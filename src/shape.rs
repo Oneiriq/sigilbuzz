@@ -40,10 +40,12 @@
 //!
 //! # What is not here yet
 //!
-//! - Unicode NFC normalisation of input text. HarfBuzz implicitly
-//!   normalises `e + U+0301` to `é` before cmap; sigilbuzz does
-//!   not. Callers that want that behaviour should normalise on
-//!   their side. An in-house implementation lives on the roadmap.
+//! - Full Unicode NFC normalisation. sigilbuzz ships the
+//!   composition half of NFC (opt-in via
+//!   [`crate::Buffer::set_normalize_nfc`]); canonical
+//!   decomposition and combining-class reordering do not run yet,
+//!   so pathological inputs that need reordering fall through
+//!   unchanged.
 //! - GSUB contextual non-chained (type 5), multiple substitution
 //!   (type 2), alternate (type 3), reverse chained (type 8),
 //!   and the format 1/2 variants of type 6.
@@ -51,6 +53,7 @@
 //! - Right-to-left reordering — `buffer.direction()` is consulted
 //!   but the output order is always logical = visual for now.
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
 use crate::buffer::{Buffer, Glyph, ShapedRun};
@@ -98,10 +101,20 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let cmap = face.cmap()?;
     let hmtx = face.hmtx()?;
 
-    let text = buffer.text();
-    if text.is_empty() {
+    let raw_text = buffer.text();
+    if raw_text.is_empty() {
         return Ok(ShapedRun::default());
     }
+    // NFC composition pass runs before cmap lookup so precomposed
+    // forms (é, ñ, ...) find their precomposed glyphs instead of
+    // the decomposed base + combining-mark pair. Opt-in; see
+    // Buffer::set_normalize_nfc.
+    let text: Cow<'_, str> = if buffer.normalize_nfc() {
+        Cow::Owned(crate::unicode::normalize::compose_str(raw_text))
+    } else {
+        Cow::Borrowed(raw_text)
+    };
+    let text: &str = &text;
 
     // Step 1: codepoint → glyph id via cmap. Clusters are byte
     // offsets from the start of the text so later passes can track
@@ -1077,6 +1090,28 @@ mod tests {
         let shaped = shape(&font, &buffer, &features).unwrap();
         assert_eq!(shaped.len(), 1);
         assert_eq!(shaped.glyphs[0].glyph_id, 1);
+    }
+
+    #[test]
+    fn normalize_nfc_flag_collapses_decomposed_input() {
+        // Test font has no cmap entry for 'e', combining acute, or
+        // precomposed 'é', so every path ends up at .notdef. The
+        // meaningful difference is glyph count: NFC off → 2 glyphs
+        // (e + combining acute both go to .notdef); NFC on → 1 glyph
+        // (the pair composes to 'é' before cmap).
+        let data = build_shapeable_font();
+        let blob = Blob::new(&data);
+        let face = Face::parse(&blob, 0).unwrap();
+        let font = Font::new(face, 16.0);
+
+        let mut buffer = Buffer::new();
+        buffer.push_str("e\u{0301}");
+        let before = shape(&font, &buffer, &[]).unwrap();
+        assert_eq!(before.len(), 2);
+
+        buffer.set_normalize_nfc(true);
+        let after = shape(&font, &buffer, &[]).unwrap();
+        assert_eq!(after.len(), 1);
     }
 
     #[test]

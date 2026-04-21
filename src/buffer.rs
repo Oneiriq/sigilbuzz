@@ -77,6 +77,11 @@ pub struct Buffer {
     pub(crate) text: String,
     /// Writing direction. Defaults to [`Direction::Ltr`].
     pub(crate) direction: Direction,
+    /// When `true`, `shape()` composes the input text via
+    /// [`crate::unicode::normalize::compose_str`] before glyph
+    /// lookup. Matches HarfBuzz's implicit NFC pass for the
+    /// ranges sigilbuzz has curated tables for.
+    pub(crate) normalize_nfc: bool,
 }
 
 impl Buffer {
@@ -114,11 +119,26 @@ impl Buffer {
         self.direction = direction;
     }
 
+    /// True when [`Buffer::set_normalize_nfc`] has been enabled.
+    #[must_use]
+    pub const fn normalize_nfc(&self) -> bool {
+        self.normalize_nfc
+    }
+
+    /// Enables or disables the implicit NFC composition pass that
+    /// runs before glyph lookup. Off by default. Turn this on to
+    /// match HarfBuzz's behaviour, where `e + U+0301` renders the
+    /// same as the precomposed `é`.
+    pub fn set_normalize_nfc(&mut self, enabled: bool) {
+        self.normalize_nfc = enabled;
+    }
+
     /// Clears the text and resets direction to LTR. Other future
     /// state (script, language, user data) will reset here too.
     pub fn clear(&mut self) {
         self.text.clear();
         self.direction = Direction::Ltr;
+        self.normalize_nfc = false;
     }
 
     /// True when no text has been pushed.

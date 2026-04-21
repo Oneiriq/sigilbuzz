@@ -7,6 +7,8 @@
 
 #![allow(missing_docs)]
 
+pub mod normalize;
+
 /// Coarse script classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Script {
