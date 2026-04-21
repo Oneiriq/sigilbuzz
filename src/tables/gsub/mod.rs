@@ -15,8 +15,10 @@ use crate::tables::layout::{FeatureList, LookupList, ScriptList};
 use crate::tables::parse::Reader;
 
 pub mod ligature;
+pub mod single;
 
 pub use ligature::Ligature;
+pub use single::Single;
 
 /// GSUB lookup type numbers. Entries land here as sigilbuzz acquires
 /// the corresponding lookup parsers.

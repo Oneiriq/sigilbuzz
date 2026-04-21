@@ -46,7 +46,7 @@ use crate::buffer::{Buffer, Glyph, ShapedRun};
 use crate::error::Result;
 use crate::font::Font;
 use crate::tables::gpos::{lookup_type as gpos_lt, PairPos};
-use crate::tables::gsub::{lookup_type as gsub_lt, Ligature};
+use crate::tables::gsub::{lookup_type as gsub_lt, Ligature, Single};
 use crate::tables::{Gpos, Gsub, KernTable};
 
 /// One entry in a feature list passed to [`shape`]. The tag is a
@@ -103,13 +103,24 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         });
     }
 
-    // Step 2: GSUB ligature substitution (type 4) rewrites the run
-    // in place. A match replaces N glyphs with one; the merged
-    // cluster is the left-most input cluster so renderers that want
-    // to map back to source text can still do so.
-    if want_liga {
-        if let Some(gsub) = face.gsub()? {
-            apply_liga(&gsub, &mut glyphs);
+    // Step 2: GSUB passes. Lookups are applied per feature, in the
+    // spec's order: required features, then default-on features,
+    // then user-enabled features. Feature tags the user opts into
+    // via `features` flow through the same machinery — they just
+    // need to be carried by the font's LangSys feature list.
+    let gsub = face.gsub()?;
+    if let Some(ref gsub) = gsub {
+        if want_liga {
+            apply_gsub_feature(gsub, &mut glyphs, *b"liga");
+        }
+        for feat in features {
+            if feat.value == 0 {
+                continue;
+            }
+            if feat.tag == *b"liga" || feat.tag == *b"kern" {
+                continue; // already handled or GPOS territory
+            }
+            apply_gsub_feature(gsub, &mut glyphs, feat.tag);
         }
     }
 
@@ -145,43 +156,23 @@ fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
     features.iter().any(|f| f.tag == tag && f.value == 0)
 }
 
-/// Applies every ligature-substitution lookup reachable via the
-/// `liga` feature to the glyph run in place. A successful match
-/// collapses `componentCount` glyphs into one, so the vector
-/// shrinks and the loop re-examines the new glyph at the same
-/// position (ligatures can chain, though it is rare).
-fn apply_liga(gsub: &Gsub<'_>, glyphs: &mut Vec<Glyph>) {
-    if glyphs.len() < 2 {
+/// Applies every GSUB lookup reachable via the named feature tag
+/// to the glyph run in place. Supports lookup types:
+///
+/// - 1 — Single substitution (`smcp`, `vert`, `salt`, `ss01`…)
+/// - 4 — Ligature substitution (`liga`, `dlig`)
+///
+/// Extension (type 7) wrappers are unwrapped to the inner type.
+/// Unknown lookup types are silently skipped so callers can enable
+/// forward-compatible features without the run erroring out.
+fn apply_gsub_feature(gsub: &Gsub<'_>, glyphs: &mut Vec<Glyph>, tag: [u8; 4]) {
+    if glyphs.is_empty() {
         return;
     }
 
-    let script_list = gsub.script_list();
-    let script = script_list
-        .find(*b"DFLT")
-        .or_else(|| script_list.iter().next().map(|(_, s)| s));
-    let Some(script) = script else {
+    let Some(lookup_indices) = lookup_indices_for_feature(gsub, tag) else {
         return;
     };
-    let Some(lang_sys) = script.default_lang_sys() else {
-        return;
-    };
-
-    let feature_list = gsub.feature_list();
-    let mut lookup_indices: Vec<u16> = Vec::new();
-    for feat_idx in lang_sys.feature_indices() {
-        let Some((tag, feature)) = feature_list.get(feat_idx) else {
-            continue;
-        };
-        if tag != *b"liga" {
-            continue;
-        }
-        for idx in feature.lookup_indices() {
-            if !lookup_indices.contains(&idx) {
-                lookup_indices.push(idx);
-            }
-        }
-    }
-    lookup_indices.sort_unstable();
     if lookup_indices.is_empty() {
         return;
     }
@@ -191,26 +182,74 @@ fn apply_liga(gsub: &Gsub<'_>, glyphs: &mut Vec<Glyph>) {
         let Some(lookup) = lookup_list.get(lookup_idx) else {
             continue;
         };
-        let lt = lookup.lookup_type();
-        if lt != gsub_lt::LIGATURE && lt != gsub_lt::EXTENSION {
-            continue;
-        }
+        let raw_lt = lookup.lookup_type();
         for sub_idx in 0..lookup.subtable_count() {
             let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
                 continue;
             };
-            let inner_bytes = if lt == gsub_lt::EXTENSION {
+            let (effective_lt, inner_bytes) = if raw_lt == gsub_lt::EXTENSION {
                 match resolve_extension(bytes) {
-                    Some((inner_type, inner)) if inner_type == gsub_lt::LIGATURE => inner,
-                    _ => continue,
+                    Some((inner_type, inner)) => (inner_type, inner),
+                    None => continue,
                 }
             } else {
-                bytes
+                (raw_lt, bytes)
             };
-            let Ok(lig) = Ligature::parse(inner_bytes) else {
-                continue;
-            };
-            apply_liga_subtable(&lig, glyphs);
+
+            match effective_lt {
+                gsub_lt::SINGLE => {
+                    let Ok(single) = Single::parse(inner_bytes) else {
+                        continue;
+                    };
+                    apply_single_subtable(&single, glyphs);
+                }
+                gsub_lt::LIGATURE => {
+                    let Ok(lig) = Ligature::parse(inner_bytes) else {
+                        continue;
+                    };
+                    apply_liga_subtable(&lig, glyphs);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Walks the default LangSys (DFLT → first script) and returns the
+/// sorted set of lookup indices that the feature `tag` selects. A
+/// return value of `None` means no usable script, `Some(empty)`
+/// means the LangSys does not carry this feature.
+fn lookup_indices_for_feature(gsub: &Gsub<'_>, tag: [u8; 4]) -> Option<Vec<u16>> {
+    let script_list = gsub.script_list();
+    let script = script_list
+        .find(*b"DFLT")
+        .or_else(|| script_list.iter().next().map(|(_, s)| s))?;
+    let lang_sys = script.default_lang_sys()?;
+
+    let feature_list = gsub.feature_list();
+    let mut indices: Vec<u16> = Vec::new();
+    for feat_idx in lang_sys.feature_indices() {
+        let Some((feat_tag, feature)) = feature_list.get(feat_idx) else {
+            continue;
+        };
+        if feat_tag != tag {
+            continue;
+        }
+        for idx in feature.lookup_indices() {
+            if !indices.contains(&idx) {
+                indices.push(idx);
+            }
+        }
+    }
+    indices.sort_unstable();
+    Some(indices)
+}
+
+fn apply_single_subtable(single: &Single<'_>, glyphs: &mut [Glyph]) {
+    for glyph in glyphs.iter_mut() {
+        let id = glyph.glyph_id as u16;
+        if let Some(out) = single.apply(id) {
+            glyph.glyph_id = u32::from(out);
         }
     }
 }

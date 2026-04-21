@@ -24,7 +24,7 @@ pub mod parse;
 pub use cmap::Cmap;
 pub use gdef::{Gdef, GlyphClass};
 pub use gpos::{Gpos, PairPos, ValueRecord};
-pub use gsub::{Gsub, Ligature};
+pub use gsub::{Gsub, Ligature, Single};
 pub use head::{Head, IndexToLocFormat};
 pub use hhea::Hhea;
 pub use hmtx::Hmtx;
