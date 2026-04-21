@@ -14,9 +14,11 @@ use crate::error::{Error, Result};
 use crate::tables::layout::{FeatureList, LookupList, ScriptList};
 use crate::tables::parse::Reader;
 
+pub mod chain_context;
 pub mod ligature;
 pub mod single;
 
+pub use chain_context::{ChainContext, SubstLookupRecord};
 pub use ligature::Ligature;
 pub use single::Single;
 

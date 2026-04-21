@@ -10,7 +10,6 @@
 //! changed output for the same feature set. Pin rustybuzz exactly
 //! in Cargo.toml to make the latter unambiguous.
 
-use rustybuzz::ttf_parser::Tag;
 use rustybuzz::Feature;
 use sigilbuzz::{shape, Blob, Buffer, Face, Feature as SigilFeature, Font};
 
@@ -45,20 +44,16 @@ const CORPUS: &[&str] = &[
 /// Features to disable on rustybuzz so its output reflects the
 /// surface sigilbuzz currently implements.
 ///
-/// As of M2, sigilbuzz applies:
-/// - GSUB ligature substitution (`liga`, lookup type 4)
-/// - GPOS pair adjustment (`kern`, lookup type 2) with Extension
-///   wrapper support
-/// - Legacy `kern` table as a GPOS-less fallback
-///
-/// Contextual and contextual-ligature variants (`clig`, `calt`)
-/// belong to GSUB lookup types sigilbuzz has not implemented yet;
-/// they rejoin the default set as those parsers come online.
-fn disabled_features() -> [Feature; 2] {
-    [
-        Feature::new(Tag::from_bytes(b"clig"), 0, ..),
-        Feature::new(Tag::from_bytes(b"calt"), 0, ..),
-    ]
+/// Latin shaping is now feature-complete enough that the list is
+/// empty — sigilbuzz runs `ccmp`, `rlig`, `liga`, `clig`, `calt`,
+/// `kern`, and `mark` by default, same as rustybuzz. When sigilbuzz
+/// grows new lookup types (GSUB single/multiple, GPOS cursive,
+/// mark-to-mark, ...) this list remains empty; divergences in any
+/// corpus entry mean either (a) a real bug, or (b) a rustybuzz
+/// feature that uses a lookup type sigilbuzz does not understand
+/// yet, which the specific test adds back to this list temporarily.
+fn disabled_features() -> [Feature; 0] {
+    []
 }
 
 #[test]

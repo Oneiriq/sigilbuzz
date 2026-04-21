@@ -18,9 +18,12 @@
 //! # What is here
 //!
 //! - cmap → glyph id, then the full shaping pipeline in spec order.
-//! - GSUB (lookup types 1 and 4, plus Extension type 7 unwrapping):
-//!   `ccmp`, `rlig`, and `liga` run by default; any user-enabled
-//!   tag with non-zero value flows through the same dispatcher.
+//! - GSUB (lookup types 1, 4, 6 format 3, plus Extension type 7
+//!   unwrapping): `ccmp`, `rlig`, `liga`, `clig`, `calt` run by
+//!   default; any user-enabled tag with non-zero value flows
+//!   through the same dispatcher. Chained-context lookups can
+//!   invoke other lookups at specific positions inside the match
+//!   window — the first recursive layer sigilbuzz supports.
 //! - hmtx advance lookup, post-substitution so ligature glyphs get
 //!   their own advance rather than the sum of their components.
 //! - GPOS (lookup types 1, 2, 4, plus Extension type 9 unwrapping):
@@ -38,12 +41,12 @@
 //! - Unicode NFC normalisation of input text. HarfBuzz implicitly
 //!   normalises `e + U+0301` to `é` before cmap; sigilbuzz does
 //!   not. Callers that want that behaviour should normalise on
-//!   their side (there is no small Rust-native NFC crate we would
-//!   accept as a dependency; an in-house implementation lives on
-//!   the roadmap).
-//! - GSUB contextual (type 5) and chained contextual (type 6).
+//!   their side. An in-house implementation lives on the roadmap.
+//! - GSUB contextual non-chained (type 5), multiple substitution
+//!   (type 2), alternate (type 3), reverse chained (type 8),
+//!   and the format 1/2 variants of type 6.
 //! - GPOS mark-to-ligature (type 5), mark-to-mark (type 6),
-//!   cursive attachment (type 3).
+//!   cursive attachment (type 3), contextual (types 7, 8).
 //! - Right-to-left reordering — `buffer.direction()` is consulted
 //!   but the output order is always logical = visual for now.
 
@@ -54,7 +57,7 @@ use crate::error::Result;
 use crate::font::Font;
 use crate::tables::gdef::{Gdef, GlyphClass};
 use crate::tables::gpos::{lookup_type as gpos_lt, MarkBasePos, PairPos, SinglePos};
-use crate::tables::gsub::{lookup_type as gsub_lt, Ligature, Single};
+use crate::tables::gsub::{lookup_type as gsub_lt, ChainContext, Ligature, Single};
 use crate::tables::{Gpos, Gsub, KernTable};
 
 /// One entry in a feature list passed to [`shape`]. The tag is a
@@ -128,18 +131,21 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         if want_liga {
             apply_gsub_feature(gsub, &mut glyphs, *b"liga");
         }
+        // `clig` (contextual ligatures) and `calt` (contextual
+        // alternates) run by default for Latin — HarfBuzz's Latin
+        // fallback shaper turns both on. sigilbuzz follows suit.
+        if !feature_disabled(features, *b"clig") {
+            apply_gsub_feature(gsub, &mut glyphs, *b"clig");
+        }
+        if !feature_disabled(features, *b"calt") {
+            apply_gsub_feature(gsub, &mut glyphs, *b"calt");
+        }
         for feat in features {
             if feat.value == 0 {
                 continue;
             }
-            if matches!(
-                feat.tag,
-                [b'l', b'i', b'g', b'a']
-                    | [b'k', b'e', b'r', b'n']
-                    | [b'c', b'c', b'm', b'p']
-                    | [b'r', b'l', b'i', b'g']
-            ) {
-                continue; // already handled
+            if is_handled_gsub_tag(feat.tag) {
+                continue; // already handled above
             }
             apply_gsub_feature(gsub, &mut glyphs, feat.tag);
         }
@@ -198,11 +204,23 @@ fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
     features.iter().any(|f| f.tag == tag && f.value == 0)
 }
 
+/// GSUB feature tags that `shape()` already dispatches by name,
+/// so the user-override walk should skip them rather than
+/// double-apply.
+fn is_handled_gsub_tag(tag: [u8; 4]) -> bool {
+    matches!(
+        &tag,
+        b"liga" | b"kern" | b"ccmp" | b"rlig" | b"clig" | b"calt"
+    )
+}
+
 /// Applies every GSUB lookup reachable via the named feature tag
 /// to the glyph run in place. Supports lookup types:
 ///
 /// - 1 — Single substitution (`smcp`, `vert`, `salt`, `ss01`…)
-/// - 4 — Ligature substitution (`liga`, `dlig`)
+/// - 4 — Ligature substitution (`liga`, `dlig`, `rlig`)
+/// - 6 — Chained context substitution (`calt`, `clig`, `init`,
+///   `medi`, `fina`, `isol`) with recursive nested lookups
 ///
 /// Extension (type 7) wrappers are unwrapped to the inner type.
 /// Unknown lookup types are silently skipped so callers can enable
@@ -219,40 +237,144 @@ fn apply_gsub_feature(gsub: &Gsub<'_>, glyphs: &mut Vec<Glyph>, tag: [u8; 4]) {
         return;
     }
 
-    let lookup_list = gsub.lookup_list();
     for lookup_idx in lookup_indices {
-        let Some(lookup) = lookup_list.get(lookup_idx) else {
+        apply_gsub_lookup(gsub, lookup_idx, glyphs);
+    }
+}
+
+/// Applies a single GSUB lookup by index, walking its subtables in
+/// spec order. Stops at the first subtable of a supported type that
+/// runs on the full glyph run.
+fn apply_gsub_lookup(gsub: &Gsub<'_>, lookup_idx: u16, glyphs: &mut Vec<Glyph>) {
+    let lookup_list = gsub.lookup_list();
+    let Some(lookup) = lookup_list.get(lookup_idx) else {
+        return;
+    };
+    let raw_lt = lookup.lookup_type();
+    for sub_idx in 0..lookup.subtable_count() {
+        let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
             continue;
         };
-        let raw_lt = lookup.lookup_type();
-        for sub_idx in 0..lookup.subtable_count() {
-            let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
-                continue;
-            };
-            let (effective_lt, inner_bytes) = if raw_lt == gsub_lt::EXTENSION {
-                match resolve_extension(bytes) {
-                    Some((inner_type, inner)) => (inner_type, inner),
-                    None => continue,
-                }
-            } else {
-                (raw_lt, bytes)
-            };
-
-            match effective_lt {
-                gsub_lt::SINGLE => {
-                    let Ok(single) = Single::parse(inner_bytes) else {
-                        continue;
-                    };
-                    apply_single_subtable(&single, glyphs);
-                }
-                gsub_lt::LIGATURE => {
-                    let Ok(lig) = Ligature::parse(inner_bytes) else {
-                        continue;
-                    };
-                    apply_liga_subtable(&lig, glyphs);
-                }
-                _ => {}
+        let (effective_lt, inner_bytes) = if raw_lt == gsub_lt::EXTENSION {
+            match resolve_extension(bytes) {
+                Some((inner_type, inner)) => (inner_type, inner),
+                None => continue,
             }
+        } else {
+            (raw_lt, bytes)
+        };
+
+        match effective_lt {
+            gsub_lt::SINGLE => {
+                let Ok(single) = Single::parse(inner_bytes) else {
+                    continue;
+                };
+                apply_single_subtable(&single, glyphs);
+            }
+            gsub_lt::LIGATURE => {
+                let Ok(lig) = Ligature::parse(inner_bytes) else {
+                    continue;
+                };
+                apply_liga_subtable(&lig, glyphs);
+            }
+            gsub_lt::CHAINED_CONTEXT => {
+                let Ok(ctx) = ChainContext::parse(inner_bytes) else {
+                    continue;
+                };
+                apply_chain_context_subtable(gsub, &ctx, glyphs);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Applies a nested GSUB lookup at one specific position in the
+/// run. Returns the number of glyphs the nested lookup consumed
+/// (1 for single substitution, N for ligature, 0 when the lookup
+/// did not fire). Called from inside `apply_chain_context_subtable`.
+fn apply_gsub_lookup_at(
+    gsub: &Gsub<'_>,
+    lookup_idx: u16,
+    glyphs: &mut Vec<Glyph>,
+    at: usize,
+) -> usize {
+    if at >= glyphs.len() {
+        return 0;
+    }
+    let lookup_list = gsub.lookup_list();
+    let Some(lookup) = lookup_list.get(lookup_idx) else {
+        return 0;
+    };
+    let raw_lt = lookup.lookup_type();
+    for sub_idx in 0..lookup.subtable_count() {
+        let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
+            continue;
+        };
+        let (effective_lt, inner_bytes) = if raw_lt == gsub_lt::EXTENSION {
+            match resolve_extension(bytes) {
+                Some((inner_type, inner)) => (inner_type, inner),
+                None => continue,
+            }
+        } else {
+            (raw_lt, bytes)
+        };
+
+        match effective_lt {
+            gsub_lt::SINGLE => {
+                let Ok(single) = Single::parse(inner_bytes) else {
+                    continue;
+                };
+                let id = glyphs[at].glyph_id as u16;
+                if let Some(out) = single.apply(id) {
+                    glyphs[at].glyph_id = u32::from(out);
+                    return 1;
+                }
+            }
+            gsub_lt::LIGATURE => {
+                let Ok(lig) = Ligature::parse(inner_bytes) else {
+                    continue;
+                };
+                let window: Vec<u16> = glyphs[at..].iter().map(|g| g.glyph_id as u16).collect();
+                if let Some((out, consumed)) = lig.apply(&window) {
+                    glyphs[at].glyph_id = u32::from(out);
+                    glyphs.drain(at + 1..at + consumed);
+                    return consumed;
+                }
+            }
+            // Chained-context lookups nested inside another
+            // chained-context rule are theoretically legal but rare;
+            // skip for now so we do not risk infinite recursion
+            // without a depth guard.
+            _ => {}
+        }
+    }
+    0
+}
+
+/// Scans the glyph run for a chained-context match and, on every
+/// hit, applies each `SubstLookupRecord` in order at its declared
+/// position inside the input window.
+fn apply_chain_context_subtable(gsub: &Gsub<'_>, ctx: &ChainContext<'_>, glyphs: &mut Vec<Glyph>) {
+    let (_, input_len, _) = ctx.context_len();
+    let mut i = 0;
+    while i < glyphs.len() {
+        // Snapshot glyph ids each iteration because nested lookups
+        // can mutate the stream. For typical run lengths (< 200
+        // glyphs) this cost is invisible; a more optimal design
+        // would update the snapshot incrementally.
+        let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
+        if ctx.matches(&ids, i) {
+            for rec in ctx.substitutions() {
+                let at = i + rec.sequence_index as usize;
+                apply_gsub_lookup_at(gsub, rec.lookup_list_index, glyphs, at);
+            }
+            // Advance past the input window. If the nested lookups
+            // collapsed the window (ligature substitution), the
+            // glyph stream shrank — we advance by at most one
+            // position because the stream may now look different.
+            i += input_len.max(1);
+        } else {
+            i += 1;
         }
     }
 }
