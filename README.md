@@ -6,7 +6,11 @@ A modern, pure-Rust text shaping engine — clean-room, zero-dependency, and bui
 
 ## Status
 
-Pre-alpha. Public API is unstable; internal formats are being bootstrapped.
+Pre-alpha, private repository. The plan is to harden sigilbuzz by
+dogfooding it as the shaping backend for [oniq](https://github.com/Oneiriq/oniq)
+until it reaches a **very capable 0.1.0**, then open it up publicly.
+Nothing is published to crates.io and `Cargo.toml` carries
+`publish = false` so the lock cannot be bypassed by accident.
 
 ## Goals
 
@@ -47,4 +51,4 @@ src/
 
 ## License
 
-Dual-licensed under either MIT or Apache-2.0, at your option. See `LICENSE-MIT` and `LICENSE-APACHE`.
+Apache-2.0. See `LICENSE-APACHE`.
