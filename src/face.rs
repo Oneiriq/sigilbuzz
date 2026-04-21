@@ -34,7 +34,9 @@ use alloc::vec::Vec;
 use crate::blob::Blob;
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
-use crate::tables::{tag, Cmap, Gdef, Gpos, Gsub, Head, Hhea, Hmtx, KernTable, Maxp};
+use crate::tables::{
+    tag, Cmap, Gdef, Glyf, GlyphBounds, Gpos, Gsub, Head, Hhea, Hmtx, KernTable, Loca, Maxp,
+};
 
 /// One entry in the SFNT table directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,6 +254,34 @@ impl<'a> Face<'a> {
             Err(Error::MissingTable { .. }) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Parses the `loca` table. Pulls the offset format from `head`
+    /// and the glyph count from `maxp`; both must be present.
+    pub fn loca(&self) -> Result<Loca<'a>> {
+        let head = self.head()?;
+        let maxp = self.maxp()?;
+        Loca::parse(
+            self.table_bytes(tag::LOCA)?,
+            head.index_to_loc_format,
+            maxp.num_glyphs,
+        )
+    }
+
+    /// Wraps the `glyf` table.
+    pub fn glyf(&self) -> Result<Glyf<'a>> {
+        Ok(Glyf::new(self.table_bytes(tag::GLYF)?))
+    }
+
+    /// Returns the design-unit bounding box for `glyph_id`, or
+    /// `Ok(None)` when the glyph has no outline (e.g. a space
+    /// glyph). Requires both `loca` and `glyf` — fonts that use CFF
+    /// outlines instead will yield [`Error::MissingTable`] for
+    /// `glyf`.
+    pub fn glyph_bounds(&self, glyph_id: u16) -> Result<Option<GlyphBounds>> {
+        let loca = self.loca()?;
+        let glyf = self.glyf()?;
+        glyf.bounds(&loca, glyph_id)
     }
 }
 

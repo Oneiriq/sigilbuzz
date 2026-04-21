@@ -11,6 +11,7 @@
 
 pub mod cmap;
 pub mod gdef;
+pub mod glyf;
 pub mod gpos;
 pub mod gsub;
 pub mod head;
@@ -18,11 +19,13 @@ pub mod hhea;
 pub mod hmtx;
 pub mod kern;
 pub mod layout;
+pub mod loca;
 pub mod maxp;
 pub mod parse;
 
 pub use cmap::Cmap;
 pub use gdef::{Gdef, GlyphClass};
+pub use glyf::{Glyf, GlyphBounds};
 pub use gpos::{Gpos, PairPos, ValueRecord};
 pub use gsub::{Gsub, Ligature, Single};
 pub use head::{Head, IndexToLocFormat};
@@ -30,6 +33,7 @@ pub use hhea::Hhea;
 pub use hmtx::Hmtx;
 pub use kern::KernTable;
 pub use layout::{ClassDef, Coverage};
+pub use loca::Loca;
 pub use maxp::Maxp;
 pub use parse::Reader;
 
