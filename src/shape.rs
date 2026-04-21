@@ -26,10 +26,12 @@
 //!   window — the first recursive layer sigilbuzz supports.
 //! - hmtx advance lookup, post-substitution so ligature glyphs get
 //!   their own advance rather than the sum of their components.
-//! - GPOS (lookup types 1, 2, 4, plus Extension type 9 unwrapping):
-//!   `kern` runs by default for pair adjustment, `mark` runs by
-//!   default for mark-to-base attachment. User-enabled GPOS tags
-//!   flow through the same dispatcher.
+//! - GPOS (lookup types 1, 2, 4, 5, 6, plus Extension type 9
+//!   unwrapping): `kern` runs by default for pair adjustment,
+//!   `mark` runs by default for mark-to-base attachment, `mkmk`
+//!   for mark-to-mark stacking, and mark-to-ligature is dispatched
+//!   via the same `mark` feature when the subtable is present.
+//!   User-enabled GPOS tags flow through the same dispatcher.
 //! - Legacy `kern` table as a fallback for fonts whose GPOS has no
 //!   `kern` feature. Open Sans is the canonical example.
 //!
@@ -45,8 +47,7 @@
 //! - GSUB contextual non-chained (type 5), multiple substitution
 //!   (type 2), alternate (type 3), reverse chained (type 8),
 //!   and the format 1/2 variants of type 6.
-//! - GPOS mark-to-ligature (type 5), mark-to-mark (type 6),
-//!   cursive attachment (type 3), contextual (types 7, 8).
+//! - GPOS cursive attachment (type 3) and contextual (types 7, 8).
 //! - Right-to-left reordering — `buffer.direction()` is consulted
 //!   but the output order is always logical = visual for now.
 
@@ -56,7 +57,9 @@ use crate::buffer::{Buffer, Glyph, ShapedRun};
 use crate::error::Result;
 use crate::font::Font;
 use crate::tables::gdef::{Gdef, GlyphClass};
-use crate::tables::gpos::{lookup_type as gpos_lt, MarkBasePos, PairPos, SinglePos};
+use crate::tables::gpos::{
+    lookup_type as gpos_lt, MarkBasePos, MarkLigaPos, MarkMarkPos, PairPos, SinglePos,
+};
 use crate::tables::gsub::{
     lookup_type as gsub_lt, Alternate, ChainContext, Ligature, Multiple, Single,
 };
@@ -179,14 +182,20 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         false
     };
     if let Some(ref gpos) = gpos {
-        apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"mark");
-        // User-enabled features beyond kern/mark/liga (which are
-        // handled explicitly) flow through the same dispatch.
+        if !feature_disabled(features, *b"mark") {
+            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"mark");
+        }
+        if !feature_disabled(features, *b"mkmk") {
+            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"mkmk");
+        }
+        // User-enabled features beyond the defaults flow through the
+        // same dispatch. Skip tags already handled above so they do
+        // not double-apply.
         for feat in features {
             if feat.value == 0 {
                 continue;
             }
-            if feat.tag == *b"kern" || feat.tag == *b"mark" || feat.tag == *b"liga" {
+            if matches!(&feat.tag, b"kern" | b"mark" | b"mkmk" | b"liga") {
                 continue;
             }
             apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), feat.tag);
@@ -552,6 +561,8 @@ fn apply_liga_subtable(lig: &Ligature<'_>, glyphs: &mut Vec<Glyph>) {
 /// - 1 — Single adjustment (uniform or per-glyph ValueRecord)
 /// - 2 — Pair adjustment (kern)
 /// - 4 — Mark-to-base attachment (mark)
+/// - 5 — Mark-to-ligature attachment (mark on ligature components)
+/// - 6 — Mark-to-mark attachment (mkmk stacking)
 /// - 9 — Extension (unwraps, re-dispatches)
 ///
 /// Returns `true` when at least one subtable of a supported type
@@ -614,6 +625,20 @@ fn apply_gpos_feature(
                         continue;
                     };
                     apply_mark_base(&mbp, glyphs, gdef);
+                    ran_any = true;
+                }
+                gpos_lt::MARK_TO_LIGATURE => {
+                    let Ok(mlp) = MarkLigaPos::parse(inner_bytes) else {
+                        continue;
+                    };
+                    apply_mark_liga(&mlp, glyphs, gdef);
+                    ran_any = true;
+                }
+                gpos_lt::MARK_TO_MARK => {
+                    let Ok(mmp) = MarkMarkPos::parse(inner_bytes) else {
+                        continue;
+                    };
+                    apply_mark_mark(&mmp, glyphs, gdef);
                     ran_any = true;
                 }
                 _ => {}
@@ -710,6 +735,97 @@ fn apply_mark_base(mbp: &MarkBasePos<'_>, glyphs: &mut [Glyph], gdef: Option<&Gd
         glyphs[i].y_offset += dy;
         // Marks do not advance the pen — replace whatever hmtx
         // reported with zero so successive text lines up.
+        glyphs[i].x_advance = 0;
+    }
+}
+
+/// Walks the run and, for each mark glyph, attaches it to the
+/// nearest preceding *ligature* base. Component selection uses a
+/// cluster-delta heuristic (how many input codepoints after the
+/// ligature's first cluster the mark belongs to); this is accurate
+/// for the common case where each codepoint after the base owns
+/// exactly one component, and degrades gracefully (falls through
+/// to a base-component anchor) when the subtable only carries
+/// anchors for lower component indices.
+fn apply_mark_liga(mlp: &MarkLigaPos<'_>, glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>) {
+    let Some(gdef) = gdef else {
+        return;
+    };
+
+    for i in 0..glyphs.len() {
+        let mark_gid = glyphs[i].glyph_id as u16;
+        if !gdef.glyph_class(mark_gid).is_mark() {
+            continue;
+        }
+        let Some(base_i) = (0..i).rev().find(|&j| {
+            let cls = gdef.glyph_class(glyphs[j].glyph_id as u16);
+            cls != GlyphClass::Mark
+        }) else {
+            continue;
+        };
+        let base_gid = glyphs[base_i].glyph_id as u16;
+
+        // Derive a component index from the difference in cluster
+        // values. A single-component ligature collapses to 0.
+        let cluster_delta = glyphs[i].cluster.saturating_sub(glyphs[base_i].cluster);
+        let component_index = cluster_delta.min(u32::from(u16::MAX)) as u16;
+
+        // Try the computed component first; fall back to 0 so marks
+        // on fonts that only anchor component 0 still land somewhere
+        // sane instead of being dropped silently.
+        let attach = mlp
+            .attach(mark_gid, base_gid, component_index)
+            .or_else(|| mlp.attach(mark_gid, base_gid, 0));
+        let Some(attach) = attach else {
+            continue;
+        };
+
+        let mut walked_advance: i32 = 0;
+        for glyph in &glyphs[base_i..i] {
+            walked_advance += glyph.x_advance;
+        }
+        let dx = i32::from(attach.base_anchor.x) - i32::from(attach.mark_anchor.x) - walked_advance;
+        let dy = i32::from(attach.base_anchor.y) - i32::from(attach.mark_anchor.y);
+        glyphs[i].x_offset += dx;
+        glyphs[i].y_offset += dy;
+        glyphs[i].x_advance = 0;
+    }
+}
+
+/// Walks the run and stacks each mark glyph onto the immediately
+/// preceding mark glyph, using the subtable's mark1/mark2 anchor
+/// pair. The previous glyph must itself be a mark (per GDEF) for
+/// this lookup to fire; otherwise mark-to-base handles the case.
+fn apply_mark_mark(mmp: &MarkMarkPos<'_>, glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>) {
+    let Some(gdef) = gdef else {
+        return;
+    };
+
+    for i in 1..glyphs.len() {
+        let mark1_gid = glyphs[i].glyph_id as u16;
+        if !gdef.glyph_class(mark1_gid).is_mark() {
+            continue;
+        }
+        let mark2_gid = glyphs[i - 1].glyph_id as u16;
+        if !gdef.glyph_class(mark2_gid).is_mark() {
+            continue;
+        }
+        let Some(attach) = mmp.attach(mark1_gid, mark2_gid) else {
+            continue;
+        };
+
+        // The lower mark has already been placed (by mark-to-base or
+        // a prior mark-to-mark). Its x_offset/y_offset encode where
+        // it sits relative to its own origin, so we stack the upper
+        // mark relative to that position. The lower mark's advance
+        // is zero (marks do not advance), so we only need to add its
+        // own offsets to the attachment delta.
+        let lower_mark_x = glyphs[i - 1].x_offset;
+        let lower_mark_y = glyphs[i - 1].y_offset;
+        let dx = i32::from(attach.base_anchor.x) - i32::from(attach.mark_anchor.x) + lower_mark_x;
+        let dy = i32::from(attach.base_anchor.y) - i32::from(attach.mark_anchor.y) + lower_mark_y;
+        glyphs[i].x_offset += dx;
+        glyphs[i].y_offset += dy;
         glyphs[i].x_advance = 0;
     }
 }

@@ -18,12 +18,16 @@ use crate::tables::parse::Reader;
 
 pub mod anchor;
 pub mod mark_base;
+pub mod mark_liga;
+pub mod mark_mark;
 pub mod pair_pos;
 pub mod single_adj;
 pub mod value_record;
 
 pub use anchor::Anchor;
 pub use mark_base::{MarkAttachment, MarkBasePos};
+pub use mark_liga::MarkLigaPos;
+pub use mark_mark::MarkMarkPos;
 pub use pair_pos::{PairPos, PairPosFormat1, PairPosFormat2};
 pub use single_adj::SinglePos;
 pub use value_record::ValueRecord;
