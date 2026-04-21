@@ -11,6 +11,7 @@
 
 pub mod cmap;
 pub mod gdef;
+pub mod gpos;
 pub mod head;
 pub mod hhea;
 pub mod hmtx;
@@ -20,6 +21,7 @@ pub mod parse;
 
 pub use cmap::Cmap;
 pub use gdef::{Gdef, GlyphClass};
+pub use gpos::{Gpos, PairPos, ValueRecord};
 pub use head::{Head, IndexToLocFormat};
 pub use hhea::Hhea;
 pub use hmtx::Hmtx;

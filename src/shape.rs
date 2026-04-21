@@ -15,19 +15,33 @@
 //! shaper output in design units matches `rustybuzz`'s default and
 //! preserves determinism — every intermediate value is an integer.
 //!
+//! # What is here
+//!
+//! - cmap + hmtx: every character becomes a glyph with a design-unit
+//!   advance.
+//! - GPOS pair adjustment (`kern` feature) when a font carries it
+//!   through GPOS — including lookups wrapped in Extension (type 9)
+//!   containers. Disable via a `Feature { tag: b"kern", value: 0 }`
+//!   entry.
+//!
 //! # What is not here yet
 //!
-//! - GSUB / GPOS feature evaluation (M2). The `features` slice is
-//!   accepted and ignored today.
+//! - GSUB feature evaluation (ligatures, contextual alternates).
+//! - Legacy `kern` table — many older fonts (Open Sans among them)
+//!   carry their kerning in the pre-OpenType `kern` table rather
+//!   than in GPOS. The shaper ignores it today; that is the next
+//!   task in M2.
 //! - Right-to-left reordering (M4). `buffer.direction()` is consulted
 //!   but the output order is always logical = visual for now.
-//! - Ligatures, kerning, mark attachment — all M2+.
+//! - Mark attachment, cursive attachment — M4.
 
 use alloc::vec::Vec;
 
 use crate::buffer::{Buffer, Glyph, ShapedRun};
 use crate::error::Result;
 use crate::font::Font;
+use crate::tables::gpos::{lookup_type, PairPos};
+use crate::tables::Gpos;
 
 /// One entry in a feature list passed to [`shape`]. The tag is a
 /// four-byte OpenType feature tag (e.g. `b"liga"`, `b"kern"`, `b"smcp"`);
@@ -53,10 +67,10 @@ pub struct Feature {
 /// for basic shaping (`cmap`, `head`, `maxp`, `hhea`, `hmtx`) or if
 /// one of them is malformed.
 pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<ShapedRun> {
-    // `features` will be consumed by the GSUB / GPOS pipeline in M2.
-    // Accept the argument today so callers can integrate against the
-    // stable signature.
-    let _ = features;
+    // GSUB feature overrides still land in M2 work. For now we
+    // consume `features` only to drive the kern/no-kern choice in
+    // the GPOS pass below.
+    let want_kern = !features.iter().any(|f| f.tag == *b"kern" && f.value == 0);
 
     let face = font.face();
     let cmap = face.cmap()?;
@@ -85,7 +99,134 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         });
     }
 
+    if want_kern {
+        if let Some(gpos) = face.gpos()? {
+            apply_kern(&gpos, &mut glyphs);
+        }
+    }
+
     Ok(ShapedRun { glyphs })
+}
+
+/// Applies every pair-adjustment lookup reachable via the `kern`
+/// feature to the current glyph run. The spec says to union lookup
+/// indices across all matching features, sort ascending, and
+/// evaluate in that order — which is what this does. Non-pair
+/// lookup types are silently skipped; they land with later milestones.
+fn apply_kern(gpos: &Gpos<'_>, glyphs: &mut [Glyph]) {
+    if glyphs.len() < 2 {
+        return;
+    }
+
+    // Locate a reasonable LangSys. Latin fonts universally carry
+    // DFLT; fall back to the first script if not present. Non-Latin
+    // scripts need a caller-supplied selection in a future revision.
+    let script_list = gpos.script_list();
+    let script = script_list
+        .find(*b"DFLT")
+        .or_else(|| script_list.iter().next().map(|(_, s)| s));
+    let Some(script) = script else {
+        return;
+    };
+    let Some(lang_sys) = script.default_lang_sys() else {
+        return;
+    };
+
+    // Collect lookup indices from every `kern` feature the LangSys
+    // exposes. A font may have more than one.
+    let feature_list = gpos.feature_list();
+    let mut lookup_indices: Vec<u16> = Vec::new();
+    for feat_idx in lang_sys.feature_indices() {
+        let Some((tag, feature)) = feature_list.get(feat_idx) else {
+            continue;
+        };
+        if tag != *b"kern" {
+            continue;
+        }
+        for idx in feature.lookup_indices() {
+            if !lookup_indices.contains(&idx) {
+                lookup_indices.push(idx);
+            }
+        }
+    }
+    lookup_indices.sort_unstable();
+
+    if lookup_indices.is_empty() {
+        return;
+    }
+
+    let lookup_list = gpos.lookup_list();
+    for lookup_idx in lookup_indices {
+        let Some(lookup) = lookup_list.get(lookup_idx) else {
+            continue;
+        };
+        let lt = lookup.lookup_type();
+        if lt != lookup_type::PAIR_ADJUSTMENT && lt != lookup_type::EXTENSION {
+            // Any other lookup type — single-adjustment, mark
+            // attachment, contextual positioning — is skipped for
+            // now. Later milestones plug in their handlers.
+            continue;
+        }
+        for sub_idx in 0..lookup.subtable_count() {
+            let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
+                continue;
+            };
+            let inner_bytes = if lt == lookup_type::EXTENSION {
+                match resolve_extension(bytes) {
+                    Some((inner_type, inner)) if inner_type == lookup_type::PAIR_ADJUSTMENT => {
+                        inner
+                    }
+                    // Extension pointing at a non-pair lookup — skip.
+                    _ => continue,
+                }
+            } else {
+                bytes
+            };
+            let Ok(pp) = PairPos::parse(inner_bytes) else {
+                continue;
+            };
+            apply_pair_pos(&pp, glyphs);
+        }
+    }
+}
+
+/// Resolves a GPOS/GSUB type-9 Extension subtable to its inner
+/// lookup type and its inner byte slice. Layout:
+///
+/// ```text
+///   u16  posFormat         (must be 1)
+///   u16  extensionLookupType
+///   u32  extensionOffset   (relative to the Extension subtable)
+/// ```
+///
+/// The inner offset is u32 — that is why Extension exists, to reach
+/// past the 64k limit a plain Offset16 imposes.
+fn resolve_extension(bytes: &[u8]) -> Option<(u16, &[u8])> {
+    if bytes.len() < 8 {
+        return None;
+    }
+    let format = u16::from_be_bytes([bytes[0], bytes[1]]);
+    if format != 1 {
+        return None;
+    }
+    let inner_type = u16::from_be_bytes([bytes[2], bytes[3]]);
+    let inner_off = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    bytes.get(inner_off..).map(|inner| (inner_type, inner))
+}
+
+fn apply_pair_pos(pp: &PairPos<'_>, glyphs: &mut [Glyph]) {
+    for i in 0..glyphs.len().saturating_sub(1) {
+        let first = glyphs[i].glyph_id as u16;
+        let second = glyphs[i + 1].glyph_id as u16;
+        if let Some((v1, v2)) = pp.lookup(first, second) {
+            glyphs[i].x_advance += i32::from(v1.x_advance);
+            glyphs[i].x_offset += i32::from(v1.x_placement);
+            glyphs[i].y_offset += i32::from(v1.y_placement);
+            glyphs[i + 1].x_advance += i32::from(v2.x_advance);
+            glyphs[i + 1].x_offset += i32::from(v2.x_placement);
+            glyphs[i + 1].y_offset += i32::from(v2.y_placement);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -265,5 +406,42 @@ mod tests {
         let shaped = shape(&font, &buffer, &features).unwrap();
         assert_eq!(shaped.len(), 1);
         assert_eq!(shaped.glyphs[0].glyph_id, 1);
+    }
+
+    #[test]
+    fn resolve_extension_decodes_inner_offset() {
+        // format=1, inner_type=2, inner_off=8, then payload "inner".
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(&2u16.to_be_bytes());
+        bytes.extend_from_slice(&8u32.to_be_bytes());
+        bytes.extend_from_slice(b"inner");
+        let (inner_type, slice) = resolve_extension(&bytes).unwrap();
+        assert_eq!(inner_type, 2);
+        assert_eq!(&slice[..5], b"inner");
+    }
+
+    #[test]
+    fn resolve_extension_rejects_bad_format() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&9u16.to_be_bytes());
+        bytes.extend_from_slice(&2u16.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        assert!(resolve_extension(&bytes).is_none());
+    }
+
+    #[test]
+    fn resolve_extension_rejects_short_header() {
+        let bytes = [0u8; 4];
+        assert!(resolve_extension(&bytes).is_none());
+    }
+
+    #[test]
+    fn resolve_extension_rejects_offset_past_end() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(&2u16.to_be_bytes());
+        bytes.extend_from_slice(&9999u32.to_be_bytes());
+        assert!(resolve_extension(&bytes).is_none());
     }
 }

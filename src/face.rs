@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 use crate::blob::Blob;
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
-use crate::tables::{tag, Cmap, Gdef, Head, Hhea, Hmtx, Maxp};
+use crate::tables::{tag, Cmap, Gdef, Gpos, Head, Hhea, Hmtx, Maxp};
 
 /// One entry in the SFNT table directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +216,17 @@ impl<'a> Face<'a> {
     pub fn gdef(&self) -> Result<Option<Gdef<'a>>> {
         match self.table_bytes(tag::GDEF) {
             Ok(bytes) => Ok(Some(Gdef::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `GPOS` table if the font carries one. Returns
+    /// `Ok(None)` when the font has no positioning features — not
+    /// every font does, and kerning-less output is still valid.
+    pub fn gpos(&self) -> Result<Option<Gpos<'a>>> {
+        match self.table_bytes(tag::GPOS) {
+            Ok(bytes) => Ok(Some(Gpos::parse(bytes)?)),
             Err(Error::MissingTable { .. }) => Ok(None),
             Err(e) => Err(e),
         }
