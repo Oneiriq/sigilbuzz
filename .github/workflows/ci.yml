@@ -1,0 +1,45 @@
+name: CI
+
+# Only run on merges to main and on manual dispatch. Local developers are
+# expected to run `cargo fmt --all --check`, `cargo clippy --all-targets
+# -- -D warnings`, and `cargo test --all-features` before opening a PR.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: CI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-sigilbuzz"
+
+      - name: fmt
+        run: cargo fmt --all --check
+
+      - name: clippy (default)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: clippy (no_std)
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
+
+      - name: test (default)
+        run: cargo test --all-features
+
+      - name: build (no_std)
+        run: cargo build --no-default-features

@@ -1,0 +1,60 @@
+[package]
+name = "sigilbuzz"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.75"
+authors = ["Shon Thomas <shonpt@outlook.com>"]
+license = "MIT OR Apache-2.0"
+description = "Modern pure-Rust text shaping engine. A clean-room reimagining of HarfBuzz with an eye on the 2026 release."
+repository = "https://github.com/Oneiriq/sigilbuzz"
+readme = "README.md"
+keywords = ["text", "shaping", "opentype", "harfbuzz", "typography"]
+categories = ["text-processing", "rendering", "no-std"]
+
+[lib]
+# Standalone library. No proc-macros, no C glue.
+
+[features]
+# Everything pure-Rust by default. `std` turns on allocation-backed
+# conveniences (Vec/String in the public API, IO helpers). Turn it off
+# for embedded / no_std targets — the core shaping path does not need
+# it.
+default = ["std"]
+std = ["alloc"]
+alloc = []
+
+[dependencies]
+# Intentionally empty. Every byte of parsing and shaping is sigilbuzz
+# code. Any new dependency requires an entry in docs/deps.md explaining
+# what it buys us and why it cannot be written in-house.
+
+[dev-dependencies]
+# Tests may depend on sample fonts and timing utilities — add here,
+# never in [dependencies].
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+[profile.bench]
+inherits = "release"
+debug = true
+
+# Lints live here so every crate consumer inherits the same rigor.
+[lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Selectively relaxed — these fire on patterns that are idiomatic in a
+# low-level parser and would otherwise add noise.
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
