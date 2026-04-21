@@ -35,7 +35,8 @@ use crate::blob::Blob;
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
 use crate::tables::{
-    tag, Cmap, Gdef, Glyf, GlyphBounds, Gpos, Gsub, Head, Hhea, Hmtx, KernTable, Loca, Maxp,
+    tag, Avar, Cmap, Fvar, Gdef, Glyf, GlyphBounds, Gpos, Gsub, Head, Hhea, Hmtx, Hvar, KernTable,
+    Loca, Maxp,
 };
 
 /// One entry in the SFNT table directory.
@@ -282,6 +283,40 @@ impl<'a> Face<'a> {
         let loca = self.loca()?;
         let glyf = self.glyf()?;
         glyf.bounds(&loca, glyph_id)
+    }
+
+    /// Parses the `fvar` table if the font carries one. Presence
+    /// of `fvar` is the definitive signal that the font is a
+    /// variable font; static fonts yield `Ok(None)`.
+    pub fn fvar(&self) -> Result<Option<Fvar>> {
+        match self.table_bytes(tag::FVAR) {
+            Ok(bytes) => Ok(Some(Fvar::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `avar` table if the font carries one. Optional
+    /// even in variable fonts — `avar` only appears when the
+    /// designer provides non-linear axis remapping.
+    pub fn avar(&self) -> Result<Option<Avar>> {
+        match self.table_bytes(tag::AVAR) {
+            Ok(bytes) => Ok(Some(Avar::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `HVAR` table if the font carries one. Variable
+    /// fonts with varying advances include this; fixed-metric
+    /// variable fonts omit it (their advances don't change across
+    /// the design space).
+    pub fn hvar(&self) -> Result<Option<Hvar<'a>>> {
+        match self.table_bytes(tag::HVAR) {
+            Ok(bytes) => Ok(Some(Hvar::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }
 

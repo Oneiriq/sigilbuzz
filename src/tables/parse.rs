@@ -134,6 +134,26 @@ impl<'a> Reader<'a> {
         Ok([b[0], b[1], b[2], b[3]])
     }
 
+    /// Reads a big-endian F2DOT14 fixed-point number (signed 2.14,
+    /// stored as `i16`) and returns it as `f32`. Used throughout
+    /// the variable font tables for normalized axis coordinates
+    /// and region boundaries; the raw range `[-2.0, 2.0)` narrows
+    /// in practice to `[-1.0, 1.0]`.
+    pub fn read_f2dot14(&mut self) -> Result<f32> {
+        let raw = self.read_i16()?;
+        #[allow(clippy::cast_precision_loss)]
+        Ok(f32::from(raw) / 16384.0)
+    }
+
+    /// Reads a big-endian F16DOT16 fixed-point number (signed
+    /// 16.16, stored as `i32`) and returns it as `f32`. Used for
+    /// user-space axis coordinates in `fvar` and `avar`.
+    pub fn read_f16dot16(&mut self) -> Result<f32> {
+        let raw = self.read_i32()?;
+        #[allow(clippy::cast_precision_loss)]
+        Ok(raw as f32 / 65536.0)
+    }
+
     // ------------------------------------------------------------------
     // Private helpers
     // ------------------------------------------------------------------
