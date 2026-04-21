@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 use crate::blob::Blob;
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
-use crate::tables::{tag, Cmap, Gdef, Gpos, Head, Hhea, Hmtx, Maxp};
+use crate::tables::{tag, Cmap, Gdef, Gpos, Head, Hhea, Hmtx, KernTable, Maxp};
 
 /// One entry in the SFNT table directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +227,18 @@ impl<'a> Face<'a> {
     pub fn gpos(&self) -> Result<Option<Gpos<'a>>> {
         match self.table_bytes(tag::GPOS) {
             Ok(bytes) => Ok(Some(Gpos::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the legacy `kern` table if the font carries one. Used
+    /// as a fallback when the GPOS `kern` feature yields no lookups
+    /// — many older fonts (Open Sans among them) ship their
+    /// kerning here rather than in GPOS.
+    pub fn kern(&self) -> Result<Option<KernTable<'a>>> {
+        match self.table_bytes(tag::KERN) {
+            Ok(bytes) => Ok(Some(KernTable::parse(bytes)?)),
             Err(Error::MissingTable { .. }) => Ok(None),
             Err(e) => Err(e),
         }

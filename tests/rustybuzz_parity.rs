@@ -42,20 +42,16 @@ const CORPUS: &[&str] = &[
 /// Features to disable on rustybuzz so its output reflects the
 /// surface sigilbuzz currently implements.
 ///
-/// As of M2, sigilbuzz applies GPOS pair adjustment (`kern`), so
-/// rustybuzz runs with `kern` enabled — *but only* for fonts that
-/// carry the `kern` feature in GPOS. Open Sans Regular stores its
-/// kerning in the legacy `kern` table, which sigilbuzz does not
-/// parse yet (tracked as a follow-up task). Until that lands,
-/// `kern` stays disabled here; flip it on once the legacy parser
-/// ships.
+/// As of M2, sigilbuzz applies kerning — via GPOS pair adjustment
+/// when a font carries the `kern` feature there, and via the legacy
+/// `kern` table otherwise. Both paths are exercised against this
+/// corpus so kern stays enabled on the reference too.
 ///
 /// Ligatures and contextual alternates remain disabled because
 /// GSUB is still M2 work; they rejoin the default set as those
 /// lookup types come online.
-fn disabled_features() -> [Feature; 4] {
+fn disabled_features() -> [Feature; 3] {
     [
-        Feature::new(Tag::from_bytes(b"kern"), 0, ..),
         Feature::new(Tag::from_bytes(b"liga"), 0, ..),
         Feature::new(Tag::from_bytes(b"clig"), 0, ..),
         Feature::new(Tag::from_bytes(b"calt"), 0, ..),

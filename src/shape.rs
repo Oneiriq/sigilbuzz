@@ -21,16 +21,17 @@
 //!   advance.
 //! - GPOS pair adjustment (`kern` feature) when a font carries it
 //!   through GPOS — including lookups wrapped in Extension (type 9)
-//!   containers. Disable via a `Feature { tag: b"kern", value: 0 }`
-//!   entry.
+//!   containers.
+//! - Legacy `kern` table (Microsoft/OpenType version 0, format 0,
+//!   horizontal) as a fallback for fonts whose GPOS has no `kern`
+//!   feature. Open Sans is the canonical example.
+//!
+//! Either kerning path is suppressed by a `Feature { tag: b"kern",
+//! value: 0 }` entry passed to [`shape`].
 //!
 //! # What is not here yet
 //!
 //! - GSUB feature evaluation (ligatures, contextual alternates).
-//! - Legacy `kern` table — many older fonts (Open Sans among them)
-//!   carry their kerning in the pre-OpenType `kern` table rather
-//!   than in GPOS. The shaper ignores it today; that is the next
-//!   task in M2.
 //! - Right-to-left reordering (M4). `buffer.direction()` is consulted
 //!   but the output order is always logical = visual for now.
 //! - Mark attachment, cursive attachment — M4.
@@ -41,7 +42,7 @@ use crate::buffer::{Buffer, Glyph, ShapedRun};
 use crate::error::Result;
 use crate::font::Font;
 use crate::tables::gpos::{lookup_type, PairPos};
-use crate::tables::Gpos;
+use crate::tables::{Gpos, KernTable};
 
 /// One entry in a feature list passed to [`shape`]. The tag is a
 /// four-byte OpenType feature tag (e.g. `b"liga"`, `b"kern"`, `b"smcp"`);
@@ -100,8 +101,17 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     }
 
     if want_kern {
-        if let Some(gpos) = face.gpos()? {
-            apply_kern(&gpos, &mut glyphs);
+        let gpos_kerned = match face.gpos()? {
+            Some(gpos) => apply_kern(&gpos, &mut glyphs),
+            None => false,
+        };
+        // Legacy `kern` is a fallback: if GPOS already kerned the run
+        // (even with zero-delta hits), the spec says GPOS wins and
+        // we do not stack a second round on top.
+        if !gpos_kerned {
+            if let Some(kern) = face.kern()? {
+                apply_legacy_kern(&kern, &mut glyphs);
+            }
         }
     }
 
@@ -113,9 +123,15 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
 /// indices across all matching features, sort ascending, and
 /// evaluate in that order — which is what this does. Non-pair
 /// lookup types are silently skipped; they land with later milestones.
-fn apply_kern(gpos: &Gpos<'_>, glyphs: &mut [Glyph]) {
+///
+/// Returns `true` when at least one GPOS pair-adjustment subtable
+/// actually ran against the glyph run. Callers use the boolean to
+/// decide whether to fall through to the legacy `kern` table or
+/// leave the run as-is. GPOS winning — even with zero-delta hits —
+/// is the spec's design, not a sigilbuzz quirk.
+fn apply_kern(gpos: &Gpos<'_>, glyphs: &mut [Glyph]) -> bool {
     if glyphs.len() < 2 {
-        return;
+        return false;
     }
 
     // Locate a reasonable LangSys. Latin fonts universally carry
@@ -126,10 +142,10 @@ fn apply_kern(gpos: &Gpos<'_>, glyphs: &mut [Glyph]) {
         .find(*b"DFLT")
         .or_else(|| script_list.iter().next().map(|(_, s)| s));
     let Some(script) = script else {
-        return;
+        return false;
     };
     let Some(lang_sys) = script.default_lang_sys() else {
-        return;
+        return false;
     };
 
     // Collect lookup indices from every `kern` feature the LangSys
@@ -152,10 +168,11 @@ fn apply_kern(gpos: &Gpos<'_>, glyphs: &mut [Glyph]) {
     lookup_indices.sort_unstable();
 
     if lookup_indices.is_empty() {
-        return;
+        return false;
     }
 
     let lookup_list = gpos.lookup_list();
+    let mut ran_any = false;
     for lookup_idx in lookup_indices {
         let Some(lookup) = lookup_list.get(lookup_idx) else {
             continue;
@@ -186,6 +203,39 @@ fn apply_kern(gpos: &Gpos<'_>, glyphs: &mut [Glyph]) {
                 continue;
             };
             apply_pair_pos(&pp, glyphs);
+            ran_any = true;
+        }
+    }
+    ran_any
+}
+
+/// Applies deltas from the legacy `kern` table to the glyph run.
+///
+/// HarfBuzz (and therefore rustybuzz) does not apply the whole
+/// delta to the left glyph — it splits it roughly in half across
+/// the pair, with the bigger share landing on the left:
+///
+/// ```text
+///   half          = delta / 2            // truncating toward zero
+///   left.advance  += delta - half        // e.g. -21 when delta=-41
+///   right.advance += half                // e.g. -20 when delta=-41
+/// ```
+///
+/// sigilbuzz matches that so legacy-kerned output lines up with
+/// rustybuzz byte-for-byte; the two-sided distribution also keeps
+/// clustering less visible if a renderer quantises advances.
+fn apply_legacy_kern(kern: &KernTable<'_>, glyphs: &mut [Glyph]) {
+    if glyphs.len() < 2 {
+        return;
+    }
+    for i in 0..glyphs.len() - 1 {
+        let left = glyphs[i].glyph_id as u16;
+        let right = glyphs[i + 1].glyph_id as u16;
+        let delta = i32::from(kern.kern(left, right));
+        if delta != 0 {
+            let half = delta / 2;
+            glyphs[i].x_advance += delta - half;
+            glyphs[i + 1].x_advance += half;
         }
     }
 }
