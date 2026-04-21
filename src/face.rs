@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 use crate::blob::Blob;
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
-use crate::tables::{tag, Cmap, Gdef, Gpos, Head, Hhea, Hmtx, KernTable, Maxp};
+use crate::tables::{tag, Cmap, Gdef, Gpos, Gsub, Head, Hhea, Hmtx, KernTable, Maxp};
 
 /// One entry in the SFNT table directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +239,16 @@ impl<'a> Face<'a> {
     pub fn kern(&self) -> Result<Option<KernTable<'a>>> {
         match self.table_bytes(tag::KERN) {
             Ok(bytes) => Ok(Some(KernTable::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `GSUB` table if the font carries one. Returns
+    /// `Ok(None)` when the font has no glyph substitution features.
+    pub fn gsub(&self) -> Result<Option<Gsub<'a>>> {
+        match self.table_bytes(tag::GSUB) {
+            Ok(bytes) => Ok(Some(Gsub::parse(bytes)?)),
             Err(Error::MissingTable { .. }) => Ok(None),
             Err(e) => Err(e),
         }

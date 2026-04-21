@@ -19,6 +19,9 @@
 //!
 //! - cmap + hmtx: every character becomes a glyph with a design-unit
 //!   advance.
+//! - GSUB ligature substitution (`liga` feature, lookup type 4)
+//!   runs before advance lookup so ligature glyphs contribute their
+//!   own advance instead of the sum of their components.
 //! - GPOS pair adjustment (`kern` feature) when a font carries it
 //!   through GPOS — including lookups wrapped in Extension (type 9)
 //!   containers.
@@ -26,12 +29,13 @@
 //!   horizontal) as a fallback for fonts whose GPOS has no `kern`
 //!   feature. Open Sans is the canonical example.
 //!
-//! Either kerning path is suppressed by a `Feature { tag: b"kern",
+//! Either feature can be suppressed by a `Feature { tag: <tag>,
 //! value: 0 }` entry passed to [`shape`].
 //!
 //! # What is not here yet
 //!
-//! - GSUB feature evaluation (ligatures, contextual alternates).
+//! - Other GSUB lookup types (single, multiple, alternate,
+//!   contextual).
 //! - Right-to-left reordering (M4). `buffer.direction()` is consulted
 //!   but the output order is always logical = visual for now.
 //! - Mark attachment, cursive attachment — M4.
@@ -41,8 +45,9 @@ use alloc::vec::Vec;
 use crate::buffer::{Buffer, Glyph, ShapedRun};
 use crate::error::Result;
 use crate::font::Font;
-use crate::tables::gpos::{lookup_type, PairPos};
-use crate::tables::{Gpos, KernTable};
+use crate::tables::gpos::{lookup_type as gpos_lt, PairPos};
+use crate::tables::gsub::{lookup_type as gsub_lt, Ligature};
+use crate::tables::{Gpos, Gsub, KernTable};
 
 /// One entry in a feature list passed to [`shape`]. The tag is a
 /// four-byte OpenType feature tag (e.g. `b"liga"`, `b"kern"`, `b"smcp"`);
@@ -59,19 +64,19 @@ pub struct Feature {
 
 /// Shapes `buffer` against `font` with optional feature overrides.
 ///
-/// Feature tags passed here are accepted for forward compatibility
-/// but currently ignored — GSUB / GPOS evaluation lands in M2.
+/// Feature tags with `value: 0` disable the corresponding feature
+/// for this call. Non-zero values enable a feature if the font
+/// supports it; unknown tags are accepted and ignored rather than
+/// returning an error.
 ///
 /// # Errors
 ///
 /// Returns an error if the font is missing any of the tables required
-/// for basic shaping (`cmap`, `head`, `maxp`, `hhea`, `hmtx`) or if
-/// one of them is malformed.
+/// for basic shaping (`cmap`, `maxp`, `hhea`, `hmtx`) or if one of
+/// them is malformed.
 pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<ShapedRun> {
-    // GSUB feature overrides still land in M2 work. For now we
-    // consume `features` only to drive the kern/no-kern choice in
-    // the GPOS pass below.
-    let want_kern = !features.iter().any(|f| f.tag == *b"kern" && f.value == 0);
+    let want_kern = !feature_disabled(features, *b"kern");
+    let want_liga = !feature_disabled(features, *b"liga");
 
     let face = font.face();
     let cmap = face.cmap()?;
@@ -82,22 +87,38 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         return Ok(ShapedRun::default());
     }
 
-    let mut glyphs = Vec::with_capacity(text.len());
+    // Step 1: codepoint → glyph id via cmap. Clusters are byte
+    // offsets from the start of the text so later passes can track
+    // which input characters coalesce into a single output glyph.
+    let mut glyphs: Vec<Glyph> = Vec::with_capacity(text.len());
     for (cluster, ch) in text.char_indices() {
-        // Miss-to-notdef fallback: callers that want to surface
-        // tofu handle the zero glyph themselves in their renderer;
-        // shapers conventionally fall through to .notdef (id 0).
         let glyph_id = cmap.glyph_id(ch).unwrap_or(0);
-        let advance = hmtx.advance(glyph_id).unwrap_or(0);
-
         glyphs.push(Glyph {
             glyph_id: u32::from(glyph_id),
             cluster: cluster as u32,
-            x_advance: i32::from(advance),
+            x_advance: 0, // filled in after substitutions settle
             y_advance: 0,
             x_offset: 0,
             y_offset: 0,
         });
+    }
+
+    // Step 2: GSUB ligature substitution (type 4) rewrites the run
+    // in place. A match replaces N glyphs with one; the merged
+    // cluster is the left-most input cluster so renderers that want
+    // to map back to source text can still do so.
+    if want_liga {
+        if let Some(gsub) = face.gsub()? {
+            apply_liga(&gsub, &mut glyphs);
+        }
+    }
+
+    // Step 3: hmtx advance lookup. Runs *after* GSUB so ligatures
+    // receive their ligature-glyph advance, not the sum of their
+    // component advances.
+    for glyph in &mut glyphs {
+        let id = glyph.glyph_id as u16;
+        glyph.x_advance = i32::from(hmtx.advance(id).unwrap_or(0));
     }
 
     if want_kern {
@@ -116,6 +137,103 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     }
 
     Ok(ShapedRun { glyphs })
+}
+
+/// Returns `true` when the feature is explicitly disabled via
+/// `Feature { tag, value: 0 }` in the override list.
+fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
+    features.iter().any(|f| f.tag == tag && f.value == 0)
+}
+
+/// Applies every ligature-substitution lookup reachable via the
+/// `liga` feature to the glyph run in place. A successful match
+/// collapses `componentCount` glyphs into one, so the vector
+/// shrinks and the loop re-examines the new glyph at the same
+/// position (ligatures can chain, though it is rare).
+fn apply_liga(gsub: &Gsub<'_>, glyphs: &mut Vec<Glyph>) {
+    if glyphs.len() < 2 {
+        return;
+    }
+
+    let script_list = gsub.script_list();
+    let script = script_list
+        .find(*b"DFLT")
+        .or_else(|| script_list.iter().next().map(|(_, s)| s));
+    let Some(script) = script else {
+        return;
+    };
+    let Some(lang_sys) = script.default_lang_sys() else {
+        return;
+    };
+
+    let feature_list = gsub.feature_list();
+    let mut lookup_indices: Vec<u16> = Vec::new();
+    for feat_idx in lang_sys.feature_indices() {
+        let Some((tag, feature)) = feature_list.get(feat_idx) else {
+            continue;
+        };
+        if tag != *b"liga" {
+            continue;
+        }
+        for idx in feature.lookup_indices() {
+            if !lookup_indices.contains(&idx) {
+                lookup_indices.push(idx);
+            }
+        }
+    }
+    lookup_indices.sort_unstable();
+    if lookup_indices.is_empty() {
+        return;
+    }
+
+    let lookup_list = gsub.lookup_list();
+    for lookup_idx in lookup_indices {
+        let Some(lookup) = lookup_list.get(lookup_idx) else {
+            continue;
+        };
+        let lt = lookup.lookup_type();
+        if lt != gsub_lt::LIGATURE && lt != gsub_lt::EXTENSION {
+            continue;
+        }
+        for sub_idx in 0..lookup.subtable_count() {
+            let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
+                continue;
+            };
+            let inner_bytes = if lt == gsub_lt::EXTENSION {
+                match resolve_extension(bytes) {
+                    Some((inner_type, inner)) if inner_type == gsub_lt::LIGATURE => inner,
+                    _ => continue,
+                }
+            } else {
+                bytes
+            };
+            let Ok(lig) = Ligature::parse(inner_bytes) else {
+                continue;
+            };
+            apply_liga_subtable(&lig, glyphs);
+        }
+    }
+}
+
+fn apply_liga_subtable(lig: &Ligature<'_>, glyphs: &mut Vec<Glyph>) {
+    let mut i = 0;
+    // Work on a scratch u16 view so lookups don't re-derive ids.
+    // Re-synthesised inside the loop after each substitution so the
+    // window reflects the post-replacement run.
+    while i < glyphs.len() {
+        let window: Vec<u16> = glyphs[i..].iter().map(|g| g.glyph_id as u16).collect();
+        if let Some((lig_glyph, consumed)) = lig.apply(&window) {
+            // Merge the consumed range: keep the cluster of the
+            // first component (the leftmost character that fed the
+            // ligature), replace the glyph id, drop the tail.
+            glyphs[i].glyph_id = u32::from(lig_glyph);
+            glyphs.drain(i + 1..i + consumed);
+            // Stay on `i` — a ligature output might itself be the
+            // first component of a longer ligature further along.
+        } else {
+            i += 1;
+        }
+    }
 }
 
 /// Applies every pair-adjustment lookup reachable via the `kern`
@@ -178,7 +296,7 @@ fn apply_kern(gpos: &Gpos<'_>, glyphs: &mut [Glyph]) -> bool {
             continue;
         };
         let lt = lookup.lookup_type();
-        if lt != lookup_type::PAIR_ADJUSTMENT && lt != lookup_type::EXTENSION {
+        if lt != gpos_lt::PAIR_ADJUSTMENT && lt != gpos_lt::EXTENSION {
             // Any other lookup type — single-adjustment, mark
             // attachment, contextual positioning — is skipped for
             // now. Later milestones plug in their handlers.
@@ -188,11 +306,9 @@ fn apply_kern(gpos: &Gpos<'_>, glyphs: &mut [Glyph]) -> bool {
             let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
                 continue;
             };
-            let inner_bytes = if lt == lookup_type::EXTENSION {
+            let inner_bytes = if lt == gpos_lt::EXTENSION {
                 match resolve_extension(bytes) {
-                    Some((inner_type, inner)) if inner_type == lookup_type::PAIR_ADJUSTMENT => {
-                        inner
-                    }
+                    Some((inner_type, inner)) if inner_type == gpos_lt::PAIR_ADJUSTMENT => inner,
                     // Extension pointing at a non-pair lookup — skip.
                     _ => continue,
                 }

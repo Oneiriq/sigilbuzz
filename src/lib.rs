@@ -50,7 +50,7 @@ pub use buffer::{Buffer, Direction, Glyph};
 pub use error::{Error, Result};
 pub use face::Face;
 pub use font::Font;
-pub use shape::shape;
+pub use shape::{shape, Feature};
 
 /// Crate version, matching `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

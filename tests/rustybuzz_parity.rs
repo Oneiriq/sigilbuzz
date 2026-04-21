@@ -1,25 +1,18 @@
-//! M1 parity contract: sigilbuzz matches rustybuzz glyph-for-glyph and
-//! advance-for-advance on a fixed Latin corpus *when rustybuzz has all
-//! OpenType features disabled*.
+//! Parity contract: sigilbuzz matches rustybuzz glyph-for-glyph and
+//! advance-for-advance on a fixed Latin corpus under the feature set
+//! sigilbuzz currently implements (see [`disabled_features`]).
 //!
-//! sigilbuzz at M1 does cmap + hmtx only — no GSUB (ligatures,
-//! contextual alternates) and no GPOS (kerning, mark attachment).
-//! The reference has to match that reduced surface or every Latin
-//! corpus entry with a kerning pair would diverge. The feature
-//! disable list below shuts off the defaults rustybuzz applies for
-//! the Latin script.
+//! As milestones add parsers, the disabled-features list shrinks
+//! and eventually disappears — at which point sigilbuzz is on the
+//! shape()-level par with rustybuzz for the supported scripts.
 //!
-//! If a test in this file fails, the M1 contract is broken. Either
-//! sigilbuzz has drifted (the common case) or rustybuzz changed its
-//! output under the same disabled-feature set (pin rustybuzz to the
-//! exact version that authored the contract in Cargo.toml).
-//!
-//! When sigilbuzz acquires GSUB / GPOS (M2), the `disabled_features`
-//! list shrinks and eventually disappears.
+//! If a test here fails, sigilbuzz has drifted or rustybuzz has
+//! changed output for the same feature set. Pin rustybuzz exactly
+//! in Cargo.toml to make the latter unambiguous.
 
 use rustybuzz::ttf_parser::Tag;
 use rustybuzz::Feature;
-use sigilbuzz::{shape, Blob, Buffer, Face, Font};
+use sigilbuzz::{shape, Blob, Buffer, Face, Feature as SigilFeature, Font};
 
 const OPEN_SANS: &[u8] = include_bytes!("fixtures/opensans_regular.ttf");
 
@@ -37,22 +30,32 @@ const CORPUS: &[&str] = &[
     // character, sigilbuzz and rustybuzz should both emit the same
     // glyph id. If it doesn't, both should emit .notdef.
     "A\u{E000}B",
+    // Strings that exercise common ligatures. Open Sans carries
+    // `fi`/`fl` in its `liga` feature, so these should collapse to
+    // single glyphs in both engines.
+    "office",
+    "sufficient",
+    "flight",
+    "definite",
+    // A ligature right next to a kerning pair so both passes must
+    // run in the correct order.
+    "flyover",
 ];
 
 /// Features to disable on rustybuzz so its output reflects the
 /// surface sigilbuzz currently implements.
 ///
-/// As of M2, sigilbuzz applies kerning — via GPOS pair adjustment
-/// when a font carries the `kern` feature there, and via the legacy
-/// `kern` table otherwise. Both paths are exercised against this
-/// corpus so kern stays enabled on the reference too.
+/// As of M2, sigilbuzz applies:
+/// - GSUB ligature substitution (`liga`, lookup type 4)
+/// - GPOS pair adjustment (`kern`, lookup type 2) with Extension
+///   wrapper support
+/// - Legacy `kern` table as a GPOS-less fallback
 ///
-/// Ligatures and contextual alternates remain disabled because
-/// GSUB is still M2 work; they rejoin the default set as those
-/// lookup types come online.
-fn disabled_features() -> [Feature; 3] {
+/// Contextual and contextual-ligature variants (`clig`, `calt`)
+/// belong to GSUB lookup types sigilbuzz has not implemented yet;
+/// they rejoin the default set as those parsers come online.
+fn disabled_features() -> [Feature; 2] {
     [
-        Feature::new(Tag::from_bytes(b"liga"), 0, ..),
         Feature::new(Tag::from_bytes(b"clig"), 0, ..),
         Feature::new(Tag::from_bytes(b"calt"), 0, ..),
     ]
@@ -104,4 +107,32 @@ fn every_corpus_entry_matches_rustybuzz_glyph_for_glyph() {
             );
         }
     }
+}
+
+#[test]
+fn fi_ligature_collapses_two_chars_into_one_glyph() {
+    // Proof-of-fire for GSUB liga: "fi" must shape to a single
+    // glyph when the font ships the ligature, which Open Sans does.
+    let blob = Blob::new(OPEN_SANS);
+    let face = Face::parse(&blob, 0).expect("parse face");
+    let font = Font::new(face, 1000.0);
+
+    let mut buffer = Buffer::new();
+    buffer.push_str("fi");
+    let shaped = shape(&font, &buffer, &[]).expect("shape fi");
+    assert_eq!(shaped.len(), 1, "expected `fi` to collapse to one glyph");
+
+    // Disabling liga should give us two glyphs again.
+    let mut buffer = Buffer::new();
+    buffer.push_str("fi");
+    let disabled = [SigilFeature {
+        tag: *b"liga",
+        value: 0,
+    }];
+    let shaped = shape(&font, &buffer, &disabled).expect("shape fi no-liga");
+    assert_eq!(
+        shaped.len(),
+        2,
+        "with liga disabled `fi` must stay as two glyphs"
+    );
 }
