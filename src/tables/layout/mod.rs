@@ -8,6 +8,12 @@
 
 pub mod class_def;
 pub mod coverage;
+pub mod feature_list;
+pub mod lookup_list;
+pub mod script_list;
 
 pub use class_def::ClassDef;
 pub use coverage::Coverage;
+pub use feature_list::{Feature, FeatureList};
+pub use lookup_list::{Lookup, LookupList, LOOKUP_FLAG_USE_MARK_FILTERING_SET};
+pub use script_list::{LangSys, Script, ScriptList};
