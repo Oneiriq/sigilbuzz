@@ -55,6 +55,8 @@ pedantic = { level = "warn", priority = -1 }
 # low-level parser and would otherwise add noise.
 cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
+cast_lossless = "allow"       # `b'A' as u16` in test fixtures is clearer than `u16::from(b'A')`
+cast_sign_loss = "allow"      # `i16 as u16` for OpenType delta arithmetic is deliberate
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
