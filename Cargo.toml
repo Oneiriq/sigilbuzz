@@ -32,6 +32,9 @@ alloc = []
 [dev-dependencies]
 # Tests may depend on sample fonts and timing utilities — add here,
 # never in [dependencies].
+# rustybuzz is the reference implementation we compare against for
+# M1 parity. Dev-dep only: the core crate must never link against it.
+rustybuzz = "0.20"
 
 [profile.release]
 lto = "thin"
