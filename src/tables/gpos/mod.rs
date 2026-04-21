@@ -17,9 +17,11 @@ use crate::tables::layout::{FeatureList, LookupList, ScriptList};
 use crate::tables::parse::Reader;
 
 pub mod pair_pos;
+pub mod single_adj;
 pub mod value_record;
 
 pub use pair_pos::{PairPos, PairPosFormat1, PairPosFormat2};
+pub use single_adj::SinglePos;
 pub use value_record::ValueRecord;
 
 /// Canonical GPOS lookup type numbers. Not exhaustive today; entries
