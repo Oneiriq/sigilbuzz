@@ -8,6 +8,7 @@
 //! Subsequent iterations will add units-per-em scaling, variation axis
 //! coordinates, synthetic bold / oblique, etc.
 
+use crate::error::Result;
 use crate::face::Face;
 
 /// A face bound to a render size.
@@ -47,6 +48,13 @@ impl<'a> Font<'a> {
             face: self.face.clone(),
             size,
         }
+    }
+
+    /// Reads `unitsPerEm` from the font's `head` table. Useful when a
+    /// caller wants to convert sigilbuzz's design-unit advances into
+    /// pixels: `pixels = advance * font.size() / font.units_per_em()?`.
+    pub fn units_per_em(&self) -> Result<u16> {
+        Ok(self.face.head()?.units_per_em)
     }
 }
 

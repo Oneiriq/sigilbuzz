@@ -34,6 +34,7 @@ use alloc::vec::Vec;
 use crate::blob::Blob;
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
+use crate::tables::{tag, Cmap, Head, Hhea, Hmtx, Maxp};
 
 /// One entry in the SFNT table directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,6 +175,39 @@ impl<'a> Face<'a> {
         // `parse_bytes` has already validated that this range is
         // in-bounds, so the slice is safe.
         Ok(&self.data[start..end])
+    }
+
+    /// Parses the `head` table.
+    pub fn head(&self) -> Result<Head> {
+        Head::parse(self.table_bytes(tag::HEAD)?)
+    }
+
+    /// Parses the `maxp` table.
+    pub fn maxp(&self) -> Result<Maxp> {
+        Maxp::parse(self.table_bytes(tag::MAXP)?)
+    }
+
+    /// Parses the `hhea` table.
+    pub fn hhea(&self) -> Result<Hhea> {
+        Hhea::parse(self.table_bytes(tag::HHEA)?)
+    }
+
+    /// Parses the `hmtx` table. Requires `maxp` and `hhea` to be
+    /// present because the hmtx layout depends on their counts; either
+    /// missing surfaces as [`Error::MissingTable`].
+    pub fn hmtx(&self) -> Result<Hmtx<'a>> {
+        let maxp = self.maxp()?;
+        let hhea = self.hhea()?;
+        Hmtx::parse(
+            self.table_bytes(tag::HMTX)?,
+            maxp.num_glyphs,
+            hhea.number_of_h_metrics,
+        )
+    }
+
+    /// Parses the `cmap` table.
+    pub fn cmap(&self) -> Result<Cmap<'a>> {
+        Cmap::parse(self.table_bytes(tag::CMAP)?)
     }
 }
 
