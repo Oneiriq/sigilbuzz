@@ -14,12 +14,16 @@ use crate::error::{Error, Result};
 use crate::tables::layout::{FeatureList, LookupList, ScriptList};
 use crate::tables::parse::Reader;
 
+pub mod alternate;
 pub mod chain_context;
 pub mod ligature;
+pub mod multiple;
 pub mod single;
 
+pub use alternate::Alternate;
 pub use chain_context::{ChainContext, SubstLookupRecord};
 pub use ligature::Ligature;
+pub use multiple::Multiple;
 pub use single::Single;
 
 /// GSUB lookup type numbers. Entries land here as sigilbuzz acquires

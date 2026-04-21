@@ -57,7 +57,9 @@ use crate::error::Result;
 use crate::font::Font;
 use crate::tables::gdef::{Gdef, GlyphClass};
 use crate::tables::gpos::{lookup_type as gpos_lt, MarkBasePos, PairPos, SinglePos};
-use crate::tables::gsub::{lookup_type as gsub_lt, ChainContext, Ligature, Single};
+use crate::tables::gsub::{
+    lookup_type as gsub_lt, Alternate, ChainContext, Ligature, Multiple, Single,
+};
 use crate::tables::{Gpos, Gsub, KernTable};
 
 /// One entry in a feature list passed to [`shape`]. The tag is a
@@ -123,22 +125,22 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let gsub = face.gsub()?;
     if let Some(ref gsub) = gsub {
         if !feature_disabled(features, *b"ccmp") {
-            apply_gsub_feature(gsub, &mut glyphs, *b"ccmp");
+            apply_gsub_feature(gsub, &mut glyphs, *b"ccmp", 0);
         }
         if !feature_disabled(features, *b"rlig") {
-            apply_gsub_feature(gsub, &mut glyphs, *b"rlig");
+            apply_gsub_feature(gsub, &mut glyphs, *b"rlig", 0);
         }
         if want_liga {
-            apply_gsub_feature(gsub, &mut glyphs, *b"liga");
+            apply_gsub_feature(gsub, &mut glyphs, *b"liga", 0);
         }
         // `clig` (contextual ligatures) and `calt` (contextual
         // alternates) run by default for Latin — HarfBuzz's Latin
         // fallback shaper turns both on. sigilbuzz follows suit.
         if !feature_disabled(features, *b"clig") {
-            apply_gsub_feature(gsub, &mut glyphs, *b"clig");
+            apply_gsub_feature(gsub, &mut glyphs, *b"clig", 0);
         }
         if !feature_disabled(features, *b"calt") {
-            apply_gsub_feature(gsub, &mut glyphs, *b"calt");
+            apply_gsub_feature(gsub, &mut glyphs, *b"calt", 0);
         }
         for feat in features {
             if feat.value == 0 {
@@ -147,7 +149,12 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             if is_handled_gsub_tag(feat.tag) {
                 continue; // already handled above
             }
-            apply_gsub_feature(gsub, &mut glyphs, feat.tag);
+            // feature.value is 1-indexed per the spec; subtract one to
+            // get the 0-indexed alternate slot sigilbuzz's Alternate
+            // parser uses. Clamped via saturating_sub so value=1 still
+            // picks the first alternate.
+            let alternate_idx = (feat.value.saturating_sub(1)).min(u32::from(u16::MAX)) as u16;
+            apply_gsub_feature(gsub, &mut glyphs, feat.tag, alternate_idx);
         }
     }
 
@@ -218,6 +225,10 @@ fn is_handled_gsub_tag(tag: [u8; 4]) -> bool {
 /// to the glyph run in place. Supports lookup types:
 ///
 /// - 1 — Single substitution (`smcp`, `vert`, `salt`, `ss01`…)
+/// - 2 — Multiple substitution (`ccmp` decomposition, some scripts)
+/// - 3 — Alternate substitution (`salt`, `swsh`, `aalt`) — the
+///   alternate index comes from the feature `value` (1-indexed,
+///   clamped into the alternate set)
 /// - 4 — Ligature substitution (`liga`, `dlig`, `rlig`)
 /// - 6 — Chained context substitution (`calt`, `clig`, `init`,
 ///   `medi`, `fina`, `isol`) with recursive nested lookups
@@ -225,7 +236,12 @@ fn is_handled_gsub_tag(tag: [u8; 4]) -> bool {
 /// Extension (type 7) wrappers are unwrapped to the inner type.
 /// Unknown lookup types are silently skipped so callers can enable
 /// forward-compatible features without the run erroring out.
-fn apply_gsub_feature(gsub: &Gsub<'_>, glyphs: &mut Vec<Glyph>, tag: [u8; 4]) {
+fn apply_gsub_feature(
+    gsub: &Gsub<'_>,
+    glyphs: &mut Vec<Glyph>,
+    tag: [u8; 4],
+    alternate_index: u16,
+) {
     if glyphs.is_empty() {
         return;
     }
@@ -238,14 +254,19 @@ fn apply_gsub_feature(gsub: &Gsub<'_>, glyphs: &mut Vec<Glyph>, tag: [u8; 4]) {
     }
 
     for lookup_idx in lookup_indices {
-        apply_gsub_lookup(gsub, lookup_idx, glyphs);
+        apply_gsub_lookup(gsub, lookup_idx, glyphs, alternate_index);
     }
 }
 
 /// Applies a single GSUB lookup by index, walking its subtables in
 /// spec order. Stops at the first subtable of a supported type that
 /// runs on the full glyph run.
-fn apply_gsub_lookup(gsub: &Gsub<'_>, lookup_idx: u16, glyphs: &mut Vec<Glyph>) {
+fn apply_gsub_lookup(
+    gsub: &Gsub<'_>,
+    lookup_idx: u16,
+    glyphs: &mut Vec<Glyph>,
+    alternate_index: u16,
+) {
     let lookup_list = gsub.lookup_list();
     let Some(lookup) = lookup_list.get(lookup_idx) else {
         return;
@@ -270,6 +291,18 @@ fn apply_gsub_lookup(gsub: &Gsub<'_>, lookup_idx: u16, glyphs: &mut Vec<Glyph>) 
                     continue;
                 };
                 apply_single_subtable(&single, glyphs);
+            }
+            gsub_lt::MULTIPLE => {
+                let Ok(m) = Multiple::parse(inner_bytes) else {
+                    continue;
+                };
+                apply_multiple_subtable(&m, glyphs);
+            }
+            gsub_lt::ALTERNATE => {
+                let Ok(alt) = Alternate::parse(inner_bytes) else {
+                    continue;
+                };
+                apply_alternate_subtable(&alt, glyphs, alternate_index);
             }
             gsub_lt::LIGATURE => {
                 let Ok(lig) = Ligature::parse(inner_bytes) else {
@@ -330,6 +363,30 @@ fn apply_gsub_lookup_at(
                     return 1;
                 }
             }
+            gsub_lt::MULTIPLE => {
+                let Ok(m) = Multiple::parse(inner_bytes) else {
+                    continue;
+                };
+                let id = glyphs[at].glyph_id as u16;
+                if let Some(seq) = m.apply(id) {
+                    if let Some(n) = expand_glyph_in_place(glyphs, at, &seq) {
+                        return n;
+                    }
+                }
+            }
+            gsub_lt::ALTERNATE => {
+                let Ok(alt) = Alternate::parse(inner_bytes) else {
+                    continue;
+                };
+                let id = glyphs[at].glyph_id as u16;
+                // Nested alternate lookups pick index 0 — the
+                // feature-value-based selection is a top-level
+                // concept that does not propagate into context.
+                if let Some(out) = alt.apply(id, 0) {
+                    glyphs[at].glyph_id = u32::from(out);
+                    return 1;
+                }
+            }
             gsub_lt::LIGATURE => {
                 let Ok(lig) = Ligature::parse(inner_bytes) else {
                     continue;
@@ -349,6 +406,33 @@ fn apply_gsub_lookup_at(
         }
     }
     0
+}
+
+/// Replaces `glyphs[at]` with the given sequence in place. Cluster
+/// is copied from the original glyph so every expanded sub-glyph
+/// still points back to its source codepoint. Returns the output
+/// length when `seq` is non-empty, `None` on a zero-length sequence
+/// (which the spec forbids but we treat as a safe no-op).
+fn expand_glyph_in_place(glyphs: &mut Vec<Glyph>, at: usize, seq: &[u16]) -> Option<usize> {
+    if seq.is_empty() {
+        return None;
+    }
+    let source_cluster = glyphs[at].cluster;
+    glyphs[at].glyph_id = u32::from(seq[0]);
+    for (i, &out_gid) in seq.iter().enumerate().skip(1) {
+        glyphs.insert(
+            at + i,
+            Glyph {
+                glyph_id: u32::from(out_gid),
+                cluster: source_cluster,
+                x_advance: 0,
+                y_advance: 0,
+                x_offset: 0,
+                y_offset: 0,
+            },
+        );
+    }
+    Some(seq.len())
 }
 
 /// Scans the glyph run for a chained-context match and, on every
@@ -413,6 +497,29 @@ fn apply_single_subtable(single: &Single<'_>, glyphs: &mut [Glyph]) {
     for glyph in glyphs.iter_mut() {
         let id = glyph.glyph_id as u16;
         if let Some(out) = single.apply(id) {
+            glyph.glyph_id = u32::from(out);
+        }
+    }
+}
+
+fn apply_multiple_subtable(m: &Multiple<'_>, glyphs: &mut Vec<Glyph>) {
+    let mut i = 0;
+    while i < glyphs.len() {
+        let id = glyphs[i].glyph_id as u16;
+        if let Some(seq) = m.apply(id) {
+            if let Some(n) = expand_glyph_in_place(glyphs, i, &seq) {
+                i += n;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
+fn apply_alternate_subtable(alt: &Alternate<'_>, glyphs: &mut [Glyph], alternate_index: u16) {
+    for glyph in glyphs.iter_mut() {
+        let id = glyph.glyph_id as u16;
+        if let Some(out) = alt.apply(id, alternate_index) {
             glyph.glyph_id = u32::from(out);
         }
     }
