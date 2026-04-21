@@ -49,6 +49,16 @@ src/
 └── ot/             OpenType feature evaluation (GSUB / GPOS / ...)
 ```
 
+## Development
+
+After cloning, install the pre-push hook that mirrors the CI gate:
+
+```bash
+scripts/install-hooks.sh
+```
+
+The hook runs `cargo fmt --all --check`, clippy (with and without default features), `cargo test --all-features`, and the `no_std` build. CI on GitHub Actions only runs on merges into `main`, so this hook is the primary gate. Never bypass it with `--no-verify`.
+
 ## License
 
 Apache-2.0. See `LICENSE-APACHE`.
