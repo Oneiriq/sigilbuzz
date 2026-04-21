@@ -17,11 +17,13 @@ use crate::tables::layout::{FeatureList, LookupList, ScriptList};
 use crate::tables::parse::Reader;
 
 pub mod anchor;
+pub mod mark_base;
 pub mod pair_pos;
 pub mod single_adj;
 pub mod value_record;
 
 pub use anchor::Anchor;
+pub use mark_base::{MarkAttachment, MarkBasePos};
 pub use pair_pos::{PairPos, PairPosFormat1, PairPosFormat2};
 pub use single_adj::SinglePos;
 pub use value_record::ValueRecord;

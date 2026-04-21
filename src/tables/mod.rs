@@ -26,7 +26,7 @@ pub mod parse;
 pub use cmap::Cmap;
 pub use gdef::{Gdef, GlyphClass};
 pub use glyf::{Glyf, GlyphBounds};
-pub use gpos::{Anchor, Gpos, PairPos, SinglePos, ValueRecord};
+pub use gpos::{Anchor, Gpos, MarkAttachment, MarkBasePos, PairPos, SinglePos, ValueRecord};
 pub use gsub::{Gsub, Ligature, Single};
 pub use head::{Head, IndexToLocFormat};
 pub use hhea::Hhea;

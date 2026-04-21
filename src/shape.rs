@@ -17,35 +17,43 @@
 //!
 //! # What is here
 //!
-//! - cmap + hmtx: every character becomes a glyph with a design-unit
-//!   advance.
-//! - GSUB ligature substitution (`liga` feature, lookup type 4)
-//!   runs before advance lookup so ligature glyphs contribute their
-//!   own advance instead of the sum of their components.
-//! - GPOS pair adjustment (`kern` feature) when a font carries it
-//!   through GPOS — including lookups wrapped in Extension (type 9)
-//!   containers.
-//! - Legacy `kern` table (Microsoft/OpenType version 0, format 0,
-//!   horizontal) as a fallback for fonts whose GPOS has no `kern`
-//!   feature. Open Sans is the canonical example.
+//! - cmap → glyph id, then the full shaping pipeline in spec order.
+//! - GSUB (lookup types 1 and 4, plus Extension type 7 unwrapping):
+//!   `ccmp`, `rlig`, and `liga` run by default; any user-enabled
+//!   tag with non-zero value flows through the same dispatcher.
+//! - hmtx advance lookup, post-substitution so ligature glyphs get
+//!   their own advance rather than the sum of their components.
+//! - GPOS (lookup types 1, 2, 4, plus Extension type 9 unwrapping):
+//!   `kern` runs by default for pair adjustment, `mark` runs by
+//!   default for mark-to-base attachment. User-enabled GPOS tags
+//!   flow through the same dispatcher.
+//! - Legacy `kern` table as a fallback for fonts whose GPOS has no
+//!   `kern` feature. Open Sans is the canonical example.
 //!
-//! Either feature can be suppressed by a `Feature { tag: <tag>,
-//! value: 0 }` entry passed to [`shape`].
+//! Any default-on feature can be suppressed by a `Feature { tag,
+//! value: 0 }` entry.
 //!
 //! # What is not here yet
 //!
-//! - Other GSUB lookup types (single, multiple, alternate,
-//!   contextual).
-//! - Right-to-left reordering (M4). `buffer.direction()` is consulted
+//! - Unicode NFC normalisation of input text. HarfBuzz implicitly
+//!   normalises `e + U+0301` to `é` before cmap; sigilbuzz does
+//!   not. Callers that want that behaviour should normalise on
+//!   their side (there is no small Rust-native NFC crate we would
+//!   accept as a dependency; an in-house implementation lives on
+//!   the roadmap).
+//! - GSUB contextual (type 5) and chained contextual (type 6).
+//! - GPOS mark-to-ligature (type 5), mark-to-mark (type 6),
+//!   cursive attachment (type 3).
+//! - Right-to-left reordering — `buffer.direction()` is consulted
 //!   but the output order is always logical = visual for now.
-//! - Mark attachment, cursive attachment — M4.
 
 use alloc::vec::Vec;
 
 use crate::buffer::{Buffer, Glyph, ShapedRun};
 use crate::error::Result;
 use crate::font::Font;
-use crate::tables::gpos::{lookup_type as gpos_lt, PairPos};
+use crate::tables::gdef::{Gdef, GlyphClass};
+use crate::tables::gpos::{lookup_type as gpos_lt, MarkBasePos, PairPos, SinglePos};
 use crate::tables::gsub::{lookup_type as gsub_lt, Ligature, Single};
 use crate::tables::{Gpos, Gsub, KernTable};
 
@@ -103,13 +111,20 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         });
     }
 
-    // Step 2: GSUB passes. Lookups are applied per feature, in the
-    // spec's order: required features, then default-on features,
-    // then user-enabled features. Feature tags the user opts into
-    // via `features` flow through the same machinery — they just
-    // need to be carried by the font's LangSys feature list.
+    // Step 2: GSUB passes. Default-on features mirror HarfBuzz's
+    // Latin defaults so common text renders the same way without
+    // the caller having to enumerate them. Order matches the spec:
+    // `ccmp` (composition/decomposition) runs before ligatures and
+    // before the required-ligature fallback, because later passes
+    // operate on the composed glyph stream.
     let gsub = face.gsub()?;
     if let Some(ref gsub) = gsub {
+        if !feature_disabled(features, *b"ccmp") {
+            apply_gsub_feature(gsub, &mut glyphs, *b"ccmp");
+        }
+        if !feature_disabled(features, *b"rlig") {
+            apply_gsub_feature(gsub, &mut glyphs, *b"rlig");
+        }
         if want_liga {
             apply_gsub_feature(gsub, &mut glyphs, *b"liga");
         }
@@ -117,8 +132,14 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             if feat.value == 0 {
                 continue;
             }
-            if feat.tag == *b"liga" || feat.tag == *b"kern" {
-                continue; // already handled or GPOS territory
+            if matches!(
+                feat.tag,
+                [b'l', b'i', b'g', b'a']
+                    | [b'k', b'e', b'r', b'n']
+                    | [b'c', b'c', b'm', b'p']
+                    | [b'r', b'l', b'i', b'g']
+            ) {
+                continue; // already handled
             }
             apply_gsub_feature(gsub, &mut glyphs, feat.tag);
         }
@@ -132,18 +153,39 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         glyph.x_advance = i32::from(hmtx.advance(id).unwrap_or(0));
     }
 
-    if want_kern {
-        let gpos_kerned = match face.gpos()? {
-            Some(gpos) => apply_kern(&gpos, &mut glyphs),
+    // Step 4: GPOS passes. Kern first, then mark-to-base; then any
+    // user-enabled GPOS features that flow through feature overrides.
+    let gdef = face.gdef()?;
+    let gpos = face.gpos()?;
+    let gpos_kerned = if want_kern {
+        match &gpos {
+            Some(gpos) => apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"kern"),
             None => false,
-        };
-        // Legacy `kern` is a fallback: if GPOS already kerned the run
-        // (even with zero-delta hits), the spec says GPOS wins and
-        // we do not stack a second round on top.
-        if !gpos_kerned {
-            if let Some(kern) = face.kern()? {
-                apply_legacy_kern(&kern, &mut glyphs);
+        }
+    } else {
+        false
+    };
+    if let Some(ref gpos) = gpos {
+        apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"mark");
+        // User-enabled features beyond kern/mark/liga (which are
+        // handled explicitly) flow through the same dispatch.
+        for feat in features {
+            if feat.value == 0 {
+                continue;
             }
+            if feat.tag == *b"kern" || feat.tag == *b"mark" || feat.tag == *b"liga" {
+                continue;
+            }
+            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), feat.tag);
+        }
+    }
+
+    // Legacy `kern` is a fallback: only runs when GPOS kern produced
+    // no lookups. GPOS wins even with zero-delta hits — the spec's
+    // design, not a sigilbuzz quirk.
+    if want_kern && !gpos_kerned {
+        if let Some(kern) = face.kern()? {
+            apply_legacy_kern(&kern, &mut glyphs);
         }
     }
 
@@ -275,55 +317,30 @@ fn apply_liga_subtable(lig: &Ligature<'_>, glyphs: &mut Vec<Glyph>) {
     }
 }
 
-/// Applies every pair-adjustment lookup reachable via the `kern`
-/// feature to the current glyph run. The spec says to union lookup
-/// indices across all matching features, sort ascending, and
-/// evaluate in that order — which is what this does. Non-pair
-/// lookup types are silently skipped; they land with later milestones.
+/// Applies every GPOS lookup reachable via the named feature tag
+/// to the glyph run in place. Supports lookup types:
 ///
-/// Returns `true` when at least one GPOS pair-adjustment subtable
-/// actually ran against the glyph run. Callers use the boolean to
-/// decide whether to fall through to the legacy `kern` table or
-/// leave the run as-is. GPOS winning — even with zero-delta hits —
-/// is the spec's design, not a sigilbuzz quirk.
-fn apply_kern(gpos: &Gpos<'_>, glyphs: &mut [Glyph]) -> bool {
-    if glyphs.len() < 2 {
+/// - 1 — Single adjustment (uniform or per-glyph ValueRecord)
+/// - 2 — Pair adjustment (kern)
+/// - 4 — Mark-to-base attachment (mark)
+/// - 9 — Extension (unwraps, re-dispatches)
+///
+/// Returns `true` when at least one subtable of a supported type
+/// actually ran. Callers use this to decide whether to fall back
+/// to the legacy `kern` table (for the `kern` feature specifically).
+fn apply_gpos_feature(
+    gpos: &Gpos<'_>,
+    glyphs: &mut [Glyph],
+    gdef: Option<&Gdef<'_>>,
+    tag: [u8; 4],
+) -> bool {
+    if glyphs.is_empty() {
         return false;
     }
 
-    // Locate a reasonable LangSys. Latin fonts universally carry
-    // DFLT; fall back to the first script if not present. Non-Latin
-    // scripts need a caller-supplied selection in a future revision.
-    let script_list = gpos.script_list();
-    let script = script_list
-        .find(*b"DFLT")
-        .or_else(|| script_list.iter().next().map(|(_, s)| s));
-    let Some(script) = script else {
+    let Some(lookup_indices) = gpos_lookup_indices_for_feature(gpos, tag) else {
         return false;
     };
-    let Some(lang_sys) = script.default_lang_sys() else {
-        return false;
-    };
-
-    // Collect lookup indices from every `kern` feature the LangSys
-    // exposes. A font may have more than one.
-    let feature_list = gpos.feature_list();
-    let mut lookup_indices: Vec<u16> = Vec::new();
-    for feat_idx in lang_sys.feature_indices() {
-        let Some((tag, feature)) = feature_list.get(feat_idx) else {
-            continue;
-        };
-        if tag != *b"kern" {
-            continue;
-        }
-        for idx in feature.lookup_indices() {
-            if !lookup_indices.contains(&idx) {
-                lookup_indices.push(idx);
-            }
-        }
-    }
-    lookup_indices.sort_unstable();
-
     if lookup_indices.is_empty() {
         return false;
     }
@@ -334,34 +351,138 @@ fn apply_kern(gpos: &Gpos<'_>, glyphs: &mut [Glyph]) -> bool {
         let Some(lookup) = lookup_list.get(lookup_idx) else {
             continue;
         };
-        let lt = lookup.lookup_type();
-        if lt != gpos_lt::PAIR_ADJUSTMENT && lt != gpos_lt::EXTENSION {
-            // Any other lookup type — single-adjustment, mark
-            // attachment, contextual positioning — is skipped for
-            // now. Later milestones plug in their handlers.
-            continue;
-        }
+        let raw_lt = lookup.lookup_type();
         for sub_idx in 0..lookup.subtable_count() {
             let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
                 continue;
             };
-            let inner_bytes = if lt == gpos_lt::EXTENSION {
+            let (effective_lt, inner_bytes) = if raw_lt == gpos_lt::EXTENSION {
                 match resolve_extension(bytes) {
-                    Some((inner_type, inner)) if inner_type == gpos_lt::PAIR_ADJUSTMENT => inner,
-                    // Extension pointing at a non-pair lookup — skip.
-                    _ => continue,
+                    Some((inner_type, inner)) => (inner_type, inner),
+                    None => continue,
                 }
             } else {
-                bytes
+                (raw_lt, bytes)
             };
-            let Ok(pp) = PairPos::parse(inner_bytes) else {
-                continue;
-            };
-            apply_pair_pos(&pp, glyphs);
-            ran_any = true;
+
+            match effective_lt {
+                gpos_lt::SINGLE_ADJUSTMENT => {
+                    let Ok(sp) = SinglePos::parse(inner_bytes) else {
+                        continue;
+                    };
+                    apply_single_pos(&sp, glyphs);
+                    ran_any = true;
+                }
+                gpos_lt::PAIR_ADJUSTMENT => {
+                    let Ok(pp) = PairPos::parse(inner_bytes) else {
+                        continue;
+                    };
+                    apply_pair_pos(&pp, glyphs);
+                    ran_any = true;
+                }
+                gpos_lt::MARK_TO_BASE => {
+                    let Ok(mbp) = MarkBasePos::parse(inner_bytes) else {
+                        continue;
+                    };
+                    apply_mark_base(&mbp, glyphs, gdef);
+                    ran_any = true;
+                }
+                _ => {}
+            }
         }
     }
     ran_any
+}
+
+/// Default-LangSys lookup-index collection for a GPOS feature tag,
+/// mirroring the GSUB helper.
+fn gpos_lookup_indices_for_feature(gpos: &Gpos<'_>, tag: [u8; 4]) -> Option<Vec<u16>> {
+    let script_list = gpos.script_list();
+    let script = script_list
+        .find(*b"DFLT")
+        .or_else(|| script_list.iter().next().map(|(_, s)| s))?;
+    let lang_sys = script.default_lang_sys()?;
+
+    let feature_list = gpos.feature_list();
+    let mut indices: Vec<u16> = Vec::new();
+    for feat_idx in lang_sys.feature_indices() {
+        let Some((feat_tag, feature)) = feature_list.get(feat_idx) else {
+            continue;
+        };
+        if feat_tag != tag {
+            continue;
+        }
+        for idx in feature.lookup_indices() {
+            if !indices.contains(&idx) {
+                indices.push(idx);
+            }
+        }
+    }
+    indices.sort_unstable();
+    Some(indices)
+}
+
+/// Walks the run and applies the single-adjustment subtable to
+/// every covered glyph. HarfBuzz ignores marks for single pos
+/// only when the lookup flag says so; we match that in a future
+/// pass.
+fn apply_single_pos(sp: &SinglePos<'_>, glyphs: &mut [Glyph]) {
+    for glyph in glyphs.iter_mut() {
+        let id = glyph.glyph_id as u16;
+        if let Some(v) = sp.adjustment(id) {
+            glyph.x_offset += i32::from(v.x_placement);
+            glyph.y_offset += i32::from(v.y_placement);
+            glyph.x_advance += i32::from(v.x_advance);
+            glyph.y_advance += i32::from(v.y_advance);
+        }
+    }
+}
+
+/// Walks the run and, for each mark glyph (per GDEF), finds the
+/// nearest preceding base and attaches via the subtable's anchor
+/// tables. Without GDEF we cannot distinguish marks from bases and
+/// the pass is a no-op — that matches HarfBuzz's behaviour.
+fn apply_mark_base(mbp: &MarkBasePos<'_>, glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>) {
+    let Some(gdef) = gdef else {
+        return;
+    };
+
+    for i in 0..glyphs.len() {
+        let mark_gid = glyphs[i].glyph_id as u16;
+        if !gdef.glyph_class(mark_gid).is_mark() {
+            continue;
+        }
+        // Walk back to the nearest base. The immediate preceding
+        // glyph might be another mark (diacritic stacking); skip
+        // marks looking for the real base. Treat "class Other" as
+        // base-ish so exotic fonts do not silently drop marks.
+        let Some(base_i) = (0..i).rev().find(|&j| {
+            let cls = gdef.glyph_class(glyphs[j].glyph_id as u16);
+            cls != GlyphClass::Mark
+        }) else {
+            continue;
+        };
+        let base_gid = glyphs[base_i].glyph_id as u16;
+        let Some(attach) = mbp.attach(mark_gid, base_gid) else {
+            continue;
+        };
+
+        // Accumulate the advance between the base and the mark so
+        // the delta accounts for any glyphs (e.g. stacked marks)
+        // that sat in between.
+        let mut walked_advance: i32 = 0;
+        for glyph in &glyphs[base_i..i] {
+            walked_advance += glyph.x_advance;
+        }
+
+        let dx = i32::from(attach.base_anchor.x) - i32::from(attach.mark_anchor.x) - walked_advance;
+        let dy = i32::from(attach.base_anchor.y) - i32::from(attach.mark_anchor.y);
+        glyphs[i].x_offset += dx;
+        glyphs[i].y_offset += dy;
+        // Marks do not advance the pen — replace whatever hmtx
+        // reported with zero so successive text lines up.
+        glyphs[i].x_advance = 0;
+    }
 }
 
 /// Applies deltas from the legacy `kern` table to the glyph run.
