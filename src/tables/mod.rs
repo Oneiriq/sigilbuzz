@@ -13,6 +13,7 @@ pub mod cmap;
 pub mod head;
 pub mod hhea;
 pub mod hmtx;
+pub mod layout;
 pub mod maxp;
 pub mod parse;
 
@@ -20,6 +21,7 @@ pub use cmap::Cmap;
 pub use head::{Head, IndexToLocFormat};
 pub use hhea::Hhea;
 pub use hmtx::Hmtx;
+pub use layout::{ClassDef, Coverage};
 pub use maxp::Maxp;
 pub use parse::Reader;
 
