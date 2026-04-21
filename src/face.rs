@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 use crate::blob::Blob;
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
-use crate::tables::{tag, Cmap, Head, Hhea, Hmtx, Maxp};
+use crate::tables::{tag, Cmap, Gdef, Head, Hhea, Hmtx, Maxp};
 
 /// One entry in the SFNT table directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,6 +208,17 @@ impl<'a> Face<'a> {
     /// Parses the `cmap` table.
     pub fn cmap(&self) -> Result<Cmap<'a>> {
         Cmap::parse(self.table_bytes(tag::CMAP)?)
+    }
+
+    /// Parses the `GDEF` table if the font carries one. Fonts without
+    /// `GDEF` get `Ok(None)` — the shaper handles missing `GDEF` by
+    /// treating every glyph as a base, which is the OpenType default.
+    pub fn gdef(&self) -> Result<Option<Gdef<'a>>> {
+        match self.table_bytes(tag::GDEF) {
+            Ok(bytes) => Ok(Some(Gdef::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }
 

@@ -10,6 +10,7 @@
 //! unambiguous and `no_std`-friendly.
 
 pub mod cmap;
+pub mod gdef;
 pub mod head;
 pub mod hhea;
 pub mod hmtx;
@@ -18,6 +19,7 @@ pub mod maxp;
 pub mod parse;
 
 pub use cmap::Cmap;
+pub use gdef::{Gdef, GlyphClass};
 pub use head::{Head, IndexToLocFormat};
 pub use hhea::Hhea;
 pub use hmtx::Hmtx;
