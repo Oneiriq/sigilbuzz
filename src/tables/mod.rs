@@ -9,8 +9,16 @@
 //! done against byte literals such as `b"cmap"` so every tag site is
 //! unambiguous and `no_std`-friendly.
 
+pub mod head;
+pub mod hhea;
+pub mod hmtx;
+pub mod maxp;
 pub mod parse;
 
+pub use head::{Head, IndexToLocFormat};
+pub use hhea::Hhea;
+pub use hmtx::Hmtx;
+pub use maxp::Maxp;
 pub use parse::Reader;
 
 /// Standard SFNT / OpenType table tags. These are the ones sigilbuzz
