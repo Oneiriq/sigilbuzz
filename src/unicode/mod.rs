@@ -11,6 +11,7 @@ pub mod bidi;
 pub mod indic_category;
 pub mod joining;
 pub mod normalize;
+pub mod use_category;
 
 /// Coarse script classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +30,8 @@ pub enum Script {
     Greek,
     /// Devanagari. Indic reordering shaper applies.
     Devanagari,
+    /// Khmer. Universal Shaping Engine (USE) applies.
+    Khmer,
     /// Anything else — returned when sigilbuzz has no specialised
     /// table for the codepoint's script.
     Other,
@@ -56,6 +59,8 @@ pub const fn script_of(ch: char) -> Script {
         0x0600..=0x06FF | 0x0750..=0x077F | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF => Script::Arabic,
         // Devanagari
         0x0900..=0x097F => Script::Devanagari,
+        // Khmer + Khmer Symbols
+        0x1780..=0x17FF | 0x19E0..=0x19FF => Script::Khmer,
         // CJK unified ideographs + extensions A/B + Hiragana + Katakana
         0x3040..=0x309F | 0x30A0..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF => Script::Han,
         _ => Script::Other,
@@ -103,5 +108,16 @@ mod tests {
     fn unknown_scripts_fall_through_to_other() {
         // Thai — not in the bootstrap table.
         assert_eq!(script_of('ก'), Script::Other);
+    }
+
+    #[test]
+    fn classifies_khmer() {
+        // ក U+1780 (consonant ka), ៊ U+17CA (register shifter),
+        // ៛ U+17DB (currency riel), and a Khmer Symbols sign
+        // U+19E0 sit in the Khmer bucket.
+        assert_eq!(script_of('\u{1780}'), Script::Khmer);
+        assert_eq!(script_of('\u{17CA}'), Script::Khmer);
+        assert_eq!(script_of('\u{17DB}'), Script::Khmer);
+        assert_eq!(script_of('\u{19E0}'), Script::Khmer);
     }
 }
