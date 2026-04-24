@@ -268,10 +268,15 @@ fn vocalised_marhaba_matches_rustybuzz() {
 fn allah_diagnostic_prints_both_engines() {
     let text = "\u{0627}\u{0644}\u{0644}\u{0647}";
     let (sig, rb, sig_adv, rb_adv) = compare_shape(text);
-    // Allah still diverges between sigilbuzz and rustybuzz for
-    // reasons unrelated to LookupFlag. Keeping this diagnostic
-    // alive gives a single place to print extra context when
-    // somebody bisects the rlig divergence.
+    // Allah still diverges between sigilbuzz and rustybuzz — the two
+    // engines pick different positional (init/medi/fina) + rlig
+    // outputs even though the glyph count matches. The cmap start
+    // state is [alef=55, lam=84, lam=84, heh=87]; sigilbuzz ends up
+    // at [55, 4839, 4929, 4393] vs rustybuzz [55, 1346, 6128, 1348].
+    // See issue #21 for the follow-up tracking the rule-selection
+    // divergence — likely interaction between isol/init/medi/fina
+    // and subsequent `rlig` chaining-context rewrites that pick
+    // different Amiri variant glyphs.
     eprintln!("allah sig glyphs: {sig:?} advances: {sig_adv:?}");
     eprintln!("allah rb  glyphs: {rb:?} advances: {rb_adv:?}");
 }

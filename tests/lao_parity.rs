@@ -143,13 +143,14 @@ const CORPUS: &[Case] = &[
         note: "ko + niggahita",
         compare_rustybuzz: true,
     },
-    // ກຳ — ko + lao am (U+0EB3). Composed: HarfBuzz decomposes
-    // to niggahita + sara aa; sigilbuzz treats as atomic post-base.
-    // Tracked as a follow-up.
+    // ກຳ — ko + lao am (U+0EB3). HarfBuzz decomposes this to
+    // niggahita (U+0ECD) + sara aa (U+0EB2) at buffer-prep;
+    // sigilbuzz mirrors that in shape.rs so GSUB/GPOS see the
+    // decomposed pair rustybuzz sees.
     Case {
         text: "\u{0E81}\u{0EB3}",
-        note: "kam (lao am) — decomposition follow-up",
-        compare_rustybuzz: false,
+        note: "kam (lao am, PUA-decomposed)",
+        compare_rustybuzz: true,
     },
 ];
 

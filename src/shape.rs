@@ -374,6 +374,31 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             }
             continue;
         }
+        // Thai sara am (U+0E33) and Lao lao am (U+0EB3). HarfBuzz
+        // decomposes these composed vowels into
+        // `nikkhahit / niggahita + sara aa` at buffer-prep time,
+        // before shape enters the state machine — the font's
+        // mark-positioning tables target the decomposed pair, not
+        // the composed codepoint. We do the same here so the cmap
+        // lookup lands on the two components and every downstream
+        // pass (GSUB, GPOS, cluster merge) sees the decomposed form
+        // rustybuzz does.
+        if matches!(ch, '\u{0E33}' | '\u{0EB3}') {
+            let (pre, post) = if ch == '\u{0E33}' {
+                // Thai sara am → nikkhahit (U+0E4D) + sara aa (U+0E32).
+                ('\u{0E4D}', '\u{0E32}')
+            } else {
+                // Lao lao am → niggahita (U+0ECD) + sara aa (U+0EB2).
+                ('\u{0ECD}', '\u{0EB2}')
+            };
+            for &component in &[pre, post] {
+                let gid = u32::from(cmap.glyph_id(component).unwrap_or(0));
+                let glyph = Glyph::new(gid, cluster as u32);
+                glyphs.push(glyph);
+                codepoints.push(component);
+            }
+            continue;
+        }
         // Tamil and Sinhala split-matra decomposition. These matras
         // decompose into a pre-base + post-base (occasionally
         // three-part) sequence. HarfBuzz's Indic shaper runs this
@@ -435,6 +460,26 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // resolved one global priority and missed script-specific lookups
     // on whichever half lost the tie-break.
     let segments = build_segments(&codepoints);
+
+    // Dominant script — the first non-COMMON/INHERITED script in the
+    // buffer. HarfBuzz (and rustybuzz) compute this once in
+    // `guess_segment_properties` and use it to select a single shaper
+    // for the whole run; features the shaper activates only fire when
+    // the buffer's dominant script matches. sigilbuzz's per-segment
+    // dispatch still runs each segment under its own script priority
+    // (Hebrew half under `hebr`, Latin half under DFLT), but the
+    // complex-shaper pre-pass for Old Hangul needs the dominant-script
+    // gate to match HarfBuzz: a mixed `Hi 가` run hands `ljmo`/`vjmo`
+    // the jamo segment under HarfBuzz's default shaper (no positional
+    // variant forms picked), not the Hangul shaper. Gating the Jamo
+    // pre-pass on dominant-script is the smallest knob that keeps
+    // parity clean on pure Hangul runs while matching HarfBuzz on
+    // Latin-majority mixed runs.
+    let dominant_script: Option<Script> = codepoints
+        .iter()
+        .copied()
+        .find(|&c| !is_common_for_segmentation(c))
+        .map(script_of);
 
     let gsub = face.gsub()?;
     // GDEF is consulted up-front so the LookupFlag skip-iterator has
@@ -521,9 +566,14 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         // Precomposed syllables (U+AC00..U+D7A3) still pass through
         // the default GSUB/GPOS chain — `ljmo`/`vjmo`/`tjmo` are
         // no-ops on them, so running the pipeline is harmless but
-        // wasteful.  Gate on at least one Jamo codepoint in the
-        // segment's codepoint slice.
+        // wasteful. Additionally gate on the buffer's dominant
+        // script: HarfBuzz picks one shaper for the whole run based
+        // on the first non-COMMON script, so a Latin-majority mix
+        // like `Hi \u{1100}\u{1161}` shapes the jamo under the
+        // default shaper (no positional variant forms). sigilbuzz
+        // matches that here so mixed runs round-trip glyph-for-glyph.
         if seg.script == Script::Hangul
+            && dominant_script == Some(Script::Hangul)
             && seg_cps.iter().any(|&c| crate::unicode::is_hangul_jamo(c))
         {
             crate::ot::use_shaper::shape_hangul(

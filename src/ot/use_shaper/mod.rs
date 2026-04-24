@@ -164,6 +164,14 @@ pub(crate) struct Syllable {
     /// get moved to before the base after GSUB has had a chance to
     /// collapse them into a single subscript form.
     pub pre_base_cons_index: Option<usize>,
+    /// Codepoint-space index of a Myanmar kinzi prefix — the triple
+    /// `Nga (U+1004) + Asat (U+103A) + Virama (U+1039)` at the start
+    /// of a consonant syllable. When present, those three glyphs move
+    /// to immediately after the base before the rphf feature fires,
+    /// so the collapsed kinzi glyph sits in the reph slot (after
+    /// the base consonant in logical order). Matches rustybuzz's
+    /// `initial_reordering_consonant_syllable` POS_AFTER_MAIN path.
+    pub kinzi_index: Option<usize>,
 }
 
 /// Entry point — shapes one Khmer run. `codepoints` is in
@@ -260,13 +268,16 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
                 end: start + 1,
                 base_index: None,
                 pre_base_cons_index: None,
+                kinzi_index: None,
             }
         }
         UseCategory::R => {
-            // Repha prefix — followed by a consonant syllable. For
-            // Khmer this arm is unreachable (no repha codepoints in
-            // the Khmer block), but it is here so Myanmar's kinzi
-            // slots in without another dispatch point.
+            // Repha prefix — followed by a consonant syllable. The
+            // Myanmar kinzi case is handled inline in
+            // `scan_consonant_syllable` because kinzi's codepoints
+            // (Nga / Asat / Virama) are categorized as B/H/H, not R;
+            // this arm stays for potential future R-category repha
+            // in other USE scripts.
             let syl = scan_consonant_syllable(cps, start + 1);
             Syllable {
                 kind: syl.kind,
@@ -274,6 +285,7 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
                 end: syl.end,
                 base_index: syl.base_index,
                 pre_base_cons_index: syl.pre_base_cons_index,
+                kinzi_index: syl.kinzi_index,
             }
         }
         UseCategory::ZWJ | UseCategory::ZWNJ | UseCategory::WS | UseCategory::O => Syllable {
@@ -282,6 +294,7 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
             end: start + 1,
             base_index: None,
             pre_base_cons_index: None,
+            kinzi_index: None,
         },
         _ => Syllable {
             kind: SyllableKind::Broken,
@@ -289,6 +302,7 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
             end: start + 1,
             base_index: None,
             pre_base_cons_index: None,
+            kinzi_index: None,
         },
     }
 }
@@ -301,6 +315,28 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
 fn scan_consonant_syllable(cps: &[char], start: usize) -> Syllable {
     let len = cps.len();
     let mut i = start;
+
+    // Myanmar kinzi prefix: `Nga (U+1004) + Asat (U+103A) + Virama
+    // (U+1039)` at the syllable head. Consume the triple up front
+    // and remember its position so `initial_reorder` can move it
+    // to POS_AFTER_MAIN once we know the base consonant index.
+    // Matches the first branch of rustybuzz's
+    // `initial_reordering_consonant_syllable` (the `Ra + As + H`
+    // check). Leaves the outer grammar intact — after the kinzi
+    // triple we still require a leading base consonant.
+    let kinzi_index: Option<usize> = if i + 3 <= len
+        && cps[i] == '\u{1004}'
+        && cps[i + 1] == '\u{103A}'
+        && cps[i + 2] == '\u{1039}'
+        && i + 3 < len
+        && matches!(use_category(cps[i + 3]), UseCategory::B | UseCategory::GB)
+    {
+        let kz = i;
+        i += 3;
+        Some(kz)
+    } else {
+        None
+    };
 
     // Required leading base.
     let mut base_index: Option<usize> =
@@ -316,6 +352,7 @@ fn scan_consonant_syllable(cps: &[char], start: usize) -> Syllable {
                 end: start + 1,
                 base_index: None,
                 pre_base_cons_index: None,
+                kinzi_index: None,
             };
         };
 
@@ -381,6 +418,7 @@ fn scan_consonant_syllable(cps: &[char], start: usize) -> Syllable {
         end: i,
         base_index,
         pre_base_cons_index,
+        kinzi_index,
     }
 }
 
@@ -409,6 +447,7 @@ fn scan_vowel_syllable(cps: &[char], start: usize) -> Syllable {
         end: i,
         base_index: Some(start),
         pre_base_cons_index: None,
+        kinzi_index: None,
     }
 }
 
@@ -448,7 +487,17 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
     // `[matras, pre-base cons pair, everything else, base, ...]`.
     let pre_cons_idx = syllable.pre_base_cons_index;
 
-    if to_move.is_empty() && pre_cons_idx.is_none() {
+    // Myanmar kinzi prefix — three codepoints at `kinzi_index`,
+    // `kinzi_index + 1`, `kinzi_index + 2` (Nga + Asat + Virama).
+    // rustybuzz's Myanmar reorder tags them POS_AFTER_MAIN so the
+    // sort drops them after the base consonant; sigilbuzz replicates
+    // the resulting glyph order here. After reorder, `rphf` fires on
+    // the still-adjacent triple and collapses it to the font's kinzi
+    // glyph, which naturally sits in the reph slot (immediately after
+    // the base consonant).
+    let kinzi_idx = syllable.kinzi_index;
+
+    if to_move.is_empty() && pre_cons_idx.is_none() && kinzi_idx.is_none() {
         return;
     }
 
@@ -470,12 +519,10 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
     // `coeng + ta` still adjacent and collapses to a single
     // subscript-ta glyph, matching rustybuzz.
     //
-    // `base` is not used in the rewrite itself — it is implicit in
-    // "everything that is not a pre-base matra stays in order" —
-    // but we still pass it through the function signature because
-    // future Myanmar / Old Hangul reorders need it for repha
-    // placement.
-    let _ = base;
+    // `base` is used below as the anchor for Myanmar kinzi
+    // placement: the kinzi triple gets injected immediately after
+    // the base consonant in the rebuilt slice, matching rustybuzz's
+    // POS_AFTER_MAIN semantics.
     let syl_start = syllable.start;
     let syl_end = syllable.end;
     let original: Vec<Glyph> = glyphs[syl_start..syl_end].to_vec();
@@ -502,12 +549,32 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
             consumed.push(pc + 1);
         }
     }
-    // 3. Everything else, in original order.
+    // 3. Mark the kinzi triple as consumed so the fall-through
+    //    doesn't re-emit them at the syllable head; we inject them
+    //    right after the base consonant below.
+    if let Some(kz) = kinzi_idx {
+        if kz + 2 < syl_end {
+            consumed.push(kz);
+            consumed.push(kz + 1);
+            consumed.push(kz + 2);
+        }
+    }
+    // 4. Everything else, in original order — with the kinzi triple
+    //    injected immediately after the base consonant.
     for idx in syl_start..syl_end {
         if consumed.contains(&idx) {
             continue;
         }
         rebuilt.push(original[idx - syl_start]);
+        if idx == base {
+            if let Some(kz) = kinzi_idx {
+                if kz + 2 < syl_end {
+                    rebuilt.push(original[kz - syl_start]);
+                    rebuilt.push(original[kz + 1 - syl_start]);
+                    rebuilt.push(original[kz + 2 - syl_start]);
+                }
+            }
+        }
     }
 
     debug_assert_eq!(rebuilt.len(), syl_end - syl_start);
