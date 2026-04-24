@@ -62,16 +62,88 @@ use crate::font::Font;
 use crate::ot::arabic::{assign_joining_forms, JoiningForm};
 use crate::tables::gdef::{Gdef, GlyphClass};
 use crate::tables::gpos::{
-    lookup_type as gpos_lt, ChainContextPos, ContextPos, MarkBasePos, MarkLigaPos, MarkMarkPos,
-    PairPos, SinglePos,
+    lookup_type as gpos_lt, resolve_variation_delta, ChainContextPos, ContextPos, MarkBasePos,
+    MarkLigaPos, MarkMarkPos, PairPos, SinglePos, ValueRecord,
 };
 use crate::tables::gsub::{
     lookup_type as gsub_lt, Alternate, ChainContextAny, Context as GsubContext, Ligature, Multiple,
     ReverseChain, Single,
 };
 use crate::tables::layout::{Lookup, MatchFilter, SequenceLookupRecord};
+use crate::tables::variation_store::ItemVariationStore;
 use crate::tables::{Gpos, Gsub, KernTable};
 use crate::unicode::{script_of, Script};
+
+/// Variable-font context threaded through every GPOS apply site.
+///
+/// Decoupling this from the GPOS tables themselves means every
+/// apply function keeps the same shape for variable and static
+/// fonts; static callers pass [`VarCtx::none`] and every resolver
+/// short-circuits to zero without reading the store.
+#[derive(Debug, Clone, Copy)]
+struct VarCtx<'a> {
+    /// Normalised axis coords. Empty for the default instance.
+    coords: &'a [f32],
+    /// GDEF's shared `ItemVariationStore`. Required for every
+    /// `VariationIndex` the ValueRecord's device slots point at.
+    store: Option<&'a ItemVariationStore<'a>>,
+}
+
+impl VarCtx<'_> {
+    /// Builds a static-instance context — no coords, no store.
+    /// Every downstream resolver produces a zero delta. Used by
+    /// callers (and tests) that need to invoke a GPOS apply site
+    /// without having a font-coords view in hand.
+    #[allow(dead_code)]
+    const fn none() -> Self {
+        Self {
+            coords: &[],
+            store: None,
+        }
+    }
+
+    /// True when the context can actually produce a non-zero delta:
+    /// coords must be non-empty *and* a store must be attached.
+    /// Callers use this to skip the resolver work entirely for the
+    /// common default-instance case.
+    #[inline]
+    fn is_active(&self) -> bool {
+        !self.coords.is_empty() && self.store.is_some()
+    }
+
+    /// Resolves the variation delta for one `(subtable, device_off)`
+    /// pair against the active coords and store. When inactive,
+    /// returns zero without touching the subtable bytes.
+    #[inline]
+    fn resolve(&self, subtable: &[u8], device_off: u16) -> i32 {
+        if !self.is_active() || device_off == 0 {
+            return 0;
+        }
+        resolve_variation_delta(subtable, device_off, self.store, self.coords)
+    }
+}
+
+/// Applies one `ValueRecord` to `glyph`, folding in any
+/// Device/VariationIndex deltas the `subtable` carries for this
+/// record. `subtable` is the enclosing PairPos/SinglePos subtable
+/// bytes — Device/VariationIndex sub-offsets are always rooted
+/// there.
+#[allow(clippy::similar_names)]
+fn apply_value_record(
+    glyph: &mut Glyph,
+    v: &ValueRecord,
+    subtable: &[u8],
+    var: &VarCtx<'_>,
+) {
+    let dx_place = var.resolve(subtable, v.x_placement_device_off);
+    let dy_place = var.resolve(subtable, v.y_placement_device_off);
+    let dx_adv = var.resolve(subtable, v.x_advance_device_off);
+    let dy_adv = var.resolve(subtable, v.y_advance_device_off);
+    glyph.x_offset += i32::from(v.x_placement) + dx_place;
+    glyph.y_offset += i32::from(v.y_placement) + dy_place;
+    glyph.x_advance += i32::from(v.x_advance) + dx_adv;
+    glyph.y_advance += i32::from(v.y_advance) + dy_adv;
+}
 
 /// Maximum recursion depth for nested-lookup dispatch. Matches the
 /// limit HarfBuzz uses (`HB_MAX_NESTING_LEVEL = 16`); any deeper and
@@ -343,11 +415,25 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // Step 4: GPOS passes. Kern first, then mark-to-base; then any
     // user-enabled GPOS features that flow through feature overrides.
     let gpos = face.gpos()?;
+    // Build the variable-font resolution context once. Passing this
+    // through every GPOS apply site is what lets VariationIndex
+    // deltas inside a ValueRecord actually respond to the user's
+    // axis coords — before PR #13 the deltas were read, parsed, and
+    // thrown away, so kerning was frozen at the default instance.
+    let var = VarCtx {
+        coords: font.coords(),
+        store: gdef.as_ref().and_then(|g| g.item_variation_store()),
+    };
     let gpos_kerned = if want_kern {
         match &gpos {
-            Some(gpos) => {
-                apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"kern", has_arabic)
-            }
+            Some(gpos) => apply_gpos_feature(
+                gpos,
+                &mut glyphs,
+                gdef.as_ref(),
+                *b"kern",
+                has_arabic,
+                &var,
+            ),
             None => false,
         }
     } else {
@@ -358,19 +444,20 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         // Applied before mark attachment so marks anchor onto the
         // distance-adjusted base positions.
         if has_devanagari && !feature_disabled(features, *b"dist") {
-            apply_gpos_feature_in_scripts(
+            apply_gpos_feature_in_scripts_with_var(
                 gpos,
                 &mut glyphs,
                 gdef.as_ref(),
                 *b"dist",
                 crate::ot::indic::devanagari::DEVA_SCRIPT_PRIORITY,
+                &var,
             );
         }
         if !feature_disabled(features, *b"mark") {
-            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"mark", has_arabic);
+            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"mark", has_arabic, &var);
         }
         if !feature_disabled(features, *b"mkmk") {
-            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"mkmk", has_arabic);
+            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"mkmk", has_arabic, &var);
         }
         // User-enabled features beyond the defaults flow through the
         // same dispatch. Skip tags already handled above so they do
@@ -382,7 +469,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             if matches!(&feat.tag, b"kern" | b"mark" | b"mkmk" | b"liga") {
                 continue;
             }
-            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), feat.tag, has_arabic);
+            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), feat.tag, has_arabic, &var);
         }
     }
 
@@ -1366,25 +1453,53 @@ fn apply_gpos_feature(
     gdef: Option<&Gdef<'_>>,
     tag: [u8; 4],
     prefer_arabic_script: bool,
+    var: &VarCtx<'_>,
 ) -> bool {
     let priority: &[[u8; 4]] = if prefer_arabic_script {
         &[*b"arab", *b"DFLT"]
     } else {
         &[*b"DFLT"]
     };
-    apply_gpos_feature_in_scripts(gpos, glyphs, gdef, tag, priority)
+    apply_gpos_feature_in_scripts_with_var(gpos, glyphs, gdef, tag, priority, var)
 }
 
 /// Script-priority variant of [`apply_gpos_feature`]. Matches the
 /// GSUB equivalent: walks `script_priority` in order, stops at the
 /// first script that carries the feature tag, and falls back to
 /// DFLT / first script when none match.
+///
+/// Back-compat entry point for callers outside [`shape`] that do
+/// not yet thread a variable-font context; equivalent to calling
+/// the `_with_var` form with [`VarCtx::none`].
+#[allow(dead_code)]
 pub(crate) fn apply_gpos_feature_in_scripts(
     gpos: &Gpos<'_>,
     glyphs: &mut [Glyph],
     gdef: Option<&Gdef<'_>>,
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
+) -> bool {
+    apply_gpos_feature_in_scripts_with_var(
+        gpos,
+        glyphs,
+        gdef,
+        tag,
+        script_priority,
+        &VarCtx::none(),
+    )
+}
+
+/// Variable-font aware variant of
+/// [`apply_gpos_feature_in_scripts`]. Every ValueRecord delta
+/// passes through the `var` context so VariationIndex-backed kern
+/// pairs scale with the active coords.
+fn apply_gpos_feature_in_scripts_with_var(
+    gpos: &Gpos<'_>,
+    glyphs: &mut [Glyph],
+    gdef: Option<&Gdef<'_>>,
+    tag: [u8; 4],
+    script_priority: &[[u8; 4]],
+    var: &VarCtx<'_>,
 ) -> bool {
     if glyphs.is_empty() {
         return false;
@@ -1425,14 +1540,14 @@ pub(crate) fn apply_gpos_feature_in_scripts(
                     let Ok(sp) = SinglePos::parse(inner_bytes) else {
                         continue;
                     };
-                    apply_single_pos(&sp, glyphs, &filter);
+                    apply_single_pos(&sp, glyphs, &filter, inner_bytes, var);
                     ran_any = true;
                 }
                 gpos_lt::PAIR_ADJUSTMENT => {
                     let Ok(pp) = PairPos::parse(inner_bytes) else {
                         continue;
                     };
-                    apply_pair_pos(&pp, glyphs, &filter);
+                    apply_pair_pos(&pp, glyphs, &filter, inner_bytes, var);
                     ran_any = true;
                 }
                 gpos_lt::MARK_TO_BASE => {
@@ -1460,14 +1575,14 @@ pub(crate) fn apply_gpos_feature_in_scripts(
                     let Ok(ctx) = ContextPos::parse(inner_bytes) else {
                         continue;
                     };
-                    apply_gpos_context_subtable(gpos, &ctx, glyphs, gdef, &filter);
+                    apply_gpos_context_subtable(gpos, &ctx, glyphs, gdef, &filter, var);
                     ran_any = true;
                 }
                 gpos_lt::CHAINED_CONTEXT => {
                     let Ok(chain) = ChainContextPos::parse(inner_bytes) else {
                         continue;
                     };
-                    apply_gpos_chain_context_subtable(gpos, &chain, glyphs, gdef, &filter);
+                    apply_gpos_chain_context_subtable(gpos, &chain, glyphs, gdef, &filter, var);
                     ran_any = true;
                 }
                 _ => {}
@@ -1494,6 +1609,7 @@ fn apply_gpos_lookup_at(
     gdef: Option<&Gdef<'_>>,
     at: usize,
     depth: u8,
+    var: &VarCtx<'_>,
 ) {
     if depth >= MAX_NESTED_DEPTH {
         return;
@@ -1530,10 +1646,7 @@ fn apply_gpos_lookup_at(
                     continue;
                 }
                 if let Some(v) = sp.adjustment(id) {
-                    glyphs[at].x_offset += i32::from(v.x_placement);
-                    glyphs[at].y_offset += i32::from(v.y_placement);
-                    glyphs[at].x_advance += i32::from(v.x_advance);
-                    glyphs[at].y_advance += i32::from(v.y_advance);
+                    apply_value_record(&mut glyphs[at], &v, inner_bytes, var);
                     return;
                 }
             }
@@ -1554,12 +1667,9 @@ fn apply_gpos_lookup_at(
                 };
                 let second = glyphs[partner].glyph_id as u16;
                 if let Some((v1, v2)) = pp.lookup(first, second) {
-                    glyphs[at].x_advance += i32::from(v1.x_advance);
-                    glyphs[at].x_offset += i32::from(v1.x_placement);
-                    glyphs[at].y_offset += i32::from(v1.y_placement);
-                    glyphs[partner].x_advance += i32::from(v2.x_advance);
-                    glyphs[partner].x_offset += i32::from(v2.x_placement);
-                    glyphs[partner].y_offset += i32::from(v2.y_placement);
+                    let (left, right) = glyphs.split_at_mut(partner);
+                    apply_value_record(&mut left[at], &v1, inner_bytes, var);
+                    apply_value_record(&mut right[0], &v2, inner_bytes, var);
                     return;
                 }
             }
@@ -1592,14 +1702,23 @@ fn apply_gpos_lookup_at(
                 let Ok(ctx) = ContextPos::parse(inner_bytes) else {
                     continue;
                 };
-                apply_gpos_context_at(gpos, &ctx, glyphs, gdef, &filter, at, depth + 1);
+                apply_gpos_context_at(gpos, &ctx, glyphs, gdef, &filter, at, depth + 1, var);
                 return;
             }
             gpos_lt::CHAINED_CONTEXT => {
                 let Ok(chain) = ChainContextPos::parse(inner_bytes) else {
                     continue;
                 };
-                apply_gpos_chain_context_at(gpos, &chain, glyphs, gdef, &filter, at, depth + 1);
+                apply_gpos_chain_context_at(
+                    gpos,
+                    &chain,
+                    glyphs,
+                    gdef,
+                    &filter,
+                    at,
+                    depth + 1,
+                    var,
+                );
                 return;
             }
             _ => {}
@@ -1615,10 +1734,11 @@ fn apply_gpos_context_subtable(
     glyphs: &mut [Glyph],
     gdef: Option<&Gdef<'_>>,
     filter: &MatchFilter<'_>,
+    var: &VarCtx<'_>,
 ) {
     let mut i = 0;
     while i < glyphs.len() {
-        let consumed = apply_gpos_context_at(gpos, ctx, glyphs, gdef, filter, i, 0);
+        let consumed = apply_gpos_context_at(gpos, ctx, glyphs, gdef, filter, i, 0, var);
         if consumed > 0 {
             i += consumed;
         } else {
@@ -1635,10 +1755,11 @@ fn apply_gpos_chain_context_subtable(
     glyphs: &mut [Glyph],
     gdef: Option<&Gdef<'_>>,
     filter: &MatchFilter<'_>,
+    var: &VarCtx<'_>,
 ) {
     let mut i = 0;
     while i < glyphs.len() {
-        let consumed = apply_gpos_chain_context_at(gpos, chain, glyphs, gdef, filter, i, 0);
+        let consumed = apply_gpos_chain_context_at(gpos, chain, glyphs, gdef, filter, i, 0, var);
         if consumed > 0 {
             i += consumed;
         } else {
@@ -1647,6 +1768,7 @@ fn apply_gpos_chain_context_subtable(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_gpos_context_at(
     gpos: &Gpos<'_>,
     ctx: &ContextPos<'_>,
@@ -1655,6 +1777,7 @@ fn apply_gpos_context_at(
     filter: &MatchFilter<'_>,
     at: usize,
     depth: u8,
+    var: &VarCtx<'_>,
 ) -> usize {
     let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
     let (input_len, lookups): (usize, Vec<SequenceLookupRecord>) = match ctx {
@@ -1677,10 +1800,11 @@ fn apply_gpos_context_at(
             (n, c.lookups().to_vec())
         }
     };
-    apply_nested_gpos_lookups(gpos, glyphs, gdef, filter, &ids, at, depth, &lookups);
+    apply_nested_gpos_lookups(gpos, glyphs, gdef, filter, &ids, at, depth, &lookups, var);
     input_len.max(1)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_gpos_chain_context_at(
     gpos: &Gpos<'_>,
     chain: &ChainContextPos<'_>,
@@ -1689,6 +1813,7 @@ fn apply_gpos_chain_context_at(
     filter: &MatchFilter<'_>,
     at: usize,
     depth: u8,
+    var: &VarCtx<'_>,
 ) -> usize {
     let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
     let (input_len, lookups): (usize, Vec<SequenceLookupRecord>) = match chain {
@@ -1711,7 +1836,7 @@ fn apply_gpos_chain_context_at(
             (n, c.lookups().to_vec())
         }
     };
-    apply_nested_gpos_lookups(gpos, glyphs, gdef, filter, &ids, at, depth, &lookups);
+    apply_nested_gpos_lookups(gpos, glyphs, gdef, filter, &ids, at, depth, &lookups, var);
     input_len.max(1)
 }
 
@@ -1726,6 +1851,7 @@ fn apply_nested_gpos_lookups(
     at: usize,
     depth: u8,
     lookups: &[SequenceLookupRecord],
+    var: &VarCtx<'_>,
 ) {
     for rec in lookups {
         let seq = rec.sequence_index as usize;
@@ -1745,7 +1871,7 @@ fn apply_nested_gpos_lookups(
             }
             pos
         };
-        apply_gpos_lookup_at(gpos, rec.lookup_list_index, glyphs, gdef, pos, depth);
+        apply_gpos_lookup_at(gpos, rec.lookup_list_index, glyphs, gdef, pos, depth, var);
     }
 }
 
@@ -1825,18 +1951,22 @@ fn gpos_lookup_indices_for_feature_in_scripts(
 /// Walks the run and applies the single-adjustment subtable to
 /// every covered glyph. Glyphs filtered out by the lookup flag
 /// (marks / bases / ligatures per the active LookupFlag) are
-/// skipped.
-fn apply_single_pos(sp: &SinglePos<'_>, glyphs: &mut [Glyph], filter: &MatchFilter<'_>) {
+/// skipped. `subtable` is the SinglePos subtable bytes, from which
+/// any Device/VariationIndex offset resolves.
+fn apply_single_pos(
+    sp: &SinglePos<'_>,
+    glyphs: &mut [Glyph],
+    filter: &MatchFilter<'_>,
+    subtable: &[u8],
+    var: &VarCtx<'_>,
+) {
     for glyph in glyphs.iter_mut() {
         let id = glyph.glyph_id as u16;
         if filter.is_skipped(id) {
             continue;
         }
         if let Some(v) = sp.adjustment(id) {
-            glyph.x_offset += i32::from(v.x_placement);
-            glyph.y_offset += i32::from(v.y_placement);
-            glyph.x_advance += i32::from(v.x_advance);
-            glyph.y_advance += i32::from(v.y_advance);
+            apply_value_record(glyph, &v, subtable, var);
         }
     }
 }
@@ -2065,7 +2195,13 @@ fn resolve_extension(bytes: &[u8]) -> Option<(u16, &[u8])> {
     bytes.get(inner_off..).map(|inner| (inner_type, inner))
 }
 
-fn apply_pair_pos(pp: &PairPos<'_>, glyphs: &mut [Glyph], filter: &MatchFilter<'_>) {
+fn apply_pair_pos(
+    pp: &PairPos<'_>,
+    glyphs: &mut [Glyph],
+    filter: &MatchFilter<'_>,
+    subtable: &[u8],
+    var: &VarCtx<'_>,
+) {
     if glyphs.len() < 2 {
         return;
     }
@@ -2085,12 +2221,15 @@ fn apply_pair_pos(pp: &PairPos<'_>, glyphs: &mut [Glyph], filter: &MatchFilter<'
         };
         let second = ids[j];
         if let Some((v1, v2)) = pp.lookup(first, second) {
-            glyphs[i].x_advance += i32::from(v1.x_advance);
-            glyphs[i].x_offset += i32::from(v1.x_placement);
-            glyphs[i].y_offset += i32::from(v1.y_placement);
-            glyphs[j].x_advance += i32::from(v2.x_advance);
-            glyphs[j].x_offset += i32::from(v2.x_placement);
-            glyphs[j].y_offset += i32::from(v2.y_placement);
+            // PairPos applies v1 to `i` and v2 to `j`. Both records'
+            // Device/VariationIndex offsets root at the PairPos
+            // subtable bytes; the second-y_advance slot follows the
+            // same rule.
+            {
+                let (left, right) = glyphs.split_at_mut(j);
+                apply_value_record(&mut left[i], &v1, subtable, var);
+                apply_value_record(&mut right[0], &v2, subtable, var);
+            }
         }
         // Advance to the position of the second glyph; HarfBuzz uses
         // a per-pair stride so a single glyph can kern against both
