@@ -100,36 +100,31 @@ pub const fn syllabic_category(ch: char) -> IndicSyllabicCategory {
     match cp {
         // Devanagari (U+0900..U+097F). Derived from
         // IndicSyllabicCategory.txt in the Unicode Character Database.
-        0x0900 | 0x0901 | 0x0902 => IndicSyllabicCategory::Bindu,
+        0x0900..=0x0902 => IndicSyllabicCategory::Bindu,
         0x0903 => IndicSyllabicCategory::Visarga,
-        0x0904..=0x0914 => IndicSyllabicCategory::VowelIndependent,
-        0x0915..=0x0939 => IndicSyllabicCategory::Consonant,
-        0x093A => IndicSyllabicCategory::VowelDependent,
-        0x093B => IndicSyllabicCategory::VowelDependent,
+        0x0904..=0x0914 | 0x0960 | 0x0961 => IndicSyllabicCategory::VowelIndependent,
+        0x0915..=0x0939 | 0x0958..=0x095F | 0x0972..=0x097F => IndicSyllabicCategory::Consonant,
+        0x093A | 0x093B => IndicSyllabicCategory::VowelDependent,
         0x093C => IndicSyllabicCategory::Nukta,
         0x093D => IndicSyllabicCategory::Avagraha,
-        0x093E..=0x094C => IndicSyllabicCategory::VowelDependent,
+        0x093E..=0x094C | 0x094E | 0x094F | 0x0955..=0x0957 | 0x0962 | 0x0963 => {
+            IndicSyllabicCategory::VowelDependent
+        }
         0x094D => IndicSyllabicCategory::Virama,
-        0x094E | 0x094F => IndicSyllabicCategory::VowelDependent,
-        0x0950 => IndicSyllabicCategory::Other, // OM
         0x0951..=0x0954 => IndicSyllabicCategory::CantillationMark,
-        0x0955..=0x0957 => IndicSyllabicCategory::VowelDependent,
-        0x0958..=0x095F => IndicSyllabicCategory::Consonant,
-        0x0960 | 0x0961 => IndicSyllabicCategory::VowelIndependent,
-        0x0962 | 0x0963 => IndicSyllabicCategory::VowelDependent,
-        0x0964 | 0x0965 => IndicSyllabicCategory::Other, // Dandas
         0x0966..=0x096F => IndicSyllabicCategory::Number,
-        0x0970 => IndicSyllabicCategory::Other, // Abbreviation sign
-        0x0971 => IndicSyllabicCategory::ConsonantPlaceholder,
-        0x0972..=0x097F => IndicSyllabicCategory::Consonant,
+        // OM (0x0950), dandas (0x0964..=0x0965), and the Devanagari
+        // abbreviation sign (0x0970) all pass through as "Other" —
+        // no reorder, no feature bucket.
+        //
+        // 0x0971 (Devanagari sign high spacing dot) and 0x25CC
+        // (dotted circle, the Indic shaper's broken-syllable base)
+        // are both treated as consonant placeholders.
+        0x0971 | 0x25CC => IndicSyllabicCategory::ConsonantPlaceholder,
 
         // Zero-width joiner / non-joiner — shared across Indic scripts.
         0x200C => IndicSyllabicCategory::NonJoiner,
         0x200D => IndicSyllabicCategory::Joiner,
-
-        // Dotted circle (U+25CC) sits in broken syllables as the
-        // visible base for orphaned marks. Treat as placeholder.
-        0x25CC => IndicSyllabicCategory::ConsonantPlaceholder,
 
         _ => IndicSyllabicCategory::Other,
     }
@@ -143,26 +138,24 @@ pub const fn positional_category(ch: char) -> IndicPositionalCategory {
     let cp = ch as u32;
     match cp {
         // Devanagari matras and marks.
-        0x093A => IndicPositionalCategory::Top,
-        0x093B => IndicPositionalCategory::Right,
-        0x093C => IndicPositionalCategory::Bottom,
-        0x093E => IndicPositionalCategory::Right,
-        0x093F => IndicPositionalCategory::Left,
-        0x0940 => IndicPositionalCategory::Right,
-        0x0941 | 0x0942 => IndicPositionalCategory::Bottom,
-        0x0943 | 0x0944 => IndicPositionalCategory::Bottom,
-        0x0945..=0x0948 => IndicPositionalCategory::Top,
-        0x0949 | 0x094A => IndicPositionalCategory::Right,
-        0x094B | 0x094C => IndicPositionalCategory::Right,
-        0x094D => IndicPositionalCategory::Bottom,
-        0x094E => IndicPositionalCategory::Left,
-        0x094F => IndicPositionalCategory::Right,
-        0x0951 => IndicPositionalCategory::Top,
-        0x0952 => IndicPositionalCategory::Bottom,
-        0x0953 | 0x0954 => IndicPositionalCategory::Top,
-        0x0955 => IndicPositionalCategory::Top,
-        0x0956 | 0x0957 => IndicPositionalCategory::Bottom,
-        0x0962 | 0x0963 => IndicPositionalCategory::Bottom,
+        0x093A | 0x0945..=0x0948 | 0x0951 | 0x0953 | 0x0954 | 0x0955 => {
+            IndicPositionalCategory::Top
+        }
+        0x093F | 0x094E => IndicPositionalCategory::Left,
+        0x093B | 0x093E | 0x0940 | 0x0949 | 0x094A | 0x094B | 0x094C | 0x094F => {
+            IndicPositionalCategory::Right
+        }
+        0x093C
+        | 0x0941
+        | 0x0942
+        | 0x0943
+        | 0x0944
+        | 0x094D
+        | 0x0952
+        | 0x0956
+        | 0x0957
+        | 0x0962
+        | 0x0963 => IndicPositionalCategory::Bottom,
 
         _ => IndicPositionalCategory::NotApplicable,
     }

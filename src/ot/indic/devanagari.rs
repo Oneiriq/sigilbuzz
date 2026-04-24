@@ -50,7 +50,7 @@
 use alloc::vec::Vec;
 
 use crate::buffer::Glyph;
-use crate::shape::apply_gsub_feature;
+use crate::shape::apply_gsub_feature_in_scripts;
 use crate::tables::Gsub;
 use crate::unicode::indic_category::{
     positional_category, syllabic_category, IndicPositionalCategory, IndicSyllabicCategory,
@@ -94,11 +94,15 @@ pub fn shape_devanagari(
     // after rphf because the ra in ra+halant may have been consumed
     // as reph already.
     //
-    // Feature application uses the generic GSUB dispatcher; the
-    // lookup's own coverage decides which glyphs transform.
+    // Feature application uses the generic GSUB dispatcher with
+    // Devanagari-aware script priority: `dev2` (Indic2 script tag
+    // adopted in the 2005 Indic-improvements spec) first, `deva`
+    // (legacy) next, DFLT as a fallback. Fonts that carry only
+    // DFLT (rare for Indic) still work because the generic
+    // fallback in `lookup_indices_for_feature_in_scripts` kicks in.
     if let Some(gsub) = gsub {
         for tag in INDIC_BASIC_FEATURES {
-            apply_gsub_feature(gsub, glyphs, **tag, 0);
+            apply_gsub_feature_in_scripts(gsub, glyphs, **tag, 0, DEVA_SCRIPT_PRIORITY);
         }
     }
 
@@ -109,11 +113,37 @@ pub fn shape_devanagari(
     for syllable in &syllables {
         final_reorder(glyphs, syllable);
     }
+
+    // Presentation features — selecting the visual forms of
+    // conjuncts, pre-base matras and combining marks. These run
+    // after final reordering so the glyph positions are in their
+    // final visual slots.
+    if let Some(gsub) = gsub {
+        for tag in INDIC_PRESENTATION_FEATURES {
+            apply_gsub_feature_in_scripts(gsub, glyphs, **tag, 0, DEVA_SCRIPT_PRIORITY);
+        }
+    }
 }
+
+/// Devanagari GSUB script-tag priority.
+///
+/// Per the OpenType Indic2 spec (2005 revision), fonts advertise
+/// the improved Indic feature set under `dev2`. Older fonts still
+/// expose the same features under `deva`. DFLT is a last-resort
+/// fallback — Indic-specific features like `pres`, `half`,
+/// `blwf`, `cjct` are rarely exposed there.
+pub(crate) const DEVA_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"dev2", *b"deva", *b"DFLT"];
 
 /// Default Indic2 basic features, in application order.
 pub(crate) const INDIC_BASIC_FEATURES: &[&[u8; 4]] = &[
     b"nukt", b"akhn", b"rphf", b"rkrf", b"blwf", b"half", b"pstf", b"vatu", b"cjct",
+];
+
+/// Default Indic2 presentation features, in application order.
+/// Run after final reordering to pick the display glyphs for
+/// pre-base vowels, conjuncts, and final marks.
+pub(crate) const INDIC_PRESENTATION_FEATURES: &[&[u8; 4]] = &[
+    b"init", b"pres", b"abvs", b"blws", b"psts", b"haln",
 ];
 
 /// Syllable classification mirroring the Indic2 syllable types.
@@ -375,11 +405,11 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
     // Collect pre-base matra indices inside the syllable, excluding
     // the base and anything preceding it.
     let mut to_move: Vec<usize> = Vec::new();
-    for i in (base + 1)..syllable.end {
-        if positional_category(codepoints[i]) == IndicPositionalCategory::Left
-            && syllabic_category(codepoints[i]) == IndicSyllabicCategory::VowelDependent
+    for (offset, &ch) in codepoints[base + 1..syllable.end].iter().enumerate() {
+        if positional_category(ch) == IndicPositionalCategory::Left
+            && syllabic_category(ch) == IndicSyllabicCategory::VowelDependent
         {
-            to_move.push(i);
+            to_move.push(base + 1 + offset);
         }
     }
     if to_move.is_empty() {
