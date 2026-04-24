@@ -21,6 +21,7 @@
 
 extern crate alloc;
 
+mod flatten;
 mod types;
 
 pub use types::{Band, Bbox, QuadSegment, SlugGlyph, Vec2};
