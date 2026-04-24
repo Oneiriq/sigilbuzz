@@ -1,4 +1,11 @@
-//! GSUB lookup type 6 — Chained Context Substitution, format 3.
+//! GSUB lookup type 6 — Chained Context Substitution.
+//!
+//! Formats 1 (glyph-based) and 2 (class-based) are parsed via the
+//! shared `tables::layout::context` helpers; see
+//! [`ChainContextAny`] for the format-dispatching entry point every
+//! downstream caller should use. The original [`ChainContext`] struct
+//! implements format 3 only and stays public for backwards
+//! compatibility with the M2 shape driver.
 //!
 //! Chained context is the mechanism behind `calt`, `clig`, and the
 //! positional-form GSUB features (`init`, `medi`, `fina`, `isol`)
@@ -161,6 +168,42 @@ impl<'a> ChainContext<'a> {
             }
         }
         true
+    }
+}
+
+/// A format-dispatching wrapper over every chained-context
+/// subtable. The shape driver calls [`ChainContextAny::parse`] and
+/// then matches on the variant — format 1 and 2 reuse the shared
+/// layout-level parsers.
+#[derive(Debug, Clone)]
+pub enum ChainContextAny<'a> {
+    /// Format 1 — glyph-based.
+    Format1(crate::tables::layout::ChainContext1<'a>),
+    /// Format 2 — class-based.
+    Format2(crate::tables::layout::ChainContext2<'a>),
+    /// Format 3 — coverage-based (the original sigilbuzz
+    /// implementation, kept for BC).
+    Format3(ChainContext<'a>),
+}
+
+impl<'a> ChainContextAny<'a> {
+    /// Parses a chained-context subtable of any format.
+    pub fn parse(data: &'a [u8]) -> Result<Self> {
+        let mut r = Reader::new(data);
+        let format = r.read_u16()?;
+        match format {
+            1 => Ok(Self::Format1(crate::tables::layout::ChainContext1::parse(
+                data,
+            )?)),
+            2 => Ok(Self::Format2(crate::tables::layout::ChainContext2::parse(
+                data,
+            )?)),
+            3 => Ok(Self::Format3(ChainContext::parse(data)?)),
+            _ => Err(Error::Malformed {
+                offset: 0,
+                context: "unsupported chainContextSubst format",
+            }),
+        }
     }
 }
 

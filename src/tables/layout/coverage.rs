@@ -172,7 +172,16 @@ impl<'a> Coverage<'a> {
             } else if glyph_id > end {
                 lo = mid + 1;
             } else {
-                return Some(start_cov + (glyph_id - start));
+                // `startCoverageIndex + (glyph_id - startGlyphID)` is
+                // the spec formula, but a malformed font can declare
+                // values whose sum overflows u16 (e.g. startCov =
+                // 0xFFFE with a range wider than one glyph). In debug
+                // builds the unchecked add panics; in release it
+                // silently wraps and returns a bogus coverage index
+                // which downstream lookups treat as a valid slot. Both
+                // are wrong on corrupt input. Surface overflow as a
+                // miss so the calling lookup skips the glyph instead.
+                return start_cov.checked_add(glyph_id - start);
             }
         }
         None
@@ -302,5 +311,22 @@ mod tests {
     #[test]
     fn rejects_truncated_header() {
         assert!(Coverage::parse(&[0]).is_err());
+    }
+
+    #[test]
+    fn format2_returns_none_when_coverage_index_overflows_u16() {
+        // Malformed font: startCoverageIndex = 0xFFFE combined with a
+        // range wider than two glyphs pushes the resulting coverage
+        // index past u16::MAX. Spec formula is `startCov + (g - start)`
+        // — unchecked addition panics in debug and wraps in release,
+        // so Coverage must surface overflow as a miss.
+        let bytes = build_format2(&[(0, 10, 0xFFFE)]);
+        let cov = Coverage::parse(&bytes).unwrap();
+        // In-range but within u16: startCov + 0 = 0xFFFE, + 1 = 0xFFFF.
+        assert_eq!(cov.index_of(0), Some(0xFFFE));
+        assert_eq!(cov.index_of(1), Some(0xFFFF));
+        // Past u16::MAX — must not panic or wrap.
+        assert_eq!(cov.index_of(2), None);
+        assert_eq!(cov.index_of(10), None);
     }
 }
