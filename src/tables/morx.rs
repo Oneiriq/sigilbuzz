@@ -391,11 +391,7 @@ fn apply_subtable(body: &SubtableBody<'_>, glyphs: &mut Vec<u16>, origins: &mut 
 
 // --- Type 0: Rearrangement ---
 
-fn apply_rearrangement(
-    state: &StateTableHeader<'_>,
-    glyphs: &mut [u16],
-    origins: &mut [usize],
-) {
+fn apply_rearrangement(state: &StateTableHeader<'_>, glyphs: &mut [u16], origins: &mut [usize]) {
     let mut cur_state: u16 = 0;
     let mut i = 0;
     let mut first: Option<usize> = None;
@@ -439,13 +435,7 @@ fn apply_rearrangement(
 // Only the verbs sigilbuzz is likely to see (1 = "Ax → xA" and
 // related swaps) are implemented; unknown verbs are a no-op so an
 // unsupported rearrangement can't corrupt the glyph stream.
-fn rearrange(
-    verb: u16,
-    glyphs: &mut [u16],
-    origins: &mut [usize],
-    first: usize,
-    last: usize,
-) {
+fn rearrange(verb: u16, glyphs: &mut [u16], origins: &mut [usize], first: usize, last: usize) {
     let len = last - first + 1;
     if len < 2 {
         return;
@@ -478,8 +468,12 @@ fn apply_contextual(state: &StateTableHeader<'_>, substitutions: &[u8], glyphs: 
         let Ok((new_state, flags)) = state.entry_prefix(entry_idx, ENTRY_SIZE) else {
             return;
         };
-        let mark_idx = state.entry_tail_u16(entry_idx, ENTRY_SIZE, 4).unwrap_or(0xFFFF);
-        let cur_idx = state.entry_tail_u16(entry_idx, ENTRY_SIZE, 6).unwrap_or(0xFFFF);
+        let mark_idx = state
+            .entry_tail_u16(entry_idx, ENTRY_SIZE, 4)
+            .unwrap_or(0xFFFF);
+        let cur_idx = state
+            .entry_tail_u16(entry_idx, ENTRY_SIZE, 6)
+            .unwrap_or(0xFFFF);
 
         if mark_idx != 0xFFFF {
             if let Some(m) = mark {
@@ -751,11 +745,7 @@ mod tests {
     // The ligature mapping: class 4 = 'f' glyph, class 5 = 'i'
     // glyph. A successful walk (class 4, then class 5) emits a
     // single replacement glyph.
-    fn build_ligature_morx(
-        f_gid: u16,
-        i_gid: u16,
-        lig_gid: u16,
-    ) -> alloc::vec::Vec<u8> {
+    fn build_ligature_morx(f_gid: u16, i_gid: u16, lig_gid: u16) -> alloc::vec::Vec<u8> {
         // --- Inner subtable body layout ---
         // Header (16B): nClasses=6, classOff, stateOff, entryOff.
         // Then 12B: ligActionOff, componentOff, ligatureOff.
@@ -834,7 +824,7 @@ mod tests {
         body.extend_from_slice(&0u16.to_be_bytes()); // newState
         body.extend_from_slice(&0u16.to_be_bytes()); // flags
         body.extend_from_slice(&0u16.to_be_bytes()); // actionIdx
-        // #1 SetComponent -> state 1
+                                                     // #1 SetComponent -> state 1
         body.extend_from_slice(&1u16.to_be_bytes()); // newState
         body.extend_from_slice(&0x8000u16.to_be_bytes());
         body.extend_from_slice(&0u16.to_be_bytes());
@@ -852,8 +842,8 @@ mod tests {
         let lig_action_off = body.len();
         // Offset = -i_gid so glyph + offset = 0, picking
         // components[0] = 0. Use negative sign encoding.
-        let neg_i: u32 = LIG_ACTION_OFFSET_SIGN
-            | ((-(i_gid as i32)) as u32 & LIG_ACTION_OFFSET_MASK);
+        let neg_i: u32 =
+            LIG_ACTION_OFFSET_SIGN | ((-(i_gid as i32)) as u32 & LIG_ACTION_OFFSET_MASK);
         body.extend_from_slice(&neg_i.to_be_bytes());
         // Last action word for f: offset = -f_gid, plus LAST | STORE.
         let neg_f: u32 = LIG_ACTION_LAST

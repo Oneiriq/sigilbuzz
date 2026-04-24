@@ -159,10 +159,7 @@ impl<'a> Kerx<'a> {
             r.seek(sub_end)?;
         }
 
-        Ok(Self {
-            version,
-            subtables,
-        })
+        Ok(Self { version, subtables })
     }
 
     /// Reported version word (2 or 3).
