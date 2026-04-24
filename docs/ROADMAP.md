@@ -1,67 +1,118 @@
-# sigilbuzz Roadmap to 0.1.0
+# sigilbuzz Roadmap
 
-**0.1.0 is not "MVP."** It is the point at which sigilbuzz is the *only* text shaper inside oniq, handles every real text case oniq throws at it, and beats rustybuzz on any benchmark we care about. Everything below is scaffolding toward that goal.
+**0.1.0 is not "MVP."** It is the point at which sigilbuzz is the *only* text shaper inside oniq, handles every real text case oniq throws at it, and beats rustybuzz on any benchmark we care about.
 
-## Milestones
+## 0.1.0 (shipping)
 
 ### M1 — Latin shaping that matches rustybuzz
-
-The minimum thing that makes sigilbuzz load-bearing. Shape a run of Latin text against a real font, produce glyph IDs and advances that agree with rustybuzz to the integer.
 
 - [x] `Blob`, `Face`, `Font`, `Buffer`, `Glyph`, `ShapedRun` public surface
 - [x] SFNT directory parse + per-table byte slicing
 - [x] Big-endian `Reader` primitives
-- [ ] `head` parser (unitsPerEm, indexToLocFormat, flags)
-- [ ] `maxp` parser (numGlyphs)
-- [ ] `hhea` parser (numberOfHMetrics, ascent/descent/lineGap)
-- [ ] `hmtx` parser (per-glyph advanceWidth + LSB)
-- [ ] `cmap` parser — encoding records, format 4 (BMP), format 12 (full Unicode)
-- [ ] `shape()` wiring: codepoint → cmap → glyph id → hmtx → advance → `Glyph`
-- [ ] Golden-file tests against Open Sans Regular matching rustybuzz output byte-for-byte for a fixed corpus
+- [x] `head` parser (unitsPerEm, indexToLocFormat, flags)
+- [x] `maxp` parser (numGlyphs)
+- [x] `hhea` parser (numberOfHMetrics, ascent/descent/lineGap)
+- [x] `hmtx` parser (per-glyph advanceWidth + LSB)
+- [x] `cmap` parser — encoding records, format 4 (BMP), format 12 (full Unicode)
+- [x] `shape()` wiring: codepoint → cmap → glyph id → hmtx → advance → `Glyph`
+- [x] Golden-file tests against Open Sans Regular matching rustybuzz output byte-for-byte
 
 ### M2 — OpenType basics
 
-What people actually expect from "a shaping engine."
-
-- [ ] `GDEF` parser (glyph class definitions, mark attachment classes)
-- [ ] `GSUB` lookup framework + lookup type 4 (ligature substitution) for `liga`
-- [ ] `GSUB` lookup type 1 (single substitution) for `smcp`
-- [ ] `GPOS` lookup framework + lookup type 2 (pair adjustment) for `kern`
-- [ ] Feature tag override plumbing end-to-end (override defaults, enable alternates)
-- [ ] Script / language-system selection (Latin default is "dflt/latn", but the infrastructure must be there for more)
+- [x] `GDEF` parser (glyph class definitions, mark attachment classes, MarkGlyphSetsDef)
+- [x] Full GSUB lookup coverage: types 1, 2, 3, 4, 5 (fmt 1/2/3), 6 (fmt 1/2/3), 7 (extension), 8 (reverse chained)
+- [x] Full GPOS lookup coverage: types 1, 2, 4, 5, 6, 7 (fmt 1/2/3), 8 (fmt 1/2/3), 9 (extension)
+- [x] `LookupFlag` skip-iterators (IgnoreBaseGlyphs/IgnoreLigatures/IgnoreMarks/MarkAttachmentType/UseMarkFilteringSet)
+- [x] `MAX_NESTED_DEPTH=16` guard on recursive lookup dispatch
+- [x] Feature tag override plumbing end-to-end
+- [x] Script / language-system selection with per-script priority lists (dev2 > deva > DFLT)
 
 ### M3 — CJK + legacy kerning
 
-So oniq's CJK fallback fonts render properly.
-
-- [ ] Vertical writing (`vert`, `vrt2`) substitutions
-- [ ] Legacy `kern` table (Apple format 0) for fonts without GPOS
-- [ ] `loca` + `glyf` parsers sufficient for bounding-box queries (the renderer needs this even though MSDF generation lives outside sigilbuzz)
+- [x] Vertical writing (`vert`, `vrt2`) substitutions — `vrt2` preferred if present
+- [x] `vhea` / `vmtx` / `VORG` parsers + auto-enable on vertical `Buffer` direction
+- [x] Legacy `kern` table (Apple format 0) with HarfBuzz-matching 64KB-length quirk + split delta
+- [x] `loca` + `glyf` parsers sufficient for bounding-box queries
 
 ### M4 — Complex scripts
 
-The payoff for being called a shaping engine at all.
-
-- [x] Arabic cursive joining (`init`, `medi`, `fina`, `isol`, `rlig`)
-- [ ] Indic reordering (`akhn`, `rphf`, `blwf`, `half`, `pstf`, `vatu`)
-- [ ] Bidi-aware buffer preparation (UAX 9) — either in sigilbuzz or via a thin consumer-provided hook
+- [x] Arabic cursive joining (`init`, `medi`, `fina`, `isol`, `rlig`) with joining-type classifier from ArabicShaping.txt
+- [x] Devanagari reordering (`nukt`, `akhn`, `rphf`, `rkrf`, `blwf`, `half`, `pstf`, `vatu`, `cjct`, `init`, `pres`, `abvs`, `blws`, `psts`, `haln`, `dist`)
+- [x] Indic per-glyph info masks (`unicode_props`, `indic_position`) + final reph reorder to display slot
+- [x] UAX 9 paragraph-direction resolution (full ordering remains a consumer concern)
 
 ### M5 — Variable fonts
 
-Because 2024+ fonts ship variations and nobody should have to fall back to 2019-era shaping for them.
+- [x] `fvar` parser (axes + named instances)
+- [x] `avar` parser (axis variation maps, `normalize_to_coords`)
+- [x] `gvar` parser (tuple variation headers, packed point numbers, packed deltas, all-points shortcut)
+- [x] `HVAR` advance-width delta evaluation with `ItemVariationStore`
+- [x] `Font::with_coords` — per-shape variation coords threaded through the pipeline
+- [x] `Face::glyph_bounds_at_coords` for coord-aware bbox queries
 
-- [ ] `fvar` parser (axes)
-- [ ] `avar` parser (axis variation maps)
-- [ ] `gvar` parser (glyph outline deltas) — needed for glyph bbox queries even if sigilbuzz never rasterizes
-- [ ] Per-shape variation coord plumbing on `Font`
+### M6 — 2026 HarfBuzz parity (color + paint)
 
-### M6 — 2026 HarfBuzz parity (aspirational)
+- [x] `COLRv0` layered-glyph subtable
+- [x] `COLRv1` paint tree — all 32 paint variants, zero-copy traversal via `Colr::paint_at`
+- [x] `CPAL` v0/v1 palette tables with BGRA→RGBA unpack and palette-type flags
 
-Optional modules that land on top of the shaping core. Any of these can become its own crate if it pulls sigilbuzz in directions the shaping core shouldn't go.
+### Hardening
+
+- [x] Malformed-font fuzz pass on every parser (two waves, five bugs fixed and shipped)
+- [x] Deterministic output — no `HashMap`/`BTreeMap` iteration in shaping paths
+- [x] `cargo build --no-default-features` clean
+- [x] `cargo clippy -D warnings` clean under default and `--no-default-features`
+- [x] Zero runtime deps in the core crate
+
+---
+
+## 0.2.0 (next)
+
+Scripts that rustybuzz still covers that sigilbuzz 0.1.0 does not.
+
+### SE Asian scripts via USE (Universal Shaping Engine)
+
+- [ ] USE machinery — category classifier from Unicode data, syllable segmenter, reorder pass
+- [ ] Khmer (`abvs`, `blws`, `pres`, `psts`, `calt`, `ccmp`, `cjct`, `pref`, `rphf`)
+- [ ] Myanmar
+- [ ] Thai (with mark reordering)
+- [ ] Lao
+- [ ] Old Hangul (Jamo composition)
+
+### Remaining Indic scripts
+
+- [ ] Bengali (`RephPosition::AfterMain`)
+- [ ] Gurmukhi
+- [ ] Gujarati
+- [ ] Oriya
+- [ ] Tamil
+- [ ] Telugu (`RephPosition::AfterPost`)
+- [ ] Kannada (`RephPosition::AfterPost`)
+- [ ] Malayalam
+- [ ] Sinhala
+
+### Hebrew
+
+- [ ] Hebrew shaping (cantillation, vowel positioning, `dlig` / `hlig` / `calt`)
+
+### Legacy
+
+- [ ] AAT `morx` (extended glyph metamorphosis, Apple fallback for non-GSUB fonts)
+- [ ] AAT `kerx` (extended kerning for macOS legacy fonts)
+
+### Variable-font deltas in GPOS
+
+- [ ] GPOS feature-variations (HVAR-style deltas for pair-kerning `ValueRecord`s)
+
+---
+
+## 0.3.0+ (aspirational)
 
 - [ ] `hb_gpu`-equivalent Slug-algorithm outline encoder for GPU rasterization
-- [ ] `hb_gpu_paint_t`-equivalent COLRv0/v1 paint encoder
-- [ ] PDF / SVG output backends
+- [ ] PDF / SVG output backends (may live in a separate crate)
+- [ ] COLRv1 paint *evaluation* helpers (stays a consumer concern by default)
+
+---
 
 ## Dogfood protocol (driven by oniq)
 
@@ -81,4 +132,4 @@ sigilbuzz is not allowed to sit in isolation. Every milestone is validated by in
 
 ## Tracking
 
-Milestones get their own issues under `github.com/Oneiriq/sigilbuzz` once there is something to discuss. Until then, this file is the source of truth for "what we are doing next."
+Each release line gets a GitHub milestone. Follow-ups surface as issues referenced from the tracking issue for the milestone.
