@@ -400,6 +400,14 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
 /// - Latin-1 punctuation / symbols (U+00A0..U+00BF).
 /// - The Unicode format-character block sigilbuzz already recognises
 ///   (ZWJ / ZWNJ / LRM / RLM / ALM).
+/// - Unicode `INHERITED` combining-mark blocks — Combining
+///   Diacritical Marks (U+0300..U+036F), the Supplement
+///   (U+1DC0..U+1DFF), Combining Diacritical Marks for Symbols
+///   (U+20D0..U+20FF), and Combining Half Marks (U+FE20..U+FE2F).
+///   Without these, `"e\u{0301}"` segments into Latin + Other
+///   because `script_of` has no rule for U+0300 and drops the
+///   mark into `Script::Other` — breaking `ccmp` dispatch and
+///   any cross-mark GSUB context.
 ///
 /// Everything else resolves via [`script_of`]; runs of the same
 /// real script collapse through the normal equality check.
@@ -419,6 +427,11 @@ const fn is_common_or_inherited(ch: char) -> bool {
         | 0x00A0..=0x00BF
         // Unicode format characters the shaper recognises.
         | 0x200C | 0x200D | 0x200E | 0x200F | 0x061C
+        // INHERITED combining-mark blocks.
+        | 0x0300..=0x036F
+        | 0x1DC0..=0x1DFF
+        | 0x20D0..=0x20FF
+        | 0xFE20..=0xFE2F
     )
 }
 
@@ -580,5 +593,35 @@ mod tests {
             script_priority_for(Script::Khmer),
             &[*b"khmr", *b"khm2", *b"DFLT"]
         );
+    }
+
+    #[test]
+    fn script_runs_combining_mark_inherits_base_script() {
+        // "é" as base + Unicode combining acute (U+0301). The combining
+        // mark has Unicode script == INHERITED, which the segmenter
+        // must resolve to the preceding Latin run — otherwise the mark
+        // gets carved into its own Script::Other segment and GSUB's
+        // `ccmp` decomposition pass fires under the wrong priority.
+        let mut b = Buffer::new();
+        b.push_str("e\u{0301}");
+        let runs = b.script_runs();
+        assert_eq!(runs.len(), 1, "combining mark must extend its base");
+        assert_eq!(runs[0].script, Script::Latin);
+        assert_eq!(runs[0].byte_range, 0..3);
+    }
+
+    #[test]
+    fn script_runs_arabic_with_quranic_mark_stays_one_segment() {
+        // U+06D6 ARABIC SMALL HIGH LIGATURE SAD is an Arabic-script
+        // combining mark — its Script property is Arabic, not
+        // Inherited, so it already collapses via the equality check.
+        // This test pins the Arabic baseline so the Inherited fix does
+        // not accidentally widen the COMMON bucket past real-script
+        // marks.
+        let mut b = Buffer::new();
+        b.push_str("\u{0627}\u{06D6}");
+        let runs = b.script_runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].script, Script::Arabic);
     }
 }
