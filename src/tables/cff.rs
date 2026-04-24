@@ -53,6 +53,12 @@ use crate::tables::parse::Reader;
 /// Subroutine recursion cap. CFF spec says 10 per Type 2.
 const MAX_SUBR_DEPTH: u8 = 10;
 
+/// Operand-stack cap for CFF1 charstrings. Type 2 spec §3.1 ceiling.
+const CFF1_STACK_LIMIT: usize = 48;
+
+/// Operand-stack cap for CFF2 charstrings. CFF2 spec §3.1 ceiling.
+const CFF2_STACK_LIMIT: usize = 513;
+
 /// A parsed `CFF ` table view.
 #[derive(Debug, Clone)]
 pub struct Cff<'a> {
@@ -593,25 +599,25 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             let b0 = r.read_u8()?;
             if (32..=246).contains(&b0) {
                 #[allow(clippy::cast_precision_loss)]
-                self.push((i32::from(b0) - 139) as f32);
+                self.push((i32::from(b0) - 139) as f32)?;
             } else if (247..=250).contains(&b0) {
                 let b1 = r.read_u8()?;
                 #[allow(clippy::cast_precision_loss)]
                 let v = ((i32::from(b0) - 247) * 256 + i32::from(b1) + 108) as f32;
-                self.push(v);
+                self.push(v)?;
             } else if (251..=254).contains(&b0) {
                 let b1 = r.read_u8()?;
                 #[allow(clippy::cast_precision_loss)]
                 let v = (-(i32::from(b0) - 251) * 256 - i32::from(b1) - 108) as f32;
-                self.push(v);
+                self.push(v)?;
             } else if b0 == 255 {
                 // 16.16 fixed.
                 let raw = r.read_i32()?;
                 #[allow(clippy::cast_precision_loss)]
-                self.push(raw as f32 / 65536.0);
+                self.push(raw as f32 / 65536.0)?;
             } else if b0 == op_code::SHORTINT {
                 let v = r.read_i16()?;
-                self.push(f32::from(v));
+                self.push(f32::from(v))?;
             } else {
                 // Operator.
                 self.exec_op(b0, &mut r, depth)?;
@@ -1070,8 +1076,20 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
         Ok(())
     }
 
-    fn push(&mut self, v: f32) {
+    fn push(&mut self, v: f32) -> Result<()> {
+        let limit = if self.is_cff2 {
+            CFF2_STACK_LIMIT
+        } else {
+            CFF1_STACK_LIMIT
+        };
+        if self.stack.len() >= limit {
+            return Err(Error::Malformed {
+                offset: 0,
+                context: "CFF charstring: operand stack overflow",
+            });
+        }
         self.stack.push(v);
+        Ok(())
     }
 
     fn pop(&mut self) -> Result<f32> {
@@ -1359,6 +1377,23 @@ mod tests {
         let mut o = Outline::new();
         parsed.outline(0, &mut o).unwrap();
         assert!(o.is_empty());
+    }
+
+    #[test]
+    fn charstring_rejects_operand_stack_overflow() {
+        // CFF1 spec caps the operand stack at 48. Pushing 49 values
+        // without consuming them must error cleanly rather than
+        // growing the Vec without bound.
+        let mut cs = Vec::new();
+        for _ in 0..49 {
+            cs.push(139); // 0
+        }
+        cs.push(op_code::ENDCHAR);
+        let cff = build_cff_with_charstring(&cs);
+        let parsed = Cff::parse(&cff).unwrap();
+        let mut o = Outline::new();
+        let err = parsed.outline(0, &mut o).unwrap_err();
+        assert!(matches!(err, Error::Malformed { .. }));
     }
 
     #[test]
