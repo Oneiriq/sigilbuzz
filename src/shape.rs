@@ -229,7 +229,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let space_gid = u32::from(cmap.glyph_id('\u{0020}').unwrap_or(0));
     let mut glyphs: Vec<Glyph> = Vec::with_capacity(text.len());
     let mut codepoints: Vec<char> = Vec::with_capacity(text.len());
-    let mut has_devanagari = false;
+    // First Indic script seen in the run, if any. Used to dispatch
+    // the Indic reordering shaper with a script-specific config
+    // (reph position, reph mode, GSUB script-tag priority).
+    let mut indic_script: Option<crate::unicode::Script> = None;
     for (cluster, ch) in text.char_indices() {
         let glyph_id = if is_default_ignorable(ch) {
             space_gid
@@ -253,8 +256,11 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         glyph.unicode_props = props;
         glyphs.push(glyph);
         codepoints.push(ch);
-        if crate::unicode::script_of(ch) == crate::unicode::Script::Devanagari {
-            has_devanagari = true;
+        if indic_script.is_none() {
+            let s = crate::unicode::script_of(ch);
+            if s.is_indic() {
+                indic_script = Some(s);
+            }
         }
     }
 
@@ -313,8 +319,21 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // generic GSUB pass so the glyph stream entering `liga` / `calt`
     // is already in logical order for the script. Non-Indic text
     // skips this pass entirely.
-    if has_devanagari {
-        crate::ot::indic::shape_devanagari(gsub.as_ref(), gdef.as_ref(), &codepoints, &mut glyphs);
+    //
+    // Each Indic script uses the same state machine but with a
+    // per-script config (virama, ra, reph position, reph mode, and
+    // GSUB script-tag priority). The config is resolved from the
+    // first Indic codepoint encountered in the run above.
+    if let Some(script) = indic_script {
+        if let Some(config) = crate::ot::indic::indic_config_for(script) {
+            crate::ot::indic::shape_indic(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                &codepoints,
+                &mut glyphs,
+                &config,
+            );
+        }
     }
 
     if let Some(ref gsub) = gsub {
@@ -463,16 +482,24 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     if let Some(ref gpos) = gpos {
         // Indic `dist` — nudges advance of certain conjunct glyphs.
         // Applied before mark attachment so marks anchor onto the
-        // distance-adjusted base positions.
-        if has_devanagari && !feature_disabled(features, *b"dist") {
-            apply_gpos_feature_in_scripts_with_var(
-                gpos,
-                &mut glyphs,
-                gdef.as_ref(),
-                *b"dist",
-                crate::ot::indic::devanagari::DEVA_SCRIPT_PRIORITY,
-                &var,
-            );
+        // distance-adjusted base positions. Uses the active Indic
+        // script's own script-tag priority (e.g. `bng2`/`beng` for
+        // Bengali) so distance adjustments come from the correct
+        // per-script LangSys, and routes through the _with_var path
+        // so GPOS feature-variations apply if present.
+        if let Some(script) = indic_script {
+            if !feature_disabled(features, *b"dist") {
+                if let Some(config) = crate::ot::indic::indic_config_for(script) {
+                    apply_gpos_feature_in_scripts_with_var(
+                        gpos,
+                        &mut glyphs,
+                        gdef.as_ref(),
+                        *b"dist",
+                        config.script_priority,
+                        &var,
+                    );
+                }
+            }
         }
         if !feature_disabled(features, *b"mark") {
             apply_gpos_feature(

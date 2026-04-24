@@ -29,9 +29,48 @@ pub enum Script {
     Greek,
     /// Devanagari. Indic reordering shaper applies.
     Devanagari,
+    /// Bengali. Indic reordering shaper applies.
+    Bengali,
+    /// Gurmukhi. Indic reordering shaper applies.
+    Gurmukhi,
+    /// Gujarati. Indic reordering shaper applies.
+    Gujarati,
+    /// Oriya. Indic reordering shaper applies.
+    Oriya,
+    /// Tamil. Indic reordering shaper applies.
+    Tamil,
+    /// Telugu. Indic reordering shaper applies.
+    Telugu,
+    /// Kannada. Indic reordering shaper applies.
+    Kannada,
+    /// Malayalam. Indic reordering shaper applies.
+    Malayalam,
+    /// Sinhala. Indic reordering shaper applies.
+    Sinhala,
     /// Anything else — returned when sigilbuzz has no specialised
     /// table for the codepoint's script.
     Other,
+}
+
+impl Script {
+    /// Returns `true` if the script is one of the Indic family scripts
+    /// that run through the Indic reordering shaper.
+    #[must_use]
+    pub const fn is_indic(self) -> bool {
+        matches!(
+            self,
+            Script::Devanagari
+                | Script::Bengali
+                | Script::Gurmukhi
+                | Script::Gujarati
+                | Script::Oriya
+                | Script::Tamil
+                | Script::Telugu
+                | Script::Kannada
+                | Script::Malayalam
+                | Script::Sinhala
+        )
+    }
 }
 
 /// Returns the script bucket for a character.
@@ -61,6 +100,24 @@ pub const fn script_of(ch: char) -> Script {
         0x0600..=0x06FF | 0x0750..=0x077F | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF => Script::Arabic,
         // Devanagari
         0x0900..=0x097F => Script::Devanagari,
+        // Bengali
+        0x0980..=0x09FF => Script::Bengali,
+        // Gurmukhi
+        0x0A00..=0x0A7F => Script::Gurmukhi,
+        // Gujarati
+        0x0A80..=0x0AFF => Script::Gujarati,
+        // Oriya (Odia)
+        0x0B00..=0x0B7F => Script::Oriya,
+        // Tamil
+        0x0B80..=0x0BFF => Script::Tamil,
+        // Telugu
+        0x0C00..=0x0C7F => Script::Telugu,
+        // Kannada
+        0x0C80..=0x0CFF => Script::Kannada,
+        // Malayalam
+        0x0D00..=0x0D7F => Script::Malayalam,
+        // Sinhala
+        0x0D80..=0x0DFF => Script::Sinhala,
         // CJK unified ideographs + extensions A/B + Hiragana + Katakana
         0x3040..=0x309F | 0x30A0..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF => Script::Han,
         _ => Script::Other,
@@ -119,6 +176,36 @@ mod tests {
         // क (U+0915) and vowel sign I (U+093F).
         assert_eq!(script_of('\u{0915}'), Script::Devanagari);
         assert_eq!(script_of('\u{093F}'), Script::Devanagari);
+    }
+
+    #[test]
+    fn classifies_indic_family() {
+        assert_eq!(script_of('\u{09B0}'), Script::Bengali); // Bengali RA
+        assert_eq!(script_of('\u{0A30}'), Script::Gurmukhi); // Gurmukhi RA
+        assert_eq!(script_of('\u{0AB0}'), Script::Gujarati); // Gujarati RA
+        assert_eq!(script_of('\u{0B30}'), Script::Oriya); // Oriya RA
+        assert_eq!(script_of('\u{0BB0}'), Script::Tamil); // Tamil RA
+        assert_eq!(script_of('\u{0C30}'), Script::Telugu); // Telugu RA
+        assert_eq!(script_of('\u{0CB0}'), Script::Kannada); // Kannada RA
+        assert_eq!(script_of('\u{0D30}'), Script::Malayalam); // Malayalam RA
+        assert_eq!(script_of('\u{0DB1}'), Script::Sinhala); // Sinhala NA
+    }
+
+    #[test]
+    fn is_indic_covers_full_family() {
+        assert!(Script::Devanagari.is_indic());
+        assert!(Script::Bengali.is_indic());
+        assert!(Script::Gurmukhi.is_indic());
+        assert!(Script::Gujarati.is_indic());
+        assert!(Script::Oriya.is_indic());
+        assert!(Script::Tamil.is_indic());
+        assert!(Script::Telugu.is_indic());
+        assert!(Script::Kannada.is_indic());
+        assert!(Script::Malayalam.is_indic());
+        assert!(Script::Sinhala.is_indic());
+        assert!(!Script::Latin.is_indic());
+        assert!(!Script::Arabic.is_indic());
+        assert!(!Script::Other.is_indic());
     }
 
     #[test]
