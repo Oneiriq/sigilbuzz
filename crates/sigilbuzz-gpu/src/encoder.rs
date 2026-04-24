@@ -26,17 +26,17 @@ pub struct SlugOptions {
     /// height in em-units.
     pub band_count: Option<u32>,
     /// Maximum allowed geometric error (design units) when flattening
-    /// cubic Beziers into quadratics. Defaults to roughly 0.05 em on
-    /// a 2048-upem font (~ 1 design unit).
+    /// cubic Beziers into quadratics. Defaults to 1 design unit —
+    /// well below the "perceptible" threshold on a 2048-upem font.
+    /// Callers can tighten or loosen this per glyph if they want a
+    /// different memory / accuracy trade-off, or to tune for fonts
+    /// with non-standard `unitsPerEm`.
     pub cubic_tolerance: f32,
 }
 
 impl SlugOptions {
-    /// Default tolerance, in design units. Calibrated against a
-    /// 2048-upem font: `0.05 em ≈ 102 design units` is too loose for
-    /// readable text, so we use 1 design unit, well below the
-    /// "perceptible" error for sub-pixel accuracy. Callers can
-    /// override per-glyph for non-2048 upems.
+    /// Default cubic-flattening tolerance in design units (1.0 unit
+    /// ≈ 0.0005 em on a 2048-upem font).
     pub const DEFAULT_CUBIC_TOLERANCE: f32 = 1.0;
 }
 

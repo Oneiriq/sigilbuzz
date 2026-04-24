@@ -46,6 +46,19 @@
 //!
 //! `sigilbuzz-gpu` builds with `--no-default-features`. It still uses
 //! `alloc::vec::Vec`; the encoder does not require `std`.
+//!
+//! # References
+//!
+//! - Eric Lengyel, "GPU-Centered Font Rendering Directly from Glyph
+//!   Outlines", Journal of Computer Graphics Techniques (JCGT), 2017.
+//! - Charles Loop, Jim Blinn, "Resolution Independent Curve Rendering
+//!   using Programmable Graphics Hardware", SIGGRAPH 2005.
+//! - Thomas Sederberg, *Computer Aided Geometric Design*, §5.4 — the
+//!   third-difference error bound used by the cubic flattening pass.
+//!
+//! The companion shader-side reference is HarfBuzz's `hb_gpu`; we
+//! deliberately omit a default shader here so consumers can target
+//! whatever graphics API (Metal, Vulkan, WebGPU, …) suits them.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_op_in_unsafe_fn)]
