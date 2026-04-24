@@ -119,7 +119,13 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // Step 1: codepoint → glyph id via cmap. Clusters are byte
     // offsets from the start of the text so later passes can track
     // which input characters coalesce into a single output glyph.
+    //
+    // We also capture the raw `char` list alongside the glyphs so
+    // the Indic shaper can consult Unicode properties per-codepoint
+    // without re-scanning the UTF-8 stream.
     let mut glyphs: Vec<Glyph> = Vec::with_capacity(text.len());
+    let mut codepoints: Vec<char> = Vec::with_capacity(text.len());
+    let mut has_devanagari = false;
     for (cluster, ch) in text.char_indices() {
         let glyph_id = cmap.glyph_id(ch).unwrap_or(0);
         glyphs.push(Glyph {
@@ -130,6 +136,20 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             x_offset: 0,
             y_offset: 0,
         });
+        codepoints.push(ch);
+        if crate::unicode::script_of(ch) == crate::unicode::Script::Devanagari {
+            has_devanagari = true;
+        }
+    }
+
+    let gsub = face.gsub()?;
+
+    // Step 1b: Indic reordering + basic features. Runs before the
+    // generic GSUB pass so the glyph stream entering `liga` / `calt`
+    // is already in logical order for the script. Non-Indic text
+    // skips this pass entirely.
+    if has_devanagari {
+        crate::ot::indic::shape_devanagari(gsub.as_ref(), &codepoints, &mut glyphs);
     }
 
     // Step 2: GSUB passes. Default-on features mirror HarfBuzz's
@@ -138,7 +158,6 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // `ccmp` (composition/decomposition) runs before ligatures and
     // before the required-ligature fallback, because later passes
     // operate on the composed glyph stream.
-    let gsub = face.gsub()?;
     if let Some(ref gsub) = gsub {
         if !feature_disabled(features, *b"ccmp") {
             apply_gsub_feature(gsub, &mut glyphs, *b"ccmp", 0);
