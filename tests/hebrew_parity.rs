@@ -42,10 +42,28 @@ const NOTO_HEBREW: &[u8] = include_bytes!("fonts/NotoSansHebrew-Regular.ttf");
 /// diverges from rustybuzz on some subtable we have not yet tracked
 /// down; it still round-trips through the shaper to guard against
 /// panics.
+///
+/// `mixed_script_segments` lists per-segment `(text, direction,
+/// script)` triples for mixed-script inputs. `assert_parity_on`
+/// compares sigilbuzz's concatenated output against the concatenation
+/// of rustybuzz shapes of each segment — matching how a correct
+/// client calls HarfBuzz for mixed runs. Pure-script cases use a
+/// single whole-buffer rustybuzz call via an empty slice.
 struct Case {
     text: &'static str,
     compare_rustybuzz: bool,
     note: &'static str,
+    /// Empty for single-script runs; one entry per script segment
+    /// otherwise. Each segment's slice of `text` is shaped under the
+    /// named script/direction on the rustybuzz side so the
+    /// concatenated output matches sigilbuzz's per-segment dispatch.
+    mixed_script_segments: &'static [MixedSeg],
+}
+
+struct MixedSeg {
+    text: &'static str,
+    rtl: bool,
+    script: rustybuzz::Script,
 }
 
 /// Pure Hebrew and mixed-script inputs. Every entry cross-checks
@@ -84,79 +102,129 @@ const CORPUS: &[Case] = &[
         text: "\u{05E9}\u{05DC}\u{05D5}\u{05DD}",
         compare_rustybuzz: true,
         note: "shalom (plain consonants)",
+        mixed_script_segments: &[],
     },
     Case {
         text: "\u{05EA}\u{05D5}\u{05D3}\u{05D4}",
         compare_rustybuzz: true,
         note: "toda (plain consonants)",
+        mixed_script_segments: &[],
     },
     Case {
         text: "\u{05D1}\u{05D5}\u{05E7}\u{05E8} \u{05D8}\u{05D5}\u{05D1}",
         compare_rustybuzz: true,
         note: "boker tov (two words)",
+        mixed_script_segments: &[],
     },
     Case {
         text: "\u{05D1}\u{05BC}\u{05B0}\u{05E8}\u{05B5}\u{05D0}\u{05E9}\u{05C1}\u{05B4}\u{05D9}\u{05EA}",
         compare_rustybuzz: true,
         note: "bereshit (full niqqud)",
+        mixed_script_segments: &[],
     },
     Case {
         text: "\u{05E9}\u{05C1}\u{05B8}\u{05DC}\u{05D5}\u{05B9}\u{05DD}",
         compare_rustybuzz: true,
         note: "shalom with niqqud",
+        mixed_script_segments: &[],
     },
     Case {
         text: "\u{05D4}\u{05B7}\u{05DC}\u{05B0}\u{05DC}\u{05D5}\u{05BC}\u{05D9}\u{05B8}\u{05D4}\u{05BC}",
         compare_rustybuzz: true,
         note: "halleluyah with dagesh stacks",
+        mixed_script_segments: &[],
     },
     Case {
         text: "\u{05D1}\u{05BC}\u{05B0}\u{05E8}\u{05B5}\u{05D0}\u{05E9}\u{05C1}\u{05B4}\u{0596}\u{05D9}\u{05EA} \u{05D1}\u{05BC}\u{05B8}\u{05E8}\u{05B8}\u{05A3}\u{05D0}",
         compare_rustybuzz: true,
         note: "bereshit bara (cantillation)",
+        mixed_script_segments: &[],
     },
     Case {
         text: "\u{05DC}\u{05D9}\u{05DA}",
         compare_rustybuzz: true,
         note: "lekha (kaf-sofit)",
+        mixed_script_segments: &[],
     },
     Case {
         text: "\u{05D9}\u{05D5}\u{05DD}",
         compare_rustybuzz: true,
         note: "yom (mem-sofit)",
+        mixed_script_segments: &[],
     },
     Case {
         text: "\u{05D1}\u{05DF}",
         compare_rustybuzz: true,
         note: "ben (nun-sofit)",
+        mixed_script_segments: &[],
     },
     Case {
         text: "\u{05E7}\u{05E6}\u{05E3}",
         compare_rustybuzz: true,
         note: "ketsef (pe-sofit)",
+        mixed_script_segments: &[],
     },
     Case {
         text: "\u{05E7}\u{05E5}",
         compare_rustybuzz: true,
         note: "kayits (tzadi-sofit)",
+        mixed_script_segments: &[],
     },
-    // Rustybuzz auto-segments mixed-script runs and shapes each
-    // script-segment independently, which lets its Hebrew half pick
-    // up a Latin-adjacent pair-kern on the final-mem that sigilbuzz's
-    // single-pass dispatcher does not replicate. The divergence is a
-    // script-segmenter gap (issue tracked against the 0.3.0
-    // milestone), not a mark / niqqud / cantillation correctness
-    // issue — the dedicated `mixed_hebrew_and_latin_runs_...` test
-    // still pins the Latin half of the buffer against itself.
+    // Mixed-script runs parity-clean once `shape()` segments the
+    // buffer and dispatches each segment under its own script-tag
+    // priority (`hebr` for the Hebrew half, DFLT for the Latin
+    // half). The parity side shapes each segment independently with
+    // rustybuzz (LTR+Latin then RTL+Hebrew) and concatenates,
+    // because rustybuzz by itself does not auto-segment a
+    // pre-existing buffer — the client is expected to segment
+    // upstream. sigilbuzz now does that upstream step inside
+    // `shape()`, so matching rustybuzz's per-segment call chain
+    // proves the new segmenter routes each half correctly.
     Case {
         text: "Hi \u{05E9}\u{05DC}\u{05D5}\u{05DD}",
-        compare_rustybuzz: false,
-        note: "mixed Latin + Hebrew (pair-kern diverges; see issue)",
+        compare_rustybuzz: true,
+        note: "Latin + Hebrew (script segmenter)",
+        mixed_script_segments: &[
+            MixedSeg {
+                text: "Hi ",
+                rtl: false,
+                script: rustybuzz::script::LATIN,
+            },
+            MixedSeg {
+                text: "\u{05E9}\u{05DC}\u{05D5}\u{05DD}",
+                rtl: true,
+                script: rustybuzz::script::HEBREW,
+            },
+        ],
+    },
+    // ASCII + currency + digits + Hebrew — pins that a COMMON span
+    // (the shekel sign U+20AA qualifies as COMMON) attaches to the
+    // Latin prefix rather than carving its own segment.
+    Case {
+        text: "Price: \u{20AA}100 \u{05E9}\u{05DC}\u{05D5}\u{05DD}",
+        compare_rustybuzz: true,
+        note: "Latin + common + Hebrew",
+        mixed_script_segments: &[
+            MixedSeg {
+                text: "Price: \u{20AA}100 ",
+                rtl: false,
+                script: rustybuzz::script::LATIN,
+            },
+            MixedSeg {
+                text: "\u{05E9}\u{05DC}\u{05D5}\u{05DD}",
+                rtl: true,
+                script: rustybuzz::script::HEBREW,
+            },
+        ],
     },
 ];
 
-/// Shape `text` with both engines and assert byte-identical output.
-fn assert_parity_on(text: &str, note: &str) {
+/// Shape `case.text` with both engines and assert byte-identical
+/// output. For mixed-script cases we shape each declared segment
+/// independently on the rustybuzz side and concatenate — that mirrors
+/// how sigilbuzz's `shape()` now dispatches per segment, and matches
+/// the "correct client" call pattern HarfBuzz documents.
+fn assert_parity_on(case: &Case) {
     let blob = Blob::new(NOTO_HEBREW);
     let face = Face::parse(&blob, 0).expect("parse sigilbuzz face");
     let font = Font::new(face, 1000.0);
@@ -164,22 +232,68 @@ fn assert_parity_on(text: &str, note: &str) {
     let rb_face = rustybuzz::Face::from_slice(NOTO_HEBREW, 0).expect("parse rustybuzz face");
 
     let mut buffer = Buffer::new();
-    buffer.push_str(text);
+    buffer.push_str(case.text);
     let sig = shape(&font, &buffer, &[]).expect("sigilbuzz shape");
 
-    let mut rb_buf = rustybuzz::UnicodeBuffer::new();
-    rb_buf.push_str(text);
-    rb_buf.set_direction(RbDirection::RightToLeft);
-    let rb_out = rustybuzz::shape(&rb_face, &[], rb_buf);
-    let rb_infos: Vec<_> = rb_out.glyph_infos().iter().rev().copied().collect();
-    let rb_positions: Vec<_> = rb_out.glyph_positions().iter().rev().copied().collect();
+    // Build the rustybuzz comparison sequence. Pure-script cases hit
+    // the simple single-buffer path; mixed cases shape each declared
+    // segment with its own direction/script and concatenate in
+    // logical order.
+    let (rb_gids, rb_xadvs): (Vec<u32>, Vec<i32>) = if case.mixed_script_segments.is_empty() {
+        let mut rb_buf = rustybuzz::UnicodeBuffer::new();
+        rb_buf.push_str(case.text);
+        rb_buf.set_direction(RbDirection::RightToLeft);
+        let rb_out = rustybuzz::shape(&rb_face, &[], rb_buf);
+        let gids: Vec<u32> = rb_out
+            .glyph_infos()
+            .iter()
+            .rev()
+            .map(|g| g.glyph_id)
+            .collect();
+        let xadvs: Vec<i32> = rb_out
+            .glyph_positions()
+            .iter()
+            .rev()
+            .map(|p| p.x_advance)
+            .collect();
+        (gids, xadvs)
+    } else {
+        let mut gids = Vec::new();
+        let mut xadvs = Vec::new();
+        for seg in case.mixed_script_segments {
+            let mut rb_buf = rustybuzz::UnicodeBuffer::new();
+            rb_buf.push_str(seg.text);
+            rb_buf.set_direction(if seg.rtl {
+                RbDirection::RightToLeft
+            } else {
+                RbDirection::LeftToRight
+            });
+            rb_buf.set_script(seg.script);
+            let rb_out = rustybuzz::shape(&rb_face, &[], rb_buf);
+            let mut seg_gids: Vec<u32> = rb_out.glyph_infos().iter().map(|g| g.glyph_id).collect();
+            let mut seg_xadvs: Vec<i32> = rb_out
+                .glyph_positions()
+                .iter()
+                .map(|p| p.x_advance)
+                .collect();
+            if seg.rtl {
+                seg_gids.reverse();
+                seg_xadvs.reverse();
+            }
+            gids.extend(seg_gids);
+            xadvs.extend(seg_xadvs);
+        }
+        (gids, xadvs)
+    };
 
+    let text = case.text;
+    let note = case.note;
     assert_eq!(
         sig.len(),
-        rb_infos.len(),
+        rb_gids.len(),
         "glyph count diverged for {note} ({text:?}): sigilbuzz={} rustybuzz={}",
         sig.len(),
-        rb_infos.len()
+        rb_gids.len()
     );
 
     // Glyph IDs and advances are the parity contract. Offsets
@@ -190,23 +304,23 @@ fn assert_parity_on(text: &str, note: &str) {
     // renderer sees the same absolute position once it walks the
     // pen). We pin the offsets with a dedicated check further down
     // rather than demand engine-for-engine equality here.
-    for (i, (sig_g, (rb_info, rb_pos))) in sig
+    for (i, (sig_g, (rb_gid, rb_xadv))) in sig
         .glyphs
         .iter()
-        .zip(rb_infos.iter().zip(rb_positions.iter()))
+        .zip(rb_gids.iter().zip(rb_xadvs.iter()))
         .enumerate()
     {
         assert_eq!(
-            sig_g.glyph_id, rb_info.glyph_id,
+            sig_g.glyph_id, *rb_gid,
             "glyph id mismatch at position {i} of {note} ({text:?}): \
              sigilbuzz={} rustybuzz={}",
-            sig_g.glyph_id, rb_info.glyph_id
+            sig_g.glyph_id, rb_gid
         );
         assert_eq!(
-            sig_g.x_advance, rb_pos.x_advance,
+            sig_g.x_advance, *rb_xadv,
             "x_advance mismatch at position {i} of {note} ({text:?}) \
              (glyph {}): sigilbuzz={} rustybuzz={}",
-            sig_g.glyph_id, sig_g.x_advance, rb_pos.x_advance
+            sig_g.glyph_id, sig_g.x_advance, rb_xadv
         );
     }
 }
@@ -225,7 +339,7 @@ fn hebrew_corpus_matches_rustybuzz_glyph_for_glyph() {
             let _ = shape(&font, &buffer, &[]).expect("shape diagnostic case");
             continue;
         }
-        assert_parity_on(case.text, case.note);
+        assert_parity_on(case);
     }
 }
 
