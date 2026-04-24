@@ -49,7 +49,7 @@
 
 use alloc::vec::Vec;
 
-use crate::buffer::Glyph;
+use crate::buffer::{Glyph, IndicPosition};
 use crate::shape::apply_gsub_feature_in_scripts;
 use crate::tables::Gsub;
 use crate::unicode::indic_category::{
@@ -74,6 +74,17 @@ pub fn shape_devanagari(gsub: Option<&Gsub<'_>>, codepoints: &[char], glyphs: &m
     // codepoint indices it covers (start, end exclusive) so the
     // reorder phase can index into `glyphs` without re-scanning.
     let syllables = segment_syllables(codepoints);
+
+    // Tag per-glyph Indic positions BEFORE we reorder or apply
+    // features. The `rphf` ligature will drop the halant and leave
+    // only the ra's glyph slot in place; because our GSUB
+    // ligature path preserves the first component's `Glyph` struct
+    // (only `glyph_id` is overwritten), the `RaToBecomeReph` mark
+    // survives the substitution and the final-reorder pass can
+    // locate the reph without re-running the state machine.
+    for syllable in &syllables {
+        tag_positions(codepoints, glyphs, syllable);
+    }
 
     // Initial reordering is per-syllable and mutates `glyphs` in
     // place. We walk syllables in reverse when reorders change
@@ -379,6 +390,71 @@ fn scan_vowel_syllable(cps: &[char], start: usize) -> Syllable {
     }
 }
 
+/// Sets per-glyph Indic positions for the glyphs in one syllable's
+/// range. Called BEFORE any reorder or GSUB pass, so indices in
+/// `glyphs` still line up one-to-one with `codepoints`.
+///
+/// Three positions matter for Devanagari's final reorder pass:
+///
+/// - [`IndicPosition::RaToBecomeReph`] on the leading `ra` of a
+///   `ra + halant + …` syllable. The `rphf` ligature will turn the
+///   ra-halant pair into a reph glyph; the ligature path preserves
+///   the first component's `Glyph` struct (everything but
+///   `glyph_id`), so the tag survives and the final-reorder pass
+///   can find the reph without re-inspecting codepoints.
+/// - [`IndicPosition::BaseC`] on the base consonant, so the
+///   reorder knows where the main consonant sits (even after
+///   basic features have collapsed conjuncts around it).
+/// - [`IndicPosition::PreM`] on pre-base matra glyphs — useful
+///   later when we grow pre-base matra repositioning, and already
+///   needed to distinguish a matra's halant from a consonant's in
+///   the reph-target-finding walk.
+///
+/// Other glyphs keep the default [`IndicPosition::Start`].
+///
+/// TODO(#<follow-up>): port the same tagging to other Indic scripts
+/// (Bengali, Gurmukhi, …) as they land. The position values are
+/// script-agnostic; only the reph target slot differs.
+fn tag_positions(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllable) {
+    if !matches!(syllable.kind, SyllableKind::Consonant) {
+        return;
+    }
+    if syllable.end > glyphs.len() || syllable.end > codepoints.len() {
+        return;
+    }
+
+    // Mark reph candidate. Only valid when the syllable genuinely
+    // starts with ra + halant AND has a base consonant after —
+    // caught at segmentation via `has_reph`.
+    if syllable.has_reph {
+        glyphs[syllable.start].indic_position = IndicPosition::RaToBecomeReph as u8;
+    }
+
+    // Mark the base consonant.
+    if let Some(base) = syllable.base_index {
+        if base < glyphs.len() {
+            glyphs[base].indic_position = IndicPosition::BaseC as u8;
+        }
+    }
+
+    // Mark pre-base matras. These live logically after the base
+    // consonant but visually before it; the `initial_reorder` pass
+    // will physically move them. Tagging survives that reorder
+    // because the tag is on the `Glyph`, not the slot.
+    for (idx, &ch) in codepoints
+        .iter()
+        .enumerate()
+        .take(syllable.end)
+        .skip(syllable.start)
+    {
+        if positional_category(ch) == IndicPositionalCategory::Left
+            && syllabic_category(ch) == IndicSyllabicCategory::VowelDependent
+        {
+            glyphs[idx].indic_position = IndicPosition::PreM as u8;
+        }
+    }
+}
+
 /// Initial reordering for one syllable.
 ///
 /// The main transformation is moving pre-base matras (positional
@@ -612,6 +688,52 @@ mod tests {
         shape_devanagari(None, &cp, &mut glyphs);
         assert_eq!(glyphs[0].cluster, 1);
         assert_eq!(glyphs[1].cluster, 0);
+    }
+
+    #[test]
+    fn tag_positions_marks_ra_as_reph_candidate() {
+        // र ् क — the leading ra is a reph candidate.
+        let cp = cps("\u{0930}\u{094D}\u{0915}");
+        let mut glyphs = fake_glyphs(3);
+        for s in &segment_syllables(&cp) {
+            tag_positions(&cp, &mut glyphs, s);
+        }
+        assert_eq!(
+            glyphs[0].indic_position,
+            IndicPosition::RaToBecomeReph as u8,
+            "ra should be marked as reph candidate"
+        );
+        assert_eq!(
+            glyphs[2].indic_position,
+            IndicPosition::BaseC as u8,
+            "ka should be marked as base consonant"
+        );
+    }
+
+    #[test]
+    fn tag_positions_marks_pre_base_matra() {
+        // कि — ka + pre-base i. Matra gets PreM, base gets BaseC.
+        let cp = cps("\u{0915}\u{093F}");
+        let mut glyphs = fake_glyphs(2);
+        for s in &segment_syllables(&cp) {
+            tag_positions(&cp, &mut glyphs, s);
+        }
+        assert_eq!(glyphs[0].indic_position, IndicPosition::BaseC as u8);
+        assert_eq!(glyphs[1].indic_position, IndicPosition::PreM as u8);
+    }
+
+    #[test]
+    fn tag_positions_leaves_non_reph_syllables_alone() {
+        // क alone — no reph anywhere in the run.
+        let cp = cps("\u{0915}");
+        let mut glyphs = fake_glyphs(1);
+        for s in &segment_syllables(&cp) {
+            tag_positions(&cp, &mut glyphs, s);
+        }
+        assert_ne!(
+            glyphs[0].indic_position,
+            IndicPosition::RaToBecomeReph as u8
+        );
     }
 
     #[test]
