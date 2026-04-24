@@ -40,6 +40,7 @@
 //!   ligature set.
 
 use crate::error::{Error, Result};
+use crate::tables::layout::skip_iter::MatchFilter;
 use crate::tables::layout::Coverage;
 use crate::tables::parse::Reader;
 
@@ -97,6 +98,30 @@ impl<'a> Ligature<'a> {
     /// shorter alternatives.
     #[must_use]
     pub fn apply(&self, glyphs: &[u16]) -> Option<(u16, usize)> {
+        self.apply_filtered(glyphs, &MatchFilter::none())
+            .map(|(out, positions)| {
+                // Span covers every raw glyph between the first and
+                // the last matched component, inclusive.
+                let span = positions.last().copied().map_or(0, |p| p + 1);
+                (out, span)
+            })
+    }
+
+    /// Filter-aware ligature match. Returns the output glyph id plus
+    /// the list of relative positions (into `glyphs`, starting at 0
+    /// for the first component) of every matched component. Callers
+    /// use those positions to collapse the ligature and to know
+    /// which skipped glyphs (typically marks) should bubble out of
+    /// the merge area to stay next to their logical base.
+    ///
+    /// When `filter.is_pass_through()` the positions are `0..N` and
+    /// the call is equivalent to [`Ligature::apply`].
+    #[must_use]
+    pub fn apply_filtered(
+        &self,
+        glyphs: &[u16],
+        filter: &MatchFilter<'_>,
+    ) -> Option<(u16, alloc::vec::Vec<usize>)> {
         let first = *glyphs.first()?;
         let cov_index = self.coverage.index_of(first)?;
         if cov_index >= self.set_count {
@@ -119,36 +144,44 @@ impl<'a> Ligature<'a> {
             let Some(lig_bytes) = set_bytes.get(lig_off..) else {
                 continue;
             };
-            let Some((out, consumed)) = try_match_ligature(lig_bytes, glyphs) else {
-                continue;
-            };
-            return Some((out, consumed));
+            if let Some((out, positions)) = try_match_ligature_filtered(lig_bytes, glyphs, filter) {
+                return Some((out, positions));
+            }
         }
         None
     }
 }
 
-/// Attempts to match one Ligature record. Returns
-/// `Some((ligature_glyph, consumed))` on a match where `consumed` is
-/// the total number of input glyphs the ligature eats (including the
-/// first, coverage-matched one).
-fn try_match_ligature(lig_bytes: &[u8], glyphs: &[u16]) -> Option<(u16, usize)> {
+/// Filter-aware ligature match. Returns `(ligature_glyph, positions)`
+/// where `positions[k]` is the relative index into `glyphs` of the
+/// `k`-th matched component. The first component is always at index
+/// 0 — the caller gated it via coverage.
+fn try_match_ligature_filtered(
+    lig_bytes: &[u8],
+    glyphs: &[u16],
+    filter: &MatchFilter<'_>,
+) -> Option<(u16, alloc::vec::Vec<usize>)> {
     let mut r = Reader::new(lig_bytes);
     let ligature_glyph = r.read_u16().ok()?;
     let component_count = r.read_u16().ok()?;
-    if component_count == 0 || (component_count as usize) > glyphs.len() {
+    if component_count == 0 {
         return None;
     }
-    // Tail components: componentCount - 1 trailing u16s.
     let tail = component_count as usize - 1;
     let tail_bytes = r.read_bytes(tail * 2).ok()?;
+    let mut positions = alloc::vec::Vec::with_capacity(component_count as usize);
+    positions.push(0);
+    let mut cursor = 1usize;
     for i in 0..tail {
         let expected = u16::from_be_bytes([tail_bytes[i * 2], tail_bytes[i * 2 + 1]]);
-        if glyphs[i + 1] != expected {
+        let pos = filter.next_unskipped(glyphs, cursor)?;
+        if glyphs[pos] != expected {
             return None;
         }
+        positions.push(pos);
+        cursor = pos + 1;
     }
-    Some((ligature_glyph, component_count as usize))
+    Some((ligature_glyph, positions))
 }
 
 #[cfg(test)]
@@ -303,5 +336,42 @@ mod tests {
     fn rejects_truncated_header() {
         let bytes = [0u8; 3];
         assert!(Ligature::parse(&bytes).is_err());
+    }
+
+    #[test]
+    fn filter_aware_apply_hops_marks_in_input_window() {
+        use crate::tables::gdef::Gdef;
+        use crate::tables::layout::skip_iter::{MatchFilter, LOOKUP_FLAG_IGNORE_MARKS};
+
+        // Ligature: 10 + 20 → 100. Input stream carries a mark glyph
+        // 99 between 10 and 20; with IgnoreMarks the match still fires.
+        let bytes = build_subtable(&[(10, alloc::vec![(100, alloc::vec![20])])]);
+        let lig = Ligature::parse(&bytes).unwrap();
+
+        // Build a GDEF that classifies 10 and 20 as bases and 99 as a mark.
+        let mut cd = alloc::vec::Vec::new();
+        cd.extend_from_slice(&2u16.to_be_bytes()); // class def format 2
+        cd.extend_from_slice(&3u16.to_be_bytes()); // range count
+        for (gid, cls) in [(10u16, 1u16), (20, 1), (99, 3)] {
+            cd.extend_from_slice(&gid.to_be_bytes());
+            cd.extend_from_slice(&gid.to_be_bytes());
+            cd.extend_from_slice(&cls.to_be_bytes());
+        }
+        let mut gdef_bytes = alloc::vec::Vec::new();
+        gdef_bytes.extend_from_slice(&1u16.to_be_bytes()); // major
+        gdef_bytes.extend_from_slice(&0u16.to_be_bytes()); // minor
+        gdef_bytes.extend_from_slice(&12u16.to_be_bytes()); // glyphClassDefOff
+        gdef_bytes.extend_from_slice(&[0u8; 6]);
+        gdef_bytes.extend_from_slice(&cd);
+        let gdef = Gdef::parse(&gdef_bytes).unwrap();
+        let filter = MatchFilter::for_lookup(LOOKUP_FLAG_IGNORE_MARKS, Some(&gdef), None);
+
+        // Plain apply sees the mark blocking the second component.
+        assert!(lig.apply(&[10, 99, 20]).is_none());
+
+        // Filter-aware apply matches across the mark.
+        let (out, positions) = lig.apply_filtered(&[10, 99, 20], &filter).unwrap();
+        assert_eq!(out, 100);
+        assert_eq!(positions, alloc::vec![0usize, 2]);
     }
 }

@@ -14,13 +14,22 @@
 //!
 //! # Scope
 //!
-//! M2 only consumes the `GlyphClassDef` subtable. `AttachList`,
-//! `LigCaretList`, `MarkAttachClassDef`, and `MarkGlyphSetsDef` are
-//! left as byte slices for later milestones — their parsers land
-//! when the shaper needs them.
+//! sigilbuzz consumes:
+//!
+//! - `GlyphClassDef` — per-glyph base/ligature/mark/component class.
+//! - `MarkAttachClassDef` — per-mark attachment class, consulted by
+//!   the `LookupFlag` skip-iterator when the high byte of the flag is
+//!   non-zero.
+//! - `MarkGlyphSetsDef` (v1.2+) — a list of Coverage tables indexed
+//!   by `LookupFlag`'s `markFilteringSet` slot. Used by the skip-
+//!   iterator to restrict the set of marks that participate in a
+//!   match.
+//!
+//! `AttachList` and `LigCaretList` are still passed through
+//! untouched — their parsers land when the shaper needs them.
 
 use crate::error::{Error, Result};
-use crate::tables::layout::ClassDef;
+use crate::tables::layout::{ClassDef, Coverage};
 use crate::tables::parse::Reader;
 
 /// Glyph role as declared by the font's `GDEF` table.
@@ -73,6 +82,11 @@ impl GlyphClass {
 #[derive(Debug, Clone)]
 pub struct Gdef<'a> {
     glyph_class_def: Option<ClassDef<'a>>,
+    mark_attach_class_def: Option<ClassDef<'a>>,
+    /// Parsed mark-glyph-set coverages, one per entry of
+    /// `MarkGlyphSetsDef.coverage[]`. Only populated when the table
+    /// is v1.2+ *and* carries a mark-glyph-sets subtable.
+    mark_glyph_sets: alloc::vec::Vec<Coverage<'a>>,
 }
 
 impl<'a> Gdef<'a> {
@@ -82,7 +96,7 @@ impl<'a> Gdef<'a> {
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(data);
         let major = r.read_u16()?;
-        let _minor = r.read_u16()?;
+        let minor = r.read_u16()?;
         if major != 1 {
             return Err(Error::Malformed {
                 offset: 0,
@@ -90,27 +104,40 @@ impl<'a> Gdef<'a> {
             });
         }
 
+        // Header order (all Offset16 relative to table start; 0 means
+        // absent). Present in every subversion >= 1.0:
+        //   glyphClassDefOff, attachListOff, ligCaretListOff,
+        //   markAttachClassDefOff
+        // Added in 1.2:
+        //   markGlyphSetsDefOff
+        // Added in 1.3 (item variation store) — we read-past only.
         let glyph_class_def_off = r.read_u16()?;
-        // Remaining header fields (attachListOffset, ligCaretListOffset,
-        // markAttachClassDefOffset, and in later sub-versions the mark
-        // glyph sets and item variation store offsets) are read-skip:
-        // we record their presence but do not parse their subtables.
-        // The exact count depends on the sub-version but the fields
-        // we do consume are all at fixed offsets, so no validation is
-        // lost.
+        let _attach_list_off = r.read_u16()?;
+        let _lig_caret_list_off = r.read_u16()?;
+        let mark_attach_class_def_off = r.read_u16()?;
+        let mark_glyph_sets_def_off = if minor >= 2 { r.read_u16()? } else { 0 };
 
-        let glyph_class_def = if glyph_class_def_off == 0 {
-            None
+        let glyph_class_def = parse_optional_class_def(
+            data,
+            glyph_class_def_off,
+            "GDEF glyphClassDef offset points outside table",
+        )?;
+        let mark_attach_class_def = parse_optional_class_def(
+            data,
+            mark_attach_class_def_off,
+            "GDEF markAttachClassDef offset points outside table",
+        )?;
+        let mark_glyph_sets = if mark_glyph_sets_def_off == 0 {
+            alloc::vec::Vec::new()
         } else {
-            let start = glyph_class_def_off as usize;
-            let sub = data.get(start..).ok_or(Error::Malformed {
-                offset: start,
-                context: "GDEF glyphClassDef offset points outside table",
-            })?;
-            Some(ClassDef::parse(sub)?)
+            parse_mark_glyph_sets(data, mark_glyph_sets_def_off as usize)?
         };
 
-        Ok(Self { glyph_class_def })
+        Ok(Self {
+            glyph_class_def,
+            mark_attach_class_def,
+            mark_glyph_sets,
+        })
     }
 
     /// Resolves the glyph class for `glyph_id`. Returns
@@ -124,6 +151,84 @@ impl<'a> Gdef<'a> {
             None => GlyphClass::Base,
         }
     }
+
+    /// Mark-attachment class for `glyph_id`. Returns 0 when the font
+    /// carries no `MarkAttachClassDef` or the glyph is unlisted.
+    /// `LookupFlag`'s high byte is compared against this number; a
+    /// zero attachment class matches "any mark" in the spec.
+    #[must_use]
+    pub fn mark_attach_class(&self, glyph_id: u16) -> u16 {
+        match &self.mark_attach_class_def {
+            Some(cd) => cd.class_of(glyph_id),
+            None => 0,
+        }
+    }
+
+    /// Coverage for the `index`-th mark-glyph-set in the
+    /// `MarkGlyphSetsDef` subtable, or `None` when the font lacks
+    /// the subtable or the index is out of range. Referenced by
+    /// `LookupFlag & USE_MARK_FILTERING_SET` lookups.
+    #[must_use]
+    pub fn mark_filtering_set(&self, index: u16) -> Option<&Coverage<'a>> {
+        self.mark_glyph_sets.get(index as usize)
+    }
+}
+
+fn parse_optional_class_def<'a>(
+    data: &'a [u8],
+    off: u16,
+    context: &'static str,
+) -> Result<Option<ClassDef<'a>>> {
+    if off == 0 {
+        return Ok(None);
+    }
+    let start = off as usize;
+    let sub = data.get(start..).ok_or(Error::Malformed {
+        offset: start,
+        context,
+    })?;
+    ClassDef::parse(sub).map(Some)
+}
+
+fn parse_mark_glyph_sets(data: &[u8], sub_off: usize) -> Result<alloc::vec::Vec<Coverage<'_>>> {
+    // Layout:
+    //   u16 format (= 1)
+    //   u16 markGlyphSetCount
+    //   Offset32 coverage[markGlyphSetCount]   -- relative to sub_off
+    let sub = data.get(sub_off..).ok_or(Error::Malformed {
+        offset: sub_off,
+        context: "GDEF markGlyphSetsDef offset points outside table",
+    })?;
+    let mut r = Reader::new(sub);
+    let format = r.read_u16()?;
+    if format != 1 {
+        return Err(Error::Malformed {
+            offset: sub_off,
+            context: "unsupported GDEF markGlyphSetsDef format",
+        });
+    }
+    let count = r.read_u16()? as usize;
+    let mut out = alloc::vec::Vec::with_capacity(count);
+    for _ in 0..count {
+        let rel = r.read_u32()? as usize;
+        if rel == 0 {
+            // Spec permits a NULL coverage slot; treat as empty.
+            // Build an empty format-1 coverage so the skip-iterator
+            // never matches this set.
+            out.push(Coverage::parse(&[0, 1, 0, 0])?);
+            continue;
+        }
+        let abs = sub_off.checked_add(rel).ok_or(Error::Malformed {
+            offset: sub_off,
+            context: "GDEF markGlyphSetsDef coverage offset overflow",
+        })?;
+        let cov_bytes = data.get(abs..).ok_or(Error::Malformed {
+            offset: abs,
+            context: "GDEF markGlyphSetsDef coverage offset past end",
+        })?;
+        out.push(Coverage::parse(cov_bytes)?);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -156,6 +261,64 @@ mod tests {
         out.extend_from_slice(&0u16.to_be_bytes()); // ligCaretListOff
         out.extend_from_slice(&0u16.to_be_bytes()); // markAttachClassDefOff
         out.extend_from_slice(class_def);
+        out
+    }
+
+    /// Builds a v1.2 GDEF header with optional markAttachClassDef and
+    /// markGlyphSetsDef subtables. Fields set to `None` get a zero
+    /// offset in the header.
+    fn build_gdef_v12(
+        glyph_class_def: Option<&[u8]>,
+        mark_attach_class_def: Option<&[u8]>,
+        mark_glyph_sets: Option<&[Vec<u8>]>,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // major
+        out.extend_from_slice(&2u16.to_be_bytes()); // minor
+        let header_len = 14u16; // v1.2 header is 14 bytes
+        out.extend_from_slice(&[0u8; 10]); // placeholders for 5 offset16s
+        let gc_slot = 4usize;
+        let mac_slot = 10usize;
+        let mgs_slot = 12usize;
+        debug_assert_eq!(out.len(), header_len as usize);
+
+        if let Some(gc) = glyph_class_def {
+            let off = out.len() as u16;
+            out[gc_slot..gc_slot + 2].copy_from_slice(&off.to_be_bytes());
+            out.extend_from_slice(gc);
+        }
+        if let Some(mac) = mark_attach_class_def {
+            let off = out.len() as u16;
+            out[mac_slot..mac_slot + 2].copy_from_slice(&off.to_be_bytes());
+            out.extend_from_slice(mac);
+        }
+        if let Some(sets) = mark_glyph_sets {
+            // markGlyphSetsDef: u16 format=1, u16 count, Offset32[count].
+            let sub_off = out.len();
+            out[mgs_slot..mgs_slot + 2].copy_from_slice(&(sub_off as u16).to_be_bytes());
+            out.extend_from_slice(&1u16.to_be_bytes()); // format
+            out.extend_from_slice(&(sets.len() as u16).to_be_bytes());
+            let off32_slots = out.len();
+            for _ in 0..sets.len() {
+                out.extend_from_slice(&0u32.to_be_bytes());
+            }
+            for (i, cov) in sets.iter().enumerate() {
+                let rel = (out.len() - sub_off) as u32;
+                let slot = off32_slots + i * 4;
+                out[slot..slot + 4].copy_from_slice(&rel.to_be_bytes());
+                out.extend_from_slice(cov);
+            }
+        }
+        out
+    }
+
+    fn build_coverage_format1(glyphs: &[u16]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes());
+        out.extend_from_slice(&(glyphs.len() as u16).to_be_bytes());
+        for g in glyphs {
+            out.extend_from_slice(&g.to_be_bytes());
+        }
         out
     }
 
@@ -248,5 +411,59 @@ mod tests {
     fn rejects_truncated_header() {
         let short = [0u8; 3];
         assert!(Gdef::parse(&short).is_err());
+    }
+
+    #[test]
+    fn parses_mark_attach_class_def() {
+        let class_def = build_class_def_format1(10, &[1, 2, 3]);
+        let mac = build_class_def_format1(10, &[5, 6, 7]);
+        let bytes = build_gdef_v12(Some(&class_def), Some(&mac), None);
+        let gdef = Gdef::parse(&bytes).unwrap();
+        assert_eq!(gdef.mark_attach_class(10), 5);
+        assert_eq!(gdef.mark_attach_class(11), 6);
+        assert_eq!(gdef.mark_attach_class(12), 7);
+        // Unlisted glyph → class 0.
+        assert_eq!(gdef.mark_attach_class(99), 0);
+    }
+
+    #[test]
+    fn mark_attach_class_defaults_to_zero_without_subtable() {
+        let class_def = build_class_def_format1(10, &[3]);
+        let bytes = build_gdef_with_class_def(&class_def);
+        let gdef = Gdef::parse(&bytes).unwrap();
+        assert_eq!(gdef.mark_attach_class(10), 0);
+        assert_eq!(gdef.mark_attach_class(999), 0);
+    }
+
+    #[test]
+    fn parses_mark_glyph_sets_and_resolves_coverage() {
+        // Two mark glyph sets: set 0 = {20, 21}, set 1 = {30}.
+        let sets = [
+            build_coverage_format1(&[20, 21]),
+            build_coverage_format1(&[30]),
+        ];
+        let class_def = build_class_def_format1(20, &[3, 3]);
+        let bytes = build_gdef_v12(Some(&class_def), None, Some(&sets));
+        let gdef = Gdef::parse(&bytes).unwrap();
+
+        let set0 = gdef.mark_filtering_set(0).expect("set 0");
+        assert!(set0.contains(20));
+        assert!(set0.contains(21));
+        assert!(!set0.contains(30));
+
+        let set1 = gdef.mark_filtering_set(1).expect("set 1");
+        assert!(set1.contains(30));
+        assert!(!set1.contains(20));
+
+        // Out-of-range index returns None.
+        assert!(gdef.mark_filtering_set(2).is_none());
+    }
+
+    #[test]
+    fn gdef_without_mark_glyph_sets_returns_none_for_every_index() {
+        let class_def = build_class_def_format1(10, &[3]);
+        let bytes = build_gdef_with_class_def(&class_def);
+        let gdef = Gdef::parse(&bytes).unwrap();
+        assert!(gdef.mark_filtering_set(0).is_none());
     }
 }
