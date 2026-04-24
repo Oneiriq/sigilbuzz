@@ -37,3 +37,20 @@ unmodified. The OFL text lives in the upstream repository's `OFL.txt`.
   <https://github.com/notofonts/NotoSansMalayalam/tree/main/fonts/ttf/hinted/instance_ttf>.
 - `NotoSansSinhala-Regular.ttf` — Source:
   <https://github.com/notofonts/NotoSansSinhala/tree/main/fonts/ttf/hinted/instance_ttf>.
+- `NotoSansMyanmar-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansMyanmar/hinted/ttf>.
+- `NotoSansThai-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansThai/hinted/ttf>.
+- `NotoSansLao-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansLao/hinted/ttf>.
+- `NotoSansOldHangul-Subset.ttf` — Subset of Noto Sans Korean variable
+  font (weight axis collapsed to Regular) restricted to the Hangul
+  Jamo blocks (U+1100..U+11FF, U+A960..U+A97F, U+D7B0..U+D7FF) plus a
+  handful of precomposed modern Hangul syllables so the parity tests
+  can also smoke-test the "don't break modern Hangul" invariant.
+  Upstream: <https://github.com/google/fonts/tree/main/ofl/notosanskr>
+  (`NotoSansKR[wght].ttf`). Subset generated with `fonttools subset`
+  keeping layout features `ljmo`, `vjmo`, `tjmo`, `ccmp`, `calt`,
+  `liga`, `locl` and dropping the variable (`gvar`/`fvar`/`avar`/
+  `HVAR`/`STAT`) and vertical (`vhea`/`vmtx`) tables — the shaper
+  only consumes the static Regular master in this fixture.

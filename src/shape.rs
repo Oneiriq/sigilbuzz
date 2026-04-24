@@ -177,6 +177,113 @@ pub struct Feature {
 ///
 /// Returns an error if the font is missing any of the tables required
 /// for basic shaping (`cmap`, `maxp`, `hhea`, `hmtx`) or if one of
+/// Pre-iterates `text` and applies Hangul NFC jamo composition in a
+/// single pass: a Leading jamo (L) followed by a Vowel jamo (V) and
+/// optionally a Trailing jamo (T) collapses into the matching
+/// precomposed syllable in U+AC00..U+D7A3 *when* the font carries a
+/// cmap entry for the precomposed codepoint. HarfBuzz / rustybuzz do
+/// exactly this, so matching the behaviour is mandatory for byte-
+/// parity on modern Korean corpora.
+///
+/// Returns a vector of `(byte_offset, char)` pairs that replaces the
+/// normal `text.char_indices()` sequence in the main shaping loop.
+/// The byte offset is the offset of the FIRST codepoint in the
+/// composed cluster — the L for an L+V / L+V+T composition — so
+/// downstream cluster tracking still maps glyphs back to the
+/// original UTF-8 stream.
+fn hangul_compose(text: &str, cmap: &crate::tables::cmap::Cmap<'_>) -> alloc::vec::Vec<(u32, char)> {
+    let mut out = alloc::vec::Vec::with_capacity(text.len());
+    // Gate: composition fires only when the buffer is a pure Hangul
+    // / whitespace / default-ignorable run. Mixed-script buffers
+    // (e.g. "Hi " + jamo) bypass composition so the jamo portion
+    // still renders as L+V and the result matches rustybuzz, which
+    // splits the run by script before shaping. Once the script
+    // segmenter lands, this predicate can be tightened to "the
+    // current Hangul sub-run".
+    let compose_enabled = text.chars().all(|c| {
+        let cp = c as u32;
+        matches!(crate::unicode::script_of(c), crate::unicode::Script::Hangul)
+            || c == ' '
+            || (0x200B..=0x200D).contains(&cp)
+            || cp == 0xFEFF
+    });
+    let mut it = text.char_indices().peekable();
+    while let Some((byte_offset, ch)) = it.next() {
+        if !compose_enabled {
+            out.push((byte_offset as u32, ch));
+            continue;
+        }
+        // L jamo range: U+1100..U+1112 (the 19 modern leading
+        // consonants). Extended-A (U+A960..) do NOT compose — they
+        // stay as jamo so ljmo picks them up.
+        let l_index = if (0x1100..=0x1112).contains(&(ch as u32)) {
+            Some((ch as u32) - 0x1100)
+        } else {
+            None
+        };
+        if let Some(l) = l_index {
+            if let Some(&(_, next_ch)) = it.peek() {
+                // V jamo range: U+1161..U+1175 (the 21 modern vowels).
+                if (0x1161..=0x1175).contains(&(next_ch as u32)) {
+                    let v = (next_ch as u32) - 0x1161;
+                    // Peek past V to see if a trailing jamo follows.
+                    // HarfBuzz's rule: only compose when the whole
+                    // run is in the modern range. If an Extended-B T
+                    // (U+D7CB..U+D7FB) follows, *skip* composition so
+                    // the font's ljmo/vjmo/tjmo features can shape
+                    // each jamo on its own. Modern T in 0x11A8..0x11C2
+                    // composes into the LVT syllable.
+                    let mut clone = it.clone();
+                    clone.next(); // skip V
+                    let t_info = match clone.peek() {
+                        Some(&(_, c)) if (0x11A8..=0x11C2).contains(&(c as u32)) => {
+                            Some(Some((c as u32) - 0x11A7))
+                        }
+                        Some(&(_, c)) if (0xD7CB..=0xD7FB).contains(&(c as u32)) => {
+                            // Extended-B T present — abort composition.
+                            Some(None)
+                        }
+                        _ => None,
+                    };
+                    if matches!(t_info, Some(None)) {
+                        // Extended-B T blocks composition; emit each
+                        // jamo as-is.
+                        out.push((byte_offset as u32, ch));
+                        out.push((byte_offset as u32, next_ch));
+                        it.next(); // consume V
+                        // T gets emitted naturally in the next loop
+                        // iteration — do NOT pre-consume.
+                        continue;
+                    }
+                    let t = t_info.and_then(|o| o).unwrap_or(0);
+                    it.next(); // consume V
+                    if t != 0 {
+                        it.next(); // consume modern T
+                    }
+                    let syllable_cp = 0xAC00 + (l * 21 + v) * 28 + t;
+                    if let Some(ch_composed) = core::char::from_u32(syllable_cp) {
+                        if cmap.glyph_id(ch_composed).is_some() {
+                            out.push((byte_offset as u32, ch_composed));
+                            continue;
+                        }
+                    }
+                    // Fallback: emit the jamos as-is.
+                    out.push((byte_offset as u32, ch));
+                    let v_ch = core::char::from_u32(0x1161 + v).unwrap_or(ch);
+                    out.push((byte_offset as u32, v_ch));
+                    if t != 0 {
+                        let t_ch = core::char::from_u32(0x11A7 + t).unwrap_or(ch);
+                        out.push((byte_offset as u32, t_ch));
+                    }
+                    continue;
+                }
+            }
+        }
+        out.push((byte_offset as u32, ch));
+    }
+    out
+}
+
 /// them is malformed.
 // The pipeline is deliberately a straight-line sequence of passes so
 // the order is visible in one place; breaking it into five stage
@@ -234,7 +341,26 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // (reph position, reph mode, GSUB script-tag priority).
     let mut indic_script: Option<crate::unicode::Script> = None;
     let mut has_khmer = false;
-    for (cluster, ch) in text.char_indices() {
+    let mut has_myanmar = false;
+    let mut has_thai = false;
+    let mut has_lao = false;
+    // Hangul Jamo routing only triggers for codepoints in the Jamo
+    // blocks — precomposed syllables (U+AC00..U+D7A3) stay on the
+    // default path. See `is_hangul_jamo` in `src/unicode/mod.rs`.
+    let mut has_hangul_jamo = false;
+    // Preprocess: Hangul Jamo composition. HarfBuzz / rustybuzz
+    // combine L + V (and optionally + T) into a precomposed syllable
+    // (U+AC00..U+D7A3) when the font carries the precomposed glyph
+    // — the standard NFC composition. We pre-iterate the text once
+    // to apply the same rule before the main pipeline. The resulting
+    // `chars` slice is a `(byte_offset, char)` sequence in one-to-one
+    // correspondence with what would normally come out of
+    // `text.char_indices()`, with jamo L+V / L+V+T sequences collapsed
+    // into the matching U+AC00..U+D7A3 codepoint so clusters still map
+    // back to the original UTF-8 stream.
+    let chars: alloc::vec::Vec<(u32, char)> = hangul_compose(text, &cmap);
+    for (cluster, ch) in chars.iter().copied() {
+        let cluster = cluster as usize;
         // Khmer split-vowel decomposition. HarfBuzz's USE
         // preprocessing hook splits U+17C4 / U+17C5 into a
         // pre-base component (sign-e) and a post-base component
@@ -280,10 +406,27 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         glyphs.push(glyph);
         codepoints.push(ch);
         let s = crate::unicode::script_of(ch);
-        if s == crate::unicode::Script::Khmer {
-            has_khmer = true;
-        } else if indic_script.is_none() && s.is_indic() {
-            indic_script = Some(s);
+        match s {
+            crate::unicode::Script::Khmer => {
+                has_khmer = true;
+            }
+            crate::unicode::Script::Myanmar => {
+                has_myanmar = true;
+            }
+            crate::unicode::Script::Thai => {
+                has_thai = true;
+            }
+            crate::unicode::Script::Lao => {
+                has_lao = true;
+            }
+            crate::unicode::Script::Hangul if crate::unicode::is_hangul_jamo(ch) => {
+                has_hangul_jamo = true;
+            }
+            _ => {
+                if indic_script.is_none() && s.is_indic() {
+                    indic_script = Some(s);
+                }
+            }
         }
     }
 
@@ -315,10 +458,26 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // the script-specific lookups still fire on the relevant glyphs;
     // the DFLT fallback inside `apply_*_feature_in_scripts` catches
     // the Latin half.
+    // Khmer stays on DFLT for the *generic* features (`liga`/`calt`/
+    // mark/mkmk) because the USE shaper already applied the Khmer-
+    // specific basic + topographical chains under `khmr` — switching
+    // the generic priority to `khmr` here would double-resolve some
+    // lookups under different LangSys and drift off the 0.1.0 Khmer
+    // parity baseline. Myanmar / Thai / Lao / Old-Hangul have not
+    // shipped yet, so they can route their generic features under
+    // their script tag straight away (matches HarfBuzz).
     let script_priority: &[[u8; 4]] = if has_arabic {
         &[*b"arab", *b"DFLT"]
     } else if has_hebrew {
         &[*b"hebr", *b"DFLT"]
+    } else if has_myanmar {
+        crate::ot::use_shaper::MYANMAR_SCRIPT_PRIORITY
+    } else if has_thai {
+        crate::ot::use_shaper::THAI_SCRIPT_PRIORITY
+    } else if has_lao {
+        crate::ot::use_shaper::LAO_SCRIPT_PRIORITY
+    } else if has_hangul_jamo {
+        crate::ot::use_shaper::HANGUL_SCRIPT_PRIORITY
     } else {
         &[*b"DFLT"]
     };
@@ -359,14 +518,38 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         }
     }
 
-    // Step 1c: Universal Shaping Engine. Khmer routes here; Myanmar /
-    // Thai / Lao / Old Hangul / Tai Tham will land on the same entry
-    // point as their category tables get filled in. Runs the USE
-    // basic + topographical feature sets per-syllable, so the generic
-    // GSUB pass below only has to handle `liga`, `calt`, `ccmp` —
-    // features that are orthogonal to script-specific reordering.
+    // Step 1c: Universal Shaping Engine. Khmer, Myanmar, Thai, Lao,
+    // and Old-Hangul (Jamo) all route here with their own feature
+    // lists + script-tag priorities. Tai Tham / Buginese / Cham
+    // land on the same dispatch as their category tables are added.
+    // Runs the USE basic + topographical feature sets per-syllable,
+    // so the generic GSUB pass below only has to handle `liga`,
+    // `calt`, `ccmp` for features that are orthogonal to script-
+    // specific reordering.
     if has_khmer {
         crate::ot::use_shaper::shape_khmer(gsub.as_ref(), gdef.as_ref(), &codepoints, &mut glyphs);
+    }
+    if has_myanmar {
+        crate::ot::use_shaper::shape_myanmar(
+            gsub.as_ref(),
+            gdef.as_ref(),
+            &codepoints,
+            &mut glyphs,
+        );
+    }
+    if has_thai {
+        crate::ot::use_shaper::shape_thai(gsub.as_ref(), gdef.as_ref(), &codepoints, &mut glyphs);
+    }
+    if has_lao {
+        crate::ot::use_shaper::shape_lao(gsub.as_ref(), gdef.as_ref(), &codepoints, &mut glyphs);
+    }
+    if has_hangul_jamo {
+        crate::ot::use_shaper::shape_hangul(
+            gsub.as_ref(),
+            gdef.as_ref(),
+            &codepoints,
+            &mut glyphs,
+        );
     }
 
     if let Some(ref gsub) = gsub {
@@ -544,6 +727,19 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 *b"dist",
                 crate::ot::use_shaper::KHMER_SCRIPT_PRIORITY,
+                &var,
+            );
+        }
+        // Myanmar `dist` — same role as Khmer's pre-mark distance
+        // tweak, routed under the Myanmar script tag so the
+        // script-specific LangSys picks its own lookup.
+        if has_myanmar && !feature_disabled(features, *b"dist") {
+            apply_gpos_feature_in_scripts_with_var(
+                gpos,
+                &mut glyphs,
+                gdef.as_ref(),
+                *b"dist",
+                crate::ot::use_shaper::MYANMAR_SCRIPT_PRIORITY,
                 &var,
             );
         }

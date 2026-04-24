@@ -50,6 +50,23 @@ pub enum Script {
     Sinhala,
     /// Khmer. Universal Shaping Engine (USE) applies.
     Khmer,
+    /// Myanmar (Burmese, Shan, Mon). Universal Shaping Engine (USE)
+    /// applies. Covers main block U+1000..U+109F plus Myanmar
+    /// Extended-A U+AA60..U+AA7F and Extended-B U+A9E0..U+A9FF.
+    Myanmar,
+    /// Thai. Routed through the USE pipeline — no coeng-style
+    /// subscripts but the same mark reorder + feature-chain shape.
+    /// Covers U+0E00..U+0E7F.
+    Thai,
+    /// Lao. Structurally near-identical to Thai; routed through USE.
+    /// Covers U+0E80..U+0EFF.
+    Lao,
+    /// Hangul. Modern precomposed syllables (U+AC00..U+D7A3) reach
+    /// the shaper through cmap and the default pipeline; Jamo-
+    /// decomposed text (U+1100..U+11FF, U+A960..U+A97F, U+D7B0..U+D7FF)
+    /// routes through USE so `ljmo` / `vjmo` / `tjmo` see the L / V / T
+    /// jamo in logical order.
+    Hangul,
     /// Anything else — returned when sigilbuzz has no specialised
     /// table for the codepoint's script.
     Other,
@@ -72,6 +89,19 @@ impl Script {
                 | Script::Kannada
                 | Script::Malayalam
                 | Script::Sinhala
+        )
+    }
+
+    /// Returns `true` if the script routes through the Universal
+    /// Shaping Engine pipeline. Khmer, Myanmar, Thai, Lao, and the
+    /// Jamo subset of Hangul all share the USE state machine — each
+    /// with its own category table and feature list, but the same
+    /// segment / reorder / basic+topographical dispatch.
+    #[must_use]
+    pub const fn is_use(self) -> bool {
+        matches!(
+            self,
+            Script::Khmer | Script::Myanmar | Script::Thai | Script::Lao | Script::Hangul
         )
     }
 }
@@ -121,12 +151,39 @@ pub const fn script_of(ch: char) -> Script {
         0x0D00..=0x0D7F => Script::Malayalam,
         // Sinhala
         0x0D80..=0x0DFF => Script::Sinhala,
+        // Thai
+        0x0E00..=0x0E7F => Script::Thai,
+        // Lao
+        0x0E80..=0x0EFF => Script::Lao,
+        // Myanmar (main + Extended-A + Extended-B)
+        0x1000..=0x109F | 0xAA60..=0xAA7F | 0xA9E0..=0xA9FF => Script::Myanmar,
+        // Hangul Jamo + Jamo Extended-A + Jamo Extended-B +
+        // precomposed Hangul Syllables + Hangul Compatibility Jamo.
+        // The USE routing in shape.rs only triggers for the Jamo
+        // ranges; precomposed syllables flow through the default
+        // pipeline — matches HarfBuzz / rustybuzz.
+        0x1100..=0x11FF
+        | 0xA960..=0xA97F
+        | 0xAC00..=0xD7A3
+        | 0xD7B0..=0xD7FF
+        | 0x3130..=0x318F => Script::Hangul,
         // Khmer + Khmer Symbols
         0x1780..=0x17FF | 0x19E0..=0x19FF => Script::Khmer,
         // CJK unified ideographs + extensions A/B + Hiragana + Katakana
         0x3040..=0x309F | 0x30A0..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF => Script::Han,
         _ => Script::Other,
     }
+}
+
+/// Returns `true` if the codepoint is a Hangul Jamo (Leading / Vowel /
+/// Trailing / Extended-A / Extended-B) — the subset of Hangul that USE
+/// reorders via the `ljmo`/`vjmo`/`tjmo` features. Precomposed syllables
+/// (U+AC00..U+D7A3) and Compatibility Jamo (U+3130..U+318F) stay on the
+/// default path.
+#[must_use]
+pub const fn is_hangul_jamo(ch: char) -> bool {
+    let cp = ch as u32;
+    matches!(cp, 0x1100..=0x11FF | 0xA960..=0xA97F | 0xD7B0..=0xD7FF)
 }
 
 #[cfg(test)]
@@ -215,8 +272,8 @@ mod tests {
 
     #[test]
     fn unknown_scripts_fall_through_to_other() {
-        // Thai — not in the bootstrap table.
-        assert_eq!(script_of('ก'), Script::Other);
+        // Armenian — not in the bootstrap table.
+        assert_eq!(script_of('\u{0531}'), Script::Other);
     }
 
     #[test]
@@ -228,5 +285,68 @@ mod tests {
         assert_eq!(script_of('\u{17CA}'), Script::Khmer);
         assert_eq!(script_of('\u{17DB}'), Script::Khmer);
         assert_eq!(script_of('\u{19E0}'), Script::Khmer);
+    }
+
+    #[test]
+    fn classifies_myanmar() {
+        // ကာ — U+1000 (consonant ka) + U+102C (sign aa).
+        assert_eq!(script_of('\u{1000}'), Script::Myanmar);
+        assert_eq!(script_of('\u{102C}'), Script::Myanmar);
+        // Myanmar Extended-A (e.g. Shan sign maun).
+        assert_eq!(script_of('\u{AA60}'), Script::Myanmar);
+        // Myanmar Extended-B.
+        assert_eq!(script_of('\u{A9E0}'), Script::Myanmar);
+    }
+
+    #[test]
+    fn classifies_thai() {
+        // ก U+0E01 (consonant ko kai), ั U+0E31 (mai han-akat).
+        assert_eq!(script_of('\u{0E01}'), Script::Thai);
+        assert_eq!(script_of('\u{0E31}'), Script::Thai);
+        // Block end — Thai digits.
+        assert_eq!(script_of('\u{0E50}'), Script::Thai);
+    }
+
+    #[test]
+    fn classifies_lao() {
+        // ກ U+0E81 (consonant ko), ັ U+0EB1 (mai kan).
+        assert_eq!(script_of('\u{0E81}'), Script::Lao);
+        assert_eq!(script_of('\u{0EB1}'), Script::Lao);
+    }
+
+    #[test]
+    fn classifies_hangul() {
+        // Jamo: leading ᄀ (U+1100), vowel ᅡ (U+1161), trailing ᆨ
+        // (U+11A8). Precomposed 가 (U+AC00) also in the Hangul
+        // bucket — `is_hangul_jamo` separates the USE-routed subset.
+        assert_eq!(script_of('\u{1100}'), Script::Hangul);
+        assert_eq!(script_of('\u{1161}'), Script::Hangul);
+        assert_eq!(script_of('\u{11A8}'), Script::Hangul);
+        assert_eq!(script_of('\u{AC00}'), Script::Hangul);
+        assert_eq!(script_of('\u{A960}'), Script::Hangul);
+        assert_eq!(script_of('\u{D7B0}'), Script::Hangul);
+    }
+
+    #[test]
+    fn hangul_jamo_predicate_only_matches_jamo_blocks() {
+        assert!(is_hangul_jamo('\u{1100}'));
+        assert!(is_hangul_jamo('\u{11A8}'));
+        assert!(is_hangul_jamo('\u{A960}'));
+        assert!(is_hangul_jamo('\u{D7B0}'));
+        // Precomposed syllables are NOT jamo.
+        assert!(!is_hangul_jamo('\u{AC00}'));
+        // Compatibility jamo are NOT the USE-routed block.
+        assert!(!is_hangul_jamo('\u{3131}'));
+    }
+
+    #[test]
+    fn is_use_covers_all_use_scripts() {
+        assert!(Script::Khmer.is_use());
+        assert!(Script::Myanmar.is_use());
+        assert!(Script::Thai.is_use());
+        assert!(Script::Lao.is_use());
+        assert!(Script::Hangul.is_use());
+        assert!(!Script::Latin.is_use());
+        assert!(!Script::Devanagari.is_use());
     }
 }
