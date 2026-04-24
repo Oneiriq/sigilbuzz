@@ -149,13 +149,13 @@ const CORPUS: &[Case] = &[
         compare_rustybuzz: true,
     },
     // ก + sara am (U+0E33). HarfBuzz's Thai shaper decomposes
-    // sara am into nikkhahit + sara aa via PUA; sigilbuzz treats
-    // it as an atomic post-base vowel. The resulting glyph stream
-    // diverges — tracked as a follow-up (see PR body).
+    // sara am into nikkhahit + sara aa at buffer-prep time;
+    // sigilbuzz mirrors that in shape.rs so the cmap lookup lands
+    // on the decomposed pair and GSUB/GPOS see what rustybuzz sees.
     Case {
         text: "\u{0E01}\u{0E33}",
-        note: "kam (sara am) — decomposition follow-up",
-        compare_rustybuzz: false,
+        note: "kam (sara am, PUA-decomposed)",
+        compare_rustybuzz: true,
     },
 ];
 

@@ -374,6 +374,31 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             }
             continue;
         }
+        // Thai sara am (U+0E33) and Lao lao am (U+0EB3). HarfBuzz
+        // decomposes these composed vowels into
+        // `nikkhahit / niggahita + sara aa` at buffer-prep time,
+        // before shape enters the state machine — the font's
+        // mark-positioning tables target the decomposed pair, not
+        // the composed codepoint. We do the same here so the cmap
+        // lookup lands on the two components and every downstream
+        // pass (GSUB, GPOS, cluster merge) sees the decomposed form
+        // rustybuzz does.
+        if matches!(ch, '\u{0E33}' | '\u{0EB3}') {
+            let (pre, post) = if ch == '\u{0E33}' {
+                // Thai sara am → nikkhahit (U+0E4D) + sara aa (U+0E32).
+                ('\u{0E4D}', '\u{0E32}')
+            } else {
+                // Lao lao am → niggahita (U+0ECD) + sara aa (U+0EB2).
+                ('\u{0ECD}', '\u{0EB2}')
+            };
+            for &component in &[pre, post] {
+                let gid = u32::from(cmap.glyph_id(component).unwrap_or(0));
+                let glyph = Glyph::new(gid, cluster as u32);
+                glyphs.push(glyph);
+                codepoints.push(component);
+            }
+            continue;
+        }
         // Tamil and Sinhala split-matra decomposition. These matras
         // decompose into a pre-base + post-base (occasionally
         // three-part) sequence. HarfBuzz's Indic shaper runs this
