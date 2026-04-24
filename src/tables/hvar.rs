@@ -120,6 +120,16 @@ fn read_index_map(data: &[u8], start: usize, glyph_id: u16) -> Option<(u16, u16)
         _ => return None,
     };
 
+    // A DeltaSetIndexMap with no entries cannot produce a valid
+    // (outer, inner) pair; treat it as "glyph has no variation
+    // mapping" so the caller emits a zero delta. Without this
+    // guard, `map_count.saturating_sub(1)` quietly collapses to 0
+    // and the decoder reads the first entry_bytes after the header
+    // as if they were a real entry — which they are not.
+    if map_count == 0 {
+        return None;
+    }
+
     // entryFormat bits 4-5: one less than the number of bytes per
     // mapping entry (1..=4). Bits 0-3: one less than the number
     // of inner-index bits.
@@ -228,5 +238,26 @@ mod tests {
         let mut bytes = build_hvar_without_map(&ivs);
         bytes[0..2].copy_from_slice(&2u16.to_be_bytes());
         assert!(matches!(Hvar::parse(&bytes), Err(Error::Malformed { .. })));
+    }
+
+    /// A DeltaSetIndexMap with `mapCount = 0` carries no entries, so
+    /// every glyph must yield "no mapping" (the caller then emits a
+    /// zero delta). Before the guard landed, `map_count.saturating_sub(1)`
+    /// collapsed to 0 and the decoder read the first `entry_bytes`
+    /// after the header as if they were a real entry, producing a
+    /// bogus `(outer, inner)` pair that the ItemVariationStore would
+    /// happily treat as a real variation index.
+    #[test]
+    fn index_map_with_zero_map_count_yields_no_mapping() {
+        // format 0 (u16 mapCount); entryFormat with 1-byte entries,
+        // 1 inner bit; mapCount = 0; then a slack byte the decoder
+        // would otherwise interpret as the first entry's payload.
+        let mut data = Vec::new();
+        data.push(0u8);
+        data.push(0u8);
+        data.extend_from_slice(&0u16.to_be_bytes());
+        data.push(0xAB);
+        assert!(read_index_map(&data, 0, 0).is_none());
+        assert!(read_index_map(&data, 0, 999).is_none());
     }
 }
