@@ -16,6 +16,7 @@ pub mod gdef;
 pub mod glyf;
 pub mod gpos;
 pub mod gsub;
+pub mod gvar;
 pub mod head;
 pub mod hhea;
 pub mod hmtx;
@@ -37,6 +38,7 @@ pub use gpos::{
     ValueRecord,
 };
 pub use gsub::{Alternate, ChainContext, Gsub, Ligature, Multiple, Single};
+pub use gvar::{Gvar, PointDelta};
 pub use head::{Head, IndexToLocFormat};
 pub use hhea::Hhea;
 pub use hmtx::Hmtx;
@@ -84,4 +86,6 @@ pub mod tag {
     pub const AVAR: [u8; 4] = *b"avar";
     /// `HVAR` — horizontal metrics variations.
     pub const HVAR: [u8; 4] = *b"HVAR";
+    /// `gvar` — glyph variations (per-point outline deltas).
+    pub const GVAR: [u8; 4] = *b"gvar";
 }
