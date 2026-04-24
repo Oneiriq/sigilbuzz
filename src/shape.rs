@@ -173,6 +173,116 @@ pub struct Feature {
 /// supports it; unknown tags are accepted and ignored rather than
 /// returning an error.
 ///
+/// Pre-iterates `text` and applies Hangul NFC jamo composition in a
+/// single pass: a Leading jamo (L) followed by a Vowel jamo (V) and
+/// optionally a Trailing jamo (T) collapses into the matching
+/// precomposed syllable in U+AC00..U+D7A3 *when* the font carries a
+/// cmap entry for the precomposed codepoint. HarfBuzz / rustybuzz do
+/// exactly this, so matching the behaviour is mandatory for byte-
+/// parity on modern Korean corpora.
+///
+/// Extended-B trailing jamo (U+D7CB..U+D7FB) abort composition of
+/// the whole L+V+T triple so the font's `ljmo` / `vjmo` / `tjmo`
+/// features can shape each jamo on its own — matches rustybuzz.
+///
+/// Returns a vector of `(byte_offset, char)` pairs that replaces the
+/// normal `text.char_indices()` sequence in the main shaping loop.
+/// The byte offset is the offset of the FIRST codepoint in the
+/// composed cluster — the L for an L+V / L+V+T composition — so
+/// downstream cluster tracking still maps glyphs back to the
+/// original UTF-8 stream.
+fn hangul_compose(
+    text: &str,
+    cmap: &crate::tables::cmap::Cmap<'_>,
+) -> alloc::vec::Vec<(u32, char)> {
+    let mut out = alloc::vec::Vec::with_capacity(text.len());
+    // Gate: HarfBuzz / rustybuzz select the Hangul shaper on a
+    // per-run basis and the Hangul preprocessor (the NFC compose)
+    // runs only when that shaper is active. sigilbuzz's segmenter
+    // splits scripts but the Hangul preprocessor still has to see
+    // the segment's L+V(+T) window to run — so we gate on "the
+    // buffer is Hangul / whitespace / default-ignorable only".
+    // Mixed-script buffers (e.g. "Hi " + jamo) bypass composition;
+    // the jamo runs through its own segment under `hang` but stays
+    // as L + V glyphs, matching rustybuzz.
+    let compose_enabled = text.chars().all(|c| {
+        let cp = c as u32;
+        matches!(crate::unicode::script_of(c), crate::unicode::Script::Hangul)
+            || c == ' '
+            || (0x200B..=0x200D).contains(&cp)
+            || cp == 0xFEFF
+    });
+    let mut it = text.char_indices().peekable();
+    while let Some((byte_offset, ch)) = it.next() {
+        if !compose_enabled {
+            out.push((byte_offset as u32, ch));
+            continue;
+        }
+        // L jamo range: U+1100..U+1112 (the 19 modern leading
+        // consonants). Extended-A (U+A960..) do NOT compose — they
+        // stay as jamo so `ljmo` picks them up.
+        let l_index = if (0x1100..=0x1112).contains(&(ch as u32)) {
+            Some((ch as u32) - 0x1100)
+        } else {
+            None
+        };
+        if let Some(l) = l_index {
+            if let Some(&(_, next_ch)) = it.peek() {
+                // V jamo range: U+1161..U+1175 (21 modern vowels).
+                if (0x1161..=0x1175).contains(&(next_ch as u32)) {
+                    let v = (next_ch as u32) - 0x1161;
+                    // Peek past V to detect the trailing jamo, if any.
+                    // HarfBuzz's rule: only compose when the whole
+                    // run is in the modern range. Extended-B T
+                    // (U+D7CB..U+D7FB) aborts composition entirely.
+                    let mut clone = it.clone();
+                    clone.next(); // skip V
+                    let t_info = match clone.peek() {
+                        Some(&(_, c)) if (0x11A8..=0x11C2).contains(&(c as u32)) => {
+                            Some(Some((c as u32) - 0x11A7))
+                        }
+                        Some(&(_, c)) if (0xD7CB..=0xD7FB).contains(&(c as u32)) => Some(None),
+                        _ => None,
+                    };
+                    if matches!(t_info, Some(None)) {
+                        // Extended-B T blocks composition; emit each
+                        // jamo as-is. L and V are consumed here; the
+                        // T gets emitted naturally on the next
+                        // iteration.
+                        out.push((byte_offset as u32, ch));
+                        out.push((byte_offset as u32, next_ch));
+                        it.next(); // consume V
+                        continue;
+                    }
+                    let t = t_info.and_then(|o| o).unwrap_or(0);
+                    it.next(); // consume V
+                    if t != 0 {
+                        it.next(); // consume modern T
+                    }
+                    let syllable_cp = 0xAC00 + (l * 21 + v) * 28 + t;
+                    if let Some(ch_composed) = core::char::from_u32(syllable_cp) {
+                        if cmap.glyph_id(ch_composed).is_some() {
+                            out.push((byte_offset as u32, ch_composed));
+                            continue;
+                        }
+                    }
+                    // Fallback: emit each jamo as-is.
+                    out.push((byte_offset as u32, ch));
+                    let v_ch = core::char::from_u32(0x1161 + v).unwrap_or(ch);
+                    out.push((byte_offset as u32, v_ch));
+                    if t != 0 {
+                        let t_ch = core::char::from_u32(0x11A7 + t).unwrap_or(ch);
+                        out.push((byte_offset as u32, t_ch));
+                    }
+                    continue;
+                }
+            }
+        }
+        out.push((byte_offset as u32, ch));
+    }
+    out
+}
+
 /// # Errors
 ///
 /// Returns an error if the font is missing any of the tables required
@@ -229,7 +339,20 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let space_gid = u32::from(cmap.glyph_id('\u{0020}').unwrap_or(0));
     let mut glyphs: Vec<Glyph> = Vec::with_capacity(text.len());
     let mut codepoints: Vec<char> = Vec::with_capacity(text.len());
-    for (cluster, ch) in text.char_indices() {
+    // Preprocess Hangul Jamo NFC composition: L + V (+ optional T)
+    // sequences collapse into the precomposed syllable in
+    // U+AC00..U+D7A3 when the font carries a cmap entry for the
+    // precomposed codepoint. The Jamo sub-blocks outside the modern
+    // compositional range (Extended-A L, Extended-B T) suppress
+    // composition so the font's `ljmo` / `vjmo` / `tjmo` features can
+    // shape each jamo independently — matches HarfBuzz / rustybuzz.
+    //
+    // Returns `(byte_offset, char)` pairs; the byte offset is always
+    // the first codepoint of the composed cluster, so cluster
+    // tracking stays aligned with the original UTF-8 stream.
+    let composed_chars: Vec<(u32, char)> = hangul_compose(text, &cmap);
+    for (cluster, ch) in composed_chars.iter().copied() {
+        let cluster = cluster as usize;
         // Khmer split-vowel decomposition. HarfBuzz's USE
         // preprocessing hook splits U+17C4 / U+17C5 into a
         // pre-base component (sign-e) and a post-base component
@@ -364,6 +487,46 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         }
         if seg.script == Script::Khmer {
             crate::ot::use_shaper::shape_khmer(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::Myanmar {
+            crate::ot::use_shaper::shape_myanmar(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::Thai {
+            crate::ot::use_shaper::shape_thai(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::Lao {
+            crate::ot::use_shaper::shape_lao(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        // Hangul routes through USE only for Jamo-decomposed text.
+        // Precomposed syllables (U+AC00..U+D7A3) still pass through
+        // the default GSUB/GPOS chain — `ljmo`/`vjmo`/`tjmo` are
+        // no-ops on them, so running the pipeline is harmless but
+        // wasteful.  Gate on at least one Jamo codepoint in the
+        // segment's codepoint slice.
+        if seg.script == Script::Hangul
+            && seg_cps.iter().any(|&c| crate::unicode::is_hangul_jamo(c))
+        {
+            crate::ot::use_shaper::shape_hangul(
                 gsub.as_ref(),
                 gdef.as_ref(),
                 seg_cps,

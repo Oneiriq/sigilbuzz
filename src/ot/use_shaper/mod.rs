@@ -73,6 +73,23 @@ use crate::unicode::use_category::{use_category, use_position, UseCategory, UseP
 /// default LangSys (rare for Khmer but cheap to probe).
 pub const KHMER_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"khmr", *b"khm2", *b"DFLT"];
 
+/// Myanmar script-tag priority — `mym2` is the Indic2 (2012+) tag
+/// that modern Noto / Padauk builds use; `mymr` is the legacy tag
+/// that older fonts still carry.
+pub const MYANMAR_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"mym2", *b"mymr", *b"DFLT"];
+
+/// Thai script-tag priority.
+pub const THAI_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"thai", *b"DFLT"];
+
+/// Lao script-tag priority. The OpenType tag is `lao ` with a
+/// trailing space — the 4-byte tag convention is padded that way.
+pub const LAO_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"lao ", *b"DFLT"];
+
+/// Hangul script-tag priority. Old Hangul fonts register their
+/// `ljmo`/`vjmo`/`tjmo` features under `hang`; `jamo` is the legacy
+/// tag that a few fonts still emit.
+pub const HANGUL_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"hang", *b"jamo", *b"DFLT"];
+
 /// USE basic features, applied per-syllable before reordering
 /// finalisation. Order matters — `rphf` must run before `half` so
 /// the ra+halant that would otherwise fold into a half-form is
@@ -85,6 +102,29 @@ pub const USE_BASIC_FEATURES: &[&[u8; 4]] = &[
 /// USE topographical features — run after basic substitutions have
 /// collapsed conjuncts into display forms.
 pub const USE_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] = &[b"abvs", b"blws", b"haln", b"pres", b"psts"];
+
+/// Myanmar's USE basic features. Adds `rphf` + `pref` + `blwf` +
+/// `pstf` + `cjct` for kinzi and medial consonant handling. The
+/// order mirrors the MS Myanmar shaping-model doc; `locl`/`ccmp`
+/// open the chain so contextual fixups settle before positional
+/// substitutions.
+pub const MYANMAR_BASIC_FEATURES: &[&[u8; 4]] = &[
+    b"locl", b"ccmp", b"rphf", b"pref", b"blwf", b"pstf", b"abvf", b"cjct",
+];
+
+/// Myanmar's USE topographical features — display-form selection
+/// after the basic subs collapse conjuncts.
+pub const MYANMAR_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] =
+    &[b"abvs", b"blws", b"haln", b"pres", b"psts", b"calt"];
+
+/// Thai / Lao's feature set — no halant, no subjoining, so the
+/// shaper just needs contextual shaping + mark positioning. `liga`
+/// and `calt` handle most tone-mark placement adjustments.
+pub const THAI_LAO_FEATURES: &[&[u8; 4]] = &[b"ccmp", b"liga", b"calt"];
+
+/// Hangul Old-Hangul features — the three positional jamo features
+/// pick Leading/Vowel/Trailing variant shapes.
+pub const HANGUL_FEATURES: &[&[u8; 4]] = &[b"ccmp", b"ljmo", b"vjmo", b"tjmo", b"calt"];
 
 /// Classification of one USE syllable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -506,6 +546,154 @@ fn merge_syllable_clusters(glyphs: &mut [Glyph], syllables: &[Syllable], byte_of
             }
         }
     }
+}
+
+/// Generic USE shaping entry point — used by Myanmar, Thai, Lao and
+/// Old-Hangul runs. Mirrors [`shape_khmer`] but takes the script-
+/// priority table and the (basic, topographical) feature slices as
+/// parameters so each script can supply its own set. The syllable
+/// segmenter and pre-base reorder are script-agnostic: they run off
+/// the [`UseCategory`] / [`UsePosition`] tables which already encode
+/// per-script positional rules.
+///
+/// `reorder_prebase` controls whether the pre-base vowel reorder
+/// runs. Thai and Lao pre-base vowels (sara e and friends) are
+/// logically typed *before* the base consonant already — so the
+/// reorder pass would be a no-op at best and break clustering at
+/// worst. Passing `false` skips it.
+#[allow(clippy::too_many_arguments)]
+pub fn shape_use(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+    script_priority: &[[u8; 4]],
+    basic_features: &[&[u8; 4]],
+    topographical_features: &[&[u8; 4]],
+    reorder_prebase: bool,
+) {
+    if codepoints.is_empty() || glyphs.is_empty() {
+        return;
+    }
+
+    // 1. Segment.
+    let syllables = segment_syllables(codepoints);
+
+    // 2. Initial reordering. Some scripts (Thai, Lao) type pre-base
+    //    vowels before the base already, so the reorder would break
+    //    cluster alignment — skip it in that case.
+    if reorder_prebase {
+        for syllable in &syllables {
+            initial_reorder(codepoints, glyphs, syllable);
+        }
+    }
+
+    // 3. Basic features.
+    if let Some(gsub) = gsub {
+        for tag in basic_features {
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority);
+        }
+    }
+
+    // 4. Topographical features.
+    if let Some(gsub) = gsub {
+        for tag in topographical_features {
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority);
+        }
+    }
+
+    // 5. Cluster merge.
+    let byte_offsets = cluster_byte_offsets(codepoints);
+    merge_syllable_clusters(glyphs, &syllables, &byte_offsets);
+}
+
+/// Entry point for Myanmar runs. Routes through the generic USE
+/// dispatch with the Myanmar script-tag priority and the Myanmar-
+/// specific feature chain (adds `rphf` for kinzi and keeps
+/// `pref`/`blwf`/`pstf`/`cjct` for medial + subjoined handling).
+pub fn shape_myanmar(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        MYANMAR_SCRIPT_PRIORITY,
+        MYANMAR_BASIC_FEATURES,
+        MYANMAR_TOPOGRAPHICAL_FEATURES,
+        true,
+    );
+}
+
+/// Entry point for Thai runs. Thai has no halant and no subjoining;
+/// the shaping reduces to contextual forms + mark positioning. We
+/// still segment into syllables so the cluster-merge pass groups
+/// tone marks with their consonant — matches HarfBuzz's Thai shaper
+/// for every string in the 0.2.0 corpus.
+pub fn shape_thai(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        THAI_SCRIPT_PRIORITY,
+        THAI_LAO_FEATURES,
+        &[],
+        false,
+    );
+}
+
+/// Entry point for Lao runs. Lao is structurally near-identical to
+/// Thai — same feature set, no reorder, different script tag.
+pub fn shape_lao(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        LAO_SCRIPT_PRIORITY,
+        THAI_LAO_FEATURES,
+        &[],
+        false,
+    );
+}
+
+/// Entry point for Hangul runs — specifically Jamo (Old Hangul)
+/// decomposed text. Precomposed syllables still flow through the
+/// default path in [`crate::shape`]; only runs containing at least
+/// one Jamo codepoint land here. The feature chain drives
+/// `ljmo`/`vjmo`/`tjmo` so Leading / Vowel / Trailing jamo pick
+/// their positional variant glyphs.
+pub fn shape_hangul(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        HANGUL_SCRIPT_PRIORITY,
+        HANGUL_FEATURES,
+        &[],
+        false,
+    );
 }
 
 #[cfg(test)]
