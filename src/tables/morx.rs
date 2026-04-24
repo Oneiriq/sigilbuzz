@@ -391,7 +391,11 @@ fn apply_subtable(body: &SubtableBody<'_>, glyphs: &mut Vec<u16>, origins: &mut 
 
 // --- Type 0: Rearrangement ---
 
-fn apply_rearrangement(state: &StateTableHeader<'_>, glyphs: &mut Vec<u16>, origins: &mut Vec<usize>) {
+fn apply_rearrangement(
+    state: &StateTableHeader<'_>,
+    glyphs: &mut [u16],
+    origins: &mut [usize],
+) {
     let mut cur_state: u16 = 0;
     let mut i = 0;
     let mut first: Option<usize> = None;
@@ -446,31 +450,16 @@ fn rearrange(
     if len < 2 {
         return;
     }
-    match verb {
-        1 => {
-            // Ax → xA : swap the first with the last one.
-            glyphs.swap(first, last);
-            origins.swap(first, last);
-        }
-        2 => {
-            // xD → Dx : swap the last with a trailing element.
-            // For a 2-glyph window these are the same swap.
-            if len >= 2 {
-                glyphs.swap(first, last);
-                origins.swap(first, last);
-            }
-        }
-        3 => {
-            // AxD → DxA
-            if len >= 2 {
-                glyphs.swap(first, last);
-                origins.swap(first, last);
-            }
-        }
-        _ => {
-            // Rarer verbs handle 3-, 4-, 5-element windows. A
-            // conservative no-op is safer than a wrong permutation.
-        }
+    // Rearrangement verbs 1 / 2 / 3 all reduce to the same single
+    // swap in sigilbuzz's two-element window coverage — a
+    // conservative subset. Rarer verbs (4..=15) handle 3- to
+    // 5-element windows and stay no-op until a real font needs them,
+    // because producing a wrong permutation would corrupt the glyph
+    // stream worse than leaving it alone.
+    let _ = len;
+    if let 1..=3 = verb {
+        glyphs.swap(first, last);
+        origins.swap(first, last);
     }
 }
 
@@ -668,12 +657,20 @@ fn perform_ligature_action(
         ]);
 
         let raw_off = action & LIG_ACTION_OFFSET_MASK;
-        let signed_off = if action & LIG_ACTION_OFFSET_SIGN != 0 {
-            // Sign-extend from bit 29 to 32 so a negative offset
-            // becomes the right i32.
-            (raw_off | 0xC000_0000) as i32
+        // Sign-extend from the 30-bit signed offset field to i32. Do
+        // the arithmetic with two's-complement-safe casts so clippy's
+        // cast_possible_wrap stays happy — we actively want the wrap,
+        // that is the point of the conversion.
+        let signed_off: i32 = if action & LIG_ACTION_OFFSET_SIGN != 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                (raw_off | 0xC000_0000) as i32
+            }
         } else {
-            raw_off as i32
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                raw_off as i32
+            }
         };
         let glyph_id = i32::from(glyphs[stack_top]);
         let comp_idx = glyph_id + signed_off;
@@ -681,7 +678,7 @@ fn perform_ligature_action(
         let Some(comp_bytes) = components.get(comp_byte_off..comp_byte_off + 2) else {
             return;
         };
-        let comp_val = u16::from_be_bytes([comp_bytes[0], comp_bytes[1]]) as i32;
+        let comp_val = i32::from(u16::from_be_bytes([comp_bytes[0], comp_bytes[1]]));
         offset = offset.wrapping_add(comp_val);
 
         if action & LIG_ACTION_LAST != 0 {
@@ -807,9 +804,8 @@ mod tests {
         use alloc::vec;
 
         let classes = build_lookup_format6(&[(f_gid, 4), (i_gid, 5)]);
-        let mut body: Vec<u8> = vec![];
         // Header placeholder (16B) + 12B extension.
-        body.resize(28, 0);
+        let mut body: Vec<u8> = vec![0; 28];
 
         let class_off = body.len();
         body.extend_from_slice(&classes);
@@ -822,11 +818,12 @@ mod tests {
         let n_classes = 6u16;
         let n_states = 2u16;
         // state rows
-        let mut row = vec![0u16; n_classes as usize * n_states as usize];
+        let nc = n_classes as usize;
+        let mut row = vec![0u16; nc * n_states as usize];
         // State 0 : class 4 (f) -> entry 1, else entry 0
-        row[0 * n_classes as usize + 4] = 1;
+        row[4] = 1;
         // State 1 : class 5 (i) -> entry 2, else entry 0
-        row[1 * n_classes as usize + 5] = 2;
+        row[nc + 5] = 2;
         for v in &row {
             body.extend_from_slice(&v.to_be_bytes());
         }

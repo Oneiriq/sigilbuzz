@@ -120,41 +120,40 @@ impl<'a> Kerx<'a> {
                 continue;
             }
 
-            match format {
-                0 => {
-                    // Format 0 body: u32 nPairs + 3 u32 search hints.
-                    let body_start = r.position();
-                    if body_start + 16 > sub_end {
-                        return Err(Error::Truncated {
-                            offset: body_start,
-                            context: "kerx format 0 header",
-                        });
-                    }
-                    let n_pairs = r.read_u32()?;
-                    r.skip(12)?; // searchRange, entrySelector, rangeShift
-                    let pairs_off = r.position();
-                    let pairs_bytes = (n_pairs as usize).saturating_mul(6);
-                    let required = pairs_off.checked_add(pairs_bytes).ok_or(Error::Malformed {
-                        offset: pairs_off,
-                        context: "kerx format 0 pairs overflow",
-                    })?;
-                    if required > sub_end {
-                        return Err(Error::Truncated {
-                            offset: required,
-                            context: "kerx format 0 pairs exceed subtable",
-                        });
-                    }
-                    subtables.push(Format0 {
-                        data,
-                        pairs_off,
-                        n_pairs,
+            // Format 0 is the common case; formats 1 (state table),
+            // 2 (two-class), 4 (control points / anchors), and 6
+            // (indexed class kerning) all exist in the spec but are
+            // rare — sigilbuzz skips them silently until a real font
+            // exercises the path, so the seek to `sub_end` below
+            // keeps later subtables correctly aligned.
+            if format == 0 {
+                // Format 0 body: u32 nPairs + 3 u32 search hints.
+                let body_start = r.position();
+                if body_start + 16 > sub_end {
+                    return Err(Error::Truncated {
+                        offset: body_start,
+                        context: "kerx format 0 header",
                     });
                 }
-                // Format 1 (state table), 2 (two-class), 4 (control
-                // points / anchors), 6 (indexed class kerning) all
-                // exist but are rare; we skip them silently until a
-                // real font exercises the path.
-                _ => {}
+                let n_pairs = r.read_u32()?;
+                r.skip(12)?; // searchRange, entrySelector, rangeShift
+                let pairs_off = r.position();
+                let pairs_bytes = (n_pairs as usize).saturating_mul(6);
+                let required = pairs_off.checked_add(pairs_bytes).ok_or(Error::Malformed {
+                    offset: pairs_off,
+                    context: "kerx format 0 pairs overflow",
+                })?;
+                if required > sub_end {
+                    return Err(Error::Truncated {
+                        offset: required,
+                        context: "kerx format 0 pairs exceed subtable",
+                    });
+                }
+                subtables.push(Format0 {
+                    data,
+                    pairs_off,
+                    n_pairs,
+                });
             }
 
             r.seek(sub_end)?;
