@@ -53,9 +53,14 @@ pub const fn script_of(ch: char) -> Script {
         0x0370..=0x03FF | 0x1F00..=0x1FFF => Script::Greek,
         // Cyrillic + supplements
         0x0400..=0x052F => Script::Cyrillic,
-        // Hebrew
-        0x0590..=0x05FF => Script::Hebrew,
-        // Arabic + supplements
+        // Hebrew — main block plus the Hebrew presentation forms
+        // (U+FB1D..U+FB4F). Alphabetic Presentation Forms splits
+        // between Hebrew (U+FB1D..U+FB4F) and Armenian/Latin (below
+        // U+FB1D), so classify the Hebrew sub-block explicitly.
+        0x0590..=0x05FF | 0xFB1D..=0xFB4F => Script::Hebrew,
+        // Arabic + supplements. Note the Arabic Presentation Forms-A
+        // block (U+FB50..U+FDFF) starts immediately after the Hebrew
+        // presentation forms above, so no overlap.
         0x0600..=0x06FF | 0x0750..=0x077F | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF => Script::Arabic,
         // Devanagari
         0x0900..=0x097F => Script::Devanagari,
@@ -89,6 +94,23 @@ mod tests {
     fn classifies_arabic() {
         assert_eq!(script_of('ا'), Script::Arabic);
         assert_eq!(script_of('ل'), Script::Arabic);
+    }
+
+    #[test]
+    fn classifies_hebrew() {
+        // Main block: alef, lamed, final-mem, sheva, cantillation
+        // etnahta.
+        assert_eq!(script_of('\u{05D0}'), Script::Hebrew);
+        assert_eq!(script_of('\u{05DC}'), Script::Hebrew);
+        assert_eq!(script_of('\u{05DD}'), Script::Hebrew);
+        assert_eq!(script_of('\u{05B0}'), Script::Hebrew);
+        assert_eq!(script_of('\u{0591}'), Script::Hebrew);
+        // Presentation forms: alef with patah, shin with dot,
+        // lam+alef equivalent position.
+        assert_eq!(script_of('\u{FB2E}'), Script::Hebrew);
+        assert_eq!(script_of('\u{FB2A}'), Script::Hebrew);
+        // Boundary: U+FB50 is Arabic presentation forms, not Hebrew.
+        assert_eq!(script_of('\u{FB50}'), Script::Arabic);
     }
 
     #[test]
