@@ -45,6 +45,19 @@ pub const X_ADVANCE_DEVICE: u16 = 0x0040;
 /// Bit for the `y_advance_device` offset field.
 pub const Y_ADVANCE_DEVICE: u16 = 0x0080;
 
+/// Bitmask of every field the spec defines. Bits outside this range
+/// are reserved and must be zero; sigilbuzz tolerates malformed fonts
+/// that leave them set by ignoring them — both `size` and `parse`
+/// agree to skip those bits so the two stay in lockstep.
+const DEFINED_BITS: u16 = X_PLACEMENT
+    | Y_PLACEMENT
+    | X_ADVANCE
+    | Y_ADVANCE
+    | X_PLACEMENT_DEVICE
+    | Y_PLACEMENT_DEVICE
+    | X_ADVANCE_DEVICE
+    | Y_ADVANCE_DEVICE;
+
 /// Decoded positioning delta. Absent fields default to zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ValueRecord {
@@ -60,13 +73,17 @@ pub struct ValueRecord {
 
 impl ValueRecord {
     /// Returns the number of bytes a `ValueRecord` with the given
-    /// format word occupies. Each set bit in `format` is one i16
-    /// (or Offset16, same size) — so the size is
-    /// `2 * popcount(format)`.
+    /// format word occupies. Each set *defined* bit in `format` is
+    /// one i16 (or Offset16, same size), so the size is `2 *
+    /// popcount(format & DEFINED_BITS)`. Reserved bits are ignored
+    /// — they must agree with [`ValueRecord::parse`], which also
+    /// skips them, otherwise a malformed font that sets a reserved
+    /// bit would drive `size` and `parse` out of lockstep and
+    /// mis-align every subsequent record in an array.
     #[must_use]
     #[inline]
     pub const fn size(format: u16) -> usize {
-        format.count_ones() as usize * 2
+        (format & DEFINED_BITS).count_ones() as usize * 2
     }
 
     /// Parses a `ValueRecord` from `data`, advancing `reader` past
@@ -169,5 +186,24 @@ mod tests {
         let bytes = [0x00]; // format wants i16 but only one byte
         let mut r = make_reader(&bytes);
         assert!(ValueRecord::parse(&mut r, X_ADVANCE).is_err());
+    }
+
+    #[test]
+    fn reserved_bits_are_ignored_by_size_and_parse_consistently() {
+        // Bits 0x0100..=0x8000 are reserved. A malformed font that
+        // leaves any of them set must not drive `size` past what
+        // `parse` actually consumes, otherwise array strides in
+        // PairPos / SinglePos format 2 would mis-align every record
+        // after the first.
+        let malformed = X_ADVANCE | 0x0100 | 0x8000;
+        assert_eq!(ValueRecord::size(malformed), ValueRecord::size(X_ADVANCE));
+
+        let bytes = [0xFF, 0xE0]; // -32 as i16, exactly what X_ADVANCE consumes
+        let mut r = make_reader(&bytes);
+        let v = ValueRecord::parse(&mut r, malformed).unwrap();
+        assert_eq!(v.x_advance, -32);
+        // Cursor moved exactly as `size` predicted — no reserved
+        // bit crept in to advance it further.
+        assert_eq!(r.position(), ValueRecord::size(malformed));
     }
 }
