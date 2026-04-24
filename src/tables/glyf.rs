@@ -56,6 +56,47 @@ impl<'a> Glyf<'a> {
         Self { data }
     }
 
+    /// Returns the number of contour points in `glyph_id`, inclusive
+    /// of the 4 phantom points gvar expects (left-side-bearing,
+    /// right-side-bearing, top, bottom). For simple glyphs the count
+    /// comes from `endPtsOfContours[numContours-1] + 1`; composite
+    /// glyphs and zero-length glyphs return `None` (composites don't
+    /// participate in gvar's per-point delta scheme in sigilbuzz's
+    /// current cut).
+    pub fn point_count(&self, loca: &Loca<'_>, glyph_id: u16) -> Result<Option<u16>> {
+        let Some((start, end)) = loca.range(glyph_id) else {
+            return Ok(None);
+        };
+        if start == end {
+            return Ok(None);
+        }
+        let start = start as usize;
+        let end = end as usize;
+        if end > self.data.len() || start > end || end - start < 10 {
+            return Ok(None);
+        }
+        let body = &self.data[start..end];
+        let mut r = Reader::new(body);
+        let num_contours = r.read_i16()?;
+        if num_contours < 0 {
+            // Composite glyph — not supported for gvar point count
+            // in this cut. Callers skip variation for composites.
+            return Ok(None);
+        }
+        // Skip xMin/yMin/xMax/yMax (4 × i16).
+        r.skip(8)?;
+        if num_contours == 0 {
+            // 4 phantom points only.
+            return Ok(Some(4));
+        }
+        // Skip to the last entry of endPtsOfContours.
+        let last_idx = (num_contours - 1) as usize;
+        r.skip(last_idx * 2)?;
+        let last_end_pt = r.read_u16()?;
+        // Add 1 to convert last index to count, plus 4 phantom points.
+        Ok(Some(last_end_pt.saturating_add(1).saturating_add(4)))
+    }
+
     /// Returns the bounding box for `glyph_id`. The glyph's byte
     /// range comes from `loca`; an empty range means the glyph has
     /// no outline and `None` is returned.
@@ -178,6 +219,37 @@ mod tests {
         let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
         let glyf = Glyf::new(&[0u8; 8]);
         assert!(glyf.bounds(&loca, 0).is_err());
+    }
+
+    #[test]
+    fn point_count_simple_glyph_adds_four_phantom_points() {
+        // Simple glyph with numContours=1, endPtsOfContours=[3] →
+        // 4 real points + 4 phantoms = 8.
+        let mut body = build_header(1, 0, 0, 100, 100);
+        body.extend_from_slice(&3u16.to_be_bytes()); // endPt
+        let loca_bytes = build_loca_short(&[0, (body.len() as u16) / 2]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
+        let glyf = Glyf::new(&body);
+        assert_eq!(glyf.point_count(&loca, 0).unwrap(), Some(8));
+    }
+
+    #[test]
+    fn point_count_composite_glyph_returns_none() {
+        // numContours = -1 → composite, unsupported for gvar.
+        let body = build_header(-1, 0, 0, 100, 100);
+        let loca_bytes = build_loca_short(&[0, (body.len() as u16) / 2]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
+        let glyf = Glyf::new(&body);
+        assert_eq!(glyf.point_count(&loca, 0).unwrap(), None);
+    }
+
+    #[test]
+    fn point_count_empty_glyph_returns_none() {
+        // loca reports zero-length range → no points at all.
+        let loca_bytes = build_loca_short(&[0, 0]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
+        let glyf = Glyf::new(&[]);
+        assert_eq!(glyf.point_count(&loca, 0).unwrap(), None);
     }
 
     #[test]

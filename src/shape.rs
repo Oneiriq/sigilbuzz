@@ -172,12 +172,12 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         run_default_gsub(gsub, &mut glyphs, features, want_liga, is_vertical);
     }
 
-    // Step 3: advance lookup. Runs *after* GSUB so ligatures
-    // receive their ligature-glyph advance, not the sum of their
     // component advances. Horizontal layout pulls from hmtx and
     // drives the pen along X; vertical layout pulls from vmtx (when
     // present) and drives the pen along Y, while x_advance stays
-    // zero so the glyphs stack rather than walk right.
+    // zero so the glyphs stack rather than walk right. In the
+    // horizontal path, a non-empty Font coord slice combined with an
+    // HVAR table adjusts each advance by the per-coord delta.
     if is_vertical {
         if let Some(ref vmtx) = vmtx {
             for glyph in &mut glyphs {
@@ -208,9 +208,29 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             }
         }
     } else {
+        let coords = font.coords();
+        let hvar = if coords.is_empty() {
+            None
+        } else {
+            face.hvar()?
+        };
         for glyph in &mut glyphs {
             let id = glyph.glyph_id as u16;
-            glyph.x_advance = i32::from(hmtx.advance(id).unwrap_or(0));
+            let base = i32::from(hmtx.advance(id).unwrap_or(0));
+            glyph.x_advance = if let Some(ref hvar) = hvar {
+                let delta = hvar.advance_delta(id, coords);
+                // Round-to-nearest without pulling in libm — the
+                // delta arithmetic is small, so add-0.5 / subtract-0.5
+                // suffices.
+                let rounded = if delta >= 0.0 {
+                    (delta + 0.5) as i32
+                } else {
+                    (delta - 0.5) as i32
+                };
+                base.saturating_add(rounded)
+            } else {
+                base
+            };
         }
     }
 
