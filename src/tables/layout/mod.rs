@@ -14,6 +14,7 @@ pub mod feature_list;
 pub mod lookup_list;
 pub mod script_list;
 pub mod skip_iter;
+pub mod state_table;
 
 pub use class_def::ClassDef;
 pub use context::{
