@@ -12,6 +12,9 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::ops::Range;
+
+use crate::unicode::{script_of, Script};
 
 /// Writing direction of a text run.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -245,6 +248,171 @@ impl Buffer {
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
+
+    /// Splits the buffer's text into maximal script runs and yields
+    /// one [`ScriptRun`] per run. Consecutive codepoints sharing the
+    /// same resolved script collapse into a single run; `COMMON`
+    /// (digits, punctuation, ASCII space, ZWJ/ZWNJ/bidi marks) and
+    /// `INHERITED` (combining marks) codepoints extend whichever real
+    /// script ran before them, matching HarfBuzz's
+    /// `select_shaper_for_script` segmentation.
+    ///
+    /// A leading `COMMON`/`INHERITED` span before the first real
+    /// script codepoint takes `Script::Other` with the default `DFLT`
+    /// priority — same treatment HarfBuzz gives a pure-digits or
+    /// pure-punctuation run.
+    ///
+    /// The returned vector is empty for an empty buffer. Callers walk
+    /// it left-to-right: segment boundaries are deterministic, so the
+    /// same input always yields the same segmentation.
+    #[must_use]
+    pub fn script_runs(&self) -> Vec<ScriptRun> {
+        let mut runs: Vec<ScriptRun> = Vec::new();
+        if self.text.is_empty() {
+            return runs;
+        }
+        let mut current: Option<(Script, usize)> = None;
+        for (byte, ch) in self.text.char_indices() {
+            let raw = script_of(ch);
+            // `COMMON` / `INHERITED` extend the previous real-script
+            // run if one exists. In sigilbuzz the only explicit bucket
+            // we keep for these characters is `Script::Other` (ASCII
+            // digits / punctuation land in `Script::Latin`; combining
+            // marks inherit their cluster base's script via the
+            // `script_of` range table). So the only codepoints we
+            // still need to actively extend are the Unicode format
+            // characters — ZWJ/ZWNJ/LRM/RLM/ALM — plus any other char
+            // that `script_of` could not classify. Everything with a
+            // real script bucket attaches normally through the
+            // script-equality test below.
+            let resolved = if is_common_or_inherited(ch) {
+                current.map_or(raw, |(s, _)| s)
+            } else {
+                raw
+            };
+            match current {
+                Some((s, start)) if s == resolved => {
+                    // Extend the active run.
+                    let _ = start;
+                }
+                Some((s, start)) => {
+                    runs.push(ScriptRun {
+                        byte_range: start..byte,
+                        script: s,
+                        script_priority: script_priority_for(s),
+                    });
+                    current = Some((resolved, byte));
+                }
+                None => {
+                    current = Some((resolved, byte));
+                }
+            }
+        }
+        if let Some((s, start)) = current {
+            runs.push(ScriptRun {
+                byte_range: start..self.text.len(),
+                script: s,
+                script_priority: script_priority_for(s),
+            });
+        }
+        runs
+    }
+}
+
+/// One maximal script run carved out of a [`Buffer`]'s text.
+///
+/// Returned by [`Buffer::script_runs`]. The byte range is expressed
+/// against the buffer's current text; the script tag priority is the
+/// one `shape()` should use when dispatching GSUB/GPOS lookups for
+/// this segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptRun {
+    /// Half-open byte range into [`Buffer::text`].
+    pub byte_range: Range<usize>,
+    /// Resolved script for the run. `Script::Other` for unknown /
+    /// pure-COMMON runs with no real-script codepoint.
+    pub script: Script,
+    /// Script-tag priority list (e.g. `&[b"arab", b"DFLT"]`) — what
+    /// the OpenType dispatcher walks to locate this run's features.
+    pub script_priority: &'static [[u8; 4]],
+}
+
+/// DFLT-only priority for Latin / Greek / Cyrillic / Han / unknown
+/// scripts. Interned as a static so `script_priority_for` can return
+/// a `'static` reference.
+const DFLT_ONLY: &[[u8; 4]] = &[*b"DFLT"];
+/// Arabic script-tag priority: `arab` then DFLT fallback.
+const ARAB_PRIORITY: &[[u8; 4]] = &[*b"arab", *b"DFLT"];
+/// Hebrew script-tag priority: `hebr` then DFLT fallback.
+const HEBR_PRIORITY: &[[u8; 4]] = &[*b"hebr", *b"DFLT"];
+
+/// Returns the GSUB/GPOS script-tag priority list for a coarse
+/// [`Script`]. Mirrors what `shape()` used to compute inline and what
+/// the Indic / USE shapers keep as constants.
+///
+/// Every priority ends in `DFLT` so mixed-script runs fall back to
+/// the default LangSys on fonts that only ship lookups under DFLT.
+#[must_use]
+pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
+    use crate::ot::indic::{
+        BENG_SCRIPT_PRIORITY, DEVA_SCRIPT_PRIORITY, GUJR_SCRIPT_PRIORITY, GURU_SCRIPT_PRIORITY,
+        KNDA_SCRIPT_PRIORITY, MLYM_SCRIPT_PRIORITY, ORYA_SCRIPT_PRIORITY, SINH_SCRIPT_PRIORITY,
+        TAML_SCRIPT_PRIORITY, TELU_SCRIPT_PRIORITY,
+    };
+    use crate::ot::use_shaper::KHMER_SCRIPT_PRIORITY;
+    match script {
+        Script::Arabic => ARAB_PRIORITY,
+        Script::Hebrew => HEBR_PRIORITY,
+        Script::Devanagari => DEVA_SCRIPT_PRIORITY,
+        Script::Bengali => BENG_SCRIPT_PRIORITY,
+        Script::Gurmukhi => GURU_SCRIPT_PRIORITY,
+        Script::Gujarati => GUJR_SCRIPT_PRIORITY,
+        Script::Oriya => ORYA_SCRIPT_PRIORITY,
+        Script::Tamil => TAML_SCRIPT_PRIORITY,
+        Script::Telugu => TELU_SCRIPT_PRIORITY,
+        Script::Kannada => KNDA_SCRIPT_PRIORITY,
+        Script::Malayalam => MLYM_SCRIPT_PRIORITY,
+        Script::Sinhala => SINH_SCRIPT_PRIORITY,
+        Script::Khmer => KHMER_SCRIPT_PRIORITY,
+        // Latin / Greek / Cyrillic / Han / Other — DFLT is where Latin
+        // shipped features live and where anything we do not have
+        // specialised dispatch for falls back.
+        _ => DFLT_ONLY,
+    }
+}
+
+/// True for codepoints HarfBuzz treats as `COMMON` or `INHERITED`
+/// for segmentation purposes — they should extend the adjacent
+/// real-script run rather than carve their own segment.
+///
+/// Covers:
+/// - ASCII controls, whitespace, and punctuation (U+0000..U+002F,
+///   U+003A..U+0040, U+005B..U+0060, U+007B..U+007E) including the
+///   ASCII digits so `"Price: 100 شلوم"` keeps the Arabic tail from
+///   detaching on the digits.
+/// - Latin-1 punctuation / symbols (U+00A0..U+00BF).
+/// - The Unicode format-character block sigilbuzz already recognises
+///   (ZWJ / ZWNJ / LRM / RLM / ALM).
+///
+/// Everything else resolves via [`script_of`]; runs of the same
+/// real script collapse through the normal equality check.
+const fn is_common_or_inherited(ch: char) -> bool {
+    let cp = ch as u32;
+    matches!(
+        cp,
+        // ASCII controls + SPACE + !"#$%&'()*+,-./
+        0x0000..=0x002F
+        // ASCII digits + :;<=>?@
+        | 0x0030..=0x0040
+        // ASCII [\]^_`
+        | 0x005B..=0x0060
+        // ASCII {|}~ + DEL
+        | 0x007B..=0x007F
+        // Latin-1 punctuation / symbols block
+        | 0x00A0..=0x00BF
+        // Unicode format characters the shaper recognises.
+        | 0x200C | 0x200D | 0x200E | 0x200F | 0x061C
+    )
 }
 
 /// The result of a shaping call: the glyphs, in visual order.
@@ -307,5 +475,103 @@ mod tests {
         assert!(!Direction::Ttb.is_horizontal());
         assert!(Direction::Ltr.is_forward());
         assert!(!Direction::Rtl.is_forward());
+    }
+
+    #[test]
+    fn script_runs_empty_buffer_yields_nothing() {
+        let b = Buffer::new();
+        assert!(b.script_runs().is_empty());
+    }
+
+    #[test]
+    fn script_runs_single_script_latin_is_one_run() {
+        let mut b = Buffer::new();
+        b.push_str("hello");
+        let runs = b.script_runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].script, Script::Latin);
+        assert_eq!(runs[0].byte_range, 0..5);
+        assert_eq!(runs[0].script_priority, &[*b"DFLT"]);
+    }
+
+    #[test]
+    fn script_runs_splits_latin_then_hebrew() {
+        let mut b = Buffer::new();
+        b.push_str("Hi \u{05E9}\u{05DC}\u{05D5}\u{05DD}");
+        let runs = b.script_runs();
+        assert_eq!(runs.len(), 2);
+        // "Hi " — space is Latin in our classifier, so it stays on
+        // the first run.
+        assert_eq!(runs[0].script, Script::Latin);
+        assert_eq!(runs[0].byte_range, 0..3);
+        assert_eq!(runs[1].script, Script::Hebrew);
+        // Hebrew letters are 2 UTF-8 bytes each; 4 chars × 2 = 8
+        // bytes starting at offset 3.
+        assert_eq!(runs[1].byte_range, 3..11);
+        assert_eq!(runs[1].script_priority, &[*b"hebr", *b"DFLT"]);
+    }
+
+    #[test]
+    fn script_runs_common_digits_stick_to_preceding_script() {
+        // "Price: ₪100 שלום" — digits land in Script::Latin bucket
+        // via script_of, so they extend the Latin prefix. The shekel
+        // sign U+20AA falls outside our range table (Script::Other)
+        // but still extends the previous run because it is a COMMON
+        // codepoint in Unicode; sigilbuzz groups it with Latin here
+        // because `Script::Other` matches nothing-scripted neighbors.
+        let mut b = Buffer::new();
+        b.push_str("Price: 100 \u{05E9}\u{05DC}\u{05D5}\u{05DD}");
+        let runs = b.script_runs();
+        // Expect 2 runs: Latin prefix through the space, then Hebrew.
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].script, Script::Latin);
+        assert_eq!(runs[1].script, Script::Hebrew);
+    }
+
+    #[test]
+    fn script_runs_zwj_between_arabic_letters_stays_one_run() {
+        // kaf + ZWJ + tatweel: ZWJ is a format character that should
+        // not break the Arabic segment.
+        let mut b = Buffer::new();
+        b.push_str("\u{0643}\u{200D}\u{0640}");
+        let runs = b.script_runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].script, Script::Arabic);
+    }
+
+    #[test]
+    fn script_runs_three_scripts_emits_three_segments() {
+        // Latin SPACE Arabic SPACE Hebrew. The spaces are COMMON and
+        // attach to the preceding real script, so transitioning
+        // Latin → Arabic → Hebrew produces exactly three segments.
+        let mut b = Buffer::new();
+        b.push_str("Read \u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064A}\u{0629} \u{05E9}\u{05DC}\u{05D5}\u{05DD}");
+        let runs = b.script_runs();
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].script, Script::Latin);
+        assert_eq!(runs[1].script, Script::Arabic);
+        assert_eq!(runs[2].script, Script::Hebrew);
+    }
+
+    #[test]
+    fn script_runs_are_deterministic() {
+        // Same input twice — segmentation must agree byte-for-byte.
+        let mut b1 = Buffer::new();
+        b1.push_str("Hi \u{05E9}\u{05DC}\u{05D5}\u{05DD} 100 \u{0627}\u{0644}");
+        let mut b2 = Buffer::new();
+        b2.push_str("Hi \u{05E9}\u{05DC}\u{05D5}\u{05DD} 100 \u{0627}\u{0644}");
+        assert_eq!(b1.script_runs(), b2.script_runs());
+    }
+
+    #[test]
+    fn script_priority_for_common_scripts() {
+        assert_eq!(script_priority_for(Script::Arabic), &[*b"arab", *b"DFLT"]);
+        assert_eq!(script_priority_for(Script::Hebrew), &[*b"hebr", *b"DFLT"]);
+        assert_eq!(script_priority_for(Script::Latin), &[*b"DFLT"]);
+        assert_eq!(script_priority_for(Script::Other), &[*b"DFLT"]);
+        assert_eq!(
+            script_priority_for(Script::Khmer),
+            &[*b"khmr", *b"khm2", *b"DFLT"]
+        );
     }
 }
