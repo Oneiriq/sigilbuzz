@@ -71,7 +71,7 @@ use crate::tables::gsub::{
 };
 use crate::tables::layout::{Lookup, MatchFilter, SequenceLookupRecord};
 use crate::tables::variation_store::ItemVariationStore;
-use crate::tables::{Gpos, Gsub, KernTable};
+use crate::tables::{Gpos, Gsub, KernTable, Kerx, Morx};
 use crate::unicode::{script_of, Script};
 
 /// Variable-font context threaded through every GPOS apply site.
@@ -398,6 +398,15 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             script_priority,
             has_arabic && !arabic_forms.is_empty(),
         );
+    } else {
+        // AAT fallback. Consulted only when the font has no GSUB at
+        // all — that is how HarfBuzz decides between OpenType and
+        // AAT, and matches the issue scope. Legacy macOS Zapfino,
+        // older Apple Chancery variants, and most third-party
+        // AAT-only fonts land here.
+        if let Some(morx) = face.morx()? {
+            apply_morx(&morx, &mut glyphs);
+        }
     }
 
     // Step 3: advance lookup. Runs *after* GSUB so ligatures receive
@@ -591,9 +600,20 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // Legacy `kern` is a fallback: only runs when GPOS kern produced
     // no lookups. GPOS wins even with zero-delta hits — the spec's
     // design, not a sigilbuzz quirk.
+    let mut legacy_kerned = false;
     if want_kern && !gpos_kerned {
         if let Some(kern) = face.kern()? {
             apply_legacy_kern(&kern, &mut glyphs);
+            legacy_kerned = true;
+        }
+    }
+    // AAT `kerx` is the last-resort fallback: GPOS kern absent AND
+    // legacy `kern` absent. In practice fonts ship one of the three,
+    // not several; keeping legacy ahead preserves existing
+    // behaviour and matches HarfBuzz ordering.
+    if want_kern && !gpos_kerned && !legacy_kerned {
+        if let Some(kerx) = face.kerx()? {
+            apply_kerx(&kerx, &mut glyphs);
         }
     }
 
@@ -2237,6 +2257,60 @@ fn apply_mark_mark(
         glyphs[i].x_offset += dx;
         glyphs[i].y_offset += dy;
         glyphs[i].x_advance = 0;
+    }
+}
+
+/// AAT `morx` substitution pass — runs only when the font has no
+/// GSUB. The morx parser returns a new glyph id stream plus an
+/// origin vector; each output index carries the input index it was
+/// derived from (or the smallest input index for a ligature). We
+/// rebuild the `Glyph` vector by copying metadata from that origin
+/// so clusters survive ligation: the surviving glyph inherits the
+/// first component's cluster, matching HarfBuzz's "merge clusters
+/// to earliest" policy.
+fn apply_morx(morx: &Morx<'_>, glyphs: &mut Vec<Glyph>) {
+    if glyphs.is_empty() {
+        return;
+    }
+    let input_ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
+    let (out_ids, origins) = morx.apply(&input_ids);
+    if out_ids.len() == glyphs.len() && out_ids == input_ids {
+        return; // no change — avoid needless allocation
+    }
+    let mut rebuilt: Vec<Glyph> = Vec::with_capacity(out_ids.len());
+    for (out_idx, &gid) in out_ids.iter().enumerate() {
+        let origin = origins.get(out_idx).copied().unwrap_or(usize::MAX);
+        if origin < glyphs.len() {
+            let mut g = glyphs[origin];
+            g.glyph_id = u32::from(gid);
+            rebuilt.push(g);
+        } else {
+            // Synthesised output with no single origin — rare; fall
+            // back to the lowest available cluster so layout does
+            // not confuse renderer-side grapheme tracking.
+            let cluster = glyphs.first().map_or(0, |g| g.cluster);
+            rebuilt.push(Glyph::new(u32::from(gid), cluster));
+        }
+    }
+    *glyphs = rebuilt;
+}
+
+/// AAT `kerx` pair-kern pass — mirrors [`apply_legacy_kern`]'s
+/// HarfBuzz-compatible half-split distribution so kerx output
+/// matches what the macOS renderer does for the same pairs.
+fn apply_kerx(kerx: &Kerx<'_>, glyphs: &mut [Glyph]) {
+    if glyphs.len() < 2 {
+        return;
+    }
+    for i in 0..glyphs.len() - 1 {
+        let left = glyphs[i].glyph_id as u16;
+        let right = glyphs[i + 1].glyph_id as u16;
+        let delta = i32::from(kerx.kern(left, right));
+        if delta != 0 {
+            let half = delta / 2;
+            glyphs[i].x_advance += delta - half;
+            glyphs[i + 1].x_advance += half;
+        }
     }
 }
 
