@@ -24,9 +24,11 @@ pub mod hhea;
 pub mod hmtx;
 pub mod hvar;
 pub mod kern;
+pub mod kerx;
 pub mod layout;
 pub mod loca;
 pub mod maxp;
+pub mod morx;
 pub mod parse;
 pub mod variation_store;
 pub mod vhea;
@@ -51,9 +53,11 @@ pub use hhea::Hhea;
 pub use hmtx::Hmtx;
 pub use hvar::Hvar;
 pub use kern::KernTable;
+pub use kerx::Kerx;
 pub use layout::{ClassDef, Coverage};
 pub use loca::Loca;
 pub use maxp::Maxp;
+pub use morx::Morx;
 pub use parse::Reader;
 pub use variation_store::ItemVariationStore;
 pub use vhea::Vhea;
@@ -108,4 +112,8 @@ pub mod tag {
     pub const COLR: [u8; 4] = *b"COLR";
     /// `CPAL` — colour palette table.
     pub const CPAL: [u8; 4] = *b"CPAL";
+    /// `morx` — Apple Extended Glyph Metamorphosis (AAT).
+    pub const MORX: [u8; 4] = *b"morx";
+    /// `kerx` — Apple Extended Kerning (AAT).
+    pub const KERX: [u8; 4] = *b"kerx";
 }

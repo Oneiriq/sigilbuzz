@@ -56,7 +56,7 @@
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
-use crate::buffer::{unicode_prop, Buffer, Glyph, ShapedRun};
+use crate::buffer::{script_priority_for, unicode_prop, Buffer, Glyph, ShapedRun};
 use crate::error::Result;
 use crate::font::Font;
 use crate::ot::arabic::{assign_joining_forms, JoiningForm};
@@ -71,7 +71,7 @@ use crate::tables::gsub::{
 };
 use crate::tables::layout::{Lookup, MatchFilter, SequenceLookupRecord};
 use crate::tables::variation_store::ItemVariationStore;
-use crate::tables::{Gpos, Gsub, KernTable};
+use crate::tables::{Gpos, Gsub, KernTable, Kerx, Morx};
 use crate::unicode::{script_of, Script};
 
 /// Variable-font context threaded through every GPOS apply site.
@@ -173,10 +173,6 @@ pub struct Feature {
 /// supports it; unknown tags are accepted and ignored rather than
 /// returning an error.
 ///
-/// # Errors
-///
-/// Returns an error if the font is missing any of the tables required
-/// for basic shaping (`cmap`, `maxp`, `hhea`, `hmtx`) or if one of
 /// Pre-iterates `text` and applies Hangul NFC jamo composition in a
 /// single pass: a Leading jamo (L) followed by a Vowel jamo (V) and
 /// optionally a Trailing jamo (T) collapses into the matching
@@ -185,37 +181,26 @@ pub struct Feature {
 /// exactly this, so matching the behaviour is mandatory for byte-
 /// parity on modern Korean corpora.
 ///
+/// Extended-B trailing jamo (U+D7CB..U+D7FB) abort composition of
+/// the whole L+V+T triple so the font's `ljmo` / `vjmo` / `tjmo`
+/// features can shape each jamo on its own — matches rustybuzz.
+///
 /// Returns a vector of `(byte_offset, char)` pairs that replaces the
 /// normal `text.char_indices()` sequence in the main shaping loop.
 /// The byte offset is the offset of the FIRST codepoint in the
 /// composed cluster — the L for an L+V / L+V+T composition — so
 /// downstream cluster tracking still maps glyphs back to the
 /// original UTF-8 stream.
-fn hangul_compose(text: &str, cmap: &crate::tables::cmap::Cmap<'_>) -> alloc::vec::Vec<(u32, char)> {
+fn hangul_compose(
+    text: &str,
+    cmap: &crate::tables::cmap::Cmap<'_>,
+) -> alloc::vec::Vec<(u32, char)> {
     let mut out = alloc::vec::Vec::with_capacity(text.len());
-    // Gate: composition fires only when the buffer is a pure Hangul
-    // / whitespace / default-ignorable run. Mixed-script buffers
-    // (e.g. "Hi " + jamo) bypass composition so the jamo portion
-    // still renders as L+V and the result matches rustybuzz, which
-    // splits the run by script before shaping. Once the script
-    // segmenter lands, this predicate can be tightened to "the
-    // current Hangul sub-run".
-    let compose_enabled = text.chars().all(|c| {
-        let cp = c as u32;
-        matches!(crate::unicode::script_of(c), crate::unicode::Script::Hangul)
-            || c == ' '
-            || (0x200B..=0x200D).contains(&cp)
-            || cp == 0xFEFF
-    });
     let mut it = text.char_indices().peekable();
     while let Some((byte_offset, ch)) = it.next() {
-        if !compose_enabled {
-            out.push((byte_offset as u32, ch));
-            continue;
-        }
         // L jamo range: U+1100..U+1112 (the 19 modern leading
         // consonants). Extended-A (U+A960..) do NOT compose — they
-        // stay as jamo so ljmo picks them up.
+        // stay as jamo so `ljmo` picks them up.
         let l_index = if (0x1100..=0x1112).contains(&(ch as u32)) {
             Some((ch as u32) - 0x1100)
         } else {
@@ -223,36 +208,30 @@ fn hangul_compose(text: &str, cmap: &crate::tables::cmap::Cmap<'_>) -> alloc::ve
         };
         if let Some(l) = l_index {
             if let Some(&(_, next_ch)) = it.peek() {
-                // V jamo range: U+1161..U+1175 (the 21 modern vowels).
+                // V jamo range: U+1161..U+1175 (21 modern vowels).
                 if (0x1161..=0x1175).contains(&(next_ch as u32)) {
                     let v = (next_ch as u32) - 0x1161;
-                    // Peek past V to see if a trailing jamo follows.
+                    // Peek past V to detect the trailing jamo, if any.
                     // HarfBuzz's rule: only compose when the whole
-                    // run is in the modern range. If an Extended-B T
-                    // (U+D7CB..U+D7FB) follows, *skip* composition so
-                    // the font's ljmo/vjmo/tjmo features can shape
-                    // each jamo on its own. Modern T in 0x11A8..0x11C2
-                    // composes into the LVT syllable.
+                    // run is in the modern range. Extended-B T
+                    // (U+D7CB..U+D7FB) aborts composition entirely.
                     let mut clone = it.clone();
                     clone.next(); // skip V
                     let t_info = match clone.peek() {
                         Some(&(_, c)) if (0x11A8..=0x11C2).contains(&(c as u32)) => {
                             Some(Some((c as u32) - 0x11A7))
                         }
-                        Some(&(_, c)) if (0xD7CB..=0xD7FB).contains(&(c as u32)) => {
-                            // Extended-B T present — abort composition.
-                            Some(None)
-                        }
+                        Some(&(_, c)) if (0xD7CB..=0xD7FB).contains(&(c as u32)) => Some(None),
                         _ => None,
                     };
                     if matches!(t_info, Some(None)) {
                         // Extended-B T blocks composition; emit each
-                        // jamo as-is.
+                        // jamo as-is. L and V are consumed here; the
+                        // T gets emitted naturally on the next
+                        // iteration.
                         out.push((byte_offset as u32, ch));
                         out.push((byte_offset as u32, next_ch));
                         it.next(); // consume V
-                        // T gets emitted naturally in the next loop
-                        // iteration — do NOT pre-consume.
                         continue;
                     }
                     let t = t_info.and_then(|o| o).unwrap_or(0);
@@ -267,7 +246,7 @@ fn hangul_compose(text: &str, cmap: &crate::tables::cmap::Cmap<'_>) -> alloc::ve
                             continue;
                         }
                     }
-                    // Fallback: emit the jamos as-is.
+                    // Fallback: emit each jamo as-is.
                     out.push((byte_offset as u32, ch));
                     let v_ch = core::char::from_u32(0x1161 + v).unwrap_or(ch);
                     out.push((byte_offset as u32, v_ch));
@@ -284,6 +263,10 @@ fn hangul_compose(text: &str, cmap: &crate::tables::cmap::Cmap<'_>) -> alloc::ve
     out
 }
 
+/// # Errors
+///
+/// Returns an error if the font is missing any of the tables required
+/// for basic shaping (`cmap`, `maxp`, `hhea`, `hmtx`) or if one of
 /// them is malformed.
 // The pipeline is deliberately a straight-line sequence of passes so
 // the order is visible in one place; breaking it into five stage
@@ -336,30 +319,19 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let space_gid = u32::from(cmap.glyph_id('\u{0020}').unwrap_or(0));
     let mut glyphs: Vec<Glyph> = Vec::with_capacity(text.len());
     let mut codepoints: Vec<char> = Vec::with_capacity(text.len());
-    // First Indic script seen in the run, if any. Used to dispatch
-    // the Indic reordering shaper with a script-specific config
-    // (reph position, reph mode, GSUB script-tag priority).
-    let mut indic_script: Option<crate::unicode::Script> = None;
-    let mut has_khmer = false;
-    let mut has_myanmar = false;
-    let mut has_thai = false;
-    let mut has_lao = false;
-    // Hangul Jamo routing only triggers for codepoints in the Jamo
-    // blocks — precomposed syllables (U+AC00..U+D7A3) stay on the
-    // default path. See `is_hangul_jamo` in `src/unicode/mod.rs`.
-    let mut has_hangul_jamo = false;
-    // Preprocess: Hangul Jamo composition. HarfBuzz / rustybuzz
-    // combine L + V (and optionally + T) into a precomposed syllable
-    // (U+AC00..U+D7A3) when the font carries the precomposed glyph
-    // — the standard NFC composition. We pre-iterate the text once
-    // to apply the same rule before the main pipeline. The resulting
-    // `chars` slice is a `(byte_offset, char)` sequence in one-to-one
-    // correspondence with what would normally come out of
-    // `text.char_indices()`, with jamo L+V / L+V+T sequences collapsed
-    // into the matching U+AC00..U+D7A3 codepoint so clusters still map
-    // back to the original UTF-8 stream.
-    let chars: alloc::vec::Vec<(u32, char)> = hangul_compose(text, &cmap);
-    for (cluster, ch) in chars.iter().copied() {
+    // Preprocess Hangul Jamo NFC composition: L + V (+ optional T)
+    // sequences collapse into the precomposed syllable in
+    // U+AC00..U+D7A3 when the font carries a cmap entry for the
+    // precomposed codepoint. The Jamo sub-blocks outside the modern
+    // compositional range (Extended-A L, Extended-B T) suppress
+    // composition so the font's `ljmo` / `vjmo` / `tjmo` features can
+    // shape each jamo independently — matches HarfBuzz / rustybuzz.
+    //
+    // Returns `(byte_offset, char)` pairs; the byte offset is always
+    // the first codepoint of the composed cluster, so cluster
+    // tracking stays aligned with the original UTF-8 stream.
+    let composed_chars: Vec<(u32, char)> = hangul_compose(text, &cmap);
+    for (cluster, ch) in composed_chars.iter().copied() {
         let cluster = cluster as usize;
         // Khmer split-vowel decomposition. HarfBuzz's USE
         // preprocessing hook splits U+17C4 / U+17C5 into a
@@ -380,7 +352,6 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 glyphs.push(glyph);
                 codepoints.push(component);
             }
-            has_khmer = true;
             continue;
         }
         let glyph_id = if is_default_ignorable(ch) {
@@ -405,182 +376,182 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         glyph.unicode_props = props;
         glyphs.push(glyph);
         codepoints.push(ch);
-        let s = crate::unicode::script_of(ch);
-        match s {
-            crate::unicode::Script::Khmer => {
-                has_khmer = true;
-            }
-            crate::unicode::Script::Myanmar => {
-                has_myanmar = true;
-            }
-            crate::unicode::Script::Thai => {
-                has_thai = true;
-            }
-            crate::unicode::Script::Lao => {
-                has_lao = true;
-            }
-            crate::unicode::Script::Hangul if crate::unicode::is_hangul_jamo(ch) => {
-                has_hangul_jamo = true;
-            }
-            _ => {
-                if indic_script.is_none() && s.is_indic() {
-                    indic_script = Some(s);
-                }
-            }
-        }
     }
 
-    // Step 1.5: Detect Arabic and compute per-glyph joining forms.
-    // When any glyph in the run comes from an Arabic codepoint the
-    // joining state machine decides which of init/medi/fina/isol
-    // each Arabic position takes. Non-Arabic positions get None and
-    // the positional features skip them. The forms vector stays
-    // aligned with `glyphs` through substitutions because ligatures
-    // and multiple-sub would violate that alignment only under
-    // `ccmp`/`rlig`, which we apply *after* computing forms so the
-    // state machine sees the pre-substitution sequence (correct per
-    // spec: joining is decided on codepoints, not glyphs).
-    let has_arabic = codepoints.iter().any(|&c| script_of(c) == Script::Arabic);
-    let has_hebrew = codepoints.iter().any(|&c| script_of(c) == Script::Hebrew);
-    let arabic_forms: Vec<JoiningForm> = if has_arabic {
-        assign_joining_forms(text)
-    } else {
-        Vec::new()
-    };
-
-    // Compute the script-tag priority for every default feature
-    // dispatch in this call. Arabic fonts resolve their positional
-    // lookups under `arab`; Hebrew fonts resolve niqqud / cantillation
-    // mark anchors under `hebr`. Anything else falls through to DFLT
-    // — which is what every Latin-era font ships under.
+    // Step 1.5: Segment the run into maximal same-script spans. Each
+    // segment carries its own script priority (e.g. Arabic `arab` ->
+    // DFLT, Hebrew `hebr` -> DFLT), its codepoint range in the
+    // `codepoints` vec we just filled, and — after we finish GSUB
+    // below — its post-substitution glyph range. Pre-GSUB the two
+    // ranges coincide because cmap is 1:1 (Khmer's split-vowel
+    // preprocessor above added both codepoints and glyphs in lockstep,
+    // so the 1:1 invariant still holds here).
     //
-    // When a run mixes scripts we prefer the complex-script tag so
-    // the script-specific lookups still fire on the relevant glyphs;
-    // the DFLT fallback inside `apply_*_feature_in_scripts` catches
-    // the Latin half.
-    // Khmer stays on DFLT for the *generic* features (`liga`/`calt`/
-    // mark/mkmk) because the USE shaper already applied the Khmer-
-    // specific basic + topographical chains under `khmr` — switching
-    // the generic priority to `khmr` here would double-resolve some
-    // lookups under different LangSys and drift off the 0.1.0 Khmer
-    // parity baseline. Myanmar / Thai / Lao / Old-Hangul have not
-    // shipped yet, so they can route their generic features under
-    // their script tag straight away (matches HarfBuzz).
-    let script_priority: &[[u8; 4]] = if has_arabic {
-        &[*b"arab", *b"DFLT"]
-    } else if has_hebrew {
-        &[*b"hebr", *b"DFLT"]
-    } else if has_myanmar {
-        crate::ot::use_shaper::MYANMAR_SCRIPT_PRIORITY
-    } else if has_thai {
-        crate::ot::use_shaper::THAI_SCRIPT_PRIORITY
-    } else if has_lao {
-        crate::ot::use_shaper::LAO_SCRIPT_PRIORITY
-    } else if has_hangul_jamo {
-        crate::ot::use_shaper::HANGUL_SCRIPT_PRIORITY
-    } else {
-        &[*b"DFLT"]
-    };
+    // Running each segment through its own cmap → pre-shaper → GSUB
+    // → GPOS chain is what lets mixed-script runs like `Hi שלום`
+    // dispatch the Hebrew half under `hebr` features and the Latin
+    // half under DFLT in a single call. The pre-segmenter implementation
+    // resolved one global priority and missed script-specific lookups
+    // on whichever half lost the tie-break.
+    let segments = build_segments(&codepoints);
 
-    // Step 2: GSUB passes. Default-on features mirror HarfBuzz's
-    // defaults so common text renders the same way without the
-    // caller having to enumerate them.
-    //
-    // When the run contains Arabic, the positional features
-    // (`isol`/`init`/`medi`/`fina`) run *before* `rlig` and `liga`
-    // so the ligature subtables see the post-joining glyph ids.
-    // That is the order HarfBuzz uses and it is what Arabic fonts
-    // are designed against.
     let gsub = face.gsub()?;
     // GDEF is consulted up-front so the LookupFlag skip-iterator has
     // it available for every GSUB context match. GPOS reuses the same
     // handle further down.
     let gdef = face.gdef()?;
 
-    // Step 1b: Indic reordering + basic features. Runs before the
-    // generic GSUB pass so the glyph stream entering `liga` / `calt`
-    // is already in logical order for the script. Non-Indic text
-    // skips this pass entirely.
-    //
-    // Each Indic script uses the same state machine but with a
-    // per-script config (virama, ra, reph position, reph mode, and
-    // GSUB script-tag priority). The config is resolved from the
-    // first Indic codepoint encountered in the run above.
-    if let Some(script) = indic_script {
-        if let Some(config) = crate::ot::indic::indic_config_for(script) {
+    // Arabic joining forms are computed once, from the full text,
+    // because the state machine depends on surrounding letters (the
+    // previous/next Arabic joining-type). A segment-local view would
+    // lose the cross-boundary context — but in sigilbuzz every Arabic
+    // segment is bounded by non-Arabic neighbours anyway, so global
+    // computation is both correct and cheaper than recomputing per
+    // segment.
+    let has_arabic = codepoints.iter().any(|&c| script_of(c) == Script::Arabic);
+    let arabic_forms: Vec<JoiningForm> = if has_arabic {
+        assign_joining_forms(text)
+    } else {
+        Vec::new()
+    };
+
+    // Step 2 (per segment): pre-shaper → GSUB. We build the result by
+    // concatenating per-segment processed glyph sub-vecs; each segment
+    // processes its own slice of codepoints/glyphs so contextual
+    // lookups in one script can never see the other script's glyphs
+    // as context. Track the post-GSUB glyph range for each segment so
+    // the downstream GPOS pass can dispatch under the same priority.
+    let mut processed_glyphs: Vec<Glyph> = Vec::with_capacity(glyphs.len());
+    let mut seg_glyph_ranges: Vec<ProcessedSegment> = Vec::with_capacity(segments.len());
+
+    for seg in &segments {
+        // Take an owned sub-vec of this segment's glyphs so ligature
+        // substitution can shrink or multiple-sub can grow the slice
+        // without touching the rest of the run.
+        let seg_glyphs_src = glyphs[seg.cp_range.clone()].to_vec();
+        let seg_cps = &codepoints[seg.cp_range.clone()];
+        let mut seg_glyphs = seg_glyphs_src;
+
+        // Per-script pre-shapers. Each is gated on the segment's
+        // resolved script so a Hebrew segment never runs the Indic
+        // state machine, and vice versa.
+        if let Some(config) = crate::ot::indic::indic_config_for(seg.script) {
             crate::ot::indic::shape_indic(
                 gsub.as_ref(),
                 gdef.as_ref(),
-                &codepoints,
-                &mut glyphs,
+                seg_cps,
+                &mut seg_glyphs,
                 &config,
             );
         }
-    }
-
-    // Step 1c: Universal Shaping Engine. Khmer, Myanmar, Thai, Lao,
-    // and Old-Hangul (Jamo) all route here with their own feature
-    // lists + script-tag priorities. Tai Tham / Buginese / Cham
-    // land on the same dispatch as their category tables are added.
-    // Runs the USE basic + topographical feature sets per-syllable,
-    // so the generic GSUB pass below only has to handle `liga`,
-    // `calt`, `ccmp` for features that are orthogonal to script-
-    // specific reordering.
-    if has_khmer {
-        crate::ot::use_shaper::shape_khmer(gsub.as_ref(), gdef.as_ref(), &codepoints, &mut glyphs);
-    }
-    if has_myanmar {
-        crate::ot::use_shaper::shape_myanmar(
-            gsub.as_ref(),
-            gdef.as_ref(),
-            &codepoints,
-            &mut glyphs,
-        );
-    }
-    if has_thai {
-        crate::ot::use_shaper::shape_thai(gsub.as_ref(), gdef.as_ref(), &codepoints, &mut glyphs);
-    }
-    if has_lao {
-        crate::ot::use_shaper::shape_lao(gsub.as_ref(), gdef.as_ref(), &codepoints, &mut glyphs);
-    }
-    if has_hangul_jamo {
-        crate::ot::use_shaper::shape_hangul(
-            gsub.as_ref(),
-            gdef.as_ref(),
-            &codepoints,
-            &mut glyphs,
-        );
-    }
-
-    if let Some(ref gsub) = gsub {
-        // Arabic positional substitution runs *before* the default
-        // GSUB pass so `rlig`/`liga` etc. see the post-joining glyph
-        // stream.
-        if has_arabic && !arabic_forms.is_empty() {
-            // ccmp must run before positional features so any
-            // composition/decomposition has settled first.
-            if !feature_disabled(features, *b"ccmp") {
-                apply_gsub_feature(
-                    gsub,
-                    &mut glyphs,
-                    gdef.as_ref(),
-                    *b"ccmp",
-                    0,
-                    script_priority,
-                );
-            }
-            apply_arabic_positional_features(gsub, &mut glyphs, gdef.as_ref(), &arabic_forms);
+        if seg.script == Script::Khmer {
+            crate::ot::use_shaper::shape_khmer(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
         }
-        run_default_gsub(
-            gsub,
-            &mut glyphs,
-            gdef.as_ref(),
-            features,
-            want_liga,
-            is_vertical,
-            script_priority,
-            has_arabic && !arabic_forms.is_empty(),
-        );
+        if seg.script == Script::Myanmar {
+            crate::ot::use_shaper::shape_myanmar(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::Thai {
+            crate::ot::use_shaper::shape_thai(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::Lao {
+            crate::ot::use_shaper::shape_lao(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        // Hangul routes through USE only for Jamo-decomposed text.
+        // Precomposed syllables (U+AC00..U+D7A3) still pass through
+        // the default GSUB/GPOS chain — `ljmo`/`vjmo`/`tjmo` are
+        // no-ops on them, so running the pipeline is harmless but
+        // wasteful.  Gate on at least one Jamo codepoint in the
+        // segment's codepoint slice.
+        if seg.script == Script::Hangul
+            && seg_cps.iter().any(|&c| crate::unicode::is_hangul_jamo(c))
+        {
+            crate::ot::use_shaper::shape_hangul(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+
+        if let Some(ref gsub) = gsub {
+            // Arabic positional + default GSUB for this segment.
+            let seg_arabic_active = seg.script == Script::Arabic && !arabic_forms.is_empty();
+            if seg_arabic_active {
+                // ccmp must run before positional features so any
+                // composition/decomposition has settled first.
+                if !feature_disabled(features, *b"ccmp") {
+                    apply_gsub_feature(
+                        gsub,
+                        &mut seg_glyphs,
+                        gdef.as_ref(),
+                        *b"ccmp",
+                        0,
+                        seg.script_priority,
+                    );
+                }
+                // Arabic positional pass consumes only the segment's
+                // slice of the forms vector — cps/glyphs are 1:1 at
+                // this point (ccmp can rewrite ids but not lengths in
+                // practice for Arabic), so the slice aligns.
+                let forms_slice = &arabic_forms[seg.cp_range.clone()];
+                apply_arabic_positional_features(gsub, &mut seg_glyphs, gdef.as_ref(), forms_slice);
+            }
+            run_default_gsub(
+                gsub,
+                &mut seg_glyphs,
+                gdef.as_ref(),
+                features,
+                want_liga,
+                is_vertical,
+                seg.script_priority,
+                seg_arabic_active,
+            );
+        }
+
+        let start = processed_glyphs.len();
+        processed_glyphs.extend(seg_glyphs);
+        let end = processed_glyphs.len();
+        seg_glyph_ranges.push(ProcessedSegment {
+            range: start..end,
+            script_priority: seg.script_priority,
+        });
+    }
+
+    // Reassemble — segments were concatenated in left-to-right order
+    // so the buffer's visual ordering survives the round-trip.
+    glyphs = processed_glyphs;
+
+    // AAT fallback. Consulted only when the font has no GSUB at all
+    // — that is how HarfBuzz decides between OpenType and AAT, and
+    // matches the issue scope. Legacy macOS Zapfino, older Apple
+    // Chancery variants, and most third-party AAT-only fonts land
+    // here. Runs after the segmented GSUB pass so a font that
+    // carries both only exercises the AAT path when the OpenType
+    // side is absent.
+    if gsub.is_none() {
+        if let Some(morx) = face.morx()? {
+            apply_morx(&morx, &mut glyphs);
+        }
     }
 
     // Step 3: advance lookup. Runs *after* GSUB so ligatures receive
@@ -668,8 +639,12 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         }
     }
 
-    // Step 4: GPOS passes. Kern first, then mark-to-base; then any
-    // user-enabled GPOS features that flow through feature overrides.
+    // Step 4: GPOS passes — per segment, so each segment dispatches
+    // under its own script-tag priority. Kern first, then `dist`
+    // (pre-mark), mark, mkmk, then user-enabled GPOS features. A GPOS
+    // kern hit on *any* segment inhibits the legacy-kern fallback —
+    // matches the spec: the modern table wins whenever it carries any
+    // usable data for the run.
     let gpos = face.gpos()?;
     // Build the variable-font resolution context once. Passing this
     // through every GPOS apply site is what lets VariationIndex
@@ -680,116 +655,74 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         coords: font.coords(),
         store: gdef.as_ref().and_then(|g| g.item_variation_store()),
     };
-    let gpos_kerned = if want_kern {
-        match &gpos {
-            Some(gpos) => apply_gpos_feature(
-                gpos,
-                &mut glyphs,
-                gdef.as_ref(),
-                *b"kern",
-                script_priority,
-                &var,
-            ),
-            None => false,
-        }
-    } else {
-        false
-    };
+    let mut gpos_kerned = false;
     if let Some(ref gpos) = gpos {
-        // Indic `dist` — nudges advance of certain conjunct glyphs.
-        // Applied before mark attachment so marks anchor onto the
-        // distance-adjusted base positions. Uses the active Indic
-        // script's own script-tag priority (e.g. `bng2`/`beng` for
-        // Bengali) so distance adjustments come from the correct
-        // per-script LangSys, and routes through the _with_var path
-        // so GPOS feature-variations apply if present.
-        if let Some(script) = indic_script {
-            if !feature_disabled(features, *b"dist") {
-                if let Some(config) = crate::ot::indic::indic_config_for(script) {
-                    apply_gpos_feature_in_scripts_with_var(
-                        gpos,
-                        &mut glyphs,
-                        gdef.as_ref(),
-                        *b"dist",
-                        config.script_priority,
-                        &var,
-                    );
+        for seg_out in &seg_glyph_ranges {
+            if seg_out.range.is_empty() {
+                continue;
+            }
+            let priority = seg_out.script_priority;
+            let seg_slice = &mut glyphs[seg_out.range.clone()];
+            if want_kern {
+                let ran =
+                    apply_gpos_feature(gpos, seg_slice, gdef.as_ref(), *b"kern", priority, &var);
+                if ran {
+                    gpos_kerned = true;
                 }
             }
-        }
-        // Khmer `dist` — same pre-mark-attach distance adjustment
-        // for USE scripts. Routes through the _with_var variant so
-        // GPOS feature-variations apply if present.
-        if has_khmer && !feature_disabled(features, *b"dist") {
-            apply_gpos_feature_in_scripts_with_var(
-                gpos,
-                &mut glyphs,
-                gdef.as_ref(),
-                *b"dist",
-                crate::ot::use_shaper::KHMER_SCRIPT_PRIORITY,
-                &var,
-            );
-        }
-        // Myanmar `dist` — same role as Khmer's pre-mark distance
-        // tweak, routed under the Myanmar script tag so the
-        // script-specific LangSys picks its own lookup.
-        if has_myanmar && !feature_disabled(features, *b"dist") {
-            apply_gpos_feature_in_scripts_with_var(
-                gpos,
-                &mut glyphs,
-                gdef.as_ref(),
-                *b"dist",
-                crate::ot::use_shaper::MYANMAR_SCRIPT_PRIORITY,
-                &var,
-            );
-        }
-        if !feature_disabled(features, *b"mark") {
-            apply_gpos_feature(
-                gpos,
-                &mut glyphs,
-                gdef.as_ref(),
-                *b"mark",
-                script_priority,
-                &var,
-            );
-        }
-        if !feature_disabled(features, *b"mkmk") {
-            apply_gpos_feature(
-                gpos,
-                &mut glyphs,
-                gdef.as_ref(),
-                *b"mkmk",
-                script_priority,
-                &var,
-            );
-        }
-        // User-enabled features beyond the defaults flow through the
-        // same dispatch. Skip tags already handled above so they do
-        // not double-apply.
-        for feat in features {
-            if feat.value == 0 {
-                continue;
+            // `dist` — distance adjustments the Indic / USE shapers
+            // rely on for conjunct forms. Keyed on the segment's
+            // resolved script priority (Devanagari → dev2/deva/DFLT,
+            // Khmer → khmr/khm2/DFLT, etc.), and skipped for scripts
+            // that never ship a `dist` feature.
+            if !feature_disabled(features, *b"dist") {
+                apply_gpos_feature_in_scripts_with_var(
+                    gpos,
+                    seg_slice,
+                    gdef.as_ref(),
+                    *b"dist",
+                    priority,
+                    &var,
+                );
             }
-            if matches!(&feat.tag, b"kern" | b"mark" | b"mkmk" | b"liga") {
-                continue;
+            if !feature_disabled(features, *b"mark") {
+                apply_gpos_feature(gpos, seg_slice, gdef.as_ref(), *b"mark", priority, &var);
             }
-            apply_gpos_feature(
-                gpos,
-                &mut glyphs,
-                gdef.as_ref(),
-                feat.tag,
-                script_priority,
-                &var,
-            );
+            if !feature_disabled(features, *b"mkmk") {
+                apply_gpos_feature(gpos, seg_slice, gdef.as_ref(), *b"mkmk", priority, &var);
+            }
+            // User-enabled features beyond the defaults flow through
+            // the same dispatch. Skip tags already handled above so
+            // they do not double-apply.
+            for feat in features {
+                if feat.value == 0 {
+                    continue;
+                }
+                if matches!(&feat.tag, b"kern" | b"mark" | b"mkmk" | b"liga") {
+                    continue;
+                }
+                apply_gpos_feature(gpos, seg_slice, gdef.as_ref(), feat.tag, priority, &var);
+            }
         }
     }
 
     // Legacy `kern` is a fallback: only runs when GPOS kern produced
-    // no lookups. GPOS wins even with zero-delta hits — the spec's
-    // design, not a sigilbuzz quirk.
+    // no lookups on any segment. GPOS wins even with zero-delta hits
+    // — the spec's design, not a sigilbuzz quirk.
+    let mut legacy_kerned = false;
     if want_kern && !gpos_kerned {
         if let Some(kern) = face.kern()? {
             apply_legacy_kern(&kern, &mut glyphs);
+            legacy_kerned = true;
+        }
+    }
+    // AAT `kerx` is the last-resort fallback: GPOS kern absent AND
+    // legacy `kern` absent. In practice fonts ship one of the three,
+    // not several; keeping legacy ahead preserves existing
+    // behaviour and matches HarfBuzz ordering.
+    if want_kern && !gpos_kerned && !legacy_kerned {
+        if let Some(kerx) = face.kerx()? {
+            apply_kerx(&kerx, &mut glyphs);
         }
     }
 
@@ -800,6 +733,93 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
 /// `Feature { tag, value: 0 }` in the override list.
 fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
     features.iter().any(|f| f.tag == tag && f.value == 0)
+}
+
+/// One shape-time segment: a maximal run of codepoints that share a
+/// resolved script. `cp_range` is a half-open range into the
+/// post-cmap `codepoints` vector (not into the buffer text, because
+/// Khmer split-vowel preprocessing can insert synthetic codepoints).
+/// Pre-GSUB, `glyphs[cp_range]` covers exactly the same glyphs.
+#[derive(Debug)]
+struct Segment {
+    cp_range: core::ops::Range<usize>,
+    script: Script,
+    script_priority: &'static [[u8; 4]],
+}
+
+/// Post-GSUB slice of the fully-assembled `glyphs` vector — one per
+/// pre-shaped segment. The GPOS loop reads this back to dispatch
+/// kern / mark / mkmk / dist / user-enabled features against the
+/// correct script tag priority for each slice.
+#[derive(Debug)]
+struct ProcessedSegment {
+    range: core::ops::Range<usize>,
+    script_priority: &'static [[u8; 4]],
+}
+
+/// Splits the post-cmap codepoint stream into [`Segment`]s whose
+/// scripts agree with the buffer-level [`crate::buffer::Buffer::script_runs`]
+/// segmentation: COMMON codepoints (ASCII space/digits/punctuation,
+/// ZWJ/ZWNJ/bidi marks) extend whichever real-script segment ran
+/// before them, and a leading COMMON-only run takes the raw script
+/// of its first codepoint (typically `Script::Latin` via the ASCII
+/// table). Always returns at least one segment covering the whole
+/// `codepoints` range for a non-empty input.
+fn build_segments(codepoints: &[char]) -> Vec<Segment> {
+    let mut segments: Vec<Segment> = Vec::new();
+    if codepoints.is_empty() {
+        return segments;
+    }
+    let mut current_start = 0usize;
+    let mut current_script: Option<Script> = None;
+    for (i, &ch) in codepoints.iter().enumerate() {
+        let raw = script_of(ch);
+        let resolved = if is_common_for_segmentation(ch) {
+            current_script.unwrap_or(raw)
+        } else {
+            raw
+        };
+        match current_script {
+            Some(s) if s == resolved => {}
+            Some(s) => {
+                segments.push(Segment {
+                    cp_range: current_start..i,
+                    script: s,
+                    script_priority: script_priority_for(s),
+                });
+                current_start = i;
+                current_script = Some(resolved);
+            }
+            None => {
+                current_script = Some(resolved);
+            }
+        }
+    }
+    if let Some(s) = current_script {
+        segments.push(Segment {
+            cp_range: current_start..codepoints.len(),
+            script: s,
+            script_priority: script_priority_for(s),
+        });
+    }
+    segments
+}
+
+/// Shape-time COMMON / INHERITED predicate: stays in lockstep with
+/// the buffer-level `is_common_or_inherited` in `buffer.rs`. Kept
+/// inside `shape.rs` so the Khmer-split synthetic codepoints — which
+/// never land in the buffer's text — still segment correctly.
+const fn is_common_for_segmentation(ch: char) -> bool {
+    let cp = ch as u32;
+    matches!(
+        cp,
+        0x0000..=0x002F
+        | 0x0030..=0x0040
+        | 0x005B..=0x0060
+        | 0x007B..=0x007F
+        | 0x00A0..=0x00BF
+        | 0x200C | 0x200D | 0x200E | 0x200F | 0x061C
+    )
 }
 
 /// True for the small set of Unicode format characters the shaper
@@ -2433,6 +2453,60 @@ fn apply_mark_mark(
         glyphs[i].x_offset += dx;
         glyphs[i].y_offset += dy;
         glyphs[i].x_advance = 0;
+    }
+}
+
+/// AAT `morx` substitution pass — runs only when the font has no
+/// GSUB. The morx parser returns a new glyph id stream plus an
+/// origin vector; each output index carries the input index it was
+/// derived from (or the smallest input index for a ligature). We
+/// rebuild the `Glyph` vector by copying metadata from that origin
+/// so clusters survive ligation: the surviving glyph inherits the
+/// first component's cluster, matching HarfBuzz's "merge clusters
+/// to earliest" policy.
+fn apply_morx(morx: &Morx<'_>, glyphs: &mut Vec<Glyph>) {
+    if glyphs.is_empty() {
+        return;
+    }
+    let input_ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
+    let (out_ids, origins) = morx.apply(&input_ids);
+    if out_ids.len() == glyphs.len() && out_ids == input_ids {
+        return; // no change — avoid needless allocation
+    }
+    let mut rebuilt: Vec<Glyph> = Vec::with_capacity(out_ids.len());
+    for (out_idx, &gid) in out_ids.iter().enumerate() {
+        let origin = origins.get(out_idx).copied().unwrap_or(usize::MAX);
+        if origin < glyphs.len() {
+            let mut g = glyphs[origin];
+            g.glyph_id = u32::from(gid);
+            rebuilt.push(g);
+        } else {
+            // Synthesised output with no single origin — rare; fall
+            // back to the lowest available cluster so layout does
+            // not confuse renderer-side grapheme tracking.
+            let cluster = glyphs.first().map_or(0, |g| g.cluster);
+            rebuilt.push(Glyph::new(u32::from(gid), cluster));
+        }
+    }
+    *glyphs = rebuilt;
+}
+
+/// AAT `kerx` pair-kern pass — mirrors [`apply_legacy_kern`]'s
+/// HarfBuzz-compatible half-split distribution so kerx output
+/// matches what the macOS renderer does for the same pairs.
+fn apply_kerx(kerx: &Kerx<'_>, glyphs: &mut [Glyph]) {
+    if glyphs.len() < 2 {
+        return;
+    }
+    for i in 0..glyphs.len() - 1 {
+        let left = glyphs[i].glyph_id as u16;
+        let right = glyphs[i + 1].glyph_id as u16;
+        let delta = i32::from(kerx.kern(left, right));
+        if delta != 0 {
+            let half = delta / 2;
+            glyphs[i].x_advance += delta - half;
+            glyphs[i + 1].x_advance += half;
+        }
     }
 }
 

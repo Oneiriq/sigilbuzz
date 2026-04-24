@@ -36,7 +36,7 @@ use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
 use crate::tables::{
     tag, Avar, Cmap, Fvar, Gdef, Glyf, GlyphBounds, Gpos, Gsub, Gvar, Head, Hhea, Hmtx, Hvar,
-    KernTable, Loca, Maxp, Vhea, Vmtx, Vorg,
+    KernTable, Kerx, Loca, Maxp, Morx, Vhea, Vmtx, Vorg,
 };
 
 /// One entry in the SFNT table directory.
@@ -254,6 +254,30 @@ impl<'a> Face<'a> {
     pub fn kern(&self) -> Result<Option<KernTable<'a>>> {
         match self.table_bytes(tag::KERN) {
             Ok(bytes) => Ok(Some(KernTable::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the AAT `morx` table if the font carries one.
+    /// sigilbuzz reaches for `morx` only when the font has no GSUB,
+    /// which is the same policy HarfBuzz uses; AAT-only fonts (some
+    /// legacy macOS system fonts, most third-party AAT designs) are
+    /// the common case.
+    pub fn morx(&self) -> Result<Option<Morx<'a>>> {
+        match self.table_bytes(tag::MORX) {
+            Ok(bytes) => Ok(Some(Morx::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the AAT `kerx` table if the font carries one. Used
+    /// only when the font has no GPOS kern feature, so mainstream
+    /// fonts are unaffected.
+    pub fn kerx(&self) -> Result<Option<Kerx<'a>>> {
+        match self.table_bytes(tag::KERX) {
+            Ok(bytes) => Ok(Some(Kerx::parse(bytes)?)),
             Err(Error::MissingTable { .. }) => Ok(None),
             Err(e) => Err(e),
         }
