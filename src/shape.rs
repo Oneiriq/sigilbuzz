@@ -163,6 +163,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let mut glyphs: Vec<Glyph> = Vec::with_capacity(text.len());
     let mut codepoints: Vec<char> = Vec::with_capacity(text.len());
     let mut has_devanagari = false;
+    let mut has_khmer = false;
     for (cluster, ch) in text.char_indices() {
         let glyph_id = if is_default_ignorable(ch) {
             space_gid
@@ -186,8 +187,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         glyph.unicode_props = props;
         glyphs.push(glyph);
         codepoints.push(ch);
-        if crate::unicode::script_of(ch) == crate::unicode::Script::Devanagari {
-            has_devanagari = true;
+        match crate::unicode::script_of(ch) {
+            crate::unicode::Script::Devanagari => has_devanagari = true,
+            crate::unicode::Script::Khmer => has_khmer = true,
+            _ => {}
         }
     }
 
@@ -229,6 +232,21 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // skips this pass entirely.
     if has_devanagari {
         crate::ot::indic::shape_devanagari(gsub.as_ref(), gdef.as_ref(), &codepoints, &mut glyphs);
+    }
+
+    // Step 1c: Universal Shaping Engine. Khmer routes here; Myanmar /
+    // Thai / Lao / Old Hangul / Tai Tham will land on the same entry
+    // point as their category tables get filled in. Runs the USE
+    // basic + topographical feature sets per-syllable, so the generic
+    // GSUB pass below only has to handle `liga`, `calt`, `ccmp` —
+    // features that are orthogonal to script-specific reordering.
+    if has_khmer {
+        crate::ot::use_shaper::shape_khmer(
+            gsub.as_ref(),
+            gdef.as_ref(),
+            &codepoints,
+            &mut glyphs,
+        );
     }
 
     if let Some(ref gsub) = gsub {
@@ -364,6 +382,17 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 *b"dist",
                 crate::ot::indic::devanagari::DEVA_SCRIPT_PRIORITY,
+            );
+        }
+        // Khmer `dist` — same pre-mark-attach distance adjustment for
+        // USE scripts.
+        if has_khmer && !feature_disabled(features, *b"dist") {
+            apply_gpos_feature_in_scripts(
+                gpos,
+                &mut glyphs,
+                gdef.as_ref(),
+                *b"dist",
+                crate::ot::use_shaper::KHMER_SCRIPT_PRIORITY,
             );
         }
         if !feature_disabled(features, *b"mark") {
