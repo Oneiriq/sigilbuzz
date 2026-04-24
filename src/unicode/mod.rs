@@ -8,6 +8,7 @@
 #![allow(missing_docs)]
 
 pub mod bidi;
+pub mod joining;
 pub mod normalize;
 
 /// Coarse script classification.
