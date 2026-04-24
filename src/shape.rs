@@ -860,6 +860,13 @@ const fn is_common_for_segmentation(ch: char) -> bool {
         | 0x007B..=0x007F
         | 0x00A0..=0x00BF
         | 0x200C | 0x200D | 0x200E | 0x200F | 0x061C
+        // INHERITED combining-mark blocks — must extend the preceding
+        // real-script segment so GSUB dispatches under the right
+        // priority. Matches `buffer::is_common_or_inherited`.
+        | 0x0300..=0x036F
+        | 0x1DC0..=0x1DFF
+        | 0x20D0..=0x20FF
+        | 0xFE20..=0xFE2F
     )
 }
 
