@@ -56,7 +56,7 @@
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
-use crate::buffer::{unicode_prop, Buffer, Glyph, ShapedRun};
+use crate::buffer::{script_priority_for, unicode_prop, Buffer, Glyph, ShapedRun};
 use crate::error::Result;
 use crate::font::Font;
 use crate::ot::arabic::{assign_joining_forms, JoiningForm};
@@ -229,11 +229,6 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let space_gid = u32::from(cmap.glyph_id('\u{0020}').unwrap_or(0));
     let mut glyphs: Vec<Glyph> = Vec::with_capacity(text.len());
     let mut codepoints: Vec<char> = Vec::with_capacity(text.len());
-    // First Indic script seen in the run, if any. Used to dispatch
-    // the Indic reordering shaper with a script-specific config
-    // (reph position, reph mode, GSUB script-tag priority).
-    let mut indic_script: Option<crate::unicode::Script> = None;
-    let mut has_khmer = false;
     for (cluster, ch) in text.char_indices() {
         // Khmer split-vowel decomposition. HarfBuzz's USE
         // preprocessing hook splits U+17C4 / U+17C5 into a
@@ -254,7 +249,6 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 glyphs.push(glyph);
                 codepoints.push(component);
             }
-            has_khmer = true;
             continue;
         }
         let glyph_id = if is_default_ignorable(ch) {
@@ -279,126 +273,133 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         glyph.unicode_props = props;
         glyphs.push(glyph);
         codepoints.push(ch);
-        let s = crate::unicode::script_of(ch);
-        if s == crate::unicode::Script::Khmer {
-            has_khmer = true;
-        } else if indic_script.is_none() && s.is_indic() {
-            indic_script = Some(s);
-        }
     }
 
-    // Step 1.5: Detect Arabic and compute per-glyph joining forms.
-    // When any glyph in the run comes from an Arabic codepoint the
-    // joining state machine decides which of init/medi/fina/isol
-    // each Arabic position takes. Non-Arabic positions get None and
-    // the positional features skip them. The forms vector stays
-    // aligned with `glyphs` through substitutions because ligatures
-    // and multiple-sub would violate that alignment only under
-    // `ccmp`/`rlig`, which we apply *after* computing forms so the
-    // state machine sees the pre-substitution sequence (correct per
-    // spec: joining is decided on codepoints, not glyphs).
-    let has_arabic = codepoints.iter().any(|&c| script_of(c) == Script::Arabic);
-    let has_hebrew = codepoints.iter().any(|&c| script_of(c) == Script::Hebrew);
-    let arabic_forms: Vec<JoiningForm> = if has_arabic {
-        assign_joining_forms(text)
-    } else {
-        Vec::new()
-    };
-
-    // Compute the script-tag priority for every default feature
-    // dispatch in this call. Arabic fonts resolve their positional
-    // lookups under `arab`; Hebrew fonts resolve niqqud / cantillation
-    // mark anchors under `hebr`. Anything else falls through to DFLT
-    // — which is what every Latin-era font ships under.
+    // Step 1.5: Segment the run into maximal same-script spans. Each
+    // segment carries its own script priority (e.g. Arabic `arab` ->
+    // DFLT, Hebrew `hebr` -> DFLT), its codepoint range in the
+    // `codepoints` vec we just filled, and — after we finish GSUB
+    // below — its post-substitution glyph range. Pre-GSUB the two
+    // ranges coincide because cmap is 1:1 (Khmer's split-vowel
+    // preprocessor above added both codepoints and glyphs in lockstep,
+    // so the 1:1 invariant still holds here).
     //
-    // When a run mixes scripts we prefer the complex-script tag so
-    // the script-specific lookups still fire on the relevant glyphs;
-    // the DFLT fallback inside `apply_*_feature_in_scripts` catches
-    // the Latin half.
-    let script_priority: &[[u8; 4]] = if has_arabic {
-        &[*b"arab", *b"DFLT"]
-    } else if has_hebrew {
-        &[*b"hebr", *b"DFLT"]
-    } else {
-        &[*b"DFLT"]
-    };
+    // Running each segment through its own cmap → pre-shaper → GSUB
+    // → GPOS chain is what lets mixed-script runs like `Hi שלום`
+    // dispatch the Hebrew half under `hebr` features and the Latin
+    // half under DFLT in a single call. The pre-segmenter implementation
+    // resolved one global priority and missed script-specific lookups
+    // on whichever half lost the tie-break.
+    let segments = build_segments(&codepoints);
 
-    // Step 2: GSUB passes. Default-on features mirror HarfBuzz's
-    // defaults so common text renders the same way without the
-    // caller having to enumerate them.
-    //
-    // When the run contains Arabic, the positional features
-    // (`isol`/`init`/`medi`/`fina`) run *before* `rlig` and `liga`
-    // so the ligature subtables see the post-joining glyph ids.
-    // That is the order HarfBuzz uses and it is what Arabic fonts
-    // are designed against.
     let gsub = face.gsub()?;
     // GDEF is consulted up-front so the LookupFlag skip-iterator has
     // it available for every GSUB context match. GPOS reuses the same
     // handle further down.
     let gdef = face.gdef()?;
 
-    // Step 1b: Indic reordering + basic features. Runs before the
-    // generic GSUB pass so the glyph stream entering `liga` / `calt`
-    // is already in logical order for the script. Non-Indic text
-    // skips this pass entirely.
-    //
-    // Each Indic script uses the same state machine but with a
-    // per-script config (virama, ra, reph position, reph mode, and
-    // GSUB script-tag priority). The config is resolved from the
-    // first Indic codepoint encountered in the run above.
-    if let Some(script) = indic_script {
-        if let Some(config) = crate::ot::indic::indic_config_for(script) {
+    // Arabic joining forms are computed once, from the full text,
+    // because the state machine depends on surrounding letters (the
+    // previous/next Arabic joining-type). A segment-local view would
+    // lose the cross-boundary context — but in sigilbuzz every Arabic
+    // segment is bounded by non-Arabic neighbours anyway, so global
+    // computation is both correct and cheaper than recomputing per
+    // segment.
+    let has_arabic = codepoints.iter().any(|&c| script_of(c) == Script::Arabic);
+    let arabic_forms: Vec<JoiningForm> = if has_arabic {
+        assign_joining_forms(text)
+    } else {
+        Vec::new()
+    };
+
+    // Step 2 (per segment): pre-shaper → GSUB. We build the result by
+    // concatenating per-segment processed glyph sub-vecs; each segment
+    // processes its own slice of codepoints/glyphs so contextual
+    // lookups in one script can never see the other script's glyphs
+    // as context. Track the post-GSUB glyph range for each segment so
+    // the downstream GPOS pass can dispatch under the same priority.
+    let mut processed_glyphs: Vec<Glyph> = Vec::with_capacity(glyphs.len());
+    let mut seg_glyph_ranges: Vec<(core::ops::Range<usize>, Script, &'static [[u8; 4]])> =
+        Vec::with_capacity(segments.len());
+
+    for seg in &segments {
+        // Take an owned sub-vec of this segment's glyphs so ligature
+        // substitution can shrink or multiple-sub can grow the slice
+        // without touching the rest of the run.
+        let seg_glyphs_src = glyphs[seg.cp_range.clone()].to_vec();
+        let seg_cps = &codepoints[seg.cp_range.clone()];
+        let mut seg_glyphs = seg_glyphs_src;
+
+        // Per-script pre-shapers. Each is gated on the segment's
+        // resolved script so a Hebrew segment never runs the Indic
+        // state machine, and vice versa.
+        if let Some(config) = crate::ot::indic::indic_config_for(seg.script) {
             crate::ot::indic::shape_indic(
                 gsub.as_ref(),
                 gdef.as_ref(),
-                &codepoints,
-                &mut glyphs,
+                seg_cps,
+                &mut seg_glyphs,
                 &config,
             );
         }
-    }
+        if seg.script == Script::Khmer {
+            crate::ot::use_shaper::shape_khmer(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
 
-    // Step 1c: Universal Shaping Engine. Khmer routes here; Myanmar /
-    // Thai / Lao / Old Hangul / Tai Tham will land on the same entry
-    // point as their category tables get filled in. Runs the USE
-    // basic + topographical feature sets per-syllable, so the generic
-    // GSUB pass below only has to handle `liga`, `calt`, `ccmp` —
-    // features that are orthogonal to script-specific reordering.
-    if has_khmer {
-        crate::ot::use_shaper::shape_khmer(gsub.as_ref(), gdef.as_ref(), &codepoints, &mut glyphs);
-    }
-
-    if let Some(ref gsub) = gsub {
-        // Arabic positional substitution runs *before* the default
-        // GSUB pass so `rlig`/`liga` etc. see the post-joining glyph
-        // stream.
-        if has_arabic && !arabic_forms.is_empty() {
-            // ccmp must run before positional features so any
-            // composition/decomposition has settled first.
-            if !feature_disabled(features, *b"ccmp") {
-                apply_gsub_feature(
+        if let Some(ref gsub) = gsub {
+            // Arabic positional + default GSUB for this segment.
+            let seg_arabic_active = seg.script == Script::Arabic && !arabic_forms.is_empty();
+            if seg_arabic_active {
+                // ccmp must run before positional features so any
+                // composition/decomposition has settled first.
+                if !feature_disabled(features, *b"ccmp") {
+                    apply_gsub_feature(
+                        gsub,
+                        &mut seg_glyphs,
+                        gdef.as_ref(),
+                        *b"ccmp",
+                        0,
+                        seg.script_priority,
+                    );
+                }
+                // Arabic positional pass consumes only the segment's
+                // slice of the forms vector — cps/glyphs are 1:1 at
+                // this point (ccmp can rewrite ids but not lengths in
+                // practice for Arabic), so the slice aligns.
+                let forms_slice = &arabic_forms[seg.cp_range.clone()];
+                apply_arabic_positional_features(
                     gsub,
-                    &mut glyphs,
+                    &mut seg_glyphs,
                     gdef.as_ref(),
-                    *b"ccmp",
-                    0,
-                    script_priority,
+                    forms_slice,
                 );
             }
-            apply_arabic_positional_features(gsub, &mut glyphs, gdef.as_ref(), &arabic_forms);
+            run_default_gsub(
+                gsub,
+                &mut seg_glyphs,
+                gdef.as_ref(),
+                features,
+                want_liga,
+                is_vertical,
+                seg.script_priority,
+                seg_arabic_active,
+            );
         }
-        run_default_gsub(
-            gsub,
-            &mut glyphs,
-            gdef.as_ref(),
-            features,
-            want_liga,
-            is_vertical,
-            script_priority,
-            has_arabic && !arabic_forms.is_empty(),
-        );
+
+        let start = processed_glyphs.len();
+        processed_glyphs.extend(seg_glyphs);
+        let end = processed_glyphs.len();
+        seg_glyph_ranges.push((start..end, seg.script, seg.script_priority));
     }
+
+    // Reassemble — segments were concatenated in left-to-right order
+    // so the buffer's visual ordering survives the round-trip.
+    glyphs = processed_glyphs;
 
     // Step 3: advance lookup. Runs *after* GSUB so ligatures receive
     // their ligature-glyph advance, not the sum of component advances.
@@ -485,8 +486,12 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         }
     }
 
-    // Step 4: GPOS passes. Kern first, then mark-to-base; then any
-    // user-enabled GPOS features that flow through feature overrides.
+    // Step 4: GPOS passes — per segment, so each segment dispatches
+    // under its own script-tag priority. Kern first, then `dist`
+    // (pre-mark), mark, mkmk, then user-enabled GPOS features. A GPOS
+    // kern hit on *any* segment inhibits the legacy-kern fallback —
+    // matches the spec: the modern table wins whenever it carries any
+    // usable data for the run.
     let gpos = face.gpos()?;
     // Build the variable-font resolution context once. Passing this
     // through every GPOS apply site is what lets VariationIndex
@@ -497,100 +502,86 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         coords: font.coords(),
         store: gdef.as_ref().and_then(|g| g.item_variation_store()),
     };
-    let gpos_kerned = if want_kern {
-        match &gpos {
-            Some(gpos) => apply_gpos_feature(
-                gpos,
-                &mut glyphs,
-                gdef.as_ref(),
-                *b"kern",
-                script_priority,
-                &var,
-            ),
-            None => false,
-        }
-    } else {
-        false
-    };
+    let mut gpos_kerned = false;
     if let Some(ref gpos) = gpos {
-        // Indic `dist` — nudges advance of certain conjunct glyphs.
-        // Applied before mark attachment so marks anchor onto the
-        // distance-adjusted base positions. Uses the active Indic
-        // script's own script-tag priority (e.g. `bng2`/`beng` for
-        // Bengali) so distance adjustments come from the correct
-        // per-script LangSys, and routes through the _with_var path
-        // so GPOS feature-variations apply if present.
-        if let Some(script) = indic_script {
-            if !feature_disabled(features, *b"dist") {
-                if let Some(config) = crate::ot::indic::indic_config_for(script) {
-                    apply_gpos_feature_in_scripts_with_var(
-                        gpos,
-                        &mut glyphs,
-                        gdef.as_ref(),
-                        *b"dist",
-                        config.script_priority,
-                        &var,
-                    );
+        for (range, _script, priority) in &seg_glyph_ranges {
+            if range.is_empty() {
+                continue;
+            }
+            let seg_slice = &mut glyphs[range.clone()];
+            if want_kern {
+                let ran = apply_gpos_feature(
+                    gpos,
+                    seg_slice,
+                    gdef.as_ref(),
+                    *b"kern",
+                    priority,
+                    &var,
+                );
+                if ran {
+                    gpos_kerned = true;
                 }
             }
-        }
-        // Khmer `dist` — same pre-mark-attach distance adjustment
-        // for USE scripts. Routes through the _with_var variant so
-        // GPOS feature-variations apply if present.
-        if has_khmer && !feature_disabled(features, *b"dist") {
-            apply_gpos_feature_in_scripts_with_var(
-                gpos,
-                &mut glyphs,
-                gdef.as_ref(),
-                *b"dist",
-                crate::ot::use_shaper::KHMER_SCRIPT_PRIORITY,
-                &var,
-            );
-        }
-        if !feature_disabled(features, *b"mark") {
-            apply_gpos_feature(
-                gpos,
-                &mut glyphs,
-                gdef.as_ref(),
-                *b"mark",
-                script_priority,
-                &var,
-            );
-        }
-        if !feature_disabled(features, *b"mkmk") {
-            apply_gpos_feature(
-                gpos,
-                &mut glyphs,
-                gdef.as_ref(),
-                *b"mkmk",
-                script_priority,
-                &var,
-            );
-        }
-        // User-enabled features beyond the defaults flow through the
-        // same dispatch. Skip tags already handled above so they do
-        // not double-apply.
-        for feat in features {
-            if feat.value == 0 {
-                continue;
+            // `dist` — distance adjustments the Indic / USE shapers
+            // rely on for conjunct forms. Keyed on the segment's
+            // resolved script priority (Devanagari → dev2/deva/DFLT,
+            // Khmer → khmr/khm2/DFLT, etc.), and skipped for scripts
+            // that never ship a `dist` feature.
+            if !feature_disabled(features, *b"dist") {
+                apply_gpos_feature_in_scripts_with_var(
+                    gpos,
+                    seg_slice,
+                    gdef.as_ref(),
+                    *b"dist",
+                    priority,
+                    &var,
+                );
             }
-            if matches!(&feat.tag, b"kern" | b"mark" | b"mkmk" | b"liga") {
-                continue;
+            if !feature_disabled(features, *b"mark") {
+                apply_gpos_feature(
+                    gpos,
+                    seg_slice,
+                    gdef.as_ref(),
+                    *b"mark",
+                    priority,
+                    &var,
+                );
             }
-            apply_gpos_feature(
-                gpos,
-                &mut glyphs,
-                gdef.as_ref(),
-                feat.tag,
-                script_priority,
-                &var,
-            );
+            if !feature_disabled(features, *b"mkmk") {
+                apply_gpos_feature(
+                    gpos,
+                    seg_slice,
+                    gdef.as_ref(),
+                    *b"mkmk",
+                    priority,
+                    &var,
+                );
+            }
+            // User-enabled features beyond the defaults flow through
+            // the same dispatch. Skip tags already handled above so
+            // they do not double-apply.
+            for feat in features {
+                if feat.value == 0 {
+                    continue;
+                }
+                if matches!(&feat.tag, b"kern" | b"mark" | b"mkmk" | b"liga") {
+                    continue;
+                }
+                apply_gpos_feature(
+                    gpos,
+                    seg_slice,
+                    gdef.as_ref(),
+                    feat.tag,
+                    priority,
+                    &var,
+                );
+            }
         }
     }
 
     // Legacy `kern` is a fallback: only runs when GPOS kern produced
-    // no lookups. GPOS wins even with zero-delta hits — the spec's
-    // design, not a sigilbuzz quirk.
+    // no lookups on any segment. GPOS wins even with zero-delta hits
+    // — the spec's design, not a sigilbuzz quirk.
     if want_kern && !gpos_kerned {
         if let Some(kern) = face.kern()? {
             apply_legacy_kern(&kern, &mut glyphs);
@@ -604,6 +595,83 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
 /// `Feature { tag, value: 0 }` in the override list.
 fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
     features.iter().any(|f| f.tag == tag && f.value == 0)
+}
+
+/// One shape-time segment: a maximal run of codepoints that share a
+/// resolved script. `cp_range` is a half-open range into the
+/// post-cmap `codepoints` vector (not into the buffer text, because
+/// Khmer split-vowel preprocessing can insert synthetic codepoints).
+/// Pre-GSUB, `glyphs[cp_range]` covers exactly the same glyphs.
+#[derive(Debug)]
+struct Segment {
+    cp_range: core::ops::Range<usize>,
+    script: Script,
+    script_priority: &'static [[u8; 4]],
+}
+
+/// Splits the post-cmap codepoint stream into [`Segment`]s whose
+/// scripts agree with the buffer-level [`crate::buffer::Buffer::script_runs`]
+/// segmentation: COMMON codepoints (ASCII space/digits/punctuation,
+/// ZWJ/ZWNJ/bidi marks) extend whichever real-script segment ran
+/// before them, and a leading COMMON-only run takes the raw script
+/// of its first codepoint (typically `Script::Latin` via the ASCII
+/// table). Always returns at least one segment covering the whole
+/// `codepoints` range for a non-empty input.
+fn build_segments(codepoints: &[char]) -> Vec<Segment> {
+    let mut segments: Vec<Segment> = Vec::new();
+    if codepoints.is_empty() {
+        return segments;
+    }
+    let mut current_start = 0usize;
+    let mut current_script: Option<Script> = None;
+    for (i, &ch) in codepoints.iter().enumerate() {
+        let raw = script_of(ch);
+        let resolved = if is_common_for_segmentation(ch) {
+            current_script.unwrap_or(raw)
+        } else {
+            raw
+        };
+        match current_script {
+            Some(s) if s == resolved => {}
+            Some(s) => {
+                segments.push(Segment {
+                    cp_range: current_start..i,
+                    script: s,
+                    script_priority: script_priority_for(s),
+                });
+                current_start = i;
+                current_script = Some(resolved);
+            }
+            None => {
+                current_script = Some(resolved);
+            }
+        }
+    }
+    if let Some(s) = current_script {
+        segments.push(Segment {
+            cp_range: current_start..codepoints.len(),
+            script: s,
+            script_priority: script_priority_for(s),
+        });
+    }
+    segments
+}
+
+/// Shape-time COMMON / INHERITED predicate: stays in lockstep with
+/// the buffer-level `is_common_or_inherited` in `buffer.rs`. Kept
+/// inside `shape.rs` so the Khmer-split synthetic codepoints — which
+/// never land in the buffer's text — still segment correctly.
+const fn is_common_for_segmentation(ch: char) -> bool {
+    let cp = ch as u32;
+    matches!(
+        cp,
+        0x0000..=0x002F
+        | 0x0030..=0x0040
+        | 0x005B..=0x0060
+        | 0x007B..=0x007F
+        | 0x00A0..=0x00BF
+        | 0x200C | 0x200D | 0x200E | 0x200F | 0x061C
+    )
 }
 
 /// True for the small set of Unicode format characters the shaper
