@@ -11,6 +11,8 @@
 
 pub mod avar;
 pub mod cmap;
+pub mod colr;
+pub mod cpal;
 pub mod fvar;
 pub mod gdef;
 pub mod glyf;
@@ -32,6 +34,8 @@ pub mod vorg;
 
 pub use avar::Avar;
 pub use cmap::Cmap;
+pub use colr::{Colr, ColrPaint};
+pub use cpal::{Color, Cpal};
 pub use fvar::{Fvar, VariationAxis};
 pub use gdef::{Gdef, GlyphClass};
 pub use glyf::{Glyf, GlyphBounds};
@@ -96,4 +100,8 @@ pub mod tag {
     pub const VMTX: [u8; 4] = *b"vmtx";
     /// `VORG` — vertical origin.
     pub const VORG: [u8; 4] = *b"VORG";
+    /// `COLR` — layered colour glyph table.
+    pub const COLR: [u8; 4] = *b"COLR";
+    /// `CPAL` — colour palette table.
+    pub const CPAL: [u8; 4] = *b"CPAL";
 }

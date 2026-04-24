@@ -362,6 +362,35 @@ impl<'a> Face<'a> {
         }
     }
 
+    /// Parses the `COLR` table if the font carries one. Colour fonts
+    /// ship this alongside `CPAL`; monochrome outlines-only fonts
+    /// omit both.
+    pub fn colr(&self) -> Result<Option<crate::tables::colr::Colr<'a>>> {
+        match self.table_bytes(tag::COLR) {
+            Ok(bytes) => Ok(Some(crate::tables::colr::Colr::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `CPAL` table if the font carries one.
+    pub fn cpal(&self) -> Result<Option<crate::tables::cpal::Cpal<'a>>> {
+        match self.table_bytes(tag::CPAL) {
+            Ok(bytes) => Ok(Some(crate::tables::cpal::Cpal::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Convenience: resolves the paint subtree for `glyph_id` through
+    /// the `COLR` table, returning `Ok(None)` when either the font has
+    /// no COLR or the glyph has no colour record.
+    pub fn colr_paint(&self, glyph_id: u16) -> Result<Option<crate::tables::colr::ColrPaint<'a>>> {
+        match self.colr()? {
+            Some(colr) => Ok(colr.paint(glyph_id)),
+            None => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]
