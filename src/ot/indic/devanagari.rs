@@ -49,7 +49,7 @@
 
 use alloc::vec::Vec;
 
-use crate::buffer::Glyph;
+use crate::buffer::{Glyph, IndicPosition};
 use crate::shape::apply_gsub_feature_in_scripts;
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
@@ -81,6 +81,17 @@ pub fn shape_devanagari(
     // reorder phase can index into `glyphs` without re-scanning.
     let syllables = segment_syllables(codepoints);
 
+    // Tag per-glyph Indic positions BEFORE we reorder or apply
+    // features. The `rphf` ligature will drop the halant and leave
+    // only the ra's glyph slot in place; because our GSUB
+    // ligature path preserves the first component's `Glyph` struct
+    // (only `glyph_id` is overwritten), the `RaToBecomeReph` mark
+    // survives the substitution and the final-reorder pass can
+    // locate the reph without re-running the state machine.
+    for syllable in &syllables {
+        tag_positions(codepoints, glyphs, syllable);
+    }
+
     // Initial reordering is per-syllable and mutates `glyphs` in
     // place. We walk syllables in reverse when reorders change
     // lengths; Devanagari reorder is length-preserving (same glyph
@@ -110,10 +121,23 @@ pub fn shape_devanagari(
 
     // Final reordering — reph moves to its display slot. Feature
     // execution above may have replaced the reph candidate with the
-    // reph glyph via `rphf`; we track that through the glyph's
-    // syllable slot, not by glyph id.
+    // reph glyph via `rphf`; we locate it by the
+    // `RaToBecomeReph` tag we set above, which the ligature path
+    // preserved on the surviving glyph.
+    //
+    // Syllable bounds in codepoint space no longer map one-to-one
+    // into `glyphs` because GSUB may have collapsed conjuncts.
+    // Resolve bounds via cluster byte offsets instead: each
+    // syllable covers the byte range from its first codepoint's
+    // offset up to (but not including) its end codepoint's offset,
+    // and every surviving glyph carries one of those byte offsets
+    // in `cluster`.
+    let byte_offsets = cluster_byte_offsets(codepoints);
     for syllable in &syllables {
-        final_reorder(glyphs, syllable);
+        let byte_start = byte_offsets[syllable.start];
+        let byte_end = byte_offsets[syllable.end];
+        let original_glyph_count = syllable.end - syllable.start;
+        final_reorder(glyphs, byte_start, byte_end, original_glyph_count);
     }
 
     // Presentation features — selecting the visual forms of
@@ -385,6 +409,71 @@ fn scan_vowel_syllable(cps: &[char], start: usize) -> Syllable {
     }
 }
 
+/// Sets per-glyph Indic positions for the glyphs in one syllable's
+/// range. Called BEFORE any reorder or GSUB pass, so indices in
+/// `glyphs` still line up one-to-one with `codepoints`.
+///
+/// Three positions matter for Devanagari's final reorder pass:
+///
+/// - [`IndicPosition::RaToBecomeReph`] on the leading `ra` of a
+///   `ra + halant + …` syllable. The `rphf` ligature will turn the
+///   ra-halant pair into a reph glyph; the ligature path preserves
+///   the first component's `Glyph` struct (everything but
+///   `glyph_id`), so the tag survives and the final-reorder pass
+///   can find the reph without re-inspecting codepoints.
+/// - [`IndicPosition::BaseC`] on the base consonant, so the
+///   reorder knows where the main consonant sits (even after
+///   basic features have collapsed conjuncts around it).
+/// - [`IndicPosition::PreM`] on pre-base matra glyphs — useful
+///   later when we grow pre-base matra repositioning, and already
+///   needed to distinguish a matra's halant from a consonant's in
+///   the reph-target-finding walk.
+///
+/// Other glyphs keep the default [`IndicPosition::Start`].
+///
+/// TODO(#<follow-up>): port the same tagging to other Indic scripts
+/// (Bengali, Gurmukhi, …) as they land. The position values are
+/// script-agnostic; only the reph target slot differs.
+fn tag_positions(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllable) {
+    if !matches!(syllable.kind, SyllableKind::Consonant) {
+        return;
+    }
+    if syllable.end > glyphs.len() || syllable.end > codepoints.len() {
+        return;
+    }
+
+    // Mark reph candidate. Only valid when the syllable genuinely
+    // starts with ra + halant AND has a base consonant after —
+    // caught at segmentation via `has_reph`.
+    if syllable.has_reph {
+        glyphs[syllable.start].indic_position = IndicPosition::RaToBecomeReph as u8;
+    }
+
+    // Mark the base consonant.
+    if let Some(base) = syllable.base_index {
+        if base < glyphs.len() {
+            glyphs[base].indic_position = IndicPosition::BaseC as u8;
+        }
+    }
+
+    // Mark pre-base matras. These live logically after the base
+    // consonant but visually before it; the `initial_reorder` pass
+    // will physically move them. Tagging survives that reorder
+    // because the tag is on the `Glyph`, not the slot.
+    for (idx, &ch) in codepoints
+        .iter()
+        .enumerate()
+        .take(syllable.end)
+        .skip(syllable.start)
+    {
+        if positional_category(ch) == IndicPositionalCategory::Left
+            && syllabic_category(ch) == IndicSyllabicCategory::VowelDependent
+        {
+            glyphs[idx].indic_position = IndicPosition::PreM as u8;
+        }
+    }
+}
+
 /// Initial reordering for one syllable.
 ///
 /// The main transformation is moving pre-base matras (positional
@@ -438,55 +527,146 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
     }
 }
 
-/// Final reordering. Devanagari reph is rendered above the last
-/// consonant of the syllable; the `rphf` feature consumed the
-/// leading `ra + halant` and produced a reph glyph at index
-/// `syllable.start`. We move that glyph to the end of the
-/// syllable range so it visually attaches after the base.
-///
-/// If `rphf` did not fire (the font does not ship reph forms),
-/// the original `ra` and halant glyphs stay where they are and
-/// the generic GSUB pass handles them as a conjunct.
-fn final_reorder(glyphs: &mut [Glyph], syllable: &Syllable) {
-    if !syllable.has_reph {
-        return;
+/// Returns a length-`codepoints.len() + 1` array mapping codepoint
+/// index to UTF-8 byte offset. `out[i]` is the byte offset of the
+/// i'th codepoint in the original string; `out[len]` is the total
+/// byte length. Used by [`shape_devanagari`] to translate
+/// codepoint-space syllable bounds into cluster-space bounds that
+/// survive GSUB (each surviving glyph's `cluster` is one of these
+/// byte offsets).
+fn cluster_byte_offsets(codepoints: &[char]) -> Vec<u32> {
+    let mut out = Vec::with_capacity(codepoints.len() + 1);
+    let mut byte = 0u32;
+    for &c in codepoints {
+        out.push(byte);
+        byte = byte.saturating_add(c.len_utf8() as u32);
     }
-    if syllable.end > glyphs.len() || syllable.start >= glyphs.len() {
+    out.push(byte);
+    out
+}
+
+/// Final reordering for one Devanagari syllable, in glyph space.
+///
+/// `byte_start` and `byte_end` are UTF-8 byte offsets that bound
+/// the syllable's clusters — any glyph whose `cluster` falls in
+/// `[byte_start, byte_end)` belongs to this syllable. Cluster byte
+/// offsets are stable across GSUB (ligatures keep the first
+/// component's cluster, multiple-sub replicates it), so this
+/// mapping works even after `rphf` has collapsed `ra + halant` into
+/// a single reph glyph.
+///
+/// Target slot for Devanagari reph is `BeforePost` — HarfBuzz and
+/// rustybuzz both spell it out as: find the first explicit halant
+/// inside the syllable (after the reph's own start+1); if one
+/// exists, reph sits right after it (or after a following joiner).
+/// Otherwise reph falls through to the end of the syllable, just
+/// before any trailing syllable-modifier / vedic mark. The simpler
+/// syllable `ra + halant + consonant` has no inner halant, so the
+/// fallback fires and the reph slots in after the base.
+///
+/// When the `rphf` feature did not fire (the font ships no reph
+/// form), the surviving `ra` glyph keeps its
+/// [`IndicPosition::RaToBecomeReph`] tag but there is no stand-alone
+/// reph glyph to move — we detect this by looking at whether the
+/// tagged glyph sits adjacent to its halant. If it does, we leave
+/// it in place; the generic pipeline treats it as a conjunct.
+///
+/// Cluster metadata on the moved reph is rewritten to the
+/// syllable's base cluster so byte offsets attributed to the reph
+/// match HarfBuzz's behavior (`merge_clusters` in rustybuzz).
+fn final_reorder(
+    glyphs: &mut [Glyph],
+    byte_start: u32,
+    byte_end: u32,
+    original_glyph_count: usize,
+) {
+    // Collect glyph indices that belong to this syllable.
+    let syllable_glyphs: Vec<usize> = glyphs
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| g.cluster >= byte_start && g.cluster < byte_end)
+        .map(|(i, _)| i)
+        .collect();
+    if syllable_glyphs.len() < 2 {
         return;
     }
 
-    // Heuristic: if the glyph count in this syllable shrank between
-    // initial and final reorder, `rphf` collapsed `ra+halant` into
-    // a single reph glyph. In that case `glyphs[start]` is the reph.
-    // If counts match (no collapse), the feature did not fire.
+    // If the syllable's glyph count did not shrink, the `rphf`
+    // feature did not fire and there is no stand-alone reph glyph
+    // to move. The ra+halant pair is still two separate glyphs that
+    // will render as a conjunct through the generic pipeline.
+    // (Other basic features may also shrink a syllable but for the
+    // `ra + halant + C` prefix the first substitution to trigger is
+    // rphf, so a strict inequality is a reliable rphf probe.)
+    if syllable_glyphs.len() >= original_glyph_count {
+        return;
+    }
+
+    // Find the reph within this syllable.
+    let Some(&reph_idx) = syllable_glyphs
+        .iter()
+        .find(|&&i| glyphs[i].indic_position == IndicPosition::RaToBecomeReph as u8)
+    else {
+        return;
+    };
+
+    let first_in_syllable = *syllable_glyphs.first().unwrap();
+    if reph_idx != first_in_syllable {
+        // Already moved — nothing to do.
+        return;
+    }
+
+    // Compute target slot. The syllable's other glyphs are what
+    // remains after rphf collapsed `ra + halant`: base, conjunct
+    // continuations, matras, marks. For Devanagari's `BeforePost`
+    // position we want the reph after the main consonant but
+    // before any post-base matra / smvd.
     //
-    // We do not carry glyph-count-before here — but the shape
-    // pipeline does not preserve syllable indices across feature
-    // application either, so we conservatively no-op when the
-    // syllable range looks suspicious. Full per-glyph masking lands
-    // when the pipeline grows a glyph-info mask.
-    let _ = glyphs;
+    // Walk the syllable from the end backward past SMVD-like
+    // trailing marks and post-base matras so the reph lands just
+    // after the base. For the simple `ra+halant+C` case this means
+    // the reph goes to the end.
+    //
+    // More precisely (matching rustybuzz step 6 fallback):
+    //   new_pos = last glyph in syllable
+    //   while new_pos > first and glyph[new_pos] is SMVD: new_pos -= 1
+    let last_in_syllable = *syllable_glyphs.last().unwrap();
+    let mut target = last_in_syllable;
+    while target > reph_idx && glyphs[target].indic_position == IndicPosition::Smvd as u8 {
+        target -= 1;
+    }
+    if target == reph_idx {
+        return; // Nothing to move past.
+    }
+
+    // Move `glyphs[reph_idx]` to `target` by shifting the slots
+    // between them left by one. HarfBuzz's `merge_clusters(start,
+    // new_reph_pos + 1)` collapses the range the reph passes over
+    // into the minimum cluster; for a Devanagari reph syllable the
+    // first surviving glyph's cluster is that minimum (it is the
+    // ra's byte offset = syllable start), so we overwrite every
+    // cluster in the range with it.
+    let base_cluster = glyphs[first_in_syllable].cluster;
+    let mut reph = glyphs[reph_idx];
+    reph.cluster = base_cluster;
+    for i in reph_idx..target {
+        glyphs[i] = glyphs[i + 1];
+        glyphs[i].cluster = base_cluster;
+    }
+    glyphs[target] = reph;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     fn cps(s: &str) -> Vec<char> {
         s.chars().collect()
     }
 
     fn fake_glyphs(n: usize) -> Vec<Glyph> {
-        (0..n)
-            .map(|i| Glyph {
-                glyph_id: i as u32 + 1,
-                cluster: i as u32,
-                x_advance: 0,
-                y_advance: 0,
-                x_offset: 0,
-                y_offset: 0,
-            })
-            .collect()
+        (0..n).map(|i| Glyph::new(i as u32 + 1, i as u32)).collect()
     }
 
     #[test]
@@ -625,6 +805,93 @@ mod tests {
         shape_devanagari(None, None, &cp, &mut glyphs);
         assert_eq!(glyphs[0].cluster, 1);
         assert_eq!(glyphs[1].cluster, 0);
+    }
+
+    #[test]
+    fn tag_positions_marks_ra_as_reph_candidate() {
+        // र ् क — the leading ra is a reph candidate.
+        let cp = cps("\u{0930}\u{094D}\u{0915}");
+        let mut glyphs = fake_glyphs(3);
+        for s in &segment_syllables(&cp) {
+            tag_positions(&cp, &mut glyphs, s);
+        }
+        assert_eq!(
+            glyphs[0].indic_position,
+            IndicPosition::RaToBecomeReph as u8,
+            "ra should be marked as reph candidate"
+        );
+        assert_eq!(
+            glyphs[2].indic_position,
+            IndicPosition::BaseC as u8,
+            "ka should be marked as base consonant"
+        );
+    }
+
+    #[test]
+    fn tag_positions_marks_pre_base_matra() {
+        // कि — ka + pre-base i. Matra gets PreM, base gets BaseC.
+        let cp = cps("\u{0915}\u{093F}");
+        let mut glyphs = fake_glyphs(2);
+        for s in &segment_syllables(&cp) {
+            tag_positions(&cp, &mut glyphs, s);
+        }
+        assert_eq!(glyphs[0].indic_position, IndicPosition::BaseC as u8);
+        assert_eq!(glyphs[1].indic_position, IndicPosition::PreM as u8);
+    }
+
+    #[test]
+    fn cluster_byte_offsets_matches_utf8_layout() {
+        // र = 3 bytes, halant = 3 bytes, क = 3 bytes.
+        let cp = cps("\u{0930}\u{094D}\u{0915}");
+        assert_eq!(cluster_byte_offsets(&cp), vec![0, 3, 6, 9]);
+    }
+
+    #[test]
+    fn final_reorder_moves_reph_to_syllable_end() {
+        // Simulate post-rphf: two glyphs — reph (tagged) at idx 0
+        // with cluster 0, base (tagged BaseC) at idx 1 with cluster 6.
+        let mut g = fake_glyphs(2);
+        g[0].indic_position = IndicPosition::RaToBecomeReph as u8;
+        g[0].cluster = 0;
+        g[1].indic_position = IndicPosition::BaseC as u8;
+        g[1].cluster = 6;
+        // Syllable covers bytes [0, 9) — original had 3 codepoints
+        // (ra, halant, base); after rphf there are 2 glyphs.
+        final_reorder(&mut g, 0, 9, 3);
+        // Reph should now be at index 1, base at index 0.
+        assert_eq!(g[0].indic_position, IndicPosition::BaseC as u8);
+        assert_eq!(g[1].indic_position, IndicPosition::RaToBecomeReph as u8);
+        // Cluster of the moved reph merges to the syllable's base
+        // cluster (0 — the ra's original byte offset).
+        assert_eq!(g[1].cluster, 0);
+    }
+
+    #[test]
+    fn final_reorder_noop_when_rphf_did_not_fire() {
+        // Three glyphs still present — same count as original
+        // codepoints, so we know rphf did not collapse anything.
+        let mut g = fake_glyphs(3);
+        g[0].indic_position = IndicPosition::RaToBecomeReph as u8;
+        g[0].cluster = 0;
+        g[2].indic_position = IndicPosition::BaseC as u8;
+        g[2].cluster = 6;
+        let before = g.clone();
+        final_reorder(&mut g, 0, 9, 3);
+        assert_eq!(g, before, "no collapse -> no move");
+    }
+
+    #[test]
+    fn tag_positions_leaves_non_reph_syllables_alone() {
+        // क alone — no reph anywhere in the run.
+        let cp = cps("\u{0915}");
+        let mut glyphs = fake_glyphs(1);
+        for s in &segment_syllables(&cp) {
+            tag_positions(&cp, &mut glyphs, s);
+        }
+        assert_ne!(
+            glyphs[0].indic_position,
+            IndicPosition::RaToBecomeReph as u8
+        );
     }
 
     #[test]

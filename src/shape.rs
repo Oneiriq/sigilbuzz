@@ -56,7 +56,7 @@
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
-use crate::buffer::{Buffer, Glyph, ShapedRun};
+use crate::buffer::{unicode_prop, Buffer, Glyph, ShapedRun};
 use crate::error::Result;
 use crate::font::Font;
 use crate::ot::arabic::{assign_joining_forms, JoiningForm};
@@ -169,14 +169,22 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         } else {
             u32::from(cmap.glyph_id(ch).unwrap_or(0))
         };
-        glyphs.push(Glyph {
-            glyph_id,
-            cluster: cluster as u32,
-            x_advance: 0, // filled in after substitutions settle
-            y_advance: 0,
-            x_offset: 0,
-            y_offset: 0,
-        });
+        // `unicode_props` is set once here and survives ligation /
+        // multiple-sub / final-reorder untouched. The Indic shaper
+        // relies on this to distinguish a ZWJ-triggered reph mode
+        // from an implicit one without re-scanning the text.
+        let mut props: u16 = 0;
+        if is_default_ignorable(ch) {
+            props |= unicode_prop::DEFAULT_IGNORABLE;
+        }
+        if ch == '\u{200D}' {
+            props |= unicode_prop::JOINER;
+        } else if ch == '\u{200C}' {
+            props |= unicode_prop::NON_JOINER;
+        }
+        let mut glyph = Glyph::new(glyph_id, cluster as u32);
+        glyph.unicode_props = props;
+        glyphs.push(glyph);
         codepoints.push(ch);
         if crate::unicode::script_of(ch) == crate::unicode::Script::Devanagari {
             has_devanagari = true;
@@ -1100,19 +1108,17 @@ fn expand_glyph_in_place(glyphs: &mut Vec<Glyph>, at: usize, seq: &[u16]) -> Opt
         return None;
     }
     let source_cluster = glyphs[at].cluster;
+    // Inherit the source glyph's shaper-internal state so Indic
+    // `indic_position` and unicode-property bits survive a
+    // multiple-sub split. Rustybuzz does the same via its info mask.
+    let source_props = glyphs[at].unicode_props;
+    let source_pos = glyphs[at].indic_position;
     glyphs[at].glyph_id = u32::from(seq[0]);
     for (i, &out_gid) in seq.iter().enumerate().skip(1) {
-        glyphs.insert(
-            at + i,
-            Glyph {
-                glyph_id: u32::from(out_gid),
-                cluster: source_cluster,
-                x_advance: 0,
-                y_advance: 0,
-                x_offset: 0,
-                y_offset: 0,
-            },
-        );
+        let mut g = Glyph::new(u32::from(out_gid), source_cluster);
+        g.unicode_props = source_props;
+        g.indic_position = source_pos;
+        glyphs.insert(at + i, g);
     }
     Some(seq.len())
 }

@@ -47,6 +47,18 @@ impl Direction {
 /// font's size. Advances and offsets are signed because shaping can
 /// produce negative displacements (contextual kerning, backtracking
 /// combining marks).
+///
+/// In addition to the rendered fields, `Glyph` carries two
+/// shaper-internal scratch fields — `unicode_props` and
+/// `indic_position` — that the Indic / complex-script shapers use
+/// to track per-glyph state across GSUB passes. Renderers and
+/// most callers can ignore them; they are public so the shaper
+/// modules inside this crate can round-trip state through `Vec<Glyph>`
+/// without stashing a parallel array. Stable bits of `unicode_props`
+/// are set once during buffer preparation (default-ignorable,
+/// joiner, …); `indic_position` is an [`IndicPosition`] value that
+/// survives ligature substitutions (the surviving glyph inherits
+/// the first-component position).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Glyph {
     /// Glyph index within the font. After shaping, this is the index
@@ -64,6 +76,93 @@ pub struct Glyph {
     pub x_offset: i32,
     /// Vertical offset applied to the glyph origin before drawing.
     pub y_offset: i32,
+    /// Shaper-internal Unicode property bits. Set once during buffer
+    /// preparation and carried across GSUB so later passes can query
+    /// "was this glyph's source a joiner / default-ignorable / …?"
+    /// without re-deriving from the cluster. See [`unicode_prop`].
+    pub unicode_props: u16,
+    /// Shaper-internal Indic positional role, set during Indic
+    /// syllable segmentation and consulted by the final-reorder
+    /// pass. Zero (`IndicPosition::Start`) for non-Indic glyphs and
+    /// for Indic glyphs whose role has not been resolved yet.
+    pub indic_position: u8,
+}
+
+/// Bits packed into [`Glyph::unicode_props`]. Laid out to leave room
+/// for future expansion without shifting existing meanings.
+pub mod unicode_prop {
+    /// The glyph's source codepoint is a Unicode default-ignorable
+    /// format character (ZWJ, ZWNJ, LRM, RLM, …).
+    pub const DEFAULT_IGNORABLE: u16 = 1 << 0;
+    /// The glyph's source codepoint is a joiner (ZWJ).
+    pub const JOINER: u16 = 1 << 1;
+    /// The glyph's source codepoint is a non-joiner (ZWNJ).
+    pub const NON_JOINER: u16 = 1 << 2;
+}
+
+/// Indic positional role — stored in [`Glyph::indic_position`] as
+/// `u8`. Mirrors HarfBuzz's `ot_position_t` so that a future port
+/// of the richer Indic reorder (pref, below-form resolution, …) can
+/// drop the constants in without a rename. Only the slots
+/// sigilbuzz currently uses are documented; reserved intermediate
+/// values keep parity with HarfBuzz so the enum's integer layout
+/// does not shift.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // reserved slots mirror HarfBuzz's ot_position_t
+pub enum IndicPosition {
+    /// Default / unresolved — also used for non-Indic glyphs.
+    Start = 0,
+    /// A leading `ra` that is a reph candidate. Set on the glyph
+    /// carrying the reph before GSUB runs; the reph glyph inherits
+    /// the position through ligature substitution.
+    RaToBecomeReph = 1,
+    /// Pre-base matra (before the base consonant visually).
+    PreM = 2,
+    /// Pre-base consonant — reserved.
+    PreC = 3,
+    /// The base consonant of a syllable.
+    BaseC = 4,
+    /// After the main consonant — reserved.
+    AfterMain = 5,
+    /// Above-base glyph — reserved.
+    AboveC = 6,
+    /// Before sub-joined form — reserved.
+    BeforeSub = 7,
+    /// Below-base glyph — reserved.
+    BelowC = 8,
+    /// After sub-joined form — reserved.
+    AfterSub = 9,
+    /// Before post-base position. Target slot for Devanagari reph.
+    BeforePost = 10,
+    /// Post-base glyph — reserved.
+    PostC = 11,
+    /// After post-base position — reserved.
+    AfterPost = 12,
+    /// Syllable modifier / vedic — reserved.
+    Smvd = 13,
+    /// End-of-syllable sentinel — reserved.
+    End = 14,
+}
+
+impl Glyph {
+    /// Minimal constructor used by the shaper pipeline — everything
+    /// but the glyph id and cluster starts at zero. Exists so the
+    /// hot spots in `shape()` stay short even as we grow more
+    /// scratch fields.
+    #[must_use]
+    pub const fn new(glyph_id: u32, cluster: u32) -> Self {
+        Self {
+            glyph_id,
+            cluster,
+            x_advance: 0,
+            y_advance: 0,
+            x_offset: 0,
+            y_offset: 0,
+            unicode_props: 0,
+            indic_position: IndicPosition::Start as u8,
+        }
+    }
 }
 
 /// Shaping input: the text run, plus state flags the shaper consults.
