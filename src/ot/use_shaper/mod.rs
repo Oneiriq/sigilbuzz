@@ -84,8 +84,7 @@ pub const USE_BASIC_FEATURES: &[&[u8; 4]] = &[
 
 /// USE topographical features — run after basic substitutions have
 /// collapsed conjuncts into display forms.
-pub const USE_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] =
-    &[b"abvs", b"blws", b"haln", b"pres", b"psts"];
+pub const USE_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] = &[b"abvs", b"blws", b"haln", b"pres", b"psts"];
 
 /// Classification of one USE syllable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -396,8 +395,7 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
     // broken-cluster repair).
     let mut to_move: Vec<usize> = Vec::new();
     for (offset, &ch) in codepoints[base + 1..syllable.end].iter().enumerate() {
-        if matches!(use_category(ch), UseCategory::VPre)
-            || use_position(ch) == UsePosition::PreBase
+        if matches!(use_category(ch), UseCategory::VPre) || use_position(ch) == UsePosition::PreBase
         {
             to_move.push(base + 1 + offset);
         }
@@ -495,11 +493,7 @@ fn cluster_byte_offsets(codepoints: &[char]) -> Vec<u32> {
 /// rustybuzz behaviour — downstream callers see one cluster id per
 /// syllable (the byte offset of the first codepoint) even when GSUB
 /// substitutions have collapsed glyphs inside the syllable.
-fn merge_syllable_clusters(
-    glyphs: &mut [Glyph],
-    syllables: &[Syllable],
-    byte_offsets: &[u32],
-) {
+fn merge_syllable_clusters(glyphs: &mut [Glyph], syllables: &[Syllable], byte_offsets: &[u32]) {
     for syl in syllables {
         if syl.end == syl.start {
             continue;

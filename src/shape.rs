@@ -282,12 +282,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // GSUB pass below only has to handle `liga`, `calt`, `ccmp` —
     // features that are orthogonal to script-specific reordering.
     if has_khmer {
-        crate::ot::use_shaper::shape_khmer(
-            gsub.as_ref(),
-            gdef.as_ref(),
-            &codepoints,
-            &mut glyphs,
-        );
+        crate::ot::use_shaper::shape_khmer(gsub.as_ref(), gdef.as_ref(), &codepoints, &mut glyphs);
     }
 
     if let Some(ref gsub) = gsub {
