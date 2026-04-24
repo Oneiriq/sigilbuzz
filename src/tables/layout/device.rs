@@ -193,7 +193,9 @@ mod tests {
         let mut base = Vec::new();
         base.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]); // 4 bytes of pad
         base.extend_from_slice(&build_device(7, 9, VARIATION_INDEX_DELTA_FORMAT, &[]));
-        let got = DeviceOrVariationIndex::parse_from(&base, 4).unwrap().unwrap();
+        let got = DeviceOrVariationIndex::parse_from(&base, 4)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             got,
             DeviceOrVariationIndex::VariationIndex { outer: 7, inner: 9 }

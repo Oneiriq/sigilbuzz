@@ -129,12 +129,7 @@ impl VarCtx<'_> {
 /// bytes — Device/VariationIndex sub-offsets are always rooted
 /// there.
 #[allow(clippy::similar_names)]
-fn apply_value_record(
-    glyph: &mut Glyph,
-    v: &ValueRecord,
-    subtable: &[u8],
-    var: &VarCtx<'_>,
-) {
+fn apply_value_record(glyph: &mut Glyph, v: &ValueRecord, subtable: &[u8], var: &VarCtx<'_>) {
     let dx_place = var.resolve(subtable, v.x_placement_device_off);
     let dy_place = var.resolve(subtable, v.y_placement_device_off);
     let dx_adv = var.resolve(subtable, v.x_advance_device_off);
