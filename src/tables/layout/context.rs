@@ -660,11 +660,7 @@ impl<'a> ChainContext2<'a> {
     }
 }
 
-fn parse_chain_class_set2(
-    full: &[u8],
-    set_off: usize,
-    set_bytes: &[u8],
-) -> Result<ChainClassSet2> {
+fn parse_chain_class_set2(full: &[u8], set_off: usize, set_bytes: &[u8]) -> Result<ChainClassSet2> {
     let mut r = Reader::new(set_bytes);
     let rule_count = r.read_u16()? as usize;
     let mut offs = Vec::with_capacity(rule_count);
@@ -1054,8 +1050,7 @@ mod tests {
             .copy_from_slice(&(cov_off as u16).to_be_bytes());
         out[rule_set_off_slot..rule_set_off_slot + 2]
             .copy_from_slice(&(rule_set_off as u16).to_be_bytes());
-        out[rule_off_slot..rule_off_slot + 2]
-            .copy_from_slice(&(rule_off_rel as u16).to_be_bytes());
+        out[rule_off_slot..rule_off_slot + 2].copy_from_slice(&(rule_off_rel as u16).to_be_bytes());
 
         let ctx = Context1::parse(&out).unwrap();
         let (n, lookups) = ctx.matches(&[10, 20, 30, 99], 0).unwrap();

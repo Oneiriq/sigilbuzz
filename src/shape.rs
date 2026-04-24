@@ -1988,8 +1988,14 @@ mod tests {
         let mut buf = Buffer::new();
         buf.push_str("BECF");
         let out = shape(&font, &buf, &features).unwrap();
-        assert_eq!(out.glyphs[0].glyph_id, 2, "B should survive: its post-sub lookahead no longer matches");
-        assert_eq!(out.glyphs[1].glyph_id, 8, "E should become 8 via reverse-chain");
+        assert_eq!(
+            out.glyphs[0].glyph_id, 2,
+            "B should survive: its post-sub lookahead no longer matches"
+        );
+        assert_eq!(
+            out.glyphs[1].glyph_id, 8,
+            "E should become 8 via reverse-chain"
+        );
         assert_eq!(out.glyphs[2].glyph_id, 3);
         assert_eq!(out.glyphs[3].glyph_id, 6);
     }

@@ -67,6 +67,9 @@ mod tests {
         bytes.extend_from_slice(&3u16.to_be_bytes()); // format
         bytes.extend_from_slice(&0u16.to_be_bytes()); // glyphCount
         bytes.extend_from_slice(&0u16.to_be_bytes()); // lookupCount
-        assert!(matches!(Context::parse(&bytes).unwrap(), Context::Format3(_)));
+        assert!(matches!(
+            Context::parse(&bytes).unwrap(),
+            Context::Format3(_)
+        ));
     }
 }
