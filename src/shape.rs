@@ -134,7 +134,13 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // Step 1: codepoint → glyph id via cmap. Clusters are byte
     // offsets from the start of the text so later passes can track
     // which input characters coalesce into a single output glyph.
+    //
+    // We also capture the raw `char` list alongside the glyphs so
+    // the Indic shaper can consult Unicode properties per-codepoint
+    // without re-scanning the UTF-8 stream.
     let mut glyphs: Vec<Glyph> = Vec::with_capacity(text.len());
+    let mut codepoints: Vec<char> = Vec::with_capacity(text.len());
+    let mut has_devanagari = false;
     for (cluster, ch) in text.char_indices() {
         let glyph_id = cmap.glyph_id(ch).unwrap_or(0);
         glyphs.push(Glyph {
@@ -145,60 +151,25 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             x_offset: 0,
             y_offset: 0,
         });
+        codepoints.push(ch);
+        if crate::unicode::script_of(ch) == crate::unicode::Script::Devanagari {
+            has_devanagari = true;
+        }
     }
 
-    // Step 2: GSUB passes. Default-on features mirror HarfBuzz's
-    // Latin defaults so common text renders the same way without
-    // the caller having to enumerate them. Order matches the spec:
-    // `ccmp` (composition/decomposition) runs before ligatures and
-    // before the required-ligature fallback, because later passes
-    // operate on the composed glyph stream.
     let gsub = face.gsub()?;
+
+    // Step 1b: Indic reordering + basic features. Runs before the
+    // generic GSUB pass so the glyph stream entering `liga` / `calt`
+    // is already in logical order for the script. Non-Indic text
+    // skips this pass entirely.
+    if has_devanagari {
+        crate::ot::indic::shape_devanagari(gsub.as_ref(), &codepoints, &mut glyphs);
+    }
+
+    // Step 2: GSUB passes (default + user-enabled).
     if let Some(ref gsub) = gsub {
-        if !feature_disabled(features, *b"ccmp") {
-            apply_gsub_feature(gsub, &mut glyphs, *b"ccmp", 0);
-        }
-        if !feature_disabled(features, *b"rlig") {
-            apply_gsub_feature(gsub, &mut glyphs, *b"rlig", 0);
-        }
-        if want_liga {
-            apply_gsub_feature(gsub, &mut glyphs, *b"liga", 0);
-        }
-        // `clig` (contextual ligatures) and `calt` (contextual
-        // alternates) run by default for Latin — HarfBuzz's Latin
-        // fallback shaper turns both on. sigilbuzz follows suit.
-        if !feature_disabled(features, *b"clig") {
-            apply_gsub_feature(gsub, &mut glyphs, *b"clig", 0);
-        }
-        if !feature_disabled(features, *b"calt") {
-            apply_gsub_feature(gsub, &mut glyphs, *b"calt", 0);
-        }
-        // Vertical writing: HarfBuzz auto-enables `vrt2` when the
-        // font carries it, otherwise falls back to `vert`. The two
-        // tags cannot be active together — `vrt2` (Vertical
-        // Alternates & Rotation) is the superset, so prefer it.
-        if is_vertical {
-            let has_vrt2 = feature_present(gsub, *b"vrt2");
-            if has_vrt2 && !feature_disabled(features, *b"vrt2") {
-                apply_gsub_feature(gsub, &mut glyphs, *b"vrt2", 0);
-            } else if !feature_disabled(features, *b"vert") {
-                apply_gsub_feature(gsub, &mut glyphs, *b"vert", 0);
-            }
-        }
-        for feat in features {
-            if feat.value == 0 {
-                continue;
-            }
-            if is_handled_gsub_tag(feat.tag) {
-                continue; // already handled above
-            }
-            // feature.value is 1-indexed per the spec; subtract one to
-            // get the 0-indexed alternate slot sigilbuzz's Alternate
-            // parser uses. Clamped via saturating_sub so value=1 still
-            // picks the first alternate.
-            let alternate_idx = (feat.value.saturating_sub(1)).min(u32::from(u16::MAX)) as u16;
-            apply_gsub_feature(gsub, &mut glyphs, feat.tag, alternate_idx);
-        }
+        run_default_gsub(gsub, &mut glyphs, features, want_liga, is_vertical);
     }
 
     // Step 3: advance lookup. Runs *after* GSUB so ligatures
@@ -256,6 +227,18 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         false
     };
     if let Some(ref gpos) = gpos {
+        // Indic `dist` — nudges advance of certain conjunct glyphs.
+        // Applied before mark attachment so marks anchor onto the
+        // distance-adjusted base positions.
+        if has_devanagari && !feature_disabled(features, *b"dist") {
+            apply_gpos_feature_in_scripts(
+                gpos,
+                &mut glyphs,
+                gdef.as_ref(),
+                *b"dist",
+                crate::ot::indic::devanagari::DEVA_SCRIPT_PRIORITY,
+            );
+        }
         if !feature_disabled(features, *b"mark") {
             apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"mark");
         }
@@ -294,6 +277,59 @@ fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
     features.iter().any(|f| f.tag == tag && f.value == 0)
 }
 
+/// Runs the default GSUB feature chain and any user-enabled extras.
+/// Order matches the spec: `ccmp` → `rlig` → `liga` → `clig` →
+/// `calt`, then `vrt2` / `vert` for vertical runs. HarfBuzz's Latin
+/// fallback shaper turns the horizontal list on by default;
+/// sigilbuzz follows suit. User-enabled features beyond that list
+/// are dispatched afterwards, respecting their 1-indexed
+/// alternate-selector value.
+fn run_default_gsub(
+    gsub: &Gsub<'_>,
+    glyphs: &mut Vec<Glyph>,
+    features: &[Feature],
+    want_liga: bool,
+    is_vertical: bool,
+) {
+    if !feature_disabled(features, *b"ccmp") {
+        apply_gsub_feature(gsub, glyphs, *b"ccmp", 0);
+    }
+    if !feature_disabled(features, *b"rlig") {
+        apply_gsub_feature(gsub, glyphs, *b"rlig", 0);
+    }
+    if want_liga {
+        apply_gsub_feature(gsub, glyphs, *b"liga", 0);
+    }
+    if !feature_disabled(features, *b"clig") {
+        apply_gsub_feature(gsub, glyphs, *b"clig", 0);
+    }
+    if !feature_disabled(features, *b"calt") {
+        apply_gsub_feature(gsub, glyphs, *b"calt", 0);
+    }
+    // Vertical writing: HarfBuzz auto-enables `vrt2` when the font
+    // carries it, otherwise falls back to `vert`. The two tags
+    // cannot be active together — `vrt2` (Vertical Alternates &
+    // Rotation) is the superset, so prefer it.
+    if is_vertical {
+        let has_vrt2 = feature_present(gsub, *b"vrt2");
+        if has_vrt2 && !feature_disabled(features, *b"vrt2") {
+            apply_gsub_feature(gsub, glyphs, *b"vrt2", 0);
+        } else if !feature_disabled(features, *b"vert") {
+            apply_gsub_feature(gsub, glyphs, *b"vert", 0);
+        }
+    }
+    for feat in features {
+        if feat.value == 0 {
+            continue;
+        }
+        if is_handled_gsub_tag(feat.tag) {
+            continue;
+        }
+        let alternate_idx = (feat.value.saturating_sub(1)).min(u32::from(u16::MAX)) as u16;
+        apply_gsub_feature(gsub, glyphs, feat.tag, alternate_idx);
+    }
+}
+
 /// GSUB feature tags that `shape()` already dispatches by name,
 /// so the user-override walk should skip them rather than
 /// double-apply.
@@ -326,17 +362,36 @@ fn feature_present(gsub: &Gsub<'_>, tag: [u8; 4]) -> bool {
 /// Extension (type 7) wrappers are unwrapped to the inner type.
 /// Unknown lookup types are silently skipped so callers can enable
 /// forward-compatible features without the run erroring out.
-fn apply_gsub_feature(
+pub(crate) fn apply_gsub_feature(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
     tag: [u8; 4],
     alternate_index: u16,
 ) {
+    apply_gsub_feature_in_scripts(gsub, glyphs, tag, alternate_index, &[*b"DFLT"]);
+}
+
+/// Same as [`apply_gsub_feature`] but walks the supplied script-tag
+/// priority list instead of just DFLT. The Indic shaper needs this
+/// because Devanagari fonts expose their reordering features under
+/// `deva`/`dev2` and leave DFLT with only the "universal" subset.
+///
+/// Falls back to the first script in the list if none of the
+/// requested tags are present, matching the prior DFLT-fallback
+/// behaviour.
+pub(crate) fn apply_gsub_feature_in_scripts(
+    gsub: &Gsub<'_>,
+    glyphs: &mut Vec<Glyph>,
+    tag: [u8; 4],
+    alternate_index: u16,
+    script_priority: &[[u8; 4]],
+) {
     if glyphs.is_empty() {
         return;
     }
 
-    let Some(lookup_indices) = lookup_indices_for_feature(gsub, tag) else {
+    let Some(lookup_indices) = lookup_indices_for_feature_in_scripts(gsub, tag, script_priority)
+    else {
         return;
     };
     if lookup_indices.is_empty() {
@@ -713,13 +768,68 @@ fn apply_reverse_chain_subtable(rc: &ReverseChain<'_>, glyphs: &mut [Glyph]) {
 /// return value of `None` means no usable script, `Some(empty)`
 /// means the LangSys does not carry this feature.
 fn lookup_indices_for_feature(gsub: &Gsub<'_>, tag: [u8; 4]) -> Option<Vec<u16>> {
-    let script_list = gsub.script_list();
-    let script = script_list
-        .find(*b"DFLT")
-        .or_else(|| script_list.iter().next().map(|(_, s)| s))?;
-    let lang_sys = script.default_lang_sys()?;
+    lookup_indices_for_feature_in_scripts(gsub, tag, &[*b"DFLT"])
+}
 
+/// Script-priority variant of [`lookup_indices_for_feature`]. Walks
+/// the `script_priority` tags in order and returns lookup indices
+/// for the first script that carries the requested feature tag. A
+/// script that exists but lacks the feature simply yields an empty
+/// lookup list — falls through to the next priority. If none of
+/// the priority scripts carry the feature, falls back to DFLT then
+/// the first script in the table (matching the generic-path
+/// default).
+fn lookup_indices_for_feature_in_scripts(
+    gsub: &Gsub<'_>,
+    tag: [u8; 4],
+    script_priority: &[[u8; 4]],
+) -> Option<Vec<u16>> {
+    let script_list = gsub.script_list();
     let feature_list = gsub.feature_list();
+
+    // Try each requested script in order; the first one that carries
+    // the feature wins. Scripts present but lacking this tag still
+    // count as "found" and stop the fallback chain — matches how
+    // HarfBuzz treats per-script feature overrides.
+    for tag_pri in script_priority {
+        let Some(script) = script_list.find(*tag_pri) else {
+            continue;
+        };
+        let Some(lang_sys) = script.default_lang_sys() else {
+            continue;
+        };
+        let mut indices: Vec<u16> = Vec::new();
+        let mut has_feature = false;
+        for feat_idx in lang_sys.feature_indices() {
+            let Some((feat_tag, feature)) = feature_list.get(feat_idx) else {
+                continue;
+            };
+            if feat_tag != tag {
+                continue;
+            }
+            has_feature = true;
+            for idx in feature.lookup_indices() {
+                if !indices.contains(&idx) {
+                    indices.push(idx);
+                }
+            }
+        }
+        if has_feature {
+            indices.sort_unstable();
+            return Some(indices);
+        }
+    }
+
+    // Final fallback: DFLT (if not already tried) then first script.
+    let already_tried_dflt = script_priority.iter().any(|t| *t == *b"DFLT");
+    let script = if already_tried_dflt {
+        script_list.iter().next().map(|(_, s)| s)?
+    } else {
+        script_list
+            .find(*b"DFLT")
+            .or_else(|| script_list.iter().next().map(|(_, s)| s))?
+    };
+    let lang_sys = script.default_lang_sys()?;
     let mut indices: Vec<u16> = Vec::new();
     for feat_idx in lang_sys.feature_indices() {
         let Some((feat_tag, feature)) = feature_list.get(feat_idx) else {
@@ -810,11 +920,27 @@ fn apply_gpos_feature(
     gdef: Option<&Gdef<'_>>,
     tag: [u8; 4],
 ) -> bool {
+    apply_gpos_feature_in_scripts(gpos, glyphs, gdef, tag, &[*b"DFLT"])
+}
+
+/// Script-priority variant of [`apply_gpos_feature`]. Matches the
+/// GSUB equivalent: walks `script_priority` in order, stops at the
+/// first script that carries the feature tag, and falls back to
+/// DFLT / first script when none match.
+pub(crate) fn apply_gpos_feature_in_scripts(
+    gpos: &Gpos<'_>,
+    glyphs: &mut [Glyph],
+    gdef: Option<&Gdef<'_>>,
+    tag: [u8; 4],
+    script_priority: &[[u8; 4]],
+) -> bool {
     if glyphs.is_empty() {
         return false;
     }
 
-    let Some(lookup_indices) = gpos_lookup_indices_for_feature(gpos, tag) else {
+    let Some(lookup_indices) =
+        gpos_lookup_indices_for_feature_in_scripts(gpos, tag, script_priority)
+    else {
         return false;
     };
     if lookup_indices.is_empty() {
@@ -1127,14 +1253,59 @@ fn apply_gpos_chain_context_at(
 
 /// Default-LangSys lookup-index collection for a GPOS feature tag,
 /// mirroring the GSUB helper.
+#[allow(dead_code)]
 fn gpos_lookup_indices_for_feature(gpos: &Gpos<'_>, tag: [u8; 4]) -> Option<Vec<u16>> {
-    let script_list = gpos.script_list();
-    let script = script_list
-        .find(*b"DFLT")
-        .or_else(|| script_list.iter().next().map(|(_, s)| s))?;
-    let lang_sys = script.default_lang_sys()?;
+    gpos_lookup_indices_for_feature_in_scripts(gpos, tag, &[*b"DFLT"])
+}
 
+/// Script-priority GPOS helper. Twin of
+/// [`lookup_indices_for_feature_in_scripts`] for GSUB.
+fn gpos_lookup_indices_for_feature_in_scripts(
+    gpos: &Gpos<'_>,
+    tag: [u8; 4],
+    script_priority: &[[u8; 4]],
+) -> Option<Vec<u16>> {
+    let script_list = gpos.script_list();
     let feature_list = gpos.feature_list();
+
+    for tag_pri in script_priority {
+        let Some(script) = script_list.find(*tag_pri) else {
+            continue;
+        };
+        let Some(lang_sys) = script.default_lang_sys() else {
+            continue;
+        };
+        let mut indices: Vec<u16> = Vec::new();
+        let mut has_feature = false;
+        for feat_idx in lang_sys.feature_indices() {
+            let Some((feat_tag, feature)) = feature_list.get(feat_idx) else {
+                continue;
+            };
+            if feat_tag != tag {
+                continue;
+            }
+            has_feature = true;
+            for idx in feature.lookup_indices() {
+                if !indices.contains(&idx) {
+                    indices.push(idx);
+                }
+            }
+        }
+        if has_feature {
+            indices.sort_unstable();
+            return Some(indices);
+        }
+    }
+
+    let already_tried_dflt = script_priority.iter().any(|t| *t == *b"DFLT");
+    let script = if already_tried_dflt {
+        script_list.iter().next().map(|(_, s)| s)?
+    } else {
+        script_list
+            .find(*b"DFLT")
+            .or_else(|| script_list.iter().next().map(|(_, s)| s))?
+    };
+    let lang_sys = script.default_lang_sys()?;
     let mut indices: Vec<u16> = Vec::new();
     for feat_idx in lang_sys.feature_indices() {
         let Some((feat_tag, feature)) = feature_list.get(feat_idx) else {

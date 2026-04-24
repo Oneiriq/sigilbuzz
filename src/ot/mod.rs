@@ -8,6 +8,8 @@
 
 #![allow(missing_docs)]
 
+pub mod indic;
+
 /// Common OpenType feature tags. These are byte-literal constants so
 /// consumers can compare against them without string handling.
 pub mod feature {
