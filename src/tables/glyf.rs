@@ -304,7 +304,14 @@ impl<'a> Glyf<'a> {
                 (dx, dy)
             };
 
-            let local = Transform { xx, xy, yx, yy, tx, ty };
+            let local = Transform {
+                xx,
+                xy,
+                yx,
+                yy,
+                tx,
+                ty,
+            };
             let combined = parent.compose(&local);
 
             // Composite children are always drawn without deltas —
@@ -366,7 +373,14 @@ impl Transform {
         let yx = self.yx * other.xx + self.yy * other.yx;
         let yy = self.yx * other.xy + self.yy * other.yy;
         let (tx, ty) = self.apply(other.tx, other.ty);
-        Self { xx, xy, yx, yy, tx, ty }
+        Self {
+            xx,
+            xy,
+            yx,
+            yy,
+            tx,
+            ty,
+        }
     }
 }
 
@@ -514,7 +528,10 @@ fn emit_contour<S: OutlineSink>(pts: &[Point], sink: &mut S) {
         (pts[n - 1].x, pts[n - 1].y)
     } else {
         // Midpoint between first and last off-curve points.
-        ((pts[0].x + pts[n - 1].x) * 0.5, (pts[0].y + pts[n - 1].y) * 0.5)
+        (
+            (pts[0].x + pts[n - 1].x) * 0.5,
+            (pts[0].y + pts[n - 1].y) * 0.5,
+        )
     };
     sink.move_to(start_x, start_y);
 
@@ -532,7 +549,11 @@ fn emit_contour<S: OutlineSink>(pts: &[Point], sink: &mut S) {
     // the start anchor and we walk from index 0 through n-1 with the
     // convention that the endpoint of the final quad is the start.
     let skip_first = first_on_curve;
-    let end_before_wrap = if !first_on_curve && last_on_curve { n - 1 } else { n };
+    let end_before_wrap = if !first_on_curve && last_on_curve {
+        n - 1
+    } else {
+        n
+    };
 
     let mut i = if skip_first { 1 } else { 0 };
     let mut cur_x = start_x;
@@ -868,7 +889,12 @@ mod tests {
         // Child (glyph 1): rectangle at origin 0..100 × 0..100.
         let child = build_simple_glyph(
             &[3],
-            &[(0, 0, true), (100, 0, true), (100, 100, true), (0, 100, true)],
+            &[
+                (0, 0, true),
+                (100, 0, true),
+                (100, 100, true),
+                (0, 100, true),
+            ],
         );
         // Parent (glyph 0): composite referencing child with translation (+200, +300).
         let mut parent = build_header(-1, 0, 0, 400, 500);
@@ -877,7 +903,7 @@ mod tests {
         parent.extend_from_slice(&1u16.to_be_bytes()); // component id = 1
         parent.extend_from_slice(&200i16.to_be_bytes()); // dx
         parent.extend_from_slice(&300i16.to_be_bytes()); // dy
-        // no MORE_COMPONENTS → single component.
+                                                         // no MORE_COMPONENTS → single component.
 
         // Lay out glyf with parent first, child second.
         let mut glyf_bytes = Vec::new();
@@ -920,7 +946,12 @@ mod tests {
         // Child: unit square at (0,0)..(100,100). Parent scales ×2.
         let child = build_simple_glyph(
             &[3],
-            &[(0, 0, true), (100, 0, true), (100, 100, true), (0, 100, true)],
+            &[
+                (0, 0, true),
+                (100, 0, true),
+                (100, 100, true),
+                (0, 100, true),
+            ],
         );
         let mut parent = build_header(-1, 0, 0, 200, 200);
         let flags: u16 =

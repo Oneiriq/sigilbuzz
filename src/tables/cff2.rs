@@ -189,12 +189,8 @@ impl<'a> Cff2<'a> {
             ivs,
             vsindex: 0,
         });
-        let mut interp = crate::tables::cff::Interp2::new(
-            &self.global_subrs,
-            local_subrs,
-            sink,
-            blend,
-        );
+        let mut interp =
+            crate::tables::cff::Interp2::new(&self.global_subrs, local_subrs, sink, blend);
         interp.run(cs, 0)?;
         Ok(true)
     }
@@ -414,11 +410,10 @@ mod tests {
 
         // Region list.
         let region_list_start = out.len() as u32;
-        out[region_off_slot..region_off_slot + 4]
-            .copy_from_slice(&region_list_start.to_be_bytes());
+        out[region_off_slot..region_off_slot + 4].copy_from_slice(&region_list_start.to_be_bytes());
         out.extend_from_slice(&1u16.to_be_bytes()); // axisCount
         out.extend_from_slice(&1u16.to_be_bytes()); // regionCount
-        // Region: (start, peak, end) = (0, 1, 1).
+                                                    // Region: (start, peak, end) = (0, 1, 1).
         let to_f2d14 = |v: f32| ((v * 16384.0) as i16).to_be_bytes();
         out.extend_from_slice(&to_f2d14(0.0));
         out.extend_from_slice(&to_f2d14(1.0));

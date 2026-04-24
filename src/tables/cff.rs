@@ -873,7 +873,10 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             op_code::ESCAPE => {
                 let b1 = r.read_u8()?;
                 match b1 {
-                    op_code::ESC_HFLEX | op_code::ESC_FLEX | op_code::ESC_HFLEX1 | op_code::ESC_FLEX1 => {
+                    op_code::ESC_HFLEX
+                    | op_code::ESC_FLEX
+                    | op_code::ESC_HFLEX1
+                    | op_code::ESC_FLEX1 => {
                         // Approximate flex as two curves. For parity
                         // with ttf-parser the exact flex expansion
                         // matters — sigilbuzz emits two rrcurvetos
@@ -1199,7 +1202,7 @@ mod tests {
         out[cs_off_slot..cs_off_slot + 4].copy_from_slice(&cs_index_off.to_be_bytes());
         out.extend_from_slice(&1u16.to_be_bytes()); // count
         out.push(2); // offSize
-        // offsets: [1, 1 + cs.len()]
+                     // offsets: [1, 1 + cs.len()]
         out.extend_from_slice(&1u16.to_be_bytes());
         let end = 1u16 + cs.len() as u16;
         out.extend_from_slice(&end.to_be_bytes());
@@ -1241,22 +1244,10 @@ mod tests {
         let mut o = Outline::new();
         parsed.outline(0, &mut o).unwrap();
         // MoveTo(100,100), LineTo(150,100), LineTo(150,150), LineTo(100,150), Close.
-        assert!(matches!(
-            o.ops()[0],
-            PathOp::MoveTo { x: 100.0, y: 100.0 }
-        ));
-        assert!(matches!(
-            o.ops()[1],
-            PathOp::LineTo { x: 150.0, y: 100.0 }
-        ));
-        assert!(matches!(
-            o.ops()[2],
-            PathOp::LineTo { x: 150.0, y: 150.0 }
-        ));
-        assert!(matches!(
-            o.ops()[3],
-            PathOp::LineTo { x: 100.0, y: 150.0 }
-        ));
+        assert!(matches!(o.ops()[0], PathOp::MoveTo { x: 100.0, y: 100.0 }));
+        assert!(matches!(o.ops()[1], PathOp::LineTo { x: 150.0, y: 100.0 }));
+        assert!(matches!(o.ops()[2], PathOp::LineTo { x: 150.0, y: 150.0 }));
+        assert!(matches!(o.ops()[3], PathOp::LineTo { x: 100.0, y: 150.0 }));
         assert!(matches!(o.ops()[4], PathOp::Close));
     }
 

@@ -34,8 +34,7 @@ impl ttf_parser::OutlineBuilder for CollectBuilder {
         self.ops.push((SimpleOp::Line, [x, y, 0.0, 0.0, 0.0, 0.0]));
     }
     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-        self.ops
-            .push((SimpleOp::Quad, [x1, y1, x, y, 0.0, 0.0]));
+        self.ops.push((SimpleOp::Quad, [x1, y1, x, y, 0.0, 0.0]));
     }
     fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
         self.ops.push((SimpleOp::Cubic, [x1, y1, x2, y2, x, y]));
@@ -50,9 +49,7 @@ fn collapse(op: PathOp) -> (SimpleOp, [f32; 6]) {
     match op {
         PathOp::MoveTo { x, y } => (SimpleOp::Move, [x, y, 0.0, 0.0, 0.0, 0.0]),
         PathOp::LineTo { x, y } => (SimpleOp::Line, [x, y, 0.0, 0.0, 0.0, 0.0]),
-        PathOp::QuadTo { cx, cy, x, y } => {
-            (SimpleOp::Quad, [cx, cy, x, y, 0.0, 0.0])
-        }
+        PathOp::QuadTo { cx, cy, x, y } => (SimpleOp::Quad, [cx, cy, x, y, 0.0, 0.0]),
         PathOp::CubicTo {
             c1x,
             c1y,
@@ -66,9 +63,7 @@ fn collapse(op: PathOp) -> (SimpleOp, [f32; 6]) {
 }
 
 fn approx_eq(a: &[f32; 6], b: &[f32; 6]) -> bool {
-    a.iter()
-        .zip(b.iter())
-        .all(|(x, y)| (x - y).abs() < 1e-2)
+    a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() < 1e-2)
 }
 
 fn parity_for(bytes: &[u8]) -> (usize, usize) {
