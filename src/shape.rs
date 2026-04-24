@@ -371,12 +371,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 // this point (ccmp can rewrite ids but not lengths in
                 // practice for Arabic), so the slice aligns.
                 let forms_slice = &arabic_forms[seg.cp_range.clone()];
-                apply_arabic_positional_features(
-                    gsub,
-                    &mut seg_glyphs,
-                    gdef.as_ref(),
-                    forms_slice,
-                );
+                apply_arabic_positional_features(gsub, &mut seg_glyphs, gdef.as_ref(), forms_slice);
             }
             run_default_gsub(
                 gsub,
@@ -513,14 +508,8 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             let priority = seg_out.script_priority;
             let seg_slice = &mut glyphs[seg_out.range.clone()];
             if want_kern {
-                let ran = apply_gpos_feature(
-                    gpos,
-                    seg_slice,
-                    gdef.as_ref(),
-                    *b"kern",
-                    priority,
-                    &var,
-                );
+                let ran =
+                    apply_gpos_feature(gpos, seg_slice, gdef.as_ref(), *b"kern", priority, &var);
                 if ran {
                     gpos_kerned = true;
                 }
@@ -541,24 +530,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 );
             }
             if !feature_disabled(features, *b"mark") {
-                apply_gpos_feature(
-                    gpos,
-                    seg_slice,
-                    gdef.as_ref(),
-                    *b"mark",
-                    priority,
-                    &var,
-                );
+                apply_gpos_feature(gpos, seg_slice, gdef.as_ref(), *b"mark", priority, &var);
             }
             if !feature_disabled(features, *b"mkmk") {
-                apply_gpos_feature(
-                    gpos,
-                    seg_slice,
-                    gdef.as_ref(),
-                    *b"mkmk",
-                    priority,
-                    &var,
-                );
+                apply_gpos_feature(gpos, seg_slice, gdef.as_ref(), *b"mkmk", priority, &var);
             }
             // User-enabled features beyond the defaults flow through
             // the same dispatch. Skip tags already handled above so
@@ -570,14 +545,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 if matches!(&feat.tag, b"kern" | b"mark" | b"mkmk" | b"liga") {
                     continue;
                 }
-                apply_gpos_feature(
-                    gpos,
-                    seg_slice,
-                    gdef.as_ref(),
-                    feat.tag,
-                    priority,
-                    &var,
-                );
+                apply_gpos_feature(gpos, seg_slice, gdef.as_ref(), feat.tag, priority, &var);
             }
         }
     }

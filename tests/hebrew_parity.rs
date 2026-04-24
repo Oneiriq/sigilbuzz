@@ -244,7 +244,12 @@ fn assert_parity_on(case: &Case) {
         rb_buf.push_str(case.text);
         rb_buf.set_direction(RbDirection::RightToLeft);
         let rb_out = rustybuzz::shape(&rb_face, &[], rb_buf);
-        let gids: Vec<u32> = rb_out.glyph_infos().iter().rev().map(|g| g.glyph_id).collect();
+        let gids: Vec<u32> = rb_out
+            .glyph_infos()
+            .iter()
+            .rev()
+            .map(|g| g.glyph_id)
+            .collect();
         let xadvs: Vec<i32> = rb_out
             .glyph_positions()
             .iter()
@@ -265,8 +270,7 @@ fn assert_parity_on(case: &Case) {
             });
             rb_buf.set_script(seg.script);
             let rb_out = rustybuzz::shape(&rb_face, &[], rb_buf);
-            let mut seg_gids: Vec<u32> =
-                rb_out.glyph_infos().iter().map(|g| g.glyph_id).collect();
+            let mut seg_gids: Vec<u32> = rb_out.glyph_infos().iter().map(|g| g.glyph_id).collect();
             let mut seg_xadvs: Vec<i32> = rb_out
                 .glyph_positions()
                 .iter()
