@@ -59,6 +59,7 @@ use alloc::vec::Vec;
 use crate::buffer::{Buffer, Glyph, ShapedRun};
 use crate::error::Result;
 use crate::font::Font;
+use crate::ot::arabic::{assign_joining_forms, JoiningForm};
 use crate::tables::gdef::{Gdef, GlyphClass};
 use crate::tables::gpos::{
     lookup_type as gpos_lt, ChainContextPos, ContextPos, MarkBasePos, MarkLigaPos, MarkMarkPos,
@@ -70,6 +71,7 @@ use crate::tables::gsub::{
 };
 use crate::tables::layout::SequenceLookupRecord;
 use crate::tables::{Gpos, Gsub, KernTable};
+use crate::unicode::{script_of, Script};
 
 /// Maximum recursion depth for nested-lookup dispatch. Matches the
 /// limit HarfBuzz uses (`HB_MAX_NESTING_LEVEL = 16`); any deeper and
@@ -102,6 +104,9 @@ pub struct Feature {
 /// Returns an error if the font is missing any of the tables required
 /// for basic shaping (`cmap`, `maxp`, `hhea`, `hmtx`) or if one of
 /// them is malformed.
+// The pipeline is deliberately a straight-line sequence of passes so
+// the order is visible in one place; breaking it into five stage
+// helpers would cost more in indirection than it buys in LOC.
 #[allow(clippy::too_many_lines)]
 pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<ShapedRun> {
     let want_kern = !feature_disabled(features, *b"kern");
@@ -135,16 +140,30 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // offsets from the start of the text so later passes can track
     // which input characters coalesce into a single output glyph.
     //
+    // Default-ignorable Unicode format characters (ZWJ, ZWNJ, and
+    // the U+200E/U+200F bidi marks) drive the joining state machine
+    // but should not render — HarfBuzz replaces their glyph id with
+    // U+0020 (SPACE) after joining-form selection. sigilbuzz mirrors
+    // that: record the space glyph once, then swap the
+    // default-ignorable glyphs below. We keep the joining-type view
+    // on the original codepoints so the state machine still sees
+    // ZWJ/ZWNJ correctly.
+    //
     // We also capture the raw `char` list alongside the glyphs so
     // the Indic shaper can consult Unicode properties per-codepoint
     // without re-scanning the UTF-8 stream.
+    let space_gid = u32::from(cmap.glyph_id('\u{0020}').unwrap_or(0));
     let mut glyphs: Vec<Glyph> = Vec::with_capacity(text.len());
     let mut codepoints: Vec<char> = Vec::with_capacity(text.len());
     let mut has_devanagari = false;
     for (cluster, ch) in text.char_indices() {
-        let glyph_id = cmap.glyph_id(ch).unwrap_or(0);
+        let glyph_id = if is_default_ignorable(ch) {
+            space_gid
+        } else {
+            u32::from(cmap.glyph_id(ch).unwrap_or(0))
+        };
         glyphs.push(Glyph {
-            glyph_id: u32::from(glyph_id),
+            glyph_id,
             cluster: cluster as u32,
             x_advance: 0, // filled in after substitutions settle
             y_advance: 0,
@@ -157,6 +176,32 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         }
     }
 
+    // Step 1.5: Detect Arabic and compute per-glyph joining forms.
+    // When any glyph in the run comes from an Arabic codepoint the
+    // joining state machine decides which of init/medi/fina/isol
+    // each Arabic position takes. Non-Arabic positions get None and
+    // the positional features skip them. The forms vector stays
+    // aligned with `glyphs` through substitutions because ligatures
+    // and multiple-sub would violate that alignment only under
+    // `ccmp`/`rlig`, which we apply *after* computing forms so the
+    // state machine sees the pre-substitution sequence (correct per
+    // spec: joining is decided on codepoints, not glyphs).
+    let has_arabic = codepoints.iter().any(|&c| script_of(c) == Script::Arabic);
+    let arabic_forms: Vec<JoiningForm> = if has_arabic {
+        assign_joining_forms(text)
+    } else {
+        Vec::new()
+    };
+
+    // Step 2: GSUB passes. Default-on features mirror HarfBuzz's
+    // defaults so common text renders the same way without the
+    // caller having to enumerate them.
+    //
+    // When the run contains Arabic, the positional features
+    // (`isol`/`init`/`medi`/`fina`) run *before* `rlig` and `liga`
+    // so the ligature subtables see the post-joining glyph ids.
+    // That is the order HarfBuzz uses and it is what Arabic fonts
+    // are designed against.
     let gsub = face.gsub()?;
 
     // Step 1b: Indic reordering + basic features. Runs before the
@@ -167,20 +212,54 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         crate::ot::indic::shape_devanagari(gsub.as_ref(), &codepoints, &mut glyphs);
     }
 
-    // Step 2: GSUB passes (default + user-enabled).
     if let Some(ref gsub) = gsub {
-        run_default_gsub(gsub, &mut glyphs, features, want_liga, is_vertical);
+        // Arabic positional substitution runs *before* the default
+        // GSUB pass so `rlig`/`liga` etc. see the post-joining glyph
+        // stream.
+        if has_arabic && !arabic_forms.is_empty() {
+            // ccmp must run before positional features so any
+            // composition/decomposition has settled first.
+            if !feature_disabled(features, *b"ccmp") {
+                apply_gsub_feature(gsub, &mut glyphs, *b"ccmp", 0, true);
+            }
+            apply_arabic_positional_features(gsub, &mut glyphs, &arabic_forms);
+        }
+        run_default_gsub(
+            gsub,
+            &mut glyphs,
+            features,
+            want_liga,
+            is_vertical,
+            has_arabic,
+            has_arabic && !arabic_forms.is_empty(),
+        );
     }
 
-    // component advances. Horizontal layout pulls from hmtx and
-    // drives the pen along X; vertical layout pulls from vmtx (when
-    // present) and drives the pen along Y, while x_advance stays
-    // zero so the glyphs stack rather than walk right. In the
-    // horizontal path, a non-empty Font coord slice combined with an
-    // HVAR table adjusts each advance by the per-coord delta.
+    // Step 3: advance lookup. Runs *after* GSUB so ligatures receive
+    // their ligature-glyph advance, not the sum of component advances.
+    // Horizontal layout pulls from hmtx and drives the pen along X;
+    // vertical layout pulls from vmtx (when present) and drives the
+    // pen along Y, while x_advance stays zero so the glyphs stack
+    // rather than walk right. In the horizontal path, a non-empty
+    // Font coord slice combined with an HVAR table adjusts each
+    // advance by the per-coord delta.
+    //
+    // Default-ignorable format characters (ZWJ, ZWNJ, bidi marks)
+    // keep a zero advance in either axis — they rendered as space
+    // earlier, but must not move the pen (HarfBuzz does the same).
+    // We walk the character stream once to collect their cluster
+    // offsets and then skip them in the advance pass.
+    let default_ignorable_clusters: Vec<u32> = text
+        .char_indices()
+        .filter(|(_, c)| is_default_ignorable(*c))
+        .map(|(i, _)| i as u32)
+        .collect();
     if is_vertical {
         if let Some(ref vmtx) = vmtx {
             for glyph in &mut glyphs {
+                if default_ignorable_clusters.contains(&glyph.cluster) {
+                    continue;
+                }
                 let id = glyph.glyph_id as u16;
                 // HarfBuzz convention: vertical y_advance is negative
                 // for top-to-bottom flow, so the pen moves downward.
@@ -199,6 +278,9 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             let hhea = face.hhea()?;
             let fallback = (hhea.ascent as i32) - (hhea.descent as i32);
             for glyph in &mut glyphs {
+                if default_ignorable_clusters.contains(&glyph.cluster) {
+                    continue;
+                }
                 glyph.y_advance = if buffer.direction().is_forward() {
                     -fallback
                 } else {
@@ -215,6 +297,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             face.hvar()?
         };
         for glyph in &mut glyphs {
+            if default_ignorable_clusters.contains(&glyph.cluster) {
+                glyph.x_advance = 0;
+                continue;
+            }
             let id = glyph.glyph_id as u16;
             let base = i32::from(hmtx.advance(id).unwrap_or(0));
             glyph.x_advance = if let Some(ref hvar) = hvar {
@@ -240,7 +326,9 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let gpos = face.gpos()?;
     let gpos_kerned = if want_kern {
         match &gpos {
-            Some(gpos) => apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"kern"),
+            Some(gpos) => {
+                apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"kern", has_arabic)
+            }
             None => false,
         }
     } else {
@@ -260,10 +348,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             );
         }
         if !feature_disabled(features, *b"mark") {
-            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"mark");
+            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"mark", has_arabic);
         }
         if !feature_disabled(features, *b"mkmk") {
-            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"mkmk");
+            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"mkmk", has_arabic);
         }
         // User-enabled features beyond the defaults flow through the
         // same dispatch. Skip tags already handled above so they do
@@ -275,7 +363,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             if matches!(&feat.tag, b"kern" | b"mark" | b"mkmk" | b"liga") {
                 continue;
             }
-            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), feat.tag);
+            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), feat.tag, has_arabic);
         }
     }
 
@@ -297,6 +385,29 @@ fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
     features.iter().any(|f| f.tag == tag && f.value == 0)
 }
 
+/// True for the small set of Unicode format characters the shaper
+/// should render as space rather than their own glyph — the ones
+/// whose job is to influence the shaping pipeline without carrying
+/// a visual form. HarfBuzz calls these "default ignorable" and
+/// rewrites them to the space glyph after shaping.
+///
+/// Coverage is deliberately narrow — only the characters that (a)
+/// drive joining decisions and (b) would otherwise render as a
+/// glyph in fonts like Amiri (which has drawable glyphs for ZWJ
+/// variants). Other default-ignorable characters (e.g. the variation
+/// selectors) pass through via their cmap mapping, which typically
+/// hits `.notdef` and becomes invisible through another path.
+const fn is_default_ignorable(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x200C  // ZERO WIDTH NON-JOINER
+        | 0x200D  // ZERO WIDTH JOINER
+        | 0x200E  // LEFT-TO-RIGHT MARK
+        | 0x200F  // RIGHT-TO-LEFT MARK
+        | 0x061C // ARABIC LETTER MARK
+    )
+}
+
 /// Runs the default GSUB feature chain and any user-enabled extras.
 /// Order matches the spec: `ccmp` → `rlig` → `liga` → `clig` →
 /// `calt`, then `vrt2` / `vert` for vertical runs. HarfBuzz's Latin
@@ -304,27 +415,32 @@ fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
 /// sigilbuzz follows suit. User-enabled features beyond that list
 /// are dispatched afterwards, respecting their 1-indexed
 /// alternate-selector value.
+#[allow(clippy::fn_params_excessive_bools)]
 fn run_default_gsub(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
     features: &[Feature],
     want_liga: bool,
     is_vertical: bool,
+    prefer_arabic_script: bool,
+    arabic_positional_already_ran: bool,
 ) {
-    if !feature_disabled(features, *b"ccmp") {
-        apply_gsub_feature(gsub, glyphs, *b"ccmp", 0);
+    // ccmp already ran before the Arabic positional pass; avoid
+    // double-applying it here.
+    if !arabic_positional_already_ran && !feature_disabled(features, *b"ccmp") {
+        apply_gsub_feature(gsub, glyphs, *b"ccmp", 0, prefer_arabic_script);
     }
     if !feature_disabled(features, *b"rlig") {
-        apply_gsub_feature(gsub, glyphs, *b"rlig", 0);
+        apply_gsub_feature(gsub, glyphs, *b"rlig", 0, prefer_arabic_script);
     }
     if want_liga {
-        apply_gsub_feature(gsub, glyphs, *b"liga", 0);
+        apply_gsub_feature(gsub, glyphs, *b"liga", 0, prefer_arabic_script);
     }
     if !feature_disabled(features, *b"clig") {
-        apply_gsub_feature(gsub, glyphs, *b"clig", 0);
+        apply_gsub_feature(gsub, glyphs, *b"clig", 0, prefer_arabic_script);
     }
     if !feature_disabled(features, *b"calt") {
-        apply_gsub_feature(gsub, glyphs, *b"calt", 0);
+        apply_gsub_feature(gsub, glyphs, *b"calt", 0, prefer_arabic_script);
     }
     // Vertical writing: HarfBuzz auto-enables `vrt2` when the font
     // carries it, otherwise falls back to `vert`. The two tags
@@ -333,9 +449,9 @@ fn run_default_gsub(
     if is_vertical {
         let has_vrt2 = feature_present(gsub, *b"vrt2");
         if has_vrt2 && !feature_disabled(features, *b"vrt2") {
-            apply_gsub_feature(gsub, glyphs, *b"vrt2", 0);
+            apply_gsub_feature(gsub, glyphs, *b"vrt2", 0, prefer_arabic_script);
         } else if !feature_disabled(features, *b"vert") {
-            apply_gsub_feature(gsub, glyphs, *b"vert", 0);
+            apply_gsub_feature(gsub, glyphs, *b"vert", 0, prefer_arabic_script);
         }
     }
     for feat in features {
@@ -346,7 +462,7 @@ fn run_default_gsub(
             continue;
         }
         let alternate_idx = (feat.value.saturating_sub(1)).min(u32::from(u16::MAX)) as u16;
-        apply_gsub_feature(gsub, glyphs, feat.tag, alternate_idx);
+        apply_gsub_feature(gsub, glyphs, feat.tag, alternate_idx, prefer_arabic_script);
     }
 }
 
@@ -364,7 +480,11 @@ fn is_handled_gsub_tag(tag: [u8; 4]) -> bool {
 /// feature tag. Used by the vertical-writing dispatcher to decide
 /// between `vrt2` (preferred if present) and `vert` (fallback).
 fn feature_present(gsub: &Gsub<'_>, tag: [u8; 4]) -> bool {
-    lookup_indices_for_feature(gsub, tag).is_some_and(|v| !v.is_empty())
+    // Vertical-writing probe runs before we know the script — use the
+    // Latin-style script order (DFLT → first) to match the previous
+    // behaviour. Arabic fonts do not ship vert/vrt2, so this choice is
+    // not observable in practice.
+    lookup_indices_for_feature_in_scripts(gsub, tag, &[*b"DFLT"]).is_some_and(|v| !v.is_empty())
 }
 
 /// Applies every GSUB lookup reachable via the named feature tag
@@ -387,8 +507,18 @@ pub(crate) fn apply_gsub_feature(
     glyphs: &mut Vec<Glyph>,
     tag: [u8; 4],
     alternate_index: u16,
+    prefer_arabic_script: bool,
 ) {
-    apply_gsub_feature_in_scripts(gsub, glyphs, tag, alternate_index, &[*b"DFLT"]);
+    // Arabic runs resolve features from the `arab` LangSys first so
+    // positional features (init/medi/fina/isol) hit the Arabic-
+    // specific lookup tables. Non-Arabic runs keep the original
+    // DFLT-only behaviour.
+    let priority: &[[u8; 4]] = if prefer_arabic_script {
+        &[*b"arab", *b"DFLT"]
+    } else {
+        &[*b"DFLT"]
+    };
+    apply_gsub_feature_in_scripts(gsub, glyphs, tag, alternate_index, priority);
 }
 
 /// Same as [`apply_gsub_feature`] but walks the supplied script-tag
@@ -420,6 +550,158 @@ pub(crate) fn apply_gsub_feature_in_scripts(
 
     for lookup_idx in lookup_indices {
         apply_gsub_lookup(gsub, lookup_idx, glyphs, alternate_index);
+    }
+}
+
+/// Applies the four Arabic positional features — `isol`, `init`,
+/// `medi`, `fina` — each restricted to the glyph positions whose
+/// [`JoiningForm`] matches. The forms slice stays aligned with the
+/// glyph run because we call this before any `ccmp`/`rlig`/`liga`
+/// substitution has shrunk or expanded the stream (see the call
+/// site in [`shape`]).
+fn apply_arabic_positional_features(
+    gsub: &Gsub<'_>,
+    glyphs: &mut Vec<Glyph>,
+    forms: &[JoiningForm],
+) {
+    for (form, tag) in [
+        (JoiningForm::Isol, *b"isol"),
+        (JoiningForm::Init, *b"init"),
+        (JoiningForm::Medi, *b"medi"),
+        (JoiningForm::Fina, *b"fina"),
+    ] {
+        let Some(lookup_indices) =
+            lookup_indices_for_feature_in_scripts(gsub, tag, &[*b"arab", *b"DFLT"])
+        else {
+            continue;
+        };
+        if lookup_indices.is_empty() {
+            continue;
+        }
+        let mask: Vec<bool> = forms.iter().map(|&f| f == form).collect();
+        for lookup_idx in lookup_indices {
+            apply_gsub_lookup_masked(gsub, lookup_idx, glyphs, &mask);
+        }
+    }
+}
+
+/// Applies a single GSUB lookup only at positions where `mask[i]`
+/// is true. Used by the Arabic positional pass — `isol` at positions
+/// tagged `Isol`, `init` at `Init`, and so on. Only per-glyph
+/// lookup types are masked here (SINGLE / MULTIPLE / ALTERNATE /
+/// LIGATURE); chained-context lookups inside an Arabic positional
+/// feature are uncommon and fall through to the unmasked dispatcher
+/// so no functionality is lost.
+fn apply_gsub_lookup_masked(
+    gsub: &Gsub<'_>,
+    lookup_idx: u16,
+    glyphs: &mut Vec<Glyph>,
+    mask: &[bool],
+) {
+    let lookup_list = gsub.lookup_list();
+    let Some(lookup) = lookup_list.get(lookup_idx) else {
+        return;
+    };
+    let raw_lt = lookup.lookup_type();
+    for sub_idx in 0..lookup.subtable_count() {
+        let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
+            continue;
+        };
+        let (effective_lt, inner_bytes) = if raw_lt == gsub_lt::EXTENSION {
+            match resolve_extension(bytes) {
+                Some((inner_type, inner)) => (inner_type, inner),
+                None => continue,
+            }
+        } else {
+            (raw_lt, bytes)
+        };
+
+        match effective_lt {
+            gsub_lt::SINGLE => {
+                let Ok(single) = Single::parse(inner_bytes) else {
+                    continue;
+                };
+                for (i, glyph) in glyphs.iter_mut().enumerate() {
+                    if !mask.get(i).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    let id = glyph.glyph_id as u16;
+                    if let Some(out) = single.apply(id) {
+                        glyph.glyph_id = u32::from(out);
+                    }
+                }
+            }
+            gsub_lt::ALTERNATE => {
+                let Ok(alt) = Alternate::parse(inner_bytes) else {
+                    continue;
+                };
+                for (i, glyph) in glyphs.iter_mut().enumerate() {
+                    if !mask.get(i).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    let id = glyph.glyph_id as u16;
+                    if let Some(out) = alt.apply(id, 0) {
+                        glyph.glyph_id = u32::from(out);
+                    }
+                }
+            }
+            gsub_lt::LIGATURE => {
+                let Ok(lig) = Ligature::parse(inner_bytes) else {
+                    continue;
+                };
+                // For ligature lookups in a positional feature the
+                // mask gates the *first* component; the rest of the
+                // window is consumed as-is. Rare in practice — the
+                // `rlig` feature is where ligation happens in Arabic,
+                // not `init`/`medi`/`fina`/`isol` — but supported for
+                // completeness.
+                let mut i = 0;
+                while i < glyphs.len() {
+                    if !mask.get(i).copied().unwrap_or(false) {
+                        i += 1;
+                        continue;
+                    }
+                    let window: Vec<u16> = glyphs[i..].iter().map(|g| g.glyph_id as u16).collect();
+                    if let Some((lig_glyph, consumed)) = lig.apply(&window) {
+                        glyphs[i].glyph_id = u32::from(lig_glyph);
+                        glyphs.drain(i + 1..i + consumed);
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            gsub_lt::MULTIPLE => {
+                let Ok(m) = Multiple::parse(inner_bytes) else {
+                    continue;
+                };
+                let mut i = 0;
+                while i < glyphs.len() {
+                    if !mask.get(i).copied().unwrap_or(false) {
+                        i += 1;
+                        continue;
+                    }
+                    let id = glyphs[i].glyph_id as u16;
+                    if let Some(seq) = m.apply(id) {
+                        if let Some(n) = expand_glyph_in_place(glyphs, i, &seq) {
+                            i += n;
+                            continue;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            // Chained-context inside a positional feature: run over
+            // the whole glyph stream. Fonts that care about position
+            // encode that via the chained rule's coverage, not via
+            // our mask.
+            gsub_lt::CHAINED_CONTEXT => {
+                let Ok(chain) = ChainContextAny::parse(inner_bytes) else {
+                    continue;
+                };
+                apply_chain_context_any_subtable(gsub, &chain, glyphs);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -787,6 +1069,7 @@ fn apply_reverse_chain_subtable(rc: &ReverseChain<'_>, glyphs: &mut [Glyph]) {
 /// sorted set of lookup indices that the feature `tag` selects. A
 /// return value of `None` means no usable script, `Some(empty)`
 /// means the LangSys does not carry this feature.
+#[allow(dead_code)]
 fn lookup_indices_for_feature(gsub: &Gsub<'_>, tag: [u8; 4]) -> Option<Vec<u16>> {
     lookup_indices_for_feature_in_scripts(gsub, tag, &[*b"DFLT"])
 }
@@ -939,8 +1222,14 @@ fn apply_gpos_feature(
     glyphs: &mut [Glyph],
     gdef: Option<&Gdef<'_>>,
     tag: [u8; 4],
+    prefer_arabic_script: bool,
 ) -> bool {
-    apply_gpos_feature_in_scripts(gpos, glyphs, gdef, tag, &[*b"DFLT"])
+    let priority: &[[u8; 4]] = if prefer_arabic_script {
+        &[*b"arab", *b"DFLT"]
+    } else {
+        &[*b"DFLT"]
+    };
+    apply_gpos_feature_in_scripts(gpos, glyphs, gdef, tag, priority)
 }
 
 /// Script-priority variant of [`apply_gpos_feature`]. Matches the

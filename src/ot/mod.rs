@@ -8,6 +8,7 @@
 
 #![allow(missing_docs)]
 
+pub mod arabic;
 pub mod indic;
 
 /// Common OpenType feature tags. These are byte-literal constants so
@@ -17,6 +18,11 @@ pub mod feature {
     pub const DLIG: [u8; 4] = *b"dlig"; // Discretionary ligatures
     pub const KERN: [u8; 4] = *b"kern"; // Kerning
     pub const CALT: [u8; 4] = *b"calt"; // Contextual alternates
+    pub const ISOL: [u8; 4] = *b"isol"; // Isolated form (Arabic)
+    pub const INIT: [u8; 4] = *b"init"; // Initial form (Arabic)
+    pub const MEDI: [u8; 4] = *b"medi"; // Medial form (Arabic)
+    pub const FINA: [u8; 4] = *b"fina"; // Final form (Arabic)
+    pub const RLIG: [u8; 4] = *b"rlig"; // Required ligatures (Arabic)
     pub const SMCP: [u8; 4] = *b"smcp"; // Small capitals
     pub const C2SC: [u8; 4] = *b"c2sc"; // Petite capitals from capitals
     pub const ONUM: [u8; 4] = *b"onum"; // Old-style figures

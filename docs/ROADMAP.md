@@ -42,7 +42,7 @@ So oniq's CJK fallback fonts render properly.
 
 The payoff for being called a shaping engine at all.
 
-- [ ] Arabic cursive joining (`init`, `medi`, `fina`, `isol`, `rlig`)
+- [x] Arabic cursive joining (`init`, `medi`, `fina`, `isol`, `rlig`)
 - [ ] Indic reordering (`akhn`, `rphf`, `blwf`, `half`, `pstf`, `vatu`)
 - [ ] Bidi-aware buffer preparation (UAX 9) — either in sigilbuzz or via a thin consumer-provided hook
 
