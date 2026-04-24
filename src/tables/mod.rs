@@ -10,6 +10,8 @@
 //! unambiguous and `no_std`-friendly.
 
 pub mod avar;
+pub mod cff;
+pub mod cff2;
 pub mod cmap;
 pub mod colr;
 pub mod cpal;
@@ -29,6 +31,7 @@ pub mod layout;
 pub mod loca;
 pub mod maxp;
 pub mod morx;
+pub mod outline;
 pub mod parse;
 pub mod variation_store;
 pub mod vhea;
@@ -36,6 +39,8 @@ pub mod vmtx;
 pub mod vorg;
 
 pub use avar::Avar;
+pub use cff::Cff;
+pub use cff2::Cff2;
 pub use cmap::Cmap;
 pub use colr::{Colr, ColrPaint};
 pub use cpal::{Color, Cpal};
@@ -58,6 +63,7 @@ pub use layout::{ClassDef, Coverage};
 pub use loca::Loca;
 pub use maxp::Maxp;
 pub use morx::Morx;
+pub use outline::{Outline, OutlineSink, PathOp};
 pub use parse::Reader;
 pub use variation_store::ItemVariationStore;
 pub use vhea::Vhea;
@@ -112,6 +118,10 @@ pub mod tag {
     pub const COLR: [u8; 4] = *b"COLR";
     /// `CPAL` — colour palette table.
     pub const CPAL: [u8; 4] = *b"CPAL";
+    /// `CFF ` — Compact Font Format 1 (PostScript charstring outlines).
+    pub const CFF1: [u8; 4] = *b"CFF ";
+    /// `CFF2` — CFF2 for OpenType variable fonts with PostScript outlines.
+    pub const CFF2: [u8; 4] = *b"CFF2";
     /// `morx` — Apple Extended Glyph Metamorphosis (AAT).
     pub const MORX: [u8; 4] = *b"morx";
     /// `kerx` — Apple Extended Kerning (AAT).

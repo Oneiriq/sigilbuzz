@@ -164,6 +164,31 @@ impl<'a> ItemVariationStore<'a> {
         Some(scalar)
     }
 
+    /// Number of regions referenced by subtable `outer`. CFF2 blend
+    /// uses this as `n_regions` for each delta row. Returns `None`
+    /// when the subtable index is out of range or the subtable
+    /// header is truncated.
+    #[must_use]
+    pub fn variation_region_count(&self, outer: u16) -> Option<u16> {
+        let off = *self.subtable_offsets.get(outer as usize)?;
+        let sub = ItemVariationData::parse(self.data, off as usize).ok()?;
+        Some(sub.region_indexes.len() as u16)
+    }
+
+    /// Per-region scalars for subtable `outer`, in subtable-region
+    /// order. CFF2 blend multiplies each column of deltas by the
+    /// corresponding entry.
+    #[must_use]
+    pub fn region_scalars(&self, outer: u16, coords: &[f32]) -> Option<Vec<f32>> {
+        let off = *self.subtable_offsets.get(outer as usize)?;
+        let sub = ItemVariationData::parse(self.data, off as usize).ok()?;
+        let mut out = Vec::with_capacity(sub.region_indexes.len());
+        for &ri in &sub.region_indexes {
+            out.push(self.region_scalar(ri, coords).unwrap_or(0.0));
+        }
+        Some(out)
+    }
+
     /// Evaluates the delta for item `(outer, inner)` at the given
     /// normalized coords. Returns `0.0` for out-of-range indices.
     #[must_use]
