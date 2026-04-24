@@ -938,7 +938,8 @@ pub(crate) fn apply_gpos_feature_in_scripts(
         return false;
     }
 
-    let Some(lookup_indices) = gpos_lookup_indices_for_feature_in_scripts(gpos, tag, script_priority)
+    let Some(lookup_indices) =
+        gpos_lookup_indices_for_feature_in_scripts(gpos, tag, script_priority)
     else {
         return false;
     };

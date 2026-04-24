@@ -145,16 +145,7 @@ pub const fn positional_category(ch: char) -> IndicPositionalCategory {
         0x093B | 0x093E | 0x0940 | 0x0949 | 0x094A | 0x094B | 0x094C | 0x094F => {
             IndicPositionalCategory::Right
         }
-        0x093C
-        | 0x0941
-        | 0x0942
-        | 0x0943
-        | 0x0944
-        | 0x094D
-        | 0x0952
-        | 0x0956
-        | 0x0957
-        | 0x0962
+        0x093C | 0x0941 | 0x0942 | 0x0943 | 0x0944 | 0x094D | 0x0952 | 0x0956 | 0x0957 | 0x0962
         | 0x0963 => IndicPositionalCategory::Bottom,
 
         _ => IndicPositionalCategory::NotApplicable,
@@ -168,9 +159,18 @@ mod tests {
     #[test]
     fn devanagari_consonants_classify_as_consonant() {
         // क U+0915 .. ह U+0939 are consonants.
-        assert_eq!(syllabic_category('\u{0915}'), IndicSyllabicCategory::Consonant);
-        assert_eq!(syllabic_category('\u{0924}'), IndicSyllabicCategory::Consonant); // त
-        assert_eq!(syllabic_category('\u{0939}'), IndicSyllabicCategory::Consonant);
+        assert_eq!(
+            syllabic_category('\u{0915}'),
+            IndicSyllabicCategory::Consonant
+        );
+        assert_eq!(
+            syllabic_category('\u{0924}'),
+            IndicSyllabicCategory::Consonant
+        ); // त
+        assert_eq!(
+            syllabic_category('\u{0939}'),
+            IndicSyllabicCategory::Consonant
+        );
     }
 
     #[test]
@@ -222,7 +222,10 @@ mod tests {
 
     #[test]
     fn zwj_and_zwnj_have_dedicated_categories() {
-        assert_eq!(syllabic_category('\u{200C}'), IndicSyllabicCategory::NonJoiner);
+        assert_eq!(
+            syllabic_category('\u{200C}'),
+            IndicSyllabicCategory::NonJoiner
+        );
         assert_eq!(syllabic_category('\u{200D}'), IndicSyllabicCategory::Joiner);
     }
 

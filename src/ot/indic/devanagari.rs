@@ -65,11 +65,7 @@ use crate::unicode::indic_category::{
 /// reordering. After this function returns, `glyphs` may contain
 /// fewer entries (if basic features applied ligatures) and the
 /// order can differ from input.
-pub fn shape_devanagari(
-    gsub: Option<&Gsub<'_>>,
-    codepoints: &[char],
-    glyphs: &mut Vec<Glyph>,
-) {
+pub fn shape_devanagari(gsub: Option<&Gsub<'_>>, codepoints: &[char], glyphs: &mut Vec<Glyph>) {
     if codepoints.is_empty() || glyphs.is_empty() {
         return;
     }
@@ -142,9 +138,8 @@ pub(crate) const INDIC_BASIC_FEATURES: &[&[u8; 4]] = &[
 /// Default Indic2 presentation features, in application order.
 /// Run after final reordering to pick the display glyphs for
 /// pre-base vowels, conjuncts, and final marks.
-pub(crate) const INDIC_PRESENTATION_FEATURES: &[&[u8; 4]] = &[
-    b"init", b"pres", b"abvs", b"blws", b"psts", b"haln",
-];
+pub(crate) const INDIC_PRESENTATION_FEATURES: &[&[u8; 4]] =
+    &[b"init", b"pres", b"abvs", b"blws", b"psts", b"haln"];
 
 /// Syllable classification mirroring the Indic2 syllable types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,8 +335,7 @@ fn scan_consonant_syllable(cps: &[char], start: usize) -> Syllable {
 
     // Reph is only real when the syllable has more consonants
     // after the ra+halant prefix.
-    let has_reph = ra_halant_prefix
-        && base_index.is_some_and(|b| b > start + 1);
+    let has_reph = ra_halant_prefix && base_index.is_some_and(|b| b > start + 1);
 
     // If the very last token was a consonant-then-virama (an
     // explicit halant cluster with no trailing matra), the base is
