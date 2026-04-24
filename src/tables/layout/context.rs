@@ -389,7 +389,8 @@ impl<'a> Context3<'a> {
     /// filter shorthand.
     #[must_use]
     pub fn matches(&self, glyphs: &[u16], i: usize) -> bool {
-        self.matches_filtered(glyphs, i, &MatchFilter::none()).is_some()
+        self.matches_filtered(glyphs, i, &MatchFilter::none())
+            .is_some()
     }
 
     /// Filter-aware match: returns the raw span of the match (number
@@ -999,7 +1000,8 @@ impl<'a> ChainContext3<'a> {
     /// filter shorthand.
     #[must_use]
     pub fn matches(&self, glyphs: &[u16], i: usize) -> bool {
-        self.matches_filtered(glyphs, i, &MatchFilter::none()).is_some()
+        self.matches_filtered(glyphs, i, &MatchFilter::none())
+            .is_some()
     }
 
     /// Filter-aware match: returns the raw span of the input match
@@ -1066,7 +1068,6 @@ fn parse_coverage_array<'a>(data: &'a [u8], r: &mut Reader<'_>) -> Result<Vec<Co
     }
     Ok(out)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1482,10 +1483,7 @@ mod tests {
         // [10, 99, 20, 30] — plain matcher fails on the mark in backtrack (i=2).
         assert!(!ctx.matches(&[10, 99, 20, 30], 2));
         // With the filter, the mark is skipped and the match fires.
-        assert_eq!(
-            ctx.matches_filtered(&[10, 99, 20, 30], 2, &filter),
-            Some(1)
-        );
+        assert_eq!(ctx.matches_filtered(&[10, 99, 20, 30], 2, &filter), Some(1));
     }
 
     #[test]

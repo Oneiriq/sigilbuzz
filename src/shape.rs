@@ -474,7 +474,14 @@ fn run_default_gsub(
             continue;
         }
         let alternate_idx = (feat.value.saturating_sub(1)).min(u32::from(u16::MAX)) as u16;
-        apply_gsub_feature(gsub, glyphs, gdef, feat.tag, alternate_idx, prefer_arabic_script);
+        apply_gsub_feature(
+            gsub,
+            glyphs,
+            gdef,
+            feat.tag,
+            alternate_idx,
+            prefer_arabic_script,
+        );
     }
 }
 

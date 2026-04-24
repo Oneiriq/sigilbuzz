@@ -520,5 +520,4 @@ mod tests {
         assert_eq!(f.prev_unskipped(&glyphs, 1), Some(0));
         assert_eq!(f.prev_unskipped(&glyphs, 0), None);
     }
-
 }

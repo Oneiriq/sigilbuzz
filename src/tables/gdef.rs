@@ -190,10 +190,7 @@ fn parse_optional_class_def<'a>(
     ClassDef::parse(sub).map(Some)
 }
 
-fn parse_mark_glyph_sets(
-    data: &[u8],
-    sub_off: usize,
-) -> Result<alloc::vec::Vec<Coverage<'_>>> {
+fn parse_mark_glyph_sets(data: &[u8], sub_off: usize) -> Result<alloc::vec::Vec<Coverage<'_>>> {
     // Layout:
     //   u16 format (= 1)
     //   u16 markGlyphSetCount
@@ -221,12 +218,10 @@ fn parse_mark_glyph_sets(
             out.push(Coverage::parse(&[0, 1, 0, 0])?);
             continue;
         }
-        let abs = sub_off
-            .checked_add(rel)
-            .ok_or(Error::Malformed {
-                offset: sub_off,
-                context: "GDEF markGlyphSetsDef coverage offset overflow",
-            })?;
+        let abs = sub_off.checked_add(rel).ok_or(Error::Malformed {
+            offset: sub_off,
+            context: "GDEF markGlyphSetsDef coverage offset overflow",
+        })?;
         let cov_bytes = data.get(abs..).ok_or(Error::Malformed {
             offset: abs,
             context: "GDEF markGlyphSetsDef coverage offset past end",
