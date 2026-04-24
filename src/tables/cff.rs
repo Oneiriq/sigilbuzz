@@ -1142,6 +1142,11 @@ fn subr_bias(count: usize) -> i32 {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::vec_init_then_push,
+    clippy::cast_possible_wrap,
+    clippy::same_item_push
+)]
 mod tests {
     use super::*;
     use crate::tables::outline::{Outline, PathOp};

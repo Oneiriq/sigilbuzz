@@ -644,6 +644,11 @@ impl<'s, 't, S: OutlineSink> OutlineSink for TransformedSink<'s, 't, S> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::vec_init_then_push,
+    clippy::cast_possible_wrap,
+    clippy::same_item_push
+)]
 mod tests {
     use super::*;
     use crate::tables::head::IndexToLocFormat;
