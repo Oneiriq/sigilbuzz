@@ -371,13 +371,9 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let gpos = face.gpos()?;
     let gpos_kerned = if want_kern {
         match &gpos {
-            Some(gpos) => apply_gpos_feature(
-                gpos,
-                &mut glyphs,
-                gdef.as_ref(),
-                *b"kern",
-                script_priority,
-            ),
+            Some(gpos) => {
+                apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"kern", script_priority)
+            }
             None => false,
         }
     } else {
