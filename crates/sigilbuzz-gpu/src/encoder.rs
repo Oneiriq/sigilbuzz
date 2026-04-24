@@ -38,6 +38,12 @@ impl SlugOptions {
     /// Default cubic-flattening tolerance in design units (1.0 unit
     /// ≈ 0.0005 em on a 2048-upem font).
     pub const DEFAULT_CUBIC_TOLERANCE: f32 = 1.0;
+
+    /// Minimum effective cubic tolerance. A caller who sets
+    /// `cubic_tolerance` to 0, a negative value, or NaN is clamped up
+    /// to this floor — smaller values subdivide exponentially without
+    /// improving the visible result on any real glyph.
+    pub const MIN_CUBIC_TOLERANCE: f32 = 1.0 / 64.0;
 }
 
 impl Default for SlugOptions {
@@ -79,7 +85,24 @@ pub fn encode_glyph_at_coords(
 /// Mostly useful for tests with hand-crafted paths.
 #[must_use]
 pub(crate) fn encode_outline_ops(ops: &[PathOp], opts: &SlugOptions) -> Option<SlugGlyph> {
-    let segments = flatten_to_quads(ops, opts.cubic_tolerance);
+    // Reject paths with non-finite coordinates before we spend work
+    // flattening — a NaN reaching the De Casteljau loop fails the
+    // tolerance comparison and drives subdivision to MAX_DEPTH,
+    // emitting ~2^18 useless segments per cubic.
+    if !ops_are_finite(ops) {
+        return None;
+    }
+    // Clamp tolerance to a positive floor. A zero/negative/NaN
+    // tolerance otherwise turns every bent cubic into a full-depth
+    // subdivision tree for no visible gain.
+    let tolerance = if opts.cubic_tolerance.is_finite()
+        && opts.cubic_tolerance >= SlugOptions::MIN_CUBIC_TOLERANCE
+    {
+        opts.cubic_tolerance
+    } else {
+        SlugOptions::MIN_CUBIC_TOLERANCE
+    };
+    let segments = flatten_to_quads(ops, tolerance);
     if segments.is_empty() {
         return None;
     }
@@ -102,6 +125,34 @@ pub(crate) fn encode_outline_ops(ops: &[PathOp], opts: &SlugOptions) -> Option<S
         bbox,
         bands,
         segments: banded_segments,
+    })
+}
+
+/// True when every coordinate in every op is finite. Used as a
+/// pre-flatten gate so malformed gvar deltas (NaN / infinity) don't
+/// drive the cubic subdivider to its depth cap.
+fn ops_are_finite(ops: &[PathOp]) -> bool {
+    ops.iter().all(|op| match *op {
+        PathOp::MoveTo { x, y } | PathOp::LineTo { x, y } => x.is_finite() && y.is_finite(),
+        PathOp::QuadTo { cx, cy, x, y } => {
+            cx.is_finite() && cy.is_finite() && x.is_finite() && y.is_finite()
+        }
+        PathOp::CubicTo {
+            c1x,
+            c1y,
+            c2x,
+            c2y,
+            x,
+            y,
+        } => {
+            c1x.is_finite()
+                && c1y.is_finite()
+                && c2x.is_finite()
+                && c2y.is_finite()
+                && x.is_finite()
+                && y.is_finite()
+        }
+        PathOp::Close => true,
     })
 }
 
@@ -486,6 +537,88 @@ mod tests {
         let bbox = segment_pool_bbox(&segments);
         let (bands, _) = decompose_into_bands(&segments, &bbox, 7);
         assert_eq!(bands.len(), 7);
+    }
+
+    #[test]
+    fn nan_coord_rejects_whole_glyph() {
+        // A malformed gvar delta could push a NaN into a CubicTo. The
+        // encoder must refuse the glyph rather than feeding NaN into
+        // the flattener, where every subdivision would still test as
+        // "not within tolerance" and drive MAX_DEPTH subdivisions.
+        let ops = [
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::CubicTo {
+                c1x: f32::NAN,
+                c1y: 0.0,
+                c2x: 0.0,
+                c2y: 0.0,
+                x: 10.0,
+                y: 10.0,
+            },
+            PathOp::Close,
+        ];
+        let glyph = encode_outline_ops(&ops, &SlugOptions::default());
+        assert!(glyph.is_none());
+
+        // Infinity is equally poisonous.
+        let ops = [
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::LineTo {
+                x: f32::INFINITY,
+                y: 0.0,
+            },
+            PathOp::Close,
+        ];
+        assert!(encode_outline_ops(&ops, &SlugOptions::default()).is_none());
+    }
+
+    #[test]
+    fn zero_or_negative_tolerance_clamps_to_minimum() {
+        // A bent cubic with tolerance 0 must not blow up to a
+        // MAX_DEPTH subdivision tree. The encoder clamps the
+        // tolerance to a positive floor so the segment count stays
+        // bounded.
+        let ops = [
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::CubicTo {
+                c1x: 100.0,
+                c1y: 200.0,
+                c2x: 200.0,
+                c2y: -200.0,
+                x: 300.0,
+                y: 0.0,
+            },
+            PathOp::Close,
+        ];
+        let opts = SlugOptions {
+            cubic_tolerance: 0.0,
+            band_count: Some(4),
+        };
+        let g = encode_outline_ops(&ops, &opts).unwrap();
+        // At the minimum clamp (1/64 unit) this curve resolves in well
+        // under 200 segments. Anchor on a conservative bound so future
+        // tightening of the floor doesn't break the assertion — the
+        // important point is that we're not hitting 2^18.
+        assert!(
+            g.segments.len() < 2048,
+            "zero-tolerance cubic exploded: {} segments",
+            g.segments.len()
+        );
+
+        // Negative and NaN tolerances must clamp the same way.
+        let opts_neg = SlugOptions {
+            cubic_tolerance: -1.0,
+            band_count: Some(4),
+        };
+        let g2 = encode_outline_ops(&ops, &opts_neg).unwrap();
+        assert_eq!(g2.segments.len(), g.segments.len());
+
+        let opts_nan = SlugOptions {
+            cubic_tolerance: f32::NAN,
+            band_count: Some(4),
+        };
+        let g3 = encode_outline_ops(&ops, &opts_nan).unwrap();
+        assert_eq!(g3.segments.len(), g.segments.len());
     }
 
     #[test]
