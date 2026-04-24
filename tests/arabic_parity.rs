@@ -22,18 +22,26 @@
 //! - **Arabic + Latin mixed runs** — the Latin half shapes the same
 //!   whether or not Arabic is present in the buffer.
 //!
-//! # What this test does not cover
+//! # Contextual `rlig` coverage
 //!
-//! Amiri's `rlig` feature uses ~40 lookups of GSUB type 5 (Contextual
-//! Substitution) for its Quranic-grade vocalised shaping and for
-//! well-known ligatures like the stand-alone word Allah
-//! (alef-lam-lam-heh → single glyph). sigilbuzz does not yet
-//! implement type 5 or the chained-context lookup flags that gate
-//! those rules, so those specific strings are left out of the parity
-//! corpus. The joining pass itself is spec-correct — positional-only
-//! shaping matches rustybuzz byte-for-byte on every Amiri input we
-//! have tested; divergence begins only when the font's contextual
-//! `rlig` rules want to fire.
+//! Amiri's `rlig` feature is ~40 lookups of GSUB type 5/6 for
+//! Quranic-grade vocalised shaping and well-known ligatures. Many
+//! of those lookups rely on `LookupFlag` skip-iterator semantics —
+//! IgnoreMarks lets the context matcher hop over combining marks
+//! inside the input window. With those bits honoured, two more
+//! probes now match rustybuzz glyph-for-glyph:
+//!
+//! - `al_salaam_matches_rustybuzz` — "al-salaam" exercises the
+//!   alef-lam + sin-lam-alef-mim chain, whose Amiri rules skip
+//!   marks in context.
+//! - `vocalised_marhaba_matches_rustybuzz` — marhaba with combining
+//!   fatha / sukun / kasratan marks, which previously broke rlig's
+//!   IgnoreMarks-gated rules.
+//!
+//! The Allah / bism-Allah forms (`الله`) still diverge between the
+//! two engines. That is a separate bug in the rlig dispatch — rlig
+//! picks a different set of lookup outputs on both sides of the
+//! diff, with no LookupFlag bit involved; tracked outside this PR.
 //!
 //! Byte-identical glyph-id and x_advance agreement is the bar.
 
@@ -195,6 +203,77 @@ fn marhaba_shapes_to_different_glyphs_than_isolated_letters() {
         shaped_ids, isolated,
         "Arabic joining must rewrite at least one glyph id"
     );
+}
+
+/// Diagnostic helper: print the two engines' output side-by-side
+/// for the given string. Called by the Allah/bism-Allah probes to
+/// produce useful failure diagnostics before the assertion runs.
+fn compare_shape(text: &str) -> (Vec<u32>, Vec<u32>, Vec<i32>, Vec<i32>) {
+    let blob = Blob::new(AMIRI);
+    let face = Face::parse(&blob, 0).expect("parse");
+    let font = Font::new(face, 1000.0);
+    let rb_face = rustybuzz::Face::from_slice(AMIRI, 0).expect("rb parse");
+
+    let mut buffer = Buffer::new();
+    buffer.push_str(text);
+    let sig = shape(&font, &buffer, &[]).expect("sig shape");
+
+    let mut rb_buf = rustybuzz::UnicodeBuffer::new();
+    rb_buf.push_str(text);
+    rb_buf.set_direction(RbDirection::RightToLeft);
+    let rb_out = rustybuzz::shape(&rb_face, &[], rb_buf);
+    let rb_ids: Vec<_> = rb_out
+        .glyph_infos()
+        .iter()
+        .rev()
+        .map(|g| g.glyph_id)
+        .collect();
+    let rb_adv: Vec<_> = rb_out
+        .glyph_positions()
+        .iter()
+        .rev()
+        .map(|p| p.x_advance)
+        .collect();
+    let sig_ids: Vec<_> = sig.glyphs.iter().map(|g| g.glyph_id).collect();
+    let sig_adv: Vec<_> = sig.glyphs.iter().map(|g| g.x_advance).collect();
+    (sig_ids, rb_ids, sig_adv, rb_adv)
+}
+
+/// "Al-salaam" (peace). Alef-lam + sin-lam-alef-mim. The sin's
+/// `init` form plus the lam-alef ligature both depend on
+/// IgnoreMarks contexts in rlig — those rules fire only with
+/// LookupFlag skip-iterators honoured.
+#[test]
+fn al_salaam_matches_rustybuzz() {
+    let text = "\u{0627}\u{0644}\u{0633}\u{0644}\u{0627}\u{0645}";
+    assert_parity_on(text);
+}
+
+/// Vocalised marhaba — the same word the smoke test exercises, but
+/// with combining fatha / sukun / kasratan marks. Amiri's rlig
+/// has mark-aware contextual rules that previously failed to
+/// match because our context dispatcher could not skip marks.
+#[test]
+fn vocalised_marhaba_matches_rustybuzz() {
+    // م َ ر ْ ح َ ب ً ا
+    let text = "\u{0645}\u{064E}\u{0631}\u{0652}\u{062D}\u{064E}\u{0628}\u{064B}\u{0627}";
+    assert_parity_on(text);
+}
+
+/// Emits a side-by-side diagnostic comparison for an arbitrary
+/// Amiri string. Useful while bisecting a LookupFlag regression;
+/// kept as a test (rather than a binary) so `cargo test` is the
+/// only invocation needed to print it. Does not assert.
+#[test]
+fn allah_diagnostic_prints_both_engines() {
+    let text = "\u{0627}\u{0644}\u{0644}\u{0647}";
+    let (sig, rb, sig_adv, rb_adv) = compare_shape(text);
+    // Allah still diverges between sigilbuzz and rustybuzz for
+    // reasons unrelated to LookupFlag. Keeping this diagnostic
+    // alive gives a single place to print extra context when
+    // somebody bisects the rlig divergence.
+    eprintln!("allah sig glyphs: {sig:?} advances: {sig_adv:?}");
+    eprintln!("allah rb  glyphs: {rb:?} advances: {rb_adv:?}");
 }
 
 #[test]

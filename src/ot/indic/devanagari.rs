@@ -51,6 +51,7 @@ use alloc::vec::Vec;
 
 use crate::buffer::Glyph;
 use crate::shape::apply_gsub_feature_in_scripts;
+use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 use crate::unicode::indic_category::{
     positional_category, syllabic_category, IndicPositionalCategory, IndicSyllabicCategory,
@@ -65,7 +66,12 @@ use crate::unicode::indic_category::{
 /// reordering. After this function returns, `glyphs` may contain
 /// fewer entries (if basic features applied ligatures) and the
 /// order can differ from input.
-pub fn shape_devanagari(gsub: Option<&Gsub<'_>>, codepoints: &[char], glyphs: &mut Vec<Glyph>) {
+pub fn shape_devanagari(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
     if codepoints.is_empty() || glyphs.is_empty() {
         return;
     }
@@ -98,7 +104,7 @@ pub fn shape_devanagari(gsub: Option<&Gsub<'_>>, codepoints: &[char], glyphs: &m
     // fallback in `lookup_indices_for_feature_in_scripts` kicks in.
     if let Some(gsub) = gsub {
         for tag in INDIC_BASIC_FEATURES {
-            apply_gsub_feature_in_scripts(gsub, glyphs, **tag, 0, DEVA_SCRIPT_PRIORITY);
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, DEVA_SCRIPT_PRIORITY);
         }
     }
 
@@ -116,7 +122,7 @@ pub fn shape_devanagari(gsub: Option<&Gsub<'_>>, codepoints: &[char], glyphs: &m
     // final visual slots.
     if let Some(gsub) = gsub {
         for tag in INDIC_PRESENTATION_FEATURES {
-            apply_gsub_feature_in_scripts(gsub, glyphs, **tag, 0, DEVA_SCRIPT_PRIORITY);
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, DEVA_SCRIPT_PRIORITY);
         }
     }
 }
@@ -616,7 +622,7 @@ mod tests {
         // क ि — reorder but no feature run.
         let cp = cps("\u{0915}\u{093F}");
         let mut glyphs = fake_glyphs(2);
-        shape_devanagari(None, &cp, &mut glyphs);
+        shape_devanagari(None, None, &cp, &mut glyphs);
         assert_eq!(glyphs[0].cluster, 1);
         assert_eq!(glyphs[1].cluster, 0);
     }

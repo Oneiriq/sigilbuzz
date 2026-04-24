@@ -27,6 +27,7 @@
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
+use crate::tables::layout::skip_iter::MatchFilter;
 use crate::tables::layout::{ClassDef, Coverage};
 use crate::tables::parse::Reader;
 
@@ -384,18 +385,45 @@ impl<'a> Context3<'a> {
         &self.lookups
     }
 
-    /// Tests whether the run matches starting at `i`.
+    /// Tests whether the run matches starting at `i`. Pass-through
+    /// filter shorthand.
     #[must_use]
     pub fn matches(&self, glyphs: &[u16], i: usize) -> bool {
-        if i + self.input.len() > glyphs.len() {
-            return false;
+        self.matches_filtered(glyphs, i, &MatchFilter::none())
+            .is_some()
+    }
+
+    /// Filter-aware match: returns the raw span of the match (number
+    /// of glyph positions between the first matched glyph and the
+    /// last matched glyph, inclusive) or `None` when the input
+    /// sequence does not align with `glyphs` starting at `i`.
+    #[must_use]
+    pub fn matches_filtered(
+        &self,
+        glyphs: &[u16],
+        i: usize,
+        filter: &MatchFilter<'_>,
+    ) -> Option<usize> {
+        if self.input.is_empty() {
+            return Some(0);
         }
-        for (j, cov) in self.input.iter().enumerate() {
-            if !cov.contains(glyphs[i + j]) {
-                return false;
+        // First input glyph must be at position `i` (coverage gate —
+        // the caller positioned us here deliberately; we do not skip
+        // the first glyph).
+        if !self.input[0].contains(*glyphs.get(i)?) {
+            return None;
+        }
+        let mut last = i;
+        let mut cursor = i + 1;
+        for cov in &self.input[1..] {
+            let pos = filter.next_unskipped(glyphs, cursor)?;
+            if !cov.contains(glyphs[pos]) {
+                return None;
             }
+            last = pos;
+            cursor = pos + 1;
         }
-        true
+        Some(last - i + 1)
     }
 }
 
@@ -711,26 +739,43 @@ fn parse_chain_class_rule2(data: &[u8]) -> Result<ChainClassRule2> {
 // ---------------------------------------------------------------------
 
 impl Context1<'_> {
-    /// Tries every rule in the ruleset for `glyphs[i]` and returns
-    /// the first match as `(input_len, &lookups)`.
+    /// Tries every rule in the ruleset for `glyphs[i]`. Pass-through
+    /// filter shorthand — equivalent to [`Context1::matches_filtered`]
+    /// with `MatchFilter::none()`.
     #[must_use]
     pub fn matches(&self, glyphs: &[u16], i: usize) -> Option<(usize, &[SequenceLookupRecord])> {
+        self.matches_filtered(glyphs, i, &MatchFilter::none())
+    }
+
+    /// Filter-aware match: walks the input stream via the
+    /// skip-iterator semantics baked into `filter`. Returns the span
+    /// (from the first input glyph to the last, inclusive) in raw
+    /// glyph positions — the dispatcher uses this to advance past
+    /// the whole match region, skipped glyphs included.
+    #[must_use]
+    pub fn matches_filtered(
+        &self,
+        glyphs: &[u16],
+        i: usize,
+        filter: &MatchFilter<'_>,
+    ) -> Option<(usize, &[SequenceLookupRecord])> {
         let first = *glyphs.get(i)?;
         let cov_i = self.coverage.index_of(first)?;
         let set = self.rule_set(cov_i)?;
-        for rule in &set.rules {
-            let input_len = rule.input_tail.len() + 1;
-            if i + input_len > glyphs.len() {
-                continue;
+        'rules: for rule in &set.rules {
+            let mut last = i;
+            let mut cursor = i + 1;
+            for &g in &rule.input_tail {
+                let Some(pos) = filter.next_unskipped(glyphs, cursor) else {
+                    continue 'rules;
+                };
+                if glyphs[pos] != g {
+                    continue 'rules;
+                }
+                last = pos;
+                cursor = pos + 1;
             }
-            if rule
-                .input_tail
-                .iter()
-                .enumerate()
-                .all(|(k, &g)| glyphs[i + 1 + k] == g)
-            {
-                return Some((input_len, &rule.lookups));
-            }
+            return Some((last - i + 1, &rule.lookups));
         }
         None
     }
@@ -738,8 +783,21 @@ impl Context1<'_> {
 
 impl Context2<'_> {
     /// Tries every class rule in the classset for `glyphs[i]`'s class.
+    /// Pass-through filter shorthand.
     #[must_use]
     pub fn matches(&self, glyphs: &[u16], i: usize) -> Option<(usize, &[SequenceLookupRecord])> {
+        self.matches_filtered(glyphs, i, &MatchFilter::none())
+    }
+
+    /// Filter-aware match — see [`Context1::matches_filtered`] for
+    /// the input-span convention.
+    #[must_use]
+    pub fn matches_filtered(
+        &self,
+        glyphs: &[u16],
+        i: usize,
+        filter: &MatchFilter<'_>,
+    ) -> Option<(usize, &[SequenceLookupRecord])> {
         let first = *glyphs.get(i)?;
         // Coverage gates matching. Format 2 stores the coverage for
         // every first glyph that appears in *any* class rule; a glyph
@@ -747,60 +805,82 @@ impl Context2<'_> {
         self.coverage.index_of(first)?;
         let cls = self.class_def.class_of(first);
         let set = self.class_set(cls)?;
-        for rule in &set.rules {
-            let input_len = rule.input_classes_tail.len() + 1;
-            if i + input_len > glyphs.len() {
-                continue;
+        'rules: for rule in &set.rules {
+            let mut last = i;
+            let mut cursor = i + 1;
+            for &c in &rule.input_classes_tail {
+                let Some(pos) = filter.next_unskipped(glyphs, cursor) else {
+                    continue 'rules;
+                };
+                if self.class_def.class_of(glyphs[pos]) != c {
+                    continue 'rules;
+                }
+                last = pos;
+                cursor = pos + 1;
             }
-            if rule
-                .input_classes_tail
-                .iter()
-                .enumerate()
-                .all(|(k, &c)| self.class_def.class_of(glyphs[i + 1 + k]) == c)
-            {
-                return Some((input_len, &rule.lookups));
-            }
+            return Some((last - i + 1, &rule.lookups));
         }
         None
     }
 }
 
 impl ChainContext1<'_> {
-    /// Tries every rule in the ruleset for `glyphs[i]`.
+    /// Tries every rule in the ruleset for `glyphs[i]`. Pass-through
+    /// filter shorthand.
     #[must_use]
     pub fn matches(&self, glyphs: &[u16], i: usize) -> Option<(usize, &[SequenceLookupRecord])> {
+        self.matches_filtered(glyphs, i, &MatchFilter::none())
+    }
+
+    /// Filter-aware match.
+    #[must_use]
+    pub fn matches_filtered(
+        &self,
+        glyphs: &[u16],
+        i: usize,
+        filter: &MatchFilter<'_>,
+    ) -> Option<(usize, &[SequenceLookupRecord])> {
         let first = *glyphs.get(i)?;
         let cov_i = self.coverage.index_of(first)?;
         let set = self.rule_set(cov_i)?;
-        for rule in &set.rules {
-            let input_len = rule.input_tail.len() + 1;
-            if !check_backtrack_glyphs(&rule.backtrack, glyphs, i) {
-                continue;
+        'rules: for rule in &set.rules {
+            // Backtrack — walk left from `i` via prev_unskipped, one
+            // entry per backtrack step.
+            let mut bt_cursor = i;
+            for &g in &rule.backtrack {
+                let Some(pos) = filter.prev_unskipped(glyphs, bt_cursor) else {
+                    continue 'rules;
+                };
+                if glyphs[pos] != g {
+                    continue 'rules;
+                }
+                bt_cursor = pos;
             }
-            if i + input_len > glyphs.len() {
-                continue;
+            // Input tail.
+            let mut last = i;
+            let mut cursor = i + 1;
+            for &g in &rule.input_tail {
+                let Some(pos) = filter.next_unskipped(glyphs, cursor) else {
+                    continue 'rules;
+                };
+                if glyphs[pos] != g {
+                    continue 'rules;
+                }
+                last = pos;
+                cursor = pos + 1;
             }
-            if !rule
-                .input_tail
-                .iter()
-                .enumerate()
-                .all(|(k, &g)| glyphs[i + 1 + k] == g)
-            {
-                continue;
+            // Lookahead — walk right from `last+1`.
+            let mut la_cursor = last + 1;
+            for &g in &rule.lookahead {
+                let Some(pos) = filter.next_unskipped(glyphs, la_cursor) else {
+                    continue 'rules;
+                };
+                if glyphs[pos] != g {
+                    continue 'rules;
+                }
+                la_cursor = pos + 1;
             }
-            let after = i + input_len;
-            if after + rule.lookahead.len() > glyphs.len() {
-                continue;
-            }
-            if !rule
-                .lookahead
-                .iter()
-                .enumerate()
-                .all(|(k, &g)| glyphs[after + k] == g)
-            {
-                continue;
-            }
-            return Some((input_len, &rule.lookups));
+            return Some((last - i + 1, &rule.lookups));
         }
         None
     }
@@ -808,42 +888,59 @@ impl ChainContext1<'_> {
 
 impl ChainContext2<'_> {
     /// Tries every class rule in the classset for `glyphs[i]`'s input class.
+    /// Pass-through filter shorthand.
     #[must_use]
     pub fn matches(&self, glyphs: &[u16], i: usize) -> Option<(usize, &[SequenceLookupRecord])> {
+        self.matches_filtered(glyphs, i, &MatchFilter::none())
+    }
+
+    /// Filter-aware match.
+    #[must_use]
+    pub fn matches_filtered(
+        &self,
+        glyphs: &[u16],
+        i: usize,
+        filter: &MatchFilter<'_>,
+    ) -> Option<(usize, &[SequenceLookupRecord])> {
         let first = *glyphs.get(i)?;
         self.coverage.index_of(first)?;
         let cls = self.input_class.class_of(first);
         let set = self.class_set(cls)?;
-        for rule in &set.rules {
-            let input_len = rule.input_classes_tail.len() + 1;
+        'rules: for rule in &set.rules {
             // Backtrack classes.
-            if !check_backtrack_classes(&rule.backtrack, &self.backtrack_class, glyphs, i) {
-                continue;
+            let mut bt_cursor = i;
+            for &c in &rule.backtrack {
+                let Some(pos) = filter.prev_unskipped(glyphs, bt_cursor) else {
+                    continue 'rules;
+                };
+                if self.backtrack_class.class_of(glyphs[pos]) != c {
+                    continue 'rules;
+                }
+                bt_cursor = pos;
             }
-            if i + input_len > glyphs.len() {
-                continue;
+            let mut last = i;
+            let mut cursor = i + 1;
+            for &c in &rule.input_classes_tail {
+                let Some(pos) = filter.next_unskipped(glyphs, cursor) else {
+                    continue 'rules;
+                };
+                if self.input_class.class_of(glyphs[pos]) != c {
+                    continue 'rules;
+                }
+                last = pos;
+                cursor = pos + 1;
             }
-            if !rule
-                .input_classes_tail
-                .iter()
-                .enumerate()
-                .all(|(k, &c)| self.input_class.class_of(glyphs[i + 1 + k]) == c)
-            {
-                continue;
+            let mut la_cursor = last + 1;
+            for &c in &rule.lookahead {
+                let Some(pos) = filter.next_unskipped(glyphs, la_cursor) else {
+                    continue 'rules;
+                };
+                if self.lookahead_class.class_of(glyphs[pos]) != c {
+                    continue 'rules;
+                }
+                la_cursor = pos + 1;
             }
-            let after = i + input_len;
-            if after + rule.lookahead.len() > glyphs.len() {
-                continue;
-            }
-            if !rule
-                .lookahead
-                .iter()
-                .enumerate()
-                .all(|(k, &c)| self.lookahead_class.class_of(glyphs[after + k]) == c)
-            {
-                continue;
-            }
-            return Some((input_len, &rule.lookups));
+            return Some((last - i + 1, &rule.lookups));
         }
         None
     }
@@ -899,35 +996,62 @@ impl<'a> ChainContext3<'a> {
         &self.lookups
     }
 
-    /// Tests whether the run matches starting at `i`.
+    /// Tests whether the run matches starting at `i`. Pass-through
+    /// filter shorthand.
     #[must_use]
     pub fn matches(&self, glyphs: &[u16], i: usize) -> bool {
-        for (offset, cov) in self.backtrack.iter().enumerate() {
-            let Some(pos) = i.checked_sub(offset + 1) else {
-                return false;
-            };
+        self.matches_filtered(glyphs, i, &MatchFilter::none())
+            .is_some()
+    }
+
+    /// Filter-aware match: returns the raw span of the input match
+    /// (first to last matched glyph, inclusive) or `None` when any
+    /// of the backtrack / input / lookahead coverages fail.
+    #[must_use]
+    pub fn matches_filtered(
+        &self,
+        glyphs: &[u16],
+        i: usize,
+        filter: &MatchFilter<'_>,
+    ) -> Option<usize> {
+        // Backtrack — walk left from `i`.
+        let mut bt_cursor = i;
+        for cov in &self.backtrack {
+            let pos = filter.prev_unskipped(glyphs, bt_cursor)?;
             if !cov.contains(glyphs[pos]) {
-                return false;
+                return None;
             }
+            bt_cursor = pos;
         }
-        if i + self.input.len() > glyphs.len() {
-            return false;
+        // Input — first at position i, rest via next_unskipped.
+        if self.input.is_empty() {
+            // Spec-wise empty input is degenerate; report a zero-span
+            // match so the caller can still advance by one.
+            return Some(0);
         }
-        for (j, cov) in self.input.iter().enumerate() {
-            if !cov.contains(glyphs[i + j]) {
-                return false;
+        if !self.input[0].contains(*glyphs.get(i)?) {
+            return None;
+        }
+        let mut last = i;
+        let mut cursor = i + 1;
+        for cov in &self.input[1..] {
+            let pos = filter.next_unskipped(glyphs, cursor)?;
+            if !cov.contains(glyphs[pos]) {
+                return None;
             }
+            last = pos;
+            cursor = pos + 1;
         }
-        let after = i + self.input.len();
-        if after + self.lookahead.len() > glyphs.len() {
-            return false;
-        }
-        for (j, cov) in self.lookahead.iter().enumerate() {
-            if !cov.contains(glyphs[after + j]) {
-                return false;
+        // Lookahead — walk right from last+1.
+        let mut la_cursor = last + 1;
+        for cov in &self.lookahead {
+            let pos = filter.next_unskipped(glyphs, la_cursor)?;
+            if !cov.contains(glyphs[pos]) {
+                return None;
             }
+            la_cursor = pos + 1;
         }
-        true
+        Some(last - i + 1)
     }
 }
 
@@ -943,41 +1067,6 @@ fn parse_coverage_array<'a>(data: &'a [u8], r: &mut Reader<'_>) -> Result<Vec<Co
         out.push(Coverage::parse(bytes)?);
     }
     Ok(out)
-}
-
-// ---------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------
-
-/// Checks backtrack glyph-id sequence, walking `glyphs[..i]` right-to-left.
-fn check_backtrack_glyphs(backtrack: &[u16], glyphs: &[u16], i: usize) -> bool {
-    for (offset, &g) in backtrack.iter().enumerate() {
-        let Some(pos) = i.checked_sub(offset + 1) else {
-            return false;
-        };
-        if glyphs[pos] != g {
-            return false;
-        }
-    }
-    true
-}
-
-/// Checks backtrack classes via a ClassDef.
-fn check_backtrack_classes(
-    backtrack: &[u16],
-    class_def: &ClassDef<'_>,
-    glyphs: &[u16],
-    i: usize,
-) -> bool {
-    for (offset, &c) in backtrack.iter().enumerate() {
-        let Some(pos) = i.checked_sub(offset + 1) else {
-            return false;
-        };
-        if class_def.class_of(glyphs[pos]) != c {
-            return false;
-        }
-    }
-    true
 }
 
 #[cfg(test)]
@@ -1294,6 +1383,107 @@ mod tests {
         assert!(ctx.matches(&[99, 10, 20, 30], 1).is_none());
         assert!(ctx.matches(&[5, 10, 99, 30], 1).is_none());
         assert!(ctx.matches(&[5, 10, 20, 99], 1).is_none());
+    }
+
+    /// Build a minimal GDEF where each listed glyph has the given class.
+    /// ClassDef format 2 requires sorted ranges — the helper sorts
+    /// the caller's (gid, class) pairs to avoid silent binary-search
+    /// misses.
+    fn build_gdef_with_classes(classes: &[(u16, u16)]) -> alloc::vec::Vec<u8> {
+        let mut sorted: alloc::vec::Vec<(u16, u16)> = classes.to_vec();
+        sorted.sort_by_key(|&(gid, _)| gid);
+        let mut cd = alloc::vec::Vec::new();
+        cd.extend_from_slice(&2u16.to_be_bytes());
+        cd.extend_from_slice(&(sorted.len() as u16).to_be_bytes());
+        for (gid, cls) in &sorted {
+            cd.extend_from_slice(&gid.to_be_bytes());
+            cd.extend_from_slice(&gid.to_be_bytes());
+            cd.extend_from_slice(&cls.to_be_bytes());
+        }
+        let mut gdef = alloc::vec::Vec::new();
+        gdef.extend_from_slice(&1u16.to_be_bytes()); // major
+        gdef.extend_from_slice(&0u16.to_be_bytes()); // minor
+        gdef.extend_from_slice(&12u16.to_be_bytes()); // glyphClassDefOff
+        gdef.extend_from_slice(&[0u8; 6]);
+        gdef.extend_from_slice(&cd);
+        gdef
+    }
+
+    #[test]
+    fn context3_filtered_matches_across_marks() {
+        use crate::tables::gdef::Gdef;
+        use crate::tables::layout::skip_iter::{MatchFilter, LOOKUP_FLAG_IGNORE_MARKS};
+
+        // Input: [cov{5,6}, cov{7}]. Same encoding as the pass-through test.
+        let mut out = Vec::new();
+        out.extend_from_slice(&3u16.to_be_bytes()); // format
+        out.extend_from_slice(&2u16.to_be_bytes()); // glyphCount
+        out.extend_from_slice(&1u16.to_be_bytes()); // lookupCount
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&3u16.to_be_bytes());
+        let cov0_slot = 6;
+        let cov1_slot = 8;
+        let cov0_off = out.len();
+        out.extend_from_slice(&build_coverage_format1(&[5, 6]));
+        let cov1_off = out.len();
+        out.extend_from_slice(&build_coverage_format1(&[7]));
+        out[cov0_slot..cov0_slot + 2].copy_from_slice(&(cov0_off as u16).to_be_bytes());
+        out[cov1_slot..cov1_slot + 2].copy_from_slice(&(cov1_off as u16).to_be_bytes());
+
+        let ctx = Context3::parse(&out).unwrap();
+        // 5 = base, 99 = mark, 7 = base.
+        let gdef_bytes = build_gdef_with_classes(&[(5, 1), (99, 3), (7, 1)]);
+        let gdef = Gdef::parse(&gdef_bytes).unwrap();
+        let filter = MatchFilter::for_lookup(LOOKUP_FLAG_IGNORE_MARKS, Some(&gdef), None);
+
+        // With the filter the mark is hopped over; span covers index 0..=2.
+        assert_eq!(ctx.matches_filtered(&[5, 99, 7], 0, &filter), Some(3));
+        // Without the filter the plain .matches fails at the mark.
+        assert!(!ctx.matches(&[5, 99, 7], 0));
+    }
+
+    #[test]
+    fn chain_context3_filtered_backtrack_skips_marks() {
+        use crate::tables::gdef::Gdef;
+        use crate::tables::layout::skip_iter::{MatchFilter, LOOKUP_FLAG_IGNORE_MARKS};
+
+        // bt=[cov{10}], input=[cov{20}], lookahead=[cov{30}].
+        let mut out = Vec::new();
+        out.extend_from_slice(&3u16.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes()); // bt count
+        out.extend_from_slice(&0u16.to_be_bytes()); // bt slot
+        out.extend_from_slice(&1u16.to_be_bytes()); // in count
+        out.extend_from_slice(&0u16.to_be_bytes()); // in slot
+        out.extend_from_slice(&1u16.to_be_bytes()); // la count
+        out.extend_from_slice(&0u16.to_be_bytes()); // la slot
+        out.extend_from_slice(&1u16.to_be_bytes()); // lookup count
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes());
+        let bt_slot = 4;
+        let in_slot = 8;
+        let la_slot = 12;
+        let bt_off = out.len();
+        out.extend_from_slice(&build_coverage_format1(&[10]));
+        let in_off = out.len();
+        out.extend_from_slice(&build_coverage_format1(&[20]));
+        let la_off = out.len();
+        out.extend_from_slice(&build_coverage_format1(&[30]));
+        out[bt_slot..bt_slot + 2].copy_from_slice(&(bt_off as u16).to_be_bytes());
+        out[in_slot..in_slot + 2].copy_from_slice(&(in_off as u16).to_be_bytes());
+        out[la_slot..la_slot + 2].copy_from_slice(&(la_off as u16).to_be_bytes());
+
+        let ctx = ChainContext3::parse(&out).unwrap();
+        // GDEF: 10=base, 99=mark, 20=base, 30=base.
+        let gdef_bytes = build_gdef_with_classes(&[(10, 1), (99, 3), (20, 1), (30, 1)]);
+        let gdef = Gdef::parse(&gdef_bytes).unwrap();
+        let filter = MatchFilter::for_lookup(LOOKUP_FLAG_IGNORE_MARKS, Some(&gdef), None);
+
+        // [10, 99, 20, 30] — plain matcher fails on the mark in backtrack (i=2).
+        assert!(!ctx.matches(&[10, 99, 20, 30], 2));
+        // With the filter, the mark is skipped and the match fires.
+        assert_eq!(ctx.matches_filtered(&[10, 99, 20, 30], 2, &filter), Some(1));
     }
 
     #[test]

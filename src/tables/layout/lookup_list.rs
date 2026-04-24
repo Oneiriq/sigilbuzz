@@ -19,11 +19,8 @@
 //! can handle them in its own module.
 
 use crate::error::{Error, Result};
+use crate::tables::layout::skip_iter::LOOKUP_FLAG_USE_MARK_FILTERING_SET;
 use crate::tables::parse::Reader;
-
-/// `lookupFlag` bit that indicates the presence of a trailing
-/// `markFilteringSet` u16.
-pub const LOOKUP_FLAG_USE_MARK_FILTERING_SET: u16 = 0x0010;
 
 /// Parsed `LookupList`.
 #[derive(Debug, Clone, Copy)]
