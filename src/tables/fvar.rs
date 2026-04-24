@@ -72,8 +72,25 @@ impl VariationAxis {
     /// the OpenType spec. Values outside `[min, max]` clamp to
     /// `-1.0` / `1.0` respectively. The default value maps to
     /// `0.0`, with a piecewise-linear ramp to either endpoint.
+    ///
+    /// Malformed fvar inputs — `min > max`, a `NaN` bound, or a
+    /// `NaN` user value — return `0.0` (the default instance) rather
+    /// than panicking; `f32::clamp` has a documented panic contract
+    /// on inverted or non-finite bounds that would otherwise bubble
+    /// up into the shape pipeline.
     #[must_use]
     pub fn normalize(&self, user: f32) -> f32 {
+        // Refuse to run the comparison pipeline on any non-finite
+        // bound or inverted range — `f32::clamp` panics in those
+        // cases, and the rest of the function would divide by NaN.
+        if !self.min_value.is_finite()
+            || !self.default_value.is_finite()
+            || !self.max_value.is_finite()
+            || self.min_value > self.max_value
+            || user.is_nan()
+        {
+            return 0.0;
+        }
         let clamped = user.clamp(self.min_value, self.max_value);
         if clamped < self.default_value {
             let denom = self.default_value - self.min_value;
@@ -302,5 +319,51 @@ mod tests {
         let mut bytes = build_fvar(&[]);
         bytes[0..2].copy_from_slice(&2u16.to_be_bytes());
         assert!(matches!(Fvar::parse(&bytes), Err(Error::Malformed { .. })));
+    }
+
+    #[test]
+    fn normalize_with_inverted_range_returns_zero_not_panic() {
+        // A malformed axis with `min_value > max_value` would make
+        // `f32::clamp` panic with its documented "min > max" contract.
+        // The fvar parser does not validate axis ranges, so a user who
+        // loads such a font would crash the shape pipeline on the
+        // first call to `normalize_coords`. Ensure we fall back to 0
+        // (the default instance) instead.
+        let axis = VariationAxis {
+            tag: *b"wght",
+            min_value: 900.0,
+            default_value: 400.0,
+            max_value: 100.0,
+            flags: 0,
+            axis_name_id: 0,
+        };
+        assert!((axis.normalize(500.0) - 0.0).abs() < f32::EPSILON);
+        assert!((axis.normalize(1000.0) - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn normalize_with_nan_bounds_returns_zero_not_panic() {
+        let axis = VariationAxis {
+            tag: *b"wght",
+            min_value: f32::NAN,
+            default_value: 400.0,
+            max_value: 900.0,
+            flags: 0,
+            axis_name_id: 0,
+        };
+        assert!((axis.normalize(500.0) - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn normalize_with_nan_user_value_returns_zero() {
+        let axis = VariationAxis {
+            tag: *b"wght",
+            min_value: 100.0,
+            default_value: 400.0,
+            max_value: 900.0,
+            flags: 0,
+            axis_name_id: 0,
+        };
+        assert!((axis.normalize(f32::NAN) - 0.0).abs() < f32::EPSILON);
     }
 }
