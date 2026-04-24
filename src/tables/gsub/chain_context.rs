@@ -44,6 +44,7 @@
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
+use crate::tables::layout::skip_iter::MatchFilter;
 use crate::tables::layout::Coverage;
 use crate::tables::parse::Reader;
 
@@ -131,43 +132,72 @@ impl<'a> ChainContext<'a> {
 
     /// Tests whether the run matches starting at input position
     /// `i`. Returns `true` when backtrack, input, and lookahead
-    /// coverages all line up. Does not modify anything — callers
-    /// run the nested lookups when this returns true.
-    ///
-    /// `glyphs[i..]` is the forward view; the backtrack walks
-    /// `glyphs[..i]` from the right.
+    /// coverages all line up. Pass-through shorthand for
+    /// [`ChainContext::matches_filtered`] with
+    /// [`MatchFilter::none`].
     #[must_use]
     pub fn matches(&self, glyphs: &[u16], i: usize) -> bool {
-        // Backtrack — iterate in spec order (first record = closest
-        // preceding glyph).
-        for (offset, cov) in self.backtrack.iter().enumerate() {
-            let Some(pos) = i.checked_sub(offset + 1) else {
-                return false;
-            };
+        self.matches_filtered(glyphs, i, &MatchFilter::none())
+            .is_some()
+    }
+
+    /// Filter-aware match. Returns the raw span of the input window
+    /// (first to last matched glyph, inclusive) or `None` when any
+    /// of the three coverage arrays fails to align. The backtrack
+    /// and lookahead steps honour the skip-iterator semantics of
+    /// the active `LookupFlag` — skipped glyphs (typically marks)
+    /// between two matched backtrack positions do not block the
+    /// match.
+    #[must_use]
+    pub fn matches_filtered(
+        &self,
+        glyphs: &[u16],
+        i: usize,
+        filter: &MatchFilter<'_>,
+    ) -> Option<usize> {
+        // Backtrack.
+        let mut bt_cursor = i;
+        for cov in &self.backtrack {
+            let pos = filter.prev_unskipped(glyphs, bt_cursor)?;
             if !cov.contains(glyphs[pos]) {
-                return false;
+                return None;
             }
+            bt_cursor = pos;
         }
-        // Input.
-        if i + self.input.len() > glyphs.len() {
-            return false;
-        }
-        for (j, cov) in self.input.iter().enumerate() {
-            if !cov.contains(glyphs[i + j]) {
-                return false;
+        // Input. Empty input is a zero-width assertion — fall
+        // through to lookahead using the caller's anchor position.
+        let (last, after) = if self.input.is_empty() {
+            (i, i)
+        } else {
+            if !self.input[0].contains(*glyphs.get(i)?) {
+                return None;
             }
-        }
+            let mut last = i;
+            let mut cursor = i + 1;
+            for cov in &self.input[1..] {
+                let pos = filter.next_unskipped(glyphs, cursor)?;
+                if !cov.contains(glyphs[pos]) {
+                    return None;
+                }
+                last = pos;
+                cursor = pos + 1;
+            }
+            (last, last + 1)
+        };
         // Lookahead.
-        let after = i + self.input.len();
-        if after + self.lookahead.len() > glyphs.len() {
-            return false;
-        }
-        for (j, cov) in self.lookahead.iter().enumerate() {
-            if !cov.contains(glyphs[after + j]) {
-                return false;
+        let mut la_cursor = after;
+        for cov in &self.lookahead {
+            let pos = filter.next_unskipped(glyphs, la_cursor)?;
+            if !cov.contains(glyphs[pos]) {
+                return None;
             }
+            la_cursor = pos + 1;
         }
-        true
+        if self.input.is_empty() {
+            Some(0)
+        } else {
+            Some(last - i + 1)
+        }
     }
 }
 
