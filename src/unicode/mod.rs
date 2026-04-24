@@ -162,11 +162,9 @@ pub const fn script_of(ch: char) -> Script {
         // The USE routing in shape.rs only triggers for the Jamo
         // ranges; precomposed syllables flow through the default
         // pipeline — matches HarfBuzz / rustybuzz.
-        0x1100..=0x11FF
-        | 0xA960..=0xA97F
-        | 0xAC00..=0xD7A3
-        | 0xD7B0..=0xD7FF
-        | 0x3130..=0x318F => Script::Hangul,
+        0x1100..=0x11FF | 0xA960..=0xA97F | 0xAC00..=0xD7A3 | 0xD7B0..=0xD7FF | 0x3130..=0x318F => {
+            Script::Hangul
+        }
         // Khmer + Khmer Symbols
         0x1780..=0x17FF | 0x19E0..=0x19FF => Script::Khmer,
         // CJK unified ideographs + extensions A/B + Hiragana + Katakana

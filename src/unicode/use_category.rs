@@ -138,7 +138,13 @@ pub const fn use_position(ch: char) -> UsePosition {
         //   positional role in the USE tables — they attach as
         //   consonant modifiers and the font chooses their visual
         //   position via GSUB.
-        0x102B | 0x102C | 0x1056 | 0x1057 | 0x1062..=0x1064 | 0x1067..=0x1068 | 0x1083..=0x1084
+        0x102B
+        | 0x102C
+        | 0x1056
+        | 0x1057
+        | 0x1062..=0x1064
+        | 0x1067..=0x1068
+        | 0x1083..=0x1084
         | 0x109C => UsePosition::PostBase,
         0x102D
         | 0x102E
