@@ -109,12 +109,14 @@ pub const fn use_position(ch: char) -> UsePosition {
     let cp = ch as u32;
     match cp {
         // --- Khmer dependent vowel signs --------------------------
-        0x17B6 => UsePosition::PostBase, // sign aa
-        0x17B7 | 0x17B8 | 0x17B9 | 0x17BA => UsePosition::AboveBase, // i/ii/y/yy
-        0x17BB | 0x17BC | 0x17BD => UsePosition::BelowBase, // u/uu/ua
-        0x17BE | 0x17BF | 0x17C0 => UsePosition::AboveBase, // oe/ya/ie (above glyph anchor)
-        0x17C1 | 0x17C2 | 0x17C3 => UsePosition::PreBase,   // e/ai/am-prefix
-        0x17C4 | 0x17C5 => UsePosition::PostBase,           // oo/au
+        // PostBase: 17B6 sign aa, 17C4/17C5 signs oo/au
+        // AboveBase: 17B7..17BA (i/ii/y/yy) and 17BE..17C0 (oe/ya/ie)
+        // BelowBase: 17BB..17BD (u/uu/ua)
+        // PreBase:   17C1..17C3 (e/ai/am-prefix)
+        0x17B6 | 0x17C4 | 0x17C5 => UsePosition::PostBase,
+        0x17B7..=0x17BA | 0x17BE..=0x17C0 => UsePosition::AboveBase,
+        0x17BB..=0x17BD => UsePosition::BelowBase,
+        0x17C1..=0x17C3 => UsePosition::PreBase,
 
         // Currency + signs — no positional role (the currency is a
         // base glyph itself).
@@ -145,61 +147,45 @@ pub const fn use_category(ch: char) -> UseCategory {
         0x200C => UseCategory::ZWNJ,
         0x200D => UseCategory::ZWJ,
         0xFE00..=0xFE0F | 0xE0100..=0xE01EF => UseCategory::VS,
-        0x25CC => UseCategory::GB,
 
-        // --- Khmer block (U+1780..U+17FF) -------------------------
-        //
-        // Consonants: U+1780..U+17A2 ka..ha. All are USE bases.
-        0x1780..=0x17A2 => UseCategory::B,
-        // U+17A3 / U+17A4 — deprecated inherent-vowel consonants.
-        // Treated as bases for shaping (rustybuzz parity).
-        0x17A3 | 0x17A4 => UseCategory::B,
+        // --- Bases ------------------------------------------------
+        // Khmer consonants (U+1780..U+17A4, incl. deprecated inherent-
+        // vowel consonants 17A3 / 17A4 which rustybuzz still treats
+        // as bases) plus U+17DC avakrahasanya.
+        0x1780..=0x17A4 | 0x17DC => UseCategory::B,
         // Independent vowels U+17A5..U+17B3.
         0x17A5..=0x17B3 => UseCategory::IV,
-        // U+17B4, U+17B5 inherent vowel signs — generic base.
-        0x17B4 | 0x17B5 => UseCategory::GB,
-        // Dependent vowel signs.
-        //
-        // Categorisation by position:
-        //   VPst (post-base):  U+17B6, U+17C4, U+17C5
-        //   VAbv (above-base): U+17B7, U+17B8, U+17B9, U+17BA,
-        //                       U+17BE, U+17BF, U+17C0
-        //   VBlw (below-base): U+17BB, U+17BC, U+17BD
-        //   VPre (pre-base):   U+17C1, U+17C2, U+17C3
+        // --- Generic bases ----------------------------------------
+        // Dotted circle, Khmer inherent-vowel signs (17B4/17B5), the
+        // riel currency (17DB), and the Khmer Symbols block.
+        0x25CC | 0x17B4..=0x17B5 | 0x17DB | 0x19E0..=0x19FF => UseCategory::GB,
+        // --- Dependent vowel signs, grouped by visual position. ---
+        //   VPst (post-base):  17B6, 17C4, 17C5
+        //   VAbv (above-base): 17B7..17BA and 17BE..17C0
+        //   VBlw (below-base): 17BB..17BD
+        //   VPre (pre-base):   17C1..17C3
         0x17B6 | 0x17C4 | 0x17C5 => UseCategory::VPst,
         0x17B7..=0x17BA | 0x17BE..=0x17C0 => UseCategory::VAbv,
         0x17BB..=0x17BD => UseCategory::VBlw,
         0x17C1..=0x17C3 => UseCategory::VPre,
-        // Khmer sign nikahit / reahmuk / yuukaleapintu / muusikatoan
-        // / triisap / bantoc / robat — modifier marks and registers.
-        0x17C6 => UseCategory::FM, // sign nikahit (above)
-        0x17C7 | 0x17C8 => UseCategory::FM, // sign reahmuk, sign yuukaleapintu
-        0x17C9 | 0x17CA => UseCategory::M,  // muusikatoan, triisap (register shifters)
-        0x17CB => UseCategory::M,           // bantoc
-        0x17CC => UseCategory::M,           // robat (above)
-        0x17CD => UseCategory::M,           // toandakhiat
-        0x17CE => UseCategory::M,           // kakabat
-        0x17CF => UseCategory::M,           // ahsda
-        0x17D0 => UseCategory::M,           // samyok sannya
-        0x17D1 => UseCategory::M,           // viriam (kills inherent vowel)
-        // Coeng — the Khmer virama / subscript-joiner.
+        // --- Final marks ------------------------------------------
+        // Nikahit, reahmuk, yuukaleapintu — syllable-final.
+        0x17C6..=0x17C8 => UseCategory::FM,
+        // --- Modifying marks --------------------------------------
+        // Register shifters (muusikatoan, triisap), bantoc, robat,
+        // toandakhiat, kakabat, ahsda, samyok sannya, viriam,
+        // bathamasat, lek too, atthacan.
+        0x17C9..=0x17D1 | 0x17D3 | 0x17D7 | 0x17DD => UseCategory::M,
+        // --- Coeng — the Khmer virama / subscript-joiner. ---------
         0x17D2 => UseCategory::H,
-        0x17D3 => UseCategory::M, // bathamasat
-        // U+17D4..U+17D6 are punctuation (khan, bariyoosan, camnuc).
-        0x17D4..=0x17D6 => UseCategory::O,
-        0x17D7 => UseCategory::M,  // lek too — iteration mark
-        0x17D8..=0x17DA => UseCategory::O, // punctuation
-        0x17DB => UseCategory::GB, // currency riel
-        0x17DC => UseCategory::B,  // avakrahasanya — base-like
-        0x17DD => UseCategory::M,  // atthacan — above
-        0x17E0..=0x17E9 => UseCategory::N, // Khmer digits
-        0x17F0..=0x17F9 => UseCategory::N, // Khmer numerals for divination
-
-        // --- Khmer Symbols block (U+19E0..U+19FF) -----------------
-        //
-        // Lunar-date symbols — all generic bases (they render as
-        // standalone ideograph-like glyphs).
-        0x19E0..=0x19FF => UseCategory::GB,
+        // Khmer punctuation (17D4..17D6 khan/bariyoosan/camnuc and
+        // 17D8..17DA beyyal/phnaek/koomuut) falls through the
+        // wildcard below to UseCategory::O — a match arm here would
+        // be identical to the fallback, so we keep the dispatch
+        // lean.
+        // --- Numbers ----------------------------------------------
+        // Khmer digits + Khmer numerals for divination.
+        0x17E0..=0x17E9 | 0x17F0..=0x17F9 => UseCategory::N,
 
         _ => UseCategory::O,
     }

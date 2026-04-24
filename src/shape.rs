@@ -165,6 +165,28 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let mut has_devanagari = false;
     let mut has_khmer = false;
     for (cluster, ch) in text.char_indices() {
+        // Khmer split-vowel decomposition. HarfBuzz's USE
+        // preprocessing hook splits U+17C4 / U+17C5 into a
+        // pre-base component (sign-e) and a post-base component
+        // (sign-aa / sign-au) so the syllable machine can see the
+        // pre-base part directly. sigilbuzz does it at codepoint
+        // push time, before the cmap lookup, so the rest of the
+        // pipeline never sees the composed form.
+        if matches!(ch, '\u{17C4}' | '\u{17C5}') {
+            let (pre, post) = if ch == '\u{17C4}' {
+                ('\u{17C1}', '\u{17B6}')
+            } else {
+                ('\u{17C1}', '\u{17B7}')
+            };
+            for &component in &[pre, post] {
+                let gid = u32::from(cmap.glyph_id(component).unwrap_or(0));
+                let glyph = Glyph::new(gid, cluster as u32);
+                glyphs.push(glyph);
+                codepoints.push(component);
+            }
+            has_khmer = true;
+            continue;
+        }
         let glyph_id = if is_default_ignorable(ch) {
             space_gid
         } else {
