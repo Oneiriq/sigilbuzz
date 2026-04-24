@@ -274,10 +274,29 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // state machine sees the pre-substitution sequence (correct per
     // spec: joining is decided on codepoints, not glyphs).
     let has_arabic = codepoints.iter().any(|&c| script_of(c) == Script::Arabic);
+    let has_hebrew = codepoints.iter().any(|&c| script_of(c) == Script::Hebrew);
     let arabic_forms: Vec<JoiningForm> = if has_arabic {
         assign_joining_forms(text)
     } else {
         Vec::new()
+    };
+
+    // Compute the script-tag priority for every default feature
+    // dispatch in this call. Arabic fonts resolve their positional
+    // lookups under `arab`; Hebrew fonts resolve niqqud / cantillation
+    // mark anchors under `hebr`. Anything else falls through to DFLT
+    // — which is what every Latin-era font ships under.
+    //
+    // When a run mixes scripts we prefer the complex-script tag so
+    // the script-specific lookups still fire on the relevant glyphs;
+    // the DFLT fallback inside `apply_*_feature_in_scripts` catches
+    // the Latin half.
+    let script_priority: &[[u8; 4]] = if has_arabic {
+        &[*b"arab", *b"DFLT"]
+    } else if has_hebrew {
+        &[*b"hebr", *b"DFLT"]
+    } else {
+        &[*b"DFLT"]
     };
 
     // Step 2: GSUB passes. Default-on features mirror HarfBuzz's
@@ -311,7 +330,14 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             // ccmp must run before positional features so any
             // composition/decomposition has settled first.
             if !feature_disabled(features, *b"ccmp") {
-                apply_gsub_feature(gsub, &mut glyphs, gdef.as_ref(), *b"ccmp", 0, true);
+                apply_gsub_feature(
+                    gsub,
+                    &mut glyphs,
+                    gdef.as_ref(),
+                    *b"ccmp",
+                    0,
+                    script_priority,
+                );
             }
             apply_arabic_positional_features(gsub, &mut glyphs, gdef.as_ref(), &arabic_forms);
         }
@@ -322,7 +348,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             features,
             want_liga,
             is_vertical,
-            has_arabic,
+            script_priority,
             has_arabic && !arabic_forms.is_empty(),
         );
     }
@@ -431,7 +457,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 &mut glyphs,
                 gdef.as_ref(),
                 *b"kern",
-                has_arabic,
+                script_priority,
                 &var,
             ),
             None => false,
@@ -454,10 +480,24 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             );
         }
         if !feature_disabled(features, *b"mark") {
-            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"mark", has_arabic, &var);
+            apply_gpos_feature(
+                gpos,
+                &mut glyphs,
+                gdef.as_ref(),
+                *b"mark",
+                script_priority,
+                &var,
+            );
         }
         if !feature_disabled(features, *b"mkmk") {
-            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), *b"mkmk", has_arabic, &var);
+            apply_gpos_feature(
+                gpos,
+                &mut glyphs,
+                gdef.as_ref(),
+                *b"mkmk",
+                script_priority,
+                &var,
+            );
         }
         // User-enabled features beyond the defaults flow through the
         // same dispatch. Skip tags already handled above so they do
@@ -469,7 +509,14 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             if matches!(&feat.tag, b"kern" | b"mark" | b"mkmk" | b"liga") {
                 continue;
             }
-            apply_gpos_feature(gpos, &mut glyphs, gdef.as_ref(), feat.tag, has_arabic, &var);
+            apply_gpos_feature(
+                gpos,
+                &mut glyphs,
+                gdef.as_ref(),
+                feat.tag,
+                script_priority,
+                &var,
+            );
         }
     }
 
@@ -521,7 +568,7 @@ const fn is_default_ignorable(ch: char) -> bool {
 /// sigilbuzz follows suit. User-enabled features beyond that list
 /// are dispatched afterwards, respecting their 1-indexed
 /// alternate-selector value.
-#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn run_default_gsub(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
@@ -529,25 +576,25 @@ fn run_default_gsub(
     features: &[Feature],
     want_liga: bool,
     is_vertical: bool,
-    prefer_arabic_script: bool,
+    script_priority: &[[u8; 4]],
     arabic_positional_already_ran: bool,
 ) {
     // ccmp already ran before the Arabic positional pass; avoid
     // double-applying it here.
     if !arabic_positional_already_ran && !feature_disabled(features, *b"ccmp") {
-        apply_gsub_feature(gsub, glyphs, gdef, *b"ccmp", 0, prefer_arabic_script);
+        apply_gsub_feature(gsub, glyphs, gdef, *b"ccmp", 0, script_priority);
     }
     if !feature_disabled(features, *b"rlig") {
-        apply_gsub_feature(gsub, glyphs, gdef, *b"rlig", 0, prefer_arabic_script);
+        apply_gsub_feature(gsub, glyphs, gdef, *b"rlig", 0, script_priority);
     }
     if want_liga {
-        apply_gsub_feature(gsub, glyphs, gdef, *b"liga", 0, prefer_arabic_script);
+        apply_gsub_feature(gsub, glyphs, gdef, *b"liga", 0, script_priority);
     }
     if !feature_disabled(features, *b"clig") {
-        apply_gsub_feature(gsub, glyphs, gdef, *b"clig", 0, prefer_arabic_script);
+        apply_gsub_feature(gsub, glyphs, gdef, *b"clig", 0, script_priority);
     }
     if !feature_disabled(features, *b"calt") {
-        apply_gsub_feature(gsub, glyphs, gdef, *b"calt", 0, prefer_arabic_script);
+        apply_gsub_feature(gsub, glyphs, gdef, *b"calt", 0, script_priority);
     }
     // Vertical writing: HarfBuzz auto-enables `vrt2` when the font
     // carries it, otherwise falls back to `vert`. The two tags
@@ -556,9 +603,9 @@ fn run_default_gsub(
     if is_vertical {
         let has_vrt2 = feature_present(gsub, *b"vrt2");
         if has_vrt2 && !feature_disabled(features, *b"vrt2") {
-            apply_gsub_feature(gsub, glyphs, gdef, *b"vrt2", 0, prefer_arabic_script);
+            apply_gsub_feature(gsub, glyphs, gdef, *b"vrt2", 0, script_priority);
         } else if !feature_disabled(features, *b"vert") {
-            apply_gsub_feature(gsub, glyphs, gdef, *b"vert", 0, prefer_arabic_script);
+            apply_gsub_feature(gsub, glyphs, gdef, *b"vert", 0, script_priority);
         }
     }
     for feat in features {
@@ -569,14 +616,7 @@ fn run_default_gsub(
             continue;
         }
         let alternate_idx = (feat.value.saturating_sub(1)).min(u32::from(u16::MAX)) as u16;
-        apply_gsub_feature(
-            gsub,
-            glyphs,
-            gdef,
-            feat.tag,
-            alternate_idx,
-            prefer_arabic_script,
-        );
+        apply_gsub_feature(gsub, glyphs, gdef, feat.tag, alternate_idx, script_priority);
     }
 }
 
@@ -622,18 +662,15 @@ pub(crate) fn apply_gsub_feature(
     gdef: Option<&Gdef<'_>>,
     tag: [u8; 4],
     alternate_index: u16,
-    prefer_arabic_script: bool,
+    script_priority: &[[u8; 4]],
 ) {
-    // Arabic runs resolve features from the `arab` LangSys first so
-    // positional features (init/medi/fina/isol) hit the Arabic-
-    // specific lookup tables. Non-Arabic runs keep the original
-    // DFLT-only behaviour.
-    let priority: &[[u8; 4]] = if prefer_arabic_script {
-        &[*b"arab", *b"DFLT"]
-    } else {
-        &[*b"DFLT"]
-    };
-    apply_gsub_feature_in_scripts(gsub, glyphs, gdef, tag, alternate_index, priority);
+    // Callers resolve the priority from run analysis: `arab > DFLT`
+    // for Arabic, `hebr > DFLT` for Hebrew, `dev2 > deva > DFLT` for
+    // Devanagari, plain `DFLT` otherwise. The script-priority walker
+    // inside `apply_gsub_feature_in_scripts` falls back when the
+    // preferred script does not carry the feature, so mixed-script
+    // runs still find the lookup under DFLT.
+    apply_gsub_feature_in_scripts(gsub, glyphs, gdef, tag, alternate_index, script_priority);
 }
 
 /// Same as [`apply_gsub_feature`] but walks the supplied script-tag
@@ -1452,15 +1489,10 @@ fn apply_gpos_feature(
     glyphs: &mut [Glyph],
     gdef: Option<&Gdef<'_>>,
     tag: [u8; 4],
-    prefer_arabic_script: bool,
+    script_priority: &[[u8; 4]],
     var: &VarCtx<'_>,
 ) -> bool {
-    let priority: &[[u8; 4]] = if prefer_arabic_script {
-        &[*b"arab", *b"DFLT"]
-    } else {
-        &[*b"DFLT"]
-    };
-    apply_gpos_feature_in_scripts_with_var(gpos, glyphs, gdef, tag, priority, var)
+    apply_gpos_feature_in_scripts_with_var(gpos, glyphs, gdef, tag, script_priority, var)
 }
 
 /// Script-priority variant of [`apply_gpos_feature`]. Matches the
