@@ -472,14 +472,7 @@ mod tests {
 
     fn fake_glyphs(n: usize) -> Vec<Glyph> {
         (0..n)
-            .map(|i| Glyph {
-                glyph_id: i as u32 + 1,
-                cluster: i as u32,
-                x_advance: 0,
-                y_advance: 0,
-                x_offset: 0,
-                y_offset: 0,
-            })
+            .map(|i| Glyph::new(i as u32 + 1, i as u32))
             .collect()
     }
 
