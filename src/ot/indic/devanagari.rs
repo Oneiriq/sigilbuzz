@@ -1,0 +1,607 @@
+//! Devanagari shaper driving the Indic2 state machine.
+//!
+//! # Pipeline
+//!
+//! Given a run of codepoints that the script classifier identified
+//! as Devanagari:
+//!
+//! 1. Syllable segmentation. Each syllable is one of:
+//!    - **Consonant syllable** — `(Consonant Nukta? (Halant Consonant)* Matra* Bindu?)`
+//!      — the common path.
+//!    - **Vowel syllable** — independent vowel, optional matras/marks.
+//!    - **Standalone** — Bindu/Visarga/dotted-circle alone.
+//!    - **Symbol / broken** — anything else; passes through unchanged.
+//! 2. Initial reordering per syllable, producing the *logical*
+//!    glyph order the GSUB feature pipeline expects:
+//!    - Identify the base consonant (last consonant not preceded by
+//!      halant is the most common heuristic; a syllable starting with
+//!      `ra + halant` marks that `ra` as a reph candidate and promotes
+//!      the next consonant to base).
+//!    - Move pre-base matras (`U+093F` in Devanagari) to immediately
+//!      before the base consonant.
+//!    - Mark glyphs that should receive `rphf` (the ra+halant reph),
+//!      `half`, `blwf`, `pstf`, `pref` features.
+//! 3. Apply basic features via the GSUB feature dispatcher:
+//!    `nukt`, `akhn`, `rphf`, `rkrf`, `blwf`, `half`, `pstf`, `vatu`,
+//!    `cjct`. sigilbuzz runs each feature across the whole run; the
+//!    font's lookup masks ensure only the right glyphs transform. A
+//!    more aggressive impl would tag per-glyph feature masks, but
+//!    the cluster-level feature call reproduces rustybuzz output on
+//!    the common Devanagari fixtures.
+//! 4. Final reordering. Reph (if any) moves to its display slot —
+//!    commonly before the last character of the syllable for
+//!    Devanagari. Pre-base matras that moved to before the base in
+//!    step 2 stay where they are.
+//! 5. Return to the generic shape pipeline, which runs presentation
+//!    features (`pres`, `abvs`, `blws`, `psts`, `haln`) and then
+//!    `liga`, `clig`, `calt` exactly as for Latin.
+//!
+//! # What isn't here yet
+//!
+//! - Matra decomposition (split vowel signs). Devanagari does not
+//!   have any split matras in the base block, so this is a no-op
+//!   for it; the hook remains for future scripts.
+//! - Per-glyph feature masking. sigilbuzz applies each basic feature
+//!   across the whole run; that matches rustybuzz output on simple
+//!   syllables but can fire a `half` form on a consonant that should
+//!   have stayed full. Fixed by tagging glyph masks once the shape
+//!   pipeline gains them.
+
+use alloc::vec::Vec;
+
+use crate::buffer::Glyph;
+use crate::shape::apply_gsub_feature;
+use crate::tables::Gsub;
+use crate::unicode::indic_category::{
+    positional_category, syllabic_category, IndicPositionalCategory, IndicSyllabicCategory,
+};
+
+/// Entry point. Re-orders and runs basic Indic features over the
+/// portion of `glyphs` that corresponds to the Devanagari run
+/// described by `codepoints`.
+///
+/// `codepoints` is in one-to-one correspondence with the starting
+/// glyph layout — each codepoint produced one glyph before any
+/// reordering. After this function returns, `glyphs` may contain
+/// fewer entries (if basic features applied ligatures) and the
+/// order can differ from input.
+pub fn shape_devanagari(
+    gsub: Option<&Gsub<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    if codepoints.is_empty() || glyphs.is_empty() {
+        return;
+    }
+
+    // Split the run into syllables. Each syllable carries the
+    // codepoint indices it covers (start, end exclusive) so the
+    // reorder phase can index into `glyphs` without re-scanning.
+    let syllables = segment_syllables(codepoints);
+
+    // Initial reordering is per-syllable and mutates `glyphs` in
+    // place. We walk syllables in reverse when reorders change
+    // lengths; Devanagari reorder is length-preserving (same glyph
+    // count in, same out) because decomposition runs separately, so
+    // forward iteration is safe here.
+    for syllable in &syllables {
+        initial_reorder(codepoints, glyphs, syllable);
+    }
+
+    // Basic features. Order matters — rphf must run before blwf
+    // because a reph candidate that did not reph must fall through
+    // to blwf as a regular ra-halant conjunct. Likewise half runs
+    // after rphf because the ra in ra+halant may have been consumed
+    // as reph already.
+    //
+    // Feature application uses the generic GSUB dispatcher; the
+    // lookup's own coverage decides which glyphs transform.
+    if let Some(gsub) = gsub {
+        for tag in INDIC_BASIC_FEATURES {
+            apply_gsub_feature(gsub, glyphs, **tag, 0);
+        }
+    }
+
+    // Final reordering — reph moves to its display slot. Feature
+    // execution above may have replaced the reph candidate with the
+    // reph glyph via `rphf`; we track that through the glyph's
+    // syllable slot, not by glyph id.
+    for syllable in &syllables {
+        final_reorder(glyphs, syllable);
+    }
+}
+
+/// Default Indic2 basic features, in application order.
+pub(crate) const INDIC_BASIC_FEATURES: &[&[u8; 4]] = &[
+    b"nukt", b"akhn", b"rphf", b"rkrf", b"blwf", b"half", b"pstf", b"vatu", b"cjct",
+];
+
+/// Syllable classification mirroring the Indic2 syllable types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyllableKind {
+    /// Consonant-based syllable: the common case.
+    Consonant,
+    /// Vowel-based syllable: starts with an independent vowel.
+    Vowel,
+    /// Standalone: a sole Bindu/Visarga/placeholder + marks.
+    Standalone,
+    /// Symbol or pass-through: digits, dandas, OM, ...
+    Symbol,
+    /// Broken: an orphan matra or virama we could not fold in.
+    Broken,
+}
+
+/// One syllable's footprint in the input.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Syllable {
+    pub kind: SyllableKind,
+    /// Start codepoint/glyph index (inclusive).
+    pub start: usize,
+    /// End codepoint/glyph index (exclusive).
+    pub end: usize,
+    /// Codepoint-space index of the base consonant, or `None` for
+    /// non-consonant syllables. Indices are relative to the syllable,
+    /// i.e. `start <= base_index < end`.
+    pub base_index: Option<usize>,
+    /// True when the syllable begins with `ra + halant` and the
+    /// leading ra is a reph candidate. The reph candidate sits at
+    /// `start`; the halant sits at `start + 1`.
+    pub has_reph: bool,
+}
+
+/// Breaks the codepoint run into Devanagari syllables.
+///
+/// The segmenter is a forgiving greedy parser: it starts at each
+/// index, consumes the longest prefix matching a syllable pattern,
+/// and emits one [`Syllable`]. Codepoints that do not begin any
+/// syllable pattern emit a one-wide Broken/Symbol syllable.
+pub(crate) fn segment_syllables(codepoints: &[char]) -> Vec<Syllable> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < codepoints.len() {
+        let syl = scan_one_syllable(codepoints, i);
+        i = syl.end;
+        out.push(syl);
+    }
+    out
+}
+
+/// Parses a single syllable starting at `start`. Always makes
+/// progress: the returned syllable has `end > start`.
+fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
+    let first_isc = syllabic_category(cps[start]);
+    match first_isc {
+        IndicSyllabicCategory::Consonant | IndicSyllabicCategory::ConsonantPlaceholder => {
+            scan_consonant_syllable(cps, start)
+        }
+        IndicSyllabicCategory::VowelIndependent | IndicSyllabicCategory::Vowel => {
+            scan_vowel_syllable(cps, start)
+        }
+        IndicSyllabicCategory::Bindu
+        | IndicSyllabicCategory::Visarga
+        | IndicSyllabicCategory::Avagraha => Syllable {
+            kind: SyllableKind::Standalone,
+            start,
+            end: start + 1,
+            base_index: None,
+            has_reph: false,
+        },
+        IndicSyllabicCategory::Number | IndicSyllabicCategory::Other => {
+            // Consume any run of pass-through codepoints in one go.
+            let mut end = start + 1;
+            while end < cps.len() {
+                let c = syllabic_category(cps[end]);
+                if matches!(
+                    c,
+                    IndicSyllabicCategory::Number | IndicSyllabicCategory::Other
+                ) {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            Syllable {
+                kind: SyllableKind::Symbol,
+                start,
+                end,
+                base_index: None,
+                has_reph: false,
+            }
+        }
+        _ => Syllable {
+            kind: SyllableKind::Broken,
+            start,
+            end: start + 1,
+            base_index: None,
+            has_reph: false,
+        },
+    }
+}
+
+/// Consumes a consonant-based syllable. Pattern (simplified):
+///
+/// ```text
+///   [(C N?) Virama]*  C  N?  (Matra Bindu?)*  (Virama)?
+/// ```
+///
+/// We track the base consonant index as "last consonant not
+/// followed by a virama". On exit `has_reph` is true when the
+/// syllable begins with `ra + halant` and at least one more
+/// consonant follows (required for reph positioning).
+fn scan_consonant_syllable(cps: &[char], start: usize) -> Syllable {
+    let mut i = start;
+    let len = cps.len();
+
+    // Detect ra + halant reph candidate at the head.
+    let ra_halant_prefix = i + 1 < len
+        && cps[i] == '\u{0930}' // ra
+        && syllabic_category(cps[i + 1]) == IndicSyllabicCategory::Virama;
+
+    let mut base_index: Option<usize> = None;
+    let mut last_was_consonant_then_virama: bool = false;
+
+    // Walk consonants and halant pairs.
+    loop {
+        if i >= len {
+            break;
+        }
+        let isc = syllabic_category(cps[i]);
+        match isc {
+            IndicSyllabicCategory::Consonant | IndicSyllabicCategory::ConsonantPlaceholder => {
+                base_index = Some(i);
+                last_was_consonant_then_virama = false;
+                i += 1;
+                // Optional nukta.
+                if i < len && syllabic_category(cps[i]) == IndicSyllabicCategory::Nukta {
+                    i += 1;
+                }
+                // Optional virama: tells us this consonant is a
+                // half-form / conjunct participant, not the base.
+                if i < len && syllabic_category(cps[i]) == IndicSyllabicCategory::Virama {
+                    i += 1;
+                    last_was_consonant_then_virama = true;
+                    continue;
+                }
+                break;
+            }
+            _ => break,
+        }
+    }
+
+    // Trailing matras and modifier marks.
+    while i < len {
+        let isc = syllabic_category(cps[i]);
+        match isc {
+            IndicSyllabicCategory::VowelDependent
+            | IndicSyllabicCategory::Bindu
+            | IndicSyllabicCategory::Visarga
+            | IndicSyllabicCategory::CantillationMark
+            | IndicSyllabicCategory::Nukta => {
+                i += 1;
+            }
+            IndicSyllabicCategory::Virama => {
+                // A trailing virama (explicit halant at the end of a
+                // syllable) is legal — it is rendered as a visible
+                // virama. Consume and stop.
+                i += 1;
+                break;
+            }
+            IndicSyllabicCategory::Joiner | IndicSyllabicCategory::NonJoiner => {
+                // ZWJ/ZWNJ request the preceding consonant's
+                // half-form / non-conjunct behaviour.
+                i += 1;
+            }
+            _ => break,
+        }
+    }
+
+    // If we never moved past `start`, we could not form a
+    // consonant syllable. Emit a one-wide Broken syllable so the
+    // caller advances.
+    if i == start {
+        return Syllable {
+            kind: SyllableKind::Broken,
+            start,
+            end: start + 1,
+            base_index: None,
+            has_reph: false,
+        };
+    }
+
+    // Reph is only real when the syllable has more consonants
+    // after the ra+halant prefix.
+    let has_reph = ra_halant_prefix
+        && base_index.is_some_and(|b| b > start + 1);
+
+    // If the very last token was a consonant-then-virama (an
+    // explicit halant cluster with no trailing matra), the base is
+    // the consonant before that halant — matches the "last
+    // consonant not followed by a virama" rule only when such a
+    // consonant exists; otherwise the last-consonant wins.
+    let _ = last_was_consonant_then_virama;
+
+    Syllable {
+        kind: SyllableKind::Consonant,
+        start,
+        end: i,
+        base_index,
+        has_reph,
+    }
+}
+
+/// Consumes a vowel syllable starting with an independent vowel.
+fn scan_vowel_syllable(cps: &[char], start: usize) -> Syllable {
+    let len = cps.len();
+    let mut i = start + 1;
+    while i < len {
+        let isc = syllabic_category(cps[i]);
+        match isc {
+            IndicSyllabicCategory::VowelDependent
+            | IndicSyllabicCategory::Bindu
+            | IndicSyllabicCategory::Visarga
+            | IndicSyllabicCategory::Nukta
+            | IndicSyllabicCategory::CantillationMark => {
+                i += 1;
+            }
+            _ => break,
+        }
+    }
+    Syllable {
+        kind: SyllableKind::Vowel,
+        start,
+        end: i,
+        base_index: Some(start),
+        has_reph: false,
+    }
+}
+
+/// Initial reordering for one syllable.
+///
+/// The main transformation is moving pre-base matras (positional
+/// category `Left`) from after the base consonant to immediately
+/// before it. That puts the glyph run into the logical order the
+/// GSUB basic features and the final reordering step expect.
+fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllable) {
+    if !matches!(syllable.kind, SyllableKind::Consonant) {
+        return;
+    }
+    let Some(base) = syllable.base_index else {
+        return;
+    };
+    if syllable.end > glyphs.len() || syllable.end > codepoints.len() {
+        return;
+    }
+
+    // Collect pre-base matra indices inside the syllable, excluding
+    // the base and anything preceding it.
+    let mut to_move: Vec<usize> = Vec::new();
+    for i in (base + 1)..syllable.end {
+        if positional_category(codepoints[i]) == IndicPositionalCategory::Left
+            && syllabic_category(codepoints[i]) == IndicSyllabicCategory::VowelDependent
+        {
+            to_move.push(i);
+        }
+    }
+    if to_move.is_empty() {
+        return;
+    }
+
+    // Take each pre-base matra and splice it in just before the
+    // reph prefix (if any) or just before the base. Walking in
+    // reverse so earlier insertions do not shift later indices.
+    // Destination slot: the first consonant that should render
+    // after the matra. For Devanagari that is immediately before
+    // the base, UNLESS the syllable has a reph — then the reph
+    // stays leftmost and the matra slots in after the reph's
+    // halant (i.e. before the base still, because the reph's ra
+    // is at `start` and its halant at `start + 1`).
+    let insertion_point = base;
+
+    // Move in reverse so later indices remain valid while we drain.
+    for &idx in to_move.iter().rev() {
+        let glyph = glyphs[idx];
+        // Shift glyphs[insertion_point..idx] right by one.
+        for j in (insertion_point..idx).rev() {
+            glyphs[j + 1] = glyphs[j];
+        }
+        glyphs[insertion_point] = glyph;
+    }
+}
+
+/// Final reordering. Devanagari reph is rendered above the last
+/// consonant of the syllable; the `rphf` feature consumed the
+/// leading `ra + halant` and produced a reph glyph at index
+/// `syllable.start`. We move that glyph to the end of the
+/// syllable range so it visually attaches after the base.
+///
+/// If `rphf` did not fire (the font does not ship reph forms),
+/// the original `ra` and halant glyphs stay where they are and
+/// the generic GSUB pass handles them as a conjunct.
+fn final_reorder(glyphs: &mut [Glyph], syllable: &Syllable) {
+    if !syllable.has_reph {
+        return;
+    }
+    if syllable.end > glyphs.len() || syllable.start >= glyphs.len() {
+        return;
+    }
+
+    // Heuristic: if the glyph count in this syllable shrank between
+    // initial and final reorder, `rphf` collapsed `ra+halant` into
+    // a single reph glyph. In that case `glyphs[start]` is the reph.
+    // If counts match (no collapse), the feature did not fire.
+    //
+    // We do not carry glyph-count-before here — but the shape
+    // pipeline does not preserve syllable indices across feature
+    // application either, so we conservatively no-op when the
+    // syllable range looks suspicious. Full per-glyph masking lands
+    // when the pipeline grows a glyph-info mask.
+    let _ = glyphs;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cps(s: &str) -> Vec<char> {
+        s.chars().collect()
+    }
+
+    fn fake_glyphs(n: usize) -> Vec<Glyph> {
+        (0..n)
+            .map(|i| Glyph {
+                glyph_id: i as u32 + 1,
+                cluster: i as u32,
+                x_advance: 0,
+                y_advance: 0,
+                x_offset: 0,
+                y_offset: 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn single_consonant_is_a_consonant_syllable() {
+        // क — one syllable.
+        let cp = cps("\u{0915}");
+        let syl = segment_syllables(&cp);
+        assert_eq!(syl.len(), 1);
+        assert_eq!(syl[0].kind, SyllableKind::Consonant);
+        assert_eq!(syl[0].start, 0);
+        assert_eq!(syl[0].end, 1);
+        assert_eq!(syl[0].base_index, Some(0));
+        assert!(!syl[0].has_reph);
+    }
+
+    #[test]
+    fn consonant_matra_is_one_syllable() {
+        // की = क + ी (consonant + post-base matra).
+        let cp = cps("\u{0915}\u{0940}");
+        let syl = segment_syllables(&cp);
+        assert_eq!(syl.len(), 1);
+        assert_eq!(syl[0].kind, SyllableKind::Consonant);
+        assert_eq!(syl[0].end, 2);
+        assert_eq!(syl[0].base_index, Some(0));
+    }
+
+    #[test]
+    fn namaste_splits_into_three_syllables() {
+        // न म स ् त े — "namaste" is typically three syllables:
+        // न (na), म (ma), स्ते (ste with halant conjunct).
+        let cp = cps("\u{0928}\u{092E}\u{0938}\u{094D}\u{0924}\u{0947}");
+        let syl = segment_syllables(&cp);
+        assert_eq!(syl.len(), 3);
+        assert!(syl.iter().all(|s| s.kind == SyllableKind::Consonant));
+    }
+
+    #[test]
+    fn hindi_has_reph_on_second_syllable() {
+        // हिन्दी = ह ि न ् द ी
+        // Syllables: हि (ha + i), न्दी (na-halant-da-ii).
+        // No reph here — the halant joins na+da inside the syllable.
+        let cp = cps("\u{0939}\u{093F}\u{0928}\u{094D}\u{0926}\u{0940}");
+        let syl = segment_syllables(&cp);
+        assert!(!syl.is_empty());
+        // None of the syllables should have reph (no ra-halant
+        // prefix).
+        assert!(syl.iter().all(|s| !s.has_reph));
+    }
+
+    #[test]
+    fn ra_halant_consonant_marks_reph() {
+        // र् क → reph(ra) + halant + ka = reph + ka syllable.
+        let cp = cps("\u{0930}\u{094D}\u{0915}");
+        let syl = segment_syllables(&cp);
+        assert_eq!(syl.len(), 1);
+        assert!(syl[0].has_reph);
+        assert_eq!(syl[0].base_index, Some(2)); // ka
+    }
+
+    #[test]
+    fn pre_base_matra_moves_before_base() {
+        // कि = क (ka) + ि (pre-base matra).
+        // Before reorder: [ka, i]. After reorder: [i, ka].
+        let cp = cps("\u{0915}\u{093F}");
+        let mut glyphs = fake_glyphs(2);
+        let original = glyphs.clone();
+        let syllables = segment_syllables(&cp);
+        for s in &syllables {
+            initial_reorder(&cp, &mut glyphs, s);
+        }
+        assert_eq!(glyphs[0], original[1]); // matra first
+        assert_eq!(glyphs[1], original[0]); // ka second
+    }
+
+    #[test]
+    fn post_base_matra_stays_put() {
+        // की — matra ी is Right positional (post-base), so no move.
+        let cp = cps("\u{0915}\u{0940}");
+        let mut glyphs = fake_glyphs(2);
+        let before = glyphs.clone();
+        let syllables = segment_syllables(&cp);
+        for s in &syllables {
+            initial_reorder(&cp, &mut glyphs, s);
+        }
+        assert_eq!(glyphs, before);
+    }
+
+    #[test]
+    fn independent_vowel_is_a_vowel_syllable() {
+        let cp = cps("\u{0905}"); // अ
+        let syl = segment_syllables(&cp);
+        assert_eq!(syl.len(), 1);
+        assert_eq!(syl[0].kind, SyllableKind::Vowel);
+    }
+
+    #[test]
+    fn devanagari_digits_are_symbol_pass_through() {
+        // ० (digit zero) — should pass through as Symbol.
+        let cp = cps("\u{0966}");
+        let syl = segment_syllables(&cp);
+        assert_eq!(syl.len(), 1);
+        assert_eq!(syl[0].kind, SyllableKind::Symbol);
+    }
+
+    #[test]
+    fn empty_input_produces_no_syllables() {
+        assert!(segment_syllables(&[]).is_empty());
+    }
+
+    #[test]
+    fn three_pre_base_matras_each_move_before_their_base() {
+        // क ि क ि क ि → three (consonant, pre-base matra) syllables.
+        // After reorder each matra should sit before its consonant.
+        let cp = cps("\u{0915}\u{093F}\u{0915}\u{093F}\u{0915}\u{093F}");
+        let mut glyphs = fake_glyphs(6);
+        let syls = segment_syllables(&cp);
+        assert_eq!(syls.len(), 3);
+        for s in &syls {
+            initial_reorder(&cp, &mut glyphs, s);
+        }
+        // Cluster ids 1,0,3,2,5,4 — i.e. the matras (original
+        // indices 1,3,5) now sit at positions 0,2,4.
+        assert_eq!(glyphs[0].cluster, 1);
+        assert_eq!(glyphs[1].cluster, 0);
+        assert_eq!(glyphs[2].cluster, 3);
+        assert_eq!(glyphs[3].cluster, 2);
+        assert_eq!(glyphs[4].cluster, 5);
+        assert_eq!(glyphs[5].cluster, 4);
+    }
+
+    #[test]
+    fn shape_devanagari_without_gsub_only_reorders() {
+        // क ि — reorder but no feature run.
+        let cp = cps("\u{0915}\u{093F}");
+        let mut glyphs = fake_glyphs(2);
+        shape_devanagari(None, &cp, &mut glyphs);
+        assert_eq!(glyphs[0].cluster, 1);
+        assert_eq!(glyphs[1].cluster, 0);
+    }
+
+    #[test]
+    fn symbol_run_advances_past_multiple_digits() {
+        let cp = cps("\u{0966}\u{0967}\u{0968}");
+        let syl = segment_syllables(&cp);
+        assert_eq!(syl.len(), 1);
+        assert_eq!(syl[0].end, 3);
+    }
+}

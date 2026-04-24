@@ -258,7 +258,7 @@ fn is_handled_gsub_tag(tag: [u8; 4]) -> bool {
 /// Extension (type 7) wrappers are unwrapped to the inner type.
 /// Unknown lookup types are silently skipped so callers can enable
 /// forward-compatible features without the run erroring out.
-fn apply_gsub_feature(
+pub(crate) fn apply_gsub_feature(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
     tag: [u8; 4],
