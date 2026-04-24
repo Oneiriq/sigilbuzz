@@ -89,19 +89,17 @@ const CORPUS: &[Case] = &[
         note: "precomposed + jamo decomposed",
         compare_rustybuzz: true,
     },
-    // Mixed Latin + jamo. With PR #41's script segmenter sigilbuzz
-    // splits the run and dispatches the Latin half under DFLT and
-    // the Hangul half through the USE Hangul shaper. rustybuzz on
-    // the same input leaves the jamo as raw uni1100 / uni1161
-    // (no `ljmo`/`vjmo`) — HarfBuzz selects the Hangul shaper at
-    // run granularity, and a majority-Latin run does not activate
-    // the preprocessor. Documenting this as a 0.3.0 follow-up so
-    // the per-run shaper selection matches HarfBuzz semantics;
-    // shape call still succeeds.
+    // Mixed Latin + jamo. HarfBuzz picks one shaper for the whole
+    // buffer based on the first non-COMMON script, so this run
+    // dispatches under the Latin (default) shaper — the jamo
+    // codepoints pass through raw cmap lookups with no
+    // `ljmo`/`vjmo`/`tjmo` positional variants. sigilbuzz now
+    // matches: `shape.rs` gates Hangul-shaper activation on the
+    // buffer's dominant script.
     Case {
         text: "Hi \u{1100}\u{1161}",
-        note: "latin + jamo — run-level shaper selection follow-up",
-        compare_rustybuzz: false,
+        note: "latin + jamo — dominant-script gate selects default shaper",
+        compare_rustybuzz: true,
     },
 ];
 

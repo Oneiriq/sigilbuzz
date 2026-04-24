@@ -461,6 +461,26 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // on whichever half lost the tie-break.
     let segments = build_segments(&codepoints);
 
+    // Dominant script — the first non-COMMON/INHERITED script in the
+    // buffer. HarfBuzz (and rustybuzz) compute this once in
+    // `guess_segment_properties` and use it to select a single shaper
+    // for the whole run; features the shaper activates only fire when
+    // the buffer's dominant script matches. sigilbuzz's per-segment
+    // dispatch still runs each segment under its own script priority
+    // (Hebrew half under `hebr`, Latin half under DFLT), but the
+    // complex-shaper pre-pass for Old Hangul needs the dominant-script
+    // gate to match HarfBuzz: a mixed `Hi 가` run hands `ljmo`/`vjmo`
+    // the jamo segment under HarfBuzz's default shaper (no positional
+    // variant forms picked), not the Hangul shaper. Gating the Jamo
+    // pre-pass on dominant-script is the smallest knob that keeps
+    // parity clean on pure Hangul runs while matching HarfBuzz on
+    // Latin-majority mixed runs.
+    let dominant_script: Option<Script> = codepoints
+        .iter()
+        .copied()
+        .find(|&c| !is_common_for_segmentation(c))
+        .map(script_of);
+
     let gsub = face.gsub()?;
     // GDEF is consulted up-front so the LookupFlag skip-iterator has
     // it available for every GSUB context match. GPOS reuses the same
@@ -546,9 +566,14 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         // Precomposed syllables (U+AC00..U+D7A3) still pass through
         // the default GSUB/GPOS chain — `ljmo`/`vjmo`/`tjmo` are
         // no-ops on them, so running the pipeline is harmless but
-        // wasteful.  Gate on at least one Jamo codepoint in the
-        // segment's codepoint slice.
+        // wasteful. Additionally gate on the buffer's dominant
+        // script: HarfBuzz picks one shaper for the whole run based
+        // on the first non-COMMON script, so a Latin-majority mix
+        // like `Hi \u{1100}\u{1161}` shapes the jamo under the
+        // default shaper (no positional variant forms). sigilbuzz
+        // matches that here so mixed runs round-trip glyph-for-glyph.
         if seg.script == Script::Hangul
+            && dominant_script == Some(Script::Hangul)
             && seg_cps.iter().any(|&c| crate::unicode::is_hangul_jamo(c))
         {
             crate::ot::use_shaper::shape_hangul(
