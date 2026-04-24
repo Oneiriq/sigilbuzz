@@ -102,7 +102,7 @@ fn build_cmap_format4(segments: &[(u16, u16, i16)]) -> Vec<u8> {
 
     let mut out = Vec::new();
     out.extend_from_slice(&4u16.to_be_bytes()); // format
-    // length filled at the end.
+                                                // length filled at the end.
     out.extend_from_slice(&0u16.to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes()); // language
     out.extend_from_slice(&seg_count_x2.to_be_bytes());
