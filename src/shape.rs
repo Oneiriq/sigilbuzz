@@ -196,8 +196,28 @@ fn hangul_compose(
     cmap: &crate::tables::cmap::Cmap<'_>,
 ) -> alloc::vec::Vec<(u32, char)> {
     let mut out = alloc::vec::Vec::with_capacity(text.len());
+    // Gate: HarfBuzz / rustybuzz select the Hangul shaper on a
+    // per-run basis and the Hangul preprocessor (the NFC compose)
+    // runs only when that shaper is active. sigilbuzz's segmenter
+    // splits scripts but the Hangul preprocessor still has to see
+    // the segment's L+V(+T) window to run — so we gate on "the
+    // buffer is Hangul / whitespace / default-ignorable only".
+    // Mixed-script buffers (e.g. "Hi " + jamo) bypass composition;
+    // the jamo runs through its own segment under `hang` but stays
+    // as L + V glyphs, matching rustybuzz.
+    let compose_enabled = text.chars().all(|c| {
+        let cp = c as u32;
+        matches!(crate::unicode::script_of(c), crate::unicode::Script::Hangul)
+            || c == ' '
+            || (0x200B..=0x200D).contains(&cp)
+            || cp == 0xFEFF
+    });
     let mut it = text.char_indices().peekable();
     while let Some((byte_offset, ch)) = it.next() {
+        if !compose_enabled {
+            out.push((byte_offset as u32, ch));
+            continue;
+        }
         // L jamo range: U+1100..U+1112 (the 19 modern leading
         // consonants). Extended-A (U+A960..) do NOT compose — they
         // stay as jamo so `ljmo` picks them up.
