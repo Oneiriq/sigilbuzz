@@ -116,8 +116,12 @@ fn open_sans_ascii_glyphs_encode_cleanly() {
     let mut total_segments = 0_u64;
     let mut total_bands = 0_u64;
     for ch in 0x21_u32..=0x7E_u32 {
-        let Some(c) = char::from_u32(ch) else { continue };
-        let Some(gid) = cmap.glyph_id(c) else { continue };
+        let Some(c) = char::from_u32(ch) else {
+            continue;
+        };
+        let Some(gid) = cmap.glyph_id(c) else {
+            continue;
+        };
         if let Some(g) = encode_glyph(&face, gid, &SlugOptions::default()) {
             assert_glyph_invariants(&g);
             total_segments += g.segments.len() as u64;

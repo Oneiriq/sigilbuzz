@@ -144,13 +144,7 @@ mod tests {
     /// For a cubic and the quadratic chain produced by
     /// `cubic_to_quads`, the maximum sample-error at the t-grid
     /// `[0, 0.25, 0.5, 0.75, 1]` must respect the tolerance.
-    fn assert_chain_within_tolerance(
-        p0: Vec2,
-        p1: Vec2,
-        p2: Vec2,
-        p3: Vec2,
-        tolerance: f32,
-    ) {
+    fn assert_chain_within_tolerance(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, tolerance: f32) {
         let mut quads = Vec::new();
         cubic_to_quads(p0, p1, p2, p3, tolerance, &mut quads);
         assert!(!quads.is_empty(), "no quadratics produced");

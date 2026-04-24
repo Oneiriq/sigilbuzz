@@ -132,10 +132,7 @@ fn flatten_to_quads(ops: &[PathOp], tolerance: f32) -> Vec<QuadSegment> {
                     have_subpath = true;
                 }
                 let end = Vec2::new(x, y);
-                let mid = Vec2::new(
-                    (current.x + end.x) * 0.5,
-                    (current.y + end.y) * 0.5,
-                );
+                let mid = Vec2::new((current.x + end.x) * 0.5, (current.y + end.y) * 0.5);
                 out.push(QuadSegment {
                     p0: current,
                     p1: mid,
@@ -184,10 +181,7 @@ fn flatten_to_quads(ops: &[PathOp], tolerance: f32) -> Vec<QuadSegment> {
             PathOp::Close => {
                 if have_subpath && (current.x != start.x || current.y != start.y) {
                     let end = start;
-                    let mid = Vec2::new(
-                        (current.x + end.x) * 0.5,
-                        (current.y + end.y) * 0.5,
-                    );
+                    let mid = Vec2::new((current.x + end.x) * 0.5, (current.y + end.y) * 0.5);
                     out.push(QuadSegment {
                         p0: current,
                         p1: mid,
