@@ -34,7 +34,7 @@ pub use mark_liga::MarkLigaPos;
 pub use mark_mark::MarkMarkPos;
 pub use pair_pos::{PairPos, PairPosFormat1, PairPosFormat2};
 pub use single_adj::SinglePos;
-pub use value_record::ValueRecord;
+pub use value_record::{resolve_variation_delta, ValueRecord};
 
 /// Canonical GPOS lookup type numbers. Not exhaustive today; entries
 /// land here as sigilbuzz acquires the corresponding lookup parsers.
