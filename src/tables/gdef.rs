@@ -31,6 +31,7 @@
 use crate::error::{Error, Result};
 use crate::tables::layout::{ClassDef, Coverage};
 use crate::tables::parse::Reader;
+use crate::tables::variation_store::ItemVariationStore;
 
 /// Glyph role as declared by the font's `GDEF` table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +88,11 @@ pub struct Gdef<'a> {
     /// `MarkGlyphSetsDef.coverage[]`. Only populated when the table
     /// is v1.2+ *and* carries a mark-glyph-sets subtable.
     mark_glyph_sets: alloc::vec::Vec<Coverage<'a>>,
+    /// Shared `ItemVariationStore` (GDEF v1.3+). Every
+    /// `VariationIndex` referenced from a GPOS value record or
+    /// anchor resolves its outer/inner pair against this store.
+    /// Fonts without a v1.3 header leave it `None`.
+    item_variation_store: Option<ItemVariationStore<'a>>,
 }
 
 impl<'a> Gdef<'a> {
@@ -110,12 +116,15 @@ impl<'a> Gdef<'a> {
         //   markAttachClassDefOff
         // Added in 1.2:
         //   markGlyphSetsDefOff
-        // Added in 1.3 (item variation store) — we read-past only.
+        // Added in 1.3:
+        //   itemVarStoreOffset (Offset32) — the shared variation store
+        //   that every GPOS VariationIndex sub-offset indirects into.
         let glyph_class_def_off = r.read_u16()?;
         let _attach_list_off = r.read_u16()?;
         let _lig_caret_list_off = r.read_u16()?;
         let mark_attach_class_def_off = r.read_u16()?;
         let mark_glyph_sets_def_off = if minor >= 2 { r.read_u16()? } else { 0 };
+        let item_var_store_off = if minor >= 3 { r.read_u32()? } else { 0 };
 
         let glyph_class_def = parse_optional_class_def(
             data,
@@ -132,11 +141,22 @@ impl<'a> Gdef<'a> {
         } else {
             parse_mark_glyph_sets(data, mark_glyph_sets_def_off as usize)?
         };
+        let item_variation_store = if item_var_store_off == 0 {
+            None
+        } else {
+            let start = item_var_store_off as usize;
+            let sub = data.get(start..).ok_or(Error::Malformed {
+                offset: start,
+                context: "GDEF itemVarStore offset points outside table",
+            })?;
+            Some(ItemVariationStore::parse(sub)?)
+        };
 
         Ok(Self {
             glyph_class_def,
             mark_attach_class_def,
             mark_glyph_sets,
+            item_variation_store,
         })
     }
 
@@ -171,6 +191,17 @@ impl<'a> Gdef<'a> {
     #[must_use]
     pub fn mark_filtering_set(&self, index: u16) -> Option<&Coverage<'a>> {
         self.mark_glyph_sets.get(index as usize)
+    }
+
+    /// Shared `ItemVariationStore` (GDEF v1.3+). Every
+    /// `VariationIndex` sub-offset in the font's GPOS value records
+    /// or anchors resolves its `(outer, inner)` pair against this
+    /// store under the active variation coords. Fonts without a v1.3
+    /// header — or a zero `itemVarStoreOffset` — return `None`, and
+    /// the shaper treats every VariationIndex as a zero delta.
+    #[must_use]
+    pub const fn item_variation_store(&self) -> Option<&ItemVariationStore<'a>> {
+        self.item_variation_store.as_ref()
     }
 }
 
@@ -465,5 +496,101 @@ mod tests {
         let bytes = build_gdef_with_class_def(&class_def);
         let gdef = Gdef::parse(&bytes).unwrap();
         assert!(gdef.mark_filtering_set(0).is_none());
+    }
+
+    fn write_f2dot14(out: &mut Vec<u8>, v: f32) {
+        #[allow(clippy::cast_possible_truncation)]
+        let raw = (v * 16384.0).round() as i16;
+        out.extend_from_slice(&raw.to_be_bytes());
+    }
+
+    /// Minimal ItemVariationStore with one axis, one region (0..=1..=1),
+    /// one item carrying `delta` at inner index 0, outer index 0.
+    fn build_minimal_ivs(delta: i16) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // format
+        let region_off_slot = out.len();
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes()); // subtable count
+        let subtable_slot = out.len();
+        out.extend_from_slice(&0u32.to_be_bytes());
+
+        let region_start = out.len() as u32;
+        out[region_off_slot..region_off_slot + 4].copy_from_slice(&region_start.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes()); // axisCount
+        out.extend_from_slice(&1u16.to_be_bytes()); // regionCount
+        write_f2dot14(&mut out, 0.0);
+        write_f2dot14(&mut out, 1.0);
+        write_f2dot14(&mut out, 1.0);
+
+        let sub_start = out.len() as u32;
+        out[subtable_slot..subtable_slot + 4].copy_from_slice(&sub_start.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes()); // itemCount
+        out.extend_from_slice(&1u16.to_be_bytes()); // wordDeltaCount (all wide, short)
+        out.extend_from_slice(&1u16.to_be_bytes()); // regionIndexCount
+        out.extend_from_slice(&0u16.to_be_bytes()); // region index
+        out.extend_from_slice(&delta.to_be_bytes()); // one delta
+        out
+    }
+
+    /// Builds a v1.3 GDEF with only the itemVarStore slot populated.
+    /// Header layout for v1.3: u16 major + u16 minor + u16 × 4 (v1.0)
+    /// + u16 mgs + u32 ivs = 18 bytes.
+    fn build_gdef_v13_with_ivs_only(ivs: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // major
+        out.extend_from_slice(&3u16.to_be_bytes()); // minor
+        out.extend_from_slice(&0u16.to_be_bytes()); // glyphClassDefOff
+        out.extend_from_slice(&0u16.to_be_bytes()); // attachListOff
+        out.extend_from_slice(&0u16.to_be_bytes()); // ligCaretListOff
+        out.extend_from_slice(&0u16.to_be_bytes()); // markAttachClassDefOff
+        out.extend_from_slice(&0u16.to_be_bytes()); // markGlyphSetsDefOff
+        let ivs_off_slot = out.len();
+        out.extend_from_slice(&0u32.to_be_bytes()); // itemVarStoreOffset placeholder
+        let ivs_start = out.len() as u32;
+        out[ivs_off_slot..ivs_off_slot + 4].copy_from_slice(&ivs_start.to_be_bytes());
+        out.extend_from_slice(ivs);
+        out
+    }
+
+    #[test]
+    fn parses_item_variation_store_from_v13_header() {
+        let ivs = build_minimal_ivs(75);
+        let bytes = build_gdef_v13_with_ivs_only(&ivs);
+        let gdef = Gdef::parse(&bytes).unwrap();
+        let store = gdef.item_variation_store().expect("v1.3 IVS");
+        // At coord 1.0 the single region peaks — delta = 75.
+        let d = store.delta(0, 0, &[1.0]);
+        assert!((d - 75.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn v13_with_zero_itemvarstore_offset_yields_none() {
+        // Build a v1.3 header whose itemVarStoreOffset stays 0 — the
+        // spec's "this table omits the optional IVS" sentinel. The
+        // parser must not chase the zero offset or the IVS accessor
+        // would return Some pointing at garbage.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u16.to_be_bytes()); // major
+        bytes.extend_from_slice(&3u16.to_be_bytes()); // minor
+        bytes.extend_from_slice(&[0u8; 10]); // four u16 + u16 mgs = 0
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // ivs off = 0
+        let gdef = Gdef::parse(&bytes).unwrap();
+        assert!(gdef.item_variation_store().is_none());
+    }
+
+    #[test]
+    fn pre_v13_header_has_no_item_variation_store() {
+        // Every test above that builds a v1.0/v1.2 header should also
+        // leave the IVS slot empty. Guard against a future refactor
+        // that accidentally creates a default store.
+        let bytes = build_gdef_without_class_def();
+        let gdef = Gdef::parse(&bytes).unwrap();
+        assert!(gdef.item_variation_store().is_none());
+
+        let class_def = build_class_def_format1(10, &[3]);
+        let bytes = build_gdef_v12(Some(&class_def), None, None);
+        let gdef = Gdef::parse(&bytes).unwrap();
+        assert!(gdef.item_variation_store().is_none());
     }
 }

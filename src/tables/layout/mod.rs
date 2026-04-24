@@ -9,6 +9,7 @@
 pub mod class_def;
 pub mod context;
 pub mod coverage;
+pub mod device;
 pub mod feature_list;
 pub mod lookup_list;
 pub mod script_list;
@@ -21,6 +22,7 @@ pub use context::{
     SequenceLookupRecord,
 };
 pub use coverage::Coverage;
+pub use device::{DeviceOrVariationIndex, VARIATION_INDEX_DELTA_FORMAT};
 pub use feature_list::{Feature, FeatureList};
 pub use lookup_list::Lookup;
 pub use lookup_list::LookupList;
