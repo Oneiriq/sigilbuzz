@@ -251,6 +251,27 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             }
             continue;
         }
+        // Tamil and Sinhala split-matra decomposition. These matras
+        // decompose into a pre-base + post-base (occasionally
+        // three-part) sequence. HarfBuzz's Indic shaper runs this
+        // before syllable reordering so the pre-base half can be
+        // picked up by the positional-category reorder. sigilbuzz
+        // does it at codepoint push time — same entry point as Khmer
+        // — so downstream passes never see the composed form.
+        if let Some(parts) = crate::ot::indic::split_matra_decompose(ch) {
+            for &component in parts {
+                let gid = u32::from(cmap.glyph_id(component).unwrap_or(0));
+                let glyph = Glyph::new(gid, cluster as u32);
+                glyphs.push(glyph);
+                codepoints.push(component);
+            }
+            // Script detection for the segmenter below runs off the
+            // `codepoints` vec (not the original text), so pushing
+            // the decomposed components is all we need. The components
+            // keep their parent's script (Tamil / Sinhala) because
+            // they come from the same Unicode block.
+            continue;
+        }
         let glyph_id = if is_default_ignorable(ch) {
             space_gid
         } else {
@@ -844,6 +865,40 @@ pub(crate) fn apply_gsub_feature_in_scripts(
 
     for lookup_idx in lookup_indices {
         apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, alternate_index);
+    }
+}
+
+/// Applies a single feature's lookups only at glyph positions where
+/// `mask[i]` is true. Used by the Indic shaper to gate `half` off
+/// on consonants whose post-halant partner is already going to be
+/// consumed by `blwf` — mirrors HarfBuzz's per-glyph feature mask
+/// machinery at the one spot sigilbuzz currently needs it.
+///
+/// Shares the masked lookup dispatcher with Arabic
+/// positional features; lookups that don't understand the mask
+/// (chaining-context interior) fall through to the unmasked
+/// dispatcher, matching the behaviour documented on
+/// [`apply_gsub_lookup_masked`].
+pub(crate) fn apply_gsub_feature_masked(
+    gsub: &Gsub<'_>,
+    glyphs: &mut Vec<Glyph>,
+    gdef: Option<&Gdef<'_>>,
+    tag: [u8; 4],
+    script_priority: &[[u8; 4]],
+    mask: &[bool],
+) {
+    if glyphs.is_empty() {
+        return;
+    }
+    let Some(lookup_indices) = lookup_indices_for_feature_in_scripts(gsub, tag, script_priority)
+    else {
+        return;
+    };
+    if lookup_indices.is_empty() {
+        return;
+    }
+    for lookup_idx in lookup_indices {
+        apply_gsub_lookup_masked(gsub, lookup_idx, glyphs, gdef, mask);
     }
 }
 
@@ -1533,6 +1588,55 @@ fn lookup_indices_for_feature_in_scripts(
     }
     indices.sort_unstable();
     Some(indices)
+}
+
+/// Asks "would feature `tag`'s lookups substitute starting at the
+/// head of this glyph sequence?" Used by the Indic shaper's base
+/// finder to tag post-halant consonants as below-base (POS_BELOW_C)
+/// when the font's `blwf` feature contains a substitution that would
+/// consume `virama + consonant` (new-spec) or `consonant + virama`
+/// (old-spec) — mirrors HarfBuzz's `consonant_position_from_face`.
+///
+/// The implementation is a dry-run: copy the candidate glyph slice
+/// into a throw-away buffer, run the feature's lookups over it, and
+/// report whether any glyph id changed or any glyph was removed.
+/// That handles ligature subtables, chaining contexts whose nested
+/// lookups ligate, and single subtables uniformly. It is considerably
+/// more expensive than poking at individual subtable types, but we
+/// only call it per-syllable during Indic initial reordering, so the
+/// cost is bounded.
+pub(crate) fn feature_would_substitute(
+    gsub: &Gsub<'_>,
+    gdef: Option<&Gdef<'_>>,
+    tag: [u8; 4],
+    script_priority: &[[u8; 4]],
+    glyph_ids: &[u16],
+) -> bool {
+    if glyph_ids.is_empty() {
+        return false;
+    }
+    // Build a throw-away glyph slice — cluster values don't matter,
+    // only glyph ids survive the dry run. Start clusters at 0 so a
+    // ligature merge collapses them to 0 deterministically.
+    let mut scratch: Vec<Glyph> = glyph_ids
+        .iter()
+        .map(|&id| Glyph::new(u32::from(id), 0))
+        .collect();
+    let before: Vec<u32> = scratch.iter().map(|g| g.glyph_id).collect();
+    apply_gsub_feature_in_scripts(gsub, &mut scratch, gdef, tag, 0, script_priority);
+    if scratch.len() != before.len() {
+        return true;
+    }
+    for (a, b) in scratch
+        .iter()
+        .map(|g| g.glyph_id)
+        .zip(before.iter().copied())
+    {
+        if a != b {
+            return true;
+        }
+    }
+    false
 }
 
 fn apply_single_subtable(single: &Single<'_>, glyphs: &mut [Glyph], filter: &MatchFilter<'_>) {

@@ -44,6 +44,43 @@ pub mod devanagari;
 
 pub use devanagari::{shape_devanagari, shape_indic};
 
+/// Tamil and Sinhala split-matra decomposition table.
+///
+/// A handful of Tamil and Sinhala vowel signs are "split" — a single
+/// codepoint visually decomposes into a pre-base component and one or
+/// two trailing components. HarfBuzz's Indic shaper performs this
+/// split at the normalization stage so the pre-base half participates
+/// in syllable reordering. sigilbuzz applies the split at
+/// buffer-preparation time (before `cmap`); the pre-base component,
+/// once it sits next to its base consonant as a separate
+/// [`IndicSyllabicCategory::VowelDependent`] of [`IndicPositionalCategory::Left`],
+/// is reordered by the generic pre-base matra pass without any
+/// further special-casing.
+///
+/// Matrix ported from rustybuzz 0.20.1's `hb/unicode.rs` decomposition
+/// table restricted to the Tamil and Sinhala code points that the
+/// Indic shaper splits.
+///
+/// [`IndicSyllabicCategory::VowelDependent`]: crate::unicode::indic_category::IndicSyllabicCategory::VowelDependent
+/// [`IndicPositionalCategory::Left`]: crate::unicode::indic_category::IndicPositionalCategory::Left
+#[must_use]
+pub fn split_matra_decompose(ch: char) -> Option<&'static [char]> {
+    match ch {
+        // Tamil: O = e + aa; OO = ee + aa; AU = e + au-length-mark.
+        '\u{0BCA}' => Some(&['\u{0BC6}', '\u{0BBE}']),
+        '\u{0BCB}' => Some(&['\u{0BC7}', '\u{0BBE}']),
+        '\u{0BCC}' => Some(&['\u{0BC6}', '\u{0BD7}']),
+        // Sinhala: O, OO, double-matra combinations. U+0DDD (three
+        // components) mirrors HarfBuzz's sequential decomposition of
+        // 0DDC followed by the virama-style 0DCA tail.
+        '\u{0DDA}' => Some(&['\u{0DD9}', '\u{0DCA}']),
+        '\u{0DDC}' => Some(&['\u{0DD9}', '\u{0DCF}']),
+        '\u{0DDD}' => Some(&['\u{0DD9}', '\u{0DCF}', '\u{0DCA}']),
+        '\u{0DDE}' => Some(&['\u{0DD9}', '\u{0DDF}']),
+        _ => None,
+    }
+}
+
 use crate::unicode::Script;
 
 /// Where the reph (reordered `ra + halant` form) should end up
