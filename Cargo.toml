@@ -56,6 +56,10 @@ alloc = []
 # rustybuzz is the reference implementation we compare against for
 # M1 parity. Dev-dep only: the core crate must never link against it.
 rustybuzz = "0.20"
+# ttf-parser drives the outline-parity tests: we compare our
+# glyph_outline stream against its OutlineBuilder callbacks across
+# every glyph of the bundled fonts. Never linked by sigilbuzz proper.
+ttf-parser = "0.25"
 
 [profile.release]
 lto = "thin"
