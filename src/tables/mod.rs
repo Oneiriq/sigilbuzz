@@ -10,6 +10,7 @@
 //! unambiguous and `no_std`-friendly.
 
 pub mod avar;
+pub mod cff;
 pub mod cmap;
 pub mod colr;
 pub mod cpal;
@@ -37,6 +38,7 @@ pub mod vmtx;
 pub mod vorg;
 
 pub use avar::Avar;
+pub use cff::Cff;
 pub use cmap::Cmap;
 pub use colr::{Colr, ColrPaint};
 pub use cpal::{Color, Cpal};
@@ -114,6 +116,8 @@ pub mod tag {
     pub const COLR: [u8; 4] = *b"COLR";
     /// `CPAL` — colour palette table.
     pub const CPAL: [u8; 4] = *b"CPAL";
+    /// `CFF ` — Compact Font Format 1 (PostScript charstring outlines).
+    pub const CFF1: [u8; 4] = *b"CFF ";
     /// `morx` — Apple Extended Glyph Metamorphosis (AAT).
     pub const MORX: [u8; 4] = *b"morx";
     /// `kerx` — Apple Extended Kerning (AAT).
