@@ -159,12 +159,7 @@ impl<'a> Gvar<'a> {
     /// one entry). Callers that only care about the outline bounding
     /// box can reduce via min/max on `dx` and `dy`.
     #[must_use]
-    pub fn glyph_deltas(
-        &self,
-        glyph_id: u16,
-        coords: &[f32],
-        num_points: u16,
-    ) -> Vec<PointDelta> {
+    pub fn glyph_deltas(&self, glyph_id: u16, coords: &[f32], num_points: u16) -> Vec<PointDelta> {
         let Some((start, end)) = self.glyph_range(glyph_id) else {
             return Vec::new();
         };
@@ -180,8 +175,6 @@ impl<'a> Gvar<'a> {
         self.deltas_from_glyph_data(body, coords, num_points)
             .unwrap_or_default()
     }
-
-
 
     fn glyph_range(&self, glyph_id: u16) -> Option<(u32, u32)> {
         if glyph_id >= self.glyph_count {
@@ -377,20 +370,20 @@ impl TupleVariationHeader {
         } else {
             None
         };
-        let (intermediate_start, intermediate_end) =
-            if tuple_index & FLAG_INTERMEDIATE_REGION != 0 {
-                let mut s = Vec::with_capacity(axis_count as usize);
-                for _ in 0..axis_count {
-                    s.push(r.read_f2dot14()?);
-                }
-                let mut e = Vec::with_capacity(axis_count as usize);
-                for _ in 0..axis_count {
-                    e.push(r.read_f2dot14()?);
-                }
-                (Some(s), Some(e))
-            } else {
-                (None, None)
-            };
+        let (intermediate_start, intermediate_end) = if tuple_index & FLAG_INTERMEDIATE_REGION != 0
+        {
+            let mut s = Vec::with_capacity(axis_count as usize);
+            for _ in 0..axis_count {
+                s.push(r.read_f2dot14()?);
+            }
+            let mut e = Vec::with_capacity(axis_count as usize);
+            for _ in 0..axis_count {
+                e.push(r.read_f2dot14()?);
+            }
+            (Some(s), Some(e))
+        } else {
+            (None, None)
+        };
         let private_point_numbers = tuple_index & FLAG_PRIVATE_POINT_NUMBERS != 0;
         Ok(Self {
             variation_data_size,
@@ -435,12 +428,7 @@ impl TupleVariationHeader {
 // Region scalar (mirrors OpenType spec's supportScalar).
 // ----------------------------------------------------------------------------
 
-fn tuple_scalar(
-    peak: &[f32],
-    start: Option<&[f32]>,
-    end: Option<&[f32]>,
-    coords: &[f32],
-) -> f32 {
+fn tuple_scalar(peak: &[f32], start: Option<&[f32]>, end: Option<&[f32]>, coords: &[f32]) -> f32 {
     let mut scalar: f32 = 1.0;
     for (i, &p) in peak.iter().enumerate() {
         let c = *coords.get(i).unwrap_or(&0.0);
@@ -455,10 +443,7 @@ fn tuple_scalar(
         }
         // Default region: [0, peak] or [peak, 0] depending on sign.
         let (s, e) = match (start, end) {
-            (Some(s), Some(e)) => (
-                *s.get(i).unwrap_or(&0.0),
-                *e.get(i).unwrap_or(&0.0),
-            ),
+            (Some(s), Some(e)) => (*s.get(i).unwrap_or(&0.0), *e.get(i).unwrap_or(&0.0)),
             _ => {
                 if p > 0.0 {
                     (0.0, p)
@@ -824,8 +809,7 @@ mod tests {
         out[shared_off_slot..shared_off_slot + 4].copy_from_slice(&shared_off.to_be_bytes());
 
         let data_array_off = out.len() as u32;
-        out[data_array_slot..data_array_slot + 4]
-            .copy_from_slice(&data_array_off.to_be_bytes());
+        out[data_array_slot..data_array_slot + 4].copy_from_slice(&data_array_off.to_be_bytes());
 
         let gvd_start = out.len();
         out.extend_from_slice(&1u16.to_be_bytes()); // tupleVariationCount = 1
