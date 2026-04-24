@@ -10,6 +10,7 @@
 
 pub mod arabic;
 pub mod indic;
+pub mod use_shaper;
 
 /// Common OpenType feature tags. These are byte-literal constants so
 /// consumers can compare against them without string handling.
