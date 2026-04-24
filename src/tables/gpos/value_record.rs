@@ -195,6 +195,7 @@ pub fn resolve_variation_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use alloc::vec::Vec;
 
     fn make_reader(bytes: &[u8]) -> Reader<'_> {
