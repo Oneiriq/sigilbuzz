@@ -26,6 +26,9 @@ pub mod loca;
 pub mod maxp;
 pub mod parse;
 pub mod variation_store;
+pub mod vhea;
+pub mod vmtx;
+pub mod vorg;
 
 pub use avar::Avar;
 pub use cmap::Cmap;
@@ -47,6 +50,9 @@ pub use loca::Loca;
 pub use maxp::Maxp;
 pub use parse::Reader;
 pub use variation_store::ItemVariationStore;
+pub use vhea::Vhea;
+pub use vmtx::Vmtx;
+pub use vorg::Vorg;
 
 /// Standard SFNT / OpenType table tags. These are the ones sigilbuzz
 /// reaches for during shaping; more land as the corresponding parsers
@@ -84,4 +90,10 @@ pub mod tag {
     pub const AVAR: [u8; 4] = *b"avar";
     /// `HVAR` — horizontal metrics variations.
     pub const HVAR: [u8; 4] = *b"HVAR";
+    /// `vhea` — vertical header.
+    pub const VHEA: [u8; 4] = *b"vhea";
+    /// `vmtx` — vertical metrics.
+    pub const VMTX: [u8; 4] = *b"vmtx";
+    /// `VORG` — vertical origin.
+    pub const VORG: [u8; 4] = *b"VORG";
 }

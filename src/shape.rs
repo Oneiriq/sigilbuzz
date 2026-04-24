@@ -93,13 +93,19 @@ pub struct Feature {
 /// Returns an error if the font is missing any of the tables required
 /// for basic shaping (`cmap`, `maxp`, `hhea`, `hmtx`) or if one of
 /// them is malformed.
+#[allow(clippy::too_many_lines)]
 pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<ShapedRun> {
     let want_kern = !feature_disabled(features, *b"kern");
     let want_liga = !feature_disabled(features, *b"liga");
+    let is_vertical = !buffer.direction().is_horizontal();
 
     let face = font.face();
     let cmap = face.cmap()?;
     let hmtx = face.hmtx()?;
+    // Vertical metrics and origin overrides are optional; only look
+    // them up when the caller has asked for vertical layout so
+    // horizontal callers keep the cheap "hmtx only" path.
+    let vmtx = if is_vertical { face.vmtx()? } else { None };
 
     let raw_text = buffer.text();
     if raw_text.is_empty() {
@@ -158,6 +164,18 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         if !feature_disabled(features, *b"calt") {
             apply_gsub_feature(gsub, &mut glyphs, *b"calt", 0);
         }
+        // Vertical writing: HarfBuzz auto-enables `vrt2` when the
+        // font carries it, otherwise falls back to `vert`. The two
+        // tags cannot be active together — `vrt2` (Vertical
+        // Alternates & Rotation) is the superset, so prefer it.
+        if is_vertical {
+            let has_vrt2 = feature_present(gsub, *b"vrt2");
+            if has_vrt2 && !feature_disabled(features, *b"vrt2") {
+                apply_gsub_feature(gsub, &mut glyphs, *b"vrt2", 0);
+            } else if !feature_disabled(features, *b"vert") {
+                apply_gsub_feature(gsub, &mut glyphs, *b"vert", 0);
+            }
+        }
         for feat in features {
             if feat.value == 0 {
                 continue;
@@ -174,12 +192,46 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         }
     }
 
-    // Step 3: hmtx advance lookup. Runs *after* GSUB so ligatures
+    // Step 3: advance lookup. Runs *after* GSUB so ligatures
     // receive their ligature-glyph advance, not the sum of their
-    // component advances.
-    for glyph in &mut glyphs {
-        let id = glyph.glyph_id as u16;
-        glyph.x_advance = i32::from(hmtx.advance(id).unwrap_or(0));
+    // component advances. Horizontal layout pulls from hmtx and
+    // drives the pen along X; vertical layout pulls from vmtx (when
+    // present) and drives the pen along Y, while x_advance stays
+    // zero so the glyphs stack rather than walk right.
+    if is_vertical {
+        if let Some(ref vmtx) = vmtx {
+            for glyph in &mut glyphs {
+                let id = glyph.glyph_id as u16;
+                // HarfBuzz convention: vertical y_advance is negative
+                // for top-to-bottom flow, so the pen moves downward.
+                let raw = i32::from(vmtx.advance(id).unwrap_or(0));
+                glyph.y_advance = if buffer.direction().is_forward() {
+                    -raw
+                } else {
+                    raw
+                };
+                glyph.x_advance = 0;
+            }
+        } else {
+            // No vmtx: fall back to an em-square advance so the run
+            // still stacks deterministically. Use the hhea-reported
+            // line height as a reasonable default.
+            let hhea = face.hhea()?;
+            let fallback = (hhea.ascent as i32) - (hhea.descent as i32);
+            for glyph in &mut glyphs {
+                glyph.y_advance = if buffer.direction().is_forward() {
+                    -fallback
+                } else {
+                    fallback
+                };
+                glyph.x_advance = 0;
+            }
+        }
+    } else {
+        for glyph in &mut glyphs {
+            let id = glyph.glyph_id as u16;
+            glyph.x_advance = i32::from(hmtx.advance(id).unwrap_or(0));
+        }
     }
 
     // Step 4: GPOS passes. Kern first, then mark-to-base; then any
@@ -239,8 +291,15 @@ fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
 fn is_handled_gsub_tag(tag: [u8; 4]) -> bool {
     matches!(
         &tag,
-        b"liga" | b"kern" | b"ccmp" | b"rlig" | b"clig" | b"calt"
+        b"liga" | b"kern" | b"ccmp" | b"rlig" | b"clig" | b"calt" | b"vert" | b"vrt2"
     )
+}
+
+/// Returns `true` when the GSUB default-LangSys advertises the named
+/// feature tag. Used by the vertical-writing dispatcher to decide
+/// between `vrt2` (preferred if present) and `vert` (fallback).
+fn feature_present(gsub: &Gsub<'_>, tag: [u8; 4]) -> bool {
+    lookup_indices_for_feature(gsub, tag).is_some_and(|v| !v.is_empty())
 }
 
 /// Applies every GSUB lookup reachable via the named feature tag

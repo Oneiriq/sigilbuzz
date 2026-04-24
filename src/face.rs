@@ -36,7 +36,7 @@ use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
 use crate::tables::{
     tag, Avar, Cmap, Fvar, Gdef, Glyf, GlyphBounds, Gpos, Gsub, Head, Hhea, Hmtx, Hvar, KernTable,
-    Loca, Maxp,
+    Loca, Maxp, Vhea, Vmtx, Vorg,
 };
 
 /// One entry in the SFNT table directory.
@@ -318,6 +318,50 @@ impl<'a> Face<'a> {
             Err(e) => Err(e),
         }
     }
+
+    /// Parses the `vhea` table if the font carries one. Fonts that
+    /// support vertical writing ship this alongside `vmtx`; purely
+    /// horizontal fonts omit both.
+    pub fn vhea(&self) -> Result<Option<Vhea>> {
+        match self.table_bytes(tag::VHEA) {
+            Ok(bytes) => Ok(Some(Vhea::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `vmtx` table if the font carries one. Requires
+    /// `maxp` and `vhea` to be present because the vmtx layout depends
+    /// on their counts; missing either surfaces as
+    /// [`Error::MissingTable`]. Returns `Ok(None)` when the font has
+    /// no `vmtx` at all (i.e. horizontal-only).
+    pub fn vmtx(&self) -> Result<Option<Vmtx<'a>>> {
+        let Some(vhea) = self.vhea()? else {
+            return Ok(None);
+        };
+        let maxp = self.maxp()?;
+        match self.table_bytes(tag::VMTX) {
+            Ok(bytes) => Ok(Some(Vmtx::parse(
+                bytes,
+                maxp.num_glyphs,
+                vhea.number_of_long_ver_metrics,
+            )?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `VORG` table if the font carries one. Most fonts
+    /// with vertical metrics omit this — the renderer's default
+    /// origin rule is usually good enough; CFF CJK fonts use it.
+    pub fn vorg(&self) -> Result<Option<Vorg<'a>>> {
+        match self.table_bytes(tag::VORG) {
+            Ok(bytes) => Ok(Some(Vorg::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
 }
 
 #[cfg(test)]
