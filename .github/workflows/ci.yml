@@ -1,12 +1,18 @@
 name: CI
 
-# Only run on merges to main and on manual dispatch. Local developers are
-# expected to run `cargo fmt --all --check`, `cargo clippy --all-targets
-# -- -D warnings`, and `cargo test --all-features` before opening a PR.
+# Runs on pushes to main and any release branch, and on every pull request
+# targeting those. Local developers are still expected to run the pre-push
+# gate (`cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`,
+# `cargo test --all-features`) before opening a PR.
 on:
   push:
     branches:
       - main
+      - 'release/**'
+  pull_request:
+    branches:
+      - main
+      - 'release/**'
   workflow_dispatch: {}
 
 env:
