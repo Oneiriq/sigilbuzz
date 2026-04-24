@@ -9,6 +9,7 @@
 #![allow(missing_docs)]
 
 pub mod arabic;
+pub mod indic;
 
 /// Common OpenType feature tags. These are byte-literal constants so
 /// consumers can compare against them without string handling.

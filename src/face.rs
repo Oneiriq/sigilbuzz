@@ -35,8 +35,8 @@ use crate::blob::Blob;
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
 use crate::tables::{
-    tag, Avar, Cmap, Fvar, Gdef, Glyf, GlyphBounds, Gpos, Gsub, Head, Hhea, Hmtx, Hvar, KernTable,
-    Loca, Maxp, Vhea, Vmtx, Vorg,
+    tag, Avar, Cmap, Fvar, Gdef, Glyf, GlyphBounds, Gpos, Gsub, Gvar, Head, Hhea, Hmtx, Hvar,
+    KernTable, Loca, Maxp, Vhea, Vmtx, Vorg,
 };
 
 /// One entry in the SFNT table directory.
@@ -60,6 +60,18 @@ pub struct Face<'a> {
     data: &'a [u8],
     sfnt_version: u32,
     records: Vec<TableRecord>,
+}
+
+/// Rounds a float to the nearest `i16`, saturating at the type bounds.
+/// A `no_std`-friendly replacement for `f32::round() as i16`, which
+/// would otherwise drag in `libm`.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn round_f32_to_i16(v: f32) -> i16 {
+    // Add-half trick: positive → +0.5 floor, negative → -0.5 ceil.
+    // Clamp to i16 range before the `as` cast to dodge UB on overflow.
+    let adj = if v >= 0.0 { v + 0.5 } else { v - 0.5 };
+    let clamped = adj.max(i16::MIN as f32).min(i16::MAX as f32);
+    clamped as i16
 }
 
 const SFNT_TRUETYPE: u32 = 0x0001_0000;
@@ -317,6 +329,84 @@ impl<'a> Face<'a> {
             Err(Error::MissingTable { .. }) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Parses the `gvar` table if the font carries one. Present in
+    /// every TrueType variable font with a `glyf` outline table;
+    /// CFF2-based variable fonts carry their own `CFF2` deltas
+    /// instead.
+    pub fn gvar(&self) -> Result<Option<Gvar<'a>>> {
+        match self.table_bytes(tag::GVAR) {
+            Ok(bytes) => Ok(Some(Gvar::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Returns the design-unit bounding box for `glyph_id` at the
+    /// given normalized axis coords. When `gvar` is present and any
+    /// tuple contributes a delta, the static bounds from `glyf` are
+    /// adjusted by the minimum / maximum `(dx, dy)` across every
+    /// contour point touched by the glyph's variation data. Missing
+    /// `gvar` — or coords that produce zero deltas — gives the same
+    /// answer as [`Face::glyph_bounds`].
+    pub fn glyph_bounds_at_coords(
+        &self,
+        glyph_id: u16,
+        coords: &[f32],
+    ) -> Result<Option<GlyphBounds>> {
+        let Some(base) = self.glyph_bounds(glyph_id)? else {
+            return Ok(None);
+        };
+        let Some(gvar) = self.gvar()? else {
+            return Ok(Some(base));
+        };
+        // Composite glyphs and zero-contour glyphs return None here;
+        // sigilbuzz doesn't apply gvar deltas to those yet.
+        let loca = self.loca()?;
+        let glyf = self.glyf()?;
+        let Some(num_points) = glyf.point_count(&loca, glyph_id)? else {
+            return Ok(Some(base));
+        };
+        let deltas = gvar.glyph_deltas(glyph_id, coords, num_points);
+        if deltas.is_empty() {
+            return Ok(Some(base));
+        }
+        // Simple glyphs carry points on contour edges; the bounding
+        // box tracks those extrema. A full renderer would interpolate
+        // composite glyphs and phantom points — sigilbuzz only needs
+        // an approximate bbox, so "shift corners by min/max deltas
+        // across touched points" is sufficient for layout work.
+        let mut x_lo = f32::INFINITY;
+        let mut x_hi = f32::NEG_INFINITY;
+        let mut y_lo = f32::INFINITY;
+        let mut y_hi = f32::NEG_INFINITY;
+        for d in &deltas {
+            if d.dx < x_lo {
+                x_lo = d.dx;
+            }
+            if d.dx > x_hi {
+                x_hi = d.dx;
+            }
+            if d.dy < y_lo {
+                y_lo = d.dy;
+            }
+            if d.dy > y_hi {
+                y_hi = d.dy;
+            }
+        }
+        if !x_lo.is_finite() {
+            return Ok(Some(base));
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let adjusted = GlyphBounds {
+            x_min: base.x_min.saturating_add(round_f32_to_i16(x_lo)),
+            y_min: base.y_min.saturating_add(round_f32_to_i16(y_lo)),
+            x_max: base.x_max.saturating_add(round_f32_to_i16(x_hi)),
+            y_max: base.y_max.saturating_add(round_f32_to_i16(y_hi)),
+            num_contours: base.num_contours,
+        };
+        Ok(Some(adjusted))
     }
 
     /// Parses the `vhea` table if the font carries one. Fonts that

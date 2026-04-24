@@ -8,6 +8,7 @@
 #![allow(missing_docs)]
 
 pub mod bidi;
+pub mod indic_category;
 pub mod joining;
 pub mod normalize;
 
@@ -26,6 +27,8 @@ pub enum Script {
     Cyrillic,
     /// Greek.
     Greek,
+    /// Devanagari. Indic reordering shaper applies.
+    Devanagari,
     /// Anything else — returned when sigilbuzz has no specialised
     /// table for the codepoint's script.
     Other,
@@ -51,6 +54,8 @@ pub const fn script_of(ch: char) -> Script {
         0x0590..=0x05FF => Script::Hebrew,
         // Arabic + supplements
         0x0600..=0x06FF | 0x0750..=0x077F | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF => Script::Arabic,
+        // Devanagari
+        0x0900..=0x097F => Script::Devanagari,
         // CJK unified ideographs + extensions A/B + Hiragana + Katakana
         0x3040..=0x309F | 0x30A0..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF => Script::Han,
         _ => Script::Other,
@@ -85,6 +90,13 @@ mod tests {
     fn classifies_greek_and_cyrillic() {
         assert_eq!(script_of('Δ'), Script::Greek);
         assert_eq!(script_of('Д'), Script::Cyrillic);
+    }
+
+    #[test]
+    fn classifies_devanagari() {
+        // क (U+0915) and vowel sign I (U+093F).
+        assert_eq!(script_of('\u{0915}'), Script::Devanagari);
+        assert_eq!(script_of('\u{093F}'), Script::Devanagari);
     }
 
     #[test]
