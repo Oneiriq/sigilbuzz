@@ -62,7 +62,9 @@ use alloc::vec::Vec;
 
 use super::{IndicConfig, RephMode, RephPosition};
 use crate::buffer::{Glyph, IndicPosition};
-use crate::shape::apply_gsub_feature_in_scripts;
+use crate::shape::{
+    apply_gsub_feature_in_scripts, apply_gsub_feature_masked, feature_would_substitute,
+};
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 use crate::unicode::indic_category::{
@@ -120,9 +122,30 @@ pub fn shape_indic(
     // to blwf as a regular ra-halant conjunct. Likewise half runs
     // after rphf because the ra in ra+halant may have been consumed
     // as reph already.
+    //
+    // `half` runs masked: for every C+H+C syllable we first ask the
+    // font "would blwf substitute halant + second-C?" If yes, the
+    // second consonant is below-base eligible and the base moves to
+    // the first C, making the pre-halant position ineligible for
+    // `half`. We encode that by zeroing the mask bit on the
+    // pre-halant consonant (and its halant) so the `half` ligature
+    // `C + H → half-C` cannot fire. Mirrors
+    // `consonant_position_from_face` in rustybuzz's ot_shaper_indic.
     if let Some(gsub) = gsub {
+        let half_mask = compute_half_mask(gsub, gdef, codepoints, glyphs, config, &syllables);
         for tag in INDIC_BASIC_FEATURES {
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, config.script_priority);
+            if *tag == b"half" {
+                apply_gsub_feature_masked(
+                    gsub,
+                    glyphs,
+                    gdef,
+                    **tag,
+                    config.script_priority,
+                    &half_mask,
+                );
+            } else {
+                apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, config.script_priority);
+            }
         }
     }
 
@@ -142,6 +165,7 @@ pub fn shape_indic(
             byte_end,
             original_glyph_count,
             config.reph_pos,
+            config.reph_mode,
         );
     }
 
@@ -295,14 +319,42 @@ fn scan_consonant_syllable(cps: &[char], start: usize, config: &IndicConfig) -> 
     let mut i = start;
     let len = cps.len();
 
-    // Detect `ra + halant` reph candidate at the head. Sigilbuzz
-    // 0.2.0 only triggers on the Implicit mode; scripts declared as
-    // Explicit or LogRepha do not tag a reph here (their reph flow
-    // is a follow-up issue — see tracker in `src/ot/indic/mod.rs`).
-    let ra_halant_prefix = config.reph_mode == RephMode::Implicit
+    // Head-of-syllable reph detection. Three modes:
+    //
+    // * [`RephMode::Implicit`] — bare `ra + halant` at position 0
+    //   is a reph candidate (Devanagari / Bengali / Gurmukhi /
+    //   Gujarati / Oriya / Tamil / Kannada).
+    // * [`RephMode::Explicit`] — `ra + halant + ZWJ` is required
+    //   (Telugu / Sinhala). The trailing ZWJ is consumed as part of
+    //   the prefix and never ends up in the output of the rphf
+    //   ligature.
+    // * [`RephMode::LogRepha`] — a dedicated code point (Malayalam
+    //   U+0D4E DOT REPH) flags the syllable as reph-bearing
+    //   regardless of ra / halant.
+    let implicit_ra_halant = config.reph_mode == RephMode::Implicit
         && i + 1 < len
         && cps[i] as u32 == config.ra
         && cps[i + 1] as u32 == config.virama;
+    let explicit_ra_halant_zwj = config.reph_mode == RephMode::Explicit
+        && i + 2 < len
+        && cps[i] as u32 == config.ra
+        && cps[i + 1] as u32 == config.virama
+        && cps[i + 2] == '\u{200D}';
+    let logrepha_prefix = config.reph_mode == RephMode::LogRepha && cps[i] == '\u{0D4E}';
+    let ra_halant_prefix = implicit_ra_halant || explicit_ra_halant_zwj || logrepha_prefix;
+
+    // Advance past a LogRepha head so the syllable machine picks up
+    // the following base consonant as the syllable's base. For
+    // Explicit the ZWJ sits between the halant and the base; the
+    // existing (C H)+ loop below treats ZWJ as non-consonant and
+    // stops, so we walk it manually here.
+    if logrepha_prefix {
+        i += 1;
+    } else if explicit_ra_halant_zwj {
+        // Skip the ZWJ after ra+halant; the head now points at the
+        // base consonant. The ra+halant pair will be swallowed by
+        // the (C H)+ loop below as normal.
+    }
 
     let mut base_index: Option<usize> = None;
 
@@ -324,6 +376,19 @@ fn scan_consonant_syllable(cps: &[char], start: usize, config: &IndicConfig) -> 
                 // half-form / conjunct participant, not the base.
                 if i < len && syllabic_category(cps[i]) == IndicSyllabicCategory::Virama {
                     i += 1;
+                    // Optional ZWJ/ZWNJ after halant — requests an
+                    // explicit conjunct / half-form. Consumed here so
+                    // the following consonant keeps extending the
+                    // C+H loop (needed for `ra + halant + ZWJ + C`
+                    // under [`RephMode::Explicit`] in particular).
+                    if i < len
+                        && matches!(
+                            syllabic_category(cps[i]),
+                            IndicSyllabicCategory::Joiner | IndicSyllabicCategory::NonJoiner
+                        )
+                    {
+                        i += 1;
+                    }
                     continue;
                 }
                 break;
@@ -372,9 +437,22 @@ fn scan_consonant_syllable(cps: &[char], start: usize, config: &IndicConfig) -> 
         };
     }
 
-    // Reph is only real when the syllable has more consonants
-    // after the ra+halant prefix.
-    let has_reph = ra_halant_prefix && base_index.is_some_and(|b| b > start + 1);
+    // Reph is only real when the syllable has a base consonant
+    // past the prefix — otherwise the "prefix" was the whole
+    // syllable and there is no base to hang the reph off.
+    //
+    // The minimum base offset depends on the head pattern:
+    // * Implicit: `ra + halant + C` — base must sit at ≥ start+2.
+    // * Explicit: `ra + halant + ZWJ + C` — base must sit at ≥ start+3.
+    // * LogRepha: `U+0D4E + C` — base must sit at ≥ start+1.
+    let min_base_offset = if logrepha_prefix {
+        1
+    } else if explicit_ra_halant_zwj {
+        3
+    } else {
+        2
+    };
+    let has_reph = ra_halant_prefix && base_index.is_some_and(|b| b >= start + min_base_offset);
 
     Syllable {
         kind: SyllableKind::Consonant,
@@ -513,6 +591,107 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
     }
 }
 
+/// Builds a per-glyph mask for the `half` feature.
+///
+/// Default is `true` (fire `half` everywhere, matching the pre-mask
+/// behaviour). A position is flipped to `false` when:
+///
+/// 1. It sits in a consonant syllable immediately before a `virama +
+///    consonant` pair, AND
+/// 2. The font's `blwf` feature would substitute that
+///    `virama + consonant` pair.
+///
+/// That's the sigilbuzz-sized equivalent of HarfBuzz's
+/// `consonant_position_from_face` check: when the post-halant
+/// consonant is blwf-eligible, HarfBuzz tags it `POS_BELOW_C` and the
+/// base moves back to the pre-halant consonant. Under the standard
+/// Indic mask scheme the pre-halant positions then no longer get the
+/// HALF mask bit, so `half` can't fire on them. We encode the same
+/// decision directly: the mask keeps `half` off at those positions.
+///
+/// Glyph count has not yet shrunk when this runs (we call it before
+/// any GSUB feature fires), so the mask indexes match the final
+/// `glyphs` slice one-to-one.
+fn compute_half_mask(
+    gsub: &Gsub<'_>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &[Glyph],
+    config: &IndicConfig,
+    syllables: &[Syllable],
+) -> Vec<bool> {
+    let mut mask = alloc::vec![true; glyphs.len()];
+    if codepoints.len() != glyphs.len() {
+        // Decomposition expanded the glyph stream past the codepoint
+        // run or vice versa; fall back to fire-everywhere to avoid
+        // mis-indexing. Parity tests catch the over-fire case when it
+        // matters.
+        return mask;
+    }
+    for syllable in syllables {
+        if !matches!(syllable.kind, SyllableKind::Consonant) {
+            continue;
+        }
+        // Walk the syllable looking for `C + H + C` triples and check
+        // the trailing pair against `blwf`. For each eligible triple
+        // the pre-halant consonant and its halant get masked off.
+        let mut i = syllable.start;
+        while i + 2 < syllable.end {
+            let (c1, h, c2) = (codepoints[i], codepoints[i + 1], codepoints[i + 2]);
+            if !is_consonant(c1) {
+                i += 1;
+                continue;
+            }
+            if h as u32 != config.virama {
+                i += 1;
+                continue;
+            }
+            if !is_consonant(c2) {
+                i += 1;
+                continue;
+            }
+            let halant_glyph = glyphs[i + 1].glyph_id as u16;
+            let c2_glyph = glyphs[i + 2].glyph_id as u16;
+            // A post-halant consonant is below-base / post-base
+            // eligible when any of the position-establishing features
+            // would substitute it. Fonts vary: Noto Sans Devanagari
+            // exposes `blwf` for its below-base consonants, Noto Sans
+            // Gurmukhi uses `pstf` for the yakash (ya after halant),
+            // and `pref` carries pre-base-reordering Ra. Check all
+            // three both in new-spec (H+C) and old-spec (C+H) order,
+            // matching `consonant_position_from_face` in rustybuzz.
+            let eligible = [*b"blwf", *b"pstf", *b"abvf"].iter().any(|tag| {
+                feature_would_substitute(
+                    gsub,
+                    gdef,
+                    *tag,
+                    config.script_priority,
+                    &[halant_glyph, c2_glyph],
+                ) || feature_would_substitute(
+                    gsub,
+                    gdef,
+                    *tag,
+                    config.script_priority,
+                    &[c2_glyph, halant_glyph],
+                )
+            });
+            if eligible {
+                mask[i] = false;
+                mask[i + 1] = false;
+            }
+            i += 1;
+        }
+    }
+    mask
+}
+
+fn is_consonant(ch: char) -> bool {
+    matches!(
+        syllabic_category(ch),
+        IndicSyllabicCategory::Consonant | IndicSyllabicCategory::ConsonantPlaceholder
+    )
+}
+
 /// Returns a length-`codepoints.len() + 1` array mapping codepoint
 /// index to UTF-8 byte offset.
 fn cluster_byte_offsets(codepoints: &[char]) -> Vec<u32> {
@@ -536,22 +715,29 @@ fn cluster_byte_offsets(codepoints: &[char]) -> Vec<u32> {
 /// mapping works even after `rphf` has collapsed `ra + halant` into
 /// a single reph glyph.
 ///
-/// The reph target slot depends on `reph_pos`:
+/// The reph target slot is selected per-script:
 ///
-/// - [`RephPosition::BeforePost`] / [`RephPosition::AfterPost`] —
-///   reph moves to the end of the syllable, skipping any trailing
-///   SMVD marks. Matches Devanagari/Gujarati (BeforePost) and
-///   Tamil/Telugu/Kannada/Sinhala (AfterPost) on the fixtures
-///   tested because our simplified syllables never have a
-///   meaningful post-base consonant cluster in between.
-/// - [`RephPosition::AfterMain`] — reph moves to immediately after
-///   the base consonant. Used by Oriya and Malayalam.
-/// - [`RephPosition::BeforeSub`] / [`RephPosition::AfterSub`] —
-///   reph slots before/after any sub-joined (below-base) consonant.
-///   Our syllable structure collapses sub-joined forms into the
-///   same `(C halant C)*` sequence as the rest, so we currently
-///   reuse the `AfterMain` path for both; the difference surfaces
-///   in multi-halant syllables that the 0.2.0 corpus avoids.
+/// - [`RephPosition::BeforePost`] — Devanagari/Gujarati. Reph lands
+///   just before any post-base matra, i.e. immediately after the
+///   base consonant (and below-base forms, if any). For our
+///   consonant-syllable structure that collapses to "end of syllable
+///   past trailing SMVD marks", which is what the Devanagari
+///   ground-truth tests exercise.
+/// - [`RephPosition::AfterPost`] — Tamil/Telugu/Kannada/Sinhala.
+///   Reph lands after any post-base matra, i.e. at the very end of
+///   the syllable excluding trailing SMVD marks.
+/// - [`RephPosition::AfterMain`] — Oriya/Malayalam. Reph lands
+///   immediately after the base consonant (BaseC tag) and before
+///   any post-base matra / mark.
+/// - [`RephPosition::BeforeSub`] — Gurmukhi. Reph lands before any
+///   sub-joined consonant. With sigilbuzz's flat `(C halant C)*`
+///   syllable structure the sub-joined form, once generated by
+///   `blwf`/`pstf`, sits to the right of the base consonant — so
+///   the "after BaseC but before everything else" target matches
+///   the AfterMain walker in practice.
+/// - [`RephPosition::AfterSub`] — Bengali. Reph lands after any
+///   sub-joined consonant. Equivalent to "end of syllable past
+///   trailing SMVD" when no post-base matra follows.
 ///
 /// When the `rphf` feature did not fire (the font ships no reph
 /// form), the surviving `ra` glyph keeps its
@@ -568,6 +754,7 @@ fn final_reorder(
     byte_end: u32,
     original_glyph_count: usize,
     reph_pos: RephPosition,
+    reph_mode: RephMode,
 ) {
     // Collect glyph indices that belong to this syllable.
     let syllable_glyphs: Vec<usize> = glyphs
@@ -580,10 +767,13 @@ fn final_reorder(
         return;
     }
 
-    // If the syllable's glyph count did not shrink, the `rphf`
-    // feature did not fire and there is no stand-alone reph glyph
-    // to move.
-    if syllable_glyphs.len() >= original_glyph_count {
+    // For Implicit / Explicit modes the ra+halant pair collapses to
+    // a single reph glyph via `rphf`; if the glyph count did NOT
+    // shrink, the font has no reph form and there is nothing to
+    // relocate. [`RephMode::LogRepha`] is different — the logrepha
+    // is encoded as its own codepoint with its own glyph, so we
+    // always run the reorder regardless of glyph-count shrinkage.
+    if reph_mode != RephMode::LogRepha && syllable_glyphs.len() >= original_glyph_count {
         return;
     }
 
@@ -603,40 +793,36 @@ fn final_reorder(
 
     // Compute target slot per-script.
     let last_in_syllable = *syllable_glyphs.last().unwrap();
-    let target = match reph_pos {
-        // BeforePost / AfterPost / BeforeSub / AfterSub all fall
-        // back to "end of syllable, past any trailing SMVD marks"
-        // for the simplified syllables the 0.2.0 corpus covers.
-        // The distinction between these four only matters when the
-        // syllable has a sub-joined form between the base and a
-        // post-base consonant, which our machine doesn't distinguish
-        // at this layer. See the follow-up issue in `mod.rs`.
-        RephPosition::BeforePost
-        | RephPosition::AfterPost
-        | RephPosition::BeforeSub
-        | RephPosition::AfterSub => {
-            let mut t = last_in_syllable;
-            while t > reph_idx && glyphs[t].indic_position == IndicPosition::Smvd as u8 {
-                t -= 1;
-            }
-            t
+    // Walker A: "end of syllable past trailing SMVD marks" — drops
+    // vedic / cantillation marks off the tail so the reph sits just
+    // before them rather than visually at the very end. Used by
+    // BeforePost / AfterPost / AfterSub.
+    let end_past_smvd = || {
+        let mut t = last_in_syllable;
+        while t > reph_idx && glyphs[t].indic_position == IndicPosition::Smvd as u8 {
+            t -= 1;
         }
-        // AfterMain — the reph slots immediately after the base
-        // consonant. Find the base glyph in the syllable; if found
-        // and it comes after the reph, land right on it. Otherwise
-        // fall back to "end of syllable" behaviour (so a missing
-        // base tag doesn't strand the reph).
-        RephPosition::AfterMain => syllable_glyphs
+        t
+    };
+    // Walker B: "immediately after the base consonant" — lands on
+    // the BaseC tag if found after the reph, else falls back to A
+    // so we don't strand the reph on an unresolved syllable. Used by
+    // AfterMain and BeforeSub (the latter because, with our flat
+    // syllable structure, a sub-joined form sits right after the
+    // base and "before it" and "right on the base glyph" collapse
+    // to the same slot).
+    let on_base_or_end = || {
+        syllable_glyphs
             .iter()
             .copied()
             .find(|&i| i > reph_idx && glyphs[i].indic_position == IndicPosition::BaseC as u8)
-            .unwrap_or_else(|| {
-                let mut t = last_in_syllable;
-                while t > reph_idx && glyphs[t].indic_position == IndicPosition::Smvd as u8 {
-                    t -= 1;
-                }
-                t
-            }),
+            .unwrap_or_else(end_past_smvd)
+    };
+    let target = match reph_pos {
+        RephPosition::BeforePost | RephPosition::AfterPost | RephPosition::AfterSub => {
+            end_past_smvd()
+        }
+        RephPosition::AfterMain | RephPosition::BeforeSub => on_base_or_end(),
     };
 
     if target == reph_idx {
@@ -847,7 +1033,14 @@ mod tests {
         g[0].cluster = 0;
         g[1].indic_position = IndicPosition::BaseC as u8;
         g[1].cluster = 6;
-        final_reorder(&mut g, 0, 9, 3, RephPosition::BeforePost);
+        final_reorder(
+            &mut g,
+            0,
+            9,
+            3,
+            RephPosition::BeforePost,
+            RephMode::Implicit,
+        );
         assert_eq!(g[0].indic_position, IndicPosition::BaseC as u8);
         assert_eq!(g[1].indic_position, IndicPosition::RaToBecomeReph as u8);
         assert_eq!(g[1].cluster, 0);
@@ -861,7 +1054,14 @@ mod tests {
         g[2].indic_position = IndicPosition::BaseC as u8;
         g[2].cluster = 6;
         let before = g.clone();
-        final_reorder(&mut g, 0, 9, 3, RephPosition::BeforePost);
+        final_reorder(
+            &mut g,
+            0,
+            9,
+            3,
+            RephPosition::BeforePost,
+            RephMode::Implicit,
+        );
         assert_eq!(g, before, "no collapse -> no move");
     }
 
@@ -948,10 +1148,85 @@ mod tests {
         g[2].indic_position = IndicPosition::Start as u8;
         g[2].cluster = 9;
         // original glyph count was 4 (ra, halant, base, matra); now 3.
-        final_reorder(&mut g, 0, 12, 4, RephPosition::AfterMain);
+        final_reorder(
+            &mut g,
+            0,
+            12,
+            4,
+            RephPosition::AfterMain,
+            RephMode::Implicit,
+        );
         // After move: base @ 0, reph @ 1, trailing @ 2.
         assert_eq!(g[0].indic_position, IndicPosition::BaseC as u8);
         assert_eq!(g[1].indic_position, IndicPosition::RaToBecomeReph as u8);
         assert_eq!(g[2].indic_position, IndicPosition::Start as u8);
+    }
+
+    #[test]
+    fn telugu_ra_halant_zwj_consonant_marks_reph_explicit() {
+        // Telugu's Explicit reph mode: ra + halant + ZWJ + C tags
+        // the ra as a reph candidate; bare ra+halant alone does not
+        // (see issue #30).
+        let cp = cps("\u{0C30}\u{0C4D}\u{200D}\u{0C15}");
+        let config = indic_config_for(Script::Telugu).unwrap();
+        let syl = segment_syllables(&cp, &config);
+        assert_eq!(syl.len(), 1);
+        assert!(
+            syl[0].has_reph,
+            "explicit ra+halant+ZWJ+C should be tagged as reph"
+        );
+        // Base must sit past the ZWJ.
+        assert_eq!(syl[0].base_index, Some(3));
+    }
+
+    #[test]
+    fn malayalam_logrepha_head_marks_reph() {
+        // Malayalam's LogRepha mode: U+0D4E at syllable head is
+        // itself the reph, and the following consonant becomes
+        // the base (see issue #31).
+        let cp = cps("\u{0D4E}\u{0D15}");
+        let config = indic_config_for(Script::Malayalam).unwrap();
+        let syl = segment_syllables(&cp, &config);
+        assert_eq!(syl.len(), 1);
+        assert!(syl[0].has_reph, "LogRepha head should tag as reph");
+        assert_eq!(syl[0].base_index, Some(1));
+    }
+
+    #[test]
+    fn logrepha_reorder_moves_reph_past_base() {
+        // LogRepha fixture: the 0D4E glyph sits at pos 0, base at
+        // pos 1. AfterMain target puts the repha right after the
+        // base — [repha, base] → [base, repha].
+        let mut g = fake_glyphs(2);
+        g[0].indic_position = IndicPosition::RaToBecomeReph as u8;
+        g[0].cluster = 0;
+        g[1].indic_position = IndicPosition::BaseC as u8;
+        g[1].cluster = 3;
+        // Original glyph count 2, no shrinkage — LogRepha mode must
+        // still relocate because the repha is a standalone glyph
+        // rather than an `rphf` ligature product.
+        final_reorder(&mut g, 0, 6, 2, RephPosition::AfterMain, RephMode::LogRepha);
+        assert_eq!(g[0].indic_position, IndicPosition::BaseC as u8);
+        assert_eq!(g[1].indic_position, IndicPosition::RaToBecomeReph as u8);
+    }
+
+    #[test]
+    fn tamil_split_matra_decomposes() {
+        // U+0BCB (OO) should be split into U+0BC7 + U+0BBE.
+        let parts = super::super::split_matra_decompose('\u{0BCB}');
+        assert_eq!(parts, Some(&['\u{0BC7}', '\u{0BBE}'][..]));
+    }
+
+    #[test]
+    fn sinhala_three_part_matra_decomposes() {
+        // U+0DDD splits into three components.
+        let parts = super::super::split_matra_decompose('\u{0DDD}');
+        assert_eq!(parts, Some(&['\u{0DD9}', '\u{0DCF}', '\u{0DCA}'][..]));
+    }
+
+    #[test]
+    fn non_split_matra_returns_none() {
+        assert!(super::super::split_matra_decompose('\u{0BBE}').is_none());
+        assert!(super::super::split_matra_decompose('\u{0D15}').is_none());
     }
 }
