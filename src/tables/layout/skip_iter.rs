@@ -196,12 +196,7 @@ impl<'a> MatchFilter<'a> {
     /// glyph is filtered out.
     #[must_use]
     pub fn prev_unskipped(&self, glyphs: &[u16], end: usize) -> Option<usize> {
-        for i in (0..end).rev() {
-            if !self.is_skipped(glyphs[i]) {
-                return Some(i);
-            }
-        }
-        None
+        (0..end).rev().find(|&i| !self.is_skipped(glyphs[i]))
     }
 }
 
@@ -251,7 +246,12 @@ impl<'g, 'f> SkipIter<'g, 'f> {
     /// Returns the next unfiltered glyph at or after the current
     /// cursor, advancing the cursor past it. `None` when the tail
     /// contains only filtered glyphs.
-    pub fn next(&mut self) -> Option<(usize, u16)> {
+    ///
+    /// Named `next_glyph` (rather than `next`) so it does not shadow
+    /// the [`Iterator::next`] trait method; sigilbuzz never wraps the
+    /// iterator in a trait object so a free method is easier to
+    /// reason about than an iterator impl.
+    pub fn next_glyph(&mut self) -> Option<(usize, u16)> {
         while self.cursor < self.glyphs.len() {
             let i = self.cursor;
             let g = self.glyphs[i];
@@ -266,7 +266,7 @@ impl<'g, 'f> SkipIter<'g, 'f> {
     /// Returns the next unfiltered glyph strictly before the current
     /// cursor, decrementing the cursor past it. `None` when the
     /// prefix contains only filtered glyphs.
-    pub fn prev(&mut self) -> Option<(usize, u16)> {
+    pub fn prev_glyph(&mut self) -> Option<(usize, u16)> {
         while self.cursor > 0 {
             self.cursor -= 1;
             let i = self.cursor;
@@ -335,7 +335,7 @@ mod tests {
         let f = MatchFilter::none();
         let glyphs = [10u16, 11, 12, 13];
         let mut it = SkipIter::new(&glyphs, &f, 0);
-        let seen: Vec<_> = core::iter::from_fn(|| it.next()).collect();
+        let seen: Vec<_> = core::iter::from_fn(|| it.next_glyph()).collect();
         assert_eq!(seen, [(0, 10), (1, 11), (2, 12), (3, 13)]);
     }
 
@@ -348,7 +348,7 @@ mod tests {
         assert!(!f.is_pass_through());
         let glyphs = [10u16, 11, 12, 13, 14];
         let mut it = SkipIter::new(&glyphs, &f, 0);
-        let seen: Vec<_> = core::iter::from_fn(|| it.next()).collect();
+        let seen: Vec<_> = core::iter::from_fn(|| it.next_glyph()).collect();
         assert_eq!(seen, [(0, 10), (2, 12), (4, 14)]);
     }
 
@@ -359,7 +359,7 @@ mod tests {
         let f = MatchFilter::for_lookup(LOOKUP_FLAG_IGNORE_BASE_GLYPHS, Some(&gdef), None);
         let glyphs = [10u16, 11, 12, 13];
         let mut it = SkipIter::new(&glyphs, &f, 0);
-        let seen: Vec<_> = core::iter::from_fn(|| it.next()).collect();
+        let seen: Vec<_> = core::iter::from_fn(|| it.next_glyph()).collect();
         // 10 base skipped; 11 mark kept; 12 base skipped; 13 liga kept.
         assert_eq!(seen, [(1, 11), (3, 13)]);
     }
@@ -371,7 +371,7 @@ mod tests {
         let f = MatchFilter::for_lookup(LOOKUP_FLAG_IGNORE_LIGATURES, Some(&gdef), None);
         let glyphs = [10u16, 11, 12, 13];
         let mut it = SkipIter::new(&glyphs, &f, 0);
-        let seen: Vec<_> = core::iter::from_fn(|| it.next()).collect();
+        let seen: Vec<_> = core::iter::from_fn(|| it.next_glyph()).collect();
         assert_eq!(seen, [(0, 10), (2, 12)]);
     }
 
@@ -384,10 +384,10 @@ mod tests {
         // Start "after" the last glyph so prev() returns the last
         // unfiltered position first.
         let mut it = SkipIter::new(&glyphs, &f, glyphs.len());
-        assert_eq!(it.prev(), Some((4, 14)));
-        assert_eq!(it.prev(), Some((2, 12)));
-        assert_eq!(it.prev(), Some((0, 10)));
-        assert_eq!(it.prev(), None);
+        assert_eq!(it.prev_glyph(), Some((4, 14)));
+        assert_eq!(it.prev_glyph(), Some((2, 12)));
+        assert_eq!(it.prev_glyph(), Some((0, 10)));
+        assert_eq!(it.prev_glyph(), None);
     }
 
     #[test]
@@ -399,8 +399,8 @@ mod tests {
         let mut it = SkipIter::new(&glyphs, &f, 0);
         assert_eq!(it.peek(), Some((1, 11)));
         assert_eq!(it.peek(), Some((1, 11)));
-        assert_eq!(it.next(), Some((1, 11)));
-        assert_eq!(it.next(), None);
+        assert_eq!(it.next_glyph(), Some((1, 11)));
+        assert_eq!(it.next_glyph(), None);
     }
 
     #[test]
@@ -408,11 +408,11 @@ mod tests {
         let glyphs = [5u16, 6, 7, 8];
         let f = MatchFilter::none();
         let mut it = SkipIter::new(&glyphs, &f, 0);
-        assert_eq!(it.next(), Some((0, 5)));
-        assert_eq!(it.next(), Some((1, 6)));
+        assert_eq!(it.next_glyph(), Some((0, 5)));
+        assert_eq!(it.next_glyph(), Some((1, 6)));
         it.reset(3);
-        assert_eq!(it.next(), Some((3, 8)));
-        assert_eq!(it.next(), None);
+        assert_eq!(it.next_glyph(), Some((3, 8)));
+        assert_eq!(it.next_glyph(), None);
     }
 
     #[test]

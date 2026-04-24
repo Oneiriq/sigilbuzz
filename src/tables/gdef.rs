@@ -190,10 +190,10 @@ fn parse_optional_class_def<'a>(
     ClassDef::parse(sub).map(Some)
 }
 
-fn parse_mark_glyph_sets<'a>(
-    data: &'a [u8],
+fn parse_mark_glyph_sets(
+    data: &[u8],
     sub_off: usize,
-) -> Result<alloc::vec::Vec<Coverage<'a>>> {
+) -> Result<alloc::vec::Vec<Coverage<'_>>> {
     // Layout:
     //   u16 format (= 1)
     //   u16 markGlyphSetCount

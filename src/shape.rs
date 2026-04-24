@@ -426,7 +426,7 @@ const fn is_default_ignorable(ch: char) -> bool {
 /// sigilbuzz follows suit. User-enabled features beyond that list
 /// are dispatched afterwards, respecting their 1-indexed
 /// alternate-selector value.
-#[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 fn run_default_gsub(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
@@ -809,6 +809,7 @@ fn apply_gsub_lookup(
 /// first invocation and each recursive edge increments by one; we
 /// bail out at [`MAX_NESTED_DEPTH`] so a pathological font loop
 /// cannot overflow the stack.
+#[allow(clippy::too_many_lines)]
 fn apply_gsub_lookup_at(
     gsub: &Gsub<'_>,
     lookup_idx: u16,
@@ -1044,6 +1045,7 @@ fn apply_gsub_chain_context_at(
 /// from `at` to find the corresponding raw index — marks (or other
 /// skipped glyphs) between matched components never appear in the
 /// sequence-index space.
+#[allow(clippy::too_many_arguments)]
 fn apply_nested_gsub_lookups(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
@@ -1390,6 +1392,7 @@ pub(crate) fn apply_gpos_feature_in_scripts(
         let Some(lookup) = lookup_list.get(lookup_idx) else {
             continue;
         };
+        let filter = filter_for_lookup(&lookup, gdef);
         let raw_lt = lookup.lookup_type();
         for sub_idx in 0..lookup.subtable_count() {
             let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
@@ -1409,49 +1412,49 @@ pub(crate) fn apply_gpos_feature_in_scripts(
                     let Ok(sp) = SinglePos::parse(inner_bytes) else {
                         continue;
                     };
-                    apply_single_pos(&sp, glyphs);
+                    apply_single_pos(&sp, glyphs, &filter);
                     ran_any = true;
                 }
                 gpos_lt::PAIR_ADJUSTMENT => {
                     let Ok(pp) = PairPos::parse(inner_bytes) else {
                         continue;
                     };
-                    apply_pair_pos(&pp, glyphs);
+                    apply_pair_pos(&pp, glyphs, &filter);
                     ran_any = true;
                 }
                 gpos_lt::MARK_TO_BASE => {
                     let Ok(mbp) = MarkBasePos::parse(inner_bytes) else {
                         continue;
                     };
-                    apply_mark_base(&mbp, glyphs, gdef);
+                    apply_mark_base(&mbp, glyphs, gdef, &filter);
                     ran_any = true;
                 }
                 gpos_lt::MARK_TO_LIGATURE => {
                     let Ok(mlp) = MarkLigaPos::parse(inner_bytes) else {
                         continue;
                     };
-                    apply_mark_liga(&mlp, glyphs, gdef);
+                    apply_mark_liga(&mlp, glyphs, gdef, &filter);
                     ran_any = true;
                 }
                 gpos_lt::MARK_TO_MARK => {
                     let Ok(mmp) = MarkMarkPos::parse(inner_bytes) else {
                         continue;
                     };
-                    apply_mark_mark(&mmp, glyphs, gdef);
+                    apply_mark_mark(&mmp, glyphs, gdef, &filter);
                     ran_any = true;
                 }
                 gpos_lt::CONTEXT => {
                     let Ok(ctx) = ContextPos::parse(inner_bytes) else {
                         continue;
                     };
-                    apply_gpos_context_subtable(gpos, &ctx, glyphs, gdef);
+                    apply_gpos_context_subtable(gpos, &ctx, glyphs, gdef, &filter);
                     ran_any = true;
                 }
                 gpos_lt::CHAINED_CONTEXT => {
                     let Ok(chain) = ChainContextPos::parse(inner_bytes) else {
                         continue;
                     };
-                    apply_gpos_chain_context_subtable(gpos, &chain, glyphs, gdef);
+                    apply_gpos_chain_context_subtable(gpos, &chain, glyphs, gdef, &filter);
                     ran_any = true;
                 }
                 _ => {}
@@ -1470,6 +1473,7 @@ pub(crate) fn apply_gpos_feature_in_scripts(
 ///
 /// `depth` guards against runaway recursion the same way the GSUB
 /// side does; bail out silently once we hit [`MAX_NESTED_DEPTH`].
+#[allow(clippy::too_many_lines)]
 fn apply_gpos_lookup_at(
     gpos: &Gpos<'_>,
     lookup_idx: u16,
@@ -1488,6 +1492,7 @@ fn apply_gpos_lookup_at(
     let Some(lookup) = lookup_list.get(lookup_idx) else {
         return;
     };
+    let filter = filter_for_lookup(&lookup, gdef);
     let raw_lt = lookup.lookup_type();
     for sub_idx in 0..lookup.subtable_count() {
         let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
@@ -1508,6 +1513,9 @@ fn apply_gpos_lookup_at(
                     continue;
                 };
                 let id = glyphs[at].glyph_id as u16;
+                if filter.is_skipped(id) {
+                    continue;
+                }
                 if let Some(v) = sp.adjustment(id) {
                     glyphs[at].x_offset += i32::from(v.x_placement);
                     glyphs[at].y_offset += i32::from(v.y_placement);
@@ -1520,18 +1528,26 @@ fn apply_gpos_lookup_at(
                 let Ok(pp) = PairPos::parse(inner_bytes) else {
                     continue;
                 };
-                if at + 1 < glyphs.len() {
-                    let first = glyphs[at].glyph_id as u16;
-                    let second = glyphs[at + 1].glyph_id as u16;
-                    if let Some((v1, v2)) = pp.lookup(first, second) {
-                        glyphs[at].x_advance += i32::from(v1.x_advance);
-                        glyphs[at].x_offset += i32::from(v1.x_placement);
-                        glyphs[at].y_offset += i32::from(v1.y_placement);
-                        glyphs[at + 1].x_advance += i32::from(v2.x_advance);
-                        glyphs[at + 1].x_offset += i32::from(v2.x_placement);
-                        glyphs[at + 1].y_offset += i32::from(v2.y_placement);
-                        return;
-                    }
+                let first = glyphs[at].glyph_id as u16;
+                if filter.is_skipped(first) {
+                    continue;
+                }
+                // Look up the partner via the skip-iterator so that
+                // marks (or any other filtered class) between two
+                // kerned bases do not defeat the match.
+                let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
+                let Some(partner) = filter.next_unskipped(&ids, at + 1) else {
+                    continue;
+                };
+                let second = glyphs[partner].glyph_id as u16;
+                if let Some((v1, v2)) = pp.lookup(first, second) {
+                    glyphs[at].x_advance += i32::from(v1.x_advance);
+                    glyphs[at].x_offset += i32::from(v1.x_placement);
+                    glyphs[at].y_offset += i32::from(v1.y_placement);
+                    glyphs[partner].x_advance += i32::from(v2.x_advance);
+                    glyphs[partner].x_offset += i32::from(v2.x_placement);
+                    glyphs[partner].y_offset += i32::from(v2.y_placement);
+                    return;
                 }
             }
             gpos_lt::MARK_TO_BASE => {
@@ -1542,35 +1558,35 @@ fn apply_gpos_lookup_at(
                 // the subtable driver on a single-position slice.
                 // We pass the whole glyph slice so the driver can
                 // walk back to the actual base.
-                apply_mark_base(&mbp, glyphs, gdef);
+                apply_mark_base(&mbp, glyphs, gdef, &filter);
                 return;
             }
             gpos_lt::MARK_TO_LIGATURE => {
                 let Ok(mlp) = MarkLigaPos::parse(inner_bytes) else {
                     continue;
                 };
-                apply_mark_liga(&mlp, glyphs, gdef);
+                apply_mark_liga(&mlp, glyphs, gdef, &filter);
                 return;
             }
             gpos_lt::MARK_TO_MARK => {
                 let Ok(mmp) = MarkMarkPos::parse(inner_bytes) else {
                     continue;
                 };
-                apply_mark_mark(&mmp, glyphs, gdef);
+                apply_mark_mark(&mmp, glyphs, gdef, &filter);
                 return;
             }
             gpos_lt::CONTEXT => {
                 let Ok(ctx) = ContextPos::parse(inner_bytes) else {
                     continue;
                 };
-                apply_gpos_context_at(gpos, &ctx, glyphs, gdef, at, depth + 1);
+                apply_gpos_context_at(gpos, &ctx, glyphs, gdef, &filter, at, depth + 1);
                 return;
             }
             gpos_lt::CHAINED_CONTEXT => {
                 let Ok(chain) = ChainContextPos::parse(inner_bytes) else {
                     continue;
                 };
-                apply_gpos_chain_context_at(gpos, &chain, glyphs, gdef, at, depth + 1);
+                apply_gpos_chain_context_at(gpos, &chain, glyphs, gdef, &filter, at, depth + 1);
                 return;
             }
             _ => {}
@@ -1585,10 +1601,11 @@ fn apply_gpos_context_subtable(
     ctx: &ContextPos<'_>,
     glyphs: &mut [Glyph],
     gdef: Option<&Gdef<'_>>,
+    filter: &MatchFilter<'_>,
 ) {
     let mut i = 0;
     while i < glyphs.len() {
-        let consumed = apply_gpos_context_at(gpos, ctx, glyphs, gdef, i, 0);
+        let consumed = apply_gpos_context_at(gpos, ctx, glyphs, gdef, filter, i, 0);
         if consumed > 0 {
             i += consumed;
         } else {
@@ -1604,10 +1621,11 @@ fn apply_gpos_chain_context_subtable(
     chain: &ChainContextPos<'_>,
     glyphs: &mut [Glyph],
     gdef: Option<&Gdef<'_>>,
+    filter: &MatchFilter<'_>,
 ) {
     let mut i = 0;
     while i < glyphs.len() {
-        let consumed = apply_gpos_chain_context_at(gpos, chain, glyphs, gdef, i, 0);
+        let consumed = apply_gpos_chain_context_at(gpos, chain, glyphs, gdef, filter, i, 0);
         if consumed > 0 {
             i += consumed;
         } else {
@@ -1621,34 +1639,32 @@ fn apply_gpos_context_at(
     ctx: &ContextPos<'_>,
     glyphs: &mut [Glyph],
     gdef: Option<&Gdef<'_>>,
+    filter: &MatchFilter<'_>,
     at: usize,
     depth: u8,
 ) -> usize {
     let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
     let (input_len, lookups): (usize, Vec<SequenceLookupRecord>) = match ctx {
         ContextPos::Format1(c) => {
-            let Some((n, lks)) = c.matches(&ids, at) else {
+            let Some((n, lks)) = c.matches_filtered(&ids, at, filter) else {
                 return 0;
             };
             (n, lks.to_vec())
         }
         ContextPos::Format2(c) => {
-            let Some((n, lks)) = c.matches(&ids, at) else {
+            let Some((n, lks)) = c.matches_filtered(&ids, at, filter) else {
                 return 0;
             };
             (n, lks.to_vec())
         }
         ContextPos::Format3(c) => {
-            if !c.matches(&ids, at) {
+            let Some(n) = c.matches_filtered(&ids, at, filter) else {
                 return 0;
-            }
-            (c.input().len(), c.lookups().to_vec())
+            };
+            (n, c.lookups().to_vec())
         }
     };
-    for rec in &lookups {
-        let pos = at + rec.sequence_index as usize;
-        apply_gpos_lookup_at(gpos, rec.lookup_list_index, glyphs, gdef, pos, depth);
-    }
+    apply_nested_gpos_lookups(gpos, glyphs, gdef, filter, &ids, at, depth, &lookups);
     input_len.max(1)
 }
 
@@ -1657,35 +1673,67 @@ fn apply_gpos_chain_context_at(
     chain: &ChainContextPos<'_>,
     glyphs: &mut [Glyph],
     gdef: Option<&Gdef<'_>>,
+    filter: &MatchFilter<'_>,
     at: usize,
     depth: u8,
 ) -> usize {
     let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
     let (input_len, lookups): (usize, Vec<SequenceLookupRecord>) = match chain {
         ChainContextPos::Format1(c) => {
-            let Some((n, lks)) = c.matches(&ids, at) else {
+            let Some((n, lks)) = c.matches_filtered(&ids, at, filter) else {
                 return 0;
             };
             (n, lks.to_vec())
         }
         ChainContextPos::Format2(c) => {
-            let Some((n, lks)) = c.matches(&ids, at) else {
+            let Some((n, lks)) = c.matches_filtered(&ids, at, filter) else {
                 return 0;
             };
             (n, lks.to_vec())
         }
         ChainContextPos::Format3(c) => {
-            if !c.matches(&ids, at) {
+            let Some(n) = c.matches_filtered(&ids, at, filter) else {
                 return 0;
-            }
-            (c.context_len().1, c.lookups().to_vec())
+            };
+            (n, c.lookups().to_vec())
         }
     };
-    for rec in &lookups {
-        let pos = at + rec.sequence_index as usize;
+    apply_nested_gpos_lookups(gpos, glyphs, gdef, filter, &ids, at, depth, &lookups);
+    input_len.max(1)
+}
+
+/// See [`apply_nested_gsub_lookups`] — this is the GPOS twin.
+#[allow(clippy::too_many_arguments)]
+fn apply_nested_gpos_lookups(
+    gpos: &Gpos<'_>,
+    glyphs: &mut [Glyph],
+    gdef: Option<&Gdef<'_>>,
+    filter: &MatchFilter<'_>,
+    ids: &[u16],
+    at: usize,
+    depth: u8,
+    lookups: &[SequenceLookupRecord],
+) {
+    for rec in lookups {
+        let seq = rec.sequence_index as usize;
+        let pos = if seq == 0 {
+            at
+        } else {
+            let mut cursor = at + 1;
+            let mut pos = at;
+            for _ in 0..seq {
+                match filter.next_unskipped(ids, cursor) {
+                    Some(p) => {
+                        pos = p;
+                        cursor = p + 1;
+                    }
+                    None => return,
+                }
+            }
+            pos
+        };
         apply_gpos_lookup_at(gpos, rec.lookup_list_index, glyphs, gdef, pos, depth);
     }
-    input_len.max(1)
 }
 
 /// Default-LangSys lookup-index collection for a GPOS feature tag,
@@ -1762,12 +1810,15 @@ fn gpos_lookup_indices_for_feature_in_scripts(
 }
 
 /// Walks the run and applies the single-adjustment subtable to
-/// every covered glyph. HarfBuzz ignores marks for single pos
-/// only when the lookup flag says so; we match that in a future
-/// pass.
-fn apply_single_pos(sp: &SinglePos<'_>, glyphs: &mut [Glyph]) {
+/// every covered glyph. Glyphs filtered out by the lookup flag
+/// (marks / bases / ligatures per the active LookupFlag) are
+/// skipped.
+fn apply_single_pos(sp: &SinglePos<'_>, glyphs: &mut [Glyph], filter: &MatchFilter<'_>) {
     for glyph in glyphs.iter_mut() {
         let id = glyph.glyph_id as u16;
+        if filter.is_skipped(id) {
+            continue;
+        }
         if let Some(v) = sp.adjustment(id) {
             glyph.x_offset += i32::from(v.x_placement);
             glyph.y_offset += i32::from(v.y_placement);
@@ -1781,7 +1832,18 @@ fn apply_single_pos(sp: &SinglePos<'_>, glyphs: &mut [Glyph]) {
 /// nearest preceding base and attaches via the subtable's anchor
 /// tables. Without GDEF we cannot distinguish marks from bases and
 /// the pass is a no-op — that matches HarfBuzz's behaviour.
-fn apply_mark_base(mbp: &MarkBasePos<'_>, glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>) {
+///
+/// The lookup's `LookupFlag` gates which marks participate. A lookup
+/// that carries a `UseMarkFilteringSet` or `MarkAttachmentType`
+/// restriction skips marks that fall outside the active subset; the
+/// shaper walks the same stream, only the "is this a candidate
+/// mark?" predicate changes.
+fn apply_mark_base(
+    mbp: &MarkBasePos<'_>,
+    glyphs: &mut [Glyph],
+    gdef: Option<&Gdef<'_>>,
+    filter: &MatchFilter<'_>,
+) {
     let Some(gdef) = gdef else {
         return;
     };
@@ -1789,6 +1851,10 @@ fn apply_mark_base(mbp: &MarkBasePos<'_>, glyphs: &mut [Glyph], gdef: Option<&Gd
     for i in 0..glyphs.len() {
         let mark_gid = glyphs[i].glyph_id as u16;
         if !gdef.glyph_class(mark_gid).is_mark() {
+            continue;
+        }
+        // LookupFlag gating: skip marks the filter tells us to ignore.
+        if filter.is_skipped(mark_gid) {
             continue;
         }
         // Walk back to the nearest base. The immediate preceding
@@ -1832,7 +1898,12 @@ fn apply_mark_base(mbp: &MarkBasePos<'_>, glyphs: &mut [Glyph], gdef: Option<&Gd
 /// exactly one component, and degrades gracefully (falls through
 /// to a base-component anchor) when the subtable only carries
 /// anchors for lower component indices.
-fn apply_mark_liga(mlp: &MarkLigaPos<'_>, glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>) {
+fn apply_mark_liga(
+    mlp: &MarkLigaPos<'_>,
+    glyphs: &mut [Glyph],
+    gdef: Option<&Gdef<'_>>,
+    filter: &MatchFilter<'_>,
+) {
     let Some(gdef) = gdef else {
         return;
     };
@@ -1840,6 +1911,9 @@ fn apply_mark_liga(mlp: &MarkLigaPos<'_>, glyphs: &mut [Glyph], gdef: Option<&Gd
     for i in 0..glyphs.len() {
         let mark_gid = glyphs[i].glyph_id as u16;
         if !gdef.glyph_class(mark_gid).is_mark() {
+            continue;
+        }
+        if filter.is_skipped(mark_gid) {
             continue;
         }
         let Some(base_i) = (0..i).rev().find(|&j| {
@@ -1881,7 +1955,12 @@ fn apply_mark_liga(mlp: &MarkLigaPos<'_>, glyphs: &mut [Glyph], gdef: Option<&Gd
 /// preceding mark glyph, using the subtable's mark1/mark2 anchor
 /// pair. The previous glyph must itself be a mark (per GDEF) for
 /// this lookup to fire; otherwise mark-to-base handles the case.
-fn apply_mark_mark(mmp: &MarkMarkPos<'_>, glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>) {
+fn apply_mark_mark(
+    mmp: &MarkMarkPos<'_>,
+    glyphs: &mut [Glyph],
+    gdef: Option<&Gdef<'_>>,
+    filter: &MatchFilter<'_>,
+) {
     let Some(gdef) = gdef else {
         return;
     };
@@ -1889,6 +1968,9 @@ fn apply_mark_mark(mmp: &MarkMarkPos<'_>, glyphs: &mut [Glyph], gdef: Option<&Gd
     for i in 1..glyphs.len() {
         let mark1_gid = glyphs[i].glyph_id as u16;
         if !gdef.glyph_class(mark1_gid).is_mark() {
+            continue;
+        }
+        if filter.is_skipped(mark1_gid) {
             continue;
         }
         let mark2_gid = glyphs[i - 1].glyph_id as u16;
@@ -1970,18 +2052,37 @@ fn resolve_extension(bytes: &[u8]) -> Option<(u16, &[u8])> {
     bytes.get(inner_off..).map(|inner| (inner_type, inner))
 }
 
-fn apply_pair_pos(pp: &PairPos<'_>, glyphs: &mut [Glyph]) {
-    for i in 0..glyphs.len().saturating_sub(1) {
-        let first = glyphs[i].glyph_id as u16;
-        let second = glyphs[i + 1].glyph_id as u16;
+fn apply_pair_pos(pp: &PairPos<'_>, glyphs: &mut [Glyph], filter: &MatchFilter<'_>) {
+    if glyphs.len() < 2 {
+        return;
+    }
+    // Precompute the id vector once — the filter cost is one GDEF
+    // lookup per hop, but walking the whole window fresh per index
+    // via next_unskipped already avoids revisiting filtered glyphs.
+    let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
+    let mut i = 0;
+    while i + 1 < glyphs.len() {
+        let first = ids[i];
+        if filter.is_skipped(first) {
+            i += 1;
+            continue;
+        }
+        let Some(j) = filter.next_unskipped(&ids, i + 1) else {
+            break;
+        };
+        let second = ids[j];
         if let Some((v1, v2)) = pp.lookup(first, second) {
             glyphs[i].x_advance += i32::from(v1.x_advance);
             glyphs[i].x_offset += i32::from(v1.x_placement);
             glyphs[i].y_offset += i32::from(v1.y_placement);
-            glyphs[i + 1].x_advance += i32::from(v2.x_advance);
-            glyphs[i + 1].x_offset += i32::from(v2.x_placement);
-            glyphs[i + 1].y_offset += i32::from(v2.y_placement);
+            glyphs[j].x_advance += i32::from(v2.x_advance);
+            glyphs[j].x_offset += i32::from(v2.x_placement);
+            glyphs[j].y_offset += i32::from(v2.y_placement);
         }
+        // Advance to the position of the second glyph; HarfBuzz uses
+        // a per-pair stride so a single glyph can kern against both
+        // its left and right neighbours in one pass.
+        i = j;
     }
 }
 

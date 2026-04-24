@@ -152,16 +152,6 @@ impl<'a> Ligature<'a> {
     }
 }
 
-/// Attempts to match one Ligature record. Returns
-/// `Some((ligature_glyph, consumed))` on a match where `consumed` is
-/// the total number of input glyphs the ligature eats (including the
-/// first, coverage-matched one).
-#[cfg(test)]
-fn try_match_ligature(lig_bytes: &[u8], glyphs: &[u16]) -> Option<(u16, usize)> {
-    let positions = try_match_ligature_filtered(lig_bytes, glyphs, &MatchFilter::none())?;
-    Some((positions.0, positions.1.last().copied().map_or(0, |p| p + 1)))
-}
-
 /// Filter-aware ligature match. Returns `(ligature_glyph, positions)`
 /// where `positions[k]` is the relative index into `glyphs` of the
 /// `k`-th matched component. The first component is always at index
