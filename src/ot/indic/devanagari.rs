@@ -597,12 +597,11 @@ fn final_reorder(
     }
 
     // Find the reph within this syllable.
-    let reph_idx = match syllable_glyphs
+    let Some(&reph_idx) = syllable_glyphs
         .iter()
         .find(|&&i| glyphs[i].indic_position == IndicPosition::RaToBecomeReph as u8)
-    {
-        Some(&i) => i,
-        None => return,
+    else {
+        return;
     };
 
     let first_in_syllable = *syllable_glyphs.first().unwrap();
@@ -656,6 +655,7 @@ fn final_reorder(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     fn cps(s: &str) -> Vec<char> {
         s.chars().collect()

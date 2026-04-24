@@ -101,17 +101,56 @@ const CORPUS: &[Case] = &[
         compare_rustybuzz: true,
         note: "jnya (akhand ligature)",
     },
-    // र् क — reph + ka. sigilbuzz defers final reorder pending
-    // per-glyph masks, so the reph glyph order diverges from
-    // rustybuzz (rustybuzz moves reph to after the base via final
-    // reorder; sigilbuzz leaves it at the syllable start). Listed
-    // here with `compare_rustybuzz: false` so the test still
-    // exercises the segmentation + rphf feature path without
-    // flagging the known-stubbed step.
+    // र्क — reph + ka. `rphf` collapses ra+halant into a single
+    // reph glyph; the final-reorder pass moves that glyph from
+    // the syllable head to its display slot (after the base for
+    // Devanagari's `BeforePost` reph position).
     Case {
         text: "\u{0930}\u{094D}\u{0915}",
-        compare_rustybuzz: false,
-        note: "reph (stubbed final reorder)",
+        compare_rustybuzz: true,
+        note: "reph + ka",
+    },
+    // र्म — reph + ma. Same shape family as र्क but with a
+    // different base consonant; guards against per-base-glyph
+    // quirks in the reorder.
+    Case {
+        text: "\u{0930}\u{094D}\u{092E}",
+        compare_rustybuzz: true,
+        note: "reph + ma",
+    },
+    // वर्ष — va + ra + halant + sha. The first syllable (व) is a
+    // plain consonant; the second (र्ष) is a reph + sha. Exercises
+    // the reorder inside a multi-syllable run so the cluster-range
+    // syllable mapping is tested end-to-end.
+    Case {
+        text: "\u{0935}\u{0930}\u{094D}\u{0937}",
+        compare_rustybuzz: true,
+        note: "varsha (reph in second syllable)",
+    },
+    // अर्थ — a + ra + halant + tha. Independent vowel followed by
+    // a reph syllable; the reorder must not affect the vowel
+    // syllable and must land the reph after the tha base.
+    Case {
+        text: "\u{0905}\u{0930}\u{094D}\u{0925}",
+        compare_rustybuzz: true,
+        note: "artha (vowel + reph syllable)",
+    },
+    // र्कि — reph + ka + pre-base i. Pre-base matra reorder plus
+    // reph reorder plus a presentation-feature substitution
+    // (Noto Sans Devanagari swaps in the reph-with-hook form when
+    // followed by a pre-base i). Full parity here means the
+    // indic_position tagging survives every pass.
+    Case {
+        text: "\u{0930}\u{094D}\u{0915}\u{093F}",
+        compare_rustybuzz: true,
+        note: "reph + ka + pre-base i",
+    },
+    // र्के — reph + ka + post-base e. Matra is visually above the
+    // base; reph sits between the base and the post-base mark.
+    Case {
+        text: "\u{0930}\u{094D}\u{0915}\u{0947}",
+        compare_rustybuzz: true,
+        note: "reph + ka + post-base e",
     },
 ];
 
