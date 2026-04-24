@@ -203,7 +203,16 @@ impl<'a> Script<'a> {
                 core::cmp::Ordering::Less => lo = mid + 1,
                 core::cmp::Ordering::Greater => hi = mid,
                 core::cmp::Ordering::Equal => {
-                    let abs_off = (self.base + rel_off as usize) as u16;
+                    // `rel_off` is relative to the Script table
+                    // start; `LangSys::parse_at` takes an absolute
+                    // u16 offset into `data`. The naïve `(self.base
+                    // + rel_off) as u16` silently wraps when the sum
+                    // exceeds `u16::MAX` — a Script placed past
+                    // offset 0x8000 combined with a large rel_off is
+                    // enough to do this. Surface overflow as a miss
+                    // so a crafted font cannot redirect the parse to
+                    // a wrapped-around location inside the blob.
+                    let abs_off = u16::try_from(self.base + rel_off as usize).ok()?;
                     return LangSys::parse_at(self.data, abs_off).ok();
                 }
             }
@@ -495,5 +504,47 @@ mod tests {
             ScriptList::parse(&bytes),
             Err(Error::Truncated { .. })
         ));
+    }
+
+    #[test]
+    fn find_lang_sys_returns_none_when_absolute_offset_overflows_u16() {
+        // Construct a ScriptList where Script sits at offset 0x8010
+        // and declares a langSysRecord with rel_off 0x8000. The
+        // buggy `(base + rel_off) as u16` wraps to 0x0010, where we
+        // planted a byte-valid LangSys (feature_indices = [42]). A
+        // correct implementation must not silently use that wrapped
+        // location — it must report the offset as unreachable.
+        let script_off: u16 = 0x8010;
+        let rel_off: u16 = 0x8000; // base(0x8010) + rel(0x8000) = 0x10010 → wraps to 0x0010
+        let wrap_to: usize = 0x0010;
+
+        let mut bytes = Vec::new();
+        // scriptCount = 1.
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        // One ScriptRecord: tag + u16 scriptOffset.
+        bytes.extend_from_slice(b"test");
+        bytes.extend_from_slice(&script_off.to_be_bytes());
+        // Pad to offset 0x10; plant a byte-valid LangSys there so a
+        // buggy lookup would silently parse it.
+        bytes.resize(wrap_to, 0);
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // lookupOrder
+        bytes.extend_from_slice(&0xFFFFu16.to_be_bytes()); // requiredFeatureIndex
+        bytes.extend_from_slice(&1u16.to_be_bytes()); // featureIndexCount
+        bytes.extend_from_slice(&42u16.to_be_bytes()); // one feature index
+                                                       // Pad to the real Script start.
+        bytes.resize(script_off as usize, 0);
+        // Script header: defaultLangSysOffset = 0 (absent), langSysCount = 1.
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        // One LangSysRecord pointing past u16::MAX when added to base.
+        bytes.extend_from_slice(b"ENG ");
+        bytes.extend_from_slice(&rel_off.to_be_bytes());
+
+        let list = ScriptList::parse(&bytes).unwrap();
+        let script = list.find(*b"test").expect("script present");
+        // Without the overflow guard this returns a LangSys with
+        // feature index 42 parsed from the wrapped location, which
+        // is wrong on every axis. Must be None.
+        assert!(script.find_lang_sys(*b"ENG ").is_none());
     }
 }

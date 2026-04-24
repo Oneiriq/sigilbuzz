@@ -7,12 +7,18 @@
 //! of one or both.
 
 pub mod class_def;
+pub mod context;
 pub mod coverage;
 pub mod feature_list;
 pub mod lookup_list;
 pub mod script_list;
 
 pub use class_def::ClassDef;
+pub use context::{
+    ChainClassRule2, ChainClassSet2, ChainContext1, ChainContext2, ChainContext3, ChainRule1,
+    ChainRuleSet1, ClassRule2, ClassSet2, Context1, Context2, Context3, Rule1, RuleSet1,
+    SequenceLookupRecord,
+};
 pub use coverage::Coverage;
 pub use feature_list::{Feature, FeatureList};
 pub use lookup_list::{Lookup, LookupList, LOOKUP_FLAG_USE_MARK_FILTERING_SET};
