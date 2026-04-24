@@ -16,14 +16,18 @@ use crate::tables::parse::Reader;
 
 pub mod alternate;
 pub mod chain_context;
+pub mod context;
 pub mod ligature;
 pub mod multiple;
+pub mod reverse_chain;
 pub mod single;
 
 pub use alternate::Alternate;
-pub use chain_context::{ChainContext, SubstLookupRecord};
+pub use chain_context::{ChainContext, ChainContextAny, SubstLookupRecord};
+pub use context::Context;
 pub use ligature::Ligature;
 pub use multiple::Multiple;
+pub use reverse_chain::ReverseChain;
 pub use single::Single;
 
 /// GSUB lookup type numbers. Entries land here as sigilbuzz acquires
@@ -37,13 +41,13 @@ pub mod lookup_type {
     pub const ALTERNATE: u16 = 3;
     /// Ligature substitution (many → one) — implemented.
     pub const LIGATURE: u16 = 4;
-    /// Contextual substitution. Deferred.
+    /// Contextual substitution — implemented for formats 1, 2, 3.
     pub const CONTEXT: u16 = 5;
-    /// Chained contextual substitution. Deferred.
+    /// Chained contextual substitution — implemented for formats 1, 2, 3.
     pub const CHAINED_CONTEXT: u16 = 6;
     /// Extension substitution — forwards to another lookup type.
     pub const EXTENSION: u16 = 7;
-    /// Reverse chained contextual substitution. Deferred.
+    /// Reverse chained contextual single substitution — implemented.
     pub const REVERSE_CHAINED: u16 = 8;
 }
 
