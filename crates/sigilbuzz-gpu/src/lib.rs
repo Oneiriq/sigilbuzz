@@ -5,10 +5,42 @@
 //! GPU-friendly representation following Eric Lengyel's *Slug*
 //! algorithm (Loop-Blinn family).
 //!
-//! Subsequent commits add the cubic-to-quadratic flattening pass
-//! and the band decomposition driver. This commit lays down the
-//! plain-old-data surface (`Vec2`, `Bbox`, `QuadSegment`, `Band`,
-//! `SlugGlyph`).
+//! # Pipeline
+//!
+//! ```text
+//!   Face                     SlugGlyph
+//!     │                       ┌──────────────────────────┐
+//!     │ glyph_outline(gid)    │ bbox: Bbox               │
+//!     ▼                       │ bands: Vec<Band>         │
+//!   Outline (PathOps)         │ segments: Vec<QuadSeg>   │
+//!     │                       └──────────────────────────┘
+//!     │ flatten cubics
+//!     ▼
+//!   QuadPath
+//!     │
+//!     │ band-decompose (N bands tiling the bbox y-range)
+//!     ▼
+//!   SlugGlyph
+//! ```
+//!
+//! The output buffers (`bands`, `segments`) are designed so a consumer
+//! can upload them as SSBOs / texture buffers and run a fragment
+//! shader that walks the band's segment list to compute coverage.
+//! The shader side is deliberately out of scope — sigilbuzz-gpu only
+//! produces the encoded data.
+//!
+//! # Quick start
+//!
+//! ```no_run
+//! use sigilbuzz::{Blob, Face};
+//! use sigilbuzz_gpu::{encode_glyph, SlugOptions};
+//!
+//! let blob = Blob::from_path("./MyFont.ttf").unwrap();
+//! let face = Face::parse_bytes(blob.as_bytes(), 0).unwrap();
+//! let glyph = encode_glyph(&face, 42, &SlugOptions::default()).unwrap();
+//! // upload glyph.bands and glyph.segments to the GPU.
+//! # let _ = glyph;
+//! ```
 //!
 //! # No-std
 //!
@@ -21,9 +53,11 @@
 
 extern crate alloc;
 
+mod encoder;
 mod flatten;
 mod types;
 
+pub use encoder::{encode_glyph, encode_glyph_at_coords, SlugOptions};
 pub use types::{Band, Bbox, QuadSegment, SlugGlyph, Vec2};
 
 /// Crate version, matching `Cargo.toml`.

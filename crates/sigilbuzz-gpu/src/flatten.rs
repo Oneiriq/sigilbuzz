@@ -1,7 +1,3 @@
-// Wired up in the next commit — until then, `cubic_to_quads` and
-// helpers exist only to support this module's unit tests.
-#![allow(dead_code)]
-
 //! Path flattening: cubic Bezier → list of quadratic Beziers.
 //!
 //! Slug rasterises quadratics natively. CFF charstrings produce
