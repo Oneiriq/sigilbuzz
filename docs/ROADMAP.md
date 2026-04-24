@@ -66,51 +66,72 @@
 
 ---
 
-## 0.2.0 (next)
+## 0.2.0 (shipping)
 
-Scripts that rustybuzz still covers that sigilbuzz 0.1.0 does not.
+Scripts that rustybuzz still covers that sigilbuzz 0.1.0 did not, plus AAT fallback, plus variable-font kerning.
 
 ### SE Asian scripts via USE (Universal Shaping Engine)
 
-- [ ] USE machinery — category classifier from Unicode data, syllable segmenter, reorder pass
-- [ ] Khmer (`abvs`, `blws`, `pres`, `psts`, `calt`, `ccmp`, `cjct`, `pref`, `rphf`)
-- [ ] Myanmar
-- [ ] Thai (with mark reordering)
-- [ ] Lao
-- [ ] Old Hangul (Jamo composition)
+- [x] USE machinery — category classifier from Unicode data, syllable segmenter, reorder pass
+- [x] Khmer (`abvs`, `blws`, `pres`, `psts`, `calt`, `ccmp`, `cjct`, `pref`, `rphf`)
+- [x] Myanmar
+- [x] Thai
+- [x] Lao
+- [x] Old Hangul (Jamo composition)
 
 ### Remaining Indic scripts
 
-- [ ] Bengali (`RephPosition::AfterMain`)
-- [ ] Gurmukhi
-- [ ] Gujarati
-- [ ] Oriya
-- [ ] Tamil
-- [ ] Telugu (`RephPosition::AfterPost`)
-- [ ] Kannada (`RephPosition::AfterPost`)
-- [ ] Malayalam
-- [ ] Sinhala
+- [x] Bengali (`RephPosition::AfterSub`)
+- [x] Gurmukhi (`RephPosition::BeforeSub` + `blwf` masking)
+- [x] Gujarati (`RephPosition::BeforePost`)
+- [x] Oriya (`RephPosition::AfterMain`)
+- [x] Tamil (split-matra decomposition for U+0BCA/U+0BCB/U+0BCC)
+- [x] Telugu (`RephPosition::AfterPost` + `RephMode::Explicit`)
+- [x] Kannada (`RephPosition::AfterPost`)
+- [x] Malayalam (`RephMode::LogRepha` via U+0D4E)
+- [x] Sinhala (split-matra decomposition for U+0DDA/U+0DDC/U+0DDD/U+0DDE + Explicit reph)
 
 ### Hebrew
 
-- [ ] Hebrew shaping (cantillation, vowel positioning, `dlig` / `hlig` / `calt`)
+- [x] Hebrew shaping with `hebr` > DFLT script priority, niqqud via GPOS mark-to-base, cantillation via mark-to-mark
+
+### Mixed-script runs
+
+- [x] `Buffer::script_runs` iterator auto-segments the buffer; `shape()` dispatches GSUB/GPOS once per segment with the segment's own script priority
+- [x] INHERITED combining-mark blocks attach to the previous real-script segment so clusters survive
 
 ### Legacy
 
-- [ ] AAT `morx` (extended glyph metamorphosis, Apple fallback for non-GSUB fonts)
-- [ ] AAT `kerx` (extended kerning for macOS legacy fonts)
+- [x] AAT `morx` (Extended Glyph Metamorphosis) — types 0 (Rearrangement), 1 (Contextual), 2 (Ligature)
+- [x] AAT `kerx` (Extended Kerning) — format 0 ordered pair list
+- [x] OpenType-wins policy — morx/kerx only consulted when GSUB/GPOS absent
 
 ### Variable-font deltas in GPOS
 
-- [ ] GPOS feature-variations (HVAR-style deltas for pair-kerning `ValueRecord`s)
+- [x] GPOS feature-variations — `Device`/`VariationIndex` sub-offsets on every `ValueRecord` field, resolved against GDEF's shared `ItemVariationStore`
+
+### Hardening
+
+- [x] Wave 3 fuzz pass on the 0.2.0 surface (+1 fix — INHERITED segmenter attachment)
 
 ---
 
 ## 0.3.0+ (aspirational)
 
+Optional modules that live on top of the shaping core. Any of these can become its own crate if it pulls sigilbuzz in directions the shaping core shouldn't go.
+
+### Renderer-facing
+
 - [ ] `hb_gpu`-equivalent Slug-algorithm outline encoder for GPU rasterization
-- [ ] PDF / SVG output backends (may live in a separate crate)
-- [ ] COLRv1 paint *evaluation* helpers (stays a consumer concern by default)
+- [ ] COLRv1 paint *evaluation* helpers (currently traversal-only; evaluation is a consumer concern by default)
+- [ ] PDF / SVG output backends (likely a separate crate)
+
+### Script-completeness follow-ups
+
+- [ ] Amiri Allah/bism-Allah `rlig` rule-selection parity (#21 — glyph count already parity, gids diverge)
+- [ ] Myanmar kinzi reorder (#44)
+- [ ] Thai/Lao sara-am U+0E33 / U+0EB3 PUA decomposition (#45)
+- [ ] Old Hangul mixed-run shaper-selection policy (#46)
 
 ---
 
