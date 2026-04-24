@@ -35,8 +35,8 @@ use crate::blob::Blob;
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
 use crate::tables::{
-    tag, Avar, Cmap, Fvar, Gdef, Glyf, GlyphBounds, Gpos, Gsub, Gvar, Head, Hhea, Hmtx, Hvar,
-    KernTable, Kerx, Loca, Maxp, Morx, Vhea, Vmtx, Vorg,
+    tag, Avar, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBounds, Gpos, Gsub, Gvar, Head, Hhea, Hmtx,
+    Hvar, KernTable, Kerx, Loca, Maxp, Morx, Outline, Vhea, Vmtx, Vorg,
 };
 
 /// One entry in the SFNT table directory.
@@ -431,6 +431,94 @@ impl<'a> Face<'a> {
             num_contours: base.num_contours,
         };
         Ok(Some(adjusted))
+    }
+
+    /// Parses the `CFF ` (Compact Font Format 1) table.
+    pub fn cff(&self) -> Result<Cff<'a>> {
+        Cff::parse(self.table_bytes(tag::CFF1)?)
+    }
+
+    /// Parses the `CFF2` table if the font carries one. CFF2 is the
+    /// variable-font flavour of CFF; static OTF fonts use plain
+    /// `CFF `.
+    pub fn cff2(&self) -> Result<Cff2<'a>> {
+        Cff2::parse(self.table_bytes(tag::CFF2)?)
+    }
+
+    /// Returns the full contour outline for `glyph_id` as a flat
+    /// list of [`crate::tables::PathOp`]s. Works for both TrueType
+    /// (`glyf`) and CFF / CFF2 fonts; the backend is inferred from
+    /// the tables the font carries.
+    ///
+    /// Composite glyphs are flattened — the caller never sees
+    /// component references. Returns `Ok(None)` for glyphs with no
+    /// outline (whitespace) or for glyph ids past the end of the
+    /// font's outline table.
+    pub fn glyph_outline(&self, glyph_id: u16) -> Result<Option<Outline>> {
+        self.glyph_outline_at_coords(glyph_id, &[])
+    }
+
+    /// Like [`Face::glyph_outline`] but applies variable-font deltas
+    /// for the given normalized axis coords. For TrueType outlines
+    /// the deltas come from `gvar`; for CFF2 they come from the
+    /// table's own Variation Store via the `blend` charstring
+    /// operator. An empty `coords` slice is equivalent to the static
+    /// outline and is the cheap path taken by [`Face::glyph_outline`].
+    pub fn glyph_outline_at_coords(
+        &self,
+        glyph_id: u16,
+        coords: &[f32],
+    ) -> Result<Option<Outline>> {
+        // CFF / CFF2 path: presence of `CFF2` wins over `CFF ` since
+        // variable fonts ship only CFF2. TODO: CFF parsers land in a
+        // later commit; for now fall through to glyf if either is
+        // present alongside glyf, and error on CFF-only fonts.
+        if self.record(tag::CFF2).is_some() {
+            let cff2 = self.cff2()?;
+            let mut out = Outline::new();
+            let drew = cff2.outline(glyph_id, coords, &mut out)?;
+            return Ok(drew.then_some(out));
+        }
+        if self.record(tag::CFF1).is_some() && self.record(tag::GLYF).is_none() {
+            let cff = self.cff()?;
+            let mut out = Outline::new();
+            let drew = cff.outline(glyph_id, &mut out)?;
+            return Ok(drew.then_some(out));
+        }
+
+        // TrueType path.
+        let loca = self.loca()?;
+        let glyf = self.glyf()?;
+        let mut out = Outline::new();
+
+        // Apply gvar if present and the font is variable.
+        if !coords.is_empty() {
+            if let Some(gvar) = self.gvar()? {
+                if let Some(num_points) = glyf.point_count(&loca, glyph_id)? {
+                    let deltas_sparse = gvar.glyph_deltas(glyph_id, coords, num_points);
+                    if !deltas_sparse.is_empty() {
+                        // Dense deltas indexed by point id. Phantom
+                        // points live at the end of the range but
+                        // don't appear in the simple-glyph coord
+                        // stream, so we only need the real-point
+                        // portion; outline() bounds-checks by slice
+                        // index.
+                        let mut dense: Vec<(f32, f32)> =
+                            alloc::vec![(0.0_f32, 0.0_f32); num_points as usize];
+                        for d in &deltas_sparse {
+                            if (d.point as usize) < dense.len() {
+                                dense[d.point as usize] = (d.dx, d.dy);
+                            }
+                        }
+                        let drew = glyf.outline(&loca, glyph_id, Some(&dense), &mut out)?;
+                        return Ok(drew.then_some(out));
+                    }
+                }
+            }
+        }
+
+        let drew = glyf.outline(&loca, glyph_id, None, &mut out)?;
+        Ok(drew.then_some(out))
     }
 
     /// Parses the `vhea` table if the font carries one. Fonts that
