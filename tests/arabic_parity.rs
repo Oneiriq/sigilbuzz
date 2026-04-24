@@ -81,8 +81,8 @@ const ARABIC_CORPUS: &[&str] = &[
 /// that while still verifying the joining state machine propagates
 /// correctly through the format character.
 const ZWJ_CORPUS: &[&str] = &[
-    "\u{0628}\u{200D}",        // beh + ZWJ — beh forced into init
-    "\u{200D}\u{0628}",        // ZWJ + beh — beh forced into fina
+    "\u{0628}\u{200D}",         // beh + ZWJ — beh forced into init
+    "\u{200D}\u{0628}",         // ZWJ + beh — beh forced into fina
     "\u{0628}\u{200C}\u{0628}", // beh + ZWNJ + beh — joining broken
 ];
 

@@ -380,7 +380,7 @@ const fn is_default_ignorable(ch: char) -> bool {
         | 0x200D  // ZERO WIDTH JOINER
         | 0x200E  // LEFT-TO-RIGHT MARK
         | 0x200F  // RIGHT-TO-LEFT MARK
-        | 0x061C  // ARABIC LETTER MARK
+        | 0x061C // ARABIC LETTER MARK
     )
 }
 
@@ -549,8 +549,7 @@ fn apply_gsub_lookup_masked(
                         i += 1;
                         continue;
                     }
-                    let window: Vec<u16> =
-                        glyphs[i..].iter().map(|g| g.glyph_id as u16).collect();
+                    let window: Vec<u16> = glyphs[i..].iter().map(|g| g.glyph_id as u16).collect();
                     if let Some((lig_glyph, consumed)) = lig.apply(&window) {
                         glyphs[i].glyph_id = u32::from(lig_glyph);
                         glyphs.drain(i + 1..i + consumed);
