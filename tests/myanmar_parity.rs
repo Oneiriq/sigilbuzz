@@ -123,18 +123,16 @@ const CORPUS: &[Case] = &[
         note: "independent vowel i",
         compare_rustybuzz: true,
     },
-    // မင်္ဂလာပါ — "Hello" (mingalaba). Exercises asat + virama
-    // (kinzi cluster) and multiple syllables. The kinzi reorder —
-    // `nga + asat + virama` becomes a reph glyph on the following
-    // base — is a Myanmar-specific state-machine move that USE's
-    // generic pre-base matra reorder does not perform. Shapes
-    // correctly under the USE defaults (all glyphs present, in
-    // logical order) but the visual order diverges from rustybuzz.
-    // Tracked as a follow-up; see the PR body for the issue link.
+    // မင်္ဂလာပါ — "Hello" (mingalaba). Exercises the kinzi prefix
+    // (`nga + asat + virama`) which sigilbuzz's Myanmar reorder
+    // moves to POS_AFTER_MAIN — immediately after the base
+    // consonant. Once the triple sits after the base, `rphf`
+    // collapses it to the font's kinzi glyph in the reph slot,
+    // matching rustybuzz glyph-for-glyph.
     Case {
         text: "\u{1019}\u{1004}\u{103A}\u{1039}\u{1002}\u{101C}\u{102C}\u{1015}\u{102B}",
-        note: "mingalaba (hello) — kinzi follow-up",
-        compare_rustybuzz: false,
+        note: "mingalaba (hello) — kinzi reorder",
+        compare_rustybuzz: true,
     },
     // Myanmar digits 0-4.
     Case {
