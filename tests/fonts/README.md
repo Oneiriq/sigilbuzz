@@ -17,6 +17,8 @@ unmodified. The OFL text lives in the upstream repository's `OFL.txt`.
   The font ships GDEF/GPOS tables covering Hebrew niqqud
   (mark-to-base) and cantillation (mark-to-mark) so the parity
   fixture exercises the full stack.
+- `NotoSansKhmer-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansKhmer/hinted/ttf>.
 - `NotoSansBengali-Regular.ttf` — Source:
   <https://github.com/notofonts/NotoSansBengali/tree/main/fonts/ttf/hinted/instance_ttf>.
 - `NotoSansGurmukhi-Regular.ttf` — Source:

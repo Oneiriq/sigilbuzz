@@ -233,7 +233,30 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // the Indic reordering shaper with a script-specific config
     // (reph position, reph mode, GSUB script-tag priority).
     let mut indic_script: Option<crate::unicode::Script> = None;
+    let mut has_khmer = false;
     for (cluster, ch) in text.char_indices() {
+        // Khmer split-vowel decomposition. HarfBuzz's USE
+        // preprocessing hook splits U+17C4 / U+17C5 into a
+        // pre-base component (sign-e) and a post-base component
+        // (sign-aa / sign-au) so the syllable machine can see the
+        // pre-base part directly. sigilbuzz does it at codepoint
+        // push time, before the cmap lookup, so the rest of the
+        // pipeline never sees the composed form.
+        if matches!(ch, '\u{17C4}' | '\u{17C5}') {
+            let (pre, post) = if ch == '\u{17C4}' {
+                ('\u{17C1}', '\u{17B6}')
+            } else {
+                ('\u{17C1}', '\u{17B7}')
+            };
+            for &component in &[pre, post] {
+                let gid = u32::from(cmap.glyph_id(component).unwrap_or(0));
+                let glyph = Glyph::new(gid, cluster as u32);
+                glyphs.push(glyph);
+                codepoints.push(component);
+            }
+            has_khmer = true;
+            continue;
+        }
         let glyph_id = if is_default_ignorable(ch) {
             space_gid
         } else {
@@ -256,11 +279,11 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         glyph.unicode_props = props;
         glyphs.push(glyph);
         codepoints.push(ch);
-        if indic_script.is_none() {
-            let s = crate::unicode::script_of(ch);
-            if s.is_indic() {
-                indic_script = Some(s);
-            }
+        let s = crate::unicode::script_of(ch);
+        if s == crate::unicode::Script::Khmer {
+            has_khmer = true;
+        } else if indic_script.is_none() && s.is_indic() {
+            indic_script = Some(s);
         }
     }
 
@@ -334,6 +357,16 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 &config,
             );
         }
+    }
+
+    // Step 1c: Universal Shaping Engine. Khmer routes here; Myanmar /
+    // Thai / Lao / Old Hangul / Tai Tham will land on the same entry
+    // point as their category tables get filled in. Runs the USE
+    // basic + topographical feature sets per-syllable, so the generic
+    // GSUB pass below only has to handle `liga`, `calt`, `ccmp` —
+    // features that are orthogonal to script-specific reordering.
+    if has_khmer {
+        crate::ot::use_shaper::shape_khmer(gsub.as_ref(), gdef.as_ref(), &codepoints, &mut glyphs);
     }
 
     if let Some(ref gsub) = gsub {
@@ -500,6 +533,19 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                     );
                 }
             }
+        }
+        // Khmer `dist` — same pre-mark-attach distance adjustment
+        // for USE scripts. Routes through the _with_var variant so
+        // GPOS feature-variations apply if present.
+        if has_khmer && !feature_disabled(features, *b"dist") {
+            apply_gpos_feature_in_scripts_with_var(
+                gpos,
+                &mut glyphs,
+                gdef.as_ref(),
+                *b"dist",
+                crate::ot::use_shaper::KHMER_SCRIPT_PRIORITY,
+                &var,
+            );
         }
         if !feature_disabled(features, *b"mark") {
             apply_gpos_feature(
