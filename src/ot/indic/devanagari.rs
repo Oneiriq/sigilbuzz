@@ -162,8 +162,8 @@ pub fn shape_devanagari(
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
 ) {
-    let config = super::indic_config_for(Script::Devanagari)
-        .expect("Devanagari always has an Indic config");
+    let config =
+        super::indic_config_for(Script::Devanagari).expect("Devanagari always has an Indic config");
     shape_indic(gsub, gdef, codepoints, glyphs, &config);
 }
 
