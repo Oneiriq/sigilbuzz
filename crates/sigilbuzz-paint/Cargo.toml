@@ -1,0 +1,19 @@
+[package]
+name = "sigilbuzz-paint"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "COLRv1 paint evaluator for sigilbuzz."
+publish = false
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+sigilbuzz = { workspace = true }
+
+[dev-dependencies]
