@@ -93,6 +93,7 @@ pub struct Feature {
 /// Returns an error if the font is missing any of the tables required
 /// for basic shaping (`cmap`, `maxp`, `hhea`, `hmtx`) or if one of
 /// them is malformed.
+#[allow(clippy::too_many_lines)]
 pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<ShapedRun> {
     let want_kern = !feature_disabled(features, *b"kern");
     let want_liga = !feature_disabled(features, *b"liga");
@@ -176,10 +177,32 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
 
     // Step 3: hmtx advance lookup. Runs *after* GSUB so ligatures
     // receive their ligature-glyph advance, not the sum of their
-    // component advances.
+    // component advances. When the Font carries non-empty variation
+    // coords and the face has an HVAR table, each glyph's static
+    // advance is adjusted by HVAR's per-coord delta — otherwise the
+    // advance stays at its default-instance value.
+    let coords = font.coords();
+    let hvar = if coords.is_empty() {
+        None
+    } else {
+        face.hvar()?
+    };
     for glyph in &mut glyphs {
         let id = glyph.glyph_id as u16;
-        glyph.x_advance = i32::from(hmtx.advance(id).unwrap_or(0));
+        let base = i32::from(hmtx.advance(id).unwrap_or(0));
+        glyph.x_advance = if let Some(ref hvar) = hvar {
+            let delta = hvar.advance_delta(id, coords);
+            // Round-to-nearest without pulling in libm — the delta
+            // arithmetic is small, so add-0.5 / subtract-0.5 suffices.
+            let rounded = if delta >= 0.0 {
+                (delta + 0.5) as i32
+            } else {
+                (delta - 0.5) as i32
+            };
+            base.saturating_add(rounded)
+        } else {
+            base
+        };
     }
 
     // Step 4: GPOS passes. Kern first, then mark-to-base; then any
