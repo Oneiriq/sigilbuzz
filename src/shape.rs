@@ -319,8 +319,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // as context. Track the post-GSUB glyph range for each segment so
     // the downstream GPOS pass can dispatch under the same priority.
     let mut processed_glyphs: Vec<Glyph> = Vec::with_capacity(glyphs.len());
-    let mut seg_glyph_ranges: Vec<(core::ops::Range<usize>, Script, &'static [[u8; 4]])> =
-        Vec::with_capacity(segments.len());
+    let mut seg_glyph_ranges: Vec<ProcessedSegment> = Vec::with_capacity(segments.len());
 
     for seg in &segments {
         // Take an owned sub-vec of this segment's glyphs so ligature
@@ -394,7 +393,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         let start = processed_glyphs.len();
         processed_glyphs.extend(seg_glyphs);
         let end = processed_glyphs.len();
-        seg_glyph_ranges.push((start..end, seg.script, seg.script_priority));
+        seg_glyph_ranges.push(ProcessedSegment {
+            range: start..end,
+            script_priority: seg.script_priority,
+        });
     }
 
     // Reassemble — segments were concatenated in left-to-right order
@@ -504,11 +506,12 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     };
     let mut gpos_kerned = false;
     if let Some(ref gpos) = gpos {
-        for (range, _script, priority) in &seg_glyph_ranges {
-            if range.is_empty() {
+        for seg_out in &seg_glyph_ranges {
+            if seg_out.range.is_empty() {
                 continue;
             }
-            let seg_slice = &mut glyphs[range.clone()];
+            let priority = seg_out.script_priority;
+            let seg_slice = &mut glyphs[seg_out.range.clone()];
             if want_kern {
                 let ran = apply_gpos_feature(
                     gpos,
@@ -606,6 +609,16 @@ fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
 struct Segment {
     cp_range: core::ops::Range<usize>,
     script: Script,
+    script_priority: &'static [[u8; 4]],
+}
+
+/// Post-GSUB slice of the fully-assembled `glyphs` vector — one per
+/// pre-shaped segment. The GPOS loop reads this back to dispatch
+/// kern / mark / mkmk / dist / user-enabled features against the
+/// correct script tag priority for each slice.
+#[derive(Debug)]
+struct ProcessedSegment {
+    range: core::ops::Range<usize>,
     script_priority: &'static [[u8; 4]],
 }
 
