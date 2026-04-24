@@ -17,6 +17,8 @@ use crate::tables::layout::{FeatureList, LookupList, ScriptList};
 use crate::tables::parse::Reader;
 
 pub mod anchor;
+pub mod chain_context;
+pub mod context;
 pub mod mark_base;
 pub mod mark_liga;
 pub mod mark_mark;
@@ -25,6 +27,8 @@ pub mod single_adj;
 pub mod value_record;
 
 pub use anchor::Anchor;
+pub use chain_context::ChainContextPos;
+pub use context::ContextPos;
 pub use mark_base::{MarkAttachment, MarkBasePos};
 pub use mark_liga::MarkLigaPos;
 pub use mark_mark::MarkMarkPos;
@@ -47,9 +51,9 @@ pub mod lookup_type {
     pub const MARK_TO_LIGATURE: u16 = 5;
     /// Mark-to-mark attachment. Deferred.
     pub const MARK_TO_MARK: u16 = 6;
-    /// Context positioning. Deferred.
+    /// Context positioning — implemented for formats 1, 2, 3.
     pub const CONTEXT: u16 = 7;
-    /// Chained context positioning. Deferred.
+    /// Chained context positioning — implemented for formats 1, 2, 3.
     pub const CHAINED_CONTEXT: u16 = 8;
     /// Extension positioning — forwards to another lookup type.
     pub const EXTENSION: u16 = 9;

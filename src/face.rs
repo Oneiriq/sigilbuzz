@@ -36,7 +36,7 @@ use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
 use crate::tables::{
     tag, Avar, Cmap, Fvar, Gdef, Glyf, GlyphBounds, Gpos, Gsub, Gvar, Head, Hhea, Hmtx, Hvar,
-    KernTable, Loca, Maxp,
+    KernTable, Loca, Maxp, Vhea, Vmtx, Vorg,
 };
 
 /// One entry in the SFNT table directory.
@@ -407,6 +407,79 @@ impl<'a> Face<'a> {
             num_contours: base.num_contours,
         };
         Ok(Some(adjusted))
+    }
+
+    /// Parses the `vhea` table if the font carries one. Fonts that
+    /// support vertical writing ship this alongside `vmtx`; purely
+    /// horizontal fonts omit both.
+    pub fn vhea(&self) -> Result<Option<Vhea>> {
+        match self.table_bytes(tag::VHEA) {
+            Ok(bytes) => Ok(Some(Vhea::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `vmtx` table if the font carries one. Requires
+    /// `maxp` and `vhea` to be present because the vmtx layout depends
+    /// on their counts; missing either surfaces as
+    /// [`Error::MissingTable`]. Returns `Ok(None)` when the font has
+    /// no `vmtx` at all (i.e. horizontal-only).
+    pub fn vmtx(&self) -> Result<Option<Vmtx<'a>>> {
+        let Some(vhea) = self.vhea()? else {
+            return Ok(None);
+        };
+        let maxp = self.maxp()?;
+        match self.table_bytes(tag::VMTX) {
+            Ok(bytes) => Ok(Some(Vmtx::parse(
+                bytes,
+                maxp.num_glyphs,
+                vhea.number_of_long_ver_metrics,
+            )?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `VORG` table if the font carries one. Most fonts
+    /// with vertical metrics omit this — the renderer's default
+    /// origin rule is usually good enough; CFF CJK fonts use it.
+    pub fn vorg(&self) -> Result<Option<Vorg<'a>>> {
+        match self.table_bytes(tag::VORG) {
+            Ok(bytes) => Ok(Some(Vorg::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `COLR` table if the font carries one. Colour fonts
+    /// ship this alongside `CPAL`; monochrome outlines-only fonts
+    /// omit both.
+    pub fn colr(&self) -> Result<Option<crate::tables::colr::Colr<'a>>> {
+        match self.table_bytes(tag::COLR) {
+            Ok(bytes) => Ok(Some(crate::tables::colr::Colr::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `CPAL` table if the font carries one.
+    pub fn cpal(&self) -> Result<Option<crate::tables::cpal::Cpal<'a>>> {
+        match self.table_bytes(tag::CPAL) {
+            Ok(bytes) => Ok(Some(crate::tables::cpal::Cpal::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Convenience: resolves the paint subtree for `glyph_id` through
+    /// the `COLR` table, returning `Ok(None)` when either the font has
+    /// no COLR or the glyph has no colour record.
+    pub fn colr_paint(&self, glyph_id: u16) -> Result<Option<crate::tables::colr::ColrPaint<'a>>> {
+        match self.colr()? {
+            Some(colr) => Ok(colr.paint(glyph_id)),
+            None => Ok(None),
+        }
     }
 }
 
