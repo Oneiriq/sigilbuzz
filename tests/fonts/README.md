@@ -130,3 +130,16 @@ font bytes.
           --output-file=SourceSans3VF-Latin-Subset.otf \
           --no-hinting \
           --drop-tables+=DSIG,STAT,MVAR,BASE
+- `CidCff1Synthetic.otf` — Hand-built CID-keyed CFF1 (FDArray +
+  FDSelect) with two Font DICTs and at least one cross-FD subroutine
+  reference. Real OFL CID-keyed CFF1 fonts in the wild are CJK and
+  far past the 200 KB-per-fixture ceiling, so this fixture is
+  synthesised by `tests/tools/build_cid_cff1_fixture.py` (which is
+  the reproducible build script — re-run it whenever the fixture is
+  regenerated). The synthetic carries no third-party copyrighted
+  bytes, so no license compliance applies. It maps U+0041..U+0045
+  ('A'..'E') onto five CID glyphs distributed across two FDs to
+  exercise both per-FD Subr renumbering (#135) and cross-FD subr
+  sharing (#138):
+
+      python3 tests/tools/build_cid_cff1_fixture.py

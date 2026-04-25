@@ -24,6 +24,7 @@ const SOURCE_CODE_PRO: &[u8] =
     include_bytes!("../../../tests/fonts/SourceCodePro-Latin-Subset.otf");
 const SOURCE_SANS_3_VF: &[u8] =
     include_bytes!("../../../tests/fonts/SourceSans3VF-Latin-Subset.otf");
+const CID_CFF1: &[u8] = include_bytes!("../../../tests/fonts/CidCff1Synthetic.otf");
 
 fn cmap_lookup(face: &Face<'_>, ch: char) -> u16 {
     face.cmap()
@@ -254,4 +255,84 @@ fn real_cff2_subset_round_trip() {
         any_changed,
         "CFF2 fixture's wght axis is inert — fixture or shaper regression",
     );
+}
+
+#[test]
+fn real_cff_cid_subset_round_trip() {
+    // Hand-built CID-keyed CFF1 fixture (FDArray + FDSelect, with at
+    // least one cross-FD shared subr to exercise #138). The build
+    // script lives at tests/tools/build_cid_cff1_fixture.py.
+    //
+    // The fixture is a 2-FD CID font; cmap maps U+0041..U+0045 onto
+    // five separate CID glyphs distributed across both FDs (gids 1..2
+    // → FD 0, gids 3..5 → FD 1). One charstring in FD 0 invokes a
+    // global subr; one charstring in FD 1 invokes its FD's local subr;
+    // the round-trip exercises both per-FD Subr renumbering (#135) and
+    // the cross-FD subroutine-keep-set machinery (#138).
+    let face = Face::parse_bytes(CID_CFF1, 0).expect("CID source parses");
+    assert!(
+        face.record(tag::CFF1).is_some(),
+        "CID fixture must carry CFF1 outlines",
+    );
+
+    let kept_chars = ['A', 'B', 'C', 'D', 'E'];
+    let kept_gids: Vec<u16> = kept_chars.iter().map(|&c| cmap_lookup(&face, c)).collect();
+
+    let input = SubsetInput {
+        gids: kept_gids.clone(),
+        retain_hints: false,
+        drop_unhandled: true,
+        retain_layout: false,
+        retain_variations: false,
+    };
+    let out = subset(&face, &input).expect("CID CFF1 real subset succeeds");
+
+    let subset_face = Face::parse_bytes(&out.bytes, 0).expect("CID subset re-parses");
+    assert!(
+        subset_face.record(tag::CFF1).is_some(),
+        "subset retains CFF1 outlines",
+    );
+
+    let new_num_glyphs = subset_face.maxp().unwrap().num_glyphs;
+    assert!(
+        new_num_glyphs >= 6,
+        "expected at least 6 glyphs in CID subset, got {new_num_glyphs}",
+    );
+
+    let src_hmtx = face.hmtx().unwrap();
+    let new_hmtx = subset_face.hmtx().unwrap();
+    for (old, new) in &out.gid_map {
+        let want = src_hmtx.advance(*old).unwrap_or(0);
+        let got = new_hmtx.advance(*new).unwrap_or(0);
+        assert_eq!(
+            want, got,
+            "CID advance mismatch for gid {old}->{new}: src {want} vs subset {got}",
+        );
+    }
+
+    let new_cmap = subset_face.cmap().unwrap();
+    for &ch in &kept_chars {
+        let new_gid = new_cmap
+            .glyph_id(ch)
+            .unwrap_or_else(|| panic!("CID subset cmap dropped {ch}"));
+        assert!(new_gid > 0 && new_gid < new_num_glyphs);
+    }
+
+    // Shaping through the subset must produce gids in the *new*
+    // namespace and advances matching the source's. This is the
+    // assertion that proves the FDArray + FDSelect rebuild and the
+    // cross-FD subroutine renumber landed glyphs that draw correctly
+    // and advance correctly under the new gid namespace.
+    let src_font = Font::new(face.clone(), 16.0);
+    let subset_font = Font::new(subset_face.clone(), 16.0);
+    for &ch in &kept_chars {
+        let (_, src_adv) = shape_one(&src_font, ch);
+        let (new_gid, new_adv) = shape_one(&subset_font, ch);
+        assert_eq!(
+            src_adv, new_adv,
+            "CID {ch}: shaped advance differs source {src_adv} vs subset {new_adv}",
+        );
+        let expected_new_gid: u32 = new_cmap.glyph_id(ch).unwrap().into();
+        assert_eq!(new_gid, expected_new_gid);
+    }
 }
