@@ -108,9 +108,19 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// fonts is `[1/upem 0 0 1/upem 0 0]` — uniform scale, no shear, no
 /// translation. sigilbuzz emits glyphs in their native upem space
 /// so this matrix is the same for every CharProc in the font.
+///
+/// `units_per_em == 0` (a malformed `head` table) is clamped to a
+/// 1000-upem default — every other emitter in this crate (`Type 1`,
+/// `OTF-embedded`) does the same dance, and emitting an `inf` matrix
+/// would produce a PDF every consumer rejects.
 #[must_use]
 pub fn font_matrix(units_per_em: u16) -> [f32; 6] {
-    let s = 1.0_f32 / f32::from(units_per_em);
+    let upem = if units_per_em == 0 {
+        1000
+    } else {
+        units_per_em
+    };
+    let s = 1.0_f32 / f32::from(upem);
     [s, 0.0, 0.0, s, 0.0, 0.0]
 }
 
@@ -376,6 +386,21 @@ mod tests {
         let m = font_matrix(2048);
         let expected = 1.0_f32 / 2048.0_f32;
         assert_eq!(m, [expected, 0.0, 0.0, expected, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn font_matrix_for_zero_upem_clamps_to_default() {
+        // upem=0 in head is malformed but in-the-wild fonts ship it.
+        // The Type 1 emitter rejects this with an error; the OTF
+        // emitter clamps to 1000. Type 3's `font_matrix` should clamp
+        // to the same 1000 so the resulting `[a b c d e f]` is finite
+        // — emitting `[inf 0 0 inf 0 0]` produces a malformed PDF that
+        // every consumer rejects.
+        let m = font_matrix(0);
+        for &v in &m {
+            assert!(v.is_finite(), "font_matrix(0) produced non-finite {v}");
+        }
+        assert_eq!(m, [0.001, 0.0, 0.0, 0.001, 0.0, 0.0]);
     }
 
     #[test]
