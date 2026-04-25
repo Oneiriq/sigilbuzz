@@ -53,7 +53,10 @@ fn opensans_capital_a_emits_well_formed_type1_charstring() {
     // hsbw is op 13. The first encoded operand is lsb (0 → byte 139),
     // followed by the advance number (1, 2, or 5 bytes depending on
     // its magnitude), followed by op 13.
-    assert_eq!(cs[0], 139, "first hsbw operand should be 0 (encoded as 139)");
+    assert_eq!(
+        cs[0], 139,
+        "first hsbw operand should be 0 (encoded as 139)"
+    );
 
     // op 13 must appear within the first 7 bytes — that's the worst
     // case (lsb single byte + advance 5-byte form + op = 7).

@@ -169,7 +169,9 @@ pub fn emit_otf_embedded_font(
         font_dict_body.extend_from_slice(b"  /Subtype /CIDFontType2\n");
     }
     font_dict_body.extend_from_slice(b"  /BaseFont /SigilbuzzEmbedded\n");
-    font_dict_body.extend_from_slice(b"  /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>\n");
+    font_dict_body.extend_from_slice(
+        b"  /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>\n",
+    );
     font_dict_body.extend_from_slice(b"  /FontDescriptor <descriptor obj>\n");
     font_dict_body.extend_from_slice(b"  /CIDToGIDMap <cidmap obj>\n");
     // /W array — the caller can re-emit this from `widths` if they

@@ -187,12 +187,13 @@ pub fn emit_path_ops(out: &mut Vec<u8>, ops: &[PathOp]) {
                 pen_y = y;
             }
             PathOp::Close => {
-                out.push(9); // closepath
-                // Pen is implicitly back at the contour start, but
-                // sigilbuzz outlines always re-open with a MoveTo, so
-                // we leave the tracked pen alone — the next op's
-                // delta is computed against where we last were and a
-                // following MoveTo will overwrite both.
+                // Emit closepath. Pen is implicitly back at the
+                // contour start, but sigilbuzz outlines always
+                // re-open with a MoveTo so we leave the tracked pen
+                // alone — the next op's delta is computed against
+                // where we last were and a following MoveTo will
+                // overwrite both.
+                out.push(9);
             }
         }
     }

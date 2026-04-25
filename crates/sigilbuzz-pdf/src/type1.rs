@@ -179,7 +179,8 @@ pub fn emit_type1_font(face: &Face<'_>, gids: &[GlyphId]) -> Result<Type1Font, E
     // eexec-encrypted" — see the module docs.
     let mut private_dict_body = Vec::new();
     private_dict_body.extend_from_slice(b"dup /Private 8 dict dup begin\n");
-    private_dict_body.extend_from_slice(b"/-|{string currentfile exch readstring pop}executeonly def\n");
+    private_dict_body
+        .extend_from_slice(b"/-|{string currentfile exch readstring pop}executeonly def\n");
     private_dict_body.extend_from_slice(b"/|-{noaccess def}executeonly def\n");
     private_dict_body.extend_from_slice(b"/|{noaccess put}executeonly def\n");
     private_dict_body.extend_from_slice(b"/BlueValues [] def\n");
@@ -190,7 +191,8 @@ pub fn emit_type1_font(face: &Face<'_>, gids: &[GlyphId]) -> Result<Type1Font, E
     // /CharStrings block. Emit one entry per gid in input order.
     let mut char_strings_body = Vec::new();
     let count = gids.len();
-    char_strings_body.extend_from_slice(format!("2 index /CharStrings {count} dict dup begin\n").as_bytes());
+    char_strings_body
+        .extend_from_slice(format!("2 index /CharStrings {count} dict dup begin\n").as_bytes());
     // Always-present /.notdef entry: zero-width, just an endchar.
     {
         let mut notdef = Vec::new();
