@@ -1,0 +1,31 @@
+[package]
+name = "sigilbuzz-woff"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WOFF1 + WOFF2 wrapper formats for sigilbuzz fonts."
+readme = "README.md"
+keywords = ["woff", "woff2", "web-fonts", "sigilbuzz", "font"]
+categories = ["text-processing"]
+publish = true
+
+[features]
+default = ["std", "woff2"]
+std = []
+# WOFF2 needs Brotli decompression. The brotli-decompressor crate is
+# the no_std-capable choice; gate it behind the woff2 feature so a
+# WOFF1-only consumer doesn't pull it in.
+woff2 = ["dep:brotli-decompressor"]
+
+[dependencies]
+sigilbuzz = { workspace = true }
+brotli-decompressor = { version = "5", optional = true, default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# Fixtures are loaded with include_bytes!. ttf-parser drives the
+# WOFF2 outline-parity test — same dev-dep already used by the
+# shaper for outline parity. Never linked by sigilbuzz-woff proper.
+ttf-parser = "0.25"

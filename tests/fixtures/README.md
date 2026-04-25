@@ -20,3 +20,13 @@ Fonts used by the integration tests.
   from `tests/tools/build_var_kern_fixture.py` so the fixture is
   reproducible; used by `tests/variable_kern.rs` to exercise the GPOS
   feature-variation wiring added for issue #13.
+- `phantom_anchor.ttf` — Synthetic 780-byte fixture with four glyphs
+  (`.notdef`, `base`, `mark`, `combo`). `combo` is a composite with one
+  XY-mode component and one *anchor-mode* component whose `arg1` lands
+  in the parent's phantom-point range (pp2, the advance-width origin).
+  Hand-crafted because no font in the existing OFL corpus exercises
+  the phantom-anchor branch added in PR #80. Built deterministically
+  from `tests/tools/build_phantom_anchor_fixture.py`; used by
+  `tests/outline_parity.rs` to drive the phantom-resolution path on a
+  real `Face`. Public-domain / no third-party content (entirely
+  synthesised at build time).

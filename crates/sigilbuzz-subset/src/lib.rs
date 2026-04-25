@@ -34,17 +34,25 @@
 //! - **Subsetted**: `cmap` (fmt 4 rebuilt), `glyf` + `loca`, `hmtx` +
 //!   `hhea`, `maxp`, `head`, `post` (forced to format 3).
 //! - **Preserved as-is**: `name`, `OS/2`.
+//! - **Layout tables** (`GSUB`, `GPOS`, `GDEF`): preserved verbatim
+//!   when the closure walker keeps every glyph in the source font
+//!   (i.e. the gid_map is the identity); dropped otherwise. Set
+//!   [`SubsetInput::retain_layout`] to `false` to force-drop them.
+//!   Full byte-level layout-table rewriting under non-identity gid
+//!   maps is staged for a future release; the [`emit_classdef`],
+//!   [`emit_coverage_from_glyphs`], and [`emit_coverage_from_pairs`]
+//!   helpers in this crate are the building blocks that rewriter will
+//!   use.
 //! - **Dropped** (when [`SubsetInput::drop_unhandled`] is true, the
-//!   default): `GDEF`, `GSUB`, `GPOS`, `kern`, `vhea`, `vmtx`, `VORG`,
-//!   `HVAR`, `gvar`, `COLR`, `CPAL`, `morx`, `kerx`, `fvar`, `avar`.
-//!   When the flag is false, encountering any of these surfaces a
-//!   [`SubsetError::Unsupported`] result.
+//!   default): `kern`, `vhea`, `vmtx`, `VORG`, `HVAR`, `gvar`, `COLR`,
+//!   `CPAL`, `morx`, `kerx`, `fvar`, `avar`. When the flag is false,
+//!   encountering any of these surfaces a [`SubsetError::Unsupported`]
+//!   result.
 //! - **Errors cleanly**: `CFF` / `CFF2` (subroutine renumbering is
 //!   significantly more involved and lands in a future release).
 //!
-//! The deferred-table list is the agenda for 0.6.0+. Variable-font
-//! subsetting (`gvar` / `HVAR`), CFF subsetting, and full GSUB / GPOS
-//! gid remap are the headline items.
+//! Variable-font subsetting (`gvar` / `HVAR`), CFF subsetting, and
+//! non-identity GSUB / GPOS / GDEF rewriting remain on the agenda.
 //!
 //! # Quick start
 //!
@@ -58,6 +66,7 @@
 //!     gids: vec![0, 36, 37, 38], // .notdef + 'A' + 'B' + 'C'
 //!     retain_hints: false,
 //!     drop_unhandled: true,
+//!     retain_layout: true,
 //! };
 //! let out = subset(&face, &input).unwrap();
 //! std::fs::write("./MyFont.subset.ttf", &out.bytes).unwrap();
@@ -80,14 +89,19 @@ use alloc::vec::Vec;
 use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
+mod classdef;
 mod closure;
 mod cmap;
+mod coverage;
 mod glyf;
 mod hmtx;
+mod layout;
 mod sfnt;
 mod util;
 
+pub use classdef::emit_classdef;
 pub use closure::compute_closure;
+pub use coverage::{emit_coverage_from_glyphs, emit_coverage_from_pairs};
 
 /// Crate version, matching `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -110,6 +124,15 @@ pub struct SubsetInput {
     /// (the default). If false, encountering an unsupported table
     /// surfaces [`SubsetError::Unsupported`].
     pub drop_unhandled: bool,
+    /// If true (the default), retain layout tables (`GSUB`, `GPOS`,
+    /// `GDEF`) when the closure walker has pulled in every glyph the
+    /// remaining lookups reference — i.e. when the layout machinery
+    /// can be passed through verbatim with no gid renumbering risk.
+    /// When false, layout tables are dropped, matching the 0.5.0
+    /// behaviour. Callers that explicitly want a hint-free, layout-
+    /// free subset (e.g. embedded PDF font streams) should set this
+    /// to false.
+    pub retain_layout: bool,
 }
 
 impl Default for SubsetInput {
@@ -118,6 +141,7 @@ impl Default for SubsetInput {
             gids: Vec::new(),
             retain_hints: false,
             drop_unhandled: true,
+            retain_layout: true,
         }
     }
 }
@@ -290,19 +314,42 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         tables.push((*b"OS/2", os2));
     }
 
+    // Layout tables (GSUB / GPOS / GDEF). Preserved verbatim when the
+    // kept-gid set is the identity (closure was a no-op); dropped
+    // otherwise. See `layout::decide` for the decision rules.
+    let plan = layout::decide(face, &kept, input)?;
+    if let layout::Decision::Preserve = plan.gdef {
+        let bytes = face.table_bytes(tag::GDEF).map_err(SubsetError::from)?;
+        tables.push((tag::GDEF, bytes.to_vec()));
+    }
+    if let layout::Decision::Preserve = plan.gsub {
+        let bytes = face.table_bytes(tag::GSUB).map_err(SubsetError::from)?;
+        tables.push((tag::GSUB, bytes.to_vec()));
+    }
+    if let layout::Decision::Preserve = plan.gpos {
+        let bytes = face.table_bytes(tag::GPOS).map_err(SubsetError::from)?;
+        tables.push((tag::GPOS, bytes.to_vec()));
+    }
+
     // Walk every other table the source carries and decide.
     for rec in face.records() {
         // Skip tables we already emitted.
         if tables.iter().any(|(t, _)| *t == rec.tag) {
             continue;
         }
+        // Layout tables hit the plan above; even when their plan is
+        // `Drop`, the drop is intentional and matches the
+        // drop_unhandled convention. Skip them here.
+        if matches!(rec.tag, tag::GSUB | tag::GPOS | tag::GDEF) {
+            continue;
+        }
         // Source tables we already errored on (CFF/CFF2) cannot
         // appear here — we returned early above.
         if !input.drop_unhandled {
             // Strict mode: any table without an implementation aborts.
-            // GSUB / GPOS / GDEF / kern / vhea / vmtx / VORG / HVAR /
-            // gvar / COLR / CPAL / morx / kerx / fvar / avar — none
-            // of these are subset-aware in 0.5.0.
+            // kern / vhea / vmtx / VORG / HVAR / gvar / COLR / CPAL /
+            // morx / kerx / fvar / avar — none of these are
+            // subset-aware in 0.6.0 either.
             return Err(SubsetError::Unsupported(
                 "table not yet handled by sigilbuzz-subset; pass drop_unhandled=true",
             ));
@@ -330,6 +377,7 @@ mod tests {
         let i = SubsetInput::default();
         assert!(i.drop_unhandled);
         assert!(!i.retain_hints);
+        assert!(i.retain_layout);
         assert!(i.gids.is_empty());
     }
 

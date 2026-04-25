@@ -169,10 +169,7 @@ enum ParsedGsubSubtable<'a> {
 /// the parsed list in spec order; subtables that fail to parse are
 /// silently dropped, matching the per-cursor behaviour the inline
 /// `apply_gsub_lookup_at` walker had before the cache was introduced.
-fn parse_lookup_subtables<'a>(
-    lookup: &Lookup<'a>,
-    raw_lt: u16,
-) -> Vec<ParsedGsubSubtable<'a>> {
+fn parse_lookup_subtables<'a>(lookup: &Lookup<'a>, raw_lt: u16) -> Vec<ParsedGsubSubtable<'a>> {
     let count = lookup.subtable_count() as usize;
     let mut out: Vec<ParsedGsubSubtable<'a>> = Vec::with_capacity(count);
     for sub_idx in 0..lookup.subtable_count() {
@@ -188,7 +185,9 @@ fn parse_lookup_subtables<'a>(
             (raw_lt, bytes)
         };
         let parsed = match effective_lt {
-            gsub_lt::SINGLE => Single::parse(inner_bytes).ok().map(ParsedGsubSubtable::Single),
+            gsub_lt::SINGLE => Single::parse(inner_bytes)
+                .ok()
+                .map(ParsedGsubSubtable::Single),
             gsub_lt::MULTIPLE => Multiple::parse(inner_bytes)
                 .ok()
                 .map(ParsedGsubSubtable::Multiple),
@@ -232,9 +231,7 @@ fn primary_coverage_of<'a, 'b>(
         ParsedGsubSubtable::Multiple(m) => Some(m.coverage()),
         ParsedGsubSubtable::Alternate(a) => Some(a.coverage()),
         ParsedGsubSubtable::Ligature(l) => Some(l.coverage()),
-        ParsedGsubSubtable::ChainContext(ChainContextAny::Format3(c3)) => {
-            c3.input_first_coverage()
-        }
+        ParsedGsubSubtable::ChainContext(ChainContextAny::Format3(c3)) => c3.input_first_coverage(),
         ParsedGsubSubtable::Context(GsubContext::Format3(c3)) => c3.input().first(),
         _ => None,
     }
@@ -346,9 +343,7 @@ fn apply_parsed_lookup_at(
                 }
             }
             ParsedGsubSubtable::Ligature(lig) => {
-                if let Some((out, positions)) =
-                    lig.apply_filtered(&ids.as_slice()[at..], filter)
-                {
+                if let Some((out, positions)) = lig.apply_filtered(&ids.as_slice()[at..], filter) {
                     glyphs[at].glyph_id = u32::from(out);
                     drain_ligature_components(glyphs, at, &positions);
                     let span = positions.last().copied().map_or(0, |p| p + 1);
@@ -357,16 +352,8 @@ fn apply_parsed_lookup_at(
                 }
             }
             ParsedGsubSubtable::Context(ctx) => {
-                let ran = apply_gsub_context_at(
-                    gsub,
-                    ctx,
-                    glyphs,
-                    ids,
-                    gdef,
-                    filter,
-                    at,
-                    depth + 1,
-                );
+                let ran =
+                    apply_gsub_context_at(gsub, ctx, glyphs, ids, gdef, filter, at, depth + 1);
                 if ran > 0 {
                     return ran;
                 }
@@ -1511,17 +1498,8 @@ fn apply_gsub_lookup_masked(
             i += 1;
             continue;
         }
-        let consumed = apply_parsed_lookup_at(
-            gsub,
-            &parsed,
-            &filter,
-            glyphs,
-            &mut ids,
-            gdef,
-            i,
-            0,
-            0,
-        );
+        let consumed =
+            apply_parsed_lookup_at(gsub, &parsed, &filter, glyphs, &mut ids, gdef, i, 0, 0);
         if consumed > 0 {
             i += consumed;
         } else {
@@ -1755,9 +1733,7 @@ fn apply_gsub_lookup_at(
                 let Ok(lig) = Ligature::parse(inner_bytes) else {
                     continue;
                 };
-                if let Some((out, positions)) =
-                    lig.apply_filtered(&ids.as_slice()[at..], &filter)
-                {
+                if let Some((out, positions)) = lig.apply_filtered(&ids.as_slice()[at..], &filter) {
                     glyphs[at].glyph_id = u32::from(out);
                     drain_ligature_components(glyphs, at, &positions);
                     let span = positions.last().copied().map_or(0, |p| p + 1);
@@ -1769,16 +1745,8 @@ fn apply_gsub_lookup_at(
                 let Ok(ctx) = GsubContext::parse(inner_bytes) else {
                     continue;
                 };
-                let ran = apply_gsub_context_at(
-                    gsub,
-                    &ctx,
-                    glyphs,
-                    ids,
-                    gdef,
-                    &filter,
-                    at,
-                    depth + 1,
-                );
+                let ran =
+                    apply_gsub_context_at(gsub, &ctx, glyphs, ids, gdef, &filter, at, depth + 1);
                 if ran > 0 {
                     return ran;
                 }
@@ -1982,7 +1950,16 @@ fn apply_nested_gsub_lookups(
         // Nested alternate lookups always pick index 0 — feature
         // value-based selection is a top-level concept and does not
         // propagate into a recursed lookup.
-        apply_gsub_lookup_at(gsub, rec.lookup_list_index, glyphs, ids, gdef, pos, depth, 0);
+        apply_gsub_lookup_at(
+            gsub,
+            rec.lookup_list_index,
+            glyphs,
+            ids,
+            gdef,
+            pos,
+            depth,
+            0,
+        );
     }
 }
 
@@ -2431,17 +2408,7 @@ fn apply_gpos_lookup_at(
                     continue;
                 };
                 let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
-                apply_gpos_context_at(
-                    gpos,
-                    &ctx,
-                    glyphs,
-                    &ids,
-                    gdef,
-                    &filter,
-                    at,
-                    depth + 1,
-                    var,
-                );
+                apply_gpos_context_at(gpos, &ctx, glyphs, &ids, gdef, &filter, at, depth + 1, var);
                 return;
             }
             gpos_lt::CHAINED_CONTEXT => {
