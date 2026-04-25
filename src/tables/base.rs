@@ -67,16 +67,24 @@
 //!     i16        coordinate
 //!     u16        referenceGlyph
 //!     u16        baseCoordPoint
+//!
+//!   BaseCoord (format 3, IVS-varied):
+//!     u16        format = 3
+//!     i16        coordinate
+//!     Offset16   deviceTable / VariationIndex (relative to BaseCoord)
 //! ```
 //!
-//! Format 3 (IVS-varied) is recognised by the format dispatcher and
-//! its static coord is returned; full IVS resolution lands in a
-//! follow-up commit alongside the v1.1 header path.
+//! Format 3's device table is a `VariationIndex` triple
+//! `(outerIndex, innerIndex, 0x8000)`; combined with the BASE
+//! header's `itemVarStoreOffset` (v1.1) it yields the design-unit
+//! delta to add to the static coordinate at a given normalized
+//! axis position.
 
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
+use crate::tables::variation_store::ItemVariationStore;
 
 /// A parsed `BASE` table.
 #[derive(Debug, Clone)]
@@ -84,6 +92,7 @@ pub struct Base<'a> {
     data: &'a [u8],
     horiz_axis_off: u16,
     vert_axis_off: u16,
+    ivs: Option<ItemVariationStore<'a>>,
 }
 
 impl<'a> Base<'a> {
@@ -91,7 +100,7 @@ impl<'a> Base<'a> {
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(data);
         let major = r.read_u16()?;
-        let _minor = r.read_u16()?;
+        let minor = r.read_u16()?;
         if major != 1 {
             return Err(Error::Malformed {
                 offset: 0,
@@ -100,6 +109,23 @@ impl<'a> Base<'a> {
         }
         let horiz_axis_off = r.read_u16()?;
         let vert_axis_off = r.read_u16()?;
+
+        // v1.1 adds a 32-bit ItemVariationStore offset. Older fonts
+        // (the vast majority shipping BASE) end the header here.
+        let ivs = if minor >= 1 {
+            let store_off = r.read_u32()? as usize;
+            if store_off == 0 {
+                None
+            } else {
+                let bytes = data.get(store_off..).ok_or(Error::Malformed {
+                    offset: store_off,
+                    context: "BASE itemVarStore offset past end",
+                })?;
+                Some(ItemVariationStore::parse(bytes)?)
+            }
+        } else {
+            None
+        };
 
         if horiz_axis_off != 0 && (horiz_axis_off as usize) > data.len() {
             return Err(Error::Malformed {
@@ -118,6 +144,7 @@ impl<'a> Base<'a> {
             data,
             horiz_axis_off,
             vert_axis_off,
+            ivs,
         })
     }
 
@@ -129,7 +156,7 @@ impl<'a> Base<'a> {
         if self.horiz_axis_off == 0 {
             None
         } else {
-            BaseAxis::parse(self.data, self.horiz_axis_off as usize).ok()
+            BaseAxis::parse(self.data, self.horiz_axis_off as usize, self.ivs.clone()).ok()
         }
     }
 
@@ -139,8 +166,16 @@ impl<'a> Base<'a> {
         if self.vert_axis_off == 0 {
             None
         } else {
-            BaseAxis::parse(self.data, self.vert_axis_off as usize).ok()
+            BaseAxis::parse(self.data, self.vert_axis_off as usize, self.ivs.clone()).ok()
         }
+    }
+
+    /// Borrowed reference to the v1.1 ItemVariationStore, when the
+    /// font carries variable-font baselines. Static fonts and v1.0
+    /// fonts return `None`.
+    #[must_use]
+    pub fn variation_store(&self) -> Option<&ItemVariationStore<'a>> {
+        self.ivs.as_ref()
     }
 }
 
@@ -156,10 +191,11 @@ pub struct BaseAxis<'a> {
     /// Absolute offset of the BaseScriptList from `data` start.
     /// Zero when the axis carries scripts but no per-script values.
     script_list_off: u16,
+    ivs: Option<ItemVariationStore<'a>>,
 }
 
 impl<'a> BaseAxis<'a> {
-    fn parse(data: &'a [u8], axis_off: usize) -> Result<Self> {
+    fn parse(data: &'a [u8], axis_off: usize, ivs: Option<ItemVariationStore<'a>>) -> Result<Self> {
         let mut r = Reader::at(data, axis_off)?;
         let tag_list_rel = r.read_u16()?;
         let script_list_rel = r.read_u16()?;
@@ -206,6 +242,7 @@ impl<'a> BaseAxis<'a> {
             data,
             tag_list_off,
             script_list_off,
+            ivs,
         })
     }
 
@@ -260,7 +297,7 @@ impl<'a> BaseAxis<'a> {
                     return None;
                 }
                 let tags = self.baseline_tags();
-                return BaseScript::parse(self.data, script_off, tags).ok();
+                return BaseScript::parse(self.data, script_off, tags, self.ivs.clone()).ok();
             }
         }
         None
@@ -281,10 +318,16 @@ pub struct BaseScript<'a> {
     /// `BaseScript` so the `baseline()` lookup doesn't have to
     /// re-walk back through the axis.
     tags: Vec<[u8; 4]>,
+    ivs: Option<ItemVariationStore<'a>>,
 }
 
 impl<'a> BaseScript<'a> {
-    fn parse(data: &'a [u8], script_off: usize, tags: Vec<[u8; 4]>) -> Result<Self> {
+    fn parse(
+        data: &'a [u8],
+        script_off: usize,
+        tags: Vec<[u8; 4]>,
+        ivs: Option<ItemVariationStore<'a>>,
+    ) -> Result<Self> {
         let mut r = Reader::at(data, script_off)?;
         let base_values_rel = r.read_u16()?;
         let default_min_max_rel = r.read_u16()?;
@@ -331,13 +374,53 @@ impl<'a> BaseScript<'a> {
             base_values_off,
             default_min_max_off,
             tags,
+            ivs,
         })
     }
 
     /// Returns the design-unit y-coordinate for `tag`, or `None`
-    /// when the script carries no value for it.
+    /// when the script carries no value for it. Reads the static
+    /// coord; for variable fonts, [`Self::baseline_at_coords`] adds
+    /// the IVS-derived delta.
     #[must_use]
     pub fn baseline(&self, tag: [u8; 4]) -> Option<i16> {
+        let (coord, _ivs_idx) = self.coord_for_tag(tag)?;
+        Some(coord)
+    }
+
+    /// Like [`Self::baseline`] but applies any v1.1 IVS deltas at
+    /// the given normalized axis coordinates. When the BaseCoord
+    /// is format 1 or format 2 — or the table has no IVS — this
+    /// returns the same value as [`Self::baseline`].
+    #[must_use]
+    pub fn baseline_at_coords(&self, tag: [u8; 4], coords: &[f32]) -> Option<i16> {
+        let (coord, ivs_idx) = self.coord_for_tag(tag)?;
+        let Some((outer, inner)) = ivs_idx else {
+            return Some(coord);
+        };
+        let Some(store) = self.ivs.as_ref() else {
+            return Some(coord);
+        };
+        let delta = store.delta(outer, inner, coords);
+        // Round-half-away-from-zero, saturating into i16. Matches
+        // the convention used elsewhere in sigilbuzz for variable
+        // metrics rounding.
+        let adj = if delta >= 0.0 {
+            delta + 0.5
+        } else {
+            delta - 0.5
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+        let clamped = adj.max(i16::MIN as f32).min(i16::MAX as f32) as i16;
+        Some(coord.saturating_add(clamped))
+    }
+
+    /// Resolves `(coordinate, optional VariationIndex)` for the
+    /// baseline tag by consulting the parent axis's tag list. The
+    /// `BaseValues` table stores per-coord offsets in the *same*
+    /// order as the axis tag list, so we look up the tag's slot
+    /// and read the `[slot]`th `BaseCoord`.
+    fn coord_for_tag(&self, tag: [u8; 4]) -> Option<(i16, Option<(u16, u16)>)> {
         if self.base_values_off == 0 {
             return None;
         }
@@ -349,14 +432,13 @@ impl<'a> BaseScript<'a> {
         if slot >= count as usize {
             return None;
         }
-        // Skip to the slot's offset slot (each is 2 bytes).
         r.skip(slot * 2).ok()?;
         let coord_rel = r.read_u16().ok()?;
         if coord_rel == 0 {
             return None;
         }
         let coord_off = bv_off.checked_add(coord_rel as usize)?;
-        read_base_coord_static(self.data, coord_off)
+        read_base_coord(self.data, coord_off)
     }
 
     /// Returns the `(min, max)` design-unit clamps for the script.
@@ -400,23 +482,54 @@ impl<'a> BaseScript<'a> {
     }
 }
 
-/// Reads the static coordinate of a BaseCoord at absolute offset
-/// `off`. Recognises formats 1 and 2 (returning the embedded
-/// coord); format 3's static coord is returned and the variation
-/// index is ignored at this stage.
-fn read_base_coord_static(data: &[u8], off: usize) -> Option<i16> {
+/// Reads a `BaseCoord` from `data` at absolute offset `off`. Returns
+/// `(coordinate, Some((outer, inner)))` for format 3 with a
+/// VariationIndex device, or `(coordinate, None)` for formats 1, 2,
+/// and format 3 with a non-VariationIndex device.
+fn read_base_coord(data: &[u8], off: usize) -> Option<(i16, Option<(u16, u16)>)> {
     let mut r = Reader::at(data, off).ok()?;
     let format = r.read_u16().ok()?;
     let coord = r.read_i16().ok()?;
     match format {
-        // Format 1: just the coord. Format 2: coord + reference
-        // glyph + contour point (we ignore the latter two).
-        // Format 3: coord + Offset16 device. We accept it here
-        // and return the static value; full IVS resolution lands
-        // when the v1.1 header path is wired up.
-        1 | 2 | 3 => Some(coord),
+        1 => Some((coord, None)),
+        2 => {
+            // referenceGlyph + baseCoordPoint follow; sigilbuzz
+            // returns the stored coord without consulting the
+            // contour point. A renderer that needs hint-driven
+            // baselines reaches for the glyph itself.
+            Some((coord, None))
+        }
+        3 => {
+            let dev_rel = r.read_u16().ok()?;
+            if dev_rel == 0 {
+                return Some((coord, None));
+            }
+            let dev_off = off.checked_add(dev_rel as usize)?;
+            // VariationIndex layout: u16 outer, u16 inner, u16
+            // deltaFormat = 0x8000.
+            let mut dr = Reader::at(data, dev_off).ok()?;
+            let outer = dr.read_u16().ok()?;
+            let inner = dr.read_u16().ok()?;
+            let fmt = dr.read_u16().ok()?;
+            if fmt != 0x8000 {
+                // Plain Device table — sigilbuzz doesn't apply
+                // ppem-keyed adjustments to baselines, so treat
+                // as static.
+                return Some((coord, None));
+            }
+            Some((coord, Some((outer, inner))))
+        }
         _ => None,
     }
+}
+
+/// Reads the static coordinate of a BaseCoord at absolute offset
+/// `off`. Drops the variation index — used by `min_max`, which
+/// doesn't expose IVS-varied clamps (the few real fonts shipping
+/// these mark them static).
+fn read_base_coord_static(data: &[u8], off: usize) -> Option<i16> {
+    let (coord, _) = read_base_coord(data, off)?;
+    Some(coord)
 }
 
 /// Reads the static coordinate at `base_off + rel`, or `None` when
@@ -787,5 +900,156 @@ mod tests {
         assert_eq!(script.min_max(None), Some((-200, 800)));
         assert_eq!(script.min_max(Some(*b"sups")), Some((-50, 600)));
         assert_eq!(script.min_max(Some(*b"subs")), Some((-200, 800)));
+    }
+
+    // --------------------------------------------------------------
+    // v1.1 IVS-varied baseline (BaseCoord format 3).
+    // --------------------------------------------------------------
+
+    fn write_f2dot14(out: &mut Vec<u8>, v: f32) {
+        #[allow(clippy::cast_possible_truncation)]
+        let raw = (v * 16384.0).round() as i16;
+        out.extend_from_slice(&raw.to_be_bytes());
+    }
+
+    /// Same one-axis, one-region, one-item IVS used by the
+    /// `mvar`/`hvar` tests. Maps `(outer=0, inner=0)` to the given
+    /// `delta` at the +1.0 axis tip, tapering linearly to 0 at
+    /// the default position.
+    fn build_ivs_one_item(delta: i16) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // format
+        let region_off_slot = out.len();
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes()); // subtable count
+        let subtable_slot = out.len();
+        out.extend_from_slice(&0u32.to_be_bytes());
+
+        let region_start = out.len() as u32;
+        out[region_off_slot..region_off_slot + 4].copy_from_slice(&region_start.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes()); // axisCount
+        out.extend_from_slice(&1u16.to_be_bytes()); // regionCount
+        write_f2dot14(&mut out, 0.0);
+        write_f2dot14(&mut out, 1.0);
+        write_f2dot14(&mut out, 1.0);
+
+        let sub_start = out.len() as u32;
+        out[subtable_slot..subtable_slot + 4].copy_from_slice(&sub_start.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes()); // itemCount
+        out.extend_from_slice(&1u16.to_be_bytes()); // wordDeltaCount
+        out.extend_from_slice(&1u16.to_be_bytes()); // regionIndexCount
+        out.extend_from_slice(&0u16.to_be_bytes()); // region index 0
+        out.extend_from_slice(&delta.to_be_bytes());
+        out
+    }
+
+    /// Builds a v1.1 BASE with one horizontal axis, one script
+    /// (`latn`), one tag (`romn`), and a format-3 BaseCoord whose
+    /// VariationIndex points at the single `(outer=0, inner=0)`
+    /// item in the embedded IVS.
+    fn build_v11_base(static_y: i16, ivs_delta: i16) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+
+        // Header (v1.1: 12 bytes).
+        out.extend_from_slice(&u16be(1)); // major
+        out.extend_from_slice(&u16be(1)); // minor
+        out.extend_from_slice(&u16be(12)); // horizAxisOffset
+        out.extend_from_slice(&u16be(0));
+        let ivs_slot = out.len();
+        out.extend_from_slice(&0u32.to_be_bytes()); // itemVarStoreOffset placeholder
+
+        let axis_off = out.len();
+        let tl_slot = axis_off;
+        out.extend_from_slice(&u16be(0));
+        out.extend_from_slice(&u16be(0));
+
+        let tag_list_off = out.len();
+        out.extend_from_slice(&u16be(1));
+        out.extend_from_slice(b"romn");
+
+        let script_list_off = out.len();
+        out.extend_from_slice(&u16be(1));
+        out.extend_from_slice(b"latn");
+        let s_slot = out.len();
+        out.extend_from_slice(&u16be(0));
+
+        let script_off = out.len();
+        let bv_slot = out.len();
+        out.extend_from_slice(&u16be(0));
+        out.extend_from_slice(&u16be(0));
+        out.extend_from_slice(&u16be(0));
+
+        let bv_off = out.len();
+        out.extend_from_slice(&u16be(0));
+        out.extend_from_slice(&u16be(1));
+        let coord_slot = out.len();
+        out.extend_from_slice(&u16be(0));
+
+        // Format 3 BaseCoord: u16 fmt, i16 coord, Offset16 device.
+        let coord_off = out.len();
+        out.extend_from_slice(&u16be(3));
+        out.extend_from_slice(&i16be(static_y));
+        let dev_slot = out.len();
+        out.extend_from_slice(&u16be(0));
+
+        // VariationIndex (inline, pointed at by dev_slot).
+        let var_index_off = out.len();
+        out.extend_from_slice(&u16be(0)); // outer
+        out.extend_from_slice(&u16be(0)); // inner
+        out.extend_from_slice(&u16be(0x8000)); // deltaFormat = VARIATION_INDEX
+
+        out[dev_slot..dev_slot + 2]
+            .copy_from_slice(&u16be((var_index_off - coord_off) as u16));
+
+        out[tl_slot..tl_slot + 2].copy_from_slice(&u16be((tag_list_off - axis_off) as u16));
+        out[tl_slot + 2..tl_slot + 4]
+            .copy_from_slice(&u16be((script_list_off - axis_off) as u16));
+        out[s_slot..s_slot + 2].copy_from_slice(&u16be((script_off - script_list_off) as u16));
+        out[bv_slot..bv_slot + 2].copy_from_slice(&u16be((bv_off - script_off) as u16));
+        out[coord_slot..coord_slot + 2].copy_from_slice(&u16be((coord_off - bv_off) as u16));
+
+        let ivs_off = out.len() as u32;
+        out[ivs_slot..ivs_slot + 4].copy_from_slice(&ivs_off.to_be_bytes());
+        out.extend_from_slice(&build_ivs_one_item(ivs_delta));
+
+        out
+    }
+
+    #[test]
+    fn v11_static_baseline_is_unchanged_at_default_coord() {
+        let data = build_v11_base(50, 30);
+        let base = Base::parse(&data).unwrap();
+        assert!(base.variation_store().is_some());
+        let axis = base.horizontal_axis().unwrap();
+        let script = axis.script(*b"latn").unwrap();
+        // baseline() always returns the static coord.
+        assert_eq!(script.baseline(*b"romn"), Some(50));
+        // At coord 0 the IVS region (0..1..1) yields scalar 0 → no
+        // delta.
+        assert_eq!(script.baseline_at_coords(*b"romn", &[0.0]), Some(50));
+    }
+
+    #[test]
+    fn v11_baseline_picks_up_ivs_delta_at_max_coord() {
+        let data = build_v11_base(50, 30);
+        let base = Base::parse(&data).unwrap();
+        let axis = base.horizontal_axis().unwrap();
+        let script = axis.script(*b"latn").unwrap();
+        // At coord 1.0 the region yields scalar 1.0 and the delta
+        // is 30 → 50 + 30 = 80.
+        assert_eq!(script.baseline_at_coords(*b"romn", &[1.0]), Some(80));
+        // At coord 0.5 the linear taper gives 50 + 15 = 65.
+        assert_eq!(script.baseline_at_coords(*b"romn", &[0.5]), Some(65));
+    }
+
+    #[test]
+    fn v11_baseline_at_coords_without_ivs_returns_static() {
+        // A v1.0 fixture has no IVS; baseline_at_coords should
+        // still return the static coord rather than failing.
+        let data = build_minimal_base(None, 42);
+        let base = Base::parse(&data).unwrap();
+        let axis = base.horizontal_axis().unwrap();
+        let script = axis.script(*b"latn").unwrap();
+        assert_eq!(script.baseline_at_coords(*b"romn", &[0.5]), Some(42));
     }
 }
