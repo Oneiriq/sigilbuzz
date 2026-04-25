@@ -1,0 +1,20 @@
+[package]
+name = "sigilbuzz-text-layout"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Line-breaking, word-wrap, and word-segmentation for sigilbuzz."
+readme = "README.md"
+keywords = ["text-layout", "line-break", "uax14", "sigilbuzz", "typography"]
+categories = ["text-processing"]
+publish = true
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+sigilbuzz = { workspace = true }
