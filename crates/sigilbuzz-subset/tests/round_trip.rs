@@ -226,8 +226,11 @@ fn shaping_subset_font_matches_remap() {
 fn cff_font_errors_cleanly() {
     // We synthesise a minimal SFNT directory advertising a CFF table
     // — Face::parse only validates the directory shape, so this is
-    // enough to prove the early CFF branch fires before we touch
-    // anything else.
+    // enough to prove the CFF dispatch surfaces a clean error path.
+    // Without a maxp the closure walk can't compute num_glyphs, so the
+    // error variant here is MissingTable rather than Unsupported. The
+    // original-intent invariant — "CFF input never panics, never
+    // bubbles a Parse error" — is what this test still guards.
     let mut bytes: Vec<u8> = Vec::new();
     bytes.extend_from_slice(&0x4F54_544Fu32.to_be_bytes()); // 'OTTO'
     bytes.extend_from_slice(&1u16.to_be_bytes()); // numTables
@@ -243,5 +246,183 @@ fn cff_font_errors_cleanly() {
     let face = Face::parse_bytes(&bytes, 0).unwrap();
     let input = SubsetInput::default();
     let err = subset(&face, &input).unwrap_err();
-    assert!(matches!(err, SubsetError::Unsupported(_)));
+    // Either MissingTable(maxp) (no maxp in the synthetic fixture) or
+    // Unsupported (for a real CFF source under non-identity gid map);
+    // both are clean.
+    assert!(matches!(
+        err,
+        SubsetError::MissingTable(_) | SubsetError::Unsupported(_)
+    ));
+}
+
+/// Builds a minimal SFNT directory with the supplied tables, sorted
+/// ascending by tag, with correct offsets / lengths / checksums of zero
+/// (Face::parse_bytes only validates structural shape).
+fn build_synthetic_sfnt(version: u32, mut tables: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
+    tables.sort_by_key(|(t, _)| *t);
+    let n = tables.len();
+    let mut out = Vec::new();
+    out.extend_from_slice(&version.to_be_bytes());
+    out.extend_from_slice(&(n as u16).to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes()); // searchRange
+    out.extend_from_slice(&0u16.to_be_bytes()); // entrySelector
+    out.extend_from_slice(&0u16.to_be_bytes()); // rangeShift
+    let header_len = 12 + n * 16;
+    let mut data_off = header_len;
+    for (_, body) in &tables {
+        data_off = (data_off + ((body.len() + 3) & !3)).max(data_off);
+    }
+    let mut cur_off = header_len;
+    // Reserve directory space; fill below.
+    let dir_off = out.len();
+    for _ in 0..n {
+        out.extend_from_slice(&[0u8; 16]);
+    }
+    let mut entries: Vec<(usize, usize)> = Vec::with_capacity(n);
+    for (_, body) in &tables {
+        let off = out.len();
+        out.extend_from_slice(body);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        entries.push((off, body.len()));
+        cur_off = off;
+    }
+    let _ = cur_off;
+    let _ = data_off;
+    for (i, ((tag, _), (off, len))) in tables.iter().zip(entries.iter()).enumerate() {
+        let d = dir_off + i * 16;
+        out[d..d + 4].copy_from_slice(tag);
+        out[d + 4..d + 8].copy_from_slice(&0u32.to_be_bytes());
+        out[d + 8..d + 12].copy_from_slice(&(*off as u32).to_be_bytes());
+        out[d + 12..d + 16].copy_from_slice(&(*len as u32).to_be_bytes());
+    }
+    out
+}
+
+/// Builds a minimal `head` table (54 bytes) with sensible defaults.
+fn build_minimal_head() -> Vec<u8> {
+    let mut head = Vec::with_capacity(54);
+    head.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // version
+    head.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // fontRev
+    head.extend_from_slice(&0u32.to_be_bytes()); // checkSumAdjustment
+    head.extend_from_slice(&0x5F0F_3CF5u32.to_be_bytes()); // magicNumber
+    head.extend_from_slice(&0u16.to_be_bytes()); // flags
+    head.extend_from_slice(&1000u16.to_be_bytes()); // unitsPerEm
+    head.extend_from_slice(&0u64.to_be_bytes()); // created
+    head.extend_from_slice(&0u64.to_be_bytes()); // modified
+    head.extend_from_slice(&0i16.to_be_bytes()); // xMin
+    head.extend_from_slice(&0i16.to_be_bytes()); // yMin
+    head.extend_from_slice(&0i16.to_be_bytes()); // xMax
+    head.extend_from_slice(&0i16.to_be_bytes()); // yMax
+    head.extend_from_slice(&0u16.to_be_bytes()); // macStyle
+    head.extend_from_slice(&8u16.to_be_bytes()); // lowestRecPPEM
+    head.extend_from_slice(&0i16.to_be_bytes()); // fontDirectionHint
+    head.extend_from_slice(&0i16.to_be_bytes()); // indexToLocFormat
+    head.extend_from_slice(&0i16.to_be_bytes()); // glyphDataFormat
+    head
+}
+
+/// Builds a minimal `maxp` v0.5 table — the 6-byte short form used by
+/// CFF fonts.
+fn build_minimal_maxp(num_glyphs: u16) -> Vec<u8> {
+    let mut maxp = Vec::new();
+    maxp.extend_from_slice(&0x0000_5000u32.to_be_bytes()); // version 0.5
+    maxp.extend_from_slice(&num_glyphs.to_be_bytes());
+    maxp
+}
+
+#[test]
+fn cff_identity_passthrough_preserves_table_bytes() {
+    // Synthesise a CFF1 font with just enough tables to satisfy the
+    // closure walker: head + maxp + a minimal CFF table. With
+    // gids = [] and drop_unhandled = true the closure walker keeps
+    // only gid 0; if num_glyphs = 1 the kept set is the identity, so
+    // the CFF dispatch hits the passthrough branch.
+    //
+    // The CFF body itself is a 4-byte header — Face::parse_bytes only
+    // validates the SFNT directory shape, and the subset entry's
+    // identity-passthrough path never re-parses the CFF body. The
+    // round-trip we care about is "same bytes survive into output".
+    let cff_body: Vec<u8> = vec![1, 0, 4, 1]; // major=1 minor=0 hdrSize=4 offSize=1
+    let head = build_minimal_head();
+    let maxp = build_minimal_maxp(1);
+
+    let bytes = build_synthetic_sfnt(
+        0x4F54_544Fu32, // 'OTTO'
+        vec![
+            (*b"CFF ", cff_body.clone()),
+            (*b"head", head),
+            (*b"maxp", maxp),
+        ],
+    );
+    let face = Face::parse_bytes(&bytes, 0).unwrap();
+    let out = subset(&face, &SubsetInput::default()).expect("CFF identity passthrough succeeds");
+    // gid_map is identity over kept set: [(0, 0)].
+    assert_eq!(out.gid_map, vec![(0u16, 0u16)]);
+
+    // The CFF body must travel byte-identical into the output.
+    let new_face = Face::parse_bytes(&out.bytes, 0).expect("subset face re-parses");
+    let new_cff = new_face
+        .table_bytes(*b"CFF ")
+        .expect("CFF survives passthrough");
+    assert_eq!(new_cff, cff_body.as_slice());
+    // Output advertises 'OTTO' too.
+    assert_eq!(&out.bytes[0..4], &0x4F54_544Fu32.to_be_bytes());
+}
+
+#[test]
+fn cff2_identity_passthrough_preserves_table_bytes() {
+    // CFF2 mirrors CFF1: identity passthrough preserves the table
+    // bytes. Use a 5-byte CFF2 header: major=2 minor=0 hdrSize=5
+    // topDictLength=0.
+    let cff2_body: Vec<u8> = vec![2, 0, 5, 0, 0];
+    let head = build_minimal_head();
+    let maxp = build_minimal_maxp(1);
+    let bytes = build_synthetic_sfnt(
+        0x4F54_544Fu32,
+        vec![
+            (*b"CFF2", cff2_body.clone()),
+            (*b"head", head),
+            (*b"maxp", maxp),
+        ],
+    );
+    let face = Face::parse_bytes(&bytes, 0).unwrap();
+    let out = subset(&face, &SubsetInput::default()).expect("CFF2 identity passthrough succeeds");
+    assert_eq!(out.gid_map, vec![(0u16, 0u16)]);
+    let new_face = Face::parse_bytes(&out.bytes, 0).expect("subset face re-parses");
+    let new_cff2 = new_face
+        .table_bytes(*b"CFF2")
+        .expect("CFF2 survives passthrough");
+    assert_eq!(new_cff2, cff2_body.as_slice());
+}
+
+#[test]
+fn cff_non_identity_subset_errors_unsupported() {
+    // Same fixture but with num_glyphs = 2: the closure walker keeps
+    // only gid 0, so the kept set is [0] — not the identity over a
+    // 2-glyph font. The dispatch must surface Unsupported with the
+    // dedicated CFF rewrite-staged context string.
+    let cff_body: Vec<u8> = vec![1, 0, 4, 1];
+    let head = build_minimal_head();
+    let maxp = build_minimal_maxp(2);
+    let bytes = build_synthetic_sfnt(
+        0x4F54_544Fu32,
+        vec![
+            (*b"CFF ", cff_body),
+            (*b"head", head),
+            (*b"maxp", maxp),
+        ],
+    );
+    let face = Face::parse_bytes(&bytes, 0).unwrap();
+    let err = subset(&face, &SubsetInput::default()).unwrap_err();
+    match err {
+        SubsetError::Unsupported(msg) => {
+            assert!(
+                msg.contains("CFF"),
+                "expected CFF-specific Unsupported message, got {msg}",
+            );
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
 }
