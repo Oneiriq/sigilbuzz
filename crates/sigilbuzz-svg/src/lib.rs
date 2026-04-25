@@ -1,23 +1,35 @@
-//! `sigilbuzz-svg` — SVG serialiser for sigilbuzz glyph outlines.
+//! `sigilbuzz-svg` — SVG serialiser for sigilbuzz glyph outlines and
+//! COLRv1 color glyphs.
 //!
 //! sigilbuzz exposes glyph outlines as a flat
-//! [`PathOp`](sigilbuzz::tables::PathOp) stream. This crate turns that
-//! into a self-contained `<svg>` element ready to drop into a
-//! document, a preview tool, or a font-debug page.
+//! [`PathOp`](sigilbuzz::tables::PathOp) stream and (via the
+//! `sigilbuzz-paint` companion) a flat [`DrawCmd`](sigilbuzz_paint::DrawCmd)
+//! stream for color glyphs. This crate turns either of those into a
+//! self-contained `<svg>` element ready to drop into a document, a
+//! preview tool, or a font-debug page.
 //!
 //! The output is plain text — there is no XML library on the write
-//! path. SVG path data and transform matrices are all emitted with
-//! `core::fmt` formatting and a single deterministic-precision policy
-//! ([`PRECISION`] decimals). Same input always produces the same byte
-//! sequence.
+//! path. SVG path data, gradient stops, and transform matrices are all
+//! emitted with `core::fmt` formatting and a single
+//! deterministic-precision policy ([`PRECISION`] decimals). Same input
+//! always produces the same byte sequence.
 //!
-//! ## Feature-gated COLRv1 emission
+//! ## Outline-only mode
 //!
-//! With the `color` Cargo feature (on by default) the crate also
-//! pulls in `sigilbuzz-paint` and exposes a `glyph_to_svg_color`
-//! entry point for COLRv1 emission. Compile with
-//! `--no-default-features` for outline-only mode and zero cost from
-//! the colour-glyph path.
+//! With `--no-default-features` (or `default-features = false`) the
+//! crate compiles without the `color` feature and depends only on
+//! sigilbuzz. The COLRv1 paths in this module are conditionally
+//! compiled out, so you pay nothing for color support you do not use.
+//!
+//! ## Sweep gradients
+//!
+//! SVG 1.1 has no native sweep / conic gradient. The COLRv1 evaluator
+//! still emits one for `PaintSweepGradient`, so this crate degrades
+//! it to an SVG `<linearGradient>` running across the gradient's
+//! bounding box, with a comment in the output noting the substitution.
+//! That keeps the SVG well-formed in every viewer; consumers that
+//! require true sweep rendering should drive `sigilbuzz-paint`
+//! directly into a renderer that supports it.
 //!
 //! ```no_run
 //! use sigilbuzz::Face;
@@ -42,6 +54,12 @@ use alloc::string::String;
 
 use sigilbuzz::tables::PathOp;
 use sigilbuzz::Face;
+
+#[cfg(feature = "color")]
+mod color;
+
+#[cfg(feature = "color")]
+pub use color::glyph_to_svg_color;
 
 /// Glyph-id alias mirroring sigilbuzz's on-disk u16.
 pub type GlyphId = u16;
