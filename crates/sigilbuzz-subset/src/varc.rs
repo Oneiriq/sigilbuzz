@@ -195,6 +195,115 @@ impl<'a> ParsedVarc<'a> {
     fn coverage_index_of(&self, gid: GlyphId) -> Option<usize> {
         coverage_index_of(self.coverage_bytes, gid)
     }
+
+    /// Iterator over `(gid, record_index)` pairs in coverage order.
+    /// The record index is the position used to look up the glyph
+    /// record inside `glyph_records`.
+    #[allow(dead_code)] // wired up by the subset_varc emit commit
+    fn coverage_iter(&self) -> impl Iterator<Item = (GlyphId, usize)> + '_ {
+        CoverageIter::new(self.coverage_bytes)
+    }
+}
+
+/// Iterator over coverage entries yielding `(gid, record_index)` pairs.
+/// Used by [`subset_varc`] to walk the source coverage in order while
+/// filtering on the kept-gid set.
+struct CoverageIter<'a> {
+    bytes: &'a [u8],
+    format: u16,
+    count: usize,
+    cursor: usize,
+    /// For format 2: which range we're inside.
+    range_idx: usize,
+    /// For format 2: current glyph inside the range (offset from start).
+    range_offset: u16,
+}
+
+impl<'a> CoverageIter<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        if bytes.len() < 4 {
+            return Self {
+                bytes,
+                format: 0,
+                count: 0,
+                cursor: 0,
+                range_idx: 0,
+                range_offset: 0,
+            };
+        }
+        let format = u16::from_be_bytes([bytes[0], bytes[1]]);
+        let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+        Self {
+            bytes,
+            format,
+            count,
+            cursor: 0,
+            range_idx: 0,
+            range_offset: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for CoverageIter<'a> {
+    type Item = (GlyphId, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.format {
+            1 => {
+                if self.cursor >= self.count {
+                    return None;
+                }
+                let off = 4 + self.cursor * 2;
+                if off + 2 > self.bytes.len() {
+                    return None;
+                }
+                let g = u16::from_be_bytes([self.bytes[off], self.bytes[off + 1]]);
+                let idx = self.cursor;
+                self.cursor += 1;
+                Some((g, idx))
+            }
+            2 => {
+                while self.range_idx < self.count {
+                    let off = 4 + self.range_idx * 6;
+                    if off + 6 > self.bytes.len() {
+                        return None;
+                    }
+                    let start = u16::from_be_bytes([self.bytes[off], self.bytes[off + 1]]);
+                    let end = u16::from_be_bytes([self.bytes[off + 2], self.bytes[off + 3]]);
+                    let start_cov =
+                        u16::from_be_bytes([self.bytes[off + 4], self.bytes[off + 5]]);
+                    let span = end.saturating_sub(start);
+                    if self.range_offset > span {
+                        self.range_idx += 1;
+                        self.range_offset = 0;
+                        continue;
+                    }
+                    let g = start.checked_add(self.range_offset)?;
+                    let idx = (start_cov as usize) + (self.range_offset as usize);
+                    self.range_offset += 1;
+                    return Some((g, idx));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Builds a Coverage format-1 table from a sorted ascending iterator of
+/// gids. Used by [`subset_varc`] to emit the rewritten coverage.
+#[allow(dead_code)] // wired up by the subset_varc emit commit
+fn build_coverage_format1(gids: impl IntoIterator<Item = GlyphId>) -> Vec<u8> {
+    let gids: Vec<GlyphId> = gids.into_iter().collect();
+    let mut out = Vec::with_capacity(4 + gids.len() * 2);
+    out.extend_from_slice(&1u16.to_be_bytes()); // format
+    #[allow(clippy::cast_possible_truncation)]
+    let count = gids.len() as u16;
+    out.extend_from_slice(&count.to_be_bytes());
+    for g in gids {
+        out.extend_from_slice(&g.to_be_bytes());
+    }
+    out
 }
 
 /// Reads u32 BE at `off`, bounds-checked.
@@ -617,6 +726,44 @@ mod tests {
         let mut rec = build_translate_record(5, 10, 20);
         rec.extend(build_translate_record(9, 30, 40));
         assert_eq!(walk_component_gids(&rec), vec![5, 9]);
+    }
+
+    #[test]
+    fn coverage_iter_format1_walks_in_source_order() {
+        let cov = build_coverage(&[1, 5, 10]);
+        let pairs: Vec<_> = CoverageIter::new(&cov).collect();
+        assert_eq!(pairs, vec![(1u16, 0usize), (5, 1), (10, 2)]);
+    }
+
+    #[test]
+    fn coverage_iter_format2_yields_one_pair_per_gid_in_range() {
+        // Format 2 with one range 100..=102 starting at coverage idx 5.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&2u16.to_be_bytes()); // format
+        bytes.extend_from_slice(&1u16.to_be_bytes()); // rangeCount
+        bytes.extend_from_slice(&100u16.to_be_bytes()); // start
+        bytes.extend_from_slice(&102u16.to_be_bytes()); // end
+        bytes.extend_from_slice(&5u16.to_be_bytes()); // startCov
+        let pairs: Vec<_> = CoverageIter::new(&bytes).collect();
+        assert_eq!(pairs, vec![(100u16, 5usize), (101, 6), (102, 7)]);
+    }
+
+    #[test]
+    fn build_coverage_emits_format_1() {
+        let cov = build_coverage_format1([1u16, 5, 10]);
+        assert_eq!(&cov[0..2], &1u16.to_be_bytes()); // format
+        assert_eq!(&cov[2..4], &3u16.to_be_bytes()); // count
+        assert_eq!(&cov[4..6], &1u16.to_be_bytes());
+        assert_eq!(&cov[6..8], &5u16.to_be_bytes());
+        assert_eq!(&cov[8..10], &10u16.to_be_bytes());
+    }
+
+    #[test]
+    fn build_coverage_handles_empty_input() {
+        let cov = build_coverage_format1(core::iter::empty());
+        assert_eq!(&cov[0..2], &1u16.to_be_bytes());
+        assert_eq!(&cov[2..4], &0u16.to_be_bytes());
+        assert_eq!(cov.len(), 4);
     }
 
     #[test]
