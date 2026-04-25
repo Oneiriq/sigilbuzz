@@ -317,6 +317,30 @@ impl<'a> Face<'a> {
         Ok(Glyf::new(self.table_bytes(tag::GLYF)?))
     }
 
+    /// Returns the glyph's raw points in glyf-natural order: contour
+    /// points (on-curve + off-curve) followed by the four phantom
+    /// points (pp1..pp4). Thin wrapper over [`Glyf::glyph_points`] —
+    /// the heavy lifting (composite flattening, phantom synthesis)
+    /// lives there; this method just plumbs `loca`, `hmtx`, and the
+    /// optional `vmtx` through.
+    ///
+    /// Used by `kerx` format-4 action type 0, which references glyph
+    /// points by index. Returns `Ok(None)` for glyphs without an
+    /// outline (whitespace, missing) and for fonts that lack `glyf`
+    /// entirely (CFF-only); the caller should treat the missing
+    /// information as "drop the kern silently" — the same conservative
+    /// posture sigilbuzz uses for fmt-4 fall-through everywhere else.
+    pub fn glyph_points(&self, glyph_id: u16) -> Result<Option<Vec<(i16, i16)>>> {
+        if self.record(tag::GLYF).is_none() {
+            return Ok(None);
+        }
+        let loca = self.loca()?;
+        let glyf = self.glyf()?;
+        let hmtx = self.hmtx()?;
+        let vmtx = self.vmtx()?;
+        glyf.glyph_points(&loca, glyph_id, &hmtx, vmtx.as_ref())
+    }
+
     /// Returns the design-unit bounding box for `glyph_id`, or
     /// `Ok(None)` when the glyph has no outline (e.g. a space
     /// glyph). Requires both `loca` and `glyf` — fonts that use CFF

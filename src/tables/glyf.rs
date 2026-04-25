@@ -144,6 +144,16 @@ const COMP_UNSCALED_COMPONENT_OFFSET: u16 = 0x1000;
 /// exceed a handful of levels.
 const MAX_COMPOSITE_DEPTH: u8 = 64;
 
+/// Rounds a float to the nearest `i16`, saturating at the type bounds.
+/// Mirrors the helper in [`crate::Face`]; duplicated here so the glyf
+/// module stays self-contained for `no_std` callers.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn round_f32_to_i16(v: f32) -> i16 {
+    let adj = if v >= 0.0 { v + 0.5 } else { v - 0.5 };
+    let clamped = adj.max(i16::MIN as f32).min(i16::MAX as f32);
+    clamped as i16
+}
+
 impl<'a> Glyf<'a> {
     /// Wraps the raw `glyf` bytes. No validation up front — the
     /// table is too large and too dense to validate whole-table in
@@ -267,6 +277,60 @@ impl<'a> Glyf<'a> {
         };
 
         Ok([(pp1_x, 0.0), (pp2_x, 0.0), (0.0, pp3_y), (0.0, pp4_y)])
+    }
+
+    /// Returns the glyph's raw points in glyf-natural order: every
+    /// contour point (on-curve and off-curve, in the order they appear
+    /// in the glyph's `glyf` data) followed by the four phantom points
+    /// (pp1 = LSB origin, pp2 = advance-width origin, pp3 = TSB origin,
+    /// pp4 = advance-height origin).
+    ///
+    /// Used by `kerx` format-4 action type 0, which references glyph
+    /// points by index — including off-curve control points and the
+    /// trailing phantoms. For composite glyphs the flat point list
+    /// returned by [`Glyf::flatten`] is the same one composite anchor
+    /// mode resolves against, so indices stay consistent across both
+    /// callers.
+    ///
+    /// `vmtx` is optional: horizontal-only fonts have no `vmtx` and the
+    /// vertical phantoms collapse to `(0, 0)` — same fallback as
+    /// composite anchor-mode resolution.
+    ///
+    /// Returns `Ok(None)` when the glyph id is out of range or has no
+    /// outline body. Coordinates are rounded to the nearest `i16`
+    /// using sigilbuzz's standard half-away-from-zero policy; this
+    /// matches the FUnit-integer coords kerx fmt 4 type 0 expects.
+    pub fn glyph_points(
+        &self,
+        loca: &Loca<'_>,
+        glyph_id: u16,
+        hmtx: &Hmtx<'_>,
+        vmtx: Option<&Vmtx<'_>>,
+    ) -> Result<Option<Vec<(i16, i16)>>> {
+        let metrics = PhantomMetrics { hmtx, vmtx };
+        let mut flat = FlatGlyph::default();
+        let identity = Transform::identity();
+        let drew = self.flatten(
+            loca,
+            glyph_id,
+            None,
+            Some(&metrics),
+            &identity,
+            &mut flat,
+            0,
+        )?;
+        if !drew {
+            return Ok(None);
+        }
+        let pp = self.phantom_points(loca, glyph_id, &metrics)?;
+        let mut out = Vec::with_capacity(flat.points.len() + 4);
+        for &(x, y) in &flat.points {
+            out.push((round_f32_to_i16(x), round_f32_to_i16(y)));
+        }
+        for &(px, py) in &pp {
+            out.push((round_f32_to_i16(px), round_f32_to_i16(py)));
+        }
+        Ok(Some(out))
     }
 
     /// Drives `sink` with the ops for `glyph_id`, flattening
@@ -1014,6 +1078,123 @@ mod tests {
         let pp = glyf.phantom_points(&loca, 0, &metrics).unwrap();
         assert!((pp[0].0 + 10.0).abs() < 1e-4);
         assert!((pp[1].0 - 490.0).abs() < 1e-4);
+    }
+
+    /// Pads `body` to an even length with a trailing zero byte. Short
+    /// `loca` offsets are u16 word indices, so an odd-length glyph
+    /// would otherwise be truncated by 1 byte at the end.
+    fn pad_even(mut body: Vec<u8>) -> Vec<u8> {
+        if body.len() % 2 != 0 {
+            body.push(0);
+        }
+        body
+    }
+
+    #[test]
+    fn glyph_points_returns_contours_then_four_phantoms() {
+        // Single contour with four on-curve points (length stays even):
+        // (10, 20), (40, 20), (40, 80), (10, 80). Bbox patched to
+        // xMin=10, yMax=80. hmtx supplies advance=300, lsb=4 →
+        // pp1=(10-4, 0)=(6, 0), pp2=(306, 0). No vmtx → pp3 = pp4 = 0.
+        let mut body = build_simple_glyph(
+            &[3],
+            &[
+                (10, 20, true),
+                (40, 20, true),
+                (40, 80, true),
+                (10, 80, true),
+            ],
+        );
+        body[2..4].copy_from_slice(&10i16.to_be_bytes()); // xMin
+        body[8..10].copy_from_slice(&80i16.to_be_bytes()); // yMax
+        let body = pad_even(body);
+        let loca_bytes = build_loca_short(&[0, (body.len() as u16) / 2]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
+        let glyf = Glyf::new(&body);
+
+        let hmtx_bytes = build_hmtx(&[(300, 4)]);
+        let hmtx = Hmtx::parse(&hmtx_bytes, 1, 1).unwrap();
+
+        let pts = glyf.glyph_points(&loca, 0, &hmtx, None).unwrap().unwrap();
+        // 4 contour points + 4 phantoms.
+        assert_eq!(pts.len(), 8);
+        assert_eq!(pts[0], (10, 20));
+        assert_eq!(pts[1], (40, 20));
+        assert_eq!(pts[2], (40, 80));
+        assert_eq!(pts[3], (10, 80));
+        // pp1 = (xMin - lsb, 0) = (6, 0).
+        assert_eq!(pts[4], (6, 0));
+        // pp2 = pp1 + advance = (306, 0).
+        assert_eq!(pts[5], (306, 0));
+        // No vmtx → pp3 / pp4 collapse to zero.
+        assert_eq!(pts[6], (0, 0));
+        assert_eq!(pts[7], (0, 0));
+    }
+
+    #[test]
+    fn glyph_points_keeps_off_curve_points_in_glyf_order() {
+        // Four points: on, off, on, on. The off-curve control at index
+        // 1 must survive — kerx fmt 4 type 0 can reference it.
+        let body = pad_even(build_simple_glyph(
+            &[3],
+            &[
+                (0, 0, true),
+                (50, 50, false),
+                (100, 0, true),
+                (150, 50, true),
+            ],
+        ));
+        let loca_bytes = build_loca_short(&[0, (body.len() as u16) / 2]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
+        let glyf = Glyf::new(&body);
+
+        let hmtx_bytes = build_hmtx(&[(200, 0)]);
+        let hmtx = Hmtx::parse(&hmtx_bytes, 1, 1).unwrap();
+        let pts = glyf.glyph_points(&loca, 0, &hmtx, None).unwrap().unwrap();
+        assert_eq!(pts[0], (0, 0));
+        assert_eq!(pts[1], (50, 50)); // off-curve survives
+        assert_eq!(pts[2], (100, 0));
+        assert_eq!(pts[3], (150, 50));
+    }
+
+    #[test]
+    fn glyph_points_uses_vmtx_phantoms_when_present() {
+        // yMax=200, vmtx advance=1000, tsb=50 → pp3=(0, 250),
+        // pp4=(0, 250 - 1000)=(0, -750).
+        let mut body = build_simple_glyph(
+            &[1],
+            &[(0, 0, true), (10, 0, true)],
+        );
+        body[8..10].copy_from_slice(&200i16.to_be_bytes());
+        let body = pad_even(body);
+        let loca_bytes = build_loca_short(&[0, (body.len() as u16) / 2]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
+        let glyf = Glyf::new(&body);
+        let hmtx_bytes = build_hmtx(&[(300, 0)]);
+        let hmtx = Hmtx::parse(&hmtx_bytes, 1, 1).unwrap();
+        let mut vmtx_bytes = Vec::new();
+        vmtx_bytes.extend_from_slice(&1000u16.to_be_bytes());
+        vmtx_bytes.extend_from_slice(&50i16.to_be_bytes());
+        let vmtx = Vmtx::parse(&vmtx_bytes, 1, 1).unwrap();
+
+        let pts = glyf
+            .glyph_points(&loca, 0, &hmtx, Some(&vmtx))
+            .unwrap()
+            .unwrap();
+        // 2 contour points + 4 phantoms.
+        assert_eq!(pts.len(), 6);
+        assert_eq!(pts[4], (0, 250)); // pp3
+        assert_eq!(pts[5], (0, -750)); // pp4
+    }
+
+    #[test]
+    fn glyph_points_empty_glyph_returns_none() {
+        let loca_bytes = build_loca_short(&[0, 0]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
+        let glyf = Glyf::new(&[]);
+        let hmtx_bytes = build_hmtx(&[(500, 0)]);
+        let hmtx = Hmtx::parse(&hmtx_bytes, 1, 1).unwrap();
+        assert!(glyf.glyph_points(&loca, 0, &hmtx, None).unwrap().is_none());
     }
 
     #[test]
