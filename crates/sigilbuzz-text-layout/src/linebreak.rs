@@ -95,9 +95,7 @@ impl<'a> Iterator for LineBreakIter<'a> {
             // character so the offset lands past it.
             let was_mandatory_trigger = matches!(
                 self.prev_class,
-                Some(LineBreakClass::BK)
-                    | Some(LineBreakClass::LF)
-                    | Some(LineBreakClass::NL)
+                Some(LineBreakClass::BK) | Some(LineBreakClass::LF) | Some(LineBreakClass::NL)
             ) || (self.prev_class == Some(LineBreakClass::CR)
                 && curr != LineBreakClass::LF);
 
@@ -124,7 +122,10 @@ impl<'a> Iterator for LineBreakIter<'a> {
                 self.suppress_next_mandatory = true;
             }
 
-            if matches!(action, BreakOpportunity::Allowed | BreakOpportunity::Mandatory) {
+            if matches!(
+                action,
+                BreakOpportunity::Allowed | BreakOpportunity::Mandatory
+            ) {
                 return Some((self.pos - ch_len, action));
             }
             // Prohibited — keep scanning.

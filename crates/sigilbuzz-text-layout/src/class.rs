@@ -91,7 +91,12 @@ pub fn line_break_class(c: char) -> LineBreakClass {
     }
 
     // Spaces.
-    if cp == 0x0020 || cp == 0x1680 || (0x2000..=0x200A).contains(&cp) || cp == 0x205F || cp == 0x3000 {
+    if cp == 0x0020
+        || cp == 0x1680
+        || (0x2000..=0x200A).contains(&cp)
+        || cp == 0x205F
+        || cp == 0x3000
+    {
         return LineBreakClass::SP;
     }
     if cp == 0x00A0 || cp == 0x202F {
@@ -158,7 +163,8 @@ pub fn line_break_class(c: char) -> LineBreakClass {
         || (0x4E00..=0x9FFF).contains(&cp)    // CJK Unified
         || (0xF900..=0xFAFF).contains(&cp)    // CJK Compat Ideographs
         || (0xAC00..=0xD7AF).contains(&cp)    // Hangul Syllables
-        || (0x20000..=0x2FFFF).contains(&cp)  // CJK Ext B-F
+        || (0x20000..=0x2FFFF).contains(&cp)
+    // CJK Ext B-F
     {
         return LineBreakClass::ID;
     }
@@ -172,10 +178,16 @@ pub fn line_break_class(c: char) -> LineBreakClass {
         return LineBreakClass::NS;
     }
     // Fullwidth open / close brackets.
-    if matches!(cp, 0x3008 | 0x300A | 0x300C | 0x300E | 0x3010 | 0xFF08 | 0xFF3B | 0xFF5B) {
+    if matches!(
+        cp,
+        0x3008 | 0x300A | 0x300C | 0x300E | 0x3010 | 0xFF08 | 0xFF3B | 0xFF5B
+    ) {
         return LineBreakClass::OP;
     }
-    if matches!(cp, 0x3009 | 0x300B | 0x300D | 0x300F | 0x3011 | 0xFF09 | 0xFF3D | 0xFF5D) {
+    if matches!(
+        cp,
+        0x3009 | 0x300B | 0x300D | 0x300F | 0x3011 | 0xFF09 | 0xFF3D | 0xFF5D
+    ) {
         return LineBreakClass::CL;
     }
 

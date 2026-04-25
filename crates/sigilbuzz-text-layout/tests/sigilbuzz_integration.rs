@@ -44,7 +44,10 @@ fn wraps_mixed_language_paragraph() {
     );
     assert!(!lines.is_empty());
     assert_eq!(lines[0].start_byte, 0);
-    assert_eq!(lines.last().expect("at least one line").end_byte, text.len());
+    assert_eq!(
+        lines.last().expect("at least one line").end_byte,
+        text.len()
+    );
 }
 
 #[test]
@@ -60,7 +63,12 @@ fn ranges_cover_text_without_gaps() {
         },
     );
     let mut cursor = 0;
-    for LineRange { start_byte, end_byte, .. } in &lines {
+    for LineRange {
+        start_byte,
+        end_byte,
+        ..
+    } in &lines
+    {
         assert_eq!(*start_byte, cursor, "lines must abut: {lines:?}");
         assert!(end_byte > start_byte, "non-empty lines: {lines:?}");
         // Every range must land on a UTF-8 boundary.
