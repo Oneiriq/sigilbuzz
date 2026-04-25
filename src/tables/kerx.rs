@@ -158,6 +158,16 @@ impl<'a> Kerx<'a> {
                 });
             }
 
+            // The declared length must at least cover the 12-byte
+            // common header; anything shorter would let `seek(sub_end)`
+            // jump backwards into this subtable's own header bytes,
+            // parking the next iteration mid-header. Treat such a
+            // subtable as "skip cleanly past the header" — drop it
+            // and use `sub_start + 12` as the cursor target. The
+            // post-header portion (whatever the malformed `length`
+            // claimed) is effectively unused.
+            let next_cursor = if length < 12 { sub_start + 12 } else { sub_end };
+
             let format = (coverage & COVERAGE_FORMAT_MASK) as u8;
             // Skip vertical, cross-stream, and variation subtables —
             // sigilbuzz produces horizontal advances only for now.
@@ -167,7 +177,7 @@ impl<'a> Kerx<'a> {
             // blindly would corrupt positions, so we skip until the
             // feature lands.
             if coverage & (COVERAGE_VERTICAL | COVERAGE_CROSS_STREAM | COVERAGE_VARIATION) != 0 {
-                r.seek(sub_end)?;
+                r.seek(next_cursor)?;
                 continue;
             }
 
@@ -178,21 +188,30 @@ impl<'a> Kerx<'a> {
             // exist in the spec but are rare; sigilbuzz skips them
             // silently so a mixed `kerx` still applies the formats
             // we do understand.
-            match format {
-                0 => {
-                    if let Some(sub) = parse_format0(data, r.position(), sub_end)? {
-                        subtables.push(Subtable::Format0(sub));
+            //
+            // Per-subtable parse failures (declared length shorter
+            // than the body, internal offsets out of range) are
+            // swallowed: a malformed subtable drops out cleanly while
+            // its peers in the same kerx still load. The error path
+            // used to propagate, which meant one truncated subtable
+            // poisoned the whole table.
+            if length >= 12 {
+                match format {
+                    0 => {
+                        if let Ok(Some(sub)) = parse_format0(data, r.position(), sub_end) {
+                            subtables.push(Subtable::Format0(sub));
+                        }
                     }
-                }
-                2 => {
-                    if let Some(sub) = parse_format2(data, sub_start, sub_end)? {
-                        subtables.push(Subtable::Format2(sub));
+                    2 => {
+                        if let Ok(Some(sub)) = parse_format2(data, sub_start, sub_end) {
+                            subtables.push(Subtable::Format2(sub));
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
 
-            r.seek(sub_end)?;
+            r.seek(next_cursor)?;
         }
 
         Ok(Self {
@@ -606,5 +625,92 @@ mod tests {
         bytes[27] = bad[3];
         let k = Kerx::parse(&bytes, 3).unwrap();
         assert_eq!(k.subtable_count(), 0);
+    }
+
+    #[test]
+    fn truncated_subtable_length_does_not_poison_following_subtables() {
+        // Two subtables: the first declares a `length` field that
+        // covers only the 12-byte header (no body) — too short for
+        // any format-0 / format-2 body to fit. The whole-table
+        // parse must still succeed and surface the *second*
+        // subtable's pair, instead of bailing out and producing
+        // zero kerning for the entire font.
+        //
+        // Pre-fix: `parse_format0` returns `Err(Truncated)` from
+        // inside the loop, the `?` propagates, and the kerx parse
+        // fails — even though the second subtable is well-formed.
+        let pair_bytes = 6;
+        let good_body = 16 + pair_bytes;
+        let good_sub_len = 12 + good_body;
+        // Bad subtable length: 12 (header only) — body is missing.
+        let bad_sub_len: u32 = 12;
+
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&2u16.to_be_bytes()); // version
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // pad
+        bytes.extend_from_slice(&2u32.to_be_bytes()); // nTables = 2
+
+        // Subtable 1: malformed — header says 12 bytes total, no body.
+        bytes.extend_from_slice(&bad_sub_len.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // coverage: format 0, horizontal
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // tupleCount
+
+        // Subtable 2: well-formed format 0 with one pair (10, 20) → -42.
+        bytes.extend_from_slice(&(good_sub_len as u32).to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // coverage: format 0
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // tupleCount
+        bytes.extend_from_slice(&1u32.to_be_bytes()); // nPairs
+        bytes.extend_from_slice(&[0u8; 12]); // search hints
+        bytes.extend_from_slice(&10u16.to_be_bytes());
+        bytes.extend_from_slice(&20u16.to_be_bytes());
+        bytes.extend_from_slice(&(-42i16).to_be_bytes());
+
+        let k = Kerx::parse(&bytes, 256).expect("kerx parse must not fail");
+        assert_eq!(
+            k.subtable_count(),
+            1,
+            "malformed subtable should be skipped, well-formed one kept"
+        );
+        assert_eq!(k.kern(10, 20), -42, "well-formed subtable's pair lookup");
+    }
+
+    #[test]
+    fn subtable_length_smaller_than_header_does_not_loop_or_overlap() {
+        // Pathological: subtable length declared as 5 bytes — smaller
+        // than its own 12-byte common header. After the header read
+        // the cursor sits at sub_start + 12, but `seek(sub_end)` would
+        // jump backwards to sub_start + 5, parking the next iteration
+        // mid-header. The parser must refuse to seek backwards (or
+        // skip the subtable cleanly) so a malformed font cannot drag
+        // the rest of `kerx` into garbage territory.
+        let pair_bytes = 6;
+        let good_body = 16 + pair_bytes;
+        let good_sub_len = 12 + good_body;
+
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&2u16.to_be_bytes()); // version
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // pad
+        bytes.extend_from_slice(&2u32.to_be_bytes()); // nTables
+
+        // Subtable 1: length = 5 — body would overlap header.
+        bytes.extend_from_slice(&5u32.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+
+        // Subtable 2: well-formed.
+        bytes.extend_from_slice(&(good_sub_len as u32).to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&1u32.to_be_bytes()); // nPairs
+        bytes.extend_from_slice(&[0u8; 12]);
+        bytes.extend_from_slice(&10u16.to_be_bytes());
+        bytes.extend_from_slice(&20u16.to_be_bytes());
+        bytes.extend_from_slice(&(-7i16).to_be_bytes());
+
+        let k = Kerx::parse(&bytes, 256).expect("kerx parse must not fail");
+        // The sub-header-size subtable is dropped; the well-formed
+        // one is preserved.
+        assert_eq!(k.subtable_count(), 1);
+        assert_eq!(k.kern(10, 20), -7);
     }
 }
