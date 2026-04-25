@@ -36,7 +36,10 @@ mod tests {
     #[test]
     fn rewrite_lookup_drops_everything() {
         let map = GidMap::from_table(vec![Some(0)]);
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         let dummy: Vec<&[u8]> = vec![&[0u8; 4]];
         assert!(rewrite_lookup(&ctx, 1, 0, None, &dummy).is_none());
     }
