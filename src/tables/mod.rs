@@ -10,6 +10,8 @@
 //! unambiguous and `no_std`-friendly.
 
 pub mod avar;
+pub mod cbdt;
+pub mod cblc;
 pub mod cff;
 pub mod cff2;
 pub mod cmap;
@@ -33,12 +35,17 @@ pub mod maxp;
 pub mod morx;
 pub mod outline;
 pub mod parse;
+pub mod sbix;
 pub mod variation_store;
 pub mod vhea;
 pub mod vmtx;
 pub mod vorg;
 
 pub use avar::Avar;
+pub use cbdt::{Cbdt, GlyphBitmap, GlyphBitmapMetrics};
+pub use cblc::{
+    BigGlyphMetrics, BitmapSize, CbdtLocation, Cblc, SbitLineMetrics, SmallGlyphMetrics,
+};
 pub use cff::Cff;
 pub use cff2::Cff2;
 pub use cmap::Cmap;
@@ -65,6 +72,7 @@ pub use maxp::Maxp;
 pub use morx::Morx;
 pub use outline::{Outline, OutlineSink, PathOp};
 pub use parse::Reader;
+pub use sbix::{Sbix, SbixGlyph, SbixStrike};
 pub use variation_store::ItemVariationStore;
 pub use vhea::Vhea;
 pub use vmtx::Vmtx;
@@ -126,4 +134,10 @@ pub mod tag {
     pub const MORX: [u8; 4] = *b"morx";
     /// `kerx` — Apple Extended Kerning (AAT).
     pub const KERX: [u8; 4] = *b"kerx";
+    /// `CBLC` — Color Bitmap Location (Google).
+    pub const CBLC: [u8; 4] = *b"CBLC";
+    /// `CBDT` — Color Bitmap Data (Google).
+    pub const CBDT: [u8; 4] = *b"CBDT";
+    /// `sbix` — Standard Bitmap Graphics (Apple).
+    pub const SBIX: [u8; 4] = *b"sbix";
 }

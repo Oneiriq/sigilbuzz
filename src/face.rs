@@ -36,8 +36,9 @@ use crate::error::{Error, Result};
 use crate::tables::glyf::PhantomMetrics;
 use crate::tables::parse::Reader;
 use crate::tables::{
-    tag, Avar, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBounds, Gpos, Gsub, Gvar, Head, Hhea, Hmtx,
-    Hvar, KernTable, Kerx, Loca, Maxp, Morx, Outline, Vhea, Vmtx, Vorg,
+    tag, Avar, Cbdt, Cblc, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBitmap, GlyphBounds, Gpos, Gsub,
+    Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Maxp, Morx, Outline, Sbix, Vhea, Vmtx,
+    Vorg,
 };
 
 /// One entry in the SFNT table directory.
@@ -611,6 +612,117 @@ impl<'a> Face<'a> {
             None => Ok(None),
         }
     }
+
+    /// Parses the `CBLC` table (color bitmap location) if the font
+    /// carries one. Always paired with `CBDT` in the wild.
+    pub fn cblc(&self) -> Result<Option<Cblc<'a>>> {
+        match self.table_bytes(tag::CBLC) {
+            Ok(bytes) => Ok(Some(Cblc::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `CBDT` table (color bitmap data) if the font carries
+    /// one. Pairs with `CBLC`; consumers usually go through
+    /// [`Face::glyph_bitmap`] instead of touching either directly.
+    pub fn cbdt(&self) -> Result<Option<Cbdt<'a>>> {
+        match self.table_bytes(tag::CBDT) {
+            Ok(bytes) => Ok(Some(Cbdt::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `sbix` table (Apple Standard Bitmap Graphics) if
+    /// the font carries one. The strike's per-glyph offsets array is
+    /// sized off `maxp.numGlyphs`, so `maxp` must be present.
+    pub fn sbix(&self) -> Result<Option<Sbix<'a>>> {
+        match self.table_bytes(tag::SBIX) {
+            Ok(bytes) => {
+                let num_glyphs = self.maxp()?.num_glyphs;
+                Ok(Some(Sbix::parse(bytes, num_glyphs)?))
+            }
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Returns the bitmap glyph for `glyph_id` at the requested
+    /// `ppem`, picking the closest available strike.
+    ///
+    /// Resolution order:
+    /// 1. `CBDT` / `CBLC` — Google color emoji.
+    /// 2. `sbix` — Apple color emoji.
+    ///
+    /// Returns `Ok(None)` when neither bitmap table is present, or
+    /// the available strikes don't cover the glyph (legitimate for
+    /// glyphs that have only outline data, e.g. ASCII fallbacks in
+    /// an emoji font).
+    ///
+    /// The returned [`GlyphBitmapEntry`] is a tagged union of CBDT
+    /// vs sbix payloads. Both ride a `&'a [u8]` that points back into
+    /// the original font blob, so cloning is cheap and there is no
+    /// allocation on the lookup path. PNG / JPEG / TIFF decoding is
+    /// the consumer's job — sigilbuzz exposes the bytes, not pixels.
+    pub fn glyph_bitmap(&self, glyph_id: u16, ppem: u16) -> Result<Option<GlyphBitmapEntry<'a>>> {
+        if let Some(cblc) = self.cblc()? {
+            if let Some(cbdt) = self.cbdt()? {
+                if let Some(size) = cblc.best_strike(glyph_id, ppem) {
+                    if let Some(loc) = cblc.locate(&size, glyph_id)? {
+                        let bm = cbdt.glyph_bitmap(&loc)?;
+                        return Ok(Some(GlyphBitmapEntry::Cbdt {
+                            ppem_x: size.ppem_x,
+                            ppem_y: size.ppem_y,
+                            bitmap: bm,
+                        }));
+                    }
+                }
+            }
+        }
+        if let Some(sbix) = self.sbix()? {
+            if let Some(strike) = sbix.best_strike(ppem) {
+                if let Some(g) = strike.glyph(glyph_id)? {
+                    return Ok(Some(GlyphBitmapEntry::Sbix {
+                        ppem: strike.ppem(),
+                        ppi: strike.ppi(),
+                        glyph: g,
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Tagged result of [`Face::glyph_bitmap`]. Bitmap fonts come in two
+/// flavours and the metrics shape differs enough that folding them
+/// into one struct loses information; consumers match on the variant
+/// they care about.
+#[derive(Debug, Clone, Copy)]
+pub enum GlyphBitmapEntry<'a> {
+    /// Color Bitmap Data (Google CBDT/CBLC). `ppem_x` / `ppem_y` are
+    /// the strike's design size; `bitmap.data` is raw payload bytes
+    /// (PNG for formats 17/18/19).
+    Cbdt {
+        /// Strike X resolution (pixels-per-em).
+        ppem_x: u8,
+        /// Strike Y resolution (pixels-per-em).
+        ppem_y: u8,
+        /// Parsed CBDT entry (format, metrics, payload bytes).
+        bitmap: GlyphBitmap<'a>,
+    },
+    /// Apple Standard Bitmap Graphics (sbix). `glyph.graphic_type`
+    /// indicates the payload format (`'png '`, `'jpg '`, `'tiff'`,
+    /// etc.).
+    Sbix {
+        /// Strike resolution (pixels-per-em).
+        ppem: u16,
+        /// Strike DPI.
+        ppi: u16,
+        /// Per-glyph entry (origin offsets, format tag, payload).
+        glyph: crate::tables::SbixGlyph<'a>,
+    },
 }
 
 #[cfg(test)]
