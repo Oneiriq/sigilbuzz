@@ -69,29 +69,36 @@
 //! patched tables are emitted; `MVAR` is dropped. Sources without
 //! `MVAR` pass these tables through unchanged.
 //!
-//! # GDEF.IVS / GPOS variable-position trade-off
+//! # GDEF.IVS / GPOS variable-position bake
 //!
-//! When `drop_var_tables` is true (the recommended default) any
-//! `GDEF.ItemVariationStore` is pruned by re-emitting the GDEF table
-//! header with the IVS offset zeroed. GPOS ValueRecords that referred
-//! to the IVS via `VariationIndex` deltas keep their static (default-
-//! instance) values; the consequence is that variable-position kerning
-//! at non-default coords is lost, which matches the documented
-//! "ship as static" intent of instancing. Resolving each GPOS
-//! VariationIndex into the corresponding ValueRecord is staged for a
-//! follow-up — at no-coords (the default instance) consumers see the
-//! same advances regardless.
+//! When `drop_var_tables` is true (the recommended default) the bake
+//! folds every supported GPOS `VariationIndex` into the corresponding
+//! `ValueRecord` static field at `coords` and zeros the offset slot,
+//! then prunes `GDEF.ItemVariationStore`. Variable-position kerning
+//! (the `VariationIndex` shape on PairPos / SinglePos value records)
+//! therefore lands at the chosen instance — not the default — so the
+//! static output renders correctly at the baked coord vector.
+//!
+//! The supported lookup types are GPOS Type 1 (SinglePos formats 1 / 2)
+//! and Type 2 (PairPos formats 1 / 2), including those wrapped in a
+//! Type 9 Extension lookup. `Mark*` and `Cursive` lookups carry their
+//! variations on `Anchor` records, not `ValueRecord` fields; the
+//! Anchor bake is staged for a follow-up. Unsupported lookups still
+//! land in the output but their `VariationIndex` offsets are left
+//! intact — the GDEF.IVS prune that follows leaves them orphan, the
+//! same trade-off the simpler #173 path shipped.
 //!
 //! # Out of scope (deferred)
 //!
 //! - **Partial instancing** (some axes pinned, others left variable).
 //!   Sigil's first cut bakes the full coord vector — every axis pins.
-//! - **GPOS VariationIndex re-emit.** When the source GPOS carries
-//!   `VariationIndex` deltas the simple "drop GDEF.IVS" path leaves
-//!   GPOS pointing at orphaned variation indices; per the briefing
-//!   we ship the simple path and stage the full re-emit (resolve
-//!   VariationIndex deltas, fold into static ValueRecord fields,
-//!   zero the offset) as a follow-up.
+//! - **Mark / Cursive GPOS Anchor variations.** GPOS Types 3 / 4 / 5 / 6
+//!   carry per-x/y `Device` / `VariationIndex` offsets on their
+//!   `Anchor` records; this pass folds `ValueRecord` variations only.
+//!   Anchor variations ride through with their `VariationIndex`
+//!   offsets intact and are then orphaned by the GDEF.IVS prune,
+//!   matching the #173 trade-off for that subset of GPOS. The Anchor
+//!   bake is tracked as a follow-up.
 //!
 //! # Determinism
 //!
@@ -118,6 +125,29 @@ use crate::{GlyphId, SubsetError};
 /// [`sigilbuzz::tables::Fvar::normalize_coords`].
 pub type F2Dot14 = f32;
 
+/// Per-axis pin policy for partial instancing.
+///
+/// fontTools' `varLib.instancer.instantiateVariableFont(axisLimits=...)`
+/// supports pinning a *subset* of axes — the deltas for those axes fold
+/// into the static outlines / metrics at the chosen coord, while the
+/// remaining axes keep their variation surface and the output is still
+/// a variable font (just with fewer axes in `fvar`). [`AxisPin`] is the
+/// per-axis switch that drives that behaviour from
+/// [`InstanceInput::axis_pins`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxisPin {
+    /// Bake this axis at `coords[i]` into every variation table; drop
+    /// the axis from `fvar` / `avar` and from every variation tuple
+    /// region. This is the existing full-instancing behaviour.
+    Pin,
+    /// Keep this axis variable. The axis stays in `fvar` / `avar`;
+    /// every variation tuple region keeps its dimension on this axis;
+    /// the value passed in `coords[i]` for this axis is ignored on the
+    /// bake side (variation tables continue to evaluate `Keep`-axis
+    /// deltas dynamically at shape time).
+    Keep,
+}
+
 /// Inputs to [`instance`].
 #[derive(Debug, Clone)]
 pub struct InstanceInput {
@@ -134,6 +164,23 @@ pub struct InstanceInput {
     /// correctly at the chosen instance — but the file is larger and
     /// shapers will still treat the font as variable.
     pub drop_var_tables: bool,
+    /// Per-axis pin policy. An empty vector means "pin every axis"
+    /// (the existing full-instancing behaviour). When non-empty,
+    /// length must equal `coords.len()`; each entry says whether the
+    /// matching axis bakes (`Pin`) or stays variable (`Keep`).
+    ///
+    /// fontTools-equivalent of
+    /// `varLib.instancer.instantiateVariableFont(axisLimits={...})` —
+    /// `Pin` axes correspond to a bare-coord entry in `axisLimits`,
+    /// `Keep` axes correspond to an axis omitted from `axisLimits`.
+    ///
+    /// Note: keeping any axis variable currently surfaces an
+    /// `Unsupported` error — the public API and tuple-projection math
+    /// primitives ([`project_region_onto_kept_axes`]) ship in this
+    /// release, while the variation-table emit side (fvar/avar trim,
+    /// `ItemVariationStore` tuple rewrite for HVAR / VVAR / MVAR /
+    /// GDEF.IVS, gvar tuple projection) lands in follow-ups.
+    pub axis_pins: Vec<AxisPin>,
 }
 
 impl Default for InstanceInput {
@@ -141,6 +188,7 @@ impl Default for InstanceInput {
         Self {
             coords: Vec::new(),
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         }
     }
 }
@@ -176,6 +224,25 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         return Err(SubsetError::Unsupported(
             "instance: coord vector length must match fvar axisCount",
         ));
+    }
+    // Partial-instancing validation: an empty axis_pins falls through
+    // to the full-instancing path (every axis pins). A non-empty
+    // axis_pins must equal coords.len(). Any `Keep` entry — which
+    // requests partial instancing — is rejected for now: the public
+    // API + tuple-projection math primitives ship here, but the
+    // variation-table emit side is staged for a follow-up.
+    if !input.axis_pins.is_empty() {
+        if input.axis_pins.len() != input.coords.len() {
+            return Err(SubsetError::Unsupported(
+                "instance: axis_pins length must equal coords.len()",
+            ));
+        }
+        if input.axis_pins.contains(&AxisPin::Keep) {
+            return Err(SubsetError::Unsupported(
+                "instance: partial instancing (axis_pins with Keep) not yet implemented; \
+                 axis_pins must be empty or all Pin",
+            ));
+        }
     }
 
     // Apply avar's piecewise-linear remap if the source ships one. The
@@ -267,9 +334,24 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         tables.push((tag::POST, post_bytes));
     }
 
+    // GPOS variation bake: when the source carries GPOS variations
+    // (VariationIndex offsets on PairPos / SinglePos value records),
+    // fold every resolvable variation into the static ValueRecord
+    // field at `coords` and zero the offset slot. Runs *before* the
+    // GDEF.IVS prune below — the prune severs the only path back to
+    // the IVS bytes, so any remaining VariationIndex would be orphan.
+    let gpos_baked = if input.drop_var_tables {
+        bake_gpos_var(face, &coords)?
+    } else {
+        None
+    };
+    if let Some(b) = gpos_baked.clone() {
+        tables.push((tag::GPOS, b));
+    }
+
     // GDEF: when the source carries an ItemVariationStore and the
     // caller wants the static "ship as static" output, prune it. See
-    // module header for the GPOS-default-instance trade-off.
+    // module header for the GPOS-bake-then-IVS-prune ordering.
     let gdef_pruned = if input.drop_var_tables {
         prune_gdef_ivs(face)?
     } else {
@@ -296,6 +378,11 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         // GDEF was handled above (either pruned or dropped from the
         // pruning path).
         if rec.tag == tag::GDEF && gdef_pruned.is_some() {
+            continue;
+        }
+        // GPOS was handled above when the variation bake produced a
+        // rewritten table.
+        if rec.tag == tag::GPOS && gpos_baked.is_some() {
             continue;
         }
         let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;
@@ -371,6 +458,15 @@ fn cff2_bake(
         tables.push((tag::POST, post_bytes));
     }
 
+    let gpos_baked = if input.drop_var_tables {
+        bake_gpos_var(face, coords)?
+    } else {
+        None
+    };
+    if let Some(b) = gpos_baked.clone() {
+        tables.push((tag::GPOS, b));
+    }
+
     let gdef_pruned = if input.drop_var_tables {
         prune_gdef_ivs(face)?
     } else {
@@ -393,6 +489,9 @@ fn cff2_bake(
             continue;
         }
         if rec.tag == tag::GDEF && gdef_pruned.is_some() {
+            continue;
+        }
+        if rec.tag == tag::GPOS && gpos_baked.is_some() {
             continue;
         }
         let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;
@@ -1194,6 +1293,174 @@ fn patch_u16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
 }
 
 // ---------------------------------------------------------------------------
+// Partial-instancing tuple projection math.
+//
+// Each variation tuple is a region defined by per-axis (peak, start, end)
+// triples plus a delta payload. To project a tuple onto a Keep-axis
+// subspace:
+//
+//   1. Resolve every Pin-axis dimension to a constant scalar at
+//      `coords[i]` (the OpenType `supportScalar`-style ramp the
+//      shaper already uses to evaluate variation tables).
+//   2. Multiply the per-Pin-axis scalars together. If the product is
+//      zero — meaning the pin coord falls outside the tuple's region
+//      on at least one Pin-axis — the tuple contributes nothing at
+//      this pin and gets dropped.
+//   3. Otherwise the survivor tuple keeps only the Keep-axis dimensions
+//      of its region triples; its delta payload is multiplied by the
+//      Pin-axis product so that evaluating the trimmed tuple at the
+//      Keep-axis coords reproduces the source tuple's contribution
+//      exactly at every (Keep-coord, Pin-coord) pair where the Pin
+//      coord matches `coords[i]`.
+//
+// These primitives are the building blocks the variation-table
+// rewriters (HVAR / VVAR / MVAR / gvar / GDEF.IVS) consume to emit
+// trimmed `ItemVariationStore` / gvar tuples in a partial-instance
+// font. They are tested in isolation here so the math stays correct
+// regardless of which table a follow-up wires them into first.
+// ---------------------------------------------------------------------------
+
+/// Computes the support-scalar contribution of a single axis dimension
+/// at `coord`. Mirrors the OpenType `supportScalar` formula used by
+/// the gvar / IVS evaluators in `sigilbuzz::tables::gvar` —
+/// re-implemented here because the subset crate cannot import
+/// crate-private helpers from the parent crate, and the formula is
+/// trivially small.
+///
+/// Returns `1.0` when the axis does not participate in the tuple
+/// (peak == 0 with the spec's "axis ignored" convention) and `0.0`
+/// when `coord` falls outside `[start, end]`.
+#[must_use]
+#[allow(dead_code)] // wired in by the partial-instance emit follow-ups
+pub(crate) fn axis_support_scalar(start: f32, peak: f32, end: f32, coord: f32) -> f32 {
+    // Spec: peak of zero means the axis does not participate.
+    if peak == 0.0 {
+        return 1.0;
+    }
+    if (coord - peak).abs() < f32::EPSILON {
+        return 1.0;
+    }
+    if coord < start || coord > end {
+        return 0.0;
+    }
+    if coord < peak {
+        let denom = peak - start;
+        if denom.abs() < f32::EPSILON {
+            return 0.0;
+        }
+        (coord - start) / denom
+    } else {
+        // coord > peak
+        let denom = end - peak;
+        if denom.abs() < f32::EPSILON {
+            return 0.0;
+        }
+        (end - coord) / denom
+    }
+}
+
+/// One tuple region's per-axis (start, peak, end) triple, in the
+/// source font's axis order. Length must equal the source's fvar axis
+/// count.
+#[allow(dead_code)] // wired in by the partial-instance emit follow-ups
+pub(crate) type RegionAxes = [(f32, f32, f32)];
+
+/// Result of projecting a variation tuple onto its Keep-axis subspace.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // wired in by the partial-instance emit follow-ups
+pub(crate) struct ProjectedTuple {
+    /// Pin-axis support-scalar product evaluated at the pin coords.
+    /// Caller multiplies every delta in this tuple's payload by this
+    /// scalar before emitting the trimmed tuple.
+    pub pin_scalar: f32,
+    /// Trimmed region triples: only the Keep-axis dimensions, in the
+    /// source's Keep-axis order.
+    pub kept_axes: alloc::vec::Vec<(f32, f32, f32)>,
+}
+
+/// Projects a tuple's per-axis region onto the Keep-axis subspace.
+///
+/// `region` carries one `(start, peak, end)` triple per source axis.
+/// `pins` indicates which axes pin (`Pin`) and which stay variable
+/// (`Keep`); `coords` carries the pin coord for every axis (entries
+/// for `Keep` axes are ignored).
+///
+/// Returns `None` when the tuple contributes nothing at the pin coords
+/// — the survivor would have a zero pin-scalar and the caller should
+/// drop the tuple entirely. Returns `Some(ProjectedTuple)` otherwise.
+///
+/// Lengths must agree: `region.len() == pins.len() == coords.len()`.
+/// Mismatched inputs return `None` (defensive — callers should validate
+/// upstream, but a length skew should not produce silently-wrong deltas).
+#[must_use]
+#[allow(dead_code)] // wired in by the partial-instance emit follow-ups
+pub(crate) fn project_region_onto_kept_axes(
+    region: &RegionAxes,
+    pins: &[AxisPin],
+    coords: &[f32],
+) -> Option<ProjectedTuple> {
+    if region.len() != pins.len() || pins.len() != coords.len() {
+        return None;
+    }
+    let mut pin_scalar: f32 = 1.0;
+    let mut kept_axes: alloc::vec::Vec<(f32, f32, f32)> =
+        alloc::vec::Vec::with_capacity(pins.len());
+    for (i, &pin) in pins.iter().enumerate() {
+        let (s, p, e) = region[i];
+        match pin {
+            AxisPin::Pin => {
+                let s_axis = axis_support_scalar(s, p, e, coords[i]);
+                if s_axis == 0.0 {
+                    return None;
+                }
+                pin_scalar *= s_axis;
+            }
+            AxisPin::Keep => {
+                kept_axes.push((s, p, e));
+            }
+        }
+    }
+    if pin_scalar == 0.0 {
+        return None;
+    }
+    Some(ProjectedTuple {
+        pin_scalar,
+        kept_axes,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// GPOS variation bake (#175)
+// ---------------------------------------------------------------------------
+
+/// Returns a GPOS byte buffer with every supported subtable's
+/// `VariationIndex`-driven ValueRecord field folded into the static
+/// field at `coords` and the matching offset slot zeroed. Returns
+/// `None` when the source has no GPOS, when the parser refuses the
+/// GPOS bytes, or when the GPOS lookup walk produced no patches.
+///
+/// Lookup-type coverage matches `gpos_var::bake_gpos_at_coords`:
+/// SinglePos (formats 1 / 2), PairPos (formats 1 / 2), and Type 9
+/// Extension wrappers around either. Mark*/Cursive lookups carry their
+/// variations on `Anchor` records — those ride through verbatim and
+/// are orphaned by the GDEF.IVS prune that follows.
+///
+/// The bake reads its `ItemVariationStore` from the *source* GDEF, not
+/// from a re-parsed copy, so it sees every region the source uses
+/// before the prune sever the path.
+fn bake_gpos_var(face: &Face<'_>, coords: &[f32]) -> Result<Option<Vec<u8>>, SubsetError> {
+    let gpos_bytes = match face.table_bytes(tag::GPOS) {
+        Ok(b) => b,
+        Err(_) => return Ok(None),
+    };
+    let gdef = face.gdef().map_err(SubsetError::from)?;
+    let store = gdef.as_ref().and_then(|g| g.item_variation_store());
+    Ok(crate::gpos_var::bake_gpos_at_coords(
+        gpos_bytes, store, coords,
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // GDEF.IVS pruning
 // ---------------------------------------------------------------------------
 
@@ -1285,6 +1552,12 @@ mod tests {
     const SOURCE_SANS: &[u8] =
         include_bytes!("../../../tests/fonts/SourceSans3VF-Latin-Subset.otf");
     const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
+    /// 972-byte synthetic VF with a single PairPos format 1 lookup
+    /// whose AV pair carries a VariationIndex into a one-region IVS;
+    /// at wght=900 the delta is -100, at wght=400 it is 0. Built by
+    /// `tests/tools/build_var_kern_fixture.py`. See
+    /// `tests/variable_kern.rs` for the upstream cover.
+    const VAR_KERN: &[u8] = include_bytes!("../../../tests/fixtures/var_kern.ttf");
 
     fn rubik_face() -> Face<'static> {
         Face::parse_bytes(RUBIK, 0).unwrap()
@@ -1308,6 +1581,7 @@ mod tests {
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).expect("bake at default");
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
@@ -1349,6 +1623,7 @@ mod tests {
         let input = InstanceInput {
             coords: coords.clone(),
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).expect("bake at extreme");
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
@@ -1381,6 +1656,7 @@ mod tests {
         let input = InstanceInput {
             coords: coords.clone(),
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).expect("bake");
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
@@ -1415,6 +1691,7 @@ mod tests {
         let bad = InstanceInput {
             coords: alloc::vec![0.0_f32; 99],
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         assert!(matches!(
             instance(&face, &bad),
@@ -1433,6 +1710,7 @@ mod tests {
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).expect("CFF2 default-instance bake");
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
@@ -1491,6 +1769,7 @@ mod tests {
         let input = InstanceInput {
             coords: coords.clone(),
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).expect("CFF2 extreme bake");
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
@@ -1537,6 +1816,7 @@ mod tests {
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let a = instance(&face, &input).unwrap();
         let b = instance(&face, &input).unwrap();
@@ -1550,6 +1830,7 @@ mod tests {
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).unwrap();
         let baked = Face::parse_bytes(&out.bytes, 0).unwrap();
@@ -1566,6 +1847,7 @@ mod tests {
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: false,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).unwrap();
         let baked = Face::parse_bytes(&out.bytes, 0).unwrap();
@@ -1579,6 +1861,7 @@ mod tests {
         let input = InstanceInput {
             coords: alloc::vec![0.5_f32; axis_count],
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let a = instance(&face, &input).unwrap();
         let b = instance(&face, &input).unwrap();
@@ -1611,6 +1894,7 @@ mod tests {
         let input = InstanceInput {
             coords: coords.clone(),
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).expect("bake at extreme");
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
@@ -1635,6 +1919,7 @@ mod tests {
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).unwrap();
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
@@ -1643,6 +1928,286 @@ mod tests {
         if face.gdef().unwrap().is_some() {
             assert!(baked.gdef().unwrap().is_some());
         }
+    }
+
+    /// Walks every GPOS lookup and returns true if any ValueRecord
+    /// device offset slot is non-zero. Used by the post-bake assertions
+    /// to confirm no orphan VariationIndex offsets survived the fold.
+    /// Covers SinglePos / PairPos formats 1 and 2, both directly and
+    /// via Type 9 Extension wrappers — the same set we explicitly bake.
+    fn any_value_record_device_offset_nonzero(face: &Face<'_>) -> bool {
+        let Ok(Some(gpos)) = face.gpos() else {
+            return false;
+        };
+        let lookups = gpos.lookup_list();
+        for li in 0..lookups.len() {
+            let Some(lookup) = lookups.get(li) else {
+                continue;
+            };
+            let lt = lookup.lookup_type();
+            for si in 0..lookup.subtable_count() {
+                let Some(sub) = lookup.subtable_bytes(si) else {
+                    continue;
+                };
+                let (effective_lt, effective_sub) = if lt == 9 {
+                    if sub.len() < 8 {
+                        continue;
+                    }
+                    let ext_type = u16::from_be_bytes([sub[2], sub[3]]);
+                    let ext_off = u32::from_be_bytes([sub[4], sub[5], sub[6], sub[7]]) as usize;
+                    let Some(inner) = sub.get(ext_off..) else {
+                        continue;
+                    };
+                    (ext_type, inner)
+                } else {
+                    (lt, sub)
+                };
+                if check_subtable_for_device_offsets(effective_lt, effective_sub) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn check_subtable_for_device_offsets(lt: u16, sub: &[u8]) -> bool {
+        match lt {
+            1 => {
+                // SinglePos.
+                if sub.len() < 6 {
+                    return false;
+                }
+                let format = u16::from_be_bytes([sub[0], sub[1]]);
+                let value_format = u16::from_be_bytes([sub[4], sub[5]]);
+                if value_format & 0x00F0 == 0 {
+                    return false;
+                }
+                let stride = (value_format & 0x00FF).count_ones() as usize * 2;
+                let value_count = if format == 2 {
+                    u16::from_be_bytes([sub[6], sub[7]]) as usize
+                } else {
+                    1
+                };
+                let header_len = if format == 2 { 8 } else { 6 };
+                for i in 0..value_count {
+                    let vr = header_len + i * stride;
+                    if vr_has_nonzero_device_offset(&sub[vr..vr + stride], value_format) {
+                        return true;
+                    }
+                }
+                false
+            }
+            2 => {
+                // PairPos.
+                if sub.len() < 4 {
+                    return false;
+                }
+                let format = u16::from_be_bytes([sub[0], sub[1]]);
+                let vf1 = u16::from_be_bytes([sub[4], sub[5]]);
+                let vf2 = u16::from_be_bytes([sub[6], sub[7]]);
+                let v1 = (vf1 & 0x00FF).count_ones() as usize * 2;
+                let v2 = (vf2 & 0x00FF).count_ones() as usize * 2;
+                if (vf1 | vf2) & 0x00F0 == 0 {
+                    return false;
+                }
+                if format == 1 {
+                    let pair_set_count = u16::from_be_bytes([sub[8], sub[9]]) as usize;
+                    let pvr_size = 2 + v1 + v2;
+                    for i in 0..pair_set_count {
+                        let off_off = 10 + i * 2;
+                        if off_off + 2 > sub.len() {
+                            continue;
+                        }
+                        let set_off = u16::from_be_bytes([sub[off_off], sub[off_off + 1]]) as usize;
+                        if set_off + 2 > sub.len() {
+                            continue;
+                        }
+                        let pair_value_count =
+                            u16::from_be_bytes([sub[set_off], sub[set_off + 1]]) as usize;
+                        for j in 0..pair_value_count {
+                            let pvr = set_off + 2 + j * pvr_size;
+                            if pvr + pvr_size > sub.len() {
+                                continue;
+                            }
+                            if vr_has_nonzero_device_offset(&sub[pvr + 2..pvr + 2 + v1], vf1)
+                                || vr_has_nonzero_device_offset(
+                                    &sub[pvr + 2 + v1..pvr + 2 + v1 + v2],
+                                    vf2,
+                                )
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                } else if format == 2 {
+                    if sub.len() < 16 {
+                        return false;
+                    }
+                    let class1 = u16::from_be_bytes([sub[12], sub[13]]) as usize;
+                    let class2 = u16::from_be_bytes([sub[14], sub[15]]) as usize;
+                    let cell = v1 + v2;
+                    let row = class2 * cell;
+                    for i in 0..class1 {
+                        for j in 0..class2 {
+                            let off = 16 + i * row + j * cell;
+                            if off + cell > sub.len() {
+                                continue;
+                            }
+                            if vr_has_nonzero_device_offset(&sub[off..off + v1], vf1)
+                                || vr_has_nonzero_device_offset(&sub[off + v1..off + cell], vf2)
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn vr_has_nonzero_device_offset(vr: &[u8], format: u16) -> bool {
+        // Skip the four static i16 fields (each present iff its bit
+        // is set) and inspect the four device-offset slots.
+        let mut cursor = 0usize;
+        for bit in [0x0001u16, 0x0002, 0x0004, 0x0008] {
+            if format & bit != 0 {
+                cursor += 2;
+            }
+        }
+        for bit in [0x0010u16, 0x0020, 0x0040, 0x0080] {
+            if format & bit != 0 {
+                if cursor + 2 > vr.len() {
+                    return false;
+                }
+                let off = u16::from_be_bytes([vr[cursor], vr[cursor + 1]]);
+                if off != 0 {
+                    return true;
+                }
+                cursor += 2;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn var_kern_fixture_bake_at_wght_900_folds_pair_pos_advance() {
+        // The synthetic var_kern fixture carries a single PairPos
+        // format 1 lookup. At wght=900 the source GPOS has x_advance=0
+        // on the AV pair plus a VariationIndex that resolves to -100.
+        // After the bake, the baked GPOS must carry x_advance=-100
+        // statically and the device offset slot must be zero.
+        let face = Face::parse_bytes(VAR_KERN, 0).unwrap();
+        let coords = face.fvar().unwrap().unwrap().normalize_coords(&[900.0]);
+        let input = InstanceInput {
+            coords: coords.clone(),
+            drop_var_tables: true,
+            axis_pins: Vec::new(),
+        };
+        let out = instance(&face, &input).expect("bake");
+        let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
+        // Confirm no GPOS device offset survived the fold.
+        assert!(
+            !any_value_record_device_offset_nonzero(&baked),
+            "baked GPOS must have zero device offsets"
+        );
+        // Confirm GDEF.IVS was pruned.
+        if let Some(gdef) = baked.gdef().unwrap() {
+            assert!(
+                gdef.item_variation_store().is_none(),
+                "baked GDEF.IVS must be pruned"
+            );
+        }
+        // Confirm the static field carries the resolved delta. Walk
+        // GPOS by hand to read the AV pair's value.
+        let gpos_bytes = baked.table_bytes(tag::GPOS).expect("baked GPOS");
+        let lookup_list_off = u16::from_be_bytes([gpos_bytes[8], gpos_bytes[9]]) as usize;
+        let lookup_off = u16::from_be_bytes([
+            gpos_bytes[lookup_list_off + 2],
+            gpos_bytes[lookup_list_off + 3],
+        ]) as usize;
+        let lookup_base = lookup_list_off + lookup_off;
+        let sub_off =
+            u16::from_be_bytes([gpos_bytes[lookup_base + 6], gpos_bytes[lookup_base + 7]]) as usize;
+        let sub_abs = lookup_base + sub_off;
+        let sub = &gpos_bytes[sub_abs..];
+        // PairPos fmt 1 — first PairSet at the first set offset.
+        let pair_set_rel = u16::from_be_bytes([sub[10], sub[11]]) as usize;
+        // PairValueRecord 0 starts at +2 inside the PairSet, AV pair
+        // bytes are: u16 secondGlyph (V), i16 x_advance, u16 device.
+        let pvr_off = pair_set_rel + 2;
+        let x_advance = i16::from_be_bytes([sub[pvr_off + 2], sub[pvr_off + 3]]);
+        assert_eq!(x_advance, -100, "AV x_advance baked at wght=900");
+    }
+
+    #[test]
+    fn var_kern_fixture_bake_at_default_coords_leaves_static_field_at_source() {
+        // At wght=400 the variation region peaks at zero scalar →
+        // delta is zero. The static x_advance must stay at the
+        // source's 0 and the device offset must still be zeroed (the
+        // bake unconditionally severs the offset to keep GDEF.IVS
+        // safe to drop).
+        let face = Face::parse_bytes(VAR_KERN, 0).unwrap();
+        let coords = face.fvar().unwrap().unwrap().normalize_coords(&[400.0]);
+        let input = InstanceInput {
+            coords,
+            drop_var_tables: true,
+            axis_pins: Vec::new(),
+        };
+        let out = instance(&face, &input).expect("bake");
+        let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
+        assert!(!any_value_record_device_offset_nonzero(&baked));
+        let gpos_bytes = baked.table_bytes(tag::GPOS).expect("baked GPOS");
+        let lookup_list_off = u16::from_be_bytes([gpos_bytes[8], gpos_bytes[9]]) as usize;
+        let lookup_off = u16::from_be_bytes([
+            gpos_bytes[lookup_list_off + 2],
+            gpos_bytes[lookup_list_off + 3],
+        ]) as usize;
+        let lookup_base = lookup_list_off + lookup_off;
+        let sub_off =
+            u16::from_be_bytes([gpos_bytes[lookup_base + 6], gpos_bytes[lookup_base + 7]]) as usize;
+        let sub_abs = lookup_base + sub_off;
+        let sub = &gpos_bytes[sub_abs..];
+        let pair_set_rel = u16::from_be_bytes([sub[10], sub[11]]) as usize;
+        let pvr_off = pair_set_rel + 2;
+        let x_advance = i16::from_be_bytes([sub[pvr_off + 2], sub[pvr_off + 3]]);
+        assert_eq!(x_advance, 0, "AV x_advance unchanged at default wght");
+    }
+
+    #[test]
+    fn source_sans_vf_subset_bake_clears_all_gpos_variation_offsets() {
+        // Source Sans 3 VF Latin Subset is the real-world fixture #173
+        // already covered with the IVS-prune path. After the variation
+        // fold, no PairPos / SinglePos ValueRecord must carry a
+        // surviving device offset, and GDEF.IVS must be pruned.
+        let face = Face::parse_bytes(SOURCE_SANS, 0).unwrap();
+        let fvar = face.fvar().unwrap().unwrap();
+        let mut user = alloc::vec![0.0_f32; fvar.axes().len()];
+        if let Some(idx) = fvar.axis_index(*b"wght") {
+            user[idx] = fvar.axes()[idx].max_value;
+        }
+        let coords = fvar.normalize_coords(&user);
+        let input = InstanceInput {
+            coords,
+            drop_var_tables: true,
+            axis_pins: Vec::new(),
+        };
+        let out = instance(&face, &input).expect("bake");
+        let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
+        if let Some(gdef) = baked.gdef().unwrap() {
+            assert!(
+                gdef.item_variation_store().is_none(),
+                "baked GDEF.IVS must be pruned"
+            );
+        }
+        assert!(
+            !any_value_record_device_offset_nonzero(&baked),
+            "baked GPOS must have no surviving device offsets on PairPos/SinglePos"
+        );
     }
 
     #[test]
@@ -1655,6 +2220,7 @@ mod tests {
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).unwrap();
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
@@ -1826,5 +2392,267 @@ mod vvar_synthetic_tests {
         let val = i16::from_be_bytes([out[68], out[69]]);
         // First-wins: 800 + 100 == 900. (Without dedup: 800 + 200 = 1000.)
         assert_eq!(val, 900, "duplicate hasc must apply delta exactly once");
+    }
+}
+
+#[cfg(test)]
+mod partial_instancing_tests {
+    //! Unit tests for the partial-instancing public API + tuple
+    //! projection math primitives. These cover the building blocks
+    //! the variation-table emitters (HVAR / VVAR / MVAR / gvar /
+    //! GDEF.IVS) will consume in the follow-up that ships full
+    //! partial instancing — wiring them in is staged so this commit
+    //! lands the API surface and math without touching every
+    //! variation emitter at once.
+    //!
+    //! fontTools-equivalent of
+    //! `varLib.instancer.instantiateVariableFont(axisLimits=...)`.
+
+    use super::*;
+
+    const RUBIK: &[u8] = include_bytes!("../../../tests/fixtures/rubik_vf.ttf");
+
+    fn rubik_face() -> Face<'static> {
+        Face::parse_bytes(RUBIK, 0).unwrap()
+    }
+
+    #[test]
+    fn axis_pin_default_is_empty_pin_every_axis() {
+        // The default `InstanceInput::axis_pins` is an empty Vec —
+        // semantically "pin every axis" so existing callers that
+        // never set the field keep getting full instancing. Anything
+        // else would be a silent breaking change.
+        let i = InstanceInput::default();
+        assert!(i.axis_pins.is_empty());
+    }
+
+    #[test]
+    fn empty_axis_pins_falls_through_to_full_instancing() {
+        // Empty axis_pins is the existing full-instancing path. The
+        // bake must succeed end-to-end and produce a static font
+        // (no fvar / gvar / HVAR), exactly as before this feature
+        // landed.
+        let face = rubik_face();
+        let axis_count = face.fvar().unwrap().unwrap().axes().len();
+        let input = InstanceInput {
+            coords: alloc::vec![0.0_f32; axis_count],
+            drop_var_tables: true,
+            axis_pins: Vec::new(),
+        };
+        let out = instance(&face, &input).expect("empty axis_pins → full bake");
+        let baked = Face::parse_bytes(&out.bytes, 0).expect("parse");
+        assert!(baked.fvar().unwrap().is_none(), "fvar dropped");
+    }
+
+    #[test]
+    fn all_pin_axis_pins_equivalent_to_empty_axis_pins() {
+        // A non-empty axis_pins where every entry is `Pin` must
+        // produce the same bytes as an empty axis_pins. The emitter
+        // walks the same code path either way; this guards against
+        // a future regression that branches on length rather than
+        // entry policy.
+        let face = rubik_face();
+        let axis_count = face.fvar().unwrap().unwrap().axes().len();
+        let coords = alloc::vec![0.25_f32; axis_count];
+        let empty = InstanceInput {
+            coords: coords.clone(),
+            drop_var_tables: true,
+            axis_pins: Vec::new(),
+        };
+        let all_pin = InstanceInput {
+            coords,
+            drop_var_tables: true,
+            axis_pins: alloc::vec![AxisPin::Pin; axis_count],
+        };
+        let a = instance(&face, &empty).expect("empty bake");
+        let b = instance(&face, &all_pin).expect("all-Pin bake");
+        assert_eq!(a.bytes, b.bytes, "all-Pin must equal empty axis_pins");
+    }
+
+    #[test]
+    fn axis_pins_length_mismatch_errors() {
+        let face = rubik_face();
+        let axis_count = face.fvar().unwrap().unwrap().axes().len();
+        let input = InstanceInput {
+            coords: alloc::vec![0.0_f32; axis_count],
+            drop_var_tables: true,
+            // Length deliberately wrong.
+            axis_pins: alloc::vec![AxisPin::Pin; axis_count + 1],
+        };
+        assert!(matches!(
+            instance(&face, &input),
+            Err(SubsetError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn axis_pins_with_keep_currently_unsupported() {
+        // The math primitives + public API ship in this release; the
+        // variation-table emit side (fvar/avar trim, IVS tuple
+        // rewrite, gvar projection) lands in follow-ups. Until then
+        // any `Keep` entry surfaces a clear error rather than
+        // producing a silently-broken font.
+        let face = rubik_face();
+        let axis_count = face.fvar().unwrap().unwrap().axes().len();
+        let mut pins = alloc::vec![AxisPin::Pin; axis_count];
+        pins[0] = AxisPin::Keep;
+        let input = InstanceInput {
+            coords: alloc::vec![0.0_f32; axis_count],
+            drop_var_tables: true,
+            axis_pins: pins,
+        };
+        assert!(matches!(
+            instance(&face, &input),
+            Err(SubsetError::Unsupported(_))
+        ));
+    }
+
+    // --------------------------------------------------------------
+    // axis_support_scalar — single-axis ramp matches OpenType spec.
+    // --------------------------------------------------------------
+
+    #[test]
+    fn axis_support_scalar_peak_returns_one() {
+        // At the peak the scalar is 1.
+        assert!((axis_support_scalar(0.0, 1.0, 1.0, 1.0) - 1.0).abs() < 1e-6);
+        assert!((axis_support_scalar(-1.0, -1.0, 0.0, -1.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn axis_support_scalar_zero_peak_means_axis_ignored() {
+        // Per spec a peak of zero means the axis does not participate
+        // in the tuple — the scalar is 1 regardless of coord.
+        assert!((axis_support_scalar(0.0, 0.0, 0.0, 0.5) - 1.0).abs() < 1e-6);
+        assert!((axis_support_scalar(-1.0, 0.0, 1.0, 0.5) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn axis_support_scalar_outside_region_returns_zero() {
+        // coord beyond [start, end] → zero contribution.
+        assert!(axis_support_scalar(0.0, 1.0, 1.0, -0.5).abs() < 1e-6);
+        assert!(axis_support_scalar(0.0, 1.0, 1.0, 1.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn axis_support_scalar_linear_ramp_below_peak() {
+        // start=0, peak=1, end=1 — coord=0.5 is halfway up the ramp.
+        assert!((axis_support_scalar(0.0, 1.0, 1.0, 0.5) - 0.5).abs() < 1e-6);
+        // 0.25 quarter up.
+        assert!((axis_support_scalar(0.0, 1.0, 1.0, 0.25) - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn axis_support_scalar_linear_ramp_above_peak() {
+        // start=-1, peak=0.5, end=1 — coord=0.75 ramps down from 1 at
+        // peak to 0 at end. Halfway → 0.5.
+        // (peak == 0 would short-circuit to 1.0 per the spec's
+        // "axis ignored" convention; we use a non-zero peak here.)
+        assert!((axis_support_scalar(-1.0, 0.5, 1.0, 0.75) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn axis_support_scalar_degenerate_peak_eq_start_returns_zero() {
+        // peak == start, coord between them → division by zero
+        // guarded with a 0.0 fallback.
+        assert!(axis_support_scalar(1.0, 1.0, 1.0, 0.5).abs() < 1e-6);
+    }
+
+    // --------------------------------------------------------------
+    // project_region_onto_kept_axes — full tuple projection.
+    // --------------------------------------------------------------
+
+    #[test]
+    fn project_two_axis_region_pin_first_keep_second() {
+        // Two axes (wght + wdth). Region: wght (0, 1, 1), wdth (0, 1, 1).
+        // Pin wght=0.5 (scalar 0.5), keep wdth.
+        let region = [(0.0_f32, 1.0, 1.0), (0.0, 1.0, 1.0)];
+        let pins = [AxisPin::Pin, AxisPin::Keep];
+        let coords = [0.5, 0.0];
+        let p = project_region_onto_kept_axes(&region, &pins, &coords).expect("survives");
+        assert!((p.pin_scalar - 0.5).abs() < 1e-6);
+        assert_eq!(p.kept_axes, alloc::vec![(0.0, 1.0, 1.0)]);
+    }
+
+    #[test]
+    fn project_drops_tuple_when_pin_falls_outside_region() {
+        // Pin coord 0.0 falls outside the wght region [0.5, 1.0]:
+        // the scalar is zero and the tuple gets dropped.
+        let region = [(0.5_f32, 1.0, 1.0), (0.0, 1.0, 1.0)];
+        let pins = [AxisPin::Pin, AxisPin::Keep];
+        let coords = [0.0, 0.0];
+        assert!(project_region_onto_kept_axes(&region, &pins, &coords).is_none());
+    }
+
+    #[test]
+    fn project_pin_at_peak_passes_kept_axes_through_at_unit_scalar() {
+        // Pin axis at peak → scalar 1, kept axes ride through.
+        let region = [(0.0_f32, 1.0, 1.0), (-1.0, -1.0, 0.0)];
+        let pins = [AxisPin::Pin, AxisPin::Keep];
+        let coords = [1.0, 0.0];
+        let p = project_region_onto_kept_axes(&region, &pins, &coords).unwrap();
+        assert!((p.pin_scalar - 1.0).abs() < 1e-6);
+        assert_eq!(p.kept_axes, alloc::vec![(-1.0, -1.0, 0.0)]);
+    }
+
+    #[test]
+    fn project_all_pin_yields_empty_kept_axes() {
+        // Every axis pinned: kept_axes is empty (the survivor tuple
+        // becomes a plain delta-set with no region dimensions).
+        let region = [(0.0_f32, 1.0, 1.0), (0.0, 1.0, 1.0)];
+        let pins = [AxisPin::Pin, AxisPin::Pin];
+        let coords = [0.5, 0.5];
+        let p = project_region_onto_kept_axes(&region, &pins, &coords).unwrap();
+        // Two ramps at 0.5 each → 0.25 product.
+        assert!((p.pin_scalar - 0.25).abs() < 1e-6);
+        assert!(p.kept_axes.is_empty());
+    }
+
+    #[test]
+    fn project_all_keep_yields_unit_scalar_full_kept_axes() {
+        // Every axis kept variable: scalar 1, kept_axes = source region.
+        let region = [(0.0_f32, 1.0, 1.0), (-1.0, -0.5, 0.0)];
+        let pins = [AxisPin::Keep, AxisPin::Keep];
+        let coords = [0.0, 0.0]; // ignored
+        let p = project_region_onto_kept_axes(&region, &pins, &coords).unwrap();
+        assert!((p.pin_scalar - 1.0).abs() < 1e-6);
+        assert_eq!(p.kept_axes, alloc::vec![(0.0, 1.0, 1.0), (-1.0, -0.5, 0.0)]);
+    }
+
+    #[test]
+    fn project_zero_peak_pin_axis_passes_scalar_through() {
+        // Pin-axis with peak == 0 (axis-doesn't-participate): scalar
+        // contribution is 1 regardless of coord, so the survivor
+        // carries through with no payload scaling.
+        let region = [(0.0_f32, 0.0, 0.0), (0.0, 1.0, 1.0)];
+        let pins = [AxisPin::Pin, AxisPin::Keep];
+        let coords = [0.5, 0.0];
+        let p = project_region_onto_kept_axes(&region, &pins, &coords).unwrap();
+        assert!((p.pin_scalar - 1.0).abs() < 1e-6);
+        assert_eq!(p.kept_axes, alloc::vec![(0.0, 1.0, 1.0)]);
+    }
+
+    #[test]
+    fn project_length_mismatch_returns_none() {
+        // Defensive: mismatched input lengths return None rather than
+        // panicking on an OOB index.
+        let region = [(0.0_f32, 1.0, 1.0)];
+        let pins = [AxisPin::Pin, AxisPin::Keep];
+        let coords = [0.5, 0.5];
+        assert!(project_region_onto_kept_axes(&region, &pins, &coords).is_none());
+    }
+
+    #[test]
+    fn project_two_pin_axes_multiplies_scalars() {
+        // Both Pin axes contribute partial ramps; the survivor's
+        // pin_scalar is their product (0.5 × 0.25 = 0.125).
+        let region = [(0.0_f32, 1.0, 1.0), (0.0, 1.0, 1.0)];
+        let pins = [AxisPin::Pin, AxisPin::Pin];
+        let coords = [0.5, 0.25];
+        let p = project_region_onto_kept_axes(&region, &pins, &coords).unwrap();
+        assert!(
+            (p.pin_scalar - 0.125).abs() < 1e-6,
+            "expected 0.125, got {}",
+            p.pin_scalar
+        );
     }
 }
