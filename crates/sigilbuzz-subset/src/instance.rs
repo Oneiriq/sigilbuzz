@@ -244,19 +244,11 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
                 "instance: axis_pins length must equal coords.len()",
             ));
         }
-        // CFF2 VarStore partial-projection is still a follow-up; the
-        // gvar tuple-projection lands here. Reject Keep on CFF2 with
-        // a clear message — the gvar path now flows through
-        // partial_instance.
+        // CFF2 VarStore partial-projection is wired through
+        // [`crate::cff2::bake_cff2_partial`]; gvar tuple-projection
+        // is wired through [`crate::gvar_partial::bake_gvar_partial`].
+        // Both paths flow through `partial_instance` below.
         if input.axis_pins.contains(&AxisPin::Keep) {
-            let has_cff2 = face.record(tag::CFF2).is_some();
-            if has_cff2 {
-                return Err(SubsetError::Unsupported(
-                    "instance: partial instancing (axis_pins with Keep) for CFF2 sources \
-                     not yet implemented; gvar / HVAR / VVAR / MVAR / GDEF.IVS paths \
-                     trim correctly today",
-                ));
-            }
             // partial_instance returns `Ok` with the reduced-axis VF;
             // its caller chain mirrors the full-instancing path.
             return partial_instance(face, input);
@@ -605,6 +597,14 @@ fn partial_instance(
         }
     }
 
+    // CFF2 VarStore + blend-operator rewrite (optional). VarStore
+    // region trim via `bake_ivs_partial`; charstrings re-emit blend
+    // ops with the surviving regions and pre-scaled deltas.
+    if let Ok(cff2_bytes) = face.table_bytes(tag::CFF2) {
+        let new_cff2 = crate::cff2::bake_cff2_partial(cff2_bytes, &post_avar_coords, pins)?;
+        tables.push((tag::CFF2, new_cff2));
+    }
+
     // gvar tuple-projection rewrite (optional). Pin-axis support
     // scalars fold into per-point deltas; Pin-axis dimensions drop
     // from every tuple region; tuples whose Pin-axis support is zero
@@ -625,9 +625,8 @@ fn partial_instance(
         if tables.iter().any(|(t, _)| *t == rec.tag) {
             continue;
         }
-        // Skip variable-font tables we already handled (or that we
-        // refuse to handle in the partial path — CFF2 is gated
-        // upstream).
+        // Variable-font tables we handled above are excluded; the
+        // gvar / CFF2 paths run when their host tables are present.
         let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;
         tables.push((rec.tag, bytes.to_vec()));
     }
@@ -4690,20 +4689,55 @@ mod partial_instancing_tests {
     }
 
     #[test]
-    fn partial_instance_rejects_keep_on_cff2_source() {
-        // Source Sans 3 is CFF2; partial-instance with Keep must
-        // surface an Unsupported error today.
+    fn partial_instance_keep_on_cff2_source_emits_partial_var_font() {
+        // Source Sans 3 is a single-axis CFF2 VF (wght). Keeping every
+        // axis Keep produces a partial-instanced VF byte-stream — the
+        // emit walks bake_cff2_partial which rewrites the VarStore +
+        // blend operators with surviving regions only.
         let face = Face::parse_bytes(SOURCE_SANS, 0).unwrap();
         let axis_count = face.fvar().unwrap().unwrap().axes().len();
-        let mut pins = alloc::vec![AxisPin::Pin; axis_count];
-        pins[0] = AxisPin::Keep;
+        let pins = alloc::vec![AxisPin::Keep; axis_count];
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
             axis_pins: pins,
         };
-        let err = instance(&face, &input).unwrap_err();
-        assert!(matches!(err, SubsetError::Unsupported(_)));
+        let out = instance(&face, &input).expect("CFF2 partial bake");
+        let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
+        let new_fvar = baked.fvar().unwrap().expect("fvar survives");
+        assert_eq!(new_fvar.axes().len(), axis_count);
+        assert!(baked.record(tag::CFF2).is_some());
+    }
+
+    #[test]
+    fn partial_instance_source_sans_pin_wght_matches_full_instance() {
+        // Source Sans 3 with `wght=Pin` must produce byte-identical
+        // output to the existing full-instance path (which uses #163
+        // blend bake). This guards the all-Pin branch: it must keep
+        // routing through cff2_bake and never enter the partial path.
+        let face = Face::parse_bytes(SOURCE_SANS, 0).unwrap();
+        let user_default = face.fvar().unwrap().unwrap().axes()[0].default_value;
+        let coords = face
+            .fvar()
+            .unwrap()
+            .unwrap()
+            .normalize_coords(&[user_default]);
+        let empty = InstanceInput {
+            coords: coords.clone(),
+            drop_var_tables: true,
+            axis_pins: Vec::new(),
+        };
+        let pinned = InstanceInput {
+            coords,
+            drop_var_tables: true,
+            axis_pins: alloc::vec![AxisPin::Pin],
+        };
+        let a = instance(&face, &empty).expect("empty (full-instance)");
+        let b = instance(&face, &pinned).expect("Pin (full-instance via partial path gate)");
+        assert_eq!(
+            a.bytes, b.bytes,
+            "Pin wght on CFF2 must match empty axis_pins (both go through cff2_bake)"
+        );
     }
 
     #[test]
