@@ -1270,6 +1270,108 @@ pub(crate) fn read_index(bytes: &[u8], pos: usize) -> Result<(Vec<&[u8]>, usize)
     Ok((entries, data_end - pos))
 }
 
+/// CFF2 INDEX reader. CFF2 widens the count field to u32 (CFF1 used
+/// u16); the offSize / offsets / data layout is otherwise identical.
+/// Returns the entry slices and the byte-length of the full INDEX.
+pub(crate) fn read_index_cff2(
+    bytes: &[u8],
+    pos: usize,
+) -> Result<(Vec<&[u8]>, usize), SubsetError> {
+    if pos + 4 > bytes.len() {
+        return Err(SubsetError::Unsupported("CFF2 INDEX header truncated"));
+    }
+    let count =
+        u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as usize;
+    if count == 0 {
+        // CFF2 empty INDEX: just the 4-byte count, no offSize / offsets.
+        return Ok((Vec::new(), 4));
+    }
+    if pos + 5 > bytes.len() {
+        return Err(SubsetError::Unsupported("CFF2 INDEX offSize missing"));
+    }
+    let off_size = bytes[pos + 4] as usize;
+    if !(1..=4).contains(&off_size) {
+        return Err(SubsetError::Unsupported("CFF2 INDEX offSize out of range"));
+    }
+    let off_table_start = pos + 5;
+    let off_table_end = off_table_start + (count + 1) * off_size;
+    if off_table_end > bytes.len() {
+        return Err(SubsetError::Unsupported("CFF2 INDEX offsets truncated"));
+    }
+    let mut offsets = Vec::with_capacity(count + 1);
+    for i in 0..=count {
+        let s = off_table_start + i * off_size;
+        let mut v = 0u32;
+        for &b in &bytes[s..s + off_size] {
+            v = (v << 8) | u32::from(b);
+        }
+        offsets.push(v as usize);
+    }
+    let data_start = off_table_end;
+    let last = *offsets.last().unwrap();
+    if last == 0 {
+        return Err(SubsetError::Unsupported("CFF2 INDEX final offset zero"));
+    }
+    let data_end = data_start + last - 1;
+    if data_end > bytes.len() {
+        return Err(SubsetError::Unsupported("CFF2 INDEX data past end"));
+    }
+    let mut entries = Vec::with_capacity(count);
+    for w in offsets.windows(2) {
+        let a = w[0];
+        let b = w[1];
+        if a == 0 || b < a {
+            return Err(SubsetError::Unsupported("CFF2 INDEX offsets non-monotone"));
+        }
+        let s = data_start + a - 1;
+        let e = data_start + b - 1;
+        entries.push(&bytes[s..e]);
+    }
+    Ok((entries, data_end - pos))
+}
+
+/// Encodes a CFF2 INDEX (count is u32, layout otherwise identical to
+/// the CFF1 INDEX). Used for FDArray / Local Subr / Global Subr /
+/// CharStrings INDEXes inside CFF2 tables.
+#[must_use]
+pub fn encode_index_cff2(entries: &[&[u8]]) -> Vec<u8> {
+    let count = entries.len();
+    let mut out = Vec::new();
+    if count == 0 {
+        out.extend_from_slice(&0u32.to_be_bytes());
+        return out;
+    }
+    let total: usize = entries.iter().map(|e| e.len()).sum();
+    let last_off = 1 + total;
+    let off_size: u8 = if last_off <= 0xFF {
+        1
+    } else if last_off <= 0xFFFF {
+        2
+    } else if last_off <= 0x00FF_FFFF {
+        3
+    } else {
+        4
+    };
+    out.extend_from_slice(&(count as u32).to_be_bytes());
+    out.push(off_size);
+
+    let write_off = |buf: &mut Vec<u8>, v: u32| {
+        let bytes = v.to_be_bytes();
+        let start = 4 - off_size as usize;
+        buf.extend_from_slice(&bytes[start..]);
+    };
+    let mut acc: u32 = 1;
+    write_off(&mut out, acc);
+    for e in entries {
+        acc += e.len() as u32;
+        write_off(&mut out, acc);
+    }
+    for e in entries {
+        out.extend_from_slice(e);
+    }
+    out
+}
+
 // ----------------------------------------------------------------------------
 // Top DICT operator numbers.
 // ----------------------------------------------------------------------------
