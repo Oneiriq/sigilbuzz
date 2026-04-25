@@ -28,6 +28,7 @@ fn subsets_open_sans_to_abc() {
         retain_hints: false,
         drop_unhandled: true,
         retain_layout: false,
+        retain_variations: false,
     };
     let out = subset(&face, &input).expect("subset succeeds");
     let subset_size = out.bytes.len();
@@ -96,6 +97,7 @@ fn subset_is_deterministic() {
         retain_hints: false,
         drop_unhandled: true,
         retain_layout: false,
+        retain_variations: false,
     };
 
     let a = subset(&face, &input).unwrap();
@@ -118,12 +120,14 @@ fn subset_input_order_is_irrelevant() {
         retain_hints: false,
         drop_unhandled: true,
         retain_layout: false,
+        retain_variations: false,
     };
     let i2 = SubsetInput {
         gids: vec![gid_c, gid_b, gid_a],
         retain_hints: false,
         drop_unhandled: true,
         retain_layout: false,
+        retain_variations: false,
     };
     let a = subset(&face, &i1).unwrap();
     let b = subset(&face, &i2).unwrap();
@@ -140,6 +144,7 @@ fn empty_gid_set_implicitly_keeps_notdef_when_drop_unhandled() {
         retain_hints: false,
         drop_unhandled: true,
         retain_layout: false,
+        retain_variations: false,
     };
     let out = subset(&face, &input).unwrap();
     let blob = Blob::from_vec(out.bytes);
@@ -155,6 +160,7 @@ fn empty_gid_set_errors_when_strict() {
         retain_hints: false,
         drop_unhandled: false,
         retain_layout: false,
+        retain_variations: false,
     };
     let err = subset(&face, &input).unwrap_err();
     assert!(matches!(err, SubsetError::EmptyGidSet));
@@ -169,6 +175,7 @@ fn out_of_range_gid_errors() {
         retain_hints: false,
         drop_unhandled: true,
         retain_layout: false,
+        retain_variations: false,
     };
     let err = subset(&face, &input).unwrap_err();
     assert!(
@@ -193,6 +200,7 @@ fn shaping_subset_font_matches_remap() {
         retain_hints: false,
         drop_unhandled: true,
         retain_layout: false,
+        retain_variations: false,
     };
     let out = subset(&face, &input).unwrap();
     let blob = Blob::from_vec(out.bytes);
