@@ -130,6 +130,7 @@ mod instance;
 mod layout;
 mod sfnt;
 mod util;
+mod varc;
 mod variation_store;
 
 pub use cff::subset_non_identity as subset_cff1_non_identity;
@@ -461,6 +462,10 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         if let Some(b) = hvar::subset_hvar(face, &kept)? {
             tables.push((tag::HVAR, b));
         }
+        // VARC subsetting wired in by a follow-up commit; the closure
+        // walker already pulls component gids into the kept set so the
+        // resulting glyf/CFF subset is whole even before the VARC
+        // table-rewrite emit lands.
     }
 
     // Walk every other table the source carries and decide.
