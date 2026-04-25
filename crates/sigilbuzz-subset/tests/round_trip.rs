@@ -503,7 +503,11 @@ fn build_synthetic_cff1_table(n_glyphs: u16) -> Vec<u8> {
     let private_size = private_dict.len();
     out.extend_from_slice(&private_dict);
 
-    patch_dict_offset(&mut out, top_dict_body_abs + charset_slot, charset_abs as i32);
+    patch_dict_offset(
+        &mut out,
+        top_dict_body_abs + charset_slot,
+        charset_abs as i32,
+    );
     patch_dict_offset(
         &mut out,
         top_dict_body_abs + encoding_slot,
@@ -597,7 +601,7 @@ fn build_minimal_cmap_abc() -> Vec<u8> {
     out.extend_from_slice(&0x0043u16.to_be_bytes());
     out.extend_from_slice(&0xFFFFu16.to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes()); // reservedPad
-    // startCount: [0x0041, 0xFFFF]
+                                                // startCount: [0x0041, 0xFFFF]
     out.extend_from_slice(&0x0041u16.to_be_bytes());
     out.extend_from_slice(&0xFFFFu16.to_be_bytes());
     // idDelta: [-0x40 (gid 1 for cp 0x41), 1] (mod 65536). For 0xFFFF→0, delta=1.
@@ -670,6 +674,9 @@ fn cff1_non_identity_subset_round_trip_synthetic() {
     for (old, new) in &out.gid_map {
         let want = old_hmtx.advance(*old).unwrap_or(0);
         let got = new_hmtx.advance(*new).unwrap_or(0);
-        assert_eq!(want, got, "gid {old}->{new} advance mismatch: {want} vs {got}");
+        assert_eq!(
+            want, got,
+            "gid {old}->{new} advance mismatch: {want} vs {got}"
+        );
     }
 }

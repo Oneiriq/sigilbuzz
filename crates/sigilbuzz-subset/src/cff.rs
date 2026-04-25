@@ -874,9 +874,9 @@ fn decode_dict_operand(bytes: &[u8], pos: usize) -> Result<(DictOperand, usize),
         // of a byte is 0xF. Preserve raw bytes only.
         let mut len = 1;
         loop {
-            let b = *bytes.get(pos + len).ok_or(SubsetError::Unsupported(
-                "CFF DICT real-number truncated",
-            ))?;
+            let b = *bytes
+                .get(pos + len)
+                .ok_or(SubsetError::Unsupported("CFF DICT real-number truncated"))?;
             len += 1;
             if (b & 0x0F) == 0x0F || (b >> 4) == 0x0F {
                 break;
@@ -1142,9 +1142,9 @@ fn parse_cff1(data: &[u8]) -> Result<ParsedCff1<'_>, SubsetError> {
         }
     }
 
-    let cs_off = char_strings_off
-        .ok_or(SubsetError::Unsupported("CFF1 Top DICT missing CharStrings"))?
-        as usize;
+    let cs_off = char_strings_off.ok_or(SubsetError::Unsupported(
+        "CFF1 Top DICT missing CharStrings",
+    ))? as usize;
     let (char_strings, _) = read_index(data, cs_off)?;
 
     // Private DICT + Local Subr INDEX.
@@ -1378,9 +1378,7 @@ fn extract_kept_encoding_codes(
                 }
             }
             _ => {
-                return Err(SubsetError::Unsupported(
-                    "CFF1 Encoding format not 0 / 1",
-                ));
+                return Err(SubsetError::Unsupported("CFF1 Encoding format not 0 / 1"));
             }
         }
     }
@@ -1432,10 +1430,8 @@ fn serialise_top_dict(
     let mut out = Vec::new();
     let mut slots = TopDictSlots::default();
     for e in entries {
-        let target = matches!(
-            e.op,
-            OP_CHARSTRINGS | OP_PRIVATE
-        ) || (rebuild_charset && e.op == OP_CHARSET)
+        let target = matches!(e.op, OP_CHARSTRINGS | OP_PRIVATE)
+            || (rebuild_charset && e.op == OP_CHARSET)
             || (rebuild_encoding && e.op == OP_ENCODING);
         if target {
             // Drop the original operands; emit placeholders for the
@@ -1555,10 +1551,7 @@ fn serialise_private_dict(
 ///
 /// Returns [`SubsetError::Unsupported`] for CID-keyed fonts or when
 /// the source uses a feature the orchestration doesn't yet rewrite.
-pub fn subset_non_identity(
-    cff_bytes: &[u8],
-    kept_gids: &[u16],
-) -> Result<Vec<u8>, SubsetError> {
+pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8>, SubsetError> {
     let parsed = parse_cff1(cff_bytes)?;
     if parsed.is_cid {
         return Err(SubsetError::Unsupported(
@@ -1588,11 +1581,8 @@ pub fn subset_non_identity(
         .collect();
 
     // Subroutine keep-set (transitive closure).
-    let (kept_local_idx, kept_global_idx) = compute_kept_subrs(
-        &kept_charstrings,
-        &parsed.local_subrs,
-        &parsed.global_subrs,
-    )?;
+    let (kept_local_idx, kept_global_idx) =
+        compute_kept_subrs(&kept_charstrings, &parsed.local_subrs, &parsed.global_subrs)?;
 
     // Build old → new renumber tables.
     let mut local_renumber: Vec<Option<u32>> = alloc::vec![None; parsed.local_subrs.len()];
@@ -1610,10 +1600,7 @@ pub fn subset_non_identity(
     let old_global_count = parsed.global_subrs.len();
 
     // Rewrite each kept charstring (cloned → mutated).
-    let mut new_charstrings: Vec<Vec<u8>> = kept_charstrings
-        .iter()
-        .map(|s| s.to_vec())
-        .collect();
+    let mut new_charstrings: Vec<Vec<u8>> = kept_charstrings.iter().map(|s| s.to_vec()).collect();
     for cs in &mut new_charstrings {
         renumber_charstring(
             cs,
@@ -2352,11 +2339,31 @@ mod tests {
         out.extend_from_slice(&local_subr_index);
 
         // Patch Top DICT placeholder offsets.
-        patch_dict_offset(&mut out, top_dict_body_abs + charset_slot, charset_abs as i32);
-        patch_dict_offset(&mut out, top_dict_body_abs + encoding_slot, encoding_abs as i32);
-        patch_dict_offset(&mut out, top_dict_body_abs + charstrings_slot, cs_abs as i32);
-        patch_dict_offset(&mut out, top_dict_body_abs + priv_size_slot, private_size as i32);
-        patch_dict_offset(&mut out, top_dict_body_abs + priv_off_slot, private_abs as i32);
+        patch_dict_offset(
+            &mut out,
+            top_dict_body_abs + charset_slot,
+            charset_abs as i32,
+        );
+        patch_dict_offset(
+            &mut out,
+            top_dict_body_abs + encoding_slot,
+            encoding_abs as i32,
+        );
+        patch_dict_offset(
+            &mut out,
+            top_dict_body_abs + charstrings_slot,
+            cs_abs as i32,
+        );
+        patch_dict_offset(
+            &mut out,
+            top_dict_body_abs + priv_size_slot,
+            private_size as i32,
+        );
+        patch_dict_offset(
+            &mut out,
+            top_dict_body_abs + priv_off_slot,
+            private_abs as i32,
+        );
         // Patch Private DICT op 19 (Subrs) offset relative to Private DICT start.
         patch_dict_offset(
             &mut out,
@@ -2469,7 +2476,11 @@ mod tests {
         buf.extend_from_slice(&global_subr_index);
         let cs_abs = buf.len();
         buf.extend_from_slice(&cs_index);
-        patch_dict_offset(&mut buf, top_idx_start + top_body_off + cs_slot, cs_abs as i32);
+        patch_dict_offset(
+            &mut buf,
+            top_idx_start + top_body_off + cs_slot,
+            cs_abs as i32,
+        );
 
         let r = subset_non_identity(&buf, &[0u16]);
         assert!(matches!(r, Err(SubsetError::Unsupported(_))));

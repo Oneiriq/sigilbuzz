@@ -129,13 +129,13 @@ mod sfnt;
 mod util;
 mod variation_store;
 
+pub use cff::subset_non_identity as subset_cff1_non_identity;
 pub use cff::{
     compute_kept_subrs, emit_charset_auto, emit_charset_format0, emit_charset_format2,
     emit_encoding_auto, emit_encoding_format0, emit_encoding_format1, encode_dict_int,
     encode_dict_offset_placeholder, encode_index, encode_int_operand, patch_dict_offset,
     renumber_charstring, renumber_subr_call, scan_subr_calls, subr_bias, SubrCall, SubrKind,
 };
-pub use cff::subset_non_identity as subset_cff1_non_identity;
 pub use classdef::emit_classdef;
 pub use closure::compute_closure;
 pub use coverage::{emit_coverage_from_glyphs, emit_coverage_from_pairs};
