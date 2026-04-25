@@ -73,6 +73,17 @@ fn real_cff1_subset_round_trip() {
         "subset retains CFF1 outlines",
     );
 
+    // Size shrinkage (#167): subsetting Source Code Pro to {A..E} must
+    // drop the CFF1 table to well under half the source size now that
+    // unreachable subroutines are pruned. Pre-#167 the rewriter kept
+    // every source subr verbatim and the table stayed ~equal.
+    let src_cff_len = face.table_bytes(tag::CFF1).unwrap().len();
+    let new_cff_len = subset_face.table_bytes(tag::CFF1).unwrap().len();
+    assert!(
+        new_cff_len * 2 < src_cff_len,
+        "CFF1 subset {new_cff_len} bytes should shrink to <50% of source {src_cff_len}",
+    );
+
     // numGlyphs after subset: 1 (.notdef) + 5 kept = 6.
     let new_num_glyphs = subset_face.maxp().unwrap().num_glyphs;
     assert!(
@@ -367,6 +378,21 @@ fn real_cff2_subset_non_identity_round_trip() {
     assert!(
         (4..=8).contains(&new_num_glyphs),
         "expected 1 .notdef + ~3 kept glyphs, got {new_num_glyphs}",
+    );
+
+    // Size shrinkage (#167): subsetting Source Sans 3 VF to {A, B, C}
+    // must shrink the CFF2 table now that unreachable per-FD locals +
+    // globals are pruned. Pre-#167 the rewriter kept every source subr
+    // verbatim; the table stayed ~equal to the source. The fixture is
+    // already a heavily Latin-pre-subset CFF2 with a small VariationStore
+    // and Top DICT overhead that doesn't shrink, so the threshold is
+    // looser than the CFF1 case but still meaningful (subset must come
+    // in under 80% of source).
+    let src_cff_len = face.table_bytes(tag::CFF2).unwrap().len();
+    let new_cff_len = subset_face.table_bytes(tag::CFF2).unwrap().len();
+    assert!(
+        new_cff_len * 5 < src_cff_len * 4,
+        "CFF2 subset {new_cff_len} bytes should shrink to <80% of source {src_cff_len}",
     );
 
     // Every kept gid's advance survives the renumber.
