@@ -35,6 +35,7 @@ pub mod maxp;
 pub mod morx;
 pub mod outline;
 pub mod parse;
+pub mod sbix;
 pub mod variation_store;
 pub mod vhea;
 pub mod vmtx;
@@ -69,6 +70,7 @@ pub use maxp::Maxp;
 pub use morx::Morx;
 pub use outline::{Outline, OutlineSink, PathOp};
 pub use parse::Reader;
+pub use sbix::{Sbix, SbixGlyph, SbixStrike};
 pub use variation_store::ItemVariationStore;
 pub use vhea::Vhea;
 pub use vmtx::Vmtx;
@@ -134,4 +136,6 @@ pub mod tag {
     pub const CBLC: [u8; 4] = *b"CBLC";
     /// `CBDT` — Color Bitmap Data (Google).
     pub const CBDT: [u8; 4] = *b"CBDT";
+    /// `sbix` — Standard Bitmap Graphics (Apple).
+    pub const SBIX: [u8; 4] = *b"sbix";
 }
