@@ -182,6 +182,187 @@ fn amiri_phantom_anchor_path_does_not_regress_parity() {
     );
 }
 
+// Locate `glyf` and `loca` raw bytes via the SFNT directory. These
+// helpers stay at module scope so the clippy `items_after_statements`
+// lint is happy.
+fn be_u16(b: &[u8], off: usize) -> u16 {
+    u16::from_be_bytes([b[off], b[off + 1]])
+}
+fn be_u32(b: &[u8], off: usize) -> u32 {
+    u32::from_be_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+}
+fn be_i16(b: &[u8], off: usize) -> i16 {
+    i16::from_be_bytes([b[off], b[off + 1]])
+}
+
+/// Scans the `glyf` table of a TTF for composite glyphs whose
+/// component flags clear `ARGS_ARE_XY_VALUES` (bit 0x0002), i.e.
+/// anchor-mode references. Returns `(anchor_components, phantom_anchor_components)`.
+///
+/// `phantom_anchor_components` further filters anchor-mode components
+/// whose `arg1` index lands in the parent's phantom-point range
+/// (`>= parent_contour_point_count`).
+///
+/// Implemented as a small standalone walker so the assertion is
+/// independent of sigilbuzz's own parser — we want the test to pin
+/// the *fixture's* shape, not just its parsing.
+fn scan_anchor_components(bytes: &[u8]) -> (usize, usize) {
+    let theirs = ttf_parser::Face::parse(bytes, 0).expect("ttf-parser face");
+    let num_tables = be_u16(bytes, 4) as usize;
+    let mut glyf: &[u8] = &[];
+    let mut loca: &[u8] = &[];
+    let mut head: &[u8] = &[];
+    for i in 0..num_tables {
+        let rec = 12 + i * 16;
+        let tag = &bytes[rec..rec + 4];
+        let off = be_u32(bytes, rec + 8) as usize;
+        let len = be_u32(bytes, rec + 12) as usize;
+        match tag {
+            b"glyf" => glyf = &bytes[off..off + len],
+            b"loca" => loca = &bytes[off..off + len],
+            b"head" => head = &bytes[off..off + len],
+            _ => {}
+        }
+    }
+    let loc_format = be_i16(head, 50);
+    let num_glyphs = theirs.number_of_glyphs() as usize;
+    // Resolve glyph offsets.
+    let glyph_offset = |gid: usize| -> usize {
+        if loc_format == 0 {
+            (be_u16(loca, gid * 2) as usize) * 2
+        } else {
+            be_u32(loca, gid * 4) as usize
+        }
+    };
+    // To know if an anchor-mode component is phantom, we need each
+    // referenced parent glyph's contour-point count. Cache it.
+    let parent_point_count = |gid: u16| -> Option<u16> {
+        let s = glyph_offset(gid as usize);
+        let e = glyph_offset(gid as usize + 1);
+        if s == e {
+            return None;
+        }
+        let body = &glyf[s..e];
+        let n_contours = be_i16(body, 0);
+        if n_contours <= 0 {
+            return None;
+        }
+        // Skip header (10) + (n_contours - 1) * 2 to last endPt.
+        let last_ep_off = 10 + (n_contours as usize - 1) * 2;
+        Some(be_u16(body, last_ep_off) + 1)
+    };
+    let mut anchor = 0usize;
+    let mut phantom = 0usize;
+    for gid in 0..num_glyphs {
+        let s = glyph_offset(gid);
+        let e = glyph_offset(gid + 1);
+        if s == e {
+            continue;
+        }
+        let body = &glyf[s..e];
+        let n_contours = be_i16(body, 0);
+        if n_contours >= 0 {
+            continue; // simple glyph
+        }
+        let mut p = 10usize;
+        loop {
+            let flags = be_u16(body, p);
+            let comp_gid = be_u16(body, p + 2);
+            p += 4;
+            let words = flags & 0x0001 != 0;
+            let xy = flags & 0x0002 != 0;
+            let (arg1, _arg2);
+            if words {
+                arg1 = be_u16(body, p) as i32;
+                _arg2 = be_u16(body, p + 2) as i32;
+                p += 4;
+            } else {
+                arg1 = body[p] as i32;
+                _arg2 = body[p + 1] as i32;
+                p += 2;
+            }
+            if !xy {
+                anchor += 1;
+                let parent_pts = parent_point_count(comp_gid).unwrap_or(0) as i32;
+                if arg1 >= parent_pts {
+                    phantom += 1;
+                }
+            }
+            if flags & 0x0008 != 0 {
+                p += 2;
+            } else if flags & 0x0040 != 0 {
+                p += 4;
+            } else if flags & 0x0080 != 0 {
+                p += 8;
+            }
+            if flags & 0x0020 == 0 {
+                break;
+            }
+        }
+    }
+    (anchor, phantom)
+}
+
+#[test]
+fn phantom_anchor_fixture_outlines_match_ttf_parser() {
+    // Hand-crafted fixture (see `tests/tools/build_phantom_anchor_fixture.py`)
+    // that exercises the composite phantom-anchor branch of
+    // `Glyf::outline`: gid 3 (`combo`) has one component in plain XY
+    // mode and one in anchor mode whose `arg1` is the parent's pp2
+    // index. The fixture is engineered so that the resolved phantom
+    // translation also equals (0, 0) — ttf-parser ignores anchor mode
+    // and defaults its translation to (0, 0), so a parity test stays
+    // green while sigilbuzz still walks through `phantom_points()` /
+    // resolves pp2 from hmtx.
+    let bytes: &[u8] = include_bytes!("fixtures/phantom_anchor.ttf");
+    let (anchor, phantom) = scan_anchor_components(bytes);
+    assert!(
+        anchor >= 1,
+        "fixture must carry at least one anchor-mode component, got {anchor}"
+    );
+    assert!(
+        phantom >= 1,
+        "fixture must carry at least one phantom-anchor component (arg1 past parent's contour points), got {phantom}"
+    );
+    // Per-glyph diagnostic to surface the offending gid clearly.
+    let ours = Face::parse_bytes(bytes, 0).expect("sigilbuzz face");
+    let theirs = ttf_parser::Face::parse(bytes, 0).expect("ttf-parser face");
+    for gid in 0..theirs.number_of_glyphs() {
+        let mut builder = CollectBuilder::default();
+        let drew_theirs = theirs.outline_glyph(ttf_parser::GlyphId(gid), &mut builder);
+        let ours_outline = ours.glyph_outline(gid).expect("our outline");
+        match (drew_theirs, ours_outline) {
+            (None, None) => {}
+            (Some(_), None) => panic!("gid {gid}: ttf-parser drew but sigilbuzz did not"),
+            (None, Some(_)) => panic!("gid {gid}: sigilbuzz drew but ttf-parser did not"),
+            (Some(_), Some(out)) => {
+                assert_eq!(
+                    out.len(),
+                    builder.ops.len(),
+                    "gid {gid}: op count mismatch ours={} theirs={}",
+                    out.len(),
+                    builder.ops.len()
+                );
+                for (i, (ours_op, theirs_op)) in
+                    out.ops().iter().zip(builder.ops.iter()).enumerate()
+                {
+                    let (tag, coords) = collapse(*ours_op);
+                    assert_eq!(
+                        tag, theirs_op.0,
+                        "gid {gid} op {i}: tag mismatch {:?} vs {:?}",
+                        tag, theirs_op.0
+                    );
+                    assert!(
+                        approx_eq(&coords, &theirs_op.1),
+                        "gid {gid} op {i}: coord mismatch {coords:?} vs {:?}",
+                        theirs_op.1
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn amiri_two_anchor_glyphs_now_match() {
     // The two Amiri glyphs that previously missed parity (gids 379

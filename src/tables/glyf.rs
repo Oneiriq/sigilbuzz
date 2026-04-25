@@ -55,7 +55,9 @@
 //! coordinates before we can emit the child's ops.
 //!
 //! Phantom-point references are resolved against hmtx (and vmtx if
-//! present) at flatten time.
+//! present) at flatten time. The phantom-anchor branch is covered by
+//! the `phantom_anchor_fixture_outlines_match_ttf_parser` integration
+//! test (hand-crafted ~1 KB fixture under `tests/fixtures/`).
 
 use alloc::vec::Vec;
 
