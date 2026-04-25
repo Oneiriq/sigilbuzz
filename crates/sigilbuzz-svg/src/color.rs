@@ -70,45 +70,60 @@ pub fn glyph_to_svg_color_at_coords(
 // =========================================================================
 
 fn render_color_svg(face: &Face<'_>, cmds: &[DrawCmd], coords: &[F2Dot14]) -> Option<String> {
-    // First pass: collect every (gid, transform) referenced by a
-    // FillGlyph so we can size the viewBox to the union of their
-    // transformed bounding boxes. Glyphs without an outline are
-    // skipped — clip-only paint trees are valid but render as no-ops.
+    // First pass: for every FillGlyph in `cmds`, look up the
+    // referenced outline. We push *one* `Option<LeafGeometry>` per
+    // FillGlyph — `None` for whitespace / out-of-range / empty-outline
+    // glyphs, `Some` for renderable ones. Storing one slot per
+    // FillGlyph keeps the second pass aligned with the cmd stream
+    // even when an interior leaf is missing; before, leaves were a
+    // dense Vec and the second pass walked the full cmd stream, so
+    // a missing-outline FillGlyph in the middle silently re-mapped
+    // every later FillGlyph to the wrong leaf (issue #68).
     let mut bbox: Option<(f32, f32, f32, f32)> = None;
-    let mut leaves: Vec<LeafGeometry> = Vec::new();
+    let mut leaves: Vec<Option<LeafGeometry>> = Vec::new();
     for cmd in cmds {
         if let DrawCmd::FillGlyph { gid, transform, .. } = cmd {
-            let outline = face.glyph_outline_at_coords(*gid, coords).ok().flatten();
-            let Some(outline) = outline else {
-                continue;
-            };
-            if outline.is_empty() {
-                continue;
+            let leaf = build_leaf(face, *gid, coords, *transform);
+            if let Some((leaf, projected)) = leaf {
+                bbox = Some(union_bbox(bbox, projected));
+                leaves.push(Some(leaf));
+            } else {
+                leaves.push(None);
             }
-            let d = path_data(outline.ops());
-            let local_bbox = match path_bbox(outline.ops()) {
-                Some(b) => b,
-                None => continue,
-            };
-            // Project the four bbox corners through the transform to
-            // get the bbox in the post-transform frame.
-            let projected = project_bbox(*transform, local_bbox);
-            bbox = Some(union_bbox(bbox, projected));
-            leaves.push(LeafGeometry { d });
         }
     }
     let bbox = bbox?;
-    if leaves.is_empty() {
+    if leaves.iter().all(Option::is_none) {
         return None;
     }
 
     // Second pass: walk the cmd stream alongside the leaf list,
-    // emitting defs (gradients) and the body (paths + groups). We
-    // reuse the leaf index so defs and body iterate in the same
-    // order.
+    // emitting defs (gradients) and the body (paths + groups). The
+    // FillGlyph counter advances on every FillGlyph cmd whether or
+    // not its leaf is `Some`, keeping the two streams in lockstep.
     let (defs, body) = emit_defs_and_body(cmds, &leaves);
 
     Some(assemble_svg(bbox, &defs, &body))
+}
+
+/// Resolves one FillGlyph's outline + transform into a `LeafGeometry`
+/// plus its projected bbox. Returns `None` when the outline is missing
+/// or empty, or when the bbox computation has nothing to fold (a
+/// `Close`-only path stream, in theory).
+fn build_leaf(
+    face: &Face<'_>,
+    gid: GlyphId,
+    coords: &[F2Dot14],
+    transform: Transform2D,
+) -> Option<(LeafGeometry, (f32, f32, f32, f32))> {
+    let outline = face.glyph_outline_at_coords(gid, coords).ok().flatten()?;
+    if outline.is_empty() {
+        return None;
+    }
+    let d = path_data(outline.ops());
+    let local_bbox = path_bbox(outline.ops())?;
+    let projected = project_bbox(transform, local_bbox);
+    Some((LeafGeometry { d }, projected))
 }
 
 struct LeafGeometry {
@@ -144,7 +159,7 @@ impl Defs {
     }
 }
 
-fn emit_defs_and_body(cmds: &[DrawCmd], leaves: &[LeafGeometry]) -> (String, String) {
+fn emit_defs_and_body(cmds: &[DrawCmd], leaves: &[Option<LeafGeometry>]) -> (String, String) {
     let mut defs = Defs::default();
     let mut body = String::new();
     let mut leaf_idx: usize = 0;
@@ -154,18 +169,15 @@ fn emit_defs_and_body(cmds: &[DrawCmd], leaves: &[LeafGeometry]) -> (String, Str
             DrawCmd::FillGlyph {
                 transform, paint, ..
             } => {
-                if leaf_idx >= leaves.len() {
-                    // Outline missing for this fill — skip it without
-                    // disturbing leaf alignment for the remainder. We
-                    // only push a leaf when the outline existed, so
-                    // this branch only fires if the second-pass leaf
-                    // list and the first-pass scan disagree, which is
-                    // a contract violation worth bailing on quietly.
-                    continue;
-                }
-                let leaf = &leaves[leaf_idx];
+                // The leaf list has exactly one slot per FillGlyph in
+                // input order; advance on every FillGlyph so the next
+                // one keeps lockstep with the cmd stream. Missing-
+                // outline glyphs (`None` slot) emit nothing.
+                let slot = leaves.get(leaf_idx);
                 leaf_idx += 1;
-                emit_fill(&mut defs, &mut body, *transform, paint, &leaf.d);
+                if let Some(Some(leaf)) = slot {
+                    emit_fill(&mut defs, &mut body, *transform, paint, &leaf.d);
+                }
             }
             DrawCmd::PushLayer { composite_mode } => {
                 push_layer(&mut body, *composite_mode);
@@ -626,5 +638,65 @@ mod tests {
         let mut body = String::new();
         push_layer(&mut body, CompositeMode::Multiply);
         assert!(body.contains(r#"style="mix-blend-mode:multiply""#));
+    }
+
+    #[test]
+    fn missing_middle_outline_does_not_misalign_later_leaves() {
+        // Three FillGlyph cmds with distinguishable solid colours;
+        // the middle glyph has no outline (its leaf slot is `None`).
+        // Before issue #68 the second-pass walker advanced its
+        // dense-leaf cursor only on `Some` slots, so the third
+        // FillGlyph silently picked up the second's `d=` payload —
+        // here the fix routes each FillGlyph through its own
+        // matching leaf slot, missing-outline ones emit nothing,
+        // and later glyphs keep the path data the first pass paired
+        // with them.
+        let cmds = alloc::vec![
+            DrawCmd::FillGlyph {
+                gid: 1,
+                transform: Transform2D::IDENTITY,
+                paint: PaintSource::Solid(Color::new(1.0, 0.0, 0.0, 1.0)),
+            },
+            DrawCmd::FillGlyph {
+                gid: 2,
+                transform: Transform2D::IDENTITY,
+                paint: PaintSource::Solid(Color::new(0.0, 1.0, 0.0, 1.0)),
+            },
+            DrawCmd::FillGlyph {
+                gid: 3,
+                transform: Transform2D::IDENTITY,
+                paint: PaintSource::Solid(Color::new(0.0, 0.0, 1.0, 1.0)),
+            },
+        ];
+        let leaves: alloc::vec::Vec<Option<LeafGeometry>> = alloc::vec![
+            Some(LeafGeometry {
+                d: alloc::string::String::from("M 0 0 L 1 0 Z"),
+            }),
+            None,
+            Some(LeafGeometry {
+                d: alloc::string::String::from("M 0 0 L 3 0 Z"),
+            }),
+        ];
+
+        let (_defs, body) = emit_defs_and_body(&cmds, &leaves);
+        // The first FillGlyph (red) should land on its own leaf.
+        assert!(
+            body.contains(r#"d="M 0 0 L 1 0 Z" fill="rgb(255,0,0)""#),
+            "first fill missing or wrong d=: {body}"
+        );
+        // The second FillGlyph (green) had no outline and emits
+        // nothing — its colour must not appear anywhere in the body.
+        assert!(
+            !body.contains("rgb(0,255,0)"),
+            "missing-outline glyph leaked into body: {body}"
+        );
+        // The third FillGlyph (blue) keeps its original `d` rather
+        // than picking up the second slot's path. Before the fix
+        // this assertion failed because the dense-leaf cursor walked
+        // the wrong way and blue inherited green's geometry.
+        assert!(
+            body.contains(r#"d="M 0 0 L 3 0 Z" fill="rgb(0,0,255)""#),
+            "third fill leaf misaligned: {body}"
+        );
     }
 }
