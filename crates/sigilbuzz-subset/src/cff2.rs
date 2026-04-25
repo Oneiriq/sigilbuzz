@@ -1351,10 +1351,10 @@ pub(crate) fn bake_cff2_partial(
     let src_ivs_bytes = &vstore_blob[2..];
 
     // Build the trimmed IVS via the IVS-bearing-table primitive.
-    let (new_ivs_bytes, _remap) =
-        crate::instance::bake_ivs_partial(src_ivs_bytes, coords, pins).ok_or(
-            SubsetError::Unsupported("CFF2 VarStore partial bake failed"),
-        )?;
+    let (new_ivs_bytes, _remap) = crate::instance::bake_ivs_partial(src_ivs_bytes, coords, pins)
+        .ok_or(SubsetError::Unsupported(
+            "CFF2 VarStore partial bake failed",
+        ))?;
 
     // Compute per-source-subtable surviving-slot info for the
     // charstring rewrite. We re-walk the source IVS rather than
@@ -1385,12 +1385,8 @@ pub(crate) fn bake_cff2_partial(
             .get(fd as usize)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let mut rewriter = PartialBaker::new(
-            &src_ivs,
-            &survivors,
-            &parsed.global_subrs,
-            local_subrs,
-        );
+        let mut rewriter =
+            PartialBaker::new(&src_ivs, &survivors, &parsed.global_subrs, local_subrs);
         let baked = rewriter.bake_charstring(cs)?;
         new_charstrings.push(baked);
     }
@@ -2336,7 +2332,7 @@ mod tests {
         let cs0: &[u8] = &[
             139, 139, 21, // 0 0 rmoveto
             139, 239, 140, 16, // 0 100 1 blend  (push master + delta + count + BLEND)
-            139, 22,  // 0 hmoveto
+            139, 22, // 0 hmoveto
         ];
         let cff = build_synthetic_cff2(&[cs0], &[0], Some(&ivs));
         let pins = [AxisPin::Pin, AxisPin::Keep];

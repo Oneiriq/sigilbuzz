@@ -601,8 +601,7 @@ fn partial_instance(
     // region trim via `bake_ivs_partial`; charstrings re-emit blend
     // ops with the surviving regions and pre-scaled deltas.
     if let Ok(cff2_bytes) = face.table_bytes(tag::CFF2) {
-        let new_cff2 =
-            crate::cff2::bake_cff2_partial(cff2_bytes, &post_avar_coords, pins)?;
+        let new_cff2 = crate::cff2::bake_cff2_partial(cff2_bytes, &post_avar_coords, pins)?;
         tables.push((tag::CFF2, new_cff2));
     }
 
