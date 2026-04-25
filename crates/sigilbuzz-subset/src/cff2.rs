@@ -189,9 +189,8 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
     let (char_strings, _) = read_index(data, cs_off)?;
     let n_glyphs = char_strings.len();
 
-    let fd_array_off = fd_array_off.ok_or(SubsetError::Unsupported(
-        "CFF2 Top DICT missing FDArray",
-    ))? as usize;
+    let fd_array_off =
+        fd_array_off.ok_or(SubsetError::Unsupported("CFF2 Top DICT missing FDArray"))? as usize;
     let (fd_array, _) = read_index(data, fd_array_off)?;
 
     // Walk each Font DICT for its Private offset.
@@ -243,9 +242,8 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
         per_fd_local_subrs.push(locals);
     }
 
-    let fd_select_off = fd_select_off.ok_or(SubsetError::Unsupported(
-        "CFF2 Top DICT missing FDSelect",
-    ))? as usize;
+    let fd_select_off =
+        fd_select_off.ok_or(SubsetError::Unsupported("CFF2 Top DICT missing FDSelect"))? as usize;
     let fd_select = parse_fd_select(data, fd_select_off, n_glyphs)?;
 
     let vstore_blob = if let Some(off) = vstore_off {
@@ -374,7 +372,8 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
     let new_global_count = kept_global_idx.len();
     let old_global_count = parsed.global_subrs.len();
 
-    let mut per_fd_local_renumber: Vec<Vec<Option<u32>>> = Vec::with_capacity(kept_fds_sorted.len());
+    let mut per_fd_local_renumber: Vec<Vec<Option<u32>>> =
+        Vec::with_capacity(kept_fds_sorted.len());
     for (i, &old_fd) in kept_fds_sorted.iter().enumerate() {
         let local_count = parsed.per_fd_local_subrs[old_fd as usize].len();
         let mut renumber: Vec<Option<u32>> = alloc::vec![None; local_count];
@@ -479,7 +478,10 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
         });
     }
 
-    let fd_array_refs: Vec<&[u8]> = fd_emits.iter().map(|f| f.font_dict_body.as_slice()).collect();
+    let fd_array_refs: Vec<&[u8]> = fd_emits
+        .iter()
+        .map(|f| f.font_dict_body.as_slice())
+        .collect();
     let fd_array_index = encode_index(&fd_array_refs);
 
     let fd_count = fd_emits.len();
@@ -634,9 +636,7 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
 #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
 mod tests {
     use super::*;
-    use crate::cff::{
-        emit_fd_select_format0, encode_int_operand, scan_subr_calls, subr_bias,
-    };
+    use crate::cff::{emit_fd_select_format0, encode_int_operand, scan_subr_calls, subr_bias};
 
     #[test]
     fn cff2_charstring_without_endchar_is_walked_to_eof() {
@@ -752,7 +752,11 @@ mod tests {
         let fd_index_off_size: usize = {
             let total: usize = font_dict_bodies.iter().map(Vec::len).sum();
             let last_off = 1 + total;
-            if last_off <= 0xFF { 1 } else { 2 }
+            if last_off <= 0xFF {
+                1
+            } else {
+                2
+            }
         };
         let fd_index_data_start = 2 + 1 + (n_fds + 1) * fd_index_off_size;
         let mut fd_body_offsets_in_index: Vec<usize> = Vec::with_capacity(n_fds);

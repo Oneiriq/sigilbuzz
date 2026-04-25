@@ -705,11 +705,7 @@ pub fn emit_encoding_auto(codes: &[u8]) -> Vec<u8> {
 ///
 /// Returns [`SubsetError::Unsupported`] for unknown formats or when the
 /// table is truncated.
-pub fn parse_fd_select(
-    data: &[u8],
-    off: usize,
-    n_glyphs: usize,
-) -> Result<Vec<u8>, SubsetError> {
+pub fn parse_fd_select(data: &[u8], off: usize, n_glyphs: usize) -> Result<Vec<u8>, SubsetError> {
     if off >= data.len() {
         return Err(SubsetError::Unsupported("CFF FDSelect offset past end"));
     }
@@ -723,14 +719,18 @@ pub fn parse_fd_select(
         }
         3 => {
             if off + 3 > data.len() {
-                return Err(SubsetError::Unsupported("CFF FDSelect format 3 header truncated"));
+                return Err(SubsetError::Unsupported(
+                    "CFF FDSelect format 3 header truncated",
+                ));
             }
             let n_ranges = u16::from_be_bytes([data[off + 1], data[off + 2]]) as usize;
             let mut p = off + 3;
             let mut ranges = Vec::with_capacity(n_ranges);
             for _ in 0..n_ranges {
                 if p + 3 > data.len() {
-                    return Err(SubsetError::Unsupported("CFF FDSelect format 3 range truncated"));
+                    return Err(SubsetError::Unsupported(
+                        "CFF FDSelect format 3 range truncated",
+                    ));
                 }
                 let first = u16::from_be_bytes([data[p], data[p + 1]]);
                 let fd = data[p + 2];
@@ -738,7 +738,9 @@ pub fn parse_fd_select(
                 p += 3;
             }
             if p + 2 > data.len() {
-                return Err(SubsetError::Unsupported("CFF FDSelect format 3 sentinel truncated"));
+                return Err(SubsetError::Unsupported(
+                    "CFF FDSelect format 3 sentinel truncated",
+                ));
             }
             let sentinel = u16::from_be_bytes([data[p], data[p + 1]]) as usize;
             let mut out = alloc::vec![0u8; n_glyphs];
@@ -2017,10 +2019,7 @@ struct CidTopDictSlots {
 /// FDArray (12 36), and FDSelect (12 37) get 5-byte placeholders. The
 /// op `0x0C22` (CIDCount) operand is rewritten to `new_cid_count`. All
 /// other operators (ROS, CIDFontVersion, etc.) are preserved verbatim.
-fn serialise_cid_top_dict(
-    entries: &[DictEntry],
-    new_cid_count: u32,
-) -> (Vec<u8>, CidTopDictSlots) {
+fn serialise_cid_top_dict(entries: &[DictEntry], new_cid_count: u32) -> (Vec<u8>, CidTopDictSlots) {
     let mut out = Vec::new();
     let mut slots = CidTopDictSlots::default();
     for e in entries {
@@ -2086,9 +2085,7 @@ fn serialise_cid_top_dict(
 /// op 18 (Private size + offset) plus whatever other operators the
 /// source Font DICT had (FontName etc.). Returns the serialised body
 /// plus the byte offsets of the Private DICT size + offset placeholders.
-pub(crate) fn serialise_font_dict(
-    entries: &[DictEntry],
-) -> (Vec<u8>, Option<(usize, usize)>) {
+pub(crate) fn serialise_font_dict(entries: &[DictEntry]) -> (Vec<u8>, Option<(usize, usize)>) {
     let mut out = Vec::new();
     let mut private_slot: Option<(usize, usize)> = None;
     let mut had_private = false;
@@ -2189,35 +2186,35 @@ fn subset_cid_keyed(
                 }
             }
         }
-        let (private_dict, local_subrs): (&[u8], Vec<&[u8]>) =
-            if let Some((size, off)) = priv_info {
-                let off_u = off as usize;
-                let size_u = size as usize;
-                if off_u + size_u > cff_bytes.len() {
-                    return Err(SubsetError::Unsupported("CFF1 CID Private DICT past end"));
-                }
-                let priv_bytes = &cff_bytes[off_u..off_u + size_u];
-                let priv_entries = walk_dict(priv_bytes)?;
-                let mut subrs_rel: Option<u32> = None;
-                for e in &priv_entries {
-                    if e.op == OP_SUBRS {
-                        if let Some(v) = e.operands.last().and_then(|o| o.int_value) {
-                            if v >= 0 {
-                                subrs_rel = Some(v as u32);
-                            }
+        let (private_dict, local_subrs): (&[u8], Vec<&[u8]>) = if let Some((size, off)) = priv_info
+        {
+            let off_u = off as usize;
+            let size_u = size as usize;
+            if off_u + size_u > cff_bytes.len() {
+                return Err(SubsetError::Unsupported("CFF1 CID Private DICT past end"));
+            }
+            let priv_bytes = &cff_bytes[off_u..off_u + size_u];
+            let priv_entries = walk_dict(priv_bytes)?;
+            let mut subrs_rel: Option<u32> = None;
+            for e in &priv_entries {
+                if e.op == OP_SUBRS {
+                    if let Some(v) = e.operands.last().and_then(|o| o.int_value) {
+                        if v >= 0 {
+                            subrs_rel = Some(v as u32);
                         }
                     }
                 }
-                if let Some(rel) = subrs_rel {
-                    let abs = off_u + rel as usize;
-                    let (locals, _) = read_index(cff_bytes, abs)?;
-                    (priv_bytes, locals)
-                } else {
-                    (priv_bytes, Vec::new())
-                }
+            }
+            if let Some(rel) = subrs_rel {
+                let abs = off_u + rel as usize;
+                let (locals, _) = read_index(cff_bytes, abs)?;
+                (priv_bytes, locals)
             } else {
-                (&[][..], Vec::new())
-            };
+                (priv_bytes, Vec::new())
+            }
+        } else {
+            (&[][..], Vec::new())
+        };
         fd_infos.push(FdInfo {
             font_dict_entries: entries,
             private_dict,
@@ -2263,8 +2260,7 @@ fn subset_cid_keyed(
     //
     // Globals are shared across all FDs — we union the per-FD global
     // keep-set to a single global keep-set.
-    let mut kept_global_set: alloc::vec::Vec<bool> =
-        alloc::vec![false; parsed.global_subrs.len()];
+    let mut kept_global_set: alloc::vec::Vec<bool> = alloc::vec![false; parsed.global_subrs.len()];
     let mut per_fd_kept_local: Vec<Vec<u32>> = Vec::with_capacity(kept_fds_sorted.len());
     for &old_fd in &kept_fds_sorted {
         let fd_local_subrs = &fd_infos[old_fd as usize].local_subrs;
@@ -2297,7 +2293,8 @@ fn subset_cid_keyed(
     let old_global_count = parsed.global_subrs.len();
 
     // Per-kept-FD local renumber tables.
-    let mut per_fd_local_renumber: Vec<Vec<Option<u32>>> = Vec::with_capacity(kept_fds_sorted.len());
+    let mut per_fd_local_renumber: Vec<Vec<Option<u32>>> =
+        Vec::with_capacity(kept_fds_sorted.len());
     for (i, &old_fd) in kept_fds_sorted.iter().enumerate() {
         let local_count = fd_infos[old_fd as usize].local_subrs.len();
         let mut renumber: Vec<Option<u32>> = alloc::vec![None; local_count];
@@ -2413,8 +2410,7 @@ fn subset_cid_keyed(
     let mut fd_emits: Vec<FdEmit> = Vec::with_capacity(kept_fds_sorted.len());
     for (i, &old_fd) in kept_fds_sorted.iter().enumerate() {
         let info = &fd_infos[old_fd as usize];
-        let (font_dict_body, font_dict_private_slot) =
-            serialise_font_dict(&info.font_dict_entries);
+        let (font_dict_body, font_dict_private_slot) = serialise_font_dict(&info.font_dict_entries);
         // Rebuild Private DICT body — keep entries except op 19, emit
         // op 19 placeholder when we have local subrs.
         let priv_entries = if info.private.is_some() {
@@ -2433,7 +2429,10 @@ fn subset_cid_keyed(
     }
 
     // Build FDArray INDEX (the kept Font DICT bodies).
-    let fd_array_refs: Vec<&[u8]> = fd_emits.iter().map(|f| f.font_dict_body.as_slice()).collect();
+    let fd_array_refs: Vec<&[u8]> = fd_emits
+        .iter()
+        .map(|f| f.font_dict_body.as_slice())
+        .collect();
     let fd_array_index = encode_index(&fd_array_refs);
 
     // Compute Font DICT body offsets within the FDArray INDEX.
@@ -3003,7 +3002,7 @@ mod tests {
         assert_eq!(bytes.len(), 3 + 6 + 2);
         assert_eq!(bytes[0], 3);
         assert_eq!(u16::from_be_bytes([bytes[1], bytes[2]]), 2); // 2 ranges
-        // First range: gid 0 -> fd 0
+                                                                 // First range: gid 0 -> fd 0
         assert_eq!(u16::from_be_bytes([bytes[3], bytes[4]]), 0);
         assert_eq!(bytes[5], 0);
         // Second range: gid 5 -> fd 1
@@ -3587,7 +3586,11 @@ mod tests {
         let fd_index_off_size: usize = {
             let total: usize = font_dict_bodies.iter().map(Vec::len).sum();
             let last_off = 1 + total;
-            if last_off <= 0xFF { 1 } else { 2 }
+            if last_off <= 0xFF {
+                1
+            } else {
+                2
+            }
         };
         let fd_index_data_start = 2 + 1 + (n_fds + 1) * fd_index_off_size;
         let mut fd_body_offsets_in_index: Vec<usize> = Vec::with_capacity(n_fds);
@@ -3606,9 +3609,17 @@ mod tests {
         }
 
         // Patch top dict slots.
-        patch_dict_offset(&mut out, top_dict_body_abs + charset_slot, charset_abs as i32);
+        patch_dict_offset(
+            &mut out,
+            top_dict_body_abs + charset_slot,
+            charset_abs as i32,
+        );
         patch_dict_offset(&mut out, top_dict_body_abs + cs_slot, cs_abs as i32);
-        patch_dict_offset(&mut out, top_dict_body_abs + fd_array_slot, fd_array_abs as i32);
+        patch_dict_offset(
+            &mut out,
+            top_dict_body_abs + fd_array_slot,
+            fd_array_abs as i32,
+        );
         patch_dict_offset(
             &mut out,
             top_dict_body_abs + fd_select_slot,
