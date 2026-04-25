@@ -157,6 +157,19 @@ fn unwrap_woff2_inner(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
             TAG_GLYF | TAG_LOCA if transform_version != 3 => r.read_uint_base128()?,
             _ => orig_length,
         };
+        // WOFF2 §4.1: only `glyf`/`loca` define a non-zero
+        // transformVersion (0 = transformed, 3 = stored as SFNT). A
+        // non-zero version on any other tag means a transform we
+        // don't implement (e.g. `hmtx` transformVersion 1). Falling
+        // through and copying the bytes verbatim hands a transformed
+        // table back as if it were the raw SFNT payload, silently
+        // corrupting the output. The crate doc explicitly calls out
+        // hmtx v1 as Unsupported; surface that contract here.
+        if transform_version != 0 && !matches!(tag, TAG_GLYF | TAG_LOCA) {
+            return Err(WoffError::Unsupported {
+                context: "WOFF2 transformVersion != 0 on a non-glyf/loca table",
+            });
+        }
         entries.push(DirEntry {
             tag,
             transform_version,
@@ -335,5 +348,42 @@ mod tests {
         assert_eq!(KNOWN_TAGS.len(), 63);
         assert_eq!(KNOWN_TAGS[10], b"glyf");
         assert_eq!(KNOWN_TAGS[11], b"loca");
+    }
+
+    #[cfg(feature = "woff2")]
+    #[test]
+    fn rejects_non_zero_transform_version_on_non_glyf_loca() {
+        // Build a minimal 1-table WOFF2 whose single directory entry
+        // is `cmap` (known tag index 0) with transformVersion=1. The
+        // bytes after the directory are irrelevant — the crate must
+        // error before attempting Brotli decompression. Without the
+        // guard, the entry was treated as untransformed and `cmap`'s
+        // transformed payload (which doesn't exist for `cmap`) would
+        // be copied verbatim into the output SFNT.
+        let mut woff2 = Vec::new();
+        woff2.extend_from_slice(&WOFF2_SIGNATURE.to_be_bytes()); // signature
+        woff2.extend_from_slice(b"\x00\x01\x00\x00"); // flavor (TrueType)
+        woff2.extend_from_slice(&64u32.to_be_bytes()); // length (placeholder)
+        woff2.extend_from_slice(&1u16.to_be_bytes()); // numTables
+        woff2.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        woff2.extend_from_slice(&100u32.to_be_bytes()); // totalSfntSize
+        woff2.extend_from_slice(&0u32.to_be_bytes()); // totalCompressedSize
+                                                      // header tail: majorVersion (u16), minorVersion (u16),
+                                                      // metaOffset (u32), metaLength (u32), metaOrigLength (u32),
+                                                      // privOffset (u32), privLength (u32) = 24 bytes.
+        woff2.extend_from_slice(&[0u8; 24]);
+
+        // Directory: flags = (transformVersion << 6) | knownTag.
+        // knownTag 0 = "cmap"; transformVersion 1.
+        let flags: u8 = 1 << 6;
+        woff2.push(flags);
+        // origLength: UIntBase128 of 16 → single byte 0x10.
+        woff2.push(0x10);
+
+        let result = unwrap_woff2(&woff2);
+        assert!(
+            matches!(result, Err(WoffError::Unsupported { .. })),
+            "expected Unsupported on non-glyf/loca with transformVersion != 0; got {result:?}"
+        );
     }
 }
