@@ -38,12 +38,11 @@ use crate::error::{Result, WoffError};
 /// - `Malformed { context: "zlib origLength mismatch" }` when inflate
 ///   succeeds but the recovered length disagrees with `expected_len`.
 pub(crate) fn inflate_zlib(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
-    let out = miniz_oxide::inflate::decompress_to_vec_zlib(input).map_err(|_| {
-        WoffError::Malformed {
+    let out =
+        miniz_oxide::inflate::decompress_to_vec_zlib(input).map_err(|_| WoffError::Malformed {
             offset: 0,
             context: "WOFF1 zlib decompress failed",
-        }
-    })?;
+        })?;
     if out.len() != expected_len {
         return Err(WoffError::Malformed {
             offset: 0,

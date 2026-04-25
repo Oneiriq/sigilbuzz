@@ -119,8 +119,7 @@ fn deflate_wrap_then_unwrap_recovers_every_table_body() {
         let a = face_in.table_bytes(rec.tag).unwrap();
         let b = face_out.table_bytes(rec.tag).unwrap();
         assert_eq!(
-            a,
-            b,
+            a, b,
             "table {:?} differs after deflate-WOFF1 round-trip",
             rec.tag
         );
@@ -156,10 +155,7 @@ fn deflate_quality_zero_still_round_trips() {
     let face_in = Face::parse_bytes(TTF, 0).unwrap();
     let face_out = Face::parse_bytes(&recovered, 0).unwrap();
     for rec in face_in.records() {
-        assert_eq!(
-            face_in.table_bytes(rec.tag),
-            face_out.table_bytes(rec.tag),
-        );
+        assert_eq!(face_in.table_bytes(rec.tag), face_out.table_bytes(rec.tag),);
     }
 }
 
@@ -168,8 +164,7 @@ fn deflate_quality_zero_still_round_trips() {
 fn unwrap_rejects_corrupted_zlib_stream_in_table_body() {
     // Wrap, then flip a byte deep inside the deflate payload of the
     // first compressed table. Decompression must fail.
-    let mut wrapped =
-        wrap_woff1_with_options(TTF, WrapWoff1Options::default()).expect("wraps");
+    let mut wrapped = wrap_woff1_with_options(TTF, WrapWoff1Options::default()).expect("wraps");
     // Find the first directory entry whose compLength < origLength
     // and corrupt a byte inside its body.
     let num_tables = u16::from_be_bytes([wrapped[12], wrapped[13]]) as usize;
@@ -202,7 +197,7 @@ fn unwrap_rejects_compressed_tables_when_feature_disabled() {
     // The unwrapper should refuse it with `Unsupported`.
     let mut bytes = WOFF1.to_vec();
     let rec = 44; // first directory entry
-    // origLength stays as-is; shrink compLength by 1.
+                  // origLength stays as-is; shrink compLength by 1.
     let orig = u32::from_be_bytes(bytes[rec + 12..rec + 16].try_into().unwrap());
     if orig > 1 {
         let smaller = orig - 1;
