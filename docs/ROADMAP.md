@@ -116,22 +116,58 @@ Scripts that rustybuzz still covers that sigilbuzz 0.1.0 did not, plus AAT fallb
 
 ---
 
-## 0.3.0+ (aspirational)
+## 0.3.0 (shipping)
 
-Optional modules that live on top of the shaping core. Any of these can become its own crate if it pulls sigilbuzz in directions the shaping core shouldn't go.
+Renderer-facing companion crates land in the workspace; remaining script-completeness carry-overs from 0.1.0 / 0.2.0 close.
 
-### Renderer-facing
+### Workspace conversion
 
-- [ ] `hb_gpu`-equivalent Slug-algorithm outline encoder for GPU rasterization
-- [ ] COLRv1 paint *evaluation* helpers (currently traversal-only; evaluation is a consumer concern by default)
-- [ ] PDF / SVG output backends (likely a separate crate)
+- [x] `[workspace]` at the repo root with `members = [".", "crates/*"]`. Companion crates inherit `edition` / `rust-version` / `authors` / `license` / `repository` and pull `sigilbuzz` via `workspace.dependencies`.
+
+### Glyph outline extraction (prerequisite for renderer crates)
+
+- [x] Full `glyf` simple + composite contour parsing, with composite flattening at extraction time and gvar deltas applied when coords are passed
+- [x] CFF1 Top DICT + Subr INDEX + CharStrings INDEX + Type 2 charstring interpreter (rmoveto/hmoveto/vmoveto/rlineto/hlineto/vlineto/rrcurveto family/endchar/callsubr/callgsubr/return/hstem/vstem/hintmask/cntrmask)
+- [x] CFF2 trimmed CFF1 + `blend` operator against the shared `ItemVariationStore`
+- [x] `Face::glyph_outline(gid)` and `Face::glyph_outline_at_coords(gid, coords)` over a `PathOp { MoveTo, LineTo, QuadTo, CubicTo, Close }` enum
+
+### Companion crate `sigilbuzz-gpu`
+
+- [x] Slug-algorithm GPU outline encoder
+- [x] Iterative cubic-to-quadratic flattening (Sederberg third-difference, MAX_DEPTH=18)
+- [x] Band decomposition with deterministic per-band scatter
+- [x] `SlugOptions { band_count, cubic_tolerance }` with sane 1-design-unit default
+
+### Companion crate `sigilbuzz-paint`
+
+- [x] COLRv1 paint evaluator emitting a `DrawCmd { FillGlyph, PushLayer, PopLayer }` stream
+- [x] Transform composition (Translate/Scale/Rotate/Skew + Var* siblings) over a 6-tuple affine
+- [x] ColorLine stop resolution against `CPAL`, foreground sentinel `0xFFFF`, alpha multiplication
+- [x] `PaintComposite` semantics matching Skia / SVG layer ordering
+- [x] Cycle detection across `PaintColrGlyph` recursion
 
 ### Script-completeness follow-ups
 
-- [ ] Amiri Allah/bism-Allah `rlig` rule-selection parity (#21 — glyph count already parity, gids diverge)
-- [ ] Myanmar kinzi reorder (#44)
-- [ ] Thai/Lao sara-am U+0E33 / U+0EB3 PUA decomposition (#45)
-- [ ] Old Hangul mixed-run shaper-selection policy (#46)
+- [x] Myanmar kinzi reorder (#44)
+- [x] Thai sara-am / Lao lao-am U+0E33 / U+0EB3 PUA decomposition (#45)
+- [x] Old Hangul per-run shaper selection for mixed buffers (#46)
+- Deferred: Amiri Allah/bism-Allah `rlig` rule-selection (#21) — glyph count already parity, gid sequence diverges by ~200-line dispatcher refactor; rolled to 0.4.0.
+
+### Hardening
+
+- [x] Wave 4 fuzz pass on the new outline + Slug + paint surface (+3 fixes — CFF stack cap, Slug NaN/zero-tolerance, CFF `hflex1` `dy6` index)
+
+---
+
+## 0.4.0+ (next)
+
+Polish + remaining gaps that surfaced during 0.3.0 development.
+
+- [ ] Amiri `rlig` rule-selection parity (#21) — feature dispatcher rule-ordering refactor
+- [ ] glyf composite anchor-point resolution (the 2/6710 Amiri misses noted by #52)
+- [ ] sigilbuzz-paint coverage gaps — radial / sweep gradient integration tests, full ItemVariationStore delta application path
+- [ ] AAT `kerx` format 2 (compound-class kerning)
+- [ ] PDF / SVG output backends — likely as `sigilbuzz-pdf` / `sigilbuzz-svg` companion crates
 
 ---
 
