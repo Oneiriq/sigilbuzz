@@ -229,6 +229,16 @@ hb_bool_t    hb_set_has(const hb_set_t *set, hb_codepoint_t codepoint);
 unsigned int hb_set_get_population(const hb_set_t *set);
 hb_bool_t    hb_set_next(const hb_set_t *set, hb_codepoint_t *codepoint);
 
+/* ---------- Subset (gated on the `subset` cargo feature) ---------- */
+
+typedef struct hb_subset_input_t hb_subset_input_t;
+
+hb_subset_input_t *hb_subset_input_create(void);
+void               hb_subset_input_destroy(hb_subset_input_t *input);
+hb_set_t          *hb_subset_input_unicode_set(hb_subset_input_t *input);
+hb_set_t          *hb_subset_input_glyph_set(hb_subset_input_t *input);
+hb_face_t         *hb_subset_or_fail(hb_face_t *face, hb_subset_input_t *input);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

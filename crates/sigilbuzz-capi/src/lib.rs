@@ -57,6 +57,11 @@ use sigilbuzz::{shape, Buffer, Direction, Face, Feature, Font};
 // the subset and introspection bridges need. It has no dependency on
 // the rest of the crate, so it ships unconditionally.
 pub mod set;
+// `subset_bridge` is gated on the `subset` cargo feature so a
+// `--no-default-features` build of this crate still compiles cleanly
+// without pulling in the companion subsetter crate.
+#[cfg(feature = "subset")]
+pub mod subset_bridge;
 
 // ---------------------------------------------------------------------------
 // Refcounted opaque types
@@ -65,11 +70,11 @@ pub mod set;
 /// Owned font bytes plus the user-data destroy callback HarfBuzz
 /// callers can hang off a blob. The destroy callback fires when
 /// the Arc's refcount hits zero.
-struct BlobInner {
+pub(crate) struct BlobInner {
     /// The actual font bytes. `Arc<Vec<u8>>` so a `FaceInner` can
     /// extend the same backing storage past the original blob's
     /// lifetime.
-    data: Arc<Vec<u8>>,
+    pub(crate) data: Arc<Vec<u8>>,
     /// Optional caller-supplied destroy callback — fires once, when
     /// the BlobInner is dropped. HarfBuzz's `hb_blob_create` accepts
     /// `mode`, `user_data`, and `destroy` so callers passing
@@ -79,6 +84,22 @@ struct BlobInner {
     /// Opaque user_data threaded into the destroy callback. Send
     /// only because the inner is shipped across threads via Arc.
     user_data: *mut c_void,
+}
+
+impl BlobInner {
+    /// Internal: build a `BlobInner` around bytes the bridge layer
+    /// already has in an `Arc`. No destroy callback — the bridge
+    /// owns the bytes outright. Only the `subset` cargo feature
+    /// references this helper today; gate to silence dead-code
+    /// warnings when the feature is off.
+    #[cfg(feature = "subset")]
+    pub(crate) fn from_data(data: Arc<Vec<u8>>) -> Self {
+        Self {
+            data,
+            user_destroy: None,
+            user_data: ptr::null_mut(),
+        }
+    }
 }
 
 // SAFETY: BlobInner does not access `user_data` itself — it only
@@ -102,16 +123,39 @@ impl Drop for BlobInner {
 
 #[repr(C)]
 pub struct hb_blob_t {
-    inner: Arc<BlobInner>,
+    pub(crate) inner: Arc<BlobInner>,
+}
+
+impl hb_blob_t {
+    /// Internal: build the public wrapper around an existing
+    /// `BlobInner` Arc. Only the `subset` cargo feature uses this
+    /// helper today.
+    #[cfg(feature = "subset")]
+    pub(crate) fn from_inner(inner: Arc<BlobInner>) -> Self {
+        Self { inner }
+    }
 }
 
 /// The face is a parsed SFNT directory plus the bytes it borrows
 /// from. The `Face<'static>` is a lie — its borrow is actually
 /// rooted in `_data`'s payload, which lives at least as long as the
 /// FaceInner. See the module-level lifetime erasure note.
-struct FaceInner {
+pub(crate) struct FaceInner {
     _data: Arc<Vec<u8>>,
-    face: Face<'static>,
+    pub(crate) face: Face<'static>,
+}
+
+impl FaceInner {
+    /// Internal: build a FaceInner from an Arc'd byte buffer plus a
+    /// lifetime-erased `Face<'static>` already constructed against
+    /// the same bytes. Callers (the subset bridge) do the
+    /// `transmute::<Face<'_>, Face<'static>>` themselves so this
+    /// helper stays unsafe-free. Only the `subset` cargo feature
+    /// uses this constructor today.
+    #[cfg(feature = "subset")]
+    pub(crate) fn from_arc(data: Arc<Vec<u8>>, face: Face<'static>) -> Self {
+        Self { _data: data, face }
+    }
 }
 
 // SAFETY: Face<'_> is Clone + Send + Sync (it holds &[u8] + Vec<TableRecord>).
@@ -124,7 +168,17 @@ unsafe impl Sync for FaceInner {}
 
 #[repr(C)]
 pub struct hb_face_t {
-    inner: Arc<FaceInner>,
+    pub(crate) inner: Arc<FaceInner>,
+}
+
+impl hb_face_t {
+    /// Internal: build the public wrapper around an existing
+    /// `FaceInner` Arc. Used by the subset bridge to ship the result
+    /// of `sigilbuzz_subset::subset()` back as an `hb_face_t*`.
+    #[cfg(feature = "subset")]
+    pub(crate) fn from_inner(inner: Arc<FaceInner>) -> Self {
+        Self { inner }
+    }
 }
 
 /// Font binds a face to a render size and (optionally) variation

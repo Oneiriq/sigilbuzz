@@ -63,6 +63,15 @@ impl hb_set_t {
         }
     }
 
+    /// Internal: wrap a pre-existing shared BTreeSet so a sibling
+    /// crate (e.g. `hb_subset_input_t`'s sets) can hand out an
+    /// `hb_set_t` handle that observes the same payload. Only the
+    /// `subset` cargo feature uses this helper today.
+    #[cfg(feature = "subset")]
+    pub(crate) fn from_arc(inner: Arc<RefCell<BTreeSet<u32>>>) -> Self {
+        Self { inner }
+    }
+
 
     /// Internal: borrow the underlying BTreeSet for read.
     pub(crate) fn with_inner<R>(&self, f: impl FnOnce(&BTreeSet<u32>) -> R) -> R {
