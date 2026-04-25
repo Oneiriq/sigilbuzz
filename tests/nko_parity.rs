@@ -61,33 +61,33 @@ const CORPUS: &[Case] = &[
     // still shape — we just do not byte-compare the result.
     Case {
         text: "\u{07D2}\u{07EB}",
-        note: "ta + high tone (joining-form, follow-up)",
-        compare_rustybuzz: false,
+        note: "ta + high tone (joining-form)",
+        compare_rustybuzz: true,
     },
     Case {
         text: "\u{07D2}\u{07EC}",
-        note: "ta + low tone (joining-form, follow-up)",
-        compare_rustybuzz: false,
+        note: "ta + low tone (joining-form)",
+        compare_rustybuzz: true,
     },
     Case {
         text: "\u{07D2}\u{07ED}",
-        note: "ta + rising tone (joining-form, follow-up)",
-        compare_rustybuzz: false,
+        note: "ta + rising tone (joining-form)",
+        compare_rustybuzz: true,
     },
     Case {
         text: "\u{07D2}\u{07EE}",
-        note: "ta + descending tone (joining-form, follow-up)",
-        compare_rustybuzz: false,
+        note: "ta + descending tone (joining-form)",
+        compare_rustybuzz: true,
     },
     Case {
         text: "\u{07D2}\u{07FD}",
-        note: "ta + dantayalan (joining-form, follow-up)",
-        compare_rustybuzz: false,
+        note: "ta + dantayalan (joining-form)",
+        compare_rustybuzz: true,
     },
     Case {
         text: "\u{07D2}\u{07DE}\u{07CF}",
-        note: "nko (n'ko, joining-form, follow-up)",
-        compare_rustybuzz: false,
+        note: "nko (n'ko, joining-form)",
+        compare_rustybuzz: true,
     },
 ];
 

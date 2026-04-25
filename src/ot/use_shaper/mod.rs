@@ -886,26 +886,81 @@ pub fn shape_hangul(
     );
 }
 
-/// Entry point for N'Ko runs. N'Ko is alphabetic + tone marks — no
-/// pre-base reorder, no halant. Uses the USE basic feature chain
-/// without subjoining (only `ccmp` / `liga` / `calt` in practice
-/// drive shaping for the current Noto Sans NKo build).
+/// Entry point for N'Ko runs. N'Ko is RTL alphabetic with cursive
+/// joining of the same shape as Arabic — every letter has up to four
+/// positional forms (`isol`/`init`/`medi`/`fina`) selected by the
+/// shared joining state machine in [`crate::unicode::joining`]. The
+/// shaper:
+///
+/// 1. Runs `ccmp` so any precomposed N'Ko diphthongs in the font's
+///    composition lookup decompose.
+/// 2. Computes a per-codepoint joining-form vector via the shared
+///    Arabic state machine — N'Ko's joining types live in the same
+///    [`JoiningType`](crate::unicode::joining::JoiningType) table.
+/// 3. Applies `isol`/`init`/`medi`/`fina` masked by the joining-form
+///    vector under the `nko ` script tag. Noto Sans NKo registers
+///    `init`/`medi`/`fina` (no `isol` lookup — the unfeatured glyph
+///    is the isolated form already), so the masked dispatcher
+///    naturally no-ops on `isol` positions.
+/// 4. Lets the generic default-GSUB pass run `calt` / `liga` after
+///    the shaper returns. Tone-mark zeroing (mark advances → 0)
+///    happens in the generic pipeline.
 pub fn shape_nko(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
 ) {
-    shape_use(
+    if codepoints.is_empty() || glyphs.is_empty() {
+        return;
+    }
+    let Some(gsub) = gsub else {
+        return;
+    };
+
+    // 1. ccmp first — handles any compositional rewrites the font
+    //    registers before the positional pass sees the glyph stream.
+    crate::shape::apply_gsub_feature_in_scripts(
         gsub,
-        gdef,
-        codepoints,
         glyphs,
+        gdef,
+        *b"ccmp",
+        0,
         NKO_SCRIPT_PRIORITY,
-        THAI_LAO_FEATURES,
-        &[],
-        false,
     );
+
+    // 2. Compute the joining-form vector using the shared Arabic
+    //    state machine. The vector is aligned with `codepoints`;
+    //    after `ccmp` the glyph count may have shifted (a multi-sub
+    //    in `ccmp` would split one glyph into two), so we only run
+    //    the masked positional pass when lengths still align.
+    let types: Vec<crate::unicode::joining::JoiningType> = codepoints
+        .iter()
+        .map(|&c| crate::unicode::joining::joining_type(c))
+        .collect();
+    let forms = crate::ot::arabic::assign_from_types(&types);
+
+    if glyphs.len() == forms.len() {
+        for (form, tag) in [
+            (crate::ot::arabic::JoiningForm::Isol, *b"isol"),
+            (crate::ot::arabic::JoiningForm::Init, *b"init"),
+            (crate::ot::arabic::JoiningForm::Medi, *b"medi"),
+            (crate::ot::arabic::JoiningForm::Fina, *b"fina"),
+        ] {
+            let mask: Vec<bool> = forms.iter().map(|&f| f == form).collect();
+            crate::shape::apply_gsub_feature_masked(
+                gsub,
+                glyphs,
+                gdef,
+                tag,
+                NKO_SCRIPT_PRIORITY,
+                &mask,
+            );
+        }
+    }
+
+    // calt / liga fire in the generic default-GSUB pass after this
+    // shaper returns; nothing else to drive here.
 }
 
 /// Entry point for Buginese runs. Brahmic — pre-base reorder fires
