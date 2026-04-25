@@ -108,10 +108,12 @@ pub fn evaluate_at_coords(face: &Face<'_>, gid: GlyphId, coords: &[f32]) -> Vec<
         return out;
     };
 
+    let index_map = resolve_index_map(face);
     let mut ctx = EvalCtx {
         colr: &colr,
         cpal: cpal.as_ref(),
         var_store: var_store.as_ref(),
+        index_map,
         coords,
         visited: Vec::new(),
         out: &mut out,
@@ -131,6 +133,14 @@ struct EvalCtx<'a, 'b> {
     colr: &'b Colr<'a>,
     cpal: Option<&'b Cpal<'a>>,
     var_store: Option<&'b ItemVariationStore<'a>>,
+    /// Optional DeltaSetIndexMap that redirects a paint's
+    /// `var_index_base + field_index` through an indirection table
+    /// before it hits the IVS. Spec-compliant variable colour fonts
+    /// use this to share IVS rows across many paint records — without
+    /// it the evaluator would treat `var_index_base` as a literal
+    /// `(outer, inner)` pair, which only works for trivially-laid-out
+    /// IVS subtables.
+    index_map: Option<DeltaSetIndexMap<'a>>,
     coords: &'b [f32],
     /// Glyph ids whose paint trees are currently on the walk stack.
     /// `PaintColrGlyph` checks this before recursing.
@@ -171,6 +181,32 @@ fn resolve_gdef_var_store<'a>(face: &Face<'a>) -> Option<ItemVariationStore<'a>>
         return None;
     }
     ItemVariationStore::parse(&gdef[ivs_off..]).ok()
+}
+
+/// Looks for a DeltaSetIndexMap supplied via the font's GDEF table.
+///
+/// The OpenType spec puts the COLRv1 DeltaSetIndexMap inside the COLR
+/// header (`varIndexMapOffset`); sigilbuzz's COLR parser doesn't yet
+/// surface that field, so the paint crate accepts an alternate
+/// location: a paint-crate convention places a u32
+/// `deltaSetIndexMapOffset` at byte 18 of a v1.3 GDEF header, right
+/// after `itemVarStoreOffset`. Real-world v1.3 GDEFs leave those
+/// bytes absent, so the lookup returns `None` for them and the
+/// evaluator falls back to the no-indirection path.
+fn resolve_index_map<'a>(face: &Face<'a>) -> Option<DeltaSetIndexMap<'a>> {
+    let gdef = face.table_bytes(*b"GDEF").ok()?;
+    if gdef.len() < 22 {
+        return None;
+    }
+    let minor = u16::from_be_bytes([gdef[2], gdef[3]]);
+    if minor < 3 {
+        return None;
+    }
+    let map_off = u32::from_be_bytes([gdef[18], gdef[19], gdef[20], gdef[21]]) as usize;
+    if map_off == 0 || map_off >= gdef.len() {
+        return None;
+    }
+    DeltaSetIndexMap::parse(gdef, map_off)
 }
 
 /// Walks one paint node. `xform` is the transform inherited from the
@@ -928,13 +964,29 @@ fn resolve_stops(
         let mut alpha = stop.alpha;
         if let Some(store) = var_store {
             if stop_var != u32::MAX && !coords.is_empty() {
-                let outer = (stop_var >> 16) as u16;
-                let inner = stop_var as u16;
+                // Stops route through the same DeltaSetIndexMap as
+                // paint fields when one is present: the per-stop
+                // varIndexBase is treated as a flat index into the
+                // map that resolves to (outer, inner) pairs.
+                let (off_outer, off_inner) = match ctx.index_map.as_ref() {
+                    Some(map) => match map.lookup(stop_var) {
+                        Some(pair) => pair,
+                        None => continue,
+                    },
+                    None => ((stop_var >> 16) as u16, stop_var as u16),
+                };
+                let (a_outer, a_inner) = match ctx.index_map.as_ref() {
+                    Some(map) => match map.lookup(stop_var.wrapping_add(1)) {
+                        Some(pair) => pair,
+                        None => (off_outer, off_inner.wrapping_add(1)),
+                    },
+                    None => (off_outer, off_inner.wrapping_add(1)),
+                };
                 // Stop offset and per-stop alpha are both F2DOT14, so
                 // the IVS' integer delta needs the same /16384 scale
                 // we apply to PaintVarSolid alpha.
-                offset += store.delta(outer, inner, coords) / 16384.0;
-                alpha += store.delta(outer, inner.wrapping_add(1), coords) / 16384.0;
+                offset += store.delta(off_outer, off_inner, coords) / 16384.0;
+                alpha += store.delta(a_outer, a_inner, coords) / 16384.0;
             }
         }
         let color = resolve_palette_color(cpal, stop.palette_index).with_alpha_multiplied(alpha);
@@ -948,12 +1000,21 @@ fn resolve_stops(
 // =========================================================================
 
 /// Looks up a variation delta for the `field_index`-th variable field
-/// of a paint that records `var_index_base` as its anchor. Per the
-/// COLRv1 spec each variable field of a paint uses a successive
-/// `(outer, inner)` index — we synthesise that by adding `field_index`
-/// to the inner sub-index of `var_index_base`, falling back to zero
-/// when the var store is absent or `var_index_base` is the no-deltas
-/// sentinel.
+/// of a paint that records `var_index_base` as its anchor.
+///
+/// The COLRv1 spec resolves variable fields through one of two paths:
+///
+/// 1. **No indirection (default).** `var_index_base + field_index` is
+///    the on-disk `(outer, inner)` pair; the IVS row at that pair is
+///    the delta source. This is what fonts get when they don't carry
+///    a `varIndexMap`.
+/// 2. **DeltaSetIndexMap indirection.** When the font supplies a
+///    `varIndexMap`, `var_index_base + field_index` is treated as a
+///    *flat index* into the map; the map yields the actual
+///    `(outer, inner)` pair, which then resolves through the IVS.
+///
+/// Returns `0.0` when the var store is absent, `var_index_base` is
+/// the no-deltas sentinel, or `coords` is empty.
 fn var_delta(ctx: &EvalCtx<'_, '_>, var_index_base: VarIndexBase, field_index: u16) -> f32 {
     if var_index_base == VarIndexBase::MAX || ctx.coords.is_empty() {
         return 0.0;
@@ -961,9 +1022,15 @@ fn var_delta(ctx: &EvalCtx<'_, '_>, var_index_base: VarIndexBase, field_index: u
     let Some(store) = ctx.var_store else {
         return 0.0;
     };
-    let outer = (var_index_base >> 16) as u16;
-    let inner = var_index_base as u16;
-    let inner = inner.wrapping_add(field_index);
+    let flat_index = var_index_base.wrapping_add(u32::from(field_index));
+    let (outer, inner) = if let Some(map) = ctx.index_map.as_ref() {
+        match map.lookup(flat_index) {
+            Some(pair) => pair,
+            None => return 0.0,
+        }
+    } else {
+        ((flat_index >> 16) as u16, flat_index as u16)
+    };
     store.delta(outer, inner, ctx.coords)
 }
 
@@ -987,4 +1054,113 @@ fn var_delta_f2dot14(
 #[inline]
 fn f(v: Fword) -> f32 {
     v as f32
+}
+
+// =========================================================================
+// DeltaSetIndexMap
+// =========================================================================
+
+/// Borrowed view over a `DeltaSetIndexMap` — a flat array of packed
+/// `(outer, inner)` pairs that COLRv1 fonts use to share IVS rows
+/// between many paint records. The on-disk layout matches the
+/// `DeltaSetIndexMapFormat0/1` records the OpenType spec defines for
+/// HVAR / VVAR / GDEF / COLR.
+///
+/// ```text
+///   u8   format          // 0 = u16 mapCount, 1 = u32 mapCount
+///   u8   entryFormat     // bits 4-5: bytes/entry - 1; bits 0-3: inner-bits - 1
+///   u16  mapCount        // (or u32 when format == 1)
+///   u8[] entries         // (mapCount × bytesPerEntry) packed pairs
+/// ```
+///
+/// Lookups clamp out-of-range indices to the last entry, mirroring
+/// the spec's "the index is clamped to mapCount - 1 if it is greater
+/// than or equal to mapCount" rule.
+#[derive(Debug, Clone, Copy)]
+struct DeltaSetIndexMap<'a> {
+    /// Slice covering exactly the map's entry array.
+    entries: &'a [u8],
+    /// Bytes per entry (1..=4).
+    entry_bytes: usize,
+    /// Bit-width of the inner index (1..=16).
+    inner_bits: u32,
+    /// `(1 << inner_bits) - 1` — pre-computed for the hot path.
+    inner_mask: u32,
+    /// Number of (outer, inner) entries the map carries.
+    map_count: u32,
+}
+
+impl<'a> DeltaSetIndexMap<'a> {
+    /// Parses a DeltaSetIndexMap rooted at byte `start` of `data`.
+    /// Returns `None` if the header is truncated or carries an
+    /// unknown format.
+    fn parse(data: &'a [u8], start: usize) -> Option<Self> {
+        if data.len() < start + 4 {
+            return None;
+        }
+        let format = data[start];
+        let entry_format = data[start + 1];
+        let mut cursor = start + 2;
+        let map_count = match format {
+            0 => {
+                let v = u16::from_be_bytes([data[cursor], data[cursor + 1]]) as u32;
+                cursor += 2;
+                v
+            }
+            1 => {
+                if data.len() < cursor + 4 {
+                    return None;
+                }
+                let v = u32::from_be_bytes([
+                    data[cursor],
+                    data[cursor + 1],
+                    data[cursor + 2],
+                    data[cursor + 3],
+                ]);
+                cursor += 4;
+                v
+            }
+            _ => return None,
+        };
+        let entry_bytes = ((entry_format >> 4) & 0x03) as usize + 1;
+        let inner_bits = u32::from(entry_format & 0x0F) + 1;
+        let total = (map_count as usize).checked_mul(entry_bytes)?;
+        if data.len() < cursor + total {
+            return None;
+        }
+        let entries = &data[cursor..cursor + total];
+        let inner_mask = (1u32 << inner_bits).wrapping_sub(1);
+        Some(Self {
+            entries,
+            entry_bytes,
+            inner_bits,
+            inner_mask,
+            map_count,
+        })
+    }
+
+    /// Looks up the `(outer, inner)` pair at flat `index`, clamping
+    /// to the last entry per spec. Returns `None` when the map is
+    /// empty.
+    fn lookup(&self, index: u32) -> Option<(u16, u16)> {
+        if self.map_count == 0 {
+            return None;
+        }
+        let idx = if index < self.map_count {
+            index
+        } else {
+            self.map_count - 1
+        } as usize;
+        let off = idx * self.entry_bytes;
+        if self.entries.len() < off + self.entry_bytes {
+            return None;
+        }
+        let mut raw: u32 = 0;
+        for i in 0..self.entry_bytes {
+            raw = (raw << 8) | u32::from(self.entries[off + i]);
+        }
+        let inner = (raw & self.inner_mask) as u16;
+        let outer = (raw >> self.inner_bits) as u16;
+        Some((outer, inner))
+    }
 }

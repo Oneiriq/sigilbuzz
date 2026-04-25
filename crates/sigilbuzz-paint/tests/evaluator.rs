@@ -944,3 +944,233 @@ fn ivs_at_half_axis_interpolates_linearly() {
     assert!((dx - 12.5).abs() < 1e-3, "dx was {dx}");
     assert!((dy - 18.5).abs() < 1e-3, "dy was {dy}");
 }
+
+// =========================================================================
+// 13. DeltaSetIndexMap indirection. Builds the same paint set as the
+//     IVS test but moves every paint's `var_index_base` to a flat
+//     index that resolves through a synthetic DeltaSetIndexMap stored
+//     in GDEF. The map permutes the IVS rows so that asserting on the
+//     output values proves the indirection actually fired.
+// =========================================================================
+
+/// Builds a v1.3 GDEF whose only populated subtable is the IVS. The
+/// paint-crate convention (see `resolve_index_map` in eval.rs) reads
+/// a u32 `deltaSetIndexMapOffset` from byte 18 of the GDEF — this
+/// helper writes that field too when `index_map` is non-empty,
+/// embedding both blobs at fixed offsets so tests can refer to them
+/// by name.
+fn build_gdef_v13(ivs: &[u8], index_map: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes()); // major
+    out.extend_from_slice(&3u16.to_be_bytes()); // minor
+    out.extend_from_slice(&0u16.to_be_bytes()); // glyphClassDefOff
+    out.extend_from_slice(&0u16.to_be_bytes()); // attachListOff
+    out.extend_from_slice(&0u16.to_be_bytes()); // ligCaretListOff
+    out.extend_from_slice(&0u16.to_be_bytes()); // markAttachClassDefOff
+    out.extend_from_slice(&0u16.to_be_bytes()); // markGlyphSetsDefOff
+    let ivs_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes()); // itemVarStoreOff (patched)
+    let map_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes()); // deltaSetIndexMapOff (paint crate)
+    let ivs_off = out.len() as u32;
+    out[ivs_slot..ivs_slot + 4].copy_from_slice(&ivs_off.to_be_bytes());
+    out.extend_from_slice(ivs);
+    if !index_map.is_empty() {
+        let map_off = out.len() as u32;
+        out[map_slot..map_slot + 4].copy_from_slice(&map_off.to_be_bytes());
+        out.extend_from_slice(index_map);
+    }
+    out
+}
+
+/// Three-table SFNT (COLR + CPAL + GDEF). Records ordered alphabetically
+/// by tag — 'C' < 'G' so COLR < CPAL < GDEF.
+fn build_face_bytes_with_gdef(colr: &[u8], cpal: &[u8], gdef: &[u8]) -> Vec<u8> {
+    let dir_len = 12 + 3 * 16;
+    let cpal_off = dir_len;
+    let colr_off = cpal_off + cpal.len();
+    let gdef_off = colr_off + colr.len();
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x00010000u32.to_be_bytes());
+    out.extend_from_slice(&3u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+
+    out.extend_from_slice(b"COLR");
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&(colr_off as u32).to_be_bytes());
+    out.extend_from_slice(&(colr.len() as u32).to_be_bytes());
+
+    out.extend_from_slice(b"CPAL");
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&(cpal_off as u32).to_be_bytes());
+    out.extend_from_slice(&(cpal.len() as u32).to_be_bytes());
+
+    out.extend_from_slice(b"GDEF");
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&(gdef_off as u32).to_be_bytes());
+    out.extend_from_slice(&(gdef.len() as u32).to_be_bytes());
+
+    out.extend_from_slice(cpal);
+    out.extend_from_slice(colr);
+    out.extend_from_slice(gdef);
+    out
+}
+
+/// Builds the indirection-test paint suite. Every variable field uses
+/// `var_index_base + field_index` as a *flat* index into the GDEF
+/// DeltaSetIndexMap, which then yields the real `(outer, inner)`
+/// pair. The map below is laid out so the same per-paint flat indices
+/// (100 / 200+201 / 300+301) hit the same IVS rows the previous test
+/// used — when this test passes the indirection round-trip is
+/// correct end to end.
+fn build_indirection_test_paints() -> Vec<(u16, Vec<u8>)> {
+    // PaintVarSolid: var_index_base = 100 (flat). Field 0 goes to map
+    // entry 100, which we'll point at IVS (0, 0) — the VarSolid alpha
+    // row.
+    let mut p_solid = Vec::new();
+    p_solid.push(3u8);
+    p_solid.extend_from_slice(&0u16.to_be_bytes());
+    p_solid.extend_from_slice(&f2dot14(1.0));
+    p_solid.extend_from_slice(&100u32.to_be_bytes());
+
+    // PaintVarLinearGradient with a VarColorLine. The paint itself has
+    // no variation (var_index_base = MAX); the *stop's* varIndexBase
+    // = 200 routes through the map at flat index 200/201 → IVS rows
+    // (0, 1) and (0, 2).
+    let mut p_lin = Vec::new();
+    p_lin.push(5u8);
+    p_lin.extend_from_slice(&[0, 0, 0]);
+    p_lin.extend_from_slice(&0i16.to_be_bytes());
+    p_lin.extend_from_slice(&0i16.to_be_bytes());
+    p_lin.extend_from_slice(&100i16.to_be_bytes());
+    p_lin.extend_from_slice(&0i16.to_be_bytes());
+    p_lin.extend_from_slice(&0i16.to_be_bytes());
+    p_lin.extend_from_slice(&100i16.to_be_bytes());
+    p_lin.extend_from_slice(&u32::MAX.to_be_bytes());
+    let cl_rel = p_lin.len() as u32;
+    p_lin[1] = ((cl_rel >> 16) & 0xff) as u8;
+    p_lin[2] = ((cl_rel >> 8) & 0xff) as u8;
+    p_lin[3] = (cl_rel & 0xff) as u8;
+    p_lin.push(0u8);
+    p_lin.extend_from_slice(&2u16.to_be_bytes());
+    p_lin.extend_from_slice(&f2dot14(0.0));
+    p_lin.extend_from_slice(&0u16.to_be_bytes());
+    p_lin.extend_from_slice(&f2dot14(1.0));
+    p_lin.extend_from_slice(&u32::MAX.to_be_bytes());
+    p_lin.extend_from_slice(&f2dot14(1.0));
+    p_lin.extend_from_slice(&1u16.to_be_bytes());
+    p_lin.extend_from_slice(&f2dot14(1.0));
+    p_lin.extend_from_slice(&200u32.to_be_bytes());
+
+    // PaintVarTranslate over a Solid. var_index_base = 300; fields
+    // 0/1 (dx/dy) hit map entries 300/301 → IVS rows (0, 3) / (0, 4).
+    let mut p_tr = Vec::new();
+    p_tr.push(15u8);
+    p_tr.extend_from_slice(&[0, 0, 0]);
+    p_tr.extend_from_slice(&10i16.to_be_bytes());
+    p_tr.extend_from_slice(&20i16.to_be_bytes());
+    p_tr.extend_from_slice(&300u32.to_be_bytes());
+    let child_rel = p_tr.len() as u32;
+    p_tr[1] = ((child_rel >> 16) & 0xff) as u8;
+    p_tr[2] = ((child_rel >> 8) & 0xff) as u8;
+    p_tr[3] = (child_rel & 0xff) as u8;
+    p_tr.push(2u8);
+    p_tr.extend_from_slice(&2u16.to_be_bytes());
+    p_tr.extend_from_slice(&f2dot14(1.0));
+
+    alloc::vec![(1u16, p_solid), (2u16, p_lin), (3u16, p_tr)]
+}
+
+/// Builds a DeltaSetIndexMap (format 1, u32 mapCount) that maps the
+/// flat indices our paints reference (100, 200, 201, 300, 301) into
+/// IVS `(outer, inner)` pairs. Padding entries before the first one
+/// we care about resolve to `(0, 0)`, which is harmless because
+/// they're never consulted.
+fn build_indirection_index_map() -> Vec<u8> {
+    // Format 1 (u32 mapCount), entryFormat: 1 byte per entry, inner
+    // bits = 4 (so outer occupies the upper 4 bits — sufficient for
+    // outer = 0 and inner up to 15). entryFormat = 0b0000_0011.
+    let map_count = 302u32;
+    let mut out = Vec::new();
+    out.push(1u8);
+    out.push(0b0000_0011u8);
+    out.extend_from_slice(&map_count.to_be_bytes());
+    let mut entries = alloc::vec![0u8; map_count as usize];
+    let pack = |outer: u8, inner: u8| -> u8 { (outer << 4) | (inner & 0x0F) };
+    entries[100] = pack(0, 0); // VarSolid alpha → IVS (0, 0)
+    entries[200] = pack(0, 1); // stop[1] offset → IVS (0, 1)
+    entries[201] = pack(0, 2); // stop[1] alpha  → IVS (0, 2)
+    entries[300] = pack(0, 3); // VarTranslate dx → IVS (0, 3)
+    entries[301] = pack(0, 4); // VarTranslate dy → IVS (0, 4)
+    out.extend_from_slice(&entries);
+    out
+}
+
+#[test]
+fn delta_set_index_map_redirects_var_index_base_through_gdef() {
+    // Same IVS rows as the IVS test, but every variable field's
+    // `var_index_base` is now a flat index that *only* resolves
+    // through the DeltaSetIndexMap. Without the indirection the
+    // evaluator either returns a zero delta (raw flat index >>16 ↦
+    // outer 0, inner = flat % 65536, which has no IVS row) or pulls
+    // the wrong row entirely — either way the assertions below fail.
+    let var_store = build_ivs_test_store();
+    let paints = build_indirection_test_paints();
+    let colr = build_v1_multi_colr(&paints, &[]);
+    let cpal = build_cpal_v0(&[
+        (255, 255, 255, 255),
+        (255, 0, 0, 255),
+        (0, 255, 0, 255),
+    ]);
+    let index_map = build_indirection_index_map();
+    let gdef = build_gdef_v13(&var_store, &index_map);
+    let bytes = build_face_bytes_with_gdef(&colr, &cpal, &gdef);
+    let face = Face::parse_bytes(&bytes, 0).expect("face parses");
+
+    // Sanity-check: the paint crate reaches into raw GDEF bytes for
+    // the index map. If GDEF isn't routable through `table_bytes`
+    // every assertion below silently regresses to "no delta applied".
+    let gdef_bytes = face
+        .table_bytes(*b"GDEF")
+        .expect("GDEF routable through table_bytes");
+    assert_eq!(gdef_bytes.len(), gdef.len());
+
+    let coords = [1.0_f32];
+
+    let solid_cmds = evaluate_at_coords(&face, 1, &coords);
+    let solid_alpha = match solid_cmds.as_slice() {
+        [DrawCmd::FillGlyph {
+            paint: PaintSource::Solid(c),
+            ..
+        }] => c.a,
+        other => panic!("solid: unexpected {other:?}"),
+    };
+    assert!(
+        (solid_alpha - 0.5).abs() < 1e-3,
+        "expected indirection to land on alpha 0.5, got {solid_alpha}"
+    );
+
+    let lin_cmds = evaluate_at_coords(&face, 2, &coords);
+    let stop1_offset = match lin_cmds.as_slice() {
+        [DrawCmd::FillGlyph {
+            paint: PaintSource::Gradient(g),
+            ..
+        }] => g.stops[1].offset,
+        other => panic!("lin: unexpected {other:?}"),
+    };
+    assert!(
+        (stop1_offset - 1.25).abs() < 1e-3,
+        "expected stop offset 1.25 after indirection, got {stop1_offset}"
+    );
+
+    let tr_cmds = evaluate_at_coords(&face, 3, &coords);
+    let (dx, dy) = match tr_cmds.as_slice() {
+        [DrawCmd::FillGlyph { transform, .. }] => transform.apply(0.0, 0.0),
+        other => panic!("tr: unexpected {other:?}"),
+    };
+    assert!((dx - 15.0).abs() < 1e-3, "indirected dx was {dx}");
+    assert!((dy - 17.0).abs() < 1e-3, "indirected dy was {dy}");
+}
