@@ -2535,10 +2535,12 @@ fn bake_gdef_ivs_partial(
 /// GPOS bytes, or when the GPOS lookup walk produced no patches.
 ///
 /// Lookup-type coverage matches `gpos_var::bake_gpos_at_coords`:
-/// SinglePos (formats 1 / 2), PairPos (formats 1 / 2), and Type 9
-/// Extension wrappers around either. Mark*/Cursive lookups carry their
-/// variations on `Anchor` records — those ride through verbatim and
-/// are orphaned by the GDEF.IVS prune that follows.
+/// SinglePos (formats 1 / 2), PairPos (formats 1 / 2), CursivePos,
+/// MarkBasePos / MarkLigPos / MarkMarkPos, and Type 9 Extension
+/// wrappers around any of those. Mark*/Cursive lookups carry their
+/// variations on `Anchor` records (xDevice / yDevice on AnchorFormat
+/// 3); those slots resolve through the same VariationIndex path used
+/// for ValueRecord device offsets.
 ///
 /// The bake reads its `ItemVariationStore` from the *source* GDEF, not
 /// from a re-parsed copy, so it sees every region the source uses
@@ -3026,10 +3028,12 @@ mod tests {
     }
 
     /// Walks every GPOS lookup and returns true if any ValueRecord
-    /// device offset slot is non-zero. Used by the post-bake assertions
-    /// to confirm no orphan VariationIndex offsets survived the fold.
-    /// Covers SinglePos / PairPos formats 1 and 2, both directly and
-    /// via Type 9 Extension wrappers — the same set we explicitly bake.
+    /// or Anchor (format 3) device offset slot is non-zero. Used by
+    /// the post-bake assertions to confirm no orphan VariationIndex
+    /// offsets survived the fold. Covers SinglePos / PairPos formats
+    /// 1 and 2, CursivePos, Mark{Base,Lig,Mark}Pos, and Type 9
+    /// Extension wrappers around any of the above — the same set we
+    /// explicitly bake.
     fn any_value_record_device_offset_nonzero(face: &Face<'_>) -> bool {
         let Ok(Some(gpos)) = face.gpos() else {
             return false;
@@ -3161,8 +3165,165 @@ mod tests {
                     false
                 }
             }
+            // CursivePos.
+            3 => {
+                if sub.len() < 6 {
+                    return false;
+                }
+                let format = u16::from_be_bytes([sub[0], sub[1]]);
+                if format != 1 {
+                    return false;
+                }
+                let count = u16::from_be_bytes([sub[4], sub[5]]) as usize;
+                let recs = 6usize;
+                if recs + count * 4 > sub.len() {
+                    return false;
+                }
+                for i in 0..count {
+                    let r = recs + i * 4;
+                    let entry = u16::from_be_bytes([sub[r], sub[r + 1]]) as usize;
+                    let exit = u16::from_be_bytes([sub[r + 2], sub[r + 3]]) as usize;
+                    if anchor_has_nonzero_device_offset(sub, entry)
+                        || anchor_has_nonzero_device_offset(sub, exit)
+                    {
+                        return true;
+                    }
+                }
+                false
+            }
+            // MarkBasePos / MarkMarkPos — same shape (mark + base/mark2 array).
+            4 | 6 => mark_pair_has_nonzero_device_offset(sub),
+            // MarkLigPos.
+            5 => mark_lig_has_nonzero_device_offset(sub),
             _ => false,
         }
+    }
+
+    /// Returns true when the Anchor at `anchor_off` (relative to
+    /// `subtable_buf`) is AnchorFormat 3 with a non-zero xDevice or
+    /// yDevice slot. Format 1 / 2 have no device slots; an anchor_off
+    /// of 0 (the spec's "absent" sentinel) returns false.
+    fn anchor_has_nonzero_device_offset(subtable_buf: &[u8], anchor_off: usize) -> bool {
+        if anchor_off == 0 || anchor_off + 10 > subtable_buf.len() {
+            return false;
+        }
+        let format = u16::from_be_bytes([subtable_buf[anchor_off], subtable_buf[anchor_off + 1]]);
+        if format != 3 {
+            return false;
+        }
+        let x_dev =
+            u16::from_be_bytes([subtable_buf[anchor_off + 6], subtable_buf[anchor_off + 7]]);
+        let y_dev =
+            u16::from_be_bytes([subtable_buf[anchor_off + 8], subtable_buf[anchor_off + 9]]);
+        x_dev != 0 || y_dev != 0
+    }
+
+    /// Walks the MarkArray + BaseArray / Mark2Array of a MarkBasePos /
+    /// MarkMarkPos subtable. Returns true if any anchor has a surviving
+    /// device offset.
+    fn mark_pair_has_nonzero_device_offset(sub: &[u8]) -> bool {
+        if sub.len() < 12 {
+            return false;
+        }
+        let format = u16::from_be_bytes([sub[0], sub[1]]);
+        if format != 1 {
+            return false;
+        }
+        let mark_class_count = u16::from_be_bytes([sub[6], sub[7]]) as usize;
+        let mark_array_off = u16::from_be_bytes([sub[8], sub[9]]) as usize;
+        let other_array_off = u16::from_be_bytes([sub[10], sub[11]]) as usize;
+        if mark_array_check(sub, mark_array_off) {
+            return true;
+        }
+        if other_array_off + 2 > sub.len() {
+            return false;
+        }
+        let count = u16::from_be_bytes([sub[other_array_off], sub[other_array_off + 1]]) as usize;
+        let recs = other_array_off + 2;
+        let total = count * mark_class_count;
+        if recs + total * 2 > sub.len() {
+            return false;
+        }
+        for i in 0..total {
+            let pos = recs + i * 2;
+            let rel = u16::from_be_bytes([sub[pos], sub[pos + 1]]) as usize;
+            if rel != 0 && anchor_has_nonzero_device_offset(sub, other_array_off + rel) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn mark_array_check(sub: &[u8], mark_array_off: usize) -> bool {
+        if mark_array_off + 2 > sub.len() {
+            return false;
+        }
+        let count = u16::from_be_bytes([sub[mark_array_off], sub[mark_array_off + 1]]) as usize;
+        let recs = mark_array_off + 2;
+        if recs + count * 4 > sub.len() {
+            return false;
+        }
+        for i in 0..count {
+            let pos = recs + i * 4;
+            let rel = u16::from_be_bytes([sub[pos + 2], sub[pos + 3]]) as usize;
+            if rel != 0 && anchor_has_nonzero_device_offset(sub, mark_array_off + rel) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Walks the MarkArray + LigatureArray of a MarkLigPos subtable.
+    /// Returns true if any anchor has a surviving device offset.
+    fn mark_lig_has_nonzero_device_offset(sub: &[u8]) -> bool {
+        if sub.len() < 12 {
+            return false;
+        }
+        let format = u16::from_be_bytes([sub[0], sub[1]]);
+        if format != 1 {
+            return false;
+        }
+        let mark_class_count = u16::from_be_bytes([sub[6], sub[7]]) as usize;
+        let mark_array_off = u16::from_be_bytes([sub[8], sub[9]]) as usize;
+        let lig_array_off = u16::from_be_bytes([sub[10], sub[11]]) as usize;
+        if mark_array_check(sub, mark_array_off) {
+            return true;
+        }
+        if lig_array_off + 2 > sub.len() {
+            return false;
+        }
+        let lig_count = u16::from_be_bytes([sub[lig_array_off], sub[lig_array_off + 1]]) as usize;
+        let lig_attach_offs = lig_array_off + 2;
+        if lig_attach_offs + lig_count * 2 > sub.len() {
+            return false;
+        }
+        for i in 0..lig_count {
+            let pos = lig_attach_offs + i * 2;
+            let rel = u16::from_be_bytes([sub[pos], sub[pos + 1]]) as usize;
+            if rel == 0 {
+                continue;
+            }
+            let la_off = lig_array_off + rel;
+            if la_off + 2 > sub.len() {
+                continue;
+            }
+            let comp_count = u16::from_be_bytes([sub[la_off], sub[la_off + 1]]) as usize;
+            let comps_off = la_off + 2;
+            let row = mark_class_count * 2;
+            if comps_off + comp_count * row > sub.len() {
+                continue;
+            }
+            for c in 0..comp_count {
+                for k in 0..mark_class_count {
+                    let p = comps_off + c * row + k * 2;
+                    let arel = u16::from_be_bytes([sub[p], sub[p + 1]]) as usize;
+                    if arel != 0 && anchor_has_nonzero_device_offset(sub, la_off + arel) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     fn vr_has_nonzero_device_offset(vr: &[u8], format: u16) -> bool {
