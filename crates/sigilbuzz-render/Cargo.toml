@@ -1,0 +1,24 @@
+[package]
+name = "sigilbuzz-render"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Software CPU rasterizer for sigilbuzz — outlines, COLRv0 layered glyphs, variable-font coord-aware."
+publish = true
+readme = "README.md"
+keywords = ["sigilbuzz", "rasterizer", "fonts", "color"]
+categories = ["graphics", "rendering"]
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+sigilbuzz = { workspace = true }
+sigilbuzz-paint = { path = "../sigilbuzz-paint", version = "0.1.0" }
+
+[dev-dependencies]
+# Fixtures via include_bytes!.
