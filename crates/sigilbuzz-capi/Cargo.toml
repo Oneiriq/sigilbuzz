@@ -54,3 +54,11 @@ sigilbuzz-paint = { path = "../sigilbuzz-paint", version = "0.1.0", optional = t
 # during `cargo test`. Dev-dep only; never enters the runtime
 # closure of any release artifact.
 cc = "1.0"
+# `fd-lock` provides the OS-level advisory file lock used by the
+# C-link tests in `tests/c_link.rs` to serialise the workspace-wide
+# cdylib rebuild step. A process-local `Mutex<()>` is not enough
+# under `cargo test --workspace`, where capi tests run alongside
+# other workspace crates that may also touch the cdylib's target
+# dir; the file lock survives across processes. Dev-dep only — the
+# crate itself ships no runtime locking.
+fd-lock = "4"
