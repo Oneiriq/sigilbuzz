@@ -1,0 +1,32 @@
+[package]
+name = "sigilbuzz-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line tool for sigilbuzz: shape, subset, paint, slug, woff, pdf, svg."
+readme = "README.md"
+keywords = ["sigilbuzz", "harfbuzz", "shaping", "cli", "fonts"]
+categories = ["command-line-utilities", "text-processing"]
+publish = true
+
+[[bin]]
+name = "sigilbuzz"
+path = "src/main.rs"
+
+[dependencies]
+sigilbuzz = { workspace = true }
+sigilbuzz-subset = { path = "../sigilbuzz-subset", version = "0.4.0" }
+sigilbuzz-paint = { path = "../sigilbuzz-paint", version = "0.1.0" }
+sigilbuzz-gpu = { path = "../sigilbuzz-gpu", version = "0.1.0" }
+sigilbuzz-svg = { path = "../sigilbuzz-svg", version = "0.1.0", features = ["color"] }
+sigilbuzz-pdf = { path = "../sigilbuzz-pdf", version = "0.2.0" }
+sigilbuzz-woff = { path = "../sigilbuzz-woff", version = "0.2.0" }
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+# No assert_cmd: keep this crate's dep set minimal. The integration
+# tests drive the binary via `std::process::Command` directly so we
+# don't pull in trycmd / assert_cmd / predicates.
