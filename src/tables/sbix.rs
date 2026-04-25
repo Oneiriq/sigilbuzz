@@ -124,12 +124,10 @@ impl<'a> Sbix<'a> {
                 offset: arr_start,
                 context: "sbix strike offset overflow",
             })?;
-        let arr_end = arr_start
-            .checked_add(arr_bytes)
-            .ok_or(Error::Malformed {
-                offset: arr_start,
-                context: "sbix strike offset overflow",
-            })?;
+        let arr_end = arr_start.checked_add(arr_bytes).ok_or(Error::Malformed {
+            offset: arr_start,
+            context: "sbix strike offset overflow",
+        })?;
         if arr_end > data.len() {
             return Err(Error::Truncated {
                 offset: arr_end,
@@ -178,12 +176,10 @@ impl<'a> Sbix<'a> {
                 context: "sbix glyphDataOffsets overflow",
             })?;
         let arr_start = sr.position();
-        let arr_end = arr_start
-            .checked_add(arr_bytes)
-            .ok_or(Error::Malformed {
-                offset: strike_off,
-                context: "sbix glyphDataOffsets overflow",
-            })?;
+        let arr_end = arr_start.checked_add(arr_bytes).ok_or(Error::Malformed {
+            offset: strike_off,
+            context: "sbix glyphDataOffsets overflow",
+        })?;
         if arr_end > strike_data.len() {
             return Err(Error::Truncated {
                 offset: strike_off + arr_end,
@@ -390,7 +386,7 @@ mod tests {
         blob.extend_from_slice(&0u16.to_be_bytes()); // flags
         blob.extend_from_slice(&1u32.to_be_bytes()); // numStrikes
         blob.extend_from_slice(&12u32.to_be_bytes()); // strikeOffsets[0] = 12
-        // Strike header at 12: ppem, ppi, then offsets[0..=1].
+                                                      // Strike header at 12: ppem, ppi, then offsets[0..=1].
         blob.extend_from_slice(&32u16.to_be_bytes());
         blob.extend_from_slice(&72u16.to_be_bytes());
         blob.extend_from_slice(&8u32.to_be_bytes()); // offsets[0] = 8 (right after the array itself)

@@ -244,20 +244,18 @@ impl<'a> Cblc<'a> {
         }
         let num_sizes = r.read_u32()?;
         let sizes_start = r.position();
-        let sizes_bytes =
-            (num_sizes as usize)
-                .checked_mul(48)
-                .ok_or(Error::Malformed {
-                    offset: sizes_start,
-                    context: "CBLC sizes overflow",
-                })?;
-        let sizes_end =
-            sizes_start
-                .checked_add(sizes_bytes)
-                .ok_or(Error::Malformed {
-                    offset: sizes_start,
-                    context: "CBLC sizes overflow",
-                })?;
+        let sizes_bytes = (num_sizes as usize)
+            .checked_mul(48)
+            .ok_or(Error::Malformed {
+                offset: sizes_start,
+                context: "CBLC sizes overflow",
+            })?;
+        let sizes_end = sizes_start
+            .checked_add(sizes_bytes)
+            .ok_or(Error::Malformed {
+                offset: sizes_start,
+                context: "CBLC sizes overflow",
+            })?;
         if sizes_end > data.len() {
             return Err(Error::Truncated {
                 offset: sizes_end,
@@ -748,7 +746,7 @@ mod tests {
             sub_payload: {
                 let mut p = Vec::new();
                 p.extend_from_slice(&80u32.to_be_bytes()); // imageSize
-                // BigGlyphMetrics: h=10, w=12, hbx=1, hby=2, hadv=15, vbx=0, vby=0, vadv=0
+                                                           // BigGlyphMetrics: h=10, w=12, hbx=1, hby=2, hadv=15, vbx=0, vby=0, vadv=0
                 p.extend_from_slice(&[10, 12, 1, 2, 15, 0, 0, 0]);
                 p
             },

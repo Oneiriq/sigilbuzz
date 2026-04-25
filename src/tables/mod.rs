@@ -43,7 +43,9 @@ pub mod vorg;
 
 pub use avar::Avar;
 pub use cbdt::{Cbdt, GlyphBitmap, GlyphBitmapMetrics};
-pub use cblc::{BigGlyphMetrics, BitmapSize, Cblc, CbdtLocation, SbitLineMetrics, SmallGlyphMetrics};
+pub use cblc::{
+    BigGlyphMetrics, BitmapSize, CbdtLocation, Cblc, SbitLineMetrics, SmallGlyphMetrics,
+};
 pub use cff::Cff;
 pub use cff2::Cff2;
 pub use cmap::Cmap;
