@@ -115,7 +115,8 @@ fn opensans_ascii_printable_emits_consistent_type3_font() {
         assert!(
             bbox_envelopes(&font.bbox, &cp.bbox),
             "FontBBox {:?} fails to envelope glyph bbox {:?}",
-            font.bbox, cp.bbox
+            font.bbox,
+            cp.bbox
         );
     }
 }
