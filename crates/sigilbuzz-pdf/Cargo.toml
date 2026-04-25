@@ -6,8 +6,11 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "PDF Type 3 font emitter for sigilbuzz glyph outlines."
-publish = false
+description = "PDF Type 3 font emitter for sigilbuzz glyph outlines, producing CharProc content streams and font dictionaries."
+publish = true
+readme = "README.md"
+keywords = ["pdf", "font-embedding", "type3", "opentype", "sigilbuzz"]
+categories = ["rendering", "text-processing"]
 
 [features]
 default = ["std"]

@@ -6,8 +6,11 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "GPU outline encoder for sigilbuzz (Slug-algorithm)."
-publish = false
+description = "GPU outline encoder for sigilbuzz, packing glyph outlines into Slug-algorithm band/segment buffers for fragment-shader coverage."
+publish = true
+readme = "README.md"
+keywords = ["gpu", "slug", "text-rendering", "opentype", "sigilbuzz"]
+categories = ["rendering::graphics-api", "text-processing"]
 
 [features]
 default = ["std"]
