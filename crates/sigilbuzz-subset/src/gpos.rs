@@ -728,8 +728,7 @@ fn rewrite_pair_pos_format2_to_format1(
         if c1 >= class1_count || c2 >= class2_count {
             return None;
         }
-        let off =
-            records_off + c1 as usize * class1_stride + c2 as usize * class2_stride;
+        let off = records_off + c1 as usize * class1_stride + c2 as usize * class2_stride;
         sub.get(off..off + v_pair)
     };
 
@@ -3090,7 +3089,10 @@ mod tests {
         let rs = rewrite_context_pos(&ctx, &bytes).unwrap();
         // Subtable parses through the shared layout::Context1 helper.
         let parsed = sigilbuzz::tables::gpos::ContextPos::parse(&rs.bytes).unwrap();
-        assert!(matches!(parsed, sigilbuzz::tables::gpos::ContextPos::Format1(_)));
+        assert!(matches!(
+            parsed,
+            sigilbuzz::tables::gpos::ContextPos::Format1(_)
+        ));
         // Walk the rewritten bytes manually to verify the lookup index.
         // Layout: u16 fmt, Offset16 cov, u16 setCount, Offset16[count],
         // then sets with rules. We pluck the first set's first rule.
@@ -3125,10 +3127,7 @@ mod tests {
     }
 
     /// Builds a fmt-3 context-positioning subtable.
-    fn build_context_pos_format3(
-        coverages: &[Vec<u16>],
-        records: &[(u16, u16)],
-    ) -> Vec<u8> {
+    fn build_context_pos_format3(coverages: &[Vec<u16>], records: &[(u16, u16)]) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&3u16.to_be_bytes()); // posFormat
         out.extend_from_slice(&(coverages.len() as u16).to_be_bytes());
@@ -3167,7 +3166,10 @@ mod tests {
         };
         let rs = rewrite_context_pos(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gpos::ContextPos::parse(&rs.bytes).unwrap();
-        assert!(matches!(parsed, sigilbuzz::tables::gpos::ContextPos::Format3(_)));
+        assert!(matches!(
+            parsed,
+            sigilbuzz::tables::gpos::ContextPos::Format3(_)
+        ));
         // Pluck the surviving record. Layout: u16 fmt, u16 glyphCount,
         // u16 recCount, Offset16[glyphCount], record[recCount].
         let glyph_count = u16::from_be_bytes([rs.bytes[2], rs.bytes[3]]);
@@ -3248,12 +3250,16 @@ mod tests {
         };
         let rs = rewrite_chain_context_pos(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gpos::ChainContextPos::parse(&rs.bytes).unwrap();
-        assert!(matches!(parsed, sigilbuzz::tables::gpos::ChainContextPos::Format3(_)));
+        assert!(matches!(
+            parsed,
+            sigilbuzz::tables::gpos::ChainContextPos::Format3(_)
+        ));
     }
 
     #[test]
     fn rewrite_chain_context_pos_format3_drops_when_backtrack_empties() {
-        let bytes = build_chain_context_pos_format3(&[vec![5]], &[vec![10]], &[vec![30]], &[(0, 1)]);
+        let bytes =
+            build_chain_context_pos_format3(&[vec![5]], &[vec![10]], &[vec![30]], &[(0, 1)]);
         // Drop gid 5 — backtrack coverage empties → subtable dies.
         let map = map_from_pairs(&[(0, 0), (10, 100), (30, 300)]);
         let ctx = RewriterCtx {
@@ -3267,7 +3273,8 @@ mod tests {
     fn rewrite_chain_context_pos_format3_renumbers_lookup_index() {
         let bytes = build_chain_context_pos_format3(&[], &[vec![10]], &[], &[(0, 5)]);
         let map = map_from_pairs(&[(0, 0), (10, 100)]);
-        let renumber: Vec<Option<u16>> = vec![Some(0), Some(1), Some(2), Some(3), Some(4), Some(11)];
+        let renumber: Vec<Option<u16>> =
+            vec![Some(0), Some(1), Some(2), Some(3), Some(4), Some(11)];
         let ctx = RewriterCtx {
             gid_map: &map,
             lookup_renumber: Some(&renumber),
@@ -3330,11 +3337,7 @@ mod tests {
         // (via 20) and class 2 (via 22) on the second.
         let cd1 = build_classdef_format1(10, &[1, 1, 2, 2]);
         let cd2 = build_classdef_format1(20, &[1, 1, 2, 2]);
-        let matrix: &[&[i16]] = &[
-            &[0, 0, 0],
-            &[0, -10, -20],
-            &[0, -30, -40],
-        ];
+        let matrix: &[&[i16]] = &[&[0, 0, 0], &[0, -10, -20], &[0, -30, -40]];
         let bytes = build_pair_pos_format2(&[10, 11, 12, 13], &cd1, &cd2, matrix);
 
         // Drop 11 and 13.
