@@ -126,3 +126,76 @@ fn parse_field<'a>(line: &'a str, key: &str) -> &'a str {
     let after = line.find(key).map(|i| &line[i + key.len()..]).unwrap_or(line);
     after.split_whitespace().next().unwrap_or("")
 }
+
+#[test]
+fn subset_writes_smaller_font_for_gid_list() {
+    let font = open_sans_path();
+    let out = write_tempfile("subset.ttf", b"");
+    let (_stdout, stderr, ok) = run_cli([
+        "subset".as_ref(),
+        font.as_os_str(),
+        out.as_os_str(),
+        "--gids".as_ref(),
+        "0,1,2,3".as_ref(),
+    ]);
+    assert!(ok, "binary failed: stderr={stderr}");
+    let bytes = std::fs::read(&out).expect("read output");
+    let src_len = OPEN_SANS.len();
+    assert!(
+        bytes.len() < src_len,
+        "subset ({}) should be smaller than source ({})",
+        bytes.len(),
+        src_len
+    );
+    assert!(stderr.contains("kept glyphs"), "expected status line: {stderr}");
+}
+
+#[test]
+fn subset_resolves_unicodes_through_cmap() {
+    let font = open_sans_path();
+    let out = write_tempfile("subset_uni.ttf", b"");
+    let (_stdout, stderr, ok) = run_cli([
+        "subset".as_ref(),
+        font.as_os_str(),
+        out.as_os_str(),
+        "--unicodes".as_ref(),
+        "H,i,A,B".as_ref(),
+    ]);
+    assert!(ok, "binary failed: stderr={stderr}");
+    assert!(out.exists());
+    // Output should be parseable as a Face.
+    let bytes = std::fs::read(&out).expect("read output");
+    let blob = sigilbuzz::Blob::from_vec(bytes);
+    let _face = sigilbuzz::Face::parse(&blob, 0).expect("parsed subset");
+}
+
+#[test]
+fn subset_accepts_inclusive_range() {
+    let font = open_sans_path();
+    let out = write_tempfile("subset_range.ttf", b"");
+    let (_stdout, stderr, ok) = run_cli([
+        "subset".as_ref(),
+        font.as_os_str(),
+        out.as_os_str(),
+        "--gids".as_ref(),
+        "0..=10".as_ref(),
+    ]);
+    assert!(ok, "binary failed: stderr={stderr}");
+    assert!(out.exists());
+}
+
+#[test]
+fn subset_rejects_empty_selection() {
+    let font = open_sans_path();
+    let out = write_tempfile("subset_empty.ttf", b"");
+    let (_stdout, stderr, ok) = run_cli([
+        "subset".as_ref(),
+        font.as_os_str(),
+        out.as_os_str(),
+    ]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("no glyphs selected"),
+        "expected friendly error, got: {stderr}"
+    );
+}
