@@ -353,7 +353,14 @@ impl<'a> Glyf<'a> {
             };
             let child_combined = parent_tf.compose(&child_local);
             let mut child_flat = FlatGlyph::default();
-            self.flatten(loca, component_id, None, &child_combined, &mut child_flat, depth + 1)?;
+            self.flatten(
+                loca,
+                component_id,
+                None,
+                &child_combined,
+                &mut child_flat,
+                depth + 1,
+            )?;
 
             // Resolve the translation. Anchor-mode (ARGS_ARE_XY_VALUES
             // clear) computes `parent[arg1] - child[arg2]` so the
@@ -1145,10 +1152,7 @@ mod tests {
         );
 
         // Glyph 2: triangle at (0,0),(40,0),(0,40).
-        let g2 = build_simple_glyph(
-            &[2],
-            &[(0, 0, true), (40, 0, true), (0, 40, true)],
-        );
+        let g2 = build_simple_glyph(&[2], &[(0, 0, true), (40, 0, true), (0, 40, true)]);
 
         // Glyph 0: composite. First component glyph 1 with xy
         // translation (0, 0); second component glyph 2 in anchor mode
@@ -1229,9 +1233,8 @@ mod tests {
         // (0, 10), and with translation (50, 5) at (50, 15).
         let child = build_simple_glyph(&[0], &[(10, 0, true)]);
         let mut parent = build_header(-1, 0, 0, 100, 100);
-        let flags: u16 = COMP_ARGS_ARE_XY_VALUES
-            | COMP_ARG_1_AND_2_ARE_WORDS
-            | COMP_WE_HAVE_A_TWO_BY_TWO;
+        let flags: u16 =
+            COMP_ARGS_ARE_XY_VALUES | COMP_ARG_1_AND_2_ARE_WORDS | COMP_WE_HAVE_A_TWO_BY_TWO;
         parent.extend_from_slice(&flags.to_be_bytes());
         parent.extend_from_slice(&1u16.to_be_bytes());
         parent.extend_from_slice(&50i16.to_be_bytes()); // dx
@@ -1254,11 +1257,8 @@ mod tests {
             glyf_bytes.push(0);
         }
         let end_off = glyf_bytes.len() as u32;
-        let loca_bytes = build_loca_short(&[
-            (p_off / 2) as u16,
-            (c_off / 2) as u16,
-            (end_off / 2) as u16,
-        ]);
+        let loca_bytes =
+            build_loca_short(&[(p_off / 2) as u16, (c_off / 2) as u16, (end_off / 2) as u16]);
         let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 2).unwrap();
         let glyf = Glyf::new(&glyf_bytes);
         let mut o = Outline::new();
