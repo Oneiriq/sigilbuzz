@@ -271,8 +271,7 @@ fn rewrite_type4(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     // (gid, index) pairs to `emit_coverage_from_pairs` afterwards.
     let mut surviving_sets: Vec<(u16, Vec<u8>)> = Vec::new();
 
-    for i in 0..pair_count {
-        let first_old = first_components[i];
+    for (i, &first_old) in first_components.iter().enumerate().take(pair_count) {
         let Some(first_new) = map.map(first_old) else {
             // First component dropped — the whole LigatureSet goes with
             // it; shaping the input sequence with first_old absent can't
