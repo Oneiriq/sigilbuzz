@@ -274,10 +274,15 @@ impl<'a> Face<'a> {
 
     /// Parses the AAT `kerx` table if the font carries one. Used
     /// only when the font has no GPOS kern feature, so mainstream
-    /// fonts are unaffected.
+    /// fonts are unaffected. `kerx` format-2 needs `numGlyphs` to
+    /// bound-check format-0 class lookups, so we plumb it through
+    /// from `maxp`.
     pub fn kerx(&self) -> Result<Option<Kerx<'a>>> {
         match self.table_bytes(tag::KERX) {
-            Ok(bytes) => Ok(Some(Kerx::parse(bytes)?)),
+            Ok(bytes) => {
+                let num_glyphs = self.maxp()?.num_glyphs;
+                Ok(Some(Kerx::parse(bytes, num_glyphs)?))
+            }
             Err(Error::MissingTable { .. }) => Ok(None),
             Err(e) => Err(e),
         }

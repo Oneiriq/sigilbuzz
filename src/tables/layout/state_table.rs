@@ -33,10 +33,13 @@
 //! subtable types we implement (0 — rearrangement, 1 — contextual
 //! glyph substitution, 2 — ligature substitution) and kerx's
 //! state-based formats. The class-subtable parser here covers the
-//! two AAT lookup formats those tables actually use: format 2
-//! (segment-array) and format 6 (single-table). Extended morx has
-//! always shipped these formats; we surface [`Error::Unsupported`]
-//! for anything else so the caller can fall back gracefully.
+//! three AAT lookup formats those tables actually use: format 0
+//! (simple array), format 2 (segment-array) and format 6
+//! (single-table). Extended morx ships formats 2 and 6; kerx
+//! format-2 class tables in the wild also lean on format 0 because
+//! the value stream there is dense per-glyph offsets rather than
+//! sparse classes. We surface [`Error::Unsupported`] for any other
+//! format so the caller can fall back gracefully.
 
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
@@ -130,7 +133,7 @@ impl<'a> StateTableHeader<'a> {
     /// [`CLASS_OUT_OF_BOUNDS`] when the glyph is outside every
     /// segment the class subtable covers.
     ///
-    /// Only lookup formats 2 and 6 are handled — the two formats
+    /// Only lookup formats 0, 2 and 6 are handled — the formats
     /// real morx/kerx fonts ship. Anything else yields
     /// [`Error::Unsupported`].
     pub fn class_of(&self, glyph_id: u16) -> Result<u16> {
@@ -141,7 +144,11 @@ impl<'a> StateTableHeader<'a> {
                 offset: self.class_table_off,
                 context: "class subtable slice",
             })?;
-        lookup_class(slice, glyph_id)
+        // morx state tables ship format 2 / 6 in practice. Pass 0
+        // for n_glyphs because format 0 isn't used here; callers
+        // wanting format-0 must use [`lookup_class`] directly with
+        // the font's true numGlyphs.
+        lookup_class(slice, glyph_id, 0)
     }
 
     /// Reads the entry index sitting at `(state, class)` in the
@@ -217,17 +224,21 @@ impl<'a> StateTableHeader<'a> {
     }
 }
 
-/// AAT "Lookup Table" class resolver. Covers the two formats that
+/// AAT "Lookup Table" class resolver. Covers the three formats that
 /// morx / kerx use in practice:
 ///
+/// - Format 0: simple array, one u16 per glyph id (dense)
 /// - Format 2: segment single values (range-based, binary-searched)
 /// - Format 6: single-table (sorted (glyph, value) pairs)
 ///
-/// Formats 0, 4, 8 are rejected with [`Error::Unsupported`]; they
+/// Formats 4 and 8 are rejected with [`Error::Unsupported`]; they
 /// exist in the spec but are vanishingly rare on shipping fonts and
 /// sigilbuzz can fall back cleanly to OpenType for whichever font
 /// trips one.
-fn lookup_class(data: &[u8], glyph_id: u16) -> Result<u16> {
+///
+/// `n_glyphs` is required by format 0, which is just a flat u16
+/// array sized by the font's `numGlyphs`. Other formats ignore it.
+pub(crate) fn lookup_class(data: &[u8], glyph_id: u16, n_glyphs: u16) -> Result<u16> {
     if data.len() < 2 {
         return Err(Error::Truncated {
             offset: 0,
@@ -236,9 +247,10 @@ fn lookup_class(data: &[u8], glyph_id: u16) -> Result<u16> {
     }
     let format = u16::from_be_bytes([data[0], data[1]]);
     match format {
+        0 => lookup_format0(data, glyph_id, n_glyphs),
         2 => lookup_format2(data, glyph_id),
         6 => lookup_format6(data, glyph_id),
-        0 | 4 | 8 => Err(Error::Unsupported {
+        4 | 8 => Err(Error::Unsupported {
             context: "AAT lookup format not yet implemented",
         }),
         _ => Err(Error::Malformed {
@@ -246,6 +258,38 @@ fn lookup_class(data: &[u8], glyph_id: u16) -> Result<u16> {
             context: "AAT lookup unknown format",
         }),
     }
+}
+
+// Format 0 layout:
+//   u16 format = 0
+//   u16 values[nGlyphs]
+//
+// The simplest AAT lookup: one u16 value per glyph in font order.
+// Used when the value stream is dense — kerx format 2's left- and
+// right-class tables are the canonical case, since they yield a
+// per-glyph byte offset that's almost always non-default.
+fn lookup_format0(data: &[u8], glyph_id: u16, n_glyphs: u16) -> Result<u16> {
+    // Two limits gate the read: the caller-supplied glyph count
+    // (when known) and the slice's actual byte length. The smaller
+    // of the two wins so a truncated table can never panic.
+    let slice_cap = (data.len().saturating_sub(2)) / 2;
+    let declared = if n_glyphs == 0 {
+        slice_cap
+    } else {
+        usize::from(n_glyphs)
+    };
+    let limit = declared.min(slice_cap);
+    if usize::from(glyph_id) >= limit {
+        return Ok(CLASS_OUT_OF_BOUNDS);
+    }
+    let off = 2usize + glyph_id as usize * 2;
+    // The bound check above already guarantees off + 2 <= data.len(),
+    // but ask the slice to confirm so a future refactor can't slip.
+    let slice = data.get(off..off + 2).ok_or(Error::Truncated {
+        offset: off,
+        context: "AAT lookup format 0 cell",
+    })?;
+    Ok(u16::from_be_bytes([slice[0], slice[1]]))
 }
 
 // Format 2 layout:
@@ -379,6 +423,7 @@ fn lookup_format6(data: &[u8], glyph_id: u16) -> Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use alloc::vec::Vec;
 
     /// Builds an AAT lookup table, format 6, mapping each `(glyph,
@@ -402,17 +447,17 @@ mod tests {
     #[test]
     fn format6_binary_search_finds_known_glyphs() {
         let tbl = build_lookup_format6(&[(5, 42), (10, 99), (200, 7)]);
-        assert_eq!(lookup_class(&tbl, 5).unwrap(), 42);
-        assert_eq!(lookup_class(&tbl, 10).unwrap(), 99);
-        assert_eq!(lookup_class(&tbl, 200).unwrap(), 7);
+        assert_eq!(lookup_class(&tbl, 5, 0).unwrap(), 42);
+        assert_eq!(lookup_class(&tbl, 10, 0).unwrap(), 99);
+        assert_eq!(lookup_class(&tbl, 200, 0).unwrap(), 7);
     }
 
     #[test]
     fn format6_returns_out_of_bounds_for_missing() {
         let tbl = build_lookup_format6(&[(5, 42), (10, 99)]);
-        assert_eq!(lookup_class(&tbl, 0).unwrap(), CLASS_OUT_OF_BOUNDS);
-        assert_eq!(lookup_class(&tbl, 7).unwrap(), CLASS_OUT_OF_BOUNDS);
-        assert_eq!(lookup_class(&tbl, 999).unwrap(), CLASS_OUT_OF_BOUNDS);
+        assert_eq!(lookup_class(&tbl, 0, 0).unwrap(), CLASS_OUT_OF_BOUNDS);
+        assert_eq!(lookup_class(&tbl, 7, 0).unwrap(), CLASS_OUT_OF_BOUNDS);
+        assert_eq!(lookup_class(&tbl, 999, 0).unwrap(), CLASS_OUT_OF_BOUNDS);
     }
 
     #[test]
@@ -430,21 +475,44 @@ mod tests {
         tbl.extend_from_slice(&20u16.to_be_bytes()); // first
         tbl.extend_from_slice(&5u16.to_be_bytes()); // value
 
-        assert_eq!(lookup_class(&tbl, 11).unwrap(), 4);
-        assert_eq!(lookup_class(&tbl, 20).unwrap(), 5);
-        assert_eq!(lookup_class(&tbl, 25).unwrap(), 5);
-        assert_eq!(lookup_class(&tbl, 15).unwrap(), CLASS_OUT_OF_BOUNDS);
-        assert_eq!(lookup_class(&tbl, 26).unwrap(), CLASS_OUT_OF_BOUNDS);
+        assert_eq!(lookup_class(&tbl, 11, 0).unwrap(), 4);
+        assert_eq!(lookup_class(&tbl, 20, 0).unwrap(), 5);
+        assert_eq!(lookup_class(&tbl, 25, 0).unwrap(), 5);
+        assert_eq!(lookup_class(&tbl, 15, 0).unwrap(), CLASS_OUT_OF_BOUNDS);
+        assert_eq!(lookup_class(&tbl, 26, 0).unwrap(), CLASS_OUT_OF_BOUNDS);
+    }
+
+    #[test]
+    fn format0_simple_array_indexes_by_glyph_id() {
+        // 4-glyph font: gid 0 → 0, gid 1 → 12, gid 2 → 24, gid 3 → 36.
+        let mut tbl = Vec::new();
+        tbl.extend_from_slice(&0u16.to_be_bytes()); // format
+        for v in [0u16, 12, 24, 36] {
+            tbl.extend_from_slice(&v.to_be_bytes());
+        }
+        assert_eq!(lookup_class(&tbl, 0, 4).unwrap(), 0);
+        assert_eq!(lookup_class(&tbl, 1, 4).unwrap(), 12);
+        assert_eq!(lookup_class(&tbl, 3, 4).unwrap(), 36);
+        // Glyph past nGlyphs falls through to OOB rather than reading
+        // garbage.
+        assert_eq!(lookup_class(&tbl, 4, 4).unwrap(), CLASS_OUT_OF_BOUNDS);
+    }
+
+    #[test]
+    fn format0_truncated_slice_is_defensive() {
+        // Format byte but no payload — must not panic.
+        let tbl = vec![0x00, 0x00];
+        assert_eq!(lookup_class(&tbl, 0, 4).unwrap(), CLASS_OUT_OF_BOUNDS);
     }
 
     #[test]
     fn unsupported_lookup_format_surfaces_error() {
         let mut tbl = Vec::new();
-        tbl.extend_from_slice(&0u16.to_be_bytes());
-        // Format 0 (segment table with single-byte arrays, rare) is
+        // Format 4 (segment array of u16 records — rare) is still
         // rejected until a real font needs it.
+        tbl.extend_from_slice(&4u16.to_be_bytes());
         assert!(matches!(
-            lookup_class(&tbl, 0),
+            lookup_class(&tbl, 0, 0),
             Err(Error::Unsupported { .. })
         ));
     }
