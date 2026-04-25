@@ -10,6 +10,7 @@
 //! unambiguous and `no_std`-friendly.
 
 pub mod avar;
+pub mod base;
 pub mod cbdt;
 pub mod cblc;
 pub mod cff;
@@ -46,6 +47,7 @@ pub mod vorg;
 pub mod vvar;
 
 pub use avar::Avar;
+pub use base::{Base, BaseAxis, BaseScript};
 pub use cbdt::{Cbdt, GlyphBitmap, GlyphBitmapMetrics};
 pub use cblc::{
     BigGlyphMetrics, BitmapSize, CbdtLocation, Cblc, SbitLineMetrics, SmallGlyphMetrics,
@@ -161,4 +163,8 @@ pub mod tag {
     /// `MATH` — OpenType math typography table. Carried by math
     /// fonts (STIX 2 Math, Latin Modern Math, Cambria Math, …).
     pub const MATH: [u8; 4] = *b"MATH";
+    /// `BASE` — baseline metrics for cross-script alignment. Adobe's
+    /// flagship faces and a smattering of Noto / SIL designs ship
+    /// this; the majority of fonts omit it.
+    pub const BASE: [u8; 4] = *b"BASE";
 }
