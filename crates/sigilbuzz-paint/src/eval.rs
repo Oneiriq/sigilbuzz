@@ -1042,11 +1042,7 @@ fn var_delta(ctx: &EvalCtx<'_, '_>, var_index_base: VarIndexBase, field_index: u
 /// that integer as `f32`; this helper finishes the conversion by
 /// dividing by 16384 so the caller can add directly to an
 /// already-scaled F2DOT14 value.
-fn var_delta_f2dot14(
-    ctx: &EvalCtx<'_, '_>,
-    var_index_base: VarIndexBase,
-    field_index: u16,
-) -> f32 {
+fn var_delta_f2dot14(ctx: &EvalCtx<'_, '_>, var_index_base: VarIndexBase, field_index: u16) -> f32 {
     var_delta(ctx, var_index_base, field_index) / 16384.0
 }
 

@@ -614,11 +614,7 @@ fn sweep_gradient_resolves_centre_angles_and_three_stops() {
     colr.extend_from_slice(&2u16.to_be_bytes());
     colr.extend_from_slice(&f2dot14(1.0));
 
-    let cpal = build_cpal_v0(&[
-        (255, 0, 0, 255),
-        (0, 255, 0, 255),
-        (0, 0, 255, 255),
-    ]);
+    let cpal = build_cpal_v0(&[(255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255)]);
     let bytes = build_face_bytes(&colr, &cpal);
     let face = Face::parse_bytes(&bytes, 0).expect("face parses");
     let cmds = evaluate(&face, 60);
@@ -871,11 +867,7 @@ fn evaluate_ivs_at(coord_input: &[f32]) -> (f32, f32, (f32, f32)) {
     let var_store = build_ivs_test_store();
     let paints = build_ivs_test_paints();
     let colr = build_v1_multi_colr(&paints, &var_store);
-    let cpal = build_cpal_v0(&[
-        (255, 255, 255, 255),
-        (255, 0, 0, 255),
-        (0, 255, 0, 255),
-    ]);
+    let cpal = build_cpal_v0(&[(255, 255, 255, 255), (255, 0, 0, 255), (0, 255, 0, 255)]);
     let bytes = build_face_bytes(&colr, &cpal);
     let face = Face::parse_bytes(&bytes, 0).expect("face parses");
 
@@ -1120,11 +1112,7 @@ fn delta_set_index_map_redirects_var_index_base_through_gdef() {
     let var_store = build_ivs_test_store();
     let paints = build_indirection_test_paints();
     let colr = build_v1_multi_colr(&paints, &[]);
-    let cpal = build_cpal_v0(&[
-        (255, 255, 255, 255),
-        (255, 0, 0, 255),
-        (0, 255, 0, 255),
-    ]);
+    let cpal = build_cpal_v0(&[(255, 255, 255, 255), (255, 0, 0, 255), (0, 255, 0, 255)]);
     let index_map = build_indirection_index_map();
     let gdef = build_gdef_v13(&var_store, &index_map);
     let bytes = build_face_bytes_with_gdef(&colr, &cpal, &gdef);
