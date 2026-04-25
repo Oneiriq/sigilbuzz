@@ -232,21 +232,30 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     }
     // Partial-instancing validation: an empty axis_pins falls through
     // to the full-instancing path (every axis pins). A non-empty
-    // axis_pins must equal coords.len(). Any `Keep` entry — which
-    // requests partial instancing — is rejected for now: the public
-    // API + tuple-projection math primitives ship here, but the
-    // variation-table emit side is staged for a follow-up.
+    // axis_pins must equal coords.len().
     if !input.axis_pins.is_empty() {
         if input.axis_pins.len() != input.coords.len() {
             return Err(SubsetError::Unsupported(
                 "instance: axis_pins length must equal coords.len()",
             ));
         }
+        // gvar + CFF2 partial-projection have not landed yet (issue
+        // tracking #183 follow-up). Reject Keep when the source has
+        // either of those, with a clear message — the fvar / avar /
+        // HVAR / VVAR / MVAR / GDEF.IVS paths are wired through below.
         if input.axis_pins.contains(&AxisPin::Keep) {
-            return Err(SubsetError::Unsupported(
-                "instance: partial instancing (axis_pins with Keep) not yet implemented; \
-                 axis_pins must be empty or all Pin",
-            ));
+            let has_gvar = face.record(tag::GVAR).is_some();
+            let has_cff2 = face.record(tag::CFF2).is_some();
+            if has_gvar || has_cff2 {
+                return Err(SubsetError::Unsupported(
+                    "instance: partial instancing (axis_pins with Keep) for sources with \
+                     gvar or CFF2 not yet implemented; the IVS-bearing tables \
+                     (HVAR / VVAR / MVAR / GDEF.IVS) trim correctly today",
+                ));
+            }
+            // partial_instance returns `Ok` with the reduced-axis VF;
+            // its caller chain mirrors the full-instancing path.
+            return partial_instance(face, input);
         }
     }
 
@@ -499,6 +508,107 @@ fn cff2_bake(
         if rec.tag == tag::GPOS && gpos_baked.is_some() {
             continue;
         }
+        let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;
+        tables.push((rec.tag, bytes.to_vec()));
+    }
+
+    let bytes = sfnt::build(face.sfnt_version(), &tables);
+    Ok(InstancedOutput { bytes })
+}
+
+/// Partial-instance bake: produces a reduced-axis variable font.
+///
+/// This path runs when `input.axis_pins` carries at least one
+/// `AxisPin::Keep` and the source has neither `gvar` nor `CFF2` (those
+/// tuple-projection paths are tracked as a follow-up to PR #183 — the
+/// public surface there errors with `Unsupported` for now).
+///
+/// The bake:
+/// - re-emits `fvar` with only the surviving axes (and instances whose
+///   surviving coord vector doesn't collapse to default),
+/// - re-emits `avar` with only the surviving segment maps,
+/// - re-emits `HVAR` / `VVAR` / `MVAR` / `GDEF.IVS` with their embedded
+///   `ItemVariationStore` partial-projected through `pins` / `coords`,
+///   each DeltaSetIndexMap rewritten to point at the new subtable
+///   indexes,
+/// - rides `glyf` / `hmtx` / `vmtx` / `head` / `hhea` / `maxp` /
+///   layout / and other tables through verbatim. The Keep-axis
+///   variations stay live; the Pin-axis dimensions fold into the
+///   trimmed deltas so a shaper at `(Keep coords)` produces exactly
+///   what the source produced at `(Keep coords, Pin coords)`.
+///
+/// `drop_var_tables = false` is honoured — the trimmed variation
+/// tables ride out either way; the field controls whether tables like
+/// `MVAR` get folded down into static metric fields. For the partial
+/// path we always keep the (trimmed) variation tables: they still
+/// drive the live axes.
+fn partial_instance(
+    face: &Face<'_>,
+    input: &InstanceInput,
+) -> Result<InstancedOutput, SubsetError> {
+    let pins = &input.axis_pins;
+    let coords = &input.coords;
+
+    // Apply avar's piecewise-linear remap if the source ships one. The
+    // Pin-axis support-scalar evaluation must use post-avar coords
+    // (the IVS regions are defined in the post-avar space).
+    let post_avar_coords: Vec<f32> = match face.avar().map_err(SubsetError::from)? {
+        Some(av) => av.remap_all(coords),
+        None => coords.clone(),
+    };
+
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::new();
+
+    // fvar trim.
+    let fvar_bytes = face.table_bytes(tag::FVAR).map_err(SubsetError::from)?;
+    let new_fvar = bake_fvar_partial(fvar_bytes, pins).ok_or(SubsetError::Unsupported(
+        "instance: fvar partial trim failed",
+    ))?;
+    tables.push((tag::FVAR, new_fvar));
+
+    // avar trim (optional).
+    if let Ok(avar_bytes) = face.table_bytes(tag::AVAR) {
+        if let Some(new_avar) = bake_avar_partial(avar_bytes, pins) {
+            tables.push((tag::AVAR, new_avar));
+        }
+    }
+
+    // HVAR rewrite (optional).
+    if let Ok(hvar_bytes) = face.table_bytes(tag::HVAR) {
+        if let Some(new_hvar) = bake_hvar_partial(hvar_bytes, &post_avar_coords, pins) {
+            tables.push((tag::HVAR, new_hvar));
+        }
+    }
+    // VVAR rewrite (optional).
+    if let Ok(vvar_bytes) = face.table_bytes(tag::VVAR) {
+        if let Some(new_vvar) = bake_vvar_partial(vvar_bytes, &post_avar_coords, pins) {
+            tables.push((tag::VVAR, new_vvar));
+        }
+    }
+    // MVAR rewrite (optional).
+    if let Ok(mvar_bytes) = face.table_bytes(tag::MVAR) {
+        if let Some(new_mvar) = bake_mvar_partial(mvar_bytes, &post_avar_coords, pins) {
+            tables.push((tag::MVAR, new_mvar));
+        }
+    }
+    // GDEF.IVS rewrite (optional).
+    if let Ok(gdef_bytes) = face.table_bytes(tag::GDEF) {
+        if let Some(new_gdef) = bake_gdef_ivs_partial(gdef_bytes, &post_avar_coords, pins) {
+            tables.push((tag::GDEF, new_gdef));
+        } else {
+            // No IVS in GDEF — pass through.
+            tables.push((tag::GDEF, gdef_bytes.to_vec()));
+        }
+    }
+
+    // Carry every other table through verbatim.
+    for rec in face.records() {
+        if tables.iter().any(|(t, _)| *t == rec.tag) {
+            continue;
+        }
+        // Skip variable-font tables we already handled (or that we
+        // refuse to handle in the partial path — gvar / CFF2 are
+        // gated upstream).
         let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;
         tables.push((rec.tag, bytes.to_vec()));
     }
@@ -1986,6 +2096,435 @@ pub(crate) fn bake_ivs_partial(
 }
 
 // ---------------------------------------------------------------------------
+// DeltaSetIndexMap rewrite (used by HVAR / VVAR partial bake)
+// ---------------------------------------------------------------------------
+
+/// Re-emits a `DeltaSetIndexMap` with every entry's outer index
+/// rewritten through `remap`. Entries whose outer subtable collapsed
+/// land at `(new_subtable_count, 0)` — guaranteed out-of-range, so
+/// IVS evaluation returns zero (the desired "no variation for this
+/// row" semantics).
+///
+/// The output keeps the source's format (0 / 1) and entryFormat
+/// (bytes-per-entry, inner-bit-count) unchanged. The packed
+/// `(outer, inner)` may overflow the source's bit allocation — when
+/// that happens we widen entryFormat conservatively.
+///
+/// `start` is the offset into `data` where the map begins.
+fn rewrite_delta_set_index_map(
+    data: &[u8],
+    start: usize,
+    remap: &RegionRemap,
+    new_subtable_count: u16,
+) -> Option<Vec<u8>> {
+    if data.len() < start + 2 {
+        return None;
+    }
+    let format = data[start];
+    let entry_format = data[start + 1];
+    let mut cursor = start + 2;
+
+    let map_count: u32 = match format {
+        0 => {
+            if data.len() < cursor + 2 {
+                return None;
+            }
+            let v = u16::from_be_bytes([data[cursor], data[cursor + 1]]) as u32;
+            cursor += 2;
+            v
+        }
+        1 => {
+            if data.len() < cursor + 4 {
+                return None;
+            }
+            let v = u32::from_be_bytes([
+                data[cursor],
+                data[cursor + 1],
+                data[cursor + 2],
+                data[cursor + 3],
+            ]);
+            cursor += 4;
+            v
+        }
+        _ => return None,
+    };
+
+    let entry_bytes = ((entry_format >> 4) & 0x03) as usize + 1;
+    let inner_bits = (entry_format & 0x0F) as u32 + 1;
+    let inner_mask: u32 = (1u32 << inner_bits) - 1;
+
+    if map_count == 0 {
+        // Nothing to rewrite — return a clone of the unchanged map
+        // header so the caller's offset surgery still works.
+        return Some(data[start..cursor].to_vec());
+    }
+
+    if data.len() < cursor + (map_count as usize) * entry_bytes {
+        return None;
+    }
+
+    // Decode every entry, remap, then decide the new entryFormat.
+    let mut new_entries: Vec<(u16, u16)> = Vec::with_capacity(map_count as usize);
+    for i in 0..map_count as usize {
+        let off = cursor + i * entry_bytes;
+        let mut raw: u32 = 0;
+        for b in 0..entry_bytes {
+            raw = (raw << 8) | u32::from(data[off + b]);
+        }
+        let inner = (raw & inner_mask) as u16;
+        let outer = (raw >> inner_bits) as u16;
+        let (new_outer, new_inner) = match remap.lookup(outer, inner) {
+            Some(v) => v,
+            None => (new_subtable_count, 0),
+        };
+        new_entries.push((new_outer, new_inner));
+    }
+
+    // Compute new entryFormat. Use the smallest entryFormat that
+    // covers every (outer, inner) we'll write. inner_bits = ceil(log2)
+    // of (max_inner + 1), clamped to [1, 16]; total bits = inner_bits
+    // + outer_bits, clamped to multiples of 8 for entry_bytes.
+    let max_outer = new_entries.iter().map(|(o, _)| *o).max().unwrap_or(0);
+    let max_inner = new_entries.iter().map(|(_, i)| *i).max().unwrap_or(0);
+    let new_inner_bits: u32 = if max_inner == 0 {
+        1
+    } else {
+        16 - max_inner.leading_zeros()
+    };
+    let new_outer_bits: u32 = if max_outer == 0 {
+        0
+    } else {
+        16 - max_outer.leading_zeros()
+    };
+    let total_bits = new_inner_bits + new_outer_bits;
+    let new_entry_bytes: u32 = total_bits.div_ceil(8);
+    let new_entry_bytes = new_entry_bytes.clamp(1, 4);
+    let new_entry_format = (((new_entry_bytes - 1) as u8) << 4) | ((new_inner_bits - 1) as u8 & 0x0F);
+    let new_inner_mask: u32 = (1u32 << new_inner_bits) - 1;
+
+    // Re-emit.
+    let mut out = Vec::with_capacity(2 + 4 + (map_count as usize) * (new_entry_bytes as usize));
+    out.push(format);
+    out.push(new_entry_format);
+    match format {
+        0 => out.extend_from_slice(&(map_count as u16).to_be_bytes()),
+        1 => out.extend_from_slice(&map_count.to_be_bytes()),
+        _ => return None,
+    }
+    for (outer, inner) in new_entries {
+        let packed: u32 =
+            (u32::from(outer) << new_inner_bits) | (u32::from(inner) & new_inner_mask);
+        let bytes = packed.to_be_bytes();
+        // Take the low `new_entry_bytes` bytes (big-endian).
+        out.extend_from_slice(&bytes[(4 - new_entry_bytes as usize)..]);
+    }
+    Some(out)
+}
+
+// ---------------------------------------------------------------------------
+// HVAR partial bake
+// ---------------------------------------------------------------------------
+
+/// Re-emits HVAR with its embedded IVS partial-projected through
+/// `pins` / `coords`, every DeltaSetIndexMap rewritten through the
+/// remap, and the table header offsets adjusted to match.
+///
+/// Returns `None` when the source HVAR is malformed or the IVS
+/// rewrite fails. The caller should fall through to dropping the
+/// table when this returns `None` — that's equivalent to "no advance
+/// variation," safe but slightly degraded.
+#[allow(dead_code)] // wired in by the partial-instancing integration commit
+fn bake_hvar_partial(hvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Option<Vec<u8>> {
+    // HVAR header: u16 major, u16 minor, o32 ivs, o32 advance, o32 lsb,
+    // o32 rsb. 20 bytes.
+    if hvar_bytes.len() < 20 {
+        return None;
+    }
+    let major = u16::from_be_bytes([hvar_bytes[0], hvar_bytes[1]]);
+    if major != 1 {
+        return None;
+    }
+    let ivs_off = u32::from_be_bytes([hvar_bytes[4], hvar_bytes[5], hvar_bytes[6], hvar_bytes[7]])
+        as usize;
+    let advance_off =
+        u32::from_be_bytes([hvar_bytes[8], hvar_bytes[9], hvar_bytes[10], hvar_bytes[11]]);
+    let lsb_off = u32::from_be_bytes([
+        hvar_bytes[12],
+        hvar_bytes[13],
+        hvar_bytes[14],
+        hvar_bytes[15],
+    ]);
+    let rsb_off = u32::from_be_bytes([
+        hvar_bytes[16],
+        hvar_bytes[17],
+        hvar_bytes[18],
+        hvar_bytes[19],
+    ]);
+
+    if hvar_bytes.len() < ivs_off {
+        return None;
+    }
+    let (new_ivs, remap) = bake_ivs_partial(&hvar_bytes[ivs_off..], coords, pins)?;
+    // Read new subtable count from the just-emitted IVS.
+    let new_subtable_count = u16::from_be_bytes([new_ivs[6], new_ivs[7]]);
+
+    // Rewrite each non-zero map.
+    let new_advance_map = if advance_off != 0 {
+        Some(rewrite_delta_set_index_map(
+            hvar_bytes,
+            advance_off as usize,
+            &remap,
+            new_subtable_count,
+        )?)
+    } else {
+        None
+    };
+    let new_lsb_map = if lsb_off != 0 {
+        Some(rewrite_delta_set_index_map(
+            hvar_bytes,
+            lsb_off as usize,
+            &remap,
+            new_subtable_count,
+        )?)
+    } else {
+        None
+    };
+    let new_rsb_map = if rsb_off != 0 {
+        Some(rewrite_delta_set_index_map(
+            hvar_bytes,
+            rsb_off as usize,
+            &remap,
+            new_subtable_count,
+        )?)
+    } else {
+        None
+    };
+
+    // Layout the output: 20-byte header + IVS + advance map +
+    // lsb map + rsb map. Offsets are u32 from start of HVAR.
+    let mut out = Vec::with_capacity(hvar_bytes.len());
+    out.extend_from_slice(&hvar_bytes[..4]); // major + minor
+    let new_ivs_off: u32 = 20;
+    out.extend_from_slice(&new_ivs_off.to_be_bytes());
+    let advance_off_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes());
+    let lsb_off_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes());
+    let rsb_off_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&new_ivs);
+    if let Some(map) = &new_advance_map {
+        let off = out.len() as u32;
+        out[advance_off_slot..advance_off_slot + 4].copy_from_slice(&off.to_be_bytes());
+        out.extend_from_slice(map);
+    }
+    if let Some(map) = &new_lsb_map {
+        let off = out.len() as u32;
+        out[lsb_off_slot..lsb_off_slot + 4].copy_from_slice(&off.to_be_bytes());
+        out.extend_from_slice(map);
+    }
+    if let Some(map) = &new_rsb_map {
+        let off = out.len() as u32;
+        out[rsb_off_slot..rsb_off_slot + 4].copy_from_slice(&off.to_be_bytes());
+        out.extend_from_slice(map);
+    }
+    Some(out)
+}
+
+// ---------------------------------------------------------------------------
+// VVAR partial bake
+// ---------------------------------------------------------------------------
+
+/// Re-emits VVAR with its embedded IVS partial-projected and every
+/// DeltaSetIndexMap rewritten. VVAR's header is 24 bytes (4 ver + 5
+/// × o32: ivs / advance-height / tsb / bsb / vorg). The vorg map
+/// shares the IVS rows with the others; we rewrite it through the
+/// same remap.
+#[allow(dead_code)] // wired in by the partial-instancing integration commit
+fn bake_vvar_partial(vvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Option<Vec<u8>> {
+    if vvar_bytes.len() < 24 {
+        return None;
+    }
+    let major = u16::from_be_bytes([vvar_bytes[0], vvar_bytes[1]]);
+    if major != 1 {
+        return None;
+    }
+    let ivs_off = u32::from_be_bytes([vvar_bytes[4], vvar_bytes[5], vvar_bytes[6], vvar_bytes[7]])
+        as usize;
+    let mut map_offs: [u32; 4] = [0; 4];
+    for (i, slot) in map_offs.iter_mut().enumerate() {
+        let base = 8 + i * 4;
+        *slot = u32::from_be_bytes([
+            vvar_bytes[base],
+            vvar_bytes[base + 1],
+            vvar_bytes[base + 2],
+            vvar_bytes[base + 3],
+        ]);
+    }
+
+    if vvar_bytes.len() < ivs_off {
+        return None;
+    }
+    let (new_ivs, remap) = bake_ivs_partial(&vvar_bytes[ivs_off..], coords, pins)?;
+    let new_subtable_count = u16::from_be_bytes([new_ivs[6], new_ivs[7]]);
+
+    let mut new_maps: [Option<Vec<u8>>; 4] = [None, None, None, None];
+    for (i, off) in map_offs.iter().enumerate() {
+        if *off != 0 {
+            new_maps[i] = Some(rewrite_delta_set_index_map(
+                vvar_bytes,
+                *off as usize,
+                &remap,
+                new_subtable_count,
+            )?);
+        }
+    }
+
+    let mut out = Vec::with_capacity(vvar_bytes.len());
+    out.extend_from_slice(&vvar_bytes[..4]); // major + minor
+    let new_ivs_off: u32 = 24;
+    out.extend_from_slice(&new_ivs_off.to_be_bytes());
+    let mut map_slots = [0usize; 4];
+    for slot in &mut map_slots {
+        *slot = out.len();
+        out.extend_from_slice(&0u32.to_be_bytes());
+    }
+    out.extend_from_slice(&new_ivs);
+    for (i, map) in new_maps.iter().enumerate() {
+        if let Some(map) = map {
+            let off = out.len() as u32;
+            out[map_slots[i]..map_slots[i] + 4].copy_from_slice(&off.to_be_bytes());
+            out.extend_from_slice(map);
+        }
+    }
+    Some(out)
+}
+
+// ---------------------------------------------------------------------------
+// MVAR partial bake
+// ---------------------------------------------------------------------------
+
+/// Re-emits MVAR with its embedded IVS partial-projected. MVAR
+/// references rows by direct (outer, inner) in each value record —
+/// no DeltaSetIndexMap. Rows pointing at collapsed subtables get
+/// rewritten to `(new_subtable_count, 0)` (out-of-range; resolves to
+/// zero delta).
+///
+/// The MVAR header has `valueRecordSize >= 8`; we preserve the
+/// source's record_size and only patch the first 8 bytes of each
+/// record (tag + outer + inner).
+#[allow(dead_code)] // wired in by the partial-instancing integration commit
+fn bake_mvar_partial(mvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Option<Vec<u8>> {
+    if mvar_bytes.len() < 12 {
+        return None;
+    }
+    let major = u16::from_be_bytes([mvar_bytes[0], mvar_bytes[1]]);
+    if major != 1 {
+        return None;
+    }
+    let record_size = u16::from_be_bytes([mvar_bytes[6], mvar_bytes[7]]) as usize;
+    let record_count = u16::from_be_bytes([mvar_bytes[8], mvar_bytes[9]]) as usize;
+    let store_off = u16::from_be_bytes([mvar_bytes[10], mvar_bytes[11]]) as usize;
+
+    if record_count > 0 && record_size < 8 {
+        return None;
+    }
+    if store_off == 0 {
+        // No store — pass through unchanged.
+        return Some(mvar_bytes.to_vec());
+    }
+    if mvar_bytes.len() < store_off {
+        return None;
+    }
+    let (new_ivs, remap) = bake_ivs_partial(&mvar_bytes[store_off..], coords, pins)?;
+    let new_subtable_count = u16::from_be_bytes([new_ivs[6], new_ivs[7]]);
+
+    // Layout: 12-byte header + records + IVS. Preserve record_size.
+    let records_start: usize = 12;
+    let records_size = record_count * record_size;
+    if mvar_bytes.len() < records_start + records_size {
+        return None;
+    }
+    let new_store_off: u16 = (records_start + records_size) as u16;
+    let mut out = Vec::with_capacity(mvar_bytes.len());
+    out.extend_from_slice(&mvar_bytes[..6]);
+    out.extend_from_slice(&(record_size as u16).to_be_bytes());
+    out.extend_from_slice(&(record_count as u16).to_be_bytes());
+    out.extend_from_slice(&new_store_off.to_be_bytes());
+
+    // Records.
+    for i in 0..record_count {
+        let off = records_start + i * record_size;
+        let tag = &mvar_bytes[off..off + 4];
+        let outer = u16::from_be_bytes([mvar_bytes[off + 4], mvar_bytes[off + 5]]);
+        let inner = u16::from_be_bytes([mvar_bytes[off + 6], mvar_bytes[off + 7]]);
+        let (new_outer, new_inner) = match remap.lookup(outer, inner) {
+            Some(v) => v,
+            None => (new_subtable_count, 0),
+        };
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&new_outer.to_be_bytes());
+        out.extend_from_slice(&new_inner.to_be_bytes());
+        // Trailing pad bytes per record_size (record_size >= 8).
+        if record_size > 8 {
+            out.extend_from_slice(&mvar_bytes[off + 8..off + record_size]);
+        }
+    }
+    out.extend_from_slice(&new_ivs);
+    Some(out)
+}
+
+// ---------------------------------------------------------------------------
+// GDEF.IVS partial bake
+// ---------------------------------------------------------------------------
+
+/// Re-emits GDEF with its embedded IVS partial-projected. The other
+/// GDEF tables (glyphClassDef, attachList, ligCaretList,
+/// markAttachClassDef, markGlyphSetsDef) ride through verbatim — they
+/// don't carry variation indices.
+///
+/// Unlike the prune-IVS path used for full instancing, this preserves
+/// GDEF v1.3 with a non-zero `itemVarStoreOffset` pointing at the new
+/// trimmed IVS. GPOS Anchor variations + future GDEF-resident
+/// VariationIndex consumers (mark / cursive bake) reach the trimmed
+/// regions through the same offset.
+#[allow(dead_code)] // wired in by the partial-instancing integration commit
+fn bake_gdef_ivs_partial(
+    gdef_bytes: &[u8],
+    coords: &[f32],
+    pins: &[AxisPin],
+) -> Option<Vec<u8>> {
+    if gdef_bytes.len() < 18 {
+        return None;
+    }
+    let major = u16::from_be_bytes([gdef_bytes[0], gdef_bytes[1]]);
+    let minor = u16::from_be_bytes([gdef_bytes[2], gdef_bytes[3]]);
+    if major != 1 || minor < 3 {
+        return None;
+    }
+    let ivs_off =
+        u32::from_be_bytes([gdef_bytes[14], gdef_bytes[15], gdef_bytes[16], gdef_bytes[17]])
+            as usize;
+    if ivs_off == 0 {
+        return None;
+    }
+    if gdef_bytes.len() < ivs_off {
+        return None;
+    }
+    let (new_ivs, _remap) = bake_ivs_partial(&gdef_bytes[ivs_off..], coords, pins)?;
+
+    // The non-IVS GDEF body (everything before ivs_off) rides through
+    // verbatim. Patch the IVS offset to the truncated body's tail and
+    // append the new IVS.
+    let mut out = Vec::with_capacity(ivs_off + new_ivs.len());
+    out.extend_from_slice(&gdef_bytes[..ivs_off]);
+    let new_ivs_off: u32 = ivs_off as u32;
+    out[14..18].copy_from_slice(&new_ivs_off.to_be_bytes());
+    out.extend_from_slice(&new_ivs);
+    Some(out)
+}
+
+// ---------------------------------------------------------------------------
 // GPOS variation bake (#175)
 // ---------------------------------------------------------------------------
 
@@ -3042,12 +3581,12 @@ mod partial_instancing_tests {
     }
 
     #[test]
-    fn axis_pins_with_keep_currently_unsupported() {
-        // The math primitives + public API ship in this release; the
-        // variation-table emit side (fvar/avar trim, IVS tuple
-        // rewrite, gvar projection) lands in follow-ups. Until then
-        // any `Keep` entry surfaces a clear error rather than
-        // producing a silently-broken font.
+    fn axis_pins_with_keep_on_gvar_source_unsupported() {
+        // gvar tuple-projection + CFF2 VarStore rewrite are tracked
+        // as a follow-up to this PR. Sources carrying gvar (like
+        // Rubik VF) still surface a clear Unsupported error when any
+        // axis is `Keep`; the IVS-bearing tables (HVAR / VVAR / MVAR /
+        // GDEF.IVS) trim correctly today.
         let face = rubik_face();
         let axis_count = face.fvar().unwrap().unwrap().axes().len();
         let mut pins = alloc::vec![AxisPin::Pin; axis_count];
