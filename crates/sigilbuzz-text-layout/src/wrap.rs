@@ -48,7 +48,11 @@ pub struct LineRange {
     pub start_byte: usize,
     /// End byte offset (exclusive) into the source text.
     pub end_byte: usize,
-    /// Total advance width consumed by the glyphs of this line.
+    /// Total advance width consumed by the glyphs of this line, with
+    /// trailing UAX 14 space-class characters ignored (LB7: trailing
+    /// spaces hang into the right margin and do not count toward the
+    /// line's measured width). This matches the budget the wrapper
+    /// enforced when picking the break.
     pub width: f32,
 }
 
@@ -115,6 +119,14 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
     };
     let measure = |from: usize, to: usize| span_width(from, trim_end(to));
 
+    // The per-line `width` we report to callers is the *measured*
+    // width — i.e. trailing space-class characters do not contribute
+    // to it, matching UAX 14 LB7 ("trailing spaces hang into the
+    // right margin"). The wrapping decisions above already use
+    // `measure`; we have to use it here too so the public field
+    // agrees with the budget the wrapper enforced.
+    let line_width = |from: usize, to: usize| span_width(from, trim_end(to));
+
     let mut lines: Vec<LineRange> = Vec::new();
     let mut line_start = 0usize;
     let mut last_allowed: Option<usize> = None;
@@ -129,7 +141,7 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
                 lines.push(LineRange {
                     start_byte: line_start,
                     end_byte: offset,
-                    width: span_width(line_start, offset),
+                    width: line_width(line_start, offset),
                 });
                 line_start = offset;
                 last_allowed = None;
@@ -146,7 +158,7 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
                         lines.push(LineRange {
                             start_byte: line_start,
                             end_byte: prev,
-                            width: span_width(line_start, prev),
+                            width: line_width(line_start, prev),
                         });
                         line_start = prev;
                         // The current opportunity may itself fit on
@@ -163,7 +175,7 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
                                 lines.push(LineRange {
                                     start_byte: line_start,
                                     end_byte: offset,
-                                    width: span_width(line_start, offset),
+                                    width: line_width(line_start, offset),
                                 });
                                 line_start = offset;
                             }
@@ -172,7 +184,7 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
                         lines.push(LineRange {
                             start_byte: line_start,
                             end_byte: offset,
-                            width: span_width(line_start, offset),
+                            width: line_width(line_start, offset),
                         });
                         line_start = offset;
                         last_allowed = None;
@@ -192,7 +204,7 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
         lines.push(LineRange {
             start_byte: line_start,
             end_byte: text.len(),
-            width: span_width(line_start, text.len()),
+            width: line_width(line_start, text.len()),
         });
     }
 
@@ -309,6 +321,32 @@ mod tests {
         for line in &lines {
             assert!(line.width <= 25.0); // a bit of slack for sentinel
         }
+    }
+
+    #[test]
+    fn trailing_spaces_do_not_count_toward_line_width() {
+        // "abc   " — 3 letters + 3 trailing spaces, advance 10 each.
+        // Per UAX 14 LB7 trailing spaces hang into the right margin,
+        // so the reported width must be 30 (the letters only), not 60.
+        let text = "abc   ";
+        let shaped = shape_uniform(text, 10);
+        let lines = wrap_lines(
+            &shaped,
+            text,
+            WrapOptions {
+                max_width: 30.0,
+                break_at_word_boundaries: true,
+            },
+        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].start_byte, 0);
+        assert_eq!(lines[0].end_byte, 6);
+        // Trailing whitespace excluded.
+        assert!(
+            (lines[0].width - 30.0).abs() < f32::EPSILON,
+            "width={} should not count trailing spaces",
+            lines[0].width
+        );
     }
 
     #[test]
