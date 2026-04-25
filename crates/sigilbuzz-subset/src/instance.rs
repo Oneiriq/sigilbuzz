@@ -239,18 +239,16 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
                 "instance: axis_pins length must equal coords.len()",
             ));
         }
-        // gvar + CFF2 partial-projection have not landed yet (issue
-        // tracking #183 follow-up). Reject Keep when the source has
-        // either of those, with a clear message — the fvar / avar /
-        // HVAR / VVAR / MVAR / GDEF.IVS paths are wired through below.
+        // gvar partial-projection is still deferred. CFF2 VarStore
+        // rewrite + blend-operator rewrite is wired through
+        // `partial_instance` (see [`crate::cff2::bake_cff2_partial`]).
         if input.axis_pins.contains(&AxisPin::Keep) {
             let has_gvar = face.record(tag::GVAR).is_some();
-            let has_cff2 = face.record(tag::CFF2).is_some();
-            if has_gvar || has_cff2 {
+            if has_gvar {
                 return Err(SubsetError::Unsupported(
                     "instance: partial instancing (axis_pins with Keep) for sources with \
-                     gvar or CFF2 not yet implemented; the IVS-bearing tables \
-                     (HVAR / VVAR / MVAR / GDEF.IVS) trim correctly today",
+                     gvar not yet implemented; the IVS-bearing tables \
+                     (HVAR / VVAR / MVAR / GDEF.IVS / CFF2.VarStore) trim correctly today",
                 ));
             }
             // partial_instance returns `Ok` with the reduced-axis VF;
@@ -599,6 +597,13 @@ fn partial_instance(
             // No IVS in GDEF — pass through.
             tables.push((tag::GDEF, gdef_bytes.to_vec()));
         }
+    }
+
+    // CFF2 VarStore + blend-operator rewrite (optional).
+    if let Ok(cff2_bytes) = face.table_bytes(tag::CFF2) {
+        let new_cff2 =
+            crate::cff2::bake_cff2_partial(cff2_bytes, &post_avar_coords, pins)?;
+        tables.push((tag::CFF2, new_cff2));
     }
 
     // Carry every other table through verbatim.
@@ -3764,11 +3769,11 @@ mod partial_instancing_tests {
 
     #[test]
     fn axis_pins_with_keep_on_gvar_source_unsupported() {
-        // gvar tuple-projection + CFF2 VarStore rewrite are tracked
-        // as a follow-up to this PR. Sources carrying gvar (like
-        // Rubik VF) still surface a clear Unsupported error when any
-        // axis is `Keep`; the IVS-bearing tables (HVAR / VVAR / MVAR /
-        // GDEF.IVS) trim correctly today.
+        // gvar tuple-projection is still tracked as a follow-up.
+        // Sources carrying gvar (like Rubik VF) surface a clear
+        // Unsupported error when any axis is `Keep`; the IVS-bearing
+        // tables (HVAR / VVAR / MVAR / GDEF.IVS / CFF2.VarStore) trim
+        // correctly today.
         let face = rubik_face();
         let axis_count = face.fvar().unwrap().unwrap().axes().len();
         let mut pins = alloc::vec![AxisPin::Pin; axis_count];
@@ -4617,8 +4622,8 @@ mod partial_instancing_tests {
         match err {
             SubsetError::Unsupported(msg) => {
                 assert!(
-                    msg.contains("gvar") || msg.contains("CFF2"),
-                    "msg should call out the deferred gvar/CFF2 paths: {}",
+                    msg.contains("gvar"),
+                    "msg should call out the deferred gvar path: {}",
                     msg
                 );
             }
@@ -4627,20 +4632,55 @@ mod partial_instancing_tests {
     }
 
     #[test]
-    fn partial_instance_rejects_keep_on_cff2_source() {
-        // Source Sans 3 is CFF2; partial-instance with Keep must
-        // surface an Unsupported error today.
+    fn partial_instance_keep_on_cff2_source_emits_partial_var_font() {
+        // Source Sans 3 is a single-axis CFF2 VF (wght). Keeping every
+        // axis Keep produces a partial-instanced VF byte-stream — the
+        // emit walks bake_cff2_partial which rewrites the VarStore +
+        // blend operators with surviving regions only.
         let face = Face::parse_bytes(SOURCE_SANS, 0).unwrap();
         let axis_count = face.fvar().unwrap().unwrap().axes().len();
-        let mut pins = alloc::vec![AxisPin::Pin; axis_count];
-        pins[0] = AxisPin::Keep;
+        let pins = alloc::vec![AxisPin::Keep; axis_count];
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
             axis_pins: pins,
         };
-        let err = instance(&face, &input).unwrap_err();
-        assert!(matches!(err, SubsetError::Unsupported(_)));
+        let out = instance(&face, &input).expect("CFF2 partial bake");
+        let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
+        let new_fvar = baked.fvar().unwrap().expect("fvar survives");
+        assert_eq!(new_fvar.axes().len(), axis_count);
+        assert!(baked.record(tag::CFF2).is_some());
+    }
+
+    #[test]
+    fn partial_instance_source_sans_pin_wght_matches_full_instance() {
+        // Source Sans 3 with `wght=Pin` must produce byte-identical
+        // output to the existing full-instance path (which uses #163
+        // blend bake). This guards the all-Pin branch: it must keep
+        // routing through cff2_bake and never enter the partial path.
+        let face = Face::parse_bytes(SOURCE_SANS, 0).unwrap();
+        let user_default = face.fvar().unwrap().unwrap().axes()[0].default_value;
+        let coords = face
+            .fvar()
+            .unwrap()
+            .unwrap()
+            .normalize_coords(&[user_default]);
+        let empty = InstanceInput {
+            coords: coords.clone(),
+            drop_var_tables: true,
+            axis_pins: Vec::new(),
+        };
+        let pinned = InstanceInput {
+            coords,
+            drop_var_tables: true,
+            axis_pins: alloc::vec![AxisPin::Pin],
+        };
+        let a = instance(&face, &empty).expect("empty (full-instance)");
+        let b = instance(&face, &pinned).expect("Pin (full-instance via partial path gate)");
+        assert_eq!(
+            a.bytes, b.bytes,
+            "Pin wght on CFF2 must match empty axis_pins (both go through cff2_bake)"
+        );
     }
 
     #[test]
