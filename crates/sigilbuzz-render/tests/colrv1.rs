@@ -14,7 +14,7 @@
 //! the var fixture) the deltas wiring up correctly.
 
 use sigilbuzz::{Blob, Face};
-use sigilbuzz_render::{RenderError, Rasterizer};
+use sigilbuzz_render::{Rasterizer, RenderError};
 
 // =========================================================================
 // SFNT directory + table-builders shared by every fixture
@@ -165,7 +165,7 @@ fn build_v1_header(glyph_id: u16) -> Vec<u8> {
     out.extend_from_slice(&0u32.to_be_bytes()); // layerListOffset
     out.extend_from_slice(&0u32.to_be_bytes()); // clipListOffset
     out.extend_from_slice(&0u32.to_be_bytes()); // varStoreOffset
-    // BaseGlyphList: numRecords, then (gid, paintOffset).
+                                                // BaseGlyphList: numRecords, then (gid, paintOffset).
     out.extend_from_slice(&1u32.to_be_bytes());
     out.extend_from_slice(&glyph_id.to_be_bytes());
     out.extend_from_slice(&10u32.to_be_bytes());
@@ -302,7 +302,10 @@ fn colrv1_missing_record_returns_dedicated_error() {
     let err = rast
         .rasterize_colrv1_glyph(&face, 99, 0, 24.0, &[])
         .unwrap_err();
-    assert!(matches!(err, RenderError::ColrV1NotFound(99)), "got {err:?}");
+    assert!(
+        matches!(err, RenderError::ColrV1NotFound(99)),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -346,9 +349,9 @@ fn build_glyph_linear_gradient_font() -> Vec<u8> {
     //   FWord x0,y0,x1,y1,x2,y2 }
     colr.push(4);
     colr.extend_from_slice(&[0, 0, 0]); // colorLine placeholder
-    // Gradient axis: from x=0 (left of square) to x=200 (right of
-    // square). Anchor (0, 200) is outside the line per the spec's
-    // unused third point convention.
+                                        // Gradient axis: from x=0 (left of square) to x=200 (right of
+                                        // square). Anchor (0, 200) is outside the line per the spec's
+                                        // unused third point convention.
     colr.extend_from_slice(&0i16.to_be_bytes()); // x0
     colr.extend_from_slice(&100i16.to_be_bytes()); // y0
     colr.extend_from_slice(&200i16.to_be_bytes()); // x1
@@ -363,7 +366,7 @@ fn build_glyph_linear_gradient_font() -> Vec<u8> {
     // ColorLine: { u8 extend; u16 numStops; ColorStop[] }
     colr.push(0); // extend = Pad
     colr.extend_from_slice(&2u16.to_be_bytes()); // numStops
-    // Stop 0: offset 0.0, palette 0 (red), alpha 1.0.
+                                                 // Stop 0: offset 0.0, palette 0 (red), alpha 1.0.
     colr.extend_from_slice(&f2dot14(0.0));
     colr.extend_from_slice(&0u16.to_be_bytes());
     colr.extend_from_slice(&f2dot14(1.0));
@@ -448,7 +451,7 @@ fn build_var_solid_font() -> Vec<u8> {
         f.extend_from_slice(&20u16.to_be_bytes()); // axisSize
         f.extend_from_slice(&0u16.to_be_bytes()); // instanceCount
         f.extend_from_slice(&0u16.to_be_bytes()); // instanceSize
-        // VariationAxisRecord (20 bytes).
+                                                  // VariationAxisRecord (20 bytes).
         f.extend_from_slice(b"WGHT");
         // Fixed (16.16) min, default, max.
         f.extend_from_slice(&0u32.to_be_bytes());
@@ -481,7 +484,7 @@ fn build_var_solid_font() -> Vec<u8> {
     // patch varStoreOffset in the header.
     let mut colr = build_v1_header(1);
     let var_store_off_slot = 26; // varStoreOffset is the last u32 in the header
-    // PaintGlyph(child=PaintVarSolid, outline=gid 1).
+                                 // PaintGlyph(child=PaintVarSolid, outline=gid 1).
     let pglyph_start = colr.len();
     colr.push(10); // PaintGlyph
     colr.extend_from_slice(&[0, 0, 0]); // Offset24 placeholder for child
@@ -538,7 +541,7 @@ fn build_ivs_one_axis_one_short_delta(delta: i16) -> Vec<u8> {
     let region_list_off = ivs.len() as u32;
     ivs.extend_from_slice(&1u16.to_be_bytes()); // axisCount
     ivs.extend_from_slice(&1u16.to_be_bytes()); // regionCount
-    // Region 0, axis 0: peak at 1.0 → scalar=1 at coord=1.0.
+                                                // Region 0, axis 0: peak at 1.0 → scalar=1 at coord=1.0.
     ivs.extend_from_slice(&f2dot14(0.0));
     ivs.extend_from_slice(&f2dot14(1.0));
     ivs.extend_from_slice(&f2dot14(1.0));
@@ -556,11 +559,11 @@ fn build_ivs_one_axis_one_short_delta(delta: i16) -> Vec<u8> {
     ivs.extend_from_slice(&0u16.to_be_bytes()); // wordDeltaCount = 0 (all short)
     ivs.extend_from_slice(&1u16.to_be_bytes()); // regionIndexCount
     ivs.extend_from_slice(&0u16.to_be_bytes()); // regionIndexes[0] = 0
-    // The single delta needs to land in `i16` range (it's -8192).
-    // `wordDeltaCount` controls the per-row layout: bits 0..14 are
-    // the count of leading word-deltas in the row, bit 15 ("LONG_WORDS")
-    // upgrades each word from i16 to i32. We keep bit 15 = 0 and
-    // set wordDeltaCount = 1 so the single delta is read as one i16.
+                                                // The single delta needs to land in `i16` range (it's -8192).
+                                                // `wordDeltaCount` controls the per-row layout: bits 0..14 are
+                                                // the count of leading word-deltas in the row, bit 15 ("LONG_WORDS")
+                                                // upgrades each word from i16 to i32. We keep bit 15 = 0 and
+                                                // set wordDeltaCount = 1 so the single delta is read as one i16.
     let wdc_off = (var_data_off as usize) + 2;
     ivs[wdc_off..wdc_off + 2].copy_from_slice(&1u16.to_be_bytes());
     // Emit the row: one i16 word delta. (`itemCount` = 1 row × one

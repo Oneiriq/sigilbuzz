@@ -41,8 +41,8 @@ use alloc::vec::Vec;
 
 use sigilbuzz::Face;
 use sigilbuzz_paint::{
-    evaluate_at_coords, Color, CompositeMode, DrawCmd, Extend, Gradient, GradientKind,
-    PaintSource, Transform2D,
+    evaluate_at_coords, Color, CompositeMode, DrawCmd, Extend, Gradient, GradientKind, PaintSource,
+    Transform2D,
 };
 
 use crate::affine::Affine;
