@@ -56,6 +56,7 @@
 //! and per-region scalar evaluation; consumers fold scalars back into
 //! their own tuple decoding.
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
@@ -340,12 +341,12 @@ impl<'a> MultiVarStore<'a> {
             .map(|&ri| self.region_scalar(ri, coords))
             .collect();
         let mut out = vec![0.0_f32; value_count];
-        for v in 0..value_count {
+        for (v, slot) in out.iter_mut().enumerate() {
             let row = v * region_count;
-            for r in 0..region_count {
+            for (r, scalar) in scalars.iter().enumerate() {
                 #[allow(clippy::cast_precision_loss)]
                 let d = deltas[row + r] as f32;
-                out[v] += d * scalars[r];
+                *slot += d * scalar;
             }
         }
         Some(out)
@@ -355,6 +356,7 @@ impl<'a> MultiVarStore<'a> {
 /// Triangular region falloff for one axis. Returns `1.0` at `peak`,
 /// tapering linearly to `0.0` at `start` and `end`. Mirrors the
 /// classic `supportScalar` from the OpenType spec.
+#[allow(clippy::float_cmp)]
 fn axis_scalar(start: f32, peak: f32, end: f32, coord: f32) -> f32 {
     if peak == 0.0 && start <= 0.0 && end >= 0.0 {
         return 1.0;
