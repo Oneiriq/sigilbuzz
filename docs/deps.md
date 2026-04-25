@@ -14,24 +14,30 @@ The bar:
 4. The dep is gated behind a cargo feature so consumers who don't
    need it pay nothing.
 
-## `brotli-decompressor` (in `sigilbuzz-woff`)
+## `brotli` (in `sigilbuzz-woff`)
 
-- **Version:** `5.x`.
+- **Version:** `8.x`.
 - **License:** BSD-3-Clause / MIT (dual).
 - **Where:** `crates/sigilbuzz-woff/Cargo.toml`, gated behind the
   `woff2` cargo feature (which is on by default but trivially
   disablable for WOFF1-only consumers).
-- **Why:** WOFF2 mandates Brotli decompression for the single
-  payload block that holds every table back-to-back. Brotli is its
-  own RFC (RFC 7932) — implementing it from scratch is a separate
-  project measured in thousands of lines and would dwarf the rest of
-  the WOFF2 unwrapper. `brotli-decompressor` is the canonical Rust
-  port maintained by the Dropbox / Brotli ecosystem and is what
-  every other Rust WOFF2 implementation rolls under.
+- **Why:** WOFF2 mandates Brotli for the single payload block that
+  holds every table back-to-back — decompression on the unwrap path
+  (`unwrap_woff2`) and compression on the wrap path (`wrap_woff2`).
+  Brotli is its own RFC (RFC 7932); a from-scratch encoder dwarfs
+  the rest of the WOFF2 wrapper. The `brotli` crate from the
+  Dropbox / Brotli ecosystem ships *both* directions in one crate
+  and is the canonical Rust port — `brotli-decompressor` (which
+  we used through 0.6.0 for unwrap-only) is published from the
+  same workspace by the same author.
 - **Transitive footprint:** `alloc-no-stdlib` and `alloc-stdlib` —
   both single-purpose helper crates by the same author, both
-  no_std-capable, both BSD-3 / MIT.
-- **Forward path:** if Brotli encoding is ever needed for
-  `wrap_woff2`, the companion `brotli` crate (same author) covers
-  it. Both decoder and encoder land in `sigilbuzz-woff` only — the
-  shaping core stays dep-free.
+  no_std-capable, both BSD-3 / MIT. The `brotli` crate adds the
+  encoder modules but keeps the same transitive set as
+  `brotli-decompressor`.
+- **Migration note (0.6.0 → 0.7.0):** the dep was previously
+  `brotli-decompressor = "5"`. 0.7.0 substitutes `brotli = "8"`
+  because the encoder for `wrap_woff2` lives in the umbrella
+  crate. The decompressor API (`brotli::BrotliDecompress`) is
+  re-exported and behaves identically to the standalone crate; the
+  switch is API-compatible for `unwrap_woff2` callers.

@@ -295,7 +295,7 @@ fn unwrap_woff2_inner(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
 
 #[cfg(feature = "woff2")]
 fn brotli_decompress(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
-    use brotli_decompressor::BrotliDecompress;
+    use brotli::BrotliDecompress;
     use std::io::Cursor;
 
     let mut out: Vec<u8> = Vec::with_capacity(expected_len);

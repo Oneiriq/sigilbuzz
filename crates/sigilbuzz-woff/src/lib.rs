@@ -23,15 +23,15 @@
 //!   WOFF2 anyway — compressed WOFF1 is a legacy curiosity that
 //!   rarely shows up in practice.
 //! - [`unwrap_woff2`]: WOFF2 header + directory parsing, Brotli
-//!   decompression (via the `brotli-decompressor` crate, gated on
-//!   the default `woff2` feature), and the inverse `glyf`/`loca`
-//!   transform. Reconstructs simple glyphs (with bbox, end-of-contour
-//!   list, instructions, and triplet-decoded coordinate deltas) and
+//!   decompression (via the `brotli` crate, gated on the default
+//!   `woff2` feature), and the inverse `glyf`/`loca` transform.
+//!   Reconstructs simple glyphs (with bbox, end-of-contour list,
+//!   instructions, and triplet-decoded coordinate deltas) and
 //!   composite glyphs (verbatim component records plus optional
 //!   trailing instructions).
-//! - `wrap_woff2`: **deferred to 0.7.0**. The forward `glyf`
-//!   transform plus Brotli encoding doubles the implementation
-//!   surface and ships in its own follow-up.
+//! - [`wrap_woff2`]: forward `glyf`/`loca` transform plus Brotli
+//!   encoding. Takes raw SFNT bytes and produces a WOFF2 file. Hmtx
+//!   transform v1 is not emitted; `hmtx` stays untransformed.
 //!
 //! # Feature flags
 //!
@@ -43,7 +43,7 @@
 //!   callers wanting Vec-free APIs.
 //!
 //! See `docs/deps.md` in the workspace root for the rationale on the
-//! single new runtime dependency this crate brings (`brotli-decompressor`).
+//! single new runtime dependency this crate brings (`brotli`).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
