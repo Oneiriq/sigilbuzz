@@ -406,7 +406,8 @@ fn fold_mark_array(
     let mut anchor_offs: Vec<usize> = Vec::with_capacity(mark_count);
     for i in 0..mark_count {
         let rec = records_off + i * 4;
-        let anchor_rel = u16::from_be_bytes([subtable_buf[rec + 2], subtable_buf[rec + 3]]) as usize;
+        let anchor_rel =
+            u16::from_be_bytes([subtable_buf[rec + 2], subtable_buf[rec + 3]]) as usize;
         if anchor_rel == 0 {
             anchor_offs.push(0);
         } else {
