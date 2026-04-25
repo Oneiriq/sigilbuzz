@@ -310,6 +310,19 @@ void              hb_font_paint_glyph(hb_font_t *font,
                                       uint32_t palette_index,
                                       hb_color_t foreground_color);
 
+/* ---------- Introspection ---------- */
+
+#define HB_OT_TAG_GSUB HB_TAG('G','S','U','B')
+#define HB_OT_TAG_GPOS HB_TAG('G','P','O','S')
+
+void hb_face_collect_unicodes(const hb_face_t *face, hb_set_t *set);
+
+void hb_ot_layout_collect_features(const hb_face_t *face,
+                                   hb_tag_t          table_tag,
+                                   const hb_tag_t   *scripts,
+                                   const hb_tag_t   *languages,
+                                   hb_set_t         *features);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

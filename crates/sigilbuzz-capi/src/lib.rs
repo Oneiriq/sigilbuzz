@@ -55,7 +55,10 @@ use sigilbuzz::{shape, Buffer, Direction, Face, Feature, Font};
 
 // `hb_set_t` lives in its own module — the opaque integer-set type
 // the subset and introspection bridges need. It has no dependency on
-// the rest of the crate, so it ships unconditionally.
+// the rest of the crate, so it ships unconditionally. `introspect`
+// follows the same posture: it doesn't reach into the subsetter or
+// paint evaluator, just walks tables sigilbuzz already parses.
+pub mod introspect;
 pub mod set;
 // `subset_bridge` is gated on the `subset` cargo feature so a
 // `--no-default-features` build of this crate still compiles cleanly
