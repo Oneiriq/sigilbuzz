@@ -37,8 +37,8 @@ use crate::tables::glyf::PhantomMetrics;
 use crate::tables::parse::Reader;
 use crate::tables::{
     tag, Avar, Cbdt, Cblc, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBitmap, GlyphBounds, Gpos, Gsub,
-    Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Maxp, Morx, Mvar, Outline, Sbix, Svg,
-    SvgDocument, Vhea, Vmtx, Vorg, Vvar,
+    Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Math, Maxp, Morx, Mvar, Outline, Sbix,
+    Svg, SvgDocument, Vhea, Vmtx, Vorg, Vvar,
 };
 
 /// One entry in the SFNT table directory.
@@ -636,6 +636,20 @@ impl<'a> Face<'a> {
         match self.colr()? {
             Some(colr) => Ok(colr.paint(glyph_id)),
             None => Ok(None),
+        }
+    }
+
+    /// Parses the `MATH` table if the font carries one. Math
+    /// typography fonts (STIX 2 Math, Latin Modern Math, Cambria
+    /// Math, Asana Math, XITS Math) ship this; everything else
+    /// returns `Ok(None)`. sigilbuzz exposes the parsed structure;
+    /// running an actual math layout pass is the consumer's job
+    /// (LuaTeX, MathML renderers, …).
+    pub fn math(&self) -> Result<Option<Math<'a>>> {
+        match self.table_bytes(tag::MATH) {
+            Ok(bytes) => Ok(Some(Math::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
         }
     }
 

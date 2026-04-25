@@ -31,6 +31,7 @@ pub mod kern;
 pub mod kerx;
 pub mod layout;
 pub mod loca;
+pub mod math;
 pub mod maxp;
 pub mod morx;
 pub mod mvar;
@@ -71,6 +72,10 @@ pub use kern::KernTable;
 pub use kerx::Kerx;
 pub use layout::{ClassDef, Coverage};
 pub use loca::Loca;
+pub use math::{
+    GlyphAssembly, GlyphConstruction, GlyphPart, KernSide, Math, MathConstants, MathGlyphInfo,
+    MathGlyphVariant, MathKern, MathValue, MathVariants,
+};
 pub use maxp::Maxp;
 pub use morx::Morx;
 pub use mvar::Mvar;
@@ -153,4 +158,7 @@ pub mod tag {
     /// `SVG ` — OpenType SVG (inline SVG documents per glyph).
     /// Note the trailing space — OpenType tags are exactly four bytes.
     pub const SVG: [u8; 4] = *b"SVG ";
+    /// `MATH` — OpenType math typography table. Carried by math
+    /// fonts (STIX 2 Math, Latin Modern Math, Cambria Math, …).
+    pub const MATH: [u8; 4] = *b"MATH";
 }

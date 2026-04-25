@@ -36,6 +36,17 @@ Fonts used by the integration tests.
   `tests/bitmap_fonts.rs` to drive the sbix parser and the
   `Face::glyph_bitmap` accessor on the sbix path. Public-domain /
   no third-party content.
+- `math_synthetic.ttf` — Synthetic 876-byte font with four glyphs and
+  a hand-laid OpenType `MATH` table exercising every subtable parser:
+  `MathConstants` (51 MathValueRecords with realistic values),
+  `MathGlyphInfo` (italic correction + top accent + extended-shape
+  coverage + per-corner kern info), and `MathVariants` (one vertical
+  glyph construction with two progressive variants and a 3-part
+  assembly). Real math fonts (STIX 2 Math, Latin Modern Math, Asana
+  Math) are 150 KB to 700 KB unsubset — too heavy to vendor for one
+  integration test. Built deterministically from
+  `tests/tools/build_math_fixture.py`; used by `tests/math_fixture.rs`.
+  Public-domain / no third-party content.
 - `phantom_anchor.ttf` — Synthetic 780-byte fixture with four glyphs
   (`.notdef`, `base`, `mark`, `combo`). `combo` is a composite with one
   XY-mode component and one *anchor-mode* component whose `arg1` lands
