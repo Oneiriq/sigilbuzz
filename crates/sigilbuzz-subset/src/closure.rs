@@ -1,15 +1,29 @@
 //! Glyph-id closure walker.
 //!
-//! Starting from the caller's gid set, we expand transitively through
-//! composite-glyph references in `glyf`. Ligature components in GSUB
-//! type 4 and mark anchors in GPOS 4/5/6 *would* land here too, but
-//! the first pass of the subsetter drops GSUB/GPOS entirely so those
-//! references cannot keep glyphs alive — there is no point pulling
-//! them in.
+//! Starting from the caller's gid set, we expand transitively through:
+//!
+//! - **Composite components** in `glyf` — a kept composite glyph keeps
+//!   every reference it needs to render correctly.
+//! - **Ligature components** in `GSUB` type 4 — if a kept gid is the
+//!   *output* of a ligature substitution, every input component must
+//!   also survive so shaping the input string still triggers the
+//!   substitution. (The reverse direction — keeping the *output* when
+//!   the user asks for the components — is intentionally not done;
+//!   shaping the components against the subset will fall through and
+//!   hit the original glyph stream, which is still correct.)
+//! - **Mark-base anchor partners** in `GPOS` type 4 — when a kept mark
+//!   has an anchor pointing at a base, the base is pulled in, so the
+//!   mark can still attach. The opposite direction is *not* pulled in:
+//!   marks attach optionally, and a base subset that drops its marks
+//!   simply renders without them.
 //!
 //! Glyph 0 (`.notdef`) is always retained: every SFNT font has one,
 //! every glyph index that fails a cmap lookup falls back to it, and
 //! every TrueType-outlined font's first glyf entry is reserved for it.
+//!
+//! The walker iterates to a fixed point: pulling in a ligature
+//! component may expand the kept set, which may itself be the output
+//! of another ligature, etc.
 
 use alloc::vec::Vec;
 
@@ -19,9 +33,9 @@ use sigilbuzz::Face;
 
 use crate::SubsetError;
 
-/// Computes the closure of `seed` over the source font's composite-
-/// reference graph. The returned vec is sorted ascending and contains
-/// gid 0 even when `seed` does not.
+/// Computes the closure of `seed` over the source font's reference
+/// graph (composites, ligatures, mark anchors). The returned vec is
+/// sorted ascending and contains gid 0 even when `seed` does not.
 pub fn compute_closure(face: &Face<'_>, seed: &[u16]) -> Result<Vec<u16>, SubsetError> {
     let num_glyphs = face.maxp()?.num_glyphs;
 
@@ -36,34 +50,17 @@ pub fn compute_closure(face: &Face<'_>, seed: &[u16]) -> Result<Vec<u16>, Subset
         }
     }
 
-    // If the source has glyf, walk composites until we hit a fixed
-    // point. A worklist plus a visited bit avoids re-walking glyphs.
-    if face.record(tag::GLYF).is_some() && face.record(tag::LOCA).is_some() {
-        let loca = face.loca()?;
-        let glyf_bytes = face.table_bytes(tag::GLYF).map_err(SubsetError::from)?;
-        let mut stack: Vec<u16> = Vec::new();
-        for (gid, &k) in keep.iter().enumerate() {
-            if k {
-                stack.push(gid as u16);
-            }
-        }
-
-        while let Some(g) = stack.pop() {
-            let Some((start, end)) = loca.range(g) else {
-                continue;
-            };
-            if start == end {
-                continue;
-            }
-            let body = glyf_bytes
-                .get(start as usize..end as usize)
-                .ok_or(SubsetError::Unsupported("glyf offset past end"))?;
-            for child in composite_components(body)? {
-                if (child as usize) < keep.len() && !keep[child as usize] {
-                    keep[child as usize] = true;
-                    stack.push(child);
-                }
-            }
+    // Iterate to a fixed point. Each pass pulls in references from one
+    // table; subsequent passes pick up second-order pull-ins (e.g. a
+    // ligature whose output was itself dragged in by a composite).
+    loop {
+        let before = count_kept(&keep);
+        expand_glyf_composites(face, &mut keep)?;
+        expand_gsub_ligatures(face, &mut keep)?;
+        expand_gpos_mark_anchors(face, &mut keep)?;
+        let after = count_kept(&keep);
+        if before == after {
+            break;
         }
     }
 
@@ -74,6 +71,323 @@ pub fn compute_closure(face: &Face<'_>, seed: &[u16]) -> Result<Vec<u16>, Subset
         .collect();
     out.sort_unstable();
     Ok(out)
+}
+
+fn count_kept(keep: &[bool]) -> usize {
+    keep.iter().filter(|k| **k).count()
+}
+
+/// Walks composite glyphs in `glyf`, pulling in component gids.
+fn expand_glyf_composites(face: &Face<'_>, keep: &mut [bool]) -> Result<(), SubsetError> {
+    if face.record(tag::GLYF).is_none() || face.record(tag::LOCA).is_none() {
+        return Ok(());
+    }
+    let loca = face.loca()?;
+    let glyf_bytes = face.table_bytes(tag::GLYF).map_err(SubsetError::from)?;
+    let mut stack: Vec<u16> = Vec::new();
+    for (gid, &k) in keep.iter().enumerate() {
+        if k {
+            stack.push(gid as u16);
+        }
+    }
+    while let Some(g) = stack.pop() {
+        let Some((start, end)) = loca.range(g) else {
+            continue;
+        };
+        if start == end {
+            continue;
+        }
+        let body = glyf_bytes
+            .get(start as usize..end as usize)
+            .ok_or(SubsetError::Unsupported("glyf offset past end"))?;
+        for child in composite_components(body)? {
+            if (child as usize) < keep.len() && !keep[child as usize] {
+                keep[child as usize] = true;
+                stack.push(child);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Walks GSUB lookup type 4 (Ligature Substitution) subtables.
+///
+/// For each ligature whose output gid is currently kept, all of its
+/// input components are pulled in. We tolerate parse errors silently
+/// — a malformed GSUB subtable should not stop the closure walk; the
+/// affected ligature simply does not contribute to the closure.
+fn expand_gsub_ligatures(face: &Face<'_>, keep: &mut [bool]) -> Result<(), SubsetError> {
+    let Ok(Some(gsub)) = face.gsub() else {
+        return Ok(());
+    };
+    let lookups = gsub.lookup_list();
+    for li in 0..lookups.len() {
+        let Some(lookup) = lookups.get(li) else {
+            continue;
+        };
+        let lookup_type = unwrap_extension_type(&lookup, /* gsub */ true);
+        if lookup_type != sigilbuzz::tables::gsub::lookup_type::LIGATURE {
+            continue;
+        }
+        for si in 0..lookup.subtable_count() {
+            let Some(sub) = subtable_with_extension(&lookup, si, /* gsub */ true) else {
+                continue;
+            };
+            walk_ligature_subtable(sub, keep);
+        }
+    }
+    Ok(())
+}
+
+/// Walks GPOS lookup type 4 (Mark-to-Base) subtables, pulling in the
+/// base coverage when a kept gid is in the mark coverage. Symmetric
+/// types 5/6 (mark-to-liga, mark-to-mark) are left alone — the same
+/// "marks attach optionally" rule means a kept mark dragging in the
+/// host glyph is sufficient; types 5/6 follow once mark coverage
+/// pulls them in via the base coverage on type 4.
+fn expand_gpos_mark_anchors(face: &Face<'_>, keep: &mut [bool]) -> Result<(), SubsetError> {
+    let Ok(Some(gpos)) = face.gpos() else {
+        return Ok(());
+    };
+    let lookups = gpos.lookup_list();
+    for li in 0..lookups.len() {
+        let Some(lookup) = lookups.get(li) else {
+            continue;
+        };
+        let lookup_type = unwrap_extension_type(&lookup, /* gsub */ false);
+        if !matches!(
+            lookup_type,
+            sigilbuzz::tables::gpos::lookup_type::MARK_TO_BASE
+                | sigilbuzz::tables::gpos::lookup_type::MARK_TO_LIGATURE
+                | sigilbuzz::tables::gpos::lookup_type::MARK_TO_MARK
+        ) {
+            continue;
+        }
+        for si in 0..lookup.subtable_count() {
+            let Some(sub) = subtable_with_extension(&lookup, si, /* gsub */ false) else {
+                continue;
+            };
+            walk_mark_attachment_subtable(sub, keep);
+        }
+    }
+    Ok(())
+}
+
+/// If the lookup is an Extension lookup (GSUB type 7 / GPOS type 9),
+/// returns the underlying lookup type; otherwise returns the lookup's
+/// own type. Falls back to the raw lookup type on any parse failure
+/// because the closure is best-effort.
+fn unwrap_extension_type(lookup: &sigilbuzz::tables::layout::Lookup<'_>, gsub: bool) -> u16 {
+    let extension_type = if gsub {
+        sigilbuzz::tables::gsub::lookup_type::EXTENSION
+    } else {
+        sigilbuzz::tables::gpos::lookup_type::EXTENSION
+    };
+    if lookup.lookup_type() != extension_type {
+        return lookup.lookup_type();
+    }
+    let Some(sub) = lookup.subtable_bytes(0) else {
+        return lookup.lookup_type();
+    };
+    if sub.len() < 8 {
+        return lookup.lookup_type();
+    }
+    // ExtensionPosFormat1 / ExtensionSubstFormat1: u16 format (=1),
+    // u16 extensionLookupType, u32 extensionOffset.
+    u16::from_be_bytes([sub[2], sub[3]])
+}
+
+/// Returns the subtable bytes, transparently following an Extension
+/// indirection when present.
+fn subtable_with_extension<'a>(
+    lookup: &sigilbuzz::tables::layout::Lookup<'a>,
+    index: u16,
+    gsub: bool,
+) -> Option<&'a [u8]> {
+    let sub = lookup.subtable_bytes(index)?;
+    let extension_type = if gsub {
+        sigilbuzz::tables::gsub::lookup_type::EXTENSION
+    } else {
+        sigilbuzz::tables::gpos::lookup_type::EXTENSION
+    };
+    if lookup.lookup_type() != extension_type {
+        return Some(sub);
+    }
+    if sub.len() < 8 {
+        return None;
+    }
+    // u16 format, u16 extensionLookupType, u32 extensionOffset.
+    let ext_off = u32::from_be_bytes([sub[4], sub[5], sub[6], sub[7]]) as usize;
+    sub.get(ext_off..)
+}
+
+fn walk_ligature_subtable(sub: &[u8], keep: &mut [bool]) {
+    // Ligature substitution format 1:
+    //   u16 substFormat = 1
+    //   Offset16 coverageOffset
+    //   u16 ligatureSetCount
+    //   Offset16 ligatureSetOffsets[ligatureSetCount]
+    let mut r = Reader::new(sub);
+    let Ok(format) = r.read_u16() else { return };
+    if format != 1 {
+        return;
+    }
+    let Ok(cov_off) = r.read_u16() else { return };
+    let Ok(set_count) = r.read_u16() else { return };
+    let cov_off = cov_off as usize;
+    // Iterate first-component glyphs by inspecting the coverage table.
+    // We don't need parsed coverage for the closure: we walk every
+    // ligature set and pull in components when the *output* glyph is
+    // kept. The first-component glyph is implicit in the coverage.
+    let Some(cov_bytes) = sub.get(cov_off..) else {
+        return;
+    };
+    let first_components = parse_coverage_glyphs(cov_bytes);
+
+    for i in 0..set_count as usize {
+        let off_off = r.position();
+        if off_off + 2 > sub.len() {
+            return;
+        }
+        let set_off = u16::from_be_bytes([sub[off_off], sub[off_off + 1]]) as usize;
+        if r.skip(2).is_err() {
+            return;
+        }
+        let Some(set_bytes) = sub.get(set_off..) else {
+            continue;
+        };
+        let first_gid = first_components.get(i).copied();
+        walk_ligature_set(set_bytes, first_gid, keep);
+    }
+}
+
+fn walk_ligature_set(set_bytes: &[u8], first_gid: Option<u16>, keep: &mut [bool]) {
+    // LigatureSet:
+    //   u16 ligatureCount
+    //   Offset16 ligatureOffsets[ligatureCount]
+    let mut r = Reader::new(set_bytes);
+    let Ok(lig_count) = r.read_u16() else { return };
+    for i in 0..lig_count {
+        let off_off = 2 + i as usize * 2;
+        if off_off + 2 > set_bytes.len() {
+            return;
+        }
+        let lig_off = u16::from_be_bytes([set_bytes[off_off], set_bytes[off_off + 1]]) as usize;
+        let Some(lig_bytes) = set_bytes.get(lig_off..) else {
+            continue;
+        };
+        // Ligature:
+        //   u16 ligatureGlyph
+        //   u16 componentCount
+        //   u16 componentGlyphIDs[componentCount - 1]
+        if lig_bytes.len() < 4 {
+            continue;
+        }
+        let lig_glyph = u16::from_be_bytes([lig_bytes[0], lig_bytes[1]]);
+        let component_count = u16::from_be_bytes([lig_bytes[2], lig_bytes[3]]);
+        if component_count == 0 {
+            continue;
+        }
+        // If the output glyph is kept, drag in every component.
+        if (lig_glyph as usize) < keep.len() && keep[lig_glyph as usize] {
+            if let Some(first) = first_gid {
+                if (first as usize) < keep.len() {
+                    keep[first as usize] = true;
+                }
+            }
+            let tail = (component_count - 1) as usize;
+            let needed = 4 + tail * 2;
+            if lig_bytes.len() < needed {
+                continue;
+            }
+            for j in 0..tail {
+                let off = 4 + j * 2;
+                let g = u16::from_be_bytes([lig_bytes[off], lig_bytes[off + 1]]);
+                if (g as usize) < keep.len() {
+                    keep[g as usize] = true;
+                }
+            }
+        }
+    }
+}
+
+fn walk_mark_attachment_subtable(sub: &[u8], keep: &mut [bool]) {
+    // MarkBasePos / MarkLigaPos / MarkMarkPos all start with:
+    //   u16 posFormat = 1
+    //   Offset16 markCoverageOffset
+    //   Offset16 baseCoverageOffset (baseCoverage / ligatureCoverage / mark2Coverage)
+    if sub.len() < 6 {
+        return;
+    }
+    let format = u16::from_be_bytes([sub[0], sub[1]]);
+    if format != 1 {
+        return;
+    }
+    let mark_cov_off = u16::from_be_bytes([sub[2], sub[3]]) as usize;
+    let base_cov_off = u16::from_be_bytes([sub[4], sub[5]]) as usize;
+
+    let Some(mark_cov_bytes) = sub.get(mark_cov_off..) else {
+        return;
+    };
+    let Some(base_cov_bytes) = sub.get(base_cov_off..) else {
+        return;
+    };
+    let mark_glyphs = parse_coverage_glyphs(mark_cov_bytes);
+    let base_glyphs = parse_coverage_glyphs(base_cov_bytes);
+
+    // If any mark in the mark coverage is kept, pull in every base in
+    // the base coverage. We don't try to resolve which specific anchor
+    // pairs are live — being conservative: a kept mark may attach to
+    // any of the bases this lookup covers, so all of them survive.
+    let any_mark_kept = mark_glyphs
+        .iter()
+        .any(|&g| (g as usize) < keep.len() && keep[g as usize]);
+    if any_mark_kept {
+        for &g in &base_glyphs {
+            if (g as usize) < keep.len() {
+                keep[g as usize] = true;
+            }
+        }
+    }
+}
+
+/// Best-effort enumeration of the glyphs covered by a Coverage table.
+/// Returns an empty vec on any parse failure.
+fn parse_coverage_glyphs(bytes: &[u8]) -> Vec<u16> {
+    let mut out = Vec::new();
+    if bytes.len() < 4 {
+        return out;
+    }
+    let format = u16::from_be_bytes([bytes[0], bytes[1]]);
+    let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+    match format {
+        1 => {
+            let need = 4 + count * 2;
+            if bytes.len() < need {
+                return out;
+            }
+            for i in 0..count {
+                let off = 4 + i * 2;
+                out.push(u16::from_be_bytes([bytes[off], bytes[off + 1]]));
+            }
+        }
+        2 => {
+            let need = 4 + count * 6;
+            if bytes.len() < need {
+                return out;
+            }
+            for i in 0..count {
+                let off = 4 + i * 6;
+                let start = u16::from_be_bytes([bytes[off], bytes[off + 1]]);
+                let end = u16::from_be_bytes([bytes[off + 2], bytes[off + 3]]);
+                for g in start..=end {
+                    out.push(g);
+                }
+            }
+        }
+        _ => {}
+    }
+    out
 }
 
 /// Returns the gids of every component referenced by a composite
