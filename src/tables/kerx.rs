@@ -236,11 +236,7 @@ impl<'a> Kerx<'a> {
 
 /// Parses one format-0 subtable body. Returns `Ok(None)` on a
 /// recoverable shape error so the rest of `kerx` still loads.
-fn parse_format0(
-    data: &[u8],
-    body_start: usize,
-    sub_end: usize,
-) -> Result<Option<Format0<'_>>> {
+fn parse_format0(data: &[u8], body_start: usize, sub_end: usize) -> Result<Option<Format0<'_>>> {
     if body_start + 16 > sub_end {
         return Err(Error::Truncated {
             offset: body_start,
@@ -275,11 +271,7 @@ fn parse_format0(
 /// Parses one format-2 subtable body. Offsets in the on-disk header
 /// are relative to the subtable's own origin, so we keep a slice
 /// that starts at `sub_start` and stash it on the descriptor.
-fn parse_format2(
-    data: &[u8],
-    sub_start: usize,
-    sub_end: usize,
-) -> Result<Option<Format2<'_>>> {
+fn parse_format2(data: &[u8], sub_start: usize, sub_end: usize) -> Result<Option<Format2<'_>>> {
     let body_start = sub_start + 12;
     if body_start + 16 > sub_end {
         return Err(Error::Truncated {
@@ -592,12 +584,7 @@ mod tests {
     fn format2_with_zero_cell_returns_zero() {
         // Pair lands on a zero entry — kern() must still return 0
         // without surfacing a parser error.
-        let bytes = build_kerx_format2(
-            3,
-            &[0, 1, 1],
-            &[0, 1, 1],
-            &[vec![0, 0], vec![0, 7]],
-        );
+        let bytes = build_kerx_format2(3, &[0, 1, 1], &[0, 1, 1], &[vec![0, 0], vec![0, 7]]);
         let k = Kerx::parse(&bytes, 3).unwrap();
         assert_eq!(k.kern(1, 0), 0); // left class 1, right class 0 → 0
         assert_eq!(k.kern(2, 2), 7); // left class 1, right class 1
@@ -608,12 +595,7 @@ mod tests {
         // Build a valid fmt2 then clobber the leftClassTable offset
         // to point past the subtable. parse() must still succeed and
         // simply skip the subtable rather than fail the table.
-        let mut bytes = build_kerx_format2(
-            3,
-            &[0, 1, 1],
-            &[0, 1, 1],
-            &[vec![0, 0], vec![0, 7]],
-        );
+        let mut bytes = build_kerx_format2(3, &[0, 1, 1], &[0, 1, 1], &[vec![0, 0], vec![0, 7]]);
         // Subtable starts at offset 8 (kerx header size). fmt2
         // header at offset 8 + 12 = 20; leftClassTable u32 lives at
         // offset 24.
