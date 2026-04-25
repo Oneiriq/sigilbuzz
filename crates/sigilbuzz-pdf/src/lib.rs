@@ -67,8 +67,11 @@
 
 extern crate alloc;
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+
+use sigilbuzz::Face;
 
 mod stream;
 
@@ -90,6 +93,117 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn font_matrix(units_per_em: u16) -> [f32; 6] {
     let s = 1.0_f32 / f32::from(units_per_em);
     [s, 0.0, 0.0, s, 0.0, 0.0]
+}
+
+/// Build a [`Type3Font`] for the given face and glyph-id list.
+///
+/// Each gid is mapped to:
+///
+/// - PDF char code, assigned sequentially starting at 1 — char code
+///   0 is reserved for `.notdef` so it is left out of the encoding.
+/// - PDF name, formatted as `g{gid}` (for example `g42`).
+/// - CharProc body: `wx 0 llx lly urx ury d1\n` prologue, the
+///   PathOp -> PDF operator stream, then `f\n` (non-zero winding
+///   fill) epilogue. Glyphs whose outline cannot be retrieved or
+///   whose `glyph_outline` returns `None` (whitespace, `.notdef`)
+///   produce a body containing only the d1 prologue and the fill
+///   epilogue, which is the conventional PDF way to encode a
+///   visible-only-by-its-advance glyph.
+/// - Width: the gid's `hmtx` advance, in glyph-design-unit space.
+///   Faces without an `hmtx` table or with an out-of-range gid
+///   contribute width 0.
+///
+/// The font's `bbox` is the union of every included CharProc bbox;
+/// the `matrix` is `[1/upem 0 0 1/upem 0 0]`. Gids beyond char code
+/// 255 are silently skipped — Type 3 encodings are 8-bit only.
+///
+/// Output is deterministic: the same face and gid slice produce a
+/// byte-identical [`Type3Font`].
+#[must_use]
+pub fn emit_type3_font(face: &Face<'_>, gids: &[GlyphId]) -> Type3Font {
+    // Look up the upem and hmtx once. Failures collapse to a
+    // 1000-upem default and absent advance widths — neither
+    // condition is normal for a real font, but the public surface
+    // is total so a malformed face does not panic.
+    let upem = face.head().map(|h| h.units_per_em).unwrap_or(1000);
+    let hmtx = face.hmtx().ok();
+
+    let mut char_procs = Vec::with_capacity(gids.len().min(255));
+    let mut encoding = Vec::with_capacity(gids.len().min(255));
+    let mut widths = Vec::with_capacity(gids.len().min(255));
+    let mut font_bbox = Bbox::empty();
+
+    for (idx, &gid) in (1_u16..).zip(gids.iter()) {
+        if idx > 255 {
+            break;
+        }
+        let code = idx as u8;
+
+        let name = format!("g{gid}");
+        let advance = hmtx
+            .as_ref()
+            .and_then(|h| h.advance(gid))
+            .map_or(0.0_f32, f32::from);
+
+        // Outline + bbox. Errors and `None` collapse to an empty
+        // outline and a zeroed bbox — Type 3 still requires a d1
+        // prologue and a body, so we synthesise an empty drawing
+        // program.
+        let ops_owned;
+        let ops: &[sigilbuzz::tables::PathOp] = match face.glyph_outline(gid) {
+            Ok(Some(o)) => {
+                ops_owned = o;
+                ops_owned.ops()
+            }
+            _ => &[],
+        };
+
+        let bbox = if ops.is_empty() {
+            Bbox {
+                xmin: 0.0,
+                ymin: 0.0,
+                xmax: 0.0,
+                ymax: 0.0,
+            }
+        } else {
+            outline_bbox(ops)
+        };
+
+        let mut body = Vec::new();
+        emit_d1_prologue(&mut body, advance, bbox);
+        emit_path_ops(&mut body, ops);
+        emit_fill_epilogue(&mut body);
+
+        font_bbox.union(&bbox);
+        char_procs.push(CharProc {
+            name: name.clone(),
+            width: advance,
+            bbox,
+            body,
+        });
+        encoding.push((code, name));
+        widths.push(advance);
+    }
+
+    if font_bbox.is_empty() {
+        // No glyphs encoded, or every glyph collapsed to (0,0,0,0).
+        // Hand the consumer a well-formed zero bbox rather than
+        // infinity sentinels.
+        font_bbox = Bbox {
+            xmin: 0.0,
+            ymin: 0.0,
+            xmax: 0.0,
+            ymax: 0.0,
+        };
+    }
+
+    Type3Font {
+        bbox: font_bbox,
+        matrix: font_matrix(upem),
+        char_procs,
+        encoding,
+        widths,
+    }
 }
 
 /// Glyph index alias. sigilbuzz uses raw `u16` glyph ids throughout;
