@@ -95,3 +95,24 @@ unmodified. The OFL text lives in the upstream repository's `OFL.txt`.
   `liga`, `locl` and dropping the variable (`gvar`/`fvar`/`avar`/
   `HVAR`/`STAT`) and vertical (`vhea`/`vmtx`) tables — the shaper
   only consumes the static Regular master in this fixture.
+
+## CFF subsetting fixtures
+
+Real-font CFF1 + CFF2 fixtures used by the round-trip integration
+tests in `crates/sigilbuzz-subset/tests/real_cff_round_trip.rs`. They
+back the synthetic-only caveat in #120, #135, and #138 with real OFL
+font bytes.
+
+- `SourceCodePro-Latin-Subset.otf` — CFF1 (non-CID). Source: Adobe's
+  upstream `SourceCodePro-Regular.otf` from
+  <https://github.com/adobe-fonts/source-code-pro/raw/release/OTF/SourceCodePro-Regular.otf>.
+  License: SIL Open Font License 1.1 (Adobe, "Source" reserved font
+  name). Subset generated with `fonttools subset` to printable ASCII
+  to keep the fixture small enough to vendor:
+
+      python3 -m fontTools.subset SourceCodePro-Regular.otf \
+          --unicodes='U+0020-007E' \
+          --output-file=SourceCodePro-Latin-Subset.otf \
+          --no-hinting --desubroutinize \
+          --drop-tables+=GSUB,GPOS,GDEF,FFTM,DSIG \
+          --no-layout-closure
