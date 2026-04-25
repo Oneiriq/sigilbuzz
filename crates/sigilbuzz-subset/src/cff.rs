@@ -435,6 +435,68 @@ fn mark_call(call: SubrCall, keep_local: &mut [bool], keep_global: &mut [bool]) 
     }
 }
 
+/// Identifies the set of kept global subroutines whose body — directly
+/// or transitively through other globals — calls a local subroutine.
+///
+/// In CID-keyed CFF1 fonts each gid belongs to a Font DICT (FD) with
+/// its own local subroutine INDEX. A `callsubr` from inside a *global*
+/// subroutine resolves at runtime against the locals of the FD that
+/// originated the call chain. When a global subr calls a local — the
+/// "cross-FD" case — the same global body cannot point at a single
+/// concrete local-index after subsetting because different FDs renumber
+/// their locals independently.
+///
+/// Returns a boolean keep-mask aligned with `global_subrs`: index `i`
+/// is `true` when global `i` reaches a local call (and therefore must
+/// be duplicated per kept FD by the rewriter). Globals that only call
+/// other non-cross-FD globals are *not* marked.
+///
+/// # Errors
+///
+/// Propagates [`scan_subr_calls`] errors from any walked global body.
+pub fn compute_cross_fd_globals(
+    global_subrs: &[&[u8]],
+    local_count: usize,
+) -> Result<Vec<bool>, SubsetError> {
+    let n = global_subrs.len();
+    let mut is_cross: Vec<bool> = alloc::vec![false; n];
+    // Pass 1: mark every global whose body directly calls a local.
+    for (i, body) in global_subrs.iter().enumerate() {
+        for call in scan_subr_calls(body, local_count, n)? {
+            if call.kind == SubrKind::Local {
+                is_cross[i] = true;
+                break;
+            }
+        }
+    }
+    // Pass 2: propagate transitively. If global G calls global G' and
+    // G' is cross-FD, then G is cross-FD too (G's emitted body would
+    // need to point at *one* duplicate of G' for *one* FD, which is
+    // exactly the cross-FD condition). Iterate to a fixed point.
+    loop {
+        let mut changed = false;
+        for (i, body) in global_subrs.iter().enumerate() {
+            if is_cross[i] {
+                continue;
+            }
+            for call in scan_subr_calls(body, local_count, n)? {
+                if call.kind == SubrKind::Global {
+                    let idx = call.index_after_bias;
+                    if idx >= 0 && (idx as usize) < n && is_cross[idx as usize] {
+                        is_cross[i] = true;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Ok(is_cross)
+}
+
 fn count_kept(keep: &[bool]) -> usize {
     keep.iter().filter(|k| **k).count()
 }
@@ -2796,6 +2858,68 @@ mod tests {
 
         let (kl, _) = compute_kept_subrs(&cs_refs, &local_refs, &global_refs).unwrap();
         assert_eq!(kl, alloc::vec![1u32]);
+    }
+
+    #[test]
+    fn cross_fd_detection_flags_direct_local_caller() {
+        // Global 0 calls local 0 (cross-FD). Global 1 is purely
+        // graphical (no calls). Detection should flag only global 0.
+        let mut g0 = alloc::vec![OP_SHORTINT];
+        g0.extend_from_slice(&(-107i16).to_be_bytes()); // local 0 (bias 107)
+        g0.push(OP_CALLSUBR);
+        g0.push(OP_RETURN);
+        let g1 = alloc::vec![139u8, 139u8, OP_RMOVETO, OP_RETURN];
+
+        let globals: Vec<&[u8]> = alloc::vec![g0.as_slice(), g1.as_slice()];
+        let is_cross = compute_cross_fd_globals(&globals, 1).unwrap();
+        assert_eq!(is_cross, alloc::vec![true, false]);
+    }
+
+    #[test]
+    fn cross_fd_detection_propagates_through_global_chain() {
+        // Global 0 calls local 0 (cross-FD).
+        // Global 1 calls global 0 (transitively cross-FD).
+        // Global 2 calls global 1 (transitively cross-FD).
+        // Global 3 is graphical only.
+        let mut g0 = alloc::vec![OP_SHORTINT];
+        g0.extend_from_slice(&(-107i16).to_be_bytes()); // local 0
+        g0.push(OP_CALLSUBR);
+        g0.push(OP_RETURN);
+
+        let mut g1 = alloc::vec![OP_SHORTINT];
+        g1.extend_from_slice(&(-107i16).to_be_bytes()); // global 0 (bias 107, count < 1240)
+        g1.push(OP_CALLGSUBR);
+        g1.push(OP_RETURN);
+
+        let mut g2 = alloc::vec![OP_SHORTINT];
+        g2.extend_from_slice(&(-106i16).to_be_bytes()); // global 1
+        g2.push(OP_CALLGSUBR);
+        g2.push(OP_RETURN);
+
+        let g3 = alloc::vec![139u8, 139u8, OP_RMOVETO, OP_RETURN];
+
+        let globals: Vec<&[u8]> = alloc::vec![
+            g0.as_slice(),
+            g1.as_slice(),
+            g2.as_slice(),
+            g3.as_slice(),
+        ];
+        let is_cross = compute_cross_fd_globals(&globals, 1).unwrap();
+        assert_eq!(is_cross, alloc::vec![true, true, true, false]);
+    }
+
+    #[test]
+    fn cross_fd_detection_clean_when_no_global_calls_local() {
+        // Two globals, neither calls a local; charstring would not be
+        // cross-FD even if it does (we only inspect globals here).
+        let g0 = alloc::vec![139u8, 139u8, OP_RMOVETO, OP_RETURN];
+        let mut g1 = alloc::vec![OP_SHORTINT];
+        g1.extend_from_slice(&(-107i16).to_be_bytes()); // global 0
+        g1.push(OP_CALLGSUBR);
+        g1.push(OP_RETURN);
+        let globals: Vec<&[u8]> = alloc::vec![g0.as_slice(), g1.as_slice()];
+        let is_cross = compute_cross_fd_globals(&globals, 4).unwrap();
+        assert_eq!(is_cross, alloc::vec![false, false]);
     }
 
     #[test]
