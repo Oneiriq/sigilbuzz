@@ -36,7 +36,7 @@ use alloc::vec::Vec;
 use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
-use crate::GlyphId;
+use crate::{GlyphId, SubsetError};
 
 // Variable-component flag bits (mirrors the parser's set, kept private
 // to this module so the subset path doesn't depend on parser internals).
@@ -442,12 +442,13 @@ fn walk_component_gids(record: &[u8]) -> Vec<GlyphId> {
 struct ComponentInfo {
     /// Source-file gid this component points at.
     gid: GlyphId,
-    /// Byte range inside the record where the gid lives — used by the
-    /// rewrite path (commit follow-up) to splice in the new gid.
-    #[allow(dead_code)]
+    /// Byte range inside the record where the gid lives — the rewrite
+    /// path uses these bounds to splice in the new gid.
     gid_range: (usize, usize),
-    /// True when the gid was encoded as 24 bits (VC_GID_IS_24BIT).
-    #[allow(dead_code)]
+    /// True when the gid was encoded as 24 bits (VC_GID_IS_24BIT). The
+    /// rewrite path keeps this width even if the new gid would fit in
+    /// 16 bits — that's a future compaction follow-up and would
+    /// otherwise risk shifting subsequent component records.
     gid_is_24bit: bool,
 }
 
@@ -632,6 +633,51 @@ fn read_uint32var(data: &[u8], off: usize) -> Option<(u32, usize)> {
     }
 }
 
+/// Rewrites every component gid in a single VARC glyph record to the
+/// new-gid namespace. Walks the record with [`parse_one_component`] to
+/// find each component's gid byte range, then splices the new gid in
+/// place. The rewritten record has the same length unless the gid
+/// encoding width changes — today we keep the width identical (24-bit
+/// stays 24-bit) for byte-stable output.
+#[allow(dead_code)] // wired up by the subset_varc emit commit
+fn rewrite_component_gids(
+    record: &[u8],
+    new_gid_for: &dyn Fn(GlyphId) -> Option<GlyphId>,
+) -> Result<Vec<u8>, SubsetError> {
+    let mut splices: Vec<(usize, usize, GlyphId, bool)> = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < record.len() {
+        match parse_one_component(record, cursor) {
+            Some((info, next)) => {
+                let new_gid = new_gid_for(info.gid).ok_or(SubsetError::Unsupported(
+                    "VARC component gid not in kept set",
+                ))?;
+                splices.push((info.gid_range.0, info.gid_range.1, new_gid, info.gid_is_24bit));
+                if next <= cursor {
+                    break;
+                }
+                cursor = next;
+            }
+            None => break,
+        }
+    }
+
+    let mut out: Vec<u8> = Vec::with_capacity(record.len());
+    let mut copy_from = 0usize;
+    for (s, e, new_gid, is_24bit) in &splices {
+        out.extend_from_slice(&record[copy_from..*s]);
+        if *is_24bit {
+            out.push(0); // top byte of u24 — sigilbuzz only uses 16-bit ids
+            out.extend_from_slice(&new_gid.to_be_bytes());
+        } else {
+            out.extend_from_slice(&new_gid.to_be_bytes());
+        }
+        copy_from = *e;
+    }
+    out.extend_from_slice(&record[copy_from..]);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -775,5 +821,52 @@ mod tests {
         record.push(0x00);
         record.extend_from_slice(&[0x00, 0x12, 0x34]); // 24-bit gid 0x1234
         assert_eq!(walk_component_gids(&record), vec![0x1234]);
+    }
+
+    #[test]
+    fn rewrite_component_gids_renumbers_basic_record() {
+        let rec = build_translate_record(7, 10, 20);
+        let map = |g: u16| if g == 7 { Some(42) } else { None };
+        let new_rec = rewrite_component_gids(&rec, &map).unwrap();
+        // Same length, but the embedded gid is now 42.
+        assert_eq!(new_rec.len(), rec.len());
+        assert_eq!(walk_component_gids(&new_rec), vec![42u16]);
+    }
+
+    #[test]
+    fn rewrite_component_gids_renumbers_multi_component_record() {
+        let mut rec = build_translate_record(5, 10, 20);
+        rec.extend(build_translate_record(9, 30, 40));
+        let map = |g: u16| match g {
+            5 => Some(1),
+            9 => Some(2),
+            _ => None,
+        };
+        let new_rec = rewrite_component_gids(&rec, &map).unwrap();
+        assert_eq!(walk_component_gids(&new_rec), vec![1u16, 2]);
+        assert_eq!(new_rec.len(), rec.len());
+    }
+
+    #[test]
+    fn rewrite_preserves_24bit_width() {
+        // 24-bit gid must stay 24-bit on output even when the new gid
+        // would fit in 16 bits — keeps record byte length stable.
+        let mut record = Vec::new();
+        record.push(0x90);
+        record.push(0x00);
+        record.extend_from_slice(&[0x00, 0x12, 0x34]); // gid 0x1234
+        let map = |g: u16| if g == 0x1234 { Some(7) } else { None };
+        let new_record = rewrite_component_gids(&record, &map).unwrap();
+        assert_eq!(new_record.len(), record.len());
+        assert_eq!(walk_component_gids(&new_record), vec![7u16]);
+    }
+
+    #[test]
+    fn rewrite_errors_when_kept_gid_lacks_mapping() {
+        let rec = build_translate_record(7, 10, 20);
+        // Map returns None for the source gid → rewriter must error.
+        let map = |_: u16| None;
+        let err = rewrite_component_gids(&rec, &map).unwrap_err();
+        assert!(matches!(err, SubsetError::Unsupported(_)));
     }
 }
