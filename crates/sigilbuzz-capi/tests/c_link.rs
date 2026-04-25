@@ -15,19 +15,43 @@
 //! support follows once the crate has macOS / Linux landed.
 #![cfg(unix)]
 
+use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Mutex;
 
-/// Serialises the `cargo build` step shared by every C-link test.
-/// Cargo itself takes a lock when invoked concurrently from the same
-/// repo, but the resulting "Blocking waiting for file lock" delays
-/// have been observed to leave the cdylib transiently absent — one
-/// invocation's `cargo build` finishes and prints "Finished" while a
-/// second is still mid-link, and the on-disk `libsigilbuzz_capi.dylib`
-/// briefly disappears. A process-local mutex on the build step makes
-/// every C-link test in this file behave like one serialised job.
-static BUILD_LOCK: Mutex<()> = Mutex::new(());
+/// Acquires the workspace-level cdylib build lock used by every
+/// C-link test in this file.
+///
+/// History: #101 introduced a process-local `Mutex<()>` to serialise
+/// the `cargo build -p sigilbuzz-capi --lib` invocations these tests
+/// fan out. That worked while `cargo test -p sigilbuzz-capi` was the
+/// only consumer of the cdylib output, but under
+/// `cargo test --workspace` other crates' build / test jobs touch
+/// the same `target/debug/libsigilbuzz_capi.{dylib,so}` and the
+/// process-local mutex no longer covers them. The visible failure
+/// mode is the same one #101 chased: one capi test sees `Finished`
+/// while a sibling `cargo build` has the cdylib mid-link and the
+/// file briefly disappears, so the C-side `cc` invocation links
+/// against nothing.
+///
+/// An OS-level advisory file lock at
+/// `target/sigilbuzz-capi.lock` survives the process boundary, so
+/// every workspace job cooperates on the same lock regardless of
+/// which crate started it. The lock file itself is content-free —
+/// only its inode matters.
+fn acquire_workspace_build_lock() -> fd_lock::RwLock<File> {
+    let dir = locate_target_dir();
+    std::fs::create_dir_all(&dir).expect("create target dir for build lock");
+    let path = dir.join("sigilbuzz-capi.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .read(true)
+        .open(&path)
+        .unwrap_or_else(|e| panic!("open build lock {}: {e}", path.display()));
+    fd_lock::RwLock::new(file)
+}
 
 /// The bundled Open Sans fixture we shape against. Same file the
 /// core sigilbuzz integration tests use.
@@ -64,23 +88,38 @@ fn run_c_test(source_filename: &str, exe_basename: &str) {
     //    set the C source links against matches the source we just
     //    edited.
     //
-    //    The build is serialised via `BUILD_LOCK` so concurrent
-    //    C-link tests don't race on the cdylib output path.
-    let build_guard = BUILD_LOCK.lock().expect("build lock poisoned");
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let build_status = Command::new(&cargo)
-        .args(["build", "-p", "sigilbuzz-capi", "--lib"])
-        .status()
-        .expect("failed to invoke cargo");
-    assert!(
-        build_status.success(),
-        "cargo build of sigilbuzz-capi failed"
-    );
-    drop(build_guard);
+    //    The build is serialised via a workspace-level file lock so
+    //    concurrent C-link tests — even ones running in sibling
+    //    workspace crates under `cargo test --workspace` — don't
+    //    race on the cdylib output path. We hold the *exclusive*
+    //    write side of the lock for the duration of `cargo build`
+    //    so no other job can observe the cdylib mid-rebuild, then
+    //    drop it before linking so the link step can run in
+    //    parallel with other readers.
+    let mut build_lock = acquire_workspace_build_lock();
+    {
+        let _exclusive = build_lock
+            .write()
+            .expect("acquire exclusive workspace build lock");
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let build_status = Command::new(&cargo)
+            .args(["build", "-p", "sigilbuzz-capi", "--lib"])
+            .status()
+            .expect("failed to invoke cargo");
+        assert!(
+            build_status.success(),
+            "cargo build of sigilbuzz-capi failed"
+        );
+    }
 
     // 2. Locate the cdylib. Cargo lays this out under
     //    `target/debug/lib<name>.{dylib,so}` (or wherever
-    //    `CARGO_TARGET_DIR` points).
+    //    `CARGO_TARGET_DIR` points). We hold a *shared* read lock
+    //    across the existence-check + link step so a parallel
+    //    rebuild can't unlink the file out from under cc.
+    let _shared = build_lock
+        .read()
+        .expect("acquire shared workspace build lock");
     let target_dir = locate_target_dir();
     let cdylib_name = if cfg!(target_os = "macos") {
         "libsigilbuzz_capi.dylib"
