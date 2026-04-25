@@ -308,7 +308,9 @@ pub const fn use_position(ch: char) -> UsePosition {
         //   11044 sign au (post), 11045 sign virama (NotApplicable).
         // 11073 vowel sign old tamil short e (above),
         // 11074 vowel sign old tamil short o (post).
-        0x11000..=0x11001 | 0x11039..=0x1103A | 0x11041..=0x11042 | 0x11073 => UsePosition::AboveBase,
+        0x11000..=0x11001 | 0x11039..=0x1103A | 0x11041..=0x11042 | 0x11073 => {
+            UsePosition::AboveBase
+        }
         0x1103B..=0x11040 => UsePosition::BelowBase,
         0x11002 | 0x11038 | 0x11043..=0x11044 | 0x11074 => UsePosition::PostBase,
 
@@ -1313,7 +1315,7 @@ mod tests {
         assert_eq!(use_category('\u{11038}'), UseCategory::VPst); // sign aa
         assert_eq!(use_category('\u{11039}'), UseCategory::VAbv); // sign i
         assert_eq!(use_category('\u{1103B}'), UseCategory::VBlw); // sign u
-        // Virama.
+                                                                  // Virama.
         assert_eq!(use_category('\u{11046}'), UseCategory::H);
         // Digits.
         assert_eq!(use_category('\u{11066}'), UseCategory::N);
@@ -1329,14 +1331,14 @@ mod tests {
         // Letters.
         assert_eq!(use_category('\u{11183}'), UseCategory::IV); // letter a
         assert_eq!(use_category('\u{11192}'), UseCategory::B); // letter ka
-        // Vowel signs. Sign-i renders visually before the base in
-        // Sharada (font has spacing pre-base sign-i glyph), so the
-        // USE category is VPre to drive the pre-base reorder.
+                                                               // Vowel signs. Sign-i renders visually before the base in
+                                                               // Sharada (font has spacing pre-base sign-i glyph), so the
+                                                               // USE category is VPre to drive the pre-base reorder.
         assert_eq!(use_category('\u{111B3}'), UseCategory::VPst); // sign aa
         assert_eq!(use_category('\u{111B4}'), UseCategory::VPre); // sign i (pre-base)
         assert_eq!(use_position('\u{111B4}'), UsePosition::PreBase);
         assert_eq!(use_category('\u{111B6}'), UseCategory::VBlw); // sign u
-        // Virama.
+                                                                  // Virama.
         assert_eq!(use_category('\u{111C0}'), UseCategory::H);
         // Digits.
         assert_eq!(use_category('\u{111D0}'), UseCategory::N);
@@ -1348,14 +1350,14 @@ mod tests {
         // Letters.
         assert_eq!(use_category('\u{11200}'), UseCategory::IV); // letter a
         assert_eq!(use_category('\u{11208}'), UseCategory::B); // letter ka
-        // Vowel signs.
+                                                               // Vowel signs.
         assert_eq!(use_category('\u{1122C}'), UseCategory::VPst); // sign aa
         assert_eq!(use_category('\u{11230}'), UseCategory::VAbv); // sign e
         assert_eq!(use_category('\u{1122F}'), UseCategory::VBlw); // sign u
-        // Anusvara / virama.
+                                                                  // Anusvara / virama.
         assert_eq!(use_category('\u{11234}'), UseCategory::M); // anusvara
         assert_eq!(use_category('\u{11235}'), UseCategory::H); // virama
-        // Letter qa.
+                                                               // Letter qa.
         assert_eq!(use_category('\u{1123F}'), UseCategory::B);
     }
 
@@ -1364,17 +1366,17 @@ mod tests {
         // Letters.
         assert_eq!(use_category('\u{11480}'), UseCategory::IV); // letter a
         assert_eq!(use_category('\u{1148A}'), UseCategory::B); // letter ka
-        // Vowel signs.
+                                                               // Vowel signs.
         assert_eq!(use_category('\u{114B0}'), UseCategory::VPst); // sign aa
         assert_eq!(use_category('\u{114B3}'), UseCategory::VBlw); // sign u
         assert_eq!(use_category('\u{114B9}'), UseCategory::VPre); // sign e (pre-base)
         assert_eq!(use_category('\u{114BC}'), UseCategory::VPre); // sign o (pre-base)
         assert_eq!(use_category('\u{114BA}'), UseCategory::VAbv); // sign short e
-        // Marks / virama.
+                                                                  // Marks / virama.
         assert_eq!(use_category('\u{114C0}'), UseCategory::M); // anusvara
         assert_eq!(use_category('\u{114C1}'), UseCategory::FM); // visarga
         assert_eq!(use_category('\u{114C2}'), UseCategory::H); // virama
-        // Digits.
+                                                               // Digits.
         assert_eq!(use_category('\u{114D0}'), UseCategory::N);
     }
 
@@ -1383,15 +1385,15 @@ mod tests {
         // Letters.
         assert_eq!(use_category('\u{11600}'), UseCategory::IV); // letter a
         assert_eq!(use_category('\u{11606}'), UseCategory::B); // letter ka
-        // Vowel signs.
+                                                               // Vowel signs.
         assert_eq!(use_category('\u{11630}'), UseCategory::VPst); // sign aa
         assert_eq!(use_category('\u{11633}'), UseCategory::VBlw); // sign u
         assert_eq!(use_category('\u{11639}'), UseCategory::VAbv); // sign e
-        // Marks / virama.
+                                                                  // Marks / virama.
         assert_eq!(use_category('\u{1163D}'), UseCategory::M); // anusvara
         assert_eq!(use_category('\u{1163E}'), UseCategory::FM); // visarga
         assert_eq!(use_category('\u{1163F}'), UseCategory::H); // virama
-        // Digits.
+                                                               // Digits.
         assert_eq!(use_category('\u{11650}'), UseCategory::N);
         assert_eq!(use_category('\u{11659}'), UseCategory::N);
     }

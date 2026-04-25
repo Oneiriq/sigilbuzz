@@ -476,17 +476,17 @@ mod tests {
         assert_eq!(script_of('\u{11000}'), Script::Brahmi); // candrabindu
         assert_eq!(script_of('\u{11015}'), Script::Brahmi); // letter ka
         assert_eq!(script_of('\u{1107F}'), Script::Brahmi); // block end
-        // Sharada (U+11180..U+111DF).
+                                                            // Sharada (U+11180..U+111DF).
         assert_eq!(script_of('\u{11180}'), Script::Sharada);
         assert_eq!(script_of('\u{11192}'), Script::Sharada); // letter ka
         assert_eq!(script_of('\u{111DF}'), Script::Sharada);
         // Khojki (U+11200..U+1124F).
         assert_eq!(script_of('\u{11200}'), Script::Khojki); // letter a
         assert_eq!(script_of('\u{11208}'), Script::Khojki); // letter ka
-        // Tirhuta (U+11480..U+114DF).
+                                                            // Tirhuta (U+11480..U+114DF).
         assert_eq!(script_of('\u{11480}'), Script::Tirhuta); // letter a
         assert_eq!(script_of('\u{1148A}'), Script::Tirhuta); // letter ka
-        // Modi (U+11600..U+1165F).
+                                                             // Modi (U+11600..U+1165F).
         assert_eq!(script_of('\u{11600}'), Script::Modi); // letter a
         assert_eq!(script_of('\u{11606}'), Script::Modi); // letter ka
     }
