@@ -623,22 +623,31 @@ pub fn emit_charset_auto(sids: &[u16]) -> Vec<u8> {
 /// Emits an Encoding in format 0 (per-gid 1-byte char-code array,
 /// omitting gid 0). `codes[i]` is the char code for gid `i+1`.
 /// Returns `1 + 1 + n` bytes: format byte (0), n_codes (u8), then n
-/// codes. `n` must fit a u8.
+/// codes.
+///
+/// The CFF1 format-0 `nCodes` field is a Card8, so at most 255 codes
+/// can be addressed. Inputs longer than that get capped — the spec
+/// requires nCodes to match the byte run that follows.
 #[must_use]
 pub fn emit_encoding_format0(codes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(2 + codes.len());
+    let n = codes.len().min(u8::MAX as usize);
+    let mut out = Vec::with_capacity(2 + n);
     out.push(0);
-    out.push(codes.len() as u8);
-    out.extend_from_slice(codes);
+    out.push(n as u8);
+    out.extend_from_slice(&codes[..n]);
     out
 }
 
 /// Emits an Encoding in format 1 (range records: u8 first + u8 nLeft).
 /// Each contiguous run of consecutive char codes at consecutive gids
-/// becomes one record. `codes[i]` is the char code for gid `i+1`.
+/// becomes one record.
+///
+/// The format-1 `nRanges` field is a Card8 so at most 255 ranges can
+/// be encoded. Excess ranges are dropped; this matches HarfBuzz's
+/// behaviour and keeps the emitted bytes parseable.
 #[must_use]
 pub fn emit_encoding_format1(codes: &[u8]) -> Vec<u8> {
-    let mut ranges = Vec::new();
+    let mut ranges: Vec<(u8, u8)> = Vec::new();
     let mut i = 0;
     while i < codes.len() {
         let first = codes[i];
@@ -652,6 +661,11 @@ pub fn emit_encoding_format1(codes: &[u8]) -> Vec<u8> {
         }
         let n_left = (j - i - 1) as u8;
         ranges.push((first, n_left));
+        if ranges.len() == u8::MAX as usize {
+            // Format 1's nRanges is a u8; stop emitting before it
+            // overflows so the byte stream stays consistent.
+            break;
+        }
         i = j;
     }
     let mut out = alloc::vec![1u8, ranges.len() as u8];
@@ -2155,6 +2169,35 @@ mod tests {
         // Format 0: 1 + 1 + 95 = 97. Format 1: 1 + 1 + 2 = 4.
         assert_eq!(auto[0], 1);
         assert!(auto.len() < 10);
+    }
+
+    #[test]
+    fn encoding_format0_caps_at_u8_boundary() {
+        // Inputs longer than 255 entries can't be represented (nCodes
+        // is a u8). The emitter must clamp the data run to match the
+        // count it advertises, otherwise downstream parsers treat the
+        // overflow bytes as the next CFF section.
+        let codes: Vec<u8> = (0..300u32).map(|c| c as u8).collect();
+        let bytes = emit_encoding_format0(&codes);
+        let count = bytes[1];
+        let data_len = bytes.len() - 2;
+        assert_eq!(count, 255);
+        assert_eq!(data_len, 255);
+    }
+
+    #[test]
+    fn encoding_format1_caps_at_u8_range_boundary() {
+        // 600 alternating codes form 600 single-entry ranges. Format 1's
+        // nRanges is a u8 so at most 255 ranges can be encoded; the
+        // emitter must stop appending before the count overflows.
+        let codes: Vec<u8> = (0..600u32)
+            .map(|c| if c.is_multiple_of(2) { 1 } else { 100 })
+            .collect();
+        let bytes = emit_encoding_format1(&codes);
+        let n_ranges = bytes[1];
+        let body_bytes = bytes.len() - 2;
+        assert_eq!(n_ranges, 255);
+        assert_eq!(body_bytes, 255 * 2);
     }
 
     #[test]
