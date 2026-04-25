@@ -90,3 +90,27 @@ pub fn unwrap_woff2(_woff2_bytes: &[u8]) -> Result<Vec<u8>> {
 pub fn wrap_woff2(_sfnt_bytes: &[u8]) -> Result<Vec<u8>> {
     Err(WoffError::Woff2Disabled)
 }
+
+#[cfg(all(test, not(feature = "woff2")))]
+mod feature_disabled_tests {
+    //! Sanity checks for the WOFF2 stub path: with the feature off,
+    //! both `unwrap_woff2` and `wrap_woff2` must return
+    //! `WoffError::Woff2Disabled` rather than panicking. These tests
+    //! also serve as a build-time guard that the workspace still
+    //! compiles without `brotli`.
+
+    use super::{unwrap_woff2, wrap_woff2, WoffError};
+
+    #[test]
+    fn unwrap_returns_disabled_marker() {
+        // Anything goes in — the stub never inspects the bytes.
+        let err = unwrap_woff2(&[0u8; 4]).unwrap_err();
+        assert!(matches!(err, WoffError::Woff2Disabled));
+    }
+
+    #[test]
+    fn wrap_returns_disabled_marker() {
+        let err = wrap_woff2(&[0u8; 4]).unwrap_err();
+        assert!(matches!(err, WoffError::Woff2Disabled));
+    }
+}
