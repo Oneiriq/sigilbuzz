@@ -69,29 +69,36 @@
 //! patched tables are emitted; `MVAR` is dropped. Sources without
 //! `MVAR` pass these tables through unchanged.
 //!
-//! # GDEF.IVS / GPOS variable-position trade-off
+//! # GDEF.IVS / GPOS variable-position bake
 //!
-//! When `drop_var_tables` is true (the recommended default) any
-//! `GDEF.ItemVariationStore` is pruned by re-emitting the GDEF table
-//! header with the IVS offset zeroed. GPOS ValueRecords that referred
-//! to the IVS via `VariationIndex` deltas keep their static (default-
-//! instance) values; the consequence is that variable-position kerning
-//! at non-default coords is lost, which matches the documented
-//! "ship as static" intent of instancing. Resolving each GPOS
-//! VariationIndex into the corresponding ValueRecord is staged for a
-//! follow-up — at no-coords (the default instance) consumers see the
-//! same advances regardless.
+//! When `drop_var_tables` is true (the recommended default) the bake
+//! folds every supported GPOS `VariationIndex` into the corresponding
+//! `ValueRecord` static field at `coords` and zeros the offset slot,
+//! then prunes `GDEF.ItemVariationStore`. Variable-position kerning
+//! (the `VariationIndex` shape on PairPos / SinglePos value records)
+//! therefore lands at the chosen instance — not the default — so the
+//! static output renders correctly at the baked coord vector.
+//!
+//! The supported lookup types are GPOS Type 1 (SinglePos formats 1 / 2)
+//! and Type 2 (PairPos formats 1 / 2), including those wrapped in a
+//! Type 9 Extension lookup. `Mark*` and `Cursive` lookups carry their
+//! variations on `Anchor` records, not `ValueRecord` fields; the
+//! Anchor bake is staged for a follow-up. Unsupported lookups still
+//! land in the output but their `VariationIndex` offsets are left
+//! intact — the GDEF.IVS prune that follows leaves them orphan, the
+//! same trade-off the simpler #173 path shipped.
 //!
 //! # Out of scope (deferred)
 //!
 //! - **Partial instancing** (some axes pinned, others left variable).
 //!   Sigil's first cut bakes the full coord vector — every axis pins.
-//! - **GPOS VariationIndex re-emit.** When the source GPOS carries
-//!   `VariationIndex` deltas the simple "drop GDEF.IVS" path leaves
-//!   GPOS pointing at orphaned variation indices; per the briefing
-//!   we ship the simple path and stage the full re-emit (resolve
-//!   VariationIndex deltas, fold into static ValueRecord fields,
-//!   zero the offset) as a follow-up.
+//! - **Mark / Cursive GPOS Anchor variations.** GPOS Types 3 / 4 / 5 / 6
+//!   carry per-x/y `Device` / `VariationIndex` offsets on their
+//!   `Anchor` records; this pass folds `ValueRecord` variations only.
+//!   Anchor variations ride through with their `VariationIndex`
+//!   offsets intact and are then orphaned by the GDEF.IVS prune,
+//!   matching the #173 trade-off for that subset of GPOS. The Anchor
+//!   bake is tracked as a follow-up.
 //!
 //! # Determinism
 //!
@@ -267,9 +274,24 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         tables.push((tag::POST, post_bytes));
     }
 
+    // GPOS variation bake: when the source carries GPOS variations
+    // (VariationIndex offsets on PairPos / SinglePos value records),
+    // fold every resolvable variation into the static ValueRecord
+    // field at `coords` and zero the offset slot. Runs *before* the
+    // GDEF.IVS prune below — the prune severs the only path back to
+    // the IVS bytes, so any remaining VariationIndex would be orphan.
+    let gpos_baked = if input.drop_var_tables {
+        bake_gpos_var(face, &coords)?
+    } else {
+        None
+    };
+    if let Some(b) = gpos_baked.clone() {
+        tables.push((tag::GPOS, b));
+    }
+
     // GDEF: when the source carries an ItemVariationStore and the
     // caller wants the static "ship as static" output, prune it. See
-    // module header for the GPOS-default-instance trade-off.
+    // module header for the GPOS-bake-then-IVS-prune ordering.
     let gdef_pruned = if input.drop_var_tables {
         prune_gdef_ivs(face)?
     } else {
@@ -296,6 +318,11 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         // GDEF was handled above (either pruned or dropped from the
         // pruning path).
         if rec.tag == tag::GDEF && gdef_pruned.is_some() {
+            continue;
+        }
+        // GPOS was handled above when the variation bake produced a
+        // rewritten table.
+        if rec.tag == tag::GPOS && gpos_baked.is_some() {
             continue;
         }
         let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;
@@ -371,6 +398,15 @@ fn cff2_bake(
         tables.push((tag::POST, post_bytes));
     }
 
+    let gpos_baked = if input.drop_var_tables {
+        bake_gpos_var(face, coords)?
+    } else {
+        None
+    };
+    if let Some(b) = gpos_baked.clone() {
+        tables.push((tag::GPOS, b));
+    }
+
     let gdef_pruned = if input.drop_var_tables {
         prune_gdef_ivs(face)?
     } else {
@@ -393,6 +429,9 @@ fn cff2_bake(
             continue;
         }
         if rec.tag == tag::GDEF && gdef_pruned.is_some() {
+            continue;
+        }
+        if rec.tag == tag::GPOS && gpos_baked.is_some() {
             continue;
         }
         let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;
@@ -1194,6 +1233,37 @@ fn patch_u16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
 }
 
 // ---------------------------------------------------------------------------
+// GPOS variation bake (#175)
+// ---------------------------------------------------------------------------
+
+/// Returns a GPOS byte buffer with every supported subtable's
+/// `VariationIndex`-driven ValueRecord field folded into the static
+/// field at `coords` and the matching offset slot zeroed. Returns
+/// `None` when the source has no GPOS, when the parser refuses the
+/// GPOS bytes, or when the GPOS lookup walk produced no patches.
+///
+/// Lookup-type coverage matches `gpos_var::bake_gpos_at_coords`:
+/// SinglePos (formats 1 / 2), PairPos (formats 1 / 2), and Type 9
+/// Extension wrappers around either. Mark*/Cursive lookups carry their
+/// variations on `Anchor` records — those ride through verbatim and
+/// are orphaned by the GDEF.IVS prune that follows.
+///
+/// The bake reads its `ItemVariationStore` from the *source* GDEF, not
+/// from a re-parsed copy, so it sees every region the source uses
+/// before the prune sever the path.
+fn bake_gpos_var(face: &Face<'_>, coords: &[f32]) -> Result<Option<Vec<u8>>, SubsetError> {
+    let gpos_bytes = match face.table_bytes(tag::GPOS) {
+        Ok(b) => b,
+        Err(_) => return Ok(None),
+    };
+    let gdef = face.gdef().map_err(SubsetError::from)?;
+    let store = gdef.as_ref().and_then(|g| g.item_variation_store());
+    Ok(crate::gpos_var::bake_gpos_at_coords(
+        gpos_bytes, store, coords,
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // GDEF.IVS pruning
 // ---------------------------------------------------------------------------
 
@@ -1285,6 +1355,12 @@ mod tests {
     const SOURCE_SANS: &[u8] =
         include_bytes!("../../../tests/fonts/SourceSans3VF-Latin-Subset.otf");
     const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
+    /// 972-byte synthetic VF with a single PairPos format 1 lookup
+    /// whose AV pair carries a VariationIndex into a one-region IVS;
+    /// at wght=900 the delta is -100, at wght=400 it is 0. Built by
+    /// `tests/tools/build_var_kern_fixture.py`. See
+    /// `tests/variable_kern.rs` for the upstream cover.
+    const VAR_KERN: &[u8] = include_bytes!("../../../tests/fixtures/var_kern.ttf");
 
     fn rubik_face() -> Face<'static> {
         Face::parse_bytes(RUBIK, 0).unwrap()
@@ -1643,6 +1719,282 @@ mod tests {
         if face.gdef().unwrap().is_some() {
             assert!(baked.gdef().unwrap().is_some());
         }
+    }
+
+    /// Walks every GPOS lookup and returns true if any ValueRecord
+    /// device offset slot is non-zero. Used by the post-bake assertions
+    /// to confirm no orphan VariationIndex offsets survived the fold.
+    /// Covers SinglePos / PairPos formats 1 and 2, both directly and
+    /// via Type 9 Extension wrappers — the same set we explicitly bake.
+    fn any_value_record_device_offset_nonzero(face: &Face<'_>) -> bool {
+        let Ok(Some(gpos)) = face.gpos() else {
+            return false;
+        };
+        let lookups = gpos.lookup_list();
+        for li in 0..lookups.len() {
+            let Some(lookup) = lookups.get(li) else {
+                continue;
+            };
+            let lt = lookup.lookup_type();
+            for si in 0..lookup.subtable_count() {
+                let Some(sub) = lookup.subtable_bytes(si) else {
+                    continue;
+                };
+                let (effective_lt, effective_sub) = if lt == 9 {
+                    if sub.len() < 8 {
+                        continue;
+                    }
+                    let ext_type = u16::from_be_bytes([sub[2], sub[3]]);
+                    let ext_off = u32::from_be_bytes([sub[4], sub[5], sub[6], sub[7]]) as usize;
+                    let Some(inner) = sub.get(ext_off..) else {
+                        continue;
+                    };
+                    (ext_type, inner)
+                } else {
+                    (lt, sub)
+                };
+                if check_subtable_for_device_offsets(effective_lt, effective_sub) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn check_subtable_for_device_offsets(lt: u16, sub: &[u8]) -> bool {
+        match lt {
+            1 => {
+                // SinglePos.
+                if sub.len() < 6 {
+                    return false;
+                }
+                let format = u16::from_be_bytes([sub[0], sub[1]]);
+                let value_format = u16::from_be_bytes([sub[4], sub[5]]);
+                if value_format & 0x00F0 == 0 {
+                    return false;
+                }
+                let stride = (value_format & 0x00FF).count_ones() as usize * 2;
+                let value_count = if format == 2 {
+                    u16::from_be_bytes([sub[6], sub[7]]) as usize
+                } else {
+                    1
+                };
+                let header_len = if format == 2 { 8 } else { 6 };
+                for i in 0..value_count {
+                    let vr = header_len + i * stride;
+                    if vr_has_nonzero_device_offset(&sub[vr..vr + stride], value_format) {
+                        return true;
+                    }
+                }
+                false
+            }
+            2 => {
+                // PairPos.
+                if sub.len() < 4 {
+                    return false;
+                }
+                let format = u16::from_be_bytes([sub[0], sub[1]]);
+                let vf1 = u16::from_be_bytes([sub[4], sub[5]]);
+                let vf2 = u16::from_be_bytes([sub[6], sub[7]]);
+                let v1 = (vf1 & 0x00FF).count_ones() as usize * 2;
+                let v2 = (vf2 & 0x00FF).count_ones() as usize * 2;
+                if (vf1 | vf2) & 0x00F0 == 0 {
+                    return false;
+                }
+                if format == 1 {
+                    let pair_set_count = u16::from_be_bytes([sub[8], sub[9]]) as usize;
+                    let pvr_size = 2 + v1 + v2;
+                    for i in 0..pair_set_count {
+                        let off_off = 10 + i * 2;
+                        if off_off + 2 > sub.len() {
+                            continue;
+                        }
+                        let set_off =
+                            u16::from_be_bytes([sub[off_off], sub[off_off + 1]]) as usize;
+                        if set_off + 2 > sub.len() {
+                            continue;
+                        }
+                        let pair_value_count =
+                            u16::from_be_bytes([sub[set_off], sub[set_off + 1]]) as usize;
+                        for j in 0..pair_value_count {
+                            let pvr = set_off + 2 + j * pvr_size;
+                            if pvr + pvr_size > sub.len() {
+                                continue;
+                            }
+                            if vr_has_nonzero_device_offset(&sub[pvr + 2..pvr + 2 + v1], vf1)
+                                || vr_has_nonzero_device_offset(
+                                    &sub[pvr + 2 + v1..pvr + 2 + v1 + v2],
+                                    vf2,
+                                )
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                } else if format == 2 {
+                    if sub.len() < 16 {
+                        return false;
+                    }
+                    let class1 = u16::from_be_bytes([sub[12], sub[13]]) as usize;
+                    let class2 = u16::from_be_bytes([sub[14], sub[15]]) as usize;
+                    let cell = v1 + v2;
+                    let row = class2 * cell;
+                    for i in 0..class1 {
+                        for j in 0..class2 {
+                            let off = 16 + i * row + j * cell;
+                            if off + cell > sub.len() {
+                                continue;
+                            }
+                            if vr_has_nonzero_device_offset(&sub[off..off + v1], vf1)
+                                || vr_has_nonzero_device_offset(&sub[off + v1..off + cell], vf2)
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn vr_has_nonzero_device_offset(vr: &[u8], format: u16) -> bool {
+        // Skip the four static i16 fields (each present iff its bit
+        // is set) and inspect the four device-offset slots.
+        let mut cursor = 0usize;
+        for bit in [0x0001u16, 0x0002, 0x0004, 0x0008] {
+            if format & bit != 0 {
+                cursor += 2;
+            }
+        }
+        for bit in [0x0010u16, 0x0020, 0x0040, 0x0080] {
+            if format & bit != 0 {
+                if cursor + 2 > vr.len() {
+                    return false;
+                }
+                let off = u16::from_be_bytes([vr[cursor], vr[cursor + 1]]);
+                if off != 0 {
+                    return true;
+                }
+                cursor += 2;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn var_kern_fixture_bake_at_wght_900_folds_pair_pos_advance() {
+        // The synthetic var_kern fixture carries a single PairPos
+        // format 1 lookup. At wght=900 the source GPOS has x_advance=0
+        // on the AV pair plus a VariationIndex that resolves to -100.
+        // After the bake, the baked GPOS must carry x_advance=-100
+        // statically and the device offset slot must be zero.
+        let face = Face::parse_bytes(VAR_KERN, 0).unwrap();
+        let coords = face.fvar().unwrap().unwrap().normalize_coords(&[900.0]);
+        let input = InstanceInput {
+            coords: coords.clone(),
+            drop_var_tables: true,
+        };
+        let out = instance(&face, &input).expect("bake");
+        let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
+        // Confirm no GPOS device offset survived the fold.
+        assert!(
+            !any_value_record_device_offset_nonzero(&baked),
+            "baked GPOS must have zero device offsets"
+        );
+        // Confirm GDEF.IVS was pruned.
+        if let Some(gdef) = baked.gdef().unwrap() {
+            assert!(
+                gdef.item_variation_store().is_none(),
+                "baked GDEF.IVS must be pruned"
+            );
+        }
+        // Confirm the static field carries the resolved delta. Walk
+        // GPOS by hand to read the AV pair's value.
+        let gpos_bytes = baked.table_bytes(tag::GPOS).expect("baked GPOS");
+        let lookup_list_off = u16::from_be_bytes([gpos_bytes[8], gpos_bytes[9]]) as usize;
+        let lookup_off =
+            u16::from_be_bytes([gpos_bytes[lookup_list_off + 2], gpos_bytes[lookup_list_off + 3]])
+                as usize;
+        let lookup_base = lookup_list_off + lookup_off;
+        let sub_off = u16::from_be_bytes([gpos_bytes[lookup_base + 6], gpos_bytes[lookup_base + 7]])
+            as usize;
+        let sub_abs = lookup_base + sub_off;
+        let sub = &gpos_bytes[sub_abs..];
+        // PairPos fmt 1 — first PairSet at the first set offset.
+        let pair_set_rel = u16::from_be_bytes([sub[10], sub[11]]) as usize;
+        // PairValueRecord 0 starts at +2 inside the PairSet, AV pair
+        // bytes are: u16 secondGlyph (V), i16 x_advance, u16 device.
+        let pvr_off = pair_set_rel + 2;
+        let x_advance = i16::from_be_bytes([sub[pvr_off + 2], sub[pvr_off + 3]]);
+        assert_eq!(x_advance, -100, "AV x_advance baked at wght=900");
+    }
+
+    #[test]
+    fn var_kern_fixture_bake_at_default_coords_leaves_static_field_at_source() {
+        // At wght=400 the variation region peaks at zero scalar →
+        // delta is zero. The static x_advance must stay at the
+        // source's 0 and the device offset must still be zeroed (the
+        // bake unconditionally severs the offset to keep GDEF.IVS
+        // safe to drop).
+        let face = Face::parse_bytes(VAR_KERN, 0).unwrap();
+        let coords = face.fvar().unwrap().unwrap().normalize_coords(&[400.0]);
+        let input = InstanceInput {
+            coords,
+            drop_var_tables: true,
+        };
+        let out = instance(&face, &input).expect("bake");
+        let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
+        assert!(!any_value_record_device_offset_nonzero(&baked));
+        let gpos_bytes = baked.table_bytes(tag::GPOS).expect("baked GPOS");
+        let lookup_list_off = u16::from_be_bytes([gpos_bytes[8], gpos_bytes[9]]) as usize;
+        let lookup_off =
+            u16::from_be_bytes([gpos_bytes[lookup_list_off + 2], gpos_bytes[lookup_list_off + 3]])
+                as usize;
+        let lookup_base = lookup_list_off + lookup_off;
+        let sub_off = u16::from_be_bytes([gpos_bytes[lookup_base + 6], gpos_bytes[lookup_base + 7]])
+            as usize;
+        let sub_abs = lookup_base + sub_off;
+        let sub = &gpos_bytes[sub_abs..];
+        let pair_set_rel = u16::from_be_bytes([sub[10], sub[11]]) as usize;
+        let pvr_off = pair_set_rel + 2;
+        let x_advance = i16::from_be_bytes([sub[pvr_off + 2], sub[pvr_off + 3]]);
+        assert_eq!(x_advance, 0, "AV x_advance unchanged at default wght");
+    }
+
+    #[test]
+    fn source_sans_vf_subset_bake_clears_all_gpos_variation_offsets() {
+        // Source Sans 3 VF Latin Subset is the real-world fixture #173
+        // already covered with the IVS-prune path. After the variation
+        // fold, no PairPos / SinglePos ValueRecord must carry a
+        // surviving device offset, and GDEF.IVS must be pruned.
+        let face = Face::parse_bytes(SOURCE_SANS, 0).unwrap();
+        let fvar = face.fvar().unwrap().unwrap();
+        let mut user = alloc::vec![0.0_f32; fvar.axes().len()];
+        if let Some(idx) = fvar.axis_index(*b"wght") {
+            user[idx] = fvar.axes()[idx].max_value;
+        }
+        let coords = fvar.normalize_coords(&user);
+        let input = InstanceInput {
+            coords,
+            drop_var_tables: true,
+        };
+        let out = instance(&face, &input).expect("bake");
+        let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
+        if let Some(gdef) = baked.gdef().unwrap() {
+            assert!(
+                gdef.item_variation_store().is_none(),
+                "baked GDEF.IVS must be pruned"
+            );
+        }
+        assert!(
+            !any_value_record_device_offset_nonzero(&baked),
+            "baked GPOS must have no surviving device offsets on PairPos/SinglePos"
+        );
     }
 
     #[test]
