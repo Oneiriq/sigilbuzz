@@ -42,6 +42,7 @@ pub mod variation_store;
 pub mod vhea;
 pub mod vmtx;
 pub mod vorg;
+pub mod vvar;
 
 pub use avar::Avar;
 pub use cbdt::{Cbdt, GlyphBitmap, GlyphBitmapMetrics};
@@ -81,6 +82,7 @@ pub use variation_store::ItemVariationStore;
 pub use vhea::Vhea;
 pub use vmtx::Vmtx;
 pub use vorg::Vorg;
+pub use vvar::Vvar;
 
 /// Standard SFNT / OpenType table tags. These are the ones sigilbuzz
 /// reaches for during shaping; more land as the corresponding parsers
