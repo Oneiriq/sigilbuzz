@@ -68,6 +68,12 @@ impl<'a> Alternate<'a> {
         })
     }
 
+    /// Coverage table for the run-level "would_apply" precheck.
+    #[must_use]
+    pub const fn coverage(&self) -> &Coverage<'a> {
+        &self.coverage
+    }
+
     /// Returns the chosen alternate for `glyph`. `alternate_index`
     /// is 0-based; per the spec's 1-based value encoding, callers
     /// pass `feature_value - 1` and clamp to the available range.

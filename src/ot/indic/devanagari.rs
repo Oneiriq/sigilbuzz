@@ -628,6 +628,37 @@ fn compute_half_mask(
         // matters.
         return mask;
     }
+    // Per-shape memoisation of the dry-run check. Indic corpora reuse
+    // the same handful of `(halant_glyph, c2_glyph)` pairs across
+    // syllables (every "ष" + virama + "ट" triple maps to the same
+    // glyph IDs), so caching the verdict turns the worst-case cost from
+    // `O(N_pairs × 6 × LookupCost)` into `O(N_unique_pairs × 6 × LookupCost)`.
+    // The cache is stack-local — no cross-shape state — so determinism
+    // is preserved.
+    let mut cache: Vec<((u16, u16), bool)> = Vec::new();
+    let mut eligible_for = |halant_glyph: u16, c2_glyph: u16| -> bool {
+        let key = (halant_glyph, c2_glyph);
+        if let Some(&(_, hit)) = cache.iter().find(|(k, _)| *k == key) {
+            return hit;
+        }
+        let hit = [*b"blwf", *b"pstf", *b"abvf"].iter().any(|tag| {
+            feature_would_substitute(
+                gsub,
+                gdef,
+                *tag,
+                config.script_priority,
+                &[halant_glyph, c2_glyph],
+            ) || feature_would_substitute(
+                gsub,
+                gdef,
+                *tag,
+                config.script_priority,
+                &[c2_glyph, halant_glyph],
+            )
+        });
+        cache.push((key, hit));
+        hit
+    };
     for syllable in syllables {
         if !matches!(syllable.kind, SyllableKind::Consonant) {
             continue;
@@ -660,22 +691,7 @@ fn compute_half_mask(
             // and `pref` carries pre-base-reordering Ra. Check all
             // three both in new-spec (H+C) and old-spec (C+H) order,
             // matching `consonant_position_from_face` in rustybuzz.
-            let eligible = [*b"blwf", *b"pstf", *b"abvf"].iter().any(|tag| {
-                feature_would_substitute(
-                    gsub,
-                    gdef,
-                    *tag,
-                    config.script_priority,
-                    &[halant_glyph, c2_glyph],
-                ) || feature_would_substitute(
-                    gsub,
-                    gdef,
-                    *tag,
-                    config.script_priority,
-                    &[c2_glyph, halant_glyph],
-                )
-            });
-            if eligible {
+            if eligible_for(halant_glyph, c2_glyph) {
                 mask[i] = false;
                 mask[i + 1] = false;
             }
