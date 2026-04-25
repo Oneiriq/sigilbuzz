@@ -204,6 +204,35 @@ impl Buffer {
         self.text.push_str(text);
     }
 
+    /// Replaces the buffer contents with `text`, but additionally
+    /// runs the UAX #9 bidirectional algorithm and reorders the
+    /// stored text into visual order before shaping. Also updates
+    /// the buffer's [`Direction`] to match the resolved paragraph
+    /// direction.
+    ///
+    /// Use this when you have mixed-direction input (Latin + Hebrew,
+    /// Arabic + ASCII digits, etc.) and want the shaper to receive
+    /// the run already partitioned into visual order — matching
+    /// HarfBuzz's `hb_buffer_guess_segment_properties` + bidi
+    /// reorder behaviour.
+    ///
+    /// The plain [`Self::set_text`] is left untouched: existing
+    /// 0.1.0 consumers (oniq, demos) that handle direction
+    /// themselves keep their current semantics.
+    pub fn set_text_bidi(&mut self, text: &str) {
+        let info = crate::unicode::bidi::BidiInfo::new(text, None);
+        self.direction = info.paragraph_direction();
+        let order = info.reorder();
+        self.text.clear();
+        // Walk the input chars in visual order and append.
+        let chars: Vec<char> = text.chars().collect();
+        for &i in &order {
+            if let Some(&ch) = chars.get(i) {
+                self.text.push(ch);
+            }
+        }
+    }
+
     /// Current text view.
     #[must_use]
     pub fn text(&self) -> &str {
@@ -507,6 +536,54 @@ mod tests {
         b.set_text("one");
         b.set_text("two");
         assert_eq!(b.text(), "two");
+    }
+
+    #[test]
+    fn set_text_bidi_keeps_pure_ltr_unchanged() {
+        let mut b = Buffer::new();
+        b.set_text_bidi("Hello");
+        assert_eq!(b.text(), "Hello");
+        assert_eq!(b.direction(), Direction::Ltr);
+    }
+
+    #[test]
+    fn set_text_bidi_reverses_pure_rtl() {
+        let mut b = Buffer::new();
+        // \u{05E9}\u{05DC}\u{05D5}\u{05DD} = "שלום" (shalom).
+        b.set_text_bidi("\u{05E9}\u{05DC}\u{05D5}\u{05DD}");
+        // After visual reorder the chars are in reverse logical
+        // order — what the shaper expects for an RTL run.
+        assert_eq!(b.text(), "\u{05DD}\u{05D5}\u{05DC}\u{05E9}");
+        assert_eq!(b.direction(), Direction::Rtl);
+    }
+
+    #[test]
+    fn set_text_bidi_handles_mixed_latin_hebrew_arabic() {
+        // "Hello עברית مرحبا" — Latin + Hebrew + Arabic. Paragraph
+        // is LTR (first strong is 'H'). Visual order: "Hello "
+        // followed by the RTL runs reversed. Specifically:
+        //   - Latin "Hello " stays at level 0.
+        //   - Hebrew "עברית" + space + Arabic "مرحبا" share level
+        //     1 and reverse together: visual = ابحرم[space]תירבע.
+        let mut b = Buffer::new();
+        b.set_text_bidi("Hello \u{05E2}\u{05D1}\u{05E8}\u{05D9}\u{05EA} \u{0645}\u{0631}\u{062D}\u{0628}\u{0627}");
+        assert_eq!(b.direction(), Direction::Ltr);
+        // Sanity: visual byte length matches input byte length (no
+        // codepoints lost in reorder).
+        assert_eq!(
+            b.text().chars().count(),
+            "Hello \u{05E2}\u{05D1}\u{05E8}\u{05D9}\u{05EA} \u{0645}\u{0631}\u{062D}\u{0628}\u{0627}"
+                .chars()
+                .count()
+        );
+        // First chars stay Latin.
+        let visual: Vec<char> = b.text().chars().collect();
+        assert_eq!(visual[0], 'H');
+        assert_eq!(visual[5], ' ');
+        // Last char of the RTL run (logically Arabic alef U+0627)
+        // should appear early in the visual order — it sits at the
+        // tail of the level-1 span, which L2 reverses to the front.
+        assert_eq!(visual[6], '\u{0627}');
     }
 
     #[test]
