@@ -936,6 +936,17 @@ pub(crate) fn encode_int_operand_at_width(
     v: i32,
     target_len: usize,
 ) -> Result<Vec<u8>, SubsetError> {
+    // Op 255 (5-byte fixed) is a 16.16 number — i16 integer + u16
+    // fractional. Any `v` outside `i16` range cannot be represented:
+    // `encode_int_operand` itself silently wraps via `(v as i64) << 16
+    // as i32` (#187), which would emit a corrupt subroutine index.
+    // Refuse early so the rewriter falls back to keeping the offending
+    // subroutine verbatim instead of producing a silently broken font.
+    if !(i32::from(i16::MIN)..=i32::from(i16::MAX)).contains(&v) {
+        return Err(SubsetError::Unsupported(
+            "CFF renumber: operand outside i16 has no Type 2 representation",
+        ));
+    }
     let natural = encode_int_operand(v);
     if natural.len() == target_len {
         return Ok(natural);
@@ -966,8 +977,10 @@ pub(crate) fn encode_int_operand_at_width(
         return Ok(alloc::vec![28u8, bytes[0], bytes[1]]);
     }
     if target_len == 5 {
-        let raw = (v as i64) << 16;
-        let raw = raw as i32;
+        // v is guaranteed to fit i16 by the early-return guard above,
+        // so the 16.16 fixed encode (i16 integer << 16, zero
+        // fractional) cannot overflow.
+        let raw = (i32::from(v as i16)) << 16;
         let mut out = alloc::vec![255u8];
         out.extend_from_slice(&raw.to_be_bytes());
         return Ok(out);
@@ -3622,6 +3635,44 @@ mod tests {
         // 5 also fits — same path.
         let bytes = encode_int_operand_at_width(5, 1).unwrap();
         assert_eq!(bytes, alloc::vec![(5 + 139) as u8]);
+    }
+
+    #[test]
+    fn encode_int_operand_at_width_five_byte_in_range_round_trips() {
+        // Op 255 (5-byte fixed) is 16.16 — i16 integer part + u16
+        // fractional. Values that fit i16 round-trip cleanly: the high
+        // 16 bits are the integer, the low 16 are zero (we never
+        // re-emit a fractional component for a renumbered subr index).
+        let bytes = encode_int_operand_at_width(12_345, 5).unwrap();
+        assert_eq!(bytes.len(), 5);
+        assert_eq!(bytes[0], 255);
+        let raw = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+        assert_eq!(raw >> 16, 12_345);
+        assert_eq!(raw & 0xFFFF, 0);
+
+        let bytes = encode_int_operand_at_width(-12_345, 5).unwrap();
+        let raw = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+        assert_eq!(raw >> 16, -12_345);
+        assert_eq!(raw & 0xFFFF, 0);
+    }
+
+    #[test]
+    fn encode_int_operand_at_width_refuses_i16_overflow() {
+        // Regression for #187 — values outside i16 used to silently
+        // wrap on `(v as i64) << 16 as i32` in the 5-byte fixed
+        // branch, producing a corrupt subroutine index. Op 255 is
+        // 16.16 (i16 integer + u16 fractional) so anything past i16
+        // has no Type 2 charstring representation; refusing surfaces
+        // the gap to `subset_non_identity`'s verbatim-fallback path.
+        for &target in &[1usize, 2, 3, 5] {
+            assert!(encode_int_operand_at_width(100_000, target).is_err());
+            assert!(encode_int_operand_at_width(-100_000, target).is_err());
+            assert!(encode_int_operand_at_width(i32::MAX, target).is_err());
+            assert!(encode_int_operand_at_width(i32::MIN, target).is_err());
+        }
+        // Boundary values fit by construction at the 5-byte width.
+        assert!(encode_int_operand_at_width(i32::from(i16::MAX), 5).is_ok());
+        assert!(encode_int_operand_at_width(i32::from(i16::MIN), 5).is_ok());
     }
 
     #[test]
