@@ -1063,13 +1063,27 @@ fn bake_mvar_metrics(face: &Face<'_>, coords: &[f32]) -> Result<MvarBake, Subset
         return Ok(MvarBake::default());
     }
 
-    use sigilbuzz::tables::mvar::tag as mvar_tag;
-
-    let mut os2 = face.table_bytes(*b"OS/2").ok().map(<[u8]>::to_vec);
+    let os2 = face.table_bytes(*b"OS/2").ok().map(<[u8]>::to_vec);
     let hhea = face.table_bytes(tag::HHEA).ok().map(<[u8]>::to_vec);
-    let mut vhea = face.table_bytes(tag::VHEA).ok().map(<[u8]>::to_vec);
-    let mut post = face.table_bytes(tag::POST).ok().map(<[u8]>::to_vec);
+    let vhea = face.table_bytes(tag::VHEA).ok().map(<[u8]>::to_vec);
+    let post = face.table_bytes(tag::POST).ok().map(<[u8]>::to_vec);
 
+    apply_mvar_records(&mvar, coords, os2, hhea, vhea, post)
+}
+
+/// Walks `mvar.entries()` and patches the rebuilt OS/2 / hhea / vhea /
+/// post buffers in place. Splits out from [`bake_mvar_metrics`] so the
+/// duplicate-tag dedup policy is unit-testable without spinning up a
+/// full Face.
+fn apply_mvar_records(
+    mvar: &sigilbuzz::tables::Mvar<'_>,
+    coords: &[f32],
+    mut os2: Option<Vec<u8>>,
+    hhea: Option<Vec<u8>>,
+    mut vhea: Option<Vec<u8>>,
+    mut post: Option<Vec<u8>>,
+) -> Result<MvarBake, SubsetError> {
+    use sigilbuzz::tables::mvar::tag as mvar_tag;
     // OS/2 v0 is 78 bytes; v1+ goes through 96/100. Field offsets
     // (per OpenType OS/2 spec):
     //   sxHeight        (s i16) at v2+ offset 0x56 (86)
@@ -1101,7 +1115,18 @@ fn bake_mvar_metrics(face: &Face<'_>, coords: &[f32]) -> Result<MvarBake, Subset
     // vhea (OpenType / AAT): same layout as hhea — ascent/descent/lineGap
     // are at offsets 4/6/8.
 
+    // Per OpenType MVAR spec each tag appears at most once in a
+    // well-formed `valueRecords` array. Malformed fonts can ship the
+    // same tag twice; without dedup the patch path applies the delta
+    // once per record, doubling its effect on the rebuilt OS/2 / hhea
+    // / vhea / post fields. Dedup with first-wins so the rebuild
+    // matches the spec-conforming case bit-for-bit.
+    let mut seen: Vec<[u8; 4]> = Vec::new();
     for (rec_tag, _) in mvar.entries() {
+        if seen.contains(&rec_tag) {
+            continue;
+        }
+        seen.push(rec_tag);
         let Some(d) = mvar.metric_delta(rec_tag, coords) else {
             continue;
         };
@@ -1729,5 +1754,77 @@ mod vvar_synthetic_tests {
         let out = prune_gdef_ivs(&face).unwrap();
         // OpenSans is GDEF v1.0 — no prune.
         assert!(out.is_none());
+    }
+
+    /// Builds a minimal MVAR table carrying `records` (each pointing
+    /// at IVS item (outer=0, inner=0)) and an embedded variation store
+    /// that resolves to `delta` at coord 1.0.
+    fn build_synthetic_mvar(records: &[[u8; 4]], delta: i16) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // major
+        out.extend_from_slice(&0u16.to_be_bytes()); // minor
+        out.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        out.extend_from_slice(&8u16.to_be_bytes()); // valueRecordSize
+        out.extend_from_slice(&(records.len() as u16).to_be_bytes());
+        let store_off_slot = out.len();
+        out.extend_from_slice(&0u16.to_be_bytes()); // store offset placeholder
+        for tag in records {
+            out.extend_from_slice(tag);
+            out.extend_from_slice(&0u16.to_be_bytes()); // outer
+            out.extend_from_slice(&0u16.to_be_bytes()); // inner
+        }
+        let store_off = out.len() as u16;
+        out[store_off_slot..store_off_slot + 2].copy_from_slice(&store_off.to_be_bytes());
+
+        // ItemVariationStore with one region (full peak at axis 0,
+        // coord 1.0) and one subtable carrying a single i16 delta.
+        // Layout: format(=1) + regionListOff + subtableCount +
+        // subtableOff[1] + RegionList + Subtable.
+        let mut ivs: Vec<u8> = Vec::new();
+        ivs.extend_from_slice(&1u16.to_be_bytes()); // format
+        let region_off_slot = ivs.len();
+        ivs.extend_from_slice(&0u32.to_be_bytes()); // regionListOff placeholder
+        ivs.extend_from_slice(&1u16.to_be_bytes()); // subtableCount
+        let sub_off_slot = ivs.len();
+        ivs.extend_from_slice(&0u32.to_be_bytes()); // subtableOffsets[0] placeholder
+
+        let region_off = ivs.len() as u32;
+        ivs.extend_from_slice(&1u16.to_be_bytes()); // axisCount
+        ivs.extend_from_slice(&1u16.to_be_bytes()); // regionCount
+                                                    // Region 0 axis 0 — start=0, peak=1.0, end=1.0 in F2DOT14.
+        ivs.extend_from_slice(&0i16.to_be_bytes());
+        ivs.extend_from_slice(&0x4000i16.to_be_bytes());
+        ivs.extend_from_slice(&0x4000i16.to_be_bytes());
+
+        let sub_off = ivs.len() as u32;
+        ivs.extend_from_slice(&1u16.to_be_bytes()); // itemCount
+        ivs.extend_from_slice(&1u16.to_be_bytes()); // wordDeltaCount = 1 (i16 wide)
+        ivs.extend_from_slice(&1u16.to_be_bytes()); // regionIndexCount
+        ivs.extend_from_slice(&0u16.to_be_bytes()); // regionIndexes[0]
+                                                    // Single delta row, one region: i16 word.
+        ivs.extend_from_slice(&delta.to_be_bytes());
+
+        ivs[region_off_slot..region_off_slot + 4].copy_from_slice(&region_off.to_be_bytes());
+        ivs[sub_off_slot..sub_off_slot + 4].copy_from_slice(&sub_off.to_be_bytes());
+
+        out.extend_from_slice(&ivs);
+        out
+    }
+
+    #[test]
+    fn apply_mvar_records_skips_duplicate_tag() {
+        // MVAR with two `hasc` records pointing at the same item.
+        // Without the dedup the OS/2 sTypoAscender would be patched
+        // twice: this test pins `apply_mvar_records` to first-wins.
+        let blob = build_synthetic_mvar(&[*b"hasc", *b"hasc"], 100);
+        let mvar = sigilbuzz::tables::Mvar::parse(&blob).unwrap();
+        // OS/2 v2 (96 bytes) with sTypoAscender = 800 at offset 68.
+        let mut os2 = alloc::vec![0u8; 96];
+        os2[68..70].copy_from_slice(&800i16.to_be_bytes());
+        let baked = apply_mvar_records(&mvar, &[1.0], Some(os2), None, None, None).unwrap();
+        let out = baked.os2.unwrap();
+        let val = i16::from_be_bytes([out[68], out[69]]);
+        // First-wins: 800 + 100 == 900. (Without dedup: 800 + 200 = 1000.)
+        assert_eq!(val, 900, "duplicate hasc must apply delta exactly once");
     }
 }
