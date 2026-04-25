@@ -11,13 +11,15 @@ them in dependency order.
 The companion crates depend on the shaper, so `sigilbuzz` itself has
 to land on the registry before any of them. Within the companion
 group, `sigilbuzz-svg` has an optional dependency on `sigilbuzz-paint`
-and so trails it. The full topological order is:
+and `sigilbuzz-render` has a hard dependency on `sigilbuzz-paint`, so
+both trail it. The full topological order is:
 
 1. **`sigilbuzz`** — the shaping core. No workspace dependencies.
 2. **`sigilbuzz-paint`** — depends on `sigilbuzz`.
 3. **`sigilbuzz-gpu`** — depends on `sigilbuzz`.
-4. **`sigilbuzz-svg`** — depends on `sigilbuzz`; optional dep on `sigilbuzz-paint`.
-5. **`sigilbuzz-pdf`** — depends on `sigilbuzz`.
+4. **`sigilbuzz-render`** — depends on `sigilbuzz` and `sigilbuzz-paint`.
+5. **`sigilbuzz-svg`** — depends on `sigilbuzz`; optional dep on `sigilbuzz-paint`.
+6. **`sigilbuzz-pdf`** — depends on `sigilbuzz`.
 
 After step 1 publishes, allow a minute or two for crates.io's index to
 propagate before kicking off step 2 — otherwise the dependency
@@ -29,7 +31,7 @@ version.
 Before tagging anything, sanity-check every member with a dry-run:
 
 ```bash
-for crate in sigilbuzz sigilbuzz-paint sigilbuzz-gpu sigilbuzz-svg sigilbuzz-pdf; do
+for crate in sigilbuzz sigilbuzz-paint sigilbuzz-gpu sigilbuzz-render sigilbuzz-svg sigilbuzz-pdf; do
     cargo publish -p "$crate" --dry-run --no-verify --allow-dirty
 done
 ```
@@ -73,6 +75,7 @@ companion's dry-run will pass.
    # wait ~60s for index propagation
    cargo publish -p sigilbuzz-paint
    cargo publish -p sigilbuzz-gpu
+   cargo publish -p sigilbuzz-render
    cargo publish -p sigilbuzz-svg
    cargo publish -p sigilbuzz-pdf
    ```
