@@ -596,6 +596,7 @@ pub(crate) fn bake_gpos_at_coords(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     /// Builds a one-region one-item ItemVariationStore: at coord 1.0
     /// the single item resolves to `delta`; at 0.0 it resolves to 0;
