@@ -54,7 +54,6 @@ pub struct MathValue<'a> {
 // offset relative to the enclosing subtable). Each subtable inlines
 // the read so it can use the right `data` slice as the device base.
 
-
 // =========================================================================
 // MATH header
 // =========================================================================
@@ -270,7 +269,9 @@ impl<'a> MathConstants<'a> {
         let device_off = u16::from_be_bytes([self.data[off + 2], self.data[off + 3]]);
         // Device offsets are from the start of the enclosing
         // MathConstants subtable.
-        let device = DeviceOrVariationIndex::parse_from(self.data, device_off).ok().flatten();
+        let device = DeviceOrVariationIndex::parse_from(self.data, device_off)
+            .ok()
+            .flatten();
         MathValue {
             value,
             device,
@@ -316,107 +317,260 @@ impl<'a> MathConstants<'a> {
     // -- the named MathValueRecord accessors -----------------------------
 
     /// `mathLeading` — minimum gap between math content baselines.
-    #[must_use] pub fn math_leading(&self) -> MathValue<'a> { self.value_record(c_idx::MATH_LEADING) }
+    #[must_use]
+    pub fn math_leading(&self) -> MathValue<'a> {
+        self.value_record(c_idx::MATH_LEADING)
+    }
     /// `axisHeight` — height of the math axis above the baseline.
-    #[must_use] pub fn axis_height(&self) -> MathValue<'a> { self.value_record(c_idx::AXIS_HEIGHT) }
+    #[must_use]
+    pub fn axis_height(&self) -> MathValue<'a> {
+        self.value_record(c_idx::AXIS_HEIGHT)
+    }
     /// `accentBaseHeight`.
-    #[must_use] pub fn accent_base_height(&self) -> MathValue<'a> { self.value_record(c_idx::ACCENT_BASE_HEIGHT) }
+    #[must_use]
+    pub fn accent_base_height(&self) -> MathValue<'a> {
+        self.value_record(c_idx::ACCENT_BASE_HEIGHT)
+    }
     /// `flattenedAccentBaseHeight`.
-    #[must_use] pub fn flattened_accent_base_height(&self) -> MathValue<'a> { self.value_record(c_idx::FLATTENED_ACCENT_BASE_HEIGHT) }
+    #[must_use]
+    pub fn flattened_accent_base_height(&self) -> MathValue<'a> {
+        self.value_record(c_idx::FLATTENED_ACCENT_BASE_HEIGHT)
+    }
     /// `subscriptShiftDown`.
-    #[must_use] pub fn subscript_shift_down(&self) -> MathValue<'a> { self.value_record(c_idx::SUBSCRIPT_SHIFT_DOWN) }
+    #[must_use]
+    pub fn subscript_shift_down(&self) -> MathValue<'a> {
+        self.value_record(c_idx::SUBSCRIPT_SHIFT_DOWN)
+    }
     /// `subscriptTopMax`.
-    #[must_use] pub fn subscript_top_max(&self) -> MathValue<'a> { self.value_record(c_idx::SUBSCRIPT_TOP_MAX) }
+    #[must_use]
+    pub fn subscript_top_max(&self) -> MathValue<'a> {
+        self.value_record(c_idx::SUBSCRIPT_TOP_MAX)
+    }
     /// `subscriptBaselineDropMin`.
-    #[must_use] pub fn subscript_baseline_drop_min(&self) -> MathValue<'a> { self.value_record(c_idx::SUBSCRIPT_BASELINE_DROP_MIN) }
+    #[must_use]
+    pub fn subscript_baseline_drop_min(&self) -> MathValue<'a> {
+        self.value_record(c_idx::SUBSCRIPT_BASELINE_DROP_MIN)
+    }
     /// `superscriptShiftUp`.
-    #[must_use] pub fn superscript_shift_up(&self) -> MathValue<'a> { self.value_record(c_idx::SUPERSCRIPT_SHIFT_UP) }
+    #[must_use]
+    pub fn superscript_shift_up(&self) -> MathValue<'a> {
+        self.value_record(c_idx::SUPERSCRIPT_SHIFT_UP)
+    }
     /// `superscriptShiftUpCramped`.
-    #[must_use] pub fn superscript_shift_up_cramped(&self) -> MathValue<'a> { self.value_record(c_idx::SUPERSCRIPT_SHIFT_UP_CRAMPED) }
+    #[must_use]
+    pub fn superscript_shift_up_cramped(&self) -> MathValue<'a> {
+        self.value_record(c_idx::SUPERSCRIPT_SHIFT_UP_CRAMPED)
+    }
     /// `superscriptBottomMin`.
-    #[must_use] pub fn superscript_bottom_min(&self) -> MathValue<'a> { self.value_record(c_idx::SUPERSCRIPT_BOTTOM_MIN) }
+    #[must_use]
+    pub fn superscript_bottom_min(&self) -> MathValue<'a> {
+        self.value_record(c_idx::SUPERSCRIPT_BOTTOM_MIN)
+    }
     /// `superscriptBaselineDropMax`.
-    #[must_use] pub fn superscript_baseline_drop_max(&self) -> MathValue<'a> { self.value_record(c_idx::SUPERSCRIPT_BASELINE_DROP_MAX) }
+    #[must_use]
+    pub fn superscript_baseline_drop_max(&self) -> MathValue<'a> {
+        self.value_record(c_idx::SUPERSCRIPT_BASELINE_DROP_MAX)
+    }
     /// `subSuperscriptGapMin`.
-    #[must_use] pub fn sub_superscript_gap_min(&self) -> MathValue<'a> { self.value_record(c_idx::SUB_SUPERSCRIPT_GAP_MIN) }
+    #[must_use]
+    pub fn sub_superscript_gap_min(&self) -> MathValue<'a> {
+        self.value_record(c_idx::SUB_SUPERSCRIPT_GAP_MIN)
+    }
     /// `superscriptBottomMaxWithSubscript`.
-    #[must_use] pub fn superscript_bottom_max_with_subscript(&self) -> MathValue<'a> { self.value_record(c_idx::SUPERSCRIPT_BOTTOM_MAX_WITH_SUBSCRIPT) }
+    #[must_use]
+    pub fn superscript_bottom_max_with_subscript(&self) -> MathValue<'a> {
+        self.value_record(c_idx::SUPERSCRIPT_BOTTOM_MAX_WITH_SUBSCRIPT)
+    }
     /// `spaceAfterScript`.
-    #[must_use] pub fn space_after_script(&self) -> MathValue<'a> { self.value_record(c_idx::SPACE_AFTER_SCRIPT) }
+    #[must_use]
+    pub fn space_after_script(&self) -> MathValue<'a> {
+        self.value_record(c_idx::SPACE_AFTER_SCRIPT)
+    }
     /// `upperLimitGapMin`.
-    #[must_use] pub fn upper_limit_gap_min(&self) -> MathValue<'a> { self.value_record(c_idx::UPPER_LIMIT_GAP_MIN) }
+    #[must_use]
+    pub fn upper_limit_gap_min(&self) -> MathValue<'a> {
+        self.value_record(c_idx::UPPER_LIMIT_GAP_MIN)
+    }
     /// `upperLimitBaselineRiseMin`.
-    #[must_use] pub fn upper_limit_baseline_rise_min(&self) -> MathValue<'a> { self.value_record(c_idx::UPPER_LIMIT_BASELINE_RISE_MIN) }
+    #[must_use]
+    pub fn upper_limit_baseline_rise_min(&self) -> MathValue<'a> {
+        self.value_record(c_idx::UPPER_LIMIT_BASELINE_RISE_MIN)
+    }
     /// `lowerLimitGapMin`.
-    #[must_use] pub fn lower_limit_gap_min(&self) -> MathValue<'a> { self.value_record(c_idx::LOWER_LIMIT_GAP_MIN) }
+    #[must_use]
+    pub fn lower_limit_gap_min(&self) -> MathValue<'a> {
+        self.value_record(c_idx::LOWER_LIMIT_GAP_MIN)
+    }
     /// `lowerLimitBaselineDropMin`.
-    #[must_use] pub fn lower_limit_baseline_drop_min(&self) -> MathValue<'a> { self.value_record(c_idx::LOWER_LIMIT_BASELINE_DROP_MIN) }
+    #[must_use]
+    pub fn lower_limit_baseline_drop_min(&self) -> MathValue<'a> {
+        self.value_record(c_idx::LOWER_LIMIT_BASELINE_DROP_MIN)
+    }
     /// `stackTopShiftUp`.
-    #[must_use] pub fn stack_top_shift_up(&self) -> MathValue<'a> { self.value_record(c_idx::STACK_TOP_SHIFT_UP) }
+    #[must_use]
+    pub fn stack_top_shift_up(&self) -> MathValue<'a> {
+        self.value_record(c_idx::STACK_TOP_SHIFT_UP)
+    }
     /// `stackTopDisplayStyleShiftUp`.
-    #[must_use] pub fn stack_top_display_style_shift_up(&self) -> MathValue<'a> { self.value_record(c_idx::STACK_TOP_DISPLAY_STYLE_SHIFT_UP) }
+    #[must_use]
+    pub fn stack_top_display_style_shift_up(&self) -> MathValue<'a> {
+        self.value_record(c_idx::STACK_TOP_DISPLAY_STYLE_SHIFT_UP)
+    }
     /// `stackBottomShiftDown`.
-    #[must_use] pub fn stack_bottom_shift_down(&self) -> MathValue<'a> { self.value_record(c_idx::STACK_BOTTOM_SHIFT_DOWN) }
+    #[must_use]
+    pub fn stack_bottom_shift_down(&self) -> MathValue<'a> {
+        self.value_record(c_idx::STACK_BOTTOM_SHIFT_DOWN)
+    }
     /// `stackBottomDisplayStyleShiftDown`.
-    #[must_use] pub fn stack_bottom_display_style_shift_down(&self) -> MathValue<'a> { self.value_record(c_idx::STACK_BOTTOM_DISPLAY_STYLE_SHIFT_DOWN) }
+    #[must_use]
+    pub fn stack_bottom_display_style_shift_down(&self) -> MathValue<'a> {
+        self.value_record(c_idx::STACK_BOTTOM_DISPLAY_STYLE_SHIFT_DOWN)
+    }
     /// `stackGapMin`.
-    #[must_use] pub fn stack_gap_min(&self) -> MathValue<'a> { self.value_record(c_idx::STACK_GAP_MIN) }
+    #[must_use]
+    pub fn stack_gap_min(&self) -> MathValue<'a> {
+        self.value_record(c_idx::STACK_GAP_MIN)
+    }
     /// `stackDisplayStyleGapMin`.
-    #[must_use] pub fn stack_display_style_gap_min(&self) -> MathValue<'a> { self.value_record(c_idx::STACK_DISPLAY_STYLE_GAP_MIN) }
+    #[must_use]
+    pub fn stack_display_style_gap_min(&self) -> MathValue<'a> {
+        self.value_record(c_idx::STACK_DISPLAY_STYLE_GAP_MIN)
+    }
     /// `stretchStackTopShiftUp`.
-    #[must_use] pub fn stretch_stack_top_shift_up(&self) -> MathValue<'a> { self.value_record(c_idx::STRETCH_STACK_TOP_SHIFT_UP) }
+    #[must_use]
+    pub fn stretch_stack_top_shift_up(&self) -> MathValue<'a> {
+        self.value_record(c_idx::STRETCH_STACK_TOP_SHIFT_UP)
+    }
     /// `stretchStackBottomShiftDown`.
-    #[must_use] pub fn stretch_stack_bottom_shift_down(&self) -> MathValue<'a> { self.value_record(c_idx::STRETCH_STACK_BOTTOM_SHIFT_DOWN) }
+    #[must_use]
+    pub fn stretch_stack_bottom_shift_down(&self) -> MathValue<'a> {
+        self.value_record(c_idx::STRETCH_STACK_BOTTOM_SHIFT_DOWN)
+    }
     /// `stretchStackGapAboveMin`.
-    #[must_use] pub fn stretch_stack_gap_above_min(&self) -> MathValue<'a> { self.value_record(c_idx::STRETCH_STACK_GAP_ABOVE_MIN) }
+    #[must_use]
+    pub fn stretch_stack_gap_above_min(&self) -> MathValue<'a> {
+        self.value_record(c_idx::STRETCH_STACK_GAP_ABOVE_MIN)
+    }
     /// `stretchStackGapBelowMin`.
-    #[must_use] pub fn stretch_stack_gap_below_min(&self) -> MathValue<'a> { self.value_record(c_idx::STRETCH_STACK_GAP_BELOW_MIN) }
+    #[must_use]
+    pub fn stretch_stack_gap_below_min(&self) -> MathValue<'a> {
+        self.value_record(c_idx::STRETCH_STACK_GAP_BELOW_MIN)
+    }
     /// `fractionNumeratorShiftUp`.
-    #[must_use] pub fn fraction_numerator_shift_up(&self) -> MathValue<'a> { self.value_record(c_idx::FRACTION_NUMERATOR_SHIFT_UP) }
+    #[must_use]
+    pub fn fraction_numerator_shift_up(&self) -> MathValue<'a> {
+        self.value_record(c_idx::FRACTION_NUMERATOR_SHIFT_UP)
+    }
     /// `fractionNumeratorDisplayStyleShiftUp`.
-    #[must_use] pub fn fraction_numerator_display_style_shift_up(&self) -> MathValue<'a> { self.value_record(c_idx::FRACTION_NUMERATOR_DISPLAY_STYLE_SHIFT_UP) }
+    #[must_use]
+    pub fn fraction_numerator_display_style_shift_up(&self) -> MathValue<'a> {
+        self.value_record(c_idx::FRACTION_NUMERATOR_DISPLAY_STYLE_SHIFT_UP)
+    }
     /// `fractionDenominatorShiftDown`.
-    #[must_use] pub fn fraction_denominator_shift_down(&self) -> MathValue<'a> { self.value_record(c_idx::FRACTION_DENOMINATOR_SHIFT_DOWN) }
+    #[must_use]
+    pub fn fraction_denominator_shift_down(&self) -> MathValue<'a> {
+        self.value_record(c_idx::FRACTION_DENOMINATOR_SHIFT_DOWN)
+    }
     /// `fractionDenominatorDisplayStyleShiftDown`.
-    #[must_use] pub fn fraction_denominator_display_style_shift_down(&self) -> MathValue<'a> { self.value_record(c_idx::FRACTION_DENOMINATOR_DISPLAY_STYLE_SHIFT_DOWN) }
+    #[must_use]
+    pub fn fraction_denominator_display_style_shift_down(&self) -> MathValue<'a> {
+        self.value_record(c_idx::FRACTION_DENOMINATOR_DISPLAY_STYLE_SHIFT_DOWN)
+    }
     /// `fractionNumeratorGapMin`.
-    #[must_use] pub fn fraction_numerator_gap_min(&self) -> MathValue<'a> { self.value_record(c_idx::FRACTION_NUMERATOR_GAP_MIN) }
+    #[must_use]
+    pub fn fraction_numerator_gap_min(&self) -> MathValue<'a> {
+        self.value_record(c_idx::FRACTION_NUMERATOR_GAP_MIN)
+    }
     /// `fractionNumDisplayStyleGapMin`.
-    #[must_use] pub fn fraction_num_display_style_gap_min(&self) -> MathValue<'a> { self.value_record(c_idx::FRACTION_NUM_DISPLAY_STYLE_GAP_MIN) }
+    #[must_use]
+    pub fn fraction_num_display_style_gap_min(&self) -> MathValue<'a> {
+        self.value_record(c_idx::FRACTION_NUM_DISPLAY_STYLE_GAP_MIN)
+    }
     /// `fractionRuleThickness`.
-    #[must_use] pub fn fraction_rule_thickness(&self) -> MathValue<'a> { self.value_record(c_idx::FRACTION_RULE_THICKNESS) }
+    #[must_use]
+    pub fn fraction_rule_thickness(&self) -> MathValue<'a> {
+        self.value_record(c_idx::FRACTION_RULE_THICKNESS)
+    }
     /// `fractionDenominatorGapMin`.
-    #[must_use] pub fn fraction_denominator_gap_min(&self) -> MathValue<'a> { self.value_record(c_idx::FRACTION_DENOMINATOR_GAP_MIN) }
+    #[must_use]
+    pub fn fraction_denominator_gap_min(&self) -> MathValue<'a> {
+        self.value_record(c_idx::FRACTION_DENOMINATOR_GAP_MIN)
+    }
     /// `fractionDenomDisplayStyleGapMin`.
-    #[must_use] pub fn fraction_denom_display_style_gap_min(&self) -> MathValue<'a> { self.value_record(c_idx::FRACTION_DENOM_DISPLAY_STYLE_GAP_MIN) }
+    #[must_use]
+    pub fn fraction_denom_display_style_gap_min(&self) -> MathValue<'a> {
+        self.value_record(c_idx::FRACTION_DENOM_DISPLAY_STYLE_GAP_MIN)
+    }
     /// `skewedFractionHorizontalGap`.
-    #[must_use] pub fn skewed_fraction_horizontal_gap(&self) -> MathValue<'a> { self.value_record(c_idx::SKEWED_FRACTION_HORIZONTAL_GAP) }
+    #[must_use]
+    pub fn skewed_fraction_horizontal_gap(&self) -> MathValue<'a> {
+        self.value_record(c_idx::SKEWED_FRACTION_HORIZONTAL_GAP)
+    }
     /// `skewedFractionVerticalGap`.
-    #[must_use] pub fn skewed_fraction_vertical_gap(&self) -> MathValue<'a> { self.value_record(c_idx::SKEWED_FRACTION_VERTICAL_GAP) }
+    #[must_use]
+    pub fn skewed_fraction_vertical_gap(&self) -> MathValue<'a> {
+        self.value_record(c_idx::SKEWED_FRACTION_VERTICAL_GAP)
+    }
     /// `overbarVerticalGap`.
-    #[must_use] pub fn overbar_vertical_gap(&self) -> MathValue<'a> { self.value_record(c_idx::OVERBAR_VERTICAL_GAP) }
+    #[must_use]
+    pub fn overbar_vertical_gap(&self) -> MathValue<'a> {
+        self.value_record(c_idx::OVERBAR_VERTICAL_GAP)
+    }
     /// `overbarRuleThickness`.
-    #[must_use] pub fn overbar_rule_thickness(&self) -> MathValue<'a> { self.value_record(c_idx::OVERBAR_RULE_THICKNESS) }
+    #[must_use]
+    pub fn overbar_rule_thickness(&self) -> MathValue<'a> {
+        self.value_record(c_idx::OVERBAR_RULE_THICKNESS)
+    }
     /// `overbarExtraAscender`.
-    #[must_use] pub fn overbar_extra_ascender(&self) -> MathValue<'a> { self.value_record(c_idx::OVERBAR_EXTRA_ASCENDER) }
+    #[must_use]
+    pub fn overbar_extra_ascender(&self) -> MathValue<'a> {
+        self.value_record(c_idx::OVERBAR_EXTRA_ASCENDER)
+    }
     /// `underbarVerticalGap`.
-    #[must_use] pub fn underbar_vertical_gap(&self) -> MathValue<'a> { self.value_record(c_idx::UNDERBAR_VERTICAL_GAP) }
+    #[must_use]
+    pub fn underbar_vertical_gap(&self) -> MathValue<'a> {
+        self.value_record(c_idx::UNDERBAR_VERTICAL_GAP)
+    }
     /// `underbarRuleThickness`.
-    #[must_use] pub fn underbar_rule_thickness(&self) -> MathValue<'a> { self.value_record(c_idx::UNDERBAR_RULE_THICKNESS) }
+    #[must_use]
+    pub fn underbar_rule_thickness(&self) -> MathValue<'a> {
+        self.value_record(c_idx::UNDERBAR_RULE_THICKNESS)
+    }
     /// `underbarExtraDescender`.
-    #[must_use] pub fn underbar_extra_descender(&self) -> MathValue<'a> { self.value_record(c_idx::UNDERBAR_EXTRA_DESCENDER) }
+    #[must_use]
+    pub fn underbar_extra_descender(&self) -> MathValue<'a> {
+        self.value_record(c_idx::UNDERBAR_EXTRA_DESCENDER)
+    }
     /// `radicalVerticalGap`.
-    #[must_use] pub fn radical_vertical_gap(&self) -> MathValue<'a> { self.value_record(c_idx::RADICAL_VERTICAL_GAP) }
+    #[must_use]
+    pub fn radical_vertical_gap(&self) -> MathValue<'a> {
+        self.value_record(c_idx::RADICAL_VERTICAL_GAP)
+    }
     /// `radicalDisplayStyleVerticalGap`.
-    #[must_use] pub fn radical_display_style_vertical_gap(&self) -> MathValue<'a> { self.value_record(c_idx::RADICAL_DISPLAY_STYLE_VERTICAL_GAP) }
+    #[must_use]
+    pub fn radical_display_style_vertical_gap(&self) -> MathValue<'a> {
+        self.value_record(c_idx::RADICAL_DISPLAY_STYLE_VERTICAL_GAP)
+    }
     /// `radicalRuleThickness`.
-    #[must_use] pub fn radical_rule_thickness(&self) -> MathValue<'a> { self.value_record(c_idx::RADICAL_RULE_THICKNESS) }
+    #[must_use]
+    pub fn radical_rule_thickness(&self) -> MathValue<'a> {
+        self.value_record(c_idx::RADICAL_RULE_THICKNESS)
+    }
     /// `radicalExtraAscender`.
-    #[must_use] pub fn radical_extra_ascender(&self) -> MathValue<'a> { self.value_record(c_idx::RADICAL_EXTRA_ASCENDER) }
+    #[must_use]
+    pub fn radical_extra_ascender(&self) -> MathValue<'a> {
+        self.value_record(c_idx::RADICAL_EXTRA_ASCENDER)
+    }
     /// `radicalKernBeforeDegree`.
-    #[must_use] pub fn radical_kern_before_degree(&self) -> MathValue<'a> { self.value_record(c_idx::RADICAL_KERN_BEFORE_DEGREE) }
+    #[must_use]
+    pub fn radical_kern_before_degree(&self) -> MathValue<'a> {
+        self.value_record(c_idx::RADICAL_KERN_BEFORE_DEGREE)
+    }
     /// `radicalKernAfterDegree`.
-    #[must_use] pub fn radical_kern_after_degree(&self) -> MathValue<'a> { self.value_record(c_idx::RADICAL_KERN_AFTER_DEGREE) }
+    #[must_use]
+    pub fn radical_kern_after_degree(&self) -> MathValue<'a> {
+        self.value_record(c_idx::RADICAL_KERN_AFTER_DEGREE)
+    }
 }
 
 // =========================================================================
@@ -458,7 +612,10 @@ impl<'a> MathGlyphInfo<'a> {
         let extended_shape_off = r.read_u16()?;
         let kern_info_off = r.read_u16()?;
         for (off, ctx) in [
-            (italic_correction_off, "MathItalicsCorrectionInfo offset past end"),
+            (
+                italic_correction_off,
+                "MathItalicsCorrectionInfo offset past end",
+            ),
             (top_accent_off, "MathTopAccentAttachment offset past end"),
             (extended_shape_off, "ExtendedShapeCoverage offset past end"),
             (kern_info_off, "MathKernInfo offset past end"),
@@ -891,7 +1048,10 @@ impl<'a> MathVariants<'a> {
         }
         for (off, ctx) in [
             (vert_coverage_off, "MathVariants vertical Coverage past end"),
-            (horiz_coverage_off, "MathVariants horizontal Coverage past end"),
+            (
+                horiz_coverage_off,
+                "MathVariants horizontal Coverage past end",
+            ),
         ] {
             if off != 0 && off as usize > data.len() {
                 return Err(Error::Malformed {
@@ -1038,8 +1198,8 @@ mod tests {
         push_i16(&mut v, 60); // scriptScriptPercentScaleDown
         push_u16(&mut v, 1500); // delimitedSubFormulaMinHeight
         push_u16(&mut v, 1800); // displayOperatorMinHeight
-        // 51 == NUM_VALUE_RECORDS; spelled inline to keep the literal
-        // a plain i16 for clippy's cast-possible-wrap lint.
+                                // 51 == NUM_VALUE_RECORDS; spelled inline to keep the literal
+                                // a plain i16 for clippy's cast-possible-wrap lint.
         for i in 0i16..51 {
             push_i16(&mut v, 100 + i); // value
             push_u16(&mut v, 0); // device offset = 0 (none)
@@ -1180,10 +1340,7 @@ mod tests {
         let mut v = Vec::new();
         push_u16(&mut v, 5);
         v.extend_from_slice(&[0u8; 4]); // far short of needed
-        assert!(matches!(
-            MathKern::parse(&v),
-            Err(Error::Truncated { .. })
-        ));
+        assert!(matches!(MathKern::parse(&v), Err(Error::Truncated { .. })));
     }
 
     #[test]
@@ -1252,7 +1409,7 @@ mod tests {
         push_u16(&mut v, 1); // variant count
         push_u16(&mut v, 11); // variant glyph
         push_u16(&mut v, 1000); // advance
-        // GlyphAssembly: italicsCorrection (4) + partCount (2) + parts.
+                                // GlyphAssembly: italicsCorrection (4) + partCount (2) + parts.
         push_i16(&mut v, 25); // italics correction value
         push_u16(&mut v, 0); // device = 0
         push_u16(&mut v, 1); // partCount
@@ -1329,9 +1486,7 @@ mod tests {
     fn math_variants_assembly_exposes_parts_and_extender_flag() {
         let bytes = build_math_variants();
         let mv = MathVariants::parse(&bytes).unwrap();
-        let cons = mv
-            .horizontal_glyph_construction(8)
-            .expect("horiz covered");
+        let cons = mv.horizontal_glyph_construction(8).expect("horiz covered");
         assert_eq!(cons.variant_count(), 1);
         let asm = cons.assembly().expect("has assembly");
         assert_eq!(asm.italics_correction.value, 25);

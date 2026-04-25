@@ -37,8 +37,8 @@ use crate::tables::glyf::PhantomMetrics;
 use crate::tables::parse::Reader;
 use crate::tables::{
     tag, Avar, Cbdt, Cblc, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBitmap, GlyphBounds, Gpos, Gsub,
-    Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Math, Maxp, Morx, Mvar, Outline, Sbix, Svg,
-    SvgDocument, Vhea, Vmtx, Vorg, Vvar,
+    Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Math, Maxp, Morx, Mvar, Outline, Sbix,
+    Svg, SvgDocument, Vhea, Vmtx, Vorg, Vvar,
 };
 
 /// One entry in the SFNT table directory.
