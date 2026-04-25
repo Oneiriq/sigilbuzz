@@ -26,6 +26,17 @@ pub fn write_hhea_metrics_count(hhea: &mut [u8], n: u16) -> Result<(), SubsetErr
     Ok(())
 }
 
+/// Patches `vhea.numberOfLongVerMetrics` (last two bytes of the table —
+/// vhea v1.0 / v1.1 share an identical byte layout to `hhea`).
+pub fn write_vhea_metrics_count(vhea: &mut [u8], n: u16) -> Result<(), SubsetError> {
+    if vhea.len() < 36 {
+        return Err(SubsetError::Unsupported("vhea too short to patch"));
+    }
+    let off = vhea.len() - 2;
+    vhea[off..off + 2].copy_from_slice(&n.to_be_bytes());
+    Ok(())
+}
+
 /// Patches `maxp.numGlyphs` (offset 4..6).
 pub fn write_maxp_num_glyphs(maxp: &mut [u8], n: u16) -> Result<(), SubsetError> {
     if maxp.len() < 6 {
