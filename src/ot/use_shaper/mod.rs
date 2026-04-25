@@ -690,7 +690,7 @@ pub fn shape_use(
     //    Without this split the substituted pre-base form ends up
     //    sitting after the base, diverging from rustybuzz on every
     //    `pref`-driven font.
-    let has_pref = basic_features.iter().any(|t| *t == b"pref");
+    let has_pref = basic_features.contains(&b"pref");
     if let Some(gsub) = gsub {
         if reorder_prebase && has_pref {
             // Snapshot pre-`pref` glyph IDs so the reorder can detect
