@@ -115,13 +115,35 @@ pub const LIMBU_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"limb", *b"DFLT"];
 /// Cham script tag.
 pub const CHAM_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"cham", *b"DFLT"];
 
+/// Brahmi script tag — `brah` is the only OT tag in current use.
+pub const BRAHMI_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"brah", *b"DFLT"];
+
+/// Sharada script tag.
+pub const SHARADA_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"shrd", *b"DFLT"];
+
+/// Khojki script tag.
+pub const KHOJKI_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"khoj", *b"DFLT"];
+
+/// Tirhuta script tag.
+pub const TIRHUTA_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"tirh", *b"DFLT"];
+
+/// Modi script tag.
+pub const MODI_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"modi", *b"DFLT"];
+
 /// USE basic features, applied per-syllable before reordering
 /// finalisation. Order matters — `rphf` must run before `half` so
 /// the ra+halant that would otherwise fold into a half-form is
 /// consumed as a reph first.
+///
+/// `nukt` (nukta composition) and `akhn` (akhand) run with `locl`
+/// and `ccmp` in the default glyph pre-processing group — Indic-
+/// style USE scripts (Sharada, Tirhuta, Modi, Khojki, Brahmi) ship
+/// `akhn` lookups for ligatures of the form `ka + sign-i` that
+/// rustybuzz applies before reordering. Keep them at the head of
+/// the list for parity.
 pub const USE_BASIC_FEATURES: &[&[u8; 4]] = &[
-    b"locl", b"ccmp", b"rphf", b"pref", b"rkrf", b"abvf", b"blwf", b"half", b"pstf", b"vatu",
-    b"cjct", b"isol",
+    b"locl", b"ccmp", b"nukt", b"akhn", b"rphf", b"pref", b"rkrf", b"abvf", b"blwf", b"half",
+    b"pstf", b"vatu", b"cjct", b"isol",
 ];
 
 /// USE topographical features — run after basic substitutions have
@@ -1097,6 +1119,107 @@ pub fn shape_cham(
     );
 }
 
+/// Entry point for Brahmi runs. Brahmic — full USE feature chain.
+/// SMP block (U+11000..U+1107F). No pre-base reorder fires (no
+/// pre-base vowel signs in Brahmi); included on the consonant
+/// shaping path so virama / vowel-sign substitutions still see
+/// the syllable structure.
+pub fn shape_brahmi(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        BRAHMI_SCRIPT_PRIORITY,
+        USE_BASIC_FEATURES,
+        USE_TOPOGRAPHICAL_FEATURES,
+        true,
+    );
+}
+
+/// Entry point for Sharada runs.
+pub fn shape_sharada(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        SHARADA_SCRIPT_PRIORITY,
+        USE_BASIC_FEATURES,
+        USE_TOPOGRAPHICAL_FEATURES,
+        true,
+    );
+}
+
+/// Entry point for Khojki runs.
+pub fn shape_khojki(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        KHOJKI_SCRIPT_PRIORITY,
+        USE_BASIC_FEATURES,
+        USE_TOPOGRAPHICAL_FEATURES,
+        true,
+    );
+}
+
+/// Entry point for Tirhuta runs. Tirhuta has pre-base vowel signs
+/// (sign-e U+114B9, sign-o U+114BC) that the USE pre-base reorder
+/// fires for.
+pub fn shape_tirhuta(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        TIRHUTA_SCRIPT_PRIORITY,
+        USE_BASIC_FEATURES,
+        USE_TOPOGRAPHICAL_FEATURES,
+        true,
+    );
+}
+
+/// Entry point for Modi runs.
+pub fn shape_modi(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        MODI_SCRIPT_PRIORITY,
+        USE_BASIC_FEATURES,
+        USE_TOPOGRAPHICAL_FEATURES,
+        true,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1308,8 +1431,8 @@ mod tests {
         assert_eq!(
             USE_BASIC_FEATURES,
             &[
-                b"locl", b"ccmp", b"rphf", b"pref", b"rkrf", b"abvf", b"blwf", b"half", b"pstf",
-                b"vatu", b"cjct", b"isol",
+                b"locl", b"ccmp", b"nukt", b"akhn", b"rphf", b"pref", b"rkrf", b"abvf", b"blwf",
+                b"half", b"pstf", b"vatu", b"cjct", b"isol",
             ]
         );
         assert_eq!(

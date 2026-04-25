@@ -949,6 +949,46 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 &mut seg_glyphs,
             );
         }
+        if seg.script == Script::Brahmi {
+            crate::ot::use_shaper::shape_brahmi(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::Sharada {
+            crate::ot::use_shaper::shape_sharada(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::Khojki {
+            crate::ot::use_shaper::shape_khojki(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::Tirhuta {
+            crate::ot::use_shaper::shape_tirhuta(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::Modi {
+            crate::ot::use_shaper::shape_modi(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
         // Hangul routes through USE only for Jamo-decomposed text.
         // Precomposed syllables (U+AC00..U+D7A3) still pass through
         // the default GSUB/GPOS chain — `ljmo`/`vjmo`/`tjmo` are
