@@ -23,15 +23,15 @@
 //!   WOFF2 anyway — compressed WOFF1 is a legacy curiosity that
 //!   rarely shows up in practice.
 //! - [`unwrap_woff2`]: WOFF2 header + directory parsing, Brotli
-//!   decompression (via the `brotli-decompressor` crate, gated on
-//!   the default `woff2` feature), and the inverse `glyf`/`loca`
-//!   transform. Reconstructs simple glyphs (with bbox, end-of-contour
-//!   list, instructions, and triplet-decoded coordinate deltas) and
+//!   decompression (via the `brotli` crate, gated on the default
+//!   `woff2` feature), and the inverse `glyf`/`loca` transform.
+//!   Reconstructs simple glyphs (with bbox, end-of-contour list,
+//!   instructions, and triplet-decoded coordinate deltas) and
 //!   composite glyphs (verbatim component records plus optional
 //!   trailing instructions).
-//! - `wrap_woff2`: **deferred to 0.7.0**. The forward `glyf`
-//!   transform plus Brotli encoding doubles the implementation
-//!   surface and ships in its own follow-up.
+//! - [`wrap_woff2`]: forward `glyf`/`loca` transform plus Brotli
+//!   encoding. Takes raw SFNT bytes and produces a WOFF2 file. Hmtx
+//!   transform v1 is not emitted; `hmtx` stays untransformed.
 //!
 //! # Feature flags
 //!
@@ -43,7 +43,7 @@
 //!   callers wanting Vec-free APIs.
 //!
 //! See `docs/deps.md` in the workspace root for the rationale on the
-//! single new runtime dependency this crate brings (`brotli-decompressor`).
+//! single new runtime dependency this crate brings (`brotli`).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -63,7 +63,7 @@ mod woff2;
 pub use error::{Result, WoffError};
 pub use woff1::{unwrap_woff1, wrap_woff1};
 #[cfg(feature = "woff2")]
-pub use woff2::unwrap_woff2;
+pub use woff2::{unwrap_woff2, wrap_woff2, wrap_woff2_with_options, WrapOptions};
 
 #[cfg(not(feature = "woff2"))]
 /// Stub returned when the `woff2` feature is disabled.
@@ -73,5 +73,13 @@ pub use woff2::unwrap_woff2;
 /// Brotli runtime dep but still compiles against the same public
 /// API surface.
 pub fn unwrap_woff2(_woff2_bytes: &[u8]) -> Result<Vec<u8>> {
+    Err(WoffError::Woff2Disabled)
+}
+
+#[cfg(not(feature = "woff2"))]
+/// Stub returned when the `woff2` feature is disabled.
+///
+/// Always returns [`WoffError::Woff2Disabled`].
+pub fn wrap_woff2(_sfnt_bytes: &[u8]) -> Result<Vec<u8>> {
     Err(WoffError::Woff2Disabled)
 }

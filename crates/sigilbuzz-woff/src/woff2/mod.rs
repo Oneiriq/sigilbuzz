@@ -27,16 +27,20 @@ use crate::error::{Result, WoffError};
 use crate::reader::Reader;
 
 mod transform;
+mod wrap;
+mod wrap_transform;
 
-const WOFF2_SIGNATURE: u32 = 0x774F_4632; // 'wOF2'
-const TAG_GLYF: [u8; 4] = *b"glyf";
-const TAG_LOCA: [u8; 4] = *b"loca";
+pub use wrap::{wrap_woff2, wrap_woff2_with_options, WrapOptions};
+
+pub(crate) const WOFF2_SIGNATURE: u32 = 0x774F_4632; // 'wOF2'
+pub(crate) const TAG_GLYF: [u8; 4] = *b"glyf";
+pub(crate) const TAG_LOCA: [u8; 4] = *b"loca";
 
 /// 5-bit known-tag table from the WOFF2 spec, table 3.
 ///
 /// Index 63 is reserved as the "arbitrary tag follows" marker — we
 /// don't list it here.
-const KNOWN_TAGS: [&[u8; 4]; 63] = [
+pub(crate) const KNOWN_TAGS: [&[u8; 4]; 63] = [
     b"cmap", b"head", b"hhea", b"hmtx", b"maxp", b"name", b"OS/2", b"post", b"cvt ", b"fpgm",
     b"glyf", b"loca", b"prep", b"CFF ", b"VORG", b"EBDT", b"EBLC", b"gasp", b"hdmx", b"kern",
     b"LTSH", b"PCLT", b"VDMX", b"vhea", b"vmtx", b"BASE", b"GDEF", b"GPOS", b"GSUB", b"EBSC",
@@ -295,7 +299,7 @@ fn unwrap_woff2_inner(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
 
 #[cfg(feature = "woff2")]
 fn brotli_decompress(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
-    use brotli_decompressor::BrotliDecompress;
+    use brotli::BrotliDecompress;
     use std::io::Cursor;
 
     let mut out: Vec<u8> = Vec::with_capacity(expected_len);

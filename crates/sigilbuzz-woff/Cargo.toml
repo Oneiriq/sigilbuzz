@@ -15,14 +15,16 @@ publish = true
 [features]
 default = ["std", "woff2"]
 std = []
-# WOFF2 needs Brotli decompression. The brotli-decompressor crate is
-# the no_std-capable choice; gate it behind the woff2 feature so a
-# WOFF1-only consumer doesn't pull it in.
-woff2 = ["dep:brotli-decompressor"]
+# WOFF2 needs both Brotli decompression (for unwrap) and encoding (for
+# wrap). The `brotli` crate (same maintainers as the
+# `brotli-decompressor` we used in 0.6.0) ships both directions, so
+# 0.7.0 collapses to a single dep behind the woff2 feature. Disabling
+# the feature drops the dep entirely for WOFF1-only consumers.
+woff2 = ["dep:brotli"]
 
 [dependencies]
 sigilbuzz = { workspace = true }
-brotli-decompressor = { version = "5", optional = true, default-features = false, features = ["std"] }
+brotli = { version = "8", optional = true, default-features = false, features = ["std"] }
 
 [dev-dependencies]
 # Fixtures are loaded with include_bytes!. ttf-parser drives the
