@@ -37,8 +37,8 @@ use crate::tables::glyf::PhantomMetrics;
 use crate::tables::parse::Reader;
 use crate::tables::{
     tag, Avar, Cbdt, Cblc, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBitmap, GlyphBounds, Gpos, Gsub,
-    Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Math, Maxp, Morx, Outline, Sbix, Svg,
-    SvgDocument, Vhea, Vmtx, Vorg,
+    Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Math, Maxp, Morx, Mvar, Outline, Sbix, Svg,
+    SvgDocument, Vhea, Vmtx, Vorg, Vvar,
 };
 
 /// One entry in the SFNT table directory.
@@ -369,6 +369,32 @@ impl<'a> Face<'a> {
     pub fn gvar(&self) -> Result<Option<Gvar<'a>>> {
         match self.table_bytes(tag::GVAR) {
             Ok(bytes) => Ok(Some(Gvar::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `MVAR` table if the font carries one. MVAR varies
+    /// font-wide instance metrics (typoAscender / Descender,
+    /// x-height, sub/super offsets, strikeout, underline, …) by
+    /// axis coord; missing MVAR means those metrics stay constant
+    /// across the design space. Most variable fonts ship MVAR.
+    pub fn mvar(&self) -> Result<Option<Mvar<'a>>> {
+        match self.table_bytes(tag::MVAR) {
+            Ok(bytes) => Ok(Some(Mvar::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `VVAR` table if the font carries one. HVAR's
+    /// vertical sibling — varies per-glyph advance height and
+    /// top-side bearing. Only fonts that support vertical layout
+    /// (CJK, vertical Latin) ship this; horizontal-only variable
+    /// fonts omit it.
+    pub fn vvar(&self) -> Result<Option<Vvar<'a>>> {
+        match self.table_bytes(tag::VVAR) {
+            Ok(bytes) => Ok(Some(Vvar::parse(bytes)?)),
             Err(Error::MissingTable { .. }) => Ok(None),
             Err(e) => Err(e),
         }
