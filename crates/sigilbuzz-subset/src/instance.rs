@@ -3849,10 +3849,7 @@ mod partial_instancing_tests {
     fn axis_support_scalar_inf_coord_returns_zero() {
         // +Inf and -Inf coords are both clamped to scalar 0.
         assert_eq!(axis_support_scalar(0.0, 1.0, 1.0, f32::INFINITY), 0.0);
-        assert_eq!(
-            axis_support_scalar(0.0, 1.0, 1.0, f32::NEG_INFINITY),
-            0.0
-        );
+        assert_eq!(axis_support_scalar(0.0, 1.0, 1.0, f32::NEG_INFINITY), 0.0);
     }
 
     #[test]
