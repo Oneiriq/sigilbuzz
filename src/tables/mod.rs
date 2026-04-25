@@ -33,6 +33,7 @@ pub mod layout;
 pub mod loca;
 pub mod maxp;
 pub mod morx;
+pub mod mvar;
 pub mod outline;
 pub mod parse;
 pub mod sbix;
@@ -71,6 +72,7 @@ pub use layout::{ClassDef, Coverage};
 pub use loca::Loca;
 pub use maxp::Maxp;
 pub use morx::Morx;
+pub use mvar::Mvar;
 pub use outline::{Outline, OutlineSink, PathOp};
 pub use parse::Reader;
 pub use sbix::{Sbix, SbixGlyph, SbixStrike};
@@ -118,6 +120,10 @@ pub mod tag {
     pub const HVAR: [u8; 4] = *b"HVAR";
     /// `gvar` — glyph variations (per-point outline deltas).
     pub const GVAR: [u8; 4] = *b"gvar";
+    /// `MVAR` — metrics variations (font-wide instance metrics).
+    pub const MVAR: [u8; 4] = *b"MVAR";
+    /// `VVAR` — vertical metrics variations (advance height, tsb).
+    pub const VVAR: [u8; 4] = *b"VVAR";
     /// `vhea` — vertical header.
     pub const VHEA: [u8; 4] = *b"vhea";
     /// `vmtx` — vertical metrics.
