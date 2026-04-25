@@ -974,10 +974,7 @@ mod tests {
         // First-component=10 has two ligatures: (10+20→100) and
         // (10+30→200). Drop component 30 → second ligature dies, first
         // survives. LigatureSet stays, Coverage entry stays.
-        let bytes = build_type4_subtable(&[(
-            10,
-            vec![(100, vec![20]), (200, vec![30])],
-        )]);
+        let bytes = build_type4_subtable(&[(10, vec![(100, vec![20]), (200, vec![30])])]);
         let map = map_from_pairs(&[
             (0, 0),
             (10, 9),
@@ -1003,10 +1000,8 @@ mod tests {
         // 40-set has a survivable ligature. Dropping all of 10's
         // ligatures (output 100 dropped) collapses that Coverage entry;
         // dropping 40 itself collapses the second.
-        let bytes = build_type4_subtable(&[
-            (10, vec![(100, vec![20])]),
-            (40, vec![(200, vec![50])]),
-        ]);
+        let bytes =
+            build_type4_subtable(&[(10, vec![(100, vec![20])]), (40, vec![(200, vec![50])])]);
         // Map keeps everything *except* 10 (first comp drops) and 100
         // (output of the only 10-ligature drops). 40 + 50 + 200 stay.
         let map = map_from_pairs(&[(0, 0), (40, 39), (50, 49), (200, 199), (20, 19)]);

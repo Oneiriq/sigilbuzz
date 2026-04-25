@@ -387,8 +387,7 @@ fn open_sans_fi_subset_round_trips_through_shape() {
         .find_map(|(old, new)| if *old == src_fi_gid { Some(*new) } else { None })
         .expect("source fi gid must be in the subset's gid_map");
     assert_eq!(
-        run_subset.glyphs[0].glyph_id as u16,
-        new_fi_gid,
+        run_subset.glyphs[0].glyph_id as u16, new_fi_gid,
         "shape(\"fi\") on subset must produce the renumbered fi ligature gid",
     );
 }
