@@ -763,12 +763,7 @@ pub fn shape_use(
 /// before the base. Mirrors rustybuzz's `record_pref` →
 /// `reorder_syllable_use` pair, but only for the medial-ra case the
 /// 0.8.0 corpus exercises (Cham). Length-preserving.
-fn pref_reorder(
-    codepoints: &[char],
-    glyphs: &mut [Glyph],
-    syllable: &Syllable,
-    pre_ids: &[u32],
-) {
+fn pref_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllable, pre_ids: &[u32]) {
     if !matches!(syllable.kind, SyllableKind::Consonant) {
         return;
     }
