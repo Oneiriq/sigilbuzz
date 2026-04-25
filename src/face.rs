@@ -36,9 +36,9 @@ use crate::error::{Error, Result};
 use crate::tables::glyf::PhantomMetrics;
 use crate::tables::parse::Reader;
 use crate::tables::{
-    tag, Avar, Cbdt, Cblc, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBitmap, GlyphBounds, Gpos, Gsub,
-    Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Math, Maxp, Morx, Mvar, Outline, Sbix,
-    Svg, SvgDocument, Vhea, Vmtx, Vorg, Vvar,
+    tag, Ankr, Avar, Cbdt, Cblc, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBitmap, GlyphBounds, Gpos,
+    Gsub, Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Math, Maxp, Morx, Mvar, Outline,
+    Sbix, Svg, SvgDocument, Vhea, Vmtx, Vorg, Vvar,
 };
 
 /// One entry in the SFNT table directory.
@@ -285,6 +285,19 @@ impl<'a> Face<'a> {
                 let num_glyphs = self.maxp()?.num_glyphs;
                 Ok(Some(Kerx::parse(bytes, num_glyphs)?))
             }
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the AAT `ankr` (Anchor Point) table if the font carries
+    /// one. Pairs with `kerx` format-4 action type 1: the kerx state
+    /// machine emits `(mark_anchor_idx, current_anchor_idx)` pairs and
+    /// the apply path resolves them through `ankr.anchor_for(gid, idx)`
+    /// into concrete `(x, y)` design-unit coordinates.
+    pub fn ankr(&self) -> Result<Option<Ankr<'a>>> {
+        match self.table_bytes(tag::ANKR) {
+            Ok(bytes) => Ok(Some(Ankr::parse(bytes)?)),
             Err(Error::MissingTable { .. }) => Ok(None),
             Err(e) => Err(e),
         }

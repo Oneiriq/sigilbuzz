@@ -76,22 +76,17 @@ fn open_sans_glyph_points_contour_count_matches_glyf_point_count() {
     for gid in 1u16..150 {
         let pts = face.glyph_points(gid).unwrap();
         let pc = glyf.point_count(&loca, gid).unwrap();
-        match (pts, pc) {
-            (Some(pts), Some(pc)) => {
-                assert_eq!(
-                    pts.len(),
-                    pc as usize,
-                    "gid {gid}: glyph_points len {} != point_count {}",
-                    pts.len(),
-                    pc
-                );
-            }
-            (None, _) => {} // empty glyph
-            (Some(_), None) => {
-                // composite — point_count returns None, but
-                // glyph_points still flattens through; either way the
-                // counts can't be cross-checked. Skip.
-            }
+        // Empty glyph (`pts == None`) or composite (`pc == None`) —
+        // the counts can't be cross-checked. Only the simple-glyph
+        // pair is asserted.
+        if let (Some(pts), Some(pc)) = (pts, pc) {
+            assert_eq!(
+                pts.len(),
+                pc as usize,
+                "gid {gid}: glyph_points len {} != point_count {}",
+                pts.len(),
+                pc
+            );
         }
     }
 }

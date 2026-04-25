@@ -9,6 +9,7 @@
 //! done against byte literals such as `b"cmap"` so every tag site is
 //! unambiguous and `no_std`-friendly.
 
+pub mod ankr;
 pub mod avar;
 pub mod cbdt;
 pub mod cblc;
@@ -45,6 +46,7 @@ pub mod vmtx;
 pub mod vorg;
 pub mod vvar;
 
+pub use ankr::Ankr;
 pub use avar::Avar;
 pub use cbdt::{Cbdt, GlyphBitmap, GlyphBitmapMetrics};
 pub use cblc::{
@@ -149,6 +151,9 @@ pub mod tag {
     pub const MORX: [u8; 4] = *b"morx";
     /// `kerx` — Apple Extended Kerning (AAT).
     pub const KERX: [u8; 4] = *b"kerx";
+    /// `ankr` — Apple Anchor Point table (AAT). Pairs with `kerx`
+    /// format-4 action type 1 (anchor-point kerning).
+    pub const ANKR: [u8; 4] = *b"ankr";
     /// `CBLC` — Color Bitmap Location (Google).
     pub const CBLC: [u8; 4] = *b"CBLC";
     /// `CBDT` — Color Bitmap Data (Google).
