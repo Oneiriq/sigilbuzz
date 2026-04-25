@@ -408,11 +408,7 @@ fn cff_non_identity_subset_errors_unsupported() {
     let maxp = build_minimal_maxp(2);
     let bytes = build_synthetic_sfnt(
         0x4F54_544Fu32,
-        vec![
-            (*b"CFF ", cff_body),
-            (*b"head", head),
-            (*b"maxp", maxp),
-        ],
+        vec![(*b"CFF ", cff_body), (*b"head", head), (*b"maxp", maxp)],
     );
     let face = Face::parse_bytes(&bytes, 0).unwrap();
     let err = subset(&face, &SubsetInput::default()).unwrap_err();

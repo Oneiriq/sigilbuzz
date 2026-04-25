@@ -767,9 +767,13 @@ pub fn renumber_charstring(
             SubrKind::Local => (local_renumber, new_local_bias),
             SubrKind::Global => (global_renumber, new_global_bias),
         };
-        let new_idx = table.get(old_idx).copied().flatten().ok_or(
-            SubsetError::Unsupported("CFF charstring calls dropped subroutine"),
-        )?;
+        let new_idx = table
+            .get(old_idx)
+            .copied()
+            .flatten()
+            .ok_or(SubsetError::Unsupported(
+                "CFF charstring calls dropped subroutine",
+            ))?;
         let new_raw = (new_idx as i64) - i64::from(new_bias);
         if !(i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&new_raw) {
             return Err(SubsetError::Unsupported(
@@ -1034,7 +1038,7 @@ mod tests {
         let bytes = encode_index(&[&big, &small]);
         assert_eq!(bytes[0..2], 2u16.to_be_bytes());
         assert_eq!(bytes[2], 2); // offSize
-        // offset[0] = 1 (u16 BE)
+                                 // offset[0] = 1 (u16 BE)
         assert_eq!(bytes[3..5], 1u16.to_be_bytes());
         // offset[1] = 1 + 300 = 301
         assert_eq!(bytes[5..7], 301u16.to_be_bytes());
@@ -1063,7 +1067,10 @@ mod tests {
         let enc = encode_dict_int(1_000_000);
         assert_eq!(enc.len(), 5);
         assert_eq!(enc[0], 29);
-        assert_eq!(i32::from_be_bytes([enc[1], enc[2], enc[3], enc[4]]), 1_000_000);
+        assert_eq!(
+            i32::from_be_bytes([enc[1], enc[2], enc[3], enc[4]]),
+            1_000_000
+        );
     }
 
     #[test]
