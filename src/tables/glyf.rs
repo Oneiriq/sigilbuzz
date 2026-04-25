@@ -63,9 +63,11 @@
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
+use crate::tables::hmtx::Hmtx;
 use crate::tables::loca::Loca;
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::Reader;
+use crate::tables::vmtx::Vmtx;
 
 /// Glyph bounding box in font design units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +82,33 @@ pub struct GlyphBounds {
     pub y_max: i16,
     /// Number of contours; negative for composite glyphs.
     pub num_contours: i16,
+}
+
+/// Bundle of metric tables a [`Glyf`] flattener needs to synthesize
+/// phantom points during composite anchor-mode resolution.
+///
+/// TrueType reserves four phantom points per glyph past the contour
+/// list:
+/// - `pp1 = (xMin - lsb, 0)` — left-side-bearing origin.
+/// - `pp2 = (xMin - lsb + advanceWidth, 0)` — advance-width origin.
+/// - `pp3 = (0, yMax + tsb)` — top-side-bearing origin.
+/// - `pp4 = (0, yMax + tsb - advanceHeight)` — advance-height origin.
+///
+/// Composite components in anchor-mode (`ARGS_ARE_XY_VALUES` clear)
+/// can index past the contour-point count into these four slots; real
+/// fonts use this to align components to the parent's advance-width
+/// origin without hard-coded offsets.
+///
+/// `vmtx` is optional: horizontal-only fonts have no `vmtx` and the
+/// vertical phantoms collapse to `(0, 0)`. Real-world anchor-mode
+/// glyphs in horizontal fonts only ever index pp1 / pp2, so the
+/// fallback is safe.
+#[derive(Debug, Clone, Copy)]
+pub struct PhantomMetrics<'a> {
+    /// Horizontal metrics. Required — every TrueType font has hmtx.
+    pub hmtx: &'a Hmtx<'a>,
+    /// Vertical metrics. `None` for horizontal-only fonts.
+    pub vmtx: Option<&'a Vmtx<'a>>,
 }
 
 /// A borrowed view of the `glyf` table. Parsing is free — accessors
@@ -200,6 +229,50 @@ impl<'a> Glyf<'a> {
             y_max,
             num_contours,
         }))
+    }
+
+    /// Computes the four phantom points for `glyph_id` in the glyph's
+    /// own (untransformed) design-unit frame.
+    ///
+    /// pp1 / pp2 always read from `hmtx`. pp3 / pp4 read from `vmtx`
+    /// when available; horizontal-only fonts get `(0, 0)` for both,
+    /// which matches every in-the-wild glyph we've checked — anchor
+    /// indices for vertical phantoms only show up in CJK fonts that
+    /// also ship `vmtx`. Glyphs without a `glyf` body get all-zero
+    /// phantoms, which collapses anchor mode to a zero translation
+    /// — same as the legacy fallback before phantom resolution
+    /// landed.
+    //
+    // The follow-up commit wires this into composite anchor resolution;
+    // splitting the helper into its own commit keeps the spec-formula
+    // test independent of the flattener plumbing.
+    #[allow(dead_code)]
+    fn phantom_points(
+        &self,
+        loca: &Loca<'_>,
+        glyph_id: u16,
+        metrics: &PhantomMetrics<'_>,
+    ) -> Result<[(f32, f32); 4]> {
+        let bounds = self.bounds(loca, glyph_id)?;
+        let (x_min, y_max) = match bounds {
+            Some(b) => (f32::from(b.x_min), f32::from(b.y_max)),
+            None => (0.0, 0.0),
+        };
+        let advance_w = f32::from(metrics.hmtx.advance(glyph_id).unwrap_or(0));
+        let lsb = f32::from(metrics.hmtx.lsb(glyph_id).unwrap_or(0));
+        let pp1_x = x_min - lsb;
+        let pp2_x = pp1_x + advance_w;
+
+        let (pp3_y, pp4_y) = if let Some(vmtx) = metrics.vmtx {
+            let advance_h = f32::from(vmtx.advance(glyph_id).unwrap_or(0));
+            let tsb = f32::from(vmtx.tsb(glyph_id).unwrap_or(0));
+            let pp3 = y_max + tsb;
+            (pp3, pp3 - advance_h)
+        } else {
+            (0.0, 0.0)
+        };
+
+        Ok([(pp1_x, 0.0), (pp2_x, 0.0), (0.0, pp3_y), (0.0, pp4_y)])
     }
 
     /// Drives `sink` with the ops for `glyph_id`, flattening
@@ -784,6 +857,102 @@ mod tests {
             out.extend_from_slice(&o.to_be_bytes());
         }
         out
+    }
+
+    /// Builds a minimal `hmtx` body with one long metric per glyph.
+    fn build_hmtx(longs: &[(u16, i16)]) -> Vec<u8> {
+        let mut b = Vec::new();
+        for (adv, lsb) in longs {
+            b.extend_from_slice(&adv.to_be_bytes());
+            b.extend_from_slice(&lsb.to_be_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn phantom_points_match_spec_formula() {
+        // Single simple glyph with bbox (xMin=10, yMax=200) plus an
+        // hmtx record (advance=300, lsb=4). Expected phantoms:
+        //   pp1 = (xMin - lsb, 0)             = (6,   0)
+        //   pp2 = (pp1 + advance, 0)          = (306, 0)
+        //   pp3 = (0, 0)   — no vmtx
+        //   pp4 = (0, 0)   — no vmtx
+        let body = build_simple_glyph(
+            &[0],
+            &[(10, 0, true)], // single contour point at (10, 0)
+        );
+        // Patch the bbox bytes to set yMax=200 explicitly (build_header
+        // wrote yMax=1000 by default; we want a known number).
+        let mut body = body;
+        body[2..4].copy_from_slice(&10i16.to_be_bytes()); // xMin
+        body[8..10].copy_from_slice(&200i16.to_be_bytes()); // yMax
+
+        let loca_bytes = build_loca_short(&[0, (body.len() as u16) / 2]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
+        let glyf = Glyf::new(&body);
+
+        let hmtx_bytes = build_hmtx(&[(300, 4)]);
+        let hmtx = Hmtx::parse(&hmtx_bytes, 1, 1).unwrap();
+        let metrics = PhantomMetrics {
+            hmtx: &hmtx,
+            vmtx: None,
+        };
+        let pp = glyf.phantom_points(&loca, 0, &metrics).unwrap();
+        assert!((pp[0].0 - 6.0).abs() < 1e-4);
+        assert!((pp[0].1 - 0.0).abs() < 1e-4);
+        assert!((pp[1].0 - 306.0).abs() < 1e-4);
+        assert!((pp[1].1 - 0.0).abs() < 1e-4);
+        assert!((pp[2].0 - 0.0).abs() < 1e-4);
+        assert!((pp[2].1 - 0.0).abs() < 1e-4);
+        assert!((pp[3].0 - 0.0).abs() < 1e-4);
+        assert!((pp[3].1 - 0.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn phantom_points_use_vmtx_when_present() {
+        // Same glyph, this time with vmtx supplying advance=1000,
+        // tsb=50. yMax=200 → pp3 = (0, 250); pp4 = (0, -750).
+        let body = build_simple_glyph(&[0], &[(10, 0, true)]);
+        let mut body = body;
+        body[2..4].copy_from_slice(&10i16.to_be_bytes());
+        body[8..10].copy_from_slice(&200i16.to_be_bytes());
+        let loca_bytes = build_loca_short(&[0, (body.len() as u16) / 2]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
+        let glyf = Glyf::new(&body);
+
+        let hmtx_bytes = build_hmtx(&[(300, 4)]);
+        let hmtx = Hmtx::parse(&hmtx_bytes, 1, 1).unwrap();
+        // vmtx body: one long metric (advance=1000, tsb=50).
+        let mut vmtx_bytes = Vec::new();
+        vmtx_bytes.extend_from_slice(&1000u16.to_be_bytes());
+        vmtx_bytes.extend_from_slice(&50i16.to_be_bytes());
+        let vmtx = Vmtx::parse(&vmtx_bytes, 1, 1).unwrap();
+        let metrics = PhantomMetrics {
+            hmtx: &hmtx,
+            vmtx: Some(&vmtx),
+        };
+        let pp = glyf.phantom_points(&loca, 0, &metrics).unwrap();
+        assert!((pp[2].1 - 250.0).abs() < 1e-4, "pp3 y = {}", pp[2].1);
+        assert!((pp[3].1 + 750.0).abs() < 1e-4, "pp4 y = {}", pp[3].1);
+    }
+
+    #[test]
+    fn phantom_points_no_glyph_body_yields_zero_pp1_pp2() {
+        // Empty glyph (zero loca range) → bounds returns None →
+        // phantom calc folds xMin/yMax to 0. With advance=500, lsb=10,
+        // pp1=(0-10,0)=(-10,0), pp2=(490,0).
+        let loca_bytes = build_loca_short(&[0, 0]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
+        let glyf = Glyf::new(&[]);
+        let hmtx_bytes = build_hmtx(&[(500, 10)]);
+        let hmtx = Hmtx::parse(&hmtx_bytes, 1, 1).unwrap();
+        let metrics = PhantomMetrics {
+            hmtx: &hmtx,
+            vmtx: None,
+        };
+        let pp = glyf.phantom_points(&loca, 0, &metrics).unwrap();
+        assert!((pp[0].0 + 10.0).abs() < 1e-4);
+        assert!((pp[1].0 - 490.0).abs() < 1e-4);
     }
 
     #[test]
