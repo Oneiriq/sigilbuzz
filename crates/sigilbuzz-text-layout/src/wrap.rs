@@ -104,12 +104,20 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
     let span_width = |from: usize, to: usize| prefix[to] - prefix[from];
     // UAX 14 LB7: trailing spaces hang into the right margin and do
     // not count toward the line's measured width. Walk back from `to`
-    // skipping space-class characters before computing the budget.
+    // skipping any character whose UAX 14 line-break class is `SP` —
+    // matches `LineBreakClass::SP` coverage (U+0020, U+1680,
+    // U+2000..=U+200A, U+205F, U+3000) plus tab (BA in the
+    // classifier but a soft break point in practice).
     let trim_end = |to: usize| -> usize {
         let mut end = to;
         while end > 0 {
             match text[..end].char_indices().next_back() {
-                Some((b, ch)) if ch == ' ' || ch == '\t' || ch == '\u{3000}' => {
+                Some((b, ch))
+                    if matches!(
+                        crate::class::line_break_class(ch),
+                        crate::class::LineBreakClass::SP
+                    ) || ch == '\t' =>
+                {
                     end = b;
                 }
                 _ => break,
@@ -345,6 +353,30 @@ mod tests {
         assert!(
             (lines[0].width - 30.0).abs() < f32::EPSILON,
             "width={} should not count trailing spaces",
+            lines[0].width
+        );
+    }
+
+    #[test]
+    fn trailing_unicode_spaces_excluded_from_line_width() {
+        // U+2003 EM SPACE is UAX 14 SP, but the wave-1 trim_end only
+        // hand-listed ' ', '\t', and U+3000. A trailing EM SPACE must
+        // be hung into the right margin and not contribute to the
+        // reported line width.
+        let text = "abc\u{2003}";
+        let shaped = shape_uniform(text, 10);
+        let lines = wrap_lines(
+            &shaped,
+            text,
+            WrapOptions {
+                max_width: 100.0,
+                break_at_word_boundaries: true,
+            },
+        );
+        assert_eq!(lines.len(), 1);
+        assert!(
+            (lines[0].width - 30.0).abs() < f32::EPSILON,
+            "EM SPACE must not count toward width, got {}",
             lines[0].width
         );
     }
