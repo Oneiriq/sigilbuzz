@@ -13,13 +13,15 @@
 //! - [`emit_otf_embedded_font`]: a PDF font dictionary referencing
 //!   the original font bytes verbatim plus a CIDToGIDMap.
 //!
-//! sigilbuzz-pdf produces the [`Type3Font`] data structure; the
-//! consumer is responsible for serialising it into a PDF document.
-//! That separation keeps this crate dependency-free — no `lopdf`,
-//! no `printpdf`. Output is deterministic: same `Face` + same gid
-//! list yields a byte-identical [`Type3Font`].
+//! Each emitter produces a plain data structure (or, for Type 1 /
+//! OTF-embedded, a small bundle of byte buffers); the consumer is
+//! responsible for serialising those into a PDF document. That
+//! separation keeps this crate dependency-free — no `lopdf`, no
+//! `printpdf`. Output is deterministic across all three flavours:
+//! same `Face` (+ same `font_bytes` for the OTF emitter) + same gid
+//! list yields byte-identical output.
 //!
-//! # Pipeline
+//! # Pipeline (Type 3)
 //!
 //! ```text
 //!   Face                       Type3Font
@@ -46,15 +48,24 @@
 //! # let _ = font;
 //! ```
 //!
-//! # Why Type 3
+//! # Choosing a flavour
 //!
-//! Type 3 sidesteps every PDF-side font-embedding subtlety: there is
-//! no `cmap` to translate, no `head.indexToLocFormat` to preserve,
-//! no subsetting to perform. The trade-off is that Type 3 fonts are
-//! not hinted and are typically rendered via the PDF content stream's
-//! own raster path — fine for archival, signage, and headline use,
-//! less ideal for body text at small sizes. Type 1 / OTF-embedded
-//! variants can land in a future release if demand materialises.
+//! - **Type 3** sidesteps every PDF-side font-embedding subtlety:
+//!   there is no `cmap` to translate, no `head.indexToLocFormat` to
+//!   preserve, no subsetting to perform. The trade-off is that Type
+//!   3 fonts are not hinted and are typically rendered via the PDF
+//!   content stream's own raster path — fine for archival, signage,
+//!   and headline use, less ideal for body text at small sizes.
+//! - **Type 1** ships per-glyph PostScript charstrings and is more
+//!   size-efficient than Type 3 for fonts with many curves. The
+//!   emitter intentionally skips eexec encryption (charstrings are
+//!   cleartext, declared via `/lenIV -1` in the private dict);
+//!   Adobe Reader and modern PDF consumers honour that.
+//! - **OTF/TrueType embedded** is the most size-efficient option —
+//!   the original font program ships verbatim through `/FontFile2`
+//!   or `/FontFile3` and the consumer addresses glyphs by CID.
+//!   Subsetting (the real source of size savings on large fonts)
+//!   is the parallel `sigilbuzz-subset` crate's responsibility.
 //!
 //! # No-std
 //!
