@@ -39,11 +39,10 @@
 //!   inner subtable.
 //! - **Any GSUB lookup type without a rewriter** — returns `None` for
 //!   every subtable. The drop cascade handles propagation.
-//! - **GPOS types 1 (single-adj), 2 (pair-adj fmt 1+2 pass-through),
-//!   3 (cursive), 4 / 5 / 6 (mark attachment), 9 (extension)** — full
-//!   byte-level rewriters. See [`crate::gpos`].
-//! - **GPOS types 7 (context) and 8 (chained context)** — drop until
-//!   their byte-level rewriters ship.
+//! - **GPOS types 1 (single-adj), 2 (pair-adj — fmt 1 + fmt 2 with
+//!   class-collapse fmt-1 fallback), 3 (cursive), 4 / 5 / 6 (mark
+//!   attachment), 7 (context), 8 (chained context), 9 (extension)** —
+//!   full byte-level rewriters. See [`crate::gpos`].
 //! - **GDEF GlyphClassDef + MarkAttachClassDef** — full ClassDef
 //!   rewriter via [`crate::classdef`]. AttachList, LigCaretList,
 //!   MarkGlyphSetsDef, ItemVariationStore drop.
@@ -92,6 +91,18 @@ impl GidMap {
     #[must_use]
     pub(crate) fn map(&self, old: u16) -> Option<u16> {
         self.table.get(old as usize).copied().flatten()
+    }
+
+    /// Iterates over every kept `(old_gid, new_gid)` pair in old-gid
+    /// order. Used by the PairPos fmt-1 fallback to enumerate the
+    /// surviving second-glyph universe (Coverage gates the first axis;
+    /// the second axis must consider every kept gid because class-0 in
+    /// the source classDef2 carries kerning too).
+    pub(crate) fn iter_kept(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+        self.table
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| slot.map(|new| (i as u16, new)))
     }
 
     /// True when every kept gid maps to itself (the identity case the
@@ -361,14 +372,19 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
     ))
 }
 
-/// Drives the GPOS rewrite — same shape as [`build_gsub`]. The
-/// per-type rewriters cover types 1 / 2 / 3 / 4 / 5 / 6 / 9; types 7
-/// (context) and 8 (chained context) drop until their byte-level
-/// rewriters ship.
+/// Drives the GPOS rewrite — same two-phase shape as [`build_gsub`].
+/// The per-type rewriters cover every GPOS lookup type (1–9). Context
+/// lookups (types 7 / 8) carry nested `PosLookupRecord`s pointing at
+/// sibling lookups by index; phase 1 preserves the source indices,
+/// phase 2 rewrites them through the renumber map iterated to a fixed
+/// point.
 pub(crate) fn build_gpos(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> {
     let gpos_table = face.gpos().ok().flatten()?;
     let lookups = gpos_table.lookup_list();
 
+    // Phase 1: per-lookup rewrite. Context-style lookups
+    // (types 7 / 8) preserve the source's lookup-list indices so we
+    // can decide what survives before patching.
     let mut rewritten: Vec<Option<RewrittenLookup>> = Vec::with_capacity(lookups.len() as usize);
     for li in 0..lookups.len() {
         let Some(lookup) = lookups.get(li) else {
@@ -391,7 +407,58 @@ pub(crate) fn build_gpos(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
         rewritten.push(rewritten_lookup);
     }
 
-    let renumber = build_renumber(&rewritten);
+    // Phase 2: iterate context-lookup renumber to a fixed point.
+    // Mirrors the GSUB driver: a context lookup whose every nested
+    // `PosLookupRecord` points at a dropped sibling collapses, which
+    // can in turn make other context lookups collapse.
+    let mut renumber = build_renumber(&rewritten);
+    for _ in 0..lookups.len() {
+        let mut changed = false;
+        let inner_ctx = RewriterCtx {
+            gid_map: ctx.gid_map,
+            lookup_renumber: Some(&renumber),
+        };
+        for li in 0..lookups.len() {
+            if rewritten
+                .get(li as usize)
+                .and_then(|s| s.as_ref())
+                .is_none()
+            {
+                continue;
+            }
+            let Some(lookup) = lookups.get(li) else {
+                continue;
+            };
+            let lt = gpos::context_lookup_type(&lookup);
+            let Some(_lt) = lt else { continue };
+            let mut subtable_bodies: Vec<&[u8]> = Vec::new();
+            for si in 0..lookup.subtable_count() {
+                if let Some(b) = lookup.subtable_bytes(si) {
+                    subtable_bodies.push(b);
+                }
+            }
+            let new_lookup = gpos::rewrite_lookup(
+                &inner_ctx,
+                lookup.lookup_type(),
+                lookup.flag(),
+                lookup.mark_filtering_set(),
+                &subtable_bodies,
+            );
+            if new_lookup.is_none() {
+                if rewritten[li as usize].is_some() {
+                    rewritten[li as usize] = None;
+                    changed = true;
+                }
+            } else {
+                rewritten[li as usize] = new_lookup;
+            }
+        }
+        if !changed {
+            break;
+        }
+        renumber = build_renumber(&rewritten);
+    }
+
     let feature_list = gpos_table.feature_list();
     let new_features = rewrite_features(*feature_list, &renumber)?;
 

@@ -738,9 +738,9 @@ fn emit_type4_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
 /// is `None` (first pass); on the second pass the caller has
 /// populated `lookup_renumber` and dropped indices have been filtered
 /// out before reaching this struct.
-struct PatchedLookupRecord {
-    sequence_index: u16,
-    lookup_list_index: u16,
+pub(crate) struct PatchedLookupRecord {
+    pub(crate) sequence_index: u16,
+    pub(crate) lookup_list_index: u16,
 }
 
 /// Walks `count` `SubstLookupRecord` entries from `bytes` starting at
@@ -748,7 +748,11 @@ struct PatchedLookupRecord {
 /// target lookup is `None` (was dropped in phase 1) and remaps survivors
 /// through the map. Returns the surviving records. Each record is
 /// 4 bytes: `u16 sequence_index, u16 lookup_list_index`.
-fn parse_and_remap_lookup_records(
+///
+/// Shared between GSUB context (types 5 / 6 / 8) and GPOS context
+/// (types 7 / 8) — `PosLookupRecord` has the same 4-byte layout as
+/// `SubstLookupRecord`.
+pub(crate) fn parse_and_remap_lookup_records(
     bytes: &[u8],
     off: usize,
     count: usize,
@@ -781,7 +785,7 @@ fn parse_and_remap_lookup_records(
     Some(out)
 }
 
-fn encode_lookup_records(records: &[PatchedLookupRecord]) -> Vec<u8> {
+pub(crate) fn encode_lookup_records(records: &[PatchedLookupRecord]) -> Vec<u8> {
     let mut out = Vec::with_capacity(records.len() * 4);
     for r in records {
         out.extend_from_slice(&r.sequence_index.to_be_bytes());
