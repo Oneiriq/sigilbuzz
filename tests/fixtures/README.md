@@ -20,6 +20,22 @@ Fonts used by the integration tests.
   from `tests/tools/build_var_kern_fixture.py` so the fixture is
   reproducible; used by `tests/variable_kern.rs` to exercise the GPOS
   feature-variation wiring added for issue #13.
+- `cbdt_synthetic.ttf` — Synthetic 860-byte font with one CBDT/CBLC
+  strike at 32 ppem, one PNG-tagged bitmap glyph, and a CBLC index
+  sub-table in format 1 (variable-metric, u32 offsets) plus a CBDT
+  record in format 17 (small metrics + PNG data). Built deterministically
+  from `tests/tools/build_cbdt_fixture.py`; used by
+  `tests/bitmap_fonts.rs` to drive the CBDT/CBLC parsers and the
+  unified `Face::glyph_bitmap` accessor on a real `Face`. The PNG is
+  a 67-byte 1×1 transparent image so the fixture stays well under
+  5 KB. Public-domain / no third-party content.
+- `sbix_synthetic.ttf` — Synthetic 784-byte font carrying an Apple
+  `sbix` table at version 1 with one strike at 32 ppem, two glyph
+  slots (gid 0 empty, gid 1 = PNG). Built deterministically from
+  `tests/tools/build_sbix_fixture.py`; used by
+  `tests/bitmap_fonts.rs` to drive the sbix parser and the
+  `Face::glyph_bitmap` accessor on the sbix path. Public-domain /
+  no third-party content.
 - `phantom_anchor.ttf` — Synthetic 780-byte fixture with four glyphs
   (`.notdef`, `base`, `mark`, `combo`). `combo` is a composite with one
   XY-mode component and one *anchor-mode* component whose `arg1` lands
