@@ -72,7 +72,6 @@ impl hb_set_t {
         Self { inner }
     }
 
-
     /// Internal: borrow the underlying BTreeSet for read.
     pub(crate) fn with_inner<R>(&self, f: impl FnOnce(&BTreeSet<u32>) -> R) -> R {
         f(&self.inner.borrow())
@@ -211,9 +210,12 @@ pub unsafe extern "C" fn hb_set_next(set: *const hb_set_t, codepoint: *mut u32) 
                 s.iter().next().copied()
             } else {
                 // Return the smallest member strictly greater than `current`.
-                s.range((core::ops::Bound::Excluded(current), core::ops::Bound::Unbounded))
-                    .next()
-                    .copied()
+                s.range((
+                    core::ops::Bound::Excluded(current),
+                    core::ops::Bound::Unbounded,
+                ))
+                .next()
+                .copied()
             }
         })
     };

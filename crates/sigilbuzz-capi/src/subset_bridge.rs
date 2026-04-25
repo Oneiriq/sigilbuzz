@@ -108,9 +108,7 @@ pub unsafe extern "C" fn hb_subset_input_unicode_set(
 /// # Safety
 /// `input` must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn hb_subset_input_glyph_set(
-    input: *mut hb_subset_input_t,
-) -> *mut hb_set_t {
+pub unsafe extern "C" fn hb_subset_input_glyph_set(input: *mut hb_subset_input_t) -> *mut hb_set_t {
     if input.is_null() {
         return ptr::null_mut();
     }
@@ -227,8 +225,8 @@ mod tests {
     use super::*;
     use crate::set::{hb_set_add, hb_set_destroy};
     use crate::{
-        hb_blob_create, hb_blob_destroy, hb_face_create, hb_face_destroy,
-        hb_face_get_glyph_count, HB_MEMORY_MODE_READONLY,
+        hb_blob_create, hb_blob_destroy, hb_face_create, hb_face_destroy, hb_face_get_glyph_count,
+        HB_MEMORY_MODE_READONLY,
     };
     use core::ffi::{c_char, c_uint};
 

@@ -117,11 +117,7 @@ extern "C" fn cb_color(
     LAST_COLOR.store(color, Ordering::SeqCst);
 }
 
-extern "C" fn cb_push_clip_glyph(
-    _funcs: *mut hb_paint_funcs_t,
-    _data: *mut c_void,
-    gid: u32,
-) {
+extern "C" fn cb_push_clip_glyph(_funcs: *mut hb_paint_funcs_t, _data: *mut c_void, gid: u32) {
     PUSH_CLIP_GLYPH_CALLS.fetch_add(1, Ordering::SeqCst);
     LAST_GID.store(gid, Ordering::SeqCst);
 }

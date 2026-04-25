@@ -64,10 +64,10 @@ pub mod set;
 // `--no-default-features` build of this crate still compiles cleanly
 // without pulling in the companion subsetter crate. `paint_bridge`
 // follows the same pattern.
-#[cfg(feature = "subset")]
-pub mod subset_bridge;
 #[cfg(feature = "paint")]
 pub mod paint_bridge;
+#[cfg(feature = "subset")]
+pub mod subset_bridge;
 
 // ---------------------------------------------------------------------------
 // Refcounted opaque types

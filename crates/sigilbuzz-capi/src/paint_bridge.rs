@@ -96,19 +96,14 @@ pub struct hb_paint_funcs_t {
     pub pop_transform: Option<extern "C" fn(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void)>,
     /// Called when the next paints should be clipped to the outline of
     /// glyph `gid`.
-    pub push_clip_glyph: Option<
-        extern "C" fn(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void, gid: u32),
-    >,
+    pub push_clip_glyph:
+        Option<extern "C" fn(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void, gid: u32)>,
     /// Called when the most recent clip should be undone.
     pub pop_clip: Option<extern "C" fn(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void)>,
     /// Called when a new layer should be pushed; `composite_mode` is
     /// the COLRv1 `CompositeMode` byte cast to `u32`.
     pub push_layer: Option<
-        extern "C" fn(
-            funcs: *mut hb_paint_funcs_t,
-            paint_data: *mut c_void,
-            composite_mode: u32,
-        ),
+        extern "C" fn(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void, composite_mode: u32),
     >,
     /// Called when the most recent `push_layer` should be popped and
     /// composited.
@@ -508,12 +503,7 @@ fn color_to_hb(c: Color) -> hb_color_t {
 /// here — sigilbuzz_paint emits the literal `Transform2D::IDENTITY`
 /// constant for "no transform"; rounding never enters.
 fn is_identity(t: &Transform2D) -> bool {
-    t.xx == 1.0
-        && t.yy == 1.0
-        && t.xy == 0.0
-        && t.yx == 0.0
-        && t.dx == 0.0
-        && t.dy == 0.0
+    t.xx == 1.0 && t.yy == 1.0 && t.xy == 0.0 && t.yx == 0.0 && t.dx == 0.0 && t.dy == 0.0
 }
 
 #[cfg(test)]
@@ -564,11 +554,7 @@ mod tests {
         AtomicU32::new(0),
     ];
 
-    extern "C" fn count_push_layer(
-        _f: *mut hb_paint_funcs_t,
-        _d: *mut c_void,
-        _mode: u32,
-    ) {
+    extern "C" fn count_push_layer(_f: *mut hb_paint_funcs_t, _d: *mut c_void, _mode: u32) {
         COUNTERS[0].fetch_add(1, Ordering::SeqCst);
     }
     extern "C" fn count_pop_layer(_f: *mut hb_paint_funcs_t, _d: *mut c_void) {
