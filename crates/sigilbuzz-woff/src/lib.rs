@@ -17,11 +17,13 @@
 //!
 //! # What ships here
 //!
-//! - [`unwrap_woff1`] / [`wrap_woff1`]: WOFF1 envelope, **uncompressed
-//!   pass-through only** for now. Compressed WOFF1 returns
-//!   `WoffError::Unsupported`. Most modern WOFF1 producers ship only
-//!   WOFF2 anyway — compressed WOFF1 is a legacy curiosity that
-//!   rarely shows up in practice.
+//! - [`unwrap_woff1`] / [`wrap_woff1`]: WOFF1 envelope. Both directions
+//!   handle zlib-compressed table bodies when the `woff1-deflate`
+//!   feature is on (default). With the feature off, `unwrap_woff1`
+//!   rejects compressed tables with `Unsupported` and `wrap_woff1`
+//!   only emits the uncompressed pass-through layout.
+//!   [`wrap_woff1_with_options`] / [`WrapWoff1Options`] expose the
+//!   per-table deflate quality knob.
 //! - [`unwrap_woff2`]: WOFF2 header + directory parsing, Brotli
 //!   decompression (via the `brotli` crate, gated on the default
 //!   `woff2` feature), and the inverse `glyf`/`loca` transform.
@@ -35,15 +37,18 @@
 //!
 //! # Feature flags
 //!
-//! - `default = ["std", "woff2"]`. Disable `woff2` to drop the
-//!   Brotli runtime dep — `unwrap_woff2` then returns
-//!   `WoffError::Woff2Disabled` at runtime, while WOFF1 stays
-//!   functional.
+//! - `default = ["std", "woff2", "woff1-deflate"]`.
+//! - `woff2`: pulls in the `brotli` runtime dep. Disable it to drop
+//!   the encoder + decoder; `unwrap_woff2` / `wrap_woff2` then return
+//!   `WoffError::Woff2Disabled` while WOFF1 stays functional.
+//! - `woff1-deflate`: pulls in `miniz_oxide` for the WOFF1 zlib codec.
+//!   With it disabled, `unwrap_woff1` rejects compressed tables and
+//!   `wrap_woff1` only emits uncompressed pass-through bodies.
 //! - `std`: currently a no-op marker; reserved for future no_std
 //!   callers wanting Vec-free APIs.
 //!
 //! See `docs/deps.md` in the workspace root for the rationale on the
-//! single new runtime dependency this crate brings (`brotli`).
+//! runtime dependencies this crate brings (`brotli`, `miniz_oxide`).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -59,9 +64,11 @@ mod reader;
 mod woff1;
 #[cfg(feature = "woff2")]
 mod woff2;
+#[cfg(feature = "woff1-deflate")]
+mod zlib;
 
 pub use error::{Result, WoffError};
-pub use woff1::{unwrap_woff1, wrap_woff1};
+pub use woff1::{unwrap_woff1, wrap_woff1, wrap_woff1_with_options, WrapWoff1Options};
 #[cfg(feature = "woff2")]
 pub use woff2::{unwrap_woff2, wrap_woff2, wrap_woff2_with_options, WrapOptions};
 
