@@ -89,6 +89,8 @@ use alloc::vec::Vec;
 use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
+mod cff;
+mod cff2;
 mod classdef;
 mod closure;
 mod cmap;
@@ -99,6 +101,9 @@ mod layout;
 mod sfnt;
 mod util;
 
+pub use cff::{
+    compute_kept_subrs, encode_int_operand, scan_subr_calls, subr_bias, SubrCall, SubrKind,
+};
 pub use classdef::emit_classdef;
 pub use closure::compute_closure;
 pub use coverage::{emit_coverage_from_glyphs, emit_coverage_from_pairs};
@@ -217,11 +222,24 @@ impl From<sigilbuzz::Error> for SubsetError {
 /// Subset `face` according to `input`. Returns the new font bytes
 /// plus a gid remap.
 pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, SubsetError> {
-    // Source must be a TrueType-outlined font: presence of CFF /
-    // CFF2 means PostScript outlines and we don't subset those yet.
-    if face.record(tag::CFF1).is_some() || face.record(tag::CFF2).is_some() {
+    // CFF / CFF2 sources route through dedicated subsetters. The
+    // analysis layer (charstring scanner, bias renumber math,
+    // transitive subr keep-set) lands in this commit; the byte-level
+    // emitter is staged for a follow-up. Until that ships, both
+    // entries return Unsupported with their own context strings —
+    // the dispatch wiring below means the eventual emitter swap is a
+    // single-file change. The early-return runs *before* maxp /
+    // closure validation so a malformed-but-CFF source still gets
+    // the dedicated-message Unsupported variant rather than a
+    // MissingTable bubble-up.
+    if face.record(tag::CFF1).is_some() {
         return Err(SubsetError::Unsupported(
-            "CFF subsetting not yet implemented",
+            "CFF1 byte-level rewrite staged for follow-up; analysis layer wired",
+        ));
+    }
+    if face.record(tag::CFF2).is_some() {
+        return Err(SubsetError::Unsupported(
+            "CFF2 byte-level rewrite staged for follow-up; analysis layer wired",
         ));
     }
 
