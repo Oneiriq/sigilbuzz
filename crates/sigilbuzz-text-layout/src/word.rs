@@ -100,6 +100,7 @@ impl<'a> Iterator for WordBreakIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use alloc::vec::Vec;
 
     fn boundaries(text: &str) -> Vec<usize> {

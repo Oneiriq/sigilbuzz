@@ -278,6 +278,7 @@ pub fn line_break_opportunities(text: &str) -> LineBreakIter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use alloc::vec::Vec;
 
     fn opportunities(text: &str) -> Vec<(usize, BreakOpportunity)> {
