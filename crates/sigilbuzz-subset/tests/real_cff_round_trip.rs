@@ -132,22 +132,15 @@ fn real_cff1_subset_round_trip() {
 #[test]
 fn real_cff2_subset_round_trip() {
     // Source Sans 3 VF Latin subset: real CFF2 + variable-font OFL
-    // fixture (single `wght` axis spanning 200..900). Adobe's
-    // CFF2 builds use a single Font DICT and elide FDSelect (the
-    // CFF2 spec marks FDSelect optional when only one FD applies),
-    // which sigilbuzz-subset's non-identity rewriter declines today.
-    // We exercise the **identity-passthrough** path instead — pass
-    // every source gid in `gids`, the closure walker keeps them all,
-    // the dispatch hits `cff_passthrough`, and the entire CFF2 table
-    // (charstrings, FDArray, VariationStore) plus fvar/avar/HVAR
-    // ride through verbatim. This is exactly the round-trip
-    // guaranteed by #135 for non-FDSelect CFF2: bytes survive, axes
-    // survive, advances at every coord survive.
-    //
-    // Non-CID CFF2 non-identity rewrite (synthesise an FDSelect for
-    // the subset) is on the agenda; once that lands a follow-up
-    // converts this test into a {A,B,C,D,E} non-identity round-trip
-    // with the same drift-tolerant assertions.
+    // fixture (single `wght` axis spanning 200..900). Adobe's CFF2
+    // builds use a single Font DICT and elide FDSelect (the CFF2 spec
+    // marks FDSelect optional when only one FD applies); the parser
+    // synthesises an implicit "every gid → FD 0" mapping for that
+    // case so the non-identity rewriter handles it like any other
+    // single-FD source. The non-identity round-trip lives in its own
+    // test below; here we exercise the **identity-passthrough** path
+    // to prove the byte-identical guarantee for the full-coverage
+    // case.
     let face = Face::parse_bytes(SOURCE_SANS_3_VF, 0).expect("CFF2 source parses");
     assert!(
         face.record(tag::CFF2).is_some(),
@@ -331,6 +324,85 @@ fn real_cff_cid_subset_round_trip() {
         assert_eq!(
             src_adv, new_adv,
             "CID {ch}: shaped advance differs source {src_adv} vs subset {new_adv}",
+        );
+        let expected_new_gid: u32 = new_cmap.glyph_id(ch).unwrap().into();
+        assert_eq!(new_gid, expected_new_gid);
+    }
+}
+
+#[test]
+fn real_cff2_subset_non_identity_round_trip() {
+    // Source Sans 3 VF, real Adobe CFF2 with single-FD elided
+    // FDSelect. Subset to {A, B, C} on a non-identity gid map; the
+    // CFF2 rewriter must synthesise an explicit FDSelect format 0
+    // for the rebuild and re-emit charstrings + local subrs +
+    // FDArray under the new gid namespace.
+    let face = Face::parse_bytes(SOURCE_SANS_3_VF, 0).expect("CFF2 source parses");
+    assert!(
+        face.record(tag::CFF2).is_some(),
+        "fixture must carry CFF2 outlines",
+    );
+
+    let kept_chars = ['A', 'B', 'C'];
+    let kept_gids: Vec<u16> = kept_chars.iter().map(|&c| cmap_lookup(&face, c)).collect();
+
+    let input = SubsetInput {
+        gids: kept_gids.clone(),
+        retain_hints: false,
+        drop_unhandled: true,
+        // Layout / variations off — the non-identity path drops
+        // them today (matches the CFF1 non-identity flow).
+        retain_layout: false,
+        retain_variations: false,
+    };
+    let out = subset(&face, &input).expect("CFF2 non-identity subset succeeds");
+
+    let subset_face = Face::parse_bytes(&out.bytes, 0).expect("CFF2 subset re-parses");
+    assert!(
+        subset_face.record(tag::CFF2).is_some(),
+        "subset retains CFF2 outlines",
+    );
+
+    let new_num_glyphs = subset_face.maxp().unwrap().num_glyphs;
+    assert!(
+        (4..=8).contains(&new_num_glyphs),
+        "expected 1 .notdef + ~3 kept glyphs, got {new_num_glyphs}",
+    );
+
+    // Every kept gid's advance survives the renumber.
+    let src_hmtx = face.hmtx().unwrap();
+    let new_hmtx = subset_face.hmtx().unwrap();
+    for (old, new) in &out.gid_map {
+        let want = src_hmtx.advance(*old).unwrap_or(0);
+        let got = new_hmtx.advance(*new).unwrap_or(0);
+        assert_eq!(
+            want, got,
+            "CFF2 non-identity advance mismatch for gid {old}->{new}: src {want} vs subset {got}",
+        );
+    }
+
+    // Cmap consistency: each kept char resolves through the new cmap.
+    let new_cmap = subset_face.cmap().unwrap();
+    for &ch in &kept_chars {
+        let new_gid = new_cmap
+            .glyph_id(ch)
+            .unwrap_or_else(|| panic!("CFF2 subset cmap dropped {ch}"));
+        assert!(
+            new_gid > 0 && new_gid < new_num_glyphs,
+            "subset cmap of {ch} = {new_gid}, out of [1..{new_num_glyphs})",
+        );
+    }
+
+    // End-to-end shaping: gids land in the new namespace and advances
+    // (at default coords; variations are dropped on this path) match.
+    let src_font = Font::new(face.clone(), 16.0);
+    let subset_font = Font::new(subset_face.clone(), 16.0);
+    for &ch in &kept_chars {
+        let (_, src_adv) = shape_one(&src_font, ch);
+        let (new_gid, new_adv) = shape_one(&subset_font, ch);
+        assert_eq!(
+            src_adv, new_adv,
+            "CFF2 {ch}: shaped advance differs source {src_adv} vs subset {new_adv}",
         );
         let expected_new_gid: u32 = new_cmap.glyph_id(ch).unwrap().into();
         assert_eq!(new_gid, expected_new_gid);

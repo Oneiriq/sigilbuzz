@@ -69,7 +69,7 @@ pub use hhea::Hhea;
 pub use hmtx::Hmtx;
 pub use hvar::Hvar;
 pub use kern::KernTable;
-pub use kerx::Kerx;
+pub use kerx::{Kerx, Kerx4Action};
 pub use layout::{ClassDef, Coverage};
 pub use loca::Loca;
 pub use math::{

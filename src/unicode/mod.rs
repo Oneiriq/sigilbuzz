@@ -8,6 +8,7 @@
 #![allow(missing_docs)]
 
 pub mod bidi;
+pub mod bidi_brackets;
 pub mod bidi_class;
 pub mod indic_category;
 pub mod joining;

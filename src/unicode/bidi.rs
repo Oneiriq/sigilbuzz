@@ -18,14 +18,17 @@
 //!
 //! ## N0 paired-bracket handling
 //!
-//! UAX #9 §3.3.5 defines a paired-bracket pass (rule N0) that needs
-//! a Bidi_Paired_Bracket / Bidi_Paired_Bracket_Type table sourced
-//! from `BidiBrackets.txt`. Production-quality coverage runs into
-//! 100+ codepoint pairs (round / square / curly / angle / corner /
-//! white / ornament). Shipping that table is mechanical but bulky;
-//! the rest of the algorithm correctly resolves brackets via N1
-//! (surrounding strong context) for the cases real shaper consumers
-//! hit (Latin / Hebrew / Arabic mixed). We file N0 for a follow-up.
+//! UAX #9 §3.3.5 — paired-bracket pass. After W1-W7 resolve the weak
+//! types but before N1 / N2 sweep neutrals, brackets that pair across
+//! the isolating-run sequence get a strong type assigned according to
+//! the surrounding embedding context. The pair codepoint table lives
+//! in [`crate::unicode::bidi_brackets`] (curated extract of
+//! `BidiBrackets.txt` — ASCII + CJK + math families).
+//!
+//! Brackets that don't pair (unbalanced opener / closer, opener
+//! without a matching closer) fall through unchanged and N1's
+//! surrounding-strong fallback handles them — exactly the behaviour
+//! shipped before N0 landed.
 //!
 //! ## Public API
 //!
@@ -48,6 +51,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::buffer::Direction;
+use crate::unicode::bidi_brackets::{bracket_of, BracketType};
 pub use crate::unicode::bidi_class::{bidi_class, BidiClass};
 
 /// Maximum embedding depth permitted by UAX #9 (BD2).
@@ -123,9 +127,10 @@ impl BidiInfo {
     #[must_use]
     pub fn new(text: &str, paragraph_dir: Option<Direction>) -> Self {
         let paragraph = paragraph_dir.unwrap_or_else(|| paragraph_direction_with_isolates(text));
-        let mut cells: Vec<BidiCell> = text
-            .chars()
-            .map(|ch| BidiCell {
+        let chars: Vec<char> = text.chars().collect();
+        let mut cells: Vec<BidiCell> = chars
+            .iter()
+            .map(|&ch| BidiCell {
                 cls: bidi_class(ch),
                 level: 0,
             })
@@ -147,10 +152,10 @@ impl BidiInfo {
         explicit_levels(&mut cells, para_level);
 
         // Partition into level runs and isolating run sequences,
-        // then run W1-W7 + N1-N2 + I1-I2 per sequence.
+        // then run W1-W7 + N0 + N1-N2 + I1-I2 per sequence.
         let isolating_sequences = build_isolating_sequences(&cells, para_level);
         for seq in isolating_sequences {
-            resolve_sequence(&mut cells, &seq, para_level);
+            resolve_sequence(&mut cells, &chars, &seq, para_level);
         }
 
         // L1: reset trailing whitespace, segment separators, and
@@ -703,11 +708,183 @@ fn build_isolate_map(cells: &[BidiCell]) -> alloc::collections::BTreeMap<usize, 
 }
 
 // ---------------------------------------------------------------------
-// W1-W7 + N1-N2 + I1-I2 against one isolating-run sequence.
+// N0: paired-bracket resolution.
+// ---------------------------------------------------------------------
+
+/// Maximum number of pending bracket openers a single isolating-run
+/// sequence may carry per UAX #9 BD16. The spec caps the stack at 63
+/// to keep pathological input bounded; we mirror that.
+const N0_BRACKET_STACK_MAX: usize = 63;
+
+/// Implements UAX #9 rule N0 against the post-W7 class list of one
+/// isolating-run sequence. `classes[i]` is the resolved class for
+/// `seq.indices[i]`; `chars[seq.indices[i]]` is the original
+/// codepoint, used only for bracket lookup.
+///
+/// The pass:
+///
+/// 1. Identifies BD16 bracket pairs by walking the sequence with a
+///    stack of pending openers (capped at 63 per the spec).
+/// 2. For each matched pair, scans the strongly-typed characters
+///    *between* the open and close. If the embedding direction's
+///    strong type appears, the pair takes the embedding direction.
+///    Otherwise, if the opposite-direction strong appears, the pair
+///    takes that direction iff the strong before the opener (or sos)
+///    is the opposite direction; if it's the embedding direction
+///    (or no strong before), the pair takes the embedding direction.
+///    No strong inside → the pair is left alone (N1 / N2 handle it).
+/// 3. When a pair fires, both bracket cells get their class swapped
+///    to the resolved strong (L or R), plus any NSMs immediately
+///    following each bracket within the sequence per N0's
+///    "carry along the NSMs" clause.
+fn apply_n0(classes: &mut [BidiClass], chars: &[char], seq: &IsolatingSequence) {
+    if classes.is_empty() {
+        return;
+    }
+    let embed_strong = if seq.level % 2 == 1 {
+        BidiClass::R
+    } else {
+        BidiClass::L
+    };
+    let opposite_strong = if embed_strong == BidiClass::L {
+        BidiClass::R
+    } else {
+        BidiClass::L
+    };
+
+    // BD16: walk the sequence and pair matched brackets. Each entry
+    // on the stack is `(seq_index, opener_codepoint, close_codepoint)`.
+    // When a closer matches the top open, pop. When a closer matches
+    // an *earlier* opener on the stack, pop that opener and discard
+    // every entry above it (BD16's "skip mismatched" rule).
+    let mut stack: Vec<(usize, u32, u32)> = Vec::with_capacity(8);
+    // Pairs in *opener-position order* (UAX 9 N0 says process in
+    // text order, which here means opener position).
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for (i, &ci) in seq.indices.iter().enumerate() {
+        // Brackets must come from the ON neutral class — N0 only
+        // touches characters whose post-W class is ON. Skip anything
+        // already promoted to a strong / weak class by W1-W7.
+        if classes[i] != BidiClass::On {
+            continue;
+        }
+        let cp = chars.get(ci).copied().map_or(0u32, |c| c as u32);
+        let Some(entry) = bracket_of(cp) else {
+            continue;
+        };
+        match entry.kind {
+            BracketType::Open => {
+                if stack.len() < N0_BRACKET_STACK_MAX {
+                    stack.push((i, cp, entry.pair));
+                }
+            }
+            BracketType::Close => {
+                // Find the topmost opener whose close codepoint equals
+                // this closer's codepoint.
+                if let Some(pos) = stack.iter().rposition(|&(_, _, close_cp)| close_cp == cp) {
+                    let (open_seq_i, _, _) = stack[pos];
+                    pairs.push((open_seq_i, i));
+                    stack.truncate(pos);
+                }
+            }
+        }
+    }
+
+    if pairs.is_empty() {
+        return;
+    }
+    // Process pairs in opener-position order — the UAX 9 algorithm
+    // resolves earlier-opened pairs first so a later pair can see the
+    // earlier pair's resolution as a strong type.
+    pairs.sort_by_key(|&(open, _)| open);
+
+    for &(open, close) in &pairs {
+        // Scan strong types strictly between open and close.
+        let mut saw_embed = false;
+        let mut saw_opposite = false;
+        for c in &classes[open + 1..close] {
+            match strong_for_n0(*c) {
+                Some(s) if s == embed_strong => {
+                    saw_embed = true;
+                    break;
+                }
+                Some(s) if s == opposite_strong => {
+                    saw_opposite = true;
+                }
+                _ => {}
+            }
+        }
+
+        let resolved = if saw_embed {
+            Some(embed_strong)
+        } else if saw_opposite {
+            // Establish the strong context preceding the opener — walk
+            // back through the sequence's resolved classes until a
+            // strong type or the sos is found.
+            let mut k = open;
+            let preceding = loop {
+                if k == 0 {
+                    break strong_for_n0(seq.sos);
+                }
+                k -= 1;
+                if let Some(s) = strong_for_n0(classes[k]) {
+                    break Some(s);
+                }
+            };
+            if preceding == Some(opposite_strong) {
+                Some(opposite_strong)
+            } else {
+                Some(embed_strong)
+            }
+        } else {
+            None
+        };
+
+        if let Some(r) = resolved {
+            classes[open] = r;
+            classes[close] = r;
+            // N0 §3.1.3: any NSMs that immediately follow either
+            // bracket take the same resolved type. Walk forward past
+            // the bracket cells until a non-NSM is hit.
+            for c in classes.iter_mut().skip(open + 1) {
+                if *c == BidiClass::Nsm {
+                    *c = r;
+                } else {
+                    break;
+                }
+            }
+            for c in classes.iter_mut().skip(close + 1) {
+                if *c == BidiClass::Nsm {
+                    *c = r;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Maps a post-W class to its N0 strong category. EN / AN both count
+/// as R direction for N0 (per the spec — EN/AN are "weak strong").
+const fn strong_for_n0(c: BidiClass) -> Option<BidiClass> {
+    match c {
+        BidiClass::L => Some(BidiClass::L),
+        BidiClass::R | BidiClass::En | BidiClass::An => Some(BidiClass::R),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------
+// W1-W7 + N0-N2 + I1-I2 against one isolating-run sequence.
 // ---------------------------------------------------------------------
 
 #[allow(clippy::too_many_lines)]
-fn resolve_sequence(cells: &mut [BidiCell], seq: &IsolatingSequence, _para_level: u8) {
+fn resolve_sequence(
+    cells: &mut [BidiCell],
+    chars: &[char],
+    seq: &IsolatingSequence,
+    _para_level: u8,
+) {
     let n = seq.indices.len();
     if n == 0 {
         return;
@@ -819,7 +996,8 @@ fn resolve_sequence(cells: &mut [BidiCell], seq: &IsolatingSequence, _para_level
         }
     }
 
-    // ---- N0 (paired brackets) deferred — see module docs. ----
+    // ---- N0: paired-bracket resolution (UAX #9 §3.3.5). ----
+    apply_n0(&mut classes, chars, seq);
 
     // ---- N1: span of NIs between same-strong text takes that strong. ----
     let mut i = 0;
@@ -1137,6 +1315,121 @@ mod tests {
         // N2 sets ON to L → level 0.
         let info = BidiInfo::new("!", None);
         assert_eq!(info.levels(), &[0]);
+    }
+
+    // ---- N0 paired-bracket coverage ----
+
+    #[test]
+    fn n0_ascii_parens_in_rtl_paragraph_take_r() {
+        // ב ( ב ב ב )  — Hebrew letter, opener, three Hebrew, closer.
+        // Embedding direction R; brackets surround a pure-R run so N0
+        // fires and both parens resolve as R → all level 1.
+        let info = BidiInfo::new("\u{05D1}(\u{05D1}\u{05D1}\u{05D1})", None);
+        assert_eq!(info.paragraph_direction(), Direction::Rtl);
+        let levels = info.levels();
+        assert_eq!(levels.len(), 6);
+        for &l in levels {
+            assert_eq!(l, 1, "every char including brackets at level 1");
+        }
+    }
+
+    #[test]
+    fn n0_ascii_parens_in_ltr_paragraph_take_l() {
+        // A ( ב ב ב ) C — LTR paragraph, brackets around an inner
+        // Hebrew run. Embedding is L (paragraph LTR); the run inside
+        // is R, but with no L between them the pair takes the
+        // surrounding context. The text before the opener is L (A),
+        // so per N0 the brackets resolve to embed direction L.
+        let info = BidiInfo::new("A(\u{05D1}\u{05D1}\u{05D1})C", None);
+        assert_eq!(info.paragraph_direction(), Direction::Ltr);
+        let levels = info.levels();
+        assert_eq!(levels.len(), 7);
+        // Brackets at L (level 0); Hebrew at level 1.
+        assert_eq!(levels[0], 0, "A");
+        assert_eq!(levels[1], 0, "open paren resolves L");
+        assert_eq!(levels[2], 1, "Hebrew");
+        assert_eq!(levels[5], 0, "close paren resolves L");
+        assert_eq!(levels[6], 0, "C after closer at L");
+    }
+
+    #[test]
+    fn n0_brackets_with_embedding_strong_inside_take_embedding() {
+        // A ( ב A ב ) — brackets enclose mixed content with the
+        // embedding direction's strong (L: 'A') present. N0's first
+        // rule: if embed-strong appears between open and close, the
+        // pair takes embed-strong.
+        let info = BidiInfo::new("A(\u{05D1}A\u{05D1})", None);
+        let levels = info.levels();
+        assert_eq!(levels.len(), 6);
+        // Brackets resolve to L (embedding) — level 0.
+        assert_eq!(levels[1], 0);
+        assert_eq!(levels[5], 0);
+    }
+
+    #[test]
+    fn n0_cjk_corner_brackets_resolve() {
+        // 「 ב ב 」 with paragraph LTR + a leading 'A' to anchor sos.
+        // U+300C/U+300D are CJK corner brackets; N0 must treat them
+        // identically to ASCII parens.
+        let info = BidiInfo::new("A\u{300C}\u{05D1}\u{05D1}\u{300D}", None);
+        let levels = info.levels();
+        assert_eq!(levels.len(), 5);
+        assert_eq!(levels[0], 0, "A at L");
+        // The corner brackets enclose pure-R content with a leading L
+        // before — N0 picks embedding (L) → brackets at level 0.
+        assert_eq!(levels[1], 0, "open corner bracket at embedding L");
+        assert_eq!(levels[4], 0, "close corner bracket at embedding L");
+    }
+
+    #[test]
+    fn n0_nested_brackets_resolve_independently() {
+        // A [ ( ב ) ב ] B — outer square brackets and inner parens.
+        // Inner: ב only → no L strong → opposite (R) seen → preceding
+        //   text before '(' is '['. Looking at preceding strong: '['
+        //   has not yet been resolved by N0; it's still ON. So look
+        //   further back: 'A' (L) precedes. Embedding L; opposite R.
+        //   No embed-strong inside, so check preceding strong: L
+        //   (from A). Preceding != opposite, so take embed = L.
+        //   Inner brackets → L.
+        // Outer: span includes '(', ')', and ב; both brackets are
+        //   now L by inner's N0 pass plus the inner ב is R. Embed
+        //   strong (L) seen → outer brackets → L.
+        let info = BidiInfo::new("A[(\u{05D1})\u{05D1}]B", None);
+        let levels = info.levels();
+        assert_eq!(levels.len(), 8);
+        assert_eq!(levels[0], 0, "A");
+        assert_eq!(levels[1], 0, "outer open");
+        assert_eq!(levels[2], 0, "inner open");
+        assert_eq!(levels[3], 1, "Hebrew between inner brackets");
+        assert_eq!(levels[4], 0, "inner close");
+        assert_eq!(levels[5], 1, "Hebrew between outer brackets");
+        assert_eq!(levels[6], 0, "outer close at L");
+        assert_eq!(levels[7], 0, "B");
+    }
+
+    #[test]
+    fn n0_unpaired_bracket_falls_through_to_n1() {
+        // Just an opener with no closer: '(' alone. N0 sees no pair
+        // (the stack-pop never matches), so it leaves the paren as
+        // ON and N1 / N2 handle it. In an LTR paragraph the lone
+        // paren resolves to L via N2.
+        let info = BidiInfo::new("A(B", None);
+        let levels = info.levels();
+        assert_eq!(levels, &[0, 0, 0]);
+    }
+
+    #[test]
+    fn n0_mismatched_bracket_skips() {
+        // A ( ב ] ב ) — opener `(` paired with `)`; the misplaced
+        // `]` is a stray closer with no matching `[` opener. BD16
+        // says skip the unmatched closer. The paren pair still fires
+        // and resolves to L (embedding) for the LTR paragraph.
+        let info = BidiInfo::new("A(\u{05D1}]\u{05D1})", None);
+        let levels = info.levels();
+        assert_eq!(levels.len(), 6);
+        assert_eq!(levels[0], 0, "A");
+        assert_eq!(levels[1], 0, "open paren resolved L");
+        assert_eq!(levels[5], 0, "close paren resolved L");
     }
 
     #[test]

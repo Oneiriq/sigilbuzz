@@ -3,7 +3,10 @@
 //! CFF2 is CFF1 trimmed: no Name INDEX, no String INDEX, no Encoding,
 //! no charset, no `endchar` operator. Only one Top DICT, stored
 //! directly (no enclosing INDEX). VariationStore is optional. Every
-//! CFF2 font is implicitly CID-keyed (FDArray + FDSelect mandatory).
+//! CFF2 font is implicitly CID-keyed (FDArray mandatory). FDSelect is
+//! conventionally required, but Adobe's CFF2 emitter elides it when
+//! a font carries a single FontDict — the [`parse_cff2`] reader
+//! synthesises the implicit "every gid → FD 0" mapping in that case.
 //!
 //! The Type 2 charstring scanner from [`crate::cff`] already accepts
 //! both flavours — it stops at `OP_RETURN` / `OP_ENDCHAR` /
@@ -31,8 +34,8 @@
 use alloc::vec::Vec;
 
 use crate::cff::{
-    compute_kept_subrs, emit_fd_select_auto, encode_dict_offset_placeholder, encode_index,
-    parse_fd_select, patch_dict_offset, read_index, renumber_charstring, serialise_font_dict,
+    emit_fd_select_auto, encode_dict_offset_placeholder, encode_index_cff2, parse_fd_select,
+    patch_dict_offset, read_index_cff2, renumber_charstring, serialise_font_dict,
     serialise_private_dict, walk_dict, DictEntry, OP_CHARSTRINGS, OP_FD_ARRAY, OP_FD_SELECT,
     OP_PRIVATE, OP_SUBRS, OP_VSTORE,
 };
@@ -181,17 +184,17 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
 
     // Global Subr INDEX is immediately after the Top DICT.
     let g_pos = hdr_size + top_dict_length;
-    let (global_subrs, _) = read_index(data, g_pos)?;
+    let (global_subrs, _) = read_index_cff2(data, g_pos)?;
 
     let cs_off = cs_off.ok_or(SubsetError::Unsupported(
         "CFF2 Top DICT missing CharStrings",
     ))? as usize;
-    let (char_strings, _) = read_index(data, cs_off)?;
+    let (char_strings, _) = read_index_cff2(data, cs_off)?;
     let n_glyphs = char_strings.len();
 
     let fd_array_off =
         fd_array_off.ok_or(SubsetError::Unsupported("CFF2 Top DICT missing FDArray"))? as usize;
-    let (fd_array, _) = read_index(data, fd_array_off)?;
+    let (fd_array, _) = read_index_cff2(data, fd_array_off)?;
 
     // Walk each Font DICT for its Private offset.
     let mut per_fd_private: Vec<&[u8]> = Vec::with_capacity(fd_array.len());
@@ -230,7 +233,7 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
             }
             if let Some(rel) = subrs_rel {
                 let abs = off_u + rel as usize;
-                let (locals, _) = read_index(data, abs)?;
+                let (locals, _) = read_index_cff2(data, abs)?;
                 (priv_bytes, locals)
             } else {
                 (priv_bytes, Vec::new())
@@ -242,9 +245,21 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
         per_fd_local_subrs.push(locals);
     }
 
-    let fd_select_off =
-        fd_select_off.ok_or(SubsetError::Unsupported("CFF2 Top DICT missing FDSelect"))? as usize;
-    let fd_select = parse_fd_select(data, fd_select_off, n_glyphs)?;
+    // Adobe's CFF2 builds elide FDSelect when the font has a single
+    // FontDict — the spec marks FDSelect optional in that case. When
+    // missing AND the FDArray has exactly one entry, synthesise the
+    // implicit "every gid → FD 0" mapping; any other shape is a
+    // genuinely malformed CFF2 (multi-FD without FDSelect cannot
+    // round-trip).
+    let fd_select = if let Some(off) = fd_select_off {
+        parse_fd_select(data, off as usize, n_glyphs)?
+    } else if fd_array.len() == 1 {
+        alloc::vec![0u8; n_glyphs]
+    } else {
+        return Err(SubsetError::Unsupported(
+            "CFF2 multi-FD source missing FDSelect",
+        ));
+    };
 
     let vstore_blob = if let Some(off) = vstore_off {
         let off_u = off as usize;
@@ -279,11 +294,25 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
 /// CFF2's smaller surface (no Name / String / Encoding / charset
 /// INDEXes, single inline Top DICT) means the orchestration here is a
 /// strict simplification of [`crate::cff::subset_non_identity`]'s CID
-/// path: walk FDSelect, build per-FD subroutine keep-sets, renumber
-/// FDs, rebuild CharStrings + per-FD Local Subr + Global Subr INDEXes,
-/// emit a fresh FDArray + FDSelect, and patch Top DICT offsets to land
-/// the rebuilt sections in deterministic order. The VariationStore
-/// (when present) rides through verbatim.
+/// path: walk FDSelect, renumber FDs, rebuild CharStrings + per-FD
+/// Local Subr + Global Subr INDEXes, emit a fresh FDArray + FDSelect,
+/// and patch Top DICT offsets to land the rebuilt sections in
+/// deterministic order. The VariationStore (when present) rides
+/// through verbatim.
+///
+/// Adobe-style CFF2 builds (single FontDict, no explicit FDSelect)
+/// are accepted: the parser synthesises an implicit "every gid → FD 0"
+/// mapping, and the rebuilder emits a real FDSelect format-0 in the
+/// output (the spec requires FDSelect on disk when CIDCount > 0,
+/// which any non-empty CFF2 satisfies).
+///
+/// Subroutines are kept verbatim across the rewrite — every source
+/// local + global subr lands in the output INDEX with identity
+/// renumbering. This avoids the bias-shift padding edge case that the
+/// byte-stable charstring renumber path can't accommodate (a wider
+/// original operand whose new natural width is narrower); a follow-up
+/// can prune unreachable subrs once the renumber path grows
+/// variable-width support.
 ///
 /// `kept_gids` must be sorted ascending and contain gid 0.
 ///
@@ -342,27 +371,23 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
 
     // Step 3: per-kept-FD subroutine keep-set. Globals are unioned
     // across all FDs.
-    let mut kept_global_set: Vec<bool> = alloc::vec![false; parsed.global_subrs.len()];
-    let mut per_fd_kept_local: Vec<Vec<u32>> = Vec::with_capacity(kept_fds_sorted.len());
-    for &old_fd in &kept_fds_sorted {
-        let fd_local_subrs = &parsed.per_fd_local_subrs[old_fd as usize];
-        let mut cs_for_this_fd: Vec<&[u8]> = Vec::new();
-        for (i, &gid) in kept_gids.iter().enumerate() {
-            if kept_fd_old[i] == old_fd {
-                cs_for_this_fd.push(parsed.char_strings[gid as usize]);
-            }
-        }
-        let (kept_local, kept_global) =
-            compute_kept_subrs(&cs_for_this_fd, fd_local_subrs, &parsed.global_subrs)?;
-        for &gi in &kept_global {
-            kept_global_set[gi as usize] = true;
-        }
-        per_fd_kept_local.push(kept_local);
-    }
-    let kept_global_idx: Vec<u32> = kept_global_set
+    //
+    // CFF2 charstrings encode subr call operands at the *minimum*
+    // byte width (1 byte for ±107, 2 bytes for ±108..±1131, etc.).
+    // Subsetting only the reachable subrs would shift the bias and
+    // can leave a renumbered operand whose natural minimum width is
+    // narrower than the original — which sigilbuzz's byte-stable
+    // renumber path can't pad up. To stay correct under arbitrary
+    // gid maps we **keep every source subroutine**, identity-renumber
+    // them, and rely on charstring DCE never producing a wider
+    // operand than the source. This costs a few KiB on heavily
+    // subsetted fonts but is the simplest correct path; a follow-up
+    // can add operand-width-aware pruning once the renumber path
+    // grows variable-width support.
+    let kept_global_idx: Vec<u32> = (0..parsed.global_subrs.len() as u32).collect();
+    let per_fd_kept_local: Vec<Vec<u32>> = kept_fds_sorted
         .iter()
-        .enumerate()
-        .filter_map(|(i, &k)| if k { Some(i as u32) } else { None })
+        .map(|&old_fd| (0..parsed.per_fd_local_subrs[old_fd as usize].len() as u32).collect())
         .collect();
 
     let mut global_renumber: Vec<Option<u32>> = alloc::vec![None; parsed.global_subrs.len()];
@@ -482,7 +507,7 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
         .iter()
         .map(|f| f.font_dict_body.as_slice())
         .collect();
-    let fd_array_index = encode_index(&fd_array_refs);
+    let fd_array_index = encode_index_cff2(&fd_array_refs);
 
     let fd_count = fd_emits.len();
     let fd_index_off_size: usize = {
@@ -498,7 +523,8 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
             4
         }
     };
-    let fd_index_data_start = 2 + 1 + (fd_count + 1) * fd_index_off_size;
+    // CFF2 INDEX header: 4-byte u32 count + 1-byte offSize.
+    let fd_index_data_start = 4 + 1 + (fd_count + 1) * fd_index_off_size;
     let mut fd_body_offsets_in_index: Vec<usize> = Vec::with_capacity(fd_count);
     let mut acc = fd_index_data_start;
     for f in &fd_emits {
@@ -512,17 +538,17 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
 
     // Global Subr INDEX (renumbered globals).
     let global_subr_refs: Vec<&[u8]> = new_global_subrs.iter().map(Vec::as_slice).collect();
-    let global_subr_index = encode_index(&global_subr_refs);
+    let global_subr_index = encode_index_cff2(&global_subr_refs);
 
     // CharStrings INDEX.
     let cs_refs: Vec<&[u8]> = new_charstrings.iter().map(Vec::as_slice).collect();
-    let charstrings_index = encode_index(&cs_refs);
+    let charstrings_index = encode_index_cff2(&cs_refs);
 
     let per_fd_local_index: Vec<Vec<u8>> = new_per_fd_local_subrs
         .iter()
         .map(|locals| {
             let refs: Vec<&[u8]> = locals.iter().map(Vec::as_slice).collect();
-            encode_index(&refs)
+            encode_index_cff2(&refs)
         })
         .collect();
 
@@ -682,8 +708,8 @@ mod tests {
     ) -> Vec<u8> {
         assert_eq!(charstrings.len(), fd_select.len());
         let n_fds = (*fd_select.iter().max().unwrap_or(&0) as usize) + 1;
-        let cs_index = encode_index(charstrings);
-        let global_subr_index = encode_index(&[]);
+        let cs_index = encode_index_cff2(charstrings);
+        let global_subr_index = encode_index_cff2(&[]);
         let fd_select_bytes = emit_fd_select_format0(fd_select);
 
         // Per-FD Private DICTs (one op for shape).
@@ -706,7 +732,7 @@ mod tests {
         }
 
         let fd_array_refs: Vec<&[u8]> = font_dict_bodies.iter().map(Vec::as_slice).collect();
-        let fd_array_index = encode_index(&fd_array_refs);
+        let fd_array_index = encode_index_cff2(&fd_array_refs);
 
         // Top DICT — CharStrings, FDArray, FDSelect, optional VariationStore.
         let mut top: Vec<u8> = Vec::new();
@@ -758,7 +784,8 @@ mod tests {
                 2
             }
         };
-        let fd_index_data_start = 2 + 1 + (n_fds + 1) * fd_index_off_size;
+        // CFF2 INDEX header: 4-byte u32 count + 1-byte offSize.
+        let fd_index_data_start = 4 + 1 + (n_fds + 1) * fd_index_off_size;
         let mut fd_body_offsets_in_index: Vec<usize> = Vec::with_capacity(n_fds);
         let mut acc = fd_index_data_start;
         for body in &font_dict_bodies {
