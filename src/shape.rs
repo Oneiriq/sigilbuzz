@@ -3263,11 +3263,7 @@ fn apply_kerx(face: &Face<'_>, kerx: &Kerx<'_>, glyphs: &mut [Glyph]) -> Result<
 /// matching the type-2 path's conservative posture for malformed
 /// records. Errors only bubble when a *parsed* table turns out to
 /// be malformed mid-walk.
-fn apply_kerx_format4(
-    face: &Face<'_>,
-    kerx: &Kerx<'_>,
-    glyphs: &mut [Glyph],
-) -> Result<()> {
+fn apply_kerx_format4(face: &Face<'_>, kerx: &Kerx<'_>, glyphs: &mut [Glyph]) -> Result<()> {
     let ids: alloc::vec::Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
     let ankr = face.ankr()?;
     // Cache `Face::glyph_points` lookups across events. A single run
@@ -3275,10 +3271,8 @@ fn apply_kerx_format4(
     // long "ABABAB" pattern would otherwise re-flatten A twice per
     // pair. `None` (no points / no glyf / out of range) is a real
     // result and worth caching too.
-    let mut points_cache: alloc::collections::BTreeMap<
-        u16,
-        Option<alloc::vec::Vec<(i16, i16)>>,
-    > = alloc::collections::BTreeMap::new();
+    let mut points_cache: alloc::collections::BTreeMap<u16, Option<alloc::vec::Vec<(i16, i16)>>> =
+        alloc::collections::BTreeMap::new();
     let mut events: alloc::vec::Vec<crate::tables::kerx::Kerx4Action> = alloc::vec::Vec::new();
     kerx.apply_format4(&ids, |evt| events.push(evt));
     for evt in events {
@@ -3304,10 +3298,7 @@ fn resolve_kerx4_event(
     face: &Face<'_>,
     glyphs: &[Glyph],
     ankr: Option<&crate::tables::Ankr<'_>>,
-    points_cache: &mut alloc::collections::BTreeMap<
-        u16,
-        Option<alloc::vec::Vec<(i16, i16)>>,
-    >,
+    points_cache: &mut alloc::collections::BTreeMap<u16, Option<alloc::vec::Vec<(i16, i16)>>>,
 ) -> Result<Option<(usize, i32, i32)>> {
     use crate::tables::kerx::Kerx4Action;
     match evt {

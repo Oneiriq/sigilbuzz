@@ -204,10 +204,7 @@ mod tests {
     fn anchor_for_returns_recorded_pair() {
         // Glyph 5 → block offset 0; block has two anchors at (10, 20)
         // and (-30, 40).
-        let bytes = build_ankr(
-            &[(5, 0)],
-            &[vec![(10, 20), (-30, 40)]],
-        );
+        let bytes = build_ankr(&[(5, 0)], &[vec![(10, 20), (-30, 40)]]);
         let ankr = Ankr::parse(&bytes).unwrap();
         assert_eq!(ankr.anchor_for(5, 0), Some((10, 20)));
         assert_eq!(ankr.anchor_for(5, 1), Some((-30, 40)));
@@ -221,10 +218,7 @@ mod tests {
     fn multiple_glyphs_with_distinct_blocks() {
         // Glyph 5 → block offset 0; glyph 7 → block offset
         // (4 + 1*4 = 8) — past the first single-anchor block.
-        let bytes = build_ankr(
-            &[(5, 0), (7, 8)],
-            &[vec![(1, 2)], vec![(3, 4), (5, 6)]],
-        );
+        let bytes = build_ankr(&[(5, 0), (7, 8)], &[vec![(1, 2)], vec![(3, 4), (5, 6)]]);
         let ankr = Ankr::parse(&bytes).unwrap();
         assert_eq!(ankr.anchor_for(5, 0), Some((1, 2)));
         assert_eq!(ankr.anchor_for(7, 0), Some((3, 4)));

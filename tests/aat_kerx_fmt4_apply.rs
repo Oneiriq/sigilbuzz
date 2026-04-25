@@ -24,10 +24,8 @@
 
 use sigilbuzz::{shape, Blob, Buffer, Face, Font};
 
-const AAT_KERX_FMT4_TYPE0: &[u8] =
-    include_bytes!("fixtures/aat_kerx_fmt4_type0.ttf");
-const AAT_KERX_FMT4_TYPE1: &[u8] =
-    include_bytes!("fixtures/aat_kerx_fmt4_type1.ttf");
+const AAT_KERX_FMT4_TYPE0: &[u8] = include_bytes!("fixtures/aat_kerx_fmt4_type0.ttf");
+const AAT_KERX_FMT4_TYPE1: &[u8] = include_bytes!("fixtures/aat_kerx_fmt4_type1.ttf");
 
 fn shape_text(font_bytes: &'static [u8], text: &str) -> Vec<sigilbuzz::Glyph> {
     let blob = Blob::new(font_bytes);

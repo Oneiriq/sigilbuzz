@@ -1161,10 +1161,7 @@ mod tests {
     fn glyph_points_uses_vmtx_phantoms_when_present() {
         // yMax=200, vmtx advance=1000, tsb=50 → pp3=(0, 250),
         // pp4=(0, 250 - 1000)=(0, -750).
-        let mut body = build_simple_glyph(
-            &[1],
-            &[(0, 0, true), (10, 0, true)],
-        );
+        let mut body = build_simple_glyph(&[1], &[(0, 0, true), (10, 0, true)]);
         body[8..10].copy_from_slice(&200i16.to_be_bytes());
         let body = pad_even(body);
         let loca_bytes = build_loca_short(&[0, (body.len() as u16) / 2]);
