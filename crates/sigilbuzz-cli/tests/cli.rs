@@ -185,6 +185,79 @@ fn subset_accepts_inclusive_range() {
 }
 
 #[test]
+fn paint_reports_no_colr_for_open_sans() {
+    // Open Sans carries no COLR table, so paint exits 0 and prints
+    // a friendly message to stderr (not stdout).
+    let font = open_sans_path();
+    let (stdout, stderr, ok) = run_cli([
+        "paint".as_ref(),
+        font.as_os_str(),
+        "5".as_ref(),
+    ]);
+    assert!(ok, "binary failed: stderr={stderr}");
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout}");
+    assert!(
+        stderr.contains("no COLRv1 paint tree"),
+        "expected no-COLR message, got: {stderr}"
+    );
+}
+
+#[test]
+fn slug_emits_valid_json_for_outline_glyph() {
+    let font = open_sans_path();
+    // gid 43 is 'H' in Open Sans — picked because the shape test
+    // already established it has a non-empty outline.
+    let (stdout, stderr, ok) = run_cli([
+        "slug".as_ref(),
+        font.as_os_str(),
+        "43".as_ref(),
+    ]);
+    assert!(ok, "binary failed: stderr={stderr}");
+    let trimmed = stdout.trim();
+    assert!(trimmed.starts_with('{') && trimmed.ends_with('}'));
+    assert!(trimmed.contains("\"bbox\":"));
+    assert!(trimmed.contains("\"bands\":["));
+    assert!(trimmed.contains("\"segments\":["));
+}
+
+#[test]
+fn svg_writes_well_formed_document() {
+    let font = open_sans_path();
+    let out = write_tempfile("glyph.svg", b"");
+    let (_stdout, stderr, ok) = run_cli([
+        "svg".as_ref(),
+        font.as_os_str(),
+        "43".as_ref(),
+        out.as_os_str(),
+    ]);
+    assert!(ok, "binary failed: stderr={stderr}");
+    let svg = std::fs::read_to_string(&out).expect("read svg");
+    assert!(svg.starts_with("<svg "), "expected <svg ... > prefix: {svg}");
+    assert!(svg.ends_with("</svg>"), "expected </svg> suffix: {svg}");
+    assert!(svg.contains("viewBox=\""));
+    assert!(svg.contains("<path d=\""));
+}
+
+#[test]
+fn svg_rejects_glyph_without_outline() {
+    // gid 0 is .notdef — Open Sans's .notdef does have an outline,
+    // so we go for an out-of-range gid instead.
+    let font = open_sans_path();
+    let out = write_tempfile("glyph_oob.svg", b"");
+    let (_stdout, stderr, ok) = run_cli([
+        "svg".as_ref(),
+        font.as_os_str(),
+        "65535".as_ref(),
+        out.as_os_str(),
+    ]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("no outline"),
+        "expected friendly error, got: {stderr}"
+    );
+}
+
+#[test]
 fn subset_rejects_empty_selection() {
     let font = open_sans_path();
     let out = write_tempfile("subset_empty.ttf", b"");
