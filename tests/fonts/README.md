@@ -116,3 +116,17 @@ font bytes.
           --no-hinting --desubroutinize \
           --drop-tables+=GSUB,GPOS,GDEF,FFTM,DSIG \
           --no-layout-closure
+- `SourceSans3VF-Latin-Subset.otf` — CFF2 + variable font (single
+  `wght` axis spanning 200..900). Source: Adobe's
+  `SourceSans3VF-Upright.otf` from
+  <https://github.com/adobe-fonts/source-sans/raw/release/VF/SourceSans3VF-Upright.otf>.
+  License: SIL Open Font License 1.1 (Adobe, "Source" reserved font
+  name). Subset generated with `fonttools subset` to printable ASCII
+  while preserving the `fvar` / `avar` / `HVAR` axis machinery so the
+  round-trip can verify variation behaviour survives:
+
+      python3 -m fontTools.subset SourceSans3VF-Upright.otf \
+          --unicodes='U+0020-007E' \
+          --output-file=SourceSans3VF-Latin-Subset.otf \
+          --no-hinting \
+          --drop-tables+=DSIG,STAT,MVAR,BASE
