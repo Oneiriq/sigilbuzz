@@ -36,6 +36,7 @@ pub mod loca;
 pub mod math;
 pub mod maxp;
 pub mod morx;
+pub mod multi_var_store;
 pub mod mvar;
 pub mod outline;
 pub mod parse;
@@ -82,6 +83,7 @@ pub use math::{
 };
 pub use maxp::Maxp;
 pub use morx::Morx;
+pub use multi_var_store::{MultiVarStore, SparseAxisCoord, SparseRegion};
 pub use mvar::Mvar;
 pub use outline::{Outline, OutlineSink, PathOp};
 pub use parse::Reader;
