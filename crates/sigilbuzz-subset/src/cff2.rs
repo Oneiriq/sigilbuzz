@@ -16,12 +16,15 @@
 //!
 //! # Status
 //!
-//! CFF2 sources are routed through the same identity-passthrough path
-//! as CFF1 in [`crate::subset`] — when the closure walker has not
-//! dropped any glyph (kept set == `0..num_glyphs`) the CFF2 table is
-//! preserved verbatim including its VariationStore, FDArray, FDSelect,
-//! and inline Top DICT. Non-identity CFF2 subsetting is staged for the
-//! same follow-up that lands non-identity CFF1.
+//! CFF2 sources are routed through the identity-passthrough path in
+//! [`crate::subset`] when the closure walker has not dropped any glyph
+//! — the CFF2 table including its VariationStore, FDArray, FDSelect,
+//! and inline Top DICT is preserved verbatim. Non-identity CFF2
+//! subsetting still surfaces [`SubsetError::Unsupported`] — the
+//! orchestration mirrors CFF1 (smaller surface: no String INDEX, no
+//! Encoding, no charset, single inline Top DICT) but its FDArray
+//! INDEX rebuild + FDSelect rewrite is shared with CID-keyed CFF1 and
+//! is staged for the same follow-up.
 
 // The CFF1 charstring scanner already accepts CFF2 inputs (no endchar
 // terminator, vsindex / blend recognised). The CFF2 emitter, when it
