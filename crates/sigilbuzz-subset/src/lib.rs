@@ -50,14 +50,23 @@
 //!   [`SubsetInput::retain_variations`] to `false` to drop them all
 //!   and produce a static-instance subset (matches the 0.5.0
 //!   baseline).
+//! - **CFF / CFF2**: identity-passthrough — when the closure has not
+//!   dropped any source glyph (kept set == `0..num_glyphs`) the CFF /
+//!   CFF2 table and its dependencies are preserved verbatim and the
+//!   surrounding sfnt directory is rebuilt around them. Non-identity
+//!   CFF subsetting (CharStrings INDEX rebuild, Subr renumber via
+//!   bias-adjusted operand rewrite, Top DICT deferred-offset patching,
+//!   charset / Encoding format auto-pick, Private DICT relocation) is
+//!   staged for a future release; the byte-level emitter primitives
+//!   ([`encode_index`], [`encode_dict_int`], [`emit_charset_auto`],
+//!   [`emit_encoding_auto`], [`renumber_charstring`]) ship with this
+//!   release as the substrate the follow-up rewriter will consume.
 //! - **Dropped** (when [`SubsetInput::drop_unhandled`] is true, the
 //!   default): `kern`, `vhea`, `vmtx`, `VORG`, `COLR`, `CPAL`,
 //!   `morx`, `kerx`. When the flag is false, encountering any of
 //!   these surfaces a [`SubsetError::Unsupported`] result.
-//! - **Errors cleanly**: `CFF` / `CFF2` (subroutine renumbering is
-//!   significantly more involved and lands in a future release).
 //!
-//! CFF subsetting and non-identity GSUB / GPOS / GDEF rewriting
+//! Non-identity CFF and non-identity GSUB / GPOS / GDEF rewriting
 //! remain on the agenda.
 //!
 //! # Quick start
@@ -114,7 +123,10 @@ mod util;
 mod variation_store;
 
 pub use cff::{
-    compute_kept_subrs, encode_int_operand, scan_subr_calls, subr_bias, SubrCall, SubrKind,
+    compute_kept_subrs, emit_charset_auto, emit_charset_format0, emit_charset_format2,
+    emit_encoding_auto, emit_encoding_format0, emit_encoding_format1, encode_dict_int,
+    encode_dict_offset_placeholder, encode_index, encode_int_operand, patch_dict_offset,
+    renumber_charstring, renumber_subr_call, scan_subr_calls, subr_bias, SubrCall, SubrKind,
 };
 pub use classdef::emit_classdef;
 pub use closure::compute_closure;
@@ -245,24 +257,48 @@ impl From<sigilbuzz::Error> for SubsetError {
 /// Subset `face` according to `input`. Returns the new font bytes
 /// plus a gid remap.
 pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, SubsetError> {
-    // CFF / CFF2 sources route through dedicated subsetters. The
-    // analysis layer (charstring scanner, bias renumber math,
-    // transitive subr keep-set) lands in this commit; the byte-level
-    // emitter is staged for a follow-up. Until that ships, both
-    // entries return Unsupported with their own context strings —
-    // the dispatch wiring below means the eventual emitter swap is a
-    // single-file change. The early-return runs *before* maxp /
-    // closure validation so a malformed-but-CFF source still gets
-    // the dedicated-message Unsupported variant rather than a
-    // MissingTable bubble-up.
-    if face.record(tag::CFF1).is_some() {
+    // CFF / CFF2 sources route through a dedicated path. The byte-level
+    // emitter primitives (CharStrings INDEX rebuild, Subr renumber via
+    // bias-adjusted operand rewrite, charset / Encoding format auto-
+    // pick, deferred-offset Top DICT patching, Private DICT relocation)
+    // live in [`cff`]; the cross-cutting orchestration that consumes
+    // them under a non-identity gid map is staged for a follow-up.
+    //
+    // Today the dispatch handles two cases cleanly:
+    //
+    // 1. The kept gid set after closure is the source font's identity
+    //    (every gid kept). The CFF / CFF2 table and its dependencies
+    //    are passed through verbatim and the surrounding sfnt directory
+    //    is rebuilt around them. This mirrors the
+    //    [`layout::Decision::Preserve`] strategy from `feature/subset-
+    //    layout-rewriter` for GSUB / GPOS / GDEF.
+    // 2. Anything else surfaces [`SubsetError::Unsupported`] with a
+    //    dedicated context string so callers see a clean error rather
+    //    than a corrupt font.
+    let has_cff1 = face.record(tag::CFF1).is_some();
+    let has_cff2 = face.record(tag::CFF2).is_some();
+    if has_cff1 || has_cff2 {
+        let cff_num_glyphs = face.maxp()?.num_glyphs;
+        // Validate gids before we touch closure / passthrough.
+        for &g in &input.gids {
+            if g >= cff_num_glyphs {
+                return Err(SubsetError::GidOutOfRange {
+                    gid: g,
+                    num_glyphs: cff_num_glyphs,
+                });
+            }
+        }
+        if input.gids.is_empty() && !input.drop_unhandled {
+            return Err(SubsetError::EmptyGidSet);
+        }
+        let kept = closure::compute_closure(face, &input.gids)?;
+        let identity = kept.len() == cff_num_glyphs as usize
+            && kept.iter().enumerate().all(|(i, &g)| g as usize == i);
+        if identity {
+            return cff_passthrough(face, &kept, has_cff1);
+        }
         return Err(SubsetError::Unsupported(
-            "CFF1 byte-level rewrite staged for follow-up; analysis layer wired",
-        ));
-    }
-    if face.record(tag::CFF2).is_some() {
-        return Err(SubsetError::Unsupported(
-            "CFF2 byte-level rewrite staged for follow-up; analysis layer wired",
+            "CFF / CFF2 non-identity subset staged for follow-up; emitter primitives in cff module",
         ));
     }
 
@@ -430,6 +466,46 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         bytes,
         gid_map: gid_map.into_iter().collect(),
     })
+}
+
+/// CFF / CFF2 identity-passthrough emitter.
+///
+/// When the closure walker has retained every glyph in the source font
+/// (kept set == `0..num_glyphs`), every byte of the CFF / CFF2 table —
+/// including its embedded gid references inside charstrings, charset,
+/// Encoding, and Private DICTs — already resolves to the right glyph
+/// in the subset (the gid namespace is unchanged). Likewise for cmap,
+/// hmtx, hhea, maxp, post, name, OS/2, and the layout tables. We copy
+/// every table the source carries except the few we never preserve
+/// (vertical / kern / morx / kerx / vorg / colr / cpal — kept-out for
+/// the same reason `glyf` mode drops them).
+///
+/// Returns the new SFNT bytes plus an identity `gid_map`.
+fn cff_passthrough(
+    face: &Face<'_>,
+    kept: &[GlyphId],
+    has_cff1: bool,
+) -> Result<SubsetOutput, SubsetError> {
+    let _ = has_cff1; // CFF1 vs CFF2 doesn't matter — the source tag travels.
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::new();
+    for rec in face.records() {
+        // Skip the same set the glyf path drops when in
+        // drop_unhandled mode. CFF identity-passthrough is morally a
+        // "preserve everything still relevant" emit, so vertical /
+        // legacy-kern tables that the rest of the pipeline can't
+        // round-trip stay dropped.
+        if matches!(
+            &rec.tag,
+            b"vhea" | b"vmtx" | b"VORG" | b"kern" | b"morx" | b"kerx"
+        ) {
+            continue;
+        }
+        let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;
+        tables.push((rec.tag, bytes.to_vec()));
+    }
+    let bytes = sfnt::build(face.sfnt_version(), &tables);
+    let gid_map: Vec<(GlyphId, GlyphId)> = kept.iter().map(|&g| (g, g)).collect();
+    Ok(SubsetOutput { bytes, gid_map })
 }
 
 #[cfg(test)]
