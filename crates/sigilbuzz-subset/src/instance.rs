@@ -242,10 +242,22 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         (tag::LOCA, glyf_loca.loca),
         (tag::GLYF, glyf_loca.glyf),
     ];
-    if let Some(vmtx_bytes) = vmtx_bake_result.vmtx_bytes {
+    // vmtx + vhea: when the source carries vmtx, emit the rebuilt
+    // table and patch vhea's numberOfLongVerMetrics to the count
+    // `bake_vmtx` computed (which may extend the long range to cover
+    // VVAR-induced trailing-advance differences).
+    if let Some(vmtx_bytes) = vmtx_bake_result.vmtx_bytes.clone() {
         tables.push((tag::VMTX, vmtx_bytes));
-    }
-    if let Some(vhea_bytes) = mvar_bake.vhea.clone() {
+        let mut vhea_out = match mvar_bake.vhea.clone() {
+            Some(bytes) => bytes,
+            None => face
+                .table_bytes(tag::VHEA)
+                .map_err(SubsetError::from)?
+                .to_vec(),
+        };
+        util::write_vhea_metrics_count(&mut vhea_out, vmtx_bake_result.number_of_long_ver_metrics)?;
+        tables.push((tag::VHEA, vhea_out));
+    } else if let Some(vhea_bytes) = mvar_bake.vhea.clone() {
         tables.push((tag::VHEA, vhea_bytes));
     }
     if let Some(os2_bytes) = mvar_bake.os2.clone() {
@@ -338,10 +350,18 @@ fn cff2_bake(
         (tag::HMTX, hmtx_out.bytes),
         (tag::CFF2, new_cff2),
     ];
-    if let Some(vmtx_bytes) = vmtx_bake_result.vmtx_bytes {
+    if let Some(vmtx_bytes) = vmtx_bake_result.vmtx_bytes.clone() {
         tables.push((tag::VMTX, vmtx_bytes));
-    }
-    if let Some(vhea_bytes) = mvar_bake.vhea.clone() {
+        let mut vhea_out = match mvar_bake.vhea.clone() {
+            Some(bytes) => bytes,
+            None => face
+                .table_bytes(tag::VHEA)
+                .map_err(SubsetError::from)?
+                .to_vec(),
+        };
+        util::write_vhea_metrics_count(&mut vhea_out, vmtx_bake_result.number_of_long_ver_metrics)?;
+        tables.push((tag::VHEA, vhea_out));
+    } else if let Some(vhea_bytes) = mvar_bake.vhea.clone() {
         tables.push((tag::VHEA, vhea_bytes));
     }
     if let Some(os2_bytes) = mvar_bake.os2.clone() {
@@ -925,35 +945,41 @@ fn bake_hmtx(face: &Face<'_>, coords: &[f32], num_glyphs: u16) -> Result<HmtxBak
 
 struct VmtxBake {
     /// New `vmtx` bytes, or `None` when the source has no `vmtx`.
-    /// The vmtx layout is determined by the source's `vhea`'s
-    /// `numberOfLongVerMetrics` — instancing keeps every gid so the
-    /// long count stays unchanged.
     vmtx_bytes: Option<Vec<u8>>,
+    /// Recomputed `numberOfLongVerMetrics` for the rebuilt table. The
+    /// caller must patch `vhea` with this value when it differs from
+    /// the source's count. Holds zero when no vmtx was emitted.
+    number_of_long_ver_metrics: u16,
 }
 
 fn bake_vmtx(face: &Face<'_>, coords: &[f32], num_glyphs: u16) -> Result<VmtxBake, SubsetError> {
     let vmtx = face.vmtx().map_err(SubsetError::from)?;
     let Some(vmtx) = vmtx else {
-        return Ok(VmtxBake { vmtx_bytes: None });
+        return Ok(VmtxBake {
+            vmtx_bytes: None,
+            number_of_long_ver_metrics: 0,
+        });
     };
-    // vhea must be present for vmtx to parse; reach for it to read
-    // numberOfLongVerMetrics so the rebuild keeps the same long-count.
-    let vhea = face
+    // vhea must be present whenever vmtx is — the parser uses
+    // `numberOfLongVerMetrics` to slice the table. Confirm presence
+    // here so a malformed source (vmtx without vhea) errors cleanly
+    // before we try to re-emit. The actual long count is recomputed
+    // below from the post-VVAR advance vector.
+    let _ = face
         .vhea()
         .map_err(SubsetError::from)?
         .ok_or(SubsetError::Unsupported(
             "instance: vmtx present without vhea",
         ))?;
-    let long_count = vhea.number_of_long_ver_metrics;
 
     let vvar = face.vvar().map_err(SubsetError::from)?;
 
-    // Compute the new (advance, tsb) per gid. Every glyph in the long
-    // range carries its own advance; trailing glyphs share the last
-    // advance as in the source. We rebuild the long range from each
-    // source advance + VVAR delta, then keep tsbs for trailing glyphs
-    // patched by VVAR.tsb deltas (when the source carries that
-    // mapping).
+    // Compute the new (advance, tsb) per gid. Every glyph that ends
+    // up in the long range carries its own advance; trailing glyphs
+    // share the last advance. We resolve VVAR deltas for *every* gid
+    // (including those originally past the source's long count) so
+    // that a trailing glyph whose advance now diverges from the
+    // shared one extends the long range below.
     let mut advances: Vec<u16> = Vec::with_capacity(num_glyphs as usize);
     let mut tsbs: Vec<i16> = Vec::with_capacity(num_glyphs as usize);
     for gid in 0..num_glyphs {
@@ -974,18 +1000,41 @@ fn bake_vmtx(face: &Face<'_>, coords: &[f32], num_glyphs: u16) -> Result<VmtxBak
         tsbs.push(clamp_i16(new_tsb));
     }
 
-    let mut out = Vec::with_capacity(num_glyphs as usize * 4);
-    for i in 0..long_count.min(num_glyphs) {
-        out.extend_from_slice(&advances[i as usize].to_be_bytes());
-        out.extend_from_slice(&tsbs[i as usize].to_be_bytes());
-    }
-    for i in long_count..num_glyphs {
-        out.extend_from_slice(&tsbs[i as usize].to_be_bytes());
-    }
+    let (out, long_count) = emit_vmtx_bytes(&advances, &tsbs);
 
     Ok(VmtxBake {
         vmtx_bytes: Some(out),
+        number_of_long_ver_metrics: long_count,
     })
+}
+
+/// Emits a vmtx body from per-gid `advances` + `tsbs`, recomputing the
+/// `numberOfLongVerMetrics` count so trailing glyphs that now share an
+/// advance compress into the tsb-only tail. Mirrors `bake_hmtx`'s long-
+/// count compression so VVAR-induced advance deltas at trailing gids
+/// extend the long range below.
+fn emit_vmtx_bytes(advances: &[u16], tsbs: &[i16]) -> (Vec<u8>, u16) {
+    debug_assert_eq!(advances.len(), tsbs.len());
+    let mut long_count = advances.len();
+    if long_count > 1 {
+        let last = advances[long_count - 1];
+        while long_count > 1 && advances[long_count - 1] == last {
+            long_count -= 1;
+        }
+        long_count += 1;
+    }
+    if long_count == 0 {
+        long_count = 1;
+    }
+    let mut out = Vec::with_capacity(advances.len() * 4);
+    for (advance, tsb) in advances.iter().zip(tsbs.iter()).take(long_count) {
+        out.extend_from_slice(&advance.to_be_bytes());
+        out.extend_from_slice(&tsb.to_be_bytes());
+    }
+    for tsb in tsbs.iter().skip(long_count) {
+        out.extend_from_slice(&tsb.to_be_bytes());
+    }
+    (out, long_count as u16)
 }
 
 // ---------------------------------------------------------------------------
@@ -1626,6 +1675,50 @@ mod vvar_synthetic_tests {
         // Out-of-range offset must not panic — short bufs survive.
         patch_i16(&mut buf, 10, 5);
         assert_eq!(buf.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn emit_vmtx_bytes_compresses_trailing_run() {
+        // 5 glyphs, every glyph shares advance 1000. The compression
+        // matches `bake_hmtx`: trailing identical advances collapse
+        // into the tsb-only tail. The shared-advance run leaves 2
+        // long entries (the loop bottoms at 1 then adds back 1 to
+        // anchor the shared advance — same as hmtx).
+        let advances = alloc::vec![1000u16; 5];
+        let tsbs = alloc::vec![10i16, 20, 30, 40, 50];
+        let (bytes, n_long) = emit_vmtx_bytes(&advances, &tsbs);
+        assert_eq!(n_long, 2);
+        // 2 long entries (4 B each) + 3 trailing tsbs (2 B each) = 14.
+        assert_eq!(bytes.len(), 4 * 2 + 3 * 2);
+    }
+
+    #[test]
+    fn emit_vmtx_bytes_extends_long_range_when_trailing_advances_diverge() {
+        // 5 glyphs. Source vmtx had long_count=1 (every glyph shared
+        // advance 1000), but a hypothetical VVAR delta at gid 3 shifted
+        // its advance to 1100. emit_vmtx_bytes must promote gid 3 into
+        // the long range so its distinct advance survives the byte
+        // emission. Without the long-count recompute fix this trailing
+        // delta is silently dropped.
+        let advances = alloc::vec![1000u16, 1000, 1000, 1100, 1000];
+        let tsbs = alloc::vec![10i16, 20, 30, 40, 50];
+        let (bytes, n_long) = emit_vmtx_bytes(&advances, &tsbs);
+        // Same compression rule as hmtx: scan trailing equal-to-last
+        // run, plus one anchor entry. Last advance is 1000; gid 3 is
+        // 1100 (different) so the run is just gid 4. long_count = 5
+        // - 1 + 1 = 5 (every glyph in the long range).
+        assert_eq!(n_long, 5);
+        assert_eq!(bytes.len(), 4 * 5);
+        // Gid 3's advance survives at the rebuilt long-entry slot.
+        let g3_adv = u16::from_be_bytes([bytes[3 * 4], bytes[3 * 4 + 1]]);
+        assert_eq!(g3_adv, 1100);
+    }
+
+    #[test]
+    fn write_vhea_metrics_count_patches_tail() {
+        let mut vhea = alloc::vec![0u8; 36];
+        crate::util::write_vhea_metrics_count(&mut vhea, 7).unwrap();
+        assert_eq!(&vhea[34..36], &7u16.to_be_bytes());
     }
 
     #[test]
