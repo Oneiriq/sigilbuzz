@@ -34,8 +34,8 @@
 use alloc::vec::Vec;
 
 use crate::cff::{
-    emit_fd_select_auto, encode_dict_offset_placeholder, encode_index_cff2, parse_fd_select,
-    patch_dict_offset, read_index_cff2, renumber_charstring, serialise_font_dict,
+    compute_kept_subrs, emit_fd_select_auto, encode_dict_offset_placeholder, encode_index_cff2,
+    parse_fd_select, patch_dict_offset, read_index_cff2, renumber_charstring, serialise_font_dict,
     serialise_private_dict, walk_dict, DictEntry, OP_CHARSTRINGS, OP_FD_ARRAY, OP_FD_SELECT,
     OP_PRIVATE, OP_SUBRS, OP_VSTORE,
 };
@@ -306,13 +306,14 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
 /// output (the spec requires FDSelect on disk when CIDCount > 0,
 /// which any non-empty CFF2 satisfies).
 ///
-/// Subroutines are kept verbatim across the rewrite — every source
-/// local + global subr lands in the output INDEX with identity
-/// renumbering. This avoids the bias-shift padding edge case that the
-/// byte-stable charstring renumber path can't accommodate (a wider
-/// original operand whose new natural width is narrower); a follow-up
-/// can prune unreachable subrs once the renumber path grows
-/// variable-width support.
+/// Unreachable subroutines are pruned. Per-kept-FD `compute_kept_subrs`
+/// runs the transitive closure over each FD's kept charstrings against
+/// that FD's local INDEX; the global keep-set is the union across FDs.
+/// The byte-stable charstring renumber pads narrower natural-width
+/// operands back to the source's original byte slot
+/// ([`crate::cff::encode_int_operand_at_width`]), so a renumbered call
+/// site never shifts the surrounding charstring even when the new
+/// (post-bias) operand value is smaller than the original.
 ///
 /// `kept_gids` must be sorted ascending and contain gid 0.
 ///
@@ -369,26 +370,92 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
         .map(|&old| fd_renumber[old as usize].unwrap())
         .collect();
 
-    // Step 3: per-kept-FD subroutine keep-set. Globals are unioned
-    // across all FDs.
-    //
-    // CFF2 charstrings encode subr call operands at the *minimum*
-    // byte width (1 byte for ±107, 2 bytes for ±108..±1131, etc.).
-    // Subsetting only the reachable subrs would shift the bias and
-    // can leave a renumbered operand whose natural minimum width is
-    // narrower than the original — which sigilbuzz's byte-stable
-    // renumber path can't pad up. To stay correct under arbitrary
-    // gid maps we **keep every source subroutine**, identity-renumber
-    // them, and rely on charstring DCE never producing a wider
-    // operand than the source. This costs a few KiB on heavily
-    // subsetted fonts but is the simplest correct path; a follow-up
-    // can add operand-width-aware pruning once the renumber path
-    // grows variable-width support.
-    let kept_global_idx: Vec<u32> = (0..parsed.global_subrs.len() as u32).collect();
-    let per_fd_kept_local: Vec<Vec<u32>> = kept_fds_sorted
+    // Step 3: per-kept-FD subroutine keep-set. Each kept FD runs its
+    // own `compute_kept_subrs` over the kept charstrings that route to
+    // that FD against its FD-private local INDEX; the global keep-set
+    // is the union across all kept FDs. The byte-stable renumber path
+    // pads narrower-natural operands back to the source's original
+    // byte slot when there's a wider form available (3-byte shortint,
+    // 5-byte fixed, the two 2-byte forms). The single hole — a
+    // `-107..=107` value that has to land in a 2-byte slot — has no
+    // 2-byte representation in Type 2 charstrings, so for that case
+    // the rewriter falls back to keeping every source subroutine
+    // verbatim with identity renumbering (preserving the source
+    // bias). The fallback is detected lazily inside
+    // [`emit_with_keep_set`]: try the pruned attempt; on the specific
+    // "cannot pad operand" error retry with identity.
+    let (pruned_per_fd_kept_local, pruned_kept_global_idx) = {
+        let mut kept_global_set: alloc::vec::Vec<bool> =
+            alloc::vec![false; parsed.global_subrs.len()];
+        let mut per_fd_kept_local: Vec<Vec<u32>> = Vec::with_capacity(kept_fds_sorted.len());
+        for &old_fd in &kept_fds_sorted {
+            let mut cs_for_this_fd: Vec<&[u8]> = Vec::new();
+            for (i, &gid) in kept_gids.iter().enumerate() {
+                if kept_fd_old[i] == old_fd {
+                    cs_for_this_fd.push(parsed.char_strings[gid as usize]);
+                }
+            }
+            let fd_local_subrs = &parsed.per_fd_local_subrs[old_fd as usize];
+            let (kept_local, kept_global) =
+                compute_kept_subrs(&cs_for_this_fd, fd_local_subrs, &parsed.global_subrs)?;
+            for &gi in &kept_global {
+                kept_global_set[gi as usize] = true;
+            }
+            per_fd_kept_local.push(kept_local);
+        }
+        let kept_global_idx: Vec<u32> = kept_global_set
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &k)| if k { Some(i as u32) } else { None })
+            .collect();
+        (per_fd_kept_local, kept_global_idx)
+    };
+
+    // Identity fallback keep-set: every source subr survives.
+    let identity_per_fd_kept_local: Vec<Vec<u32>> = kept_fds_sorted
         .iter()
         .map(|&old_fd| (0..parsed.per_fd_local_subrs[old_fd as usize].len() as u32).collect())
         .collect();
+    let identity_kept_global_idx: Vec<u32> = (0..parsed.global_subrs.len() as u32).collect();
+
+    match emit_with_keep_set(
+        cff_bytes,
+        &parsed,
+        kept_gids,
+        &kept_fd_old,
+        &kept_fds_sorted,
+        &new_fd_select,
+        &pruned_per_fd_kept_local,
+        &pruned_kept_global_idx,
+    ) {
+        Ok(out) => Ok(out),
+        Err(SubsetError::Unsupported("CFF renumber: cannot pad operand to original width")) => {
+            emit_with_keep_set(
+                cff_bytes,
+                &parsed,
+                kept_gids,
+                &kept_fd_old,
+                &kept_fds_sorted,
+                &new_fd_select,
+                &identity_per_fd_kept_local,
+                &identity_kept_global_idx,
+            )
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn emit_with_keep_set(
+    cff_bytes: &[u8],
+    parsed: &ParsedCff2<'_>,
+    kept_gids: &[u16],
+    kept_fd_old: &[u8],
+    kept_fds_sorted: &[u8],
+    new_fd_select: &[u8],
+    per_fd_kept_local: &[Vec<u32>],
+    kept_global_idx: &[u32],
+) -> Result<Vec<u8>, SubsetError> {
 
     let mut global_renumber: Vec<Option<u32>> = alloc::vec![None; parsed.global_subrs.len()];
     for (new_i, &old_i) in kept_global_idx.iter().enumerate() {
@@ -474,7 +541,7 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
     }
 
     // FDSelect bytes.
-    let fd_select_bytes = emit_fd_select_auto(&new_fd_select);
+    let fd_select_bytes = emit_fd_select_auto(new_fd_select);
 
     // Per-FD Font DICT body + Private DICT body.
     struct FdEmit {
