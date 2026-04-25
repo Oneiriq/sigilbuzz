@@ -38,10 +38,12 @@
 //!   fatha / sukun / kasratan marks, which previously broke rlig's
 //!   IgnoreMarks-gated rules.
 //!
-//! The Allah / bism-Allah forms (`الله`) still diverge between the
-//! two engines. That is a separate bug in the rlig dispatch — rlig
-//! picks a different set of lookup outputs on both sides of the
-//! diff, with no LookupFlag bit involved; tracked outside this PR.
+//! Allah, bism-Allah, and the surrounding Quranic-grade rlig corpus
+//! also match rustybuzz glyph-for-glyph after the GSUB rule-ordering
+//! fix in #21: Amiri's `rlig` lookups carry chained-context subtables
+//! whose first-subtable-wins semantics are load-bearing — earlier
+//! subtables with `SubstCount = 0` intentionally block later
+//! subtables at the same cursor (see `allah_matches_rustybuzz`).
 //!
 //! Byte-identical glyph-id and x_advance agreement is the bar.
 
@@ -205,9 +207,11 @@ fn marhaba_shapes_to_different_glyphs_than_isolated_letters() {
     );
 }
 
-/// Diagnostic helper: print the two engines' output side-by-side
-/// for the given string. Called by the Allah/bism-Allah probes to
-/// produce useful failure diagnostics before the assertion runs.
+/// Diagnostic helper: returns the two engines' output side-by-side
+/// for the given string. Used both by `allah_diagnostic_prints_both_engines`
+/// (which prints, no assertion) and as backing for any debug bisection
+/// that compares glyph streams without committing to a specific gid.
+#[allow(dead_code)]
 fn compare_shape(text: &str) -> (Vec<u32>, Vec<u32>, Vec<i32>, Vec<i32>) {
     let blob = Blob::new(AMIRI);
     let face = Face::parse(&blob, 0).expect("parse");
@@ -260,23 +264,76 @@ fn vocalised_marhaba_matches_rustybuzz() {
     assert_parity_on(text);
 }
 
-/// Emits a side-by-side diagnostic comparison for an arbitrary
-/// Amiri string. Useful while bisecting a LookupFlag regression;
-/// kept as a test (rather than a binary) so `cargo test` is the
-/// only invocation needed to print it. Does not assert.
+/// "Allah" — alef + lam + lam + heh (`\u{0627}\u{0644}\u{0644}\u{0647}`).
+/// The canonical rlig regression for issue #21: Amiri's lookup 42 has
+/// eight chained-context subtables whose first match consumes the
+/// cursor *with `SubstCount = 0`*, intentionally blocking subtables
+/// 1+ at that cursor. The previous dispatcher walked each subtable
+/// across the run independently — subtable 1 then re-matched the same
+/// alef-lam-lam-heh window and fired its nested L41 single subst,
+/// producing rare init/medi/fina variants instead of the canonical
+/// Allah ligature.
+#[test]
+fn allah_matches_rustybuzz() {
+    let text = "\u{0627}\u{0644}\u{0644}\u{0647}";
+    assert_parity_on(text);
+}
+
+/// "Bism-Allah" — `\u{0628}\u{0633}\u{0645} \u{0627}\u{0644}\u{0644}\u{0647}`.
+/// Allah preceded by "bism" + space; the second word of the buffer
+/// re-runs the rlig dispatcher under the same conditions.
+#[test]
+fn bism_allah_matches_rustybuzz() {
+    let text = "\u{0628}\u{0633}\u{0645} \u{0627}\u{0644}\u{0644}\u{0647}";
+    assert_parity_on(text);
+}
+
+/// "Muhammad" — `\u{0645}\u{062D}\u{0645}\u{062F}`. Double meem +
+/// medial hah + final dal. Hits Amiri's hah-class chained-context
+/// rewrites, which go through L43-style multi-subst rules.
+#[test]
+fn muhammad_matches_rustybuzz() {
+    let text = "\u{0645}\u{062D}\u{0645}\u{062F}";
+    assert_parity_on(text);
+}
+
+/// "Lillah" (`\u{0644}\u{0644}\u{0647}`) — the `lam-lam-heh` ligature
+/// chain in isolation. The rlig dispatcher picks the same canonical
+/// lillah ligature only when subtable ordering is honoured.
+#[test]
+fn lillah_matches_rustybuzz() {
+    let text = "\u{0644}\u{0644}\u{0647}";
+    assert_parity_on(text);
+}
+
+/// "Qul" (`\u{0642}\u{0644}`) — qaf + lam, a two-letter init/fina
+/// pair that has historically been a subtable-ordering tripwire on
+/// rlig-flush fonts.
+#[test]
+fn qul_matches_rustybuzz() {
+    let text = "\u{0642}\u{0644}";
+    assert_parity_on(text);
+}
+
+/// "Akbar" (`\u{0623}\u{0643}\u{0628}\u{0631}`) — alef-with-hamza +
+/// kaf + beh + reh. Mixes positional features with rlig context
+/// rewrites whose first-match-wins selection differs from later
+/// subtables.
+#[test]
+fn akbar_matches_rustybuzz() {
+    let text = "\u{0623}\u{0643}\u{0628}\u{0631}";
+    assert_parity_on(text);
+}
+
+/// Diagnostic-only side-by-side print. Retained as a regression
+/// hammock for any future Allah-shaped issue: failures of
+/// `allah_matches_rustybuzz` give an assertion message that names
+/// the diverging glyph; this test prints both runs in full so the
+/// shape of the divergence is visible without a debugger.
 #[test]
 fn allah_diagnostic_prints_both_engines() {
     let text = "\u{0627}\u{0644}\u{0644}\u{0647}";
     let (sig, rb, sig_adv, rb_adv) = compare_shape(text);
-    // Allah still diverges between sigilbuzz and rustybuzz — the two
-    // engines pick different positional (init/medi/fina) + rlig
-    // outputs even though the glyph count matches. The cmap start
-    // state is [alef=55, lam=84, lam=84, heh=87]; sigilbuzz ends up
-    // at [55, 4839, 4929, 4393] vs rustybuzz [55, 1346, 6128, 1348].
-    // See issue #21 for the follow-up tracking the rule-selection
-    // divergence — likely interaction between isol/init/medi/fina
-    // and subsequent `rlig` chaining-context rewrites that pick
-    // different Amiri variant glyphs.
     eprintln!("allah sig glyphs: {sig:?} advances: {sig_adv:?}");
     eprintln!("allah rb  glyphs: {rb:?} advances: {rb_adv:?}");
 }
@@ -322,3 +379,4 @@ fn mixed_arabic_and_latin_runs_shape_each_half_correctly() {
         );
     }
 }
+
