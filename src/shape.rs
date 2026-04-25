@@ -346,9 +346,25 @@ fn apply_parsed_lookup_at(
                 if let Some((out, positions)) = lig.apply_filtered(&ids.as_slice()[at..], filter) {
                     glyphs[at].glyph_id = u32::from(out);
                     drain_ligature_components(glyphs, at, &positions);
-                    let span = positions.last().copied().map_or(0, |p| p + 1);
                     ids.resync(glyphs);
-                    return span;
+                    // Ligature emits 1 glyph from N matched components.
+                    // The cursor must advance past the ligature output
+                    // *and* any skipped (filtered) glyphs that survived
+                    // inside the matched window — in HarfBuzz's
+                    // input/output buffer model that is `idx + span` in
+                    // INPUT space; in our in-place model the buffer
+                    // already shrunk by `(positions.len() - 1)` glyphs,
+                    // so the equivalent NEW-buffer advance is
+                    // `span - (positions.len() - 1)` = `1 + skipped`.
+                    //
+                    // Returning the raw input span over-advances by the
+                    // number of consumed components, which silently skips
+                    // the next-letter slot — visible as Mongolian's calt
+                    // marker-pass leaking marker glyphs on 3+ letter
+                    // chains (#118).
+                    let span = positions.last().copied().map_or(0, |p| p + 1);
+                    let advance = 1 + span.saturating_sub(positions.len());
+                    return advance;
                 }
             }
             ParsedGsubSubtable::Context(ctx) => {

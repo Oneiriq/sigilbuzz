@@ -76,21 +76,37 @@ const CORPUS: &[Case] = &[
 ];
 
 // Multi-letter Mongolian chains (3+ dual-joining letters in a row)
-// hit a known sigilbuzz limitation in chained-context lookup
-// dispatch — the calt/rclt marker-pass that Noto Sans Mongolian
-// uses to discriminate post-letter contexts double-inserts the
-// internal marker glyph on stacks longer than one joining
-// boundary. Tracked separately so the rest of the corpus stays
-// green while the deeper fix lands. See issue tracker for the
-// follow-up.
-const KNOWN_MULTILETTER_DRIFT: &[Case] = &[
+// exercise the calt/rclt marker pass: lookups inject transient
+// `masculine` / `feminine` marker glyphs via Multiple substitution
+// inside a chained-context match, then later ligature lookups in
+// the same calt feature consume `letter + marker -> letter` to
+// remove the marker once it has driven the contextual choice. The
+// suite below asserts full glyph-stream parity with rustybuzz so
+// any drift in the marker-pass cursor walk surfaces immediately.
+const MULTILETTER_CHAINS: &[Case] = &[
     Case {
         text: "\u{1820}\u{1821}\u{1822}",
-        note: "A + E + I (3-letter chain) — drifts on calt marker pass",
+        note: "A + E + I (3-letter chain)",
     },
     Case {
         text: "\u{182A}\u{1820}\u{182D}\u{1820}",
-        note: "BA + A + GA + A (4-letter chain) — drifts on calt marker pass",
+        note: "BA + A + GA + A (4-letter chain)",
+    },
+    Case {
+        text: "\u{1820}\u{1820}\u{1820}",
+        note: "A + A + A (3-letter same-letter chain)",
+    },
+    Case {
+        text: "\u{1820}\u{1820}\u{1820}\u{1820}",
+        note: "A + A + A + A (4-letter same-letter chain)",
+    },
+    Case {
+        text: "\u{1820}\u{1821}\u{1822}\u{1823}\u{1824}",
+        note: "A + E + I + O + U (5-letter chain)",
+    },
+    Case {
+        text: "\u{1828}\u{1820}\u{182D}\u{1820}",
+        note: "NA + A + GA + A (4-letter masculine chain)",
     },
 ];
 
@@ -150,20 +166,18 @@ fn mongolian_corpus_matches_rustybuzz() {
 }
 
 #[test]
-#[ignore = "tracks calt-marker chained-context limitation; see KNOWN_MULTILETTER_DRIFT"]
-fn known_multiletter_drift_tracks_followup() {
-    // This test is `#[ignore]` by default — it documents the known
-    // multi-letter divergence so a future fix can flip it to a
-    // running parity test by removing the attribute. Until then
-    // the assertion below confirms the scope of the divergence
-    // (sigilbuzz emits one extra glyph per extra medial in the
-    // chain) without failing the suite.
+fn multiletter_chains_match_rustybuzz() {
+    // Regression coverage for #118 — sigilbuzz used to leave the
+    // transient `masculine` / `feminine` marker glyph (gid 1490 /
+    // 1491 in Noto Sans Mongolian) in the stream on every chain of
+    // three or more dual-joining letters because the apply_forward
+    // cursor over-advanced after a marker-consuming ligature.
     let blob = Blob::new(NOTO_MONGOLIAN);
     let face = Face::parse(&blob, 0).expect("parse face");
     let font = Font::new(face, 1000.0);
     let rb_face = rustybuzz::Face::from_slice(NOTO_MONGOLIAN, 0).expect("parse rustybuzz");
 
-    for case in KNOWN_MULTILETTER_DRIFT {
+    for case in MULTILETTER_CHAINS {
         let mut buffer = Buffer::new();
         buffer.set_direction(Direction::Rtl);
         buffer.push_str(case.text);
@@ -173,15 +187,35 @@ fn known_multiletter_drift_tracks_followup() {
         rb_buf.set_direction(rustybuzz::Direction::LeftToRight);
         rb_buf.push_str(case.text);
         let rb_out = rustybuzz::shape(&rb_face, &[], rb_buf);
-        // Document the exact divergence — sigilbuzz produces strictly
-        // more glyphs than rustybuzz on these inputs. Once the calt
-        // marker-pass fix lands the inequality flips to equality and
-        // this case can move into CORPUS.
-        assert!(
-            sig.len() >= rb_out.glyph_infos().len(),
-            "{}: sigilbuzz should emit at least as many glyphs as rustybuzz",
-            case.note
+        let rb_infos = rb_out.glyph_infos();
+        let rb_positions = rb_out.glyph_positions();
+
+        assert_eq!(
+            sig.len(),
+            rb_infos.len(),
+            "glyph count diverged for {} ({:?}): sigilbuzz={} rustybuzz={}",
+            case.note,
+            case.text,
+            sig.len(),
+            rb_infos.len()
         );
+        for (i, (sig_g, (rb_info, rb_pos))) in sig
+            .glyphs
+            .iter()
+            .zip(rb_infos.iter().zip(rb_positions.iter()))
+            .enumerate()
+        {
+            assert_eq!(
+                sig_g.glyph_id, rb_info.glyph_id,
+                "glyph id mismatch at position {i} of {} ({:?}): sigilbuzz={} rustybuzz={}",
+                case.note, case.text, sig_g.glyph_id, rb_info.glyph_id
+            );
+            assert_eq!(
+                sig_g.x_advance, rb_pos.x_advance,
+                "x_advance mismatch at position {i} of {} ({:?}): sigilbuzz={} rustybuzz={}",
+                case.note, case.text, sig_g.x_advance, rb_pos.x_advance
+            );
+        }
     }
 }
 
