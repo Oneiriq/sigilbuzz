@@ -520,8 +520,7 @@ impl<'a> Iterator for CoverageIter<'a> {
                     }
                     let start = u16::from_be_bytes([self.bytes[off], self.bytes[off + 1]]);
                     let end = u16::from_be_bytes([self.bytes[off + 2], self.bytes[off + 3]]);
-                    let start_cov =
-                        u16::from_be_bytes([self.bytes[off + 4], self.bytes[off + 5]]);
+                    let start_cov = u16::from_be_bytes([self.bytes[off + 4], self.bytes[off + 5]]);
                     let span = end.saturating_sub(start);
                     if self.range_offset > span {
                         self.range_idx += 1;
@@ -871,12 +870,8 @@ fn read_uint32var(data: &[u8], off: usize) -> Option<(u32, usize)> {
             if off + 5 > data.len() {
                 return None;
             }
-            let v = u32::from_be_bytes([
-                data[off + 1],
-                data[off + 2],
-                data[off + 3],
-                data[off + 4],
-            ]);
+            let v =
+                u32::from_be_bytes([data[off + 1], data[off + 2], data[off + 3], data[off + 4]]);
             Some((v, off + 5))
         }
     }
@@ -900,7 +895,12 @@ fn rewrite_component_gids(
                 let new_gid = new_gid_for(info.gid).ok_or(SubsetError::Unsupported(
                     "VARC component gid not in kept set",
                 ))?;
-                splices.push((info.gid_range.0, info.gid_range.1, new_gid, info.gid_is_24bit));
+                splices.push((
+                    info.gid_range.0,
+                    info.gid_range.1,
+                    new_gid,
+                    info.gid_is_24bit,
+                ));
                 if next <= cursor {
                     break;
                 }
