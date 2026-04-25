@@ -48,7 +48,7 @@ pub mod unicode;
 pub use blob::Blob;
 pub use buffer::{Buffer, Direction, Glyph};
 pub use error::{Error, Result};
-pub use face::Face;
+pub use face::{Face, GlyphBitmapEntry};
 pub use font::Font;
 pub use shape::{shape, Feature};
 
