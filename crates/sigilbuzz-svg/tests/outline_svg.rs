@@ -32,11 +32,17 @@ fn ascii_glyph_round_trips_to_svg() {
     for ch in ['A', 'g', 'O'] {
         let gid = gid_for(&face, ch);
         let svg = glyph_to_svg(&face, gid).unwrap_or_else(|| panic!("svg for {ch}"));
-        assert!(svg.starts_with("<svg "), "missing <svg prefix for {ch}: {svg}");
+        assert!(
+            svg.starts_with("<svg "),
+            "missing <svg prefix for {ch}: {svg}"
+        );
         assert!(svg.ends_with("</svg>"), "missing </svg> tail for {ch}");
         // Exactly one path element with a d="..." attribute.
         let path_count = svg.matches("<path ").count();
-        assert_eq!(path_count, 1, "expected exactly one <path> for {ch}, got {path_count}");
+        assert_eq!(
+            path_count, 1,
+            "expected exactly one <path> for {ch}, got {path_count}"
+        );
         let d_count = svg.matches(" d=\"").count();
         assert_eq!(d_count, 1, "expected exactly one d=\"\" for {ch}");
         // Path data starts with a MoveTo command.

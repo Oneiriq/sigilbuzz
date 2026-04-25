@@ -34,7 +34,7 @@ use sigilbuzz_paint::{
     PaintSource, Transform2D,
 };
 
-use crate::{path_bbox, path_data, push_num, GlyphId, F2Dot14, VIEWBOX_MARGIN};
+use crate::{path_bbox, path_data, push_num, F2Dot14, GlyphId, VIEWBOX_MARGIN};
 
 /// Emits a complete `<svg>` document for `gid`'s COLRv1 color glyph.
 ///
@@ -69,11 +69,7 @@ pub fn glyph_to_svg_color_at_coords(
 // Render pipeline
 // =========================================================================
 
-fn render_color_svg(
-    face: &Face<'_>,
-    cmds: &[DrawCmd],
-    coords: &[F2Dot14],
-) -> Option<String> {
+fn render_color_svg(face: &Face<'_>, cmds: &[DrawCmd], coords: &[F2Dot14]) -> Option<String> {
     // First pass: collect every (gid, transform) referenced by a
     // FillGlyph so we can size the viewBox to the union of their
     // transformed bounding boxes. Glyphs without an outline are
@@ -81,10 +77,7 @@ fn render_color_svg(
     let mut bbox: Option<(f32, f32, f32, f32)> = None;
     let mut leaves: Vec<LeafGeometry> = Vec::new();
     for cmd in cmds {
-        if let DrawCmd::FillGlyph {
-            gid, transform, ..
-        } = cmd
-        {
+        if let DrawCmd::FillGlyph { gid, transform, .. } = cmd {
             let outline = face.glyph_outline_at_coords(*gid, coords).ok().flatten();
             let Some(outline) = outline else {
                 continue;
@@ -441,10 +434,7 @@ fn project_bbox(t: Transform2D, b: (f32, f32, f32, f32)) -> (f32, f32, f32, f32)
     (mnx, mny, mxx, mxy)
 }
 
-fn union_bbox(
-    a: Option<(f32, f32, f32, f32)>,
-    b: (f32, f32, f32, f32),
-) -> (f32, f32, f32, f32) {
+fn union_bbox(a: Option<(f32, f32, f32, f32)>, b: (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
     match a {
         None => b,
         Some(a) => (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)),

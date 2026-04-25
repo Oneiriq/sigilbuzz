@@ -103,11 +103,7 @@ pub fn glyph_to_svg(face: &Face<'_>, gid: GlyphId) -> Option<String> {
 /// normalized axis vector — pass an empty slice for the static
 /// outline (equivalent to [`glyph_to_svg`]).
 #[must_use]
-pub fn glyph_to_svg_at_coords(
-    face: &Face<'_>,
-    gid: GlyphId,
-    coords: &[F2Dot14],
-) -> Option<String> {
+pub fn glyph_to_svg_at_coords(face: &Face<'_>, gid: GlyphId, coords: &[F2Dot14]) -> Option<String> {
     let outline = face.glyph_outline_at_coords(gid, coords).ok().flatten()?;
     if outline.is_empty() {
         return None;
