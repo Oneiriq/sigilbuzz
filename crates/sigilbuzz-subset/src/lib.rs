@@ -43,16 +43,22 @@
 //!   [`emit_coverage_from_glyphs`], and [`emit_coverage_from_pairs`]
 //!   helpers in this crate are the building blocks that rewriter will
 //!   use.
+//! - **Variable-font tables**: `fvar` and `avar` are passed through
+//!   verbatim (axis-keyed, never glyph-keyed); `gvar` is rebuilt with
+//!   one entry per kept gid; `HVAR` is rebuilt around a fresh
+//!   `DeltaSetIndexMap` plus a deduped `ItemVariationStore`. Set
+//!   [`SubsetInput::retain_variations`] to `false` to drop them all
+//!   and produce a static-instance subset (matches the 0.5.0
+//!   baseline).
 //! - **Dropped** (when [`SubsetInput::drop_unhandled`] is true, the
-//!   default): `kern`, `vhea`, `vmtx`, `VORG`, `HVAR`, `gvar`, `COLR`,
-//!   `CPAL`, `morx`, `kerx`, `fvar`, `avar`. When the flag is false,
-//!   encountering any of these surfaces a [`SubsetError::Unsupported`]
-//!   result.
+//!   default): `kern`, `vhea`, `vmtx`, `VORG`, `COLR`, `CPAL`,
+//!   `morx`, `kerx`. When the flag is false, encountering any of
+//!   these surfaces a [`SubsetError::Unsupported`] result.
 //! - **Errors cleanly**: `CFF` / `CFF2` (subroutine renumbering is
 //!   significantly more involved and lands in a future release).
 //!
-//! Variable-font subsetting (`gvar` / `HVAR`), CFF subsetting, and
-//! non-identity GSUB / GPOS / GDEF rewriting remain on the agenda.
+//! CFF subsetting and non-identity GSUB / GPOS / GDEF rewriting
+//! remain on the agenda.
 //!
 //! # Quick start
 //!
@@ -67,6 +73,7 @@
 //!     retain_hints: false,
 //!     drop_unhandled: true,
 //!     retain_layout: true,
+//!     retain_variations: true,
 //! };
 //! let out = subset(&face, &input).unwrap();
 //! std::fs::write("./MyFont.subset.ttf", &out.bytes).unwrap();
@@ -89,17 +96,22 @@ use alloc::vec::Vec;
 use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
+mod avar;
 mod cff;
 mod cff2;
 mod classdef;
 mod closure;
 mod cmap;
 mod coverage;
+mod fvar;
 mod glyf;
+mod gvar;
 mod hmtx;
+mod hvar;
 mod layout;
 mod sfnt;
 mod util;
+mod variation_store;
 
 pub use cff::{
     compute_kept_subrs, encode_int_operand, scan_subr_calls, subr_bias, SubrCall, SubrKind,
@@ -138,6 +150,16 @@ pub struct SubsetInput {
     /// free subset (e.g. embedded PDF font streams) should set this
     /// to false.
     pub retain_layout: bool,
+    /// If true (the default), retain variable-font tables (`fvar`,
+    /// `avar`, `gvar`, `HVAR`) so the resulting subset still varies
+    /// under axis coordinates. `fvar` and `avar` are passed through
+    /// verbatim; `gvar` is rebuilt with one entry per kept gid;
+    /// `HVAR` is rebuilt around a fresh `DeltaSetIndexMap` plus a
+    /// deduped `ItemVariationStore`. When false, every variable-font
+    /// table is dropped, matching the 0.5.0 baseline — the resulting
+    /// subset behaves as a static font pinned to the source's default
+    /// instance.
+    pub retain_variations: bool,
 }
 
 impl Default for SubsetInput {
@@ -147,6 +169,7 @@ impl Default for SubsetInput {
             retain_hints: false,
             drop_unhandled: true,
             retain_layout: true,
+            retain_variations: true,
         }
     }
 }
@@ -349,6 +372,25 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         tables.push((tag::GPOS, bytes.to_vec()));
     }
 
+    // Variable-font tables. fvar/avar pass through verbatim;
+    // gvar/HVAR are rebuilt around the new gid namespace. When
+    // `retain_variations` is false we drop them all and the subset
+    // becomes a static-instance font.
+    if input.retain_variations {
+        if let Some(b) = fvar::subset_fvar(face)? {
+            tables.push((tag::FVAR, b));
+        }
+        if let Some(b) = avar::subset_avar(face)? {
+            tables.push((tag::AVAR, b));
+        }
+        if let Some(b) = gvar::subset_gvar(face, &kept)? {
+            tables.push((tag::GVAR, b));
+        }
+        if let Some(b) = hvar::subset_hvar(face, &kept)? {
+            tables.push((tag::HVAR, b));
+        }
+    }
+
     // Walk every other table the source carries and decide.
     for rec in face.records() {
         // Skip tables we already emitted.
@@ -361,13 +403,18 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         if matches!(rec.tag, tag::GSUB | tag::GPOS | tag::GDEF) {
             continue;
         }
+        // Variable-font tables hit the retain_variations branch
+        // above; when retain_variations=false the drop is
+        // intentional.
+        if matches!(rec.tag, tag::FVAR | tag::AVAR | tag::GVAR | tag::HVAR) {
+            continue;
+        }
         // Source tables we already errored on (CFF/CFF2) cannot
         // appear here — we returned early above.
         if !input.drop_unhandled {
             // Strict mode: any table without an implementation aborts.
-            // kern / vhea / vmtx / VORG / HVAR / gvar / COLR / CPAL /
-            // morx / kerx / fvar / avar — none of these are
-            // subset-aware in 0.6.0 either.
+            // kern / vhea / vmtx / VORG / COLR / CPAL / morx / kerx —
+            // none of these are subset-aware in 0.6.0 either.
             return Err(SubsetError::Unsupported(
                 "table not yet handled by sigilbuzz-subset; pass drop_unhandled=true",
             ));
@@ -396,6 +443,7 @@ mod tests {
         assert!(i.drop_unhandled);
         assert!(!i.retain_hints);
         assert!(i.retain_layout);
+        assert!(i.retain_variations);
         assert!(i.gids.is_empty());
     }
 

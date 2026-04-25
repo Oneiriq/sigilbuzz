@@ -38,6 +38,7 @@ fn retain_layout_false_drops_gsub_gpos_gdef() {
         retain_hints: false,
         drop_unhandled: true,
         retain_layout: false,
+        retain_variations: false,
     };
     let out = subset(&face, &input).unwrap();
     let blob = Blob::from_vec(out.bytes);
@@ -61,6 +62,7 @@ fn retain_layout_true_with_proper_subset_drops_layout_tables() {
         retain_hints: false,
         drop_unhandled: true,
         retain_layout: true,
+        retain_variations: false,
     };
     let out = subset(&face, &input).unwrap();
     let blob = Blob::from_vec(out.bytes);
@@ -83,6 +85,7 @@ fn retain_layout_true_with_identity_kept_set_preserves_layout_tables() {
         retain_hints: false,
         drop_unhandled: true,
         retain_layout: true,
+        retain_variations: false,
     };
     let out = subset(&face, &input).unwrap();
     let blob = Blob::from_vec(out.bytes);
