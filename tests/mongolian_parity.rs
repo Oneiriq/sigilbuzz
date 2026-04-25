@@ -92,6 +92,22 @@ const MULTILETTER_CHAINS: &[Case] = &[
         text: "\u{182A}\u{1820}\u{182D}\u{1820}",
         note: "BA + A + GA + A (4-letter chain)",
     },
+    Case {
+        text: "\u{1820}\u{1820}\u{1820}",
+        note: "A + A + A (3-letter same-letter chain)",
+    },
+    Case {
+        text: "\u{1820}\u{1820}\u{1820}\u{1820}",
+        note: "A + A + A + A (4-letter same-letter chain)",
+    },
+    Case {
+        text: "\u{1820}\u{1821}\u{1822}\u{1823}\u{1824}",
+        note: "A + E + I + O + U (5-letter chain)",
+    },
+    Case {
+        text: "\u{1828}\u{1820}\u{182D}\u{1820}",
+        note: "NA + A + GA + A (4-letter masculine chain)",
+    },
 ];
 
 #[test]
