@@ -128,6 +128,48 @@ fn parse_field<'a>(line: &'a str, key: &str) -> &'a str {
 }
 
 #[test]
+fn binary_advertises_every_subcommand_in_help() {
+    let (stdout, _stderr, ok) = run_cli(["--help"]);
+    assert!(ok, "help should always succeed");
+    for sub in [
+        "shape", "subset", "paint", "slug", "woff", "pdf", "svg", "info",
+    ] {
+        assert!(stdout.contains(sub), "help missing subcommand '{sub}': {stdout}");
+    }
+}
+
+#[test]
+fn binary_reports_version() {
+    let (stdout, _stderr, ok) = run_cli(["--version"]);
+    assert!(ok);
+    assert!(stdout.contains("sigilbuzz"), "version line: {stdout}");
+}
+
+#[test]
+fn subset_then_shape_round_trip() {
+    // End-to-end: subset down to .notdef + 'H' + 'i', then shape "Hi"
+    // against the subset and confirm it produces two glyphs.
+    let font = open_sans_path();
+    let sub = write_tempfile("e2e_subset.ttf", b"");
+    let (_so, stderr, ok) = run_cli([
+        "subset".as_ref(),
+        font.as_os_str(),
+        sub.as_os_str(),
+        "--unicodes".as_ref(),
+        "H,i".as_ref(),
+    ]);
+    assert!(ok, "subset failed: stderr={stderr}");
+    let (stdout, stderr, ok) = run_cli([
+        "shape".as_ref(),
+        sub.as_os_str(),
+        "Hi".as_ref(),
+    ]);
+    assert!(ok, "shape on subset failed: stderr={stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "expected 2 glyphs after subset round-trip: {stdout}");
+}
+
+#[test]
 fn subset_writes_smaller_font_for_gid_list() {
     let font = open_sans_path();
     let out = write_tempfile("subset.ttf", b"");

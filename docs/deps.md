@@ -41,3 +41,32 @@ The bar:
   crate. The decompressor API (`brotli::BrotliDecompress`) is
   re-exported and behaves identically to the standalone crate; the
   switch is API-compatible for `unwrap_woff2` callers.
+
+## `clap` (in `sigilbuzz-cli`)
+
+- **Version:** `4.x`, with the `derive` feature.
+- **License:** MIT / Apache-2.0 (dual).
+- **Where:** `crates/sigilbuzz-cli/Cargo.toml` only. Never appears in
+  any library crate's dep closure — `sigilbuzz-cli` is a binary-only
+  crate (`[[bin]]` with no `[lib]`) so consumers of the library
+  surface (`sigilbuzz`, `sigilbuzz-subset`, …) never link against it.
+- **Why:** the CLI exposes eight subcommands with rich argument
+  shapes (range parsing, comma lists, sub-subcommands for `woff` and
+  `pdf`). A from-scratch parser would be roughly the size of the
+  rest of the binary, and clap's `derive` feature collapses the
+  argument schema to one struct per subcommand — the same pattern
+  every Rust CLI in the ecosystem uses (`cargo`, `rustup`,
+  `ripgrep`, …). It is the canonical choice for argument parsing in
+  Rust and there is no in-house alternative that would carry its
+  weight.
+- **Transitive footprint:** `clap_builder`, `clap_derive`,
+  `clap_lex`, `anstream`, `anstyle*`, `colorchoice`, `strsim`,
+  `heck`, `is_terminal_polyfill`, `once_cell_polyfill`,
+  `utf8parse`. All MIT / Apache-2.0 dual-licensed, all maintained
+  by the clap-rs org. None of them propagate into any sigilbuzz
+  *library* crate; they are entirely scoped to the binary.
+- **Cargo feature gating:** the `derive` feature is the one we
+  rely on (every subcommand is a `#[derive(Args)]` struct). Other
+  clap features (`color`, `cargo`, `env`, `unicode`) stay at their
+  defaults — none of them push extra deps into the closure beyond
+  the listed transitive set.
