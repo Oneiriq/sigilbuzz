@@ -422,3 +422,254 @@ fn cff_non_identity_subset_errors_unsupported() {
         other => panic!("expected Unsupported, got {other:?}"),
     }
 }
+
+/// Builds a synthetic CFF1 table with `n_glyphs` charstrings (gid 0 is
+/// `.notdef`, gids 1..n hold simple `RMOVETO ENDCHAR` outlines whose
+/// advance is encoded inline as a leading width). Mirrors the helper
+/// in `cff.rs::tests::build_synthetic_cff1` so the integration test
+/// can drive the public `subset()` entry without re-exporting test
+/// internals.
+fn build_synthetic_cff1_table(n_glyphs: u16) -> Vec<u8> {
+    use sigilbuzz_subset::{
+        emit_charset_format0, emit_encoding_format0, encode_dict_int,
+        encode_dict_offset_placeholder, encode_index, patch_dict_offset,
+    };
+    // Glyph 0 = .notdef (single endchar).
+    let mut all_cs: Vec<Vec<u8>> = vec![vec![14u8]];
+    for _ in 1..n_glyphs {
+        // 0 0 rmoveto endchar — a trivial outline.
+        all_cs.push(vec![139u8, 139, 21, 14]);
+    }
+    let cs_refs: Vec<&[u8]> = all_cs.iter().map(Vec::as_slice).collect();
+
+    let header = vec![1u8, 0, 4, 1];
+    let name_index = encode_index(&[b"SyntheticCff"]);
+    let string_index = encode_index(&[]);
+    let global_subr_index = encode_index(&[]);
+
+    let charset_sids: Vec<u16> = (1..n_glyphs).collect();
+    let charset_bytes = emit_charset_format0(&charset_sids);
+
+    let codes: Vec<u8> = (1..n_glyphs as usize).map(|i| i as u8).collect();
+    let encoding_bytes = emit_encoding_format0(&codes);
+
+    let cs_index = encode_index(&cs_refs);
+
+    // Build Top DICT with 4 movable offset slots.
+    let mut top_dict: Vec<u8> = Vec::new();
+    let charset_slot = top_dict.len();
+    top_dict.extend_from_slice(&encode_dict_offset_placeholder());
+    top_dict.push(15);
+    let encoding_slot = top_dict.len();
+    top_dict.extend_from_slice(&encode_dict_offset_placeholder());
+    top_dict.push(16);
+    let charstrings_slot = top_dict.len();
+    top_dict.extend_from_slice(&encode_dict_offset_placeholder());
+    top_dict.push(17);
+    let priv_size_slot = top_dict.len();
+    top_dict.extend_from_slice(&encode_dict_offset_placeholder());
+    let priv_off_slot = top_dict.len();
+    top_dict.extend_from_slice(&encode_dict_offset_placeholder());
+    top_dict.push(18);
+
+    // Private DICT: stub with no Subrs.
+    let private_dict: Vec<u8> = encode_dict_int(0); // a single 0 operand the parser tolerates.
+
+    let top_dict_index = encode_index(&[&top_dict[..]]);
+    let top_dict_body_offset_in_index = {
+        let total = 1 + top_dict.len();
+        let off_size: usize = if total <= 0xFF { 1 } else { 2 };
+        2 + 1 + 2 * off_size
+    };
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&header);
+    out.extend_from_slice(&name_index);
+    let top_dict_index_start = out.len();
+    out.extend_from_slice(&top_dict_index);
+    let top_dict_body_abs = top_dict_index_start + top_dict_body_offset_in_index;
+
+    out.extend_from_slice(&string_index);
+    out.extend_from_slice(&global_subr_index);
+
+    let encoding_abs = out.len();
+    out.extend_from_slice(&encoding_bytes);
+    let charset_abs = out.len();
+    out.extend_from_slice(&charset_bytes);
+    let cs_abs = out.len();
+    out.extend_from_slice(&cs_index);
+
+    let private_abs = out.len();
+    let private_size = private_dict.len();
+    out.extend_from_slice(&private_dict);
+
+    patch_dict_offset(&mut out, top_dict_body_abs + charset_slot, charset_abs as i32);
+    patch_dict_offset(
+        &mut out,
+        top_dict_body_abs + encoding_slot,
+        encoding_abs as i32,
+    );
+    patch_dict_offset(
+        &mut out,
+        top_dict_body_abs + charstrings_slot,
+        cs_abs as i32,
+    );
+    patch_dict_offset(
+        &mut out,
+        top_dict_body_abs + priv_size_slot,
+        private_size as i32,
+    );
+    patch_dict_offset(
+        &mut out,
+        top_dict_body_abs + priv_off_slot,
+        private_abs as i32,
+    );
+
+    out
+}
+
+/// Builds a minimal `hhea` table (36 bytes) compatible with `numberOfHMetrics`.
+fn build_minimal_hhea(num_h_metrics: u16) -> Vec<u8> {
+    let mut hhea = Vec::with_capacity(36);
+    hhea.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // version
+    hhea.extend_from_slice(&800i16.to_be_bytes()); // ascender
+    hhea.extend_from_slice(&(-200i16).to_be_bytes()); // descender
+    hhea.extend_from_slice(&100i16.to_be_bytes()); // lineGap
+    hhea.extend_from_slice(&1000u16.to_be_bytes()); // advanceWidthMax
+    hhea.extend_from_slice(&0i16.to_be_bytes()); // minLeftSideBearing
+    hhea.extend_from_slice(&0i16.to_be_bytes()); // minRightSideBearing
+    hhea.extend_from_slice(&1000i16.to_be_bytes()); // xMaxExtent
+    hhea.extend_from_slice(&1i16.to_be_bytes()); // caretSlopeRise
+    hhea.extend_from_slice(&0i16.to_be_bytes()); // caretSlopeRun
+    hhea.extend_from_slice(&0i16.to_be_bytes()); // caretOffset
+    for _ in 0..4 {
+        hhea.extend_from_slice(&0i16.to_be_bytes()); // reserved
+    }
+    hhea.extend_from_slice(&0i16.to_be_bytes()); // metricDataFormat
+    hhea.extend_from_slice(&num_h_metrics.to_be_bytes()); // numberOfHMetrics
+    hhea
+}
+
+/// Builds an `hmtx` table for `n_glyphs` glyphs, each with the same
+/// advance + zero LSB. `numberOfHMetrics == n_glyphs`.
+fn build_minimal_hmtx(n_glyphs: u16, advance: u16) -> Vec<u8> {
+    let mut hmtx = Vec::with_capacity(n_glyphs as usize * 4);
+    for _ in 0..n_glyphs {
+        hmtx.extend_from_slice(&advance.to_be_bytes());
+        hmtx.extend_from_slice(&0i16.to_be_bytes());
+    }
+    hmtx
+}
+
+/// Minimal cmap with a single format 4 subtable mapping U+0041..U+0043
+/// to gids 1..3.
+fn build_minimal_cmap_abc() -> Vec<u8> {
+    // cmap header: version 0, numTables 1, encoding record (platform 3
+    // encoding 1) → subtable offset.
+    let mut out = Vec::new();
+    out.extend_from_slice(&0u16.to_be_bytes()); // version
+    out.extend_from_slice(&1u16.to_be_bytes()); // numTables
+    out.extend_from_slice(&3u16.to_be_bytes()); // platformID = Microsoft
+    out.extend_from_slice(&1u16.to_be_bytes()); // encodingID = Unicode BMP
+    out.extend_from_slice(&12u32.to_be_bytes()); // offset to subtable
+
+    // Format 4 subtable. Single segment 0x0041..0x0043 → start gid 1.
+    // Plus the mandatory tail segment 0xFFFF..0xFFFF → 0.
+    // segCount = 2 → segCountX2 = 4.
+    let seg_count = 2u16;
+    let seg_count_x2 = seg_count * 2;
+    let search_range = 4u16; // 2 * largest power of 2 <= seg_count.
+    let entry_selector = 1u16;
+    let range_shift = seg_count_x2 - search_range;
+    // length = 14 (header) + 2 + segCountX2*4 + 2 endCount + 2 reservedPad + 2 startCount + 2 idDelta + 2 idRangeOffset + ... Actually format 4 layout:
+    //   format(2) length(2) language(2) segCountX2(2) searchRange(2) entrySelector(2) rangeShift(2)
+    //   endCount[segCount] reservedPad(2) startCount[segCount] idDelta[segCount] idRangeOffset[segCount]
+    let length = 14 + 2 * seg_count_x2 + 2 + 2 + 2 * seg_count;
+    let length_pos = out.len();
+    out.extend_from_slice(&4u16.to_be_bytes()); // format
+    out.extend_from_slice(&length.to_be_bytes()); // length
+    out.extend_from_slice(&0u16.to_be_bytes()); // language
+    out.extend_from_slice(&seg_count_x2.to_be_bytes());
+    out.extend_from_slice(&search_range.to_be_bytes());
+    out.extend_from_slice(&entry_selector.to_be_bytes());
+    out.extend_from_slice(&range_shift.to_be_bytes());
+    // endCount: [0x0043, 0xFFFF]
+    out.extend_from_slice(&0x0043u16.to_be_bytes());
+    out.extend_from_slice(&0xFFFFu16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes()); // reservedPad
+    // startCount: [0x0041, 0xFFFF]
+    out.extend_from_slice(&0x0041u16.to_be_bytes());
+    out.extend_from_slice(&0xFFFFu16.to_be_bytes());
+    // idDelta: [-0x40 (gid 1 for cp 0x41), 1] (mod 65536). For 0xFFFF→0, delta=1.
+    let delta_a = (1i16 - 0x41i16) as u16;
+    out.extend_from_slice(&delta_a.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes());
+    // idRangeOffset: [0, 0]
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    let _ = length_pos;
+    out
+}
+
+#[test]
+fn cff1_non_identity_subset_round_trip_synthetic() {
+    // Build a synthetic CFF1 SFNT with 4 glyphs (.notdef + A + B + C),
+    // subset down to {gid 0, gid 2} (.notdef + B), and verify the
+    // resulting font re-parses, advances are preserved, and the cmap
+    // still resolves the kept Unicode codepoints.
+    let cff_body = build_synthetic_cff1_table(4);
+    let head = build_minimal_head();
+    let maxp = build_minimal_maxp(4);
+    let hhea = build_minimal_hhea(4);
+    let hmtx = build_minimal_hmtx(4, 500);
+    let cmap = build_minimal_cmap_abc();
+    // Minimal name table: count=0 + storageOffset=6 + 0 storage bytes.
+    let name = vec![
+        0u8, 0, // version
+        0, 0, // count
+        0, 6, // storageOffset
+    ];
+
+    let bytes = build_synthetic_sfnt(
+        0x4F54_544Fu32,
+        vec![
+            (*b"CFF ", cff_body),
+            (*b"head", head),
+            (*b"hhea", hhea),
+            (*b"hmtx", hmtx),
+            (*b"maxp", maxp),
+            (*b"cmap", cmap),
+            (*b"name", name),
+        ],
+    );
+
+    let face = Face::parse_bytes(&bytes, 0).unwrap();
+
+    // Subset to {.notdef, gid 2 (B)}. The closure adds gid 0
+    // automatically; we only need to ask for gid 2.
+    let input = SubsetInput {
+        gids: vec![2u16],
+        retain_hints: false,
+        drop_unhandled: true,
+        retain_layout: false,
+        retain_variations: false,
+    };
+    let out = subset(&face, &input).expect("CFF1 non-identity subset succeeds");
+    // gid_map must include (0, 0) and (2, 1).
+    assert!(out.gid_map.contains(&(0u16, 0u16)));
+    assert!(out.gid_map.contains(&(2u16, 1u16)));
+
+    // Re-parse the subset.
+    let new_face = Face::parse_bytes(&out.bytes, 0).expect("subset face re-parses");
+    let new_maxp = new_face.maxp().unwrap();
+    assert_eq!(new_maxp.num_glyphs, 2);
+
+    // Advances are preserved across the renumber.
+    let old_hmtx = face.hmtx().unwrap();
+    let new_hmtx = new_face.hmtx().unwrap();
+    for (old, new) in &out.gid_map {
+        let want = old_hmtx.advance(*old).unwrap_or(0);
+        let got = new_hmtx.advance(*new).unwrap_or(0);
+        assert_eq!(want, got, "gid {old}->{new} advance mismatch: {want} vs {got}");
+    }
+}

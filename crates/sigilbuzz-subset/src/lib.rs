@@ -54,13 +54,17 @@
 //!   dropped any source glyph (kept set == `0..num_glyphs`) the CFF /
 //!   CFF2 table and its dependencies are preserved verbatim and the
 //!   surrounding sfnt directory is rebuilt around them. Non-identity
-//!   CFF subsetting (CharStrings INDEX rebuild, Subr renumber via
-//!   bias-adjusted operand rewrite, Top DICT deferred-offset patching,
-//!   charset / Encoding format auto-pick, Private DICT relocation) is
-//!   staged for a future release; the byte-level emitter primitives
+//!   CFF1 subsetting is implemented for non-CID (single Private DICT)
+//!   fonts: CharStrings INDEX rebuild, Subr renumber via bias-adjusted
+//!   operand rewrite, Top DICT deferred-offset patching, charset /
+//!   Encoding format auto-pick, Private DICT relocation. CID-keyed
+//!   CFF1 (FDArray + FDSelect) and CFF2 non-identity subsetting still
+//!   surface [`SubsetError::Unsupported`] — those flows are staged
+//!   for the same follow-up that lands the FDArray INDEX rebuild +
+//!   FDSelect rewrite. The byte-level emitter primitives
 //!   ([`encode_index`], [`encode_dict_int`], [`emit_charset_auto`],
-//!   [`emit_encoding_auto`], [`renumber_charstring`]) ship with this
-//!   release as the substrate the follow-up rewriter will consume.
+//!   [`emit_encoding_auto`], [`renumber_charstring`]) are public so
+//!   downstream tooling can drive the same rewrite pieces directly.
 //! - **Dropped** (when [`SubsetInput::drop_unhandled`] is true, the
 //!   default): `kern`, `vhea`, `vmtx`, `VORG`, `COLR`, `CPAL`,
 //!   `morx`, `kerx`. When the flag is false, encountering any of
@@ -131,6 +135,7 @@ pub use cff::{
     encode_dict_offset_placeholder, encode_index, encode_int_operand, patch_dict_offset,
     renumber_charstring, renumber_subr_call, scan_subr_calls, subr_bias, SubrCall, SubrKind,
 };
+pub use cff::subset_non_identity as subset_cff1_non_identity;
 pub use classdef::emit_classdef;
 pub use closure::compute_closure;
 pub use coverage::{emit_coverage_from_glyphs, emit_coverage_from_pairs};
@@ -300,8 +305,13 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         if identity {
             return cff_passthrough(face, &kept, has_cff1);
         }
+        if has_cff1 {
+            return cff_non_identity(face, &kept);
+        }
+        // CFF2 non-identity is staged for the follow-up that lands the
+        // FDArray rebuild + FDSelect rewrite shared with CID-keyed CFF1.
         return Err(SubsetError::Unsupported(
-            "CFF / CFF2 non-identity subset staged for follow-up; emitter primitives in cff module",
+            "CFF2 non-identity subset staged for follow-up; CFF1 non-CID flow is implemented",
         ));
     }
 
@@ -479,6 +489,76 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
     // Build the new font.
     let bytes = sfnt::build(face.sfnt_version(), &tables);
 
+    Ok(SubsetOutput {
+        bytes,
+        gid_map: gid_map.into_iter().collect(),
+    })
+}
+
+/// CFF1 non-identity orchestration.
+///
+/// Wires the [`cff::subset_non_identity`] table rewriter into a fresh
+/// SFNT directory: every other table is either passed through verbatim
+/// (when its bytes don't carry gid-keyed data — e.g. `name`, `head`)
+/// or rebuilt against the new gid namespace (`cmap`, `hmtx` / `hhea`,
+/// `maxp`, `post`).
+///
+/// Variable-font tables (`fvar`, `avar`, `gvar`, `HVAR`) and layout
+/// tables (`GSUB` / `GPOS` / `GDEF`) are dropped on the non-identity
+/// path — CFF1 fonts rarely carry them, and a follow-up wires the
+/// existing rewriters in once the orchestration baseline lands.
+fn cff_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, SubsetError> {
+    // Build the gid_map.
+    let mut gid_map: Vec<(GlyphId, GlyphId)> = kept
+        .iter()
+        .enumerate()
+        .map(|(new, &old)| (old, new as u16))
+        .collect();
+    gid_map.sort_by_key(|(old, _)| *old);
+    let new_num_glyphs = kept.len() as u16;
+
+    // Rebuild the CFF table.
+    let cff_bytes = face.table_bytes(tag::CFF1).map_err(SubsetError::from)?;
+    let new_cff = cff::subset_non_identity(cff_bytes, kept)?;
+
+    // Rebuild the directly-rewritable tables that ride alongside the CFF.
+    let head_bytes = face.table_bytes(tag::HEAD).map_err(SubsetError::from)?;
+    let head_out = head_bytes.to_vec();
+
+    let cmap_out = cmap::subset_cmap(face, &gid_map)?;
+    let hmtx_out = hmtx::subset_hmtx(face, kept)?;
+
+    let hhea_bytes = face.table_bytes(tag::HHEA).map_err(SubsetError::from)?;
+    let mut hhea_out = hhea_bytes.to_vec();
+    util::write_hhea_metrics_count(&mut hhea_out, hmtx_out.number_of_h_metrics)?;
+
+    let maxp_bytes = face.table_bytes(tag::MAXP).map_err(SubsetError::from)?;
+    let mut maxp_out = maxp_bytes.to_vec();
+    util::write_maxp_num_glyphs(&mut maxp_out, new_num_glyphs)?;
+
+    let post_out = util::synthesize_post_format_3(face)?;
+
+    let name_out = face
+        .table_bytes(tag::NAME)
+        .map(|b| b.to_vec())
+        .map_err(SubsetError::from)?;
+    let os2_out = face.table_bytes(*b"OS/2").ok().map(<[u8]>::to_vec);
+
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = alloc::vec![
+        (tag::HEAD, head_out),
+        (tag::HHEA, hhea_out),
+        (tag::MAXP, maxp_out),
+        (tag::HMTX, hmtx_out.bytes),
+        (tag::CMAP, cmap_out),
+        (tag::NAME, name_out),
+        (tag::POST, post_out),
+        (tag::CFF1, new_cff),
+    ];
+    if let Some(os2) = os2_out {
+        tables.push((*b"OS/2", os2));
+    }
+
+    let bytes = sfnt::build(face.sfnt_version(), &tables);
     Ok(SubsetOutput {
         bytes,
         gid_map: gid_map.into_iter().collect(),
