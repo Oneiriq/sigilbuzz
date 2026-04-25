@@ -34,6 +34,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::tag;
+use sigilbuzz::tables::Varc;
 use sigilbuzz::Face;
 
 use crate::{GlyphId, SubsetError};
@@ -150,11 +151,197 @@ pub(crate) fn varc_closure_bitset(face: &Face<'_>, keep: &mut [bool]) {
     }
 }
 
-/// Internal lightweight parse of a VARC table — just enough to enumerate
-/// coverage entries and glyph records. The full subset emit (commit
-/// follow-up) layers Coverage rewrite + record-renumber on top of this.
+/// Subsets a VARC table.
+///
+/// Drops coverage entries whose gid is not in `kept_gids`, renumbers
+/// surviving entries per `new_gid_for`, and rewrites every component
+/// record so its referenced gid maps to the new namespace. Returns the
+/// new VARC bytes, or `Ok(None)` when no covered gid survives (in which
+/// case the caller should omit the table from the output entirely).
+///
+/// The MultiVarStore, ConditionList, and AxisIndicesList are preserved
+/// verbatim — pruning their entries when component references drop is a
+/// future follow-up.
+pub(crate) fn subset_varc(
+    src_varc: &Varc<'_>,
+    src_bytes: &[u8],
+    kept_gids: &[GlyphId],
+    new_gid_for: &dyn Fn(GlyphId) -> Option<GlyphId>,
+) -> Result<Option<Vec<u8>>, SubsetError> {
+    let _ = src_varc; // signature compatibility — we re-parse the raw bytes
+    let parsed = ParsedVarc::parse(src_bytes)
+        .map_err(|_| SubsetError::Unsupported("VARC malformed during subset"))?;
+
+    // Determine which coverage entries survive. Walk in source coverage
+    // order so we can pull the right glyph record per entry.
+    let kept_set: BTreeSet<GlyphId> = kept_gids.iter().copied().collect();
+    let mut surviving: Vec<(GlyphId, usize)> = Vec::new();
+    for (gid, idx) in parsed.coverage_iter() {
+        if kept_set.contains(&gid) {
+            surviving.push((gid, idx));
+        }
+    }
+
+    if surviving.is_empty() {
+        // No kept gid is VARC-covered → drop the whole table.
+        return Ok(None);
+    }
+
+    // Renumber and sort by new gid. Coverage format 1 requires sorted
+    // glyphArray; the corresponding glyphRecords INDEX walks in the
+    // same order.
+    let mut renumbered: Vec<(GlyphId, usize)> = Vec::with_capacity(surviving.len());
+    for (old_gid, src_idx) in &surviving {
+        let new_gid = new_gid_for(*old_gid).ok_or(SubsetError::Unsupported(
+            "VARC kept gid lacks a new-gid mapping",
+        ))?;
+        renumbered.push((new_gid, *src_idx));
+    }
+    renumbered.sort_by_key(|(new_gid, _)| *new_gid);
+
+    // Rewrite every surviving glyph record.
+    let mut new_records: Vec<Vec<u8>> = Vec::with_capacity(renumbered.len());
+    for (_, src_idx) in &renumbered {
+        let raw = parsed
+            .glyph_record(*src_idx)
+            .ok_or(SubsetError::Unsupported("VARC glyph record index OOB"))?;
+        let new_record = rewrite_component_gids(raw, &new_gid_for)?;
+        new_records.push(new_record);
+    }
+
+    // Coverage format 1 with the new sorted gid list.
+    let new_coverage = build_coverage_format1(renumbered.iter().map(|(g, _)| *g));
+
+    // glyphRecords CFF2 INDEX over the rewritten records.
+    let new_glyph_records = build_cff2_index(&new_records);
+
+    // Pass-throughs.
+    let var_store_bytes = parsed.var_store_bytes();
+    let condition_list_bytes = parsed.condition_list_bytes();
+    let axis_indices_bytes = parsed.axis_indices_bytes();
+
+    // Reassemble. Header is 24 bytes (u16 major, u16 minor, then five
+    // Offset32 slots). Subsequent blocks are placed in source order with
+    // 4-byte alignment between blocks.
+    let mut out: Vec<u8> = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes()); // major
+    out.extend_from_slice(&0u16.to_be_bytes()); // minor
+
+    let cov_off_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes());
+    let vs_off_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes());
+    let cl_off_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes());
+    let ail_off_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes());
+    let gr_off_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes());
+
+    // coverage
+    let cov_start = out.len() as u32;
+    out[cov_off_slot..cov_off_slot + 4].copy_from_slice(&cov_start.to_be_bytes());
+    out.extend_from_slice(&new_coverage);
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+
+    // varStore
+    if let Some(vs) = var_store_bytes {
+        let vs_start = out.len() as u32;
+        out[vs_off_slot..vs_off_slot + 4].copy_from_slice(&vs_start.to_be_bytes());
+        out.extend_from_slice(vs);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+    }
+
+    // conditionList
+    if let Some(cl) = condition_list_bytes {
+        let cl_start = out.len() as u32;
+        out[cl_off_slot..cl_off_slot + 4].copy_from_slice(&cl_start.to_be_bytes());
+        out.extend_from_slice(cl);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+    }
+
+    // axisIndicesList
+    if let Some(ail) = axis_indices_bytes {
+        let ail_start = out.len() as u32;
+        out[ail_off_slot..ail_off_slot + 4].copy_from_slice(&ail_start.to_be_bytes());
+        out.extend_from_slice(ail);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+    }
+
+    // glyphRecords
+    let gr_start = out.len() as u32;
+    out[gr_off_slot..gr_off_slot + 4].copy_from_slice(&gr_start.to_be_bytes());
+    out.extend_from_slice(&new_glyph_records);
+
+    Ok(Some(out))
+}
+
+/// Builds a CFF2 INDEX over the given entries, picking the smallest
+/// off_size that fits. Determinism: identical inputs always produce
+/// identical output bytes.
+fn build_cff2_index(entries: &[Vec<u8>]) -> Vec<u8> {
+    let count = entries.len() as u32;
+    let mut out = Vec::new();
+    out.extend_from_slice(&count.to_be_bytes());
+    if entries.is_empty() {
+        return out;
+    }
+    let total: u32 = entries.iter().map(|e| e.len() as u32).sum();
+    let max_off = total + 1;
+    let off_size: u8 = if max_off <= 0xFF {
+        1
+    } else if max_off <= 0xFFFF {
+        2
+    } else if max_off <= 0x00FF_FFFF {
+        3
+    } else {
+        4
+    };
+    out.push(off_size);
+    let write_off = |out: &mut Vec<u8>, v: u32| match off_size {
+        1 => {
+            #[allow(clippy::cast_possible_truncation)]
+            out.push(v as u8);
+        }
+        2 => {
+            #[allow(clippy::cast_possible_truncation)]
+            out.extend_from_slice(&(v as u16).to_be_bytes());
+        }
+        3 => {
+            out.push(((v >> 16) & 0xFF) as u8);
+            out.push(((v >> 8) & 0xFF) as u8);
+            out.push((v & 0xFF) as u8);
+        }
+        _ => out.extend_from_slice(&v.to_be_bytes()),
+    };
+    let mut cursor: u32 = 1;
+    write_off(&mut out, cursor);
+    for e in entries {
+        cursor += e.len() as u32;
+        write_off(&mut out, cursor);
+    }
+    for e in entries {
+        out.extend_from_slice(e);
+    }
+    out
+}
+
+/// Internal lightweight parse of a VARC table — enumerates coverage
+/// entries, glyph records, and exposes the byte ranges of the
+/// pass-through blocks (MultiVarStore / ConditionList / AxisIndicesList).
 struct ParsedVarc<'a> {
     coverage_bytes: &'a [u8],
+    var_store: Option<&'a [u8]>,
+    condition_list: Option<&'a [u8]>,
+    axis_indices_list: Option<&'a [u8]>,
     glyph_records: Vec<&'a [u8]>,
 }
 
@@ -168,9 +355,60 @@ impl<'a> ParsedVarc<'a> {
             return Err("VARC unsupported major version");
         }
         let coverage_off = read_u32(data, 4)? as usize;
+        let var_store_off = read_u32(data, 8)? as usize;
+        let condition_list_off = read_u32(data, 12)? as usize;
+        let axis_indices_off = read_u32(data, 16)? as usize;
         let glyph_records_off = read_u32(data, 20)? as usize;
 
         let coverage_bytes = data.get(coverage_off..).ok_or("VARC coverage off OOB")?;
+
+        // Each block extends to the start of the next block, in source
+        // file order. Build a sorted list of non-zero offsets and map
+        // each block to (start, end) using its successor.
+        let mut markers: Vec<usize> = [
+            coverage_off,
+            var_store_off,
+            condition_list_off,
+            axis_indices_off,
+            glyph_records_off,
+        ]
+        .iter()
+        .copied()
+        .filter(|o| *o != 0)
+        .collect();
+        markers.push(data.len());
+        markers.sort_unstable();
+        markers.dedup();
+
+        let block_end = |start: usize| -> usize {
+            let next = markers.iter().copied().find(|m| *m > start);
+            next.unwrap_or(data.len())
+        };
+
+        let var_store = if var_store_off == 0 {
+            None
+        } else {
+            Some(
+                data.get(var_store_off..block_end(var_store_off))
+                    .ok_or("VARC varStore OOB")?,
+            )
+        };
+        let condition_list = if condition_list_off == 0 {
+            None
+        } else {
+            Some(
+                data.get(condition_list_off..block_end(condition_list_off))
+                    .ok_or("VARC conditionList OOB")?,
+            )
+        };
+        let axis_indices_list = if axis_indices_off == 0 {
+            None
+        } else {
+            Some(
+                data.get(axis_indices_off..block_end(axis_indices_off))
+                    .ok_or("VARC axisIndices OOB")?,
+            )
+        };
 
         let glyph_records = if glyph_records_off == 0 {
             Vec::new()
@@ -183,8 +421,21 @@ impl<'a> ParsedVarc<'a> {
 
         Ok(Self {
             coverage_bytes,
+            var_store,
+            condition_list,
+            axis_indices_list,
             glyph_records,
         })
+    }
+
+    fn var_store_bytes(&self) -> Option<&'a [u8]> {
+        self.var_store
+    }
+    fn condition_list_bytes(&self) -> Option<&'a [u8]> {
+        self.condition_list
+    }
+    fn axis_indices_bytes(&self) -> Option<&'a [u8]> {
+        self.axis_indices_list
     }
 
     fn glyph_record(&self, idx: usize) -> Option<&'a [u8]> {
@@ -199,7 +450,6 @@ impl<'a> ParsedVarc<'a> {
     /// Iterator over `(gid, record_index)` pairs in coverage order.
     /// The record index is the position used to look up the glyph
     /// record inside `glyph_records`.
-    #[allow(dead_code)] // wired up by the subset_varc emit commit
     fn coverage_iter(&self) -> impl Iterator<Item = (GlyphId, usize)> + '_ {
         CoverageIter::new(self.coverage_bytes)
     }
@@ -292,7 +542,6 @@ impl<'a> Iterator for CoverageIter<'a> {
 
 /// Builds a Coverage format-1 table from a sorted ascending iterator of
 /// gids. Used by [`subset_varc`] to emit the rewritten coverage.
-#[allow(dead_code)] // wired up by the subset_varc emit commit
 fn build_coverage_format1(gids: impl IntoIterator<Item = GlyphId>) -> Vec<u8> {
     let gids: Vec<GlyphId> = gids.into_iter().collect();
     let mut out = Vec::with_capacity(4 + gids.len() * 2);
@@ -639,7 +888,6 @@ fn read_uint32var(data: &[u8], off: usize) -> Option<(u32, usize)> {
 /// place. The rewritten record has the same length unless the gid
 /// encoding width changes — today we keep the width identical (24-bit
 /// stays 24-bit) for byte-stable output.
-#[allow(dead_code)] // wired up by the subset_varc emit commit
 fn rewrite_component_gids(
     record: &[u8],
     new_gid_for: &dyn Fn(GlyphId) -> Option<GlyphId>,
@@ -868,5 +1116,54 @@ mod tests {
         let map = |_: u16| None;
         let err = rewrite_component_gids(&rec, &map).unwrap_err();
         assert!(matches!(err, SubsetError::Unsupported(_)));
+    }
+
+    #[test]
+    fn cff2_index_round_trips_through_parser() {
+        let entries: Vec<Vec<u8>> = vec![vec![0xAAu8, 0xBB], vec![0xCC, 0xDD, 0xEE]];
+        let block = build_cff2_index(&entries);
+        let parsed = parse_cff2_index(&block).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], &[0xAA, 0xBB][..]);
+        assert_eq!(parsed[1], &[0xCC, 0xDD, 0xEE][..]);
+    }
+
+    #[test]
+    fn subset_drops_table_when_no_covered_gid_kept() {
+        // Coverage covers gid 5 only; kept set has only gid 2 → drop.
+        let rec = build_translate_record(7, 0, 0);
+        let bytes = build_varc(&[5], &[&rec]);
+        let varc = sigilbuzz::tables::Varc::parse(&bytes).unwrap();
+        let map = |g: u16| Some(g);
+        let kept = vec![2u16];
+        let out = subset_varc(&varc, &bytes, &kept, &map).unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn subset_keeps_table_with_renumbered_coverage() {
+        let rec = build_translate_record(7, 10, 20);
+        let bytes = build_varc(&[5], &[&rec]);
+        let varc = sigilbuzz::tables::Varc::parse(&bytes).unwrap();
+        // Map old gid 5 → new gid 1, old gid 7 (component) → new gid 2.
+        let map = |g: u16| match g {
+            5 => Some(1),
+            7 => Some(2),
+            _ => None,
+        };
+        let kept = vec![5u16, 7];
+        let out = subset_varc(&varc, &bytes, &kept, &map).unwrap().unwrap();
+        // Re-parse the output and verify it still passes the parser.
+        let new_varc = sigilbuzz::tables::Varc::parse(&out).unwrap();
+        assert!(new_varc.covers(1));
+        assert!(!new_varc.covers(5));
+        assert_eq!(new_varc.glyph_record_count(), 1);
+        // Component gid in the new record is 2.
+        let comp = new_varc.composite(1, &[]).unwrap();
+        assert_eq!(comp.components.len(), 1);
+        assert_eq!(comp.components[0].gid, 2);
+        // Translation preserved verbatim.
+        assert!((comp.components[0].transform[4] - 10.0).abs() < 1e-3);
+        assert!((comp.components[0].transform[5] - 20.0).abs() < 1e-3);
     }
 }
