@@ -36,9 +36,9 @@ use crate::error::{Error, Result};
 use crate::tables::glyf::PhantomMetrics;
 use crate::tables::parse::Reader;
 use crate::tables::{
-    tag, Avar, Cbdt, Cblc, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBitmap, GlyphBounds, Gpos, Gsub,
-    Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Math, Maxp, Morx, Mvar, Outline, Sbix,
-    Svg, SvgDocument, Vhea, Vmtx, Vorg, Vvar,
+    tag, Avar, Base, Cbdt, Cblc, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBitmap, GlyphBounds, Gpos,
+    Gsub, Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Math, Maxp, Morx, Mvar, Outline,
+    Sbix, Svg, SvgDocument, Vhea, Vmtx, Vorg, Vvar,
 };
 
 /// One entry in the SFNT table directory.
@@ -648,6 +648,23 @@ impl<'a> Face<'a> {
     pub fn math(&self) -> Result<Option<Math<'a>>> {
         match self.table_bytes(tag::MATH) {
             Ok(bytes) => Ok(Some(Math::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `BASE` table if the font carries one. BASE
+    /// provides per-script baseline metrics (`romn`, `ideo`,
+    /// `hang`, `math`, …) plus min/max clamps so a typesetting
+    /// engine can align glyphs from different scripts on a common
+    /// baseline. Most fonts omit BASE — Adobe's flagship faces,
+    /// some Noto / SIL designs, and a handful of math fonts ship
+    /// it. v1.1 BASE tables can carry IVS-varied baseline coords;
+    /// the parsed [`Base`] exposes its variation store via
+    /// [`Base::variation_store`].
+    pub fn base(&self) -> Result<Option<Base<'a>>> {
+        match self.table_bytes(tag::BASE) {
+            Ok(bytes) => Ok(Some(Base::parse(bytes)?)),
             Err(Error::MissingTable { .. }) => Ok(None),
             Err(e) => Err(e),
         }

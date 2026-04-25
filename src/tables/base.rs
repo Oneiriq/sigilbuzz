@@ -255,13 +255,11 @@ impl<'a> BaseAxis<'a> {
             return Vec::new();
         }
         let off = self.tag_list_off as usize;
-        let mut r = match Reader::at(self.data, off) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
+        let Ok(mut r) = Reader::at(self.data, off) else {
+            return Vec::new();
         };
-        let count = match r.read_u16() {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
+        let Ok(count) = r.read_u16() else {
+            return Vec::new();
         };
         let mut tags = Vec::with_capacity(count as usize);
         for _ in 0..count {
@@ -355,12 +353,13 @@ impl<'a> BaseScript<'a> {
         let default_min_max_off = if default_min_max_rel == 0 {
             0
         } else {
-            let abs = script_off
-                .checked_add(default_min_max_rel as usize)
-                .ok_or(Error::Malformed {
-                    offset: script_off,
-                    context: "BASE MinMax offset overflow",
-                })?;
+            let abs =
+                script_off
+                    .checked_add(default_min_max_rel as usize)
+                    .ok_or(Error::Malformed {
+                        offset: script_off,
+                        context: "BASE MinMax offset overflow",
+                    })?;
             if abs > data.len() {
                 return Err(Error::Malformed {
                     offset: script_off,
@@ -880,8 +879,7 @@ mod tests {
         out.extend_from_slice(&i16be(600));
 
         out[tl_slot..tl_slot + 2].copy_from_slice(&u16be((tag_list_off - axis_off) as u16));
-        out[tl_slot + 2..tl_slot + 4]
-            .copy_from_slice(&u16be((script_list_off - axis_off) as u16));
+        out[tl_slot + 2..tl_slot + 4].copy_from_slice(&u16be((script_list_off - axis_off) as u16));
         out[s_slot..s_slot + 2].copy_from_slice(&u16be((script_off - script_list_off) as u16));
         out[mm_slot..mm_slot + 2].copy_from_slice(&u16be((mm_off - script_off) as u16));
         out[mm_min_slot..mm_min_slot + 2].copy_from_slice(&u16be((dmin - mm_off) as u16));
@@ -998,12 +996,10 @@ mod tests {
         out.extend_from_slice(&u16be(0)); // inner
         out.extend_from_slice(&u16be(0x8000)); // deltaFormat = VARIATION_INDEX
 
-        out[dev_slot..dev_slot + 2]
-            .copy_from_slice(&u16be((var_index_off - coord_off) as u16));
+        out[dev_slot..dev_slot + 2].copy_from_slice(&u16be((var_index_off - coord_off) as u16));
 
         out[tl_slot..tl_slot + 2].copy_from_slice(&u16be((tag_list_off - axis_off) as u16));
-        out[tl_slot + 2..tl_slot + 4]
-            .copy_from_slice(&u16be((script_list_off - axis_off) as u16));
+        out[tl_slot + 2..tl_slot + 4].copy_from_slice(&u16be((script_list_off - axis_off) as u16));
         out[s_slot..s_slot + 2].copy_from_slice(&u16be((script_off - script_list_off) as u16));
         out[bv_slot..bv_slot + 2].copy_from_slice(&u16be((bv_off - script_off) as u16));
         out[coord_slot..coord_slot + 2].copy_from_slice(&u16be((coord_off - bv_off) as u16));
