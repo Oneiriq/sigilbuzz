@@ -214,6 +214,115 @@ void        hb_version(unsigned int *major,
                        unsigned int *micro);
 const char *hb_version_string(void);
 
+/* ---------- hb_set_t (opaque integer set) ---------- */
+
+typedef struct hb_set_t hb_set_t;
+
+#define HB_SET_VALUE_INVALID ((hb_codepoint_t)0xFFFFFFFFu)
+
+hb_set_t    *hb_set_create(void);
+void         hb_set_destroy(hb_set_t *set);
+hb_set_t    *hb_set_reference(hb_set_t *set);
+void         hb_set_add(hb_set_t *set, hb_codepoint_t codepoint);
+void         hb_set_del(hb_set_t *set, hb_codepoint_t codepoint);
+hb_bool_t    hb_set_has(const hb_set_t *set, hb_codepoint_t codepoint);
+unsigned int hb_set_get_population(const hb_set_t *set);
+hb_bool_t    hb_set_next(const hb_set_t *set, hb_codepoint_t *codepoint);
+
+/* ---------- Subset (gated on the `subset` cargo feature) ---------- */
+
+typedef struct hb_subset_input_t hb_subset_input_t;
+
+hb_subset_input_t *hb_subset_input_create(void);
+void               hb_subset_input_destroy(hb_subset_input_t *input);
+hb_set_t          *hb_subset_input_unicode_set(hb_subset_input_t *input);
+hb_set_t          *hb_subset_input_glyph_set(hb_subset_input_t *input);
+hb_face_t         *hb_subset_or_fail(hb_face_t *face, hb_subset_input_t *input);
+
+/* ---------- Paint (gated on the `paint` cargo feature) ---------- */
+
+typedef struct hb_paint_funcs_t hb_paint_funcs_t;
+typedef struct hb_color_line_t  hb_color_line_t;
+
+/* HarfBuzz packs colour as BGRA inside a uint32. */
+typedef uint32_t hb_color_t;
+
+#define HB_COLOR(b,g,r,a) \
+    (((uint32_t)(b)&0xFFu) | (((uint32_t)(g)&0xFFu)<<8) | \
+     (((uint32_t)(r)&0xFFu)<<16) | (((uint32_t)(a)&0xFFu)<<24))
+
+typedef void (*hb_paint_push_transform_func_t)(hb_paint_funcs_t *funcs,
+                                               void *paint_data,
+                                               float xx, float yx,
+                                               float xy, float yy,
+                                               float dx, float dy);
+typedef void (*hb_paint_pop_transform_func_t)(hb_paint_funcs_t *funcs,
+                                              void *paint_data);
+typedef void (*hb_paint_push_clip_glyph_func_t)(hb_paint_funcs_t *funcs,
+                                                void *paint_data,
+                                                uint32_t gid);
+typedef void (*hb_paint_pop_clip_func_t)(hb_paint_funcs_t *funcs,
+                                         void *paint_data);
+typedef void (*hb_paint_push_layer_func_t)(hb_paint_funcs_t *funcs,
+                                           void *paint_data,
+                                           uint32_t composite_mode);
+typedef void (*hb_paint_pop_layer_func_t)(hb_paint_funcs_t *funcs,
+                                          void *paint_data);
+typedef void (*hb_paint_color_func_t)(hb_paint_funcs_t *funcs,
+                                      void *paint_data,
+                                      hb_bool_t is_foreground,
+                                      hb_color_t color);
+typedef void (*hb_paint_linear_gradient_func_t)(hb_paint_funcs_t *funcs,
+                                                void *paint_data,
+                                                const hb_color_line_t *color_line,
+                                                float x0, float y0,
+                                                float x1, float y1,
+                                                float x2, float y2);
+typedef void (*hb_paint_radial_gradient_func_t)(hb_paint_funcs_t *funcs,
+                                                void *paint_data,
+                                                const hb_color_line_t *color_line,
+                                                float x0, float y0, float r0,
+                                                float x1, float y1, float r1);
+typedef void (*hb_paint_sweep_gradient_func_t)(hb_paint_funcs_t *funcs,
+                                               void *paint_data,
+                                               const hb_color_line_t *color_line,
+                                               float x0, float y0,
+                                               float start_angle,
+                                               float end_angle);
+
+hb_paint_funcs_t *hb_paint_funcs_create(void);
+void              hb_paint_funcs_destroy(hb_paint_funcs_t *funcs);
+void              hb_paint_funcs_set_push_transform_func(hb_paint_funcs_t *funcs, hb_paint_push_transform_func_t cb);
+void              hb_paint_funcs_set_pop_transform_func(hb_paint_funcs_t *funcs, hb_paint_pop_transform_func_t cb);
+void              hb_paint_funcs_set_push_clip_glyph_func(hb_paint_funcs_t *funcs, hb_paint_push_clip_glyph_func_t cb);
+void              hb_paint_funcs_set_pop_clip_func(hb_paint_funcs_t *funcs, hb_paint_pop_clip_func_t cb);
+void              hb_paint_funcs_set_push_layer_func(hb_paint_funcs_t *funcs, hb_paint_push_layer_func_t cb);
+void              hb_paint_funcs_set_pop_layer_func(hb_paint_funcs_t *funcs, hb_paint_pop_layer_func_t cb);
+void              hb_paint_funcs_set_color_func(hb_paint_funcs_t *funcs, hb_paint_color_func_t cb);
+void              hb_paint_funcs_set_linear_gradient_func(hb_paint_funcs_t *funcs, hb_paint_linear_gradient_func_t cb);
+void              hb_paint_funcs_set_radial_gradient_func(hb_paint_funcs_t *funcs, hb_paint_radial_gradient_func_t cb);
+void              hb_paint_funcs_set_sweep_gradient_func(hb_paint_funcs_t *funcs, hb_paint_sweep_gradient_func_t cb);
+
+void              hb_font_paint_glyph(hb_font_t *font,
+                                      uint32_t gid,
+                                      hb_paint_funcs_t *funcs,
+                                      void *paint_data,
+                                      uint32_t palette_index,
+                                      hb_color_t foreground_color);
+
+/* ---------- Introspection ---------- */
+
+#define HB_OT_TAG_GSUB HB_TAG('G','S','U','B')
+#define HB_OT_TAG_GPOS HB_TAG('G','P','O','S')
+
+void hb_face_collect_unicodes(const hb_face_t *face, hb_set_t *set);
+
+void hb_ot_layout_collect_features(const hb_face_t *face,
+                                   hb_tag_t          table_tag,
+                                   const hb_tag_t   *scripts,
+                                   const hb_tag_t   *languages,
+                                   hb_set_t         *features);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
