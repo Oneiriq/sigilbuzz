@@ -59,6 +59,31 @@ unmodified. The OFL text lives in the upstream repository's `OFL.txt`.
   <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansLimbu/hinted/ttf>.
 - `NotoSansCham-Regular.ttf` — Source:
   <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansCham/hinted/ttf>.
+- `NotoSansBrahmi-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansBrahmi/hinted/ttf>.
+  Brahmi historical script (U+11000..U+1107F). The font ships only
+  a `ccmp` GSUB feature — no positional / topographical features —
+  so the parity corpus exercises segmentation + cluster handling
+  rather than rich GSUB substitution.
+- `NotoSansSharada-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansSharada/hinted/ttf>.
+  Sharada historical script (U+11180..U+111DF). Ships `akhn`,
+  `abvs`, and `blws` lookups; sign-i (U+111B4) is a spacing pre-
+  base glyph that the USE reorder pass moves before the base.
+- `NotoSansKhojki-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansKhojki/hinted/ttf>.
+  Khojki historical script (U+11200..U+1124F). Advertises lookups
+  under both `khoj` and `gujr`; sigilbuzz routes via `khoj` first.
+- `NotoSansTirhuta-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansTirhuta/hinted/ttf>.
+  Tirhuta historical script (U+11480..U+114DF). Ships `rphf`,
+  `abvf`, `blwf`, `pstf` and topographical lookups; sign-e
+  (U+114B9) and sign-o (U+114BC) are pre-base vowel signs that
+  the USE pre-base reorder fires for.
+- `NotoSansModi-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansModi/hinted/ttf>.
+  Modi historical script (U+11600..U+1165F). Ships `rphf`, `half`,
+  `pres`, and `calt` lookups.
 - `NotoSansOldHangul-Subset.ttf` — Subset of Noto Sans Korean variable
   font (weight axis collapsed to Regular) restricted to the Hangul
   Jamo blocks (U+1100..U+11FF, U+A960..U+A97F, U+D7B0..U+D7FF) plus a

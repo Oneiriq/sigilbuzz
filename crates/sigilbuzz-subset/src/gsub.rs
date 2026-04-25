@@ -12,6 +12,14 @@
 //! - **Type 1 (single-sub)** — formats 1 (delta) and 2 (explicit). Auto-
 //!   selects between formats; falls back to format 2 when a remapped
 //!   delta would no longer produce contiguous targets.
+//! - **Type 2 (multiple-sub)** — format 1. Filters Coverage to surviving
+//!   input gids; drops any Sequence whose substitute glyphs are not all
+//!   kept (a partial sequence would emit a missing gid), and drops the
+//!   subtable when Coverage empties out.
+//! - **Type 3 (alternate-sub)** — format 1. Filters Coverage to surviving
+//!   input gids; remaps each AlternateSet's surviving alternates;
+//!   drops the AlternateSet (and its Coverage entry) when every
+//!   alternate dies, and drops the subtable when Coverage empties out.
 //! - **Type 4 (ligature-sub)** — format 1. Filters Coverage to surviving
 //!   first-component gids, drops any Ligature whose result gid or any
 //!   component gid is not kept, drops empty LigatureSets, and drops the
@@ -69,6 +77,8 @@ pub(crate) fn rewrite_lookup(
 fn rewrite_subtable(ctx: &RewriterCtx, lookup_type: u16, sub: &[u8]) -> Option<RewrittenSubtable> {
     match lookup_type {
         gsub_type::SINGLE => rewrite_single(ctx, sub),
+        gsub_type::MULTIPLE => rewrite_type2(ctx, sub),
+        gsub_type::ALTERNATE => rewrite_type3(ctx, sub),
         gsub_type::LIGATURE => rewrite_type4(ctx, sub),
         gsub_type::EXTENSION => rewrite_extension(ctx, sub),
         // Other types drop until their byte-level rewriter ships.
@@ -207,6 +217,259 @@ fn emit_single_subtable(pairs: &[(u16, u16)]) -> RewrittenSubtable {
         out.extend_from_slice(&cov_bytes);
         out[2..4].copy_from_slice(&cov_off.to_be_bytes());
     }
+    RewrittenSubtable { bytes: out }
+}
+
+/// Rewrites a GSUB type 2 (Multiple Substitution) subtable.
+///
+/// Format 1 layout:
+///
+/// ```text
+///   u16      substFormat = 1
+///   Offset16 coverageOffset
+///   u16      sequenceCount
+///   Offset16 sequenceOffsets[sequenceCount]
+///
+///   Sequence:
+///     u16 glyphCount
+///     u16 substituteGlyphIDs[glyphCount]
+/// ```
+///
+/// Drop rules:
+///
+/// - A Coverage entry dies if its input gid isn't in the GidMap **or**
+///   any substitute glyph in its Sequence isn't kept. A partial
+///   substitution would emit a missing gid which has no defined
+///   meaning in the new namespace.
+/// - The subtable dies when Coverage becomes empty.
+fn rewrite_type2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
+    if sub.len() < 6 {
+        return None;
+    }
+    let format = u16::from_be_bytes([sub[0], sub[1]]);
+    if format != 1 {
+        return None;
+    }
+    let cov_off = u16::from_be_bytes([sub[2], sub[3]]) as usize;
+    let seq_count = u16::from_be_bytes([sub[4], sub[5]]) as usize;
+    let seq_offsets_off = 6usize;
+    if sub.len() < seq_offsets_off + seq_count * 2 {
+        return None;
+    }
+    let cov_bytes = sub.get(cov_off..)?;
+    let covered = parse_coverage_glyphs(cov_bytes);
+    let pair_count = covered.len().min(seq_count);
+
+    let map = ctx.gid_map;
+    // (new_input_gid, encoded_sequence_bytes) per surviving Coverage entry.
+    let mut surviving: Vec<(u16, Vec<u8>)> = Vec::new();
+
+    for (i, &input_old) in covered.iter().enumerate().take(pair_count) {
+        let Some(input_new) = map.map(input_old) else {
+            continue;
+        };
+        let off_off = seq_offsets_off + i * 2;
+        let seq_off = u16::from_be_bytes([sub[off_off], sub[off_off + 1]]) as usize;
+        let Some(seq_bytes) = sub.get(seq_off..) else {
+            continue;
+        };
+        if seq_bytes.len() < 2 {
+            continue;
+        }
+        let glyph_count = u16::from_be_bytes([seq_bytes[0], seq_bytes[1]]) as usize;
+        let need = 2 + glyph_count * 2;
+        if seq_bytes.len() < need {
+            continue;
+        }
+        // Every substitute must be kept. A missing output gid would
+        // emit a substitution that points at a dropped slot — there's
+        // no graceful degrade here, mirror type-4's all-or-nothing
+        // ligature drop.
+        let mut new_seq: Vec<u16> = Vec::with_capacity(glyph_count);
+        let mut all_kept = true;
+        for j in 0..glyph_count {
+            let off = 2 + j * 2;
+            let g_old = u16::from_be_bytes([seq_bytes[off], seq_bytes[off + 1]]);
+            match map.map(g_old) {
+                Some(g_new) => new_seq.push(g_new),
+                None => {
+                    all_kept = false;
+                    break;
+                }
+            }
+        }
+        if !all_kept {
+            continue;
+        }
+
+        // Encode the rewritten Sequence body.
+        let mut body = Vec::with_capacity(2 + new_seq.len() * 2);
+        body.extend_from_slice(&(new_seq.len() as u16).to_be_bytes());
+        for g in &new_seq {
+            body.extend_from_slice(&g.to_be_bytes());
+        }
+        surviving.push((input_new, body));
+    }
+
+    if surviving.is_empty() {
+        return None;
+    }
+
+    Some(emit_type2_subtable(&surviving))
+}
+
+/// Encodes a complete MultipleSubstFormat1 subtable around already-
+/// rewritten `(new_input_gid, sequence_bytes)` pairs.
+fn emit_type2_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes()); // substFormat
+    let cov_off_slot = out.len();
+    out.extend_from_slice(&0u16.to_be_bytes()); // coverageOffset placeholder
+    out.extend_from_slice(&(surviving.len() as u16).to_be_bytes()); // sequenceCount
+    let seq_offsets_start = out.len();
+    for _ in 0..surviving.len() {
+        out.extend_from_slice(&[0u8; 2]); // sequenceOffset placeholder
+    }
+    for (i, (_input_gid, seq_body)) in surviving.iter().enumerate() {
+        let body_start = out.len();
+        out.extend_from_slice(seq_body);
+        let slot = seq_offsets_start + i * 2;
+        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+    }
+    let pairs: Vec<(u16, u16)> = surviving
+        .iter()
+        .enumerate()
+        .map(|(i, (g, _))| (*g, i as u16))
+        .collect();
+    let cov_bytes = emit_coverage_from_pairs(&pairs);
+    let cov_off = out.len() as u16;
+    out.extend_from_slice(&cov_bytes);
+    out[cov_off_slot..cov_off_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
+    RewrittenSubtable { bytes: out }
+}
+
+/// Rewrites a GSUB type 3 (Alternate Substitution) subtable.
+///
+/// Format 1 layout:
+///
+/// ```text
+///   u16      substFormat = 1
+///   Offset16 coverageOffset
+///   u16      alternateSetCount
+///   Offset16 alternateSetOffsets[alternateSetCount]
+///
+///   AlternateSet:
+///     u16 glyphCount
+///     u16 alternateGlyphIDs[glyphCount]
+/// ```
+///
+/// Drop rules — looser than type 2 because alternates are user-chosen,
+/// so dropping individual entries doesn't break the meaning of the
+/// substitution as a whole:
+///
+/// - Each AlternateSet keeps only the alternates whose gids survived
+///   the GidMap (and renumbers them).
+/// - A Coverage entry dies if its input gid isn't kept **or** every
+///   alternate in its AlternateSet was dropped (an empty AlternateSet
+///   isn't useful — fall through to the input glyph rather than emit
+///   a degenerate set).
+/// - The subtable dies when Coverage empties out.
+fn rewrite_type3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
+    if sub.len() < 6 {
+        return None;
+    }
+    let format = u16::from_be_bytes([sub[0], sub[1]]);
+    if format != 1 {
+        return None;
+    }
+    let cov_off = u16::from_be_bytes([sub[2], sub[3]]) as usize;
+    let alt_set_count = u16::from_be_bytes([sub[4], sub[5]]) as usize;
+    let alt_offsets_off = 6usize;
+    if sub.len() < alt_offsets_off + alt_set_count * 2 {
+        return None;
+    }
+    let cov_bytes = sub.get(cov_off..)?;
+    let covered = parse_coverage_glyphs(cov_bytes);
+    let pair_count = covered.len().min(alt_set_count);
+
+    let map = ctx.gid_map;
+    // (new_input_gid, encoded_alternate_set_bytes) per surviving Coverage entry.
+    let mut surviving: Vec<(u16, Vec<u8>)> = Vec::new();
+
+    for (i, &input_old) in covered.iter().enumerate().take(pair_count) {
+        let Some(input_new) = map.map(input_old) else {
+            continue;
+        };
+        let off_off = alt_offsets_off + i * 2;
+        let alt_off = u16::from_be_bytes([sub[off_off], sub[off_off + 1]]) as usize;
+        let Some(alt_bytes) = sub.get(alt_off..) else {
+            continue;
+        };
+        if alt_bytes.len() < 2 {
+            continue;
+        }
+        let glyph_count = u16::from_be_bytes([alt_bytes[0], alt_bytes[1]]) as usize;
+        let need = 2 + glyph_count * 2;
+        if alt_bytes.len() < need {
+            continue;
+        }
+        // Filter alternates to those that survive; remap survivors.
+        let mut new_alts: Vec<u16> = Vec::with_capacity(glyph_count);
+        for j in 0..glyph_count {
+            let off = 2 + j * 2;
+            let g_old = u16::from_be_bytes([alt_bytes[off], alt_bytes[off + 1]]);
+            if let Some(g_new) = map.map(g_old) {
+                new_alts.push(g_new);
+            }
+        }
+        // Empty AlternateSet means every alternate dropped — drop the
+        // whole Coverage entry. The fall-through is the input glyph
+        // unchanged, which is shaping's default behaviour anyway.
+        if new_alts.is_empty() {
+            continue;
+        }
+        let mut body = Vec::with_capacity(2 + new_alts.len() * 2);
+        body.extend_from_slice(&(new_alts.len() as u16).to_be_bytes());
+        for g in &new_alts {
+            body.extend_from_slice(&g.to_be_bytes());
+        }
+        surviving.push((input_new, body));
+    }
+
+    if surviving.is_empty() {
+        return None;
+    }
+
+    Some(emit_type3_subtable(&surviving))
+}
+
+/// Encodes a complete AlternateSubstFormat1 subtable around already-
+/// rewritten `(new_input_gid, alt_set_bytes)` pairs.
+fn emit_type3_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes()); // substFormat
+    let cov_off_slot = out.len();
+    out.extend_from_slice(&0u16.to_be_bytes()); // coverageOffset placeholder
+    out.extend_from_slice(&(surviving.len() as u16).to_be_bytes()); // alternateSetCount
+    let alt_offsets_start = out.len();
+    for _ in 0..surviving.len() {
+        out.extend_from_slice(&[0u8; 2]); // alternateSetOffset placeholder
+    }
+    for (i, (_input_gid, alt_body)) in surviving.iter().enumerate() {
+        let body_start = out.len();
+        out.extend_from_slice(alt_body);
+        let slot = alt_offsets_start + i * 2;
+        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+    }
+    let pairs: Vec<(u16, u16)> = surviving
+        .iter()
+        .enumerate()
+        .map(|(i, (g, _))| (*g, i as u16))
+        .collect();
+    let cov_bytes = emit_coverage_from_pairs(&pairs);
+    let cov_off = out.len() as u16;
+    out.extend_from_slice(&cov_bytes);
+    out[cov_off_slot..cov_off_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
     RewrittenSubtable { bytes: out }
 }
 
@@ -1092,5 +1355,294 @@ mod tests {
         let rs = rewrite_subtable(&ctx, gsub_type::LIGATURE, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Ligature::parse(&rs.bytes).unwrap();
         assert_eq!(parsed.apply(&[9, 19]).unwrap(), (99, 2));
+    }
+
+    // ===== GSUB type 2 (Multiple Substitution) rewriter tests =====
+
+    /// Builds a type-2 subtable; `entries` is `(input_gid, [substitute_gid])`.
+    fn build_type2_subtable(entries: &[(u16, Vec<u16>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // format
+        let cov_slot = out.len();
+        out.extend_from_slice(&0u16.to_be_bytes()); // cov off placeholder
+        out.extend_from_slice(&(entries.len() as u16).to_be_bytes());
+        let seq_offsets_start = out.len();
+        for _ in 0..entries.len() {
+            out.extend_from_slice(&[0u8; 2]);
+        }
+        for (i, (_input, seq)) in entries.iter().enumerate() {
+            let body_start = out.len();
+            out.extend_from_slice(&(seq.len() as u16).to_be_bytes());
+            for g in seq {
+                out.extend_from_slice(&g.to_be_bytes());
+            }
+            let slot = seq_offsets_start + i * 2;
+            out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        }
+        let cov_start = out.len();
+        let inputs: Vec<u16> = entries.iter().map(|(g, _)| *g).collect();
+        out.extend_from_slice(&build_coverage_format1(&inputs));
+        out[cov_slot..cov_slot + 2].copy_from_slice(&(cov_start as u16).to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn rewrite_type2_keeps_all_when_every_gid_survives() {
+        // Input gid 100 decomposes to [40, 50, 60]. Renumber down by 1.
+        let bytes = build_type2_subtable(&[(100, vec![40, 50, 60])]);
+        let map = map_from_pairs(&[(0, 0), (40, 39), (50, 49), (60, 59), (100, 99)]);
+        let ctx = RewriterCtx { gid_map: &map };
+        let rs = rewrite_type2(&ctx, &bytes).unwrap();
+        let parsed = sigilbuzz::tables::gsub::Multiple::parse(&rs.bytes).unwrap();
+        assert_eq!(parsed.apply(99), Some(vec![39, 49, 59]));
+        assert!(parsed.apply(99).is_some());
+        assert!(parsed.apply(0).is_none());
+    }
+
+    #[test]
+    fn rewrite_type2_drops_sequence_when_substitute_drops() {
+        // 100 → [40, 50, 60] but 50 is dropped. The whole Sequence
+        // dies because emitting [40, ?, 60] would point at a missing
+        // gid.
+        let bytes = build_type2_subtable(&[(100, vec![40, 50, 60])]);
+        let map = map_from_pairs(&[(0, 0), (40, 39), (60, 59), (100, 99)]);
+        let ctx = RewriterCtx { gid_map: &map };
+        // Single-entry subtable; that entry dies → subtable dies.
+        assert!(rewrite_type2(&ctx, &bytes).is_none());
+    }
+
+    #[test]
+    fn rewrite_type2_drops_entry_when_input_drops() {
+        // Two entries; drop input 100 entirely → first entry vanishes,
+        // second entry survives.
+        let bytes = build_type2_subtable(&[(100, vec![40, 50]), (200, vec![70])]);
+        let map = map_from_pairs(&[
+            (0, 0),
+            (40, 39),
+            (50, 49),
+            (70, 69),
+            (200, 199),
+            // 100 not in the map → its Coverage entry dies.
+        ]);
+        let ctx = RewriterCtx { gid_map: &map };
+        let rs = rewrite_type2(&ctx, &bytes).unwrap();
+        let parsed = sigilbuzz::tables::gsub::Multiple::parse(&rs.bytes).unwrap();
+        // Surviving entry: input 199 → [69].
+        assert_eq!(parsed.apply(199), Some(vec![69]));
+        // The dropped entry's input gid (100 was renumbered to nothing)
+        // — neither old nor any other gid produces a hit.
+        assert!(parsed.apply(99).is_none());
+    }
+
+    #[test]
+    fn rewrite_type2_returns_none_when_coverage_empties() {
+        let bytes = build_type2_subtable(&[(100, vec![40, 50])]);
+        let map = map_from_pairs(&[(0, 0)]);
+        let ctx = RewriterCtx { gid_map: &map };
+        assert!(rewrite_type2(&ctx, &bytes).is_none());
+    }
+
+    #[test]
+    fn rewrite_type2_via_dispatcher() {
+        let bytes = build_type2_subtable(&[(100, vec![40, 50])]);
+        let map = map_from_pairs(&[(0, 0), (40, 39), (50, 49), (100, 99)]);
+        let ctx = RewriterCtx { gid_map: &map };
+        let rs = rewrite_subtable(&ctx, gsub_type::MULTIPLE, &bytes).unwrap();
+        let parsed = sigilbuzz::tables::gsub::Multiple::parse(&rs.bytes).unwrap();
+        assert_eq!(parsed.apply(99), Some(vec![39, 49]));
+    }
+
+    #[test]
+    fn rewrite_type2_is_byte_deterministic() {
+        let bytes = build_type2_subtable(&[
+            (100, vec![40, 50]),
+            (200, vec![70, 80, 90]),
+            (300, vec![60]),
+        ]);
+        let map = map_from_pairs(&[
+            (0, 0),
+            (40, 1),
+            (50, 2),
+            (60, 3),
+            (70, 4),
+            (80, 5),
+            (90, 6),
+            (100, 7),
+            (200, 8),
+            (300, 9),
+        ]);
+        let ctx = RewriterCtx { gid_map: &map };
+        let a = rewrite_type2(&ctx, &bytes).unwrap();
+        let b = rewrite_type2(&ctx, &bytes).unwrap();
+        assert_eq!(a.bytes, b.bytes);
+    }
+
+    #[test]
+    fn pull_multiple_extends_keep_set() {
+        // Closure walker: input 100 is kept → every substitute in the
+        // sequence gets pulled in.
+        let bytes = build_type2_subtable(&[(100, vec![40, 50, 60])]);
+        let mut keep = vec![false; 256];
+        keep[100] = true;
+        let changed = pull_multiple(&bytes, &mut keep);
+        assert!(changed);
+        assert!(keep[40]);
+        assert!(keep[50]);
+        assert!(keep[60]);
+    }
+
+    #[test]
+    fn pull_multiple_no_op_when_input_dropped() {
+        let bytes = build_type2_subtable(&[(100, vec![40, 50])]);
+        let mut keep = vec![false; 256];
+        // 100 not kept → no outputs pulled.
+        let changed = pull_multiple(&bytes, &mut keep);
+        assert!(!changed);
+        assert!(!keep[40]);
+        assert!(!keep[50]);
+    }
+
+    // ===== GSUB type 3 (Alternate Substitution) rewriter tests =====
+
+    /// Builds a type-3 subtable; `entries` is `(input_gid, [alternate_gid])`.
+    fn build_type3_subtable(entries: &[(u16, Vec<u16>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // format
+        let cov_slot = out.len();
+        out.extend_from_slice(&0u16.to_be_bytes()); // cov off placeholder
+        out.extend_from_slice(&(entries.len() as u16).to_be_bytes());
+        let alt_offsets_start = out.len();
+        for _ in 0..entries.len() {
+            out.extend_from_slice(&[0u8; 2]);
+        }
+        for (i, (_input, alts)) in entries.iter().enumerate() {
+            let body_start = out.len();
+            out.extend_from_slice(&(alts.len() as u16).to_be_bytes());
+            for g in alts {
+                out.extend_from_slice(&g.to_be_bytes());
+            }
+            let slot = alt_offsets_start + i * 2;
+            out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        }
+        let cov_start = out.len();
+        let inputs: Vec<u16> = entries.iter().map(|(g, _)| *g).collect();
+        out.extend_from_slice(&build_coverage_format1(&inputs));
+        out[cov_slot..cov_slot + 2].copy_from_slice(&(cov_start as u16).to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn rewrite_type3_keeps_all_when_every_gid_survives() {
+        // Input 10 has alternates [100, 101, 102].
+        let bytes = build_type3_subtable(&[(10, vec![100, 101, 102])]);
+        let map = map_from_pairs(&[(0, 0), (10, 9), (100, 99), (101, 100), (102, 101)]);
+        let ctx = RewriterCtx { gid_map: &map };
+        let rs = rewrite_type3(&ctx, &bytes).unwrap();
+        let parsed = sigilbuzz::tables::gsub::Alternate::parse(&rs.bytes).unwrap();
+        assert_eq!(parsed.apply(9, 0), Some(99));
+        assert_eq!(parsed.apply(9, 1), Some(100));
+        assert_eq!(parsed.apply(9, 2), Some(101));
+        assert!(parsed.apply(9, 3).is_none());
+    }
+
+    #[test]
+    fn rewrite_type3_filters_partial_alternate_set() {
+        // Input 10 has alternates [100, 101, 102]; 101 is dropped. The
+        // surviving set is [100, 102] (renumbered).
+        let bytes = build_type3_subtable(&[(10, vec![100, 101, 102])]);
+        let map = map_from_pairs(&[(0, 0), (10, 9), (100, 99), (102, 101)]);
+        let ctx = RewriterCtx { gid_map: &map };
+        let rs = rewrite_type3(&ctx, &bytes).unwrap();
+        let parsed = sigilbuzz::tables::gsub::Alternate::parse(&rs.bytes).unwrap();
+        assert_eq!(parsed.apply(9, 0), Some(99));
+        assert_eq!(parsed.apply(9, 1), Some(101));
+        assert!(parsed.apply(9, 2).is_none());
+    }
+
+    #[test]
+    fn rewrite_type3_drops_entry_when_all_alternates_drop() {
+        // Two Coverage entries; the first's alternates all drop, the
+        // second survives untouched.
+        let bytes = build_type3_subtable(&[(10, vec![100, 101]), (20, vec![200])]);
+        let map = map_from_pairs(&[(0, 0), (10, 9), (20, 19), (200, 199)]);
+        let ctx = RewriterCtx { gid_map: &map };
+        let rs = rewrite_type3(&ctx, &bytes).unwrap();
+        let parsed = sigilbuzz::tables::gsub::Alternate::parse(&rs.bytes).unwrap();
+        // First entry's input (gid 9) is no longer covered.
+        assert!(parsed.apply(9, 0).is_none());
+        // Second entry survives.
+        assert_eq!(parsed.apply(19, 0), Some(199));
+    }
+
+    #[test]
+    fn rewrite_type3_returns_none_when_coverage_empties() {
+        let bytes = build_type3_subtable(&[(10, vec![100, 101])]);
+        let map = map_from_pairs(&[(0, 0)]);
+        let ctx = RewriterCtx { gid_map: &map };
+        assert!(rewrite_type3(&ctx, &bytes).is_none());
+    }
+
+    #[test]
+    fn rewrite_type3_via_dispatcher() {
+        let bytes = build_type3_subtable(&[(10, vec![100, 101])]);
+        let map = map_from_pairs(&[(0, 0), (10, 9), (100, 99), (101, 100)]);
+        let ctx = RewriterCtx { gid_map: &map };
+        let rs = rewrite_subtable(&ctx, gsub_type::ALTERNATE, &bytes).unwrap();
+        let parsed = sigilbuzz::tables::gsub::Alternate::parse(&rs.bytes).unwrap();
+        assert_eq!(parsed.apply(9, 0), Some(99));
+        assert_eq!(parsed.apply(9, 1), Some(100));
+    }
+
+    #[test]
+    fn rewrite_type3_is_byte_deterministic() {
+        let bytes = build_type3_subtable(&[(10, vec![100, 101]), (20, vec![200, 201, 202])]);
+        let map = map_from_pairs(&[
+            (0, 0),
+            (10, 1),
+            (20, 2),
+            (100, 3),
+            (101, 4),
+            (200, 5),
+            (201, 6),
+            (202, 7),
+        ]);
+        let ctx = RewriterCtx { gid_map: &map };
+        let a = rewrite_type3(&ctx, &bytes).unwrap();
+        let b = rewrite_type3(&ctx, &bytes).unwrap();
+        assert_eq!(a.bytes, b.bytes);
+    }
+
+    #[test]
+    fn pull_alternate_default_extends_keep_set_with_first_alternate_only() {
+        // Closure walker: input 10 is kept → only the *first* alternate
+        // (100) gets pulled in. The remaining alternates (101, 102) stay
+        // dropped unless the caller requested them explicitly.
+        let bytes = build_type3_subtable(&[(10, vec![100, 101, 102])]);
+        let mut keep = vec![false; 256];
+        keep[10] = true;
+        let changed = pull_alternate_default(&bytes, &mut keep);
+        assert!(changed);
+        assert!(
+            keep[100],
+            "default alternate (index 0 = gid 100) must be pulled in"
+        );
+        assert!(
+            !keep[101],
+            "non-default alternate gid 101 must NOT be auto-pulled"
+        );
+        assert!(
+            !keep[102],
+            "non-default alternate gid 102 must NOT be auto-pulled"
+        );
+    }
+
+    #[test]
+    fn pull_alternate_default_no_op_when_input_dropped() {
+        let bytes = build_type3_subtable(&[(10, vec![100])]);
+        let mut keep = vec![false; 256];
+        // 10 not kept → no outputs pulled.
+        let changed = pull_alternate_default(&bytes, &mut keep);
+        assert!(!changed);
+        assert!(!keep[100]);
     }
 }
