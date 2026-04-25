@@ -232,14 +232,47 @@ Operational gaps closed. Subsetting, the remaining PDF font types, performance b
 
 ---
 
-## 0.6.0+ (next)
+## 0.6.0 (shipping)
 
-- [ ] Layout-table subsetting in `sigilbuzz-subset` — GSUB / GPOS / GDEF gid remap.
-- [ ] CFF / CFF2 subsetting (subroutine renumbering, Top DICT updates).
-- [ ] Variable-font subsetting — gvar / HVAR / fvar / avar.
-- [ ] Performance tuning for the > 2× rustybuzz scripts (#74, #75, #76).
-- [ ] WOFF1 / WOFF2 wrapper formats — likely as `sigilbuzz-woff` companion crate.
-- [ ] Real-font fixture for glyf phantom-point anchor mode (currently exercised only by a synthetic unit test).
+Operational gaps from 0.5.0 closed. `sigilbuzz-subset` covers every gid-keyed table in scope; complex-script shaping comes within 5× of rustybuzz; `sigilbuzz-woff` lands as the seventh workspace member; the workspace gains its first runtime dependency (`brotli-decompressor`, gated and confined to `sigilbuzz-woff`).
+
+### Subset extension
+
+- [x] Layout-table policy in `sigilbuzz-subset` — Coverage / ClassDef auto-format-pick emitters; closure walker pulls in ligature components and mark-base anchor partners; Preserve-or-Drop policy keeps GSUB / GPOS / GDEF intact under identity gid maps. Full byte-level rewriter for non-identity maps tracked as #87 for 0.7.0+.
+- [x] CFF / CFF2 analysis primitives — Type 2 charstring scanner, subr-bias helper, transitive subr keep-set, operand encoder/decoder. Byte-level emitter tracked as #92 for 0.7.0+.
+- [x] Variable-font subsetting — gvar by gid, HVAR with `ItemVariationStore` row dedup + `DeltaSetIndexMap` rewrite, fvar / avar pass-through. `SubsetInput.retain_variations` defaults true.
+
+### Performance
+
+- [x] Three algorithmic fixes in `src/shape.rs` close the > 2× rustybuzz gaps from #74 / #75 / #76: pre-parsed `ParsedGsubSubtable` enum (was re-parsing every cursor × every subtable × every lookup), `GlyphIds` shadow buffer (was rebuilding via `iter().collect()` every match), run-level `would_apply` digest (skip-iterator-style cursor gate). Devanagari 173× → 4.98×, Arabic 32× → 2.72×, Khmer 17× → 1.88×. Latin (1.17× → 0.74×) and Hebrew (0.88× → 0.62×) collateral wins — both faster than rustybuzz.
+
+### Companion crate `sigilbuzz-woff`
+
+- [x] WOFF1 unwrap (uncompressed pass-through, zlib deferred) + uncompressed wrap.
+- [x] WOFF2 unwrap with Brotli decompression and full `glyf` + `loca` inverse transform — 8-stream reconstruction (nContour / nPoints / flags / triplets / composite / bbox bitmap+stream / instructions / overlap-simple). `wrap_woff2` deferred to 0.7.0.
+- [x] First runtime dep introduced — `brotli-decompressor`, gated behind the `woff2` feature, confined to `sigilbuzz-woff`. Justified in `docs/deps.md`. Shaping core stays zero-dep.
+
+### Glyf phantom-anchor real-font integration
+
+- [x] Hand-crafted 780-byte phantom-anchor fixture exercises the code path that 0.5.0 added but couldn't reach with the bundled corpus.
+
+### Hardening
+
+- [x] Wave 7 fuzz pass on the 0.6.0 surface (+3 fixes — Coverage emitter byte-waste on non-identity inputs (#94/#95); WOFF2 empty-glyph + bbox-bitmap mis-alignment (#96/#97); WOFF2 transformVersion validation on non-glyf/loca tags (#98/#99)).
+
+---
+
+## 0.7.0 (next)
+
+**Headline:** C-API shim for cross-language compatibility. `sigilbuzz-capi` companion crate exposes HarfBuzz-symbol-compatible `hb_*` functions so a downstream binary can swap `-lharfbuzz` for `-lsigilbuzz` and recompile with no source-level changes. Drives every other 0.7.0 item behind it in priority.
+
+- [ ] **`sigilbuzz-capi`** — required surface (hb_blob, hb_face, hb_font, hb_buffer, hb_shape, hb_buffer_get_glyph_infos / positions). Stretch surface (hb_subset_*, hb_paint_*).
+- [ ] Full GSUB / GPOS / GDEF byte-level subset rewriter (#87) — every coverage / classdef / ligature / mark-anchor reference rewritten under non-identity gid maps.
+- [ ] CFF / CFF2 byte-level subset emitter (#92) — CharStrings INDEX rebuild, Subr renumber, Top DICT deferred-offset patching, charset / encoding / Private DICT relocation.
+- [ ] More USE script tables — N'Ko, Tai Tham, Brahmi family, Balinese, Javanese, etc. The state machine handles them; just ISC/IPC tables to fill in.
+- [ ] Tibetan + Mongolian shapers.
+- [ ] Bitmap font formats — CBDT/CBLC, sbix.
+- [ ] SVG-in-OT (`SVG ` table).
 
 ---
 
