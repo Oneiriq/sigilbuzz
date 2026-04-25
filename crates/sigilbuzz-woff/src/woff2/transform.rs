@@ -182,7 +182,18 @@ pub(crate) fn reconstruct_glyf_and_loca(payload: &[u8]) -> Result<(Vec<u8>, Vec<
         let bbox_present = (bbox_bitmap[gid / 8] >> (7 - (gid % 8))) & 1 != 0;
 
         if n_contours == 0 {
-            // Empty glyph: zero-length record.
+            // Empty glyph: zero-length record. WOFF2 §5.1 forbids
+            // an empty glyph from carrying a stored bbox — accepting
+            // it silently would leave the bbox stream cursor in the
+            // wrong place and corrupt every subsequent glyph's bbox
+            // decode (Google's reference woff2 rejects this for the
+            // same reason).
+            if bbox_present {
+                return Err(WoffError::Malformed {
+                    offset: 0,
+                    context: "empty glyph has bbox bitmap bit set",
+                });
+            }
             continue;
         }
 
@@ -454,5 +465,84 @@ mod tests {
         assert_eq!(with_sign(1, 100), 100);
         assert_eq!(with_sign(0, 100), -100);
         assert_eq!(with_sign(3, 50), 50);
+    }
+
+    #[test]
+    fn empty_glyph_with_bbox_bit_is_rejected() {
+        // WOFF2 spec section 5.1: an empty glyph (nContours == 0)
+        // must NOT have a stored bbox. A bbox bitmap claiming
+        // otherwise mis-aligns the bbox stream for every subsequent
+        // glyph because the empty path used to skip the read. We
+        // expose the divergence indirectly: gid 0 is empty + bbox
+        // bit set; gid 1 is simple with 1 contour + bbox bit set.
+        // Without the reject, gid 1 reads gid 0's "phantom" bbox
+        // bytes and decodes a corrupted bbox.
+        // Stream sizes:
+        //   nContourStream: 2 glyphs * 2 = 4
+        //   nPointsStream: 1 contour for gid 1: 255UInt16 of 1 = 1 byte
+        //   flagStream: 1 flag byte
+        //   glyphStream: 1 triplet (1-byte) + instr_len 0 (1-byte) = 2
+        //   compositeStream: empty
+        //   bboxStream: bitmap = ceil(2/8) = 1 byte; two bbox * 8 = 16
+        //   instructionStream: empty
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        payload.extend_from_slice(&0u16.to_be_bytes()); // optionFlags
+        payload.extend_from_slice(&2u16.to_be_bytes()); // numGlyphs
+        payload.extend_from_slice(&1u16.to_be_bytes()); // indexFormat = long
+        let n_contour_size: u32 = 4;
+        let n_points_size: u32 = 1;
+        let flag_size: u32 = 1;
+        let glyph_size: u32 = 2;
+        let composite_size: u32 = 0;
+        let bbox_size: u32 = 1 + 16;
+        let instr_size: u32 = 0;
+        payload.extend_from_slice(&n_contour_size.to_be_bytes());
+        payload.extend_from_slice(&n_points_size.to_be_bytes());
+        payload.extend_from_slice(&flag_size.to_be_bytes());
+        payload.extend_from_slice(&glyph_size.to_be_bytes());
+        payload.extend_from_slice(&composite_size.to_be_bytes());
+        payload.extend_from_slice(&bbox_size.to_be_bytes());
+        payload.extend_from_slice(&instr_size.to_be_bytes());
+
+        // nContourStream: gid 0 empty (0), gid 1 simple (1 contour).
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        payload.extend_from_slice(&1i16.to_be_bytes());
+        // nPointsStream: gid 1 has one contour with 1 point. 255UInt16
+        // direct value: 1.
+        payload.push(1);
+        // flagStream: one on-curve point with X_SHORT and dx-only
+        // delta. We use flag byte 0x01 (decoded triplet from `< 10`
+        // case, dy=0, dx pulled from the next stream byte).
+        payload.push(0x01);
+        // glyphStream: 1 byte for the triplet decode + 1 byte for
+        // the 255UInt16-encoded instruction length (0).
+        payload.push(0x00);
+        payload.push(0);
+        // compositeStream: empty.
+        // bboxStream: bitmap byte 0b1100_0000 (gid 0 and gid 1 both
+        // present) + 16 bytes of bbox data (gid 0's phantom bbox,
+        // then gid 1's real bbox).
+        payload.push(0b1100_0000);
+        // gid 0 phantom bbox values that are easy to spot if leaked.
+        payload.extend_from_slice(&0xDEADu16.to_be_bytes());
+        payload.extend_from_slice(&0xDEADu16.to_be_bytes());
+        payload.extend_from_slice(&0xDEADu16.to_be_bytes());
+        payload.extend_from_slice(&0xDEADu16.to_be_bytes());
+        // gid 1 real bbox.
+        payload.extend_from_slice(&10i16.to_be_bytes());
+        payload.extend_from_slice(&20i16.to_be_bytes());
+        payload.extend_from_slice(&30i16.to_be_bytes());
+        payload.extend_from_slice(&40i16.to_be_bytes());
+        // instructionStream: empty.
+
+        let result = reconstruct_glyf_and_loca(&payload);
+        // Per WOFF2 §5.1 the decoder must reject this payload — an
+        // empty glyph with a bbox bit set is malformed input.
+        assert!(
+            result.is_err(),
+            "empty glyph with bbox bit set must be rejected; got Ok and the \
+             bbox stream cursor would silently mis-align for later glyphs"
+        );
     }
 }
