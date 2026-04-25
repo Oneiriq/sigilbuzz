@@ -1067,6 +1067,29 @@ mod tests {
         }
     }
 
+    /// Probe (#197): pinning at a coord outside the tuple's region —
+    /// `axis_support_scalar` returns 0, the tuple drops via
+    /// `project_region_onto_kept_axes`. No infinite loops, no panics,
+    /// no NaN leak through the round-trip.  Coords approaching f32::MAX
+    /// must clamp through the existing NaN/Inf hardening (#185 / #186).
+    #[test]
+    fn pin_with_extreme_coord_drops_tuple_without_panic() {
+        let bytes = build_two_axis_gvar();
+        let pins = vec![AxisPin::Pin, AxisPin::Keep];
+        let coords = vec![1.0e30_f32, 0.0]; // wildly out of [-1, 1]
+        let out = bake_gvar_partial(&bytes, &coords, &pins, 1).expect("partial bake");
+        // Output must parse cleanly.
+        let parsed = ParsedGvar::parse(&out).expect("parses");
+        assert_eq!(parsed.axis_count(), 1);
+        // Surviving tuples (if any) must produce finite deltas; the
+        // tuple should drop because pin scalar is 0 at coord 1e30.
+        let new_deltas = parsed.glyph_deltas(0, &[1.0_f32], 4);
+        for d in &new_deltas {
+            assert!(d.dx.is_finite(), "dx must be finite, got {}", d.dx);
+            assert!(d.dy.is_finite(), "dy must be finite, got {}", d.dy);
+        }
+    }
+
     #[test]
     fn synthetic_two_axis_pin_wght_at_half_scales_payload() {
         // Pin wght=0.5 → scalar 0.5; Keep wdth. Surviving tuple's

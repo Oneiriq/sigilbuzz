@@ -715,6 +715,14 @@ fn parse_one_component(record: &[u8], start: usize) -> Option<(ComponentInfo, us
         let g = (u32::from(record[cur]) << 16)
             | (u32::from(record[cur + 1]) << 8)
             | u32::from(record[cur + 2]);
+        // sigilbuzz uses u16 gids throughout; a u24 source gid > 0xFFFF
+        // would silently truncate to its low 16 bits and lie about the
+        // reference graph (#196). Treat it as a malformed component and
+        // bail — the walker's caller treats `None` as "no further
+        // components in this record" and skips it tolerantly.
+        if g > u32::from(u16::MAX) {
+            return None;
+        }
         #[allow(clippy::cast_possible_truncation)]
         let gid = g as u16;
         (gid, true, cur + 3)
@@ -1116,6 +1124,77 @@ mod tests {
         let map = |_: u16| None;
         let err = rewrite_component_gids(&rec, &map).unwrap_err();
         assert!(matches!(err, SubsetError::Unsupported(_)));
+    }
+
+    /// VARC closure walker must terminate on a cyclic component graph
+    /// (gid A references gid B, gid B references gid A). The fixed-
+    /// point loop should converge after one iteration once both gids
+    /// are in the kept set, regardless of the cycle.
+    #[test]
+    fn closure_terminates_on_circular_components() {
+        // Two records: idx 0 covering gid 1 references gid 2; idx 1
+        // covering gid 2 references gid 1.
+        let cov = build_coverage(&[1, 2]);
+        let rec_a = build_translate_record(2, 0, 0); // gid 1 → gid 2
+        let rec_b = build_translate_record(1, 0, 0); // gid 2 → gid 1
+        let bytes = build_varc(&[1, 2], &[&rec_a, &rec_b]);
+        let _ = cov; // silence unused (build_varc constructs its own)
+        let parsed = ParsedVarc::parse(&bytes).expect("parses");
+
+        // Manually drive the cycle: start with gid 1, then iterate.
+        let mut keep: alloc::collections::BTreeSet<GlyphId> = alloc::collections::BTreeSet::new();
+        keep.insert(1);
+
+        let mut iterations = 0;
+        loop {
+            let before = keep.len();
+            let snapshot: alloc::vec::Vec<GlyphId> = keep.iter().copied().collect();
+            for g in snapshot {
+                let Some(idx) = parsed.coverage_index_of(g) else {
+                    continue;
+                };
+                let Some(record) = parsed.glyph_record(idx) else {
+                    continue;
+                };
+                for child in walk_component_gids(record) {
+                    keep.insert(child);
+                }
+            }
+            iterations += 1;
+            if keep.len() == before {
+                break;
+            }
+            assert!(
+                iterations < 10,
+                "VARC cycle walker must terminate quickly; iter={iterations}",
+            );
+        }
+        // Both gids end up in the kept set, no infinite loop.
+        assert!(keep.contains(&1));
+        assert!(keep.contains(&2));
+    }
+
+    /// Regression for #196: a 24-bit gid with a non-zero high byte
+    /// (>0xFFFF) used to truncate silently to its low 16 bits — the
+    /// closure walker would then claim a wrong glyph was referenced.
+    /// The walker must skip such records cleanly instead of fabricating
+    /// a fake gid in the kept set.
+    #[test]
+    fn walk_skips_24bit_gid_overflowing_u16() {
+        // VC_GID_IS_24BIT (1<<12 = 0x1000) → uint32var encoding is the
+        // two-byte form (0x80..=0xBF first byte): 0x90, 0x00.
+        // 24-bit gid 0x010005 — high byte non-zero, doesn't fit u16.
+        let mut record = Vec::new();
+        record.push(0x90);
+        record.push(0x00);
+        record.extend_from_slice(&[0x01, 0x00, 0x05]);
+        // Walker must NOT yield 0x0005 (the truncated low bits) — that
+        // would lie about the source's reference graph.
+        let gids = walk_component_gids(&record);
+        assert!(
+            gids.is_empty(),
+            "u24 gid > 0xFFFF must be rejected, not silently truncated; got {gids:?}",
+        );
     }
 
     #[test]
