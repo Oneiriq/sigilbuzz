@@ -45,10 +45,13 @@
 //! - **Type 2** — Ligature Substitution. State machine walks the
 //!   input, stacking pending glyphs; on an accept entry it looks up
 //!   a ligature action array to emit a single replacement.
-//!
-//! Types 4 (non-contextual) and 5 (insertion) are accepted at the
-//! header level — their bytes are consumed so later subtables stay
-//! aligned — but ignored for now. A future PR can flesh them in.
+//! - **Type 4** — Non-Contextual Substitution. The simplest morx
+//!   subtable type: just an AAT lookup table giving a gid → gid
+//!   replacement applied unconditionally to every glyph in the run.
+//! - **Type 5** — Insertion. State machine that inserts up to five
+//!   glyphs before / after the current position based on context.
+//!   Used by Apple Chancery to inject decorative glyphs and by
+//!   Hebrew / Arabic AAT fonts for cantillation marks.
 //!
 //! # Feature selector handling
 //!
@@ -72,6 +75,8 @@ use crate::tables::parse::Reader;
 const TYPE_REARRANGEMENT: u8 = 0;
 const TYPE_CONTEXTUAL: u8 = 1;
 const TYPE_LIGATURE: u8 = 2;
+const TYPE_NON_CONTEXTUAL: u8 = 4;
+const TYPE_INSERTION: u8 = 5;
 
 /// Parsed `morx` table — owns pointers into the source bytes.
 #[derive(Debug, Clone)]
@@ -125,6 +130,20 @@ enum SubtableBody<'a> {
         components: &'a [u8],
         ligatures: &'a [u8],
     },
+    /// Type 4 — Non-contextual substitution. The body is one AAT
+    /// lookup table mapping every input glyph id directly to its
+    /// replacement; the "no rule" sentinel falls back to the input.
+    NonContextual { lookup: &'a [u8] },
+    /// Type 5 — Insertion. The state machine walks the input; on an
+    /// insertion entry, it splices `currentInsertCount` glyphs from
+    /// `currentInsertList` before / after the current glyph, and
+    /// `markedInsertCount` glyphs at the most recent mark. Inserted
+    /// glyphs are u16 ids drawn from the `insertion glyph table` — a
+    /// flat u16 array indexed by the entry's u16 list offsets.
+    Insertion {
+        state: StateTableHeader<'a>,
+        insertion_table: &'a [u8],
+    },
 }
 
 // --- Type 0 flags ---
@@ -149,6 +168,22 @@ const FLAG_LIG_SET_COMPONENT: u16 = 1 << 15;
 // bit 14: DontAdvance reused
 // bit 13: PerformAction — run the ligature action referenced by the entry
 const FLAG_LIG_PERFORM_ACTION: u16 = 1 << 13;
+
+// --- Type 5 flags ---
+// bit 15: SetMark — record the current position as the mark
+const FLAG_INS_SET_MARK: u16 = 1 << 15;
+// bit 14: DontAdvance reused
+// bit 13: CurrentIsKashidaLike — kashida hint, ignored for shaping correctness
+// bit 12: MarkedIsKashidaLike   — kashida hint, ignored
+// bit 11: CurrentInsertBefore — insert relative to the current glyph: 0 = after, 1 = before
+// bit 10: MarkedInsertBefore  — insert relative to the marked glyph
+// bits 5-9: currentInsertCount (5 bits → max 31)
+// bits 0-4: markedInsertCount  (5 bits → max 31)
+const FLAG_INS_CURRENT_BEFORE: u16 = 1 << 11;
+const FLAG_INS_MARKED_BEFORE: u16 = 1 << 10;
+const FLAG_INS_CURRENT_COUNT_MASK: u16 = 0x03E0;
+const FLAG_INS_CURRENT_COUNT_SHIFT: u32 = 5;
+const FLAG_INS_MARKED_COUNT_MASK: u16 = 0x001F;
 
 // Ligature action flags in the u32 action word.
 const LIG_ACTION_LAST: u32 = 1 << 31;
@@ -319,58 +354,86 @@ fn parse_subtable_body(sub_type: u8, bytes: &[u8]) -> Result<Option<SubtableBody
                 substitutions,
             }))
         }
-        TYPE_LIGATURE => {
-            // Ligature subtable extends the header with three offsets.
-            if bytes.len() < StateTableHeader::SIZE + 12 {
+        TYPE_LIGATURE => parse_ligature_body(bytes),
+        TYPE_NON_CONTEXTUAL => {
+            // The whole body IS the AAT lookup table — no extra
+            // header, no offsets. We hand the slice straight to
+            // [`lookup_via_state_table`] at apply time.
+            Ok(Some(SubtableBody::NonContextual { lookup: bytes }))
+        }
+        TYPE_INSERTION => {
+            // Insertion subtable extends the state-table header with
+            // one extra offset: insertionGlyphTable.
+            if bytes.len() < StateTableHeader::SIZE + 4 {
                 return Err(Error::Truncated {
                     offset: bytes.len(),
-                    context: "morx type 2 header",
+                    context: "morx type 5 header",
                 });
             }
             let state = StateTableHeader::parse(bytes)?;
-            let base = StateTableHeader::SIZE;
-            let lig_action_off = u32::from_be_bytes([
-                bytes[base],
-                bytes[base + 1],
-                bytes[base + 2],
-                bytes[base + 3],
+            let ins_off = u32::from_be_bytes([
+                bytes[StateTableHeader::SIZE],
+                bytes[StateTableHeader::SIZE + 1],
+                bytes[StateTableHeader::SIZE + 2],
+                bytes[StateTableHeader::SIZE + 3],
             ]) as usize;
-            let component_off = u32::from_be_bytes([
-                bytes[base + 4],
-                bytes[base + 5],
-                bytes[base + 6],
-                bytes[base + 7],
-            ]) as usize;
-            let ligature_off = u32::from_be_bytes([
-                bytes[base + 8],
-                bytes[base + 9],
-                bytes[base + 10],
-                bytes[base + 11],
-            ]) as usize;
-            let lig_actions = bytes.get(lig_action_off..).ok_or(Error::Truncated {
-                offset: lig_action_off,
-                context: "morx ligature action table",
+            let insertion_table = bytes.get(ins_off..).ok_or(Error::Truncated {
+                offset: ins_off,
+                context: "morx insertion glyph table",
             })?;
-            let components = bytes.get(component_off..).ok_or(Error::Truncated {
-                offset: component_off,
-                context: "morx ligature component table",
-            })?;
-            let ligatures = bytes.get(ligature_off..).ok_or(Error::Truncated {
-                offset: ligature_off,
-                context: "morx ligature list",
-            })?;
-            Ok(Some(SubtableBody::Ligature {
+            Ok(Some(SubtableBody::Insertion {
                 state,
-                lig_actions,
-                components,
-                ligatures,
+                insertion_table,
             }))
         }
-        // Types 4 (non-contextual) and 5 (insertion) are deferred;
-        // parse accepts them so later subtables stay aligned, but the
-        // body is None so the apply pass skips them silently.
+        // Types 6+ remain deferred for now.
         _ => Ok(None),
     }
+}
+
+fn parse_ligature_body(bytes: &[u8]) -> Result<Option<SubtableBody<'_>>> {
+    // Ligature subtable extends the header with three offsets.
+    if bytes.len() < StateTableHeader::SIZE + 12 {
+        return Err(Error::Truncated {
+            offset: bytes.len(),
+            context: "morx type 2 header",
+        });
+    }
+    let state = StateTableHeader::parse(bytes)?;
+    let base = StateTableHeader::SIZE;
+    let lig_action_off =
+        u32::from_be_bytes([bytes[base], bytes[base + 1], bytes[base + 2], bytes[base + 3]])
+            as usize;
+    let component_off = u32::from_be_bytes([
+        bytes[base + 4],
+        bytes[base + 5],
+        bytes[base + 6],
+        bytes[base + 7],
+    ]) as usize;
+    let ligature_off = u32::from_be_bytes([
+        bytes[base + 8],
+        bytes[base + 9],
+        bytes[base + 10],
+        bytes[base + 11],
+    ]) as usize;
+    let lig_actions = bytes.get(lig_action_off..).ok_or(Error::Truncated {
+        offset: lig_action_off,
+        context: "morx ligature action table",
+    })?;
+    let components = bytes.get(component_off..).ok_or(Error::Truncated {
+        offset: component_off,
+        context: "morx ligature component table",
+    })?;
+    let ligatures = bytes.get(ligature_off..).ok_or(Error::Truncated {
+        offset: ligature_off,
+        context: "morx ligature list",
+    })?;
+    Ok(Some(SubtableBody::Ligature {
+        state,
+        lig_actions,
+        components,
+        ligatures,
+    }))
 }
 
 fn apply_subtable(body: &SubtableBody<'_>, glyphs: &mut Vec<u16>, origins: &mut Vec<usize>) {
@@ -386,6 +449,11 @@ fn apply_subtable(body: &SubtableBody<'_>, glyphs: &mut Vec<u16>, origins: &mut 
             components,
             ligatures,
         } => apply_ligature(state, lig_actions, components, ligatures, glyphs, origins),
+        SubtableBody::NonContextual { lookup } => apply_non_contextual(lookup, glyphs),
+        SubtableBody::Insertion {
+            state,
+            insertion_table,
+        } => apply_insertion(state, insertion_table, glyphs, origins),
     }
 }
 
@@ -708,6 +776,173 @@ fn perform_ligature_action(
     }
 }
 
+// --- Type 4: Non-Contextual Substitution ---
+
+/// Walks every glyph in the run and replaces it with whatever the
+/// subtable's AAT lookup yields. A lookup that returns
+/// [`CLASS_OUT_OF_BOUNDS`] (the AAT "glyph not covered" sentinel) or
+/// errors on a malformed slice falls through to "keep the original
+/// glyph", so a partly-broken subtable can't blank out the run.
+fn apply_non_contextual(lookup: &[u8], glyphs: &mut [u16]) {
+    for slot in glyphs.iter_mut() {
+        if let Ok(replacement) = lookup_via_state_table(lookup, *slot) {
+            if replacement != CLASS_OUT_OF_BOUNDS {
+                *slot = replacement;
+            }
+        }
+    }
+}
+
+// --- Type 5: Insertion Substitution ---
+
+/// Applies one type-5 (insertion) subtable. State-table entries are
+/// 8 bytes each: `(newState, flags, currentInsertIndex, markedInsertIndex)`.
+/// Flags carry the SetMark / DontAdvance bits plus before/after
+/// orientation flags and the two count fields (5 bits each).
+///
+/// On an entry whose currentInsertIndex (or markedInsertIndex) is
+/// non-`0xFFFF` and whose corresponding count is non-zero, we splice
+/// `count` glyphs from the insertion-glyph table at the chosen
+/// position, taking care to keep the cursor and origin map in sync.
+///
+/// The insertion-glyph table is a flat u16 array indexed in units of
+/// glyph ids (so byte offset = index * 2).
+fn apply_insertion(
+    state: &StateTableHeader<'_>,
+    insertion_table: &[u8],
+    glyphs: &mut Vec<u16>,
+    origins: &mut Vec<usize>,
+) {
+    const ENTRY_SIZE: usize = 8;
+    let mut cur_state: u16 = 0;
+    let mut mark: Option<usize> = None;
+    let mut i = 0usize;
+    // Bound the walk: every glyph processed at most a handful of
+    // times (DontAdvance retries) before we cap, so a malformed font
+    // can't loop the shaper.
+    let max_iters = glyphs.len().saturating_mul(8) + 16;
+    let mut iters = 0usize;
+    while i <= glyphs.len() {
+        iters += 1;
+        if iters > max_iters {
+            return;
+        }
+        let class = class_for(state, glyphs.get(i).copied()).unwrap_or(CLASS_OUT_OF_BOUNDS);
+        let Ok(entry_idx) = state.entry_index(cur_state, class) else {
+            return;
+        };
+        let Ok((new_state, flags)) = state.entry_prefix(entry_idx, ENTRY_SIZE) else {
+            return;
+        };
+        let cur_index = state
+            .entry_tail_u16(entry_idx, ENTRY_SIZE, 4)
+            .unwrap_or(0xFFFF);
+        let marked_index = state
+            .entry_tail_u16(entry_idx, ENTRY_SIZE, 6)
+            .unwrap_or(0xFFFF);
+
+        let cur_count =
+            ((flags & FLAG_INS_CURRENT_COUNT_MASK) >> FLAG_INS_CURRENT_COUNT_SHIFT) as usize;
+        let mark_count = (flags & FLAG_INS_MARKED_COUNT_MASK) as usize;
+
+        // Apply marked insertions first — they sit earlier in the
+        // run, so splicing them first leaves the current-position
+        // index valid afterwards. When the marked position lands at
+        // or before the cursor, we shift the cursor forward by the
+        // number of inserted glyphs.
+        if marked_index != 0xFFFF && mark_count > 0 {
+            if let Some(m) = mark {
+                let pos = if flags & FLAG_INS_MARKED_BEFORE != 0 {
+                    m
+                } else {
+                    m + 1
+                };
+                let n = splice_insertions(
+                    insertion_table,
+                    marked_index,
+                    mark_count,
+                    pos,
+                    glyphs,
+                    origins,
+                );
+                if pos <= i {
+                    i += n;
+                }
+            }
+        }
+        // Current-glyph insertions. After-position inserts leave the
+        // cursor on the same glyph (so the next tick advances past
+        // both it and the inserted glyphs); before-position inserts
+        // push the cursor past the new run so the original glyph is
+        // re-processed in the new state.
+        if cur_index != 0xFFFF && cur_count > 0 && i <= glyphs.len() {
+            let before = flags & FLAG_INS_CURRENT_BEFORE != 0;
+            let pos = if before { i } else { i + 1 };
+            let n = splice_insertions(
+                insertion_table,
+                cur_index,
+                cur_count,
+                pos,
+                glyphs,
+                origins,
+            );
+            if before {
+                i += n;
+            }
+        }
+
+        if flags & FLAG_INS_SET_MARK != 0 {
+            mark = Some(i);
+        }
+        cur_state = new_state;
+        if flags & FLAG_DONT_ADVANCE == 0 {
+            i += 1;
+        } else if i == glyphs.len() {
+            return;
+        }
+    }
+}
+
+/// Reads `count` u16 glyph ids from `insertion_table` at `index`
+/// and splices them into `glyphs` / `origins` at `pos`. Returns the
+/// number of glyphs actually inserted (zero when `pos` is past the
+/// run end or the table doesn't cover the request).
+fn splice_insertions(
+    insertion_table: &[u8],
+    index: u16,
+    count: usize,
+    pos: usize,
+    glyphs: &mut Vec<u16>,
+    origins: &mut Vec<usize>,
+) -> usize {
+    if pos > glyphs.len() {
+        return 0;
+    }
+    let inserts = read_insertions(insertion_table, index, count);
+    for (k, g) in inserts.iter().enumerate() {
+        glyphs.insert(pos + k, *g);
+        origins.insert(pos + k, usize::MAX);
+    }
+    inserts.len()
+}
+
+/// Reads `count` u16 glyph ids from the insertion-glyph table
+/// starting at `index` (units of u16, not bytes). Returns an empty
+/// vector if the slice doesn't cover the request — the caller treats
+/// that as "no insertion".
+fn read_insertions(table: &[u8], index: u16, count: usize) -> Vec<u16> {
+    let start = index as usize * 2;
+    let end = start + count * 2;
+    let Some(slice) = table.get(start..end) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(count);
+    for chunk in slice.chunks_exact(2) {
+        out.push(u16::from_be_bytes([chunk[0], chunk[1]]));
+    }
+    out
+}
+
 fn class_for(state: &StateTableHeader<'_>, glyph: Option<u16>) -> Result<u16> {
     match glyph {
         None => Ok(CLASS_END_OF_TEXT),
@@ -939,6 +1174,199 @@ mod tests {
             Morx::parse(&bytes),
             Err(Error::Unsupported { .. })
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // Type 4 — Non-contextual substitution.
+    // -----------------------------------------------------------------
+
+    /// Builds a morx version-2 table with a single chain containing
+    /// a single type-4 subtable. The subtable's body is one AAT
+    /// lookup (format 6) that maps `pairs` (gid_in → gid_out).
+    fn build_non_contextual_morx(pairs: &[(u16, u16)]) -> Vec<u8> {
+        let mut sorted = pairs.to_vec();
+        sorted.sort_by_key(|p| p.0);
+        let lookup = build_lookup_format6(&sorted);
+
+        let body = lookup;
+        let sub_len = 12 + body.len();
+        let mut subtable: Vec<u8> = Vec::new();
+        subtable.extend_from_slice(&(sub_len as u32).to_be_bytes());
+        subtable.extend_from_slice(&0x0000_0004u32.to_be_bytes()); // type 4
+        subtable.extend_from_slice(&0x0000_0001u32.to_be_bytes()); // subFeatureFlags
+        subtable.extend_from_slice(&body);
+
+        let chain_len = 16 + subtable.len();
+        let mut chain: Vec<u8> = Vec::new();
+        chain.extend_from_slice(&0x0000_0001u32.to_be_bytes()); // defaultFlags
+        chain.extend_from_slice(&(chain_len as u32).to_be_bytes());
+        chain.extend_from_slice(&0u32.to_be_bytes()); // featureCount
+        chain.extend_from_slice(&1u32.to_be_bytes()); // subtableCount
+        chain.extend_from_slice(&subtable);
+
+        let mut table: Vec<u8> = Vec::new();
+        table.extend_from_slice(&2u16.to_be_bytes()); // version
+        table.extend_from_slice(&0u16.to_be_bytes());
+        table.extend_from_slice(&1u32.to_be_bytes()); // nChains
+        table.extend_from_slice(&chain);
+        table
+    }
+
+    #[test]
+    fn morx_non_contextual_substitutes_known_glyphs() {
+        // gid 5 → gid 50, gid 7 → gid 70. Untouched glyphs pass through.
+        let bytes = build_non_contextual_morx(&[(5, 50), (7, 70)]);
+        let m = Morx::parse(&bytes).unwrap();
+        let (out, _) = m.apply(&[5, 9, 7]);
+        assert_eq!(out, &[50, 9, 70]);
+    }
+
+    #[test]
+    fn morx_non_contextual_leaves_unmapped_glyphs_alone() {
+        let bytes = build_non_contextual_morx(&[(5, 50)]);
+        let m = Morx::parse(&bytes).unwrap();
+        let (out, _) = m.apply(&[1, 2, 3]);
+        assert_eq!(out, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn morx_non_contextual_handles_empty_input() {
+        let bytes = build_non_contextual_morx(&[(5, 50)]);
+        let m = Morx::parse(&bytes).unwrap();
+        let (out, _) = m.apply(&[]);
+        assert!(out.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Type 5 — Insertion.
+    // -----------------------------------------------------------------
+
+    /// Builds a morx version-2 table with one chain that carries a
+    /// single type-5 (insertion) subtable wired to inject `marker_gid`
+    /// after every `trigger_gid` it sees.
+    ///
+    /// State machine:
+    ///   class 4 = trigger_gid; everything else falls through.
+    ///   State 0 (only state):
+    ///     class 4 → entry 1 (currentInsertCount=1, inserts the
+    ///                        single-glyph table starting at index 0).
+    ///     other classes → entry 0 (noop).
+    fn build_insertion_morx_after_trigger(trigger_gid: u16, marker_gid: u16) -> Vec<u8> {
+        let class_lookup = build_lookup_format6(&[(trigger_gid, 4)]);
+
+        // Body layout (relative to body start):
+        //   0..16   state-table header
+        //  16..20   insertionGlyphTable offset (u32)
+        //  20..     class lookup (aligned to 2)
+        //  ..       state array (1 state × 5 classes × u16) = 10 B
+        //  ..       entry array (2 entries × 8 B) = 16 B
+        //  ..       insertion glyph table (one u16 = marker_gid)
+        let n_classes: u32 = 5;
+        let n_states: u32 = 1;
+        let n_entries: usize = 2;
+
+        let header_len = 20;
+        let class_off = header_len;
+        let class_end = class_off + class_lookup.len();
+        let state_off = class_end + (class_end % 2);
+        let state_bytes = (n_states * n_classes) as usize * 2;
+        let entry_off = state_off + state_bytes;
+        let entry_bytes = n_entries * 8;
+        let ins_off = entry_off + entry_bytes;
+        let ins_bytes = 2usize;
+
+        let body_len = ins_off + ins_bytes;
+
+        let mut body: Vec<u8> = Vec::with_capacity(body_len);
+        body.extend_from_slice(&n_classes.to_be_bytes());
+        body.extend_from_slice(&(class_off as u32).to_be_bytes());
+        body.extend_from_slice(&(state_off as u32).to_be_bytes());
+        body.extend_from_slice(&(entry_off as u32).to_be_bytes());
+        body.extend_from_slice(&(ins_off as u32).to_be_bytes());
+        body.extend_from_slice(&class_lookup);
+        if body.len() < state_off {
+            body.resize(state_off, 0);
+        }
+        // State 0:
+        let s0: [u16; 5] = [0, 0, 0, 0, 1];
+        for v in &s0 {
+            body.extend_from_slice(&v.to_be_bytes());
+        }
+        // Entries (newState, flags, currentInsertIndex, markedInsertIndex)
+        // #0 noop
+        body.extend_from_slice(&0u16.to_be_bytes());
+        body.extend_from_slice(&0u16.to_be_bytes()); // flags
+        body.extend_from_slice(&0xFFFFu16.to_be_bytes()); // cur idx
+        body.extend_from_slice(&0xFFFFu16.to_be_bytes()); // mark idx
+        // #1 insert 1 glyph after current (CurrentInsertCount=1, no
+        // before-flag → after, list at index 0).
+        // Flags: count=1 in bits 5..9 → 1 << 5 = 0x0020.
+        let entry1_flags: u16 = 1 << FLAG_INS_CURRENT_COUNT_SHIFT;
+        body.extend_from_slice(&0u16.to_be_bytes()); // newState
+        body.extend_from_slice(&entry1_flags.to_be_bytes());
+        body.extend_from_slice(&0u16.to_be_bytes()); // currentInsertIndex = 0
+        body.extend_from_slice(&0xFFFFu16.to_be_bytes()); // markedInsertIndex
+        // Insertion glyph table.
+        body.extend_from_slice(&marker_gid.to_be_bytes());
+
+        let sub_len = 12 + body.len();
+        let mut subtable: Vec<u8> = Vec::new();
+        subtable.extend_from_slice(&(sub_len as u32).to_be_bytes());
+        subtable.extend_from_slice(&0x0000_0005u32.to_be_bytes()); // type 5
+        subtable.extend_from_slice(&0x0000_0001u32.to_be_bytes()); // subFeatureFlags
+        subtable.extend_from_slice(&body);
+
+        let chain_len = 16 + subtable.len();
+        let mut chain: Vec<u8> = Vec::new();
+        chain.extend_from_slice(&0x0000_0001u32.to_be_bytes()); // defaultFlags
+        chain.extend_from_slice(&(chain_len as u32).to_be_bytes());
+        chain.extend_from_slice(&0u32.to_be_bytes());
+        chain.extend_from_slice(&1u32.to_be_bytes());
+        chain.extend_from_slice(&subtable);
+
+        let mut table: Vec<u8> = Vec::new();
+        table.extend_from_slice(&2u16.to_be_bytes());
+        table.extend_from_slice(&0u16.to_be_bytes());
+        table.extend_from_slice(&1u32.to_be_bytes());
+        table.extend_from_slice(&chain);
+        table
+    }
+
+    #[test]
+    fn morx_insertion_appends_marker_after_trigger() {
+        // trigger gid 7, marker gid 99.
+        let bytes = build_insertion_morx_after_trigger(7, 99);
+        let m = Morx::parse(&bytes).unwrap();
+        let (out, origins) = m.apply(&[1, 7, 2]);
+        // Trigger lands at index 1; marker is inserted *after* it.
+        assert_eq!(out, &[1, 7, 99, 2]);
+        // Inserted glyph has no originating input — marked with
+        // usize::MAX.
+        assert_eq!(origins, &[0, 1, usize::MAX, 2]);
+    }
+
+    #[test]
+    fn morx_insertion_handles_no_trigger() {
+        let bytes = build_insertion_morx_after_trigger(7, 99);
+        let m = Morx::parse(&bytes).unwrap();
+        let (out, _) = m.apply(&[1, 2, 3]);
+        assert_eq!(out, &[1, 2, 3], "no insertion when trigger absent");
+    }
+
+    #[test]
+    fn morx_insertion_fires_for_each_trigger() {
+        let bytes = build_insertion_morx_after_trigger(7, 99);
+        let m = Morx::parse(&bytes).unwrap();
+        let (out, _) = m.apply(&[7, 7]);
+        assert_eq!(out, &[7, 99, 7, 99]);
+    }
+
+    #[test]
+    fn morx_insertion_handles_empty_input() {
+        let bytes = build_insertion_morx_after_trigger(7, 99);
+        let m = Morx::parse(&bytes).unwrap();
+        let (out, _) = m.apply(&[]);
+        assert!(out.is_empty());
     }
 
     #[test]
