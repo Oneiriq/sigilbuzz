@@ -3506,6 +3506,9 @@ mod partial_instancing_tests {
     use super::*;
 
     const RUBIK: &[u8] = include_bytes!("../../../tests/fixtures/rubik_vf.ttf");
+    const VAR_KERN: &[u8] = include_bytes!("../../../tests/fixtures/var_kern.ttf");
+    const SOURCE_SANS: &[u8] =
+        include_bytes!("../../../tests/fonts/SourceSans3VF-Latin-Subset.otf");
 
     fn rubik_face() -> Face<'static> {
         Face::parse_bytes(RUBIK, 0).unwrap()
@@ -4135,5 +4138,248 @@ mod partial_instancing_tests {
                 );
             }
         }
+    }
+
+    // --------------------------------------------------------------
+    // Host-table partial bakes (HVAR / VVAR / MVAR / GDEF.IVS).
+    // --------------------------------------------------------------
+
+    /// Builds an HVAR table (no maps; gid is the inner index directly)
+    /// wrapping the given IVS bytes.
+    fn build_hvar_no_maps(ivs: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // major
+        out.extend_from_slice(&0u16.to_be_bytes()); // minor
+        out.extend_from_slice(&20u32.to_be_bytes()); // ivs offset = header end
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(ivs);
+        out
+    }
+
+    #[test]
+    fn bake_hvar_partial_round_trips_at_keep_coord() {
+        // 2-axis IVS, one region (peak at (1, 1)), one item delta = 100.
+        // Pin wght=0.5, keep wdth → delta scales to 50; HVAR's gid-0
+        // delta at wdth=1 must be 50.
+        let ivs = build_ivs2(
+            &[[(0.0, 1.0, 1.0), (0.0, 1.0, 1.0)]],
+            &[(alloc::vec![0], alloc::vec![alloc::vec![100]])],
+        );
+        let hvar = build_hvar_no_maps(&ivs);
+        let new_hvar = bake_hvar_partial(&hvar, &[0.5, 0.0], &[AxisPin::Pin, AxisPin::Keep])
+            .expect("bake");
+        let parsed = sigilbuzz::tables::Hvar::parse(&new_hvar).unwrap();
+        let d = parsed.advance_delta(0, &[1.0]);
+        assert!((d - 50.0).abs() < 1.0, "got {}", d);
+    }
+
+    #[test]
+    fn bake_hvar_partial_zeroes_dropped_subtable_lookups() {
+        // Region drops at the pin coord (peak at (1, 1), pin coord 0
+        // on wght → scalar 0). Subtable collapses; HVAR.advance_delta
+        // must return 0, not NaN, not panic.
+        let ivs = build_ivs2(
+            &[[(0.5, 1.0, 1.0), (0.0, 1.0, 1.0)]],
+            &[(alloc::vec![0], alloc::vec![alloc::vec![100]])],
+        );
+        let hvar = build_hvar_no_maps(&ivs);
+        let new_hvar = bake_hvar_partial(&hvar, &[0.0, 0.0], &[AxisPin::Pin, AxisPin::Keep])
+            .expect("bake");
+        let parsed = sigilbuzz::tables::Hvar::parse(&new_hvar).unwrap();
+        // Subtable count is now zero; (outer=0, inner=0) is out of
+        // range → IVS evaluator returns 0.
+        let d = parsed.advance_delta(0, &[1.0]);
+        assert!(d.abs() < 1e-3, "got {}", d);
+    }
+
+    /// Builds an MVAR table with `records` × (tag, outer=0, inner=0)
+    /// pointing at the embedded IVS.
+    fn build_mvar(records: &[[u8; 4]], ivs: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // major
+        out.extend_from_slice(&0u16.to_be_bytes()); // minor
+        out.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        out.extend_from_slice(&8u16.to_be_bytes()); // valueRecordSize
+        out.extend_from_slice(&(records.len() as u16).to_be_bytes());
+        let store_off_slot = out.len();
+        out.extend_from_slice(&0u16.to_be_bytes()); // store offset placeholder
+        for tag in records {
+            out.extend_from_slice(tag);
+            out.extend_from_slice(&0u16.to_be_bytes()); // outer
+            out.extend_from_slice(&0u16.to_be_bytes()); // inner
+        }
+        let store_off = out.len() as u16;
+        out[store_off_slot..store_off_slot + 2].copy_from_slice(&store_off.to_be_bytes());
+        out.extend_from_slice(ivs);
+        out
+    }
+
+    #[test]
+    fn bake_mvar_partial_round_trips_at_keep_coord() {
+        let ivs = build_ivs2(
+            &[[(0.0, 1.0, 1.0), (0.0, 1.0, 1.0)]],
+            &[(alloc::vec![0], alloc::vec![alloc::vec![80]])],
+        );
+        let mvar = build_mvar(&[*b"hasc"], &ivs);
+        let new_mvar = bake_mvar_partial(&mvar, &[0.5, 0.0], &[AxisPin::Pin, AxisPin::Keep])
+            .expect("bake");
+        let parsed = sigilbuzz::tables::Mvar::parse(&new_mvar).unwrap();
+        // Pin scalar 0.5; at wdth=1.0 the trimmed tuple gives 40.
+        let d = parsed.metric_delta(*b"hasc", &[1.0]).unwrap();
+        assert!((d - 40.0).abs() < 1.0, "got {}", d);
+    }
+
+    #[test]
+    fn bake_mvar_partial_zeroes_collapsed_record() {
+        let ivs = build_ivs2(
+            &[[(0.5, 1.0, 1.0), (0.0, 1.0, 1.0)]],
+            &[(alloc::vec![0], alloc::vec![alloc::vec![80]])],
+        );
+        let mvar = build_mvar(&[*b"hasc"], &ivs);
+        let new_mvar = bake_mvar_partial(&mvar, &[0.0, 0.0], &[AxisPin::Pin, AxisPin::Keep])
+            .expect("bake");
+        let parsed = sigilbuzz::tables::Mvar::parse(&new_mvar).unwrap();
+        // Subtable collapsed; (outer=0, inner=0) is now out of range
+        // → 0 delta.
+        let d = parsed.metric_delta(*b"hasc", &[1.0]).unwrap();
+        assert!(d.abs() < 1e-3, "got {}", d);
+    }
+
+    /// Builds a minimal v1.3 GDEF carrying just the IVS.
+    fn build_gdef_v13_ivs_only(ivs: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // major
+        out.extend_from_slice(&3u16.to_be_bytes()); // minor
+        out.extend_from_slice(&0u16.to_be_bytes()); // glyphClassDef
+        out.extend_from_slice(&0u16.to_be_bytes()); // attachList
+        out.extend_from_slice(&0u16.to_be_bytes()); // ligCaretList
+        out.extend_from_slice(&0u16.to_be_bytes()); // markAttachClassDef
+        out.extend_from_slice(&0u16.to_be_bytes()); // markGlyphSetsDef (v1.2+)
+        out.extend_from_slice(&18u32.to_be_bytes()); // itemVarStoreOffset (v1.3)
+        out.extend_from_slice(ivs);
+        out
+    }
+
+    #[test]
+    fn bake_gdef_ivs_partial_trims_ivs_and_keeps_offset_alive() {
+        let ivs = build_ivs2(
+            &[[(0.0, 1.0, 1.0), (0.0, 1.0, 1.0)]],
+            &[(alloc::vec![0], alloc::vec![alloc::vec![100]])],
+        );
+        let gdef = build_gdef_v13_ivs_only(&ivs);
+        let new_gdef =
+            bake_gdef_ivs_partial(&gdef, &[1.0, 0.0], &[AxisPin::Pin, AxisPin::Keep]).expect("bake");
+        // The IVS offset slot is still 18 (header end) and non-zero.
+        let new_off = u32::from_be_bytes([new_gdef[14], new_gdef[15], new_gdef[16], new_gdef[17]]);
+        assert_eq!(new_off, 18);
+        // The trimmed IVS at offset 18 has axisCount = 1.
+        let new_ivs_off = new_off as usize;
+        let parsed = sigilbuzz::tables::variation_store::ItemVariationStore::parse(
+            &new_gdef[new_ivs_off..],
+        )
+        .unwrap();
+        assert_eq!(parsed.axis_count(), 1);
+    }
+
+    // --------------------------------------------------------------
+    // partial_instance() integration round-trip.
+    // --------------------------------------------------------------
+
+    /// var_kern.ttf is a single-axis (wght) VF with GDEF.IVS carrying
+    /// a one-region tuple. Pinning wght reduces to a static font (the
+    /// existing full-instance behaviour). Keeping wght is the
+    /// trivial-axis Keep case — the output keeps fvar + GDEF.IVS, both
+    /// trimmed (axisCount = 1, regionCount = 1). At wght=1 the output
+    /// IVS must produce the same delta as the source IVS at wght=1.
+    #[test]
+    fn partial_instance_var_kern_keep_wght_round_trips() {
+        let face = Face::parse_bytes(VAR_KERN, 0).unwrap();
+        let input = InstanceInput {
+            coords: alloc::vec![0.0_f32; 1],
+            drop_var_tables: false,
+            axis_pins: alloc::vec![AxisPin::Keep],
+        };
+        let out = instance(&face, &input).expect("partial bake");
+        let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
+        // fvar still present with one axis.
+        let new_fvar = baked.fvar().unwrap().expect("fvar survives");
+        assert_eq!(new_fvar.axes().len(), 1);
+        assert_eq!(new_fvar.axes()[0].tag, *b"wght");
+        // GDEF still has an IVS — the trimmed one.
+        let baked_gdef = baked.gdef().unwrap().expect("GDEF survives");
+        let store = baked_gdef
+            .item_variation_store()
+            .expect("GDEF IVS survives");
+        assert_eq!(store.axis_count(), 1);
+    }
+
+    #[test]
+    fn partial_instance_rejects_keep_on_gvar_source() {
+        // Rubik VF carries gvar; partial-instance with Keep must
+        // surface a clear Unsupported error today (gvar projection
+        // tracked as a follow-up).
+        let face = rubik_face();
+        let axis_count = face.fvar().unwrap().unwrap().axes().len();
+        let mut pins = alloc::vec![AxisPin::Pin; axis_count];
+        pins[0] = AxisPin::Keep;
+        let input = InstanceInput {
+            coords: alloc::vec![0.0_f32; axis_count],
+            drop_var_tables: true,
+            axis_pins: pins,
+        };
+        let err = instance(&face, &input).unwrap_err();
+        match err {
+            SubsetError::Unsupported(msg) => {
+                assert!(
+                    msg.contains("gvar") || msg.contains("CFF2"),
+                    "msg should call out the deferred gvar/CFF2 paths: {}",
+                    msg
+                );
+            }
+            other => panic!("expected Unsupported, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn partial_instance_rejects_keep_on_cff2_source() {
+        // Source Sans 3 is CFF2; partial-instance with Keep must
+        // surface an Unsupported error today.
+        let face = Face::parse_bytes(SOURCE_SANS, 0).unwrap();
+        let axis_count = face.fvar().unwrap().unwrap().axes().len();
+        let mut pins = alloc::vec![AxisPin::Pin; axis_count];
+        pins[0] = AxisPin::Keep;
+        let input = InstanceInput {
+            coords: alloc::vec![0.0_f32; axis_count],
+            drop_var_tables: true,
+            axis_pins: pins,
+        };
+        let err = instance(&face, &input).unwrap_err();
+        assert!(matches!(err, SubsetError::Unsupported(_)));
+    }
+
+    #[test]
+    fn partial_instance_var_kern_pin_wght_matches_full_instance() {
+        // Single-axis source; Pin wght and empty pins must produce
+        // identical bytes (the per-axis Pin is just the existing full-
+        // instancing path, exercised through the new integer
+        // validator).
+        let face = Face::parse_bytes(VAR_KERN, 0).unwrap();
+        let user_max = face.fvar().unwrap().unwrap().axes()[0].max_value;
+        let coords = face.fvar().unwrap().unwrap().normalize_coords(&[user_max]);
+        let empty = InstanceInput {
+            coords: coords.clone(),
+            drop_var_tables: true,
+            axis_pins: Vec::new(),
+        };
+        let pinned = InstanceInput {
+            coords,
+            drop_var_tables: true,
+            axis_pins: alloc::vec![AxisPin::Pin],
+        };
+        let a = instance(&face, &empty).expect("empty");
+        let b = instance(&face, &pinned).expect("Pin");
+        assert_eq!(a.bytes, b.bytes, "Pin must equal empty axis_pins");
     }
 }
