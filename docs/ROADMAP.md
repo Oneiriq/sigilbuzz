@@ -197,13 +197,49 @@ Polish: every script-completeness carry-over from prior releases closes, the ren
 
 ---
 
-## 0.5.0+ (next)
+## 0.5.0 (shipping)
 
-- [ ] HarfBuzz `hb-subset` equivalent — font subsetting for distribution + serving.
-- [ ] PDF Type 1 / OTF-embedded font types — alternatives to Type 3 for size-sensitive consumers.
-- [ ] Performance benchmarks against rustybuzz — establish a regression suite.
-- [ ] crates.io publish — `publish = false` flips to true on every workspace member.
-- [ ] Phantom-point references in glyf composite anchor-mode (currently zero-translation fallback).
+Operational gaps closed. Subsetting, the remaining PDF font types, performance baselines, crates.io publish posture, and the phantom-point glyf fallback all land.
+
+### Companion crate `sigilbuzz-subset`
+
+- [x] HarfBuzz `hb-subset` equivalent — font subsetting for distribution + serving. Closure walker pulls composite components into the kept set; cmap / glyf / loca / hmtx / hhea / maxp / head / post all rewritten with new gid order. SFNT directory rebuilt with checksums per spec. Open Sans → {A,B,C} produces a 2 284-byte font (~1% of the 217 KiB source).
+- Pass-through: `name`, `OS/2`. Dropped (or strict-error) by default: GDEF, GSUB, GPOS, kern, vhea, vmtx, VORG, HVAR, gvar, COLR, CPAL, morx, kerx, fvar, avar. CFF/CFF2 raise `SubsetError::Unsupported`. Layout-table subsetting follows in 0.6.0+.
+
+### `sigilbuzz-pdf` Type 1 + OTF-embedded
+
+- [x] Type 1 (PostScript) emitter — cleartext charstrings (eexec encryption deliberately skipped), Type 1 number encoding across all four byte-form tiers, full PathOp coverage with degree-elevated cubics for QuadTo.
+- [x] OTF / TrueType embedded emitter — emits the PDF font dictionary + descriptor + Identity-H CIDToGIDMap + widths around a raw font program. Subsetting the embedded program is `sigilbuzz-subset`'s job.
+
+### Performance baselines
+
+- [x] Criterion benches across Latin / Arabic / Devanagari / Khmer / Hebrew shaping plus Slug encoding and COLRv1 evaluation. `docs/PERFORMANCE.md` records the baseline.
+- [x] Filed `performance` issues for the > 2× rustybuzz gaps: Arabic 32× (#74), Devanagari 173× (#75), Khmer 17× (#76). Tuning is 0.6.0+ work.
+- Hebrew at 0.88× rustybuzz (faster). Latin at 1.17×.
+
+### crates.io publish posture
+
+- [x] Every workspace member has `publish = true`, finalised metadata (description / keywords / categories / per-crate README), and verifies under `cargo publish --dry-run --no-verify --allow-dirty`. Bootstrap caveat documented in `docs/RELEASING.md`: companion crates' `--dry-run` cannot resolve `{ workspace = true }` until `sigilbuzz` has at least one real publish on crates.io.
+- [x] Full Apache 2.0 LICENSE + standard NOTICE present at the repo root.
+
+### Glyf phantom-point anchors
+
+- [x] Phantom-point references in glyf composite anchor-mode now resolve against `hmtx` (and `vmtx` if present) instead of degrading to zero translation. Currently dead-but-correct on the bundled corpus — neither Open Sans nor Amiri uses phantom-anchor mode — and exercised by a synthetic unit test until a fixture font that anchors to phantoms is added.
+
+### Hardening
+
+- [x] Wave 6 fuzz pass on the 0.5.0 surface (+2 fixes — `sigilbuzz-subset` Cargo metadata gap from publish-prep / subset-crate landing order; `sigilbuzz-pdf` Type 3 `font_matrix(0)` returning `[inf 0 0 inf 0 0]` for malformed faces, now clamped to match OTF-embedded behavior).
+
+---
+
+## 0.6.0+ (next)
+
+- [ ] Layout-table subsetting in `sigilbuzz-subset` — GSUB / GPOS / GDEF gid remap.
+- [ ] CFF / CFF2 subsetting (subroutine renumbering, Top DICT updates).
+- [ ] Variable-font subsetting — gvar / HVAR / fvar / avar.
+- [ ] Performance tuning for the > 2× rustybuzz scripts (#74, #75, #76).
+- [ ] WOFF1 / WOFF2 wrapper formats — likely as `sigilbuzz-woff` companion crate.
+- [ ] Real-font fixture for glyf phantom-point anchor mode (currently exercised only by a synthetic unit test).
 
 ---
 
