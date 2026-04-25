@@ -2,10 +2,11 @@
 //!
 //! This companion crate implements a curated subset of
 //! [UAX #14 *Unicode Line Breaking Algorithm*][uax14] sufficient to
-//! wrap English, other European scripts, and CJK text correctly. This
-//! commit adds the [`LineBreakIter`] state machine on top of the
-//! line-break-class classifier; the width-budget wrapper and the UAX
-//! 29 word-segmentation iterator land in subsequent commits.
+//! wrap English, other European scripts, and CJK text correctly.
+//!
+//! - [`line_break_opportunities`] — UAX 14 break iterator over a `&str`.
+//! - [`wrap_lines`] — walks a slice of shaped [`sigilbuzz::Glyph`]s
+//!   and a width budget to produce [`LineRange`]s.
 //!
 //! [uax14]: https://www.unicode.org/reports/tr14/
 
@@ -17,6 +18,8 @@ extern crate alloc;
 
 mod class;
 mod linebreak;
+mod wrap;
 
 pub use class::{line_break_class, LineBreakClass};
 pub use linebreak::{line_break_opportunities, BreakOpportunity, LineBreakIter};
+pub use wrap::{wrap_lines, LineRange, WrapOptions};
