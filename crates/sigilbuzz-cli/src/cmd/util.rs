@@ -4,11 +4,25 @@
 //! scaffold commit stays small. Once a helper is referenced by more
 //! than one subcommand it lives here.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 /// CLI-level error alias. Concrete errors are stringified at the
 /// subcommand boundary so the dispatcher only has to print them.
 pub type CliResult<T = ()> = Result<T, String>;
+
+/// Renders a 4-byte tag as ASCII, escaping non-printable bytes.
+pub fn tag_to_string(tag: [u8; 4]) -> String {
+    let mut out = String::with_capacity(4);
+    for b in tag {
+        if (0x20..=0x7E).contains(&b) {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "\\x{b:02X}");
+        }
+    }
+    out
+}
 
 /// Loads a font file from disk into memory. Reports a friendly error
 /// if the path can't be read.

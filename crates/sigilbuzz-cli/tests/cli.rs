@@ -185,6 +185,88 @@ fn subset_accepts_inclusive_range() {
 }
 
 #[test]
+fn info_prints_table_list_and_features() {
+    let font = open_sans_path();
+    let (stdout, stderr, ok) = run_cli([
+        "info".as_ref(),
+        font.as_os_str(),
+    ]);
+    assert!(ok, "binary failed: stderr={stderr}");
+    assert!(stdout.contains("num_glyphs:"), "missing num_glyphs: {stdout}");
+    assert!(stdout.contains("units_per_em:"), "missing upem: {stdout}");
+    assert!(stdout.contains("tables ("), "missing tables list: {stdout}");
+    // Open Sans carries cmap/head/hhea/hmtx/maxp/glyf/loca at minimum.
+    for tag in &["cmap", "head", "hhea", "hmtx", "maxp", "glyf", "loca"] {
+        assert!(stdout.contains(tag), "missing table {tag}: {stdout}");
+    }
+    // Open Sans carries GSUB and GPOS so we expect a feature list.
+    assert!(stdout.contains("features ("), "missing features: {stdout}");
+}
+
+#[test]
+fn woff_round_trips_ttf_through_woff2() {
+    let font = open_sans_path();
+    let woff2 = write_tempfile("round.woff2", b"");
+    let recovered = write_tempfile("recovered.ttf", b"");
+    let (_so, stderr, ok) = run_cli([
+        "woff".as_ref(),
+        "wrap".as_ref(),
+        font.as_os_str(),
+        woff2.as_os_str(),
+        "--format".as_ref(),
+        "woff2".as_ref(),
+    ]);
+    assert!(ok, "wrap failed: stderr={stderr}");
+    let (_so, stderr, ok) = run_cli([
+        "woff".as_ref(),
+        "unwrap".as_ref(),
+        woff2.as_os_str(),
+        recovered.as_os_str(),
+    ]);
+    assert!(ok, "unwrap failed: stderr={stderr}");
+    let bytes = std::fs::read(&recovered).expect("read recovered");
+    let blob = sigilbuzz::Blob::from_vec(bytes);
+    let _face = sigilbuzz::Face::parse(&blob, 0).expect("recovered face parses");
+}
+
+#[test]
+fn woff_unwrap_rejects_non_woff_input() {
+    let font = open_sans_path();
+    let out = write_tempfile("bogus.ttf", b"");
+    let (_so, stderr, ok) = run_cli([
+        "woff".as_ref(),
+        "unwrap".as_ref(),
+        font.as_os_str(),
+        out.as_os_str(),
+    ]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("unknown WOFF magic"),
+        "expected friendly error, got: {stderr}"
+    );
+}
+
+#[test]
+fn pdf_type3_emits_charprocs() {
+    let font = open_sans_path();
+    let out = write_tempfile("type3.pdfx", b"");
+    let (_stdout, stderr, ok) = run_cli([
+        "pdf".as_ref(),
+        "type3".as_ref(),
+        font.as_os_str(),
+        out.as_os_str(),
+        "--gids".as_ref(),
+        "0..=4".as_ref(),
+    ]);
+    assert!(ok, "binary failed: stderr={stderr}");
+    let body = std::fs::read_to_string(&out).expect("read output");
+    assert!(body.contains("FontBBox"), "missing FontBBox: {body}");
+    assert!(body.contains("FontMatrix"), "missing FontMatrix: {body}");
+    assert!(body.contains("CharProc[0]"), "missing CharProc[0]: {body}");
+    assert!(body.contains("stream"), "missing stream marker: {body}");
+}
+
+#[test]
 fn paint_reports_no_colr_for_open_sans() {
     // Open Sans carries no COLR table, so paint exits 0 and prints
     // a friendly message to stderr (not stdout).
