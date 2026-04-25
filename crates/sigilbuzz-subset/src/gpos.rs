@@ -180,7 +180,11 @@ fn rewrite_single_adj(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable
             if surviving_gids.is_empty() {
                 return None;
             }
-            Some(emit_single_adj_format1(value_format, value_bytes, &surviving_gids))
+            Some(emit_single_adj_format1(
+                value_format,
+                value_bytes,
+                &surviving_gids,
+            ))
         }
         2 => {
             // Per-glyph ValueRecord array right after the header.
@@ -230,10 +234,7 @@ fn emit_single_adj_format1(
     RewrittenSubtable { bytes: out }
 }
 
-fn emit_single_adj_format2(
-    value_format: u16,
-    surviving: &[(u16, Vec<u8>)],
-) -> RewrittenSubtable {
+fn emit_single_adj_format2(value_format: u16, surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
     let mut out = Vec::new();
     out.extend_from_slice(&2u16.to_be_bytes()); // posFormat
     let cov_slot = out.len();
@@ -535,7 +536,8 @@ fn rewrite_pair_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
 
     // Matrix bytes travel verbatim — neither ValueRecord field nor
     // class indices changed.
-    let matrix_bytes = sub[records_off..records_off + class1_count as usize * class1_stride].to_vec();
+    let matrix_bytes =
+        sub[records_off..records_off + class1_count as usize * class1_stride].to_vec();
 
     Some(emit_pair_pos_format2(
         value_format1,
@@ -880,10 +882,9 @@ fn rewrite_mark_attach(
             if base_array_bytes.len() < off_slot + 2 {
                 continue;
             }
-            let attach_off_rel = u16::from_be_bytes([
-                base_array_bytes[off_slot],
-                base_array_bytes[off_slot + 1],
-            ]) as usize;
+            let attach_off_rel =
+                u16::from_be_bytes([base_array_bytes[off_slot], base_array_bytes[off_slot + 1]])
+                    as usize;
             let Some(attach_bytes) = base_array_bytes.get(attach_off_rel..) else {
                 continue;
             };
@@ -893,8 +894,7 @@ fn rewrite_mark_attach(
             if attach_bytes.len() < 2 {
                 continue;
             }
-            let component_count =
-                u16::from_be_bytes([attach_bytes[0], attach_bytes[1]]) as usize;
+            let component_count = u16::from_be_bytes([attach_bytes[0], attach_bytes[1]]) as usize;
             let comp_records_size = component_count * mcc * 2;
             let comp_records_end = 2 + comp_records_size;
             if attach_bytes.len() < comp_records_end {
@@ -913,8 +913,7 @@ fn rewrite_mark_attach(
                 for c in 0..mcc {
                     let slot = 2 + (ci * mcc + c) * 2;
                     let anchor_off_rel =
-                        u16::from_be_bytes([attach_bytes[slot], attach_bytes[slot + 1]])
-                            as usize;
+                        u16::from_be_bytes([attach_bytes[slot], attach_bytes[slot + 1]]) as usize;
                     let anchor_bytes = read_anchor_bytes(attach_bytes, anchor_off_rel);
                     let new_slot = new_records_start + (ci * mcc + c) * 2;
                     if anchor_bytes.is_empty() {
@@ -922,8 +921,7 @@ fn rewrite_mark_attach(
                     } else {
                         let new_off = new_attach.len() as u16;
                         new_attach.extend_from_slice(&anchor_bytes);
-                        new_attach[new_slot..new_slot + 2]
-                            .copy_from_slice(&new_off.to_be_bytes());
+                        new_attach[new_slot..new_slot + 2].copy_from_slice(&new_off.to_be_bytes());
                     }
                 }
             }
@@ -1119,11 +1117,7 @@ mod tests {
         out
     }
 
-    fn build_single_adj_format2(
-        covered: &[u16],
-        value_format: u16,
-        records: &[&[i16]],
-    ) -> Vec<u8> {
+    fn build_single_adj_format2(covered: &[u16], value_format: u16, records: &[&[i16]]) -> Vec<u8> {
         assert_eq!(covered.len(), records.len());
         let mut out = Vec::new();
         out.extend_from_slice(&2u16.to_be_bytes()); // posFormat
@@ -1159,8 +1153,7 @@ mod tests {
     #[test]
     fn rewrite_single_adj_format2_drops_corresponding_value() {
         // Three glyphs with per-glyph deltas. Drop the middle one.
-        let bytes =
-            build_single_adj_format2(&[10, 20, 30], X_ADVANCE, &[&[-5], &[-10], &[-15]]);
+        let bytes = build_single_adj_format2(&[10, 20, 30], X_ADVANCE, &[&[-5], &[-10], &[-15]]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (30, 3)]);
         let ctx = RewriterCtx { gid_map: &map };
         let rs = rewrite_single_adj(&ctx, &bytes).unwrap();
@@ -1228,10 +1221,8 @@ mod tests {
     fn rewrite_pair_pos_format1_keeps_surviving_pairs() {
         // first 10 → second {15, 25}; first 20 → second {5}.
         // Map: 10→1, 15→2, 20→3, drop 5, drop 25.
-        let bytes = build_pair_pos_format1(
-            &[10, 20],
-            &[&[(15, -30, 0), (25, 5, 0)], &[(5, -50, 0)]],
-        );
+        let bytes =
+            build_pair_pos_format1(&[10, 20], &[&[(15, -30, 0), (25, 5, 0)], &[(5, -50, 0)]]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (15, 2), (20, 3)]);
         let ctx = RewriterCtx { gid_map: &map };
         let rs = rewrite_pair_pos_format1(&ctx, &bytes).unwrap();
@@ -1314,14 +1305,7 @@ mod tests {
         let matrix: &[&[i16]] = &[&[0, 0, 0], &[0, -25, -15]];
         let bytes = build_pair_pos_format2(&[10, 11], &cd1, &cd2, matrix);
 
-        let map = map_from_pairs(&[
-            (0, 0),
-            (10, 9),
-            (11, 10),
-            (20, 19),
-            (21, 20),
-            (22, 21),
-        ]);
+        let map = map_from_pairs(&[(0, 0), (10, 9), (11, 10), (20, 19), (21, 20), (22, 21)]);
         let ctx = RewriterCtx { gid_map: &map };
         let rs = rewrite_pair_pos_format2(&ctx, &bytes).unwrap();
         let pp = PairPos::parse(&rs.bytes).unwrap();
@@ -1440,8 +1424,7 @@ mod tests {
 
     #[test]
     fn rewrite_mark_base_drops_when_marks_drop() {
-        let bytes =
-            build_mark_base_pos(&[20], &[5], 1, &[(0, (10, 0))], &[vec![Some((250, 500))]]);
+        let bytes = build_mark_base_pos(&[20], &[5], 1, &[(0, (10, 0))], &[vec![Some((250, 500))]]);
         let map = map_from_pairs(&[(0, 0), (5, 1)]); // mark 20 dropped
         let ctx = RewriterCtx { gid_map: &map };
         assert!(rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::FixedClassRow).is_none());
@@ -1449,8 +1432,7 @@ mod tests {
 
     #[test]
     fn rewrite_mark_base_drops_when_bases_drop() {
-        let bytes =
-            build_mark_base_pos(&[20], &[5], 1, &[(0, (10, 0))], &[vec![Some((250, 500))]]);
+        let bytes = build_mark_base_pos(&[20], &[5], 1, &[(0, (10, 0))], &[vec![Some((250, 500))]]);
         let map = map_from_pairs(&[(0, 0), (20, 1)]); // base 5 dropped
         let ctx = RewriterCtx { gid_map: &map };
         assert!(rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::FixedClassRow).is_none());
@@ -1568,13 +1550,7 @@ mod tests {
     fn rewrite_mark_mark_keeps_round_trip() {
         // Mark1 (gid 30, class 0), Mark2 (gid 5) with class-0 anchor.
         // Mark-to-mark uses the same shape as mark-to-base.
-        let bytes = build_mark_base_pos(
-            &[30],
-            &[5],
-            1,
-            &[(0, (5, 0))],
-            &[vec![Some((100, 600))]],
-        );
+        let bytes = build_mark_base_pos(&[30], &[5], 1, &[(0, (5, 0))], &[vec![Some((100, 600))]]);
         let map = map_from_pairs(&[(0, 0), (5, 1), (30, 2)]);
         let ctx = RewriterCtx { gid_map: &map };
         let rs = rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::FixedClassRow).unwrap();
@@ -1609,7 +1585,10 @@ mod tests {
 
     // ----- Type 3 — Cursive -----
 
-    fn build_cursive(covered: &[u16], records: &[(Option<(i16, i16)>, Option<(i16, i16)>)]) -> Vec<u8> {
+    fn build_cursive(
+        covered: &[u16],
+        records: &[(Option<(i16, i16)>, Option<(i16, i16)>)],
+    ) -> Vec<u8> {
         assert_eq!(covered.len(), records.len());
         let mut out = Vec::new();
         out.extend_from_slice(&1u16.to_be_bytes()); // posFormat

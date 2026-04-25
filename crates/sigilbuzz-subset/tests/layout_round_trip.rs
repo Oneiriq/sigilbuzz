@@ -811,7 +811,11 @@ fn rubik_latin_subset_retains_gpos() {
     );
     // The rewritten GPOS must parse cleanly.
     let parsed = subset_face.gpos();
-    assert!(parsed.is_ok(), "rewritten GPOS must parse: {:?}", parsed.err());
+    assert!(
+        parsed.is_ok(),
+        "rewritten GPOS must parse: {:?}",
+        parsed.err()
+    );
 }
 
 #[test]
@@ -845,7 +849,10 @@ fn rubik_latin_subset_gpos_is_byte_deterministic() {
     };
     let a = subset(&face, &input).unwrap();
     let b = subset(&face, &input).unwrap();
-    assert_eq!(a.bytes, b.bytes, "GPOS-bearing subset must be byte-deterministic");
+    assert_eq!(
+        a.bytes, b.bytes,
+        "GPOS-bearing subset must be byte-deterministic"
+    );
 }
 
 #[test]
@@ -861,8 +868,8 @@ fn amiri_subset_gpos_round_trips() {
     }
     // Pick a chunk of Arabic letters.
     let chars = [
-        '\u{0627}', '\u{0628}', '\u{062A}', '\u{062B}', '\u{062C}', '\u{062D}',
-        '\u{062E}', '\u{062F}',
+        '\u{0627}', '\u{0628}', '\u{062A}', '\u{062B}', '\u{062C}', '\u{062D}', '\u{062E}',
+        '\u{062F}',
     ];
     let cmap = face.cmap().unwrap();
     let mut gids: Vec<u16> = Vec::new();
@@ -886,6 +893,10 @@ fn amiri_subset_gpos_round_trips() {
     let subset_face = Face::parse(&blob, 0).unwrap();
     if let Some(_) = subset_face.record(tag::GPOS) {
         let parsed = subset_face.gpos();
-        assert!(parsed.is_ok(), "rewritten Amiri GPOS must parse: {:?}", parsed.err());
+        assert!(
+            parsed.is_ok(),
+            "rewritten Amiri GPOS must parse: {:?}",
+            parsed.err()
+        );
     }
 }
