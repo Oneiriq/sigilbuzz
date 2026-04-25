@@ -241,19 +241,9 @@ pub fn scan_subr_calls(
             OP_ENDCHAR => {
                 return Ok(out);
             }
-            OP_RMOVETO
-            | OP_HMOVETO
-            | OP_VMOVETO
-            | OP_RLINETO
-            | OP_HLINETO
-            | OP_VLINETO
-            | OP_RRCURVETO
-            | OP_HHCURVETO
-            | OP_VVCURVETO
-            | OP_HVCURVETO
-            | OP_VHCURVETO
-            | OP_RCURVELINE
-            | OP_RLINECURVE => {
+            OP_RMOVETO | OP_HMOVETO | OP_VMOVETO | OP_RLINETO | OP_HLINETO | OP_VLINETO
+            | OP_RRCURVETO | OP_HHCURVETO | OP_VVCURVETO | OP_HVCURVETO | OP_VHCURVETO
+            | OP_RCURVELINE | OP_RLINECURVE => {
                 stack.clear();
                 pos += 1;
             }
@@ -545,13 +535,13 @@ mod tests {
         // Stem pair count = 1 → hintmask reads ceil(1/8) = 1 mask byte.
         // Then 0 callsubr resolves to local subr 0 → bias 107.
         let cs: Vec<u8> = alloc::vec![
-            239,        // 100 (single-byte form: 239 - 139 = 100)
-            247,        // 200 = (247-247)*256 + 92 + 108 → b1 = 92
+            239, // 100 (single-byte form: 239 - 139 = 100)
+            247, // 200 = (247-247)*256 + 92 + 108 → b1 = 92
             92,
             OP_HSTEM,
             OP_HINTMASK,
-            0xff,       // 1 mask byte
-            139,        // 0
+            0xff, // 1 mask byte
+            139,  // 0
             OP_CALLSUBR,
             OP_ENDCHAR,
         ];
@@ -593,7 +583,11 @@ mod tests {
         local_0.push(OP_CALLSUBR);
         local_0.push(OP_RETURN);
 
-        let local_1 = alloc::vec![139u8 /* 0 */, 139u8 /* 0 */, OP_RMOVETO, OP_RETURN];
+        let local_1 = alloc::vec![
+            139u8, /* 0 */
+            139u8, /* 0 */
+            OP_RMOVETO, OP_RETURN
+        ];
 
         let mut cs = alloc::vec![OP_SHORTINT];
         cs.extend_from_slice(&(-107i16).to_be_bytes());
