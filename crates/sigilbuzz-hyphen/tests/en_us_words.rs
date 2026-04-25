@@ -79,9 +79,7 @@ fn en_us_matches_canonical_liang() {
     for (word, expected) in CASES {
         let got = hyphenate(word, patterns);
         if got != *expected {
-            mismatches.push(format!(
-                "  {word:>14}: expected {expected:?}, got {got:?}"
-            ));
+            mismatches.push(format!("  {word:>14}: expected {expected:?}, got {got:?}"));
         }
     }
     assert!(
@@ -119,8 +117,14 @@ fn boundary_offsets_are_valid_byte_indices() {
     let patterns = Patterns::for_language(Language::EnglishUs).unwrap();
     for (word, _) in CASES {
         for off in hyphenate(word, patterns) {
-            assert!(off > 0 && off < word.len(), "offset {off} out of bounds for {word:?}");
-            assert!(word.is_char_boundary(off), "offset {off} not a char boundary in {word:?}");
+            assert!(
+                off > 0 && off < word.len(),
+                "offset {off} out of bounds for {word:?}"
+            );
+            assert!(
+                word.is_char_boundary(off),
+                "offset {off} not a char boundary in {word:?}"
+            );
         }
     }
 }

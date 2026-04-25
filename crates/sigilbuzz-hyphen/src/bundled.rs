@@ -44,8 +44,7 @@ fn en_us_patterns() -> &'static Patterns {
     use std::sync::OnceLock;
     static CELL: OnceLock<Patterns> = OnceLock::new();
     CELL.get_or_init(|| {
-        let mut p = Patterns::parse(PATTERNS_EN_US)
-            .expect("bundled en-us patterns must parse");
+        let mut p = Patterns::parse(PATTERNS_EN_US).expect("bundled en-us patterns must parse");
         // hyph-en-us.tex declares hyphenmins typesetting left=2, right=3.
         p.left_min = 2;
         p.right_min = 3;

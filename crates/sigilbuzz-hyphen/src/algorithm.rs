@@ -69,9 +69,7 @@ pub fn hyphenate(word: &str, patterns: &Patterns) -> Vec<usize> {
     for (k, p) in priorities.iter().enumerate().take(upper).skip(2) {
         if p % 2 == 1 {
             let byte_offset = k - 1;
-            if byte_offset >= patterns.left_min
-                && word.len() - byte_offset >= patterns.right_min
-            {
+            if byte_offset >= patterns.left_min && word.len() - byte_offset >= patterns.right_min {
                 breaks.push(byte_offset);
             }
         }
@@ -79,13 +77,7 @@ pub fn hyphenate(word: &str, patterns: &Patterns) -> Vec<usize> {
     breaks
 }
 
-fn apply_pattern(
-    pat: &Pattern,
-    haystack: &[u8],
-    i: usize,
-    at_start: bool,
-    priorities: &mut [u8],
-) {
+fn apply_pattern(pat: &Pattern, haystack: &[u8], i: usize, at_start: bool, priorities: &mut [u8]) {
     if pat.anchored_start && !at_start {
         return;
     }

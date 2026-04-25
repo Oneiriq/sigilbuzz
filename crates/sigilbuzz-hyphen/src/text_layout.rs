@@ -139,8 +139,12 @@ mod tests {
         // somewhere near 11..12). Liang must contribute hyphens at
         // 2 and 6 inside "hyphenation" (the canonical Liang split is
         // "hy-phen-ation" with the bundled `hyph-en-us.tex` patterns).
-        assert!(events.iter().any(|(o, k)| *o == 2 && *k == HyphenatedBreak::Hyphen));
-        assert!(events.iter().any(|(o, k)| *o == 6 && *k == HyphenatedBreak::Hyphen));
+        assert!(events
+            .iter()
+            .any(|(o, k)| *o == 2 && *k == HyphenatedBreak::Hyphen));
+        assert!(events
+            .iter()
+            .any(|(o, k)| *o == 6 && *k == HyphenatedBreak::Hyphen));
         assert!(events.iter().any(|(_, k)| *k == HyphenatedBreak::Allowed));
     }
 

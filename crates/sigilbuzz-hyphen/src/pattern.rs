@@ -83,10 +83,7 @@ impl fmt::Display for ParseError {
                 write!(f, "non-ASCII character on pattern line {line}")
             }
             Self::InvalidCharacter { line, ch } => {
-                write!(
-                    f,
-                    "invalid character {ch:?} in pattern on line {line}"
-                )
+                write!(f, "invalid character {ch:?} in pattern on line {line}")
             }
             Self::AdjacentDigits { line } => {
                 write!(f, "adjacent priority digits on pattern line {line}")
