@@ -49,22 +49,23 @@ pub fn run(args: Args) -> CliResult {
             output,
             format,
         } => {
-            let sfnt = std::fs::read(&input)
-                .map_err(|e| format!("read {}: {e}", input.display()))?;
-            let wrapped = match format.to_ascii_lowercase().as_str() {
-                "woff1" => sigilbuzz_woff::wrap_woff1(&sfnt)
-                    .map_err(|e| format!("wrap woff1: {e:?}"))?,
-                "woff2" => sigilbuzz_woff::wrap_woff2(&sfnt)
-                    .map_err(|e| format!("wrap woff2: {e:?}"))?,
-                other => return Err(format!("unknown woff format '{other}'")),
-            };
+            let sfnt =
+                std::fs::read(&input).map_err(|e| format!("read {}: {e}", input.display()))?;
+            let wrapped =
+                match format.to_ascii_lowercase().as_str() {
+                    "woff1" => sigilbuzz_woff::wrap_woff1(&sfnt)
+                        .map_err(|e| format!("wrap woff1: {e:?}"))?,
+                    "woff2" => sigilbuzz_woff::wrap_woff2(&sfnt)
+                        .map_err(|e| format!("wrap woff2: {e:?}"))?,
+                    other => return Err(format!("unknown woff format '{other}'")),
+                };
             std::fs::write(&output, &wrapped)
                 .map_err(|e| format!("write {}: {e}", output.display()))?;
             eprintln!("wrote {} bytes to {}", wrapped.len(), output.display());
         }
         Op::Unwrap { input, output } => {
-            let bytes = std::fs::read(&input)
-                .map_err(|e| format!("read {}: {e}", input.display()))?;
+            let bytes =
+                std::fs::read(&input).map_err(|e| format!("read {}: {e}", input.display()))?;
             let sfnt = match magic_of(&bytes) {
                 Some(b"wOFF") => sigilbuzz_woff::unwrap_woff1(&bytes)
                     .map_err(|e| format!("unwrap woff1: {e:?}"))?,

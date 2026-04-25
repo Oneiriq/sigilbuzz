@@ -40,7 +40,9 @@ pub fn parse_gid_list(s: &str) -> CliResult<Vec<u16>> {
         if trimmed.is_empty() {
             return Err("gid list contains an empty entry".to_string());
         }
-        let v = if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X"))
+        let v = if let Some(hex) = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
         {
             u16::from_str_radix(hex, 16)
         } else {
@@ -86,7 +88,10 @@ fn split_range(s: &str) -> Option<(&str, &str)> {
 
 fn parse_one_u16(s: &str) -> CliResult<u16> {
     let trimmed = s.trim();
-    if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
         u16::from_str_radix(hex, 16).map_err(|e| format!("bad number '{trimmed}': {e}"))
     } else {
         trimmed

@@ -45,11 +45,7 @@ pub enum Op {
 /// Runs `sigilbuzz pdf`.
 pub fn run(args: Args) -> CliResult {
     match args.op {
-        Op::Type3 {
-            font,
-            output,
-            gids,
-        } => {
+        Op::Type3 { font, output, gids } => {
             let bytes = read_font(&font)?;
             let blob = Blob::from_vec(bytes);
             let face = Face::parse(&blob, 0).map_err(|e| format!("parse face: {e:?}"))?;

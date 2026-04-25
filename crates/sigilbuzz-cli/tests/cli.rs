@@ -51,11 +51,7 @@ fn open_sans_path() -> PathBuf {
 #[test]
 fn shape_emits_one_line_per_glyph() {
     let font = open_sans_path();
-    let (stdout, stderr, ok) = run_cli([
-        "shape".as_ref(),
-        font.as_os_str(),
-        "Hi".as_ref(),
-    ]);
+    let (stdout, stderr, ok) = run_cli(["shape".as_ref(), font.as_os_str(), "Hi".as_ref()]);
     assert!(ok, "binary failed: stderr={stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "expected 2 glyphs, got: {stdout}");
@@ -123,7 +119,10 @@ fn shape_rejects_bad_feature_tag() {
 }
 
 fn parse_field<'a>(line: &'a str, key: &str) -> &'a str {
-    let after = line.find(key).map(|i| &line[i + key.len()..]).unwrap_or(line);
+    let after = line
+        .find(key)
+        .map(|i| &line[i + key.len()..])
+        .unwrap_or(line);
     after.split_whitespace().next().unwrap_or("")
 }
 
@@ -134,7 +133,10 @@ fn binary_advertises_every_subcommand_in_help() {
     for sub in [
         "shape", "subset", "paint", "slug", "woff", "pdf", "svg", "info",
     ] {
-        assert!(stdout.contains(sub), "help missing subcommand '{sub}': {stdout}");
+        assert!(
+            stdout.contains(sub),
+            "help missing subcommand '{sub}': {stdout}"
+        );
     }
 }
 
@@ -159,14 +161,14 @@ fn subset_then_shape_round_trip() {
         "H,i".as_ref(),
     ]);
     assert!(ok, "subset failed: stderr={stderr}");
-    let (stdout, stderr, ok) = run_cli([
-        "shape".as_ref(),
-        sub.as_os_str(),
-        "Hi".as_ref(),
-    ]);
+    let (stdout, stderr, ok) = run_cli(["shape".as_ref(), sub.as_os_str(), "Hi".as_ref()]);
     assert!(ok, "shape on subset failed: stderr={stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 2, "expected 2 glyphs after subset round-trip: {stdout}");
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected 2 glyphs after subset round-trip: {stdout}"
+    );
 }
 
 #[test]
@@ -189,7 +191,10 @@ fn subset_writes_smaller_font_for_gid_list() {
         bytes.len(),
         src_len
     );
-    assert!(stderr.contains("kept glyphs"), "expected status line: {stderr}");
+    assert!(
+        stderr.contains("kept glyphs"),
+        "expected status line: {stderr}"
+    );
 }
 
 #[test]
@@ -229,12 +234,12 @@ fn subset_accepts_inclusive_range() {
 #[test]
 fn info_prints_table_list_and_features() {
     let font = open_sans_path();
-    let (stdout, stderr, ok) = run_cli([
-        "info".as_ref(),
-        font.as_os_str(),
-    ]);
+    let (stdout, stderr, ok) = run_cli(["info".as_ref(), font.as_os_str()]);
     assert!(ok, "binary failed: stderr={stderr}");
-    assert!(stdout.contains("num_glyphs:"), "missing num_glyphs: {stdout}");
+    assert!(
+        stdout.contains("num_glyphs:"),
+        "missing num_glyphs: {stdout}"
+    );
     assert!(stdout.contains("units_per_em:"), "missing upem: {stdout}");
     assert!(stdout.contains("tables ("), "missing tables list: {stdout}");
     // Open Sans carries cmap/head/hhea/hmtx/maxp/glyf/loca at minimum.
@@ -313,11 +318,7 @@ fn paint_reports_no_colr_for_open_sans() {
     // Open Sans carries no COLR table, so paint exits 0 and prints
     // a friendly message to stderr (not stdout).
     let font = open_sans_path();
-    let (stdout, stderr, ok) = run_cli([
-        "paint".as_ref(),
-        font.as_os_str(),
-        "5".as_ref(),
-    ]);
+    let (stdout, stderr, ok) = run_cli(["paint".as_ref(), font.as_os_str(), "5".as_ref()]);
     assert!(ok, "binary failed: stderr={stderr}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout}");
     assert!(
@@ -331,11 +332,7 @@ fn slug_emits_valid_json_for_outline_glyph() {
     let font = open_sans_path();
     // gid 43 is 'H' in Open Sans — picked because the shape test
     // already established it has a non-empty outline.
-    let (stdout, stderr, ok) = run_cli([
-        "slug".as_ref(),
-        font.as_os_str(),
-        "43".as_ref(),
-    ]);
+    let (stdout, stderr, ok) = run_cli(["slug".as_ref(), font.as_os_str(), "43".as_ref()]);
     assert!(ok, "binary failed: stderr={stderr}");
     let trimmed = stdout.trim();
     assert!(trimmed.starts_with('{') && trimmed.ends_with('}'));
@@ -356,7 +353,10 @@ fn svg_writes_well_formed_document() {
     ]);
     assert!(ok, "binary failed: stderr={stderr}");
     let svg = std::fs::read_to_string(&out).expect("read svg");
-    assert!(svg.starts_with("<svg "), "expected <svg ... > prefix: {svg}");
+    assert!(
+        svg.starts_with("<svg "),
+        "expected <svg ... > prefix: {svg}"
+    );
     assert!(svg.ends_with("</svg>"), "expected </svg> suffix: {svg}");
     assert!(svg.contains("viewBox=\""));
     assert!(svg.contains("<path d=\""));
@@ -385,11 +385,7 @@ fn svg_rejects_glyph_without_outline() {
 fn subset_rejects_empty_selection() {
     let font = open_sans_path();
     let out = write_tempfile("subset_empty.ttf", b"");
-    let (_stdout, stderr, ok) = run_cli([
-        "subset".as_ref(),
-        font.as_os_str(),
-        out.as_os_str(),
-    ]);
+    let (_stdout, stderr, ok) = run_cli(["subset".as_ref(), font.as_os_str(), out.as_os_str()]);
     assert!(!ok);
     assert!(
         stderr.contains("no glyphs selected"),
