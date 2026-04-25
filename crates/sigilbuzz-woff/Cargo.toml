@@ -13,7 +13,7 @@ categories = ["text-processing"]
 publish = true
 
 [features]
-default = ["std", "woff2"]
+default = ["std", "woff2", "woff1-deflate"]
 std = []
 # WOFF2 needs both Brotli decompression (for unwrap) and encoding (for
 # wrap). The `brotli` crate (same maintainers as the
@@ -21,10 +21,17 @@ std = []
 # 0.7.0 collapses to a single dep behind the woff2 feature. Disabling
 # the feature drops the dep entirely for WOFF1-only consumers.
 woff2 = ["dep:brotli"]
+# WOFF1 zlib (deflate + adler32) for both wrap and unwrap directions.
+# Pulls in `miniz_oxide` — pure-Rust, no transitive deps. Disable the
+# feature to drop the dep entirely; `unwrap_woff1` then rejects
+# compressed tables with `Unsupported`, and `wrap_woff1` only emits
+# the uncompressed pass-through layout (compLength == origLength).
+woff1-deflate = ["dep:miniz_oxide"]
 
 [dependencies]
 sigilbuzz = { workspace = true }
 brotli = { version = "8", optional = true, default-features = false, features = ["std"] }
+miniz_oxide = { version = "0.8", optional = true, default-features = false, features = ["with-alloc"] }
 
 [dev-dependencies]
 # Fixtures are loaded with include_bytes!. ttf-parser drives the
