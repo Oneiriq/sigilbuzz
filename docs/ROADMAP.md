@@ -338,12 +338,41 @@ The biggest 0.8.0 surface across any release: the C-API stretch bridges, full by
 
 ---
 
-## 0.9.0+ (next)
+## 0.9.0 (shipping)
 
-- [ ] WOFF1 zlib compression (currently uncompressed pass-through; most producers use WOFF2, so low priority).
-- [ ] Real-font CFF integration fixtures (Source Han Sans CN subset for CID, an OFL CFF2 VF) — synthetic fixtures already cover the orchestration; vendored fixtures would tighten the integration coverage.
-- [ ] Cross-FD CFF subr sharing (currently raises Unsupported; rare in real-world fonts).
-- [ ] AAT kerx state-machine formats 1 / 4 / 6 (currently only format 0 is recognised).
+The remaining 0.8.0 carry-overs close, plus a command-line binary and a hardening pass.
+
+### WOFF1 zlib (#137)
+
+- [x] WOFF1 wrap emits each table compressed via `miniz_oxide` when deflate saves space; unwrap inflates zlib-compressed tables. New `woff1-deflate` cargo feature gates the codec dep. ~30% size reduction on Open Sans Latin.
+
+### CFF cross-FD subr sharing (#138)
+
+- [x] Per-FD duplication of cross-FD globals: each cross-FD G is duplicated once per surviving FD; caller charstrings are renumbered through the per-FD copy. Fixed-point iteration handles the nested G → G' → local case. Closes the cross-FD `Unsupported` from #135 — the CFF subset story is now spec-complete.
+
+### AAT kerx state-machine (#139)
+
+- [x] kerx format 1 (state-machine kerning) — parser, apply walker, kern-stack value-list consumer. Synthetic AAT fixture + 8 integration tests. Formats 4 (control-point) and 6 (extended class-pair) deferred with the existing silent-skip pattern; document in module header.
+
+### `sigilbuzz-cli` binary (#141)
+
+- [x] New `crates/sigilbuzz-cli` exposing `shape` / `subset` / `paint` / `slug` / `svg` / `woff` / `pdf` / `info` subcommands. The HarfBuzz `hb-shape` equivalent — but for the whole workspace. `clap` is the only new external runtime dep, scoped to the binary. 19 integration tests via `std::process::Command`.
+
+### Hardening — wave 10
+
+- [x] 4 fixes shipped (counting #140 hotfix from the wave-1 clippy upgrade): newer-clippy `manual_contains` upgrade (#140); WOFF2 test feature-gate panic under `--no-default-features` (#142/#143); CLI gid-range parsing off-by-one (#144/#145).
+
+---
+
+## 1.0.0+ (next)
+
+The remaining 0.9.0 deferral plus stretch items toward a 1.0.0.
+
+- [ ] AAT kerx format 4 (control-point) + format 6 (extended class-pair) — implement only on real-world demand.
+- [ ] AAT morx formats 4 (Non-Contextual) + 5 (Insertion) — the same pattern.
+- [ ] Real-font CFF integration fixtures (vendored Source Han Sans CN subset for CID, OFL CFF2 VF).
+- [ ] Bidi *ordering* (UAX 9 full algorithm; currently only paragraph direction).
+- [ ] Hyphenation / line breaking (UAX 14) — out of scope for HarfBuzz; would be a sigilbuzz-text-layout companion crate.
 
 ---
 

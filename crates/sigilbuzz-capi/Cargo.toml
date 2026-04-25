@@ -44,7 +44,7 @@ paint = ["dep:sigilbuzz-paint"]
 sigilbuzz = { workspace = true }
 # Optional — enabled by the `subset` cargo feature. Provides the
 # subsetter sigilbuzz-capi's `hb_subset_*` shim wraps.
-sigilbuzz-subset = { path = "../sigilbuzz-subset", version = "0.4.0", optional = true }
+sigilbuzz-subset = { path = "../sigilbuzz-subset", version = "0.5.0", optional = true }
 # Optional — enabled by the `paint` cargo feature. Provides the
 # COLRv1 evaluator sigilbuzz-capi's `hb_paint_*` shim wraps.
 sigilbuzz-paint = { path = "../sigilbuzz-paint", version = "0.1.0", optional = true }
