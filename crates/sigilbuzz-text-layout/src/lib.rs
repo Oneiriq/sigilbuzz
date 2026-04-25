@@ -7,8 +7,11 @@
 //! - [`line_break_opportunities`] — UAX 14 break iterator over a `&str`.
 //! - [`wrap_lines`] — walks a slice of shaped [`sigilbuzz::Glyph`]s
 //!   and a width budget to produce [`LineRange`]s.
+//! - [`word_breaks`] — simplified [UAX #29][uax29] word-segmentation
+//!   iterator for cursor-by-word movement and double-click selection.
 //!
 //! [uax14]: https://www.unicode.org/reports/tr14/
+//! [uax29]: https://www.unicode.org/reports/tr29/
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![warn(missing_docs)]
@@ -18,8 +21,10 @@ extern crate alloc;
 
 mod class;
 mod linebreak;
+mod word;
 mod wrap;
 
 pub use class::{line_break_class, LineBreakClass};
 pub use linebreak::{line_break_opportunities, BreakOpportunity, LineBreakIter};
+pub use word::word_breaks;
 pub use wrap::{wrap_lines, LineRange, WrapOptions};
