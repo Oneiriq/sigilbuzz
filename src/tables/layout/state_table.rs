@@ -423,6 +423,7 @@ fn lookup_format6(data: &[u8], glyph_id: u16) -> Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use alloc::vec::Vec;
 
     /// Builds an AAT lookup table, format 6, mapping each `(glyph,

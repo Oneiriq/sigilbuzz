@@ -398,6 +398,7 @@ impl Format2<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     fn build_kerx_format0(pairs: &[(u16, u16, i16)]) -> Vec<u8> {
         let pair_bytes = pairs.len() * 6;
@@ -454,7 +455,7 @@ mod tests {
         let mut right_lookup: Vec<u8> = Vec::new();
         right_lookup.extend_from_slice(&0u16.to_be_bytes());
         for &c in right_classes {
-            let off = (c * 2) as u16;
+            let off: u16 = c * 2;
             right_lookup.extend_from_slice(&off.to_be_bytes());
         }
 
