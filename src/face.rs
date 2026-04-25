@@ -36,9 +36,9 @@ use crate::error::{Error, Result};
 use crate::tables::glyf::PhantomMetrics;
 use crate::tables::parse::Reader;
 use crate::tables::{
-    tag, Avar, Base, Cbdt, Cblc, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBitmap, GlyphBounds, Gpos,
-    Gsub, Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Math, Maxp, Morx, Mvar, Outline,
-    Sbix, Svg, SvgDocument, Vhea, Vmtx, Vorg, Vvar,
+    tag, Ankr, Avar, Base, Cbdt, Cblc, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBitmap, GlyphBounds,
+    Gpos, Gsub, Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Math, Maxp, Morx, Mvar,
+    Outline, Sbix, Svg, SvgDocument, Vhea, Vmtx, Vorg, Vvar,
 };
 
 /// One entry in the SFNT table directory.
@@ -290,6 +290,19 @@ impl<'a> Face<'a> {
         }
     }
 
+    /// Parses the AAT `ankr` (Anchor Point) table if the font carries
+    /// one. Pairs with `kerx` format-4 action type 1: the kerx state
+    /// machine emits `(mark_anchor_idx, current_anchor_idx)` pairs and
+    /// the apply path resolves them through `ankr.anchor_for(gid, idx)`
+    /// into concrete `(x, y)` design-unit coordinates.
+    pub fn ankr(&self) -> Result<Option<Ankr<'a>>> {
+        match self.table_bytes(tag::ANKR) {
+            Ok(bytes) => Ok(Some(Ankr::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Parses the `GSUB` table if the font carries one. Returns
     /// `Ok(None)` when the font has no glyph substitution features.
     pub fn gsub(&self) -> Result<Option<Gsub<'a>>> {
@@ -315,6 +328,30 @@ impl<'a> Face<'a> {
     /// Wraps the `glyf` table.
     pub fn glyf(&self) -> Result<Glyf<'a>> {
         Ok(Glyf::new(self.table_bytes(tag::GLYF)?))
+    }
+
+    /// Returns the glyph's raw points in glyf-natural order: contour
+    /// points (on-curve + off-curve) followed by the four phantom
+    /// points (pp1..pp4). Thin wrapper over [`Glyf::glyph_points`] —
+    /// the heavy lifting (composite flattening, phantom synthesis)
+    /// lives there; this method just plumbs `loca`, `hmtx`, and the
+    /// optional `vmtx` through.
+    ///
+    /// Used by `kerx` format-4 action type 0, which references glyph
+    /// points by index. Returns `Ok(None)` for glyphs without an
+    /// outline (whitespace, missing) and for fonts that lack `glyf`
+    /// entirely (CFF-only); the caller should treat the missing
+    /// information as "drop the kern silently" — the same conservative
+    /// posture sigilbuzz uses for fmt-4 fall-through everywhere else.
+    pub fn glyph_points(&self, glyph_id: u16) -> Result<Option<Vec<(i16, i16)>>> {
+        if self.record(tag::GLYF).is_none() {
+            return Ok(None);
+        }
+        let loca = self.loca()?;
+        let glyf = self.glyf()?;
+        let hmtx = self.hmtx()?;
+        let vmtx = self.vmtx()?;
+        glyf.glyph_points(&loca, glyph_id, &hmtx, vmtx.as_ref())
     }
 
     /// Returns the design-unit bounding box for `glyph_id`, or
