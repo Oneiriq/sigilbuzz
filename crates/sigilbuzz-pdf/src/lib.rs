@@ -76,10 +76,12 @@ use alloc::vec::Vec;
 
 use sigilbuzz::Face;
 
+mod otf_embedded;
 mod stream;
 mod type1;
 mod type1_charstring;
 
+pub use otf_embedded::{emit_otf_embedded_font, OtfEmbeddedFont};
 pub use stream::{emit_d1_prologue, emit_fill_epilogue, emit_path_ops, outline_bbox};
 pub use type1::{emit_type1_font, EmitError, Type1Font};
 
