@@ -37,8 +37,8 @@ use crate::tables::glyf::PhantomMetrics;
 use crate::tables::parse::Reader;
 use crate::tables::{
     tag, Avar, Cbdt, Cblc, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBitmap, GlyphBounds, Gpos, Gsub,
-    Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Maxp, Morx, Outline, Sbix, Vhea, Vmtx,
-    Vorg,
+    Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Maxp, Morx, Outline, Sbix, Svg,
+    SvgDocument, Vhea, Vmtx, Vorg,
 };
 
 /// One entry in the SFNT table directory.
@@ -646,6 +646,29 @@ impl<'a> Face<'a> {
             Err(Error::MissingTable { .. }) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Parses the `SVG ` table (OpenType SVG) if the font carries
+    /// one. Returns `Ok(None)` for fonts without inline SVG glyphs —
+    /// most fonts in the wild, including all COLR-only colour fonts.
+    pub fn svg(&self) -> Result<Option<Svg<'a>>> {
+        match self.table_bytes(tag::SVG) {
+            Ok(bytes) => Ok(Some(Svg::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Convenience: returns the inline SVG document for `glyph_id`,
+    /// or `Ok(None)` when the font has no `SVG ` table or no record
+    /// covers the glyph.
+    ///
+    /// The returned [`SvgDocument`] borrows directly into the font
+    /// blob; `data` is either plain SVG XML or a gzip stream — see
+    /// the `gzipped` flag. sigilbuzz never decompresses or parses the
+    /// SVG itself.
+    pub fn svg_document(&self, glyph_id: u16) -> Result<Option<SvgDocument<'a>>> {
+        Ok(self.svg()?.and_then(|svg| svg.document_for(glyph_id)))
     }
 
     /// Returns the bitmap glyph for `glyph_id` at the requested

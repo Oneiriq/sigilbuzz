@@ -36,6 +36,7 @@ pub mod morx;
 pub mod outline;
 pub mod parse;
 pub mod sbix;
+pub mod svg_table;
 pub mod variation_store;
 pub mod vhea;
 pub mod vmtx;
@@ -73,6 +74,7 @@ pub use morx::Morx;
 pub use outline::{Outline, OutlineSink, PathOp};
 pub use parse::Reader;
 pub use sbix::{Sbix, SbixGlyph, SbixStrike};
+pub use svg_table::{Svg, SvgDocument};
 pub use variation_store::ItemVariationStore;
 pub use vhea::Vhea;
 pub use vmtx::Vmtx;
@@ -140,4 +142,7 @@ pub mod tag {
     pub const CBDT: [u8; 4] = *b"CBDT";
     /// `sbix` — Standard Bitmap Graphics (Apple).
     pub const SBIX: [u8; 4] = *b"sbix";
+    /// `SVG ` — OpenType SVG (inline SVG documents per glyph).
+    /// Note the trailing space — OpenType tags are exactly four bytes.
+    pub const SVG: [u8; 4] = *b"SVG ";
 }
