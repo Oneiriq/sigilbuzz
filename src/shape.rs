@@ -1157,11 +1157,17 @@ fn apply_arabic_positional_features(
 
 /// Applies a single GSUB lookup only at positions where `mask[i]`
 /// is true. Used by the Arabic positional pass — `isol` at positions
-/// tagged `Isol`, `init` at `Init`, and so on. Only per-glyph
-/// lookup types are masked here (SINGLE / MULTIPLE / ALTERNATE /
-/// LIGATURE); chained-context lookups inside an Arabic positional
-/// feature are uncommon and fall through to the unmasked dispatcher
-/// so no functionality is lost.
+/// tagged `Isol`, `init` at `Init`, and so on, and by the Indic
+/// shaper for `half`/`pref`/`pres` gating.
+///
+/// Per-glyph lookup types (SINGLE / MULTIPLE / ALTERNATE / LIGATURE)
+/// only fire when the mask at the cursor position is true.
+/// Chained-context lookups inside a positional feature run over the
+/// full glyph stream — the rules' coverage already encodes their
+/// positional intent.
+///
+/// Like [`apply_gsub_lookup`], this walks the cursor once and tries
+/// the lookup's subtables in spec order, taking the first match.
 fn apply_gsub_lookup_masked(
     gsub: &Gsub<'_>,
     lookup_idx: u16,
@@ -1173,113 +1179,57 @@ fn apply_gsub_lookup_masked(
     let Some(lookup) = lookup_list.get(lookup_idx) else {
         return;
     };
-    let filter = filter_for_lookup(&lookup, gdef);
     let raw_lt = lookup.lookup_type();
-    for sub_idx in 0..lookup.subtable_count() {
-        let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
-            continue;
-        };
-        let (effective_lt, inner_bytes) = if raw_lt == gsub_lt::EXTENSION {
-            match resolve_extension(bytes) {
-                Some((inner_type, inner)) => (inner_type, inner),
-                None => continue,
-            }
-        } else {
-            (raw_lt, bytes)
-        };
+    let effective_lt = if raw_lt == gsub_lt::EXTENSION {
+        lookup
+            .subtable_bytes(0)
+            .and_then(resolve_extension)
+            .map_or(raw_lt, |(inner, _)| inner)
+    } else {
+        raw_lt
+    };
 
-        match effective_lt {
-            gsub_lt::SINGLE => {
-                let Ok(single) = Single::parse(inner_bytes) else {
-                    continue;
-                };
-                for (i, glyph) in glyphs.iter_mut().enumerate() {
-                    if !mask.get(i).copied().unwrap_or(false) {
-                        continue;
-                    }
-                    let id = glyph.glyph_id as u16;
-                    if let Some(out) = single.apply(id) {
-                        glyph.glyph_id = u32::from(out);
-                    }
-                }
-            }
-            gsub_lt::ALTERNATE => {
-                let Ok(alt) = Alternate::parse(inner_bytes) else {
-                    continue;
-                };
-                for (i, glyph) in glyphs.iter_mut().enumerate() {
-                    if !mask.get(i).copied().unwrap_or(false) {
-                        continue;
-                    }
-                    let id = glyph.glyph_id as u16;
-                    if let Some(out) = alt.apply(id, 0) {
-                        glyph.glyph_id = u32::from(out);
-                    }
-                }
-            }
-            gsub_lt::LIGATURE => {
-                let Ok(lig) = Ligature::parse(inner_bytes) else {
-                    continue;
-                };
-                // For ligature lookups in a positional feature the
-                // mask gates the *first* component; the rest of the
-                // window is consumed as-is. Rare in practice — the
-                // `rlig` feature is where ligation happens in Arabic,
-                // not `init`/`medi`/`fina`/`isol` — but supported for
-                // completeness.
-                let mut i = 0;
-                while i < glyphs.len() {
-                    if !mask.get(i).copied().unwrap_or(false) {
-                        i += 1;
-                        continue;
-                    }
-                    let window: Vec<u16> = glyphs[i..].iter().map(|g| g.glyph_id as u16).collect();
-                    if let Some((lig_glyph, positions)) = lig.apply_filtered(&window, &filter) {
-                        glyphs[i].glyph_id = u32::from(lig_glyph);
-                        drain_ligature_components(glyphs, i, &positions);
-                    } else {
-                        i += 1;
-                    }
-                }
-            }
-            gsub_lt::MULTIPLE => {
-                let Ok(m) = Multiple::parse(inner_bytes) else {
-                    continue;
-                };
-                let mut i = 0;
-                while i < glyphs.len() {
-                    if !mask.get(i).copied().unwrap_or(false) {
-                        i += 1;
-                        continue;
-                    }
-                    let id = glyphs[i].glyph_id as u16;
-                    if let Some(seq) = m.apply(id) {
-                        if let Some(n) = expand_glyph_in_place(glyphs, i, &seq) {
-                            i += n;
-                            continue;
-                        }
-                    }
-                    i += 1;
-                }
-            }
-            // Chained-context inside a positional feature: run over
-            // the whole glyph stream. Fonts that care about position
-            // encode that via the chained rule's coverage, not via
-            // our mask.
-            gsub_lt::CHAINED_CONTEXT => {
-                let Ok(chain) = ChainContextAny::parse(inner_bytes) else {
-                    continue;
-                };
-                apply_chain_context_any_subtable(gsub, &chain, glyphs, gdef, &filter);
-            }
-            _ => {}
+    // Chained-context inside a positional feature ignores the mask:
+    // the rule itself encodes positional intent via its input coverage
+    // (post-positional glyph ids tagged init/medi/fina/...). Defer to
+    // the unmasked driver so the cursor walk + first-subtable-wins
+    // semantics still apply.
+    if effective_lt == gsub_lt::CHAINED_CONTEXT || effective_lt == gsub_lt::CONTEXT {
+        apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, 0);
+        return;
+    }
+
+    let mut i = 0;
+    while i < glyphs.len() {
+        if !mask.get(i).copied().unwrap_or(false) {
+            i += 1;
+            continue;
+        }
+        let consumed = apply_gsub_lookup_at(gsub, lookup_idx, glyphs, gdef, i, 0, 0);
+        if consumed > 0 {
+            i += consumed;
+        } else {
+            i += 1;
         }
     }
 }
 
-/// Applies a single GSUB lookup by index, walking its subtables in
-/// spec order. Stops at the first subtable of a supported type that
-/// runs on the full glyph run.
+/// Applies a single GSUB lookup by index. Mirrors HarfBuzz's
+/// `apply_forward`: walks the glyph run cursor-by-cursor, and at each
+/// cursor tries the lookup's subtables in spec order, taking the
+/// first subtable that matches and advancing the cursor past the
+/// consumed input window. The previous implementation walked each
+/// subtable across the whole run independently — that re-fired later
+/// subtables on positions that an earlier one had already matched
+/// (with `SubstCount=0`, common in Amiri's `rlig`), producing
+/// glyph-id divergences from rustybuzz on Allah / bism-Allah and
+/// other Quranic-grade vocalised forms (issue #21).
+///
+/// Reverse-chained lookups (type 8) iterate right-to-left and are
+/// not a per-cursor "first match" thing — they substitute coverage-
+/// matched glyphs in place, with each lookup's subtables walking the
+/// frozen-prefix snapshot. Detected via lookup type and dispatched
+/// separately.
 fn apply_gsub_lookup(
     gsub: &Gsub<'_>,
     lookup_idx: u16,
@@ -1291,65 +1241,56 @@ fn apply_gsub_lookup(
     let Some(lookup) = lookup_list.get(lookup_idx) else {
         return;
     };
-    let filter = filter_for_lookup(&lookup, gdef);
     let raw_lt = lookup.lookup_type();
-    for sub_idx in 0..lookup.subtable_count() {
-        let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
-            continue;
-        };
-        let (effective_lt, inner_bytes) = if raw_lt == gsub_lt::EXTENSION {
-            match resolve_extension(bytes) {
-                Some((inner_type, inner)) => (inner_type, inner),
-                None => continue,
-            }
-        } else {
-            (raw_lt, bytes)
-        };
+    let effective_lt = if raw_lt == gsub_lt::EXTENSION {
+        // Peek at the first subtable to see what the extension wraps;
+        // a lookup's subtables all share a type so this is sufficient.
+        lookup
+            .subtable_bytes(0)
+            .and_then(resolve_extension)
+            .map_or(raw_lt, |(inner, _)| inner)
+    } else {
+        raw_lt
+    };
 
-        match effective_lt {
-            gsub_lt::SINGLE => {
-                let Ok(single) = Single::parse(inner_bytes) else {
-                    continue;
-                };
-                apply_single_subtable(&single, glyphs, &filter);
-            }
-            gsub_lt::MULTIPLE => {
-                let Ok(m) = Multiple::parse(inner_bytes) else {
-                    continue;
-                };
-                apply_multiple_subtable(&m, glyphs, &filter);
-            }
-            gsub_lt::ALTERNATE => {
-                let Ok(alt) = Alternate::parse(inner_bytes) else {
-                    continue;
-                };
-                apply_alternate_subtable(&alt, glyphs, &filter, alternate_index);
-            }
-            gsub_lt::LIGATURE => {
-                let Ok(lig) = Ligature::parse(inner_bytes) else {
-                    continue;
-                };
-                apply_liga_subtable(&lig, glyphs, &filter);
-            }
-            gsub_lt::CONTEXT => {
-                let Ok(ctx) = GsubContext::parse(inner_bytes) else {
-                    continue;
-                };
-                apply_context_subtable(gsub, &ctx, glyphs, gdef, &filter);
-            }
-            gsub_lt::CHAINED_CONTEXT => {
-                let Ok(chain) = ChainContextAny::parse(inner_bytes) else {
-                    continue;
-                };
-                apply_chain_context_any_subtable(gsub, &chain, glyphs, gdef, &filter);
-            }
-            gsub_lt::REVERSE_CHAINED => {
-                let Ok(rc) = ReverseChain::parse(inner_bytes) else {
-                    continue;
-                };
-                apply_reverse_chain_subtable(&rc, glyphs);
-            }
-            _ => {}
+    if effective_lt == gsub_lt::REVERSE_CHAINED {
+        // Reverse chain walks right-to-left and is in-place; keep the
+        // existing per-subtable driver since cursor semantics differ
+        // from forward lookups.
+        for sub_idx in 0..lookup.subtable_count() {
+            let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
+                continue;
+            };
+            let inner_bytes = if raw_lt == gsub_lt::EXTENSION {
+                match resolve_extension(bytes) {
+                    Some((_, inner)) => inner,
+                    None => continue,
+                }
+            } else {
+                bytes
+            };
+            let Ok(rc) = ReverseChain::parse(inner_bytes) else {
+                continue;
+            };
+            apply_reverse_chain_subtable(&rc, glyphs);
+        }
+        return;
+    }
+
+    // Forward cursor walk. At each cursor, try every subtable in
+    // order; the first one that matches consumes input and the cursor
+    // skips past it. A subtable that matches but produces zero
+    // substitutions (common in Amiri rlig: a context with
+    // `SubstCount=0` is intentionally a "no-op match" that blocks
+    // later subtables at this cursor) still advances the cursor by
+    // its input length.
+    let mut i = 0;
+    while i < glyphs.len() {
+        let consumed = apply_gsub_lookup_at(gsub, lookup_idx, glyphs, gdef, i, 0, alternate_index);
+        if consumed > 0 {
+            i += consumed;
+        } else {
+            i += 1;
         }
     }
 }
@@ -1364,7 +1305,7 @@ fn apply_gsub_lookup(
 /// first invocation and each recursive edge increments by one; we
 /// bail out at [`MAX_NESTED_DEPTH`] so a pathological font loop
 /// cannot overflow the stack.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn apply_gsub_lookup_at(
     gsub: &Gsub<'_>,
     lookup_idx: u16,
@@ -1372,6 +1313,7 @@ fn apply_gsub_lookup_at(
     gdef: Option<&Gdef<'_>>,
     at: usize,
     depth: u8,
+    alternate_index: u16,
 ) -> usize {
     if depth >= MAX_NESTED_DEPTH {
         return 0;
@@ -1434,10 +1376,7 @@ fn apply_gsub_lookup_at(
                 if filter.is_skipped(id) {
                     continue;
                 }
-                // Nested alternate lookups pick index 0 — the
-                // feature-value-based selection is a top-level
-                // concept that does not propagate into context.
-                if let Some(out) = alt.apply(id, 0) {
+                if let Some(out) = alt.apply(id, alternate_index) {
                     glyphs[at].glyph_id = u32::from(out);
                     return 1;
                 }
@@ -1634,7 +1573,10 @@ fn apply_nested_gsub_lookups(
             }
             pos
         };
-        apply_gsub_lookup_at(gsub, rec.lookup_list_index, glyphs, gdef, pos, depth);
+        // Nested alternate lookups always pick index 0 — feature
+        // value-based selection is a top-level concept and does not
+        // propagate into a recursed lookup.
+        apply_gsub_lookup_at(gsub, rec.lookup_list_index, glyphs, gdef, pos, depth, 0);
     }
 }
 
@@ -1661,46 +1603,6 @@ fn expand_glyph_in_place(glyphs: &mut Vec<Glyph>, at: usize, seq: &[u16]) -> Opt
         glyphs.insert(at + i, g);
     }
     Some(seq.len())
-}
-
-/// Scans the glyph run for a GSUB type-5 contextual match and fires
-/// the nested lookups on every hit. Shared across all three formats
-/// via [`apply_gsub_context_at`].
-fn apply_context_subtable(
-    gsub: &Gsub<'_>,
-    ctx: &GsubContext<'_>,
-    glyphs: &mut Vec<Glyph>,
-    gdef: Option<&Gdef<'_>>,
-    filter: &MatchFilter<'_>,
-) {
-    let mut i = 0;
-    while i < glyphs.len() {
-        let consumed = apply_gsub_context_at(gsub, ctx, glyphs, gdef, filter, i, 0);
-        if consumed > 0 {
-            i += consumed;
-        } else {
-            i += 1;
-        }
-    }
-}
-
-/// Scans the glyph run for a chained-context match (format 1, 2, or 3).
-fn apply_chain_context_any_subtable(
-    gsub: &Gsub<'_>,
-    chain: &ChainContextAny<'_>,
-    glyphs: &mut Vec<Glyph>,
-    gdef: Option<&Gdef<'_>>,
-    filter: &MatchFilter<'_>,
-) {
-    let mut i = 0;
-    while i < glyphs.len() {
-        let consumed = apply_gsub_chain_context_at(gsub, chain, glyphs, gdef, filter, i, 0);
-        if consumed > 0 {
-            i += consumed;
-        } else {
-            i += 1;
-        }
-    }
 }
 
 /// Reverse chained single substitution (GSUB type 8). Walks the run
@@ -1857,83 +1759,6 @@ pub(crate) fn feature_would_substitute(
         }
     }
     false
-}
-
-fn apply_single_subtable(single: &Single<'_>, glyphs: &mut [Glyph], filter: &MatchFilter<'_>) {
-    for glyph in glyphs.iter_mut() {
-        let id = glyph.glyph_id as u16;
-        if filter.is_skipped(id) {
-            continue;
-        }
-        if let Some(out) = single.apply(id) {
-            glyph.glyph_id = u32::from(out);
-        }
-    }
-}
-
-fn apply_multiple_subtable(m: &Multiple<'_>, glyphs: &mut Vec<Glyph>, filter: &MatchFilter<'_>) {
-    let mut i = 0;
-    while i < glyphs.len() {
-        let id = glyphs[i].glyph_id as u16;
-        if filter.is_skipped(id) {
-            i += 1;
-            continue;
-        }
-        if let Some(seq) = m.apply(id) {
-            if let Some(n) = expand_glyph_in_place(glyphs, i, &seq) {
-                i += n;
-                continue;
-            }
-        }
-        i += 1;
-    }
-}
-
-fn apply_alternate_subtable(
-    alt: &Alternate<'_>,
-    glyphs: &mut [Glyph],
-    filter: &MatchFilter<'_>,
-    alternate_index: u16,
-) {
-    for glyph in glyphs.iter_mut() {
-        let id = glyph.glyph_id as u16;
-        if filter.is_skipped(id) {
-            continue;
-        }
-        if let Some(out) = alt.apply(id, alternate_index) {
-            glyph.glyph_id = u32::from(out);
-        }
-    }
-}
-
-fn apply_liga_subtable(lig: &Ligature<'_>, glyphs: &mut Vec<Glyph>, filter: &MatchFilter<'_>) {
-    let mut i = 0;
-    // Work on a scratch u16 view so lookups don't re-derive ids.
-    // Re-synthesised inside the loop after each substitution so the
-    // window reflects the post-replacement run.
-    while i < glyphs.len() {
-        // If the leading glyph itself is filtered out, never try to
-        // start a ligature here.
-        let lead = glyphs[i].glyph_id as u16;
-        if filter.is_skipped(lead) {
-            i += 1;
-            continue;
-        }
-        let window: Vec<u16> = glyphs[i..].iter().map(|g| g.glyph_id as u16).collect();
-        if let Some((lig_glyph, positions)) = lig.apply_filtered(&window, filter) {
-            // Merge the consumed range: keep the cluster of the
-            // first component (the leftmost character that fed the
-            // ligature), replace the glyph id, drop the matched
-            // tail components while preserving skipped glyphs
-            // (typically marks) that sat between them.
-            glyphs[i].glyph_id = u32::from(lig_glyph);
-            drain_ligature_components(glyphs, i, &positions);
-            // Stay on `i` — a ligature output might itself be the
-            // first component of a longer ligature further along.
-        } else {
-            i += 1;
-        }
-    }
 }
 
 /// Applies every GPOS lookup reachable via the named feature tag

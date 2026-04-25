@@ -1,0 +1,20 @@
+[package]
+name = "sigilbuzz-pdf"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PDF Type 3 font emitter for sigilbuzz glyph outlines."
+publish = false
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+sigilbuzz = { workspace = true }
+
+[dev-dependencies]
+# No extra deps — fixtures are loaded with include_bytes!.
