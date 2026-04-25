@@ -1448,6 +1448,13 @@ fn patch_u16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
 #[must_use]
 #[allow(dead_code)] // wired in by the partial-instance emit follow-ups
 pub(crate) fn axis_support_scalar(start: f32, peak: f32, end: f32, coord: f32) -> f32 {
+    // Hardening (#185): any non-finite input returns 0 — the axis is
+    // treated as outside this region. This matches HarfBuzz's
+    // hb_array_t::evaluate clamping behavior and prevents NaN/Inf from
+    // propagating into the per-tuple scalar product downstream.
+    if !coord.is_finite() || !peak.is_finite() || !start.is_finite() || !end.is_finite() {
+        return 0.0;
+    }
     // Spec: peak of zero means the axis does not participate.
     if peak == 0.0 {
         return 1.0;
@@ -3814,6 +3821,59 @@ mod partial_instancing_tests {
         // peak == start, coord between them → division by zero
         // guarded with a 0.0 fallback.
         assert!(axis_support_scalar(1.0, 1.0, 1.0, 0.5).abs() < 1e-6);
+    }
+
+    // --------------------------------------------------------------
+    // axis_support_scalar — non-finite inputs are clamped to 0.0
+    // (regression #185). Matches HarfBuzz hb_array_t::evaluate.
+    // --------------------------------------------------------------
+
+    #[test]
+    fn axis_support_scalar_nan_coord_returns_zero() {
+        // NaN coord → axis is "outside the region": scalar 0.
+        assert_eq!(axis_support_scalar(0.0, 1.0, 1.0, f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn axis_support_scalar_inf_coord_returns_zero() {
+        // +Inf and -Inf coords are both clamped to scalar 0.
+        assert_eq!(axis_support_scalar(0.0, 1.0, 1.0, f32::INFINITY), 0.0);
+        assert_eq!(
+            axis_support_scalar(0.0, 1.0, 1.0, f32::NEG_INFINITY),
+            0.0
+        );
+    }
+
+    #[test]
+    fn axis_support_scalar_nan_peak_returns_zero() {
+        // NaN peak — the region itself is corrupt; clamp to 0.
+        assert_eq!(axis_support_scalar(0.0, f32::NAN, 1.0, 0.5), 0.0);
+    }
+
+    #[test]
+    fn axis_support_scalar_nan_or_inf_endpoints_return_zero() {
+        // Non-finite start or end: clamp to 0.
+        assert_eq!(axis_support_scalar(f32::NAN, 1.0, 1.0, 0.5), 0.0);
+        assert_eq!(axis_support_scalar(0.0, 1.0, f32::NAN, 0.5), 0.0);
+        assert_eq!(axis_support_scalar(f32::NEG_INFINITY, 1.0, 1.0, 0.5), 0.0);
+        assert_eq!(axis_support_scalar(0.0, 1.0, f32::INFINITY, 0.5), 0.0);
+    }
+
+    #[test]
+    fn axis_support_scalar_degenerate_region_at_peak_returns_one() {
+        // start == end == peak == coord: the spec's degenerate region
+        // collapses to a point and the coord lands on it → scalar 1.
+        // (Without the (coord - peak).abs() < EPSILON short-circuit
+        // this would divide by zero and produce NaN.)
+        assert!((axis_support_scalar(0.5, 0.5, 0.5, 0.5) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn axis_support_scalar_start_eq_peak_below_peak_returns_zero() {
+        // start == peak == 0.5, end == 1.0; coord = 0.4 falls below
+        // start so the outside-region branch returns 0.0 (no divide
+        // by zero on the up-ramp denominator).
+        assert_eq!(axis_support_scalar(0.5, 0.5, 1.0, 0.4), 0.0);
     }
 
     // --------------------------------------------------------------
