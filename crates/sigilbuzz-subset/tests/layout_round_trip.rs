@@ -9,12 +9,11 @@
 //!   and `GDEF` verbatim when the kept-gid set is the full font (the
 //!   gid_map is identity). Under a proper subset, the byte-level
 //!   rewriter rebuilds whatever layout content it has support for —
-//!   today GSUB type 1 (single-sub) plus GDEF GlyphClassDef and
-//!   MarkAttachClassDef. Lookup types without a rewriter drop, the
-//!   drop cascade then drops empty subtables / lookups / features /
-//!   scripts, and a layout table drops entirely when no script
-//!   survives. GPOS currently has no per-type rewriter so it always
-//!   drops under a proper subset.
+//!   today GSUB types 1/2/3/4/7 plus GPOS types 1/2/3/4/5/6/9 plus
+//!   GDEF GlyphClassDef and MarkAttachClassDef. Lookup types without
+//!   a rewriter drop, the drop cascade then drops empty subtables /
+//!   lookups / features / scripts, and a layout table drops entirely
+//!   when no script survives.
 
 use sigilbuzz::tables::tag;
 use sigilbuzz::{Blob, Face};
@@ -69,7 +68,10 @@ fn retain_layout_true_with_proper_subset_routes_through_rewriter() {
     //     keeps at least one (input, output) pair. Other GSUB types
     //     drop. The drop cascade then drops empty lookups / features /
     //     scripts, and GSUB itself drops when no script survives.
-    //   - GPOS has no per-type rewriter today; it always drops.
+    //   - GPOS types 1/2/3/4/5/6/9 have rewriters; types 7/8 (context)
+    //     drop. For Open Sans → {A, B} the few lookups that touch
+    //     these glyphs end up empty after pair filtering and the drop
+    //     cascade removes GPOS entirely.
     //   - GDEF GlyphClassDef and MarkAttachClassDef are rewritten via
     //     the auto-format ClassDef emitter; AttachList / LigCaretList /
     //     MarkGlyphSetsDef / ItemVariationStore drop.
@@ -91,10 +93,13 @@ fn retain_layout_true_with_proper_subset_routes_through_rewriter() {
     let out = subset(&face, &input).unwrap();
     let blob = Blob::from_vec(out.bytes);
     let subset_face = Face::parse(&blob, 0).unwrap();
-    // GPOS must drop — no per-type rewriter today.
+    // GPOS drops here because Open Sans's pair-pos / mark lookups
+    // that cover A/B all empty out after filtering — none of the
+    // surviving secondGlyphs / mark partners are in {A, B}. The drop
+    // cascade then removes GPOS entirely.
     assert!(
         subset_face.record(tag::GPOS).is_none(),
-        "GPOS must drop until per-type rewriters ship",
+        "GPOS expected to drop for the {{A, B}} subset of Open Sans",
     );
     // GDEF must survive — Open Sans carries a GlyphClassDef, the
     // ClassDef rewriter handles it.
@@ -761,6 +766,139 @@ fn rubik_aalt_subset_is_byte_deterministic() {
     let a = subset(&face, &input).unwrap();
     let b = subset(&face, &input).unwrap();
     assert_eq!(a.bytes, b.bytes);
+}
+
+#[test]
+fn rubik_latin_subset_retains_gpos() {
+    // Rubik VF carries pair-pos (type 2 fmt 1/2), single-adj (type 1
+    // wrapped in extension), mark-base / mark-liga / mark-mark, and
+    // an extension-wrapped pair-pos. With a broad Latin subset the
+    // pair-pos lookups retain at least one (first, second) pair so
+    // the rewriter emits a parseable GPOS table.
+    let face = rubik_face();
+    if face.gpos().ok().flatten().is_none() {
+        return;
+    }
+    let cmap = face.cmap().unwrap();
+    let mut gids: Vec<u16> = Vec::new();
+    for c in 'A'..='Z' {
+        if let Some(g) = cmap.glyph_id(c) {
+            gids.push(g);
+        }
+    }
+    for c in 'a'..='z' {
+        if let Some(g) = cmap.glyph_id(c) {
+            gids.push(g);
+        }
+    }
+    if gids.is_empty() {
+        return;
+    }
+    let input = SubsetInput {
+        gids,
+        retain_hints: false,
+        drop_unhandled: true,
+        retain_layout: true,
+        retain_variations: false,
+    };
+    let out = subset(&face, &input).unwrap();
+    let blob = Blob::from_vec(out.bytes);
+    let subset_face = Face::parse(&blob, 0).unwrap();
+    assert!(
+        subset_face.record(tag::GPOS).is_some(),
+        "GPOS must survive a Latin-letter subset of Rubik — \
+         the pair-pos lookup retains at least one (first, second) pair",
+    );
+    // The rewritten GPOS must parse cleanly.
+    let parsed = subset_face.gpos();
+    assert!(
+        parsed.is_ok(),
+        "rewritten GPOS must parse: {:?}",
+        parsed.err()
+    );
+}
+
+#[test]
+fn rubik_latin_subset_gpos_is_byte_deterministic() {
+    // Determinism guard for GPOS rewrites.
+    let face = rubik_face();
+    if face.gpos().ok().flatten().is_none() {
+        return;
+    }
+    let cmap = face.cmap().unwrap();
+    let mut gids: Vec<u16> = Vec::new();
+    for c in 'A'..='Z' {
+        if let Some(g) = cmap.glyph_id(c) {
+            gids.push(g);
+        }
+    }
+    for c in 'a'..='z' {
+        if let Some(g) = cmap.glyph_id(c) {
+            gids.push(g);
+        }
+    }
+    if gids.is_empty() {
+        return;
+    }
+    let input = SubsetInput {
+        gids,
+        retain_hints: false,
+        drop_unhandled: true,
+        retain_layout: true,
+        retain_variations: false,
+    };
+    let a = subset(&face, &input).unwrap();
+    let b = subset(&face, &input).unwrap();
+    assert_eq!(
+        a.bytes, b.bytes,
+        "GPOS-bearing subset must be byte-deterministic"
+    );
+}
+
+#[test]
+fn amiri_subset_gpos_round_trips() {
+    // Amiri carries mark-to-base / mark-to-mark GPOS lookups. A
+    // subset that keeps base glyphs must retain GPOS after the
+    // rewriter ships, so the marks the closure pulls in still attach
+    // correctly. We only check that GPOS parses post-subset; the
+    // attachment math is covered by the unit-test fixtures.
+    let face = amiri_face();
+    if face.gpos().ok().flatten().is_none() {
+        return;
+    }
+    // Pick a chunk of Arabic letters.
+    let chars = [
+        '\u{0627}', '\u{0628}', '\u{062A}', '\u{062B}', '\u{062C}', '\u{062D}', '\u{062E}',
+        '\u{062F}',
+    ];
+    let cmap = face.cmap().unwrap();
+    let mut gids: Vec<u16> = Vec::new();
+    for ch in chars {
+        if let Some(gid) = cmap.glyph_id(ch) {
+            gids.push(gid);
+        }
+    }
+    if gids.is_empty() {
+        return;
+    }
+    let input = SubsetInput {
+        gids,
+        retain_hints: false,
+        drop_unhandled: true,
+        retain_layout: true,
+        retain_variations: false,
+    };
+    let out = subset(&face, &input).unwrap();
+    let blob = Blob::from_vec(out.bytes);
+    let subset_face = Face::parse(&blob, 0).unwrap();
+    if subset_face.record(tag::GPOS).is_some() {
+        let parsed = subset_face.gpos();
+        assert!(
+            parsed.is_ok(),
+            "rewritten Amiri GPOS must parse: {:?}",
+            parsed.err()
+        );
+    }
 }
 
 // ===== GSUB type 5 / 6 / 8 round-trip coverage =====
