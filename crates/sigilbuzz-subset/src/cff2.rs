@@ -7,16 +7,21 @@
 //! The Type 2 charstring scanner from [`crate::cff`] already accepts
 //! both flavours — it stops at `OP_RETURN` / `OP_ENDCHAR` /
 //! end-of-stream, and recognises `vsindex` / `blend` so CFF2-specific
-//! ops don't confuse the operand-stack tracking. The CFF2 entry point
-//! exists today as a placeholder so the upstream `subset()` API can
-//! dispatch on which CFF variant the source font carries.
+//! ops don't confuse the operand-stack tracking. The byte-level emitter
+//! primitives ([`crate::cff::encode_index`],
+//! [`crate::cff::encode_dict_int`], [`crate::cff::renumber_charstring`])
+//! are shared with CFF1 — CFF2's smaller surface (no Name / String /
+//! Encoding / charset INDEXes) means the eventual emitter is a strict
+//! subset of the CFF1 layout pass.
 //!
 //! # Status
 //!
-//! The byte-level CFF2 emitter (Top DICT serialise, INDEX rebuilds,
-//! VariationStore pass-through) is staged in the same follow-up
-//! commit as the CFF1 emitter; today this entry point returns
-//! `Unsupported`.
+//! CFF2 sources are routed through the same identity-passthrough path
+//! as CFF1 in [`crate::subset`] — when the closure walker has not
+//! dropped any glyph (kept set == `0..num_glyphs`) the CFF2 table is
+//! preserved verbatim including its VariationStore, FDArray, FDSelect,
+//! and inline Top DICT. Non-identity CFF2 subsetting is staged for the
+//! same follow-up that lands non-identity CFF1.
 
 // The CFF1 charstring scanner already accepts CFF2 inputs (no endchar
 // terminator, vsindex / blend recognised). The CFF2 emitter, when it
