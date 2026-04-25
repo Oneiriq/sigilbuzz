@@ -101,6 +101,22 @@ pub enum Script {
     /// Cham. Brahmic script of Cambodia and Vietnam used for the
     /// Cham language. USE pipeline; covers U+AA00..U+AA5F.
     Cham,
+    /// Brahmi (U+11000..U+1107F). The 3rd-century-BCE ancestor of
+    /// every Brahmic script. Historical / scholarly use only. SMP
+    /// block — codepoints are u32-wide. USE pipeline.
+    Brahmi,
+    /// Sharada (U+11180..U+111DF). Historical Kashmiri / Sanskrit
+    /// script (8th century). Still used liturgically. USE pipeline.
+    Sharada,
+    /// Khojki (U+11200..U+1124F). Historical script for Sindhi /
+    /// Khoja Ismaili community. USE pipeline.
+    Khojki,
+    /// Tirhuta (U+11480..U+114DF). Historical script for Maithili
+    /// / Sanskrit. USE pipeline.
+    Tirhuta,
+    /// Modi (U+11600..U+1165F). Historical script for Marathi
+    /// (17th century). USE pipeline.
+    Modi,
     /// Anything else — returned when sigilbuzz has no specialised
     /// table for the codepoint's script.
     Other,
@@ -150,6 +166,11 @@ impl Script {
                 | Script::Lepcha
                 | Script::Limbu
                 | Script::Cham
+                | Script::Brahmi
+                | Script::Sharada
+                | Script::Khojki
+                | Script::Tirhuta
+                | Script::Modi
         )
     }
 }
@@ -223,6 +244,17 @@ pub const fn script_of(ch: char) -> Script {
         0x1C00..=0x1C4F => Script::Lepcha,
         // Cham (Cambodia / Vietnam).
         0xAA00..=0xAA5F => Script::Cham,
+        // --- Brahmi-family historical scripts (SMP) -------------
+        // Brahmi (3rd century BCE — ancestor of all Brahmic).
+        0x11000..=0x1107F => Script::Brahmi,
+        // Sharada (Kashmiri / Sanskrit, 8th century).
+        0x11180..=0x111DF => Script::Sharada,
+        // Khojki (Sindhi / Khoja Ismaili).
+        0x11200..=0x1124F => Script::Khojki,
+        // Tirhuta (Maithili / Sanskrit).
+        0x11480..=0x114DF => Script::Tirhuta,
+        // Modi (Marathi, 17th century).
+        0x11600..=0x1165F => Script::Modi,
         // Hangul Jamo + Jamo Extended-A + Jamo Extended-B +
         // precomposed Hangul Syllables + Hangul Compatibility Jamo.
         // The USE routing in shape.rs only triggers for the Jamo
@@ -429,8 +461,34 @@ mod tests {
         assert!(Script::Lepcha.is_use());
         assert!(Script::Limbu.is_use());
         assert!(Script::Cham.is_use());
+        assert!(Script::Brahmi.is_use());
+        assert!(Script::Sharada.is_use());
+        assert!(Script::Khojki.is_use());
+        assert!(Script::Tirhuta.is_use());
+        assert!(Script::Modi.is_use());
         assert!(!Script::Latin.is_use());
         assert!(!Script::Devanagari.is_use());
+    }
+
+    #[test]
+    fn classifies_brahmi_family_smp_scripts() {
+        // Brahmi (U+11000..U+1107F).
+        assert_eq!(script_of('\u{11000}'), Script::Brahmi); // candrabindu
+        assert_eq!(script_of('\u{11015}'), Script::Brahmi); // letter ka
+        assert_eq!(script_of('\u{1107F}'), Script::Brahmi); // block end
+        // Sharada (U+11180..U+111DF).
+        assert_eq!(script_of('\u{11180}'), Script::Sharada);
+        assert_eq!(script_of('\u{11192}'), Script::Sharada); // letter ka
+        assert_eq!(script_of('\u{111DF}'), Script::Sharada);
+        // Khojki (U+11200..U+1124F).
+        assert_eq!(script_of('\u{11200}'), Script::Khojki); // letter a
+        assert_eq!(script_of('\u{11208}'), Script::Khojki); // letter ka
+        // Tirhuta (U+11480..U+114DF).
+        assert_eq!(script_of('\u{11480}'), Script::Tirhuta); // letter a
+        assert_eq!(script_of('\u{1148A}'), Script::Tirhuta); // letter ka
+        // Modi (U+11600..U+1165F).
+        assert_eq!(script_of('\u{11600}'), Script::Modi); // letter a
+        assert_eq!(script_of('\u{11606}'), Script::Modi); // letter ka
     }
 
     #[test]

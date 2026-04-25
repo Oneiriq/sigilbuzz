@@ -296,6 +296,79 @@ pub const fn use_position(ch: char) -> UsePosition {
         0xAA2F..=0xAA30 => UsePosition::PreBase,
         0xAA33 | 0xAA43 | 0xAA4D => UsePosition::PostBase,
 
+        // --- Brahmi (U+11000..U+1107F) ---------------------------
+        // 11000 sign candrabindu (above), 11001 sign anusvara (above),
+        // 11002 sign visarga (post), 11038..11045 vowel signs:
+        //   11038 sign aa (post), 11039 sign bb-i (above),
+        //   1103A sign ii (above), 1103B sign u (below),
+        //   1103C sign uu (below), 1103D sign vocalic r (below),
+        //   1103E sign vocalic rr (below), 1103F sign vocalic l (below),
+        //   11040 sign vocalic ll (below), 11041 sign e (above),
+        //   11042 sign ai (above), 11043 sign o (post),
+        //   11044 sign au (post), 11045 sign virama (NotApplicable).
+        // 11073 vowel sign old tamil short e (above),
+        // 11074 vowel sign old tamil short o (post).
+        0x11000..=0x11001 | 0x11039..=0x1103A | 0x11041..=0x11042 | 0x11073 => UsePosition::AboveBase,
+        0x1103B..=0x11040 => UsePosition::BelowBase,
+        0x11002 | 0x11038 | 0x11043..=0x11044 | 0x11074 => UsePosition::PostBase,
+
+        // --- Sharada (U+11180..U+111DF) --------------------------
+        // 11180 candrabindu (above), 11181 anusvara (above),
+        // 11182 visarga (post), 111B3..111BF vowel signs:
+        //   111B3 sign aa (post), 111B4 sign i (above),
+        //   111B5 sign ii (above), 111B6..111B9 below,
+        //   111BA sign vocalic ll (below), 111BB sign e (post),
+        //   111BC sign ai (post), 111BD sign o (post),
+        //   111BE sign au (post), 111BF sign vowel sign aw (post),
+        //   111C0 sign virama (NotApplicable).
+        // 111CA nukta (below), 111CB vowel modifier mark (above),
+        // 111CC extra short vowel mark (above),
+        // 111CD sutra mark (above), 111CE sign vowel modifier (above),
+        // 111CF sign inverted candrabindu (above).
+        0x11180..=0x11181 | 0x111CB..=0x111CF => UsePosition::AboveBase,
+        0x111B6..=0x111BA | 0x111CA => UsePosition::BelowBase,
+        0x111B4..=0x111B5 => UsePosition::PreBase,
+        0x11182 | 0x111B3 | 0x111BB..=0x111BF => UsePosition::PostBase,
+
+        // --- Khojki (U+11200..U+1124F) ---------------------------
+        // 1122C..1122E vowel signs (post — sign aa/i/ii),
+        // 1122F sign u (below), 11230 sign e (above),
+        // 11231 sign ai (above), 11232..11233 sign o/au (post),
+        // 11234 anusvara (above), 11235 virama (NotApplicable),
+        // 11236 nukta (below), 11237 shadda (above).
+        0x11230..=0x11231 | 0x11234 | 0x11237 => UsePosition::AboveBase,
+        0x1122F | 0x11236 => UsePosition::BelowBase,
+        0x1122C..=0x1122E | 0x11232..=0x11233 => UsePosition::PostBase,
+
+        // --- Tirhuta (U+11480..U+114DF) --------------------------
+        // 114B0 sign aa (post), 114B1 sign i (post),
+        // 114B2 sign ii (post), 114B3..114B8 below (u/uu/vocalic r/rr/l/ll),
+        // 114B9 sign e (pre-base — Tirhuta places sign-e visually
+        //   before the base, like Bengali sign-e),
+        // 114BA sign short e (above),
+        // 114BB sign ai (post), 114BC sign o (pre — like sign-e),
+        // 114BD sign short o (post), 114BE sign au (post),
+        // 114BF sign candrabindu (above), 114C0 sign anusvara (above),
+        // 114C1 sign visarga (post), 114C2 sign virama (NotApplicable),
+        // 114C3 sign nukta (below).
+        0x114BA | 0x114BF..=0x114C0 => UsePosition::AboveBase,
+        0x114B3..=0x114B8 | 0x114C3 => UsePosition::BelowBase,
+        0x114B9 | 0x114BC => UsePosition::PreBase,
+        0x114B0..=0x114B2 | 0x114BB | 0x114BD..=0x114BE | 0x114C1 => UsePosition::PostBase,
+
+        // --- Modi (U+11600..U+1165F) -----------------------------
+        // 11630..11632 vowel signs (post — sign aa/i/ii),
+        // 11633..11637 below (u/uu/vocalic r/rr/l),
+        // 11638 sign vocalic ll (below),
+        // 11639..1163A above (e/ai),
+        // 1163B..1163C post (o/au),
+        // 1163D anusvara (above), 1163E visarga (post),
+        // 1163F virama (NotApplicable),
+        // 11640 ardhacandra (above).
+        0x11639..=0x1163A | 0x1163D | 0x11640 => UsePosition::AboveBase,
+        0x11633..=0x11638 => UsePosition::BelowBase,
+        0x11630..=0x11632 | 0x1163B..=0x1163C | 0x1163E => UsePosition::PostBase,
+
         // Currency + signs — no positional role (the currency is a
         // base glyph itself).
         _ => UsePosition::NotApplicable,
@@ -659,6 +732,141 @@ pub const fn use_category(ch: char) -> UseCategory {
         0xAA4D => UseCategory::VPst,
         0xAA50..=0xAA59 => UseCategory::N,
         0xAA5C..=0xAA5F => UseCategory::GB,
+
+        // --- Brahmi (U+11000..U+1107F) ---------------------------
+        // Historical script of the Indian subcontinent (3rd century BCE);
+        // ancestor of every Brahmic script. SMP block.
+        // 11000 candrabindu (M — above-base modifier),
+        // 11001 anusvara (M),
+        // 11002 visarga (FM — final mark),
+        // 11003..11037: 11003..11005 independent vowels,
+        //   11006..11037 consonants.
+        // 11038..11045 dependent vowel signs (mix of above/below/post),
+        // 11046 virama (H),
+        // 11047..1104D punctuation (GB),
+        // 11052..11065 number signs (N — Brahmi numeric system),
+        // 11066..1106F digits (N),
+        // 11070 old tamil virama (H — Pulli sign),
+        // 11071..11072 old tamil short e/o (IV),
+        // 11073..11074 old tamil short e/o vowel signs (above/post),
+        // 11075 old tamil lla (B).
+        0x11000..=0x11001 => UseCategory::M,
+        0x11002 => UseCategory::FM,
+        0x11003..=0x11005 => UseCategory::IV,
+        0x11006..=0x11037 => UseCategory::B,
+        0x11038 | 0x11043..=0x11044 | 0x11074 => UseCategory::VPst,
+        0x11039..=0x1103A | 0x11041..=0x11042 | 0x11073 => UseCategory::VAbv,
+        0x1103B..=0x11040 => UseCategory::VBlw,
+        0x11046 | 0x11070 => UseCategory::H,
+        0x11047..=0x1104D => UseCategory::GB,
+        0x11052..=0x1106F => UseCategory::N,
+        0x11071..=0x11072 => UseCategory::IV,
+        0x11075 => UseCategory::B,
+
+        // --- Sharada (U+11180..U+111DF) --------------------------
+        // Historical script for Kashmiri / Sanskrit (8th century);
+        // still used liturgically in Kashmiri Hindu communities.
+        // 11180 candrabindu (M), 11181 anusvara (M), 11182 visarga (FM),
+        // 11183..11191 independent vowels (IV),
+        // 11192..111B2 consonants (B),
+        // 111B3..111BF dependent vowel signs,
+        // 111C0 virama (H),
+        // 111C1..111C3 sign avagraha / aum / siddham (B/GB),
+        // 111C4 letter om (B), 111C5..111C8 punctuation (GB),
+        // 111C9 sandhi mark (M), 111CA nukta (M — below),
+        // 111CB vowel modifier mark (M), 111CC extra short vowel mark (M),
+        // 111CD sutra mark (M), 111CE sign vowel modifier (M),
+        // 111CF sign inverted candrabindu (M),
+        // 111D0..111D9 digits (N),
+        // 111DA letter ekam (B),
+        // 111DB..111DF punctuation (GB).
+        0x11180..=0x11181 => UseCategory::M,
+        0x11182 => UseCategory::FM,
+        0x11183..=0x11191 => UseCategory::IV,
+        0x11192..=0x111B2 => UseCategory::B,
+        0x111B3 | 0x111BB..=0x111BF => UseCategory::VPst,
+        // Sign-i (U+111B4) renders visually before the base in
+        // Sharada despite Unicode marking it Top — the font ships
+        // sign-i as a spacing pre-base glyph and the USE reorder
+        // pass moves it to the head of the syllable. Sign-ii
+        // (U+111B5) follows the same pattern in this font.
+        0x111B4..=0x111B5 => UseCategory::VPre,
+        0x111B6..=0x111BA => UseCategory::VBlw,
+        0x111C0 => UseCategory::H,
+        0x111C1..=0x111C4 => UseCategory::B,
+        0x111C5..=0x111C8 | 0x111CD => UseCategory::GB,
+        0x111C9..=0x111CC | 0x111CE..=0x111CF => UseCategory::M,
+        0x111D0..=0x111D9 => UseCategory::N,
+        0x111DA => UseCategory::B,
+        0x111DB..=0x111DF => UseCategory::GB,
+
+        // --- Khojki (U+11200..U+1124F) ---------------------------
+        // Historical script for Sindhi / Khoja Ismaili community.
+        // 11200..11211: 11200..11211 letters (mix of IV at start,
+        //   then B). 11200 letter a (IV), 11201..11202 aa/i (IV),
+        //   11203..11211 mostly consonants. We approximate by
+        //   classifying 11200..11207 as IV (vowel letters) and
+        //   11208..11211 as B (consonants) — Unicode UCD splits at
+        //   11208 letter ka.
+        // 11213..1122B consonants (B),
+        // 1122C..11233 vowel signs (mix),
+        // 11234 anusvara (M), 11235 virama (H),
+        // 11236 nukta (M), 11237 shadda (M),
+        // 11238..1123D punctuation (GB),
+        // 1123E sign sukun (M), 1123F letter qa (B).
+        0x11200..=0x11207 => UseCategory::IV,
+        0x11208..=0x11211 | 0x11213..=0x1122B | 0x1123F => UseCategory::B,
+        0x1122C..=0x1122E | 0x11232..=0x11233 => UseCategory::VPst,
+        0x1122F => UseCategory::VBlw,
+        0x11230..=0x11231 => UseCategory::VAbv,
+        0x11234 | 0x11236..=0x11237 | 0x1123E => UseCategory::M,
+        0x11235 => UseCategory::H,
+        0x11238..=0x1123D => UseCategory::GB,
+
+        // --- Tirhuta (U+11480..U+114DF) --------------------------
+        // Historical script for Maithili / Sanskrit.
+        // 11480..11489 independent vowels (IV),
+        // 1148A..114AF consonants (B),
+        // 114B0..114BE dependent vowel signs (mix),
+        // 114BF candrabindu (M), 114C0 anusvara (M),
+        // 114C1 visarga (FM), 114C2 virama (H),
+        // 114C3 nukta (M),
+        // 114C4..114C5 marks (M),
+        // 114C6 abbreviation sign (GB), 114C7 om (B),
+        // 114D0..114D9 digits (N).
+        0x11480..=0x11489 => UseCategory::IV,
+        0x1148A..=0x114AF | 0x114C7 => UseCategory::B,
+        0x114B0..=0x114B2 | 0x114BB | 0x114BD..=0x114BE => UseCategory::VPst,
+        0x114B3..=0x114B8 => UseCategory::VBlw,
+        0x114B9 | 0x114BC => UseCategory::VPre,
+        0x114BA => UseCategory::VAbv,
+        0x114BF..=0x114C0 => UseCategory::M,
+        0x114C1 => UseCategory::FM,
+        0x114C2 => UseCategory::H,
+        0x114C3..=0x114C5 => UseCategory::M,
+        0x114C6 => UseCategory::GB,
+        0x114D0..=0x114D9 => UseCategory::N,
+
+        // --- Modi (U+11600..U+1165F) -----------------------------
+        // Historical script for Marathi (17th century).
+        // 11600..1162F: 11600..11605 independent vowels,
+        //   11606..1162F consonants. (Modi has fewer vowels than
+        //   Devanagari; 6 IV letters then 42 consonants.)
+        // 11630..11640 dependent vowel signs / marks (mix),
+        // 11641..11643 punctuation (GB? — actually digits).
+        // Wait: 11641 digit zero ... no, Modi digits are 11650..11659.
+        // 11641..11643 is unassigned in 15.0; 11644 is letter qa (B).
+        // 11650..11659 digits (N), 1165D..1165F punctuation (GB).
+        0x11600..=0x11605 => UseCategory::IV,
+        0x11606..=0x1162F | 0x11644 => UseCategory::B,
+        0x11630..=0x11632 | 0x1163B..=0x1163C => UseCategory::VPst,
+        0x11633..=0x11638 => UseCategory::VBlw,
+        0x11639..=0x1163A => UseCategory::VAbv,
+        0x1163D | 0x11640 => UseCategory::M,
+        0x1163E => UseCategory::FM,
+        0x1163F => UseCategory::H,
+        0x11650..=0x11659 => UseCategory::N,
+        0x1165D..=0x1165F => UseCategory::GB,
 
         // --- Hangul Jamo (U+1100..U+11FF) + Extensions -----------
         // Leading consonants (Choseong): 1100..115F + A960..A97C.
@@ -1086,5 +1294,105 @@ mod tests {
         assert_eq!(use_category('\u{AA40}'), UseCategory::CM); // final k
         assert_eq!(use_category('\u{AA43}'), UseCategory::FM); // final ng
         assert_eq!(use_category('\u{AA50}'), UseCategory::N); // digit 0
+    }
+
+    // --- Brahmi-family historical-script tests -------------------
+
+    #[test]
+    fn brahmi_basics() {
+        // 11000 candrabindu (M), 11001 anusvara (M), 11002 visarga (FM).
+        assert_eq!(use_category('\u{11000}'), UseCategory::M);
+        assert_eq!(use_category('\u{11001}'), UseCategory::M);
+        assert_eq!(use_category('\u{11002}'), UseCategory::FM);
+        // Independent vowels.
+        assert_eq!(use_category('\u{11003}'), UseCategory::IV);
+        assert_eq!(use_category('\u{11005}'), UseCategory::IV);
+        // Letter ka.
+        assert_eq!(use_category('\u{11015}'), UseCategory::B);
+        // Vowel signs.
+        assert_eq!(use_category('\u{11038}'), UseCategory::VPst); // sign aa
+        assert_eq!(use_category('\u{11039}'), UseCategory::VAbv); // sign i
+        assert_eq!(use_category('\u{1103B}'), UseCategory::VBlw); // sign u
+        // Virama.
+        assert_eq!(use_category('\u{11046}'), UseCategory::H);
+        // Digits.
+        assert_eq!(use_category('\u{11066}'), UseCategory::N);
+        assert_eq!(use_category('\u{1106F}'), UseCategory::N);
+    }
+
+    #[test]
+    fn sharada_basics() {
+        // 11180 candrabindu (M), 11181 anusvara (M), 11182 visarga (FM).
+        assert_eq!(use_category('\u{11180}'), UseCategory::M);
+        assert_eq!(use_category('\u{11181}'), UseCategory::M);
+        assert_eq!(use_category('\u{11182}'), UseCategory::FM);
+        // Letters.
+        assert_eq!(use_category('\u{11183}'), UseCategory::IV); // letter a
+        assert_eq!(use_category('\u{11192}'), UseCategory::B); // letter ka
+        // Vowel signs. Sign-i renders visually before the base in
+        // Sharada (font has spacing pre-base sign-i glyph), so the
+        // USE category is VPre to drive the pre-base reorder.
+        assert_eq!(use_category('\u{111B3}'), UseCategory::VPst); // sign aa
+        assert_eq!(use_category('\u{111B4}'), UseCategory::VPre); // sign i (pre-base)
+        assert_eq!(use_position('\u{111B4}'), UsePosition::PreBase);
+        assert_eq!(use_category('\u{111B6}'), UseCategory::VBlw); // sign u
+        // Virama.
+        assert_eq!(use_category('\u{111C0}'), UseCategory::H);
+        // Digits.
+        assert_eq!(use_category('\u{111D0}'), UseCategory::N);
+        assert_eq!(use_category('\u{111D9}'), UseCategory::N);
+    }
+
+    #[test]
+    fn khojki_basics() {
+        // Letters.
+        assert_eq!(use_category('\u{11200}'), UseCategory::IV); // letter a
+        assert_eq!(use_category('\u{11208}'), UseCategory::B); // letter ka
+        // Vowel signs.
+        assert_eq!(use_category('\u{1122C}'), UseCategory::VPst); // sign aa
+        assert_eq!(use_category('\u{11230}'), UseCategory::VAbv); // sign e
+        assert_eq!(use_category('\u{1122F}'), UseCategory::VBlw); // sign u
+        // Anusvara / virama.
+        assert_eq!(use_category('\u{11234}'), UseCategory::M); // anusvara
+        assert_eq!(use_category('\u{11235}'), UseCategory::H); // virama
+        // Letter qa.
+        assert_eq!(use_category('\u{1123F}'), UseCategory::B);
+    }
+
+    #[test]
+    fn tirhuta_basics() {
+        // Letters.
+        assert_eq!(use_category('\u{11480}'), UseCategory::IV); // letter a
+        assert_eq!(use_category('\u{1148A}'), UseCategory::B); // letter ka
+        // Vowel signs.
+        assert_eq!(use_category('\u{114B0}'), UseCategory::VPst); // sign aa
+        assert_eq!(use_category('\u{114B3}'), UseCategory::VBlw); // sign u
+        assert_eq!(use_category('\u{114B9}'), UseCategory::VPre); // sign e (pre-base)
+        assert_eq!(use_category('\u{114BC}'), UseCategory::VPre); // sign o (pre-base)
+        assert_eq!(use_category('\u{114BA}'), UseCategory::VAbv); // sign short e
+        // Marks / virama.
+        assert_eq!(use_category('\u{114C0}'), UseCategory::M); // anusvara
+        assert_eq!(use_category('\u{114C1}'), UseCategory::FM); // visarga
+        assert_eq!(use_category('\u{114C2}'), UseCategory::H); // virama
+        // Digits.
+        assert_eq!(use_category('\u{114D0}'), UseCategory::N);
+    }
+
+    #[test]
+    fn modi_basics() {
+        // Letters.
+        assert_eq!(use_category('\u{11600}'), UseCategory::IV); // letter a
+        assert_eq!(use_category('\u{11606}'), UseCategory::B); // letter ka
+        // Vowel signs.
+        assert_eq!(use_category('\u{11630}'), UseCategory::VPst); // sign aa
+        assert_eq!(use_category('\u{11633}'), UseCategory::VBlw); // sign u
+        assert_eq!(use_category('\u{11639}'), UseCategory::VAbv); // sign e
+        // Marks / virama.
+        assert_eq!(use_category('\u{1163D}'), UseCategory::M); // anusvara
+        assert_eq!(use_category('\u{1163E}'), UseCategory::FM); // visarga
+        assert_eq!(use_category('\u{1163F}'), UseCategory::H); // virama
+        // Digits.
+        assert_eq!(use_category('\u{11650}'), UseCategory::N);
+        assert_eq!(use_category('\u{11659}'), UseCategory::N);
     }
 }

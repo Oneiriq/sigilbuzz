@@ -362,10 +362,12 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
     use crate::ot::mongolian::MONG_SCRIPT_PRIORITY;
     use crate::ot::tibetan::TIBT_SCRIPT_PRIORITY;
     use crate::ot::use_shaper::{
-        BALINESE_SCRIPT_PRIORITY, BUGINESE_SCRIPT_PRIORITY, CHAM_SCRIPT_PRIORITY,
-        HANGUL_SCRIPT_PRIORITY, KHMER_SCRIPT_PRIORITY, LAO_SCRIPT_PRIORITY, LEPCHA_SCRIPT_PRIORITY,
-        LIMBU_SCRIPT_PRIORITY, MYANMAR_SCRIPT_PRIORITY, NKO_SCRIPT_PRIORITY,
+        BALINESE_SCRIPT_PRIORITY, BRAHMI_SCRIPT_PRIORITY, BUGINESE_SCRIPT_PRIORITY,
+        CHAM_SCRIPT_PRIORITY, HANGUL_SCRIPT_PRIORITY, KHMER_SCRIPT_PRIORITY, KHOJKI_SCRIPT_PRIORITY,
+        LAO_SCRIPT_PRIORITY, LEPCHA_SCRIPT_PRIORITY, LIMBU_SCRIPT_PRIORITY, MODI_SCRIPT_PRIORITY,
+        MYANMAR_SCRIPT_PRIORITY, NKO_SCRIPT_PRIORITY, SHARADA_SCRIPT_PRIORITY,
         SUNDANESE_SCRIPT_PRIORITY, TAI_THAM_SCRIPT_PRIORITY, THAI_SCRIPT_PRIORITY,
+        TIRHUTA_SCRIPT_PRIORITY,
     };
     match script {
         Script::Arabic => ARAB_PRIORITY,
@@ -395,6 +397,11 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
         Script::Lepcha => LEPCHA_SCRIPT_PRIORITY,
         Script::Limbu => LIMBU_SCRIPT_PRIORITY,
         Script::Cham => CHAM_SCRIPT_PRIORITY,
+        Script::Brahmi => BRAHMI_SCRIPT_PRIORITY,
+        Script::Sharada => SHARADA_SCRIPT_PRIORITY,
+        Script::Khojki => KHOJKI_SCRIPT_PRIORITY,
+        Script::Tirhuta => TIRHUTA_SCRIPT_PRIORITY,
+        Script::Modi => MODI_SCRIPT_PRIORITY,
         // Latin / Greek / Cyrillic / Han / Other — DFLT is where Latin
         // shipped features live and where anything we do not have
         // specialised dispatch for falls back.
