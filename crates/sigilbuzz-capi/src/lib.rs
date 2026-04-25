@@ -555,9 +555,8 @@ pub unsafe extern "C" fn hb_face_create(blob: *mut hb_blob_t, index: c_uint) -> 
         Ok(f) => f,
         Err(_) => return empty_face(),
     };
-    let face_static: Face<'static> = unsafe {
-        core::mem::transmute::<Face<'_>, Face<'static>>(face)
-    };
+    let face_static: Face<'static> =
+        unsafe { core::mem::transmute::<Face<'_>, Face<'static>>(face) };
     let inner = Arc::new(FaceInner {
         _data: bytes_arc,
         face: face_static,
@@ -613,7 +612,11 @@ pub unsafe extern "C" fn hb_face_get_upem(face: *mut hb_face_t) -> c_uint {
     }
     // SAFETY: caller asserts validity.
     let inner: &Arc<FaceInner> = unsafe { &(*face).inner };
-    inner.face.head().map(|h| u32::from(h.units_per_em)).unwrap_or(0)
+    inner
+        .face
+        .head()
+        .map(|h| u32::from(h.units_per_em))
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -621,7 +624,12 @@ pub unsafe extern "C" fn hb_face_get_upem(face: *mut hb_face_t) -> c_uint {
 // ---------------------------------------------------------------------------
 
 /// Internal: build the FontState's Font from coords and size.
-fn build_font(face_inner: &Arc<FaceInner>, x_scale: i32, _y_scale: i32, coords: &[f32]) -> Font<'static> {
+fn build_font(
+    face_inner: &Arc<FaceInner>,
+    x_scale: i32,
+    _y_scale: i32,
+    coords: &[f32],
+) -> Font<'static> {
     // sigilbuzz Font carries a single size; mirror x_scale into it.
     // y_scale is preserved for hb_font_get_scale round-tripping.
     let face = face_inner.face.clone();
@@ -633,9 +641,8 @@ fn build_font(face_inner: &Arc<FaceInner>, x_scale: i32, _y_scale: i32, coords: 
         // Font; the FontState owns both, so the borrow holds for
         // the same lifetime as the Font<'static> lie itself —
         // both are rooted in the FontInner's heap allocation.
-        let coords_static: &'static [f32] = unsafe {
-            core::mem::transmute::<&[f32], &'static [f32]>(coords)
-        };
+        let coords_static: &'static [f32] =
+            unsafe { core::mem::transmute::<&[f32], &'static [f32]>(coords) };
         font.with_coords(coords_static)
     }
 }
@@ -675,7 +682,13 @@ pub unsafe extern "C" fn hb_font_create(face: *mut hb_face_t) -> *mut hb_font_t 
     let face_inner = unsafe { (*face).inner.clone() };
     // Default x_scale / y_scale follow HarfBuzz: they default to
     // upem so an unscaled font produces design-unit output.
-    let upem_signed = i32::from(face_inner.face.head().map(|h| h.units_per_em).unwrap_or(1000));
+    let upem_signed = i32::from(
+        face_inner
+            .face
+            .head()
+            .map(|h| h.units_per_em)
+            .unwrap_or(1000),
+    );
     let coords: Vec<f32> = Vec::new();
     let font = build_font(&face_inner, upem_signed, upem_signed, &coords);
     let state = FontState {
@@ -1078,9 +1091,7 @@ pub unsafe extern "C" fn hb_buffer_guess_segment_properties(buffer: *mut hb_buff
         // first run's script into the matching ISO 15924 tag.
         let runs = state.buffer.script_runs();
         let chosen = runs.first().map(|r| r.script);
-        state.script = chosen
-            .map(script_to_iso15924)
-            .unwrap_or(HB_SCRIPT_COMMON);
+        state.script = chosen.map(script_to_iso15924).unwrap_or(HB_SCRIPT_COMMON);
     }
     if state.language.is_null() {
         // HarfBuzz uses the host locale here; pick "und" as a safe
@@ -1350,7 +1361,10 @@ pub unsafe extern "C" fn hb_language_from_string(s: *const c_char, len: c_int) -
     if bytes.is_empty() {
         return ptr::null();
     }
-    let normalised: String = bytes.iter().map(|b| b.to_ascii_lowercase() as char).collect();
+    let normalised: String = bytes
+        .iter()
+        .map(|b| b.to_ascii_lowercase() as char)
+        .collect();
     intern_language(&normalised)
 }
 
@@ -1369,11 +1383,7 @@ const HB_COMPAT_MICRO: c_uint = 0;
 /// # Safety
 /// All pointers, when non-null, must be writeable.
 #[no_mangle]
-pub unsafe extern "C" fn hb_version(
-    major: *mut c_uint,
-    minor: *mut c_uint,
-    micro: *mut c_uint,
-) {
+pub unsafe extern "C" fn hb_version(major: *mut c_uint, minor: *mut c_uint, micro: *mut c_uint) {
     if !major.is_null() {
         // SAFETY: caller asserts writeable.
         unsafe { *major = HB_COMPAT_MAJOR };
@@ -1481,7 +1491,9 @@ fn lang_und() -> hb_language_t {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sigilbuzz::{shape as sb_shape, Blob as SbBlob, Buffer as SbBuffer, Face as SbFace, Font as SbFont};
+    use sigilbuzz::{
+        shape as sb_shape, Blob as SbBlob, Buffer as SbBuffer, Face as SbFace, Font as SbFont,
+    };
 
     const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
 
@@ -1507,13 +1519,7 @@ mod tests {
             assert!(!font.is_null());
             // Default scale is upem; preserve to stay in design units.
             let buffer = hb_buffer_create();
-            hb_buffer_add_utf8(
-                buffer,
-                b"Hello\0".as_ptr().cast::<c_char>(),
-                -1,
-                0,
-                -1,
-            );
+            hb_buffer_add_utf8(buffer, b"Hello\0".as_ptr().cast::<c_char>(), -1, 0, -1);
             hb_buffer_set_direction(buffer, HB_DIRECTION_LTR);
             hb_buffer_set_script(buffer, HB_SCRIPT_LATIN);
 
@@ -1522,7 +1528,10 @@ mod tests {
 
             let mut len: c_uint = 0;
             let infos = hb_buffer_get_glyph_infos(buffer, &mut len);
-            assert!(len >= 5, "expected at least 5 glyphs for 'Hello', got {len}");
+            assert!(
+                len >= 5,
+                "expected at least 5 glyphs for 'Hello', got {len}"
+            );
             assert!(!infos.is_null());
             let infos_slice = slice::from_raw_parts(infos, len as usize);
             let positions = hb_buffer_get_glyph_positions(buffer, &mut len);

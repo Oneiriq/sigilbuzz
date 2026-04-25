@@ -35,7 +35,10 @@ fn c_program_links_and_shapes() {
         .args(["build", "-p", "sigilbuzz-capi", "--lib"])
         .status()
         .expect("failed to invoke cargo");
-    assert!(build_status.success(), "cargo build of sigilbuzz-capi failed");
+    assert!(
+        build_status.success(),
+        "cargo build of sigilbuzz-capi failed"
+    );
 
     // 2. Locate the cdylib. Cargo lays this out under
     //    `target/debug/lib<name>.{dylib,so}` (or wherever
@@ -83,10 +86,7 @@ fn c_program_links_and_shapes() {
     // time; on macOS we set DYLD_LIBRARY_PATH below instead because
     // codesigning interferes with @rpath in test builds.
     if cfg!(target_os = "linux") {
-        cmd.arg(format!(
-            "-Wl,-rpath,{}",
-            target_dir.join("debug").display()
-        ));
+        cmd.arg(format!("-Wl,-rpath,{}", target_dir.join("debug").display()));
     }
 
     let status = cmd.status().expect("failed to invoke C compiler");
@@ -99,10 +99,7 @@ fn c_program_links_and_shapes() {
     let mut run = Command::new(&exe_path);
     run.arg(manifest_dir.join(OPEN_SANS));
     if cfg!(target_os = "macos") {
-        run.env(
-            "DYLD_LIBRARY_PATH",
-            target_dir.join("debug"),
-        );
+        run.env("DYLD_LIBRARY_PATH", target_dir.join("debug"));
     }
     let output = run.output().expect("failed to run C test binary");
     assert!(
