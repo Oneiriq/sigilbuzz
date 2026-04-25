@@ -1233,6 +1233,15 @@ fn decode_operand_f32(data: &[u8], pos: usize) -> Option<(f32, usize)> {
             (-(i32::from(b0) - 251) * 256 - i32::from(b1) - 108) as f32,
             2,
         ))
+    } else if b0 == OP_SHORTINT {
+        // Type 2 shortint: 2-byte big-endian i16 follows. Required for
+        // any integer in `[-32768, -1132]` ∪ `[1132, 32767]` (#197) —
+        // omitting this branch breaks fonts with ≥ 1240 subrs whose
+        // call indices spill into shortint encoding.
+        let b1 = *data.get(pos + 1)?;
+        let b2 = *data.get(pos + 2)?;
+        let raw = i16::from_be_bytes([b1, b2]);
+        Some((f32::from(raw), 3))
     } else if b0 == 255 {
         let bytes = data.get(pos + 1..pos + 5)?;
         let raw = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
@@ -1825,7 +1834,14 @@ impl<'a> PartialBaker<'a> {
                     pos += 1;
                 }
                 OP_RETURN => {
-                    self.stack_starts.clear();
+                    // CFF2 subroutines do NOT own the caller's stack —
+                    // they may leave operands on it for the caller to
+                    // consume (#198). Clearing `stack_starts` here used
+                    // to corrupt the caller's tracking and made any
+                    // subr-pushes-deltas-then-returns pattern fail with
+                    // "blend without count operand". Just hand control
+                    // back; the inliner's caller continues from the
+                    // current stack state.
                     return Ok(());
                 }
                 OP_HSTEM | OP_VSTEM | OP_HSTEMHM | OP_VSTEMHM => {
@@ -2391,6 +2407,282 @@ mod tests {
             "blend op dropped when subtable collapses; got {:?}",
             cs_baked
         );
+    }
+
+    /// Regression for #198: when an inlined local subroutine returns
+    /// while leaving operands on the stack (a perfectly legal CFF2
+    /// pattern — subrs commonly stash deltas / masters for the caller
+    /// to blend against), `OP_RETURN` used to call
+    /// `self.stack_starts.clear()`, discarding the caller's tracking
+    /// for those operands. The next blend in the caller would then
+    /// underflow / mis-decode operands and surface as an opaque error
+    /// or worse: silently emit a malformed charstring.
+    #[test]
+    fn bake_cff2_partial_subr_return_preserves_caller_stack_tracking() {
+        // 1-axis IVS, one region peaking at (1.0,). One subtable, one
+        // delta (50). Charstring:
+        //   0 0 rmoveto
+        //   0 callsubr        # subr pushes "0 50 1" then returns
+        //   blend             # caller consumes 0(master) 50(delta) 1(count)
+        //   22                # hmoveto (consumes blend result)
+        //
+        // Local subr 0 body: 139 (push 0), 189 (push 50), 140 (push 1),
+        // 11 (return). Operands stay on the stack across the return.
+        let ivs = build_ivs1_for_cff2(
+            &[[(0.0, 1.0, 1.0)]],
+            &[(alloc::vec![0], alloc::vec![alloc::vec![50i16]])],
+        );
+        // Bias for count<1240 is 107. Calling subr 0 requires push -107
+        // which encodes via SHORTINT only (a separate bug #197). Sidestep:
+        // build a font with N=108 subrs, place the trampoline at index 107,
+        // and call it with raw=0 (1-byte push 139). 0 + 107 = 107 → subr 107.
+        let mut local_subrs_storage: Vec<&[u8]> = Vec::new();
+        for _ in 0..107 {
+            local_subrs_storage.push(&[11u8]); // empty subr → return
+        }
+        // Subr 107: pushes 0, 50, 1, then returns. Stack on return: 3 entries.
+        local_subrs_storage.push(&[139u8, 189, 140, 11]);
+        let cff = build_synthetic_cff2_with_local_subrs(
+            &[
+                // gid 0 charstring: 0 0 rmoveto, push 0 (=139), callsubr (10),
+                // blend (16), hmoveto (22).
+                &[139u8, 139, 21, 139, 10, 16, 22],
+            ],
+            &[0u8],
+            &local_subrs_storage,
+            Some(&ivs),
+        );
+        let pins = [AxisPin::Pin];
+        let coords = [1.0_f32];
+        // Must NOT error. Bug: stack_starts gets cleared by OP_RETURN
+        // even though the subr left "0 50 1" on the stack for the
+        // caller's blend, so the blend underflows and surfaces as
+        // "blend without count operand".
+        let _new_cff =
+            bake_cff2_partial(&cff, &coords, &pins).expect("inlined subr return preserves stack");
+    }
+
+    /// Builds a 1-axis IVS body.
+    fn build_ivs1_for_cff2(
+        regions: &[[(f32, f32, f32); 1]],
+        subtables: &[(Vec<u16>, Vec<Vec<i16>>)],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes());
+        let region_off_slot = out.len();
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&(subtables.len() as u16).to_be_bytes());
+        let sub_slot_start = out.len();
+        for _ in 0..subtables.len() {
+            out.extend_from_slice(&0u32.to_be_bytes());
+        }
+        let region_off = out.len() as u32;
+        out[region_off_slot..region_off_slot + 4].copy_from_slice(&region_off.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes()); // axisCount
+        out.extend_from_slice(&(regions.len() as u16).to_be_bytes());
+        for region in regions {
+            for (s, p, e) in region {
+                let s_raw = (*s * 16384.0).round() as i16;
+                let p_raw = (*p * 16384.0).round() as i16;
+                let e_raw = (*e * 16384.0).round() as i16;
+                out.extend_from_slice(&s_raw.to_be_bytes());
+                out.extend_from_slice(&p_raw.to_be_bytes());
+                out.extend_from_slice(&e_raw.to_be_bytes());
+            }
+        }
+        for (i, (region_indexes, rows)) in subtables.iter().enumerate() {
+            let sub_off = out.len() as u32;
+            let slot = sub_slot_start + i * 4;
+            out[slot..slot + 4].copy_from_slice(&sub_off.to_be_bytes());
+            out.extend_from_slice(&(rows.len() as u16).to_be_bytes()); // itemCount
+            out.extend_from_slice(&(region_indexes.len() as u16).to_be_bytes()); // wordDeltaCount
+            out.extend_from_slice(&(region_indexes.len() as u16).to_be_bytes()); // regionIndexCount
+            for ri in region_indexes {
+                out.extend_from_slice(&ri.to_be_bytes());
+            }
+            for row in rows {
+                for v in row {
+                    out.extend_from_slice(&v.to_be_bytes());
+                }
+            }
+        }
+        out
+    }
+
+    /// Builds a synthetic CFF2 with local subroutines per Font DICT.
+    fn build_synthetic_cff2_with_local_subrs(
+        charstrings: &[&[u8]],
+        fd_select: &[u8],
+        local_subrs: &[&[u8]],
+        vstore: Option<&[u8]>,
+    ) -> Vec<u8> {
+        assert_eq!(charstrings.len(), fd_select.len());
+        let n_fds = (*fd_select.iter().max().unwrap_or(&0) as usize) + 1;
+        let cs_index = encode_index_cff2(charstrings);
+        let global_subr_index = encode_index_cff2(&[]);
+        let fd_select_bytes = emit_fd_select_format0(fd_select);
+
+        // Per-FD Private DICT: must include Subrs op (19) pointing at a
+        // local subr INDEX in the same blob. Each Private DICT is laid
+        // out as: [subrs offset placeholder] 19 [defaultWidth=0] 20.
+        let local_subr_index = encode_index_cff2(local_subrs);
+        // Build Private DICTs with placeholder Subrs offsets — patched
+        // post-layout. Use a 5-byte op255 placeholder so the offset
+        // slot is fixed-width (matching the rest of the test scaffold).
+        let private_subrs_slot_in_body = 0usize;
+        let private_bodies: Vec<Vec<u8>> = (0..n_fds)
+            .map(|_| {
+                let mut p = Vec::new();
+                p.extend_from_slice(&encode_dict_offset_placeholder()); // Subrs offset
+                p.push(19); // op = Subrs
+                p.push(139); // defaultWidthX = 0
+                p.push(20);
+                p
+            })
+            .collect();
+
+        let mut font_dict_bodies: Vec<Vec<u8>> = Vec::with_capacity(n_fds);
+        let mut font_dict_priv_slots: Vec<(usize, usize)> = Vec::with_capacity(n_fds);
+        for _ in 0..n_fds {
+            let mut body = Vec::new();
+            let size_slot = body.len();
+            body.extend_from_slice(&encode_dict_offset_placeholder());
+            let off_slot = body.len();
+            body.extend_from_slice(&encode_dict_offset_placeholder());
+            body.push(18);
+            font_dict_priv_slots.push((size_slot, off_slot));
+            font_dict_bodies.push(body);
+        }
+
+        let fd_array_refs: Vec<&[u8]> = font_dict_bodies.iter().map(Vec::as_slice).collect();
+        let fd_array_index = encode_index_cff2(&fd_array_refs);
+
+        // Top DICT.
+        let mut top: Vec<u8> = Vec::new();
+        let cs_slot = top.len();
+        top.extend_from_slice(&encode_dict_offset_placeholder());
+        top.push(17);
+        let fd_array_slot = top.len();
+        top.extend_from_slice(&encode_dict_offset_placeholder());
+        top.push(12);
+        top.push(0x24);
+        let fd_select_slot = top.len();
+        top.extend_from_slice(&encode_dict_offset_placeholder());
+        top.push(12);
+        top.push(0x25);
+        let vstore_slot = if vstore.is_some() {
+            let s = top.len();
+            top.extend_from_slice(&encode_dict_offset_placeholder());
+            top.push(24);
+            Some(s)
+        } else {
+            None
+        };
+
+        let mut out = Vec::new();
+        out.push(2u8);
+        out.push(0u8);
+        out.push(5u8);
+        let top_len = top.len() as u16;
+        out.extend_from_slice(&top_len.to_be_bytes());
+        let top_abs = out.len();
+        out.extend_from_slice(&top);
+        out.extend_from_slice(&global_subr_index);
+        let fd_select_abs = out.len();
+        out.extend_from_slice(&fd_select_bytes);
+        let cs_abs = out.len();
+        out.extend_from_slice(&cs_index);
+        let fd_array_abs = out.len();
+        out.extend_from_slice(&fd_array_index);
+
+        let fd_index_off_size: usize = {
+            let total: usize = font_dict_bodies.iter().map(Vec::len).sum();
+            let last_off = 1 + total;
+            if last_off <= 0xFF { 1 } else { 2 }
+        };
+        let fd_index_data_start = 4 + 1 + (n_fds + 1) * fd_index_off_size;
+        let mut fd_body_offsets_in_index: Vec<usize> = Vec::with_capacity(n_fds);
+        let mut acc = fd_index_data_start;
+        for body in &font_dict_bodies {
+            fd_body_offsets_in_index.push(acc);
+            acc += body.len();
+        }
+
+        let mut per_fd_priv_abs: Vec<usize> = Vec::with_capacity(n_fds);
+        let mut per_fd_subr_abs: Vec<usize> = Vec::with_capacity(n_fds);
+        for pb in &private_bodies {
+            let priv_abs = out.len();
+            per_fd_priv_abs.push(priv_abs);
+            out.extend_from_slice(pb);
+            // Local subr INDEX immediately follows each Private DICT.
+            // The Private DICT's Subrs op holds an OFFSET RELATIVE TO
+            // THE START OF THE PRIVATE DICT (CFF spec).
+            let subr_abs = out.len();
+            per_fd_subr_abs.push(subr_abs);
+            out.extend_from_slice(&local_subr_index);
+        }
+
+        let vstore_abs = if let Some(v) = vstore {
+            let a = out.len();
+            let len = v.len() as u16;
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(v);
+            Some(a)
+        } else {
+            None
+        };
+
+        // Patch top dict.
+        patch_dict_offset(&mut out, top_abs + cs_slot, cs_abs as i32);
+        patch_dict_offset(&mut out, top_abs + fd_array_slot, fd_array_abs as i32);
+        patch_dict_offset(&mut out, top_abs + fd_select_slot, fd_select_abs as i32);
+        if let (Some(slot), Some(vabs)) = (vstore_slot, vstore_abs) {
+            patch_dict_offset(&mut out, top_abs + slot, vabs as i32);
+        }
+
+        // Patch each Font DICT's Private slots and Private DICT's Subrs slot.
+        for i in 0..n_fds {
+            let body_abs_in_out = fd_array_abs + fd_body_offsets_in_index[i];
+            let (size_slot, off_slot) = font_dict_priv_slots[i];
+            patch_dict_offset(
+                &mut out,
+                body_abs_in_out + size_slot,
+                private_bodies[i].len() as i32,
+            );
+            patch_dict_offset(
+                &mut out,
+                body_abs_in_out + off_slot,
+                per_fd_priv_abs[i] as i32,
+            );
+            // Subrs offset: relative to the Private DICT's start.
+            let subr_rel = per_fd_subr_abs[i] - per_fd_priv_abs[i];
+            patch_dict_offset(
+                &mut out,
+                per_fd_priv_abs[i] + private_subrs_slot_in_body,
+                subr_rel as i32,
+            );
+        }
+
+        out
+    }
+
+    /// Regression for #197: a charstring whose blend operand was
+    /// pushed via the 3-byte `OP_SHORTINT` form (b0=28, then 2-byte
+    /// big-endian i16) used to fail with "blend count decode failed"
+    /// because `decode_operand_f32` only matched the 1- and 2-byte push
+    /// ranges and the 5-byte real-number form. Real fonts with ≥ 1240
+    /// subrs route call indices through SHORTINT, and any blend whose
+    /// delta count happens to land at e.g. 5000 also uses SHORTINT.
+    #[test]
+    fn decode_operand_f32_handles_shortint() {
+        // 28, 0x0B, 0xB8 = shortint 3000.
+        let v = decode_operand_f32(&[28, 0x0B, 0xB8], 0).expect("shortint decodes");
+        assert!((v.0 - 3000.0).abs() < 1e-6);
+        assert_eq!(v.1, 3);
+        // 28, 0xFF, 0x9C = shortint -100.
+        let v2 = decode_operand_f32(&[28, 0xFF, 0x9C], 0).expect("shortint negative decodes");
+        assert!((v2.0 - (-100.0)).abs() < 1e-6);
+        assert_eq!(v2.1, 3);
     }
 
     #[test]
