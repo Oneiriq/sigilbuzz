@@ -6,6 +6,7 @@
     clippy::elidable_lifetime_names,
     clippy::map_unwrap_or,
     clippy::too_many_lines,
+    clippy::too_many_arguments,
     clippy::needless_range_loop,
     clippy::similar_names
 )]
@@ -53,19 +54,17 @@
 //! `parent[arg1] - child[arg2]` — so we need both sides as concrete
 //! coordinates before we can emit the child's ops.
 //!
-//! Phantom points (LSB / advance-width / TSB / advance-height) are
-//! reserved by the spec at the end of every glyph's logical point
-//! list. sigilbuzz does not currently synthesize them: anchor-mode
-//! components that reference phantom indices fall through to a zero
-//! translation rather than miscompute the offset. No glyph in the
-//! Open Sans, Amiri, or other bundled fixtures exercises that path.
+//! Phantom-point references are resolved against hmtx (and vmtx if
+//! present) at flatten time.
 
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
+use crate::tables::hmtx::Hmtx;
 use crate::tables::loca::Loca;
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::Reader;
+use crate::tables::vmtx::Vmtx;
 
 /// Glyph bounding box in font design units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +79,33 @@ pub struct GlyphBounds {
     pub y_max: i16,
     /// Number of contours; negative for composite glyphs.
     pub num_contours: i16,
+}
+
+/// Bundle of metric tables a [`Glyf`] flattener needs to synthesize
+/// phantom points during composite anchor-mode resolution.
+///
+/// TrueType reserves four phantom points per glyph past the contour
+/// list:
+/// - `pp1 = (xMin - lsb, 0)` — left-side-bearing origin.
+/// - `pp2 = (xMin - lsb + advanceWidth, 0)` — advance-width origin.
+/// - `pp3 = (0, yMax + tsb)` — top-side-bearing origin.
+/// - `pp4 = (0, yMax + tsb - advanceHeight)` — advance-height origin.
+///
+/// Composite components in anchor-mode (`ARGS_ARE_XY_VALUES` clear)
+/// can index past the contour-point count into these four slots; real
+/// fonts use this to align components to the parent's advance-width
+/// origin without hard-coded offsets.
+///
+/// `vmtx` is optional: horizontal-only fonts have no `vmtx` and the
+/// vertical phantoms collapse to `(0, 0)`. Real-world anchor-mode
+/// glyphs in horizontal fonts only ever index pp1 / pp2, so the
+/// fallback is safe.
+#[derive(Debug, Clone, Copy)]
+pub struct PhantomMetrics<'a> {
+    /// Horizontal metrics. Required — every TrueType font has hmtx.
+    pub hmtx: &'a Hmtx<'a>,
+    /// Vertical metrics. `None` for horizontal-only fonts.
+    pub vmtx: Option<&'a Vmtx<'a>>,
 }
 
 /// A borrowed view of the `glyf` table. Parsing is free — accessors
@@ -202,12 +228,59 @@ impl<'a> Glyf<'a> {
         }))
     }
 
+    /// Computes the four phantom points for `glyph_id` in the glyph's
+    /// own (untransformed) design-unit frame.
+    ///
+    /// pp1 / pp2 always read from `hmtx`. pp3 / pp4 read from `vmtx`
+    /// when available; horizontal-only fonts get `(0, 0)` for both,
+    /// which matches every in-the-wild glyph we've checked — anchor
+    /// indices for vertical phantoms only show up in CJK fonts that
+    /// also ship `vmtx`. Glyphs without a `glyf` body get all-zero
+    /// phantoms, which collapses anchor mode to a zero translation
+    /// — same as the legacy fallback before phantom resolution
+    /// landed.
+    fn phantom_points(
+        &self,
+        loca: &Loca<'_>,
+        glyph_id: u16,
+        metrics: &PhantomMetrics<'_>,
+    ) -> Result<[(f32, f32); 4]> {
+        let bounds = self.bounds(loca, glyph_id)?;
+        let (x_min, y_max) = match bounds {
+            Some(b) => (f32::from(b.x_min), f32::from(b.y_max)),
+            None => (0.0, 0.0),
+        };
+        let advance_w = f32::from(metrics.hmtx.advance(glyph_id).unwrap_or(0));
+        let lsb = f32::from(metrics.hmtx.lsb(glyph_id).unwrap_or(0));
+        let pp1_x = x_min - lsb;
+        let pp2_x = pp1_x + advance_w;
+
+        let (pp3_y, pp4_y) = if let Some(vmtx) = metrics.vmtx {
+            let advance_h = f32::from(vmtx.advance(glyph_id).unwrap_or(0));
+            let tsb = f32::from(vmtx.tsb(glyph_id).unwrap_or(0));
+            let pp3 = y_max + tsb;
+            (pp3, pp3 - advance_h)
+        } else {
+            (0.0, 0.0)
+        };
+
+        Ok([(pp1_x, 0.0), (pp2_x, 0.0), (0.0, pp3_y), (0.0, pp4_y)])
+    }
+
     /// Drives `sink` with the ops for `glyph_id`, flattening
     /// composite glyphs recursively. `deltas` is an optional list
     /// of `(dx, dy)` pairs in the glyph's point order — supply the
     /// output of [`crate::tables::Gvar::glyph_deltas`] folded into a
     /// dense `[f32; num_points]` pair to apply variable-font
     /// deltas. Pass `None` for the coord-free path.
+    ///
+    /// `metrics` supplies `hmtx` (and optionally `vmtx`) so anchor-mode
+    /// composites whose anchor index points past the parent's contour
+    /// points can resolve against the four phantom points (LSB origin,
+    /// advance-width origin, TSB origin, advance-height origin).
+    /// Passing `None` keeps the legacy zero-translation fallback for
+    /// the rare phantom case — useful for unit tests of synthetic
+    /// composites that don't ship metrics.
     ///
     /// Returns `Ok(false)` when the glyph id is valid but has no
     /// outline data (whitespace glyph), `Ok(true)` otherwise.
@@ -216,6 +289,7 @@ impl<'a> Glyf<'a> {
         loca: &Loca<'_>,
         glyph_id: u16,
         deltas: Option<&[(f32, f32)]>,
+        metrics: Option<&PhantomMetrics<'_>>,
         sink: &mut S,
     ) -> Result<bool> {
         // Two-pass flattening: phase 1 walks the glyph (and any
@@ -229,7 +303,7 @@ impl<'a> Glyf<'a> {
         // translation.
         let mut flat = FlatGlyph::default();
         let identity = Transform::identity();
-        let drew = self.flatten(loca, glyph_id, deltas, &identity, &mut flat, 0)?;
+        let drew = self.flatten(loca, glyph_id, deltas, metrics, &identity, &mut flat, 0)?;
         if !drew {
             return Ok(false);
         }
@@ -246,6 +320,7 @@ impl<'a> Glyf<'a> {
         loca: &Loca<'_>,
         glyph_id: u16,
         deltas: Option<&[(f32, f32)]>,
+        metrics: Option<&PhantomMetrics<'_>>,
         tf: &Transform,
         out: &mut FlatGlyph,
         depth: u8,
@@ -268,7 +343,7 @@ impl<'a> Glyf<'a> {
         if num_contours >= 0 {
             flatten_simple_glyph(&mut r, num_contours as u16, deltas, tf, out)?;
         } else {
-            self.flatten_composite(&mut r, loca, tf, out, depth)?;
+            self.flatten_composite(&mut r, loca, glyph_id, metrics, tf, out, depth)?;
         }
         Ok(true)
     }
@@ -277,6 +352,8 @@ impl<'a> Glyf<'a> {
         &self,
         r: &mut Reader<'_>,
         loca: &Loca<'_>,
+        parent_glyph_id: u16,
+        metrics: Option<&PhantomMetrics<'_>>,
         parent_tf: &Transform,
         out: &mut FlatGlyph,
         depth: u8,
@@ -357,6 +434,7 @@ impl<'a> Glyf<'a> {
                 loca,
                 component_id,
                 None,
+                metrics,
                 &child_combined,
                 &mut child_flat,
                 depth + 1,
@@ -387,17 +465,51 @@ impl<'a> Glyf<'a> {
             } else {
                 let p_idx = raw_a as usize;
                 let c_idx = raw_b as usize;
-                if p_idx >= parent_point_count || c_idx >= child_flat.points.len() {
-                    // Out-of-range anchor index: fall back to a zero
-                    // translation rather than refusing to draw the
-                    // component. Phantom-point references would land
-                    // here; sigilbuzz does not synthesize phantom
-                    // points for composite anchors yet.
-                    (0.0, 0.0)
-                } else {
-                    let (px, py) = out.points[p_idx];
-                    let (cx, cy) = child_flat.points[c_idx];
-                    (px - cx, py - cy)
+                let parent_anchor = resolve_anchor_point(
+                    p_idx,
+                    parent_point_count,
+                    &out.points,
+                    || -> Result<Option<(f32, f32)>> {
+                        let Some(m) = metrics else { return Ok(None) };
+                        let pp = self.phantom_points(loca, parent_glyph_id, m)?;
+                        let phantom_idx = p_idx - parent_point_count;
+                        if phantom_idx >= 4 {
+                            return Ok(None);
+                        }
+                        let (px, py) = pp[phantom_idx];
+                        // Parent's phantoms live in the parent's frame
+                        // — same frame as the points already in
+                        // `out.points`, which were transformed by
+                        // `parent_tf` on insertion. Apply the same
+                        // transform so the subtraction below cancels
+                        // out cleanly.
+                        Ok(Some(parent_tf.apply(px, py)))
+                    },
+                )?;
+                let child_anchor = resolve_anchor_point(
+                    c_idx,
+                    child_flat.points.len(),
+                    &child_flat.points,
+                    || -> Result<Option<(f32, f32)>> {
+                        let Some(m) = metrics else { return Ok(None) };
+                        let pp = self.phantom_points(loca, component_id, m)?;
+                        let phantom_idx = c_idx - child_flat.points.len();
+                        if phantom_idx >= 4 {
+                            return Ok(None);
+                        }
+                        let (cx, cy) = pp[phantom_idx];
+                        // Child's phantoms share the frame of the
+                        // freshly-flattened child points, which had
+                        // `child_combined` baked in.
+                        Ok(Some(child_combined.apply(cx, cy)))
+                    },
+                )?;
+                match (parent_anchor, child_anchor) {
+                    (Some((px, py)), Some((cx, cy))) => (px - cx, py - cy),
+                    // Out-of-range phantom index, or no metrics passed
+                    // through. Match the historic behaviour of skipping
+                    // the translation rather than refusing to draw.
+                    _ => (0.0, 0.0),
                 }
             };
 
@@ -521,6 +633,26 @@ impl FlatGlyph {
             emit_contour(coords, flags, sink);
         }
     }
+}
+
+/// Resolves an anchor-point index to a concrete `(x, y)` pair.
+/// Indices below `real_point_count` index into `points`; indices at
+/// or above that boundary are phantom-point references and route
+/// through `phantom`, which is invoked lazily so non-anchor-mode
+/// components pay nothing.
+fn resolve_anchor_point<F>(
+    idx: usize,
+    real_point_count: usize,
+    points: &[(f32, f32)],
+    phantom: F,
+) -> Result<Option<(f32, f32)>>
+where
+    F: FnOnce() -> Result<Option<(f32, f32)>>,
+{
+    if idx < real_point_count {
+        return Ok(Some(points[idx]));
+    }
+    phantom()
 }
 
 fn flatten_simple_glyph(
@@ -786,6 +918,102 @@ mod tests {
         out
     }
 
+    /// Builds a minimal `hmtx` body with one long metric per glyph.
+    fn build_hmtx(longs: &[(u16, i16)]) -> Vec<u8> {
+        let mut b = Vec::new();
+        for (adv, lsb) in longs {
+            b.extend_from_slice(&adv.to_be_bytes());
+            b.extend_from_slice(&lsb.to_be_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn phantom_points_match_spec_formula() {
+        // Single simple glyph with bbox (xMin=10, yMax=200) plus an
+        // hmtx record (advance=300, lsb=4). Expected phantoms:
+        //   pp1 = (xMin - lsb, 0)             = (6,   0)
+        //   pp2 = (pp1 + advance, 0)          = (306, 0)
+        //   pp3 = (0, 0)   — no vmtx
+        //   pp4 = (0, 0)   — no vmtx
+        let body = build_simple_glyph(
+            &[0],
+            &[(10, 0, true)], // single contour point at (10, 0)
+        );
+        // Patch the bbox bytes to set yMax=200 explicitly (build_header
+        // wrote yMax=1000 by default; we want a known number).
+        let mut body = body;
+        body[2..4].copy_from_slice(&10i16.to_be_bytes()); // xMin
+        body[8..10].copy_from_slice(&200i16.to_be_bytes()); // yMax
+
+        let loca_bytes = build_loca_short(&[0, (body.len() as u16) / 2]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
+        let glyf = Glyf::new(&body);
+
+        let hmtx_bytes = build_hmtx(&[(300, 4)]);
+        let hmtx = Hmtx::parse(&hmtx_bytes, 1, 1).unwrap();
+        let metrics = PhantomMetrics {
+            hmtx: &hmtx,
+            vmtx: None,
+        };
+        let pp = glyf.phantom_points(&loca, 0, &metrics).unwrap();
+        assert!((pp[0].0 - 6.0).abs() < 1e-4);
+        assert!((pp[0].1 - 0.0).abs() < 1e-4);
+        assert!((pp[1].0 - 306.0).abs() < 1e-4);
+        assert!((pp[1].1 - 0.0).abs() < 1e-4);
+        assert!((pp[2].0 - 0.0).abs() < 1e-4);
+        assert!((pp[2].1 - 0.0).abs() < 1e-4);
+        assert!((pp[3].0 - 0.0).abs() < 1e-4);
+        assert!((pp[3].1 - 0.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn phantom_points_use_vmtx_when_present() {
+        // Same glyph, this time with vmtx supplying advance=1000,
+        // tsb=50. yMax=200 → pp3 = (0, 250); pp4 = (0, -750).
+        let body = build_simple_glyph(&[0], &[(10, 0, true)]);
+        let mut body = body;
+        body[2..4].copy_from_slice(&10i16.to_be_bytes());
+        body[8..10].copy_from_slice(&200i16.to_be_bytes());
+        let loca_bytes = build_loca_short(&[0, (body.len() as u16) / 2]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
+        let glyf = Glyf::new(&body);
+
+        let hmtx_bytes = build_hmtx(&[(300, 4)]);
+        let hmtx = Hmtx::parse(&hmtx_bytes, 1, 1).unwrap();
+        // vmtx body: one long metric (advance=1000, tsb=50).
+        let mut vmtx_bytes = Vec::new();
+        vmtx_bytes.extend_from_slice(&1000u16.to_be_bytes());
+        vmtx_bytes.extend_from_slice(&50i16.to_be_bytes());
+        let vmtx = Vmtx::parse(&vmtx_bytes, 1, 1).unwrap();
+        let metrics = PhantomMetrics {
+            hmtx: &hmtx,
+            vmtx: Some(&vmtx),
+        };
+        let pp = glyf.phantom_points(&loca, 0, &metrics).unwrap();
+        assert!((pp[2].1 - 250.0).abs() < 1e-4, "pp3 y = {}", pp[2].1);
+        assert!((pp[3].1 + 750.0).abs() < 1e-4, "pp4 y = {}", pp[3].1);
+    }
+
+    #[test]
+    fn phantom_points_no_glyph_body_yields_zero_pp1_pp2() {
+        // Empty glyph (zero loca range) → bounds returns None →
+        // phantom calc folds xMin/yMax to 0. With advance=500, lsb=10,
+        // pp1=(0-10,0)=(-10,0), pp2=(490,0).
+        let loca_bytes = build_loca_short(&[0, 0]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
+        let glyf = Glyf::new(&[]);
+        let hmtx_bytes = build_hmtx(&[(500, 10)]);
+        let hmtx = Hmtx::parse(&hmtx_bytes, 1, 1).unwrap();
+        let metrics = PhantomMetrics {
+            hmtx: &hmtx,
+            vmtx: None,
+        };
+        let pp = glyf.phantom_points(&loca, 0, &metrics).unwrap();
+        assert!((pp[0].0 + 10.0).abs() < 1e-4);
+        assert!((pp[1].0 - 490.0).abs() < 1e-4);
+    }
+
     #[test]
     fn reads_bounds_from_simple_glyph() {
         let g0_body: Vec<u8> = Vec::new();
@@ -920,7 +1148,7 @@ mod tests {
         let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
         let glyf = Glyf::new(&body);
         let mut o = Outline::new();
-        glyf.outline(&loca, 0, None, &mut o).unwrap();
+        glyf.outline(&loca, 0, None, None, &mut o).unwrap();
         assert_eq!(
             o.ops(),
             &[
@@ -949,7 +1177,7 @@ mod tests {
         let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
         let glyf = Glyf::new(&body);
         let mut o = Outline::new();
-        glyf.outline(&loca, 0, None, &mut o).unwrap();
+        glyf.outline(&loca, 0, None, None, &mut o).unwrap();
         // Expected: MoveTo(0,0), QuadTo(10,20 -> 20,20),
         //           QuadTo(30,20 -> 40,0), LineTo(0,0), Close.
         let ops = o.ops();
@@ -992,7 +1220,7 @@ mod tests {
         let glyf = Glyf::new(&body);
         let mut o = Outline::new();
         let deltas: Vec<(f32, f32)> = vec![(5.0, -3.0); 4];
-        glyf.outline(&loca, 0, Some(&deltas), &mut o).unwrap();
+        glyf.outline(&loca, 0, Some(&deltas), None, &mut o).unwrap();
         assert!(matches!(o.ops()[0], PathOp::MoveTo { x: 105.0, y: 97.0 }));
         assert!(matches!(o.ops()[1], PathOp::LineTo { x: 505.0, y: 97.0 }));
     }
@@ -1046,7 +1274,7 @@ mod tests {
         let glyf = Glyf::new(&glyf_bytes);
 
         let mut o = Outline::new();
-        glyf.outline(&loca, 0, None, &mut o).unwrap();
+        glyf.outline(&loca, 0, None, None, &mut o).unwrap();
         // Child starts at (0,0), translated to (200, 300). The
         // closing LineTo brings the pen back to the start before
         // Close — matches ttf-parser's convention.
@@ -1105,7 +1333,7 @@ mod tests {
         let glyf = Glyf::new(&glyf_bytes);
 
         let mut o = Outline::new();
-        glyf.outline(&loca, 0, None, &mut o).unwrap();
+        glyf.outline(&loca, 0, None, None, &mut o).unwrap();
         // 1.5 × (100, 100) = (150, 150).
         match o.ops()[2] {
             PathOp::LineTo { x, y } => {
@@ -1204,7 +1432,7 @@ mod tests {
         let glyf = Glyf::new(&glyf_bytes);
 
         let mut o = Outline::new();
-        glyf.outline(&loca, 0, None, &mut o).unwrap();
+        glyf.outline(&loca, 0, None, None, &mut o).unwrap();
 
         // First six ops: square contour from glyph 1 unchanged.
         assert!(matches!(o.ops()[0], PathOp::MoveTo { x: 10.0, y: 20.0 }));
@@ -1262,13 +1490,188 @@ mod tests {
         let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 2).unwrap();
         let glyf = Glyf::new(&glyf_bytes);
         let mut o = Outline::new();
-        glyf.outline(&loca, 0, None, &mut o).unwrap();
+        glyf.outline(&loca, 0, None, None, &mut o).unwrap();
         match o.ops()[0] {
             PathOp::MoveTo { x, y } => {
                 assert!((x - 50.0).abs() < 1e-3, "x = {x}");
                 assert!((y - 15.0).abs() < 1e-3, "y = {y}");
             }
             other => panic!("expected MoveTo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composite_anchor_mode_resolves_parent_phantom_point() {
+        // Parent (glyph 0) is a composite with two components:
+        //   - Component A (glyph 1): a square at (10, 0) → (40, 30).
+        //     Its xMin=10 and lsb=4 imply pp1=(6,0) and
+        //     pp2=(6+advance,0).
+        //     The composite parent inherits its own metrics from
+        //     gid 0 (advance=300, lsb=4); xMin/yMax from the parent
+        //     header are 10 and 30. Parent's own pp1=(6,0),
+        //     pp2=(306,0).
+        //   - Component B (glyph 2): triangle (0,0)/(40,0)/(0,40).
+        //     Anchor mode targets parent's pp2 (index =
+        //     numContourPoints + 1) and child's own point 0.
+        //
+        // Expected translation = parent.pp2 - child[0]
+        //   = (306, 0) - (0, 0) = (306, 0).
+        let g1 = build_simple_glyph(
+            &[3],
+            &[(10, 0, true), (40, 0, true), (40, 30, true), (10, 30, true)],
+        );
+        let g2 = build_simple_glyph(&[2], &[(0, 0, true), (40, 0, true), (0, 40, true)]);
+
+        // Parent composite header. xMin=10, yMin=0, xMax=40, yMax=30
+        // — matches the donor square so the parent's bounds line up
+        // with its real points.
+        let mut g0 = build_header(-1, 10, 0, 40, 30);
+        let flags_a: u16 =
+            COMP_ARGS_ARE_XY_VALUES | COMP_ARG_1_AND_2_ARE_WORDS | COMP_MORE_COMPONENTS;
+        g0.extend_from_slice(&flags_a.to_be_bytes());
+        g0.extend_from_slice(&1u16.to_be_bytes());
+        g0.extend_from_slice(&0i16.to_be_bytes());
+        g0.extend_from_slice(&0i16.to_be_bytes());
+        // Component B in anchor mode (no XY_VALUES, no WORDS, last).
+        // Parent has 4 real points after component A; index 5 = pp2.
+        // Child has 3 real points; index 0 = first contour point.
+        let flags_b: u16 = 0;
+        g0.extend_from_slice(&flags_b.to_be_bytes());
+        g0.extend_from_slice(&2u16.to_be_bytes());
+        g0.push(5u8); // arg1 = parent pp2 (numContourPoints + 1)
+        g0.push(0u8); // arg2 = child point 0
+
+        let mut glyf_bytes = Vec::new();
+        let off0 = glyf_bytes.len() as u32;
+        glyf_bytes.extend_from_slice(&g0);
+        if glyf_bytes.len() % 2 != 0 {
+            glyf_bytes.push(0);
+        }
+        let off1 = glyf_bytes.len() as u32;
+        glyf_bytes.extend_from_slice(&g1);
+        if glyf_bytes.len() % 2 != 0 {
+            glyf_bytes.push(0);
+        }
+        let off2 = glyf_bytes.len() as u32;
+        glyf_bytes.extend_from_slice(&g2);
+        if glyf_bytes.len() % 2 != 0 {
+            glyf_bytes.push(0);
+        }
+        let off_end = glyf_bytes.len() as u32;
+
+        let loca_bytes = build_loca_short(&[
+            (off0 / 2) as u16,
+            (off1 / 2) as u16,
+            (off2 / 2) as u16,
+            (off_end / 2) as u16,
+        ]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 3).unwrap();
+        let glyf = Glyf::new(&glyf_bytes);
+
+        // Per-glyph metrics. Parent (gid 0): advance=300, lsb=4 →
+        // pp1=(10-4, 0)=(6,0), pp2=(306,0). Other glyphs need only
+        // be parseable.
+        let hmtx_bytes = build_hmtx(&[(300, 4), (60, 4), (40, 0)]);
+        let hmtx = Hmtx::parse(&hmtx_bytes, 3, 3).unwrap();
+        let metrics = PhantomMetrics {
+            hmtx: &hmtx,
+            vmtx: None,
+        };
+
+        let mut o = Outline::new();
+        glyf.outline(&loca, 0, None, Some(&metrics), &mut o)
+            .unwrap();
+
+        // First six ops are component A's square unchanged.
+        // Ops 6..= are the anchor-mode triangle, translated by
+        // parent.pp2 = (306, 0).
+        // child[0]=(0,0)   -> (306, 0)
+        // child[1]=(40,0)  -> (346, 0)
+        // child[2]=(0,40)  -> (306, 40)
+        match o.ops()[6] {
+            PathOp::MoveTo { x, y } => {
+                assert!((x - 306.0).abs() < 1e-4, "got x={x}");
+                assert!((y - 0.0).abs() < 1e-4, "got y={y}");
+            }
+            other => panic!("expected MoveTo at 6, got {other:?}"),
+        }
+        match o.ops()[7] {
+            PathOp::LineTo { x, y } => {
+                assert!((x - 346.0).abs() < 1e-4);
+                assert!((y - 0.0).abs() < 1e-4);
+            }
+            other => panic!("expected LineTo at 7, got {other:?}"),
+        }
+        match o.ops()[8] {
+            PathOp::LineTo { x, y } => {
+                assert!((x - 306.0).abs() < 1e-4);
+                assert!((y - 40.0).abs() < 1e-4);
+            }
+            other => panic!("expected LineTo at 8, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composite_anchor_phantom_without_metrics_falls_back_to_zero() {
+        // Same composite shape as the phantom-resolution test, but
+        // with `metrics=None`. The legacy fallback applies: the
+        // anchor index is out-of-range and the translation collapses
+        // to (0, 0). Pin the behaviour so callers that opt out of
+        // phantom resolution still get a stable answer.
+        let g1 = build_simple_glyph(
+            &[3],
+            &[(0, 0, true), (10, 0, true), (10, 10, true), (0, 10, true)],
+        );
+        let g2 = build_simple_glyph(&[0], &[(0, 0, true)]);
+
+        let mut g0 = build_header(-1, 0, 0, 10, 10);
+        let flags_a: u16 =
+            COMP_ARGS_ARE_XY_VALUES | COMP_ARG_1_AND_2_ARE_WORDS | COMP_MORE_COMPONENTS;
+        g0.extend_from_slice(&flags_a.to_be_bytes());
+        g0.extend_from_slice(&1u16.to_be_bytes());
+        g0.extend_from_slice(&0i16.to_be_bytes());
+        g0.extend_from_slice(&0i16.to_be_bytes());
+        let flags_b: u16 = 0;
+        g0.extend_from_slice(&flags_b.to_be_bytes());
+        g0.extend_from_slice(&2u16.to_be_bytes());
+        g0.push(5u8); // pp2
+        g0.push(0u8);
+
+        let mut glyf_bytes = Vec::new();
+        glyf_bytes.extend_from_slice(&g0);
+        if glyf_bytes.len() % 2 != 0 {
+            glyf_bytes.push(0);
+        }
+        let off1 = glyf_bytes.len() as u32;
+        glyf_bytes.extend_from_slice(&g1);
+        if glyf_bytes.len() % 2 != 0 {
+            glyf_bytes.push(0);
+        }
+        let off2 = glyf_bytes.len() as u32;
+        glyf_bytes.extend_from_slice(&g2);
+        if glyf_bytes.len() % 2 != 0 {
+            glyf_bytes.push(0);
+        }
+        let off_end = glyf_bytes.len() as u32;
+        let loca_bytes = build_loca_short(&[
+            0,
+            (off1 / 2) as u16,
+            (off2 / 2) as u16,
+            (off_end / 2) as u16,
+        ]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 3).unwrap();
+        let glyf = Glyf::new(&glyf_bytes);
+
+        let mut o = Outline::new();
+        glyf.outline(&loca, 0, None, None, &mut o).unwrap();
+        // Component A drew 4 points + close, so child's MoveTo lands
+        // at op index 6 with no translation: child[0]=(0,0).
+        match o.ops()[6] {
+            PathOp::MoveTo { x, y } => {
+                assert!((x - 0.0).abs() < 1e-4);
+                assert!((y - 0.0).abs() < 1e-4);
+            }
+            other => panic!("expected MoveTo at 6, got {other:?}"),
         }
     }
 
@@ -1288,6 +1691,6 @@ mod tests {
         let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
         let glyf = Glyf::new(&body);
         let mut o = Outline::new();
-        assert!(glyf.outline(&loca, 0, None, &mut o).is_err());
+        assert!(glyf.outline(&loca, 0, None, None, &mut o).is_err());
     }
 }

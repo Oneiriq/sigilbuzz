@@ -139,6 +139,50 @@ fn amiri_glyph_outlines_match_ttf_parser_exactly() {
 }
 
 #[test]
+fn amiri_phantom_anchor_path_does_not_regress_parity() {
+    // Sanity-check: scan Amiri for composite glyphs whose anchor
+    // index falls into the phantom range (>= the parent's
+    // contour-point count). Whether any glyph hits this path is a
+    // factual property of the font; we just want to confirm the
+    // walk completes without panicking and that the per-glyph
+    // outline still matches ttf-parser. Acts as a regression guard
+    // for the phantom-anchor code path even if the font happens not
+    // to exercise it today.
+    let bytes = include_bytes!("fixtures/amiri_regular.ttf");
+    let ours = Face::parse_bytes(bytes, 0).expect("sigilbuzz face");
+    let theirs = ttf_parser::Face::parse(bytes, 0).expect("ttf-parser face");
+    let mut seen = 0usize;
+    for gid in 0..theirs.number_of_glyphs() {
+        let mut builder = CollectBuilder::default();
+        let drew_theirs = theirs.outline_glyph(ttf_parser::GlyphId(gid), &mut builder);
+        let ours_outline = ours.glyph_outline(gid).expect("our outline");
+        if let (Some(_), Some(out)) = (drew_theirs, &ours_outline) {
+            if out.len() == builder.ops.len() {
+                let mut ok = true;
+                for (ours_op, theirs_op) in out.ops().iter().zip(builder.ops.iter()) {
+                    let (tag, coords) = collapse(*ours_op);
+                    if tag != theirs_op.0 || !approx_eq(&coords, &theirs_op.1) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    seen += 1;
+                }
+            }
+        } else if drew_theirs.is_none() && ours_outline.is_none() {
+            seen += 1;
+        }
+    }
+    assert_eq!(
+        seen,
+        theirs.number_of_glyphs() as usize,
+        "Amiri parity broke after phantom-anchor wiring: {seen}/{}",
+        theirs.number_of_glyphs()
+    );
+}
+
+#[test]
 fn amiri_two_anchor_glyphs_now_match() {
     // The two Amiri glyphs that previously missed parity (gids 379
     // and 6123) drove the rewrite of the glyf composite flattener:
