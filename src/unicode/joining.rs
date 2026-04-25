@@ -32,6 +32,7 @@
 //! - `U+0750..U+077F` (Arabic Supplement) — all letters
 //! - `U+0870..U+089F` (Arabic Extended-B, partial)
 //! - `U+08A0..U+08FF` (Arabic Extended-A) — letters and marks
+//! - `U+1800..U+18AA` (Mongolian) — letters + Free Variation Selectors
 //! - `U+200C..U+200D` — ZWNJ (non-joiner) / ZWJ (join-causing)
 //!
 //! Codepoints outside the Arabic family return [`JoiningType::U`]
@@ -107,6 +108,11 @@ const fn is_arabic_range(cp: u32) -> bool {
         | 0x08A0..=0x08FF
         | 0xFB50..=0xFDFF
         | 0xFE70..=0xFEFF
+        // Mongolian — letters + Free Variation Selectors. Mongolian
+        // shapes through the same joining-state machine as Arabic
+        // (same `init`/`medi`/`fina`/`isol` GSUB feature tags), so
+        // the joining table is the natural place for it.
+        | 0x1800..=0x18AF
         // ZWNJ / ZWJ — bidi format characters that participate in
         // joining even though they are not Arabic letters.
         | 0x200C..=0x200D
@@ -276,6 +282,50 @@ const JOINING_TABLE: &[(u32, u32, JoiningType)] = &[
     (0x08CA, 0x08E1, JoiningType::T),
     (0x08E2, 0x08E2, JoiningType::U),
     (0x08E3, 0x08FF, JoiningType::T),
+
+    // --- U+1800..U+18AA Mongolian ---
+    // The Mongolian script ships with letters whose default joining
+    // type matches the values rustybuzz's generated table assigns
+    // (`gen-arabic-table.py` from the HarfBuzz tree). Mongolian's
+    // joining flow is the same as Arabic: dual-joining letters take
+    // `init`/`medi`/`fina` based on neighbours, and Free Variation
+    // Selectors are transparent so the post-FVS form selection in
+    // [`crate::ot::mongolian`] can promote the chosen variant onto
+    // the previous letter without disturbing the chain.
+    //
+    // 0x1806 TODO SOFT HYPHEN — Non-joining (used as line-break hint).
+    (0x1806, 0x1806, JoiningType::U),
+    // 0x1807 SIBE SYLLABLE BOUNDARY MARKER — Dual.
+    (0x1807, 0x1807, JoiningType::D),
+    // 0x180A NIRUGU — Dual (a connecting baseline).
+    (0x180A, 0x180A, JoiningType::D),
+    // 0x180B..0x180D Free Variation Selectors 1/2/3 — Transparent.
+    // FVS4 (U+180F, Unicode 14.0) joins them. The Mongolian shaper
+    // promotes the FVS-selected variant onto the preceding letter
+    // after joining-form assignment; the FVS itself does not join.
+    (0x180B, 0x180D, JoiningType::T),
+    // 0x180E MONGOLIAN VOWEL SEPARATOR — Non-joining. Breaks the
+    // cursive chain so the preceding letter takes its final form.
+    (0x180E, 0x180E, JoiningType::U),
+    // 0x180F FVS4 — Transparent (Unicode 14.0).
+    (0x180F, 0x180F, JoiningType::T),
+    // 0x1820..0x1877 Mongolian letters — bulk Dual-joining block.
+    // Covers Mongolian, Galik, Manchu, and Sibe letters; every
+    // assigned letter in this range is dual-joining.
+    (0x1820, 0x1877, JoiningType::D),
+    // 0x1880..0x1884 — Mongolian letters: ali gali anusvara, visarga,
+    // damaru, ubadama, three baluda. Non-joining symbols.
+    (0x1880, 0x1884, JoiningType::U),
+    // 0x1885..0x1886 Mongolian letter ali gali baluda + ali gali three
+    // baluda — Transparent combining marks.
+    (0x1885, 0x1886, JoiningType::T),
+    // 0x1887..0x18A8 Mongolian Galik / Manchu / Sibe letters — Dual.
+    (0x1887, 0x18A8, JoiningType::D),
+    // 0x18A9 MONGOLIAN LETTER ALI GALI DAGALGA — Non-joining; rustybuzz
+    // marks this position as `X` (no joining data) which we treat as U.
+    (0x18A9, 0x18A9, JoiningType::U),
+    // 0x18AA MONGOLIAN LETTER MANCHU ALI GALI LHA — Dual.
+    (0x18AA, 0x18AA, JoiningType::D),
 
     // --- Format characters that participate in joining ---
     (0x200C, 0x200C, JoiningType::U), // ZWNJ — breaks joining

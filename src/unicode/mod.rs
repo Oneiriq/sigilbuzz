@@ -67,6 +67,15 @@ pub enum Script {
     /// routes through USE so `ljmo` / `vjmo` / `tjmo` see the L / V / T
     /// jamo in logical order.
     Hangul,
+    /// Tibetan (U+0F00..U+0FFF). Stacked above/below-base subjoined
+    /// consonants — runs through the feature-loop-only Tibetan shaper
+    /// in [`crate::ot::tibetan`].
+    Tibetan,
+    /// Mongolian (U+1800..U+18AF). Cursive-joining like Arabic, with
+    /// Free Variation Selectors (U+180B..U+180D, U+180F) overriding
+    /// the joining-form choice. Runs through the Mongolian shaper in
+    /// [`crate::ot::mongolian`].
+    Mongolian,
     /// N'Ko. Right-to-left alphabetic script for the Manding language
     /// family (Bambara / Maninka / Dyula). USE pipeline; covers
     /// U+07C0..U+07FF.
@@ -222,8 +231,19 @@ pub const fn script_of(ch: char) -> Script {
         0x1100..=0x11FF | 0xA960..=0xA97F | 0xAC00..=0xD7A3 | 0xD7B0..=0xD7FF | 0x3130..=0x318F => {
             Script::Hangul
         }
+        // Tibetan — base block. Stacked subjoined consonants live
+        // in U+0F90..U+0FBC; the whole block routes through the
+        // Tibetan feature-loop shaper.
+        0x0F00..=0x0FFF => Script::Tibetan,
         // Khmer + Khmer Symbols
         0x1780..=0x17FF | 0x19E0..=0x19FF => Script::Khmer,
+        // Mongolian — main block. Mongolian Supplement (U+11660..)
+        // is intentionally out of scope for the bootstrap classifier
+        // since cargo's `char` is `u32` but the binding is `const fn`
+        // and the supplement lives outside the Basic Multilingual
+        // Plane; modern Noto Sans Mongolian's covered glyphs sit in
+        // the main block, which is what 0.7.0's parity corpus tests.
+        0x1800..=0x18AF => Script::Mongolian,
         // CJK unified ideographs + extensions A/B + Hiragana + Katakana
         0x3040..=0x309F | 0x30A0..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF => Script::Han,
         _ => Script::Other,

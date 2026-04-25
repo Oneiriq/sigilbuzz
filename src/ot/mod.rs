@@ -10,6 +10,8 @@
 
 pub mod arabic;
 pub mod indic;
+pub mod mongolian;
+pub mod tibetan;
 pub mod use_shaper;
 
 /// Common OpenType feature tags. These are byte-literal constants so
