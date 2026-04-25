@@ -172,7 +172,13 @@ impl Rasterizer {
             if mask.pixmap.is_empty() {
                 continue;
             }
-            blit(&mut out, &mask.pixmap, mask.origin_x, mask.origin_y, fill.color);
+            blit(
+                &mut out,
+                &mask.pixmap,
+                mask.origin_x,
+                mask.origin_y,
+                fill.color,
+            );
         }
         Ok(out)
     }
@@ -322,9 +328,7 @@ fn walk_children(
                 } else if v.trim().eq_ignore_ascii_case("none") {
                     child_ctx.fill[3] = 0;
                 }
-            } else if k.eq_ignore_ascii_case("fill-opacity")
-                || k.eq_ignore_ascii_case("opacity")
-            {
+            } else if k.eq_ignore_ascii_case("fill-opacity") || k.eq_ignore_ascii_case("opacity") {
                 // SVG `opacity` strictly multiplies the rendered
                 // element (not just its fill), but in our bounded
                 // subset we only fill — so collapsing both attributes
@@ -763,7 +767,11 @@ fn parse_path_d(s: &str) -> Result<Vec<PathOp>, RenderError> {
         match cmd {
             b'M' | b'm' => {
                 let (x, y) = read_pair(bytes, &mut i)?;
-                let (ax, ay) = if cmd == b'M' { (x, y) } else { (cx + x, cy + y) };
+                let (ax, ay) = if cmd == b'M' {
+                    (x, y)
+                } else {
+                    (cx + x, cy + y)
+                };
                 cx = ax;
                 cy = ay;
                 sx = ax;
@@ -773,7 +781,11 @@ fn parse_path_d(s: &str) -> Result<Vec<PathOp>, RenderError> {
             }
             b'L' | b'l' => {
                 let (x, y) = read_pair(bytes, &mut i)?;
-                let (ax, ay) = if cmd == b'L' { (x, y) } else { (cx + x, cy + y) };
+                let (ax, ay) = if cmd == b'L' {
+                    (x, y)
+                } else {
+                    (cx + x, cy + y)
+                };
                 cx = ax;
                 cy = ay;
                 out.push(PathOp::LineTo { x: ax, y: ay });
@@ -994,7 +1006,9 @@ mod tests {
         // No separator between sign and digits — common SVG output.
         let ops = parse_path_d("M0 0L10-5L-3 .5Z").unwrap();
         assert_eq!(ops.len(), 4);
-        assert!(matches!(ops[2], PathOp::LineTo { x, y } if (x + 3.0).abs() < 1e-3 && (y - 0.5).abs() < 1e-3));
+        assert!(
+            matches!(ops[2], PathOp::LineTo { x, y } if (x + 3.0).abs() < 1e-3 && (y - 0.5).abs() < 1e-3)
+        );
     }
 
     #[test]
