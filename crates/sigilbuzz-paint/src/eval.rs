@@ -103,7 +103,7 @@ pub fn evaluate_at_coords(face: &Face<'_>, gid: GlyphId, coords: &[f32]) -> Vec<
         return out;
     };
     let cpal = face.cpal().ok().flatten();
-    let var_store = resolve_var_store(&colr);
+    let var_store = resolve_var_store(&colr).or_else(|| resolve_gdef_var_store(face));
     let Some(root) = colr.paint(gid) else {
         return out;
     };
@@ -151,6 +151,28 @@ fn resolve_var_store<'a>(colr: &Colr<'a>) -> Option<ItemVariationStore<'a>> {
     ItemVariationStore::parse(&data[start..]).ok()
 }
 
+/// Falls back to the GDEF v1.3+ shared `ItemVariationStore` when the
+/// COLR table doesn't carry its own. Real-world variable colour fonts
+/// often park the IVS in GDEF and reach into it from both COLR and
+/// GPOS — without this fallback the evaluator silently emits the
+/// static (no-deltas) output for any such font even when `coords` is
+/// non-empty.
+fn resolve_gdef_var_store<'a>(face: &Face<'a>) -> Option<ItemVariationStore<'a>> {
+    let gdef = face.table_bytes(*b"GDEF").ok()?;
+    if gdef.len() < 18 {
+        return None;
+    }
+    let minor = u16::from_be_bytes([gdef[2], gdef[3]]);
+    if minor < 3 {
+        return None;
+    }
+    let ivs_off = u32::from_be_bytes([gdef[14], gdef[15], gdef[16], gdef[17]]) as usize;
+    if ivs_off == 0 || ivs_off >= gdef.len() {
+        return None;
+    }
+    ItemVariationStore::parse(&gdef[ivs_off..]).ok()
+}
+
 /// Walks one paint node. `xform` is the transform inherited from the
 /// chain of ancestor transforms; `depth` is the current recursion
 /// depth used for the cycle-bypass safety net.
@@ -195,7 +217,10 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
             alpha,
             var_index_base,
         } => {
-            let alpha = alpha + var_delta(ctx, var_index_base, 0);
+            // Alpha is F2DOT14 — the IVS delta arrives as an int16
+            // count of F2DOT14 ticks, so we divide by 16384 to land
+            // in the same `0.0..=1.0` scale as `alpha`.
+            let alpha = alpha + var_delta_f2dot14(ctx, var_index_base, 0);
             emit_solid(ctx, palette_index, alpha, xform);
         }
         ColrPaint::LinearGradient {
@@ -905,8 +930,11 @@ fn resolve_stops(
             if stop_var != u32::MAX && !coords.is_empty() {
                 let outer = (stop_var >> 16) as u16;
                 let inner = stop_var as u16;
-                offset += store.delta(outer, inner, coords);
-                alpha += store.delta(outer, inner.wrapping_add(1), coords);
+                // Stop offset and per-stop alpha are both F2DOT14, so
+                // the IVS' integer delta needs the same /16384 scale
+                // we apply to PaintVarSolid alpha.
+                offset += store.delta(outer, inner, coords) / 16384.0;
+                alpha += store.delta(outer, inner.wrapping_add(1), coords) / 16384.0;
             }
         }
         let color = resolve_palette_color(cpal, stop.palette_index).with_alpha_multiplied(alpha);
@@ -937,6 +965,22 @@ fn var_delta(ctx: &EvalCtx<'_, '_>, var_index_base: VarIndexBase, field_index: u
     let inner = var_index_base as u16;
     let inner = inner.wrapping_add(field_index);
     store.delta(outer, inner, ctx.coords)
+}
+
+/// Variant of [`var_delta`] for fields whose base values live in
+/// F2DOT14 fixed-point. The OpenType variation spec requires deltas
+/// to share the same units as the field they patch, so an IVS that
+/// stores a raw `int16` of `8192` represents a delta of `0.5` in
+/// F2DOT14 space. The sigilbuzz `ItemVariationStore::delta` returns
+/// that integer as `f32`; this helper finishes the conversion by
+/// dividing by 16384 so the caller can add directly to an
+/// already-scaled F2DOT14 value.
+fn var_delta_f2dot14(
+    ctx: &EvalCtx<'_, '_>,
+    var_index_base: VarIndexBase,
+    field_index: u16,
+) -> f32 {
+    var_delta(ctx, var_index_base, field_index) / 16384.0
 }
 
 /// Helper widening an `Fword` (i16 design-unit coord) to f32.

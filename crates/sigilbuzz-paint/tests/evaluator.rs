@@ -659,3 +659,288 @@ fn sweep_gradient_resolves_centre_angles_and_three_stops() {
         other => panic!("unexpected {other:?}"),
     }
 }
+
+// =========================================================================
+// IVS / DeltaSetIndexMap fixture helpers (used by tests 12+).
+// =========================================================================
+
+extern crate alloc;
+
+/// Builds an `ItemVariationStore` with `axis_count` axes, the supplied
+/// regions, and a *single* outer subtable carrying `delta_sets`. Each
+/// inner row is `regions.len()` deltas wide, packed as int16 (no
+/// LONG_WORDS). Returns the full IVS byte blob — the caller embeds it
+/// at the COLR `varStoreOffset` it picks (or in GDEF's `itemVarStore`).
+fn build_ivs(
+    axis_count: u16,
+    regions: &[Vec<(f32, f32, f32)>],
+    delta_sets: &[Vec<i16>],
+) -> Vec<u8> {
+    let region_count = regions.len() as u16;
+    let item_count = delta_sets.len() as u16;
+    // Header: u16 format + u32 regionListOff + u16 subtableCount +
+    // u32 subtableOffsets[1] = 12 bytes.
+    let header_len: u32 = 12;
+    let region_list_size = 4 + region_count as u32 * axis_count as u32 * 6;
+    let region_list_off = header_len;
+    let subtable_off = header_len + region_list_size;
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes()); // format
+    out.extend_from_slice(&region_list_off.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes()); // subtable count
+    out.extend_from_slice(&subtable_off.to_be_bytes());
+
+    // Region list.
+    out.extend_from_slice(&axis_count.to_be_bytes());
+    out.extend_from_slice(&region_count.to_be_bytes());
+    for region in regions {
+        assert_eq!(region.len(), axis_count as usize);
+        for (s, p, e) in region {
+            out.extend_from_slice(&f2dot14(*s));
+            out.extend_from_slice(&f2dot14(*p));
+            out.extend_from_slice(&f2dot14(*e));
+        }
+    }
+
+    // Subtable: itemCount, wordDeltaCount = region_count (every delta
+    // is a wide short-word so the writer is uniform), regionIndexCount,
+    // regionIndexes, then the delta rows packed as int16.
+    out.extend_from_slice(&item_count.to_be_bytes());
+    out.extend_from_slice(&region_count.to_be_bytes());
+    out.extend_from_slice(&region_count.to_be_bytes());
+    for ri in 0..region_count {
+        out.extend_from_slice(&ri.to_be_bytes());
+    }
+    for set in delta_sets {
+        assert_eq!(set.len(), region_count as usize);
+        for d in set {
+            out.extend_from_slice(&d.to_be_bytes());
+        }
+    }
+    out
+}
+
+/// Builds a multi-base-glyph COLRv1 table. Each entry of `paints` is
+/// the raw bytes of one paint subtree; the helper places them
+/// contiguously after the BaseGlyphList and patches the
+/// `BaseGlyphPaintRecord` offsets. `var_store` is appended to the
+/// COLR data when non-empty and its absolute offset is recorded as
+/// `varStoreOffset` in the v1 header.
+fn build_v1_multi_colr(paints: &[(u16, Vec<u8>)], var_store: &[u8]) -> Vec<u8> {
+    let header_len: u32 = 30; // 14 (v0) + 16 (v1 appendix, 4 u32)
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes()); // version
+    out.extend_from_slice(&0u16.to_be_bytes()); // v0 numBase
+    out.extend_from_slice(&header_len.to_be_bytes()); // baseGlyphRecordsOff
+    out.extend_from_slice(&header_len.to_be_bytes()); // layerRecordsOff
+    out.extend_from_slice(&0u16.to_be_bytes()); // numLayer
+    out.extend_from_slice(&header_len.to_be_bytes()); // baseGlyphListOff
+    out.extend_from_slice(&0u32.to_be_bytes()); // layerListOff
+    out.extend_from_slice(&0u32.to_be_bytes()); // clipListOff
+    let var_store_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes()); // varStoreOff (filled in below)
+
+    // BaseGlyphList header.
+    out.extend_from_slice(&(paints.len() as u32).to_be_bytes());
+    let record_slots = out.len();
+    for (gid, _) in paints {
+        out.extend_from_slice(&gid.to_be_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes()); // patched below
+    }
+
+    for (i, (_, bytes)) in paints.iter().enumerate() {
+        let rel = (out.len() as u32) - header_len;
+        let slot = record_slots + i * 6 + 2;
+        out[slot..slot + 4].copy_from_slice(&rel.to_be_bytes());
+        out.extend_from_slice(bytes);
+    }
+
+    if !var_store.is_empty() {
+        let off = out.len() as u32;
+        out[var_store_slot..var_store_slot + 4].copy_from_slice(&off.to_be_bytes());
+        out.extend_from_slice(var_store);
+    }
+    out
+}
+
+// =========================================================================
+// 12. ItemVariationStore: full delta-application path. Synthesises an
+//     IVS embedded at COLR's varStoreOffset and asserts the three
+//     PaintVar* nodes we care about (Solid alpha, LinearGradient stop
+//     offset, Translate dx/dy) interpolate linearly across the axis.
+// =========================================================================
+
+/// Encodes the test's three paint blobs at the `(gid, paint_bytes)`
+/// pairs the multi-glyph COLR builder expects. All three reference
+/// the same IVS subtable (outer = 0); inner indices partition the
+/// subtable rows by paint:
+///   inner 0   → PaintVarSolid alpha
+///   inner 1-2 → PaintVarLinearGradient stop[1] offset / alpha
+///   inner 3-4 → PaintVarTranslate dx / dy
+fn build_ivs_test_paints() -> Vec<(u16, Vec<u8>)> {
+    // Glyph 1: PaintVarSolid (format 3) — palette 0, alpha 1.0,
+    // var_index_base = 0 (outer 0, inner 0).
+    let mut p_solid = Vec::new();
+    p_solid.push(3u8);
+    p_solid.extend_from_slice(&0u16.to_be_bytes()); // palette index
+    p_solid.extend_from_slice(&f2dot14(1.0)); // alpha base
+    p_solid.extend_from_slice(&0x0000_0000u32.to_be_bytes()); // var_index_base
+
+    // Glyph 2: PaintVarLinearGradient (format 5) wrapping a VarColorLine
+    // with two stops; stop[1] carries varIndexBase = 1 so the stop's
+    // offset/alpha pull from inner 1 / inner 2 of the IVS.
+    let mut p_lin = Vec::new();
+    p_lin.push(5u8);
+    p_lin.extend_from_slice(&[0, 0, 0]); // Offset24 colorLine — patched below.
+    p_lin.extend_from_slice(&0i16.to_be_bytes()); // x0
+    p_lin.extend_from_slice(&0i16.to_be_bytes()); // y0
+    p_lin.extend_from_slice(&100i16.to_be_bytes()); // x1
+    p_lin.extend_from_slice(&0i16.to_be_bytes()); // y1
+    p_lin.extend_from_slice(&0i16.to_be_bytes()); // x2
+    p_lin.extend_from_slice(&100i16.to_be_bytes()); // y2
+    p_lin.extend_from_slice(&u32::MAX.to_be_bytes()); // paint var_index_base = none
+    let cl_rel = p_lin.len() as u32;
+    p_lin[1] = ((cl_rel >> 16) & 0xff) as u8;
+    p_lin[2] = ((cl_rel >> 8) & 0xff) as u8;
+    p_lin[3] = (cl_rel & 0xff) as u8;
+    // VarColorLine: u8 extend, u16 numStops, VarColorStop[2] (10 bytes each).
+    p_lin.push(0u8); // extend = Pad
+    p_lin.extend_from_slice(&2u16.to_be_bytes());
+    // Stop 0: offset 0.0, palette 0, alpha 1.0, no variation.
+    p_lin.extend_from_slice(&f2dot14(0.0));
+    p_lin.extend_from_slice(&0u16.to_be_bytes());
+    p_lin.extend_from_slice(&f2dot14(1.0));
+    p_lin.extend_from_slice(&u32::MAX.to_be_bytes());
+    // Stop 1: offset 1.0, palette 1, alpha 1.0, varIndexBase = 1.
+    p_lin.extend_from_slice(&f2dot14(1.0));
+    p_lin.extend_from_slice(&1u16.to_be_bytes());
+    p_lin.extend_from_slice(&f2dot14(1.0));
+    p_lin.extend_from_slice(&0x0000_0001u32.to_be_bytes());
+
+    // Glyph 3: PaintVarTranslate (format 15) over a PaintSolid leaf.
+    // Translate base = (10, 20); inner 3/4 carry dx/dy deltas.
+    let mut p_tr = Vec::new();
+    p_tr.push(15u8);
+    p_tr.extend_from_slice(&[0, 0, 0]); // Offset24 child paint — patched below.
+    p_tr.extend_from_slice(&10i16.to_be_bytes()); // dx base
+    p_tr.extend_from_slice(&20i16.to_be_bytes()); // dy base
+    p_tr.extend_from_slice(&0x0000_0003u32.to_be_bytes()); // var_index_base = 3
+    let child_rel = p_tr.len() as u32;
+    p_tr[1] = ((child_rel >> 16) & 0xff) as u8;
+    p_tr[2] = ((child_rel >> 8) & 0xff) as u8;
+    p_tr[3] = (child_rel & 0xff) as u8;
+    p_tr.push(2u8); // child = PaintSolid
+    p_tr.extend_from_slice(&2u16.to_be_bytes()); // palette 2
+    p_tr.extend_from_slice(&f2dot14(1.0));
+
+    alloc::vec![(1u16, p_solid), (2u16, p_lin), (3u16, p_tr)]
+}
+
+/// Builds the IVS used by every IVS test in this file. One axis, two
+/// regions:
+///   region 0 → always-1 ("default" / always-on bias row)
+///   region 1 → triangular (0, 1, 1) — peaks at axis = 1
+/// Five delta sets, indexed by inner index. Region 0 always carries 0
+/// so only region 1 contributes; this means the delta is exactly
+/// `region_1_value * coord` for any coord in `[0, 1]`.
+fn build_ivs_test_store() -> Vec<u8> {
+    build_ivs(
+        1,
+        &[
+            alloc::vec![(0.0, 0.0, 0.0)], // axis-not-used → scalar 1
+            alloc::vec![(0.0, 1.0, 1.0)], // peaks at coord = 1
+        ],
+        &[
+            alloc::vec![0, -8192], // inner 0: VarSolid alpha (F2DOT14 -0.5)
+            alloc::vec![0, 4096],  // inner 1: VarLinGrad stop[1] offset (+0.25)
+            alloc::vec![0, 0],     // inner 2: VarLinGrad stop[1] alpha (+0.0)
+            alloc::vec![0, 5],     // inner 3: VarTranslate dx (+5 design units)
+            alloc::vec![0, -3],    // inner 4: VarTranslate dy (-3 design units)
+        ],
+    )
+}
+
+/// Helper: build the IVS face once, exercise three paint variants
+/// at a given axis coord, and return `(solid_alpha, stop1_offset,
+/// translated_origin)`. Each tuple element is what the evaluator
+/// emitted for the corresponding paint subtree — failures therefore
+/// pinpoint which Var* path stopped applying its delta.
+fn evaluate_ivs_at(coord_input: &[f32]) -> (f32, f32, (f32, f32)) {
+    let var_store = build_ivs_test_store();
+    let paints = build_ivs_test_paints();
+    let colr = build_v1_multi_colr(&paints, &var_store);
+    let cpal = build_cpal_v0(&[
+        (255, 255, 255, 255),
+        (255, 0, 0, 255),
+        (0, 255, 0, 255),
+    ]);
+    let bytes = build_face_bytes(&colr, &cpal);
+    let face = Face::parse_bytes(&bytes, 0).expect("face parses");
+
+    let solid_cmds = evaluate_at_coords(&face, 1, coord_input);
+    let solid_alpha = match solid_cmds.as_slice() {
+        [DrawCmd::FillGlyph {
+            paint: PaintSource::Solid(c),
+            ..
+        }] => c.a,
+        other => panic!("solid: unexpected {other:?}"),
+    };
+
+    let lin_cmds = evaluate_at_coords(&face, 2, coord_input);
+    let stop1_offset = match lin_cmds.as_slice() {
+        [DrawCmd::FillGlyph {
+            paint: PaintSource::Gradient(g),
+            ..
+        }] => {
+            assert_eq!(g.stops.len(), 2);
+            g.stops[1].offset
+        }
+        other => panic!("lin: unexpected {other:?}"),
+    };
+
+    let tr_cmds = evaluate_at_coords(&face, 3, coord_input);
+    let translate = match tr_cmds.as_slice() {
+        [DrawCmd::FillGlyph { transform, .. }] => transform.apply(0.0, 0.0),
+        other => panic!("tr: unexpected {other:?}"),
+    };
+
+    (solid_alpha, stop1_offset, translate)
+}
+
+#[test]
+fn ivs_at_axis_zero_returns_unmodified_base_values() {
+    // Coord 0.0 → region 1 scalar = 0 → no deltas applied.
+    let (alpha, offset, (dx, dy)) = evaluate_ivs_at(&[0.0]);
+    assert!((alpha - 1.0).abs() < 1e-4, "alpha was {alpha}");
+    assert!((offset - 1.0).abs() < 1e-4, "offset was {offset}");
+    assert!((dx - 10.0).abs() < 1e-4, "dx was {dx}");
+    assert!((dy - 20.0).abs() < 1e-4, "dy was {dy}");
+}
+
+#[test]
+fn ivs_at_axis_one_applies_full_deltas() {
+    // Coord 1.0 → region 1 scalar = 1 → full deltas applied.
+    let (alpha, offset, (dx, dy)) = evaluate_ivs_at(&[1.0]);
+    // Alpha base 1.0 + delta of -0.5 (raw -8192 / 16384) = 0.5.
+    assert!((alpha - 0.5).abs() < 1e-3, "alpha was {alpha}");
+    // Stop offset base 1.0 + delta of 0.25 (raw 4096 / 16384) = 1.25.
+    assert!((offset - 1.25).abs() < 1e-3, "offset was {offset}");
+    // Translate base (10, 20) + delta (5, -3) = (15, 17).
+    assert!((dx - 15.0).abs() < 1e-3, "dx was {dx}");
+    assert!((dy - 17.0).abs() < 1e-3, "dy was {dy}");
+}
+
+#[test]
+fn ivs_at_half_axis_interpolates_linearly() {
+    // Coord 0.5 → region 1 scalar = 0.5 → half deltas applied.
+    let (alpha, offset, (dx, dy)) = evaluate_ivs_at(&[0.5]);
+    // Alpha 1.0 + (-0.5 * 0.5) = 0.75.
+    assert!((alpha - 0.75).abs() < 1e-3, "alpha was {alpha}");
+    // Stop offset 1.0 + (0.25 * 0.5) = 1.125.
+    assert!((offset - 1.125).abs() < 1e-3, "offset was {offset}");
+    // Translate (10, 20) + (5 * 0.5, -3 * 0.5) = (12.5, 18.5).
+    assert!((dx - 12.5).abs() < 1e-3, "dx was {dx}");
+    assert!((dy - 18.5).abs() < 1e-3, "dy was {dy}");
+}
