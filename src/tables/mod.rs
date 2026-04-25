@@ -10,6 +10,7 @@
 //! unambiguous and `no_std`-friendly.
 
 pub mod avar;
+pub mod cbdt;
 pub mod cblc;
 pub mod cff;
 pub mod cff2;
@@ -40,6 +41,7 @@ pub mod vmtx;
 pub mod vorg;
 
 pub use avar::Avar;
+pub use cbdt::{Cbdt, GlyphBitmap, GlyphBitmapMetrics};
 pub use cblc::{BigGlyphMetrics, BitmapSize, Cblc, CbdtLocation, SbitLineMetrics, SmallGlyphMetrics};
 pub use cff::Cff;
 pub use cff2::Cff2;
@@ -130,4 +132,6 @@ pub mod tag {
     pub const KERX: [u8; 4] = *b"kerx";
     /// `CBLC` — Color Bitmap Location (Google).
     pub const CBLC: [u8; 4] = *b"CBLC";
+    /// `CBDT` — Color Bitmap Data (Google).
+    pub const CBDT: [u8; 4] = *b"CBDT";
 }
