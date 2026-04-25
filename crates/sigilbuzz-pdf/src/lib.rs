@@ -70,8 +70,27 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+mod stream;
+
+pub use stream::{emit_d1_prologue, emit_fill_epilogue, emit_path_ops, outline_bbox};
+
 /// Crate version, matching `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Build a Type 3 `FontMatrix` row-vector tuple `[a b c d e f]` for a
+/// face whose glyph coordinates live in `units_per_em` design units.
+///
+/// PDF's `FontMatrix` maps glyph-space coordinates to text space (1
+/// unit = 1 typographic point at use time, after the text-state
+/// matrix scale). The standard convention for font-design-unit
+/// fonts is `[1/upem 0 0 1/upem 0 0]` — uniform scale, no shear, no
+/// translation. sigilbuzz emits glyphs in their native upem space
+/// so this matrix is the same for every CharProc in the font.
+#[must_use]
+pub fn font_matrix(units_per_em: u16) -> [f32; 6] {
+    let s = 1.0_f32 / f32::from(units_per_em);
+    [s, 0.0, 0.0, s, 0.0, 0.0]
+}
 
 /// Glyph index alias. sigilbuzz uses raw `u16` glyph ids throughout;
 /// this alias makes the public PDF surface read as "glyph id" rather
@@ -207,4 +226,45 @@ pub struct Type3Font {
     /// `widths.len() == char_procs.len()` — `FontMatrix` scales each
     /// entry into PDF text-space units at render time.
     pub widths: Vec<f32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn font_matrix_for_1000_upem_face() {
+        let m = font_matrix(1000);
+        assert_eq!(m, [0.001, 0.0, 0.0, 0.001, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn font_matrix_for_2048_upem_face() {
+        let m = font_matrix(2048);
+        let expected = 1.0_f32 / 2048.0_f32;
+        assert_eq!(m, [expected, 0.0, 0.0, expected, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn bbox_extend_and_union_round_trip() {
+        let mut a = Bbox::empty();
+        assert!(a.is_empty());
+        a.extend(10.0, -5.0);
+        a.extend(40.0, 30.0);
+        assert_eq!(a.xmin, 10.0);
+        assert_eq!(a.ymin, -5.0);
+        assert_eq!(a.xmax, 40.0);
+        assert_eq!(a.ymax, 30.0);
+
+        let mut b = Bbox::empty();
+        b.extend(0.0, 100.0);
+        a.union(&b);
+        assert_eq!(a.xmin, 0.0);
+        assert_eq!(a.ymax, 100.0);
+
+        // Unioning an empty bbox is a no-op.
+        let snapshot = a;
+        a.union(&Bbox::empty());
+        assert_eq!(a, snapshot);
+    }
 }
