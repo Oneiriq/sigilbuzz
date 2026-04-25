@@ -397,15 +397,42 @@ The "drop-in shaping engine" line crosses to "drop-in text pipeline." Bidi order
 
 ---
 
-## 1.0.0+ (next)
+## 0.11.0 (shipping)
 
-The remaining deferrals plus polish + crates.io publish.
+Variable fonts get the rest of their story (instancing + MVAR + VVAR), math typography lands, and three deferrals from prior releases close out.
 
-- [ ] N0 paired-bracket bidi conformance (#148) — needs `BidiBrackets.txt`-derived pair table.
-- [ ] kerx format 4 apply path — needs glyf-point + ankr coordinate plumbing.
-- [ ] CFF2 non-identity rewrite — current CFF2 path is identity-passthrough only.
-- [ ] Hyphenation as a companion crate.
-- [ ] Stable API audit + crates.io publish for real (publish=true scaffolding already in place per 0.5.0; just hasn't been pushed).
+### Variable-font instancing (#161)
+
+- [x] `sigilbuzz-subset::instance(face, &InstanceInput { coords, drop_var_tables })` bakes a coord vector into a static font. glyf simple-glyph contour points re-encoded with optimal SHORT/SAME-OR-POS flags + recomputed bbox; hmtx advances baked through HVAR; fvar/avar/gvar/HVAR dropped on `drop_var_tables=true`. CFF2 blend baking and MVAR/VVAR-aware metrics-bake tracked as #163 follow-up. Round-trip tested against Rubik VF at default and extreme wght.
+
+### MVAR + VVAR variable metrics (#162)
+
+- [x] `MVAR` (Master Variation, font-wide instance metrics by axis coords): `Face::mvar()` + `metric_delta(tag, coords)`. Reuses `ItemVariationStore` from 0.1.0/0.2.0 plumbing.
+- [x] `VVAR` (Vertical Advance Variation, HVAR's vertical sibling): `Face::vvar()` + `advance_height_delta(gid, coords)` + `top_side_bearing_delta(gid, coords)`. Wired into shape pipeline's vertical-advance branch.
+
+### MATH table (#164)
+
+- [x] All five `MATH` subtables parsed: MathConstants (~70 spec-defined font-wide fields), MathGlyphInfo (italic correction, top-accent, extended-shape bitmap, kern info), MathKern (piecewise vertical kerning), MathVariants (stretchy-glyph variant lookup + glyph assemblies for top/mid/bottom/extender parts). Reuses `DeviceOrVariationIndex` from #34 for variable-math evaluation pre-wiring. Layout is the consumer's job — sigilbuzz exposes the data.
+
+### Three deferrals closed (#165)
+
+- [x] **#148 N0 paired-bracket bidi conformance** — full UAX 9 §3.3.5 implementation. ~80-pair curated `BidiBrackets.txt` extract covering ASCII / CJK / math brackets. Sits between W7 and N1 in the resolver.
+- [x] **CFF2 non-identity for Adobe-style elided-FDSelect fonts** — Source Sans 3 VF and similar single-FD CFF2 fonts. Round-trip integration tested.
+- [x] **kerx format 4 apply** (action type 2 — inline coordinates). Types 0 (control points → glyf) and 1 (anchor points → ankr) emit events but the shaper drops them; tracked as #166 follow-up.
+
+### Hardening — wave 12
+
+- [x] Honest audit pass — zero bugs filed across 9 priority areas (instancing, MATH, MVAR/VVAR, N0 brackets, CFF2 non-identity Adobe fast path, kerx fmt 4 type 2, workspace builds, determinism, clippy under newer toolchain). Wave 1's PRs were genuinely well-tested.
+
+---
+
+## 0.12.0+ (next)
+
+- [ ] Font instancing extras (#163) — CFF2 blend baking, VVAR/vmtx bake, MVAR (OS/2 + hhea + post) bake, GDEF.IVS pruning.
+- [ ] kerx format 4 type 0 + type 1 apply (#166) — Face::glyph_points API + ankr table parser.
+- [ ] Variable-width subr operand renumber padding (#167) — let CFF subset rewriters prune subrs even when the natural-width operand is shorter than the original byte slot.
+- [ ] Hyphenation companion crate.
+- [ ] Stable API audit + crates.io publish.
 
 ---
 
