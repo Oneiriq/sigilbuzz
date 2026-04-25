@@ -113,7 +113,10 @@ mod closure;
 mod cmap;
 mod coverage;
 mod fvar;
+mod gdef;
 mod glyf;
+mod gpos;
+mod gsub;
 mod gvar;
 mod hmtx;
 mod hvar;
@@ -391,21 +394,35 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         tables.push((*b"OS/2", os2));
     }
 
-    // Layout tables (GSUB / GPOS / GDEF). Preserved verbatim when the
-    // kept-gid set is the identity (closure was a no-op); dropped
-    // otherwise. See `layout::decide` for the decision rules.
+    // Layout tables (GSUB / GPOS / GDEF). Identity gid map: pass the
+    // source bytes through verbatim. Non-identity: per-lookup-type
+    // rewriters in `crate::gsub` / `crate::gpos` / `crate::gdef`
+    // produce fresh bytes; lookup types without a rewriter drop and
+    // the drop cascade propagates the loss up. See `layout::decide`.
     let plan = layout::decide(face, &kept, input)?;
-    if let layout::Decision::Preserve = plan.gdef {
-        let bytes = face.table_bytes(tag::GDEF).map_err(SubsetError::from)?;
-        tables.push((tag::GDEF, bytes.to_vec()));
+    match plan.gdef {
+        layout::Decision::Preserve => {
+            let bytes = face.table_bytes(tag::GDEF).map_err(SubsetError::from)?;
+            tables.push((tag::GDEF, bytes.to_vec()));
+        }
+        layout::Decision::Rewrite(b) => tables.push((tag::GDEF, b)),
+        layout::Decision::Drop => {}
     }
-    if let layout::Decision::Preserve = plan.gsub {
-        let bytes = face.table_bytes(tag::GSUB).map_err(SubsetError::from)?;
-        tables.push((tag::GSUB, bytes.to_vec()));
+    match plan.gsub {
+        layout::Decision::Preserve => {
+            let bytes = face.table_bytes(tag::GSUB).map_err(SubsetError::from)?;
+            tables.push((tag::GSUB, bytes.to_vec()));
+        }
+        layout::Decision::Rewrite(b) => tables.push((tag::GSUB, b)),
+        layout::Decision::Drop => {}
     }
-    if let layout::Decision::Preserve = plan.gpos {
-        let bytes = face.table_bytes(tag::GPOS).map_err(SubsetError::from)?;
-        tables.push((tag::GPOS, bytes.to_vec()));
+    match plan.gpos {
+        layout::Decision::Preserve => {
+            let bytes = face.table_bytes(tag::GPOS).map_err(SubsetError::from)?;
+            tables.push((tag::GPOS, bytes.to_vec()));
+        }
+        layout::Decision::Rewrite(b) => tables.push((tag::GPOS, b)),
+        layout::Decision::Drop => {}
     }
 
     // Variable-font tables. fvar/avar pass through verbatim;

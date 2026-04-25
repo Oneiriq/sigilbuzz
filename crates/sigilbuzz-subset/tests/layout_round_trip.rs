@@ -1,17 +1,20 @@
 //! Integration tests covering the `retain_layout` flag on
 //! [`SubsetInput`] and the layout-table preservation rules.
 //!
-//! These tests document the 0.6.0 contract:
+//! These tests document the 0.7.0 contract:
 //!
 //! - `retain_layout = false` is the 0.5.0 baseline — layout tables are
 //!   dropped from the subset regardless of the closure size.
 //! - `retain_layout = true` (the default) preserves `GSUB`, `GPOS`,
-//!   and `GDEF` verbatim **only when the kept-gid set is the full
-//!   font** (the gid_map is the identity). For proper subsets the
-//!   tables are still dropped, because rewriting them under a
-//!   non-identity gid map is staged for a future release. Callers
-//!   that need full layout-aware subsetting will see the tables drop
-//!   today and pick them up automatically once the rewriter ships.
+//!   and `GDEF` verbatim when the kept-gid set is the full font (the
+//!   gid_map is identity). Under a proper subset, the byte-level
+//!   rewriter rebuilds whatever layout content it has support for —
+//!   today GSUB type 1 (single-sub) plus GDEF GlyphClassDef and
+//!   MarkAttachClassDef. Lookup types without a rewriter drop, the
+//!   drop cascade then drops empty subtables / lookups / features /
+//!   scripts, and a layout table drops entirely when no script
+//!   survives. GPOS currently has no per-type rewriter so it always
+//!   drops under a proper subset.
 
 use sigilbuzz::tables::tag;
 use sigilbuzz::{Blob, Face};
@@ -49,11 +52,22 @@ fn retain_layout_false_drops_gsub_gpos_gdef() {
 }
 
 #[test]
-fn retain_layout_true_with_proper_subset_drops_layout_tables() {
-    // Without byte-level GSUB / GPOS / GDEF rewriting, a proper subset
-    // cannot safely keep the layout tables: every gid reference inside
-    // them would be stale. The subsetter drops them and continues —
-    // the cmap/glyf/hmtx slice is still complete and renders text.
+fn retain_layout_true_with_proper_subset_routes_through_rewriter() {
+    // The 0.7.0 byte-level rewriter rebuilds whatever it has support
+    // for. As of this commit:
+    //   - GSUB type 1 (single-sub) survives when its rewritten lookup
+    //     keeps at least one (input, output) pair. Other GSUB types
+    //     drop. The drop cascade then drops empty lookups / features /
+    //     scripts, and GSUB itself drops when no script survives.
+    //   - GPOS has no per-type rewriter today; it always drops.
+    //   - GDEF GlyphClassDef and MarkAttachClassDef are rewritten via
+    //     the auto-format ClassDef emitter; AttachList / LigCaretList /
+    //     MarkGlyphSetsDef / ItemVariationStore drop.
+    //
+    // For a proper subset of Open Sans → {A, B}, GPOS drops; GSUB may
+    // or may not survive depending on whether any single-sub lookup
+    // covers A or B; GDEF survives because Open Sans carries
+    // GlyphClassDef.
     let face = open_sans_face();
     let gid_a = cmap_lookup(&face, 'A');
     let gid_b = cmap_lookup(&face, 'B');
@@ -67,10 +81,21 @@ fn retain_layout_true_with_proper_subset_drops_layout_tables() {
     let out = subset(&face, &input).unwrap();
     let blob = Blob::from_vec(out.bytes);
     let subset_face = Face::parse(&blob, 0).unwrap();
-    // Dropped — proper subset, non-identity gid map.
-    assert!(subset_face.record(tag::GSUB).is_none());
-    assert!(subset_face.record(tag::GPOS).is_none());
-    assert!(subset_face.record(tag::GDEF).is_none());
+    // GPOS must drop — no per-type rewriter today.
+    assert!(
+        subset_face.record(tag::GPOS).is_none(),
+        "GPOS must drop until per-type rewriters ship",
+    );
+    // GDEF must survive — Open Sans carries a GlyphClassDef, the
+    // ClassDef rewriter handles it.
+    assert!(
+        subset_face.record(tag::GDEF).is_some(),
+        "GDEF should survive via ClassDef rewriter",
+    );
+    // GSUB may or may not survive depending on the source's lookups.
+    // We don't pin the exact outcome — only that the subset built
+    // cleanly and parses. (Tightening this assertion lands once the
+    // remaining GSUB lookup types ship their rewriters.)
 }
 
 #[test]
@@ -166,6 +191,85 @@ fn closure_pulls_in_ligature_components() {
     assert!(
         kept.contains(&gid_i),
         "closure of fi-ligature gid {lig_gid} did not pull in 'i' (gid {gid_i})",
+    );
+}
+
+#[test]
+fn proper_subset_yields_parseable_gdef() {
+    // The GDEF rewriter rebuilds GlyphClassDef around the new gid
+    // namespace. Given a small subset of Open Sans, the output GDEF
+    // must round-trip through the parser.
+    let face = open_sans_face();
+    let gid_a = cmap_lookup(&face, 'A');
+    let gid_b = cmap_lookup(&face, 'B');
+    let input = SubsetInput {
+        gids: vec![gid_a, gid_b],
+        retain_hints: false,
+        drop_unhandled: true,
+        retain_layout: true,
+        retain_variations: false,
+    };
+    let out = subset(&face, &input).unwrap();
+    let blob = Blob::from_vec(out.bytes);
+    let subset_face = Face::parse(&blob, 0).unwrap();
+    if let Some(_rec) = subset_face.record(tag::GDEF) {
+        // Source carries GDEF and the rewriter built a v1.0 around the
+        // remapped ClassDef. Just assert it parses.
+        let parsed = subset_face.gdef();
+        assert!(
+            parsed.is_ok(),
+            "rewritten GDEF must parse: {:?}",
+            parsed.err()
+        );
+    }
+}
+
+#[test]
+fn proper_subset_is_byte_deterministic() {
+    // Determinism guard: subsetting the same face with the same
+    // input twice must produce byte-identical output.
+    let face = open_sans_face();
+    let gid_a = cmap_lookup(&face, 'A');
+    let gid_b = cmap_lookup(&face, 'B');
+    let gid_c = cmap_lookup(&face, 'C');
+    let input = SubsetInput {
+        gids: vec![gid_a, gid_b, gid_c],
+        retain_hints: false,
+        drop_unhandled: true,
+        retain_layout: true,
+        retain_variations: false,
+    };
+    let out1 = subset(&face, &input).unwrap();
+    let out2 = subset(&face, &input).unwrap();
+    assert_eq!(
+        out1.bytes, out2.bytes,
+        "subset output must be deterministic"
+    );
+}
+
+#[test]
+fn proper_subset_is_smaller_than_source() {
+    // Regression for the 0.5.0 baseline: the subset must remain a
+    // small fraction of the source even with the rewriter wired.
+    let face = open_sans_face();
+    let gid_a = cmap_lookup(&face, 'A');
+    let gid_b = cmap_lookup(&face, 'B');
+    let gid_c = cmap_lookup(&face, 'C');
+    let input = SubsetInput {
+        gids: vec![gid_a, gid_b, gid_c],
+        retain_hints: false,
+        drop_unhandled: true,
+        retain_layout: true,
+        retain_variations: false,
+    };
+    let out = subset(&face, &input).unwrap();
+    let source_size = OPEN_SANS.len();
+    let pct = (out.bytes.len() as f64 / source_size as f64) * 100.0;
+    assert!(
+        pct < 5.0,
+        "subset should be < 5% of source, got {pct:.1}% ({} / {} bytes)",
+        out.bytes.len(),
+        source_size,
     );
 }
 
