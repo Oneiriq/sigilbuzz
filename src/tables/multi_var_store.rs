@@ -301,7 +301,12 @@ impl<'a> MultiVarStore<'a> {
     /// Region indexes referenced by subtable `outer`.
     #[must_use]
     pub fn region_indexes(&self, outer: u16) -> Option<&[u16]> {
-        Some(self.subtables.get(outer as usize)?.region_indexes.as_slice())
+        Some(
+            self.subtables
+                .get(outer as usize)?
+                .region_indexes
+                .as_slice(),
+        )
     }
 
     /// Raw `TupleValues` byte slice for delta set `(outer, inner)`.
@@ -564,11 +569,7 @@ mod tests {
 
     #[test]
     fn region_scalar_tapers_on_named_axis() {
-        let bytes = build_store(
-            &[vec![(0, 0.0, 1.0, 1.0)]],
-            &[0],
-            &[&[0x00, 0x64]],
-        );
+        let bytes = build_store(&[vec![(0, 0.0, 1.0, 1.0)]], &[0], &[&[0x00, 0x64]]);
         let s = MultiVarStore::parse(&bytes).unwrap();
         let v = s.region_scalar(0, &[0.5]);
         assert!((v - 0.5).abs() < 1e-3);
@@ -584,10 +585,7 @@ mod tests {
         // words, run_len=4).
         let payload = vec![0x03_u8, 100, 50, (-10_i8) as u8, 5];
         let bytes = build_store(
-            &[
-                vec![(0, 0.0, 1.0, 1.0)],
-                vec![(0, -1.0, -1.0, 0.0)],
-            ],
+            &[vec![(0, 0.0, 1.0, 1.0)], vec![(0, -1.0, -1.0, 0.0)]],
             &[0, 1],
             &[&payload],
         );
@@ -612,16 +610,14 @@ mod tests {
     #[test]
     fn tuple_values_decodes_word_run() {
         // 0x40 | 0x01 = run of 2 i16s. Payload = 0x0064, 0xFFFF (-1).
-        let out =
-            decode_tuple_values(&[0x41, 0x00, 0x64, 0xFF, 0xFF], 2).unwrap();
+        let out = decode_tuple_values(&[0x41, 0x00, 0x64, 0xFF, 0xFF], 2).unwrap();
         assert_eq!(out, vec![100, -1]);
     }
 
     #[test]
     fn tuple_values_zero_words_combo_decodes_i32() {
         // 0xC0 | 0x00 = run of 1 i32. Payload = 0x00010000 = 65536.
-        let out =
-            decode_tuple_values(&[0xC0, 0x00, 0x01, 0x00, 0x00], 1).unwrap();
+        let out = decode_tuple_values(&[0xC0, 0x00, 0x01, 0x00, 0x00], 1).unwrap();
         assert_eq!(out, vec![65536]);
     }
 

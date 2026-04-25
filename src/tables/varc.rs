@@ -558,8 +558,7 @@ fn decode_axis_indices(data: &[u8]) -> Result<Vec<u16>> {
                             context: "VARC axisIndices i32 entry truncated",
                         });
                     }
-                    let v =
-                        i32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+                    let v = i32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
                     i += 4;
                     v
                 }
@@ -699,8 +698,7 @@ fn sincos_pi(x: f32) -> (f32, f32) {
     // 9-term Taylor expansion good to ~1e-6 over [-π, π].
     let y2 = y * y;
     let sin = y * (1.0 - y2 / 6.0 + y2 * y2 / 120.0 - y2 * y2 * y2 / 5040.0);
-    let cos = 1.0 - y2 / 2.0 + y2 * y2 / 24.0 - y2 * y2 * y2 / 720.0
-        + y2 * y2 * y2 * y2 / 40320.0;
+    let cos = 1.0 - y2 / 2.0 + y2 * y2 / 24.0 - y2 * y2 * y2 / 720.0 + y2 * y2 * y2 * y2 / 40320.0;
     (cos, sin)
 }
 
@@ -798,10 +796,7 @@ mod tests {
         let mut bytes = build_varc(&[1], &[b"\x00\x00\x01"], None, None);
         bytes[0] = 0;
         bytes[1] = 2; // major = 2
-        assert!(matches!(
-            Varc::parse(&bytes),
-            Err(Error::Malformed { .. })
-        ));
+        assert!(matches!(Varc::parse(&bytes), Err(Error::Malformed { .. })));
     }
 
     #[test]
@@ -931,19 +926,14 @@ mod tests {
         record.push(flags as u8);
         record.extend_from_slice(&3u16.to_be_bytes()); // gid 3
         record.push(0x00); // axisIndicesIndex = 0
-        // axisValues: 1 value, F2DOT14 = 0.5 = 8192. Word run.
+                           // axisValues: 1 value, F2DOT14 = 0.5 = 8192. Word run.
         record.push(0x40); // ctrl: words, run_len 1
         record.extend_from_slice(&8192i16.to_be_bytes());
 
         // Build VARC with the axis_indices block. We need to use the
         // separate axis_indices arg.
         let _ = bytes_axis_indices; // (we let build_varc rebuild it)
-        let bytes = build_varc(
-            &[1],
-            &[&record],
-            None,
-            Some(&[&axis_indices_payload]),
-        );
+        let bytes = build_varc(&[1], &[&record], None, Some(&[&axis_indices_payload]));
         let varc = Varc::parse(&bytes).unwrap();
         let comp = varc.composite(1, &[0.0, 0.0]).unwrap();
         let coords = &comp.components[0].coords;

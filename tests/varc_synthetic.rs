@@ -43,19 +43,19 @@ fn build_square_glyph() -> Vec<u8> {
     g.extend_from_slice(&100i16.to_be_bytes()); // yMax
     g.extend_from_slice(&3u16.to_be_bytes()); // endPts[0] = 3
     g.extend_from_slice(&0u16.to_be_bytes()); // instructionLength
-    // Per-point flags: ON_CURVE (0x01), X_SHORT (0x02), Y_SHORT (0x04).
-    // Coords as signed bytes then.
-    // Use repeat-flag for compactness? Keep it simple: 4 separate
-    // flag bytes with X_SHORT|Y_SHORT|ON_CURVE = 0x07 — coords as
-    // unsigned i8 abs values, X_SAME / Y_SAME bits decide sign.
-    // For (0,0),(100,0),(100,100),(0,100), x deltas = 0,100,0,-100
-    // and y deltas = 0,0,100,0.
-    // Flag byte: bit0=ON_CURVE, bit1=X_SHORT, bit2=Y_SHORT,
-    // bit4=X_SAME(if X_SHORT then sign), bit5=Y_SAME(same).
-    // We'll use long-form coords (no shortcuts) by setting flags to
-    // ON_CURVE only (0x01): then x and y read as i16 deltas after.
+                                              // Per-point flags: ON_CURVE (0x01), X_SHORT (0x02), Y_SHORT (0x04).
+                                              // Coords as signed bytes then.
+                                              // Use repeat-flag for compactness? Keep it simple: 4 separate
+                                              // flag bytes with X_SHORT|Y_SHORT|ON_CURVE = 0x07 — coords as
+                                              // unsigned i8 abs values, X_SAME / Y_SAME bits decide sign.
+                                              // For (0,0),(100,0),(100,100),(0,100), x deltas = 0,100,0,-100
+                                              // and y deltas = 0,0,100,0.
+                                              // Flag byte: bit0=ON_CURVE, bit1=X_SHORT, bit2=Y_SHORT,
+                                              // bit4=X_SAME(if X_SHORT then sign), bit5=Y_SAME(same).
+                                              // We'll use long-form coords (no shortcuts) by setting flags to
+                                              // ON_CURVE only (0x01): then x and y read as i16 deltas after.
     g.extend_from_slice(&[0x01u8; 4]); // ON_CURVE, no short, no same — once per point
-    // X deltas (i16): 0, 100, 0, -100
+                                       // X deltas (i16): 0, 100, 0, -100
     for d in [0i16, 100, 0, -100] {
         g.extend_from_slice(&d.to_be_bytes());
     }
@@ -302,14 +302,8 @@ fn varc_routes_outline_through_composite() {
 
     assert_eq!(gid2_pts.len(), gid1_pts.len(), "same point count");
     for ((sx, sy), (cx, cy)) in gid2_pts.iter().zip(gid1_pts.iter()) {
-        assert!(
-            (cx - (sx + 50.0)).abs() < 1e-3,
-            "x mismatch: {sx} -> {cx}"
-        );
-        assert!(
-            (cy - (sy + 25.0)).abs() < 1e-3,
-            "y mismatch: {sy} -> {cy}"
-        );
+        assert!((cx - (sx + 50.0)).abs() < 1e-3, "x mismatch: {sx} -> {cx}");
+        assert!((cy - (sy + 25.0)).abs() < 1e-3, "y mismatch: {sy} -> {cy}");
     }
 }
 

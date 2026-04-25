@@ -583,11 +583,8 @@ impl<'a> Face<'a> {
                 if let Some(composite) = varc.composite(glyph_id, coords) {
                     let mut out = Outline::new();
                     for comp in &composite.components {
-                        let child = self.glyph_outline_at_coords_inner(
-                            comp.gid,
-                            &comp.coords,
-                            depth + 1,
-                        )?;
+                        let child =
+                            self.glyph_outline_at_coords_inner(comp.gid, &comp.coords, depth + 1)?;
                         if let Some(child) = child {
                             for op in child.ops() {
                                 out.push(transform_path_op(*op, comp.transform));
@@ -878,9 +875,8 @@ impl<'a> Face<'a> {
 /// affine maps because they preserve the "control point ratio"
 /// implied by Bezier evaluation.
 fn transform_path_op(op: PathOp, m: [f32; 6]) -> PathOp {
-    let xform = |x: f32, y: f32| -> (f32, f32) {
-        (m[0] * x + m[1] * y + m[4], m[2] * x + m[3] * y + m[5])
-    };
+    let xform =
+        |x: f32, y: f32| -> (f32, f32) { (m[0] * x + m[1] * y + m[4], m[2] * x + m[3] * y + m[5]) };
     match op {
         PathOp::MoveTo { x, y } => {
             let (x, y) = xform(x, y);
