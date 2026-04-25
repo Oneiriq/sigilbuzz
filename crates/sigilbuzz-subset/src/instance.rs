@@ -1662,7 +1662,9 @@ fn bake_fvar_partial(fvar_bytes: &[u8], pins: &[AxisPin]) -> Option<Vec<u8>> {
     }
 
     // Assemble the new fvar.
-    let mut out = Vec::with_capacity(16 + new_axis_count * 20 + new_instance_records.len() * new_instance_size);
+    let mut out = Vec::with_capacity(
+        16 + new_axis_count * 20 + new_instance_records.len() * new_instance_size,
+    );
     out.extend_from_slice(&1u16.to_be_bytes()); // major
     out.extend_from_slice(&0u16.to_be_bytes()); // minor
     out.extend_from_slice(&16u16.to_be_bytes()); // axesArrayOffset (header is 16 bytes)
@@ -1785,7 +1787,9 @@ fn read_f2dot14(data: &[u8], off: usize) -> f32 {
 /// Writes an F2DOT14 to a byte vector.
 fn write_f2dot14_bytes(out: &mut Vec<u8>, v: f32) {
     #[allow(clippy::cast_possible_truncation)]
-    let raw = (v * 16384.0).round().clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
+    let raw = (v * 16384.0)
+        .round()
+        .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
     out.extend_from_slice(&raw.to_be_bytes());
 }
 
@@ -1814,12 +1818,8 @@ pub(crate) fn bake_ivs_partial(
     if format != 1 {
         return None;
     }
-    let region_list_off = u32::from_be_bytes([
-        ivs_bytes[2],
-        ivs_bytes[3],
-        ivs_bytes[4],
-        ivs_bytes[5],
-    ]) as usize;
+    let region_list_off =
+        u32::from_be_bytes([ivs_bytes[2], ivs_bytes[3], ivs_bytes[4], ivs_bytes[5]]) as usize;
     let subtable_count = u16::from_be_bytes([ivs_bytes[6], ivs_bytes[7]]) as usize;
     if ivs_bytes.len() < 8 + subtable_count * 4 {
         return None;
@@ -1895,8 +1895,7 @@ pub(crate) fn bake_ivs_partial(
             return None;
         }
         let item_count = u16::from_be_bytes([ivs_bytes[sub_off], ivs_bytes[sub_off + 1]]) as usize;
-        let wdc_raw =
-            u16::from_be_bytes([ivs_bytes[sub_off + 2], ivs_bytes[sub_off + 3]]);
+        let wdc_raw = u16::from_be_bytes([ivs_bytes[sub_off + 2], ivs_bytes[sub_off + 3]]);
         let long_words = wdc_raw & 0x8000 != 0;
         let word_delta_count = (wdc_raw & 0x7FFF) as usize;
         let region_index_count =
@@ -1934,9 +1933,13 @@ pub(crate) fn bake_ivs_partial(
 
         // Read every delta row's source slots. Each slot's source
         // encoding depends on (slot < word_delta_count, long_words).
-        let (src_wide, src_narrow) = if long_words { (4usize, 2usize) } else { (2usize, 1usize) };
-        let row_size = word_delta_count * src_wide
-            + (region_index_count - word_delta_count) * src_narrow;
+        let (src_wide, src_narrow) = if long_words {
+            (4usize, 2usize)
+        } else {
+            (2usize, 1usize)
+        };
+        let row_size =
+            word_delta_count * src_wide + (region_index_count - word_delta_count) * src_narrow;
         let rows_start = ri_start + region_index_count * 2;
         if ivs_bytes.len() < rows_start + item_count * row_size {
             return None;
@@ -1986,10 +1989,7 @@ pub(crate) fn bake_ivs_partial(
             for &(slot, _new_ri, scalar) in &surviving_slots {
                 #[allow(clippy::cast_precision_loss)]
                 let scaled = src_deltas[slot] as f32 * scalar;
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_precision_loss
-                )]
+                #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
                 let rounded = scaled.round() as i32;
                 new_row.push(rounded);
             }
@@ -2199,7 +2199,8 @@ fn rewrite_delta_set_index_map(
     let total_bits = new_inner_bits + new_outer_bits;
     let new_entry_bytes: u32 = total_bits.div_ceil(8);
     let new_entry_bytes = new_entry_bytes.clamp(1, 4);
-    let new_entry_format = (((new_entry_bytes - 1) as u8) << 4) | ((new_inner_bits - 1) as u8 & 0x0F);
+    let new_entry_format =
+        (((new_entry_bytes - 1) as u8) << 4) | ((new_inner_bits - 1) as u8 & 0x0F);
     let new_inner_mask: u32 = (1u32 << new_inner_bits) - 1;
 
     // Re-emit.
@@ -2244,8 +2245,8 @@ fn bake_hvar_partial(hvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Opt
     if major != 1 {
         return None;
     }
-    let ivs_off = u32::from_be_bytes([hvar_bytes[4], hvar_bytes[5], hvar_bytes[6], hvar_bytes[7]])
-        as usize;
+    let ivs_off =
+        u32::from_be_bytes([hvar_bytes[4], hvar_bytes[5], hvar_bytes[6], hvar_bytes[7]]) as usize;
     let advance_off =
         u32::from_be_bytes([hvar_bytes[8], hvar_bytes[9], hvar_bytes[10], hvar_bytes[11]]);
     let lsb_off = u32::from_be_bytes([
@@ -2349,8 +2350,8 @@ fn bake_vvar_partial(vvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Opt
     if major != 1 {
         return None;
     }
-    let ivs_off = u32::from_be_bytes([vvar_bytes[4], vvar_bytes[5], vvar_bytes[6], vvar_bytes[7]])
-        as usize;
+    let ivs_off =
+        u32::from_be_bytes([vvar_bytes[4], vvar_bytes[5], vvar_bytes[6], vvar_bytes[7]]) as usize;
     let mut map_offs: [u32; 4] = [0; 4];
     for (i, slot) in map_offs.iter_mut().enumerate() {
         let base = 8 + i * 4;
@@ -2489,11 +2490,7 @@ fn bake_mvar_partial(mvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Opt
 /// VariationIndex consumers (mark / cursive bake) reach the trimmed
 /// regions through the same offset.
 #[allow(dead_code)] // wired in by the partial-instancing integration commit
-fn bake_gdef_ivs_partial(
-    gdef_bytes: &[u8],
-    coords: &[f32],
-    pins: &[AxisPin],
-) -> Option<Vec<u8>> {
+fn bake_gdef_ivs_partial(gdef_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Option<Vec<u8>> {
     if gdef_bytes.len() < 18 {
         return None;
     }
@@ -2502,9 +2499,12 @@ fn bake_gdef_ivs_partial(
     if major != 1 || minor < 3 {
         return None;
     }
-    let ivs_off =
-        u32::from_be_bytes([gdef_bytes[14], gdef_bytes[15], gdef_bytes[16], gdef_bytes[17]])
-            as usize;
+    let ivs_off = u32::from_be_bytes([
+        gdef_bytes[14],
+        gdef_bytes[15],
+        gdef_bytes[16],
+        gdef_bytes[17],
+    ]) as usize;
     if ivs_off == 0 {
         return None;
     }
@@ -4119,7 +4119,7 @@ mod partial_instancing_tests {
             let slot = sub_slot_start + i * 4;
             out[slot..slot + 4].copy_from_slice(&sub_off.to_be_bytes());
             out.extend_from_slice(&(rows.len() as u16).to_be_bytes()); // itemCount
-            // wordDeltaCount = regionIndexCount, all i16.
+                                                                       // wordDeltaCount = regionIndexCount, all i16.
             out.extend_from_slice(&(region_indexes.len() as u16).to_be_bytes());
             out.extend_from_slice(&(region_indexes.len() as u16).to_be_bytes());
             for ri in region_indexes {
@@ -4224,8 +4224,8 @@ mod partial_instancing_tests {
         // drops. RegionRemap reflects the elision.
         let bytes = build_ivs2(
             &[
-                [(0.0, 1.0, 1.0), (0.0, 1.0, 1.0)],   // region 0: keeps
-                [(0.5, 1.0, 1.0), (0.0, 1.0, 1.0)],   // region 1: drops at coord 0
+                [(0.0, 1.0, 1.0), (0.0, 1.0, 1.0)], // region 0: keeps
+                [(0.5, 1.0, 1.0), (0.0, 1.0, 1.0)], // region 1: drops at coord 0
             ],
             &[
                 (alloc::vec![0], alloc::vec![alloc::vec![100]]),
@@ -4329,8 +4329,8 @@ mod partial_instancing_tests {
             &[(alloc::vec![0], alloc::vec![alloc::vec![100]])],
         );
         let hvar = build_hvar_no_maps(&ivs);
-        let new_hvar = bake_hvar_partial(&hvar, &[0.5, 0.0], &[AxisPin::Pin, AxisPin::Keep])
-            .expect("bake");
+        let new_hvar =
+            bake_hvar_partial(&hvar, &[0.5, 0.0], &[AxisPin::Pin, AxisPin::Keep]).expect("bake");
         let parsed = sigilbuzz::tables::Hvar::parse(&new_hvar).unwrap();
         let d = parsed.advance_delta(0, &[1.0]);
         assert!((d - 50.0).abs() < 1.0, "got {}", d);
@@ -4346,8 +4346,8 @@ mod partial_instancing_tests {
             &[(alloc::vec![0], alloc::vec![alloc::vec![100]])],
         );
         let hvar = build_hvar_no_maps(&ivs);
-        let new_hvar = bake_hvar_partial(&hvar, &[0.0, 0.0], &[AxisPin::Pin, AxisPin::Keep])
-            .expect("bake");
+        let new_hvar =
+            bake_hvar_partial(&hvar, &[0.0, 0.0], &[AxisPin::Pin, AxisPin::Keep]).expect("bake");
         let parsed = sigilbuzz::tables::Hvar::parse(&new_hvar).unwrap();
         // Subtable count is now zero; (outer=0, inner=0) is out of
         // range → IVS evaluator returns 0.
@@ -4384,8 +4384,8 @@ mod partial_instancing_tests {
             &[(alloc::vec![0], alloc::vec![alloc::vec![80]])],
         );
         let mvar = build_mvar(&[*b"hasc"], &ivs);
-        let new_mvar = bake_mvar_partial(&mvar, &[0.5, 0.0], &[AxisPin::Pin, AxisPin::Keep])
-            .expect("bake");
+        let new_mvar =
+            bake_mvar_partial(&mvar, &[0.5, 0.0], &[AxisPin::Pin, AxisPin::Keep]).expect("bake");
         let parsed = sigilbuzz::tables::Mvar::parse(&new_mvar).unwrap();
         // Pin scalar 0.5; at wdth=1.0 the trimmed tuple gives 40.
         let d = parsed.metric_delta(*b"hasc", &[1.0]).unwrap();
@@ -4399,8 +4399,8 @@ mod partial_instancing_tests {
             &[(alloc::vec![0], alloc::vec![alloc::vec![80]])],
         );
         let mvar = build_mvar(&[*b"hasc"], &ivs);
-        let new_mvar = bake_mvar_partial(&mvar, &[0.0, 0.0], &[AxisPin::Pin, AxisPin::Keep])
-            .expect("bake");
+        let new_mvar =
+            bake_mvar_partial(&mvar, &[0.0, 0.0], &[AxisPin::Pin, AxisPin::Keep]).expect("bake");
         let parsed = sigilbuzz::tables::Mvar::parse(&new_mvar).unwrap();
         // Subtable collapsed; (outer=0, inner=0) is now out of range
         // → 0 delta.
@@ -4430,17 +4430,16 @@ mod partial_instancing_tests {
             &[(alloc::vec![0], alloc::vec![alloc::vec![100]])],
         );
         let gdef = build_gdef_v13_ivs_only(&ivs);
-        let new_gdef =
-            bake_gdef_ivs_partial(&gdef, &[1.0, 0.0], &[AxisPin::Pin, AxisPin::Keep]).expect("bake");
+        let new_gdef = bake_gdef_ivs_partial(&gdef, &[1.0, 0.0], &[AxisPin::Pin, AxisPin::Keep])
+            .expect("bake");
         // The IVS offset slot is still 18 (header end) and non-zero.
         let new_off = u32::from_be_bytes([new_gdef[14], new_gdef[15], new_gdef[16], new_gdef[17]]);
         assert_eq!(new_off, 18);
         // The trimmed IVS at offset 18 has axisCount = 1.
         let new_ivs_off = new_off as usize;
-        let parsed = sigilbuzz::tables::variation_store::ItemVariationStore::parse(
-            &new_gdef[new_ivs_off..],
-        )
-        .unwrap();
+        let parsed =
+            sigilbuzz::tables::variation_store::ItemVariationStore::parse(&new_gdef[new_ivs_off..])
+                .unwrap();
         assert_eq!(parsed.axis_count(), 1);
     }
 
