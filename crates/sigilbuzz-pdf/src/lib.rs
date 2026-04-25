@@ -1,14 +1,17 @@
-//! sigilbuzz-pdf — PDF Type 3 font emitter for sigilbuzz outlines.
+//! sigilbuzz-pdf — PDF font emitters for sigilbuzz outlines.
 //!
-//! PDF supports several font flavours: Type 1 (PostScript, eexec
-//! encrypted), TrueType / OpenType embedded variants, and Type 3 —
-//! "user-defined fonts" whose glyphs are described as ordinary PDF
-//! content streams. Type 3 is self-contained, requires no font
-//! subsetting, and maps cleanly onto sigilbuzz's [`PathOp`] stream:
-//! every `MoveTo` / `LineTo` / curve becomes a PDF drawing operator
-//! emitted into a `CharProc` content stream. The Type 3 font dict
-//! ties those streams together with a `FontMatrix`, `FontBBox`,
-//! `Encoding`, and `Widths` array.
+//! PDF supports several font flavours: Type 1 (PostScript), TrueType
+//! / OpenType embedded variants, and Type 3 — "user-defined fonts"
+//! whose glyphs are described as ordinary PDF content streams. This
+//! crate ships emitters for all three:
+//!
+//! - [`emit_type3_font`]: every `MoveTo` / `LineTo` / curve becomes a
+//!   PDF drawing operator emitted into a `CharProc` content stream.
+//! - [`emit_type1_font`]: per-glyph Type 1 charstrings, cleartext —
+//!   eexec encryption is intentionally skipped (see the `Type1Font`
+//!   docs for the rationale).
+//! - [`emit_otf_embedded_font`]: a PDF font dictionary referencing
+//!   the original font bytes verbatim plus a CIDToGIDMap.
 //!
 //! sigilbuzz-pdf produces the [`Type3Font`] data structure; the
 //! consumer is responsible for serialising it into a PDF document.
@@ -74,9 +77,11 @@ use alloc::vec::Vec;
 use sigilbuzz::Face;
 
 mod stream;
+mod type1;
 mod type1_charstring;
 
 pub use stream::{emit_d1_prologue, emit_fill_epilogue, emit_path_ops, outline_bbox};
+pub use type1::{emit_type1_font, EmitError, Type1Font};
 
 /// Crate version, matching `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

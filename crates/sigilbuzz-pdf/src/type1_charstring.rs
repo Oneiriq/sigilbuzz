@@ -328,46 +328,25 @@ mod tests {
         let mut out = Vec::new();
         emit_path_ops(&mut out, &ops);
 
-        // Verify by walking expected bytes:
-        //   MoveTo 100,0 → dy=0, hmoveto: encode(100) op22
-        //                              = 239, 22
-        let mut expected = Vec::new();
-        // 100 hmoveto
-        expected.push(239);
-        expected.push(22);
-        // LineTo 200,0 from (100,0): dx=100 dy=0 → hlineto 100, op6
-        expected.push(239);
-        expected.push(6);
-        // LineTo 200,50 from (200,0): dx=0 dy=50 → vlineto 50, op7
-        expected.push(189); // 50 + 139
-        expected.push(7);
-        // QuadTo c=(200,100) p2=(150,100) from p0=(200,50)
-        //   c1 = (200,50)+2/3*(0,50)   = (200, 83.33) round → (200, 83)
-        //   c2 = (150,100)+2/3*(50,0)  = (183.33, 100) round → (183, 100)
-        // rrcurveto deltas:
-        //   dx1=0,    dy1=33    (83-50)
-        //   dx2=-17,  dy2=17    (183-200, 100-83)
-        //   dx3=-33,  dy3=0     (150-183, 100-100)
-        expected.push(139); // 0
-        expected.push(172); // 33 + 139
-        expected.push(122); // -17 + 139
-        expected.push(156); // 17 + 139
-        expected.push(106); // -33 + 139
-        expected.push(139); // 0
-        expected.push(8);
-        // CubicTo from (150,100) → c1(100,100) c2(100,50) end(100,0)
-        //   dx1=-50, dy1=0
-        //   dx2=0,   dy2=-50
-        //   dx3=0,   dy3=-50
-        expected.push(89); // -50 + 139
-        expected.push(139); // 0
-        expected.push(139); // 0
-        expected.push(89); // -50 + 139
-        expected.push(139); // 0
-        expected.push(89); // -50 + 139
-        expected.push(8);
-        // closepath
-        expected.push(9);
+        // Verify by walking expected bytes. Comments document the
+        // delta and op for each block:
+        //   MoveTo 100,0  → dy=0  hmoveto:  239, 22
+        //   LineTo 200,0  → dx=100 dy=0    hlineto: 239, 6
+        //   LineTo 200,50 → dx=0 dy=50     vlineto: 189, 7
+        //   QuadTo (c=(200,100), p2=(150,100)) from p0=(200,50)
+        //     c1 = (200,83.33) rounded (200,83); c2 = (183.33,100) rounded (183,100)
+        //     deltas: (0, 33) (-17, 17) (-33, 0)  rrcurveto = op8
+        //   CubicTo from (150,100) → c1(100,100) c2(100,50) end(100,0)
+        //     deltas: (-50, 0) (0, -50) (0, -50)  rrcurveto = op8
+        //   Close → op9
+        let expected: [u8; 21] = [
+            239, 22, // hmoveto 100
+            239, 6, // hlineto 100
+            189, 7, // vlineto 50
+            139, 172, 122, 156, 106, 139, 8, // rrcurveto for the quad
+            89, 139, 139, 89, 139, 89, 8, // rrcurveto for the cubic
+            9, // closepath
+        ];
 
         assert_eq!(out, expected);
     }
