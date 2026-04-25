@@ -34,6 +34,7 @@ use alloc::vec::Vec;
 use crate::blob::Blob;
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
+use crate::tables::glyf::PhantomMetrics;
 use crate::tables::{
     tag, Avar, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBounds, Gpos, Gsub, Gvar, Head, Hhea, Hmtx,
     Hvar, KernTable, Kerx, Loca, Maxp, Morx, Outline, Vhea, Vmtx, Vorg,
@@ -496,6 +497,17 @@ impl<'a> Face<'a> {
         let glyf = self.glyf()?;
         let mut out = Outline::new();
 
+        // Phantom metrics let composite anchor-mode resolve indices
+        // past the contour-point count (lsb / advance-width / tsb /
+        // advance-height). hmtx is required by every TrueType font;
+        // vmtx is optional and only horizontal-only fonts skip it.
+        let hmtx = self.hmtx()?;
+        let vmtx = self.vmtx()?;
+        let metrics = PhantomMetrics {
+            hmtx: &hmtx,
+            vmtx: vmtx.as_ref(),
+        };
+
         // Apply gvar if present and the font is variable.
         if !coords.is_empty() {
             if let Some(gvar) = self.gvar()? {
@@ -515,14 +527,20 @@ impl<'a> Face<'a> {
                                 dense[d.point as usize] = (d.dx, d.dy);
                             }
                         }
-                        let drew = glyf.outline(&loca, glyph_id, Some(&dense), &mut out)?;
+                        let drew = glyf.outline(
+                            &loca,
+                            glyph_id,
+                            Some(&dense),
+                            Some(&metrics),
+                            &mut out,
+                        )?;
                         return Ok(drew.then_some(out));
                     }
                 }
             }
         }
 
-        let drew = glyf.outline(&loca, glyph_id, None, &mut out)?;
+        let drew = glyf.outline(&loca, glyph_id, None, Some(&metrics), &mut out)?;
         Ok(drew.then_some(out))
     }
 
