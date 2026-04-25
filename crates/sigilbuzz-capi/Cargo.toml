@@ -1,0 +1,40 @@
+[package]
+name = "sigilbuzz-capi"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HarfBuzz-symbol-compatible C API for sigilbuzz. Drop-in -lharfbuzz replacement."
+publish = true
+readme = "README.md"
+keywords = ["harfbuzz", "ffi", "shaping", "sigilbuzz"]
+categories = ["text-processing", "external-ffi-bindings"]
+
+[lib]
+# Build all three: a cdylib for `-lsigilbuzz` linkers, a staticlib for
+# CMake / Bazel projects that prefer to absorb the symbols, and an
+# rlib so downstream Rust consumers can pull the C wrappers in for
+# testing without going through dlopen.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+# `std` is on by default — the same posture as the core shaper. The
+# C surface itself does not need std (everything routes through
+# `extern crate alloc`), but `hb_blob_create_from_file` reads from
+# disk and requires `std::fs`.
+default = ["std"]
+std = []
+
+[dependencies]
+# The shaping core. No other deps — the whole point of the crate is
+# to be a thin extern-C veneer over sigilbuzz, so adding anything
+# else would defeat the value proposition.
+sigilbuzz = { workspace = true }
+
+[dev-dependencies]
+# `cc` builds the C source files in `tests/c/` against the cdylib
+# during `cargo test`. Dev-dep only; never enters the runtime
+# closure of any release artifact.
+cc = "1.0"
