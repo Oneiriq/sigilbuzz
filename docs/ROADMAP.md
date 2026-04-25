@@ -426,12 +426,37 @@ Variable fonts get the rest of their story (instancing + MVAR + VVAR), math typo
 
 ---
 
-## 0.12.0+ (next)
+## 0.12.0 (shipping)
 
-- [ ] Font instancing extras (#163) — CFF2 blend baking, VVAR/vmtx bake, MVAR (OS/2 + hhea + post) bake, GDEF.IVS pruning.
-- [ ] kerx format 4 type 0 + type 1 apply (#166) — Face::glyph_points API + ankr table parser.
-- [ ] Variable-width subr operand renumber padding (#167) — let CFF subset rewriters prune subrs even when the natural-width operand is shorter than the original byte slot.
-- [ ] Hyphenation companion crate.
+Three deferral close-outs (#163 / #166 / #167), the OT BASE table, and a hyphenation companion crate. Plus two real bugs in the new instance-bake path caught by wave 13.
+
+### Closed deferrals
+
+- [x] **#163 instance() extras** — CFF2 `blend` baking + VVAR-aware vmtx bake + MVAR-aware OS/2 / hhea / vhea / post bake. GDEF.IVS prune used the simpler "drop IVS + GPOS-default-instance" escape-hatch per the brief; the proper GPOS VariationIndex re-emit at coords is filed as #175 for follow-up.
+- [x] **#166 kerx fmt 4 types 0 + 1** — `Face::glyph_points` exposes raw glyf point indices; new `src/tables/ankr.rs` parses Apple's Anchor Point table. Both action types apply through `apply_kerx`. Synthetic AAT fixtures verify the +500 anchor-offset path.
+- [x] **#167 variable-width CFF subr renumber padding** — `encode_int_operand_at_width` extended with the 247-250 / 251-254 byte forms. CFF1 / CFF2 subset rewriters now actually prune unused subrs (CFF1 Source Code Pro subset shrinks <50% of source; CFF2 Source Sans 3 VF ~71%). One unfixable case documented: Type 2 charstrings have no 2-byte form for `-107..=107`, so the rewriter falls back to identity keep-set defensively.
+
+### OT BASE table (#170)
+
+- [x] Per-script baseline metrics + min/max boundaries for typographic alignment. `Face::base()` accessor. v1.1 IVS-varied baselines via `BaseCoord` format 3.
+
+### Companion crate `sigilbuzz-hyphen` (#171)
+
+- [x] **11th workspace crate.** Liang/Knuth pattern-driven hyphenation. en-us bundled (~31 KB) by default; de/fr/es as opt-in cargo features. `text-layout-integration` feature wires hyphenation into `sigilbuzz-text-layout`'s break iterator.
+
+### Hardening — wave 13
+
+- [x] 2 fixes in the instance bake: VVAR trailing-advance deltas dropped from rebuilt vmtx (#176/#177 — long-vmtx range needed dynamic recompute, mirroring `bake_hmtx`); MVAR duplicate value-record tags double-applied delta (#178/#179 — first-wins dedup added).
+
+---
+
+## 0.13.0+ (next)
+
+- [ ] GPOS VariationIndex re-emit at coords (#175) — properly fold variable kerning into static ValueRecords during instancing.
+- [ ] capi cdylib build-lock race in concurrent test execution (#172) — pre-existing flake.
+- [ ] VARC (Variable Composite Glyphs) — Chrome's 2024 OT spec extension.
+- [ ] Partial instancing — pin some axes, leave others variable.
+- [ ] Color font rasterizer companion crate (`sigilbuzz-render`).
 - [ ] Stable API audit + crates.io publish.
 
 ---
