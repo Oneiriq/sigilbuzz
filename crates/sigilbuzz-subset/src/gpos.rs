@@ -1078,6 +1078,7 @@ fn rewrite_extension(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable>
 mod tests {
     use super::*;
     use crate::layout::GidMap;
+    use alloc::vec;
     use sigilbuzz::tables::gpos::value_record::{X_ADVANCE, X_PLACEMENT};
     use sigilbuzz::tables::gpos::{MarkBasePos, MarkLigaPos, MarkMarkPos, PairPos, SinglePos};
 
@@ -1142,7 +1143,10 @@ mod tests {
         // x_advance = -25 should still apply.
         let bytes = build_single_adj_format1(&[10, 20, 30], X_ADVANCE, &[-25]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (20, 2)]);
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         let rs = rewrite_single_adj(&ctx, &bytes).unwrap();
         let parsed = SinglePos::parse(&rs.bytes).unwrap();
         assert_eq!(parsed.adjustment(1).unwrap().x_advance, -25);
@@ -1155,7 +1159,10 @@ mod tests {
         // Three glyphs with per-glyph deltas. Drop the middle one.
         let bytes = build_single_adj_format2(&[10, 20, 30], X_ADVANCE, &[&[-5], &[-10], &[-15]]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (30, 3)]);
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         let rs = rewrite_single_adj(&ctx, &bytes).unwrap();
         let parsed = SinglePos::parse(&rs.bytes).unwrap();
         assert_eq!(parsed.adjustment(1).unwrap().x_advance, -5);
@@ -1168,7 +1175,10 @@ mod tests {
     fn rewrite_single_adj_returns_none_when_all_dropped() {
         let bytes = build_single_adj_format1(&[10, 20], X_ADVANCE, &[-5]);
         let map = map_from_pairs(&[(0, 0)]);
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         assert!(rewrite_single_adj(&ctx, &bytes).is_none());
     }
 
@@ -1177,7 +1187,10 @@ mod tests {
         // value_format = X_PLACEMENT | X_ADVANCE → two i16 fields.
         let bytes = build_single_adj_format1(&[5], X_PLACEMENT | X_ADVANCE, &[4, -10]);
         let map = map_from_pairs(&[(0, 0), (5, 1)]);
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         let rs = rewrite_single_adj(&ctx, &bytes).unwrap();
         let parsed = SinglePos::parse(&rs.bytes).unwrap();
         let v = parsed.adjustment(1).unwrap();
@@ -1224,7 +1237,10 @@ mod tests {
         let bytes =
             build_pair_pos_format1(&[10, 20], &[&[(15, -30, 0), (25, 5, 0)], &[(5, -50, 0)]]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (15, 2), (20, 3)]);
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         let rs = rewrite_pair_pos_format1(&ctx, &bytes).unwrap();
         let pp = PairPos::parse(&rs.bytes).unwrap();
         // (1, 2) → -30 survives; (1, 25)/(3, 5) drop.
@@ -1240,7 +1256,10 @@ mod tests {
     fn rewrite_pair_pos_format1_returns_none_when_all_drop() {
         let bytes = build_pair_pos_format1(&[10], &[&[(15, -30, 0)]]);
         let map = map_from_pairs(&[(0, 0)]);
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         assert!(rewrite_pair_pos_format1(&ctx, &bytes).is_none());
     }
 
@@ -1306,7 +1325,10 @@ mod tests {
         let bytes = build_pair_pos_format2(&[10, 11], &cd1, &cd2, matrix);
 
         let map = map_from_pairs(&[(0, 0), (10, 9), (11, 10), (20, 19), (21, 20), (22, 21)]);
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         let rs = rewrite_pair_pos_format2(&ctx, &bytes).unwrap();
         let pp = PairPos::parse(&rs.bytes).unwrap();
         // (9, 20) → class1=1, class2=1 → -25.
@@ -1411,7 +1433,10 @@ mod tests {
             &[vec![Some((250, 500)), Some((260, 600))]],
         );
         let map = map_from_pairs(&[(0, 0), (5, 3), (20, 1), (21, 2)]);
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         let rs = rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::FixedClassRow).unwrap();
         let mbp = MarkBasePos::parse(&rs.bytes).unwrap();
         let a0 = mbp.attach(1, 3).unwrap();
@@ -1426,7 +1451,10 @@ mod tests {
     fn rewrite_mark_base_drops_when_marks_drop() {
         let bytes = build_mark_base_pos(&[20], &[5], 1, &[(0, (10, 0))], &[vec![Some((250, 500))]]);
         let map = map_from_pairs(&[(0, 0), (5, 1)]); // mark 20 dropped
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         assert!(rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::FixedClassRow).is_none());
     }
 
@@ -1434,7 +1462,10 @@ mod tests {
     fn rewrite_mark_base_drops_when_bases_drop() {
         let bytes = build_mark_base_pos(&[20], &[5], 1, &[(0, (10, 0))], &[vec![Some((250, 500))]]);
         let map = map_from_pairs(&[(0, 0), (20, 1)]); // base 5 dropped
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         assert!(rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::FixedClassRow).is_none());
     }
 
@@ -1535,7 +1566,10 @@ mod tests {
             &[vec![vec![Some((100, 600))], vec![Some((400, 600))]]],
         );
         let map = map_from_pairs(&[(0, 0), (30, 1), (50, 2)]);
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         let rs = rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::LigatureAttach).unwrap();
         let mlp = MarkLigaPos::parse(&rs.bytes).unwrap();
         let a0 = mlp.attach(1, 2, 0).unwrap();
@@ -1552,7 +1586,10 @@ mod tests {
         // Mark-to-mark uses the same shape as mark-to-base.
         let bytes = build_mark_base_pos(&[30], &[5], 1, &[(0, (5, 0))], &[vec![Some((100, 600))]]);
         let map = map_from_pairs(&[(0, 0), (5, 1), (30, 2)]);
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         let rs = rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::FixedClassRow).unwrap();
         let mmp = MarkMarkPos::parse(&rs.bytes).unwrap();
         let attach = mmp.attach(2, 1).unwrap();
@@ -1571,7 +1608,10 @@ mod tests {
         out.extend_from_slice(&8u32.to_be_bytes()); // inner offset = 8
         out.extend_from_slice(&inner);
         let map = map_from_pairs(&[(0, 0), (10, 1)]);
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         let rs = rewrite_extension(&ctx, &out).unwrap();
         // Verify the wrapper is preserved and inner parses.
         assert_eq!(&rs.bytes[0..2], &1u16.to_be_bytes());
@@ -1585,10 +1625,9 @@ mod tests {
 
     // ----- Type 3 — Cursive -----
 
-    fn build_cursive(
-        covered: &[u16],
-        records: &[(Option<(i16, i16)>, Option<(i16, i16)>)],
-    ) -> Vec<u8> {
+    type CursiveAnchor = Option<(i16, i16)>;
+
+    fn build_cursive(covered: &[u16], records: &[(CursiveAnchor, CursiveAnchor)]) -> Vec<u8> {
         assert_eq!(covered.len(), records.len());
         let mut out = Vec::new();
         out.extend_from_slice(&1u16.to_be_bytes()); // posFormat
@@ -1635,7 +1674,10 @@ mod tests {
             ],
         );
         let map = map_from_pairs(&[(0, 0), (10, 1), (20, 2)]);
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         let rs = rewrite_cursive(&ctx, &bytes).unwrap();
         // Verify it parses as a valid GPOS subtable header: format 1.
         assert_eq!(&rs.bytes[0..2], &1u16.to_be_bytes());
@@ -1657,7 +1699,10 @@ mod tests {
             ],
         );
         let map = map_from_pairs(&[(0, 0), (10, 1)]); // 20 dropped
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         let rs = rewrite_cursive(&ctx, &bytes).unwrap();
         let count = u16::from_be_bytes([rs.bytes[4], rs.bytes[5]]);
         assert_eq!(count, 1);
@@ -1667,14 +1712,20 @@ mod tests {
     fn rewrite_cursive_returns_none_when_all_dropped() {
         let bytes = build_cursive(&[10], &[(Some((0, 0)), Some((100, 0)))]);
         let map = map_from_pairs(&[(0, 0)]);
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         assert!(rewrite_cursive(&ctx, &bytes).is_none());
     }
 
     #[test]
     fn rewrite_lookup_drops_unsupported_type() {
         let map = map_from_pairs(&[(0, 0), (10, 1)]);
-        let ctx = RewriterCtx { gid_map: &map };
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: None,
+        };
         // Lookup type 7 (context) drops.
         let dummy: Vec<&[u8]> = vec![&[0u8; 6]];
         assert!(rewrite_lookup(&ctx, gpos_type::CONTEXT, 0, None, &dummy).is_none());
