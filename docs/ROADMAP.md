@@ -475,13 +475,35 @@ Two close-outs (#172 capi build-lock race, #175 GPOS VariationIndex re-emit at c
 
 ---
 
-## 0.14.0+ (next)
+## 0.14.0 (shipping)
 
-- [ ] gvar tuple projection during partial instancing — close out #190's deferred path so TrueType+gvar fonts (Rubik VF etc.) can have axes pinned with others kept variable.
-- [ ] CFF2 VarStore rewrite during partial instancing — close out #190's other deferred path so Source Sans 3 + similar CFF2 sources work.
-- [ ] NaN/Inf hardening in instance math primitives (#185 / #186).
-- [ ] VARC subsetting — extend `sigilbuzz-subset` so VARC-covered gids survive subset round-trips alongside their referenced glyf/CFF base outlines.
-- [ ] Color font rasterizer companion crate (`sigilbuzz-render`).
+Four close-outs from 0.13.0 (gvar partial instancing, CFF2 VarStore partial, NaN/Inf hardening, VARC subsetting), plus a new color rasterizer companion crate, plus a wave 14 regression bundle.
+
+### Partial instancing close-outs
+
+- [x] **gvar tuple projection (#194)** — TrueType+gvar sources (Rubik VF etc.) can now have axes pinned with others kept variable. Per-tuple region projection via `project_region_onto_kept_axes`; per-point i8/i16 packed deltas decoded, scaled by Pin-axis scalar, re-encoded with smallest-fit run picker.
+- [x] **CFF2 VarStore rewrite (#195)** — CFF2 sources (Source Sans 3 etc.) can now have axes pinned. VarStore region trim + delta scale via `bake_ivs_partial`; charstring `blend` operators rewritten with new region count and pre-scaled deltas. Subroutines inlined; `vsindex` re-emitted lazily before each blend whose subtable's outer index changed.
+- [x] **NaN/Inf hardening (#185 / #186 → #192)** — `axis_support_scalar` clamps non-finite inputs to 0; `project_region_onto_kept_axes` drops the tuple defensively when the Pin-axis scalar pipeline produces non-finite output.
+
+### VARC subsetting (#193)
+
+- [x] **Closure expansion + VARC table rewrite.** `varc_closure_bitset` walks every VARC-covered gid in the kept set, adds referenced component gids until fixed point. VARC Coverage and VarCompositeGlyph entries renumber gids per the kept-set map. MultiVarStore preserved as-is (pruning is a follow-up). 24-bit gid encoding preserved; 24-bit gids > 0xFFFF rejected (#196).
+
+### `sigilbuzz-render` (#199)
+
+- [x] **12th workspace crate.** Software CPU rasterizer for outlines + COLRv0 layered glyphs. Clean-room non-zero-winding scanline rasterizer with 8x vertical supersampling. Adaptive midpoint subdivision flattener for quad/cubic Béziers (~0.25 px tolerance). `Affine` 2x3 transforms, `Pixmap` (alpha) + `ColorPixmap` (premul RGBA). Variable-font coord-aware throughout (routes through `Face::glyph_outline_at_coords`, so VARC composites rasterize transparently). COLRv1 / SVG / CBDT / sbix / hinting deferred to 0.15.0+.
+
+### Hardening — wave 14
+
+- [x] 3 fixes (#200): #196 VARC 24-bit component gid > 0xFFFF silently truncated; #197 CFF2 `decode_operand_f32` missing `OP_SHORTINT` (b0=28) branch — broke partial-instance bake on fonts with ≥ 1240 subrs; #198 CFF2 `OP_RETURN` inside inlined subr cleared caller's stack-tracking, breaking subrs that leave operands for the caller's blend.
+
+---
+
+## 0.15.0+ (next)
+
+- [ ] COLRv1 paint tree integration in `sigilbuzz-render` — sigilbuzz-paint already walks the tree; render needs to glue.
+- [ ] SVG-in-OT rasterization in `sigilbuzz-render`.
+- [ ] CBDT/CBLC/EBDT/EBLC/sbix bitmap embeds in `sigilbuzz-render`.
 - [ ] Stable API audit + crates.io publish.
 
 ---
