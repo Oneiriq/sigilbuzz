@@ -919,10 +919,45 @@ pub fn renumber_subr_call(
 
 /// Encodes a charstring integer operand at exactly `target_len` bytes,
 /// upgrading to a wider form when the natural minimum is shorter.
-fn encode_int_operand_at_width(v: i32, target_len: usize) -> Result<Vec<u8>, SubsetError> {
+///
+/// `target_len` 1: only values in `-107..=107`.
+/// `target_len` 2: only values in `-1131..=-108 ∪ 108..=1131` (the two
+/// 2-byte natural forms; there is no Type 2 mechanism to express a
+/// `-107..=107` value in 2 bytes).
+/// `target_len` 3: any `i16` (re-encoded as shortint op 28).
+/// `target_len` 5: any `i32` (re-encoded as fixed op 255 with a zero
+/// fractional part).
+///
+/// Returns [`SubsetError::Unsupported`] when the supplied value cannot
+/// be expressed at `target_len` bytes (the rewriter then falls back to
+/// keeping the offending subroutine verbatim — see
+/// [`subset_non_identity`]).
+pub(crate) fn encode_int_operand_at_width(
+    v: i32,
+    target_len: usize,
+) -> Result<Vec<u8>, SubsetError> {
     let natural = encode_int_operand(v);
     if natural.len() == target_len {
         return Ok(natural);
+    }
+    // Two-byte natural forms only span 108..=1131 and -1131..=-108.
+    // No way to express -107..=107 in 2 bytes.
+    if target_len == 2 {
+        if (108..=1131).contains(&v) {
+            let v0 = v - 108;
+            let b0 = ((v0 >> 8) + 247) as u8;
+            let b1 = (v0 & 0xff) as u8;
+            return Ok(alloc::vec![b0, b1]);
+        }
+        if (-1131..=-108).contains(&v) {
+            let v0 = -v - 108;
+            let b0 = ((v0 >> 8) + 251) as u8;
+            let b1 = (v0 & 0xff) as u8;
+            return Ok(alloc::vec![b0, b1]);
+        }
+        return Err(SubsetError::Unsupported(
+            "CFF renumber: cannot pad operand to original width",
+        ));
     }
     // Shortint (op 28) is always 3 bytes for any i16; fixed (op 255)
     // is always 5 bytes.
@@ -3525,6 +3560,68 @@ mod tests {
         let new_val = i16::from_be_bytes([cs[1], cs[2]]);
         assert_eq!(i32::from(new_val), -102);
         assert_eq!(cs[3], OP_CALLSUBR);
+    }
+
+    #[test]
+    fn renumber_charstring_pads_two_byte_natural_to_three_byte_slot() {
+        // #167 padding case: original operand encoded at 3-byte
+        // shortint width, new natural-width operand falls into the
+        // 2-byte form. Renumber must repad the 2-byte natural back to
+        // a 3-byte shortint so the byte span stays stable.
+        // Charstring: shortint 1000, callsubr, endchar.
+        // bias = 107; index_after_bias = 1000 + 107 = 1107.
+        let mut cs = alloc::vec![OP_SHORTINT];
+        cs.extend_from_slice(&1000i16.to_be_bytes());
+        cs.push(OP_CALLSUBR);
+        cs.push(OP_ENDCHAR);
+        let mut local_renumber = alloc::vec![None::<u32>; 2000];
+        // Map subr 1107 → new index 307. New bias 107 → new raw = 200,
+        // whose natural minimum width is 2 bytes (108..=1131). Renumber
+        // must pad to the original 3-byte shortint width.
+        local_renumber[1107] = Some(307);
+        let global_renumber: Vec<Option<u32>> = Vec::new();
+        renumber_charstring(&mut cs, 0, 0, 0, 0, &local_renumber, &global_renumber).unwrap();
+        // Still 3-byte shortint, now carrying 200.
+        assert_eq!(cs[0], OP_SHORTINT);
+        let new_val = i16::from_be_bytes([cs[1], cs[2]]);
+        assert_eq!(i32::from(new_val), 200);
+        assert_eq!(cs[3], OP_CALLSUBR);
+    }
+
+    #[test]
+    fn encode_int_operand_at_width_two_byte_natural_in_range() {
+        // 200 fits both natural-width 2 (247-250 form) and target=3
+        // (shortint). When target=2 we should produce the 2-byte form
+        // unchanged.
+        let bytes = encode_int_operand_at_width(200, 2).unwrap();
+        assert_eq!(bytes.len(), 2);
+        // First byte = 247 + (200-108) >> 8 = 247 + 0 = 247.
+        assert_eq!(bytes[0], 247);
+        assert_eq!(bytes[1], (200 - 108) as u8);
+
+        // -200 maps to the 251-254 form (negative 2-byte).
+        let bytes = encode_int_operand_at_width(-200, 2).unwrap();
+        assert_eq!(bytes.len(), 2);
+        assert_eq!(bytes[0], 251);
+        assert_eq!(bytes[1], (200 - 108) as u8);
+    }
+
+    #[test]
+    fn encode_int_operand_at_width_two_byte_unfixable() {
+        // No 2-byte representation exists for -107..=107.
+        let r = encode_int_operand_at_width(50, 2);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn encode_int_operand_at_width_one_byte_natural_no_change() {
+        // 50 fits 1-byte natural form; target=1 returns the 1-byte
+        // encoding unchanged.
+        let bytes = encode_int_operand_at_width(50, 1).unwrap();
+        assert_eq!(bytes, alloc::vec![(50 + 139) as u8]);
+        // 5 also fits — same path.
+        let bytes = encode_int_operand_at_width(5, 1).unwrap();
+        assert_eq!(bytes, alloc::vec![(5 + 139) as u8]);
     }
 
     #[test]
