@@ -7,10 +7,12 @@
 //! - **Ligature components** in `GSUB` type 4 — if a kept gid is the
 //!   *output* of a ligature substitution, every input component must
 //!   also survive so shaping the input string still triggers the
-//!   substitution. (The reverse direction — keeping the *output* when
-//!   the user asks for the components — is intentionally not done;
-//!   shaping the components against the subset will fall through and
-//!   hit the original glyph stream, which is still correct.)
+//!   substitution. The forward direction is also pulled: if a kept
+//!   gid is the *first component* (i.e. listed in Coverage) **and**
+//!   every other component is also kept, the result gid is pulled in
+//!   too — otherwise `subset(face, &[f, i])` would silently lose the
+//!   `fi` ligature gid and shaping the input pair against the subset
+//!   would fall back to the unligatured glyph stream.
 //! - **Mark-base anchor partners** in `GPOS` type 4 — when a kept mark
 //!   has an anchor pointing at a base, the base is pulled in, so the
 //!   mark can still attach. The opposite direction is *not* pulled in:
@@ -293,17 +295,20 @@ fn walk_ligature_set(set_bytes: &[u8], first_gid: Option<u16>, keep: &mut [bool]
         if component_count == 0 {
             continue;
         }
-        // If the output glyph is kept, drag in every component.
+        let tail = (component_count - 1) as usize;
+        let needed = 4 + tail * 2;
+        if lig_bytes.len() < needed {
+            continue;
+        }
+
+        // Backward direction (output kept → drag in every component).
+        // Necessary so shaping the input string in the subset still
+        // fires the kept ligature.
         if (lig_glyph as usize) < keep.len() && keep[lig_glyph as usize] {
             if let Some(first) = first_gid {
                 if (first as usize) < keep.len() {
                     keep[first as usize] = true;
                 }
-            }
-            let tail = (component_count - 1) as usize;
-            let needed = 4 + tail * 2;
-            if lig_bytes.len() < needed {
-                continue;
             }
             for j in 0..tail {
                 let off = 4 + j * 2;
@@ -311,6 +316,30 @@ fn walk_ligature_set(set_bytes: &[u8], first_gid: Option<u16>, keep: &mut [bool]
                 if (g as usize) < keep.len() {
                     keep[g as usize] = true;
                 }
+            }
+        }
+
+        // Forward direction (every component kept → drag in the result
+        // gid). Necessary so `subset(face, &[f, i])` carries the `fi`
+        // ligature gid into the output; otherwise the rewritten GSUB
+        // type 4 lookup would resolve a result gid that was dropped
+        // from the subset and the whole ligature would die during
+        // rewrite.
+        let first_kept = first_gid
+            .map(|g| (g as usize) < keep.len() && keep[g as usize])
+            .unwrap_or(false);
+        if first_kept {
+            let mut all_components_kept = true;
+            for j in 0..tail {
+                let off = 4 + j * 2;
+                let g = u16::from_be_bytes([lig_bytes[off], lig_bytes[off + 1]]);
+                if (g as usize) >= keep.len() || !keep[g as usize] {
+                    all_components_kept = false;
+                    break;
+                }
+            }
+            if all_components_kept && (lig_glyph as usize) < keep.len() {
+                keep[lig_glyph as usize] = true;
             }
         }
     }
@@ -529,5 +558,78 @@ mod tests {
 
         let comps = composite_components(&body).unwrap();
         assert_eq!(comps, alloc::vec![42]);
+    }
+
+    // ===== walk_ligature_set forward / backward pull tests =====
+
+    /// Builds a single-ligature set body. The set is the LigatureSet
+    /// table the GSUB type-4 walker consumes — coverage / outer subtable
+    /// framing is the caller's problem.
+    fn build_lig_set(ligature_glyph: u16, tail: &[u16]) -> alloc::vec::Vec<u8> {
+        let component_count = (tail.len() + 1) as u16;
+        let mut out = alloc::vec::Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // ligatureCount
+        out.extend_from_slice(&4u16.to_be_bytes()); // ligatureOffsets[0] = 4
+        out.extend_from_slice(&ligature_glyph.to_be_bytes());
+        out.extend_from_slice(&component_count.to_be_bytes());
+        for c in tail {
+            out.extend_from_slice(&c.to_be_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn walk_ligature_set_pulls_in_components_when_output_kept() {
+        // Backward direction: keep the fi ligature output 100, expect 10
+        // and 20 to be pulled in.
+        let set = build_lig_set(100, &[20]);
+        let mut keep = alloc::vec![false; 256];
+        keep[100] = true;
+        walk_ligature_set(&set, Some(10), &mut keep);
+        assert!(keep[10]);
+        assert!(keep[20]);
+        assert!(keep[100]);
+    }
+
+    #[test]
+    fn walk_ligature_set_pulls_in_output_when_all_components_kept() {
+        // Forward direction: keep f=10 and i=20, expect fi=100 to come in.
+        let set = build_lig_set(100, &[20]);
+        let mut keep = alloc::vec![false; 256];
+        keep[10] = true;
+        keep[20] = true;
+        walk_ligature_set(&set, Some(10), &mut keep);
+        assert!(
+            keep[100],
+            "forward direction must pull in the result gid when every component is kept",
+        );
+    }
+
+    #[test]
+    fn walk_ligature_set_does_not_pull_output_when_a_component_drops() {
+        // Forward direction must hold off when *any* component is missing.
+        // Three-component ligature: 10 + 20 + 30 → 500. Keep 10 and 30
+        // but not 20 → must NOT pull 500.
+        let set = build_lig_set(500, &[20, 30]);
+        let mut keep = alloc::vec![false; 1024];
+        keep[10] = true;
+        keep[30] = true;
+        walk_ligature_set(&set, Some(10), &mut keep);
+        assert!(
+            !keep[500],
+            "forward direction must not pull result when a component is missing",
+        );
+    }
+
+    #[test]
+    fn walk_ligature_set_does_not_pull_output_when_first_component_drops() {
+        // Forward direction requires the first component (Coverage entry)
+        // to be kept too — a kept tail alone can't fire the lookup.
+        let set = build_lig_set(100, &[20]);
+        let mut keep = alloc::vec![false; 256];
+        keep[20] = true; // first component (10) is NOT kept
+        walk_ligature_set(&set, Some(10), &mut keep);
+        assert!(!keep[100]);
+        assert!(!keep[10]);
     }
 }
