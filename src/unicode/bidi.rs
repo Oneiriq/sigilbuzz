@@ -251,6 +251,45 @@ enum Override {
     Rtl,
 }
 
+/// Resolves an FSI initiator at `start` to either [`BidiClass::Lri`] or
+/// [`BidiClass::Rli`] per UAX 9 §X5c: scan the matched isolated
+/// subsequence for the first strong character (R / AL → RLI, L → LRI),
+/// skipping any nested isolates per BD9. Default is LRI when the
+/// scan finds no strong type or the FSI has no matching PDI, mirroring
+/// the P3 LTR fallback.
+fn fsi_resolves_to(cells: &[BidiCell], start: usize) -> BidiClass {
+    debug_assert!(matches!(
+        cells.get(start).map(|c| c.cls),
+        Some(BidiClass::Fsi)
+    ));
+    let mut depth: u32 = 0;
+    for cell in cells.iter().skip(start + 1) {
+        let cls = cell.cls;
+        if cls.is_isolate_initiator() {
+            depth = depth.saturating_add(1);
+            continue;
+        }
+        if cls == BidiClass::Pdi {
+            if depth == 0 {
+                // End of this FSI's isolated subsequence reached
+                // without a strong type — default to LRI.
+                return BidiClass::Lri;
+            }
+            depth -= 1;
+            continue;
+        }
+        if depth == 0 {
+            match cls {
+                BidiClass::L => return BidiClass::Lri,
+                BidiClass::R | BidiClass::Al => return BidiClass::Rli,
+                _ => {}
+            }
+        }
+    }
+    // No matching PDI / no strong type seen — default LTR.
+    BidiClass::Lri
+}
+
 /// Implements X1-X10. Sets `cells[i].level` to the embedding level
 /// each character resolves to *before* W/N/I passes; characters that
 /// the explicit-format pass deletes (rule X9) keep their level but
@@ -271,7 +310,16 @@ fn explicit_levels(cells: &mut [BidiCell], para_level: u8) {
     let mut overflow_embedding: u32 = 0;
     let mut valid_isolate_count: u32 = 0;
 
-    for cell in cells.iter_mut() {
+    for i in 0..cells.len() {
+        // Resolve FSI to LRI or RLI before processing per UAX 9 §X5c
+        // by scanning the matched isolated subsequence for its first
+        // strong character. Skip nested isolates (BD9). When the
+        // first strong is R or AL, FSI behaves as RLI; otherwise as
+        // LRI (default LTR per the spec, matching the P3 fallback).
+        if cells[i].cls == BidiClass::Fsi {
+            cells[i].cls = fsi_resolves_to(cells, i);
+        }
+        let cell = &mut cells[i];
         match cell.cls {
             // X2-X5: explicit embedding / override.
             BidiClass::Rle | BidiClass::Lre | BidiClass::Rlo | BidiClass::Lro => {
@@ -316,7 +364,9 @@ fn explicit_levels(cells: &mut [BidiCell], para_level: u8) {
                     Override::Rtl => cell.cls = BidiClass::R,
                     Override::None => {}
                 }
-                let is_rtl = cell.cls == BidiClass::Rli || matches!(cell.cls, BidiClass::Fsi);
+                // FSI was resolved to LRI / RLI at the loop entry, so
+                // only Rli is RTL here.
+                let is_rtl = cell.cls == BidiClass::Rli;
                 let new_level = if is_rtl {
                     next_odd_level(last.level)
                 } else {
@@ -1120,6 +1170,67 @@ mod tests {
         assert_eq!(levels[2], 0);
         // 'B' back at paragraph level → 0.
         assert_eq!(levels[3], 0);
+    }
+
+    #[test]
+    fn fsi_with_latin_inside_resolves_as_lri() {
+        // 'A' FSI 'X' PDI 'B' — first strong inside FSI is L, so FSI
+        // must behave as LRI (embed at next *even* level, here 2).
+        // 'X' is L → I1 even-level no bump → level 2.
+        let info = BidiInfo::new("A\u{2068}X\u{2069}B", None);
+        let levels = info.levels();
+        assert_eq!(levels.len(), 5);
+        assert_eq!(levels[0], 0);
+        assert_eq!(levels[2], 2);
+        assert_eq!(levels[4], 0);
+    }
+
+    #[test]
+    fn fsi_with_hebrew_inside_resolves_as_rli() {
+        // 'A' FSI 'אבג' PDI 'B' — first strong inside FSI is R, so
+        // FSI must behave as RLI (embed at next *odd* level, here 1).
+        // Hebrew letters at level 1; B at paragraph 0.
+        let info = BidiInfo::new("A\u{2068}\u{05D0}\u{05D1}\u{05D2}\u{2069}B", None);
+        let levels = info.levels();
+        assert_eq!(levels.len(), 7);
+        assert_eq!(levels[0], 0);
+        for &l in &levels[2..5] {
+            assert_eq!(l, 1, "hebrew inside FSI should be at level 1");
+        }
+        assert_eq!(levels[6], 0);
+    }
+
+    #[test]
+    fn fsi_with_no_strong_inside_defaults_to_lri() {
+        // 'A' FSI '!!!' PDI 'B' — no strong type inside FSI, so default
+        // is LRI: embed at level 2 in LTR paragraph; '!' chars resolve
+        // to L via N2 at level 2.
+        let info = BidiInfo::new("A\u{2068}!!!\u{2069}B", None);
+        let levels = info.levels();
+        assert_eq!(levels.len(), 7);
+        assert_eq!(levels[0], 0);
+        for &l in &levels[2..5] {
+            assert_eq!(l, 2, "neutrals inside FSI default to LRI level 2");
+        }
+        assert_eq!(levels[6], 0);
+    }
+
+    #[test]
+    fn fsi_skips_nested_isolates_when_resolving() {
+        // 'A' FSI LRI 'B' PDI 'ש' PDI 'C' — first strong AT FSI's
+        // own depth must be 'ש' (R), not the nested LRI's 'B'. So FSI
+        // should resolve as RLI: embed level 1, hebrew at 1, 'B'
+        // (inside the nested LRI at FSI+1=2) at the inner LRI's
+        // even-bumped level 2.
+        let text = "A\u{2068}\u{2066}B\u{2069}\u{05E9}\u{2069}C";
+        let info = BidiInfo::new(text, None);
+        let levels = info.levels();
+        // Hebrew 'ש' is the 6th char (index 5) of the input.
+        // Verify FSI itself sat at the surrounding paragraph level (0)
+        // and the 'ש' resolves at FSI's odd-embedded level 1.
+        assert_eq!(levels[0], 0); // 'A'
+        assert_eq!(levels[5], 1, "hebrew inside FSI must be at level 1");
+        assert_eq!(*levels.last().unwrap(), 0); // 'C'
     }
 
     #[test]
