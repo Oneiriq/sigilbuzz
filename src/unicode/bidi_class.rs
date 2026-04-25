@@ -111,7 +111,10 @@ impl BidiClass {
     /// True for codepoints that L1 resets back to the paragraph level.
     #[must_use]
     pub const fn is_l1_reset(self) -> bool {
-        matches!(self, Self::B | Self::S | Self::Ws | Self::Fsi | Self::Lri | Self::Rli | Self::Pdi)
+        matches!(
+            self,
+            Self::B | Self::S | Self::Ws | Self::Fsi | Self::Lri | Self::Rli | Self::Pdi
+        )
     }
 }
 
@@ -170,7 +173,7 @@ pub const fn bidi_class(ch: char) -> BidiClass {
         | 0x200F
         | 0x2060..=0x2064
         | 0xFEFF => match cp {
-            0x200E => BidiClass::L, // LRM is strong-L
+            0x200E => BidiClass::L,          // LRM is strong-L
             0x200F | 0x061C => BidiClass::R, // RLM and ALM are strong-R
             _ => BidiClass::Bn,
         },
@@ -199,9 +202,22 @@ pub const fn bidi_class(ch: char) -> BidiClass {
         // `#`, `$`, `%`, `*`, `°`, `‰`, `‱`, currency symbols,
         // Latin-1 currency / per-mille, percent / per-mille, plus
         // common sub-/super-script signs.
-        0x0023 | 0x0024 | 0x0025 | 0x002A | 0x00A2..=0x00A5 | 0x00B0 | 0x00B1
-        | 0x066A | 0x09F2 | 0x09F3 | 0x0AF1 | 0x0BF9 | 0x0E3F | 0x17DB
-        | 0x2030..=0x2034 | 0x20A0..=0x20CF => BidiClass::Et,
+        0x0023
+        | 0x0024
+        | 0x0025
+        | 0x002A
+        | 0x00A2..=0x00A5
+        | 0x00B0
+        | 0x00B1
+        | 0x066A
+        | 0x09F2
+        | 0x09F3
+        | 0x0AF1
+        | 0x0BF9
+        | 0x0E3F
+        | 0x17DB
+        | 0x2030..=0x2034
+        | 0x20A0..=0x20CF => BidiClass::Et,
 
         // --- ASCII letters (L) ----------------------------------
         0x0041..=0x005A | 0x0061..=0x007A => BidiClass::L,

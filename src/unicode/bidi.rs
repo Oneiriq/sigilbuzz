@@ -47,8 +47,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-pub use crate::unicode::bidi_class::{bidi_class, BidiClass};
 use crate::buffer::Direction;
+pub use crate::unicode::bidi_class::{bidi_class, BidiClass};
 
 /// Maximum embedding depth permitted by UAX #9 (BD2).
 const MAX_DEPTH: u8 = 125;
@@ -200,7 +200,11 @@ impl BidiInfo {
         let min_level = self.levels.iter().copied().min().unwrap_or(0);
         // Lowest odd level — anything below it is purely-LTR and
         // never gets reversed.
-        let lowest_odd = if min_level % 2 == 1 { min_level } else { min_level + 1 };
+        let lowest_odd = if min_level % 2 == 1 {
+            min_level
+        } else {
+            min_level + 1
+        };
         let mut level = max_level;
         while level >= lowest_odd {
             // Walk through and reverse every contiguous run whose
@@ -465,7 +469,12 @@ struct IsolatingSequence {
 fn is_x9_removed(cls: BidiClass) -> bool {
     matches!(
         cls,
-        BidiClass::Rle | BidiClass::Lre | BidiClass::Rlo | BidiClass::Lro | BidiClass::Pdf | BidiClass::Bn
+        BidiClass::Rle
+            | BidiClass::Lre
+            | BidiClass::Rlo
+            | BidiClass::Lro
+            | BidiClass::Pdf
+            | BidiClass::Bn
     )
 }
 
@@ -589,9 +598,7 @@ fn build_isolating_sequences(cells: &[BidiCell], para_level: u8) -> Vec<Isolatin
         // had no matching PDI, eos is max(level, paragraph). Else
         // it's the level of the next cell beyond the sequence.
         let last_cls = cells[last_idx].cls;
-        let eos_level = if last_cls.is_isolate_initiator()
-            && !isolate_map.contains_key(&last_idx)
-        {
+        let eos_level = if last_cls.is_isolate_initiator() && !isolate_map.contains_key(&last_idx) {
             level.max(para_level)
         } else if last_idx + 1 >= cells.len() {
             para_level.max(level)
@@ -664,10 +671,7 @@ fn resolve_sequence(cells: &mut [BidiCell], seq: &IsolatingSequence, _para_level
         if classes[i] == BidiClass::Nsm {
             let prev = if i == 0 { seq.sos } else { classes[i - 1] };
             classes[i] = match prev {
-                BidiClass::Pdi
-                | BidiClass::Lri
-                | BidiClass::Rli
-                | BidiClass::Fsi => BidiClass::On,
+                BidiClass::Pdi | BidiClass::Lri | BidiClass::Rli | BidiClass::Fsi => BidiClass::On,
                 other => other,
             };
         }
@@ -1174,7 +1178,11 @@ mod tests {
         }
         let cases = [
             // 1. Pure Latin.
-            Case { text: "abc", para: None, levels: &[0, 0, 0] },
+            Case {
+                text: "abc",
+                para: None,
+                levels: &[0, 0, 0],
+            },
             // 2. Pure Hebrew.
             Case {
                 text: "\u{05D0}\u{05D1}\u{05D2}",
@@ -1209,10 +1217,18 @@ mod tests {
             // 7. ET adjacent to EN: "$1" with paragraph LTR. W5
             //    turns ET into EN, then W7 turns the EN run back
             //    into L (sos=L) → level 0.
-            Case { text: "$1", para: None, levels: &[0, 0] },
+            Case {
+                text: "$1",
+                para: None,
+                levels: &[0, 0],
+            },
             // 8. ES between two ENs in LTR para: W4 turns ES into
             //    EN, W7 then turns the run into L → level 0.
-            Case { text: "1+2", para: None, levels: &[0, 0, 0] },
+            Case {
+                text: "1+2",
+                para: None,
+                levels: &[0, 0, 0],
+            },
             // 9. RLE override.
             Case {
                 text: "\u{202B}AB\u{202C}",
