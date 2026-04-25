@@ -35,18 +35,17 @@
 //! - **SinglePos format 1** — uniform `ValueRecord` shared across the
 //!   coverage.
 //! - **SinglePos format 2** — per-coverage-entry `ValueRecord` array.
+//! - **CursivePos** — per-glyph `EntryExitRecord` with two anchor
+//!   offsets. Anchor format 3 carries x/yDevice slots that the bake
+//!   resolves the same way ValueRecord device slots are resolved.
+//! - **MarkBasePos / MarkMarkPos** — `MarkArray` + `BaseArray`
+//!   (`Mark2Array` for type 6) anchor matrices. Same anchor walk.
+//! - **MarkLigPos** — `MarkArray` + `LigatureArray` of per-component
+//!   anchor matrices. Same anchor walk per component.
 //!
-//! `MarkBasePos` / `MarkLigPos` / `MarkMarkPos` / `CursivePos` carry
-//! `Anchor` records with their own Device/VariationIndex slots. Those
-//! are deferred to a follow-up — instance() drops `GDEF.IVS` after the
-//! supported lookups are baked, so any `VariationIndex` in a deferred
-//! lookup type is left orphan, matching the #173 trade-off for that
-//! subset of GPOS.
-//!
-//! Lookup types we do not bake (`Cursive`, `Mark*`, `Context`,
-//! `ChainContext`, `Extension`) ride through verbatim — only their
-//! parent table bytes are copied; nested subtables we do not understand
-//! are not touched.
+//! Lookup types we do not bake (`Context`, `ChainContext`) ride through
+//! verbatim — only their parent table bytes are copied; nested subtables
+//! we do not understand are not touched.
 //!
 //! # Determinism
 //!
@@ -268,6 +267,368 @@ pub(crate) fn fold_value_record(
         fold_one_field(subtable_buf, y_ad_pos, cursor, store, coords);
         // No more after y_advance_device; cursor unused.
         let _ = cursor;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Anchor fold (Mark*/Cursive)
+// ---------------------------------------------------------------------------
+
+/// Folds the `VariationIndex` deltas (if any) carried by the Anchor
+/// record at `anchor_off` (relative to `subtable_buf`) into the
+/// anchor's static `xCoord` / `yCoord` fields, then zeros the device
+/// offset slots.
+///
+/// AnchorFormat layout per the OpenType spec:
+///
+/// ```text
+///   format 1: u16 format=1, i16 xCoord, i16 yCoord                (6 B)
+///   format 2: u16 format=2, i16 xCoord, i16 yCoord, u16 anchorPt  (8 B)
+///   format 3: u16 format=3, i16 xCoord, i16 yCoord,
+///             o16 xDeviceOffset, o16 yDeviceOffset               (10 B)
+/// ```
+///
+/// Only format 3 carries variations: `xDeviceOffset` / `yDeviceOffset`
+/// can name a `VariationIndex` (`deltaFormat == 0x8000`) whose
+/// region-weighted delta scales the static x/y at the bake's `coords`.
+/// Formats 1 and 2 have no variation surface — early return.
+///
+/// The static-field fold reuses `fold_one_field` so the Anchor and
+/// ValueRecord paths stay in byte-for-byte lockstep on the
+/// `add-0.5/subtract-0.5` rounding rule and the saturating-add overflow
+/// guard.
+pub(crate) fn fold_anchor_variations(
+    subtable_buf: &mut [u8],
+    anchor_off: usize,
+    store: Option<&ItemVariationStore<'_>>,
+    coords: &[f32],
+) {
+    if anchor_off == 0 {
+        return;
+    }
+    if anchor_off + 6 > subtable_buf.len() {
+        return;
+    }
+    let format = u16::from_be_bytes([subtable_buf[anchor_off], subtable_buf[anchor_off + 1]]);
+    if format != 3 {
+        // Format 1 / 2: no Device/VariationIndex slots. Format 0 or
+        // anything > 3 is malformed; ride through.
+        return;
+    }
+    if anchor_off + 10 > subtable_buf.len() {
+        return;
+    }
+    let x_pos = anchor_off + 2;
+    let y_pos = anchor_off + 4;
+    let x_dev_pos = anchor_off + 6;
+    let y_dev_pos = anchor_off + 8;
+    fold_one_field(subtable_buf, x_pos, x_dev_pos, store, coords);
+    fold_one_field(subtable_buf, y_pos, y_dev_pos, store, coords);
+}
+
+/// Folds every Anchor in a CursivePos subtable starting at `sub_off`
+/// within `gpos_buf`.
+///
+/// Layout (CursivePos format 1):
+/// ```text
+///   u16 posFormat = 1
+///   u16 coverageOffset
+///   u16 entryExitCount
+///   EntryExitRecord[entryExitCount]:
+///     u16 entryAnchorOffset
+///     u16 exitAnchorOffset
+/// ```
+fn fold_cursive_pos(
+    gpos_buf: &mut [u8],
+    sub_off: usize,
+    store: Option<&ItemVariationStore<'_>>,
+    coords: &[f32],
+) {
+    let Some(sub) = gpos_buf.get(sub_off..) else {
+        return;
+    };
+    if sub.len() < 6 {
+        return;
+    }
+    let format = u16::from_be_bytes([sub[0], sub[1]]);
+    if format != 1 {
+        return;
+    }
+    let entry_exit_count = u16::from_be_bytes([sub[4], sub[5]]) as usize;
+    let records_off = 6usize;
+    let need = records_off + entry_exit_count * 4;
+    if sub.len() < need {
+        return;
+    }
+    // Collect anchor offsets first so we don't overlap mut/immut borrows.
+    let mut anchor_offs: Vec<usize> = Vec::with_capacity(entry_exit_count * 2);
+    for i in 0..entry_exit_count {
+        let rec = records_off + i * 4;
+        anchor_offs.push(u16::from_be_bytes([sub[rec], sub[rec + 1]]) as usize);
+        anchor_offs.push(u16::from_be_bytes([sub[rec + 2], sub[rec + 3]]) as usize);
+    }
+    for off in anchor_offs {
+        fold_anchor_variations(&mut gpos_buf[sub_off..], off, store, coords);
+    }
+}
+
+/// Walks every Anchor in a `MarkArray` at `mark_array_off` (relative to
+/// `subtable_buf`) and folds its variation slots.
+///
+/// MarkArray layout:
+/// ```text
+///   u16 markCount
+///   MarkRecord[markCount]:
+///     u16 class
+///     u16 markAnchorOffset (relative to MarkArray start)
+/// ```
+///
+/// Note that `markAnchorOffset` is relative to the MarkArray, not to
+/// the enclosing subtable — we add `mark_array_off` to land in
+/// subtable-relative space before calling `fold_anchor_variations`.
+fn fold_mark_array(
+    subtable_buf: &mut [u8],
+    mark_array_off: usize,
+    store: Option<&ItemVariationStore<'_>>,
+    coords: &[f32],
+) {
+    if mark_array_off + 2 > subtable_buf.len() {
+        return;
+    }
+    let mark_count = u16::from_be_bytes([
+        subtable_buf[mark_array_off],
+        subtable_buf[mark_array_off + 1],
+    ]) as usize;
+    let records_off = mark_array_off + 2;
+    if records_off + mark_count * 4 > subtable_buf.len() {
+        return;
+    }
+    let mut anchor_offs: Vec<usize> = Vec::with_capacity(mark_count);
+    for i in 0..mark_count {
+        let rec = records_off + i * 4;
+        let anchor_rel = u16::from_be_bytes([subtable_buf[rec + 2], subtable_buf[rec + 3]]) as usize;
+        if anchor_rel == 0 {
+            anchor_offs.push(0);
+        } else {
+            anchor_offs.push(mark_array_off + anchor_rel);
+        }
+    }
+    for off in anchor_offs {
+        fold_anchor_variations(subtable_buf, off, store, coords);
+    }
+}
+
+/// Walks every Anchor in a `BaseArray` (or `Mark2Array`, same shape).
+///
+/// BaseArray layout:
+/// ```text
+///   u16 baseCount
+///   BaseRecord[baseCount]:
+///     u16 baseAnchorOffsets[markClassCount]   (each relative to BaseArray)
+/// ```
+///
+/// The flat anchor matrix is `baseCount × markClassCount` u16 offsets,
+/// each relative to `base_array_off`.
+fn fold_base_or_mark2_array(
+    subtable_buf: &mut [u8],
+    base_array_off: usize,
+    mark_class_count: usize,
+    store: Option<&ItemVariationStore<'_>>,
+    coords: &[f32],
+) {
+    if base_array_off + 2 > subtable_buf.len() {
+        return;
+    }
+    let base_count = u16::from_be_bytes([
+        subtable_buf[base_array_off],
+        subtable_buf[base_array_off + 1],
+    ]) as usize;
+    let records_off = base_array_off + 2;
+    let total = base_count * mark_class_count;
+    if records_off + total * 2 > subtable_buf.len() {
+        return;
+    }
+    let mut anchor_offs: Vec<usize> = Vec::with_capacity(total);
+    for i in 0..total {
+        let pos = records_off + i * 2;
+        let rel = u16::from_be_bytes([subtable_buf[pos], subtable_buf[pos + 1]]) as usize;
+        if rel == 0 {
+            anchor_offs.push(0);
+        } else {
+            anchor_offs.push(base_array_off + rel);
+        }
+    }
+    for off in anchor_offs {
+        fold_anchor_variations(subtable_buf, off, store, coords);
+    }
+}
+
+/// Folds every Anchor in a MarkBasePos subtable starting at `sub_off`.
+///
+/// Layout (MarkBasePos format 1):
+/// ```text
+///   u16 posFormat = 1
+///   u16 markCoverageOffset
+///   u16 baseCoverageOffset
+///   u16 markClassCount
+///   o16 markArrayOffset
+///   o16 baseArrayOffset
+/// ```
+fn fold_mark_base_pos(
+    gpos_buf: &mut [u8],
+    sub_off: usize,
+    store: Option<&ItemVariationStore<'_>>,
+    coords: &[f32],
+) {
+    let Some(sub) = gpos_buf.get(sub_off..) else {
+        return;
+    };
+    if sub.len() < 12 {
+        return;
+    }
+    let format = u16::from_be_bytes([sub[0], sub[1]]);
+    if format != 1 {
+        return;
+    }
+    let mark_class_count = u16::from_be_bytes([sub[6], sub[7]]) as usize;
+    let mark_array_off = u16::from_be_bytes([sub[8], sub[9]]) as usize;
+    let base_array_off = u16::from_be_bytes([sub[10], sub[11]]) as usize;
+    let buf = &mut gpos_buf[sub_off..];
+    fold_mark_array(buf, mark_array_off, store, coords);
+    fold_base_or_mark2_array(buf, base_array_off, mark_class_count, store, coords);
+}
+
+/// Folds every Anchor in a MarkMarkPos subtable starting at `sub_off`.
+///
+/// Layout (MarkMarkPos format 1):
+/// ```text
+///   u16 posFormat = 1
+///   u16 mark1CoverageOffset
+///   u16 mark2CoverageOffset
+///   u16 markClassCount
+///   o16 mark1ArrayOffset
+///   o16 mark2ArrayOffset
+/// ```
+///
+/// Identical shape to MarkBasePos with `Mark2Array` substituted for
+/// `BaseArray`. The `Mark2Array` matrix dimensions match
+/// `BaseArray`'s: `mark2Count × markClassCount`.
+fn fold_mark_mark_pos(
+    gpos_buf: &mut [u8],
+    sub_off: usize,
+    store: Option<&ItemVariationStore<'_>>,
+    coords: &[f32],
+) {
+    let Some(sub) = gpos_buf.get(sub_off..) else {
+        return;
+    };
+    if sub.len() < 12 {
+        return;
+    }
+    let format = u16::from_be_bytes([sub[0], sub[1]]);
+    if format != 1 {
+        return;
+    }
+    let mark_class_count = u16::from_be_bytes([sub[6], sub[7]]) as usize;
+    let mark1_array_off = u16::from_be_bytes([sub[8], sub[9]]) as usize;
+    let mark2_array_off = u16::from_be_bytes([sub[10], sub[11]]) as usize;
+    let buf = &mut gpos_buf[sub_off..];
+    fold_mark_array(buf, mark1_array_off, store, coords);
+    fold_base_or_mark2_array(buf, mark2_array_off, mark_class_count, store, coords);
+}
+
+/// Folds every Anchor in a MarkLigPos subtable starting at `sub_off`.
+///
+/// Layout (MarkLigPos format 1):
+/// ```text
+///   u16 posFormat = 1
+///   u16 markCoverageOffset
+///   u16 ligatureCoverageOffset
+///   u16 markClassCount
+///   o16 markArrayOffset
+///   o16 ligatureArrayOffset
+///
+///   LigatureArray (at ligatureArrayOffset):
+///     u16 ligatureCount
+///     o16 ligatureAttachOffsets[ligatureCount]   (relative to LigatureArray)
+///
+///   LigatureAttach (at each ligatureAttachOffset):
+///     u16 componentCount
+///     ComponentRecord[componentCount]:
+///       o16 ligatureAnchorOffsets[markClassCount]  (relative to LigatureAttach)
+/// ```
+fn fold_mark_lig_pos(
+    gpos_buf: &mut [u8],
+    sub_off: usize,
+    store: Option<&ItemVariationStore<'_>>,
+    coords: &[f32],
+) {
+    let Some(sub) = gpos_buf.get(sub_off..) else {
+        return;
+    };
+    if sub.len() < 12 {
+        return;
+    }
+    let format = u16::from_be_bytes([sub[0], sub[1]]);
+    if format != 1 {
+        return;
+    }
+    let mark_class_count = u16::from_be_bytes([sub[6], sub[7]]) as usize;
+    let mark_array_off = u16::from_be_bytes([sub[8], sub[9]]) as usize;
+    let lig_array_off = u16::from_be_bytes([sub[10], sub[11]]) as usize;
+
+    // MarkArray walks like the other Mark* lookups.
+    fold_mark_array(&mut gpos_buf[sub_off..], mark_array_off, store, coords);
+
+    // LigatureArray: collect every ligatureAttach offset and every
+    // ComponentRecord's anchor offsets, then fold in one pass to keep
+    // the borrows simple.
+    let buf = &gpos_buf[sub_off..];
+    if lig_array_off + 2 > buf.len() {
+        return;
+    }
+    let lig_count = u16::from_be_bytes([buf[lig_array_off], buf[lig_array_off + 1]]) as usize;
+    let lig_attach_offs_start = lig_array_off + 2;
+    if lig_attach_offs_start + lig_count * 2 > buf.len() {
+        return;
+    }
+    let mut lig_attach_abs: Vec<usize> = Vec::with_capacity(lig_count);
+    for i in 0..lig_count {
+        let pos = lig_attach_offs_start + i * 2;
+        let rel = u16::from_be_bytes([buf[pos], buf[pos + 1]]) as usize;
+        if rel == 0 {
+            continue;
+        }
+        lig_attach_abs.push(lig_array_off + rel);
+    }
+
+    let mut anchor_abs: Vec<usize> = Vec::new();
+    for la_off in lig_attach_abs {
+        if la_off + 2 > buf.len() {
+            continue;
+        }
+        let comp_count = u16::from_be_bytes([buf[la_off], buf[la_off + 1]]) as usize;
+        let comps_off = la_off + 2;
+        let row_size = mark_class_count * 2;
+        if comps_off + comp_count * row_size > buf.len() {
+            continue;
+        }
+        for c in 0..comp_count {
+            let row = comps_off + c * row_size;
+            for k in 0..mark_class_count {
+                let pos = row + k * 2;
+                let rel = u16::from_be_bytes([buf[pos], buf[pos + 1]]) as usize;
+                if rel == 0 {
+                    continue;
+                }
+                // ligatureAnchorOffsets are relative to LigatureAttach.
+                anchor_abs.push(la_off + rel);
+            }
+        }
+    }
+    let mbuf = &mut gpos_buf[sub_off..];
+    for off in anchor_abs {
+        fold_anchor_variations(mbuf, off, store, coords);
     }
 }
 
@@ -533,11 +894,19 @@ pub(crate) fn bake_gpos_at_coords(
                 1 => fold_single_pos(&mut buf, sub_abs, store, coords),
                 // Type 2 — PairPos.
                 2 => fold_pair_pos(&mut buf, sub_abs, store, coords),
+                // Type 3 — CursivePos.
+                3 => fold_cursive_pos(&mut buf, sub_abs, store, coords),
+                // Type 4 — MarkBasePos.
+                4 => fold_mark_base_pos(&mut buf, sub_abs, store, coords),
+                // Type 5 — MarkLigPos.
+                5 => fold_mark_lig_pos(&mut buf, sub_abs, store, coords),
+                // Type 6 — MarkMarkPos.
+                6 => fold_mark_mark_pos(&mut buf, sub_abs, store, coords),
                 // Type 9 — Extension. The extension subtable is a
                 // 2-byte format + 2-byte extensionLookupType + 4-byte
                 // extensionOffset (relative to the extension subtable
                 // start). Recurse into the inner subtable so we cover
-                // PairPos/SinglePos that font compilers wrap in
+                // every supported type that font compilers wrap in
                 // Extension lookups (common in large GPOS tables).
                 9 => {
                     if sub_abs + 8 > gpos_bytes.len() {
@@ -558,14 +927,17 @@ pub(crate) fn bake_gpos_at_coords(
                     match ext_type {
                         1 => fold_single_pos(&mut buf, inner_abs, store, coords),
                         2 => fold_pair_pos(&mut buf, inner_abs, store, coords),
+                        3 => fold_cursive_pos(&mut buf, inner_abs, store, coords),
+                        4 => fold_mark_base_pos(&mut buf, inner_abs, store, coords),
+                        5 => fold_mark_lig_pos(&mut buf, inner_abs, store, coords),
+                        6 => fold_mark_mark_pos(&mut buf, inner_abs, store, coords),
                         _ => {}
                     }
                 }
-                // Mark*/Cursive/Context/ChainContext — deferred. The
-                // anchors and nested lookups in these types may carry
-                // VariationIndex offsets, but the GDEF.IVS prune that
-                // follows leaves them orphan. Tracked in the #175
-                // follow-up.
+                // Context (7) / ChainContext (8) — nested rule
+                // dispatchers; their nested lookups are reached via
+                // the LookupList loop above so any anchor variations
+                // ride through that path too.
                 _ => {}
             }
         }
@@ -904,5 +1276,562 @@ mod tests {
         // Offset zeroed.
         let baked_off = u16::from_be_bytes([baked[device_off_pos], baked[device_off_pos + 1]]);
         assert_eq!(baked_off, 0);
+    }
+
+    // -----------------------------------------------------------------
+    // Mark*/Cursive anchor fold tests
+    // -----------------------------------------------------------------
+
+    /// AnchorFormat 1 has no device slots — the fold must be a pure
+    /// no-op on every byte.
+    #[test]
+    fn fold_anchor_format1_is_noop() {
+        // Pad 4 bytes up front so anchor_off != 0 (the helper treats
+        // an offset of 0 as the spec's "absent" sentinel).
+        let mut buf = vec![0u8; 4];
+        buf.extend_from_slice(&1u16.to_be_bytes());
+        buf.extend_from_slice(&300i16.to_be_bytes());
+        buf.extend_from_slice(&(-200i16).to_be_bytes());
+        let original = buf.clone();
+        let ivs_bytes = build_ivs_one_region_one_item(40);
+        let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
+        fold_anchor_variations(&mut buf, 4, Some(&store), &[1.0]);
+        assert_eq!(buf, original);
+    }
+
+    /// AnchorFormat 2 (contour-point hint) carries no device slots —
+    /// fold must leave every byte untouched.
+    #[test]
+    fn fold_anchor_format2_is_noop() {
+        let mut buf = vec![0u8; 4];
+        buf.extend_from_slice(&2u16.to_be_bytes());
+        buf.extend_from_slice(&50i16.to_be_bytes());
+        buf.extend_from_slice(&75i16.to_be_bytes());
+        buf.extend_from_slice(&42u16.to_be_bytes()); // anchorPoint
+        let original = buf.clone();
+        let ivs_bytes = build_ivs_one_region_one_item(40);
+        let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
+        fold_anchor_variations(&mut buf, 4, Some(&store), &[1.0]);
+        assert_eq!(buf, original);
+    }
+
+    /// AnchorFormat 3 with both x and y device offsets pointing at a
+    /// VariationIndex — both static fields must absorb the delta and
+    /// both device slots must zero.
+    #[test]
+    fn fold_anchor_format3_folds_x_and_y() {
+        // Build: 4 bytes of pad, anchor at byte 4 (10 B), then the
+        // shared VariationIndex. The pad keeps anchor_off != 0 so the
+        // helper doesn't treat the anchor as "absent".
+        let mut buf = vec![0u8; 4];
+        buf.extend_from_slice(&3u16.to_be_bytes()); // format
+        buf.extend_from_slice(&100i16.to_be_bytes()); // xCoord
+        buf.extend_from_slice(&(-50i16).to_be_bytes()); // yCoord
+        let x_dev_pos = buf.len();
+        buf.extend_from_slice(&0u16.to_be_bytes()); // xDevice (filled)
+        let y_dev_pos = buf.len();
+        buf.extend_from_slice(&0u16.to_be_bytes()); // yDevice (filled)
+        let vi_pos = buf.len();
+        buf.extend_from_slice(&0u16.to_be_bytes()); // outer
+        buf.extend_from_slice(&0u16.to_be_bytes()); // inner
+        buf.extend_from_slice(&0x8000u16.to_be_bytes()); // deltaFormat
+        buf[x_dev_pos..x_dev_pos + 2].copy_from_slice(&(vi_pos as u16).to_be_bytes());
+        buf[y_dev_pos..y_dev_pos + 2].copy_from_slice(&(vi_pos as u16).to_be_bytes());
+
+        let ivs_bytes = build_ivs_one_region_one_item(25);
+        let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
+        fold_anchor_variations(&mut buf, 4, Some(&store), &[1.0]);
+        let x = i16::from_be_bytes([buf[6], buf[7]]);
+        let y = i16::from_be_bytes([buf[8], buf[9]]);
+        assert_eq!(x, 125);
+        assert_eq!(y, -25);
+        assert_eq!(u16::from_be_bytes([buf[x_dev_pos], buf[x_dev_pos + 1]]), 0);
+        assert_eq!(u16::from_be_bytes([buf[y_dev_pos], buf[y_dev_pos + 1]]), 0);
+    }
+
+    /// Zero anchor offset (the spec's "absent" sentinel) — the fold
+    /// must early-return rather than walk into byte 0 of the subtable.
+    #[test]
+    fn fold_anchor_zero_offset_is_noop() {
+        let mut buf = vec![0xAAu8; 16];
+        let original = buf.clone();
+        fold_anchor_variations(&mut buf, 0, None, &[1.0]);
+        assert_eq!(buf, original);
+    }
+
+    /// CursivePos round-trip: one EntryExitRecord with both anchors
+    /// in format 3, each pointing at a VariationIndex into a non-zero
+    /// IVS delta. Bake at coord 1.0 and assert the static fields
+    /// absorb the delta and every device offset is zeroed.
+    #[test]
+    fn cursive_pos_anchor_variation_folds() {
+        let mut gpos = Vec::new();
+        // Header.
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // major
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // minor
+        gpos.extend_from_slice(&100u16.to_be_bytes()); // scriptListOff (unused)
+        gpos.extend_from_slice(&100u16.to_be_bytes()); // featureListOff (unused)
+        gpos.extend_from_slice(&10u16.to_be_bytes()); // lookupListOff
+                                                      // LookupList at 10:
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // lookupCount
+        gpos.extend_from_slice(&4u16.to_be_bytes()); // lookupOffset[0] (rel to LookupList)
+                                                     // Lookup at 14:
+        gpos.extend_from_slice(&3u16.to_be_bytes()); // lookupType = CursivePos
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // flag
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // subtableCount
+        gpos.extend_from_slice(&8u16.to_be_bytes()); // subtableOffset[0] (rel to Lookup)
+                                                     // CursivePos subtable at byte 22.
+        let sub_off = gpos.len();
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // posFormat=1
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // coverageOff (filled below)
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // entryExitCount=1
+                                                     // EntryExitRecord[0]: entryAnchorOffset, exitAnchorOffset.
+        let ee_pos = gpos.len();
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // entryAnchorOffset (filled)
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // exitAnchorOffset (filled)
+                                                     // Entry anchor (format 3) at end-of-records.
+        let entry_anchor_off = gpos.len() - sub_off;
+        let entry_x_pos = gpos.len() + 2;
+        let entry_y_pos = gpos.len() + 4;
+        let entry_x_dev_pos = gpos.len() + 6;
+        let entry_y_dev_pos = gpos.len() + 8;
+        gpos.extend_from_slice(&3u16.to_be_bytes()); // format=3
+        gpos.extend_from_slice(&500i16.to_be_bytes()); // xCoord
+        gpos.extend_from_slice(&100i16.to_be_bytes()); // yCoord
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // xDevice (filled below)
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // yDevice (filled below)
+                                                     // Exit anchor (format 3).
+        let exit_anchor_off = gpos.len() - sub_off;
+        let exit_x_pos = gpos.len() + 2;
+        let exit_y_pos = gpos.len() + 4;
+        let exit_x_dev_pos = gpos.len() + 6;
+        let exit_y_dev_pos = gpos.len() + 8;
+        gpos.extend_from_slice(&3u16.to_be_bytes());
+        gpos.extend_from_slice(&(-200i16).to_be_bytes());
+        gpos.extend_from_slice(&50i16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+
+        // Coverage at end.
+        let coverage_rel = (gpos.len() - sub_off) as u16;
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&77u16.to_be_bytes());
+
+        // Shared VariationIndex at end of subtable.
+        let vi_rel = (gpos.len() - sub_off) as u16;
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0x8000u16.to_be_bytes());
+
+        // Patch slots.
+        gpos[sub_off + 2..sub_off + 4].copy_from_slice(&coverage_rel.to_be_bytes());
+        gpos[ee_pos..ee_pos + 2].copy_from_slice(&(entry_anchor_off as u16).to_be_bytes());
+        gpos[ee_pos + 2..ee_pos + 4].copy_from_slice(&(exit_anchor_off as u16).to_be_bytes());
+        // Point both anchors' x/y devices at the shared VariationIndex.
+        gpos[entry_x_dev_pos..entry_x_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+        gpos[entry_y_dev_pos..entry_y_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+        gpos[exit_x_dev_pos..exit_x_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+        gpos[exit_y_dev_pos..exit_y_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+
+        let ivs_bytes = build_ivs_one_region_one_item(60);
+        let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
+        let baked = bake_gpos_at_coords(&gpos, Some(&store), &[1.0]).unwrap();
+
+        // Entry: x=500+60=560, y=100+60=160.
+        assert_eq!(
+            i16::from_be_bytes([baked[entry_x_pos], baked[entry_x_pos + 1]]),
+            560
+        );
+        assert_eq!(
+            i16::from_be_bytes([baked[entry_y_pos], baked[entry_y_pos + 1]]),
+            160
+        );
+        // Exit: x=-200+60=-140, y=50+60=110.
+        assert_eq!(
+            i16::from_be_bytes([baked[exit_x_pos], baked[exit_x_pos + 1]]),
+            -140
+        );
+        assert_eq!(
+            i16::from_be_bytes([baked[exit_y_pos], baked[exit_y_pos + 1]]),
+            110
+        );
+        // All four device offset slots zeroed.
+        for off in [
+            entry_x_dev_pos,
+            entry_y_dev_pos,
+            exit_x_dev_pos,
+            exit_y_dev_pos,
+        ] {
+            assert_eq!(u16::from_be_bytes([baked[off], baked[off + 1]]), 0);
+        }
+    }
+
+    /// MarkBasePos round-trip: one mark, one base, single mark class.
+    /// Both anchors are AnchorFormat 3 with x/yDevice → VariationIndex.
+    /// Assert both anchors' static fields absorb the delta and every
+    /// device slot zeros.
+    #[test]
+    fn mark_base_pos_anchor_variation_folds() {
+        // GPOS header / lookup list / lookup identical to the cursive
+        // test, but with lookupType = 4.
+        let mut gpos = Vec::new();
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&100u16.to_be_bytes());
+        gpos.extend_from_slice(&100u16.to_be_bytes());
+        gpos.extend_from_slice(&10u16.to_be_bytes());
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&4u16.to_be_bytes());
+        gpos.extend_from_slice(&4u16.to_be_bytes()); // lookupType=4
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&8u16.to_be_bytes());
+        let sub_off = gpos.len();
+        // MarkBasePos: u16 format=1, u16 markCovOff, u16 baseCovOff,
+        // u16 markClassCount, o16 markArrayOff, o16 baseArrayOff.
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // posFormat
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // markCovOff (fill)
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // baseCovOff (fill)
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // markClassCount=1
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // markArrayOff (fill)
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // baseArrayOff (fill)
+
+        // MarkArray.
+        let mark_array_rel = (gpos.len() - sub_off) as u16;
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // markCount
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // markRecord.class=0
+                                                     // markAnchorOffset (rel to MarkArray) — fill below.
+        let mark_anchor_off_pos = gpos.len();
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+
+        // Mark anchor (format 3).
+        let mark_anchor_rel_to_marray = (gpos.len() - sub_off - mark_array_rel as usize) as u16;
+        let mark_x_pos = gpos.len() + 2;
+        let mark_y_pos = gpos.len() + 4;
+        let mark_x_dev_pos = gpos.len() + 6;
+        let mark_y_dev_pos = gpos.len() + 8;
+        gpos.extend_from_slice(&3u16.to_be_bytes());
+        gpos.extend_from_slice(&10i16.to_be_bytes());
+        gpos.extend_from_slice(&20i16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+
+        // BaseArray.
+        let base_array_rel = (gpos.len() - sub_off) as u16;
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // baseCount
+                                                     // baseAnchorOffsets[markClassCount=1] — rel to BaseArray.
+        let base_anchor_off_pos = gpos.len();
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+
+        // Base anchor (format 3).
+        let base_anchor_rel_to_barray = (gpos.len() - sub_off - base_array_rel as usize) as u16;
+        let base_x_pos = gpos.len() + 2;
+        let base_y_pos = gpos.len() + 4;
+        let base_x_dev_pos = gpos.len() + 6;
+        let base_y_dev_pos = gpos.len() + 8;
+        gpos.extend_from_slice(&3u16.to_be_bytes());
+        gpos.extend_from_slice(&100i16.to_be_bytes());
+        gpos.extend_from_slice(&200i16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+
+        // Coverage records at the end (same shape, same content; we
+        // don't actually consult them in the bake walk).
+        let cov_rel = (gpos.len() - sub_off) as u16;
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&50u16.to_be_bytes());
+
+        // Shared VariationIndex.
+        let vi_rel = (gpos.len() - sub_off) as u16;
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0x8000u16.to_be_bytes());
+
+        // Patch slots.
+        gpos[sub_off + 2..sub_off + 4].copy_from_slice(&cov_rel.to_be_bytes());
+        gpos[sub_off + 4..sub_off + 6].copy_from_slice(&cov_rel.to_be_bytes());
+        gpos[sub_off + 8..sub_off + 10].copy_from_slice(&mark_array_rel.to_be_bytes());
+        gpos[sub_off + 10..sub_off + 12].copy_from_slice(&base_array_rel.to_be_bytes());
+        gpos[mark_anchor_off_pos..mark_anchor_off_pos + 2]
+            .copy_from_slice(&mark_anchor_rel_to_marray.to_be_bytes());
+        gpos[base_anchor_off_pos..base_anchor_off_pos + 2]
+            .copy_from_slice(&base_anchor_rel_to_barray.to_be_bytes());
+        gpos[mark_x_dev_pos..mark_x_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+        gpos[mark_y_dev_pos..mark_y_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+        gpos[base_x_dev_pos..base_x_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+        gpos[base_y_dev_pos..base_y_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+
+        let ivs_bytes = build_ivs_one_region_one_item(15);
+        let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
+        let baked = bake_gpos_at_coords(&gpos, Some(&store), &[1.0]).unwrap();
+
+        assert_eq!(
+            i16::from_be_bytes([baked[mark_x_pos], baked[mark_x_pos + 1]]),
+            25
+        );
+        assert_eq!(
+            i16::from_be_bytes([baked[mark_y_pos], baked[mark_y_pos + 1]]),
+            35
+        );
+        assert_eq!(
+            i16::from_be_bytes([baked[base_x_pos], baked[base_x_pos + 1]]),
+            115
+        );
+        assert_eq!(
+            i16::from_be_bytes([baked[base_y_pos], baked[base_y_pos + 1]]),
+            215
+        );
+        for off in [
+            mark_x_dev_pos,
+            mark_y_dev_pos,
+            base_x_dev_pos,
+            base_y_dev_pos,
+        ] {
+            assert_eq!(u16::from_be_bytes([baked[off], baked[off + 1]]), 0);
+        }
+    }
+
+    /// MarkLigPos round-trip: one mark, one ligature with two
+    /// components, single mark class. The component matrix is
+    /// `componentCount × markClassCount` — 2 anchors per ligature.
+    /// Assert both component anchors absorb the delta and zero their
+    /// device slots.
+    #[test]
+    fn mark_lig_pos_anchor_variation_folds() {
+        let mut gpos = Vec::new();
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&100u16.to_be_bytes());
+        gpos.extend_from_slice(&100u16.to_be_bytes());
+        gpos.extend_from_slice(&10u16.to_be_bytes());
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&4u16.to_be_bytes());
+        gpos.extend_from_slice(&5u16.to_be_bytes()); // lookupType=5
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&8u16.to_be_bytes());
+        let sub_off = gpos.len();
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // posFormat
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // markCovOff (fill)
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // ligCovOff (fill)
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // markClassCount=1
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // markArrayOff (fill)
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // ligArrayOff (fill)
+
+        // MarkArray.
+        let mark_array_rel = (gpos.len() - sub_off) as u16;
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // markCount=1
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // markRecord.class=0
+        let mark_anchor_off_pos = gpos.len();
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // markAnchorOff (fill)
+
+        // Mark anchor (format 3, single shared VariationIndex).
+        let mark_anchor_rel_to_marray = (gpos.len() - sub_off - mark_array_rel as usize) as u16;
+        let mark_x_pos = gpos.len() + 2;
+        let mark_x_dev_pos = gpos.len() + 6;
+        let mark_y_dev_pos = gpos.len() + 8;
+        gpos.extend_from_slice(&3u16.to_be_bytes());
+        gpos.extend_from_slice(&5i16.to_be_bytes());
+        gpos.extend_from_slice(&5i16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+
+        // LigatureArray.
+        let lig_array_rel = (gpos.len() - sub_off) as u16;
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // ligatureCount=1
+        let lig_attach_off_pos = gpos.len();
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // ligAttachOff (fill)
+
+        // LigatureAttach.
+        let lig_attach_rel_to_larray = (gpos.len() - sub_off - lig_array_rel as usize) as u16;
+        let lig_attach_abs_in_sub = gpos.len() - sub_off;
+        gpos.extend_from_slice(&2u16.to_be_bytes()); // componentCount=2
+                                                     // 2 components × 1 markClass = 2 anchor offsets.
+        let comp0_anchor_off_pos = gpos.len();
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        let comp1_anchor_off_pos = gpos.len();
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+
+        // Component 0 anchor (format 3).
+        let comp0_anchor_rel_to_la = (gpos.len() - sub_off - lig_attach_abs_in_sub) as u16;
+        let comp0_x_pos = gpos.len() + 2;
+        let comp0_x_dev_pos = gpos.len() + 6;
+        let comp0_y_dev_pos = gpos.len() + 8;
+        gpos.extend_from_slice(&3u16.to_be_bytes());
+        gpos.extend_from_slice(&100i16.to_be_bytes());
+        gpos.extend_from_slice(&50i16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+
+        // Component 1 anchor (format 3).
+        let comp1_anchor_rel_to_la = (gpos.len() - sub_off - lig_attach_abs_in_sub) as u16;
+        let comp1_x_pos = gpos.len() + 2;
+        let comp1_x_dev_pos = gpos.len() + 6;
+        let comp1_y_dev_pos = gpos.len() + 8;
+        gpos.extend_from_slice(&3u16.to_be_bytes());
+        gpos.extend_from_slice(&200i16.to_be_bytes());
+        gpos.extend_from_slice(&75i16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+
+        // Coverage filler.
+        let cov_rel = (gpos.len() - sub_off) as u16;
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&60u16.to_be_bytes());
+
+        // Shared VariationIndex.
+        let vi_rel = (gpos.len() - sub_off) as u16;
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0x8000u16.to_be_bytes());
+
+        // Patch slots.
+        gpos[sub_off + 2..sub_off + 4].copy_from_slice(&cov_rel.to_be_bytes());
+        gpos[sub_off + 4..sub_off + 6].copy_from_slice(&cov_rel.to_be_bytes());
+        gpos[sub_off + 8..sub_off + 10].copy_from_slice(&mark_array_rel.to_be_bytes());
+        gpos[sub_off + 10..sub_off + 12].copy_from_slice(&lig_array_rel.to_be_bytes());
+        gpos[mark_anchor_off_pos..mark_anchor_off_pos + 2]
+            .copy_from_slice(&mark_anchor_rel_to_marray.to_be_bytes());
+        gpos[lig_attach_off_pos..lig_attach_off_pos + 2]
+            .copy_from_slice(&lig_attach_rel_to_larray.to_be_bytes());
+        gpos[comp0_anchor_off_pos..comp0_anchor_off_pos + 2]
+            .copy_from_slice(&comp0_anchor_rel_to_la.to_be_bytes());
+        gpos[comp1_anchor_off_pos..comp1_anchor_off_pos + 2]
+            .copy_from_slice(&comp1_anchor_rel_to_la.to_be_bytes());
+        gpos[mark_x_dev_pos..mark_x_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+        gpos[mark_y_dev_pos..mark_y_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+        gpos[comp0_x_dev_pos..comp0_x_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+        gpos[comp0_y_dev_pos..comp0_y_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+        gpos[comp1_x_dev_pos..comp1_x_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+        gpos[comp1_y_dev_pos..comp1_y_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+
+        let ivs_bytes = build_ivs_one_region_one_item(20);
+        let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
+        let baked = bake_gpos_at_coords(&gpos, Some(&store), &[1.0]).unwrap();
+
+        // Mark anchor: 5+20=25.
+        assert_eq!(
+            i16::from_be_bytes([baked[mark_x_pos], baked[mark_x_pos + 1]]),
+            25
+        );
+        // Component 0 anchor: 100+20=120.
+        assert_eq!(
+            i16::from_be_bytes([baked[comp0_x_pos], baked[comp0_x_pos + 1]]),
+            120
+        );
+        // Component 1 anchor: 200+20=220.
+        assert_eq!(
+            i16::from_be_bytes([baked[comp1_x_pos], baked[comp1_x_pos + 1]]),
+            220
+        );
+        for off in [
+            mark_x_dev_pos,
+            mark_y_dev_pos,
+            comp0_x_dev_pos,
+            comp0_y_dev_pos,
+            comp1_x_dev_pos,
+            comp1_y_dev_pos,
+        ] {
+            assert_eq!(u16::from_be_bytes([baked[off], baked[off + 1]]), 0);
+        }
+    }
+
+    /// MarkMarkPos shares MarkBasePos's shape (two MarkArrays). Single
+    /// targeted check that MarkMark dispatches into the same anchor
+    /// walk by routing one anchor through the type-6 branch.
+    #[test]
+    fn mark_mark_pos_anchor_variation_folds() {
+        let mut gpos = Vec::new();
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&100u16.to_be_bytes());
+        gpos.extend_from_slice(&100u16.to_be_bytes());
+        gpos.extend_from_slice(&10u16.to_be_bytes());
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&4u16.to_be_bytes());
+        gpos.extend_from_slice(&6u16.to_be_bytes()); // lookupType=6
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&8u16.to_be_bytes());
+        let sub_off = gpos.len();
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // posFormat
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // mark1CovOff (fill)
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // mark2CovOff (fill)
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // markClassCount=1
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // mark1ArrayOff (fill)
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // mark2ArrayOff (fill)
+
+        // Mark1Array.
+        let m1_array_rel = (gpos.len() - sub_off) as u16;
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        let m1_anchor_off_pos = gpos.len();
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        let m1_anchor_rel_to_array = (gpos.len() - sub_off - m1_array_rel as usize) as u16;
+        let m1_x_pos = gpos.len() + 2;
+        let m1_x_dev_pos = gpos.len() + 6;
+        let m1_y_dev_pos = gpos.len() + 8;
+        gpos.extend_from_slice(&3u16.to_be_bytes());
+        gpos.extend_from_slice(&7i16.to_be_bytes());
+        gpos.extend_from_slice(&8i16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+
+        // Mark2Array (same shape as BaseArray).
+        let m2_array_rel = (gpos.len() - sub_off) as u16;
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // mark2Count
+        let m2_anchor_off_pos = gpos.len();
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        let m2_anchor_rel_to_array = (gpos.len() - sub_off - m2_array_rel as usize) as u16;
+        let m2_x_pos = gpos.len() + 2;
+        let m2_x_dev_pos = gpos.len() + 6;
+        let m2_y_dev_pos = gpos.len() + 8;
+        gpos.extend_from_slice(&3u16.to_be_bytes());
+        gpos.extend_from_slice(&77i16.to_be_bytes());
+        gpos.extend_from_slice(&88i16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+
+        let cov_rel = (gpos.len() - sub_off) as u16;
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&90u16.to_be_bytes());
+
+        let vi_rel = (gpos.len() - sub_off) as u16;
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0x8000u16.to_be_bytes());
+
+        gpos[sub_off + 2..sub_off + 4].copy_from_slice(&cov_rel.to_be_bytes());
+        gpos[sub_off + 4..sub_off + 6].copy_from_slice(&cov_rel.to_be_bytes());
+        gpos[sub_off + 8..sub_off + 10].copy_from_slice(&m1_array_rel.to_be_bytes());
+        gpos[sub_off + 10..sub_off + 12].copy_from_slice(&m2_array_rel.to_be_bytes());
+        gpos[m1_anchor_off_pos..m1_anchor_off_pos + 2]
+            .copy_from_slice(&m1_anchor_rel_to_array.to_be_bytes());
+        gpos[m2_anchor_off_pos..m2_anchor_off_pos + 2]
+            .copy_from_slice(&m2_anchor_rel_to_array.to_be_bytes());
+        gpos[m1_x_dev_pos..m1_x_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+        gpos[m1_y_dev_pos..m1_y_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+        gpos[m2_x_dev_pos..m2_x_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+        gpos[m2_y_dev_pos..m2_y_dev_pos + 2].copy_from_slice(&vi_rel.to_be_bytes());
+
+        let ivs_bytes = build_ivs_one_region_one_item(11);
+        let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
+        let baked = bake_gpos_at_coords(&gpos, Some(&store), &[1.0]).unwrap();
+
+        assert_eq!(
+            i16::from_be_bytes([baked[m1_x_pos], baked[m1_x_pos + 1]]),
+            18
+        );
+        assert_eq!(
+            i16::from_be_bytes([baked[m2_x_pos], baked[m2_x_pos + 1]]),
+            88
+        );
+        for off in [m1_x_dev_pos, m1_y_dev_pos, m2_x_dev_pos, m2_y_dev_pos] {
+            assert_eq!(u16::from_be_bytes([baked[off], baked[off + 1]]), 0);
+        }
     }
 }
