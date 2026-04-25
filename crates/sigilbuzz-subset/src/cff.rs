@@ -1017,28 +1017,21 @@ pub fn renumber_charstring_with_cross_fd(
             ));
         }
         let old_idx = old_idx as usize;
-        let new_idx = match call.kind {
-            SubrKind::Local => local_renumber
-                .get(old_idx)
-                .copied()
-                .flatten()
-                .ok_or(SubsetError::Unsupported(
-                    "CFF charstring calls dropped subroutine",
-                ))?,
-            SubrKind::Global => {
-                if let Some(Some(target)) = cross_fd_override.get(old_idx).copied() {
-                    target
-                } else {
-                    global_renumber
-                        .get(old_idx)
-                        .copied()
-                        .flatten()
-                        .ok_or(SubsetError::Unsupported(
-                            "CFF charstring calls dropped subroutine",
-                        ))?
+        let new_idx =
+            match call.kind {
+                SubrKind::Local => local_renumber.get(old_idx).copied().flatten().ok_or(
+                    SubsetError::Unsupported("CFF charstring calls dropped subroutine"),
+                )?,
+                SubrKind::Global => {
+                    if let Some(Some(target)) = cross_fd_override.get(old_idx).copied() {
+                        target
+                    } else {
+                        global_renumber.get(old_idx).copied().flatten().ok_or(
+                            SubsetError::Unsupported("CFF charstring calls dropped subroutine"),
+                        )?
+                    }
                 }
-            }
-        };
+            };
         let new_bias = match call.kind {
             SubrKind::Local => new_local_bias,
             SubrKind::Global => new_global_bias,
@@ -3071,12 +3064,8 @@ mod tests {
 
         let g3 = alloc::vec![139u8, 139u8, OP_RMOVETO, OP_RETURN];
 
-        let globals: Vec<&[u8]> = alloc::vec![
-            g0.as_slice(),
-            g1.as_slice(),
-            g2.as_slice(),
-            g3.as_slice(),
-        ];
+        let globals: Vec<&[u8]> =
+            alloc::vec![g0.as_slice(), g1.as_slice(), g2.as_slice(), g3.as_slice(),];
         let is_cross = compute_cross_fd_globals(&globals, 1).unwrap();
         assert_eq!(is_cross, alloc::vec![true, true, true, false]);
     }
@@ -4154,7 +4143,11 @@ mod tests {
         let fd_index_off_size: usize = {
             let total: usize = font_dict_bodies.iter().map(Vec::len).sum();
             let last_off = 1 + total;
-            if last_off <= 0xFF { 1 } else { 2 }
+            if last_off <= 0xFF {
+                1
+            } else {
+                2
+            }
         };
         let fd_index_data_start = 2 + 1 + (n_fds + 1) * fd_index_off_size;
         let mut fd_body_offsets_in_index: Vec<usize> = Vec::with_capacity(n_fds);
@@ -4257,12 +4250,8 @@ mod tests {
         let globals: Vec<&[u8]> = alloc::vec![g0.as_slice()];
         let per_fd_locals: Vec<Vec<&[u8]>> =
             alloc::vec![alloc::vec![local.as_slice()], alloc::vec![local.as_slice()]];
-        let cff = build_synthetic_cid_cff1_with_subrs(
-            &charstrings,
-            &[0u8, 1],
-            &globals,
-            &per_fd_locals,
-        );
+        let cff =
+            build_synthetic_cid_cff1_with_subrs(&charstrings, &[0u8, 1], &globals, &per_fd_locals);
 
         let new_cff = subset_non_identity(&cff, &[0u16, 1]).unwrap();
         let parsed = parse_cff1(&new_cff).unwrap();
@@ -4297,7 +4286,11 @@ mod tests {
         }
         targets.sort();
         targets.dedup();
-        assert_eq!(targets.len(), 2, "each FD's charstring routes to its own duplicate");
+        assert_eq!(
+            targets.len(),
+            2,
+            "each FD's charstring routes to its own duplicate"
+        );
     }
 
     #[test]
