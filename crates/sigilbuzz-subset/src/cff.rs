@@ -967,6 +967,40 @@ pub fn renumber_charstring(
     local_renumber: &[Option<u32>],
     global_renumber: &[Option<u32>],
 ) -> Result<(), SubsetError> {
+    renumber_charstring_with_cross_fd(
+        charstring,
+        old_local_count,
+        old_global_count,
+        new_local_count,
+        new_global_count,
+        local_renumber,
+        global_renumber,
+        &[],
+    )
+}
+
+/// Like [`renumber_charstring`] but accepts a per-FD override map for
+/// cross-FD globals. `cross_fd_override[i]` — when `Some(new_idx)` —
+/// rewrites a `callgsubr` to old global `i` to point at the FD-specific
+/// duplicate at `new_idx` in the rebuilt global INDEX, instead of the
+/// `global_renumber` entry. The override table must be indexed in the
+/// source-font global numbering (length == old_global_count) and is
+/// allowed to be empty for the non-cross-FD case.
+///
+/// # Errors
+///
+/// Returns [`SubsetError::Unsupported`] under the same conditions as
+/// [`renumber_charstring`].
+pub fn renumber_charstring_with_cross_fd(
+    charstring: &mut [u8],
+    old_local_count: usize,
+    old_global_count: usize,
+    new_local_count: usize,
+    new_global_count: usize,
+    local_renumber: &[Option<u32>],
+    global_renumber: &[Option<u32>],
+    cross_fd_override: &[Option<u32>],
+) -> Result<(), SubsetError> {
     let calls = scan_subr_calls(charstring, old_local_count, old_global_count)?;
     let new_local_bias = subr_bias(new_local_count);
     let new_global_bias = subr_bias(new_global_count);
@@ -982,17 +1016,32 @@ pub fn renumber_charstring(
             ));
         }
         let old_idx = old_idx as usize;
-        let (table, new_bias) = match call.kind {
-            SubrKind::Local => (local_renumber, new_local_bias),
-            SubrKind::Global => (global_renumber, new_global_bias),
+        let new_idx = match call.kind {
+            SubrKind::Local => local_renumber
+                .get(old_idx)
+                .copied()
+                .flatten()
+                .ok_or(SubsetError::Unsupported(
+                    "CFF charstring calls dropped subroutine",
+                ))?,
+            SubrKind::Global => {
+                if let Some(Some(target)) = cross_fd_override.get(old_idx).copied() {
+                    target
+                } else {
+                    global_renumber
+                        .get(old_idx)
+                        .copied()
+                        .flatten()
+                        .ok_or(SubsetError::Unsupported(
+                            "CFF charstring calls dropped subroutine",
+                        ))?
+                }
+            }
         };
-        let new_idx = table
-            .get(old_idx)
-            .copied()
-            .flatten()
-            .ok_or(SubsetError::Unsupported(
-                "CFF charstring calls dropped subroutine",
-            ))?;
+        let new_bias = match call.kind {
+            SubrKind::Local => new_local_bias,
+            SubrKind::Global => new_global_bias,
+        };
         let new_raw = (new_idx as i64) - i64::from(new_bias);
         if !(i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&new_raw) {
             return Err(SubsetError::Unsupported(
@@ -2346,13 +2395,15 @@ fn subset_cid_keyed(
         .filter_map(|(i, &k)| if k { Some(i as u32) } else { None })
         .collect();
 
-    // Build global renumber table.
-    let mut global_renumber: Vec<Option<u32>> = alloc::vec![None; parsed.global_subrs.len()];
-    for (new_i, &old_i) in kept_global_idx.iter().enumerate() {
-        global_renumber[old_i as usize] = Some(new_i as u32);
-    }
-    let new_global_count = kept_global_idx.len();
     let old_global_count = parsed.global_subrs.len();
+
+    // Cross-FD detection: which kept globals reach a `callsubr` either
+    // directly or transitively through another global? Such a global
+    // resolves locals against the calling FD's local INDEX, so in the
+    // rebuilt CFF — where every FD shares the same global INDEX — we
+    // must duplicate the global per kept FD that uses it and rewrite
+    // each caller's `callgsubr` operand to point at *that* FD's copy.
+    let cross_fd_mask = compute_cross_fd_globals(&parsed.global_subrs, 0)?;
 
     // Per-kept-FD local renumber tables.
     let mut per_fd_local_renumber: Vec<Vec<Option<u32>>> =
@@ -2366,8 +2417,110 @@ fn subset_cid_keyed(
         per_fd_local_renumber.push(renumber);
     }
 
+    // Determine which (cross-FD global, kept-FD) duplicates are needed.
+    // A duplicate is needed iff a kept charstring or kept local subr in
+    // FD f calls (transitively) the cross-FD global. Conservatively
+    // request a duplicate for every (cross-FD-global, FD) pair where
+    // the global is *reached* from any caller in that FD.
+    //
+    // Reachability: walk every kept charstring and every kept local
+    // subr in FD f; collect the set of globals they reach via the
+    // global-call graph. Intersect with cross_fd_mask to get the
+    // duplicates needed for FD f.
+    let mut per_fd_cross_fd_targets: Vec<alloc::vec::Vec<bool>> =
+        alloc::vec![alloc::vec![false; old_global_count]; kept_fds_sorted.len()];
+    for (fd_pos, &old_fd) in kept_fds_sorted.iter().enumerate() {
+        // Bodies that originate calls in this FD: kept charstrings
+        // belonging to old_fd plus all kept locals in old_fd.
+        let fd_local_subrs = &fd_infos[old_fd as usize].local_subrs;
+        let mut seed_bodies: Vec<&[u8]> = Vec::new();
+        for (i, &gid) in kept_gids.iter().enumerate() {
+            if kept_fd_old[i] == old_fd {
+                seed_bodies.push(parsed.char_strings[gid as usize]);
+            }
+        }
+        for &kept_local_old in &per_fd_kept_local[fd_pos] {
+            seed_bodies.push(fd_local_subrs[kept_local_old as usize]);
+        }
+        // Reachable globals — transitive closure through global call
+        // graph. We use the source-font global INDEX because the new
+        // INDEX hasn't been built yet.
+        let mut reached = alloc::vec![false; old_global_count];
+        let mut frontier: Vec<u32> = Vec::new();
+        for body in &seed_bodies {
+            for call in scan_subr_calls(body, fd_local_subrs.len(), old_global_count)? {
+                if call.kind == SubrKind::Global {
+                    let idx = call.index_after_bias;
+                    if idx >= 0 && (idx as usize) < old_global_count {
+                        let i = idx as usize;
+                        if !reached[i] {
+                            reached[i] = true;
+                            frontier.push(i as u32);
+                        }
+                    }
+                }
+            }
+        }
+        while let Some(g) = frontier.pop() {
+            let body = parsed.global_subrs[g as usize];
+            for call in scan_subr_calls(body, fd_local_subrs.len(), old_global_count)? {
+                if call.kind == SubrKind::Global {
+                    let idx = call.index_after_bias;
+                    if idx >= 0 && (idx as usize) < old_global_count {
+                        let i = idx as usize;
+                        if !reached[i] {
+                            reached[i] = true;
+                            frontier.push(i as u32);
+                        }
+                    }
+                }
+            }
+        }
+        for (g, hit) in reached.iter().enumerate() {
+            if *hit && cross_fd_mask[g] {
+                per_fd_cross_fd_targets[fd_pos][g] = true;
+            }
+        }
+    }
+
+    // Build the new global INDEX layout:
+    //   slot [0 .. n_non_cross]            — kept *non-cross-FD* globals
+    //   slot [n_non_cross .. n_non_cross+k] — per-FD duplicates (one per
+    //                                         (cross-FD global, FD) pair
+    //                                         that any caller exercises)
+    //
+    // `global_renumber[i]` is the new slot for the canonical (non-cross-FD)
+    // copy of source global `i` — `Some(slot)` only when global `i` is
+    // *kept and not cross-FD*. Cross-FD globals route through
+    // `cross_fd_override_per_fd` instead.
+    let mut global_renumber: Vec<Option<u32>> = alloc::vec![None; old_global_count];
+    let mut new_global_layout: Vec<(u32, Option<u8>)> = Vec::new();
+    for &old_i in &kept_global_idx {
+        if !cross_fd_mask[old_i as usize] {
+            let new_slot = new_global_layout.len() as u32;
+            global_renumber[old_i as usize] = Some(new_slot);
+            new_global_layout.push((old_i, None));
+        }
+    }
+    // Per-FD override tables: per_fd_cross_fd_override[fd_pos][old_g] =
+    // Some(new_slot) when FD fd_pos calls cross-FD global old_g.
+    let mut per_fd_cross_fd_override: Vec<Vec<Option<u32>>> = (0..kept_fds_sorted.len())
+        .map(|_| alloc::vec![None; old_global_count])
+        .collect();
+    for (fd_pos, &old_fd) in kept_fds_sorted.iter().enumerate() {
+        for (old_g, &needs) in per_fd_cross_fd_targets[fd_pos].iter().enumerate() {
+            if needs && kept_global_set[old_g] {
+                let new_slot = new_global_layout.len() as u32;
+                per_fd_cross_fd_override[fd_pos][old_g] = Some(new_slot);
+                new_global_layout.push((old_g as u32, Some(old_fd)));
+            }
+        }
+    }
+    let new_global_count = new_global_layout.len();
+
     // Step 5: rewrite each kept charstring with its FD's local-renumber
-    // table + the shared global-renumber table.
+    // table + the shared global-renumber table + the FD's cross-FD
+    // override table.
     let mut new_charstrings: Vec<Vec<u8>> = Vec::with_capacity(kept_gids.len());
     for (i, &gid) in kept_gids.iter().enumerate() {
         let old_fd = kept_fd_old[i];
@@ -2376,7 +2529,7 @@ fn subset_cid_keyed(
         let fd_local_renumber = &per_fd_local_renumber[new_fd_pos];
         let new_local_count = per_fd_kept_local[new_fd_pos].len();
         let mut cs = parsed.char_strings[gid as usize].to_vec();
-        renumber_charstring(
+        renumber_charstring_with_cross_fd(
             &mut cs,
             fd_local_subrs_old.len(),
             old_global_count,
@@ -2384,11 +2537,13 @@ fn subset_cid_keyed(
             new_global_count,
             fd_local_renumber,
             &global_renumber,
+            &per_fd_cross_fd_override[new_fd_pos],
         )?;
         new_charstrings.push(cs);
     }
 
-    // Renumber each kept local subr (per-FD).
+    // Renumber each kept local subr (per-FD). Locals are FD-scoped so
+    // they use their FD's cross-FD override too.
     let mut new_per_fd_local_subrs: Vec<Vec<Vec<u8>>> = Vec::with_capacity(kept_fds_sorted.len());
     for (i, &old_fd) in kept_fds_sorted.iter().enumerate() {
         let fd_local_subrs_old = &fd_infos[old_fd as usize].local_subrs;
@@ -2400,7 +2555,7 @@ fn subset_cid_keyed(
             .map(|&idx| fd_local_subrs_old[idx as usize].to_vec())
             .collect();
         for sub in &mut new_locals {
-            renumber_charstring(
+            renumber_charstring_with_cross_fd(
                 sub,
                 fd_local_subrs_old.len(),
                 old_global_count,
@@ -2408,47 +2563,64 @@ fn subset_cid_keyed(
                 new_global_count,
                 fd_local_renumber,
                 &global_renumber,
+                &per_fd_cross_fd_override[i],
             )?;
         }
         new_per_fd_local_subrs.push(new_locals);
     }
 
-    // Renumber each kept global subr. Globals can call other globals
-    // (using the global-renumber table) and locals (using the *original-
-    // FD's* local-renumber table at runtime). Cross-FD subr sharing is
-    // already an unusual configuration; the safest path is to renumber
-    // a global subr using the *global* table only and require global
-    // subrs not to call locals. compute_kept_subrs's seed traversal
-    // already discards any local-subr references made from a global
-    // body in the rare cross-FD case; we mirror that by *not* renumbering
-    // local-subr operands inside global bodies. In practice global subrs
-    // overwhelmingly call globals; they call locals only in some
-    // optimisation-pass outputs, never across FDs.
-    let mut new_global_subrs: Vec<Vec<u8>> = kept_global_idx
-        .iter()
-        .map(|&i| parsed.global_subrs[i as usize].to_vec())
-        .collect();
-    // Use an empty local-renumber table for globals — they don't see a
-    // single local pool. We pass the global-renumber table; any local
-    // call inside a global would collide with this and be rejected by
-    // renumber_charstring. To keep round-trip robustness we treat such
-    // calls as a hard error rather than silently drop them.
-    let empty_local: Vec<Option<u32>> = Vec::new();
-    for sub in &mut new_global_subrs {
-        // Pass new_local_count = 0, which sets bias = 107. If the sub
-        // contains a callsubr, the bias subtraction will be wrong, but
-        // renumber_charstring will hit the empty local renumber table
-        // and surface a hard error — which is the right outcome for an
-        // unsupported source shape.
-        renumber_charstring(
-            sub,
-            0,
-            old_global_count,
-            0,
-            new_global_count,
-            &empty_local,
-            &global_renumber,
-        )?;
+    // Build the new global INDEX bodies. For each slot:
+    //   * (old_g, None)          — non-cross-FD global, single copy.
+    //   * (old_g, Some(old_fd))  — cross-FD duplicate for FD `old_fd`.
+    //
+    // Non-cross-FD globals only call other globals; we rewrite their
+    // `callgsubr` operands using `global_renumber` (cross-FD overrides
+    // are inapplicable because by definition this body never calls a
+    // local). A non-cross-FD global that calls a cross-FD global would
+    // itself become cross-FD by `compute_cross_fd_globals`'s transitive
+    // pass, so this branch only sees globals whose entire reach stays
+    // inside the non-cross-FD tier.
+    //
+    // Cross-FD duplicates re-encode against the *original* FD's local
+    // INDEX (sized to that FD's source local_subrs.len()), then route
+    // local-subr operands through that FD's local-renumber table and
+    // global-subr operands through that FD's cross-FD override (so
+    // recursive cross-FD calls land on the correct duplicate).
+    let mut new_global_subrs: Vec<Vec<u8>> = Vec::with_capacity(new_global_layout.len());
+    for &(old_g, dup_for_fd) in &new_global_layout {
+        let mut body = parsed.global_subrs[old_g as usize].to_vec();
+        if let Some(old_fd) = dup_for_fd {
+            let fd_pos = kept_fds_sorted.iter().position(|&f| f == old_fd).unwrap();
+            let fd_local_subrs_old = &fd_infos[old_fd as usize].local_subrs;
+            let new_local_count = per_fd_kept_local[fd_pos].len();
+            renumber_charstring_with_cross_fd(
+                &mut body,
+                fd_local_subrs_old.len(),
+                old_global_count,
+                new_local_count,
+                new_global_count,
+                &per_fd_local_renumber[fd_pos],
+                &global_renumber,
+                &per_fd_cross_fd_override[fd_pos],
+            )?;
+        } else {
+            // Non-cross-FD: zero-sized local pool because the body
+            // never issues a `callsubr`. If it did, the empty local
+            // renumber table would surface a hard error.
+            let empty_local: Vec<Option<u32>> = Vec::new();
+            let empty_override: Vec<Option<u32>> = Vec::new();
+            renumber_charstring_with_cross_fd(
+                &mut body,
+                0,
+                old_global_count,
+                0,
+                new_global_count,
+                &empty_local,
+                &global_renumber,
+                &empty_override,
+            )?;
+        }
+        new_global_subrs.push(body);
     }
 
     // Step 4: emit FDSelect bytes.
