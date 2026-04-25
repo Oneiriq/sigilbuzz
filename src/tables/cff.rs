@@ -973,11 +973,14 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                 }
             }
             op_code::ESC_HFLEX1 => {
-                // 12 36: 9 args. First curve dy starts with d1, second
-                // ends vertically-corrected.
+                // 12 36: 9 args `dx1 dy1 dx2 dy2 dx3 dx4 dx5 dy5 dx6`.
+                // The flex starts AND ends at the same y value, so the
+                // implicit dy6 must cancel the accumulated y delta:
+                // dy1 + dy2 + dy3(=0) + dy4(=0) + dy5 + dy6 = 0, hence
+                // dy6 = -(dy1 + dy2 + dy5) = -(a[1] + a[3] + a[7]).
                 if self.stack.len() >= 9 {
                     let a = core::mem::take(&mut self.stack);
-                    let dy_total = a[1] + a[3] + a[6];
+                    let dy_total = a[1] + a[3] + a[7];
                     let c1 = [a[0], a[1], a[2], a[3], a[4], 0.0];
                     let c2 = [a[5], 0.0, a[6], a[7], a[8], -dy_total];
                     self.rr_curve(&c1);
@@ -1394,6 +1397,64 @@ mod tests {
         let mut o = Outline::new();
         let err = parsed.outline(0, &mut o).unwrap_err();
         assert!(matches!(err, Error::Malformed { .. }));
+    }
+
+    #[test]
+    fn charstring_hflex1_endpoint_returns_to_start_y() {
+        // hflex1 spec: the flex starts and ends at the same y value.
+        // Args: dx1 dy1 dx2 dy2 dx3 dx4 dx5 dy5 dx6. Use dy1=5, dy2=3,
+        // dy5=-2 — a non-trivial set where the buggy dy_total formula
+        // (a[1]+a[3]+a[6], mixing dx5 for dy5) diverges from the
+        // correct a[1]+a[3]+a[7]. Start at (0, 100). Expected final y
+        // = 100.
+        let enc = |n: i32| -> Vec<u8> {
+            // Use SHORTINT encoding (op 28, i16) for clean small ints.
+            let mut v = Vec::new();
+            v.push(op_code::SHORTINT);
+            v.extend_from_slice(&(n as i16).to_be_bytes());
+            v
+        };
+        let mut cs = Vec::new();
+        cs.extend(enc(0)); // move_to x0=0
+        cs.extend(enc(100)); // move_to y0=100
+        cs.push(op_code::RMOVETO);
+        // hflex1 args.
+        cs.extend(enc(10)); // dx1
+        cs.extend(enc(5)); // dy1
+        cs.extend(enc(10)); // dx2
+        cs.extend(enc(3)); // dy2
+        cs.extend(enc(10)); // dx3
+        cs.extend(enc(10)); // dx4
+        cs.extend(enc(10)); // dx5
+        cs.extend(enc(-2)); // dy5
+        cs.extend(enc(10)); // dx6
+        cs.push(op_code::ESCAPE);
+        cs.push(op_code::ESC_HFLEX1);
+        cs.push(op_code::ENDCHAR);
+
+        let cff = build_cff_with_charstring(&cs);
+        let parsed = Cff::parse(&cff).unwrap();
+        let mut o = Outline::new();
+        parsed.outline(0, &mut o).unwrap();
+
+        // The second CubicTo's endpoint must share the y of the
+        // original MoveTo (100). The buggy implementation swapped
+        // a[6] (dx5) for a[7] (dy5) in dy_total, yielding a final y
+        // of 100 + a[7] - a[6] = 92.
+        let cubics: Vec<_> = o
+            .ops()
+            .iter()
+            .filter_map(|op| match op {
+                PathOp::CubicTo { x, y, .. } => Some((*x, *y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cubics.len(), 2, "hflex1 must emit exactly two cubics");
+        let (_, last_y) = cubics[1];
+        assert!(
+            (last_y - 100.0).abs() < 1e-3,
+            "hflex1 endpoint y was {last_y}, expected 100.0 (start y)"
+        );
     }
 
     #[test]
