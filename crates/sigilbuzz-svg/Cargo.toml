@@ -6,8 +6,11 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "SVG serialiser for sigilbuzz glyph outlines and color glyphs."
-publish = false
+description = "SVG serialiser for sigilbuzz glyph outlines and COLRv1 color glyphs, producing self-contained <svg> documents."
+publish = true
+readme = "README.md"
+keywords = ["svg", "vector", "opentype", "color-fonts", "sigilbuzz"]
+categories = ["rendering", "text-processing"]
 
 [features]
 default = ["std", "color"]
