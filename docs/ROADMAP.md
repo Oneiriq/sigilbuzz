@@ -159,15 +159,51 @@ Renderer-facing companion crates land in the workspace; remaining script-complet
 
 ---
 
-## 0.4.0+ (next)
+## 0.4.0 (shipping)
 
-Polish + remaining gaps that surfaced during 0.3.0 development.
+Polish: every script-completeness carry-over from prior releases closes, the renderer-output companion crates land, and two real latent bugs surfaced during the polish work get fixed.
 
-- [ ] Amiri `rlig` rule-selection parity (#21) — feature dispatcher rule-ordering refactor
-- [ ] glyf composite anchor-point resolution (the 2/6710 Amiri misses noted by #52)
-- [ ] sigilbuzz-paint coverage gaps — radial / sweep gradient integration tests, full ItemVariationStore delta application path
-- [ ] AAT `kerx` format 2 (compound-class kerning)
-- [ ] PDF / SVG output backends — likely as `sigilbuzz-pdf` / `sigilbuzz-svg` companion crates
+### Script-completeness
+
+- [x] Amiri `rlig` rule-selection parity (#21) — refactored `apply_gsub_lookup` to mirror HarfBuzz's `apply_forward` (cursor-first walk, take first matching subtable per cursor) instead of running each subtable across the whole run independently. Net -200 lines. Allah / bism-Allah / Muhammad / lillah / qul / akbar all parity-clean.
+- [x] glyf composite anchor-mode + TWO_BY_TWO column-major fix — the 2/6710 Amiri parity miss was actually a TWO_BY_TWO matrix-field-order bug latent since 0.3.0; symmetric scales hid it. Anchor-mode resolution implemented at the same time. Amiri now 6710/6710.
+
+### AAT compound-class kerning
+
+- [x] AAT `kerx` format 2 — compound-class kerning subtable. AAT lookup-table format 0 + 6 (format 2 already shipped in 0.3.0). 904-byte synthetic fixture.
+
+### Companion crate `sigilbuzz-svg`
+
+- [x] SVG outline emission (default feature) — `glyph_to_svg` / `glyph_to_svg_at_coords` over `PathOp` → SVG path-data.
+- [x] COLRv1 emission gated on the `color` feature — depends on `sigilbuzz-paint` only when enabled.
+- [x] Sweep-gradient gracefully degrades to a linear gradient with a `<!-- sweep-fallback -->` marker so consumers needing true sweep can detect and route through `sigilbuzz-gpu`.
+
+### Companion crate `sigilbuzz-pdf`
+
+- [x] PDF Type 3 font emitter — `emit_type3_font(face, gids) -> Type3Font` with per-glyph `CharProc` + Encoding + Widths + FontMatrix.
+- [x] Exact quadratic-to-cubic degree elevation for `QuadTo` ops (PDF has no quadratic operator).
+
+### sigilbuzz-paint coverage + bug fixes
+
+- [x] PaintRadialGradient + PaintSweepGradient integration coverage.
+- [x] Full ItemVariationStore delta-application path with hand-rolled IVS fixture (1 axis, 2 regions, 5 delta-set rows).
+- [x] DeltaSetIndexMap indirection — `var_index_base` now resolves through GDEF's `DeltaSetIndexMap` instead of bit-slicing the base directly.
+- [x] **F2DOT14 unit fix** — `var_delta` returned raw IVS ints as `f32` and added them to fields already divided by 16384; every PaintVar* alpha and stop-offset was scaled wrong.
+- [x] **GDEF-parked IVS fix** — fonts that store the shared IVS in GDEF (per OpenType v1.3+) silently emitted static output even with non-empty coords.
+
+### Hardening
+
+- [x] Wave 5 fuzz pass on the 0.4.0 surface (+2 fixes — `sigilbuzz-svg` leaf-list misalignment when an interior glyph has no outline; `kerx` per-subtable error handling so one malformed subtable doesn't poison the rest of the table).
+
+---
+
+## 0.5.0+ (next)
+
+- [ ] HarfBuzz `hb-subset` equivalent — font subsetting for distribution + serving.
+- [ ] PDF Type 1 / OTF-embedded font types — alternatives to Type 3 for size-sensitive consumers.
+- [ ] Performance benchmarks against rustybuzz — establish a regression suite.
+- [ ] crates.io publish — `publish = false` flips to true on every workspace member.
+- [ ] Phantom-point references in glyf composite anchor-mode (currently zero-translation fallback).
 
 ---
 
