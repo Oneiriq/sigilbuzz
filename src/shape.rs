@@ -3179,22 +3179,42 @@ fn apply_morx(morx: &Morx<'_>, glyphs: &mut Vec<Glyph>) {
     *glyphs = rebuilt;
 }
 
-/// AAT `kerx` pair-kern pass — mirrors [`apply_legacy_kern`]'s
-/// HarfBuzz-compatible half-split distribution so kerx output
-/// matches what the macOS renderer does for the same pairs.
+/// AAT `kerx` apply pass.
+///
+/// Two passes run in sequence:
+///
+/// - Format 0 / 2 (pair-list and compound-class) emit a delta per
+///   adjacent pair; we distribute it half-on-left, half-on-right
+///   exactly like [`apply_legacy_kern`] so kerx output lines up
+///   with the macOS renderer for the same pairs.
+/// - Format 1 (state-machine) walks the run through an AAT state
+///   table; each value-list pop targets a single stacked glyph and
+///   the delta is applied directly to that glyph's `x_advance`. No
+///   half-split — the state machine already chose which glyph to
+///   land on (typically the left of the pair).
 fn apply_kerx(kerx: &Kerx<'_>, glyphs: &mut [Glyph]) {
-    if glyphs.len() < 2 {
+    if glyphs.is_empty() {
         return;
     }
-    for i in 0..glyphs.len() - 1 {
-        let left = glyphs[i].glyph_id as u16;
-        let right = glyphs[i + 1].glyph_id as u16;
-        let delta = i32::from(kerx.kern(left, right));
-        if delta != 0 {
-            let half = delta / 2;
-            glyphs[i].x_advance += delta - half;
-            glyphs[i + 1].x_advance += half;
+    if glyphs.len() >= 2 {
+        for i in 0..glyphs.len() - 1 {
+            let left = glyphs[i].glyph_id as u16;
+            let right = glyphs[i + 1].glyph_id as u16;
+            let delta = i32::from(kerx.kern(left, right));
+            if delta != 0 {
+                let half = delta / 2;
+                glyphs[i].x_advance += delta - half;
+                glyphs[i + 1].x_advance += half;
+            }
         }
+    }
+    if kerx.has_state_machine() {
+        let ids: alloc::vec::Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
+        kerx.apply_state_machines(&ids, |idx, delta| {
+            if let Some(g) = glyphs.get_mut(idx) {
+                g.x_advance += i32::from(delta);
+            }
+        });
     }
 }
 

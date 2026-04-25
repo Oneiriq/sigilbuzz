@@ -20,20 +20,26 @@
 //!     Body body        (format-specific)
 //! ```
 //!
-//! Two subtable formats are implemented:
+//! Three subtable formats are implemented:
 //!
 //! - Format 0 — ordered pair list (the common case for AAT fonts
 //!   that re-use legacy `kern` data).
+//! - Format 1 — state-machine kerning. Walks the run through an AAT
+//!   extended state table; entries push glyph indices onto a "kern
+//!   stack" and reference a list of i16 values that are popped and
+//!   applied in pair order. Useful for contextual kerning (e.g. a
+//!   spur joining only when not preceded by a space).
 //! - Format 2 — n-way class kerning. Two AAT lookup tables map
 //!   left and right glyph ids to row / column offsets into a 2D
 //!   array of i16 deltas; useful for dense matrices like Latin
 //!   pair-class tables that would explode if expanded to flat
 //!   pairs.
 //!
-//! Other formats (1 — state machine, 4 — control-point anchoring,
-//! 6 — indexed class) are skipped silently — sigilbuzz's apply path
-//! still consults the subtables it does understand, so a mixed-format
-//! `kerx` degrades gracefully instead of failing the whole font.
+//! Format 4 (control-point anchoring) and format 6 (extended class
+//! pair, 32-bit offsets) are skipped silently — sigilbuzz's apply
+//! path still consults the subtables it does understand, so a
+//! mixed-format `kerx` degrades gracefully instead of failing the
+//! whole font.
 //!
 //! # Format 0
 //!
@@ -51,6 +57,32 @@
 //! Pairs are sorted by the 32-bit key `(left << 16) | right`, so
 //! lookup is a binary search — exactly as in the legacy `kern`
 //! table, just with a u32 count instead of u16.
+//!
+//! # Format 1
+//!
+//! ```text
+//!   u32 nClasses
+//!   u32 classTableOffset    (relative to format-1 body start)
+//!   u32 stateArrayOffset    (        ")
+//!   u32 entryTableOffset    (        ")
+//!   u32 valueTableOffset    (        ")
+//!   ... class subtable, state array, entry array, value list
+//! ```
+//!
+//! Each entry is 6 bytes: `(newState: u16, flags: u16, valueIndex: u16)`.
+//! `flags` carries `PUSH` (bit 15 — push the current glyph onto the
+//! kern stack), `DONT_ADVANCE` (bit 14 — re-process the current glyph
+//! after switching state) and `RESET` (bit 13 — clear the stack;
+//! cross-stream only). `valueIndex` is a byte offset from the start
+//! of the value table to the first i16 in this entry's value list;
+//! `0xFFFF` means "no value list".
+//!
+//! Value lists are open-ended i16 arrays terminated by an entry with
+//! bit 0 set. The masked value (`raw & !1`) is the actual kern delta
+//! applied to the glyph popped from the kern stack. Multiple values
+//! in a list pop multiple stack glyphs (last-pushed first), so a
+//! list of three values applies to the three most recently pushed
+//! glyphs.
 //!
 //! # Format 2
 //!
@@ -71,7 +103,9 @@
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
-use crate::tables::layout::state_table::lookup_class;
+use crate::tables::layout::state_table::{
+    lookup_class, StateTableHeader, CLASS_END_OF_TEXT, CLASS_OUT_OF_BOUNDS,
+};
 use crate::tables::parse::Reader;
 
 const COVERAGE_FORMAT_MASK: u32 = 0xFF;
@@ -91,7 +125,24 @@ pub struct Kerx<'a> {
 #[derive(Debug, Clone, Copy)]
 enum Subtable<'a> {
     Format0(Format0<'a>),
+    Format1(Format1<'a>),
     Format2(Format2<'a>),
+}
+
+/// Format 1 — state-machine kerning. Wraps the AAT extended state
+/// table primitive plus a value-table slice; the apply pass walks
+/// the glyph stream through the state machine, pushing glyphs onto
+/// a kern stack on each `PUSH` entry and popping + applying values
+/// from the value table whenever an entry references a non-empty
+/// value list.
+#[derive(Debug, Clone, Copy)]
+struct Format1<'a> {
+    state: StateTableHeader<'a>,
+    /// Slice of the format-1 subtable body that begins at the value
+    /// table's origin. Value lists are i16 arrays terminated by an
+    /// entry with bit 0 set; this slice provides the bytes those
+    /// lists index into.
+    value_table: &'a [u8],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -181,13 +232,13 @@ impl<'a> Kerx<'a> {
                 continue;
             }
 
-            // Format 0 is the common case. Format 2 (compound-class
+            // Format 0 is the common case. Format 1 is the AAT state
+            // machine for contextual kerning. Format 2 (compound-class
             // kerning) covers Latin / CJK fonts that ship a dense
-            // pair matrix. Formats 1 (state-machine), 4
-            // (control-point anchors) and 6 (indexed class kern)
-            // exist in the spec but are rare; sigilbuzz skips them
-            // silently so a mixed `kerx` still applies the formats
-            // we do understand.
+            // pair matrix. Formats 4 (control-point anchors) and 6
+            // (indexed class kern) exist in the spec but are rare;
+            // sigilbuzz skips them silently so a mixed `kerx` still
+            // applies the formats we do understand.
             //
             // Per-subtable parse failures (declared length shorter
             // than the body, internal offsets out of range) are
@@ -200,6 +251,11 @@ impl<'a> Kerx<'a> {
                     0 => {
                         if let Ok(Some(sub)) = parse_format0(data, r.position(), sub_end) {
                             subtables.push(Subtable::Format0(sub));
+                        }
+                    }
+                    1 => {
+                        if let Ok(Some(sub)) = parse_format1(data, sub_start, sub_end) {
+                            subtables.push(Subtable::Format1(sub));
                         }
                     }
                     2 => {
@@ -227,8 +283,11 @@ impl<'a> Kerx<'a> {
         self.version
     }
 
-    /// Sum of kerning deltas across every parsed subtable for the
-    /// pair `(left, right)`. Zero when no pair matches.
+    /// Sum of pair-kerning deltas across every parsed *pair-lookup*
+    /// subtable (formats 0 and 2) for the pair `(left, right)`. Zero
+    /// when no pair matches. Format 1 (state machine) is stateful and
+    /// is not consulted here — callers wanting full kerx coverage
+    /// must also call [`Kerx::apply_state_machines`].
     #[must_use]
     pub fn kern(&self, left: u16, right: u16) -> i16 {
         let key = (u32::from(left) << 16) | u32::from(right);
@@ -237,12 +296,44 @@ impl<'a> Kerx<'a> {
             let v = match sub {
                 Subtable::Format0(f0) => f0.find(key),
                 Subtable::Format2(f2) => f2.find(left, right, self.num_glyphs),
+                Subtable::Format1(_) => continue,
             };
             if let Some(v) = v {
                 total += i32::from(v);
             }
         }
         total.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+    }
+
+    /// Walks every format-1 (state-machine) subtable across the run,
+    /// applying each value-list pop directly to the targeted glyph's
+    /// `x_advance`. Formats 0 / 2 are pair-only and are handled by
+    /// [`Kerx::kern`] — this method only drives the stateful subtables.
+    ///
+    /// `apply` receives `(glyph_index, kern_delta)` for every kern
+    /// the state machine emits and is responsible for splatting that
+    /// delta wherever it should land (e.g. the glyph's advance). The
+    /// callback indirection keeps `kerx` independent of the public
+    /// `Glyph` struct.
+    pub fn apply_state_machines<F>(&self, glyph_ids: &[u16], mut apply: F)
+    where
+        F: FnMut(usize, i16),
+    {
+        for sub in &self.subtables {
+            if let Subtable::Format1(f1) = sub {
+                f1.apply(glyph_ids, &mut apply);
+            }
+        }
+    }
+
+    /// True iff this `kerx` carries at least one state-machine
+    /// (format 1) subtable. Callers can short-circuit the apply walk
+    /// when no state machine is present.
+    #[must_use]
+    pub fn has_state_machine(&self) -> bool {
+        self.subtables
+            .iter()
+            .any(|s| matches!(s, Subtable::Format1(_)))
     }
 
     /// Number of parsed subtables (any format) — useful in tests to
@@ -339,6 +430,171 @@ fn parse_format2(data: &[u8], sub_start: usize, sub_end: usize) -> Result<Option
         array_off,
     }))
 }
+
+/// Parses one format-1 subtable body. Layout (relative to the
+/// subtable origin, i.e. byte 0 = the 12-byte common header):
+///
+/// ```text
+///   0 .. 12 : common subtable header  (length, coverage, tupleCount)
+///  12 .. 28 : extended state-table header (nClasses, classOff,
+///             stateOff, entryOff)
+///  28 .. 32 : valueTableOffset (relative to format-1 body start)
+///   ...     : class subtable, state array, entry array, value table
+/// ```
+///
+/// All recorded offsets are relative to byte 0 of the format-1
+/// *body* (i.e. byte 12 of the full subtable), matching how the AAT
+/// state-table primitive expects them.
+fn parse_format1(data: &[u8], sub_start: usize, sub_end: usize) -> Result<Option<Format1<'_>>> {
+    let body_start = sub_start + 12;
+    if body_start + 20 > sub_end {
+        return Err(Error::Truncated {
+            offset: body_start,
+            context: "kerx format 1 header",
+        });
+    }
+    let body = data.get(body_start..sub_end).ok_or(Error::Truncated {
+        offset: body_start,
+        context: "kerx format 1 body slice",
+    })?;
+    // The state-table header lives at body bytes 0..16; the
+    // valueTableOffset u32 sits immediately after.
+    let Ok(state) = StateTableHeader::parse(body) else {
+        return Ok(None);
+    };
+    let value_off = u32::from_be_bytes([body[16], body[17], body[18], body[19]]) as usize;
+    if value_off > body.len() {
+        return Ok(None);
+    }
+    let value_table = &body[value_off..];
+    Ok(Some(Format1 { state, value_table }))
+}
+
+impl Format1<'_> {
+    /// Walks `glyph_ids` through the state machine, invoking `apply`
+    /// with each `(target_index, kern_delta)` the value lists emit.
+    /// On any malformed read the walk bails cleanly — partial output
+    /// is allowed but never panics — so a font with a corrupt format
+    /// 1 subtable still positions whatever pairs the apply loop did
+    /// reach.
+    fn apply<F>(&self, glyph_ids: &[u16], apply: &mut F)
+    where
+        F: FnMut(usize, i16),
+    {
+        const ENTRY_SIZE: usize = 6; // newState + flags + valueIndex
+        // Kern stack: indices into `glyph_ids` of glyphs awaiting a
+        // value-list pop. AAT semantics says new pushes go on top
+        // and the next value list pops them in reverse — last pushed,
+        // first applied — pairing each value with the matching glyph.
+        let mut stack: Vec<usize> = Vec::new();
+        let mut cur_state: u16 = 0;
+        let mut i = 0usize;
+        // Bound the walk: at most one pass per glyph plus a few
+        // DontAdvance retries. AAT's spec doesn't cap the loop, so
+        // we cap it here defensively to avoid pathological fonts
+        // looping the shaper.
+        let max_iters = glyph_ids.len().saturating_mul(8) + 16;
+        let mut iters = 0usize;
+        while i <= glyph_ids.len() {
+            iters += 1;
+            if iters > max_iters {
+                return;
+            }
+            let class = if i == glyph_ids.len() {
+                CLASS_END_OF_TEXT
+            } else {
+                self.state.class_of(glyph_ids[i]).unwrap_or(CLASS_OUT_OF_BOUNDS)
+            };
+            let Ok(entry_idx) = self.state.entry_index(cur_state, class) else {
+                return;
+            };
+            let Ok((new_state, flags)) = self.state.entry_prefix(entry_idx, ENTRY_SIZE) else {
+                return;
+            };
+            let value_index = self
+                .state
+                .entry_tail_u16(entry_idx, ENTRY_SIZE, 4)
+                .unwrap_or(VALUE_INDEX_NONE);
+
+            if flags & FLAG_F1_PUSH != 0 && i < glyph_ids.len() {
+                // Cap the stack at 8 (AAT's documented depth limit
+                // for kern actions) to keep a malformed font from
+                // ballooning memory.
+                if stack.len() < KERN_STACK_MAX {
+                    stack.push(i);
+                }
+            }
+            if flags & FLAG_F1_RESET != 0 {
+                stack.clear();
+            }
+            if value_index != VALUE_INDEX_NONE {
+                self.consume_value_list(value_index, &mut stack, apply);
+            }
+
+            cur_state = new_state;
+            if flags & FLAG_F1_DONT_ADVANCE == 0 {
+                i += 1;
+            } else if i == glyph_ids.len() {
+                // End-of-text + DontAdvance would loop forever; bail.
+                return;
+            }
+        }
+    }
+
+    /// Reads i16 values starting at `value_index` (a byte offset
+    /// from the start of the value table) until an entry with bit 0
+    /// set ends the list. Each value is masked to clear bit 0 and
+    /// applied to the top of the kern stack via `apply`.
+    fn consume_value_list<F>(&self, value_index: u16, stack: &mut Vec<usize>, apply: &mut F)
+    where
+        F: FnMut(usize, i16),
+    {
+        let mut off = value_index as usize;
+        // Cap the walk at the value table's length so a malformed
+        // entry that never sets bit 0 cannot loop forever.
+        let max_steps = self.value_table.len() / 2 + 1;
+        for _ in 0..max_steps {
+            let Some(slice) = self.value_table.get(off..off + 2) else {
+                return;
+            };
+            let raw = i16::from_be_bytes([slice[0], slice[1]]);
+            let is_last = (raw as u16) & 1 != 0;
+            // Mask out bit 0 — the spec uses it as a list terminator
+            // but the actual kern delta is the masked value.
+            let value = raw & !1i16;
+            if let Some(idx) = stack.pop() {
+                if value != 0 {
+                    apply(idx, value);
+                }
+            } else {
+                // No glyph to apply against — break to avoid walking
+                // past meaningful data.
+                return;
+            }
+            if is_last {
+                return;
+            }
+            off += 2;
+        }
+    }
+}
+
+// --- Format 1 flag bits (per Apple kerx spec) ---
+/// Push the current glyph onto the kern stack.
+const FLAG_F1_PUSH: u16 = 1 << 15;
+/// Don't advance the cursor (re-process the current glyph in the
+/// new state).
+const FLAG_F1_DONT_ADVANCE: u16 = 1 << 14;
+/// Reset the cross-stream kerning state. We honour the flag by
+/// clearing the kern stack so a stale push cannot leak into the next
+/// run — sigilbuzz does not yet emit cross-stream offsets so the
+/// stricter cross-stream resync isn't needed.
+const FLAG_F1_RESET: u16 = 1 << 13;
+/// Sentinel meaning "this entry has no value list".
+const VALUE_INDEX_NONE: u16 = 0xFFFF;
+/// Maximum kern stack depth. Apple's documented depth is eight
+/// — we mirror that to bound memory on malformed fonts.
+const KERN_STACK_MAX: usize = 8;
 
 impl Format0<'_> {
     fn pair_at(&self, i: u32) -> (u32, i16) {
@@ -712,5 +968,209 @@ mod tests {
         // one is preserved.
         assert_eq!(k.subtable_count(), 1);
         assert_eq!(k.kern(10, 20), -7);
+    }
+
+    // -----------------------------------------------------------------
+    // Format 1 — state-machine kerning.
+    // -----------------------------------------------------------------
+
+    /// Builds an AAT lookup-table format 6 (sorted glyph→class
+    /// pairs). Mirrors the helper in `state_table.rs::tests` since
+    /// `mod tests` is private to its module.
+    fn build_lookup_format6(pairs: &[(u16, u16)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&6u16.to_be_bytes()); // format
+        out.extend_from_slice(&4u16.to_be_bytes()); // unitSize
+        out.extend_from_slice(&(pairs.len() as u16).to_be_bytes());
+        out.extend_from_slice(&[0u8; 6]); // search hints
+        for (g, v) in pairs {
+            out.extend_from_slice(&g.to_be_bytes());
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        out
+    }
+
+    /// Builds a one-subtable kerx with format 1 wired for a tiny
+    /// "kern A before V only when not after space" state machine.
+    /// The A glyph id, V glyph id and space glyph id are caller
+    /// inputs so the test can pick non-overlapping gids.
+    fn build_kerx_format1_av_after_letter(a_gid: u16, v_gid: u16, sp_gid: u16) -> Vec<u8> {
+        // Class subtable (format 6): A→4, V→5, space→6. Sorted by
+        // glyph id so the binary search keeps working regardless of
+        // caller's choice of gids.
+        let mut sorted = [(a_gid, 4u16), (v_gid, 5u16), (sp_gid, 6u16)];
+        sorted.sort_by_key(|p| p.0);
+        let class_lookup = build_lookup_format6(&sorted);
+
+        // Format 1 body layout (everything offset from body start):
+        //   0..16   state-table header
+        //  16..20   valueTableOffset (u32)
+        //  20..     class lookup (aligned to 2)
+        //  ..       state array (nStates × nClasses × u16)
+        //  ..       entry array (n_entries × 6)
+        //  ..       value table
+        let n_classes: u32 = 7;
+        let n_states: u32 = 2;
+        let n_entries: usize = 5;
+
+        let header_len = 20;
+        let class_off = header_len;
+        let class_end = class_off + class_lookup.len();
+        // 2-byte align state array.
+        let state_off = class_end + (class_end % 2);
+        let state_bytes = (n_states * n_classes) as usize * 2;
+        let entry_off = state_off + state_bytes;
+        let entry_bytes = n_entries * 6;
+        let value_off = entry_off + entry_bytes;
+        let value_bytes = 2usize; // single terminator-marked entry
+
+        let body_len = value_off + value_bytes;
+
+        let mut body: Vec<u8> = Vec::with_capacity(body_len);
+        // --- State table header ---
+        body.extend_from_slice(&n_classes.to_be_bytes());
+        body.extend_from_slice(&(class_off as u32).to_be_bytes());
+        body.extend_from_slice(&(state_off as u32).to_be_bytes());
+        body.extend_from_slice(&(entry_off as u32).to_be_bytes());
+        body.extend_from_slice(&(value_off as u32).to_be_bytes());
+        // --- Class lookup ---
+        body.extend_from_slice(&class_lookup);
+        if body.len() < state_off {
+            body.resize(state_off, 0);
+        }
+        // --- State array ---
+        // State 0: cells per class.
+        //   class 0..3 (reserved)  → entry 0 (noop)
+        //   class 4 (A)            → entry 1 (push, stay state 0)
+        //   class 5 (V)            → entry 2 (apply value 0, stay state 0)
+        //   class 6 (space)        → entry 3 (no-op, go state 1)
+        // State 1: cells per class.
+        //   class 4 (A)            → entry 4 (no-op, go state 0; suppresses push)
+        //   class 5 (V)            → entry 0 (noop — no V kern after solo space)
+        //   class 6 (space)        → entry 3 (stay state 1)
+        let s0: [u16; 7] = [0, 0, 0, 0, 1, 2, 3];
+        let s1: [u16; 7] = [0, 0, 0, 0, 4, 0, 3];
+        for v in s0.iter().chain(s1.iter()) {
+            body.extend_from_slice(&v.to_be_bytes());
+        }
+        // --- Entries (newState, flags, valueIndex) ---
+        let push: u16 = 0x8000;
+        let entries: [(u16, u16, u16); 5] = [
+            (0, 0, VALUE_INDEX_NONE),    // #0 noop
+            (0, push, VALUE_INDEX_NONE), // #1 push
+            (0, 0, 0),                   // #2 apply value at offset 0
+            (1, 0, VALUE_INDEX_NONE),    // #3 → state 1
+            (0, 0, VALUE_INDEX_NONE),    // #4 → state 0 (clears stale A)
+        ];
+        for (ns, fl, vi) in entries {
+            body.extend_from_slice(&ns.to_be_bytes());
+            body.extend_from_slice(&fl.to_be_bytes());
+            body.extend_from_slice(&vi.to_be_bytes());
+        }
+        // --- Value table: one i16 = -50 with terminator bit. ---
+        // The spec says: value list terminated by an entry whose bit
+        // 0 is set; the kern delta is the value with bit 0 cleared.
+        // -50 is even (0xFFCE), so writing 0xFFCF keeps the magnitude
+        // and adds the terminator. Reinterpret the bit pattern as i16.
+        #[allow(clippy::cast_possible_wrap)]
+        let raw = 0xFFCFu16 as i16;
+        body.extend_from_slice(&raw.to_be_bytes());
+
+        // Wrap in the 12-byte common subtable header + 8-byte kerx
+        // table header.
+        let sub_len = 12 + body.len();
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&2u16.to_be_bytes()); // version
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // pad
+        bytes.extend_from_slice(&1u32.to_be_bytes()); // nTables
+        bytes.extend_from_slice(&(sub_len as u32).to_be_bytes());
+        bytes.extend_from_slice(&1u32.to_be_bytes()); // coverage: format 1
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // tupleCount
+        bytes.extend_from_slice(&body);
+        bytes
+    }
+
+    /// Captures `(glyph_index, kern_delta)` callbacks during a
+    /// state-machine apply pass.
+    fn collect_kerns(k: &Kerx<'_>, ids: &[u16]) -> Vec<(usize, i16)> {
+        let mut out = Vec::new();
+        k.apply_state_machines(ids, |idx, delta| out.push((idx, delta)));
+        out
+    }
+
+    #[test]
+    fn format1_parses_and_reports_state_machine() {
+        let bytes = build_kerx_format1_av_after_letter(1, 2, 3);
+        let k = Kerx::parse(&bytes, 8).unwrap();
+        assert_eq!(k.subtable_count(), 1);
+        assert!(k.has_state_machine());
+        // No pair-list subtable — the legacy kern() lookup must
+        // return zero so the apply path doesn't double-count.
+        assert_eq!(k.kern(1, 2), 0);
+    }
+
+    #[test]
+    fn format1_kerns_av_when_not_after_space() {
+        // gid 1 = A, gid 2 = V — a contiguous AV pair should kern.
+        let bytes = build_kerx_format1_av_after_letter(1, 2, 3);
+        let k = Kerx::parse(&bytes, 8).unwrap();
+        let kerns = collect_kerns(&k, &[1, 2]);
+        assert_eq!(kerns, alloc::vec![(0, -50)]);
+    }
+
+    #[test]
+    fn format1_skips_av_after_space() {
+        // gid 3 (space) before AV: the state machine's "after space"
+        // state suppresses the A push, so no kern lands.
+        let bytes = build_kerx_format1_av_after_letter(1, 2, 3);
+        let k = Kerx::parse(&bytes, 8).unwrap();
+        let kerns = collect_kerns(&k, &[3, 1, 2]);
+        assert!(kerns.is_empty(), "no kern after a leading space");
+    }
+
+    #[test]
+    fn format1_kerns_repeated_av_pairs() {
+        // "AVAV" should kern both pairs — the state machine is
+        // designed to reset to state 0 after each V.
+        let bytes = build_kerx_format1_av_after_letter(1, 2, 3);
+        let k = Kerx::parse(&bytes, 8).unwrap();
+        let kerns = collect_kerns(&k, &[1, 2, 1, 2]);
+        assert_eq!(kerns, alloc::vec![(0, -50), (2, -50)]);
+    }
+
+    #[test]
+    fn format1_walk_terminates_on_corrupt_value_list() {
+        // Build a working machine, then clobber the value-table byte
+        // so bit 0 is *not* set — the consume_value_list cap should
+        // bail before walking off the end.
+        let mut bytes = build_kerx_format1_av_after_letter(1, 2, 3);
+        // The value byte sits as the very last 2 bytes of the
+        // table. Clear bit 0 so the list never terminates organically.
+        let len = bytes.len();
+        bytes[len - 1] &= !1;
+        let k = Kerx::parse(&bytes, 8).unwrap();
+        // Apply must still return without panicking; the kern that
+        // *would* have been emitted may or may not land but the
+        // shaper must not loop or crash.
+        let _ = collect_kerns(&k, &[1, 2, 1, 2]);
+    }
+
+    #[test]
+    fn format1_handles_empty_input() {
+        let bytes = build_kerx_format1_av_after_letter(1, 2, 3);
+        let k = Kerx::parse(&bytes, 8).unwrap();
+        let kerns = collect_kerns(&k, &[]);
+        assert!(kerns.is_empty());
+    }
+
+    #[test]
+    fn format1_unknown_glyphs_do_not_kern() {
+        // Glyph ids that aren't in the class table fall through to
+        // the reserved out-of-bounds class, which always lands on
+        // entry 0 (noop) in our table.
+        let bytes = build_kerx_format1_av_after_letter(1, 2, 3);
+        let k = Kerx::parse(&bytes, 8).unwrap();
+        let kerns = collect_kerns(&k, &[99, 99, 99]);
+        assert!(kerns.is_empty());
     }
 }
