@@ -119,17 +119,69 @@ fn opensans_glyph_outlines_match_ttf_parser_exactly() {
 }
 
 #[test]
-fn amiri_glyph_outlines_match_ttf_parser_majority() {
-    // Amiri is a large Arabic font with many composites. Hold it
-    // to a strong majority; 100% parity is plausible but not
-    // guaranteed on first pass because of composite anchor-point
-    // matching corners.
+fn amiri_glyph_outlines_match_ttf_parser_exactly() {
+    // Amiri is a large Arabic font (6710 glyphs) with extensive
+    // composite use, including TWO_BY_TWO rotation matrices and
+    // anchor-point references. With the composite flattener
+    // rewritten to a two-pass scheme that materialises absolute
+    // points before emitting, every glyph now matches ttf-parser
+    // to within the 1e-2 epsilon. Drop the coverage to a strict
+    // equality check so the next composite-shape regression lands
+    // here loudly.
     let bytes = include_bytes!("fixtures/amiri_regular.ttf");
     let (matched, total) = parity_for(bytes);
     let ratio = matched as f32 / total as f32;
     println!("Amiri outline parity: {matched}/{total} = {ratio:.3}");
-    assert!(
-        ratio >= 0.95,
+    assert_eq!(
+        matched, total,
         "Amiri outline parity regression: {matched}/{total} = {ratio:.3}"
     );
+}
+
+#[test]
+fn amiri_two_anchor_glyphs_now_match() {
+    // The two Amiri glyphs that previously missed parity (gids 379
+    // and 6123) drove the rewrite of the glyf composite flattener:
+    // both reference component children with TWO_BY_TWO transforms
+    // whose 2x2 was being read in wrong field order, and both also
+    // exercise the wider re-architecting that resolves
+    // ARGS_ARE_XY_VALUES-clear anchor pairs. Pin them by gid so the
+    // regression surfaces directly if either of those two paths
+    // breaks again.
+    let bytes = include_bytes!("fixtures/amiri_regular.ttf");
+    let ours = Face::parse_bytes(bytes, 0).expect("sigilbuzz face");
+    let theirs = ttf_parser::Face::parse(bytes, 0).expect("ttf-parser face");
+    for &gid in &[379u16, 6123u16] {
+        let mut builder = CollectBuilder::default();
+        theirs.outline_glyph(ttf_parser::GlyphId(gid), &mut builder);
+        let ours_outline = ours
+            .glyph_outline(gid)
+            .expect("outline ok")
+            .expect("outline drew");
+        assert_eq!(
+            ours_outline.len(),
+            builder.ops.len(),
+            "op-count mismatch on gid {gid}: ours={} theirs={}",
+            ours_outline.len(),
+            builder.ops.len()
+        );
+        for (i, (ours_op, theirs_op)) in ours_outline
+            .ops()
+            .iter()
+            .zip(builder.ops.iter())
+            .enumerate()
+        {
+            let (tag, coords) = collapse(*ours_op);
+            assert_eq!(
+                tag, theirs_op.0,
+                "op-tag mismatch at {i} on gid {gid}: {:?} vs {:?}",
+                tag, theirs_op.0
+            );
+            assert!(
+                approx_eq(&coords, &theirs_op.1),
+                "op-coord mismatch at {i} on gid {gid}: {coords:?} vs {:?}",
+                theirs_op.1
+            );
+        }
+    }
 }
