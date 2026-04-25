@@ -214,6 +214,21 @@ void        hb_version(unsigned int *major,
                        unsigned int *micro);
 const char *hb_version_string(void);
 
+/* ---------- hb_set_t (opaque integer set) ---------- */
+
+typedef struct hb_set_t hb_set_t;
+
+#define HB_SET_VALUE_INVALID ((hb_codepoint_t)0xFFFFFFFFu)
+
+hb_set_t    *hb_set_create(void);
+void         hb_set_destroy(hb_set_t *set);
+hb_set_t    *hb_set_reference(hb_set_t *set);
+void         hb_set_add(hb_set_t *set, hb_codepoint_t codepoint);
+void         hb_set_del(hb_set_t *set, hb_codepoint_t codepoint);
+hb_bool_t    hb_set_has(const hb_set_t *set, hb_codepoint_t codepoint);
+unsigned int hb_set_get_population(const hb_set_t *set);
+hb_bool_t    hb_set_next(const hb_set_t *set, hb_codepoint_t *codepoint);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

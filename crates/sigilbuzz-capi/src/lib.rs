@@ -53,6 +53,11 @@ use core::slice;
 
 use sigilbuzz::{shape, Buffer, Direction, Face, Feature, Font};
 
+// `hb_set_t` lives in its own module — the opaque integer-set type
+// the subset and introspection bridges need. It has no dependency on
+// the rest of the crate, so it ships unconditionally.
+pub mod set;
+
 // ---------------------------------------------------------------------------
 // Refcounted opaque types
 // ---------------------------------------------------------------------------
