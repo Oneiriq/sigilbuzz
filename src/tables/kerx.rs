@@ -481,7 +481,8 @@ impl Format1<'_> {
     where
         F: FnMut(usize, i16),
     {
-        const ENTRY_SIZE: usize = 6; // newState + flags + valueIndex
+        // newState + flags + valueIndex
+        const ENTRY_SIZE: usize = 6;
         // Kern stack: indices into `glyph_ids` of glyphs awaiting a
         // value-list pop. AAT semantics says new pushes go on top
         // and the next value list pops them in reverse — last pushed,
@@ -503,7 +504,9 @@ impl Format1<'_> {
             let class = if i == glyph_ids.len() {
                 CLASS_END_OF_TEXT
             } else {
-                self.state.class_of(glyph_ids[i]).unwrap_or(CLASS_OUT_OF_BOUNDS)
+                self.state
+                    .class_of(glyph_ids[i])
+                    .unwrap_or(CLASS_OUT_OF_BOUNDS)
             };
             let Ok(entry_idx) = self.state.entry_index(cur_state, class) else {
                 return;

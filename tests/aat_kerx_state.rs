@@ -37,10 +37,7 @@ fn shape_text(text: &str) -> Vec<sigilbuzz::Glyph> {
 fn fixture_has_kerx_and_no_pair_kerning_paths() {
     let blob = Blob::new(AAT_KERX_STATE);
     let face = Face::parse(&blob, 0).unwrap();
-    assert!(
-        face.kerx().unwrap().is_some(),
-        "fixture must carry kerx"
-    );
+    assert!(face.kerx().unwrap().is_some(), "fixture must carry kerx");
     assert!(
         face.gpos().unwrap().is_none(),
         "fixture must omit GPOS so kerx is consulted"
@@ -90,8 +87,15 @@ fn state_machine_kerns_ab_after_letter() {
     // pushes; B then kerns.
     let glyphs = shape_text("DAB");
     assert_eq!(glyphs.len(), 3);
-    assert_eq!(glyphs[0].x_advance, 500, "D untouched (no D push at this slot)");
-    assert_eq!(glyphs[1].x_advance, 500 - 40, "A kerns -40 when reached after D");
+    assert_eq!(
+        glyphs[0].x_advance, 500,
+        "D untouched (no D push at this slot)"
+    );
+    assert_eq!(
+        glyphs[1].x_advance,
+        500 - 40,
+        "A kerns -40 when reached after D"
+    );
     assert_eq!(glyphs[2].x_advance, 500, "B advance untouched");
 }
 
