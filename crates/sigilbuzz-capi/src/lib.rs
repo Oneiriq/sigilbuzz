@@ -59,9 +59,12 @@ use sigilbuzz::{shape, Buffer, Direction, Face, Feature, Font};
 pub mod set;
 // `subset_bridge` is gated on the `subset` cargo feature so a
 // `--no-default-features` build of this crate still compiles cleanly
-// without pulling in the companion subsetter crate.
+// without pulling in the companion subsetter crate. `paint_bridge`
+// follows the same pattern.
 #[cfg(feature = "subset")]
 pub mod subset_bridge;
+#[cfg(feature = "paint")]
+pub mod paint_bridge;
 
 // ---------------------------------------------------------------------------
 // Refcounted opaque types
@@ -187,9 +190,9 @@ impl hb_face_t {
 /// `hb_font_set_*` functions accept a non-const pointer and we
 /// expose the same surface. Most callers configure the font once
 /// before shaping, so contention is negligible.
-struct FontInner {
-    _face: Arc<FaceInner>,
-    state: spin_mutex::SpinMutex<FontState>,
+pub(crate) struct FontInner {
+    pub(crate) _face: Arc<FaceInner>,
+    pub(crate) state: spin_mutex::SpinMutex<FontState>,
 }
 
 struct FontState {
@@ -212,7 +215,7 @@ unsafe impl Sync for FontInner {}
 
 #[repr(C)]
 pub struct hb_font_t {
-    inner: Arc<FontInner>,
+    pub(crate) inner: Arc<FontInner>,
 }
 
 /// The shaping buffer — text in, glyphs out. HarfBuzz makes
