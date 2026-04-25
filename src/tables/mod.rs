@@ -42,6 +42,7 @@ pub mod outline;
 pub mod parse;
 pub mod sbix;
 pub mod svg_table;
+pub mod varc;
 pub mod variation_store;
 pub mod vhea;
 pub mod vmtx;
@@ -89,6 +90,7 @@ pub use outline::{Outline, OutlineSink, PathOp};
 pub use parse::Reader;
 pub use sbix::{Sbix, SbixGlyph, SbixStrike};
 pub use svg_table::{Svg, SvgDocument};
+pub use varc::{Varc, VarcComponent, VarcComposite};
 pub use variation_store::ItemVariationStore;
 pub use vhea::Vhea;
 pub use vmtx::Vmtx;
@@ -174,4 +176,8 @@ pub mod tag {
     /// flagship faces and a smattering of Noto / SIL designs ship
     /// this; the majority of fonts omit it.
     pub const BASE: [u8; 4] = *b"BASE";
+    /// `VARC` — Variable Composite Glyphs. OpenType 1.10 / 2024
+    /// extension that carries axis-driven shape transformations on
+    /// composite-glyph components.
+    pub const VARC: [u8; 4] = *b"VARC";
 }
