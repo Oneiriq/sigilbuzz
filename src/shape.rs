@@ -3216,6 +3216,34 @@ fn apply_kerx(kerx: &Kerx<'_>, glyphs: &mut [Glyph]) {
             }
         });
     }
+    // Format 4 (control-point) apply. Inline-coordinates events
+    // resolve fully without consulting glyf / ankr; we land them as
+    // x/y offsets on the current glyph. Control-point and anchor-
+    // point events need a glyf-point or `ankr` lookup that
+    // [`Face::glyph_points`] does not yet expose — those events are
+    // dropped silently until the API lands. Dropping is the same
+    // behaviour the parse-only path used to give, so no regression.
+    if kerx.has_format4() {
+        let ids: alloc::vec::Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
+        kerx.apply_format4(&ids, |evt| {
+            if let crate::tables::kerx::Kerx4Action::Coordinates {
+                mark_index: _,
+                current_index,
+                mark_x,
+                mark_y,
+                current_x,
+                current_y,
+            } = evt
+            {
+                if let Some(g) = glyphs.get_mut(current_index) {
+                    let dx = i32::from(mark_x) - i32::from(current_x);
+                    let dy = i32::from(mark_y) - i32::from(current_y);
+                    g.x_offset += dx;
+                    g.y_offset += dy;
+                }
+            }
+        });
+    }
 }
 
 /// Applies deltas from the legacy `kern` table to the glyph run.

@@ -35,17 +35,25 @@
 //!   pair-class tables that would explode if expanded to flat
 //!   pairs.
 //!
-//! Format 4 — control-point kerning. Parsed for structure (so a
-//! mixed-format `kerx` doesn't trip on format-4 bytes), but the
-//! apply path is a stub: control-point and anchor-point variants
-//! need glyf-point or ankr coordinate reads that sigilbuzz's kerx
-//! module deliberately keeps separate from the state-machine walk.
-//! The "coordinates" variant (action type 2 — inline FUnit deltas)
-//! is structurally parsed too. Walking the state machine to drive
-//! actual offsets is left for a follow-up; until then format 4
-//! subtables degrade to "parse cleanly, apply nothing", which is
-//! strictly better than dropping the surrounding format-0 / 2 / 6
-//! subtables on the floor.
+//! Format 4 — control-point kerning. The state machine walks the run
+//! marking glyphs and firing actions; each action looks up an anchor
+//! pair in the action table. Three action types exist:
+//!
+//! - **Type 0** — control points: pairs of glyf-point indices. The
+//!   apply pass needs to read the (x, y) of point N on each glyph.
+//!   sigilbuzz emits a [`Kerx4Action::ControlPoints`] event so the
+//!   caller can resolve the points; the shaper integration drops
+//!   these events until [`crate::Face`] grows a public glyph-point
+//!   accessor (follow-up).
+//! - **Type 1** — anchor points: pairs of `ankr` table indices.
+//!   sigilbuzz emits the event but the shaper drops it; `ankr`
+//!   support is on a separate track.
+//! - **Type 2** — coordinates: four i16 in FUnits per record. The
+//!   shaper applies `(mark_x - current_x, mark_y - current_y)` as
+//!   x/y offsets directly — no glyf / ankr reads needed.
+//!
+//! The state-machine walk + event emission is driven by
+//! [`Kerx::apply_format4`].
 //!
 //! # Format 6
 //!
@@ -158,7 +166,6 @@ enum Subtable<'a> {
     Format0(Format0<'a>),
     Format1(Format1<'a>),
     Format2(Format2<'a>),
-    #[allow(dead_code)] // apply path is a follow-up — see module docs
     Format4(Format4<'a>),
     Format6(Format6<'a>),
 }
@@ -202,25 +209,73 @@ struct Format2<'a> {
     array_off: usize,
 }
 
-/// Format 4 — control-point kerning. Structurally parsed (state
-/// table header + a 32-bit flags word that encodes the action type
-/// and action-table offset) so a mixed-format `kerx` doesn't lose
-/// surrounding subtables, but the apply path is intentionally a
-/// stub — driving the state machine to glyf / ankr point reads
-/// requires plumbing this module deliberately keeps separate.
+/// Format 4 — control-point kerning. The state machine pushes glyph
+/// indices onto a "mark stack" (max depth 1 — the most recent push)
+/// and entries with a non-`0xFFFF` action index look up an anchor
+/// pair in the action table. The pair tells the apply code which
+/// point on the marked glyph and the current glyph's outlines should
+/// coincide; the resulting (dx, dy) becomes the offset applied to
+/// the current glyph's pen position.
 ///
 /// Action type lives in flags bits 30-31:
 /// - 0 = control points (u16 pairs into glyf points)
-/// - 1 = anchor points (u16 pairs into ankr)
+/// - 1 = anchor points (u16 pairs into ankr) — sigilbuzz emits zero
+///   for this case; ankr support is a follow-up.
 /// - 2 = coordinates    (four i16 in FUnits — inline)
 #[derive(Debug, Clone, Copy)]
 struct Format4<'a> {
-    #[allow(dead_code)]
     state: StateTableHeader<'a>,
-    #[allow(dead_code)]
     action_type: u8,
-    #[allow(dead_code)]
     action_table: &'a [u8],
+}
+
+/// One control-point apply event emitted by [`Kerx::apply_format4`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kerx4Action {
+    /// Action type 0 — control points. Look up point `mark_point` on
+    /// the glyph at `mark_index`, point `current_point` on the glyph
+    /// at `current_index`, and apply the FUnit delta `mark - current`
+    /// as an offset to the current glyph.
+    ControlPoints {
+        /// Index into the run of the previously-marked glyph.
+        mark_index: usize,
+        /// Index into the run of the glyph the offset is applied to.
+        current_index: usize,
+        /// Point id on the marked glyph.
+        mark_point: u16,
+        /// Point id on the current glyph.
+        current_point: u16,
+    },
+    /// Action type 1 — anchor points (`ankr` table). sigilbuzz does
+    /// not yet parse `ankr`; the consumer should treat this as a
+    /// no-op until `ankr` lands.
+    AnchorPoints {
+        /// Index into the run of the previously-marked glyph.
+        mark_index: usize,
+        /// Index into the run of the glyph the offset is applied to.
+        current_index: usize,
+        /// `ankr` lookup index for the marked glyph.
+        mark_anchor: u16,
+        /// `ankr` lookup index for the current glyph.
+        current_anchor: u16,
+    },
+    /// Action type 2 — inline coordinates. Pre-computed FUnit deltas
+    /// (`mark_x`, `mark_y`, `current_x`, `current_y`); apply
+    /// `(mark_x - current_x, mark_y - current_y)` to the current glyph.
+    Coordinates {
+        /// Index into the run of the previously-marked glyph.
+        mark_index: usize,
+        /// Index into the run of the glyph the offset is applied to.
+        current_index: usize,
+        /// Marked glyph anchor x in FUnits.
+        mark_x: i16,
+        /// Marked glyph anchor y in FUnits.
+        mark_y: i16,
+        /// Current glyph anchor x in FUnits.
+        current_x: i16,
+        /// Current glyph anchor y in FUnits.
+        current_y: i16,
+    },
 }
 
 /// Format 6 — simple n×m kerning array. Mirrors format 2 but the
@@ -409,6 +464,27 @@ impl<'a> Kerx<'a> {
         }
     }
 
+    /// Walks every format-4 (control-point) subtable across the run,
+    /// emitting a [`Kerx4Action`] event for each anchor pair the state
+    /// machine fires. The caller is responsible for resolving the
+    /// referenced points to FUnit coords (via `glyf` for action type
+    /// 0, the `ankr` table for type 1) and applying the resulting
+    /// offset to the current glyph's pen position.
+    ///
+    /// Action type 2 (inline coordinates) is fully self-contained —
+    /// the consumer can apply `(mark_x - current_x, mark_y -
+    /// current_y)` directly without a second table lookup.
+    pub fn apply_format4<F>(&self, glyph_ids: &[u16], mut emit: F)
+    where
+        F: FnMut(Kerx4Action),
+    {
+        for sub in &self.subtables {
+            if let Subtable::Format4(f4) = sub {
+                f4.apply(glyph_ids, &mut emit);
+            }
+        }
+    }
+
     /// True iff this `kerx` carries at least one state-machine
     /// (format 1) subtable. Callers can short-circuit the apply walk
     /// when no state machine is present.
@@ -417,6 +493,16 @@ impl<'a> Kerx<'a> {
         self.subtables
             .iter()
             .any(|s| matches!(s, Subtable::Format1(_)))
+    }
+
+    /// True iff this `kerx` carries at least one format-4
+    /// (control-point) subtable. Callers can short-circuit the
+    /// [`Kerx::apply_format4`] walk when no fmt-4 is present.
+    #[must_use]
+    pub fn has_format4(&self) -> bool {
+        self.subtables
+            .iter()
+            .any(|s| matches!(s, Subtable::Format4(_)))
     }
 
     /// Number of parsed subtables (any format) — useful in tests to
@@ -791,6 +877,143 @@ impl Format1<'_> {
                 return;
             }
             off += 2;
+        }
+    }
+}
+
+// --- Format 4 flag bits (per Apple kerx spec) ---
+/// Mark the current glyph as the "marked" glyph for the next anchor
+/// action.
+const FLAG_F4_MARK: u16 = 1 << 15;
+/// Don't advance the cursor — re-process the current glyph in the new
+/// state.
+const FLAG_F4_DONT_ADVANCE: u16 = 1 << 14;
+/// Sentinel meaning "this entry has no action".
+const ACTION_INDEX_NONE: u16 = 0xFFFF;
+
+impl Format4<'_> {
+    /// Walks `glyph_ids` through the state machine and emits one
+    /// [`Kerx4Action`] event per anchor-action entry. AAT semantics:
+    /// each entry can mark the current glyph (storing its run index)
+    /// and / or invoke an action; an action looks up `actionIndex`'s
+    /// pair in the action table and emits an event referencing both
+    /// the previously-marked glyph and the current glyph.
+    fn apply<F>(&self, glyph_ids: &[u16], emit: &mut F)
+    where
+        F: FnMut(Kerx4Action),
+    {
+        // Format 4 entry size: newState + flags + actionIndex = 6 B.
+        const ENTRY_SIZE: usize = 6;
+        let mut cur_state: u16 = 0;
+        let mut marked: Option<usize> = None;
+        let mut i = 0usize;
+        let max_iters = glyph_ids.len().saturating_mul(8) + 16;
+        let mut iters = 0usize;
+        while i <= glyph_ids.len() {
+            iters += 1;
+            if iters > max_iters {
+                return;
+            }
+            let class = if i == glyph_ids.len() {
+                CLASS_END_OF_TEXT
+            } else {
+                self.state
+                    .class_of(glyph_ids[i])
+                    .unwrap_or(CLASS_OUT_OF_BOUNDS)
+            };
+            let Ok(entry_idx) = self.state.entry_index(cur_state, class) else {
+                return;
+            };
+            let Ok((new_state, flags)) = self.state.entry_prefix(entry_idx, ENTRY_SIZE) else {
+                return;
+            };
+            let action_index = self
+                .state
+                .entry_tail_u16(entry_idx, ENTRY_SIZE, 4)
+                .unwrap_or(ACTION_INDEX_NONE);
+
+            // Mark before action so the spec's "self-anchor" idiom
+            // (mark + action on the same entry) emits the action with
+            // the current glyph as both the mark and the current glyph.
+            if flags & FLAG_F4_MARK != 0 && i < glyph_ids.len() {
+                marked = Some(i);
+            }
+            if action_index != ACTION_INDEX_NONE && i < glyph_ids.len() {
+                if let Some(mark_index) = marked {
+                    self.emit_action(action_index, mark_index, i, emit);
+                }
+            }
+
+            cur_state = new_state;
+            if flags & FLAG_F4_DONT_ADVANCE == 0 {
+                i += 1;
+            } else if i == glyph_ids.len() {
+                return;
+            }
+        }
+    }
+
+    /// Reads a single record from the action table at `action_index`
+    /// and emits the corresponding [`Kerx4Action`]. The record shape
+    /// depends on the action type stamped in the format-4 flags:
+    ///
+    /// - 0 (control points): two u16 — `mark_point`, `current_point`.
+    /// - 1 (anchor points):  two u16 — `mark_anchor`, `current_anchor`.
+    /// - 2 (coordinates):    four i16 — mark x/y, current x/y.
+    fn emit_action<F>(
+        &self,
+        action_index: u16,
+        mark_index: usize,
+        current_index: usize,
+        emit: &mut F,
+    ) where
+        F: FnMut(Kerx4Action),
+    {
+        match self.action_type {
+            0 | 1 => {
+                let off = (action_index as usize).saturating_mul(4);
+                let Some(rec) = self.action_table.get(off..off + 4) else {
+                    return;
+                };
+                let a = u16::from_be_bytes([rec[0], rec[1]]);
+                let b = u16::from_be_bytes([rec[2], rec[3]]);
+                if self.action_type == 0 {
+                    emit(Kerx4Action::ControlPoints {
+                        mark_index,
+                        current_index,
+                        mark_point: a,
+                        current_point: b,
+                    });
+                } else {
+                    emit(Kerx4Action::AnchorPoints {
+                        mark_index,
+                        current_index,
+                        mark_anchor: a,
+                        current_anchor: b,
+                    });
+                }
+            }
+            2 => {
+                let off = (action_index as usize).saturating_mul(8);
+                let Some(rec) = self.action_table.get(off..off + 8) else {
+                    return;
+                };
+                let mark_x = i16::from_be_bytes([rec[0], rec[1]]);
+                let mark_y = i16::from_be_bytes([rec[2], rec[3]]);
+                let current_x = i16::from_be_bytes([rec[4], rec[5]]);
+                let current_y = i16::from_be_bytes([rec[6], rec[7]]);
+                emit(Kerx4Action::Coordinates {
+                    mark_index,
+                    current_index,
+                    mark_x,
+                    mark_y,
+                    current_x,
+                    current_y,
+                });
+            }
+            _ => {
+                // Reserved action type (3) — ignore.
+            }
         }
     }
 }
@@ -1410,12 +1633,15 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Format 4 — control-point kerning. Parse-only coverage: the
-    // apply path is a stub (glyf-coordinate / ankr reads live
-    // outside this module), so the tests assert that a format-4
-    // subtable parses cleanly and its presence does not corrupt the
-    // surrounding kerx — the kerx must still yield zero pair kerns
-    // on it without consuming subsequent format-0 subtables.
+    // Format 4 — control-point kerning.
+    //
+    // Parse-coverage tests assert that a format-4 subtable parses
+    // cleanly and its presence does not corrupt the surrounding
+    // kerx (zero pair kerns, no consumption of subsequent fmt 0
+    // subtables). The apply-coverage tests below drive a synthetic
+    // state machine through "AB" and assert one [`Kerx4Action`]
+    // event fires per matched pair with the expected indices and
+    // anchor record.
     // -----------------------------------------------------------------
 
     /// Builds a one-subtable kerx with format 4 wired with an empty
@@ -1510,6 +1736,215 @@ mod tests {
         let k = Kerx::parse(&bytes, 8).unwrap();
         assert_eq!(k.subtable_count(), 1);
         assert_eq!(k.kern(1, 2), 0);
+    }
+
+    /// Builds a kerx with one fmt-4 subtable wired with a real
+    /// state machine: class 4 = "A", class 5 = "B". State 0 entry
+    /// for class 4 marks the glyph (FLAG_F4_MARK) and goes to state
+    /// 1; state 1 entry for class 5 fires action 0 and resets.
+    /// `action_type` is stamped into bits 30-31 of the format-4 flags
+    /// word. `action_records` is the raw bytes for the action table.
+    fn build_kerx_format4_with_action(
+        a_gid: u16,
+        b_gid: u16,
+        action_type: u8,
+        action_records: &[u8],
+    ) -> Vec<u8> {
+        // Class lookup (format 6) maps A → class 4, B → class 5.
+        let mut sorted = [(a_gid, 4u16), (b_gid, 5u16)];
+        sorted.sort_by_key(|p| p.0);
+        let class_lookup = build_lookup_format6(&sorted);
+
+        let n_classes: u32 = 6; // 0..=3 reserved + A class 4 + B class 5
+        let n_states: u32 = 2;
+        let n_entries: usize = 4;
+
+        let header_len = 20;
+        let class_off = header_len;
+        let class_end = class_off + class_lookup.len();
+        let state_off = class_end + (class_end % 2);
+        let state_bytes = (n_states * n_classes) as usize * 2;
+        let entry_off = state_off + state_bytes;
+        let entry_bytes = n_entries * 6;
+        let action_off = entry_off + entry_bytes;
+        let action_bytes = action_records.len();
+        let body_len = action_off + action_bytes;
+
+        let mut body: Vec<u8> = Vec::with_capacity(body_len);
+        // State-table header.
+        body.extend_from_slice(&n_classes.to_be_bytes());
+        body.extend_from_slice(&(class_off as u32).to_be_bytes());
+        body.extend_from_slice(&(state_off as u32).to_be_bytes());
+        body.extend_from_slice(&(entry_off as u32).to_be_bytes());
+        // Flags: action_type in bits 30-31, action_off (relative to
+        // body start) in low 30.
+        let flags: u32 = (u32::from(action_type) << 30) | (action_off as u32);
+        body.extend_from_slice(&flags.to_be_bytes());
+        body.extend_from_slice(&class_lookup);
+        if body.len() < state_off {
+            body.resize(state_off, 0);
+        }
+        // State 0: only class 4 (A) is interesting → entry 1 (mark, →s1).
+        // Other classes → entry 0 (noop).
+        // State 1: only class 5 (B) is interesting → entry 2 (action, →s0).
+        // Class 4 (A) → entry 3 (mark, stay s1 — handles AAB).
+        // Other classes → entry 0.
+        let s0: [u16; 6] = [0, 0, 0, 0, 1, 0];
+        let s1: [u16; 6] = [0, 0, 0, 0, 3, 2];
+        for v in s0.iter().chain(s1.iter()) {
+            body.extend_from_slice(&v.to_be_bytes());
+        }
+        // Entries (newState, flags, actionIndex).
+        let mark: u16 = 0x8000;
+        let entries: [(u16, u16, u16); 4] = [
+            (0, 0, ACTION_INDEX_NONE),    // #0 noop
+            (1, mark, ACTION_INDEX_NONE), // #1 mark A, → state 1
+            (0, 0, 0),                    // #2 fire action 0, → state 0
+            (1, mark, ACTION_INDEX_NONE), // #3 re-mark A, stay in s1
+        ];
+        for (ns, fl, ai) in entries {
+            body.extend_from_slice(&ns.to_be_bytes());
+            body.extend_from_slice(&fl.to_be_bytes());
+            body.extend_from_slice(&ai.to_be_bytes());
+        }
+        body.extend_from_slice(action_records);
+
+        let sub_len = 12 + body.len();
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&2u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&(sub_len as u32).to_be_bytes());
+        bytes.extend_from_slice(&4u32.to_be_bytes()); // coverage: format 4
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // tupleCount
+        bytes.extend_from_slice(&body);
+        bytes
+    }
+
+    #[test]
+    fn format4_apply_action_type_2_emits_inline_coords() {
+        // Action type 2 — inline coordinates. Build a single record
+        // with mark anchor at (100, 0) and current anchor at (50, 0);
+        // running "AB" should fire one event with mark_index=0 and
+        // current_index=1, and the coords reported back unchanged.
+        let mut action: Vec<u8> = Vec::new();
+        action.extend_from_slice(&100i16.to_be_bytes()); // mark_x
+        action.extend_from_slice(&0i16.to_be_bytes()); // mark_y
+        action.extend_from_slice(&50i16.to_be_bytes()); // current_x
+        action.extend_from_slice(&0i16.to_be_bytes()); // current_y
+        let bytes = build_kerx_format4_with_action(1, 2, 2, &action);
+        let k = Kerx::parse(&bytes, 8).unwrap();
+        assert!(k.has_format4());
+        let mut events: Vec<Kerx4Action> = Vec::new();
+        k.apply_format4(&[1, 2], |evt| events.push(evt));
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            Kerx4Action::Coordinates {
+                mark_index: 0,
+                current_index: 1,
+                mark_x: 100,
+                mark_y: 0,
+                current_x: 50,
+                current_y: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn format4_apply_action_type_0_emits_control_points() {
+        // Action type 0 — control points. One record: mark_point=3,
+        // current_point=7. Run "AB" — one event with both points and
+        // the run indices.
+        let mut action: Vec<u8> = Vec::new();
+        action.extend_from_slice(&3u16.to_be_bytes()); // mark_point
+        action.extend_from_slice(&7u16.to_be_bytes()); // current_point
+        let bytes = build_kerx_format4_with_action(1, 2, 0, &action);
+        let k = Kerx::parse(&bytes, 8).unwrap();
+        let mut events: Vec<Kerx4Action> = Vec::new();
+        k.apply_format4(&[1, 2], |evt| events.push(evt));
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            Kerx4Action::ControlPoints {
+                mark_index: 0,
+                current_index: 1,
+                mark_point: 3,
+                current_point: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn format4_apply_skips_when_no_action() {
+        // Run with no marked-then-action sequence ("BB") — the state
+        // machine never advances past state 0 for class B (entry 0 =
+        // noop), so no event fires.
+        let mut action: Vec<u8> = Vec::new();
+        action.extend_from_slice(&[0u8; 8]);
+        let bytes = build_kerx_format4_with_action(1, 2, 2, &action);
+        let k = Kerx::parse(&bytes, 8).unwrap();
+        let mut events: Vec<Kerx4Action> = Vec::new();
+        k.apply_format4(&[2, 2, 2], |evt| events.push(evt));
+        assert!(events.is_empty(), "no AB pattern → no kern");
+    }
+
+    #[test]
+    fn format4_apply_action_type_1_emits_anchor_indices() {
+        // Action type 1 — anchor points (ankr lookup indices). One
+        // record: mark_anchor=2, current_anchor=5.
+        let mut action: Vec<u8> = Vec::new();
+        action.extend_from_slice(&2u16.to_be_bytes()); // mark_anchor
+        action.extend_from_slice(&5u16.to_be_bytes()); // current_anchor
+        let bytes = build_kerx_format4_with_action(1, 2, 1, &action);
+        let k = Kerx::parse(&bytes, 8).unwrap();
+        let mut events: Vec<Kerx4Action> = Vec::new();
+        k.apply_format4(&[1, 2], |evt| events.push(evt));
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            Kerx4Action::AnchorPoints {
+                mark_index: 0,
+                current_index: 1,
+                mark_anchor: 2,
+                current_anchor: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn format4_apply_repeated_pair_fires_each_time() {
+        // "ABAB" — two AB pairs, each should emit one event.
+        let mut action: Vec<u8> = Vec::new();
+        action.extend_from_slice(&10i16.to_be_bytes());
+        action.extend_from_slice(&0i16.to_be_bytes());
+        action.extend_from_slice(&5i16.to_be_bytes());
+        action.extend_from_slice(&0i16.to_be_bytes());
+        let bytes = build_kerx_format4_with_action(1, 2, 2, &action);
+        let k = Kerx::parse(&bytes, 8).unwrap();
+        let mut events: Vec<Kerx4Action> = Vec::new();
+        k.apply_format4(&[1, 2, 1, 2], |evt| events.push(evt));
+        assert_eq!(events.len(), 2);
+        if let Kerx4Action::Coordinates {
+            mark_index,
+            current_index,
+            ..
+        } = events[0]
+        {
+            assert_eq!((mark_index, current_index), (0, 1));
+        } else {
+            panic!("first event wrong variant");
+        }
+        if let Kerx4Action::Coordinates {
+            mark_index,
+            current_index,
+            ..
+        } = events[1]
+        {
+            assert_eq!((mark_index, current_index), (2, 3));
+        } else {
+            panic!("second event wrong variant");
+        }
     }
 
     #[test]
