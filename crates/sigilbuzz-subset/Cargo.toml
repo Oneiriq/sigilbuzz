@@ -7,7 +7,10 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Font subsetter for sigilbuzz — produces a smaller font containing only a chosen glyph set."
-publish = false
+publish = true
+readme = "README.md"
+keywords = ["font", "subset", "opentype", "truetype", "sigilbuzz"]
+categories = ["text-processing", "compression"]
 
 [features]
 default = ["std"]
