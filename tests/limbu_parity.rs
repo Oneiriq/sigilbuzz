@@ -52,31 +52,30 @@ const CORPUS: &[Case] = &[
     // just do not byte-compare.
     Case {
         text: "\u{1901}\u{1920}",
-        note: "ka + sign a (mark advance, follow-up)",
-        compare_rustybuzz: false,
+        note: "ka + sign a",
+        compare_rustybuzz: true,
     },
     Case {
         text: "\u{1901}\u{1921}",
-        note: "ki (ka + sign i, mark advance, follow-up)",
-        compare_rustybuzz: false,
+        note: "ki (ka + sign i)",
+        compare_rustybuzz: true,
     },
     Case {
         text: "\u{1901}\u{1923}",
-        note: "kee (ka + sign ee, mark advance, follow-up)",
-        compare_rustybuzz: false,
+        note: "kee (ka + sign ee)",
+        compare_rustybuzz: true,
     },
-    // ka + small ya (subjoined). Subjoined consonants share the
-    // mark-advance issue above.
+    // ka + small ya (subjoined).
     Case {
         text: "\u{1901}\u{1929}",
-        note: "ka + subjoined ya (mark advance, follow-up)",
-        compare_rustybuzz: false,
+        note: "ka + subjoined ya",
+        compare_rustybuzz: true,
     },
-    // ka + final ka (small final consonant). Same mark-advance issue.
+    // ka + final ka (small final consonant).
     Case {
         text: "\u{1901}\u{1930}",
-        note: "ka + final ka (mark advance, follow-up)",
-        compare_rustybuzz: false,
+        note: "ka + final ka",
+        compare_rustybuzz: true,
     },
     // Limbu digit run.
     Case {
@@ -84,12 +83,11 @@ const CORPUS: &[Case] = &[
         note: "limbu digits 0-2",
         compare_rustybuzz: true,
     },
-    // Mixed Latin + Limbu — same mark-advance follow-up applies,
-    // since the mixed run includes the sign-i mark.
+    // Mixed Latin + Limbu.
     Case {
         text: "Hi \u{1901}\u{1921}",
-        note: "mixed latin + limbu (mark advance, follow-up)",
-        compare_rustybuzz: false,
+        note: "mixed latin + limbu",
+        compare_rustybuzz: true,
     },
 ];
 

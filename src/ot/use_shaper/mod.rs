@@ -702,10 +702,44 @@ pub fn shape_use(
         }
     }
 
-    // 3. Basic features.
+    // 3. Basic features. We split the chain so the `pref` feature
+    //    fires before the rest, with a per-syllable post-pref reorder
+    //    in between. That mirrors HarfBuzz/rustybuzz's USE shaper:
+    //    `pref` collapses a pre-base form (e.g. Cham medial-ra
+    //    `raMedial_cham` -> `raMedial_cham_pre`); after the
+    //    substitution the substituted glyph is treated as if it were
+    //    typed VPre, so the reorder pass moves it in front of the base.
+    //    Without this split the substituted pre-base form ends up
+    //    sitting after the base, diverging from rustybuzz on every
+    //    `pref`-driven font.
+    let has_pref = basic_features.contains(&b"pref");
     if let Some(gsub) = gsub {
-        for tag in basic_features {
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority);
+        if reorder_prebase && has_pref {
+            // Snapshot pre-`pref` glyph IDs so the reorder can detect
+            // which positions actually changed.
+            let pre_ids: Vec<u32> = glyphs.iter().map(|g| g.glyph_id).collect();
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"pref", 0, script_priority);
+            // The pref pass on the fonts we care about is a single-subst
+            // (length-preserving), so the snapshot length still aligns.
+            // If a future font ships a pref ligature that changes glyph
+            // count, the lengths diverge and we skip the reorder — the
+            // shaper still produces the post-pref output, just without
+            // the pre-base move (matching the pre-fix behaviour).
+            if pre_ids.len() == glyphs.len() {
+                for syl in &syllables {
+                    pref_reorder(codepoints, glyphs, syl, &pre_ids);
+                }
+            }
+            for tag in basic_features {
+                if **tag == *b"pref" {
+                    continue;
+                }
+                apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority);
+            }
+        } else {
+            for tag in basic_features {
+                apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority);
+            }
         }
     }
 
@@ -719,6 +753,65 @@ pub fn shape_use(
     // 5. Cluster merge.
     let byte_offsets = cluster_byte_offsets(codepoints);
     merge_syllable_clusters(glyphs, &syllables, &byte_offsets);
+}
+
+/// Post-`pref` reorder. Walks one syllable and, for any position whose
+/// glyph id changed under the `pref` feature AND whose original
+/// codepoint was a [`UseCategory::CM`] sitting at
+/// [`UsePosition::BelowBase`] (the textbook medial-ra), moves the
+/// substituted glyph to the front of the syllable so it visually sits
+/// before the base. Mirrors rustybuzz's `record_pref` →
+/// `reorder_syllable_use` pair, but only for the medial-ra case the
+/// 0.8.0 corpus exercises (Cham). Length-preserving.
+fn pref_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllable, pre_ids: &[u32]) {
+    if !matches!(syllable.kind, SyllableKind::Consonant) {
+        return;
+    }
+    let Some(base) = syllable.base_index else {
+        return;
+    };
+    if syllable.end > glyphs.len() || syllable.end > codepoints.len() {
+        return;
+    }
+
+    // Find positions in (base, end) whose glyph id changed under
+    // `pref` and whose original codepoint was a below-base CM.
+    let mut to_move: Vec<usize> = Vec::new();
+    for idx in (base + 1)..syllable.end {
+        if glyphs[idx].glyph_id == pre_ids[idx] {
+            continue;
+        }
+        let ch = codepoints[idx];
+        if use_category(ch) != UseCategory::CM {
+            continue;
+        }
+        if use_position(ch) != UsePosition::BelowBase {
+            continue;
+        }
+        to_move.push(idx);
+    }
+    if to_move.is_empty() {
+        return;
+    }
+
+    let syl_start = syllable.start;
+    let syl_end = syllable.end;
+    let original: Vec<Glyph> = glyphs[syl_start..syl_end].to_vec();
+    let mut rebuilt: Vec<Glyph> = Vec::with_capacity(syl_end - syl_start);
+
+    // 1. Substituted pre-base forms in logical order.
+    for &idx in &to_move {
+        rebuilt.push(original[idx - syl_start]);
+    }
+    // 2. Everything else, in original order.
+    for idx in syl_start..syl_end {
+        if to_move.contains(&idx) {
+            continue;
+        }
+        rebuilt.push(original[idx - syl_start]);
+    }
+    debug_assert_eq!(rebuilt.len(), syl_end - syl_start);
+    glyphs[syl_start..syl_end].copy_from_slice(&rebuilt);
 }
 
 /// Entry point for Myanmar runs. Routes through the generic USE
@@ -810,26 +903,81 @@ pub fn shape_hangul(
     );
 }
 
-/// Entry point for N'Ko runs. N'Ko is alphabetic + tone marks — no
-/// pre-base reorder, no halant. Uses the USE basic feature chain
-/// without subjoining (only `ccmp` / `liga` / `calt` in practice
-/// drive shaping for the current Noto Sans NKo build).
+/// Entry point for N'Ko runs. N'Ko is RTL alphabetic with cursive
+/// joining of the same shape as Arabic — every letter has up to four
+/// positional forms (`isol`/`init`/`medi`/`fina`) selected by the
+/// shared joining state machine in [`crate::unicode::joining`]. The
+/// shaper:
+///
+/// 1. Runs `ccmp` so any precomposed N'Ko diphthongs in the font's
+///    composition lookup decompose.
+/// 2. Computes a per-codepoint joining-form vector via the shared
+///    Arabic state machine — N'Ko's joining types live in the same
+///    [`JoiningType`](crate::unicode::joining::JoiningType) table.
+/// 3. Applies `isol`/`init`/`medi`/`fina` masked by the joining-form
+///    vector under the `nko ` script tag. Noto Sans NKo registers
+///    `init`/`medi`/`fina` (no `isol` lookup — the unfeatured glyph
+///    is the isolated form already), so the masked dispatcher
+///    naturally no-ops on `isol` positions.
+/// 4. Lets the generic default-GSUB pass run `calt` / `liga` after
+///    the shaper returns. Tone-mark zeroing (mark advances → 0)
+///    happens in the generic pipeline.
 pub fn shape_nko(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
 ) {
-    shape_use(
+    if codepoints.is_empty() || glyphs.is_empty() {
+        return;
+    }
+    let Some(gsub) = gsub else {
+        return;
+    };
+
+    // 1. ccmp first — handles any compositional rewrites the font
+    //    registers before the positional pass sees the glyph stream.
+    crate::shape::apply_gsub_feature_in_scripts(
         gsub,
-        gdef,
-        codepoints,
         glyphs,
+        gdef,
+        *b"ccmp",
+        0,
         NKO_SCRIPT_PRIORITY,
-        THAI_LAO_FEATURES,
-        &[],
-        false,
     );
+
+    // 2. Compute the joining-form vector using the shared Arabic
+    //    state machine. The vector is aligned with `codepoints`;
+    //    after `ccmp` the glyph count may have shifted (a multi-sub
+    //    in `ccmp` would split one glyph into two), so we only run
+    //    the masked positional pass when lengths still align.
+    let types: Vec<crate::unicode::joining::JoiningType> = codepoints
+        .iter()
+        .map(|&c| crate::unicode::joining::joining_type(c))
+        .collect();
+    let forms = crate::ot::arabic::assign_from_types(&types);
+
+    if glyphs.len() == forms.len() {
+        for (form, tag) in [
+            (crate::ot::arabic::JoiningForm::Isol, *b"isol"),
+            (crate::ot::arabic::JoiningForm::Init, *b"init"),
+            (crate::ot::arabic::JoiningForm::Medi, *b"medi"),
+            (crate::ot::arabic::JoiningForm::Fina, *b"fina"),
+        ] {
+            let mask: Vec<bool> = forms.iter().map(|&f| f == form).collect();
+            crate::shape::apply_gsub_feature_masked(
+                gsub,
+                glyphs,
+                gdef,
+                tag,
+                NKO_SCRIPT_PRIORITY,
+                &mask,
+            );
+        }
+    }
+
+    // calt / liga fire in the generic default-GSUB pass after this
+    // shaper returns; nothing else to drive here.
 }
 
 /// Entry point for Buginese runs. Brahmic — pre-base reorder fires

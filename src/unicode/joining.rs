@@ -104,6 +104,8 @@ const fn is_arabic_range(cp: u32) -> bool {
         // Arabic Presentation Forms (handled separately below).
         0x0600..=0x06FF
         | 0x0750..=0x077F
+        // N'Ko — same Arabic-style joining state machine.
+        | 0x07C0..=0x07FF
         | 0x0870..=0x089F
         | 0x08A0..=0x08FF
         | 0xFB50..=0xFDFF
@@ -248,6 +250,31 @@ const JOINING_TABLE: &[(u32, u32, JoiningType)] = &[
     (0x0775, 0x0777, JoiningType::D),
     (0x0778, 0x0779, JoiningType::R),
     (0x077A, 0x077F, JoiningType::D),
+
+    // --- U+07C0..U+07FF N'Ko ---
+    // N'Ko is RTL alphabetic with cursive joining of the same shape
+    // as Arabic — every letter has an init/medi/fina/isol form
+    // selected by the same state machine. The categorization mirrors
+    // rustybuzz's `gen-arabic-table.py` output: digits + tone marks
+    // are X (fallback to U / T by general-category — non-spacing
+    // marks become T, everything else U), letters 07CA..07EA are
+    // Dual, and 07FA Lajanyalan (low-tone mark stretcher) is Dual.
+    // 07C0..07C9 — N'Ko digits (Non-joining).
+    (0x07C0, 0x07C9, JoiningType::U),
+    // 07CA..07EA — N'Ko letters (Dual-joining).
+    (0x07CA, 0x07EA, JoiningType::D),
+    // 07EB..07F3 — N'Ko combining tone marks (Transparent — the
+    // joining state machine threads them through without breaking
+    // the cursive chain).
+    (0x07EB, 0x07F3, JoiningType::T),
+    // 07F4..07F5 — N'Ko high/low tone apostrophes (Non-joining).
+    (0x07F4, 0x07F5, JoiningType::U),
+    // 07F6..07F9 — N'Ko symbols + punctuation (Non-joining).
+    (0x07F6, 0x07F9, JoiningType::U),
+    // 07FA — N'Ko Lajanyalan (Dual-joining).
+    (0x07FA, 0x07FA, JoiningType::D),
+    // 07FD — N'Ko Dantayalan (Transparent — combining low-tone mark).
+    (0x07FD, 0x07FD, JoiningType::T),
 
     // --- U+0870..U+088E Arabic Extended-B (Quranic) ---
     // Largely Non-joining letters + one Right-joining alef variant.
