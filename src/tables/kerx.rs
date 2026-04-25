@@ -35,10 +35,17 @@
 //!   pair-class tables that would explode if expanded to flat
 //!   pairs.
 //!
-//! Format 4 (control-point anchoring) is skipped silently —
-//! sigilbuzz's apply path still consults the subtables it does
-//! understand, so a mixed-format `kerx` degrades gracefully instead
-//! of failing the whole font.
+//! Format 4 — control-point kerning. Parsed for structure (so a
+//! mixed-format `kerx` doesn't trip on format-4 bytes), but the
+//! apply path is a stub: control-point and anchor-point variants
+//! need glyf-point or ankr coordinate reads that sigilbuzz's kerx
+//! module deliberately keeps separate from the state-machine walk.
+//! The "coordinates" variant (action type 2 — inline FUnit deltas)
+//! is structurally parsed too. Walking the state machine to drive
+//! actual offsets is left for a follow-up; until then format 4
+//! subtables degrade to "parse cleanly, apply nothing", which is
+//! strictly better than dropping the surrounding format-0 / 2 / 6
+//! subtables on the floor.
 //!
 //! # Format 6
 //!
@@ -151,6 +158,8 @@ enum Subtable<'a> {
     Format0(Format0<'a>),
     Format1(Format1<'a>),
     Format2(Format2<'a>),
+    #[allow(dead_code)] // apply path is a follow-up — see module docs
+    Format4(Format4<'a>),
     Format6(Format6<'a>),
 }
 
@@ -191,6 +200,27 @@ struct Format2<'a> {
     left_class_off: usize,
     right_class_off: usize,
     array_off: usize,
+}
+
+/// Format 4 — control-point kerning. Structurally parsed (state
+/// table header + a 32-bit flags word that encodes the action type
+/// and action-table offset) so a mixed-format `kerx` doesn't lose
+/// surrounding subtables, but the apply path is intentionally a
+/// stub — driving the state machine to glyf / ankr point reads
+/// requires plumbing this module deliberately keeps separate.
+///
+/// Action type lives in flags bits 30-31:
+/// - 0 = control points (u16 pairs into glyf points)
+/// - 1 = anchor points (u16 pairs into ankr)
+/// - 2 = coordinates    (four i16 in FUnits — inline)
+#[derive(Debug, Clone, Copy)]
+struct Format4<'a> {
+    #[allow(dead_code)]
+    state: StateTableHeader<'a>,
+    #[allow(dead_code)]
+    action_type: u8,
+    #[allow(dead_code)]
+    action_table: &'a [u8],
 }
 
 /// Format 6 — simple n×m kerning array. Mirrors format 2 but the
@@ -302,6 +332,11 @@ impl<'a> Kerx<'a> {
                             subtables.push(Subtable::Format2(sub));
                         }
                     }
+                    4 => {
+                        if let Ok(Some(sub)) = parse_format4(data, sub_start, sub_end) {
+                            subtables.push(Subtable::Format4(sub));
+                        }
+                    }
                     6 => {
                         if let Ok(Some(sub)) = parse_format6(data, sub_start, sub_end) {
                             subtables.push(Subtable::Format6(sub));
@@ -341,7 +376,10 @@ impl<'a> Kerx<'a> {
                 Subtable::Format0(f0) => f0.find(key),
                 Subtable::Format2(f2) => f2.find(left, right, self.num_glyphs),
                 Subtable::Format6(f6) => f6.find(left, right, self.num_glyphs),
-                Subtable::Format1(_) => continue,
+                // Format 1 is the state machine — applied separately.
+                // Format 4 has no pair-lookup semantics; its apply
+                // path needs glyf / ankr coordinates and is deferred.
+                Subtable::Format1(_) | Subtable::Format4(_) => continue,
             };
             if let Some(v) = v {
                 total += i32::from(v);
@@ -473,6 +511,56 @@ fn parse_format2(data: &[u8], sub_start: usize, sub_end: usize) -> Result<Option
         left_class_off: left_off,
         right_class_off: right_off,
         array_off,
+    }))
+}
+
+/// Parses one format-4 subtable body. Layout (relative to the
+/// subtable origin):
+///
+/// ```text
+///   0  : 12 B common header
+///  12  : 16 B extended state-table header
+///  28  :  4 B flags  (bits 30-31 = action type;
+///                     bits 0-29  = action-table offset relative
+///                                  to the format-4 body start)
+///  ..  : action table (variable, action-type-specific)
+/// ```
+///
+/// The action table layout depends on the action type:
+/// - 0 (control points): u16 pairs of glyph point indices
+/// - 1 (anchor points):  u16 pairs of `ankr` indices
+/// - 2 (coordinates):    four i16 (left x/y, right x/y) per record
+///
+/// sigilbuzz validates the offset / range for the action table but
+/// the actual apply walk is deferred. See module docs.
+fn parse_format4(data: &[u8], sub_start: usize, sub_end: usize) -> Result<Option<Format4<'_>>> {
+    let body_start = sub_start + 12;
+    if body_start + 20 > sub_end {
+        return Err(Error::Truncated {
+            offset: body_start,
+            context: "kerx format 4 header",
+        });
+    }
+    let body = data.get(body_start..sub_end).ok_or(Error::Truncated {
+        offset: body_start,
+        context: "kerx format 4 body slice",
+    })?;
+    let Ok(state) = StateTableHeader::parse(body) else {
+        return Ok(None);
+    };
+    let flags = u32::from_be_bytes([body[16], body[17], body[18], body[19]]);
+    // Apple uses bits 30-31 for action type; the low 30 bits hold the
+    // action-table offset (relative to the format-4 body start).
+    let action_type = ((flags >> 30) & 0x3) as u8;
+    let action_off = (flags & 0x3FFF_FFFF) as usize;
+    if action_off > body.len() {
+        return Ok(None);
+    }
+    let action_table = &body[action_off..];
+    Ok(Some(Format4 {
+        state,
+        action_type,
+        action_table,
     }))
 }
 
@@ -1303,6 +1391,153 @@ mod tests {
         let k = Kerx::parse(&bytes, 8).unwrap();
         let kerns = collect_kerns(&k, &[]);
         assert!(kerns.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Format 4 — control-point kerning. Parse-only coverage: the
+    // apply path is a stub (glyf-coordinate / ankr reads live
+    // outside this module), so the tests assert that a format-4
+    // subtable parses cleanly and its presence does not corrupt the
+    // surrounding kerx — the kerx must still yield zero pair kerns
+    // on it without consuming subsequent format-0 subtables.
+    // -----------------------------------------------------------------
+
+    /// Builds a one-subtable kerx with format 4 wired with an empty
+    /// state table (one state, two classes, single noop entry) and
+    /// the action-type-2 (coordinates) flag. The inner action table
+    /// holds one record of four zeros — enough to validate parsing
+    /// without driving any glyph offset.
+    fn build_kerx_format4(action_type: u8) -> Vec<u8> {
+        // Format 4 body layout:
+        //   0..16   state-table header (nClasses, classOff, stateOff,
+        //                                entryOff)
+        //  16..20   flags (action_type << 30 | action_off)
+        //  20..     class lookup (format 6, empty)
+        //  ..       state array (1 state × 4 classes × u16) = 8 B
+        //  ..       entry array (1 entry × 6 B)
+        //  ..       action table (one 8-B record)
+        let n_classes: u32 = 4; // four reserved classes is the AAT minimum
+        let header_len = 20;
+
+        // Empty class lookup (format 6, zero entries).
+        let mut class_lookup: Vec<u8> = Vec::new();
+        class_lookup.extend_from_slice(&6u16.to_be_bytes());
+        class_lookup.extend_from_slice(&4u16.to_be_bytes()); // unitSize
+        class_lookup.extend_from_slice(&0u16.to_be_bytes()); // nUnits
+        class_lookup.extend_from_slice(&[0u8; 6]); // search hints
+
+        let class_off = header_len;
+        let class_end = class_off + class_lookup.len();
+        let state_off = class_end + (class_end % 2);
+        let state_bytes = n_classes as usize * 2;
+        let entry_off = state_off + state_bytes;
+        let entry_bytes = 6;
+        let action_off = entry_off + entry_bytes;
+        let action_bytes = 8;
+
+        let body_len = action_off + action_bytes;
+
+        let mut body: Vec<u8> = Vec::with_capacity(body_len);
+        // State-table header.
+        body.extend_from_slice(&n_classes.to_be_bytes());
+        body.extend_from_slice(&(class_off as u32).to_be_bytes());
+        body.extend_from_slice(&(state_off as u32).to_be_bytes());
+        body.extend_from_slice(&(entry_off as u32).to_be_bytes());
+        // Flags: action_type in bits 30-31, action_off in low 30.
+        let flags: u32 = (u32::from(action_type) << 30) | (action_off as u32);
+        body.extend_from_slice(&flags.to_be_bytes());
+        body.extend_from_slice(&class_lookup);
+        if body.len() < state_off {
+            body.resize(state_off, 0);
+        }
+        // State row: every cell points at entry 0 (noop).
+        for _ in 0..n_classes {
+            body.extend_from_slice(&0u16.to_be_bytes());
+        }
+        // Entry 0: noop.
+        body.extend_from_slice(&0u16.to_be_bytes()); // newState
+        body.extend_from_slice(&0u16.to_be_bytes()); // flags
+        body.extend_from_slice(&0u16.to_be_bytes()); // actionIndex
+        // Action record: 8 bytes of zero (four i16s for the
+        // coordinates variant — for control-points / anchors the
+        // shape happens to overlap, so the same fill works).
+        body.extend_from_slice(&[0u8; 8]);
+
+        // Wrap in 12-byte common header + 8-byte kerx table header.
+        let sub_len = 12 + body.len();
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&2u16.to_be_bytes()); // version
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // pad
+        bytes.extend_from_slice(&1u32.to_be_bytes()); // nTables
+        bytes.extend_from_slice(&(sub_len as u32).to_be_bytes());
+        bytes.extend_from_slice(&4u32.to_be_bytes()); // coverage: format 4
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // tupleCount
+        bytes.extend_from_slice(&body);
+        bytes
+    }
+
+    #[test]
+    fn format4_parses_with_coordinates_action_type() {
+        // Action type 2 = coordinates (inline FUnit deltas). Parses
+        // cleanly and the subtable is retained.
+        let bytes = build_kerx_format4(2);
+        let k = Kerx::parse(&bytes, 8).unwrap();
+        assert_eq!(k.subtable_count(), 1, "format 4 subtable retained");
+        // Format 4 produces no pair kerns — it's stateful and its
+        // apply path is deferred.
+        assert_eq!(k.kern(1, 2), 0);
+    }
+
+    #[test]
+    fn format4_parses_with_control_points_action_type() {
+        let bytes = build_kerx_format4(0);
+        let k = Kerx::parse(&bytes, 8).unwrap();
+        assert_eq!(k.subtable_count(), 1);
+        assert_eq!(k.kern(1, 2), 0);
+    }
+
+    #[test]
+    fn format4_does_not_drop_following_subtables() {
+        // Mixed kerx: format 4 first, then format 0 with one pair.
+        // The format-4 subtable parses-but-emits-nothing path must
+        // not interfere with the format-0 lookup. This guards the
+        // "deferred apply path" promise from the module docs.
+        let f4 = build_kerx_format4(2);
+        // f4 layout: 8 B header + 1 subtable. Strip the kerx header
+        // and re-emit with two subtables.
+        let f4_sub = &f4[8..];
+
+        // Build a tiny format-0 subtable directly.
+        let pairs: &[(u16, u16, i16)] = &[(10, 20, -42)];
+        let pair_bytes = pairs.len() * 6;
+        let f0_body_len = 16 + pair_bytes;
+        let f0_sub_len = 12 + f0_body_len;
+        let mut f0_sub: Vec<u8> = Vec::new();
+        f0_sub.extend_from_slice(&(f0_sub_len as u32).to_be_bytes());
+        f0_sub.extend_from_slice(&0u32.to_be_bytes()); // coverage: fmt 0
+        f0_sub.extend_from_slice(&0u32.to_be_bytes()); // tupleCount
+        f0_sub.extend_from_slice(&(pairs.len() as u32).to_be_bytes());
+        f0_sub.extend_from_slice(&[0u8; 12]);
+        for (l, r, v) in pairs {
+            f0_sub.extend_from_slice(&l.to_be_bytes());
+            f0_sub.extend_from_slice(&r.to_be_bytes());
+            f0_sub.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&2u16.to_be_bytes()); // version
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // pad
+        bytes.extend_from_slice(&2u32.to_be_bytes()); // nTables = 2
+        bytes.extend_from_slice(f4_sub);
+        bytes.extend_from_slice(&f0_sub);
+
+        let k = Kerx::parse(&bytes, 256).expect("kerx with mixed fmt4+fmt0 parses");
+        assert_eq!(k.subtable_count(), 2);
+        assert_eq!(
+            k.kern(10, 20),
+            -42,
+            "format 0 pair survives the format-4 neighbour"
+        );
     }
 
     // -----------------------------------------------------------------
