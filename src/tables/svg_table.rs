@@ -257,8 +257,7 @@ mod tests {
         out
     }
 
-    const TINY_SVG: &[u8] =
-        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><circle r=\"5\"/></svg>";
+    const TINY_SVG: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><circle r=\"5\"/></svg>";
 
     #[test]
     fn parses_header_and_record_count() {
