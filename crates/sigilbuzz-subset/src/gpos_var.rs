@@ -143,9 +143,10 @@ fn fold_one_field(
     if device_off_pos + 2 > subtable_buf.len() {
         return;
     }
-    let device_off =
-        u16::from_be_bytes([subtable_buf[device_off_pos], subtable_buf[device_off_pos + 1]])
-            as usize;
+    let device_off = u16::from_be_bytes([
+        subtable_buf[device_off_pos],
+        subtable_buf[device_off_pos + 1],
+    ]) as usize;
     if device_off == 0 {
         return;
     }
@@ -159,8 +160,7 @@ fn fold_one_field(
         return;
     }
     let first = u16::from_be_bytes([subtable_buf[device_off], subtable_buf[device_off + 1]]);
-    let second =
-        u16::from_be_bytes([subtable_buf[device_off + 2], subtable_buf[device_off + 3]]);
+    let second = u16::from_be_bytes([subtable_buf[device_off + 2], subtable_buf[device_off + 3]]);
     let delta_format =
         u16::from_be_bytes([subtable_buf[device_off + 4], subtable_buf[device_off + 5]]);
     if delta_format != VARIATION_INDEX_DELTA_FORMAT {
@@ -177,11 +177,13 @@ fn fold_one_field(
     if scaled == 0 || static_field_pos + 2 > subtable_buf.len() {
         return;
     }
-    let cur = i16::from_be_bytes([subtable_buf[static_field_pos], subtable_buf[static_field_pos + 1]]);
-    let new = i32::from(cur).saturating_add(scaled).clamp(
-        i32::from(i16::MIN),
-        i32::from(i16::MAX),
-    );
+    let cur = i16::from_be_bytes([
+        subtable_buf[static_field_pos],
+        subtable_buf[static_field_pos + 1],
+    ]);
+    let new = i32::from(cur)
+        .saturating_add(scaled)
+        .clamp(i32::from(i16::MIN), i32::from(i16::MAX));
     #[allow(clippy::cast_possible_truncation)]
     let new_i16 = new as i16;
     subtable_buf[static_field_pos..static_field_pos + 2].copy_from_slice(&new_i16.to_be_bytes());
@@ -300,34 +302,21 @@ fn fold_single_pos(
             if sub.len() < 6 + stride {
                 return;
             }
-            fold_value_record(
-                &mut gpos_buf[sub_off..],
-                6,
-                value_format,
-                store,
-                coords,
-            );
+            fold_value_record(&mut gpos_buf[sub_off..], 6, value_format, store, coords);
         }
         2 => {
             // Per-glyph array at offset 8.
             if sub.len() < 8 {
                 return;
             }
-            let value_count =
-                u16::from_be_bytes([sub[6], sub[7]]) as usize;
+            let value_count = u16::from_be_bytes([sub[6], sub[7]]) as usize;
             let need = 8 + value_count * stride;
             if sub.len() < need {
                 return;
             }
             for i in 0..value_count {
                 let vr = 8 + i * stride;
-                fold_value_record(
-                    &mut gpos_buf[sub_off..],
-                    vr,
-                    value_format,
-                    store,
-                    coords,
-                );
+                fold_value_record(&mut gpos_buf[sub_off..], vr, value_format, store, coords);
             }
         }
         _ => {}
@@ -498,15 +487,12 @@ pub(crate) fn bake_gpos_at_coords(
     if major != 1 {
         return None;
     }
-    let lookup_list_off =
-        u16::from_be_bytes([gpos_bytes[8], gpos_bytes[9]]) as usize;
+    let lookup_list_off = u16::from_be_bytes([gpos_bytes[8], gpos_bytes[9]]) as usize;
     if lookup_list_off + 2 > gpos_bytes.len() {
         return None;
     }
-    let lookup_count = u16::from_be_bytes([
-        gpos_bytes[lookup_list_off],
-        gpos_bytes[lookup_list_off + 1],
-    ]) as usize;
+    let lookup_count =
+        u16::from_be_bytes([gpos_bytes[lookup_list_off], gpos_bytes[lookup_list_off + 1]]) as usize;
     let offsets_start = lookup_list_off + 2;
     if offsets_start + lookup_count * 2 > gpos_bytes.len() {
         return None;
@@ -529,18 +515,15 @@ pub(crate) fn bake_gpos_at_coords(
         }
         let lookup_type =
             u16::from_be_bytes([gpos_bytes[lookup_base], gpos_bytes[lookup_base + 1]]);
-        let subtable_count = u16::from_be_bytes([
-            gpos_bytes[lookup_base + 4],
-            gpos_bytes[lookup_base + 5],
-        ]) as usize;
+        let subtable_count =
+            u16::from_be_bytes([gpos_bytes[lookup_base + 4], gpos_bytes[lookup_base + 5]]) as usize;
         let subtable_offsets_off = lookup_base + 6;
         if subtable_offsets_off + subtable_count * 2 > gpos_bytes.len() {
             continue;
         }
         for si in 0..subtable_count {
             let so_pos = subtable_offsets_off + si * 2;
-            let sub_rel = u16::from_be_bytes([gpos_bytes[so_pos], gpos_bytes[so_pos + 1]])
-                as usize;
+            let sub_rel = u16::from_be_bytes([gpos_bytes[so_pos], gpos_bytes[so_pos + 1]]) as usize;
             let sub_abs = lookup_base + sub_rel;
             if sub_abs >= gpos_bytes.len() {
                 continue;
@@ -560,10 +543,8 @@ pub(crate) fn bake_gpos_at_coords(
                     if sub_abs + 8 > gpos_bytes.len() {
                         continue;
                     }
-                    let ext_type = u16::from_be_bytes([
-                        gpos_bytes[sub_abs + 2],
-                        gpos_bytes[sub_abs + 3],
-                    ]);
+                    let ext_type =
+                        u16::from_be_bytes([gpos_bytes[sub_abs + 2], gpos_bytes[sub_abs + 3]]);
                     let ext_off = u32::from_be_bytes([
                         gpos_bytes[sub_abs + 4],
                         gpos_bytes[sub_abs + 5],
@@ -615,7 +596,7 @@ mod tests {
         out[region_off_slot..region_off_slot + 4].copy_from_slice(&region_start.to_be_bytes());
         out.extend_from_slice(&1u16.to_be_bytes()); // axisCount
         out.extend_from_slice(&1u16.to_be_bytes()); // regionCount
-        // F2DOT14 (start, peak, end) = (0.0, 1.0, 1.0)
+                                                    // F2DOT14 (start, peak, end) = (0.0, 1.0, 1.0)
         out.extend_from_slice(&0i16.to_be_bytes());
         out.extend_from_slice(&16384i16.to_be_bytes());
         out.extend_from_slice(&16384i16.to_be_bytes());
@@ -747,15 +728,15 @@ mod tests {
         gpos.extend_from_slice(&100u16.to_be_bytes()); // scriptListOff (unused)
         gpos.extend_from_slice(&100u16.to_be_bytes()); // featureListOff (unused)
         gpos.extend_from_slice(&10u16.to_be_bytes()); // lookupListOff
-        // LookupList
+                                                      // LookupList
         gpos.extend_from_slice(&1u16.to_be_bytes()); // lookupCount
         gpos.extend_from_slice(&4u16.to_be_bytes()); // lookupOffset[0]
-        // Lookup at 14
+                                                     // Lookup at 14
         gpos.extend_from_slice(&2u16.to_be_bytes()); // lookupType
         gpos.extend_from_slice(&0u16.to_be_bytes()); // flag
         gpos.extend_from_slice(&1u16.to_be_bytes()); // subtableCount
         gpos.extend_from_slice(&8u16.to_be_bytes()); // subtableOffset[0]
-        // PairPos at 22 — sub_off = 22.
+                                                     // PairPos at 22 — sub_off = 22.
         let sub_off = gpos.len();
         let value_format1 = VR_X_ADVANCE | VR_X_ADVANCE_DEVICE; // 0x44
         let value_format2 = 0u16;
@@ -765,11 +746,11 @@ mod tests {
         gpos.extend_from_slice(&value_format2.to_be_bytes());
         gpos.extend_from_slice(&1u16.to_be_bytes()); // pairSetCount
         gpos.extend_from_slice(&0u16.to_be_bytes()); // pairSetOffset (filled below)
-        // PairSet
+                                                     // PairSet
         let pair_set_rel = (gpos.len() - sub_off) as u16;
         gpos.extend_from_slice(&1u16.to_be_bytes()); // pairValueCount
         gpos.extend_from_slice(&60u16.to_be_bytes()); // secondGlyph
-        // ValueRecord1: x_advance (i16) + x_advance_device (offset16).
+                                                      // ValueRecord1: x_advance (i16) + x_advance_device (offset16).
         let x_advance_pos = gpos.len();
         gpos.extend_from_slice(&(-50i16).to_be_bytes()); // x_advance source
         let device_off_pos = gpos.len();
@@ -802,12 +783,10 @@ mod tests {
         let baked = bake_gpos_at_coords(&gpos, Some(&store), &[1.0]).unwrap();
 
         // x_advance: -50 + 75 = 25.
-        let baked_x =
-            i16::from_be_bytes([baked[x_advance_pos], baked[x_advance_pos + 1]]);
+        let baked_x = i16::from_be_bytes([baked[x_advance_pos], baked[x_advance_pos + 1]]);
         assert_eq!(baked_x, 25);
         // device offset slot zeroed.
-        let baked_off =
-            u16::from_be_bytes([baked[device_off_pos], baked[device_off_pos + 1]]);
+        let baked_off = u16::from_be_bytes([baked[device_off_pos], baked[device_off_pos + 1]]);
         assert_eq!(baked_off, 0);
     }
 
@@ -835,7 +814,7 @@ mod tests {
         gpos.extend_from_slice(&0u16.to_be_bytes()); // coverageOff (fill below)
         gpos.extend_from_slice(&value_format.to_be_bytes());
         gpos.extend_from_slice(&2u16.to_be_bytes()); // valueCount = 2
-        // Two ValueRecords: each is 4 bytes (i16 + o16).
+                                                     // Two ValueRecords: each is 4 bytes (i16 + o16).
         let vr0_pos = gpos.len();
         gpos.extend_from_slice(&10i16.to_be_bytes());
         gpos.extend_from_slice(&0u16.to_be_bytes()); // device off (fill below)
@@ -920,12 +899,10 @@ mod tests {
 
         let baked = bake_gpos_at_coords(&gpos, None, &[1.0]).unwrap();
         // Static field unchanged.
-        let baked_x =
-            i16::from_be_bytes([baked[x_advance_pos], baked[x_advance_pos + 1]]);
+        let baked_x = i16::from_be_bytes([baked[x_advance_pos], baked[x_advance_pos + 1]]);
         assert_eq!(baked_x, -50);
         // Offset zeroed.
-        let baked_off =
-            u16::from_be_bytes([baked[device_off_pos], baked[device_off_pos + 1]]);
+        let baked_off = u16::from_be_bytes([baked[device_off_pos], baked[device_off_pos + 1]]);
         assert_eq!(baked_off, 0);
     }
 }

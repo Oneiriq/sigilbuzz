@@ -1809,8 +1809,7 @@ mod tests {
                         if off_off + 2 > sub.len() {
                             continue;
                         }
-                        let set_off =
-                            u16::from_be_bytes([sub[off_off], sub[off_off + 1]]) as usize;
+                        let set_off = u16::from_be_bytes([sub[off_off], sub[off_off + 1]]) as usize;
                         if set_off + 2 > sub.len() {
                             continue;
                         }
@@ -1917,12 +1916,13 @@ mod tests {
         // GPOS by hand to read the AV pair's value.
         let gpos_bytes = baked.table_bytes(tag::GPOS).expect("baked GPOS");
         let lookup_list_off = u16::from_be_bytes([gpos_bytes[8], gpos_bytes[9]]) as usize;
-        let lookup_off =
-            u16::from_be_bytes([gpos_bytes[lookup_list_off + 2], gpos_bytes[lookup_list_off + 3]])
-                as usize;
+        let lookup_off = u16::from_be_bytes([
+            gpos_bytes[lookup_list_off + 2],
+            gpos_bytes[lookup_list_off + 3],
+        ]) as usize;
         let lookup_base = lookup_list_off + lookup_off;
-        let sub_off = u16::from_be_bytes([gpos_bytes[lookup_base + 6], gpos_bytes[lookup_base + 7]])
-            as usize;
+        let sub_off =
+            u16::from_be_bytes([gpos_bytes[lookup_base + 6], gpos_bytes[lookup_base + 7]]) as usize;
         let sub_abs = lookup_base + sub_off;
         let sub = &gpos_bytes[sub_abs..];
         // PairPos fmt 1 — first PairSet at the first set offset.
@@ -1952,12 +1952,13 @@ mod tests {
         assert!(!any_value_record_device_offset_nonzero(&baked));
         let gpos_bytes = baked.table_bytes(tag::GPOS).expect("baked GPOS");
         let lookup_list_off = u16::from_be_bytes([gpos_bytes[8], gpos_bytes[9]]) as usize;
-        let lookup_off =
-            u16::from_be_bytes([gpos_bytes[lookup_list_off + 2], gpos_bytes[lookup_list_off + 3]])
-                as usize;
+        let lookup_off = u16::from_be_bytes([
+            gpos_bytes[lookup_list_off + 2],
+            gpos_bytes[lookup_list_off + 3],
+        ]) as usize;
         let lookup_base = lookup_list_off + lookup_off;
-        let sub_off = u16::from_be_bytes([gpos_bytes[lookup_base + 6], gpos_bytes[lookup_base + 7]])
-            as usize;
+        let sub_off =
+            u16::from_be_bytes([gpos_bytes[lookup_base + 6], gpos_bytes[lookup_base + 7]]) as usize;
         let sub_abs = lookup_base + sub_off;
         let sub = &gpos_bytes[sub_abs..];
         let pair_set_rel = u16::from_be_bytes([sub[10], sub[11]]) as usize;
