@@ -38,7 +38,7 @@ use crate::tables::parse::Reader;
 use crate::tables::{
     tag, Ankr, Avar, Base, Cbdt, Cblc, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBitmap, GlyphBounds,
     Gpos, Gsub, Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Math, Maxp, Morx, Mvar,
-    Outline, Sbix, Svg, SvgDocument, Vhea, Vmtx, Vorg, Vvar,
+    Outline, PathOp, Sbix, Svg, SvgDocument, Varc, Vhea, Vmtx, Vorg, Vvar,
 };
 
 /// One entry in the SFNT table directory.
@@ -437,6 +437,20 @@ impl<'a> Face<'a> {
         }
     }
 
+    /// Parses the `VARC` table if the font carries one. VARC adds
+    /// per-axis variation deltas to composite-glyph component
+    /// transforms and to each component's effective coord vector;
+    /// shipped to date only by Chrome's experimental VARC fonts and
+    /// a handful of demo files. Returns `Ok(None)` for the vast
+    /// majority of fonts that don't carry it.
+    pub fn varc(&self) -> Result<Option<Varc<'a>>> {
+        match self.table_bytes(tag::VARC) {
+            Ok(bytes) => Ok(Some(Varc::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Returns the design-unit bounding box for `glyph_id` at the
     /// given normalized axis coords. When `gvar` is present and any
     /// tuple contributes a delta, the static bounds from `glyf` are
@@ -539,6 +553,52 @@ impl<'a> Face<'a> {
         glyph_id: u16,
         coords: &[f32],
     ) -> Result<Option<Outline>> {
+        self.glyph_outline_at_coords_inner(glyph_id, coords, 0)
+    }
+
+    /// Recursive entry point used by VARC composite resolution.
+    /// `depth` caps recursion through nested VARC composites the
+    /// same way [`Glyf::flatten`] caps `glyf` composites.
+    fn glyph_outline_at_coords_inner(
+        &self,
+        glyph_id: u16,
+        coords: &[f32],
+        depth: u8,
+    ) -> Result<Option<Outline>> {
+        const MAX_VARC_DEPTH: u8 = 64;
+        if depth > MAX_VARC_DEPTH {
+            return Err(Error::Malformed {
+                offset: 0,
+                context: "VARC composite recursion exceeded cap",
+            });
+        }
+
+        // VARC routing: if the font ships a VARC table that covers
+        // this gid, recurse through the resolved components and apply
+        // each component's affine to the child outline. Children
+        // outside VARC's coverage fall through to the regular glyf /
+        // CFF path with the component's effective coord vector.
+        if let Some(varc) = self.varc()? {
+            if varc.covers(glyph_id) {
+                if let Some(composite) = varc.composite(glyph_id, coords) {
+                    let mut out = Outline::new();
+                    for comp in &composite.components {
+                        let child = self.glyph_outline_at_coords_inner(
+                            comp.gid,
+                            &comp.coords,
+                            depth + 1,
+                        )?;
+                        if let Some(child) = child {
+                            for op in child.ops() {
+                                out.push(transform_path_op(*op, comp.transform));
+                            }
+                        }
+                    }
+                    return Ok(Some(out));
+                }
+            }
+        }
+
         // CFF / CFF2 path: presence of `CFF2` wins over `CFF ` since
         // variable fonts ship only CFF2. TODO: CFF parsers land in a
         // later commit; for now fall through to glyf if either is
@@ -809,6 +869,53 @@ impl<'a> Face<'a> {
             }
         }
         Ok(None)
+    }
+}
+
+/// Applies a row-major `[xx, xy, yx, yy, tx, ty]` affine to a single
+/// path op, transforming every point inside it. Control points and
+/// endpoints alike receive the same affine, which is correct for
+/// affine maps because they preserve the "control point ratio"
+/// implied by Bezier evaluation.
+fn transform_path_op(op: PathOp, m: [f32; 6]) -> PathOp {
+    let xform = |x: f32, y: f32| -> (f32, f32) {
+        (m[0] * x + m[1] * y + m[4], m[2] * x + m[3] * y + m[5])
+    };
+    match op {
+        PathOp::MoveTo { x, y } => {
+            let (x, y) = xform(x, y);
+            PathOp::MoveTo { x, y }
+        }
+        PathOp::LineTo { x, y } => {
+            let (x, y) = xform(x, y);
+            PathOp::LineTo { x, y }
+        }
+        PathOp::QuadTo { cx, cy, x, y } => {
+            let (cx, cy) = xform(cx, cy);
+            let (x, y) = xform(x, y);
+            PathOp::QuadTo { cx, cy, x, y }
+        }
+        PathOp::CubicTo {
+            c1x,
+            c1y,
+            c2x,
+            c2y,
+            x,
+            y,
+        } => {
+            let (c1x, c1y) = xform(c1x, c1y);
+            let (c2x, c2y) = xform(c2x, c2y);
+            let (x, y) = xform(x, y);
+            PathOp::CubicTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            }
+        }
+        PathOp::Close => PathOp::Close,
     }
 }
 
