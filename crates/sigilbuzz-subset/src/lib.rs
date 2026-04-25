@@ -124,6 +124,7 @@ mod gpos;
 mod gpos_var;
 mod gsub;
 mod gvar;
+mod gvar_partial;
 mod hmtx;
 mod hvar;
 mod instance;
