@@ -57,6 +57,11 @@ pub fn compute_closure(face: &Face<'_>, seed: &[u16]) -> Result<Vec<u16>, Subset
         let before = count_kept(&keep);
         expand_glyf_composites(face, &mut keep)?;
         expand_gsub_ligatures(face, &mut keep)?;
+        // Substitution-target pull-ins: GSUB type 1/2/3 outputs are
+        // implicitly kept whenever their inputs are kept. The byte-
+        // level rewriter in `crate::gsub` honours the same rule when
+        // it filters surviving subtable pairs.
+        crate::gsub::pull_in_substitution_targets(face, &mut keep);
         expand_gpos_mark_anchors(face, &mut keep)?;
         let after = count_kept(&keep);
         if before == after {
