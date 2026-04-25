@@ -1,0 +1,20 @@
+Hyphenation patterns for American English (en-us)
+==================================================
+
+Source:    hyph-utf8 package, hyph-en-us.tex
+Author:    Gerard D.C. Kuiken
+Copyright: Copyright (C) 1990, 2004, 2005 Gerard D.C. Kuiken
+
+License (verbatim from the upstream .tex source):
+
+    Copying and distribution of this file, with or without modification,
+    are permitted in any medium without royalty provided the copyright
+    notice and this notice are preserved.
+
+This permissive notice is compatible with the Apache-2.0 license under
+which sigilbuzz-hyphen itself is distributed. The pattern data is
+embedded as `crates/sigilbuzz-hyphen/patterns/en-us.txt` and is *not*
+covered by the Apache-2.0 grant; it retains the upstream copyright
+notice above.
+
+Hyphenmins (recommended): left = 2, right = 3.

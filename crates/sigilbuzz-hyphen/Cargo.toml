@@ -1,0 +1,29 @@
+[package]
+name = "sigilbuzz-hyphen"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Liang/Knuth pattern-driven hyphenation for sigilbuzz."
+readme = "README.md"
+keywords = ["hyphenation", "liang", "knuth", "sigilbuzz", "text"]
+categories = ["text-processing"]
+publish = true
+
+[features]
+default = ["std", "patterns-en-us"]
+std = []
+# Bundled language patterns. Each pattern set is gated so consumers
+# can compile out the ones they don't need. The bundled-pattern cache
+# uses `std::sync::OnceLock`, so each pattern feature implies `std`.
+patterns-en-us = ["std"]
+patterns-de = ["std"]
+patterns-fr = ["std"]
+patterns-es = ["std"]
+# Optional bridge to sigilbuzz-text-layout's BreakOpportunity stream.
+text-layout-integration = ["dep:sigilbuzz-text-layout"]
+
+[dependencies]
+sigilbuzz-text-layout = { path = "../sigilbuzz-text-layout", version = "0.1.0", optional = true }
