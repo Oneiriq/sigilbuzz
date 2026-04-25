@@ -133,6 +133,60 @@ fn default_instance_matches_rustybuzz_without_coords() {
 }
 
 #[test]
+fn rubik_mvar_resolves_underline_offset_delta() {
+    // Rubik VF ships MVAR with a single `undo` record (underline
+    // position). Parsing the table at heavy weight should produce
+    // a non-zero delta — the heavier instance positions the
+    // underline differently. We assert "non-default differs from
+    // default" rather than a fixed number to stay future-proof
+    // against re-mastering of the fixture.
+    let blob = Blob::new(RUBIK);
+    let face = Face::parse(&blob, 0).unwrap();
+    let mvar = face.mvar().unwrap().expect("rubik ships MVAR");
+    assert!(!mvar.is_empty());
+    let entries: Vec<_> = mvar.entries().collect();
+    assert!(
+        entries.iter().any(|(t, _)| t == b"undo"),
+        "rubik MVAR should carry the `undo` (underline offset) record, got {entries:?}"
+    );
+
+    // Resolving `undo` at coord 0 gives the default-instance delta
+    // (zero) and at heavy weight gives a non-zero value.
+    let zero = mvar.metric_delta(*b"undo", &[0.0]).unwrap();
+    assert!(zero.abs() < 1e-3, "default coord should yield zero delta");
+
+    let heavy_coords = normalize_wght(&face, 900.0);
+    let heavy = mvar
+        .metric_delta(*b"undo", &heavy_coords)
+        .expect("undo record present");
+    assert!(
+        heavy.abs() > 0.0,
+        "heavy weight should shift underline offset, got {heavy}"
+    );
+
+    // Unrecognised tags resolve to None.
+    assert!(mvar.metric_delta(*b"xxxx", &heavy_coords).is_none());
+}
+
+#[test]
+fn source_sans_3_vf_carries_no_mvar_or_vvar() {
+    // Source Sans 3 VF (the OTF subset vendored at
+    // tests/fonts/SourceSans3VF-Latin-Subset.otf) ships HVAR but
+    // omits MVAR and VVAR — typical of horizontal-only Latin
+    // variable fonts. The accessors must return Ok(None) for both,
+    // never an error: Face::table_bytes' MissingTable path is
+    // mapped to None by the optional accessor convention.
+    const SS3: &[u8] = include_bytes!("fonts/SourceSans3VF-Latin-Subset.otf");
+    let blob = Blob::new(SS3);
+    let face = Face::parse(&blob, 0).unwrap();
+    assert!(face.mvar().unwrap().is_none());
+    assert!(face.vvar().unwrap().is_none());
+    // Sanity: HVAR is present, so the optional-table machinery is
+    // working — this rules out a parse error masking as None.
+    assert!(face.hvar().unwrap().is_some());
+}
+
+#[test]
 fn glyph_bounds_at_coords_shifts_bbox() {
     // For a weight-varying font, 'A' at weight=900 should have a
     // wider bbox (larger x_max - x_min) than at weight=300 because
