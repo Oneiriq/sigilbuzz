@@ -36,6 +36,29 @@
 //! A composite glyph is a chain of component records, each carrying a
 //! 2×2 transform and a translation. Components may reference further
 //! composites; sigilbuzz caps recursion to avoid pathological fonts.
+//!
+//! # Composite flattening: two passes
+//!
+//! Outline emission is split into two passes. Pass 1 walks the glyph
+//! and any composite children into a flat point list with absolute
+//! coordinates (gvar deltas + 2×2 + translation already folded in).
+//! Pass 2 walks the contour list and dispatches to the caller's
+//! [`OutlineSink`].
+//!
+//! The intermediate point list is what supports
+//! `ARGS_ARE_XY_VALUES`-clear *anchor-mode* components: when the
+//! component flag bit is clear, `arg1` and `arg2` are point indices
+//! into the parent's already-flattened points and the child's own
+//! flattened points respectively. The translation is implied —
+//! `parent[arg1] - child[arg2]` — so we need both sides as concrete
+//! coordinates before we can emit the child's ops.
+//!
+//! Phantom points (LSB / advance-width / TSB / advance-height) are
+//! reserved by the spec at the end of every glyph's logical point
+//! list. sigilbuzz does not currently synthesize them: anchor-mode
+//! components that reference phantom indices fall through to a zero
+//! translation rather than miscompute the offset. No glyph in the
+//! Open Sans, Amiri, or other bundled fixtures exercises that path.
 
 use alloc::vec::Vec;
 
@@ -92,14 +115,6 @@ const COMP_UNSCALED_COMPONENT_OFFSET: u16 = 0x1000;
 /// no fixed bound, but HarfBuzz uses 64 and in-the-wild glyphs never
 /// exceed a handful of levels.
 const MAX_COMPOSITE_DEPTH: u8 = 64;
-
-/// Per-point data after flag decoding, before deltas.
-#[derive(Debug, Clone, Copy)]
-struct Point {
-    x: f32,
-    y: f32,
-    on_curve: bool,
-}
 
 impl<'a> Glyf<'a> {
     /// Wraps the raw `glyf` bytes. No validation up front — the
@@ -203,20 +218,36 @@ impl<'a> Glyf<'a> {
         deltas: Option<&[(f32, f32)]>,
         sink: &mut S,
     ) -> Result<bool> {
-        // Composite flattening is driven by an explicit transform
-        // stack instead of nested `ChildSink` wrappers — nesting
-        // blows up monomorphisation. Identity as the initial frame.
+        // Two-pass flattening: phase 1 walks the glyph (and any
+        // composite children) into a flat point list with absolute
+        // coordinates; phase 2 emits ops contour by contour. The
+        // intermediate point list is what lets composite components
+        // resolve `ARGS_ARE_XY_VALUES`-clear anchor-point matching:
+        // arg1 indexes into the parent's already-flattened points
+        // and arg2 into the freshly-flattened child, so we need both
+        // sets of concrete coordinates before we know the child's
+        // translation.
+        let mut flat = FlatGlyph::default();
         let identity = Transform::identity();
-        self.outline_with_transform(loca, glyph_id, deltas, &identity, sink, 0)
+        let drew = self.flatten(loca, glyph_id, deltas, &identity, &mut flat, 0)?;
+        if !drew {
+            return Ok(false);
+        }
+        flat.emit(sink);
+        Ok(true)
     }
 
-    fn outline_with_transform<S: OutlineSink>(
+    /// Flattens `glyph_id` (transformed by `tf`) into `out`. Returns
+    /// `Ok(false)` for empty / out-of-range glyphs. Recurses through
+    /// composite components, with `depth` capped by
+    /// [`MAX_COMPOSITE_DEPTH`].
+    fn flatten(
         &self,
         loca: &Loca<'_>,
         glyph_id: u16,
         deltas: Option<&[(f32, f32)]>,
         tf: &Transform,
-        sink: &mut S,
+        out: &mut FlatGlyph,
         depth: u8,
     ) -> Result<bool> {
         if depth > MAX_COMPOSITE_DEPTH {
@@ -235,49 +266,57 @@ impl<'a> Glyf<'a> {
         let num_contours = r.read_i16()?;
         r.skip(8)?; // bbox
         if num_contours >= 0 {
-            let mut wrapper = TransformedSink { sink, tf };
-            emit_simple_glyph(&mut r, num_contours as u16, deltas, &mut wrapper)?;
+            flatten_simple_glyph(&mut r, num_contours as u16, deltas, tf, out)?;
         } else {
-            self.emit_composite(&mut r, loca, tf, sink, depth)?;
+            self.flatten_composite(&mut r, loca, tf, out, depth)?;
         }
         Ok(true)
     }
 
-    fn emit_composite<S: OutlineSink>(
+    fn flatten_composite(
         &self,
         r: &mut Reader<'_>,
         loca: &Loca<'_>,
-        parent: &Transform,
-        sink: &mut S,
+        parent_tf: &Transform,
+        out: &mut FlatGlyph,
         depth: u8,
     ) -> Result<()> {
         loop {
             let flags = r.read_u16()?;
             let component_id = r.read_u16()?;
 
-            // Arguments: either two i16 (WORDS) or two i8 (bytes).
-            // ARGS_ARE_XY_VALUES distinguishes translation (used
-            // here) from anchor-point matching (OK to ignore for
-            // outline flattening of typical fonts — they stay at
-            // (0,0) offset which matches the glyph's own layout).
-            let (dx, dy): (f32, f32) = if flags & COMP_ARG_1_AND_2_ARE_WORDS != 0 {
+            // Arg width is flag-driven. We read the raw values first
+            // and decide later whether they are xy offsets or anchor
+            // point indices.
+            let (raw_a, raw_b): (i32, i32) = if flags & COMP_ARG_1_AND_2_ARE_WORDS != 0 {
                 let a = r.read_i16()?;
                 let b = r.read_i16()?;
-                if flags & COMP_ARGS_ARE_XY_VALUES != 0 {
-                    (f32::from(a), f32::from(b))
-                } else {
-                    (0.0, 0.0)
-                }
+                (i32::from(a), i32::from(b))
             } else {
-                let a = r.read_i8()?;
-                let b = r.read_i8()?;
+                // Anchor mode uses unsigned point indices when args
+                // are not WORDS; xy mode uses signed bytes. The
+                // distinction is the ARGS_ARE_XY_VALUES flag.
                 if flags & COMP_ARGS_ARE_XY_VALUES != 0 {
-                    (f32::from(a), f32::from(b))
+                    let a = r.read_i8()?;
+                    let b = r.read_i8()?;
+                    (i32::from(a), i32::from(b))
                 } else {
-                    (0.0, 0.0)
+                    let a = r.read_u8()?;
+                    let b = r.read_u8()?;
+                    (i32::from(a), i32::from(b))
                 }
             };
 
+            // OpenType stores the 2x2 in column-major order
+            // (xscale, scale01, scale10, yscale) where the resulting
+            // transform is:
+            //   x' = xscale * x + scale10 * y
+            //   y' = scale01 * x + yscale * y
+            // [`Transform`]'s `apply` is `xx*x + xy*y, yx*x + yy*y`,
+            // so `xy` receives `scale10` and `yx` receives `scale01`.
+            // Crossing those wires is invisible for symmetric scales
+            // (the only kind exercised by Open Sans + most of Amiri)
+            // but flips the axes for shear / rotation matrices.
             let (mut xx, mut xy, mut yx, mut yy) = (1.0_f32, 0.0_f32, 0.0_f32, 1.0_f32);
             if flags & COMP_WE_HAVE_A_SCALE != 0 {
                 let s = r.read_f2dot14()?;
@@ -288,38 +327,88 @@ impl<'a> Glyf<'a> {
                 yy = r.read_f2dot14()?;
             } else if flags & COMP_WE_HAVE_A_TWO_BY_TWO != 0 {
                 xx = r.read_f2dot14()?;
-                xy = r.read_f2dot14()?;
-                yx = r.read_f2dot14()?;
+                yx = r.read_f2dot14()?; // scale01 — y' coefficient on x
+                xy = r.read_f2dot14()?; // scale10 — x' coefficient on y
                 yy = r.read_f2dot14()?;
             }
 
-            // SCALED_COMPONENT_OFFSET: the spec allows Apple-style
-            // offset scaling; most fonts don't use it. We honour it
-            // by pre-multiplying the translation through the 2x2.
-            let (tx, ty) = if flags & COMP_SCALED_COMPONENT_OFFSET != 0
-                && flags & COMP_UNSCALED_COMPONENT_OFFSET == 0
-            {
-                (xx * dx + xy * dy, yx * dx + yy * dy)
-            } else {
-                (dx, dy)
-            };
+            // Snapshot the parent's point count *before* this
+            // component is laid down. Anchor-mode arg1 indexes into
+            // exactly those points (the parent contour points already
+            // emitted by previous siblings, transformed into the
+            // composite's frame).
+            let parent_point_count = out.points.len();
 
-            let local = Transform {
+            // First flatten the child into a scratch buffer with the
+            // 2x2 applied but no translation yet — both anchor-mode
+            // and xy-mode branches need access to the child's
+            // pre-translation absolute points.
+            let child_local = Transform {
                 xx,
                 xy,
                 yx,
                 yy,
-                tx,
-                ty,
+                tx: 0.0,
+                ty: 0.0,
             };
-            let combined = parent.compose(&local);
+            let child_combined = parent_tf.compose(&child_local);
+            let mut child_flat = FlatGlyph::default();
+            self.flatten(loca, component_id, None, &child_combined, &mut child_flat, depth + 1)?;
 
-            // Composite children are always drawn without deltas —
-            // gvar deltas for composites target the composite's own
-            // translation offsets rather than child points; sigilbuzz
-            // does not yet apply that per-component delta, so the
-            // child draws in its own design space.
-            self.outline_with_transform(loca, component_id, None, &combined, sink, depth + 1)?;
+            // Resolve the translation. Anchor-mode (ARGS_ARE_XY_VALUES
+            // clear) computes `parent[arg1] - child[arg2]` so the
+            // child's anchor point lands on the parent's. Otherwise
+            // the args are signed offsets and SCALED_COMPONENT_OFFSET
+            // optionally pre-multiplies them through the 2x2.
+            let (tx, ty) = if flags & COMP_ARGS_ARE_XY_VALUES != 0 {
+                let dx = raw_a as f32;
+                let dy = raw_b as f32;
+                let (lx, ly) = if flags & COMP_SCALED_COMPONENT_OFFSET != 0
+                    && flags & COMP_UNSCALED_COMPONENT_OFFSET == 0
+                {
+                    (xx * dx + xy * dy, yx * dx + yy * dy)
+                } else {
+                    (dx, dy)
+                };
+                // The translation lives in the parent's coordinate
+                // frame, so route it through the parent's transform
+                // (rotation + scale + translation) before applying
+                // it on top of the already-transformed child points.
+                let tx = parent_tf.xx * lx + parent_tf.xy * ly;
+                let ty = parent_tf.yx * lx + parent_tf.yy * ly;
+                (tx, ty)
+            } else {
+                let p_idx = raw_a as usize;
+                let c_idx = raw_b as usize;
+                if p_idx >= parent_point_count || c_idx >= child_flat.points.len() {
+                    // Out-of-range anchor index: fall back to a zero
+                    // translation rather than refusing to draw the
+                    // component. Phantom-point references would land
+                    // here; sigilbuzz does not synthesize phantom
+                    // points for composite anchors yet.
+                    (0.0, 0.0)
+                } else {
+                    let (px, py) = out.points[p_idx];
+                    let (cx, cy) = child_flat.points[c_idx];
+                    (px - cx, py - cy)
+                }
+            };
+
+            // Splice the child into the parent. Contour ends shift by
+            // the parent's running point count; coordinates shift by
+            // the resolved translation; flags follow each point.
+            let point_offset = out.points.len();
+            debug_assert_eq!(child_flat.points.len(), child_flat.flags.len());
+            for (i, &(cx, cy)) in child_flat.points.iter().enumerate() {
+                out.points.push((cx + tx, cy + ty));
+                out.flags.push(child_flat.flags[i]);
+            }
+            for c in &child_flat.contours {
+                out.contours.push(Contour {
+                    start: c.start + point_offset,
+                    end: c.end + point_offset,
+                });
+            }
 
             if flags & COMP_MORE_COMPONENTS == 0 {
                 break;
@@ -384,11 +473,55 @@ impl Transform {
     }
 }
 
-fn emit_simple_glyph<S: OutlineSink>(
+/// Flat point representation in the parent composite's frame. Both
+/// real contour points and (eventually) phantom points share this
+/// shape. `on_curve` is meaningful only for contour points.
+#[derive(Debug, Clone, Copy)]
+struct FlatPoint {
+    on_curve: bool,
+}
+
+/// One closed contour within a [`FlatGlyph`], delimited by start /
+/// end indices into the parent point + flag arrays.
+#[derive(Debug, Clone, Copy)]
+struct Contour {
+    start: usize,
+    end: usize,
+}
+
+/// Two-pass flatten target. Phase 1 of [`Glyf::outline`] fills this
+/// with absolute coordinates (deltas + composite transforms already
+/// folded in); phase 2 walks `contours` and dispatches to the
+/// caller's [`OutlineSink`]. Composite anchor-mode resolution reaches
+/// into `points` to compute the parent ↔ child anchor pair, which is
+/// why the intermediate representation exists.
+#[derive(Debug, Default)]
+struct FlatGlyph {
+    points: Vec<(f32, f32)>,
+    flags: Vec<FlatPoint>,
+    contours: Vec<Contour>,
+}
+
+impl FlatGlyph {
+    fn emit<S: OutlineSink>(&self, sink: &mut S) {
+        for c in &self.contours {
+            // `flatten_simple_glyph` guarantees `start..=end` is in
+            // range, and `flatten_composite` only ever copies
+            // contiguous slices, so the indexing is safe by
+            // construction.
+            let coords = &self.points[c.start..=c.end];
+            let flags = &self.flags[c.start..=c.end];
+            emit_contour(coords, flags, sink);
+        }
+    }
+}
+
+fn flatten_simple_glyph(
     r: &mut Reader<'_>,
     num_contours: u16,
     deltas: Option<&[(f32, f32)]>,
-    sink: &mut S,
+    tf: &Transform,
+    out: &mut FlatGlyph,
 ) -> Result<()> {
     if num_contours == 0 {
         return Ok(());
@@ -469,8 +602,11 @@ fn emit_simple_glyph<S: OutlineSink>(
         ys.push(y_cur);
     }
 
-    // Materialise absolute points with optional deltas.
-    let mut points = Vec::with_capacity(total_points as usize);
+    // Materialise absolute, transformed points with optional deltas.
+    // Deltas live in design-unit space and apply *before* the
+    // composite transform — gvar feeds them into the simple-glyph
+    // coord stream, so they share the glyph's own frame.
+    let base_idx = out.points.len();
     for (i, &f) in flags.iter().enumerate() {
         let mut x = xs[i] as f32;
         let mut y = ys[i] as f32;
@@ -480,30 +616,35 @@ fn emit_simple_glyph<S: OutlineSink>(
                 y += dy;
             }
         }
-        points.push(Point {
-            x,
-            y,
+        let (tx, ty) = tf.apply(x, y);
+        out.points.push((tx, ty));
+        out.flags.push(FlatPoint {
             on_curve: f & FLAG_ON_CURVE != 0,
         });
     }
 
-    // Emit per contour.
+    // Per-contour ends, rebased onto the running point count.
     let mut start: usize = 0;
     for &end in &end_pts {
         let end_idx = end as usize;
-        if end_idx >= points.len() || end_idx < start {
+        if end_idx >= xs.len() || end_idx < start {
             return Err(Error::Malformed {
                 offset: 0,
                 context: "glyf endPtsOfContours out of range",
             });
         }
-        emit_contour(&points[start..=end_idx], sink);
+        out.contours.push(Contour {
+            start: base_idx + start,
+            end: base_idx + end_idx,
+        });
         start = end_idx + 1;
     }
     Ok(())
 }
 
-/// Emits the TrueType quadratic-pair expansion for one closed contour.
+/// Emits the TrueType quadratic-pair expansion for one closed
+/// contour. `coords` and `flags` are parallel slices of equal
+/// length.
 ///
 /// Matches ttf-parser's convention: every `Close` is preceded by an
 /// explicit `LineTo` back to the start when the last emitted point
@@ -513,25 +654,25 @@ fn emit_simple_glyph<S: OutlineSink>(
 /// - A contour that begins off-curve either borrows its last point
 ///   as the implicit start (when the last is on-curve) or uses the
 ///   midpoint between first and last.
-fn emit_contour<S: OutlineSink>(pts: &[Point], sink: &mut S) {
-    if pts.is_empty() {
+fn emit_contour<S: OutlineSink>(coords: &[(f32, f32)], flags: &[FlatPoint], sink: &mut S) {
+    debug_assert_eq!(coords.len(), flags.len());
+    if coords.is_empty() {
         return;
     }
-    let n = pts.len();
+    let n = coords.len();
 
     // Determine the starting on-curve point.
-    let first_on_curve = pts[0].on_curve;
-    let last_on_curve = pts[n - 1].on_curve;
+    let first_on_curve = flags[0].on_curve;
+    let last_on_curve = flags[n - 1].on_curve;
     let (start_x, start_y) = if first_on_curve {
-        (pts[0].x, pts[0].y)
+        coords[0]
     } else if last_on_curve {
-        (pts[n - 1].x, pts[n - 1].y)
+        coords[n - 1]
     } else {
         // Midpoint between first and last off-curve points.
-        (
-            (pts[0].x + pts[n - 1].x) * 0.5,
-            (pts[0].y + pts[n - 1].y) * 0.5,
-        )
+        let (x0, y0) = coords[0];
+        let (xn, yn) = coords[n - 1];
+        ((x0 + xn) * 0.5, (y0 + yn) * 0.5)
     };
     sink.move_to(start_x, start_y);
 
@@ -560,11 +701,11 @@ fn emit_contour<S: OutlineSink>(pts: &[Point], sink: &mut S) {
     let mut cur_y = start_y;
 
     while i < end_before_wrap {
-        let p = pts[i];
-        if p.on_curve {
-            sink.line_to(p.x, p.y);
-            cur_x = p.x;
-            cur_y = p.y;
+        let (px, py) = coords[i];
+        if flags[i].on_curve {
+            sink.line_to(px, py);
+            cur_x = px;
+            cur_y = py;
             i += 1;
         } else {
             // Off-curve control. The next point either is on-curve
@@ -574,16 +715,16 @@ fn emit_contour<S: OutlineSink>(pts: &[Point], sink: &mut S) {
             // unskipped index.
             let next_idx = i + 1;
             if next_idx < end_before_wrap {
-                let q = pts[next_idx];
-                if q.on_curve {
-                    sink.quad_to(p.x, p.y, q.x, q.y);
-                    cur_x = q.x;
-                    cur_y = q.y;
+                let (qx, qy) = coords[next_idx];
+                if flags[next_idx].on_curve {
+                    sink.quad_to(px, py, qx, qy);
+                    cur_x = qx;
+                    cur_y = qy;
                     i = next_idx + 1;
                 } else {
-                    let mx = (p.x + q.x) * 0.5;
-                    let my = (p.y + q.y) * 0.5;
-                    sink.quad_to(p.x, p.y, mx, my);
+                    let mx = (px + qx) * 0.5;
+                    let my = (py + qy) * 0.5;
+                    sink.quad_to(px, py, mx, my);
                     cur_x = mx;
                     cur_y = my;
                     i = next_idx;
@@ -591,7 +732,7 @@ fn emit_contour<S: OutlineSink>(pts: &[Point], sink: &mut S) {
             } else {
                 // Off-curve is the last point in the walk. The
                 // endpoint is the contour's start.
-                sink.quad_to(p.x, p.y, start_x, start_y);
+                sink.quad_to(px, py, start_x, start_y);
                 cur_x = start_x;
                 cur_y = start_y;
                 i = next_idx;
@@ -605,42 +746,6 @@ fn emit_contour<S: OutlineSink>(pts: &[Point], sink: &mut S) {
         sink.line_to(start_x, start_y);
     }
     sink.close();
-}
-
-/// Outline sink wrapper that applies a flat `Transform` (borrowed)
-/// to every emitted op. Composite flattening builds the composed
-/// transform per component and wraps the caller's sink exactly once
-/// — the recursive call takes a fresh `TransformedSink` with the
-/// composed matrix, so the resulting monomorphisation depth is
-/// bounded by 1 (identity wrapper → transformed wrapper).
-struct TransformedSink<'s, 't, S: OutlineSink> {
-    sink: &'s mut S,
-    tf: &'t Transform,
-}
-
-impl<'s, 't, S: OutlineSink> OutlineSink for TransformedSink<'s, 't, S> {
-    fn move_to(&mut self, x: f32, y: f32) {
-        let (mx, my) = self.tf.apply(x, y);
-        self.sink.move_to(mx, my);
-    }
-    fn line_to(&mut self, x: f32, y: f32) {
-        let (mx, my) = self.tf.apply(x, y);
-        self.sink.line_to(mx, my);
-    }
-    fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
-        let (cx, cy) = self.tf.apply(cx, cy);
-        let (mx, my) = self.tf.apply(x, y);
-        self.sink.quad_to(cx, cy, mx, my);
-    }
-    fn curve_to(&mut self, c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32) {
-        let (c1x, c1y) = self.tf.apply(c1x, c1y);
-        let (c2x, c2y) = self.tf.apply(c2x, c2y);
-        let (mx, my) = self.tf.apply(x, y);
-        self.sink.curve_to(c1x, c1y, c2x, c2y, mx, my);
-    }
-    fn close(&mut self) {
-        self.sink.close();
-    }
 }
 
 #[cfg(test)]
@@ -1001,6 +1106,169 @@ mod tests {
                 assert!((y - 150.0).abs() < 1e-3);
             }
             _ => panic!("expected LineTo at 2"),
+        }
+    }
+
+    #[test]
+    fn composite_anchor_mode_translates_child_to_parent_anchor() {
+        // Two-component composite (glyph 0):
+        //   1. First component is a contour that *contributes* the
+        //      parent's flattened points — a 4-point square anchored
+        //      at (10, 20)..(20, 20)..(20, 30)..(10, 30). It draws
+        //      itself unchanged.
+        //   2. Second component (glyph 2) is a single triangle whose
+        //      first point is (0, 0). It is matched in anchor mode
+        //      with arg1=1 (parent point index 1 → (20, 20)) and
+        //      arg2=0 (child point index 0 → (0, 0)). The implied
+        //      translation is parent[1] - child[0] = (20, 20).
+        //
+        // The test confirms:
+        //   - Anchor mode reads two unsigned bytes (no XY_VALUES, no
+        //     WORDS) and treats them as point indices.
+        //   - The translation is computed from the parent's already-
+        //     flattened points (component 1) and the child's own
+        //     anchor point.
+        //   - Child ops are emitted with the resolved translation.
+        //
+        // Glyph layout: 0 = composite parent, 1 = parent's "anchor"
+        // donor (a 4-point square), 2 = anchor-mode child (triangle).
+
+        // Glyph 1: anchor-donor square at (10,20),(20,20),(20,30),(10,30).
+        let g1 = build_simple_glyph(
+            &[3],
+            &[
+                (10, 20, true),
+                (20, 20, true),
+                (20, 30, true),
+                (10, 30, true),
+            ],
+        );
+
+        // Glyph 2: triangle at (0,0),(40,0),(0,40).
+        let g2 = build_simple_glyph(
+            &[2],
+            &[(0, 0, true), (40, 0, true), (0, 40, true)],
+        );
+
+        // Glyph 0: composite. First component glyph 1 with xy
+        // translation (0, 0); second component glyph 2 in anchor mode
+        // (arg1=1 → parent point 1 = (20, 20); arg2=0 → child point 0
+        // = (0, 0)).
+        let mut g0 = build_header(-1, 0, 0, 100, 100);
+        // Component A: glyph 1, xy_values, words, MORE_COMPONENTS.
+        let flags_a: u16 =
+            COMP_ARGS_ARE_XY_VALUES | COMP_ARG_1_AND_2_ARE_WORDS | COMP_MORE_COMPONENTS;
+        g0.extend_from_slice(&flags_a.to_be_bytes());
+        g0.extend_from_slice(&1u16.to_be_bytes());
+        g0.extend_from_slice(&0i16.to_be_bytes());
+        g0.extend_from_slice(&0i16.to_be_bytes());
+        // Component B: glyph 2, anchor mode (no XY_VALUES, no WORDS,
+        // last component).
+        let flags_b: u16 = 0; // anchor mode, byte args, last.
+        g0.extend_from_slice(&flags_b.to_be_bytes());
+        g0.extend_from_slice(&2u16.to_be_bytes());
+        g0.push(1u8); // arg1 = parent point 1
+        g0.push(0u8); // arg2 = child point 0
+
+        // Lay out the glyf table with each glyph on a 2-byte boundary
+        // for the short loca format.
+        let mut glyf_bytes = Vec::new();
+        let off0 = glyf_bytes.len() as u32;
+        glyf_bytes.extend_from_slice(&g0);
+        if glyf_bytes.len() % 2 != 0 {
+            glyf_bytes.push(0);
+        }
+        let off1 = glyf_bytes.len() as u32;
+        glyf_bytes.extend_from_slice(&g1);
+        if glyf_bytes.len() % 2 != 0 {
+            glyf_bytes.push(0);
+        }
+        let off2 = glyf_bytes.len() as u32;
+        glyf_bytes.extend_from_slice(&g2);
+        if glyf_bytes.len() % 2 != 0 {
+            glyf_bytes.push(0);
+        }
+        let off_end = glyf_bytes.len() as u32;
+
+        let loca_bytes = build_loca_short(&[
+            (off0 / 2) as u16,
+            (off1 / 2) as u16,
+            (off2 / 2) as u16,
+            (off_end / 2) as u16,
+        ]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 3).unwrap();
+        let glyf = Glyf::new(&glyf_bytes);
+
+        let mut o = Outline::new();
+        glyf.outline(&loca, 0, None, &mut o).unwrap();
+
+        // First six ops: square contour from glyph 1 unchanged.
+        assert!(matches!(o.ops()[0], PathOp::MoveTo { x: 10.0, y: 20.0 }));
+        assert!(matches!(o.ops()[1], PathOp::LineTo { x: 20.0, y: 20.0 }));
+        assert!(matches!(o.ops()[2], PathOp::LineTo { x: 20.0, y: 30.0 }));
+        assert!(matches!(o.ops()[3], PathOp::LineTo { x: 10.0, y: 30.0 }));
+        assert!(matches!(o.ops()[4], PathOp::LineTo { x: 10.0, y: 20.0 }));
+        assert!(matches!(o.ops()[5], PathOp::Close));
+
+        // Anchor-mode triangle: child[0] = (0, 0) lands on parent[1]
+        // = (20, 20), so every child point shifts by (+20, +20).
+        // (0,0)->(20,20), (40,0)->(60,20), (0,40)->(20,60).
+        assert!(matches!(o.ops()[6], PathOp::MoveTo { x: 20.0, y: 20.0 }));
+        assert!(matches!(o.ops()[7], PathOp::LineTo { x: 60.0, y: 20.0 }));
+        assert!(matches!(o.ops()[8], PathOp::LineTo { x: 20.0, y: 60.0 }));
+        assert!(matches!(o.ops()[9], PathOp::LineTo { x: 20.0, y: 20.0 }));
+        assert!(matches!(o.ops()[10], PathOp::Close));
+    }
+
+    #[test]
+    fn composite_two_by_two_uses_column_major_layout() {
+        // OpenType stores the 2x2 in column-major order. A 90° CCW
+        // rotation has xscale=0, scale01=1, scale10=-1, yscale=0, so
+        // (x, y) → (-y, x). Pin that mapping with a single-point
+        // contour at (10, 0): after rotation it should land at
+        // (0, 10), and with translation (50, 5) at (50, 15).
+        let child = build_simple_glyph(&[0], &[(10, 0, true)]);
+        let mut parent = build_header(-1, 0, 0, 100, 100);
+        let flags: u16 = COMP_ARGS_ARE_XY_VALUES
+            | COMP_ARG_1_AND_2_ARE_WORDS
+            | COMP_WE_HAVE_A_TWO_BY_TWO;
+        parent.extend_from_slice(&flags.to_be_bytes());
+        parent.extend_from_slice(&1u16.to_be_bytes());
+        parent.extend_from_slice(&50i16.to_be_bytes()); // dx
+        parent.extend_from_slice(&5i16.to_be_bytes()); //  dy
+        let one = 16384i16; // 1.0 in F2Dot14
+        parent.extend_from_slice(&0i16.to_be_bytes()); // xscale = 0
+        parent.extend_from_slice(&one.to_be_bytes()); //  scale01 = 1
+        parent.extend_from_slice(&(-one).to_be_bytes()); // scale10 = -1
+        parent.extend_from_slice(&0i16.to_be_bytes()); // yscale = 0
+
+        let mut glyf_bytes = Vec::new();
+        let p_off = glyf_bytes.len() as u32;
+        glyf_bytes.extend_from_slice(&parent);
+        if glyf_bytes.len() % 2 != 0 {
+            glyf_bytes.push(0);
+        }
+        let c_off = glyf_bytes.len() as u32;
+        glyf_bytes.extend_from_slice(&child);
+        if glyf_bytes.len() % 2 != 0 {
+            glyf_bytes.push(0);
+        }
+        let end_off = glyf_bytes.len() as u32;
+        let loca_bytes = build_loca_short(&[
+            (p_off / 2) as u16,
+            (c_off / 2) as u16,
+            (end_off / 2) as u16,
+        ]);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 2).unwrap();
+        let glyf = Glyf::new(&glyf_bytes);
+        let mut o = Outline::new();
+        glyf.outline(&loca, 0, None, &mut o).unwrap();
+        match o.ops()[0] {
+            PathOp::MoveTo { x, y } => {
+                assert!((x - 50.0).abs() < 1e-3, "x = {x}");
+                assert!((y - 15.0).abs() < 1e-3, "y = {y}");
+            }
+            other => panic!("expected MoveTo, got {other:?}"),
         }
     }
 
