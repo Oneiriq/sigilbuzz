@@ -379,4 +379,3 @@ fn mixed_arabic_and_latin_runs_shape_each_half_correctly() {
         );
     }
 }
-
