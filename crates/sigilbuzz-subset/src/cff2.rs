@@ -456,7 +456,6 @@ fn emit_with_keep_set(
     per_fd_kept_local: &[Vec<u32>],
     kept_global_idx: &[u32],
 ) -> Result<Vec<u8>, SubsetError> {
-
     let mut global_renumber: Vec<Option<u32>> = alloc::vec![None; parsed.global_subrs.len()];
     for (new_i, &old_i) in kept_global_idx.iter().enumerate() {
         global_renumber[old_i as usize] = Some(new_i as u32);
