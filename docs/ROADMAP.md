@@ -302,14 +302,48 @@ Operational gaps from 0.5.0 closed. `sigilbuzz-subset` covers every gid-keyed ta
 
 ---
 
-## 0.8.0+ (next)
+## 0.8.0 (shipping)
 
-- [ ] `sigilbuzz-capi` stretch surface — `hb_subset_*` (#102), `hb_paint_*` (#103), `hb_face_collect_unicodes` + `hb_ot_layout_collect_features` (#104).
-- [ ] Layout subset rewriter — GSUB types 2/3/5/6/8 + full GPOS + remaining GDEF (#107). The scaffold from 0.7.0 makes each follow-up localised to its own lookup-type rewriter.
-- [ ] CFF non-identity orchestration on top of #105 primitives (#108) — wires CharStrings INDEX rebuild + Subr renumber + Top DICT deferred-offset patching end-to-end.
-- [ ] Per-script parity follow-ups: N'Ko tone (#114), Limbu vowel-mark (#115), Cham medial-ra (#116), Mongolian multi-letter chain (#118).
-- [ ] Brahmi historical-script family on the USE state machine.
-- [ ] WOFF1 zlib compression (currently uncompressed pass-through; most producers use WOFF2 now, so low priority).
+The biggest 0.8.0 surface across any release: the C-API stretch bridges, full byte-level subset rewriting for **every** GSUB and GPOS lookup type, complete CFF subsetting (CID + CFF2), the Brahmi USE family, generic shaping fixes, and three rounds of fuzz hardening.
+
+### `sigilbuzz-capi` stretch surface (closes #102/#103/#104)
+
+- [x] `hb_set_t` opaque set type (Arc-pinned `BTreeSet<u32>`) with create/destroy/reference/add/del/has/get_population/next.
+- [x] `hb_subset_*` bridge to sigilbuzz-subset (`hb_subset_input_create/_destroy/_unicode_set/_glyph_set` + `hb_subset_or_fail`).
+- [x] `hb_paint_funcs_t` with all 10 callback setters + `hb_font_paint_glyph` walking sigilbuzz-paint's DrawCmd stream.
+- [x] `hb_face_collect_unicodes` + `hb_ot_layout_collect_features` introspection.
+
+### Subsetting completes
+
+- [x] **Full GSUB byte-level rewriter**: types 1 (#109), 2+3 (#121), 4 (#112), 5+6+8 (#127). Closure walker pulls forward through every substitution variant. Two-phase build_gsub driver with renumber-stable lookup-index propagation.
+- [x] **Full GPOS byte-level rewriter**: types 1 / 2 fmt 1+2 / 3 / 4 / 5 / 6 / 7 / 8 / 9 (#128 + #131). PairPos fmt 2 uses adaptive class-collapse (small kept-set → fmt-1 fallback for correctness; large kept-set → fmt-2 pass-through for compactness).
+- [x] **CFF subsetting end-to-end**: non-CID CFF1 (#120), CID-keyed CFF1 (#135), CFF2 non-identity (#135). FDArray + FDSelect rewrite + per-FD subr renumber.
+- [x] Closes #87 (full layout rewriter), #92 (CFF emitter), #107 (per-lookup-type follow-ups), #108 (CFF orchestration), #122 (CID + CFF2), #126 (GPOS context).
+
+### Brahmi USE family (#123)
+
+- [x] Brahmi (U+11000), Sharada (U+11180), Khojki (U+11200), Tirhuta (U+11480), Modi (U+11600). All five with vendored OFL Noto fixtures and parity vs rustybuzz.
+- [x] **`USE_BASIC_FEATURES` correction**: added `nukt` + `akhn` (missing previously). Generic improvement that benefits every Indic-style USE script.
+
+### Generic shaping correctness fixes
+
+- [x] **Mongolian apply_forward bug** (#118 / PR #134): `apply_parsed_lookup_at`'s Ligature arm advanced cursor by INPUT span, not OUTPUT span, after in-place buffer shrinkage. One-line fix in `src/shape.rs`. Affects any script using ligatures with marker glyphs in the run.
+- [x] **Limbu mark-zero passes** (#115 / PR #124): dominant-script-gated EARLY/LATE/NONE timing for clearing mark advances. USE/Myanmar=EARLY, default/Arabic/Hebrew/Thai/Lao=LATE, Indic/Khmer/Hangul=NONE. General correctness — fixed via Limbu, benefits everywhere.
+- [x] **Cham `pref` dispatch** (#116 / PR #124): split USE basic-feature dispatch so `pref` runs first, with per-syllable post-`pref` reorder. General USE improvement.
+- [x] **N'Ko cursive joining** (#114 / PR #124): added N'Ko block to joining-type table, routed through Arabic's state machine via `nko ` script tag.
+
+### Hardening — three regression waves
+
+- [x] Wave 9 fuzz on 0.8.0 surface: 2 fixes — CFF charset format-2 emitter overflow on SID 0xFFFF (#129/#130); CFF Encoding emitters silent truncation past u8 count limit (#132/#133).
+
+---
+
+## 0.9.0+ (next)
+
+- [ ] WOFF1 zlib compression (currently uncompressed pass-through; most producers use WOFF2, so low priority).
+- [ ] Real-font CFF integration fixtures (Source Han Sans CN subset for CID, an OFL CFF2 VF) — synthetic fixtures already cover the orchestration; vendored fixtures would tighten the integration coverage.
+- [ ] Cross-FD CFF subr sharing (currently raises Unsupported; rare in real-world fonts).
+- [ ] AAT kerx state-machine formats 1 / 4 / 6 (currently only format 0 is recognised).
 
 ---
 
