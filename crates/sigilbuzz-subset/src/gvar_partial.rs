@@ -146,7 +146,8 @@ pub(crate) fn bake_gvar_partial(
     // sits immediately after the offsets-padded region.
     let data_array_off: u32 = shared_tuples_off;
 
-    let mut out: Vec<u8> = Vec::with_capacity(header_len + offsets_padded + total_data_len as usize);
+    let mut out: Vec<u8> =
+        Vec::with_capacity(header_len + offsets_padded + total_data_len as usize);
 
     // Header.
     out.extend_from_slice(&1u16.to_be_bytes()); // major
@@ -229,7 +230,11 @@ fn read_shared_tuples(bytes: &[u8], header: &GvarHeader) -> Result<Vec<Vec<f32>>
     let mut out: Vec<Vec<f32>> = Vec::with_capacity(count);
     let base = header.shared_tuples_off as usize;
     let need = base
-        .checked_add(count.checked_mul(axis_count.checked_mul(2).unwrap_or(0)).unwrap_or(0))
+        .checked_add(
+            count
+                .checked_mul(axis_count.checked_mul(2).unwrap_or(0))
+                .unwrap_or(0),
+        )
         .ok_or(SubsetError::Unsupported(
             "gvar partial: shared tuples size overflow",
         ))?;
@@ -775,18 +780,14 @@ fn parse_packed_point_numbers(data: &[u8]) -> Result<Vec<u16>, SubsetError> {
         for _ in 0..take {
             let delta: u32 = if words {
                 if cursor + 2 > data.len() {
-                    return Err(SubsetError::Unsupported(
-                        "gvar partial: packed-points u16",
-                    ));
+                    return Err(SubsetError::Unsupported("gvar partial: packed-points u16"));
                 }
                 let v = u16::from_be_bytes([data[cursor], data[cursor + 1]]);
                 cursor += 2;
                 u32::from(v)
             } else {
                 if cursor >= data.len() {
-                    return Err(SubsetError::Unsupported(
-                        "gvar partial: packed-points u8",
-                    ));
+                    return Err(SubsetError::Unsupported("gvar partial: packed-points u8"));
                 }
                 let v = data[cursor];
                 cursor += 1;
@@ -880,9 +881,7 @@ fn count_packed_deltas(data: &[u8]) -> Result<usize, SubsetError> {
             total += run;
         } else if control & DELTA_WORDS != 0 {
             if cursor + run * 2 > data.len() {
-                return Err(SubsetError::Unsupported(
-                    "gvar partial: count deltas i16",
-                ));
+                return Err(SubsetError::Unsupported("gvar partial: count deltas i16"));
             }
             cursor += run * 2;
             total += run;
