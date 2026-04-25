@@ -28,6 +28,18 @@ pub enum RenderError {
     /// Underlying sigilbuzz parser returned an error while pulling
     /// tables we needed (head, COLR, CPAL).
     Parse(&'static str),
+    /// The font has no SVG document for this glyph id (either the
+    /// `SVG ` table is absent or the gid sits outside every record's
+    /// range).
+    SvgNotFound(u16),
+    /// The SVG document for this glyph is gzip-compressed.
+    /// `sigilbuzz-render` deliberately does not depend on a gzip
+    /// decoder; the consumer is expected to decompress the payload
+    /// themselves and feed it through a future bytes-based entry
+    /// point. The SVG-in-OT spec allows both plain and gzipped
+    /// payloads — Apple Color Emoji and Twitter Color Emoji ship the
+    /// plain form, so this is rarer than it sounds.
+    SvgGzipped,
 }
 
 impl fmt::Display for RenderError {
@@ -42,6 +54,8 @@ impl fmt::Display for RenderError {
             Self::BadSize(s) => write!(f, "bad rasterization size {s}"),
             Self::BadUpem => write!(f, "font has zero or unparseable units_per_em"),
             Self::Parse(msg) => write!(f, "parser error: {msg}"),
+            Self::SvgNotFound(g) => write!(f, "glyph {g} has no SVG document"),
+            Self::SvgGzipped => f.write_str("SVG document is gzip-compressed"),
         }
     }
 }

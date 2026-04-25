@@ -52,6 +52,14 @@ impl Rasterizer {
         self
     }
 
+    /// Returns the configured curve flattening tolerance. Used by
+    /// sibling modules (`svg.rs`) that re-use the flatten/raster
+    /// pipeline directly.
+    #[must_use]
+    pub(crate) fn flattening_tolerance(&self) -> f32 {
+        self.tolerance
+    }
+
     /// Rasterizes a single glyph outline at `size_pt` pixels with the
     /// given variable-font normalized coords. The returned [`Pixmap`]
     /// is sized to the glyph's bounding box plus a one-pixel margin so
