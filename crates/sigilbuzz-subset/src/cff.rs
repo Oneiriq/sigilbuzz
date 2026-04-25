@@ -595,8 +595,14 @@ pub fn emit_charset_format2(sids: &[u16]) -> Vec<u8> {
         let first = sids[i];
         let mut j = i + 1;
         // Extend the run while consecutive SIDs are contiguous and
-        // nLeft fits a u16.
-        while j < sids.len() && sids[j] == sids[j - 1] + 1 && (j - i) <= u16::MAX as usize {
+        // nLeft fits a u16. `checked_add` guards the SID == 0xFFFF
+        // boundary — a +1 overflow would panic in debug builds and
+        // wrap to 0 in release, silently merging unrelated SIDs into
+        // the same record.
+        while j < sids.len()
+            && sids[j - 1].checked_add(1) == Some(sids[j])
+            && (j - i) <= u16::MAX as usize
+        {
             j += 1;
         }
         let n_left = (j - i - 1) as u16;
@@ -2109,6 +2115,21 @@ mod tests {
         assert_eq!(u16::from_be_bytes([bytes[1], bytes[2]]), 100);
         assert_eq!(u16::from_be_bytes([bytes[3], bytes[4]]), 2);
         assert_eq!(bytes.len(), 5);
+    }
+
+    #[test]
+    fn charset_format2_handles_sid_at_u16_boundary() {
+        // A SID of 0xFFFF followed by an unrelated SID used to overflow
+        // when the run extender computed `sids[j-1] + 1`. The boundary
+        // SID must terminate the run cleanly without panicking.
+        let bytes = emit_charset_format2(&[0xFFFFu16, 100u16]);
+        // Two single-entry records: (first=0xFFFF, nLeft=0) and
+        // (first=100, nLeft=0).
+        assert_eq!(bytes[0], 2);
+        assert_eq!(u16::from_be_bytes([bytes[1], bytes[2]]), 0xFFFF);
+        assert_eq!(u16::from_be_bytes([bytes[3], bytes[4]]), 0);
+        assert_eq!(u16::from_be_bytes([bytes[5], bytes[6]]), 100);
+        assert_eq!(u16::from_be_bytes([bytes[7], bytes[8]]), 0);
     }
 
     #[test]
