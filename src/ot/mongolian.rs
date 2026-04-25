@@ -183,7 +183,7 @@ mod tests {
         assert!(is_mongolian_fvs('\u{180C}')); // FVS2
         assert!(is_mongolian_fvs('\u{180D}')); // FVS3
         assert!(is_mongolian_fvs('\u{180F}')); // FVS4 (U14.0)
-        // Vowel separator (U+180E) is NOT an FVS.
+                                               // Vowel separator (U+180E) is NOT an FVS.
         assert!(!is_mongolian_fvs('\u{180E}'));
         assert!(!is_mongolian_fvs('\u{1820}'));
     }

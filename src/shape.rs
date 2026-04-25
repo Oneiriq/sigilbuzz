@@ -589,13 +589,15 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // callers shape Mongolian without having to know the default.
     // Consumers who want horizontal Mongolian must set the direction
     // to RTL (vertical-rotated) or pass a non-Mongolian-dominant run.
-    let mongolian_dominant = buffer.text().chars().any(|c| {
-        crate::unicode::script_of(c) == crate::unicode::Script::Mongolian
-    }) && buffer
+    let mongolian_dominant = buffer
         .text()
         .chars()
-        .find(|c| !matches!(crate::unicode::script_of(*c), crate::unicode::Script::Other))
-        .is_some_and(|c| crate::unicode::script_of(c) == crate::unicode::Script::Mongolian);
+        .any(|c| crate::unicode::script_of(c) == crate::unicode::Script::Mongolian)
+        && buffer
+            .text()
+            .chars()
+            .find(|c| !matches!(crate::unicode::script_of(*c), crate::unicode::Script::Other))
+            .is_some_and(|c| crate::unicode::script_of(c) == crate::unicode::Script::Mongolian);
     let is_vertical = if buffer.direction() == crate::buffer::Direction::Ltr && mongolian_dominant {
         true
     } else {
