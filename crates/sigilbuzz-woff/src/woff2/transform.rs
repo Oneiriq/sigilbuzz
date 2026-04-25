@@ -98,6 +98,17 @@ fn decode_one_triplet(flag_byte: u8, glyph_stream: &mut Reader<'_>) -> Result<(i
     ))
 }
 
+/// Test-only handle on the otherwise-private triplet decoder so the
+/// forward encoder in `wrap_transform.rs` can round-trip against it
+/// without exposing the helper to the rest of the crate.
+#[cfg(test)]
+pub(crate) fn __test_decode_one_triplet(
+    flag_byte: u8,
+    glyph_stream: &mut Reader<'_>,
+) -> Result<(i16, i16, bool)> {
+    decode_one_triplet(flag_byte, glyph_stream)
+}
+
 /// Sign convention from the WOFF2 spec: bit 0 of the relevant flag
 /// piece selects the sign. `flag & 1 == 1` means positive, `0` means
 /// negative.
