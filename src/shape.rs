@@ -1109,6 +1109,17 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         .collect();
     if is_vertical {
         if let Some(ref vmtx) = vmtx {
+            // VVAR carries per-glyph vertical-advance deltas;
+            // applies only when the font is variable and the user
+            // requested non-default coords. Same pattern as the
+            // horizontal branch's HVAR usage below — we resolve
+            // once and consult per-glyph inside the loop.
+            let coords = font.coords();
+            let vvar = if coords.is_empty() {
+                None
+            } else {
+                face.vvar()?
+            };
             for glyph in &mut glyphs {
                 if default_ignorable_clusters.contains(&glyph.cluster) {
                     continue;
@@ -1116,7 +1127,16 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 let id = glyph.glyph_id as u16;
                 // HarfBuzz convention: vertical y_advance is negative
                 // for top-to-bottom flow, so the pen moves downward.
-                let raw = i32::from(vmtx.advance(id).unwrap_or(0));
+                let mut raw = i32::from(vmtx.advance(id).unwrap_or(0));
+                if let Some(ref vvar) = vvar {
+                    let delta = vvar.advance_height_delta(id, coords);
+                    let rounded = if delta >= 0.0 {
+                        (delta + 0.5) as i32
+                    } else {
+                        (delta - 0.5) as i32
+                    };
+                    raw = raw.saturating_add(rounded);
+                }
                 glyph.y_advance = if buffer.direction().is_forward() {
                     -raw
                 } else {
