@@ -1532,17 +1532,28 @@ pub(crate) fn project_region_onto_kept_axes(
         match pin {
             AxisPin::Pin => {
                 let s_axis = axis_support_scalar(s, p, e, coords[i]);
-                if s_axis == 0.0 {
+                // Hardening (#186): any non-finite scalar from the
+                // pipeline drops the tuple. axis_support_scalar already
+                // clamps non-finite inputs to 0.0, but the multiplication
+                // chain itself is checked here defensively so any future
+                // upstream change can never quietly poison deltas.
+                if !s_axis.is_finite() || s_axis == 0.0 {
                     return None;
                 }
                 pin_scalar *= s_axis;
+                // Subnormal underflow short-circuit: if the running
+                // product collapsed to 0 (or went non-finite somehow),
+                // drop the tuple now.
+                if !pin_scalar.is_finite() || pin_scalar == 0.0 {
+                    return None;
+                }
             }
             AxisPin::Keep => {
                 kept_axes.push((s, p, e));
             }
         }
     }
-    if pin_scalar == 0.0 {
+    if !pin_scalar.is_finite() || pin_scalar == 0.0 {
         return None;
     }
     Some(ProjectedTuple {
@@ -3973,6 +3984,62 @@ mod partial_instancing_tests {
             "expected 0.125, got {}",
             p.pin_scalar
         );
+    }
+
+    // --------------------------------------------------------------
+    // project_region_onto_kept_axes — non-finite Pin-axis inputs are
+    // clamped: the surviving tuple gets dropped rather than scaling
+    // every delta by NaN/Inf (regression #186).
+    // --------------------------------------------------------------
+
+    #[test]
+    fn project_drops_tuple_when_pin_coord_is_nan() {
+        // NaN Pin coord poisons the scalar pipeline: drop the tuple
+        // rather than emitting deltas multiplied by NaN.
+        let region = [(0.0_f32, 1.0, 1.0), (0.0, 1.0, 1.0)];
+        let pins = [AxisPin::Pin, AxisPin::Keep];
+        let coords = [f32::NAN, 0.0];
+        assert!(project_region_onto_kept_axes(&region, &pins, &coords).is_none());
+    }
+
+    #[test]
+    fn project_drops_tuple_when_pin_coord_is_inf() {
+        // +Inf and -Inf Pin coords also drop the tuple.
+        let region = [(0.0_f32, 1.0, 1.0), (0.0, 1.0, 1.0)];
+        let pins = [AxisPin::Pin, AxisPin::Keep];
+        for coord in [f32::INFINITY, f32::NEG_INFINITY] {
+            let coords = [coord, 0.0];
+            assert!(
+                project_region_onto_kept_axes(&region, &pins, &coords).is_none(),
+                "expected drop for coord {coord}",
+            );
+        }
+    }
+
+    #[test]
+    fn project_drops_tuple_when_pin_axis_region_is_nan() {
+        // Corrupt region triple (NaN peak) on a Pin axis: drop the
+        // tuple — the math primitive returns 0.0 for non-finite
+        // inputs and project_region_onto_kept_axes treats that as
+        // "axis outside the region".
+        let region = [(0.0_f32, f32::NAN, 1.0), (0.0, 1.0, 1.0)];
+        let pins = [AxisPin::Pin, AxisPin::Keep];
+        let coords = [0.5, 0.0];
+        assert!(project_region_onto_kept_axes(&region, &pins, &coords).is_none());
+    }
+
+    #[test]
+    fn project_ignores_nan_coord_on_keep_axis() {
+        // Keep-axis coords are unused by the scalar pipeline; a NaN
+        // there must not poison the projection — the Pin axis still
+        // produces a clean scalar and the tuple survives.
+        let region = [(0.0_f32, 1.0, 1.0), (0.0, 1.0, 1.0)];
+        let pins = [AxisPin::Pin, AxisPin::Keep];
+        let coords = [0.5, f32::NAN];
+        let p = project_region_onto_kept_axes(&region, &pins, &coords)
+            .expect("Keep-axis coord is ignored, tuple should survive");
+        assert!((p.pin_scalar - 0.5).abs() < 1e-6);
+        assert_eq!(p.kept_axes, alloc::vec![(0.0, 1.0, 1.0)]);
     }
 
     // --------------------------------------------------------------
