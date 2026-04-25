@@ -617,6 +617,22 @@ fn parse_format6(data: &[u8], sub_start: usize, sub_end: usize) -> Result<Option
     if row_index_off >= sub_len || col_index_off >= sub_len || array_off >= sub_len {
         return Ok(None);
     }
+    // Validate that the declared `rowCount × columnCount` i16 grid
+    // actually fits inside the subtable. A pathological font that
+    // claims a 1000×1000 grid in a 64-byte payload would otherwise
+    // parse cleanly and only fail per-cell at apply time, leaking the
+    // garbage subtable into [`Kerx::subtable_count`] and forcing every
+    // `kern()` lookup to walk a doomed find() path. Reject up front.
+    let array_bytes = (row_count as usize)
+        .checked_mul(column_count as usize)
+        .and_then(|cells| cells.checked_mul(2));
+    let Some(array_bytes) = array_bytes else {
+        return Ok(None);
+    };
+    match array_off.checked_add(array_bytes) {
+        Some(end) if end <= sub_len => {}
+        _ => return Ok(None),
+    }
     let sub = &data[sub_start..sub_end];
     Ok(Some(Format6 {
         sub,
@@ -1678,6 +1694,24 @@ mod tests {
         );
         let k = Kerx::parse(&bytes, 3).unwrap();
         assert_eq!(k.kern(1, 2), 0, "out-of-range row index falls through");
+    }
+
+    #[test]
+    fn format6_oversized_grid_drops_subtable() {
+        // Build a valid 2×3 fmt6 then bump rowCount to 1000 so the
+        // declared array (1000 × 3 × 2 = 6000 bytes) blows past the
+        // subtable's payload. Parse must drop the subtable cleanly
+        // rather than retain a doomed find() path.
+        let mut bytes = build_kerx_format6(3, &[0, 1, 1], &[0, 0, 1], &[vec![0, 0], vec![0, 7]]);
+        // Subtable starts at offset 8 (kerx header); fmt6 header at
+        // offset 8 + 12 = 20; rowCount u16 at +4 = 24.
+        bytes[24..26].copy_from_slice(&1000u16.to_be_bytes());
+        let k = Kerx::parse(&bytes, 3).unwrap();
+        assert_eq!(
+            k.subtable_count(),
+            0,
+            "oversized rowCount × columnCount must drop the subtable"
+        );
     }
 
     #[test]
