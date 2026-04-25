@@ -68,10 +68,21 @@ fn emit_from_sorted(sorted: &[(u16, u16)]) -> Vec<u8> {
         }
     }
 
-    // Pick the smaller representation.
+    // Format 1 only encodes the gid array; it implies coverage
+    // index == position-in-array, so it's only viable when the
+    // caller's indices match `0..N`. Comparing f1_bytes against
+    // f2_bytes without that gate picked Format 1 for non-identity
+    // inputs that then fell back to a single-gid Format 2 list,
+    // throwing away the merge opportunity (e.g. three consecutive
+    // pairs with indices 5,6,7 emitted as 22 bytes instead of the
+    // 10-byte single-range Format 2).
+    let f1_viable = sorted
+        .iter()
+        .enumerate()
+        .all(|(i, &(_, idx))| idx as usize == i);
     let f1_bytes = 4 + sorted.len() * 2;
     let f2_bytes = 4 + ranges.len() * 6;
-    if f1_bytes <= f2_bytes {
+    if f1_viable && f1_bytes <= f2_bytes {
         emit_format1(sorted)
     } else {
         emit_format2(&ranges)
@@ -189,5 +200,29 @@ mod tests {
         for (g, i) in [(10, 5), (11, 6), (12, 7), (13, 8)] {
             assert_eq!(cov.index_of(g), Some(i));
         }
+    }
+
+    #[test]
+    fn pairs_with_non_identity_consecutive_indices_collapse_to_one_range() {
+        // Three consecutive gids with consecutive non-zero-start
+        // indices fold into one Format 2 range of 10 bytes. The
+        // size heuristic used to pick Format 1 (also 10 bytes), but
+        // Format 1 implies index == position-in-array — which fails
+        // here — and the fallback re-emits each pair as its own
+        // single-gid Format 2 range, producing 22 bytes.
+        let bytes = emit_coverage_from_pairs(&[(10, 5), (11, 6), (12, 7)]);
+        assert_eq!(
+            bytes.len(),
+            10,
+            "expected single merged Format 2 range (10 bytes), got {} — \
+             format selection lost the merge opportunity for non-identity \
+             but consecutive indices",
+            bytes.len()
+        );
+        // Output stays semantically correct regardless of byte count.
+        let cov = Coverage::parse(&bytes).unwrap();
+        assert_eq!(cov.index_of(10), Some(5));
+        assert_eq!(cov.index_of(11), Some(6));
+        assert_eq!(cov.index_of(12), Some(7));
     }
 }
