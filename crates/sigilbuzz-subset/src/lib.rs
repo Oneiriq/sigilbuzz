@@ -125,6 +125,7 @@ mod gsub;
 mod gvar;
 mod hmtx;
 mod hvar;
+mod instance;
 mod layout;
 mod sfnt;
 mod util;
@@ -143,6 +144,7 @@ pub use cff2::subset_non_identity as subset_cff2_non_identity;
 pub use classdef::emit_classdef;
 pub use closure::compute_closure;
 pub use coverage::{emit_coverage_from_glyphs, emit_coverage_from_pairs};
+pub use instance::{instance, F2Dot14, InstanceInput, InstancedOutput};
 
 /// Crate version, matching `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
