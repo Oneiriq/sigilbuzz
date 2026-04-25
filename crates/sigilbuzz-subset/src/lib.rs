@@ -54,16 +54,17 @@
 //!   dropped any source glyph (kept set == `0..num_glyphs`) the CFF /
 //!   CFF2 table and its dependencies are preserved verbatim and the
 //!   surrounding sfnt directory is rebuilt around them. Non-identity
-//!   CFF1 subsetting is implemented for non-CID (single Private DICT)
-//!   fonts: CharStrings INDEX rebuild, Subr renumber via bias-adjusted
-//!   operand rewrite, Top DICT deferred-offset patching, charset /
-//!   Encoding format auto-pick, Private DICT relocation. CID-keyed
-//!   CFF1 (FDArray + FDSelect) and CFF2 non-identity subsetting still
-//!   surface [`SubsetError::Unsupported`] — those flows are staged
-//!   for the same follow-up that lands the FDArray INDEX rebuild +
-//!   FDSelect rewrite. The byte-level emitter primitives
-//!   ([`encode_index`], [`encode_dict_int`], [`emit_charset_auto`],
-//!   [`emit_encoding_auto`], [`renumber_charstring`]) are public so
+//!   CFF1 subsetting handles both non-CID (single Private DICT) and
+//!   CID-keyed (FDArray + FDSelect) sources: CharStrings INDEX rebuild,
+//!   per-FD Subr renumber via bias-adjusted operand rewrite, Top DICT
+//!   deferred-offset patching, charset / Encoding / FDSelect format
+//!   auto-pick, FDArray INDEX rebuild with FD renumber, per-FD Private
+//!   DICT relocation. CFF2 non-identity mirrors the CID-keyed CFF1 flow
+//!   with the CFF2-specific elisions (no String INDEX, no Encoding,
+//!   no charset, single inline Top DICT, VariationStore preserved
+//!   verbatim). The byte-level emitter primitives ([`encode_index`],
+//!   [`encode_dict_int`], [`emit_charset_auto`], [`emit_encoding_auto`],
+//!   [`emit_fd_select_auto`], [`renumber_charstring`]) are public so
 //!   downstream tooling can drive the same rewrite pieces directly.
 //! - **Dropped** (when [`SubsetInput::drop_unhandled`] is true, the
 //!   default): `kern`, `vhea`, `vmtx`, `VORG`, `COLR`, `CPAL`,
@@ -132,10 +133,13 @@ mod variation_store;
 pub use cff::subset_non_identity as subset_cff1_non_identity;
 pub use cff::{
     compute_kept_subrs, emit_charset_auto, emit_charset_format0, emit_charset_format2,
-    emit_encoding_auto, emit_encoding_format0, emit_encoding_format1, encode_dict_int,
-    encode_dict_offset_placeholder, encode_index, encode_int_operand, patch_dict_offset,
-    renumber_charstring, renumber_subr_call, scan_subr_calls, subr_bias, SubrCall, SubrKind,
+    emit_encoding_auto, emit_encoding_format0, emit_encoding_format1, emit_fd_select_auto,
+    emit_fd_select_format0, emit_fd_select_format3, encode_dict_int,
+    encode_dict_offset_placeholder, encode_index, encode_int_operand, parse_fd_select,
+    patch_dict_offset, renumber_charstring, renumber_subr_call, scan_subr_calls, subr_bias,
+    SubrCall, SubrKind,
 };
+pub use cff2::subset_non_identity as subset_cff2_non_identity;
 pub use classdef::emit_classdef;
 pub use closure::compute_closure;
 pub use coverage::{emit_coverage_from_glyphs, emit_coverage_from_pairs};
@@ -267,12 +271,14 @@ impl From<sigilbuzz::Error> for SubsetError {
 pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, SubsetError> {
     // CFF / CFF2 sources route through a dedicated path. The byte-level
     // emitter primitives (CharStrings INDEX rebuild, Subr renumber via
-    // bias-adjusted operand rewrite, charset / Encoding format auto-
-    // pick, deferred-offset Top DICT patching, Private DICT relocation)
-    // live in [`cff`]; the cross-cutting orchestration that consumes
-    // them under a non-identity gid map is staged for a follow-up.
+    // bias-adjusted operand rewrite, charset / Encoding / FDSelect
+    // format auto-pick, deferred-offset Top DICT patching, Private DICT
+    // relocation, FDArray INDEX rebuild with FD renumber) live in
+    // [`cff`] and [`cff2`]; the cross-cutting orchestration consumes
+    // them under a non-identity gid map for both non-CID and CID-keyed
+    // CFF1 plus CFF2.
     //
-    // Today the dispatch handles two cases cleanly:
+    // Today the dispatch handles three cases cleanly:
     //
     // 1. The kept gid set after closure is the source font's identity
     //    (every gid kept). The CFF / CFF2 table and its dependencies
@@ -280,9 +286,10 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
     //    is rebuilt around them. This mirrors the
     //    [`layout::Decision::Preserve`] strategy from `feature/subset-
     //    layout-rewriter` for GSUB / GPOS / GDEF.
-    // 2. Anything else surfaces [`SubsetError::Unsupported`] with a
-    //    dedicated context string so callers see a clean error rather
-    //    than a corrupt font.
+    // 2. CFF1 non-identity (non-CID and CID-keyed) routes through
+    //    [`cff_non_identity`] which calls [`cff::subset_non_identity`].
+    // 3. CFF2 non-identity routes through [`cff2_non_identity`] which
+    //    calls [`cff2::subset_non_identity`].
     let has_cff1 = face.record(tag::CFF1).is_some();
     let has_cff2 = face.record(tag::CFF2).is_some();
     if has_cff1 || has_cff2 {
@@ -308,11 +315,10 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         if has_cff1 {
             return cff_non_identity(face, &kept);
         }
-        // CFF2 non-identity is staged for the follow-up that lands the
-        // FDArray rebuild + FDSelect rewrite shared with CID-keyed CFF1.
-        return Err(SubsetError::Unsupported(
-            "CFF2 non-identity subset staged for follow-up; CFF1 non-CID flow is implemented",
-        ));
+        // CFF2 non-identity: mirror the CID-keyed CFF1 flow with
+        // CFF2-specific elisions (no String INDEX, no Encoding/charset,
+        // single inline Top DICT). VariationStore rides through verbatim.
+        return cff2_non_identity(face, &kept);
     }
 
     let maxp = face.maxp()?;
@@ -553,6 +559,70 @@ fn cff_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, S
         (tag::NAME, name_out),
         (tag::POST, post_out),
         (tag::CFF1, new_cff),
+    ];
+    if let Some(os2) = os2_out {
+        tables.push((*b"OS/2", os2));
+    }
+
+    let bytes = sfnt::build(face.sfnt_version(), &tables);
+    Ok(SubsetOutput {
+        bytes,
+        gid_map: gid_map.into_iter().collect(),
+    })
+}
+
+/// CFF2 non-identity orchestration.
+///
+/// Mirrors [`cff_non_identity`]'s shape: rebuild the CFF2 table around
+/// the kept-gid set via [`cff2::subset_non_identity`], then assemble a
+/// fresh SFNT directory around it. CFF2 fonts pair with cmap, hmtx,
+/// hhea, head, name, OS/2 — every other table the source carries
+/// (notably layout / variable-font tables) is dropped on the
+/// non-identity path; the rewriters ride alongside the CFF1 flow's same
+/// follow-up that wires those in.
+fn cff2_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, SubsetError> {
+    let mut gid_map: Vec<(GlyphId, GlyphId)> = kept
+        .iter()
+        .enumerate()
+        .map(|(new, &old)| (old, new as u16))
+        .collect();
+    gid_map.sort_by_key(|(old, _)| *old);
+    let new_num_glyphs = kept.len() as u16;
+
+    let cff2_bytes = face.table_bytes(tag::CFF2).map_err(SubsetError::from)?;
+    let new_cff2 = cff2::subset_non_identity(cff2_bytes, kept)?;
+
+    let head_bytes = face.table_bytes(tag::HEAD).map_err(SubsetError::from)?;
+    let head_out = head_bytes.to_vec();
+
+    let cmap_out = cmap::subset_cmap(face, &gid_map)?;
+    let hmtx_out = hmtx::subset_hmtx(face, kept)?;
+
+    let hhea_bytes = face.table_bytes(tag::HHEA).map_err(SubsetError::from)?;
+    let mut hhea_out = hhea_bytes.to_vec();
+    util::write_hhea_metrics_count(&mut hhea_out, hmtx_out.number_of_h_metrics)?;
+
+    let maxp_bytes = face.table_bytes(tag::MAXP).map_err(SubsetError::from)?;
+    let mut maxp_out = maxp_bytes.to_vec();
+    util::write_maxp_num_glyphs(&mut maxp_out, new_num_glyphs)?;
+
+    let post_out = util::synthesize_post_format_3(face)?;
+
+    let name_out = face
+        .table_bytes(tag::NAME)
+        .map(|b| b.to_vec())
+        .map_err(SubsetError::from)?;
+    let os2_out = face.table_bytes(*b"OS/2").ok().map(<[u8]>::to_vec);
+
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = alloc::vec![
+        (tag::HEAD, head_out),
+        (tag::HHEA, hhea_out),
+        (tag::MAXP, maxp_out),
+        (tag::HMTX, hmtx_out.bytes),
+        (tag::CMAP, cmap_out),
+        (tag::NAME, name_out),
+        (tag::POST, post_out),
+        (tag::CFF2, new_cff2),
     ];
     if let Some(os2) = os2_out {
         tables.push((*b"OS/2", os2));

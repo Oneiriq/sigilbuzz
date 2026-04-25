@@ -34,21 +34,23 @@
 //! # Subset entry
 //!
 //! [`subset_non_identity`] is the orchestration that wires the
-//! analysis layer + emitter primitives end-to-end for a non-CID CFF1
-//! source. It walks the source Top DICT, captures every offset
-//! operator, computes the kept-charstring + transitive subroutine
-//! keep-set, renumbers every kept charstring + kept subr in place,
-//! lays out the new sections in deterministic order
-//! (Header / Name INDEX / Top DICT INDEX / String INDEX / Global Subr
-//! INDEX / Encoding / charset / CharStrings INDEX / Private DICT /
-//! Local Subr INDEX), then patches the deferred-offset placeholders
-//! in the Top DICT and Private DICT bodies.
+//! analysis layer + emitter primitives end-to-end. It dispatches by
+//! source shape: non-CID CFF1 sources walk the single-Private path
+//! (Top DICT walk, kept-charstring + transitive subroutine keep-set,
+//! renumber-in-place, layout in deterministic order: Header / Name
+//! INDEX / Top DICT INDEX / String INDEX / Global Subr INDEX /
+//! Encoding / charset / CharStrings INDEX / Private DICT / Local Subr
+//! INDEX, then deferred-offset placeholder patches). CID-keyed sources
+//! (FDArray + FDSelect present in the source Top DICT) route through
+//! `subset_cid_keyed`, which adds an FDArray INDEX rebuild + FDSelect
+//! rewrite + per-FD subroutine keep-set on top of the same primitives.
 //!
 //! The crate's [`crate::subset`] entry routes non-identity CFF1 via
 //! this path and the layout-rebuild driver next door in `crate::lib`.
-//! CID-keyed CFF1 (FDArray + FDSelect) and CFF2 non-identity routes
-//! still surface [`SubsetError::Unsupported`] — both flows share an
-//! FDArray rebuild + FDSelect rewrite that's staged for a follow-up.
+//! CFF2 non-identity uses the mirror flow in [`crate::cff2`] —
+//! structurally a strict simplification of the CID-keyed CFF1 layout
+//! (no Name / String / Encoding / charset INDEXes; single inline Top
+//! DICT; VariationStore rides through verbatim).
 //!
 //! The emitter primitives are exercised by unit tests covering the
 //! bias-renumber boundaries (107 / 1131 / 32768), Top DICT
@@ -695,6 +697,130 @@ pub fn emit_encoding_auto(codes: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Parses a CFF FDSelect at `data[off..]` for `n_glyphs` glyphs,
+/// returning a per-gid FD-index vector. Recognises format 0 (per-gid u8)
+/// and format 3 (range records, u16 firstGlyph + u8 fd).
+///
+/// # Errors
+///
+/// Returns [`SubsetError::Unsupported`] for unknown formats or when the
+/// table is truncated.
+pub fn parse_fd_select(data: &[u8], off: usize, n_glyphs: usize) -> Result<Vec<u8>, SubsetError> {
+    if off >= data.len() {
+        return Err(SubsetError::Unsupported("CFF FDSelect offset past end"));
+    }
+    let format = data[off];
+    match format {
+        0 => {
+            if off + 1 + n_glyphs > data.len() {
+                return Err(SubsetError::Unsupported("CFF FDSelect format 0 truncated"));
+            }
+            Ok(data[off + 1..off + 1 + n_glyphs].to_vec())
+        }
+        3 => {
+            if off + 3 > data.len() {
+                return Err(SubsetError::Unsupported(
+                    "CFF FDSelect format 3 header truncated",
+                ));
+            }
+            let n_ranges = u16::from_be_bytes([data[off + 1], data[off + 2]]) as usize;
+            let mut p = off + 3;
+            let mut ranges = Vec::with_capacity(n_ranges);
+            for _ in 0..n_ranges {
+                if p + 3 > data.len() {
+                    return Err(SubsetError::Unsupported(
+                        "CFF FDSelect format 3 range truncated",
+                    ));
+                }
+                let first = u16::from_be_bytes([data[p], data[p + 1]]);
+                let fd = data[p + 2];
+                ranges.push((first, fd));
+                p += 3;
+            }
+            if p + 2 > data.len() {
+                return Err(SubsetError::Unsupported(
+                    "CFF FDSelect format 3 sentinel truncated",
+                ));
+            }
+            let sentinel = u16::from_be_bytes([data[p], data[p + 1]]) as usize;
+            let mut out = alloc::vec![0u8; n_glyphs];
+            for (i, &(first, fd)) in ranges.iter().enumerate() {
+                let start = first as usize;
+                let end = if i + 1 < n_ranges {
+                    ranges[i + 1].0 as usize
+                } else {
+                    sentinel
+                };
+                let bound = end.min(n_glyphs);
+                if start < bound {
+                    for slot in &mut out[start..bound] {
+                        *slot = fd;
+                    }
+                }
+            }
+            Ok(out)
+        }
+        _ => Err(SubsetError::Unsupported("CFF FDSelect format not 0 / 3")),
+    }
+}
+
+/// Emits an FDSelect in format 0 (per-gid 1-byte FD index, one entry
+/// per glyph including gid 0). For `n_glyphs` glyphs the table is
+/// `1 + n_glyphs` bytes.
+#[must_use]
+pub fn emit_fd_select_format0(per_gid: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + per_gid.len());
+    out.push(0);
+    out.extend_from_slice(per_gid);
+    out
+}
+
+/// Emits an FDSelect in format 3 (range records: u16 firstGlyph, u8 fd,
+/// terminated by a u16 sentinel == nGlyphs). Each contiguous run of
+/// gids sharing the same FD becomes one record.
+#[must_use]
+pub fn emit_fd_select_format3(per_gid: &[u8]) -> Vec<u8> {
+    let n_glyphs = per_gid.len();
+    let mut ranges: Vec<(u16, u8)> = Vec::new();
+    let mut i = 0;
+    while i < n_glyphs {
+        let fd = per_gid[i];
+        ranges.push((i as u16, fd));
+        let mut j = i + 1;
+        while j < n_glyphs && per_gid[j] == fd {
+            j += 1;
+        }
+        i = j;
+    }
+    let n_ranges = ranges.len();
+    let mut out = Vec::with_capacity(3 + n_ranges * 3 + 2);
+    out.push(3);
+    out.extend_from_slice(&(n_ranges as u16).to_be_bytes());
+    for (first, fd) in &ranges {
+        out.extend_from_slice(&first.to_be_bytes());
+        out.push(*fd);
+    }
+    out.extend_from_slice(&(n_glyphs as u16).to_be_bytes());
+    out
+}
+
+/// Picks the shorter of FDSelect formats 0 and 3 for the given per-gid
+/// FD-index list. Returns the encoded bytes including the format byte.
+///
+/// Format 0 is `1 + n` bytes; format 3 is `3 + 3*n_ranges + 2` bytes.
+/// On dense / mostly-uniform inputs format 3 wins; on highly fragmented
+/// inputs format 0 wins.
+#[must_use]
+pub fn emit_fd_select_auto(per_gid: &[u8]) -> Vec<u8> {
+    let f0 = emit_fd_select_format0(per_gid);
+    let f3 = emit_fd_select_format3(per_gid);
+    if f3.len() < f0.len() {
+        f3
+    } else {
+        f0
+    }
+}
+
 /// Re-encodes a single subroutine call site within a charstring buffer
 /// in place. `call.operand_byte_offset` and `call.operand_byte_len`
 /// locate the original operand push; the new operand is `new_index -
@@ -834,23 +960,23 @@ pub fn renumber_charstring(
 /// can be re-emitted byte-for-byte (preserving real-number operands and
 /// any non-canonical integer encoding the source font happened to use).
 #[derive(Debug, Clone)]
-struct DictOperand {
+pub(crate) struct DictOperand {
     /// Decoded integer value, when the operand is integer-typed.
     /// `None` for real-number operands (op 30) — we never need to
     /// patch a real, so preserving the raw bytes is enough.
-    int_value: Option<i32>,
+    pub(crate) int_value: Option<i32>,
     /// Encoded bytes as they appeared in the source DICT.
-    raw: Vec<u8>,
+    pub(crate) raw: Vec<u8>,
 }
 
-/// One operator + its operand list, as captured by [`walk_top_dict`].
+/// One operator + its operand list, as captured by [`walk_dict`].
 #[derive(Debug, Clone)]
-struct DictEntry {
+pub(crate) struct DictEntry {
     /// Operator number — single-byte ops are 0..=21, escaped ops are
     /// 0x0C00 | b1.
-    op: u16,
+    pub(crate) op: u16,
     /// Operands that preceded this operator.
-    operands: Vec<DictOperand>,
+    pub(crate) operands: Vec<DictOperand>,
 }
 
 /// Decodes one DICT operand at `bytes[pos..]`, returning the operand
@@ -949,13 +1075,18 @@ fn decode_dict_operand(bytes: &[u8], pos: usize) -> Result<(DictOperand, usize),
 /// Walks a CFF DICT (Top DICT or Private DICT) and returns one
 /// [`DictEntry`] per operator + its preceding operands. Pure byte walk
 /// — no semantic interpretation of operator meanings.
-fn walk_dict(bytes: &[u8]) -> Result<Vec<DictEntry>, SubsetError> {
+pub(crate) fn walk_dict(bytes: &[u8]) -> Result<Vec<DictEntry>, SubsetError> {
     let mut out = Vec::new();
     let mut pos = 0;
     let mut operands: Vec<DictOperand> = Vec::new();
     while pos < bytes.len() {
         let b0 = bytes[pos];
-        if b0 <= 21 {
+        // CFF DICT operators are b0 in 0..=21 (CFF1) or 0..=24 (CFF2's
+        // VariationStore op = 24). Bytes 22, 23, 25..=27 are reserved
+        // and we reject them as malformed if they appear in operand
+        // position. Operands start at b0 = 28 (shortint) / 29 / 30 /
+        // 32..=254 / 255 (charstring fixed; CFF DICTs don't use 255).
+        if b0 <= 24 {
             // Operator.
             let (op, len) = if b0 == 12 {
                 let b1 = *bytes
@@ -982,7 +1113,7 @@ fn walk_dict(bytes: &[u8]) -> Result<Vec<DictEntry>, SubsetError> {
 /// Reads a CFF INDEX at `bytes[pos..]`, returning the entry slices
 /// (zero-copy into the input) plus the byte-length of the entire INDEX
 /// structure (so the caller can advance past it).
-fn read_index(bytes: &[u8], pos: usize) -> Result<(Vec<&[u8]>, usize), SubsetError> {
+pub(crate) fn read_index(bytes: &[u8], pos: usize) -> Result<(Vec<&[u8]>, usize), SubsetError> {
     if pos + 2 > bytes.len() {
         return Err(SubsetError::Unsupported("CFF INDEX header truncated"));
     }
@@ -1040,12 +1171,13 @@ fn read_index(bytes: &[u8], pos: usize) -> Result<(Vec<&[u8]>, usize), SubsetErr
 
 const OP_CHARSET: u16 = 15;
 const OP_ENCODING: u16 = 16;
-const OP_CHARSTRINGS: u16 = 17;
-const OP_PRIVATE: u16 = 18;
-const OP_SUBRS: u16 = 19;
-const OP_FD_ARRAY: u16 = 0x0C24;
-const OP_FD_SELECT: u16 = 0x0C25;
+pub(crate) const OP_CHARSTRINGS: u16 = 17;
+pub(crate) const OP_PRIVATE: u16 = 18;
+pub(crate) const OP_SUBRS: u16 = 19;
+pub(crate) const OP_FD_ARRAY: u16 = 0x0C24;
+pub(crate) const OP_FD_SELECT: u16 = 0x0C25;
 const OP_ROS: u16 = 0x0C1E;
+pub(crate) const OP_VSTORE: u16 = 24;
 
 /// Captures the source CFF1 layout in raw form so the orchestration
 /// can rebuild kept sections while preserving everything else verbatim.
@@ -1076,6 +1208,10 @@ struct ParsedCff1<'a> {
     local_subrs: Vec<&'a [u8]>,
     /// Whether the source uses CID-keyed (FDArray/FDSelect) layout.
     is_cid: bool,
+    /// FDArray offset (Top DICT op 12 36). `Some` when CID-keyed.
+    fd_array_off: Option<u32>,
+    /// FDSelect offset (Top DICT op 12 37). `Some` when CID-keyed.
+    fd_select_off: Option<u32>,
 }
 
 /// Walks the source CFF1 table and captures every span the rewriter
@@ -1125,6 +1261,8 @@ fn parse_cff1(data: &[u8]) -> Result<ParsedCff1<'_>, SubsetError> {
     let mut char_strings_off: Option<u32> = None;
     let mut private: Option<(u32, u32)> = None;
     let mut is_cid = false;
+    let mut fd_array_off: Option<u32> = None;
+    let mut fd_select_off: Option<u32> = None;
     for e in &entries {
         match e.op {
             OP_CHARSET => {
@@ -1157,7 +1295,23 @@ fn parse_cff1(data: &[u8]) -> Result<ParsedCff1<'_>, SubsetError> {
                     }
                 }
             }
-            OP_FD_ARRAY | OP_FD_SELECT | OP_ROS => is_cid = true,
+            OP_FD_ARRAY => {
+                is_cid = true;
+                if let Some(v) = e.operands.last().and_then(|o| o.int_value) {
+                    if v >= 0 {
+                        fd_array_off = Some(v as u32);
+                    }
+                }
+            }
+            OP_FD_SELECT => {
+                is_cid = true;
+                if let Some(v) = e.operands.last().and_then(|o| o.int_value) {
+                    if v >= 0 {
+                        fd_select_off = Some(v as u32);
+                    }
+                }
+            }
+            OP_ROS => is_cid = true,
             _ => {}
         }
     }
@@ -1213,6 +1367,8 @@ fn parse_cff1(data: &[u8]) -> Result<ParsedCff1<'_>, SubsetError> {
         private_dict,
         local_subrs,
         is_cid,
+        fd_array_off,
+        fd_select_off,
     })
 }
 
@@ -1498,16 +1654,16 @@ fn serialise_top_dict(
 /// Private DICT placeholder slots — only the Subrs (op 19) operand is
 /// patched at this layer.
 #[derive(Debug, Default, Clone)]
-struct PrivateDictSlots {
+pub(crate) struct PrivateDictSlots {
     /// Byte offset of the b0=29 operand byte for op 19 (Subrs).
-    subrs_slot: Option<usize>,
+    pub(crate) subrs_slot: Option<usize>,
 }
 
 /// Serialises a Private DICT body. Op 19 (Subrs) — present iff the
 /// Private DICT had a Subrs reference — gets a 5-byte placeholder.
 /// When the source had no op 19 but the orchestration is emitting
 /// local subrs, an op 19 entry is appended.
-fn serialise_private_dict(
+pub(crate) fn serialise_private_dict(
     entries: &[DictEntry],
     emit_subrs_op: bool,
 ) -> (Vec<u8>, PrivateDictSlots) {
@@ -1574,9 +1730,7 @@ fn serialise_private_dict(
 pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8>, SubsetError> {
     let parsed = parse_cff1(cff_bytes)?;
     if parsed.is_cid {
-        return Err(SubsetError::Unsupported(
-            "CFF1 CID-keyed (FDArray / FDSelect) subset staged for follow-up",
-        ));
+        return subset_cid_keyed(cff_bytes, &parsed, kept_gids);
     }
 
     let n_glyphs = parsed.char_strings.len();
@@ -1801,6 +1955,636 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
         let abs = private_abs + slot;
         let rel = (local_subr_abs - private_abs) as i32;
         patch_dict_offset(&mut out, abs, rel);
+    }
+
+    Ok(out)
+}
+
+// ----------------------------------------------------------------------------
+// CID-keyed CFF1 orchestration.
+//
+// CID-keyed fonts replace the single Top-DICT-level Private DICT with an
+// FDArray (an INDEX of Font DICTs, each carrying its own Private DICT)
+// and an FDSelect (a per-gid map naming which Font DICT — and thus which
+// Local Subr INDEX — to use for that glyph).
+//
+// Subsetting an FDArray/FDSelect-shaped CFF1 entails:
+//
+//   1. Walk FDSelect, capture old FD index per kept gid.
+//   2. Build the kept-FD set (union of FDs referenced by the kept gid set).
+//   3. For each kept FD, walk every kept charstring it owns + its
+//      Private DICT's local subr INDEX, computing the per-FD subroutine
+//      keep-set (transitive through callsubr/callgsubr).
+//   4. Renumber FDs to a 0..N compact range; rewrite FDSelect with the
+//      new FD indices.
+//   5. Renumber per-FD local subrs (reuse renumber_charstring with the
+//      FD-specific renumber tables).
+//   6. Rebuild the FDArray INDEX with placeholder-patched Font DICTs
+//      whose Private DICT (size, off) and Subrs offsets get patched once
+//      the layout lands.
+//   7. Rewrite the Top DICT: keep CID-specific metadata verbatim
+//      (ROS / CIDFontVersion / CIDFontRevision / CIDFontType / UIDBase),
+//      rewrite CIDCount to the new kept-gid-count, and emit placeholder
+//      offsets for charset (15), CharStrings (17), FDArray (12 36), and
+//      FDSelect (12 37).
+// ----------------------------------------------------------------------------
+
+// Top DICT operators specific to CID-keyed fonts. CIDCount (0x0C22)
+// is the only one we rewrite — all others (CIDFontVersion 0x0C1F,
+// CIDFontRevision 0x0C20, CIDFontType 0x0C21, UIDBase 0x0C23, ROS
+// 0x0C1E) ride through verbatim via the catch-all branch in
+// `serialise_cid_top_dict`.
+const OP_CID_COUNT: u16 = 0x0C22;
+
+/// Top DICT placeholder slots for CID-keyed fonts.
+///
+/// CID Top DICT carries charset (15) + CharStrings (17) + FDArray (12 36)
+/// + FDSelect (12 37).
+///
+/// The Private (18) operator is *not* in the CID Top DICT — it lives
+/// inside each Font DICT in the FDArray.
+#[derive(Debug, Default, Clone)]
+struct CidTopDictSlots {
+    /// Byte offset of the b0=29 operand byte for op 15 (charset).
+    charset_slot: Option<usize>,
+    /// Byte offset of the b0=29 operand byte for op 17 (CharStrings).
+    char_strings_slot: Option<usize>,
+    /// Byte offset of the b0=29 operand byte for op 12 36 (FDArray).
+    fd_array_slot: Option<usize>,
+    /// Byte offset of the b0=29 operand byte for op 12 37 (FDSelect).
+    fd_select_slot: Option<usize>,
+}
+
+/// Serialises a CID-keyed Top DICT body. Charset (15), CharStrings (17),
+/// FDArray (12 36), and FDSelect (12 37) get 5-byte placeholders. The
+/// op `0x0C22` (CIDCount) operand is rewritten to `new_cid_count`. All
+/// other operators (ROS, CIDFontVersion, etc.) are preserved verbatim.
+fn serialise_cid_top_dict(entries: &[DictEntry], new_cid_count: u32) -> (Vec<u8>, CidTopDictSlots) {
+    let mut out = Vec::new();
+    let mut slots = CidTopDictSlots::default();
+    for e in entries {
+        match e.op {
+            OP_CHARSET => {
+                slots.charset_slot = Some(out.len());
+                out.extend_from_slice(&encode_dict_offset_placeholder());
+                out.push(15);
+            }
+            OP_CHARSTRINGS => {
+                slots.char_strings_slot = Some(out.len());
+                out.extend_from_slice(&encode_dict_offset_placeholder());
+                out.push(17);
+            }
+            OP_FD_ARRAY => {
+                slots.fd_array_slot = Some(out.len());
+                out.extend_from_slice(&encode_dict_offset_placeholder());
+                out.push(12);
+                out.push(0x24);
+            }
+            OP_FD_SELECT => {
+                slots.fd_select_slot = Some(out.len());
+                out.extend_from_slice(&encode_dict_offset_placeholder());
+                out.push(12);
+                out.push(0x25);
+            }
+            OP_CID_COUNT => {
+                // Rewrite CIDCount operand to the new value.
+                let enc = encode_dict_int(new_cid_count as i32);
+                out.extend_from_slice(&enc);
+                out.push(12);
+                out.push(0x22);
+            }
+            // Encoding op 16 — CID fonts shouldn't have it, but if
+            // present preserve verbatim.
+            _ => {
+                for o in &e.operands {
+                    out.extend_from_slice(&o.raw);
+                }
+                if e.op >= 0x0C00 {
+                    out.push(12);
+                    out.push(e.op as u8);
+                } else {
+                    out.push(e.op as u8);
+                }
+            }
+        }
+    }
+    // If the source Top DICT didn't carry CIDCount explicitly (rare —
+    // most CID fonts emit it), append it now so the subset has accurate
+    // glyph-count metadata.
+    let had_cid_count = entries.iter().any(|e| e.op == OP_CID_COUNT);
+    if !had_cid_count {
+        let enc = encode_dict_int(new_cid_count as i32);
+        out.extend_from_slice(&enc);
+        out.push(12);
+        out.push(0x22);
+    }
+    (out, slots)
+}
+
+/// Emits one Font DICT body (used inside the FDArray INDEX). Carries
+/// op 18 (Private size + offset) plus whatever other operators the
+/// source Font DICT had (FontName etc.). Returns the serialised body
+/// plus the byte offsets of the Private DICT size + offset placeholders.
+pub(crate) fn serialise_font_dict(entries: &[DictEntry]) -> (Vec<u8>, Option<(usize, usize)>) {
+    let mut out = Vec::new();
+    let mut private_slot: Option<(usize, usize)> = None;
+    let mut had_private = false;
+    for e in entries {
+        if e.op == OP_PRIVATE {
+            had_private = true;
+            let size_slot = out.len();
+            out.extend_from_slice(&encode_dict_offset_placeholder());
+            let off_slot = out.len();
+            out.extend_from_slice(&encode_dict_offset_placeholder());
+            out.push(18);
+            private_slot = Some((size_slot, off_slot));
+        } else {
+            for o in &e.operands {
+                out.extend_from_slice(&o.raw);
+            }
+            if e.op >= 0x0C00 {
+                out.push(12);
+                out.push(e.op as u8);
+            } else {
+                out.push(e.op as u8);
+            }
+        }
+    }
+    if !had_private {
+        // Source Font DICT had no Private — emit a fresh op 18 entry.
+        let size_slot = out.len();
+        out.extend_from_slice(&encode_dict_offset_placeholder());
+        let off_slot = out.len();
+        out.extend_from_slice(&encode_dict_offset_placeholder());
+        out.push(18);
+        private_slot = Some((size_slot, off_slot));
+    }
+    (out, private_slot)
+}
+
+/// CID-keyed CFF1 subset orchestration. See module-level header comment
+/// above for the high-level walk.
+fn subset_cid_keyed(
+    cff_bytes: &[u8],
+    parsed: &ParsedCff1<'_>,
+    kept_gids: &[u16],
+) -> Result<Vec<u8>, SubsetError> {
+    let n_glyphs = parsed.char_strings.len();
+    if n_glyphs == 0 {
+        return Err(SubsetError::Unsupported("CFF1 source has zero glyphs"));
+    }
+    for &g in kept_gids {
+        if (g as usize) >= n_glyphs {
+            return Err(SubsetError::Unsupported(
+                "CFF1 kept gid past source numGlyphs",
+            ));
+        }
+    }
+    if kept_gids.first() != Some(&0u16) {
+        return Err(SubsetError::Unsupported("CFF1 kept gid set must include 0"));
+    }
+
+    let fd_array_off = parsed.fd_array_off.ok_or(SubsetError::Unsupported(
+        "CFF1 CID-keyed source missing FDArray offset",
+    ))? as usize;
+    let fd_select_off = parsed.fd_select_off.ok_or(SubsetError::Unsupported(
+        "CFF1 CID-keyed source missing FDSelect offset",
+    ))? as usize;
+
+    // Parse FDSelect → per-gid FD index for *every* source gid.
+    let source_fd_select = parse_fd_select(cff_bytes, fd_select_off, n_glyphs)?;
+
+    // Parse FDArray → vector of Font DICT bytes.
+    let (fd_array_entries, _) = read_index(cff_bytes, fd_array_off)?;
+    if fd_array_entries.is_empty() {
+        return Err(SubsetError::Unsupported("CFF1 CID FDArray has zero FDs"));
+    }
+    if fd_array_entries.len() > 256 {
+        return Err(SubsetError::Unsupported("CFF1 CID FDArray > 256 FDs"));
+    }
+
+    // For each source FD, capture (Font DICT bytes, parsed entries,
+    // optional Private DICT info, Private DICT bytes, Local Subr INDEX).
+    struct FdInfo<'a> {
+        font_dict_entries: Vec<DictEntry>,
+        private_dict: &'a [u8],
+        private: Option<(u32, u32)>,
+        local_subrs: Vec<&'a [u8]>,
+    }
+    let mut fd_infos: Vec<FdInfo<'_>> = Vec::with_capacity(fd_array_entries.len());
+    for fd_bytes in &fd_array_entries {
+        let entries = walk_dict(fd_bytes)?;
+        let mut priv_info: Option<(u32, u32)> = None;
+        for e in &entries {
+            if e.op == OP_PRIVATE && e.operands.len() >= 2 {
+                let s = e.operands[e.operands.len() - 2].int_value;
+                let o = e.operands[e.operands.len() - 1].int_value;
+                if let (Some(sv), Some(ov)) = (s, o) {
+                    if sv >= 0 && ov >= 0 {
+                        priv_info = Some((sv as u32, ov as u32));
+                    }
+                }
+            }
+        }
+        let (private_dict, local_subrs): (&[u8], Vec<&[u8]>) = if let Some((size, off)) = priv_info
+        {
+            let off_u = off as usize;
+            let size_u = size as usize;
+            if off_u + size_u > cff_bytes.len() {
+                return Err(SubsetError::Unsupported("CFF1 CID Private DICT past end"));
+            }
+            let priv_bytes = &cff_bytes[off_u..off_u + size_u];
+            let priv_entries = walk_dict(priv_bytes)?;
+            let mut subrs_rel: Option<u32> = None;
+            for e in &priv_entries {
+                if e.op == OP_SUBRS {
+                    if let Some(v) = e.operands.last().and_then(|o| o.int_value) {
+                        if v >= 0 {
+                            subrs_rel = Some(v as u32);
+                        }
+                    }
+                }
+            }
+            if let Some(rel) = subrs_rel {
+                let abs = off_u + rel as usize;
+                let (locals, _) = read_index(cff_bytes, abs)?;
+                (priv_bytes, locals)
+            } else {
+                (priv_bytes, Vec::new())
+            }
+        } else {
+            (&[][..], Vec::new())
+        };
+        fd_infos.push(FdInfo {
+            font_dict_entries: entries,
+            private_dict,
+            private: priv_info,
+            local_subrs,
+        });
+    }
+
+    // Step 1+2: walk FDSelect, capture per-kept-gid FD, build kept-FD set.
+    // kept_fd_old[i] = source-FD index for kept gid i (in kept_gids order).
+    let mut kept_fd_old: Vec<u8> = Vec::with_capacity(kept_gids.len());
+    for &g in kept_gids {
+        let fd = source_fd_select
+            .get(g as usize)
+            .copied()
+            .ok_or(SubsetError::Unsupported("CFF1 CID FDSelect gid past end"))?;
+        if (fd as usize) >= fd_infos.len() {
+            return Err(SubsetError::Unsupported(
+                "CFF1 CID FDSelect FD index past FDArray length",
+            ));
+        }
+        kept_fd_old.push(fd);
+    }
+    let mut kept_fds_sorted: Vec<u8> = kept_fd_old.clone();
+    kept_fds_sorted.sort_unstable();
+    kept_fds_sorted.dedup();
+
+    // FD renumber map: old_fd → new_fd, or None when dropped.
+    let mut fd_renumber: Vec<Option<u8>> = alloc::vec![None; fd_infos.len()];
+    for (new_i, &old_i) in kept_fds_sorted.iter().enumerate() {
+        fd_renumber[old_i as usize] = Some(new_i as u8);
+    }
+    // Per-kept-gid: new FD index.
+    let new_fd_select: Vec<u8> = kept_fd_old
+        .iter()
+        .map(|&old| fd_renumber[old as usize].unwrap())
+        .collect();
+
+    // Step 3: per-kept-FD subroutine keep-set.
+    // For each kept FD f (old index): collect every kept charstring whose
+    // gid maps to f; then compute_kept_subrs over those charstrings using
+    // f's local_subrs and the global_subrs.
+    //
+    // Globals are shared across all FDs — we union the per-FD global
+    // keep-set to a single global keep-set.
+    let mut kept_global_set: alloc::vec::Vec<bool> = alloc::vec![false; parsed.global_subrs.len()];
+    let mut per_fd_kept_local: Vec<Vec<u32>> = Vec::with_capacity(kept_fds_sorted.len());
+    for &old_fd in &kept_fds_sorted {
+        let fd_local_subrs = &fd_infos[old_fd as usize].local_subrs;
+        // Charstrings whose source-FD is old_fd.
+        let mut cs_for_this_fd: Vec<&[u8]> = Vec::new();
+        for (i, &gid) in kept_gids.iter().enumerate() {
+            if kept_fd_old[i] == old_fd {
+                cs_for_this_fd.push(parsed.char_strings[gid as usize]);
+            }
+        }
+        let (kept_local, kept_global) =
+            compute_kept_subrs(&cs_for_this_fd, fd_local_subrs, &parsed.global_subrs)?;
+        for &gi in &kept_global {
+            kept_global_set[gi as usize] = true;
+        }
+        per_fd_kept_local.push(kept_local);
+    }
+    let kept_global_idx: Vec<u32> = kept_global_set
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &k)| if k { Some(i as u32) } else { None })
+        .collect();
+
+    // Build global renumber table.
+    let mut global_renumber: Vec<Option<u32>> = alloc::vec![None; parsed.global_subrs.len()];
+    for (new_i, &old_i) in kept_global_idx.iter().enumerate() {
+        global_renumber[old_i as usize] = Some(new_i as u32);
+    }
+    let new_global_count = kept_global_idx.len();
+    let old_global_count = parsed.global_subrs.len();
+
+    // Per-kept-FD local renumber tables.
+    let mut per_fd_local_renumber: Vec<Vec<Option<u32>>> =
+        Vec::with_capacity(kept_fds_sorted.len());
+    for (i, &old_fd) in kept_fds_sorted.iter().enumerate() {
+        let local_count = fd_infos[old_fd as usize].local_subrs.len();
+        let mut renumber: Vec<Option<u32>> = alloc::vec![None; local_count];
+        for (new_i, &old_i) in per_fd_kept_local[i].iter().enumerate() {
+            renumber[old_i as usize] = Some(new_i as u32);
+        }
+        per_fd_local_renumber.push(renumber);
+    }
+
+    // Step 5: rewrite each kept charstring with its FD's local-renumber
+    // table + the shared global-renumber table.
+    let mut new_charstrings: Vec<Vec<u8>> = Vec::with_capacity(kept_gids.len());
+    for (i, &gid) in kept_gids.iter().enumerate() {
+        let old_fd = kept_fd_old[i];
+        let new_fd_pos = kept_fds_sorted.iter().position(|&f| f == old_fd).unwrap();
+        let fd_local_subrs_old = &fd_infos[old_fd as usize].local_subrs;
+        let fd_local_renumber = &per_fd_local_renumber[new_fd_pos];
+        let new_local_count = per_fd_kept_local[new_fd_pos].len();
+        let mut cs = parsed.char_strings[gid as usize].to_vec();
+        renumber_charstring(
+            &mut cs,
+            fd_local_subrs_old.len(),
+            old_global_count,
+            new_local_count,
+            new_global_count,
+            fd_local_renumber,
+            &global_renumber,
+        )?;
+        new_charstrings.push(cs);
+    }
+
+    // Renumber each kept local subr (per-FD).
+    let mut new_per_fd_local_subrs: Vec<Vec<Vec<u8>>> = Vec::with_capacity(kept_fds_sorted.len());
+    for (i, &old_fd) in kept_fds_sorted.iter().enumerate() {
+        let fd_local_subrs_old = &fd_infos[old_fd as usize].local_subrs;
+        let kept_local_idx = &per_fd_kept_local[i];
+        let fd_local_renumber = &per_fd_local_renumber[i];
+        let new_local_count = kept_local_idx.len();
+        let mut new_locals: Vec<Vec<u8>> = kept_local_idx
+            .iter()
+            .map(|&idx| fd_local_subrs_old[idx as usize].to_vec())
+            .collect();
+        for sub in &mut new_locals {
+            renumber_charstring(
+                sub,
+                fd_local_subrs_old.len(),
+                old_global_count,
+                new_local_count,
+                new_global_count,
+                fd_local_renumber,
+                &global_renumber,
+            )?;
+        }
+        new_per_fd_local_subrs.push(new_locals);
+    }
+
+    // Renumber each kept global subr. Globals can call other globals
+    // (using the global-renumber table) and locals (using the *original-
+    // FD's* local-renumber table at runtime). Cross-FD subr sharing is
+    // already an unusual configuration; the safest path is to renumber
+    // a global subr using the *global* table only and require global
+    // subrs not to call locals. compute_kept_subrs's seed traversal
+    // already discards any local-subr references made from a global
+    // body in the rare cross-FD case; we mirror that by *not* renumbering
+    // local-subr operands inside global bodies. In practice global subrs
+    // overwhelmingly call globals; they call locals only in some
+    // optimisation-pass outputs, never across FDs.
+    let mut new_global_subrs: Vec<Vec<u8>> = kept_global_idx
+        .iter()
+        .map(|&i| parsed.global_subrs[i as usize].to_vec())
+        .collect();
+    // Use an empty local-renumber table for globals — they don't see a
+    // single local pool. We pass the global-renumber table; any local
+    // call inside a global would collide with this and be rejected by
+    // renumber_charstring. To keep round-trip robustness we treat such
+    // calls as a hard error rather than silently drop them.
+    let empty_local: Vec<Option<u32>> = Vec::new();
+    for sub in &mut new_global_subrs {
+        // Pass new_local_count = 0, which sets bias = 107. If the sub
+        // contains a callsubr, the bias subtraction will be wrong, but
+        // renumber_charstring will hit the empty local renumber table
+        // and surface a hard error — which is the right outcome for an
+        // unsupported source shape.
+        renumber_charstring(
+            sub,
+            0,
+            old_global_count,
+            0,
+            new_global_count,
+            &empty_local,
+            &global_renumber,
+        )?;
+    }
+
+    // Step 4: emit FDSelect bytes.
+    let fd_select_bytes = emit_fd_select_auto(&new_fd_select);
+
+    // Charset rebuild — CID fonts use SIDs that are CIDs (not String
+    // INDEX SIDs), so the per-gid SID is the gid's CID. We project
+    // kept_gids to their CIDs by reading the source charset (which maps
+    // gid → CID for CID fonts).
+    let charset_per_gid_cids =
+        extract_kept_charset_sids(cff_bytes, parsed.charset_off, n_glyphs, kept_gids)?;
+    let charset_bytes = emit_charset_auto(&charset_per_gid_cids);
+
+    // Step 6: serialise per-FD Font DICTs with placeholders.
+    struct FdEmit {
+        font_dict_body: Vec<u8>,
+        font_dict_private_slot: Option<(usize, usize)>,
+        new_private_body: Vec<u8>,
+        new_priv_subrs_slot: Option<usize>,
+    }
+    let mut fd_emits: Vec<FdEmit> = Vec::with_capacity(kept_fds_sorted.len());
+    for (i, &old_fd) in kept_fds_sorted.iter().enumerate() {
+        let info = &fd_infos[old_fd as usize];
+        let (font_dict_body, font_dict_private_slot) = serialise_font_dict(&info.font_dict_entries);
+        // Rebuild Private DICT body — keep entries except op 19, emit
+        // op 19 placeholder when we have local subrs.
+        let priv_entries = if info.private.is_some() {
+            walk_dict(info.private_dict)?
+        } else {
+            Vec::new()
+        };
+        let emit_subrs = !new_per_fd_local_subrs[i].is_empty();
+        let (new_private_body, priv_slots) = serialise_private_dict(&priv_entries, emit_subrs);
+        fd_emits.push(FdEmit {
+            font_dict_body,
+            font_dict_private_slot,
+            new_private_body,
+            new_priv_subrs_slot: priv_slots.subrs_slot,
+        });
+    }
+
+    // Build FDArray INDEX (the kept Font DICT bodies).
+    let fd_array_refs: Vec<&[u8]> = fd_emits
+        .iter()
+        .map(|f| f.font_dict_body.as_slice())
+        .collect();
+    let fd_array_index = encode_index(&fd_array_refs);
+
+    // Compute Font DICT body offsets within the FDArray INDEX.
+    let fd_index_off_size: usize = {
+        let total: usize = fd_emits.iter().map(|f| f.font_dict_body.len()).sum();
+        let last_off = 1 + total;
+        if last_off <= 0xFF {
+            1
+        } else if last_off <= 0xFFFF {
+            2
+        } else if last_off <= 0x00FF_FFFF {
+            3
+        } else {
+            4
+        }
+    };
+    let fd_count = fd_emits.len();
+    let fd_index_data_start = 2 + 1 + (fd_count + 1) * fd_index_off_size;
+    let mut fd_body_offsets_in_index: Vec<usize> = Vec::with_capacity(fd_count);
+    let mut acc = fd_index_data_start;
+    for f in &fd_emits {
+        fd_body_offsets_in_index.push(acc);
+        acc += f.font_dict_body.len();
+    }
+
+    // Top DICT — clone source entries, drop Encoding (CID fonts don't
+    // have one), serialise with placeholders.
+    let mut top_entries = walk_dict(parsed.top_dict)?;
+    top_entries.retain(|e| e.op != OP_ENCODING);
+    let new_cid_count = kept_gids.len() as u32;
+    let (top_dict_body, top_slots) = serialise_cid_top_dict(&top_entries, new_cid_count);
+
+    // Top DICT INDEX wrapping.
+    let top_dict_index = encode_index(&[&top_dict_body[..]]);
+    let top_dict_body_offset_in_index = {
+        let total = 1 + top_dict_body.len();
+        let off_size: usize = if total <= 0xFF {
+            1
+        } else if total <= 0xFFFF {
+            2
+        } else if total <= 0x00FF_FFFF {
+            3
+        } else {
+            4
+        };
+        2 + 1 + 2 * off_size
+    };
+
+    // Global Subr INDEX (renumbered globals).
+    let global_subr_refs: Vec<&[u8]> = new_global_subrs.iter().map(Vec::as_slice).collect();
+    let global_subr_index = encode_index(&global_subr_refs);
+
+    // CharStrings INDEX.
+    let cs_refs: Vec<&[u8]> = new_charstrings.iter().map(Vec::as_slice).collect();
+    let charstrings_index = encode_index(&cs_refs);
+
+    // Per-FD Local Subr INDEX bytes.
+    let per_fd_local_index: Vec<Vec<u8>> = new_per_fd_local_subrs
+        .iter()
+        .map(|locals| {
+            let refs: Vec<&[u8]> = locals.iter().map(Vec::as_slice).collect();
+            encode_index(&refs)
+        })
+        .collect();
+
+    // ---- Layout ---------------------------------------------------------
+    // Header → Name INDEX → Top DICT INDEX → String INDEX → Global Subr
+    // INDEX → charset → FDSelect → CharStrings INDEX → FDArray INDEX →
+    // [for each FD: Private DICT bytes → Local Subr INDEX bytes (when
+    // present)].
+    let mut out = Vec::with_capacity(cff_bytes.len());
+    out.extend_from_slice(parsed.header);
+    out.extend_from_slice(parsed.name_index);
+
+    let top_dict_index_start = out.len();
+    out.extend_from_slice(&top_dict_index);
+    let top_dict_body_abs = top_dict_index_start + top_dict_body_offset_in_index;
+
+    out.extend_from_slice(parsed.string_index);
+    out.extend_from_slice(&global_subr_index);
+
+    let charset_abs = out.len();
+    out.extend_from_slice(&charset_bytes);
+
+    let fd_select_abs = out.len();
+    out.extend_from_slice(&fd_select_bytes);
+
+    let charstrings_abs = out.len();
+    out.extend_from_slice(&charstrings_index);
+
+    let fd_array_abs = out.len();
+    out.extend_from_slice(&fd_array_index);
+
+    // Per-FD: write Private DICT body and the corresponding Local Subr
+    // INDEX (when locals were kept). Track absolute offsets so we can
+    // patch the Font DICT's Private slot.
+    let mut per_fd_private_abs: Vec<usize> = Vec::with_capacity(fd_count);
+    let mut per_fd_private_size: Vec<usize> = Vec::with_capacity(fd_count);
+    let mut per_fd_local_subr_abs: Vec<Option<usize>> = Vec::with_capacity(fd_count);
+    for (i, f) in fd_emits.iter().enumerate() {
+        let private_abs = out.len();
+        out.extend_from_slice(&f.new_private_body);
+        per_fd_private_abs.push(private_abs);
+        per_fd_private_size.push(f.new_private_body.len());
+        if !per_fd_local_index[i].is_empty()
+            && !new_per_fd_local_subrs[i].is_empty()
+            && f.new_priv_subrs_slot.is_some()
+        {
+            let abs = out.len();
+            out.extend_from_slice(&per_fd_local_index[i]);
+            per_fd_local_subr_abs.push(Some(abs));
+        } else {
+            per_fd_local_subr_abs.push(None);
+        }
+    }
+
+    // ---- Patch Top DICT placeholders ------------------------------------
+    if let Some(slot) = top_slots.charset_slot {
+        let abs = top_dict_body_abs + slot;
+        patch_dict_offset(&mut out, abs, charset_abs as i32);
+    }
+    if let Some(slot) = top_slots.char_strings_slot {
+        let abs = top_dict_body_abs + slot;
+        patch_dict_offset(&mut out, abs, charstrings_abs as i32);
+    }
+    if let Some(slot) = top_slots.fd_array_slot {
+        let abs = top_dict_body_abs + slot;
+        patch_dict_offset(&mut out, abs, fd_array_abs as i32);
+    }
+    if let Some(slot) = top_slots.fd_select_slot {
+        let abs = top_dict_body_abs + slot;
+        patch_dict_offset(&mut out, abs, fd_select_abs as i32);
+    }
+
+    // ---- Patch Font DICT Private slots and Private DICT Subrs slots -----
+    for (i, f) in fd_emits.iter().enumerate() {
+        if let Some((size_slot_in_fd_body, off_slot_in_fd_body)) = f.font_dict_private_slot {
+            let body_abs_in_out = fd_array_abs + fd_body_offsets_in_index[i];
+            let abs_size = body_abs_in_out + size_slot_in_fd_body;
+            let abs_off = body_abs_in_out + off_slot_in_fd_body;
+            patch_dict_offset(&mut out, abs_size, per_fd_private_size[i] as i32);
+            patch_dict_offset(&mut out, abs_off, per_fd_private_abs[i] as i32);
+        }
+        // Patch Subrs slot in Private DICT, if present.
+        if let (Some(slot), Some(local_subr_abs)) =
+            (f.new_priv_subrs_slot, per_fd_local_subr_abs[i])
+        {
+            let private_abs = per_fd_private_abs[i];
+            let abs = private_abs + slot;
+            let rel = (local_subr_abs - private_abs) as i32;
+            patch_dict_offset(&mut out, abs, rel);
+        }
     }
 
     Ok(out)
@@ -2190,6 +2974,97 @@ mod tests {
         // Format 0: 1 + 1 + 95 = 97. Format 1: 1 + 1 + 2 = 4.
         assert_eq!(auto[0], 1);
         assert!(auto.len() < 10);
+    }
+
+    // -- FDSelect tests ------------------------------------------------------
+
+    #[test]
+    fn fd_select_format0_round_trip() {
+        // Per-gid FD indices [0, 0, 1, 1, 0]. Format 0 emits format
+        // byte + raw bytes.
+        let per_gid = alloc::vec![0u8, 0, 1, 1, 0];
+        let bytes = emit_fd_select_format0(&per_gid);
+        assert_eq!(bytes.len(), 6);
+        assert_eq!(bytes[0], 0);
+        assert_eq!(&bytes[1..], &per_gid[..]);
+        let parsed = parse_fd_select(&bytes, 0, per_gid.len()).unwrap();
+        assert_eq!(parsed, per_gid);
+    }
+
+    #[test]
+    fn fd_select_format3_collapses_runs() {
+        // Per-gid FD indices: 5 zeros then 3 ones. Two ranges + sentinel.
+        let per_gid = alloc::vec![0u8, 0, 0, 0, 0, 1, 1, 1];
+        let bytes = emit_fd_select_format3(&per_gid);
+        // Header: format(1) + nRanges(2) = 3 bytes.
+        // Two ranges: 2 * 3 = 6.
+        // Sentinel: 2.
+        assert_eq!(bytes.len(), 3 + 6 + 2);
+        assert_eq!(bytes[0], 3);
+        assert_eq!(u16::from_be_bytes([bytes[1], bytes[2]]), 2); // 2 ranges
+                                                                 // First range: gid 0 -> fd 0
+        assert_eq!(u16::from_be_bytes([bytes[3], bytes[4]]), 0);
+        assert_eq!(bytes[5], 0);
+        // Second range: gid 5 -> fd 1
+        assert_eq!(u16::from_be_bytes([bytes[6], bytes[7]]), 5);
+        assert_eq!(bytes[8], 1);
+        // Sentinel = nGlyphs = 8
+        assert_eq!(u16::from_be_bytes([bytes[9], bytes[10]]), 8);
+
+        let parsed = parse_fd_select(&bytes, 0, per_gid.len()).unwrap();
+        assert_eq!(parsed, per_gid);
+    }
+
+    #[test]
+    fn fd_select_format3_singleton_range() {
+        // Single FD across all gids -> one range.
+        let per_gid = alloc::vec![0u8; 10];
+        let bytes = emit_fd_select_format3(&per_gid);
+        assert_eq!(bytes[0], 3);
+        assert_eq!(u16::from_be_bytes([bytes[1], bytes[2]]), 1);
+        // First range: gid 0 -> fd 0
+        assert_eq!(u16::from_be_bytes([bytes[3], bytes[4]]), 0);
+        assert_eq!(bytes[5], 0);
+        // Sentinel = 10
+        assert_eq!(u16::from_be_bytes([bytes[6], bytes[7]]), 10);
+
+        let parsed = parse_fd_select(&bytes, 0, per_gid.len()).unwrap();
+        assert_eq!(parsed, per_gid);
+    }
+
+    #[test]
+    fn fd_select_auto_picks_format3_on_uniform() {
+        // 100 zeros: format 0 is 1 + 100 = 101 bytes, format 3 is
+        // 3 + 3 + 2 = 8 bytes. Format 3 wins.
+        let per_gid = alloc::vec![0u8; 100];
+        let auto = emit_fd_select_auto(&per_gid);
+        assert_eq!(auto[0], 3);
+        assert!(auto.len() < 20);
+    }
+
+    #[test]
+    fn fd_select_auto_picks_format0_on_alternating() {
+        // 10 alternating values: format 0 is 1 + 10 = 11 bytes,
+        // format 3 is 3 + 30 + 2 = 35 bytes. Format 0 wins.
+        let per_gid: Vec<u8> = (0..10u8).map(|i| i & 1).collect();
+        let auto = emit_fd_select_auto(&per_gid);
+        assert_eq!(auto[0], 0);
+        assert_eq!(auto.len(), 11);
+    }
+
+    #[test]
+    fn parse_fd_select_format0_short_errors() {
+        // Format 0 with declared length but missing bytes.
+        let bytes = alloc::vec![0u8, 1, 2]; // 3 bytes total: format byte + 2 entries
+        let r = parse_fd_select(&bytes, 0, 5);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_fd_select_unknown_format_errors() {
+        let bytes = alloc::vec![1u8, 0, 0]; // format 1 not supported by FDSelect
+        let r = parse_fd_select(&bytes, 0, 1);
+        assert!(r.is_err());
     }
 
     #[test]
@@ -2582,5 +3457,279 @@ mod tests {
         assert_eq!(kept_cs.len(), cs.len());
         assert_eq!(kept_cs[1], 10); // OP_CALLSUBR preserved.
         assert_eq!(kept_cs[2], 14); // OP_ENDCHAR preserved.
+    }
+
+    // -- CID-keyed orchestration ----------------------------------------------
+
+    /// Builds a synthetic CID-keyed CFF1 with `n_fds` Font DICTs, where
+    /// each gid is assigned a Font DICT via the supplied `fd_select` map.
+    /// `charstrings` carries the per-gid charstring (gid 0 included).
+    /// Each FD gets an empty Private DICT (no local subrs) for
+    /// simplicity. This synthesises the minimum CID-shaped table needed
+    /// to drive subset_cid_keyed end-to-end.
+    fn build_synthetic_cid_cff1(charstrings: &[&[u8]], fd_select: &[u8]) -> Vec<u8> {
+        assert_eq!(charstrings.len(), fd_select.len());
+        let n_fds = (*fd_select.iter().max().unwrap_or(&0) as usize) + 1;
+        let cs_index = encode_index(charstrings);
+
+        let global_subr_index = encode_index(&[]);
+        let header = alloc::vec![1u8, 0, 4, 1];
+        let name_index = encode_index(&[b"CIDSynth"]);
+        // String INDEX with one entry — Registry/Ordering both use SID 391
+        // (Adobe-Identity-0 default in Adobe TN 5176). For a synthetic
+        // build we leave the String INDEX empty and use SID 0 (== `.notdef`)
+        // for ROS Registry/Ordering — fontTools tolerates this in CID
+        // headers where the parser only checks the operator presence.
+        let string_index = encode_index(&[]);
+
+        // Charset: format 0 with CIDs counting from 1 per gid past gid 0.
+        let charset_sids: Vec<u16> = (1..(charstrings.len() as u16)).collect();
+        let charset_bytes = emit_charset_format0(&charset_sids);
+
+        // FDSelect: format 0 (per-gid u8).
+        let fd_select_bytes = emit_fd_select_format0(fd_select);
+
+        // Per-FD Private DICT body (each just one op — `defaultWidthX`,
+        // op 20). Source Private DICTs for CID fonts are typically richer,
+        // but the orchestration only cares that the body parses + survives.
+        let private_bodies: Vec<Vec<u8>> = (0..n_fds)
+            .map(|_| alloc::vec![139u8 /* 0 */, 20u8 /* defaultWidthX */])
+            .collect();
+
+        // Font DICTs — each carries op 18 (Private size + offset) only.
+        // We need the absolute Private DICT offsets, which depend on
+        // layout. Build everything with placeholder offsets, then patch.
+        let mut font_dict_bodies: Vec<Vec<u8>> = Vec::with_capacity(n_fds);
+        let mut font_dict_priv_slots: Vec<(usize, usize)> = Vec::with_capacity(n_fds);
+        for _ in 0..n_fds {
+            let mut body = Vec::new();
+            let size_slot = body.len();
+            body.extend_from_slice(&encode_dict_offset_placeholder());
+            let off_slot = body.len();
+            body.extend_from_slice(&encode_dict_offset_placeholder());
+            body.push(18);
+            font_dict_priv_slots.push((size_slot, off_slot));
+            font_dict_bodies.push(body);
+        }
+
+        let fd_array_refs: Vec<&[u8]> = font_dict_bodies.iter().map(Vec::as_slice).collect();
+        let fd_array_index = encode_index(&fd_array_refs);
+
+        // Top DICT: ROS (op 12 30), CIDCount (12 34), charset (15),
+        // CharStrings (17), FDArray (12 36), FDSelect (12 37). Use
+        // placeholders for offset operators.
+        let mut top: Vec<u8> = Vec::new();
+        // ROS: Registry, Ordering, Supplement — three operands. We
+        // encode SID 0, SID 0, integer 0.
+        top.extend_from_slice(&encode_dict_int(0));
+        top.extend_from_slice(&encode_dict_int(0));
+        top.extend_from_slice(&encode_dict_int(0));
+        top.push(12);
+        top.push(0x1E);
+        // CIDCount.
+        top.extend_from_slice(&encode_dict_int(charstrings.len() as i32));
+        top.push(12);
+        top.push(0x22);
+        // charset.
+        let charset_slot = top.len();
+        top.extend_from_slice(&encode_dict_offset_placeholder());
+        top.push(15);
+        // CharStrings.
+        let cs_slot = top.len();
+        top.extend_from_slice(&encode_dict_offset_placeholder());
+        top.push(17);
+        // FDArray.
+        let fd_array_slot = top.len();
+        top.extend_from_slice(&encode_dict_offset_placeholder());
+        top.push(12);
+        top.push(0x24);
+        // FDSelect.
+        let fd_select_slot = top.len();
+        top.extend_from_slice(&encode_dict_offset_placeholder());
+        top.push(12);
+        top.push(0x25);
+
+        let top_dict_index = encode_index(&[&top[..]]);
+        let top_dict_body_offset_in_index = {
+            let total = 1 + top.len();
+            let off_size: usize = if total <= 0xFF { 1 } else { 2 };
+            2 + 1 + 2 * off_size
+        };
+
+        // Layout: header | name | top idx | string idx | gsubr idx |
+        //   charset | FDSelect | CharStrings idx | FDArray idx |
+        //   per-FD Private DICT bodies.
+        let mut out = Vec::new();
+        out.extend_from_slice(&header);
+        out.extend_from_slice(&name_index);
+
+        let top_dict_index_start = out.len();
+        out.extend_from_slice(&top_dict_index);
+        let top_dict_body_abs = top_dict_index_start + top_dict_body_offset_in_index;
+
+        out.extend_from_slice(&string_index);
+        out.extend_from_slice(&global_subr_index);
+
+        let charset_abs = out.len();
+        out.extend_from_slice(&charset_bytes);
+
+        let fd_select_abs = out.len();
+        out.extend_from_slice(&fd_select_bytes);
+
+        let cs_abs = out.len();
+        out.extend_from_slice(&cs_index);
+
+        let fd_array_abs = out.len();
+        out.extend_from_slice(&fd_array_index);
+
+        // Per-FD Private DICT.
+        let fd_index_off_size: usize = {
+            let total: usize = font_dict_bodies.iter().map(Vec::len).sum();
+            let last_off = 1 + total;
+            if last_off <= 0xFF {
+                1
+            } else {
+                2
+            }
+        };
+        let fd_index_data_start = 2 + 1 + (n_fds + 1) * fd_index_off_size;
+        let mut fd_body_offsets_in_index: Vec<usize> = Vec::with_capacity(n_fds);
+        let mut acc = fd_index_data_start;
+        for body in &font_dict_bodies {
+            fd_body_offsets_in_index.push(acc);
+            acc += body.len();
+        }
+
+        let mut per_fd_priv_abs: Vec<usize> = Vec::with_capacity(n_fds);
+        let mut per_fd_priv_size: Vec<usize> = Vec::with_capacity(n_fds);
+        for pb in &private_bodies {
+            per_fd_priv_abs.push(out.len());
+            per_fd_priv_size.push(pb.len());
+            out.extend_from_slice(pb);
+        }
+
+        // Patch top dict slots.
+        patch_dict_offset(
+            &mut out,
+            top_dict_body_abs + charset_slot,
+            charset_abs as i32,
+        );
+        patch_dict_offset(&mut out, top_dict_body_abs + cs_slot, cs_abs as i32);
+        patch_dict_offset(
+            &mut out,
+            top_dict_body_abs + fd_array_slot,
+            fd_array_abs as i32,
+        );
+        patch_dict_offset(
+            &mut out,
+            top_dict_body_abs + fd_select_slot,
+            fd_select_abs as i32,
+        );
+
+        // Patch each Font DICT's Private slots.
+        for i in 0..n_fds {
+            let body_abs_in_out = fd_array_abs + fd_body_offsets_in_index[i];
+            let (size_slot, off_slot) = font_dict_priv_slots[i];
+            patch_dict_offset(
+                &mut out,
+                body_abs_in_out + size_slot,
+                per_fd_priv_size[i] as i32,
+            );
+            patch_dict_offset(
+                &mut out,
+                body_abs_in_out + off_slot,
+                per_fd_priv_abs[i] as i32,
+            );
+        }
+
+        out
+    }
+
+    #[test]
+    fn cid_orchestration_keeps_all_glyphs_when_kept_set_is_full() {
+        // 3 glyphs, 1 FD. Subsetting to all gids should round-trip.
+        let cs0: &[u8] = &[14u8]; // .notdef = endchar
+        let cs1: &[u8] = &[139, 139, 21, 14];
+        let cs2: &[u8] = &[139, 14];
+        let cff = build_synthetic_cid_cff1(&[cs0, cs1, cs2], &[0, 0, 0]);
+        let new_cff = subset_non_identity(&cff, &[0, 1, 2]).unwrap();
+        let parsed = parse_cff1(&new_cff).unwrap();
+        assert!(parsed.is_cid);
+        assert_eq!(parsed.char_strings.len(), 3);
+        assert_eq!(parsed.char_strings[0], cs0);
+        assert_eq!(parsed.char_strings[1], cs1);
+        assert_eq!(parsed.char_strings[2], cs2);
+    }
+
+    #[test]
+    fn cid_orchestration_drops_unused_glyphs() {
+        // 4 glyphs, 1 FD. Subset to [0, 2]. Output charstrings = 2.
+        let cs0: &[u8] = &[14u8];
+        let cs1: &[u8] = &[139, 139, 21, 14];
+        let cs2: &[u8] = &[139, 14];
+        let cs3: &[u8] = &[139, 139, 22, 14];
+        let cff = build_synthetic_cid_cff1(&[cs0, cs1, cs2, cs3], &[0, 0, 0, 0]);
+        let new_cff = subset_non_identity(&cff, &[0, 2]).unwrap();
+        let parsed = parse_cff1(&new_cff).unwrap();
+        assert!(parsed.is_cid);
+        assert_eq!(parsed.char_strings.len(), 2);
+        assert_eq!(parsed.char_strings[1], cs2);
+    }
+
+    #[test]
+    fn cid_orchestration_drops_unused_fd() {
+        // 3 glyphs across 2 FDs. Subset to gids whose FDs are all 0;
+        // the dropped FD must vanish from the new FDArray.
+        let cs0: &[u8] = &[14u8];
+        let cs1: &[u8] = &[139, 14];
+        let cs2: &[u8] = &[139, 14];
+        // FDSelect: gid 0 → FD 0, gid 1 → FD 0, gid 2 → FD 1.
+        let cff = build_synthetic_cid_cff1(&[cs0, cs1, cs2], &[0, 0, 1]);
+        let new_cff = subset_non_identity(&cff, &[0u16, 1]).unwrap();
+        // Re-parse and inspect the FDArray INDEX.
+        let parsed = parse_cff1(&new_cff).unwrap();
+        assert!(parsed.is_cid);
+        let fd_array_off = parsed.fd_array_off.unwrap() as usize;
+        let (fda, _) = read_index(&new_cff, fd_array_off).unwrap();
+        assert_eq!(fda.len(), 1, "kept FD set should reduce to {{0}}");
+    }
+
+    #[test]
+    fn cid_orchestration_renumbers_fd_select() {
+        // 3 glyphs across 3 FDs (gid i uses FD i). Subset to [0, 2]
+        // drops FD 1; FDs 0 and 2 collapse to new FDs 0 and 1.
+        let cs0: &[u8] = &[14u8];
+        let cs1: &[u8] = &[139, 14];
+        let cs2: &[u8] = &[139, 14];
+        let cff = build_synthetic_cid_cff1(&[cs0, cs1, cs2], &[0, 1, 2]);
+        let new_cff = subset_non_identity(&cff, &[0u16, 2]).unwrap();
+        let parsed = parse_cff1(&new_cff).unwrap();
+        let fd_select = parse_fd_select(
+            &new_cff,
+            parsed.fd_select_off.unwrap() as usize,
+            parsed.char_strings.len(),
+        )
+        .unwrap();
+        // gid 0's old FD was 0 → new FD 0.
+        // gid 2's old FD was 2 → new FD 1 (FD 1 was dropped).
+        assert_eq!(fd_select, alloc::vec![0u8, 1]);
+    }
+
+    #[test]
+    fn cid_orchestration_preserves_ros_metadata() {
+        // Round-trip a 2-glyph CID font and verify the source's ROS /
+        // CIDCount operators ride through.
+        let cs0: &[u8] = &[14u8];
+        let cs1: &[u8] = &[139, 14];
+        let cff = build_synthetic_cid_cff1(&[cs0, cs1], &[0, 0]);
+        let new_cff = subset_non_identity(&cff, &[0u16, 1]).unwrap();
+        let parsed = parse_cff1(&new_cff).unwrap();
+        // ROS still triggers `is_cid`.
+        assert!(parsed.is_cid);
+        // Top DICT walk finds CIDCount = new_cid_count = 2.
+        let entries = walk_dict(parsed.top_dict).unwrap();
+        let cid_count_entry = entries.iter().find(|e| e.op == OP_CID_COUNT).unwrap();
+        let cid_count = cid_count_entry.operands.last().unwrap().int_value.unwrap();
+        assert_eq!(cid_count, 2);
     }
 }
