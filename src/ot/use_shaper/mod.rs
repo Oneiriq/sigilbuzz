@@ -90,6 +90,31 @@ pub const LAO_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"lao ", *b"DFLT"];
 /// tag that a few fonts still emit.
 pub const HANGUL_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"hang", *b"jamo", *b"DFLT"];
 
+/// N'Ko script tag — `nko ` (trailing space) is the canonical
+/// OpenType tag for N'Ko. No v2 form.
+pub const NKO_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"nko ", *b"DFLT"];
+
+/// Buginese (Lontara) script tag.
+pub const BUGINESE_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"bugi", *b"DFLT"];
+
+/// Tai Tham (Lanna) script tag.
+pub const TAI_THAM_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"lana", *b"DFLT"];
+
+/// Balinese script tag — `bali` is the only OT tag in current use.
+pub const BALINESE_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"bali", *b"DFLT"];
+
+/// Sundanese script tag.
+pub const SUNDANESE_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"sund", *b"DFLT"];
+
+/// Lepcha script tag.
+pub const LEPCHA_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"lepc", *b"DFLT"];
+
+/// Limbu script tag.
+pub const LIMBU_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"limb", *b"DFLT"];
+
+/// Cham script tag.
+pub const CHAM_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"cham", *b"DFLT"];
+
 /// USE basic features, applied per-syllable before reordering
 /// finalisation. Order matters — `rphf` must run before `half` so
 /// the ra+halant that would otherwise fold into a half-form is
@@ -760,6 +785,162 @@ pub fn shape_hangul(
         HANGUL_FEATURES,
         &[],
         false,
+    );
+}
+
+/// Entry point for N'Ko runs. N'Ko is alphabetic + tone marks — no
+/// pre-base reorder, no halant. Uses the USE basic feature chain
+/// without subjoining (only `ccmp` / `liga` / `calt` in practice
+/// drive shaping for the current Noto Sans NKo build).
+pub fn shape_nko(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        NKO_SCRIPT_PRIORITY,
+        THAI_LAO_FEATURES,
+        &[],
+        false,
+    );
+}
+
+/// Entry point for Buginese runs. Brahmic — pre-base reorder fires
+/// for sara e (U+1A19). Uses the full USE feature chain.
+pub fn shape_buginese(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        BUGINESE_SCRIPT_PRIORITY,
+        USE_BASIC_FEATURES,
+        USE_TOPOGRAPHICAL_FEATURES,
+        true,
+    );
+}
+
+/// Entry point for Tai Tham (Lanna) runs.
+pub fn shape_tai_tham(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        TAI_THAM_SCRIPT_PRIORITY,
+        USE_BASIC_FEATURES,
+        USE_TOPOGRAPHICAL_FEATURES,
+        true,
+    );
+}
+
+/// Entry point for Balinese runs.
+pub fn shape_balinese(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        BALINESE_SCRIPT_PRIORITY,
+        USE_BASIC_FEATURES,
+        USE_TOPOGRAPHICAL_FEATURES,
+        true,
+    );
+}
+
+/// Entry point for Sundanese runs.
+pub fn shape_sundanese(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        SUNDANESE_SCRIPT_PRIORITY,
+        USE_BASIC_FEATURES,
+        USE_TOPOGRAPHICAL_FEATURES,
+        true,
+    );
+}
+
+/// Entry point for Lepcha runs.
+pub fn shape_lepcha(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        LEPCHA_SCRIPT_PRIORITY,
+        USE_BASIC_FEATURES,
+        USE_TOPOGRAPHICAL_FEATURES,
+        true,
+    );
+}
+
+/// Entry point for Limbu runs.
+pub fn shape_limbu(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        LIMBU_SCRIPT_PRIORITY,
+        USE_BASIC_FEATURES,
+        USE_TOPOGRAPHICAL_FEATURES,
+        true,
+    );
+}
+
+/// Entry point for Cham runs.
+pub fn shape_cham(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+) {
+    shape_use(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        CHAM_SCRIPT_PRIORITY,
+        USE_BASIC_FEATURES,
+        USE_TOPOGRAPHICAL_FEATURES,
+        true,
     );
 }
 
