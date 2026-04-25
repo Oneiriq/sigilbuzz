@@ -39,8 +39,11 @@
 //!   (the only other implemented type).
 //! - **All other GSUB lookup types** — the rewriter returns `None`
 //!   for every subtable. The drop cascade handles propagation.
-//! - **All GPOS lookup types** — drop. The drop cascade then drops
-//!   GPOS entirely.
+//! - **GPOS types 1 (single-adj), 2 (pair-adj fmt 1+2), 3 (cursive),
+//!   4 / 5 / 6 (mark attachment), 9 (extension)** — full byte-level
+//!   rewriters. See [`crate::gpos`].
+//! - **GPOS types 7 (context) and 8 (chained context)** — drop until
+//!   their byte-level rewriters ship.
 //! - **GDEF GlyphClassDef + MarkAttachClassDef** — full ClassDef
 //!   rewriter via [`crate::classdef`]. AttachList, LigCaretList,
 //!   MarkGlyphSetsDef, ItemVariationStore drop.
@@ -283,9 +286,10 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
     ))
 }
 
-/// Drives the GPOS rewrite — same shape as [`build_gsub`]. Today the
-/// GPOS per-type rewriters drop everything, so this returns `None`
-/// whenever the source GPOS has any lookup.
+/// Drives the GPOS rewrite — same shape as [`build_gsub`]. The
+/// per-type rewriters cover types 1 / 2 / 3 / 4 / 5 / 6 / 9; types 7
+/// (context) and 8 (chained context) drop until their byte-level
+/// rewriters ship.
 pub(crate) fn build_gpos(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> {
     let gpos_table = face.gpos().ok().flatten()?;
     let lookups = gpos_table.lookup_list();
