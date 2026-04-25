@@ -35,11 +35,35 @@
 //!   pair-class tables that would explode if expanded to flat
 //!   pairs.
 //!
-//! Format 4 (control-point anchoring) and format 6 (extended class
-//! pair, 32-bit offsets) are skipped silently — sigilbuzz's apply
-//! path still consults the subtables it does understand, so a
-//! mixed-format `kerx` degrades gracefully instead of failing the
-//! whole font.
+//! Format 4 (control-point anchoring) is skipped silently —
+//! sigilbuzz's apply path still consults the subtables it does
+//! understand, so a mixed-format `kerx` degrades gracefully instead
+//! of failing the whole font.
+//!
+//! # Format 6
+//!
+//! Apple's "simple n × m array" — a compound-class layout like format
+//! 2, but the row / column class tables are AAT lookups that yield
+//! direct row / column *indices* into a 2D `(rowCount × columnCount)`
+//! grid of i16 kern deltas. Layout (relative to the subtable origin):
+//!
+//! ```text
+//!   u32 flags             (bit 0 = "long values"; sigilbuzz only
+//!                          implements the short-value variant)
+//!   u16 rowCount
+//!   u16 columnCount
+//!   u32 rowIndexTable     (offset to AAT lookup; glyph → row index)
+//!   u32 columnIndexTable  (offset to AAT lookup; glyph → col index)
+//!   u32 kerningArray      (offset to i16[rowCount * columnCount])
+//!   u32 kerningVector     (long-value variant only — ignored)
+//! ```
+//!
+//! Real shipping fonts pick small row / column counts (a few dozen)
+//! and store the indices as plain u16 — the same shape format 2 uses
+//! for its pre-multiplied byte offsets, just without the
+//! pre-multiplication. The apply path mirrors format 2: resolve both
+//! lookups, then read the cell at
+//! `array + (row * columnCount + column) * 2`.
 //!
 //! # Format 0
 //!
@@ -127,6 +151,7 @@ enum Subtable<'a> {
     Format0(Format0<'a>),
     Format1(Format1<'a>),
     Format2(Format2<'a>),
+    Format6(Format6<'a>),
 }
 
 /// Format 1 — state-machine kerning. Wraps the AAT extended state
@@ -165,6 +190,21 @@ struct Format2<'a> {
     row_width: u32,
     left_class_off: usize,
     right_class_off: usize,
+    array_off: usize,
+}
+
+/// Format 6 — simple n×m kerning array. Mirrors format 2 but the
+/// row / column lookup tables yield direct indices (not pre-multiplied
+/// byte offsets) and the array is sized by `rowCount × columnCount`.
+/// All offsets are relative to the subtable origin (the 12-byte
+/// common header).
+#[derive(Debug, Clone, Copy)]
+struct Format6<'a> {
+    sub: &'a [u8],
+    row_count: u16,
+    column_count: u16,
+    row_index_off: usize,
+    col_index_off: usize,
     array_off: usize,
 }
 
@@ -235,10 +275,9 @@ impl<'a> Kerx<'a> {
             // Format 0 is the common case. Format 1 is the AAT state
             // machine for contextual kerning. Format 2 (compound-class
             // kerning) covers Latin / CJK fonts that ship a dense
-            // pair matrix. Formats 4 (control-point anchors) and 6
-            // (indexed class kern) exist in the spec but are rare;
-            // sigilbuzz skips them silently so a mixed `kerx` still
-            // applies the formats we do understand.
+            // pair matrix. Format 6 is the n×m simple grid. Format 4
+            // (control-point anchors) is parsed for structure but its
+            // apply path is a stub — see [`Format4`] for details.
             //
             // Per-subtable parse failures (declared length shorter
             // than the body, internal offsets out of range) are
@@ -261,6 +300,11 @@ impl<'a> Kerx<'a> {
                     2 => {
                         if let Ok(Some(sub)) = parse_format2(data, sub_start, sub_end) {
                             subtables.push(Subtable::Format2(sub));
+                        }
+                    }
+                    6 => {
+                        if let Ok(Some(sub)) = parse_format6(data, sub_start, sub_end) {
+                            subtables.push(Subtable::Format6(sub));
                         }
                     }
                     _ => {}
@@ -296,6 +340,7 @@ impl<'a> Kerx<'a> {
             let v = match sub {
                 Subtable::Format0(f0) => f0.find(key),
                 Subtable::Format2(f2) => f2.find(left, right, self.num_glyphs),
+                Subtable::Format6(f6) => f6.find(left, right, self.num_glyphs),
                 Subtable::Format1(_) => continue,
             };
             if let Some(v) = v {
@@ -427,6 +472,70 @@ fn parse_format2(data: &[u8], sub_start: usize, sub_end: usize) -> Result<Option
         row_width,
         left_class_off: left_off,
         right_class_off: right_off,
+        array_off,
+    }))
+}
+
+/// Parses one format-6 subtable body. Body layout is documented at
+/// the module level; offsets are relative to the subtable origin
+/// (the 12-byte common header sits at byte 0). The "long values"
+/// flag is rejected with `Ok(None)` — sigilbuzz only implements the
+/// short-value variant, which is what shipping AAT fonts use.
+fn parse_format6(data: &[u8], sub_start: usize, sub_end: usize) -> Result<Option<Format6<'_>>> {
+    let body_start = sub_start + 12;
+    // 4 (flags) + 2 (rowCount) + 2 (columnCount) + 4 + 4 + 4 = 20 bytes
+    // for the short-value header. The optional kerningVector u32 only
+    // applies when long-values is set, which we reject anyway.
+    if body_start + 20 > sub_end {
+        return Err(Error::Truncated {
+            offset: body_start,
+            context: "kerx format 6 header",
+        });
+    }
+    let flags = u32::from_be_bytes([
+        data[body_start],
+        data[body_start + 1],
+        data[body_start + 2],
+        data[body_start + 3],
+    ]);
+    // Bit 0 = long-values: cells become i32 instead of i16, and a
+    // `kerningVector` offset follows the array. Real AAT fonts don't
+    // ship this — drop the subtable rather than half-implement it.
+    if flags & 0x0000_0001 != 0 {
+        return Ok(None);
+    }
+    let row_count = u16::from_be_bytes([data[body_start + 4], data[body_start + 5]]);
+    let column_count = u16::from_be_bytes([data[body_start + 6], data[body_start + 7]]);
+    let row_index_off = u32::from_be_bytes([
+        data[body_start + 8],
+        data[body_start + 9],
+        data[body_start + 10],
+        data[body_start + 11],
+    ]) as usize;
+    let col_index_off = u32::from_be_bytes([
+        data[body_start + 12],
+        data[body_start + 13],
+        data[body_start + 14],
+        data[body_start + 15],
+    ]) as usize;
+    let array_off = u32::from_be_bytes([
+        data[body_start + 16],
+        data[body_start + 17],
+        data[body_start + 18],
+        data[body_start + 19],
+    ]) as usize;
+
+    let sub_len = sub_end - sub_start;
+    if row_index_off >= sub_len || col_index_off >= sub_len || array_off >= sub_len {
+        return Ok(None);
+    }
+    let sub = &data[sub_start..sub_end];
+    Ok(Some(Format6 {
+        sub,
+        row_count,
+        column_count,
+        row_index_off,
+        col_index_off,
         array_off,
     }))
 }
@@ -660,6 +769,36 @@ impl Format2<'_> {
         // malformed lookup table, but again we tolerate it by
         // letting the slice bound check do the work.
         let _ = self.row_width; // referenced for the doc-driven invariant
+        let bytes = self.sub.get(cell_off..cell_off + 2)?;
+        Some(i16::from_be_bytes([bytes[0], bytes[1]]))
+    }
+}
+
+impl Format6<'_> {
+    /// Resolves `(left, right)` through the row / column index
+    /// lookups and reads the i16 cell at
+    /// `array + (row * column_count + column) * 2`. Returns `None`
+    /// for any defensive failure (bad lookup format, glyph in a
+    /// reserved class, cell outside the subtable). Matches format 2's
+    /// "no rule = zero" convention so the kern path doesn't need a
+    /// distinct sentinel.
+    fn find(&self, left: u16, right: u16, num_glyphs: u16) -> Option<i16> {
+        let row_table = self.sub.get(self.row_index_off..)?;
+        let col_table = self.sub.get(self.col_index_off..)?;
+
+        let row = lookup_class(row_table, left, num_glyphs).ok()?;
+        let col = lookup_class(col_table, right, num_glyphs).ok()?;
+
+        // Reserved-class sentinels (1 / 2 / 3) typically fall on row
+        // or column 0 in real fonts — read the cell as-is and let
+        // the array's natural zero slots handle the case. If either
+        // index lands past the declared row / column count, treat the
+        // pair as "no rule".
+        if row >= self.row_count || col >= self.column_count {
+            return None;
+        }
+        let cell_idx = usize::from(row) * usize::from(self.column_count) + usize::from(col);
+        let cell_off = self.array_off.checked_add(cell_idx * 2)?;
         let bytes = self.sub.get(cell_off..cell_off + 2)?;
         Some(i16::from_be_bytes([bytes[0], bytes[1]]))
     }
@@ -1164,6 +1303,160 @@ mod tests {
         let k = Kerx::parse(&bytes, 8).unwrap();
         let kerns = collect_kerns(&k, &[]);
         assert!(kerns.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Format 6 — simple n×m kerning array.
+    // -----------------------------------------------------------------
+
+    /// Builds a one-subtable kerx with format 6, two row classes and
+    /// three column classes. `n_glyphs` is the synthetic font's glyph
+    /// count. `row_classes[i]` is the row index for gid `i` (0-based);
+    /// same for `col_classes`. `matrix[r][c]` is the i16 delta.
+    fn build_kerx_format6(
+        n_glyphs: u16,
+        row_classes: &[u16],
+        col_classes: &[u16],
+        matrix: &[Vec<i16>],
+    ) -> Vec<u8> {
+        let row_count = matrix.len() as u16;
+        let column_count = matrix[0].len() as u16;
+
+        // Row / column lookup tables (format 0): direct row / column
+        // index per glyph.
+        let mut row_lookup: Vec<u8> = Vec::new();
+        row_lookup.extend_from_slice(&0u16.to_be_bytes()); // format 0
+        for &c in row_classes {
+            row_lookup.extend_from_slice(&c.to_be_bytes());
+        }
+        let mut col_lookup: Vec<u8> = Vec::new();
+        col_lookup.extend_from_slice(&0u16.to_be_bytes());
+        for &c in col_classes {
+            col_lookup.extend_from_slice(&c.to_be_bytes());
+        }
+
+        // Body layout (relative to subtable start):
+        //   0  : 12 B common header
+        //   12 : 20 B fmt6 header
+        //   32 : row lookup
+        //   .. : col lookup
+        //   .. : kerning array (row_count × column_count i16s)
+        let header_size = 12 + 20;
+        let row_off = header_size;
+        let col_off = row_off + row_lookup.len();
+        let array_off = col_off + col_lookup.len();
+        let array_bytes = (row_count as usize) * (column_count as usize) * 2;
+        let sub_len = array_off + array_bytes;
+
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(&2u16.to_be_bytes()); // version
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&1u32.to_be_bytes()); // nTables
+
+        // Common subtable header.
+        out.extend_from_slice(&(sub_len as u32).to_be_bytes());
+        out.extend_from_slice(&6u32.to_be_bytes()); // coverage: format 6
+        out.extend_from_slice(&0u32.to_be_bytes()); // tupleCount
+
+        // fmt6 header.
+        out.extend_from_slice(&0u32.to_be_bytes()); // flags (no long values)
+        out.extend_from_slice(&row_count.to_be_bytes());
+        out.extend_from_slice(&column_count.to_be_bytes());
+        out.extend_from_slice(&(row_off as u32).to_be_bytes());
+        out.extend_from_slice(&(col_off as u32).to_be_bytes());
+        out.extend_from_slice(&(array_off as u32).to_be_bytes());
+
+        out.extend_from_slice(&row_lookup);
+        out.extend_from_slice(&col_lookup);
+        for row in matrix {
+            for v in row {
+                out.extend_from_slice(&v.to_be_bytes());
+            }
+        }
+
+        // Sanity: caller's class arrays must cover n_glyphs.
+        assert_eq!(row_classes.len(), n_glyphs as usize);
+        assert_eq!(col_classes.len(), n_glyphs as usize);
+        out
+    }
+
+    #[test]
+    fn format6_simple_grid_resolves_pairs() {
+        // 4-glyph synthetic font:
+        //   gid 0 .notdef → row 0, col 0
+        //   gid 1 A       → row 1, col 0
+        //   gid 2 B       → row 1, col 0
+        //   gid 3 V       → row 0, col 1
+        // Matrix [row][col]:
+        //   [[ 0,   0,   0],
+        //    [-30,-50, -70]]
+        let bytes = build_kerx_format6(
+            4,
+            &[0, 1, 1, 0],
+            &[0, 0, 0, 1],
+            &[vec![0, 0, 0], vec![-30, -50, -70]],
+        );
+        let k = Kerx::parse(&bytes, 4).unwrap();
+        assert_eq!(k.subtable_count(), 1);
+        assert_eq!(k.kern(1, 3), -50, "A-V via (row 1, col 1)");
+        assert_eq!(k.kern(2, 3), -50, "B-V shares row 1");
+        assert_eq!(k.kern(1, 1), -30, "A-A via (row 1, col 0)");
+        assert_eq!(k.kern(0, 0), 0, ".notdef pair → row 0 default");
+        assert_eq!(k.kern(3, 1), 0, "V-A reversed pair → row 0 default");
+    }
+
+    #[test]
+    fn format6_rejects_long_values_flag() {
+        // Build a valid fmt6, then set the long-values flag bit so the
+        // parse path drops the subtable cleanly. The subtable becomes
+        // unusable but parse() must still succeed.
+        let mut bytes = build_kerx_format6(
+            3,
+            &[0, 1, 1],
+            &[0, 1, 1],
+            &[vec![0, 0], vec![0, 7]],
+        );
+        // Subtable starts at offset 8 (kerx header). fmt6 header at
+        // offset 8 + 12 = 20; flags u32 lives there.
+        bytes[20..24].copy_from_slice(&0x0000_0001u32.to_be_bytes());
+        let k = Kerx::parse(&bytes, 3).unwrap();
+        assert_eq!(
+            k.subtable_count(),
+            0,
+            "long-values flag drops the subtable"
+        );
+    }
+
+    #[test]
+    fn format6_bad_offset_silently_drops_subtable() {
+        // Clobber the rowIndexTable u32 to point past the subtable —
+        // parse must still succeed and skip the subtable.
+        let mut bytes = build_kerx_format6(
+            3,
+            &[0, 1, 1],
+            &[0, 1, 1],
+            &[vec![0, 0], vec![0, 7]],
+        );
+        // fmt6 header at offset 20; rowIndexTable at +8 = 28.
+        let bad = u32::MAX.to_be_bytes();
+        bytes[28..32].copy_from_slice(&bad);
+        let k = Kerx::parse(&bytes, 3).unwrap();
+        assert_eq!(k.subtable_count(), 0);
+    }
+
+    #[test]
+    fn format6_index_past_grid_returns_zero() {
+        // Lookups can yield indices beyond the declared row / column
+        // count; the find path must fall through to "no rule = 0"
+        // rather than panic on the cell read.
+        let bytes = build_kerx_format6(
+            3,
+            &[0, 99, 1], // gid 1 → row 99 (past row_count=2)
+            &[0, 0, 1],
+            &[vec![0, 0], vec![0, 7]],
+        );
+        let k = Kerx::parse(&bytes, 3).unwrap();
+        assert_eq!(k.kern(1, 2), 0, "out-of-range row index falls through");
     }
 
     #[test]
