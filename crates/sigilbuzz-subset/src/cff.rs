@@ -4268,7 +4268,7 @@ mod tests {
         // Each duplicate's body must contain a `callsubr` (op 10).
         for body in &parsed.global_subrs {
             assert!(
-                body.iter().any(|&b| b == OP_CALLSUBR),
+                body.contains(&OP_CALLSUBR),
                 "cross-FD duplicate must retain callsubr",
             );
         }
