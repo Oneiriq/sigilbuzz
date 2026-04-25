@@ -364,15 +364,48 @@ The remaining 0.8.0 carry-overs close, plus a command-line binary and a hardenin
 
 ---
 
+## 0.10.0 (shipping)
+
+The "drop-in shaping engine" line crosses to "drop-in text pipeline." Bidi ordering and line-breaking are the two consumer-side responsibilities a shaping engine usually leaves to the caller; both close in 0.10.0.
+
+### Bidi UAX 9 full ordering (#147)
+
+- [x] Full algorithm: X1-X10 (explicit-level resolution) + W1-W7 (weak types) + N1-N2 (neutrals) + I1-I2 (implicit levels) + L1-L4 (post-resolve normalization) + L2 reorder.
+- [x] `BidiInfo` struct + `paragraph_direction()` / `levels()` / `reorder()` API. `Buffer::set_text_bidi` opts in to auto-reorder pre-shape.
+- [x] N0 paired-bracket conformance deferred to #148 (N1 surrounding-strong covers most real-world bracket cases).
+
+### `sigilbuzz-text-layout` companion (#149)
+
+- [x] New 10th workspace crate. UAX 14 line-break-class table covering 25 high-impact classes (BK, CR, LF, NL, WJ, CL, CP, OP, QU, GL, NS, CM, SP, BA, BB, HY, AL, NU, PR, PO, ID, EX, ZW, EB, EM).
+- [x] `LineBreakIter`, `wrap_lines` width-budget word-wrap, simplified `word_breaks` UAX 29 iterator.
+- [x] Languages handled cleanly: English / European Latin / per-grapheme CJK / mixed Latin↔CJK / hard line breaks. Brahmic combining marks, Korean Jamo clustering, Thai/Lao/Khmer dictionary breaking deferred.
+
+### CFF real-font fixtures (#150)
+
+- [x] Source Code Pro Latin subset (6.9 KB OFL CFF1 non-CID) + Source Sans 3 VF Latin subset (28 KB OFL CFF2 VF) + hand-built CidCff1Synthetic (672 B). Backfills real-font integration round-trips for #120 / #135 / #138.
+
+### AAT remaining formats (#151)
+
+- [x] kerx format 6 (compound-class n×m grid) — full apply.
+- [x] kerx format 4 (control-point) — parse-only; apply path needs glyf-point + ankr coordinate plumbing, deferred.
+- [x] morx format 4 (Non-Contextual Substitution) — full apply.
+- [x] morx format 5 (Insertion Substitution) — full apply, count up to 31.
+
+### Hardening — wave 11
+
+- [x] 4 fixes shipped: bidi FSI X5c violation (FSI was hard-coded RTL, must look ahead through matched isolated subsequence) — #155; wrap_lines published `width` ignored its own LB7 trim — #153; kerx format-6 missing grid-vs-payload bounds check — #157; wrap.rs `trim_end` only handled 3 of the 10 UAX 14 SP-class chars — #159.
+
+---
+
 ## 1.0.0+ (next)
 
-The remaining 0.9.0 deferral plus stretch items toward a 1.0.0.
+The remaining deferrals plus polish + crates.io publish.
 
-- [ ] AAT kerx format 4 (control-point) + format 6 (extended class-pair) — implement only on real-world demand.
-- [ ] AAT morx formats 4 (Non-Contextual) + 5 (Insertion) — the same pattern.
-- [ ] Real-font CFF integration fixtures (vendored Source Han Sans CN subset for CID, OFL CFF2 VF).
-- [ ] Bidi *ordering* (UAX 9 full algorithm; currently only paragraph direction).
-- [ ] Hyphenation / line breaking (UAX 14) — out of scope for HarfBuzz; would be a sigilbuzz-text-layout companion crate.
+- [ ] N0 paired-bracket bidi conformance (#148) — needs `BidiBrackets.txt`-derived pair table.
+- [ ] kerx format 4 apply path — needs glyf-point + ankr coordinate plumbing.
+- [ ] CFF2 non-identity rewrite — current CFF2 path is identity-passthrough only.
+- [ ] Hyphenation as a companion crate.
+- [ ] Stable API audit + crates.io publish for real (publish=true scaffolding already in place per 0.5.0; just hasn't been pushed).
 
 ---
 
