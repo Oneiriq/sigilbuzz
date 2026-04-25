@@ -450,12 +450,37 @@ Three deferral close-outs (#163 / #166 / #167), the OT BASE table, and a hyphena
 
 ---
 
-## 0.13.0+ (next)
+## 0.13.0 (shipping)
 
-- [ ] GPOS VariationIndex re-emit at coords (#175) — properly fold variable kerning into static ValueRecords during instancing.
-- [ ] capi cdylib build-lock race in concurrent test execution (#172) — pre-existing flake.
-- [ ] VARC (Variable Composite Glyphs) — Chrome's 2024 OT spec extension.
-- [ ] Partial instancing — pin some axes, leave others variable.
+Two close-outs (#172 capi build-lock race, #175 GPOS VariationIndex re-emit at coords), VARC parser, partial instancing API + emit, GPOS Mark*/Cursive anchor-side variations, and a regression-13 bundle.
+
+### Close-outs
+
+- [x] **#172 capi build-lock race** — process-local `Mutex<()>` from #101 replaced with an `fd-lock`-backed file lock at `target/sigilbuzz-capi.lock`. Exclusive write across `cargo build`, downgraded to shared read for the cc link step. New 4-thread concurrent FFI test pins the regression.
+- [x] **#175 GPOS VariationIndex re-emit at coords** — properly folds variable kerning into static `ValueRecord` fields during `instance()`. New `gpos_var.rs` walks SinglePos / PairPos / Type 9 Extension wrappers, resolves VariationIndex through GDEF.IVS at the bake's coords, saturating-adds the scalar to the field, zeros the device offset. Mark*/Cursive anchor-side variations followed in #188 (AnchorFormat 3 walk).
+
+### VARC parser (#184)
+
+- [x] **OpenType 1.10 / 2024 — Chrome's Variable Composite Glyphs.** New `MultiItemVariationStore` primitive for sparse multi-axis tuple regions. New `Varc` parser handles the full header / Coverage / AxisIndicesList / VarCompositeGlyph CFF2-INDEX layout — decodes `uint32var`, F4DOT12, F6DOT10, all 15 component flags, composes per-component affines (translate / rotate / scale / skew / transformation centre) with axis-coord resolution. `Face::glyph_outline_at_coords` routes VARC-covered gids through composite resolution with depth cap 64. Synthetic in-memory SFNT fixture (no fontTools dep). Reading-only — encoding + subsetting deferred.
+
+### Partial instancing (#183 + #190)
+
+- [x] **`AxisPin::{Pin, Keep}` API + tuple-projection math** (#183) — `axis_support_scalar` (single-axis OT supportScalar ramp) + `project_region_onto_kept_axes` (per-tuple Pin-axis fold + Keep-axis trim). All-`Pin` produces byte-identical output to the existing full-instance path.
+- [x] **fvar/avar trim + IVS host-table rewrite** (#190) — `bake_fvar_partial` drops Pin-axis records + collapsed instances; `bake_avar_partial` drops Pin-axis segment maps; `bake_ivs_partial` trims regions, scales deltas by the Pin-axis scalar, and returns a `RegionRemap` for downstream reindex. HVAR / VVAR / MVAR / GDEF.IVS host tables rewrite their DeltaSetIndexMaps through the remap; entryFormat re-tightens. gvar tuple projection and CFF2 VarStore rewrite still surface `Unsupported` — filed for 0.14.0.
+
+### Hardening — wave 13
+
+- [x] 1 fix: subset/cff `encode_int_operand_at_width` silently corrupted 5-byte (op 255) re-encode when the input value was outside i16 range — now refuses with `SubsetError::Unsupported` (#187 / #189).
+- [x] 2 deferred to 0.14.0: NaN/Inf propagation in `axis_support_scalar` (#185) and `project_region_onto_kept_axes` (#186) — caught during regression scrutiny but blocked behind the partial-instancing-emit branch landing first.
+
+---
+
+## 0.14.0+ (next)
+
+- [ ] gvar tuple projection during partial instancing — close out #190's deferred path so TrueType+gvar fonts (Rubik VF etc.) can have axes pinned with others kept variable.
+- [ ] CFF2 VarStore rewrite during partial instancing — close out #190's other deferred path so Source Sans 3 + similar CFF2 sources work.
+- [ ] NaN/Inf hardening in instance math primitives (#185 / #186).
+- [ ] VARC subsetting — extend `sigilbuzz-subset` so VARC-covered gids survive subset round-trips alongside their referenced glyf/CFF base outlines.
 - [ ] Color font rasterizer companion crate (`sigilbuzz-render`).
 - [ ] Stable API audit + crates.io publish.
 
