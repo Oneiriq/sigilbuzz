@@ -2,13 +2,30 @@
 //!
 //! This companion crate implements a curated subset of
 //! [UAX #14 *Unicode Line Breaking Algorithm*][uax14] sufficient to
-//! wrap English, other European scripts, and CJK text correctly.
+//! wrap English, other European scripts, and CJK text correctly. It
+//! also offers a simplified [UAX #29][uax29] word-segmentation iterator
+//! for callers that need word boundaries (cursor movement, double-click
+//! selection) without pulling in a full Unicode segmentation crate.
+//!
+//! The headline entry points are:
 //!
 //! - [`line_break_opportunities`] — UAX 14 break iterator over a `&str`.
 //! - [`wrap_lines`] — walks a slice of shaped [`sigilbuzz::Glyph`]s
 //!   and a width budget to produce [`LineRange`]s.
-//! - [`word_breaks`] — simplified [UAX #29][uax29] word-segmentation
-//!   iterator for cursor-by-word movement and double-click selection.
+//! - [`word_breaks`] — simplified UAX 29 word-segmentation iterator.
+//!
+//! The crate is `no_std`-friendly when the default `std` feature is
+//! turned off; `wrap_lines` and the iterators all live in `alloc`.
+//!
+//! # Coverage
+//!
+//! The line-break classifier covers the high-impact UAX 14 classes:
+//! `BK`, `CR`, `LF`, `NL`, `WJ`, `CL`, `CP`, `OP`, `QU`, `GL`, `NS`,
+//! `CM`, `SP`, `BA`, `BB`, `HY`, `AL`, `NU`, `PR`, `PO`, `ID`, `EX`,
+//! `ZW`, `EB`, and `EM`. Brahmic combining marks, Korean Jamo
+//! clustering, complex line-breaking for Southeast-Asian scripts, and
+//! the UAX 14 LB30a regional-indicator pair logic are deferred to a
+//! future release.
 //!
 //! [uax14]: https://www.unicode.org/reports/tr14/
 //! [uax29]: https://www.unicode.org/reports/tr29/
@@ -24,7 +41,7 @@ mod linebreak;
 mod word;
 mod wrap;
 
-pub use class::{line_break_class, LineBreakClass};
+pub use class::LineBreakClass;
 pub use linebreak::{line_break_opportunities, BreakOpportunity, LineBreakIter};
 pub use word::word_breaks;
 pub use wrap::{wrap_lines, LineRange, WrapOptions};
