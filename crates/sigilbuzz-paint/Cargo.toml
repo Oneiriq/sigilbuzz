@@ -6,8 +6,11 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "COLRv1 paint evaluator for sigilbuzz."
-publish = false
+description = "COLRv1 paint evaluator for sigilbuzz: walks the paint tree and emits a flat DrawCmd stream for renderers."
+publish = true
+readme = "README.md"
+keywords = ["colr", "paint", "color-fonts", "opentype", "sigilbuzz"]
+categories = ["rendering", "text-processing"]
 
 [features]
 default = ["std"]

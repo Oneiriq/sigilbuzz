@@ -7,7 +7,10 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "PDF font emitters (Type 1, Type 3, OTF/TrueType-embedded) for sigilbuzz glyph outlines."
-publish = false
+publish = true
+readme = "README.md"
+keywords = ["pdf", "font-embedding", "type3", "type1", "opentype"]
+categories = ["rendering", "text-processing"]
 
 [features]
 default = ["std"]
