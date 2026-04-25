@@ -2598,7 +2598,11 @@ mod tests {
         let fd_index_off_size: usize = {
             let total: usize = font_dict_bodies.iter().map(Vec::len).sum();
             let last_off = 1 + total;
-            if last_off <= 0xFF { 1 } else { 2 }
+            if last_off <= 0xFF {
+                1
+            } else {
+                2
+            }
         };
         let fd_index_data_start = 4 + 1 + (n_fds + 1) * fd_index_off_size;
         let mut fd_body_offsets_in_index: Vec<usize> = Vec::with_capacity(n_fds);
