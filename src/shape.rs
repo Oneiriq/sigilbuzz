@@ -582,7 +582,25 @@ fn hangul_compose(
 pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<ShapedRun> {
     let want_kern = !feature_disabled(features, *b"kern");
     let want_liga = !feature_disabled(features, *b"liga");
-    let is_vertical = !buffer.direction().is_horizontal();
+    // Vertical layout: explicit when the buffer direction is TTB/BTT,
+    // *implicit* when the run is dominantly Mongolian and the caller
+    // left the direction at the default LTR. Mongolian's traditional
+    // writing axis is top-to-bottom; auto-vertical here lets simple
+    // callers shape Mongolian without having to know the default.
+    // Consumers who want horizontal Mongolian must set the direction
+    // to RTL (vertical-rotated) or pass a non-Mongolian-dominant run.
+    let mongolian_dominant = buffer.text().chars().any(|c| {
+        crate::unicode::script_of(c) == crate::unicode::Script::Mongolian
+    }) && buffer
+        .text()
+        .chars()
+        .find(|c| !matches!(crate::unicode::script_of(*c), crate::unicode::Script::Other))
+        .is_some_and(|c| crate::unicode::script_of(c) == crate::unicode::Script::Mongolian);
+    let is_vertical = if buffer.direction() == crate::buffer::Direction::Ltr && mongolian_dominant {
+        true
+    } else {
+        !buffer.direction().is_horizontal()
+    };
 
     let face = font.face();
     let cmap = face.cmap()?;
@@ -827,6 +845,14 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         }
         if seg.script == Script::Tibetan && dominant_script == Some(Script::Tibetan) {
             crate::ot::tibetan::shape_tibetan(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::Mongolian && dominant_script == Some(Script::Mongolian) {
+            crate::ot::mongolian::shape_mongolian(
                 gsub.as_ref(),
                 gdef.as_ref(),
                 seg_cps,
@@ -1270,8 +1296,38 @@ fn run_default_gsub(
     if !feature_disabled(features, *b"clig") {
         apply_gsub_feature(gsub, glyphs, gdef, *b"clig", 0, script_priority);
     }
-    if !feature_disabled(features, *b"calt") {
-        apply_gsub_feature(gsub, glyphs, gdef, *b"calt", 0, script_priority);
+    // `calt` and `rclt` together: HarfBuzz's default horizontal
+    // feature list enables both, and Mongolian fonts in particular
+    // ship the same lookup set under both tags (calt for legacy,
+    // rclt for required-contextual). Naively running each tag's
+    // lookups in turn double-applies on those fonts. Mirror
+    // HarfBuzz's "each lookup runs once per pass" rule by collecting
+    // both lookup index lists, deduplicating, and applying the
+    // union in ascending lookup-index order — the same order the
+    // GSUB FeatureList walks them.
+    if !feature_disabled(features, *b"calt") || !feature_disabled(features, *b"rclt") {
+        let mut indices: Vec<u16> = Vec::new();
+        if !feature_disabled(features, *b"calt") {
+            if let Some(idxs) =
+                lookup_indices_for_feature_in_scripts(gsub, *b"calt", script_priority)
+            {
+                indices.extend(idxs);
+            }
+        }
+        if !feature_disabled(features, *b"rclt") {
+            if let Some(idxs) =
+                lookup_indices_for_feature_in_scripts(gsub, *b"rclt", script_priority)
+            {
+                indices.extend(idxs);
+            }
+        }
+        // Sort + dedup so each lookup is applied at most once and in
+        // ascending index order (matching HarfBuzz's pass walk).
+        indices.sort_unstable();
+        indices.dedup();
+        for lookup_idx in indices {
+            apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, 0);
+        }
     }
     // Vertical writing: HarfBuzz auto-enables `vrt2` when the font
     // carries it, otherwise falls back to `vert`. The two tags
@@ -1303,7 +1359,7 @@ fn run_default_gsub(
 fn is_handled_gsub_tag(tag: [u8; 4]) -> bool {
     matches!(
         &tag,
-        b"liga" | b"kern" | b"ccmp" | b"rlig" | b"clig" | b"calt" | b"vert" | b"vrt2"
+        b"liga" | b"kern" | b"ccmp" | b"rlig" | b"clig" | b"calt" | b"rclt" | b"vert" | b"vrt2"
     )
 }
 

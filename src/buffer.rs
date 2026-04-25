@@ -359,6 +359,7 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
         KNDA_SCRIPT_PRIORITY, MLYM_SCRIPT_PRIORITY, ORYA_SCRIPT_PRIORITY, SINH_SCRIPT_PRIORITY,
         TAML_SCRIPT_PRIORITY, TELU_SCRIPT_PRIORITY,
     };
+    use crate::ot::mongolian::MONG_SCRIPT_PRIORITY;
     use crate::ot::tibetan::TIBT_SCRIPT_PRIORITY;
     use crate::ot::use_shaper::{
         HANGUL_SCRIPT_PRIORITY, KHMER_SCRIPT_PRIORITY, LAO_SCRIPT_PRIORITY,
@@ -383,6 +384,7 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
         Script::Lao => LAO_SCRIPT_PRIORITY,
         Script::Hangul => HANGUL_SCRIPT_PRIORITY,
         Script::Tibetan => TIBT_SCRIPT_PRIORITY,
+        Script::Mongolian => MONG_SCRIPT_PRIORITY,
         // Latin / Greek / Cyrillic / Han / Other — DFLT is where Latin
         // shipped features live and where anything we do not have
         // specialised dispatch for falls back.
