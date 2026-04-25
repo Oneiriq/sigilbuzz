@@ -67,7 +67,11 @@ fn fmt4_does_not_drop_sibling_format0_pair() {
     let half = -42 / 2;
     let left_delta = -42 - half;
     let right_delta = half;
-    assert_eq!(glyphs[0].x_advance, 500 + left_delta, "A kerned by sibling fmt0 pair");
+    assert_eq!(
+        glyphs[0].x_advance,
+        500 + left_delta,
+        "A kerned by sibling fmt0 pair"
+    );
     assert_eq!(glyphs[1].x_advance, 500 + right_delta, "V balanced half");
     assert_eq!(
         glyphs[0].x_advance + glyphs[1].x_advance,

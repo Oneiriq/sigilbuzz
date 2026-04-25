@@ -1458,9 +1458,9 @@ mod tests {
         body.extend_from_slice(&0u16.to_be_bytes()); // newState
         body.extend_from_slice(&0u16.to_be_bytes()); // flags
         body.extend_from_slice(&0u16.to_be_bytes()); // actionIndex
-        // Action record: 8 bytes of zero (four i16s for the
-        // coordinates variant — for control-points / anchors the
-        // shape happens to overlap, so the same fill works).
+                                                     // Action record: 8 bytes of zero (four i16s for the
+                                                     // coordinates variant — for control-points / anchors the
+                                                     // shape happens to overlap, so the same fill works).
         body.extend_from_slice(&[0u8; 8]);
 
         // Wrap in 12-byte common header + 8-byte kerx table header.
@@ -1645,33 +1645,19 @@ mod tests {
         // Build a valid fmt6, then set the long-values flag bit so the
         // parse path drops the subtable cleanly. The subtable becomes
         // unusable but parse() must still succeed.
-        let mut bytes = build_kerx_format6(
-            3,
-            &[0, 1, 1],
-            &[0, 1, 1],
-            &[vec![0, 0], vec![0, 7]],
-        );
+        let mut bytes = build_kerx_format6(3, &[0, 1, 1], &[0, 1, 1], &[vec![0, 0], vec![0, 7]]);
         // Subtable starts at offset 8 (kerx header). fmt6 header at
         // offset 8 + 12 = 20; flags u32 lives there.
         bytes[20..24].copy_from_slice(&0x0000_0001u32.to_be_bytes());
         let k = Kerx::parse(&bytes, 3).unwrap();
-        assert_eq!(
-            k.subtable_count(),
-            0,
-            "long-values flag drops the subtable"
-        );
+        assert_eq!(k.subtable_count(), 0, "long-values flag drops the subtable");
     }
 
     #[test]
     fn format6_bad_offset_silently_drops_subtable() {
         // Clobber the rowIndexTable u32 to point past the subtable —
         // parse must still succeed and skip the subtable.
-        let mut bytes = build_kerx_format6(
-            3,
-            &[0, 1, 1],
-            &[0, 1, 1],
-            &[vec![0, 0], vec![0, 7]],
-        );
+        let mut bytes = build_kerx_format6(3, &[0, 1, 1], &[0, 1, 1], &[vec![0, 0], vec![0, 7]]);
         // fmt6 header at offset 20; rowIndexTable at +8 = 28.
         let bad = u32::MAX.to_be_bytes();
         bytes[28..32].copy_from_slice(&bad);

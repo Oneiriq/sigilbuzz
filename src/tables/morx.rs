@@ -401,9 +401,12 @@ fn parse_ligature_body(bytes: &[u8]) -> Result<Option<SubtableBody<'_>>> {
     }
     let state = StateTableHeader::parse(bytes)?;
     let base = StateTableHeader::SIZE;
-    let lig_action_off =
-        u32::from_be_bytes([bytes[base], bytes[base + 1], bytes[base + 2], bytes[base + 3]])
-            as usize;
+    let lig_action_off = u32::from_be_bytes([
+        bytes[base],
+        bytes[base + 1],
+        bytes[base + 2],
+        bytes[base + 3],
+    ]) as usize;
     let component_off = u32::from_be_bytes([
         bytes[base + 4],
         bytes[base + 5],
@@ -878,14 +881,7 @@ fn apply_insertion(
         if cur_index != 0xFFFF && cur_count > 0 && i <= glyphs.len() {
             let before = flags & FLAG_INS_CURRENT_BEFORE != 0;
             let pos = if before { i } else { i + 1 };
-            let n = splice_insertions(
-                insertion_table,
-                cur_index,
-                cur_count,
-                pos,
-                glyphs,
-                origins,
-            );
+            let n = splice_insertions(insertion_table, cur_index, cur_count, pos, glyphs, origins);
             if before {
                 i += n;
             }
@@ -1298,15 +1294,15 @@ mod tests {
         body.extend_from_slice(&0u16.to_be_bytes()); // flags
         body.extend_from_slice(&0xFFFFu16.to_be_bytes()); // cur idx
         body.extend_from_slice(&0xFFFFu16.to_be_bytes()); // mark idx
-        // #1 insert 1 glyph after current (CurrentInsertCount=1, no
-        // before-flag → after, list at index 0).
-        // Flags: count=1 in bits 5..9 → 1 << 5 = 0x0020.
+                                                          // #1 insert 1 glyph after current (CurrentInsertCount=1, no
+                                                          // before-flag → after, list at index 0).
+                                                          // Flags: count=1 in bits 5..9 → 1 << 5 = 0x0020.
         let entry1_flags: u16 = 1 << FLAG_INS_CURRENT_COUNT_SHIFT;
         body.extend_from_slice(&0u16.to_be_bytes()); // newState
         body.extend_from_slice(&entry1_flags.to_be_bytes());
         body.extend_from_slice(&0u16.to_be_bytes()); // currentInsertIndex = 0
         body.extend_from_slice(&0xFFFFu16.to_be_bytes()); // markedInsertIndex
-        // Insertion glyph table.
+                                                          // Insertion glyph table.
         body.extend_from_slice(&marker_gid.to_be_bytes());
 
         let sub_len = 12 + body.len();
