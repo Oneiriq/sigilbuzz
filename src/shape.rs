@@ -825,6 +825,14 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 &mut seg_glyphs,
             );
         }
+        if seg.script == Script::Tibetan && dominant_script == Some(Script::Tibetan) {
+            crate::ot::tibetan::shape_tibetan(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
         if seg.script == Script::Myanmar {
             crate::ot::use_shaper::shape_myanmar(
                 gsub.as_ref(),

@@ -67,6 +67,10 @@ pub enum Script {
     /// routes through USE so `ljmo` / `vjmo` / `tjmo` see the L / V / T
     /// jamo in logical order.
     Hangul,
+    /// Tibetan (U+0F00..U+0FFF). Stacked above/below-base subjoined
+    /// consonants — runs through the feature-loop-only Tibetan shaper
+    /// in [`crate::ot::tibetan`].
+    Tibetan,
     /// Anything else — returned when sigilbuzz has no specialised
     /// table for the codepoint's script.
     Other,
@@ -165,6 +169,10 @@ pub const fn script_of(ch: char) -> Script {
         0x1100..=0x11FF | 0xA960..=0xA97F | 0xAC00..=0xD7A3 | 0xD7B0..=0xD7FF | 0x3130..=0x318F => {
             Script::Hangul
         }
+        // Tibetan — base block. Stacked subjoined consonants live
+        // in U+0F90..U+0FBC; the whole block routes through the
+        // Tibetan feature-loop shaper.
+        0x0F00..=0x0FFF => Script::Tibetan,
         // Khmer + Khmer Symbols
         0x1780..=0x17FF | 0x19E0..=0x19FF => Script::Khmer,
         // CJK unified ideographs + extensions A/B + Hiragana + Katakana
