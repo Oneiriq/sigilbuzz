@@ -67,6 +67,31 @@ pub enum Script {
     /// routes through USE so `ljmo` / `vjmo` / `tjmo` see the L / V / T
     /// jamo in logical order.
     Hangul,
+    /// N'Ko. Right-to-left alphabetic script for the Manding language
+    /// family (Bambara / Maninka / Dyula). USE pipeline; covers
+    /// U+07C0..U+07FF.
+    NKo,
+    /// Buginese (Lontara). Brahmic script for the Bugis language of
+    /// South Sulawesi. USE pipeline; covers U+1A00..U+1A1F.
+    Buginese,
+    /// Tai Tham (Lanna). Brahmic script used for Northern Thai, Tai
+    /// Lue, Khün, and Lao Tham. USE pipeline; covers U+1A20..U+1AAF.
+    TaiTham,
+    /// Balinese. Brahmic script for Balinese / Sasak / Old Javanese.
+    /// USE pipeline; covers U+1B00..U+1B7F.
+    Balinese,
+    /// Sundanese. Brahmic script for the Sundanese language of West
+    /// Java. USE pipeline; covers U+1B80..U+1BBF.
+    Sundanese,
+    /// Lepcha. Brahmic script of Sikkim used for the Lepcha language.
+    /// USE pipeline; covers U+1C00..U+1C4F.
+    Lepcha,
+    /// Limbu. Brahmic-derived script of Sikkim / Eastern Nepal used
+    /// for the Limbu language. USE pipeline; covers U+1900..U+194F.
+    Limbu,
+    /// Cham. Brahmic script of Cambodia and Vietnam used for the
+    /// Cham language. USE pipeline; covers U+AA00..U+AA5F.
+    Cham,
     /// Anything else — returned when sigilbuzz has no specialised
     /// table for the codepoint's script.
     Other,
@@ -94,14 +119,28 @@ impl Script {
 
     /// Returns `true` if the script routes through the Universal
     /// Shaping Engine pipeline. Khmer, Myanmar, Thai, Lao, and the
-    /// Jamo subset of Hangul all share the USE state machine — each
-    /// with its own category table and feature list, but the same
-    /// segment / reorder / basic+topographical dispatch.
+    /// Jamo subset of Hangul are the 0.2.0 set; 0.7.x adds the
+    /// Brahmic SE-Asian / South Asian set (Buginese, Tai Tham,
+    /// Balinese, Sundanese, Lepcha, Limbu, Cham) plus N'Ko. Each
+    /// supplies its own category table and feature list, but the
+    /// segment / reorder / basic+topographical dispatch is shared.
     #[must_use]
     pub const fn is_use(self) -> bool {
         matches!(
             self,
-            Script::Khmer | Script::Myanmar | Script::Thai | Script::Lao | Script::Hangul
+            Script::Khmer
+                | Script::Myanmar
+                | Script::Thai
+                | Script::Lao
+                | Script::Hangul
+                | Script::NKo
+                | Script::Buginese
+                | Script::TaiTham
+                | Script::Balinese
+                | Script::Sundanese
+                | Script::Lepcha
+                | Script::Limbu
+                | Script::Cham
         )
     }
 }
@@ -131,6 +170,9 @@ pub const fn script_of(ch: char) -> Script {
         // block (U+FB50..U+FDFF) starts immediately after the Hebrew
         // presentation forms above, so no overlap.
         0x0600..=0x06FF | 0x0750..=0x077F | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF => Script::Arabic,
+        // N'Ko — RTL alphabetic, Manding family. Block ends at U+07FF
+        // and abuts the Samaritan / Mandaic blocks at U+0800.
+        0x07C0..=0x07FF => Script::NKo,
         // Devanagari
         0x0900..=0x097F => Script::Devanagari,
         // Bengali
@@ -157,6 +199,21 @@ pub const fn script_of(ch: char) -> Script {
         0x0E80..=0x0EFF => Script::Lao,
         // Myanmar (main + Extended-A + Extended-B)
         0x1000..=0x109F | 0xAA60..=0xAA7F | 0xA9E0..=0xA9FF => Script::Myanmar,
+        // Limbu (Sikkim / Eastern Nepal).
+        0x1900..=0x194F => Script::Limbu,
+        // Buginese (Lontara, South Sulawesi).
+        0x1A00..=0x1A1F => Script::Buginese,
+        // Tai Tham (Lanna).
+        0x1A20..=0x1AAF => Script::TaiTham,
+        // Balinese.
+        0x1B00..=0x1B7F => Script::Balinese,
+        // Sundanese (West Java) — main block + supplement
+        // (U+1CC0..U+1CCF holds Sundanese punctuation/numerals).
+        0x1B80..=0x1BBF | 0x1CC0..=0x1CCF => Script::Sundanese,
+        // Lepcha (Sikkim).
+        0x1C00..=0x1C4F => Script::Lepcha,
+        // Cham (Cambodia / Vietnam).
+        0xAA00..=0xAA5F => Script::Cham,
         // Hangul Jamo + Jamo Extended-A + Jamo Extended-B +
         // precomposed Hangul Syllables + Hangul Compatibility Jamo.
         // The USE routing in shape.rs only triggers for the Jamo
@@ -344,7 +401,30 @@ mod tests {
         assert!(Script::Thai.is_use());
         assert!(Script::Lao.is_use());
         assert!(Script::Hangul.is_use());
+        assert!(Script::NKo.is_use());
+        assert!(Script::Buginese.is_use());
+        assert!(Script::TaiTham.is_use());
+        assert!(Script::Balinese.is_use());
+        assert!(Script::Sundanese.is_use());
+        assert!(Script::Lepcha.is_use());
+        assert!(Script::Limbu.is_use());
+        assert!(Script::Cham.is_use());
         assert!(!Script::Latin.is_use());
         assert!(!Script::Devanagari.is_use());
+    }
+
+    #[test]
+    fn classifies_added_use_scripts() {
+        assert_eq!(script_of('\u{07CA}'), Script::NKo); // letter ba
+        assert_eq!(script_of('\u{1A00}'), Script::Buginese); // letter ka
+        assert_eq!(script_of('\u{1A20}'), Script::TaiTham); // letter high ka
+        assert_eq!(script_of('\u{1B00}'), Script::Balinese);
+        assert_eq!(script_of('\u{1B83}'), Script::Sundanese); // letter a
+        assert_eq!(script_of('\u{1C00}'), Script::Lepcha); // letter ka
+        assert_eq!(script_of('\u{1900}'), Script::Limbu); // vowel-carrier
+        assert_eq!(script_of('\u{AA00}'), Script::Cham); // letter a
+                                                         // Block boundaries.
+        assert_eq!(script_of('\u{AA5F}'), Script::Cham);
+        assert_eq!(script_of('\u{AA60}'), Script::Myanmar);
     }
 }

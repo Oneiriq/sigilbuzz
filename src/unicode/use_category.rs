@@ -13,11 +13,12 @@
 //!   pass and picks the correct positional feature bucket (`abvf`,
 //!   `blwf`, `pstf`, `pref`).
 //!
-//! sigilbuzz 0.2.0 wires up Khmer, Myanmar, Thai, Lao, and the Jamo
-//! subset of Hangul against these tables. Tai Tham / Buginese / Cham
-//! stay on the generic path until follow-up work. The tables live here
-//! rather than inside a script-specific module because the same state
-//! machine consumes them for every USE script.
+//! sigilbuzz 0.2.0 wired up Khmer, Myanmar, Thai, Lao, and the Jamo
+//! subset of Hangul against these tables. 0.7.x extends the coverage
+//! to N'Ko, Buginese, Tai Tham, Balinese, Sundanese, Lepcha, Limbu,
+//! and Cham. The tables live here rather than inside a script-specific
+//! module because the same state machine consumes them for every USE
+//! script.
 //!
 //! # Sources
 //!
@@ -109,6 +110,7 @@ pub enum UsePosition {
 /// that makes the table maintainable.
 #[must_use]
 #[allow(clippy::match_same_arms)]
+#[allow(clippy::too_many_lines)]
 pub const fn use_position(ch: char) -> UsePosition {
     let cp = ch as u32;
     match cp {
@@ -182,6 +184,118 @@ pub const fn use_position(ch: char) -> UsePosition {
         0x0EB8 | 0x0EB9 => UsePosition::BelowBase,
         0x0EB0 | 0x0EB2 | 0x0EB3 => UsePosition::PostBase,
 
+        // --- N'Ko (U+07C0..U+07FF) -------------------------------
+        // N'Ko marks all sit above their base. The dantayalan
+        // (07FD) sits below. No pre-base or post-base vowels — N'Ko
+        // is alphabetic, not Brahmic.
+        0x07EB..=0x07F3 => UsePosition::AboveBase,
+        0x07FD => UsePosition::BelowBase,
+
+        // --- Buginese (U+1A00..U+1A1F) ---------------------------
+        // 1A17 vowel-i (above), 1A18 vowel-u (below),
+        // 1A19 vowel-e (pre-base), 1A1A vowel-o (post-base),
+        // 1A1B vowel-ae (above).
+        0x1A17 | 0x1A1B => UsePosition::AboveBase,
+        0x1A18 => UsePosition::BelowBase,
+        0x1A19 => UsePosition::PreBase,
+        0x1A1A => UsePosition::PostBase,
+
+        // --- Tai Tham (U+1A20..U+1AAF) ---------------------------
+        // 1A55 medial ra (pre-base), 1A56 medial la (below),
+        // 1A57 a-mode (post), 1A58..1A5E above-base signs,
+        // 1A60 sakot (halant — NotApplicable for position),
+        // 1A61 a, 1A62 mai sat (above), 1A63..1A64 aa (post),
+        // 1A65..1A68 above (i/ii/ue/uee), 1A69..1A6A below (u/uu),
+        // 1A6B above (o), 1A6C..1A72 various, 1A6E..1A72 pre-base
+        // vowels, 1A73..1A74 above, 1A75..1A7C tone above,
+        // 1A7F dot below.
+        0x1A55 | 0x1A6E..=0x1A72 => UsePosition::PreBase,
+        0x1A58..=0x1A5E | 0x1A62 | 0x1A65..=0x1A68 | 0x1A6B | 0x1A73..=0x1A74 | 0x1A75..=0x1A7C => {
+            UsePosition::AboveBase
+        }
+        0x1A56 | 0x1A69..=0x1A6A | 0x1A7F => UsePosition::BelowBase,
+        0x1A57 | 0x1A63..=0x1A64 | 0x1A6C..=0x1A6D => UsePosition::PostBase,
+
+        // --- Balinese (U+1B00..U+1B7F) ---------------------------
+        // 1B00..1B03 anusvara/visarga (above except 1B03 which is
+        // post in some sources; treat as above for placement).
+        // 1B34 rerekan (above), 1B35 sign tedung (post),
+        // 1B36..1B38 above (i/ii/u variants), 1B39..1B3A below,
+        // 1B3B above, 1B3C below,
+        // 1B3D sign la e (above), 1B3E sign le (pre-base),
+        // 1B3F sign le tedung (pre-base — sign le + tedung
+        //   composed; renders before the base then a tedung after),
+        // 1B40 sign taa-le (pre-base — like Devanagari sign O),
+        // 1B41 sign taa-le tedung (pre-base),
+        // 1B42 above (sign ie), 1B43 above (sign ai),
+        // 1B44 adeg adeg (halant — NotApplicable),
+        // 1B6B..1B73 musical/above, 1B80..1B82 stay in 1B80 block.
+        0x1B36..=0x1B38 | 0x1B3B | 0x1B3D | 0x1B42 | 0x1B43 | 0x1B6B..=0x1B73 => {
+            UsePosition::AboveBase
+        }
+        0x1B3E..=0x1B41 => UsePosition::PreBase,
+        0x1B34 => UsePosition::AboveBase,
+        0x1B39..=0x1B3A | 0x1B3C => UsePosition::BelowBase,
+        0x1B35 => UsePosition::PostBase,
+
+        // --- Sundanese (U+1B80..U+1BBF) --------------------------
+        // 1B80 panyecek (above anusvara), 1B81 panglayar (above),
+        // 1B82 pangwisad (post),
+        // 1BA1 pamingkal (post), 1BA2 panyakra (below),
+        // 1BA3 panyikuh (below),
+        // 1BA4 vowel sign i (above), 1BA5 vowel sign u (below),
+        // 1BA6 vowel sign e (pre-base), 1BA7 vowel sign aa (post),
+        // 1BA8..1BA9 above (eu/ae), 1BAA pamaaeh (post),
+        // 1BAB virama (halant), 1BAC..1BAD consonant signs (above).
+        0x1B80..=0x1B81 | 0x1BA4 | 0x1BA8..=0x1BA9 | 0x1BAC..=0x1BAD => UsePosition::AboveBase,
+        0x1BA2..=0x1BA3 | 0x1BA5 => UsePosition::BelowBase,
+        0x1BA6 => UsePosition::PreBase,
+        0x1B82 | 0x1BA1 | 0x1BA7 | 0x1BAA => UsePosition::PostBase,
+
+        // --- Lepcha (U+1C00..U+1C4F) -----------------------------
+        // 1C24..1C25 subjoined consonants (post),
+        // 1C26 sign i (post), 1C27 sign o (pre-base),
+        // 1C28 sign on (post), 1C29 sign u (below),
+        // 1C2A sign uu (post), 1C2B sign uu (post),
+        // 1C2C sign u-below (below), 1C2D sign e (post),
+        // 1C2E sign ee (post), 1C2F sign ai (post),
+        // 1C30 sign yy (post),
+        // 1C34..1C35 consonant signs (post),
+        // 1C36 ran (above), 1C37 nukta (below),
+        // 1C40..1C49 digits.
+        0x1C27 => UsePosition::PreBase,
+        0x1C36 => UsePosition::AboveBase,
+        0x1C29 | 0x1C2C | 0x1C37 => UsePosition::BelowBase,
+        0x1C24..=0x1C26 | 0x1C28 | 0x1C2A..=0x1C2B | 0x1C2D..=0x1C35 => UsePosition::PostBase,
+
+        // --- Limbu (U+1900..U+194F) ------------------------------
+        // 1920..1922 above (a/i/u), 1923..1924 below (ee/ai),
+        // 1925..1926 above (oo/au), 1927..1928 below (e/o),
+        // 1929..192B subjoined consonants (below),
+        // 1930..1938 small / final letters (post),
+        // 1939..193B signs (above/below). 193B sa-i (below),
+        // 1939..193A above tone marks.
+        0x1920..=0x1922 | 0x1925..=0x1926 | 0x1939..=0x193A => UsePosition::AboveBase,
+        0x1923..=0x1924 | 0x1927..=0x192B | 0x193B => UsePosition::BelowBase,
+        0x1930..=0x1938 => UsePosition::PostBase,
+
+        // --- Cham (U+AA00..U+AA5F) -------------------------------
+        // AA29..AA2E above (aa/i/ii/ei/u),
+        // AA2F..AA30 pre-base (oe/o — render visually before the
+        //   base consonant; the IndicPositionalCategory column
+        //   marks them Top_And_Left in the Unicode Standard, but
+        //   the USE places them in the pre-base bucket — same as
+        //   rustybuzz),
+        // AA31..AA32 above (ai/au),
+        // AA33 post (medial ya), AA34 below (medial ra),
+        // AA35..AA36 below (medial la/wa),
+        // AA43 final ng (post), AA4C consonant sign (above),
+        // AA4D consonant sign (post).
+        0xAA29..=0xAA2E | 0xAA31..=0xAA32 | 0xAA4C => UsePosition::AboveBase,
+        0xAA34..=0xAA36 => UsePosition::BelowBase,
+        0xAA2F..=0xAA30 => UsePosition::PreBase,
+        0xAA33 | 0xAA43 | 0xAA4D => UsePosition::PostBase,
+
         // Currency + signs — no positional role (the currency is a
         // base glyph itself).
         _ => UsePosition::NotApplicable,
@@ -211,6 +325,7 @@ pub const fn use_position(ch: char) -> UsePosition {
 /// and a reviewer can check each script slice in isolation.
 #[must_use]
 #[allow(clippy::match_same_arms)]
+#[allow(clippy::too_many_lines)]
 pub const fn use_category(ch: char) -> UseCategory {
     let cp = ch as u32;
     match cp {
@@ -372,6 +487,178 @@ pub const fn use_category(ch: char) -> UseCategory {
         0x0EC6 => UseCategory::GB,
         0x0EC8..=0x0ECD => UseCategory::M,
         0x0ED0..=0x0ED9 => UseCategory::N,
+
+        // --- N'Ko (U+07C0..U+07FF) -------------------------------
+        // N'Ko digits (07C0..07C9), letters (07CA..07EA),
+        // tone / combining marks (07EB..07F3, 07FD), low-tone
+        // letters (07F4..07F5), exclam/question marks (07F8..07F9),
+        // lajanyalan (07FA — consonant modifier / TATWEEL-like).
+        0x07C0..=0x07C9 => UseCategory::N,
+        0x07CA..=0x07EA | 0x07F4..=0x07F5 => UseCategory::B,
+        0x07EB..=0x07F3 | 0x07FD => UseCategory::M,
+        0x07F6..=0x07F9 => UseCategory::GB,
+        0x07FA => UseCategory::CM,
+
+        // --- Buginese (U+1A00..U+1A1F) ---------------------------
+        0x1A00..=0x1A16 => UseCategory::B,
+        0x1A17 | 0x1A1B => UseCategory::VAbv,
+        0x1A18 => UseCategory::VBlw,
+        0x1A19 => UseCategory::VPre,
+        0x1A1A => UseCategory::VPst,
+        0x1A1E..=0x1A1F => UseCategory::GB,
+
+        // --- Tai Tham (U+1A20..U+1AAF) ---------------------------
+        // Consonants 1A20..1A4C, independent vowels 1A4D..1A52,
+        // sign la-tang lai 1A53, sign sakot 1A60 (halant),
+        // medial ra 1A55 (CM, pre-base), medial la 1A56 (CM, below),
+        // medial wa 1A54 (CM), sign mai sat 1A57 (post),
+        // signs 1A58..1A5E (above modifiers — CM),
+        // sa 1A5F (final consonant — CM),
+        // vowel signs 1A61..1A6C (mix), pre-base 1A6E..1A72,
+        // 1A73..1A74 above-base extensions, 1A75..1A7C tone marks,
+        // 1A7F dot below, digits 1A80..1A89, 1A90..1A99.
+        0x1A20..=0x1A4C => UseCategory::B,
+        0x1A4D..=0x1A52 => UseCategory::IV,
+        0x1A53..=0x1A54 | 0x1A55..=0x1A56 | 0x1A58..=0x1A5E => UseCategory::CM,
+        0x1A57 | 0x1A63..=0x1A64 | 0x1A6C..=0x1A6D => UseCategory::VPst,
+        0x1A5F => UseCategory::CM,
+        0x1A60 => UseCategory::H,
+        0x1A61 | 0x1A62 | 0x1A65..=0x1A68 | 0x1A6B | 0x1A73..=0x1A74 => UseCategory::VAbv,
+        0x1A69..=0x1A6A => UseCategory::VBlw,
+        0x1A6E..=0x1A72 => UseCategory::VPre,
+        0x1A75..=0x1A7C => UseCategory::M,
+        0x1A7F => UseCategory::M,
+        0x1A80..=0x1A89 | 0x1A90..=0x1A99 => UseCategory::N,
+        0x1AA0..=0x1AA6 | 0x1AA8..=0x1AAD => UseCategory::GB,
+        0x1AA7 => UseCategory::M,
+
+        // --- Balinese (U+1B00..U+1B7F) ---------------------------
+        // 1B00..1B03 signs (above), 1B04 visarga (post-base FM),
+        // 1B05..1B33 letters,
+        // 1B34 rerekan (above modifier — M),
+        // 1B35..1B43 vowel signs (mix),
+        // 1B44 adeg adeg (halant),
+        // 1B45..1B4F more letters,
+        // 1B50..1B59 digits,
+        // 1B5A..1B6A punctuation/symbols,
+        // 1B6B..1B73 musical signs (above marks),
+        // 1B74..1B7C symbols.
+        0x1B00..=0x1B03 => UseCategory::M,
+        0x1B04 => UseCategory::FM,
+        0x1B05..=0x1B33 | 0x1B45..=0x1B4F => UseCategory::B,
+        0x1B34 => UseCategory::M,
+        0x1B35 => UseCategory::VPst,
+        0x1B36..=0x1B38 | 0x1B3B | 0x1B3D | 0x1B42 | 0x1B43 => UseCategory::VAbv,
+        0x1B3E..=0x1B41 => UseCategory::VPre,
+        0x1B39..=0x1B3A | 0x1B3C => UseCategory::VBlw,
+        0x1B44 => UseCategory::H,
+        0x1B50..=0x1B59 => UseCategory::N,
+        0x1B5A..=0x1B6A | 0x1B74..=0x1B7C => UseCategory::GB,
+        0x1B6B..=0x1B73 => UseCategory::M,
+
+        // --- Sundanese (U+1B80..U+1BBF) --------------------------
+        // 1B80 panyecek (anusvara — M),
+        // 1B81 panglayar (M),
+        // 1B82 pangwisad (FM),
+        // 1B83..1B89 independent vowels,
+        // 1B8A..1BA0 letters,
+        // 1BA1 pamingkal (post-base medial — CM),
+        // 1BA2..1BA3 panyakra/panyikuh (below medials — CM),
+        // 1BA4 vowel-i (above), 1BA5 vowel-u (below),
+        // 1BA6 vowel-e (pre), 1BA7 vowel-aa (post),
+        // 1BA8..1BA9 vowel-eu/ae (above),
+        // 1BAA pamaaeh (post — final mark / virama-equivalent).
+        //   In Unicode 6.1+, 1BAA is given Indic_Syllabic_Category
+        //   = Pure_Killer (ie a virama), not a final mark; rustybuzz
+        //   classifies it as H. Track that here.
+        // 1BAB..1BAD additional consonant signs (above).
+        // 1BAE..1BAF more letters.
+        // 1BB0..1BB9 digits. 1BBA..1BBF Sundanese symbols.
+        0x1B80..=0x1B81 => UseCategory::M,
+        0x1B82 => UseCategory::FM,
+        0x1B83..=0x1B89 => UseCategory::IV,
+        0x1B8A..=0x1BA0 | 0x1BAE..=0x1BAF => UseCategory::B,
+        0x1BA1..=0x1BA3 => UseCategory::CM,
+        0x1BA4 => UseCategory::VAbv,
+        0x1BA5 => UseCategory::VBlw,
+        0x1BA6 => UseCategory::VPre,
+        0x1BA7 => UseCategory::VPst,
+        0x1BA8..=0x1BA9 => UseCategory::VAbv,
+        0x1BAA => UseCategory::H,
+        0x1BAB => UseCategory::H,
+        0x1BAC..=0x1BAD => UseCategory::M,
+        0x1BB0..=0x1BB9 => UseCategory::N,
+        0x1BBA..=0x1BBF | 0x1CC0..=0x1CCF => UseCategory::GB,
+
+        // --- Lepcha (U+1C00..U+1C4F) -----------------------------
+        // 1C00..1C23 letters,
+        // 1C24..1C2B subjoined consonants (CM — they sit below or
+        // post a base, attached via halant-like behaviour),
+        // 1C2C..1C2F vowel signs,
+        // 1C30..1C33 vowel signs (post),
+        // 1C34..1C35 consonant signs (post),
+        // 1C36 ran (above tone), 1C37 nukta (below — M),
+        // 1C3B..1C3F punctuation,
+        // 1C40..1C49 digits,
+        // 1C4D..1C4F more letters.
+        0x1C00..=0x1C23 | 0x1C4D..=0x1C4F => UseCategory::B,
+        0x1C24..=0x1C25 => UseCategory::CM,
+        0x1C26 => UseCategory::VPst,
+        0x1C27 => UseCategory::VPre,
+        0x1C28 => UseCategory::VPst,
+        0x1C29 => UseCategory::VBlw,
+        0x1C2A..=0x1C2B => UseCategory::VPst,
+        0x1C2C => UseCategory::VBlw,
+        0x1C2D..=0x1C33 => UseCategory::VPst,
+        0x1C34..=0x1C35 => UseCategory::CM,
+        0x1C36 => UseCategory::M,
+        0x1C37 => UseCategory::M,
+        0x1C3B..=0x1C3F => UseCategory::GB,
+        0x1C40..=0x1C49 => UseCategory::N,
+
+        // --- Limbu (U+1900..U+194F) ------------------------------
+        // 1900..191F letters,
+        // 1920..1922 above (a/i/u),
+        // 1923..1928 below (ee/ai/oo/au/e/o — wait some are above),
+        //   actually 1925..1926 above (oo/au), 1923..1924 below
+        //   (ee/ai), 1927..1928 below (e/o).
+        // 1929..192B subjoined (CM, below — yya/ra/sa subjoined),
+        // 1930..1938 small / final letters (CM, post),
+        // 1939..193B tone / dot marks (M),
+        // 1940 sign loo, 1944..1945 punctuation.
+        // 1946..194F digits.
+        0x1900..=0x191F => UseCategory::B,
+        0x1920..=0x1922 | 0x1925..=0x1926 => UseCategory::VAbv,
+        0x1923..=0x1924 | 0x1927..=0x1928 => UseCategory::VBlw,
+        0x1929..=0x192B => UseCategory::CM,
+        0x1930..=0x1938 => UseCategory::CM,
+        0x1939..=0x193B => UseCategory::M,
+        0x1940 | 0x1944..=0x1945 => UseCategory::GB,
+        0x1946..=0x194F => UseCategory::N,
+
+        // --- Cham (U+AA00..U+AA5F) -------------------------------
+        // AA00..AA28 letters (incl. independent vowels AA00..AA05),
+        // AA29..AA2E vowel signs (above — aa/i/ii/ei/u),
+        // AA2F..AA30 vowel signs (post — oe/o),
+        // AA31..AA32 vowel signs (above — ai/au),
+        // AA33 medial ya (post — CM),
+        // AA34..AA36 medial ra/la/wa (below — CM),
+        // AA40..AA42 final consonants (CM, post),
+        // AA43 final ng (FM/post),
+        // AA44..AA4B more final consonants (CM),
+        // AA4C consonant sign (above), AA4D consonant sign (post),
+        // AA50..AA59 digits, AA5C..AA5F punctuation.
+        0xAA00..=0xAA05 => UseCategory::IV,
+        0xAA06..=0xAA28 => UseCategory::B,
+        0xAA29..=0xAA2E | 0xAA31..=0xAA32 => UseCategory::VAbv,
+        0xAA2F..=0xAA30 => UseCategory::VPre,
+        0xAA33..=0xAA36 => UseCategory::CM,
+        0xAA40..=0xAA42 | 0xAA44..=0xAA4B => UseCategory::CM,
+        0xAA43 => UseCategory::FM,
+        0xAA4C => UseCategory::M,
+        0xAA4D => UseCategory::VPst,
+        0xAA50..=0xAA59 => UseCategory::N,
+        0xAA5C..=0xAA5F => UseCategory::GB,
 
         // --- Hangul Jamo (U+1100..U+11FF) + Extensions -----------
         // Leading consonants (Choseong): 1100..115F + A960..A97C.
@@ -696,5 +983,108 @@ mod tests {
     fn precomposed_hangul_syllable_is_base() {
         assert_eq!(use_category('\u{AC00}'), UseCategory::B); // 가
         assert_eq!(use_category('\u{D7A3}'), UseCategory::B);
+    }
+
+    // --- N'Ko tests ----------------------------------------------
+
+    #[test]
+    fn nko_letters_and_marks() {
+        assert_eq!(use_category('\u{07CA}'), UseCategory::B); // letter a
+        assert_eq!(use_category('\u{07EA}'), UseCategory::B);
+        assert_eq!(use_category('\u{07EB}'), UseCategory::M); // tone mark
+        assert_eq!(use_category('\u{07FD}'), UseCategory::M); // dantayalan
+        assert_eq!(use_category('\u{07C0}'), UseCategory::N); // digit 0
+        assert_eq!(use_category('\u{07C9}'), UseCategory::N); // digit 9
+        assert_eq!(use_category('\u{07FA}'), UseCategory::CM); // lajanyalan
+    }
+
+    // --- Buginese tests ------------------------------------------
+
+    #[test]
+    fn buginese_letters_and_signs() {
+        assert_eq!(use_category('\u{1A00}'), UseCategory::B); // ka
+        assert_eq!(use_category('\u{1A16}'), UseCategory::B);
+        assert_eq!(use_category('\u{1A17}'), UseCategory::VAbv); // sara i
+        assert_eq!(use_category('\u{1A18}'), UseCategory::VBlw); // sara u
+        assert_eq!(use_category('\u{1A19}'), UseCategory::VPre); // sara e
+        assert_eq!(use_category('\u{1A1A}'), UseCategory::VPst); // sara o
+        assert_eq!(use_category('\u{1A1B}'), UseCategory::VAbv); // sara ae
+    }
+
+    // --- Tai Tham tests ------------------------------------------
+
+    #[test]
+    fn tai_tham_basics() {
+        assert_eq!(use_category('\u{1A20}'), UseCategory::B); // high ka
+        assert_eq!(use_category('\u{1A4D}'), UseCategory::IV);
+        assert_eq!(use_category('\u{1A60}'), UseCategory::H); // sakot
+        assert_eq!(use_category('\u{1A55}'), UseCategory::CM); // medial ra
+        assert_eq!(use_category('\u{1A6E}'), UseCategory::VPre); // pre-base
+        assert_eq!(use_category('\u{1A80}'), UseCategory::N); // hora digit 0
+    }
+
+    // --- Balinese tests ------------------------------------------
+
+    #[test]
+    fn balinese_basics() {
+        assert_eq!(use_category('\u{1B05}'), UseCategory::B); // letter a
+        assert_eq!(use_category('\u{1B35}'), UseCategory::VPst); // tedung
+        assert_eq!(use_category('\u{1B36}'), UseCategory::VAbv); // i
+        assert_eq!(use_category('\u{1B39}'), UseCategory::VBlw); // u-style
+        assert_eq!(use_category('\u{1B44}'), UseCategory::H); // adeg adeg
+        assert_eq!(use_category('\u{1B50}'), UseCategory::N); // digit 0
+    }
+
+    // --- Sundanese tests -----------------------------------------
+
+    #[test]
+    fn sundanese_basics() {
+        assert_eq!(use_category('\u{1B83}'), UseCategory::IV); // letter a
+        assert_eq!(use_category('\u{1B95}'), UseCategory::B); // letter ka
+        assert_eq!(use_category('\u{1B80}'), UseCategory::M); // panyecek
+        assert_eq!(use_category('\u{1B82}'), UseCategory::FM); // pangwisad
+        assert_eq!(use_category('\u{1BA4}'), UseCategory::VAbv); // sara i
+        assert_eq!(use_category('\u{1BA6}'), UseCategory::VPre); // sara e
+        assert_eq!(use_category('\u{1BAB}'), UseCategory::H); // virama
+        assert_eq!(use_category('\u{1BB0}'), UseCategory::N); // digit 0
+    }
+
+    // --- Lepcha tests --------------------------------------------
+
+    #[test]
+    fn lepcha_basics() {
+        assert_eq!(use_category('\u{1C00}'), UseCategory::B); // ka
+        assert_eq!(use_category('\u{1C24}'), UseCategory::CM); // subjoined ya
+        assert_eq!(use_category('\u{1C26}'), UseCategory::VPst); // sign i
+        assert_eq!(use_category('\u{1C27}'), UseCategory::VPre); // sign o
+        assert_eq!(use_category('\u{1C36}'), UseCategory::M); // ran
+        assert_eq!(use_category('\u{1C40}'), UseCategory::N); // digit 0
+    }
+
+    // --- Limbu tests ---------------------------------------------
+
+    #[test]
+    fn limbu_basics() {
+        assert_eq!(use_category('\u{1900}'), UseCategory::B); // letter ka
+        assert_eq!(use_category('\u{1920}'), UseCategory::VAbv); // sign a
+        assert_eq!(use_category('\u{1923}'), UseCategory::VBlw); // sign ee
+        assert_eq!(use_category('\u{1929}'), UseCategory::CM); // subjoined ya
+        assert_eq!(use_category('\u{1930}'), UseCategory::CM); // small ka
+        assert_eq!(use_category('\u{1939}'), UseCategory::M); // tone marker
+        assert_eq!(use_category('\u{1946}'), UseCategory::N); // digit 0
+    }
+
+    // --- Cham tests ----------------------------------------------
+
+    #[test]
+    fn cham_basics() {
+        assert_eq!(use_category('\u{AA00}'), UseCategory::IV); // letter a
+        assert_eq!(use_category('\u{AA06}'), UseCategory::B);
+        assert_eq!(use_category('\u{AA29}'), UseCategory::VAbv); // sign aa
+        assert_eq!(use_category('\u{AA2F}'), UseCategory::VPre); // sign oe (pre-base)
+        assert_eq!(use_category('\u{AA34}'), UseCategory::CM); // medial ra
+        assert_eq!(use_category('\u{AA40}'), UseCategory::CM); // final k
+        assert_eq!(use_category('\u{AA43}'), UseCategory::FM); // final ng
+        assert_eq!(use_category('\u{AA50}'), UseCategory::N); // digit 0
     }
 }

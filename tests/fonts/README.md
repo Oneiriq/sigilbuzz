@@ -43,6 +43,22 @@ unmodified. The OFL text lives in the upstream repository's `OFL.txt`.
   <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansThai/hinted/ttf>.
 - `NotoSansLao-Regular.ttf` — Source:
   <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansLao/hinted/ttf>.
+- `NotoSansNKo-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansNKo/hinted/ttf>.
+- `NotoSansBuginese-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansBuginese/hinted/ttf>.
+- `NotoSansTaiTham-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansTaiTham/hinted/ttf>.
+- `NotoSansBalinese-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansBalinese/hinted/ttf>.
+- `NotoSansSundanese-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansSundanese/hinted/ttf>.
+- `NotoSansLepcha-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansLepcha/hinted/ttf>.
+- `NotoSansLimbu-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansLimbu/hinted/ttf>.
+- `NotoSansCham-Regular.ttf` — Source:
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts/NotoSansCham/hinted/ttf>.
 - `NotoSansOldHangul-Subset.ttf` — Subset of Noto Sans Korean variable
   font (weight axis collapsed to Regular) restricted to the Hangul
   Jamo blocks (U+1100..U+11FF, U+A960..U+A97F, U+D7B0..U+D7FF) plus a

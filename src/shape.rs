@@ -849,6 +849,70 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 &mut seg_glyphs,
             );
         }
+        if seg.script == Script::NKo {
+            crate::ot::use_shaper::shape_nko(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::Buginese {
+            crate::ot::use_shaper::shape_buginese(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::TaiTham {
+            crate::ot::use_shaper::shape_tai_tham(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::Balinese {
+            crate::ot::use_shaper::shape_balinese(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::Sundanese {
+            crate::ot::use_shaper::shape_sundanese(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::Lepcha {
+            crate::ot::use_shaper::shape_lepcha(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::Limbu {
+            crate::ot::use_shaper::shape_limbu(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
+        if seg.script == Script::Cham {
+            crate::ot::use_shaper::shape_cham(
+                gsub.as_ref(),
+                gdef.as_ref(),
+                seg_cps,
+                &mut seg_glyphs,
+            );
+        }
         // Hangul routes through USE only for Jamo-decomposed text.
         // Precomposed syllables (U+AC00..U+D7A3) still pass through
         // the default GSUB/GPOS chain — `ljmo`/`vjmo`/`tjmo` are
