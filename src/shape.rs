@@ -58,6 +58,7 @@ use alloc::vec::Vec;
 
 use crate::buffer::{script_priority_for, unicode_prop, Buffer, Glyph, ShapedRun};
 use crate::error::Result;
+use crate::face::Face;
 use crate::font::Font;
 use crate::ot::arabic::{assign_joining_forms, JoiningForm};
 use crate::tables::gdef::{Gdef, GlyphClass};
@@ -1306,7 +1307,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // behaviour and matches HarfBuzz ordering.
     if want_kern && !gpos_kerned && !legacy_kerned {
         if let Some(kerx) = face.kerx()? {
-            apply_kerx(&kerx, &mut glyphs);
+            apply_kerx(face, &kerx, &mut glyphs)?;
         }
     }
 
@@ -3212,9 +3213,9 @@ fn apply_morx(morx: &Morx<'_>, glyphs: &mut Vec<Glyph>) {
 ///   the delta is applied directly to that glyph's `x_advance`. No
 ///   half-split — the state machine already chose which glyph to
 ///   land on (typically the left of the pair).
-fn apply_kerx(kerx: &Kerx<'_>, glyphs: &mut [Glyph]) {
+fn apply_kerx(face: &Face<'_>, kerx: &Kerx<'_>, glyphs: &mut [Glyph]) -> Result<()> {
     if glyphs.is_empty() {
-        return;
+        return Ok(());
     }
     if glyphs.len() >= 2 {
         for i in 0..glyphs.len() - 1 {
@@ -3236,34 +3237,163 @@ fn apply_kerx(kerx: &Kerx<'_>, glyphs: &mut [Glyph]) {
             }
         });
     }
-    // Format 4 (control-point) apply. Inline-coordinates events
-    // resolve fully without consulting glyf / ankr; we land them as
-    // x/y offsets on the current glyph. Control-point and anchor-
-    // point events need a glyf-point or `ankr` lookup that
-    // [`Face::glyph_points`] does not yet expose — those events are
-    // dropped silently until the API lands. Dropping is the same
-    // behaviour the parse-only path used to give, so no regression.
     if kerx.has_format4() {
-        let ids: alloc::vec::Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
-        kerx.apply_format4(&ids, |evt| {
-            if let crate::tables::kerx::Kerx4Action::Coordinates {
-                mark_index: _,
-                current_index,
-                mark_x,
-                mark_y,
-                current_x,
-                current_y,
-            } = evt
-            {
-                if let Some(g) = glyphs.get_mut(current_index) {
-                    let dx = i32::from(mark_x) - i32::from(current_x);
-                    let dy = i32::from(mark_y) - i32::from(current_y);
-                    g.x_offset += dx;
-                    g.y_offset += dy;
-                }
-            }
-        });
+        apply_kerx_format4(face, kerx, glyphs)?;
     }
+    Ok(())
+}
+
+/// Resolves every fmt-4 event the state machine emits across `glyphs`
+/// and applies the resulting offset to the current glyph.
+///
+/// Three event types appear:
+///
+/// - **Coordinates** (action type 2) — inline FUnit deltas; resolves
+///   directly to `(mark - current)` without external lookups.
+/// - **ControlPoints** (action type 0) — pairs of glyf-point indices.
+///   [`Face::glyph_points`] returns the points in glyf-natural order
+///   (contour points + 4 phantoms); the offset comes from
+///   `mark[mpi] - current[cpi]`.
+/// - **AnchorPoints** (action type 1) — pairs of `ankr` indices.
+///   [`crate::tables::Ankr::anchor_for`] maps `(gid, idx)` to
+///   `(x, y)`; same `mark - current` math.
+///
+/// Per #166's contract, an out-of-range index, a missing `ankr`
+/// table, or a CFF-only font (no glyf) drops the kern silently —
+/// matching the type-2 path's conservative posture for malformed
+/// records. Errors only bubble when a *parsed* table turns out to
+/// be malformed mid-walk.
+fn apply_kerx_format4(
+    face: &Face<'_>,
+    kerx: &Kerx<'_>,
+    glyphs: &mut [Glyph],
+) -> Result<()> {
+    let ids: alloc::vec::Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
+    let ankr = face.ankr()?;
+    // Cache `Face::glyph_points` lookups across events. A single run
+    // can fire the same glyph as the mark or current many times — a
+    // long "ABABAB" pattern would otherwise re-flatten A twice per
+    // pair. `None` (no points / no glyf / out of range) is a real
+    // result and worth caching too.
+    let mut points_cache: alloc::collections::BTreeMap<
+        u16,
+        Option<alloc::vec::Vec<(i16, i16)>>,
+    > = alloc::collections::BTreeMap::new();
+    let mut events: alloc::vec::Vec<crate::tables::kerx::Kerx4Action> = alloc::vec::Vec::new();
+    kerx.apply_format4(&ids, |evt| events.push(evt));
+    for evt in events {
+        let Some((current_index, dx, dy)) =
+            resolve_kerx4_event(evt, face, glyphs, ankr.as_ref(), &mut points_cache)?
+        else {
+            continue;
+        };
+        if let Some(g) = glyphs.get_mut(current_index) {
+            g.x_offset += dx;
+            g.y_offset += dy;
+        }
+    }
+    Ok(())
+}
+
+/// Resolves one [`Kerx4Action`] event to `(current_glyph_index, dx,
+/// dy)`. Returns `Ok(None)` when the event references an unavailable
+/// glyph point / anchor — silent drop, mirroring the type-2 path's
+/// behaviour for malformed records.
+fn resolve_kerx4_event(
+    evt: crate::tables::kerx::Kerx4Action,
+    face: &Face<'_>,
+    glyphs: &[Glyph],
+    ankr: Option<&crate::tables::Ankr<'_>>,
+    points_cache: &mut alloc::collections::BTreeMap<
+        u16,
+        Option<alloc::vec::Vec<(i16, i16)>>,
+    >,
+) -> Result<Option<(usize, i32, i32)>> {
+    use crate::tables::kerx::Kerx4Action;
+    match evt {
+        Kerx4Action::Coordinates {
+            mark_index: _,
+            current_index,
+            mark_x,
+            mark_y,
+            current_x,
+            current_y,
+        } => {
+            let dx = i32::from(mark_x) - i32::from(current_x);
+            let dy = i32::from(mark_y) - i32::from(current_y);
+            Ok(Some((current_index, dx, dy)))
+        }
+        Kerx4Action::ControlPoints {
+            mark_index,
+            current_index,
+            mark_point,
+            current_point,
+        } => {
+            let mark_gid = glyphs.get(mark_index).map(|g| g.glyph_id as u16);
+            let cur_gid = glyphs.get(current_index).map(|g| g.glyph_id as u16);
+            let (Some(mark_gid), Some(cur_gid)) = (mark_gid, cur_gid) else {
+                return Ok(None);
+            };
+            let mark_pts = cached_glyph_points(face, mark_gid, points_cache)?;
+            let cur_pts = cached_glyph_points(face, cur_gid, points_cache)?;
+            let (Some(mark_pts), Some(cur_pts)) = (mark_pts, cur_pts) else {
+                return Ok(None);
+            };
+            let Some(&(mx, my)) = mark_pts.get(mark_point as usize) else {
+                return Ok(None);
+            };
+            let Some(&(cx, cy)) = cur_pts.get(current_point as usize) else {
+                return Ok(None);
+            };
+            Ok(Some((
+                current_index,
+                i32::from(mx) - i32::from(cx),
+                i32::from(my) - i32::from(cy),
+            )))
+        }
+        Kerx4Action::AnchorPoints {
+            mark_index,
+            current_index,
+            mark_anchor,
+            current_anchor,
+        } => {
+            let Some(ankr) = ankr else { return Ok(None) };
+            let mark_gid = glyphs.get(mark_index).map(|g| g.glyph_id as u16);
+            let cur_gid = glyphs.get(current_index).map(|g| g.glyph_id as u16);
+            let (Some(mark_gid), Some(cur_gid)) = (mark_gid, cur_gid) else {
+                return Ok(None);
+            };
+            let Some((mx, my)) = ankr.anchor_for(mark_gid, mark_anchor) else {
+                return Ok(None);
+            };
+            let Some((cx, cy)) = ankr.anchor_for(cur_gid, current_anchor) else {
+                return Ok(None);
+            };
+            Ok(Some((
+                current_index,
+                i32::from(mx) - i32::from(cx),
+                i32::from(my) - i32::from(cy),
+            )))
+        }
+    }
+}
+
+/// Reads `Face::glyph_points(gid)` once per `gid`, memoising the
+/// result. Cloning the cached Vec is cheaper than re-flattening a
+/// composite glyph; callers that want the raw slice should refactor
+/// the caller chain to take a reference, but the current cache shape
+/// keeps `apply_kerx_format4` short and obvious.
+fn cached_glyph_points(
+    face: &Face<'_>,
+    gid: u16,
+    cache: &mut alloc::collections::BTreeMap<u16, Option<alloc::vec::Vec<(i16, i16)>>>,
+) -> Result<Option<alloc::vec::Vec<(i16, i16)>>> {
+    if let Some(v) = cache.get(&gid) {
+        return Ok(v.clone());
+    }
+    let v = face.glyph_points(gid)?;
+    cache.insert(gid, v.clone());
+    Ok(v)
 }
 
 /// Applies deltas from the legacy `kern` table to the glyph run.
