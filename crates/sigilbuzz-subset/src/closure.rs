@@ -65,6 +65,10 @@ pub fn compute_closure(face: &Face<'_>, seed: &[u16]) -> Result<Vec<u16>, Subset
         // it filters surviving subtable pairs.
         crate::gsub::pull_in_substitution_targets(face, &mut keep);
         expand_gpos_mark_anchors(face, &mut keep)?;
+        // VARC-covered glyphs reference component gids the same way
+        // glyf composites do; pull them into the kept set so the
+        // outline graph stays whole after subset.
+        crate::varc::varc_closure_bitset(face, &mut keep);
         let after = count_kept(&keep);
         if before == after {
             break;

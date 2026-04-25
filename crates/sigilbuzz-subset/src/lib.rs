@@ -124,12 +124,14 @@ mod gpos;
 mod gpos_var;
 mod gsub;
 mod gvar;
+mod gvar_partial;
 mod hmtx;
 mod hvar;
 mod instance;
 mod layout;
 mod sfnt;
 mod util;
+mod varc;
 mod variation_store;
 
 pub use cff::subset_non_identity as subset_cff1_non_identity;
@@ -461,6 +463,22 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         if let Some(b) = hvar::subset_hvar(face, &kept)? {
             tables.push((tag::HVAR, b));
         }
+        // VARC: re-emit when the source carries the table. Coverage
+        // entries renumber per the new gid map and component records
+        // are rewritten to point at the new gid namespace; the
+        // MultiVarStore is preserved verbatim.
+        if let Some(varc) = face.varc()? {
+            let varc_bytes = face.table_bytes(tag::VARC).map_err(SubsetError::from)?;
+            let lookup = |old: GlyphId| -> Option<GlyphId> {
+                gid_map
+                    .binary_search_by_key(&old, |(o, _)| *o)
+                    .ok()
+                    .map(|i| gid_map[i].1)
+            };
+            if let Some(b) = varc::subset_varc(&varc, varc_bytes, &kept, &lookup)? {
+                tables.push((tag::VARC, b));
+            }
+        }
     }
 
     // Walk every other table the source carries and decide.
@@ -478,7 +496,10 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         // Variable-font tables hit the retain_variations branch
         // above; when retain_variations=false the drop is
         // intentional.
-        if matches!(rec.tag, tag::FVAR | tag::AVAR | tag::GVAR | tag::HVAR) {
+        if matches!(
+            rec.tag,
+            tag::FVAR | tag::AVAR | tag::GVAR | tag::HVAR | tag::VARC
+        ) {
             continue;
         }
         // Source tables we already errored on (CFF/CFF2) cannot
