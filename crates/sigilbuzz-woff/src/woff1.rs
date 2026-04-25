@@ -82,12 +82,13 @@ pub fn unwrap_woff1(woff_bytes: &[u8]) -> Result<Vec<u8>> {
         }
         // Bounds-check the body now so the body-copy loop below can
         // unwrap without surprises.
-        let end = (offset as usize)
-            .checked_add(comp_length as usize)
-            .ok_or(WoffError::Malformed {
-                offset: r.position() - 16,
-                context: "table offset + compLength overflows",
-            })?;
+        let end =
+            (offset as usize)
+                .checked_add(comp_length as usize)
+                .ok_or(WoffError::Malformed {
+                    offset: r.position() - 16,
+                    context: "table offset + compLength overflows",
+                })?;
         if end > woff_bytes.len() {
             return Err(WoffError::Malformed {
                 offset: r.position() - 16,
@@ -114,7 +115,13 @@ pub fn unwrap_woff1(woff_bytes: &[u8]) -> Result<Vec<u8>> {
     // padded table bodies. Each table body must be 4-byte aligned;
     // the offset in the SFNT directory points at the table itself.
     let header_size = 12 + 16 * num_tables;
-    let mut sfnt = Vec::with_capacity(header_size + entries.iter().map(|e| pad4(e.orig_length as usize)).sum::<usize>());
+    let mut sfnt = Vec::with_capacity(
+        header_size
+            + entries
+                .iter()
+                .map(|e| pad4(e.orig_length as usize))
+                .sum::<usize>(),
+    );
 
     sfnt.extend_from_slice(&flavor.to_be_bytes());
     sfnt.extend_from_slice(&(num_tables as u16).to_be_bytes());

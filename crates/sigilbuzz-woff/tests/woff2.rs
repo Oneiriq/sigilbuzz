@@ -19,7 +19,10 @@ const TTF: &[u8] = include_bytes!("fixtures/opensans_latin.ttf");
 fn unwrap_woff2_yields_parseable_sfnt() {
     let sfnt = unwrap_woff2(WOFF2).expect("WOFF2 unwraps");
     let face = Face::parse_bytes(&sfnt, 0).expect("SFNT parses");
-    assert!(face.num_tables() >= 7, "should have all the core SFNT tables");
+    assert!(
+        face.num_tables() >= 7,
+        "should have all the core SFNT tables"
+    );
     // glyf + loca must both come back.
     assert!(face.record(*b"glyf").is_some(), "glyf reconstructed");
     assert!(face.record(*b"loca").is_some(), "loca reconstructed");
@@ -77,7 +80,11 @@ fn glyph_outlines_match_reference_ttf() {
         let mut b = Path::default();
         let r1 = face_ttf.outline_glyph(ttf_parser::GlyphId(gid), &mut a);
         let r2 = face_woff.outline_glyph(ttf_parser::GlyphId(gid), &mut b);
-        assert_eq!(r1.is_some(), r2.is_some(), "glyph {gid} bbox presence differs");
+        assert_eq!(
+            r1.is_some(),
+            r2.is_some(),
+            "glyph {gid} bbox presence differs"
+        );
         assert_eq!(a, b, "glyph {gid} outline differs");
         compared += 1;
         if !a.0.is_empty() {

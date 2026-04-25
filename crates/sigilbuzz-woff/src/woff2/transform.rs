@@ -233,7 +233,8 @@ pub(crate) fn reconstruct_glyf_and_loca(payload: &[u8]) -> Result<(Vec<u8>, Vec<
             // Instructions length follows the coords, length is
             // 255UInt16-encoded in glyphStream itself.
             let instr_len = u32::from(glyph_reader.read_packed_u16()?);
-            let instructions = instr_reader.read_bytes(instr_len as usize, "simple instructions")?;
+            let instructions =
+                instr_reader.read_bytes(instr_len as usize, "simple instructions")?;
 
             // Compute bbox if not stored.
             let (x_min, y_min, x_max, y_max) = if let Some(b) = stored_bbox {
@@ -314,7 +315,11 @@ pub(crate) fn reconstruct_glyf_and_loca(payload: &[u8]) -> Result<(Vec<u8>, Vec<
                 glyf.extend_from_slice(&flags.to_be_bytes());
                 glyf.extend_from_slice(&glyph_index.to_be_bytes());
 
-                let arg_size = if flags & ARG_1_AND_2_ARE_WORDS != 0 { 4 } else { 2 };
+                let arg_size = if flags & ARG_1_AND_2_ARE_WORDS != 0 {
+                    4
+                } else {
+                    2
+                };
                 let args = composite_reader.read_bytes(arg_size, "composite args")?;
                 glyf.extend_from_slice(args);
 
