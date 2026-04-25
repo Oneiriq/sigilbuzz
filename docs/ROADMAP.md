@@ -262,17 +262,54 @@ Operational gaps from 0.5.0 closed. `sigilbuzz-subset` covers every gid-keyed ta
 
 ---
 
-## 0.7.0 (next)
+## 0.7.0 (shipping)
 
-**Headline:** C-API shim for cross-language compatibility. `sigilbuzz-capi` companion crate exposes HarfBuzz-symbol-compatible `hb_*` functions so a downstream binary can swap `-lharfbuzz` for `-lsigilbuzz` and recompile with no source-level changes. Drives every other 0.7.0 item behind it in priority.
+**Headline:** the C-API shim. Eight other PRs ride alongside it covering renderer-output legacy formats, layout subset rewriting, complex-script breadth, and the WOFF2 wrap direction.
 
-- [ ] **`sigilbuzz-capi`** — required surface (hb_blob, hb_face, hb_font, hb_buffer, hb_shape, hb_buffer_get_glyph_infos / positions). Stretch surface (hb_subset_*, hb_paint_*).
-- [ ] Full GSUB / GPOS / GDEF byte-level subset rewriter (#87) — every coverage / classdef / ligature / mark-anchor reference rewritten under non-identity gid maps.
-- [ ] CFF / CFF2 byte-level subset emitter (#92) — CharStrings INDEX rebuild, Subr renumber, Top DICT deferred-offset patching, charset / encoding / Private DICT relocation.
-- [ ] More USE script tables — N'Ko, Tai Tham, Brahmi family, Balinese, Javanese, etc. The state machine handles them; just ISC/IPC tables to fill in.
-- [ ] Tibetan + Mongolian shapers.
-- [ ] Bitmap font formats — CBDT/CBLC, sbix.
-- [ ] SVG-in-OT (`SVG ` table).
+### Companion crate `sigilbuzz-capi` (HarfBuzz-symbol-compatible C shim)
+
+- [x] cdylib + staticlib + rlib crate-types. `hb_*` symbol names match HarfBuzz exactly so a downstream binary swaps `-lharfbuzz` for `-lsigilbuzz` and recompiles with no source changes.
+- [x] Required surface: `hb_blob_*`, `hb_face_*`, `hb_font_*` (with `set_scale` / `get_scale` / `set_ppem` / `set_variations`), `hb_buffer_*` (create / destroy / reference / reset / clear_contents / add_utf8 / set_direction / set_script / set_language / guess_segment_properties / get_glyph_infos / get_glyph_positions / get_length), `hb_shape`, `hb_shape_full`, `hb_tag_from_string` / `to_string`, `hb_direction_from_string`, `hb_script_from_iso15924_tag`, `hb_language_from_string`, `hb_version` (advertises 8.0.0 for ABI compat) / `hb_version_string`.
+- [x] Lifetime erasure via Arc-pinned bytes + contained `transmute` to `Face<'static>`. No core-sigilbuzz API change required.
+- [x] Hand-written `include/hb.h` subset, pkg-config template, CMake find-module.
+- [x] Stretch (`hb_subset_*`, `hb_paint_*`, `hb_face_collect_unicodes`, `hb_ot_layout_collect_features`) deferred to small follow-up issues.
+
+### Companion crate extensions
+
+- [x] CFF / CFF2 byte-level emitter primitives + identity-passthrough — INDEX builder, DICT integer + 5-byte deferred-offset placeholder + patcher, charset format 0/2 with auto-pick, Encoding format 0/1 with auto-pick, callsubr/callgsubr in-place renumber. Non-identity orchestration tracked as #108 for 0.8.0+.
+- [x] GSUB / GPOS / GDEF byte-level subset rewriter scaffold + GSUB type 1 + GSUB type 4 ligature + GDEF ClassDef. Closure walker pulls ligature result gids forward (Open Sans → {f, i} retains the `fi` ligature). Remaining lookup types tracked as #107 for 0.8.0+.
+- [x] `wrap_woff2` — forward `glyf` + `loca` transform with triplet encoder + Brotli encode (52% compression on Open Sans Latin). Closes the wrap deferral from 0.6.0. Dep switched from `brotli-decompressor` to `brotli` (same maintainers, both directions).
+
+### New tables
+
+- [x] CBDT / CBLC bitmap font format (Google color-emoji) — formats 17 / 18 / 19, IndexSubTable formats 1-5, raw PNG bytes exposed via `Face::glyph_bitmap`.
+- [x] sbix bitmap font format (Apple color-emoji) — strikes, graphicType tags (`'png '`, `'jpg '`, `'tiff'`, `'jp2 '`, `'dupe'`).
+- [x] `SVG ` table — pre-COLRv1 color-emoji format. `Face::svg_document(gid)` returns the inline SVG bytes plus a gzip-magic flag. Bytes-only — decompression and SVG parsing are the consumer's job.
+
+### Scripts
+
+- [x] Tibetan shaper — feature-loop only (no reordering needed). Parity-clean on a 9-string Noto Serif Tibetan corpus.
+- [x] Mongolian shaper — cursive joining state machine reusing Arabic's, plus Free Variation Selector handling and auto-vertical default.
+- [x] Eight USE-eligible scripts on the existing state machine: N'Ko, Buginese, Tai Tham, Balinese, Sundanese, Lepcha, Limbu, Cham. Only ISC/IPC tables and `Script` enum routing change.
+
+### Generic shaping correctness
+
+- [x] HarfBuzz-style "each lookup once per pass" dedup added to `run_default_gsub` (surfaced by Mongolian double-apply; verified neutral on Arabic / USE corpora).
+
+### Hardening
+
+- [x] Wave 8 fuzz pass on the 0.7.0 surface — clean. Probed all 11 priority areas across the nine PRs (capi C ABI, CFF emitter primitives, layout rewriter scaffold, bitmap parsers, SVG-in-OT, wrap_woff2, lookup-dedup, Tibetan/Mongolian shapers, USE block boundaries) — no genuine bugs filed.
+
+---
+
+## 0.8.0+ (next)
+
+- [ ] `sigilbuzz-capi` stretch surface — `hb_subset_*` (#102), `hb_paint_*` (#103), `hb_face_collect_unicodes` + `hb_ot_layout_collect_features` (#104).
+- [ ] Layout subset rewriter — GSUB types 2/3/5/6/8 + full GPOS + remaining GDEF (#107). The scaffold from 0.7.0 makes each follow-up localised to its own lookup-type rewriter.
+- [ ] CFF non-identity orchestration on top of #105 primitives (#108) — wires CharStrings INDEX rebuild + Subr renumber + Top DICT deferred-offset patching end-to-end.
+- [ ] Per-script parity follow-ups: N'Ko tone (#114), Limbu vowel-mark (#115), Cham medial-ra (#116), Mongolian multi-letter chain (#118).
+- [ ] Brahmi historical-script family on the USE state machine.
+- [ ] WOFF1 zlib compression (currently uncompressed pass-through; most producers use WOFF2 now, so low priority).
 
 ---
 

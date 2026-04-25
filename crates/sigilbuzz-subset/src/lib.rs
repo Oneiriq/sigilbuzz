@@ -492,10 +492,10 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
 /// including its embedded gid references inside charstrings, charset,
 /// Encoding, and Private DICTs — already resolves to the right glyph
 /// in the subset (the gid namespace is unchanged). Likewise for cmap,
-/// hmtx, hhea, maxp, post, name, OS/2, and the layout tables. We copy
-/// every table the source carries except the few we never preserve
-/// (vertical / kern / morx / kerx / vorg / colr / cpal — kept-out for
-/// the same reason `glyf` mode drops them).
+/// hmtx, hhea, maxp, post, name, OS/2, COLR, CPAL, and the layout
+/// tables. We copy every table the source carries except the small
+/// set the rest of the pipeline can't round-trip: `vhea` / `vmtx` /
+/// `VORG` / legacy `kern` / `morx` / `kerx`.
 ///
 /// Returns the new SFNT bytes plus an identity `gid_map`.
 fn cff_passthrough(
