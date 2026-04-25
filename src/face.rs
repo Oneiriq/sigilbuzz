@@ -33,8 +33,8 @@ use alloc::vec::Vec;
 
 use crate::blob::Blob;
 use crate::error::{Error, Result};
-use crate::tables::parse::Reader;
 use crate::tables::glyf::PhantomMetrics;
+use crate::tables::parse::Reader;
 use crate::tables::{
     tag, Avar, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBounds, Gpos, Gsub, Gvar, Head, Hhea, Hmtx,
     Hvar, KernTable, Kerx, Loca, Maxp, Morx, Outline, Vhea, Vmtx, Vorg,
@@ -527,13 +527,8 @@ impl<'a> Face<'a> {
                                 dense[d.point as usize] = (d.dx, d.dy);
                             }
                         }
-                        let drew = glyf.outline(
-                            &loca,
-                            glyph_id,
-                            Some(&dense),
-                            Some(&metrics),
-                            &mut out,
-                        )?;
+                        let drew =
+                            glyf.outline(&loca, glyph_id, Some(&dense), Some(&metrics), &mut out)?;
                         return Ok(drew.then_some(out));
                     }
                 }

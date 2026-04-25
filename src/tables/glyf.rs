@@ -1518,12 +1518,7 @@ mod tests {
         //   = (306, 0) - (0, 0) = (306, 0).
         let g1 = build_simple_glyph(
             &[3],
-            &[
-                (10, 0, true),
-                (40, 0, true),
-                (40, 30, true),
-                (10, 30, true),
-            ],
+            &[(10, 0, true), (40, 0, true), (40, 30, true), (10, 30, true)],
         );
         let g2 = build_simple_glyph(&[2], &[(0, 0, true), (40, 0, true), (0, 40, true)]);
 
@@ -1584,7 +1579,8 @@ mod tests {
         };
 
         let mut o = Outline::new();
-        glyf.outline(&loca, 0, None, Some(&metrics), &mut o).unwrap();
+        glyf.outline(&loca, 0, None, Some(&metrics), &mut o)
+            .unwrap();
 
         // First six ops are component A's square unchanged.
         // Ops 6..= are the anchor-mode triangle, translated by
