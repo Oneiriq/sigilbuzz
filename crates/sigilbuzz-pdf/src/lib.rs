@@ -74,6 +74,7 @@ use alloc::vec::Vec;
 use sigilbuzz::Face;
 
 mod stream;
+mod type1_charstring;
 
 pub use stream::{emit_d1_prologue, emit_fill_epilogue, emit_path_ops, outline_bbox};
 
