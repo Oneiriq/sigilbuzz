@@ -205,8 +205,7 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         if tables.iter().any(|(t, _)| *t == rec.tag) {
             continue;
         }
-        if input.drop_var_tables
-            && matches!(rec.tag, tag::FVAR | tag::AVAR | tag::GVAR | tag::HVAR)
+        if input.drop_var_tables && matches!(rec.tag, tag::FVAR | tag::AVAR | tag::GVAR | tag::HVAR)
         {
             continue;
         }
@@ -228,8 +227,7 @@ fn cff1_passthrough(
 ) -> Result<InstancedOutput, SubsetError> {
     let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::new();
     for rec in face.records() {
-        if input.drop_var_tables
-            && matches!(rec.tag, tag::FVAR | tag::AVAR | tag::GVAR | tag::HVAR)
+        if input.drop_var_tables && matches!(rec.tag, tag::FVAR | tag::AVAR | tag::GVAR | tag::HVAR)
         {
             continue;
         }
@@ -263,11 +261,13 @@ fn bake_glyf_loca(
     let mut new_bodies: Vec<Vec<u8>> = Vec::with_capacity(num_glyphs as usize);
     for gid in 0..num_glyphs {
         let body = match loca.range(gid) {
-            Some((s, e)) if s != e => glyf_bytes
-                .get(s as usize..e as usize)
-                .ok_or(SubsetError::Unsupported(
-                    "instance: glyf range falls outside table",
-                ))?,
+            Some((s, e)) if s != e => {
+                glyf_bytes
+                    .get(s as usize..e as usize)
+                    .ok_or(SubsetError::Unsupported(
+                        "instance: glyf range falls outside table",
+                    ))?
+            }
             _ => &[][..],
         };
         let baked = if body.is_empty() {
@@ -395,10 +395,9 @@ fn bake_simple_glyph(
     // mean the hinted grid no longer matches the rasterised outline.
     // Stripping is the safest default and matches what fonttools'
     // instancer does in `--no-recalc-hints` mode.
-    let instr_len = r
-        .read_u16()
-        .map_err(|_| SubsetError::Unsupported("instance: instructionLength"))?
-        as usize;
+    let instr_len =
+        r.read_u16()
+            .map_err(|_| SubsetError::Unsupported("instance: instructionLength"))? as usize;
     r.skip(instr_len)
         .map_err(|_| SubsetError::Unsupported("instance: instructions"))?;
 
@@ -765,7 +764,8 @@ mod tests {
     use super::*;
 
     const RUBIK: &[u8] = include_bytes!("../../../tests/fixtures/rubik_vf.ttf");
-    const SOURCE_SANS: &[u8] = include_bytes!("../../../tests/fonts/SourceSans3VF-Latin-Subset.otf");
+    const SOURCE_SANS: &[u8] =
+        include_bytes!("../../../tests/fonts/SourceSans3VF-Latin-Subset.otf");
     const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
 
     fn rubik_face() -> Face<'static> {
@@ -898,7 +898,10 @@ mod tests {
             coords: alloc::vec![0.0_f32; 99],
             drop_var_tables: true,
         };
-        assert!(matches!(instance(&face, &bad), Err(SubsetError::Unsupported(_))));
+        assert!(matches!(
+            instance(&face, &bad),
+            Err(SubsetError::Unsupported(_))
+        ));
     }
 
     #[test]
@@ -909,10 +912,7 @@ mod tests {
         // contract here is "produce a clean, named error" rather than
         // silently emitting a broken font.
         let face = Face::parse_bytes(SOURCE_SANS, 0).unwrap();
-        let axis_count = face
-            .fvar()
-            .unwrap()
-            .map_or(0, |f| f.axes().len());
+        let axis_count = face.fvar().unwrap().map_or(0, |f| f.axes().len());
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
