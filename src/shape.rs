@@ -1117,6 +1117,36 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         }
     }
 
+    // Mark-width zeroing — phase 1 (early). The USE shaper and the
+    // Myanmar shaper both ship with
+    // `zero_width_marks = HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_EARLY`
+    // in HarfBuzz, so before the GPOS pass every glyph that GDEF
+    // tags as a mark gets its advance forced to zero. A subsequent
+    // chained-context kern (e.g. Noto Sans Limbu's `kern` lookup
+    // that adds a back-positioning advance to specific mark glyphs)
+    // then writes the *delta* onto the cleared advance, not on top
+    // of the hmtx default — so the final value matches rustybuzz.
+    // Without this pass sigilbuzz double-applies the hmtx advance
+    // for any mark that participates in a GPOS chained-context
+    // lookup, which is the 0.7.0 Limbu mark-advance follow-up.
+    //
+    // HarfBuzz selects exactly one shaper per buffer based on the
+    // first non-common codepoint, so the gate is on the dominant
+    // script — a Latin-majority `Hi <limbu>` run uses the default
+    // shaper (late-zero) on every segment, including the Limbu one.
+    let dominant_zeroes_early = dominant_script.is_some_and(zeroes_marks_early);
+    if dominant_zeroes_early {
+        if let Some(ref gdef) = gdef {
+            for seg_out in &seg_glyph_ranges {
+                for glyph in &mut glyphs[seg_out.range.clone()] {
+                    if gdef.glyph_class(glyph.glyph_id as u16).is_mark() {
+                        glyph.x_advance = 0;
+                    }
+                }
+            }
+        }
+    }
+
     // Step 4: GPOS passes — per segment, so each segment dispatches
     // under its own script-tag priority. Kern first, then `dist`
     // (pre-mark), mark, mkmk, then user-enabled GPOS features. A GPOS
@@ -1204,6 +1234,33 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         }
     }
 
+    // Mark-width zeroing — phase 2 (late). HarfBuzz's default,
+    // Arabic, Hebrew, Thai and Lao shapers ship
+    // `zero_width_marks = HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_LATE`:
+    // mark advances are zeroed *after* GPOS, so any chained-context
+    // kern that wrote a positioning delta on top of the hmtx default
+    // is preserved while the underlying mark advance still ends at
+    // zero. The gate is on the dominant script — a `Hi <limbu>`
+    // mixed run with a Latin majority takes this late-zero path on
+    // every segment, including Limbu.
+    //
+    // Indic / Khmer / Hangul / Myanmar are excluded — their shapers
+    // ship `HB_OT_SHAPE_ZERO_WIDTH_MARKS_NONE`, so post-base matras
+    // keep their hmtx advance through the entire pipeline (they are
+    // bases dressed up as marks for OpenType GDEF reasons).
+    let dominant_zeroes_late = dominant_script.is_some_and(zeroes_marks_late);
+    if dominant_zeroes_late {
+        if let Some(ref gdef) = gdef {
+            for seg_out in &seg_glyph_ranges {
+                for glyph in &mut glyphs[seg_out.range.clone()] {
+                    if gdef.glyph_class(glyph.glyph_id as u16).is_mark() {
+                        glyph.x_advance = 0;
+                    }
+                }
+            }
+        }
+    }
+
     Ok(ShapedRun { glyphs })
 }
 
@@ -1211,6 +1268,54 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
 /// `Feature { tag, value: 0 }` in the override list.
 fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
     features.iter().any(|f| f.tag == tag && f.value == 0)
+}
+
+/// HarfBuzz "zero mark widths early" set — the dominant scripts whose
+/// shaper sets `zero_width_marks = HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_EARLY`
+/// (USE shaper + Myanmar). Used to gate the early-zero pass that fires
+/// before GPOS, so chained-context kern lookups that write a mark's
+/// repositioning advance write a *delta* onto a cleared baseline rather
+/// than doubling the hmtx default.
+fn zeroes_marks_early(script: Script) -> bool {
+    matches!(
+        script,
+        // USE-routed scripts (HarfBuzz's USE shaper, EARLY).
+        Script::NKo
+            | Script::Buginese
+            | Script::TaiTham
+            | Script::Balinese
+            | Script::Sundanese
+            | Script::Lepcha
+            | Script::Limbu
+            | Script::Cham
+            | Script::Mongolian
+            // Myanmar shaper, also EARLY.
+            | Script::Myanmar
+    )
+}
+
+/// HarfBuzz "zero mark widths late" set — dominant scripts whose
+/// shaper sets `zero_width_marks = HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_LATE`
+/// (default / Arabic / Hebrew / Thai / Lao). The dominant-script gate
+/// reads this when deciding whether to zero mark advances after GPOS.
+/// Indic / Khmer / Hangul are explicitly excluded — their shapers ship
+/// `HB_OT_SHAPE_ZERO_WIDTH_MARKS_NONE`, so a post-base matra (a "mark"
+/// in GDEF terms but a base in shaping terms) must retain its hmtx
+/// advance through the entire pipeline.
+fn zeroes_marks_late(script: Script) -> bool {
+    matches!(
+        script,
+        // Arabic + Arabic-joining family (HarfBuzz Arabic shaper).
+        Script::Arabic
+            | Script::Hebrew
+            // Thai/Lao shapers ship LATE explicitly.
+            | Script::Thai
+            | Script::Lao
+            // Latin / common / "Other" all reach the default shaper,
+            // which is LATE.
+            | Script::Latin
+            | Script::Other
+    )
 }
 
 /// One shape-time segment: a maximal run of codepoints that share a
