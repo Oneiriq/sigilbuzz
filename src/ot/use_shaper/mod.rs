@@ -680,10 +680,44 @@ pub fn shape_use(
         }
     }
 
-    // 3. Basic features.
+    // 3. Basic features. We split the chain so the `pref` feature
+    //    fires before the rest, with a per-syllable post-pref reorder
+    //    in between. That mirrors HarfBuzz/rustybuzz's USE shaper:
+    //    `pref` collapses a pre-base form (e.g. Cham medial-ra
+    //    `raMedial_cham` -> `raMedial_cham_pre`); after the
+    //    substitution the substituted glyph is treated as if it were
+    //    typed VPre, so the reorder pass moves it in front of the base.
+    //    Without this split the substituted pre-base form ends up
+    //    sitting after the base, diverging from rustybuzz on every
+    //    `pref`-driven font.
+    let has_pref = basic_features.iter().any(|t| *t == b"pref");
     if let Some(gsub) = gsub {
-        for tag in basic_features {
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority);
+        if reorder_prebase && has_pref {
+            // Snapshot pre-`pref` glyph IDs so the reorder can detect
+            // which positions actually changed.
+            let pre_ids: Vec<u32> = glyphs.iter().map(|g| g.glyph_id).collect();
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"pref", 0, script_priority);
+            // The pref pass on the fonts we care about is a single-subst
+            // (length-preserving), so the snapshot length still aligns.
+            // If a future font ships a pref ligature that changes glyph
+            // count, the lengths diverge and we skip the reorder — the
+            // shaper still produces the post-pref output, just without
+            // the pre-base move (matching the pre-fix behaviour).
+            if pre_ids.len() == glyphs.len() {
+                for syl in &syllables {
+                    pref_reorder(codepoints, glyphs, syl, &pre_ids);
+                }
+            }
+            for tag in basic_features {
+                if **tag == *b"pref" {
+                    continue;
+                }
+                apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority);
+            }
+        } else {
+            for tag in basic_features {
+                apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority);
+            }
         }
     }
 
@@ -697,6 +731,70 @@ pub fn shape_use(
     // 5. Cluster merge.
     let byte_offsets = cluster_byte_offsets(codepoints);
     merge_syllable_clusters(glyphs, &syllables, &byte_offsets);
+}
+
+/// Post-`pref` reorder. Walks one syllable and, for any position whose
+/// glyph id changed under the `pref` feature AND whose original
+/// codepoint was a [`UseCategory::CM`] sitting at
+/// [`UsePosition::BelowBase`] (the textbook medial-ra), moves the
+/// substituted glyph to the front of the syllable so it visually sits
+/// before the base. Mirrors rustybuzz's `record_pref` →
+/// `reorder_syllable_use` pair, but only for the medial-ra case the
+/// 0.8.0 corpus exercises (Cham). Length-preserving.
+fn pref_reorder(
+    codepoints: &[char],
+    glyphs: &mut [Glyph],
+    syllable: &Syllable,
+    pre_ids: &[u32],
+) {
+    if !matches!(syllable.kind, SyllableKind::Consonant) {
+        return;
+    }
+    let Some(base) = syllable.base_index else {
+        return;
+    };
+    if syllable.end > glyphs.len() || syllable.end > codepoints.len() {
+        return;
+    }
+
+    // Find positions in (base, end) whose glyph id changed under
+    // `pref` and whose original codepoint was a below-base CM.
+    let mut to_move: Vec<usize> = Vec::new();
+    for idx in (base + 1)..syllable.end {
+        if glyphs[idx].glyph_id == pre_ids[idx] {
+            continue;
+        }
+        let ch = codepoints[idx];
+        if use_category(ch) != UseCategory::CM {
+            continue;
+        }
+        if use_position(ch) != UsePosition::BelowBase {
+            continue;
+        }
+        to_move.push(idx);
+    }
+    if to_move.is_empty() {
+        return;
+    }
+
+    let syl_start = syllable.start;
+    let syl_end = syllable.end;
+    let original: Vec<Glyph> = glyphs[syl_start..syl_end].to_vec();
+    let mut rebuilt: Vec<Glyph> = Vec::with_capacity(syl_end - syl_start);
+
+    // 1. Substituted pre-base forms in logical order.
+    for &idx in &to_move {
+        rebuilt.push(original[idx - syl_start]);
+    }
+    // 2. Everything else, in original order.
+    for idx in syl_start..syl_end {
+        if to_move.contains(&idx) {
+            continue;
+        }
+        rebuilt.push(original[idx - syl_start]);
+    }
+    debug_assert_eq!(rebuilt.len(), syl_end - syl_start);
+    glyphs[syl_start..syl_end].copy_from_slice(&rebuilt);
 }
 
 /// Entry point for Myanmar runs. Routes through the generic USE

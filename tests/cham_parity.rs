@@ -70,8 +70,8 @@ const CORPUS: &[Case] = &[
     // do not byte-compare against rustybuzz.
     Case {
         text: "\u{AA06}\u{AA34}",
-        note: "kra (ka + medial ra, follow-up)",
-        compare_rustybuzz: false,
+        note: "kra (ka + medial ra)",
+        compare_rustybuzz: true,
     },
     // ka + final ng (final mark).
     Case {
