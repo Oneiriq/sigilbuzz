@@ -29,9 +29,7 @@ use alloc::vec::Vec;
 use sigilbuzz::tables::gsub::lookup_type as gsub_type;
 
 use crate::coverage::emit_coverage_from_pairs;
-use crate::layout::{
-    parse_coverage_glyphs, RewrittenLookup, RewrittenSubtable, RewriterCtx,
-};
+use crate::layout::{parse_coverage_glyphs, RewriterCtx, RewrittenLookup, RewrittenSubtable};
 
 /// Rewrites a single GSUB lookup. Returns `None` if the lookup has no
 /// surviving subtables after rewriting (drop cascade will remove the
@@ -63,11 +61,7 @@ pub(crate) fn rewrite_lookup(
     })
 }
 
-fn rewrite_subtable(
-    ctx: &RewriterCtx,
-    lookup_type: u16,
-    sub: &[u8],
-) -> Option<RewrittenSubtable> {
+fn rewrite_subtable(ctx: &RewriterCtx, lookup_type: u16, sub: &[u8]) -> Option<RewrittenSubtable> {
     match lookup_type {
         gsub_type::SINGLE => rewrite_single(ctx, sub),
         gsub_type::EXTENSION => rewrite_extension(ctx, sub),
@@ -631,8 +625,8 @@ mod tests {
         assert_eq!(&rs.bytes[0..2], &1u16.to_be_bytes());
         let inner_type = u16::from_be_bytes([rs.bytes[2], rs.bytes[3]]);
         assert_eq!(inner_type, gsub_type::SINGLE);
-        let inner_off = u32::from_be_bytes([rs.bytes[4], rs.bytes[5], rs.bytes[6], rs.bytes[7]])
-            as usize;
+        let inner_off =
+            u32::from_be_bytes([rs.bytes[4], rs.bytes[5], rs.bytes[6], rs.bytes[7]]) as usize;
         let parsed = sigilbuzz::tables::gsub::Single::parse(&rs.bytes[inner_off..]).unwrap();
         assert_eq!(parsed.apply(1), Some(7));
         assert_eq!(parsed.apply(2), Some(8));

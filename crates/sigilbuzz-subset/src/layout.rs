@@ -418,10 +418,7 @@ fn rewrite_features(
 /// dropped, drops any Script with no surviving default LangSys + no
 /// surviving named LangSys, and returns the new bytes when at least
 /// one script survives.
-fn rewrite_scripts_from_bytes(
-    bytes: &[u8],
-    feature_renumber: &[Option<u16>],
-) -> Option<Vec<u8>> {
+fn rewrite_scripts_from_bytes(bytes: &[u8], feature_renumber: &[Option<u16>]) -> Option<Vec<u8>> {
     // ScriptList:
     //   u16 scriptCount
     //   ScriptRecord records[scriptCount]: { tag(4) + Offset16 (relative to ScriptList start) }
@@ -448,8 +445,7 @@ fn rewrite_scripts_from_bytes(
             bytes[rec_off + 2],
             bytes[rec_off + 3],
         ];
-        let script_off =
-            u16::from_be_bytes([bytes[rec_off + 4], bytes[rec_off + 5]]) as usize;
+        let script_off = u16::from_be_bytes([bytes[rec_off + 4], bytes[rec_off + 5]]) as usize;
         let Some(script_body) = bytes.get(script_off..) else {
             continue;
         };

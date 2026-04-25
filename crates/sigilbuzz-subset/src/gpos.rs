@@ -12,7 +12,7 @@
 //! Issue tracking the GPOS lookup-type rewriters: see the sibling
 //! issue filed alongside this module.
 
-use crate::layout::{RewrittenLookup, RewriterCtx};
+use crate::layout::{RewriterCtx, RewrittenLookup};
 
 /// Rewrites a single GPOS lookup. Returns `None` while no lookup type
 /// has a byte-level rewriter — the drop cascade handles the rest.

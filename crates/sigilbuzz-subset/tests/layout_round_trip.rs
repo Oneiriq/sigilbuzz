@@ -216,7 +216,11 @@ fn proper_subset_yields_parseable_gdef() {
         // Source carries GDEF and the rewriter built a v1.0 around the
         // remapped ClassDef. Just assert it parses.
         let parsed = subset_face.gdef();
-        assert!(parsed.is_ok(), "rewritten GDEF must parse: {:?}", parsed.err());
+        assert!(
+            parsed.is_ok(),
+            "rewritten GDEF must parse: {:?}",
+            parsed.err()
+        );
     }
 }
 
@@ -237,7 +241,10 @@ fn proper_subset_is_byte_deterministic() {
     };
     let out1 = subset(&face, &input).unwrap();
     let out2 = subset(&face, &input).unwrap();
-    assert_eq!(out1.bytes, out2.bytes, "subset output must be deterministic");
+    assert_eq!(
+        out1.bytes, out2.bytes,
+        "subset output must be deterministic"
+    );
 }
 
 #[test]
