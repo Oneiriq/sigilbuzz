@@ -1,0 +1,20 @@
+[package]
+name = "sigilbuzz-subset"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Font subsetter for sigilbuzz — produces a smaller font containing only a chosen glyph set."
+publish = false
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+sigilbuzz = { workspace = true }
+
+[dev-dependencies]
+# Fixtures load via include_bytes!.
