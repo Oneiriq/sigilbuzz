@@ -1535,8 +1535,7 @@ mod tests {
     fn rewrite_type3_keeps_all_when_every_gid_survives() {
         // Input 10 has alternates [100, 101, 102].
         let bytes = build_type3_subtable(&[(10, vec![100, 101, 102])]);
-        let map =
-            map_from_pairs(&[(0, 0), (10, 9), (100, 99), (101, 100), (102, 101)]);
+        let map = map_from_pairs(&[(0, 0), (10, 9), (100, 99), (101, 100), (102, 101)]);
         let ctx = RewriterCtx { gid_map: &map };
         let rs = rewrite_type3(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Alternate::parse(&rs.bytes).unwrap();
@@ -1596,10 +1595,7 @@ mod tests {
 
     #[test]
     fn rewrite_type3_is_byte_deterministic() {
-        let bytes = build_type3_subtable(&[
-            (10, vec![100, 101]),
-            (20, vec![200, 201, 202]),
-        ]);
+        let bytes = build_type3_subtable(&[(10, vec![100, 101]), (20, vec![200, 201, 202])]);
         let map = map_from_pairs(&[
             (0, 0),
             (10, 1),

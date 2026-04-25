@@ -682,10 +682,10 @@ fn rubik_aalt_subset_keeps_alternates_when_explicitly_requested() {
             let parsed = sigilbuzz::tables::gsub::Alternate::parse(sub).unwrap();
             // Translate the source base gid to its new gid via the
             // subset's gid_map.
-            if let Some(new_input) = out
-                .gid_map
-                .iter()
-                .find_map(|(o, n)| if *o == gid_input { Some(*n) } else { None })
+            if let Some(new_input) =
+                out.gid_map
+                    .iter()
+                    .find_map(|(o, n)| if *o == gid_input { Some(*n) } else { None })
             {
                 if parsed.apply(new_input, 0).is_some() {
                     found_alt_set = true;
