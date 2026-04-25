@@ -63,7 +63,7 @@ mod woff2;
 pub use error::{Result, WoffError};
 pub use woff1::{unwrap_woff1, wrap_woff1};
 #[cfg(feature = "woff2")]
-pub use woff2::unwrap_woff2;
+pub use woff2::{unwrap_woff2, wrap_woff2, wrap_woff2_with_options, WrapOptions};
 
 #[cfg(not(feature = "woff2"))]
 /// Stub returned when the `woff2` feature is disabled.
@@ -73,5 +73,13 @@ pub use woff2::unwrap_woff2;
 /// Brotli runtime dep but still compiles against the same public
 /// API surface.
 pub fn unwrap_woff2(_woff2_bytes: &[u8]) -> Result<Vec<u8>> {
+    Err(WoffError::Woff2Disabled)
+}
+
+#[cfg(not(feature = "woff2"))]
+/// Stub returned when the `woff2` feature is disabled.
+///
+/// Always returns [`WoffError::Woff2Disabled`].
+pub fn wrap_woff2(_sfnt_bytes: &[u8]) -> Result<Vec<u8>> {
     Err(WoffError::Woff2Disabled)
 }
