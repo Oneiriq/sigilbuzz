@@ -34,11 +34,11 @@
 //!
 //! - **GSUB type 1 (single-sub)** — full byte-level rewriter (formats
 //!   1+2). See [`crate::gsub`].
+//! - **GSUB types 2–6 + 8** — full byte-level rewriters. See [`crate::gsub`].
 //! - **GSUB type 7 (extension)** — pass-through, recurses into the
-//!   inner subtable. Currently only useful when the inner type is 1
-//!   (the only other implemented type).
-//! - **All other GSUB lookup types** — the rewriter returns `None`
-//!   for every subtable. The drop cascade handles propagation.
+//!   inner subtable.
+//! - **Any GSUB lookup type without a rewriter** — returns `None` for
+//!   every subtable. The drop cascade handles propagation.
 //! - **All GPOS lookup types** — drop. The drop cascade then drops
 //!   GPOS entirely.
 //! - **GDEF GlyphClassDef + MarkAttachClassDef** — full ClassDef
@@ -108,6 +108,13 @@ impl GidMap {
 /// Borrow bag passed into per-lookup-type rewriters.
 pub(crate) struct RewriterCtx<'a> {
     pub gid_map: &'a GidMap,
+    /// Optional old → new lookup-index map. Set during the second
+    /// pass over context-style lookups (GSUB types 5 / 6) so their
+    /// nested `SubstLookupRecord` entries can be patched. `None` on
+    /// the first pass — context rewriters preserve the source's
+    /// lookup-list indices unchanged so the caller can decide what
+    /// survives and rebuild the renumber map afterwards.
+    pub lookup_renumber: Option<&'a [Option<u16>]>,
 }
 
 /// One subtable's worth of rewritten bytes.
@@ -195,7 +202,10 @@ pub(crate) fn decide(
     // Non-identity: invoke the rewriter. Each driver returns either
     // bytes to substitute or None when the whole table dropped.
     let map = GidMap::from_kept(kept);
-    let ctx = RewriterCtx { gid_map: &map };
+    let ctx = RewriterCtx {
+        gid_map: &map,
+        lookup_renumber: None,
+    };
 
     let gsub = if has_gsub {
         match build_gsub(face, &ctx) {
@@ -233,7 +243,12 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
     let gsub_table = face.gsub().ok().flatten()?;
     let lookups = gsub_table.lookup_list();
 
-    // Phase 1: per-lookup rewrite.
+    // Phase 1: per-lookup rewrite. Context-style lookups (types
+    // 5 / 6) carry nested `SubstLookupRecord` entries that point at
+    // sibling lookups by index; on this pass we don't yet know
+    // which sibling lookups survive, so the rewriters preserve the
+    // source's lookup-list indices verbatim and we patch them in
+    // phase 2 once the renumber map is known.
     let mut rewritten: Vec<Option<RewrittenLookup>> = Vec::with_capacity(lookups.len() as usize);
     for li in 0..lookups.len() {
         let Some(lookup) = lookups.get(li) else {
@@ -256,8 +271,68 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
         rewritten.push(rewritten_lookup);
     }
 
-    // Phase 2: build old→new index map for surviving lookups.
-    let renumber = build_renumber(&rewritten);
+    // Phase 2: iterate context-lookup renumber to a fixed point.
+    // Each iteration rebuilds the renumber map from the surviving
+    // lookups, then re-rewrites every context-style lookup with the
+    // new map; a context lookup whose `SubstLookupRecord`s all point
+    // at dropped lookups loses every subtable and falls out, which
+    // may in turn cascade into other context lookups losing their
+    // targets. Bounded by `lookups.len()` since each iteration only
+    // ever drops more lookups (or stabilises).
+    let mut renumber = build_renumber(&rewritten);
+    for _ in 0..lookups.len() {
+        let mut changed = false;
+        let inner_ctx = RewriterCtx {
+            gid_map: ctx.gid_map,
+            lookup_renumber: Some(&renumber),
+        };
+        for li in 0..lookups.len() {
+            // Only re-rewrite slots that survived phase 1; nothing to
+            // resurrect here.
+            if rewritten
+                .get(li as usize)
+                .and_then(|s| s.as_ref())
+                .is_none()
+            {
+                continue;
+            }
+            let Some(lookup) = lookups.get(li) else {
+                continue;
+            };
+            // Skip non-context lookup types — their rewrite output is
+            // independent of the renumber map.
+            let lt = gsub::context_lookup_type(&lookup);
+            let Some(_lt) = lt else { continue };
+            let mut subtable_bodies: Vec<&[u8]> = Vec::new();
+            for si in 0..lookup.subtable_count() {
+                if let Some(b) = lookup.subtable_bytes(si) {
+                    subtable_bodies.push(b);
+                }
+            }
+            let new_lookup = gsub::rewrite_lookup(
+                &inner_ctx,
+                lookup.lookup_type(),
+                lookup.flag(),
+                lookup.mark_filtering_set(),
+                &subtable_bodies,
+            );
+            // A context lookup whose every nested target dropped
+            // returns None now that the renumber knows. Mark it as
+            // dropped and trigger another pass.
+            if new_lookup.is_none() {
+                if rewritten[li as usize].is_some() {
+                    rewritten[li as usize] = None;
+                    changed = true;
+                }
+            } else {
+                rewritten[li as usize] = new_lookup;
+            }
+        }
+        if !changed {
+            break;
+        }
+        renumber = build_renumber(&rewritten);
+    }
 
     // Phase 3: rewrite features and scripts. ScriptList walks raw
     // bytes because the parser doesn't expose enumeration of named
