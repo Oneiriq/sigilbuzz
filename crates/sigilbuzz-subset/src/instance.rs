@@ -118,6 +118,29 @@ use crate::{GlyphId, SubsetError};
 /// [`sigilbuzz::tables::Fvar::normalize_coords`].
 pub type F2Dot14 = f32;
 
+/// Per-axis pin policy for partial instancing.
+///
+/// fontTools' `varLib.instancer.instantiateVariableFont(axisLimits=...)`
+/// supports pinning a *subset* of axes — the deltas for those axes fold
+/// into the static outlines / metrics at the chosen coord, while the
+/// remaining axes keep their variation surface and the output is still
+/// a variable font (just with fewer axes in `fvar`). [`AxisPin`] is the
+/// per-axis switch that drives that behaviour from
+/// [`InstanceInput::axis_pins`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxisPin {
+    /// Bake this axis at `coords[i]` into every variation table; drop
+    /// the axis from `fvar` / `avar` and from every variation tuple
+    /// region. This is the existing full-instancing behaviour.
+    Pin,
+    /// Keep this axis variable. The axis stays in `fvar` / `avar`;
+    /// every variation tuple region keeps its dimension on this axis;
+    /// the value passed in `coords[i]` for this axis is ignored on the
+    /// bake side (variation tables continue to evaluate `Keep`-axis
+    /// deltas dynamically at shape time).
+    Keep,
+}
+
 /// Inputs to [`instance`].
 #[derive(Debug, Clone)]
 pub struct InstanceInput {
@@ -134,6 +157,23 @@ pub struct InstanceInput {
     /// correctly at the chosen instance — but the file is larger and
     /// shapers will still treat the font as variable.
     pub drop_var_tables: bool,
+    /// Per-axis pin policy. An empty vector means "pin every axis"
+    /// (the existing full-instancing behaviour). When non-empty,
+    /// length must equal `coords.len()`; each entry says whether the
+    /// matching axis bakes (`Pin`) or stays variable (`Keep`).
+    ///
+    /// fontTools-equivalent of
+    /// `varLib.instancer.instantiateVariableFont(axisLimits={...})` —
+    /// `Pin` axes correspond to a bare-coord entry in `axisLimits`,
+    /// `Keep` axes correspond to an axis omitted from `axisLimits`.
+    ///
+    /// Note: keeping any axis variable currently surfaces an
+    /// `Unsupported` error — the public API and tuple-projection math
+    /// primitives ([`project_region_onto_kept_axes`]) ship in this
+    /// release, while the variation-table emit side (fvar/avar trim,
+    /// `ItemVariationStore` tuple rewrite for HVAR / VVAR / MVAR /
+    /// GDEF.IVS, gvar tuple projection) lands in follow-ups.
+    pub axis_pins: Vec<AxisPin>,
 }
 
 impl Default for InstanceInput {
@@ -141,6 +181,7 @@ impl Default for InstanceInput {
         Self {
             coords: Vec::new(),
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         }
     }
 }
@@ -176,6 +217,25 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         return Err(SubsetError::Unsupported(
             "instance: coord vector length must match fvar axisCount",
         ));
+    }
+    // Partial-instancing validation: an empty axis_pins falls through
+    // to the full-instancing path (every axis pins). A non-empty
+    // axis_pins must equal coords.len(). Any `Keep` entry — which
+    // requests partial instancing — is rejected for now: the public
+    // API + tuple-projection math primitives ship here, but the
+    // variation-table emit side is staged for a follow-up.
+    if !input.axis_pins.is_empty() {
+        if input.axis_pins.len() != input.coords.len() {
+            return Err(SubsetError::Unsupported(
+                "instance: axis_pins length must equal coords.len()",
+            ));
+        }
+        if input.axis_pins.contains(&AxisPin::Keep) {
+            return Err(SubsetError::Unsupported(
+                "instance: partial instancing (axis_pins with Keep) not yet implemented; \
+                 axis_pins must be empty or all Pin",
+            ));
+        }
     }
 
     // Apply avar's piecewise-linear remap if the source ships one. The
@@ -1194,6 +1254,143 @@ fn patch_u16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
 }
 
 // ---------------------------------------------------------------------------
+// Partial-instancing tuple projection math.
+//
+// Each variation tuple is a region defined by per-axis (peak, start, end)
+// triples plus a delta payload. To project a tuple onto a Keep-axis
+// subspace:
+//
+//   1. Resolve every Pin-axis dimension to a constant scalar at
+//      `coords[i]` (the OpenType `supportScalar`-style ramp the
+//      shaper already uses to evaluate variation tables).
+//   2. Multiply the per-Pin-axis scalars together. If the product is
+//      zero — meaning the pin coord falls outside the tuple's region
+//      on at least one Pin-axis — the tuple contributes nothing at
+//      this pin and gets dropped.
+//   3. Otherwise the survivor tuple keeps only the Keep-axis dimensions
+//      of its region triples; its delta payload is multiplied by the
+//      Pin-axis product so that evaluating the trimmed tuple at the
+//      Keep-axis coords reproduces the source tuple's contribution
+//      exactly at every (Keep-coord, Pin-coord) pair where the Pin
+//      coord matches `coords[i]`.
+//
+// These primitives are the building blocks the variation-table
+// rewriters (HVAR / VVAR / MVAR / gvar / GDEF.IVS) consume to emit
+// trimmed `ItemVariationStore` / gvar tuples in a partial-instance
+// font. They are tested in isolation here so the math stays correct
+// regardless of which table a follow-up wires them into first.
+// ---------------------------------------------------------------------------
+
+/// Computes the support-scalar contribution of a single axis dimension
+/// at `coord`. Mirrors the OpenType `supportScalar` formula used by
+/// the gvar / IVS evaluators in `sigilbuzz::tables::gvar` —
+/// re-implemented here because the subset crate cannot import
+/// crate-private helpers from the parent crate, and the formula is
+/// trivially small.
+///
+/// Returns `1.0` when the axis does not participate in the tuple
+/// (peak == 0 with the spec's "axis ignored" convention) and `0.0`
+/// when `coord` falls outside `[start, end]`.
+#[must_use]
+#[allow(dead_code)] // wired in by the partial-instance emit follow-ups
+pub(crate) fn axis_support_scalar(start: f32, peak: f32, end: f32, coord: f32) -> f32 {
+    // Spec: peak of zero means the axis does not participate.
+    if peak == 0.0 {
+        return 1.0;
+    }
+    if (coord - peak).abs() < f32::EPSILON {
+        return 1.0;
+    }
+    if coord < start || coord > end {
+        return 0.0;
+    }
+    if coord < peak {
+        let denom = peak - start;
+        if denom.abs() < f32::EPSILON {
+            return 0.0;
+        }
+        (coord - start) / denom
+    } else {
+        // coord > peak
+        let denom = end - peak;
+        if denom.abs() < f32::EPSILON {
+            return 0.0;
+        }
+        (end - coord) / denom
+    }
+}
+
+/// One tuple region's per-axis (start, peak, end) triple, in the
+/// source font's axis order. Length must equal the source's fvar axis
+/// count.
+#[allow(dead_code)] // wired in by the partial-instance emit follow-ups
+pub(crate) type RegionAxes = [(f32, f32, f32)];
+
+/// Result of projecting a variation tuple onto its Keep-axis subspace.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // wired in by the partial-instance emit follow-ups
+pub(crate) struct ProjectedTuple {
+    /// Pin-axis support-scalar product evaluated at the pin coords.
+    /// Caller multiplies every delta in this tuple's payload by this
+    /// scalar before emitting the trimmed tuple.
+    pub pin_scalar: f32,
+    /// Trimmed region triples: only the Keep-axis dimensions, in the
+    /// source's Keep-axis order.
+    pub kept_axes: alloc::vec::Vec<(f32, f32, f32)>,
+}
+
+/// Projects a tuple's per-axis region onto the Keep-axis subspace.
+///
+/// `region` carries one `(start, peak, end)` triple per source axis.
+/// `pins` indicates which axes pin (`Pin`) and which stay variable
+/// (`Keep`); `coords` carries the pin coord for every axis (entries
+/// for `Keep` axes are ignored).
+///
+/// Returns `None` when the tuple contributes nothing at the pin coords
+/// — the survivor would have a zero pin-scalar and the caller should
+/// drop the tuple entirely. Returns `Some(ProjectedTuple)` otherwise.
+///
+/// Lengths must agree: `region.len() == pins.len() == coords.len()`.
+/// Mismatched inputs return `None` (defensive — callers should validate
+/// upstream, but a length skew should not produce silently-wrong deltas).
+#[must_use]
+#[allow(dead_code)] // wired in by the partial-instance emit follow-ups
+pub(crate) fn project_region_onto_kept_axes(
+    region: &RegionAxes,
+    pins: &[AxisPin],
+    coords: &[f32],
+) -> Option<ProjectedTuple> {
+    if region.len() != pins.len() || pins.len() != coords.len() {
+        return None;
+    }
+    let mut pin_scalar: f32 = 1.0;
+    let mut kept_axes: alloc::vec::Vec<(f32, f32, f32)> =
+        alloc::vec::Vec::with_capacity(pins.len());
+    for (i, &pin) in pins.iter().enumerate() {
+        let (s, p, e) = region[i];
+        match pin {
+            AxisPin::Pin => {
+                let s_axis = axis_support_scalar(s, p, e, coords[i]);
+                if s_axis == 0.0 {
+                    return None;
+                }
+                pin_scalar *= s_axis;
+            }
+            AxisPin::Keep => {
+                kept_axes.push((s, p, e));
+            }
+        }
+    }
+    if pin_scalar == 0.0 {
+        return None;
+    }
+    Some(ProjectedTuple {
+        pin_scalar,
+        kept_axes,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // GDEF.IVS pruning
 // ---------------------------------------------------------------------------
 
@@ -1308,6 +1505,7 @@ mod tests {
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).expect("bake at default");
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
@@ -1349,6 +1547,7 @@ mod tests {
         let input = InstanceInput {
             coords: coords.clone(),
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).expect("bake at extreme");
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
@@ -1381,6 +1580,7 @@ mod tests {
         let input = InstanceInput {
             coords: coords.clone(),
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).expect("bake");
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
@@ -1415,6 +1615,7 @@ mod tests {
         let bad = InstanceInput {
             coords: alloc::vec![0.0_f32; 99],
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         assert!(matches!(
             instance(&face, &bad),
@@ -1433,6 +1634,7 @@ mod tests {
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).expect("CFF2 default-instance bake");
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
@@ -1491,6 +1693,7 @@ mod tests {
         let input = InstanceInput {
             coords: coords.clone(),
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).expect("CFF2 extreme bake");
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
@@ -1537,6 +1740,7 @@ mod tests {
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let a = instance(&face, &input).unwrap();
         let b = instance(&face, &input).unwrap();
@@ -1550,6 +1754,7 @@ mod tests {
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).unwrap();
         let baked = Face::parse_bytes(&out.bytes, 0).unwrap();
@@ -1566,6 +1771,7 @@ mod tests {
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: false,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).unwrap();
         let baked = Face::parse_bytes(&out.bytes, 0).unwrap();
@@ -1579,6 +1785,7 @@ mod tests {
         let input = InstanceInput {
             coords: alloc::vec![0.5_f32; axis_count],
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let a = instance(&face, &input).unwrap();
         let b = instance(&face, &input).unwrap();
@@ -1611,6 +1818,7 @@ mod tests {
         let input = InstanceInput {
             coords: coords.clone(),
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).expect("bake at extreme");
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
@@ -1635,6 +1843,7 @@ mod tests {
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).unwrap();
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
@@ -1655,6 +1864,7 @@ mod tests {
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
+            axis_pins: Vec::new(),
         };
         let out = instance(&face, &input).unwrap();
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
@@ -1826,5 +2036,267 @@ mod vvar_synthetic_tests {
         let val = i16::from_be_bytes([out[68], out[69]]);
         // First-wins: 800 + 100 == 900. (Without dedup: 800 + 200 = 1000.)
         assert_eq!(val, 900, "duplicate hasc must apply delta exactly once");
+    }
+}
+
+#[cfg(test)]
+mod partial_instancing_tests {
+    //! Unit tests for the partial-instancing public API + tuple
+    //! projection math primitives. These cover the building blocks
+    //! the variation-table emitters (HVAR / VVAR / MVAR / gvar /
+    //! GDEF.IVS) will consume in the follow-up that ships full
+    //! partial instancing — wiring them in is staged so this commit
+    //! lands the API surface and math without touching every
+    //! variation emitter at once.
+    //!
+    //! fontTools-equivalent of
+    //! `varLib.instancer.instantiateVariableFont(axisLimits=...)`.
+
+    use super::*;
+
+    const RUBIK: &[u8] = include_bytes!("../../../tests/fixtures/rubik_vf.ttf");
+
+    fn rubik_face() -> Face<'static> {
+        Face::parse_bytes(RUBIK, 0).unwrap()
+    }
+
+    #[test]
+    fn axis_pin_default_is_empty_pin_every_axis() {
+        // The default `InstanceInput::axis_pins` is an empty Vec —
+        // semantically "pin every axis" so existing callers that
+        // never set the field keep getting full instancing. Anything
+        // else would be a silent breaking change.
+        let i = InstanceInput::default();
+        assert!(i.axis_pins.is_empty());
+    }
+
+    #[test]
+    fn empty_axis_pins_falls_through_to_full_instancing() {
+        // Empty axis_pins is the existing full-instancing path. The
+        // bake must succeed end-to-end and produce a static font
+        // (no fvar / gvar / HVAR), exactly as before this feature
+        // landed.
+        let face = rubik_face();
+        let axis_count = face.fvar().unwrap().unwrap().axes().len();
+        let input = InstanceInput {
+            coords: alloc::vec![0.0_f32; axis_count],
+            drop_var_tables: true,
+            axis_pins: Vec::new(),
+        };
+        let out = instance(&face, &input).expect("empty axis_pins → full bake");
+        let baked = Face::parse_bytes(&out.bytes, 0).expect("parse");
+        assert!(baked.fvar().unwrap().is_none(), "fvar dropped");
+    }
+
+    #[test]
+    fn all_pin_axis_pins_equivalent_to_empty_axis_pins() {
+        // A non-empty axis_pins where every entry is `Pin` must
+        // produce the same bytes as an empty axis_pins. The emitter
+        // walks the same code path either way; this guards against
+        // a future regression that branches on length rather than
+        // entry policy.
+        let face = rubik_face();
+        let axis_count = face.fvar().unwrap().unwrap().axes().len();
+        let coords = alloc::vec![0.25_f32; axis_count];
+        let empty = InstanceInput {
+            coords: coords.clone(),
+            drop_var_tables: true,
+            axis_pins: Vec::new(),
+        };
+        let all_pin = InstanceInput {
+            coords,
+            drop_var_tables: true,
+            axis_pins: alloc::vec![AxisPin::Pin; axis_count],
+        };
+        let a = instance(&face, &empty).expect("empty bake");
+        let b = instance(&face, &all_pin).expect("all-Pin bake");
+        assert_eq!(a.bytes, b.bytes, "all-Pin must equal empty axis_pins");
+    }
+
+    #[test]
+    fn axis_pins_length_mismatch_errors() {
+        let face = rubik_face();
+        let axis_count = face.fvar().unwrap().unwrap().axes().len();
+        let input = InstanceInput {
+            coords: alloc::vec![0.0_f32; axis_count],
+            drop_var_tables: true,
+            // Length deliberately wrong.
+            axis_pins: alloc::vec![AxisPin::Pin; axis_count + 1],
+        };
+        assert!(matches!(
+            instance(&face, &input),
+            Err(SubsetError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn axis_pins_with_keep_currently_unsupported() {
+        // The math primitives + public API ship in this release; the
+        // variation-table emit side (fvar/avar trim, IVS tuple
+        // rewrite, gvar projection) lands in follow-ups. Until then
+        // any `Keep` entry surfaces a clear error rather than
+        // producing a silently-broken font.
+        let face = rubik_face();
+        let axis_count = face.fvar().unwrap().unwrap().axes().len();
+        let mut pins = alloc::vec![AxisPin::Pin; axis_count];
+        pins[0] = AxisPin::Keep;
+        let input = InstanceInput {
+            coords: alloc::vec![0.0_f32; axis_count],
+            drop_var_tables: true,
+            axis_pins: pins,
+        };
+        assert!(matches!(
+            instance(&face, &input),
+            Err(SubsetError::Unsupported(_))
+        ));
+    }
+
+    // --------------------------------------------------------------
+    // axis_support_scalar — single-axis ramp matches OpenType spec.
+    // --------------------------------------------------------------
+
+    #[test]
+    fn axis_support_scalar_peak_returns_one() {
+        // At the peak the scalar is 1.
+        assert!((axis_support_scalar(0.0, 1.0, 1.0, 1.0) - 1.0).abs() < 1e-6);
+        assert!((axis_support_scalar(-1.0, -1.0, 0.0, -1.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn axis_support_scalar_zero_peak_means_axis_ignored() {
+        // Per spec a peak of zero means the axis does not participate
+        // in the tuple — the scalar is 1 regardless of coord.
+        assert!((axis_support_scalar(0.0, 0.0, 0.0, 0.5) - 1.0).abs() < 1e-6);
+        assert!((axis_support_scalar(-1.0, 0.0, 1.0, 0.5) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn axis_support_scalar_outside_region_returns_zero() {
+        // coord beyond [start, end] → zero contribution.
+        assert!(axis_support_scalar(0.0, 1.0, 1.0, -0.5).abs() < 1e-6);
+        assert!(axis_support_scalar(0.0, 1.0, 1.0, 1.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn axis_support_scalar_linear_ramp_below_peak() {
+        // start=0, peak=1, end=1 — coord=0.5 is halfway up the ramp.
+        assert!((axis_support_scalar(0.0, 1.0, 1.0, 0.5) - 0.5).abs() < 1e-6);
+        // 0.25 quarter up.
+        assert!((axis_support_scalar(0.0, 1.0, 1.0, 0.25) - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn axis_support_scalar_linear_ramp_above_peak() {
+        // start=-1, peak=0.5, end=1 — coord=0.75 ramps down from 1 at
+        // peak to 0 at end. Halfway → 0.5.
+        // (peak == 0 would short-circuit to 1.0 per the spec's
+        // "axis ignored" convention; we use a non-zero peak here.)
+        assert!((axis_support_scalar(-1.0, 0.5, 1.0, 0.75) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn axis_support_scalar_degenerate_peak_eq_start_returns_zero() {
+        // peak == start, coord between them → division by zero
+        // guarded with a 0.0 fallback.
+        assert!(axis_support_scalar(1.0, 1.0, 1.0, 0.5).abs() < 1e-6);
+    }
+
+    // --------------------------------------------------------------
+    // project_region_onto_kept_axes — full tuple projection.
+    // --------------------------------------------------------------
+
+    #[test]
+    fn project_two_axis_region_pin_first_keep_second() {
+        // Two axes (wght + wdth). Region: wght (0, 1, 1), wdth (0, 1, 1).
+        // Pin wght=0.5 (scalar 0.5), keep wdth.
+        let region = [(0.0_f32, 1.0, 1.0), (0.0, 1.0, 1.0)];
+        let pins = [AxisPin::Pin, AxisPin::Keep];
+        let coords = [0.5, 0.0];
+        let p = project_region_onto_kept_axes(&region, &pins, &coords).expect("survives");
+        assert!((p.pin_scalar - 0.5).abs() < 1e-6);
+        assert_eq!(p.kept_axes, alloc::vec![(0.0, 1.0, 1.0)]);
+    }
+
+    #[test]
+    fn project_drops_tuple_when_pin_falls_outside_region() {
+        // Pin coord 0.0 falls outside the wght region [0.5, 1.0]:
+        // the scalar is zero and the tuple gets dropped.
+        let region = [(0.5_f32, 1.0, 1.0), (0.0, 1.0, 1.0)];
+        let pins = [AxisPin::Pin, AxisPin::Keep];
+        let coords = [0.0, 0.0];
+        assert!(project_region_onto_kept_axes(&region, &pins, &coords).is_none());
+    }
+
+    #[test]
+    fn project_pin_at_peak_passes_kept_axes_through_at_unit_scalar() {
+        // Pin axis at peak → scalar 1, kept axes ride through.
+        let region = [(0.0_f32, 1.0, 1.0), (-1.0, -1.0, 0.0)];
+        let pins = [AxisPin::Pin, AxisPin::Keep];
+        let coords = [1.0, 0.0];
+        let p = project_region_onto_kept_axes(&region, &pins, &coords).unwrap();
+        assert!((p.pin_scalar - 1.0).abs() < 1e-6);
+        assert_eq!(p.kept_axes, alloc::vec![(-1.0, -1.0, 0.0)]);
+    }
+
+    #[test]
+    fn project_all_pin_yields_empty_kept_axes() {
+        // Every axis pinned: kept_axes is empty (the survivor tuple
+        // becomes a plain delta-set with no region dimensions).
+        let region = [(0.0_f32, 1.0, 1.0), (0.0, 1.0, 1.0)];
+        let pins = [AxisPin::Pin, AxisPin::Pin];
+        let coords = [0.5, 0.5];
+        let p = project_region_onto_kept_axes(&region, &pins, &coords).unwrap();
+        // Two ramps at 0.5 each → 0.25 product.
+        assert!((p.pin_scalar - 0.25).abs() < 1e-6);
+        assert!(p.kept_axes.is_empty());
+    }
+
+    #[test]
+    fn project_all_keep_yields_unit_scalar_full_kept_axes() {
+        // Every axis kept variable: scalar 1, kept_axes = source region.
+        let region = [(0.0_f32, 1.0, 1.0), (-1.0, -0.5, 0.0)];
+        let pins = [AxisPin::Keep, AxisPin::Keep];
+        let coords = [0.0, 0.0]; // ignored
+        let p = project_region_onto_kept_axes(&region, &pins, &coords).unwrap();
+        assert!((p.pin_scalar - 1.0).abs() < 1e-6);
+        assert_eq!(p.kept_axes, alloc::vec![(0.0, 1.0, 1.0), (-1.0, -0.5, 0.0)]);
+    }
+
+    #[test]
+    fn project_zero_peak_pin_axis_passes_scalar_through() {
+        // Pin-axis with peak == 0 (axis-doesn't-participate): scalar
+        // contribution is 1 regardless of coord, so the survivor
+        // carries through with no payload scaling.
+        let region = [(0.0_f32, 0.0, 0.0), (0.0, 1.0, 1.0)];
+        let pins = [AxisPin::Pin, AxisPin::Keep];
+        let coords = [0.5, 0.0];
+        let p = project_region_onto_kept_axes(&region, &pins, &coords).unwrap();
+        assert!((p.pin_scalar - 1.0).abs() < 1e-6);
+        assert_eq!(p.kept_axes, alloc::vec![(0.0, 1.0, 1.0)]);
+    }
+
+    #[test]
+    fn project_length_mismatch_returns_none() {
+        // Defensive: mismatched input lengths return None rather than
+        // panicking on an OOB index.
+        let region = [(0.0_f32, 1.0, 1.0)];
+        let pins = [AxisPin::Pin, AxisPin::Keep];
+        let coords = [0.5, 0.5];
+        assert!(project_region_onto_kept_axes(&region, &pins, &coords).is_none());
+    }
+
+    #[test]
+    fn project_two_pin_axes_multiplies_scalars() {
+        // Both Pin axes contribute partial ramps; the survivor's
+        // pin_scalar is their product (0.5 × 0.25 = 0.125).
+        let region = [(0.0_f32, 1.0, 1.0), (0.0, 1.0, 1.0)];
+        let pins = [AxisPin::Pin, AxisPin::Pin];
+        let coords = [0.5, 0.25];
+        let p = project_region_onto_kept_axes(&region, &pins, &coords).unwrap();
+        assert!(
+            (p.pin_scalar - 0.125).abs() < 1e-6,
+            "expected 0.125, got {}",
+            p.pin_scalar
+        );
     }
 }
