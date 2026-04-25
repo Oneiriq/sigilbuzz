@@ -8,6 +8,15 @@
 //! compression — instead we walk every glyph through `ttf-parser`'s
 //! outline visitor and compare the emitted `MoveTo` / `LineTo` /
 //! `CurveTo` / `Close` callbacks.
+//!
+//! All tests in this file require the `woff2` cargo feature: the
+//! `unwrap_woff2` / `wrap_woff2` symbols still exist with the feature
+//! disabled, but they are stubs that return `WoffError::Woff2Disabled`,
+//! which would fail every `expect`/`unwrap` here. Cfg-gating the whole
+//! file keeps `cargo test --no-default-features` clean for WOFF1-only
+//! consumers.
+
+#![cfg(feature = "woff2")]
 
 use sigilbuzz::{shape, Buffer, Face, Font};
 use sigilbuzz_woff::{unwrap_woff2, wrap_woff2};
