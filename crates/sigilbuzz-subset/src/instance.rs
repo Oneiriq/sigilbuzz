@@ -90,8 +90,10 @@
 //!
 //! # Out of scope (deferred)
 //!
-//! - **Partial instancing** (some axes pinned, others left variable).
-//!   Sigil's first cut bakes the full coord vector — every axis pins.
+//! - **CFF2 partial instancing** (some axes pinned, others left
+//!   variable on a CFF2 source). The gvar / TrueType partial path is
+//!   wired through [`crate::gvar_partial::bake_gvar_partial`]; the
+//!   CFF2 VarStore equivalent lands separately.
 //! - **Mark / Cursive GPOS Anchor variations.** GPOS Types 3 / 4 / 5 / 6
 //!   carry per-x/y `Device` / `VariationIndex` offsets on their
 //!   `Anchor` records; this pass folds `ValueRecord` variations only.
@@ -180,11 +182,14 @@ pub struct InstanceInput {
     /// VVAR / MVAR / GDEF.IVS) have their region lists rewritten with
     /// every Pin-axis dimension folded into the surviving deltas, and
     /// any tuple that contributes nothing at the pin coords is
-    /// dropped. `gvar` and CFF2's VarStore are not yet rewritten — a
-    /// source carrying either with `Keep` still surfaces an
-    /// `Unsupported` error today; the projection follows in a
-    /// follow-up using the same [`project_region_onto_kept_axes`]
-    /// primitive that drives the IVS rewrite.
+    /// dropped. `gvar` is rewritten through the same
+    /// [`project_region_onto_kept_axes`] primitive: every per-tuple
+    /// peak / intermediate region keeps only its `Keep`-axis
+    /// dimensions, every per-point delta scales by the Pin-axis
+    /// support-scalar product, and tuples whose Pin support drops to
+    /// zero are dropped. CFF2's VarStore partial-projection is still
+    /// staged; a CFF2 source with `Keep` still surfaces an
+    /// `Unsupported` error today.
     pub axis_pins: Vec<AxisPin>,
 }
 
@@ -239,18 +244,17 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
                 "instance: axis_pins length must equal coords.len()",
             ));
         }
-        // gvar + CFF2 partial-projection have not landed yet (issue
-        // tracking #183 follow-up). Reject Keep when the source has
-        // either of those, with a clear message — the fvar / avar /
-        // HVAR / VVAR / MVAR / GDEF.IVS paths are wired through below.
+        // CFF2 VarStore partial-projection is still a follow-up; the
+        // gvar tuple-projection lands here. Reject Keep on CFF2 with
+        // a clear message — the gvar path now flows through
+        // partial_instance.
         if input.axis_pins.contains(&AxisPin::Keep) {
-            let has_gvar = face.record(tag::GVAR).is_some();
             let has_cff2 = face.record(tag::CFF2).is_some();
-            if has_gvar || has_cff2 {
+            if has_cff2 {
                 return Err(SubsetError::Unsupported(
-                    "instance: partial instancing (axis_pins with Keep) for sources with \
-                     gvar or CFF2 not yet implemented; the IVS-bearing tables \
-                     (HVAR / VVAR / MVAR / GDEF.IVS) trim correctly today",
+                    "instance: partial instancing (axis_pins with Keep) for CFF2 sources \
+                     not yet implemented; gvar / HVAR / VVAR / MVAR / GDEF.IVS paths \
+                     trim correctly today",
                 ));
             }
             // partial_instance returns `Ok` with the reduced-axis VF;
@@ -601,14 +605,29 @@ fn partial_instance(
         }
     }
 
+    // gvar tuple-projection rewrite (optional). Pin-axis support
+    // scalars fold into per-point deltas; Pin-axis dimensions drop
+    // from every tuple region; tuples whose Pin-axis support is zero
+    // disappear. Output gvar's axisCount = Keep-axis count.
+    if let Ok(gvar_bytes) = face.table_bytes(tag::GVAR) {
+        let new_axis_count = pins.iter().filter(|p| matches!(p, AxisPin::Keep)).count() as u16;
+        let new_gvar = crate::gvar_partial::bake_gvar_partial(
+            gvar_bytes,
+            &post_avar_coords,
+            pins,
+            new_axis_count,
+        )?;
+        tables.push((tag::GVAR, new_gvar));
+    }
+
     // Carry every other table through verbatim.
     for rec in face.records() {
         if tables.iter().any(|(t, _)| *t == rec.tag) {
             continue;
         }
         // Skip variable-font tables we already handled (or that we
-        // refuse to handle in the partial path — gvar / CFF2 are
-        // gated upstream).
+        // refuse to handle in the partial path — CFF2 is gated
+        // upstream).
         let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;
         tables.push((rec.tag, bytes.to_vec()));
     }
@@ -1446,7 +1465,6 @@ fn patch_u16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
 /// (peak == 0 with the spec's "axis ignored" convention) and `0.0`
 /// when `coord` falls outside `[start, end]`.
 #[must_use]
-#[allow(dead_code)] // wired in by the partial-instance emit follow-ups
 pub(crate) fn axis_support_scalar(start: f32, peak: f32, end: f32, coord: f32) -> f32 {
     // Hardening (#185): any non-finite input returns 0 — the axis is
     // treated as outside this region. This matches HarfBuzz's
@@ -1484,12 +1502,10 @@ pub(crate) fn axis_support_scalar(start: f32, peak: f32, end: f32, coord: f32) -
 /// One tuple region's per-axis (start, peak, end) triple, in the
 /// source font's axis order. Length must equal the source's fvar axis
 /// count.
-#[allow(dead_code)] // wired in by the partial-instance emit follow-ups
 pub(crate) type RegionAxes = [(f32, f32, f32)];
 
 /// Result of projecting a variation tuple onto its Keep-axis subspace.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // wired in by the partial-instance emit follow-ups
 pub(crate) struct ProjectedTuple {
     /// Pin-axis support-scalar product evaluated at the pin coords.
     /// Caller multiplies every delta in this tuple's payload by this
@@ -1515,7 +1531,6 @@ pub(crate) struct ProjectedTuple {
 /// Mismatched inputs return `None` (defensive — callers should validate
 /// upstream, but a length skew should not produce silently-wrong deltas).
 #[must_use]
-#[allow(dead_code)] // wired in by the partial-instance emit follow-ups
 pub(crate) fn project_region_onto_kept_axes(
     region: &RegionAxes,
     pins: &[AxisPin],
@@ -3672,12 +3687,13 @@ mod vvar_synthetic_tests {
 #[cfg(test)]
 mod partial_instancing_tests {
     //! Unit tests for the partial-instancing public API + tuple
-    //! projection math primitives. These cover the building blocks
-    //! the variation-table emitters (HVAR / VVAR / MVAR / gvar /
-    //! GDEF.IVS) will consume in the follow-up that ships full
-    //! partial instancing — wiring them in is staged so this commit
-    //! lands the API surface and math without touching every
-    //! variation emitter at once.
+    //! projection math primitives. The variation-table emitters
+    //! (HVAR / VVAR / MVAR / gvar / GDEF.IVS) all flow through these
+    //! primitives — the gvar tuple-projection follow-up wired the
+    //! `axis_support_scalar` + `project_region_onto_kept_axes` pair
+    //! into [`crate::gvar_partial::bake_gvar_partial`] so the
+    //! reduced-axis VF's gvar surface stays consistent with the
+    //! reduced-axis IVS surfaces.
     //!
     //! fontTools-equivalent of
     //! `varLib.instancer.instantiateVariableFont(axisLimits=...)`.
@@ -3763,25 +3779,26 @@ mod partial_instancing_tests {
     }
 
     #[test]
-    fn axis_pins_with_keep_on_gvar_source_unsupported() {
-        // gvar tuple-projection + CFF2 VarStore rewrite are tracked
-        // as a follow-up to this PR. Sources carrying gvar (like
-        // Rubik VF) still surface a clear Unsupported error when any
-        // axis is `Keep`; the IVS-bearing tables (HVAR / VVAR / MVAR /
-        // GDEF.IVS) trim correctly today.
+    fn axis_pins_with_keep_on_gvar_source_emits_partial_vf() {
+        // gvar tuple-projection landed: with at least one axis `Keep`
+        // the partial-instance pass produces a reduced-axis VF (gvar
+        // axisCount equals the Keep-axis count). Rubik is single-
+        // axis (wght), so pinning the only axis is a degenerate
+        // partial — but the all-Keep case is the more meaningful
+        // round-trip cover.
         let face = rubik_face();
         let axis_count = face.fvar().unwrap().unwrap().axes().len();
-        let mut pins = alloc::vec![AxisPin::Pin; axis_count];
-        pins[0] = AxisPin::Keep;
+        let pins = alloc::vec![AxisPin::Keep; axis_count];
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
             axis_pins: pins,
         };
-        assert!(matches!(
-            instance(&face, &input),
-            Err(SubsetError::Unsupported(_))
-        ));
+        let out = instance(&face, &input).expect("partial bake");
+        let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
+        let baked_gvar = baked.gvar().unwrap().expect("baked gvar present");
+        assert_eq!(baked_gvar.axis_count(), axis_count as u16);
+        assert_eq!(baked_gvar.glyph_count(), face.maxp().unwrap().num_glyphs);
     }
 
     // --------------------------------------------------------------
@@ -4600,30 +4617,76 @@ mod partial_instancing_tests {
     }
 
     #[test]
-    fn partial_instance_rejects_keep_on_gvar_source() {
-        // Rubik VF carries gvar; partial-instance with Keep must
-        // surface a clear Unsupported error today (gvar projection
-        // tracked as a follow-up).
+    fn partial_instance_keep_on_gvar_source_emits_reduced_axis_vf() {
+        // Rubik VF carries gvar; partial-instance with all axes Keep
+        // returns a reduced-axis VF whose gvar still varies.
         let face = rubik_face();
         let axis_count = face.fvar().unwrap().unwrap().axes().len();
-        let mut pins = alloc::vec![AxisPin::Pin; axis_count];
-        pins[0] = AxisPin::Keep;
+        let pins = alloc::vec![AxisPin::Keep; axis_count];
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
             axis_pins: pins,
         };
-        let err = instance(&face, &input).unwrap_err();
-        match err {
-            SubsetError::Unsupported(msg) => {
-                assert!(
-                    msg.contains("gvar") || msg.contains("CFF2"),
-                    "msg should call out the deferred gvar/CFF2 paths: {}",
-                    msg
-                );
-            }
-            other => panic!("expected Unsupported, got {:?}", other),
-        }
+        let out = instance(&face, &input).expect("partial bake");
+        let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
+        let baked_gvar = baked.gvar().unwrap().expect("gvar still present");
+        assert_eq!(baked_gvar.axis_count(), axis_count as u16);
+    }
+
+    #[test]
+    fn rubik_partial_pin_wght_matches_full_instance_bytes() {
+        // Single-axis source; partial bake with `Pin` on the only
+        // axis must produce identical bytes to the full-instancing
+        // path (which flattens to the static font). The gvar
+        // projection has no `Keep` axes to preserve, so the bake
+        // routes through `partial_instance` only when the input
+        // `axis_pins.contains(&Keep)` — for an all-Pin axis_pins it
+        // routes through the existing full-instance path. This test
+        // pins that contract: for all-Pin, partial == full.
+        let face = rubik_face();
+        let user_max = face.fvar().unwrap().unwrap().axes()[0].max_value;
+        let coords = face.fvar().unwrap().unwrap().normalize_coords(&[user_max]);
+        let empty = InstanceInput {
+            coords: coords.clone(),
+            drop_var_tables: true,
+            axis_pins: Vec::new(),
+        };
+        let pinned = InstanceInput {
+            coords,
+            drop_var_tables: true,
+            axis_pins: alloc::vec![AxisPin::Pin],
+        };
+        let a = instance(&face, &empty).expect("empty");
+        let b = instance(&face, &pinned).expect("Pin");
+        assert_eq!(
+            a.bytes, b.bytes,
+            "Pin must equal empty axis_pins for Rubik VF"
+        );
+    }
+
+    #[test]
+    fn rubik_partial_keep_wght_preserves_source_gvar_bytes() {
+        // No-op partial: every axis Keep, no axes pin. The output
+        // gvar should match the source byte-for-byte (the bake
+        // short-circuits to passthrough when there's nothing to
+        // project). The whole VF rides through with its variation
+        // tables intact.
+        let face = rubik_face();
+        let axis_count = face.fvar().unwrap().unwrap().axes().len();
+        let input = InstanceInput {
+            coords: alloc::vec![0.0_f32; axis_count],
+            drop_var_tables: true,
+            axis_pins: alloc::vec![AxisPin::Keep; axis_count],
+        };
+        let out = instance(&face, &input).expect("partial bake");
+        let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
+        let baked_gvar_bytes = baked.table_bytes(tag::GVAR).expect("gvar present");
+        let src_gvar_bytes = face.table_bytes(tag::GVAR).expect("source gvar");
+        assert_eq!(
+            baked_gvar_bytes, src_gvar_bytes,
+            "all-Keep partial must preserve source gvar bytes verbatim"
+        );
     }
 
     #[test]
