@@ -121,6 +121,7 @@ mod fvar;
 mod gdef;
 mod glyf;
 mod gpos;
+mod gpos_var;
 mod gsub;
 mod gvar;
 mod hmtx;
