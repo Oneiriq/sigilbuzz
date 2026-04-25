@@ -1,9 +1,9 @@
 # Performance baseline
 
-First-run Criterion numbers captured against the 0.5.0 release tip on
-the maintainer's macOS arm64 workstation. Re-run after any change that
-touches a hot path and update this file together with the change so
-the historical trend stays in one place.
+Criterion numbers from the 0.6.0 release-prep tip on the maintainer's
+macOS arm64 workstation. Re-run after any change that touches a hot
+path and update this file together with the change so the historical
+trend stays in one place.
 
 ## How to reproduce
 
@@ -29,28 +29,48 @@ machine, but the ratio against rustybuzz is stable.
 
 | bench               | sigilbuzz   | rustybuzz   | ratio   | notes                                                  |
 |---------------------|-------------|-------------|---------|--------------------------------------------------------|
-| shape_latin         | 18.09 µs    | 15.51 µs    | 1.17x   | Open Sans, ASCII pangrams + liga/kern.                 |
-| shape_arabic        | 3.63 ms     | 112 µs      | 32.4x   | Amiri, Quranic-grade rlig + IgnoreMarks. See #74.      |
-| shape_devanagari    | 15.27 ms    | 88 µs       | 173x    | Noto Sans Devanagari, reph + conjuncts. See #75.       |
-| shape_khmer         | 867 µs      | 50 µs       | 17.3x   | Noto Sans Khmer, USE state machine. See #76.           |
-| shape_hebrew        | 15.91 µs    | 18.0 µs     | 0.88x   | Noto Sans Hebrew, GPOS mark-to-base/mark-to-mark.      |
+| shape_latin         | 11.39 µs    | 15.03 µs    | 0.76x   | Open Sans, ASCII pangrams + liga/kern.                 |
+| shape_arabic        | 290 µs      | 108 µs      | 2.70x   | Amiri, Quranic-grade rlig + IgnoreMarks.               |
+| shape_devanagari    | 419 µs      | 85.8 µs     | 4.89x   | Noto Sans Devanagari, reph + conjuncts.                |
+| shape_khmer         | 91.6 µs     | 49.0 µs     | 1.87x   | Noto Sans Khmer, USE state machine.                    |
+| shape_hebrew        | 10.99 µs    | 17.28 µs    | 0.64x   | Noto Sans Hebrew, GPOS mark-to-base/mark-to-mark.      |
 
-### Follow-ups (>2x rustybuzz)
+### 0.6.0 perf pass (PR closing #74 / #75 / #76)
 
-The complex-script benches expose three regressions that need
-dedicated optimisation passes. Each has a tracking issue with the
-candidate root causes:
+The 0.5.0 numbers above had Devanagari at 173x, Arabic at 32x, Khmer
+at 17x — every complex-script bench was an algorithmic outlier. Three
+fixes in `src/shape.rs` and `src/tables/gsub/*.rs` collapsed each
+into the < 5x rustybuzz envelope while leaving Latin and Hebrew
+faster than rustybuzz:
 
-- **Arabic 32x slower** — `https://github.com/Oneiriq/sigilbuzz/issues/74`
-  GSUB cursor walker + LookupFlag skip iterators were already flagged
-  as the heaviest path in 0.4.0; the bench confirms it.
-- **Devanagari 173x slower** — `https://github.com/Oneiriq/sigilbuzz/issues/75`
-  Syllable classifier + Indic feature dispatch chain.
-- **Khmer 17x slower** — `https://github.com/Oneiriq/sigilbuzz/issues/76`
-  USE category classifier + state machine.
+1. **Hoist GSUB-id snapshot.** Context / chained-context / reverse-
+   chain matchers used to rebuild a `Vec<u16>` of every glyph id on
+   every cursor step. Now built once per `apply_gsub_lookup` call
+   (`GlyphIds`) and updated incrementally — Single/Alternate touch
+   one slot, Ligature/Multiple resync. Devanagari -17%.
 
-Hebrew and Latin sit within ~1.2x of rustybuzz and are not blocking;
-revisit if a future change knocks either above the 2x line.
+2. **Pre-parse subtables once per lookup.** ChainContextAny/
+   GsubContext format-3 parsing allocates four `Vec`s per call;
+   the cursor walk was paying that cost at every `at`. The parsed
+   form (`ParsedGsubSubtable`) is now constructed once at the
+   `apply_gsub_lookup` entry and reused across the whole cursor
+   walk. Devanagari -94%, Arabic -86%, Khmer -75%.
+
+3. **Run-level "would_apply" + per-cursor digest.** Each lookup
+   asks "any glyph in the run in any subtable's primary coverage?"
+   before walking. Within the walk, only cursors whose glyph is in
+   the digest get full subtable dispatch; the rest skip with a
+   single `cov.contains` per parsed subtable. Mirrors HarfBuzz's
+   skip-iterator gate. Devanagari -23%, Arabic -37%, Khmer -47%.
+
+The chain-context matchers were also reordered to check input[0]
+before walking backtrack (HarfBuzz semantics), and the per-syllable
+`compute_half_mask` dry-run memoises `feature_would_substitute`
+results so repeated `(halant, c2)` pairs don't re-walk GSUB.
+
+Latin and Hebrew benefit indirectly: the cursor walk savings apply
+to default `liga`/`calt`/`clig` and `mark`/`mkmk` GPOS as well —
+both ratios now sit *below* rustybuzz on this corpus.
 
 ## sigilbuzz-gpu encode bench
 

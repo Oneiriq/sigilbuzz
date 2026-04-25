@@ -89,6 +89,12 @@ impl<'a> Ligature<'a> {
         })
     }
 
+    /// Coverage table for the run-level "would_apply" precheck.
+    #[must_use]
+    pub const fn coverage(&self) -> &Coverage<'a> {
+        &self.coverage
+    }
+
     /// Tries to match a ligature starting at `glyphs[0]`. Returns the
     /// output glyph id and the number of input glyphs consumed when a
     /// ligature fires; `None` when no rule in this subtable matches.
@@ -156,11 +162,24 @@ impl<'a> Ligature<'a> {
 /// where `positions[k]` is the relative index into `glyphs` of the
 /// `k`-th matched component. The first component is always at index
 /// 0 — the caller gated it via coverage.
+///
+/// The two-pass shape (verify the tail components first, then
+/// allocate the positions `Vec` only on success) is deliberate: the
+/// matcher is called once per cursor that passes the lookup's
+/// coverage, which on Indic / Arabic corpora vastly outnumbers actual
+/// ligature hits. Reserving heap on every speculative call is what
+/// the Devanagari profile flagged.
 fn try_match_ligature_filtered(
     lig_bytes: &[u8],
     glyphs: &[u16],
     filter: &MatchFilter<'_>,
 ) -> Option<(u16, alloc::vec::Vec<usize>)> {
+    // Stack-buffered scan: walk every tail component and remember its
+    // matched index. We can fit up to `STACK` components without
+    // spilling (HarfBuzz hard-caps the same number); fall back to
+    // heap only for genuinely pathological ligatures.
+    const STACK: usize = 16;
+
     let mut r = Reader::new(lig_bytes);
     let ligature_glyph = r.read_u16().ok()?;
     let component_count = r.read_u16().ok()?;
@@ -169,8 +188,9 @@ fn try_match_ligature_filtered(
     }
     let tail = component_count as usize - 1;
     let tail_bytes = r.read_bytes(tail * 2).ok()?;
-    let mut positions = alloc::vec::Vec::with_capacity(component_count as usize);
-    positions.push(0);
+    let mut stack_positions: [usize; STACK] = [0; STACK];
+    let mut heap_positions: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+    let use_stack = tail < STACK;
     let mut cursor = 1usize;
     for i in 0..tail {
         let expected = u16::from_be_bytes([tail_bytes[i * 2], tail_bytes[i * 2 + 1]]);
@@ -178,9 +198,28 @@ fn try_match_ligature_filtered(
         if glyphs[pos] != expected {
             return None;
         }
-        positions.push(pos);
+        if use_stack {
+            stack_positions[i] = pos;
+        } else {
+            if heap_positions.is_empty() {
+                heap_positions.reserve(component_count as usize);
+            }
+            heap_positions.push(pos);
+        }
         cursor = pos + 1;
     }
+    let mut positions = if use_stack {
+        let mut v = alloc::vec::Vec::with_capacity(component_count as usize);
+        v.push(0);
+        v.extend_from_slice(&stack_positions[..tail]);
+        v
+    } else {
+        let mut v = alloc::vec::Vec::with_capacity(component_count as usize);
+        v.push(0);
+        v.extend_from_slice(&heap_positions);
+        v
+    };
+    let _ = &mut positions; // ensure compiler keeps the chosen path
     Some((ligature_glyph, positions))
 }
 

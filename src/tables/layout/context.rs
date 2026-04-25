@@ -1014,16 +1014,9 @@ impl<'a> ChainContext3<'a> {
         i: usize,
         filter: &MatchFilter<'_>,
     ) -> Option<usize> {
-        // Backtrack — walk left from `i`.
-        let mut bt_cursor = i;
-        for cov in &self.backtrack {
-            let pos = filter.prev_unskipped(glyphs, bt_cursor)?;
-            if !cov.contains(glyphs[pos]) {
-                return None;
-            }
-            bt_cursor = pos;
-        }
-        // Input — first at position i, rest via next_unskipped.
+        // Cheapest test first: input[0] must match the cursor glyph.
+        // Most cursor positions fail here, so checking before walking
+        // backtrack avoids `prev_unskipped` work we'd throw away.
         if self.input.is_empty() {
             // Spec-wise empty input is degenerate; report a zero-span
             // match so the caller can still advance by one.
@@ -1041,6 +1034,15 @@ impl<'a> ChainContext3<'a> {
             }
             last = pos;
             cursor = pos + 1;
+        }
+        // Backtrack — walk left from `i`.
+        let mut bt_cursor = i;
+        for cov in &self.backtrack {
+            let pos = filter.prev_unskipped(glyphs, bt_cursor)?;
+            if !cov.contains(glyphs[pos]) {
+                return None;
+            }
+            bt_cursor = pos;
         }
         // Lookahead — walk right from last+1.
         let mut la_cursor = last + 1;

@@ -72,6 +72,14 @@ impl<'a> Multiple<'a> {
         })
     }
 
+    /// Coverage table — exposed so the shape driver can run a fast
+    /// "any glyph in run might trigger this subtable" precheck before
+    /// committing to a full cursor walk.
+    #[must_use]
+    pub const fn coverage(&self) -> &Coverage<'a> {
+        &self.coverage
+    }
+
     /// Returns the substitute glyph sequence for `glyph`, or `None`
     /// when this subtable does not cover it.
     #[must_use]

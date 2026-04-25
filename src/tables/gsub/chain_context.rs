@@ -124,6 +124,15 @@ impl<'a> ChainContext<'a> {
         (self.backtrack.len(), self.input.len(), self.lookahead.len())
     }
 
+    /// Coverage of the first input glyph, exposed for the run-level
+    /// "would_apply" precheck. `None` only for the rare empty-input
+    /// chain rule, where the lookup matches at every cursor — caller
+    /// then conservatively schedules the cursor walk.
+    #[must_use]
+    pub fn input_first_coverage(&self) -> Option<&Coverage<'a>> {
+        self.input.first()
+    }
+
     /// The nested-lookup records that fire on a successful match.
     #[must_use]
     pub fn substitutions(&self) -> &[SubstLookupRecord] {
@@ -155,17 +164,12 @@ impl<'a> ChainContext<'a> {
         i: usize,
         filter: &MatchFilter<'_>,
     ) -> Option<usize> {
-        // Backtrack.
-        let mut bt_cursor = i;
-        for cov in &self.backtrack {
-            let pos = filter.prev_unskipped(glyphs, bt_cursor)?;
-            if !cov.contains(glyphs[pos]) {
-                return None;
-            }
-            bt_cursor = pos;
-        }
-        // Input. Empty input is a zero-width assertion — fall
-        // through to lookahead using the caller's anchor position.
+        // Cheapest test first: input[0] must match the cursor glyph.
+        // Most cursor positions fail here (a lookup's coverage usually
+        // selects a small subset of the run), so checking before the
+        // backtrack walk avoids `prev_unskipped` calls we'd otherwise
+        // throw away. This swap is what HarfBuzz does and shaves the
+        // bulk of the per-cursor cost on Devanagari `pres`/`abvs`/...
         let (last, after) = if self.input.is_empty() {
             (i, i)
         } else {
@@ -184,6 +188,15 @@ impl<'a> ChainContext<'a> {
             }
             (last, last + 1)
         };
+        // Backtrack.
+        let mut bt_cursor = i;
+        for cov in &self.backtrack {
+            let pos = filter.prev_unskipped(glyphs, bt_cursor)?;
+            if !cov.contains(glyphs[pos]) {
+                return None;
+            }
+            bt_cursor = pos;
+        }
         // Lookahead.
         let mut la_cursor = after;
         for cov in &self.lookahead {
