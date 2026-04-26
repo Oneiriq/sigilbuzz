@@ -86,5 +86,30 @@ pub use shape::{shape, Feature};
 pub use ot::arabic::JoiningForm;
 pub use ot::feature;
 
+// --- Curated stable re-exports from `unicode::*` ---------------------------
+//
+// As with `ot`, the `unicode` module remains `#[doc(hidden)]` while
+// its core property-classification surface graduates to a stable
+// crate-root name. `Script` is re-exported as `UnicodeScript` to
+// disambiguate from any future `ot::Script` (script-tag enum); the
+// `script_of` and `is_hangul_jamo` helpers are the canonical
+// char-to-script entry points.
+//
+// Promoted in 0.20.0:
+//   - `unicode::Script as UnicodeScript` — coarse script bucket
+//     consumed by `sigilbuzz-capi` for `hb_script_t` mapping.
+//   - `unicode::script_of`, `unicode::is_hangul_jamo` — char
+//     classifiers.
+//   - `unicode::bidi::BidiInfo` — UAX #9 result type (per-char
+//     embedding levels + paragraph direction + L2 reorder).
+//   - `unicode::bidi_class::{BidiClass, bidi_class}` — the
+//     UCD `Bidi_Class` enum and the char-to-class lookup.
+//   - `unicode::joining::JoiningType` — Arabic / Mongolian
+//     joining-type enum.
+pub use unicode::bidi::BidiInfo;
+pub use unicode::bidi_class::{bidi_class, BidiClass};
+pub use unicode::joining::JoiningType;
+pub use unicode::{is_hangul_jamo, script_of, Script as UnicodeScript};
+
 /// Crate version, matching `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
