@@ -110,15 +110,12 @@ debug = true
 missing_docs = "warn"
 unsafe_op_in_unsafe_fn = "warn"
 
-# Root-crate-only clippy enforcement. The shaper has the deepest parser
-# code and the densest existing pedantic-clean coverage, so it stays at
-# pedantic-warn. Companion crates have not been audited at this level
-# yet — promoting them is a follow-up issue per crate.
-[lints.rust]
-missing_docs = "warn"
-unsafe_op_in_unsafe_fn = "warn"
-
-[lints.clippy]
+# Workspace-wide clippy enforcement. Hoisted in 0.20.0 after the
+# companion-crate pedantic cleanup (was previously root-only because
+# hoisting it surfaced ~100 pre-existing violations across the 11
+# companion crates — those have now been fixed or narrowly allowed,
+# see commit history on chore/companion-pedantic-cleanup).
+[workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 # Selectively relaxed — these fire on patterns that are idiomatic in a
@@ -127,6 +124,11 @@ cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 cast_lossless = "allow"       # `b'A' as u16` in test fixtures is clearer than `u16::from(b'A')`
 cast_sign_loss = "allow"      # `i16 as u16` for OpenType delta arithmetic is deliberate
+# `cast_possible_wrap` rounds out the cast family for binary parsers:
+# OpenType offsets are stored as `usize` in our parsers but written
+# back as `i32`/`i16` in encoded tables. The wrap is intentional and
+# bounded by the format spec, not a correctness concern.
+cast_possible_wrap = "allow"
 # doc_markdown fires constantly on CamelCase OpenType names like
 # ScriptList / FeatureList / ValueRecord / GSUB that are genuine
 # English prose references, not Rust identifiers. Relaxing it lets
@@ -142,3 +144,107 @@ missing_panics_doc = "allow"
 # public-API-doc rule and let private items document themselves on a
 # best-effort basis.
 missing_docs_in_private_items = "allow"
+# Companion-crate pedantic exemptions. These fire across the binary
+# encoder/decoder code in sigilbuzz-subset, sigilbuzz-woff,
+# sigilbuzz-gpu, sigilbuzz-pdf and the parser code in
+# sigilbuzz-text-layout. Each is idiomatic for the work done at
+# that layer, not a correctness concern.
+#
+# `similar_names`: parser locals like `idx`/`index`, `glyph`/`glyph_id`,
+# `coord`/`coords` collide constantly. Fighting clippy here just makes
+# the parser harder to read.
+similar_names = "allow"
+# `items_after_statements`: encoder code groups inline `const` byte
+# tables and helper structs next to their first use site for locality.
+items_after_statements = "allow"
+# `bool_to_int_with_if`: byte-level encoding (`if flag { 1 } else { 0 }`
+# packed into a header byte) reads more clearly as an `if` than
+# `u8::from(flag)`.
+bool_to_int_with_if = "allow"
+# `match_bool` / `single_match_else`: explicit match-on-bool/Option
+# patterns appear in encoder code where future variants are anticipated
+# (e.g. WOFF2 transform variants).
+match_bool = "allow"
+single_match_else = "allow"
+# `float_cmp`: COLRv1 / variation-store code compares `f32` axis
+# coordinates and gradient stops bit-exactly against canonical values
+# (0.0, 1.0, default). Tolerance comparisons would be wrong here.
+float_cmp = "allow"
+# `too_many_lines`: parsers for CFF/CFF2 INDEX/Top DICT, WOFF2 transform
+# tables, and gvar variation stores are intrinsically long state
+# machines. Splitting them obscures the spec mapping.
+too_many_lines = "allow"
+# `struct_field_names`: e.g. `glyf_slot` / `loca_slot` / `cff_slot`
+# pattern in subset table allocation — the postfix carries semantic
+# meaning, not redundancy.
+struct_field_names = "allow"
+# `unnecessary_wraps`: many parser entry points return `Result` even
+# when the current implementation cannot fail, because the format
+# permits future error paths and external callers code against the
+# fallible signature.
+unnecessary_wraps = "allow"
+# `trivially_copy_pass_by_ref`: a handful of helper signatures take
+# `&Tag` / `&u32` for symmetry with neighbouring fns that take a
+# real reference. Enforcing by-value here would make the signatures
+# inconsistent across each module.
+trivially_copy_pass_by_ref = "allow"
+# `redundant_closure_for_method_calls`: `.map(|b| b.to_vec())` is
+# clearer than the `<[u8]>::to_vec` method-pointer suggestion in the
+# subset crate.
+redundant_closure_for_method_calls = "allow"
+# `single_match`: tolerated in parser dispatch tables where future
+# arms are documented in the spec but not yet implemented.
+single_match = "allow"
+# `manual_let_else`: a couple of pre-1.65-style `match` blocks remain
+# in subset/woff parsers where the early-return shape is more readable
+# than the `let ... else` form.
+manual_let_else = "allow"
+# `unreadable_literal`: hex constants for OT tags / WOFF2 magic bytes
+# are intentionally unseparated.
+unreadable_literal = "allow"
+# `map_unwrap_or`: `.map(f).unwrap_or(default)` is more readable than
+# `.map_or(default, f)` when the closure or default is non-trivial,
+# which is the common case in subset/pdf parsers.
+map_unwrap_or = "allow"
+# `struct_excessive_bools`: subset options structs (SubsetOptions etc.)
+# are flag bags by design — turning them into bitflags would change
+# the public API for no readability gain.
+struct_excessive_bools = "allow"
+# `many_single_char_names`: 2D affine transform code uses the
+# canonical CSS / PostScript `a, b, c, d, e, f` matrix naming. The
+# single-letter names *are* the spec.
+many_single_char_names = "allow"
+# `match_same_arms`: parser dispatch tables sometimes have identical
+# bodies for distinct arms because the spec assigns different
+# semantic meaning to each tag — collapsing them would lose the
+# documentation value of the explicit arm list.
+match_same_arms = "allow"
+# `explicit_iter_loop`: `BTreeMap::iter_mut()` cannot be replaced
+# with `&mut *m` because BTreeMap doesn't implement DerefMut. The
+# explicit form is required, not stylistic.
+explicit_iter_loop = "allow"
+# `needless_continue` in render/src/svg.rs is owned by the
+# svg-mask-text-on-path agent and intentionally retained for the
+# loop's structural symmetry across tag-kind dispatch arms.
+needless_continue = "allow"
+# `uninlined_format_args`: fires in test fixtures where `format!("{}", x)`
+# patterns predate the captured-identifier syntax. Net stylistic; we
+# don't want a churn-PR over it.
+uninlined_format_args = "allow"
+# `needless_pass_by_value`: clap-derived cli `Args` structs are
+# consumed by their `run(args)` entry points by convention — taking
+# them by value matches the standard `clap` example and lets
+# subcommands move owned `PathBuf`s without an extra `.clone()`.
+needless_pass_by_value = "allow"
+# `borrow_as_ptr`: `&x as *const T` and `addr_of!(x)` are equivalent
+# but the former is more idiomatic in the FFI-heavy capi crate.
+borrow_as_ptr = "allow"
+# `checked_conversions`: `x <= u16::MAX as u32` reads more clearly as
+# a numeric comparison than `u16::try_from(x).is_ok()` in some hot
+# paths; we accept both forms.
+checked_conversions = "allow"
+
+# Root crate inherits the workspace lint baseline. No per-crate
+# additions — the shaper already conforms to the strictest level.
+[lints]
+workspace = true
