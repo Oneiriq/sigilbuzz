@@ -13,6 +13,9 @@ use sigilbuzz_render::{Pixmap, Rasterizer};
 
 const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
 const RUBIK: &[u8] = include_bytes!("../../../tests/fixtures/rubik_vf.ttf");
+const SOURCE_SANS_VF: &[u8] = include_bytes!("../../../tests/fonts/SourceSans3VF-Latin-Subset.otf");
+const SOURCE_CODE_PRO: &[u8] =
+    include_bytes!("../../../tests/fonts/SourceCodePro-Latin-Subset.otf");
 
 fn count_lit(p: &Pixmap) -> usize {
     p.data.iter().filter(|&&a| a > 0).count()
@@ -93,6 +96,33 @@ fn bad_size_is_rejected() {
     assert!(rast
         .rasterize_glyph(&face, gid, f32::INFINITY, &[])
         .is_err());
+}
+
+#[test]
+fn source_sans_vf_cff2_a_rasterizes_with_lit_pixels() {
+    // Regression for issue #209: before the CFF2 INDEX-count fix, the
+    // CharStrings INDEX was parsed as zero-length and Face::glyph_outline
+    // returned Ok(None), which surfaced here as RenderError::NoOutline.
+    let blob = Blob::new(SOURCE_SANS_VF);
+    let face = Face::parse(&blob, 0).unwrap();
+    let gid = glyph_for(&face, 'A');
+    let rast = Rasterizer::new();
+    let pix = rast.rasterize_glyph(&face, gid, 48.0, &[]).unwrap();
+    assert!(pix.width > 0 && pix.height > 0, "empty pixmap");
+    assert!(count_lit(&pix) > 0, "no pixels lit on Source Sans 3 VF 'A'");
+    assert!(count_partial(&pix) > 0, "no anti-aliased pixels");
+}
+
+#[test]
+fn source_code_pro_cff1_a_rasterizes_with_lit_pixels() {
+    // Coverage for the static-CFF1 path. Same outline plumbing —
+    // ensures the fix to read_index didn't break u16 INDEX parsing.
+    let blob = Blob::new(SOURCE_CODE_PRO);
+    let face = Face::parse(&blob, 0).unwrap();
+    let gid = glyph_for(&face, 'A');
+    let rast = Rasterizer::new();
+    let pix = rast.rasterize_glyph(&face, gid, 48.0, &[]).unwrap();
+    assert!(count_lit(&pix) > 0, "no pixels lit on Source Code Pro 'A'");
 }
 
 #[test]
