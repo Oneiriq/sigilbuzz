@@ -320,3 +320,207 @@ fn colrv0_composition_is_deterministic() {
     let b = rast.rasterize_colrv0_glyph(&face, 0, 0, 64.0, &[]).unwrap();
     assert_eq!(a, b);
 }
+
+#[test]
+fn colrv0_oob_palette_index_with_real_layers_errors() {
+    // Sanity: when a layer has a real palette entry, an out-of-range
+    // palette index already errors via the per-layer cpal lookup.
+    let bytes = build_colrv0_font();
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    let rast = Rasterizer::new();
+    let err = rast
+        .rasterize_colrv0_glyph(&face, 0, 999, 24.0, &[])
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            sigilbuzz_render::RenderError::BadPaletteIndex { palette: 999, .. }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// Build a COLRv0 font where both layers are flagged as foreground
+/// (`palette_index == 0xFFFF`). The pre-fix rasterizer would happily
+/// accept any user-supplied palette_index here because the
+/// per-layer `cpal.color()` lookup is skipped for foreground layers.
+#[allow(clippy::too_many_lines)]
+fn build_colrv0_foreground_only_font() -> Vec<u8> {
+    let head = {
+        let mut h = Vec::new();
+        h.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        h.extend_from_slice(&0u32.to_be_bytes());
+        h.extend_from_slice(&0u32.to_be_bytes());
+        h.extend_from_slice(&0x5F0F_3CF5u32.to_be_bytes());
+        h.extend_from_slice(&0u16.to_be_bytes());
+        h.extend_from_slice(&1024u16.to_be_bytes());
+        h.extend_from_slice(&0u64.to_be_bytes());
+        h.extend_from_slice(&0u64.to_be_bytes());
+        h.extend_from_slice(&0i16.to_be_bytes());
+        h.extend_from_slice(&0i16.to_be_bytes());
+        h.extend_from_slice(&500i16.to_be_bytes());
+        h.extend_from_slice(&500i16.to_be_bytes());
+        h.extend_from_slice(&0u16.to_be_bytes());
+        h.extend_from_slice(&8u16.to_be_bytes());
+        h.extend_from_slice(&2i16.to_be_bytes());
+        h.extend_from_slice(&0i16.to_be_bytes());
+        h.extend_from_slice(&0i16.to_be_bytes());
+        align4(&mut h);
+        h
+    };
+    let maxp = {
+        let mut m = Vec::new();
+        m.extend_from_slice(&0x0000_5000u32.to_be_bytes());
+        m.extend_from_slice(&3u16.to_be_bytes());
+        align4(&mut m);
+        m
+    };
+    let hhea = {
+        let mut h = Vec::new();
+        h.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        h.extend_from_slice(&800i16.to_be_bytes());
+        h.extend_from_slice(&(-200i16).to_be_bytes());
+        h.extend_from_slice(&0i16.to_be_bytes());
+        h.extend_from_slice(&500u16.to_be_bytes());
+        h.extend_from_slice(&0i16.to_be_bytes());
+        h.extend_from_slice(&0i16.to_be_bytes());
+        h.extend_from_slice(&500i16.to_be_bytes());
+        h.extend_from_slice(&1i16.to_be_bytes());
+        h.extend_from_slice(&0i16.to_be_bytes());
+        h.extend_from_slice(&0i16.to_be_bytes());
+        for _ in 0..4 {
+            h.extend_from_slice(&0i16.to_be_bytes());
+        }
+        h.extend_from_slice(&0i16.to_be_bytes());
+        h.extend_from_slice(&3u16.to_be_bytes());
+        align4(&mut h);
+        h
+    };
+    let hmtx = {
+        let mut m = Vec::new();
+        for _ in 0..3 {
+            m.extend_from_slice(&500u16.to_be_bytes());
+            m.extend_from_slice(&0i16.to_be_bytes());
+        }
+        align4(&mut m);
+        m
+    };
+    let red = build_square_glyph(0, 0, 200, 200);
+    let blue = build_square_glyph(100, 100, 300, 300);
+    let mut glyf = Vec::new();
+    let off0 = glyf.len();
+    let off1 = glyf.len();
+    glyf.extend_from_slice(&red);
+    align2(&mut glyf);
+    let off2 = glyf.len();
+    glyf.extend_from_slice(&blue);
+    align2(&mut glyf);
+    let off3 = glyf.len();
+    align4(&mut glyf);
+    let loca = {
+        let mut l = Vec::new();
+        for off in [off0, off1, off2, off3] {
+            l.extend_from_slice(&((off / 2) as u16).to_be_bytes());
+        }
+        align4(&mut l);
+        l
+    };
+    // Single-palette CPAL — important: num_palettes = 1.
+    let cpal = {
+        let mut c = Vec::new();
+        c.extend_from_slice(&0u16.to_be_bytes());
+        c.extend_from_slice(&1u16.to_be_bytes());
+        c.extend_from_slice(&1u16.to_be_bytes());
+        c.extend_from_slice(&1u16.to_be_bytes());
+        c.extend_from_slice(&14u32.to_be_bytes());
+        c.extend_from_slice(&0u16.to_be_bytes());
+        c.push(0);
+        c.push(0);
+        c.push(0);
+        c.push(255);
+        align4(&mut c);
+        c
+    };
+    // COLR v0: both layers carry palette_index = 0xFFFF (foreground).
+    let colr = {
+        let mut c = Vec::new();
+        c.extend_from_slice(&0u16.to_be_bytes());
+        c.extend_from_slice(&1u16.to_be_bytes());
+        let base_slot = c.len();
+        c.extend_from_slice(&0u32.to_be_bytes());
+        let layer_slot = c.len();
+        c.extend_from_slice(&0u32.to_be_bytes());
+        c.extend_from_slice(&2u16.to_be_bytes());
+        let base_off = c.len() as u32;
+        c[base_slot..base_slot + 4].copy_from_slice(&base_off.to_be_bytes());
+        c.extend_from_slice(&0u16.to_be_bytes());
+        c.extend_from_slice(&0u16.to_be_bytes());
+        c.extend_from_slice(&2u16.to_be_bytes());
+        let layer_off = c.len() as u32;
+        c[layer_slot..layer_slot + 4].copy_from_slice(&layer_off.to_be_bytes());
+        c.extend_from_slice(&1u16.to_be_bytes());
+        c.extend_from_slice(&0xFFFFu16.to_be_bytes());
+        c.extend_from_slice(&2u16.to_be_bytes());
+        c.extend_from_slice(&0xFFFFu16.to_be_bytes());
+        align4(&mut c);
+        c
+    };
+    let payloads: Vec<([u8; 4], &[u8])> = vec![
+        (*b"COLR", colr.as_slice()),
+        (*b"CPAL", cpal.as_slice()),
+        (*b"glyf", glyf.as_slice()),
+        (*b"head", head.as_slice()),
+        (*b"hhea", hhea.as_slice()),
+        (*b"hmtx", hmtx.as_slice()),
+        (*b"loca", loca.as_slice()),
+        (*b"maxp", maxp.as_slice()),
+    ];
+    let num_tables = payloads.len() as u16;
+    let header_len = 12 + num_tables as usize * 16;
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    out.extend_from_slice(&num_tables.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    let mut cursor = header_len as u32;
+    let mut directory: Vec<[u8; 16]> = Vec::with_capacity(payloads.len());
+    for (tag, body) in &payloads {
+        directory.push(record(*tag, cursor, body.len() as u32));
+        cursor += body.len() as u32;
+    }
+    for d in &directory {
+        out.extend_from_slice(d);
+    }
+    for (_, body) in &payloads {
+        out.extend_from_slice(body);
+    }
+    out
+}
+
+#[test]
+fn colrv0_oob_palette_index_with_foreground_only_layers_errors() {
+    // Regression for issue #203 — pre-fix rasterizer accepted any
+    // palette_index when every layer was a foreground sentinel
+    // (0xFFFF) because the per-layer cpal lookup that would have
+    // detected the bad index was skipped.
+    let bytes = build_colrv0_foreground_only_font();
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    let rast = Rasterizer::new();
+    // Valid palette index 0 must succeed.
+    let ok = rast.rasterize_colrv0_glyph(&face, 0, 0, 32.0, &[]);
+    assert!(ok.is_ok(), "valid palette: {:?}", ok.err());
+    // Out-of-range palette index 5 (font has 1 palette) must error.
+    let err = rast
+        .rasterize_colrv0_glyph(&face, 0, 5, 32.0, &[])
+        .expect_err("oob palette must error");
+    assert!(
+        matches!(
+            err,
+            sigilbuzz_render::RenderError::BadPaletteIndex { palette: 5, .. }
+        ),
+        "got {err:?}"
+    );
+}
