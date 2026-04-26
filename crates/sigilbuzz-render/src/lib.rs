@@ -83,10 +83,12 @@
 //!
 //! # Out of scope
 //!
-//! - sbix `'tiff'` / `'jp2 '` decoding (deferred — these are rare in
-//!   font embeds and each is its own ~700-line decoder). sbix `'jpg '`
+//! - sbix `'jp2 '` decoding (deferred — JPEG-2000 is rare in font
+//!   embeds and would be its own substantial decoder). sbix `'jpg '`
 //!   *is* now decoded via the hand-rolled baseline decoder in
-//!   [`decode_jpeg`].
+//!   [`decode_jpeg`], and sbix `'tiff'` is decoded via the baseline
+//!   subset in [`decode_tiff`] (uncompressed RGB(A) and PackBits;
+//!   LZW / JPEG-in-TIFF / tiled / multi-IFD remain unsupported).
 //! - Subpixel text positioning beyond what the trapezoid rasterizer
 //!   naturally provides.
 //! - Hinting.
@@ -108,6 +110,7 @@ mod png_encode;
 mod raster;
 mod rasterizer;
 mod svg;
+mod tiff_decode;
 
 pub use affine::Affine;
 pub use bitmaps::{decode_ebdt_mono, decode_png, rasterize_bitmap_glyph, rescale_bilinear};
@@ -120,6 +123,7 @@ pub use jpeg_decode::decode_jpeg;
 pub use pixmap::{ColorPixmap, Pixmap};
 pub use png_encode::{encode_png, encode_png_alpha};
 pub use rasterizer::Rasterizer;
+pub use tiff_decode::decode_tiff;
 
 /// Crate version, matching `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

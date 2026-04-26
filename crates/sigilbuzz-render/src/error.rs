@@ -51,6 +51,13 @@ pub enum RenderError {
     /// precision, JPEG2000 / TIFF, restart markers, etc.). The
     /// static string identifies the specific failure.
     BadJpeg(&'static str),
+    /// TIFF payload failed structural validation (header magic, byte
+    /// order mark, IFD shape, strip offsets, length mismatch). The
+    /// static string identifies the specific failure. Well-formed but
+    /// out-of-scope features (LZW / JPEG-in-TIFF / tiled / planar /
+    /// non-RGB photometric / non-8-bit) surface as
+    /// [`RenderError::UnsupportedBitmap`] instead.
+    BadTiff(&'static str),
     /// The font has no SVG document for this glyph id (either the
     /// `SVG ` table is absent or the gid sits outside every record's
     /// range).
@@ -85,6 +92,7 @@ impl fmt::Display for RenderError {
             Self::BitmapDecodeFailed(msg) => write!(f, "bitmap decode failed: {msg}"),
             Self::BadPng(msg) => write!(f, "PNG decode failed: {msg}"),
             Self::BadJpeg(msg) => write!(f, "JPEG decode failed: {msg}"),
+            Self::BadTiff(msg) => write!(f, "TIFF decode failed: {msg}"),
             Self::SvgNotFound(g) => write!(f, "glyph {g} has no SVG document"),
             Self::SvgGzipped => f.write_str("SVG document is gzip-compressed"),
         }

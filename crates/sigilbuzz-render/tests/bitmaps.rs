@@ -352,7 +352,10 @@ fn decode_jpeg_rejects_empty_input() {
 }
 
 #[test]
-fn sbix_tiff_returns_unsupported_not_panic() {
+fn sbix_tiff_truncated_surfaces_bad_tiff() {
+    // 4-byte payload trips the baseline TIFF decoder's header-length
+    // guard; the dedicated `BadTiff` arm replaces the old wholesale
+    // `UnsupportedBitmap` deferral.
     let glyphs = vec![None, Some((*b"tiff", vec![0x49, 0x49, 0x2a, 0x00]))];
     let sbix = build_sbix_strike(2, 16, &glyphs);
     let font = build_sfnt(vec![(*b"maxp", maxp_05(2)), (*b"sbix", sbix)]);
@@ -362,7 +365,7 @@ fn sbix_tiff_returns_unsupported_not_panic() {
     let err = rast
         .rasterize_bitmap_glyph(&face, 1, 16.0, &[])
         .unwrap_err();
-    assert!(matches!(err, RenderError::UnsupportedBitmap));
+    assert!(matches!(err, RenderError::BadTiff(_)));
 }
 
 /// Builds an EBDT format-1 entry: 5-byte SmallGlyphMetrics followed
