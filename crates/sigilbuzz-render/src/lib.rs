@@ -38,7 +38,7 @@
 //!
 //! # Out of scope
 //!
-//! - SVG-in-OT, CBDT/CBLC, EBDT/EBLC, sbix bitmap embeds.
+//! - CBDT/CBLC, EBDT/EBLC, sbix bitmap embeds.
 //! - Subpixel text positioning beyond what the trapezoid rasterizer
 //!   naturally provides.
 //! - Hinting.
@@ -56,6 +56,7 @@ mod flatten;
 mod pixmap;
 mod raster;
 mod rasterizer;
+mod svg;
 
 pub use affine::Affine;
 pub use error::RenderError;
