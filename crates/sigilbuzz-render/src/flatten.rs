@@ -17,9 +17,22 @@ use sigilbuzz::tables::PathOp;
 
 use crate::affine::Affine;
 
+/// Default curve flattening tolerance in device pixels.
+///
+/// Matches the value used internally by [`crate::Rasterizer`] and is
+/// suitable for AA glyph rendering at typical UI sizes. Downstream
+/// MSDF / glyph-cache consumers should generally pass this unless they
+/// have a specific reason to subdivide more or less aggressively.
+pub const DEFAULT_TOLERANCE: f32 = 0.25;
+
 /// One straight edge in pixel coordinates.
+///
+/// Produced by [`flatten`]. Coordinates are post-transform — the
+/// [`Affine`] applied during flattening has already moved them into
+/// device-pixel space, so consumers can read them directly without
+/// re-applying the design-units → pixels mapping.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Segment {
+pub struct Segment {
     /// Start x (pixel space).
     pub x0: f32,
     /// Start y (pixel space).
@@ -30,12 +43,42 @@ pub(crate) struct Segment {
     pub y1: f32,
 }
 
-/// Flattens `outline` into segments through `xform`.
+/// Flattens an outline path into a list of straight pixel-space segments.
+///
+/// Walks `ops` (a [`PathOp`] stream from
+/// [`sigilbuzz::Face::glyph_outline`]) and emits one [`Segment`] per
+/// straight edge in the flattened contour. Quadratic and cubic Béziers
+/// are subdivided with adaptive midpoint de Casteljau until each chord
+/// is within `tolerance` pixels of the true curve. `xform` is applied
+/// to each control point before subdivision, so the returned segments
+/// are already in device-pixel space.
 ///
 /// `tolerance` is the maximum chord-to-curve perpendicular error in
-/// pixel-space units. Smaller is more accurate and slower; the
-/// rasterizer uses `0.25` by default.
-pub(crate) fn flatten<I>(ops: I, xform: &Affine, tolerance: f32) -> Vec<Segment>
+/// pixel-space units. Smaller is more accurate and slower; pass
+/// [`DEFAULT_TOLERANCE`] (`0.25`) for AA-quality rendering.
+///
+/// `Close` ops emit an explicit terminator segment back to the last
+/// `MoveTo`, so the returned `Vec<Segment>` is a complete edge list
+/// suitable for scanline rasterization, MSDF generation, or any other
+/// edge-list consumer.
+///
+/// # Example
+///
+/// ```
+/// use sigilbuzz_render::{flatten, Affine, DEFAULT_TOLERANCE};
+/// use sigilbuzz::tables::PathOp;
+///
+/// let ops = vec![
+///     PathOp::MoveTo { x: 0.0, y: 0.0 },
+///     PathOp::QuadTo { cx: 50.0, cy: 100.0, x: 100.0, y: 0.0 },
+///     PathOp::Close,
+/// ];
+/// let segments = flatten(ops, &Affine::identity(), DEFAULT_TOLERANCE);
+/// assert!(!segments.is_empty());
+/// // First segment starts at the path origin.
+/// assert!(segments[0].x0.abs() < 1e-5 && segments[0].y0.abs() < 1e-5);
+/// ```
+pub fn flatten<I>(ops: I, xform: &Affine, tolerance: f32) -> Vec<Segment>
 where
     I: IntoIterator<Item = PathOp>,
 {
