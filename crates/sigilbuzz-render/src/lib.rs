@@ -120,6 +120,7 @@ pub use jpeg_decode::decode_jpeg;
 pub use pixmap::{ColorPixmap, Pixmap};
 pub use png_encode::{encode_png, encode_png_alpha};
 pub use rasterizer::Rasterizer;
+pub use svg::{TextPathGlyph, TextPathInput};
 
 /// Crate version, matching `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

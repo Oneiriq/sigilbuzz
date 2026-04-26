@@ -57,14 +57,29 @@
 //!   compose end-to-end. Filters apply per shape (`element[filter=…]`);
 //!   group-level filter regions are rendered shape-by-shape.
 //!
+//! - `<textPath xlink:href="#id">` glyph placement along a referenced
+//!   `<path>`, via the consumer-pre-shape API
+//!   [`Rasterizer::rasterize_svg_glyph_with_text_paths`]. The renderer
+//!   does not shape text — the consumer feeds in pre-shaped
+//!   [`TextPathGlyph`] runs (one entry per visual glyph, carrying a
+//!   gid and a user-space x-advance), and the renderer walks the
+//!   referenced path's arc length, fetching each glyph's outline from
+//!   the same [`Face`] and translating it to the cumulative-advance
+//!   position. Glyphs are placed axis-aligned only — tangent rotation
+//!   is deferred to a follow-up. `side="right"` and path cycling
+//!   (`startOffset` past path end) are also deferred.
+//!
 //! Anything outside this list — filter primitives beyond the set above
 //! (`feTurbulence`, `feImage`, `feMorphology`, `feConvolveMatrix`,
 //! `feSpecularLighting`, `feDiffuseLighting`, `feComponentTransfer`,
 //! `feComposite` operators beyond source-over), `<mask>` with
 //! `maskUnits="objectBoundingBox"` or `mask-type="alpha"`, animations,
-//! scripting, `style=` attributes, `<text>` / `<textPath>` glyph
-//! rendering (text shaping is the consumer's responsibility — see
-//! sigilbuzz core) — is silently skipped.
+//! scripting, `style=` attributes, plain `<text>` rendering (text
+//! shaping is the consumer's responsibility — see sigilbuzz core) — is
+//! silently skipped. `<textPath>` is rendered only when the consumer
+//! supplies pre-shaped runs via the API above; un-paired `<textPath>`
+//! nodes (no matching [`TextPathInput`]) are silently skipped, matching
+//! the broader policy.
 //!
 //! ## Pipeline
 //!
@@ -217,6 +232,497 @@ impl Rasterizer {
         }
         Ok(out)
     }
+
+    /// Rasterizes the SVG document for `gid` and additionally places
+    /// pre-shaped glyph runs along any `<textPath>` nodes whose
+    /// `xlink:href` (or `href`) matches an entry in `text_paths`.
+    ///
+    /// sigilbuzz-render does not shape text — the consumer supplies
+    /// already-shaped [`TextPathGlyph`] runs (one record per visual
+    /// glyph, carrying a `gid` and a user-space `x_advance`). For each
+    /// matched `<textPath>` the renderer:
+    ///
+    /// 1. Resolves the referenced `<path>` from the document's defs.
+    /// 2. Flattens the path into chord polylines (curves use the same
+    ///    Roger-Willcocks-arc-length flattener `<stroke-dasharray>`
+    ///    uses, so cumulative-advance lands on the *true* curve sweep
+    ///    rather than the chord-shortened approximation).
+    /// 3. Walks the polyline by cumulative advance. For each glyph,
+    ///    fetches its outline via [`Face::glyph_outline_at_coords`],
+    ///    scales design units to user-space units by
+    ///    `font_size / units_per_em`, translates the outline to the
+    ///    path-position, and emits it into the canvas as if it were a
+    ///    document `<path>` filled with the inherited paint of the
+    ///    enclosing `<textPath>` (or fallback solid black if none).
+    ///
+    /// **Axis-aligned only.** Glyphs do not rotate to follow the path
+    /// tangent; this is a known PoC limitation flagged by PR #236's
+    /// defer-note and tracked for the next minor. `side="right"` and
+    /// path cycling beyond a single cumulative-advance walk are also
+    /// deferred — extra glyphs whose advance overruns the path's total
+    /// length are silently dropped.
+    ///
+    /// `coords` flows through to glyph outline lookups so variable
+    /// fonts produce the right outlines for the supplied axis position;
+    /// it does not affect the SVG document parse (SVG-in-OT documents
+    /// are static).
+    ///
+    /// # Errors
+    /// Same set as [`Self::rasterize_svg_glyph`], plus
+    /// [`RenderError::BadUpem`] when the font has zero units-per-em
+    /// (needed to scale glyph design units onto the SVG user space).
+    /// A `<textPath>` whose `xlink:href` points at a missing or
+    /// non-`<path>` def is silently skipped, matching the rest of the
+    /// `<svg>`-subset policy. Glyph outlines that fail to parse are
+    /// also silently skipped (the rest of the document still renders).
+    pub fn rasterize_svg_glyph_with_text_paths(
+        &self,
+        face: &Face<'_>,
+        gid: u16,
+        size_pt: f32,
+        coords: &[f32],
+        text_paths: &[TextPathInput<'_>],
+    ) -> Result<ColorPixmap, RenderError> {
+        if !size_pt.is_finite() || size_pt <= 0.0 {
+            return Err(RenderError::BadSize(size_pt));
+        }
+        let doc_record = face
+            .svg_document(gid)
+            .map_err(|_| RenderError::Parse("svg"))?
+            .ok_or(RenderError::SvgNotFound(gid))?;
+        if doc_record.gzipped {
+            return Err(RenderError::SvgGzipped);
+        }
+        let xml = core::str::from_utf8(doc_record.data).map_err(|_| RenderError::Parse("svg"))?;
+        let mut doc = parse_document(xml)?;
+
+        if doc.view_w <= 0.0 || doc.view_h <= 0.0 {
+            return Err(RenderError::Parse("svg viewBox"));
+        }
+
+        // Resolve text-path runs against the (re-parsed) XML tree and
+        // append their glyph fills to the document's fill list before
+        // raster pass. The fills land in user-space units alongside the
+        // rest of the document so the existing `world` transform maps
+        // them straight onto the canvas.
+        if !text_paths.is_empty() {
+            let head = face.head().map_err(|_| RenderError::Parse("head"))?;
+            let upem = f32::from(head.units_per_em);
+            if upem <= 0.0 {
+                return Err(RenderError::BadUpem);
+            }
+            let root = parse_xml(xml)?;
+            let mut defs = Defs::default();
+            collect_defs(&root, &mut defs);
+            append_text_path_fills(&mut doc, &root, &defs, face, coords, upem, text_paths);
+        }
+
+        let s = (size_pt / doc.view_w).min(size_pt / doc.view_h);
+        let world = Affine {
+            xx: s,
+            yx: 0.0,
+            xy: 0.0,
+            yy: s,
+            dx: -doc.view_x * s,
+            dy: -doc.view_y * s,
+        };
+        let width_f = (doc.view_w * s).round().max(1.0);
+        let height_f = (doc.view_h * s).round().max(1.0);
+        if !width_f.is_finite()
+            || !height_f.is_finite()
+            || width_f > MAX_RENDER_DIM
+            || height_f > MAX_RENDER_DIM
+        {
+            return Err(RenderError::BadSize(size_pt));
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let width = width_f as u32;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let height = height_f as u32;
+        let mut out = ColorPixmap::new(width, height);
+
+        let tol = self.flattening_tolerance();
+        for fill in &doc.fills {
+            render_fill(&mut out, fill, &world, tol);
+        }
+        Ok(out)
+    }
+}
+
+// =========================================================================
+// Public textPath API
+// =========================================================================
+
+/// Pre-shaped input for one `<textPath>` element.
+///
+/// sigilbuzz-render does not perform text shaping. To render a
+/// `<textPath xlink:href="#id">…</textPath>` the caller must
+/// pre-shape the contained text into a sequence of [`TextPathGlyph`]
+/// records (one per visual glyph) and pass them in via
+/// [`Rasterizer::rasterize_svg_glyph_with_text_paths`]. The renderer
+/// then walks the referenced path's arc length and translates each
+/// glyph's outline onto its cumulative-advance position.
+///
+/// `text_path_id` is the bare element id — the part after the `#` in
+/// `xlink:href="#id"`. Whichever `<textPath>` node matches by id has
+/// its content replaced with the supplied glyph runs (any text-bearing
+/// children inside the SVG `<textPath>` are ignored — this API is the
+/// sole text source).
+///
+/// `font_size` is the user-space height of one em; design-unit glyph
+/// outlines fetched from the [`Face`] are scaled by
+/// `font_size / units_per_em` before placement. This decouples the
+/// SVG document's user-space units from the font's design-unit grid.
+///
+/// `glyph_runs` is consumed in order. Cumulative `x_advance` walks the
+/// path; glyphs whose run-start position lands past the path's total
+/// arc length are silently dropped (path cycling is deferred — see the
+/// module-level docs).
+#[derive(Debug, Clone)]
+pub struct TextPathInput<'a> {
+    /// The `<path>` id this run targets. Matches the
+    /// `xlink:href="#id"` (or `href="#id"`) attribute on a
+    /// `<textPath>` node, with the leading `#` stripped.
+    pub text_path_id: &'a str,
+    /// User-space units per em — converts design-unit glyph outlines
+    /// to the document's coordinate space.
+    pub font_size: f32,
+    /// Pre-shaped glyph stream. Walked left-to-right; each glyph is
+    /// placed at the cumulative-advance position along the path.
+    pub glyph_runs: Vec<TextPathGlyph>,
+}
+
+/// One pre-shaped glyph in a [`TextPathInput`] run.
+///
+/// The consumer is responsible for shaping (cluster decomposition,
+/// kerning, ligatures, mark positioning) — sigilbuzz-render only
+/// places. `gid` indexes into the same [`Face`] that owns the SVG
+/// document; the renderer fetches its outline via
+/// [`Face::glyph_outline_at_coords`].
+///
+/// `x_advance` is in user-space units (the same coordinate system the
+/// SVG document's `viewBox` is expressed in). The glyph's *origin* is
+/// placed at the path-position corresponding to the *cumulative* run
+/// advance up to (and including) this glyph's pre-advance — i.e.
+/// glyph 0 sits at advance 0, glyph 1 sits at glyph-0's `x_advance`,
+/// and so on.
+#[derive(Debug, Clone, Copy)]
+pub struct TextPathGlyph {
+    /// Glyph id, indexed against the same [`Face`] passed to
+    /// [`Rasterizer::rasterize_svg_glyph_with_text_paths`].
+    pub gid: u16,
+    /// Cumulative-advance step in user-space units. The renderer adds
+    /// this to a running counter *after* placing the glyph, so the
+    /// first glyph is always at position 0 along the path.
+    pub x_advance: f32,
+}
+
+// =========================================================================
+// textPath resolution
+// =========================================================================
+
+/// Walks the parsed XML tree, locates `<textPath>` nodes whose
+/// `xlink:href` matches an entry in `text_paths`, resolves the
+/// referenced `<path>` definition, and emits one [`Fill`] per
+/// pre-shaped glyph translated onto the path's cumulative-advance
+/// position.
+///
+/// Glyphs are placed axis-aligned only — no tangent rotation. Glyph
+/// outlines come back in font design units (y-up); we flip y while
+/// scaling by `font_size / upem` so the result lives in the SVG
+/// document's user-space (y-down) alongside the rest of the parsed
+/// fills.
+///
+/// All failures (missing href, missing def, non-`<path>` def,
+/// un-parseable `d`, glyph outline lookup error, advance past path
+/// length) silently drop the offending glyph or run, matching the
+/// rest of the SVG-subset policy.
+fn append_text_path_fills(
+    doc: &mut SvgDoc,
+    root: &Node,
+    defs: &Defs<'_>,
+    face: &Face<'_>,
+    coords: &[f32],
+    upem: f32,
+    text_paths: &[TextPathInput<'_>],
+) {
+    let ctx = ElemCtx::default();
+    walk_for_text_paths(root, doc, defs, &ctx, face, coords, upem, text_paths, 0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_for_text_paths(
+    node: &Node,
+    doc: &mut SvgDoc,
+    defs: &Defs<'_>,
+    parent: &ElemCtx,
+    face: &Face<'_>,
+    coords: &[f32],
+    upem: f32,
+    text_paths: &[TextPathInput<'_>],
+    depth: u32,
+) {
+    if depth > MAX_GROUP_DEPTH {
+        return;
+    }
+    if doc.fills.len() >= MAX_FILLS {
+        return;
+    }
+    let ctx = inherit_attrs(parent, node);
+
+    if name_eq(&node.name, "textPath") {
+        let href = node
+            .attr("href")
+            .or_else(|| node.attr("xlink:href"))
+            .unwrap_or("");
+        let id = href.strip_prefix('#').unwrap_or("");
+        if !id.is_empty() {
+            if let Some(input) = text_paths.iter().find(|t| t.text_path_id == id) {
+                emit_text_path_fills(doc, defs, &ctx, face, coords, upem, id, input);
+            }
+        }
+        // `<textPath>` doesn't recurse into structural children for
+        // text-content extraction — the consumer-shaped runs are the
+        // sole source. Stop here.
+        return;
+    }
+
+    for child in &node.children {
+        walk_for_text_paths(
+            child,
+            doc,
+            defs,
+            &ctx,
+            face,
+            coords,
+            upem,
+            text_paths,
+            depth + 1,
+        );
+        if doc.fills.len() >= MAX_FILLS {
+            break;
+        }
+    }
+}
+
+/// Emits one [`Fill`] per pre-shaped glyph in `input`, placed along
+/// the `<path id=path_id>` defined elsewhere in `defs`.
+#[allow(clippy::too_many_arguments)]
+fn emit_text_path_fills(
+    doc: &mut SvgDoc,
+    defs: &Defs<'_>,
+    ctx: &ElemCtx,
+    face: &Face<'_>,
+    coords: &[f32],
+    upem: f32,
+    path_id: &str,
+    input: &TextPathInput<'_>,
+) {
+    let Some(target) = defs.lookup(path_id) else {
+        return;
+    };
+    if !name_eq(&target.name, "path") {
+        return;
+    }
+    let Some(d_attr) = target.attr("d") else {
+        return;
+    };
+    let Ok(path_ops) = parse_path_d(d_attr) else {
+        return;
+    };
+    if path_ops.is_empty() {
+        return;
+    }
+
+    // Path lives in document user-space; flatten in identity so chord
+    // coordinates land on the same space the rest of the SvgDoc fills
+    // already use. The world transform (doc → pixel) is applied per
+    // Fill at raster time, so we don't double-apply it here.
+    let polyline = build_arc_length_polyline(&path_ops);
+    if polyline.is_empty() {
+        return;
+    }
+    let total = polyline.last().map_or(0.0, |p| p.cum);
+    if total <= 0.0 {
+        return;
+    }
+
+    // Scale design units → user-space units. Y is flipped because
+    // OT outlines are y-up and SVG document space is y-down.
+    let scale = input.font_size / upem;
+
+    let fill_paint = resolve_fill_paint(defs, ctx).unwrap_or(Paint::Solid([0, 0, 0, 255]));
+
+    let mut cum = 0.0_f32;
+    for g in &input.glyph_runs {
+        if doc.fills.len() >= MAX_FILLS {
+            break;
+        }
+        if cum > total {
+            break;
+        }
+        let Some(pos) = sample_polyline_position(&polyline, cum) else {
+            break;
+        };
+        if let Ok(Some(outline)) = face.glyph_outline_at_coords(g.gid, coords) {
+            if !outline.is_empty() {
+                let translated = transform_outline_ops(outline.ops(), scale, pos.0, pos.1);
+                if !translated.is_empty() {
+                    doc.fills.push(Fill {
+                        ops: translated,
+                        paint: fill_paint.clone(),
+                        xform: ctx.xform,
+                        clip: ctx
+                            .clip_href
+                            .as_deref()
+                            .and_then(|id| resolve_clip_shape(defs, id)),
+                        is_stroke: false,
+                        filter: ctx
+                            .filter_href
+                            .as_deref()
+                            .and_then(|id| resolve_filter(defs, id)),
+                        mask: ctx
+                            .mask_href
+                            .as_deref()
+                            .and_then(|id| resolve_mask_shape(defs, id)),
+                    });
+                }
+            }
+        }
+        cum += g.x_advance;
+    }
+}
+
+/// One sample along the cumulative-arc-length polyline of a flattened
+/// path. `cum` is the arc-length distance from the path start; `(x,y)`
+/// are the user-space coordinates at that distance.
+#[derive(Debug, Clone, Copy)]
+struct PolyPoint {
+    x: f32,
+    y: f32,
+    cum: f32,
+}
+
+/// Flattens `ops` and converts the resulting [`Segment`] list into a
+/// cumulative-arc-length polyline. The first point sits at `cum = 0`
+/// at the path's first MoveTo; each subsequent point appends one
+/// chord's length onto the running total.
+///
+/// Multi-contour paths concatenate their per-contour polylines back to
+/// back — the cumulative-advance walk treats them as one continuous
+/// stroke for placement, matching the simple PoC contract documented
+/// on [`TextPathInput`]. Tangent-rotation and per-contour breaks are
+/// deferred work.
+fn build_arc_length_polyline(ops: &[PathOp]) -> Vec<PolyPoint> {
+    let segs = flatten(
+        ops.iter().copied(),
+        &Affine::identity(),
+        DEFAULT_TOLERANCE_LOCAL,
+    );
+    let mut out = Vec::with_capacity(segs.len() + 1);
+    let mut cum = 0.0_f32;
+    for (i, s) in segs.iter().enumerate() {
+        if i == 0 {
+            out.push(PolyPoint {
+                x: s.x0,
+                y: s.y0,
+                cum,
+            });
+        }
+        let dx = s.x1 - s.x0;
+        let dy = s.y1 - s.y0;
+        let len = (dx * dx + dy * dy).sqrt();
+        cum += len;
+        out.push(PolyPoint {
+            x: s.x1,
+            y: s.y1,
+            cum,
+        });
+    }
+    out
+}
+
+/// Local copy of [`crate::flatten::DEFAULT_TOLERANCE`] held here so
+/// the textPath flattener keeps a stable subdivision policy
+/// independent of the top-level rasterizer's runtime tolerance —
+/// arc-length walks want consistent chord lengths across calls.
+const DEFAULT_TOLERANCE_LOCAL: f32 = crate::flatten::DEFAULT_TOLERANCE;
+
+/// Linear-interpolates a position on the polyline at cumulative
+/// arc-length `target`. Returns `None` if `target` is past the
+/// polyline's total length.
+fn sample_polyline_position(poly: &[PolyPoint], target: f32) -> Option<(f32, f32)> {
+    if poly.is_empty() {
+        return None;
+    }
+    if target <= 0.0 {
+        return Some((poly[0].x, poly[0].y));
+    }
+    for w in poly.windows(2) {
+        let a = w[0];
+        let b = w[1];
+        if target <= b.cum {
+            let span = b.cum - a.cum;
+            if span <= 0.0 {
+                return Some((b.x, b.y));
+            }
+            let t = (target - a.cum) / span;
+            return Some((a.x + t * (b.x - a.x), a.y + t * (b.y - a.y)));
+        }
+    }
+    None
+}
+
+/// Translates and scales an outline's `PathOp`s so the design-unit
+/// origin lands at `(ox, oy)` in user-space. The y-axis is flipped
+/// because OT outlines are y-up and SVG document space is y-down.
+fn transform_outline_ops(ops: &[PathOp], scale: f32, ox: f32, oy: f32) -> Vec<PathOp> {
+    let map = |x: f32, y: f32| -> (f32, f32) { (ox + x * scale, oy - y * scale) };
+    let mut out = Vec::with_capacity(ops.len());
+    for op in ops {
+        match *op {
+            PathOp::MoveTo { x, y } => {
+                let (nx, ny) = map(x, y);
+                out.push(PathOp::MoveTo { x: nx, y: ny });
+            }
+            PathOp::LineTo { x, y } => {
+                let (nx, ny) = map(x, y);
+                out.push(PathOp::LineTo { x: nx, y: ny });
+            }
+            PathOp::QuadTo { cx, cy, x, y } => {
+                let (cx2, cy2) = map(cx, cy);
+                let (nx, ny) = map(x, y);
+                out.push(PathOp::QuadTo {
+                    cx: cx2,
+                    cy: cy2,
+                    x: nx,
+                    y: ny,
+                });
+            }
+            PathOp::CubicTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            } => {
+                let (a1, b1) = map(c1x, c1y);
+                let (a2, b2) = map(c2x, c2y);
+                let (nx, ny) = map(x, y);
+                out.push(PathOp::CubicTo {
+                    c1x: a1,
+                    c1y: b1,
+                    c2x: a2,
+                    c2y: b2,
+                    x: nx,
+                    y: ny,
+                });
+            }
+            PathOp::Close => out.push(PathOp::Close),
+        }
+    }
+    out
 }
 
 // =========================================================================
@@ -4490,5 +4996,164 @@ mod tests {
                 assert!((pa.0 - pb.0).abs() < 1e-6 && (pa.1 - pb.1).abs() < 1e-6);
             }
         }
+    }
+
+    // ---- textPath helpers ------------------------------------------------
+
+    #[test]
+    fn arc_length_polyline_horizontal_line_lays_out_endpoints() {
+        // A simple horizontal line from (10,50) to (210,50). The
+        // flattener emits one segment so the polyline has two points,
+        // with cum 0 and cum 200.
+        let ops = vec![
+            PathOp::MoveTo { x: 10.0, y: 50.0 },
+            PathOp::LineTo { x: 210.0, y: 50.0 },
+        ];
+        let poly = build_arc_length_polyline(&ops);
+        assert_eq!(poly.len(), 2);
+        assert!((poly[0].cum - 0.0).abs() < 1e-5);
+        assert!((poly[1].cum - 200.0).abs() < 1e-3);
+        assert!((poly[0].x - 10.0).abs() < 1e-5);
+        assert!((poly[1].x - 210.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn sample_polyline_position_lerps_between_chord_endpoints() {
+        let poly = vec![
+            PolyPoint {
+                x: 0.0,
+                y: 0.0,
+                cum: 0.0,
+            },
+            PolyPoint {
+                x: 100.0,
+                y: 0.0,
+                cum: 100.0,
+            },
+            PolyPoint {
+                x: 100.0,
+                y: 100.0,
+                cum: 200.0,
+            },
+        ];
+        let p0 = sample_polyline_position(&poly, 0.0).unwrap();
+        assert!((p0.0 - 0.0).abs() < 1e-5 && (p0.1 - 0.0).abs() < 1e-5);
+        let p_mid_first = sample_polyline_position(&poly, 50.0).unwrap();
+        assert!((p_mid_first.0 - 50.0).abs() < 1e-5 && (p_mid_first.1).abs() < 1e-5);
+        let p_corner = sample_polyline_position(&poly, 100.0).unwrap();
+        assert!((p_corner.0 - 100.0).abs() < 1e-5 && (p_corner.1 - 0.0).abs() < 1e-5);
+        let p_mid_second = sample_polyline_position(&poly, 150.0).unwrap();
+        assert!((p_mid_second.0 - 100.0).abs() < 1e-5 && (p_mid_second.1 - 50.0).abs() < 1e-5);
+        // Past the total length → None (silent drop policy in
+        // emit_text_path_fills).
+        assert!(sample_polyline_position(&poly, 250.0).is_none());
+    }
+
+    #[test]
+    fn transform_outline_ops_translates_and_flips_y() {
+        // Design-unit point (0, 100) at scale 0.5 with origin
+        // (50, 200) maps to (50 + 0*0.5, 200 - 100*0.5) = (50, 150).
+        // Y is flipped so OT y-up matches SVG y-down.
+        let ops = vec![
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::LineTo { x: 0.0, y: 100.0 },
+            PathOp::QuadTo {
+                cx: 50.0,
+                cy: 50.0,
+                x: 100.0,
+                y: 0.0,
+            },
+            PathOp::Close,
+        ];
+        let out = transform_outline_ops(&ops, 0.5, 50.0, 200.0);
+        assert_eq!(out.len(), ops.len());
+        match out[0] {
+            PathOp::MoveTo { x, y } => {
+                assert!((x - 50.0).abs() < 1e-5);
+                assert!((y - 200.0).abs() < 1e-5);
+            }
+            _ => panic!("expected MoveTo"),
+        }
+        match out[1] {
+            PathOp::LineTo { x, y } => {
+                assert!((x - 50.0).abs() < 1e-5);
+                assert!((y - 150.0).abs() < 1e-5);
+            }
+            _ => panic!("expected LineTo"),
+        }
+        match out[2] {
+            PathOp::QuadTo { cx, cy, x, y } => {
+                assert!((cx - 75.0).abs() < 1e-5);
+                assert!((cy - 175.0).abs() < 1e-5);
+                assert!((x - 100.0).abs() < 1e-5);
+                assert!((y - 200.0).abs() < 1e-5);
+            }
+            _ => panic!("expected QuadTo"),
+        }
+        assert!(matches!(out[3], PathOp::Close));
+    }
+
+    #[test]
+    fn transform_outline_ops_handles_cubic() {
+        let ops = vec![
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::CubicTo {
+                c1x: 10.0,
+                c1y: 20.0,
+                c2x: 30.0,
+                c2y: 40.0,
+                x: 50.0,
+                y: 60.0,
+            },
+        ];
+        let out = transform_outline_ops(&ops, 1.0, 0.0, 0.0);
+        match out[1] {
+            PathOp::CubicTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            } => {
+                assert!((c1x - 10.0).abs() < 1e-5);
+                assert!((c1y - -20.0).abs() < 1e-5); // y-flipped
+                assert!((c2x - 30.0).abs() < 1e-5);
+                assert!((c2y - -40.0).abs() < 1e-5);
+                assert!((x - 50.0).abs() < 1e-5);
+                assert!((y - -60.0).abs() < 1e-5);
+            }
+            _ => panic!("expected CubicTo"),
+        }
+    }
+
+    #[test]
+    fn arc_length_polyline_cubic_aggregates_chord_lengths() {
+        // A single cubic Bézier: M 0 0 C 0 100, 100 100, 100 0 — a
+        // hump from (0,0) to (100,0). Its true arc length is ≈146.
+        // The polyline should have len > 1 chords and a non-trivial
+        // total cum.
+        let ops = vec![
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::CubicTo {
+                c1x: 0.0,
+                c1y: 100.0,
+                c2x: 100.0,
+                c2y: 100.0,
+                x: 100.0,
+                y: 0.0,
+            },
+        ];
+        let poly = build_arc_length_polyline(&ops);
+        assert!(poly.len() > 2, "cubic should subdivide into many chords");
+        let total = poly.last().unwrap().cum;
+        // The cubic with controls at y=100 sweeps well above a tight
+        // arc — empirical chord-length total at default tolerance is
+        // ~200 (the curve's true arc length), not the much smaller
+        // straight-line chord. Bound conservatively.
+        assert!(
+            (180.0..=220.0).contains(&total),
+            "expected chord total ~200, got {total}"
+        );
     }
 }
