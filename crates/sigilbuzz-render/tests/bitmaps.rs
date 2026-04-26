@@ -83,6 +83,44 @@ fn rescale_zero_size_is_empty() {
     assert!(rescale_bilinear(&pix, 0, 4).is_empty());
 }
 
+/// Issue #226: a hostile combination of small-ppem strike + extreme
+/// `size_pt` used to multiply up to a `u32::MAX × u32::MAX × 4`
+/// allocation that panicked with "capacity overflow" in
+/// `ColorPixmap::new`. The fix caps the rescale target at 16384 per
+/// dim (matching the PNG decoder ceiling) and surfaces the structured
+/// `BadSize` error.
+#[test]
+fn rasterize_bitmap_extreme_size_pt_returns_bad_size_not_oom_panic() {
+    let blob = Blob::new(CBDT_FONT);
+    let face = Face::parse(&blob, 0).unwrap();
+    let rast = Rasterizer::new();
+    // Strike is 32 ppem with a 1×1 PNG. size_pt = 1e9 yields scale =
+    // 1e9 / 32 ≈ 3.1e7, dst dims would be ≈ 3.1e7 — way past the cap.
+    let err = rast
+        .rasterize_bitmap_glyph(&face, 1, 1.0e9, &[])
+        .expect_err("extreme size_pt must not OOM-panic");
+    assert!(
+        matches!(err, RenderError::BadSize(_)),
+        "expected BadSize, got {err:?}"
+    );
+}
+
+/// Public `rescale_bilinear` mirror: an out-of-range `dst_w` /
+/// `dst_h` (e.g. caller miscomputing from a hostile size_pt) must
+/// return an empty pixmap instead of panicking in the destination
+/// allocation.
+#[test]
+fn rescale_bilinear_extreme_target_is_empty_not_panic() {
+    let src = ColorPixmap::new(2, 2);
+    let out = rescale_bilinear(&src, u32::MAX, u32::MAX);
+    assert!(
+        out.is_empty(),
+        "extreme dst dims must clamp to empty, got {}×{}",
+        out.width,
+        out.height
+    );
+}
+
 #[test]
 fn decode_png_round_trips_with_known_payload() {
     // 1×1 fully transparent RGBA PNG. Built deterministically by

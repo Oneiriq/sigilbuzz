@@ -98,6 +98,14 @@ const MAX_USE_DEPTH: u32 = 16;
 /// `4 × stroke-width` past the join, fall back to a bevel join.
 const MITER_LIMIT: f32 = 4.0;
 
+/// Maximum pixel dimension for a rasterized SVG-in-OT glyph. Matches
+/// the PNG decoder's per-dim ceiling (16384) so the bound is uniform
+/// across the public render surface. A combination of a font-supplied
+/// finite-but-extreme `viewBox` and a caller-supplied large `size_pt`
+/// can otherwise multiply up to a `u32::MAX × u32::MAX × 4` allocation
+/// that panics in the `Vec` macro before any rasterization runs.
+const MAX_RENDER_DIM: f32 = 16384.0;
+
 // =========================================================================
 // Public entry
 // =========================================================================
@@ -160,8 +168,26 @@ impl Rasterizer {
             dy: -doc.view_y * s,
         };
 
-        let width = (doc.view_w * s).round().max(1.0) as u32;
-        let height = (doc.view_h * s).round().max(1.0) as u32;
+        // Cap output dimensions before allocation. Without this guard
+        // an extreme finite viewBox + matching size_pt yields a
+        // post-cast `u32::MAX × u32::MAX × 4` allocation that overflows
+        // `usize` even through `saturating_mul`, and `vec![0u8; len]`
+        // panics with "capacity overflow". 16384 matches the PNG
+        // decoder's per-dim ceiling (`Ihdr::parse`) so the bound is
+        // consistent across the public render surface.
+        let width_f = (doc.view_w * s).round().max(1.0);
+        let height_f = (doc.view_h * s).round().max(1.0);
+        if !width_f.is_finite()
+            || !height_f.is_finite()
+            || width_f > MAX_RENDER_DIM
+            || height_f > MAX_RENDER_DIM
+        {
+            return Err(RenderError::BadSize(size_pt));
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let width = width_f as u32;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let height = height_f as u32;
         let mut out = ColorPixmap::new(width, height);
 
         let tol = self.flattening_tolerance();

@@ -553,6 +553,51 @@ fn svg_rect_with_rounded_corners_loses_corner_pixels() {
     );
 }
 
+/// Issue #225: extreme finite `viewBox` + matching `size_pt` used to
+/// land in `ColorPixmap::new(u32::MAX, u32::MAX)` and panic with
+/// "capacity overflow" before any rasterization ran. The fix caps the
+/// post-cast dimensions at 16384 (matching the PNG decoder's ceiling)
+/// and surfaces the structured `BadSize` error instead.
+#[test]
+fn svg_extreme_viewbox_returns_bad_size_not_oom_panic() {
+    // 1e30 viewBox with 1e30 size_pt → scale s = 1, width_f = 1e30,
+    // (width_f as u32) saturates to u32::MAX, and the destination
+    // pixmap allocation would otherwise overflow.
+    let payload =
+        b"<svg viewBox=\"0 0 1e30 1e30\"><path d=\"M 0 0 L 1 0 L 1 1 Z\" fill=\"black\"/></svg>";
+    let bytes = build_svg_font(payload);
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    let rast = Rasterizer::new();
+    let err = rast
+        .rasterize_svg_glyph(&face, 1, 1e30, &[])
+        .expect_err("extreme viewBox + size_pt must not OOM-panic");
+    assert!(
+        matches!(err, RenderError::BadSize(_)),
+        "expected BadSize, got {err:?}"
+    );
+}
+
+/// Companion to `svg_extreme_viewbox_returns_bad_size_not_oom_panic`:
+/// a normally-sized viewBox with a hostile-but-still-finite `size_pt`
+/// must also hit the dimension cap.
+#[test]
+fn svg_extreme_size_pt_returns_bad_size_not_oom_panic() {
+    let payload =
+        b"<svg viewBox=\"0 0 100 100\"><path d=\"M 0 0 L 1 0 L 1 1 Z\" fill=\"black\"/></svg>";
+    let bytes = build_svg_font(payload);
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    let rast = Rasterizer::new();
+    let err = rast
+        .rasterize_svg_glyph(&face, 1, 1.0e9, &[])
+        .expect_err("extreme size_pt must not OOM-panic");
+    assert!(
+        matches!(err, RenderError::BadSize(_)),
+        "expected BadSize, got {err:?}"
+    );
+}
+
 // =========================================================================
 // PR #223 deferral coverage: <polygon> / <polyline> / <line> shape
 // primitives + stroke-dasharray. Each new feature gets a fixture and a
