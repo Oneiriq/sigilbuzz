@@ -63,6 +63,7 @@ mod svg;
 pub use affine::Affine;
 pub use bitmaps::{decode_png, rasterize_bitmap_glyph, rescale_bilinear};
 pub use error::RenderError;
+pub use flatten::{flatten, Segment, DEFAULT_TOLERANCE};
 pub use pixmap::{ColorPixmap, Pixmap};
 pub use rasterizer::Rasterizer;
 
