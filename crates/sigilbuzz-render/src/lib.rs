@@ -56,6 +56,7 @@ mod colrv1;
 mod error;
 mod flatten;
 mod pixmap;
+mod png_encode;
 mod raster;
 mod rasterizer;
 mod svg;
