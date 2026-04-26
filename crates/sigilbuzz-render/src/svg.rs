@@ -36,6 +36,14 @@
 //! - `<clipPath>` containing a single `<path>` (the common case in
 //!   designer-emoji fonts).
 //!
+//! - `<mask>` (`mask-type="luminance"`, the SVG default) containing
+//!   any combination of the supported shape primitives. The mask
+//!   children are rendered into a same-size scratch ColorPixmap; per-
+//!   pixel BT.709 luminance × source alpha gives the mask alpha that
+//!   modulates the masked element's coverage. `userSpaceOnUse` only —
+//!   `objectBoundingBox` mask units are deferred. `mask-type="alpha"`
+//!   is deferred (luminance is the consumer-side default).
+//!
 //! - `stroke-dasharray` + `stroke-dashoffset` on stroked geometry,
 //!   applied to the post-flattening polyline. Curves become chords
 //!   first, then dashes are walked along cumulative arc length per
@@ -52,9 +60,11 @@
 //! Anything outside this list — filter primitives beyond the set above
 //! (`feTurbulence`, `feImage`, `feMorphology`, `feConvolveMatrix`,
 //! `feSpecularLighting`, `feDiffuseLighting`, `feComponentTransfer`,
-//! `feComposite` operators beyond source-over), masks beyond
-//! `clipPath`, animations, scripting, `style=` attributes, text-on-path
-//! — is silently skipped.
+//! `feComposite` operators beyond source-over), `<mask>` with
+//! `maskUnits="objectBoundingBox"` or `mask-type="alpha"`, animations,
+//! scripting, `style=` attributes, `<text>` / `<textPath>` glyph
+//! rendering (text shaping is the consumer's responsibility — see
+//! sigilbuzz core) — is silently skipped.
 //!
 //! ## Pipeline
 //!
@@ -238,6 +248,15 @@ struct Fill {
     /// walked, and the final primitive's output is composited under
     /// the canvas via Porter-Duff source-over.
     filter: Option<Filter>,
+    /// Optional alpha mask (SVG `<mask>` element) to apply to this
+    /// fill. Distinct from `clip` — clip is binary inside/outside,
+    /// mask is a continuous luminance-derived alpha multiplier (so
+    /// gradient mask edges feather the masked element). When set, the
+    /// element rasterizes to a SourceGraphic pixmap, the mask
+    /// children are rendered into a same-size buffer, and per-pixel
+    /// BT.709 luminance × mask source alpha modulates the
+    /// SourceGraphic alpha before composite.
+    mask: Option<MaskShape>,
 }
 
 /// Paint source for a [`Fill`]. SVG-in-OT documents use solid colour
@@ -287,6 +306,18 @@ struct ClipShape {
     /// Transform stack the clipPath's child path inherited (clipPath
     /// contents may carry their own `transform=`).
     xform: Affine,
+}
+
+/// A parsed `<mask>` element. Stored as a list of [`Fill`] records
+/// because masks can hold any combination of shape primitives,
+/// gradients, and per-element transforms — the same machinery that
+/// renders the rest of the document. At render time the mask's fills
+/// paint into a same-size scratch ColorPixmap, then a per-pixel
+/// BT.709 luminance derivation converts the colour buffer into an
+/// alpha mask multiplied against the masked element's coverage.
+#[derive(Debug, Clone)]
+struct MaskShape {
+    fills: Vec<Fill>,
 }
 
 /// A parsed `<filter>` element — an ordered list of primitives forming
@@ -510,6 +541,10 @@ struct ElemCtx {
     /// Inherited like `clip_href`; resolved against the document `Defs`
     /// at emit time to a [`Filter`] cloned onto each Fill.
     filter_href: Option<String>,
+    /// Active mask href (`mask="url(#id)"`). Stored as the bare id.
+    /// Inherited like `clip_href` / `filter_href`; resolved against
+    /// the document `Defs` at emit time to a [`MaskShape`].
+    mask_href: Option<String>,
 }
 
 impl Default for ElemCtx {
@@ -529,6 +564,7 @@ impl Default for ElemCtx {
             stroke_dashoffset: 0.0,
             clip_href: None,
             filter_href: None,
+            mask_href: None,
         }
     }
 }
@@ -563,12 +599,14 @@ fn walk(
     }
 
     // Skip elements that contribute no rendering: <defs>, <linearGradient>,
-    // <radialGradient>, <clipPath>, <stop>, <metadata>, <title>, <desc>.
-    // They were already harvested by `collect_defs` for href resolution.
+    // <radialGradient>, <clipPath>, <mask>, <filter>, <stop>, <metadata>,
+    // <title>, <desc>. They were already harvested by `collect_defs` for
+    // href resolution; <mask> is materialized lazily by `resolve_mask_shape`.
     if name_eq(&node.name, "defs")
         || name_eq(&node.name, "linearGradient")
         || name_eq(&node.name, "radialGradient")
         || name_eq(&node.name, "clipPath")
+        || name_eq(&node.name, "mask")
         || name_eq(&node.name, "filter")
         || name_eq(&node.name, "metadata")
         || name_eq(&node.name, "title")
@@ -730,6 +768,10 @@ fn inherit_attrs(parent: &ElemCtx, node: &Node) -> ElemCtx {
             if let Some(href) = parse_url_ref(v) {
                 ctx.filter_href = Some(href);
             }
+        } else if attr_matches(k, "mask") {
+            if let Some(href) = parse_url_ref(v) {
+                ctx.mask_href = Some(href);
+            }
         }
     }
     ctx
@@ -770,6 +812,14 @@ fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) 
         .as_deref()
         .and_then(|id| resolve_filter(defs, id));
 
+    // Resolve the mask once per emission. Same fallback policy as
+    // filter / clipPath: unknown id silently drops the mask rather
+    // than blanking the glyph.
+    let mask = ctx
+        .mask_href
+        .as_deref()
+        .and_then(|id| resolve_mask_shape(defs, id));
+
     // Fill pass.
     let fill_paint = resolve_fill_paint(defs, ctx);
     if let Some(p) = fill_paint {
@@ -781,6 +831,7 @@ fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) 
                 clip: clip.clone(),
                 is_stroke: false,
                 filter: filter.clone(),
+                mask: mask.clone(),
             });
         }
     }
@@ -808,6 +859,7 @@ fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) 
                         clip: clip.clone(),
                         is_stroke: true,
                         filter: filter.clone(),
+                        mask: mask.clone(),
                     });
                 }
             }
@@ -889,6 +941,65 @@ fn resolve_clip_shape(defs: &Defs<'_>, id: &str) -> Option<ClipShape> {
         }
     }
     None
+}
+
+/// Resolves a `<mask id="...">` definition into a [`MaskShape`].
+///
+/// Walks the mask's children with a fresh root [`ElemCtx`] (mask
+/// contents inherit nothing from the masked element) and reuses the
+/// document walk machinery to collect each child shape into a
+/// [`Fill`]. The mask's own `transform=` attribute pre-composes onto
+/// the inherited identity. `mask-type="alpha"` and
+/// `maskUnits="objectBoundingBox"` are deferred — both fall back to
+/// the default behaviour (luminance, userSpaceOnUse), which matches
+/// the bulk of real-world SVG-in-OT mask use.
+///
+/// Returns `None` when the id doesn't point at a `<mask>` element or
+/// the mask has no renderable children. A self-referential mask
+/// (mask-of-mask) is not supported — nested mask references inside
+/// the mask body are dropped at walk time so the caller never sees a
+/// recursive composite.
+fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape> {
+    let mn = defs.lookup(id)?;
+    if !name_eq(&mn.name, "mask") {
+        return None;
+    }
+    // Build a tiny scratch SvgDoc so we can re-use `walk` end-to-end.
+    // The dimensions don't matter — render-time uses the masked
+    // element's pixmap size, not the mask's viewBox.
+    let mut scratch = SvgDoc {
+        view_w: 1.0,
+        view_h: 1.0,
+        view_x: 0.0,
+        view_y: 0.0,
+        fills: Vec::new(),
+    };
+    let mut ctx = ElemCtx::default();
+    if let Some(t) = mn.attr("transform").and_then(parse_transform) {
+        ctx.xform = ctx.xform.compose(&t);
+    }
+    // Drop any nested mask reference on the mask root itself —
+    // mask-of-mask isn't supported; the brief defers it explicitly.
+    ctx.mask_href = None;
+    for child in &mn.children {
+        // Sanity: cap mask-internal fill count at the same MAX_FILLS
+        // ceiling as the document.
+        if scratch.fills.len() >= MAX_FILLS {
+            break;
+        }
+        let _ = walk(child, &mut scratch, defs, &ctx, 0, 0);
+    }
+    if scratch.fills.is_empty() {
+        return None;
+    }
+    // Strip any nested mask references that survived from grand-
+    // children — mask-of-mask is documented as unsupported.
+    for f in &mut scratch.fills {
+        f.mask = None;
+    }
+    Some(MaskShape {
+        fills: scratch.fills,
+    })
 }
 
 /// Resolves a `<filter id="...">` definition into a [`Filter`] record.
@@ -2243,22 +2354,101 @@ fn render_fill(out: &mut ColorPixmap, fill: &Fill, world: &Affine, tol: f32) {
         raster(&csegs)
     });
 
-    // Filtered shapes route through a same-size scratch ColorPixmap
-    // (the SourceGraphic) instead of writing to `out` directly. The
-    // filter pipeline then produces a final pixmap which is composited
-    // under the canvas via Porter-Duff source-over. This keeps the
-    // primitive set (offset / blur / matrix / merge) operating on
-    // canvas-aligned buffers and avoids tracking per-shape filter
-    // regions.
-    if let Some(filter) = &fill.filter {
+    // Filtered or masked shapes route through a same-size scratch
+    // ColorPixmap (the SourceGraphic) instead of writing to `out`
+    // directly. The filter / mask pipeline then produces a final
+    // pixmap which is composited under the canvas via Porter-Duff
+    // source-over. This keeps the per-pixel ops (filter primitives,
+    // mask alpha multiplication) operating on canvas-aligned buffers
+    // and avoids tracking per-shape filter / mask regions.
+    if fill.filter.is_some() || fill.mask.is_some() {
         let mut src = ColorPixmap::new(out.width, out.height);
         paint_into(&mut src, fill, &mask, clip_mask.as_ref(), world);
-        let result = apply_filter(filter, &src);
+        let mut result = if let Some(filter) = &fill.filter {
+            apply_filter(filter, &src)
+        } else {
+            src
+        };
+        if let Some(m) = &fill.mask {
+            apply_mask(&mut result, m, world, tol);
+        }
         composite_over(out, &result);
         return;
     }
 
     paint_into(out, fill, &mask, clip_mask.as_ref(), world);
+}
+
+/// Multiplies `dst`'s premultiplied alpha by the luminance-derived
+/// alpha of `mask`. The mask's children are rendered into a same-size
+/// scratch ColorPixmap, then per-pixel BT.709 luminance × source
+/// alpha is computed and used to scale every channel of `dst`. The
+/// luminance derivation matches SVG 1.1 §14.4 (`mask-type="luminance"`,
+/// the default).
+fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &Affine, tol: f32) {
+    if dst.is_empty() {
+        return;
+    }
+    // Render the mask's children into a same-size buffer using the
+    // same world transform so mask geometry lines up with the masked
+    // element in pixel space.
+    let mut mask_buf = ColorPixmap::new(dst.width, dst.height);
+    for f in &mask_shape.fills {
+        render_fill(&mut mask_buf, f, world, tol);
+    }
+    // Per-pixel: luminance(mask_rgb) × mask_alpha → m ∈ [0, 1]; scale
+    // every channel of dst by m. dst is premultiplied, so scaling all
+    // four channels uniformly preserves the invariant.
+    //
+    // The mask buffer is also premultiplied (it came out of the same
+    // render pipeline). We un-premultiply RGB before luminance so the
+    // weighting works in straight colour space, which matches what a
+    // browser does (CSS computes luminance from the un-premultiplied
+    // colour).
+    let n = dst.data.len() / 4;
+    for i in 0..n {
+        let mr = mask_buf.data[i * 4] as u32;
+        let mg = mask_buf.data[i * 4 + 1] as u32;
+        let mb = mask_buf.data[i * 4 + 2] as u32;
+        let ma = mask_buf.data[i * 4 + 3] as u32;
+        // Coverage from this mask pixel: luminance of un-premultiplied
+        // colour × source alpha. Express as a fixed-point factor
+        // 0..=255 so we can fold straight into the per-channel scale.
+        let m = if ma == 0 {
+            0u32
+        } else {
+            // Un-premultiply: rgb_straight = rgb_premul / a.
+            // Then luminance = 0.2126*r + 0.7152*g + 0.0722*b in [0,1].
+            // Then m = luminance * alpha.
+            // Re-arrange to integer math: keep RGB premultiplied,
+            // luminance(premul_rgb) is already luminance × alpha
+            // because premul_rgb = straight_rgb × alpha.
+            // So m = (0.2126*mr + 0.7152*mg + 0.0722*mb) computed
+            // directly from premultiplied bytes, no un-premultiply
+            // step. Fixed-point: scale BT.709 weights ×1024 → 218 /
+            // 732 / 74 (sum 1024) for round-trip-stable integer math.
+            let lum = (218 * mr + 732 * mg + 74 * mb + 512) / 1024;
+            lum.min(255)
+        };
+        if m == 255 {
+            continue;
+        }
+        if m == 0 {
+            dst.data[i * 4] = 0;
+            dst.data[i * 4 + 1] = 0;
+            dst.data[i * 4 + 2] = 0;
+            dst.data[i * 4 + 3] = 0;
+            continue;
+        }
+        let dr = dst.data[i * 4] as u32;
+        let dg = dst.data[i * 4 + 1] as u32;
+        let db = dst.data[i * 4 + 2] as u32;
+        let da = dst.data[i * 4 + 3] as u32;
+        dst.data[i * 4] = ((dr * m + 127) / 255) as u8;
+        dst.data[i * 4 + 1] = ((dg * m + 127) / 255) as u8;
+        dst.data[i * 4 + 2] = ((db * m + 127) / 255) as u8;
+        dst.data[i * 4 + 3] = ((da * m + 127) / 255) as u8;
+    }
 }
 
 /// Paints `fill` into `dst` at the canvas-aligned position implied by
@@ -3667,6 +3857,78 @@ mod tests {
         let doc = parse_document(xml).unwrap();
         assert_eq!(doc.fills.len(), 1);
         assert!(doc.fills[0].clip.is_some());
+    }
+
+    #[test]
+    fn mask_attaches_to_referencing_fill() {
+        // <mask> with a luminance body — black circle on white square.
+        // The fill that references it should carry a non-empty
+        // MaskShape with both child fills harvested.
+        let xml = r##"<svg viewBox="0 0 100 100">
+            <defs>
+                <mask id="m">
+                    <rect x="0" y="0" width="100" height="100" fill="white"/>
+                    <circle cx="50" cy="50" r="30" fill="black"/>
+                </mask>
+            </defs>
+            <rect x="0" y="0" width="100" height="100" fill="red" mask="url(#m)"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        assert_eq!(doc.fills.len(), 1);
+        let m = doc.fills[0].mask.as_ref().expect("mask attached");
+        assert_eq!(m.fills.len(), 2, "mask should carry rect + circle fills");
+    }
+
+    #[test]
+    fn mask_unknown_id_silently_drops() {
+        // Bad reference falls back to "no mask" (matches the
+        // clip-path / filter degrade-gracefully policy).
+        let xml = r##"<svg viewBox="0 0 10 10">
+            <rect x="0" y="0" width="10" height="10" fill="#000" mask="url(#missing)"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        assert_eq!(doc.fills.len(), 1);
+        assert!(doc.fills[0].mask.is_none());
+    }
+
+    #[test]
+    fn mask_does_not_emit_a_top_level_fill() {
+        // The <mask> element itself must NOT emit fills into the
+        // document (it's a definition, not a render target). Only the
+        // top-level <rect> referencing it should produce a fill.
+        let xml = r##"<svg viewBox="0 0 100 100">
+            <mask id="m">
+                <rect x="0" y="0" width="100" height="100" fill="white"/>
+            </mask>
+            <rect x="0" y="0" width="100" height="100" fill="red" mask="url(#m)"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        assert_eq!(
+            doc.fills.len(),
+            1,
+            "mask body must not contribute top-level fills"
+        );
+    }
+
+    #[test]
+    fn mask_of_mask_is_dropped() {
+        // The brief defers nested masks: a mask whose body references
+        // another mask must drop the inner reference at resolve time.
+        let xml = r##"<svg viewBox="0 0 100 100">
+            <defs>
+                <mask id="inner">
+                    <rect x="0" y="0" width="100" height="100" fill="white"/>
+                </mask>
+                <mask id="outer">
+                    <rect x="0" y="0" width="100" height="100" fill="white" mask="url(#inner)"/>
+                </mask>
+            </defs>
+            <rect x="0" y="0" width="100" height="100" fill="red" mask="url(#outer)"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        let outer = doc.fills[0].mask.as_ref().expect("outer mask attached");
+        // Outer's child fill must NOT carry a nested mask reference.
+        assert!(outer.fills.iter().all(|f| f.mask.is_none()));
     }
 
     #[test]
