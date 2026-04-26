@@ -41,8 +41,19 @@
 //!   first, then dashes are walked along cumulative arc length per
 //!   contour.
 //!
-//! Anything outside this list — filter primitives, masks beyond
-//! clipPath, animations, scripting, `style=` attributes, text-on-path
+//! - `<filter>` with the minimum-viable primitive set:
+//!   `feGaussianBlur` (3-pass box-blur approximation), `feColorMatrix`
+//!   (matrix / saturate / hueRotate / luminanceToAlpha), `feOffset`,
+//!   `feFlood`, and `feMerge`. Drop-shadow chains
+//!   (`SourceAlpha` → blur → offset → merged under `SourceGraphic`)
+//!   compose end-to-end. Filters apply per shape (`element[filter=…]`);
+//!   group-level filter regions are rendered shape-by-shape.
+//!
+//! Anything outside this list — filter primitives beyond the set above
+//! (`feTurbulence`, `feImage`, `feMorphology`, `feConvolveMatrix`,
+//! `feSpecularLighting`, `feDiffuseLighting`, `feComponentTransfer`,
+//! `feComposite` operators beyond source-over), masks beyond
+//! `clipPath`, animations, scripting, `style=` attributes, text-on-path
 //! — is silently skipped.
 //!
 //! ## Pipeline
@@ -221,6 +232,12 @@ struct Fill {
     /// pipeline split.
     #[allow(dead_code)]
     is_stroke: bool,
+    /// Optional filter chain to apply to this fill. Resolved at parse
+    /// time from `filter="url(#id)"`. When set, the fill is rendered
+    /// to a temporary `SourceGraphic` pixmap, the filter pipeline is
+    /// walked, and the final primitive's output is composited under
+    /// the canvas via Porter-Duff source-over.
+    filter: Option<Filter>,
 }
 
 /// Paint source for a [`Fill`]. SVG-in-OT documents use solid colour
@@ -270,6 +287,58 @@ struct ClipShape {
     /// Transform stack the clipPath's child path inherited (clipPath
     /// contents may carry their own `transform=`).
     xform: Affine,
+}
+
+/// A parsed `<filter>` element — an ordered list of primitives forming
+/// a small DAG keyed by `result=` names. The DAG is evaluated at render
+/// time against a `SourceGraphic` pixmap (the filtered shape rendered
+/// into a transparent buffer) and a `SourceAlpha` pixmap (same shape,
+/// alpha only).
+#[derive(Debug, Clone)]
+struct Filter {
+    primitives: Vec<FilterPrimitive>,
+}
+
+/// One `<fe*>` element: an input ref (`in="..."`), an output name
+/// (`result="..."`), and an operation. Inputs default to `SourceGraphic`
+/// for the first primitive and the previous primitive's result
+/// thereafter (per SVG 1.1 §15.6).
+#[derive(Debug, Clone)]
+struct FilterPrimitive {
+    /// `in="..."`. `None` means "use previous primitive's output, or
+    /// SourceGraphic if no previous primitive".
+    input: Option<String>,
+    /// Second input (only meaningful for primitives that take two — for
+    /// the v1 set, none do, but parsed for forward-compat).
+    #[allow(dead_code)]
+    input2: Option<String>,
+    /// `result="..."`. Names this primitive's output for later refs.
+    /// `None` means "anonymous; only the next primitive can reference
+    /// it (via the implicit-input chain)".
+    result: Option<String>,
+    op: FilterOp,
+}
+
+/// The actual operation a [`FilterPrimitive`] performs.
+#[derive(Debug, Clone)]
+enum FilterOp {
+    /// `feGaussianBlur stdDeviation="σ"` or `"σx σy"`. Implemented as a
+    /// 3-pass box-blur approximation (separable, O(N) per pass per axis)
+    /// — visually indistinguishable from a true Gaussian for σ ≥ 1 and
+    /// vastly faster than convolving a full kernel.
+    GaussianBlur { std_dev_x: f32, std_dev_y: f32 },
+    /// `feColorMatrix` in any of its `type=` flavours.
+    ColorMatrix { matrix: [f32; 20] },
+    /// `feOffset dx=… dy=…`. Pure translation, integer-rounded at blit
+    /// time.
+    Offset { dx: f32, dy: f32 },
+    /// `feFlood flood-color=… flood-opacity=…`. Constant-color pixmap
+    /// of the filter region. Color stored straight (un-premultiplied);
+    /// premultiplication happens at materialize time.
+    Flood { color: [u8; 4] },
+    /// `feMerge` with N `<feMergeNode in="…">` children. Composites the
+    /// inputs in document order via Porter-Duff source-over.
+    Merge { inputs: Vec<String> },
 }
 
 /// Parsed SVG document.
@@ -437,6 +506,10 @@ struct ElemCtx {
     /// Active clip-path href, applied to every fill / stroke produced
     /// inside this subtree. Stored as the bare id (no `url(#…)` form).
     clip_href: Option<String>,
+    /// Active filter href (`filter="url(#id)"`). Stored as the bare id.
+    /// Inherited like `clip_href`; resolved against the document `Defs`
+    /// at emit time to a [`Filter`] cloned onto each Fill.
+    filter_href: Option<String>,
 }
 
 impl Default for ElemCtx {
@@ -455,6 +528,7 @@ impl Default for ElemCtx {
             stroke_dasharray: Vec::new(),
             stroke_dashoffset: 0.0,
             clip_href: None,
+            filter_href: None,
         }
     }
 }
@@ -495,6 +569,7 @@ fn walk(
         || name_eq(&node.name, "linearGradient")
         || name_eq(&node.name, "radialGradient")
         || name_eq(&node.name, "clipPath")
+        || name_eq(&node.name, "filter")
         || name_eq(&node.name, "metadata")
         || name_eq(&node.name, "title")
         || name_eq(&node.name, "desc")
@@ -651,6 +726,10 @@ fn inherit_attrs(parent: &ElemCtx, node: &Node) -> ElemCtx {
             if let Some(href) = parse_url_ref(v) {
                 ctx.clip_href = Some(href);
             }
+        } else if attr_matches(k, "filter") {
+            if let Some(href) = parse_url_ref(v) {
+                ctx.filter_href = Some(href);
+            }
         }
     }
     ctx
@@ -683,6 +762,14 @@ fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) 
         .as_deref()
         .and_then(|id| resolve_clip_shape(defs, id));
 
+    // Resolve the filter chain once per emission. Unrecognised /
+    // missing filter ids degrade to "no filter" — matches browser
+    // behaviour and keeps a typo from blanking the glyph.
+    let filter = ctx
+        .filter_href
+        .as_deref()
+        .and_then(|id| resolve_filter(defs, id));
+
     // Fill pass.
     let fill_paint = resolve_fill_paint(defs, ctx);
     if let Some(p) = fill_paint {
@@ -693,6 +780,7 @@ fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) 
                 xform: ctx.xform,
                 clip: clip.clone(),
                 is_stroke: false,
+                filter: filter.clone(),
             });
         }
     }
@@ -719,6 +807,7 @@ fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) 
                         xform: ctx.xform,
                         clip: clip.clone(),
                         is_stroke: true,
+                        filter: filter.clone(),
                     });
                 }
             }
@@ -801,6 +890,183 @@ fn resolve_clip_shape(defs: &Defs<'_>, id: &str) -> Option<ClipShape> {
     }
     None
 }
+
+/// Resolves a `<filter id="...">` definition into a [`Filter`] record.
+/// Unknown / malformed primitives are skipped silently — the rest of
+/// the chain still runs. Returns `None` if the id doesn't point at a
+/// `<filter>` element or no recognised primitives were collected.
+fn resolve_filter(defs: &Defs<'_>, id: &str) -> Option<Filter> {
+    let f = defs.lookup(id)?;
+    if !name_eq(&f.name, "filter") {
+        return None;
+    }
+    let mut primitives = Vec::new();
+    for c in &f.children {
+        if let Some(p) = parse_filter_primitive(c) {
+            primitives.push(p);
+        }
+    }
+    if primitives.is_empty() {
+        return None;
+    }
+    Some(Filter { primitives })
+}
+
+fn parse_filter_primitive(node: &Node) -> Option<FilterPrimitive> {
+    let input = node.attr("in").map(|s| s.trim().to_string());
+    let input2 = node.attr("in2").map(|s| s.trim().to_string());
+    let result = node.attr("result").map(|s| s.trim().to_string());
+
+    let op = if name_eq(&node.name, "feGaussianBlur") {
+        let (sx, sy) = parse_std_deviation(node.attr("stdDeviation").unwrap_or(""))?;
+        FilterOp::GaussianBlur {
+            std_dev_x: sx,
+            std_dev_y: sy,
+        }
+    } else if name_eq(&node.name, "feColorMatrix") {
+        let kind = node
+            .attr("type")
+            .unwrap_or("matrix")
+            .trim()
+            .to_ascii_lowercase();
+        let values = node.attr("values").unwrap_or("");
+        let matrix = parse_color_matrix(&kind, values)?;
+        FilterOp::ColorMatrix { matrix }
+    } else if name_eq(&node.name, "feOffset") {
+        let dx = node.attr("dx").and_then(parse_length).unwrap_or(0.0);
+        let dy = node.attr("dy").and_then(parse_length).unwrap_or(0.0);
+        FilterOp::Offset { dx, dy }
+    } else if name_eq(&node.name, "feFlood") {
+        let mut color = node
+            .attr("flood-color")
+            .and_then(parse_color)
+            .unwrap_or([0, 0, 0, 255]);
+        let opa = node
+            .attr("flood-opacity")
+            .and_then(parse_opacity)
+            .unwrap_or(1.0);
+        let a = (color[3] as f32 / 255.0 * opa).clamp(0.0, 1.0);
+        color[3] = (a * 255.0).round() as u8;
+        FilterOp::Flood { color }
+    } else if name_eq(&node.name, "feMerge") {
+        let mut inputs = Vec::new();
+        for c in &node.children {
+            if name_eq(&c.name, "feMergeNode") {
+                if let Some(r) = c.attr("in") {
+                    inputs.push(r.trim().to_string());
+                }
+            }
+        }
+        if inputs.is_empty() {
+            return None;
+        }
+        FilterOp::Merge { inputs }
+    } else {
+        return None;
+    };
+
+    Some(FilterPrimitive {
+        input,
+        input2,
+        result,
+        op,
+    })
+}
+
+/// `stdDeviation` may be a single number or two whitespace-separated
+/// numbers (x, y). Negative values are an SVG error; we treat them as
+/// zero (no blur on that axis).
+fn parse_std_deviation(s: &str) -> Option<(f32, f32)> {
+    let mut it = s
+        .split(|c: char| c.is_ascii_whitespace() || c == ',')
+        .filter(|t| !t.is_empty());
+    let a: f32 = it.next()?.parse().ok()?;
+    let b = it.next().and_then(|t| t.parse::<f32>().ok()).unwrap_or(a);
+    Some((a.max(0.0), b.max(0.0)))
+}
+
+/// Parses an `feColorMatrix` `values=` attribute under the named
+/// `type=` flavour. Returns a 4x5 row-major matrix (RGBA in, RGBA out
+/// plus 1 column of bias). Failure modes (wrong arity, NaN) silently
+/// degrade to identity so downstream rendering stays sane.
+fn parse_color_matrix(kind: &str, values: &str) -> Option<[f32; 20]> {
+    let nums: Vec<f32> = values
+        .split(|c: char| c.is_ascii_whitespace() || c == ',')
+        .filter(|t| !t.is_empty())
+        .filter_map(|t| t.parse::<f32>().ok())
+        .collect();
+    match kind {
+        "matrix" | "" => {
+            if nums.len() != 20 {
+                return None;
+            }
+            let mut m = [0.0_f32; 20];
+            m.copy_from_slice(&nums);
+            Some(m)
+        }
+        "saturate" => {
+            // SVG 1.1 §15.18: saturation matrix.
+            let s = nums.first().copied().unwrap_or(1.0);
+            Some(saturate_matrix(s))
+        }
+        "huerotate" => {
+            let deg = nums.first().copied().unwrap_or(0.0);
+            Some(hue_rotate_matrix(deg))
+        }
+        "luminancetoalpha" => Some(LUMINANCE_TO_ALPHA_MATRIX),
+        _ => None,
+    }
+}
+
+/// Identity-on-luma matrix from SVG 1.1 §15.18 with `s` controlling the
+/// linear interpolation between luma-only (s=0) and identity (s=1).
+fn saturate_matrix(s: f32) -> [f32; 20] {
+    // Coefficients from the SVG spec.
+    let r0 = 0.213 + 0.787 * s;
+    let r1 = 0.715 - 0.715 * s;
+    let r2 = 0.072 - 0.072 * s;
+    let g0 = 0.213 - 0.213 * s;
+    let g1 = 0.715 + 0.285 * s;
+    let g2 = 0.072 - 0.072 * s;
+    let b0 = 0.213 - 0.213 * s;
+    let b1 = 0.715 - 0.715 * s;
+    let b2 = 0.072 + 0.928 * s;
+    [
+        r0, r1, r2, 0.0, 0.0, //
+        g0, g1, g2, 0.0, 0.0, //
+        b0, b1, b2, 0.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0, 0.0,
+    ]
+}
+
+/// Hue-rotation matrix from SVG 1.1 §15.18.
+fn hue_rotate_matrix(degrees: f32) -> [f32; 20] {
+    let rad = degrees.to_radians();
+    let c = rad.cos();
+    let s = rad.sin();
+    let r0 = 0.213 + c * 0.787 - s * 0.213;
+    let r1 = 0.715 - c * 0.715 - s * 0.715;
+    let r2 = 0.072 - c * 0.072 + s * 0.928;
+    let g0 = 0.213 - c * 0.213 + s * 0.143;
+    let g1 = 0.715 + c * 0.285 + s * 0.140;
+    let g2 = 0.072 - c * 0.072 - s * 0.283;
+    let b0 = 0.213 - c * 0.213 - s * 0.787;
+    let b1 = 0.715 - c * 0.715 + s * 0.715;
+    let b2 = 0.072 + c * 0.928 + s * 0.072;
+    [
+        r0, r1, r2, 0.0, 0.0, //
+        g0, g1, g2, 0.0, 0.0, //
+        b0, b1, b2, 0.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0, 0.0,
+    ]
+}
+
+const LUMINANCE_TO_ALPHA_MATRIX: [f32; 20] = [
+    0.0, 0.0, 0.0, 0.0, 0.0, //
+    0.0, 0.0, 0.0, 0.0, 0.0, //
+    0.0, 0.0, 0.0, 0.0, 0.0, //
+    0.2125, 0.7154, 0.0721, 0.0, 0.0,
+];
 
 fn resolve_gradient(defs: &Defs<'_>, id: &str, ctx: &ElemCtx) -> Option<GradientPaint> {
     let node = defs.lookup(id)?;
@@ -1968,27 +2234,55 @@ fn render_fill(out: &mut ColorPixmap, fill: &Fill, world: &Affine, tol: f32) {
         raster(&csegs)
     });
 
+    // Filtered shapes route through a same-size scratch ColorPixmap
+    // (the SourceGraphic) instead of writing to `out` directly. The
+    // filter pipeline then produces a final pixmap which is composited
+    // under the canvas via Porter-Duff source-over. This keeps the
+    // primitive set (offset / blur / matrix / merge) operating on
+    // canvas-aligned buffers and avoids tracking per-shape filter
+    // regions.
+    if let Some(filter) = &fill.filter {
+        let mut src = ColorPixmap::new(out.width, out.height);
+        paint_into(&mut src, fill, &mask, clip_mask.as_ref(), world);
+        let result = apply_filter(filter, &src);
+        composite_over(out, &result);
+        return;
+    }
+
+    paint_into(out, fill, &mask, clip_mask.as_ref(), world);
+}
+
+/// Paints `fill` into `dst` at the canvas-aligned position implied by
+/// `mask.origin_x/y`. Shared by the unfiltered fast path and the
+/// filtered SourceGraphic materialization.
+fn paint_into(
+    dst: &mut ColorPixmap,
+    fill: &Fill,
+    mask: &crate::raster::Render,
+    clip_mask: Option<&crate::raster::Render>,
+    world: &Affine,
+) {
     match &fill.paint {
         Paint::Solid(color) => {
             blit_solid(
-                out,
+                dst,
                 &mask.pixmap,
                 mask.origin_x,
                 mask.origin_y,
                 *color,
-                clip_mask.as_ref(),
+                clip_mask,
             );
         }
         Paint::Gradient(g) => {
             let g_xf = world.compose(&fill.xform).compose(&g.gradient_xform);
             blit_gradient(
-                out,
+                dst,
                 &mask.pixmap,
                 mask.origin_x,
                 mask.origin_y,
                 g,
                 &g_xf,
-                clip_mask.as_ref(),
+                clip_mask,
             );
         }
     }
@@ -2178,6 +2472,320 @@ fn sample_svg_gradient(g: &GradientPaint, g_xf: &Affine, x: f32, y: f32) -> [u8;
     let t = apply_extend(t, g.extend);
     let c = sample_stops(&g.stops, t);
     to_premul(c)
+}
+
+// =========================================================================
+// Filter pipeline
+// =========================================================================
+//
+// Each `<filter>` is a small DAG of `FilterPrimitive`s. We evaluate the
+// DAG against a same-size `SourceGraphic` pixmap (the filtered shape
+// rendered alone into a transparent buffer) and a `SourceAlpha` pixmap
+// (the same shape with R=G=B=0). Each primitive reads from `in` (named
+// or implicit-prev) and writes to `result` (named or anonymous). The
+// last primitive's output is the filtered pixmap, composited under the
+// canvas via Porter-Duff source-over.
+//
+// All intermediate buffers are full canvas size. This trades memory
+// for simplicity — feOffset + feMerge etc. don't need to track filter
+// regions, and shifting / blurring stays within the visible canvas.
+
+/// Walks the primitive list and returns the final pixmap. Built-in
+/// inputs `SourceGraphic` and `SourceAlpha` are materialised lazily.
+fn apply_filter(filter: &Filter, source: &ColorPixmap) -> ColorPixmap {
+    use alloc::collections::BTreeMap;
+    let mut named: BTreeMap<String, ColorPixmap> = BTreeMap::new();
+    let mut prev: Option<ColorPixmap> = None;
+    let mut source_alpha: Option<ColorPixmap> = None;
+
+    for prim in &filter.primitives {
+        let in_pix: ColorPixmap = match prim.input.as_deref() {
+            Some("SourceGraphic") => source.clone(),
+            Some("SourceAlpha") => {
+                if source_alpha.is_none() {
+                    source_alpha = Some(make_source_alpha(source));
+                }
+                source_alpha.as_ref().unwrap().clone()
+            }
+            Some(name) => named
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| ColorPixmap::new(source.width, source.height)),
+            None => prev.clone().unwrap_or_else(|| source.clone()),
+        };
+
+        let out = match &prim.op {
+            FilterOp::GaussianBlur {
+                std_dev_x,
+                std_dev_y,
+            } => apply_gaussian_blur(&in_pix, *std_dev_x, *std_dev_y),
+            FilterOp::ColorMatrix { matrix } => apply_color_matrix(&in_pix, matrix),
+            FilterOp::Offset { dx, dy } => apply_offset(&in_pix, *dx, *dy),
+            FilterOp::Flood { color } => apply_flood(in_pix.width, in_pix.height, *color),
+            FilterOp::Merge { inputs } => {
+                let mut acc = ColorPixmap::new(source.width, source.height);
+                for name in inputs {
+                    let layer = match name.as_str() {
+                        "SourceGraphic" => source.clone(),
+                        "SourceAlpha" => {
+                            if source_alpha.is_none() {
+                                source_alpha = Some(make_source_alpha(source));
+                            }
+                            source_alpha.as_ref().unwrap().clone()
+                        }
+                        other => named
+                            .get(other)
+                            .cloned()
+                            .unwrap_or_else(|| ColorPixmap::new(source.width, source.height)),
+                    };
+                    composite_over(&mut acc, &layer);
+                }
+                acc
+            }
+        };
+
+        if let Some(name) = &prim.result {
+            named.insert(name.clone(), out.clone());
+        }
+        prev = Some(out);
+    }
+
+    prev.unwrap_or_else(|| source.clone())
+}
+
+/// `SourceAlpha`: the source's alpha channel in all four channels'
+/// premultiplied form (R=G=B=0, A unchanged).
+fn make_source_alpha(src: &ColorPixmap) -> ColorPixmap {
+    let mut out = ColorPixmap::new(src.width, src.height);
+    let n = src.data.len() / 4;
+    for i in 0..n {
+        let a = src.data[i * 4 + 3];
+        out.data[i * 4] = 0;
+        out.data[i * 4 + 1] = 0;
+        out.data[i * 4 + 2] = 0;
+        out.data[i * 4 + 3] = a;
+    }
+    out
+}
+
+/// Porter-Duff source-over compositing of a same-size premultiplied
+/// `top` onto `dst`. Reuses the per-pixel formula from
+/// `colrv1::blend_src_over` but in a tight inner loop.
+fn composite_over(dst: &mut ColorPixmap, top: &ColorPixmap) {
+    if dst.width != top.width || dst.height != top.height {
+        return;
+    }
+    let n = dst.data.len() / 4;
+    for i in 0..n {
+        let sa = top.data[i * 4 + 3] as u32;
+        if sa == 0 {
+            continue;
+        }
+        let sr = top.data[i * 4] as u32;
+        let sg = top.data[i * 4 + 1] as u32;
+        let sb = top.data[i * 4 + 2] as u32;
+        let dr = dst.data[i * 4] as u32;
+        let dg = dst.data[i * 4 + 1] as u32;
+        let db = dst.data[i * 4 + 2] as u32;
+        let da = dst.data[i * 4 + 3] as u32;
+        let inv = 255 - sa;
+        dst.data[i * 4] = (sr + (dr * inv + 127) / 255) as u8;
+        dst.data[i * 4 + 1] = (sg + (dg * inv + 127) / 255) as u8;
+        dst.data[i * 4 + 2] = (sb + (db * inv + 127) / 255) as u8;
+        dst.data[i * 4 + 3] = (sa + (da * inv + 127) / 255) as u8;
+    }
+}
+
+/// Three-pass separable box-blur approximation. Each axis is convolved
+/// with a box kernel of radius `r ≈ ⌈σ⌉` three times, which approaches
+/// a true Gaussian by the central-limit theorem and is visually
+/// indistinguishable for σ ≥ 1.
+fn apply_gaussian_blur(src: &ColorPixmap, sx: f32, sy: f32) -> ColorPixmap {
+    if (sx <= 0.0 && sy <= 0.0) || src.is_empty() {
+        return src.clone();
+    }
+    let rx = (sx.max(0.0)).ceil() as i32;
+    let ry = (sy.max(0.0)).ceil() as i32;
+    let mut buf = src.clone();
+    if rx > 0 {
+        for _ in 0..3 {
+            buf = box_blur_h(&buf, rx);
+        }
+    }
+    if ry > 0 {
+        for _ in 0..3 {
+            buf = box_blur_v(&buf, ry);
+        }
+    }
+    buf
+}
+
+fn box_blur_h(src: &ColorPixmap, r: i32) -> ColorPixmap {
+    let w = src.width as i32;
+    let h = src.height as i32;
+    let mut out = ColorPixmap::new(src.width, src.height);
+    if w == 0 || h == 0 || r == 0 {
+        out.data.copy_from_slice(&src.data);
+        return out;
+    }
+    let kernel = (r * 2 + 1) as u32;
+    for y in 0..h {
+        let row = (y * w) as usize * 4;
+        // Sliding-window sum over the kernel. Out-of-bounds samples
+        // clamp to the edge ("EDGE" mode in SVG terms — closer to what
+        // browser engines do for filter regions touching the canvas
+        // edge).
+        let mut sr: u32 = 0;
+        let mut sg: u32 = 0;
+        let mut sb: u32 = 0;
+        let mut sa: u32 = 0;
+        // Prime the window with [-r, r] samples.
+        for kx in -r..=r {
+            let cx = kx.clamp(0, w - 1);
+            let i = row + cx as usize * 4;
+            sr += src.data[i] as u32;
+            sg += src.data[i + 1] as u32;
+            sb += src.data[i + 2] as u32;
+            sa += src.data[i + 3] as u32;
+        }
+        for x in 0..w {
+            let oi = row + x as usize * 4;
+            out.data[oi] = (sr / kernel) as u8;
+            out.data[oi + 1] = (sg / kernel) as u8;
+            out.data[oi + 2] = (sb / kernel) as u8;
+            out.data[oi + 3] = (sa / kernel) as u8;
+            // Slide window: drop pixel at x-r, add pixel at x+r+1.
+            let drop_x = (x - r).clamp(0, w - 1);
+            let add_x = (x + r + 1).clamp(0, w - 1);
+            let di = row + drop_x as usize * 4;
+            let ai = row + add_x as usize * 4;
+            sr = sr + src.data[ai] as u32 - src.data[di] as u32;
+            sg = sg + src.data[ai + 1] as u32 - src.data[di + 1] as u32;
+            sb = sb + src.data[ai + 2] as u32 - src.data[di + 2] as u32;
+            sa = sa + src.data[ai + 3] as u32 - src.data[di + 3] as u32;
+        }
+    }
+    out
+}
+
+fn box_blur_v(src: &ColorPixmap, r: i32) -> ColorPixmap {
+    let w = src.width as i32;
+    let h = src.height as i32;
+    let mut out = ColorPixmap::new(src.width, src.height);
+    if w == 0 || h == 0 || r == 0 {
+        out.data.copy_from_slice(&src.data);
+        return out;
+    }
+    let kernel = (r * 2 + 1) as u32;
+    let stride = (w as usize) * 4;
+    for x in 0..w {
+        let col = x as usize * 4;
+        let mut sr: u32 = 0;
+        let mut sg: u32 = 0;
+        let mut sb: u32 = 0;
+        let mut sa: u32 = 0;
+        for ky in -r..=r {
+            let cy = ky.clamp(0, h - 1);
+            let i = col + cy as usize * stride;
+            sr += src.data[i] as u32;
+            sg += src.data[i + 1] as u32;
+            sb += src.data[i + 2] as u32;
+            sa += src.data[i + 3] as u32;
+        }
+        for y in 0..h {
+            let oi = col + y as usize * stride;
+            out.data[oi] = (sr / kernel) as u8;
+            out.data[oi + 1] = (sg / kernel) as u8;
+            out.data[oi + 2] = (sb / kernel) as u8;
+            out.data[oi + 3] = (sa / kernel) as u8;
+            let drop_y = (y - r).clamp(0, h - 1);
+            let add_y = (y + r + 1).clamp(0, h - 1);
+            let di = col + drop_y as usize * stride;
+            let ai = col + add_y as usize * stride;
+            sr = sr + src.data[ai] as u32 - src.data[di] as u32;
+            sg = sg + src.data[ai + 1] as u32 - src.data[di + 1] as u32;
+            sb = sb + src.data[ai + 2] as u32 - src.data[di + 2] as u32;
+            sa = sa + src.data[ai + 3] as u32 - src.data[di + 3] as u32;
+        }
+    }
+    out
+}
+
+/// Applies a 4×5 colour matrix (RGBA + bias column) to a premultiplied
+/// pixmap. Per SVG 1.1 §15.18, `feColorMatrix` operates on
+/// non-premultiplied RGBA, so we un-premultiply, transform, clamp, and
+/// re-premultiply.
+fn apply_color_matrix(src: &ColorPixmap, m: &[f32; 20]) -> ColorPixmap {
+    let mut out = ColorPixmap::new(src.width, src.height);
+    let n = src.data.len() / 4;
+    for i in 0..n {
+        let pr = src.data[i * 4] as f32 / 255.0;
+        let pg = src.data[i * 4 + 1] as f32 / 255.0;
+        let pb = src.data[i * 4 + 2] as f32 / 255.0;
+        let pa = src.data[i * 4 + 3] as f32 / 255.0;
+        // Un-premultiply (avoid div-by-zero).
+        let (r, g, b) = if pa > 0.0 {
+            (pr / pa, pg / pa, pb / pa)
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+        let nr = (m[0] * r + m[1] * g + m[2] * b + m[3] * pa + m[4]).clamp(0.0, 1.0);
+        let ng = (m[5] * r + m[6] * g + m[7] * b + m[8] * pa + m[9]).clamp(0.0, 1.0);
+        let nb = (m[10] * r + m[11] * g + m[12] * b + m[13] * pa + m[14]).clamp(0.0, 1.0);
+        let na = (m[15] * r + m[16] * g + m[17] * b + m[18] * pa + m[19]).clamp(0.0, 1.0);
+        out.data[i * 4] = (nr * na * 255.0).round() as u8;
+        out.data[i * 4 + 1] = (ng * na * 255.0).round() as u8;
+        out.data[i * 4 + 2] = (nb * na * 255.0).round() as u8;
+        out.data[i * 4 + 3] = (na * 255.0).round() as u8;
+    }
+    out
+}
+
+/// Translates a pixmap by `(dx, dy)` device-space pixels. Out-of-bounds
+/// reads return transparent black; the destination is fresh.
+fn apply_offset(src: &ColorPixmap, dx: f32, dy: f32) -> ColorPixmap {
+    let mut out = ColorPixmap::new(src.width, src.height);
+    let dxi = dx.round() as i32;
+    let dyi = dy.round() as i32;
+    let w = src.width as i32;
+    let h = src.height as i32;
+    for y in 0..h {
+        let sy = y - dyi;
+        if sy < 0 || sy >= h {
+            continue;
+        }
+        for x in 0..w {
+            let sx = x - dxi;
+            if sx < 0 || sx >= w {
+                continue;
+            }
+            let s = (sy as usize * w as usize + sx as usize) * 4;
+            let d = (y as usize * w as usize + x as usize) * 4;
+            out.data[d] = src.data[s];
+            out.data[d + 1] = src.data[s + 1];
+            out.data[d + 2] = src.data[s + 2];
+            out.data[d + 3] = src.data[s + 3];
+        }
+    }
+    out
+}
+
+/// Returns a same-size pixmap filled with a solid premultiplied colour.
+fn apply_flood(width: u32, height: u32, color: [u8; 4]) -> ColorPixmap {
+    let mut out = ColorPixmap::new(width, height);
+    // Premultiply.
+    let a = color[3] as u32;
+    let r = (color[0] as u32 * a + 127) / 255;
+    let g = (color[1] as u32 * a + 127) / 255;
+    let b = (color[2] as u32 * a + 127) / 255;
+    let n = out.data.len() / 4;
+    for i in 0..n {
+        out.data[i * 4] = r as u8;
+        out.data[i * 4 + 1] = g as u8;
+        out.data[i * 4 + 2] = b as u8;
+        out.data[i * 4 + 3] = a as u8;
+    }
+    out
 }
 
 // =========================================================================
@@ -3240,6 +3848,83 @@ mod tests {
         // confirm the parser accepted the attribute.
         assert_eq!(doc.fills.len(), 1);
         assert!(doc.fills[0].is_stroke);
+    }
+
+    #[test]
+    fn filter_attaches_to_fill_when_referenced() {
+        let xml = r##"<svg viewBox="0 0 100 100">
+            <defs>
+                <filter id="b"><feGaussianBlur stdDeviation="2"/></filter>
+            </defs>
+            <rect x="0" y="0" width="100" height="100" fill="#000" filter="url(#b)"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        assert_eq!(doc.fills.len(), 1);
+        let f = doc.fills[0].filter.as_ref().expect("filter expected");
+        assert_eq!(f.primitives.len(), 1);
+        assert!(matches!(f.primitives[0].op, FilterOp::GaussianBlur { .. }));
+    }
+
+    #[test]
+    fn filter_unknown_id_silently_drops() {
+        let xml = r##"<svg viewBox="0 0 10 10">
+            <rect x="0" y="0" width="10" height="10" fill="#000" filter="url(#missing)"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        assert_eq!(doc.fills.len(), 1);
+        assert!(doc.fills[0].filter.is_none());
+    }
+
+    #[test]
+    fn filter_parses_full_drop_shadow_chain() {
+        let xml = r##"<svg viewBox="0 0 100 100">
+            <defs>
+                <filter id="ds">
+                    <feGaussianBlur in="SourceAlpha" stdDeviation="2" result="b"/>
+                    <feOffset in="b" dx="4" dy="4" result="o"/>
+                    <feMerge>
+                        <feMergeNode in="o"/>
+                        <feMergeNode in="SourceGraphic"/>
+                    </feMerge>
+                </filter>
+            </defs>
+            <rect x="10" y="10" width="40" height="40" fill="#000" filter="url(#ds)"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        let f = doc.fills[0].filter.as_ref().unwrap();
+        assert_eq!(f.primitives.len(), 3);
+        assert!(matches!(f.primitives[0].op, FilterOp::GaussianBlur { .. }));
+        assert!(matches!(f.primitives[1].op, FilterOp::Offset { .. }));
+        assert!(matches!(f.primitives[2].op, FilterOp::Merge { .. }));
+    }
+
+    #[test]
+    fn color_matrix_saturate_zero_collapses_red_channels() {
+        let m = saturate_matrix(0.0);
+        // Pure red (1,0,0,1) → grey: each output channel ≈ 0.213.
+        let r = m[0] * 1.0 + m[1] * 0.0 + m[2] * 0.0 + m[3] * 1.0 + m[4];
+        let g = m[5] * 1.0 + m[6] * 0.0 + m[7] * 0.0 + m[8] * 1.0 + m[9];
+        let b = m[10] * 1.0 + m[11] * 0.0 + m[12] * 0.0 + m[13] * 1.0 + m[14];
+        assert!((r - g).abs() < 1e-3);
+        assert!((g - b).abs() < 1e-3);
+    }
+
+    #[test]
+    fn color_matrix_hue_rotate_zero_is_identity() {
+        let m = hue_rotate_matrix(0.0);
+        // (1,0,0) stays roughly (1,0,0).
+        let r = m[0] * 1.0 + m[1] * 0.0 + m[2] * 0.0;
+        assert!((r - 1.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn parse_std_deviation_handles_one_or_two_values() {
+        assert_eq!(parse_std_deviation("3"), Some((3.0, 3.0)));
+        assert_eq!(parse_std_deviation("3 5"), Some((3.0, 5.0)));
+        assert_eq!(parse_std_deviation("3,5"), Some((3.0, 5.0)));
+        // Negative collapses to zero.
+        assert_eq!(parse_std_deviation("-2"), Some((0.0, 0.0)));
+        assert_eq!(parse_std_deviation(""), None);
     }
 
     #[test]
