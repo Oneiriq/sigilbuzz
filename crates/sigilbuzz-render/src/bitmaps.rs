@@ -831,6 +831,7 @@ mod tests {
             }),
             packing: BitPacking::ByteAligned,
             data,
+            components_raw: &[],
         }
     }
 
@@ -849,6 +850,7 @@ mod tests {
             }),
             packing: BitPacking::BitAligned,
             data,
+            components_raw: &[],
         }
     }
 
