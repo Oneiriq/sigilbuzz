@@ -30,3 +30,6 @@ clap = { version = "4", features = ["derive"] }
 # No assert_cmd: keep this crate's dep set minimal. The integration
 # tests drive the binary via `std::process::Command` directly so we
 # don't pull in trycmd / assert_cmd / predicates.
+
+[lints]
+workspace = true

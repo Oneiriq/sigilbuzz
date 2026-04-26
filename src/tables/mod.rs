@@ -9,47 +9,107 @@
 //! done against byte literals such as `b"cmap"` so every tag site is
 //! unambiguous and `no_std`-friendly.
 
+// Each per-table submodule below is `pub` so companion crates
+// (sigilbuzz-subset, sigilbuzz-paint, sigilbuzz-render, …) can reach
+// the parser types they need by full path. The headline names
+// re-exported at the module root via `pub use` (`Cmap`, `Glyf`,
+// `Colr`, `PathOp`, `MultiVarStore`, `ItemVariationStore`, `Reader`,
+// …) are the *public* surface — those carry the stability commitment
+// in `docs/STABILITY.md`.
+//
+// Submodules marked `#[doc(hidden)]` below contain additional
+// internal helper types and parser machinery that are `pub` only so
+// sibling crates can link to them. Their shape may move between
+// releases; consumers should depend on the curated `tables::Foo`
+// re-export rather than the `tables::foo::Foo` path. Hiding the
+// module keeps the re-exports visible while suppressing rustdoc for
+// the deep paths.
+//
+// `colr`, `cpal`, and `outline` stay visible because consumer code
+// (sigilbuzz-paint, sigilbuzz-svg, sigilbuzz-render) walks the full
+// submodule surface — variant enums (`ColrPaint`, `ColorLine`,
+// `PathOp`) and small helper types are part of the published API,
+// not internals.
+#[doc(hidden)]
 pub mod ankr;
+#[doc(hidden)]
 pub mod avar;
+#[doc(hidden)]
 pub mod base;
+#[doc(hidden)]
 pub mod cbdt;
+#[doc(hidden)]
 pub mod cblc;
+#[doc(hidden)]
 pub mod cff;
+#[doc(hidden)]
 pub mod cff2;
+#[doc(hidden)]
 pub mod cmap;
 pub mod colr;
 pub mod cpal;
+#[doc(hidden)]
 pub mod ebdt;
+#[doc(hidden)]
 pub mod eblc;
+#[doc(hidden)]
 pub mod fvar;
+#[doc(hidden)]
 pub mod gdef;
+#[doc(hidden)]
 pub mod glyf;
+#[doc(hidden)]
 pub mod gpos;
+#[doc(hidden)]
 pub mod gsub;
+#[doc(hidden)]
 pub mod gvar;
+#[doc(hidden)]
 pub mod head;
+#[doc(hidden)]
 pub mod hhea;
+#[doc(hidden)]
 pub mod hmtx;
+#[doc(hidden)]
 pub mod hvar;
+#[doc(hidden)]
 pub mod kern;
+#[doc(hidden)]
 pub mod kerx;
+#[doc(hidden)]
 pub mod layout;
+#[doc(hidden)]
 pub mod loca;
+#[doc(hidden)]
 pub mod math;
+#[doc(hidden)]
 pub mod maxp;
+#[doc(hidden)]
 pub mod morx;
+#[doc(hidden)]
 pub mod multi_var_store;
+#[doc(hidden)]
 pub mod mvar;
+#[doc(hidden)]
 pub mod name;
 pub mod outline;
+#[doc(hidden)]
 pub mod parse;
+#[doc(hidden)]
 pub mod sbix;
+#[doc(hidden)]
 pub mod svg_table;
+#[doc(hidden)]
 pub mod varc;
+#[doc(hidden)]
 pub mod variation_store;
+#[doc(hidden)]
 pub mod vhea;
+#[doc(hidden)]
 pub mod vmtx;
+#[doc(hidden)]
 pub mod vorg;
+#[doc(hidden)]
 pub mod vvar;
 
 pub use ankr::Ankr;

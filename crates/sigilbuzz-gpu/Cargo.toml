@@ -27,3 +27,6 @@ criterion = "0.5"
 [[bench]]
 name = "encode"
 harness = false
+
+[lints]
+workspace = true

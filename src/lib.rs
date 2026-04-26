@@ -41,8 +41,25 @@ mod face;
 mod font;
 mod shape;
 
+// Public-but-experimental: the OpenType Layout module exposes the
+// shape-engine internals (Arabic / Indic / USE / Mongolian / Tibetan
+// state machines, feature tag constants). The shaper is a stable API
+// via [`shape`]; the per-script machinery here is not — its types and
+// signatures will move as the shaping pipeline evolves toward 1.0. The
+// module is `pub` so companion crates that experiment with custom
+// shapers can still reach it, but it is hidden from rustdoc to signal
+// that consumers cannot depend on its shape across releases. See
+// `docs/STABILITY.md`.
+#[doc(hidden)]
 pub mod ot;
 pub mod tables;
+// Public-but-experimental: the Unicode property tables backing the
+// shaper. `unicode::Script` is already consumed by `sigilbuzz-capi`
+// for the `hb_script_t` mapping, so the module stays `pub`. The full
+// UCD-derived data is still being filled in release-by-release;
+// consumers should not pin against the internal shape. Hidden from
+// rustdoc until the surface settles. See `docs/STABILITY.md`.
+#[doc(hidden)]
 pub mod unicode;
 
 pub use blob::Blob;

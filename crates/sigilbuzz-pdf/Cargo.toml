@@ -21,3 +21,6 @@ sigilbuzz = { workspace = true }
 
 [dev-dependencies]
 # No extra deps — fixtures are loaded with include_bytes!.
+
+[lints]
+workspace = true
