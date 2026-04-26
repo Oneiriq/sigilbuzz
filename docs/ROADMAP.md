@@ -529,13 +529,34 @@ Three dogfood-driven gaps closed (surfaced by oniq's MSDF generator cutover from
 
 ---
 
-## 0.17.0+ (next)
+## 0.17.0 (shipping)
 
+Four close-outs from prior carry-overs (#207 EBDT/EBLC + sbix dupe; #205 SVG strokes/gradients/use/clipPath + shape primitives; #193 VARC MVS pruning) plus a sigilbuzz-render PNG encoder unlocking downstream raster bake. Wave 17 found one cross-cutting NaN/Inf defect in sigilbuzz-svg/sigilbuzz-pdf number serialization.
+
+### Render close-outs
+
+- [x] **PNG encoder (#217)** — `sigilbuzz_render::encode_png(&ColorPixmap)` and `encode_png_alpha(&Pixmap)` produce deterministic PNGs (filter type None, miniz_oxide for zlib, fresh CRC32 impl). Closes the asymmetry from PR #207 which shipped a decoder only. Unblocks downstream consumers (oniq dogfood + pixel-stroke SVG `<text>` RasterBake fill).
+- [x] **EBDT/EBLC mono bitmaps + sbix `dupe` (#221)** — closes PR #207 (0.15.0) deferrals. New `src/tables/{ebdt,eblc}.rs` (formats 1/2/5/6/7), 1bpp → RGBA conversion in render, sbix `'dupe'` recursion with depth cap + self-ref guard, sbix `'jpg '`/`'tiff'`/`'jp2 '` surface `RenderError::UnsupportedBitmap` instead of panic. Dispatch priority: CBDT (color) > sbix png > EBDT (mono).
+- [x] **SVG strokes + gradients + `<use>` + clipPath + shapes (#219)** — closes PR #205 (0.15.0) deferrals. Strokes (butt+miter minimum-viable; round/square/bevel approximate), `<linearGradient>` and `<radialGradient>` reusing the COLRv1 ramp evaluator, in-document `<use>` with 16-deep recursion guard, basic clipPath (single shape), `<rect>` (with rx/ry rounded corners) / `<circle>` / `<ellipse>`. The streaming tag walker became a small in-memory DOM so id-bearing `<defs>` stay reachable for forward refs.
+
+### Subset close-out
+
+- [x] **VARC MultiVarStore pruning (#220)** — closes PR #193 (0.14.0) carry-over. Walks surviving VarCompositeGlyph component records to collect referenced `MultiVarIdx` entries, rewrites the MVS keeping only visited entries with index remapping back into the components. -25.9% VARC table size on a 4-composite/10-MVS-entry test fixture.
+
+### Hardening — wave 17
+
+- [x] 1 fix (#222 / issue #216): sigilbuzz-svg `push_num` and sigilbuzz-pdf `write_num` emitted invalid `NaN`/`inf` tokens for non-finite floats. Both coerce non-finite → 0 before format. Sibling-PR scrutiny (PNG / SVG / VARC / EBDT) found no other defects.
+
+---
+
+## 0.18.0+ (next)
+
+- [ ] **#218** — per-Bezier `flatten` variant for MSDF edge coloring (oniq dogfood gap).
 - [ ] Stable API audit + crates.io publish.
-- [ ] EBDT/EBLC mono bitmap embeds in `sigilbuzz-render`.
-- [ ] sbix non-PNG (`'jpg '`, `'tiff'`) decoders.
-- [ ] SVG strokes + gradients + `<use>` + clipPaths.
-- [ ] VARC subset MultiVarStore pruning (#193 carry-over).
+- [ ] sbix `'jpg '` / `'tiff'` / `'jp2 '` decoders (defer-of-deferral).
+- [ ] EBDT formats 8/9 (composite bitmaps).
+- [ ] SVG `stroke-dasharray`, `<polygon>` / `<polyline>` / `<line>`, filter primitives, masks beyond clipPath.
+- [ ] VARC subset region-list pruning when fully unreferenced (further #193 follow-up).
 
 ---
 
