@@ -243,6 +243,11 @@ borrow_as_ptr = "allow"
 # a numeric comparison than `u16::try_from(x).is_ok()` in some hot
 # paths; we accept both forms.
 checked_conversions = "allow"
+# `needless_raw_string_hashes`: SVG/XML fixtures use `r##"..."##`
+# uniformly so authors can paste in attribute strings containing `"`
+# without re-counting hashes. Letting clippy strip hashes per-fixture
+# would create a maintenance trap.
+needless_raw_string_hashes = "allow"
 
 # Root crate inherits the workspace lint baseline. No per-crate
 # additions — the shaper already conforms to the strictest level.
