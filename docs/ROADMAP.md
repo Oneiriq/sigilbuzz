@@ -549,14 +549,32 @@ Four close-outs from prior carry-overs (#207 EBDT/EBLC + sbix dupe; #205 SVG str
 
 ---
 
-## 0.18.0+ (next)
+## 0.18.0 (shipping)
 
-- [ ] **#218** — per-Bezier `flatten` variant for MSDF edge coloring (oniq dogfood gap).
+Four close-outs from prior carry-overs (one fresh dogfood-driven gap, three deferrals from 0.17.0). Wave 18 found two cross-cutting capacity-overflow panics in the render path on extreme size inputs.
+
+### Render close-outs
+
+- [x] **#218 / #224 — `flatten_grouped()` for per-Bezier MSDF edge coloring**. Closes the oniq dogfood gap from 0.16.0 consumption: oniq's per-Bezier wrapping pattern can drop in favor of this. New `FlattenedCurve::{Line(Segment), Quad(Vec<Segment>), Cubic(Vec<Segment>)}` enum returned by the new function; existing `flatten()` byte-identical.
+- [x] **SVG polygon / polyline / line + stroke-dasharray (#227)** — closes 0.17.0 #219 deferrals. Points-list parser, `<polygon>` (closed) / `<polyline>` (open) / `<line>` lowering. `parse_dasharray` (with SVG odd-length doubling, `none` / empty / negative / all-zero → no dash, `px` suffix tolerated) + `dash_polyline` arc-length walker that splits each contour into draw-phase sub-polylines. `stroke-dashoffset` honored. Curves are dashed via their flattened chord polyline (true Bezier arc length is a follow-up).
+- [x] **EBDT formats 8/9 composite mono bitmaps (#229)** — closes 0.17.0 #221 deferral. Parser for SmallGlyphMetrics + components (format 8) and BigGlyphMetrics + components (format 9). Recursive render path with depth cap = 4, self-reference + cycle guards, strike-consistency check (component must resolve at parent's ppem_y through EBDT, not CBDT/sbix).
+
+### Subset close-out
+
+- [x] **VARC subset region-list pruning (#228)** — closes 0.17.0 #220 follow-up. After MVS subtable pruning, walks surviving tuples to collect referenced regions, drops the unreferenced ones from the region list, renumbers tuple region indices through the remap. -124 bytes / 4→2 region-count on the orphan-maximizing test fixture.
+
+### Hardening — wave 18
+
+- [x] 2 fixes (#230 / issues #225 + #226): `rasterize_svg_glyph` and `rasterize_bitmap_glyph` panicked with capacity-overflow when extreme finite viewBox or size_pt produced multi-GB pixel buffer requests. Both now cap output dimensions at 16384 (matches PNG decoder ceiling) and return `RenderError::BadSize` instead of panicking. `rescale_bilinear` returns empty pixmap on out-of-range targets.
+
+---
+
+## 0.19.0+ (next)
+
 - [ ] Stable API audit + crates.io publish.
-- [ ] sbix `'jpg '` / `'tiff'` / `'jp2 '` decoders (defer-of-deferral).
-- [ ] EBDT formats 8/9 (composite bitmaps).
-- [ ] SVG `stroke-dasharray`, `<polygon>` / `<polyline>` / `<line>`, filter primitives, masks beyond clipPath.
-- [ ] VARC subset region-list pruning when fully unreferenced (further #193 follow-up).
+- [ ] sbix `'jpg '` / `'tiff'` / `'jp2 '` decoders.
+- [ ] SVG filter primitives, masks beyond clipPath, animations, `<text>` rendering inside SVG (text-on-path).
+- [ ] Dasharray on Bezier arc-length (true curve dashing, not chord-flattened approximation).
 
 ---
 
