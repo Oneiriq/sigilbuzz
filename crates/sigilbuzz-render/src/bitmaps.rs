@@ -65,6 +65,7 @@ use crate::error::RenderError;
 use crate::jpeg_decode::decode_jpeg;
 use crate::pixmap::ColorPixmap;
 use crate::rasterizer::Rasterizer;
+use crate::tiff_decode::decode_tiff;
 
 /// Maximum sbix `'dupe'` recursion depth before sigilbuzz-render bails
 /// with [`RenderError::UnsupportedBitmap`]. Real fonts dupe at most
@@ -208,10 +209,16 @@ fn rasterize_bitmap_inner_full(
             // `UnsupportedBitmap` so callers can fall back to outlines
             // exactly as before.
             TAG_JPG => (decode_jpeg(glyph.data)?, f32::from(ppem)),
-            // TIFF / JPEG-2000: still each its own ~700-line decoder
-            // and even rarer than JPEG in real fonts. Surface cleanly
-            // so callers can fall back to outlines.
-            TAG_TIFF | TAG_JP2 => return Err(RenderError::UnsupportedBitmap),
+            // TIFF: hand-rolled baseline decoder. Supports 8-bit RGB
+            // / RGBA, single IFD, strip-organised, uncompressed or
+            // PackBits (compression 1 / 32773). LZW / CCITT / JPEG-in-
+            // TIFF / tiled / planar / multi-IFD surface `BadTiff` or
+            // `UnsupportedBitmap`.
+            TAG_TIFF => (decode_tiff(glyph.data)?, f32::from(ppem)),
+            // JPEG-2000: still each its own ~700-line decoder and
+            // even rarer than JPEG in real fonts. Surface cleanly so
+            // callers can fall back to outlines.
+            TAG_JP2 => return Err(RenderError::UnsupportedBitmap),
             // Unknown four-byte tag — treat as unsupported rather
             // than guessing.
             _ => return Err(RenderError::UnsupportedBitmap),
