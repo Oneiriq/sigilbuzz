@@ -167,7 +167,19 @@ fn append_cmd(out: &mut String, cmd: char, coords: &[f32]) {
 /// places, stripping trailing zeros and the trailing `.` when the
 /// value is integral. Determinism: a fixed precision plus the same
 /// trim policy means the same input always produces the same bytes.
+///
+/// Non-finite inputs (NaN, ±∞) are coerced to `0` so the emitted SVG
+/// stays well-formed — `format!("{NaN:.3}")` round-trips to the
+/// literal string `"NaN"` and `format!("{inf:.3}")` to `"inf"`,
+/// neither of which is a valid SVG numeric token. A pathological
+/// glyph outline (e.g. a CFF charstring whose blend evaluation
+/// overflows under extreme variation coords) would otherwise leak
+/// those tokens into the document and corrupt downstream parsers.
 pub(crate) fn push_num(out: &mut String, v: f32) {
+    if !v.is_finite() {
+        out.push('0');
+        return;
+    }
     // Round to PRECISION decimals first, then format. Avoids the
     // "1.4999999..." artefacts that show up when f32 fed directly to
     // `{:.3}` rounds inconsistently across platforms. We also collapse
@@ -378,5 +390,63 @@ mod tests {
         let svg1 = render_outline_svg("M 0 0 Z", (0.0, 0.0, 5.0, 5.0));
         let svg2 = render_outline_svg("M 0 0 Z", (0.0, 0.0, 5.0, 5.0));
         assert_eq!(svg1, svg2);
+    }
+
+    #[test]
+    fn push_num_coerces_non_finite_to_zero() {
+        // Issue #216: a pathological glyph outline (e.g. CFF charstring
+        // whose blend evaluation overflows under extreme variation
+        // coords) could leak NaN / ±inf into the float formatter, which
+        // round-trips them as the literal strings "NaN" / "inf" / "-inf"
+        // — none of which is a valid SVG numeric token. The emitter
+        // must coerce non-finite values to 0 so the document stays
+        // well-formed.
+        for &bad in &[f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut s = String::new();
+            push_num(&mut s, bad);
+            assert_eq!(s, "0", "non-finite {bad} leaked: {s:?}");
+        }
+    }
+
+    #[test]
+    fn path_data_with_non_finite_coords_emits_only_finite_tokens() {
+        let ops = [
+            PathOp::MoveTo {
+                x: f32::NAN,
+                y: 0.0,
+            },
+            PathOp::LineTo {
+                x: f32::INFINITY,
+                y: f32::NEG_INFINITY,
+            },
+            PathOp::QuadTo {
+                cx: f32::NAN,
+                cy: 1.0,
+                x: 2.0,
+                y: 3.0,
+            },
+            PathOp::CubicTo {
+                c1x: f32::INFINITY,
+                c1y: 0.0,
+                c2x: 0.0,
+                c2y: 0.0,
+                x: 0.0,
+                y: 0.0,
+            },
+            PathOp::Close,
+        ];
+        let d = path_data(&ops);
+        assert!(!d.contains("NaN"), "NaN leaked: {d:?}");
+        assert!(!d.contains("inf"), "inf leaked: {d:?}");
+        // The SVG must remain well-formed — verify only valid path
+        // command letters and digits / spaces / minus / dot show up.
+        for ch in d.chars() {
+            assert!(
+                ch.is_ascii_digit()
+                    || ch.is_ascii_whitespace()
+                    || matches!(ch, 'M' | 'L' | 'Q' | 'C' | 'Z' | '-' | '.'),
+                "unexpected char {ch:?} in path data {d:?}"
+            );
+        }
     }
 }
