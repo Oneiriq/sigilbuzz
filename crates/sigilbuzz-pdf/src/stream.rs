@@ -38,13 +38,21 @@ use crate::Bbox;
 /// round-trips to the same value, then drop a trailing `.0` if any —
 /// PDF parsers accept both `1` and `1.0`, and dropping the suffix
 /// keeps the output compact and snapshot-stable.
+///
+/// Non-finite inputs (NaN, ±∞) are coerced to `0` because PDF
+/// numeric objects do not admit `NaN` / `inf` tokens — emitting them
+/// would break content-stream parsing in every conforming reader. A
+/// pathological glyph outline (CFF charstring whose blend evaluation
+/// overflows under extreme variation coords, for example) would
+/// otherwise leak those literals into the output. See issue #216.
 fn write_num(out: &mut Vec<u8>, value: f32) {
+    let safe = if value.is_finite() { value } else { 0.0 };
     use core::fmt::Write;
     // Buffered into a local stack string so we can post-process the
     // ".0" suffix without an allocation. 32 bytes is comfortably
     // larger than any f32's `{}` rendering (max ~15 chars).
     let mut buf = heapless_str::HeaplessStr::<32>::new();
-    let _ = write!(buf, "{value}");
+    let _ = write!(buf, "{safe}");
     let s = buf.as_str();
     let trimmed = s.strip_suffix(".0").unwrap_or(s);
     out.extend_from_slice(trimmed.as_bytes());
@@ -349,5 +357,47 @@ mod tests {
     fn empty_outline_yields_empty_bbox() {
         let bb = outline_bbox(&[]);
         assert!(bb.is_empty());
+    }
+
+    #[test]
+    fn write_num_coerces_non_finite_to_zero() {
+        // Issue #216: PDF numeric tokens cannot be NaN / inf — those
+        // would fail to parse in every conforming reader. A pathological
+        // glyph outline whose coords overflow under variation evaluation
+        // could otherwise leak literal "NaN"/"inf"/"-inf" tokens into the
+        // content stream.
+        for &bad in &[f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut out = Vec::new();
+            write_num(&mut out, bad);
+            assert_eq!(s(&out), "0", "non-finite {bad} leaked: {:?}", s(&out));
+        }
+    }
+
+    #[test]
+    fn emit_path_ops_with_non_finite_coords_emits_only_finite_tokens() {
+        let ops = [
+            PathOp::MoveTo {
+                x: f32::NAN,
+                y: 0.0,
+            },
+            PathOp::LineTo {
+                x: f32::INFINITY,
+                y: f32::NEG_INFINITY,
+            },
+            PathOp::CubicTo {
+                c1x: f32::NAN,
+                c1y: 0.0,
+                c2x: 0.0,
+                c2y: 0.0,
+                x: 0.0,
+                y: 0.0,
+            },
+            PathOp::Close,
+        ];
+        let mut out = Vec::new();
+        emit_path_ops(&mut out, &ops);
+        let stream = s(&out);
+        assert!(!stream.contains("NaN"), "NaN leaked: {stream:?}");
+        assert!(!stream.contains("inf"), "inf leaked: {stream:?}");
     }
 }
