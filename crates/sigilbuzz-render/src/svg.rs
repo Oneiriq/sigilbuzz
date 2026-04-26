@@ -18,6 +18,10 @@
 //! - `<path>` with `d=` containing M/L/H/V/C/Q/Z + relative variants.
 //! - `<rect>` / `<circle>` / `<ellipse>` shape primitives — converted
 //!   to paths and run through the existing fill pipeline.
+//! - `<polygon>` / `<polyline>` / `<line>` shape primitives — converted
+//!   to paths via the SVG `points` list grammar (space- or
+//!   comma-separated coords). `<polygon>` closes back to the first
+//!   point; `<polyline>` is open; `<line>` is a single segment.
 //! - `fill="#RRGGBB"`, `fill="#RGB"`, `fill="rgb(...)"`, named colours,
 //!   `fill="none"`, `fill-opacity` / `opacity`, plus `fill="url(#g)"`
 //!   pointing at a `<linearGradient>` / `<radialGradient>`.
@@ -32,9 +36,14 @@
 //! - `<clipPath>` containing a single `<path>` (the common case in
 //!   designer-emoji fonts).
 //!
+//! - `stroke-dasharray` + `stroke-dashoffset` on stroked geometry,
+//!   applied to the post-flattening polyline. Curves become chords
+//!   first, then dashes are walked along cumulative arc length per
+//!   contour.
+//!
 //! Anything outside this list — filter primitives, masks beyond
-//! clipPath, animations, scripting, `style=` attributes, dasharray,
-//! text-on-path — is silently skipped.
+//! clipPath, animations, scripting, `style=` attributes, text-on-path
+//! — is silently skipped.
 //!
 //! ## Pipeline
 //!
@@ -515,6 +524,12 @@ fn walk(
         Some(circle_to_path(node))
     } else if name_eq(&node.name, "ellipse") {
         Some(ellipse_to_path(node))
+    } else if name_eq(&node.name, "polygon") {
+        Some(polygon_to_path(node))
+    } else if name_eq(&node.name, "polyline") {
+        Some(polyline_to_path(node))
+    } else if name_eq(&node.name, "line") {
+        Some(line_to_path(node))
     } else {
         None
     };
@@ -722,6 +737,12 @@ fn resolve_clip_shape(defs: &Defs<'_>, id: &str) -> Option<ClipShape> {
             Some(circle_to_path(c))
         } else if name_eq(&c.name, "ellipse") {
             Some(ellipse_to_path(c))
+        } else if name_eq(&c.name, "polygon") {
+            Some(polygon_to_path(c))
+        } else if name_eq(&c.name, "polyline") {
+            Some(polyline_to_path(c))
+        } else if name_eq(&c.name, "line") {
+            Some(line_to_path(c))
         } else {
             None
         };
@@ -1507,6 +1528,123 @@ fn ellipse_path(cx: f32, cy: f32, rx: f32, ry: f32) -> Vec<PathOp> {
             y: cy,
         },
         PathOp::Close,
+    ]
+}
+
+/// Parses an SVG `points="x1,y1 x2,y2 ..."` list. The grammar accepts
+/// any mix of whitespace and commas as separators (per SVG 1.1
+/// §9.7.1). Trailing odd coordinates (a stray "x" with no matching "y")
+/// are dropped silently — that's what every browser does in practice.
+fn parse_points_list(s: &str) -> Vec<(f32, f32)> {
+    let mut out: Vec<(f32, f32)> = Vec::new();
+    let mut nums: Vec<f32> = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip separators: whitespace and commas.
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let start = i;
+        if bytes[i] == b'+' || bytes[i] == b'-' {
+            i += 1;
+        }
+        let mut saw_digit = false;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+            saw_digit = true;
+        }
+        if i < bytes.len() && bytes[i] == b'.' {
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+                saw_digit = true;
+            }
+        }
+        if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
+            i += 1;
+            if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+                i += 1;
+            }
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+        if !saw_digit {
+            // Bail out on unrecognised garbage; what's parsed so far
+            // stays.
+            break;
+        }
+        if let Ok(s) = core::str::from_utf8(&bytes[start..i]) {
+            if let Ok(n) = s.parse::<f32>() {
+                nums.push(n);
+            }
+        }
+    }
+    let mut k = 0;
+    while k + 1 < nums.len() {
+        out.push((nums[k], nums[k + 1]));
+        k += 2;
+    }
+    out
+}
+
+/// `<polygon points="...">`: closed shape, `MoveTo + LineTo* + Close`.
+fn polygon_to_path(node: &Node) -> Vec<PathOp> {
+    let pts = node
+        .attr("points")
+        .map(parse_points_list)
+        .unwrap_or_default();
+    if pts.len() < 2 {
+        return Vec::new();
+    }
+    let mut ops = Vec::with_capacity(pts.len() + 1);
+    ops.push(PathOp::MoveTo {
+        x: pts[0].0,
+        y: pts[0].1,
+    });
+    for p in &pts[1..] {
+        ops.push(PathOp::LineTo { x: p.0, y: p.1 });
+    }
+    ops.push(PathOp::Close);
+    ops
+}
+
+/// `<polyline points="...">`: open shape, `MoveTo + LineTo*` (no Close).
+fn polyline_to_path(node: &Node) -> Vec<PathOp> {
+    let pts = node
+        .attr("points")
+        .map(parse_points_list)
+        .unwrap_or_default();
+    if pts.len() < 2 {
+        return Vec::new();
+    }
+    let mut ops = Vec::with_capacity(pts.len());
+    ops.push(PathOp::MoveTo {
+        x: pts[0].0,
+        y: pts[0].1,
+    });
+    for p in &pts[1..] {
+        ops.push(PathOp::LineTo { x: p.0, y: p.1 });
+    }
+    ops
+}
+
+/// `<line x1 y1 x2 y2>`: a single segment, `MoveTo + LineTo`.
+fn line_to_path(node: &Node) -> Vec<PathOp> {
+    let x1 = node.attr("x1").and_then(parse_length).unwrap_or(0.0);
+    let y1 = node.attr("y1").and_then(parse_length).unwrap_or(0.0);
+    let x2 = node.attr("x2").and_then(parse_length).unwrap_or(0.0);
+    let y2 = node.attr("y2").and_then(parse_length).unwrap_or(0.0);
+    if (x1 - x2).abs() < 1e-6 && (y1 - y2).abs() < 1e-6 {
+        return Vec::new();
+    }
+    alloc::vec![
+        PathOp::MoveTo { x: x1, y: y1 },
+        PathOp::LineTo { x: x2, y: y2 },
     ]
 }
 
@@ -2628,5 +2766,80 @@ mod tests {
     fn stop_offset_handles_percent_and_decimal() {
         assert!((parse_stop_offset("50%") - 0.5).abs() < 1e-5);
         assert!((parse_stop_offset("0.25") - 0.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn points_list_accepts_space_and_comma_separators() {
+        let a = parse_points_list("0,0 10,0 10,10 0,10");
+        let b = parse_points_list("0 0 10 0 10 10 0 10");
+        let c = parse_points_list("0,0,10,0,10,10,0,10");
+        assert_eq!(a, vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+    }
+
+    #[test]
+    fn points_list_handles_decimals_and_signs() {
+        let pts = parse_points_list("-1.5,2 3.25e1,-0.5");
+        assert_eq!(pts.len(), 2);
+        assert!((pts[0].0 + 1.5).abs() < 1e-5);
+        assert!((pts[1].0 - 32.5).abs() < 1e-5);
+        assert!((pts[1].1 + 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn points_list_drops_trailing_odd_coordinate() {
+        let pts = parse_points_list("0 0 10 0 5");
+        assert_eq!(pts, vec![(0.0, 0.0), (10.0, 0.0)]);
+    }
+
+    #[test]
+    fn polygon_lowers_to_closed_path() {
+        let xml = r#"<svg viewBox="0 0 100 100">
+            <polygon points="10,10 90,10 50,90" fill="black"/>
+        </svg>"#;
+        let doc = parse_document(xml).unwrap();
+        assert_eq!(doc.fills.len(), 1);
+        let ops = &doc.fills[0].ops;
+        assert!(matches!(ops[0], PathOp::MoveTo { x, y } if x == 10.0 && y == 10.0));
+        assert!(matches!(ops[1], PathOp::LineTo { x, y } if x == 90.0 && y == 10.0));
+        assert!(matches!(ops[2], PathOp::LineTo { x, y } if x == 50.0 && y == 90.0));
+        assert!(matches!(ops[3], PathOp::Close));
+    }
+
+    #[test]
+    fn polyline_lowers_to_open_path() {
+        let xml = r#"<svg viewBox="0 0 100 100">
+            <polyline points="10,10 90,10 50,90" fill="none" stroke="black" stroke-width="2"/>
+        </svg>"#;
+        let doc = parse_document(xml).unwrap();
+        // No fill (fill="none"); stroke produces one fill ribbon.
+        assert_eq!(doc.fills.len(), 1);
+        assert!(doc.fills[0].is_stroke);
+    }
+
+    #[test]
+    fn line_lowers_to_two_op_path() {
+        // fill="none" suppresses the (degenerate) fill so we can see
+        // the stroke alone.
+        let xml = r#"<svg viewBox="0 0 100 100">
+            <line x1="10" y1="10" x2="90" y2="90" stroke="black" stroke-width="2" fill="none"/>
+        </svg>"#;
+        let doc = parse_document(xml).unwrap();
+        assert_eq!(doc.fills.len(), 1);
+        assert!(doc.fills[0].is_stroke);
+        // The stroke source ops were MoveTo + LineTo before being
+        // expanded into a ribbon: the Fill we collected is the ribbon,
+        // so just ensure it's non-empty.
+        assert!(!doc.fills[0].ops.is_empty());
+    }
+
+    #[test]
+    fn polygon_with_too_few_points_drops() {
+        let xml = r#"<svg viewBox="0 0 100 100">
+            <polygon points="10,10" fill="black"/>
+        </svg>"#;
+        let doc = parse_document(xml).unwrap();
+        assert!(doc.fills.is_empty());
     }
 }
