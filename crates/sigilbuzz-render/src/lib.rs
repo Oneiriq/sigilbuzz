@@ -38,8 +38,8 @@
 //!
 //! # Out of scope
 //!
-//! - EBDT/EBLC mono bitmap embeds (deferred — modern bitmap fonts
-//!   carry CBDT or sbix instead).
+//! - sbix `'jpg '` / `'tiff'` / `'jp2 '` decoding (deferred — these
+//!   are rare in font embeds and each is its own ~700-line decoder).
 //! - Subpixel text positioning beyond what the trapezoid rasterizer
 //!   naturally provides.
 //! - Hinting.
@@ -61,7 +61,7 @@ mod rasterizer;
 mod svg;
 
 pub use affine::Affine;
-pub use bitmaps::{decode_png, rasterize_bitmap_glyph, rescale_bilinear};
+pub use bitmaps::{decode_ebdt_mono, decode_png, rasterize_bitmap_glyph, rescale_bilinear};
 pub use error::RenderError;
 pub use flatten::{flatten, Segment, DEFAULT_TOLERANCE};
 pub use pixmap::{ColorPixmap, Pixmap};
