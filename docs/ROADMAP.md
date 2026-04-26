@@ -515,7 +515,21 @@ Three deferral close-outs from `sigilbuzz-render` (#199), plus a regression wave
 
 ---
 
-## 0.16.0+ (next)
+## 0.16.0 (shipping)
+
+Three dogfood-driven gaps closed (surfaced by oniq's MSDF generator cutover from fontdue → sigilbuzz), plus a regression wave 16.
+
+- [x] **#208 expose `flatten()` publicly** (#211) — `flatten()` + `Segment` + `DEFAULT_TOLERANCE = 0.25` promoted from `pub(crate)` to `pub` in `sigilbuzz-render`. Downstream MSDF generators / glyph caches no longer need to reimplement the adaptive midpoint subdivider.
+- [x] **#209 CFF2 `glyph_outline` routing** (#213) — `Face::glyph_outline` and `glyph_outline_at_coords` now dispatch through CFF/CFF2 charstrings instead of returning `Ok(None)`. Two latent bugs uncovered by the dogfood: (a) `read_index` used u16 count, but CFF2 INDEX uses u32 per OT 1.8 §10.3 — every CFF2 INDEX truncated after the first zero entry; (b) `apply_blend` corrupted the operand stack at empty coords because `n_regions` was guessed from surplus stack depth instead of resolved from IVS up front.
+- [x] **#210 OpenType `name` table parser** (#212) — new `src/tables/name.rs`, `Face::name()` accessor, encoding selection across (3,1) / (3,10) / (0,*) / (1,0) platforms. UTF-16BE + Mac OS Roman decoders. v1 langTag table read-and-skipped; surfacing langTag map deferred. 16 unit tests + Open Sans integration cover.
+
+### Hardening — wave 16
+
+- [x] No correctness defects — wave-1 fixes shipped clean. `regression/0.16.0-hardening` (#214) is regression-test-only: 13 new tests locking the new public contracts (10 flatten edge cases incl. NaN coords / pathological cubic cusp / very-tight tolerance / depth cap; 3 CFF2 defensive cases incl. OOB gid / `u16::MAX` / explicit default coords).
+
+---
+
+## 0.17.0+ (next)
 
 - [ ] Stable API audit + crates.io publish.
 - [ ] EBDT/EBLC mono bitmap embeds in `sigilbuzz-render`.
