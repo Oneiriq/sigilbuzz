@@ -368,7 +368,15 @@ impl Segment {
 /// assert!((l - 114.78).abs() < 0.5, "got {l}");
 /// ```
 #[must_use]
-pub fn arc_length_quad(x0: f32, y0: f32, x1: f32, y1: f32, x2: f32, y2: f32, tolerance: f32) -> f32 {
+pub fn arc_length_quad(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    tolerance: f32,
+) -> f32 {
     let tol = tolerance.max(1e-4);
     arc_length_quad_rec(x0, y0, x1, y1, x2, y2, tol, 0)
 }
@@ -637,12 +645,8 @@ fn arc_length_cubic_rec(
     let m123y = 0.5 * (m12y + m23y);
     let mx = 0.5 * (m012x + m123x);
     let my = 0.5 * (m012y + m123y);
-    let left = arc_length_cubic_rec(
-        x0, y0, m01x, m01y, m012x, m012y, mx, my, tol, depth + 1,
-    );
-    let right = arc_length_cubic_rec(
-        mx, my, m123x, m123y, m23x, m23y, x3, y3, tol, depth + 1,
-    );
+    let left = arc_length_cubic_rec(x0, y0, m01x, m01y, m012x, m012y, mx, my, tol, depth + 1);
+    let right = arc_length_cubic_rec(mx, my, m123x, m123y, m23x, m23y, x3, y3, tol, depth + 1);
     left + right
 }
 
@@ -1061,10 +1065,7 @@ mod tests {
         // arc length ≈ 114.7793 (analytic). Roger Willcocks adaptive
         // should land within 0.05 of that.
         let l = arc_length_quad(0.0, 0.0, 50.0, 50.0, 100.0, 0.0, 0.01);
-        assert!(
-            (l - 114.7793).abs() < 0.05,
-            "true arc 114.7793, got {l}"
-        );
+        assert!((l - 114.7793).abs() < 0.05, "true arc 114.7793, got {l}");
     }
 
     #[test]
@@ -1083,10 +1084,7 @@ mod tests {
         // length should land within ~0.1 of the true value.
         const K: f32 = 0.552_284_8 * 100.0;
         let l = arc_length_cubic(100.0, 0.0, 100.0, K, K, 100.0, 0.0, 100.0, 0.01);
-        assert!(
-            (l - 157.0796).abs() < 0.1,
-            "true arc 157.0796, got {l}"
-        );
+        assert!((l - 157.0796).abs() < 0.1, "true arc 157.0796, got {l}");
     }
 
     #[test]
@@ -1126,10 +1124,8 @@ mod tests {
         const K: f32 = 0.552_284_8 * 100.0;
         let total = arc_length_cubic(100.0, 0.0, 100.0, K, K, 100.0, 0.0, 100.0, 0.01);
         let target = 0.25 * total;
-        let t =
-            arc_length_cubic_solve_t(100.0, 0.0, 100.0, K, K, 100.0, 0.0, 100.0, target, 0.01);
-        let recovered =
-            cubic_prefix_length(100.0, 0.0, 100.0, K, K, 100.0, 0.0, 100.0, t, 0.01);
+        let t = arc_length_cubic_solve_t(100.0, 0.0, 100.0, K, K, 100.0, 0.0, 100.0, target, 0.01);
+        let recovered = cubic_prefix_length(100.0, 0.0, 100.0, K, K, 100.0, 0.0, 100.0, t, 0.01);
         assert!(
             (recovered - target).abs() < 0.05,
             "target {target}, recovered {recovered}, t {t}"

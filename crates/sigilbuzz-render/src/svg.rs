@@ -1344,9 +1344,7 @@ fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
                 x,
                 y,
             } => {
-                flatten_quad_polyline(
-                    &mut cur, &mut cur_arc, cx, cy, ccx, ccy, x, y, 0.25, 0,
-                );
+                flatten_quad_polyline(&mut cur, &mut cur_arc, cx, cy, ccx, ccy, x, y, 0.25, 0);
                 cx = x;
                 cy = y;
             }
@@ -1359,7 +1357,18 @@ fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
                 y,
             } => {
                 flatten_cubic_polyline(
-                    &mut cur, &mut cur_arc, cx, cy, c1x, c1y, c2x, c2y, x, y, 0.25, 0,
+                    &mut cur,
+                    &mut cur_arc,
+                    cx,
+                    cy,
+                    c1x,
+                    c1y,
+                    c2x,
+                    c2y,
+                    x,
+                    y,
+                    0.25,
+                    0,
                 );
                 cx = x;
                 cy = y;
@@ -4180,8 +4189,8 @@ mod tests {
         // cusp may collapse), but we must not panic.
         for fill in &doc.fills {
             assert!(!fill.ops.iter().any(|o| match o {
-                PathOp::MoveTo { x, y }
-                | PathOp::LineTo { x, y } => !x.is_finite() || !y.is_finite(),
+                PathOp::MoveTo { x, y } | PathOp::LineTo { x, y } =>
+                    !x.is_finite() || !y.is_finite(),
                 _ => false,
             }));
         }
