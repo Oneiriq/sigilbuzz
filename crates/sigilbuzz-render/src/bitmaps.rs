@@ -531,8 +531,13 @@ fn emit_row(
         0 => {
             // Grayscale; tRNS (when present) is a single 2-byte
             // gray value treated as transparent. For 8-bit depth the
-            // low byte is what counts.
-            let trns_v = trns.map(|t| t.last().copied().unwrap_or(0));
+            // low byte (index 1, big-endian) is what counts. A tRNS
+            // chunk whose length is not exactly 2 bytes is malformed
+            // (PNG spec 11.3.2.1): silently ignore it rather than fall
+            // back to `t.last()`, which would mis-mark every black
+            // pixel transparent on an empty tRNS and produce arbitrary
+            // results on a wrong-length one. Issue #231.
+            let trns_v = trns.and_then(|t| if t.len() == 2 { Some(t[1]) } else { None });
             for &g in row {
                 let a = if Some(g) == trns_v { 0 } else { 255 };
                 push_premul(out, g, g, g, a);
@@ -1303,6 +1308,84 @@ mod tests {
         assert_eq!(c.glyph_id, 2);
         assert_eq!(c.x_offset, 0);
         assert_eq!(c.y_offset, 0);
+    }
+
+    /// Build an 8-bit grayscale PNG with a single solid-gray pixel and
+    /// an arbitrary tRNS chunk payload. Used to exercise the spec's
+    /// "tRNS for color type 0 must be exactly 2 bytes" validation.
+    fn build_gray_png_with_trns(gray: u8, w: u32, h: u32, trns: &[u8]) -> Vec<u8> {
+        let mut raw = Vec::with_capacity(((w + 1) * h) as usize);
+        for _y in 0..h {
+            raw.push(0u8); // filter: None
+            for _x in 0..w {
+                raw.push(gray);
+            }
+        }
+        let idat = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6);
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&PNG_SIGNATURE);
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.push(8); // bit depth
+        ihdr.push(0); // color type: grayscale
+        ihdr.push(0); // compression
+        ihdr.push(0); // filter
+        ihdr.push(0); // interlace
+        write_chunk(&mut out, *b"IHDR", &ihdr);
+        write_chunk(&mut out, *b"tRNS", trns);
+        write_chunk(&mut out, *b"IDAT", &idat);
+        write_chunk(&mut out, *b"IEND", &[]);
+        out
+    }
+
+    #[test]
+    fn decode_png_gray_empty_trns_does_not_make_black_transparent() {
+        // Issue #231: an empty tRNS chunk on a grayscale PNG used to be
+        // interpreted as `Some(0)` because the decoder reached for
+        // `t.last().unwrap_or(0)`. That marked every gray-0 pixel as
+        // transparent — a black glyph round-tripped to a fully blank
+        // pixmap.
+        let png = build_gray_png_with_trns(0, 1, 1, &[]);
+        let pix = decode_png(&png).unwrap();
+        // The single pixel is gray 0. With the bug it decoded as
+        // (0, 0, 0, 0); the spec says an empty tRNS is malformed and
+        // must not mark anything transparent, so we expect opaque.
+        assert_eq!(pix.get(0, 0), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn decode_png_gray_one_byte_trns_is_ignored() {
+        // tRNS for color type 0 must be 2 bytes. A 1-byte chunk used
+        // to leak through as `Some(byte)`, marking arbitrary pixels
+        // transparent.
+        let png = build_gray_png_with_trns(7, 1, 1, &[7]);
+        let pix = decode_png(&png).unwrap();
+        // Without the fix, the single 7-gray pixel would be marked
+        // transparent (because `t.last()` returned 7). The fix
+        // rejects the malformed chunk, leaving the pixel opaque.
+        assert_eq!(pix.get(0, 0), [7, 7, 7, 255]);
+    }
+
+    #[test]
+    fn decode_png_gray_three_byte_trns_is_ignored() {
+        // tRNS payloads longer than 2 bytes are equally malformed.
+        // `t.last()` previously surfaced the trailing byte, which
+        // would mark unrelated pixels transparent.
+        let png = build_gray_png_with_trns(42, 1, 1, &[0, 0, 42]);
+        let pix = decode_png(&png).unwrap();
+        assert_eq!(pix.get(0, 0), [42, 42, 42, 255]);
+    }
+
+    #[test]
+    fn decode_png_gray_well_formed_trns_marks_match_transparent() {
+        // Sanity check that the well-formed 2-byte tRNS path keeps
+        // working — the gray value 5 in the second byte (low byte of
+        // the big-endian 16-bit sample) marks gray-5 pixels transparent.
+        let png = build_gray_png_with_trns(5, 1, 1, &[0, 5]);
+        let pix = decode_png(&png).unwrap();
+        assert_eq!(pix.get(0, 0), [0, 0, 0, 0]);
     }
 
     #[test]
