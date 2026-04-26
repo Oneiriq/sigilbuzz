@@ -1049,22 +1049,10 @@ fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape> {
     // `userSpaceOnUse`, the legacy PR #236 behaviour ignored the
     // region entirely, so we keep the parse but only consult it in
     // the bbox path.
-    let region_x = mn
-        .attr("x")
-        .and_then(parse_length)
-        .unwrap_or(0.0);
-    let region_y = mn
-        .attr("y")
-        .and_then(parse_length)
-        .unwrap_or(0.0);
-    let region_w = mn
-        .attr("width")
-        .and_then(parse_length)
-        .unwrap_or(1.0);
-    let region_h = mn
-        .attr("height")
-        .and_then(parse_length)
-        .unwrap_or(1.0);
+    let region_x = mn.attr("x").and_then(parse_length).unwrap_or(0.0);
+    let region_y = mn.attr("y").and_then(parse_length).unwrap_or(0.0);
+    let region_w = mn.attr("width").and_then(parse_length).unwrap_or(1.0);
+    let region_h = mn.attr("height").and_then(parse_length).unwrap_or(1.0);
 
     Some(MaskShape {
         fills: scratch.fills,
@@ -2535,8 +2523,7 @@ fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &Affine, tol
         let inside_y = bbox.map_or(true, |(_, lo_y, _, hi_y)| y >= lo_y && y < hi_y);
         for x in 0..w {
             let i = (y as usize) * (w as usize) + (x as usize);
-            let inside =
-                inside_y && bbox.map_or(true, |(lo_x, _, hi_x, _)| x >= lo_x && x < hi_x);
+            let inside = inside_y && bbox.map_or(true, |(lo_x, _, hi_x, _)| x >= lo_x && x < hi_x);
             let m = if inside {
                 let mr = mask_buf.data[i * 4] as u32;
                 let mg = mask_buf.data[i * 4 + 1] as u32;
