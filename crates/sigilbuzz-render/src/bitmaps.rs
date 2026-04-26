@@ -95,9 +95,7 @@ pub fn rasterize_bitmap_glyph(
         .ok_or(RenderError::NoBitmap(gid))?;
 
     let (png_bytes, strike_ppem) = match entry {
-        GlyphBitmapEntry::Cbdt {
-            ppem_y, bitmap, ..
-        } => match bitmap.image_format {
+        GlyphBitmapEntry::Cbdt { ppem_y, bitmap, .. } => match bitmap.image_format {
             17..=19 => (bitmap.data, f32::from(ppem_y)),
             _ => return Err(RenderError::UnsupportedBitmap),
         },
@@ -170,9 +168,9 @@ pub fn decode_png(bytes: &[u8]) -> Result<ColorPixmap, RenderError> {
             bytes[cursor + 7],
         ];
         cursor += 8;
-        let data_end = cursor.checked_add(len).ok_or(RenderError::BadPng(
-            "chunk length overflow",
-        ))?;
+        let data_end = cursor
+            .checked_add(len)
+            .ok_or(RenderError::BadPng("chunk length overflow"))?;
         if data_end + 4 > bytes.len() {
             return Err(RenderError::BadPng("truncated chunk body"));
         }
@@ -366,9 +364,7 @@ fn defilter_row(
                 let left = if i >= bpp { dst[i - bpp] as i32 } else { 0 };
                 let up = prev[i] as i32;
                 let upleft = if i >= bpp { prev[i - bpp] as i32 } else { 0 };
-                dst[i] = (src[i] as i32)
-                    .wrapping_add(paeth(left, up, upleft))
-                    as u8;
+                dst[i] = (src[i] as i32).wrapping_add(paeth(left, up, upleft)) as u8;
             }
         }
         _ => return Err(RenderError::BadPng("unknown filter type")),
@@ -435,9 +431,7 @@ fn emit_row(
                     return Err(RenderError::BadPng("palette index out of range"));
                 }
                 let [r, g, b] = palette[i];
-                let a = trns
-                    .and_then(|t| t.get(i).copied())
-                    .unwrap_or(255);
+                let a = trns.and_then(|t| t.get(i).copied()).unwrap_or(255);
                 push_premul(out, r, g, b, a);
             }
         }
@@ -624,7 +618,9 @@ mod tests {
     #[test]
     fn rescale_identity_returns_clone() {
         let mut src = ColorPixmap::new(2, 2);
-        src.data = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+        src.data = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
         let out = rescale_bilinear(&src, 2, 2);
         assert_eq!(out, src);
     }
