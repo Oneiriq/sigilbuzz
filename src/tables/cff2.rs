@@ -38,7 +38,7 @@
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
-use crate::tables::cff::{read_index, BlendContext};
+use crate::tables::cff::{read_index2, BlendContext};
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::Reader;
 use crate::tables::variation_store::ItemVariationStore;
@@ -89,7 +89,7 @@ impl<'a> Cff2<'a> {
 
         // Global Subr INDEX — immediately after the Top DICT.
         let mut g_reader = Reader::at(data, top_dict_end)?;
-        let global_subrs = read_index(&mut g_reader)?;
+        let global_subrs = read_index2(&mut g_reader)?;
 
         // CharStrings INDEX.
         let cs_off = top.char_strings.ok_or(Error::Malformed {
@@ -97,7 +97,7 @@ impl<'a> Cff2<'a> {
             context: "CFF2 Top DICT missing CharStrings",
         })? as usize;
         let mut cs_reader = Reader::at(data, cs_off)?;
-        let char_strings = read_index(&mut cs_reader)?;
+        let char_strings = read_index2(&mut cs_reader)?;
 
         // FDArray — CFF2 always uses it.
         let fd_array_off = top.fd_array.ok_or(Error::Malformed {
@@ -105,7 +105,7 @@ impl<'a> Cff2<'a> {
             context: "CFF2 Top DICT missing FDArray",
         })? as usize;
         let mut fda_reader = Reader::at(data, fd_array_off)?;
-        let fd_array = read_index(&mut fda_reader)?;
+        let fd_array = read_index2(&mut fda_reader)?;
 
         let mut locals = Vec::with_capacity(fd_array.len());
         for font_dict_bytes in &fd_array {
@@ -164,10 +164,16 @@ impl<'a> Cff2<'a> {
             .map(Vec::as_slice)
             .unwrap_or(&[]);
 
-        // Parse the variation store when we have non-zero coords.
-        let ivs = if coords.is_empty() {
-            None
-        } else if let Some(off) = self.vstore_off {
+        // Parse the variation store. CFF2 charstrings call `blend`
+        // even at the default instance (empty coords) — the operator
+        // pops `n` defaults plus `n × n_regions` per-region deltas
+        // off the stack. Without an IVS the interpreter must guess
+        // `n_regions` from surplus stack depth, and that guess is
+        // wrong whenever a `blend` is followed by additional
+        // operands left over from earlier ops. Resolving the IVS up
+        // front pins `n_regions` from the spec, so the stack stays
+        // balanced regardless of coord vector.
+        let ivs = if let Some(off) = self.vstore_off {
             // CFF2 VariationStore: u16 length prefix, then the
             // ItemVariationStore bytes.
             let mut vr = Reader::at(self.data, off as usize)?;
@@ -320,7 +326,7 @@ fn read_local_subrs<'a>(
     };
     let subr_off = priv_off + off as usize;
     let mut r = Reader::at(data, subr_off)?;
-    read_index(&mut r)
+    read_index2(&mut r)
 }
 
 fn parse_fd_select(data: &[u8], off: usize, n_glyphs: usize) -> Result<Vec<u8>> {
