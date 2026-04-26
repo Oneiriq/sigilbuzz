@@ -35,7 +35,7 @@
 
 use alloc::vec::Vec;
 
-use crate::pixmap::ColorPixmap;
+use crate::pixmap::{ColorPixmap, Pixmap};
 
 /// PNG signature bytes — every PNG starts with this 8-byte header.
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
@@ -71,6 +71,31 @@ pub fn encode_png(pixmap: &ColorPixmap) -> Vec<u8> {
         }
     }
     assemble_png(pixmap.width, pixmap.height, 6, &raw)
+}
+
+/// Encode a [`Pixmap`] (8-bit alpha) as a grayscale PNG byte stream
+/// (color type 0).
+///
+/// The single-byte coverage value is written as the gray sample. The
+/// decoder treats grayscale `g` as RGBA `(g, g, g, 255)`, so a
+/// `Pixmap → encode_png_alpha → decode_png` round-trip surfaces the
+/// original alpha as `pixmap_out.get(x, y)[0]`. We choose color type 0
+/// rather than color type 4 (gray + alpha) because the consumer of an
+/// alpha-only Pixmap is typically a glyph mask — the alpha *is* the
+/// gray sample, and emitting it as such avoids redundant
+/// `(value, value)` byte pairs in the IDAT.
+#[must_use]
+pub fn encode_png_alpha(pixmap: &Pixmap) -> Vec<u8> {
+    let mut raw = Vec::with_capacity(
+        ((pixmap.width as usize) + 1).saturating_mul(pixmap.height as usize),
+    );
+    for y in 0..pixmap.height {
+        raw.push(0u8); // filter: None
+        for x in 0..pixmap.width {
+            raw.push(pixmap.get(x, y));
+        }
+    }
+    assemble_png(pixmap.width, pixmap.height, 0, &raw)
 }
 
 /// Build the four PNG sections — signature, IHDR, IDAT, IEND — from
@@ -428,6 +453,79 @@ mod tests {
         let a = encode_png(&p);
         let b = encode_png(&p);
         assert_eq!(a, b, "encode_png must be byte-deterministic");
+    }
+
+    // --- encode_png_alpha Pixmap path ---------------------------------------
+
+    #[test]
+    fn encode_png_alpha_round_trip_4x4() {
+        let mut p = Pixmap::new(4, 4);
+        for y in 0..4 {
+            for x in 0..4 {
+                p.set(x, y, ((x * 64) + (y * 16)) as u8);
+            }
+        }
+        let bytes = encode_png_alpha(&p);
+        // Re-decode through the existing ColorPixmap decoder. Color
+        // type 0 (gray) decodes as RGBA (g, g, g, 255), so the original
+        // alpha sample lives in channel 0.
+        let decoded = decode_png(&bytes).expect("alpha PNG decodes");
+        assert_eq!(decoded.width, 4);
+        assert_eq!(decoded.height, 4);
+        for y in 0..4 {
+            for x in 0..4 {
+                let want = p.get(x, y);
+                let got = decoded.get(x, y);
+                assert_eq!(got, [want, want, want, 255], "({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn encode_png_alpha_1x1() {
+        let mut p = Pixmap::new(1, 1);
+        p.set(0, 0, 137);
+        let bytes = encode_png_alpha(&p);
+        let decoded = decode_png(&bytes).unwrap();
+        assert_eq!(decoded.get(0, 0), [137, 137, 137, 255]);
+    }
+
+    #[test]
+    fn encode_png_alpha_wide_1024x1() {
+        let mut p = Pixmap::new(1024, 1);
+        for x in 0..1024 {
+            p.set(x, 0, (x & 0xFF) as u8);
+        }
+        let bytes = encode_png_alpha(&p);
+        let decoded = decode_png(&bytes).unwrap();
+        assert_eq!(decoded.width, 1024);
+        for x in 0..1024 {
+            assert_eq!(decoded.get(x, 0)[0], p.get(x, 0));
+        }
+    }
+
+    #[test]
+    fn encode_png_alpha_metadata() {
+        let p = Pixmap::new(5, 9);
+        let bytes = encode_png_alpha(&p);
+        assert_eq!(&bytes[12..16], b"IHDR");
+        let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        let ct = bytes[25];
+        assert_eq!(w, 5);
+        assert_eq!(h, 9);
+        assert_eq!(ct, 0, "color type for Pixmap is 0 (grayscale)");
+    }
+
+    #[test]
+    fn encode_png_alpha_is_deterministic() {
+        let mut p = Pixmap::new(8, 8);
+        for (i, b) in p.data.iter_mut().enumerate() {
+            *b = (i & 0xFF) as u8;
+        }
+        let a = encode_png_alpha(&p);
+        let b = encode_png_alpha(&p);
+        assert_eq!(a, b);
     }
 
     // --- unpremul correctness -----------------------------------------------
