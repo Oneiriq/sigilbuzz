@@ -38,8 +38,6 @@
 //!
 //! # Out of scope
 //!
-//! - COLRv1 paint-tree evaluation (live in `sigilbuzz-paint`; a render
-//!   integration lands in 0.15.0+).
 //! - CBDT/CBLC, EBDT/EBLC, sbix bitmap embeds.
 //! - Subpixel text positioning beyond what the trapezoid rasterizer
 //!   naturally provides.
@@ -52,6 +50,7 @@
 extern crate alloc;
 
 mod affine;
+mod colrv1;
 mod error;
 mod flatten;
 mod pixmap;
