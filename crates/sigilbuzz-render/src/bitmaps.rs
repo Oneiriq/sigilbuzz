@@ -168,10 +168,33 @@ fn rasterize_bitmap_inner(
         return Ok(decoded);
     }
     let scale = size_pt / strike_ppem;
-    let dst_w = ((decoded.width as f32 * scale).round() as u32).max(1);
-    let dst_h = ((decoded.height as f32 * scale).round() as u32).max(1);
+    // Cap rescale target dimensions before the destination pixmap
+    // allocation. Without this guard `decoded.width as f32 * scale`
+    // can saturate to `u32::MAX` (e.g. caller passing a very large
+    // `size_pt` against a small-ppem strike), and the subsequent
+    // `vec![0u8; w*h*4]` panics with "capacity overflow". 16384 keeps
+    // us aligned with the PNG decoder's per-dim ceiling.
+    let dst_w_f = (decoded.width as f32 * scale).round().max(1.0);
+    let dst_h_f = (decoded.height as f32 * scale).round().max(1.0);
+    if !dst_w_f.is_finite()
+        || !dst_h_f.is_finite()
+        || dst_w_f > MAX_BITMAP_DIM
+        || dst_h_f > MAX_BITMAP_DIM
+    {
+        return Err(RenderError::BadSize(size_pt));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let dst_w = (dst_w_f as u32).max(1);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let dst_h = (dst_h_f as u32).max(1);
     Ok(rescale_bilinear(&decoded, dst_w, dst_h))
 }
+
+/// Maximum pixel dimension for a rescaled bitmap embed. Matches the
+/// PNG decoder's per-dim ceiling (`Ihdr::parse`) so caller-driven
+/// `size_pt` cannot multiply a small-ppem strike up to an allocation
+/// that overflows `usize`.
+const MAX_BITMAP_DIM: f32 = 16384.0;
 
 /// True iff the source pixmap needs to be resampled to match the
 /// caller's size_pt. We compare the strike ppem to the requested
@@ -661,6 +684,15 @@ pub fn rescale_bilinear(src: &ColorPixmap, dst_w: u32, dst_h: u32) -> ColorPixma
     }
     if dst_w == src.width && dst_h == src.height {
         return src.clone();
+    }
+    // Cap target dimensions: an out-of-range `dst_w` / `dst_h` (e.g.
+    // a caller miscomputing from a hostile size_pt) would otherwise
+    // panic in `vec![0u8; w*h*4]`. The ceiling matches the PNG
+    // decoder's bound; callers that genuinely need larger surfaces
+    // should resample in tiles.
+    #[allow(clippy::cast_precision_loss)]
+    if dst_w as f32 > MAX_BITMAP_DIM || dst_h as f32 > MAX_BITMAP_DIM {
+        return ColorPixmap::new(0, 0);
     }
     let mut out = ColorPixmap::new(dst_w, dst_h);
     let sw = src.width as f32;
