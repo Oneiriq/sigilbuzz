@@ -105,7 +105,7 @@ mod tests {
         blob.extend_from_slice(&1u16.to_be_bytes()); // firstGlyphIndex
         blob.extend_from_slice(&1u16.to_be_bytes()); // lastGlyphIndex
         blob.extend_from_slice(&8u32.to_be_bytes()); // additional offset
-        // IndexSubTable header: format 1, image format 1, image data offset 0
+                                                     // IndexSubTable header: format 1, image format 1, image data offset 0
         blob.extend_from_slice(&1u16.to_be_bytes());
         blob.extend_from_slice(&1u16.to_be_bytes());
         blob.extend_from_slice(&0u32.to_be_bytes());

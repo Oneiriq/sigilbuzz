@@ -228,9 +228,9 @@ fn sbix_dupe_tag_recurses_to_target_gid() {
     );
     let png = hex_to_bytes(png_hex);
     let glyphs = vec![
-        None, // gid 0 .notdef
+        None,                               // gid 0 .notdef
         Some((*b"dupe", vec![0x00, 0x02])), // gid 1 → dupe to gid 2
-        Some((*b"png ", png)), // gid 2 carries the PNG
+        Some((*b"png ", png)),              // gid 2 carries the PNG
     ];
     let sbix = build_sbix_strike(3, 16, &glyphs);
     let font = build_sfnt(vec![(*b"maxp", maxp_05(3)), (*b"sbix", sbix)]);
@@ -307,7 +307,9 @@ fn sbix_tiff_returns_unsupported_not_panic() {
 
     let face = Face::parse_bytes(&font, 0).unwrap();
     let rast = Rasterizer::new();
-    let err = rast.rasterize_bitmap_glyph(&face, 1, 16.0, &[]).unwrap_err();
+    let err = rast
+        .rasterize_bitmap_glyph(&face, 1, 16.0, &[])
+        .unwrap_err();
     assert!(matches!(err, RenderError::UnsupportedBitmap));
 }
 
@@ -317,9 +319,9 @@ fn ebdt_format1_entry(width: u8, height: u8, data: &[u8]) -> Vec<u8> {
     let mut out = vec![
         height,
         width,
-        0,                         // bearing_x
-        height as i8 as u8,        // bearing_y
-        width,                     // advance
+        0,                  // bearing_x
+        height as i8 as u8, // bearing_y
+        width,              // advance
     ];
     out.extend_from_slice(data);
     out
@@ -475,9 +477,7 @@ fn ebdt_synthetic_falls_back_when_only_ebdt_present() {
     // glyph_bitmap should expose this as the EBDT variant.
     let entry = face.glyph_bitmap(1, 16).unwrap().expect("EBDT entry");
     match entry {
-        sigilbuzz::GlyphBitmapEntry::Ebdt {
-            ppem_y, bitmap, ..
-        } => {
+        sigilbuzz::GlyphBitmapEntry::Ebdt { ppem_y, bitmap, .. } => {
             assert_eq!(ppem_y, 16);
             assert_eq!(bitmap.image_format, 1);
             assert_eq!(bitmap.metrics.width(), 8);
@@ -494,6 +494,8 @@ fn sbix_jp2_returns_unsupported_not_panic() {
 
     let face = Face::parse_bytes(&font, 0).unwrap();
     let rast = Rasterizer::new();
-    let err = rast.rasterize_bitmap_glyph(&face, 1, 16.0, &[]).unwrap_err();
+    let err = rast
+        .rasterize_bitmap_glyph(&face, 1, 16.0, &[])
+        .unwrap_err();
     assert!(matches!(err, RenderError::UnsupportedBitmap));
 }
