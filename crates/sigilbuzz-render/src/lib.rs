@@ -83,8 +83,10 @@
 //!
 //! # Out of scope
 //!
-//! - sbix `'jpg '` / `'tiff'` / `'jp2 '` decoding (deferred — these
-//!   are rare in font embeds and each is its own ~700-line decoder).
+//! - sbix `'tiff'` / `'jp2 '` decoding (deferred — these are rare in
+//!   font embeds and each is its own ~700-line decoder). sbix `'jpg '`
+//!   *is* now decoded via the hand-rolled baseline decoder in
+//!   [`decode_jpeg`].
 //! - Subpixel text positioning beyond what the trapezoid rasterizer
 //!   naturally provides.
 //! - Hinting.
@@ -100,6 +102,7 @@ mod bitmaps;
 mod colrv1;
 mod error;
 mod flatten;
+mod jpeg_decode;
 mod pixmap;
 mod png_encode;
 mod raster;
@@ -113,6 +116,7 @@ pub use flatten::{
     arc_length_cubic, arc_length_cubic_solve_t, arc_length_quad, arc_length_quad_solve_t, flatten,
     flatten_grouped, FlattenedCurve, Segment, DEFAULT_TOLERANCE,
 };
+pub use jpeg_decode::decode_jpeg;
 pub use pixmap::{ColorPixmap, Pixmap};
 pub use png_encode::{encode_png, encode_png_alpha};
 pub use rasterizer::Rasterizer;
