@@ -40,6 +40,18 @@ pub enum RenderError {
     /// PNG payload failed structural validation (signature, IHDR,
     /// chunk shape) or zlib inflate.
     BadPng(&'static str),
+    /// The font has no SVG document for this glyph id (either the
+    /// `SVG ` table is absent or the gid sits outside every record's
+    /// range).
+    SvgNotFound(u16),
+    /// The SVG document for this glyph is gzip-compressed.
+    /// `sigilbuzz-render` deliberately does not depend on a gzip
+    /// decoder; the consumer is expected to decompress the payload
+    /// themselves and feed it through a future bytes-based entry
+    /// point. The SVG-in-OT spec allows both plain and gzipped
+    /// payloads — Apple Color Emoji and Twitter Color Emoji ship the
+    /// plain form, so this is rarer than it sounds.
+    SvgGzipped,
 }
 
 impl fmt::Display for RenderError {
@@ -60,6 +72,8 @@ impl fmt::Display for RenderError {
                 write!(f, "embedded bitmap uses an unsupported payload format")
             }
             Self::BadPng(msg) => write!(f, "PNG decode failed: {msg}"),
+            Self::SvgNotFound(g) => write!(f, "glyph {g} has no SVG document"),
+            Self::SvgGzipped => f.write_str("SVG document is gzip-compressed"),
         }
     }
 }

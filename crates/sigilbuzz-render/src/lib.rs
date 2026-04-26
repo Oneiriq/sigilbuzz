@@ -38,7 +38,6 @@
 //!
 //! # Out of scope
 //!
-//! - SVG-in-OT.
 //! - EBDT/EBLC mono bitmap embeds (deferred — modern bitmap fonts
 //!   carry CBDT or sbix instead).
 //! - Subpixel text positioning beyond what the trapezoid rasterizer
@@ -59,6 +58,7 @@ mod flatten;
 mod pixmap;
 mod raster;
 mod rasterizer;
+mod svg;
 
 pub use affine::Affine;
 pub use bitmaps::{decode_png, rasterize_bitmap_glyph, rescale_bilinear};

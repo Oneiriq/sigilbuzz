@@ -54,6 +54,14 @@ impl Rasterizer {
         self
     }
 
+    /// Returns the configured curve flattening tolerance. Used by
+    /// sibling modules (`svg.rs`) that re-use the flatten/raster
+    /// pipeline directly.
+    #[must_use]
+    pub(crate) fn flattening_tolerance(&self) -> f32 {
+        self.tolerance
+    }
+
     /// Rasterizes a single glyph outline at `size_pt` pixels with the
     /// given variable-font normalized coords. The returned [`Pixmap`]
     /// is sized to the glyph's bounding box plus a one-pixel margin so
@@ -152,6 +160,19 @@ impl Rasterizer {
             .cpal()
             .map_err(|_| RenderError::Parse("cpal"))?
             .ok_or(RenderError::NoCpal)?;
+
+        // Validate the user-supplied palette index against the CPAL
+        // up front. The per-layer `cpal.color()` lookup below would
+        // also catch this — but only for layers whose palette entry
+        // is not the foreground sentinel `0xFFFF`. A glyph composed
+        // entirely of foreground layers would otherwise silently
+        // accept an out-of-range palette. (issue #203)
+        if palette_index >= cpal.num_palettes() {
+            return Err(RenderError::BadPaletteIndex {
+                palette: palette_index,
+                entry: 0xFFFF,
+            });
+        }
 
         let s = size_pt / upem;
         let xform = Affine {
