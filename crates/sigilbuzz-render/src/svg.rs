@@ -645,9 +645,7 @@ fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) 
     // Stroke pass.
     if let Some(scol) = ctx.stroke_color {
         if ctx.stroke_width > 0.0 {
-            let alpha = (scol[3] as f32 / 255.0)
-                * ctx.stroke_opacity
-                * ctx.opacity;
+            let alpha = (scol[3] as f32 / 255.0) * ctx.stroke_opacity * ctx.opacity;
             let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
             if a > 0 {
                 let rgba = [scol[0], scol[1], scol[2], a];
@@ -678,8 +676,7 @@ fn is_fully_transparent(p: &Paint) -> bool {
             // Treat as transparent only when *every* stop is fully
             // transparent and the per-element opacity is zero. Cheap
             // early-exit; gradients with mid-range stops still render.
-            g.opacity <= 0.0
-                || (g.stops.iter().all(|s| s.color.a <= 0.0))
+            g.opacity <= 0.0 || (g.stops.iter().all(|s| s.color.a <= 0.0))
         }
     }
 }
@@ -881,12 +878,7 @@ fn parse_stop_offset(s: &str) -> f32 {
 /// segment direction. Joins between segments are filled with
 /// miter / round / bevel geometry, and the open ends carry the
 /// configured cap shape.
-fn stroke_to_fill(
-    ops: &[PathOp],
-    stroke_width: f32,
-    cap: LineCap,
-    join: LineJoin,
-) -> Vec<PathOp> {
+fn stroke_to_fill(ops: &[PathOp], stroke_width: f32, cap: LineCap, join: LineJoin) -> Vec<PathOp> {
     if stroke_width <= 0.0 {
         return Vec::new();
     }
@@ -922,7 +914,11 @@ fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
     let mut open = false;
 
     let push_line = |cur: &mut Vec<(f32, f32)>, x: f32, y: f32| {
-        if cur.last().map(|p| (p.0 - x).abs() > 1e-6 || (p.1 - y).abs() > 1e-6).unwrap_or(true) {
+        if cur
+            .last()
+            .map(|p| (p.0 - x).abs() > 1e-6 || (p.1 - y).abs() > 1e-6)
+            .unwrap_or(true)
+        {
             cur.push((x, y));
         }
     };
@@ -950,7 +946,12 @@ fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
                 cx = x;
                 cy = y;
             }
-            PathOp::QuadTo { cx: ccx, cy: ccy, x, y } => {
+            PathOp::QuadTo {
+                cx: ccx,
+                cy: ccy,
+                x,
+                y,
+            } => {
                 flatten_quad_polyline(&mut cur, cx, cy, ccx, ccy, x, y, 0.25, 0);
                 cx = x;
                 cy = y;
@@ -1013,7 +1014,11 @@ fn flatten_quad_polyline(
         ex * ex + ey * ey
     };
     if depth >= 16 || dist_sq <= 4.0 * tol * tol {
-        if out.last().map(|p| (p.0 - x2).abs() > 1e-6 || (p.1 - y2).abs() > 1e-6).unwrap_or(true) {
+        if out
+            .last()
+            .map(|p| (p.0 - x2).abs() > 1e-6 || (p.1 - y2).abs() > 1e-6)
+            .unwrap_or(true)
+        {
             out.push((x2, y2));
         }
         return;
@@ -1054,7 +1059,11 @@ fn flatten_cubic_polyline(
         (e1x * e1x + e1y * e1y, e2x * e2x + e2y * e2y)
     };
     if depth >= 16 || (d1 <= tol * tol && d2 <= tol * tol) {
-        if out.last().map(|p| (p.0 - x3).abs() > 1e-6 || (p.1 - y3).abs() > 1e-6).unwrap_or(true) {
+        if out
+            .last()
+            .map(|p| (p.0 - x3).abs() > 1e-6 || (p.1 - y3).abs() > 1e-6)
+            .unwrap_or(true)
+        {
             out.push((x3, y3));
         }
         return;
@@ -1385,7 +1394,10 @@ fn rect_to_path(node: &Node) -> Vec<PathOp> {
             y: y + ry,
         });
         // Right edge.
-        ops.push(PathOp::LineTo { x: x + w, y: y + h - ry });
+        ops.push(PathOp::LineTo {
+            x: x + w,
+            y: y + h - ry,
+        });
         // Bottom-right corner.
         ops.push(PathOp::CubicTo {
             c1x: x + w,
@@ -1396,7 +1408,10 @@ fn rect_to_path(node: &Node) -> Vec<PathOp> {
             y: y + h,
         });
         // Bottom edge.
-        ops.push(PathOp::LineTo { x: x + rx, y: y + h });
+        ops.push(PathOp::LineTo {
+            x: x + rx,
+            y: y + h,
+        });
         // Bottom-left corner.
         ops.push(PathOp::CubicTo {
             c1x: x + rx - kx,
@@ -1781,11 +1796,7 @@ fn parse_xml_after_prolog(p: &mut XmlParser<'_>) -> Result<Node, RenderError> {
     Err(RenderError::Parse("svg root"))
 }
 
-fn parse_children(
-    p: &mut XmlParser<'_>,
-    parent: &mut Node,
-    depth: u32,
-) -> Result<(), RenderError> {
+fn parse_children(p: &mut XmlParser<'_>, parent: &mut Node, depth: u32) -> Result<(), RenderError> {
     if depth > 256 {
         return Err(RenderError::Parse("svg nesting"));
     }
@@ -1994,7 +2005,9 @@ fn parse_length(s: &str) -> Option<f32> {
     }
     let cut = s
         .char_indices()
-        .find(|(_, c)| !(c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+' || *c == 'e' || *c == 'E'))
+        .find(|(_, c)| {
+            !(c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+' || *c == 'e' || *c == 'E')
+        })
         .map(|(i, _)| i)
         .unwrap_or(s.len());
     s[..cut].parse::<f32>().ok()

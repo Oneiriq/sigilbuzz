@@ -366,11 +366,17 @@ fn svg_stroke_paints_a_line() {
     // Pixels at y=50 between x=20 and x=80 must be near-opaque black.
     let mid = pix.get(50, 50);
     assert!(mid[3] > 200, "mid of stroke should be opaque, got {mid:?}");
-    assert!(mid[0] < 30 && mid[1] < 30 && mid[2] < 30, "stroke colour should be black, got {mid:?}");
+    assert!(
+        mid[0] < 30 && mid[1] < 30 && mid[2] < 30,
+        "stroke colour should be black, got {mid:?}"
+    );
 
     // Pixels well outside the stroke must stay transparent.
     let above = pix.get(50, 10);
-    assert_eq!(above[3], 0, "above stroke must be transparent, got {above:?}");
+    assert_eq!(
+        above[3], 0,
+        "above stroke must be transparent, got {above:?}"
+    );
 }
 
 /// Linear gradient red → blue. Sampling the left edge should be red,
@@ -432,7 +438,10 @@ fn svg_use_replicates_referenced_shape() {
     let between = pix.get(50, 50);
     assert!(left[3] > 200, "left dot should be opaque, got {left:?}");
     assert!(right[3] > 200, "right dot should be opaque, got {right:?}");
-    assert_eq!(between[3], 0, "gap between dots should be transparent, got {between:?}");
+    assert_eq!(
+        between[3], 0,
+        "gap between dots should be transparent, got {between:?}"
+    );
 }
 
 /// A clipPath that's a circle should mask a full-rect fill into a
@@ -452,10 +461,16 @@ fn svg_clip_path_masks_rect_to_circle() {
 
     // Centre is inside the clip → opaque.
     let centre = pix.get(50, 50);
-    assert!(centre[3] > 200, "centre should be inside clip, got {centre:?}");
+    assert!(
+        centre[3] > 200,
+        "centre should be inside clip, got {centre:?}"
+    );
     // Corner is outside the clip → transparent.
     let corner = pix.get(5, 5);
-    assert_eq!(corner[3], 0, "corner should be outside clip, got {corner:?}");
+    assert_eq!(
+        corner[3], 0,
+        "corner should be outside clip, got {corner:?}"
+    );
     // Far edge of the rect (well outside the 20-radius circle) →
     // transparent.
     let far = pix.get(90, 90);
@@ -532,7 +547,10 @@ fn svg_rect_with_rounded_corners_loses_corner_pixels() {
     }
     let s = count(sharp);
     let r = count(round);
-    assert!(r < s, "rounded rect should cover fewer pixels than sharp, sharp={s} round={r}");
+    assert!(
+        r < s,
+        "rounded rect should cover fewer pixels than sharp, sharp={s} round={r}"
+    );
 }
 
 #[test]
