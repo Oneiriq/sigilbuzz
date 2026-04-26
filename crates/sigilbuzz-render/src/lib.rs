@@ -55,6 +55,32 @@
 //! assert_eq!(back, p);
 //! ```
 //!
+//! # Per-Bézier flattening for MSDF
+//!
+//! [`flatten_grouped`] is a sibling of [`flatten`] that keeps each
+//! source curve's chord chunk grouped under a [`FlattenedCurve`]
+//! variant. Use this when downstream code needs per-source-Bézier
+//! identity (MSDF RGB edge coloring, signed-distance generators,
+//! etc.) — it replaces the workaround of calling [`flatten`] one
+//! tiny `MoveTo + draw` op pair at a time per Bézier.
+//!
+//! ```
+//! use sigilbuzz_render::{flatten_grouped, FlattenedCurve, Affine, DEFAULT_TOLERANCE};
+//! use sigilbuzz::tables::PathOp;
+//!
+//! let ops = vec![
+//!     PathOp::MoveTo { x: 0.0, y: 0.0 },
+//!     PathOp::CubicTo { c1x: 50.0, c1y: 100.0, c2x: 100.0, c2y: 100.0, x: 100.0, y: 0.0 },
+//!     PathOp::Close,
+//! ];
+//! let curves = flatten_grouped(ops, &Affine::identity(), DEFAULT_TOLERANCE);
+//! assert_eq!(curves.len(), 2); // cubic + close-line
+//! match &curves[0] {
+//!     FlattenedCurve::Cubic(segs) => assert!(segs.len() > 1),
+//!     _ => panic!("expected Cubic"),
+//! }
+//! ```
+//!
 //! # Out of scope
 //!
 //! - sbix `'jpg '` / `'tiff'` / `'jp2 '` decoding (deferred — these
@@ -83,7 +109,7 @@ mod svg;
 pub use affine::Affine;
 pub use bitmaps::{decode_ebdt_mono, decode_png, rasterize_bitmap_glyph, rescale_bilinear};
 pub use error::RenderError;
-pub use flatten::{flatten, Segment, DEFAULT_TOLERANCE};
+pub use flatten::{flatten, flatten_grouped, FlattenedCurve, Segment, DEFAULT_TOLERANCE};
 pub use pixmap::{ColorPixmap, Pixmap};
 pub use png_encode::{encode_png, encode_png_alpha};
 pub use rasterizer::Rasterizer;

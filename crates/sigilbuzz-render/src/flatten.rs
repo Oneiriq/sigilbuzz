@@ -25,6 +25,34 @@ use crate::affine::Affine;
 /// have a specific reason to subdivide more or less aggressively.
 pub const DEFAULT_TOLERANCE: f32 = 0.25;
 
+/// One flattened source curve, grouping the straight chord
+/// [`Segment`]s that came from a single Bézier in the input
+/// [`PathOp`] stream.
+///
+/// Produced by [`flatten_grouped`]. Where [`flatten`] returns a single
+/// flat `Vec<Segment>` and forgets per-source-Bézier identity (which
+/// is fine for fill rasterization), `flatten_grouped` keeps each
+/// chord chunk grouped under its source variant. This is the shape
+/// MSDF generators want: edge-coloring decisions have to be made
+/// *per source curve*, not per chord, so downstream code needs to
+/// know which subset of chords came from one quadratic vs. cubic vs.
+/// straight `LineTo` (or implicit close-line).
+///
+/// `Quad` and `Cubic` always carry at least one chord. A degenerate
+/// curve still emits a single accept-the-chord segment, so consumers
+/// can rely on `segs.first()` / `segs.last()` being meaningful.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FlattenedCurve {
+    /// One straight edge from a `LineTo`, or the implicit close-line
+    /// emitted by `Close` when the current point hasn't returned to
+    /// the contour start.
+    Line(Segment),
+    /// Chord chain from one quadratic Bézier (`QuadTo`).
+    Quad(Vec<Segment>),
+    /// Chord chain from one cubic Bézier (`CubicTo`).
+    Cubic(Vec<Segment>),
+}
+
 /// One straight edge in pixel coordinates.
 ///
 /// Produced by [`flatten`]. Coordinates are post-transform — the
@@ -154,6 +182,135 @@ where
         }
     }
     segs
+}
+
+/// Flattens an outline path, preserving per-source-Bézier boundaries.
+///
+/// Sibling to [`flatten`]. Same input, same chord output, same
+/// `xform` and `tolerance` semantics — but the result is a
+/// `Vec<FlattenedCurve>` where each entry corresponds to exactly one
+/// drawing op from the input stream. A `LineTo` becomes one
+/// [`FlattenedCurve::Line`]; a `QuadTo` becomes one
+/// [`FlattenedCurve::Quad`] holding all chords produced by adaptive
+/// subdivision of that quadratic; a `CubicTo` becomes one
+/// [`FlattenedCurve::Cubic`]; a `Close` that needs an explicit
+/// terminator emits a final `FlattenedCurve::Line` back to the
+/// contour start. `MoveTo` and no-op `Close` (already at start)
+/// produce no entries.
+///
+/// This is what MSDF-style generators want — RGB edge coloring picks
+/// channels per *source curve*, not per chord, so the consumer needs
+/// to know which subset of chords came from one Bézier. The previous
+/// workaround was to call [`flatten`] one tiny `MoveTo+draw` op pair
+/// at a time per Bézier; this API replaces that with a single walk.
+///
+/// Determinism: chord output for a given `(ops, xform, tolerance)`
+/// triple is bit-identical across calls. Concatenating the inner
+/// segment lists in-order yields the same `Vec<Segment>` that
+/// [`flatten`] would have produced for the same input.
+///
+/// # Example
+///
+/// ```
+/// use sigilbuzz_render::{flatten_grouped, Affine, FlattenedCurve, DEFAULT_TOLERANCE};
+/// use sigilbuzz::tables::PathOp;
+///
+/// let ops = vec![
+///     PathOp::MoveTo { x: 0.0, y: 0.0 },
+///     PathOp::CubicTo {
+///         c1x: 50.0, c1y: 100.0,
+///         c2x: 100.0, c2y: 100.0,
+///         x: 100.0, y: 0.0,
+///     },
+///     PathOp::Close,
+/// ];
+/// let curves = flatten_grouped(ops, &Affine::identity(), DEFAULT_TOLERANCE);
+/// assert_eq!(curves.len(), 2); // cubic + close-line
+/// match &curves[0] {
+///     FlattenedCurve::Cubic(segs) => assert!(segs.len() > 1),
+///     _ => panic!("expected Cubic"),
+/// }
+/// ```
+pub fn flatten_grouped<I>(ops: I, xform: &Affine, tolerance: f32) -> Vec<FlattenedCurve>
+where
+    I: IntoIterator<Item = PathOp>,
+{
+    let mut out = Vec::new();
+    let mut sx = 0.0_f32;
+    let mut sy = 0.0_f32;
+    let mut cx = 0.0_f32;
+    let mut cy = 0.0_f32;
+    let mut have_start = false;
+    let tol = tolerance.max(1e-3);
+    let tol_sq = tol * tol;
+
+    for op in ops {
+        match op {
+            PathOp::MoveTo { x, y } => {
+                let (px, py) = xform.apply(x, y);
+                sx = px;
+                sy = py;
+                cx = px;
+                cy = py;
+                have_start = true;
+            }
+            PathOp::LineTo { x, y } => {
+                let (px, py) = xform.apply(x, y);
+                out.push(FlattenedCurve::Line(Segment {
+                    x0: cx,
+                    y0: cy,
+                    x1: px,
+                    y1: py,
+                }));
+                cx = px;
+                cy = py;
+            }
+            PathOp::QuadTo {
+                cx: ccx,
+                cy: ccy,
+                x,
+                y,
+            } => {
+                let (p1x, p1y) = xform.apply(ccx, ccy);
+                let (p2x, p2y) = xform.apply(x, y);
+                let mut segs = Vec::new();
+                flatten_quad(cx, cy, p1x, p1y, p2x, p2y, tol_sq, &mut segs, 0);
+                out.push(FlattenedCurve::Quad(segs));
+                cx = p2x;
+                cy = p2y;
+            }
+            PathOp::CubicTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            } => {
+                let (p1x, p1y) = xform.apply(c1x, c1y);
+                let (p2x, p2y) = xform.apply(c2x, c2y);
+                let (p3x, p3y) = xform.apply(x, y);
+                let mut segs = Vec::new();
+                flatten_cubic(cx, cy, p1x, p1y, p2x, p2y, p3x, p3y, tol_sq, &mut segs, 0);
+                out.push(FlattenedCurve::Cubic(segs));
+                cx = p3x;
+                cy = p3y;
+            }
+            PathOp::Close => {
+                if have_start && (cx != sx || cy != sy) {
+                    out.push(FlattenedCurve::Line(Segment {
+                        x0: cx,
+                        y0: cy,
+                        x1: sx,
+                        y1: sy,
+                    }));
+                }
+                cx = sx;
+                cy = sy;
+            }
+        }
+    }
+    out
 }
 
 const MAX_DEPTH: u32 = 16;
@@ -368,5 +525,181 @@ mod tests {
         assert_eq!(segs.len(), 3);
         let last = segs[2];
         assert!((last.x1).abs() < 1e-5 && (last.y1).abs() < 1e-5);
+    }
+
+    // -------- flatten_grouped --------
+
+    /// Helper: flatten the per-curve segment lists back to a single
+    /// flat `Vec<Segment>` so we can cross-check against `flatten()`.
+    fn ungroup(curves: &[FlattenedCurve]) -> Vec<Segment> {
+        let mut out = Vec::new();
+        for c in curves {
+            match c {
+                FlattenedCurve::Line(s) => out.push(*s),
+                FlattenedCurve::Quad(v) | FlattenedCurve::Cubic(v) => out.extend_from_slice(v),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn flatten_grouped_mlqcz_yields_four_entries() {
+        // M / L / Q / C / Z. The Z emits an implicit close-line.
+        let ops = [
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::LineTo { x: 10.0, y: 0.0 },
+            PathOp::QuadTo {
+                cx: 50.0,
+                cy: 100.0,
+                x: 100.0,
+                y: 0.0,
+            },
+            PathOp::CubicTo {
+                c1x: 100.0,
+                c1y: 50.0,
+                c2x: 50.0,
+                c2y: 50.0,
+                x: 0.0,
+                y: 50.0,
+            },
+            PathOp::Close,
+        ];
+        let curves = flatten_grouped(ops, &Affine::identity(), 0.25);
+        // L + Q + C + implicit close-Line = 4 entries.
+        assert_eq!(curves.len(), 4, "got: {curves:?}");
+        assert!(matches!(curves[0], FlattenedCurve::Line(_)));
+        assert!(matches!(curves[1], FlattenedCurve::Quad(_)));
+        assert!(matches!(curves[2], FlattenedCurve::Cubic(_)));
+        assert!(matches!(curves[3], FlattenedCurve::Line(_)));
+        // Quad / Cubic both subdivide.
+        if let FlattenedCurve::Quad(segs) = &curves[1] {
+            assert!(segs.len() > 1);
+        }
+        if let FlattenedCurve::Cubic(segs) = &curves[2] {
+            assert!(segs.len() > 1);
+        }
+    }
+
+    #[test]
+    fn flatten_grouped_empty_input_is_empty() {
+        let curves = flatten_grouped(core::iter::empty::<PathOp>(), &Affine::identity(), 0.25);
+        assert!(curves.is_empty());
+    }
+
+    #[test]
+    fn flatten_grouped_lone_moveto_is_empty() {
+        let ops = [PathOp::MoveTo { x: 5.0, y: 5.0 }];
+        let curves = flatten_grouped(ops, &Affine::identity(), 0.25);
+        assert!(
+            curves.is_empty(),
+            "MoveTo with no draw ops should yield no curves, got {curves:?}"
+        );
+    }
+
+    #[test]
+    fn flatten_grouped_tight_tolerance_subdivides_cubic_heavily() {
+        let ops = [
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::CubicTo {
+                c1x: 0.0,
+                c1y: 100.0,
+                c2x: 100.0,
+                c2y: 100.0,
+                x: 100.0,
+                y: 0.0,
+            },
+        ];
+        let curves = flatten_grouped(ops, &Affine::identity(), 0.01);
+        assert_eq!(curves.len(), 1);
+        match &curves[0] {
+            FlattenedCurve::Cubic(segs) => {
+                assert!(segs.len() > 8, "tight tolerance got {} segs", segs.len());
+            }
+            other => panic!("expected Cubic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flatten_grouped_is_deterministic() {
+        let ops = [
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::QuadTo {
+                cx: 50.0,
+                cy: 100.0,
+                x: 100.0,
+                y: 0.0,
+            },
+            PathOp::CubicTo {
+                c1x: 0.0,
+                c1y: 50.0,
+                c2x: 100.0,
+                c2y: 50.0,
+                x: 100.0,
+                y: 0.0,
+            },
+            PathOp::Close,
+        ];
+        let a = flatten_grouped(ops, &Affine::identity(), 0.25);
+        let b = flatten_grouped(ops, &Affine::identity(), 0.25);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn flatten_grouped_segment_count_matches_flatten() {
+        // Same chord output, just grouped — concatenating the per-curve
+        // segment lists must equal flatten()'s flat output exactly.
+        let ops = [
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::LineTo { x: 10.0, y: 0.0 },
+            PathOp::QuadTo {
+                cx: 50.0,
+                cy: 100.0,
+                x: 100.0,
+                y: 0.0,
+            },
+            PathOp::CubicTo {
+                c1x: 100.0,
+                c1y: 50.0,
+                c2x: 50.0,
+                c2y: 50.0,
+                x: 0.0,
+                y: 50.0,
+            },
+            PathOp::Close,
+        ];
+        let flat = flatten(ops, &Affine::identity(), 0.25);
+        let grouped = flatten_grouped(ops, &Affine::identity(), 0.25);
+        let ungrouped = ungroup(&grouped);
+        assert_eq!(flat.len(), ungrouped.len(), "total chord count");
+        assert_eq!(flat, ungrouped, "chord sequence must be bit-identical");
+    }
+
+    #[test]
+    fn flatten_grouped_close_at_start_emits_no_line() {
+        // Already at the contour start when Close hits — no implicit
+        // close-line, so the output is exactly the LineTo.
+        let ops = [
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::LineTo { x: 10.0, y: 0.0 },
+            PathOp::LineTo { x: 0.0, y: 0.0 },
+            PathOp::Close,
+        ];
+        let curves = flatten_grouped(ops, &Affine::identity(), 0.25);
+        assert_eq!(curves.len(), 2);
+        assert!(matches!(curves[0], FlattenedCurve::Line(_)));
+        assert!(matches!(curves[1], FlattenedCurve::Line(_)));
+    }
+
+    #[test]
+    fn flatten_grouped_applies_affine() {
+        let ops = [
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::LineTo { x: 1.0, y: 0.0 },
+        ];
+        let curves = flatten_grouped(ops, &Affine::scale(10.0, 10.0), 0.25);
+        match &curves[0] {
+            FlattenedCurve::Line(s) => assert!((s.x1 - 10.0).abs() < 1e-5),
+            other => panic!("expected Line, got {other:?}"),
+        }
     }
 }
