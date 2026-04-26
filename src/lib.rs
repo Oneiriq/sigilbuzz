@@ -69,5 +69,22 @@ pub use face::{Face, GlyphBitmapEntry};
 pub use font::Font;
 pub use shape::{shape, Feature};
 
+// --- Curated stable re-exports from `ot::*` --------------------------------
+//
+// The `ot` module itself stays `#[doc(hidden)]` because most of its
+// surface (Arabic / Indic / USE / Mongolian / Tibetan state machines)
+// is implementation detail subject to redesign before 1.0. The items
+// re-exported here are the subset that downstream consumers writing
+// custom shapers or feature pipelines reasonably want as crate-root
+// names — see `docs/STABILITY.md`.
+//
+// Promoted in 0.20.0 (audit follow-up #235):
+//   - `ot::feature` — OpenType feature-tag byte-literal constants
+//     (LIGA, KERN, CALT, etc.) usable as `Feature::tag` keys.
+//   - `ot::arabic::JoiningForm` — the Arabic joining-form enum, the
+//     stable output of `ot::arabic::assign_joining_forms`.
+pub use ot::arabic::JoiningForm;
+pub use ot::feature;
+
 /// Crate version, matching `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
