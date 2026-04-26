@@ -569,12 +569,33 @@ Four close-outs from prior carry-overs (one fresh dogfood-driven gap, three defe
 
 ---
 
-## 0.19.0+ (next)
+## 0.19.0 (shipping)
 
-- [ ] Stable API audit + crates.io publish.
-- [ ] sbix `'jpg '` / `'tiff'` / `'jp2 '` decoders.
-- [ ] SVG filter primitives, masks beyond clipPath, animations, `<text>` rendering inside SVG (text-on-path).
-- [ ] Dasharray on Bezier arc-length (true curve dashing, not chord-flattened approximation).
+Three render close-outs (SVG filters, true-arc dasharray, PNG tRNS) plus a pre-publish API audit. Wave 19 caught one PNG decoder validation bug.
+
+### Render close-outs
+
+- [x] **SVG filter primitives (#233)** — feGaussianBlur (3-pass separable box-blur), feColorMatrix (matrix/saturate/hueRotate/luminanceToAlpha), feOffset, feFlood, feMerge with feMergeNode source-over compositing. SourceGraphic + SourceAlpha materialize lazily, named `result=` pixmaps tracked. End-to-end drop-shadow chain works. Closes the long-standing #205 deferral. feTurbulence/feImage/feMorphology/feConvolveMatrix/feSpecularLighting/feDiffuseLighting/feComponentTransfer remain deferred.
+- [x] **True Bezier arc-length stroke-dasharray (#234)** — replaces #227's chord-flatten approximation. Adaptive arc-length estimator via Roger Willcocks' chord+control formula, bisection arc-length-to-t solver, accurate to ~0.014% on a kappa-circle (chord-flatten was -0.026%; ~2× more accurate). Straight-segment paths byte-identical to before.
+- [x] **PNG decoder grayscale tRNS validation (#231 / #232)** — wave 19: malformed grayscale tRNS chunk (length != 2) was silently accepted with `last().copied().unwrap_or(0)`. Now requires `t.len() == 2` matching the existing color-type-2 validation.
+
+### Pre-publish API audit (#235)
+
+- [x] Tier-1 stable public API documented (~75 named exports, full list in `docs/STABILITY.md`).
+- [x] 40 deep-path modules marked `#[doc(hidden)]` (rustdoc-only; sibling crates keep compiling). Includes `pub mod ot`, `pub mod unicode`, and 38 of 41 `tables::*` submodules. The named `tables::Reader`, `tables::Coverage`, `tables::ItemVariationStore` re-exports stay visible.
+- [x] `missing_docs = warn` propagated to all 12 workspace crates (was root-only). Workspace already at zero missing-docs warnings.
+- [x] `STABILITY.md` documents the 1.0 stability commitment, `#[doc(hidden)]` policy, pre-1.0 lockstep posture.
+- [x] Companion-crate clippy::pedantic cleanup (~100 warnings) deferred to per-crate follow-ups; root crate stays pedantic.
+
+---
+
+## 0.20.0+ (next)
+
+- [ ] crates.io publish (gated on user prompt).
+- [ ] sbix `'jpg '` / `'tiff'` / `'jp2 '` decoders (still deferred — each is its own substantial decoder).
+- [ ] SVG masks beyond clipPath, animations, `<text>` rendering inside SVG (text-on-path).
+- [ ] Companion-crate `clippy::pedantic` cleanup (~100 pre-existing warnings surfaced by audit's lint propagation).
+- [ ] Promote `sigilbuzz::ot` and `sigilbuzz::unicode` to a stable curated re-export set before 1.0.
 
 ---
 
