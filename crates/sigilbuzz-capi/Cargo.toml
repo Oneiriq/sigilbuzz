@@ -62,3 +62,6 @@ cc = "1.0"
 # dir; the file lock survives across processes. Dev-dep only — the
 # crate itself ships no runtime locking.
 fd-lock = "4"
+
+[lints]
+workspace = true

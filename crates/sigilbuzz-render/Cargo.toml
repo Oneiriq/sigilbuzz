@@ -28,3 +28,6 @@ miniz_oxide = { version = "0.8", default-features = false, features = ["with-all
 
 [dev-dependencies]
 # Fixtures via include_bytes!.
+
+[lints]
+workspace = true

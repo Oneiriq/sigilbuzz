@@ -27,3 +27,6 @@ text-layout-integration = ["dep:sigilbuzz-text-layout"]
 
 [dependencies]
 sigilbuzz-text-layout = { path = "../sigilbuzz-text-layout", version = "0.1.0", optional = true }
+
+[lints]
+workspace = true

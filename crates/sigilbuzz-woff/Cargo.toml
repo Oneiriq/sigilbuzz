@@ -38,3 +38,6 @@ miniz_oxide = { version = "0.8", optional = true, default-features = false, feat
 # WOFF2 outline-parity test — same dev-dep already used by the
 # shaper for outline parity. Never linked by sigilbuzz-woff proper.
 ttf-parser = "0.25"
+
+[lints]
+workspace = true
