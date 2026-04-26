@@ -36,9 +36,10 @@ use crate::error::{Error, Result};
 use crate::tables::glyf::PhantomMetrics;
 use crate::tables::parse::Reader;
 use crate::tables::{
-    tag, Ankr, Avar, Base, Cbdt, Cblc, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBitmap, GlyphBounds,
-    Gpos, Gsub, Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Math, Maxp, Morx, Mvar, Name,
-    Outline, PathOp, Sbix, Svg, SvgDocument, Varc, Vhea, Vmtx, Vorg, Vvar,
+    tag, Ankr, Avar, Base, Cbdt, Cblc, Cff, Cff2, Cmap, Ebdt, EbdtBitmap, Eblc, Fvar, Gdef, Glyf,
+    GlyphBitmap, GlyphBounds, Gpos, Gsub, Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca,
+    Math, Maxp, Morx, Mvar, Name, Outline, PathOp, Sbix, Svg, SvgDocument, Varc, Vhea, Vmtx, Vorg,
+    Vvar,
 };
 
 /// One entry in the SFNT table directory.
@@ -799,6 +800,31 @@ impl<'a> Face<'a> {
         }
     }
 
+    /// Parses the `EBLC` table (Microsoft monochrome bitmap location)
+    /// if the font carries one. Always paired with `EBDT` in the wild.
+    /// Modern colour-emoji fonts use CBDT/CBLC instead; EBLC/EBDT
+    /// shows up in legacy Asian text fonts and a handful of bitmap-
+    /// only display faces.
+    pub fn eblc(&self) -> Result<Option<Eblc<'a>>> {
+        match self.table_bytes(tag::EBLC) {
+            Ok(bytes) => Ok(Some(Eblc::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Parses the `EBDT` table (Microsoft monochrome bitmap data) if
+    /// the font carries one. Pairs with `EBLC`; consumers usually go
+    /// through [`Face::glyph_bitmap`] instead of touching either
+    /// directly.
+    pub fn ebdt(&self) -> Result<Option<Ebdt<'a>>> {
+        match self.table_bytes(tag::EBDT) {
+            Ok(bytes) => Ok(Some(Ebdt::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Parses the `sbix` table (Apple Standard Bitmap Graphics) if
     /// the font carries one. The strike's per-glyph offsets array is
     /// sized off `maxp.numGlyphs`, so `maxp` must be present.
@@ -842,17 +868,23 @@ impl<'a> Face<'a> {
     /// Resolution order:
     /// 1. `CBDT` / `CBLC` — Google color emoji.
     /// 2. `sbix` — Apple color emoji.
+    /// 3. `EBDT` / `EBLC` — Microsoft monochrome bitmap embeds.
     ///
-    /// Returns `Ok(None)` when neither bitmap table is present, or
-    /// the available strikes don't cover the glyph (legitimate for
-    /// glyphs that have only outline data, e.g. ASCII fallbacks in
-    /// an emoji font).
+    /// CBDT outranks EBDT because a font carrying both (rare but
+    /// permitted) is overwhelmingly built around the colour table;
+    /// the mono path is the legacy fallback.
     ///
-    /// The returned [`GlyphBitmapEntry`] is a tagged union of CBDT
-    /// vs sbix payloads. Both ride a `&'a [u8]` that points back into
-    /// the original font blob, so cloning is cheap and there is no
-    /// allocation on the lookup path. PNG / JPEG / TIFF decoding is
-    /// the consumer's job — sigilbuzz exposes the bytes, not pixels.
+    /// Returns `Ok(None)` when no bitmap table is present, or the
+    /// available strikes don't cover the glyph (legitimate for glyphs
+    /// that have only outline data, e.g. ASCII fallbacks in an emoji
+    /// font).
+    ///
+    /// The returned [`GlyphBitmapEntry`] is a tagged union of CBDT,
+    /// sbix, and EBDT payloads. All three ride a `&'a [u8]` that
+    /// points back into the original font blob, so cloning is cheap
+    /// and there is no allocation on the lookup path. PNG / JPEG /
+    /// TIFF / mask decoding is the consumer's job — sigilbuzz exposes
+    /// the bytes, not pixels.
     pub fn glyph_bitmap(&self, glyph_id: u16, ppem: u16) -> Result<Option<GlyphBitmapEntry<'a>>> {
         if let Some(cblc) = self.cblc()? {
             if let Some(cbdt) = self.cbdt()? {
@@ -876,6 +908,20 @@ impl<'a> Face<'a> {
                         ppi: strike.ppi(),
                         glyph: g,
                     }));
+                }
+            }
+        }
+        if let Some(eblc) = self.eblc()? {
+            if let Some(ebdt) = self.ebdt()? {
+                if let Some(size) = eblc.best_strike(glyph_id, ppem) {
+                    if let Some(loc) = eblc.locate(&size, glyph_id)? {
+                        let bm = ebdt.glyph_bitmap(&loc)?;
+                        return Ok(Some(GlyphBitmapEntry::Ebdt {
+                            ppem_x: size.ppem_x,
+                            ppem_y: size.ppem_y,
+                            bitmap: bm,
+                        }));
+                    }
                 }
             }
         }
@@ -956,6 +1002,17 @@ pub enum GlyphBitmapEntry<'a> {
         ppi: u16,
         /// Per-glyph entry (origin offsets, format tag, payload).
         glyph: crate::tables::SbixGlyph<'a>,
+    },
+    /// Microsoft Embedded Bitmap Data (EBDT/EBLC) — monochrome 1bpp
+    /// masks. Predecessor to CBDT/CBLC; same indexing model, mask
+    /// payload instead of PNG.
+    Ebdt {
+        /// Strike X resolution (pixels-per-em).
+        ppem_x: u8,
+        /// Strike Y resolution (pixels-per-em).
+        ppem_y: u8,
+        /// Parsed EBDT entry (format, metrics, packing, mask bytes).
+        bitmap: EbdtBitmap<'a>,
     },
 }
 

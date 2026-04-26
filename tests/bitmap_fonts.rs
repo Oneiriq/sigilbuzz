@@ -67,6 +67,7 @@ fn cbdt_synthetic_face_glyph_bitmap_unified_accessor() {
             assert!(bitmap.data.starts_with(PNG_SIGNATURE));
         }
         sigilbuzz::GlyphBitmapEntry::Sbix { .. } => panic!("expected CBDT"),
+        sigilbuzz::GlyphBitmapEntry::Ebdt { .. } => panic!("expected CBDT"),
     }
 }
 
@@ -118,6 +119,7 @@ fn sbix_synthetic_face_glyph_bitmap_unified_accessor() {
             assert!(glyph.data.starts_with(PNG_SIGNATURE));
         }
         sigilbuzz::GlyphBitmapEntry::Cbdt { .. } => panic!("expected sbix"),
+        sigilbuzz::GlyphBitmapEntry::Ebdt { .. } => panic!("expected sbix"),
     }
 }
 
