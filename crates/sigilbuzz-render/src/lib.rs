@@ -36,6 +36,25 @@
 //! let _ = pix.data;
 //! ```
 //!
+//! # PNG round-trip
+//!
+//! [`encode_png`] / [`encode_png_alpha`] turn a pixmap back into a
+//! self-contained PNG byte stream that round-trips through
+//! [`decode_png`].
+//!
+//! ```
+//! use sigilbuzz_render::{ColorPixmap, decode_png, encode_png};
+//!
+//! let mut p = ColorPixmap::new(2, 2);
+//! p.data = vec![
+//!     255, 0, 0, 255,  0, 255, 0, 255,
+//!     0, 0, 255, 255,  255, 255, 255, 255,
+//! ];
+//! let bytes = encode_png(&p);
+//! let back = decode_png(&bytes).unwrap();
+//! assert_eq!(back, p);
+//! ```
+//!
 //! # Out of scope
 //!
 //! - EBDT/EBLC mono bitmap embeds (deferred — modern bitmap fonts
@@ -56,6 +75,7 @@ mod colrv1;
 mod error;
 mod flatten;
 mod pixmap;
+mod png_encode;
 mod raster;
 mod rasterizer;
 mod svg;
@@ -65,6 +85,7 @@ pub use bitmaps::{decode_png, rasterize_bitmap_glyph, rescale_bilinear};
 pub use error::RenderError;
 pub use flatten::{flatten, Segment, DEFAULT_TOLERANCE};
 pub use pixmap::{ColorPixmap, Pixmap};
+pub use png_encode::{encode_png, encode_png_alpha};
 pub use rasterizer::Rasterizer;
 
 /// Crate version, matching `Cargo.toml`.
