@@ -88,7 +88,7 @@ pub(crate) fn rasterize(segments: &[Segment]) -> Render {
             max_y = s.y1;
         }
     }
-    if !min_x.is_finite() || !max_x.is_finite() {
+    if !min_x.is_finite() || !max_x.is_finite() || !min_y.is_finite() || !max_y.is_finite() {
         return Render {
             pixmap: Pixmap::new(0, 0),
             origin_x: 0,
@@ -96,13 +96,28 @@ pub(crate) fn rasterize(segments: &[Segment]) -> Render {
         };
     }
 
-    let pad = 1;
-    let ox = min_x.floor() as i32 - pad;
-    let oy = min_y.floor() as i32 - pad;
-    let ex = max_x.ceil() as i32 + pad;
-    let ey = max_y.ceil() as i32 + pad;
-    let width = (ex - ox).max(0) as u32;
-    let height = (ey - oy).max(0) as u32;
+    // Reject bboxes whose extents don't fit in a sane pixel grid.
+    // `as i32` saturates at i32::MIN / i32::MAX for f32 values out of
+    // integer range, so finite-but-extreme coords could otherwise
+    // overflow the `+/- pad` and `ex - ox` arithmetic and either
+    // panic in debug or allocate a multi-gig pixmap. The cap is
+    // generous (any glyph that needs > 1M pixels per side is already
+    // pathological).
+    const MAX_EXTENT: f32 = 1_048_576.0;
+    if min_x < -MAX_EXTENT || max_x > MAX_EXTENT || min_y < -MAX_EXTENT || max_y > MAX_EXTENT {
+        return Render {
+            pixmap: Pixmap::new(0, 0),
+            origin_x: 0,
+            origin_y: 0,
+        };
+    }
+    let pad = 1_i32;
+    let ox = (min_x.floor() as i32).saturating_sub(pad);
+    let oy = (min_y.floor() as i32).saturating_sub(pad);
+    let ex = (max_x.ceil() as i32).saturating_add(pad);
+    let ey = (max_y.ceil() as i32).saturating_add(pad);
+    let width = ex.saturating_sub(ox).max(0) as u32;
+    let height = ey.saturating_sub(oy).max(0) as u32;
 
     let mut pixmap = Pixmap::new(width, height);
     if width == 0 || height == 0 {
@@ -352,6 +367,68 @@ mod tests {
         let wx = (1 - r.origin_x) as u32;
         let wy = (5 - r.origin_y) as u32;
         assert_eq!(r.pixmap.get(wx, wy), 255, "wall should be opaque");
+    }
+
+    #[test]
+    fn nonfinite_y_does_not_panic_returns_empty() {
+        // Regression for issue #202 — y bbox was previously not
+        // checked for finiteness, so an INF y crashed the i32 cast +
+        // pad with `attempt to add with overflow`.
+        let segs = vec![
+            Segment {
+                x0: 0.0,
+                y0: f32::INFINITY,
+                x1: 10.0,
+                y1: 0.0,
+            },
+            Segment {
+                x0: 10.0,
+                y0: 0.0,
+                x1: 0.0,
+                y1: 10.0,
+            },
+        ];
+        let r = rasterize(&segs);
+        assert!(
+            r.pixmap.is_empty(),
+            "non-finite bbox must yield empty pixmap"
+        );
+    }
+
+    #[test]
+    fn nan_y_does_not_panic_returns_empty() {
+        let segs = vec![Segment {
+            x0: 0.0,
+            y0: f32::NAN,
+            x1: 1.0,
+            y1: 1.0,
+        }];
+        let r = rasterize(&segs);
+        // Either empty pixmap, or the segment was effectively dropped;
+        // either way no panic.
+        assert!(r.pixmap.width <= 4 && r.pixmap.height <= 4);
+    }
+
+    #[test]
+    fn extreme_finite_x_does_not_panic_returns_empty() {
+        // f32::MAX is finite but saturates to i32::MAX after .floor()
+        // / .ceil() casts; the previous `+ pad` and `ex - ox`
+        // arithmetic overflowed in debug builds. Regression for
+        // issue #202: a pathologically large bbox now bails out to
+        // an empty pixmap rather than panic-or-oom.
+        let segs = vec![Segment {
+            x0: 0.0,
+            y0: 0.0,
+            x1: f32::MAX,
+            y1: 1.0,
+        }];
+        let r = rasterize(&segs);
+        assert!(
+            r.pixmap.is_empty(),
+            "extreme x bbox must yield empty pixmap, got {}x{}",
+            r.pixmap.width,
+            r.pixmap.height
+        );
     }
 
     #[test]
