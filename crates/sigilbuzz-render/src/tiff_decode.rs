@@ -187,7 +187,11 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<ColorPixmap, RenderError> {
     // contiguous buffer of `height * width * samples_per_pixel` bytes.
     // This keeps the per-pixel emit loop simple.
     let mut raw = Vec::with_capacity(total_bytes);
-    for (i, (&off, &len)) in strip_offsets.iter().zip(strip_byte_counts.iter()).enumerate() {
+    for (i, (&off, &len)) in strip_offsets
+        .iter()
+        .zip(strip_byte_counts.iter())
+        .enumerate()
+    {
         let off = off as usize;
         let len = len as usize;
         let end = off
@@ -314,7 +318,12 @@ impl Ifd {
     /// vs-offset branch for us. The output is `Vec<u32>` for both BYTE
     /// (1-byte) and SHORT (2-byte) and LONG (4-byte) tags so callers
     /// don't have to fork on field type.
-    fn require_array(&self, tag: u16, file: &[u8], endian: Endian) -> Result<Vec<u32>, RenderError> {
+    fn require_array(
+        &self,
+        tag: u16,
+        file: &[u8],
+        endian: Endian,
+    ) -> Result<Vec<u32>, RenderError> {
         let entry = self
             .find(tag)
             .ok_or(RenderError::BadTiff("missing required array tag"))?;
@@ -548,18 +557,8 @@ mod tests {
         let _ = entries; // discard above; rebuild dynamically below.
 
         let mut ifd_entries: Vec<(u16, u16, u32, [u8; 4])> = Vec::new();
-        ifd_entries.push((
-            TAG_IMAGE_WIDTH,
-            FIELD_LONG,
-            1,
-            width.to_le_bytes(),
-        ));
-        ifd_entries.push((
-            TAG_IMAGE_LENGTH,
-            FIELD_LONG,
-            1,
-            height.to_le_bytes(),
-        ));
+        ifd_entries.push((TAG_IMAGE_WIDTH, FIELD_LONG, 1, width.to_le_bytes()));
+        ifd_entries.push((TAG_IMAGE_LENGTH, FIELD_LONG, 1, height.to_le_bytes()));
 
         // Compute external-data layout. After IFD body we place:
         //   - BitsPerSample (3 SHORTs = 6 bytes)
@@ -596,16 +595,11 @@ mod tests {
                 b
             },
         ));
-        ifd_entries.push((
-            TAG_PHOTOMETRIC,
-            FIELD_SHORT,
-            1,
-            {
-                let mut b = [0u8; 4];
-                b[..2].copy_from_slice(&(PHOTOMETRIC_RGB as u16).to_le_bytes());
-                b
-            },
-        ));
+        ifd_entries.push((TAG_PHOTOMETRIC, FIELD_SHORT, 1, {
+            let mut b = [0u8; 4];
+            b[..2].copy_from_slice(&(PHOTOMETRIC_RGB as u16).to_le_bytes());
+            b
+        }));
 
         // StripOffsets: if 1 strip, inline; else external.
         if strips == 1 {
@@ -624,16 +618,11 @@ mod tests {
             ));
         }
 
-        ifd_entries.push((
-            TAG_SAMPLES_PER_PIXEL,
-            FIELD_SHORT,
-            1,
-            {
-                let mut b = [0u8; 4];
-                b[..2].copy_from_slice(&3u16.to_le_bytes());
-                b
-            },
-        ));
+        ifd_entries.push((TAG_SAMPLES_PER_PIXEL, FIELD_SHORT, 1, {
+            let mut b = [0u8; 4];
+            b[..2].copy_from_slice(&3u16.to_le_bytes());
+            b
+        }));
         ifd_entries.push((
             TAG_ROWS_PER_STRIP,
             FIELD_LONG,
