@@ -609,13 +609,26 @@ Four close-outs from prior carry-overs (companion clippy backlog, sbix JPEG deco
 
 ---
 
-## 0.21.0+ (next)
+## 0.21.0 (shipping)
+
+Five close-outs (sbix TIFF, JPEG progressive, SVG mask alpha+bbox, SVG textPath, regression wave 21).
+
+- [x] **sbix TIFF decoder (#240)** — hand-rolled baseline TIFF: II/MM headers, single IFD, 8-bit RGB(A), Compression=1 (none) and 32773 (PackBits), strip-organised, chunky planar. CCITT/LZW/JPEG-in-TIFF/multi-IFD/non-RGB/non-8-bit remain Unsupported.
+- [x] **JPEG progressive scan (#241)** — SOF2 entropy decoder with DC first-time, DC refinement, AC first-time + EOB-run tracking. AC successive-approximation refinement (Ah>0 on AC bands) deferred — surfaces structured BadJpeg.
+- [x] **SVG mask-type=alpha + maskUnits=objectBoundingBox (#242)** — closes 0.20.0 #236 follow-up. Alpha-channel direct sampling, element-relative mask region. Nested masks deferred.
+- [x] **SVG textPath (#243)** — consumer-pre-shaped glyph runs translated along path arc-length. Tangent rotation + side="right" deferred.
+- [x] **Wave 21 (#244)** — historical adversarial pass found one mask-cycle stack overflow; fixed via depth guard. 17 new edge-case tests.
+
+---
+
+## 0.22.0+ (next)
 
 - [ ] crates.io publish (gated on user prompt).
-- [ ] sbix `'tiff'` and `'jp2 '` decoders (still deferred).
-- [ ] SVG `<textPath>` once a consumer wants it; SVG animations.
-- [ ] Mask-type=alpha + objectBoundingBox + nested masks.
-- [ ] JPEG progressive scan, arithmetic coding, 16-bit precision.
+- [ ] JPEG AC successive-approximation refinement (Ah>0 AC scans).
+- [ ] SVG textPath tangent rotation, side="right", path cycling.
+- [ ] sbix `'jp2 '` decoder.
+- [ ] TIFF LZW + CCITT compressions, multi-IFD, non-RGB photometrics.
+- [ ] Nested SVG masks.
 
 ---
 
