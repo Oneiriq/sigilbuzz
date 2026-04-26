@@ -31,14 +31,35 @@ from fontTools.ttLib.tables.DefaultTable import DefaultTable
 OUT_PATH = Path(__file__).resolve().parent.parent / "fixtures" / "cbdt_synthetic.ttf"
 UPEM = 1000
 
-# Smallest valid PNG: 1x1 RGBA, fully transparent. 67 bytes.
-TINY_PNG = bytes.fromhex(
-    "89504e470d0a1a0a"  # signature
-    "0000000d49484452"  # IHDR length=13
-    "00000001000000010806000000"  # 1x1 RGBA
-    "1f15c489"
-    "0000000d4944415478da6300010000000500010d0a2db40000000049454e44ae426082"
-)
+def _make_png(width: int, height: int, rgba: bytes) -> bytes:
+    """Builds a minimal but spec-valid PNG with the given RGBA payload.
+
+    The previous fixture inlined a hand-typed hex string whose IDAT
+    length and zlib stream didn't match (the embed parsed for the
+    parser tests but failed any actual PNG decoder). This helper
+    rebuilds the PNG from its source pixels each time so a renderer
+    that decodes the embed gets a real image back.
+    """
+    import binascii
+    import zlib
+
+    def chunk(typ: bytes, data: bytes) -> bytes:
+        out = struct.pack(">I", len(data)) + typ + data
+        crc = binascii.crc32(typ + data) & 0xFFFFFFFF
+        return out + struct.pack(">I", crc)
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+    # PNG row format: 1 filter byte (0 = None) + width*4 RGBA bytes.
+    raw = b"".join(b"\x00" + rgba[y * width * 4 : (y + 1) * width * 4] for y in range(height))
+    idat = chunk(b"IDAT", zlib.compress(raw))
+    iend = chunk(b"IEND", b"")
+    return sig + ihdr + idat + iend
+
+
+# Tiny 1×1 transparent RGBA PNG. Real PNG (signature + IHDR + IDAT +
+# IEND with valid CRCs and zlib stream).
+TINY_PNG = _make_png(1, 1, b"\x00\x00\x00\x00")
 
 
 def build_rect():

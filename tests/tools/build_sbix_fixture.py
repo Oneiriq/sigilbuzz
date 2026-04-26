@@ -32,13 +32,29 @@ from fontTools.ttLib.tables.DefaultTable import DefaultTable
 OUT_PATH = Path(__file__).resolve().parent.parent / "fixtures" / "sbix_synthetic.ttf"
 UPEM = 1000
 
-TINY_PNG = bytes.fromhex(
-    "89504e470d0a1a0a"
-    "0000000d49484452"
-    "00000001000000010806000000"
-    "1f15c489"
-    "0000000d4944415478da6300010000000500010d0a2db40000000049454e44ae426082"
-)
+def _make_png(width: int, height: int, rgba: bytes) -> bytes:
+    """Builds a minimal but spec-valid PNG (real CRCs, real zlib).
+
+    See `build_cbdt_fixture.py` for the rationale: the previous
+    inline hex string was a malformed PNG.
+    """
+    import binascii
+    import zlib
+
+    def chunk(typ: bytes, data: bytes) -> bytes:
+        out = struct.pack(">I", len(data)) + typ + data
+        crc = binascii.crc32(typ + data) & 0xFFFFFFFF
+        return out + struct.pack(">I", crc)
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+    raw = b"".join(b"\x00" + rgba[y * width * 4 : (y + 1) * width * 4] for y in range(height))
+    idat = chunk(b"IDAT", zlib.compress(raw))
+    iend = chunk(b"IEND", b"")
+    return sig + ihdr + idat + iend
+
+
+TINY_PNG = _make_png(1, 1, b"\x00\x00\x00\x00")
 
 
 def build_rect():
