@@ -450,8 +450,7 @@ const VC_HAVE_TRANSLATE_Y: u32 = 1 << 5;
 /// var_idx = (outer << 16) | inner — encoded as a two-byte uint32var when
 /// the value spans more than 7 bits (our test values do).
 fn build_component_with_var(gid: u16, outer: u16, inner: u16, tx: i16, ty: i16) -> Vec<u8> {
-    let flags =
-        (VC_TRANSFORM_HAS_VARIATION | VC_HAVE_TRANSLATE_X | VC_HAVE_TRANSLATE_Y) as u8;
+    let flags = (VC_TRANSFORM_HAS_VARIATION | VC_HAVE_TRANSLATE_X | VC_HAVE_TRANSLATE_Y) as u8;
     assert!(flags < 0x80, "flags must fit in one-byte uint32var");
     let mut rec = Vec::new();
     rec.push(flags);
@@ -527,8 +526,7 @@ fn build_synthetic_mvs(subtables: &[(Vec<u16>, Vec<Vec<u8>>)]) -> Vec<u8> {
     }
     // Region list: one region at axis 0 peak +1.
     let region_list_start = out.len() as u32;
-    out[region_off_slot..region_off_slot + 4]
-        .copy_from_slice(&region_list_start.to_be_bytes());
+    out[region_off_slot..region_off_slot + 4].copy_from_slice(&region_list_start.to_be_bytes());
     out.extend_from_slice(&1u16.to_be_bytes()); // region count
     let region_off_slot_inner = out.len();
     out.extend_from_slice(&0u32.to_be_bytes());
@@ -605,7 +603,10 @@ fn build_mvs_varc() -> Vec<u8> {
     // payload. Two bytes per entry.
     let mvs_subtables: Vec<(Vec<u16>, Vec<Vec<u8>>)> = vec![
         (vec![0], (0..5).map(|i| vec![0x00_u8, i as u8]).collect()),
-        (vec![0], (0..5).map(|i| vec![0x00_u8, (10 + i) as u8]).collect()),
+        (
+            vec![0],
+            (0..5).map(|i| vec![0x00_u8, (10 + i) as u8]).collect(),
+        ),
     ];
     let mvs = build_synthetic_mvs(&mvs_subtables);
 
@@ -918,7 +919,12 @@ fn varc_subset_prunes_mvs_and_remaps_var_idx_orphan_free() {
                 return 0;
             }
             let nexts = [read_off(b, 12), read_off(b, 16), read_off(b, 20), b.len()];
-            let next = nexts.iter().copied().filter(|x| *x > vs_off).min().unwrap_or(b.len());
+            let next = nexts
+                .iter()
+                .copied()
+                .filter(|x| *x > vs_off)
+                .min()
+                .unwrap_or(b.len());
             next - vs_off
         };
         eprintln!(
