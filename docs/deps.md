@@ -42,6 +42,32 @@ The bar:
   re-exported and behaves identically to the standalone crate; the
   switch is API-compatible for `unwrap_woff2` callers.
 
+## `miniz_oxide` (in `sigilbuzz-render`)
+
+- **Version:** `0.8.x` (matches the pin `sigilbuzz-woff` already
+  carries — they share the workspace lockfile entry).
+- **License:** MIT / Apache-2.0 / Zlib (tri-licensed).
+- **Where:** `crates/sigilbuzz-render/Cargo.toml`, unconditional
+  (the rasterizer needs PNG decode whenever a font carries CBDT or
+  sbix; we don't gate it because the dep is leaf-clean).
+- **Why:** the embedded-bitmap rasterization path (`bitmaps.rs`)
+  decodes PNG payloads stored in `CBDT` and `sbix` strikes. PNG IDAT
+  chunks are zlib streams (RFC 1950 + RFC 1951); writing an inflater
+  in-house duplicates the same effort `sigilbuzz-woff` already
+  vendored for WOFF1. The rest of the PNG decoder (chunk walk,
+  per-row defilter, color-type expansion) is hand-rolled in
+  `sigilbuzz-render`; `miniz_oxide` is used only for `inflate`.
+- **Why not `image` / `png` crates:** the `image` crate brings a
+  closure of decoders we don't need (JPEG, GIF, WebP, BMP, …); the
+  standalone `png` crate is well-engineered but pulls in
+  `miniz_oxide` itself plus its own ancillary handling we don't
+  want for embed-only payloads. By writing the PNG walk ourselves
+  we keep the crate's public surface small and reuse the same
+  inflater the WOFF crate already qualified.
+- **Transitive footprint:** `adler2` — same single-purpose adler32
+  helper already noted in the WOFF1 entry below. No new transitive
+  deps land in the workspace because of this.
+
 ## `miniz_oxide` (in `sigilbuzz-woff`)
 
 - **Version:** `0.8.x`.

@@ -38,7 +38,8 @@
 //!
 //! # Out of scope
 //!
-//! - CBDT/CBLC, EBDT/EBLC, sbix bitmap embeds.
+//! - EBDT/EBLC mono bitmap embeds (deferred — modern bitmap fonts
+//!   carry CBDT or sbix instead).
 //! - Subpixel text positioning beyond what the trapezoid rasterizer
 //!   naturally provides.
 //! - Hinting.
@@ -50,6 +51,7 @@
 extern crate alloc;
 
 mod affine;
+mod bitmaps;
 mod colrv1;
 mod error;
 mod flatten;
@@ -59,6 +61,7 @@ mod rasterizer;
 mod svg;
 
 pub use affine::Affine;
+pub use bitmaps::{decode_png, rasterize_bitmap_glyph, rescale_bilinear};
 pub use error::RenderError;
 pub use pixmap::{ColorPixmap, Pixmap};
 pub use rasterizer::Rasterizer;

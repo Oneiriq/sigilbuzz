@@ -32,6 +32,14 @@ pub enum RenderError {
     /// Underlying sigilbuzz parser returned an error while pulling
     /// tables we needed (head, COLR, CPAL).
     Parse(&'static str),
+    /// No CBDT/CBLC or sbix strike covers this glyph.
+    NoBitmap(u16),
+    /// The bitmap embed used an encoding we don't decode (e.g. sbix
+    /// `'jpg '` / `'tiff'` / `'dupe'`, or CBDT mask formats 1-9).
+    UnsupportedBitmap,
+    /// PNG payload failed structural validation (signature, IHDR,
+    /// chunk shape) or zlib inflate.
+    BadPng(&'static str),
     /// The font has no SVG document for this glyph id (either the
     /// `SVG ` table is absent or the gid sits outside every record's
     /// range).
@@ -59,6 +67,11 @@ impl fmt::Display for RenderError {
             Self::BadSize(s) => write!(f, "bad rasterization size {s}"),
             Self::BadUpem => write!(f, "font has zero or unparseable units_per_em"),
             Self::Parse(msg) => write!(f, "parser error: {msg}"),
+            Self::NoBitmap(g) => write!(f, "glyph {g} has no embedded bitmap"),
+            Self::UnsupportedBitmap => {
+                write!(f, "embedded bitmap uses an unsupported payload format")
+            }
+            Self::BadPng(msg) => write!(f, "PNG decode failed: {msg}"),
             Self::SvgNotFound(g) => write!(f, "glyph {g} has no SVG document"),
             Self::SvgGzipped => f.write_str("SVG document is gzip-compressed"),
         }

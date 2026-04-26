@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 use sigilbuzz::Face;
 
 use crate::affine::Affine;
+use crate::bitmaps;
 use crate::colrv1::rasterize_colrv1;
 use crate::error::RenderError;
 use crate::flatten::flatten;
@@ -289,6 +290,27 @@ impl Rasterizer {
         coords: &[f32],
     ) -> Result<ColorPixmap, RenderError> {
         rasterize_colrv1(face, gid, palette_index, size_pt, coords, self.tolerance)
+    }
+
+    /// Rasterizes an embedded bitmap glyph (CBDT/CBLC or sbix PNG)
+    /// into a [`ColorPixmap`]. Strike selection picks the closest
+    /// match, and the result is bilinearly rescaled when the strike
+    /// ppem doesn't equal the requested `size_pt`.
+    ///
+    /// `coords` is reserved for future variable-axis bitmap variants
+    /// and currently unused — the canonical bitmap embed tables don't
+    /// vary per axis.
+    ///
+    /// # Errors
+    /// See [`crate::rasterize_bitmap_glyph`].
+    pub fn rasterize_bitmap_glyph(
+        &self,
+        face: &Face<'_>,
+        gid: u16,
+        size_pt: f32,
+        coords: &[f32],
+    ) -> Result<ColorPixmap, RenderError> {
+        bitmaps::rasterize_bitmap_glyph(self, face, gid, size_pt, coords)
     }
 }
 
