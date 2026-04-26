@@ -259,7 +259,7 @@ fn encoding_rank(platform_id: u16, encoding_id: u16) -> Option<u32> {
 fn decode_string(platform_id: u16, encoding_id: u16, bytes: &[u8]) -> Option<String> {
     match (platform_id, encoding_id) {
         // UTF-16BE: Windows Unicode platforms and the Unicode platform.
-        (3, 1) | (3, 10) | (0, _) => decode_utf16_be(bytes),
+        (3, 1 | 10) | (0, _) => decode_utf16_be(bytes),
         (1, 0) => Some(decode_mac_roman(bytes)),
         _ => None,
     }
