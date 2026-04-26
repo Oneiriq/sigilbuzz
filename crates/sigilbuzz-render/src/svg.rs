@@ -2607,6 +2607,7 @@ fn read_num(bytes: &[u8], i: &mut usize) -> Result<f32, RenderError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     fn first_fill(doc: &SvgDoc) -> &Fill {
         &doc.fills[0]
