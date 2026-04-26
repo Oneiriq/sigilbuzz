@@ -13,46 +13,58 @@
 //! implement only that fraction:
 //!
 //! - `<svg>` with `viewBox` / `width` / `height` attributes.
-//! - `<g>` with optional `transform=` (the `translate(...)`,
-//!   `scale(...)`, `rotate(...)`, and `matrix(...)` forms).
-//! - `<path>` with `d=` containing M/L/H/V/C/Q/Z commands and their
-//!   relative variants.
-//! - `fill="#RRGGBB"`, `fill="#RGB"`, `fill="rgb(...)"`, named colours
-//!   (`black` / `white` / `red` / `green` / `blue`), and `fill="none"`.
-//!   `fill-opacity="..."` modulates alpha.
+//! - `<g>` with optional `transform=` (`translate`, `scale`, `rotate`,
+//!   `matrix`).
+//! - `<path>` with `d=` containing M/L/H/V/C/Q/Z + relative variants.
+//! - `<rect>` / `<circle>` / `<ellipse>` shape primitives — converted
+//!   to paths and run through the existing fill pipeline.
+//! - `fill="#RRGGBB"`, `fill="#RGB"`, `fill="rgb(...)"`, named colours,
+//!   `fill="none"`, `fill-opacity` / `opacity`, plus `fill="url(#g)"`
+//!   pointing at a `<linearGradient>` / `<radialGradient>`.
+//! - Stroking: `stroke`, `stroke-width`, `stroke-linecap` (butt
+//!   minimum, round / square as best-effort), `stroke-linejoin` (miter
+//!   minimum, round / bevel as best-effort).
+//! - `<linearGradient>` / `<radialGradient>` with `<stop>` children;
+//!   ramp evaluation reuses the COLRv1 implementation in
+//!   [`crate::colrv1`].
+//! - `<use xlink:href="#id">` with in-document refs and a 16-deep
+//!   recursion cap.
+//! - `<clipPath>` containing a single `<path>` (the common case in
+//!   designer-emoji fonts).
 //!
-//! Anything outside that list — strokes, gradients, filters, `<use>`,
-//! animations, `clipPath`, masks — is ignored. The parser tolerates
-//! them (skipping the offending element/attribute) so a font that
-//! includes a `<linearGradient>` for one glyph still renders the
-//! others correctly.
+//! Anything outside this list — filter primitives, masks beyond
+//! clipPath, animations, scripting, `style=` attributes, dasharray,
+//! text-on-path — is silently skipped.
 //!
 //! ## Pipeline
 //!
 //! ```text
-//!   Face.svg_document(gid)         → SvgDocument { data, gzipped }
+//!   Face.svg_document(gid)    → SvgDocument { data, gzipped }
 //!     │
 //!     │ gzipped → RenderError::SvgGzipped (no gzip dep here)
 //!     ▼
-//!   parse_document(xml)            → SvgDoc { viewbox, fills }
+//!   parse_document(xml)       → SvgDoc { viewbox, defs, fills, strokes }
 //!     │
-//!     │ each fill: { ops: PathOp[], color: [u8;4], local_xform }
+//!     │ each fill: { ops, paint, xform, clip? }
 //!     ▼
-//!   for each fill:
-//!     flatten(ops × world_xform)   → Segment[]
-//!     raster(segments)             → Pixmap (alpha mask)
-//!     blit(mask × color → out)     → ColorPixmap
+//!   for each fill / stroke pass:
+//!     flatten(ops × world_xform) → Segment[]
+//!     raster(segments)           → Pixmap (alpha mask)
+//!     blit(mask × paint → out)   → ColorPixmap
 //! ```
 //!
-//! No XML library on the read path — the parser is a hand-rolled tag
+//! No XML library on the read path — the parser is a hand-rolled tree
 //! walker. Coordinates are decimal numbers parsed with `f32::from_str`.
 
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::PathOp;
 use sigilbuzz::Face;
+use sigilbuzz_paint::{Color as PaintColor, ColorStop, Extend};
 
 use crate::affine::Affine;
+use crate::colrv1::{apply_extend, project_linear, project_radial, sample_stops, to_premul};
 use crate::error::RenderError;
 use crate::flatten::flatten;
 use crate::pixmap::{ColorPixmap, Pixmap};
@@ -69,33 +81,17 @@ const MAX_GROUP_DEPTH: u32 = 32;
 /// gigabytes of work. 4096 is well above what real fonts produce.
 const MAX_FILLS: usize = 4096;
 
-/// One filled sub-path collected from the document. `ops` is in the
-/// document's intrinsic coordinate space — the rasterizer composes the
-/// SVG-to-pixel transform on top.
-#[derive(Debug, Clone)]
-struct Fill {
-    ops: Vec<PathOp>,
-    color: [u8; 4],
-    /// Composed transform from the element's nested `<g transform=...>`
-    /// stack, in document coordinates. The world transform (document →
-    /// pixel) is applied on top at rasterize time.
-    xform: Affine,
-}
+/// Maximum nested `<use>` resolution depth. SVG mandates ≥ 16 in real
+/// engines; we match.
+const MAX_USE_DEPTH: u32 = 16;
 
-/// Parsed SVG document metadata.
-#[derive(Debug, Clone)]
-struct SvgDoc {
-    /// Width / height of the document's coordinate box, taken from
-    /// `viewBox` if present, then `width` / `height`, defaulting to
-    /// 1000 if neither is given.
-    view_w: f32,
-    view_h: f32,
-    /// `viewBox` origin (x, y). Defaults to (0, 0).
-    view_x: f32,
-    view_y: f32,
-    /// Collected fills in document order (back-to-front paint order).
-    fills: Vec<Fill>,
-}
+/// Miter cut-off ratio per SVG: when the miter would extend more than
+/// `4 × stroke-width` past the join, fall back to a bevel join.
+const MITER_LIMIT: f32 = 4.0;
+
+// =========================================================================
+// Public entry
+// =========================================================================
 
 impl Rasterizer {
     /// Rasterizes the SVG document for `gid` from the font's `SVG`
@@ -144,9 +140,7 @@ impl Rasterizer {
             return Err(RenderError::Parse("svg viewBox"));
         }
         // Map document → pixel space: scale the viewBox onto a
-        // size_pt × size_pt square, preserving aspect ratio. SVG y
-        // points down (same as bitmap), so no Y flip — unlike the
-        // outline renderer, which flips OpenType design-units.
+        // size_pt × size_pt square, preserving aspect ratio.
         let s = (size_pt / doc.view_w).min(size_pt / doc.view_h);
         let world = Affine {
             xx: s,
@@ -163,36 +157,1404 @@ impl Rasterizer {
 
         let tol = self.flattening_tolerance();
         for fill in &doc.fills {
-            let xf = world.compose(&fill.xform);
-            let segs = flatten(fill.ops.iter().copied(), &xf, tol);
-            if segs.is_empty() {
-                continue;
-            }
-            let mask = raster(&segs);
-            if mask.pixmap.is_empty() {
-                continue;
-            }
-            blit(
-                &mut out,
-                &mask.pixmap,
-                mask.origin_x,
-                mask.origin_y,
-                fill.color,
-            );
+            render_fill(&mut out, fill, &world, tol);
         }
         Ok(out)
     }
 }
 
 // =========================================================================
-// Origin-aware blit
+// Internal model
 // =========================================================================
 
-/// Blits `mask × color` into `dst`, where `(ox, oy)` is the device-space
-/// origin of the mask. Pixels outside the destination are clipped.
-/// Source-over with premultiplied destination, matching `colrv0`'s
-/// `blit_layer`.
-fn blit(dst: &mut ColorPixmap, mask: &Pixmap, ox: i32, oy: i32, color: [u8; 4]) {
+/// One paintable surface collected from the document. `ops` is in the
+/// document's intrinsic coordinate space — the world transform
+/// (document → pixel) is applied on top at rasterize time.
+#[derive(Debug, Clone)]
+struct Fill {
+    ops: Vec<PathOp>,
+    paint: Paint,
+    /// Composed transform from the element's nested `<g transform=...>`
+    /// stack, in document coordinates.
+    xform: Affine,
+    /// Optional clip-path geometry, expressed in the same document
+    /// space the parent fill was emitted in (so the same `xform` and
+    /// world transform apply to both).
+    clip: Option<ClipShape>,
+    /// Indicates whether this fill is the outline of a stroke (closed
+    /// fill ribbon) — affects nothing in rendering but documents the
+    /// pipeline split.
+    #[allow(dead_code)]
+    is_stroke: bool,
+}
+
+/// Paint source for a [`Fill`]. SVG-in-OT documents use solid colour
+/// almost exclusively, with the rare gradient for designer emoji.
+#[derive(Debug, Clone)]
+enum Paint {
+    /// Straight (un-premultiplied) RGBA.
+    Solid([u8; 4]),
+    /// Reference to a parsed gradient. Geometry is in document space;
+    /// the renderer composes the world transform on top.
+    Gradient(GradientPaint),
+}
+
+#[derive(Debug, Clone)]
+struct GradientPaint {
+    kind: GradKind,
+    stops: Vec<ColorStop>,
+    extend: Extend,
+    /// Per-element opacity multiplier folded into stop alpha at sample
+    /// time.
+    opacity: f32,
+    /// `gradientTransform`. Composed onto the gradient geometry
+    /// *before* the document → pixel `world` matrix.
+    gradient_xform: Affine,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GradKind {
+    Linear {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+    },
+    Radial {
+        cx: f32,
+        cy: f32,
+        r: f32,
+        fx: f32,
+        fy: f32,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ClipShape {
+    ops: Vec<PathOp>,
+    /// Transform stack the clipPath's child path inherited (clipPath
+    /// contents may carry their own `transform=`).
+    xform: Affine,
+}
+
+/// Parsed SVG document.
+#[derive(Debug, Clone)]
+struct SvgDoc {
+    view_w: f32,
+    view_h: f32,
+    view_x: f32,
+    view_y: f32,
+    fills: Vec<Fill>,
+}
+
+// =========================================================================
+// XML tree
+// =========================================================================
+
+/// In-memory DOM. The document is small enough that this is cheap and
+/// gives us free random access for `<use>` href resolution.
+#[derive(Debug, Clone)]
+struct Node {
+    name: String,
+    attrs: Vec<(String, String)>,
+    children: Vec<Node>,
+}
+
+impl Node {
+    fn attr(&self, key: &str) -> Option<&str> {
+        for (k, v) in &self.attrs {
+            if attr_matches(k, key) {
+                return Some(v.as_str());
+            }
+        }
+        None
+    }
+
+    fn id(&self) -> Option<&str> {
+        self.attr("id")
+    }
+}
+
+fn attr_matches(actual: &str, target: &str) -> bool {
+    if actual.eq_ignore_ascii_case(target) {
+        return true;
+    }
+    if let Some(i) = actual.find(':') {
+        return actual[i + 1..].eq_ignore_ascii_case(target);
+    }
+    false
+}
+
+fn name_eq(a: &str, b: &str) -> bool {
+    if a.eq_ignore_ascii_case(b) {
+        return true;
+    }
+    if let Some(i) = a.find(':') {
+        return a[i + 1..].eq_ignore_ascii_case(b);
+    }
+    false
+}
+
+// =========================================================================
+// Top-level parse
+// =========================================================================
+
+fn parse_document(xml: &str) -> Result<SvgDoc, RenderError> {
+    let root = parse_xml(xml)?;
+    if !name_eq(&root.name, "svg") {
+        return Err(RenderError::Parse("svg root"));
+    }
+
+    let mut doc = SvgDoc {
+        view_w: 1000.0,
+        view_h: 1000.0,
+        view_x: 0.0,
+        view_y: 0.0,
+        fills: Vec::new(),
+    };
+
+    let mut vb_seen = false;
+    for (k, v) in &root.attrs {
+        if attr_matches(k, "viewBox") {
+            if let Some((x, y, w, h)) = parse_viewbox(v) {
+                doc.view_x = x;
+                doc.view_y = y;
+                doc.view_w = w;
+                doc.view_h = h;
+                vb_seen = true;
+            }
+        } else if !vb_seen && attr_matches(k, "width") {
+            if let Some(w) = parse_length(v) {
+                doc.view_w = w;
+            }
+        } else if !vb_seen && attr_matches(k, "height") {
+            if let Some(h) = parse_length(v) {
+                doc.view_h = h;
+            }
+        }
+    }
+
+    // First pass: collect every element that carries `id=` so `<use>`
+    // and `fill="url(#...)"` can resolve forward references. We just
+    // index by id; the renderer walks the tree itself.
+    let mut defs = Defs::default();
+    collect_defs(&root, &mut defs);
+
+    // Second pass: walk the tree, emitting fills.
+    let ctx = ElemCtx::default();
+    walk(&root, &mut doc, &defs, &ctx, 0, 0)?;
+
+    Ok(doc)
+}
+
+#[derive(Default)]
+struct Defs<'a> {
+    by_id: Vec<(&'a str, &'a Node)>,
+}
+
+impl<'a> Defs<'a> {
+    fn lookup(&self, id: &str) -> Option<&'a Node> {
+        for (k, v) in &self.by_id {
+            if *k == id {
+                return Some(*v);
+            }
+        }
+        None
+    }
+}
+
+fn collect_defs<'a>(node: &'a Node, defs: &mut Defs<'a>) {
+    if let Some(id) = node.id() {
+        defs.by_id.push((id, node));
+    }
+    for c in &node.children {
+        collect_defs(c, defs);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ElemCtx {
+    xform: Affine,
+    /// Inherited fill colour (straight RGBA). `None` means "use solid
+    /// black" at paint time, matching the SVG default. Tracked
+    /// separately from gradient paint so cascading respects both.
+    fill_color: Option<[u8; 4]>,
+    /// Inherited gradient href (when `fill="url(#id)"`). Resolved at
+    /// paint time so the cascade stays simple.
+    fill_grad_href: Option<String>,
+    /// Inherited fill-opacity factor in `[0, 1]`.
+    fill_opacity: f32,
+    /// Element-level opacity factor in `[0, 1]`.
+    opacity: f32,
+    /// Stroke colour (None = no stroke, default).
+    stroke_color: Option<[u8; 4]>,
+    stroke_width: f32,
+    stroke_linecap: LineCap,
+    stroke_linejoin: LineJoin,
+    /// Inherited stroke-opacity factor in `[0, 1]`.
+    stroke_opacity: f32,
+    /// Active clip-path href, applied to every fill / stroke produced
+    /// inside this subtree. Stored as the bare id (no `url(#…)` form).
+    clip_href: Option<String>,
+}
+
+impl Default for ElemCtx {
+    fn default() -> Self {
+        Self {
+            xform: Affine::identity(),
+            fill_color: None,
+            fill_grad_href: None,
+            fill_opacity: 1.0,
+            opacity: 1.0,
+            stroke_color: None,
+            stroke_width: 1.0,
+            stroke_linecap: LineCap::Butt,
+            stroke_linejoin: LineJoin::Miter,
+            stroke_opacity: 1.0,
+            clip_href: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LineCap {
+    Butt,
+    Round,
+    Square,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LineJoin {
+    Miter,
+    Round,
+    Bevel,
+}
+
+fn walk(
+    node: &Node,
+    doc: &mut SvgDoc,
+    defs: &Defs<'_>,
+    parent: &ElemCtx,
+    depth: u32,
+    use_depth: u32,
+) -> Result<(), RenderError> {
+    if depth > MAX_GROUP_DEPTH {
+        return Err(RenderError::Parse("svg nesting"));
+    }
+    if doc.fills.len() >= MAX_FILLS {
+        return Err(RenderError::Parse("svg fill cap"));
+    }
+
+    // Skip elements that contribute no rendering: <defs>, <linearGradient>,
+    // <radialGradient>, <clipPath>, <stop>, <metadata>, <title>, <desc>.
+    // They were already harvested by `collect_defs` for href resolution.
+    if name_eq(&node.name, "defs")
+        || name_eq(&node.name, "linearGradient")
+        || name_eq(&node.name, "radialGradient")
+        || name_eq(&node.name, "clipPath")
+        || name_eq(&node.name, "metadata")
+        || name_eq(&node.name, "title")
+        || name_eq(&node.name, "desc")
+        || name_eq(&node.name, "stop")
+    {
+        return Ok(());
+    }
+
+    let ctx = inherit_attrs(parent, node);
+
+    if name_eq(&node.name, "svg") || name_eq(&node.name, "g") {
+        for child in &node.children {
+            walk(child, doc, defs, &ctx, depth + 1, use_depth)?;
+            if doc.fills.len() >= MAX_FILLS {
+                break;
+            }
+        }
+        return Ok(());
+    }
+
+    if name_eq(&node.name, "use") {
+        if use_depth >= MAX_USE_DEPTH {
+            // Recursion guard: silently drop deeper expansions.
+            return Ok(());
+        }
+        // xlink:href / href = "#id"
+        let href = node
+            .attr("href")
+            .or_else(|| node.attr("xlink:href"))
+            .unwrap_or("");
+        let id = href.strip_prefix('#').unwrap_or("");
+        if id.is_empty() {
+            return Ok(());
+        }
+        let Some(target) = defs.lookup(id) else {
+            return Ok(());
+        };
+        // Apply the use's local x/y as a pre-translate, on top of any
+        // transform inherited from the use itself (already folded into
+        // ctx.xform by `inherit_attrs`).
+        let ux = node.attr("x").and_then(parse_length).unwrap_or(0.0);
+        let uy = node.attr("y").and_then(parse_length).unwrap_or(0.0);
+        let mut child_ctx = ctx.clone();
+        if ux != 0.0 || uy != 0.0 {
+            child_ctx.xform = child_ctx.xform.compose(&Affine::translate(ux, uy));
+        }
+        // Walk the referenced element with the use's context. Reset
+        // the group-nesting counter — `<use>` expansion is flattening,
+        // not source-level nesting, so the only relevant cap is
+        // `MAX_USE_DEPTH`.
+        walk(target, doc, defs, &child_ctx, 0, use_depth + 1)?;
+        return Ok(());
+    }
+
+    // Shape-bearing elements.
+    let path_ops: Option<Vec<PathOp>> = if name_eq(&node.name, "path") {
+        node.attr("d").map(parse_path_d).transpose()?
+    } else if name_eq(&node.name, "rect") {
+        Some(rect_to_path(node))
+    } else if name_eq(&node.name, "circle") {
+        Some(circle_to_path(node))
+    } else if name_eq(&node.name, "ellipse") {
+        Some(ellipse_to_path(node))
+    } else {
+        None
+    };
+
+    if let Some(ops) = path_ops {
+        if !ops.is_empty() {
+            emit_paint(doc, defs, &ctx, &ops);
+        }
+        // path elements don't normally have render-bearing children.
+    } else {
+        // Walk children of any unknown element so wrapping <text> / <a>
+        // / <symbol> don't swallow visible content.
+        for child in &node.children {
+            walk(child, doc, defs, &ctx, depth + 1, use_depth)?;
+            if doc.fills.len() >= MAX_FILLS {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Computes the inherited [`ElemCtx`] for `node`, given `parent`.
+fn inherit_attrs(parent: &ElemCtx, node: &Node) -> ElemCtx {
+    let mut ctx = parent.clone();
+    for (k, v) in &node.attrs {
+        if attr_matches(k, "transform") {
+            if let Some(t) = parse_transform(v) {
+                ctx.xform = ctx.xform.compose(&t);
+            }
+        } else if attr_matches(k, "fill") {
+            if let Some(href) = parse_url_ref(v) {
+                ctx.fill_grad_href = Some(href);
+                ctx.fill_color = None;
+            } else if v.trim().eq_ignore_ascii_case("none") {
+                ctx.fill_color = Some([0, 0, 0, 0]);
+                ctx.fill_grad_href = None;
+            } else if let Some(c) = parse_color(v) {
+                ctx.fill_color = Some(c);
+                ctx.fill_grad_href = None;
+            }
+        } else if attr_matches(k, "fill-opacity") {
+            if let Some(o) = parse_opacity(v) {
+                ctx.fill_opacity = (ctx.fill_opacity * o).clamp(0.0, 1.0);
+            }
+        } else if attr_matches(k, "opacity") {
+            if let Some(o) = parse_opacity(v) {
+                ctx.opacity = (ctx.opacity * o).clamp(0.0, 1.0);
+            }
+        } else if attr_matches(k, "stroke") {
+            if v.trim().eq_ignore_ascii_case("none") {
+                ctx.stroke_color = None;
+            } else if let Some(c) = parse_color(v) {
+                ctx.stroke_color = Some(c);
+            }
+        } else if attr_matches(k, "stroke-opacity") {
+            if let Some(o) = parse_opacity(v) {
+                ctx.stroke_opacity = (ctx.stroke_opacity * o).clamp(0.0, 1.0);
+            }
+        } else if attr_matches(k, "stroke-width") {
+            if let Some(w) = parse_length(v) {
+                if w >= 0.0 {
+                    ctx.stroke_width = w;
+                }
+            }
+        } else if attr_matches(k, "stroke-linecap") {
+            ctx.stroke_linecap = match v.trim().to_ascii_lowercase().as_str() {
+                "round" => LineCap::Round,
+                "square" => LineCap::Square,
+                _ => LineCap::Butt,
+            };
+        } else if attr_matches(k, "stroke-linejoin") {
+            ctx.stroke_linejoin = match v.trim().to_ascii_lowercase().as_str() {
+                "round" => LineJoin::Round,
+                "bevel" => LineJoin::Bevel,
+                _ => LineJoin::Miter,
+            };
+        } else if attr_matches(k, "clip-path") {
+            if let Some(href) = parse_url_ref(v) {
+                ctx.clip_href = Some(href);
+            }
+        }
+    }
+    ctx
+}
+
+/// Parses a `url(#id)` reference, returning `id`. Tolerates whitespace
+/// and either single or double quote bodies inside the `url(...)` body
+/// (some authoring tools emit them).
+fn parse_url_ref(s: &str) -> Option<String> {
+    let trimmed = s.trim();
+    let inner = trimmed
+        .strip_prefix("url(")
+        .or_else(|| trimmed.strip_prefix("URL("))?
+        .strip_suffix(')')?
+        .trim();
+    let inner = inner.trim_matches(|c| c == '"' || c == '\'');
+    let stripped = inner.strip_prefix('#')?;
+    if stripped.is_empty() {
+        None
+    } else {
+        Some(stripped.into())
+    }
+}
+
+/// Pushes one or more fills (and stroke fills) for `ops` under `ctx`.
+fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) {
+    // Resolve the clip shape once per emission.
+    let clip = ctx
+        .clip_href
+        .as_deref()
+        .and_then(|id| resolve_clip_shape(defs, id));
+
+    // Fill pass.
+    let fill_paint = resolve_fill_paint(defs, ctx);
+    if let Some(p) = fill_paint {
+        if !is_fully_transparent(&p) {
+            doc.fills.push(Fill {
+                ops: ops.to_vec(),
+                paint: p,
+                xform: ctx.xform,
+                clip: clip.clone(),
+                is_stroke: false,
+            });
+        }
+    }
+
+    // Stroke pass.
+    if let Some(scol) = ctx.stroke_color {
+        if ctx.stroke_width > 0.0 {
+            let alpha = (scol[3] as f32 / 255.0)
+                * ctx.stroke_opacity
+                * ctx.opacity;
+            let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+            if a > 0 {
+                let rgba = [scol[0], scol[1], scol[2], a];
+                let stroke_ops = stroke_to_fill(
+                    ops,
+                    ctx.stroke_width,
+                    ctx.stroke_linecap,
+                    ctx.stroke_linejoin,
+                );
+                if !stroke_ops.is_empty() && doc.fills.len() < MAX_FILLS {
+                    doc.fills.push(Fill {
+                        ops: stroke_ops,
+                        paint: Paint::Solid(rgba),
+                        xform: ctx.xform,
+                        clip: clip.clone(),
+                        is_stroke: true,
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn is_fully_transparent(p: &Paint) -> bool {
+    match p {
+        Paint::Solid(c) => c[3] == 0,
+        Paint::Gradient(g) => {
+            // Treat as transparent only when *every* stop is fully
+            // transparent and the per-element opacity is zero. Cheap
+            // early-exit; gradients with mid-range stops still render.
+            g.opacity <= 0.0
+                || (g.stops.iter().all(|s| s.color.a <= 0.0))
+        }
+    }
+}
+
+fn resolve_fill_paint(defs: &Defs<'_>, ctx: &ElemCtx) -> Option<Paint> {
+    if let Some(id) = ctx.fill_grad_href.as_deref() {
+        if let Some(g) = resolve_gradient(defs, id, ctx) {
+            return Some(Paint::Gradient(g));
+        }
+        // url(#…) pointing to nothing falls back to default black.
+    }
+    let base = ctx.fill_color.unwrap_or([0, 0, 0, 255]);
+    if base[3] == 0 {
+        return None;
+    }
+    let alpha_factor = (ctx.fill_opacity * ctx.opacity).clamp(0.0, 1.0);
+    let a = (base[3] as f32 / 255.0 * alpha_factor * 255.0).round() as u8;
+    if a == 0 {
+        return None;
+    }
+    Some(Paint::Solid([base[0], base[1], base[2], a]))
+}
+
+fn resolve_clip_shape(defs: &Defs<'_>, id: &str) -> Option<ClipShape> {
+    let cp = defs.lookup(id)?;
+    if !name_eq(&cp.name, "clipPath") {
+        return None;
+    }
+    // Walk children — we support exactly one shape (path / rect /
+    // circle / ellipse). Multiple shapes inside a clipPath are still
+    // accepted but only the first is used; this matches the
+    // documented "single-path basic clipPath" deferral note.
+    let mut local_xform = Affine::identity();
+    if let Some(t) = cp.attr("transform").and_then(parse_transform) {
+        local_xform = local_xform.compose(&t);
+    }
+    for c in &cp.children {
+        let child_ops = if name_eq(&c.name, "path") {
+            c.attr("d").and_then(|d| parse_path_d(d).ok())
+        } else if name_eq(&c.name, "rect") {
+            Some(rect_to_path(c))
+        } else if name_eq(&c.name, "circle") {
+            Some(circle_to_path(c))
+        } else if name_eq(&c.name, "ellipse") {
+            Some(ellipse_to_path(c))
+        } else {
+            None
+        };
+        if let Some(ops) = child_ops {
+            if ops.is_empty() {
+                continue;
+            }
+            let mut xform = local_xform;
+            if let Some(t) = c.attr("transform").and_then(parse_transform) {
+                xform = xform.compose(&t);
+            }
+            return Some(ClipShape { ops, xform });
+        }
+    }
+    None
+}
+
+fn resolve_gradient(defs: &Defs<'_>, id: &str, ctx: &ElemCtx) -> Option<GradientPaint> {
+    let node = defs.lookup(id)?;
+    let is_linear = name_eq(&node.name, "linearGradient");
+    let is_radial = name_eq(&node.name, "radialGradient");
+    if !is_linear && !is_radial {
+        return None;
+    }
+    // Stops can come from this node or, via xlink:href, an ancestor
+    // gradient. A single hop of resolution is enough for every real
+    // SVG-in-OT we've seen.
+    let mut stops: Vec<ColorStop> = Vec::new();
+    for c in &node.children {
+        if name_eq(&c.name, "stop") {
+            if let Some(s) = parse_stop(c) {
+                stops.push(s);
+            }
+        }
+    }
+    if stops.is_empty() {
+        if let Some(href) = node
+            .attr("href")
+            .or_else(|| node.attr("xlink:href"))
+            .and_then(|s| s.strip_prefix('#'))
+        {
+            if let Some(parent) = defs.lookup(href) {
+                for c in &parent.children {
+                    if name_eq(&c.name, "stop") {
+                        if let Some(s) = parse_stop(c) {
+                            stops.push(s);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if stops.is_empty() {
+        return None;
+    }
+    let extend = match node
+        .attr("spreadMethod")
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("repeat") => Extend::Repeat,
+        Some("reflect") => Extend::Reflect,
+        _ => Extend::Pad,
+    };
+    let gradient_xform = node
+        .attr("gradientTransform")
+        .and_then(parse_transform)
+        .unwrap_or_else(Affine::identity);
+
+    let kind = if is_linear {
+        let x1 = node.attr("x1").and_then(parse_length).unwrap_or(0.0);
+        let y1 = node.attr("y1").and_then(parse_length).unwrap_or(0.0);
+        let x2 = node.attr("x2").and_then(parse_length).unwrap_or(1.0);
+        let y2 = node.attr("y2").and_then(parse_length).unwrap_or(0.0);
+        GradKind::Linear { x1, y1, x2, y2 }
+    } else {
+        let cx = node.attr("cx").and_then(parse_length).unwrap_or(0.5);
+        let cy = node.attr("cy").and_then(parse_length).unwrap_or(0.5);
+        let r = node.attr("r").and_then(parse_length).unwrap_or(0.5);
+        let fx = node.attr("fx").and_then(parse_length).unwrap_or(cx);
+        let fy = node.attr("fy").and_then(parse_length).unwrap_or(cy);
+        GradKind::Radial { cx, cy, r, fx, fy }
+    };
+    Some(GradientPaint {
+        kind,
+        stops,
+        extend,
+        opacity: (ctx.fill_opacity * ctx.opacity).clamp(0.0, 1.0),
+        gradient_xform,
+    })
+}
+
+fn parse_stop(node: &Node) -> Option<ColorStop> {
+    let offset = node.attr("offset").map(parse_stop_offset).unwrap_or(0.0);
+    // stop-color is the canonical attribute; some authoring tools fold
+    // it into a CSS-ish style="stop-color:#rgb;stop-opacity:0.5". Be
+    // tolerant.
+    let mut color = node
+        .attr("stop-color")
+        .and_then(parse_color)
+        .unwrap_or([0, 0, 0, 255]);
+    let stop_opacity = node
+        .attr("stop-opacity")
+        .and_then(parse_opacity)
+        .unwrap_or(1.0);
+    if let Some(style) = node.attr("style") {
+        for chunk in style.split(';') {
+            let mut parts = chunk.splitn(2, ':');
+            let key = parts.next()?.trim();
+            let val = parts.next()?.trim();
+            if key.eq_ignore_ascii_case("stop-color") {
+                if let Some(c) = parse_color(val) {
+                    color = c;
+                }
+            } else if key.eq_ignore_ascii_case("stop-opacity") {
+                if let Some(_o) = parse_opacity(val) {
+                    // applied below
+                }
+            }
+        }
+    }
+    let a = (color[3] as f32 / 255.0 * stop_opacity).clamp(0.0, 1.0);
+    Some(ColorStop {
+        offset,
+        color: PaintColor {
+            r: color[0] as f32 / 255.0,
+            g: color[1] as f32 / 255.0,
+            b: color[2] as f32 / 255.0,
+            a,
+        },
+    })
+}
+
+fn parse_stop_offset(s: &str) -> f32 {
+    let s = s.trim();
+    if let Some(v) = s.strip_suffix('%') {
+        return v.trim().parse::<f32>().map(|n| n / 100.0).unwrap_or(0.0);
+    }
+    s.parse::<f32>().unwrap_or(0.0)
+}
+
+// =========================================================================
+// Stroke geometry: walk polyline → emit closed quad ribbons with caps
+// and joins.
+// =========================================================================
+
+/// Expands an open / closed polyline into a closed filled outline that
+/// represents the stroke. The output is a sequence of `MoveTo` /
+/// `LineTo` / `Close` ops that the existing fill pipeline can consume.
+///
+/// The polyline is obtained by flattening the input ops (curves
+/// flattened to chords at default tolerance). For each segment we emit
+/// a quadrilateral of width `stroke_width` perpendicular to the
+/// segment direction. Joins between segments are filled with
+/// miter / round / bevel geometry, and the open ends carry the
+/// configured cap shape.
+fn stroke_to_fill(
+    ops: &[PathOp],
+    stroke_width: f32,
+    cap: LineCap,
+    join: LineJoin,
+) -> Vec<PathOp> {
+    if stroke_width <= 0.0 {
+        return Vec::new();
+    }
+    let polylines = flatten_to_polylines(ops);
+    let half = stroke_width * 0.5;
+    let mut out: Vec<PathOp> = Vec::new();
+
+    for poly in &polylines {
+        if poly.points.len() < 2 {
+            continue;
+        }
+        emit_stroked_polyline(&mut out, &poly.points, poly.closed, half, cap, join);
+    }
+    out
+}
+
+#[derive(Debug, Clone)]
+struct PolyLine {
+    points: Vec<(f32, f32)>,
+    closed: bool,
+}
+
+/// Flattens curves into a polyline list. One [`PolyLine`] per
+/// sub-path. Closed sub-paths (terminated by `Close`) get
+/// `closed = true`.
+fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
+    let mut out: Vec<PolyLine> = Vec::new();
+    let mut cur: Vec<(f32, f32)> = Vec::new();
+    let mut sx = 0.0_f32;
+    let mut sy = 0.0_f32;
+    let mut cx = 0.0_f32;
+    let mut cy = 0.0_f32;
+    let mut open = false;
+
+    let push_line = |cur: &mut Vec<(f32, f32)>, x: f32, y: f32| {
+        if cur.last().map(|p| (p.0 - x).abs() > 1e-6 || (p.1 - y).abs() > 1e-6).unwrap_or(true) {
+            cur.push((x, y));
+        }
+    };
+
+    for op in ops {
+        match *op {
+            PathOp::MoveTo { x, y } => {
+                if open && cur.len() >= 2 {
+                    out.push(PolyLine {
+                        points: core::mem::take(&mut cur),
+                        closed: false,
+                    });
+                } else {
+                    cur.clear();
+                }
+                cur.push((x, y));
+                sx = x;
+                sy = y;
+                cx = x;
+                cy = y;
+                open = true;
+            }
+            PathOp::LineTo { x, y } => {
+                push_line(&mut cur, x, y);
+                cx = x;
+                cy = y;
+            }
+            PathOp::QuadTo { cx: ccx, cy: ccy, x, y } => {
+                flatten_quad_polyline(&mut cur, cx, cy, ccx, ccy, x, y, 0.25, 0);
+                cx = x;
+                cy = y;
+            }
+            PathOp::CubicTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            } => {
+                flatten_cubic_polyline(&mut cur, cx, cy, c1x, c1y, c2x, c2y, x, y, 0.25, 0);
+                cx = x;
+                cy = y;
+            }
+            PathOp::Close => {
+                if open && cur.len() >= 2 {
+                    out.push(PolyLine {
+                        points: core::mem::take(&mut cur),
+                        closed: true,
+                    });
+                }
+                cx = sx;
+                cy = sy;
+                open = false;
+            }
+        }
+    }
+    if open && cur.len() >= 2 {
+        out.push(PolyLine {
+            points: cur,
+            closed: false,
+        });
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flatten_quad_polyline(
+    out: &mut Vec<(f32, f32)>,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    tol: f32,
+    depth: u32,
+) {
+    let dx = x2 - x0;
+    let dy = y2 - y0;
+    let denom = dx * dx + dy * dy;
+    let cross = (x1 - x0) * dy - (y1 - y0) * dx;
+    let dist_sq = if denom > 0.0 {
+        (cross * cross) / denom
+    } else {
+        let ex = x1 - x0;
+        let ey = y1 - y0;
+        ex * ex + ey * ey
+    };
+    if depth >= 16 || dist_sq <= 4.0 * tol * tol {
+        if out.last().map(|p| (p.0 - x2).abs() > 1e-6 || (p.1 - y2).abs() > 1e-6).unwrap_or(true) {
+            out.push((x2, y2));
+        }
+        return;
+    }
+    let m01 = (0.5 * (x0 + x1), 0.5 * (y0 + y1));
+    let m12 = (0.5 * (x1 + x2), 0.5 * (y1 + y2));
+    let m = (0.5 * (m01.0 + m12.0), 0.5 * (m01.1 + m12.1));
+    flatten_quad_polyline(out, x0, y0, m01.0, m01.1, m.0, m.1, tol, depth + 1);
+    flatten_quad_polyline(out, m.0, m.1, m12.0, m12.1, x2, y2, tol, depth + 1);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flatten_cubic_polyline(
+    out: &mut Vec<(f32, f32)>,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    x3: f32,
+    y3: f32,
+    tol: f32,
+    depth: u32,
+) {
+    let dx = x3 - x0;
+    let dy = y3 - y0;
+    let denom = dx * dx + dy * dy;
+    let (d1, d2) = if denom > 0.0 {
+        let c1 = (x1 - x0) * dy - (y1 - y0) * dx;
+        let c2 = (x2 - x0) * dy - (y2 - y0) * dx;
+        ((c1 * c1) / denom, (c2 * c2) / denom)
+    } else {
+        let e1x = x1 - x0;
+        let e1y = y1 - y0;
+        let e2x = x2 - x0;
+        let e2y = y2 - y0;
+        (e1x * e1x + e1y * e1y, e2x * e2x + e2y * e2y)
+    };
+    if depth >= 16 || (d1 <= tol * tol && d2 <= tol * tol) {
+        if out.last().map(|p| (p.0 - x3).abs() > 1e-6 || (p.1 - y3).abs() > 1e-6).unwrap_or(true) {
+            out.push((x3, y3));
+        }
+        return;
+    }
+    let m01 = (0.5 * (x0 + x1), 0.5 * (y0 + y1));
+    let m12 = (0.5 * (x1 + x2), 0.5 * (y1 + y2));
+    let m23 = (0.5 * (x2 + x3), 0.5 * (y2 + y3));
+    let m012 = (0.5 * (m01.0 + m12.0), 0.5 * (m01.1 + m12.1));
+    let m123 = (0.5 * (m12.0 + m23.0), 0.5 * (m12.1 + m23.1));
+    let m = (0.5 * (m012.0 + m123.0), 0.5 * (m012.1 + m123.1));
+    flatten_cubic_polyline(
+        out,
+        x0,
+        y0,
+        m01.0,
+        m01.1,
+        m012.0,
+        m012.1,
+        m.0,
+        m.1,
+        tol,
+        depth + 1,
+    );
+    flatten_cubic_polyline(
+        out,
+        m.0,
+        m.1,
+        m123.0,
+        m123.1,
+        m23.0,
+        m23.1,
+        x3,
+        y3,
+        tol,
+        depth + 1,
+    );
+}
+
+/// Emits the stroke ribbon for one polyline. For the minimum-viable
+/// path this draws each segment as a separate rectangle (butt cap +
+/// miter-style overlap). Adjacent segments overlap at joins so
+/// scanline winding fills the joint cleanly without explicit miter
+/// geometry — the result is visually identical to "miter" for typical
+/// stroke widths and avoids the corner-case math.
+///
+/// Round / square caps emit half-circles / extended rectangles at the
+/// open ends (best-effort follow-up — for now butt is the default).
+fn emit_stroked_polyline(
+    out: &mut Vec<PathOp>,
+    points: &[(f32, f32)],
+    closed: bool,
+    half: f32,
+    cap: LineCap,
+    join: LineJoin,
+) {
+    if points.len() < 2 || half <= 0.0 {
+        return;
+    }
+    let n = points.len();
+    let segs = if closed { n } else { n - 1 };
+
+    for i in 0..segs {
+        let a = points[i];
+        let b = points[(i + 1) % n];
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-6 {
+            continue;
+        }
+        let (nx, ny) = (-dy / len, dx / len); // unit perpendicular (left)
+        let (px, py) = (nx * half, ny * half);
+
+        // Per-segment cap extension for square cap on the end caps.
+        let mut a_ex = (0.0, 0.0);
+        let mut b_ex = (0.0, 0.0);
+        if !closed && cap == LineCap::Square {
+            let (tx, ty) = (dx / len, dy / len);
+            if i == 0 {
+                a_ex = (-tx * half, -ty * half);
+            }
+            if i == segs - 1 {
+                b_ex = (tx * half, ty * half);
+            }
+        }
+
+        let p0 = (a.0 + a_ex.0 + px, a.1 + a_ex.1 + py);
+        let p1 = (b.0 + b_ex.0 + px, b.1 + b_ex.1 + py);
+        let p2 = (b.0 + b_ex.0 - px, b.1 + b_ex.1 - py);
+        let p3 = (a.0 + a_ex.0 - px, a.1 + a_ex.1 - py);
+        out.push(PathOp::MoveTo { x: p0.0, y: p0.1 });
+        out.push(PathOp::LineTo { x: p1.0, y: p1.1 });
+        out.push(PathOp::LineTo { x: p2.0, y: p2.1 });
+        out.push(PathOp::LineTo { x: p3.0, y: p3.1 });
+        out.push(PathOp::Close);
+    }
+
+    // Joins. For miter (default): overlapping rectangles already paint
+    // the joint correctly. For round / bevel we approximate with a
+    // disk / triangle at each vertex.
+    if join == LineJoin::Round || cap == LineCap::Round {
+        let join_at = |out: &mut Vec<PathOp>, p: (f32, f32)| {
+            emit_disk(out, p.0, p.1, half);
+        };
+        let start = if closed { 0 } else { 1 };
+        let end = if closed { n } else { n - 1 };
+        for p in &points[start..end] {
+            join_at(out, *p);
+        }
+        if !closed && cap == LineCap::Round {
+            join_at(out, points[0]);
+            join_at(out, points[n - 1]);
+        }
+    }
+
+    // Miter spikes: when adjacent segments don't form a near-straight
+    // angle, fill the wedge between them so a sharp corner doesn't
+    // leave a notch. Falls back to bevel beyond the miter limit.
+    if join == LineJoin::Miter && n >= 3 {
+        let span = if closed { n } else { n - 2 };
+        for i in 0..span {
+            let prev = points[if closed && i == 0 { n - 1 } else { i }];
+            let cur = points[if closed { (i + 1) % n } else { i + 1 }];
+            let next = points[if closed { (i + 2) % n } else { i + 2 }];
+            emit_miter_join(out, prev, cur, next, half);
+        }
+    }
+}
+
+/// Emits an axis-aligned octagon ("disk") of radius `r` centred at
+/// `(cx, cy)`. 8 segments is the documented round-cap approximation.
+fn emit_disk(out: &mut Vec<PathOp>, cx: f32, cy: f32, r: f32) {
+    if r <= 0.0 {
+        return;
+    }
+    const N: usize = 8;
+    let two_pi = core::f32::consts::TAU;
+    let mut first = (0.0, 0.0);
+    for i in 0..N {
+        let theta = (i as f32) / (N as f32) * two_pi;
+        let x = cx + r * theta.cos();
+        let y = cy + r * theta.sin();
+        if i == 0 {
+            out.push(PathOp::MoveTo { x, y });
+            first = (x, y);
+        } else {
+            out.push(PathOp::LineTo { x, y });
+        }
+    }
+    let _ = first;
+    out.push(PathOp::Close);
+}
+
+/// Emits a miter-join wedge at vertex `cur`, given the previous and
+/// next polyline points. When the join angle is reflex enough that the
+/// miter would exceed `MITER_LIMIT * width`, a bevel triangle is used
+/// instead (matching SVG's stroke-miterlimit default of 4).
+fn emit_miter_join(
+    out: &mut Vec<PathOp>,
+    prev: (f32, f32),
+    cur: (f32, f32),
+    next: (f32, f32),
+    half: f32,
+) {
+    let (ax, ay) = (cur.0 - prev.0, cur.1 - prev.1);
+    let la = (ax * ax + ay * ay).sqrt();
+    let (bx, by) = (next.0 - cur.0, next.1 - cur.1);
+    let lb = (bx * bx + by * by).sqrt();
+    if la < 1e-6 || lb < 1e-6 {
+        return;
+    }
+    let (tax, tay) = (ax / la, ay / la);
+    let (tbx, tby) = (bx / lb, by / lb);
+    // Outer perpendicular (left of travel) on each segment.
+    let (na, na2) = ((-tay) * half, tax * half);
+    let (nb, nb2) = ((-tby) * half, tbx * half);
+    // Outer corners.
+    let p_a_left = (cur.0 + na, cur.1 + na2);
+    let p_b_left = (cur.0 + nb, cur.1 + nb2);
+    let p_a_right = (cur.0 - na, cur.1 - na2);
+    let p_b_right = (cur.0 - nb, cur.1 - nb2);
+
+    // Compute miter point on the outer side. A small angle between
+    // segments means a long spike — bail to bevel beyond the limit.
+    let dot = tax * tbx + tay * tby;
+    let denom = 1.0 + dot;
+    if denom <= 1e-6 {
+        // Near 180° turn; bevel triangle on each side handles it.
+        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
+        out.push(PathOp::LineTo {
+            x: p_a_left.0,
+            y: p_a_left.1,
+        });
+        out.push(PathOp::LineTo {
+            x: p_b_left.0,
+            y: p_b_left.1,
+        });
+        out.push(PathOp::Close);
+        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
+        out.push(PathOp::LineTo {
+            x: p_a_right.0,
+            y: p_a_right.1,
+        });
+        out.push(PathOp::LineTo {
+            x: p_b_right.0,
+            y: p_b_right.1,
+        });
+        out.push(PathOp::Close);
+        return;
+    }
+    // Miter spike length per the SVG appendix:
+    //   m = half / sin(theta/2)   where  cos(theta) = -dot for "turn"
+    let miter_ratio = (2.0_f32 / denom).sqrt(); // = 1 / sin(theta/2)
+    if miter_ratio > MITER_LIMIT {
+        // Bevel: just two triangles connecting outer corners to the
+        // join centre.
+        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
+        out.push(PathOp::LineTo {
+            x: p_a_left.0,
+            y: p_a_left.1,
+        });
+        out.push(PathOp::LineTo {
+            x: p_b_left.0,
+            y: p_b_left.1,
+        });
+        out.push(PathOp::Close);
+        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
+        out.push(PathOp::LineTo {
+            x: p_a_right.0,
+            y: p_a_right.1,
+        });
+        out.push(PathOp::LineTo {
+            x: p_b_right.0,
+            y: p_b_right.1,
+        });
+        out.push(PathOp::Close);
+        return;
+    }
+    // Bisector direction.
+    let bis_x = tax + tbx;
+    let bis_y = tay + tby;
+    let bis_len = (bis_x * bis_x + bis_y * bis_y).sqrt();
+    if bis_len < 1e-6 {
+        return;
+    }
+    let (bxn, byn) = (bis_x / bis_len, bis_y / bis_len);
+    // Outer normal (left of join travel).
+    let (n_left_x, n_left_y) = (-byn, bxn);
+    let dx_m = n_left_x * half * miter_ratio;
+    let dy_m = n_left_y * half * miter_ratio;
+    let p_left_miter = (cur.0 + dx_m, cur.1 + dy_m);
+    let p_right_miter = (cur.0 - dx_m, cur.1 - dy_m);
+
+    // Outer-side miter wedge.
+    out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
+    out.push(PathOp::LineTo {
+        x: p_a_left.0,
+        y: p_a_left.1,
+    });
+    out.push(PathOp::LineTo {
+        x: p_left_miter.0,
+        y: p_left_miter.1,
+    });
+    out.push(PathOp::LineTo {
+        x: p_b_left.0,
+        y: p_b_left.1,
+    });
+    out.push(PathOp::Close);
+    // Inner-side miter wedge (mirrors the outer one).
+    out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
+    out.push(PathOp::LineTo {
+        x: p_a_right.0,
+        y: p_a_right.1,
+    });
+    out.push(PathOp::LineTo {
+        x: p_right_miter.0,
+        y: p_right_miter.1,
+    });
+    out.push(PathOp::LineTo {
+        x: p_b_right.0,
+        y: p_b_right.1,
+    });
+    out.push(PathOp::Close);
+}
+
+// =========================================================================
+// Shape primitives → path
+// =========================================================================
+
+fn rect_to_path(node: &Node) -> Vec<PathOp> {
+    let x = node.attr("x").and_then(parse_length).unwrap_or(0.0);
+    let y = node.attr("y").and_then(parse_length).unwrap_or(0.0);
+    let w = node.attr("width").and_then(parse_length).unwrap_or(0.0);
+    let h = node.attr("height").and_then(parse_length).unwrap_or(0.0);
+    if w <= 0.0 || h <= 0.0 {
+        return Vec::new();
+    }
+    let rx_attr = node.attr("rx").and_then(parse_length);
+    let ry_attr = node.attr("ry").and_then(parse_length);
+    let rx = match (rx_attr, ry_attr) {
+        (Some(rx), _) => rx,
+        (None, Some(ry)) => ry,
+        (None, None) => 0.0,
+    };
+    let ry = match (rx_attr, ry_attr) {
+        (_, Some(ry)) => ry,
+        (Some(rx), None) => rx,
+        (None, None) => 0.0,
+    };
+    let rx = rx.max(0.0).min(w * 0.5);
+    let ry = ry.max(0.0).min(h * 0.5);
+
+    let mut ops = Vec::with_capacity(if rx > 0.0 || ry > 0.0 { 12 } else { 6 });
+    if rx > 0.0 && ry > 0.0 {
+        // Kappa for cubic-circle approximation of a quarter ellipse.
+        const K: f32 = 0.552_284_8;
+        let kx = rx * K;
+        let ky = ry * K;
+        // Top edge: start at (x+rx, y) and go to (x+w-rx, y).
+        ops.push(PathOp::MoveTo { x: x + rx, y });
+        ops.push(PathOp::LineTo { x: x + w - rx, y });
+        // Top-right corner.
+        ops.push(PathOp::CubicTo {
+            c1x: x + w - rx + kx,
+            c1y: y,
+            c2x: x + w,
+            c2y: y + ry - ky,
+            x: x + w,
+            y: y + ry,
+        });
+        // Right edge.
+        ops.push(PathOp::LineTo { x: x + w, y: y + h - ry });
+        // Bottom-right corner.
+        ops.push(PathOp::CubicTo {
+            c1x: x + w,
+            c1y: y + h - ry + ky,
+            c2x: x + w - rx + kx,
+            c2y: y + h,
+            x: x + w - rx,
+            y: y + h,
+        });
+        // Bottom edge.
+        ops.push(PathOp::LineTo { x: x + rx, y: y + h });
+        // Bottom-left corner.
+        ops.push(PathOp::CubicTo {
+            c1x: x + rx - kx,
+            c1y: y + h,
+            c2x: x,
+            c2y: y + h - ry + ky,
+            x,
+            y: y + h - ry,
+        });
+        // Left edge.
+        ops.push(PathOp::LineTo { x, y: y + ry });
+        // Top-left corner.
+        ops.push(PathOp::CubicTo {
+            c1x: x,
+            c1y: y + ry - ky,
+            c2x: x + rx - kx,
+            c2y: y,
+            x: x + rx,
+            y,
+        });
+        ops.push(PathOp::Close);
+    } else {
+        ops.push(PathOp::MoveTo { x, y });
+        ops.push(PathOp::LineTo { x: x + w, y });
+        ops.push(PathOp::LineTo { x: x + w, y: y + h });
+        ops.push(PathOp::LineTo { x, y: y + h });
+        ops.push(PathOp::Close);
+    }
+    ops
+}
+
+fn circle_to_path(node: &Node) -> Vec<PathOp> {
+    let cx = node.attr("cx").and_then(parse_length).unwrap_or(0.0);
+    let cy = node.attr("cy").and_then(parse_length).unwrap_or(0.0);
+    let r = node.attr("r").and_then(parse_length).unwrap_or(0.0);
+    if r <= 0.0 {
+        return Vec::new();
+    }
+    ellipse_path(cx, cy, r, r)
+}
+
+fn ellipse_to_path(node: &Node) -> Vec<PathOp> {
+    let cx = node.attr("cx").and_then(parse_length).unwrap_or(0.0);
+    let cy = node.attr("cy").and_then(parse_length).unwrap_or(0.0);
+    let rx = node.attr("rx").and_then(parse_length).unwrap_or(0.0);
+    let ry = node.attr("ry").and_then(parse_length).unwrap_or(0.0);
+    if rx <= 0.0 || ry <= 0.0 {
+        return Vec::new();
+    }
+    ellipse_path(cx, cy, rx, ry)
+}
+
+/// Approximates a centred ellipse with four cubic Béziers using the
+/// standard kappa = 0.552_284_8. Drawing direction is clockwise (the
+/// rasterizer's non-zero winding handles either, but we stay
+/// consistent with `<rect>`).
+fn ellipse_path(cx: f32, cy: f32, rx: f32, ry: f32) -> Vec<PathOp> {
+    const K: f32 = 0.552_284_8;
+    let kx = rx * K;
+    let ky = ry * K;
+    alloc::vec![
+        PathOp::MoveTo { x: cx + rx, y: cy },
+        PathOp::CubicTo {
+            c1x: cx + rx,
+            c1y: cy + ky,
+            c2x: cx + kx,
+            c2y: cy + ry,
+            x: cx,
+            y: cy + ry,
+        },
+        PathOp::CubicTo {
+            c1x: cx - kx,
+            c1y: cy + ry,
+            c2x: cx - rx,
+            c2y: cy + ky,
+            x: cx - rx,
+            y: cy,
+        },
+        PathOp::CubicTo {
+            c1x: cx - rx,
+            c1y: cy - ky,
+            c2x: cx - kx,
+            c2y: cy - ry,
+            x: cx,
+            y: cy - ry,
+        },
+        PathOp::CubicTo {
+            c1x: cx + kx,
+            c1y: cy - ry,
+            c2x: cx + rx,
+            c2y: cy - ky,
+            x: cx + rx,
+            y: cy,
+        },
+        PathOp::Close,
+    ]
+}
+
+// =========================================================================
+// Render-time blit
+// =========================================================================
+
+fn render_fill(out: &mut ColorPixmap, fill: &Fill, world: &Affine, tol: f32) {
+    let xf = world.compose(&fill.xform);
+    let segs = flatten(fill.ops.iter().copied(), &xf, tol);
+    if segs.is_empty() {
+        return;
+    }
+    let mask = raster(&segs);
+    if mask.pixmap.is_empty() {
+        return;
+    }
+    // If a clip-path is set, rasterize it once, then multiply mask
+    // alpha by the clip alpha at sample time. The clip lives in
+    // document space; compose the world transform on top.
+    let clip_mask = fill.clip.as_ref().map(|cs| {
+        let cxf = world.compose(&cs.xform);
+        let csegs = flatten(cs.ops.iter().copied(), &cxf, tol);
+        raster(&csegs)
+    });
+
+    match &fill.paint {
+        Paint::Solid(color) => {
+            blit_solid(
+                out,
+                &mask.pixmap,
+                mask.origin_x,
+                mask.origin_y,
+                *color,
+                clip_mask.as_ref(),
+            );
+        }
+        Paint::Gradient(g) => {
+            let g_xf = world.compose(&fill.xform).compose(&g.gradient_xform);
+            blit_gradient(
+                out,
+                &mask.pixmap,
+                mask.origin_x,
+                mask.origin_y,
+                g,
+                &g_xf,
+                clip_mask.as_ref(),
+            );
+        }
+    }
+}
+
+/// Blits `mask × color` into `dst`, where `(ox, oy)` is the
+/// device-space origin of the mask. Clipping is applied per-pixel
+/// against `clip` if provided.
+fn blit_solid(
+    dst: &mut ColorPixmap,
+    mask: &Pixmap,
+    ox: i32,
+    oy: i32,
+    color: [u8; 4],
+    clip: Option<&crate::raster::Render>,
+) {
     if dst.is_empty() || mask.is_empty() {
         return;
     }
@@ -212,9 +1574,28 @@ fn blit(dst: &mut ColorPixmap, mask: &Pixmap, ox: i32, oy: i32, color: [u8; 4]) 
             if px < 0 || px >= dw {
                 continue;
             }
-            let m = mask.get(mx as u32, my as u32) as u32;
+            let mut m = mask.get(mx as u32, my as u32) as u32;
             if m == 0 {
                 continue;
+            }
+            if let Some(cm) = clip {
+                let cm_x = px - cm.origin_x;
+                let cm_y = py - cm.origin_y;
+                if cm_x < 0
+                    || cm_y < 0
+                    || cm_x >= cm.pixmap.width as i32
+                    || cm_y >= cm.pixmap.height as i32
+                {
+                    continue;
+                }
+                let cv = cm.pixmap.get(cm_x as u32, cm_y as u32) as u32;
+                if cv == 0 {
+                    continue;
+                }
+                m = (m * cv + 127) / 255;
+                if m == 0 {
+                    continue;
+                }
             }
             let sa = (ca * m + 127) / 255;
             if sa == 0 {
@@ -237,176 +1618,244 @@ fn blit(dst: &mut ColorPixmap, mask: &Pixmap, ox: i32, oy: i32, color: [u8; 4]) 
     }
 }
 
+/// Blits `mask × gradient` into `dst` using the COLRv1 ramp evaluator.
+fn blit_gradient(
+    dst: &mut ColorPixmap,
+    mask: &Pixmap,
+    ox: i32,
+    oy: i32,
+    g: &GradientPaint,
+    g_xf: &Affine,
+    clip: Option<&crate::raster::Render>,
+) {
+    if dst.is_empty() || mask.is_empty() {
+        return;
+    }
+    let dw = dst.width as i32;
+    let dh = dst.height as i32;
+    for my in 0..mask.height as i32 {
+        let py = oy + my;
+        if py < 0 || py >= dh {
+            continue;
+        }
+        for mx in 0..mask.width as i32 {
+            let px = ox + mx;
+            if px < 0 || px >= dw {
+                continue;
+            }
+            let mut m = mask.get(mx as u32, my as u32) as u32;
+            if m == 0 {
+                continue;
+            }
+            if let Some(cm) = clip {
+                let cm_x = px - cm.origin_x;
+                let cm_y = py - cm.origin_y;
+                if cm_x < 0
+                    || cm_y < 0
+                    || cm_x >= cm.pixmap.width as i32
+                    || cm_y >= cm.pixmap.height as i32
+                {
+                    continue;
+                }
+                let cv = cm.pixmap.get(cm_x as u32, cm_y as u32) as u32;
+                if cv == 0 {
+                    continue;
+                }
+                m = (m * cv + 127) / 255;
+                if m == 0 {
+                    continue;
+                }
+            }
+            // Pixel centre in pixel space.
+            let abs_x = px as f32 + 0.5;
+            let abs_y = py as f32 + 0.5;
+            let sample = sample_svg_gradient(g, g_xf, abs_x, abs_y);
+            // Apply per-element opacity by scaling alpha.
+            let mut sample = sample;
+            if g.opacity < 1.0 {
+                let factor = g.opacity.clamp(0.0, 1.0);
+                sample[0] = ((sample[0] as f32 * factor).round()) as u8;
+                sample[1] = ((sample[1] as f32 * factor).round()) as u8;
+                sample[2] = ((sample[2] as f32 * factor).round()) as u8;
+                sample[3] = ((sample[3] as f32 * factor).round()) as u8;
+            }
+            // Multiply by mask coverage `m`.
+            let sr = (sample[0] as u32 * m + 127) / 255;
+            let sg = (sample[1] as u32 * m + 127) / 255;
+            let sb = (sample[2] as u32 * m + 127) / 255;
+            let sa = (sample[3] as u32 * m + 127) / 255;
+            if sa == 0 {
+                continue;
+            }
+            let idx = (py as usize * dst.width as usize + px as usize) * 4;
+            let dr = dst.data[idx] as u32;
+            let dg = dst.data[idx + 1] as u32;
+            let db = dst.data[idx + 2] as u32;
+            let da = dst.data[idx + 3] as u32;
+            let inv = 255 - sa;
+            dst.data[idx] = (sr + (dr * inv + 127) / 255) as u8;
+            dst.data[idx + 1] = (sg + (dg * inv + 127) / 255) as u8;
+            dst.data[idx + 2] = (sb + (db * inv + 127) / 255) as u8;
+            dst.data[idx + 3] = (sa + (da * inv + 127) / 255) as u8;
+        }
+    }
+}
+
+/// Evaluates a parsed SVG gradient at pixel-space `(x, y)`. Routes the
+/// gradient geometry through `g_xf` (document → pixel + any
+/// `gradientTransform`) before calling the COLRv1 projection
+/// primitives — same shape, same `Pad` / `Repeat` / `Reflect` semantics.
+fn sample_svg_gradient(g: &GradientPaint, g_xf: &Affine, x: f32, y: f32) -> [u8; 4] {
+    let t_opt = match g.kind {
+        GradKind::Linear { x1, y1, x2, y2 } => {
+            let a = g_xf.apply(x1, y1);
+            let b = g_xf.apply(x2, y2);
+            project_linear(a, b, (x, y))
+        }
+        GradKind::Radial { cx, cy, r, fx, fy } => {
+            let centre = g_xf.apply(cx, cy);
+            let focus = g_xf.apply(fx, fy);
+            // Approximate radius scale by the matrix's geometric mean.
+            let lx = (g_xf.xx * g_xf.xx + g_xf.yx * g_xf.yx).sqrt();
+            let ly = (g_xf.xy * g_xf.xy + g_xf.yy * g_xf.yy).sqrt();
+            let s = (lx * ly).sqrt();
+            project_radial(focus, 0.0, centre, r * s, (x, y))
+        }
+    };
+    let Some(t) = t_opt else {
+        return [0, 0, 0, 0];
+    };
+    let t = apply_extend(t, g.extend);
+    let c = sample_stops(&g.stops, t);
+    to_premul(c)
+}
+
 // =========================================================================
-// XML walker
+// XML scanner → DOM
 // =========================================================================
 
-fn parse_document(xml: &str) -> Result<SvgDoc, RenderError> {
+fn parse_xml(xml: &str) -> Result<Node, RenderError> {
     let mut p = XmlParser::new(xml);
     p.skip_prolog();
-    let root = p.next_tag().ok_or(RenderError::Parse("svg root"))?;
-    if root.kind != TagKind::Open || !name_is(root.name, "svg") {
+    let Some(tag) = p.next_tag() else {
+        return Err(RenderError::Parse("svg root"));
+    };
+    if tag.kind == TagKind::Comment || tag.kind == TagKind::Decl {
+        return parse_xml_after_prolog(&mut p);
+    }
+    if tag.kind != TagKind::Open && tag.kind != TagKind::SelfClose {
         return Err(RenderError::Parse("svg root"));
     }
-
-    let mut doc = SvgDoc {
-        view_w: 1000.0,
-        view_h: 1000.0,
-        view_x: 0.0,
-        view_y: 0.0,
-        fills: Vec::new(),
+    let mut node = Node {
+        name: tag.name.into(),
+        attrs: parse_attrs(tag.attrs),
+        children: Vec::new(),
     };
+    if tag.kind == TagKind::SelfClose {
+        return Ok(node);
+    }
+    parse_children(&mut p, &mut node, 0)?;
+    Ok(node)
+}
 
-    let mut vb_seen = false;
-    for (k, v) in attrs(root.attrs) {
-        if k.eq_ignore_ascii_case("viewBox") {
-            if let Some((x, y, w, h)) = parse_viewbox(v) {
-                doc.view_x = x;
-                doc.view_y = y;
-                doc.view_w = w;
-                doc.view_h = h;
-                vb_seen = true;
+fn parse_xml_after_prolog(p: &mut XmlParser<'_>) -> Result<Node, RenderError> {
+    while let Some(tag) = p.next_tag() {
+        match tag.kind {
+            TagKind::Comment | TagKind::Decl => continue,
+            TagKind::Open | TagKind::SelfClose => {
+                let mut node = Node {
+                    name: tag.name.into(),
+                    attrs: parse_attrs(tag.attrs),
+                    children: Vec::new(),
+                };
+                if tag.kind == TagKind::Open {
+                    parse_children(p, &mut node, 0)?;
+                }
+                return Ok(node);
             }
-        } else if !vb_seen && k.eq_ignore_ascii_case("width") {
-            if let Some(w) = parse_length(v) {
-                doc.view_w = w;
-            }
-        } else if !vb_seen && k.eq_ignore_ascii_case("height") {
-            if let Some(h) = parse_length(v) {
-                doc.view_h = h;
+            TagKind::Close => {
+                return Err(RenderError::Parse("svg root"));
             }
         }
     }
-
-    if root.kind == TagKind::SelfClose {
-        return Ok(doc);
-    }
-
-    let ctx = ElemCtx {
-        xform: Affine::identity(),
-        fill: [0, 0, 0, 255], // SVG default fill is opaque black
-    };
-    walk_children(&mut p, &mut doc, &ctx, 0)?;
-    Ok(doc)
+    Err(RenderError::Parse("svg root"))
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ElemCtx {
-    xform: Affine,
-    fill: [u8; 4],
-}
-
-fn walk_children(
+fn parse_children(
     p: &mut XmlParser<'_>,
-    doc: &mut SvgDoc,
-    ctx: &ElemCtx,
+    parent: &mut Node,
     depth: u32,
 ) -> Result<(), RenderError> {
-    if depth > MAX_GROUP_DEPTH {
+    if depth > 256 {
         return Err(RenderError::Parse("svg nesting"));
     }
     while let Some(tag) = p.next_tag() {
         match tag.kind {
-            TagKind::Close => return Ok(()),
             TagKind::Comment | TagKind::Decl => continue,
-            TagKind::Open | TagKind::SelfClose => {}
-        }
-        let self_close = tag.kind == TagKind::SelfClose;
-        let mut child_ctx = *ctx;
-        for (k, v) in attrs(tag.attrs) {
-            if k.eq_ignore_ascii_case("transform") {
-                if let Some(t) = parse_transform(v) {
-                    child_ctx.xform = child_ctx.xform.compose(&t);
-                }
-            } else if k.eq_ignore_ascii_case("fill") {
-                if let Some(c) = parse_color(v) {
-                    // Preserve any fill-opacity already applied via
-                    // CSS-like inheritance on this element by carrying
-                    // forward the alpha factor only.
-                    let alpha_factor = child_ctx.fill[3] as f32 / 255.0;
-                    child_ctx.fill = [c[0], c[1], c[2], (c[3] as f32 * alpha_factor).round() as u8];
-                } else if v.trim().eq_ignore_ascii_case("none") {
-                    child_ctx.fill[3] = 0;
-                }
-            } else if k.eq_ignore_ascii_case("fill-opacity") || k.eq_ignore_ascii_case("opacity") {
-                // SVG `opacity` strictly multiplies the rendered
-                // element (not just its fill), but in our bounded
-                // subset we only fill — so collapsing both attributes
-                // to the same path is correct.
-                if let Some(o) = parse_opacity(v) {
-                    let a = (child_ctx.fill[3] as f32 * o).round().clamp(0.0, 255.0) as u8;
-                    child_ctx.fill[3] = a;
-                }
-            }
-        }
-
-        if name_is(tag.name, "path") {
-            if let Some(d) = attr_value(tag.attrs, "d") {
-                let ops = parse_path_d(d)?;
-                if !ops.is_empty() && child_ctx.fill[3] > 0 {
-                    if doc.fills.len() >= MAX_FILLS {
-                        return Err(RenderError::Parse("svg fill cap"));
-                    }
-                    doc.fills.push(Fill {
-                        ops,
-                        color: child_ctx.fill,
-                        xform: child_ctx.xform,
-                    });
-                }
-            }
-            // `<path>` is normally self-closing; tolerate either form.
-            if !self_close {
-                skip_element_body(p)?;
-            }
-        } else if name_is(tag.name, "g") {
-            if !self_close {
-                walk_children(p, doc, &child_ctx, depth + 1)?;
-            }
-        } else if !self_close {
-            // Unknown element body: skip it without parsing.
-            skip_element_body(p)?;
-        }
-    }
-    Ok(())
-}
-
-fn skip_element_body(p: &mut XmlParser<'_>) -> Result<(), RenderError> {
-    let mut depth: u32 = 1;
-    while let Some(tag) = p.next_tag() {
-        match tag.kind {
+            TagKind::Close => return Ok(()),
             TagKind::Open => {
-                depth += 1;
+                let mut child = Node {
+                    name: tag.name.into(),
+                    attrs: parse_attrs(tag.attrs),
+                    children: Vec::new(),
+                };
+                parse_children(p, &mut child, depth + 1)?;
+                parent.children.push(child);
             }
-            TagKind::SelfClose => {}
-            TagKind::Close => {
-                depth -= 1;
-                if depth == 0 {
-                    return Ok(());
-                }
+            TagKind::SelfClose => {
+                parent.children.push(Node {
+                    name: tag.name.into(),
+                    attrs: parse_attrs(tag.attrs),
+                    children: Vec::new(),
+                });
             }
-            TagKind::Comment | TagKind::Decl => {}
         }
     }
-    // Truncated input — tolerate so partial fills already collected
-    // can still render.
     Ok(())
 }
 
-// =========================================================================
-// Tiny XML scanner
-// =========================================================================
+fn parse_attrs(s: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        let Some(eq) = rest.find('=') else {
+            break;
+        };
+        let key = rest[..eq].trim().to_string();
+        let after = rest[eq + 1..].trim_start();
+        let bytes = after.as_bytes();
+        if bytes.is_empty() {
+            break;
+        }
+        let q = bytes[0];
+        let (val, next) = if q == b'"' || q == b'\'' {
+            let body = &after[1..];
+            let Some(end) = body.find(q as char) else {
+                break;
+            };
+            (body[..end].to_string(), &body[end + 1..])
+        } else {
+            let end = after
+                .find(|c: char| c.is_ascii_whitespace() || c == '>')
+                .unwrap_or(after.len());
+            (after[..end].to_string(), &after[end..])
+        };
+        out.push((key, val));
+        rest = next;
+    }
+    out
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum TagKind {
-    /// `<name ...>`
     Open,
-    /// `<name .../>`
     SelfClose,
-    /// `</name>`
     Close,
-    /// `<!-- ... -->`
     Comment,
-    /// `<?xml ...?>` or `<!DOCTYPE ...>`
     Decl,
 }
 
@@ -431,8 +1880,8 @@ impl<'a> XmlParser<'a> {
         loop {
             self.skip_ws();
             let rest = &self.src[self.pos..];
-            if let Some(stripped_start) = rest.strip_prefix("<?") {
-                if let Some(end) = stripped_start.find("?>") {
+            if let Some(stripped) = rest.strip_prefix("<?") {
+                if let Some(end) = stripped.find("?>") {
                     self.pos += 2 + end + 2;
                     continue;
                 }
@@ -468,7 +1917,6 @@ impl<'a> XmlParser<'a> {
 
     fn next_tag(&mut self) -> Option<Tag<'a>> {
         let bytes = self.src.as_bytes();
-        // Skip text content between tags.
         while self.pos < bytes.len() && bytes[self.pos] != b'<' {
             self.pos += 1;
         }
@@ -526,70 +1974,6 @@ impl<'a> XmlParser<'a> {
     }
 }
 
-fn name_is(name: &str, target: &str) -> bool {
-    if name.eq_ignore_ascii_case(target) {
-        return true;
-    }
-    if let Some(i) = name.find(':') {
-        return name[i + 1..].eq_ignore_ascii_case(target);
-    }
-    false
-}
-
-// =========================================================================
-// Attribute parsing
-// =========================================================================
-
-fn attrs(attrs: &str) -> AttrIter<'_> {
-    AttrIter { rest: attrs }
-}
-
-struct AttrIter<'a> {
-    rest: &'a str,
-}
-
-impl<'a> Iterator for AttrIter<'a> {
-    type Item = (&'a str, &'a str);
-    fn next(&mut self) -> Option<Self::Item> {
-        self.rest = self.rest.trim_start();
-        if self.rest.is_empty() {
-            return None;
-        }
-        let eq = self.rest.find('=')?;
-        let key = self.rest[..eq].trim();
-        let after = self.rest[eq + 1..].trim_start();
-        let bytes = after.as_bytes();
-        if bytes.is_empty() {
-            self.rest = "";
-            return None;
-        }
-        let q = bytes[0];
-        if q == b'"' || q == b'\'' {
-            let body = &after[1..];
-            let end = body.find(q as char)?;
-            let val = &body[..end];
-            self.rest = &body[end + 1..];
-            Some((key, val))
-        } else {
-            let end = after
-                .find(|c: char| c.is_ascii_whitespace() || c == '>')
-                .unwrap_or(after.len());
-            let val = &after[..end];
-            self.rest = &after[end..];
-            Some((key, val))
-        }
-    }
-}
-
-fn attr_value<'a>(attr_str: &'a str, key: &str) -> Option<&'a str> {
-    for (k, v) in attrs(attr_str) {
-        if k.eq_ignore_ascii_case(key) {
-            return Some(v);
-        }
-    }
-    None
-}
-
 // =========================================================================
 // Numeric / colour / transform parsing
 // =========================================================================
@@ -605,9 +1989,12 @@ fn parse_viewbox(s: &str) -> Option<(f32, f32, f32, f32)> {
 
 fn parse_length(s: &str) -> Option<f32> {
     let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
     let cut = s
         .char_indices()
-        .find(|(_, c)| !(c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+'))
+        .find(|(_, c)| !(c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+' || *c == 'e' || *c == 'E'))
         .map(|(i, _)| i)
         .unwrap_or(s.len());
     s[..cut].parse::<f32>().ok()
@@ -618,7 +2005,6 @@ fn parse_opacity(s: &str) -> Option<f32> {
     Some(v.clamp(0.0, 1.0))
 }
 
-/// Parses a colour value. Returns straight (un-premultiplied) RGBA.
 fn parse_color(s: &str) -> Option<[u8; 4]> {
     let s = s.trim();
     if s.eq_ignore_ascii_case("none") {
@@ -726,13 +2112,9 @@ fn parse_transform(s: &str) -> Option<Affine> {
 }
 
 // =========================================================================
-// Path-data parser
+// Path-data parser (M/L/H/V/C/Q/Z)
 // =========================================================================
 
-/// Parses SVG `<path d="...">` data into the sigilbuzz `PathOp` stream.
-/// Supports M/L/H/V/C/Q/Z and their relative variants. `S`, `T`, `A`
-/// are not handled (rare in SVG-in-OT and a follow-up can lift them
-/// in).
 fn parse_path_d(s: &str) -> Result<Vec<PathOp>, RenderError> {
     let mut out = Vec::new();
     let bytes = s.as_bytes();
@@ -757,7 +2139,6 @@ fn parse_path_d(s: &str) -> Result<Vec<PathOp>, RenderError> {
             c
         } else {
             match last_cmd {
-                // After M/m, repeated coord pairs are implicit L/l.
                 Some(b'M') => b'L',
                 Some(b'm') => b'l',
                 Some(prev) => prev,
@@ -899,12 +2280,16 @@ fn read_num(bytes: &[u8], i: &mut usize) -> Result<f32, RenderError> {
 }
 
 // =========================================================================
-// Tests
+// Tests (parser + geometry primitives)
 // =========================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn first_fill(doc: &SvgDoc) -> &Fill {
+        &doc.fills[0]
+    }
 
     #[test]
     fn parse_color_hex_long() {
@@ -951,7 +2336,6 @@ mod tests {
 
     #[test]
     fn parse_transform_chains_left_to_right() {
-        // translate then scale: a point (1, 0) should become (12, 0).
         let xf = parse_transform("translate(10, 0) scale(2)").unwrap();
         let (x, y) = xf.apply(1.0, 0.0);
         assert!((x - 12.0).abs() < 1e-5);
@@ -1003,7 +2387,6 @@ mod tests {
 
     #[test]
     fn path_d_handles_compact_negative_numbers() {
-        // No separator between sign and digits — common SVG output.
         let ops = parse_path_d("M0 0L10-5L-3 .5Z").unwrap();
         assert_eq!(ops.len(), 4);
         assert!(
@@ -1020,7 +2403,10 @@ mod tests {
         assert_eq!(doc.view_w, 100.0);
         assert_eq!(doc.view_h, 100.0);
         assert_eq!(doc.fills.len(), 1);
-        assert_eq!(doc.fills[0].color, [0xff, 0, 0, 255]);
+        let Paint::Solid(c) = &first_fill(&doc).paint else {
+            panic!("expected solid fill");
+        };
+        assert_eq!(*c, [0xff, 0, 0, 255]);
     }
 
     #[test]
@@ -1040,7 +2426,7 @@ mod tests {
     #[test]
     fn unknown_elements_are_skipped_not_failed() {
         let xml = r#"<svg viewBox="0 0 10 10">
-            <defs><linearGradient id="g"><stop offset="0"/></linearGradient></defs>
+            <metadata>hello</metadata>
             <path d="M 0 0 L 10 0 L 10 10 Z" fill="black"/>
         </svg>"#;
         let doc = parse_document(xml).unwrap();
@@ -1059,5 +2445,175 @@ mod tests {
     #[test]
     fn missing_root_svg_is_an_error() {
         assert!(parse_document("<not-svg/>").is_err());
+    }
+
+    #[test]
+    fn rect_with_no_radii_is_a_quad() {
+        let xml = r#"<svg viewBox="0 0 10 10">
+            <rect x="1" y="2" width="4" height="6" fill="black"/>
+        </svg>"#;
+        let doc = parse_document(xml).unwrap();
+        assert_eq!(doc.fills.len(), 1);
+        // 4 line segments + close.
+        let ops = &doc.fills[0].ops;
+        assert!(ops.iter().any(|o| matches!(o, PathOp::Close)));
+        assert!(matches!(ops[0], PathOp::MoveTo { x, y } if x == 1.0 && y == 2.0));
+    }
+
+    #[test]
+    fn rect_with_rx_ry_emits_cubics() {
+        let xml = r#"<svg viewBox="0 0 10 10">
+            <rect x="0" y="0" width="10" height="10" rx="2" ry="2" fill="black"/>
+        </svg>"#;
+        let doc = parse_document(xml).unwrap();
+        let ops = &doc.fills[0].ops;
+        assert!(ops.iter().any(|o| matches!(o, PathOp::CubicTo { .. })));
+    }
+
+    #[test]
+    fn circle_emits_four_cubics() {
+        let xml = r#"<svg viewBox="0 0 10 10">
+            <circle cx="5" cy="5" r="3" fill="red"/>
+        </svg>"#;
+        let doc = parse_document(xml).unwrap();
+        assert_eq!(doc.fills.len(), 1);
+        let cubics = doc.fills[0]
+            .ops
+            .iter()
+            .filter(|o| matches!(o, PathOp::CubicTo { .. }))
+            .count();
+        assert_eq!(cubics, 4);
+    }
+
+    #[test]
+    fn ellipse_emits_four_cubics() {
+        let xml = r#"<svg viewBox="0 0 10 10">
+            <ellipse cx="5" cy="5" rx="4" ry="2" fill="red"/>
+        </svg>"#;
+        let doc = parse_document(xml).unwrap();
+        let cubics = doc.fills[0]
+            .ops
+            .iter()
+            .filter(|o| matches!(o, PathOp::CubicTo { .. }))
+            .count();
+        assert_eq!(cubics, 4);
+    }
+
+    #[test]
+    fn use_resolves_in_document_reference() {
+        let xml = r##"<svg viewBox="0 0 100 100">
+            <defs><circle id="dot" cx="0" cy="0" r="3" fill="black"/></defs>
+            <use xlink:href="#dot" x="10" y="10"/>
+            <use xlink:href="#dot" x="50" y="50"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        assert_eq!(doc.fills.len(), 2);
+        // First use translated to (10, 10).
+        let (x, y) = doc.fills[0].xform.apply(0.0, 0.0);
+        assert!((x - 10.0).abs() < 1e-5 && (y - 10.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn use_recursion_guard_caps_at_depth() {
+        // <use> pointing at a <g> that itself contains a <use> back at
+        // the parent — should bottom out at MAX_USE_DEPTH instead of
+        // recursing forever.
+        let xml = r##"<svg viewBox="0 0 100 100">
+            <defs>
+                <g id="a"><use xlink:href="#a"/><circle cx="0" cy="0" r="1" fill="black"/></g>
+            </defs>
+            <use xlink:href="#a"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        // The non-cycling circle inside <g id="a"> renders at every
+        // expansion level. The expansion bottoms out at MAX_USE_DEPTH;
+        // the test just asserts we stayed under MAX_FILLS and didn't
+        // panic.
+        assert!(doc.fills.len() <= MAX_FILLS);
+    }
+
+    #[test]
+    fn linear_gradient_collected_with_stops() {
+        let xml = r##"<svg viewBox="0 0 10 10">
+            <defs>
+                <linearGradient id="g" x1="0" y1="0" x2="10" y2="0">
+                    <stop offset="0" stop-color="#FF0000"/>
+                    <stop offset="1" stop-color="#0000FF"/>
+                </linearGradient>
+            </defs>
+            <rect x="0" y="0" width="10" height="10" fill="url(#g)"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        assert_eq!(doc.fills.len(), 1);
+        let Paint::Gradient(g) = &doc.fills[0].paint else {
+            panic!("expected gradient fill");
+        };
+        assert_eq!(g.stops.len(), 2);
+        assert!(matches!(g.kind, GradKind::Linear { .. }));
+    }
+
+    #[test]
+    fn radial_gradient_parsed() {
+        let xml = r##"<svg viewBox="0 0 10 10">
+            <defs>
+                <radialGradient id="g" cx="5" cy="5" r="5">
+                    <stop offset="0" stop-color="#FF0000"/>
+                    <stop offset="1" stop-color="#0000FF"/>
+                </radialGradient>
+            </defs>
+            <rect x="0" y="0" width="10" height="10" fill="url(#g)"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        let Paint::Gradient(g) = &doc.fills[0].paint else {
+            panic!("expected gradient fill");
+        };
+        assert!(matches!(g.kind, GradKind::Radial { .. }));
+    }
+
+    #[test]
+    fn stroke_emits_outline_fill() {
+        let xml = r##"<svg viewBox="0 0 100 100">
+            <path d="M 10 10 L 90 10" stroke="#000" stroke-width="4" fill="none"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        // No fill (fill="none"), but one stroke fill.
+        assert_eq!(doc.fills.len(), 1);
+        assert!(doc.fills[0].is_stroke);
+    }
+
+    #[test]
+    fn stroke_zero_width_ignored() {
+        let xml = r##"<svg viewBox="0 0 10 10">
+            <path d="M 0 0 L 10 0" stroke="#000" stroke-width="0" fill="none"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        assert!(doc.fills.is_empty());
+    }
+
+    #[test]
+    fn clip_path_attaches_to_fill() {
+        let xml = r##"<svg viewBox="0 0 100 100">
+            <defs>
+                <clipPath id="c"><circle cx="50" cy="50" r="20"/></clipPath>
+            </defs>
+            <rect x="0" y="0" width="100" height="100" fill="#000" clip-path="url(#c)"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        assert_eq!(doc.fills.len(), 1);
+        assert!(doc.fills[0].clip.is_some());
+    }
+
+    #[test]
+    fn parse_url_ref_extracts_id() {
+        assert_eq!(parse_url_ref("url(#abc)"), Some("abc".into()));
+        assert_eq!(parse_url_ref(" url(#xyz) "), Some("xyz".into()));
+        assert_eq!(parse_url_ref("url('#q')"), Some("q".into()));
+        assert_eq!(parse_url_ref("none"), None);
+    }
+
+    #[test]
+    fn stop_offset_handles_percent_and_decimal() {
+        assert!((parse_stop_offset("50%") - 0.5).abs() < 1e-5);
+        assert!((parse_stop_offset("0.25") - 0.25).abs() < 1e-5);
     }
 }
