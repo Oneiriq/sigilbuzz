@@ -64,7 +64,7 @@ impl<'a> LineBreakIter<'a> {
     }
 }
 
-impl<'a> Iterator for LineBreakIter<'a> {
+impl Iterator for LineBreakIter<'_> {
     type Item = (usize, BreakOpportunity);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -95,7 +95,7 @@ impl<'a> Iterator for LineBreakIter<'a> {
             // character so the offset lands past it.
             let was_mandatory_trigger = matches!(
                 self.prev_class,
-                Some(LineBreakClass::BK) | Some(LineBreakClass::LF) | Some(LineBreakClass::NL)
+                Some(LineBreakClass::BK | LineBreakClass::LF | LineBreakClass::NL)
             ) || (self.prev_class == Some(LineBreakClass::CR)
                 && curr != LineBreakClass::LF);
 
