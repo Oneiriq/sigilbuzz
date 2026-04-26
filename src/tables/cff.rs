@@ -204,10 +204,25 @@ impl<'a> Cff<'a> {
 // CFF INDEX structure.
 // ----------------------------------------------------------------------------
 
-/// Reads a CFF INDEX starting at the reader's current position and
+/// Reads a CFF1 INDEX starting at the reader's current position and
 /// advances the cursor past it. Returns one byte slice per entry.
+///
+/// CFF1 (the `CFF ` table) uses a `Card16` (u16) count prefix. The
+/// CFF2 INDEX is layout-compatible except the count is a u32; CFF2
+/// callers go through [`read_index2`].
 pub(crate) fn read_index<'a>(r: &mut Reader<'a>) -> Result<Vec<&'a [u8]>> {
-    let count = r.read_u16()?;
+    let count = u32::from(r.read_u16()?);
+    read_index_body(r, count)
+}
+
+/// Reads a CFF2 INDEX. Identical to [`read_index`] but with a u32
+/// count prefix per the OpenType 1.8 CFF2 spec.
+pub(crate) fn read_index2<'a>(r: &mut Reader<'a>) -> Result<Vec<&'a [u8]>> {
+    let count = r.read_u32()?;
+    read_index_body(r, count)
+}
+
+fn read_index_body<'a>(r: &mut Reader<'a>, count: u32) -> Result<Vec<&'a [u8]>> {
     if count == 0 {
         return Ok(Vec::new());
     }
