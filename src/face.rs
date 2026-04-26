@@ -37,7 +37,7 @@ use crate::tables::glyf::PhantomMetrics;
 use crate::tables::parse::Reader;
 use crate::tables::{
     tag, Ankr, Avar, Base, Cbdt, Cblc, Cff, Cff2, Cmap, Fvar, Gdef, Glyf, GlyphBitmap, GlyphBounds,
-    Gpos, Gsub, Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Math, Maxp, Morx, Mvar,
+    Gpos, Gsub, Gvar, Head, Hhea, Hmtx, Hvar, KernTable, Kerx, Loca, Math, Maxp, Morx, Mvar, Name,
     Outline, PathOp, Sbix, Svg, SvgDocument, Varc, Vhea, Vmtx, Vorg, Vvar,
 };
 
@@ -225,6 +225,20 @@ impl<'a> Face<'a> {
     /// Parses the `cmap` table.
     pub fn cmap(&self) -> Result<Cmap<'a>> {
         Cmap::parse(self.table_bytes(tag::CMAP)?)
+    }
+
+    /// Parses the `name` table if the font carries one. Used by font
+    /// browsers and rendering frontends that surface the family /
+    /// subfamily / full name to end users; before this accessor
+    /// landed the only way out of the crate was a placeholder string
+    /// in the consumer (oniq #210). Returns `Ok(None)` for the rare
+    /// fonts that omit `name` entirely.
+    pub fn name(&self) -> Result<Option<Name<'a>>> {
+        match self.table_bytes(tag::NAME) {
+            Ok(bytes) => Ok(Some(Name::parse(bytes)?)),
+            Err(Error::MissingTable { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Parses the `GDEF` table if the font carries one. Fonts without
