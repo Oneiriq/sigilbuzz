@@ -19,6 +19,8 @@ pub mod cff2;
 pub mod cmap;
 pub mod colr;
 pub mod cpal;
+pub mod ebdt;
+pub mod eblc;
 pub mod fvar;
 pub mod gdef;
 pub mod glyf;
@@ -62,6 +64,8 @@ pub use cff2::Cff2;
 pub use cmap::Cmap;
 pub use colr::{Colr, ColrPaint};
 pub use cpal::{Color, Cpal};
+pub use ebdt::{BitPacking, Ebdt, EbdtBitmap, EbdtMetrics};
+pub use eblc::Eblc;
 pub use fvar::{Fvar, VariationAxis};
 pub use gdef::{Gdef, GlyphClass};
 pub use glyf::{Glyf, GlyphBounds};
@@ -166,6 +170,10 @@ pub mod tag {
     pub const CBLC: [u8; 4] = *b"CBLC";
     /// `CBDT` — Color Bitmap Data (Google).
     pub const CBDT: [u8; 4] = *b"CBDT";
+    /// `EBLC` — Embedded Bitmap Location (Microsoft, monochrome).
+    pub const EBLC: [u8; 4] = *b"EBLC";
+    /// `EBDT` — Embedded Bitmap Data (Microsoft, monochrome).
+    pub const EBDT: [u8; 4] = *b"EBDT";
     /// `sbix` — Standard Bitmap Graphics (Apple).
     pub const SBIX: [u8; 4] = *b"sbix";
     /// `SVG ` — OpenType SVG (inline SVG documents per glyph).
