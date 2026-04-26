@@ -36,13 +36,16 @@
 //! - `<clipPath>` containing a single `<path>` (the common case in
 //!   designer-emoji fonts).
 //!
-//! - `<mask>` (`mask-type="luminance"`, the SVG default) containing
-//!   any combination of the supported shape primitives. The mask
-//!   children are rendered into a same-size scratch ColorPixmap; per-
-//!   pixel BT.709 luminance × source alpha gives the mask alpha that
-//!   modulates the masked element's coverage. `userSpaceOnUse` only —
-//!   `objectBoundingBox` mask units are deferred. `mask-type="alpha"`
-//!   is deferred (luminance is the consumer-side default).
+//! - `<mask>` (`mask-type="luminance"` default plus `mask-type="alpha"`
+//!   opt-in) containing any combination of the supported shape
+//!   primitives. The mask children are rendered into a same-size
+//!   scratch ColorPixmap; per-pixel BT.709 luminance × source alpha
+//!   gives the mask alpha for `luminance`, while `alpha` uses the
+//!   mask buffer's alpha channel directly. `maskUnits="userSpaceOnUse"`
+//!   (default) and `maskUnits="objectBoundingBox"` (mask region rect
+//!   re-interpreted in `[0, 1]²` of the masked element's bbox) are
+//!   both supported. Nested mask references inside the mask body
+//!   remain deferred.
 //!
 //! - `stroke-dasharray` + `stroke-dashoffset` on stroked geometry,
 //!   applied to the post-flattening polyline. Curves become chords
@@ -60,11 +63,11 @@
 //! Anything outside this list — filter primitives beyond the set above
 //! (`feTurbulence`, `feImage`, `feMorphology`, `feConvolveMatrix`,
 //! `feSpecularLighting`, `feDiffuseLighting`, `feComponentTransfer`,
-//! `feComposite` operators beyond source-over), `<mask>` with
-//! `maskUnits="objectBoundingBox"` or `mask-type="alpha"`, animations,
-//! scripting, `style=` attributes, `<text>` / `<textPath>` glyph
-//! rendering (text shaping is the consumer's responsibility — see
-//! sigilbuzz core) — is silently skipped.
+//! `feComposite` operators beyond source-over), nested `<mask>`
+//! references (mask-of-mask), animations, scripting, `style=`
+//! attributes, `<text>` / `<textPath>` glyph rendering (text shaping
+//! is the consumer's responsibility — see sigilbuzz core) — is
+//! silently skipped.
 //!
 //! ## Pipeline
 //!
@@ -312,12 +315,44 @@ struct ClipShape {
 /// because masks can hold any combination of shape primitives,
 /// gradients, and per-element transforms — the same machinery that
 /// renders the rest of the document. At render time the mask's fills
-/// paint into a same-size scratch ColorPixmap, then a per-pixel
-/// BT.709 luminance derivation converts the colour buffer into an
-/// alpha mask multiplied against the masked element's coverage.
+/// paint into a same-size scratch ColorPixmap, then either a per-pixel
+/// BT.709 luminance derivation (`mask-type="luminance"`, the default)
+/// or the source alpha channel directly (`mask-type="alpha"`) is used
+/// as the alpha mask multiplied against the masked element's coverage.
 #[derive(Debug, Clone)]
 struct MaskShape {
     fills: Vec<Fill>,
+    /// `mask-type="luminance" | "alpha"`. Luminance is the SVG
+    /// default; alpha skips the BT.709 derivation and uses the mask
+    /// buffer's alpha channel directly.
+    mask_type: MaskType,
+    /// `maskUnits` — coordinate system the mask region (`x`, `y`,
+    /// `width`, `height`) is expressed in. `UserSpaceOnUse` is the
+    /// SVG default for our prior implementation; `ObjectBoundingBox`
+    /// reinterprets the region as `[0, 1]²` of the masked element's
+    /// bounding box.
+    units: MaskUnits,
+    /// Mask region as parsed from `x`, `y`, `width`, `height`.
+    /// Interpretation depends on `units`. When `units` is
+    /// `UserSpaceOnUse`, this is currently informational only — the
+    /// luminance fast path renders the mask body across the entire
+    /// canvas, matching the prior PR #236 behaviour.
+    region_x: f32,
+    region_y: f32,
+    region_w: f32,
+    region_h: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MaskType {
+    Luminance,
+    Alpha,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MaskUnits {
+    UserSpaceOnUse,
+    ObjectBoundingBox,
 }
 
 /// A parsed `<filter>` element — an ordered list of primitives forming
@@ -949,10 +984,10 @@ fn resolve_clip_shape(defs: &Defs<'_>, id: &str) -> Option<ClipShape> {
 /// contents inherit nothing from the masked element) and reuses the
 /// document walk machinery to collect each child shape into a
 /// [`Fill`]. The mask's own `transform=` attribute pre-composes onto
-/// the inherited identity. `mask-type="alpha"` and
-/// `maskUnits="objectBoundingBox"` are deferred — both fall back to
-/// the default behaviour (luminance, userSpaceOnUse), which matches
-/// the bulk of real-world SVG-in-OT mask use.
+/// the inherited identity. Parses `mask-type` (`luminance` default,
+/// `alpha` opt-in) and `maskUnits` (`userSpaceOnUse` default,
+/// `objectBoundingBox` opt-in) plus the mask region rect (`x`, `y`,
+/// `width`, `height`).
 ///
 /// Returns `None` when the id doesn't point at a `<mask>` element or
 /// the mask has no renderable children. A self-referential mask
@@ -997,8 +1032,48 @@ fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape> {
     for f in &mut scratch.fills {
         f.mask = None;
     }
+
+    let mask_type = match mn.attr("mask-type").map(str::trim) {
+        Some(s) if s.eq_ignore_ascii_case("alpha") => MaskType::Alpha,
+        _ => MaskType::Luminance,
+    };
+    let units = match mn.attr("maskUnits").map(str::trim) {
+        Some(s) if s.eq_ignore_ascii_case("objectBoundingBox") => MaskUnits::ObjectBoundingBox,
+        _ => MaskUnits::UserSpaceOnUse,
+    };
+    // Per SVG spec the mask region defaults to the full bounding-box
+    // window when `objectBoundingBox` (-10%, -10%, 120%, 120% in the
+    // spec, but consumer-side OT-SVG fonts almost always use the
+    // simpler 0/0/1/1 window — we follow that simpler convention so
+    // the test fixture in the brief reads cleanly). For
+    // `userSpaceOnUse`, the legacy PR #236 behaviour ignored the
+    // region entirely, so we keep the parse but only consult it in
+    // the bbox path.
+    let region_x = mn
+        .attr("x")
+        .and_then(parse_length)
+        .unwrap_or(0.0);
+    let region_y = mn
+        .attr("y")
+        .and_then(parse_length)
+        .unwrap_or(0.0);
+    let region_w = mn
+        .attr("width")
+        .and_then(parse_length)
+        .unwrap_or(1.0);
+    let region_h = mn
+        .attr("height")
+        .and_then(parse_length)
+        .unwrap_or(1.0);
+
     Some(MaskShape {
         fills: scratch.fills,
+        mask_type,
+        units,
+        region_x,
+        region_y,
+        region_w,
+        region_h,
     })
 }
 
@@ -2379,12 +2454,21 @@ fn render_fill(out: &mut ColorPixmap, fill: &Fill, world: &Affine, tol: f32) {
     paint_into(out, fill, &mask, clip_mask.as_ref(), world);
 }
 
-/// Multiplies `dst`'s premultiplied alpha by the luminance-derived
-/// alpha of `mask`. The mask's children are rendered into a same-size
-/// scratch ColorPixmap, then per-pixel BT.709 luminance × source
-/// alpha is computed and used to scale every channel of `dst`. The
-/// luminance derivation matches SVG 1.1 §14.4 (`mask-type="luminance"`,
-/// the default).
+/// Multiplies `dst`'s premultiplied alpha by the alpha derived from
+/// `mask`. The mask's children are rendered into a same-size scratch
+/// ColorPixmap; the per-pixel coverage factor is then either:
+///
+/// - `mask-type="luminance"` (SVG default): BT.709 luminance × source
+///   alpha (SVG 1.1 §14.4).
+/// - `mask-type="alpha"`: the mask buffer's alpha channel directly,
+///   skipping the luminance derivation entirely.
+///
+/// When `maskUnits="objectBoundingBox"` the mask's `(x, y, width,
+/// height)` rect is interpreted in `[0, 1]²` of the masked element's
+/// bounding box (computed from `dst`'s non-zero alpha extent). Pixels
+/// outside that rect are forced to `m = 0`. `userSpaceOnUse` (the
+/// PR #236 behaviour) leaves the mask coverage unchanged across the
+/// whole canvas.
 fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &Affine, tol: f32) {
     if dst.is_empty() {
         return;
@@ -2396,59 +2480,141 @@ fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &Affine, tol
     for f in &mask_shape.fills {
         render_fill(&mut mask_buf, f, world, tol);
     }
-    // Per-pixel: luminance(mask_rgb) × mask_alpha → m ∈ [0, 1]; scale
-    // every channel of dst by m. dst is premultiplied, so scaling all
-    // four channels uniformly preserves the invariant.
+
+    // For `objectBoundingBox`, derive the bbox from `dst`'s non-zero
+    // alpha extent and pre-compute the pixel-space window the mask
+    // region (`x`, `y`, `width`, `height`) maps onto.
+    //
+    // Storing the inclusive min / exclusive max keeps the inside
+    // test branch-cheap in the per-pixel loop.
+    let bbox = if mask_shape.units == MaskUnits::ObjectBoundingBox {
+        compute_alpha_bbox(dst).map(|(min_x, min_y, max_x, max_y)| {
+            let bw = (max_x - min_x) as f32;
+            let bh = (max_y - min_y) as f32;
+            let rx = (min_x as f32) + mask_shape.region_x * bw;
+            let ry = (min_y as f32) + mask_shape.region_y * bh;
+            let rw = mask_shape.region_w * bw;
+            let rh = mask_shape.region_h * bh;
+            // Floor / ceil to integer pixel rows; clamp to canvas.
+            let lo_x = (rx.floor() as i32).max(0);
+            let lo_y = (ry.floor() as i32).max(0);
+            let hi_x = ((rx + rw).ceil() as i32).clamp(0, dst.width as i32);
+            let hi_y = ((ry + rh).ceil() as i32).clamp(0, dst.height as i32);
+            (lo_x, lo_y, hi_x, hi_y)
+        })
+    } else {
+        None
+    };
+    // ObjectBoundingBox with no opaque pixels in `dst` collapses to a
+    // fully transparent result — nothing to mask, nothing to keep.
+    if mask_shape.units == MaskUnits::ObjectBoundingBox && bbox.is_none() {
+        for px in dst.data.chunks_exact_mut(4) {
+            px[0] = 0;
+            px[1] = 0;
+            px[2] = 0;
+            px[3] = 0;
+        }
+        return;
+    }
+
+    // Per-pixel: derive a coverage factor m ∈ [0, 1] from the mask
+    // buffer (luminance or alpha), optionally zero it outside the
+    // objectBoundingBox window, then scale every channel of dst by m.
+    // dst is premultiplied, so scaling all four channels uniformly
+    // preserves the invariant.
     //
     // The mask buffer is also premultiplied (it came out of the same
-    // render pipeline). We un-premultiply RGB before luminance so the
-    // weighting works in straight colour space, which matches what a
-    // browser does (CSS computes luminance from the un-premultiplied
-    // colour).
-    let n = dst.data.len() / 4;
-    for i in 0..n {
-        let mr = mask_buf.data[i * 4] as u32;
-        let mg = mask_buf.data[i * 4 + 1] as u32;
-        let mb = mask_buf.data[i * 4 + 2] as u32;
-        let ma = mask_buf.data[i * 4 + 3] as u32;
-        // Coverage from this mask pixel: luminance of un-premultiplied
-        // colour × source alpha. Express as a fixed-point factor
-        // 0..=255 so we can fold straight into the per-channel scale.
-        let m = if ma == 0 {
-            0u32
-        } else {
-            // Un-premultiply: rgb_straight = rgb_premul / a.
-            // Then luminance = 0.2126*r + 0.7152*g + 0.0722*b in [0,1].
-            // Then m = luminance * alpha.
-            // Re-arrange to integer math: keep RGB premultiplied,
-            // luminance(premul_rgb) is already luminance × alpha
-            // because premul_rgb = straight_rgb × alpha.
-            // So m = (0.2126*mr + 0.7152*mg + 0.0722*mb) computed
-            // directly from premultiplied bytes, no un-premultiply
-            // step. Fixed-point: scale BT.709 weights ×1024 → 218 /
-            // 732 / 74 (sum 1024) for round-trip-stable integer math.
-            let lum = (218 * mr + 732 * mg + 74 * mb + 512) / 1024;
-            lum.min(255)
-        };
-        if m == 255 {
-            continue;
+    // render pipeline). For luminance we keep the integer-math trick
+    // from PR #236: luminance(premul_rgb) is already luminance × alpha
+    // because premul_rgb = straight_rgb × alpha, so no un-premultiply
+    // step is needed. Fixed-point: BT.709 weights ×1024 → 218 / 732 /
+    // 74 (sum 1024) for round-trip-stable integer math.
+    let w = dst.width as i32;
+    let h = dst.height as i32;
+    for y in 0..h {
+        let inside_y = bbox.map_or(true, |(_, lo_y, _, hi_y)| y >= lo_y && y < hi_y);
+        for x in 0..w {
+            let i = (y as usize) * (w as usize) + (x as usize);
+            let inside =
+                inside_y && bbox.map_or(true, |(lo_x, _, hi_x, _)| x >= lo_x && x < hi_x);
+            let m = if inside {
+                let mr = mask_buf.data[i * 4] as u32;
+                let mg = mask_buf.data[i * 4 + 1] as u32;
+                let mb = mask_buf.data[i * 4 + 2] as u32;
+                let ma = mask_buf.data[i * 4 + 3] as u32;
+                match mask_shape.mask_type {
+                    MaskType::Luminance => {
+                        if ma == 0 {
+                            0
+                        } else {
+                            let lum = (218 * mr + 732 * mg + 74 * mb + 512) / 1024;
+                            lum.min(255)
+                        }
+                    }
+                    MaskType::Alpha => ma,
+                }
+            } else {
+                0u32
+            };
+            if m == 255 {
+                continue;
+            }
+            if m == 0 {
+                dst.data[i * 4] = 0;
+                dst.data[i * 4 + 1] = 0;
+                dst.data[i * 4 + 2] = 0;
+                dst.data[i * 4 + 3] = 0;
+                continue;
+            }
+            let dr = dst.data[i * 4] as u32;
+            let dg = dst.data[i * 4 + 1] as u32;
+            let db = dst.data[i * 4 + 2] as u32;
+            let da = dst.data[i * 4 + 3] as u32;
+            dst.data[i * 4] = ((dr * m + 127) / 255) as u8;
+            dst.data[i * 4 + 1] = ((dg * m + 127) / 255) as u8;
+            dst.data[i * 4 + 2] = ((db * m + 127) / 255) as u8;
+            dst.data[i * 4 + 3] = ((da * m + 127) / 255) as u8;
         }
-        if m == 0 {
-            dst.data[i * 4] = 0;
-            dst.data[i * 4 + 1] = 0;
-            dst.data[i * 4 + 2] = 0;
-            dst.data[i * 4 + 3] = 0;
-            continue;
-        }
-        let dr = dst.data[i * 4] as u32;
-        let dg = dst.data[i * 4 + 1] as u32;
-        let db = dst.data[i * 4 + 2] as u32;
-        let da = dst.data[i * 4 + 3] as u32;
-        dst.data[i * 4] = ((dr * m + 127) / 255) as u8;
-        dst.data[i * 4 + 1] = ((dg * m + 127) / 255) as u8;
-        dst.data[i * 4 + 2] = ((db * m + 127) / 255) as u8;
-        dst.data[i * 4 + 3] = ((da * m + 127) / 255) as u8;
     }
+}
+
+/// Returns the inclusive-min / exclusive-max pixel extent of the
+/// non-zero-alpha pixels of `pm`, or `None` if every pixel is
+/// transparent. Used to derive an `objectBoundingBox` window for the
+/// `<mask>` apply step.
+fn compute_alpha_bbox(pm: &ColorPixmap) -> Option<(i32, i32, i32, i32)> {
+    if pm.is_empty() {
+        return None;
+    }
+    let w = pm.width as i32;
+    let h = pm.height as i32;
+    let mut min_x = i32::MAX;
+    let mut min_y = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut max_y = i32::MIN;
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y as usize) * (w as usize) + (x as usize);
+            if pm.data[i * 4 + 3] != 0 {
+                if x < min_x {
+                    min_x = x;
+                }
+                if y < min_y {
+                    min_y = y;
+                }
+                if x > max_x {
+                    max_x = x;
+                }
+                if y > max_y {
+                    max_y = y;
+                }
+            }
+        }
+    }
+    if min_x == i32::MAX {
+        return None;
+    }
+    Some((min_x, min_y, max_x + 1, max_y + 1))
 }
 
 /// Paints `fill` into `dst` at the canvas-aligned position implied by
@@ -3929,6 +4095,165 @@ mod tests {
         let outer = doc.fills[0].mask.as_ref().expect("outer mask attached");
         // Outer's child fill must NOT carry a nested mask reference.
         assert!(outer.fills.iter().all(|f| f.mask.is_none()));
+    }
+
+    #[test]
+    fn mask_type_defaults_to_luminance() {
+        // No `mask-type=` attribute → MaskType::Luminance, matching
+        // the SVG spec default and the PR #236 baseline.
+        let xml = r##"<svg viewBox="0 0 10 10">
+            <defs>
+                <mask id="m">
+                    <rect x="0" y="0" width="10" height="10" fill="white"/>
+                </mask>
+            </defs>
+            <rect x="0" y="0" width="10" height="10" fill="red" mask="url(#m)"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        let m = doc.fills[0].mask.as_ref().unwrap();
+        assert_eq!(m.mask_type, MaskType::Luminance);
+        assert_eq!(m.units, MaskUnits::UserSpaceOnUse);
+    }
+
+    #[test]
+    fn mask_type_alpha_is_parsed() {
+        // `mask-type="alpha"` opts into the alpha-channel-direct path.
+        let xml = r##"<svg viewBox="0 0 10 10">
+            <defs>
+                <mask id="m" mask-type="alpha">
+                    <rect x="0" y="0" width="10" height="10" fill="black" fill-opacity="0.5"/>
+                </mask>
+            </defs>
+            <rect x="0" y="0" width="10" height="10" fill="red" mask="url(#m)"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        let m = doc.fills[0].mask.as_ref().unwrap();
+        assert_eq!(m.mask_type, MaskType::Alpha);
+    }
+
+    #[test]
+    fn mask_units_object_bounding_box_is_parsed() {
+        // `maskUnits="objectBoundingBox"` plus a region rect must round-
+        // trip through resolve_mask_shape.
+        let xml = r##"<svg viewBox="0 0 100 100">
+            <defs>
+                <mask id="m" maskUnits="objectBoundingBox" x="0.25" y="0.25" width="0.5" height="0.5">
+                    <rect x="0" y="0" width="100" height="100" fill="white"/>
+                </mask>
+            </defs>
+            <rect x="0" y="0" width="100" height="100" fill="red" mask="url(#m)"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        let m = doc.fills[0].mask.as_ref().unwrap();
+        assert_eq!(m.units, MaskUnits::ObjectBoundingBox);
+        assert!((m.region_x - 0.25).abs() < 1e-5);
+        assert!((m.region_y - 0.25).abs() < 1e-5);
+        assert!((m.region_w - 0.5).abs() < 1e-5);
+        assert!((m.region_h - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn apply_mask_alpha_uses_alpha_channel_directly() {
+        // mask-type="alpha" means: ignore RGB luminance, sample the
+        // mask buffer's alpha channel directly. A mask body that paints
+        // opaque BLACK (luminance = 0, alpha = 255) would zero the
+        // output under luminance, but must keep it under alpha.
+        let world = Affine::identity();
+        let mut dst = ColorPixmap::new(4, 4);
+        // Fill dst with opaque red (premultiplied: r=255, a=255).
+        for px in dst.data.chunks_exact_mut(4) {
+            px[0] = 255;
+            px[1] = 0;
+            px[2] = 0;
+            px[3] = 255;
+        }
+        // Mask body: a black rect that fully covers the canvas.
+        let ops = vec![
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::LineTo { x: 4.0, y: 0.0 },
+            PathOp::LineTo { x: 4.0, y: 4.0 },
+            PathOp::LineTo { x: 0.0, y: 4.0 },
+            PathOp::Close,
+        ];
+        let body_fill = Fill {
+            ops,
+            paint: Paint::Solid([0, 0, 0, 255]),
+            xform: Affine::identity(),
+            clip: None,
+            is_stroke: false,
+            filter: None,
+            mask: None,
+        };
+        let mask_shape = MaskShape {
+            fills: vec![body_fill],
+            mask_type: MaskType::Alpha,
+            units: MaskUnits::UserSpaceOnUse,
+            region_x: 0.0,
+            region_y: 0.0,
+            region_w: 1.0,
+            region_h: 1.0,
+        };
+        apply_mask(&mut dst, &mask_shape, &world, 0.25);
+        // Under alpha-mode the opaque-black mask body keeps every dst
+        // pixel intact (alpha = 255 → m = 255). Under luminance it
+        // would have zeroed the pixels.
+        for px in dst.data.chunks_exact(4) {
+            assert_eq!(px[0], 255, "alpha-mask kept red channel intact");
+            assert_eq!(px[3], 255, "alpha-mask kept dst alpha intact");
+        }
+    }
+
+    #[test]
+    fn apply_mask_object_bounding_box_clips_to_region() {
+        // maskUnits="objectBoundingBox" with x=0.25 y=0.25 w=0.5 h=0.5
+        // on a 100x100 opaque rect: only the [25, 75) × [25, 75) pixel
+        // region survives; everything outside is zeroed.
+        let world = Affine::identity();
+        let mut dst = ColorPixmap::new(100, 100);
+        for px in dst.data.chunks_exact_mut(4) {
+            px[0] = 255;
+            px[1] = 0;
+            px[2] = 0;
+            px[3] = 255;
+        }
+        let ops = vec![
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::LineTo { x: 100.0, y: 0.0 },
+            PathOp::LineTo { x: 100.0, y: 100.0 },
+            PathOp::LineTo { x: 0.0, y: 100.0 },
+            PathOp::Close,
+        ];
+        let body_fill = Fill {
+            ops,
+            paint: Paint::Solid([255, 255, 255, 255]),
+            xform: Affine::identity(),
+            clip: None,
+            is_stroke: false,
+            filter: None,
+            mask: None,
+        };
+        let mask_shape = MaskShape {
+            fills: vec![body_fill],
+            mask_type: MaskType::Luminance,
+            units: MaskUnits::ObjectBoundingBox,
+            region_x: 0.25,
+            region_y: 0.25,
+            region_w: 0.5,
+            region_h: 0.5,
+        };
+        apply_mask(&mut dst, &mask_shape, &world, 0.25);
+        // Inside the [25, 75) box: pixels survive (white luminance ×
+        // opaque alpha = 255 → unchanged premultiplied red).
+        let inside = dst.get(50, 50);
+        assert_eq!(inside, [255, 0, 0, 255]);
+        // Outside the box: forced to zero.
+        let outside_tl = dst.get(5, 5);
+        let outside_br = dst.get(95, 95);
+        assert_eq!(outside_tl, [0, 0, 0, 0]);
+        assert_eq!(outside_br, [0, 0, 0, 0]);
+        // Just outside the upper-left region edge.
+        let edge_just_outside = dst.get(24, 24);
+        assert_eq!(edge_just_outside, [0, 0, 0, 0]);
     }
 
     #[test]
