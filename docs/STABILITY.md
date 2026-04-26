@@ -44,6 +44,28 @@ changes will only happen on a major-version bump.
 - `tables::{Fvar, VariationAxis, Avar, Hvar, Vvar, Mvar}` — variations
 - `tables::tag::*` — table tag constants
 - `Error`, `Result`, `VERSION`
+- **Promoted in 0.20.0** (audit follow-up #235 — curated re-exports
+  of items previously reachable only through the `#[doc(hidden)]`
+  `ot::*` and `unicode::*` deep paths):
+  - `feature` — OpenType feature-tag byte-literal constants
+    (re-export of `ot::feature`).
+  - `JoiningForm` — Arabic joining-form enum (re-export of
+    `ot::arabic::JoiningForm`).
+  - `UnicodeScript` — coarse script bucket (re-export of
+    `unicode::Script`, renamed to leave room for a future
+    `ot::Script` script-tag enum).
+  - `script_of`, `is_hangul_jamo` — char-to-script classifiers
+    (re-exports of `unicode::script_of` /
+    `unicode::is_hangul_jamo`).
+  - `BidiInfo` — UAX #9 result type (re-export of
+    `unicode::bidi::BidiInfo`).
+  - `BidiClass`, `bidi_class` — UCD `Bidi_Class` enum + lookup
+    (re-exports of `unicode::bidi_class::*`).
+  - `JoiningType` — Arabic / Mongolian joining-type enum
+    (re-export of `unicode::joining::JoiningType`).
+  The deep `ot::*` and `unicode::*` paths remain `#[doc(hidden)]`
+  Tier-2; only the names listed above carry the Tier-1 stability
+  commitment.
 
 **`sigilbuzz-render`:**
 
@@ -121,11 +143,18 @@ downstream pinning. Their shape may change in any minor release.
 - `sigilbuzz::ot::*` — script-shaping internals: Arabic, Indic, USE,
   Mongolian, Tibetan state machines plus feature tag constants. The
   shaper API is `shape()`; the per-script machinery is not part of
-  the public surface.
-- `sigilbuzz::unicode::*` — Unicode property tables. The exception is
-  `unicode::Script`, used by `sigilbuzz-capi` for the `hb_script_t`
-  mapping; that will be promoted to a stable export once the variant
-  set settles.
+  the public surface. As of 0.20.0 the consumer-facing subset
+  (`feature` constants module, `arabic::JoiningForm`) is re-exported
+  at crate root and *is* Tier-1 — see the `sigilbuzz` (root crate)
+  list above.
+- `sigilbuzz::unicode::*` — Unicode property tables. As of 0.20.0
+  the consumer-facing subset is re-exported at crate root and *is*
+  Tier-1 (`UnicodeScript`, `script_of`, `is_hangul_jamo`,
+  `BidiInfo`, `BidiClass`, `bidi_class`, `JoiningType`); the
+  remaining `unicode::*` deep paths (bidi-class table internals,
+  indic / use category tables, normalization helpers, bidi-bracket
+  pairs, joining-type lookup table) stay Tier-2 because the UCD
+  data continues to evolve UCD-version by UCD-version.
 - `sigilbuzz::tables::{ankr, avar, base, cbdt, cblc, cff, cff2, cmap,
   ebdt, eblc, fvar, gdef, glyf, gpos, gsub, gvar, head, hhea, hmtx,
   hvar, kern, kerx, layout, loca, math, maxp, morx, multi_var_store,
