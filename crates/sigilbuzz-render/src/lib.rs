@@ -110,8 +110,8 @@ pub use affine::Affine;
 pub use bitmaps::{decode_ebdt_mono, decode_png, rasterize_bitmap_glyph, rescale_bilinear};
 pub use error::RenderError;
 pub use flatten::{
-    arc_length_cubic, arc_length_quad, flatten, flatten_grouped, FlattenedCurve, Segment,
-    DEFAULT_TOLERANCE,
+    arc_length_cubic, arc_length_cubic_solve_t, arc_length_quad, arc_length_quad_solve_t, flatten,
+    flatten_grouped, FlattenedCurve, Segment, DEFAULT_TOLERANCE,
 };
 pub use pixmap::{ColorPixmap, Pixmap};
 pub use png_encode::{encode_png, encode_png_alpha};

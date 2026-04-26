@@ -440,6 +440,166 @@ pub fn arc_length_cubic(
     arc_length_cubic_rec(x0, y0, x1, y1, x2, y2, x3, y3, tol, 0)
 }
 
+/// Solves for the Bezier parameter `t` along a quadratic that
+/// corresponds to a given arc-length distance `target` from `t = 0`.
+///
+/// Used by stroke-dasharray when a dash boundary lands mid-curve and
+/// the caller needs the exact parametric position (e.g. for splitting
+/// the curve into draw / skip ranges before re-flattening). Returns
+/// `t ∈ [0, 1]`. If `target ≤ 0` returns 0; if `target` is at or past
+/// the curve's total arc length, returns 1.
+///
+/// Implementation: bisection on the prefix-arc-length function
+/// `L(t) = arc_length(curve restricted to [0, t])`. Bisection is
+/// monotone-stable on cusps and pathological cubics where Newton's
+/// method can overshoot — the dasher must never panic on adversarial
+/// curves, so we accept ~25 iterations (≤ 1e-7 relative tolerance) for
+/// robustness over Newton's quadratic convergence.
+///
+/// `tolerance` controls the arc-length estimator accuracy under the
+/// hood; pass `0.01` for typical SVG dash work.
+#[must_use]
+pub fn arc_length_quad_solve_t(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    target: f32,
+    tolerance: f32,
+) -> f32 {
+    if target <= 0.0 {
+        return 0.0;
+    }
+    let total = arc_length_quad(x0, y0, x1, y1, x2, y2, tolerance);
+    if !target.is_finite() || target >= total {
+        return 1.0;
+    }
+    // Bisect on [0, 1]. Each iteration evaluates the prefix length by
+    // splitting the curve at the trial midpoint via de Casteljau and
+    // estimating the left half's arc length.
+    let mut lo = 0.0_f32;
+    let mut hi = 1.0_f32;
+    for _ in 0..25 {
+        let mid = 0.5 * (lo + hi);
+        let prefix = quad_prefix_length(x0, y0, x1, y1, x2, y2, mid, tolerance);
+        if prefix < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+        if (hi - lo) < 1e-7 {
+            break;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+fn quad_prefix_length(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    t: f32,
+    tolerance: f32,
+) -> f32 {
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return arc_length_quad(x0, y0, x1, y1, x2, y2, tolerance);
+    }
+    // de Casteljau split at `t`, returning the left sub-curve.
+    let m01x = x0 + t * (x1 - x0);
+    let m01y = y0 + t * (y1 - y0);
+    let m12x = x1 + t * (x2 - x1);
+    let m12y = y1 + t * (y2 - y1);
+    let mx = m01x + t * (m12x - m01x);
+    let my = m01y + t * (m12y - m01y);
+    arc_length_quad(x0, y0, m01x, m01y, mx, my, tolerance)
+}
+
+/// Solves for the Bezier parameter `t` along a cubic that corresponds
+/// to a given arc-length distance `target` from `t = 0`. See
+/// [`arc_length_quad_solve_t`] for the contract; the cubic variant
+/// uses the same bisection-on-prefix-length scheme against
+/// [`arc_length_cubic`].
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn arc_length_cubic_solve_t(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    x3: f32,
+    y3: f32,
+    target: f32,
+    tolerance: f32,
+) -> f32 {
+    if target <= 0.0 {
+        return 0.0;
+    }
+    let total = arc_length_cubic(x0, y0, x1, y1, x2, y2, x3, y3, tolerance);
+    if !target.is_finite() || target >= total {
+        return 1.0;
+    }
+    let mut lo = 0.0_f32;
+    let mut hi = 1.0_f32;
+    for _ in 0..25 {
+        let mid = 0.5 * (lo + hi);
+        let prefix = cubic_prefix_length(x0, y0, x1, y1, x2, y2, x3, y3, mid, tolerance);
+        if prefix < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+        if (hi - lo) < 1e-7 {
+            break;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cubic_prefix_length(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    x3: f32,
+    y3: f32,
+    t: f32,
+    tolerance: f32,
+) -> f32 {
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return arc_length_cubic(x0, y0, x1, y1, x2, y2, x3, y3, tolerance);
+    }
+    // de Casteljau split at `t`, returning the left sub-cubic.
+    let m01x = x0 + t * (x1 - x0);
+    let m01y = y0 + t * (y1 - y0);
+    let m12x = x1 + t * (x2 - x1);
+    let m12y = y1 + t * (y2 - y1);
+    let m23x = x2 + t * (x3 - x2);
+    let m23y = y2 + t * (y3 - y2);
+    let m012x = m01x + t * (m12x - m01x);
+    let m012y = m01y + t * (m12y - m01y);
+    let m123x = m12x + t * (m23x - m12x);
+    let m123y = m12y + t * (m23y - m12y);
+    let mx = m012x + t * (m123x - m012x);
+    let my = m012y + t * (m123y - m012y);
+    arc_length_cubic(x0, y0, m01x, m01y, m012x, m012y, mx, my, tolerance)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn arc_length_cubic_rec(
     x0: f32,
@@ -932,5 +1092,65 @@ mod tests {
         // Length should be finite and non-negative, even at MAX_DEPTH.
         let l = arc_length_cubic(0.0, 0.0, 100.0, 100.0, 100.0, 100.0, 0.0, 0.0, 0.01);
         assert!(l.is_finite() && l > 0.0, "got {l}");
+    }
+
+    #[test]
+    fn arc_length_quad_solve_t_clamps_below_zero_and_above_total() {
+        // target = 0  → t = 0
+        // target = ∞ → t = 1
+        let t0 = arc_length_quad_solve_t(0.0, 0.0, 50.0, 50.0, 100.0, 0.0, 0.0, 0.01);
+        let t1 = arc_length_quad_solve_t(0.0, 0.0, 50.0, 50.0, 100.0, 0.0, 1e9, 0.01);
+        assert!(t0.abs() < 1e-6);
+        assert!((t1 - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn arc_length_quad_solve_t_finds_midpoint_arc() {
+        // Arc-length total ≈ 114.78. Half-length should land near
+        // t = 0.5 (the curve is symmetric about t = 0.5).
+        let total = arc_length_quad(0.0, 0.0, 50.0, 50.0, 100.0, 0.0, 0.01);
+        let t = arc_length_quad_solve_t(0.0, 0.0, 50.0, 50.0, 100.0, 0.0, 0.5 * total, 0.01);
+        assert!(
+            (t - 0.5).abs() < 1e-3,
+            "expected t ≈ 0.5 at midpoint arc length, got {t}"
+        );
+    }
+
+    #[test]
+    fn arc_length_cubic_solve_t_round_trips() {
+        // Quarter-circle approx; solve for t at a known arc length and
+        // verify the prefix-length round-trips.
+        const K: f32 = 0.552_284_8 * 100.0;
+        let total = arc_length_cubic(100.0, 0.0, 100.0, K, K, 100.0, 0.0, 100.0, 0.01);
+        let target = 0.25 * total;
+        let t =
+            arc_length_cubic_solve_t(100.0, 0.0, 100.0, K, K, 100.0, 0.0, 100.0, target, 0.01);
+        let recovered =
+            cubic_prefix_length(100.0, 0.0, 100.0, K, K, 100.0, 0.0, 100.0, t, 0.01);
+        assert!(
+            (recovered - target).abs() < 0.05,
+            "target {target}, recovered {recovered}, t {t}"
+        );
+    }
+
+    #[test]
+    fn arc_length_cubic_solve_t_pathological_cusp_does_not_panic() {
+        // Same cusp as arc_length_cubic_pathological_cusp_does_not_panic.
+        // Bisection is monotone-stable; should always return a finite t
+        // in [0, 1].
+        let total = arc_length_cubic(0.0, 0.0, 100.0, 100.0, 100.0, 100.0, 0.0, 0.0, 0.01);
+        let t = arc_length_cubic_solve_t(
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            0.5 * total,
+            0.01,
+        );
+        assert!(t.is_finite() && (0.0..=1.0).contains(&t), "got {t}");
     }
 }
