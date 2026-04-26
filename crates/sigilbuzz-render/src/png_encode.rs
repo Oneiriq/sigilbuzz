@@ -86,9 +86,8 @@ pub fn encode_png(pixmap: &ColorPixmap) -> Vec<u8> {
 /// `(value, value)` byte pairs in the IDAT.
 #[must_use]
 pub fn encode_png_alpha(pixmap: &Pixmap) -> Vec<u8> {
-    let mut raw = Vec::with_capacity(
-        ((pixmap.width as usize) + 1).saturating_mul(pixmap.height as usize),
-    );
+    let mut raw =
+        Vec::with_capacity(((pixmap.width as usize) + 1).saturating_mul(pixmap.height as usize));
     for y in 0..pixmap.height {
         raw.push(0u8); // filter: None
         for x in 0..pixmap.width {
