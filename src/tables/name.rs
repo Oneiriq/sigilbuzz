@@ -404,10 +404,7 @@ mod tests {
     #[test]
     fn rejects_unknown_version() {
         let bytes = build_name(7, &[]);
-        assert!(matches!(
-            Name::parse(&bytes),
-            Err(Error::Malformed { .. })
-        ));
+        assert!(matches!(Name::parse(&bytes), Err(Error::Malformed { .. })));
     }
 
     #[test]
@@ -439,7 +436,7 @@ mod tests {
         bytes.extend_from_slice(&1u16.to_be_bytes()); // name_id
         bytes.extend_from_slice(&(payload.len() as u16).to_be_bytes());
         bytes.extend_from_slice(&0u16.to_be_bytes()); // string_offset
-        // langTagCount + 1 record (length 0, offset 0).
+                                                      // langTagCount + 1 record (length 0, offset 0).
         bytes.extend_from_slice(&lang_tag_count.to_be_bytes());
         bytes.extend_from_slice(&0u16.to_be_bytes());
         bytes.extend_from_slice(&0u16.to_be_bytes());
@@ -456,10 +453,7 @@ mod tests {
         bytes.extend_from_slice(&0u16.to_be_bytes()); // version
         bytes.extend_from_slice(&0u16.to_be_bytes()); // count
         bytes.extend_from_slice(&0xFFFFu16.to_be_bytes()); // storage_offset
-        assert!(matches!(
-            Name::parse(&bytes),
-            Err(Error::Malformed { .. })
-        ));
+        assert!(matches!(Name::parse(&bytes), Err(Error::Malformed { .. })));
     }
 
     #[test]
@@ -555,7 +549,7 @@ mod tests {
         bytes.extend_from_slice(&1u16.to_be_bytes()); // name_id
         bytes.extend_from_slice(&4u16.to_be_bytes()); // length
         bytes.extend_from_slice(&0xFFFFu16.to_be_bytes()); // bogus offset
-        // No storage.
+                                                           // No storage.
         let name = Name::parse(&bytes).unwrap();
         assert!(name.family_name().is_none());
     }
