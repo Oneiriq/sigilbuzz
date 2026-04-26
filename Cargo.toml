@@ -95,18 +95,30 @@ strip = "debuginfo"
 inherits = "release"
 debug = true
 
-# Lints live here so every workspace crate inherits the same rigor.
-# Each crate opts in via `[lints] workspace = true`.
+# Workspace-wide lints. Every crate opts in via `[lints] workspace =
+# true` to enforce the rules in `docs/STABILITY.md`:
 #
-# `missing_docs = warn` is intentional — the pre-1.0 stability commitment
-# in `docs/STABILITY.md` requires that every `pub` item carries a doc
-# comment so consumers know what they are depending on. New `pub` items
-# without a doc comment trip a build warning.
+#   missing_docs = warn  — every `pub` item must carry a doc comment
+#                          so the public-API contract is self-documenting.
+#   unsafe_op_in_unsafe_fn = warn  — surface every unsafe operation
+#                          even inside an `unsafe fn` body.
+#
+# Per-crate `[lints]` blocks may add stricter rules (the root sigilbuzz
+# crate enables clippy::all + pedantic with selective allows below).
+# Companion crates inherit the workspace baseline only.
 [workspace.lints.rust]
 missing_docs = "warn"
 unsafe_op_in_unsafe_fn = "warn"
 
-[workspace.lints.clippy]
+# Root-crate-only clippy enforcement. The shaper has the deepest parser
+# code and the densest existing pedantic-clean coverage, so it stays at
+# pedantic-warn. Companion crates have not been audited at this level
+# yet — promoting them is a follow-up issue per crate.
+[lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+
+[lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 # Selectively relaxed — these fire on patterns that are idiomatic in a
@@ -130,7 +142,3 @@ missing_panics_doc = "allow"
 # public-API-doc rule and let private items document themselves on a
 # best-effort basis.
 missing_docs_in_private_items = "allow"
-
-# The package itself opts in to the same lints.
-[lints]
-workspace = true
