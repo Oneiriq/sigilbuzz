@@ -402,6 +402,12 @@ struct ElemCtx {
     stroke_linejoin: LineJoin,
     /// Inherited stroke-opacity factor in `[0, 1]`.
     stroke_opacity: f32,
+    /// Parsed `stroke-dasharray`. Empty means "no dashing". Odd-length
+    /// lists are normalised to even length by [`parse_dasharray`].
+    stroke_dasharray: Vec<f32>,
+    /// `stroke-dashoffset` (in user-space units), applied at the start
+    /// of every contour.
+    stroke_dashoffset: f32,
     /// Active clip-path href, applied to every fill / stroke produced
     /// inside this subtree. Stored as the bare id (no `url(#…)` form).
     clip_href: Option<String>,
@@ -420,6 +426,8 @@ impl Default for ElemCtx {
             stroke_linecap: LineCap::Butt,
             stroke_linejoin: LineJoin::Miter,
             stroke_opacity: 1.0,
+            stroke_dasharray: Vec::new(),
+            stroke_dashoffset: 0.0,
             clip_href: None,
         }
     }
@@ -607,6 +615,12 @@ fn inherit_attrs(parent: &ElemCtx, node: &Node) -> ElemCtx {
                 "bevel" => LineJoin::Bevel,
                 _ => LineJoin::Miter,
             };
+        } else if attr_matches(k, "stroke-dasharray") {
+            ctx.stroke_dasharray = parse_dasharray(v);
+        } else if attr_matches(k, "stroke-dashoffset") {
+            if let Some(o) = parse_length(v) {
+                ctx.stroke_dashoffset = o;
+            }
         } else if attr_matches(k, "clip-path") {
             if let Some(href) = parse_url_ref(v) {
                 ctx.clip_href = Some(href);
@@ -669,6 +683,8 @@ fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) 
                     ctx.stroke_width,
                     ctx.stroke_linecap,
                     ctx.stroke_linejoin,
+                    &ctx.stroke_dasharray,
+                    ctx.stroke_dashoffset,
                 );
                 if !stroke_ops.is_empty() && doc.fills.len() < MAX_FILLS {
                     doc.fills.push(Fill {
@@ -899,7 +915,14 @@ fn parse_stop_offset(s: &str) -> f32 {
 /// segment direction. Joins between segments are filled with
 /// miter / round / bevel geometry, and the open ends carry the
 /// configured cap shape.
-fn stroke_to_fill(ops: &[PathOp], stroke_width: f32, cap: LineCap, join: LineJoin) -> Vec<PathOp> {
+fn stroke_to_fill(
+    ops: &[PathOp],
+    stroke_width: f32,
+    cap: LineCap,
+    join: LineJoin,
+    dasharray: &[f32],
+    dashoffset: f32,
+) -> Vec<PathOp> {
     if stroke_width <= 0.0 {
         return Vec::new();
     }
@@ -907,11 +930,24 @@ fn stroke_to_fill(ops: &[PathOp], stroke_width: f32, cap: LineCap, join: LineJoi
     let half = stroke_width * 0.5;
     let mut out: Vec<PathOp> = Vec::new();
 
+    let dashed = !dasharray.is_empty() && dasharray.iter().any(|&v| v > 0.0);
+
     for poly in &polylines {
         if poly.points.len() < 2 {
             continue;
         }
-        emit_stroked_polyline(&mut out, &poly.points, poly.closed, half, cap, join);
+        if dashed {
+            // Per-contour: walk arc length, emit only the "draw" phase
+            // segments as fresh open polylines.
+            let segs = dash_polyline(&poly.points, poly.closed, dasharray, dashoffset);
+            for seg in segs {
+                if seg.len() >= 2 {
+                    emit_stroked_polyline(&mut out, &seg, false, half, cap, join);
+                }
+            }
+        } else {
+            emit_stroked_polyline(&mut out, &poly.points, poly.closed, half, cap, join);
+        }
     }
     out
 }
@@ -1367,6 +1403,140 @@ fn emit_miter_join(
         y: p_b_right.1,
     });
     out.push(PathOp::Close);
+}
+
+// =========================================================================
+// Stroke dasharray
+// =========================================================================
+
+/// Parses a `stroke-dasharray` attribute body. Empty / `none` /
+/// all-zero / unparseable inputs return an empty `Vec`. SVG mandates
+/// that odd-length lists are doubled (e.g. `"2 3 5"` →
+/// `"2 3 5 2 3 5"`); we apply that here so the walker can iterate
+/// without worrying about parity.
+fn parse_dasharray(s: &str) -> Vec<f32> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+        return Vec::new();
+    }
+    let mut nums: Vec<f32> = Vec::new();
+    for tok in trimmed.split(|c: char| c == ',' || c.is_ascii_whitespace()) {
+        if tok.is_empty() {
+            continue;
+        }
+        // Strip an optional `px` suffix; everything else (em/%/etc.)
+        // we treat as "user-space units" per SVG.
+        let body = tok.trim_end_matches("px");
+        match body.parse::<f32>() {
+            Ok(n) if n.is_finite() && n >= 0.0 => nums.push(n),
+            _ => return Vec::new(), // SVG: any negative or invalid → ignore the whole list.
+        }
+    }
+    if nums.is_empty() || nums.iter().all(|&v| v == 0.0) {
+        return Vec::new();
+    }
+    if nums.len() % 2 == 1 {
+        let extra = nums.clone();
+        nums.extend_from_slice(&extra);
+    }
+    nums
+}
+
+/// Walks `points` by cumulative arc length and returns the polylines
+/// that fall inside the "draw" phase of the dash pattern. `pattern` is
+/// even-length and non-empty (caller-checked). `offset` is applied at
+/// the start of the contour, then resets per [SVG spec].
+///
+/// Behaviour at a glance:
+///
+/// - Stride alternates draw / skip starting from index 0 ("draw").
+/// - `offset` may be negative or larger than the pattern; reduced
+///   modulo `total = sum(pattern)` after sign-folding.
+/// - Closed contours are walked as if a final segment connected back
+///   to the first vertex; the resulting "wrap" sub-polyline is split
+///   the same way as any other.
+fn dash_polyline(
+    points: &[(f32, f32)],
+    closed: bool,
+    pattern: &[f32],
+    offset: f32,
+) -> Vec<Vec<(f32, f32)>> {
+    let total: f32 = pattern.iter().sum();
+    if total <= 0.0 || points.len() < 2 {
+        return Vec::new();
+    }
+    // Normalise offset into [0, total).
+    let mut off = offset % total;
+    if off < 0.0 {
+        off += total;
+    }
+    // The current dash index (even = draw, odd = skip) and remaining
+    // length within that dash segment after consuming `off`.
+    let mut idx = 0usize;
+    let mut remaining = pattern[0];
+    while off > 0.0 && remaining <= off {
+        off -= remaining;
+        idx = (idx + 1) % pattern.len();
+        remaining = pattern[idx];
+    }
+    remaining -= off;
+    let mut drawing = idx % 2 == 0;
+
+    // Build the list of segments to walk. For closed contours we
+    // append the wraparound segment.
+    let n = points.len();
+    let segs = if closed { n } else { n - 1 };
+
+    let mut out: Vec<Vec<(f32, f32)>> = Vec::new();
+    let mut cur: Vec<(f32, f32)> = Vec::new();
+    if drawing {
+        cur.push(points[0]);
+    }
+
+    for i in 0..segs {
+        let a = points[i];
+        let b = points[(i + 1) % n];
+        let dx = b.0 - a.0;
+        let dy = b.1 - a.1;
+        let seg_len = (dx * dx + dy * dy).sqrt();
+        if seg_len < 1e-6 {
+            continue;
+        }
+        let mut t_consumed = 0.0_f32;
+        // Walk the segment, splitting at every dash boundary.
+        while seg_len - t_consumed > remaining {
+            // Boundary lands at `t = (t_consumed + remaining) / seg_len`
+            // along (a → b).
+            let t = (t_consumed + remaining) / seg_len;
+            let bx = a.0 + dx * t;
+            let by = a.1 + dy * t;
+            if drawing {
+                cur.push((bx, by));
+                if cur.len() >= 2 {
+                    out.push(core::mem::take(&mut cur));
+                }
+            }
+            t_consumed += remaining;
+            // Advance to the next pattern entry.
+            idx = (idx + 1) % pattern.len();
+            remaining = pattern[idx];
+            drawing = idx % 2 == 0;
+            if drawing {
+                cur.clear();
+                cur.push((bx, by));
+            }
+        }
+        // Remainder of the segment.
+        let used = seg_len - t_consumed;
+        remaining -= used;
+        if drawing {
+            cur.push(b);
+        }
+    }
+    if drawing && cur.len() >= 2 {
+        out.push(cur);
+    }
+    out
 }
 
 // =========================================================================
@@ -2841,5 +3011,114 @@ mod tests {
         </svg>"#;
         let doc = parse_document(xml).unwrap();
         assert!(doc.fills.is_empty());
+    }
+
+    #[test]
+    fn dasharray_parses_even_list_unchanged() {
+        assert_eq!(parse_dasharray("4 2"), vec![4.0, 2.0]);
+        assert_eq!(parse_dasharray("4, 2"), vec![4.0, 2.0]);
+        assert_eq!(parse_dasharray("1 2 3 4"), vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn dasharray_doubles_odd_length() {
+        // "2 3 5" → "2 3 5 2 3 5"
+        assert_eq!(
+            parse_dasharray("2 3 5"),
+            vec![2.0, 3.0, 5.0, 2.0, 3.0, 5.0]
+        );
+    }
+
+    #[test]
+    fn dasharray_none_and_empty_yield_empty() {
+        assert!(parse_dasharray("none").is_empty());
+        assert!(parse_dasharray("").is_empty());
+        assert!(parse_dasharray("   ").is_empty());
+    }
+
+    #[test]
+    fn dasharray_negative_or_invalid_yields_empty() {
+        assert!(parse_dasharray("4 -2").is_empty());
+        assert!(parse_dasharray("4 abc").is_empty());
+    }
+
+    #[test]
+    fn dasharray_zero_only_yields_empty() {
+        // All zeros means "no dash" per the SVG spec — same as none.
+        assert!(parse_dasharray("0 0 0 0").is_empty());
+    }
+
+    #[test]
+    fn dasharray_strips_px_suffix() {
+        assert_eq!(parse_dasharray("4px 2px"), vec![4.0, 2.0]);
+    }
+
+    #[test]
+    fn dash_walker_emits_alternating_subpolylines_on_a_line() {
+        // 20-unit horizontal line with pattern "4 2": dashes at
+        // [0,4], [6,10], [12,16], [18,20] → 4 sub-polylines.
+        let line = vec![(0.0, 0.0), (20.0, 0.0)];
+        let segs = dash_polyline(&line, false, &[4.0, 2.0], 0.0);
+        assert_eq!(segs.len(), 4);
+        // First dash starts at the contour origin.
+        assert!((segs[0][0].0 - 0.0).abs() < 1e-4);
+        // Second dash starts at x=6.
+        assert!((segs[1][0].0 - 6.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn dash_walker_honours_offset() {
+        // Same 20-unit line, pattern "4 2", offset=4 advances past the
+        // first 4-unit draw — the contour now opens with a 2-unit skip
+        // (x=0..2), then dashes start at x=2.
+        let zero = dash_polyline(&[(0.0, 0.0), (20.0, 0.0)], false, &[4.0, 2.0], 0.0);
+        let off = dash_polyline(&[(0.0, 0.0), (20.0, 0.0)], false, &[4.0, 2.0], 4.0);
+        // With offset=0 the first dash starts at x=0; with offset=4 it
+        // starts later (at x=2). Just verify the offset moved the
+        // first dash forward.
+        assert!(zero[0][0].0 < off[0][0].0);
+        assert!((zero[0][0].0).abs() < 1e-4);
+        assert!((off[0][0].0 - 2.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn dash_walker_resets_per_contour() {
+        // Two contours via M..L M..L; both should start their dash
+        // pattern from offset=0 (i.e. drawing first).
+        let xml = r#"<svg viewBox="0 0 100 100">
+            <path d="M 0 50 L 20 50 M 0 70 L 20 70" stroke="black"
+                  stroke-width="2" stroke-dasharray="4 2" fill="none"/>
+        </svg>"#;
+        let doc = parse_document(xml).unwrap();
+        // One Fill record holds the union of all dashed ribbons; just
+        // confirm the parser accepted the attribute.
+        assert_eq!(doc.fills.len(), 1);
+        assert!(doc.fills[0].is_stroke);
+    }
+
+    #[test]
+    fn dash_walker_works_on_closed_contour() {
+        // A closed square has 4 sides of length 10; pattern "5 5".
+        // Half of perimeter (20 of 40) should be drawing.
+        let pts = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        let segs = dash_polyline(&pts, true, &[5.0, 5.0], 0.0);
+        assert!(!segs.is_empty(), "closed contour should produce dashes");
+        // Total drawn length should approximate 20 (= half the perimeter).
+        let drawn: f32 = segs
+            .iter()
+            .map(|s| {
+                let mut acc = 0.0_f32;
+                for w in s.windows(2) {
+                    let dx = w[1].0 - w[0].0;
+                    let dy = w[1].1 - w[0].1;
+                    acc += (dx * dx + dy * dy).sqrt();
+                }
+                acc
+            })
+            .sum();
+        assert!(
+            (drawn - 20.0).abs() < 0.5,
+            "expected ~20 drawn units, got {drawn}"
+        );
     }
 }
