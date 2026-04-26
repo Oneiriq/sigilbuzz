@@ -1084,7 +1084,13 @@ fn build_multi_region_mvs_varc() -> Vec<u8> {
     // ctrl = 0x01 (no zero, no words, run_len=2).
     let make_entries = |base: u8| -> Vec<Vec<u8>> {
         (0..5)
-            .map(|i| vec![0x01_u8, base.wrapping_add(i as u8), base.wrapping_add(i as u8 + 1)])
+            .map(|i| {
+                vec![
+                    0x01_u8,
+                    base.wrapping_add(i as u8),
+                    base.wrapping_add(i as u8 + 1),
+                ]
+            })
             .collect()
     };
     // 4 regions: pos peak, mid peak (axis 0 +0.5), neg peak,
@@ -1488,7 +1494,10 @@ fn varc_subset_prunes_region_list_and_renumbers_tuple_indexes() {
 
     // Determinism: a second subset call yields byte-identical output.
     let again = subset(&face, &input).expect("subset succeeds");
-    assert_eq!(out.bytes, again.bytes, "region-prune output not deterministic");
+    assert_eq!(
+        out.bytes, again.bytes,
+        "region-prune output not deterministic"
+    );
 
     // Size delta surfacing — gated on an env var so CI noise stays low.
     if std::env::var_os("SIGILBUZZ_REPORT_MVS_DELTA").is_some() {
