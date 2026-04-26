@@ -59,10 +59,10 @@ fn decode_one_triplet(flag_byte: u8, glyph_stream: &mut Reader<'_>) -> Result<(i
     let dy;
     if flag < 10 {
         dx = 0;
-        let mag = (i32::from(flag & 14) << 7) + i32::from(buf[0]);
+        let mag = (i32::from(flag & 0x0E) << 7) + i32::from(buf[0]);
         dy = with_sign(flag, mag);
     } else if flag < 20 {
-        let mag = (i32::from((flag - 10) & 14) << 7) + i32::from(buf[0]);
+        let mag = (i32::from((flag - 10) & 0x0E) << 7) + i32::from(buf[0]);
         dx = with_sign(flag, mag);
         dy = 0;
     } else if flag < 84 {
