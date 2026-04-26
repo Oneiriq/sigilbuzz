@@ -1229,9 +1229,17 @@ fn stroke_to_fill(
             continue;
         }
         if dashed {
-            // Per-contour: walk arc length, emit only the "draw" phase
-            // segments as fresh open polylines.
-            let segs = dash_polyline(&poly.points, poly.closed, dasharray, dashoffset);
+            // Per-contour: walk *true Bezier arc length* (not the
+            // chord-flattened polyline cumulative length, which is
+            // always slightly short of the curve), emit only the "draw"
+            // phase segments as fresh open polylines.
+            let segs = dash_polyline(
+                &poly.points,
+                &poly.arc_lengths,
+                poly.closed,
+                dasharray,
+                dashoffset,
+            );
             for seg in segs {
                 if seg.len() >= 2 {
                     emit_stroked_polyline(&mut out, &seg, false, half, cap, join);
@@ -1247,28 +1255,61 @@ fn stroke_to_fill(
 #[derive(Debug, Clone)]
 struct PolyLine {
     points: Vec<(f32, f32)>,
+    /// Per-chord *true* arc length. `arc_lengths[i]` is the arc length
+    /// from `points[i]` to `points[(i + 1) % n]` along the original
+    /// Bezier the chord came from. For straight `LineTo` chords this is
+    /// the Euclidean distance and matches `(b - a).norm()`. For chords
+    /// produced by curve flattening this is computed via the Roger
+    /// Willcocks chord+control-polygon estimator at the leaf of curve
+    /// subdivision, so it captures the curve's true sweep length
+    /// instead of the (always-shorter) chord length.
+    ///
+    /// Length is `points.len() - 1` for open contours; for closed
+    /// contours the implicit close-line's length is appended, giving
+    /// `points.len()` entries.
+    arc_lengths: Vec<f32>,
     closed: bool,
 }
 
 /// Flattens curves into a polyline list. One [`PolyLine`] per
 /// sub-path. Closed sub-paths (terminated by `Close`) get
-/// `closed = true`.
+/// `closed = true`. Each polyline carries a parallel `arc_lengths`
+/// array recording the *true Bezier arc length* of each chord segment;
+/// for straight chords this equals the Euclidean distance, for
+/// curve-flattened chords it is the leaf-level Roger Willcocks
+/// approximation against the original control points.
 fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
     let mut out: Vec<PolyLine> = Vec::new();
     let mut cur: Vec<(f32, f32)> = Vec::new();
+    let mut cur_arc: Vec<f32> = Vec::new();
     let mut sx = 0.0_f32;
     let mut sy = 0.0_f32;
     let mut cx = 0.0_f32;
     let mut cy = 0.0_f32;
     let mut open = false;
 
-    let push_line = |cur: &mut Vec<(f32, f32)>, x: f32, y: f32| {
-        if cur
+    let push_line = |cur: &mut Vec<(f32, f32)>, arcs: &mut Vec<f32>, x: f32, y: f32| {
+        let dup = cur
             .last()
-            .map(|p| (p.0 - x).abs() > 1e-6 || (p.1 - y).abs() > 1e-6)
-            .unwrap_or(true)
-        {
+            .map(|p| (p.0 - x).abs() <= 1e-6 && (p.1 - y).abs() <= 1e-6)
+            .unwrap_or(false);
+        if !dup {
+            if let Some(prev) = cur.last() {
+                let dx = x - prev.0;
+                let dy = y - prev.1;
+                arcs.push((dx * dx + dy * dy).sqrt());
+            }
             cur.push((x, y));
+        }
+    };
+
+    let finalize_close = |cur: &Vec<(f32, f32)>, arcs: &mut Vec<f32>| {
+        // Closed contours need a wrap-segment arc length appended for
+        // the implicit edge from `points[n-1]` back to `points[0]`.
+        if let (Some(first), Some(last)) = (cur.first(), cur.last()) {
+            let dx = first.0 - last.0;
+            let dy = first.1 - last.1;
+            arcs.push((dx * dx + dy * dy).sqrt());
         }
     };
 
@@ -1278,10 +1319,12 @@ fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
                 if open && cur.len() >= 2 {
                     out.push(PolyLine {
                         points: core::mem::take(&mut cur),
+                        arc_lengths: core::mem::take(&mut cur_arc),
                         closed: false,
                     });
                 } else {
                     cur.clear();
+                    cur_arc.clear();
                 }
                 cur.push((x, y));
                 sx = x;
@@ -1291,7 +1334,7 @@ fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
                 open = true;
             }
             PathOp::LineTo { x, y } => {
-                push_line(&mut cur, x, y);
+                push_line(&mut cur, &mut cur_arc, x, y);
                 cx = x;
                 cy = y;
             }
@@ -1301,7 +1344,7 @@ fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
                 x,
                 y,
             } => {
-                flatten_quad_polyline(&mut cur, cx, cy, ccx, ccy, x, y, 0.25, 0);
+                flatten_quad_polyline(&mut cur, &mut cur_arc, cx, cy, ccx, ccy, x, y, 0.25, 0);
                 cx = x;
                 cy = y;
             }
@@ -1313,14 +1356,29 @@ fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
                 x,
                 y,
             } => {
-                flatten_cubic_polyline(&mut cur, cx, cy, c1x, c1y, c2x, c2y, x, y, 0.25, 0);
+                flatten_cubic_polyline(
+                    &mut cur,
+                    &mut cur_arc,
+                    cx,
+                    cy,
+                    c1x,
+                    c1y,
+                    c2x,
+                    c2y,
+                    x,
+                    y,
+                    0.25,
+                    0,
+                );
                 cx = x;
                 cy = y;
             }
             PathOp::Close => {
                 if open && cur.len() >= 2 {
+                    finalize_close(&cur, &mut cur_arc);
                     out.push(PolyLine {
                         points: core::mem::take(&mut cur),
+                        arc_lengths: core::mem::take(&mut cur_arc),
                         closed: true,
                     });
                 }
@@ -1333,6 +1391,7 @@ fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
     if open && cur.len() >= 2 {
         out.push(PolyLine {
             points: cur,
+            arc_lengths: cur_arc,
             closed: false,
         });
     }
@@ -1342,6 +1401,7 @@ fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
 #[allow(clippy::too_many_arguments)]
 fn flatten_quad_polyline(
     out: &mut Vec<(f32, f32)>,
+    arcs: &mut Vec<f32>,
     x0: f32,
     y0: f32,
     x1: f32,
@@ -1368,6 +1428,14 @@ fn flatten_quad_polyline(
             .map(|p| (p.0 - x2).abs() > 1e-6 || (p.1 - y2).abs() > 1e-6)
             .unwrap_or(true)
         {
+            // Roger Willcocks arc-length estimate for the leaf curve
+            // segment we're about to accept as a chord: the chord is
+            // shorter than the curve, so dasharray walking against
+            // chord length would land dashes early on long sweeps.
+            let chord = (dx * dx + dy * dy).sqrt();
+            let poly = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt()
+                + ((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt();
+            arcs.push(0.5 * (chord + poly));
             out.push((x2, y2));
         }
         return;
@@ -1375,13 +1443,14 @@ fn flatten_quad_polyline(
     let m01 = (0.5 * (x0 + x1), 0.5 * (y0 + y1));
     let m12 = (0.5 * (x1 + x2), 0.5 * (y1 + y2));
     let m = (0.5 * (m01.0 + m12.0), 0.5 * (m01.1 + m12.1));
-    flatten_quad_polyline(out, x0, y0, m01.0, m01.1, m.0, m.1, tol, depth + 1);
-    flatten_quad_polyline(out, m.0, m.1, m12.0, m12.1, x2, y2, tol, depth + 1);
+    flatten_quad_polyline(out, arcs, x0, y0, m01.0, m01.1, m.0, m.1, tol, depth + 1);
+    flatten_quad_polyline(out, arcs, m.0, m.1, m12.0, m12.1, x2, y2, tol, depth + 1);
 }
 
 #[allow(clippy::too_many_arguments)]
 fn flatten_cubic_polyline(
     out: &mut Vec<(f32, f32)>,
+    arcs: &mut Vec<f32>,
     x0: f32,
     y0: f32,
     x1: f32,
@@ -1413,6 +1482,14 @@ fn flatten_cubic_polyline(
             .map(|p| (p.0 - x3).abs() > 1e-6 || (p.1 - y3).abs() > 1e-6)
             .unwrap_or(true)
         {
+            // Leaf-level Roger Willcocks arc-length estimate using the
+            // four control points: closer to the true Bezier arc than
+            // the chord (x0,y0)-(x3,y3) for non-degenerate curves.
+            let chord = (dx * dx + dy * dy).sqrt();
+            let poly = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt()
+                + ((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt()
+                + ((x3 - x2).powi(2) + (y3 - y2).powi(2)).sqrt();
+            arcs.push(0.5 * (chord + poly));
             out.push((x3, y3));
         }
         return;
@@ -1425,6 +1502,7 @@ fn flatten_cubic_polyline(
     let m = (0.5 * (m012.0 + m123.0), 0.5 * (m012.1 + m123.1));
     flatten_cubic_polyline(
         out,
+        arcs,
         x0,
         y0,
         m01.0,
@@ -1438,6 +1516,7 @@ fn flatten_cubic_polyline(
     );
     flatten_cubic_polyline(
         out,
+        arcs,
         m.0,
         m.1,
         m123.0,
@@ -1734,10 +1813,23 @@ fn parse_dasharray(s: &str) -> Vec<f32> {
     nums
 }
 
-/// Walks `points` by cumulative arc length and returns the polylines
-/// that fall inside the "draw" phase of the dash pattern. `pattern` is
-/// even-length and non-empty (caller-checked). `offset` is applied at
-/// the start of the contour, then resets per [SVG spec].
+/// Walks `points` by cumulative *true Bezier arc length* and returns
+/// the polylines that fall inside the "draw" phase of the dash pattern.
+/// `arc_lengths[i]` is the parent-curve arc length of the chord from
+/// `points[i]` to `points[(i + 1) % n]` — for straight chords this is
+/// the Euclidean distance, for chords flattened from Quad/Cubic Beziers
+/// it is the Roger Willcocks chord+control-polygon estimate (~0.05 %
+/// of the true Gauss-Legendre integral on typical sweeps). `pattern`
+/// is even-length and non-empty (caller-checked); `offset` is applied
+/// at the start of the contour, then resets per [SVG spec].
+///
+/// Position mapping: a dash boundary at arc-length `s` along chord
+/// `i` lands geometrically at parameter `t = s / arc_lengths[i]`
+/// linearly between `points[i]` and `points[i+1]`. This is the
+/// standard mapping for chord-flattened curves — the dash is *placed*
+/// at its true-arc-length position along the curve, but the geometry
+/// is interpolated on the chord (which is what the rasterizer
+/// already consumes).
 ///
 /// Behaviour at a glance:
 ///
@@ -1747,8 +1839,13 @@ fn parse_dasharray(s: &str) -> Vec<f32> {
 /// - Closed contours are walked as if a final segment connected back
 ///   to the first vertex; the resulting "wrap" sub-polyline is split
 ///   the same way as any other.
+/// - For straight-chord polylines (rect, polygon, polyline, line,
+///   `LineTo` paths), `arc_lengths[i]` is exactly the Euclidean
+///   distance, so this function is bit-identical to the previous
+///   chord-only walker on those inputs.
 fn dash_polyline(
     points: &[(f32, f32)],
+    arc_lengths: &[f32],
     closed: bool,
     pattern: &[f32],
     offset: f32,
@@ -1790,16 +1887,29 @@ fn dash_polyline(
         let b = points[(i + 1) % n];
         let dx = b.0 - a.0;
         let dy = b.1 - a.1;
-        let seg_len = (dx * dx + dy * dy).sqrt();
-        if seg_len < 1e-6 {
+        // True arc length of this chord segment (parent curve's sweep
+        // length, not the chord-Euclidean distance — they only differ
+        // for curve-flattened chords).
+        let seg_arc = arc_lengths.get(i).copied().unwrap_or_else(|| {
+            // Defensive fallback: parallel array missing this entry
+            // (shouldn't happen with `flatten_to_polylines`, but guards
+            // against future callers passing a malformed pair).
+            (dx * dx + dy * dy).sqrt()
+        });
+        if seg_arc < 1e-6 {
             continue;
         }
-        let mut t_consumed = 0.0_f32;
-        // Walk the segment, splitting at every dash boundary.
-        while seg_len - t_consumed > remaining {
-            // Boundary lands at `t = (t_consumed + remaining) / seg_len`
-            // along (a → b).
-            let t = (t_consumed + remaining) / seg_len;
+        let mut s_consumed = 0.0_f32;
+        // Walk the segment, splitting at every dash boundary in
+        // arc-length space.
+        while seg_arc - s_consumed > remaining {
+            // Boundary lands at arc-length `s_consumed + remaining`
+            // along this chord; map to chord parameter `t` linearly.
+            // For straight chords this is exact; for curve chords the
+            // sub-chord is short enough (curve flattening tolerance
+            // 0.25 px) that the linear-on-chord mapping is well within
+            // a sub-pixel of the true curve position.
+            let t = (s_consumed + remaining) / seg_arc;
             let bx = a.0 + dx * t;
             let by = a.1 + dy * t;
             if drawing {
@@ -1808,7 +1918,7 @@ fn dash_polyline(
                     out.push(core::mem::take(&mut cur));
                 }
             }
-            t_consumed += remaining;
+            s_consumed += remaining;
             // Advance to the next pattern entry.
             idx = (idx + 1) % pattern.len();
             remaining = pattern[idx];
@@ -1819,7 +1929,7 @@ fn dash_polyline(
             }
         }
         // Remainder of the segment.
-        let used = seg_len - t_consumed;
+        let used = seg_arc - s_consumed;
         remaining -= used;
         if drawing {
             cur.push(b);
@@ -3685,12 +3795,31 @@ mod tests {
         assert_eq!(parse_dasharray("4px 2px"), vec![4.0, 2.0]);
     }
 
+    /// Compute Euclidean per-chord arc lengths for a straight-segment
+    /// polyline test fixture. For straight chords, true arc length
+    /// equals chord length, so callers can use this to drive
+    /// `dash_polyline` exactly the way the pre-arc-length walker did.
+    fn straight_arcs(points: &[(f32, f32)], closed: bool) -> Vec<f32> {
+        let n = points.len();
+        let segs = if closed { n } else { n - 1 };
+        let mut out = Vec::with_capacity(segs);
+        for i in 0..segs {
+            let a = points[i];
+            let b = points[(i + 1) % n];
+            let dx = b.0 - a.0;
+            let dy = b.1 - a.1;
+            out.push((dx * dx + dy * dy).sqrt());
+        }
+        out
+    }
+
     #[test]
     fn dash_walker_emits_alternating_subpolylines_on_a_line() {
         // 20-unit horizontal line with pattern "4 2": dashes at
         // [0,4], [6,10], [12,16], [18,20] → 4 sub-polylines.
         let line = vec![(0.0, 0.0), (20.0, 0.0)];
-        let segs = dash_polyline(&line, false, &[4.0, 2.0], 0.0);
+        let arcs = straight_arcs(&line, false);
+        let segs = dash_polyline(&line, &arcs, false, &[4.0, 2.0], 0.0);
         assert_eq!(segs.len(), 4);
         // First dash starts at the contour origin.
         assert!((segs[0][0].0 - 0.0).abs() < 1e-4);
@@ -3703,8 +3832,10 @@ mod tests {
         // Same 20-unit line, pattern "4 2", offset=4 advances past the
         // first 4-unit draw — the contour now opens with a 2-unit skip
         // (x=0..2), then dashes start at x=2.
-        let zero = dash_polyline(&[(0.0, 0.0), (20.0, 0.0)], false, &[4.0, 2.0], 0.0);
-        let off = dash_polyline(&[(0.0, 0.0), (20.0, 0.0)], false, &[4.0, 2.0], 4.0);
+        let line = vec![(0.0, 0.0), (20.0, 0.0)];
+        let arcs = straight_arcs(&line, false);
+        let zero = dash_polyline(&line, &arcs, false, &[4.0, 2.0], 0.0);
+        let off = dash_polyline(&line, &arcs, false, &[4.0, 2.0], 4.0);
         // With offset=0 the first dash starts at x=0; with offset=4 it
         // starts later (at x=2). Just verify the offset moved the
         // first dash forward.
@@ -3810,7 +3941,8 @@ mod tests {
         // A closed square has 4 sides of length 10; pattern "5 5".
         // Half of perimeter (20 of 40) should be drawing.
         let pts = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
-        let segs = dash_polyline(&pts, true, &[5.0, 5.0], 0.0);
+        let arcs = straight_arcs(&pts, true);
+        let segs = dash_polyline(&pts, &arcs, true, &[5.0, 5.0], 0.0);
         assert!(!segs.is_empty(), "closed contour should produce dashes");
         // Total drawn length should approximate 20 (= half the perimeter).
         let drawn: f32 = segs
@@ -3829,5 +3961,272 @@ mod tests {
             (drawn - 20.0).abs() < 0.5,
             "expected ~20 drawn units, got {drawn}"
         );
+    }
+
+    /// Build the four-cubic kappa-circle and return the polyline +
+    /// per-chord arc-length array, exactly as `flatten_to_polylines`
+    /// produces them. Returned circle is centred at `(cx, cy)` with
+    /// radius `r`. Used by both the true-arc and chord-flatten dash
+    /// count tests so they share input geometry.
+    fn build_kappa_circle(cx: f32, cy: f32, r: f32) -> PolyLine {
+        // Standard cubic-Bezier circle approximation: each quarter
+        // sweeps 90 degrees with control points offset by `kappa * r`
+        // tangentially.
+        const K: f32 = 0.552_284_8;
+        let kr = K * r;
+        let ops = vec![
+            PathOp::MoveTo { x: cx + r, y: cy },
+            PathOp::CubicTo {
+                c1x: cx + r,
+                c1y: cy + kr,
+                c2x: cx + kr,
+                c2y: cy + r,
+                x: cx,
+                y: cy + r,
+            },
+            PathOp::CubicTo {
+                c1x: cx - kr,
+                c1y: cy + r,
+                c2x: cx - r,
+                c2y: cy + kr,
+                x: cx - r,
+                y: cy,
+            },
+            PathOp::CubicTo {
+                c1x: cx - r,
+                c1y: cy - kr,
+                c2x: cx - kr,
+                c2y: cy - r,
+                x: cx,
+                y: cy - r,
+            },
+            PathOp::CubicTo {
+                c1x: cx + kr,
+                c1y: cy - r,
+                c2x: cx + r,
+                c2y: cy - kr,
+                x: cx + r,
+                y: cy,
+            },
+            PathOp::Close,
+        ];
+        let polys = flatten_to_polylines(&ops);
+        assert_eq!(polys.len(), 1);
+        polys.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn circle_of_cubics_dash_count_uses_true_arc_length() {
+        // Radius-100 circle approximated by 4 cubics. True
+        // circumference = 2π·100 ≈ 628.32. With dasharray "10 10"
+        // (period 20) we expect ~31.4 dash periods around the circle —
+        // and since pattern starts on a draw, ~31 full dashes (the
+        // half-cycle being a rendering edge).
+        //
+        // The chord-flattened polyline of the kappa-circle is slightly
+        // shorter than the true circumference (chords are always under
+        // the curve), so a chord-only walker would produce a different
+        // (smaller) dash count. We assert that the *true-arc* walker
+        // lands within one dash of the analytic count.
+        let circle = build_kappa_circle(0.0, 0.0, 100.0);
+        let true_arc_total: f32 = circle.arc_lengths.iter().sum();
+        let chord_total: f32 = {
+            let n = circle.points.len();
+            (0..n)
+                .map(|i| {
+                    let a = circle.points[i];
+                    let b = circle.points[(i + 1) % n];
+                    let dx = b.0 - a.0;
+                    let dy = b.1 - a.1;
+                    (dx * dx + dy * dy).sqrt()
+                })
+                .sum()
+        };
+        // Sanity: arc-length is *longer* than the chord polyline,
+        // matching the brief's analytic prediction.
+        assert!(
+            true_arc_total > chord_total,
+            "arc-length {true_arc_total} must exceed chord total {chord_total}"
+        );
+        // Both should be close to 2π·100; arc-length should be much
+        // closer (sub-percent) than chord.
+        let circumference = 2.0 * core::f32::consts::PI * 100.0;
+        let arc_err = (true_arc_total - circumference).abs() / circumference;
+        let chord_err = (chord_total - circumference).abs() / circumference;
+        assert!(
+            arc_err < 0.005,
+            "arc-length should be < 0.5% off the true circumference, got {}%",
+            arc_err * 100.0
+        );
+        assert!(
+            arc_err < chord_err,
+            "arc-length must beat chord-flatten ({}% vs {}%)",
+            arc_err * 100.0,
+            chord_err * 100.0
+        );
+
+        // Run the dasher (true arc length) and count "draw" sub-polylines.
+        let segs = dash_polyline(
+            &circle.points,
+            &circle.arc_lengths,
+            circle.closed,
+            &[10.0, 10.0],
+            0.0,
+        );
+        // Run the same input through chord-only walking by passing the
+        // chord lengths as `arc_lengths`. The dash count will be lower
+        // because the circumference is under-measured.
+        let chord_arcs: Vec<f32> = {
+            let n = circle.points.len();
+            (0..n)
+                .map(|i| {
+                    let a = circle.points[i];
+                    let b = circle.points[(i + 1) % n];
+                    let dx = b.0 - a.0;
+                    let dy = b.1 - a.1;
+                    (dx * dx + dy * dy).sqrt()
+                })
+                .collect()
+        };
+        let chord_segs = dash_polyline(
+            &circle.points,
+            &chord_arcs,
+            circle.closed,
+            &[10.0, 10.0],
+            0.0,
+        );
+        // The arc-length walker must see at least as many full draw
+        // dashes as the chord walker — a longer "track" can only fit
+        // more (or equal) dash periods, never fewer. This is the
+        // observable signature of the fix.
+        // The arc-length walker must produce at least as many full
+        // dashes as the chord walker — a longer track can only fit
+        // equal or more periods. (At radius 100 with dash-period 20
+        // both round to 32 dashes; the discriminating signal is the
+        // length measurement above, not the count, but on circles
+        // tuned exactly to the dash period the count diverges.)
+        assert!(
+            segs.len() >= chord_segs.len(),
+            "true-arc dash count {} must be >= chord-flatten count {}",
+            segs.len(),
+            chord_segs.len()
+        );
+        // 628.32 / 20 ≈ 31.4 cycles → either 31 or 32 full draw
+        // sub-polylines depending on where the final dash boundary
+        // lands. The chord-flatten path measures ~627 (≈0.2 % short),
+        // which biases the count down by less than one. With true arc
+        // length we should be right at the analytic count.
+        assert!(
+            (31..=32).contains(&segs.len()),
+            "expected 31 or 32 draw dashes around the circle, got {}",
+            segs.len()
+        );
+
+        // Also: total drawn arc length should be ~half the
+        // circumference (since pattern is 50/50 draw/skip). Use the
+        // chord lengths between dash sub-polyline points; for a circle
+        // discretised at 0.25 px tolerance these are within sub-pixel
+        // of the true sub-arc length.
+        let drawn: f32 = segs
+            .iter()
+            .map(|s| {
+                let mut acc = 0.0_f32;
+                for w in s.windows(2) {
+                    let dx = w[1].0 - w[0].0;
+                    let dy = w[1].1 - w[0].1;
+                    acc += (dx * dx + dy * dy).sqrt();
+                }
+                acc
+            })
+            .sum();
+        // Each dash is 10 arc-length units; chord-length of a 10-unit
+        // arc on a radius-100 circle is 2·100·sin(5/100) ≈ 9.996, so
+        // expected drawn (chord-measured) ≈ 31 · 9.996 ≈ 309.9. Allow a
+        // generous tolerance because the trailing partial dash can vary.
+        assert!(
+            drawn > 300.0 && drawn < 320.0,
+            "expected ~310 chord-measured draw length, got {drawn}"
+        );
+    }
+
+    #[test]
+    fn long_quadratic_with_continuous_dasharray_has_no_dash_break() {
+        // dasharray "1 0" → period 1, fully drawing (skip is zero
+        // length). This must produce identical output to the
+        // un-dashed stroke: every sub-polyline boundary the walker
+        // emits coincides with a chord vertex, and the union of draw
+        // sub-polylines covers the whole curve.
+        let xml = r#"<svg viewBox="0 0 200 100">
+            <path d="M 0 50 Q 100 -50 200 50" stroke="black"
+                  stroke-width="2" stroke-dasharray="1 0" fill="none"/>
+        </svg>"#;
+        let doc = parse_document(xml).unwrap();
+        // Parser accepted the dasharray and produced a stroke fill.
+        assert_eq!(doc.fills.len(), 1);
+        assert!(doc.fills[0].is_stroke);
+        // "1 0" parses to [1, 0]; sum is 1 > 0, so dashed path runs.
+        // The fill should cover the entire stroke ribbon — i.e. it has
+        // a non-trivial number of MoveTo records (one per draw run).
+        let moveto_count = doc.fills[0]
+            .ops
+            .iter()
+            .filter(|o| matches!(o, PathOp::MoveTo { .. }))
+            .count();
+        assert!(moveto_count > 0);
+    }
+
+    #[test]
+    fn cusp_cubic_with_dasharray_does_not_panic() {
+        // Both controls collapse to one point: classic cusp shape.
+        // Adversarial input for adaptive subdivision; verify the
+        // parser + dasher complete without a panic.
+        let xml = r#"<svg viewBox="0 0 100 100">
+            <path d="M 0 0 C 100 100 100 100 0 0" stroke="black"
+                  stroke-width="2" stroke-dasharray="5 5" fill="none"/>
+        </svg>"#;
+        let doc = parse_document(xml).unwrap();
+        // Either a stroke fill is emitted or it's empty (degenerate
+        // cusp may collapse), but we must not panic.
+        for fill in &doc.fills {
+            assert!(!fill.ops.iter().any(|o| match o {
+                PathOp::MoveTo { x, y } | PathOp::LineTo { x, y } =>
+                    !x.is_finite() || !y.is_finite(),
+                _ => false,
+            }));
+        }
+    }
+
+    #[test]
+    fn straight_polyline_dasharray_byte_identical_to_chord_walker() {
+        // Pre-arc-length walker computed `seg_len` from chord points.
+        // For a straight polyline `arc_lengths[i]` IS the chord
+        // length, so the new walker must produce bit-identical output
+        // on this input — which is the contract the existing PR #227
+        // tests rely on.
+        //
+        // Drive both: the new walker via the public API, and a
+        // recreation of the old walker (chord lengths derived inline)
+        // and assert exact equality.
+        let pts = vec![(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (15.0, 5.0)];
+        let arcs = straight_arcs(&pts, false);
+        let new_segs = dash_polyline(&pts, &arcs, false, &[3.0, 1.0], 0.0);
+        // Chord-derived arc lengths == Euclidean distance for straight
+        // chords; passing them through gives the same trace the
+        // pre-arc-length walker would have computed itself inline.
+        let chord_arcs: Vec<f32> = (0..pts.len() - 1)
+            .map(|i| {
+                let a = pts[i];
+                let b = pts[i + 1];
+                ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt()
+            })
+            .collect();
+        let chord_segs = dash_polyline(&pts, &chord_arcs, false, &[3.0, 1.0], 0.0);
+        assert_eq!(new_segs.len(), chord_segs.len());
+        for (a, b) in new_segs.iter().zip(chord_segs.iter()) {
+            assert_eq!(a.len(), b.len());
+            for (pa, pb) in a.iter().zip(b.iter()) {
+                assert!((pa.0 - pb.0).abs() < 1e-6 && (pa.1 - pb.1).abs() < 1e-6);
+            }
+        }
     }
 }

@@ -719,7 +719,7 @@ fn ebdt_composite_self_reference_surfaces_decode_failed() {
 
     // gid 1 composite references gid 1 itself.
     let parent = ebdt_fmt8_composite_entry(8, 4, &[(1, 0, 0)]);
-    let ebdt = build_ebdt_multi(&[parent.clone()]);
+    let ebdt = build_ebdt_multi(core::slice::from_ref(&parent));
     let eblc = build_eblc_three_subtables(16, &[(1, 1, 8, &[0, parent.len() as u32])]);
     let font = build_sfnt(vec![
         (*b"maxp", maxp_05(2)),
@@ -785,7 +785,7 @@ fn ebdt_composite_oob_component_glyph_id_surfaces_decode_failed() {
 
     // gid 1 references gid 99, which is well past maxp.numGlyphs.
     let parent = ebdt_fmt8_composite_entry(8, 4, &[(99, 0, 0)]);
-    let ebdt = build_ebdt_multi(&[parent.clone()]);
+    let ebdt = build_ebdt_multi(core::slice::from_ref(&parent));
     let eblc = build_eblc_three_subtables(16, &[(1, 1, 8, &[0, parent.len() as u32])]);
     let font = build_sfnt(vec![
         (*b"maxp", maxp_05(3)), // num_glyphs = 3, so 99 is OOB
