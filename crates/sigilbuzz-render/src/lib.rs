@@ -38,8 +38,6 @@
 //!
 //! # Out of scope
 //!
-//! - COLRv1 paint-tree evaluation (live in `sigilbuzz-paint`; a render
-//!   integration lands in 0.15.0+).
 //! - SVG-in-OT.
 //! - EBDT/EBLC mono bitmap embeds (deferred — modern bitmap fonts
 //!   carry CBDT or sbix instead).
@@ -55,6 +53,7 @@ extern crate alloc;
 
 mod affine;
 mod bitmaps;
+mod colrv1;
 mod error;
 mod flatten;
 mod pixmap;

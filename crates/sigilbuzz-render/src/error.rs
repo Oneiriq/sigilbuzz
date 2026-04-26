@@ -10,6 +10,10 @@ pub enum RenderError {
     NoOutline(u16),
     /// The COLR table did not carry a v0 record for this glyph.
     NoColrV0(u16),
+    /// The COLR table did not carry a v1 paint record for this glyph
+    /// (either no v1 extension on the table, or no `BaseGlyphPaintRecord`
+    /// for the requested gid).
+    ColrV1NotFound(u16),
     /// The font carried no CPAL table, so palette resolution is
     /// impossible.
     NoCpal,
@@ -43,6 +47,7 @@ impl fmt::Display for RenderError {
         match self {
             Self::NoOutline(g) => write!(f, "glyph {g} has no outline"),
             Self::NoColrV0(g) => write!(f, "glyph {g} has no COLRv0 record"),
+            Self::ColrV1NotFound(g) => write!(f, "glyph {g} has no COLRv1 paint record"),
             Self::NoCpal => write!(f, "font has no CPAL table"),
             Self::BadPaletteIndex { palette, entry } => {
                 write!(f, "palette/entry index out of range: {palette}/{entry}")

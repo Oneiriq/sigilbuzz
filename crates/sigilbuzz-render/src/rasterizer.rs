@@ -16,6 +16,7 @@ use sigilbuzz::Face;
 
 use crate::affine::Affine;
 use crate::bitmaps;
+use crate::colrv1::rasterize_colrv1;
 use crate::error::RenderError;
 use crate::flatten::flatten;
 use crate::pixmap::{ColorPixmap, Pixmap};
@@ -236,6 +237,38 @@ impl Rasterizer {
             blit_layer(&mut out, &m.r.pixmap, dx, dy, m.color);
         }
         Ok(out)
+    }
+
+    /// Rasterizes a COLRv1 paint-tree colour glyph into a premultiplied
+    /// RGBA [`ColorPixmap`].
+    ///
+    /// Walks the paint tree via `sigilbuzz-paint`'s evaluator, then
+    /// composites every leaf paint (solid / linear / radial / sweep
+    /// gradient) — clipped through any enclosing `PaintGlyph` outline
+    /// and blended through any `PaintComposite` mode — into a single
+    /// surface sized to the union bounding box of every fill.
+    ///
+    /// `palette_index` is forwarded for forward compatibility with
+    /// COLRv0; the COLRv1 evaluator currently always uses palette 0
+    /// for stop colour lookups.
+    ///
+    /// # Errors
+    /// - [`RenderError::ColrV1NotFound`] when the font has no v1
+    ///   paint record for `gid`.
+    /// - [`RenderError::BadSize`] when `size_pt` is non-finite or
+    ///   non-positive.
+    /// - [`RenderError::BadUpem`] when the font has zero `units_per_em`.
+    /// - [`RenderError::Parse`] when the underlying parser refuses
+    ///   one of the tables we need.
+    pub fn rasterize_colrv1_glyph(
+        &self,
+        face: &Face<'_>,
+        gid: u16,
+        palette_index: u16,
+        size_pt: f32,
+        coords: &[f32],
+    ) -> Result<ColorPixmap, RenderError> {
+        rasterize_colrv1(face, gid, palette_index, size_pt, coords, self.tolerance)
     }
 
     /// Rasterizes an embedded bitmap glyph (CBDT/CBLC or sbix PNG)
