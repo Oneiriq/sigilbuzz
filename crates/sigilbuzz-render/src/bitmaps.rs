@@ -18,7 +18,8 @@
 //!         ├── Cbdt → decode_png
 //!         ├── Sbix png  → decode_png
 //!         ├── Sbix dupe → recurse to referenced gid
-//!         ├── Sbix jpg/tiff/jp2 → UnsupportedBitmap
+//!         ├── Sbix jpg → decode_jpeg (baseline 8-bit YCbCr/gray)
+//!         ├── Sbix tiff/jp2 → UnsupportedBitmap
 //!         └── Ebdt → unpack 1bpp mask → black-on-transparent RGBA
 //!         │
 //!         ▼
@@ -30,8 +31,10 @@
 //!
 //! # Scope
 //!
-//! - **PNG and 1bpp mono.** sbix `'jpg '` / `'tiff'` / `'jp2 '` return
-//!   [`RenderError::UnsupportedBitmap`]; implementing those decoders
+//! - **PNG, baseline JPEG, and 1bpp mono.** sbix `'jpg '` is decoded
+//!   via the in-crate baseline decoder ([`crate::decode_jpeg`]); sbix
+//!   `'tiff'` / `'jp2 '` return [`RenderError::UnsupportedBitmap`];
+//!   implementing those decoders
 //!   from scratch is each its own project and they're rare in font
 //!   embeds. The bitmap-emoji ecosystem in 2026 is overwhelmingly
 //!   PNG-only.
@@ -59,6 +62,7 @@ use sigilbuzz::tables::sbix::{TAG_DUPE, TAG_JP2, TAG_JPG, TAG_PNG, TAG_TIFF};
 use sigilbuzz::{Face, GlyphBitmapEntry};
 
 use crate::error::RenderError;
+use crate::jpeg_decode::decode_jpeg;
 use crate::pixmap::ColorPixmap;
 use crate::rasterizer::Rasterizer;
 
@@ -94,16 +98,19 @@ const EBDT_COMPOSITE_MAX_DEPTH: u8 = 4;
 ///
 /// Dispatch priority is **CBDT (color) > sbix png > EBDT (mono)** —
 /// see [`Face::glyph_bitmap`](sigilbuzz::Face::glyph_bitmap). Within
-/// the sbix variant, `'png '` decodes inline, `'dupe'` recurses (with
-/// a depth cap) into the referenced gid, and `'jpg '` / `'tiff'` /
-/// `'jp2 '` surface [`RenderError::UnsupportedBitmap`].
+/// the sbix variant, `'png '` decodes inline, `'jpg '` decodes via
+/// the in-crate baseline JPEG decoder ([`crate::decode_jpeg`]),
+/// `'dupe'` recurses (with a depth cap) into the referenced gid, and
+/// `'tiff'` / `'jp2 '` surface [`RenderError::UnsupportedBitmap`].
 ///
 /// Returns:
 /// - `Ok(pixmap)` — decoded and (optionally) rescaled bitmap.
 /// - `Err(RenderError::NoBitmap(gid))` — no strike covers `gid`, or
 ///   the font carries no bitmap tables.
-/// - `Err(RenderError::UnsupportedBitmap)` — sbix payload is jpg /
-///   tiff / jp2, or `'dupe'` recursion exceeds the depth cap.
+/// - `Err(RenderError::UnsupportedBitmap)` — sbix payload is tiff /
+///   jp2, or `'dupe'` recursion exceeds the depth cap.
+/// - `Err(RenderError::BadJpeg(...))` — sbix `'jpg '` payload failed
+///   to decode (truncated, progressive, arithmetic-coded, etc.).
 /// - `Err(RenderError::BitmapDecodeFailed(_))` — EBDT composite
 ///   (formats 8 / 9) recursion hit a cycle, self-reference, OOB
 ///   component glyph id, missing-at-strike component, or
@@ -193,11 +200,18 @@ fn rasterize_bitmap_inner_full(
                     composite_depth,
                 );
             }
-            // JPEG / TIFF / JPEG-2000: implementing those decoders
-            // from scratch is each its own project and they're rare
-            // in font embeds. Surface cleanly so callers can fall
-            // back to outlines.
-            TAG_JPG | TAG_TIFF | TAG_JP2 => return Err(RenderError::UnsupportedBitmap),
+            // JPEG: hand-rolled baseline decoder. Supports 8-bit
+            // sequential YCbCr (4:4:4 / 4:2:2 / 4:2:0) and grayscale
+            // — the slice that real-world font sbix payloads land in.
+            // Progressive scan / arithmetic coding / 16-bit / restart
+            // markers surface as `BadJpeg`; we re-tag as
+            // `UnsupportedBitmap` so callers can fall back to outlines
+            // exactly as before.
+            TAG_JPG => (decode_jpeg(glyph.data)?, f32::from(ppem)),
+            // TIFF / JPEG-2000: still each its own ~700-line decoder
+            // and even rarer than JPEG in real fonts. Surface cleanly
+            // so callers can fall back to outlines.
+            TAG_TIFF | TAG_JP2 => return Err(RenderError::UnsupportedBitmap),
             // Unknown four-byte tag — treat as unsupported rather
             // than guessing.
             _ => return Err(RenderError::UnsupportedBitmap),

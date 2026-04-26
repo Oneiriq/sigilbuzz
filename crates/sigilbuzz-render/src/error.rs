@@ -45,6 +45,12 @@ pub enum RenderError {
     /// PNG payload failed structural validation (signature, IHDR,
     /// chunk shape) or zlib inflate.
     BadPng(&'static str),
+    /// JPEG payload failed structural validation (SOI, marker shape,
+    /// SOF0, DQT, DHT, SOS, entropy stream) or used an unsupported
+    /// feature (progressive scan, arithmetic coding, 16-bit
+    /// precision, JPEG2000 / TIFF, restart markers, etc.). The
+    /// static string identifies the specific failure.
+    BadJpeg(&'static str),
     /// The font has no SVG document for this glyph id (either the
     /// `SVG ` table is absent or the gid sits outside every record's
     /// range).
@@ -78,6 +84,7 @@ impl fmt::Display for RenderError {
             }
             Self::BitmapDecodeFailed(msg) => write!(f, "bitmap decode failed: {msg}"),
             Self::BadPng(msg) => write!(f, "PNG decode failed: {msg}"),
+            Self::BadJpeg(msg) => write!(f, "JPEG decode failed: {msg}"),
             Self::SvgNotFound(g) => write!(f, "glyph {g} has no SVG document"),
             Self::SvgGzipped => f.write_str("SVG document is gzip-compressed"),
         }

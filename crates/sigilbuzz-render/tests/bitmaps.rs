@@ -8,7 +8,9 @@
 //! validate the full pipeline (face → strike → PNG decode → rescale).
 
 use sigilbuzz::{Blob, Face};
-use sigilbuzz_render::{decode_png, rescale_bilinear, ColorPixmap, Rasterizer, RenderError};
+use sigilbuzz_render::{
+    decode_jpeg, decode_png, rescale_bilinear, ColorPixmap, Rasterizer, RenderError,
+};
 
 const CBDT_FONT: &[u8] = include_bytes!("../../../tests/fixtures/cbdt_synthetic.ttf");
 const SBIX_FONT: &[u8] = include_bytes!("../../../tests/fixtures/sbix_synthetic.ttf");
@@ -322,9 +324,12 @@ fn sbix_dupe_chain_exceeding_depth_cap_is_unsupported() {
 }
 
 #[test]
-fn sbix_jpg_returns_unsupported_not_panic() {
-    // sbix carrying a 'jpg ' payload — sigilbuzz-render surfaces
-    // UnsupportedBitmap rather than attempting a decode.
+fn sbix_jpg_truncated_payload_returns_bad_jpeg() {
+    // sbix carrying a malformed 'jpg ' payload — the in-crate JPEG
+    // decoder rejects it cleanly with BadJpeg rather than panicking.
+    // (Pre-0.20 this surfaced UnsupportedBitmap because we didn't
+    // even try; now we do, so a truncated APP0-only stream fails at
+    // the marker walker.)
     let glyphs = vec![None, Some((*b"jpg ", vec![0xff, 0xd8, 0xff, 0xe0]))];
     let sbix = build_sbix_strike(2, 16, &glyphs);
     let font = build_sfnt(vec![(*b"maxp", maxp_05(2)), (*b"sbix", sbix)]);
@@ -333,8 +338,17 @@ fn sbix_jpg_returns_unsupported_not_panic() {
     let rast = Rasterizer::new();
     let err = rast
         .rasterize_bitmap_glyph(&face, 1, 16.0, &[])
-        .expect_err("jpg sbix should surface Unsupported");
-    assert!(matches!(err, RenderError::UnsupportedBitmap));
+        .expect_err("malformed jpg sbix should surface BadJpeg");
+    assert!(matches!(err, RenderError::BadJpeg(_)));
+}
+
+#[test]
+fn decode_jpeg_rejects_empty_input() {
+    // Public API smoke test: confirm the JPEG decoder is wired up and
+    // surfaces BadJpeg on a clearly-malformed (empty) payload rather
+    // than panicking.
+    let err = decode_jpeg(&[]).unwrap_err();
+    assert!(matches!(err, RenderError::BadJpeg(_)));
 }
 
 #[test]
