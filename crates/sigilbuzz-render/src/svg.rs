@@ -3024,10 +3024,7 @@ mod tests {
     #[test]
     fn dasharray_doubles_odd_length() {
         // "2 3 5" → "2 3 5 2 3 5"
-        assert_eq!(
-            parse_dasharray("2 3 5"),
-            vec![2.0, 3.0, 5.0, 2.0, 3.0, 5.0]
-        );
+        assert_eq!(parse_dasharray("2 3 5"), vec![2.0, 3.0, 5.0, 2.0, 3.0, 5.0]);
     }
 
     #[test]
