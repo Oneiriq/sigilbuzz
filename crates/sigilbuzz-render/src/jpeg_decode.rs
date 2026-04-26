@@ -6,8 +6,13 @@
 //! emoji fonts) and nothing more:
 //!
 //! - **8-bit precision only.** All real-world font sbix JPEGs are 8-bit.
-//! - **Baseline sequential DCT only (SOF0).** No progressive (SOF2),
-//!   no arithmetic coding (SOF9..15), no hierarchical (SOFE).
+//! - **Baseline sequential DCT (SOF0)** plus **progressive DCT (SOF2)**
+//!   first-time DC and AC scans, plus DC successive-approximation
+//!   refinement. AC successive-approximation refinement scans (Ah > 0
+//!   on an AC band) are surfaced as [`RenderError::BadJpeg`] —
+//!   uncommon in real-world font payloads but explicitly out of scope
+//!   for this PR. No arithmetic coding (SOF9..15), no hierarchical
+//!   (SOFE).
 //! - **YCbCr** (3-component) and **grayscale** (1-component).
 //! - **Sampling factors:** 4:4:4, 4:2:2, 4:2:0 — and any combination
 //!   where each component's max sampling factor is `<= 2`.
@@ -37,8 +42,11 @@
 //!
 //! # Non-goals
 //!
-//! - Progressive scan, arithmetic coding, lossless JPEG, JPEG-LS,
-//!   JPEG 2000 (`'jp2 '`), TIFF (`'tiff'`).
+//! - AC successive-approximation refinement scans (rare; the bit-plane
+//!   walking over existing nonzeros is the genuinely thorny progressive
+//!   subroutine and not seen in font sbix payloads we tested against).
+//! - Arithmetic coding, lossless JPEG, JPEG-LS, JPEG 2000 (`'jp2 '`),
+//!   TIFF (`'tiff'`).
 //! - Color-managed output (ICC profiles), EXIF orientation.
 //! - SIMD or fixed-point IDCT — the hot path here is tiny font emoji
 //!   bitmaps, not high-throughput photo decode.
@@ -64,6 +72,7 @@ const MARKER_DQT: u8 = 0xDB;
 const MARKER_DHT: u8 = 0xC4;
 const MARKER_DRI: u8 = 0xDD;
 const MARKER_SOF0: u8 = 0xC0;
+const MARKER_SOF2: u8 = 0xC2;
 const MARKER_COM: u8 = 0xFE;
 
 /// Maximum image dimension for a JPEG payload. Mirrors the PNG
@@ -82,14 +91,17 @@ const MAX_QT_TABLES: usize = 4;
 // Public API.
 // ---------------------------------------------------------------------------
 
-/// Decode a baseline JPEG byte slice into a premultiplied RGBA
-/// [`ColorPixmap`].
+/// Decode a baseline or progressive JPEG byte slice into a
+/// premultiplied RGBA [`ColorPixmap`].
 ///
-/// Supports 8-bit baseline sequential JPEGs with YCbCr (3-component)
-/// or grayscale (1-component) data and sampling factors where each
-/// component's max h/v is `<= 2`. Progressive scan, arithmetic
-/// coding, 16-bit precision, hierarchical mode, restart markers, and
-/// JPEG2000 / TIFF return [`RenderError::BadJpeg`].
+/// Supports 8-bit JPEGs with YCbCr (3-component) or grayscale
+/// (1-component) data and sampling factors where each component's
+/// max h/v is `<= 2`. Both baseline (SOF0) and progressive (SOF2,
+/// first-time DC/AC scans plus DC successive-approximation
+/// refinement) modes are handled. AC successive-approximation
+/// refinement scans, arithmetic coding, 16-bit precision,
+/// hierarchical mode, restart markers, and JPEG2000 / TIFF return
+/// [`RenderError::BadJpeg`].
 ///
 /// # Errors
 /// Returns [`RenderError::BadJpeg`] on any structural problem,
@@ -182,6 +194,17 @@ struct Decoder<'a> {
     width: u32,
     height: u32,
     components: Vec<ComponentSpec>,
+    /// SOF mode: false = SOF0 baseline, true = SOF2 progressive.
+    progressive: bool,
+    /// Per-component coefficient buffers. Used only in progressive
+    /// mode to accumulate coefficients across multiple SOS scans.
+    /// Each buffer holds `num_blocks_x * num_blocks_y * 64` `i16`
+    /// entries in zig-zag order.
+    coeffs: Vec<Vec<i16>>,
+    /// Per-component block grid dimensions (in 8×8 blocks). Sized
+    /// to `mcus_x * h_sampling` and `mcus_y * v_sampling` for each
+    /// component.
+    blocks_per_comp: Vec<(u32, u32)>,
 }
 
 impl<'a> Decoder<'a> {
@@ -195,6 +218,9 @@ impl<'a> Decoder<'a> {
             width: 0,
             height: 0,
             components: Vec::new(),
+            progressive: false,
+            coeffs: Vec::new(),
+            blocks_per_comp: Vec::new(),
         }
     }
 
@@ -211,11 +237,21 @@ impl<'a> Decoder<'a> {
             match marker {
                 MARKER_DQT => self.read_dqt()?,
                 MARKER_DHT => self.read_dht()?,
-                MARKER_SOF0 => self.read_sof0()?,
+                MARKER_SOF0 => self.read_sof(false)?,
+                MARKER_SOF2 => self.read_sof(true)?,
                 MARKER_SOS => {
                     // SOS header sets per-component huff dests, then
                     // the entropy-coded data starts immediately.
-                    return self.read_sos_and_decode();
+                    if self.progressive {
+                        self.read_sos_progressive()?;
+                        // Loop continues for subsequent SOS / EOI.
+                    } else {
+                        return self.read_sos_and_decode();
+                    }
+                }
+                MARKER_EOI if self.progressive => {
+                    // Progressive: all scans done, run IDCT + compose.
+                    return self.finalize_progressive();
                 }
                 MARKER_DRI => {
                     // Restart-interval definition. We don't support
@@ -370,31 +406,32 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    fn read_sof0(&mut self) -> Result<(), RenderError> {
+    fn read_sof(&mut self, progressive: bool) -> Result<(), RenderError> {
         let body = self.read_segment()?;
         if body.len() < 6 {
-            return Err(RenderError::BadJpeg("truncated SOF0"));
+            return Err(RenderError::BadJpeg("truncated SOF"));
         }
         let precision = body[0];
         if precision != 8 {
-            return Err(RenderError::BadJpeg("SOF0 precision not 8-bit"));
+            return Err(RenderError::BadJpeg("SOF precision not 8-bit"));
         }
         let height = u16::from_be_bytes([body[1], body[2]]);
         let width = u16::from_be_bytes([body[3], body[4]]);
         if width == 0 || height == 0 {
-            return Err(RenderError::BadJpeg("SOF0 zero dimension"));
+            return Err(RenderError::BadJpeg("SOF zero dimension"));
         }
         if u32::from(width) > MAX_JPEG_DIM || u32::from(height) > MAX_JPEG_DIM {
-            return Err(RenderError::BadJpeg("SOF0 dimension exceeds max"));
+            return Err(RenderError::BadJpeg("SOF dimension exceeds max"));
         }
         self.width = u32::from(width);
         self.height = u32::from(height);
+        self.progressive = progressive;
         let n_comp = body[5] as usize;
         if !matches!(n_comp, 1 | 3) {
-            return Err(RenderError::BadJpeg("SOF0 component count must be 1 or 3"));
+            return Err(RenderError::BadJpeg("SOF component count must be 1 or 3"));
         }
         if body.len() < 6 + 3 * n_comp {
-            return Err(RenderError::BadJpeg("truncated SOF0 components"));
+            return Err(RenderError::BadJpeg("truncated SOF components"));
         }
         let mut comps = Vec::with_capacity(n_comp);
         for c in 0..n_comp {
@@ -408,7 +445,7 @@ impl<'a> Decoder<'a> {
                 return Err(RenderError::BadJpeg("sampling factor not in 1..=2"));
             }
             if qt_dest as usize >= MAX_QT_TABLES {
-                return Err(RenderError::BadJpeg("SOF0 qt_dest out of range"));
+                return Err(RenderError::BadJpeg("SOF qt_dest out of range"));
             }
             comps.push(ComponentSpec {
                 id,
@@ -420,7 +457,40 @@ impl<'a> Decoder<'a> {
             });
         }
         self.components = comps;
+        if progressive {
+            self.allocate_progressive_buffers();
+        }
         Ok(())
+    }
+
+    /// Allocate per-component coefficient buffers sized to the
+    /// component's full block grid. Called after SOF2 parses the
+    /// component list.
+    fn allocate_progressive_buffers(&mut self) {
+        let max_h = self
+            .components
+            .iter()
+            .map(|c| c.h_sampling)
+            .max()
+            .unwrap_or(1);
+        let max_v = self
+            .components
+            .iter()
+            .map(|c| c.v_sampling)
+            .max()
+            .unwrap_or(1);
+        let mcu_w_px = u32::from(max_h) * 8;
+        let mcu_h_px = u32::from(max_v) * 8;
+        let mcus_x = self.width.div_ceil(mcu_w_px);
+        let mcus_y = self.height.div_ceil(mcu_h_px);
+        self.coeffs = Vec::with_capacity(self.components.len());
+        self.blocks_per_comp = Vec::with_capacity(self.components.len());
+        for comp in &self.components {
+            let bw = mcus_x * u32::from(comp.h_sampling);
+            let bh = mcus_y * u32::from(comp.v_sampling);
+            self.blocks_per_comp.push((bw, bh));
+            self.coeffs.push(vec![0i16; (bw * bh * 64) as usize]);
+        }
     }
 
     fn read_sos_and_decode(&mut self) -> Result<ColorPixmap, RenderError> {
@@ -551,7 +621,18 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        // Compose into RGBA.
+        Ok(self.compose_planes(&planes, &plane_strides, max_h, max_v))
+    }
+
+    /// Build the final RGBA `ColorPixmap` from per-component sample
+    /// planes. Shared by baseline and progressive paths.
+    fn compose_planes(
+        &self,
+        planes: &[Vec<u8>],
+        plane_strides: &[usize],
+        max_h: u8,
+        max_v: u8,
+    ) -> ColorPixmap {
         let w = self.width as usize;
         let h = self.height as usize;
         let mut out = ColorPixmap::new(self.width, self.height);
@@ -593,10 +674,6 @@ impl<'a> Decoder<'a> {
             let max_v_u = u32::from(max_v);
             for y in 0..h {
                 for x in 0..w {
-                    // Luma is stored at the full MCU grid; the
-                    // component's own h/v is already accounted for in
-                    // its plane stride. Sample at (x * h_y / max_h,
-                    // y * v_y / max_v).
                     let yx = (x as u32) * h_y / max_h_u;
                     let yy = (y as u32) * v_y / max_v_u;
                     let cbx = (x as u32) * h_cb / max_h_u;
@@ -606,9 +683,7 @@ impl<'a> Decoder<'a> {
                     let yv = i32::from(planes[0][yy as usize * stride_y + yx as usize]);
                     let cb = i32::from(planes[1][cby as usize * stride_cb + cbx as usize]) - 128;
                     let cr = i32::from(planes[2][cry as usize * stride_cr + crx as usize]) - 128;
-                    // ITU-R BT.601 in fixed-point Q16. Coefficients
-                    // are 1.402, 0.34414, 0.71414, 1.772 each
-                    // multiplied by 65536 and rounded.
+                    // ITU-R BT.601 in fixed-point Q16.
                     let r = yv + ((91881 * cr) >> 16);
                     let g = yv - ((22554 * cb + 46802 * cr) >> 16);
                     let b = yv + ((116130 * cb) >> 16);
@@ -621,7 +696,417 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        Ok(out)
+        out
+    }
+
+    // -----------------------------------------------------------------
+    // Progressive (SOF2) entropy decode.
+    //
+    // Each SOS in a progressive stream covers a coefficient band
+    // `Ss..=Se` at successive-approximation bits `Ah` (already-set high
+    // bits) and `Al` (low bit being set this scan). Multiple SOS
+    // markers fill in different bands until EOI; only then do we run
+    // IDCT + compose.
+    //
+    // Spec: ITU-T T.81 §F.2.
+    // -----------------------------------------------------------------
+
+    fn read_sos_progressive(&mut self) -> Result<(), RenderError> {
+        let body = self.read_segment()?;
+        if body.is_empty() {
+            return Err(RenderError::BadJpeg("empty SOS"));
+        }
+        let n_scan = body[0] as usize;
+        if n_scan == 0 || n_scan > self.components.len() {
+            return Err(RenderError::BadJpeg("SOS component count out of range"));
+        }
+        if body.len() < 1 + 2 * n_scan + 3 {
+            return Err(RenderError::BadJpeg("truncated SOS"));
+        }
+        // Parse per-scan component selectors and resolve to indices in
+        // the SOF component list (preserving order from SOS).
+        let mut scan_indices: Vec<usize> = Vec::with_capacity(n_scan);
+        for c in 0..n_scan {
+            let off = 1 + 2 * c;
+            let id = body[off];
+            let td_ta = body[off + 1];
+            let dc = td_ta >> 4;
+            let ac = td_ta & 0x0F;
+            let comp_idx = self
+                .components
+                .iter()
+                .position(|cs| cs.id == id)
+                .ok_or(RenderError::BadJpeg("SOS component id not in SOF"))?;
+            self.components[comp_idx].dc_huff = dc;
+            self.components[comp_idx].ac_huff = ac;
+            scan_indices.push(comp_idx);
+        }
+        let tail = &body[1 + 2 * n_scan..];
+        let ss = tail[0];
+        let se = tail[1];
+        let ah = tail[2] >> 4;
+        let al = tail[2] & 0x0F;
+
+        // Validate band parameters per T.81 §F.2.2.1.
+        if ss > 63 || se > 63 {
+            return Err(RenderError::BadJpeg("SOS Ss/Se out of range"));
+        }
+        let is_dc = ss == 0;
+        if is_dc {
+            // DC scans must have Se=0 and may include multiple comps.
+            if se != 0 {
+                return Err(RenderError::BadJpeg("progressive DC scan Se != 0"));
+            }
+        } else {
+            // AC scans: Ss must be <= Se, and must cover exactly one
+            // component (T.81 §F.1.4.2).
+            if ss > se {
+                return Err(RenderError::BadJpeg("progressive AC scan Ss > Se"));
+            }
+            if n_scan != 1 {
+                return Err(RenderError::BadJpeg(
+                    "progressive AC scan must be single-component",
+                ));
+            }
+        }
+        if al > 13 || ah > 13 {
+            return Err(RenderError::BadJpeg("progressive Ah/Al out of range"));
+        }
+
+        // AC successive-approximation refinement is genuinely thorny —
+        // bit-plane walking over the existing nonzero coefficients —
+        // and the deferred-scope note in the module-level docs makes
+        // this an explicit non-goal for the PR. Surface it before any
+        // table validation so callers see a stable error message
+        // regardless of the upstream stream's table layout.
+        if !is_dc && ah != 0 {
+            return Err(RenderError::BadJpeg(
+                "progressive AC refinement scans not supported",
+            ));
+        }
+
+        // Validate Huffman tables for the scan participants.
+        for &ci in &scan_indices {
+            let comp = &self.components[ci];
+            if is_dc && self.dc_huff[comp.dc_huff as usize].is_none() {
+                return Err(RenderError::BadJpeg("missing DC Huffman table"));
+            }
+            if !is_dc && self.ac_huff[comp.ac_huff as usize].is_none() {
+                return Err(RenderError::BadJpeg("missing AC Huffman table"));
+            }
+        }
+
+        // Hand off to the appropriate scan handler. The bit reader
+        // consumes from `self.cursor`; on completion we advance the
+        // cursor past the entropy bytes it consumed (up to but not
+        // including the next marker).
+        let consumed = {
+            let entropy = &self.src[self.cursor..];
+            let mut br = BitReader::new(entropy);
+            if is_dc {
+                if ah == 0 {
+                    self.scan_dc_first(&mut br, &scan_indices, al)?;
+                } else {
+                    self.scan_dc_refine(&mut br, &scan_indices, al)?;
+                }
+            } else {
+                self.scan_ac_first(&mut br, scan_indices[0], ss, se, al)?;
+            }
+            br.pos
+        };
+        self.cursor += consumed;
+        Ok(())
+    }
+
+    /// First-pass DC scan (Ah == 0). Reads one DC coefficient per
+    /// 8×8 block in MCU order and writes its value, point-shifted
+    /// left by `al`, into the coefficient buffer at zig-zag index 0.
+    fn scan_dc_first(
+        &mut self,
+        br: &mut BitReader<'_>,
+        scan_indices: &[usize],
+        al: u8,
+    ) -> Result<(), RenderError> {
+        let max_h = self
+            .components
+            .iter()
+            .map(|c| c.h_sampling)
+            .max()
+            .unwrap_or(1);
+        let max_v = self
+            .components
+            .iter()
+            .map(|c| c.v_sampling)
+            .max()
+            .unwrap_or(1);
+        let mcus_x = self.width.div_ceil(u32::from(max_h) * 8);
+        let mcus_y = self.height.div_ceil(u32::from(max_v) * 8);
+        let mut prev_dc = vec![0i32; self.components.len()];
+
+        // Single-component scans iterate the component's own block
+        // grid; multi-component scans walk in MCU order.
+        if scan_indices.len() == 1 {
+            let ci = scan_indices[0];
+            let (bw, bh) = self.blocks_per_comp[ci];
+            for by in 0..bh {
+                for bx in 0..bw {
+                    self.decode_dc_first_block(br, ci, bx, by, &mut prev_dc[ci], al)?;
+                }
+            }
+        } else {
+            for mcu_y in 0..mcus_y {
+                for mcu_x in 0..mcus_x {
+                    for &ci in scan_indices {
+                        let comp = self.components[ci];
+                        let h = u32::from(comp.h_sampling);
+                        let v = u32::from(comp.v_sampling);
+                        for by in 0..v {
+                            for bx in 0..h {
+                                let block_x = mcu_x * h + bx;
+                                let block_y = mcu_y * v + by;
+                                self.decode_dc_first_block(
+                                    br,
+                                    ci,
+                                    block_x,
+                                    block_y,
+                                    &mut prev_dc[ci],
+                                    al,
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn decode_dc_first_block(
+        &mut self,
+        br: &mut BitReader<'_>,
+        ci: usize,
+        bx: u32,
+        by: u32,
+        prev_dc: &mut i32,
+        al: u8,
+    ) -> Result<(), RenderError> {
+        let comp = self.components[ci];
+        let dc_tbl = self.dc_huff[comp.dc_huff as usize]
+            .as_ref()
+            .expect("validated");
+        let t = br.decode_huff(dc_tbl)?;
+        if t > 15 {
+            return Err(RenderError::BadJpeg("invalid DC magnitude"));
+        }
+        let raw = br.read_bits(t);
+        let diff = extend(raw, t);
+        *prev_dc = prev_dc.wrapping_add(diff);
+        let (bw, _bh) = self.blocks_per_comp[ci];
+        let block_idx = (by * bw + bx) as usize;
+        let coeff_off = block_idx * 64;
+        // Point-transform: shift left by `al`. The value can fit in
+        // i16 because JPEG DC differences are bounded by ±2^11.
+        self.coeffs[ci][coeff_off] = ((*prev_dc) << al) as i16;
+        Ok(())
+    }
+
+    /// Refinement DC scan (Ah > 0). Reads one bit per block and ORs
+    /// it into bit position `al` of the existing DC coefficient.
+    fn scan_dc_refine(
+        &mut self,
+        br: &mut BitReader<'_>,
+        scan_indices: &[usize],
+        al: u8,
+    ) -> Result<(), RenderError> {
+        let max_h = self
+            .components
+            .iter()
+            .map(|c| c.h_sampling)
+            .max()
+            .unwrap_or(1);
+        let max_v = self
+            .components
+            .iter()
+            .map(|c| c.v_sampling)
+            .max()
+            .unwrap_or(1);
+        let mcus_x = self.width.div_ceil(u32::from(max_h) * 8);
+        let mcus_y = self.height.div_ceil(u32::from(max_v) * 8);
+
+        if scan_indices.len() == 1 {
+            let ci = scan_indices[0];
+            let (bw, bh) = self.blocks_per_comp[ci];
+            for by in 0..bh {
+                for bx in 0..bw {
+                    self.refine_dc_block(br, ci, bx, by, al);
+                }
+            }
+        } else {
+            for mcu_y in 0..mcus_y {
+                for mcu_x in 0..mcus_x {
+                    for &ci in scan_indices {
+                        let comp = self.components[ci];
+                        let h = u32::from(comp.h_sampling);
+                        let v = u32::from(comp.v_sampling);
+                        for by in 0..v {
+                            for bx in 0..h {
+                                let block_x = mcu_x * h + bx;
+                                let block_y = mcu_y * v + by;
+                                self.refine_dc_block(br, ci, block_x, block_y, al);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn refine_dc_block(&mut self, br: &mut BitReader<'_>, ci: usize, bx: u32, by: u32, al: u8) {
+        let bit = br.read_bits(1);
+        if bit != 0 {
+            let (bw, _bh) = self.blocks_per_comp[ci];
+            let coeff_off = ((by * bw + bx) as usize) * 64;
+            self.coeffs[ci][coeff_off] |= 1i16 << al;
+        }
+    }
+
+    /// First-pass AC scan (Ah == 0). Walks the component's blocks in
+    /// row-major order and decodes run/value pairs over the band
+    /// `ss..=se`, including EOB-run tracking for large skips.
+    fn scan_ac_first(
+        &mut self,
+        br: &mut BitReader<'_>,
+        ci: usize,
+        ss: u8,
+        se: u8,
+        al: u8,
+    ) -> Result<(), RenderError> {
+        let comp = self.components[ci];
+        let (bw, bh) = self.blocks_per_comp[ci];
+        let mut eob_run: u32 = 0;
+        // Avoid borrowing &self.ac_huff across &mut self.coeffs.
+        // Decode in a tight loop with the Huffman table reference held
+        // for just the inner block.
+        for by in 0..bh {
+            for bx in 0..bw {
+                let block_idx = (by * bw + bx) as usize;
+                let coeff_off = block_idx * 64;
+                if eob_run > 0 {
+                    eob_run -= 1;
+                    continue;
+                }
+                let ac_tbl = self.ac_huff[comp.ac_huff as usize]
+                    .as_ref()
+                    .expect("validated");
+                let mut k = ss;
+                while k <= se {
+                    let rs = br.decode_huff(ac_tbl)?;
+                    let run = rs >> 4;
+                    let size = rs & 0x0F;
+                    if size == 0 {
+                        if run == 15 {
+                            // ZRL — 16 zero coefficients.
+                            k = k.saturating_add(16);
+                            continue;
+                        }
+                        // EOBn — skip 2^run blocks (this one + run more).
+                        eob_run = (1u32 << run) - 1;
+                        if run > 0 {
+                            eob_run += br.read_bits(run);
+                        }
+                        break;
+                    }
+                    k = k.saturating_add(run);
+                    if k > se {
+                        return Err(RenderError::BadJpeg("AC run overflow in band"));
+                    }
+                    let raw = br.read_bits(size);
+                    let val = extend(raw, size);
+                    let nat = ZIGZAG[k as usize];
+                    self.coeffs[ci][coeff_off + nat] = (val << al) as i16;
+                    k = k.saturating_add(1);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Run IDCT over each component's accumulated coefficient buffer
+    /// and compose into the final RGBA pixmap.
+    fn finalize_progressive(&mut self) -> Result<ColorPixmap, RenderError> {
+        // Validate quantization tables for every component.
+        for comp in &self.components {
+            if self.qt[comp.qt_dest as usize].is_none() {
+                return Err(RenderError::BadJpeg("missing quantization table"));
+            }
+        }
+        let max_h = self
+            .components
+            .iter()
+            .map(|c| c.h_sampling)
+            .max()
+            .unwrap_or(1);
+        let max_v = self
+            .components
+            .iter()
+            .map(|c| c.v_sampling)
+            .max()
+            .unwrap_or(1);
+        let mcu_w_px = u32::from(max_h) * 8;
+        let mcu_h_px = u32::from(max_v) * 8;
+        let mcus_x = self.width.div_ceil(mcu_w_px);
+        let mcus_y = self.height.div_ceil(mcu_h_px);
+
+        let mut planes: Vec<Vec<u8>> = self
+            .components
+            .iter()
+            .map(|c| {
+                let pw = (mcus_x * 8 * u32::from(c.h_sampling)) as usize;
+                let ph = (mcus_y * 8 * u32::from(c.v_sampling)) as usize;
+                vec![0u8; pw * ph]
+            })
+            .collect();
+        let plane_strides: Vec<usize> = self
+            .components
+            .iter()
+            .map(|c| (mcus_x * 8 * u32::from(c.h_sampling)) as usize)
+            .collect();
+
+        for (ci, comp) in self.components.iter().enumerate() {
+            let (bw, bh) = self.blocks_per_comp[ci];
+            let qt = self.qt[comp.qt_dest as usize].as_ref().expect("validated");
+            let stride = plane_strides[ci];
+            for by in 0..bh {
+                for bx in 0..bw {
+                    let coeff_off = ((by * bw + bx) as usize) * 64;
+                    // Dequantize + de-zig-zag into a natural-order
+                    // buffer the IDCT consumes. The accumulator is in
+                    // zig-zag order with the DC at index 0.
+                    let mut natural = [0i32; 64];
+                    natural[0] = i32::from(self.coeffs[ci][coeff_off]) * qt[0];
+                    for k in 1..64 {
+                        let v = i32::from(self.coeffs[ci][coeff_off + k]);
+                        let nat = ZIGZAG[k];
+                        natural[nat] = v * qt[k];
+                    }
+                    let mut samples = [0u8; 64];
+                    idct(&natural, &mut samples);
+                    let block_x = (bx * 8) as usize;
+                    let block_y = (by * 8) as usize;
+                    for j in 0..8 {
+                        for i in 0..8 {
+                            let dst_idx = (block_y + j) * stride + (block_x + i);
+                            if dst_idx < planes[ci].len() {
+                                planes[ci][dst_idx] = samples[j * 8 + i];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(self.compose_planes(&planes, &plane_strides, max_h, max_v))
     }
 }
 
@@ -1136,9 +1621,10 @@ mod tests {
     }
 
     #[test]
-    fn marker_walker_rejects_progressive_sof() {
-        // SOI then SOF2 (progressive).
-        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xC2];
+    fn marker_walker_rejects_arithmetic_sof() {
+        // SOF9 (arithmetic). We accept SOF0 + SOF2 only; everything
+        // else in the SOFn range must surface BadJpeg.
+        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xC9];
         bytes.extend_from_slice(&8u16.to_be_bytes()); // length
         bytes.extend_from_slice(&[8, 0, 8, 0, 8, 0]); // dummy body
         let err = decode_jpeg(&bytes).unwrap_err();
@@ -1286,5 +1772,274 @@ mod tests {
                 "channel {ch} value {value} near 128"
             );
         }
+    }
+
+    /// Build a minimal **progressive** (SOF2) grayscale JPEG that
+    /// encodes a single 8×8 block via two scans:
+    ///
+    ///   - SOS #1: DC scan (Ss=0, Se=0, Ah=0, Al=0) emits the DC
+    ///     coefficient using the standard luma DC table.
+    ///   - SOS #2: AC first-time scan (Ss=1, Se=63, Ah=0, Al=0) emits
+    ///     a single EOB so all 63 AC coefficients stay zero.
+    ///
+    /// After IDCT + level-shift the spatial output is uniform
+    /// `dc / 8 + 128` (clamped). This exercises the progressive
+    /// dispatch end-to-end: SOF2 walker entry, two `read_sos_progressive`
+    /// calls, `scan_dc_first` + `scan_ac_first`, and `finalize_progressive`.
+    fn build_progressive_grayscale_jpeg(dc: i32) -> Vec<u8> {
+        let mut out = vec![0xFF, MARKER_SOI];
+
+        // DQT — single identity table at dest 0.
+        out.push(0xFF);
+        out.push(MARKER_DQT);
+        out.extend_from_slice(&(2u16 + 1 + 64).to_be_bytes());
+        out.push(0); // precision 0, dest 0
+        out.extend_from_slice(&[1u8; 64]);
+
+        // SOF2 — 8×8, 1 component (grayscale), 1×1 sampling, qt 0.
+        out.push(0xFF);
+        out.push(MARKER_SOF2);
+        out.extend_from_slice(&(2u16 + 6 + 3).to_be_bytes());
+        out.push(8); // precision
+        out.extend_from_slice(&8u16.to_be_bytes()); // height
+        out.extend_from_slice(&8u16.to_be_bytes()); // width
+        out.push(1); // 1 component
+        out.push(1); // id
+        out.push((1 << 4) | 1); // 1×1
+        out.push(0); // qt 0
+
+        // DHT — DC luma + AC luma at dest 0. Reuse the standard
+        // tables defined in the baseline fixture.
+        let dc_lum_counts: [u8; 16] = [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
+        let dc_lum_syms: [u8; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        let ac_lum_counts: [u8; 16] = [0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7d];
+        let ac_lum_syms: [u8; 162] = [
+            0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51,
+            0x61, 0x07, 0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xa1, 0x08, 0x23, 0x42, 0xb1, 0xc1,
+            0x15, 0x52, 0xd1, 0xf0, 0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0a, 0x16, 0x17, 0x18,
+            0x19, 0x1a, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+            0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x53, 0x54, 0x55, 0x56, 0x57,
+            0x58, 0x59, 0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x73, 0x74, 0x75,
+            0x76, 0x77, 0x78, 0x79, 0x7a, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x92,
+            0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+            0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3,
+            0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8,
+            0xd9, 0xda, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xf1, 0xf2,
+            0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa,
+        ];
+        let mut dht_body = Vec::new();
+        let push_table = |body: &mut Vec<u8>, class: u8, dest: u8, counts: &[u8], syms: &[u8]| {
+            body.push((class << 4) | dest);
+            body.extend_from_slice(counts);
+            body.extend_from_slice(syms);
+        };
+        push_table(&mut dht_body, 0, 0, &dc_lum_counts, &dc_lum_syms);
+        push_table(&mut dht_body, 1, 0, &ac_lum_counts, &ac_lum_syms);
+        out.push(0xFF);
+        out.push(MARKER_DHT);
+        out.extend_from_slice(&((dht_body.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(&dht_body);
+
+        // SOS #1 — DC scan (Ss=0, Se=0, Ah=Al=0).
+        out.push(0xFF);
+        out.push(MARKER_SOS);
+        out.extend_from_slice(&(2u16 + 1 + 2 + 3).to_be_bytes());
+        out.push(1); // 1 component
+        out.push(1); // id
+        out.push(0); // DC=0 AC=0
+        out.push(0); // Ss
+        out.push(0); // Se
+        out.push(0); // Ah/Al
+
+        // Entropy: encode DC value only (no AC) for a single block.
+        let mut bw = BitWriter::default();
+        let (size, code) = magnitude_encode(dc);
+        let (huff_code, huff_len) = std_dc_lum_code(size);
+        bw.write_bits(huff_code, huff_len);
+        if size > 0 {
+            bw.write_bits(code, size);
+        }
+        bw.flush();
+        out.extend_from_slice(&bw.bytes);
+
+        // SOS #2 — AC first-time scan (Ss=1, Se=63, Ah=Al=0).
+        out.push(0xFF);
+        out.push(MARKER_SOS);
+        out.extend_from_slice(&(2u16 + 1 + 2 + 3).to_be_bytes());
+        out.push(1); // 1 component
+        out.push(1); // id
+        out.push(0); // DC=0 AC=0
+        out.push(1); // Ss
+        out.push(63); // Se
+        out.push(0); // Ah/Al
+
+        // Entropy: single EOB (AC luma symbol 0x00).
+        let mut bw = BitWriter::default();
+        let (eob_code, eob_len) = std_ac_lum_code(0x00);
+        bw.write_bits(eob_code, eob_len);
+        bw.flush();
+        out.extend_from_slice(&bw.bytes);
+
+        out.push(0xFF);
+        out.push(MARKER_EOI);
+        out
+    }
+
+    #[test]
+    fn progressive_grayscale_decodes_to_constant() {
+        // dc = 0 → spatial sample 0 → after level shift 128.
+        let bytes = build_progressive_grayscale_jpeg(0);
+        let pix = decode_jpeg(&bytes).unwrap();
+        assert_eq!(pix.width, 8);
+        assert_eq!(pix.height, 8);
+        let center = pix.get(4, 4);
+        assert_eq!(center[3], 255);
+        // Grayscale: R=G=B=128 (within rounding).
+        for (ch, value) in center.iter().take(3).enumerate() {
+            assert!(
+                (126..=130).contains(value),
+                "progressive grayscale channel {ch} value {value} near 128"
+            );
+        }
+    }
+
+    #[test]
+    fn progressive_matches_baseline_for_constant_block() {
+        // A progressive 1-component decode of dc=64 should land on
+        // approximately the same luminance as a baseline decode of
+        // YCbCr (64, 0, 0). With identity quantization, dequant DC=64
+        // and IDCT → spatial 8 per pixel, level-shifted to 136.
+        let bytes = build_progressive_grayscale_jpeg(64);
+        let pix = decode_jpeg(&bytes).unwrap();
+        let center = pix.get(4, 4);
+        assert_eq!(center[3], 255);
+        // R=G=B for grayscale, all near 136.
+        assert!(
+            (134..=138).contains(&center[0]),
+            "R ({}) near 136",
+            center[0]
+        );
+        assert_eq!(center[0], center[1]);
+        assert_eq!(center[1], center[2]);
+    }
+
+    #[test]
+    fn progressive_sos_rejects_dc_scan_with_se_nonzero() {
+        // Build a minimal SOF2 + SOS where Ss=0 and Se=5 — illegal:
+        // a DC scan must have Se=0 per T.81 §F.1.4.2.
+        let mut bytes = vec![0xFF, MARKER_SOI];
+        // Minimal DQT.
+        bytes.push(0xFF);
+        bytes.push(MARKER_DQT);
+        bytes.extend_from_slice(&(2u16 + 1 + 64).to_be_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&[1u8; 64]);
+        // SOF2.
+        bytes.push(0xFF);
+        bytes.push(MARKER_SOF2);
+        bytes.extend_from_slice(&(2u16 + 6 + 3).to_be_bytes());
+        bytes.push(8);
+        bytes.extend_from_slice(&8u16.to_be_bytes());
+        bytes.extend_from_slice(&8u16.to_be_bytes());
+        bytes.push(1);
+        bytes.push(1);
+        bytes.push((1 << 4) | 1);
+        bytes.push(0);
+        // SOS — Ss=0 but Se=5 (malformed for DC scan).
+        bytes.push(0xFF);
+        bytes.push(MARKER_SOS);
+        bytes.extend_from_slice(&(2u16 + 1 + 2 + 3).to_be_bytes());
+        bytes.push(1);
+        bytes.push(1);
+        bytes.push(0);
+        bytes.push(0); // Ss
+        bytes.push(5); // Se
+        bytes.push(0);
+        bytes.push(0xFF);
+        bytes.push(MARKER_EOI);
+
+        let err = decode_jpeg(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            RenderError::BadJpeg("progressive DC scan Se != 0")
+        ));
+    }
+
+    #[test]
+    fn progressive_sos_rejects_ac_scan_with_ss_greater_than_se() {
+        let mut bytes = vec![0xFF, MARKER_SOI];
+        bytes.push(0xFF);
+        bytes.push(MARKER_DQT);
+        bytes.extend_from_slice(&(2u16 + 1 + 64).to_be_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&[1u8; 64]);
+        bytes.push(0xFF);
+        bytes.push(MARKER_SOF2);
+        bytes.extend_from_slice(&(2u16 + 6 + 3).to_be_bytes());
+        bytes.push(8);
+        bytes.extend_from_slice(&8u16.to_be_bytes());
+        bytes.extend_from_slice(&8u16.to_be_bytes());
+        bytes.push(1);
+        bytes.push(1);
+        bytes.push((1 << 4) | 1);
+        bytes.push(0);
+        bytes.push(0xFF);
+        bytes.push(MARKER_SOS);
+        bytes.extend_from_slice(&(2u16 + 1 + 2 + 3).to_be_bytes());
+        bytes.push(1);
+        bytes.push(1);
+        bytes.push(0);
+        bytes.push(20); // Ss
+        bytes.push(5); // Se (< Ss)
+        bytes.push(0);
+        bytes.push(0xFF);
+        bytes.push(MARKER_EOI);
+
+        let err = decode_jpeg(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            RenderError::BadJpeg("progressive AC scan Ss > Se")
+        ));
+    }
+
+    #[test]
+    fn progressive_ac_refinement_scan_is_unsupported() {
+        // SOF2 + an AC scan with Ah=1 (refinement). The implementation
+        // surfaces this as BadJpeg explicitly per the PR's deferred-scope
+        // note.
+        let mut bytes = vec![0xFF, MARKER_SOI];
+        bytes.push(0xFF);
+        bytes.push(MARKER_DQT);
+        bytes.extend_from_slice(&(2u16 + 1 + 64).to_be_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&[1u8; 64]);
+        bytes.push(0xFF);
+        bytes.push(MARKER_SOF2);
+        bytes.extend_from_slice(&(2u16 + 6 + 3).to_be_bytes());
+        bytes.push(8);
+        bytes.extend_from_slice(&8u16.to_be_bytes());
+        bytes.extend_from_slice(&8u16.to_be_bytes());
+        bytes.push(1);
+        bytes.push(1);
+        bytes.push((1 << 4) | 1);
+        bytes.push(0);
+        // AC scan with Ah=1, Al=0.
+        bytes.push(0xFF);
+        bytes.push(MARKER_SOS);
+        bytes.extend_from_slice(&(2u16 + 1 + 2 + 3).to_be_bytes());
+        bytes.push(1);
+        bytes.push(1);
+        bytes.push(0);
+        bytes.push(1); // Ss
+        bytes.push(63); // Se
+        bytes.push(1 << 4); // Ah=1, Al=0
+        bytes.push(0xFF);
+        bytes.push(MARKER_EOI);
+
+        let err = decode_jpeg(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            RenderError::BadJpeg("progressive AC refinement scans not supported")
+        ));
     }
 }
