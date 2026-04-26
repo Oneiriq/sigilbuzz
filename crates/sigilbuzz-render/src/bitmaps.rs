@@ -39,7 +39,12 @@
 //!   the referenced gid's bitmap.
 //! - **EBDT formats 1, 2, 5, 6, 7** (1bpp byte-aligned and bit-aligned
 //!   masks) are decoded into black-on-transparent premultiplied RGBA.
-//!   Composite formats 8/9 surface `UnsupportedBitmap`.
+//! - **EBDT formats 8 and 9** (composite mono bitmaps) recurse into
+//!   the referenced component gids at the parent's strike, alpha-
+//!   overlay each on a parent canvas, and surface
+//!   [`RenderError::BitmapDecodeFailed`] on cycles, self-references,
+//!   missing-at-strike components, or recursion past
+//!   [`EBDT_COMPOSITE_MAX_DEPTH`].
 //! - **No interlacing.** Adam7 isn't used in font embeds.
 //! - **No ancillary chunks beyond IHDR / IDAT / IEND.** The PNG
 //!   decoder skips unknown chunks (per PNG spec) but doesn't apply
@@ -98,8 +103,11 @@ const EBDT_COMPOSITE_MAX_DEPTH: u8 = 4;
 /// - `Err(RenderError::NoBitmap(gid))` — no strike covers `gid`, or
 ///   the font carries no bitmap tables.
 /// - `Err(RenderError::UnsupportedBitmap)` — sbix payload is jpg /
-///   tiff / jp2, EBDT format is one of the composite variants
-///   (8 / 9), or `'dupe'` recursion exceeds the depth cap.
+///   tiff / jp2, or `'dupe'` recursion exceeds the depth cap.
+/// - `Err(RenderError::BitmapDecodeFailed(_))` — EBDT composite
+///   (formats 8 / 9) recursion hit a cycle, self-reference, OOB
+///   component glyph id, missing-at-strike component, or
+///   `EBDT_COMPOSITE_MAX_DEPTH`.
 /// - `Err(RenderError::BadPng(...))` — PNG payload failed to decode.
 ///
 /// # Errors
@@ -667,9 +675,7 @@ fn decode_ebdt_composite(
             // the depth cap so they surface a precise error message
             // even at depth 1.
             if comp.glyph_id == gid {
-                return Err(RenderError::BitmapDecodeFailed(
-                    "composite self-reference",
-                ));
+                return Err(RenderError::BitmapDecodeFailed("composite self-reference"));
             }
             if composite_chain.contains(&comp.glyph_id) {
                 return Err(RenderError::BitmapDecodeFailed("composite cycle"));
@@ -726,7 +732,12 @@ fn decode_ebdt_composite(
                 composite_chain,
                 composite_depth + 1,
             )?;
-            blit_source_over(&mut canvas, &comp_pix, i32::from(comp.x_offset), i32::from(comp.y_offset));
+            blit_source_over(
+                &mut canvas,
+                &comp_pix,
+                i32::from(comp.x_offset),
+                i32::from(comp.y_offset),
+            );
         }
         Ok(())
     })();
@@ -1183,7 +1194,9 @@ mod tests {
             dst.data[i * 4 + 3] = 255; // opaque black background
         }
         let mut src = ColorPixmap::new(2, 2);
-        src.data = vec![255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255];
+        src.data = vec![
+            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        ];
         blit_source_over(&mut dst, &src, 1, 1);
         assert_eq!(dst.get(0, 0), [0, 0, 0, 255]);
         assert_eq!(dst.get(1, 1), [255, 255, 255, 255]);
@@ -1194,7 +1207,9 @@ mod tests {
     #[test]
     fn blit_source_over_skips_transparent_pixels() {
         let mut dst = ColorPixmap::new(2, 2);
-        dst.data = vec![10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255];
+        dst.data = vec![
+            10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255,
+        ];
         let original = dst.data.clone();
         let src = ColorPixmap::new(2, 2); // all-zero alpha
         blit_source_over(&mut dst, &src, 0, 0);

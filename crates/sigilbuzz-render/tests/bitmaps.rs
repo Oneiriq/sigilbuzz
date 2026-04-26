@@ -514,18 +514,8 @@ fn ebdt_fmt1_entry_mask(width: u8, height: u8, mask: &[u8]) -> Vec<u8> {
 
 /// Builds an EBDT format-8 composite entry: 5-byte SmallGlyphMetrics +
 /// 1-byte pad + u16 numComponents + 4 bytes per component.
-fn ebdt_fmt8_composite_entry(
-    width: u8,
-    height: u8,
-    components: &[(u16, i8, i8)],
-) -> Vec<u8> {
-    let mut out = vec![
-        height,
-        width,
-        0,
-        height as i8 as u8,
-        width,
-    ];
+fn ebdt_fmt8_composite_entry(width: u8, height: u8, components: &[(u16, i8, i8)]) -> Vec<u8> {
+    let mut out = vec![height, width, 0, height as i8 as u8, width];
     out.push(0); // pad
     out.extend_from_slice(&(components.len() as u16).to_be_bytes());
     for (gid, dx, dy) in components {
@@ -561,7 +551,11 @@ fn ebdt_format8_composite_overlays_two_components() {
     let parent_entry = ebdt_fmt8_composite_entry(16, 4, &[(2, 0, 0), (3, 8, 0)]);
     let leaf2_entry = ebdt_fmt1_entry_mask(4, 4, &[0xF0, 0xF0, 0xF0, 0xF0]);
     let leaf3_entry = ebdt_fmt1_entry_mask(2, 2, &[0xC0, 0xC0]);
-    let ebdt = build_ebdt_multi(&[parent_entry.clone(), leaf2_entry.clone(), leaf3_entry.clone()]);
+    let ebdt = build_ebdt_multi(&[
+        parent_entry.clone(),
+        leaf2_entry.clone(),
+        leaf3_entry.clone(),
+    ]);
     let eblc = build_eblc_three_subtables(
         16,
         // (start_gid, end_gid, image_format, entry_offsets relative
@@ -624,10 +618,7 @@ fn ebdt_format8_composite_overlays_two_components() {
 /// are u32 values written into a format-1 var-metric offset array
 /// (count + 1 entries). All sub-tables share image_data_offset = 4 so
 /// the offsets address bytes in EBDT past the version header.
-fn build_eblc_three_subtables(
-    ppem: u8,
-    subtables: &[(u16, u16, u16, &[u32])],
-) -> Vec<u8> {
+fn build_eblc_three_subtables(ppem: u8, subtables: &[(u16, u16, u16, &[u32])]) -> Vec<u8> {
     let mut blob = Vec::new();
     blob.extend_from_slice(&2u16.to_be_bytes()); // major
     blob.extend_from_slice(&0u16.to_be_bytes()); // minor
@@ -691,10 +682,7 @@ fn ebdt_composite_self_reference_surfaces_decode_failed() {
     // gid 1 composite references gid 1 itself.
     let parent = ebdt_fmt8_composite_entry(8, 4, &[(1, 0, 0)]);
     let ebdt = build_ebdt_multi(&[parent.clone()]);
-    let eblc = build_eblc_three_subtables(
-        16,
-        &[(1, 1, 8, &[0, parent.len() as u32])],
-    );
+    let eblc = build_eblc_three_subtables(16, &[(1, 1, 8, &[0, parent.len() as u32])]);
     let font = build_sfnt(vec![
         (*b"maxp", maxp_05(2)),
         (*b"EBLC", eblc),
@@ -760,10 +748,7 @@ fn ebdt_composite_oob_component_glyph_id_surfaces_decode_failed() {
     // gid 1 references gid 99, which is well past maxp.numGlyphs.
     let parent = ebdt_fmt8_composite_entry(8, 4, &[(99, 0, 0)]);
     let ebdt = build_ebdt_multi(&[parent.clone()]);
-    let eblc = build_eblc_three_subtables(
-        16,
-        &[(1, 1, 8, &[0, parent.len() as u32])],
-    );
+    let eblc = build_eblc_three_subtables(16, &[(1, 1, 8, &[0, parent.len() as u32])]);
     let font = build_sfnt(vec![
         (*b"maxp", maxp_05(3)), // num_glyphs = 3, so 99 is OOB
         (*b"EBLC", eblc),

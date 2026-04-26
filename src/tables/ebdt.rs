@@ -317,12 +317,10 @@ impl<'a> Ebdt<'a> {
 /// [`EbdtBitmap::components`].
 fn read_components<'a>(r: &mut Reader<'a>, slice: &'a [u8]) -> Result<&'a [u8]> {
     let num_components = r.read_u16()? as usize;
-    let need = num_components
-        .checked_mul(4)
-        .ok_or(Error::Malformed {
-            offset: r.position(),
-            context: "EBDT component count overflow",
-        })?;
+    let need = num_components.checked_mul(4).ok_or(Error::Malformed {
+        offset: r.position(),
+        context: "EBDT component count overflow",
+    })?;
     let start = r.position();
     let end = start.checked_add(need).ok_or(Error::Malformed {
         offset: start,
@@ -353,6 +351,7 @@ fn parse_big(r: &mut Reader<'_>) -> Result<BigGlyphMetrics> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use alloc::vec::Vec;
 
     fn header() -> Vec<u8> {
