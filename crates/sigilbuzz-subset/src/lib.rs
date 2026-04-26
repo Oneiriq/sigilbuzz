@@ -727,7 +727,7 @@ mod tests {
             gid: 9,
             num_glyphs: 4,
         };
-        assert!(format!("{e}").contains("9"));
+        assert!(format!("{e}").contains('9'));
         let e = SubsetError::Unsupported("foo");
         assert!(format!("{e}").contains("foo"));
         let e = SubsetError::MissingTable(*b"glyf");
