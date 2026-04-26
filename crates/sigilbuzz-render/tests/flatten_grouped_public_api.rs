@@ -55,8 +55,7 @@ fn flatten_grouped_is_callable_from_outside_the_crate() {
         PathOp::Close,
     ];
 
-    let curves: Vec<FlattenedCurve> =
-        flatten_grouped(ops, &Affine::identity(), DEFAULT_TOLERANCE);
+    let curves: Vec<FlattenedCurve> = flatten_grouped(ops, &Affine::identity(), DEFAULT_TOLERANCE);
 
     // 1 LineTo + 1 QuadTo + 1 CubicTo + 1 implicit close-line = 4.
     assert_eq!(curves.len(), 4);
