@@ -499,12 +499,29 @@ Four close-outs from 0.13.0 (gvar partial instancing, CFF2 VarStore partial, NaN
 
 ---
 
-## 0.15.0+ (next)
+## 0.15.0 (shipping)
 
-- [ ] COLRv1 paint tree integration in `sigilbuzz-render` — sigilbuzz-paint already walks the tree; render needs to glue.
-- [ ] SVG-in-OT rasterization in `sigilbuzz-render`.
-- [ ] CBDT/CBLC/EBDT/EBLC/sbix bitmap embeds in `sigilbuzz-render`.
+Three deferral close-outs from `sigilbuzz-render` (#199), plus a regression wave 15 bundle. The render crate now covers every glyph backend a 2026 emoji-class font ships: outlines + COLRv0 + COLRv1 + SVG-in-OT + CBDT/sbix bitmap embeds.
+
+### `sigilbuzz-render` close-outs
+
+- [x] **COLRv1 paint tree (#204)** — full COLRv1 compositor walking `sigilbuzz-paint::evaluate_at_coords`'s DrawCmd stream. Linear/radial/sweep gradient ramps with Pad/Repeat/Reflect extends. Porter-Duff: SrcOver / DestIn / DestOut / SrcIn / SrcOut. PaintGlyph clipping + recursive PaintColrGlyph + variation-aware (PaintVar* via the evaluator's IVS resolver).
+- [x] **SVG-in-OT rasterization (#205)** — hand-rolled XML walker + path-d parser (M/L/H/V/C/Q/Z + relative + implicit-repeat) + transform parser (translate/scale/rotate/matrix) + colour parser (`#rrggbb`, `rgb(...)`, named, `fill-opacity`). Re-uses the existing trapezoid scanline rasterizer. Strokes / gradients / `<use>` / animations / clipPaths / gzipped payloads deferred (the last surfaces `RenderError::SvgGzipped`).
+- [x] **CBDT/sbix bitmap embeds (#207)** — minimal PNG decoder (8-bit grayscale / gray+alpha / RGB / RGBA / indexed PLTE+tRNS) using `miniz_oxide` for the zlib step. CBDT formats 17/18/19 + sbix `'png '` payloads. Half-pixel-centered bilinear rescale on premul RGBA. EBDT mono / sbix non-PNG / Adam7 interlace / 16-bit depth deferred. New workspace dep: `miniz_oxide` (already qualified for sigilbuzz-woff). Discovered + fixed a malformed PNG in the existing `tests/fixtures/{cbdt,sbix}_synthetic.ttf` (declared 13-byte IDAT, embedded 11-byte zlib stream).
+
+### Hardening — wave 15
+
+- [x] 2 fixes (#206): #202 render trapezoid rasterizer panic on non-finite y or extreme-x segment coords; #203 render `rasterize_colrv0_glyph` silently accepted out-of-range `palette_index` when every layer was foreground (0xFFFF).
+
+---
+
+## 0.16.0+ (next)
+
 - [ ] Stable API audit + crates.io publish.
+- [ ] EBDT/EBLC mono bitmap embeds in `sigilbuzz-render`.
+- [ ] sbix non-PNG (`'jpg '`, `'tiff'`) decoders.
+- [ ] SVG strokes + gradients + `<use>` + clipPaths.
+- [ ] VARC subset MultiVarStore pruning (#193 carry-over).
 
 ---
 
