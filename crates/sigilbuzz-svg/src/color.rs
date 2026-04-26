@@ -27,6 +27,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt::Write as _;
 
 use sigilbuzz::Face;
 use sigilbuzz_paint::{
@@ -203,11 +204,11 @@ fn emit_fill(
         PaintSource::Solid(c) => {
             body.push_str("<path");
             if let Some(t) = xform {
-                body.push_str(&format!(r#" transform="{t}""#));
+                let _ = write!(body, r#" transform="{t}""#);
             }
-            body.push_str(&format!(r#" d="{d}" fill="{}""#, color_to_rgb(*c)));
+            let _ = write!(body, r#" d="{d}" fill="{}""#, color_to_rgb(*c));
             if c.a < 1.0 - 1e-6 {
-                body.push_str(&format!(r#" fill-opacity="{}""#, fmt_num(c.a)));
+                let _ = write!(body, r#" fill-opacity="{}""#, fmt_num(c.a));
             }
             body.push_str("/>");
         }
@@ -215,16 +216,16 @@ fn emit_fill(
             let id = emit_gradient_def(defs, g);
             body.push_str("<path");
             if let Some(t) = xform {
-                body.push_str(&format!(r#" transform="{t}""#));
+                let _ = write!(body, r#" transform="{t}""#);
             }
-            body.push_str(&format!(r#" d="{d}" fill="url(#{id})"/>"#));
+            let _ = write!(body, r#" d="{d}" fill="url(#{id})"/>"#);
         }
     }
 }
 
 fn push_layer(body: &mut String, mode: CompositeMode) {
     let blend = composite_to_blend_mode(mode);
-    body.push_str(&format!(r#"<g style="mix-blend-mode:{blend}">"#));
+    let _ = write!(body, r#"<g style="mix-blend-mode:{blend}">"#);
 }
 
 // =========================================================================
@@ -236,14 +237,15 @@ fn emit_gradient_def(defs: &mut Defs, g: &Gradient) -> String {
         GradientKind::Linear { p0, p1, .. } => {
             let id = defs.allocate_id("grad");
             let mut s = String::new();
-            s.push_str(&format!(
+            let _ = write!(
+                s,
                 r#"<linearGradient id="{id}" gradientUnits="userSpaceOnUse" x1="{}" y1="{}" x2="{}" y2="{}" spreadMethod="{}">"#,
                 fmt_num(p0.0),
                 fmt_num(p0.1),
                 fmt_num(p1.0),
                 fmt_num(p1.1),
                 spread_method(g),
-            ));
+            );
             for stop in &g.stops {
                 s.push_str(&stop_tag(stop.offset, stop.color));
             }
@@ -258,7 +260,8 @@ fn emit_gradient_def(defs: &mut Defs, g: &Gradient) -> String {
             // some viewers respect it, others ignore it — either way we emit
             // both circles so the data is preserved.
             let mut s = String::new();
-            s.push_str(&format!(
+            let _ = write!(
+                s,
                 r#"<radialGradient id="{id}" gradientUnits="userSpaceOnUse" cx="{}" cy="{}" r="{}" fx="{}" fy="{}" fr="{}" spreadMethod="{}">"#,
                 fmt_num(c1.0),
                 fmt_num(c1.1),
@@ -267,7 +270,7 @@ fn emit_gradient_def(defs: &mut Defs, g: &Gradient) -> String {
                 fmt_num(c0.1),
                 fmt_num(r0),
                 spread_method(g),
-            ));
+            );
             for stop in &g.stops {
                 s.push_str(&stop_tag(stop.offset, stop.color));
             }
@@ -294,14 +297,15 @@ fn emit_gradient_def(defs: &mut Defs, g: &Gradient) -> String {
             let r = 1.0_f32; // unit-vector axis; userSpaceOnUse keeps coords stable.
             let mut s = String::new();
             s.push_str("<!-- sweep-fallback -->");
-            s.push_str(&format!(
+            let _ = write!(
+                s,
                 r#"<linearGradient id="{id}" gradientUnits="userSpaceOnUse" x1="{}" y1="{}" x2="{}" y2="{}" spreadMethod="{}">"#,
                 fmt_num(center.0 - dx * r),
                 fmt_num(center.1 - dy * r),
                 fmt_num(center.0 + dx * r),
                 fmt_num(center.1 + dy * r),
                 spread_method(g),
-            ));
+            );
             for stop in &g.stops {
                 s.push_str(&stop_tag(stop.offset, stop.color));
             }
