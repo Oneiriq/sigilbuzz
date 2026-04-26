@@ -556,10 +556,10 @@ fn emit_with_keep_set(
         let fd_bytes = parsed.fd_array[old_fd as usize];
         let fd_entries = walk_dict(fd_bytes)?;
         let (font_dict_body, font_dict_private_slot) = serialise_font_dict(&fd_entries);
-        let priv_entries = if !parsed.per_fd_private[old_fd as usize].is_empty() {
-            walk_dict(parsed.per_fd_private[old_fd as usize])?
-        } else {
+        let priv_entries = if parsed.per_fd_private[old_fd as usize].is_empty() {
             Vec::new()
+        } else {
+            walk_dict(parsed.per_fd_private[old_fd as usize])?
         };
         let emit_subrs = !new_per_fd_local_subrs[i].is_empty();
         let (new_private_body, priv_slots) = serialise_private_dict(&priv_entries, emit_subrs);
@@ -813,10 +813,10 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
     for fd_bytes in &parsed.fd_array {
         let fd_entries = walk_dict(fd_bytes)?;
         let (font_dict_body, font_dict_private_slot) = serialise_font_dict(&fd_entries);
-        let priv_entries = if !parsed.per_fd_private[fd_emits.len()].is_empty() {
-            walk_dict(parsed.per_fd_private[fd_emits.len()])?
-        } else {
+        let priv_entries = if parsed.per_fd_private[fd_emits.len()].is_empty() {
             Vec::new()
+        } else {
+            walk_dict(parsed.per_fd_private[fd_emits.len()])?
         };
         // No local subrs survive the bake.
         let (new_private_body, _) = serialise_private_dict(&priv_entries, false);
@@ -1412,10 +1412,10 @@ pub(crate) fn bake_cff2_partial(
     for (i, fd_bytes) in parsed.fd_array.iter().enumerate() {
         let fd_entries = walk_dict(fd_bytes)?;
         let (font_dict_body, font_dict_private_slot) = serialise_font_dict(&fd_entries);
-        let priv_entries = if !parsed.per_fd_private[i].is_empty() {
-            walk_dict(parsed.per_fd_private[i])?
-        } else {
+        let priv_entries = if parsed.per_fd_private[i].is_empty() {
             Vec::new()
+        } else {
+            walk_dict(parsed.per_fd_private[i])?
         };
         let (new_private_body, _) = serialise_private_dict(&priv_entries, false);
         fd_emits.push(FdEmit {

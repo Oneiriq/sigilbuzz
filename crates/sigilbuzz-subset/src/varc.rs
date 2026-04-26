@@ -523,7 +523,7 @@ impl<'a> CoverageIter<'a> {
     }
 }
 
-impl<'a> Iterator for CoverageIter<'a> {
+impl Iterator for CoverageIter<'_> {
     type Item = (GlyphId, usize);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1048,7 +1048,7 @@ impl<'a> ParsedMvs<'a> {
             .to_vec();
 
         // Subtables.
-        let mut markers: Vec<usize> = subtable_offsets.to_vec();
+        let mut markers: Vec<usize> = subtable_offsets.clone();
         markers.push(region_list_off);
         markers.push(data.len());
         let mut subtables: Vec<ParsedMvsSubtable<'a>> = Vec::with_capacity(subtable_count);

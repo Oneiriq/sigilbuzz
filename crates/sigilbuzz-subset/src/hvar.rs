@@ -244,7 +244,7 @@ fn build_index_map(new_inner_per_gid: &[u16], max_inner: u16) -> Vec<u8> {
     let entry_format: u8 =
         ((((entry_bytes - 1) as u8) & 0x03) << 4) | ((inner_bits - 1) as u8 & 0x0F);
 
-    let format: u8 = if map_count <= u32::from(u16::MAX) {
+    let format: u8 = if u16::try_from(map_count).is_ok() {
         0
     } else {
         1

@@ -265,14 +265,10 @@ pub fn scan_subr_calls(
                 stack.clear();
                 pos += 2;
             }
-            OP_RETURN => {
-                // Subroutine return — stop walking *this* charstring
-                // body but only when we're scanning a subr in
-                // isolation. The scanner's caller invokes us per
-                // body; treating return as end-of-walk is correct.
-                return Ok(out);
-            }
-            OP_ENDCHAR => {
+            // Subroutine return / endchar — stop walking *this*
+            // charstring body. The scanner's caller invokes us per
+            // body; treating either op as end-of-walk is correct.
+            OP_RETURN | OP_ENDCHAR => {
                 return Ok(out);
             }
             OP_RMOVETO | OP_HMOVETO | OP_VMOVETO | OP_RLINETO | OP_HLINETO | OP_VLINETO
@@ -665,7 +661,7 @@ pub fn emit_charset_format2(sids: &[u16]) -> Vec<u8> {
         // the same record.
         while j < sids.len()
             && sids[j - 1].checked_add(1) == Some(sids[j])
-            && (j - i) <= u16::MAX as usize
+            && u16::try_from(j - i).is_ok()
         {
             j += 1;
         }
@@ -4415,12 +4411,12 @@ mod tests {
             per_fd_priv_abs.push(out.len());
             per_fd_priv_size.push(pb.len());
             out.extend_from_slice(pb);
-            if !per_fd_locals[i].is_empty() {
+            if per_fd_locals[i].is_empty() {
+                per_fd_local_abs.push(None);
+            } else {
                 let abs = out.len();
                 out.extend_from_slice(&local_indexes[i]);
                 per_fd_local_abs.push(Some(abs));
-            } else {
-                per_fd_local_abs.push(None);
             }
         }
 
@@ -4534,7 +4530,7 @@ mod tests {
                 }
             }
         }
-        targets.sort();
+        targets.sort_unstable();
         targets.dedup();
         assert_eq!(
             targets.len(),

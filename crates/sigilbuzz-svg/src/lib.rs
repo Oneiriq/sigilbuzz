@@ -190,7 +190,7 @@ pub(crate) fn push_num(out: &mut String, v: f32) {
     if rounded == 0.0 {
         rounded = 0.0;
     }
-    let s = format!("{rounded:.*}", PRECISION);
+    let s = format!("{rounded:.PRECISION$}");
     let trimmed = trim_zeros(&s);
     if trimmed.is_empty() || trimmed == "-" || trimmed == "-0" {
         out.push('0');

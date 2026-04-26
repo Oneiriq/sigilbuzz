@@ -40,6 +40,11 @@
 #![allow(non_camel_case_types, non_snake_case)]
 #![allow(missing_docs)]
 #![allow(clippy::missing_safety_doc)]
+// `_face`-prefixed inner-struct fields are referenced from a few
+// non-FFI helper sites for lifetime-rooted borrows. The leading
+// underscore on the field is a documentation cue ("not for direct
+// public access"), not a "truly unused" marker.
+#![allow(clippy::used_underscore_binding)]
 
 extern crate alloc;
 
@@ -194,6 +199,11 @@ impl hb_face_t {
 /// expose the same surface. Most callers configure the font once
 /// before shaping, so contention is negligible.
 pub(crate) struct FontInner {
+    // `_face` is the lifetime root for `state.font` (which holds a
+    // `Font<'static>` borrowed from this Arc — see SAFETY note below).
+    // The leading underscore signals "not for direct access" but a
+    // few internal call sites still need to read it; those are
+    // covered by the module-level `used_underscore_binding` allow.
     pub(crate) _face: Arc<FaceInner>,
     pub(crate) state: spin_mutex::SpinMutex<FontState>,
 }

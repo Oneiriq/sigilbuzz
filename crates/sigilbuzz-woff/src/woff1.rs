@@ -335,6 +335,10 @@ pub fn wrap_woff1_with_options(sfnt_bytes: &[u8], opts: WrapWoff1Options) -> Res
 /// Returns the bytes to write and the matching `compLength`. With the
 /// feature off, the function is a thin pass-through that always
 /// returns `(raw.to_vec(), raw.len())`.
+// `_quality` is unused in the feature-off build but consumed inside
+// the `cfg(feature = "woff1-deflate")` block. The leading underscore
+// is the standard "unused unless a cfg branch fires" idiom.
+#[allow(clippy::used_underscore_binding)]
 fn compress_body(raw: &[u8], _quality: u8) -> (Vec<u8>, u32) {
     #[cfg(feature = "woff1-deflate")]
     {

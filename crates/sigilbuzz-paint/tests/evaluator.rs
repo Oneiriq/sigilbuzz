@@ -131,7 +131,7 @@ fn solid_paint_emits_single_fill_with_palette_color() {
                 assert!((c.b).abs() < 1e-6);
                 assert!((c.a - 1.0).abs() < 1e-6);
             }
-            other => panic!("expected solid, got {other:?}"),
+            other @ PaintSource::Gradient(_) => panic!("expected solid, got {other:?}"),
         },
         other => panic!("expected FillGlyph, got {other:?}"),
     }

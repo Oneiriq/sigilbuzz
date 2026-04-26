@@ -61,7 +61,7 @@ fn classify(c: char) -> WordKind {
     }
 }
 
-impl<'a> Iterator for WordBreakIter<'a> {
+impl Iterator for WordBreakIter<'_> {
     type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {

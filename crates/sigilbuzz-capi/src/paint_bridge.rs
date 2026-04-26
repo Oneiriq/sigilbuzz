@@ -26,6 +26,11 @@
 //! HarfBuzz's `hb_color_t` is a packed `u32` BGRA byte tuple. The
 //! conversion is a clamp + cast.
 
+// `_face` is the lifetime-root field in `FaceInner`/`FontInner`; the
+// bridge reads it to obtain a `&Face` for paint evaluation. See
+// `crates/sigilbuzz-capi/src/lib.rs` for the rationale.
+#![allow(clippy::used_underscore_binding)]
+
 extern crate alloc;
 
 use alloc::boxed::Box;
