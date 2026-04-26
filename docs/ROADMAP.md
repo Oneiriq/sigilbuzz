@@ -589,13 +589,33 @@ Three render close-outs (SVG filters, true-arc dasharray, PNG tRNS) plus a pre-p
 
 ---
 
-## 0.20.0+ (next)
+## 0.20.0 (shipping)
+
+Four close-outs from prior carry-overs (companion clippy backlog, sbix JPEG decoder, SVG mask, ot/unicode stable promotion). No regression PR — adversarial probing found no defects.
+
+### Render close-outs
+
+- [x] **sbix JPEG decoder (#237)** — closes #221 deferral. Hand-rolled minimum-viable baseline JPEG decoder: marker walker, DQT/DHT parsers, baseline SOF0 entropy decoder, float IDCT, ITU-R BT.601 YCbCr→RGB with chroma upsample. YCbCr (3-component) + grayscale (1-component) at sampling 1×1 / 2×1 / 1×2 / 2×2 (4:4:4 / 4:2:2 / 4:2:0). Progressive scan / arithmetic coding / 16-bit precision still surface `RenderError::BadJpeg`.
+- [x] **SVG `<mask>` (#236)** — generic alpha mask via BT.709 luminance derivation (mask-type=alpha + objectBoundingBox + nested masks deferred). Distinguishes from clipPath via continuous-luminance ramp (vs binary in/out). `<textPath>` deferred again — needs shaped runs from a consumer, which isn't render-side input.
+
+### API stabilization
+
+- [x] **ot/unicode stable promotion (#238)** — closes #235 audit follow-up. Curated subset of `ot::feature::{LIGA, KERN, CALT, ISOL, INIT, MEDI, FINA, RLIG, SMCP, C2SC, ONUM, LNUM, TNUM, PNUM, FRAC, SWSH, SS01}` + `ot::JoiningForm` + `unicode::{UnicodeScript, script_of, is_hangul_jamo, BidiInfo, BidiClass, bidi_class, JoiningType}` re-exported at crate root. Deep paths stay `#[doc(hidden)]`.
+- [x] **Companion clippy::pedantic cleanup (#239)** — closes #235 audit deferral. Hoisted `clippy::pedantic = warn` from root-only to workspace level. 14 actual fixes + 23 workspace-level allows with per-allow justification. All companion crates now uniform.
+
+### Hardening — wave 20
+
+- [x] No defects shipped. Adversarial probing across `flatten`/`flatten_grouped`/`arc_length_*`/`raster::rasterize`/`colrv1`/`png_encode`/`affine` with NaN/Inf/extreme inputs found everything robust.
+
+---
+
+## 0.21.0+ (next)
 
 - [ ] crates.io publish (gated on user prompt).
-- [ ] sbix `'jpg '` / `'tiff'` / `'jp2 '` decoders (still deferred — each is its own substantial decoder).
-- [ ] SVG masks beyond clipPath, animations, `<text>` rendering inside SVG (text-on-path).
-- [ ] Companion-crate `clippy::pedantic` cleanup (~100 pre-existing warnings surfaced by audit's lint propagation).
-- [ ] Promote `sigilbuzz::ot` and `sigilbuzz::unicode` to a stable curated re-export set before 1.0.
+- [ ] sbix `'tiff'` and `'jp2 '` decoders (still deferred).
+- [ ] SVG `<textPath>` once a consumer wants it; SVG animations.
+- [ ] Mask-type=alpha + objectBoundingBox + nested masks.
+- [ ] JPEG progressive scan, arithmetic coding, 16-bit precision.
 
 ---
 
