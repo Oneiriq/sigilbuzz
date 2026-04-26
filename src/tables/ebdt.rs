@@ -16,16 +16,20 @@
 //!   [`BigGlyphMetrics`](crate::tables::cblc::BigGlyphMetrics)).
 //! - **6**: BigGlyphMetrics (8 B) + byte-aligned 1bpp.
 //! - **7**: BigGlyphMetrics + bit-aligned 1bpp.
-//! - **8 / 9**: composite glyphs (a list of component gids each at an
-//!   offset). sigilbuzz returns
-//!   [`Error::Unsupported`](crate::error::Error::Unsupported) for these
-//!   — composite mono bitmaps are exceedingly rare and would need a
-//!   separate recursion model.
+//! - **8**: SmallGlyphMetrics + 1 byte pad + `u16 num_components` +
+//!   `EbdtComponent[num_components]`. Each component is a 4-byte
+//!   record: `u16 glyph_id`, `i8 x_offset`, `i8 y_offset` referencing
+//!   another EBDT entry to alpha-overlay onto the parent canvas.
+//! - **9**: BigGlyphMetrics + `u16 num_components` +
+//!   `EbdtComponent[num_components]`. Big-metrics counterpart of
+//!   format 8.
 //!
 //! sigilbuzz returns the parsed [`EbdtBitmap`] which carries the
 //! resolved metrics, the bit-packing flavour, and the raw mask bytes.
-//! The renderer is responsible for unpacking those bits into pixels —
-//! see `sigilbuzz-render::bitmaps`.
+//! For composite formats 8 / 9 the [`EbdtBitmap::data`] slice is empty
+//! and the parsed component records hang off [`EbdtBitmap::components`].
+//! The renderer is responsible for unpacking the 1bpp data and for
+//! recursing into composite components — see `sigilbuzz-render::bitmaps`.
 
 use crate::error::{Error, Result};
 use crate::tables::cblc::{BigGlyphMetrics, CbdtLocation, SmallGlyphMetrics};
@@ -76,21 +80,77 @@ pub enum BitPacking {
     BitAligned,
 }
 
-/// A parsed EBDT entry — payload bytes plus the metrics and packing
-/// flavour needed to interpret them. `data` is the raw mask bytes,
-/// borrowing into the EBDT table.
+/// One component of an EBDT composite entry (formats 8 / 9). Each
+/// composite glyph is built by alpha-overlaying the bitmap of the
+/// referenced `glyph_id` at the given pixel offset onto the parent
+/// canvas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EbdtComponent {
+    /// Glyph id whose EBDT entry is composited into the parent. The
+    /// referenced entry should itself be one of the non-composite
+    /// formats (1 / 2 / 5 / 6 / 7) at the same strike.
+    pub glyph_id: u16,
+    /// Pixel offset on the X axis applied before compositing.
+    pub x_offset: i8,
+    /// Pixel offset on the Y axis applied before compositing.
+    pub y_offset: i8,
+}
+
+/// A parsed EBDT entry — metrics, packing flavour, and either the raw
+/// mask bytes (formats 1 / 2 / 5 / 6 / 7) or the parsed component
+/// references (formats 8 / 9).
 #[derive(Debug, Clone, Copy)]
 pub struct EbdtBitmap<'a> {
-    /// EBDT image format id (1 / 2 / 5 / 6 / 7).
+    /// EBDT image format id (1 / 2 / 5 / 6 / 7 / 8 / 9).
     pub image_format: u16,
     /// Resolved per-glyph metrics. For formats with strike-level
     /// metrics (5), the metrics are folded in from the EBLC location.
     pub metrics: EbdtMetrics,
-    /// Whether the mask is byte- or bit-aligned per scanline.
+    /// Whether the mask is byte- or bit-aligned per scanline. For
+    /// composite formats (8 / 9) this is set to
+    /// [`BitPacking::ByteAligned`] but is not meaningful — the
+    /// component records carry no mask of their own.
     pub packing: BitPacking,
     /// Raw mask bytes. Most-significant bit of each byte holds the
-    /// leftmost pixel.
+    /// leftmost pixel. Empty slice for composite formats (8 / 9).
     pub data: &'a [u8],
+    /// Raw, unparsed component-array bytes for composite formats
+    /// (8 / 9). Each record is exactly 4 bytes: `u16 glyph_id`,
+    /// `i8 x_offset`, `i8 y_offset` (big-endian). Empty slice for
+    /// non-composite formats. Iterate via [`EbdtBitmap::components`].
+    pub components_raw: &'a [u8],
+}
+
+impl<'a> EbdtBitmap<'a> {
+    /// Number of composite components (formats 8 / 9). Always zero
+    /// for non-composite formats.
+    #[must_use]
+    pub fn component_count(&self) -> u16 {
+        // 4 bytes per record. The byte slice was sized to a multiple
+        // of 4 by the parser, and `num_components` is u16, so the
+        // count fits.
+        #[allow(clippy::cast_possible_truncation)]
+        let n = (self.components_raw.len() / 4) as u16;
+        n
+    }
+
+    /// Iterates parsed [`EbdtComponent`] records for composite formats
+    /// (8 / 9). Yields nothing for non-composite formats.
+    pub fn components(&self) -> impl Iterator<Item = EbdtComponent> + 'a {
+        self.components_raw.chunks_exact(4).map(|c| EbdtComponent {
+            glyph_id: u16::from_be_bytes([c[0], c[1]]),
+            #[allow(clippy::cast_possible_wrap)]
+            x_offset: c[2] as i8,
+            #[allow(clippy::cast_possible_wrap)]
+            y_offset: c[3] as i8,
+        })
+    }
+
+    /// True when this entry is one of the composite formats (8 / 9).
+    #[must_use]
+    pub fn is_composite(&self) -> bool {
+        matches!(self.image_format, 8 | 9)
+    }
 }
 
 /// Wraps an EBDT byte slice and dispenses per-glyph parses.
@@ -155,6 +215,7 @@ impl<'a> Ebdt<'a> {
                     metrics: EbdtMetrics::Small(metrics),
                     packing: BitPacking::ByteAligned,
                     data: &slice[data_start..],
+                    components_raw: &[],
                 })
             }
             2 => {
@@ -166,6 +227,7 @@ impl<'a> Ebdt<'a> {
                     metrics: EbdtMetrics::Small(metrics),
                     packing: BitPacking::BitAligned,
                     data: &slice[data_start..],
+                    components_raw: &[],
                 })
             }
             5 => {
@@ -181,6 +243,7 @@ impl<'a> Ebdt<'a> {
                     metrics,
                     packing: BitPacking::BitAligned,
                     data: slice,
+                    components_raw: &[],
                 })
             }
             6 => {
@@ -192,6 +255,7 @@ impl<'a> Ebdt<'a> {
                     metrics: EbdtMetrics::Big(metrics),
                     packing: BitPacking::ByteAligned,
                     data: &slice[data_start..],
+                    components_raw: &[],
                 })
             }
             7 => {
@@ -203,13 +267,72 @@ impl<'a> Ebdt<'a> {
                     metrics: EbdtMetrics::Big(metrics),
                     packing: BitPacking::BitAligned,
                     data: &slice[data_start..],
+                    components_raw: &[],
+                })
+            }
+            8 => {
+                // Composite, small metrics. Layout:
+                //   SmallGlyphMetrics (5 B)
+                //   pad           (1 B, ignored)
+                //   numComponents (u16 BE)
+                //   EbdtComponent[numComponents] (4 B each)
+                let metrics = SmallGlyphMetrics::parse(&mut r)?;
+                // Spec calls for one byte of padding between the
+                // small metrics and num_components; consume it
+                // explicitly so the cursor lands on the count.
+                r.skip(1)?;
+                let components_raw = read_components(&mut r, slice)?;
+                Ok(EbdtBitmap {
+                    image_format: 8,
+                    metrics: EbdtMetrics::Small(metrics),
+                    packing: BitPacking::ByteAligned,
+                    data: &[],
+                    components_raw,
+                })
+            }
+            9 => {
+                // Composite, big metrics. No padding between metrics
+                // and num_components.
+                let metrics = parse_big(&mut r)?;
+                let components_raw = read_components(&mut r, slice)?;
+                Ok(EbdtBitmap {
+                    image_format: 9,
+                    metrics: EbdtMetrics::Big(metrics),
+                    packing: BitPacking::ByteAligned,
+                    data: &[],
+                    components_raw,
                 })
             }
             _ => Err(Error::Unsupported {
-                context: "EBDT image format (only 1/2/5/6/7 are decoded)",
+                context: "EBDT image format (only 1/2/5/6/7/8/9 are decoded)",
             }),
         }
     }
+}
+
+/// Reads `u16 numComponents` followed by `numComponents` 4-byte
+/// component records out of `r` and returns the raw component bytes
+/// borrowed from `slice`. The records are returned unparsed so the
+/// surrounding `EbdtBitmap` stays `Copy`-friendly; iterate them via
+/// [`EbdtBitmap::components`].
+fn read_components<'a>(r: &mut Reader<'a>, slice: &'a [u8]) -> Result<&'a [u8]> {
+    let num_components = r.read_u16()? as usize;
+    let need = num_components.checked_mul(4).ok_or(Error::Malformed {
+        offset: r.position(),
+        context: "EBDT component count overflow",
+    })?;
+    let start = r.position();
+    let end = start.checked_add(need).ok_or(Error::Malformed {
+        offset: start,
+        context: "EBDT component array overflow",
+    })?;
+    if end > slice.len() {
+        return Err(Error::Truncated {
+            offset: end,
+            context: "EBDT component array past end of entry",
+        });
+    }
+    Ok(&slice[start..end])
 }
 
 fn parse_big(r: &mut Reader<'_>) -> Result<BigGlyphMetrics> {
@@ -228,6 +351,7 @@ fn parse_big(r: &mut Reader<'_>) -> Result<BigGlyphMetrics> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use alloc::vec::Vec;
 
     fn header() -> Vec<u8> {
@@ -360,12 +484,141 @@ mod tests {
         let loc = CbdtLocation {
             offset: 0,
             length: 4,
-            image_format: 8, // composite — not supported
+            // 17 is a CBDT-only format (PNG); the EBDT dispatch
+            // rejects it as unsupported.
+            image_format: 17,
             metrics: None,
         };
         assert!(matches!(
             ebdt.glyph_bitmap(&loc),
             Err(Error::Unsupported { .. })
         ));
+    }
+
+    #[test]
+    fn parses_format8_composite_small_metrics() {
+        let mut data = header();
+        let payload_off = data.len() as u32;
+        // Small metrics (5B): h=4, w=4, bx=0, by=4, adv=4
+        data.extend_from_slice(&[4, 4, 0, 4, 4]);
+        // 1 byte of pad
+        data.push(0);
+        // numComponents = 2
+        data.extend_from_slice(&2u16.to_be_bytes());
+        // Component 1: glyph_id=2, x_offset=0, y_offset=0
+        data.extend_from_slice(&2u16.to_be_bytes());
+        data.push(0);
+        data.push(0);
+        // Component 2: glyph_id=3, x_offset=8, y_offset=-2
+        data.extend_from_slice(&3u16.to_be_bytes());
+        #[allow(clippy::cast_sign_loss)]
+        data.push(8i8 as u8);
+        #[allow(clippy::cast_sign_loss)]
+        data.push(-2i8 as u8);
+        let payload_len = data.len() as u32 - payload_off;
+
+        let ebdt = Ebdt::parse(&data).unwrap();
+        let loc = CbdtLocation {
+            offset: payload_off,
+            length: payload_len,
+            image_format: 8,
+            metrics: None,
+        };
+        let bm = ebdt.glyph_bitmap(&loc).unwrap();
+        assert!(bm.is_composite());
+        assert_eq!(bm.image_format, 8);
+        assert_eq!(bm.component_count(), 2);
+        let comps: Vec<_> = bm.components().collect();
+        assert_eq!(
+            comps,
+            vec![
+                EbdtComponent {
+                    glyph_id: 2,
+                    x_offset: 0,
+                    y_offset: 0
+                },
+                EbdtComponent {
+                    glyph_id: 3,
+                    x_offset: 8,
+                    y_offset: -2
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_format9_composite_big_metrics() {
+        let mut data = header();
+        let payload_off = data.len() as u32;
+        // Big metrics (8B): h=8, w=8, hbx=0, hby=8, hadv=8, vbx=0, vby=0, vadv=0
+        data.extend_from_slice(&[8, 8, 0, 8, 8, 0, 0, 0]);
+        // numComponents = 1
+        data.extend_from_slice(&1u16.to_be_bytes());
+        // Component: glyph_id=42, x_offset=-1, y_offset=3
+        data.extend_from_slice(&42u16.to_be_bytes());
+        #[allow(clippy::cast_sign_loss)]
+        data.push(-1i8 as u8);
+        data.push(3);
+        let payload_len = data.len() as u32 - payload_off;
+
+        let ebdt = Ebdt::parse(&data).unwrap();
+        let loc = CbdtLocation {
+            offset: payload_off,
+            length: payload_len,
+            image_format: 9,
+            metrics: None,
+        };
+        let bm = ebdt.glyph_bitmap(&loc).unwrap();
+        assert!(bm.is_composite());
+        assert_eq!(bm.image_format, 9);
+        assert_eq!(bm.component_count(), 1);
+        let c = bm.components().next().unwrap();
+        assert_eq!(c.glyph_id, 42);
+        assert_eq!(c.x_offset, -1);
+        assert_eq!(c.y_offset, 3);
+    }
+
+    #[test]
+    fn format8_truncated_component_array_rejected() {
+        let mut data = header();
+        let payload_off = data.len() as u32;
+        // Small metrics + pad
+        data.extend_from_slice(&[4, 4, 0, 4, 4, 0]);
+        // numComponents = 4 but only 1 record present (4 bytes).
+        data.extend_from_slice(&4u16.to_be_bytes());
+        data.extend_from_slice(&[0, 1, 0, 0]);
+        let payload_len = data.len() as u32 - payload_off;
+
+        let ebdt = Ebdt::parse(&data).unwrap();
+        let loc = CbdtLocation {
+            offset: payload_off,
+            length: payload_len,
+            image_format: 8,
+            metrics: None,
+        };
+        assert!(matches!(
+            ebdt.glyph_bitmap(&loc),
+            Err(Error::Truncated { .. })
+        ));
+    }
+
+    #[test]
+    fn format8_zero_components_round_trips() {
+        let mut data = header();
+        let payload_off = data.len() as u32;
+        data.extend_from_slice(&[2, 2, 0, 2, 2, 0]);
+        data.extend_from_slice(&0u16.to_be_bytes());
+        let payload_len = data.len() as u32 - payload_off;
+
+        let ebdt = Ebdt::parse(&data).unwrap();
+        let loc = CbdtLocation {
+            offset: payload_off,
+            length: payload_len,
+            image_format: 8,
+            metrics: None,
+        };
+        let bm = ebdt.glyph_bitmap(&loc).unwrap();
+        assert_eq!(bm.component_count(), 0);
+        assert!(bm.components().next().is_none());
     }
 }

@@ -37,6 +37,11 @@ pub enum RenderError {
     /// The bitmap embed used an encoding we don't decode (e.g. sbix
     /// `'jpg '` / `'tiff'` / `'dupe'`, or CBDT mask formats 1-9).
     UnsupportedBitmap,
+    /// A bitmap embed parsed structurally but could not be decoded —
+    /// used by the EBDT composite (formats 8 / 9) recursion guard for
+    /// cycles, self-references, and out-of-range component glyph ids.
+    /// The static string identifies which guard tripped.
+    BitmapDecodeFailed(&'static str),
     /// PNG payload failed structural validation (signature, IHDR,
     /// chunk shape) or zlib inflate.
     BadPng(&'static str),
@@ -71,6 +76,7 @@ impl fmt::Display for RenderError {
             Self::UnsupportedBitmap => {
                 write!(f, "embedded bitmap uses an unsupported payload format")
             }
+            Self::BitmapDecodeFailed(msg) => write!(f, "bitmap decode failed: {msg}"),
             Self::BadPng(msg) => write!(f, "PNG decode failed: {msg}"),
             Self::SvgNotFound(g) => write!(f, "glyph {g} has no SVG document"),
             Self::SvgGzipped => f.write_str("SVG document is gzip-compressed"),
