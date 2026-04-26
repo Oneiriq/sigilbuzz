@@ -40,7 +40,9 @@
 //!
 //! - COLRv1 paint-tree evaluation (live in `sigilbuzz-paint`; a render
 //!   integration lands in 0.15.0+).
-//! - SVG-in-OT, CBDT/CBLC, EBDT/EBLC, sbix bitmap embeds.
+//! - SVG-in-OT.
+//! - EBDT/EBLC mono bitmap embeds (deferred — modern bitmap fonts
+//!   carry CBDT or sbix instead).
 //! - Subpixel text positioning beyond what the trapezoid rasterizer
 //!   naturally provides.
 //! - Hinting.
@@ -52,6 +54,7 @@
 extern crate alloc;
 
 mod affine;
+mod bitmaps;
 mod error;
 mod flatten;
 mod pixmap;
@@ -59,6 +62,7 @@ mod raster;
 mod rasterizer;
 
 pub use affine::Affine;
+pub use bitmaps::{decode_png, rasterize_bitmap_glyph, rescale_bilinear};
 pub use error::RenderError;
 pub use pixmap::{ColorPixmap, Pixmap};
 pub use rasterizer::Rasterizer;
