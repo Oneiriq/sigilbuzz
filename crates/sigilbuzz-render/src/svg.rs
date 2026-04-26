@@ -1086,6 +1086,14 @@ struct ElemCtx {
     /// Inherited like `clip_href` / `filter_href`; resolved against
     /// the document `Defs` at emit time to a [`MaskShape`].
     mask_href: Option<String>,
+    /// Cycle-guard for nested mask resolution. `resolve_mask_shape`
+    /// bumps this when it walks the mask body so any descendant
+    /// `mask="url(#…)"` reference (including the cyclic
+    /// `<mask id=a>…<rect mask=url(#b)>…<mask id=b>…<rect mask=url(#a)>`
+    /// case) is dropped at `emit_paint` rather than recursing back
+    /// into the resolver. Keeps the stack bounded at the documented
+    /// "mask-of-mask is unsupported" semantics.
+    mask_depth: u8,
 }
 
 impl Default for ElemCtx {
@@ -1106,6 +1114,7 @@ impl Default for ElemCtx {
             clip_href: None,
             filter_href: None,
             mask_href: None,
+            mask_depth: 0,
         }
     }
 }
@@ -1356,10 +1365,20 @@ fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) 
     // Resolve the mask once per emission. Same fallback policy as
     // filter / clipPath: unknown id silently drops the mask rather
     // than blanking the glyph.
-    let mask = ctx
-        .mask_href
-        .as_deref()
-        .and_then(|id| resolve_mask_shape(defs, id));
+    //
+    // `mask_depth` is the cycle-guard: once we are inside a
+    // `resolve_mask_shape` walk (depth > 0), drop any nested mask
+    // reference so a `<mask id=a>…<rect mask=url(#b)>…<mask
+    // id=b>…<rect mask=url(#a)>` document can't recurse the
+    // resolver into a stack overflow. mask-of-mask is documented as
+    // deferred; this enforces it.
+    let mask = if ctx.mask_depth == 0 {
+        ctx.mask_href
+            .as_deref()
+            .and_then(|id| resolve_mask_shape(defs, id))
+    } else {
+        None
+    };
 
     // Fill pass.
     let fill_paint = resolve_fill_paint(defs, ctx);
@@ -1522,6 +1541,12 @@ fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape> {
     // Drop any nested mask reference on the mask root itself —
     // mask-of-mask isn't supported; the brief defers it explicitly.
     ctx.mask_href = None;
+    // Cycle-guard: bump `mask_depth` so any descendant `<rect
+    // mask="url(#…)">` inside the mask body falls out at
+    // `emit_paint` rather than recursing back into
+    // `resolve_mask_shape`. Caps the call stack at one level of mask
+    // resolution.
+    ctx.mask_depth = ctx.mask_depth.saturating_add(1);
     for child in &mn.children {
         // Sanity: cap mask-internal fill count at the same MAX_FILLS
         // ceiling as the document.

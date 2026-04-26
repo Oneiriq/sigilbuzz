@@ -839,3 +839,173 @@ fn sbix_jp2_returns_unsupported_not_panic() {
         .unwrap_err();
     assert!(matches!(err, RenderError::UnsupportedBitmap));
 }
+
+// =========================================================================
+// Wave-21 adversarial: sbix `'tiff'` payload-shape coverage.
+//
+// The TIFF decoder is owned by the sibling PR (feature/sbix-tiff-decoder)
+// and not yet on release/0.21.0 — every payload here lands at the
+// `UnsupportedBitmap` fast path. The point of these tests is to pin
+// no-panic behaviour for the malformed shapes the sibling brief calls
+// out (bad magic / wrong byte order / unknown compression / truncated
+// strip / multi-IFD) so when the sibling implementation lands, the
+// regression bar already has the adversarial fixtures wired up.
+// =========================================================================
+
+/// Truncated TIFF header (just the LE byte-order bytes, no magic).
+#[test]
+fn sbix_tiff_bad_magic_returns_unsupported() {
+    // "II" little-endian intent but missing magic 42 + IFD offset.
+    let payload = vec![0x49, 0x49, 0x00, 0x00];
+    let glyphs = vec![None, Some((*b"tiff", payload))];
+    let sbix = build_sbix_strike(2, 16, &glyphs);
+    let font = build_sfnt(vec![(*b"maxp", maxp_05(2)), (*b"sbix", sbix)]);
+    let face = Face::parse_bytes(&font, 0).unwrap();
+    let rast = Rasterizer::new();
+    let err = rast
+        .rasterize_bitmap_glyph(&face, 1, 16.0, &[])
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RenderError::UnsupportedBitmap | RenderError::BadTiff(_)
+        ),
+        "got {err:?}"
+    );
+}
+
+/// Big-endian "MM" signature with magic — sibling brief calls out
+/// "wrong byte order"; the TIFF decoder either accepts BE (returns
+/// BadTiff for the empty content) or rejects up front. Either way:
+/// no panic.
+#[test]
+fn sbix_tiff_big_endian_byte_order_returns_unsupported() {
+    let payload = vec![0x4D, 0x4D, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08];
+    let glyphs = vec![None, Some((*b"tiff", payload))];
+    let sbix = build_sbix_strike(2, 16, &glyphs);
+    let font = build_sfnt(vec![(*b"maxp", maxp_05(2)), (*b"sbix", sbix)]);
+    let face = Face::parse_bytes(&font, 0).unwrap();
+    let rast = Rasterizer::new();
+    let err = rast
+        .rasterize_bitmap_glyph(&face, 1, 16.0, &[])
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RenderError::UnsupportedBitmap | RenderError::BadTiff(_)
+        ),
+        "got {err:?}"
+    );
+}
+
+/// Empty payload. Most parsers explode on unindexed reads — the
+/// dispatcher / TIFF decoder must catch this before any unguarded
+/// indexing happens.
+#[test]
+fn sbix_tiff_empty_payload_returns_unsupported() {
+    let glyphs = vec![None, Some((*b"tiff", vec![]))];
+    let sbix = build_sbix_strike(2, 16, &glyphs);
+    let font = build_sfnt(vec![(*b"maxp", maxp_05(2)), (*b"sbix", sbix)]);
+    let face = Face::parse_bytes(&font, 0).unwrap();
+    let rast = Rasterizer::new();
+    let err = rast
+        .rasterize_bitmap_glyph(&face, 1, 16.0, &[])
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RenderError::UnsupportedBitmap | RenderError::BadTiff(_)
+        ),
+        "got {err:?}"
+    );
+}
+
+/// Multi-IFD shape: single IFD containing one entry whose chained
+/// next-IFD offset points back to itself (would loop forever in a
+/// naive walker). Either rejected outright or surfaced as BadTiff —
+/// must NOT recurse forever.
+#[test]
+fn sbix_tiff_multi_ifd_self_chain_returns_unsupported() {
+    // II 42 IFD-off=8; IFD: count=1; entry (12 bytes of zeros);
+    // next-IFD-offset = 8 (same as first IFD → cycle).
+    let mut payload = vec![0x49, 0x49, 0x2a, 0x00];
+    payload.extend_from_slice(&8u32.to_le_bytes());
+    payload.extend_from_slice(&1u16.to_le_bytes()); // entry count
+    payload.extend_from_slice(&[0u8; 12]); // single IFD entry
+    payload.extend_from_slice(&8u32.to_le_bytes()); // next IFD = 8 (cycle)
+    let glyphs = vec![None, Some((*b"tiff", payload))];
+    let sbix = build_sbix_strike(2, 16, &glyphs);
+    let font = build_sfnt(vec![(*b"maxp", maxp_05(2)), (*b"sbix", sbix)]);
+    let face = Face::parse_bytes(&font, 0).unwrap();
+    let rast = Rasterizer::new();
+    let err = rast
+        .rasterize_bitmap_glyph(&face, 1, 16.0, &[])
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RenderError::UnsupportedBitmap | RenderError::BadTiff(_)
+        ),
+        "got {err:?}"
+    );
+}
+
+/// Truncated-strip shape: claims to have an image but strip-offset
+/// points past EOF.
+#[test]
+fn sbix_tiff_truncated_strip_returns_unsupported() {
+    // Magic + IFD pointer to offset 8; entry tag 273 (StripOffsets)
+    // claiming the strip starts at offset 0xFFFF (past EOF).
+    let mut payload = vec![0x49, 0x49, 0x2a, 0x00];
+    payload.extend_from_slice(&8u32.to_le_bytes());
+    payload.extend_from_slice(&1u16.to_le_bytes());
+    payload.extend_from_slice(&273u16.to_le_bytes()); // StripOffsets
+    payload.extend_from_slice(&4u16.to_le_bytes()); // type LONG
+    payload.extend_from_slice(&1u32.to_le_bytes()); // count
+    payload.extend_from_slice(&0xFFFFu32.to_le_bytes()); // value (OOB)
+    payload.extend_from_slice(&0u32.to_le_bytes()); // next IFD = 0
+    let glyphs = vec![None, Some((*b"tiff", payload))];
+    let sbix = build_sbix_strike(2, 16, &glyphs);
+    let font = build_sfnt(vec![(*b"maxp", maxp_05(2)), (*b"sbix", sbix)]);
+    let face = Face::parse_bytes(&font, 0).unwrap();
+    let rast = Rasterizer::new();
+    let err = rast
+        .rasterize_bitmap_glyph(&face, 1, 16.0, &[])
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RenderError::UnsupportedBitmap | RenderError::BadTiff(_)
+        ),
+        "got {err:?}"
+    );
+}
+
+/// Unknown-compression shape: tag 259 (Compression) with an
+/// unrecognised value.
+#[test]
+fn sbix_tiff_unknown_compression_returns_unsupported() {
+    let mut payload = vec![0x49, 0x49, 0x2a, 0x00];
+    payload.extend_from_slice(&8u32.to_le_bytes());
+    payload.extend_from_slice(&1u16.to_le_bytes());
+    payload.extend_from_slice(&259u16.to_le_bytes()); // Compression
+    payload.extend_from_slice(&3u16.to_le_bytes()); // type SHORT
+    payload.extend_from_slice(&1u32.to_le_bytes()); // count
+    payload.extend_from_slice(&0xFFFFu32.to_le_bytes()); // unknown comp
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    let glyphs = vec![None, Some((*b"tiff", payload))];
+    let sbix = build_sbix_strike(2, 16, &glyphs);
+    let font = build_sfnt(vec![(*b"maxp", maxp_05(2)), (*b"sbix", sbix)]);
+    let face = Face::parse_bytes(&font, 0).unwrap();
+    let rast = Rasterizer::new();
+    let err = rast
+        .rasterize_bitmap_glyph(&face, 1, 16.0, &[])
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RenderError::UnsupportedBitmap | RenderError::BadTiff(_)
+        ),
+        "got {err:?}"
+    );
+}
