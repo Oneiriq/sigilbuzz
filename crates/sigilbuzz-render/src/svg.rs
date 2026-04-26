@@ -924,7 +924,11 @@ fn parse_filter_primitive(node: &Node) -> Option<FilterPrimitive> {
             std_dev_y: sy,
         }
     } else if name_eq(&node.name, "feColorMatrix") {
-        let kind = node.attr("type").unwrap_or("matrix").trim().to_ascii_lowercase();
+        let kind = node
+            .attr("type")
+            .unwrap_or("matrix")
+            .trim()
+            .to_ascii_lowercase();
         let values = node.attr("values").unwrap_or("");
         let matrix = parse_color_matrix(&kind, values)?;
         FilterOp::ColorMatrix { matrix }
@@ -977,10 +981,7 @@ fn parse_std_deviation(s: &str) -> Option<(f32, f32)> {
         .split(|c: char| c.is_ascii_whitespace() || c == ',')
         .filter(|t| !t.is_empty());
     let a: f32 = it.next()?.parse().ok()?;
-    let b = it
-        .next()
-        .and_then(|t| t.parse::<f32>().ok())
-        .unwrap_or(a);
+    let b = it.next().and_then(|t| t.parse::<f32>().ok()).unwrap_or(a);
     Some((a.max(0.0), b.max(0.0)))
 }
 

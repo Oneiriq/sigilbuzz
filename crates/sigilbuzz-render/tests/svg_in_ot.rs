@@ -898,10 +898,7 @@ fn filter_color_matrix_saturate_zero_yields_grey() {
     // R, G, B should be near each other (within rounding noise).
     let max = p[0].max(p[1]).max(p[2]);
     let min = p[0].min(p[1]).min(p[2]);
-    assert!(
-        max - min <= 4,
-        "saturate=0 should produce grey, got {p:?}"
-    );
+    assert!(max - min <= 4, "saturate=0 should produce grey, got {p:?}");
     // And the alpha is opaque.
     assert!(p[3] > 250, "alpha lost: {p:?}");
 }
