@@ -705,9 +705,11 @@ fn parse_cff2_index(block: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
 ///   pruned store has no surviving subtables (caller emits no
 ///   varStore offset).
 ///
-/// The region list is preserved verbatim — region pruning is rare in
-/// the wild (every region usually contributes to *some* surviving
-/// entry) and adds another layer of remap; deferred to a follow-up.
+/// The region list is also pruned: after subtable pruning, every
+/// surviving subtable's `region_indexes` is walked to collect the set
+/// of regions any kept tuple still references; unreferenced regions
+/// are dropped from the region list and surviving subtables' region
+/// indexes are renumbered through the remap.
 ///
 /// Tolerates a source `referenced` set that names entries the source
 /// MVS doesn't actually have — those are silently skipped, but they
@@ -777,8 +779,130 @@ fn prune_multi_var_store(
         return Ok((remap, None));
     }
 
-    let new_bytes = emit_multi_var_store(&parsed.region_list_bytes, &new_subtables);
+    // ---- Region-list prune ------------------------------------------
+    //
+    // After subtable pruning, walk every surviving subtable's
+    // `region_indexes` to collect the set of regions any tuple still
+    // references. Regions outside this set are unreachable and dropped
+    // from the region list; surviving subtables' region indexes are
+    // renumbered through the remap.
+    //
+    // Defensive: a malformed source MVS where a subtable's region
+    // index points past the source region list would normally be
+    // surfaced by the parser, but we re-check here and skip such
+    // entries during region collection. Skipping is safer than failing
+    // — the resulting subtable simply carries no contribution from
+    // that region, mirroring the parser's tolerant behaviour.
+    let referenced_regions = collect_referenced_regions(&new_subtables);
+    let src_regions = parse_region_list(&parsed.region_list_bytes)
+        .map_err(|_| SubsetError::Unsupported("VARC MVS region list malformed during prune"))?;
+
+    // Region remap: old region index → new region index. Built by
+    // walking referenced regions in ascending order so the new region
+    // list preserves source order — that keeps output bytes stable for
+    // round-trip determinism.
+    let mut region_remap: BTreeMap<u16, u16> = BTreeMap::new();
+    let mut kept_region_payloads: Vec<&[u8]> = Vec::new();
+    for &old_ri in &referenced_regions {
+        let Some(payload) = src_regions.get(old_ri as usize).copied() else {
+            // Source's tuple referenced a region that doesn't exist —
+            // skip it. The subtable's region_indexes will be filtered
+            // below and the region effectively contributes zero, which
+            // matches the parser's behaviour for an OOB region.
+            continue;
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let new_ri = kept_region_payloads.len() as u16;
+        region_remap.insert(old_ri, new_ri);
+        kept_region_payloads.push(payload);
+    }
+
+    // Renumber each surviving subtable's region_indexes through the
+    // remap. Drop indexes that lacked a kept region (defensive — if a
+    // subtable ends up with zero region indexes after this filter,
+    // every region it referenced was orphaned, which shouldn't happen
+    // when the subtable prune is correct; we drop the subtable in that
+    // case to keep the output structurally valid).
+    let mut pruned_subtables: Vec<RewrittenMvsSubtable> = Vec::with_capacity(new_subtables.len());
+    let mut outer_remap_collapse: BTreeMap<u16, u16> = BTreeMap::new();
+    for (old_outer, sub) in new_subtables.into_iter().enumerate() {
+        let mut new_region_indexes: Vec<u16> = Vec::with_capacity(sub.region_indexes.len());
+        for ri in &sub.region_indexes {
+            if let Some(&new_ri) = region_remap.get(ri) {
+                new_region_indexes.push(new_ri);
+            }
+        }
+        if new_region_indexes.is_empty() {
+            // Defensive collapse — see comment above.
+            continue;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let new_outer = pruned_subtables.len() as u16;
+        if (old_outer as u16) != new_outer {
+            outer_remap_collapse.insert(old_outer as u16, new_outer);
+        }
+        pruned_subtables.push(RewrittenMvsSubtable {
+            region_indexes: new_region_indexes,
+            delta_sets: sub.delta_sets,
+        });
+    }
+
+    // If a subtable was dropped during the region collapse, fold the
+    // outer-index shift into the existing `(outer, inner)` remap so the
+    // record-rewrite path sees the final outer indices. In practice
+    // this branch is dead — the subtable prune above already drops
+    // empty subtables — but guards against future edits where a
+    // subtable could survive subtable pruning yet collapse here.
+    if !outer_remap_collapse.is_empty() {
+        for (_, (no, _)) in remap.iter_mut() {
+            if let Some(&final_no) = outer_remap_collapse.get(no) {
+                *no = final_no;
+            }
+        }
+    }
+
+    if pruned_subtables.is_empty() {
+        // Every subtable's regions were orphaned — the MVS becomes
+        // effectively region-less and contributes nothing. Drop it
+        // entirely so the caller emits no varStore offset.
+        return Ok((BTreeMap::new(), None));
+    }
+
+    let new_region_list_bytes = build_region_list_bytes(&kept_region_payloads);
+    let new_bytes = emit_multi_var_store(&new_region_list_bytes, &pruned_subtables);
     Ok((remap, Some(new_bytes)))
+}
+
+/// Builds an MVS region-list block from kept region payload slices.
+/// Each `payload` is the raw bytes of one region (`u16 axisCount` +
+/// axis triples), as returned by [`parse_region_list`]. Output layout:
+///
+/// ```text
+///   u16       regionCount
+///   Offset32  variationRegionOffsets[regionCount] (relative to block start)
+///   <region payloads, concatenated in input order>
+/// ```
+fn build_region_list_bytes(payloads: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    #[allow(clippy::cast_possible_truncation)]
+    let count = payloads.len() as u16;
+    out.extend_from_slice(&count.to_be_bytes());
+    let off_table_start = out.len();
+    for _ in payloads {
+        out.extend_from_slice(&0u32.to_be_bytes());
+    }
+    let mut starts: Vec<u32> = Vec::with_capacity(payloads.len());
+    for p in payloads {
+        #[allow(clippy::cast_possible_truncation)]
+        let start = out.len() as u32;
+        starts.push(start);
+        out.extend_from_slice(p);
+    }
+    for (i, s) in starts.iter().enumerate() {
+        let slot = off_table_start + i * 4;
+        out[slot..slot + 4].copy_from_slice(&s.to_be_bytes());
+    }
+    out
 }
 
 /// One subtable in the rewritten MVS. After the region-list pruning
@@ -794,7 +918,6 @@ struct RewrittenMvsSubtable {
 /// set of regions any tuple still references. Drives the region list
 /// prune — anything not in this set is unreachable after the MVS
 /// subtable prune and can be dropped.
-#[allow(dead_code)] // wired up in the region-list rewrite pass (next commit)
 fn collect_referenced_regions(subtables: &[RewrittenMvsSubtable]) -> BTreeSet<u16> {
     let mut out: BTreeSet<u16> = BTreeSet::new();
     for sub in subtables {
@@ -817,7 +940,6 @@ fn collect_referenced_regions(subtables: &[RewrittenMvsSubtable]) -> BTreeSet<u1
 ///   Offset32  variationRegionOffsets[regionCount] (relative to block start)
 ///   <region payloads>
 /// ```
-#[allow(dead_code)] // wired up in the region-list rewrite pass (next commit)
 fn parse_region_list(bytes: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
     if bytes.len() < 2 {
         return Err("MVS region list header truncated");
@@ -1831,5 +1953,31 @@ mod tests {
         let refs = collect_referenced_regions(&[s0, s1]);
         let v: Vec<u16> = refs.into_iter().collect();
         assert_eq!(v, vec![0, 2, 3]);
+    }
+
+    #[test]
+    fn build_region_list_bytes_produces_parseable_output() {
+        // Synthesize 3 regions, splice through parse_region_list,
+        // re-emit via build_region_list_bytes, then re-parse.
+        let src = build_region_list(&[
+            &[(0u16, 0.0, 1.0, 1.0)],
+            &[(1u16, -1.0, -1.0, 0.0)],
+            &[(0u16, 0.0, 1.0, 1.0), (1u16, 0.0, 1.0, 1.0)],
+        ]);
+        let regions = parse_region_list(&src).unwrap();
+        let rebuilt = build_region_list_bytes(&regions);
+        let reparsed = parse_region_list(&rebuilt).unwrap();
+        assert_eq!(reparsed.len(), 3);
+        assert_eq!(reparsed[0], regions[0]);
+        assert_eq!(reparsed[1], regions[1]);
+        assert_eq!(reparsed[2], regions[2]);
+    }
+
+    #[test]
+    fn build_region_list_bytes_handles_zero_regions() {
+        let bytes = build_region_list_bytes(&[]);
+        // Just a u16 region count of 0; no offset table, no payloads.
+        assert_eq!(bytes.len(), 2);
+        assert_eq!(&bytes[..2], &0u16.to_be_bytes());
     }
 }
