@@ -540,8 +540,8 @@ impl<'a> Decoder<'a> {
                             let stride = plane_strides[ci];
                             for j in 0..8 {
                                 for i in 0..8 {
-                                    let dst_idx = (block_y as usize + j) * stride
-                                        + (block_x as usize + i);
+                                    let dst_idx =
+                                        (block_y as usize + j) * stride + (block_x as usize + i);
                                     planes[ci][dst_idx] = samples[j * 8 + i];
                                 }
                             }
@@ -1252,8 +1252,18 @@ mod tests {
         let center = pix.get(4, 4);
         assert_eq!(center[3], 255);
         // R should be > G and > B.
-        assert!(center[0] > center[1], "R ({}) > G ({})", center[0], center[1]);
-        assert!(center[0] > center[2], "R ({}) > B ({})", center[0], center[2]);
+        assert!(
+            center[0] > center[1],
+            "R ({}) > G ({})",
+            center[0],
+            center[1]
+        );
+        assert!(
+            center[0] > center[2],
+            "R ({}) > B ({})",
+            center[0],
+            center[2]
+        );
         // R should land in the expected window 130..=145.
         assert!(
             (130..=145).contains(&center[0]),
