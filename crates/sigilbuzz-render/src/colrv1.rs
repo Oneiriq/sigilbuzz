@@ -355,7 +355,10 @@ fn mul_alpha(rgba: [u8; 4], m: u8) -> [u8; 4] {
 
 /// Converts a paint-crate float `Color` to a premultiplied 8-bit RGBA
 /// pixel.
-fn to_premul(c: Color) -> [u8; 4] {
+///
+/// `pub(crate)` so the SVG path can reuse the same conversion when it
+/// resolves a gradient sample to an output pixel.
+pub(crate) fn to_premul(c: Color) -> [u8; 4] {
     let a = c.a.clamp(0.0, 1.0);
     let r = c.r.clamp(0.0, 1.0) * a;
     let g = c.g.clamp(0.0, 1.0) * a;
@@ -444,7 +447,10 @@ fn matrix_scale(m: Transform2D) -> f32 {
 /// Projects `p` onto the line from `a` to `b`, returning the
 /// normalized parameter `t` such that `a + t * (b - a)` is the
 /// closest point on the line. Returns `None` when `a == b`.
-fn project_linear(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> Option<f32> {
+///
+/// Re-exported through the crate so the SVG path can reuse the same
+/// projection logic for `<linearGradient>` (PR #205 deferral).
+pub(crate) fn project_linear(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> Option<f32> {
     let dx = b.0 - a.0;
     let dy = b.1 - a.1;
     let len_sq = dx * dx + dy * dy;
@@ -457,7 +463,16 @@ fn project_linear(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> Option<f32> {
 /// Two-circle radial gradient projection. Solves the standard
 /// quadratic that COLRv1 / SVG share — see the spec's appendix.
 /// Returns the larger valid root in `[0, +inf)` (the "outer" branch).
-fn project_radial(c0: (f32, f32), r0: f32, c1: (f32, f32), r1: f32, p: (f32, f32)) -> Option<f32> {
+///
+/// `pub(crate)` so the SVG path can reuse the same code for
+/// `<radialGradient>` (PR #205 deferral).
+pub(crate) fn project_radial(
+    c0: (f32, f32),
+    r0: f32,
+    c1: (f32, f32),
+    r1: f32,
+    p: (f32, f32),
+) -> Option<f32> {
     // The cone equation for an animated circle interpolating between
     // (c0, r0) at t=0 and (c1, r1) at t=1:
     //
@@ -532,7 +547,10 @@ fn project_sweep(
 
 /// Applies the extend mode to a gradient parameter `t`, returning the
 /// in-`[0, 1]` value used to sample the stops.
-fn apply_extend(t: f32, extend: Extend) -> f32 {
+///
+/// `pub(crate)` so the SVG path can reuse the COLRv1 ramp behaviour
+/// (PR #205 deferral).
+pub(crate) fn apply_extend(t: f32, extend: Extend) -> f32 {
     match extend {
         Extend::Pad => t.clamp(0.0, 1.0),
         Extend::Repeat => {
@@ -557,7 +575,10 @@ fn apply_extend(t: f32, extend: Extend) -> f32 {
 
 /// Samples the stop list at `t`. Stops are not assumed sorted, but the
 /// spec says they should be — we walk them in order and clamp.
-fn sample_stops(stops: &[sigilbuzz_paint::ColorStop], t: f32) -> Color {
+///
+/// `pub(crate)` so the SVG path can reuse the same ramp interpolation
+/// for `<linearGradient>` / `<radialGradient>` stops.
+pub(crate) fn sample_stops(stops: &[sigilbuzz_paint::ColorStop], t: f32) -> Color {
     if stops.is_empty() {
         return Color::TRANSPARENT;
     }
