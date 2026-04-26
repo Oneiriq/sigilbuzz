@@ -373,6 +373,7 @@ pub fn arc_length_quad(x0: f32, y0: f32, x1: f32, y1: f32, x2: f32, y2: f32, tol
     arc_length_quad_rec(x0, y0, x1, y1, x2, y2, tol, 0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn arc_length_quad_rec(
     x0: f32,
     y0: f32,
@@ -458,6 +459,7 @@ pub fn arc_length_cubic(
 ///
 /// `tolerance` controls the arc-length estimator accuracy under the
 /// hood; pass `0.01` for typical SVG dash work.
+#[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn arc_length_quad_solve_t(
     x0: f32,
@@ -496,6 +498,7 @@ pub fn arc_length_quad_solve_t(
     0.5 * (lo + hi)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn quad_prefix_length(
     x0: f32,
     y0: f32,
