@@ -24,7 +24,7 @@ sigilbuzz-paint = { path = "../sigilbuzz-paint", version = "0.1.0" }
 # already pulled in by `sigilbuzz-woff` for WOFF1 zlib (see
 # docs/deps.md). `with-alloc` is the only feature we need; default
 # features stay off so we don't drag in std-only paths.
-miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 
 [dev-dependencies]
 # Fixtures via include_bytes!.
