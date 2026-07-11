@@ -1,0 +1,10 @@
+# Line-ending policy: every text file is LF in the repository AND in the
+# working copy, overriding any local core.autocrlf. This kills the phantom
+# "modified" status Windows checkouts produce on this all-LF repo.
+* text=auto eol=lf
+
+# Font fixtures and other binaries: never subject to EOL conversion.
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
