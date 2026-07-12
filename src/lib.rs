@@ -42,6 +42,7 @@ mod face;
 mod font;
 mod owned;
 mod shape;
+mod ttc;
 
 // Public-but-experimental: the OpenType Layout module exposes the
 // shape-engine internals (Arabic / Indic / USE / Mongolian / Tibetan
@@ -72,6 +73,7 @@ pub use face::{Face, GlyphBitmapEntry};
 pub use font::Font;
 pub use owned::OwnedFace;
 pub use shape::{shape, Feature};
+pub use ttc::fonts_in_collection;
 
 // --- Curated stable re-exports from `ot::*` --------------------------------
 //

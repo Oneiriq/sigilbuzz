@@ -42,6 +42,8 @@ changes will only happen on a major-version bump.
   `Face::glyph_bounds`, `Face::name`, `Face::parse`, `Face::parse_bytes`
 - `OwnedFace::parse`, `OwnedFace::as_face`, `OwnedFace::data`,
   `OwnedFace::data_arc`
+- `fonts_in_collection` — TrueType Collection member count
+  (`Face::parse` / `OwnedFace::parse` index into `ttcf` files)
 - `Font::new`, `Font::with_coords`
 - `tables::{Outline, OutlineSink, PathOp}` — outline iteration
 - `tables::{Cmap, Glyf, Cff, Cff2, Head, Hhea, Hmtx, Maxp, Name,

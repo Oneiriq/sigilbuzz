@@ -26,8 +26,11 @@
 //!   12  u32     length
 //! ```
 //!
-//! TrueType Collections (`ttcf`) are not handled yet; `Face::parse`
-//! rejects them with [`crate::Error::Unsupported`].
+//! TrueType Collections (`ttcf`) are supported: `Face::parse` reads
+//! the collection header and indexes into the requested member font
+//! (member table offsets are absolute from the start of the file, so
+//! table access is identical to a standalone font). Enumerate members
+//! with [`crate::fonts_in_collection`].
 
 use alloc::vec::Vec;
 
@@ -77,17 +80,18 @@ fn round_f32_to_i16(v: f32) -> i16 {
     clamped as i16
 }
 
+use crate::ttc::TTCF_MAGIC;
+
 const SFNT_TRUETYPE: u32 = 0x0001_0000;
 const SFNT_OTTO: u32 = 0x4F54_544F; // 'OTTO'
 const SFNT_TRUE: u32 = 0x7472_7565; // 'true' — legacy Apple TrueType
-const TTCF_MAGIC: u32 = 0x7474_6366; // 'ttcf' — TrueType collection
 
 impl<'a> Face<'a> {
     /// Parses the SFNT directory at the start of `blob`.
     ///
-    /// `index` selects a font in a TrueType Collection; for plain TTF
-    /// and OTF files it must be zero. Non-zero indices currently return
-    /// [`Error::Unsupported`].
+    /// `index` selects a font in a TrueType Collection (`ttcf`);
+    /// enumerate valid indices with [`crate::fonts_in_collection`].
+    /// For plain TTF and OTF files it must be zero.
     pub fn parse(blob: &'a Blob<'a>, index: u32) -> Result<Self> {
         Self::parse_bytes(blob.as_bytes(), index)
     }
@@ -98,23 +102,39 @@ impl<'a> Face<'a> {
         let mut r = Reader::new(data);
         let version = r.read_u32()?;
 
-        if version == TTCF_MAGIC {
-            return Err(Error::Unsupported {
-                context: "TrueType Collections (ttcf) not yet implemented",
-            });
-        }
+        let dir_offset = if version == TTCF_MAGIC {
+            // Collection: locate the member's table directory. Member
+            // table offsets are absolute from the start of the file,
+            // so everything downstream keeps slicing `data` directly.
+            crate::ttc::member_offset(data, index)?
+        } else {
+            if index != 0 {
+                return Err(Error::Unsupported {
+                    context: "non-zero font index outside a TTC is meaningless",
+                });
+            }
+            0
+        };
 
-        if index != 0 {
-            return Err(Error::Unsupported {
-                context: "non-zero font index outside a TTC is meaningless",
-            });
-        }
+        Self::parse_directory(data, dir_offset)
+    }
+
+    /// Parses the SFNT table directory found at `dir_offset` within
+    /// `data`. Table record offsets are absolute from the start of
+    /// `data` (true for both standalone fonts and TTC members).
+    fn parse_directory(data: &'a [u8], dir_offset: usize) -> Result<Self> {
+        let dir = data.get(dir_offset..).ok_or(Error::Malformed {
+            offset: dir_offset,
+            context: "table directory offset past end of font",
+        })?;
+        let mut r = Reader::new(dir);
+        let version = r.read_u32()?;
 
         match version {
             SFNT_TRUETYPE | SFNT_OTTO | SFNT_TRUE => {}
             _ => {
                 return Err(Error::Malformed {
-                    offset: 0,
+                    offset: dir_offset,
                     context: "unrecognised sfnt version",
                 });
             }
@@ -135,12 +155,12 @@ impl<'a> Face<'a> {
             let end = (offset as usize)
                 .checked_add(length as usize)
                 .ok_or(Error::Malformed {
-                    offset: r.position() - 8,
+                    offset: dir_offset + r.position() - 8,
                     context: "table offset + length overflows",
                 })?;
             if end > data.len() {
                 return Err(Error::Malformed {
-                    offset: r.position() - 8,
+                    offset: dir_offset + r.position() - 8,
                     context: "table extends past end of font",
                 });
             }
@@ -1101,11 +1121,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_ttc_header() {
+    fn rejects_truncated_ttc_header() {
+        // TTC files are supported now, but a header cut off right
+        // after the magic still has to error instead of panicking.
         let mut bytes = vec![];
         bytes.extend_from_slice(&TTCF_MAGIC.to_be_bytes());
         let err = Face::parse_bytes(&bytes, 0).unwrap_err();
-        assert!(matches!(err, Error::Unsupported { .. }));
+        assert!(matches!(err, Error::Truncated { .. }));
     }
 
     #[test]
