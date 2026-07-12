@@ -34,6 +34,9 @@ changes will only happen on a major-version bump.
 
 - `Blob`, `Face`, `Font`, `Buffer`, `Glyph`, `Direction`, `Feature`
 - `OwnedFace` — lifetime-free face for caching / cross-thread sharing
+- `BidiMap` — logical/visual byte map retained by `Buffer::set_text_bidi`
+  (`Buffer::bidi_map`, `BidiMap::{new, from_order, visual_to_logical,
+  logical_to_visual, level_at_visual, level_at_logical}`)
 - `shape`
 - `Face::glyph_outline`, `Face::glyph_outline_at_coords`,
   `Face::glyph_bounds`, `Face::name`, `Face::parse`, `Face::parse_bytes`

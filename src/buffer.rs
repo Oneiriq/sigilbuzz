@@ -184,6 +184,12 @@ pub struct Buffer {
     /// lookup. Matches HarfBuzz's implicit NFC pass for the
     /// ranges sigilbuzz has curated tables for.
     pub(crate) normalize_nfc: bool,
+    /// Logical/visual byte map retained by [`Buffer::set_text_bidi`]
+    /// so consumers can translate shaped cluster values (which index
+    /// the reordered text) back to source offsets. `None` when the
+    /// text was set without bidi reordering, and invalidated by any
+    /// other text mutation.
+    pub(crate) bidi_map: Option<crate::bidi_map::BidiMap>,
 }
 
 impl Buffer {
@@ -196,12 +202,14 @@ impl Buffer {
     /// Appends `text` to the buffer.
     pub fn push_str(&mut self, text: &str) {
         self.text.push_str(text);
+        self.bidi_map = None;
     }
 
     /// Replaces the buffer contents with `text`.
     pub fn set_text(&mut self, text: &str) {
         self.text.clear();
         self.text.push_str(text);
+        self.bidi_map = None;
     }
 
     /// Replaces the buffer contents with `text`, but additionally
@@ -219,11 +227,17 @@ impl Buffer {
     /// The plain [`Self::set_text`] is left untouched: existing
     /// 0.1.0 consumers (oniq, demos) that handle direction
     /// themselves keep their current semantics.
+    ///
+    /// The logical-to-visual permutation is retained and exposed via
+    /// [`Self::bidi_map`], so cluster values from the shaped output
+    /// (which index the reordered text) can be translated back to
+    /// offsets in the original `text`.
     pub fn set_text_bidi(&mut self, text: &str) {
         let info = crate::unicode::bidi::BidiInfo::new(text, None);
         self.direction = info.paragraph_direction();
         let order = info.reorder();
         self.text.clear();
+        self.text.reserve(text.len());
         // Walk the input chars in visual order and append.
         let chars: Vec<char> = text.chars().collect();
         for &i in &order {
@@ -231,12 +245,28 @@ impl Buffer {
                 self.text.push(ch);
             }
         }
+        self.bidi_map = Some(crate::bidi_map::BidiMap::from_order(text, &order, &info));
     }
 
     /// Current text view.
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// The bidirectional reorder map captured by the last
+    /// [`Self::set_text_bidi`] call, or `None` when the current text
+    /// was set without bidi reordering ([`Self::set_text`],
+    /// [`Self::push_str`], [`Self::clear`] all reset it).
+    ///
+    /// Visual-side offsets in the map match [`crate::Glyph::cluster`]
+    /// values from shaping this buffer, as long as the opt-in NFC
+    /// pass ([`Self::set_normalize_nfc`]) does not recompose the text
+    /// (composition shortens it and shifts offsets after any composed
+    /// pair — feed precomposed input when combining the two).
+    #[must_use]
+    pub const fn bidi_map(&self) -> Option<&crate::bidi_map::BidiMap> {
+        self.bidi_map.as_ref()
     }
 
     /// Current writing direction.
@@ -270,6 +300,7 @@ impl Buffer {
         self.text.clear();
         self.direction = Direction::Ltr;
         self.normalize_nfc = false;
+        self.bidi_map = None;
     }
 
     /// True when no text has been pushed.

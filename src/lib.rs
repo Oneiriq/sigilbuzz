@@ -34,6 +34,7 @@
 
 extern crate alloc;
 
+mod bidi_map;
 mod blob;
 mod buffer;
 mod error;
@@ -63,6 +64,7 @@ pub mod tables;
 #[doc(hidden)]
 pub mod unicode;
 
+pub use bidi_map::BidiMap;
 pub use blob::Blob;
 pub use buffer::{Buffer, Direction, Glyph};
 pub use error::{Error, Result};
