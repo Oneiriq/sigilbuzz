@@ -39,6 +39,7 @@ mod buffer;
 mod error;
 mod face;
 mod font;
+mod owned;
 mod shape;
 
 // Public-but-experimental: the OpenType Layout module exposes the
@@ -67,6 +68,7 @@ pub use buffer::{Buffer, Direction, Glyph};
 pub use error::{Error, Result};
 pub use face::{Face, GlyphBitmapEntry};
 pub use font::Font;
+pub use owned::OwnedFace;
 pub use shape::{shape, Feature};
 
 // --- Curated stable re-exports from `ot::*` --------------------------------

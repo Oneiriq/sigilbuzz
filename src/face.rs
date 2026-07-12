@@ -159,6 +159,24 @@ impl<'a> Face<'a> {
         })
     }
 
+    /// Rebuilds a `Face` from a previously parsed directory without
+    /// re-reading the header.
+    ///
+    /// Invariant (upheld by the only caller, [`crate::OwnedFace`]):
+    /// `records` must come from a successful [`Face::parse_bytes`] over
+    /// exactly this `data`, so every record range is already validated.
+    pub(crate) fn from_raw_parts(
+        data: &'a [u8],
+        sfnt_version: u32,
+        records: Vec<TableRecord>,
+    ) -> Self {
+        Self {
+            data,
+            sfnt_version,
+            records,
+        }
+    }
+
     /// Raw SFNT version word. `0x00010000` is TrueType, `OTTO` is CFF,
     /// `true` is legacy Apple TrueType.
     #[must_use]

@@ -33,9 +33,12 @@ changes will only happen on a major-version bump.
 **`sigilbuzz` (root crate):**
 
 - `Blob`, `Face`, `Font`, `Buffer`, `Glyph`, `Direction`, `Feature`
+- `OwnedFace` — lifetime-free face for caching / cross-thread sharing
 - `shape`
 - `Face::glyph_outline`, `Face::glyph_outline_at_coords`,
   `Face::glyph_bounds`, `Face::name`, `Face::parse`, `Face::parse_bytes`
+- `OwnedFace::parse`, `OwnedFace::as_face`, `OwnedFace::data`,
+  `OwnedFace::data_arc`
 - `Font::new`, `Font::with_coords`
 - `tables::{Outline, OutlineSink, PathOp}` — outline iteration
 - `tables::{Cmap, Glyf, Cff, Cff2, Head, Hhea, Hmtx, Maxp, Name,
