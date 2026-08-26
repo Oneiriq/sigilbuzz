@@ -22,7 +22,7 @@ sigilbuzz = { workspace = true }
 [dev-dependencies]
 # No extra runtime fixtures — fonts loaded with include_bytes!.
 # Criterion drives the encode bench. Dev-dep only.
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "encode"

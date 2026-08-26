@@ -31,7 +31,7 @@ woff1-deflate = ["dep:miniz_oxide"]
 [dependencies]
 sigilbuzz = { workspace = true }
 brotli = { version = "8", optional = true, default-features = false, features = ["std"] }
-miniz_oxide = { version = "0.8", optional = true, default-features = false, features = ["with-alloc"] }
+miniz_oxide = { version = "0.9", optional = true, default-features = false, features = ["with-alloc"] }
 
 [dev-dependencies]
 # Fixtures are loaded with include_bytes!. ttf-parser drives the

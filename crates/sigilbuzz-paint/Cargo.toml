@@ -21,7 +21,7 @@ sigilbuzz = { workspace = true }
 
 [dev-dependencies]
 # Criterion drives the COLRv1 evaluator bench. Dev-dep only.
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "evaluate"
