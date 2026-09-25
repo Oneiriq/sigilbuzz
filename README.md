@@ -147,7 +147,7 @@ scripts/install-hooks.sh
 ```
 
 The hook runs `cargo fmt --all --check`, clippy with and without default features,
-`cargo test --all-features`, and the `no_std` build. CI runs the same checks on pushes
+`cargo test --workspace --all-features`, and the `no_std` build. CI runs the same checks on pushes
 and pull requests to `main` and `release/**` branches, but the hook catches problems
 first. Don't bypass it with `--no-verify`.
 

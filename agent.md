@@ -58,9 +58,9 @@ Every change must pass these locally:
 
 ```
 cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo clippy --no-default-features --all-targets -- -D warnings
-cargo test --all-features
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --no-default-features --all-targets -- -D warnings
+cargo test --workspace --all-features
 cargo build --no-default-features
 ```
 
@@ -108,7 +108,7 @@ surrounding safe API must enforce them.
   the boundaries, and a truncated input.
 - Shaping integration tests use real openly licensed fonts (for example Open Sans)
   stored under `tests/fixtures/` and `tests/fonts/`.
-- `cargo test --all-features` is the one-command gate.
+- `cargo test --workspace --all-features` is the one-command gate.
 - Expected-output fixtures are regenerated with an explicit command, never re-captured
   silently.
 
