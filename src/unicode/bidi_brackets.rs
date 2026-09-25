@@ -1,7 +1,7 @@
 //! UAX #9 Bidi_Paired_Bracket / Bidi_Paired_Bracket_Type data.
 //!
 //! Curated extract of `BidiBrackets.txt` covering the bracket pairs
-//! shapers actually meet in the wild — ASCII parens / brackets /
+//! shapers actually meet in the wild: ASCII parens / brackets /
 //! braces, the CJK corner / lenticular / tortoise families, and the
 //! math angle / floor / ceiling brackets. Each row maps a bracket
 //! codepoint to its [`BracketType`] (open / close) and the codepoint
@@ -10,7 +10,7 @@
 //! Coverage is intentionally narrow: a full BidiBrackets.txt expansion
 //! to every Unicode-defined pair (white-square, ornate-parenthesis,
 //! Wancho, Vai, Tangsa, ...) would be mechanical to add but bulky and
-//! shaping-irrelevant — none of those brackets show up in mixed-LTR /
+//! shaping-irrelevant. None of those brackets show up in mixed-LTR /
 //! RTL text. The pairs here are the ones the bidi algorithm's N0
 //! actually has to disambiguate when a paragraph mixes Latin / Hebrew
 //! / Arabic with punctuation.
@@ -18,14 +18,14 @@
 /// Whether a bracket codepoint opens or closes its pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BracketType {
-    /// Opening half of the pair — `(`, `[`, `「`, ...
+    /// Opening half of the pair: `(`, `[`, `「`, ...
     Open,
-    /// Closing half of the pair — `)`, `]`, `」`, ...
+    /// Closing half of the pair: `)`, `]`, `」`, ...
     Close,
 }
 
 /// One bracket-pair entry. The `pair` field holds the codepoint of the
-/// matching bracket — i.e. the open's close, or the close's open.
+/// matching bracket, i.e. the open's close, or the close's open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BracketEntry {
     /// Open or close.
@@ -37,13 +37,13 @@ pub struct BracketEntry {
 /// Returns the bracket entry for `cp`, or `None` if the codepoint is
 /// not in the curated pair set.
 #[must_use]
-#[allow(clippy::too_many_lines)] // ~80 codepoint pairs — flat match is the clearest layout
+#[allow(clippy::too_many_lines)] // ~80 codepoint pairs. Flat match is the clearest layout
 pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
     // Sorted by `cp` so a future binary-search rewrite stays trivial;
-    // the const-fn match is fine for ~80 entries — rustc lowers it to
+    // the const-fn match is fine for ~80 entries: rustc lowers it to
     // a jump table.
     match cp {
-        // ASCII parens / brackets / braces. (U+0028 ↔ U+0029 etc.)
+        // ASCII parens / brackets / braces. (U+0028 <-> U+0029 etc.)
         0x0028 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x0029,
@@ -70,7 +70,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
         }),
 
         // Mathematical and miscellaneous technical brackets.
-        // ⌈⌉ U+2308/U+2309 — left / right ceiling.
+        // ⌈⌉ U+2308/U+2309: left / right ceiling.
         0x2308 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x2309,
@@ -79,7 +79,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x2308,
         }),
-        // ⌊⌋ U+230A/U+230B — left / right floor.
+        // ⌊⌋ U+230A/U+230B: left / right floor.
         0x230A => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x230B,
@@ -88,7 +88,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x230A,
         }),
-        // ❨❩ U+2768/U+2769 — medium parenthesis ornament.
+        // ❨❩ U+2768/U+2769: medium parenthesis ornament.
         0x2768 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x2769,
@@ -97,7 +97,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x2768,
         }),
-        // ❪❫ U+276A/U+276B — flat parenthesis ornament.
+        // ❪❫ U+276A/U+276B: flat parenthesis ornament.
         0x276A => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x276B,
@@ -106,7 +106,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x276A,
         }),
-        // ❬❭ U+276C/U+276D — pointing-angle ornament (medium).
+        // ❬❭ U+276C/U+276D: pointing-angle ornament (medium).
         0x276C => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x276D,
@@ -115,7 +115,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x276C,
         }),
-        // ❮❯ U+276E/U+276F — pointing-angle ornament (heavy).
+        // ❮❯ U+276E/U+276F: pointing-angle ornament (heavy).
         0x276E => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x276F,
@@ -124,7 +124,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x276E,
         }),
-        // ❰❱ U+2770/U+2771 — heavy pointing-angle ornament.
+        // ❰❱ U+2770/U+2771: heavy pointing-angle ornament.
         0x2770 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x2771,
@@ -133,7 +133,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x2770,
         }),
-        // ❲❳ U+2772/U+2773 — light tortoise-shell ornament.
+        // ❲❳ U+2772/U+2773: light tortoise-shell ornament.
         0x2772 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x2773,
@@ -142,7 +142,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x2772,
         }),
-        // ❴❵ U+2774/U+2775 — medium curly-bracket ornament.
+        // ❴❵ U+2774/U+2775: medium curly-bracket ornament.
         0x2774 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x2775,
@@ -151,7 +151,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x2774,
         }),
-        // ⟦⟧ U+27E6/U+27E7 — mathematical white square bracket.
+        // ⟦⟧ U+27E6/U+27E7: mathematical white square bracket.
         0x27E6 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x27E7,
@@ -160,7 +160,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x27E6,
         }),
-        // ⟨⟩ U+27E8/U+27E9 — mathematical angle bracket.
+        // ⟨⟩ U+27E8/U+27E9: mathematical angle bracket.
         0x27E8 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x27E9,
@@ -169,7 +169,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x27E8,
         }),
-        // ⟪⟫ U+27EA/U+27EB — mathematical double angle bracket.
+        // ⟪⟫ U+27EA/U+27EB: mathematical double angle bracket.
         0x27EA => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x27EB,
@@ -178,7 +178,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x27EA,
         }),
-        // ⟬⟭ U+27EC/U+27ED — mathematical white tortoise-shell bracket.
+        // ⟬⟭ U+27EC/U+27ED: mathematical white tortoise-shell bracket.
         0x27EC => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x27ED,
@@ -187,7 +187,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x27EC,
         }),
-        // ⟮⟯ U+27EE/U+27EF — mathematical flattened parenthesis.
+        // ⟮⟯ U+27EE/U+27EF: mathematical flattened parenthesis.
         0x27EE => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x27EF,
@@ -198,7 +198,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
         }),
 
         // Miscellaneous-mathematical-symbols-A square / curly / angle.
-        // ⦃⦄ U+2983/U+2984 — left / right white curly bracket.
+        // ⦃⦄ U+2983/U+2984: left / right white curly bracket.
         0x2983 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x2984,
@@ -207,7 +207,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x2983,
         }),
-        // ⦅⦆ U+2985/U+2986 — left / right white parenthesis.
+        // ⦅⦆ U+2985/U+2986: left / right white parenthesis.
         0x2985 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x2986,
@@ -216,7 +216,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x2985,
         }),
-        // ⦇⦈ U+2987/U+2988 — Z-notation image bracket.
+        // ⦇⦈ U+2987/U+2988: Z-notation image bracket.
         0x2987 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x2988,
@@ -225,7 +225,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x2987,
         }),
-        // ⦉⦊ U+2989/U+298A — Z-notation binding bracket.
+        // ⦉⦊ U+2989/U+298A: Z-notation binding bracket.
         0x2989 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x298A,
@@ -234,7 +234,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x2989,
         }),
-        // ⦋⦌ U+298B/U+298C — square bracket with underbar.
+        // ⦋⦌ U+298B/U+298C: square bracket with underbar.
         0x298B => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x298C,
@@ -243,7 +243,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x298B,
         }),
-        // ⦍⦎ U+298D/U+298E — square bracket with tick (top corner).
+        // ⦍⦎ U+298D/U+298E: square bracket with tick (top corner).
         0x298D => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x298E,
@@ -252,7 +252,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x298D,
         }),
-        // ⦏⦐ U+298F/U+2990 — square bracket with tick (bottom corner).
+        // ⦏⦐ U+298F/U+2990: square bracket with tick (bottom corner).
         0x298F => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x2990,
@@ -261,7 +261,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x298F,
         }),
-        // ⦑⦒ U+2991/U+2992 — angle bracket with dot.
+        // ⦑⦒ U+2991/U+2992: angle bracket with dot.
         0x2991 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x2992,
@@ -270,7 +270,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x2991,
         }),
-        // ⦓⦔ U+2993/U+2994 — arc less-than / greater-than bracket.
+        // ⦓⦔ U+2993/U+2994: arc less-than / greater-than bracket.
         0x2993 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x2994,
@@ -279,7 +279,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x2993,
         }),
-        // ⦕⦖ U+2995/U+2996 — double arc less-than / greater-than.
+        // ⦕⦖ U+2995/U+2996: double arc less-than / greater-than.
         0x2995 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x2996,
@@ -288,7 +288,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x2995,
         }),
-        // ⦗⦘ U+2997/U+2998 — black tortoise-shell bracket.
+        // ⦗⦘ U+2997/U+2998: black tortoise-shell bracket.
         0x2997 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x2998,
@@ -299,7 +299,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
         }),
 
         // Miscellaneous-mathematical-symbols-B square / curly / angle.
-        // ⧘⧙ U+29D8/U+29D9 — wiggly fence.
+        // ⧘⧙ U+29D8/U+29D9: wiggly fence.
         0x29D8 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x29D9,
@@ -308,7 +308,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x29D8,
         }),
-        // ⧚⧛ U+29DA/U+29DB — double wiggly fence.
+        // ⧚⧛ U+29DA/U+29DB: double wiggly fence.
         0x29DA => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x29DB,
@@ -317,7 +317,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x29DA,
         }),
-        // ⧼⧽ U+29FC/U+29FD — curved angle bracket.
+        // ⧼⧽ U+29FC/U+29FD: curved angle bracket.
         0x29FC => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x29FD,
@@ -328,7 +328,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
         }),
 
         // CJK Symbols and Punctuation.
-        // 〈〉 U+2329/U+232A — left / right pointing angle (canonical
+        // 〈〉 U+2329/U+232A: left / right pointing angle (canonical
         // equivalents to U+27E8/U+27E9 above; deprecated but still
         // round-tripped).
         0x2329 => Some(BracketEntry {
@@ -339,7 +339,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x2329,
         }),
-        // 「」 U+300C/U+300D — left / right corner bracket.
+        // 「」 U+300C/U+300D: left / right corner bracket.
         0x300C => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x300D,
@@ -348,7 +348,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x300C,
         }),
-        // 『』 U+300E/U+300F — left / right white corner bracket.
+        // 『』 U+300E/U+300F: left / right white corner bracket.
         0x300E => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x300F,
@@ -357,7 +357,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x300E,
         }),
-        // 【】 U+3010/U+3011 — left / right black lenticular bracket.
+        // 【】 U+3010/U+3011: left / right black lenticular bracket.
         0x3010 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x3011,
@@ -366,7 +366,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x3010,
         }),
-        // 〔〕 U+3014/U+3015 — left / right tortoise-shell bracket.
+        // 〔〕 U+3014/U+3015: left / right tortoise-shell bracket.
         0x3014 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x3015,
@@ -375,7 +375,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x3014,
         }),
-        // 〖〗 U+3016/U+3017 — left / right white lenticular.
+        // 〖〗 U+3016/U+3017: left / right white lenticular.
         0x3016 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x3017,
@@ -384,7 +384,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x3016,
         }),
-        // 〘〙 U+3018/U+3019 — left / right white tortoise-shell.
+        // 〘〙 U+3018/U+3019: left / right white tortoise-shell.
         0x3018 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x3019,
@@ -393,7 +393,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x3018,
         }),
-        // 〚〛 U+301A/U+301B — left / right white square bracket.
+        // 〚〛 U+301A/U+301B: left / right white square bracket.
         0x301A => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x301B,
@@ -402,7 +402,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x301A,
         }),
-        // 《》 U+300A/U+300B — left / right double angle bracket.
+        // 《》 U+300A/U+300B: left / right double angle bracket.
         0x300A => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x300B,
@@ -411,7 +411,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x300A,
         }),
-        // 〈〉 U+3008/U+3009 — left / right angle bracket (CJK).
+        // 〈〉 U+3008/U+3009: left / right angle bracket (CJK).
         0x3008 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x3009,
@@ -485,7 +485,7 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0xFF5F,
         }),
-        // ｢｣ U+FF62/U+FF63 — halfwidth corner brackets.
+        // ｢｣ U+FF62/U+FF63: halfwidth corner brackets.
         0xFF62 => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0xFF63,
@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn cjk_corner_brackets_resolve() {
-        // U+300C 「 ↔ U+300D 」.
+        // U+300C 「 <-> U+300D 」.
         assert_eq!(
             bracket_of(0x300C),
             Some(BracketEntry {
@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn math_angle_brackets_resolve() {
-        // U+27E8 ⟨ ↔ U+27E9 ⟩.
+        // U+27E8 ⟨ <-> U+27E9 ⟩.
         assert_eq!(
             bracket_of(0x27E8),
             Some(BracketEntry {

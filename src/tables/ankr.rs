@@ -1,4 +1,4 @@
-//! `ankr` — Apple Anchor Point table.
+//! `ankr`: Apple Anchor Point table.
 //!
 //! AAT companion to `kerx` format 4 action type 1 (anchor-point
 //! kerning). `kerx` carries a state machine whose action records hold
@@ -11,8 +11,8 @@
 //!
 //! ```text
 //!   u16 version        (0)
-//!   u16 flags          (reserved — sigilbuzz ignores)
-//!   u32 lookupTableOff (from start of ankr; AAT lookup: gid → byte
+//!   u16 flags          (reserved, sigilbuzz ignores)
+//!   u32 lookupTableOff (from start of ankr; AAT lookup: gid -> byte
 //!                       offset into the anchor-points block)
 //!   u32 anchorPointsOff (from start of ankr; the per-glyph anchor
 //!                        records live here)
@@ -20,13 +20,13 @@
 //!   AnchorPoints record (one per glyph that has anchors):
 //!     u32 nPoints
 //!     i16 x[nPoints]
-//!     i16 y[nPoints]   — interleaved as (x0, y0, x1, y1, …)
+//!     i16 y[nPoints]   (interleaved as x0, y0, x1, y1, ...)
 //! ```
 //!
 //! The lookup table maps a glyph id to a *byte offset* into the
 //! anchor-points block (relative to `anchorPointsOff`). A glyph that
 //! falls outside any segment / record yields the AAT
-//! `CLASS_OUT_OF_BOUNDS` sentinel and resolves to "no anchor" — same
+//! `CLASS_OUT_OF_BOUNDS` sentinel and resolves to "no anchor", same
 //! conservative posture sigilbuzz uses for a missing kern rule.
 //!
 //! Spec:
@@ -35,7 +35,7 @@
 //! Note Apple's lookup-value semantics here: while `kerx` format-2
 //! pre-multiplies its lookup values to yield byte offsets directly,
 //! `ankr`'s lookup yields a u16 that's *already a raw byte offset*
-//! into the anchor-points block. That's a quirk of the spec — we
+//! into the anchor-points block. That's a quirk of the spec. We
 //! mirror it without scaling.
 
 use crate::error::{Error, Result};
@@ -45,7 +45,7 @@ use crate::tables::layout::state_table::{lookup_class, CLASS_OUT_OF_BOUNDS};
 /// slice into them on demand without allocation.
 #[derive(Debug, Clone, Copy)]
 pub struct Ankr<'a> {
-    /// Full table bytes — every recorded offset is relative to byte 0.
+    /// Full table bytes: every recorded offset is relative to byte 0.
     data: &'a [u8],
     /// Slice that starts at the lookup table's origin.
     lookup: &'a [u8],
@@ -123,7 +123,7 @@ impl<'a> Ankr<'a> {
         Some((x, y))
     }
 
-    /// Raw table bytes — exposed for tests / debug tooling.
+    /// Raw table bytes, exposed for tests / debug tooling.
     #[must_use]
     pub const fn data(&self) -> &'a [u8] {
         self.data
@@ -202,22 +202,22 @@ mod tests {
 
     #[test]
     fn anchor_for_returns_recorded_pair() {
-        // Glyph 5 → block offset 0; block has two anchors at (10, 20)
+        // Glyph 5 -> block offset 0; block has two anchors at (10, 20)
         // and (-30, 40).
         let bytes = build_ankr(&[(5, 0)], &[vec![(10, 20), (-30, 40)]]);
         let ankr = Ankr::parse(&bytes).unwrap();
         assert_eq!(ankr.anchor_for(5, 0), Some((10, 20)));
         assert_eq!(ankr.anchor_for(5, 1), Some((-30, 40)));
-        // Anchor index past nPoints → None.
+        // Anchor index past nPoints -> None.
         assert_eq!(ankr.anchor_for(5, 2), None);
-        // Glyph the lookup doesn't cover → None.
+        // Glyph the lookup doesn't cover -> None.
         assert_eq!(ankr.anchor_for(99, 0), None);
     }
 
     #[test]
     fn multiple_glyphs_with_distinct_blocks() {
-        // Glyph 5 → block offset 0; glyph 7 → block offset
-        // (4 + 1*4 = 8) — past the first single-anchor block.
+        // Glyph 5 -> block offset 0; glyph 7 -> block offset
+        // (4 + 1*4 = 8), past the first single-anchor block.
         let bytes = build_ankr(&[(5, 0), (7, 8)], &[vec![(1, 2)], vec![(3, 4), (5, 6)]]);
         let ankr = Ankr::parse(&bytes).unwrap();
         assert_eq!(ankr.anchor_for(5, 0), Some((1, 2)));
@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn out_of_range_lookup_returns_none() {
-        // Glyph 5 → block offset 0; gid 99 falls through the format-6
+        // Glyph 5 -> block offset 0; gid 99 falls through the format-6
         // search and yields CLASS_OUT_OF_BOUNDS, which translates to a
         // huge block offset and the bounds check rejects it.
         let bytes = build_ankr(&[(5, 0)], &[vec![(1, 2)]]);

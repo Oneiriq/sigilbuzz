@@ -6,7 +6,7 @@
 //! patterns/` and are baked in via [`include_str!`].
 //!
 //! Patterns parse on first use and are cached for the lifetime of the
-//! process — see [`Patterns::for_language`].
+//! process. See [`Patterns::for_language`].
 //!
 //! [`Patterns::for_language`]: super::Patterns::for_language
 
@@ -23,14 +23,14 @@ pub enum Language {
     /// D.C. Kuiken.
     #[cfg(feature = "patterns-en-us")]
     EnglishUs,
-    /// German (`de`). Reserved — no patterns vendored yet; the variant
+    /// German (`de`). Reserved: no patterns vendored yet; the variant
     /// exists so callers can future-proof their `match` arms.
     #[cfg(feature = "patterns-de")]
     German,
-    /// French (`fr`). Reserved — no patterns vendored yet.
+    /// French (`fr`). Reserved: no patterns vendored yet.
     #[cfg(feature = "patterns-fr")]
     French,
-    /// Spanish (`es`). Reserved — no patterns vendored yet.
+    /// Spanish (`es`). Reserved: no patterns vendored yet.
     #[cfg(feature = "patterns-es")]
     Spanish,
 }

@@ -1,13 +1,13 @@
-//! `COLR` — Layered colour glyph table.
+//! `COLR`: Layered color glyph table.
 //!
 //! Two generations coexist in a single `COLR` blob:
 //!
 //! - **v0** (2013 era): a base glyph maps to a flat list of
 //!   *(glyph_id, palette_index)* layer records. The renderer draws
-//!   each layer in order with the palette colour.
+//!   each layer in order with the palette color.
 //! - **v1** (2020 era): a base glyph maps to a tree of `Paint`
-//!   operations — gradients, transforms, composites, nested clip
-//!   glyphs — roughly matching SVG's native-paint model. Variable-font
+//!   operations (gradients, transforms, composites, nested clip
+//!   glyphs), roughly matching SVG's native-paint model. Variable-font
 //!   aware siblings (`PaintVar*`) carry `ItemVariationStore` deltas.
 //!
 //! sigilbuzz parses both. Evaluation (drawing pixels) is a renderer
@@ -39,7 +39,7 @@ pub type PaintOffset = u32;
 /// Parsed `COLR` table.
 ///
 /// Holds enough offsets to service both the v0 layer list and, when
-/// present, the v1 paint-tree traversal API. Cloning is cheap —
+/// present, the v1 paint-tree traversal API. Cloning is cheap:
 /// just a handful of slice references.
 #[derive(Debug, Clone, Copy)]
 pub struct Colr<'a> {
@@ -322,7 +322,7 @@ impl<'a> Colr<'a> {
 }
 
 // =========================================================================
-// COLR v0 — layer records
+// COLR v0: layer records
 // =========================================================================
 
 /// Iterator view over the v0 layer records for a single base glyph.
@@ -379,15 +379,15 @@ pub struct V0Layer {
     /// Child glyph id to draw.
     pub glyph_id: u16,
     /// Index into the active `CPAL` palette. `0xFFFF` means "use the
-    /// foreground text colour".
+    /// foreground text color".
     pub palette_index: u16,
 }
 
 // =========================================================================
-// COLR v1 — paint tree
+// COLR v1: paint tree
 // =========================================================================
 
-/// A [0,1]-clamped alpha factor. Stored as F2DOT14 in the font.
+/// An alpha factor clamped to `[0, 1]`. Stored as F2DOT14 in the font.
 pub type F2Dot14 = f32;
 
 /// A fixed-point 16.16 scalar, used for gradient stops and so on.
@@ -400,7 +400,7 @@ pub type Fword = i16;
 /// for a paint. Sentinel value `0xFFFFFFFF` means "no variation".
 pub type VarIndexBase = u32;
 
-/// Colour stop in a `PaintColorLine`. Colours index into the active
+/// Color stop in a `PaintColorLine`. Colors index into the active
 /// `CPAL` palette; alpha is a post-multiplied factor on top of the
 /// palette entry.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -408,16 +408,16 @@ pub struct ColorStop {
     /// Stop position along the line, as a fraction (typically
     /// `0.0..=1.0`, but may exceed).
     pub stop_offset: F2Dot14,
-    /// Palette index. `0xFFFF` means "use the foreground colour".
+    /// Palette index. `0xFFFF` means "use the foreground color".
     pub palette_index: u16,
-    /// Additional alpha on the stop colour.
+    /// Additional alpha on the stop color.
     pub alpha: F2Dot14,
 }
 
 /// Gradient extend modes (what happens outside `[0, 1]`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Extend {
-    /// Repeat the first / last colour outward.
+    /// Repeat the first / last color outward.
     Pad,
     /// Repeat the entire gradient.
     Repeat,
@@ -435,11 +435,11 @@ impl Extend {
     }
 }
 
-/// Colour line — extend + colour stops. Parsed lazily; iteration
+/// Color line: extend + color stops. Parsed lazily; iteration
 /// over [`ColorLine::stops`] walks the font bytes directly.
 #[derive(Debug, Clone, Copy)]
 pub struct ColorLine<'a> {
-    /// Where to extend colours past `[0, 1]`.
+    /// Where to extend colors past `[0, 1]`.
     pub extend: Extend,
     /// Raw per-stop array. Each stop is 6 bytes (v0) or 10 bytes
     /// (v1, with var index base).
@@ -493,7 +493,7 @@ impl ColorLine<'_> {
         (0..self.stop_count).filter_map(move |i| self.get(i))
     }
 
-    /// For variable colour lines, returns the `varIndexBase` alongside
+    /// For variable color lines, returns the `varIndexBase` alongside
     /// each stop so consumers can resolve deltas through the
     /// ItemVariationStore.
     pub fn stops_variable(&self) -> impl Iterator<Item = (ColorStop, VarIndexBase)> + '_ {
@@ -619,7 +619,7 @@ pub enum ColrPaint<'a> {
     },
     /// Format 4: Linear gradient.
     LinearGradient {
-        /// Colour line. Resolve stops via [`ColorLine::stops`].
+        /// Color line. Resolve stops via [`ColorLine::stops`].
         color_line: ColorLine<'a>,
         /// Gradient endpoint p0 (start).
         x0: Fword,
@@ -636,7 +636,7 @@ pub enum ColrPaint<'a> {
     },
     /// Format 5: Variable linear gradient.
     VarLinearGradient {
-        /// Colour line.
+        /// Color line.
         color_line: ColorLine<'a>,
         /// Gradient endpoint p0.
         x0: Fword,
@@ -655,34 +655,34 @@ pub enum ColrPaint<'a> {
     },
     /// Format 6: Radial gradient.
     RadialGradient {
-        /// Colour line.
+        /// Color line.
         color_line: ColorLine<'a>,
-        /// Inner circle centre x.
+        /// Inner circle center x.
         x0: Fword,
-        /// Inner circle centre y.
+        /// Inner circle center y.
         y0: Fword,
         /// Inner radius.
         r0: u16,
-        /// Outer circle centre x.
+        /// Outer circle center x.
         x1: Fword,
-        /// Outer circle centre y.
+        /// Outer circle center y.
         y1: Fword,
         /// Outer radius.
         r1: u16,
     },
     /// Format 7: Variable radial gradient.
     VarRadialGradient {
-        /// Colour line.
+        /// Color line.
         color_line: ColorLine<'a>,
-        /// Inner centre x.
+        /// Inner center x.
         x0: Fword,
-        /// Inner centre y.
+        /// Inner center y.
         y0: Fword,
         /// Inner radius.
         r0: u16,
-        /// Outer centre x.
+        /// Outer center x.
         x1: Fword,
-        /// Outer centre y.
+        /// Outer center y.
         y1: Fword,
         /// Outer radius.
         r1: u16,
@@ -691,11 +691,11 @@ pub enum ColrPaint<'a> {
     },
     /// Format 8: Sweep gradient.
     SweepGradient {
-        /// Colour line.
+        /// Color line.
         color_line: ColorLine<'a>,
-        /// Centre x.
+        /// Center x.
         center_x: Fword,
-        /// Centre y.
+        /// Center y.
         center_y: Fword,
         /// Start angle in degrees * (180/128) per the spec's F2Dot14.
         start_angle: F2Dot14,
@@ -704,11 +704,11 @@ pub enum ColrPaint<'a> {
     },
     /// Format 9: Variable sweep gradient.
     VarSweepGradient {
-        /// Colour line.
+        /// Color line.
         color_line: ColorLine<'a>,
-        /// Centre x.
+        /// Center x.
         center_x: Fword,
-        /// Centre y.
+        /// Center y.
         center_y: Fword,
         /// Start angle.
         start_angle: F2Dot14,
@@ -733,17 +733,17 @@ pub enum ColrPaint<'a> {
     Transform {
         /// Child paint.
         paint_offset: PaintOffset,
-        /// 3×2 affine matrix component xx.
+        /// 3x2 affine matrix component xx.
         xx: Fixed,
-        /// 3×2 affine matrix component yx.
+        /// 3x2 affine matrix component yx.
         yx: Fixed,
-        /// 3×2 affine matrix component xy.
+        /// 3x2 affine matrix component xy.
         xy: Fixed,
-        /// 3×2 affine matrix component yy.
+        /// 3x2 affine matrix component yy.
         yy: Fixed,
-        /// 3×2 affine matrix translation dx.
+        /// 3x2 affine matrix translation dx.
         dx: Fixed,
-        /// 3×2 affine matrix translation dy.
+        /// 3x2 affine matrix translation dy.
         dy: Fixed,
     },
     /// Format 13: Variable affine transform.
@@ -805,7 +805,7 @@ pub enum ColrPaint<'a> {
         /// Variation index base.
         var_index_base: VarIndexBase,
     },
-    /// Format 18: Scale around a specified centre point.
+    /// Format 18: Scale around a specified center point.
     ScaleAroundCenter {
         /// Child paint.
         paint_offset: PaintOffset,
@@ -813,12 +813,12 @@ pub enum ColrPaint<'a> {
         scale_x: F2Dot14,
         /// Scale y.
         scale_y: F2Dot14,
-        /// Centre x.
+        /// Center x.
         center_x: Fword,
-        /// Centre y.
+        /// Center y.
         center_y: Fword,
     },
-    /// Format 19: Variable scale around centre.
+    /// Format 19: Variable scale around center.
     VarScaleAroundCenter {
         /// Child paint.
         paint_offset: PaintOffset,
@@ -826,9 +826,9 @@ pub enum ColrPaint<'a> {
         scale_x: F2Dot14,
         /// Scale y.
         scale_y: F2Dot14,
-        /// Centre x.
+        /// Center x.
         center_x: Fword,
-        /// Centre y.
+        /// Center y.
         center_y: Fword,
         /// Variation index base.
         var_index_base: VarIndexBase,
@@ -849,26 +849,26 @@ pub enum ColrPaint<'a> {
         /// Variation index base.
         var_index_base: VarIndexBase,
     },
-    /// Format 22: Uniform scale around specified centre.
+    /// Format 22: Uniform scale around specified center.
     ScaleUniformAroundCenter {
         /// Child paint.
         paint_offset: PaintOffset,
         /// Uniform scale.
         scale: F2Dot14,
-        /// Centre x.
+        /// Center x.
         center_x: Fword,
-        /// Centre y.
+        /// Center y.
         center_y: Fword,
     },
-    /// Format 23: Variable uniform scale around centre.
+    /// Format 23: Variable uniform scale around center.
     VarScaleUniformAroundCenter {
         /// Child paint.
         paint_offset: PaintOffset,
         /// Uniform scale.
         scale: F2Dot14,
-        /// Centre x.
+        /// Center x.
         center_x: Fword,
-        /// Centre y.
+        /// Center y.
         center_y: Fword,
         /// Variation index base.
         var_index_base: VarIndexBase,
@@ -889,26 +889,26 @@ pub enum ColrPaint<'a> {
         /// Variation index base.
         var_index_base: VarIndexBase,
     },
-    /// Format 26: Rotate around centre.
+    /// Format 26: Rotate around center.
     RotateAroundCenter {
         /// Child paint.
         paint_offset: PaintOffset,
         /// Angle.
         angle: F2Dot14,
-        /// Centre x.
+        /// Center x.
         center_x: Fword,
-        /// Centre y.
+        /// Center y.
         center_y: Fword,
     },
-    /// Format 27: Variable rotate around centre.
+    /// Format 27: Variable rotate around center.
     VarRotateAroundCenter {
         /// Child paint.
         paint_offset: PaintOffset,
         /// Angle.
         angle: F2Dot14,
-        /// Centre x.
+        /// Center x.
         center_x: Fword,
-        /// Centre y.
+        /// Center y.
         center_y: Fword,
         /// Variation index base.
         var_index_base: VarIndexBase,
@@ -933,7 +933,7 @@ pub enum ColrPaint<'a> {
         /// Variation index base.
         var_index_base: VarIndexBase,
     },
-    /// Format 30: Skew around centre.
+    /// Format 30: Skew around center.
     SkewAroundCenter {
         /// Child paint.
         paint_offset: PaintOffset,
@@ -941,12 +941,12 @@ pub enum ColrPaint<'a> {
         x_skew_angle: F2Dot14,
         /// Y skew angle.
         y_skew_angle: F2Dot14,
-        /// Centre x.
+        /// Center x.
         center_x: Fword,
-        /// Centre y.
+        /// Center y.
         center_y: Fword,
     },
-    /// Format 31: Variable skew around centre.
+    /// Format 31: Variable skew around center.
     VarSkewAroundCenter {
         /// Child paint.
         paint_offset: PaintOffset,
@@ -954,9 +954,9 @@ pub enum ColrPaint<'a> {
         x_skew_angle: F2Dot14,
         /// Y skew angle.
         y_skew_angle: F2Dot14,
-        /// Centre x.
+        /// Center x.
         center_x: Fword,
-        /// Centre y.
+        /// Center y.
         center_y: Fword,
         /// Variation index base.
         var_index_base: VarIndexBase,
@@ -1053,7 +1053,7 @@ impl<'a> ColrPaint<'a> {
         //   ColorStop[numStops]  (6 bytes each for ColorLine,
         //                         10 bytes for VarColorLine)
         let read_color_line = |k: usize, variable: bool| -> Result<(ColorLine<'a>, usize)> {
-            // The gradient formats store the colour line as a
+            // The gradient formats store the color line as a
             // u24 sub-offset (relative to the paint record); we
             // resolve it here so callers see a straight
             // `ColorLine<'a>`.
@@ -1096,23 +1096,23 @@ impl<'a> ColrPaint<'a> {
         };
 
         Ok(match format {
-            // 1. PaintColrLayers — { u8 format; u8 numLayers; u32 firstLayerIndex }
+            // 1. PaintColrLayers: { u8 format; u8 numLayers; u32 firstLayerIndex }
             1 => Self::ColrLayers {
                 num_layers: read_u8(1)?,
                 first_layer_index: read_u32(2)?,
             },
-            // 2. PaintSolid — { u8 format; u16 paletteIndex; F2Dot14 alpha }
+            // 2. PaintSolid: { u8 format; u16 paletteIndex; F2Dot14 alpha }
             2 => Self::Solid {
                 palette_index: read_u16(1)?,
                 alpha: read_f2dot14(3)?,
             },
-            // 3. PaintVarSolid — + u32 varIndexBase
+            // 3. PaintVarSolid: + u32 varIndexBase
             3 => Self::VarSolid {
                 palette_index: read_u16(1)?,
                 alpha: read_f2dot14(3)?,
                 var_index_base: read_u32(5)?,
             },
-            // 4. PaintLinearGradient —
+            // 4. PaintLinearGradient:
             //    { u8 format; Offset24 colorLine; FWORD x0..y2 (6 words) }
             4 => {
                 let (color_line, _) = read_color_line(1, false)?;
@@ -1126,7 +1126,7 @@ impl<'a> ColrPaint<'a> {
                     y2: read_i16(14)?,
                 }
             }
-            // 5. PaintVarLinearGradient — + varIndexBase
+            // 5. PaintVarLinearGradient: + varIndexBase
             5 => {
                 let (color_line, _) = read_color_line(1, true)?;
                 Self::VarLinearGradient {
@@ -1140,7 +1140,7 @@ impl<'a> ColrPaint<'a> {
                     var_index_base: read_u32(16)?,
                 }
             }
-            // 6. PaintRadialGradient — colorLine + (x0,y0,r0,x1,y1,r1) all i16/u16
+            // 6. PaintRadialGradient: colorLine + (x0,y0,r0,x1,y1,r1) all i16/u16
             6 => {
                 let (color_line, _) = read_color_line(1, false)?;
                 Self::RadialGradient {
@@ -1167,7 +1167,7 @@ impl<'a> ColrPaint<'a> {
                     var_index_base: read_u32(16)?,
                 }
             }
-            // 8. PaintSweepGradient — colorLine + centerX + centerY + startAngle + endAngle
+            // 8. PaintSweepGradient: colorLine + centerX + centerY + startAngle + endAngle
             8 => {
                 let (color_line, _) = read_color_line(1, false)?;
                 Self::SweepGradient {
@@ -1190,19 +1190,19 @@ impl<'a> ColrPaint<'a> {
                     var_index_base: read_u32(12)?,
                 }
             }
-            // 10. PaintGlyph — { u8 format; Offset24 paint; u16 glyphID }
+            // 10. PaintGlyph: { u8 format; Offset24 paint; u16 glyphID }
             10 => Self::Glyph {
                 paint_offset: read_off24(1)?,
                 glyph_id: read_u16(4)?,
             },
-            // 11. PaintColrGlyph — { u8 format; u16 glyphID }
+            // 11. PaintColrGlyph: { u8 format; u16 glyphID }
             11 => Self::ColrGlyph {
                 glyph_id: read_u16(1)?,
             },
-            // 12. PaintTransform — Offset24 paint + Offset24 affine
+            // 12. PaintTransform: Offset24 paint + Offset24 affine
             12 => {
                 // The 2x3 Affine2x3 table referenced by the sub-offset
-                // has layout: Fixed xx, yx, xy, yy, dx, dy (6 × 4 bytes).
+                // has layout: Fixed xx, yx, xy, yy, dx, dy (6 * 4 bytes).
                 let paint_offset = read_off24(1)?;
                 if base + 4 + 3 > data.len() {
                     return Err(Error::Truncated {
@@ -1239,7 +1239,7 @@ impl<'a> ColrPaint<'a> {
                     dy: read_aff(20),
                 }
             }
-            // 13. PaintVarTransform — same, VarAffine2x3 includes varIndexBase
+            // 13. PaintVarTransform: same, VarAffine2x3 includes varIndexBase
             13 => {
                 let paint_offset = read_off24(1)?;
                 if base + 7 > data.len() {
@@ -1284,7 +1284,7 @@ impl<'a> ColrPaint<'a> {
                     var_index_base,
                 }
             }
-            // 14. PaintTranslate — Offset24 paint + dx + dy (i16)
+            // 14. PaintTranslate: Offset24 paint + dx + dy (i16)
             14 => Self::Translate {
                 paint_offset: read_off24(1)?,
                 dx: read_i16(4)?,
@@ -1518,7 +1518,7 @@ mod tests {
     /// tree is a `PaintSolid`. Returns the full table bytes.
     fn build_colr_v1_solid(palette_index: u16, alpha: f32) -> Vec<u8> {
         let mut out = Vec::new();
-        // v1 header = 14 bytes (v0) + 16 bytes (4× u32).
+        // v1 header = 14 bytes (v0) + 16 bytes (4x u32).
         let header_len = 14 + 16;
         out.extend_from_slice(&1u16.to_be_bytes()); // version
         out.extend_from_slice(&0u16.to_be_bytes()); // numBaseGlyphRecords
@@ -1707,10 +1707,10 @@ mod tests {
         // PaintLinearGradient body:
         //   u8 format=4
         //   Offset24 colorLineOffset (relative to this paint)
-        //   6× i16 (x0..y2)
+        //   6x i16 (x0..y2)
         let paint_start = out.len();
         out.push(4);
-        // Offset24 placeholder — patched after we know ColorLine offset.
+        // Offset24 placeholder, patched after we know ColorLine offset.
         out.extend_from_slice(&[0, 0, 0]);
         out.extend_from_slice(&10i16.to_be_bytes()); // x0
         out.extend_from_slice(&20i16.to_be_bytes()); // y0
@@ -1796,7 +1796,7 @@ mod tests {
         out.push(3); // mode = SrcOver
         out.extend_from_slice(&[0, 0, 0]); // backdrop
 
-        // Child source paint — PaintSolid.
+        // Child source paint: PaintSolid.
         let src_start = out.len();
         let src_rel = (src_start - composite_start) as u32;
         out[composite_start + 1] = ((src_rel >> 16) & 0xff) as u8;
@@ -1806,7 +1806,7 @@ mod tests {
         out.extend_from_slice(&1u16.to_be_bytes());
         out.extend_from_slice(&16384i16.to_be_bytes());
 
-        // Child backdrop paint — PaintSolid.
+        // Child backdrop paint: PaintSolid.
         let bd_start = out.len();
         let bd_rel = (bd_start - composite_start) as u32;
         out[composite_start + 5] = ((bd_rel >> 16) & 0xff) as u8;
@@ -1833,7 +1833,7 @@ mod tests {
         }
     }
 
-    /// Spot-check translate, scale, rotate, skew — each should
+    /// Spot-check translate, scale, rotate, skew. Each should
     /// round-trip its single transform argument.
     #[test]
     fn v1_simple_transform_variants_round_trip() {
@@ -1869,7 +1869,7 @@ mod tests {
             out
         }
 
-        // Format 14 — Translate: dx=5, dy=-7 (i16 each).
+        // Format 14 (Translate): dx=5, dy=-7 (i16 each).
         let bytes = build_single_transform(14, &[0, 5, 0xff, 0xf9]);
         let colr = Colr::parse(&bytes).unwrap();
         match colr.paint(1).unwrap() {
@@ -1880,7 +1880,7 @@ mod tests {
             p => panic!("expected Translate, got {p:?}"),
         }
 
-        // Format 20 — ScaleUniform: scale=0.5 (F2Dot14 = 8192).
+        // Format 20 (ScaleUniform): scale=0.5 (F2Dot14 = 8192).
         let bytes = build_single_transform(20, &[0x20, 0x00]);
         let colr = Colr::parse(&bytes).unwrap();
         match colr.paint(1).unwrap() {
@@ -1890,7 +1890,7 @@ mod tests {
             p => panic!("expected ScaleUniform, got {p:?}"),
         }
 
-        // Format 24 — Rotate: angle=0.25 (= F2Dot14 4096).
+        // Format 24 (Rotate): angle=0.25 (= F2Dot14 4096).
         let bytes = build_single_transform(24, &[0x10, 0x00]);
         let colr = Colr::parse(&bytes).unwrap();
         match colr.paint(1).unwrap() {

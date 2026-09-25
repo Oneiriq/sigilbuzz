@@ -9,7 +9,7 @@
 //!
 //! The integration introduces a thin local enum, [`HyphenatedBreak`],
 //! that wraps [`sigilbuzz_text_layout::BreakOpportunity`] and adds a
-//! `Hyphen` variant — kept on this side of the boundary so the layout
+//! `Hyphen` variant, kept on this side of the boundary so the layout
 //! crate's public API stays focused on UAX 14.
 
 use alloc::vec::Vec;
@@ -25,9 +25,9 @@ use crate::pattern::Patterns;
 /// variant for soft-hyphen breaks discovered by Liang's algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HyphenatedBreak {
-    /// Mandatory UAX 14 break — `CR`, `LF`, `NL`, `BK`.
+    /// Mandatory UAX 14 break: `CR`, `LF`, `NL`, `BK`.
     Mandatory,
-    /// Allowed UAX 14 break — typically a space or other class
+    /// Allowed UAX 14 break: typically a space or other class
     /// boundary.
     Allowed,
     /// Soft-hyphen break discovered by Liang's algorithm. Distinct
@@ -65,7 +65,7 @@ pub fn break_opportunities_with_hyphens(
 
     // 2. For each contiguous run of ASCII letters, hyphenate it and
     //    convert the byte offsets back into absolute offsets in
-    //    `text`. Skip runs whose neighbouring breaks already make the
+    //    `text`. Skip runs whose neighboring breaks already make the
     //    run trivially small.
     let bytes = text.as_bytes();
     let mut start: Option<usize> = None;

@@ -10,7 +10,7 @@
 //!
 //!   * single base consonants
 //!   * consonant + above-base vowel sign (sara i, sara u, sara ae)
-//!   * consonant + pre-base vowel sign (sara e — reorders before base)
+//!   * consonant + pre-base vowel sign (sara e, reorders before base)
 //!   * consonant + post-base vowel sign (sara o)
 //!   * mixed Buginese + Latin
 //!
@@ -33,7 +33,7 @@ const CORPUS: &[Case] = &[
         note: "empty",
         compare_rustybuzz: true,
     },
-    // ᨀ U+1A00 — letter ka. Single base.
+    // ᨀ U+1A00: letter ka. Single base.
     Case {
         text: "\u{1A00}",
         note: "ka alone",
@@ -51,7 +51,7 @@ const CORPUS: &[Case] = &[
         note: "ku (ka + sara u)",
         compare_rustybuzz: true,
     },
-    // ka + sara e (pre-base — reorder fires).
+    // ka + sara e (pre-base, reorder fires).
     Case {
         text: "\u{1A00}\u{1A19}",
         note: "ke (ka + sara e, pre-base reorder)",

@@ -1,4 +1,4 @@
-//! AAT `morx` type 5 (insertion) — end-to-end shape pass.
+//! AAT `morx` type 5 (insertion): end-to-end shape pass.
 //!
 //! Fixture: `tests/fixtures/aat_morx_insertion.ttf` (~950 B) carries
 //! six glyphs (`.notdef`, A, B, C, D, mark) plus a `morx` v2 type-5
@@ -11,7 +11,7 @@
 //!
 //! # No rustybuzz parity
 //!
-//! rustybuzz 0.20 has no AAT shaper — it ignores `morx` entirely.
+//! rustybuzz 0.20 has no AAT shaper: it ignores `morx` entirely.
 //! This is sigilbuzz-only coverage. Regenerate with
 //! `python3 tests/tools/build_aat_morx_insertion_fixture.py`.
 
@@ -49,7 +49,7 @@ fn fixture_has_morx_and_no_gsub() {
 
 #[test]
 fn type5_inserts_mark_after_trigger() {
-    // Single A → A + mark.
+    // Single A -> A + mark.
     let glyphs = shape_text("A");
     assert_eq!(glyphs.len(), 2);
     assert_eq!(glyphs[0].glyph_id, GID_A);
@@ -58,7 +58,7 @@ fn type5_inserts_mark_after_trigger() {
 
 #[test]
 fn type5_leaves_run_alone_without_trigger() {
-    // "BCD" — no trigger, no insertion.
+    // "BCD": no trigger, no insertion.
     let glyphs = shape_text("BCD");
     assert_eq!(glyphs.len(), 3);
     assert_eq!(glyphs[0].glyph_id, GID_B);
@@ -66,7 +66,7 @@ fn type5_leaves_run_alone_without_trigger() {
 
 #[test]
 fn type5_inserts_for_each_trigger() {
-    // "ABA" — two A triggers, two mark glyphs inserted (one after
+    // "ABA": two A triggers, two mark glyphs inserted (one after
     // each), so the output is "A mark B A mark" = 5 glyphs.
     let glyphs = shape_text("ABA");
     assert_eq!(glyphs.len(), 5);
@@ -79,7 +79,7 @@ fn type5_inserts_for_each_trigger() {
 
 #[test]
 fn type5_inserts_back_to_back_for_double_trigger() {
-    // "AA" — two triggers in a row produce A mark A mark.
+    // "AA": two triggers in a row produce A mark A mark.
     let glyphs = shape_text("AA");
     assert_eq!(glyphs.len(), 4);
     assert_eq!(glyphs[0].glyph_id, GID_A);
@@ -96,7 +96,7 @@ fn type5_handles_empty_input() {
 
 #[test]
 fn type5_total_advance_includes_inserted_glyph() {
-    // "A" → A (500) + mark (200) = 700.
+    // "A" -> A (500) + mark (200) = 700.
     let glyphs = shape_text("A");
     let total: i32 = glyphs.iter().map(|g| g.x_advance).sum();
     assert_eq!(total, 700);

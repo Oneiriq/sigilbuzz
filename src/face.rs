@@ -1,7 +1,7 @@
 //! Parsed SFNT font directory.
 //!
 //! A [`Face`] is the result of reading the top-level header of an OTF or
-//! TTF font file. It does **not** eagerly parse every table — instead it
+//! TTF font file. It does **not** eagerly parse every table. Instead it
 //! records where each table starts and how many bytes it occupies, so
 //! downstream callers can slice into the blob on demand.
 //!
@@ -11,10 +11,10 @@
 //!   offset  type   field               notes
 //!     0     u32    sfntVersion         0x00010000 (TTF), 'OTTO' (OTF)
 //!     4     u16    numTables
-//!     6     u16    searchRange         unused — informational only
-//!     8     u16    entrySelector       unused — informational only
-//!    10     u16    rangeShift          unused — informational only
-//!   12+    ×N     TableRecord         numTables × 16 bytes
+//!     6     u16    searchRange         unused, informational only
+//!     8     u16    entrySelector       unused, informational only
+//!    10     u16    rangeShift          unused, informational only
+//!   12+    xN     TableRecord         numTables x 16 bytes
 //! ```
 //!
 //! `TableRecord` is:
@@ -59,7 +59,7 @@ pub struct TableRecord {
 /// A parsed SFNT header and table directory.
 ///
 /// Holds a reference to the underlying bytes so table accessors can
-/// return byte slices without copying. A `Face` is cheap to clone —
+/// return byte slices without copying. A `Face` is cheap to clone:
 /// it carries a short `Vec<TableRecord>` and a borrowed slice.
 #[derive(Debug, Clone)]
 pub struct Face<'a> {
@@ -73,7 +73,7 @@ pub struct Face<'a> {
 /// would otherwise drag in `libm`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 fn round_f32_to_i16(v: f32) -> i16 {
-    // Add-half trick: positive → +0.5 floor, negative → -0.5 ceil.
+    // Add-half trick: positive -> +0.5 floor, negative -> -0.5 ceil.
     // Clamp to i16 range before the `as` cast to dodge UB on overflow.
     let adj = if v >= 0.0 { v + 0.5 } else { v - 0.5 };
     let clamped = adj.max(i16::MIN as f32).min(i16::MAX as f32);
@@ -84,7 +84,7 @@ use crate::ttc::TTCF_MAGIC;
 
 const SFNT_TRUETYPE: u32 = 0x0001_0000;
 const SFNT_OTTO: u32 = 0x4F54_544F; // 'OTTO'
-const SFNT_TRUE: u32 = 0x7472_7565; // 'true' — legacy Apple TrueType
+const SFNT_TRUE: u32 = 0x7472_7565; // 'true': legacy Apple TrueType
 
 impl<'a> Face<'a> {
     /// Parses the SFNT directory at the start of `blob`.
@@ -141,7 +141,7 @@ impl<'a> Face<'a> {
         }
 
         let num_tables = r.read_u16()? as usize;
-        // Skip searchRange / entrySelector / rangeShift — all derivable
+        // Skip searchRange / entrySelector / rangeShift, all derivable
         // from num_tables and not trusted by any sigilbuzz consumer.
         r.skip(6)?;
 
@@ -281,7 +281,7 @@ impl<'a> Face<'a> {
     }
 
     /// Parses the `GDEF` table if the font carries one. Fonts without
-    /// `GDEF` get `Ok(None)` — the shaper handles missing `GDEF` by
+    /// `GDEF` get `Ok(None)`. The shaper handles missing `GDEF` by
     /// treating every glyph as a base, which is the OpenType default.
     pub fn gdef(&self) -> Result<Option<Gdef<'a>>> {
         match self.table_bytes(tag::GDEF) {
@@ -292,7 +292,7 @@ impl<'a> Face<'a> {
     }
 
     /// Parses the `GPOS` table if the font carries one. Returns
-    /// `Ok(None)` when the font has no positioning features — not
+    /// `Ok(None)` when the font has no positioning features. Not
     /// every font does, and kerning-less output is still valid.
     pub fn gpos(&self) -> Result<Option<Gpos<'a>>> {
         match self.table_bytes(tag::GPOS) {
@@ -304,7 +304,7 @@ impl<'a> Face<'a> {
 
     /// Parses the legacy `kern` table if the font carries one. Used
     /// as a fallback when the GPOS `kern` feature yields no lookups
-    /// — many older fonts (Open Sans among them) ship their
+    /// since many older fonts (Open Sans among them) ship their
     /// kerning here rather than in GPOS.
     pub fn kern(&self) -> Result<Option<KernTable<'a>>> {
         match self.table_bytes(tag::KERN) {
@@ -385,7 +385,7 @@ impl<'a> Face<'a> {
 
     /// Returns the glyph's raw points in glyf-natural order: contour
     /// points (on-curve + off-curve) followed by the four phantom
-    /// points (pp1..pp4). Thin wrapper over [`Glyf::glyph_points`] —
+    /// points (pp1..pp4). Thin wrapper over [`Glyf::glyph_points`]:
     /// the heavy lifting (composite flattening, phantom synthesis)
     /// lives there; this method just plumbs `loca`, `hmtx`, and the
     /// optional `vmtx` through.
@@ -394,7 +394,7 @@ impl<'a> Face<'a> {
     /// points by index. Returns `Ok(None)` for glyphs without an
     /// outline (whitespace, missing) and for fonts that lack `glyf`
     /// entirely (CFF-only); the caller should treat the missing
-    /// information as "drop the kern silently" — the same conservative
+    /// information as "drop the kern silently", the same conservative
     /// posture sigilbuzz uses for fmt-4 fall-through everywhere else.
     pub fn glyph_points(&self, glyph_id: u16) -> Result<Option<Vec<(i16, i16)>>> {
         if self.record(tag::GLYF).is_none() {
@@ -409,7 +409,7 @@ impl<'a> Face<'a> {
 
     /// Returns the design-unit bounding box for `glyph_id`, or
     /// `Ok(None)` when the glyph has no outline (e.g. a space
-    /// glyph). Requires both `loca` and `glyf` — fonts that use CFF
+    /// glyph). Requires both `loca` and `glyf`. Fonts that use CFF
     /// outlines instead will yield [`Error::MissingTable`] for
     /// `glyf`.
     pub fn glyph_bounds(&self, glyph_id: u16) -> Result<Option<GlyphBounds>> {
@@ -430,7 +430,7 @@ impl<'a> Face<'a> {
     }
 
     /// Parses the `avar` table if the font carries one. Optional
-    /// even in variable fonts — `avar` only appears when the
+    /// even in variable fonts: `avar` only appears when the
     /// designer provides non-linear axis remapping.
     pub fn avar(&self) -> Result<Option<Avar>> {
         match self.table_bytes(tag::AVAR) {
@@ -466,7 +466,7 @@ impl<'a> Face<'a> {
 
     /// Parses the `MVAR` table if the font carries one. MVAR varies
     /// font-wide instance metrics (typoAscender / Descender,
-    /// x-height, sub/super offsets, strikeout, underline, …) by
+    /// x-height, sub/super offsets, strikeout, underline, ...) by
     /// axis coord; missing MVAR means those metrics stay constant
     /// across the design space. Most variable fonts ship MVAR.
     pub fn mvar(&self) -> Result<Option<Mvar<'a>>> {
@@ -478,7 +478,7 @@ impl<'a> Face<'a> {
     }
 
     /// Parses the `VVAR` table if the font carries one. HVAR's
-    /// vertical sibling — varies per-glyph advance height and
+    /// vertical sibling: varies per-glyph advance height and
     /// top-side bearing. Only fonts that support vertical layout
     /// (CJK, vertical Latin) ship this; horizontal-only variable
     /// fonts omit it.
@@ -509,7 +509,7 @@ impl<'a> Face<'a> {
     /// tuple contributes a delta, the static bounds from `glyf` are
     /// adjusted by the minimum / maximum `(dx, dy)` across every
     /// contour point touched by the glyph's variation data. Missing
-    /// `gvar` — or coords that produce zero deltas — gives the same
+    /// `gvar` (or coords that produce zero deltas) gives the same
     /// answer as [`Face::glyph_bounds`].
     pub fn glyph_bounds_at_coords(
         &self,
@@ -535,7 +535,7 @@ impl<'a> Face<'a> {
         }
         // Simple glyphs carry points on contour edges; the bounding
         // box tracks those extrema. A full renderer would interpolate
-        // composite glyphs and phantom points — sigilbuzz only needs
+        // composite glyphs and phantom points. sigilbuzz only needs
         // an approximate bbox, so "shift corners by min/max deltas
         // across touched points" is sufficient for layout work.
         let mut x_lo = f32::INFINITY;
@@ -576,7 +576,7 @@ impl<'a> Face<'a> {
     }
 
     /// Parses the `CFF2` table if the font carries one. CFF2 is the
-    /// variable-font flavour of CFF; static OTF fonts use plain
+    /// variable-font flavor of CFF; static OTF fonts use plain
     /// `CFF `.
     pub fn cff2(&self) -> Result<Cff2<'a>> {
         Cff2::parse(self.table_bytes(tag::CFF2)?)
@@ -587,7 +587,7 @@ impl<'a> Face<'a> {
     /// (`glyf`) and CFF / CFF2 fonts; the backend is inferred from
     /// the tables the font carries.
     ///
-    /// Composite glyphs are flattened — the caller never sees
+    /// Composite glyphs are flattened: the caller never sees
     /// component references. Returns `Ok(None)` for glyphs with no
     /// outline (whitespace) or for glyph ids past the end of the
     /// font's outline table.
@@ -746,7 +746,7 @@ impl<'a> Face<'a> {
     }
 
     /// Parses the `VORG` table if the font carries one. Most fonts
-    /// with vertical metrics omit this — the renderer's default
+    /// with vertical metrics omit this. The renderer's default
     /// origin rule is usually good enough; CFF CJK fonts use it.
     pub fn vorg(&self) -> Result<Option<Vorg<'a>>> {
         match self.table_bytes(tag::VORG) {
@@ -756,7 +756,7 @@ impl<'a> Face<'a> {
         }
     }
 
-    /// Parses the `COLR` table if the font carries one. Colour fonts
+    /// Parses the `COLR` table if the font carries one. Color fonts
     /// ship this alongside `CPAL`; monochrome outlines-only fonts
     /// omit both.
     pub fn colr(&self) -> Result<Option<crate::tables::colr::Colr<'a>>> {
@@ -778,7 +778,7 @@ impl<'a> Face<'a> {
 
     /// Convenience: resolves the paint subtree for `glyph_id` through
     /// the `COLR` table, returning `Ok(None)` when either the font has
-    /// no COLR or the glyph has no colour record.
+    /// no COLR or the glyph has no color record.
     pub fn colr_paint(&self, glyph_id: u16) -> Result<Option<crate::tables::colr::ColrPaint<'a>>> {
         match self.colr()? {
             Some(colr) => Ok(colr.paint(glyph_id)),
@@ -791,7 +791,7 @@ impl<'a> Face<'a> {
     /// Math, Asana Math, XITS Math) ship this; everything else
     /// returns `Ok(None)`. sigilbuzz exposes the parsed structure;
     /// running an actual math layout pass is the consumer's job
-    /// (LuaTeX, MathML renderers, …).
+    /// (LuaTeX, MathML renderers, ...).
     pub fn math(&self) -> Result<Option<Math<'a>>> {
         match self.table_bytes(tag::MATH) {
             Ok(bytes) => Ok(Some(Math::parse(bytes)?)),
@@ -802,9 +802,9 @@ impl<'a> Face<'a> {
 
     /// Parses the `BASE` table if the font carries one. BASE
     /// provides per-script baseline metrics (`romn`, `ideo`,
-    /// `hang`, `math`, …) plus min/max clamps so a typesetting
+    /// `hang`, `math`, ...) plus min/max clamps so a typesetting
     /// engine can align glyphs from different scripts on a common
-    /// baseline. Most fonts omit BASE — Adobe's flagship faces,
+    /// baseline. Most fonts omit BASE. Adobe's flagship faces,
     /// some Noto / SIL designs, and a handful of math fonts ship
     /// it. v1.1 BASE tables can carry IVS-varied baseline coords;
     /// the parsed [`Base`] exposes its variation store via
@@ -840,7 +840,7 @@ impl<'a> Face<'a> {
 
     /// Parses the `EBLC` table (Microsoft monochrome bitmap location)
     /// if the font carries one. Always paired with `EBDT` in the wild.
-    /// Modern colour-emoji fonts use CBDT/CBLC instead; EBLC/EBDT
+    /// Modern color-emoji fonts use CBDT/CBLC instead; EBLC/EBDT
     /// shows up in legacy Asian text fonts and a handful of bitmap-
     /// only display faces.
     pub fn eblc(&self) -> Result<Option<Eblc<'a>>> {
@@ -878,8 +878,8 @@ impl<'a> Face<'a> {
     }
 
     /// Parses the `SVG ` table (OpenType SVG) if the font carries
-    /// one. Returns `Ok(None)` for fonts without inline SVG glyphs —
-    /// most fonts in the wild, including all COLR-only colour fonts.
+    /// one. Returns `Ok(None)` for fonts without inline SVG glyphs:
+    /// most fonts in the wild, including all COLR-only color fonts.
     pub fn svg(&self) -> Result<Option<Svg<'a>>> {
         match self.table_bytes(tag::SVG) {
             Ok(bytes) => Ok(Some(Svg::parse(bytes)?)),
@@ -893,7 +893,7 @@ impl<'a> Face<'a> {
     /// covers the glyph.
     ///
     /// The returned [`SvgDocument`] borrows directly into the font
-    /// blob; `data` is either plain SVG XML or a gzip stream — see
+    /// blob; `data` is either plain SVG XML or a gzip stream. See
     /// the `gzipped` flag. sigilbuzz never decompresses or parses the
     /// SVG itself.
     pub fn svg_document(&self, glyph_id: u16) -> Result<Option<SvgDocument<'a>>> {
@@ -904,12 +904,12 @@ impl<'a> Face<'a> {
     /// `ppem`, picking the closest available strike.
     ///
     /// Resolution order:
-    /// 1. `CBDT` / `CBLC` — Google color emoji.
-    /// 2. `sbix` — Apple color emoji.
-    /// 3. `EBDT` / `EBLC` — Microsoft monochrome bitmap embeds.
+    /// 1. `CBDT` / `CBLC`: Google color emoji.
+    /// 2. `sbix`: Apple color emoji.
+    /// 3. `EBDT` / `EBLC`: Microsoft monochrome bitmap embeds.
     ///
     /// CBDT outranks EBDT because a font carrying both (rare but
-    /// permitted) is overwhelmingly built around the colour table;
+    /// permitted) is overwhelmingly built around the color table;
     /// the mono path is the legacy fallback.
     ///
     /// Returns `Ok(None)` when no bitmap table is present, or the
@@ -921,7 +921,7 @@ impl<'a> Face<'a> {
     /// sbix, and EBDT payloads. All three ride a `&'a [u8]` that
     /// points back into the original font blob, so cloning is cheap
     /// and there is no allocation on the lookup path. PNG / JPEG /
-    /// TIFF / mask decoding is the consumer's job — sigilbuzz exposes
+    /// TIFF / mask decoding is the consumer's job: sigilbuzz exposes
     /// the bytes, not pixels.
     pub fn glyph_bitmap(&self, glyph_id: u16, ppem: u16) -> Result<Option<GlyphBitmapEntry<'a>>> {
         if let Some(cblc) = self.cblc()? {
@@ -1014,7 +1014,7 @@ fn transform_path_op(op: PathOp, m: [f32; 6]) -> PathOp {
 }
 
 /// Tagged result of [`Face::glyph_bitmap`]. Bitmap fonts come in two
-/// flavours and the metrics shape differs enough that folding them
+/// flavors and the metrics shape differs enough that folding them
 /// into one struct loses information; consumers match on the variant
 /// they care about.
 #[derive(Debug, Clone, Copy)]
@@ -1041,7 +1041,7 @@ pub enum GlyphBitmapEntry<'a> {
         /// Per-glyph entry (origin offsets, format tag, payload).
         glyph: crate::tables::SbixGlyph<'a>,
     },
-    /// Microsoft Embedded Bitmap Data (EBDT/EBLC) — monochrome 1bpp
+    /// Microsoft Embedded Bitmap Data (EBDT/EBLC): monochrome 1bpp
     /// masks. Predecessor to CBDT/CBLC; same indexing model, mask
     /// payload instead of PNG.
     Ebdt {

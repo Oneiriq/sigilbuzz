@@ -1,9 +1,9 @@
-//! `avar` — Axis Variations table.
+//! `avar`: Axis Variations table.
 //!
 //! Remaps normalized axis coordinates through piecewise-linear
 //! segments, after `fvar` normalization and before the variation
 //! store consumes them. Font designers use `avar` to correct
-//! non-linear interpolation — for example, a weight axis whose
+//! non-linear interpolation: for example, a weight axis whose
 //! mid-point should render not as the arithmetic mean of Regular
 //! and Black but closer to Semibold.
 //!
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn non_identity_map_interpolates_linearly() {
-        // 0.5 user → 0.75 normalized (weight bias toward heavy).
+        // 0.5 user -> 0.75 normalized (weight bias toward heavy).
         let map = &[(-1.0, -1.0), (0.0, 0.0), (0.5, 0.75), (1.0, 1.0)];
         let bytes = build_avar(&[map]);
         let avar = Avar::parse(&bytes).unwrap();

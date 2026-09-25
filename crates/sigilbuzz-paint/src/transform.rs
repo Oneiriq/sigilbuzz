@@ -14,7 +14,7 @@
 //! the conversion from a parsed `ColrPaint::Transform` is just a
 //! field-by-field copy.
 //!
-//! A "child paint inherits the parent's transform" — i.e. transforms
+//! A "child paint inherits the parent's transform", i.e. transforms
 //! compose left-to-right as the walker descends the tree. The math is
 //! the same as standard 3x3 matrix multiplication with the implicit
 //! bottom row pinned to `[0, 0, 1]`; the helpers here are inlined and
@@ -26,7 +26,7 @@ use core::f32::consts::PI;
 ///
 /// Applies to a point `(x, y)` as
 /// `(xx * x + xy * y + dx, yx * x + yy * y + dy)`. Composition with
-/// [`Transform2D::then`] applies `self` first, then `next` — the same
+/// [`Transform2D::then`] applies `self` first, then `next`, the same
 /// order a depth-first walk of a COLRv1 paint tree produces.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Transform2D {
@@ -151,7 +151,7 @@ impl Default for Transform2D {
 
 /// Converts a COLRv1 F2DOT14 angle into radians.
 ///
-/// COLRv1 stores angles as F2DOT14 multiples of 180 degrees — i.e. an
+/// COLRv1 stores angles as F2DOT14 multiples of 180 degrees, i.e. an
 /// on-disk value of 1.0 means a half-turn. sigilbuzz already converts
 /// the F2DOT14 to a fraction; this helper finishes the trip into
 /// radians by multiplying by `pi`.

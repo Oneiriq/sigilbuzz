@@ -1,12 +1,12 @@
-//! `ItemVariationStore` — the shared primitive behind HVAR, VVAR,
+//! `ItemVariationStore`: the shared primitive behind HVAR, VVAR,
 //! MVAR, and feature-variations in GSUB/GPOS.
 //!
 //! Variable fonts express per-item deltas (advance widths, kerning
 //! deltas, anchor positions, ...) as sums of region-weighted
 //! contributions. Each *region* is a product of per-axis triangular
-//! functions parameterised by `(start, peak, end)` in normalized
+//! functions parameterized by `(start, peak, end)` in normalized
 //! axis space. Each *item* carries a row of deltas, one per region
-//! it participates in, plus an index table that maps region slot →
+//! it participates in, plus an index table that maps region slot to
 //! global region.
 //!
 //! # Layout
@@ -52,7 +52,7 @@
 //!
 //! ```text
 //!   sum over regions referenced by the item:
-//!     scalar(region, coords) × delta
+//!     scalar(region, coords) * delta
 //! ```
 //!
 //! where `scalar` is the product across axes of the 1D triangular
@@ -98,7 +98,7 @@ impl<'a> ItemVariationStore<'a> {
         let region_count = rr.read_u16()?;
 
         // Validate that region list fits. Each region is
-        // axis_count * 6 bytes (3 × F2DOT14 per axis).
+        // axis_count * 6 bytes (3 * F2DOT14 per axis).
         let regions_start = rr.position();
         let regions_size = region_count as usize * axis_count as usize * 6;
         if data.len() < regions_start + regions_size {
@@ -238,7 +238,7 @@ fn f2dot14(data: &[u8], off: usize) -> f32 {
 #[allow(clippy::float_cmp)]
 fn axis_scalar(start: f32, peak: f32, end: f32, coord: f32) -> f32 {
     // Per spec: a region with peak == 0 on any axis evaluates to 1
-    // on that axis — the axis is "not used by this region".
+    // on that axis. The axis is "not used by this region".
     if peak == 0.0 && start <= 0.0 && end >= 0.0 {
         return 1.0;
     }
@@ -332,7 +332,7 @@ impl<'a> ItemVariationData<'a> {
             let is_wide = (slot as u16) < self.word_delta_count;
             let (bytes, advance) = match (is_wide, self.long_words) {
                 (true, true) => (4, 4), // i32
-                // i16 — either wide/short-word or narrow/long-word.
+                // i16: either wide/short-word or narrow/long-word.
                 (true, false) | (false, true) => (2, 2),
                 (false, false) => (1, 1), // i8
             };
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn region_scalar_peaks_at_one() {
-        // One axis, one region (-1 … 1 … 1). At coord = 1.0 scalar = 1.
+        // One axis, one region (-1 ... 1 ... 1). At coord = 1.0 scalar = 1.
         let bytes = build_store(
             1,
             &[&[(-1.0, 1.0, 1.0)]],
@@ -461,7 +461,7 @@ mod tests {
             &[(alloc::vec![0], alloc::vec![alloc::vec![100]], false)],
         );
         let s = ItemVariationStore::parse(&bytes).unwrap();
-        // coord = 0.5 is halfway between start (0) and peak (1) → 0.5.
+        // coord = 0.5 is halfway between start (0) and peak (1) -> 0.5.
         let v = s.region_scalar(0, &[0.5]).unwrap();
         assert!((v - 0.5).abs() < 1e-3);
     }
@@ -478,12 +478,12 @@ mod tests {
         let s = ItemVariationStore::parse(&bytes).unwrap();
 
         // At coord = 1.0: region 0 scalar = 1, region 1 scalar = 0
-        // → delta = 100.
+        // -> delta = 100.
         let d = s.delta(0, 0, &[1.0]);
         assert!((d - 100.0).abs() < 1e-3);
 
         // At coord = -1.0: region 0 scalar = 0, region 1 scalar = 1
-        // → delta = 50.
+        // -> delta = 50.
         let d = s.delta(0, 0, &[-1.0]);
         assert!((d - 50.0).abs() < 1e-3);
     }

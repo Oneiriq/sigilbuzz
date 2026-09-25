@@ -1,4 +1,4 @@
-//! `hmtx` — horizontal metrics.
+//! `hmtx`: horizontal metrics.
 //!
 //! Layout, as prescribed by the OpenType spec:
 //!

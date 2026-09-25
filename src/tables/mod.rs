@@ -10,11 +10,11 @@
 //! unambiguous and `no_std`-friendly.
 
 // Each per-table submodule below is `pub` so companion crates
-// (sigilbuzz-subset, sigilbuzz-paint, sigilbuzz-render, …) can reach
+// (sigilbuzz-subset, sigilbuzz-paint, sigilbuzz-render, ...) can reach
 // the parser types they need by full path. The headline names
 // re-exported at the module root via `pub use` (`Cmap`, `Glyf`,
 // `Colr`, `PathOp`, `MultiVarStore`, `ItemVariationStore`, `Reader`,
-// …) are the *public* surface — those carry the stability commitment
+// ...) are the *public* surface. Those carry the stability commitment
 // in `docs/STABILITY.md`.
 //
 // Submodules marked `#[doc(hidden)]` below contain additional
@@ -27,7 +27,7 @@
 //
 // `colr`, `cpal`, and `outline` stay visible because consumer code
 // (sigilbuzz-paint, sigilbuzz-svg, sigilbuzz-render) walks the full
-// submodule surface — variant enums (`ColrPaint`, `ColorLine`,
+// submodule surface: variant enums (`ColrPaint`, `ColorLine`,
 // `PathOp`) and small helper types are part of the published API,
 // not internals.
 #[doc(hidden)]
@@ -167,86 +167,86 @@ pub use vvar::Vvar;
 /// reaches for during shaping; more land as the corresponding parsers
 /// come online.
 pub mod tag {
-    /// `cmap` — character to glyph index mapping.
+    /// `cmap`: character to glyph index mapping.
     pub const CMAP: [u8; 4] = *b"cmap";
-    /// `head` — font header.
+    /// `head`: font header.
     pub const HEAD: [u8; 4] = *b"head";
-    /// `hhea` — horizontal header.
+    /// `hhea`: horizontal header.
     pub const HHEA: [u8; 4] = *b"hhea";
-    /// `hmtx` — horizontal metrics.
+    /// `hmtx`: horizontal metrics.
     pub const HMTX: [u8; 4] = *b"hmtx";
-    /// `maxp` — maximum profile (glyph count, etc.).
+    /// `maxp`: maximum profile (glyph count, etc.).
     pub const MAXP: [u8; 4] = *b"maxp";
-    /// `name` — naming table.
+    /// `name`: naming table.
     pub const NAME: [u8; 4] = *b"name";
-    /// `post` — PostScript information.
+    /// `post`: PostScript information.
     pub const POST: [u8; 4] = *b"post";
-    /// `loca` — index to location (TrueType outlines).
+    /// `loca`: index to location (TrueType outlines).
     pub const LOCA: [u8; 4] = *b"loca";
-    /// `glyf` — glyph data (TrueType outlines).
+    /// `glyf`: glyph data (TrueType outlines).
     pub const GLYF: [u8; 4] = *b"glyf";
-    /// `GSUB` — glyph substitution (ligatures, contextual alternates).
+    /// `GSUB`: glyph substitution (ligatures, contextual alternates).
     pub const GSUB: [u8; 4] = *b"GSUB";
-    /// `GPOS` — glyph positioning (kerning, mark attachment).
+    /// `GPOS`: glyph positioning (kerning, mark attachment).
     pub const GPOS: [u8; 4] = *b"GPOS";
-    /// `GDEF` — glyph definition (class, caret, mark attachment).
+    /// `GDEF`: glyph definition (class, caret, mark attachment).
     pub const GDEF: [u8; 4] = *b"GDEF";
-    /// `kern` — legacy kerning table.
+    /// `kern`: legacy kerning table.
     pub const KERN: [u8; 4] = *b"kern";
-    /// `fvar` — font variations axes and named instances.
+    /// `fvar`: font variations axes and named instances.
     pub const FVAR: [u8; 4] = *b"fvar";
-    /// `avar` — axis variations remapping.
+    /// `avar`: axis variations remapping.
     pub const AVAR: [u8; 4] = *b"avar";
-    /// `HVAR` — horizontal metrics variations.
+    /// `HVAR`: horizontal metrics variations.
     pub const HVAR: [u8; 4] = *b"HVAR";
-    /// `gvar` — glyph variations (per-point outline deltas).
+    /// `gvar`: glyph variations (per-point outline deltas).
     pub const GVAR: [u8; 4] = *b"gvar";
-    /// `MVAR` — metrics variations (font-wide instance metrics).
+    /// `MVAR`: metrics variations (font-wide instance metrics).
     pub const MVAR: [u8; 4] = *b"MVAR";
-    /// `VVAR` — vertical metrics variations (advance height, tsb).
+    /// `VVAR`: vertical metrics variations (advance height, tsb).
     pub const VVAR: [u8; 4] = *b"VVAR";
-    /// `vhea` — vertical header.
+    /// `vhea`: vertical header.
     pub const VHEA: [u8; 4] = *b"vhea";
-    /// `vmtx` — vertical metrics.
+    /// `vmtx`: vertical metrics.
     pub const VMTX: [u8; 4] = *b"vmtx";
-    /// `VORG` — vertical origin.
+    /// `VORG`: vertical origin.
     pub const VORG: [u8; 4] = *b"VORG";
-    /// `COLR` — layered colour glyph table.
+    /// `COLR`: layered color glyph table.
     pub const COLR: [u8; 4] = *b"COLR";
-    /// `CPAL` — colour palette table.
+    /// `CPAL`: color palette table.
     pub const CPAL: [u8; 4] = *b"CPAL";
-    /// `CFF ` — Compact Font Format 1 (PostScript charstring outlines).
+    /// `CFF `: Compact Font Format 1 (PostScript charstring outlines).
     pub const CFF1: [u8; 4] = *b"CFF ";
-    /// `CFF2` — CFF2 for OpenType variable fonts with PostScript outlines.
+    /// `CFF2`: CFF2 for OpenType variable fonts with PostScript outlines.
     pub const CFF2: [u8; 4] = *b"CFF2";
-    /// `morx` — Apple Extended Glyph Metamorphosis (AAT).
+    /// `morx`: Apple Extended Glyph Metamorphosis (AAT).
     pub const MORX: [u8; 4] = *b"morx";
-    /// `kerx` — Apple Extended Kerning (AAT).
+    /// `kerx`: Apple Extended Kerning (AAT).
     pub const KERX: [u8; 4] = *b"kerx";
-    /// `ankr` — Apple Anchor Point table (AAT). Pairs with `kerx`
+    /// `ankr`: Apple Anchor Point table (AAT). Pairs with `kerx`
     /// format-4 action type 1 (anchor-point kerning).
     pub const ANKR: [u8; 4] = *b"ankr";
-    /// `CBLC` — Color Bitmap Location (Google).
+    /// `CBLC`: Color Bitmap Location (Google).
     pub const CBLC: [u8; 4] = *b"CBLC";
-    /// `CBDT` — Color Bitmap Data (Google).
+    /// `CBDT`: Color Bitmap Data (Google).
     pub const CBDT: [u8; 4] = *b"CBDT";
-    /// `EBLC` — Embedded Bitmap Location (Microsoft, monochrome).
+    /// `EBLC`: Embedded Bitmap Location (Microsoft, monochrome).
     pub const EBLC: [u8; 4] = *b"EBLC";
-    /// `EBDT` — Embedded Bitmap Data (Microsoft, monochrome).
+    /// `EBDT`: Embedded Bitmap Data (Microsoft, monochrome).
     pub const EBDT: [u8; 4] = *b"EBDT";
-    /// `sbix` — Standard Bitmap Graphics (Apple).
+    /// `sbix`: Standard Bitmap Graphics (Apple).
     pub const SBIX: [u8; 4] = *b"sbix";
-    /// `SVG ` — OpenType SVG (inline SVG documents per glyph).
-    /// Note the trailing space — OpenType tags are exactly four bytes.
+    /// `SVG `: OpenType SVG (inline SVG documents per glyph).
+    /// Note the trailing space: OpenType tags are exactly four bytes.
     pub const SVG: [u8; 4] = *b"SVG ";
-    /// `MATH` — OpenType math typography table. Carried by math
-    /// fonts (STIX 2 Math, Latin Modern Math, Cambria Math, …).
+    /// `MATH`: OpenType math typography table. Carried by math
+    /// fonts (STIX 2 Math, Latin Modern Math, Cambria Math, ...).
     pub const MATH: [u8; 4] = *b"MATH";
-    /// `BASE` — baseline metrics for cross-script alignment. Adobe's
+    /// `BASE`: baseline metrics for cross-script alignment. Adobe's
     /// flagship faces and a smattering of Noto / SIL designs ship
     /// this; the majority of fonts omit it.
     pub const BASE: [u8; 4] = *b"BASE";
-    /// `VARC` — Variable Composite Glyphs. OpenType 1.10 / 2024
+    /// `VARC`: Variable Composite Glyphs. OpenType 1.10 / 2024
     /// extension that carries axis-driven shape transformations on
     /// composite-glyph components.
     pub const VARC: [u8; 4] = *b"VARC";

@@ -1,18 +1,18 @@
-//! `MATH` — OpenType math typography table.
+//! `MATH`: OpenType math typography table.
 //!
 //! Math fonts (STIX 2 Math, Latin Modern Math, Cambria Math, Asana Math,
-//! XITS Math, …) ship a `MATH` table that math-typesetting engines like
+//! XITS Math, ...) ship a `MATH` table that math-typesetting engines like
 //! LuaTeX and MathML renderers consume to lay out equations. The table
 //! is divided into five logically distinct subtables:
 //!
-//! - [`MathConstants`] — ~70 font-wide layout constants (script scale
+//! - [`MathConstants`]: ~70 font-wide layout constants (script scale
 //!   percentages, fraction-rule shifts, radical inset, etc.).
-//! - [`MathGlyphInfo`] — per-glyph italic correction, top-accent
+//! - [`MathGlyphInfo`]: per-glyph italic correction, top-accent
 //!   attachment, an "is extended shape" bitmap, and per-corner kerning.
-//! - [`MathKern`] — piecewise math kerning that varies with the
+//! - [`MathKern`]: piecewise math kerning that varies with the
 //!   secondary glyph's vertical position.
-//! - [`MathVariants`] — stretchy-glyph variant lists and assembly
-//!   parts for tall operators (∑ ∫ ⎰ ⎱ ⎛ ⎜ ⎝ …).
+//! - [`MathVariants`]: stretchy-glyph variant lists and assembly
+//!   parts for tall operators (∑ ∫ ⎰ ⎱ ⎛ ⎜ ⎝ ...).
 //!
 //! sigilbuzz parses the data; *evaluating* it (running a math layout
 //! pass) is the consumer's job, just like `COLR` paint evaluation. All
@@ -29,7 +29,7 @@ use crate::tables::parse::Reader;
 // MathValueRecord
 // =========================================================================
 
-/// A `MathValueRecord` — every numeric field in the MATH table is one
+/// A `MathValueRecord`: every numeric field in the MATH table is one
 /// of these. The `value` is a design-unit (`FWord`) scalar; the optional
 /// `device` references a Device or VariationIndex table that adjusts
 /// the value at runtime (per-ppem hinting deltas or variable-font
@@ -44,7 +44,7 @@ pub struct MathValue<'a> {
     /// Resolved Device / VariationIndex sub-table, or `None` when the
     /// font emits the spec's "absent" sentinel (offset = 0).
     pub device: Option<DeviceOrVariationIndex>,
-    /// Slice of the enclosing MATH table — kept so callers can later
+    /// Slice of the enclosing MATH table, kept so callers can later
     /// resolve any embedded VariationIndex against an
     /// `ItemVariationStore` if one is wired in.
     _table: &'a [u8],
@@ -111,7 +111,7 @@ impl<'a> Math<'a> {
     }
 
     /// Returns the [`MathConstants`] subtable, or `None` when the font
-    /// does not provide one (rare — every real math font ships it).
+    /// does not provide one (rare: every real math font ships it).
     pub fn constants(&self) -> Result<Option<MathConstants<'a>>> {
         if self.constants_off == 0 {
             return Ok(None);
@@ -232,7 +232,7 @@ mod c_idx {
     pub const RADICAL_KERN_AFTER_DEGREE: usize = 50;
 }
 
-/// `MathConstants` — font-wide math-layout constants.
+/// `MathConstants`: font-wide math-layout constants.
 ///
 /// Parsed lazily: the struct just holds a slice of the subtable and
 /// each accessor reads from the right offset on demand.
@@ -279,7 +279,7 @@ impl<'a> MathConstants<'a> {
         }
     }
 
-    /// Percentage scale factor for script-style math, ×100. e.g.
+    /// Percentage scale factor for script-style math, x100. e.g.
     /// `80` means script subscripts/superscripts are at 80% of the
     /// base size.
     #[must_use]
@@ -316,12 +316,12 @@ impl<'a> MathConstants<'a> {
 
     // -- the named MathValueRecord accessors -----------------------------
 
-    /// `mathLeading` — minimum gap between math content baselines.
+    /// `mathLeading`: minimum gap between math content baselines.
     #[must_use]
     pub fn math_leading(&self) -> MathValue<'a> {
         self.value_record(c_idx::MATH_LEADING)
     }
-    /// `axisHeight` — height of the math axis above the baseline.
+    /// `axisHeight`: height of the math axis above the baseline.
     #[must_use]
     pub fn axis_height(&self) -> MathValue<'a> {
         self.value_record(c_idx::AXIS_HEIGHT)
@@ -648,7 +648,7 @@ impl<'a> MathGlyphInfo<'a> {
         Self::lookup_value(self.data, self.top_accent_off, gid)
     }
 
-    /// True when `gid` is in the "extended shape" coverage set —
+    /// True when `gid` is in the "extended shape" coverage set:
     /// glyphs that already span the math axis and don't need
     /// accent-style superscript shifting.
     #[must_use]
@@ -665,7 +665,7 @@ impl<'a> MathGlyphInfo<'a> {
         cov.contains(gid)
     }
 
-    /// Returns the [`MathKernInfo`] for `gid` on `side`, or `None`
+    /// Returns the `MathKernInfo` for `gid` on `side`, or `None`
     /// when no entry covers that corner. The same coverage table
     /// drives all four sides; an absent entry on one side does not
     /// prevent the other three from working.
@@ -755,8 +755,8 @@ impl<'a> MathGlyphInfo<'a> {
 ///
 /// The shape is two parallel arrays: `correction_height[i]` (n entries)
 /// and `kern_value[i]` (n + 1 entries). For a query height *h*, walk
-/// `correction_height` and pick the first `i` where *h ≤
-/// correction_height[i]*; the returned kern is `kern_value[i]`. If *h*
+/// `correction_height` and pick the first `i` where *h <=
+/// correction_height\[i\]*; the returned kern is `kern_value[i]`. If *h*
 /// exceeds every height, the answer is `kern_value[n]`.
 #[derive(Debug, Clone, Copy)]
 pub struct MathKern<'a> {
@@ -875,7 +875,7 @@ impl GlyphPart {
     }
 }
 
-/// `GlyphAssembly` — the parts list used to compose stretchy glyphs
+/// `GlyphAssembly`: the parts list used to compose stretchy glyphs
 /// taller / wider than every variant in [`GlyphConstruction::variants`].
 #[derive(Debug, Clone, Copy)]
 pub struct GlyphAssembly<'a> {
@@ -916,7 +916,7 @@ impl GlyphAssembly<'_> {
     }
 }
 
-/// `MathGlyphConstruction` — variants list plus optional assembly.
+/// `MathGlyphConstruction`: variants list plus optional assembly.
 #[derive(Debug, Clone, Copy)]
 pub struct GlyphConstruction<'a> {
     /// Slice of the MathGlyphConstruction subtable.
@@ -1009,7 +1009,7 @@ impl<'a> GlyphConstruction<'a> {
     }
 }
 
-/// `MathVariants` — stretchy-operator construction tables.
+/// `MathVariants`: stretchy-operator construction tables.
 #[derive(Debug, Clone, Copy)]
 pub struct MathVariants<'a> {
     /// Slice of the MathVariants subtable.
@@ -1223,10 +1223,10 @@ mod tests {
     fn math_constants_returns_value_records_for_named_fields() {
         let bytes = build_constants();
         let c = MathConstants::parse(&bytes).unwrap();
-        // axisHeight is index 1 → 100 + 1 = 101.
+        // axisHeight is index 1 -> 100 + 1 = 101.
         assert_eq!(c.axis_height().value, 101);
         assert!(c.axis_height().device.is_none());
-        // fractionRuleThickness is index 34 → 100 + 34 = 134.
+        // fractionRuleThickness is index 34 -> 100 + 34 = 134.
         assert_eq!(c.fraction_rule_thickness().value, 134);
         // radicalKernAfterDegree is the last value record (idx 50).
         assert_eq!(c.radical_kern_after_degree().value, 150);
@@ -1260,7 +1260,7 @@ mod tests {
     /// Build a minimal MathGlyphInfo with only italics correction populated.
     fn glyph_info_italics_only(gid: u16, value: i16) -> Vec<u8> {
         let mut v = Vec::new();
-        // header is 8 bytes (4 × Offset16). italics offset = 8.
+        // header is 8 bytes (4 x Offset16). italics offset = 8.
         push_u16(&mut v, 8);
         push_u16(&mut v, 0);
         push_u16(&mut v, 0);
@@ -1296,7 +1296,7 @@ mod tests {
 
     #[test]
     fn glyph_info_absent_subtables_yield_none() {
-        // All four offsets zero — nothing is present.
+        // All four offsets zero: nothing is present.
         let bytes = vec![0u8; 8];
         let gi = MathGlyphInfo::parse(&bytes).unwrap();
         assert!(gi.italic_correction(0).is_none());
@@ -1349,7 +1349,7 @@ mod tests {
         // top-right kern. Layout:
         //   [0..2]   coverageOffset
         //   [2..4]   mathKernCount = 1
-        //   [4..12]  MathKernInfoRecord (4 × Offset16 — TR/TL/BR/BL)
+        //   [4..12]  MathKernInfoRecord (4 x Offset16: TR/TL/BR/BL)
         //   [12..]   coverage
         //   [..]     MathKern table (from build_math_kern)
         let kern_table = build_math_kern(&[50], &[7, 9]);
@@ -1427,7 +1427,7 @@ mod tests {
     /// integration of Coverage + offset arrays can be checked.
     fn build_math_variants() -> Vec<u8> {
         // Header is 10 bytes; after that, two construction-offset
-        // arrays (vert then horiz, 1 entry each) → 4 more bytes.
+        // arrays (vert then horiz, 1 entry each) -> 4 more bytes.
         // After that we lay out the rest in order:
         //   verticalCoverage, verticalConstruction,
         //   horizontalCoverage, horizontalConstruction.

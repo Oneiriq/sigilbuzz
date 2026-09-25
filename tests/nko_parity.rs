@@ -12,7 +12,7 @@
 //!   * letter + tone mark (high tone, low tone, rising, descending)
 //!   * the dantayalan low-tone mark (U+07FD)
 //!   * N'Ko digits (Symbol pass-through)
-//!   * mixed N'Ko + Latin (BiDi reordering not exercised here —
+//!   * mixed N'Ko + Latin (BiDi reordering not exercised here:
 //!     the parity test compares raw glyph order, so the strings
 //!     are kept logical-only).
 //!
@@ -36,13 +36,13 @@ const CORPUS: &[Case] = &[
         note: "empty",
         compare_rustybuzz: true,
     },
-    // ߒ U+07D2 — N'Ko letter ta. Single base.
+    // ߒ U+07D2: N'Ko letter ta. Single base.
     Case {
         text: "\u{07D2}",
         note: "ta alone",
         compare_rustybuzz: true,
     },
-    // N'Ko digits 0-4 (U+07C0..U+07C4). Symbol pass-through —
+    // N'Ko digits 0-4 (U+07C0..U+07C4). Symbol pass-through:
     // sigilbuzz emits one syllable per digit so each keeps its
     // own cluster id, matching rustybuzz.
     Case {
@@ -58,7 +58,7 @@ const CORPUS: &[Case] = &[
     // scripts, so the precomposition diverges. Tracked as the
     // follow-up at <https://github.com/Oneiriq/sigilbuzz/issues>
     // (USE: joining-form masking for N'Ko / Phags-pa). The cases
-    // still shape — we just do not byte-compare the result.
+    // still shape. We just do not byte-compare the result.
     Case {
         text: "\u{07D2}\u{07EB}",
         note: "ta + high tone (joining-form)",
@@ -110,7 +110,7 @@ fn nko_corpus_matches_rustybuzz() {
 
         let mut rb_buf = rustybuzz::UnicodeBuffer::new();
         rb_buf.push_str(case.text);
-        // N'Ko is RTL — set direction explicitly so rustybuzz emits
+        // N'Ko is RTL. Set direction explicitly so rustybuzz emits
         // visual order; reverse it before zipping against sigilbuzz's
         // logical-order output.
         rb_buf.set_direction(RbDirection::RightToLeft);

@@ -1,5 +1,5 @@
 /*
- * hb.h — sigilbuzz's HarfBuzz-symbol-compatible C header.
+ * hb.h: sigilbuzz's HarfBuzz-symbol-compatible C header.
  *
  * Subset of the upstream HarfBuzz public API covering the symbols
  * sigilbuzz-capi implements. A binary previously compiled against

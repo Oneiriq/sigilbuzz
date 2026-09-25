@@ -1,4 +1,4 @@
-//! GSUB lookup type 2 — Multiple Substitution.
+//! GSUB lookup type 2: Multiple Substitution.
 //!
 //! Replaces one input glyph with a sequence of output glyphs. The
 //! inverse of ligature substitution. Most commonly used for
@@ -72,7 +72,7 @@ impl<'a> Multiple<'a> {
         })
     }
 
-    /// Coverage table — exposed so the shape driver can run a fast
+    /// Coverage table, exposed so the shape driver can run a fast
     /// "any glyph in run might trigger this subtable" precheck before
     /// committing to a full cursor walk.
     #[must_use]

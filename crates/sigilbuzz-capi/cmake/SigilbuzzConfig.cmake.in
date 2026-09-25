@@ -1,4 +1,4 @@
-# SigilbuzzConfig.cmake — find-module for the sigilbuzz cdylib.
+# SigilbuzzConfig.cmake: find-module for the sigilbuzz cdylib.
 #
 # Generated from `SigilbuzzConfig.cmake.in` by configuring `@PREFIX@`
 # and `@VERSION@` substitutions at install time. Drop the resulting

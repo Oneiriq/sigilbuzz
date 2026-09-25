@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Synthesise an AAT-only font that exercises `morx` subtable
-type 5 — insertion substitution.
+type 5: insertion substitution.
 
 Type 5 walks the glyph stream through a state machine; on an
 insertion entry it splices up to 31 glyphs from an "insertion glyph
@@ -23,8 +23,8 @@ Glyphs:
 State machine (1 state, 5 classes):
   class 4 = trigger (A)
   state 0:
-    class 4 → entry 1: insert one glyph (gid 5) AFTER current.
-    other  → entry 0: noop.
+    class 4 -> entry 1: insert one glyph (gid 5) AFTER current.
+    other  -> entry 0: noop.
 
 Insertion glyph table is a flat `[mark_gid]` u16 array.
 
@@ -95,9 +95,9 @@ def build_morx_table() -> bytes:
     #   0..16   state-table header
     #  16..20   insertionGlyphTable offset (u32)
     #  20..     class lookup (aligned to 2)
-    #  ..       state array (1 × 5 × u16) = 10 B
-    #  ..       entry array (2 × 8 B) = 16 B
-    #  ..       insertion glyph table (1 × u16) = 2 B
+    #  ..       state array (1 x 5 x u16) = 10 B
+    #  ..       entry array (2 x 8 B) = 16 B
+    #  ..       insertion glyph table (1 x u16) = 2 B
     header_len = 20
     class_off = header_len
     class_end = class_off + len(class_lookup)
@@ -122,7 +122,7 @@ def build_morx_table() -> bytes:
     body += class_lookup
     while len(body) < state_off:
         body += b"\x00"
-    # State row: class 4 → entry 1, else entry 0.
+    # State row: class 4 -> entry 1, else entry 0.
     s0 = [0, 0, 0, 0, 1]
     for v in s0:
         body += struct.pack(">H", v)

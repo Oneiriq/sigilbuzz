@@ -1,78 +1,66 @@
-//! sigilbuzz-subset — font subsetter for sigilbuzz.
+//! sigilbuzz-subset: font subsetter and instancer for sigilbuzz.
 //!
-//! Given a [`Face`] and a set of glyph ids to keep, produces a smaller
-//! font containing only those glyphs (plus any glyphs they reference
-//! transitively through composites and ligatures). All retained tables
-//! are rewritten so old glyph-id references resolve against the new,
-//! compacted glyph order.
+//! Given a [`Face`] and a set of glyph IDs to keep, [`subset`] produces a
+//! smaller font containing only those glyphs, plus any glyphs they pull
+//! in through composites and ligatures. Every table that survives is
+//! rewritten so glyph references point at the new, compacted glyph order.
+//! [`instance`] bakes variable-font axis coordinates into a static font or
+//! pins some axes and keeps the rest.
 //!
 //! # Pipeline
 //!
 //! ```text
 //!   Face + SubsetInput
-//!        │
-//!        ▼
-//!   closure walk     ── expand `gids` to include composite and
-//!        │              ligature components
-//!        ▼
-//!   gid remap        ── new gid 0..N in old-order; gid 0 always kept
-//!        │
-//!        ▼
-//!   table emission   ── cmap / glyf+loca / hmtx+hhea / maxp / head /
-//!        │              name / OS/2 / post
-//!        ▼
-//!   SFNT rebuild     ── new directory, table-level checksums,
-//!        │              head.checkSumAdjustment
-//!        ▼
+//!        |
+//!        v
+//!   closure walk     -- expand `gids` to include composite and
+//!        |              ligature components
+//!        v
+//!   gid remap        -- new gid 0..N in old order, gid 0 always kept
+//!        |
+//!        v
+//!   table emission   -- rebuild or pass through each table
+//!        |
+//!        v
+//!   SFNT rebuild     -- new directory, table checksums,
+//!        |              head.checkSumAdjustment
+//!        v
 //!   SubsetOutput { bytes, gid_map }
 //! ```
 //!
-//! # Scope
+//! # What happens to each table
 //!
-//! This is the first pass and intentionally narrow:
+//! For TrueType (`glyf`) fonts:
 //!
-//! - **Subsetted**: `cmap` (fmt 4 rebuilt), `glyf` + `loca`, `hmtx` +
-//!   `hhea`, `maxp`, `head`, `post` (forced to format 3).
-//! - **Preserved as-is**: `name`, `OS/2`.
-//! - **Layout tables** (`GSUB`, `GPOS`, `GDEF`): preserved verbatim
-//!   when the closure walker keeps every glyph in the source font
-//!   (i.e. the gid_map is the identity); dropped otherwise. Set
-//!   [`SubsetInput::retain_layout`] to `false` to force-drop them.
-//!   Full byte-level layout-table rewriting under non-identity gid
-//!   maps is staged for a future release; the [`emit_classdef`],
-//!   [`emit_coverage_from_glyphs`], and [`emit_coverage_from_pairs`]
-//!   helpers in this crate are the building blocks that rewriter will
-//!   use.
-//! - **Variable-font tables**: `fvar` and `avar` are passed through
-//!   verbatim (axis-keyed, never glyph-keyed); `gvar` is rebuilt with
-//!   one entry per kept gid; `HVAR` is rebuilt around a fresh
-//!   `DeltaSetIndexMap` plus a deduped `ItemVariationStore`. Set
-//!   [`SubsetInput::retain_variations`] to `false` to drop them all
-//!   and produce a static-instance subset (matches the 0.5.0
-//!   baseline).
-//! - **CFF / CFF2**: identity-passthrough — when the closure has not
-//!   dropped any source glyph (kept set == `0..num_glyphs`) the CFF /
-//!   CFF2 table and its dependencies are preserved verbatim and the
-//!   surrounding sfnt directory is rebuilt around them. Non-identity
-//!   CFF1 subsetting handles both non-CID (single Private DICT) and
-//!   CID-keyed (FDArray + FDSelect) sources: CharStrings INDEX rebuild,
-//!   per-FD Subr renumber via bias-adjusted operand rewrite, Top DICT
-//!   deferred-offset patching, charset / Encoding / FDSelect format
-//!   auto-pick, FDArray INDEX rebuild with FD renumber, per-FD Private
-//!   DICT relocation. CFF2 non-identity mirrors the CID-keyed CFF1 flow
-//!   with the CFF2-specific elisions (no String INDEX, no Encoding,
-//!   no charset, single inline Top DICT, VariationStore preserved
-//!   verbatim). The byte-level emitter primitives ([`encode_index`],
-//!   [`encode_dict_int`], [`emit_charset_auto`], [`emit_encoding_auto`],
-//!   [`emit_fd_select_auto`], [`renumber_charstring`]) are public so
-//!   downstream tooling can drive the same rewrite pieces directly.
-//! - **Dropped** (when [`SubsetInput::drop_unhandled`] is true, the
-//!   default): `kern`, `vhea`, `vmtx`, `VORG`, `COLR`, `CPAL`,
-//!   `morx`, `kerx`. When the flag is false, encountering any of
-//!   these surfaces a [`SubsetError::Unsupported`] result.
+//! - Rebuilt: `cmap` (as format 4), `glyf` and `loca`, `hmtx` and `hhea`,
+//!   `maxp`, `head`, and `post` (as format 3, without glyph names).
+//! - Passed through: `name` and `OS/2`.
+//! - Layout (`GSUB`, `GPOS`, `GDEF`): kept verbatim when every glyph
+//!   survives, rewritten at the byte level when glyph IDs change. Set
+//!   [`SubsetInput::retain_layout`] to `false` to drop them.
+//! - Variations: `fvar` and `avar` pass through. `gvar` is rebuilt with one
+//!   entry per kept glyph, `HVAR` around a fresh `DeltaSetIndexMap` and a
+//!   deduplicated `ItemVariationStore`, and `VARC` around the kept
+//!   composites. Set [`SubsetInput::retain_variations`] to `false` to drop
+//!   them and get a static subset at the default instance.
+//! - Dropped when [`SubsetInput::drop_unhandled`] is true (the default):
+//!   `kern`, `vhea`, `vmtx`, `VORG`, `COLR`, `CPAL`, `morx`, and `kerx`.
+//!   With the flag off, any of these returns [`SubsetError::Unsupported`].
 //!
-//! Non-identity CFF and non-identity GSUB / GPOS / GDEF rewriting
-//! remain on the agenda.
+//! For CFF and CFF2 fonts:
+//!
+//! - If every glyph survives, the CFF or CFF2 table and everything else
+//!   passes through and only the SFNT directory is rebuilt.
+//! - Otherwise the CFF or CFF2 table is rebuilt around the kept glyphs.
+//!   That covers non-CID and CID-keyed CFF (FDArray and FDSelect) as well
+//!   as CFF2, with subroutines renumbered and unused ones dropped. `cmap`,
+//!   `hmtx`, `hhea`, `maxp`, and `post` are rebuilt too. Layout and
+//!   variation tables are dropped on this path for now.
+//!
+//! The byte-level building blocks ([`encode_index`], [`encode_dict_int`],
+//! [`emit_charset_auto`], [`emit_encoding_auto`], [`emit_fd_select_auto`],
+//! [`renumber_charstring`], [`emit_classdef`], [`emit_coverage_from_glyphs`],
+//! [`emit_coverage_from_pairs`]) are public so other tools can reuse them.
 //!
 //! # Quick start
 //!
@@ -163,8 +151,7 @@ pub struct SubsetInput {
     /// Glyph 0 (`.notdef`) is always retained even when omitted.
     pub gids: Vec<GlyphId>,
     /// If true, retain hinting / instructions. Defaults to false.
-    /// Currently honoured for the simple-glyph path of `glyf`; CFF
-    /// subsetting is unimplemented entirely.
+    /// Currently honored only for simple glyphs in `glyf`.
     pub retain_hints: bool,
     /// If true, drop tables that don't have a subset implementation
     /// (the default). If false, encountering an unsupported table
@@ -172,10 +159,10 @@ pub struct SubsetInput {
     pub drop_unhandled: bool,
     /// If true (the default), retain layout tables (`GSUB`, `GPOS`,
     /// `GDEF`) when the closure walker has pulled in every glyph the
-    /// remaining lookups reference — i.e. when the layout machinery
+    /// remaining lookups reference, i.e. when the layout machinery
     /// can be passed through verbatim with no gid renumbering risk.
     /// When false, layout tables are dropped, matching the 0.5.0
-    /// behaviour. Callers that explicitly want a hint-free, layout-
+    /// behavior. Callers that explicitly want a hint-free, layout-
     /// free subset (e.g. embedded PDF font streams) should set this
     /// to false.
     pub retain_layout: bool,
@@ -185,7 +172,7 @@ pub struct SubsetInput {
     /// verbatim; `gvar` is rebuilt with one entry per kept gid;
     /// `HVAR` is rebuilt around a fresh `DeltaSetIndexMap` plus a
     /// deduped `ItemVariationStore`. When false, every variable-font
-    /// table is dropped, matching the 0.5.0 baseline — the resulting
+    /// table is dropped, matching the 0.5.0 baseline. The resulting
     /// subset behaves as a static font pinned to the source's default
     /// instance.
     pub retain_variations: bool,
@@ -218,7 +205,7 @@ pub struct SubsetOutput {
 pub enum SubsetError {
     /// Subset gids were empty after closure (caller passed nothing,
     /// not even `.notdef`). The subsetter implicitly retains gid 0,
-    /// so this only fires when the caller's slice is genuinely empty
+    /// so this only fires when the caller's slice is empty
     /// and `drop_unhandled` is false.
     EmptyGidSet,
     /// A gid past the source font's `numGlyphs` was supplied.
@@ -229,7 +216,7 @@ pub enum SubsetError {
         num_glyphs: u16,
     },
     /// The source font uses a feature sigilbuzz-subset cannot yet
-    /// process — typically CFF / CFF2 outlines or, with
+    /// process: typically CFF / CFF2 outlines or, with
     /// `drop_unhandled = false`, any of the deferred tables.
     Unsupported(&'static str),
     /// A sigilbuzz parse error bubbled up while inspecting the
@@ -336,7 +323,7 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         }
     }
 
-    // Strict mode rejects an empty user-supplied gid list — in
+    // Strict mode rejects an empty user-supplied gid list. In
     // permissive mode we silently keep just .notdef.
     if input.gids.is_empty() && !input.drop_unhandled {
         return Err(SubsetError::EmptyGidSet);
@@ -379,13 +366,13 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
 
     // maxp: rewrite numGlyphs, leave the rest untouched. v1.0 carries
     // a maxComponent depth tail we conservatively leave at the source
-    // values — they stay valid because the closure walker never
+    // values. They stay valid because the closure walker never
     // adds a *deeper* composite than the source font already had.
     let maxp_bytes = face.table_bytes(tag::MAXP).map_err(SubsetError::from)?;
     let mut maxp_out = maxp_bytes.to_vec();
     util::write_maxp_num_glyphs(&mut maxp_out, new_num_glyphs)?;
 
-    // post: emit format 3 unconditionally — the subsetter does not
+    // post: emit format 3 unconditionally. The subsetter does not
     // attempt to preserve PostScript glyph names. This matches what
     // hb-subset's --no-glyph-names mode produces and is well-defined
     // by the spec.
@@ -503,10 +490,10 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
             continue;
         }
         // Source tables we already errored on (CFF/CFF2) cannot
-        // appear here — we returned early above.
+        // appear here. We returned early above.
         if !input.drop_unhandled {
             // Strict mode: any table without an implementation aborts.
-            // kern / vhea / vmtx / VORG / COLR / CPAL / morx / kerx —
+            // kern / vhea / vmtx / VORG / COLR / CPAL / morx / kerx:
             // none of these are subset-aware in 0.6.0 either.
             return Err(SubsetError::Unsupported(
                 "table not yet handled by sigilbuzz-subset; pass drop_unhandled=true",
@@ -529,13 +516,13 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
 ///
 /// Wires the [`cff::subset_non_identity`] table rewriter into a fresh
 /// SFNT directory: every other table is either passed through verbatim
-/// (when its bytes don't carry gid-keyed data — e.g. `name`, `head`)
+/// (when its bytes don't carry gid-keyed data, e.g. `name`, `head`)
 /// or rebuilt against the new gid namespace (`cmap`, `hmtx` / `hhea`,
 /// `maxp`, `post`).
 ///
 /// Variable-font tables (`fvar`, `avar`, `gvar`, `HVAR`) and layout
 /// tables (`GSUB` / `GPOS` / `GDEF`) are dropped on the non-identity
-/// path — CFF1 fonts rarely carry them, and a follow-up wires the
+/// path. CFF1 fonts rarely carry them, and a follow-up wires the
 /// existing rewriters in once the orchestration baseline lands.
 fn cff_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, SubsetError> {
     // Build the gid_map.
@@ -600,8 +587,8 @@ fn cff_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, S
 /// Mirrors [`cff_non_identity`]'s shape: rebuild the CFF2 table around
 /// the kept-gid set via [`cff2::subset_non_identity`], then assemble a
 /// fresh SFNT directory around it. CFF2 fonts pair with cmap, hmtx,
-/// hhea, head, name, OS/2 — every other table the source carries
-/// (notably layout / variable-font tables) is dropped on the
+/// hhea, head, name, OS/2. Every other table the source carries
+/// (including layout / variable-font tables) is dropped on the
 /// non-identity path; the rewriters ride alongside the CFF1 flow's same
 /// follow-up that wires those in.
 fn cff2_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, SubsetError> {
@@ -662,9 +649,9 @@ fn cff2_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, 
 /// CFF / CFF2 identity-passthrough emitter.
 ///
 /// When the closure walker has retained every glyph in the source font
-/// (kept set == `0..num_glyphs`), every byte of the CFF / CFF2 table —
+/// (kept set == `0..num_glyphs`), every byte of the CFF / CFF2 table,
 /// including its embedded gid references inside charstrings, charset,
-/// Encoding, and Private DICTs — already resolves to the right glyph
+/// Encoding, and Private DICTs, already resolves to the right glyph
 /// in the subset (the gid namespace is unchanged). Likewise for cmap,
 /// hmtx, hhea, maxp, post, name, OS/2, COLR, CPAL, and the layout
 /// tables. We copy every table the source carries except the small
@@ -677,7 +664,7 @@ fn cff_passthrough(
     kept: &[GlyphId],
     has_cff1: bool,
 ) -> Result<SubsetOutput, SubsetError> {
-    let _ = has_cff1; // CFF1 vs CFF2 doesn't matter — the source tag travels.
+    let _ = has_cff1; // CFF1 vs CFF2 doesn't matter: the source tag travels.
     let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::new();
     for rec in face.records() {
         // Skip the same set the glyf path drops when in

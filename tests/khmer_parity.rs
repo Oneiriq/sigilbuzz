@@ -3,7 +3,7 @@
 //! Shapes a Khmer corpus with both sigilbuzz and rustybuzz against
 //! Noto Sans Khmer (OFL) and asserts the output matches byte-for-byte.
 //! Khmer runs through sigilbuzz's Universal Shaping Engine pipeline
-//! (`src/ot/use_shaper`) — category-classifier + syllable state
+//! (`src/ot/use_shaper`): category-classifier + syllable state
 //! machine + pre-base matra reorder + the USE basic/topographical
 //! feature chains.
 //!
@@ -33,112 +33,112 @@ struct Case {
 }
 
 const CORPUS: &[Case] = &[
-    // Empty run — identity; neither engine should emit glyphs.
+    // Empty run: identity; neither engine should emit glyphs.
     Case {
         text: "",
         note: "empty",
     },
-    // ក — ka alone. Simplest base syllable.
+    // ក: ka alone. Simplest base syllable.
     Case {
         text: "\u{1780}",
         note: "ka alone",
     },
-    // កា — ka + sign-aa. Post-base vowel sign; no reorder.
+    // កា: ka + sign-aa. Post-base vowel sign; no reorder.
     Case {
         text: "\u{1780}\u{17B6}",
         note: "kaa (post-base aa)",
     },
-    // កេ — ka + sign-e. Pre-base vowel sign; sign-e must visually
+    // កេ: ka + sign-e. Pre-base vowel sign; sign-e must visually
     // precede ka, which is exactly the USE initial-reorder pass.
     Case {
         text: "\u{1780}\u{17C1}",
         note: "ke (pre-base sign-e)",
     },
-    // កៃ — ka + sign-ai. Another pre-base vowel sign.
+    // កៃ: ka + sign-ai. Another pre-base vowel sign.
     Case {
         text: "\u{1780}\u{17C3}",
         note: "kai (pre-base sign-ai)",
     },
-    // កុ — ka + below-base u. No reorder, but the u renders below
+    // កុ: ka + below-base u. No reorder, but the u renders below
     // the base; the `blws` topographical feature picks the stacked
     // form.
     Case {
         text: "\u{1780}\u{17BB}",
         note: "ku (below-base u)",
     },
-    // ស្ត — sa + coeng + ta. Coeng subscript; `blwf` picks the
+    // ស្ត: sa + coeng + ta. Coeng subscript; `blwf` picks the
     // subscripted ta glyph.
     Case {
         text: "\u{179F}\u{17D2}\u{178F}",
         note: "sa + coeng + ta (subscript)",
     },
-    // ស្តេ — sa + coeng + ta + sign-e. Coeng stack + pre-base
-    // matra. The full USE reorder chain — the hardest path in the
+    // ស្តេ: sa + coeng + ta + sign-e. Coeng stack + pre-base
+    // matra. The full USE reorder chain, the hardest path in the
     // corpus for this M4 scope.
     Case {
         text: "\u{179F}\u{17D2}\u{178F}\u{17C1}",
         note: "ste (coeng + pre-base)",
     },
-    // ខ្ញុំ — "I" (colloquial). kha + coeng + nya + u + nikahit.
+    // ខ្ញុំ: "I" (colloquial). kha + coeng + nya + u + nikahit.
     // kha (U+1781) is the base; coeng-nya subscripts; u below; then
     // final nikahit (U+17C6).
     Case {
         text: "\u{1781}\u{17D2}\u{1789}\u{17BB}\u{17C6}",
         note: "knyom (I)",
     },
-    // សួស្តី — "hello". Two syllables: សួ (sa + ua below) +
+    // សួស្តី: "hello". Two syllables: សួ (sa + ua below) +
     // ស្តី (sa + coeng + ta + ii).
     Case {
         text: "\u{179F}\u{17BD}\u{179F}\u{17D2}\u{178F}\u{17B8}",
         note: "suosdei (hello)",
     },
-    // ព្រះរាជាណាចក្រកម្ពុជា — "Kingdom of Cambodia". The
+    // ព្រះរាជាណាចក្រកម្ពុជា: "Kingdom of Cambodia". The
     // full spelling; exercises most categories in one pass.
     Case {
         text: "\u{1796}\u{17D2}\u{179A}\u{17C7}\u{179A}\u{17B6}\u{1787}\u{17B6}\u{178E}\u{17B6}\u{1785}\u{1780}\u{17D2}\u{179A}\u{1780}\u{1798}\u{17D2}\u{1796}\u{17BB}\u{1787}\u{17B6}",
         note: "preah reachea anachak kampuchea",
     },
-    // អ្នក — "you" (an + coeng + ka). Independent vowel +
+    // អ្នក: "you" (an + coeng + ka). Independent vowel +
     // coeng-consonant.
     Case {
         text: "\u{17A2}\u{17D2}\u{1793}\u{1780}",
         note: "neak (you)",
     },
-    // ប៉ — ba + muusikatoan register shifter.
+    // ប៉: ba + muusikatoan register shifter.
     Case {
         text: "\u{1794}\u{17C9}",
         note: "ba + muusikatoan (register)",
     },
-    // ម៉ែ — ma + muusikatoan + sign-ai. Register shifter plus
+    // ម៉ែ: ma + muusikatoan + sign-ai. Register shifter plus
     // pre-base matra.
     Case {
         text: "\u{1798}\u{17C9}\u{17C2}",
         note: "mae (ma + register + pre-base)",
     },
-    // Khmer digit run — Symbol pass-through.
+    // Khmer digit run: Symbol pass-through.
     Case {
         text: "\u{17E0}\u{17E1}\u{17E2}\u{17E3}\u{17E4}",
         note: "khmer digits 0-4",
     },
-    // Mixed Khmer + Latin — "Hi ក". Mixed-script runs must not
+    // Mixed Khmer + Latin: "Hi ក". Mixed-script runs must not
     // corrupt the Latin.
     Case {
         text: "Hi \u{1780}",
         note: "mixed latin + khmer",
     },
-    // ស្រី — "woman". sa + coeng + ra + ii. Below-base ra (the
+    // ស្រី: "woman". sa + coeng + ra + ii. Below-base ra (the
     // `blwf` feature selects the subscript ra form) plus above-base
     // vowel.
     Case {
         text: "\u{179F}\u{17D2}\u{179A}\u{17B8}",
         note: "srey (woman)",
     },
-    // កាំ — ka + sign-aa + nikahit. Post-base + final mark.
+    // កាំ: ka + sign-aa + nikahit. Post-base + final mark.
     Case {
         text: "\u{1780}\u{17B6}\u{17C6}",
         note: "kam (ka + aa + nikahit)",
     },
-    // កោះ — ka + sign-oo + reahmuk. Post-base vowel + final visarga.
+    // កោះ: ka + sign-oo + reahmuk. Post-base vowel + final visarga.
     Case {
         text: "\u{1780}\u{17C4}\u{17C7}",
         note: "koh (ka + oo + reahmuk)",
@@ -201,7 +201,7 @@ fn khmer_corpus_matches_rustybuzz() {
 
 #[test]
 fn pre_base_vowel_sign_e_renders_before_ka() {
-    // កេ — the sign-e glyph should end up visually before the ka
+    // កេ: the sign-e glyph should end up visually before the ka
     // glyph. Verify directly (independent of rustybuzz) so the
     // reorder pass has a guard against future regressions.
     let blob = Blob::new(NOTO_KHMER);
@@ -215,7 +215,7 @@ fn pre_base_vowel_sign_e_renders_before_ka() {
     assert_eq!(shaped.len(), 2, "ke should be two glyphs after shaping");
     // Glyph at index 0 is the sign-e glyph; glyph at index 1 is
     // the ka glyph. After the USE cluster-merge pass both carry
-    // the syllable's head cluster (0) — matches rustybuzz. The
+    // the syllable's head cluster (0). Matches rustybuzz. The
     // reorder itself is verified by the glyph ids differing
     // (sign-e is narrower than ka, so its glyph id sorts earlier
     // in the cmap in this font) and by the Khmer parity corpus.
@@ -230,7 +230,7 @@ fn pre_base_vowel_sign_e_renders_before_ka() {
 
 #[test]
 fn khmer_digits_pass_through_unchanged() {
-    // ០១២ — Khmer digits 0, 1, 2. Symbol pass-through syllable
+    // ០១២: Khmer digits 0, 1, 2. Symbol pass-through syllable
     // should emit one glyph per codepoint, preserving cluster order.
     let blob = Blob::new(NOTO_KHMER);
     let face = Face::parse(&blob, 0).expect("parse face");

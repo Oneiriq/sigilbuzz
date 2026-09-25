@@ -1,5 +1,5 @@
-//! `Device` / `VariationIndex` — the variable-metric sub-offset the
-//! spec tacks onto a [`ValueRecord`] (or an `Anchor`, or an MVAR
+//! `Device` / `VariationIndex`: the variable-metric sub-offset the
+//! spec tacks onto a `ValueRecord` (or an `Anchor`, or an MVAR
 //! entry).
 //!
 //! # Two tables, one offset slot
@@ -17,15 +17,15 @@
 //! ```
 //!
 //! `Device` carries bit-packed per-ppem adjustments used by hinted
-//! rasterisers. sigilbuzz does not have a ppem — the shaper emits
-//! design-unit advances and lets the renderer scale — so we parse
+//! rasterizers. sigilbuzz does not have a ppem (the shaper emits
+//! design-unit advances and lets the renderer scale), so we parse
 //! the header but skip the payload.
 //!
 //! `VariationIndex` (`deltaFormat == 0x8000`) repurposes the
 //! `startSize`/`endSize` slots as a 16-bit outer + 16-bit inner
 //! index into the enclosing table's `ItemVariationStore`. This is
 //! what makes GPOS value records participate in feature-variations
-//! — without it, kerning deltas would be frozen at the font's
+//! and without it, kerning deltas would be frozen at the font's
 //! default instance.
 
 use crate::error::{Error, Result};
@@ -35,14 +35,14 @@ use crate::tables::parse::Reader;
 /// `VariationIndex`. Any other value is a plain Device table.
 pub const VARIATION_INDEX_DELTA_FORMAT: u16 = 0x8000;
 
-/// A resolved Device-or-VariationIndex reference. The parser normalises
+/// A resolved Device-or-VariationIndex reference. The parser normalizes
 /// the ambiguous offset slot into this enum so downstream code never
 /// has to re-peek at `deltaFormat`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceOrVariationIndex {
     /// Per-ppem hinted adjustment. sigilbuzz parses the header so it
     /// can tell a Device apart from a VariationIndex, but does not
-    /// apply the deltas — we run in design units, not device pixels.
+    /// apply the deltas: we run in design units, not device pixels.
     Device {
         /// Smallest ppem this table applies to.
         start_size: u16,
@@ -53,12 +53,12 @@ pub enum DeviceOrVariationIndex {
         delta_format: u16,
     },
     /// Index into the enclosing table's `ItemVariationStore`. This is
-    /// the one feature-variations uses — kerning deltas that scale
+    /// the one feature-variations uses: kerning deltas that scale
     /// with the user's axis coords live here.
     VariationIndex {
-        /// Outer index — which `ItemVariationData` subtable to consult.
+        /// Outer index: which `ItemVariationData` subtable to consult.
         outer: u16,
-        /// Inner index — which row within that subtable.
+        /// Inner index: which row within that subtable.
         inner: u16,
     },
 }
@@ -108,7 +108,7 @@ impl DeviceOrVariationIndex {
         Self::parse(sub).map(Some)
     }
 
-    /// True if this is a `VariationIndex` — the only variant the
+    /// True if this is a `VariationIndex`, the only variant the
     /// shaper actually consumes today. Handy when the caller wants
     /// to short-circuit Device-table resolution.
     #[must_use]

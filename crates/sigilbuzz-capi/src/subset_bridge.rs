@@ -1,20 +1,20 @@
-//! `hb_subset_*` — bridge from HarfBuzz's subsetter surface to
+//! `hb_subset_*`: bridge from HarfBuzz's subsetter surface to
 //! `sigilbuzz_subset::subset()`.
 //!
 //! HarfBuzz's subset API hangs off two opaque types:
-//! `hb_subset_input_t` (the "what to keep" descriptor — unicode set,
-//! glyph set, drop-tables list, …) and the result, an `hb_face_t`.
+//! `hb_subset_input_t` (the "what to keep" descriptor: unicode set,
+//! glyph set, drop-tables list, ...) and the result, an `hb_face_t`.
 //! sigilbuzz's subsetter wants a flat `SubsetInput { gids: Vec<u16> }`,
 //! so the bridge has to (a) own the inputs as opaque sets and (b)
-//! translate the unicode set through cmap → gids before calling
+//! translate the unicode set through cmap to gids before calling
 //! through.
 //!
-//! Refcount semantics match HarfBuzz: `hb_subset_input_create` → 1,
+//! Refcount semantics match HarfBuzz: `hb_subset_input_create` -> 1,
 //! `hb_subset_input_destroy` decrements.
 //!
 //! `hb_subset_input_unicode_set` / `hb_subset_input_glyph_set` return
 //! a fresh `hb_set_t` handle that observes the input's internal set
-//! — the C caller then owns one reference and must destroy it. This
+//! and the C caller then owns one reference and must destroy it. This
 //! mirrors HarfBuzz's contract: "the returned set is shared; mutating
 //! it mutates the input".
 
@@ -52,11 +52,11 @@ unsafe impl Sync for hb_subset_input_t {}
 
 /// Allocates a fresh subset-input. Both internal sets start empty.
 //
-// See the safety note on `hb_subset_input_t` above re Send/Sync — the
+// See the safety note on `hb_subset_input_t` above re Send/Sync: the
 // unsafe impls make `Arc<SubsetInputInner>` valid; the inner
 // `Arc<RefCell<...>>` payloads inherit the same posture because
 // they're never observed across a thread boundary without external
-// synchronisation. Apply the clippy allow at the function level so
+// synchronization. Apply the clippy allow at the function level so
 // every `Arc::new(RefCell::new(...))` site inherits it.
 #[allow(clippy::arc_with_non_send_sync)]
 #[no_mangle]
@@ -96,7 +96,7 @@ pub unsafe extern "C" fn hb_subset_input_unicode_set(
         return ptr::null_mut();
     }
     // SAFETY: caller asserts validity. Take an explicit `&` so the
-    // pointer-deref autoref lint is happy — `(*input).inner` would
+    // pointer-deref autoref lint is happy: `(*input).inner` would
     // otherwise be flagged as creating an implicit reference.
     let arc = unsafe { (*(input)).inner.as_ref().unicode_set.clone() };
     Box::into_raw(Box::new(set_from_arc(arc)))
@@ -154,7 +154,7 @@ pub unsafe extern "C" fn hb_subset_or_fail(
     // Always retain .notdef.
     gids.insert(0);
 
-    // Translate unicode codepoints → gids.
+    // Translate unicode codepoints to gids.
     if let Ok(cmap) = face_inner.face.cmap() {
         let unicode = input_inner.unicode_set.borrow();
         for &cp in unicode.iter() {
@@ -199,7 +199,7 @@ pub unsafe extern "C" fn hb_subset_or_fail(
         Ok(f) => f,
         Err(_) => return ptr::null_mut(),
     };
-    // Lifetime erasure — the FaceInner pins the bytes via its Arc
+    // Lifetime erasure: the FaceInner pins the bytes via its Arc
     // clone, so the 'static cast is sound. See
     // `crate::lib::FaceInner` SAFETY note.
     let face_static: Face<'static> =
@@ -209,7 +209,7 @@ pub unsafe extern "C" fn hb_subset_or_fail(
     Box::into_raw(Box::new(hb_face_t::from_inner(inner)))
 }
 
-/// Internal helper used during construction — builds an empty,
+/// Internal helper used during construction: builds an empty,
 /// caller-owned blob handle around the supplied bytes. Reserved for
 /// future use; no current callers, but keeping the symbol in the
 /// crate compiles a passive sanity check that `BlobInner` is reachable

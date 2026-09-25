@@ -9,36 +9,36 @@
 //!
 //! As of this commit the rewriter ships byte-level support for:
 //!
-//! - **Type 1 (single-sub)** — formats 1 (delta) and 2 (explicit). Auto-
+//! - **Type 1 (single-sub)**: formats 1 (delta) and 2 (explicit). Auto-
 //!   selects between formats; falls back to format 2 when a remapped
 //!   delta would no longer produce contiguous targets.
-//! - **Type 2 (multiple-sub)** — format 1. Filters Coverage to surviving
+//! - **Type 2 (multiple-sub)**: format 1. Filters Coverage to surviving
 //!   input gids; drops any Sequence whose substitute glyphs are not all
 //!   kept (a partial sequence would emit a missing gid), and drops the
 //!   subtable when Coverage empties out.
-//! - **Type 3 (alternate-sub)** — format 1. Filters Coverage to surviving
+//! - **Type 3 (alternate-sub)**: format 1. Filters Coverage to surviving
 //!   input gids; remaps each AlternateSet's surviving alternates;
 //!   drops the AlternateSet (and its Coverage entry) when every
 //!   alternate dies, and drops the subtable when Coverage empties out.
-//! - **Type 4 (ligature-sub)** — format 1. Filters Coverage to surviving
+//! - **Type 4 (ligature-sub)**: format 1. Filters Coverage to surviving
 //!   first-component gids, drops any Ligature whose result gid or any
 //!   component gid is not kept, drops empty LigatureSets, and drops the
 //!   subtable when Coverage empties out. Result + component gids are
 //!   remapped through the GidMap.
-//! - **Type 5 (context)** — formats 1 (rule-based), 2 (class-based), 3
+//! - **Type 5 (context)**: formats 1 (rule-based), 2 (class-based), 3
 //!   (coverage-based). Filters first-glyph Coverage / ClassDef / per-
 //!   position Coverage through the GidMap; drops any Rule whose input
 //!   tail loses a gid; drops nested `SubstLookupRecord`s whose target
 //!   lookup dropped (renumber map is wired in by the GSUB driver in a
-//!   second pass — see [`context_lookup_type`]).
-//! - **Type 6 (chained context)** — formats 1, 2, 3. Mirrors type 5
+//!   second pass, see [`context_lookup_type`]).
+//! - **Type 6 (chained context)**: formats 1, 2, 3. Mirrors type 5
 //!   with three sequences (backtrack / input / lookahead). Drops a
 //!   ChainRule when any required gid in any of the three sequences is
 //!   not kept.
-//! - **Type 7 (extension)** — pass-through after rewriting the inner
+//! - **Type 7 (extension)**: pass-through after rewriting the inner
 //!   subtable. Only inner types this module implements are passed
 //!   through; everything else drops the lookup.
-//! - **Type 8 (reverse chain)** — format 1. Filters Coverage to
+//! - **Type 8 (reverse chain)**: format 1. Filters Coverage to
 //!   surviving input gids whose substitute gid also survives; rewrites
 //!   the backtrack and lookahead Coverage arrays; drops the subtable
 //!   when any Coverage in the context window empties out.
@@ -46,7 +46,7 @@
 //! Every other lookup type drops its lookup. The drop cascade then
 //! removes empty subtables, lookups with no surviving subtable,
 //! features that name no surviving lookup, and scripts whose features
-//! have all been dropped — see [`super::layout`].
+//! have all been dropped. See [`super::layout`].
 //!
 //! Issue tracking the remaining lookup types: see the sibling issue
 //! filed alongside this module.
@@ -106,7 +106,7 @@ fn rewrite_subtable(ctx: &RewriterCtx, lookup_type: u16, sub: &[u8]) -> Option<R
 }
 
 /// Returns the effective GSUB lookup type when the lookup is a
-/// context-family type (5, 6, or 8) — including the case where it is
+/// context-family type (5, 6, or 8), including the case where it is
 /// wrapped in an Extension lookup (type 7). Returns `None` otherwise.
 ///
 /// Used by the GSUB driver to identify lookups whose nested
@@ -132,7 +132,7 @@ fn rewrite_single(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     let cov_bytes = sub.get(cov_off..)?;
     let covered = parse_coverage_glyphs(cov_bytes);
 
-    // Build the (input → output) pairs in the *old* gid namespace
+    // Build the (input -> output) pairs in the *old* gid namespace
     // first, then drop pairs whose input or output is not in the kept
     // set, then remap.
     let pairs_old: Vec<(u16, u16)> = match format {
@@ -314,7 +314,7 @@ fn rewrite_type2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
             continue;
         }
         // Every substitute must be kept. A missing output gid would
-        // emit a substitution that points at a dropped slot — there's
+        // emit a substitution that points at a dropped slot: there's
         // no graceful degrade here, mirror type-4's all-or-nothing
         // ligature drop.
         let mut new_seq: Vec<u16> = Vec::with_capacity(glyph_count);
@@ -395,7 +395,7 @@ fn emit_type2_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
 ///     u16 alternateGlyphIDs[glyphCount]
 /// ```
 ///
-/// Drop rules — looser than type 2 because alternates are user-chosen,
+/// Drop rules: looser than type 2 because alternates are user-chosen,
 /// so dropping individual entries doesn't break the meaning of the
 /// substitution as a whole:
 ///
@@ -403,7 +403,7 @@ fn emit_type2_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
 ///   the GidMap (and renumbers them).
 /// - A Coverage entry dies if its input gid isn't kept **or** every
 ///   alternate in its AlternateSet was dropped (an empty AlternateSet
-///   isn't useful — fall through to the input glyph rather than emit
+///   isn't useful: fall through to the input glyph rather than emit
 ///   a degenerate set).
 /// - The subtable dies when Coverage empties out.
 fn rewrite_type3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
@@ -454,9 +454,9 @@ fn rewrite_type3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
                 new_alts.push(g_new);
             }
         }
-        // Empty AlternateSet means every alternate dropped — drop the
+        // Empty AlternateSet means every alternate dropped: drop the
         // whole Coverage entry. The fall-through is the input glyph
-        // unchanged, which is shaping's default behaviour anyway.
+        // unchanged, which is shaping's default behavior anyway.
         if new_alts.is_empty() {
             continue;
         }
@@ -525,7 +525,7 @@ fn emit_type3_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
 ///     u16 componentGlyphIDs[componentCount - 1]
 /// ```
 ///
-/// Drop rules — every condition collapses the affected scope, never a
+/// Drop rules: every condition collapses the affected scope, never a
 /// silent rewrite:
 ///
 /// - A Ligature dies if its `ligatureGlyph` is not in the GidMap **or**
@@ -568,7 +568,7 @@ fn rewrite_type4(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
 
     for (i, &first_old) in first_components.iter().enumerate().take(pair_count) {
         let Some(first_new) = map.map(first_old) else {
-            // First component dropped — the whole LigatureSet goes with
+            // First component dropped: the whole LigatureSet goes with
             // it; shaping the input sequence with first_old absent can't
             // fire any of these ligatures anyway.
             continue;
@@ -624,12 +624,12 @@ fn rewrite_ligature_set(set_bytes: &[u8], map: &crate::layout::GidMap) -> Option
         if lig_bytes.len() < need {
             continue;
         }
-        // Result gid must survive — otherwise the substitution has
+        // Result gid must survive. Otherwise the substitution has
         // nowhere to go.
         let Some(lig_glyph_new) = map.map(lig_glyph_old) else {
             continue;
         };
-        // Every tail component must survive — a single missing piece
+        // Every tail component must survive. A single missing piece
         // changes which input sequences match. Drop the whole ligature.
         let mut new_tail: Vec<u16> = Vec::with_capacity(tail);
         let mut all_kept = true;
@@ -705,7 +705,7 @@ fn emit_type4_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
     }
 
     // Coverage. Pair every kept first-gid with its index in the
-    // ligatureSetOffsets array — emit_coverage_from_pairs sorts by gid
+    // ligatureSetOffsets array: emit_coverage_from_pairs sorts by gid
     // and falls back to format 2 when those indices aren't a 0..N
     // sequence after sorting.
     let pairs: Vec<(u16, u16)> = surviving
@@ -721,7 +721,7 @@ fn emit_type4_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
     RewrittenSubtable { bytes: out }
 }
 
-// ===== GSUB types 5 / 6 / 8 — contextual / chained / reverse-chain =====
+// ===== GSUB types 5 / 6 / 8: contextual / chained / reverse-chain =====
 //
 // These types wire glyph-stream context into the substitution pipeline.
 // All three formats of types 5 and 6 carry `SubstLookupRecord` entries
@@ -750,7 +750,7 @@ pub(crate) struct PatchedLookupRecord {
 /// 4 bytes: `u16 sequence_index, u16 lookup_list_index`.
 ///
 /// Shared between GSUB context (types 5 / 6 / 8) and GPOS context
-/// (types 7 / 8) — `PosLookupRecord` has the same 4-byte layout as
+/// (types 7 / 8). `PosLookupRecord` has the same 4-byte layout as
 /// `SubstLookupRecord`.
 pub(crate) fn parse_and_remap_lookup_records(
     bytes: &[u8],
@@ -770,7 +770,7 @@ pub(crate) fn parse_and_remap_lookup_records(
         let new_li = match lookup_renumber {
             Some(map) => match map.get(li as usize) {
                 Some(Some(n)) => *n,
-                // Dropped target — drop this record. A context rule
+                // Dropped target: drop this record. A context rule
                 // with no surviving nested lookups is meaningless and
                 // its subtable will be considered empty.
                 _ => continue,
@@ -852,7 +852,7 @@ fn rewrite_type5_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
         let off_off = set_offsets_off + i * 2;
         let set_off_rel = u16::from_be_bytes([sub[off_off], sub[off_off + 1]]) as usize;
         if set_off_rel == 0 {
-            // NULL ruleset — drop along with the Coverage entry; an
+            // NULL ruleset: drop along with the Coverage entry; an
             // empty ruleset gives no rule for `first_old`, which is the
             // same as not covering it.
             continue;
@@ -895,7 +895,7 @@ fn rewrite_type5_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
         let glyph_count = u16::from_be_bytes([rule_bytes[0], rule_bytes[1]]) as usize;
         let lookup_count = u16::from_be_bytes([rule_bytes[2], rule_bytes[3]]) as usize;
         if glyph_count == 0 {
-            // Zero-input rule — preserve as-is (parsing tolerates it).
+            // Zero-input rule: preserve as-is (parsing tolerates it).
             // Patch nested-lookups only.
             let recs_off = 4;
             let Some(records) = parse_and_remap_lookup_records(
@@ -922,7 +922,7 @@ fn rewrite_type5_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
             continue;
         }
         // Remap input tail glyph ids; drop the rule if any tail gid
-        // dropped — a missing input means the rule could never match
+        // dropped. A missing input means the rule could never match
         // in the new namespace anyway.
         let mut new_tail: Vec<u16> = Vec::with_capacity(tail);
         let mut all_kept = true;
@@ -948,7 +948,7 @@ fn rewrite_type5_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
         };
         if records.is_empty() {
             // Rule with surviving input but no surviving nested lookup
-            // is meaningless — drop it.
+            // is meaningless. Drop it.
             continue;
         }
 
@@ -1037,7 +1037,7 @@ fn emit_context_format1(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
 ///     SubstLookupRecord records[substLookupRecordCount]
 /// ```
 ///
-/// Class indices stay numeric — they index the source ClassDef's class
+/// Class indices stay numeric. They index the source ClassDef's class
 /// enumeration. Re-emitting the source ClassDef with only surviving
 /// glyphs (via [`crate::classdef::emit_classdef`]) preserves those
 /// numeric class ids; ClassRule indices remain valid as long as they
@@ -1083,7 +1083,7 @@ fn rewrite_type5_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
             reachable_classes[ci] = true;
         }
     }
-    // Class 0 — "everything else" — is reachable iff some surviving
+    // Class 0 ("everything else") is reachable iff some surviving
     // glyph isn't otherwise classified. We treat class 0 as always
     // reachable conservatively: a rule referencing class 0 simply
     // means "any other glyph", which is satisfied by .notdef alone.
@@ -1260,7 +1260,7 @@ fn rewrite_type5_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     let map = ctx.gid_map;
 
     // Rewrite each input Coverage. If any becomes empty, drop the whole
-    // subtable — a context rule with no possible match for one position
+    // subtable. A context rule with no possible match for one position
     // can't fire.
     let mut new_cov_bytes: Vec<Vec<u8>> = Vec::with_capacity(glyph_count);
     for j in 0..glyph_count {
@@ -2002,7 +2002,7 @@ fn rewrite_type8(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     new_pairs.sort_unstable_by_key(|(g, _)| *g);
     new_pairs.dedup_by_key(|(g, _)| *g);
 
-    // Backtrack / lookahead Coverages — every Coverage slot must
+    // Backtrack / lookahead Coverages: every Coverage slot must
     // survive. A reverse-chain rule whose context window has any
     // empty Coverage can never match, so drop the subtable.
     let read_cov_array = |start: usize, count: usize| -> Option<Vec<Vec<u8>>> {
@@ -2375,7 +2375,7 @@ mod tests {
     }
 
     fn map_from_pairs(pairs: &[(u16, u16)]) -> GidMap {
-        // Build a GidMap by old gid → new gid; gids not in `pairs` map
+        // Build a GidMap by old gid -> new gid; gids not in `pairs` map
         // to None.
         let max_old = pairs.iter().map(|(o, _)| *o).max().unwrap_or(0);
         let mut table = vec![None; (max_old as usize + 1).max(1)];
@@ -2387,10 +2387,10 @@ mod tests {
 
     #[test]
     fn rewrite_single_format1_remaps_delta() {
-        // A → small-cap-A, B → small-cap-B, C → small-cap-C.
-        // Old: covered {65,66,67}, delta +200 → outputs 265,266,267.
+        // A -> small-cap-A, B -> small-cap-B, C -> small-cap-C.
+        // Old: covered {65,66,67}, delta +200 -> outputs 265,266,267.
         let bytes = build_single_format1(&[65, 66, 67], 200);
-        // New gid map: 65→1, 66→2, 67→3, 265→4, 266→5, 267→6 (.notdef stays at 0).
+        // New gid map: 65->1, 66->2, 67->3, 265->4, 266->5, 267->6 (.notdef stays at 0).
         let map = map_from_pairs(&[
             (0, 0),
             (65, 1),
@@ -2416,9 +2416,9 @@ mod tests {
     #[test]
     fn rewrite_single_format1_falls_back_to_format2_when_delta_breaks() {
         // After remap, the deltas no longer line up. Old: covered
-        // {10, 20, 30}, delta +5 → outputs 15, 25, 35. New gid map
-        // jumbles them: 10→1, 20→2, 30→3, 15→7, 25→9, 35→11. Now
-        // input→output deltas are 6, 7, 8 — no constant.
+        // {10, 20, 30}, delta +5 -> outputs 15, 25, 35. New gid map
+        // jumbles them: 10->1, 20->2, 30->3, 15->7, 25->9, 35->11. Now
+        // input->output deltas are 6, 7, 8 (no constant).
         let bytes = build_single_format1(&[10, 20, 30], 5);
         let map = map_from_pairs(&[
             (0, 0),
@@ -2444,8 +2444,8 @@ mod tests {
 
     #[test]
     fn rewrite_single_format2_drops_pairs_with_dropped_input() {
-        // Format 2: 10→100, 20→200, 30→300. Drop input 20 from the
-        // kept set. New gid map: 10→1, 30→3, 100→11, 300→33.
+        // Format 2: 10->100, 20->200, 30->300. Drop input 20 from the
+        // kept set. New gid map: 10->1, 30->3, 100->11, 300->33.
         let bytes = build_single_format2(&[10, 20, 30], &[100, 200, 300]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (30, 3), (100, 11), (300, 33)]);
         let ctx = RewriterCtx {
@@ -2456,14 +2456,14 @@ mod tests {
         let parsed = sigilbuzz::tables::gsub::Single::parse(&rs.bytes).unwrap();
         assert_eq!(parsed.apply(1), Some(11));
         // Input 2 (the new gid for 20) is not in the map at all because
-        // 20 was dropped — so it can't be in the rewritten coverage.
+        // 20 was dropped, so it can't be in the rewritten coverage.
         assert!(parsed.apply(2).is_none() || parsed.apply(2) == Some(0));
         assert_eq!(parsed.apply(3), Some(33));
     }
 
     #[test]
     fn rewrite_single_drops_pairs_with_dropped_output() {
-        // 10→100 stays, 20→200 dies because 200 is dropped.
+        // 10->100 stays, 20->200 dies because 200 is dropped.
         let bytes = build_single_format2(&[10, 20], &[100, 200]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (20, 2), (100, 11)]);
         let ctx = RewriterCtx {
@@ -2518,7 +2518,7 @@ mod tests {
 
     #[test]
     fn pull_single_extends_keep_set() {
-        // covered {10}, delta +5 → output 15. Mark 10 kept; pull should
+        // covered {10}, delta +5 -> output 15. Mark 10 kept; pull should
         // mark 15 kept.
         let bytes = build_single_format1(&[10], 5);
         let mut keep = vec![false; 32];
@@ -2532,7 +2532,7 @@ mod tests {
     fn pull_single_no_op_when_input_dropped() {
         let bytes = build_single_format1(&[10], 5);
         let mut keep = vec![false; 32];
-        // 10 not kept → 15 not pulled.
+        // 10 not kept -> 15 not pulled.
         let changed = pull_single(&bytes, &mut keep);
         assert!(!changed);
         assert!(!keep[15]);
@@ -2593,8 +2593,8 @@ mod tests {
 
     #[test]
     fn rewrite_type4_keeps_all_when_every_gid_survives() {
-        // f=10, i=20 → fi=100. Every gid is kept and renumbered down by
-        // 1: 10→9, 20→19, 100→99.
+        // f=10, i=20 -> fi=100. Every gid is kept and renumbered down by
+        // 1: 10->9, 20->19, 100->99.
         let bytes = build_type4_subtable(&[(10, vec![(100, vec![20])])]);
         let map = map_from_pairs(&[(0, 0), (10, 9), (20, 19), (100, 99)]);
         let ctx = RewriterCtx {
@@ -2612,8 +2612,8 @@ mod tests {
 
     #[test]
     fn rewrite_type4_drops_ligature_when_result_gid_drops() {
-        // f=10, i=20 → fi=100; the result gid 100 is not in the map, so
-        // the ligature must die. Coverage must lose the entry too — no
+        // f=10, i=20 -> fi=100; the result gid 100 is not in the map, so
+        // the ligature must die. Coverage must lose the entry too: no
         // surviving LigatureSet anchors it.
         let bytes = build_type4_subtable(&[(10, vec![(100, vec![20])])]);
         let map = map_from_pairs(&[(0, 0), (10, 9), (20, 19)]);
@@ -2629,7 +2629,7 @@ mod tests {
 
     #[test]
     fn rewrite_type4_drops_ligature_when_component_drops() {
-        // 10 + 20 + 30 → 100; component 20 dropped → entire ligature
+        // 10 + 20 + 30 -> 100; component 20 dropped -> entire ligature
         // dies (single missing component kills the rule).
         let bytes = build_type4_subtable(&[(10, vec![(100, vec![20, 30])])]);
         let map = map_from_pairs(&[(0, 0), (10, 9), (30, 29), (100, 99)]);
@@ -2642,8 +2642,8 @@ mod tests {
 
     #[test]
     fn rewrite_type4_partial_ligature_set_survives() {
-        // First-component=10 has two ligatures: (10+20→100) and
-        // (10+30→200). Drop component 30 → second ligature dies, first
+        // First-component=10 has two ligatures: (10+20->100) and
+        // (10+30->200). Drop component 30 -> second ligature dies, first
         // survives. LigatureSet stays, Coverage entry stays.
         let bytes = build_type4_subtable(&[(10, vec![(100, vec![20]), (200, vec![30])])]);
         let map = map_from_pairs(&[
@@ -2689,7 +2689,7 @@ mod tests {
         let (out_gid, span) = parsed.apply(&[39, 49]).unwrap();
         assert_eq!(out_gid, 199);
         assert_eq!(span, 2);
-        // The 10-rooted ligature is gone — its first component is no
+        // The 10-rooted ligature is gone. Its first component is no
         // longer in Coverage.
         let cov_off = u16::from_be_bytes([rs.bytes[2], rs.bytes[3]]) as usize;
         let cov = CoverageParser::parse(&rs.bytes[cov_off..]).unwrap();
@@ -2830,7 +2830,7 @@ mod tests {
 
     #[test]
     fn rewrite_type2_drops_sequence_when_substitute_drops() {
-        // 100 → [40, 50, 60] but 50 is dropped. The whole Sequence
+        // 100 -> [40, 50, 60] but 50 is dropped. The whole Sequence
         // dies because emitting [40, ?, 60] would point at a missing
         // gid.
         let bytes = build_type2_subtable(&[(100, vec![40, 50, 60])]);
@@ -2839,13 +2839,13 @@ mod tests {
             gid_map: &map,
             lookup_renumber: None,
         };
-        // Single-entry subtable; that entry dies → subtable dies.
+        // Single-entry subtable; that entry dies -> subtable dies.
         assert!(rewrite_type2(&ctx, &bytes).is_none());
     }
 
     #[test]
     fn rewrite_type2_drops_entry_when_input_drops() {
-        // Two entries; drop input 100 entirely → first entry vanishes,
+        // Two entries; drop input 100 entirely -> first entry vanishes,
         // second entry survives.
         let bytes = build_type2_subtable(&[(100, vec![40, 50]), (200, vec![70])]);
         let map = map_from_pairs(&[
@@ -2854,7 +2854,7 @@ mod tests {
             (50, 49),
             (70, 69),
             (200, 199),
-            // 100 not in the map → its Coverage entry dies.
+            // 100 not in the map -> its Coverage entry dies.
         ]);
         let ctx = RewriterCtx {
             gid_map: &map,
@@ -2862,10 +2862,10 @@ mod tests {
         };
         let rs = rewrite_type2(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Multiple::parse(&rs.bytes).unwrap();
-        // Surviving entry: input 199 → [69].
+        // Surviving entry: input 199 -> [69].
         assert_eq!(parsed.apply(199), Some(vec![69]));
         // The dropped entry's input gid (100 was renumbered to nothing)
-        // — neither old nor any other gid produces a hit.
+        // is gone: neither old nor any other gid produces a hit.
         assert!(parsed.apply(99).is_none());
     }
 
@@ -2923,7 +2923,7 @@ mod tests {
 
     #[test]
     fn pull_multiple_extends_keep_set() {
-        // Closure walker: input 100 is kept → every substitute in the
+        // Closure walker: input 100 is kept -> every substitute in the
         // sequence gets pulled in.
         let bytes = build_type2_subtable(&[(100, vec![40, 50, 60])]);
         let mut keep = vec![false; 256];
@@ -2939,7 +2939,7 @@ mod tests {
     fn pull_multiple_no_op_when_input_dropped() {
         let bytes = build_type2_subtable(&[(100, vec![40, 50])]);
         let mut keep = vec![false; 256];
-        // 100 not kept → no outputs pulled.
+        // 100 not kept -> no outputs pulled.
         let changed = pull_multiple(&bytes, &mut keep);
         assert!(!changed);
         assert!(!keep[40]);
@@ -3076,7 +3076,7 @@ mod tests {
 
     #[test]
     fn pull_alternate_default_extends_keep_set_with_first_alternate_only() {
-        // Closure walker: input 10 is kept → only the *first* alternate
+        // Closure walker: input 10 is kept -> only the *first* alternate
         // (100) gets pulled in. The remaining alternates (101, 102) stay
         // dropped unless the caller requested them explicitly.
         let bytes = build_type3_subtable(&[(10, vec![100, 101, 102])]);
@@ -3102,7 +3102,7 @@ mod tests {
     fn pull_alternate_default_no_op_when_input_dropped() {
         let bytes = build_type3_subtable(&[(10, vec![100])]);
         let mut keep = vec![false; 256];
-        // 10 not kept → no outputs pulled.
+        // 10 not kept -> no outputs pulled.
         let changed = pull_alternate_default(&bytes, &mut keep);
         assert!(!changed);
         assert!(!keep[100]);
@@ -3209,7 +3209,7 @@ mod tests {
 
     #[test]
     fn rewrite_type5_format1_drops_rule_when_input_tail_drops() {
-        // First=10, tail=[20] — drop 20. Single rule dies, set dies,
+        // First=10, tail=[20]: drop 20. Single rule dies, set dies,
         // coverage entry dies, subtable dies.
         let bytes = build_type5_format1(&[(10, vec![(vec![20], vec![(0, 1)])])]);
         let map = map_from_pairs(&[(0, 0), (10, 9)]);
@@ -3233,7 +3233,7 @@ mod tests {
 
     #[test]
     fn rewrite_type5_format1_drops_record_when_target_lookup_drops() {
-        // Two SubstLookupRecords, indices 1 and 2. Renumber drops 2 →
+        // Two SubstLookupRecords, indices 1 and 2. Renumber drops 2 ->
         // record list survives with one entry.
         let bytes = build_type5_format1(&[(10, vec![(vec![20], vec![(0, 1), (1, 2)])])]);
         let map = map_from_pairs(&[(0, 0), (10, 9), (20, 19)]);
@@ -3286,7 +3286,7 @@ mod tests {
 
     #[test]
     fn rewrite_type5_format3_drops_subtable_when_any_input_position_empties() {
-        // Drop both glyphs at position 1 → that coverage empties → subtable dies.
+        // Drop both glyphs at position 1 -> that coverage empties -> subtable dies.
         let bytes = build_type5_format3(&[vec![10, 11], vec![20, 21]], &[(0, 1)]);
         let map = map_from_pairs(&[(0, 0), (10, 100), (11, 101)]);
         let ctx = RewriterCtx {
@@ -3408,7 +3408,7 @@ mod tests {
 
     #[test]
     fn rewrite_type6_format3_drops_when_backtrack_position_empties() {
-        // Backtrack [5] — drop 5 → backtrack coverage empties → subtable dies.
+        // Backtrack [5]: drop 5 -> backtrack coverage empties -> subtable dies.
         let bytes = build_type6_format3(&[vec![5]], &[vec![10]], &[vec![30]], &[(0, 1)]);
         let map = map_from_pairs(&[(0, 0), (10, 100), (30, 300)]);
         let ctx = RewriterCtx {
@@ -3547,7 +3547,7 @@ mod tests {
         };
         let rs = rewrite_type8(&ctx, &bytes).unwrap();
         let rc = sigilbuzz::tables::gsub::ReverseChain::parse(&rs.bytes).unwrap();
-        // Apply with surrounding context: [50, 1, 3] → 99.
+        // Apply with surrounding context: [50, 1, 3] -> 99.
         assert_eq!(rc.apply(&[50, 1, 3], 1), Some(99));
     }
 
@@ -3593,7 +3593,7 @@ mod tests {
 
     #[test]
     fn rewrite_type8_drops_subtable_when_backtrack_coverage_empties() {
-        // Backtrack [{5}] — drop 5 → backtrack coverage empties → subtable dies.
+        // Backtrack [{5}]: drop 5 -> backtrack coverage empties -> subtable dies.
         let bytes = build_type8(&[10], &[vec![5]], &[], &[100]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (100, 99)]);
         let ctx = RewriterCtx {

@@ -61,7 +61,7 @@ pub fn parse_gid_list(s: &str) -> CliResult<Vec<u16>> {
 /// The three range forms follow Rust convention: `..=` and `-` are
 /// inclusive, `..` is exclusive (Rust's `Range::end` is exclusive
 /// too). All three produce identical glyph sets when expressed
-/// equivalently — e.g. `0..=255`, `0..256`, and `0-255` all expand
+/// equivalently, e.g. `0..=255`, `0..256`, and `0-255` all expand
 /// to gids 0..=255.
 pub fn parse_gid_spec(s: &str) -> CliResult<Vec<u16>> {
     if let Some((lo, hi, inclusive)) = split_range(s) {
@@ -231,8 +231,8 @@ mod tests {
     #[test]
     fn gid_spec_exclusive_range_excludes_upper_bound() {
         // The documented equivalence is "0..=255 == 0..256 == 0-255".
-        // Treating `..` as inclusive (the pre-fix behaviour) made
-        // `0..256` produce 257 gids — one off — and would silently
+        // Treating `..` as inclusive (the pre-fix behavior) made
+        // `0..256` produce 257 gids (one off) and would silently
         // pass gid 256 to the subsetter for fonts where 255 was
         // intended to be the last kept gid.
         assert_eq!(parse_gid_spec("0..4").unwrap(), vec![0, 1, 2, 3]);

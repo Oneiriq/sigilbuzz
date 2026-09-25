@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Synthesise an AAT-only font that exercises `kerx` subtable
-format 2 — compound-class (n-way) kerning.
+format 2: compound-class (n-way) kerning.
 
 Sister script to `build_aat_fixture.py`. The two outputs split
 duties so each test fixture is small and single-purpose:
@@ -9,7 +9,7 @@ duties so each test fixture is small and single-purpose:
 - `aat_kerx_fmt2.ttf` covers `kerx` format 2 only.
 
 The font has six glyphs (`.notdef`, A, B, V, W, X) with cmap
-entries for the four real letters (X is unmapped — it just sits
+entries for the four real letters (X is unmapped: it just sits
 in the glyph order so the per-glyph format-0 lookup tables stay
 dense). Hand-authored kerx layout:
 
@@ -18,18 +18,18 @@ dense). Hand-authored kerx layout:
     A=1, B=1, everything else=0.
 - Right class table (AAT lookup format 0):
     V=1, W=2, everything else=0.
-- Kerning array (2 left classes × 3 right classes, rowWidth = 6):
+- Kerning array (2 left classes x 3 right classes, rowWidth = 6):
     row 0 (left class 0): [0,    0,    0]
     row 1 (left class 1): [0,  -30,  -50]
 
 So shaping:
 
-- "AV" → -30 (A is left class 1, V is right class 1)
-- "BV" → -30
-- "AW" → -50 (A is left class 1, W is right class 2)
-- "BW" → -50
-- "VA" →   0 (V is left class 0, A is right class 0 — default)
-- "AA" →   0 (A is left class 1, A is right class 0)
+- "AV" -> -30 (A is left class 1, V is right class 1)
+- "BV" -> -30
+- "AW" -> -50 (A is left class 1, W is right class 2)
+- "BW" -> -50
+- "VA" ->   0 (V is left class 0, A is right class 0, default)
+- "AA" ->   0 (A is left class 1, A is right class 0)
 
 Deliberately NO GSUB and NO GPOS so sigilbuzz's `kerx` fallback
 runs.
@@ -57,7 +57,7 @@ GID_A = 1
 GID_B = 2
 GID_V = 3
 GID_W = 4
-GID_X = 5  # unmapped — keeps the format-0 array's last cell exercised
+GID_X = 5  # unmapped, keeps the format-0 array's last cell exercised
 
 NUM_GLYPHS = 6
 
@@ -91,18 +91,18 @@ def build_kerx_table() -> bytes:
     row_width = n_right_classes * 2  # bytes (i16 cells)
 
     # Left class table: each cell is class * row_width.
-    left_class_of_gid = [0, 1, 1, 0, 0, 0]  # gid → class
+    left_class_of_gid = [0, 1, 1, 0, 0, 0]  # gid -> class
     left_values = [c * row_width for c in left_class_of_gid]
     assert all(v < 0x10000 for v in left_values)
 
     # Right class table: each cell is class * 2.
-    right_class_of_gid = [0, 0, 0, 1, 2, 0]  # gid → class
+    right_class_of_gid = [0, 0, 0, 1, 2, 0]  # gid -> class
     right_values = [c * 2 for c in right_class_of_gid]
 
     left_lookup = lookup_format0(left_values)
     right_lookup = lookup_format0(right_values)
 
-    # Kerning matrix [leftClass][rightClass] → i16.
+    # Kerning matrix [leftClass][rightClass] -> i16.
     matrix = [
         [0,   0,   0],
         [0, -30, -50],
@@ -114,7 +114,7 @@ def build_kerx_table() -> bytes:
     #   12 : 16 B fmt2 header (rowWidth, leftOff, rightOff, arrayOff)
     #   28 : left lookup
     #   .. : right lookup
-    #   .. : kerning array (n_left_classes rows × row_width bytes)
+    #   .. : kerning array (n_left_classes rows x row_width bytes)
     fmt2_header_off = 12
     left_off = fmt2_header_off + 16
     right_off = left_off + len(left_lookup)

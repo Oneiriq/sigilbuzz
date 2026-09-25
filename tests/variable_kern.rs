@@ -3,7 +3,7 @@
 //! delta off a shared ItemVariationStore at wght=900 and zero at
 //! the default wght=400.
 //!
-//! This is the integration cover for issue #13 — before the GPOS
+//! This is the integration cover for issue #13. Before the GPOS
 //! feature-variations wiring, sigilbuzz parsed the VariationIndex
 //! offsets but threw them away, so kerning was frozen at the
 //! default instance. With the fix, the "AV" advance shifts by -100
@@ -12,8 +12,8 @@
 //!
 //! The fixture is a hand-built 972-byte TTF produced by
 //! `tests/tools/build_var_kern_fixture.py`. It packs exactly what
-//! the bug fix needs to exercise — one axis, one variation region,
-//! one kern pair — without the megabyte of overhead a real variable
+//! the bug fix needs to exercise (one axis, one variation region,
+//! one kern pair) without the megabyte of overhead a real variable
 //! font would cost.
 //!
 //! # Why no byte-for-byte rustybuzz parity here
@@ -23,7 +23,7 @@
 //! OpenType spec's rule. rustybuzz 0.20 (via ttf-parser) resolves
 //! those offsets against the enclosing PairSet instead, which
 //! means it cannot find the VariationIndex in this fixture and
-//! silently drops the delta — rustybuzz returns the default-
+//! silently drops the delta: rustybuzz returns the default-
 //! instance advance regardless of the bound axis. Matching that
 //! would mean replicating an upstream bug. The `rubik_vf.ttf`
 //! fixture in `variable_fonts.rs` still covers HVAR parity with
@@ -70,7 +70,7 @@ fn default_instance_kern_delta_is_zero() {
 
 #[test]
 fn heavy_weight_tightens_av_pair_by_a_hundred_units() {
-    // At wght = 900 the variation region peaks → delta = -100
+    // At wght = 900 the variation region peaks -> delta = -100
     // lands on the first glyph's x_advance.
     let blob = Blob::new(VAR_KERN);
     let face = Face::parse(&blob, 0).unwrap();
@@ -85,7 +85,7 @@ fn heavy_weight_tightens_av_pair_by_a_hundred_units() {
 fn halfway_axis_coord_gives_halfway_delta() {
     // The variation region is (start=0, peak=1, end=1) so at a
     // normalized coord of 0.5 the scalar is 0.5 and the delta is
-    // -50. wght 400 .. 900 user-space → halfway is 650.
+    // -50. wght 400 .. 900 user-space -> halfway is 650.
     let blob = Blob::new(VAR_KERN);
     let face = Face::parse(&blob, 0).unwrap();
     let coords = normalize_wght(&face, 650.0);

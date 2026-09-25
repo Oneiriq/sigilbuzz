@@ -1,7 +1,7 @@
 //! Type 1 (PostScript) font emission.
 //!
 //! Produces the three text/byte fragments a downstream PDF
-//! serialiser needs to assemble a Type 1 font object:
+//! serializer needs to assemble a Type 1 font object:
 //!
 //! - the [public font dictionary][Type1Font::font_dict_body]
 //!   (`/FontInfo`, `/FontType`, `/FontMatrix`, `/FontBBox`, `/Encoding`),
@@ -20,7 +20,7 @@
 //! 4-byte random salt. Adobe Reader and every modern PDF consumer the
 //! authors have access to (Preview, pdfium, mupdf, Poppler) accept
 //! Type 1 fonts that ship the **cleartext** block twice in lieu of an
-//! encrypted half — the `/lenIV -1` directive in the private dict
+//! encrypted half. The `/lenIV -1` directive in the private dict
 //! signals "charstrings are not eexec-encrypted." Skipping eexec keeps
 //! this PR small and focused; a follow-up can layer the cipher on top
 //! of the existing module if a non-Adobe consumer ever surfaces.
@@ -29,7 +29,7 @@
 //!
 //! Type 1 stores a per-font `/FontMatrix` that maps glyph design units
 //! into a 1000-unit "character space." sigilbuzz emits glyphs in their
-//! native upem space, so the matrix is `[1/upem 0 0 1/upem 0 0]` —
+//! native upem space, so the matrix is `[1/upem 0 0 1/upem 0 0]`,
 //! identical to the Type 3 convention.
 
 use alloc::format;
@@ -45,7 +45,7 @@ use crate::{Bbox, GlyphId};
 ///
 /// The Type 1 surface is fallible (unlike the Type 3 surface) because
 /// a malformed or sufficiently degenerate face cannot produce a
-/// well-formed `/FontMatrix` — Type 1 spec requires a non-zero scale.
+/// well-formed `/FontMatrix`. Type 1 spec requires a non-zero scale.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmitError {
     /// The face's `head` table reports `units_per_em == 0`, which would
@@ -72,17 +72,17 @@ impl std::error::Error for EmitError {}
 /// All three buffers are valid 7-bit ASCII PostScript text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Type1Font {
-    /// Public font dictionary body — the part of a Type 1 font that
+    /// Public font dictionary body: the part of a Type 1 font that
     /// lives *outside* the eexec block. Includes `/FontInfo`,
     /// `/FontType 1`, `/FontMatrix`, `/FontBBox`, and the encoding
     /// vector that maps PDF char codes to glyph names.
     pub font_dict_body: Vec<u8>,
     /// `/Private` dict body. Contains `/BlueValues`, `/MinFeature`,
-    /// and the `/lenIV -1` flag (cleartext charstrings — see module
+    /// and the `/lenIV -1` flag (cleartext charstrings, see module
     /// docs). The `/RD` and `/ND`/`/NP` PostScript primitives are
     /// declared here so the `/CharStrings` body parses standalone.
     pub private_dict_body: Vec<u8>,
-    /// `/CharStrings` body — one entry per emitted glyph, keyed by
+    /// `/CharStrings` body: one entry per emitted glyph, keyed by
     /// `/g{gid}`. Each value is a Type 1 charstring (cleartext, not
     /// eexec-encrypted) beginning with `hsbw` and ending with
     /// `endchar`.
@@ -113,8 +113,8 @@ pub fn emit_type1_font(face: &Face<'_>, gids: &[GlyphId]) -> Result<Type1Font, E
 
     // Compute the union bbox up-front so we can bake it into the public
     // font dict. Per-glyph bboxes are computed twice (once here, once
-    // implicitly via charstring path tracing in a downstream rasteriser)
-    // — that is the trade-off for shipping a complete /FontBBox without
+    // implicitly via charstring path tracing in a downstream rasterizer).
+    // That is the trade-off for shipping a complete /FontBBox without
     // a second pass.
     let mut font_bbox = Bbox::empty();
     for &gid in gids {
@@ -133,9 +133,9 @@ pub fn emit_type1_font(face: &Face<'_>, gids: &[GlyphId]) -> Result<Type1Font, E
     }
 
     // Build the public font dict body. PostScript numbers are emitted
-    // by Display directly — no PDF-style ".0" trimming is required;
+    // by Display directly. No PDF-style ".0" trimming is required;
     // the output is parsed by a PostScript interpreter, not a PDF
-    // tokeniser.
+    // tokenizer.
     let mut font_dict_body = Vec::new();
     font_dict_body.extend_from_slice(b"12 dict begin\n");
     font_dict_body.extend_from_slice(b"/FontInfo 4 dict dup begin\n");
@@ -176,7 +176,7 @@ pub fn emit_type1_font(face: &Face<'_>, gids: &[GlyphId]) -> Result<Type1Font, E
     font_dict_body.extend_from_slice(b"readonly def\n");
 
     // Private dict. /lenIV -1 means "the charstrings are not
-    // eexec-encrypted" — see the module docs.
+    // eexec-encrypted". See the module docs.
     let mut private_dict_body = Vec::new();
     private_dict_body.extend_from_slice(b"dup /Private 8 dict dup begin\n");
     private_dict_body
@@ -212,7 +212,7 @@ pub fn emit_type1_font(face: &Face<'_>, gids: &[GlyphId]) -> Result<Type1Font, E
 
         let mut cs = Vec::new();
         // hsbw with lsb=0 (sigilbuzz's PathOp coordinates are absolute,
-        // so the lsb is implicit in the first MoveTo's x — emitting 0
+        // so the lsb is implicit in the first MoveTo's x. Emitting 0
         // here keeps the charstring's pen origin at the design-space
         // origin, which matches what every PathOp x/y is measured
         // against).
@@ -237,7 +237,7 @@ pub fn emit_type1_font(face: &Face<'_>, gids: &[GlyphId]) -> Result<Type1Font, E
     })
 }
 
-/// Format an `f32` for inclusion in a PostScript number literal —
+/// Format an `f32` for inclusion in a PostScript number literal:
 /// matches the Type 3 stream.rs convention of stripping `.0` so the
 /// output is compact and snapshot-stable.
 fn ps_num(value: f32) -> String {
@@ -276,7 +276,7 @@ mod tests {
             ],
         );
 
-        // hsbw lsb=0 advance=500 → encode(0)=139, encode(500)=[248,136], op13.
+        // hsbw lsb=0 advance=500 -> encode(0)=139, encode(500)=[248,136], op13.
         assert_eq!(&cs[..4], &[139, 248, 136, 13]);
         // Last byte is endchar (op 14).
         assert_eq!(*cs.last().unwrap(), 14);

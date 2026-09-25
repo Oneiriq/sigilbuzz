@@ -9,7 +9,7 @@
 //! The corpus exercises:
 //!
 //!   * single base consonants
-//!   * sakot (U+1A60) — Tai Tham's halant
+//!   * sakot (U+1A60): Tai Tham's halant
 //!   * above-base vowel signs (sign-i U+1A65, sign-ii U+1A66)
 //!   * below-base vowel sign (sign-u U+1A69)
 //!   * post-base vowel sign (sign-aa U+1A63)
@@ -34,7 +34,7 @@ const CORPUS: &[Case] = &[
         note: "empty",
         compare_rustybuzz: true,
     },
-    // ᨠ U+1A20 — high ka.
+    // ᨠ U+1A20: high ka.
     Case {
         text: "\u{1A20}",
         note: "high ka alone",

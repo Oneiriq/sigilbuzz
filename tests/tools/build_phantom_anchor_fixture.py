@@ -4,7 +4,7 @@ phantom-point reference (advance-width origin).
 
 PR #80 added phantom-point resolution for composite glyphs whose
 `ARGS_ARE_XY_VALUES` flag is clear and whose anchor index falls past
-the parent's contour-point count — the four phantom points (pp1..pp4).
+the parent's contour-point count: the four phantom points (pp1..pp4).
 Neither Open Sans nor Amiri exercises this path, so the code shipped
 "dead-but-correct on the bundled corpus, exercised only by a synthetic
 unit test". This fixture flips it to a real font.
@@ -12,7 +12,7 @@ unit test". This fixture flips it to a real font.
 # Constraint: ttf-parser ignores anchor mode
 
 ttf-parser 0.25.1 (the parity oracle) does NOT resolve anchor-mode
-composite components — when `ARGS_ARE_XY_VALUES` is clear, it leaves
+composite components: when `ARGS_ARE_XY_VALUES` is clear, it leaves
 the translation at (0, 0) and skips the anchor bytes. To keep the
 parity test green while still exercising sigilbuzz's phantom-point
 branch, the fixture is hand-crafted so that the phantom-resolved
@@ -24,12 +24,12 @@ the child's anchor point so `parent.pp2 - child[anchor] == (0, 0)`.
 UPEM = 1000.
 
 - `.notdef` (gid 0): rectangle (used as a placeholder).
-- `base`    (gid 1): rectangle (0, 0) → (500, 500). 1 contour, 4
+- `base`    (gid 1): rectangle (0, 0) -> (500, 500). 1 contour, 4
   points. Advance = 500, lsb = 0, so pp1 = (0, 0), pp2 = (500, 0).
 - `mark`    (gid 2): triangle anchored at its own point 0 = (500, 0).
   3 points: (500, 0), (550, 0), (500, 50). Advance = 100, lsb = 500.
 - `combo`   (gid 3): composite of two components. Advance = 500,
-  lsb = 0, xMin = 0 → combo.pp2 = (500, 0).
+  lsb = 0, xMin = 0 -> combo.pp2 = (500, 0).
     1. `base`  in XY mode at translation (0, 0).
     2. `mark`  in anchor mode. arg1 = 5 (= 4 contour points + pp2
        phantom index 1; pp2 lives at `numContourPoints + 1`).
@@ -53,7 +53,7 @@ The integration test in `tests/outline_parity.rs`:
 # How we sidestep fontTools' bounds-recompute
 
 fontTools refuses to compile a composite glyph whose `firstPt` index
-exceeds the parent's real contour-point count — its bounds path reads
+exceeds the parent's real contour-point count: its bounds path reads
 `allCoords[firstPt]` and IndexErrors. We therefore:
 
 1. Build the font with `combo` in XY mode (so fontTools is happy).
@@ -96,7 +96,7 @@ MORE_COMPONENTS = 0x0020
 
 
 def build_base_rect() -> Glyph:
-    """4-point square (0, 0) → (500, 500)."""
+    """4-point square (0, 0) -> (500, 500)."""
     pen = TTGlyphPen(None)
     pen.moveTo((0, 0))
     pen.lineTo((500, 0))
@@ -169,7 +169,7 @@ def _build_combo_anchor_mode_body() -> bytes:
       // component 2: mark, anchor mode (last)
       u16  flags = 0
       u16  glyphIndex = 2
-      u8   arg1 = 5  (= numContourPoints(4) + 1 → pp2)
+      u8   arg1 = 5  (= numContourPoints(4) + 1 -> pp2)
       u8   arg2 = 0  (mark's first contour point)
     """
     body = bytearray()
@@ -188,7 +188,7 @@ def _patch_sfnt_combo(font_bytes: bytes) -> bytes:
     # u16 entrySelector + u16 rangeShift = 12 bytes.
     num_tables = struct.unpack(">H", font_bytes[4:6])[0]
 
-    # Parse table directory: numTables × 16-byte records.
+    # Parse table directory: numTables x 16-byte records.
     table_dir = {}  # tag -> (offset_in_file_of_record, content_offset, length)
     for i in range(num_tables):
         rec_off = 12 + i * 16
@@ -233,7 +233,7 @@ def _patch_sfnt_combo(font_bytes: bytes) -> bytes:
             body = new_combo_body
         else:
             body = glyf[offsets[gid]:offsets[gid + 1]]
-        # Strip any trailing pad bytes from the original slice — we
+        # Strip any trailing pad bytes from the original slice: we
         # re-pad uniformly below.
         new_glyf += body
         if len(new_glyf) & 1:
@@ -255,7 +255,7 @@ def _patch_sfnt_combo(font_bytes: bytes) -> bytes:
     # We assume the saved layout has glyf and loca contiguous (TTFont
     # writes them adjacent for short loca builds). Even if not, our
     # rewrite preserves length: combo's body shrank from "two XY
-    # components, 24 B" to "one XY + one anchor, 22 B" → 2 fewer
+    # components, 24 B" to "one XY + one anchor, 22 B" -> 2 fewer
     # bytes. Pad new_glyf with zeros to keep total length identical
     # so we don't have to relocate later tables.
     old_glyf_len = glyf_rec[2]

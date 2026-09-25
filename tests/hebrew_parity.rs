@@ -8,20 +8,20 @@
 //! transforms are GDEF-driven mark classification plus GPOS
 //! mark-to-base / mark-to-mark anchors. The corpus exercises:
 //!
-//! - **Plain consonants** — shalom, toda, boker tov. No marks;
+//! - **Plain consonants**: shalom, toda, boker tov. No marks;
 //!   proves cmap + RTL iteration yield the same glyph ids.
-//! - **Niqqud (vowel points)** — bereshit, shalom with kamatz /
+//! - **Niqqud (vowel points)**: bereshit, shalom with kamatz /
 //!   holam / sheva, hallelu-Yah with mapiq-he. Validates the GPOS
 //!   `mark` feature anchoring niqqud below/above the base consonant.
-//! - **Cantillation (te'amim)** — the opening of Genesis 1:1 with
+//! - **Cantillation (te'amim)**: the opening of Genesis 1:1 with
 //!   tipeha, munach, etnahta. Validates GPOS `mkmk` stacking of
 //!   cantillation marks on top of niqqud.
-//! - **Final-form consonants** — words ending in kaf-sofit, mem-sofit,
+//! - **Final-form consonants**: words ending in kaf-sofit, mem-sofit,
 //!   nun-sofit, pe-sofit, tzadi-sofit. Those encode as distinct
 //!   codepoints in Hebrew (unlike Arabic, where joining selects
-//!   the form) so correct behaviour is pure cmap; the test pins
+//!   the form) so correct behavior is pure cmap; the test pins
 //!   that nothing in the pipeline breaks the straight-through path.
-//! - **Mixed Hebrew + Latin** — proves script-segment transitions
+//! - **Mixed Hebrew + Latin**: proves script-segment transitions
 //!   do not corrupt either side.
 //!
 //! # Direction
@@ -46,7 +46,7 @@ const NOTO_HEBREW: &[u8] = include_bytes!("fonts/NotoSansHebrew-Regular.ttf");
 /// `mixed_script_segments` lists per-segment `(text, direction,
 /// script)` triples for mixed-script inputs. `assert_parity_on`
 /// compares sigilbuzz's concatenated output against the concatenation
-/// of rustybuzz shapes of each segment — matching how a correct
+/// of rustybuzz shapes of each segment, matching how a correct
 /// client calls HarfBuzz for mixed runs. Pure-script cases use a
 /// single whole-buffer rustybuzz call via an empty slice.
 struct Case {
@@ -70,33 +70,33 @@ struct MixedSeg {
 /// against rustybuzz unless a `compare_rustybuzz: false` flag says
 /// otherwise.
 ///
-/// - `\u{05E9}\u{05DC}\u{05D5}\u{05DD}` — shalom (peace). Four
+/// - `\u{05E9}\u{05DC}\u{05D5}\u{05DD}`: shalom (peace). Four
 ///   plain consonants, no marks.
-/// - `\u{05EA}\u{05D5}\u{05D3}\u{05D4}` — toda (thanks). Same
+/// - `\u{05EA}\u{05D5}\u{05D3}\u{05D4}`: toda (thanks). Same
 ///   shape family, different letter set.
-/// - `\u{05D1}\u{05D5}\u{05E7}\u{05E8} \u{05D8}\u{05D5}\u{05D1}` —
+/// - `\u{05D1}\u{05D5}\u{05E7}\u{05E8} \u{05D8}\u{05D5}\u{05D1}`:
 ///   boker tov (good morning). Space-broken two-word run.
 /// - `\u{05D1}\u{05BC}\u{05B0}\u{05E8}\u{05B5}\u{05D0}\u{05E9}\u{05C1}\u{05B4}\u{05D9}\u{05EA}`
-///   — bereshit (in the beginning). Full niqqud: dagesh (U+05BC),
+///   is bereshit (in the beginning). Full niqqud: dagesh (U+05BC),
 ///   sheva (U+05B0), tsere (U+05B5), shin-dot (U+05C1), hiriq (U+05B4).
 ///   Exercises mark-to-base in bulk.
-/// - `\u{05E9}\u{05C1}\u{05B8}\u{05DC}\u{05D5}\u{05B9}\u{05DD}` —
+/// - `\u{05E9}\u{05C1}\u{05B8}\u{05DC}\u{05D5}\u{05B9}\u{05DD}`:
 ///   shalom with niqqud (shin-dot, kamatz, holam). Mark-to-base
 ///   over three separate bases.
 /// - `\u{05D4}\u{05B7}\u{05DC}\u{05B0}\u{05DC}\u{05D5}\u{05BC}\u{05D9}\u{05B8}\u{05D4}\u{05BC}`
-///   — halleluyah with dagesh + niqqud stacks. Multiple mark-to-base
+///   is halleluyah with dagesh + niqqud stacks. Multiple mark-to-base
 ///   and some mark-to-mark because the mapiq-he final needs the
 ///   dagesh anchored on top of the base.
 /// - `\u{05D1}\u{05BC}\u{05B0}\u{05E8}\u{05B5}\u{05D0}\u{05E9}\u{05C1}\u{05B4}\u{0596}\u{05D9}\u{05EA} \u{05D1}\u{05BC}\u{05B8}\u{05E8}\u{05B8}\u{05A3}\u{05D0}`
-///   — bereshit bara (Genesis 1:1 opening) with cantillation
+///   is bereshit bara (Genesis 1:1 opening) with cantillation
 ///   (tipeha U+0596 and munach U+05A3). Exercises GPOS mkmk
 ///   stacking te'amim on top of niqqud.
-/// - Final-form words: `\u{05DC}\u{05D9}\u{05DA}` (to you — kaf-sofit),
-///   `\u{05D9}\u{05D5}\u{05DD}` (day — mem-sofit),
-///   `\u{05D1}\u{05DF}` (son — nun-sofit),
-///   `\u{05E7}\u{05E6}\u{05E3}` (end — pe-sofit),
-///   `\u{05E7}\u{05E5}` (summer — tzadi-sofit).
-/// - `Hi \u{05E9}\u{05DC}\u{05D5}\u{05DD}` — mixed Latin+Hebrew.
+/// - Final-form words: `\u{05DC}\u{05D9}\u{05DA}` (to you, kaf-sofit),
+///   `\u{05D9}\u{05D5}\u{05DD}` (day, mem-sofit),
+///   `\u{05D1}\u{05DF}` (son, nun-sofit),
+///   `\u{05E7}\u{05E6}\u{05E3}` (end, pe-sofit),
+///   `\u{05E7}\u{05E5}` (summer, tzadi-sofit).
+/// - `Hi \u{05E9}\u{05DC}\u{05D5}\u{05DD}`: mixed Latin+Hebrew.
 const CORPUS: &[Case] = &[
     Case {
         text: "\u{05E9}\u{05DC}\u{05D5}\u{05DD}",
@@ -176,7 +176,7 @@ const CORPUS: &[Case] = &[
     // half). The parity side shapes each segment independently with
     // rustybuzz (LTR+Latin then RTL+Hebrew) and concatenates,
     // because rustybuzz by itself does not auto-segment a
-    // pre-existing buffer — the client is expected to segment
+    // pre-existing buffer: the client is expected to segment
     // upstream. sigilbuzz now does that upstream step inside
     // `shape()`, so matching rustybuzz's per-segment call chain
     // proves the new segmenter routes each half correctly.
@@ -197,7 +197,7 @@ const CORPUS: &[Case] = &[
             },
         ],
     },
-    // ASCII + currency + digits + Hebrew — pins that a COMMON span
+    // ASCII + currency + digits + Hebrew: pins that a COMMON span
     // (the shekel sign U+20AA qualifies as COMMON) attaches to the
     // Latin prefix rather than carving its own segment.
     Case {
@@ -221,7 +221,7 @@ const CORPUS: &[Case] = &[
 
 /// Shape `case.text` with both engines and assert byte-identical
 /// output. For mixed-script cases we shape each declared segment
-/// independently on the rustybuzz side and concatenate — that mirrors
+/// independently on the rustybuzz side and concatenate. That mirrors
 /// how sigilbuzz's `shape()` now dispatches per segment, and matches
 /// the "correct client" call pattern HarfBuzz documents.
 fn assert_parity_on(case: &Case) {
@@ -298,7 +298,7 @@ fn assert_parity_on(case: &Case) {
 
     // Glyph IDs and advances are the parity contract. Offsets
     // carry an RTL convention difference (HarfBuzz subtracts the
-    // base-advance from the mark offset during RTL finalisation and
+    // base-advance from the mark offset during RTL finalization and
     // relies on the caller to reverse the visual run; sigilbuzz
     // emits logical order with unmodified anchor deltas so the
     // renderer sees the same absolute position once it walks the
@@ -352,7 +352,7 @@ fn niqqud_anchors_below_base_via_gpos_mark() {
     // origin with zero offset.
     //
     // bet (U+05D1) + kamatz (U+05B8). Noto Sans Hebrew anchors
-    // kamatz below the bet — the resulting y_offset is non-zero
+    // kamatz below the bet. The resulting y_offset is non-zero
     // and typically negative (below the baseline) in HarfBuzz
     // design-unit convention.
     let blob = Blob::new(NOTO_HEBREW);
@@ -378,7 +378,7 @@ fn niqqud_anchors_below_base_via_gpos_mark() {
         mark.x_offset,
         mark.y_offset
     );
-    // Mark advance is zero — marks do not advance the pen.
+    // Mark advance is zero: marks do not advance the pen.
     assert_eq!(
         mark.x_advance, 0,
         "a combining mark should have zero advance after GPOS"
@@ -389,7 +389,7 @@ fn niqqud_anchors_below_base_via_gpos_mark() {
 fn final_form_consonants_survive_cmap_untouched() {
     // Hebrew final forms (kaf-sofit U+05DA etc.) are distinct
     // codepoints with their own cmap entries. The shaper should not
-    // rewrite them via any GSUB pass — they go straight through.
+    // rewrite them via any GSUB pass. They go straight through.
     let blob = Blob::new(NOTO_HEBREW);
     let face = Face::parse(&blob, 0).expect("parse face");
     let cmap = face.cmap().expect("cmap");
@@ -416,7 +416,7 @@ fn final_form_consonants_survive_cmap_untouched() {
 #[test]
 fn mixed_hebrew_and_latin_runs_shape_each_half_correctly() {
     // The Latin portion should produce the same glyphs whether or
-    // not Hebrew is in the buffer — the Latin half hits DFLT via
+    // not Hebrew is in the buffer. The Latin half hits DFLT via
     // the script-priority fallback in apply_gsub_feature_in_scripts.
     let blob = Blob::new(NOTO_HEBREW);
     let face = Face::parse(&blob, 0).expect("parse face");

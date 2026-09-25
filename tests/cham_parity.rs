@@ -9,11 +9,11 @@
 //! The corpus exercises:
 //!
 //!   * single base consonants
-//!   * above-base vowel sign (sign-aa U+1A29 — wait, actually U+AA29)
+//!   * above-base vowel sign (sign-aa U+1A29, wait, actually U+AA29)
 //!   * post-base vowel sign (sign-oe U+AA2F)
 //!   * medial ra (U+AA34, below-base CM)
-//!   * final consonant (U+AA40 final k — CM)
-//!   * final ng (U+AA43 — final mark)
+//!   * final consonant (U+AA40 final k, CM)
+//!   * final ng (U+AA43, final mark)
 //!   * Cham digit (Symbol pass-through)
 //!   * mixed Cham + Latin
 //!
@@ -35,13 +35,13 @@ const CORPUS: &[Case] = &[
         note: "empty",
         compare_rustybuzz: true,
     },
-    // ꨆ U+AA06 — letter ka.
+    // ꨆ U+AA06: letter ka.
     Case {
         text: "\u{AA06}",
         note: "ka alone",
         compare_rustybuzz: true,
     },
-    // ꨀ U+AA00 — letter a (independent vowel).
+    // ꨀ U+AA00: letter a (independent vowel).
     Case {
         text: "\u{AA00}",
         note: "independent a",
@@ -64,7 +64,7 @@ const CORPUS: &[Case] = &[
     // kra form. sigilbuzz's USE pipeline emits the right basic
     // features, but Noto Sans Cham registers the lookup under the
     // `pref` feature with a contextual rule that the current
-    // dispatcher does not yet match — tracked as a follow-up at
+    // dispatcher does not yet match, tracked as a follow-up at
     // <https://github.com/Oneiriq/sigilbuzz/issues> (USE: medial-ra
     // pref ligature for Cham). The string still shapes; we just
     // do not byte-compare against rustybuzz.

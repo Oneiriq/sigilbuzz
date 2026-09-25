@@ -3,31 +3,31 @@
 //! Sparse, curated coverage targeting the scripts and category families
 //! sigilbuzz consumers actually shape:
 //!
-//! - **L** — Latin / Greek / Cyrillic / Armenian / CJK / Hangul /
+//! - **L**: Latin / Greek / Cyrillic / Armenian / CJK / Hangul /
 //!   Devanagari and the rest of the Brahmic family.
-//! - **R** — Hebrew letters + presentation forms, Thaana, N'Ko.
-//! - **AL** — Arabic letters + presentation forms, Syriac.
-//! - **EN** — ASCII digits.
-//! - **AN** — Arabic-Indic digits + Extended Arabic-Indic digits.
-//! - **ES** — `+`, `-`, `−` (minus).
-//! - **ET** — `#`, `$`, `%`, `&`, `*`, `°`, `+/-` etc. plus per-mille,
-//!   currency, and the degree sign — "European Terminator".
-//! - **CS** — `,`, `.`, `:`, `/`, `\u{00A0}` (NBSP), Arabic comma /
-//!   semicolon — "Common Number Separator".
-//! - **NSM** — Combining diacritics, Hebrew points, Arabic harakat.
-//! - **BN** — `BOUNDARY_NEUTRAL`: format controls + ZWNBSP + soft hyphen.
-//! - **B** — Paragraph separators: LF, CR, U+0085, U+2029.
-//! - **S** — Segment separators: TAB, U+001F.
-//! - **WS** — Whitespace: U+0020, U+00A0 (no — that's CS), U+200x set,
+//! - **R**: Hebrew letters + presentation forms, Thaana, N'Ko.
+//! - **AL**: Arabic letters + presentation forms, Syriac.
+//! - **EN**: ASCII digits.
+//! - **AN**: Arabic-Indic digits + Extended Arabic-Indic digits.
+//! - **ES**: `+`, `-`, `−` (minus).
+//! - **ET**: `#`, `$`, `%`, `&`, `*`, `°`, `+/-` etc. plus per-mille,
+//!   currency, and the degree sign. "European Terminator".
+//! - **CS**: `,`, `.`, `:`, `/`, `\u{00A0}` (NBSP), Arabic comma /
+//!   semicolon. "Common Number Separator".
+//! - **NSM**: Combining diacritics, Hebrew points, Arabic harakat.
+//! - **BN** (`BOUNDARY_NEUTRAL`): format controls + ZWNBSP + soft hyphen.
+//! - **B**: Paragraph separators: LF, CR, U+0085, U+2029.
+//! - **S**: Segment separators: TAB, U+001F.
+//! - **WS**: Whitespace: U+0020, U+00A0 (no, that's CS), U+200x set,
 //!   U+205F, U+3000.
-//! - **ON** — Anything not classified above that the algorithm should
+//! - **ON**: Anything not classified above that the algorithm should
 //!   treat as a neutral (most punctuation and symbols).
-//! - **LRE / RLE / LRO / RLO / PDF** — Explicit-embedding and override
+//! - **LRE / RLE / LRO / RLO / PDF**: Explicit-embedding and override
 //!   format characters (U+202A..U+202E).
-//! - **LRI / RLI / FSI / PDI** — Explicit-isolate format characters
+//! - **LRI / RLI / FSI / PDI**: Explicit-isolate format characters
 //!   (U+2066..U+2069).
 //!
-//! Anything not matched falls through to **ON** — the safe neutral
+//! Anything not matched falls through to **ON**, the safe neutral
 //! default. Real-world consumers hit this table on Latin / Hebrew /
 //! Arabic mixed runs; the long tail (e.g. Inscriptional Pahlavi,
 //! Mandaic) remains classifiable via a future expansion without
@@ -35,9 +35,9 @@
 
 use crate::buffer::Direction;
 
-/// UAX #9 Bidi_Class — full set of categories the algorithm
+/// UAX #9 Bidi_Class: full set of categories the algorithm
 /// distinguishes. The variants exactly match the names used in the
-/// UAX #9 rule pseudocode (`L`, `R`, `AL`, `EN`, …) so cross-checking
+/// UAX #9 rule pseudocode (`L`, `R`, `AL`, `EN`, ...) so cross-checking
 /// against the spec stays mechanical.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(missing_docs)]
@@ -128,7 +128,7 @@ pub const fn strong_for_direction(dir: Direction) -> BidiClass {
     }
 }
 
-/// Returns the UAX #9 Bidi_Class for `ch`. Sparse / curated — see the
+/// Returns the UAX #9 Bidi_Class for `ch`. Sparse / curated. See the
 /// module docs for the coverage envelope. Codepoints outside the
 /// curated set fall through to [`BidiClass::On`] (Other Neutral),
 /// which is the safe default for the algorithm.
@@ -178,12 +178,12 @@ pub const fn bidi_class(ch: char) -> BidiClass {
             _ => BidiClass::Bn,
         },
 
-        // --- ASCII digits → EN ----------------------------------
+        // --- ASCII digits -> EN ---------------------------------
         0x0030..=0x0039 => BidiClass::En,
-        // Superscript / subscript digits → EN.
+        // Superscript / subscript digits -> EN.
         0x00B2 | 0x00B3 | 0x00B9 | 0x2070 | 0x2074..=0x2079 | 0x2080..=0x2089 => BidiClass::En,
 
-        // --- Arabic-Indic digits → AN ---------------------------
+        // --- Arabic-Indic digits -> AN --------------------------
         0x0660..=0x0669 | 0x066B | 0x066C => BidiClass::An,
         // Extended Arabic-Indic digits.
         0x06F0..=0x06F9 => BidiClass::An,
@@ -356,7 +356,7 @@ pub const fn bidi_class(ch: char) -> BidiClass {
         | 0xAAE0..=0xABFF
         | 0xAC00..=0xD7FF => BidiClass::L,
 
-        // --- Brackets and other punctuation → ON ----------------
+        // --- Brackets and other punctuation -> ON ---------------
         // The algorithm's neutral handling will resolve these.
         _ => BidiClass::On,
     }
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn unknown_falls_through_to_on() {
-        // U+2603 SNOWMAN — not in any classified range.
+        // U+2603 SNOWMAN: not in any classified range.
         assert_eq!(bidi_class('\u{2603}'), BidiClass::On);
     }
 

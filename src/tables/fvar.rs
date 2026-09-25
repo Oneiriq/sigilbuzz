@@ -1,10 +1,10 @@
-//! `fvar` — Font Variations table.
+//! `fvar`: Font Variations table.
 //!
 //! Describes the variation axes a font exposes (weight, width,
 //! optical size, custom axes). Each axis carries `(min, default,
 //! max)` in user-facing design-space units, plus a human-readable
 //! name via the `name` table. Optional *named instances* pin every
-//! axis to a specific coordinate — Regular, Bold, Condensed, ...
+//! axis to a specific coordinate: Regular, Bold, Condensed, ...
 //!
 //! sigilbuzz uses `fvar` to:
 //!
@@ -22,7 +22,7 @@
 //!   u16      axisCount
 //!   u16      axisSize            always 20
 //!   u16      instanceCount
-//!   u16      instanceSize        20 + 4 × axisCount  (+ 2 for ps_name variant)
+//!   u16      instanceSize        20 + 4 * axisCount  (+ 2 for ps_name variant)
 //! ```
 //!
 //! Axis record (20 bytes):
@@ -73,15 +73,15 @@ impl VariationAxis {
     /// `-1.0` / `1.0` respectively. The default value maps to
     /// `0.0`, with a piecewise-linear ramp to either endpoint.
     ///
-    /// Malformed fvar inputs — `min > max`, a `NaN` bound, or a
-    /// `NaN` user value — return `0.0` (the default instance) rather
+    /// Malformed fvar inputs (`min > max`, a `NaN` bound, or a
+    /// `NaN` user value) return `0.0` (the default instance) rather
     /// than panicking; `f32::clamp` has a documented panic contract
     /// on inverted or non-finite bounds that would otherwise bubble
     /// up into the shape pipeline.
     #[must_use]
     pub fn normalize(&self, user: f32) -> f32 {
         // Refuse to run the comparison pipeline on any non-finite
-        // bound or inverted range — `f32::clamp` panics in those
+        // bound or inverted range: `f32::clamp` panics in those
         // cases, and the rest of the function would divide by NaN.
         if !self.min_value.is_finite()
             || !self.default_value.is_finite()
@@ -117,7 +117,7 @@ pub struct Fvar {
 }
 
 impl Fvar {
-    /// Parses an `fvar` table. Named instances are skipped — the
+    /// Parses an `fvar` table. Named instances are skipped: the
     /// shaper only needs axes today.
     pub fn parse(data: &[u8]) -> Result<Self> {
         let mut r = Reader::new(data);
@@ -280,7 +280,7 @@ mod tests {
         assert!((axis.normalize(400.0) - 0.0).abs() < 1e-6);
         assert!((axis.normalize(900.0) - 1.0).abs() < 1e-6);
         assert!((axis.normalize(100.0) + 1.0).abs() < 1e-6);
-        // Halfway between default and max → +0.5.
+        // Halfway between default and max -> +0.5.
         assert!((axis.normalize(650.0) - 0.5).abs() < 1e-6);
         // Out-of-range clamps, not extrapolates.
         assert!((axis.normalize(2000.0) - 1.0).abs() < 1e-6);

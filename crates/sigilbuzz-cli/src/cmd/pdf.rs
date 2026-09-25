@@ -1,6 +1,6 @@
-//! `sigilbuzz pdf` — emit PDF font fragments.
+//! `sigilbuzz pdf`: emit PDF font fragments.
 //!
-//! Today we only ship the `type3` flavour — `emit_type3_font` is the
+//! Today we only ship the `type3` flavor: `emit_type3_font` is the
 //! one that produces a self-contained, CharProc-stream-based body
 //! that is meaningful to dump on its own. The Type 1 and OTF-embedded
 //! emitters in `sigilbuzz-pdf` produce fragments that cross-reference
@@ -20,12 +20,12 @@ use super::util::{parse_gid_spec, read_font, CliResult};
 /// Arguments for `sigilbuzz pdf`.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
-    /// Sub-flavour — only `type3` is supported today.
+    /// Sub-flavor: only `type3` is supported today.
     #[command(subcommand)]
     pub op: Op,
 }
 
-/// PDF emitter sub-flavours.
+/// PDF emitter sub-flavors.
 #[derive(Debug, Subcommand)]
 pub enum Op {
     /// Emit a Type 3 font's CharProc stream for the chosen gid set.
@@ -34,7 +34,7 @@ pub enum Op {
         font: PathBuf,
         /// Output path. Receives a plain UTF-8 dump of the font dict
         /// fragments (FontBBox, FontMatrix, CharProcs, Encoding,
-        /// Widths) — the consumer assembles this into a full PDF.
+        /// Widths). The consumer assembles this into a full PDF.
         output: PathBuf,
         /// Gid set as a comma list or range (`0..=255`, `0..256`, `0-255`).
         #[arg(long)]
@@ -52,7 +52,7 @@ pub fn run(args: Args) -> CliResult {
             let gids = parse_gid_spec(&gids)?;
             let t3 = sigilbuzz_pdf::emit_type3_font(&face, &gids);
 
-            // Plain-text dump. Each section is labelled so the consumer
+            // Plain-text dump. Each section is labeled so the consumer
             // can split it back out programmatically; CharProc bodies
             // are emitted as raw PDF content streams.
             let mut buf = String::new();

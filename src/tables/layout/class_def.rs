@@ -12,7 +12,7 @@
 //!
 //! # Formats
 //!
-//! ## Format 1 — dense
+//! ## Format 1: dense
 //!
 //! ```text
 //!   u16 classFormat = 1
@@ -24,7 +24,7 @@
 //! Looks up glyph `g` as `classValueArray[g - startGlyphID]` when
 //! `g` falls in the declared range; everything else is class 0.
 //!
-//! ## Format 2 — range-based
+//! ## Format 2: range-based
 //!
 //! ```text
 //!   u16 classFormat = 2
@@ -114,7 +114,7 @@ impl<'a> ClassDef<'a> {
     }
 
     /// Class value assigned to `glyph_id`. Returns `0` for glyphs
-    /// that are not listed — both formats treat unlisted glyphs as
+    /// that are not listed: both formats treat unlisted glyphs as
     /// the default class.
     #[must_use]
     pub fn class_of(&self, glyph_id: u16) -> u16 {

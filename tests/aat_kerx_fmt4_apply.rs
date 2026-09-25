@@ -1,4 +1,4 @@
-//! AAT `kerx` format-4 (control-point + anchor-point) — *apply*-path
+//! AAT `kerx` format-4 (control-point + anchor-point): *apply*-path
 //! end-to-end coverage.
 //!
 //! Format 4's apply path resolves anchor pairs to FUnit (dx, dy)
@@ -6,18 +6,18 @@
 //! action types exist; this file covers the two that need extra
 //! tables to resolve:
 //!
-//! 1. **Type 0 — control points**: pairs of glyf-point indices.
+//! 1. **Type 0 (control points)**: pairs of glyf-point indices.
 //!    `Face::glyph_points` returns each glyph's points in glyf-natural
 //!    order (contour points + 4 phantoms); the shaper looks up
 //!    `mark[mpi]` and `current[cpi]` and applies `mark - current`.
 //!
-//! 2. **Type 1 — anchor points**: pairs of `ankr` indices. The
+//! 2. **Type 1 (anchor points)**: pairs of `ankr` indices. The
 //!    `ankr` table resolves each `(gid, idx)` to a concrete (x, y);
 //!    same `mark - current` math.
 //!
 //! Both fixtures ship a state machine that fires action 0 on the
 //! "AB" pattern. The action records are crafted so the resolved
-//! offset is `(500, 0)` — large and asymmetric enough to be obvious
+//! offset is `(500, 0)`, large and asymmetric enough to be obvious
 //! in the assertion.
 //!
 //! Regenerate with `python3 tests/tools/build_aat_kerx_fmt4_apply_fixture.py`.
@@ -45,7 +45,7 @@ fn fmt4_type0_control_points_apply_offset_to_current_glyph() {
     // B: (500, 0).
     let glyphs = shape_text(AAT_KERX_FMT4_TYPE0, "AB");
     assert_eq!(glyphs.len(), 2);
-    assert_eq!(glyphs[0].x_offset, 0, "A is the marked glyph — no offset");
+    assert_eq!(glyphs[0].x_offset, 0, "A is the marked glyph, no offset");
     assert_eq!(glyphs[0].y_offset, 0);
     assert_eq!(
         glyphs[1].x_offset, 500,
@@ -56,7 +56,7 @@ fn fmt4_type0_control_points_apply_offset_to_current_glyph() {
 
 #[test]
 fn fmt4_type0_skips_when_no_pair_match() {
-    // "BB" — class 5 in state 0 falls to entry 0 (noop). No action
+    // "BB": class 5 in state 0 falls to entry 0 (noop). No action
     // fires; B keeps its untouched (x_offset, y_offset).
     let glyphs = shape_text(AAT_KERX_FMT4_TYPE0, "BB");
     assert_eq!(glyphs.len(), 2);
@@ -66,7 +66,7 @@ fn fmt4_type0_skips_when_no_pair_match() {
 
 #[test]
 fn fmt4_type0_advance_is_unaffected() {
-    // Format 4 uses the *positioning offset*, not the advance — the
+    // Format 4 uses the *positioning offset*, not the advance. The
     // pen still moves by the glyph's hmtx width. Both glyphs are
     // 500-wide rectangles, so each advance stays at 500.
     let glyphs = shape_text(AAT_KERX_FMT4_TYPE0, "AB");
@@ -76,7 +76,7 @@ fn fmt4_type0_advance_is_unaffected() {
 
 #[test]
 fn fmt4_type1_anchor_points_apply_offset_to_current_glyph() {
-    // ankr: A→anchor 0 at (500, 0), B→anchor 0 at (0, 0). Action
+    // ankr: A->anchor 0 at (500, 0), B->anchor 0 at (0, 0). Action
     // record references both index 0. Expected B offset = (500, 0).
     let glyphs = shape_text(AAT_KERX_FMT4_TYPE1, "AB");
     assert_eq!(glyphs.len(), 2);

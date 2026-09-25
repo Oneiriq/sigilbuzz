@@ -11,7 +11,7 @@
 //!
 //! For every VARC-covered gid in the kept set, walk the component
 //! records and pull each referenced gid into the kept set. Iterate to
-//! a fixed point — pulled-in gids may themselves be VARC-covered, and
+//! a fixed point: pulled-in gids may themselves be VARC-covered, and
 //! so on. The walk caps recursion at 64 levels (the same hard cap the
 //! parser uses against malicious cycles).
 //!
@@ -67,13 +67,13 @@ const MAX_VARC_DEPTH: usize = 64;
 /// VARC-covered gid already in the set. Iterates to a fixed point so
 /// references to other VARC-covered gids cascade.
 ///
-/// Tolerates malformed records silently — a single bad component record
+/// Tolerates malformed records silently. A single bad component record
 /// should not stop the closure walk.
 ///
-/// `BTreeSet` flavour: used by callers that already model the kept set
+/// `BTreeSet` flavor: used by callers that already model the kept set
 /// as a sorted set; the closure driver uses [`varc_closure_bitset`] for
 /// the existing `Vec<bool>` representation.
-#[allow(dead_code)] // public API surface — the in-tree driver uses the bitset variant
+#[allow(dead_code)] // public API surface. The in-tree driver uses the bitset variant
 pub(crate) fn varc_closure(face: &Face<'_>, kept: &mut BTreeSet<GlyphId>) {
     let Ok(Some(varc)) = face.varc() else {
         return;
@@ -108,7 +108,7 @@ pub(crate) fn varc_closure(face: &Face<'_>, kept: &mut BTreeSet<GlyphId>) {
     }
 }
 
-/// `Vec<bool>` flavour of the closure walk — wires into the existing
+/// `Vec<bool>` flavor of the closure walk. Wires into the existing
 /// closure driver in [`crate::closure`] which uses a bitset keyed by
 /// gid. Same fixed-point iteration as [`varc_closure`].
 pub(crate) fn varc_closure_bitset(face: &Face<'_>, keep: &mut [bool]) {
@@ -164,7 +164,7 @@ pub(crate) fn varc_closure_bitset(face: &Face<'_>, keep: &mut [bool]) {
 /// unreferenced delta-set entry (and collapses subtables that become
 /// empty), re-emits the MVS, and rewrites the surviving records'
 /// `MultiVarIdx` slots through the remap. ConditionList and
-/// AxisIndicesList are still preserved verbatim — pruning those is a
+/// AxisIndicesList are still preserved verbatim. Pruning those is a
 /// future follow-up.
 pub(crate) fn subset_varc(
     src_varc: &Varc<'_>,
@@ -172,7 +172,7 @@ pub(crate) fn subset_varc(
     kept_gids: &[GlyphId],
     new_gid_for: &dyn Fn(GlyphId) -> Option<GlyphId>,
 ) -> Result<Option<Vec<u8>>, SubsetError> {
-    let _ = src_varc; // signature compatibility — we re-parse the raw bytes
+    let _ = src_varc; // signature compatibility: we re-parse the raw bytes
     let parsed = ParsedVarc::parse(src_bytes)
         .map_err(|_| SubsetError::Unsupported("VARC malformed during subset"))?;
 
@@ -187,7 +187,7 @@ pub(crate) fn subset_varc(
     }
 
     if surviving.is_empty() {
-        // No kept gid is VARC-covered → drop the whole table.
+        // No kept gid is VARC-covered: drop the whole table.
         return Ok(None);
     }
 
@@ -363,7 +363,7 @@ fn build_cff2_index(entries: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
-/// Internal lightweight parse of a VARC table — enumerates coverage
+/// Internal lightweight parse of a VARC table: enumerates coverage
 /// entries, glyph records, and exposes the byte ranges of the
 /// pass-through blocks (MultiVarStore / ConditionList / AxisIndicesList).
 struct ParsedVarc<'a> {
@@ -712,7 +712,7 @@ fn parse_cff2_index(block: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
 /// indexes are renumbered through the remap.
 ///
 /// Tolerates a source `referenced` set that names entries the source
-/// MVS doesn't actually have — those are silently skipped, but they
+/// MVS doesn't actually have. Those are silently skipped, but they
 /// won't appear in the remap either, so the caller's
 /// [`rewrite_component_record`] will surface the orphan via the
 /// `Unsupported` path.
@@ -755,7 +755,7 @@ fn prune_multi_var_store(
         if kept_pairs.is_empty() {
             continue;
         }
-        // Sorted by inner index — kept_inners is a BTreeSet so already
+        // Sorted by inner index: kept_inners is a BTreeSet so already
         // ascending; re-sort defensively in case future paths feed
         // unsorted refs in.
         kept_pairs.sort_by_key(|(i, _)| *i);
@@ -791,24 +791,24 @@ fn prune_multi_var_store(
     // index points past the source region list would normally be
     // surfaced by the parser, but we re-check here and skip such
     // entries during region collection. Skipping is safer than failing
-    // — the resulting subtable simply carries no contribution from
-    // that region, mirroring the parser's tolerant behaviour.
+    // because the resulting subtable simply carries no contribution from
+    // that region, mirroring the parser's tolerant behavior.
     let referenced_regions = collect_referenced_regions(&new_subtables);
     let src_regions = parse_region_list(&parsed.region_list_bytes)
         .map_err(|_| SubsetError::Unsupported("VARC MVS region list malformed during prune"))?;
 
-    // Region remap: old region index → new region index. Built by
+    // Region remap: old region index -> new region index. Built by
     // walking referenced regions in ascending order so the new region
-    // list preserves source order — that keeps output bytes stable for
+    // list preserves source order. That keeps output bytes stable for
     // round-trip determinism.
     let mut region_remap: BTreeMap<u16, u16> = BTreeMap::new();
     let mut kept_region_payloads: Vec<&[u8]> = Vec::new();
     for &old_ri in &referenced_regions {
         let Some(payload) = src_regions.get(old_ri as usize).copied() else {
-            // Source's tuple referenced a region that doesn't exist —
+            // Source's tuple referenced a region that doesn't exist:
             // skip it. The subtable's region_indexes will be filtered
             // below and the region effectively contributes zero, which
-            // matches the parser's behaviour for an OOB region.
+            // matches the parser's behavior for an OOB region.
             continue;
         };
         #[allow(clippy::cast_possible_truncation)]
@@ -818,7 +818,7 @@ fn prune_multi_var_store(
     }
 
     // Renumber each surviving subtable's region_indexes through the
-    // remap. Drop indexes that lacked a kept region (defensive — if a
+    // remap. Drop indexes that lacked a kept region (defensive: if a
     // subtable ends up with zero region indexes after this filter,
     // every region it referenced was orphaned, which shouldn't happen
     // when the subtable prune is correct; we drop the subtable in that
@@ -833,7 +833,7 @@ fn prune_multi_var_store(
             }
         }
         if new_region_indexes.is_empty() {
-            // Defensive collapse — see comment above.
+            // Defensive collapse: see comment above.
             continue;
         }
         #[allow(clippy::cast_possible_truncation)]
@@ -850,8 +850,8 @@ fn prune_multi_var_store(
     // If a subtable was dropped during the region collapse, fold the
     // outer-index shift into the existing `(outer, inner)` remap so the
     // record-rewrite path sees the final outer indices. In practice
-    // this branch is dead — the subtable prune above already drops
-    // empty subtables — but guards against future edits where a
+    // this branch is dead (the subtable prune above already drops
+    // empty subtables) but guards against future edits where a
     // subtable could survive subtable pruning yet collapse here.
     if !outer_remap_collapse.is_empty() {
         for (_, (no, _)) in remap.iter_mut() {
@@ -862,7 +862,7 @@ fn prune_multi_var_store(
     }
 
     if pruned_subtables.is_empty() {
-        // Every subtable's regions were orphaned — the MVS becomes
+        // Every subtable's regions were orphaned. The MVS becomes
         // effectively region-less and contributes nothing. Drop it
         // entirely so the caller emits no varStore offset.
         return Ok((BTreeMap::new(), None));
@@ -916,7 +916,7 @@ struct RewrittenMvsSubtable {
 
 /// Walks every surviving subtable's `region_indexes` and returns the
 /// set of regions any tuple still references. Drives the region list
-/// prune — anything not in this set is unreachable after the MVS
+/// prune: anything not in this set is unreachable after the MVS
 /// subtable prune and can be dropped.
 fn collect_referenced_regions(subtables: &[RewrittenMvsSubtable]) -> BTreeSet<u16> {
     let mut out: BTreeSet<u16> = BTreeSet::new();
@@ -930,7 +930,7 @@ fn collect_referenced_regions(subtables: &[RewrittenMvsSubtable]) -> BTreeSet<u1
 
 /// Parses an MVS region-list block into one byte slice per region. The
 /// returned slices cover each region's body (`u16 axisCount` + axis
-/// triples) — they're spliced verbatim into the new region list, so the
+/// triples). They're spliced verbatim into the new region list, so the
 /// pruner doesn't need to decode F2DOT14 coords.
 ///
 /// The block layout (mirrors `src/tables/multi_var_store.rs`):
@@ -984,7 +984,7 @@ fn parse_region_list(bytes: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
             return Err("MVS region axes truncated");
         }
         // Trim any trailing padding the source may have between
-        // regions — emit only the region's structural bytes so the
+        // regions: emit only the region's structural bytes so the
         // rewriter produces a tightly-packed region list.
         regions.push(&region[..need]);
     }
@@ -995,7 +995,7 @@ fn parse_region_list(bytes: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
 /// in `src/tables/multi_var_store.rs`. We keep references to the
 /// region-list bytes so the rewriter can splice them back in verbatim.
 struct ParsedMvs<'a> {
-    /// Bytes of the region list block — header (regionCount + offset
+    /// Bytes of the region list block: header (regionCount + offset
     /// table) + every region payload, concatenated as in the source.
     /// The pruner re-emits these as-is.
     region_list_bytes: Vec<u8>,
@@ -1029,7 +1029,7 @@ impl<'a> ParsedMvs<'a> {
             subtable_offsets.push(v);
         }
 
-        // Region list — bytes from `region_list_off` to the start of
+        // Region list: bytes from `region_list_off` to the start of
         // the next block. The region list contains its own offset
         // array; for the pruner we don't need to decode regions, just
         // capture the byte range.
@@ -1168,7 +1168,7 @@ fn emit_multi_var_store(region_list_bytes: &[u8], subtables: &[RewrittenMvsSubta
 }
 
 /// Walks a single VarComposite glyph record and yields the gid of every
-/// component. Tolerates malformed records by stopping mid-walk — the
+/// component. Tolerates malformed records by stopping mid-walk. The
 /// caller treats that as "no further components in this record."
 fn walk_component_gids(record: &[u8]) -> Vec<GlyphId> {
     let mut out: Vec<GlyphId> = Vec::new();
@@ -1191,10 +1191,10 @@ fn walk_component_gids(record: &[u8]) -> Vec<GlyphId> {
 }
 
 /// Walks a single VarComposite glyph record and yields every
-/// MultiVarIdx referenced by its component records — both transform
+/// MultiVarIdx referenced by its component records: both transform
 /// deltas (`VC_TRANSFORM_HAS_VARIATION`) and axis-coord deltas
 /// (`VC_AXIS_VALUES_HAVE_VARIATION`). Each value is split into its
-/// outer/inner halves (high 16 bits → outer, low 16 → inner).
+/// outer/inner halves (high 16 bits -> outer, low 16 -> inner).
 ///
 /// Tolerates malformed records by stopping mid-walk, mirroring
 /// [`walk_component_gids`].
@@ -1225,12 +1225,12 @@ fn walk_component_var_idxs(record: &[u8]) -> Vec<(u16, u16)> {
 struct ComponentInfo {
     /// Source-file gid this component points at.
     gid: GlyphId,
-    /// Byte range inside the record where the gid lives — the rewrite
+    /// Byte range inside the record where the gid lives. The rewrite
     /// path uses these bounds to splice in the new gid.
     gid_range: (usize, usize),
     /// True when the gid was encoded as 24 bits (VC_GID_IS_24BIT). The
     /// rewrite path keeps this width even if the new gid would fit in
-    /// 16 bits — that's a future compaction follow-up and would
+    /// 16 bits. That's a future compaction follow-up and would
     /// otherwise risk shifting subsequent component records.
     gid_is_24bit: bool,
     /// Byte range + old value of the axis-values MultiVarIdx, when
@@ -1260,7 +1260,7 @@ fn parse_one_component(record: &[u8], start: usize) -> Option<(ComponentInfo, us
         // sigilbuzz uses u16 gids throughout; a u24 source gid > 0xFFFF
         // would silently truncate to its low 16 bits and lie about the
         // reference graph (#196). Treat it as a malformed component and
-        // bail — the walker's caller treats `None` as "no further
+        // bail. The walker's caller treats `None` as "no further
         // components in this record" and skips it tolerantly.
         if g > u32::from(u16::MAX) {
             return None;
@@ -1287,7 +1287,7 @@ fn parse_one_component(record: &[u8], start: usize) -> Option<(ComponentInfo, us
         let (_axis_indices_index, n) = read_uint32var(record, cur)?;
         cur = n;
         // axisValues is a TupleValues stream. We consume one run-control
-        // + payload — VARC's writers emit a single run per axisValues
+        // + payload. VARC's writers emit a single run per axisValues
         // covering every axis the component touches.
         let n = consume_tuple_values_one_run(record, cur)?;
         cur = n;
@@ -1439,7 +1439,7 @@ fn read_uint32var(data: &[u8], off: usize) -> Option<(u32, usize)> {
 /// new-gid namespace. Walks the record with [`parse_one_component`] to
 /// find each component's gid byte range, then splices the new gid in
 /// place. The rewritten record has the same length unless the gid
-/// encoding width changes — today we keep the width identical (24-bit
+/// encoding width changes. Today we keep the width identical (24-bit
 /// stays 24-bit) for byte-stable output.
 ///
 /// Test-only thin wrapper around [`rewrite_component_record`] with an
@@ -1457,7 +1457,7 @@ fn rewrite_component_gids(
 /// picking the smallest form that fits. Mirrors `read_uint32var` in
 /// `src/tables/varc.rs`.
 ///
-/// Returns the encoded bytes (1–5 bytes long).
+/// Returns the encoded bytes (1-5 bytes long).
 fn encode_uint32var(v: u32) -> Vec<u8> {
     if v <= 0x7F {
         #[allow(clippy::cast_possible_truncation)]
@@ -1493,7 +1493,7 @@ fn encode_uint32var(v: u32) -> Vec<u8> {
 ///
 /// - Every component gid is renumbered through `new_gid_for`.
 /// - Every `MultiVarIdx` (transform deltas + axis-values deltas) is
-///   remapped through `var_idx_remap` — the closure takes
+///   remapped through `var_idx_remap`. The closure takes
 ///   `(outer, inner)` halves of the source `MultiVarIdx` and returns
 ///   the new halves, or `None` when the entry was unreferenced and is
 ///   being dropped (a hard error in this path: every var-idx the walker
@@ -1748,7 +1748,7 @@ mod tests {
     #[test]
     fn rewrite_preserves_24bit_width() {
         // 24-bit gid must stay 24-bit on output even when the new gid
-        // would fit in 16 bits — keeps record byte length stable.
+        // would fit in 16 bits. Keeps record byte length stable.
         let mut record = Vec::new();
         record.push(0x90);
         record.push(0x00);
@@ -1762,7 +1762,7 @@ mod tests {
     #[test]
     fn rewrite_errors_when_kept_gid_lacks_mapping() {
         let rec = build_translate_record(7, 10, 20);
-        // Map returns None for the source gid → rewriter must error.
+        // Map returns None for the source gid, so rewriter must error.
         let map = |_: u16| None;
         let err = rewrite_component_gids(&rec, &map).unwrap_err();
         assert!(matches!(err, SubsetError::Unsupported(_)));
@@ -1777,8 +1777,8 @@ mod tests {
         // Two records: idx 0 covering gid 1 references gid 2; idx 1
         // covering gid 2 references gid 1.
         let cov = build_coverage(&[1, 2]);
-        let rec_a = build_translate_record(2, 0, 0); // gid 1 → gid 2
-        let rec_b = build_translate_record(1, 0, 0); // gid 2 → gid 1
+        let rec_a = build_translate_record(2, 0, 0); // gid 1 -> gid 2
+        let rec_b = build_translate_record(1, 0, 0); // gid 2 -> gid 1
         let bytes = build_varc(&[1, 2], &[&rec_a, &rec_b]);
         let _ = cov; // silence unused (build_varc constructs its own)
         let parsed = ParsedVarc::parse(&bytes).expect("parses");
@@ -1817,20 +1817,20 @@ mod tests {
     }
 
     /// Regression for #196: a 24-bit gid with a non-zero high byte
-    /// (>0xFFFF) used to truncate silently to its low 16 bits — the
+    /// (>0xFFFF) used to truncate silently to its low 16 bits. The
     /// closure walker would then claim a wrong glyph was referenced.
     /// The walker must skip such records cleanly instead of fabricating
     /// a fake gid in the kept set.
     #[test]
     fn walk_skips_24bit_gid_overflowing_u16() {
-        // VC_GID_IS_24BIT (1<<12 = 0x1000) → uint32var encoding is the
+        // VC_GID_IS_24BIT (1<<12 = 0x1000) -> uint32var encoding is the
         // two-byte form (0x80..=0xBF first byte): 0x90, 0x00.
-        // 24-bit gid 0x010005 — high byte non-zero, doesn't fit u16.
+        // 24-bit gid 0x010005: high byte non-zero, doesn't fit u16.
         let mut record = Vec::new();
         record.push(0x90);
         record.push(0x00);
         record.extend_from_slice(&[0x01, 0x00, 0x05]);
-        // Walker must NOT yield 0x0005 (the truncated low bits) — that
+        // Walker must NOT yield 0x0005 (the truncated low bits). That
         // would lie about the source's reference graph.
         let gids = walk_component_gids(&record);
         assert!(
@@ -1851,7 +1851,7 @@ mod tests {
 
     #[test]
     fn subset_drops_table_when_no_covered_gid_kept() {
-        // Coverage covers gid 5 only; kept set has only gid 2 → drop.
+        // Coverage covers gid 5 only; kept set has only gid 2 -> drop.
         let rec = build_translate_record(7, 0, 0);
         let bytes = build_varc(&[5], &[&rec]);
         let varc = sigilbuzz::tables::Varc::parse(&bytes).unwrap();
@@ -1866,7 +1866,7 @@ mod tests {
         let rec = build_translate_record(7, 10, 20);
         let bytes = build_varc(&[5], &[&rec]);
         let varc = sigilbuzz::tables::Varc::parse(&bytes).unwrap();
-        // Map old gid 5 → new gid 1, old gid 7 (component) → new gid 2.
+        // Map old gid 5 -> new gid 1, old gid 7 (component) -> new gid 2.
         let map = |g: u16| match g {
             5 => Some(1),
             7 => Some(2),

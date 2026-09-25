@@ -1,7 +1,7 @@
 //! Variable-font subsetting round-trip tests.
 //!
 //! Verify that subsetting a variable font with `retain_variations =
-//! true` (the default) preserves the per-glyph variation behaviour
+//! true` (the default) preserves the per-glyph variation behavior
 //! through the new gid namespace:
 //!
 //! - `gvar`: glyph outline deltas at non-default coords match the

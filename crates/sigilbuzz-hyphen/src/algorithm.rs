@@ -111,17 +111,17 @@ mod tests {
     /// single word. We cover only the patterns Liang's classic en-us
     /// set fires for "hyphenation":
     ///
-    /// - `hy3ph` — encourage break between hy and ph (gives `hy-phen`).
-    /// - `he2n` — discourage break before n.
-    /// - `hena4` — discourage even more strongly between n and a.
-    /// - `hen5at` — *strongly encourage* break between hen and at
+    /// - `hy3ph`: encourage break between hy and ph (gives `hy-phen`).
+    /// - `he2n`: discourage break before n.
+    /// - `hena4`: discourage even more strongly between n and a.
+    /// - `hen5at`: *strongly encourage* break between hen and at
     ///   (gives `phen-at` which combines with `hena4` to produce
     ///   the canonical `phen-a-tion`).
-    /// - `1na` — slight encourage before na (loses to hen5at).
-    /// - `n2at` — discourage before at.
-    /// - `1tio` — encourage before tio (gives `a-tion`).
-    /// - `2io` — discourage before io.
-    /// - `2on` — discourage before on.
+    /// - `1na`: slight encourage before na (loses to hen5at).
+    /// - `n2at`: discourage before at.
+    /// - `1tio`: encourage before tio (gives `a-tion`).
+    /// - `2io`: discourage before io.
+    /// - `2on`: discourage before on.
     fn small_en_patterns() -> Patterns {
         let text = "\
 hy3ph\n\

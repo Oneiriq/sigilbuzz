@@ -30,8 +30,8 @@ pub fn build(sfnt_version: u32, tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
 
     let num_tables = sorted.len() as u16;
     // Spec searchRange / entrySelector / rangeShift derivation. The
-    // values are informational only — every modern SFNT consumer
-    // ignores them — but emit them correctly anyway.
+    // values are informational only (every modern SFNT consumer
+    // ignores them), but emit them correctly anyway.
     let mut entry_selector: u16 = 0;
     let mut sr_pow: u16 = 1;
     while sr_pow * 2 <= num_tables {
@@ -108,7 +108,7 @@ pub fn build(sfnt_version: u32, tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
         let csa_off = head_off + 8;
         // First, zero out the field (we already wrote zero into the
         // table body for the per-table checksum, but the file-wide
-        // sum below assumes csa is currently zero — confirm by
+        // sum below assumes csa is currently zero. Confirm by
         // overwriting).
         if csa_off + 4 <= buf.len() {
             buf[csa_off..csa_off + 4].copy_from_slice(&0u32.to_be_bytes());
@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     fn checksum_handles_padding() {
-        // Five bytes: [0x01,0x02,0x03,0x04,0x05] →
+        // Five bytes: [0x01,0x02,0x03,0x04,0x05] ->
         //   word0 = 0x01020304
         //   word1 (padded) = 0x05000000
         //   sum = 0x06020304

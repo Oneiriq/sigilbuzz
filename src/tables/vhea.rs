@@ -1,4 +1,4 @@
-//! `vhea` — vertical header.
+//! `vhea`: vertical header.
 //!
 //! Symmetric with `hhea`: carries vertical line metrics plus the
 //! `numberOfLongVerMetrics` count that slices `vmtx` into its full-
@@ -7,15 +7,15 @@
 //! `vmtx` side by side.
 //!
 //! The spec has two versions: 1.0 (Apple Advanced Typography) and
-//! 1.1 (OpenType). The field at offsets 4..10 differs slightly —
+//! 1.1 (OpenType). The field at offsets 4..10 differs slightly:
 //! `ascent`/`descent`/`lineGap` in 1.1 vs. `vertTypoAscender` et al.
-//! in 1.0 — but the byte layout is identical, so sigilbuzz treats
+//! in 1.0, but the byte layout is identical, so sigilbuzz treats
 //! them uniformly and reads whichever version the font carries.
 
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
 
-/// The parsed `vhea` table — only the fields a shaper needs.
+/// The parsed `vhea` table: only the fields a shaper needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Vhea {
     /// Distance from the centerline to the previous line's
@@ -57,7 +57,7 @@ impl Vhea {
         let line_gap = r.read_i16()?;
 
         // advanceHeightMax, minTopSideBearing, minBottomSideBearing,
-        // yMaxExtent, caretSlopeRise, caretSlopeRun, caretOffset —
+        // yMaxExtent, caretSlopeRise, caretSlopeRun, caretOffset:
         // seven u16/i16 we don't consume yet.
         r.skip(2 * 7)?;
         // Four i16 reserved fields.

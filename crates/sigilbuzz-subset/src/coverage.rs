@@ -13,15 +13,15 @@
 //! subset where every kept gid in 1..N is covered) collapses to a
 //! single 6-byte range that beats Format 1 once N >= 4.
 //!
-//! The two helpers below — [`emit_coverage_from_pairs`] and
-//! [`emit_coverage_from_glyphs`] — produce byte-deterministic output
+//! The two helpers below, [`emit_coverage_from_pairs`] and
+//! [`emit_coverage_from_glyphs`], produce byte-deterministic output
 //! and never allocate beyond the returned `Vec<u8>`.
 
 use alloc::vec::Vec;
 
 /// Emits a Coverage table for the given `(new_gid, coverage_index)`
 /// pairs. Pairs may be in any order on the way in; the function sorts
-/// internally and the resulting Coverage is normalised.
+/// internally and the resulting Coverage is normalized.
 ///
 /// `coverage_index` corresponds to the slot in any parallel array
 /// (e.g. `LigatureSet[]`, `MarkRecord[]`) the caller intends to emit
@@ -35,7 +35,7 @@ pub fn emit_coverage_from_pairs(pairs: &[(u16, u16)]) -> Vec<u8> {
 }
 
 /// Convenience for the case where coverage indices are simply
-/// `0..glyphs.len()` after sorting — i.e. the caller does not have
+/// `0..glyphs.len()` after sorting, i.e. the caller does not have
 /// any parallel array or wants the indices to follow the gids' sort
 /// order. Equivalent to calling [`emit_coverage_from_pairs`] with
 /// `(g, i)` pairs derived from the sorted gid list.
@@ -100,7 +100,7 @@ fn emit_format1(sorted: &[(u16, u16)]) -> Vec<u8> {
         .enumerate()
         .all(|(i, &(_, idx))| idx as usize == i);
     if !identity {
-        // Synthesise a single big Format 2 list.
+        // Synthesize a single big Format 2 list.
         let ranges: Vec<(u16, u16, u16)> = sorted.iter().map(|&(g, i)| (g, g, i)).collect();
         return emit_format2(&ranges);
     }
@@ -183,7 +183,7 @@ mod tests {
         // (gid, idx) pairs that don't form a 0..N sequence after
         // sorting must encode as format 2 to preserve the indices.
         let bytes = emit_coverage_from_pairs(&[(10, 5), (20, 6), (30, 7)]);
-        // 10..=10 idx 5, 20..=20 idx 6, 30..=30 idx 7 — three ranges,
+        // 10..=10 idx 5, 20..=20 idx 6, 30..=30 idx 7: three ranges,
         // not a single contiguous one (gids skip).
         let cov = Coverage::parse(&bytes).unwrap();
         assert_eq!(cov.index_of(10), Some(5));
@@ -207,14 +207,14 @@ mod tests {
         // Three consecutive gids with consecutive non-zero-start
         // indices fold into one Format 2 range of 10 bytes. The
         // size heuristic used to pick Format 1 (also 10 bytes), but
-        // Format 1 implies index == position-in-array — which fails
-        // here — and the fallback re-emits each pair as its own
+        // Format 1 implies index == position-in-array, which fails
+        // here, and the fallback re-emits each pair as its own
         // single-gid Format 2 range, producing 22 bytes.
         let bytes = emit_coverage_from_pairs(&[(10, 5), (11, 6), (12, 7)]);
         assert_eq!(
             bytes.len(),
             10,
-            "expected single merged Format 2 range (10 bytes), got {} — \
+            "expected single merged Format 2 range (10 bytes), got {}: \
              format selection lost the merge opportunity for non-identity \
              but consecutive indices",
             bytes.len()

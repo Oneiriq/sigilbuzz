@@ -12,7 +12,7 @@
 //!
 //! 1. The subset re-parses as a CFF / CFF2 face on its own.
 //! 2. Every kept gid's advance survives the renumber.
-//! 3. (CFF2 only) Variation axis behaviour survives: shaping at the
+//! 3. (CFF2 only) Variation axis behavior survives: shaping at the
 //!    default and at the maxima of the `wght` axis through the
 //!    subset matches the source's at the same coords.
 
@@ -146,7 +146,7 @@ fn real_cff2_subset_round_trip() {
     // fixture (single `wght` axis spanning 200..900). Adobe's CFF2
     // builds use a single Font DICT and elide FDSelect (the CFF2 spec
     // marks FDSelect optional when only one FD applies); the parser
-    // synthesises an implicit "every gid → FD 0" mapping for that
+    // synthesizes an implicit "every gid -> FD 0" mapping for that
     // case so the non-identity rewriter handles it like any other
     // single-FD source. The non-identity round-trip lives in its own
     // test below; here we exercise the **identity-passthrough** path
@@ -159,7 +159,7 @@ fn real_cff2_subset_round_trip() {
     );
     let src_num_glyphs = face.maxp().unwrap().num_glyphs;
 
-    // Identity-passthrough requires every gid in the kept set —
+    // Identity-passthrough requires every gid in the kept set:
     // pass the full 0..N range so the closure's kept set equals the
     // source's identity.
     let all_gids: Vec<u16> = (0..src_num_glyphs).collect();
@@ -199,7 +199,7 @@ fn real_cff2_subset_round_trip() {
     let new_hvar_bytes = subset_face.table_bytes(tag::HVAR).unwrap();
     assert_eq!(src_hvar_bytes, new_hvar_bytes, "HVAR must pass through");
 
-    // Default-instance advances survive (trivially — bytes are
+    // Default-instance advances survive (trivially: bytes are
     // identical, but we still check via the public APIs to prove the
     // re-parse hits the same numbers).
     let src_hmtx = face.hmtx().unwrap();
@@ -257,7 +257,7 @@ fn real_cff2_subset_round_trip() {
         .any(|&ch| shape_one(&src_def, ch).1 != shape_one(&src_max, ch).1);
     assert!(
         any_changed,
-        "CFF2 fixture's wght axis is inert — fixture or shaper regression",
+        "CFF2 fixture's wght axis is inert: fixture or shaper regression",
     );
 }
 
@@ -269,7 +269,7 @@ fn real_cff_cid_subset_round_trip() {
     //
     // The fixture is a 2-FD CID font; cmap maps U+0041..U+0045 onto
     // five separate CID glyphs distributed across both FDs (gids 1..2
-    // → FD 0, gids 3..5 → FD 1). One charstring in FD 0 invokes a
+    // -> FD 0, gids 3..5 -> FD 1). One charstring in FD 0 invokes a
     // global subr; one charstring in FD 1 invokes its FD's local subr;
     // the round-trip exercises both per-FD Subr renumbering (#135) and
     // the cross-FD subroutine-keep-set machinery (#138).
@@ -345,7 +345,7 @@ fn real_cff_cid_subset_round_trip() {
 fn real_cff2_subset_non_identity_round_trip() {
     // Source Sans 3 VF, real Adobe CFF2 with single-FD elided
     // FDSelect. Subset to {A, B, C} on a non-identity gid map; the
-    // CFF2 rewriter must synthesise an explicit FDSelect format 0
+    // CFF2 rewriter must synthesize an explicit FDSelect format 0
     // for the rebuild and re-emit charstrings + local subrs +
     // FDArray under the new gid namespace.
     let face = Face::parse_bytes(SOURCE_SANS_3_VF, 0).expect("CFF2 source parses");
@@ -361,7 +361,7 @@ fn real_cff2_subset_non_identity_round_trip() {
         gids: kept_gids.clone(),
         retain_hints: false,
         drop_unhandled: true,
-        // Layout / variations off — the non-identity path drops
+        // Layout / variations off: the non-identity path drops
         // them today (matches the CFF1 non-identity flow).
         retain_layout: false,
         retain_variations: false,

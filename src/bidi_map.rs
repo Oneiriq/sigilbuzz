@@ -6,7 +6,7 @@
 //! string. That is correct for rendering but useless on its own for
 //! editing: a caret lives at a byte offset in the *logical* (source)
 //! string, and hit-testing produces a visual position. [`BidiMap`] is
-//! the bridge — it records, for every character, where it sits in
+//! the bridge: it records, for every character, where it sits in
 //! both orders, so consumers can translate cluster values back to
 //! source offsets (`visual_to_logical`) and caret offsets forward to
 //! visual positions (`logical_to_visual`).
@@ -42,14 +42,14 @@ use crate::unicode::bidi::BidiInfo;
 /// Build one with [`BidiMap::new`] (or receive one from
 /// [`crate::Buffer::bidi_map`] after
 /// [`crate::Buffer::set_text_bidi`]). Lookups round byte offsets
-/// down to the containing character, so any in-character byte — in
-/// particular any `cluster` value — resolves to that character's
+/// down to the containing character, so any in-character byte (in
+/// particular any `cluster` value) resolves to that character's
 /// first byte.
 ///
 /// The visual-side offsets match [`crate::Glyph::cluster`] values as
 /// long as the shaper saw the buffer text unchanged. The opt-in NFC
 /// pass ([`crate::Buffer::set_normalize_nfc`]) can shorten the text
-/// it shapes, shifting cluster offsets after any composed pair —
+/// it shapes, shifting cluster offsets after any composed pair:
 /// feed precomposed input (or leave NFC off) when combining it with
 /// bidi mapping.
 #[derive(Debug, Clone)]
@@ -93,7 +93,7 @@ impl BidiMap {
     /// Builds the map from a precomputed visual-order permutation.
     ///
     /// `order` must be the value of [`BidiInfo::reorder`] for this
-    /// exact `text` / `info` pair — callers that already reordered
+    /// exact `text` / `info` pair. Callers that already reordered
     /// the string (like [`crate::Buffer::set_text_bidi`]) pass it in
     /// so the L2 pass runs once.
     ///
@@ -174,15 +174,15 @@ impl BidiMap {
     }
 
     /// True when the visual order equals the logical order (no
-    /// reordering happened — pure-LTR input). Consumers can skip
+    /// reordering happened, pure-LTR input). Consumers can skip
     /// mapping entirely in that case.
     #[must_use]
     pub const fn is_identity(&self) -> bool {
         self.identity
     }
 
-    /// Maps a byte offset in the visual (reordered) string — e.g. a
-    /// [`crate::Glyph::cluster`] value — to the byte offset of the
+    /// Maps a byte offset in the visual (reordered) string (e.g. a
+    /// [`crate::Glyph::cluster`] value) to the byte offset of the
     /// same character in the logical (source) string.
     ///
     /// The offset is rounded down to the containing character's
@@ -209,7 +209,7 @@ impl BidiMap {
 
     /// Embedding level (post L1) of the character containing the
     /// given byte offset in the visual string. Odd levels are
-    /// right-to-left — the signal caret math needs to pick which
+    /// right-to-left: the signal caret math needs to pick which
     /// side of a glyph a boundary caret sits on.
     #[must_use]
     pub fn level_at_visual(&self, visual_byte: usize) -> Option<u8> {
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn mixed_run_maps_chars_to_equal_chars() {
         // The character AT the visual offset must be the character AT
-        // the mapped logical offset — the map is a permutation of the
+        // the mapped logical offset. The map is a permutation of the
         // same characters.
         let text = "ab \u{05D0}\u{05D1} cd";
         let info = BidiInfo::new(text, None);

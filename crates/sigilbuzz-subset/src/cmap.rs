@@ -7,7 +7,7 @@
 //! record.
 //!
 //! Format 4 covers the BMP only. Subset fonts that need astral-plane
-//! coverage will require a format-12 emitter alongside this — left as
+//! coverage will require a format-12 emitter alongside this, left as
 //! a TODO; bundled fixtures (Open Sans, Amiri) are BMP-only.
 
 use alloc::vec::Vec;
@@ -36,7 +36,7 @@ pub fn subset_cmap(face: &Face<'_>, gid_map: &[(u16, u16)]) -> Result<Vec<u8>, S
 
     let mut entries: Vec<(u16, u16)> = Vec::new(); // (codepoint, new_gid)
     for cp in 0u32..=0xFFFF {
-        // Skip surrogates — never legal in cmap input.
+        // Skip surrogates: never legal in cmap input.
         if (0xD800..=0xDFFF).contains(&cp) {
             continue;
         }
@@ -56,7 +56,7 @@ pub fn subset_cmap(face: &Face<'_>, gid_map: &[(u16, u16)]) -> Result<Vec<u8>, S
 
     // Build segments. A segment is a run of codepoints with a
     // constant `new_gid - codepoint` delta. Each break in continuity
-    // — whether on codepoint or delta — starts a new segment.
+    // (whether on codepoint or delta) starts a new segment.
     let mut segments: Vec<(u16, u16, i32)> = Vec::new(); // (start, end, delta)
     for (cp, gid) in entries {
         let delta = gid as i32 - cp as i32;
@@ -70,7 +70,7 @@ pub fn subset_cmap(face: &Face<'_>, gid_map: &[(u16, u16)]) -> Result<Vec<u8>, S
     }
 
     // Append the spec-mandated terminator: startCode = endCode = 0xFFFF,
-    // idDelta arbitrary (we use 1 → wraps to 0 for codepoint 0xFFFF,
+    // idDelta arbitrary (we use 1 -> wraps to 0 for codepoint 0xFFFF,
     // i.e. the `.notdef` slot, which is the conventional choice).
     segments.push((0xFFFF, 0xFFFF, 1));
 
@@ -79,7 +79,7 @@ pub fn subset_cmap(face: &Face<'_>, gid_map: &[(u16, u16)]) -> Result<Vec<u8>, S
 }
 
 /// Wraps a single subtable in a `cmap` table header with one
-/// (platform=3, encoding=1 — Windows BMP) encoding record.
+/// (platform=3, encoding=1: Windows BMP) encoding record.
 fn wrap_cmap(subtable: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + 8 + subtable.len());
     out.extend_from_slice(&0u16.to_be_bytes()); // version
@@ -100,12 +100,12 @@ fn build_format4(segments: &[(u16, u16, i32)]) -> Vec<u8> {
     let seg_count_x2 = (seg_count * 2) as u16;
     // Header: format(2) + length(2) + language(2) + segCountX2(2) +
     //         searchRange(2) + entrySelector(2) + rangeShift(2) = 14
-    // Body: 4 × segCount × u16 + 1 reservedPad u16 = 8 * seg_count + 2.
+    // Body: 4 * segCount * u16 + 1 reservedPad u16 = 8 * seg_count + 2.
     let body_bytes = 8 * seg_count + 2;
     let total = 14 + body_bytes;
 
     // Ceil-log2(seg_count). Format 4's searchRange / entrySelector
-    // are derived from the largest power of two ≤ seg_count, scaled
+    // are derived from the largest power of two <= seg_count, scaled
     // by 2. We compute it longhand because sigilbuzz is no_std.
     let mut entry_selector: u16 = 0;
     let mut sr_pow: u16 = 1;

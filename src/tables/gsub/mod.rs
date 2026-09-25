@@ -1,10 +1,10 @@
-//! `GSUB` — Glyph Substitution.
+//! `GSUB`: Glyph Substitution.
 //!
 //! Rewrites the glyph stream before positioning: ligature
 //! substitution replaces `(f, i)` with `ﬁ`, contextual alternates
-//! pick different glyph shapes based on neighbours, and so on.
+//! pick different glyph shapes based on neighbors, and so on.
 //! sigilbuzz at M2 ships lookup type 4 (ligature substitution)
-//! only — the scaffolding for more types lives here.
+//! only. The scaffolding for more types lives here.
 //!
 //! The table header is identical to GPOS's: version + offsets to
 //! `ScriptList`, `FeatureList`, and `LookupList`. Each lookup's
@@ -35,19 +35,19 @@ pub use single::Single;
 pub mod lookup_type {
     /// Single substitution. Deferred.
     pub const SINGLE: u16 = 1;
-    /// Multiple substitution (one → many). Deferred.
+    /// Multiple substitution (one -> many). Deferred.
     pub const MULTIPLE: u16 = 2;
-    /// Alternate substitution (one → choice of alternates). Deferred.
+    /// Alternate substitution (one -> choice of alternates). Deferred.
     pub const ALTERNATE: u16 = 3;
-    /// Ligature substitution (many → one) — implemented.
+    /// Ligature substitution (many -> one). Implemented.
     pub const LIGATURE: u16 = 4;
-    /// Contextual substitution — implemented for formats 1, 2, 3.
+    /// Contextual substitution. Implemented for formats 1, 2, 3.
     pub const CONTEXT: u16 = 5;
-    /// Chained contextual substitution — implemented for formats 1, 2, 3.
+    /// Chained contextual substitution. Implemented for formats 1, 2, 3.
     pub const CHAINED_CONTEXT: u16 = 6;
-    /// Extension substitution — forwards to another lookup type.
+    /// Extension substitution: forwards to another lookup type.
     pub const EXTENSION: u16 = 7;
-    /// Reverse chained contextual single substitution — implemented.
+    /// Reverse chained contextual single substitution. Implemented.
     pub const REVERSE_CHAINED: u16 = 8;
 }
 

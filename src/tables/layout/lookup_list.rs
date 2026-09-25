@@ -1,4 +1,4 @@
-//! OpenType `LookupList` — the catalogue of lookups that features
+//! OpenType `LookupList`: the catalog of lookups that features
 //! reference.
 //!
 //! ```text
@@ -138,7 +138,7 @@ impl<'a> Lookup<'a> {
         })
     }
 
-    /// Lookup type (1-9 in GSUB, 1-9 in GPOS — meanings differ).
+    /// Lookup type (1-9 in GSUB, 1-9 in GPOS, meanings differ).
     #[must_use]
     pub const fn lookup_type(&self) -> u16 {
         self.lookup_type
@@ -165,7 +165,7 @@ impl<'a> Lookup<'a> {
 
     /// Returns the raw subtable byte slice starting at subtable
     /// `index`, extending to the end of the container table. The
-    /// caller — a type-specific parser — decides how many bytes it
+    /// caller (a type-specific parser) decides how many bytes it
     /// needs.
     #[must_use]
     pub fn subtable_bytes(&self, index: u16) -> Option<&'a [u8]> {
@@ -239,7 +239,7 @@ mod tests {
         assert!(lookup.mark_filtering_set().is_none());
         let subtable = lookup.subtable_bytes(0).unwrap();
         // `subtable_bytes` returns a slice that *starts at* the
-        // subtable — the caller reads what it needs.
+        // subtable. The caller reads what it needs.
         assert_eq!(&subtable[..3], &sub);
     }
 
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn mark_filtering_set_read_when_flag_set() {
         let sub = [0u8; 2];
-        // Flag 0x0010 → USE_MARK_FILTERING_SET.
+        // Flag 0x0010 -> USE_MARK_FILTERING_SET.
         let bytes = build_lookup_list(&[(4, 0x0010, &[&sub])]);
         let ll = LookupList::parse(&bytes).unwrap();
         let lookup = ll.get(0).unwrap();

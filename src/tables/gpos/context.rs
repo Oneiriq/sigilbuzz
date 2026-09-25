@@ -1,9 +1,9 @@
-//! GPOS lookup type 7 — Contextual Positioning.
+//! GPOS lookup type 7: Contextual Positioning.
 //!
 //! Same three-format shape as GSUB type 5: a contextual match drives
 //! a list of `(sequenceIndex, lookupListIndex)` nested positioning
 //! lookups. The match logic is identical to GSUB because the shared
-//! `tables::layout::context` module is GSUB/GPOS agnostic — the only
+//! `tables::layout::context` module is GSUB/GPOS agnostic. The only
 //! thing that changes is which dispatcher runs on a hit.
 
 use crate::error::{Error, Result};
@@ -13,11 +13,11 @@ use crate::tables::parse::Reader;
 /// A parsed GPOS type-7 contextual-positioning subtable.
 #[derive(Debug, Clone)]
 pub enum ContextPos<'a> {
-    /// Format 1 — glyph-based.
+    /// Format 1: glyph-based.
     Format1(Context1<'a>),
-    /// Format 2 — class-based.
+    /// Format 2: class-based.
     Format2(Context2<'a>),
-    /// Format 3 — coverage-based.
+    /// Format 3: coverage-based.
     Format3(Context3<'a>),
 }
 

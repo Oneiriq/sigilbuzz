@@ -1,9 +1,9 @@
-//! Font — a [`Face`] scaled to a particular size.
+//! Font: a [`Face`] scaled to a particular size.
 //!
 //! Metrics queries go through `Font` rather than `Face` because they
 //! inherently depend on a point / pixel size. Beyond size, a `Font`
-//! may also carry a set of *normalized* variation-axis coordinates —
-//! one `f32` per axis in `[-1.0, 1.0]` — which the shaper uses to
+//! may also carry a set of *normalized* variation-axis coordinates,
+//! one `f32` per axis in `[-1.0, 1.0]`, which the shaper uses to
 //! pick the right advance widths (via HVAR) and, on the road map,
 //! outline deltas (via gvar).
 //!
@@ -41,7 +41,7 @@ impl<'a> Font<'a> {
     /// Creates a new font from a parsed face and a size.
     ///
     /// `size` is interpreted as a floating-point value in whatever
-    /// units the caller chooses — sigilbuzz scales by it and otherwise
+    /// units the caller chooses: sigilbuzz scales by it and otherwise
     /// does not care. Pixels are the conventional choice. The new
     /// font starts with no variation coords; see [`Font::with_coords`]
     /// to bind a variable-font instance.

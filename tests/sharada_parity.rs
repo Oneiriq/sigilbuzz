@@ -8,7 +8,7 @@
 //!
 //! The corpus exercises:
 //!
-//!   * single base consonants (SMP — U+11180..U+111DF)
+//!   * single base consonants (SMP: U+11180..U+111DF)
 //!   * consonant + above-base vowel sign (sign-i U+111B4)
 //!   * consonant + below-base vowel sign (sign-u U+111B6)
 //!   * consonant + post-base vowel sign (sign-aa U+111B3)
@@ -32,7 +32,7 @@ const CORPUS: &[Case] = &[
         note: "empty",
         compare_rustybuzz: true,
     },
-    // U+11192 — letter ka. Single base.
+    // U+11192: letter ka. Single base.
     Case {
         text: "\u{11192}",
         note: "ka alone",
@@ -44,7 +44,7 @@ const CORPUS: &[Case] = &[
         note: "kaa (ka + sign aa)",
         compare_rustybuzz: true,
     },
-    // ka + sign i (renders pre-base in Sharada — the USE reorder
+    // ka + sign i (renders pre-base in Sharada: the USE reorder
     // moves sign-i to before the base consonant).
     Case {
         text: "\u{11192}\u{111B4}",

@@ -1,4 +1,4 @@
-//! OpenType `FeatureList` — the middle layer between a language
+//! OpenType `FeatureList`: the middle layer between a language
 //! system's feature *indices* and the lookup list's lookups.
 //!
 //! ```text
@@ -114,7 +114,7 @@ impl<'a> Iterator for FeatureIter<'a> {
     }
 }
 
-/// A single feature — a list of lookup indices to apply when the
+/// A single feature: a list of lookup indices to apply when the
 /// feature is enabled.
 #[derive(Debug, Clone, Copy)]
 pub struct Feature<'a> {

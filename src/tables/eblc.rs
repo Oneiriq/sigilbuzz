@@ -1,9 +1,9 @@
-//! `EBLC` — Embedded Bitmap Location (Microsoft, monochrome).
+//! `EBLC`: Embedded Bitmap Location (Microsoft, monochrome).
 //!
 //! `EBLC` is the older, monochrome cousin of [`Cblc`](crate::tables::cblc::Cblc):
 //! same on-disk layout (BitmapSize records, IndexSubTableArray, index
 //! sub-table formats 1-5), only the expected payload format codes
-//! differ — `EBDT` carries 1-bit (and historically 2/4/8-bit) mask
+//! differ: `EBDT` carries 1-bit (and historically 2/4/8-bit) mask
 //! data, while `CBDT` carries PNG. The shared layout is why `EBLC`
 //! is implemented as a tag-only newtype around the `CBLC` parser:
 //! every byte is in the same place, so reusing the byte-level walk is
@@ -16,12 +16,12 @@
 //! [`Ebdt`](crate::tables::ebdt::Ebdt) decodes against. The
 //! `image_format` field in the location record is what distinguishes
 //! mono masks (`1..=9`) from CBDT's PNG payloads (`17..=19`); the
-//! data table is responsible for honouring the format dispatch.
+//! data table is responsible for honoring the format dispatch.
 
 use crate::error::Result;
 use crate::tables::cblc::{BitmapSize, CbdtLocation, Cblc};
 
-/// Parsed `EBLC` table. Structurally identical to `CBLC` — same
+/// Parsed `EBLC` table. Structurally identical to `CBLC`: same
 /// header, same BitmapSize records, same index sub-table formats.
 /// Wraps the shared parser so the two stay byte-identical.
 #[derive(Debug, Clone, Copy)]
@@ -59,7 +59,7 @@ impl<'a> Eblc<'a> {
     /// Picks the strike whose `ppem_y` is closest to `target_ppem`.
     /// Ties prefer the larger size; strikes that don't cover
     /// `glyph_id` are skipped. See [`Cblc::best_strike`] for the full
-    /// rationale — the mono case applies the same selection policy.
+    /// rationale. The mono case applies the same selection policy.
     #[must_use]
     pub fn best_strike(&self, glyph_id: u16, target_ppem: u16) -> Option<BitmapSize> {
         self.inner.best_strike(glyph_id, target_ppem)

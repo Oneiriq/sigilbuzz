@@ -1,10 +1,10 @@
-//! GPOS lookup type 1 — Single Adjustment.
+//! GPOS lookup type 1: Single Adjustment.
 //!
 //! Applies a [`ValueRecord`] to every covered glyph. Two formats
 //! exist: format 1 uses the same record for every glyph (used when
-//! a feature wants to shift a whole class of glyphs by a constant
-//! — e.g. lining vs. old-style figures that need a vertical tweak),
-//! format 2 has a parallel array of records, one per covered glyph
+//! a feature wants to shift a whole class of glyphs by a constant,
+//! for example lining vs. old-style figures that need a vertical tweak).
+//! Format 2 has a parallel array of records, one per covered glyph
 //! (used for per-glyph fine positioning).
 //!
 //! # Layout
@@ -32,14 +32,14 @@ use crate::tables::parse::Reader;
 /// A parsed Single Adjustment subtable.
 #[derive(Debug, Clone, Copy)]
 pub enum SinglePos<'a> {
-    /// Format 1 — one `ValueRecord` for every covered glyph.
+    /// Format 1: one `ValueRecord` for every covered glyph.
     Uniform {
         /// Covered glyph set.
         coverage: Coverage<'a>,
         /// The shared adjustment.
         value: ValueRecord,
     },
-    /// Format 2 — one `ValueRecord` per coverage index.
+    /// Format 2: one `ValueRecord` per coverage index.
     PerGlyph {
         /// Covered glyph set.
         coverage: Coverage<'a>,
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn format1_can_mix_placement_and_advance_fields() {
-        // value_format = X_PLACEMENT | X_ADVANCE → two i16 fields.
+        // value_format = X_PLACEMENT | X_ADVANCE -> two i16 fields.
         let bytes = build_format1(&[5], X_PLACEMENT | X_ADVANCE, &[4, -10]);
         let sp = SinglePos::parse(&bytes).unwrap();
         let v = sp.adjustment(5).unwrap();
@@ -222,7 +222,7 @@ mod tests {
         // only one record bytes present.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&2u16.to_be_bytes());
-        bytes.extend_from_slice(&100u16.to_be_bytes()); // far coverage — may or may not parse
+        bytes.extend_from_slice(&100u16.to_be_bytes()); // far coverage, may or may not parse
         bytes.extend_from_slice(&X_ADVANCE.to_be_bytes());
         bytes.extend_from_slice(&3u16.to_be_bytes()); // valueCount
         bytes.extend_from_slice(&0u16.to_be_bytes()); // one record instead of three

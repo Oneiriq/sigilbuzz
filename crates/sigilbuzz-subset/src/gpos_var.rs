@@ -1,4 +1,4 @@
-//! GPOS variation-bake — folds `VariationIndex` deltas into static
+//! GPOS variation-bake: folds `VariationIndex` deltas into static
 //! `ValueRecord` fields at a chosen coord vector. (#175)
 //!
 //! # Why
@@ -7,8 +7,8 @@
 //! `VariationIndex` sub-offsets. When `deltaFormat == 0x8000` the
 //! offset names an `(outer, inner)` row in `GDEF.ItemVariationStore`
 //! whose region-weighted delta scales the static `ValueRecord` field
-//! at the user's axis coords. Instancing — the operation that
-//! collapses a variable font to a static one at a chosen instance —
+//! at the user's axis coords. Instancing (the operation that
+//! collapses a variable font to a static one at a chosen instance)
 //! cannot leave those references intact: the `ItemVariationStore`
 //! they point at is dropped along with the rest of the variable-font
 //! surface.
@@ -28,23 +28,23 @@
 //!
 //! # Coverage
 //!
-//! - **PairPos format 1** — explicit pair entries: 2 ValueRecords per
+//! - **PairPos format 1**: explicit pair entries, 2 ValueRecords per
 //!   `PairValueRecord`.
-//! - **PairPos format 2** — class-pair matrix: 2 ValueRecords per
-//!   `Class1Record × Class2Record` cell.
-//! - **SinglePos format 1** — uniform `ValueRecord` shared across the
+//! - **PairPos format 2**: class-pair matrix, 2 ValueRecords per
+//!   `Class1Record * Class2Record` cell.
+//! - **SinglePos format 1**: uniform `ValueRecord` shared across the
 //!   coverage.
-//! - **SinglePos format 2** — per-coverage-entry `ValueRecord` array.
-//! - **CursivePos** — per-glyph `EntryExitRecord` with two anchor
+//! - **SinglePos format 2**: per-coverage-entry `ValueRecord` array.
+//! - **CursivePos**: per-glyph `EntryExitRecord` with two anchor
 //!   offsets. Anchor format 3 carries x/yDevice slots that the bake
 //!   resolves the same way ValueRecord device slots are resolved.
-//! - **MarkBasePos / MarkMarkPos** — `MarkArray` + `BaseArray`
+//! - **MarkBasePos / MarkMarkPos**: `MarkArray` + `BaseArray`
 //!   (`Mark2Array` for type 6) anchor matrices. Same anchor walk.
-//! - **MarkLigPos** — `MarkArray` + `LigatureArray` of per-component
+//! - **MarkLigPos**: `MarkArray` + `LigatureArray` of per-component
 //!   anchor matrices. Same anchor walk per component.
 //!
 //! Lookup types we do not bake (`Context`, `ChainContext`) ride through
-//! verbatim — only their parent table bytes are copied; nested subtables
+//! verbatim. Only their parent table bytes are copied; nested subtables
 //! we do not understand are not touched.
 //!
 //! # Determinism
@@ -59,13 +59,13 @@ use alloc::vec::Vec;
 
 use sigilbuzz::tables::variation_store::ItemVariationStore;
 
-/// Defined ValueRecord format bits — bits 0x0001..=0x0080. Mirrors the
+/// Defined ValueRecord format bits: bits 0x0001..=0x0080. Mirrors the
 /// `DEFINED_BITS` constant in `sigilbuzz::tables::gpos::value_record`.
 const VALUE_FORMAT_DEFINED: u16 = 0x00FF;
 
 /// Bit offsets within a ValueRecord, in the order the spec lays them
-/// out. The first four (`x_placement` … `y_advance`) are the static
-/// i16 fields; the next four (`x_placement_device` … `y_advance_device`)
+/// out. The first four (`x_placement` ... `y_advance`) are the static
+/// i16 fields; the next four (`x_placement_device` ... `y_advance_device`)
 /// are the Offset16 sub-offsets that point at Device / VariationIndex
 /// tables relative to the enclosing subtable.
 const VR_X_PLACEMENT: u16 = 0x0001;
@@ -80,7 +80,7 @@ const VR_Y_ADVANCE_DEVICE: u16 = 0x0080;
 /// `deltaFormat` sentinel that turns a Device-shaped offset into a
 /// `VariationIndex`. Mirrors
 /// `sigilbuzz::tables::layout::device::VARIATION_INDEX_DELTA_FORMAT`
-/// — repeated here so the bake does not pull a runtime parser dep on
+/// and is repeated here so the bake does not pull a runtime parser dep on
 /// the layout module.
 const VARIATION_INDEX_DELTA_FORMAT: u16 = 0x8000;
 
@@ -113,16 +113,16 @@ fn round_delta(delta: f32) -> i32 {
 ///   bytes (same start that `Device/VariationIndex` offsets are
 ///   relative to).
 /// - `static_field_pos` is the byte offset of the static i16 field
-///   (`x_placement` / `x_advance` / …) within `subtable_buf`.
+///   (`x_placement` / `x_advance` / ...) within `subtable_buf`.
 /// - `device_off_pos` is the byte offset of the Offset16 slot within
-///   `subtable_buf` (i.e., the position of `x_placement_device` / …).
+///   `subtable_buf` (i.e., the position of `x_placement_device` / ...).
 ///
-/// Behaviour:
+/// Behavior:
 ///
-/// - If the offset slot is zero (the spec's "absent" sentinel) — no-op.
+/// - If the offset slot is zero (the spec's "absent" sentinel): no-op.
 /// - If the offset points past the subtable, the header is malformed,
 ///   or the referenced table is a `Device` (per-ppem hinting, not a
-///   `VariationIndex`) — zero the offset slot and leave the static
+///   `VariationIndex`): zero the offset slot and leave the static
 ///   field alone. Folding a Device into the static field would
 ///   silently warp design-unit metrics; the "ship as static" intent is
 ///   to preserve them.
@@ -130,7 +130,7 @@ fn round_delta(delta: f32) -> i32 {
 ///   `Some`, look up `(outer, inner)`, resolve at `coords`, round, and
 ///   saturating-add to the static field. Then zero the offset slot.
 /// - If the referenced table is a `VariationIndex` but `store` is
-///   `None` (font has GPOS variations but no GDEF.IVS — malformed) —
+///   `None` (font has GPOS variations but no GDEF.IVS, malformed):
 ///   zero the offset slot, leave the static field alone.
 fn fold_one_field(
     subtable_buf: &mut [u8],
@@ -149,7 +149,7 @@ fn fold_one_field(
     if device_off == 0 {
         return;
     }
-    // Always zero the offset, even when we can't resolve the delta —
+    // Always zero the offset, even when we can't resolve the delta:
     // the GDEF.IVS prune that follows would leave it pointing at an
     // orphan otherwise.
     subtable_buf[device_off_pos] = 0;
@@ -163,7 +163,7 @@ fn fold_one_field(
     let delta_format =
         u16::from_be_bytes([subtable_buf[device_off + 4], subtable_buf[device_off + 5]]);
     if delta_format != VARIATION_INDEX_DELTA_FORMAT {
-        // Plain Device — leave the static field alone.
+        // Plain Device: leave the static field alone.
         return;
     }
     let outer = first;
@@ -208,7 +208,7 @@ fn fold_one_field(
 /// Each device-offset bit is paired with one static field bit:
 /// `0x0010 ↔ 0x0001`, `0x0020 ↔ 0x0002`, `0x0040 ↔ 0x0004`,
 /// `0x0080 ↔ 0x0008`. When a device-offset bit is set but the paired
-/// static field bit is *not*, the spec doesn't define a fold target —
+/// static field bit is *not*, the spec doesn't define a fold target:
 /// we zero the offset slot and skip the static-field write.
 pub(crate) fn fold_value_record(
     subtable_buf: &mut [u8],
@@ -291,7 +291,7 @@ pub(crate) fn fold_value_record(
 /// Only format 3 carries variations: `xDeviceOffset` / `yDeviceOffset`
 /// can name a `VariationIndex` (`deltaFormat == 0x8000`) whose
 /// region-weighted delta scales the static x/y at the bake's `coords`.
-/// Formats 1 and 2 have no variation surface — early return.
+/// Formats 1 and 2 have no variation surface: early return.
 ///
 /// The static-field fold reuses `fold_one_field` so the Anchor and
 /// ValueRecord paths stay in byte-for-byte lockstep on the
@@ -384,7 +384,7 @@ fn fold_cursive_pos(
 /// ```
 ///
 /// Note that `markAnchorOffset` is relative to the MarkArray, not to
-/// the enclosing subtable — we add `mark_array_off` to land in
+/// the enclosing subtable. We add `mark_array_off` to land in
 /// subtable-relative space before calling `fold_anchor_variations`.
 fn fold_mark_array(
     subtable_buf: &mut [u8],
@@ -428,7 +428,7 @@ fn fold_mark_array(
 ///     u16 baseAnchorOffsets[markClassCount]   (each relative to BaseArray)
 /// ```
 ///
-/// The flat anchor matrix is `baseCount × markClassCount` u16 offsets,
+/// The flat anchor matrix is `baseCount * markClassCount` u16 offsets,
 /// each relative to `base_array_off`.
 fn fold_base_or_mark2_array(
     subtable_buf: &mut [u8],
@@ -513,7 +513,7 @@ fn fold_mark_base_pos(
 ///
 /// Identical shape to MarkBasePos with `Mark2Array` substituted for
 /// `BaseArray`. The `Mark2Array` matrix dimensions match
-/// `BaseArray`'s: `mark2Count × markClassCount`.
+/// `BaseArray`'s: `mark2Count * markClassCount`.
 fn fold_mark_mark_pos(
     gpos_buf: &mut [u8],
     sub_off: usize,
@@ -654,7 +654,7 @@ fn fold_single_pos(
     let format = u16::from_be_bytes([sub[0], sub[1]]);
     let value_format = u16::from_be_bytes([sub[4], sub[5]]);
     if value_format & 0x00F0 == 0 {
-        // No device-offset fields — no variation work to do.
+        // No device-offset fields: no variation work to do.
         return;
     }
     let stride = value_record_size(value_format);
@@ -731,7 +731,7 @@ fn fold_pair_pos_format1(
     if sub.len() < set_offsets_off + pair_set_count * 2 {
         return;
     }
-    // Collect set offsets first, then fold each set in turn — the
+    // Collect set offsets first, then fold each set in turn: the
     // borrow of `sub` ends here.
     let mut set_offs: Vec<usize> = Vec::with_capacity(pair_set_count);
     for i in 0..pair_set_count {
@@ -835,7 +835,7 @@ fn fold_pair_pos_format2(
 ///
 /// Returns `Some(new_gpos_bytes)` when the source carries GPOS, else
 /// `None` (caller passes through). The returned table is byte-for-byte
-/// identical to the source for every byte we did not touch — only the
+/// identical to the source for every byte we did not touch. Only the
 /// fields we folded into and the offset slots we zeroed change.
 pub(crate) fn bake_gpos_at_coords(
     gpos_bytes: &[u8],
@@ -860,8 +860,8 @@ pub(crate) fn bake_gpos_at_coords(
         return None;
     }
 
-    // Collect (lookup_type, lookup_base, [subtable_abs_off, …]) for
-    // every lookup. We do not patch context/chain/extension lookups —
+    // Collect (lookup_type, lookup_base, [subtable_abs_off, ...]) for
+    // every lookup. We do not patch context/chain/extension lookups:
     // those are passed through.
     let mut buf = gpos_bytes.to_vec();
 
@@ -891,19 +891,19 @@ pub(crate) fn bake_gpos_at_coords(
                 continue;
             }
             match lookup_type {
-                // Type 1 — SinglePos.
+                // Type 1: SinglePos.
                 1 => fold_single_pos(&mut buf, sub_abs, store, coords),
-                // Type 2 — PairPos.
+                // Type 2: PairPos.
                 2 => fold_pair_pos(&mut buf, sub_abs, store, coords),
-                // Type 3 — CursivePos.
+                // Type 3: CursivePos.
                 3 => fold_cursive_pos(&mut buf, sub_abs, store, coords),
-                // Type 4 — MarkBasePos.
+                // Type 4: MarkBasePos.
                 4 => fold_mark_base_pos(&mut buf, sub_abs, store, coords),
-                // Type 5 — MarkLigPos.
+                // Type 5: MarkLigPos.
                 5 => fold_mark_lig_pos(&mut buf, sub_abs, store, coords),
-                // Type 6 — MarkMarkPos.
+                // Type 6: MarkMarkPos.
                 6 => fold_mark_mark_pos(&mut buf, sub_abs, store, coords),
-                // Type 9 — Extension. The extension subtable is a
+                // Type 9: Extension. The extension subtable is a
                 // 2-byte format + 2-byte extensionLookupType + 4-byte
                 // extensionOffset (relative to the extension subtable
                 // start). Recurse into the inner subtable so we cover
@@ -935,7 +935,7 @@ pub(crate) fn bake_gpos_at_coords(
                         _ => {}
                     }
                 }
-                // Context (7) / ChainContext (8) — nested rule
+                // Context (7) / ChainContext (8): nested rule
                 // dispatchers; their nested lookups are reached via
                 // the LookupList loop above so any anchor variations
                 // ride through that path too.
@@ -1010,7 +1010,7 @@ mod tests {
     fn fold_one_field_resolves_variation_index_and_zeros_offset() {
         // Static field at 0..2 = 50; offset slot at 4..6 = 8 (points
         // at the VariationIndex header at byte 8). At coord 1.0 the
-        // delta is 80 → 50 + 80 = 130. After fold the offset slot is
+        // delta is 80 -> 50 + 80 = 130. After fold the offset slot is
         // zero.
         let mut buf = vec![0u8; 14];
         buf[0..2].copy_from_slice(&50i16.to_be_bytes());
@@ -1030,7 +1030,7 @@ mod tests {
 
     #[test]
     fn fold_one_field_device_table_zeros_offset_only() {
-        // Device-shape (deltaFormat = 3) — must zero the offset but
+        // Device-shape (deltaFormat = 3): must zero the offset but
         // leave the static field alone.
         let mut buf = vec![0u8; 14];
         buf[0..2].copy_from_slice(&50i16.to_be_bytes());
@@ -1068,7 +1068,7 @@ mod tests {
         buf[8..10].copy_from_slice(&0u16.to_be_bytes());
         buf[10..12].copy_from_slice(&0u16.to_be_bytes());
         buf[12..14].copy_from_slice(&0x8000u16.to_be_bytes());
-        // delta = 30000 → 30000 + 30000 saturates at i16::MAX (32767).
+        // delta = 30000 -> 30000 + 30000 saturates at i16::MAX (32767).
         let ivs_bytes = build_ivs_one_region_one_item(30000);
         let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
         fold_one_field(&mut buf, 0, 4, Some(&store), &[1.0]);
@@ -1109,7 +1109,7 @@ mod tests {
         gpos.extend_from_slice(&0u16.to_be_bytes()); // flag
         gpos.extend_from_slice(&1u16.to_be_bytes()); // subtableCount
         gpos.extend_from_slice(&8u16.to_be_bytes()); // subtableOffset[0]
-                                                     // PairPos at 22 — sub_off = 22.
+                                                     // PairPos at 22, sub_off = 22.
         let sub_off = gpos.len();
         let value_format1 = VR_X_ADVANCE | VR_X_ADVANCE_DEVICE; // 0x44
         let value_format2 = 0u16;
@@ -1127,7 +1127,7 @@ mod tests {
         let x_advance_pos = gpos.len();
         gpos.extend_from_slice(&(-50i16).to_be_bytes()); // x_advance source
         let device_off_pos = gpos.len();
-        // Will fill device_off below — points at the VariationIndex
+        // Will fill device_off below: points at the VariationIndex
         // header that we tack on at the end of the subtable.
         gpos.extend_from_slice(&0u16.to_be_bytes());
         // ValueRecord2 is empty (format2 == 0).
@@ -1226,7 +1226,7 @@ mod tests {
 
     /// No-IVS source: the bake must still walk and zero VariationIndex
     /// offsets even though it cannot resolve a delta. This is the
-    /// "GDEF.IVS will be pruned next" path — leaving the offsets
+    /// "GDEF.IVS will be pruned next" path. Leaving the offsets
     /// dangling would re-create the orphan that #173 already shipped.
     #[test]
     fn bake_without_ivs_zeros_offsets_without_changing_static_fields() {
@@ -1283,7 +1283,7 @@ mod tests {
     // Mark*/Cursive anchor fold tests
     // -----------------------------------------------------------------
 
-    /// AnchorFormat 1 has no device slots — the fold must be a pure
+    /// AnchorFormat 1 has no device slots. The fold must be a pure
     /// no-op on every byte.
     #[test]
     fn fold_anchor_format1_is_noop() {
@@ -1300,7 +1300,7 @@ mod tests {
         assert_eq!(buf, original);
     }
 
-    /// AnchorFormat 2 (contour-point hint) carries no device slots —
+    /// AnchorFormat 2 (contour-point hint) carries no device slots:
     /// fold must leave every byte untouched.
     #[test]
     fn fold_anchor_format2_is_noop() {
@@ -1317,7 +1317,7 @@ mod tests {
     }
 
     /// AnchorFormat 3 with both x and y device offsets pointing at a
-    /// VariationIndex — both static fields must absorb the delta and
+    /// VariationIndex: both static fields must absorb the delta and
     /// both device slots must zero.
     #[test]
     fn fold_anchor_format3_folds_x_and_y() {
@@ -1350,7 +1350,7 @@ mod tests {
         assert_eq!(u16::from_be_bytes([buf[y_dev_pos], buf[y_dev_pos + 1]]), 0);
     }
 
-    /// Zero anchor offset (the spec's "absent" sentinel) — the fold
+    /// Zero anchor offset (the spec's "absent" sentinel): the fold
     /// must early-return rather than walk into byte 0 of the subtable.
     #[test]
     fn fold_anchor_zero_offset_is_noop() {
@@ -1469,7 +1469,7 @@ mod tests {
     }
 
     /// MarkBasePos round-trip: one mark, one base, single mark class.
-    /// Both anchors are AnchorFormat 3 with x/yDevice → VariationIndex.
+    /// Both anchors are AnchorFormat 3 with x/yDevice -> VariationIndex.
     /// Assert both anchors' static fields absorb the delta and every
     /// device slot zeros.
     #[test]
@@ -1502,7 +1502,7 @@ mod tests {
         let mark_array_rel = (gpos.len() - sub_off) as u16;
         gpos.extend_from_slice(&1u16.to_be_bytes()); // markCount
         gpos.extend_from_slice(&0u16.to_be_bytes()); // markRecord.class=0
-                                                     // markAnchorOffset (rel to MarkArray) — fill below.
+                                                     // markAnchorOffset (rel to MarkArray), fill below.
         let mark_anchor_off_pos = gpos.len();
         gpos.extend_from_slice(&0u16.to_be_bytes());
 
@@ -1521,7 +1521,7 @@ mod tests {
         // BaseArray.
         let base_array_rel = (gpos.len() - sub_off) as u16;
         gpos.extend_from_slice(&1u16.to_be_bytes()); // baseCount
-                                                     // baseAnchorOffsets[markClassCount=1] — rel to BaseArray.
+                                                     // baseAnchorOffsets[markClassCount=1], rel to BaseArray.
         let base_anchor_off_pos = gpos.len();
         gpos.extend_from_slice(&0u16.to_be_bytes());
 
@@ -1596,7 +1596,7 @@ mod tests {
 
     /// MarkLigPos round-trip: one mark, one ligature with two
     /// components, single mark class. The component matrix is
-    /// `componentCount × markClassCount` — 2 anchors per ligature.
+    /// `componentCount * markClassCount`, 2 anchors per ligature.
     /// Assert both component anchors absorb the delta and zero their
     /// device slots.
     #[test]
@@ -1649,7 +1649,7 @@ mod tests {
         let lig_attach_rel_to_larray = (gpos.len() - sub_off - lig_array_rel as usize) as u16;
         let lig_attach_abs_in_sub = gpos.len() - sub_off;
         gpos.extend_from_slice(&2u16.to_be_bytes()); // componentCount=2
-                                                     // 2 components × 1 markClass = 2 anchor offsets.
+                                                     // 2 components * 1 markClass = 2 anchor offsets.
         let comp0_anchor_off_pos = gpos.len();
         gpos.extend_from_slice(&0u16.to_be_bytes());
         let comp1_anchor_off_pos = gpos.len();

@@ -4,14 +4,14 @@
 //! intermittent C-link failures, but it also raised the question
 //! of whether the FFI surface itself is safe under genuine
 //! parallel use. This test pins that down: four threads run an
-//! end-to-end shape pipeline (`hb_blob_create_from_file` →
-//! `hb_face_create` → `hb_font_create` → `hb_shape` → glyph
+//! end-to-end shape pipeline (`hb_blob_create_from_file` ->
+//! `hb_face_create` -> `hb_font_create` -> `hb_shape` -> glyph
 //! readout) over the same Open Sans fixture, repeating each loop
 //! enough times to flush out any non-deterministic lifetime bug
 //! that a single-threaded test would miss.
 //!
-//! The goal is *not* shared state between threads — every thread
-//! owns its own blob/face/font/buffer chain — but to prove that
+//! The goal is *not* shared state between threads (every thread
+//! owns its own blob/face/font/buffer chain), but to prove that
 //! independent FFI clients don't trip over each other's
 //! allocations, drop one another's resources, or cause the test
 //! harness to UB-trap. The whole exercise is a fast in-process
@@ -34,7 +34,7 @@ use sigilbuzz_capi::{
     hb_font_destroy, hb_shape_full, HB_DIRECTION_LTR, HB_MEMORY_MODE_READONLY, HB_SCRIPT_LATIN,
 };
 
-/// Open Sans Regular — the same fixture every other capi
+/// Open Sans Regular: the same fixture every other capi
 /// integration test reaches for. Embedded at compile time so each
 /// thread gets a static, read-only byte slice with no I/O on the
 /// hot path.
@@ -42,7 +42,7 @@ const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regula
 
 /// Drives one end-to-end shape on a private blob/face/font/buffer
 /// chain. Returns the count of glyphs the shaper emitted so the
-/// caller can sanity-check the result — any value above zero is
+/// caller can sanity-check the result: any value above zero is
 /// proof the FFI round-trip survived.
 fn shape_once(text: &[u8]) -> usize {
     unsafe {
@@ -99,8 +99,8 @@ fn shape_once(text: &[u8]) -> usize {
 }
 
 /// Four threads, each shaping the same string repeatedly. Any
-/// inter-thread interference — a double-free, a torn pointer, a
-/// shared-state mutation — manifests as a panic in `shape_once`
+/// inter-thread interference (a double-free, a torn pointer, a
+/// shared-state mutation) manifests as a panic in `shape_once`
 /// or a thread-join failure here. We use plain `b"Hello"` because
 /// the assertion is on *survival under concurrency*, not on
 /// shaping correctness, which is already covered by the inline

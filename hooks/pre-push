@@ -17,19 +17,19 @@ set -euo pipefail
 
 echo "[sigilbuzz pre-push] running local CI gate..."
 
-echo "  → cargo fmt --all --check"
+echo "  -> cargo fmt --all --check"
 cargo fmt --all --check
 
-echo "  → cargo clippy --all-targets -- -D warnings"
+echo "  -> cargo clippy --all-targets -- -D warnings"
 cargo clippy --all-targets -- -D warnings
 
-echo "  → cargo clippy --no-default-features --all-targets -- -D warnings"
+echo "  -> cargo clippy --no-default-features --all-targets -- -D warnings"
 cargo clippy --no-default-features --all-targets -- -D warnings
 
-echo "  → cargo test --all-features"
+echo "  -> cargo test --all-features"
 cargo test --all-features
 
-echo "  → cargo build --no-default-features"
+echo "  -> cargo build --no-default-features"
 cargo build --no-default-features
 
 echo "[sigilbuzz pre-push] all checks passed."

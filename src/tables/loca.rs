@@ -1,16 +1,16 @@
-//! `loca` — glyph index to location.
+//! `loca`: glyph index to location.
 //!
 //! Maps glyph ids to byte offsets inside the sibling `glyf` table.
 //! Ships in two shapes, selected by `head.indexToLocFormat`:
 //!
-//! - **Short** — `u16[numGlyphs + 1]`, each entry stores `offset / 2`.
-//!   Used when the glyf table is at most 128 KB (the u16 × 2
+//! - **Short**: `u16[numGlyphs + 1]`, each entry stores `offset / 2`.
+//!   Used when the glyf table is at most 128 KB (the u16 * 2
 //!   reach).
-//! - **Long** — `u32[numGlyphs + 1]`, raw byte offsets.
+//! - **Long**: `u32[numGlyphs + 1]`, raw byte offsets.
 //!
 //! The array carries `numGlyphs + 1` entries. Glyph `i` lives in
 //! `glyf[loca[i] .. loca[i+1]]`. A zero-length range (where the two
-//! offsets are equal) means the glyph has no outline — whitespace
+//! offsets are equal) means the glyph has no outline. Whitespace
 //! glyphs commonly encode this way.
 
 use crate::error::{Error, Result};
@@ -58,7 +58,7 @@ impl<'a> Loca<'a> {
     ///
     /// An equal start/end means the glyph has no outline (e.g. a
     /// space glyph). The caller treats that as "no bounding box"
-    /// — it is not an error.
+    /// (it is not an error).
     #[must_use]
     pub fn range(&self, glyph_id: u16) -> Option<(u32, u32)> {
         if glyph_id >= self.num_glyphs {
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn short_format_doubles_stored_offsets() {
-        // numGlyphs = 3 → 4 offsets. Halved: 0, 50, 100, 200 → actual
+        // numGlyphs = 3 -> 4 offsets. Halved: 0, 50, 100, 200 -> actual
         // bytes 0, 100, 200, 400.
         let bytes = build_short(&[0, 50, 100, 200]);
         let loca = Loca::parse(&bytes, IndexToLocFormat::Short, 3).unwrap();
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn rejects_truncated_table() {
-        // Short format, numGlyphs = 3 needs 4 offsets × 2 bytes = 8,
+        // Short format, numGlyphs = 3 needs 4 offsets * 2 bytes = 8,
         // but only 6 provided.
         let bytes = build_short(&[0, 10, 20]);
         assert!(matches!(

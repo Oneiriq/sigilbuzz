@@ -35,7 +35,7 @@ const CORPUS: &[Case] = &[
         note: "empty",
         compare_rustybuzz: true,
     },
-    // ᤁ U+1901 — letter ka.
+    // ᤁ U+1901: letter ka.
     Case {
         text: "\u{1901}",
         note: "ka alone",
@@ -44,9 +44,9 @@ const CORPUS: &[Case] = &[
     // ka + sign-a / sign-i / sign-ee. These vowel signs are mark
     // glyphs in Noto Sans Limbu but the font's hmtx assigns them a
     // non-zero default advance; rustybuzz zeroes the advance via a
-    // GPOS pass that recognises them as combining marks. sigilbuzz's
+    // GPOS pass that recognizes them as combining marks. sigilbuzz's
     // GPOS dispatcher does not yet emit the mark-positioning advance
-    // override for non-Indic Brahmic scripts — tracked as a follow-up
+    // override for non-Indic Brahmic scripts, tracked as a follow-up
     // at <https://github.com/Oneiriq/sigilbuzz/issues> (USE: GPOS
     // mark advance for Limbu / Cham). The strings still shape; we
     // just do not byte-compare.

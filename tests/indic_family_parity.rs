@@ -7,7 +7,7 @@
 //! reph-candidate syllable where applicable.
 //!
 //! Test entries whose shape depends on Indic features sigilbuzz does
-//! not yet implement (explicit reph, LogRepha, split matras, …)
+//! not yet implement (explicit reph, LogRepha, split matras, ...)
 //! carry `compare_rustybuzz: false` and a `note` explaining why.
 //! They still run through sigilbuzz to guard against panics /
 //! cluster-integrity regressions; they just do not cross-check the
@@ -100,7 +100,7 @@ fn run_corpus(script_name: &str, font_bytes: &[u8], corpus: &[Case]) {
 }
 
 // -----------------------------------------------------------------
-// Bengali — U+0980..U+09FF. Reph: AfterSub (Implicit).
+// Bengali: U+0980..U+09FF. Reph: AfterSub (Implicit).
 // -----------------------------------------------------------------
 #[test]
 fn bengali_corpus_matches_rustybuzz() {
@@ -135,13 +135,13 @@ fn bengali_corpus_matches_rustybuzz() {
             note: "bengali digits",
         },
         Case {
-            // ক্ষ — ka + virama + ssa conjunct
+            // ক্ষ: ka + virama + ssa conjunct
             text: "\u{0995}\u{09CD}\u{09B7}",
             compare_rustybuzz: true,
             note: "kssa conjunct",
         },
         Case {
-            // র্ক — ra + virama + ka (reph, AfterSub).
+            // র্ক: ra + virama + ka (reph, AfterSub).
             // Sigilbuzz's refined final_reorder now handles the
             // AfterSub target for the single-post-base syllable we
             // test here (see issue #26).
@@ -150,7 +150,7 @@ fn bengali_corpus_matches_rustybuzz() {
             note: "reph + ka (AfterSub)",
         },
         Case {
-            // র্ম — ra + virama + ma (reph variation)
+            // র্ম: ra + virama + ma (reph variation)
             text: "\u{09B0}\u{09CD}\u{09AE}",
             compare_rustybuzz: true,
             note: "reph + ma",
@@ -160,7 +160,7 @@ fn bengali_corpus_matches_rustybuzz() {
 }
 
 // -----------------------------------------------------------------
-// Gurmukhi — U+0A00..U+0A7F. Reph: BeforeSub (Implicit).
+// Gurmukhi: U+0A00..U+0A7F. Reph: BeforeSub (Implicit).
 // -----------------------------------------------------------------
 #[test]
 fn gurmukhi_corpus_matches_rustybuzz() {
@@ -195,7 +195,7 @@ fn gurmukhi_corpus_matches_rustybuzz() {
             note: "gurmukhi digits",
         },
         Case {
-            // ਖ੍ਯ — kha + halant + ya (subjoined conjunct).
+            // ਖ੍ਯ: kha + halant + ya (subjoined conjunct).
             // Gurmukhi's `pstf` feature rewrites halant+ya into
             // the yakash subjoined form; sigilbuzz now masks the
             // competing `half` feature off on the pre-halant
@@ -206,7 +206,7 @@ fn gurmukhi_corpus_matches_rustybuzz() {
             note: "kha + subjoined ya (BeforeSub + blwf/pstf mask)",
         },
         Case {
-            // ਕ੍ਯ — ka + halant + ya (subjoined conjunct variant).
+            // ਕ੍ਯ: ka + halant + ya (subjoined conjunct variant).
             text: "\u{0A15}\u{0A4D}\u{0A2F}",
             compare_rustybuzz: true,
             note: "ka + subjoined ya",
@@ -216,7 +216,7 @@ fn gurmukhi_corpus_matches_rustybuzz() {
 }
 
 // -----------------------------------------------------------------
-// Gujarati — U+0A80..U+0AFF. Reph: BeforePost (Implicit).
+// Gujarati: U+0A80..U+0AFF. Reph: BeforePost (Implicit).
 // -----------------------------------------------------------------
 #[test]
 fn gujarati_corpus_matches_rustybuzz() {
@@ -245,13 +245,13 @@ fn gujarati_corpus_matches_rustybuzz() {
             note: "kaa (post-base matra)",
         },
         Case {
-            // ક્ષ — ka + halant + ssa conjunct
+            // ક્ષ: ka + halant + ssa conjunct
             text: "\u{0A95}\u{0ACD}\u{0AB7}",
             compare_rustybuzz: true,
             note: "kssa conjunct",
         },
         Case {
-            // ર્ક — ra + halant + ka (reph, BeforePost — same path as Devanagari)
+            // ર્ક: ra + halant + ka (reph, BeforePost, same path as Devanagari)
             text: "\u{0AB0}\u{0ACD}\u{0A95}",
             compare_rustybuzz: true,
             note: "reph + ka (BeforePost)",
@@ -267,7 +267,7 @@ fn gujarati_corpus_matches_rustybuzz() {
 }
 
 // -----------------------------------------------------------------
-// Oriya — U+0B00..U+0B7F. Reph: AfterMain (Implicit).
+// Oriya: U+0B00..U+0B7F. Reph: AfterMain (Implicit).
 // -----------------------------------------------------------------
 #[test]
 fn oriya_corpus_matches_rustybuzz() {
@@ -296,7 +296,7 @@ fn oriya_corpus_matches_rustybuzz() {
             note: "ke (pre-base matra)",
         },
         Case {
-            // ର୍କ — ra + halant + ka (reph, AfterMain).
+            // ର୍କ: ra + halant + ka (reph, AfterMain).
             // Sigilbuzz's refined final_reorder handles AfterMain
             // by landing the reph right after the base consonant
             // (see issue #28).
@@ -315,7 +315,7 @@ fn oriya_corpus_matches_rustybuzz() {
 }
 
 // -----------------------------------------------------------------
-// Tamil — U+0B80..U+0BFF. Reph: AfterPost (Implicit).
+// Tamil: U+0B80..U+0BFF. Reph: AfterPost (Implicit).
 // -----------------------------------------------------------------
 #[test]
 fn tamil_corpus_matches_rustybuzz() {
@@ -350,13 +350,13 @@ fn tamil_corpus_matches_rustybuzz() {
             note: "kee (pre-base matra)",
         },
         Case {
-            // க்ஷ — ka + virama + ssa (conjunct)
+            // க்ஷ: ka + virama + ssa (conjunct)
             text: "\u{0B95}\u{0BCD}\u{0BB7}",
             compare_rustybuzz: true,
             note: "kshha conjunct",
         },
         Case {
-            // கோ — ka + two-part matra OO (= ee + aa). The Indic
+            // கோ: ka + two-part matra OO (= ee + aa). The Indic
             // shaper now decomposes the matra at buffer-prep time,
             // matching rustybuzz (see issue #29).
             text: "\u{0B95}\u{0BCB}",
@@ -364,13 +364,13 @@ fn tamil_corpus_matches_rustybuzz() {
             note: "koo (split matra U+0BCB)",
         },
         Case {
-            // கொ — ka + two-part matra O (= e + aa).
+            // கொ: ka + two-part matra O (= e + aa).
             text: "\u{0B95}\u{0BCA}",
             compare_rustybuzz: true,
             note: "ko (split matra U+0BCA)",
         },
         Case {
-            // கௌ — ka + two-part matra AU (= e + au-length-mark).
+            // கௌ: ka + two-part matra AU (= e + au-length-mark).
             text: "\u{0B95}\u{0BCC}",
             compare_rustybuzz: true,
             note: "kau (split matra U+0BCC)",
@@ -386,7 +386,7 @@ fn tamil_corpus_matches_rustybuzz() {
 }
 
 // -----------------------------------------------------------------
-// Telugu — U+0C00..U+0C7F. Reph: AfterPost (Explicit).
+// Telugu: U+0C00..U+0C7F. Reph: AfterPost (Explicit).
 // -----------------------------------------------------------------
 #[test]
 fn telugu_corpus_matches_rustybuzz() {
@@ -415,19 +415,19 @@ fn telugu_corpus_matches_rustybuzz() {
             note: "ki",
         },
         Case {
-            // క్ష — ka + halant + ssa (Telugu conjunct — subjoined form)
+            // క్ష: ka + halant + ssa (Telugu conjunct, subjoined form)
             text: "\u{0C15}\u{0C4D}\u{0C37}",
             compare_rustybuzz: true,
             note: "kssa conjunct",
         },
         Case {
-            // ర్‍క — ra + halant + ZWJ + ka. Telugu uses Explicit
+            // ర్‍క: ra + halant + ZWJ + ka. Telugu uses Explicit
             // reph mode: bare ra+halant is not a reph, but
             // ra+halant+ZWJ is. Sigilbuzz now detects the ZWJ head
             // and tags the ra as reph candidate; the rphf ligature
             // then collapses the triple into an explicit reph
             // form if the font supplies one. The fixture is a
-            // cluster-integrity check — the Telugu corpus font
+            // cluster-integrity check. The Telugu corpus font
             // ligates down to a different glyph set than sigilbuzz
             // produces (pref-only fonts land here), so we stop
             // short of a byte-identical compare. See issue #30.
@@ -446,7 +446,7 @@ fn telugu_corpus_matches_rustybuzz() {
 }
 
 // -----------------------------------------------------------------
-// Kannada — U+0C80..U+0CFF. Reph: AfterPost (Implicit).
+// Kannada: U+0C80..U+0CFF. Reph: AfterPost (Implicit).
 // -----------------------------------------------------------------
 #[test]
 fn kannada_corpus_matches_rustybuzz() {
@@ -475,13 +475,13 @@ fn kannada_corpus_matches_rustybuzz() {
             note: "ki",
         },
         Case {
-            // ಕ್ಷ — ka + halant + ssa (subjoined conjunct)
+            // ಕ್ಷ: ka + halant + ssa (subjoined conjunct)
             text: "\u{0C95}\u{0CCD}\u{0CB7}",
             compare_rustybuzz: true,
             note: "kssa conjunct",
         },
         Case {
-            // ರ್ಕ — ra + halant + ka (reph; AfterPost).
+            // ರ್ಕ: ra + halant + ka (reph; AfterPost).
             // Sigilbuzz's refined AfterPost walker now matches
             // rustybuzz for this syllable (see issue #32).
             text: "\u{0CB0}\u{0CCD}\u{0C95}",
@@ -489,7 +489,7 @@ fn kannada_corpus_matches_rustybuzz() {
             note: "reph + ka (AfterPost)",
         },
         Case {
-            // ರ್ಮ — ra + halant + ma.
+            // ರ್ಮ: ra + halant + ma.
             text: "\u{0CB0}\u{0CCD}\u{0CAE}",
             compare_rustybuzz: true,
             note: "reph + ma (AfterPost)",
@@ -505,7 +505,7 @@ fn kannada_corpus_matches_rustybuzz() {
 }
 
 // -----------------------------------------------------------------
-// Malayalam — U+0D00..U+0D7F. Reph: AfterMain (LogRepha).
+// Malayalam: U+0D00..U+0D7F. Reph: AfterMain (LogRepha).
 // -----------------------------------------------------------------
 #[test]
 fn malayalam_corpus_matches_rustybuzz() {
@@ -534,7 +534,7 @@ fn malayalam_corpus_matches_rustybuzz() {
             note: "ke (pre-base matra)",
         },
         Case {
-            // ക്ക — ka + halant + ka (geminate conjunct)
+            // ക്ക: ka + halant + ka (geminate conjunct)
             text: "\u{0D15}\u{0D4D}\u{0D15}",
             compare_rustybuzz: true,
             note: "kka conjunct",
@@ -546,7 +546,7 @@ fn malayalam_corpus_matches_rustybuzz() {
             note: "malayalam digits",
         },
         Case {
-            // ർക — LogRepha (U+0D4E) + ka. Sigilbuzz now recognises
+            // ർക: LogRepha (U+0D4E) + ka. Sigilbuzz now recognizes
             // the encoded Repha as a reph candidate and moves it
             // to the AfterMain slot without relying on rphf to
             // collapse a ra+halant prefix (see issue #31).
@@ -555,7 +555,7 @@ fn malayalam_corpus_matches_rustybuzz() {
             note: "log repha + ka (LogRepha reorder)",
         },
         Case {
-            // ർമ — LogRepha + ma.
+            // ർമ: LogRepha + ma.
             text: "\u{0D4E}\u{0D2E}",
             compare_rustybuzz: true,
             note: "log repha + ma",
@@ -565,7 +565,7 @@ fn malayalam_corpus_matches_rustybuzz() {
 }
 
 // -----------------------------------------------------------------
-// Sinhala — U+0D80..U+0DFF. Reph: AfterPost (Explicit).
+// Sinhala: U+0D80..U+0DFF. Reph: AfterPost (Explicit).
 // -----------------------------------------------------------------
 #[test]
 fn sinhala_corpus_matches_rustybuzz() {
@@ -595,7 +595,7 @@ fn sinhala_corpus_matches_rustybuzz() {
         },
         Case {
             // කෙ (ka + pre-base e)
-            // Sinhala pre-base matras need Indic reorder — our generic
+            // Sinhala pre-base matras need Indic reorder. Our generic
             // reorder places the matra first; rustybuzz does the same
             // via its own state machine.
             text: "\u{0D9A}\u{0DD9}",
@@ -603,7 +603,7 @@ fn sinhala_corpus_matches_rustybuzz() {
             note: "ke (pre-base matra)",
         },
         Case {
-            // කේ — ka + two-part matra U+0DDA (= e + halant).
+            // කේ: ka + two-part matra U+0DDA (= e + halant).
             // Sigilbuzz now decomposes the matra at buffer-prep
             // time so the pre-base component participates in Indic
             // reordering (see issue #29).
@@ -612,19 +612,19 @@ fn sinhala_corpus_matches_rustybuzz() {
             note: "kee (split matra U+0DDA)",
         },
         Case {
-            // කො — ka + U+0DDC (split: e + aa).
+            // කො: ka + U+0DDC (split: e + aa).
             text: "\u{0D9A}\u{0DDC}",
             compare_rustybuzz: true,
             note: "ko (split matra U+0DDC)",
         },
         Case {
-            // කෝ — ka + U+0DDD (three-part: e + aa + halant).
+            // කෝ: ka + U+0DDD (three-part: e + aa + halant).
             text: "\u{0D9A}\u{0DDD}",
             compare_rustybuzz: true,
             note: "koo (three-part matra U+0DDD)",
         },
         Case {
-            // කෞ — ka + U+0DDE (split: e + post-base-lll).
+            // කෞ: ka + U+0DDE (split: e + post-base-lll).
             text: "\u{0D9A}\u{0DDE}",
             compare_rustybuzz: true,
             note: "kau (split matra U+0DDE)",

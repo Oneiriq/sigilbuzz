@@ -3,7 +3,7 @@
 //! WOFF1 stores per-table bodies as raw zlib streams: a 2-byte zlib
 //! header, a deflate (RFC 1951) payload, and a trailing 4-byte adler32
 //! over the *uncompressed* bytes. The format is not concatenated /
-//! framed across tables — every directory entry whose
+//! framed across tables. Every directory entry whose
 //! `compLength < origLength` carries its own complete zlib stream.
 //!
 //! Both directions live behind the `woff1-deflate` cargo feature so
@@ -24,7 +24,7 @@ use crate::error::{Result, WoffError};
 /// length against the directory entry's `origLength`.
 ///
 /// `expected_len` is the WOFF1 directory's `origLength` for the table.
-/// We refuse to return a buffer whose length doesn't match — a
+/// We refuse to return a buffer whose length doesn't match. A
 /// truncated or over-long inflate is a malformed WOFF1 file by the
 /// spec's "compressed table data must be a valid compressed stream"
 /// clause, and downstream SFNT parsing would silently see a different
@@ -56,7 +56,7 @@ pub(crate) fn inflate_zlib(input: &[u8], expected_len: usize) -> Result<Vec<u8>>
 ///
 /// `level` follows the standard zlib 0..=9 scale: 0 is store-only,
 /// 1 is fastest, 9 is maximum. `miniz_oxide`'s
-/// `compress_to_vec_zlib` clamps internally; we mirror that behaviour
+/// `compress_to_vec_zlib` clamps internally; we mirror that behavior
 /// here so callers can pass any `u8`.
 pub(crate) fn deflate_zlib(input: &[u8], level: u8) -> Vec<u8> {
     miniz_oxide::deflate::compress_to_vec_zlib(input, level.min(10))
@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn round_trip_short_input() {
-        // 64 bytes of structured input — short enough that compression
+        // 64 bytes of structured input, short enough that compression
         // may not save space, but the codec must still round-trip.
         let raw: Vec<u8> = (0u8..64).collect();
         let z = deflate_zlib(&raw, 6);
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn round_trip_compressible_input() {
-        // 4 KiB of 'A' — should compress dramatically.
+        // 4 KiB of 'A' should compress dramatically.
         let raw = vec![b'A'; 4096];
         let z = deflate_zlib(&raw, 6);
         assert!(
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn inflate_rejects_length_mismatch() {
-        // Compress 32 bytes, claim 33 on the way back — the helper
+        // Compress 32 bytes, claim 33 on the way back. The helper
         // must catch the discrepancy and refuse the buffer.
         let raw = vec![0xA5u8; 32];
         let z = deflate_zlib(&raw, 6);

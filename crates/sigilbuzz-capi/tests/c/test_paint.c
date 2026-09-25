@@ -1,7 +1,7 @@
 /*
- * test_paint.c — drives the hb_paint_* bridge from C.
+ * test_paint.c: drives the hb_paint_* bridge from C.
  *
- * The drop-in fixture font (Open Sans) is monochrome — it has no
+ * The drop-in fixture font (Open Sans) is monochrome: it has no
  * COLR table. That makes this a useful linkage smoke test: the C
  * compiler / linker must resolve every hb_paint_* symbol against
  * sigilbuzz-capi, and the dispatcher must turn a `hb_font_paint_glyph`
@@ -54,7 +54,7 @@ int main(int argc, char **argv) {
     hb_paint_funcs_set_color_func(funcs, on_color);
     hb_paint_funcs_set_push_layer_func(funcs, on_push_layer);
 
-    /* Open Sans has no COLR — paint_glyph must be a clean no-op. */
+    /* Open Sans has no COLR: paint_glyph must be a clean no-op. */
     hb_font_paint_glyph(font, 36 /* arbitrary gid */, funcs, NULL,
                         0, HB_COLOR(0, 0, 0, 0xFF));
 
@@ -75,7 +75,7 @@ int main(int argc, char **argv) {
     hb_paint_funcs_set_radial_gradient_func(funcs, NULL);
     hb_paint_funcs_set_sweep_gradient_func(funcs, NULL);
 
-    /* Set / has / population on a fresh hb_set_t — proves the set
+    /* Set / has / population on a fresh hb_set_t: proves the set
      * API symbols all link. */
     hb_set_t *set = hb_set_create();
     hb_set_add(set, 7);

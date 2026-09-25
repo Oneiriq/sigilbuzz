@@ -9,7 +9,7 @@
 //! feature, BidiClass, bidi_class, script_of, is_hangul_jamo}` and
 //! pin against those names. The deep paths stay internal.
 //!
-//! If a re-export here goes away, the test breaks at compile time —
+//! If a re-export here goes away, the test breaks at compile time:
 //! that is exactly the alarm we want.
 
 // Crate-root names only. The compiler enforces that none of these go
@@ -44,7 +44,7 @@ fn bidi_class_lookup_via_root_name() {
 fn bidi_info_runs_via_root_name() {
     let info = BidiInfo::new("Hello", None);
     assert_eq!(info.char_count(), 5);
-    // Pure-Latin paragraph defaults to LTR — every level resolves to 0.
+    // Pure-Latin paragraph defaults to LTR: every level resolves to 0.
     assert!(info.levels().iter().all(|&lvl| lvl == 0));
 }
 

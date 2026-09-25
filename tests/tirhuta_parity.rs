@@ -6,7 +6,7 @@
 //! through sigilbuzz's USE pipeline with the `tirh` script tag.
 //!
 //! Codepoint range: U+11480..U+114DF (SMP). Notable: sign-e (U+114B9)
-//! and sign-o (U+114BC) are pre-base vowel signs — the USE pre-base
+//! and sign-o (U+114BC) are pre-base vowel signs. The USE pre-base
 //! reorder pass moves them to before the base consonant.
 
 use sigilbuzz::{shape, Blob, Buffer, Face, Font};
@@ -25,7 +25,7 @@ const CORPUS: &[Case] = &[
         note: "empty",
         compare_rustybuzz: true,
     },
-    // U+1148A — letter ka.
+    // U+1148A: letter ka.
     Case {
         text: "\u{1148A}",
         note: "ka alone",

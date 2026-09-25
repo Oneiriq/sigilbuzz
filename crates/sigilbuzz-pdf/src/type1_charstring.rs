@@ -8,13 +8,13 @@
 //!
 //! # Number encoding
 //!
-//! - `-107..=107`  → one byte: `v + 139`. So `0` is `139`, `-107` is
+//! - `-107..=107`  -> one byte: `v + 139`. So `0` is `139`, `-107` is
 //!   `32`, `107` is `246`.
-//! - `108..=1131`  → two bytes: `[247..=250, w]` where the value is
+//! - `108..=1131`  -> two bytes: `[247..=250, w]` where the value is
 //!   `(hi - 247) * 256 + lo + 108`.
-//! - `-1131..=-108` → two bytes: `[251..=254, w]` where the value is
+//! - `-1131..=-108` -> two bytes: `[251..=254, w]` where the value is
 //!   `-((hi - 251) * 256 + lo + 108)`.
-//! - anything outside `-32768..=32767`-ish → five-byte form: `255`
+//! - anything outside `-32768..=32767`-ish -> five-byte form: `255`
 //!   followed by a 32-bit big-endian two's-complement integer.
 //!
 //! Negatives are handled symmetrically with positives: the small
@@ -42,9 +42,9 @@
 //! Type 1 paths are *relative*: every move/line/curve operand is the
 //! delta from the current pen, not the absolute target. The emitter
 //! tracks the pen and converts sigilbuzz's absolute [`PathOp`] values
-//! to deltas. Curve emission always uses `rrcurveto` (8) — the H/V
-//! variants exist as size optimisations but require additional flat
-//! tangent checks; they are intentionally skipped here in favour of a
+//! to deltas. Curve emission always uses `rrcurveto` (8). The H/V
+//! variants exist as size optimizations but require additional flat
+//! tangent checks; they are intentionally skipped here in favor of a
 //! simpler emitter, since this PR is targeting cleartext-readable
 //! charstrings and not a tight binary diet.
 
@@ -55,7 +55,7 @@ use sigilbuzz::tables::PathOp;
 /// Encode a signed integer onto the operand stack using the smallest
 /// Type 1 number form that fits.
 ///
-/// Type 1 charstrings have no native float type — sub-unit precision
+/// Type 1 charstrings have no native float type. Sub-unit precision
 /// is expressed via the `div` operator (12 12). For PDF font use we
 /// follow the convention of rounding to the nearest integer in
 /// glyph-design-unit space; sub-unit drift is invisible at typical
@@ -190,7 +190,7 @@ pub fn emit_path_ops(out: &mut Vec<u8>, ops: &[PathOp]) {
                 // Emit closepath. Pen is implicitly back at the
                 // contour start, but sigilbuzz outlines always
                 // re-open with a MoveTo so we leave the tracked pen
-                // alone — the next op's delta is computed against
+                // alone. The next op's delta is computed against
                 // where we last were and a following MoveTo will
                 // overwrite both.
                 out.push(9);
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn small_positive_uses_single_byte() {
-        // 0 → 139, 100 → 239, 107 → 246.
+        // 0 -> 139, 100 -> 239, 107 -> 246.
         let mut out = Vec::new();
         encode_number(&mut out, 0);
         encode_number(&mut out, 100);
@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn small_negative_uses_single_byte() {
-        // -107 → 32, -1 → 138.
+        // -107 -> 32, -1 -> 138.
         let mut out = Vec::new();
         encode_number(&mut out, -107);
         encode_number(&mut out, -1);
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn medium_positive_uses_two_bytes() {
-        // 108 → 247 0, 1131 → 250 255.
+        // 108 -> 247 0, 1131 -> 250 255.
         let mut out = Vec::new();
         encode_number(&mut out, 108);
         assert_eq!(out, [247, 0]);
@@ -331,15 +331,15 @@ mod tests {
 
         // Verify by walking expected bytes. Comments document the
         // delta and op for each block:
-        //   MoveTo 100,0  → dy=0  hmoveto:  239, 22
-        //   LineTo 200,0  → dx=100 dy=0    hlineto: 239, 6
-        //   LineTo 200,50 → dx=0 dy=50     vlineto: 189, 7
+        //   MoveTo 100,0  -> dy=0  hmoveto:  239, 22
+        //   LineTo 200,0  -> dx=100 dy=0    hlineto: 239, 6
+        //   LineTo 200,50 -> dx=0 dy=50     vlineto: 189, 7
         //   QuadTo (c=(200,100), p2=(150,100)) from p0=(200,50)
         //     c1 = (200,83.33) rounded (200,83); c2 = (183.33,100) rounded (183,100)
         //     deltas: (0, 33) (-17, 17) (-33, 0)  rrcurveto = op8
-        //   CubicTo from (150,100) → c1(100,100) c2(100,50) end(100,0)
+        //   CubicTo from (150,100) -> c1(100,100) c2(100,50) end(100,0)
         //     deltas: (-50, 0) (0, -50) (0, -50)  rrcurveto = op8
-        //   Close → op9
+        //   Close -> op9
         let expected: [u8; 21] = [
             239, 22, // hmoveto 100
             239, 6, // hlineto 100
@@ -356,7 +356,7 @@ mod tests {
     fn hsbw_emits_lsb_then_advance_then_op() {
         let mut out = Vec::new();
         emit_hsbw(&mut out, 50, 500);
-        // 50 → 189, 500 → [248, 136] (see medium-positive test), op 13.
+        // 50 -> 189, 500 -> [248, 136] (see medium-positive test), op 13.
         assert_eq!(out, [189, 248, 136, 13]);
     }
 

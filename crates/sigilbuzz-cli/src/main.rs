@@ -1,10 +1,10 @@
-//! sigilbuzz-cli — command-line driver for the sigilbuzz workspace.
+//! sigilbuzz-cli: command-line driver for the sigilbuzz workspace.
 //!
 //! This binary is the `hb-shape` equivalent for the *whole* sigilbuzz
 //! stack: shaping, subsetting, COLRv1 paint evaluation, GPU/Slug
 //! encoding, WOFF wrap/unwrap, PDF font emission, SVG glyph emission,
 //! and font-info dumps. Every subcommand wraps a companion crate's
-//! public API directly — no logic lives here that does not belong in
+//! public API directly. No logic lives here that does not belong in
 //! the underlying library.
 //!
 //! The only new external runtime dependency is `clap`, scoped to this
@@ -46,9 +46,9 @@ enum Cmd {
     Slug(cmd::slug::Args),
     /// Wrap or unwrap WOFF1 / WOFF2 envelopes.
     Woff(cmd::woff::Args),
-    /// Emit PDF font fragments (Type 3 / Type 1 / OTF-embedded).
+    /// Emit PDF font fragments (Type 3 for now).
     Pdf(cmd::pdf::Args),
-    /// Emit SVG for a single glyph (outline-only or COLRv1 colour).
+    /// Emit SVG for a single glyph (outline-only or COLRv1 color).
     Svg(cmd::svg::Args),
     /// Dump a summary of the font's metadata and table list.
     Info(cmd::info::Args),

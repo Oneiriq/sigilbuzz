@@ -1,6 +1,6 @@
 //! Universal Shaping Engine (USE).
 //!
-//! The USE is Microsoft's generic complex-script shaper — the one
+//! The USE is Microsoft's generic complex-script shaper, the one
 //! every SE-Asian, SE-Indic and archaic-South-Asian script that does
 //! not fit Arabic or Indic2 runs through. Khmer, Myanmar, Tai Tham,
 //! Buginese, New Tai Lue, Cham, Old Hangul, Hanifi Rohingya are all
@@ -11,7 +11,7 @@
 //!
 //! # Pipeline
 //!
-//! 1. **Categorise** every codepoint in the run via
+//! 1. **Categorize** every codepoint in the run via
 //!    [`use_category`](crate::unicode::use_category::use_category)
 //!    and [`use_position`](crate::unicode::use_category::use_position).
 //! 2. **Segment** into USE syllables. The grammar (simplified to the
@@ -26,30 +26,30 @@
 //! 3. **Reorder** each syllable in place:
 //!    - Move every pre-base vowel sign (VPre) to sit immediately
 //!      before the base.
-//!    - Promote a leading Repha (R) to the USE reph slot — a no-op
+//!    - Promote a leading Repha (R) to the USE reph slot, a no-op
 //!      for Khmer which has no repha, but wired so Myanmar's
 //!      kinzi slots straight in.
-//! 4. **Basic features** — per-syllable, applied via the GSUB
-//!    dispatcher in the script-tag order `khmr`/`khm2` → DFLT. Order:
+//! 4. **Basic features**: per-syllable, applied via the GSUB
+//!    dispatcher in the script-tag order `khmr`/`khm2` -> DFLT. Order:
 //!
 //!    ```text
-//!      locl → ccmp → rphf → pref → rkrf → abvf → blwf → half
-//!           → pstf → vatu → cjct → isol
+//!      locl -> ccmp -> rphf -> pref -> rkrf -> abvf -> blwf -> half
+//!           -> pstf -> vatu -> cjct -> isol
 //!    ```
 //!
-//! 5. **Topographical features** — run after basic substitutions:
+//! 5. **Topographical features**, run after basic substitutions:
 //!
 //!    ```text
-//!      abvs → blws → haln → pres → psts
+//!      abvs -> blws -> haln -> pres -> psts
 //!    ```
 //!
-//! 6. **GPOS** — the generic pipeline in [`crate::shape`] runs the
+//! 6. **GPOS**: the generic pipeline in [`crate::shape`] runs the
 //!    standard kern/mark/mkmk plus the Khmer `dist` feature. This
 //!    module returns control to it after topographical GSUB.
 //!
 //! # Cluster integrity
 //!
-//! Every reorder preserves cluster byte offsets — pre-base matra
+//! Every reorder preserves cluster byte offsets: pre-base matra
 //! movement copies the source glyph (cluster and all), shifts the
 //! intervening glyphs right by one, and drops the matra in. The
 //! generic GSUB dispatcher already merges clusters when a ligature
@@ -73,7 +73,7 @@ use crate::unicode::use_category::{use_category, use_position, UseCategory, UseP
 /// default LangSys (rare for Khmer but cheap to probe).
 pub const KHMER_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"khmr", *b"khm2", *b"DFLT"];
 
-/// Myanmar script-tag priority — `mym2` is the Indic2 (2012+) tag
+/// Myanmar script-tag priority: `mym2` is the Indic2 (2012+) tag
 /// that modern Noto / Padauk builds use; `mymr` is the legacy tag
 /// that older fonts still carry.
 pub const MYANMAR_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"mym2", *b"mymr", *b"DFLT"];
@@ -82,7 +82,7 @@ pub const MYANMAR_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"mym2", *b"mymr", *b"DFLT"];
 pub const THAI_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"thai", *b"DFLT"];
 
 /// Lao script-tag priority. The OpenType tag is `lao ` with a
-/// trailing space — the 4-byte tag convention is padded that way.
+/// trailing space. The 4-byte tag convention is padded that way.
 pub const LAO_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"lao ", *b"DFLT"];
 
 /// Hangul script-tag priority. Old Hangul fonts register their
@@ -90,7 +90,7 @@ pub const LAO_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"lao ", *b"DFLT"];
 /// tag that a few fonts still emit.
 pub const HANGUL_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"hang", *b"jamo", *b"DFLT"];
 
-/// N'Ko script tag — `nko ` (trailing space) is the canonical
+/// N'Ko script tag: `nko ` (trailing space) is the canonical
 /// OpenType tag for N'Ko. No v2 form.
 pub const NKO_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"nko ", *b"DFLT"];
 
@@ -100,7 +100,7 @@ pub const BUGINESE_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"bugi", *b"DFLT"];
 /// Tai Tham (Lanna) script tag.
 pub const TAI_THAM_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"lana", *b"DFLT"];
 
-/// Balinese script tag — `bali` is the only OT tag in current use.
+/// Balinese script tag: `bali` is the only OT tag in current use.
 pub const BALINESE_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"bali", *b"DFLT"];
 
 /// Sundanese script tag.
@@ -115,7 +115,7 @@ pub const LIMBU_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"limb", *b"DFLT"];
 /// Cham script tag.
 pub const CHAM_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"cham", *b"DFLT"];
 
-/// Brahmi script tag — `brah` is the only OT tag in current use.
+/// Brahmi script tag: `brah` is the only OT tag in current use.
 pub const BRAHMI_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"brah", *b"DFLT"];
 
 /// Sharada script tag.
@@ -131,12 +131,12 @@ pub const TIRHUTA_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"tirh", *b"DFLT"];
 pub const MODI_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"modi", *b"DFLT"];
 
 /// USE basic features, applied per-syllable before reordering
-/// finalisation. Order matters — `rphf` must run before `half` so
+/// finalization. Order matters: `rphf` must run before `half` so
 /// the ra+halant that would otherwise fold into a half-form is
 /// consumed as a reph first.
 ///
 /// `nukt` (nukta composition) and `akhn` (akhand) run with `locl`
-/// and `ccmp` in the default glyph pre-processing group — Indic-
+/// and `ccmp` in the default glyph pre-processing group. Indic-
 /// style USE scripts (Sharada, Tirhuta, Modi, Khojki, Brahmi) ship
 /// `akhn` lookups for ligatures of the form `ka + sign-i` that
 /// rustybuzz applies before reordering. Keep them at the head of
@@ -146,7 +146,7 @@ pub const USE_BASIC_FEATURES: &[&[u8; 4]] = &[
     b"pstf", b"vatu", b"cjct", b"isol",
 ];
 
-/// USE topographical features — run after basic substitutions have
+/// USE topographical features: run after basic substitutions have
 /// collapsed conjuncts into display forms.
 pub const USE_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] = &[b"abvs", b"blws", b"haln", b"pres", b"psts"];
 
@@ -159,31 +159,31 @@ pub const MYANMAR_BASIC_FEATURES: &[&[u8; 4]] = &[
     b"locl", b"ccmp", b"rphf", b"pref", b"blwf", b"pstf", b"abvf", b"cjct",
 ];
 
-/// Myanmar's USE topographical features — display-form selection
+/// Myanmar's USE topographical features: display-form selection
 /// after the basic subs collapse conjuncts.
 pub const MYANMAR_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] =
     &[b"abvs", b"blws", b"haln", b"pres", b"psts", b"calt"];
 
-/// Thai / Lao's feature set — no halant, no subjoining, so the
+/// Thai / Lao's feature set: no halant, no subjoining, so the
 /// shaper just needs contextual shaping + mark positioning. `liga`
 /// and `calt` handle most tone-mark placement adjustments.
 pub const THAI_LAO_FEATURES: &[&[u8; 4]] = &[b"ccmp", b"liga", b"calt"];
 
-/// Hangul Old-Hangul features — the three positional jamo features
+/// Hangul Old-Hangul features: the three positional jamo features
 /// pick Leading/Vowel/Trailing variant shapes.
 pub const HANGUL_FEATURES: &[&[u8; 4]] = &[b"ccmp", b"ljmo", b"vjmo", b"tjmo", b"calt"];
 
 /// Classification of one USE syllable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SyllableKind {
-    /// Consonant-based syllable — the common case.
+    /// Consonant-based syllable, the common case.
     Consonant,
-    /// Vowel syllable — starts with an independent vowel (IV).
+    /// Vowel syllable: starts with an independent vowel (IV).
     Vowel,
     /// A single symbol / number / generic-base pass-through. The
     /// state machine should not reorder these.
     Symbol,
-    /// A broken syllable — codepoint we could not fit into any
+    /// A broken syllable: codepoint we could not fit into any
     /// grammar production. Emitted as a one-wide unit so the
     /// segmenter always advances.
     Broken,
@@ -195,7 +195,7 @@ pub(crate) struct Syllable {
     pub kind: SyllableKind,
     /// Start codepoint/glyph index (inclusive). Kept for debugging
     /// and test assertions even when the reorder pass only needs
-    /// `end` and `base_index` — tagging a syllable by its left edge
+    /// `end` and `base_index`. Tagging a syllable by its left edge
     /// is the cheapest way to cross-reference against the original
     /// codepoint slice.
     #[allow(dead_code)]
@@ -211,7 +211,7 @@ pub(crate) struct Syllable {
     /// get moved to before the base after GSUB has had a chance to
     /// collapse them into a single subscript form.
     pub pre_base_cons_index: Option<usize>,
-    /// Codepoint-space index of a Myanmar kinzi prefix — the triple
+    /// Codepoint-space index of a Myanmar kinzi prefix: the triple
     /// `Nga (U+1004) + Asat (U+103A) + Virama (U+1039)` at the start
     /// of a consonant syllable. When present, those three glyphs move
     /// to immediately after the base before the rphf feature fires,
@@ -221,7 +221,7 @@ pub(crate) struct Syllable {
     pub kinzi_index: Option<usize>,
 }
 
-/// Entry point — shapes one Khmer run. `codepoints` is in
+/// Entry point: shapes one Khmer run. `codepoints` is in
 /// one-to-one correspondence with `glyphs` on entry; after the call
 /// `glyphs` may be shorter (GSUB collapses) and reordered. Clusters
 /// track back to original byte offsets so the caller can map glyphs
@@ -240,7 +240,7 @@ pub fn shape_khmer(
     //    records that the reorder pass can consume directly.
     let syllables = segment_syllables(codepoints);
 
-    // 2. Initial reordering — pre-base vowel signs move before the
+    // 2. Initial reordering: pre-base vowel signs move before the
     //    base. Done BEFORE GSUB so features see the logical order
     //    fonts expect. Reordering is length-preserving, so glyph
     //    indices stay aligned with codepoints across this pass.
@@ -257,7 +257,7 @@ pub fn shape_khmer(
         }
     }
 
-    // 4. Topographical features — after basic, to pick display
+    // 4. Topographical features: after basic, to pick display
     //    forms for the collapsed conjuncts.
     if let Some(gsub) = gsub {
         for tag in USE_TOPOGRAPHICAL_FEATURES {
@@ -267,13 +267,13 @@ pub fn shape_khmer(
 
     // 5. Cluster merge. Every glyph belonging to a syllable gets
     //    its cluster rewritten to the byte offset of the syllable's
-    //    first codepoint — matches HarfBuzz / rustybuzz so the
+    //    first codepoint, matching HarfBuzz / rustybuzz so the
     //    parity tests see identical cluster ids even after GSUB
     //    has collapsed parts of the syllable.
     let byte_offsets = cluster_byte_offsets(codepoints);
     merge_syllable_clusters(glyphs, &syllables, &byte_offsets);
 
-    // Final GPOS (kern, mark, mkmk, dist) runs in the caller — see
+    // Final GPOS (kern, mark, mkmk, dist) runs in the caller, see
     // shape.rs. That lets the generic mark-attachment machinery
     // handle Khmer's tone marks without a script-specific branch.
 }
@@ -305,7 +305,7 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
         UseCategory::GB | UseCategory::N | UseCategory::S => {
             // One-wide Symbol syllable. Runs of digits or generic
             // bases are kept as separate syllables so each keeps
-            // its own cluster id after the merge pass — matches
+            // its own cluster id after the merge pass, matching
             // rustybuzz, where e.g. the three Khmer digits ០១២
             // emit clusters 0/3/6 rather than a single merged 0.
             let _ = len;
@@ -319,7 +319,7 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
             }
         }
         UseCategory::R => {
-            // Repha prefix — followed by a consonant syllable. The
+            // Repha prefix, followed by a consonant syllable. The
             // Myanmar kinzi case is handled inline in
             // `scan_consonant_syllable` because kinzi's codepoints
             // (Nga / Asat / Virama) are categorized as B/H/H, not R;
@@ -369,7 +369,7 @@ fn scan_consonant_syllable(cps: &[char], start: usize) -> Syllable {
     // to POS_AFTER_MAIN once we know the base consonant index.
     // Matches the first branch of rustybuzz's
     // `initial_reordering_consonant_syllable` (the `Ra + As + H`
-    // check). Leaves the outer grammar intact — after the kinzi
+    // check). Leaves the outer grammar intact: after the kinzi
     // triple we still require a leading base consonant.
     let kinzi_index: Option<usize> = if i + 3 <= len
         && cps[i] == '\u{1004}'
@@ -391,7 +391,7 @@ fn scan_consonant_syllable(cps: &[char], start: usize) -> Syllable {
             i += 1;
             Some(i - 1)
         } else {
-            // Degenerate case — caller routed us here with a non-B
+            // Degenerate case: caller routed us here with a non-B
             // first codepoint. Emit Broken so the outer loop advances.
             return Syllable {
                 kind: SyllableKind::Broken,
@@ -404,16 +404,16 @@ fn scan_consonant_syllable(cps: &[char], start: usize) -> Syllable {
         };
 
     // Zero or more halant-consonant pairs (Khmer coeng stacks). The
-    // last base wins — it is the visible consonant; earlier bases
+    // last base wins: it is the visible consonant; earlier bases
     // become subscripts via the `blwf`/`pstf` GSUB features.
     //
     // Exception: Khmer `coeng + ra` (U+17D2 + U+179A) is a pre-base
     // subscript. When we hit it, remember the pair's index but
-    // keep the previous consonant as the visible base — so the
+    // keep the previous consonant as the visible base, so the
     // post-GSUB reorder can move the subscript-ra glyph in front
     // of the base. This is the Khmer-specific `pref` positioning
     // rule that USE bakes in for every script with pre-base
-    // subscripts (Myanmar has similar behaviour for medial ra).
+    // subscripts (Myanmar has similar behavior for medial ra).
     let mut pre_base_cons_index: Option<usize> = None;
     while i + 1 < len
         && use_category(cps[i]) == UseCategory::H
@@ -424,7 +424,7 @@ fn scan_consonant_syllable(cps: &[char], start: usize) -> Syllable {
         let is_khmer_coeng_ra = cps[halant_idx] == '\u{17D2}' && cps[cons_idx] == '\u{179A}';
         i += 2;
         if is_khmer_coeng_ra && pre_base_cons_index.is_none() {
-            // Pre-base subscript. Do NOT update base_index — the
+            // Pre-base subscript. Do NOT update base_index: the
             // visible base stays the consonant before the coeng.
             pre_base_cons_index = Some(halant_idx);
         } else {
@@ -433,7 +433,7 @@ fn scan_consonant_syllable(cps: &[char], start: usize) -> Syllable {
     }
 
     // Trailing vowel signs and marks. Order the grammar is lenient
-    // about — we accept any interleaving of V* / M* / FM* because
+    // about: we accept any interleaving of V* / M* / FM* because
     // the reorder pass handles positions explicitly.
     while i < len {
         match use_category(cps[i]) {
@@ -469,7 +469,7 @@ fn scan_consonant_syllable(cps: &[char], start: usize) -> Syllable {
     }
 }
 
-/// Matches a vowel-led syllable — independent vowel + optional
+/// Matches a vowel-led syllable: independent vowel + optional
 /// trailing marks.
 fn scan_vowel_syllable(cps: &[char], start: usize) -> Syllable {
     let len = cps.len();
@@ -515,7 +515,7 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
         return;
     }
 
-    // Gather pre-base matra indices that live after the base — those
+    // Gather pre-base matra indices that live after the base: those
     // are the ones that need to move. A pre-base sign sitting before
     // the base is already in position (unusual but legal for
     // broken-cluster repair).
@@ -530,11 +530,11 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
     // Pre-base consonant pair indices (Khmer `coeng + ra` = the two
     // codepoints at `pre_base_cons_index` and that + 1). These
     // move to the start of the syllable, BEFORE the pre-base
-    // matras — so the visual order ends up as
+    // matras, so the visual order ends up as
     // `[matras, pre-base cons pair, everything else, base, ...]`.
     let pre_cons_idx = syllable.pre_base_cons_index;
 
-    // Myanmar kinzi prefix — three codepoints at `kinzi_index`,
+    // Myanmar kinzi prefix: three codepoints at `kinzi_index`,
     // `kinzi_index + 1`, `kinzi_index + 2` (Nga + Asat + Virama).
     // rustybuzz's Myanmar reorder tags them POS_AFTER_MAIN so the
     // sort drops them after the base consonant; sigilbuzz replicates
@@ -556,7 +556,7 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
     //   [pre-base matras in logical order]
     //   [everything else, in original order]
     //
-    // Pre-base matras move to the very start of the syllable — not
+    // Pre-base matras move to the very start of the syllable, not
     // just before the base. This keeps coeng stacks intact so GSUB
     // `blwf` / `pstf` can still see `halant + consonant` pairs
     // adjacent and collapse them into a single subscript glyph.
@@ -606,7 +606,7 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
             consumed.push(kz + 2);
         }
     }
-    // 4. Everything else, in original order — with the kinzi triple
+    // 4. Everything else, in original order, with the kinzi triple
     //    injected immediately after the base consonant.
     for idx in syl_start..syl_end {
         if consumed.contains(&idx) {
@@ -644,7 +644,7 @@ fn cluster_byte_offsets(codepoints: &[char]) -> Vec<u32> {
 
 /// Merges all cluster byte offsets that belong to a syllable to the
 /// minimum offset in that syllable's byte range. Matches HarfBuzz /
-/// rustybuzz behaviour — downstream callers see one cluster id per
+/// rustybuzz behavior. Downstream callers see one cluster id per
 /// syllable (the byte offset of the first codepoint) even when GSUB
 /// substitutions have collapsed glyphs inside the syllable.
 fn merge_syllable_clusters(glyphs: &mut [Glyph], syllables: &[Syllable], byte_offsets: &[u32]) {
@@ -662,7 +662,7 @@ fn merge_syllable_clusters(glyphs: &mut [Glyph], syllables: &[Syllable], byte_of
     }
 }
 
-/// Generic USE shaping entry point — used by Myanmar, Thai, Lao and
+/// Generic USE shaping entry point, used by Myanmar, Thai, Lao and
 /// Old-Hangul runs. Mirrors [`shape_khmer`] but takes the script-
 /// priority table and the (basic, topographical) feature slices as
 /// parameters so each script can supply its own set. The syllable
@@ -672,7 +672,7 @@ fn merge_syllable_clusters(glyphs: &mut [Glyph], syllables: &[Syllable], byte_of
 ///
 /// `reorder_prebase` controls whether the pre-base vowel reorder
 /// runs. Thai and Lao pre-base vowels (sara e and friends) are
-/// logically typed *before* the base consonant already — so the
+/// logically typed *before* the base consonant already, so the
 /// reorder pass would be a no-op at best and break clustering at
 /// worst. Passing `false` skips it.
 #[allow(clippy::too_many_arguments)]
@@ -695,7 +695,7 @@ pub fn shape_use(
 
     // 2. Initial reordering. Some scripts (Thai, Lao) type pre-base
     //    vowels before the base already, so the reorder would break
-    //    cluster alignment — skip it in that case.
+    //    cluster alignment. Skip it in that case.
     if reorder_prebase {
         for syllable in &syllables {
             initial_reorder(codepoints, glyphs, syllable);
@@ -722,9 +722,9 @@ pub fn shape_use(
             // The pref pass on the fonts we care about is a single-subst
             // (length-preserving), so the snapshot length still aligns.
             // If a future font ships a pref ligature that changes glyph
-            // count, the lengths diverge and we skip the reorder — the
+            // count, the lengths diverge and we skip the reorder. The
             // shaper still produces the post-pref output, just without
-            // the pre-base move (matching the pre-fix behaviour).
+            // the pre-base move (matching the pre-fix behavior).
             if pre_ids.len() == glyphs.len() {
                 for syl in &syllables {
                     pref_reorder(codepoints, glyphs, syl, &pre_ids);
@@ -760,7 +760,7 @@ pub fn shape_use(
 /// codepoint was a [`UseCategory::CM`] sitting at
 /// [`UsePosition::BelowBase`] (the textbook medial-ra), moves the
 /// substituted glyph to the front of the syllable so it visually sits
-/// before the base. Mirrors rustybuzz's `record_pref` →
+/// before the base. Mirrors rustybuzz's `record_pref` ->
 /// `reorder_syllable_use` pair, but only for the medial-ra case the
 /// 0.8.0 corpus exercises (Cham). Length-preserving.
 fn pref_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllable, pre_ids: &[u32]) {
@@ -839,7 +839,7 @@ pub fn shape_myanmar(
 /// Entry point for Thai runs. Thai has no halant and no subjoining;
 /// the shaping reduces to contextual forms + mark positioning. We
 /// still segment into syllables so the cluster-merge pass groups
-/// tone marks with their consonant — matches HarfBuzz's Thai shaper
+/// tone marks with their consonant, matching HarfBuzz's Thai shaper
 /// for every string in the 0.2.0 corpus.
 pub fn shape_thai(
     gsub: Option<&Gsub<'_>>,
@@ -860,7 +860,7 @@ pub fn shape_thai(
 }
 
 /// Entry point for Lao runs. Lao is structurally near-identical to
-/// Thai — same feature set, no reorder, different script tag.
+/// Thai: same feature set, no reorder, different script tag.
 pub fn shape_lao(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -879,7 +879,7 @@ pub fn shape_lao(
     );
 }
 
-/// Entry point for Hangul runs — specifically Jamo (Old Hangul)
+/// Entry point for Hangul runs, specifically Jamo (Old Hangul)
 /// decomposed text. Precomposed syllables still flow through the
 /// default path in [`crate::shape`]; only runs containing at least
 /// one Jamo codepoint land here. The feature chain drives
@@ -904,7 +904,7 @@ pub fn shape_hangul(
 }
 
 /// Entry point for N'Ko runs. N'Ko is RTL alphabetic with cursive
-/// joining of the same shape as Arabic — every letter has up to four
+/// joining of the same shape as Arabic: every letter has up to four
 /// positional forms (`isol`/`init`/`medi`/`fina`) selected by the
 /// shared joining state machine in [`crate::unicode::joining`]. The
 /// shaper:
@@ -912,15 +912,15 @@ pub fn shape_hangul(
 /// 1. Runs `ccmp` so any precomposed N'Ko diphthongs in the font's
 ///    composition lookup decompose.
 /// 2. Computes a per-codepoint joining-form vector via the shared
-///    Arabic state machine — N'Ko's joining types live in the same
+///    Arabic state machine. N'Ko's joining types live in the same
 ///    [`JoiningType`](crate::unicode::joining::JoiningType) table.
 /// 3. Applies `isol`/`init`/`medi`/`fina` masked by the joining-form
 ///    vector under the `nko ` script tag. Noto Sans NKo registers
-///    `init`/`medi`/`fina` (no `isol` lookup — the unfeatured glyph
+///    `init`/`medi`/`fina` (no `isol` lookup: the unfeatured glyph
 ///    is the isolated form already), so the masked dispatcher
 ///    naturally no-ops on `isol` positions.
 /// 4. Lets the generic default-GSUB pass run `calt` / `liga` after
-///    the shaper returns. Tone-mark zeroing (mark advances → 0)
+///    the shaper returns. Tone-mark zeroing (mark advances -> 0)
 ///    happens in the generic pipeline.
 pub fn shape_nko(
     gsub: Option<&Gsub<'_>>,
@@ -935,7 +935,7 @@ pub fn shape_nko(
         return;
     };
 
-    // 1. ccmp first — handles any compositional rewrites the font
+    // 1. ccmp first: handles any compositional rewrites the font
     //    registers before the positional pass sees the glyph stream.
     crate::shape::apply_gsub_feature_in_scripts(
         gsub,
@@ -980,7 +980,7 @@ pub fn shape_nko(
     // shaper returns; nothing else to drive here.
 }
 
-/// Entry point for Buginese runs. Brahmic — pre-base reorder fires
+/// Entry point for Buginese runs. Brahmic: pre-base reorder fires
 /// for sara e (U+1A19). Uses the full USE feature chain.
 pub fn shape_buginese(
     gsub: Option<&Gsub<'_>>,
@@ -1114,7 +1114,7 @@ pub fn shape_cham(
     );
 }
 
-/// Entry point for Brahmi runs. Brahmic — full USE feature chain.
+/// Entry point for Brahmi runs. Brahmic: full USE feature chain.
 /// SMP block (U+11000..U+1107F). No pre-base reorder fires (no
 /// pre-base vowel signs in Brahmi); included on the consonant
 /// shaping path so virama / vowel-sign substitutions still see
@@ -1230,7 +1230,7 @@ mod tests {
 
     #[test]
     fn single_consonant_is_one_syllable() {
-        // ក U+1780 — one base, one syllable.
+        // ក U+1780: one base, one syllable.
         let cp = cps("\u{1780}");
         let syl = segment_syllables(&cp);
         assert_eq!(syl.len(), 1);
@@ -1242,7 +1242,7 @@ mod tests {
 
     #[test]
     fn consonant_plus_post_base_matra_is_one_syllable() {
-        // កា — ka + aa.
+        // កា: ka + aa.
         let cp = cps("\u{1780}\u{17B6}");
         let syl = segment_syllables(&cp);
         assert_eq!(syl.len(), 1);
@@ -1252,7 +1252,7 @@ mod tests {
 
     #[test]
     fn coeng_conjunct_keeps_last_base() {
-        // ស្ត — sa + coeng + ta. One syllable, base is the ta at idx 2.
+        // ស្ត: sa + coeng + ta. One syllable, base is the ta at idx 2.
         let cp = cps("\u{179F}\u{17D2}\u{178F}");
         let syl = segment_syllables(&cp);
         assert_eq!(syl.len(), 1);
@@ -1278,7 +1278,7 @@ mod tests {
 
     #[test]
     fn post_base_vowel_stays_put() {
-        // កា — sign-aa is post-base; no reorder.
+        // កា: sign-aa is post-base; no reorder.
         let cp = cps("\u{1780}\u{17B6}");
         let mut glyphs = fake_glyphs(2);
         let before = glyphs.clone();
@@ -1292,7 +1292,7 @@ mod tests {
     #[test]
     fn independent_vowel_is_vowel_syllable() {
         // ឣ U+17A3 historically independent vowel a. After our
-        // table it is classed as B (base) — still a single
+        // table it is classed as B (base), still a single
         // syllable. Use U+17A5 (real IV) for the vowel path.
         let cp = cps("\u{17A5}");
         let syl = segment_syllables(&cp);
@@ -1302,7 +1302,7 @@ mod tests {
 
     #[test]
     fn khmer_digits_are_symbol_pass_through() {
-        // ០១២ — Khmer digits 0,1,2 — three Symbol syllables, one
+        // ០១២ (Khmer digits 0,1,2): three Symbol syllables, one
         // per digit. Each keeps its own cluster id (not merged to
         // the first byte offset), matching rustybuzz.
         let cp = cps("\u{17E0}\u{17E1}\u{17E2}");
@@ -1313,11 +1313,11 @@ mod tests {
 
     #[test]
     fn multi_syllable_run_segments_correctly() {
-        // សួស្តី — SUS TI (hello). 6 codepoints, 2 syllables:
-        //   សួ (sa + below-base u)                — 3 codepoints
-        //   ស្តី (sa + coeng + ta + pre-base ii)   — 3 codepoints? No:
-        //       ស 179F, ្ 17D2, ត 178F, ី 17B8 — 4 cps
-        // Input: 179F 17BD 179F 17D2 178F 17B8 — six cps.
+        // សួស្តី: SUS TI (hello). 6 codepoints, 2 syllables:
+        //   សួ (sa + below-base u):                3 codepoints
+        //   ស្តី (sa + coeng + ta + pre-base ii):   3 codepoints? No:
+        //       ស 179F, ្ 17D2, ត 178F, ី 17B8: 4 cps
+        // Input: 179F 17BD 179F 17D2 178F 17B8, six cps.
         // Hmm, សួ = sa(179F) + ua(17BD); ស្តី = sa(179F) + coeng(17D2)
         //       + ta(178F) + ii(17B8). Two syllables.
         let cp = cps("\u{179F}\u{17BD}\u{179F}\u{17D2}\u{178F}\u{17B8}");
@@ -1335,11 +1335,11 @@ mod tests {
 
     #[test]
     fn shape_khmer_without_gsub_only_reorders() {
-        // កេ — reorder, no GSUB. After reorder the sign-e sits
+        // កេ: reorder, no GSUB. After reorder the sign-e sits
         // first; after the cluster-merge pass both glyphs share the
         // syllable's head byte offset (0 for `fake_glyphs` which
         // mirrors a UTF-8 buffer where ka starts at byte 0). We
-        // verify the glyph IDs moved (1 → 0 by original mapping) so
+        // verify the glyph IDs moved (1 -> 0 by original mapping) so
         // the test still catches a reorder regression.
         let cp = cps("\u{1780}\u{17C1}");
         let mut glyphs = fake_glyphs(2);
@@ -1361,7 +1361,7 @@ mod tests {
         // of the syllable, not just before the base. Keeping
         // `coeng + ta` adjacent is what lets the GSUB `blwf`
         // feature collapse them into a single subscript-ta glyph
-        // in a later pass — matches rustybuzz output.
+        // in a later pass, matching rustybuzz output.
         //
         // Codepoint indices: sa=0, coeng=1, ta=2, sign-e=3.
         // fake_glyphs(4) uses index as cluster, so post-reorder we
@@ -1382,7 +1382,7 @@ mod tests {
 
     #[test]
     fn broken_leading_matra_advances_one_codepoint() {
-        // Leading matra with no base — broken cluster. The
+        // Leading matra with no base: broken cluster. The
         // segmenter must still advance so the outer loop ends.
         let cp = cps("\u{17B6}\u{1780}");
         let syl = segment_syllables(&cp);
@@ -1419,7 +1419,7 @@ mod tests {
 
     #[test]
     fn feature_lists_are_deterministic() {
-        // Compile-time check — the const slice of features is the
+        // Compile-time check: the const slice of features is the
         // one the state machine dispatches, in the order the MS spec
         // specifies. Assertion is about order so downstream reviewers
         // can eyeball the slice instead of re-deriving it.
@@ -1443,10 +1443,10 @@ mod tests {
 
     #[test]
     fn cluster_merge_collapses_syllable_to_head_offset() {
-        // កេ — pre-base reorder followed by the cluster-merge pass
+        // កេ: pre-base reorder followed by the cluster-merge pass
         // leaves every glyph in the syllable carrying the head
-        // byte offset (0 here — ka is first in the UTF-8 stream).
-        // Matches HarfBuzz / rustybuzz behaviour so callers see one
+        // byte offset (0 here: ka is first in the UTF-8 stream).
+        // Matches HarfBuzz / rustybuzz behavior so callers see one
         // cluster id per syllable.
         let cp = cps("\u{1780}\u{17C1}");
         let mut glyphs = vec![Glyph::new(10, 0), Glyph::new(20, 3)];

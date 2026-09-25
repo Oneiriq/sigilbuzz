@@ -1,8 +1,8 @@
 //! Resolved gradient descriptors emitted by the evaluator.
 //!
-//! sigilbuzz exposes the COLRv1 colour line as palette indices + raw
+//! sigilbuzz exposes the COLRv1 color line as palette indices + raw
 //! coordinates. The evaluator turns those into the float-channel
-//! gradients consumers actually want — palette entries already
+//! gradients consumers actually want: palette entries already
 //! resolved, alpha already multiplied, geometry already transformed
 //! through the active design-unit space (transform composition is the
 //! consumer's job since they may want to defer it for hardware-driven
@@ -13,15 +13,15 @@ use alloc::vec::Vec;
 
 use crate::color::Color;
 
-/// Resolved colour stop. Position along the colour line plus the
-/// resolved RGBA — the renderer needs no further palette lookups.
+/// Resolved color stop. Position along the color line plus the
+/// resolved RGBA. The renderer needs no further palette lookups.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColorStop {
     /// Stop offset along the gradient axis. Typically in `[0.0, 1.0]`
     /// but the spec allows out-of-range values for `Repeat` / `Reflect`
     /// extends.
     pub offset: f32,
-    /// Resolved colour with the per-stop alpha already folded in.
+    /// Resolved color with the per-stop alpha already folded in.
     pub color: Color,
 }
 
@@ -30,7 +30,7 @@ pub struct ColorStop {
 /// into sigilbuzz's table layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Extend {
-    /// Replicate the first / last colour outward.
+    /// Replicate the first / last color outward.
     Pad,
     /// Tile the gradient by repeating it.
     Repeat,
@@ -70,11 +70,11 @@ pub enum GradientKind {
     /// Two-circle radial gradient. `t = 0` rides the inner circle,
     /// `t = 1` the outer.
     Radial {
-        /// Inner circle centre.
+        /// Inner circle center.
         c0: (f32, f32),
         /// Inner circle radius.
         r0: f32,
-        /// Outer circle centre.
+        /// Outer circle center.
         c1: (f32, f32),
         /// Outer circle radius.
         r1: f32,
@@ -82,7 +82,7 @@ pub enum GradientKind {
     /// Sweep (conic) gradient around `center`. Angles in radians; `0`
     /// is the +x axis, increasing counter-clockwise.
     Sweep {
-        /// Centre of the sweep.
+        /// Center of the sweep.
         center: (f32, f32),
         /// Start angle in radians.
         start_angle: f32,
@@ -98,6 +98,6 @@ pub struct Gradient {
     pub kind: GradientKind,
     /// Resolved stops in input order.
     pub stops: Vec<ColorStop>,
-    /// Extend behaviour beyond `[0, 1]`.
+    /// Extend behavior beyond `[0, 1]`.
     pub extend: Extend,
 }

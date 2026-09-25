@@ -1,12 +1,12 @@
-//! `MVAR` — Metrics Variations.
+//! `MVAR`: Metrics Variations.
 //!
 //! Carries deltas for *font-wide* instance metrics (typo
 //! ascender / descender, x-height, sub/super script offsets,
-//! strikeout, underline, gasp ranges, …) so a renderer can
+//! strikeout, underline, gasp ranges, ...) so a renderer can
 //! interpolate them away from the font's default instance.
 //!
 //! Unlike HVAR (per-glyph advance widths) MVAR is consulted once
-//! per layout — every record names a 4-byte metric tag and a
+//! per layout: every record names a 4-byte metric tag and a
 //! `(outer, inner)` index into the shared
 //! [`ItemVariationStore`](super::variation_store::ItemVariationStore).
 //! sigilbuzz exposes the parsed records and a `metric_delta`
@@ -97,7 +97,7 @@ impl<'a> Mvar<'a> {
         // Per spec: itemVariationStoreOffset == 0 means the table
         // carries records but no variation store, so every record
         // resolves to a delta of 0. Real fonts always set this when
-        // record_count > 0 — but a defensive parser handles the
+        // record_count > 0, but a defensive parser handles the
         // optional case rather than rejecting.
         let store = if store_off == 0 {
             None
@@ -140,7 +140,7 @@ impl<'a> Mvar<'a> {
     }
 
     /// Iterates over `(tag, (outer, inner))` for every record. The
-    /// iterator is cheap — it slices into the original blob and
+    /// iterator is cheap: it slices into the original blob and
     /// decodes one record at a time.
     pub fn entries(&self) -> impl Iterator<Item = ([u8; 4], (u16, u16))> + '_ {
         (0..self.record_count).filter_map(move |i| self.record_at(i))
@@ -160,7 +160,7 @@ impl<'a> Mvar<'a> {
 
     /// Looks up the `(outer, inner)` pair for a metric tag using a
     /// linear scan. Records appear in tag-sorted order in valid
-    /// fonts; sigilbuzz doesn't rely on that — the tables are tiny
+    /// fonts; sigilbuzz doesn't rely on that. The tables are tiny
     /// (a few dozen entries at most).
     fn lookup(&self, tag: [u8; 4]) -> Option<(u16, u16)> {
         for i in 0..self.record_count {
@@ -177,7 +177,7 @@ impl<'a> Mvar<'a> {
     /// doesn't carry a record for `tag`.
     ///
     /// The variation store this MVAR points at is consulted via
-    /// [`Self::variation_store`] — callers needn't pass it
+    /// [`Self::variation_store`]. Callers needn't pass it
     /// explicitly. (Keeping the parameter list to a single
     /// `(tag, coords)` pair matches HVAR's surface and avoids
     /// mismatching stores.)
@@ -194,49 +194,49 @@ impl<'a> Mvar<'a> {
 /// most consumers reach for so they don't have to type the byte
 /// literals.
 pub mod tag {
-    /// `hasc` — OS/2 typoAscender.
+    /// `hasc`: OS/2 typoAscender.
     pub const HORIZ_ASCENDER: [u8; 4] = *b"hasc";
-    /// `hdsc` — OS/2 typoDescender.
+    /// `hdsc`: OS/2 typoDescender.
     pub const HORIZ_DESCENDER: [u8; 4] = *b"hdsc";
-    /// `hlgp` — OS/2 typoLineGap.
+    /// `hlgp`: OS/2 typoLineGap.
     pub const HORIZ_LINE_GAP: [u8; 4] = *b"hlgp";
-    /// `hcla` — OS/2 winAscent.
+    /// `hcla`: OS/2 winAscent.
     pub const HORIZ_CLIPPING_ASCENT: [u8; 4] = *b"hcla";
-    /// `hcld` — OS/2 winDescent.
+    /// `hcld`: OS/2 winDescent.
     pub const HORIZ_CLIPPING_DESCENT: [u8; 4] = *b"hcld";
-    /// `vasc` — vhea ascent.
+    /// `vasc`: vhea ascent.
     pub const VERT_ASCENDER: [u8; 4] = *b"vasc";
-    /// `vdsc` — vhea descent.
+    /// `vdsc`: vhea descent.
     pub const VERT_DESCENDER: [u8; 4] = *b"vdsc";
-    /// `vlgp` — vhea line gap.
+    /// `vlgp`: vhea line gap.
     pub const VERT_LINE_GAP: [u8; 4] = *b"vlgp";
-    /// `xhgt` — OS/2 sxHeight.
+    /// `xhgt`: OS/2 sxHeight.
     pub const X_HEIGHT: [u8; 4] = *b"xhgt";
-    /// `cpht` — OS/2 sCapHeight.
+    /// `cpht`: OS/2 sCapHeight.
     pub const CAP_HEIGHT: [u8; 4] = *b"cpht";
-    /// `sbxs` — OS/2 ySubscriptXSize.
+    /// `sbxs`: OS/2 ySubscriptXSize.
     pub const SUBSCRIPT_X_SIZE: [u8; 4] = *b"sbxs";
-    /// `sbys` — OS/2 ySubscriptYSize.
+    /// `sbys`: OS/2 ySubscriptYSize.
     pub const SUBSCRIPT_Y_SIZE: [u8; 4] = *b"sbys";
-    /// `sbxo` — OS/2 ySubscriptXOffset.
+    /// `sbxo`: OS/2 ySubscriptXOffset.
     pub const SUBSCRIPT_X_OFFSET: [u8; 4] = *b"sbxo";
-    /// `sbyo` — OS/2 ySubscriptYOffset.
+    /// `sbyo`: OS/2 ySubscriptYOffset.
     pub const SUBSCRIPT_Y_OFFSET: [u8; 4] = *b"sbyo";
-    /// `spxs` — OS/2 ySuperscriptXSize.
+    /// `spxs`: OS/2 ySuperscriptXSize.
     pub const SUPERSCRIPT_X_SIZE: [u8; 4] = *b"spxs";
-    /// `spys` — OS/2 ySuperscriptYSize.
+    /// `spys`: OS/2 ySuperscriptYSize.
     pub const SUPERSCRIPT_Y_SIZE: [u8; 4] = *b"spys";
-    /// `spxo` — OS/2 ySuperscriptXOffset.
+    /// `spxo`: OS/2 ySuperscriptXOffset.
     pub const SUPERSCRIPT_X_OFFSET: [u8; 4] = *b"spxo";
-    /// `spyo` — OS/2 ySuperscriptYOffset.
+    /// `spyo`: OS/2 ySuperscriptYOffset.
     pub const SUPERSCRIPT_Y_OFFSET: [u8; 4] = *b"spyo";
-    /// `strs` — OS/2 yStrikeoutSize.
+    /// `strs`: OS/2 yStrikeoutSize.
     pub const STRIKEOUT_SIZE: [u8; 4] = *b"strs";
-    /// `stro` — OS/2 yStrikeoutPosition.
+    /// `stro`: OS/2 yStrikeoutPosition.
     pub const STRIKEOUT_OFFSET: [u8; 4] = *b"stro";
-    /// `unds` — post underlineThickness.
+    /// `unds`: post underlineThickness.
     pub const UNDERLINE_SIZE: [u8; 4] = *b"unds";
-    /// `undo` — post underlinePosition.
+    /// `undo`: post underlinePosition.
     pub const UNDERLINE_OFFSET: [u8; 4] = *b"undo";
 }
 
@@ -288,7 +288,7 @@ mod tests {
     fn build_mvar(records: &[([u8; 4], u16, u16)], delta: i16) -> Vec<u8> {
         let mut out = Vec::new();
         // Header: 12 bytes total (4 ver/reserved + 2 size + 2 count
-        // + 2 + 2 store off — actually 6+2+2+2 = 12).
+        // + 2 + 2 store off, actually 6+2+2+2 = 12).
         out.extend_from_slice(&1u16.to_be_bytes()); // major
         out.extend_from_slice(&0u16.to_be_bytes()); // minor
         out.extend_from_slice(&0u16.to_be_bytes()); // reserved
@@ -334,7 +334,7 @@ mod tests {
         let mvar = Mvar::parse(&data).unwrap();
         let d = mvar.metric_delta(*b"hasc", &[1.0]).unwrap();
         assert!((d - 75.0).abs() < 1e-3);
-        // At coord 0.5 the IVS region (0…1…1) gives scalar 0.5.
+        // At coord 0.5 the IVS region (0...1...1) gives scalar 0.5.
         let d = mvar.metric_delta(*b"hasc", &[0.5]).unwrap();
         assert!((d - 37.5).abs() < 1e-3);
     }

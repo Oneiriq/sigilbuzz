@@ -13,7 +13,7 @@
 //!
 //! The forward triplet encoder is the inverse of the decoder in
 //! `transform.rs`. We pick the *smallest* of the 128 encodings that
-//! covers the (dx, dy, on_curve) triple — never larger than the
+//! covers the (dx, dy, on_curve) triple, never larger than the
 //! 4-byte fallback.
 //!
 //! Hmtx transform v1 is intentionally not emitted: hmtx stays in its
@@ -59,11 +59,11 @@ impl Default for WrapOptions {
 /// # Errors
 ///
 /// - `BadMagic` for an input whose SFNT signature isn't one of the
-///   recognised values.
+///   recognized values.
 /// - `Malformed` / `UnexpectedEof` for a truncated or
 ///   self-inconsistent SFNT.
 /// - `Unsupported` for tables this release doesn't know how to
-///   transform forward (currently a no-op — the only forward
+///   transform forward (currently a no-op: the only forward
 ///   transform shipped is glyf/loca; everything else is copied
 ///   verbatim).
 pub fn wrap_woff2(sfnt_bytes: &[u8]) -> Result<Vec<u8>> {
@@ -96,7 +96,7 @@ pub fn wrap_woff2_with_options(sfnt_bytes: &[u8], opts: WrapOptions) -> Result<V
     write_directory(&mut out, &entries);
     let body_offset = out.len();
     out.extend_from_slice(&compressed);
-    // WOFF2 §3 — the file is padded to a 4-byte boundary.
+    // WOFF2 §3: the file is padded to a 4-byte boundary.
     while out.len() % 4 != 0 {
         out.push(0);
     }
@@ -124,7 +124,7 @@ struct ParsedSfnt {
     flavor: u32,
     /// Tables in original directory order.
     tables: Vec<SfntTable>,
-    /// Sum of (header + per-table-record + each table padded to 4) —
+    /// Sum of (header + per-table-record + each table padded to 4):
     /// the value the WOFF2 header advertises so the consumer can
     /// pre-allocate the unwrapped buffer.
     total_sfnt_size: u32,
@@ -147,7 +147,7 @@ impl ParsedSfnt {
             }
         }
         let num_tables = r.read_u16("SFNT numTables")? as usize;
-        // searchRange, entrySelector, rangeShift — derivable; ignored.
+        // searchRange, entrySelector, rangeShift: derivable; ignored.
         r.skip(6, "SFNT search params")?;
 
         let mut records: Vec<(usize, [u8; 4], u32, u32)> = Vec::with_capacity(num_tables);
@@ -216,7 +216,7 @@ struct OutEntry {
     /// 0 = transformed (glyf/loca), 3 = stored as raw SFNT for
     /// glyf/loca, 0 = no transform for everything else.
     transform_version: u8,
-    /// Original (post-inverse-transform) length — what the unwrapper
+    /// Original (post-inverse-transform) length: what the unwrapper
     /// must produce.
     orig_length: u32,
     /// Length in the brotli payload. For transformed glyf this is
@@ -310,7 +310,7 @@ fn write_header(
     }
     out.extend_from_slice(&WOFF2_SIGNATURE.to_be_bytes());
     out.extend_from_slice(&flavor.to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes()); // length — patched after body
+    out.extend_from_slice(&0u32.to_be_bytes()); // length, patched after body
     out.extend_from_slice(&(entries.len() as u16).to_be_bytes()); // numTables
     out.extend_from_slice(&0u16.to_be_bytes()); // reserved
     out.extend_from_slice(&total_sfnt_size.to_be_bytes());
@@ -382,7 +382,7 @@ fn brotli_compress(input: &[u8], quality: u8) -> Result<Vec<u8>> {
     use brotli::BrotliCompress;
     use std::io::Cursor;
 
-    // WOFF2 §3 specifies a 22-bit (4 MiB) window — the default for
+    // WOFF2 §3 specifies a 22-bit (4 MiB) window, the default for
     // Brotli quality >= 1, but pin it explicitly for determinism.
     let params = BrotliEncoderParams {
         quality: i32::from(quality.min(11)),

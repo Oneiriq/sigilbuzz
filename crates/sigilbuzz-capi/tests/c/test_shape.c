@@ -1,5 +1,5 @@
 /*
- * test_shape.c — minimal C-side smoke test exercised by tests/c_link.rs.
+ * test_shape.c: minimal C-side smoke test exercised by tests/c_link.rs.
  *
  * The test driver (in Rust) compiles this against the sigilbuzz cdylib
  * and runs the resulting executable; exit 0 means PASS. The test
@@ -58,7 +58,7 @@ int main(int argc, char **argv) {
         return 7;
     }
 
-    /* Every glyph in "Hello" — H, e, l, l, o — must produce a
+    /* Every glyph in "Hello" (H, e, l, l, o) must produce a
      * positive advance from a sane Latin font. */
     for (unsigned int i = 0; i < len; i++) {
         if (positions[i].x_advance <= 0) {

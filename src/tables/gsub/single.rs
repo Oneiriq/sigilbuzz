@@ -1,16 +1,16 @@
-//! GSUB lookup type 1 — Single Substitution.
+//! GSUB lookup type 1: Single Substitution.
 //!
 //! Maps one glyph to one glyph. The simplest substitution type, and
 //! the mechanism behind a surprisingly large fraction of shaping
 //! work: small caps (`smcp`), stylistic alternates (`salt`),
-//! stylistic sets (`ss01`..`ss20`), localised forms (`locl`), glyph
+//! stylistic sets (`ss01`..`ss20`), localized forms (`locl`), glyph
 //! composition/decomposition (`ccmp`), and vertical substitutes
 //! (`vert`) all ship as single-sub lookups in the real fonts that
 //! declare them.
 //!
 //! # Subtable formats
 //!
-//! ## Format 1 — delta
+//! ## Format 1: delta
 //!
 //! ```text
 //!   u16      substFormat = 1
@@ -20,10 +20,10 @@
 //!
 //! Output glyph = `(input + delta) mod 65536`. Works only when the
 //! set of replacement glyphs is contiguous and offset from the
-//! inputs by a constant — common when a font places "A..Z" and
+//! inputs by a constant, common when a font places "A..Z" and
 //! their small-cap variants in adjacent glyph-id ranges.
 //!
-//! ## Format 2 — explicit
+//! ## Format 2: explicit
 //!
 //! ```text
 //!   u16      substFormat = 2
@@ -42,14 +42,14 @@ use crate::tables::parse::Reader;
 /// A parsed Single Substitution subtable.
 #[derive(Debug, Clone, Copy)]
 pub enum Single<'a> {
-    /// Format 1 — `(input + delta) mod 65536`.
+    /// Format 1: `(input + delta) mod 65536`.
     Delta {
         /// First-glyph coverage.
         coverage: Coverage<'a>,
         /// Delta to add to every covered glyph id.
         delta: i16,
     },
-    /// Format 2 — explicit substitute list indexed by coverage index.
+    /// Format 2: explicit substitute list indexed by coverage index.
     Explicit {
         /// First-glyph coverage.
         coverage: Coverage<'a>,
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn format1_wraps_at_u16_boundary() {
-        // delta big enough to wrap: 65500 + 100 = 65600 → wraps to 64.
+        // delta big enough to wrap: 65500 + 100 = 65600 -> wraps to 64.
         let bytes = build_format1(&[65500], 100);
         let sub = Single::parse(&bytes).unwrap();
         assert_eq!(sub.apply(65500), Some(64));
@@ -244,7 +244,7 @@ mod tests {
         bytes.extend_from_slice(&8u16.to_be_bytes()); // coverage offset (points past end to fail ahead of time)
         bytes.extend_from_slice(&3u16.to_be_bytes()); // glyphCount = 3
         bytes.extend_from_slice(&99u16.to_be_bytes()); // only one substitute
-                                                       // no coverage present → parse fails on coverage lookup.
+                                                       // no coverage present -> parse fails on coverage lookup.
         assert!(Single::parse(&bytes).is_err());
     }
 }

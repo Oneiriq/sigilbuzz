@@ -1,4 +1,4 @@
-//! `VORG` — Vertical Origin table.
+//! `VORG`: Vertical Origin table.
 //!
 //! Optional table; records the y-coordinate of the vertical origin for
 //! specific glyphs, overriding the default origin the renderer would
@@ -82,7 +82,7 @@ impl<'a> Vorg<'a> {
     /// table's default when the glyph has no record.
     #[must_use]
     pub fn vert_origin_y(&self, glyph: u16) -> i16 {
-        // The array is sorted by glyph index — binary search.
+        // The array is sorted by glyph index: binary search.
         let mut lo = 0usize;
         let mut hi = self.count as usize;
         while lo < hi {

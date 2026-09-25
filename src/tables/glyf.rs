@@ -11,7 +11,7 @@
     clippy::similar_names
 )]
 
-//! `glyf` — TrueType glyph data.
+//! `glyf`: TrueType glyph data.
 //!
 //! Parses the 10-byte glyph header, simple-glyph contour points, and
 //! composite-glyph component references. The simple-glyph path emits
@@ -35,14 +35,14 @@
 //! widths are flag-driven.
 //!
 //! A composite glyph is a chain of component records, each carrying a
-//! 2×2 transform and a translation. Components may reference further
+//! 2x2 transform and a translation. Components may reference further
 //! composites; sigilbuzz caps recursion to avoid pathological fonts.
 //!
 //! # Composite flattening: two passes
 //!
 //! Outline emission is split into two passes. Pass 1 walks the glyph
 //! and any composite children into a flat point list with absolute
-//! coordinates (gvar deltas + 2×2 + translation already folded in).
+//! coordinates (gvar deltas + 2x2 + translation already folded in).
 //! Pass 2 walks the contour list and dispatches to the caller's
 //! [`OutlineSink`].
 //!
@@ -50,8 +50,8 @@
 //! `ARGS_ARE_XY_VALUES`-clear *anchor-mode* components: when the
 //! component flag bit is clear, `arg1` and `arg2` are point indices
 //! into the parent's already-flattened points and the child's own
-//! flattened points respectively. The translation is implied —
-//! `parent[arg1] - child[arg2]` — so we need both sides as concrete
+//! flattened points respectively. The translation is implied:
+//! `parent[arg1] - child[arg2]`, so we need both sides as concrete
 //! coordinates before we can emit the child's ops.
 //!
 //! Phantom-point references are resolved against hmtx (and vmtx if
@@ -88,10 +88,10 @@ pub struct GlyphBounds {
 ///
 /// TrueType reserves four phantom points per glyph past the contour
 /// list:
-/// - `pp1 = (xMin - lsb, 0)` — left-side-bearing origin.
-/// - `pp2 = (xMin - lsb + advanceWidth, 0)` — advance-width origin.
-/// - `pp3 = (0, yMax + tsb)` — top-side-bearing origin.
-/// - `pp4 = (0, yMax + tsb - advanceHeight)` — advance-height origin.
+/// - `pp1 = (xMin - lsb, 0)`: left-side-bearing origin.
+/// - `pp2 = (xMin - lsb + advanceWidth, 0)`: advance-width origin.
+/// - `pp3 = (0, yMax + tsb)`: top-side-bearing origin.
+/// - `pp4 = (0, yMax + tsb - advanceHeight)`: advance-height origin.
 ///
 /// Composite components in anchor-mode (`ARGS_ARE_XY_VALUES` clear)
 /// can index past the contour-point count into these four slots; real
@@ -104,13 +104,13 @@ pub struct GlyphBounds {
 /// fallback is safe.
 #[derive(Debug, Clone, Copy)]
 pub struct PhantomMetrics<'a> {
-    /// Horizontal metrics. Required — every TrueType font has hmtx.
+    /// Horizontal metrics. Required: every TrueType font has hmtx.
     pub hmtx: &'a Hmtx<'a>,
     /// Vertical metrics. `None` for horizontal-only fonts.
     pub vmtx: Option<&'a Vmtx<'a>>,
 }
 
-/// A borrowed view of the `glyf` table. Parsing is free — accessors
+/// A borrowed view of the `glyf` table. Parsing is free: accessors
 /// slice into the underlying bytes on demand.
 #[derive(Debug, Clone, Copy)]
 pub struct Glyf<'a> {
@@ -155,7 +155,7 @@ fn round_f32_to_i16(v: f32) -> i16 {
 }
 
 impl<'a> Glyf<'a> {
-    /// Wraps the raw `glyf` bytes. No validation up front — the
+    /// Wraps the raw `glyf` bytes. No validation up front: the
     /// table is too large and too dense to validate whole-table in
     /// linear time; accessors bound-check each read.
     #[must_use]
@@ -245,11 +245,11 @@ impl<'a> Glyf<'a> {
     ///
     /// pp1 / pp2 always read from `hmtx`. pp3 / pp4 read from `vmtx`
     /// when available; horizontal-only fonts get `(0, 0)` for both,
-    /// which matches every in-the-wild glyph we've checked — anchor
+    /// which matches every in-the-wild glyph we've checked: anchor
     /// indices for vertical phantoms only show up in CJK fonts that
     /// also ship `vmtx`. Glyphs without a `glyf` body get all-zero
     /// phantoms, which collapses anchor mode to a zero translation
-    /// — same as the legacy fallback before phantom resolution
+    /// like the legacy fallback before phantom resolution
     /// landed.
     fn phantom_points(
         &self,
@@ -286,14 +286,14 @@ impl<'a> Glyf<'a> {
     /// pp4 = advance-height origin).
     ///
     /// Used by `kerx` format-4 action type 0, which references glyph
-    /// points by index — including off-curve control points and the
+    /// points by index, including off-curve control points and the
     /// trailing phantoms. For composite glyphs the flat point list
-    /// returned by [`Glyf::flatten`] is the same one composite anchor
+    /// returned by `Glyf::flatten` is the same one composite anchor
     /// mode resolves against, so indices stay consistent across both
     /// callers.
     ///
     /// `vmtx` is optional: horizontal-only fonts have no `vmtx` and the
-    /// vertical phantoms collapse to `(0, 0)` — same fallback as
+    /// vertical phantoms collapse to `(0, 0)`, same fallback as
     /// composite anchor-mode resolution.
     ///
     /// Returns `Ok(None)` when the glyph id is out of range or has no
@@ -335,7 +335,7 @@ impl<'a> Glyf<'a> {
 
     /// Drives `sink` with the ops for `glyph_id`, flattening
     /// composite glyphs recursively. `deltas` is an optional list
-    /// of `(dx, dy)` pairs in the glyph's point order — supply the
+    /// of `(dx, dy)` pairs in the glyph's point order. Supply the
     /// output of [`crate::tables::Gvar::glyph_deltas`] folded into a
     /// dense `[f32; num_points]` pair to apply variable-font
     /// deltas. Pass `None` for the coord-free path.
@@ -345,7 +345,7 @@ impl<'a> Glyf<'a> {
     /// points can resolve against the four phantom points (LSB origin,
     /// advance-width origin, TSB origin, advance-height origin).
     /// Passing `None` keeps the legacy zero-translation fallback for
-    /// the rare phantom case — useful for unit tests of synthetic
+    /// the rare phantom case, useful for unit tests of synthetic
     /// composites that don't ship metrics.
     ///
     /// Returns `Ok(false)` when the glyph id is valid but has no
@@ -470,8 +470,8 @@ impl<'a> Glyf<'a> {
                 yy = r.read_f2dot14()?;
             } else if flags & COMP_WE_HAVE_A_TWO_BY_TWO != 0 {
                 xx = r.read_f2dot14()?;
-                yx = r.read_f2dot14()?; // scale01 — y' coefficient on x
-                xy = r.read_f2dot14()?; // scale10 — x' coefficient on y
+                yx = r.read_f2dot14()?; // scale01: y' coefficient on x
+                xy = r.read_f2dot14()?; // scale10: x' coefficient on y
                 yy = r.read_f2dot14()?;
             }
 
@@ -483,7 +483,7 @@ impl<'a> Glyf<'a> {
             let parent_point_count = out.points.len();
 
             // First flatten the child into a scratch buffer with the
-            // 2x2 applied but no translation yet — both anchor-mode
+            // 2x2 applied but no translation yet. Both anchor-mode
             // and xy-mode branches need access to the child's
             // pre-translation absolute points.
             let child_local = Transform {
@@ -544,7 +544,7 @@ impl<'a> Glyf<'a> {
                         }
                         let (px, py) = pp[phantom_idx];
                         // Parent's phantoms live in the parent's frame
-                        // — same frame as the points already in
+                        // which is the same frame as the points already in
                         // `out.points`, which were transformed by
                         // `parent_tf` on insertion. Apply the same
                         // transform so the subtraction below cancels
@@ -573,7 +573,7 @@ impl<'a> Glyf<'a> {
                 match (parent_anchor, child_anchor) {
                     (Some((px, py)), Some((cx, cy))) => (px - cx, py - cy),
                     // Out-of-range phantom index, or no metrics passed
-                    // through. Match the historic behaviour of skipping
+                    // through. Match the historic behavior of skipping
                     // the translation rather than refusing to draw.
                     _ => (0.0, 0.0),
                 }
@@ -602,14 +602,14 @@ impl<'a> Glyf<'a> {
         }
         // If WE_HAVE_INSTRUCTIONS is set the composite ends with a
         // u16 instruction count + that many bytes. We don't execute
-        // TT hints so we stop here — the caller already has the
+        // TT hints so we stop here. The caller already has the
         // flat outline.
         Ok(())
     }
 }
 
 /// A 2x2 + translation affine transform. Used to flatten composite
-/// glyphs without monomorphising a nested sink tower.
+/// glyphs without monomorphizing a nested sink tower.
 #[derive(Debug, Clone, Copy)]
 struct Transform {
     xx: f32,
@@ -639,8 +639,8 @@ impl Transform {
         )
     }
 
-    /// `self ∘ other` — apply `other` first, then `self`. Used by
-    /// composites to chain parent × child matrices.
+    /// `self ∘ other`: apply `other` first, then `self`. Used by
+    /// composites to chain parent * child matrices.
     fn compose(&self, other: &Self) -> Self {
         let xx = self.xx * other.xx + self.xy * other.yx;
         let xy = self.xx * other.xy + self.xy * other.yy;
@@ -678,7 +678,7 @@ struct Contour {
 /// with absolute coordinates (deltas + composite transforms already
 /// folded in); phase 2 walks `contours` and dispatches to the
 /// caller's [`OutlineSink`]. Composite anchor-mode resolution reaches
-/// into `points` to compute the parent ↔ child anchor pair, which is
+/// into `points` to compute the parent <-> child anchor pair, which is
 /// why the intermediate representation exists.
 #[derive(Debug, Default)]
 struct FlatGlyph {
@@ -742,7 +742,7 @@ fn flatten_simple_glyph(
         .map(|e| e.saturating_add(1))
         .unwrap_or(0);
 
-    // instructions — skip.
+    // instructions: skip.
     let instr_len = r.read_u16()? as usize;
     r.skip(instr_len)?;
 
@@ -807,9 +807,9 @@ fn flatten_simple_glyph(
         ys.push(y_cur);
     }
 
-    // Materialise absolute, transformed points with optional deltas.
+    // Materialize absolute, transformed points with optional deltas.
     // Deltas live in design-unit space and apply *before* the
-    // composite transform — gvar feeds them into the simple-glyph
+    // composite transform: gvar feeds them into the simple-glyph
     // coord stream, so they share the glyph's own frame.
     let base_idx = out.points.len();
     for (i, &f) in flags.iter().enumerate() {
@@ -881,7 +881,7 @@ fn emit_contour<S: OutlineSink>(coords: &[(f32, f32)], flags: &[FlatPoint], sink
     };
     sink.move_to(start_x, start_y);
 
-    // Single-point contour — nothing more to draw.
+    // Single-point contour: nothing more to draw.
     if n == 1 {
         sink.close();
         return;
@@ -1000,8 +1000,8 @@ mod tests {
         // hmtx record (advance=300, lsb=4). Expected phantoms:
         //   pp1 = (xMin - lsb, 0)             = (6,   0)
         //   pp2 = (pp1 + advance, 0)          = (306, 0)
-        //   pp3 = (0, 0)   — no vmtx
-        //   pp4 = (0, 0)   — no vmtx
+        //   pp3 = (0, 0)   (no vmtx)
+        //   pp4 = (0, 0)   (no vmtx)
         let body = build_simple_glyph(
             &[0],
             &[(10, 0, true)], // single contour point at (10, 0)
@@ -1036,7 +1036,7 @@ mod tests {
     #[test]
     fn phantom_points_use_vmtx_when_present() {
         // Same glyph, this time with vmtx supplying advance=1000,
-        // tsb=50. yMax=200 → pp3 = (0, 250); pp4 = (0, -750).
+        // tsb=50. yMax=200 -> pp3 = (0, 250); pp4 = (0, -750).
         let body = build_simple_glyph(&[0], &[(10, 0, true)]);
         let mut body = body;
         body[2..4].copy_from_slice(&10i16.to_be_bytes());
@@ -1063,7 +1063,7 @@ mod tests {
 
     #[test]
     fn phantom_points_no_glyph_body_yields_zero_pp1_pp2() {
-        // Empty glyph (zero loca range) → bounds returns None →
+        // Empty glyph (zero loca range) -> bounds returns None ->
         // phantom calc folds xMin/yMax to 0. With advance=500, lsb=10,
         // pp1=(0-10,0)=(-10,0), pp2=(490,0).
         let loca_bytes = build_loca_short(&[0, 0]);
@@ -1094,8 +1094,8 @@ mod tests {
     fn glyph_points_returns_contours_then_four_phantoms() {
         // Single contour with four on-curve points (length stays even):
         // (10, 20), (40, 20), (40, 80), (10, 80). Bbox patched to
-        // xMin=10, yMax=80. hmtx supplies advance=300, lsb=4 →
-        // pp1=(10-4, 0)=(6, 0), pp2=(306, 0). No vmtx → pp3 = pp4 = 0.
+        // xMin=10, yMax=80. hmtx supplies advance=300, lsb=4 ->
+        // pp1=(10-4, 0)=(6, 0), pp2=(306, 0). No vmtx -> pp3 = pp4 = 0.
         let mut body = build_simple_glyph(
             &[3],
             &[
@@ -1126,7 +1126,7 @@ mod tests {
         assert_eq!(pts[4], (6, 0));
         // pp2 = pp1 + advance = (306, 0).
         assert_eq!(pts[5], (306, 0));
-        // No vmtx → pp3 / pp4 collapse to zero.
+        // No vmtx -> pp3 / pp4 collapse to zero.
         assert_eq!(pts[6], (0, 0));
         assert_eq!(pts[7], (0, 0));
     }
@@ -1134,7 +1134,7 @@ mod tests {
     #[test]
     fn glyph_points_keeps_off_curve_points_in_glyf_order() {
         // Four points: on, off, on, on. The off-curve control at index
-        // 1 must survive — kerx fmt 4 type 0 can reference it.
+        // 1 must survive: kerx fmt 4 type 0 can reference it.
         let body = pad_even(build_simple_glyph(
             &[3],
             &[
@@ -1159,7 +1159,7 @@ mod tests {
 
     #[test]
     fn glyph_points_uses_vmtx_phantoms_when_present() {
-        // yMax=200, vmtx advance=1000, tsb=50 → pp3=(0, 250),
+        // yMax=200, vmtx advance=1000, tsb=50 -> pp3=(0, 250),
         // pp4=(0, 250 - 1000)=(0, -750).
         let mut body = build_simple_glyph(&[1], &[(0, 0, true), (10, 0, true)]);
         body[8..10].copy_from_slice(&200i16.to_be_bytes());
@@ -1345,7 +1345,7 @@ mod tests {
     #[test]
     fn simple_glyph_two_consecutive_off_curve_implies_midpoint() {
         // Contour: on(0,0), off(10,20), off(30,20), on(40,0). Two
-        // off-curve points in a row → implicit midpoint at (20, 20).
+        // off-curve points in a row -> implicit midpoint at (20, 20).
         let pts = [
             (0, 0, true),
             (10, 20, false),
@@ -1411,7 +1411,7 @@ mod tests {
 
     #[test]
     fn composite_glyph_translates_child_outline() {
-        // Child (glyph 1): rectangle at origin 0..100 × 0..100.
+        // Child (glyph 1): rectangle at origin 0..100 x 0..100.
         let child = build_simple_glyph(
             &[3],
             &[
@@ -1428,7 +1428,7 @@ mod tests {
         parent.extend_from_slice(&1u16.to_be_bytes()); // component id = 1
         parent.extend_from_slice(&200i16.to_be_bytes()); // dx
         parent.extend_from_slice(&300i16.to_be_bytes()); // dy
-                                                         // no MORE_COMPONENTS → single component.
+                                                         // no MORE_COMPONENTS -> single component.
 
         // Lay out glyf with parent first, child second.
         let mut glyf_bytes = Vec::new();
@@ -1457,7 +1457,7 @@ mod tests {
         glyf.outline(&loca, 0, None, None, &mut o).unwrap();
         // Child starts at (0,0), translated to (200, 300). The
         // closing LineTo brings the pen back to the start before
-        // Close — matches ttf-parser's convention.
+        // Close (matches ttf-parser's convention).
         assert!(matches!(o.ops()[0], PathOp::MoveTo { x: 200.0, y: 300.0 }));
         assert!(matches!(o.ops()[1], PathOp::LineTo { x: 300.0, y: 300.0 }));
         assert!(matches!(o.ops()[2], PathOp::LineTo { x: 300.0, y: 400.0 }));
@@ -1468,7 +1468,7 @@ mod tests {
 
     #[test]
     fn composite_with_scale_doubles_child() {
-        // Child: unit square at (0,0)..(100,100). Parent scales ×2.
+        // Child: unit square at (0,0)..(100,100). Parent scales x2.
         let child = build_simple_glyph(
             &[3],
             &[
@@ -1485,7 +1485,7 @@ mod tests {
         parent.extend_from_slice(&1u16.to_be_bytes());
         parent.extend_from_slice(&0i16.to_be_bytes());
         parent.extend_from_slice(&0i16.to_be_bytes());
-        // Scale 2.0 in F2Dot14 = 32768, but that overflows i16 — the
+        // Scale 2.0 in F2Dot14 = 32768, but that overflows i16: the
         // spec tops out at 2x so store 0x7FFF as a close proxy, or
         // just test with 1.5 (which fits as 24576).
         let scale_raw: i16 = 24576; // 1.5
@@ -1514,7 +1514,7 @@ mod tests {
 
         let mut o = Outline::new();
         glyf.outline(&loca, 0, None, None, &mut o).unwrap();
-        // 1.5 × (100, 100) = (150, 150).
+        // 1.5 * (100, 100) = (150, 150).
         match o.ops()[2] {
             PathOp::LineTo { x, y } => {
                 assert!((x - 150.0).abs() < 1e-3);
@@ -1528,13 +1528,13 @@ mod tests {
     fn composite_anchor_mode_translates_child_to_parent_anchor() {
         // Two-component composite (glyph 0):
         //   1. First component is a contour that *contributes* the
-        //      parent's flattened points — a 4-point square anchored
+        //      parent's flattened points: a 4-point square anchored
         //      at (10, 20)..(20, 20)..(20, 30)..(10, 30). It draws
         //      itself unchanged.
         //   2. Second component (glyph 2) is a single triangle whose
         //      first point is (0, 0). It is matched in anchor mode
-        //      with arg1=1 (parent point index 1 → (20, 20)) and
-        //      arg2=0 (child point index 0 → (0, 0)). The implied
+        //      with arg1=1 (parent point index 1 -> (20, 20)) and
+        //      arg2=0 (child point index 0 -> (0, 0)). The implied
         //      translation is parent[1] - child[0] = (20, 20).
         //
         // The test confirms:
@@ -1564,7 +1564,7 @@ mod tests {
 
         // Glyph 0: composite. First component glyph 1 with xy
         // translation (0, 0); second component glyph 2 in anchor mode
-        // (arg1=1 → parent point 1 = (20, 20); arg2=0 → child point 0
+        // (arg1=1 -> parent point 1 = (20, 20); arg2=0 -> child point 0
         // = (0, 0)).
         let mut g0 = build_header(-1, 0, 0, 100, 100);
         // Component A: glyph 1, xy_values, words, MORE_COMPONENTS.
@@ -1636,7 +1636,7 @@ mod tests {
     fn composite_two_by_two_uses_column_major_layout() {
         // OpenType stores the 2x2 in column-major order. A 90° CCW
         // rotation has xscale=0, scale01=1, scale10=-1, yscale=0, so
-        // (x, y) → (-y, x). Pin that mapping with a single-point
+        // (x, y) -> (-y, x). Pin that mapping with a single-point
         // contour at (10, 0): after rotation it should land at
         // (0, 10), and with translation (50, 5) at (50, 15).
         let child = build_simple_glyph(&[0], &[(10, 0, true)]);
@@ -1683,7 +1683,7 @@ mod tests {
     #[test]
     fn composite_anchor_mode_resolves_parent_phantom_point() {
         // Parent (glyph 0) is a composite with two components:
-        //   - Component A (glyph 1): a square at (10, 0) → (40, 30).
+        //   - Component A (glyph 1): a square at (10, 0) -> (40, 30).
         //     Its xMin=10 and lsb=4 imply pp1=(6,0) and
         //     pp2=(6+advance,0).
         //     The composite parent inherits its own metrics from
@@ -1703,7 +1703,7 @@ mod tests {
         let g2 = build_simple_glyph(&[2], &[(0, 0, true), (40, 0, true), (0, 40, true)]);
 
         // Parent composite header. xMin=10, yMin=0, xMax=40, yMax=30
-        // — matches the donor square so the parent's bounds line up
+        // matching the donor square so the parent's bounds line up
         // with its real points.
         let mut g0 = build_header(-1, 10, 0, 40, 30);
         let flags_a: u16 =
@@ -1748,7 +1748,7 @@ mod tests {
         let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 3).unwrap();
         let glyf = Glyf::new(&glyf_bytes);
 
-        // Per-glyph metrics. Parent (gid 0): advance=300, lsb=4 →
+        // Per-glyph metrics. Parent (gid 0): advance=300, lsb=4 ->
         // pp1=(10-4, 0)=(6,0), pp2=(306,0). Other glyphs need only
         // be parseable.
         let hmtx_bytes = build_hmtx(&[(300, 4), (60, 4), (40, 0)]);
@@ -1796,7 +1796,7 @@ mod tests {
         // Same composite shape as the phantom-resolution test, but
         // with `metrics=None`. The legacy fallback applies: the
         // anchor index is out-of-range and the translation collapses
-        // to (0, 0). Pin the behaviour so callers that opt out of
+        // to (0, 0). Pin the behavior so callers that opt out of
         // phantom resolution still get a stable answer.
         let g1 = build_simple_glyph(
             &[3],
@@ -1857,7 +1857,7 @@ mod tests {
 
     #[test]
     fn composite_recursion_limit_rejects_self_reference() {
-        // Glyph 0 references glyph 0 — infinite loop.
+        // Glyph 0 references glyph 0: infinite loop.
         let mut body = build_header(-1, 0, 0, 1000, 1000);
         let flags: u16 = COMP_ARGS_ARE_XY_VALUES | COMP_ARG_1_AND_2_ARE_WORDS;
         body.extend_from_slice(&flags.to_be_bytes());

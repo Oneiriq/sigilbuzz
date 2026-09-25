@@ -5,7 +5,7 @@
 //! premultiplied RGBA [`ColorPixmap`]. The flow is:
 //!
 //! 1. Walk the `DrawCmd` stream linearly. Maintain a *layer stack* of
-//!    `ColorPixmap`s — the bottom of the stack is the final surface.
+//!    `ColorPixmap`s. The bottom of the stack is the final surface.
 //! 2. `FillGlyph` rasterizes the inner outline glyph as an alpha mask,
 //!    converts the [`PaintSource`] (solid or gradient) into a premul
 //!    RGBA pixel grid, masks it by the glyph alpha, and `over`-composes
@@ -16,7 +16,7 @@
 //! 4. `PopLayer` blends the top pixmap into the one below it using the
 //!    composite mode recorded at push time, per Porter-Duff.
 //!
-//! The implementation deliberately avoids any external maths crates —
+//! The implementation avoids any external math crates:
 //! gradients, transforms, and Porter-Duff are all inline. The crate's
 //! single dep is `sigilbuzz-paint`, which itself only depends on
 //! `sigilbuzz`.
@@ -33,8 +33,8 @@
 //!
 //! The five Porter-Duff modes the driver implements pixel-perfectly:
 //! `SrcOver`, `DestIn`, `DestOut`, `SrcIn`, `SrcOut`. Other modes
-//! (`Plus`, the HSL family, etc.) fall back to `SrcOver` so colour
-//! glyphs that use them at least show *something* — the caller can
+//! (`Plus`, the HSL family, etc.) fall back to `SrcOver` so color
+//! glyphs that use them at least show *something*. The caller can
 //! upgrade individual modes later without breaking the API.
 
 use alloc::vec::Vec;
@@ -94,7 +94,7 @@ pub(crate) fn rasterize_colrv1(
         return Ok(ColorPixmap::new(0, 0));
     }
 
-    // Design units → pixel space. Y flips so output rows go down.
+    // Design units to pixel space. Y flips so output rows go down.
     let s = size_pt / upem;
     let to_pixels = Transform2D {
         xx: s,
@@ -107,7 +107,7 @@ pub(crate) fn rasterize_colrv1(
 
     // First pass: pre-rasterize every FillGlyph leaf to discover the
     // overall bounding box. This matches the strategy used by the
-    // COLRv0 path — no surface allocation until we know the union.
+    // COLRv0 path: no surface allocation until we know the union.
     let mut leaves: Vec<Leaf> = Vec::new();
     for cmd in &cmds {
         if let DrawCmd::FillGlyph {
@@ -225,7 +225,7 @@ pub(crate) fn rasterize_colrv1(
             }
             DrawCmd::PopLayer => {
                 if stack.len() < 2 {
-                    // Mismatched pop — evaluator guarantees pairing
+                    // Mismatched pop: evaluator guarantees pairing
                     // but we stay defensive against future cmd-stream
                     // changes.
                     continue;
@@ -286,11 +286,11 @@ const fn transform_to_affine(t: Transform2D) -> Affine {
 /// Composites a single FillGlyph onto the destination layer.
 ///
 /// `mask` is the alpha pixmap for the outline. `(dx, dy)` is the
-/// mask's offset within `dst`'s space. `paint` is the colour source.
+/// mask's offset within `dst`'s space. `paint` is the color source.
 /// `paint_xform` is the transform that mapped paint design-unit
 /// coordinates into pixel space (we need it to sample gradients in
 /// pixel space). `bbox_origin` is the destination layer's `(min_x,
-/// min_y)` in pixel space — i.e. the offset that turns a pixel index
+/// min_y)` in pixel space, i.e. the offset that turns a pixel index
 /// `(px, py)` inside `dst` into absolute pixel-space coordinates.
 fn paint_glyph_into_layer(
     dst: &mut ColorPixmap,
@@ -320,7 +320,7 @@ fn paint_glyph_into_layer(
             if m == 0 {
                 continue;
             }
-            // The pixel's centre in pixel space (= the gradient
+            // The pixel's center in pixel space (= the gradient
             // domain after `paint_xform` was already folded in by the
             // caller via `transform.then(to_pixels)`).
             let abs_x = (bbox_origin.0 + px) as f32 + 0.5;
@@ -332,7 +332,7 @@ fn paint_glyph_into_layer(
     }
 }
 
-/// Resolves the colour at pixel `(x, y)` for a paint source.
+/// Resolves the color at pixel `(x, y)` for a paint source.
 fn evaluate_paint(paint: &PaintSource, paint_xform: Transform2D, x: f32, y: f32) -> [u8; 4] {
     match paint {
         PaintSource::Solid(c) => to_premul(*c),
@@ -341,7 +341,7 @@ fn evaluate_paint(paint: &PaintSource, paint_xform: Transform2D, x: f32, y: f32)
 }
 
 /// Multiplies a premul RGBA pixel by an extra mask coverage `m`
-/// (0..=255). All channels — including alpha — scale together so the
+/// (0..=255). All channels, including alpha, scale together so the
 /// result stays premultiplied.
 fn mul_alpha(rgba: [u8; 4], m: u8) -> [u8; 4] {
     let m = m as u32;
@@ -408,7 +408,7 @@ fn sample_gradient(g: &Gradient, paint_xform: Transform2D, x: f32, y: f32) -> [u
         }
         GradientKind::Radial { c0, r0, c1, r1 } => {
             let (a, b) = transformed_pair(paint_xform, c0, c1);
-            // Radii scale by the matrix's average linear scale — a
+            // Radii scale by the matrix's average linear scale, a
             // rough but robust approximation that handles uniform
             // scale exactly and stays sensible under skew.
             let sa = matrix_scale(paint_xform);
@@ -435,7 +435,7 @@ fn transformed_pair(m: Transform2D, p0: (f32, f32), p1: (f32, f32)) -> ((f32, f3
     (m.apply(p0.0, p0.1), m.apply(p1.0, p1.1))
 }
 
-/// Approximate uniform-scale factor for a 2x3 affine — geometric mean
+/// Approximate uniform-scale factor for a 2x3 affine: geometric mean
 /// of the column lengths. Exact for uniform scale, reasonable under
 /// rotation and skew.
 fn matrix_scale(m: Transform2D) -> f32 {
@@ -461,7 +461,7 @@ pub(crate) fn project_linear(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> Opt
 }
 
 /// Two-circle radial gradient projection. Solves the standard
-/// quadratic that COLRv1 / SVG share — see the spec's appendix.
+/// quadratic that COLRv1 / SVG share. See the spec's appendix.
 /// Returns the larger valid root in `[0, +inf)` (the "outer" branch).
 ///
 /// `pub(crate)` so the SVG path can reuse the same code for
@@ -488,7 +488,7 @@ pub(crate) fn project_radial(
     let bb = -2.0 * (px * dx + py * dy + r0 * dr);
     let cc = px * px + py * py - r0 * r0;
     if aa.abs() <= f32::EPSILON {
-        // Degenerate: both circles same size or coincident centres.
+        // Degenerate: both circles same size or coincident centers.
         if bb.abs() <= f32::EPSILON {
             return None;
         }
@@ -548,7 +548,7 @@ fn project_sweep(
 /// Applies the extend mode to a gradient parameter `t`, returning the
 /// in-`[0, 1]` value used to sample the stops.
 ///
-/// `pub(crate)` so the SVG path can reuse the COLRv1 ramp behaviour
+/// `pub(crate)` so the SVG path can reuse the COLRv1 ramp behavior
 /// (PR #205 deferral).
 pub(crate) fn apply_extend(t: f32, extend: Extend) -> f32 {
     match extend {
@@ -574,7 +574,7 @@ pub(crate) fn apply_extend(t: f32, extend: Extend) -> f32 {
 }
 
 /// Samples the stop list at `t`. Stops are not assumed sorted, but the
-/// spec says they should be — we walk them in order and clamp.
+/// spec says they should be. We walk them in order and clamp.
 ///
 /// `pub(crate)` so the SVG path can reuse the same ramp interpolation
 /// for `<linearGradient>` / `<radialGradient>` stops.
@@ -646,9 +646,9 @@ fn composite_layer(parent: &mut ColorPixmap, top: &ColorPixmap, mode: CompositeM
 }
 
 /// Porter-Duff blend table. All operands are 8-bit premultiplied. The
-/// formulas are the canonical ones — `Sa` and `Da` are the source /
+/// formulas are the canonical ones: `Sa` and `Da` are the source /
 /// destination alpha channels, `inv = 255 - alpha`. Modes outside the
-/// supported set fall through to `SrcOver` so a colour glyph at least
+/// supported set fall through to `SrcOver` so a color glyph at least
 /// renders something instead of vanishing.
 #[allow(clippy::too_many_arguments)]
 fn porter_duff(
@@ -710,7 +710,7 @@ fn porter_duff(
                 ((sa * inv + 127) / 255) as u8,
             )
         }
-        // Unsupported / future modes — fall back to source-over so
+        // Unsupported / future modes: fall back to source-over so
         // the glyph still appears. A more advanced renderer can grow
         // this table in place.
         _ => {
@@ -750,9 +750,9 @@ mod tests {
 
     #[test]
     fn extend_reflect_bounces() {
-        // 1.25 → 0.75 (reflected past 1)
+        // 1.25 -> 0.75 (reflected past 1)
         assert!((apply_extend(1.25, Extend::Reflect) - 0.75).abs() < 1e-6);
-        // 2.25 → 0.25 (full cycle + a bit)
+        // 2.25 -> 0.25 (full cycle + a bit)
         assert!((apply_extend(2.25, Extend::Reflect) - 0.25).abs() < 1e-6);
     }
 
@@ -798,7 +798,7 @@ mod tests {
     #[test]
     fn to_premul_multiplies_channels() {
         let p = to_premul(col(1.0, 1.0, 1.0, 0.5));
-        // 1.0 * 0.5 ≈ 128 (rounded from 127.5).
+        // 1.0 * 0.5 ~ 128 (rounded from 127.5).
         assert!(p[0] >= 127 && p[0] <= 128);
         assert_eq!(p[3], 128);
     }
@@ -844,7 +844,7 @@ mod tests {
     #[test]
     fn porter_duff_src_in_masks_src_by_dest_alpha() {
         let r = porter_duff(CompositeMode::SrcIn, 255, 0, 0, 255, 0, 0, 0, 128);
-        // src red × dst.a/255.
+        // src red * dst.a/255.
         assert!(r.0 > 120 && r.0 < 132);
         assert!(r.3 > 120 && r.3 < 132);
     }
@@ -864,8 +864,8 @@ mod tests {
 
     #[test]
     fn radial_quadratic_two_circles() {
-        // Two concentric circles, radii 0 and 10, centred on origin.
-        // Sample at (5, 0) — that's halfway between r=0 and r=10.
+        // Two concentric circles, radii 0 and 10, centered on origin.
+        // Sample at (5, 0). That's halfway between r=0 and r=10.
         let t = project_radial((0.0, 0.0), 0.0, (0.0, 0.0), 10.0, (5.0, 0.0));
         assert!(t.is_some());
         let t = t.unwrap();
@@ -875,7 +875,7 @@ mod tests {
     #[test]
     fn sweep_basic_quadrants() {
         let c = (0.0, 0.0);
-        // Sweep from 0 to 2pi: angle 0 → t=0, angle pi → t=0.5.
+        // Sweep from 0 to 2pi: angle 0 -> t=0, angle pi -> t=0.5.
         let t = project_sweep(c, 0.0, core::f32::consts::TAU, (1.0, 0.0));
         assert!((t.unwrap() - 0.0).abs() < 1e-3);
         let t = project_sweep(c, 0.0, core::f32::consts::TAU, (-1.0, 0.0));

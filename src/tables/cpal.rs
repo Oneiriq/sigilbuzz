@@ -1,10 +1,10 @@
-//! `CPAL` — Colour Palette table.
+//! `CPAL`: Color Palette table.
 //!
-//! Paired with `COLR`; provides the palettes of BGRA colour values the
+//! Paired with `COLR`; provides the palettes of BGRA color values the
 //! `COLR` paint tree indexes into. Fonts can ship multiple palettes
 //! (typically light-mode / dark-mode variants or themed sets); every
 //! palette has the same number of entries. Palette index `0xFFFF` is
-//! a reserved sentinel meaning "use the foreground text colour"; the
+//! a reserved sentinel meaning "use the foreground text color"; the
 //! renderer handles that at paint time.
 //!
 //! Layout (version 0):
@@ -28,7 +28,7 @@
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
 
-/// A single palette entry — stored BGRA per spec, but exposed as
+/// A single palette entry: stored BGRA per spec, but exposed as
 /// RGBA for friendlier consumption.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color {
@@ -71,10 +71,10 @@ impl PaletteType {
 pub struct Cpal<'a> {
     num_palette_entries: u16,
     num_palettes: u16,
-    /// `colorRecordIndices[palette_index]` points at the first colour
+    /// `colorRecordIndices[palette_index]` points at the first color
     /// record in the palette; `num_palette_entries` follow.
     color_record_indices: &'a [u8],
-    /// Entire colour-record pool. Each record is four bytes (BGRA).
+    /// Entire color-record pool. Each record is four bytes (BGRA).
     color_records: &'a [u8],
     /// V1 extension: optional palette type flags array.
     palette_types: Option<&'a [u8]>,
@@ -186,7 +186,7 @@ impl<'a> Cpal<'a> {
         self.num_palettes
     }
 
-    /// Reads the colour at `(palette_index, entry_index)`. Returns
+    /// Reads the color at `(palette_index, entry_index)`. Returns
     /// `None` if either index is out of range.
     #[must_use]
     pub fn color(&self, palette_index: u16, entry_index: u16) -> Option<Color> {
@@ -247,7 +247,7 @@ mod tests {
         b.extend_from_slice(&entries_per_palette.to_be_bytes());
         b.extend_from_slice(&num_palettes.to_be_bytes());
         b.extend_from_slice(&num_color_records.to_be_bytes());
-        // colorRecordsArrayOffset — computed below; header is 12
+        // colorRecordsArrayOffset: computed below; header is 12
         // bytes, then num_palettes * 2 for indices, then optional
         // v1 appendix (12 bytes).
         let header_plus_indices = 12 + num_palettes as usize * 2;
@@ -260,7 +260,7 @@ mod tests {
             cursor += p.len() as u16;
         }
         if version == 1 {
-            // three Offset32 — all zero (no appendix arrays).
+            // three Offset32: all zero (no appendix arrays).
             b.extend_from_slice(&[0u8; 12]);
         }
         for p in palettes {

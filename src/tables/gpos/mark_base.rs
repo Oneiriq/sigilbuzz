@@ -1,4 +1,4 @@
-//! GPOS lookup type 4 — Mark-to-Base Attachment.
+//! GPOS lookup type 4: Mark-to-Base Attachment.
 //!
 //! Attaches a combining mark (grave, acute, tilde, diaeresis, ...)
 //! to the preceding base glyph. The feature that drives this at
@@ -215,7 +215,7 @@ impl<'a> BaseArray<'a> {
         if data.len() < need {
             return Err(Error::Truncated {
                 offset: records_off,
-                context: "baseArray records shorter than baseCount × markClassCount",
+                context: "baseArray records shorter than baseCount * markClassCount",
             });
         }
         Ok(Self {
@@ -238,7 +238,7 @@ impl<'a> BaseArray<'a> {
             u16::from_be_bytes([self.data[record_off], self.data[record_off + 1]]) as usize;
         if anchor_off_rel == 0 {
             // Spec: a null offset means this base has no anchor for
-            // this mark class. Not an error — the mark simply does
+            // this mark class. Not an error: the mark simply does
             // not attach through this base.
             return None;
         }

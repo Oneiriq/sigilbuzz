@@ -7,7 +7,7 @@
 //! width, and the font's `FontBBox` envelopes every per-glyph bbox.
 //!
 //! The byte-length of one specific glyph's content stream is locked
-//! down as a snapshot — any future change to the emitter that
+//! down as a snapshot. Any future change to the emitter that
 //! shifts that length silently is a regression we want to catch.
 
 use sigilbuzz::Face;
@@ -147,8 +147,8 @@ fn opensans_capital_a_charproc_length_is_stable() {
     assert_eq!(
         body_len, EXPECTED_OPENSANS_A_BODY_LEN,
         "Open Sans 'A' CharProc body length drifted (got {body_len}, \
-         expected {EXPECTED_OPENSANS_A_BODY_LEN}) — update the constant \
-         intentionally if the emitter change is deliberate"
+         expected {EXPECTED_OPENSANS_A_BODY_LEN}). Update the constant \
+         if the emitter change is intended."
     );
 }
 

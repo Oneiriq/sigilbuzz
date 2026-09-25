@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Synthesise an AAT-only font that exercises `kerx` subtable
-format 6 — simple n×m kerning array.
+format 6: simple n x m kerning array.
 
 Sister script to `build_aat_kerx_fmt2_fixture.py`. Format 6 mirrors
 format 2's compound-class layout but the row / column lookup tables
@@ -16,17 +16,17 @@ for the four real letters. Hand-authored kerx layout:
     A=1, B=1, everything else=0.
 - Column index table (AAT lookup format 0):
     V=1, W=2, everything else=0.
-- Kerning array (rowCount=2 × columnCount=3):
+- Kerning array (rowCount=2 x columnCount=3):
     row 0: [0,    0,    0]
     row 1: [0,  -30,  -50]
 
 So shaping:
 
-- "AV" → -30 (A is row 1, V is col 1)
-- "BV" → -30
-- "AW" → -50 (A is row 1, W is col 2)
-- "BW" → -50
-- "VA" →   0 (V is row 0, A is col 0 — default)
+- "AV" -> -30 (A is row 1, V is col 1)
+- "BV" -> -30
+- "AW" -> -50 (A is row 1, W is col 2)
+- "BW" -> -50
+- "VA" ->   0 (V is row 0, A is col 0, default)
 
 Deliberately NO GSUB and NO GPOS so sigilbuzz's `kerx` fallback
 runs.
@@ -86,15 +86,15 @@ def build_kerx_table() -> bytes:
     row_count = 2
     column_count = 3
 
-    # Row index table: gid → row index.
+    # Row index table: gid -> row index.
     row_index_of_gid = [0, 1, 1, 0, 0, 0]
-    # Column index table: gid → column index.
+    # Column index table: gid -> column index.
     col_index_of_gid = [0, 0, 0, 1, 2, 0]
 
     row_lookup = lookup_format0(row_index_of_gid)
     col_lookup = lookup_format0(col_index_of_gid)
 
-    # Kerning matrix [row][col] → i16.
+    # Kerning matrix [row][col] -> i16.
     matrix = [
         [0,   0,   0],
         [0, -30, -50],
@@ -107,7 +107,7 @@ def build_kerx_table() -> bytes:
     #                          rowIndexOff, colIndexOff, arrayOff)
     #   32 : row lookup
     #   .. : col lookup
-    #   .. : kerning array (row_count × column_count i16s)
+    #   .. : kerning array (row_count x column_count i16s)
     fmt6_header_off = 12
     row_off = fmt6_header_off + 20
     col_off = row_off + len(row_lookup)

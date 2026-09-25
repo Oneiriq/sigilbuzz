@@ -1,4 +1,4 @@
-//! `sigilbuzz subset` — wraps [`sigilbuzz_subset::subset`].
+//! `sigilbuzz subset`: wraps [`sigilbuzz_subset::subset`].
 //!
 //! The CLI accepts either a list of raw glyph ids (`--gids 1,2,3` or
 //! `--gids 0..=255`) or a list of unicodes (`--unicodes A,B,U+1F600`)

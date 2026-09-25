@@ -1,7 +1,7 @@
 //! End-to-end Type 1 emission against a vendored TTF.
 //!
 //! The Type 1 emitter doesn't actually need a PostScript-format font
-//! to ingest from — it converts sigilbuzz [`PathOp`]s, regardless of
+//! to ingest from. It converts sigilbuzz [`PathOp`]s, regardless of
 //! whether they came from a `glyf` outline (Open Sans) or a CFF
 //! charstring (any modern OTF). This test exercises the OpenSans
 //! `glyf` path because that's the fixture the Type 3 test already
@@ -50,7 +50,7 @@ fn opensans_capital_a_emits_well_formed_type1_charstring() {
         !cs.is_empty(),
         "expected a non-empty charstring for /g{gid_a}"
     );
-    // hsbw is op 13. The first encoded operand is lsb (0 → byte 139),
+    // hsbw is op 13. The first encoded operand is lsb (0 -> byte 139),
     // followed by the advance number (1, 2, or 5 bytes depending on
     // its magnitude), followed by op 13.
     assert_eq!(
@@ -58,7 +58,7 @@ fn opensans_capital_a_emits_well_formed_type1_charstring() {
         "first hsbw operand should be 0 (encoded as 139)"
     );
 
-    // op 13 must appear within the first 7 bytes — that's the worst
+    // op 13 must appear within the first 7 bytes. That's the worst
     // case (lsb single byte + advance 5-byte form + op = 7).
     let hsbw_pos = cs[..7]
         .iter()
@@ -69,7 +69,7 @@ fn opensans_capital_a_emits_well_formed_type1_charstring() {
         "hsbw op should appear after lsb+advance encoding (got pos {hsbw_pos})"
     );
 
-    // Charstring must end with endchar (op 14) — after stripping the
+    // Charstring must end with endchar (op 14), after stripping the
     // closing " |-\n" framing.
     // Find the trailing " |-\n" after the charstring, then confirm
     // the byte directly before it is 14.
@@ -109,7 +109,7 @@ fn private_dict_advertises_cleartext_charstrings() {
     let font = emit_type1_font(&face, &[]).unwrap();
     let s = std::str::from_utf8(&font.private_dict_body).unwrap();
     // /lenIV -1 = "the charstrings that follow are cleartext, not
-    // eexec-encrypted." Adobe Reader and modern consumers honour
+    // eexec-encrypted." Adobe Reader and modern consumers honor
     // this; see the type1 module docs.
     assert!(
         s.contains("/lenIV -1 def"),

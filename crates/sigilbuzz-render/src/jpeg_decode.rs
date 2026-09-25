@@ -1,6 +1,6 @@
 //! Minimum-viable baseline JPEG decoder for sbix `'jpg '` payloads.
 //!
-//! Hand-rolled from ITU-T T.81 (1992). Scope is deliberately narrow —
+//! Hand-rolled from ITU-T T.81 (1992). Scope is narrow:
 //! enough to decode the JPEG payloads that appear in real-world font
 //! sbix tables (some Apple Color Emoji variants and a handful of CJK
 //! emoji fonts) and nothing more:
@@ -9,12 +9,12 @@
 //! - **Baseline sequential DCT (SOF0)** plus **progressive DCT (SOF2)**
 //!   first-time DC and AC scans, plus DC successive-approximation
 //!   refinement. AC successive-approximation refinement scans (Ah > 0
-//!   on an AC band) are surfaced as [`RenderError::BadJpeg`] —
+//!   on an AC band) are surfaced as [`RenderError::BadJpeg`],
 //!   uncommon in real-world font payloads but explicitly out of scope
 //!   for this PR. No arithmetic coding (SOF9..15), no hierarchical
 //!   (SOFE).
 //! - **YCbCr** (3-component) and **grayscale** (1-component).
-//! - **Sampling factors:** 4:4:4, 4:2:2, 4:2:0 — and any combination
+//! - **Sampling factors:** 4:4:4, 4:2:2, 4:2:0, and any combination
 //!   where each component's max sampling factor is `<= 2`.
 //! - **In-stream Huffman + quantization tables** (DHT / DQT). No JFIF
 //!   "default" tables are assumed.
@@ -30,25 +30,25 @@
 //! 1. **Marker walker** parses the JPEG byte stream until SOS, then
 //!    hands off to the entropy decoder.
 //! 2. **Huffman decode** pulls DC + 63 AC zig-zag-ordered coefficients
-//!    per 8×8 block.
+//!    per 8x8 block.
 //! 3. **Dequantize + de-zig-zag** turns the coefficient stream into
-//!    natural-order 8×8 blocks.
+//!    natural-order 8x8 blocks.
 //! 4. **IDCT** (a straightforward float-domain row+column DCT-III) maps
 //!    coefficients back to spatial-domain samples.
 //! 5. **Level shift +128** restores the 0..=255 range.
 //! 6. **Chroma upsample** (nearest-neighbor) widens subsampled Cb/Cr to
 //!    luma resolution.
-//! 7. **YCbCr → RGB** via ITU-R BT.601 with clamping.
+//! 7. **YCbCr -> RGB** via ITU-R BT.601 with clamping.
 //!
 //! # Non-goals
 //!
 //! - AC successive-approximation refinement scans (rare; the bit-plane
-//!   walking over existing nonzeros is the genuinely thorny progressive
+//!   walking over existing nonzeros is the thorny progressive
 //!   subroutine and not seen in font sbix payloads we tested against).
 //! - Arithmetic coding, lossless JPEG, JPEG-LS, JPEG 2000 (`'jp2 '`),
 //!   TIFF (`'tiff'`).
 //! - Color-managed output (ICC profiles), EXIF orientation.
-//! - SIMD or fixed-point IDCT — the hot path here is tiny font emoji
+//! - SIMD or fixed-point IDCT: the hot path here is tiny font emoji
 //!   bitmaps, not high-throughput photo decode.
 //!
 //! See [`super::bitmaps::decode_sbix_glyph`] for the dispatch site.
@@ -77,14 +77,14 @@ const MARKER_COM: u8 = 0xFE;
 
 /// Maximum image dimension for a JPEG payload. Mirrors the PNG
 /// decoder's per-dim ceiling so a malicious or malformed font can't
-/// blow up `usize` math via a 65535×65535 SOF0.
+/// blow up `usize` math via a 65535x65535 SOF0.
 const MAX_JPEG_DIM: u32 = 16384;
 
 /// Hard cap on Huffman table count. JPEG allows 4 of each AC/DC class,
 /// so the worst legitimate case is 8 tables.
 const MAX_HUFF_TABLES: usize = 4;
 
-/// Hard cap on quantization table count. Same logic — 4 destinations.
+/// Hard cap on quantization table count. Same logic: 4 destinations.
 const MAX_QT_TABLES: usize = 4;
 
 // ---------------------------------------------------------------------------
@@ -122,7 +122,7 @@ struct HuffmanTable {
     counts: [u8; 16],
     /// Symbol values, in the order they appear in the DHT segment.
     symbols: Vec<u8>,
-    /// Decode lookup: maps `code` (right-padded to 16 bits) → (symbol,
+    /// Decode lookup: maps `code` (right-padded to 16 bits) -> (symbol,
     /// code length). We build a flat 16-bit table during `finalize`.
     /// `lookup[code]` is `(symbol, length)` for any 16-bit code whose
     /// top `length` bits match the canonical code, with `length = 0`
@@ -201,7 +201,7 @@ struct Decoder<'a> {
     /// Each buffer holds `num_blocks_x * num_blocks_y * 64` `i16`
     /// entries in zig-zag order.
     coeffs: Vec<Vec<i16>>,
-    /// Per-component block grid dimensions (in 8×8 blocks). Sized
+    /// Per-component block grid dimensions (in 8x8 blocks). Sized
     /// to `mcus_x * h_sampling` and `mcus_y * v_sampling` for each
     /// component.
     blocks_per_comp: Vec<(u32, u32)>,
@@ -271,7 +271,7 @@ impl<'a> Decoder<'a> {
                 }
                 MARKER_EOI => return Err(RenderError::BadJpeg("EOI before SOS")),
                 m if (0xE0..=0xEF).contains(&m) => {
-                    // APP0..APP15 — skip.
+                    // APP0..APP15: skip.
                     let _ = self.read_segment()?;
                 }
                 m if (0xC1..=0xCF).contains(&m) && m != MARKER_DHT => {
@@ -284,7 +284,7 @@ impl<'a> Decoder<'a> {
                     return Err(RenderError::BadJpeg("RST marker outside scan"));
                 }
                 _ => {
-                    // Unknown marker — try to skip via length.
+                    // Unknown marker: try to skip via length.
                     let _ = self.read_segment()?;
                 }
             }
@@ -652,7 +652,7 @@ impl<'a> Decoder<'a> {
                 }
             }
         } else {
-            // YCbCr → RGB. Sample chroma via nearest-neighbor at the
+            // YCbCr -> RGB. Sample chroma via nearest-neighbor at the
             // luma grid: pixel (x, y) in luma maps to
             // (x * h_chroma / max_h, y * v_chroma / max_v) in chroma.
             let (h_y, v_y) = (
@@ -773,8 +773,8 @@ impl<'a> Decoder<'a> {
             return Err(RenderError::BadJpeg("progressive Ah/Al out of range"));
         }
 
-        // AC successive-approximation refinement is genuinely thorny —
-        // bit-plane walking over the existing nonzero coefficients —
+        // AC successive-approximation refinement is thorny
+        // (bit-plane walking over the existing nonzero coefficients),
         // and the deferred-scope note in the module-level docs makes
         // this an explicit non-goal for the PR. Surface it before any
         // table validation so callers see a stable error message
@@ -819,7 +819,7 @@ impl<'a> Decoder<'a> {
     }
 
     /// First-pass DC scan (Ah == 0). Reads one DC coefficient per
-    /// 8×8 block in MCU order and writes its value, point-shifted
+    /// 8x8 block in MCU order and writes its value, point-shifted
     /// left by `al`, into the coefficient buffer at zig-zag index 0.
     fn scan_dc_first(
         &mut self,
@@ -1006,11 +1006,11 @@ impl<'a> Decoder<'a> {
                     let size = rs & 0x0F;
                     if size == 0 {
                         if run == 15 {
-                            // ZRL — 16 zero coefficients.
+                            // ZRL: 16 zero coefficients.
                             k = k.saturating_add(16);
                             continue;
                         }
-                        // EOBn — skip 2^run blocks (this one + run more).
+                        // EOBn: skip 2^run blocks (this one + run more).
                         eob_run = (1u32 << run) - 1;
                         if run > 0 {
                             eob_run += br.read_bits(run);
@@ -1130,7 +1130,7 @@ struct BitReader<'a> {
     /// Bits currently valid in `buf`.
     len: u8,
     /// Once we hit a marker (0xFF nn with nn != 0x00) the stream is
-    /// ended; further reads return 0 (zero-padding behaviour matches
+    /// ended; further reads return 0 (zero-padding behavior matches
     /// libjpeg for tail-truncated streams).
     eos: bool,
 }
@@ -1169,7 +1169,7 @@ impl<'a> BitReader<'a> {
                 }
                 let next = self.src[self.pos];
                 if next == 0x00 {
-                    // Stuffed byte — consume and emit literal 0xFF.
+                    // Stuffed byte: consume and emit literal 0xFF.
                     self.pos += 1;
                     self.buf = (self.buf << 8) | u32::from(b);
                     self.len += 8;
@@ -1225,8 +1225,8 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// Sign-extend an `n`-bit JPEG receive value: top bit 1 → positive,
-/// top bit 0 → negative, where the negative range is
+/// Sign-extend an `n`-bit JPEG receive value: top bit 1 -> positive,
+/// top bit 0 -> negative, where the negative range is
 /// `-(2^n - 1) ..= -2^(n-1)`.
 fn extend(v: u32, n: u8) -> i32 {
     if n == 0 {
@@ -1274,11 +1274,11 @@ fn decode_block(
         let size = rs & 0x0F;
         if size == 0 {
             if run == 15 {
-                // ZRL — 16 zeros, then continue.
+                // ZRL: 16 zeros, then continue.
                 k += 16;
                 continue;
             }
-            // EOB — rest of block is zero.
+            // EOB: rest of block is zero.
             break;
         }
         k += run;
@@ -1295,9 +1295,9 @@ fn decode_block(
 }
 
 // ---------------------------------------------------------------------------
-// Inverse DCT — straightforward float-domain DCT-III, applied first
+// Inverse DCT: straightforward float-domain DCT-III, applied first
 // across rows then across columns. Adequate for tiny font emoji
-// bitmaps; not optimised for throughput.
+// bitmaps; not optimized for throughput.
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::excessive_precision)]
@@ -1357,10 +1357,10 @@ fn idct(coeffs: &[i32; 64], out: &mut [u8; 64]) {
 mod tests {
     use super::*;
 
-    /// Build a minimal baseline JPEG that encodes a single 8×8 block
-    /// of a constant Y/Cb/Cr value, with sampling 1×1 for each
-    /// component (4:4:4). Uses very small Huffman tables — one DC
-    /// symbol per class, one AC symbol — and identity quantization.
+    /// Build a minimal baseline JPEG that encodes a single 8x8 block
+    /// of a constant Y/Cb/Cr value, with sampling 1x1 for each
+    /// component (4:4:4). Uses very small Huffman tables (one DC
+    /// symbol per class, one AC symbol) and identity quantization.
     ///
     /// The block has DC = `dc_y` for luma, `dc_cb` for Cb, `dc_cr`
     /// for Cr, and zero AC. After IDCT + level-shift the spatial
@@ -1368,7 +1368,7 @@ mod tests {
     fn build_constant_jpeg(dc_y: i32, dc_cb: i32, dc_cr: i32) -> Vec<u8> {
         // We build:
         //   SOI
-        //   DQT (3 identity tables, dest 0/1/2 — but we use only 0 + 1)
+        //   DQT (3 identity tables, dest 0/1/2, but we use only 0 + 1)
         //   SOF0 (8x8, 3 components, 1x1 sampling each)
         //   DHT (DC/AC tables for class 0/1, dest 0/1)
         //   SOS (3 components)
@@ -1376,7 +1376,7 @@ mod tests {
         //   EOI
         let mut out = vec![0xFF, MARKER_SOI];
 
-        // DQT — two identity tables (dest 0 = luma, dest 1 = chroma).
+        // DQT: two identity tables (dest 0 = luma, dest 1 = chroma).
         out.push(0xFF);
         out.push(MARKER_DQT);
         // Length = 2 + (1 + 64) * 2 = 132.
@@ -1386,7 +1386,7 @@ mod tests {
             out.extend_from_slice(&[1u8; 64]);
         }
 
-        // SOF0 — 8×8, 3 components, 1×1 sampling each.
+        // SOF0: 8x8, 3 components, 1x1 sampling each.
         out.push(0xFF);
         out.push(MARKER_SOF0);
         // Length = 2 + 6 + 3*3 = 17.
@@ -1396,7 +1396,7 @@ mod tests {
         out.extend_from_slice(&8u16.to_be_bytes()); // width
         out.push(3); // components
         out.push(1); // Y
-        out.push((1 << 4) | 1); // 1×1
+        out.push((1 << 4) | 1); // 1x1
         out.push(0); // qt 0
         out.push(2); // Cb
         out.push((1 << 4) | 1);
@@ -1405,7 +1405,7 @@ mod tests {
         out.push((1 << 4) | 1);
         out.push(1); // qt 1
 
-        // DHT — four tables: DC/0, DC/1, AC/0, AC/1.
+        // DHT (four tables): DC/0, DC/1, AC/0, AC/1.
         // We use the standard JPEG DC luma + DC chroma + AC luma +
         // AC chroma tables (from the spec). They're long, but
         // necessary so the encoder side has real codes to use.
@@ -1458,7 +1458,7 @@ mod tests {
         out.extend_from_slice(&((dht_body.len() + 2) as u16).to_be_bytes());
         out.extend_from_slice(&dht_body);
 
-        // SOS — 3 components, DC=0/1/1 AC=0/1/1.
+        // SOS: 3 components, DC=0/1/1 AC=0/1/1.
         out.push(0xFF);
         out.push(MARKER_SOS);
         // Length = 2 + 1 + 2*3 + 3 = 12.
@@ -1518,7 +1518,7 @@ mod tests {
         }
     }
 
-    /// Encode a single 8×8 block with a single DC coefficient and EOB.
+    /// Encode a single 8x8 block with a single DC coefficient and EOB.
     ///
     /// `is_luma` selects between the luma (dest 0) and chroma (dest 1)
     /// standard tables. Implements just enough of the spec encoder to
@@ -1676,15 +1676,15 @@ mod tests {
             lookup: Vec::new(),
         };
         tbl.finalize().unwrap();
-        // Code 0 (top bit 0) → 0xAA, length 1.
+        // Code 0 (top bit 0) -> 0xAA, length 1.
         assert_eq!(tbl.lookup[0x0000], (0xAA, 1));
-        // Code 1 (top bit 1) → 0xBB, length 1.
+        // Code 1 (top bit 1) -> 0xBB, length 1.
         assert_eq!(tbl.lookup[0x8000], (0xBB, 1));
     }
 
     #[test]
     fn huffman_table_rejects_count_overflow() {
-        // 17 codes of length 4 — only 16 codes fit in 4 bits.
+        // 17 codes of length 4. Only 16 codes fit in 4 bits.
         let mut tbl = HuffmanTable {
             counts: [0, 0, 0, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             symbols: vec![0u8; 17],
@@ -1696,9 +1696,9 @@ mod tests {
 
     #[test]
     fn extend_signs_correctly() {
-        // Receive of 4 bits, value 0b1010 = 10 → top bit 1, positive.
+        // Receive of 4 bits, value 0b1010 = 10 -> top bit 1, positive.
         assert_eq!(extend(0b1010, 4), 10);
-        // Receive of 4 bits, value 0b0010 = 2, top bit 0 → negative.
+        // Receive of 4 bits, value 0b0010 = 2, top bit 0 -> negative.
         // Range is -(2^4 - 1) ..= -2^3 = -15..=-8. Specifically the
         // formula gives 2 + (-16) + 1 = -13.
         assert_eq!(extend(0b0010, 4), -13);
@@ -1707,8 +1707,8 @@ mod tests {
 
     #[test]
     fn idct_dc_only_block_is_constant() {
-        // DC = 1024 (after dequant) → spatial value = 1024 / 8 = 128.
-        // After level shift: 128 + 128 = 256 → clamped to 255.
+        // DC = 1024 (after dequant) -> spatial value = 1024 / 8 = 128.
+        // After level shift: 128 + 128 = 256 -> clamped to 255.
         let mut coeffs = [0i32; 64];
         coeffs[0] = 1024;
         let mut out = [0u8; 64];
@@ -1720,7 +1720,7 @@ mod tests {
 
     #[test]
     fn synthetic_constant_jpeg_decodes_to_expected_color() {
-        // dc_y = 0, dc_cb = 0, dc_cr = 64 → red shift.
+        // dc_y = 0, dc_cb = 0, dc_cr = 64 -> red shift.
         // After IDCT + level shift each spatial sample is 128 for Y,
         // 128 for Cb, and 128 + (64/8) = 136 for Cr (since identity
         // quantization means dequant = 1, and with our test encoder
@@ -1733,7 +1733,7 @@ mod tests {
         let pix = decode_jpeg(&bytes).unwrap();
         assert_eq!(pix.width, 8);
         assert_eq!(pix.height, 8);
-        // Spot-check a center pixel — JPEG ringing is zero with a
+        // Spot-check a center pixel. JPEG ringing is zero with a
         // single DC, so every pixel should match.
         let center = pix.get(4, 4);
         assert_eq!(center[3], 255);
@@ -1760,8 +1760,8 @@ mod tests {
 
     #[test]
     fn synthetic_neutral_jpeg_decodes_to_gray() {
-        // All-zero DC → spatial sample 0 → after level shift 128.
-        // YCbCr (128, 128, 128) → RGB (128, 128, 128).
+        // All-zero DC -> spatial sample 0 -> after level shift 128.
+        // YCbCr (128, 128, 128) -> RGB (128, 128, 128).
         let bytes = build_constant_jpeg(0, 0, 0);
         let pix = decode_jpeg(&bytes).unwrap();
         let center = pix.get(4, 4);
@@ -1775,7 +1775,7 @@ mod tests {
     }
 
     /// Build a minimal **progressive** (SOF2) grayscale JPEG that
-    /// encodes a single 8×8 block via two scans:
+    /// encodes a single 8x8 block via two scans:
     ///
     ///   - SOS #1: DC scan (Ss=0, Se=0, Ah=0, Al=0) emits the DC
     ///     coefficient using the standard luma DC table.
@@ -1789,14 +1789,14 @@ mod tests {
     fn build_progressive_grayscale_jpeg(dc: i32) -> Vec<u8> {
         let mut out = vec![0xFF, MARKER_SOI];
 
-        // DQT — single identity table at dest 0.
+        // DQT: single identity table at dest 0.
         out.push(0xFF);
         out.push(MARKER_DQT);
         out.extend_from_slice(&(2u16 + 1 + 64).to_be_bytes());
         out.push(0); // precision 0, dest 0
         out.extend_from_slice(&[1u8; 64]);
 
-        // SOF2 — 8×8, 1 component (grayscale), 1×1 sampling, qt 0.
+        // SOF2: 8x8, 1 component (grayscale), 1x1 sampling, qt 0.
         out.push(0xFF);
         out.push(MARKER_SOF2);
         out.extend_from_slice(&(2u16 + 6 + 3).to_be_bytes());
@@ -1805,10 +1805,10 @@ mod tests {
         out.extend_from_slice(&8u16.to_be_bytes()); // width
         out.push(1); // 1 component
         out.push(1); // id
-        out.push((1 << 4) | 1); // 1×1
+        out.push((1 << 4) | 1); // 1x1
         out.push(0); // qt 0
 
-        // DHT — DC luma + AC luma at dest 0. Reuse the standard
+        // DHT: DC luma + AC luma at dest 0. Reuse the standard
         // tables defined in the baseline fixture.
         let dc_lum_counts: [u8; 16] = [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
         let dc_lum_syms: [u8; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
@@ -1840,7 +1840,7 @@ mod tests {
         out.extend_from_slice(&((dht_body.len() + 2) as u16).to_be_bytes());
         out.extend_from_slice(&dht_body);
 
-        // SOS #1 — DC scan (Ss=0, Se=0, Ah=Al=0).
+        // SOS #1: DC scan (Ss=0, Se=0, Ah=Al=0).
         out.push(0xFF);
         out.push(MARKER_SOS);
         out.extend_from_slice(&(2u16 + 1 + 2 + 3).to_be_bytes());
@@ -1862,7 +1862,7 @@ mod tests {
         bw.flush();
         out.extend_from_slice(&bw.bytes);
 
-        // SOS #2 — AC first-time scan (Ss=1, Se=63, Ah=Al=0).
+        // SOS #2: AC first-time scan (Ss=1, Se=63, Ah=Al=0).
         out.push(0xFF);
         out.push(MARKER_SOS);
         out.extend_from_slice(&(2u16 + 1 + 2 + 3).to_be_bytes());
@@ -1887,7 +1887,7 @@ mod tests {
 
     #[test]
     fn progressive_grayscale_decodes_to_constant() {
-        // dc = 0 → spatial sample 0 → after level shift 128.
+        // dc = 0 -> spatial sample 0 -> after level shift 128.
         let bytes = build_progressive_grayscale_jpeg(0);
         let pix = decode_jpeg(&bytes).unwrap();
         assert_eq!(pix.width, 8);
@@ -1908,7 +1908,7 @@ mod tests {
         // A progressive 1-component decode of dc=64 should land on
         // approximately the same luminance as a baseline decode of
         // YCbCr (64, 0, 0). With identity quantization, dequant DC=64
-        // and IDCT → spatial 8 per pixel, level-shifted to 136.
+        // and IDCT -> spatial 8 per pixel, level-shifted to 136.
         let bytes = build_progressive_grayscale_jpeg(64);
         let pix = decode_jpeg(&bytes).unwrap();
         let center = pix.get(4, 4);
@@ -1925,7 +1925,7 @@ mod tests {
 
     #[test]
     fn progressive_sos_rejects_dc_scan_with_se_nonzero() {
-        // Build a minimal SOF2 + SOS where Ss=0 and Se=5 — illegal:
+        // Build a minimal SOF2 + SOS where Ss=0 and Se=5 (illegal):
         // a DC scan must have Se=0 per T.81 §F.1.4.2.
         let mut bytes = vec![0xFF, MARKER_SOI];
         // Minimal DQT.
@@ -1945,7 +1945,7 @@ mod tests {
         bytes.push(1);
         bytes.push((1 << 4) | 1);
         bytes.push(0);
-        // SOS — Ss=0 but Se=5 (malformed for DC scan).
+        // SOS: Ss=0 but Se=5 (malformed for DC scan).
         bytes.push(0xFF);
         bytes.push(MARKER_SOS);
         bytes.extend_from_slice(&(2u16 + 1 + 2 + 3).to_be_bytes());
@@ -2049,8 +2049,8 @@ mod tests {
     // surface still has bite:
     //
     //   - Baseline (SOF0) still decodes (covered above).
-    //   - SOF1 (extended sequential) — non-baseline, still rejected.
-    //   - SOF3 (lossless) — non-baseline, still rejected.
+    //   - SOF1 (extended sequential): non-baseline, still rejected.
+    //   - SOF3 (lossless): non-baseline, still rejected.
     //   - SOF0-SOS scan params with Ss != 0 must reject (the
     //     baseline path doesn't morph into a progressive scanner
     //     just because Ss looks progressive).
@@ -2073,7 +2073,7 @@ mod tests {
 
     #[test]
     fn marker_walker_rejects_lossless_sof3() {
-        // SOF3 is lossless — also non-baseline.
+        // SOF3 is lossless, also non-baseline.
         let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xC3];
         bytes.extend_from_slice(&8u16.to_be_bytes());
         bytes.extend_from_slice(&[8, 0, 8, 0, 8, 0]);
@@ -2084,9 +2084,9 @@ mod tests {
         ));
     }
 
-    /// Adversarial: SOS spectrum-selection start byte non-zero — this
+    /// Adversarial: SOS spectrum-selection start byte non-zero. This
     /// is what a *progressive* DC-first scan would carry (Ss=0, Se=0)
-    /// or an AC scan (Ss=1, Se=63). Either flavour must surface as
+    /// or an AC scan (Ss=1, Se=63). Either flavor must surface as
     /// "non-baseline scan parameters" rather than continuing into the
     /// entropy decoder with bogus state.
     #[test]
@@ -2108,7 +2108,7 @@ mod tests {
         bytes.extend_from_slice(&67u16.to_be_bytes());
         bytes.push(0x00);
         bytes.extend_from_slice(&[1u8; 64]);
-        // DHT: minimal DC table (0 codes total → empty), class 0 dest 0
+        // DHT: minimal DC table (0 codes total -> empty), class 0 dest 0
         bytes.extend_from_slice(&[0xFF, 0xC4]);
         bytes.extend_from_slice(&19u16.to_be_bytes());
         bytes.push(0x00);
@@ -2131,7 +2131,7 @@ mod tests {
         );
     }
 
-    /// Adversarial: SOS with Ah/Al non-zero — the successive-
+    /// Adversarial: SOS with Ah/Al non-zero, the successive-
     /// approximation refinement-bit field used by progressive scans.
     /// Must reject with the same structured error.
     #[test]

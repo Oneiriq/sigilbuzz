@@ -218,8 +218,8 @@ fn standard_glyf_loca() -> (Vec<u8>, Vec<u8>) {
 }
 
 // =========================================================================
-// Test 1: PaintGlyph wrapping a PaintSolid — verifies the basic
-// outline-clipped colour fill goes round-trip.
+// Test 1: PaintGlyph wrapping a PaintSolid. Verifies the basic
+// outline-clipped color fill goes round-trip.
 // =========================================================================
 
 fn build_glyph_solid_font() -> Vec<u8> {
@@ -232,7 +232,7 @@ fn build_glyph_solid_font() -> Vec<u8> {
     // CPAL: one entry, opaque red.
     let cpal = build_cpal_v0(&[(255, 0, 0, 255)]);
 
-    // COLR: BaseGlyphPaintRecord for gid 1 → PaintGlyph(child=Solid,
+    // COLR: BaseGlyphPaintRecord for gid 1 -> PaintGlyph(child=Solid,
     // outline=gid 1). The PaintGlyph's child paint is right after.
     let mut colr = build_v1_header(1);
     let pglyph_start = colr.len();
@@ -320,7 +320,7 @@ fn colrv1_rasterization_is_deterministic() {
 }
 
 // =========================================================================
-// Test 2: PaintGlyph wrapping a PaintLinearGradient — the gradient
+// Test 2: PaintGlyph wrapping a PaintLinearGradient. The gradient
 // pixels should vary across the glyph, masked by the outline.
 // =========================================================================
 
@@ -401,7 +401,7 @@ fn colrv1_paint_glyph_linear_gradient_varies_across_outline() {
     assert!(pix.width > 1 && pix.height > 1);
 
     // Walk a horizontal strip across the middle of the glyph and tally
-    // the dominant channel. Going left → right, red should dominate
+    // the dominant channel. Going left to right, red should dominate
     // first then blue.
     let mid_y = pix.height / 2;
     let mut red_left = false;
@@ -464,17 +464,17 @@ fn build_var_solid_font() -> Vec<u8> {
     };
 
     // COLR with an inline ItemVariationStore. The PaintVarSolid uses
-    // var_index_base = 0; field_index 0 lookup → outer=0, inner=0.
+    // var_index_base = 0; field_index 0 lookup -> outer=0, inner=0.
     //
     // ItemVariationStore layout (we hand-craft the minimum spec
     // permits): one axis, one region with (start=0, peak=1, end=1)
-    // → at coord 1.0 the region scalar is 1.0. One subtable with one
+    // -> at coord 1.0 the region scalar is 1.0. One subtable with one
     // delta row of [-8192] (= -0.5 in F2DOT14) and one short-delta
     // entry. The PaintVarSolid then gets alpha = 1.0 + (-0.5) = 0.5
     // when coords = [1.0].
     let ivs = build_ivs_one_axis_one_short_delta(-8192_i16);
 
-    // Compute COLR layout: header (30 bytes) → paint body → IVS.
+    // Compute COLR layout: header (30 bytes) -> paint body -> IVS.
     // We need the IVS to live inside the COLR table data, accessed
     // through `var_store_offset`. So we set varStoreOffset in the
     // header to point past the paint body.
@@ -541,7 +541,7 @@ fn build_ivs_one_axis_one_short_delta(delta: i16) -> Vec<u8> {
     let region_list_off = ivs.len() as u32;
     ivs.extend_from_slice(&1u16.to_be_bytes()); // axisCount
     ivs.extend_from_slice(&1u16.to_be_bytes()); // regionCount
-                                                // Region 0, axis 0: peak at 1.0 → scalar=1 at coord=1.0.
+                                                // Region 0, axis 0: peak at 1.0 -> scalar=1 at coord=1.0.
     ivs.extend_from_slice(&f2dot14(0.0));
     ivs.extend_from_slice(&f2dot14(1.0));
     ivs.extend_from_slice(&f2dot14(1.0));
@@ -566,7 +566,7 @@ fn build_ivs_one_axis_one_short_delta(delta: i16) -> Vec<u8> {
                                                 // set wordDeltaCount = 1 so the single delta is read as one i16.
     let wdc_off = (var_data_off as usize) + 2;
     ivs[wdc_off..wdc_off + 2].copy_from_slice(&1u16.to_be_bytes());
-    // Emit the row: one i16 word delta. (`itemCount` = 1 row × one
+    // Emit the row: one i16 word delta. (`itemCount` = 1 row x one
     // delta column = 2 bytes total.)
     ivs.extend_from_slice(&delta.to_be_bytes());
     align4(&mut ivs);
@@ -582,11 +582,11 @@ fn colrv1_paint_var_solid_alpha_responds_to_coords() {
     let face = Face::parse(&blob, 0).unwrap();
     let rast = Rasterizer::new();
 
-    // At default coords [0.0]: alpha = 1.0 → opaque white pixels.
+    // At default coords [0.0]: alpha = 1.0 -> opaque white pixels.
     let pix_default = rast
         .rasterize_colrv1_glyph(&face, 1, 0, 100.0, &[])
         .expect("default rasterizes");
-    // At coord [1.0]: alpha = 1.0 - 0.5 = 0.5 → translucent whites.
+    // At coord [1.0]: alpha = 1.0 - 0.5 = 0.5 -> translucent whites.
     let pix_peak = rast
         .rasterize_colrv1_glyph(&face, 1, 0, 100.0, &[1.0])
         .expect("peak rasterizes");

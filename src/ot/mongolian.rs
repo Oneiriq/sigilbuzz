@@ -1,6 +1,6 @@
 //! Mongolian script shaper.
 //!
-//! Mongolian (U+1800..U+18AF) is cursive — every letter has up to
+//! Mongolian (U+1800..U+18AF) is cursive: every letter has up to
 //! four positional forms (isolated, initial, medial, final) selected
 //! the same way Arabic does. The state machine that picks the form
 //! is shared verbatim with Arabic via [`crate::ot::arabic`]; the
@@ -13,7 +13,7 @@
 //!   [joining table](crate::unicode::joining) marks them
 //!   `Transparent` so the state machine threads them through, and
 //!   this module post-processes the form vector so the FVS position
-//!   inherits the form chosen for the preceding letter — that way
+//!   inherits the form chosen for the preceding letter. That way
 //!   the GSUB lookup driving the variant (e.g. `init` lookups
 //!   targeting `letter + FVS1`) sees the FVS as part of the
 //!   initial-form cluster.
@@ -24,7 +24,7 @@
 //!   state machine sees the resulting Mongolian segment in
 //!   isolation, which gives the right "the last letter of the
 //!   first word is final, the first letter of the second word is
-//!   initial" behaviour.
+//!   initial" behavior.
 //! - **Vertical default**. Mongolian is written top-to-bottom by
 //!   default. The shaper sets a vertical hint via the dispatcher
 //!   in [`crate::shape`] so a buffer with the default LTR
@@ -39,10 +39,10 @@
 //! The Mongolian feature chain mirrors Arabic:
 //!
 //! ```text
-//!   ccmp → isol/init/medi/fina (positional pass) → calt → liga
+//!   ccmp -> isol/init/medi/fina (positional pass) -> calt -> liga
 //! ```
 //!
-//! `rlig` is omitted — Noto Sans Mongolian ships its required
+//! `rlig` is omitted. Noto Sans Mongolian ships its required
 //! ligatures under the positional features themselves.
 
 use alloc::vec::Vec;
@@ -64,7 +64,7 @@ pub const MONG_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"mong", *b"DFLT"];
 /// Mongolian shaper has no script-specific feature chain of its
 /// own beyond the four positional (`isol`/`init`/`medi`/`fina`)
 /// features run masked below. `ccmp` runs in the generic default
-/// GSUB pass before the positional features — actually after, in
+/// GSUB pass before the positional features. Actually after, in
 /// HarfBuzz's order, but for Mongolian fonts on the 0.7.0 corpus
 /// the `ccmp` lookups are SINGLE_SUBST and order-insensitive.
 /// `calt` and `liga` also fire afterward in default-GSUB; nothing
@@ -88,8 +88,8 @@ pub const fn is_mongolian_fvs(ch: char) -> bool {
 
 /// Computes a per-codepoint joining-form vector for a Mongolian run.
 ///
-/// The Arabic state machine handles the heavy lifting — Mongolian
-/// shares the same joining types — and this wrapper layers FVS
+/// The Arabic state machine handles the heavy lifting (Mongolian
+/// shares the same joining types) and this wrapper layers FVS
 /// inheritance on top: a Free Variation Selector is Transparent in
 /// the state machine (so it does not break the cursive chain) and
 /// then takes on the *form* of the letter immediately to its left.
@@ -117,7 +117,7 @@ pub fn assign_mongolian_forms(codepoints: &[char]) -> Vec<JoiningForm> {
     forms
 }
 
-/// Entry point — shapes one Mongolian run.
+/// Entry point: shapes one Mongolian run.
 ///
 /// `codepoints` and `glyphs` start 1:1 (a glyph per codepoint, post
 /// cmap). The shaper runs `ccmp`, then the four positional features
@@ -136,13 +136,13 @@ pub fn shape_mongolian(
         return;
     };
 
-    // Positional pass — `isol`/`init`/`medi`/`fina` each apply only
+    // Positional pass: `isol`/`init`/`medi`/`fina` each apply only
     // at positions whose computed JoiningForm matches.
     let forms = assign_mongolian_forms(codepoints);
     // The forms vector is aligned with `codepoints`. ccmp may have
     // rewritten glyph ids but it does not change run length on the
     // Mongolian fonts we test against (Noto Sans Mongolian's ccmp
-    // lookups are SINGLE_SUBST), so the cps↔glyph count is still
+    // lookups are SINGLE_SUBST), so the cps<->glyph count is still
     // the same here. If a future font ships a length-changing ccmp
     // lookup the parity test will catch it.
     if glyphs.len() == forms.len() {
@@ -190,14 +190,14 @@ mod tests {
 
     #[test]
     fn single_letter_is_isolated() {
-        // U+1820 MONGOLIAN LETTER A — alone is `isol`.
+        // U+1820 MONGOLIAN LETTER A: alone is `isol`.
         let cps: Vec<char> = "\u{1820}".chars().collect();
         assert_eq!(assign_mongolian_forms(&cps), alloc::vec![JoiningForm::Isol]);
     }
 
     #[test]
     fn two_letters_split_init_fina() {
-        // U+1820 A + U+1821 E — both Dual; the pair shapes init+fina.
+        // U+1820 A + U+1821 E: both Dual; the pair shapes init+fina.
         let cps: Vec<char> = "\u{1820}\u{1821}".chars().collect();
         assert_eq!(
             assign_mongolian_forms(&cps),
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn three_letter_word_is_init_medi_fina() {
-        // A + E + I (all Dual) — classic init/medi/fina chain.
+        // A + E + I (all Dual): classic init/medi/fina chain.
         let cps: Vec<char> = "\u{1820}\u{1821}\u{1822}".chars().collect();
         assert_eq!(
             assign_mongolian_forms(&cps),
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn fvs_inherits_previous_letter_form() {
-        // A (init) + FVS1 — the FVS should also carry Init so the
+        // A (init) + FVS1: the FVS should also carry Init so the
         // `init` lookup gated on `letter + FVS` triggers.
         let cps: Vec<char> = "\u{1820}\u{180B}\u{1821}".chars().collect();
         let forms = assign_mongolian_forms(&cps);
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn fvs_at_word_end_inherits_final_form() {
-        // A + E + FVS2 — E is `fina`; the trailing FVS inherits Fina.
+        // A + E + FVS2: E is `fina`; the trailing FVS inherits Fina.
         let cps: Vec<char> = "\u{1820}\u{1821}\u{180C}".chars().collect();
         let forms = assign_mongolian_forms(&cps);
         assert_eq!(
@@ -240,14 +240,14 @@ mod tests {
 
     #[test]
     fn vowel_separator_breaks_joining() {
-        // A + MVS + E — the vowel separator (U+180E, type U) breaks
+        // A + MVS + E: the vowel separator (U+180E, type U) breaks
         // the cursive chain so the A is final (it has the implicit
         // word-start, so init), the MVS is isolated, and the E is
         // initial because nothing precedes it. Walk:
-        //   A: prev=none, next=MVS(U) → no joiner before, no joiner
-        //      after → isol.
-        //   MVS: U → isol.
-        //   E: prev=MVS(U) → no joiner before, next=none → isol.
+        //   A: prev=none, next=MVS(U) -> no joiner before, no joiner
+        //      after -> isol.
+        //   MVS: U -> isol.
+        //   E: prev=MVS(U) -> no joiner before, next=none -> isol.
         let cps: Vec<char> = "\u{1820}\u{180E}\u{1821}".chars().collect();
         let forms = assign_mongolian_forms(&cps);
         assert_eq!(

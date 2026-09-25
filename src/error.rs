@@ -1,7 +1,7 @@
 //! Error type for every public fallible operation in sigilbuzz.
 //!
 //! A single error enum keeps the public surface small. Variants either
-//! carry a byte offset (parse failures — so callers can bisect a bad
+//! carry a byte offset (parse failures, so callers can bisect a bad
 //! font) or a brief reason string. The type is `Copy`-free because the
 //! reason strings are owned `&'static str` slices; no allocation on the
 //! error path.
@@ -41,8 +41,8 @@ pub enum Error {
         tag: [u8; 4],
     },
 
-    /// The feature in question is recognised but not yet implemented.
-    /// Used sparingly during the bootstrap period — every `Unsupported`
+    /// The feature in question is recognized but not yet implemented.
+    /// Used sparingly during the bootstrap period. Every `Unsupported`
     /// variant should have a tracking issue.
     Unsupported {
         /// Brief human-readable context.

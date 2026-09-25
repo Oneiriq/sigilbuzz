@@ -1,4 +1,4 @@
-//! `head` — font header.
+//! `head`: font header.
 //!
 //! Only the fields sigilbuzz actually consumes are parsed today:
 //! `unitsPerEm` (the grid that every metric is expressed in) and
@@ -46,12 +46,12 @@ impl Head {
             });
         }
 
-        // fontRevision (Fixed, i32) — not consumed yet, skip.
+        // fontRevision (Fixed, i32): not consumed yet, skip.
         r.skip(4)?;
-        // checksumAdjustment — skip.
+        // checksumAdjustment: skip.
         r.skip(4)?;
 
-        // magicNumber — must match 0x5F0F3CF5 or the table is bogus.
+        // magicNumber: must match 0x5F0F3CF5 or the table is bogus.
         let magic_offset = r.position();
         let magic = r.read_u32()?;
         if magic != HEAD_MAGIC {
@@ -61,7 +61,7 @@ impl Head {
             });
         }
 
-        // flags — skip (16 bits of feature hints we do not consume).
+        // flags: skip (16 bits of feature hints we do not consume).
         r.skip(2)?;
 
         let upem = r.read_u16()?;
@@ -72,13 +72,13 @@ impl Head {
             });
         }
 
-        // created + modified (LONGDATETIME = i64 each) — skip.
+        // created + modified (LONGDATETIME = i64 each): skip.
         r.skip(16)?;
-        // xMin/yMin/xMax/yMax (i16 × 4) — skip.
+        // xMin/yMin/xMax/yMax (i16 x 4): skip.
         r.skip(8)?;
-        // macStyle + lowestRecPPEM (u16 × 2) — skip.
+        // macStyle + lowestRecPPEM (u16 x 2): skip.
         r.skip(4)?;
-        // fontDirectionHint — skip.
+        // fontDirectionHint: skip.
         r.skip(2)?;
 
         let itl_offset = r.position();

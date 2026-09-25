@@ -1,4 +1,4 @@
-//! OpenType Anchor table — `(x, y)` attachment point.
+//! OpenType Anchor table: `(x, y)` attachment point.
 //!
 //! Anchors are the glue for three GPOS lookup types: mark-to-base
 //! (type 4), mark-to-ligature (type 5), and mark-to-mark (type 6).
@@ -13,14 +13,14 @@
 //!
 //! ```text
 //!   format 1:  u16 format=1, i16 x, i16 y
-//!   format 2:  format 1 + u16 anchorPoint              (hinting — ignored)
-//!   format 3:  format 1 + u16 xDeviceOffset, u16 yDev  (hinting — ignored)
+//!   format 2:  format 1 + u16 anchorPoint              (hinting, ignored)
+//!   format 3:  format 1 + u16 xDeviceOffset, u16 yDev  (hinting, ignored)
 //! ```
 //!
 //! The hint-only fields are consumed to advance the cursor past
 //! them when parsing a larger structure that contains anchors
 //! inline, but they do not influence placement. Device tables are
-//! a later milestone (same situation as in ValueRecord — they hold
+//! a later milestone (same situation as in ValueRecord: they hold
 //! per-ppem deltas that sigilbuzz does not yet apply).
 
 use crate::error::{Error, Result};
@@ -48,7 +48,7 @@ impl Anchor {
         match format {
             1 => Ok(Self { x, y }),
             2 => {
-                // u16 anchorPoint — contour index for hinting.
+                // u16 anchorPoint: contour index for hinting.
                 let _ = r.read_u16()?;
                 Ok(Self { x, y })
             }

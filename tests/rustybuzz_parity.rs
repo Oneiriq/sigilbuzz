@@ -3,7 +3,7 @@
 //! sigilbuzz currently implements (see [`disabled_features`]).
 //!
 //! As milestones add parsers, the disabled-features list shrinks
-//! and eventually disappears — at which point sigilbuzz is on the
+//! and eventually disappears, at which point sigilbuzz is on the
 //! shape()-level par with rustybuzz for the supported scripts.
 //!
 //! If a test here fails, sigilbuzz has drifted or rustybuzz has
@@ -25,7 +25,7 @@ const CORPUS: &[&str] = &[
     "héllo",
     "  multiple   spaces  ",
     // A private-use codepoint intermixed with mapped chars exercises
-    // the notdef fallback path — if Open Sans maps this PUA
+    // the notdef fallback path. If Open Sans maps this PUA
     // character, sigilbuzz and rustybuzz should both emit the same
     // glyph id. If it doesn't, both should emit .notdef.
     "A\u{E000}B",
@@ -45,7 +45,7 @@ const CORPUS: &[&str] = &[
 /// surface sigilbuzz currently implements.
 ///
 /// Latin shaping is now feature-complete enough that the list is
-/// empty — sigilbuzz runs `ccmp`, `rlig`, `liga`, `clig`, `calt`,
+/// empty: sigilbuzz runs `ccmp`, `rlig`, `liga`, `clig`, `calt`,
 /// `kern`, and `mark` by default, same as rustybuzz. When sigilbuzz
 /// grows new lookup types (GSUB single/multiple, GPOS cursive,
 /// mark-to-mark, ...) this list remains empty; divergences in any
@@ -60,7 +60,7 @@ fn disabled_features() -> [Feature; 0] {
 fn every_corpus_entry_matches_rustybuzz_glyph_for_glyph() {
     let blob = Blob::new(OPEN_SANS);
     let face = Face::parse(&blob, 0).expect("parse sigilbuzz face");
-    let font = Font::new(face, 1000.0); // Irrelevant today — advances are in design units.
+    let font = Font::new(face, 1000.0); // Irrelevant today: advances are in design units.
 
     let rb_face = rustybuzz::Face::from_slice(OPEN_SANS, 0).expect("parse rustybuzz face");
     let features = disabled_features();

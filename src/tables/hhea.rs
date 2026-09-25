@@ -1,4 +1,4 @@
-//! `hhea` — horizontal header.
+//! `hhea`: horizontal header.
 //!
 //! The field sigilbuzz needs most is `numberOfHMetrics`, which slices
 //! `hmtx` in half between full-metric glyphs (advance + LSB) and
@@ -9,7 +9,7 @@
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
 
-/// The parsed `hhea` table — only the fields a shaper needs.
+/// The parsed `hhea` table: only the fields a shaper needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hhea {
     /// Distance from the baseline to the highest ascender, in design
@@ -46,7 +46,7 @@ impl Hhea {
         let line_gap = r.read_i16()?;
 
         // advanceWidthMax, minLeftSideBearing, minRightSideBearing,
-        // xMaxExtent, caretSlopeRise, caretSlopeRun, caretOffset —
+        // xMaxExtent, caretSlopeRise, caretSlopeRun, caretOffset:
         // seven u16/i16 we don't consume yet.
         r.skip(2 * 7)?;
         // Four i16 reserved fields.

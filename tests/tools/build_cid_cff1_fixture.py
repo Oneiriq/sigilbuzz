@@ -3,7 +3,7 @@
 round-trip tests in `crates/sigilbuzz-subset/tests/real_cff_round_trip.rs`.
 
 Real OFL CID-keyed CFF1 fonts in the wild are CJK and large (Source Han
-Sans, Noto Serif CJK SC) — far past the 200 KB fixture ceiling
+Sans, Noto Serif CJK SC), far past the 200 KB fixture ceiling
 sigilbuzz holds itself to. Rather than vendor a multi-MB blob, this
 script builds a minimal CID-keyed CFF1 by hand:
 
@@ -25,7 +25,7 @@ script builds a minimal CID-keyed CFF1 by hand:
   head, name, OS/2, post) so fontTools' CFF integration doesn't try to
   reflow our hand-built body.
 
-The resulting fixture is well under 2 KB — comfortably under the
+The resulting fixture is well under 2 KB, comfortably under the
 workspace's 200 KB-per-fixture cap.
 
 Run:
@@ -50,7 +50,7 @@ UPEM = 1000
 GLYPH_ORDER = [".notdef", "A", "B", "C", "D", "E"]
 ADVANCES = [600, 600, 620, 640, 660, 680]
 
-# FDSelect routing: gids 0..2 → FD 0, gids 3..5 → FD 1.
+# FDSelect routing: gids 0..2 -> FD 0, gids 3..5 -> FD 1.
 FD_SELECT = [0, 0, 0, 1, 1, 1]
 N_FDS = 2
 
@@ -143,18 +143,18 @@ def encode_t2_int(value: int) -> bytes:
 
 def build_charstrings() -> list[bytes]:
     cs: list[bytes] = []
-    cs.append(bytes([14]))  # .notdef → endchar.
+    cs.append(bytes([14]))  # .notdef -> endchar.
 
     # FD 0's A charstring: a no-op rmoveto + a callgsubr to global 0
-    # + endchar. The `callgsubr` exercises cross-FD subr sharing — FD
+    # + endchar. The `callgsubr` exercises cross-FD subr sharing. FD
     # 1's C charstring also reaches a subr (its own local), and the
     # rewriter must renumber globals separately from per-FD locals.
     cs_a = bytearray()
     cs_a += encode_t2_int(0)
     cs_a += encode_t2_int(0)
     cs_a += bytes([21])  # rmoveto
-    # callgsubr operand 0 → with global-subr bias = 107 (n_globals < 1240)
-    # the absolute subr index is 0 + 107 = 107? No — bias is 107 for
+    # callgsubr operand 0 -> with global-subr bias = 107 (n_globals < 1240)
+    # the absolute subr index is 0 + 107 = 107? No, bias is 107 for
     # n in [240, 33899) and 0 for n < 240; subr_bias semantics are
     # detailed in TN 5176 §16. For 3 globals the bias is *0* per CFF
     # spec; the operand is the absolute index. Encode operand 0.
@@ -393,7 +393,7 @@ def build_hmtx() -> bytes:
 
 
 def build_cmap() -> bytes:
-    """Format 4 cmap mapping U+0041..U+0045 → gids 1..5 plus 0xFFFF tail."""
+    """Format 4 cmap mapping U+0041..U+0045 -> gids 1..5 plus 0xFFFF tail."""
     header = struct.pack(">HHHHI", 0, 1, 3, 1, 12)
     seg_count = 2
     seg_count_x2 = seg_count * 2

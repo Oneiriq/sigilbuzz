@@ -5,16 +5,16 @@
 //! directly (no enclosing INDEX). VariationStore is optional. Every
 //! CFF2 font is implicitly CID-keyed (FDArray mandatory). FDSelect is
 //! conventionally required, but Adobe's CFF2 emitter elides it when
-//! a font carries a single FontDict — the [`parse_cff2`] reader
-//! synthesises the implicit "every gid → FD 0" mapping in that case.
+//! a font carries a single FontDict. The [`parse_cff2`] reader
+//! synthesizes the implicit "every gid -> FD 0" mapping in that case.
 //!
 //! The Type 2 charstring scanner from [`crate::cff`] already accepts
-//! both flavours — it stops at `OP_RETURN` / `OP_ENDCHAR` /
-//! end-of-stream, and recognises `vsindex` / `blend` so CFF2-specific
+//! both flavors: it stops at `OP_RETURN` / `OP_ENDCHAR` /
+//! end-of-stream, and recognizes `vsindex` / `blend` so CFF2-specific
 //! ops don't confuse the operand-stack tracking. The byte-level emitter
 //! primitives ([`crate::cff::encode_index`],
 //! [`crate::cff::encode_dict_int`], [`crate::cff::renumber_charstring`])
-//! are shared with CFF1 — CFF2's smaller surface (no Name / String /
+//! are shared with CFF1. CFF2's smaller surface (no Name / String /
 //! Encoding / charset INDEXes) means the emitter is a strict subset of
 //! the CFF1 layout pass.
 //!
@@ -57,7 +57,7 @@ struct Cff2TopDictSlots {
     vstore_slot: Option<usize>,
 }
 
-/// Serialises the CFF2 Top DICT body. CharStrings (17), FDArray (12 36),
+/// Serializes the CFF2 Top DICT body. CharStrings (17), FDArray (12 36),
 /// FDSelect (12 37), and VariationStore (24) get 5-byte placeholders.
 /// Other operators ride through verbatim.
 fn serialise_cff2_top_dict(entries: &[DictEntry]) -> (Vec<u8>, Cff2TopDictSlots) {
@@ -248,10 +248,10 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
     }
 
     // Adobe's CFF2 builds elide FDSelect when the font has a single
-    // FontDict — the spec marks FDSelect optional in that case. When
-    // missing AND the FDArray has exactly one entry, synthesise the
-    // implicit "every gid → FD 0" mapping; any other shape is a
-    // genuinely malformed CFF2 (multi-FD without FDSelect cannot
+    // FontDict. The spec marks FDSelect optional in that case. When
+    // missing AND the FDArray has exactly one entry, synthesize the
+    // implicit "every gid -> FD 0" mapping; any other shape is a
+    // malformed CFF2 (multi-FD without FDSelect cannot
     // round-trip).
     let fd_select = if let Some(off) = fd_select_off {
         parse_fd_select(data, off as usize, n_glyphs)?
@@ -303,7 +303,7 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
 /// through verbatim.
 ///
 /// Adobe-style CFF2 builds (single FontDict, no explicit FDSelect)
-/// are accepted: the parser synthesises an implicit "every gid → FD 0"
+/// are accepted: the parser synthesizes an implicit "every gid -> FD 0"
 /// mapping, and the rebuilder emits a real FDSelect format-0 in the
 /// output (the spec requires FDSelect on disk when CIDCount > 0,
 /// which any non-empty CFF2 satisfies).
@@ -313,7 +313,7 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
 /// that FD's local INDEX; the global keep-set is the union across FDs.
 /// The byte-stable charstring renumber pads narrower natural-width
 /// operands back to the source's original byte slot
-/// ([`crate::cff::encode_int_operand_at_width`]), so a renumbered call
+/// (`cff::encode_int_operand_at_width`), so a renumbered call
 /// site never shifts the surrounding charstring even when the new
 /// (post-bias) operand value is smaller than the original.
 ///
@@ -378,8 +378,8 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
     // is the union across all kept FDs. The byte-stable renumber path
     // pads narrower-natural operands back to the source's original
     // byte slot when there's a wider form available (3-byte shortint,
-    // 5-byte fixed, the two 2-byte forms). The single hole — a
-    // `-107..=107` value that has to land in a 2-byte slot — has no
+    // 5-byte fixed, the two 2-byte forms). The single hole, a
+    // `-107..=107` value that has to land in a 2-byte slot, has no
     // 2-byte representation in Type 2 charstrings, so for that case
     // the rewriter falls back to keeping every source subroutine
     // verbatim with identity renumbering (preserving the source
@@ -522,7 +522,7 @@ fn emit_with_keep_set(
         new_per_fd_local_subrs.push(new_locals);
     }
 
-    // Renumber globals — pass an empty local table; calls into locals
+    // Renumber globals: pass an empty local table; calls into locals
     // from globals would cross-FD-collide and surface a hard error.
     let mut new_global_subrs: Vec<Vec<u8>> = kept_global_idx
         .iter()
@@ -600,7 +600,7 @@ fn emit_with_keep_set(
         acc += f.font_dict_body.len();
     }
 
-    // Top DICT — reuse source entries, swap targeted ops with placeholders.
+    // Top DICT: reuse source entries, swap targeted ops with placeholders.
     let top_entries = walk_dict(parsed.top_dict)?;
     let (top_dict_body, top_slots) = serialise_cff2_top_dict(&top_entries);
 
@@ -621,11 +621,11 @@ fn emit_with_keep_set(
         .collect();
 
     // ---- Layout ---------------------------------------------------------
-    // Header → Top DICT → Global Subr INDEX → FDSelect → CharStrings
-    // INDEX → FDArray INDEX → [for each FD: Private DICT → Local Subr
-    // INDEX (when present)] → VariationStore (when present).
+    // Header -> Top DICT -> Global Subr INDEX -> FDSelect -> CharStrings
+    // INDEX -> FDArray INDEX -> [for each FD: Private DICT -> Local Subr
+    // INDEX (when present)] -> VariationStore (when present).
     //
-    // Header carries the rebuilt topDictLength, so we serialise the
+    // Header carries the rebuilt topDictLength, so we serialize the
     // header last using the new top_dict_body length.
     let mut out = Vec::with_capacity(cff_bytes.len());
     let new_top_dict_length = top_dict_body.len() as u16;
@@ -739,14 +739,14 @@ fn emit_with_keep_set(
 /// Implementation strategy:
 ///
 /// 1. **Inline-expand subroutines** into each charstring. CFF2 `blend`
-///    can occur in a subr while masters were pushed by the caller —
+///    can occur in a subr while masters were pushed by the caller:
 ///    a stack-tracking pass that doesn't inline would have to model
 ///    cross-subr stack flows, which is more bookkeeping than just
 ///    pasting the body. Inlining also lets us drop the local + global
 ///    Subr INDEX entirely.
 /// 2. **Resolve `blend`**: pop `n`, then `n*nRegions` deltas, then `n`
 ///    masters; emit only the `n` resolved scalars
-///    (`master + Σ scalar(coords)·delta`). The trailing count and the
+///    (`master + Σ scalar(coords) * delta`). The trailing count and the
 ///    delta operands are dropped.
 /// 3. **Strip `vsindex`**: tracks which IVS subtable subsequent
 ///    `blend`s read from. Dropped from the output (no blend remains).
@@ -802,7 +802,7 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
     }
 
     // Per-FD Font DICT bodies. We re-emit each Font DICT pointing at
-    // its source Private DICT body (with Subrs op stripped — there are
+    // its source Private DICT body (with Subrs op stripped: there are
     // no subrs anymore).
     struct FdBakeEmit {
         font_dict_body: Vec<u8>,
@@ -845,7 +845,7 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
     let cs_refs: Vec<&[u8]> = new_charstrings.iter().map(Vec::as_slice).collect();
     let charstrings_index = encode_index_cff2(&cs_refs);
 
-    // Top DICT — VariationStore op omitted from the rebuilt body.
+    // Top DICT: VariationStore op omitted from the rebuilt body.
     let top_entries: Vec<DictEntry> = walk_dict(parsed.top_dict)?
         .into_iter()
         .filter(|e| e.op != OP_VSTORE)
@@ -853,8 +853,8 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
     let (top_dict_body, top_slots) = serialise_cff2_top_dict(&top_entries);
 
     // Layout:
-    //   header → Top DICT → Global Subr INDEX → FDSelect →
-    //   CharStrings INDEX → FDArray INDEX → [per-FD: Private DICT].
+    //   header -> Top DICT -> Global Subr INDEX -> FDSelect ->
+    //   CharStrings INDEX -> FDArray INDEX -> [per-FD: Private DICT].
     let mut out = Vec::with_capacity(cff_bytes.len() / 2);
     out.push(2u8);
     out.push(0u8);
@@ -941,7 +941,7 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
 }
 
 // Type 2 op codes consumed by the baker. Duplicates of crate::cff
-// constants kept private to this module — the baker only reads, never
+// constants kept private to this module. The baker only reads, never
 // renumbers.
 const OP_HSTEM: u8 = 1;
 const OP_VSTEM: u8 = 3;
@@ -981,7 +981,7 @@ struct Baker<'a> {
     ivs: Option<&'a ItemVariationStore<'a>>,
     global_subrs: &'a [&'a [u8]],
     local_subrs: &'a [&'a [u8]],
-    /// Operand stack — floats so blend deltas don't lose precision.
+    /// Operand stack: floats so blend deltas don't lose precision.
     stack: Vec<f32>,
     /// Output charstring bytes.
     out: Vec<u8>,
@@ -1235,8 +1235,8 @@ fn decode_operand_f32(data: &[u8], pos: usize) -> Option<(f32, usize)> {
         ))
     } else if b0 == OP_SHORTINT {
         // Type 2 shortint: 2-byte big-endian i16 follows. Required for
-        // any integer in `[-32768, -1132]` ∪ `[1132, 32767]` (#197) —
-        // omitting this branch breaks fonts with ≥ 1240 subrs whose
+        // any integer in `[-32768, -1132]` or `[1132, 32767]` (#197).
+        // Omitting this branch breaks fonts with >= 1240 subrs whose
         // call indices spill into shortint encoding.
         let b1 = *data.get(pos + 1)?;
         let b2 = *data.get(pos + 2)?;
@@ -1317,7 +1317,7 @@ struct CffSubtableSurvivors {
 /// inside surviving subtables are preserved (subtables that collapse
 /// entirely are elided; `vsindex` ops that pointed at them are
 /// dropped, and any blend that runs against a collapsed subtable
-/// emits no blend — its masters survive untouched, matching the
+/// emits no blend: its masters survive untouched, matching the
 /// post-execution stack of `n, 0, blend`).
 ///
 /// `coords` and `pins` follow the same shape as
@@ -1327,8 +1327,8 @@ struct CffSubtableSurvivors {
 ///
 /// The bake inlines local + global subroutines into each charstring
 /// (mirroring [`bake_at_coords`]'s strategy) so the rebuilt CFF2
-/// carries empty Subr INDEXes — vsindex tracking inside subroutines
-/// would otherwise require cross-call stack modelling.
+/// carries empty Subr INDEXes: vsindex tracking inside subroutines
+/// would otherwise require cross-call stack modeling.
 ///
 /// # Errors
 ///
@@ -1346,7 +1346,7 @@ pub(crate) fn bake_cff2_partial(
         return Err(SubsetError::Unsupported("CFF2 source has zero glyphs"));
     }
 
-    // No VarStore → there are no blend ops to rewrite (CFF2 charstrings
+    // No VarStore, so there are no blend ops to rewrite (CFF2 charstrings
     // can't blend without a VarStore). Re-emit the source as-is so the
     // caller's table-list always gets a deterministic CFF2 buffer.
     let Some(vstore_blob) = parsed.vstore_blob else {
@@ -1367,8 +1367,8 @@ pub(crate) fn bake_cff2_partial(
 
     // Compute per-source-subtable surviving-slot info for the
     // charstring rewrite. We re-walk the source IVS rather than
-    // extending bake_ivs_partial's return shape — the walk is cheap
-    // (O(subtables × regions)) and keeps the IVS-bearing-table API
+    // extending bake_ivs_partial's return shape. The walk is cheap
+    // (O(subtables * regions)) and keeps the IVS-bearing-table API
     // narrow.
     let survivors = compute_subtable_survivors(src_ivs_bytes, coords, pins).ok_or(
         SubsetError::Unsupported("CFF2 VarStore region projection failed"),
@@ -1401,7 +1401,7 @@ pub(crate) fn bake_cff2_partial(
     }
 
     // Per-FD Font DICT bodies. We re-emit each Font DICT pointing at
-    // its source Private DICT body with the Subrs operator stripped —
+    // its source Private DICT body with the Subrs operator stripped:
     // no local subrs survive after inlining.
     struct FdEmit {
         font_dict_body: Vec<u8>,
@@ -1436,13 +1436,13 @@ pub(crate) fn bake_cff2_partial(
     let cs_refs: Vec<&[u8]> = new_charstrings.iter().map(Vec::as_slice).collect();
     let charstrings_index = encode_index_cff2(&cs_refs);
 
-    // Top DICT — keep VariationStore op (we still emit a VarStore).
+    // Top DICT: keep VariationStore op (we still emit a VarStore).
     let top_entries: Vec<DictEntry> = walk_dict(parsed.top_dict)?;
     let (top_dict_body, top_slots) = serialise_cff2_top_dict(&top_entries);
 
     // Layout:
-    //   header → Top DICT → Global Subr INDEX → FDSelect →
-    //   CharStrings INDEX → FDArray INDEX → [per-FD: Private DICT] →
+    //   header -> Top DICT -> Global Subr INDEX -> FDSelect ->
+    //   CharStrings INDEX -> FDArray INDEX -> [per-FD: Private DICT] ->
     //   VariationStore (length-prefixed).
     let mut out = Vec::with_capacity(cff_bytes.len());
     out.push(2u8);
@@ -1550,7 +1550,7 @@ pub(crate) fn bake_cff2_partial(
 /// re-emit), or `None` when every region drops (blend ops against
 /// this subtable degenerate to a no-op).
 ///
-/// Returns `None` (the outer `Option`) on malformed input — every
+/// Returns `None` (the outer `Option`) on malformed input: every
 /// length and offset matches what `bake_ivs_partial` accepts.
 fn compute_subtable_survivors(
     ivs_bytes: &[u8],
@@ -1600,7 +1600,7 @@ fn compute_subtable_survivors(
     }
 
     // Project each region onto Keep axes; track new index + scalar.
-    // None → dropped at pin coords.
+    // None -> dropped at pin coords.
     let mut region_remap: Vec<Option<(u16, f32)>> = Vec::with_capacity(region_count);
     let mut next_new_idx: u16 = 0;
     for ri in 0..region_count {
@@ -1676,8 +1676,8 @@ fn read_f2dot14_at(data: &[u8], off: usize) -> f32 {
 // from the last value we wrote.
 //
 // Subroutines are inlined into the output charstring so the rebuilt
-// CFF2 carries empty Subr INDEXes — cross-call vsindex tracking
-// would otherwise need stack modelling.
+// CFF2 carries empty Subr INDEXes. Cross-call vsindex tracking
+// would otherwise need stack modeling.
 struct PartialBaker<'a> {
     src_ivs: &'a ItemVariationStore<'a>,
     survivors: &'a [Option<CffSubtableSurvivors>],
@@ -1686,7 +1686,7 @@ struct PartialBaker<'a> {
     out: Vec<u8>,
     /// Per stack entry: byte position in `out` where this entry's push
     /// began. Non-push values (results of a prior blend) carry the
-    /// position of the original master push that fed that blend —
+    /// position of the original master push that fed that blend:
     /// the master bytes survive the truncate and remain the "anchor"
     /// for a later blend's truncate.
     stack_starts: Vec<usize>,
@@ -1834,7 +1834,7 @@ impl<'a> PartialBaker<'a> {
                     pos += 1;
                 }
                 OP_RETURN => {
-                    // CFF2 subroutines do NOT own the caller's stack —
+                    // CFF2 subroutines do NOT own the caller's stack:
                     // they may leave operands on it for the caller to
                     // consume (#198). Clearing `stack_starts` here used
                     // to corrupt the caller's tracking and made any
@@ -1899,7 +1899,7 @@ impl<'a> PartialBaker<'a> {
     /// scaled deltas | count | blend`. When the active subtable
     /// collapsed entirely (no surviving regions), drops the deltas +
     /// count entirely and emits no blend (the masters become the
-    /// post-blend stack values directly — equivalent to `n, 0, blend`
+    /// post-blend stack values directly, equivalent to `n, 0, blend`
     /// post-execution).
     fn apply_blend(&mut self) -> Result<(), SubsetError> {
         // Pop the count operand.
@@ -1911,7 +1911,7 @@ impl<'a> PartialBaker<'a> {
                 "CFF2 partial bake: blend count decode failed",
             ))?
             .0;
-        // Strip the count operand from `out` — we'll re-emit it below.
+        // Strip the count operand from `out`. We'll re-emit it below.
         self.out.truncate(count_start);
         if !(0.0..=f32::from(u16::MAX)).contains(&n_raw) {
             return Err(SubsetError::Unsupported(
@@ -1952,7 +1952,7 @@ impl<'a> PartialBaker<'a> {
         }
 
         // Truncate `out` to the byte position before the first delta
-        // push — the n masters' bytes survive; everything from the
+        // push. The n masters' bytes survive; everything from the
         // first delta to the end of the count operand is gone. Drop
         // the corresponding `stack_starts` entries.
         let truncate_to = self.stack_starts[delta_first_idx];
@@ -1967,13 +1967,13 @@ impl<'a> PartialBaker<'a> {
         let Some(survivor) = survivor else {
             // Subtable collapsed: emit no blend at all. The n masters
             // already sit in `out`. They'll be consumed by the next
-            // outline op verbatim — equivalent to executing
+            // outline op verbatim, equivalent to executing
             // `n, 0, blend` (count consumed, masters intact).
             return Ok(());
         };
 
         // Emit `new_outer, vsindex` before this blend when the active
-        // outer-in-output differs. CFF2 default vsindex is 0 — if the
+        // outer-in-output differs. CFF2 default vsindex is 0. If the
         // surviving outer is also 0 and we haven't emitted vsindex
         // yet, the prefix is a no-op.
         let need_vsindex = match self.last_emitted_new_outer {
@@ -2005,7 +2005,7 @@ impl<'a> PartialBaker<'a> {
         // blend that pops these masters as its own masters will
         // truncate to the original master positions, leaving the
         // already-emitted [masters][deltas][count][BLEND] block alone
-        // — sound for chained blend ops that build on prior blend
+        // which is sound for chained blend ops that build on prior blend
         // results.
         Ok(())
     }
@@ -2019,7 +2019,7 @@ mod tests {
 
     #[test]
     fn cff2_charstring_without_endchar_is_walked_to_eof() {
-        // CFF2 charstrings have no terminating endchar — the
+        // CFF2 charstrings have no terminating endchar: the
         // scanner must complete on end-of-stream. Charstring: push 0,
         // callsubr (resolves to local subr 0 with default bias 107).
         let cs = [139u8, 10 /* OP_CALLSUBR */];
@@ -2087,7 +2087,7 @@ mod tests {
         let fd_array_refs: Vec<&[u8]> = font_dict_bodies.iter().map(Vec::as_slice).collect();
         let fd_array_index = encode_index_cff2(&fd_array_refs);
 
-        // Top DICT — CharStrings, FDArray, FDSelect, optional VariationStore.
+        // Top DICT: CharStrings, FDArray, FDSelect, optional VariationStore.
         let mut top: Vec<u8> = Vec::new();
         let cs_slot = top.len();
         top.extend_from_slice(&encode_dict_offset_placeholder());
@@ -2244,7 +2244,7 @@ mod tests {
 
     #[test]
     fn cff2_orchestration_preserves_vstore() {
-        // VariationStore content is opaque to the orchestration —
+        // VariationStore content is opaque to the orchestration:
         // ensure the bytes ride through the round trip verbatim.
         let cs0: &[u8] = &[14u8];
         let cs1: &[u8] = &[139];
@@ -2268,7 +2268,7 @@ mod tests {
     }
 
     // --------------------------------------------------------------
-    // bake_cff2_partial — VarStore + blend rewrite.
+    // bake_cff2_partial: VarStore + blend rewrite.
     // --------------------------------------------------------------
 
     use crate::instance::AxisPin;
@@ -2327,9 +2327,9 @@ mod tests {
     fn bake_cff2_partial_pin_one_axis_keep_other_trims_varstore_axis_count() {
         // 2-axis IVS, one region peaking at (1, 1), one subtable with
         // one delta of 100. Charstring: 0 0 rmoveto, then push 0
-        // (master), 100 (delta), 1 (count), blend → resolved value
+        // (master), 100 (delta), 1 (count), blend -> resolved value
         // becomes the next pushed scalar. Then endchar/return-equivalent
-        // — CFF2 doesn't endchar; we let the implicit eof end the CS.
+        // (CFF2 doesn't endchar; we let the implicit eof end the CS).
         //
         // Pin wght=1.0 (scalar 1.0 at peak), keep wdth.
         // Output IVS axisCount must be 1 (only wdth survives). Blend
@@ -2341,10 +2341,10 @@ mod tests {
         // Charstring: 0 0 rmoveto, then push master(0), delta(100),
         // count(1), blend, then 0 hmoveto for shape (move op flushes
         // stack). Encoded values:
-        //   0 → 139, 100 → push 100 (107..=1131 range; 100 < 108 so
+        //   0 -> 139, 100 -> push 100 (107..=1131 range; 100 < 108 so
         //         it's one byte 239=139+100? wait: 100 is in [-107,
         //         107] range, so 100+139=239)
-        //   1 → 140, blend op = 16. rmoveto = 21. hmoveto = 22.
+        //   1 -> 140, blend op = 16. rmoveto = 21. hmoveto = 22.
         let cs0: &[u8] = &[
             139, 139, 21, // 0 0 rmoveto
             139, 239, 140, 16, // 0 100 1 blend  (push master + delta + count + BLEND)
@@ -2363,7 +2363,7 @@ mod tests {
 
     #[test]
     fn bake_cff2_partial_no_varstore_passes_through() {
-        // CFF2 without VariationStore → bake is a no-op (the source
+        // CFF2 without VariationStore: bake is a no-op (the source
         // bytes round-trip unchanged). Charstring rewrite has nothing
         // to do because charstrings can't blend without an IVS.
         let cs0: &[u8] = &[139, 139, 21];
@@ -2379,7 +2379,7 @@ mod tests {
         // Region peaks at wght=1, wdth=1. Pin wght=0 (region drops
         // because the wght axis support is 0 at coord 0 with peak 1).
         // The rebuilt charstring's blend op must NOT reference the
-        // dropped subtable — the subtable collapse → no blend
+        // dropped subtable. The subtable collapse -> no blend
         // emitted; the master survives as the post-blend value.
         let ivs = build_ivs2_for_cff2(
             &[[(0.5, 1.0, 1.0), (0.0, 1.0, 1.0)]],
@@ -2398,7 +2398,7 @@ mod tests {
         let parsed = parse_cff2(&new_cff).expect("parse");
         let blob = parsed.vstore_blob.expect("vstore present");
         let store = ItemVariationStore::parse(&blob[2..]).expect("ivs parses");
-        // Subtable collapsed → zero subtables in the new IVS.
+        // Subtable collapsed -> zero subtables in the new IVS.
         assert_eq!(store.subtable_count(), 0, "subtable elided");
         // Charstring's BLEND op must be gone (subtable collapsed).
         let cs_baked = parsed.char_strings[0];
@@ -2411,7 +2411,7 @@ mod tests {
 
     /// Regression for #198: when an inlined local subroutine returns
     /// while leaving operands on the stack (a perfectly legal CFF2
-    /// pattern — subrs commonly stash deltas / masters for the caller
+    /// pattern: subrs commonly stash deltas / masters for the caller
     /// to blend against), `OP_RETURN` used to call
     /// `self.stack_starts.clear()`, discarding the caller's tracking
     /// for those operands. The next blend in the caller would then
@@ -2435,10 +2435,10 @@ mod tests {
         // Bias for count<1240 is 107. Calling subr 0 requires push -107
         // which encodes via SHORTINT only (a separate bug #197). Sidestep:
         // build a font with N=108 subrs, place the trampoline at index 107,
-        // and call it with raw=0 (1-byte push 139). 0 + 107 = 107 → subr 107.
+        // and call it with raw=0 (1-byte push 139). 0 + 107 = 107 -> subr 107.
         let mut local_subrs_storage: Vec<&[u8]> = Vec::new();
         for _ in 0..107 {
-            local_subrs_storage.push(&[11u8]); // empty subr → return
+            local_subrs_storage.push(&[11u8]); // empty subr -> return
         }
         // Subr 107: pushes 0, 50, 1, then returns. Stack on return: 3 entries.
         local_subrs_storage.push(&[139u8, 189, 140, 11]);
@@ -2526,7 +2526,7 @@ mod tests {
         // local subr INDEX in the same blob. Each Private DICT is laid
         // out as: [subrs offset placeholder] 19 [defaultWidth=0] 20.
         let local_subr_index = encode_index_cff2(local_subrs);
-        // Build Private DICTs with placeholder Subrs offsets — patched
+        // Build Private DICTs with placeholder Subrs offsets, patched
         // post-layout. Use a 5-byte op255 placeholder so the offset
         // slot is fixed-width (matching the rest of the test scaffold).
         let private_subrs_slot_in_body = 0usize;
@@ -2674,7 +2674,7 @@ mod tests {
     /// pushed via the 3-byte `OP_SHORTINT` form (b0=28, then 2-byte
     /// big-endian i16) used to fail with "blend count decode failed"
     /// because `decode_operand_f32` only matched the 1- and 2-byte push
-    /// ranges and the 5-byte real-number form. Real fonts with ≥ 1240
+    /// ranges and the 5-byte real-number form. Real fonts with >= 1240
     /// subrs route call indices through SHORTINT, and any blend whose
     /// delta count happens to land at e.g. 5000 also uses SHORTINT.
     #[test]
@@ -2691,8 +2691,8 @@ mod tests {
 
     #[test]
     fn bake_cff2_partial_scales_blend_delta_by_pin_scalar() {
-        // Region peaks at (1, 1). Pin wght=0.5 → scalar 0.5. Source
-        // delta 100 → output delta 50. The rebuilt charstring's blend
+        // Region peaks at (1, 1). Pin wght=0.5 -> scalar 0.5. Source
+        // delta 100 -> output delta 50. The rebuilt charstring's blend
         // pushes 50 (the scaled delta) instead of 100.
         let ivs = build_ivs2_for_cff2(
             &[[(0.0, 1.0, 1.0), (0.0, 1.0, 1.0)]],

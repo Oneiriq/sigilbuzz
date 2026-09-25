@@ -110,7 +110,7 @@ fn opensans_glyph_outlines_match_ttf_parser_exactly() {
     println!("Open Sans outline parity: {matched}/{total} = {ratio:.3}");
     // Every glyph of Open Sans (938 glyphs at the time of writing)
     // matches ttf-parser's OutlineBuilder sequence within a 1e-2
-    // design-unit epsilon. Any regression — even a single glyph —
+    // design-unit epsilon. Any regression, even a single glyph,
     // is surfaced here immediately.
     assert_eq!(
         matched, total,
@@ -123,7 +123,7 @@ fn amiri_glyph_outlines_match_ttf_parser_exactly() {
     // Amiri is a large Arabic font (6710 glyphs) with extensive
     // composite use, including TWO_BY_TWO rotation matrices and
     // anchor-point references. With the composite flattener
-    // rewritten to a two-pass scheme that materialises absolute
+    // rewritten to a two-pass scheme that materializes absolute
     // points before emitting, every glyph now matches ttf-parser
     // to within the 1e-2 epsilon. Drop the coverage to a strict
     // equality check so the next composite-shape regression lands
@@ -204,7 +204,7 @@ fn be_i16(b: &[u8], off: usize) -> i16 {
 /// (`>= parent_contour_point_count`).
 ///
 /// Implemented as a small standalone walker so the assertion is
-/// independent of sigilbuzz's own parser — we want the test to pin
+/// independent of sigilbuzz's own parser. We want the test to pin
 /// the *fixture's* shape, not just its parsing.
 fn scan_anchor_components(bytes: &[u8]) -> (usize, usize) {
     let theirs = ttf_parser::Face::parse(bytes, 0).expect("ttf-parser face");
@@ -310,7 +310,7 @@ fn phantom_anchor_fixture_outlines_match_ttf_parser() {
     // `Glyf::outline`: gid 3 (`combo`) has one component in plain XY
     // mode and one in anchor mode whose `arg1` is the parent's pp2
     // index. The fixture is engineered so that the resolved phantom
-    // translation also equals (0, 0) — ttf-parser ignores anchor mode
+    // translation also equals (0, 0): ttf-parser ignores anchor mode
     // and defaults its translation to (0, 0), so a parity test stays
     // green while sigilbuzz still walks through `phantom_points()` /
     // resolves pp2 from hmtx.

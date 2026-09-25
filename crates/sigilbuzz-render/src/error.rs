@@ -37,7 +37,7 @@ pub enum RenderError {
     /// The bitmap embed used an encoding we don't decode (e.g. sbix
     /// `'jpg '` / `'tiff'` / `'dupe'`, or CBDT mask formats 1-9).
     UnsupportedBitmap,
-    /// A bitmap embed parsed structurally but could not be decoded —
+    /// A bitmap embed parsed structurally but could not be decoded,
     /// used by the EBDT composite (formats 8 / 9) recursion guard for
     /// cycles, self-references, and out-of-range component glyph ids.
     /// The static string identifies which guard tripped.
@@ -63,11 +63,11 @@ pub enum RenderError {
     /// range).
     SvgNotFound(u16),
     /// The SVG document for this glyph is gzip-compressed.
-    /// `sigilbuzz-render` deliberately does not depend on a gzip
+    /// `sigilbuzz-render` does not depend on a gzip
     /// decoder; the consumer is expected to decompress the payload
     /// themselves and feed it through a future bytes-based entry
     /// point. The SVG-in-OT spec allows both plain and gzipped
-    /// payloads — Apple Color Emoji and Twitter Color Emoji ship the
+    /// payloads. Apple Color Emoji and Twitter Color Emoji ship the
     /// plain form, so this is rarer than it sounds.
     SvgGzipped,
 }

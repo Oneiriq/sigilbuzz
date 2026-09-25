@@ -65,7 +65,7 @@ pub struct ColorPixmap {
 }
 
 impl ColorPixmap {
-    /// Allocates a fully transparent colour pixmap.
+    /// Allocates a fully transparent color pixmap.
     #[must_use]
     pub fn new(width: u32, height: u32) -> Self {
         let len = (width as usize)

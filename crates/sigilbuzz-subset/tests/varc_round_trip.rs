@@ -2,7 +2,7 @@
 //!
 //! Builds the same synthetic 3-glyph VARC font that `tests/varc_synthetic.rs`
 //! exercises in the parser crate (gid 0 .notdef, gid 1 VARC composite of
-//! gid 2, gid 2 a 100×100 square), then runs the subsetter and asserts:
+//! gid 2, gid 2 a 100x100 square), then runs the subsetter and asserts:
 //!
 //! - Closure expansion pulls gid 2 into the kept set when the caller asks
 //!   only for gid 1.
@@ -181,7 +181,7 @@ fn build_synthetic_varc_font() -> Vec<u8> {
         l
     };
 
-    // Minimal cmap format 4 mapping nothing useful — exists so subset
+    // Minimal cmap format 4 mapping nothing useful. Exists so subset
     // doesn't choke trying to rebuild it. (`subset_cmap` requires a
     // cmap on the source.)
     let cmap = {
@@ -400,7 +400,7 @@ fn varc_subset_drops_table_when_no_covered_gid_kept() {
     let new_blob = Blob::from_vec(out.bytes.clone());
     let new_face = Face::parse(&new_blob, 0).expect("subset font parses");
 
-    // VARC was dropped — gid 1 was not in the kept set, so coverage
+    // VARC was dropped: gid 1 was not in the kept set, so coverage
     // would be empty, and the subsetter omits the whole table.
     let varc_opt = new_face.varc().expect("varc accessor");
     assert!(
@@ -447,7 +447,7 @@ const VC_HAVE_TRANSLATE_Y: u32 = 1 << 5;
 /// Builds one component record:
 /// flags = TRANSFORM_HAS_VARIATION | HAVE_TRANSLATE_X | HAVE_TRANSLATE_Y
 /// (all three bits sit below 0x80, so flags fits in a one-byte uint32var).
-/// var_idx = (outer << 16) | inner — encoded as a two-byte uint32var when
+/// var_idx = (outer << 16) | inner, encoded as a two-byte uint32var when
 /// the value spans more than 7 bits (our test values do).
 fn build_component_with_var(gid: u16, outer: u16, inner: u16, tx: i16, ty: i16) -> Vec<u8> {
     let flags = (VC_TRANSFORM_HAS_VARIATION | VC_HAVE_TRANSLATE_X | VC_HAVE_TRANSLATE_Y) as u8;
@@ -599,7 +599,7 @@ fn build_mvs_varc() -> Vec<u8> {
     };
 
     // MVS: 2 subtables, 5 entries each = 10 total. Each delta set is
-    // a single i8 zero (0x00, 0x00) — `0x00` ctrl = run of 1 i8, `0x00`
+    // a single i8 zero (0x00, 0x00): `0x00` ctrl = run of 1 i8, `0x00`
     // payload. Two bytes per entry.
     let mvs_subtables: Vec<(Vec<u16>, Vec<Vec<u8>>)> = vec![
         (vec![0], (0..5).map(|i| vec![0x00_u8, i as u8]).collect()),
@@ -728,7 +728,7 @@ fn build_mvs_varc_font() -> Vec<u8> {
         m
     };
 
-    // Six glyphs in the loca array — gid 0..=4 empty, gid 5 carries
+    // Six glyphs in the loca array: gid 0..=4 empty, gid 5 carries
     // the square. Subsetting walks glyf via loca, so all gids must
     // have a valid loca slot.
     let square = build_square_glyph();
@@ -905,7 +905,7 @@ fn varc_subset_prunes_mvs_and_remaps_var_idx_orphan_free() {
         new_varc_bytes.len(),
     );
 
-    // Locate and report the MVS sub-block sizes before/after — this
+    // Locate and report the MVS sub-block sizes before/after. This
     // is the size delta the pruning closure reclaims. (Surfaced via
     // `eprintln!` so `cargo test -- --nocapture` shows it; gated on
     // an env var so CI noise stays low.)
@@ -941,7 +941,7 @@ fn varc_subset_prunes_mvs_and_remaps_var_idx_orphan_free() {
 
     // Re-parse the output and assert every component's transform
     // resolves cleanly. If a `MultiVarIdx` had become orphaned the
-    // parser's `composite()` would silently zero its delta — but the
+    // parser's `composite()` would silently zero its delta, but the
     // structural assertion is that the table re-parses at all (a
     // dangling outer index would surface via region_count out of range
     // and the whole record would fail to decode under the parser's
@@ -978,7 +978,7 @@ fn varc_subset_prunes_mvs_and_remaps_var_idx_orphan_free() {
     }
 }
 
-/// MVS pruning preserves determinism — same input → identical output
+/// MVS pruning preserves determinism: same input gives identical output
 /// across two subset calls, including the rewritten MVS bytes.
 #[test]
 fn varc_subset_with_mvs_prune_is_deterministic() {
@@ -1022,7 +1022,7 @@ fn build_multi_region_mvs(
     for _ in subtables {
         out.extend_from_slice(&0u32.to_be_bytes());
     }
-    // Region list — `regions.len()` regions, each constraining axis 0.
+    // Region list: `regions.len()` regions, each constraining axis 0.
     let region_list_start = out.len() as u32;
     out[region_off_slot..region_off_slot + 4].copy_from_slice(&region_list_start.to_be_bytes());
     out.extend_from_slice(&(regions.len() as u16).to_be_bytes());
@@ -1076,7 +1076,7 @@ fn build_multi_region_mvs(
 /// - gid 3, 4 each carry components referencing subtable 1 (regions 2,3).
 ///
 /// After subsetting to keep only gids 1,2, subtable 1 is dropped, which
-/// leaves regions 2,3 unreferenced — the region-list prune must drop
+/// leaves regions 2,3 unreferenced. The region-list prune must drop
 /// those, leaving exactly 2 regions in the output.
 fn build_multi_region_mvs_varc() -> Vec<u8> {
     // Each subtable carries 5 delta-set entries with run-of-2 i8s
@@ -1107,7 +1107,7 @@ fn build_multi_region_mvs_varc() -> Vec<u8> {
     ];
     let mvs = build_multi_region_mvs(&regions, &subtables);
 
-    // gid 1: 3 components → subtable 0, inners 0..2.
+    // gid 1: 3 components -> subtable 0, inners 0..2.
     let rec1 = {
         let mut r = Vec::new();
         r.extend(build_component_with_var(5, 0, 0, 1, 1));
@@ -1115,14 +1115,14 @@ fn build_multi_region_mvs_varc() -> Vec<u8> {
         r.extend(build_component_with_var(5, 0, 2, 3, 3));
         r
     };
-    // gid 2: 2 components → subtable 0, inners 3,4.
+    // gid 2: 2 components -> subtable 0, inners 3,4.
     let rec2 = {
         let mut r = Vec::new();
         r.extend(build_component_with_var(5, 0, 3, 4, 4));
         r.extend(build_component_with_var(5, 0, 4, 5, 5));
         r
     };
-    // gid 3: 3 components → subtable 1, inners 0..2.
+    // gid 3: 3 components -> subtable 1, inners 0..2.
     let rec3 = {
         let mut r = Vec::new();
         r.extend(build_component_with_var(5, 1, 0, 6, 6));
@@ -1130,7 +1130,7 @@ fn build_multi_region_mvs_varc() -> Vec<u8> {
         r.extend(build_component_with_var(5, 1, 2, 8, 8));
         r
     };
-    // gid 4: 2 components → subtable 1, inners 3,4.
+    // gid 4: 2 components -> subtable 1, inners 3,4.
     let rec4 = {
         let mut r = Vec::new();
         r.extend(build_component_with_var(5, 1, 3, 9, 9));
@@ -1375,7 +1375,7 @@ fn build_multi_region_mvs_varc_font() -> Vec<u8> {
 /// Parses the MVS region count out of a VARC byte block. Returns the
 /// region list's `regionCount` u16, or 0 when the table has no MVS.
 fn varc_mvs_region_count(varc_bytes: &[u8]) -> u16 {
-    // VARC header: u16 major + u16 minor + 5 × Offset32. varStore is
+    // VARC header: u16 major + u16 minor + 5 x Offset32. varStore is
     // the second offset (slot at byte 8).
     let read_u32 = |b: &[u8], at: usize| -> u32 {
         u32::from_be_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
@@ -1408,7 +1408,7 @@ fn assert_no_orphan_region_refs(varc_bytes: &[u8]) {
     for i in 0..subtable_count {
         let sub_off = read_u32(mvs, 8 + i * 4) as usize;
         let sub = &mvs[sub_off..];
-        // sub: u8 format + u16 regionIndexCount + regionIndexes[u16]…
+        // sub: u8 format + u16 regionIndexCount + regionIndexes[u16]...
         assert_eq!(sub[0], 1, "MVS subtable {i} format must be 1");
         let ric = u16::from_be_bytes([sub[1], sub[2]]) as usize;
         for j in 0..ric {
@@ -1438,7 +1438,7 @@ fn varc_subset_prunes_region_list_and_renumbers_tuple_indexes() {
     let src_varc_bytes = face.table_bytes(sigilbuzz::tables::tag::VARC).unwrap();
     assert_eq!(varc_mvs_region_count(src_varc_bytes), 4);
 
-    // Subset to keep gids 1, 2 → subtable 1 dropped → regions 2, 3 orphan.
+    // Subset to keep gids 1, 2 -> subtable 1 dropped -> regions 2, 3 orphan.
     let input = SubsetInput {
         gids: vec![1, 2],
         retain_hints: false,
@@ -1453,7 +1453,7 @@ fn varc_subset_prunes_region_list_and_renumbers_tuple_indexes() {
         .table_bytes(sigilbuzz::tables::tag::VARC)
         .expect("output has VARC");
 
-    // Region list pruned 4 → 2.
+    // Region list pruned 4 -> 2.
     assert_eq!(
         varc_mvs_region_count(new_varc_bytes),
         2,
@@ -1474,7 +1474,7 @@ fn varc_subset_prunes_region_list_and_renumbers_tuple_indexes() {
     );
 
     // Surviving composites still resolve cleanly through the parser
-    // — i.e. the renumbered region indexes still produce valid scalars.
+    // (i.e. the renumbered region indexes still produce valid scalars).
     let new_varc = new_face.varc().unwrap().expect("output has VARC");
     let new_gid_for = |old: u16| -> u16 {
         out.gid_map
@@ -1499,7 +1499,7 @@ fn varc_subset_prunes_region_list_and_renumbers_tuple_indexes() {
         "region-prune output not deterministic"
     );
 
-    // Size delta surfacing — gated on an env var so CI noise stays low.
+    // Size delta surfacing, gated on an env var so CI noise stays low.
     if std::env::var_os("SIGILBUZZ_REPORT_MVS_DELTA").is_some() {
         eprintln!(
             "VARC region prune: source = {} bytes, output = {} bytes (delta {})",

@@ -74,7 +74,7 @@ fn subsets_open_sans_to_abc() {
     // Subset must be < 30 % of the original.
     let pct = subset_size * 100 / original_size;
     eprintln!(
-        "open_sans subset → {{A,B,C}}: original {original_size} bytes, subset {subset_size} bytes ({pct}%)",
+        "open_sans subset to {{A,B,C}}: original {original_size} bytes, subset {subset_size} bytes ({pct}%)",
     );
     assert!(
         subset_size < original_size * 30 / 100,
@@ -188,7 +188,7 @@ fn out_of_range_gid_errors() {
 fn shaping_subset_font_matches_remap() {
     // After subsetting Open Sans to {A, B, C}, shaping each character
     // through the subset must produce gids equal to what cmap_lookup
-    // returns for those characters in the subset font — i.e. the
+    // returns for those characters in the subset font, i.e. the
     // glyph stream is consistent with the new gid namespace.
     let face = open_sans_face();
     let gid_a = cmap_lookup(&face, 'A');
@@ -224,13 +224,13 @@ fn shaping_subset_font_matches_remap() {
 
 #[test]
 fn cff_font_errors_cleanly() {
-    // We synthesise a minimal SFNT directory advertising a CFF table
-    // — Face::parse only validates the directory shape, so this is
+    // We synthesize a minimal SFNT directory advertising a CFF table.
+    // Face::parse only validates the directory shape, so this is
     // enough to prove the CFF dispatch surfaces a clean error path.
     // Without a maxp the closure walk can't compute num_glyphs, so the
     // error variant here is MissingTable rather than Unsupported. The
-    // original-intent invariant — "CFF input never panics, never
-    // bubbles a Parse error" — is what this test still guards.
+    // original-intent invariant ("CFF input never panics, never
+    // bubbles a Parse error") is what this test still guards.
     let mut bytes: Vec<u8> = Vec::new();
     bytes.extend_from_slice(&0x4F54_544Fu32.to_be_bytes()); // 'OTTO'
     bytes.extend_from_slice(&1u16.to_be_bytes()); // numTables
@@ -323,7 +323,7 @@ fn build_minimal_head() -> Vec<u8> {
     head
 }
 
-/// Builds a minimal `maxp` v0.5 table — the 6-byte short form used by
+/// Builds a minimal `maxp` v0.5 table, the 6-byte short form used by
 /// CFF fonts.
 fn build_minimal_maxp(num_glyphs: u16) -> Vec<u8> {
     let mut maxp = Vec::new();
@@ -334,13 +334,13 @@ fn build_minimal_maxp(num_glyphs: u16) -> Vec<u8> {
 
 #[test]
 fn cff_identity_passthrough_preserves_table_bytes() {
-    // Synthesise a CFF1 font with just enough tables to satisfy the
+    // Synthesize a CFF1 font with just enough tables to satisfy the
     // closure walker: head + maxp + a minimal CFF table. With
     // gids = [] and drop_unhandled = true the closure walker keeps
     // only gid 0; if num_glyphs = 1 the kept set is the identity, so
     // the CFF dispatch hits the passthrough branch.
     //
-    // The CFF body itself is a 4-byte header — Face::parse_bytes only
+    // The CFF body itself is a 4-byte header. Face::parse_bytes only
     // validates the SFNT directory shape, and the subset entry's
     // identity-passthrough path never re-parses the CFF body. The
     // round-trip we care about is "same bytes survive into output".
@@ -400,7 +400,7 @@ fn cff2_identity_passthrough_preserves_table_bytes() {
 #[test]
 fn cff_non_identity_subset_errors_unsupported() {
     // Same fixture but with num_glyphs = 2: the closure walker keeps
-    // only gid 0, so the kept set is [0] — not the identity over a
+    // only gid 0, so the kept set is [0], not the identity over a
     // 2-glyph font. The dispatch must surface Unsupported with the
     // dedicated CFF rewrite-staged context string.
     let cff_body: Vec<u8> = vec![1, 0, 4, 1];
@@ -437,7 +437,7 @@ fn build_synthetic_cff1_table(n_glyphs: u16) -> Vec<u8> {
     // Glyph 0 = .notdef (single endchar).
     let mut all_cs: Vec<Vec<u8>> = vec![vec![14u8]];
     for _ in 1..n_glyphs {
-        // 0 0 rmoveto endchar — a trivial outline.
+        // 0 0 rmoveto endchar: a trivial outline.
         all_cs.push(vec![139u8, 139, 21, 14]);
     }
     let cs_refs: Vec<&[u8]> = all_cs.iter().map(Vec::as_slice).collect();
@@ -569,7 +569,7 @@ fn build_minimal_hmtx(n_glyphs: u16, advance: u16) -> Vec<u8> {
 /// to gids 1..3.
 fn build_minimal_cmap_abc() -> Vec<u8> {
     // cmap header: version 0, numTables 1, encoding record (platform 3
-    // encoding 1) → subtable offset.
+    // encoding 1) -> subtable offset.
     let mut out = Vec::new();
     out.extend_from_slice(&0u16.to_be_bytes()); // version
     out.extend_from_slice(&1u16.to_be_bytes()); // numTables
@@ -577,9 +577,9 @@ fn build_minimal_cmap_abc() -> Vec<u8> {
     out.extend_from_slice(&1u16.to_be_bytes()); // encodingID = Unicode BMP
     out.extend_from_slice(&12u32.to_be_bytes()); // offset to subtable
 
-    // Format 4 subtable. Single segment 0x0041..0x0043 → start gid 1.
-    // Plus the mandatory tail segment 0xFFFF..0xFFFF → 0.
-    // segCount = 2 → segCountX2 = 4.
+    // Format 4 subtable. Single segment 0x0041..0x0043 -> start gid 1.
+    // Plus the mandatory tail segment 0xFFFF..0xFFFF -> 0.
+    // segCount = 2 -> segCountX2 = 4.
     let seg_count = 2u16;
     let seg_count_x2 = seg_count * 2;
     let search_range = 4u16; // 2 * largest power of 2 <= seg_count.
@@ -604,7 +604,7 @@ fn build_minimal_cmap_abc() -> Vec<u8> {
                                                 // startCount: [0x0041, 0xFFFF]
     out.extend_from_slice(&0x0041u16.to_be_bytes());
     out.extend_from_slice(&0xFFFFu16.to_be_bytes());
-    // idDelta: [-0x40 (gid 1 for cp 0x41), 1] (mod 65536). For 0xFFFF→0, delta=1.
+    // idDelta: [-0x40 (gid 1 for cp 0x41), 1] (mod 65536). For 0xFFFF->0, delta=1.
     let delta_a = (1i16 - 0x41i16) as u16;
     out.extend_from_slice(&delta_a.to_be_bytes());
     out.extend_from_slice(&1u16.to_be_bytes());

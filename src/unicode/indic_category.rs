@@ -8,7 +8,7 @@
 //! These two properties are published in the Unicode Character
 //! Database (`IndicSyllabicCategory.txt`, `IndicPositionalCategory.txt`)
 //! and are OSI-approved data. sigilbuzz carries a hand-curated excerpt
-//! covering the scripts it can shape — the full Indic family at 0.2.0.
+//! covering the scripts it can shape: the full Indic family at 0.2.0.
 //!
 //! # Layout
 //!
@@ -24,18 +24,18 @@
 //!
 //! Ranges are cross-referenced with the Unicode Character Database
 //! and rustybuzz's `ot_shaper_indic_table.rs`. Simplified here
-//! compared to the full UCD — sigilbuzz collapses several matra
+//! compared to the full UCD: sigilbuzz collapses several matra
 //! positional sub-categories (`VPre`, `VPst`, `VBlw`, `VAbv`) into
 //! the coarser positional `Left`/`Right`/`Bottom`/`Top` set that
 //! the state machine actually consumes.
 
-/// Indic Syllabic Category — the role a codepoint plays inside an
+/// Indic Syllabic Category: the role a codepoint plays inside an
 /// Indic syllable. Variants mirror the UAX #44 `Indic_Syllabic_Category`
 /// enumeration; only the values sigilbuzz uses today are listed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(missing_docs)]
 pub enum IndicSyllabicCategory {
-    /// Anything we have not tabulated — passes through untouched.
+    /// Anything we have not tabulated: passes through untouched.
     Other,
     Bindu,
     Visarga,
@@ -76,7 +76,7 @@ pub enum IndicSyllabicCategory {
     SymbolLetter,
 }
 
-/// Indic Positional Category — where a mark sits relative to its
+/// Indic Positional Category: where a mark sits relative to its
 /// base consonant. Used by the Indic shaper to decide which feature
 /// bucket a matra belongs in (pre-base, below-base, post-base...).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,7 +172,7 @@ const fn devanagari_syllabic(cp: u32) -> IndicSyllabicCategory {
         0x0951..=0x0954 => IndicSyllabicCategory::CantillationMark,
         0x0966..=0x096F => IndicSyllabicCategory::Number,
         // OM (0x0950), dandas (0x0964..=0x0965), abbreviation sign
-        // (0x0970) pass through as "Other" — no reorder, no feature.
+        // (0x0970) pass through as "Other": no reorder, no feature.
         // 0x0971 (high spacing dot) is a consonant placeholder.
         0x0971 => IndicSyllabicCategory::ConsonantPlaceholder,
         _ => IndicSyllabicCategory::Other,
@@ -557,7 +557,7 @@ mod tests {
             positional_category('A'),
             IndicPositionalCategory::NotApplicable
         );
-        // Thai — no table yet.
+        // Thai: no table yet.
         assert_eq!(syllabic_category('\u{0E01}'), IndicSyllabicCategory::Other);
     }
 

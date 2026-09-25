@@ -1,4 +1,4 @@
-//! GSUB lookup type 5 — Contextual Substitution.
+//! GSUB lookup type 5: Contextual Substitution.
 //!
 //! Contextual substitution is the "non-chained" cousin of chained
 //! context (type 6): a run of input glyphs triggers a list of nested
@@ -22,11 +22,11 @@ use crate::tables::parse::Reader;
 /// right matcher to the shape driver.
 #[derive(Debug, Clone)]
 pub enum Context<'a> {
-    /// Format 1 — glyph-based.
+    /// Format 1: glyph-based.
     Format1(Context1<'a>),
-    /// Format 2 — class-based.
+    /// Format 2: class-based.
     Format2(Context2<'a>),
-    /// Format 3 — coverage-based.
+    /// Format 3: coverage-based.
     Format3(Context3<'a>),
 }
 

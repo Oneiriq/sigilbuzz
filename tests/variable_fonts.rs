@@ -1,5 +1,5 @@
 //! Variable-font integration: Rubik Variable (`wght` axis) exercises
-//! the full fvar → avar → Font::with_coords → shape() pipeline, and
+//! the full fvar -> avar -> Font::with_coords -> shape() pipeline, and
 //! checks that the resulting per-glyph advances match rustybuzz with
 //! the same axis coordinate.
 
@@ -62,7 +62,7 @@ fn font_coords_slice_is_preserved() {
 fn heavy_weight_differs_from_default_weight_at_least_once() {
     // Proof-of-fire: without HVAR wiring, both of these advance lists
     // are identical. The wiring test below then compares us to
-    // rustybuzz — this test just makes sure the integration fixture
+    // rustybuzz. This test just makes sure the integration fixture
     // actually exercises HVAR.
     let blob = Blob::new(RUBIK);
     let face = Face::parse(&blob, 0).unwrap();
@@ -81,13 +81,13 @@ fn heavy_weight_differs_from_default_weight_at_least_once() {
 fn advance_deltas_match_rustybuzz_across_wght_axis() {
     // Compare (heavy - default) advance deltas between sigilbuzz and
     // rustybuzz. This isolates the HVAR contribution from any
-    // pre-existing GPOS differences between the two shapers — which
+    // pre-existing GPOS differences between the two shapers, which
     // is all the variable-font wiring is responsible for.
     let blob = Blob::new(RUBIK);
     let face = Face::parse(&blob, 0).unwrap();
 
     // Corpus chosen to avoid GPOS pair adjustments that rustybuzz
-    // varies with weight via feature-variations — that layer is
+    // varies with weight via feature-variations. That layer is
     // orthogonal to HVAR advance deltas. With un-kerning-varying
     // glyphs, all measured divergence between the two shapers is
     // HVAR drift alone.
@@ -104,7 +104,7 @@ fn advance_deltas_match_rustybuzz_across_wght_axis() {
             for i in 0..sig_default.len() {
                 let sig_delta = sig_heavy[i] - sig_default[i];
                 let rb_delta = rb_heavy[i] - rb_default[i];
-                // Tolerance of 1 design unit — sigilbuzz uses f32
+                // Tolerance of 1 design unit: sigilbuzz uses f32
                 // math, rustybuzz fixed-point f2dot14. Drift stays at
                 // or under 1 unit on this corpus.
                 assert!(
@@ -121,7 +121,7 @@ fn advance_deltas_match_rustybuzz_across_wght_axis() {
 fn default_instance_matches_rustybuzz_without_coords() {
     // When Font::with_coords is not called, sigilbuzz must produce
     // the same advances as rustybuzz with no variations set. Corpus
-    // deliberately avoids kerning pairs rubik renders differently in
+    // avoids kerning pairs rubik renders differently in
     // the two engines (pre-existing shaper divergence that the
     // parity test in rustybuzz_parity.rs is the right home for).
     let corpus = ["A", "Hello", "o"];
@@ -136,7 +136,7 @@ fn default_instance_matches_rustybuzz_without_coords() {
 fn rubik_mvar_resolves_underline_offset_delta() {
     // Rubik VF ships MVAR with a single `undo` record (underline
     // position). Parsing the table at heavy weight should produce
-    // a non-zero delta — the heavier instance positions the
+    // a non-zero delta. The heavier instance positions the
     // underline differently. We assert "non-default differs from
     // default" rather than a fixed number to stay future-proof
     // against re-mastering of the fixture.
@@ -164,7 +164,7 @@ fn rubik_mvar_resolves_underline_offset_delta() {
         "heavy weight should shift underline offset, got {heavy}"
     );
 
-    // Unrecognised tags resolve to None.
+    // Unrecognized tags resolve to None.
     assert!(mvar.metric_delta(*b"xxxx", &heavy_coords).is_none());
 }
 
@@ -172,7 +172,7 @@ fn rubik_mvar_resolves_underline_offset_delta() {
 fn source_sans_3_vf_carries_no_mvar_or_vvar() {
     // Source Sans 3 VF (the OTF subset vendored at
     // tests/fonts/SourceSans3VF-Latin-Subset.otf) ships HVAR but
-    // omits MVAR and VVAR — typical of horizontal-only Latin
+    // omits MVAR and VVAR, typical of horizontal-only Latin
     // variable fonts. The accessors must return Ok(None) for both,
     // never an error: Face::table_bytes' MissingTable path is
     // mapped to None by the optional accessor convention.
@@ -182,7 +182,7 @@ fn source_sans_3_vf_carries_no_mvar_or_vvar() {
     assert!(face.mvar().unwrap().is_none());
     assert!(face.vvar().unwrap().is_none());
     // Sanity: HVAR is present, so the optional-table machinery is
-    // working — this rules out a parse error masking as None.
+    // working. This rules out a parse error masking as None.
     assert!(face.hvar().unwrap().is_some());
 }
 
@@ -210,7 +210,7 @@ fn glyph_bounds_at_coords_shifts_bbox() {
 
     let default_w = i32::from(default_bounds.x_max) - i32::from(default_bounds.x_min);
     let heavy_w = i32::from(heavy_bounds.x_max) - i32::from(heavy_bounds.x_min);
-    // The heavy weight should at minimum differ from the default —
+    // The heavy weight should at minimum differ from the default:
     // whether wider or merely shifted depends on the font. The key
     // invariant: gvar deltas should actually change something.
     let differs = default_bounds != heavy_bounds;

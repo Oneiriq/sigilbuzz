@@ -6,7 +6,7 @@
 //! over [`LineBreakClass`] pairs sourced from the spec's pair-table.
 //!
 //! The implementation keeps the table compact: rather than the full
-//! 64×64 matrix, [`pair_action`] encodes a curated subset (≈250
+//! 64x64 matrix, [`pair_action`] encodes a curated subset (~250
 //! decisions) covering the rules a wrapper actually consults for
 //! English-plus-CJK input.
 
@@ -15,13 +15,13 @@ use crate::class::{line_break_class, LineBreakClass};
 /// Whether a position may host a line break.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BreakOpportunity {
-    /// Mandatory break — `CR`, `LF`, `NL`, `BK`. The wrapper *must*
+    /// Mandatory break: `CR`, `LF`, `NL`, `BK`. The wrapper *must*
     /// break here.
     Mandatory,
     /// Allowed break. The wrapper *may* break here if the next chunk
     /// would not fit.
     Allowed,
-    /// Prohibited break — included for completeness so callers can
+    /// Prohibited break: included for completeness so callers can
     /// distinguish "we considered this position and rejected it" from
     /// "we never reached this position".
     Prohibited,
@@ -44,7 +44,7 @@ pub struct LineBreakIter<'a> {
     /// Class of the most recently consumed character. `None` until the
     /// first character is seen.
     prev_class: Option<LineBreakClass>,
-    /// True when the last consumed pair was a CR followed by LF — the
+    /// True when the last consumed pair was a CR followed by LF. The
     /// CR already emitted a Mandatory break, so we suppress one for
     /// the LF.
     suppress_next_mandatory: bool,
@@ -90,7 +90,7 @@ impl Iterator for LineBreakIter<'_> {
             let next_pos = self.pos + ch_len;
             let curr = line_break_class(ch);
 
-            // LB4 / LB5 — mandatory breaks after BK / CR / LF / NL.
+            // LB4 / LB5: mandatory breaks after BK / CR / LF / NL.
             // We emit the break *after* consuming the controlling
             // character so the offset lands past it.
             let was_mandatory_trigger = matches!(
@@ -116,7 +116,7 @@ impl Iterator for LineBreakIter<'_> {
             self.prev_class = Some(curr);
             self.pos = next_pos;
 
-            // Skip over CR-LF — the LF after a CR is treated as part
+            // Skip over CR-LF: the LF after a CR is treated as part
             // of the same mandatory break.
             if matches!(curr, LineBreakClass::CR) {
                 self.suppress_next_mandatory = true;
@@ -128,14 +128,14 @@ impl Iterator for LineBreakIter<'_> {
             ) {
                 return Some((self.pos - ch_len, action));
             }
-            // Prohibited — keep scanning.
+            // Prohibited: keep scanning.
         }
     }
 }
 
 /// UAX 14 pair-table action.
 ///
-/// The full pair-table is 64×64; this curated version returns
+/// The full pair-table is 64x64; this curated version returns
 /// `Prohibited` by default and only special-cases pairs that produce
 /// an `Allowed` break or a `Mandatory` flush. Tweaks here have been
 /// driven by the test suite: the rules cover English / CJK / mixed
@@ -145,111 +145,111 @@ impl Iterator for LineBreakIter<'_> {
 pub fn pair_action(prev: LineBreakClass, curr: LineBreakClass) -> BreakOpportunity {
     use LineBreakClass as L;
 
-    // LB6 — never break before a hard line break. The CR/LF/NL/BK rule
+    // LB6: never break before a hard line break. The CR/LF/NL/BK rule
     // is enforced by the iterator emitting *after* those characters.
     if matches!(curr, L::BK | L::CR | L::LF | L::NL) {
         return BreakOpportunity::Prohibited;
     }
-    // LB7 — never break before a space or zero-width-space.
+    // LB7: never break before a space or zero-width-space.
     if matches!(curr, L::SP | L::ZW) {
         return BreakOpportunity::Prohibited;
     }
-    // LB8 — break after a zero-width space.
+    // LB8: break after a zero-width space.
     if prev == L::ZW {
         return BreakOpportunity::Allowed;
     }
-    // LB11 — never break before or after a word-joiner.
+    // LB11: never break before or after a word-joiner.
     if curr == L::WJ || prev == L::WJ {
         return BreakOpportunity::Prohibited;
     }
-    // LB12 / LB12a — never break around glue.
+    // LB12 / LB12a: never break around glue.
     if prev == L::GL {
         return BreakOpportunity::Prohibited;
     }
     if curr == L::GL && !matches!(prev, L::SP | L::BA | L::HY) {
         return BreakOpportunity::Prohibited;
     }
-    // LB13 — never break before close punctuation, exclamation, or
+    // LB13: never break before close punctuation, exclamation, or
     // close paren, with or without preceding space.
     if matches!(curr, L::CL | L::CP | L::EX | L::NS) {
         return BreakOpportunity::Prohibited;
     }
-    // LB14 — never break after open punctuation.
+    // LB14: never break after open punctuation.
     if prev == L::OP {
         return BreakOpportunity::Prohibited;
     }
-    // LB15 — never break after a quotation followed by open punct.
+    // LB15: never break after a quotation followed by open punct.
     if prev == L::QU && curr == L::OP {
         return BreakOpportunity::Prohibited;
     }
-    // LB16 — no break between CL/CP and NS.
+    // LB16: no break between CL/CP and NS.
     if matches!(prev, L::CL | L::CP) && curr == L::NS {
         return BreakOpportunity::Prohibited;
     }
-    // LB18 — break after spaces.
+    // LB18: break after spaces.
     if prev == L::SP {
         return BreakOpportunity::Allowed;
     }
-    // LB19 — never break around quotation marks.
+    // LB19: never break around quotation marks.
     if curr == L::QU || prev == L::QU {
         return BreakOpportunity::Prohibited;
     }
-    // LB21 — break before BB and after BA / HY / NS-as-mid.
+    // LB21: break before BB and after BA / HY / NS-as-mid.
     if curr == L::BB {
         return BreakOpportunity::Allowed;
     }
     if matches!(prev, L::BA | L::HY) {
-        // LB21b — except numeric stays attached: HY before NU.
+        // LB21b: except numeric stays attached (HY before NU).
         if prev == L::HY && curr == L::NU {
             return BreakOpportunity::Prohibited;
         }
         return BreakOpportunity::Allowed;
     }
-    // LB22 — never break before NS (handled above) or CM.
+    // LB22: never break before NS (handled above) or CM.
     if curr == L::CM {
         return BreakOpportunity::Prohibited;
     }
-    // LB23 — never break between AL / NU.
+    // LB23: never break between AL / NU.
     if matches!(prev, L::AL | L::NU) && matches!(curr, L::AL | L::NU) {
         return BreakOpportunity::Prohibited;
     }
-    // LB23a — never break between numeric prefix and ID.
+    // LB23a: never break between numeric prefix and ID.
     if prev == L::PR && curr == L::ID {
         return BreakOpportunity::Prohibited;
     }
     if prev == L::ID && curr == L::PO {
         return BreakOpportunity::Prohibited;
     }
-    // LB24 — PR / PO with AL / NU stays attached.
+    // LB24: PR / PO with AL / NU stays attached.
     if matches!(prev, L::PR | L::PO) && matches!(curr, L::AL | L::NU) {
         return BreakOpportunity::Prohibited;
     }
     if matches!(prev, L::AL | L::NU) && matches!(curr, L::PR | L::PO) {
         return BreakOpportunity::Prohibited;
     }
-    // LB25 — numeric expressions stay together. Coarse approximation.
+    // LB25: numeric expressions stay together. Coarse approximation.
     if prev == L::NU && matches!(curr, L::NU | L::PR | L::PO) {
         return BreakOpportunity::Prohibited;
     }
     if matches!(prev, L::PR | L::PO) && curr == L::NU {
         return BreakOpportunity::Prohibited;
     }
-    // LB28 — never break between two ALs.
+    // LB28: never break between two ALs.
     if prev == L::AL && curr == L::AL {
         return BreakOpportunity::Prohibited;
     }
-    // LB29 — never break a numeric followed by an alphabetic suffix.
+    // LB29: never break a numeric followed by an alphabetic suffix.
     if prev == L::NU && curr == L::AL {
         return BreakOpportunity::Prohibited;
     }
-    // LB30b — emoji base + emoji modifier stays attached.
+    // LB30b: emoji base + emoji modifier stays attached.
     if prev == L::EB && curr == L::EM {
         return BreakOpportunity::Prohibited;
     }
 
-    // LB30 — break between ID and AL: CJK ↔ Latin transition is a
-    // legitimate wrap point. ID ↔ ID is an explicit allowed break
-    // (the per-grapheme CJK wrap behaviour).
+    // LB30: break between ID and AL. CJK <-> Latin transition is a
+    // legitimate wrap point. ID <-> ID is an explicit allowed break
+    // (the per-grapheme CJK wrap behavior).
     if prev == L::ID || curr == L::ID {
         return BreakOpportunity::Allowed;
     }
@@ -257,7 +257,7 @@ pub fn pair_action(prev: LineBreakClass, curr: LineBreakClass) -> BreakOpportuni
         return BreakOpportunity::Allowed;
     }
 
-    // Default — forbid the break. UAX 14's LB31 is "break everywhere
+    // Default: forbid the break. UAX 14's LB31 is "break everywhere
     // else" but in practice that produces too many spurious breaks; we
     // err conservative and let SP / BA / HY / ZW drive the
     // opportunities.

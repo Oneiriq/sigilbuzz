@@ -13,13 +13,13 @@ use sigilbuzz_render::{flatten, flatten_grouped, Affine, FlattenedCurve, DEFAULT
 
 /// Walk-the-curves convenience: assigns a synthetic edge-color tag
 /// to each `FlattenedCurve` in a `Vec`. This is the *shape* of what
-/// MSDF generators actually do — pick a channel per source curve,
+/// MSDF generators actually do: pick a channel per source curve,
 /// then for every chord in that curve, paint into that channel.
 /// We don't need a real MSDF here; we just need to prove the
 /// per-curve identity is preserved end-to-end through the public
 /// API.
 fn paint_per_curve(curves: &[FlattenedCurve]) -> Vec<(usize, usize)> {
-    // (curve_idx, chord_count) — one entry per source curve.
+    // (curve_idx, chord_count): one entry per source curve.
     curves
         .iter()
         .enumerate()
@@ -68,7 +68,7 @@ fn flatten_grouped_is_callable_from_outside_the_crate() {
 #[test]
 fn msdf_use_case_per_curve_identity_preserved() {
     // The exact pattern oniq's outline cache used to wrap one Bezier
-    // at a time — but now done in a single pass.
+    // at a time, but now done in a single pass.
     let ops = vec![
         PathOp::MoveTo { x: 0.0, y: 0.0 },
         PathOp::CubicTo {
@@ -104,8 +104,8 @@ fn msdf_use_case_per_curve_identity_preserved() {
 
 #[test]
 fn flatten_grouped_chord_count_matches_flatten() {
-    // The grouped API must produce the same chord set as flatten() —
-    // this is the load-bearing invariant that lets MSDF consumers
+    // The grouped API must produce the same chord set as flatten().
+    // This is the invariant that lets MSDF consumers
     // swap from the per-Bezier wrapping pattern to flatten_grouped()
     // without changing visual output.
     let ops = vec![

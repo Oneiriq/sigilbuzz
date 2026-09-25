@@ -1,4 +1,4 @@
-//! `sigilbuzz-text-layout` — line-breaking and word-wrap for sigilbuzz.
+//! `sigilbuzz-text-layout`: line-breaking and word-wrap for sigilbuzz.
 //!
 //! This companion crate implements a curated subset of
 //! [UAX #14 *Unicode Line Breaking Algorithm*][uax14] sufficient to
@@ -9,10 +9,10 @@
 //!
 //! The headline entry points are:
 //!
-//! - [`line_break_opportunities`] — UAX 14 break iterator over a `&str`.
-//! - [`wrap_lines`] — walks a slice of shaped [`sigilbuzz::Glyph`]s
+//! - [`line_break_opportunities`]: UAX 14 break iterator over a `&str`.
+//! - [`wrap_lines`]: walks a slice of shaped [`sigilbuzz::Glyph`]s
 //!   and a width budget to produce [`LineRange`]s.
-//! - [`word_breaks`] — simplified UAX 29 word-segmentation iterator.
+//! - [`word_breaks`]: simplified UAX 29 word-segmentation iterator.
 //!
 //! The crate is `no_std`-friendly when the default `std` feature is
 //! turned off; `wrap_lines` and the iterators all live in `alloc`.

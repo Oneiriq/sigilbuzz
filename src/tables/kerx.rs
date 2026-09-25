@@ -1,9 +1,9 @@
-//! `kerx` — Apple Extended Kerning.
+//! `kerx`: Apple Extended Kerning.
 //!
 //! `kerx` is the AAT successor to `kern`. AAT-only fonts ship their
 //! kerning here. sigilbuzz consults `kerx` only when GPOS has no
 //! `kern` feature, so modern OpenType fonts keep their existing
-//! behaviour — this matches HarfBuzz's AAT shaper policy.
+//! behavior. This matches HarfBuzz's AAT shaper policy.
 //!
 //! # Layout
 //!
@@ -16,50 +16,50 @@
 //!   Subtable:
 //!     u32 length       (bytes, incl. this header)
 //!     u32 coverage     (low byte = format; high bits = flags)
-//!     u32 tupleCount   (variation-font kerning — sigilbuzz ignores)
+//!     u32 tupleCount   (variation-font kerning, sigilbuzz ignores)
 //!     Body body        (format-specific)
 //! ```
 //!
 //! Three subtable formats are implemented:
 //!
-//! - Format 0 — ordered pair list (the common case for AAT fonts
+//! - Format 0: ordered pair list (the common case for AAT fonts
 //!   that re-use legacy `kern` data).
-//! - Format 1 — state-machine kerning. Walks the run through an AAT
+//! - Format 1: state-machine kerning. Walks the run through an AAT
 //!   extended state table; entries push glyph indices onto a "kern
 //!   stack" and reference a list of i16 values that are popped and
 //!   applied in pair order. Useful for contextual kerning (e.g. a
 //!   spur joining only when not preceded by a space).
-//! - Format 2 — n-way class kerning. Two AAT lookup tables map
+//! - Format 2: n-way class kerning. Two AAT lookup tables map
 //!   left and right glyph ids to row / column offsets into a 2D
 //!   array of i16 deltas; useful for dense matrices like Latin
 //!   pair-class tables that would explode if expanded to flat
 //!   pairs.
 //!
-//! Format 4 — control-point kerning. The state machine walks the run
+//! Format 4: control-point kerning. The state machine walks the run
 //! marking glyphs and firing actions; each action looks up an anchor
 //! pair in the action table. Three action types exist:
 //!
-//! - **Type 0** — control points: pairs of glyf-point indices. The
+//! - **Type 0** (control points): pairs of glyf-point indices. The
 //!   apply pass needs to read the (x, y) of point N on each glyph.
 //!   sigilbuzz emits a [`Kerx4Action::ControlPoints`] event so the
 //!   caller can resolve the points; the shaper integration drops
 //!   these events until [`crate::Face`] grows a public glyph-point
 //!   accessor (follow-up).
-//! - **Type 1** — anchor points: pairs of `ankr` table indices.
+//! - **Type 1** (anchor points): pairs of `ankr` table indices.
 //!   sigilbuzz emits the event but the shaper drops it; `ankr`
 //!   support is on a separate track.
-//! - **Type 2** — coordinates: four i16 in FUnits per record. The
+//! - **Type 2** (coordinates): four i16 in FUnits per record. The
 //!   shaper applies `(mark_x - current_x, mark_y - current_y)` as
-//!   x/y offsets directly — no glyf / ankr reads needed.
+//!   x/y offsets directly. No glyf / ankr reads needed.
 //!
 //! The state-machine walk + event emission is driven by
 //! [`Kerx::apply_format4`].
 //!
 //! # Format 6
 //!
-//! Apple's "simple n × m array" — a compound-class layout like format
+//! Apple's "simple n x m array": a compound-class layout like format
 //! 2, but the row / column class tables are AAT lookups that yield
-//! direct row / column *indices* into a 2D `(rowCount × columnCount)`
+//! direct row / column *indices* into a 2D `(rowCount * columnCount)`
 //! grid of i16 kern deltas. Layout (relative to the subtable origin):
 //!
 //! ```text
@@ -67,14 +67,14 @@
 //!                          implements the short-value variant)
 //!   u16 rowCount
 //!   u16 columnCount
-//!   u32 rowIndexTable     (offset to AAT lookup; glyph → row index)
-//!   u32 columnIndexTable  (offset to AAT lookup; glyph → col index)
+//!   u32 rowIndexTable     (offset to AAT lookup; glyph -> row index)
+//!   u32 columnIndexTable  (offset to AAT lookup; glyph -> col index)
 //!   u32 kerningArray      (offset to i16[rowCount * columnCount])
-//!   u32 kerningVector     (long-value variant only — ignored)
+//!   u32 kerningVector     (long-value variant only, ignored)
 //! ```
 //!
 //! Real shipping fonts pick small row / column counts (a few dozen)
-//! and store the indices as plain u16 — the same shape format 2 uses
+//! and store the indices as plain u16, the same shape format 2 uses
 //! for its pre-multiplied byte offsets, just without the
 //! pre-multiplication. The apply path mirrors format 2: resolve both
 //! lookups, then read the cell at
@@ -94,7 +94,7 @@
 //! ```
 //!
 //! Pairs are sorted by the 32-bit key `(left << 16) | right`, so
-//! lookup is a binary search — exactly as in the legacy `kern`
+//! lookup is a binary search, exactly as in the legacy `kern`
 //! table, just with a u32 count instead of u16.
 //!
 //! # Format 1
@@ -109,9 +109,9 @@
 //! ```
 //!
 //! Each entry is 6 bytes: `(newState: u16, flags: u16, valueIndex: u16)`.
-//! `flags` carries `PUSH` (bit 15 — push the current glyph onto the
-//! kern stack), `DONT_ADVANCE` (bit 14 — re-process the current glyph
-//! after switching state) and `RESET` (bit 13 — clear the stack;
+//! `flags` carries `PUSH` (bit 15: push the current glyph onto the
+//! kern stack), `DONT_ADVANCE` (bit 14: re-process the current glyph
+//! after switching state) and `RESET` (bit 13: clear the stack;
 //! cross-stream only). `valueIndex` is a byte offset from the start
 //! of the value table to the first i16 in this entry's value list;
 //! `0xFFFF` means "no value list".
@@ -137,7 +137,7 @@
 //! yields a u16-aligned byte offset (`class * 2`). The kerning value
 //! is the i16 at `array + leftValue + rightValue`. Subtable offsets
 //! are measured from the start of the 12-byte common subtable header
-//! — the same origin Apple's spec uses.
+//! (the same origin Apple's spec uses).
 
 use alloc::vec::Vec;
 
@@ -170,7 +170,7 @@ enum Subtable<'a> {
     Format6(Format6<'a>),
 }
 
-/// Format 1 — state-machine kerning. Wraps the AAT extended state
+/// Format 1: state-machine kerning. Wraps the AAT extended state
 /// table primitive plus a value-table slice; the apply pass walks
 /// the glyph stream through the state machine, pushing glyphs onto
 /// a kern stack on each `PUSH` entry and popping + applying values
@@ -193,7 +193,7 @@ struct Format0<'a> {
     n_pairs: u32,
 }
 
-/// Format 2 — n-way class kerning. Records the subtable-relative
+/// Format 2: n-way class kerning. Records the subtable-relative
 /// offsets to the class tables and the kerning array; a kern lookup
 /// resolves both classes through the AAT lookup primitive and reads
 /// the i16 cell at `array + leftClassValue + rightClassValue`.
@@ -209,8 +209,8 @@ struct Format2<'a> {
     array_off: usize,
 }
 
-/// Format 4 — control-point kerning. The state machine pushes glyph
-/// indices onto a "mark stack" (max depth 1 — the most recent push)
+/// Format 4: control-point kerning. The state machine pushes glyph
+/// indices onto a "mark stack" (max depth 1, the most recent push)
 /// and entries with a non-`0xFFFF` action index look up an anchor
 /// pair in the action table. The pair tells the apply code which
 /// point on the marked glyph and the current glyph's outlines should
@@ -219,9 +219,9 @@ struct Format2<'a> {
 ///
 /// Action type lives in flags bits 30-31:
 /// - 0 = control points (u16 pairs into glyf points)
-/// - 1 = anchor points (u16 pairs into ankr) — sigilbuzz emits zero
+/// - 1 = anchor points (u16 pairs into ankr). sigilbuzz emits zero
 ///   for this case; ankr support is a follow-up.
-/// - 2 = coordinates    (four i16 in FUnits — inline)
+/// - 2 = coordinates    (four i16 in FUnits, inline)
 #[derive(Debug, Clone, Copy)]
 struct Format4<'a> {
     state: StateTableHeader<'a>,
@@ -232,7 +232,7 @@ struct Format4<'a> {
 /// One control-point apply event emitted by [`Kerx::apply_format4`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kerx4Action {
-    /// Action type 0 — control points. Look up point `mark_point` on
+    /// Action type 0: control points. Look up point `mark_point` on
     /// the glyph at `mark_index`, point `current_point` on the glyph
     /// at `current_index`, and apply the FUnit delta `mark - current`
     /// as an offset to the current glyph.
@@ -246,7 +246,7 @@ pub enum Kerx4Action {
         /// Point id on the current glyph.
         current_point: u16,
     },
-    /// Action type 1 — anchor points (`ankr` table). sigilbuzz does
+    /// Action type 1: anchor points (`ankr` table). sigilbuzz does
     /// not yet parse `ankr`; the consumer should treat this as a
     /// no-op until `ankr` lands.
     AnchorPoints {
@@ -259,7 +259,7 @@ pub enum Kerx4Action {
         /// `ankr` lookup index for the current glyph.
         current_anchor: u16,
     },
-    /// Action type 2 — inline coordinates. Pre-computed FUnit deltas
+    /// Action type 2: inline coordinates. Pre-computed FUnit deltas
     /// (`mark_x`, `mark_y`, `current_x`, `current_y`); apply
     /// `(mark_x - current_x, mark_y - current_y)` to the current glyph.
     Coordinates {
@@ -278,9 +278,9 @@ pub enum Kerx4Action {
     },
 }
 
-/// Format 6 — simple n×m kerning array. Mirrors format 2 but the
+/// Format 6: simple n x m kerning array. Mirrors format 2 but the
 /// row / column lookup tables yield direct indices (not pre-multiplied
-/// byte offsets) and the array is sized by `rowCount × columnCount`.
+/// byte offsets) and the array is sized by `rowCount * columnCount`.
 /// All offsets are relative to the subtable origin (the 12-byte
 /// common header).
 #[derive(Debug, Clone, Copy)]
@@ -295,7 +295,7 @@ struct Format6<'a> {
 
 impl<'a> Kerx<'a> {
     /// Parses a `kerx` table. Returns [`Error::Unsupported`] for
-    /// versions outside {2, 3} — every AAT font sigilbuzz targets
+    /// versions outside {2, 3}. Every AAT font sigilbuzz targets
     /// ships one of those two. `num_glyphs` is the font's `maxp`
     /// glyph count, used to bound-check format-0 lookup tables in
     /// format-2 class subtables.
@@ -338,14 +338,14 @@ impl<'a> Kerx<'a> {
             // common header; anything shorter would let `seek(sub_end)`
             // jump backwards into this subtable's own header bytes,
             // parking the next iteration mid-header. Treat such a
-            // subtable as "skip cleanly past the header" — drop it
+            // subtable as "skip cleanly past the header": drop it
             // and use `sub_start + 12` as the cursor target. The
             // post-header portion (whatever the malformed `length`
             // claimed) is effectively unused.
             let next_cursor = if length < 12 { sub_start + 12 } else { sub_end };
 
             let format = (coverage & COVERAGE_FORMAT_MASK) as u8;
-            // Skip vertical, cross-stream, and variation subtables —
+            // Skip vertical, cross-stream, and variation subtables:
             // sigilbuzz produces horizontal advances only for now.
             // The cross-stream bit moves a glyph's origin in the
             // opposite axis (e.g. Zapfino's connecting ligatures
@@ -360,9 +360,9 @@ impl<'a> Kerx<'a> {
             // Format 0 is the common case. Format 1 is the AAT state
             // machine for contextual kerning. Format 2 (compound-class
             // kerning) covers Latin / CJK fonts that ship a dense
-            // pair matrix. Format 6 is the n×m simple grid. Format 4
+            // pair matrix. Format 6 is the n x m simple grid. Format 4
             // (control-point anchors) is parsed for structure but its
-            // apply path is a stub — see [`Format4`] for details.
+            // apply path is a stub. See [`Format4`] for details.
             //
             // Per-subtable parse failures (declared length shorter
             // than the body, internal offsets out of range) are
@@ -420,7 +420,7 @@ impl<'a> Kerx<'a> {
     /// Sum of pair-kerning deltas across every parsed *pair-lookup*
     /// subtable (formats 0 and 2) for the pair `(left, right)`. Zero
     /// when no pair matches. Format 1 (state machine) is stateful and
-    /// is not consulted here — callers wanting full kerx coverage
+    /// is not consulted here. Callers wanting full kerx coverage
     /// must also call [`Kerx::apply_state_machines`].
     #[must_use]
     pub fn kern(&self, left: u16, right: u16) -> i16 {
@@ -431,7 +431,7 @@ impl<'a> Kerx<'a> {
                 Subtable::Format0(f0) => f0.find(key),
                 Subtable::Format2(f2) => f2.find(left, right, self.num_glyphs),
                 Subtable::Format6(f6) => f6.find(left, right, self.num_glyphs),
-                // Format 1 is the state machine — applied separately.
+                // Format 1 is the state machine, applied separately.
                 // Format 4 has no pair-lookup semantics; its apply
                 // path needs glyf / ankr coordinates and is deferred.
                 Subtable::Format1(_) | Subtable::Format4(_) => continue,
@@ -446,7 +446,7 @@ impl<'a> Kerx<'a> {
     /// Walks every format-1 (state-machine) subtable across the run,
     /// applying each value-list pop directly to the targeted glyph's
     /// `x_advance`. Formats 0 / 2 are pair-only and are handled by
-    /// [`Kerx::kern`] — this method only drives the stateful subtables.
+    /// [`Kerx::kern`]. This method only drives the stateful subtables.
     ///
     /// `apply` receives `(glyph_index, kern_delta)` for every kern
     /// the state machine emits and is responsible for splatting that
@@ -471,7 +471,7 @@ impl<'a> Kerx<'a> {
     /// 0, the `ankr` table for type 1) and applying the resulting
     /// offset to the current glyph's pen position.
     ///
-    /// Action type 2 (inline coordinates) is fully self-contained —
+    /// Action type 2 (inline coordinates) is fully self-contained:
     /// the consumer can apply `(mark_x - current_x, mark_y -
     /// current_y)` directly without a second table lookup.
     pub fn apply_format4<F>(&self, glyph_ids: &[u16], mut emit: F)
@@ -505,7 +505,7 @@ impl<'a> Kerx<'a> {
             .any(|s| matches!(s, Subtable::Format4(_)))
     }
 
-    /// Number of parsed subtables (any format) — useful in tests to
+    /// Number of parsed subtables (any format). Useful in tests to
     /// assert which subtables were retained.
     #[must_use]
     pub fn subtable_count(&self) -> usize {
@@ -653,7 +653,7 @@ fn parse_format4(data: &[u8], sub_start: usize, sub_end: usize) -> Result<Option
 /// Parses one format-6 subtable body. Body layout is documented at
 /// the module level; offsets are relative to the subtable origin
 /// (the 12-byte common header sits at byte 0). The "long values"
-/// flag is rejected with `Ok(None)` — sigilbuzz only implements the
+/// flag is rejected with `Ok(None)`: sigilbuzz only implements the
 /// short-value variant, which is what shipping AAT fonts use.
 fn parse_format6(data: &[u8], sub_start: usize, sub_end: usize) -> Result<Option<Format6<'_>>> {
     let body_start = sub_start + 12;
@@ -674,7 +674,7 @@ fn parse_format6(data: &[u8], sub_start: usize, sub_end: usize) -> Result<Option
     ]);
     // Bit 0 = long-values: cells become i32 instead of i16, and a
     // `kerningVector` offset follows the array. Real AAT fonts don't
-    // ship this — drop the subtable rather than half-implement it.
+    // ship this. Drop the subtable rather than half-implement it.
     if flags & 0x0000_0001 != 0 {
         return Ok(None);
     }
@@ -703,9 +703,9 @@ fn parse_format6(data: &[u8], sub_start: usize, sub_end: usize) -> Result<Option
     if row_index_off >= sub_len || col_index_off >= sub_len || array_off >= sub_len {
         return Ok(None);
     }
-    // Validate that the declared `rowCount × columnCount` i16 grid
+    // Validate that the declared `rowCount * columnCount` i16 grid
     // actually fits inside the subtable. A pathological font that
-    // claims a 1000×1000 grid in a 64-byte payload would otherwise
+    // claims a 1000x1000 grid in a 64-byte payload would otherwise
     // parse cleanly and only fail per-cell at apply time, leaking the
     // garbage subtable into [`Kerx::subtable_count`] and forcing every
     // `kern()` lookup to walk a doomed find() path. Reject up front.
@@ -772,8 +772,8 @@ fn parse_format1(data: &[u8], sub_start: usize, sub_end: usize) -> Result<Option
 impl Format1<'_> {
     /// Walks `glyph_ids` through the state machine, invoking `apply`
     /// with each `(target_index, kern_delta)` the value lists emit.
-    /// On any malformed read the walk bails cleanly — partial output
-    /// is allowed but never panics — so a font with a corrupt format
+    /// On any malformed read the walk bails cleanly (partial output
+    /// is allowed but never panics), so a font with a corrupt format
     /// 1 subtable still positions whatever pairs the apply loop did
     /// reach.
     fn apply<F>(&self, glyph_ids: &[u16], apply: &mut F)
@@ -784,8 +784,8 @@ impl Format1<'_> {
         const ENTRY_SIZE: usize = 6;
         // Kern stack: indices into `glyph_ids` of glyphs awaiting a
         // value-list pop. AAT semantics says new pushes go on top
-        // and the next value list pops them in reverse — last pushed,
-        // first applied — pairing each value with the matching glyph.
+        // and the next value list pops them in reverse (last pushed,
+        // first applied), pairing each value with the matching glyph.
         let mut stack: Vec<usize> = Vec::new();
         let mut cur_state: u16 = 0;
         let mut i = 0usize;
@@ -861,7 +861,7 @@ impl Format1<'_> {
             };
             let raw = i16::from_be_bytes([slice[0], slice[1]]);
             let is_last = (raw as u16) & 1 != 0;
-            // Mask out bit 0 — the spec uses it as a list terminator
+            // Mask out bit 0: the spec uses it as a list terminator
             // but the actual kern delta is the masked value.
             let value = raw & !1i16;
             if let Some(idx) = stack.pop() {
@@ -869,7 +869,7 @@ impl Format1<'_> {
                     apply(idx, value);
                 }
             } else {
-                // No glyph to apply against — break to avoid walking
+                // No glyph to apply against. Break to avoid walking
                 // past meaningful data.
                 return;
             }
@@ -885,7 +885,7 @@ impl Format1<'_> {
 /// Mark the current glyph as the "marked" glyph for the next anchor
 /// action.
 const FLAG_F4_MARK: u16 = 1 << 15;
-/// Don't advance the cursor — re-process the current glyph in the new
+/// Don't advance the cursor: re-process the current glyph in the new
 /// state.
 const FLAG_F4_DONT_ADVANCE: u16 = 1 << 14;
 /// Sentinel meaning "this entry has no action".
@@ -957,9 +957,9 @@ impl Format4<'_> {
     /// and emits the corresponding [`Kerx4Action`]. The record shape
     /// depends on the action type stamped in the format-4 flags:
     ///
-    /// - 0 (control points): two u16 — `mark_point`, `current_point`.
-    /// - 1 (anchor points):  two u16 — `mark_anchor`, `current_anchor`.
-    /// - 2 (coordinates):    four i16 — mark x/y, current x/y.
+    /// - 0 (control points): two u16 (`mark_point`, `current_point`).
+    /// - 1 (anchor points):  two u16 (`mark_anchor`, `current_anchor`).
+    /// - 2 (coordinates):    four i16 (mark x/y, current x/y).
     fn emit_action<F>(
         &self,
         action_index: u16,
@@ -1012,7 +1012,7 @@ impl Format4<'_> {
                 });
             }
             _ => {
-                // Reserved action type (3) — ignore.
+                // Reserved action type (3): ignore.
             }
         }
     }
@@ -1024,15 +1024,15 @@ const FLAG_F1_PUSH: u16 = 1 << 15;
 /// Don't advance the cursor (re-process the current glyph in the
 /// new state).
 const FLAG_F1_DONT_ADVANCE: u16 = 1 << 14;
-/// Reset the cross-stream kerning state. We honour the flag by
+/// Reset the cross-stream kerning state. We honor the flag by
 /// clearing the kern stack so a stale push cannot leak into the next
-/// run — sigilbuzz does not yet emit cross-stream offsets so the
+/// run. sigilbuzz does not yet emit cross-stream offsets so the
 /// stricter cross-stream resync isn't needed.
 const FLAG_F1_RESET: u16 = 1 << 13;
 /// Sentinel meaning "this entry has no value list".
 const VALUE_INDEX_NONE: u16 = 0xFFFF;
 /// Maximum kern stack depth. Apple's documented depth is eight
-/// — we mirror that to bound memory on malformed fonts.
+/// (we mirror that to bound memory on malformed fonts).
 const KERN_STACK_MAX: usize = 8;
 
 impl Format0<'_> {
@@ -1068,8 +1068,8 @@ impl Format2<'_> {
     /// the i16 cell. Returns `None` for any defensive failure: bad
     /// offsets, unsupported lookup formats, glyphs that fall in the
     /// reserved-class slots, or a cell that lands outside the
-    /// subtable. Format 2 always returns deltas — no half-split,
-    /// no cross-stream — so a `Some(0)` would be indistinguishable
+    /// subtable. Format 2 always returns deltas (no half-split,
+    /// no cross-stream), so a `Some(0)` would be indistinguishable
     /// from "no rule"; callers don't need the distinction.
     fn find(&self, left: u16, right: u16, num_glyphs: u16) -> Option<i16> {
         let left_table = self.sub.get(self.left_class_off..)?;
@@ -1117,7 +1117,7 @@ impl Format6<'_> {
         let col = lookup_class(col_table, right, num_glyphs).ok()?;
 
         // Reserved-class sentinels (1 / 2 / 3) typically fall on row
-        // or column 0 in real fonts — read the cell as-is and let
+        // or column 0 in real fonts. Read the cell as-is and let
         // the array's natural zero slots handle the case. If either
         // index lands past the declared row / column count, treat the
         // pair as "no rule".
@@ -1138,7 +1138,7 @@ mod tests {
 
     fn build_kerx_format0(pairs: &[(u16, u16, i16)]) -> Vec<u8> {
         let pair_bytes = pairs.len() * 6;
-        let body_len = 16 + pair_bytes; // 4 × u32 + pairs
+        let body_len = 16 + pair_bytes; // 4 * u32 + pairs
         let sub_len = 12 + body_len;
 
         let mut out: Vec<u8> = Vec::new();
@@ -1300,10 +1300,10 @@ mod tests {
     #[test]
     fn format2_compound_class_lookup_resolves_pairs() {
         // 4-glyph synthetic font:
-        //   gid 0 .notdef       → left class 0, right class 0
-        //   gid 1 A             → left class 1, right class 0
-        //   gid 2 B             → left class 1, right class 0
-        //   gid 3 V             → left class 0, right class 1
+        //   gid 0 .notdef       -> left class 0, right class 0
+        //   gid 1 A             -> left class 1, right class 0
+        //   gid 2 B             -> left class 1, right class 0
+        //   gid 3 V             -> left class 0, right class 1
         // Matrix [left][right]:
         //   [[ 0,   0],
         //    [-30,-50]]
@@ -1320,17 +1320,17 @@ mod tests {
         assert_eq!(k.kern(1, 3), -50, "A-V pair via classes (1, 1)");
         assert_eq!(k.kern(2, 3), -50, "B-V pair via classes (1, 1)");
         assert_eq!(k.kern(1, 1), -30, "A-A pair via classes (1, 0)");
-        assert_eq!(k.kern(0, 0), 0, ".notdef pair → row 0 default");
-        assert_eq!(k.kern(3, 1), 0, "V-A reversed pair → row 0 default");
+        assert_eq!(k.kern(0, 0), 0, ".notdef pair -> row 0 default");
+        assert_eq!(k.kern(3, 1), 0, "V-A reversed pair -> row 0 default");
     }
 
     #[test]
     fn format2_with_zero_cell_returns_zero() {
-        // Pair lands on a zero entry — kern() must still return 0
+        // Pair lands on a zero entry: kern() must still return 0
         // without surfacing a parser error.
         let bytes = build_kerx_format2(3, &[0, 1, 1], &[0, 1, 1], &[vec![0, 0], vec![0, 7]]);
         let k = Kerx::parse(&bytes, 3).unwrap();
-        assert_eq!(k.kern(1, 0), 0); // left class 1, right class 0 → 0
+        assert_eq!(k.kern(1, 0), 0); // left class 1, right class 0 -> 0
         assert_eq!(k.kern(2, 2), 7); // left class 1, right class 1
     }
 
@@ -1355,7 +1355,7 @@ mod tests {
     #[test]
     fn truncated_subtable_length_does_not_poison_following_subtables() {
         // Two subtables: the first declares a `length` field that
-        // covers only the 12-byte header (no body) — too short for
+        // covers only the 12-byte header (no body), too short for
         // any format-0 / format-2 body to fit. The whole-table
         // parse must still succeed and surface the *second*
         // subtable's pair, instead of bailing out and producing
@@ -1363,11 +1363,11 @@ mod tests {
         //
         // Pre-fix: `parse_format0` returns `Err(Truncated)` from
         // inside the loop, the `?` propagates, and the kerx parse
-        // fails — even though the second subtable is well-formed.
+        // fails, even though the second subtable is well-formed.
         let pair_bytes = 6;
         let good_body = 16 + pair_bytes;
         let good_sub_len = 12 + good_body;
-        // Bad subtable length: 12 (header only) — body is missing.
+        // Bad subtable length: 12 (header only). Body is missing.
         let bad_sub_len: u32 = 12;
 
         let mut bytes: Vec<u8> = Vec::new();
@@ -1375,12 +1375,12 @@ mod tests {
         bytes.extend_from_slice(&0u16.to_be_bytes()); // pad
         bytes.extend_from_slice(&2u32.to_be_bytes()); // nTables = 2
 
-        // Subtable 1: malformed — header says 12 bytes total, no body.
+        // Subtable 1: malformed. Header says 12 bytes total, no body.
         bytes.extend_from_slice(&bad_sub_len.to_be_bytes());
         bytes.extend_from_slice(&0u32.to_be_bytes()); // coverage: format 0, horizontal
         bytes.extend_from_slice(&0u32.to_be_bytes()); // tupleCount
 
-        // Subtable 2: well-formed format 0 with one pair (10, 20) → -42.
+        // Subtable 2: well-formed format 0 with one pair (10, 20) -> -42.
         bytes.extend_from_slice(&(good_sub_len as u32).to_be_bytes());
         bytes.extend_from_slice(&0u32.to_be_bytes()); // coverage: format 0
         bytes.extend_from_slice(&0u32.to_be_bytes()); // tupleCount
@@ -1401,7 +1401,7 @@ mod tests {
 
     #[test]
     fn subtable_length_smaller_than_header_does_not_loop_or_overlap() {
-        // Pathological: subtable length declared as 5 bytes — smaller
+        // Pathological: subtable length declared as 5 bytes, smaller
         // than its own 12-byte common header. After the header read
         // the cursor sits at sub_start + 12, but `seek(sub_end)` would
         // jump backwards to sub_start + 5, parking the next iteration
@@ -1417,7 +1417,7 @@ mod tests {
         bytes.extend_from_slice(&0u16.to_be_bytes()); // pad
         bytes.extend_from_slice(&2u32.to_be_bytes()); // nTables
 
-        // Subtable 1: length = 5 — body would overlap header.
+        // Subtable 1: length = 5. Body would overlap header.
         bytes.extend_from_slice(&5u32.to_be_bytes());
         bytes.extend_from_slice(&0u32.to_be_bytes());
         bytes.extend_from_slice(&0u32.to_be_bytes());
@@ -1440,10 +1440,10 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Format 1 — state-machine kerning.
+    // Format 1: state-machine kerning.
     // -----------------------------------------------------------------
 
-    /// Builds an AAT lookup-table format 6 (sorted glyph→class
+    /// Builds an AAT lookup-table format 6 (sorted glyph->class
     /// pairs). Mirrors the helper in `state_table.rs::tests` since
     /// `mod tests` is private to its module.
     fn build_lookup_format6(pairs: &[(u16, u16)]) -> Vec<u8> {
@@ -1464,7 +1464,7 @@ mod tests {
     /// The A glyph id, V glyph id and space glyph id are caller
     /// inputs so the test can pick non-overlapping gids.
     fn build_kerx_format1_av_after_letter(a_gid: u16, v_gid: u16, sp_gid: u16) -> Vec<u8> {
-        // Class subtable (format 6): A→4, V→5, space→6. Sorted by
+        // Class subtable (format 6): A->4, V->5, space->6. Sorted by
         // glyph id so the binary search keeps working regardless of
         // caller's choice of gids.
         let mut sorted = [(a_gid, 4u16), (v_gid, 5u16), (sp_gid, 6u16)];
@@ -1475,8 +1475,8 @@ mod tests {
         //   0..16   state-table header
         //  16..20   valueTableOffset (u32)
         //  20..     class lookup (aligned to 2)
-        //  ..       state array (nStates × nClasses × u16)
-        //  ..       entry array (n_entries × 6)
+        //  ..       state array (nStates * nClasses * u16)
+        //  ..       entry array (n_entries * 6)
         //  ..       value table
         let n_classes: u32 = 7;
         let n_states: u32 = 2;
@@ -1509,14 +1509,14 @@ mod tests {
         }
         // --- State array ---
         // State 0: cells per class.
-        //   class 0..3 (reserved)  → entry 0 (noop)
-        //   class 4 (A)            → entry 1 (push, stay state 0)
-        //   class 5 (V)            → entry 2 (apply value 0, stay state 0)
-        //   class 6 (space)        → entry 3 (no-op, go state 1)
+        //   class 0..3 (reserved)  -> entry 0 (noop)
+        //   class 4 (A)            -> entry 1 (push, stay state 0)
+        //   class 5 (V)            -> entry 2 (apply value 0, stay state 0)
+        //   class 6 (space)        -> entry 3 (no-op, go state 1)
         // State 1: cells per class.
-        //   class 4 (A)            → entry 4 (no-op, go state 0; suppresses push)
-        //   class 5 (V)            → entry 0 (noop — no V kern after solo space)
-        //   class 6 (space)        → entry 3 (stay state 1)
+        //   class 4 (A)            -> entry 4 (no-op, go state 0; suppresses push)
+        //   class 5 (V)            -> entry 0 (noop, no V kern after solo space)
+        //   class 6 (space)        -> entry 3 (stay state 1)
         let s0: [u16; 7] = [0, 0, 0, 0, 1, 2, 3];
         let s1: [u16; 7] = [0, 0, 0, 0, 4, 0, 3];
         for v in s0.iter().chain(s1.iter()) {
@@ -1528,8 +1528,8 @@ mod tests {
             (0, 0, VALUE_INDEX_NONE),    // #0 noop
             (0, push, VALUE_INDEX_NONE), // #1 push
             (0, 0, 0),                   // #2 apply value at offset 0
-            (1, 0, VALUE_INDEX_NONE),    // #3 → state 1
-            (0, 0, VALUE_INDEX_NONE),    // #4 → state 0 (clears stale A)
+            (1, 0, VALUE_INDEX_NONE),    // #3 -> state 1
+            (0, 0, VALUE_INDEX_NONE),    // #4 -> state 0 (clears stale A)
         ];
         for (ns, fl, vi) in entries {
             body.extend_from_slice(&ns.to_be_bytes());
@@ -1573,14 +1573,14 @@ mod tests {
         let k = Kerx::parse(&bytes, 8).unwrap();
         assert_eq!(k.subtable_count(), 1);
         assert!(k.has_state_machine());
-        // No pair-list subtable — the legacy kern() lookup must
+        // No pair-list subtable: the legacy kern() lookup must
         // return zero so the apply path doesn't double-count.
         assert_eq!(k.kern(1, 2), 0);
     }
 
     #[test]
     fn format1_kerns_av_when_not_after_space() {
-        // gid 1 = A, gid 2 = V — a contiguous AV pair should kern.
+        // gid 1 = A, gid 2 = V. A contiguous AV pair should kern.
         let bytes = build_kerx_format1_av_after_letter(1, 2, 3);
         let k = Kerx::parse(&bytes, 8).unwrap();
         let kerns = collect_kerns(&k, &[1, 2]);
@@ -1599,7 +1599,7 @@ mod tests {
 
     #[test]
     fn format1_kerns_repeated_av_pairs() {
-        // "AVAV" should kern both pairs — the state machine is
+        // "AVAV" should kern both pairs: the state machine is
         // designed to reset to state 0 after each V.
         let bytes = build_kerx_format1_av_after_letter(1, 2, 3);
         let k = Kerx::parse(&bytes, 8).unwrap();
@@ -1610,7 +1610,7 @@ mod tests {
     #[test]
     fn format1_walk_terminates_on_corrupt_value_list() {
         // Build a working machine, then clobber the value-table byte
-        // so bit 0 is *not* set — the consume_value_list cap should
+        // so bit 0 is *not* set. The consume_value_list cap should
         // bail before walking off the end.
         let mut bytes = build_kerx_format1_av_after_letter(1, 2, 3);
         // The value byte sits as the very last 2 bytes of the
@@ -1633,7 +1633,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Format 4 — control-point kerning.
+    // Format 4: control-point kerning.
     //
     // Parse-coverage tests assert that a format-4 subtable parses
     // cleanly and its presence does not corrupt the surrounding
@@ -1647,7 +1647,7 @@ mod tests {
     /// Builds a one-subtable kerx with format 4 wired with an empty
     /// state table (one state, two classes, single noop entry) and
     /// the action-type-2 (coordinates) flag. The inner action table
-    /// holds one record of four zeros — enough to validate parsing
+    /// holds one record of four zeros, enough to validate parsing
     /// without driving any glyph offset.
     fn build_kerx_format4(action_type: u8) -> Vec<u8> {
         // Format 4 body layout:
@@ -1655,8 +1655,8 @@ mod tests {
         //                                entryOff)
         //  16..20   flags (action_type << 30 | action_off)
         //  20..     class lookup (format 6, empty)
-        //  ..       state array (1 state × 4 classes × u16) = 8 B
-        //  ..       entry array (1 entry × 6 B)
+        //  ..       state array (1 state * 4 classes * u16) = 8 B
+        //  ..       entry array (1 entry * 6 B)
         //  ..       action table (one 8-B record)
         let n_classes: u32 = 4; // four reserved classes is the AAT minimum
         let header_len = 20;
@@ -1701,7 +1701,7 @@ mod tests {
         body.extend_from_slice(&0u16.to_be_bytes()); // flags
         body.extend_from_slice(&0u16.to_be_bytes()); // actionIndex
                                                      // Action record: 8 bytes of zero (four i16s for the
-                                                     // coordinates variant — for control-points / anchors the
+                                                     // coordinates variant. For control-points / anchors the
                                                      // shape happens to overlap, so the same fill works).
         body.extend_from_slice(&[0u8; 8]);
 
@@ -1725,7 +1725,7 @@ mod tests {
         let bytes = build_kerx_format4(2);
         let k = Kerx::parse(&bytes, 8).unwrap();
         assert_eq!(k.subtable_count(), 1, "format 4 subtable retained");
-        // Format 4 produces no pair kerns — it's stateful and its
+        // Format 4 produces no pair kerns. It's stateful and its
         // apply path is deferred.
         assert_eq!(k.kern(1, 2), 0);
     }
@@ -1750,7 +1750,7 @@ mod tests {
         action_type: u8,
         action_records: &[u8],
     ) -> Vec<u8> {
-        // Class lookup (format 6) maps A → class 4, B → class 5.
+        // Class lookup (format 6) maps A to class 4, B to class 5.
         let mut sorted = [(a_gid, 4u16), (b_gid, 5u16)];
         sorted.sort_by_key(|p| p.0);
         let class_lookup = build_lookup_format6(&sorted);
@@ -1784,11 +1784,11 @@ mod tests {
         if body.len() < state_off {
             body.resize(state_off, 0);
         }
-        // State 0: only class 4 (A) is interesting → entry 1 (mark, →s1).
-        // Other classes → entry 0 (noop).
-        // State 1: only class 5 (B) is interesting → entry 2 (action, →s0).
-        // Class 4 (A) → entry 3 (mark, stay s1 — handles AAB).
-        // Other classes → entry 0.
+        // State 0: only class 4 (A) is interesting -> entry 1 (mark, ->s1).
+        // Other classes -> entry 0 (noop).
+        // State 1: only class 5 (B) is interesting -> entry 2 (action, ->s0).
+        // Class 4 (A) -> entry 3 (mark, stay s1, handles AAB).
+        // Other classes -> entry 0.
         let s0: [u16; 6] = [0, 0, 0, 0, 1, 0];
         let s1: [u16; 6] = [0, 0, 0, 0, 3, 2];
         for v in s0.iter().chain(s1.iter()) {
@@ -1798,8 +1798,8 @@ mod tests {
         let mark: u16 = 0x8000;
         let entries: [(u16, u16, u16); 4] = [
             (0, 0, ACTION_INDEX_NONE),    // #0 noop
-            (1, mark, ACTION_INDEX_NONE), // #1 mark A, → state 1
-            (0, 0, 0),                    // #2 fire action 0, → state 0
+            (1, mark, ACTION_INDEX_NONE), // #1 mark A, -> state 1
+            (0, 0, 0),                    // #2 fire action 0, -> state 0
             (1, mark, ACTION_INDEX_NONE), // #3 re-mark A, stay in s1
         ];
         for (ns, fl, ai) in entries {
@@ -1823,7 +1823,7 @@ mod tests {
 
     #[test]
     fn format4_apply_action_type_2_emits_inline_coords() {
-        // Action type 2 — inline coordinates. Build a single record
+        // Action type 2: inline coordinates. Build a single record
         // with mark anchor at (100, 0) and current anchor at (50, 0);
         // running "AB" should fire one event with mark_index=0 and
         // current_index=1, and the coords reported back unchanged.
@@ -1853,8 +1853,8 @@ mod tests {
 
     #[test]
     fn format4_apply_action_type_0_emits_control_points() {
-        // Action type 0 — control points. One record: mark_point=3,
-        // current_point=7. Run "AB" — one event with both points and
+        // Action type 0: control points. One record: mark_point=3,
+        // current_point=7. Run "AB": one event with both points and
         // the run indices.
         let mut action: Vec<u8> = Vec::new();
         action.extend_from_slice(&3u16.to_be_bytes()); // mark_point
@@ -1877,7 +1877,7 @@ mod tests {
 
     #[test]
     fn format4_apply_skips_when_no_action() {
-        // Run with no marked-then-action sequence ("BB") — the state
+        // Run with no marked-then-action sequence ("BB"): the state
         // machine never advances past state 0 for class B (entry 0 =
         // noop), so no event fires.
         let mut action: Vec<u8> = Vec::new();
@@ -1886,12 +1886,12 @@ mod tests {
         let k = Kerx::parse(&bytes, 8).unwrap();
         let mut events: Vec<Kerx4Action> = Vec::new();
         k.apply_format4(&[2, 2, 2], |evt| events.push(evt));
-        assert!(events.is_empty(), "no AB pattern → no kern");
+        assert!(events.is_empty(), "no AB pattern -> no kern");
     }
 
     #[test]
     fn format4_apply_action_type_1_emits_anchor_indices() {
-        // Action type 1 — anchor points (ankr lookup indices). One
+        // Action type 1: anchor points (ankr lookup indices). One
         // record: mark_anchor=2, current_anchor=5.
         let mut action: Vec<u8> = Vec::new();
         action.extend_from_slice(&2u16.to_be_bytes()); // mark_anchor
@@ -1914,7 +1914,7 @@ mod tests {
 
     #[test]
     fn format4_apply_repeated_pair_fires_each_time() {
-        // "ABAB" — two AB pairs, each should emit one event.
+        // "ABAB": two AB pairs, each should emit one event.
         let mut action: Vec<u8> = Vec::new();
         action.extend_from_slice(&10i16.to_be_bytes());
         action.extend_from_slice(&0i16.to_be_bytes());
@@ -1992,7 +1992,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Format 6 — simple n×m kerning array.
+    // Format 6: simple n x m kerning array.
     // -----------------------------------------------------------------
 
     /// Builds a one-subtable kerx with format 6, two row classes and
@@ -2026,7 +2026,7 @@ mod tests {
         //   12 : 20 B fmt6 header
         //   32 : row lookup
         //   .. : col lookup
-        //   .. : kerning array (row_count × column_count i16s)
+        //   .. : kerning array (row_count x column_count i16s)
         let header_size = 12 + 20;
         let row_off = header_size;
         let col_off = row_off + row_lookup.len();
@@ -2069,10 +2069,10 @@ mod tests {
     #[test]
     fn format6_simple_grid_resolves_pairs() {
         // 4-glyph synthetic font:
-        //   gid 0 .notdef → row 0, col 0
-        //   gid 1 A       → row 1, col 0
-        //   gid 2 B       → row 1, col 0
-        //   gid 3 V       → row 0, col 1
+        //   gid 0 .notdef -> row 0, col 0
+        //   gid 1 A       -> row 1, col 0
+        //   gid 2 B       -> row 1, col 0
+        //   gid 3 V       -> row 0, col 1
         // Matrix [row][col]:
         //   [[ 0,   0,   0],
         //    [-30,-50, -70]]
@@ -2087,8 +2087,8 @@ mod tests {
         assert_eq!(k.kern(1, 3), -50, "A-V via (row 1, col 1)");
         assert_eq!(k.kern(2, 3), -50, "B-V shares row 1");
         assert_eq!(k.kern(1, 1), -30, "A-A via (row 1, col 0)");
-        assert_eq!(k.kern(0, 0), 0, ".notdef pair → row 0 default");
-        assert_eq!(k.kern(3, 1), 0, "V-A reversed pair → row 0 default");
+        assert_eq!(k.kern(0, 0), 0, ".notdef pair -> row 0 default");
+        assert_eq!(k.kern(3, 1), 0, "V-A reversed pair -> row 0 default");
     }
 
     #[test]
@@ -2106,7 +2106,7 @@ mod tests {
 
     #[test]
     fn format6_bad_offset_silently_drops_subtable() {
-        // Clobber the rowIndexTable u32 to point past the subtable —
+        // Clobber the rowIndexTable u32 to point past the subtable:
         // parse must still succeed and skip the subtable.
         let mut bytes = build_kerx_format6(3, &[0, 1, 1], &[0, 1, 1], &[vec![0, 0], vec![0, 7]]);
         // fmt6 header at offset 20; rowIndexTable at +8 = 28.
@@ -2123,7 +2123,7 @@ mod tests {
         // rather than panic on the cell read.
         let bytes = build_kerx_format6(
             3,
-            &[0, 99, 1], // gid 1 → row 99 (past row_count=2)
+            &[0, 99, 1], // gid 1 -> row 99 (past row_count=2)
             &[0, 0, 1],
             &[vec![0, 0], vec![0, 7]],
         );
@@ -2133,8 +2133,8 @@ mod tests {
 
     #[test]
     fn format6_oversized_grid_drops_subtable() {
-        // Build a valid 2×3 fmt6 then bump rowCount to 1000 so the
-        // declared array (1000 × 3 × 2 = 6000 bytes) blows past the
+        // Build a valid 2x3 fmt6 then bump rowCount to 1000 so the
+        // declared array (1000 * 3 * 2 = 6000 bytes) blows past the
         // subtable's payload. Parse must drop the subtable cleanly
         // rather than retain a doomed find() path.
         let mut bytes = build_kerx_format6(3, &[0, 1, 1], &[0, 0, 1], &[vec![0, 0], vec![0, 7]]);
@@ -2145,7 +2145,7 @@ mod tests {
         assert_eq!(
             k.subtable_count(),
             0,
-            "oversized rowCount × columnCount must drop the subtable"
+            "oversized rowCount x columnCount must drop the subtable"
         );
     }
 

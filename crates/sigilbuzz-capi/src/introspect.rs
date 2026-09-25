@@ -1,9 +1,9 @@
-//! Introspection helpers — `hb_face_collect_unicodes` and
+//! Introspection helpers: `hb_face_collect_unicodes` and
 //! `hb_ot_layout_collect_features`.
 //!
 //! Both populate an `hb_set_t` the caller passes in.
 //! `hb_face_collect_unicodes` walks the cmap; `hb_ot_layout_collect_features`
-//! walks GSUB / GPOS's ScriptList → LangSys → FeatureList and adds the
+//! walks GSUB / GPOS's ScriptList -> LangSys -> FeatureList and adds the
 //! feature tags reachable through the script/language filter.
 
 extern crate alloc;
@@ -19,7 +19,7 @@ pub const HB_OT_TAG_GSUB: hb_tag_t =
 pub const HB_OT_TAG_GPOS: hb_tag_t =
     ((b'G' as u32) << 24) | ((b'P' as u32) << 16) | ((b'O' as u32) << 8) | (b'S' as u32);
 
-/// Tag HarfBuzz uses to mean "default language" — the synthetic tag
+/// Tag HarfBuzz uses to mean "default language": the synthetic tag
 /// every script's `default_lang_sys()` is keyed under for filter
 /// purposes.
 const TAG_DFLT_LANG: [u8; 4] = *b"dflt";
@@ -43,10 +43,10 @@ pub unsafe extern "C" fn hb_face_collect_unicodes(face: *const hb_face_t, set: *
     // assigned codepoint in Unicode and probe; skip the surrogate
     // pairs gap because `char::from_u32` rejects them anyway.
     //
-    // 0x10FFFF iterations is a fast probe in practice — `glyph_id`
+    // 0x10FFFF iterations is a fast probe in practice: `glyph_id`
     // is a binary search over format 4/12 segments. The tight inner
     // loop locks the lookup to a few nanoseconds per call. The
-    // alternative — exposing the cmap segment iterator — would
+    // alternative (exposing the cmap segment iterator) would
     // require touching `src/tables/cmap.rs`, which is owned by
     // sister branches.
     // SAFETY: caller asserts validity; the BTreeSet behind `set`
@@ -68,8 +68,8 @@ pub unsafe extern "C" fn hb_face_collect_unicodes(face: *const hb_face_t, set: *
 /// optional script and language tag arrays, and adds every reachable
 /// feature tag to `features`.
 ///
-/// `scripts` and `languages` are NUL-terminated `hb_tag_t[]` arrays
-/// — i.e. the array is followed by a single zero entry that tells us
+/// `scripts` and `languages` are NUL-terminated `hb_tag_t[]` arrays,
+/// meaning the array is followed by a single zero entry that tells us
 /// where the array ends. Either pointer may be NULL, in which case
 /// the corresponding filter is "all scripts" / "all languages".
 ///
@@ -173,7 +173,7 @@ unsafe fn read_tag_list(ptr: *const hb_tag_t) -> Option<Vec<[u8; 4]>> {
 /// BE pack) to `out`.
 ///
 /// Public-API access to a `Script` does not expose a "name every
-/// LangSys" iterator — only `default_lang_sys()` and
+/// LangSys" iterator: only `default_lang_sys()` and
 /// `find_lang_sys(tag)`. When the caller hasn't supplied a language
 /// filter we therefore resort to a script-scoped fallback: union
 /// every feature tag reachable from any script that passes
@@ -214,7 +214,7 @@ fn collect_features_from(
             None => {
                 // Script-only filter: include every feature tag the
                 // script's default LangSys reaches, plus a fallback
-                // that sweeps the full FeatureList — the public Script
+                // that sweeps the full FeatureList: the public Script
                 // API doesn't enumerate named LangSys records by
                 // index. The full sweep matches HarfBuzz's "include
                 // every reachable feature for this script" semantics
@@ -321,7 +321,7 @@ mod tests {
             let set = hb_set_create();
             hb_ot_layout_collect_features(face, HB_OT_TAG_GSUB, ptr::null(), ptr::null(), set);
             // Open Sans's GSUB carries at least `liga`. We don't
-            // hard-assert anything brittle — just that the helper
+            // hard-assert anything brittle, just that the helper
             // populates SOMETHING when GSUB is present.
             let pop = hb_set_get_population(set);
             assert!(pop > 0, "expected non-empty GSUB feature set, got {pop}");
@@ -336,7 +336,7 @@ mod tests {
         unsafe {
             let (blob, face) = make_face();
             let set = hb_set_create();
-            // Use a tag that isn't GSUB or GPOS — the helper should
+            // Use a tag that isn't GSUB or GPOS: the helper should
             // leave the set empty.
             hb_ot_layout_collect_features(
                 face,

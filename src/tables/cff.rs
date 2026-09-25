@@ -21,7 +21,7 @@
     clippy::needless_bool
 )]
 
-//! `CFF ` — Compact Font Format, version 1.
+//! `CFF `: Compact Font Format, version 1.
 //!
 //! Adobe's Type 2 charstring container, wrapped in a CFF header and a
 //! series of length-prefixed INDEX structures. sigilbuzz parses only
@@ -67,7 +67,7 @@ pub struct Cff<'a> {
     /// Per-font-dict local subroutines. CID fonts pick one per glyph
     /// via FDSelect; non-CID fonts store a single entry.
     local_subrs: Vec<Vec<&'a [u8]>>,
-    /// CharStrings INDEX — one entry per glyph.
+    /// CharStrings INDEX: one entry per glyph.
     char_strings: Vec<&'a [u8]>,
     /// FDSelect mapping: Some(indices) for CID, None for simple.
     fd_select: Option<Vec<u8>>,
@@ -96,10 +96,10 @@ impl<'a> Cff<'a> {
         // Skip any padding between the fixed header and the Name INDEX.
         r.seek(hdr_size)?;
 
-        // Name INDEX — skip.
+        // Name INDEX: skip.
         let name_index = read_index(&mut r)?;
 
-        // Top DICT INDEX — use only the first entry in a single-font
+        // Top DICT INDEX: use only the first entry in a single-font
         // CFF. (CFF technically supports a FontSet, but OpenType
         // restricts it to one font per `CFF ` table.)
         let top_index = read_index(&mut r)?;
@@ -109,7 +109,7 @@ impl<'a> Cff<'a> {
         })?;
         let _ = name_index;
 
-        // String INDEX — skip.
+        // String INDEX: skip.
         let _string_index = read_index(&mut r)?;
 
         // Global Subr INDEX.
@@ -158,7 +158,7 @@ impl<'a> Cff<'a> {
             };
             (locals, fd_select)
         } else {
-            // No Private DICT info at all — font has no subroutines.
+            // No Private DICT info at all: font has no subroutines.
             (alloc::vec![Vec::new()], None)
         };
 
@@ -178,7 +178,7 @@ impl<'a> Cff<'a> {
 
     /// Drives `sink` with the path ops for `glyph_id`. Returns
     /// `Ok(false)` when the id has no charstring (out of range),
-    /// `Ok(true)` otherwise. An empty charstring counts as drawn —
+    /// `Ok(true)` otherwise. An empty charstring counts as drawn:
     /// callers filter on `Outline::is_empty`.
     pub fn outline<S: OutlineSink>(&self, glyph_id: u16, sink: &mut S) -> Result<bool> {
         let Some(cs) = self.char_strings.get(glyph_id as usize) else {
@@ -280,7 +280,7 @@ fn read_offset(r: &mut Reader<'_>, off_size: usize) -> Result<u32> {
     Ok(v)
 }
 
-/// Hack helper — slices out of the Reader's underlying buffer by
+/// Hack helper: slices out of the Reader's underlying buffer by
 /// absolute offsets. Exposed via `Reader::peek_bytes` after a `seek`
 /// round-trip. Used only during INDEX parsing above.
 fn reader_slice<'a>(r: &Reader<'a>, start: usize, end: usize) -> Result<&'a [u8]> {
@@ -552,13 +552,13 @@ pub(crate) struct Interp<'a, 'b, S: OutlineSink> {
     /// Running stem count, for width determination and hintmask
     /// padding.
     stem_count: u32,
-    /// Set once we enter the first drawing operator — before that
+    /// Set once we enter the first drawing operator. Before that
     /// the first optional element on the stack is the glyph width.
     consumed_width: bool,
-    /// True when the interpreter should honour CFF2 extensions
+    /// True when the interpreter should honor CFF2 extensions
     /// (`blend`, `vsindex`) and omit the width / endchar bookkeeping.
     is_cff2: bool,
-    /// True once endchar fires — outer loop halts.
+    /// True once endchar fires. Outer loop halts.
     done: bool,
     /// True after the first move operator. Needed to close open
     /// contours at endchar.
@@ -900,17 +900,17 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     | op_code::ESC_FLEX1 => {
                         // Approximate flex as two curves. For parity
                         // with ttf-parser the exact flex expansion
-                        // matters — sigilbuzz emits two rrcurvetos
+                        // matters: sigilbuzz emits two rrcurvetos
                         // from the 7/11/9/11 args respectively.
                         self.flex(b1)?;
                     }
-                    // Type 1 deprecated ops — reject.
+                    // Type 1 deprecated ops: reject.
                     0 | 3 | 4 | 5 | 7 | 8 | 13 | 14 | 15 | 16 | 17 | 21 | 32 | 33 => {
                         return Err(Error::Unsupported {
                             context: "CFF deprecated Type 1 operator",
                         });
                     }
-                    // Arithmetic / logic ops — not needed for
+                    // Arithmetic / logic ops: not needed for
                     // outline extraction but tolerated by clearing
                     // the stack; sigilbuzz isn't a CharString VM.
                     _ => {
@@ -969,7 +969,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
         // hints are rendering concerns we don't model.
         match esc {
             op_code::ESC_FLEX => {
-                // 12 35: 13 args total — 6 + 6 + flex depth.
+                // 12 35: 13 args total (6 + 6 + flex depth).
                 if self.stack.len() >= 13 {
                     let a = core::mem::take(&mut self.stack);
                     self.rr_curve(&a[..6]);
@@ -1037,11 +1037,11 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
     }
 
     fn apply_blend(&mut self) -> Result<()> {
-        // Stack layout: n default values, followed by n×nRegions
+        // Stack layout: n default values, followed by n*nRegions
         // delta values, followed by the count `n`. `nRegions` is
         // fixed by the IVS subtable at the current vsindex. Without
         // a BlendContext we infer `nRegions` from the surplus stack
-        // depth — that is only correct when the font's charstring
+        // depth. That is only correct when the font's charstring
         // and our best-effort default agree, which is enough to
         // keep the interpreter balanced so parsing continues past
         // BLEND.
@@ -1124,7 +1124,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             // hint or move operator when the stack size is odd for
             // hints or > expected for moves. Simplest: if the stack
             // carries one more operand than the operator needs, the
-            // leading one is the width — we ignore it.
+            // leading one is the width. We ignore it.
             // The conservative approach (HarfBuzz's): drop the lowest
             // operand when the top operator is a move and the stack
             // has an odd count > needed. Rather than re-parse, we
@@ -1205,7 +1205,7 @@ mod tests {
         out.push(1);
         out.push(1);
 
-        // Top DICT INDEX placeholder — patch later.
+        // Top DICT INDEX placeholder: patch later.
         let top_index_start = out.len();
         out.extend_from_slice(&1u16.to_be_bytes()); // count
         out.push(4); // offSize (4-byte offsets)
@@ -1255,8 +1255,8 @@ mod tests {
     #[test]
     fn charstring_rmoveto_rlineto_endchar() {
         // 100 100 rmoveto 50 0 rlineto 0 50 rlineto -50 0 rlineto endchar
-        // Encode: 100 → 247 -108... actually 100 fits in single byte
-        // shortcut "b0 = 100 + 139"? No — encoding is b0 - 139 for
+        // Encode: 100 -> 247 -108... actually 100 fits in single byte
+        // shortcut "b0 = 100 + 139"? No, encoding is b0 - 139 for
         // 32..=246; 100 = b0 = 239.
         let mut cs = Vec::new();
         // push 100
@@ -1269,9 +1269,9 @@ mod tests {
         cs.push(139); // 0
         cs.push(189); // 50
         cs.push(op_code::RLINETO);
-        // -50: 251..=254 range. b0=251, b1=(-(-50) - 108) → 251, b1 = -50 = -108 - b1*256 - ... solve:
+        // -50: 251..=254 range. b0=251, b1=(-(-50) - 108) -> 251, b1 = -50 = -108 - b1*256 - ... solve:
         //   value = -(b0 - 251)*256 - b1 - 108 = -50
-        //   b0=251 → value = -b1 - 108 = -50 → b1 = -58 invalid (unsigned)
+        //   b0=251 -> value = -b1 - 108 = -50 -> b1 = -58 invalid (unsigned)
         // Use 28 <short int> instead.
         cs.push(28);
         cs.extend_from_slice(&(-50i16).to_be_bytes());
@@ -1353,12 +1353,12 @@ mod tests {
 
     #[test]
     fn charstring_callsubr_executes_local_subroutine() {
-        // Local subroutine 0 (biased index = 0 - 107 = -107 → call
+        // Local subroutine 0 (biased index = 0 - 107 = -107 -> call
         // subr with arg -107): emits rlineto (0, 50).
         //
         // With subr_count < 1240 the bias is 107. We want to call
         // subroutine index 0, so the charstring pushes (0 - 107) =
-        // -107, which after + bias (107) → 0. We construct both
+        // -107, which after + bias (107) -> 0. We construct both
         // the charstring and a local subr, but our
         // `build_cff_with_charstring` helper doesn't support
         // private dict / subrs. Instead, exercise callgsubr: a
@@ -1368,7 +1368,7 @@ mod tests {
         //
         // Simpler approach: call a CALLSUBR into an empty locals
         // list and assert that the interpreter surfaces a
-        // Malformed error rather than panicking — this exercises
+        // Malformed error rather than panicking. This exercises
         // the bias path without having to rebuild the fixture.
         let mut cs = Vec::new();
         // push 0 (via 139 single-byte).
@@ -1383,7 +1383,7 @@ mod tests {
 
     #[test]
     fn charstring_return_halts_subroutine_body() {
-        // A RETURN at the top of a glyph charstring is valid —
+        // A RETURN at the top of a glyph charstring is valid:
         // the interpreter simply stops reading. Followed by no
         // endchar this means we drew nothing; the outline is
         // empty. Use this to verify that `run` terminates cleanly
@@ -1418,7 +1418,7 @@ mod tests {
     fn charstring_hflex1_endpoint_returns_to_start_y() {
         // hflex1 spec: the flex starts and ends at the same y value.
         // Args: dx1 dy1 dx2 dy2 dx3 dx4 dx5 dy5 dx6. Use dy1=5, dy2=3,
-        // dy5=-2 — a non-trivial set where the buggy dy_total formula
+        // dy5=-2, a non-trivial set where the buggy dy_total formula
         // (a[1]+a[3]+a[6], mixing dx5 for dy5) diverges from the
         // correct a[1]+a[3]+a[7]. Start at (0, 100). Expected final y
         // = 100.
@@ -1474,7 +1474,7 @@ mod tests {
 
     #[test]
     fn charstring_endchar_rejects_seac_four_args() {
-        // 1 2 3 4 endchar → 4-arg deprecated seac.
+        // 1 2 3 4 endchar -> 4-arg deprecated seac.
         let mut cs = Vec::new();
         for _ in 0..4 {
             cs.push(140); // small integer

@@ -2,7 +2,7 @@
 //!
 //! A glyph outline is a stream of drawing operations: move-to, line-to,
 //! quadratic / cubic Bezier curves, close. Downstream renderers, GPU
-//! encoders (Slug), and colour-glyph evaluators (COLRv1) all consume
+//! encoders (Slug), and color-glyph evaluators (COLRv1) all consume
 //! the same shape. sigilbuzz exposes that stream through the
 //! [`PathOp`] enum and the [`Outline`] type.
 //!
@@ -118,9 +118,9 @@ impl Outline {
 }
 
 /// Sink for streaming outline construction. Backends (glyf, CFF)
-/// drive one of these and the caller materialises the result into an
+/// drive one of these and the caller materializes the result into an
 /// [`Outline`]. The sink abstraction keeps the parity-test path
-/// simple — a test builder can implement `OutlineSink` and record
+/// simple: a test builder can implement `OutlineSink` and record
 /// op-by-op without allocating an intermediate `Outline`.
 pub trait OutlineSink {
     /// Records a move-to.

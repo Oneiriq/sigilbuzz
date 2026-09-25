@@ -6,8 +6,8 @@
 //! than Latin. A pre-base vowel sign is typed after its consonant
 //! but must render before it; `ra + halant` at the start of a
 //! syllable becomes a "reph" that renders above the last consonant;
-//! conjunct consonants — half-forms, below-base forms, post-base
-//! forms — are selected by font-declared GSUB features that run in
+//! conjunct consonants (half-forms, below-base forms, post-base
+//! forms) are selected by font-declared GSUB features that run in
 //! a specific order.
 //!
 //! The HarfBuzz implementation of the Indic2 shaper is the
@@ -30,7 +30,7 @@
 //!      GSUB pass after the Indic pipeline returns.)
 //! ```
 //!
-//! The state machine itself is script-agnostic. Per-script behaviour
+//! The state machine itself is script-agnostic. Per-script behavior
 //! is concentrated in [`IndicConfig`]: script-tag priority (which
 //! `<scr>`/`<scr2>` pair to look up features under), reph
 //! positioning (where the reph lands after `rphf` collapses the
@@ -46,7 +46,7 @@ pub use devanagari::{shape_devanagari, shape_indic};
 
 /// Tamil and Sinhala split-matra decomposition table.
 ///
-/// A handful of Tamil and Sinhala vowel signs are "split" — a single
+/// A handful of Tamil and Sinhala vowel signs are "split": a single
 /// codepoint visually decomposes into a pre-base component and one or
 /// two trailing components. HarfBuzz's Indic shaper performs this
 /// split at the normalization stage so the pre-base half participates
@@ -105,18 +105,18 @@ pub enum RephPosition {
     AfterPost,
 }
 
-/// How the shaper recognises that a syllable has a reph to move.
+/// How the shaper recognizes that a syllable has a reph to move.
 ///
-/// [`RephMode::Implicit`] — ra + halant at the head is enough.
-/// [`RephMode::Explicit`] — ra + halant + ZWJ is required.
-/// [`RephMode::LogRepha`] — the encoded Repha character (e.g.
+/// [`RephMode::Implicit`]: ra + halant at the head is enough.
+/// [`RephMode::Explicit`]: ra + halant + ZWJ is required.
+/// [`RephMode::LogRepha`]: the encoded Repha character (e.g.
 /// Malayalam U+0D4E) is emitted ahead of the base and reordered as
 /// if it were a reph.
 ///
 /// Only `Implicit` fires a reorder in sigilbuzz 0.2.0. `Explicit`
 /// and `LogRepha` currently fall through to the generic Implicit
 /// path for scripts where that produces the same output on the
-/// tested corpus; scripts that need explicit behaviour are flagged
+/// tested corpus; scripts that need explicit behavior are flagged
 /// as follow-up issues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RephMode {
@@ -140,7 +140,7 @@ pub struct IndicConfig {
     /// Virama codepoint, for ra+halant detection.
     pub virama: u32,
     /// The script's "ra" consonant codepoint. The state machine
-    /// recognises a reph candidate when the syllable opens with
+    /// recognizes a reph candidate when the syllable opens with
     /// `ra + virama` (and the reph mode allows it).
     pub ra: u32,
     /// Reph display slot after `rphf` fires.
@@ -148,13 +148,13 @@ pub struct IndicConfig {
     /// How the shaper decides a syllable has a reph.
     pub reph_mode: RephMode,
     /// Script-tag priority for GSUB/GPOS feature lookup. First tag
-    /// is the Indic2 tag (`dev2`, `bng2`, …); second is the legacy
+    /// is the Indic2 tag (`dev2`, `bng2`, ...); second is the legacy
     /// Indic1 tag; last is always `DFLT` as a fallback.
     pub script_priority: &'static [[u8; 4]],
 }
 
 // Script-tag priority tables. Each Indic script has an Indic2 tag
-// (`dev2`, `bng2`, …) and a legacy Indic1 tag (`deva`, `beng`, …);
+// (`dev2`, `bng2`, ...) and a legacy Indic1 tag (`deva`, `beng`, ...);
 // DFLT is a last-resort fallback. Sinhala is the only Indic script
 // that never received an Indic2 tag, so its priority only lists `sinh`.
 pub(crate) const DEVA_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"dev2", *b"deva", *b"DFLT"];
@@ -253,7 +253,7 @@ pub const fn indic_config_for(script: Script) -> Option<IndicConfig> {
             script,
             virama: 0x0DCA,
             // Sinhala's "ra" is U+0DBB; but Sinhala reph mode is Explicit
-            // (requires a following ZWJ) — sigilbuzz's M2 Implicit path
+            // (requires a following ZWJ). sigilbuzz's M2 Implicit path
             // won't trigger on bare ra+virama anyway, so this field is
             // informational for Sinhala until the Explicit mode lands.
             ra: 0x0DBB,

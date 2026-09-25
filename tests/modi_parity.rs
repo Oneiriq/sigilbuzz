@@ -23,7 +23,7 @@ const CORPUS: &[Case] = &[
         note: "empty",
         compare_rustybuzz: true,
     },
-    // U+11606 — letter ka.
+    // U+11606: letter ka.
     Case {
         text: "\u{11606}",
         note: "ka alone",

@@ -1,14 +1,14 @@
-//! Universal Shaping Engine (USE) per-codepoint categorisation.
+//! Universal Shaping Engine (USE) per-codepoint categorization.
 //!
-//! The USE is Microsoft's generalised complex-script shaper. It covers
+//! The USE is Microsoft's generalized complex-script shaper. It covers
 //! Khmer, Myanmar, Tai Tham, Buginese, Cham, New Tai Lue and several
 //! others that do not fit the Arabic / Indic2 moulds. Each codepoint
 //! it sees is classified along two axes:
 //!
-//! - [`UseCategory`] — the role the codepoint plays inside a syllable
+//! - [`UseCategory`]: the role the codepoint plays inside a syllable
 //!   (base, halant, vowel, final mark, ...). Drives the syllable state
 //!   machine and the feature masking.
-//! - [`UsePosition`] — where a mark visually sits relative to its base
+//! - [`UsePosition`]: where a mark visually sits relative to its base
 //!   (pre-base, above-base, below-base, post-base). Drives the reorder
 //!   pass and picks the correct positional feature bucket (`abvf`,
 //!   `blwf`, `pstf`, `pref`).
@@ -35,37 +35,37 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(missing_docs)]
 pub enum UseCategory {
-    /// Base consonant / independent letter — anchors a syllable.
+    /// Base consonant / independent letter: anchors a syllable.
     B,
     /// Independent vowel.
     IV,
-    /// Number — digits and number signs.
+    /// Number: digits and number signs.
     N,
-    /// Generic base — default for letters that do not participate in
+    /// Generic base: default for letters that do not participate in
     /// the syllable cluster (punctuation, signs that stand alone).
     GB,
-    /// Repha — reordering ra-equivalent. Myanmar uses this for the
+    /// Repha: reordering ra-equivalent. Myanmar uses this for the
     /// `kinzi` cluster (ra + asat + virama preceding the base).
     R,
     /// Symbol.
     S,
-    /// Halant / virama — deletes the inherent vowel of the preceding
+    /// Halant / virama: deletes the inherent vowel of the preceding
     /// base and glues it to the following consonant as a subscript.
     /// Khmer uses U+17D2 COENG, Myanmar U+1039, Hangul none.
     H,
-    /// Pre-base vowel sign — renders before the base visually.
+    /// Pre-base vowel sign: renders before the base visually.
     VPre,
     /// Above-base vowel sign.
     VAbv,
     /// Below-base vowel sign.
     VBlw,
-    /// Post-base vowel sign — renders after the base visually.
+    /// Post-base vowel sign: renders after the base visually.
     VPst,
-    /// Modifying mark — tone marks, registers, robat, bindu-likes.
+    /// Modifying mark: tone marks, registers, robat, bindu-likes.
     M,
-    /// Final mark — syllable-final modifiers (visarga, anusvara).
+    /// Final mark: syllable-final modifiers (visarga, anusvara).
     FM,
-    /// Consonant modifier / medial — Myanmar medial ya/ra/wa/ha,
+    /// Consonant modifier / medial: Myanmar medial ya/ra/wa/ha,
     /// Myanmar asat (U+103A when it is not acting as a kinzi virama).
     CM,
     /// Variation selector.
@@ -76,7 +76,7 @@ pub enum UseCategory {
     ZWJ,
     /// Whitespace / cluster boundary.
     WS,
-    /// Anything else — treated as a cluster-break / pass-through.
+    /// Anything else: treated as a cluster-break / pass-through.
     O,
 }
 
@@ -86,16 +86,16 @@ pub enum UseCategory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(missing_docs)]
 pub enum UsePosition {
-    /// No positional role — the default for bases, whitespace, marks
+    /// No positional role: the default for bases, whitespace, marks
     /// that attach at the overall glyph box.
     NotApplicable,
-    /// Before the base visually — pre-base matras.
+    /// Before the base visually: pre-base matras.
     PreBase,
-    /// Above the base — above-base vowel signs and tone marks.
+    /// Above the base: above-base vowel signs and tone marks.
     AboveBase,
-    /// Below the base — below-base vowel signs and subscript marks.
+    /// Below the base: below-base vowel signs and subscript marks.
     BelowBase,
-    /// After the base visually — post-base matras and final marks.
+    /// After the base visually: post-base matras and final marks.
     PostBase,
 }
 
@@ -137,7 +137,7 @@ pub const fn use_position(ch: char) -> UsePosition {
         //   VPre: 1031 sign e
         //
         //   CM medials (103B..103E, 105E..1060, 1082) carry no
-        //   positional role in the USE tables — they attach as
+        //   positional role in the USE tables. They attach as
         //   consonant modifiers and the font chooses their visual
         //   position via GSUB.
         0x102B
@@ -158,7 +158,7 @@ pub const fn use_position(ch: char) -> UsePosition {
         | 0xAA7C
         | 0xA9E5 => UsePosition::AboveBase,
         0x102F | 0x1030 | 0x1058 | 0x1059 => UsePosition::BelowBase,
-        // Medial ra (U+103C) renders before the base in Myanmar —
+        // Medial ra (U+103C) renders before the base in Myanmar:
         // USE classifies it as pre-base for reorder purposes. Medial
         // ya / wa / ha (U+103B / 103D / 103E) keep NotApplicable;
         // the font's `blwf` / `pstf` features place them.
@@ -186,7 +186,7 @@ pub const fn use_position(ch: char) -> UsePosition {
 
         // --- N'Ko (U+07C0..U+07FF) -------------------------------
         // N'Ko marks all sit above their base. The dantayalan
-        // (07FD) sits below. No pre-base or post-base vowels — N'Ko
+        // (07FD) sits below. No pre-base or post-base vowels: N'Ko
         // is alphabetic, not Brahmic.
         0x07EB..=0x07F3 => UsePosition::AboveBase,
         0x07FD => UsePosition::BelowBase,
@@ -203,7 +203,7 @@ pub const fn use_position(ch: char) -> UsePosition {
         // --- Tai Tham (U+1A20..U+1AAF) ---------------------------
         // 1A55 medial ra (pre-base), 1A56 medial la (below),
         // 1A57 a-mode (post), 1A58..1A5E above-base signs,
-        // 1A60 sakot (halant — NotApplicable for position),
+        // 1A60 sakot (halant, NotApplicable for position),
         // 1A61 a, 1A62 mai sat (above), 1A63..1A64 aa (post),
         // 1A65..1A68 above (i/ii/ue/uee), 1A69..1A6A below (u/uu),
         // 1A6B above (o), 1A6C..1A72 various, 1A6E..1A72 pre-base
@@ -223,12 +223,12 @@ pub const fn use_position(ch: char) -> UsePosition {
         // 1B36..1B38 above (i/ii/u variants), 1B39..1B3A below,
         // 1B3B above, 1B3C below,
         // 1B3D sign la e (above), 1B3E sign le (pre-base),
-        // 1B3F sign le tedung (pre-base — sign le + tedung
+        // 1B3F sign le tedung (pre-base: sign le + tedung
         //   composed; renders before the base then a tedung after),
-        // 1B40 sign taa-le (pre-base — like Devanagari sign O),
+        // 1B40 sign taa-le (pre-base, like Devanagari sign O),
         // 1B41 sign taa-le tedung (pre-base),
         // 1B42 above (sign ie), 1B43 above (sign ai),
-        // 1B44 adeg adeg (halant — NotApplicable),
+        // 1B44 adeg adeg (halant, NotApplicable),
         // 1B6B..1B73 musical/above, 1B80..1B82 stay in 1B80 block.
         0x1B36..=0x1B38 | 0x1B3B | 0x1B3D | 0x1B42 | 0x1B43 | 0x1B6B..=0x1B73 => {
             UsePosition::AboveBase
@@ -281,10 +281,10 @@ pub const fn use_position(ch: char) -> UsePosition {
 
         // --- Cham (U+AA00..U+AA5F) -------------------------------
         // AA29..AA2E above (aa/i/ii/ei/u),
-        // AA2F..AA30 pre-base (oe/o — render visually before the
+        // AA2F..AA30 pre-base (oe/o: render visually before the
         //   base consonant; the IndicPositionalCategory column
         //   marks them Top_And_Left in the Unicode Standard, but
-        //   the USE places them in the pre-base bucket — same as
+        //   the USE places them in the pre-base bucket, same as
         //   rustybuzz),
         // AA31..AA32 above (ai/au),
         // AA33 post (medial ya), AA34 below (medial ra),
@@ -333,7 +333,7 @@ pub const fn use_position(ch: char) -> UsePosition {
         0x11182 | 0x111B3 | 0x111BB..=0x111BF => UsePosition::PostBase,
 
         // --- Khojki (U+11200..U+1124F) ---------------------------
-        // 1122C..1122E vowel signs (post — sign aa/i/ii),
+        // 1122C..1122E vowel signs (post: sign aa/i/ii),
         // 1122F sign u (below), 11230 sign e (above),
         // 11231 sign ai (above), 11232..11233 sign o/au (post),
         // 11234 anusvara (above), 11235 virama (NotApplicable),
@@ -345,10 +345,10 @@ pub const fn use_position(ch: char) -> UsePosition {
         // --- Tirhuta (U+11480..U+114DF) --------------------------
         // 114B0 sign aa (post), 114B1 sign i (post),
         // 114B2 sign ii (post), 114B3..114B8 below (u/uu/vocalic r/rr/l/ll),
-        // 114B9 sign e (pre-base — Tirhuta places sign-e visually
+        // 114B9 sign e (pre-base: Tirhuta places sign-e visually
         //   before the base, like Bengali sign-e),
         // 114BA sign short e (above),
-        // 114BB sign ai (post), 114BC sign o (pre — like sign-e),
+        // 114BB sign ai (post), 114BC sign o (pre, like sign-e),
         // 114BD sign short o (post), 114BE sign au (post),
         // 114BF sign candrabindu (above), 114C0 sign anusvara (above),
         // 114C1 sign visarga (post), 114C2 sign virama (NotApplicable),
@@ -359,7 +359,7 @@ pub const fn use_position(ch: char) -> UsePosition {
         0x114B0..=0x114B2 | 0x114BB | 0x114BD..=0x114BE | 0x114C1 => UsePosition::PostBase,
 
         // --- Modi (U+11600..U+1165F) -----------------------------
-        // 11630..11632 vowel signs (post — sign aa/i/ii),
+        // 11630..11632 vowel signs (post: sign aa/i/ii),
         // 11633..11637 below (u/uu/vocalic r/rr/l),
         // 11638 sign vocalic ll (below),
         // 11639..1163A above (e/ai),
@@ -371,7 +371,7 @@ pub const fn use_position(ch: char) -> UsePosition {
         0x11633..=0x11638 => UsePosition::BelowBase,
         0x11630..=0x11632 | 0x1163B..=0x1163C | 0x1163E => UsePosition::PostBase,
 
-        // Currency + signs — no positional role (the currency is a
+        // Currency + signs: no positional role (the currency is a
         // base glyph itself).
         _ => UsePosition::NotApplicable,
     }
@@ -395,7 +395,7 @@ pub const fn use_position(ch: char) -> UsePosition {
 /// (U+1100..U+11FF, U+A960..U+A97F, U+D7B0..U+D7FF) are covered. Format
 /// characters and variation selectors carry their shared USE categories.
 ///
-/// Arms are grouped by script / Unicode block — `match_same_arms` is
+/// Arms are grouped by script / Unicode block. `match_same_arms` is
 /// silenced so the table reads top-to-bottom against the block layout
 /// and a reviewer can check each script slice in isolation.
 #[must_use]
@@ -448,13 +448,13 @@ pub const fn use_category(ch: char) -> UseCategory {
         0x102F | 0x1030 => UseCategory::VBlw,
         0x1031 => UseCategory::VPre,
         0x1032..=0x1035 => UseCategory::VAbv,
-        // Anusvara, dot below, visarga — syllable-final marks.
+        // Anusvara, dot below, visarga: syllable-final marks.
         0x1036..=0x1038 => UseCategory::FM,
         // Virama (U+1039) + asat (U+103A). asat is the "explicit
         // virama" that doesn't trigger subjoining; classifying it as
         // H lets the state machine end the syllable cleanly.
         0x1039..=0x103A => UseCategory::H,
-        // Medial consonants — ya (103B), ra (103C), wa (103D), ha
+        // Medial consonants: ya (103B), ra (103C), wa (103D), ha
         // (103E). These are not full halant-joined consonants, they
         // are special Myanmar modifiers that attach to the preceding
         // base via `pref`/`blwf`/`pstf`.
@@ -475,7 +475,7 @@ pub const fn use_category(ch: char) -> UseCategory {
         0x1071..=0x1074 | 0x1085..=0x1086 | 0x108D => UseCategory::VAbv,
         // Shan tone marks (1069..106D, 1087..108C, 108F, 109A..109B).
         0x1069..=0x106D | 0x1087..=0x108C | 0x108F | 0x109A..=0x109B => UseCategory::M,
-        // Myanmar medial mon la (1082) — consonant modifier.
+        // Myanmar medial mon la (1082): consonant modifier.
         0x1082 => UseCategory::CM,
         // Aiton / Khamti sign (109C post, 109D above).
         0x109C => UseCategory::VPst,
@@ -499,7 +499,7 @@ pub const fn use_category(ch: char) -> UseCategory {
 
         // --- Myanmar Extended-B (U+A9E0..U+A9FF) -----------------
         // Shan consonants 0xA9E0..0xA9E4, sign shan saw 0xA9E5
-        // (VAbv), letter sign (0xA9E6 — modifier), more consonants
+        // (VAbv), letter sign (0xA9E6, modifier), more consonants
         // 0xA9E7..0xA9EF, Shan digits 0xA9F0..0xA9F9, consonants
         // 0xA9FA..0xA9FE, reserved 0xA9FF.
         0xA9E0..=0xA9E4 | 0xA9E7..=0xA9EF | 0xA9FA..=0xA9FE => UseCategory::B,
@@ -509,33 +509,33 @@ pub const fn use_category(ch: char) -> UseCategory {
 
         // --- Thai (U+0E00..U+0E7F) -------------------------------
         // Consonants 0E01..0E2E (incl. ng, cho, phoom, ro, lo, wo,
-        // so, ho, o, ng-obsolete). No explicit halant — Thai has no
+        // so, ho, o, ng-obsolete). No explicit halant: Thai has no
         // subjoining.
         0x0E01..=0x0E2E => UseCategory::B,
         // Independent vowels 0E2F paiyannoi, 0E46 maiyamok (B-like
         // repeat mark). Treat 0E2F as GB (punctuation-style) and
-        // 0E46 as GB — both can stand alone.
+        // 0E46 as GB. Both can stand alone.
         0x0E2F | 0x0E46 | 0x0E4F | 0x0E5A..=0x0E5B => UseCategory::GB,
         // Thai tonal / vowel placement.
         0x0E30 | 0x0E32 | 0x0E33 => UseCategory::VPst,
         0x0E31 | 0x0E34..=0x0E37 => UseCategory::VAbv,
         0x0E38..=0x0E39 => UseCategory::VBlw,
-        // Pinthu (0E3A) — silencer, above-base in Thai.
+        // Pinthu (0E3A): silencer, above-base in Thai.
         0x0E3A => UseCategory::VBlw,
         // Pre-base vowels.
         0x0E40..=0x0E44 => UseCategory::VPre,
         // Thai currency signs (0E3F baht). GB.
         0x0E3F => UseCategory::GB,
         // Mai Taikhu / Mai Ek / Mai Tho / Mai Tri / Mai Chattawa /
-        // Thanthakhat / Nikhahit / Yamakkan — tone / final marks.
-        // 0E45 (lakkhangyao) — long-vowel extender (VPst-ish).
+        // Thanthakhat / Nikhahit / Yamakkan: tone / final marks.
+        // 0E45 (lakkhangyao): long-vowel extender (VPst-ish).
         0x0E45 => UseCategory::VPst,
         0x0E47..=0x0E4E => UseCategory::M,
         // Thai digits.
         0x0E50..=0x0E59 => UseCategory::N,
 
         // --- Lao (U+0E80..U+0EFF) -------------------------------
-        // Lao consonants (with gaps — 0E81, 0E82, 0E84, 0E86..0E8A,
+        // Lao consonants (with gaps: 0E81, 0E82, 0E84, 0E86..0E8A,
         // 0E8C..0EA3, 0EA5, 0EA7..0EAE, 0EB0 boundary, etc.). For
         // simplicity treat every codepoint in the consonant sub-
         // range as B; unassigned codepoints will fall through to
@@ -552,9 +552,9 @@ pub const fn use_category(ch: char) -> UseCategory {
         0x0EB0 | 0x0EB2 | 0x0EB3 => UseCategory::VPst,
         0x0EB1 | 0x0EB4..=0x0EB7 => UseCategory::VAbv,
         0x0EB8..=0x0EB9 => UseCategory::VBlw,
-        // 0EBA (sign pali virama) — used as silencer, like pinthu.
+        // 0EBA (sign pali virama): used as silencer, like pinthu.
         0x0EBA => UseCategory::VBlw,
-        // Lao semivowels (0EBB..0EBC) — above-base consonant-like
+        // Lao semivowels (0EBB..0EBC): above-base consonant-like
         // modifier (wo/yo attached).
         0x0EBB..=0x0EBC => UseCategory::CM,
         0x0EBD => UseCategory::B,
@@ -567,7 +567,7 @@ pub const fn use_category(ch: char) -> UseCategory {
         // N'Ko digits (07C0..07C9), letters (07CA..07EA),
         // tone / combining marks (07EB..07F3, 07FD), low-tone
         // letters (07F4..07F5), exclam/question marks (07F8..07F9),
-        // lajanyalan (07FA — consonant modifier / TATWEEL-like).
+        // lajanyalan (07FA, consonant modifier / TATWEEL-like).
         0x07C0..=0x07C9 => UseCategory::N,
         0x07CA..=0x07EA | 0x07F4..=0x07F5 => UseCategory::B,
         0x07EB..=0x07F3 | 0x07FD => UseCategory::M,
@@ -587,8 +587,8 @@ pub const fn use_category(ch: char) -> UseCategory {
         // sign la-tang lai 1A53, sign sakot 1A60 (halant),
         // medial ra 1A55 (CM, pre-base), medial la 1A56 (CM, below),
         // medial wa 1A54 (CM), sign mai sat 1A57 (post),
-        // signs 1A58..1A5E (above modifiers — CM),
-        // sa 1A5F (final consonant — CM),
+        // signs 1A58..1A5E (above modifiers, CM),
+        // sa 1A5F (final consonant, CM),
         // vowel signs 1A61..1A6C (mix), pre-base 1A6E..1A72,
         // 1A73..1A74 above-base extensions, 1A75..1A7C tone marks,
         // 1A7F dot below, digits 1A80..1A89, 1A90..1A99.
@@ -610,7 +610,7 @@ pub const fn use_category(ch: char) -> UseCategory {
         // --- Balinese (U+1B00..U+1B7F) ---------------------------
         // 1B00..1B03 signs (above), 1B04 visarga (post-base FM),
         // 1B05..1B33 letters,
-        // 1B34 rerekan (above modifier — M),
+        // 1B34 rerekan (above modifier, M),
         // 1B35..1B43 vowel signs (mix),
         // 1B44 adeg adeg (halant),
         // 1B45..1B4F more letters,
@@ -632,17 +632,17 @@ pub const fn use_category(ch: char) -> UseCategory {
         0x1B6B..=0x1B73 => UseCategory::M,
 
         // --- Sundanese (U+1B80..U+1BBF) --------------------------
-        // 1B80 panyecek (anusvara — M),
+        // 1B80 panyecek (anusvara, M),
         // 1B81 panglayar (M),
         // 1B82 pangwisad (FM),
         // 1B83..1B89 independent vowels,
         // 1B8A..1BA0 letters,
-        // 1BA1 pamingkal (post-base medial — CM),
-        // 1BA2..1BA3 panyakra/panyikuh (below medials — CM),
+        // 1BA1 pamingkal (post-base medial, CM),
+        // 1BA2..1BA3 panyakra/panyikuh (below medials, CM),
         // 1BA4 vowel-i (above), 1BA5 vowel-u (below),
         // 1BA6 vowel-e (pre), 1BA7 vowel-aa (post),
         // 1BA8..1BA9 vowel-eu/ae (above),
-        // 1BAA pamaaeh (post — final mark / virama-equivalent).
+        // 1BAA pamaaeh (post, final mark / virama-equivalent).
         //   In Unicode 6.1+, 1BAA is given Indic_Syllabic_Category
         //   = Pure_Killer (ie a virama), not a final mark; rustybuzz
         //   classifies it as H. Track that here.
@@ -667,12 +667,12 @@ pub const fn use_category(ch: char) -> UseCategory {
 
         // --- Lepcha (U+1C00..U+1C4F) -----------------------------
         // 1C00..1C23 letters,
-        // 1C24..1C2B subjoined consonants (CM — they sit below or
-        // post a base, attached via halant-like behaviour),
+        // 1C24..1C2B subjoined consonants (CM: they sit below or
+        // post a base, attached via halant-like behavior),
         // 1C2C..1C2F vowel signs,
         // 1C30..1C33 vowel signs (post),
         // 1C34..1C35 consonant signs (post),
-        // 1C36 ran (above tone), 1C37 nukta (below — M),
+        // 1C36 ran (above tone), 1C37 nukta (below, M),
         // 1C3B..1C3F punctuation,
         // 1C40..1C49 digits,
         // 1C4D..1C4F more letters.
@@ -694,10 +694,10 @@ pub const fn use_category(ch: char) -> UseCategory {
         // --- Limbu (U+1900..U+194F) ------------------------------
         // 1900..191F letters,
         // 1920..1922 above (a/i/u),
-        // 1923..1928 below (ee/ai/oo/au/e/o — wait some are above),
+        // 1923..1928 below (ee/ai/oo/au/e/o, wait some are above),
         //   actually 1925..1926 above (oo/au), 1923..1924 below
         //   (ee/ai), 1927..1928 below (e/o).
-        // 1929..192B subjoined (CM, below — yya/ra/sa subjoined),
+        // 1929..192B subjoined (CM, below: yya/ra/sa subjoined),
         // 1930..1938 small / final letters (CM, post),
         // 1939..193B tone / dot marks (M),
         // 1940 sign loo, 1944..1945 punctuation.
@@ -713,11 +713,11 @@ pub const fn use_category(ch: char) -> UseCategory {
 
         // --- Cham (U+AA00..U+AA5F) -------------------------------
         // AA00..AA28 letters (incl. independent vowels AA00..AA05),
-        // AA29..AA2E vowel signs (above — aa/i/ii/ei/u),
-        // AA2F..AA30 vowel signs (post — oe/o),
-        // AA31..AA32 vowel signs (above — ai/au),
-        // AA33 medial ya (post — CM),
-        // AA34..AA36 medial ra/la/wa (below — CM),
+        // AA29..AA2E vowel signs (above: aa/i/ii/ei/u),
+        // AA2F..AA30 vowel signs (post: oe/o),
+        // AA31..AA32 vowel signs (above: ai/au),
+        // AA33 medial ya (post, CM),
+        // AA34..AA36 medial ra/la/wa (below, CM),
         // AA40..AA42 final consonants (CM, post),
         // AA43 final ng (FM/post),
         // AA44..AA4B more final consonants (CM),
@@ -738,17 +738,17 @@ pub const fn use_category(ch: char) -> UseCategory {
         // --- Brahmi (U+11000..U+1107F) ---------------------------
         // Historical script of the Indian subcontinent (3rd century BCE);
         // ancestor of every Brahmic script. SMP block.
-        // 11000 candrabindu (M — above-base modifier),
+        // 11000 candrabindu (M: above-base modifier),
         // 11001 anusvara (M),
-        // 11002 visarga (FM — final mark),
+        // 11002 visarga (FM: final mark),
         // 11003..11037: 11003..11005 independent vowels,
         //   11006..11037 consonants.
         // 11038..11045 dependent vowel signs (mix of above/below/post),
         // 11046 virama (H),
         // 11047..1104D punctuation (GB),
-        // 11052..11065 number signs (N — Brahmi numeric system),
+        // 11052..11065 number signs (N: Brahmi numeric system),
         // 11066..1106F digits (N),
-        // 11070 old tamil virama (H — Pulli sign),
+        // 11070 old tamil virama (H: Pulli sign),
         // 11071..11072 old tamil short e/o (IV),
         // 11073..11074 old tamil short e/o vowel signs (above/post),
         // 11075 old tamil lla (B).
@@ -775,7 +775,7 @@ pub const fn use_category(ch: char) -> UseCategory {
         // 111C0 virama (H),
         // 111C1..111C3 sign avagraha / aum / siddham (B/GB),
         // 111C4 letter om (B), 111C5..111C8 punctuation (GB),
-        // 111C9 sandhi mark (M), 111CA nukta (M — below),
+        // 111C9 sandhi mark (M), 111CA nukta (M, below),
         // 111CB vowel modifier mark (M), 111CC extra short vowel mark (M),
         // 111CD sutra mark (M), 111CE sign vowel modifier (M),
         // 111CF sign inverted candrabindu (M),
@@ -788,7 +788,7 @@ pub const fn use_category(ch: char) -> UseCategory {
         0x11192..=0x111B2 => UseCategory::B,
         0x111B3 | 0x111BB..=0x111BF => UseCategory::VPst,
         // Sign-i (U+111B4) renders visually before the base in
-        // Sharada despite Unicode marking it Top — the font ships
+        // Sharada despite Unicode marking it Top. The font ships
         // sign-i as a spacing pre-base glyph and the USE reorder
         // pass moves it to the head of the syllable. Sign-ii
         // (U+111B5) follows the same pattern in this font.
@@ -808,7 +808,7 @@ pub const fn use_category(ch: char) -> UseCategory {
         //   then B). 11200 letter a (IV), 11201..11202 aa/i (IV),
         //   11203..11211 mostly consonants. We approximate by
         //   classifying 11200..11207 as IV (vowel letters) and
-        //   11208..11211 as B (consonants) — Unicode UCD splits at
+        //   11208..11211 as B (consonants). Unicode UCD splits at
         //   11208 letter ka.
         // 11213..1122B consonants (B),
         // 1122C..11233 vowel signs (mix),
@@ -855,7 +855,7 @@ pub const fn use_category(ch: char) -> UseCategory {
         //   11606..1162F consonants. (Modi has fewer vowels than
         //   Devanagari; 6 IV letters then 42 consonants.)
         // 11630..11640 dependent vowel signs / marks (mix),
-        // 11641..11643 punctuation (GB? — actually digits).
+        // 11641..11643 punctuation (GB? Actually digits).
         // Wait: 11641 digit zero ... no, Modi digits are 11650..11659.
         // 11641..11643 is unassigned in 15.0; 11644 is letter qa (B).
         // 11650..11659 digits (N), 1165D..1165F punctuation (GB).
@@ -875,7 +875,7 @@ pub const fn use_category(ch: char) -> UseCategory {
         // Vowels (Jungseong): 1160..11A7 + D7B0..D7C6.
         // Trailing consonants (Jongseong): 11A8..11FF + D7CB..D7FB.
         //
-        // All three categories map to B under USE — the state
+        // All three categories map to B under USE. The state
         // machine treats them as stackable bases, and the font's
         // ljmo/vjmo/tjmo features pick the correct variant form per
         // position. The segmenter emits one syllable per L (+V+T),
@@ -892,7 +892,7 @@ pub const fn use_category(ch: char) -> UseCategory {
 
 /// Returns `true` if the codepoint is a Hangul Leading Jamo
 /// (Choseong). The USE segmenter uses this to anchor a Hangul syllable
-/// — L is the required opening of `L V? T?`.
+/// (L is the required opening of `L V? T?`).
 #[must_use]
 pub const fn is_hangul_l(ch: char) -> bool {
     let cp = ch as u32;
@@ -973,7 +973,7 @@ mod tests {
 
     #[test]
     fn khmer_register_shifters_are_modifiers() {
-        // U+17C9 muusikatoan, U+17CA triisap — register shifters.
+        // U+17C9 muusikatoan, U+17CA triisap: register shifters.
         assert_eq!(use_category('\u{17C9}'), UseCategory::M);
         assert_eq!(use_category('\u{17CA}'), UseCategory::M);
     }
@@ -1162,7 +1162,7 @@ mod tests {
 
     #[test]
     fn hangul_jamo_are_bases() {
-        // Leading, vowel, trailing — all three classify as B for
+        // Leading, vowel, trailing: all three classify as B for
         // the USE state machine; the font's ljmo/vjmo/tjmo features
         // pick the positional variant.
         assert_eq!(use_category('\u{1100}'), UseCategory::B); // L kiyeok
@@ -1182,7 +1182,7 @@ mod tests {
 
     #[test]
     fn hangul_jamo_extensions_covered() {
-        // Extended-A is all L. Extended-B has a mix — 0xD7B0..0xD7C6
+        // Extended-A is all L. Extended-B has a mix: 0xD7B0..0xD7C6
         // are V, 0xD7CB..0xD7FB are T.
         assert!(is_hangul_l('\u{A960}'));
         assert!(is_hangul_v('\u{D7B0}'));

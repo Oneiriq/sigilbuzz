@@ -19,8 +19,8 @@ fn open_sans_glyph_points_phantoms_match_hmtx_formula() {
     let face = Face::parse(&blob, 0).unwrap();
     let hmtx = face.hmtx().unwrap();
 
-    // Sample a handful of glyph ids — covering an empty glyph, a
-    // small Latin letter, and a few mid-range glyphs — and assert
+    // Sample a handful of glyph ids (covering an empty glyph, a
+    // small Latin letter, and a few mid-range glyphs) and assert
     // pp1 / pp2 of `glyph_points` match the spec formula.
     for &gid in &[1u16, 2, 36, 37, 50, 100] {
         let bounds = face.glyph_bounds(gid).unwrap();
@@ -48,13 +48,13 @@ fn open_sans_glyph_points_phantoms_match_hmtx_formula() {
                     "pp2.x for gid {gid}: got {pp2:?}, expected x={expected_pp2_x}"
                 );
                 assert_eq!(pp2.1, 0, "pp2.y must be 0");
-                // Open Sans is horizontal-only — no vmtx → pp3 / pp4
+                // Open Sans is horizontal-only: no vmtx, so pp3 / pp4
                 // collapse to (0, 0).
                 assert_eq!(pp3, (0, 0), "pp3 collapses without vmtx");
                 assert_eq!(pp4, (0, 0), "pp4 collapses without vmtx");
             }
             (None, None) => {
-                // Whitespace glyph — both APIs agree on "no outline".
+                // Whitespace glyph: both APIs agree on "no outline".
             }
             (b, p) => panic!("inconsistent for gid {gid}: bounds={b:?}, points={p:?}"),
         }
@@ -76,7 +76,7 @@ fn open_sans_glyph_points_contour_count_matches_glyf_point_count() {
     for gid in 1u16..150 {
         let pts = face.glyph_points(gid).unwrap();
         let pc = glyf.point_count(&loca, gid).unwrap();
-        // Empty glyph (`pts == None`) or composite (`pc == None`) —
+        // Empty glyph (`pts == None`) or composite (`pc == None`):
         // the counts can't be cross-checked. Only the simple-glyph
         // pair is asserted.
         if let (Some(pts), Some(pc)) = (pts, pc) {

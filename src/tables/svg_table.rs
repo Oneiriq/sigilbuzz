@@ -1,16 +1,16 @@
-//! `SVG ` — OpenType SVG table.
+//! `SVG `: OpenType SVG table.
 //!
-//! A pre-COLRv1 colour-glyph format: maps glyph ids to inline SVG XML
+//! A pre-COLRv1 color-glyph format: maps glyph ids to inline SVG XML
 //! documents. Mostly seen in older Twitter / Mozilla emoji fonts and a
-//! handful of designer colour fonts; COLRv1 has largely displaced it,
+//! handful of designer color fonts; COLRv1 has largely displaced it,
 //! but plenty of fonts in the wild still ship it (often alongside
 //! COLR/CPAL as a fallback for SVG-aware renderers).
 //!
 //! sigilbuzz follows the same expose-bytes-not-pixels policy used by
 //! `CBDT` / `sbix`: we surface the raw SVG payload (gzip-compressed or
 //! plain) and a flag describing whether the bytes start with the gzip
-//! magic. Decompression and SVG XML parsing are the consumer's job —
-//! we deliberately do not pull `flate2`, `xml-rs`, `usvg`, or any other
+//! magic. Decompression and SVG XML parsing are the consumer's job.
+//! We do not pull `flate2`, `xml-rs`, `usvg`, or any other
 //! heavyweight dep for this.
 //!
 //! # Format
@@ -34,7 +34,7 @@
 //!
 //! Document payload is one of:
 //! - Plain UTF-8 / ASCII SVG XML (often starts `<?xml` or `<svg`).
-//! - gzip-compressed SVG — detect via the two-byte magic `1f 8b` at the
+//! - gzip-compressed SVG: detect via the two-byte magic `1f 8b` at the
 //!   payload's start.
 //!
 //! Records may overlap; the spec lets a single document cover a range
@@ -52,15 +52,15 @@ const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 
 /// One SVG document carved out of the `SVG ` table.
 ///
-/// Borrows directly into the font blob — `data` is a slice, not a
-/// copy — so a lookup costs a single bounds check.
+/// Borrows directly into the font blob (`data` is a slice, not a
+/// copy), so a lookup costs a single bounds check.
 #[derive(Debug, Clone, Copy)]
 pub struct SvgDocument<'a> {
     /// First glyph id this document covers (inclusive).
     pub start_gid: u16,
     /// Last glyph id this document covers (inclusive).
     pub end_gid: u16,
-    /// Raw payload bytes. Plain SVG XML or a gzip stream — the
+    /// Raw payload bytes. Plain SVG XML or a gzip stream: the
     /// `gzipped` field tells which.
     pub data: &'a [u8],
     /// `true` when `data` begins with the gzip magic `1f 8b`. The
@@ -80,7 +80,7 @@ pub struct Svg<'a> {
     list_off: usize,
     /// Number of entries in the document-list index.
     num_entries: u16,
-    /// Slice covering exactly the `numEntries × 12` records, sliced
+    /// Slice covering exactly the `numEntries * 12` records, sliced
     /// for cheap indexing during lookup.
     records: &'a [u8],
 }
@@ -169,7 +169,7 @@ impl<'a> Svg<'a> {
             let abs_start = self.list_off.checked_add(doc_off)?;
             let abs_end = abs_start.checked_add(doc_len)?;
             if abs_end > self.data.len() {
-                // Malformed record — skip rather than panic; a later
+                // Malformed record: skip rather than panic; a later
                 // record might still be well-formed for this gid.
                 continue;
             }

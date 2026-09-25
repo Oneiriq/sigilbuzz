@@ -1,4 +1,4 @@
-//! sigilbuzz-woff — WOFF1 and WOFF2 wrapping / unwrapping.
+//! sigilbuzz-woff: WOFF1 and WOFF2 wrapping / unwrapping.
 //!
 //! Browsers serve fonts as either [WOFF1] (the legacy zlib-framed
 //! format) or [WOFF2] (Brotli + a transformed `glyf`/`loca` pair).
@@ -49,6 +49,9 @@
 //!
 //! See `docs/deps.md` in the workspace root for the rationale on the
 //! runtime dependencies this crate brings (`brotli`, `miniz_oxide`).
+//!
+//! [WOFF1]: https://www.w3.org/TR/WOFF/
+//! [WOFF2]: https://www.w3.org/TR/WOFF2/
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -103,7 +106,7 @@ mod feature_disabled_tests {
 
     #[test]
     fn unwrap_returns_disabled_marker() {
-        // Anything goes in — the stub never inspects the bytes.
+        // Anything goes in: the stub never inspects the bytes.
         let err = unwrap_woff2(&[0u8; 4]).unwrap_err();
         assert!(matches!(err, WoffError::Woff2Disabled));
     }

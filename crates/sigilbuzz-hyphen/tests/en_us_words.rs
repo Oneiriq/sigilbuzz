@@ -6,7 +6,7 @@
 //! exact same pattern file we vendor at
 //! `crates/sigilbuzz-hyphen/patterns/en-us.txt`, with the canonical
 //! `left = 2`, `right = 3` thresholds declared in the upstream
-//! `.tex` source. This is *not* a comparison against pyphen — pyphen
+//! `.tex` source. This is *not* a comparison against pyphen: pyphen
 //! ships a different (LibreOffice-derived) en-us dictionary whose
 //! breaks differ from the classic Liang/Kuiken set.
 //!

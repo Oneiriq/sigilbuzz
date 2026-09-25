@@ -3,21 +3,21 @@
 //! The inverse lives in `transform.rs`; this module produces the
 //! same eight streams the decoder consumes:
 //!
-//! 1. n_contour_stream — i16 contour count per glyph.
-//! 2. n_points_stream — per-contour point count, 255UInt16.
-//! 3. flag_stream — per-point flag byte (low 7 bits = triplet
+//! 1. n_contour_stream: i16 contour count per glyph.
+//! 2. n_points_stream: per-contour point count, 255UInt16.
+//! 3. flag_stream: per-point flag byte (low 7 bits = triplet
 //!    encoding index, high bit = off-curve).
-//! 4. glyph_stream — per-point coordinate triplet data + the
+//! 4. glyph_stream: per-point coordinate triplet data + the
 //!    255UInt16-encoded simple-instruction length.
-//! 5. composite_stream — composite component records, verbatim.
-//! 6. bbox_stream — bbox bitmap + per-glyph bbox bytes.
-//! 7. instruction_stream — TrueType instructions (simple + composite).
-//! 8. overlap_simple bitmap — bit per simple glyph signalling the
+//! 5. composite_stream: composite component records, verbatim.
+//! 6. bbox_stream: bbox bitmap + per-glyph bbox bytes.
+//! 7. instruction_stream: TrueType instructions (simple + composite).
+//! 8. overlap_simple bitmap: bit per simple glyph signaling the
 //!    OVERLAP_SIMPLE flag from the SFNT.
 //!
 //! We always emit a stored bbox for composites (mandatory) and skip
 //! it for simple glyphs when the bbox can be re-derived from the
-//! deltas. That matches what `transform.rs` decodes — a simple-glyph
+//! deltas. That matches what `transform.rs` decodes: a simple-glyph
 //! bbox is stored only when the SFNT bbox doesn't agree with the
 //! "sum of deltas" version.
 
@@ -48,7 +48,7 @@ const WE_HAVE_INSTRUCTIONS: u16 = 0x0100;
 ///
 /// `head_table` is consulted for `indexToLocFormat` (short / long
 /// loca); `maxp_table` for `numGlyphs`. Both must be present in any
-/// SFNT carrying a `glyf` — we error out cleanly if not.
+/// SFNT carrying a `glyf`. We error out cleanly if not.
 ///
 /// `retain_hints` controls whether simple-glyph instructions are
 /// included in the instruction_stream. Composite-glyph
@@ -550,7 +550,7 @@ fn encode_triplet(dx: i16, dy: i16, on_curve: bool) -> (u8, Vec<u8>) {
         // The decoder uses `flag >> 1` for sign_y and `flag & 1` for
         // sign_x, but the multiplexed magnitudes still come from
         // `flag - 20` which we precomputed as `b0`. Add the sign
-        // bits *after* — wait, we need to verify. The decoder does:
+        // bits *after*. Wait, we need to verify. The decoder does:
         //   b0 = flag - 20
         //   mag_x = 1 + (b0 & 0x30) + (b1 >> 4)   -> b0 bits 4..5
         //   mag_y = 1 + ((b0 & 0x0C) << 2) + (b1 & 0x0F) -> b0 bits 2..3
@@ -565,7 +565,7 @@ fn encode_triplet(dx: i16, dy: i16, on_curve: bool) -> (u8, Vec<u8>) {
         // of `(flag - 20)`. We did: flag = 20 + b0 + (sign_y<<1) + sign_x,
         // but b0 already contained `b0_low = (mag_y & 0x30) >> 2`
         // which lands in bits 2..3, and `b0_high` in bits 4..5. So
-        // the low 2 bits of (flag - 20) come purely from sign — good.
+        // the low 2 bits of (flag - 20) come purely from sign. Good.
         // Reject any case where b0's low 2 bits weren't already 0.
         debug_assert_eq!(b0 & 0x03, 0);
         return (off_curve_bit | flag, alloc::vec![b1]);
@@ -635,10 +635,10 @@ fn encode_triplet(dx: i16, dy: i16, on_curve: bool) -> (u8, Vec<u8>) {
 
 fn write_packed_u16(out: &mut Vec<u8>, value: u16) {
     // Inverse of `Reader::read_packed_u16`:
-    //   value < 253          → 1 byte: value as u8
-    //   value in 253..506    → 2 bytes: 255, (value - 253)
-    //   value in 506..759    → 2 bytes: 254, (value - 506)
-    //   value >= 759         → 3 bytes: 253, hi, lo
+    //   value < 253          -> 1 byte: value as u8
+    //   value in 253..506    -> 2 bytes: 255, (value - 253)
+    //   value in 506..759    -> 2 bytes: 254, (value - 506)
+    //   value >= 759         -> 3 bytes: 253, hi, lo
     if value < 253 {
         out.push(value as u8);
     } else if value < 506 {

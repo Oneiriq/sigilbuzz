@@ -5,14 +5,14 @@
 //! [`crate::gpos`], and [`crate::gdef`]; this module owns the
 //! infrastructure they share:
 //!
-//! - [`GidMap`] — the old→new gid translator built once per subset.
-//! - [`RewriterCtx`] — the borrow bag passed to per-lookup-type
+//! - [`GidMap`]: the old->new gid translator built once per subset.
+//! - [`RewriterCtx`]: the borrow bag passed to per-lookup-type
 //!   rewriters.
-//! - [`RewrittenLookup`] / [`RewrittenSubtable`] — the value types
+//! - [`RewrittenLookup`] / [`RewrittenSubtable`]: the value types
 //!   the per-lookup-type rewriters produce.
-//! - [`parse_coverage_glyphs`] / [`parse_classdef_pairs`] — small
+//! - [`parse_coverage_glyphs`] / [`parse_classdef_pairs`]: small
 //!   byte-walking helpers for the rewriters and the closure walker.
-//! - [`build_gsub`] / [`build_gpos`] — the drivers that walk every
+//! - [`build_gsub`] / [`build_gpos`]: the drivers that walk every
 //!   lookup, call the per-type rewriter, run the drop cascade, and
 //!   renumber surviving lookups.
 //!
@@ -26,24 +26,24 @@
 //! 3. Scripts whose every feature dropped.
 //! 4. The container table entirely if no script survives.
 //!
-//! Surviving lookups are then renumbered to 0..N. Every reference —
-//! the FeatureList's lookup-index list — is rewritten through the
+//! Surviving lookups are then renumbered to 0..N. Every reference
+//! (the FeatureList's lookup-index list) is rewritten through the
 //! same renumber map.
 //!
 //! # Coverage matrix today
 //!
-//! - **GSUB type 1 (single-sub)** — full byte-level rewriter (formats
+//! - **GSUB type 1 (single-sub)**: full byte-level rewriter (formats
 //!   1+2). See [`crate::gsub`].
-//! - **GSUB types 2–6 + 8** — full byte-level rewriters. See [`crate::gsub`].
-//! - **GSUB type 7 (extension)** — pass-through, recurses into the
+//! - **GSUB types 2-6 + 8**: full byte-level rewriters. See [`crate::gsub`].
+//! - **GSUB type 7 (extension)**: pass-through, recurses into the
 //!   inner subtable.
-//! - **Any GSUB lookup type without a rewriter** — returns `None` for
+//! - **Any GSUB lookup type without a rewriter**: returns `None` for
 //!   every subtable. The drop cascade handles propagation.
-//! - **GPOS types 1 (single-adj), 2 (pair-adj — fmt 1 + fmt 2 with
+//! - **GPOS types 1 (single-adj), 2 (pair-adj: fmt 1 + fmt 2 with
 //!   class-collapse fmt-1 fallback), 3 (cursive), 4 / 5 / 6 (mark
-//!   attachment), 7 (context), 8 (chained context), 9 (extension)** —
+//!   attachment), 7 (context), 8 (chained context), 9 (extension)**:
 //!   full byte-level rewriters. See [`crate::gpos`].
-//! - **GDEF GlyphClassDef + MarkAttachClassDef** — full ClassDef
+//! - **GDEF GlyphClassDef + MarkAttachClassDef**: full ClassDef
 //!   rewriter via [`crate::classdef`]. AttachList, LigCaretList,
 //!   MarkGlyphSetsDef, ItemVariationStore drop.
 //!
@@ -58,7 +58,7 @@ use sigilbuzz::Face;
 
 use crate::{gdef, gpos, gsub, GlyphId, SubsetError, SubsetInput};
 
-/// A new-namespace gid translator. `map(old) → Some(new)` when the
+/// A new-namespace gid translator. `map(old) -> Some(new)` when the
 /// gid is kept, `None` when it has been dropped.
 ///
 /// Built once per subset from the closure walker's kept-gid set.
@@ -71,7 +71,7 @@ impl GidMap {
     /// Builds a [`GidMap`] from a sorted-ascending kept-gid set. The
     /// kept set's position-in-vector becomes the new gid (so the
     /// 0th kept gid maps to new-gid 0, the 1st kept gid maps to
-    /// new-gid 1, and so on — matching the convention `subset()` uses
+    /// new-gid 1, and so on, matching the convention `subset()` uses
     /// for `gid_map`).
     pub(crate) fn from_kept(kept: &[GlyphId]) -> Self {
         let max = kept.iter().copied().max().unwrap_or(0);
@@ -122,10 +122,10 @@ impl GidMap {
 /// Borrow bag passed into per-lookup-type rewriters.
 pub(crate) struct RewriterCtx<'a> {
     pub gid_map: &'a GidMap,
-    /// Optional old → new lookup-index map. Set during the second
+    /// Optional old -> new lookup-index map. Set during the second
     /// pass over context-style lookups (GSUB types 5 / 6) so their
     /// nested `SubstLookupRecord` entries can be patched. `None` on
-    /// the first pass — context rewriters preserve the source's
+    /// the first pass. Context rewriters preserve the source's
     /// lookup-list indices unchanged so the caller can decide what
     /// survives and rebuild the renumber map afterwards.
     pub lookup_renumber: Option<&'a [Option<u16>]>,
@@ -292,7 +292,7 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
     // at dropped lookups loses every subtable and falls out, which
     // may in turn cascade into other context lookups losing their
     // targets. Bounded by `lookups.len()` since each iteration only
-    // ever drops more lookups (or stabilises).
+    // ever drops more lookups (or stabilizes).
     let mut renumber = build_renumber(&rewritten);
     for _ in 0..lookups.len() {
         let mut changed = false;
@@ -313,7 +313,7 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
             let Some(lookup) = lookups.get(li) else {
                 continue;
             };
-            // Skip non-context lookup types — their rewrite output is
+            // Skip non-context lookup types. Their rewrite output is
             // independent of the renumber map.
             let lt = gsub::context_lookup_type(&lookup);
             let Some(_lt) = lt else { continue };
@@ -372,8 +372,8 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
     ))
 }
 
-/// Drives the GPOS rewrite — same two-phase shape as [`build_gsub`].
-/// The per-type rewriters cover every GPOS lookup type (1–9). Context
+/// Drives the GPOS rewrite, same two-phase shape as [`build_gsub`].
+/// The per-type rewriters cover every GPOS lookup type (1-9). Context
 /// lookups (types 7 / 8) carry nested `PosLookupRecord`s pointing at
 /// sibling lookups by index; phase 1 preserves the source indices,
 /// phase 2 rewrites them through the renumber map iterated to a fixed
@@ -499,7 +499,7 @@ fn build_renumber(rewritten: &[Option<RewrittenLookup>]) -> Vec<Option<u16>> {
 
 struct RewrittenFeatures {
     bytes: Vec<u8>,
-    /// Old feature index → new feature index (or None if dropped).
+    /// Old feature index -> new feature index (or None if dropped).
     feature_renumber: Vec<Option<u16>>,
 }
 
@@ -741,7 +741,7 @@ fn rewrite_langsys_from_bytes(
 
 fn encode_langsys(ls: &RewrittenLangSys) -> Vec<u8> {
     // LangSys:
-    //   Offset16 lookupOrderOffset (0 — reserved)
+    //   Offset16 lookupOrderOffset (0, reserved)
     //   u16 requiredFeatureIndex
     //   u16 featureIndexCount
     //   u16 featureIndices[featureIndexCount]
@@ -802,7 +802,7 @@ fn assemble_layout_table(
         //   u16 lookupFlag
         //   u16 subtableCount
         //   Offset16 subtableOffsets[subtableCount]
-        //   (u16 markFilteringSet — only if flag bit set)
+        //   (u16 markFilteringSet, only if flag bit set)
         out.extend_from_slice(&lookup.lookup_type.to_be_bytes());
         out.extend_from_slice(&lookup.lookup_flag.to_be_bytes());
         out.extend_from_slice(&(lookup.subtables.len() as u16).to_be_bytes());
@@ -829,7 +829,7 @@ fn assemble_layout_table(
 /// Best-effort enumeration of the glyphs covered by a Coverage table
 /// given its raw bytes. Returns an empty vec on any parse failure.
 ///
-/// Mirrors the helper in [`crate::closure`] — exposed here so the
+/// Mirrors the helper in [`crate::closure`], exposed here so the
 /// per-lookup-type rewriters in [`crate::gsub`] / [`crate::gpos`] can
 /// share it without re-deriving the byte layout.
 pub(crate) fn parse_coverage_glyphs(bytes: &[u8]) -> Vec<u16> {

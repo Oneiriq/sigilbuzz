@@ -1,13 +1,13 @@
-//! sigilbuzz-pdf — PDF font emitters for sigilbuzz outlines.
+//! sigilbuzz-pdf: PDF font emitters for sigilbuzz outlines.
 //!
-//! PDF supports several font flavours: Type 1 (PostScript), TrueType
-//! / OpenType embedded variants, and Type 3 — "user-defined fonts"
+//! PDF supports several font flavors: Type 1 (PostScript), TrueType
+//! / OpenType embedded variants, and Type 3, "user-defined fonts"
 //! whose glyphs are described as ordinary PDF content streams. This
 //! crate ships emitters for all three:
 //!
 //! - [`emit_type3_font`]: every `MoveTo` / `LineTo` / curve becomes a
 //!   PDF drawing operator emitted into a `CharProc` content stream.
-//! - [`emit_type1_font`]: per-glyph Type 1 charstrings, cleartext —
+//! - [`emit_type1_font`]: per-glyph Type 1 charstrings, cleartext,
 //!   eexec encryption is intentionally skipped (see the `Type1Font`
 //!   docs for the rationale).
 //! - [`emit_otf_embedded_font`]: a PDF font dictionary referencing
@@ -15,9 +15,9 @@
 //!
 //! Each emitter produces a plain data structure (or, for Type 1 /
 //! OTF-embedded, a small bundle of byte buffers); the consumer is
-//! responsible for serialising those into a PDF document. That
-//! separation keeps this crate dependency-free — no `lopdf`, no
-//! `printpdf`. Output is deterministic across all three flavours:
+//! responsible for serializing those into a PDF document. That
+//! separation keeps this crate dependency-free: no `lopdf`, no
+//! `printpdf`. Output is deterministic across all three flavors:
 //! same `Face` (+ same `font_bytes` for the OTF emitter) + same gid
 //! list yields byte-identical output.
 //!
@@ -25,13 +25,13 @@
 //!
 //! ```text
 //!   Face                       Type3Font
-//!     │                         ┌─────────────────────────────┐
-//!     │ glyph_outline(gid)      │ bbox: Bbox                  │
-//!     ▼                         │ matrix: [f32; 6]            │
-//!   Outline (PathOps)           │ char_procs: Vec<CharProc>   │
-//!     │                         │ encoding: Vec<(u8, String)> │
-//!     │ PathOp → PDF op         │ widths:   Vec<f32>          │
-//!     ▼                         └─────────────────────────────┘
+//!     |                         +-----------------------------+
+//!     | glyph_outline(gid)      | bbox: Bbox                  |
+//!     v                         | matrix: [f32; 6]            |
+//!   Outline (PathOps)           | char_procs: Vec<CharProc>   |
+//!     |                         | encoding: Vec<(u8, String)> |
+//!     | PathOp -> PDF op        | widths:   Vec<f32>          |
+//!     v                         +-----------------------------+
 //!   CharProc.body bytes
 //! ```
 //!
@@ -44,24 +44,24 @@
 //! let blob = Blob::from_path("./MyFont.ttf").unwrap();
 //! let face = Face::parse_bytes(blob.as_bytes(), 0).unwrap();
 //! let font = emit_type3_font(&face, &[36, 37, 38]);
-//! // serialise font.bbox / font.matrix / font.char_procs into a PDF.
+//! // serialize font.bbox / font.matrix / font.char_procs into a PDF.
 //! # let _ = font;
 //! ```
 //!
-//! # Choosing a flavour
+//! # Choosing a flavor
 //!
 //! - **Type 3** sidesteps every PDF-side font-embedding subtlety:
 //!   there is no `cmap` to translate, no `head.indexToLocFormat` to
 //!   preserve, no subsetting to perform. The trade-off is that Type
 //!   3 fonts are not hinted and are typically rendered via the PDF
-//!   content stream's own raster path — fine for archival, signage,
+//!   content stream's own raster path, fine for archival, signage,
 //!   and headline use, less ideal for body text at small sizes.
 //! - **Type 1** ships per-glyph PostScript charstrings and is more
 //!   size-efficient than Type 3 for fonts with many curves. The
 //!   emitter intentionally skips eexec encryption (charstrings are
 //!   cleartext, declared via `/lenIV -1` in the private dict);
-//!   Adobe Reader and modern PDF consumers honour that.
-//! - **OTF/TrueType embedded** is the most size-efficient option —
+//!   Adobe Reader and modern PDF consumers honor that.
+//! - **OTF/TrueType embedded** is the most size-efficient option:
 //!   the original font program ships verbatim through `/FontFile2`
 //!   or `/FontFile3` and the consumer addresses glyphs by CID.
 //!   Subsetting (the real source of size savings on large fonts)
@@ -105,12 +105,12 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// PDF's `FontMatrix` maps glyph-space coordinates to text space (1
 /// unit = 1 typographic point at use time, after the text-state
 /// matrix scale). The standard convention for font-design-unit
-/// fonts is `[1/upem 0 0 1/upem 0 0]` — uniform scale, no shear, no
+/// fonts is `[1/upem 0 0 1/upem 0 0]`: uniform scale, no shear, no
 /// translation. sigilbuzz emits glyphs in their native upem space
 /// so this matrix is the same for every CharProc in the font.
 ///
 /// `units_per_em == 0` (a malformed `head` table) is clamped to a
-/// 1000-upem default — every other emitter in this crate (`Type 1`,
+/// 1000-upem default. Every other emitter in this crate (`Type 1`,
 /// `OTF-embedded`) does the same dance, and emitting an `inf` matrix
 /// would produce a PDF every consumer rejects.
 #[must_use]
@@ -128,7 +128,7 @@ pub fn font_matrix(units_per_em: u16) -> [f32; 6] {
 ///
 /// Each gid is mapped to:
 ///
-/// - PDF char code, assigned sequentially starting at 1 — char code
+/// - PDF char code, assigned sequentially starting at 1. Char code
 ///   0 is reserved for `.notdef` so it is left out of the encoding.
 /// - PDF name, formatted as `g{gid}` (for example `g42`).
 /// - CharProc body: `wx 0 llx lly urx ury d1\n` prologue, the
@@ -144,14 +144,14 @@ pub fn font_matrix(units_per_em: u16) -> [f32; 6] {
 ///
 /// The font's `bbox` is the union of every included CharProc bbox;
 /// the `matrix` is `[1/upem 0 0 1/upem 0 0]`. Gids beyond char code
-/// 255 are silently skipped — Type 3 encodings are 8-bit only.
+/// 255 are silently skipped. Type 3 encodings are 8-bit only.
 ///
 /// Output is deterministic: the same face and gid slice produce a
 /// byte-identical [`Type3Font`].
 #[must_use]
 pub fn emit_type3_font(face: &Face<'_>, gids: &[GlyphId]) -> Type3Font {
     // Look up the upem and hmtx once. Failures collapse to a
-    // 1000-upem default and absent advance widths — neither
+    // 1000-upem default and absent advance widths. Neither
     // condition is normal for a real font, but the public surface
     // is total so a malformed face does not panic.
     let upem = face.head().map(|h| h.units_per_em).unwrap_or(1000);
@@ -175,8 +175,8 @@ pub fn emit_type3_font(face: &Face<'_>, gids: &[GlyphId]) -> Type3Font {
             .map_or(0.0_f32, f32::from);
 
         // Outline + bbox. Errors and `None` collapse to an empty
-        // outline and a zeroed bbox — Type 3 still requires a d1
-        // prologue and a body, so we synthesise an empty drawing
+        // outline and a zeroed bbox. Type 3 still requires a d1
+        // prologue and a body, so we synthesize an empty drawing
         // program.
         let ops_owned;
         let ops: &[sigilbuzz::tables::PathOp] = match face.glyph_outline(gid) {
@@ -328,7 +328,7 @@ pub struct CharProc {
     pub width: f32,
     /// Per-glyph bounding box in glyph-design-unit space.
     pub bbox: Bbox,
-    /// PDF content-stream bytes — drawing operators ready to drop
+    /// PDF content-stream bytes: drawing operators ready to drop
     /// into the `/CharProcs` stream object verbatim.
     pub body: Vec<u8>,
 }
@@ -336,8 +336,8 @@ pub struct CharProc {
 /// A Type 3 font assembled from a sigilbuzz [`Face`] and a list of
 /// glyph ids.
 ///
-/// The fields are deliberately laid out so a downstream PDF
-/// serialiser can pick each one up and write the corresponding PDF
+/// The fields are laid out so a downstream PDF
+/// serializer can pick each one up and write the corresponding PDF
 /// dict entry without further bookkeeping:
 ///
 /// | Field          | PDF dict entry             |
@@ -351,7 +351,7 @@ pub struct CharProc {
 /// [`Face`]: sigilbuzz::Face
 #[derive(Debug, Clone, PartialEq)]
 pub struct Type3Font {
-    /// `FontBBox` in glyph-design-unit space — union of every
+    /// `FontBBox` in glyph-design-unit space: union of every
     /// included glyph's bbox.
     pub bbox: Bbox,
     /// `FontMatrix` mapping glyph design units to PDF text space.
@@ -366,7 +366,7 @@ pub struct Type3Font {
     /// free for `.notdef`.
     pub encoding: Vec<(u8, String)>,
     /// Per-encoded-glyph advance widths in glyph-design-unit space.
-    /// `widths.len() == char_procs.len()` — `FontMatrix` scales each
+    /// `widths.len() == char_procs.len()`. `FontMatrix` scales each
     /// entry into PDF text-space units at render time.
     pub widths: Vec<f32>,
 }
@@ -394,7 +394,7 @@ mod tests {
         // The Type 1 emitter rejects this with an error; the OTF
         // emitter clamps to 1000. Type 3's `font_matrix` should clamp
         // to the same 1000 so the resulting `[a b c d e f]` is finite
-        // — emitting `[inf 0 0 inf 0 0]` produces a malformed PDF that
+        // because emitting `[inf 0 0 inf 0 0]` produces a malformed PDF that
         // every consumer rejects.
         let m = font_matrix(0);
         for &v in &m {

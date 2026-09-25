@@ -26,7 +26,7 @@ struct Case {
 }
 
 const CORPUS: &[Case] = &[
-    // Empty string — identity.
+    // Empty string: identity.
     Case {
         text: "",
         compare_rustybuzz: true,
@@ -38,19 +38,19 @@ const CORPUS: &[Case] = &[
         compare_rustybuzz: true,
         note: "ka alone",
     },
-    // Consonant + post-base matra — shape order = logical order.
+    // Consonant + post-base matra: shape order = logical order.
     Case {
         text: "\u{0915}\u{0940}",
         compare_rustybuzz: true,
         note: "kii (ka + post-base ii)",
     },
-    // Devanagari digits — pass-through Symbol syllables.
+    // Devanagari digits: pass-through Symbol syllables.
     Case {
         text: "\u{0966}\u{0967}\u{0968}\u{0969}",
         compare_rustybuzz: true,
         note: "devanagari digits 0-3",
     },
-    // Latin interleaved with Devanagari — mixed-script runs must
+    // Latin interleaved with Devanagari: mixed-script runs must
     // not corrupt the ASCII.
     Case {
         text: "Hi \u{0915}",
@@ -71,37 +71,37 @@ const CORPUS: &[Case] = &[
         compare_rustybuzz: true,
         note: "ka kha ga",
     },
-    // Pre-base matra: कि — requires reorder to match rustybuzz.
+    // Pre-base matra: कि (requires reorder to match rustybuzz).
     Case {
         text: "\u{0915}\u{093F}",
         compare_rustybuzz: true,
         note: "ki (pre-base matra i)",
     },
-    // नमस्ते — conjunct स्त, exercises `half` and `pres`.
+    // नमस्ते: conjunct स्त, exercises `half` and `pres`.
     Case {
         text: "\u{0928}\u{092E}\u{0938}\u{094D}\u{0924}\u{0947}",
         compare_rustybuzz: true,
         note: "namaste",
     },
-    // हिन्दी — conjunct न्द via `half`/`pres`, plus pre-base matra ि.
+    // हिन्दी: conjunct न्द via `half`/`pres`, plus pre-base matra ि.
     Case {
         text: "\u{0939}\u{093F}\u{0928}\u{094D}\u{0926}\u{0940}",
         compare_rustybuzz: true,
         note: "hindi",
     },
-    // क्ष्य — triple conjunct, no matras. Fires `akhn` + `cjct`.
+    // क्ष्य: triple conjunct, no matras. Fires `akhn` + `cjct`.
     Case {
         text: "\u{0915}\u{094D}\u{0937}\u{094D}\u{092F}",
         compare_rustybuzz: true,
         note: "kshya (triple conjunct)",
     },
-    // ज्ञ — single-akhand conjunct (ja + halant + nya → ज्ञ).
+    // ज्ञ: single-akhand conjunct (ja + halant + nya -> ज्ञ).
     Case {
         text: "\u{091C}\u{094D}\u{091E}",
         compare_rustybuzz: true,
         note: "jnya (akhand ligature)",
     },
-    // र्क — reph + ka. `rphf` collapses ra+halant into a single
+    // र्क: reph + ka. `rphf` collapses ra+halant into a single
     // reph glyph; the final-reorder pass moves that glyph from
     // the syllable head to its display slot (after the base for
     // Devanagari's `BeforePost` reph position).
@@ -110,7 +110,7 @@ const CORPUS: &[Case] = &[
         compare_rustybuzz: true,
         note: "reph + ka",
     },
-    // र्म — reph + ma. Same shape family as र्क but with a
+    // र्म: reph + ma. Same shape family as र्क but with a
     // different base consonant; guards against per-base-glyph
     // quirks in the reorder.
     Case {
@@ -118,7 +118,7 @@ const CORPUS: &[Case] = &[
         compare_rustybuzz: true,
         note: "reph + ma",
     },
-    // वर्ष — va + ra + halant + sha. The first syllable (व) is a
+    // वर्ष: va + ra + halant + sha. The first syllable (व) is a
     // plain consonant; the second (र्ष) is a reph + sha. Exercises
     // the reorder inside a multi-syllable run so the cluster-range
     // syllable mapping is tested end-to-end.
@@ -127,7 +127,7 @@ const CORPUS: &[Case] = &[
         compare_rustybuzz: true,
         note: "varsha (reph in second syllable)",
     },
-    // अर्थ — a + ra + halant + tha. Independent vowel followed by
+    // अर्थ: a + ra + halant + tha. Independent vowel followed by
     // a reph syllable; the reorder must not affect the vowel
     // syllable and must land the reph after the tha base.
     Case {
@@ -135,7 +135,7 @@ const CORPUS: &[Case] = &[
         compare_rustybuzz: true,
         note: "artha (vowel + reph syllable)",
     },
-    // र्कि — reph + ka + pre-base i. Pre-base matra reorder plus
+    // र्कि: reph + ka + pre-base i. Pre-base matra reorder plus
     // reph reorder plus a presentation-feature substitution
     // (Noto Sans Devanagari swaps in the reph-with-hook form when
     // followed by a pre-base i). Full parity here means the
@@ -145,7 +145,7 @@ const CORPUS: &[Case] = &[
         compare_rustybuzz: true,
         note: "reph + ka + pre-base i",
     },
-    // र्के — reph + ka + post-base e. Matra is visually above the
+    // र्के: reph + ka + post-base e. Matra is visually above the
     // base; reph sits between the base and the post-base mark.
     Case {
         text: "\u{0930}\u{094D}\u{0915}\u{0947}",
@@ -209,7 +209,7 @@ fn devanagari_corpus_matches_rustybuzz_for_supported_features() {
 
 #[test]
 fn pre_base_matra_glyphs_end_up_before_their_consonant() {
-    // कि — with pre-base matra, the matra glyph should appear at
+    // कि: with pre-base matra, the matra glyph should appear at
     // index 0 and the ka glyph at index 1. Verify this independently
     // of rustybuzz so we catch regressions even if upstream drifts.
     let blob = Blob::new(NOTO_DEVA);

@@ -1,4 +1,4 @@
-//! `gvar` — Glyph Variations table.
+//! `gvar`: Glyph Variations table.
 //!
 //! Carries per-glyph outline deltas for a variable font. Where `HVAR`
 //! varies a glyph's *advance* across the design space, `gvar` varies
@@ -6,7 +6,7 @@
 //! is the base glyph's point `i` plus the weighted sum of per-region
 //! `(dx, dy)` deltas for that point. sigilbuzz doesn't rasterize yet,
 //! but `glyph_bounds_at_coords` needs the deltas to shift the glyph
-//! bounding box — which is all this parser exposes today.
+//! bounding box, which is all this parser exposes today.
 //!
 //! # Layout
 //!
@@ -106,7 +106,7 @@ impl<'a> Gvar<'a> {
             }
         } else {
             for _ in 0..n_offsets {
-                // Short offsets are stored halved — the spec multiplies
+                // Short offsets are stored halved: the spec multiplies
                 // by two to recover the byte offset.
                 let half = u32::from(r.read_u16()?);
                 glyph_offsets.push(half * 2);
@@ -145,14 +145,14 @@ impl<'a> Gvar<'a> {
 
     /// Returns all contour-point deltas for `glyph_id` at the given
     /// normalized coords, summed across every contributing tuple.
-    /// Glyphs with no variation data — or with indices past the end
-    /// — return an empty vector.
+    /// Glyphs with no variation data, or with indices past the end,
+    /// return an empty vector.
     ///
     /// `num_points` is the glyph's total point count, inclusive of
     /// the 4 phantom points gvar expects (obtain from
     /// [`crate::tables::Glyf::point_count`]). It's required because
     /// gvar's "all-points" shortcut packs deltas without an explicit
-    /// length — the count comes from the outline itself.
+    /// length. The count comes from the outline itself.
     ///
     /// The returned `PointDelta`s are ordered by first appearance of
     /// each point index (deltas for the same point are summed into
@@ -293,7 +293,7 @@ impl<'a> Gvar<'a> {
             } else if has_shared_points {
                 shared_points_is_all_points
             } else {
-                // Neither private nor shared point numbers present —
+                // Neither private nor shared point numbers present:
                 // spec says this is equivalent to the all-points
                 // shortcut.
                 true
@@ -481,7 +481,7 @@ fn tuple_scalar(peak: &[f32], start: Option<&[f32]>, end: Option<&[f32]>, coords
 /// Decodes the packed-point-number stream at the start of `data`.
 /// Returns the point index list plus the number of bytes consumed. A
 /// count byte of zero is a shortcut meaning "all points in the
-/// glyph"; signalled by an empty returned `Vec`. Callers must treat
+/// glyph"; signaled by an empty returned `Vec`. Callers must treat
 /// that as the all-points case rather than a zero-length point list.
 pub(crate) fn read_packed_point_numbers(data: &[u8]) -> Result<(Vec<u16>, usize)> {
     if data.is_empty() {
@@ -634,7 +634,7 @@ fn read_packed_deltas_n(data: &[u8], n: usize) -> Result<(Vec<i32>, usize)> {
 }
 
 fn accumulate(acc: &mut Vec<PointDelta>, pt: u16, dx: f32, dy: f32) {
-    // Deterministic append — do not sort. If the same point index
+    // Deterministic append: do not sort. If the same point index
     // already has an entry (shared across tuples), fold into it.
     if let Some(existing) = acc.iter_mut().find(|e| e.point == pt) {
         existing.dx += dx;
@@ -723,8 +723,8 @@ mod tests {
         // Count = 300 via two-byte count. First delta is u16 = 100.
         let mut data = Vec::new();
         data.push(0x81); // top count byte
-        data.push(0x2C); // low count byte → 300
-        data.push(0x80); // WORDS, run_count-1=0 → one u16 delta
+        data.push(0x2C); // low count byte -> 300
+        data.push(0x80); // WORDS, run_count-1=0 -> one u16 delta
         data.extend_from_slice(&100u16.to_be_bytes());
         // Remaining 299 points: u8 deltas of 1 apiece.
         let mut remaining = 299usize;
@@ -817,7 +817,7 @@ mod tests {
         out.extend_from_slice(&0u16.to_be_bytes());
 
         let data_size_slot = out.len();
-        out.extend_from_slice(&0u16.to_be_bytes()); // variationDataSize — patch
+        out.extend_from_slice(&0u16.to_be_bytes()); // variationDataSize: patch
         out.extend_from_slice(&FLAG_EMBEDDED_PEAK.to_be_bytes());
         write_f2dot14(&mut out, 1.0);
 
@@ -826,9 +826,9 @@ mod tests {
 
         // Tuple data: all-points x deltas +10, y deltas 0.
         let tuple_start = out.len();
-        out.push(0x03); // i8 run, run_count-1 = 3 → 4 deltas
+        out.push(0x03); // i8 run, run_count-1 = 3 -> 4 deltas
         out.resize(out.len() + 4, 10);
-        out.push(0x83); // ALL_ZERO | run_count-1 = 3 → 4 zero deltas
+        out.push(0x83); // ALL_ZERO | run_count-1 = 3 -> 4 zero deltas
         let tuple_len = (out.len() - tuple_start) as u16;
         out[data_size_slot..data_size_slot + 2].copy_from_slice(&tuple_len.to_be_bytes());
 

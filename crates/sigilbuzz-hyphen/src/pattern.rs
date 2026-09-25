@@ -12,9 +12,9 @@
 //! comment) or `#` are ignored, as are empty lines.
 //!
 //! Internally each pattern is split into:
-//! - `letters` — the lowercase ASCII letters plus the optional `.`
+//! - `letters`: the lowercase ASCII letters plus the optional `.`
 //!   anchors, used for `starts_with` matching.
-//! - `priorities` — one priority per *position* in `letters`, where
+//! - `priorities`: one priority per *position* in `letters`, where
 //!   the priority at index `i` is the digit (if any) that appeared
 //!   *before* `letters[i]`. So `hy3ph` becomes
 //!   `letters="hyph"`, `priorities=[0,0,3,0]`.
@@ -102,7 +102,7 @@ impl Patterns {
     /// are blank lines. Each remaining line is one pattern in the
     /// classic Liang form (e.g. `hy3ph`, `.ach4`, `z3o1phr`).
     ///
-    /// `left_min` and `right_min` default to 2 and 3 — the canonical
+    /// `left_min` and `right_min` default to 2 and 3, the canonical
     /// values for English; callers may overwrite the fields after
     /// parsing if their language prefers different thresholds.
     pub fn parse(text: &str) -> Result<Self, ParseError> {

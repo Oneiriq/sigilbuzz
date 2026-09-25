@@ -1,4 +1,4 @@
-//! `sigilbuzz woff` — wrap or unwrap WOFF1 / WOFF2 envelopes.
+//! `sigilbuzz woff`: wrap or unwrap WOFF1 / WOFF2 envelopes.
 //!
 //! Wraps [`sigilbuzz_woff::wrap_woff1`] / [`sigilbuzz_woff::wrap_woff2`]
 //! and the matching unwrap functions. The unwrap path auto-detects

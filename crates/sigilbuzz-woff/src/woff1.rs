@@ -21,16 +21,16 @@ const WOFF1_SIGNATURE: u32 = 0x774F_4646; // 'wOFF'
 
 /// Knobs for [`wrap_woff1_with_options`].
 ///
-/// Defaults to `deflate_quality = 6` — a balanced
+/// Defaults to `deflate_quality = 6`, a balanced
 /// compression/throughput trade-off that matches `zlib`'s out-of-the-box
-/// behaviour and is what most WOFF1 producers (including fontTools)
+/// behavior and is what most WOFF1 producers (including fontTools)
 /// ship by default.
 #[derive(Debug, Clone, Copy)]
 pub struct WrapWoff1Options {
     /// Zlib compression level, `0..=9`. `0` is store-only; `9` is
     /// maximum compression and slowest. Values above `9` are clamped.
     /// Ignored when the `woff1-deflate` cargo feature is disabled
-    /// — the wrapper then always emits uncompressed pass-through
+    /// since the wrapper then always emits uncompressed pass-through
     /// bodies.
     pub deflate_quality: u8,
 }
@@ -82,7 +82,7 @@ pub fn unwrap_woff1(woff_bytes: &[u8]) -> Result<Vec<u8>> {
     }
     let _total_sfnt_size = r.read_u32("WOFF1 totalSfntSize")?;
     // majorVersion, minorVersion, metaOffset, metaLength,
-    // metaOrigLength, privOffset, privLength — none of which affect
+    // metaOrigLength, privOffset, privLength, none of which affect
     // the SFNT we rebuild.
     r.skip(4 + 4 + 4 + 4 + 4 + 4, "WOFF1 header tail")?;
 
@@ -137,7 +137,7 @@ pub fn unwrap_woff1(woff_bytes: &[u8]) -> Result<Vec<u8>> {
 
     // --- Build SFNT --------------------------------------------------------
 
-    // Compute search params per the SFNT spec — a no-op for our
+    // Compute search params per the SFNT spec, a no-op for our
     // parser but required for spec-compliant readers.
     let (search_range, entry_selector, range_shift) = sfnt_search_params(num_tables as u16);
 
@@ -207,7 +207,7 @@ pub fn unwrap_woff1(woff_bytes: &[u8]) -> Result<Vec<u8>> {
 /// Equivalent to `wrap_woff1_with_options(sfnt_bytes,
 /// WrapWoff1Options::default())`. With the `woff1-deflate` feature on
 /// (default), each table is emitted compressed when deflate saves
-/// space and uncompressed otherwise — the per-table decision the spec
+/// space and uncompressed otherwise, the per-table decision the spec
 /// expects. With the feature disabled, every table is emitted
 /// uncompressed (`compLength == origLength`).
 ///
@@ -242,7 +242,7 @@ pub fn wrap_woff1_with_options(sfnt_bytes: &[u8], opts: WrapWoff1Options) -> Res
     struct Entry {
         tag: [u8; 4],
         checksum: u32,
-        /// Bytes that go on the wire — either the raw SFNT slice or
+        /// Bytes that go on the wire: either the raw SFNT slice or
         /// a freshly-allocated zlib stream.
         body: Vec<u8>,
         comp_length: u32,
@@ -343,7 +343,7 @@ fn compress_body(raw: &[u8], _quality: u8) -> (Vec<u8>, u32) {
     #[cfg(feature = "woff1-deflate")]
     {
         // Compress, then keep the result only if it's strictly
-        // smaller than the raw body — the spec uses
+        // smaller than the raw body. The spec uses
         // `compLength == origLength` as the "uncompressed" sentinel,
         // so equal-size compressed payloads provide no signal and
         // would just cost decode time.
@@ -395,7 +395,7 @@ mod tests {
     #[cfg(feature = "woff1-deflate")]
     #[test]
     fn compress_body_keeps_raw_when_compression_grows_it() {
-        // 4 bytes of pseudo-random data — deflate framing dwarfs the
+        // 4 bytes of pseudo-random data. Deflate framing dwarfs the
         // payload, so the wrapper must keep the body uncompressed.
         let raw = [0x00, 0xFF, 0x37, 0x42];
         let (out, comp_len) = compress_body(&raw, 6);

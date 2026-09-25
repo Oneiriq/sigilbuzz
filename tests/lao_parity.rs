@@ -3,9 +3,9 @@
 //! Shapes a Lao corpus with both sigilbuzz and rustybuzz against
 //! Noto Sans Lao (OFL) and asserts the output matches byte-for-byte.
 //! Lao runs through sigilbuzz's Universal Shaping Engine pipeline
-//! (`src/ot/use_shaper`) with the Lao script-tag priority (`lao ` →
+//! (`src/ot/use_shaper`) with the Lao script-tag priority (`lao ` ->
 //! `DFLT`) and the same reduced Thai/Lao feature chain (`ccmp` /
-//! `liga` / `calt` — Lao has no halant and no subjoining).
+//! `liga` / `calt`: Lao has no halant and no subjoining).
 //!
 //! The corpus exercises:
 //!
@@ -41,85 +41,85 @@ const CORPUS: &[Case] = &[
         note: "empty",
         compare_rustybuzz: true,
     },
-    // ກ — ko, base alone.
+    // ກ: ko, base alone.
     Case {
         text: "\u{0E81}",
         note: "ko alone",
         compare_rustybuzz: true,
     },
-    // ກາ — ko + sara aa. Post-base matra, no reorder.
+    // ກາ: ko + sara aa. Post-base matra, no reorder.
     Case {
         text: "\u{0E81}\u{0EB2}",
         note: "kaa (post-base aa)",
         compare_rustybuzz: true,
     },
-    // ກິ — ko + sara i. Above-base matra.
+    // ກິ: ko + sara i. Above-base matra.
     Case {
         text: "\u{0E81}\u{0EB4}",
         note: "ki (above-base i)",
         compare_rustybuzz: true,
     },
-    // ກີ — ko + sara ii.
+    // ກີ: ko + sara ii.
     Case {
         text: "\u{0E81}\u{0EB5}",
         note: "kii (above-base ii)",
         compare_rustybuzz: true,
     },
-    // ກຸ — ko + sara u. Below-base.
+    // ກຸ: ko + sara u. Below-base.
     Case {
         text: "\u{0E81}\u{0EB8}",
         note: "ku (below-base u)",
         compare_rustybuzz: true,
     },
-    // ກູ — ko + sara uu.
+    // ກູ: ko + sara uu.
     Case {
         text: "\u{0E81}\u{0EB9}",
         note: "kuu (below-base uu)",
         compare_rustybuzz: true,
     },
-    // ເກ — sara e + ko. Pre-base vowel typed before base already.
+    // ເກ: sara e + ko. Pre-base vowel typed before base already.
     Case {
         text: "\u{0EC0}\u{0E81}",
         note: "ke (pre-base sara e)",
         compare_rustybuzz: true,
     },
-    // ແກ — sara ae + ko.
+    // ແກ: sara ae + ko.
     Case {
         text: "\u{0EC1}\u{0E81}",
         note: "kae (pre-base sara ae)",
         compare_rustybuzz: true,
     },
-    // ໂກ — sara o + ko.
+    // ໂກ: sara o + ko.
     Case {
         text: "\u{0EC2}\u{0E81}",
         note: "ko (pre-base sara o)",
         compare_rustybuzz: true,
     },
-    // ໃກ — sara ai + ko.
+    // ໃກ: sara ai + ko.
     Case {
         text: "\u{0EC3}\u{0E81}",
         note: "kai",
         compare_rustybuzz: true,
     },
-    // ກັນ — ko + mai kan + no. Above-base vowel + consonant close.
+    // ກັນ: ko + mai kan + no. Above-base vowel + consonant close.
     Case {
         text: "\u{0E81}\u{0EB1}\u{0E99}",
         note: "kan (mai kan)",
         compare_rustybuzz: true,
     },
-    // ກ່າ — ko + mai ek + sara aa.
+    // ກ່າ: ko + mai ek + sara aa.
     Case {
         text: "\u{0E81}\u{0EC8}\u{0EB2}",
         note: "kaa with mai ek",
         compare_rustybuzz: true,
     },
-    // ກ້າ — ko + mai tho + sara aa.
+    // ກ້າ: ko + mai tho + sara aa.
     Case {
         text: "\u{0E81}\u{0EC9}\u{0EB2}",
         note: "kaa with mai tho",
         compare_rustybuzz: true,
     },
-    // ສະບາຍດີ — "hello". sa + sara a + ba + sara aa + ny + do + sara ii.
+    // ສະບາຍດີ: "hello". sa + sara a + ba + sara aa + ny + do + sara ii.
     Case {
         text: "\u{0EAA}\u{0EB0}\u{0E9A}\u{0EB2}\u{0E8D}\u{0E94}\u{0EB5}",
         note: "sabaidi (hello)",
@@ -137,13 +137,13 @@ const CORPUS: &[Case] = &[
         note: "mixed latin + lao",
         compare_rustybuzz: true,
     },
-    // ກໍ — ko + niggahita (U+0ECD). Nikkhahit-equivalent mark.
+    // ກໍ: ko + niggahita (U+0ECD). Nikkhahit-equivalent mark.
     Case {
         text: "\u{0E81}\u{0ECD}",
         note: "ko + niggahita",
         compare_rustybuzz: true,
     },
-    // ກຳ — ko + lao am (U+0EB3). HarfBuzz decomposes this to
+    // ກຳ: ko + lao am (U+0EB3). HarfBuzz decomposes this to
     // niggahita (U+0ECD) + sara aa (U+0EB2) at buffer-prep;
     // sigilbuzz mirrors that in shape.rs so GSUB/GPOS see the
     // decomposed pair rustybuzz sees.

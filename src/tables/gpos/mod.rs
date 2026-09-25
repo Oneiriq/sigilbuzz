@@ -1,16 +1,16 @@
-//! `GPOS` — Glyph Positioning.
+//! `GPOS`: Glyph Positioning.
 //!
 //! Refines the advances and placements produced by cmap+hmtx with
 //! feature-driven deltas: kerning (lookup type 2), cursive
 //! attachment (type 3), mark-to-base attachment (type 4), and so
-//! on. sigilbuzz at M2 implements type 2 (pair adjustment) only —
-//! enough to make kerning actually apply — and exposes the
+//! on. sigilbuzz at M2 implements type 2 (pair adjustment) only,
+//! enough to make kerning actually apply, and exposes the
 //! machinery for later lookup types to slot in.
 //!
 //! The table header is shared with GSUB: version + offsets to
 //! `ScriptList`, `FeatureList`, and `LookupList`. Each lookup in the
-//! `LookupList` has a `lookupType` — see
-//! [`LookupType`] — that determines how its subtables are parsed.
+//! `LookupList` has a `lookupType` (see
+//! `LookupType`) that determines how its subtables are parsed.
 
 use crate::error::{Error, Result};
 use crate::tables::layout::{FeatureList, LookupList, ScriptList};
@@ -41,7 +41,7 @@ pub use value_record::{resolve_variation_delta, ValueRecord};
 pub mod lookup_type {
     /// Single adjustment. Deferred.
     pub const SINGLE_ADJUSTMENT: u16 = 1;
-    /// Pair adjustment — the one sigilbuzz currently implements.
+    /// Pair adjustment: the one sigilbuzz currently implements.
     pub const PAIR_ADJUSTMENT: u16 = 2;
     /// Cursive attachment. Deferred.
     pub const CURSIVE_ATTACHMENT: u16 = 3;
@@ -51,11 +51,11 @@ pub mod lookup_type {
     pub const MARK_TO_LIGATURE: u16 = 5;
     /// Mark-to-mark attachment. Deferred.
     pub const MARK_TO_MARK: u16 = 6;
-    /// Context positioning — implemented for formats 1, 2, 3.
+    /// Context positioning: implemented for formats 1, 2, 3.
     pub const CONTEXT: u16 = 7;
-    /// Chained context positioning — implemented for formats 1, 2, 3.
+    /// Chained context positioning: implemented for formats 1, 2, 3.
     pub const CHAINED_CONTEXT: u16 = 8;
-    /// Extension positioning — forwards to another lookup type.
+    /// Extension positioning: forwards to another lookup type.
     pub const EXTENSION: u16 = 9;
 }
 

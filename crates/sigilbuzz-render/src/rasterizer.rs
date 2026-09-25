@@ -2,12 +2,12 @@
 //!
 //! Two methods at the moment:
 //!
-//! - [`Rasterizer::rasterize_glyph`] — outline rasterization for any
+//! - [`Rasterizer::rasterize_glyph`]: outline rasterization for any
 //!   glyph reachable through `Face::glyph_outline_at_coords` (glyf,
 //!   CFF, CFF2, VARC).
-//! - [`Rasterizer::rasterize_colrv0_glyph`] — COLRv0 layered colour
+//! - [`Rasterizer::rasterize_colrv0_glyph`]: COLRv0 layered color
 //!   composition. Each layer is rasterized as a sub-glyph, multiplied
-//!   by its CPAL palette colour, and `over`-composited onto the
+//!   by its CPAL palette color, and `over`-composited onto the
 //!   running RGBA pixmap.
 
 use alloc::vec::Vec;
@@ -68,7 +68,7 @@ impl Rasterizer {
     /// anti-aliased edges don't clip.
     ///
     /// `size_pt` is the rendering size in pixels (the renderer's "em
-    /// size"); the function maps font design-units → pixels via
+    /// size"); the function maps font design-units to pixels via
     /// `size_pt / units_per_em`. Y flips so that increasing pixel rows
     /// move down (the conventional bitmap orientation).
     ///
@@ -101,7 +101,7 @@ impl Rasterizer {
             return Err(RenderError::NoOutline(gid));
         }
 
-        // Design-units → pixels. Y flips because OpenType's y axis
+        // Design-units -> pixels. Y flips because OpenType's y axis
         // points up while bitmap rows go down.
         let s = size_pt / upem;
         let xform = Affine {
@@ -118,16 +118,16 @@ impl Rasterizer {
         Ok(r.pixmap)
     }
 
-    /// Rasterizes a COLRv0 layered colour glyph and composes the
+    /// Rasterizes a COLRv0 layered color glyph and composes the
     /// layers into an RGBA premultiplied [`ColorPixmap`].
     ///
     /// Layers are drawn in COLR order (bottom-up). Each layer's outline
     /// is rasterized at the same size as the base glyph; the resulting
-    /// alpha mask is multiplied by the palette colour for that layer
+    /// alpha mask is multiplied by the palette color for that layer
     /// and then `over`-composited on top of the running pixmap. The
-    /// special palette index `0xFFFF` falls back to opaque black —
+    /// special palette index `0xFFFF` falls back to opaque black,
     /// rasterizers in real apps would substitute the foreground text
-    /// colour here, but at this layer we have no app-level context.
+    /// color here, but at this layer we have no app-level context.
     ///
     /// # Errors
     /// - [`RenderError::NoColrV0`] when the glyph has no v0 layer record.
@@ -163,7 +163,7 @@ impl Rasterizer {
 
         // Validate the user-supplied palette index against the CPAL
         // up front. The per-layer `cpal.color()` lookup below would
-        // also catch this — but only for layers whose palette entry
+        // also catch this, but only for layers whose palette entry
         // is not the foreground sentinel `0xFFFF`. A glyph composed
         // entirely of foreground layers would otherwise silently
         // accept an out-of-range palette. (issue #203)
@@ -260,18 +260,18 @@ impl Rasterizer {
         Ok(out)
     }
 
-    /// Rasterizes a COLRv1 paint-tree colour glyph into a premultiplied
+    /// Rasterizes a COLRv1 paint-tree color glyph into a premultiplied
     /// RGBA [`ColorPixmap`].
     ///
     /// Walks the paint tree via `sigilbuzz-paint`'s evaluator, then
     /// composites every leaf paint (solid / linear / radial / sweep
-    /// gradient) — clipped through any enclosing `PaintGlyph` outline
-    /// and blended through any `PaintComposite` mode — into a single
+    /// gradient), clipped through any enclosing `PaintGlyph` outline
+    /// and blended through any `PaintComposite` mode, into a single
     /// surface sized to the union bounding box of every fill.
     ///
     /// `palette_index` is forwarded for forward compatibility with
     /// COLRv0; the COLRv1 evaluator currently always uses palette 0
-    /// for stop colour lookups.
+    /// for stop color lookups.
     ///
     /// # Errors
     /// - [`RenderError::ColrV1NotFound`] when the font has no v1
@@ -298,7 +298,7 @@ impl Rasterizer {
     /// ppem doesn't equal the requested `size_pt`.
     ///
     /// `coords` is reserved for future variable-axis bitmap variants
-    /// and currently unused — the canonical bitmap embed tables don't
+    /// and currently unused. The canonical bitmap embed tables don't
     /// vary per axis.
     ///
     /// # Errors
@@ -314,7 +314,7 @@ impl Rasterizer {
     }
 }
 
-/// Composites `mask × color` onto `dst` at offset `(dx, dy)` using the
+/// Composites `mask * color` onto `dst` at offset `(dx, dy)` using the
 /// straight-alpha source-over operator. `dst` stores premultiplied
 /// RGBA.
 fn blit_layer(dst: &mut ColorPixmap, mask: &Pixmap, dx: u32, dy: u32, color: [u8; 4]) {
@@ -341,7 +341,7 @@ fn blit_layer(dst: &mut ColorPixmap, mask: &Pixmap, dx: u32, dy: u32, color: [u8
             if m == 0 {
                 continue;
             }
-            // Source alpha: layer color alpha × coverage.
+            // Source alpha: layer color alpha * coverage.
             let sa = (ca * m + 127) / 255;
             if sa == 0 {
                 continue;

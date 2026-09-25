@@ -24,7 +24,7 @@
 //!    coordination problem cleanly: every output tuple stands alone.
 //! 3. Output `sharedTupleCount = 0`. Per-glyph emit reproduces the
 //!    source's shared-points / per-tuple-private-points structure
-//!    verbatim — packed point numbers are copied byte-for-byte; only
+//!    verbatim: packed point numbers are copied byte-for-byte; only
 //!    the delta payloads (and the headers around them) change.
 //! 4. The header's `axisCount` becomes `new_axis_count`; the header's
 //!    `glyphCount` is the source's verbatim (instancing keeps every
@@ -66,7 +66,7 @@ const DELTA_COUNT_MASK: u8 = 0x3F;
 /// `pins` (the caller derives both from a single source-axis vector).
 ///
 /// Returns the new `gvar` bytes. When every axis is `AxisPin::Keep`
-/// the source bytes pass through verbatim — no re-emit is needed.
+/// the source bytes pass through verbatim. No re-emit is needed.
 pub(crate) fn bake_gvar_partial(
     gvar_bytes: &[u8],
     coords: &[F2Dot14],
@@ -98,7 +98,7 @@ pub(crate) fn bake_gvar_partial(
     }
 
     // Pre-resolve the shared tuple list (peaks only, axis_count
-    // dimensions). We project each one once and cache the result —
+    // dimensions). We project each one once and cache the result:
     // any source tuple that points at it via tuple_index reuses the
     // same projection. The cache only matters for source-shape
     // fidelity, since we always emit embedded peaks downstream.
@@ -142,7 +142,7 @@ pub(crate) fn bake_gvar_partial(
     let offsets_len = (header.glyph_count as usize + 1) * off_entry_size;
     let offsets_padded = (offsets_len + 3) & !3;
     let shared_tuples_off: u32 = (header_len + offsets_padded) as u32;
-    // sharedTupleCount = 0 → shared tuple region is empty; data array
+    // sharedTupleCount = 0 -> shared tuple region is empty; data array
     // sits immediately after the offsets-padded region.
     let data_array_off: u32 = shared_tuples_off;
 
@@ -176,7 +176,7 @@ pub(crate) fn bake_gvar_partial(
         out.push(0);
     }
 
-    // Data array (no shared tuples — sharedTupleCount = 0).
+    // Data array (no shared tuples, sharedTupleCount = 0).
     for body in &bodies {
         out.extend_from_slice(body);
     }
@@ -357,7 +357,7 @@ fn rewrite_glyph_body(
         new_peak: Vec<f32>,
         new_int_start: Option<Vec<f32>>,
         new_int_end: Option<Vec<f32>>,
-        // Private points — copied verbatim from the source if the
+        // Private points: copied verbatim from the source if the
         // source tuple had them.
         private_points_raw: Option<Vec<u8>>,
         // Scaled deltas (post-pin-scalar). Encoded back as packed
@@ -413,7 +413,7 @@ fn rewrite_glyph_body(
 
         // Project.
         let Some(proj) = project_region_onto_kept_axes(&region, pins, coords) else {
-            // Tuple drops — skip.
+            // Tuple drops: skip.
             continue;
         };
 
@@ -456,7 +456,7 @@ fn rewrite_glyph_body(
                 (shared_pts.len(), false)
             }
         } else {
-            // No point lists at all — spec says this is the all-
+            // No point lists at all: spec says this is the all-
             // points case. Recover n from the delta stream byte
             // length.
             let n = count_packed_deltas(&tuple_bytes[tr..])?;
@@ -497,13 +497,13 @@ fn rewrite_glyph_body(
             }
         }
         // Drop survivors whose new region collapses to no-contribution
-        // on every Keep axis (every peak is zero — the kept-axis
+        // on every Keep axis (every peak is zero: the kept-axis
         // tuple is a no-op).
         if !new_peak.is_empty() && new_peak.iter().all(|&p| p == 0.0) {
             // No surviving variation on the kept axes: the static
             // contribution at the pin coords already lives in the
             // baked outline (scaled deltas would multiply zero by the
-            // scalar — moot anyway). Drop.
+            // scalar, moot anyway). Drop.
             continue;
         }
 
@@ -535,7 +535,7 @@ fn rewrite_glyph_body(
         });
     }
 
-    // If no tuples survive, the glyph has no variation — emit empty.
+    // If no tuples survive, the glyph has no variation. Emit empty.
     if survivors.is_empty() {
         return Ok(Vec::new());
     }
@@ -592,7 +592,7 @@ fn rewrite_glyph_body(
         }
     }
 
-    // Patch dataOffset (relative to start of body) — points at the
+    // Patch dataOffset (relative to start of body): points at the
     // start of the per-tuple data block.
     let new_data_off = out.len() as u16;
     out[data_off_slot..data_off_slot + 2].copy_from_slice(&new_data_off.to_be_bytes());
@@ -871,7 +871,7 @@ fn count_packed_deltas(data: &[u8]) -> Result<usize, SubsetError> {
     // shape is: each stream covers exactly num_points values. The
     // count function computes the *total* values across both
     // streams and the caller divides by 2. The control bytes are
-    // self-describing — we consume runs until the cursor is out
+    // self-describing: we consume runs until the cursor is out
     // of bytes.
     while cursor < data.len() {
         let control = data[cursor];
@@ -893,7 +893,7 @@ fn count_packed_deltas(data: &[u8]) -> Result<usize, SubsetError> {
             total += run;
         }
     }
-    // Stream covers x then y deltas — same count each.
+    // Stream covers x then y deltas, same count each.
     if total % 2 != 0 {
         return Err(SubsetError::Unsupported(
             "gvar partial: all-points deltas not paired",
@@ -922,7 +922,7 @@ fn encode_packed_deltas(values: &[i32], out: &mut Vec<u8>) {
             out.push(control);
             i += run;
         } else if (-128..=127).contains(&v) {
-            // i8 run — collect as long as values fit and aren't zero
+            // i8 run: collect as long as values fit and aren't zero
             // (zero runs are more compact via ALL_ZERO).
             let mut run = 1usize;
             while i + run < values.len()
@@ -942,7 +942,7 @@ fn encode_packed_deltas(values: &[i32], out: &mut Vec<u8>) {
             }
             i += run;
         } else {
-            // i16 run — values that don't fit in i8.
+            // i16 run: values that don't fit in i8.
             let mut run = 1usize;
             while i + run < values.len()
                 && values[i + run] != 0
@@ -1023,7 +1023,7 @@ mod tests {
     fn encode_packed_deltas_compresses_zero_run() {
         let mut out = Vec::new();
         encode_packed_deltas(&[0, 0, 0, 0, 0], &mut out);
-        // ALL_ZERO control byte: 0x80 | 0x04 (run-1=4) → 0x84.
+        // ALL_ZERO control byte: 0x80 | 0x04 (run-1=4) -> 0x84.
         assert_eq!(out, vec![0x84]);
     }
 
@@ -1067,7 +1067,7 @@ mod tests {
         }
     }
 
-    /// Probe (#197): pinning at a coord outside the tuple's region —
+    /// Probe (#197): pinning at a coord outside the tuple's region,
     /// `axis_support_scalar` returns 0, the tuple drops via
     /// `project_region_onto_kept_axes`. No infinite loops, no panics,
     /// no NaN leak through the round-trip.  Coords approaching f32::MAX
@@ -1092,7 +1092,7 @@ mod tests {
 
     #[test]
     fn synthetic_two_axis_pin_wght_at_half_scales_payload() {
-        // Pin wght=0.5 → scalar 0.5; Keep wdth. Surviving tuple's
+        // Pin wght=0.5 -> scalar 0.5; Keep wdth. Surviving tuple's
         // peak is wdth-only; payload scales by 0.5.
         let bytes = build_two_axis_gvar();
         let pins = vec![AxisPin::Pin, AxisPin::Keep];
@@ -1102,14 +1102,14 @@ mod tests {
         assert_eq!(parsed.axis_count(), 1);
         // At wdth=1 the new deltas equal half the source's at peak.
         let new_deltas = parsed.glyph_deltas(0, &[1.0_f32], 4);
-        // Source dx=10 at peak (1,1) → new dx=5 at wdth=1.
+        // Source dx=10 at peak (1,1) -> new dx=5 at wdth=1.
         for d in &new_deltas {
             assert!((d.dx - 5.0).abs() < 1e-3, "expected 5, got {}", d.dx);
         }
     }
 
     /// Builds a 2-axis gvar with one glyph, one tuple at
-    /// peak=(1.0, 1.0), all-points i8 deltas: x=+10 ×4, y=0 ×4.
+    /// peak=(1.0, 1.0), all-points i8 deltas: x=+10 x4, y=0 x4.
     fn build_two_axis_gvar() -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&1u16.to_be_bytes()); // major
@@ -1212,16 +1212,16 @@ mod tests {
         let dataoff_val = (out.len() - gvd_start) as u16;
         out[data_off_slot..data_off_slot + 2].copy_from_slice(&dataoff_val.to_be_bytes());
 
-        // Tuple data: x deltas (+10 ×4) then y deltas (0 ×4). No
-        // private/shared point numbers — equivalent to all-points.
+        // Tuple data: x deltas (+10 x4) then y deltas (0 x4). No
+        // private/shared point numbers, equivalent to all-points.
         let tuple_start = out.len();
-        out.push(0x03); // i8 run, run-1=3 → 4 deltas
+        out.push(0x03); // i8 run, run-1=3 -> 4 deltas
         out.resize(out.len() + 4, 10);
-        out.push(0x83); // ALL_ZERO run-1=3 → 4 zeros
+        out.push(0x83); // ALL_ZERO run-1=3 -> 4 zeros
         let tuple_len = (out.len() - tuple_start) as u16;
         out[vds_slot..vds_slot + 2].copy_from_slice(&tuple_len.to_be_bytes());
 
-        // Patch glyph offset (short — half-encoded).
+        // Patch glyph offset (short, half-encoded).
         let body_len = (out.len() as u32) - data_array_off;
         let half = (body_len / 2) as u16;
         out[glyph_off_start + 2..glyph_off_start + 4].copy_from_slice(&half.to_be_bytes());

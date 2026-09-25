@@ -5,7 +5,7 @@
 //! during stop resolution: a stop's per-stop alpha is multiplied with
 //! the palette entry's alpha before the color leaves the evaluator.
 //!
-//! Conversion stays linear-in-sRGB at this layer — color management
+//! Conversion stays linear-in-sRGB at this layer. Color management
 //! is the renderer's call, not ours.
 
 use sigilbuzz::tables::cpal::Color as CpalColor;

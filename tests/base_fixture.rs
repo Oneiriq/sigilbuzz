@@ -10,7 +10,7 @@
 //! exercise the Face accessor.
 //!
 //! The fixture mirrors the layout `build_minimal_base` produces in
-//! `src/tables/base.rs::tests` — one horizontal axis, one script
+//! `src/tables/base.rs::tests`: one horizontal axis, one script
 //! (`latn`), one baseline tag (`romn`) at y = 0, plus a default
 //! MinMax of (-200, 800).
 

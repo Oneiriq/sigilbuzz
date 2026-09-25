@@ -1,4 +1,4 @@
-//! `vmtx` — vertical metrics.
+//! `vmtx`: vertical metrics.
 //!
 //! Symmetric mirror of `hmtx`: per-glyph `advanceHeight` + top-side
 //! bearing, with the same "repeat the last long metric" trick past

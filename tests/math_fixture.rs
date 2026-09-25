@@ -87,7 +87,7 @@ fn math_variants_returns_construction_for_integral_sign() {
     let blob = Blob::new(&bytes);
     let face = Face::parse(&blob, 0).unwrap();
 
-    // Resolve U+222B → gid via the cmap, just like a real shaper.
+    // Resolve U+222B -> gid via the cmap, just like a real shaper.
     let cmap = face.cmap().unwrap();
     let integral_gid = cmap.glyph_id('\u{222B}').expect("∫ in cmap");
     assert_eq!(integral_gid, 2);
@@ -118,7 +118,7 @@ fn math_variants_returns_construction_for_integral_sign() {
     assert!(!parts[2].is_extender());
     assert_eq!(parts[1].full_advance, 1500);
 
-    // Horizontal lookup for a gid not in horizontal coverage → None.
+    // Horizontal lookup for a gid not in horizontal coverage -> None.
     assert!(mv.horizontal_glyph_construction(integral_gid).is_none());
 }
 

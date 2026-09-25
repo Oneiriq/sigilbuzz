@@ -1,4 +1,4 @@
-//! `sigilbuzz-paint` — COLRv1 paint evaluator.
+//! `sigilbuzz-paint`: COLRv1 paint evaluator.
 //!
 //! sigilbuzz parses the COLRv1 paint tree as a borrowed enum
 //! ([`sigilbuzz::tables::colr::ColrPaint`]); this companion crate walks
@@ -29,7 +29,7 @@
 //! for cmd in &cmds {
 //!     match cmd {
 //!         DrawCmd::FillGlyph { gid, transform, paint } => {
-//!             // hand off to your rasteriser
+//!             // hand off to your rasterizer
 //!             let _ = (gid, transform, paint);
 //!         }
 //!         DrawCmd::PushLayer { composite_mode } => {

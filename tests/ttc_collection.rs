@@ -1,6 +1,6 @@
 //! TrueType Collection parsing: a real TTC is synthesized from a
 //! vendored fixture font (twice), and every member must behave
-//! byte-for-byte like the standalone font — same tables, same
+//! byte-for-byte like the standalone font: same tables, same
 //! metrics, same outlines.
 
 use std::fs;

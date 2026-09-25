@@ -1,15 +1,15 @@
-//! `sbix` — Standard Bitmap Graphics (Apple).
+//! `sbix`: Standard Bitmap Graphics (Apple).
 //!
 //! Apple's bitmap-emoji table. Simpler than CBDT/CBLC: a flat list of
 //! "strikes" (one per ppem), each carrying a per-glyph
-//! `glyphDataOffsets[numGlyphs + 1]` array — exactly the same trick
+//! `glyphDataOffsets[numGlyphs + 1]` array, exactly the same trick
 //! `loca` uses. Per-glyph the payload is one of:
 //!
-//! - `'png '` — PNG bytes
-//! - `'jpg '` — JPEG bytes
-//! - `'tiff'` — TIFF bytes
-//! - `'jp2 '` — JPEG 2000 bytes (rare)
-//! - `'dupe'` — pointer to another glyph id (the encoded glyph id is
+//! - `'png '`: PNG bytes
+//! - `'jpg '`: JPEG bytes
+//! - `'tiff'`: TIFF bytes
+//! - `'jp2 '`: JPEG 2000 bytes (rare)
+//! - `'dupe'`: pointer to another glyph id (the encoded glyph id is
 //!   the entire 2-byte payload)
 //!
 //! sigilbuzz returns the raw four-byte tag and the payload slice;
@@ -36,7 +36,7 @@
 //!     8  ...  payload bytes
 //! ```
 //!
-//! `numGlyphs` is taken from `maxp` — sbix doesn't restate it.
+//! `numGlyphs` is taken from `maxp`: sbix doesn't restate it.
 //! Empty glyphs (length-zero entries) are valid: `glyphDataOffsets[gid] ==
 //! glyphDataOffsets[gid + 1]` means "this strike has no bitmap for
 //! this glyph". sigilbuzz surfaces those as `Ok(None)`.
@@ -44,7 +44,7 @@
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
 
-/// One sbix strike — a set of per-glyph bitmaps at a given resolution.
+/// One sbix strike: a set of per-glyph bitmaps at a given resolution.
 /// Borrows into the table; cheap to copy.
 #[derive(Debug, Clone, Copy)]
 pub struct SbixStrike<'a> {
@@ -62,7 +62,7 @@ pub struct SbixStrike<'a> {
     strike_data: &'a [u8],
 }
 
-/// One sbix glyph entry — origin offset, graphic type tag, and the
+/// One sbix glyph entry: origin offset, graphic type tag, and the
 /// raw payload.
 #[derive(Debug, Clone, Copy)]
 pub struct SbixGlyph<'a> {
@@ -73,7 +73,7 @@ pub struct SbixGlyph<'a> {
     pub origin_offset_y: i16,
     /// Four-byte tag describing the payload format.
     pub graphic_type: [u8; 4],
-    /// Raw payload bytes — a PNG/JPEG/TIFF blob, or for `'dupe'` the
+    /// Raw payload bytes: a PNG/JPEG/TIFF blob, or for `'dupe'` the
     /// 2-byte big-endian glyph id of the glyph this one aliases.
     pub data: &'a [u8],
 }
@@ -89,7 +89,7 @@ pub const TAG_JP2: [u8; 4] = *b"jp2 ";
 /// Tag indicating the payload is a 2-byte glyph id whose bitmap to use instead.
 pub const TAG_DUPE: [u8; 4] = *b"dupe";
 
-/// Parsed `sbix` table — header plus the strike-offset array.
+/// Parsed `sbix` table: header plus the strike-offset array.
 #[derive(Debug, Clone, Copy)]
 pub struct Sbix<'a> {
     data: &'a [u8],
@@ -103,7 +103,7 @@ pub struct Sbix<'a> {
 }
 
 impl<'a> Sbix<'a> {
-    /// Parses an `sbix` table. `num_glyphs` comes from `maxp` — the
+    /// Parses an `sbix` table. `num_glyphs` comes from `maxp`. The
     /// sbix table itself doesn't carry one, since the `glyphDataOffsets`
     /// array length is `maxp.numGlyphs + 1`.
     pub fn parse(data: &'a [u8], num_glyphs: u16) -> Result<Self> {
@@ -239,7 +239,7 @@ impl<'a> SbixStrike<'a> {
     }
 
     /// Looks up `glyph_id` in this strike. Returns `Ok(None)` for an
-    /// out-of-range gid, or for an empty entry (length-zero record —
+    /// out-of-range gid, or for an empty entry (length-zero record:
     /// "this strike has no bitmap for this glyph").
     pub fn glyph(&self, glyph_id: u16) -> Result<Option<SbixGlyph<'a>>> {
         if glyph_id >= self.num_glyphs {

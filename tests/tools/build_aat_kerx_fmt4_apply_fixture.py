@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Synthesise an AAT-only font that exercises `kerx` subtable
-format 4 — control-point and anchor-point apply paths.
+format 4: control-point and anchor-point apply paths.
 
 Two fonts are emitted side by side:
 
-    aat_kerx_fmt4_type0.ttf   — fmt 4 action type 0 (glyf control points)
-    aat_kerx_fmt4_type1.ttf   — fmt 4 action type 1 (ankr anchor points)
+    aat_kerx_fmt4_type0.ttf: fmt 4 action type 0 (glyf control points)
+    aat_kerx_fmt4_type1.ttf: fmt 4 action type 1 (ankr anchor points)
 
 Both fonts ship six glyphs (.notdef, A, B, V, W, X) and a kerx v2
 table whose single fmt-4 subtable carries a real state machine:
@@ -14,9 +14,9 @@ class 4 = "A", class 5 = "B"; the entry for (state 0, class 4) marks
 returns to state 0. The action records are crafted so a known offset
 falls out of `mark - current`:
 
-    type 0 — A's contour point 1 sits at (500, 0); B's point 0 sits
+    type 0:  A's contour point 1 sits at (500, 0); B's point 0 sits
              at (0, 0). Expected offset on B: (+500, 0).
-    type 1 — `ankr` carries one anchor per real glyph. A's anchor 0
+    type 1:  `ankr` carries one anchor per real glyph. A's anchor 0
              at (500, 0); B's anchor 0 at (0, 0). Same expected
              offset.
 
@@ -52,7 +52,7 @@ NUM_GLYPHS = 6
 
 def build_rect(width: int, height: int = 700):
     pen = TTGlyphPen(None)
-    # Four contour points — kept on-curve so glyf-point indices map
+    # Four contour points, kept on-curve so glyf-point indices map
     # cleanly to the corners. The Rust shaper sees:
     #   point 0 = (0, 0)
     #   point 1 = (width, 0)
@@ -69,12 +69,12 @@ def build_rect(width: int, height: int = 700):
 def build_format4_state_machine(action_type: int, action_records: bytes) -> bytes:
     """Emits one kerx fmt-4 subtable bytes (incl. 12-B common header).
 
-    Class lookup (format 6) maps GID_A → class 4, GID_B → class 5.
+    Class lookup (format 6) maps GID_A -> class 4, GID_B -> class 5.
     State table:
-        state 0 / class 4 → entry 1 (mark, → state 1)
-        state 1 / class 5 → entry 2 (action 0, → state 0)
-        state 1 / class 4 → entry 3 (re-mark, stay in state 1)
-        everything else  → entry 0 (noop)
+        state 0 / class 4 -> entry 1 (mark, -> state 1)
+        state 1 / class 5 -> entry 2 (action 0, -> state 0)
+        state 1 / class 4 -> entry 3 (re-mark, stay in state 1)
+        everything else  -> entry 0 (noop)
     """
     n_classes = 6
     n_states = 2
@@ -107,9 +107,9 @@ def build_format4_state_machine(action_type: int, action_records: bytes) -> byte
     body += class_lookup
     while len(body) < state_off:
         body += b"\x00"
-    # State 0: only class 4 (A) is interesting → entry 1 (mark, →s1).
+    # State 0: only class 4 (A) is interesting -> entry 1 (mark, ->s1).
     s0 = [0, 0, 0, 0, 1, 0]
-    # State 1: class 5 (B) → entry 2 (action), class 4 (A) → entry 3
+    # State 1: class 5 (B) -> entry 2 (action), class 4 (A) -> entry 3
     # (re-mark, stay in s1).
     s1 = [0, 0, 0, 0, 3, 2]
     for v in s0 + s1:
@@ -119,8 +119,8 @@ def build_format4_state_machine(action_type: int, action_records: bytes) -> byte
     NO_ACTION = 0xFFFF
     entries = [
         (0, 0, NO_ACTION),       # 0: noop
-        (1, MARK, NO_ACTION),    # 1: mark, → state 1
-        (0, 0, 0),               # 2: fire action 0, → state 0
+        (1, MARK, NO_ACTION),    # 1: mark, -> state 1
+        (0, 0, 0),               # 2: fire action 0, -> state 0
         (1, MARK, NO_ACTION),    # 3: re-mark, stay s1
     ]
     for ns, fl, ai in entries:
@@ -141,9 +141,9 @@ def build_kerx_table(action_type: int, action_records: bytes) -> bytes:
 
 def build_ankr_table() -> bytes:
     """ankr v0 with one anchor per gid for A and B.
-    A → anchor 0 = (500, 0); B → anchor 0 = (0, 0).
+    A -> anchor 0 = (500, 0); B -> anchor 0 = (0, 0).
     """
-    # Format-6 lookup: gid → byte offset into anchor block.
+    # Format-6 lookup: gid -> byte offset into anchor block.
     pairs = sorted([(GID_A, 0), (GID_B, 8)])
     lookup = bytearray()
     lookup += struct.pack(">H", 6)
@@ -228,13 +228,13 @@ def build_font(out_path: Path, action_type: int, action_records: bytes,
 
 
 def main():
-    # Type 0 — control points. A's contour point 1 sits at (500, 0)
+    # Type 0: control points. A's contour point 1 sits at (500, 0)
     # (the rectangle's bottom-right corner). B's point 0 is at (0, 0).
     # Expected `mark - current` = (500, 0).
     type0_action = struct.pack(">HH", 1, 0)  # mark_point=1, current_point=0
     build_font(OUT_DIR / "aat_kerx_fmt4_type0.ttf", 0, type0_action, {})
 
-    # Type 1 — anchor points. ankr maps A→anchor 0 at (500, 0), B→
+    # Type 1: anchor points. ankr maps A->anchor 0 at (500, 0), B->
     # anchor 0 at (0, 0). The action record points at index 0 on each
     # side.
     type1_action = struct.pack(">HH", 0, 0)  # mark_anchor=0, current_anchor=0

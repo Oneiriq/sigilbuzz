@@ -7,7 +7,7 @@
 //!
 //! Fonts are loaded via `include_bytes!` from the workspace's bundled
 //! fixtures and dropped onto disk under `std::env::temp_dir()` for the
-//! duration of the test — the CLI takes paths, not slices.
+//! duration of the test. The CLI takes paths, not slices.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,7 +19,7 @@ const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regula
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Drops `bytes` into a temp file and returns its path. The file is
-/// not cleaned up — `std::env::temp_dir()` is the OS's responsibility,
+/// not cleaned up: `std::env::temp_dir()` is the OS's responsibility,
 /// and a stable filename per (test, counter) is friendlier for
 /// post-mortem debugging than a `tempfile`-style auto-delete.
 fn write_tempfile(stem: &str, bytes: &[u8]) -> PathBuf {
@@ -330,7 +330,7 @@ fn paint_reports_no_colr_for_open_sans() {
 #[test]
 fn slug_emits_valid_json_for_outline_glyph() {
     let font = open_sans_path();
-    // gid 43 is 'H' in Open Sans — picked because the shape test
+    // gid 43 is 'H' in Open Sans, picked because the shape test
     // already established it has a non-empty outline.
     let (stdout, stderr, ok) = run_cli(["slug".as_ref(), font.as_os_str(), "43".as_ref()]);
     assert!(ok, "binary failed: stderr={stderr}");
@@ -364,7 +364,7 @@ fn svg_writes_well_formed_document() {
 
 #[test]
 fn svg_rejects_glyph_without_outline() {
-    // gid 0 is .notdef — Open Sans's .notdef does have an outline,
+    // gid 0 is .notdef. Open Sans's .notdef does have an outline,
     // so we go for an out-of-range gid instead.
     let font = open_sans_path();
     let out = write_tempfile("glyph_oob.svg", b"");

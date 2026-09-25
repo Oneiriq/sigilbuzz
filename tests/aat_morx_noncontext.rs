@@ -1,9 +1,9 @@
-//! AAT `morx` type 4 (non-contextual substitution) — end-to-end
+//! AAT `morx` type 4 (non-contextual substitution): end-to-end
 //! shape pass.
 //!
 //! Fixture: `tests/fixtures/aat_morx_noncontext.ttf` (~900 B) carries
 //! five glyphs (`.notdef`, A, B, A.smcp, B.smcp) plus a `morx` v2
-//! type-4 subtable with a single mapping `A (gid 1) → A.smcp (gid 3)`.
+//! type-4 subtable with a single mapping `A (gid 1) -> A.smcp (gid 3)`.
 //! B is intentionally *not* mapped so the test can prove the
 //! substitution is per-glyph rather than blanket.
 //!
@@ -12,7 +12,7 @@
 //!
 //! # No rustybuzz parity
 //!
-//! rustybuzz 0.20 has no AAT shaper — it ignores `morx` entirely.
+//! rustybuzz 0.20 has no AAT shaper. It ignores `morx` entirely.
 //! This is sigilbuzz-only coverage. Regenerate with
 //! `python3 tests/tools/build_aat_morx_noncontext_fixture.py`.
 
@@ -46,7 +46,7 @@ fn fixture_has_morx_and_no_gsub() {
 
 #[test]
 fn type4_substitutes_a_for_smcp() {
-    // Single A → A.smcp via the type-4 lookup. Output is one glyph
+    // Single A -> A.smcp via the type-4 lookup. Output is one glyph
     // at gid 3.
     let glyphs = shape_text("A");
     assert_eq!(glyphs.len(), 1);
@@ -82,7 +82,7 @@ fn type4_substitutes_every_occurrence() {
 
 #[test]
 fn type4_preserves_clusters() {
-    // Substitution doesn't merge or split — clusters stay 1:1.
+    // Substitution doesn't merge or split: clusters stay 1:1.
     let glyphs = shape_text("AB");
     assert_eq!(glyphs[0].cluster, 0);
     assert_eq!(glyphs[1].cluster, 1);
