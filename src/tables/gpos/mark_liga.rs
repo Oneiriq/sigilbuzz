@@ -43,7 +43,7 @@
 
 use crate::error::{Error, Result};
 use crate::tables::gpos::anchor::Anchor;
-use crate::tables::gpos::mark_base::MarkAttachment;
+use crate::tables::gpos::mark_base::{anchor_matrix_len, MarkAttachment};
 use crate::tables::layout::Coverage;
 use crate::tables::parse::Reader;
 
@@ -165,8 +165,9 @@ impl<'a> MarkArray<'a> {
             return None;
         }
         let at = self.records_off + idx as usize * 4;
-        let mark_class = u16::from_be_bytes([self.data[at], self.data[at + 1]]);
-        let anchor_off_rel = u16::from_be_bytes([self.data[at + 2], self.data[at + 3]]) as usize;
+        let mut r = Reader::at(self.data, at).ok()?;
+        let mark_class = r.read_u16().ok()?;
+        let anchor_off_rel = r.read_u16().ok()? as usize;
         let anchor_off = self.base + anchor_off_rel;
         let anchor = Anchor::parse_at(self.data, anchor_off).ok()?;
         Some((mark_class, anchor))
@@ -218,8 +219,7 @@ impl<'a> LigatureArray<'a> {
             return None;
         }
         let off_slot = self.attach_offsets_off + liga_idx as usize * 2;
-        let attach_off_rel =
-            u16::from_be_bytes([self.data[off_slot], self.data[off_slot + 1]]) as usize;
+        let attach_off_rel = Reader::at(self.data, off_slot).ok()?.read_u16().ok()? as usize;
         let attach_base = self.base + attach_off_rel;
         if attach_base >= self.data.len() {
             return None;
@@ -230,16 +230,16 @@ impl<'a> LigatureArray<'a> {
             return None;
         }
         let records_off = r.position();
-        let stride = self.mark_class_count as usize * 2;
-        let need = records_off + component_count as usize * stride;
-        if self.data.len() < need {
+        let need = anchor_matrix_len(component_count, self.mark_class_count)?;
+        if self.data.len() < records_off.checked_add(need)? {
             return None;
         }
+        // The whole component matrix fits in `data`, so this offset
+        // cannot overflow.
         let anchor_slot = records_off
             + component_index as usize * self.mark_class_count as usize * 2
             + mark_class as usize * 2;
-        let anchor_off_rel =
-            u16::from_be_bytes([self.data[anchor_slot], self.data[anchor_slot + 1]]) as usize;
+        let anchor_off_rel = Reader::at(self.data, anchor_slot).ok()?.read_u16().ok()? as usize;
         if anchor_off_rel == 0 {
             return None;
         }
