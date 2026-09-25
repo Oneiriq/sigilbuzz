@@ -6,7 +6,7 @@
 //!
 //! # Per-subtable coverage
 //!
-//! As of this commit the rewriter ships byte-level support for:
+//! The rewriter supports:
 //!
 //! - **GlyphClassDef**: ClassDef remap (filter dropped gids out, then
 //!   remap to new gids; auto-format-pick via the existing emitter).
@@ -14,27 +14,21 @@
 //!   GlyphClassDef.
 //!
 //! Other GDEF subtables (`AttachList`, `LigCaretList`,
-//! `MarkGlyphSetsDef`, `ItemVariationStore`) are dropped from the
-//! rewritten output. Most callers that disable layout-aware shaping
-//! for a heavy subset don't notice because GPOS drops too (see
-//! [`crate::gpos`]) and these ancillary tables are only consulted
-//! during shaping.
-//!
-//! Issue tracking the remaining GDEF subtables: see the sibling issue
-//! filed alongside this module.
+//! `MarkGlyphSetsDef`, `ItemVariationStore`) are not rewritten yet and
+//! are dropped from the output, which is always a version 1.0 table.
+//! Lookups that name a mark filtering set keep that index, so shaping
+//! with the subset ignores their mark filter.
 
 use alloc::vec::Vec;
 
 use crate::classdef::emit_classdef;
-use crate::layout::{parse_classdef_pairs_from_bytes, GidMap};
+use crate::layout::{patch_offset16, read_u16, GidMap};
 
 /// Rewrites a `GDEF` table. Returns `None` if every contained
-/// subtable drops to nothing.
+/// subtable drops to nothing, or if the rewritten ClassDefs no longer
+/// fit their 16-bit offsets.
 pub(crate) fn rewrite_gdef(face: &sigilbuzz::Face<'_>, map: &GidMap) -> Option<Vec<u8>> {
     let bytes = face.table_bytes(sigilbuzz::tables::tag::GDEF).ok()?;
-    if bytes.len() < 12 {
-        return None;
-    }
 
     // GDEF header (v1.0):
     //   u16 majorVersion
@@ -45,15 +39,12 @@ pub(crate) fn rewrite_gdef(face: &sigilbuzz::Face<'_>, map: &GidMap) -> Option<V
     //   Offset16 markAttachClassDefOffset
     //   (v1.2+) Offset16 markGlyphSetsDefOffset
     //   (v1.3+) Offset32 itemVarStoreOffset
-    let major = u16::from_be_bytes([bytes[0], bytes[1]]);
-    let minor = u16::from_be_bytes([bytes[2], bytes[3]]);
+    let major = read_u16(bytes, 0)?;
     if major != 1 {
         return None;
     }
-    let glyph_class_off = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
-    let _attach_list_off = u16::from_be_bytes([bytes[6], bytes[7]]) as usize;
-    let _lig_caret_off = u16::from_be_bytes([bytes[8], bytes[9]]) as usize;
-    let mark_attach_off = u16::from_be_bytes([bytes[10], bytes[11]]) as usize;
+    let glyph_class_off = usize::from(read_u16(bytes, 4)?);
+    let mark_attach_off = usize::from(read_u16(bytes, 10)?);
 
     // Rewrite GlyphClassDef.
     let new_glyph_class = if glyph_class_off != 0 {
@@ -78,8 +69,7 @@ pub(crate) fn rewrite_gdef(face: &sigilbuzz::Face<'_>, map: &GidMap) -> Option<V
     // rewrite. Other subtable offsets are zeroed.
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // major
-    out.extend_from_slice(&0u16.to_be_bytes()); // minor: drop to v1.0; we don't carry mark glyph sets / IVS yet.
-    let _ = minor;
+    out.extend_from_slice(&0u16.to_be_bytes()); // minor: v1.0 carries no mark glyph sets or IVS.
 
     // Header offsets get patched once we know the subtable positions.
     let glyph_class_slot = out.len();
@@ -90,14 +80,14 @@ pub(crate) fn rewrite_gdef(face: &sigilbuzz::Face<'_>, map: &GidMap) -> Option<V
     out.extend_from_slice(&0u16.to_be_bytes()); // markAttachClassDef offset
 
     if let Some(gc) = new_glyph_class.as_deref() {
-        let pos = out.len() as u16;
+        let pos = out.len();
+        patch_offset16(&mut out, glyph_class_slot, pos)?;
         out.extend_from_slice(gc);
-        out[glyph_class_slot..glyph_class_slot + 2].copy_from_slice(&pos.to_be_bytes());
     }
     if let Some(ma) = new_mark_attach.as_deref() {
-        let pos = out.len() as u16;
+        let pos = out.len();
+        patch_offset16(&mut out, mark_attach_slot, pos)?;
         out.extend_from_slice(ma);
-        out[mark_attach_slot..mark_attach_slot + 2].copy_from_slice(&pos.to_be_bytes());
     }
 
     Some(out)
@@ -105,7 +95,7 @@ pub(crate) fn rewrite_gdef(face: &sigilbuzz::Face<'_>, map: &GidMap) -> Option<V
 
 fn rewrite_classdef_subtable(bytes: &[u8], offset: usize, map: &GidMap) -> Option<Vec<u8>> {
     let body = bytes.get(offset..)?;
-    let pairs = parse_classdef_pairs_from_bytes(body);
+    let pairs = map.classdef_pairs(body)?;
     let mut new_pairs: Vec<(u16, u16)> = Vec::with_capacity(pairs.len());
     for (gid, class) in pairs {
         let Some(new_gid) = map.map(gid) else {
