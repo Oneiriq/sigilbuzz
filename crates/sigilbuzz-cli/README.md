@@ -1,12 +1,12 @@
 # sigilbuzz-cli
 
-Command-line driver for the [sigilbuzz](https://github.com/Oneiriq/sigilbuzz)
-workspace. Think `hb-shape`, but for the whole stack: shaping, subsetting,
-COLRv1 paint evaluation, GPU/Slug encoding, WOFF wrap/unwrap, PDF font
-emission, SVG glyph emission, and font-info dumps.
+The command-line tool for the [sigilbuzz](https://github.com/Oneiriq/sigilbuzz)
+workspace. It works like `hb-shape`, but covers the whole stack: shaping, subsetting,
+COLRv1 paint evaluation, GPU (Slug) encoding, WOFF wrap and unwrap, PDF font output,
+SVG glyph output, and font info.
 
-The binary is named `sigilbuzz` (the crate is named `sigilbuzz-cli` so it
-sits next to the other companion crates in the workspace).
+The binary is called `sigilbuzz`. The crate is called `sigilbuzz-cli` so it sits next
+to the other companion crates.
 
 ## Install
 
@@ -14,15 +14,14 @@ sits next to the other companion crates in the workspace).
 cargo install --path crates/sigilbuzz-cli
 ```
 
-This drops a `sigilbuzz` binary on your `$PATH`. The only external
-runtime dependency is `clap`, scoped to this crate (see
-`docs/deps.md` in the workspace root for the full justification).
+That puts a `sigilbuzz` binary on your `PATH`. Its only external dependency is `clap`.
+`docs/deps.md` in the workspace root explains why.
 
-## Subcommands
+## Commands
 
 ### `sigilbuzz shape`
 
-Shape text against a font and print the resulting glyph stream.
+Shape text with a font and print the glyphs.
 
 ```sh
 sigilbuzz shape FONT.ttf "Hello, world"
@@ -31,20 +30,20 @@ sigilbuzz shape FONT.ttf "مرحبا" --direction rtl
 sigilbuzz shape FONT.ttf "Hi" --json
 ```
 
-Output (default):
+Default output:
 
 ```text
 gid=43 advance=1511 cluster=0
 gid=76 advance=518 cluster=1
 ```
 
-`--json` produces a single-line array of `{gid, cluster, x_advance,
-y_advance, x_offset, y_offset}` records. Feature syntax mirrors
-`hb-shape`: `tag=value`, `+tag` to enable, `-tag` to disable.
+`--json` prints a single-line array of `{gid, cluster, x_advance, y_advance, x_offset,
+y_offset}` records. Feature syntax matches `hb-shape`: `tag=value`, `+tag` to turn a
+feature on, and `-tag` to turn it off.
 
 ### `sigilbuzz subset`
 
-Subset a font down to a chosen glyph or codepoint set.
+Cut a font down to a set of glyphs or codepoints.
 
 ```sh
 sigilbuzz subset FONT.ttf OUT.ttf --gids 1,2,3
@@ -53,14 +52,13 @@ sigilbuzz subset FONT.ttf OUT.ttf --unicodes A,B,U+1F600
 sigilbuzz subset FONT.ttf OUT.ttf --gids 0,1 --unicodes 'H,i' --drop-layout
 ```
 
-Both selectors merge before the subsetter runs so a caller can mix-
-and-match. `--drop-layout` and `--drop-variations` invert the matching
-defaults; `--retain-hints` opts back into instructions / hints.
+You can combine `--gids` and `--unicodes`. They are merged before subsetting.
+`--drop-layout` and `--drop-variations` drop tables that are kept by default.
+`--retain-hints` keeps hinting instructions, which are dropped by default.
 
 ### `sigilbuzz paint`
 
-Walk the COLRv1 paint tree for a glyph and print one `DrawCmd` per
-line.
+Walk the COLRv1 paint tree for a glyph and print one `DrawCmd` per line.
 
 ```sh
 sigilbuzz paint FONT.ttf 42
@@ -75,19 +73,19 @@ FillGlyph gid=43 transform=...
 PopLayer
 ```
 
-Glyphs without a paint tree exit `0` with a friendly stderr message
-rather than erroring — paint is optional metadata.
+A glyph with no paint tree prints a note to stderr and exits with `0`. Paint data is
+optional, so a missing tree is not an error.
 
 ### `sigilbuzz slug`
 
-Encode a glyph for GPU rendering via the Slug algorithm.
+Encode a glyph for GPU rendering with the Slug algorithm.
 
 ```sh
 sigilbuzz slug FONT.ttf 42
 sigilbuzz slug FONT.ttf 42 --bands 8 --cubic-tolerance 0.5
 ```
 
-Output is hand-rolled JSON:
+The output is JSON:
 
 ```json
 {"bbox":{"xmin":201,"ymin":0,"xmax":1311,"ymax":1462},
@@ -95,11 +93,9 @@ Output is hand-rolled JSON:
  "segments":[{"p0":[1311,0],"p1":[1226,0],"p2":[1141,0]}, ...]}
 ```
 
-(`serde_json` is a future-PR commitment; see `docs/deps.md`.)
-
 ### `sigilbuzz woff`
 
-Wrap or unwrap WOFF1 / WOFF2 envelopes.
+Wrap or unwrap WOFF1 and WOFF2 files.
 
 ```sh
 sigilbuzz woff wrap FONT.ttf FONT.woff2
@@ -107,43 +103,42 @@ sigilbuzz woff wrap FONT.ttf FONT.woff1 --format woff1
 sigilbuzz woff unwrap FONT.woff2 FONT.ttf
 ```
 
-Unwrap auto-detects WOFF1 vs WOFF2 from the input's 4-byte magic.
+`unwrap` detects WOFF1 or WOFF2 from the file's first four bytes.
 
 ### `sigilbuzz pdf`
 
-Emit PDF font fragments. Today the only flavour is Type 3:
+Emit PDF font fragments. Only Type 3 is available from the command line so far. The
+`sigilbuzz-pdf` library also writes Type 1 and embedded OpenType fonts.
 
 ```sh
 sigilbuzz pdf type3 FONT.ttf OUT.pdf-fragment --gids 0..=255
 ```
 
-Output is a labelled UTF-8 dump of the FontBBox / FontMatrix /
-Encoding / CharProcs that the consumer assembles into a complete
-PDF object stream.
+The output is a labeled UTF-8 dump of the FontBBox, FontMatrix, Encoding, and
+CharProcs. You assemble those into a PDF object stream yourself.
 
 ### `sigilbuzz svg`
 
-Emit SVG for a single glyph.
+Write one glyph as SVG.
 
 ```sh
-sigilbuzz svg FONT.ttf 42 OUT.svg            # outline-only
-sigilbuzz svg FONT.ttf 42 OUT.svg --color    # COLRv1 when present
+sigilbuzz svg FONT.ttf 42 OUT.svg            # outline only
+sigilbuzz svg FONT.ttf 42 OUT.svg --color    # COLRv1 when the glyph has it
 ```
 
-`--color` falls back to outline-only when the glyph has no paint
-tree, so a single invocation produces a useful artifact regardless
-of font.
+With `--color`, a glyph that has no paint tree falls back to its outline, so the
+command always produces something useful.
 
 ### `sigilbuzz info`
 
-Dump font metadata: face version, num_glyphs, units_per_em, the OT
-table list (sorted), and the deduped GSUB + GPOS feature list.
+Print font metadata: the SFNT version, glyph count, units per em, the sorted table
+list, and the GSUB and GPOS feature tags.
 
 ```sh
 sigilbuzz info FONT.ttf
 ```
 
-Sample output (Open Sans):
+Sample output for Open Sans:
 
 ```text
 path: tests/fixtures/opensans_regular.ttf
@@ -164,4 +159,4 @@ features (10):
 
 ## License
 
-Apache-2.0, matching the rest of the sigilbuzz workspace.
+Apache-2.0, like the rest of the workspace.

@@ -1,108 +1,102 @@
-# Performance baseline
+# Performance
 
-Criterion numbers from the 0.6.0 release-prep tip on the maintainer's
-macOS arm64 workstation. Re-run after any change that touches a hot
-path and update this file together with the change so the historical
-trend stays in one place.
+Criterion numbers from the 0.6.0 release, measured on the maintainer's macOS arm64
+workstation. If you change a hot path, re-run the benchmarks and update this file in
+the same change, so the history stays in one place.
 
-## How to reproduce
+## Running the benchmarks
 
 ```sh
-# All shape benches (Latin / Arabic / Devanagari / Khmer / Hebrew):
+# Every benchmark in the workspace (Latin, Arabic, Devanagari, Khmer, Hebrew, plus
+# the GPU encoder and COLRv1 evaluator):
 cargo bench --workspace
 
-# A single bench:
+# A single benchmark:
 cargo bench --bench shape_arabic
 cargo bench -p sigilbuzz-gpu --bench encode
 cargo bench -p sigilbuzz-paint --bench evaluate
 
-# Quick sanity-check pass (Criterion --quick mode, ~1s per measurement):
+# A quick pass (Criterion's --quick mode, about one second per measurement):
 cargo bench --bench shape_latin -- --quick
 ```
 
-Each shape bench runs the same 200-codepoint corpus through both
-sigilbuzz and rustybuzz back-to-back so the ratio column below is
-the load-bearing number — absolute timings shift with the host
-machine, but the ratio against rustybuzz is stable.
+Each shaping benchmark runs the same 200-codepoint text through sigilbuzz and
+rustybuzz back to back. Absolute times depend on the machine. The ratio against
+rustybuzz is the number to watch, because it stays stable across machines.
 
-## Shape benches (sigilbuzz vs rustybuzz)
+## Shaping: sigilbuzz vs rustybuzz
 
-| bench               | sigilbuzz   | rustybuzz   | ratio   | notes                                                  |
-|---------------------|-------------|-------------|---------|--------------------------------------------------------|
-| shape_latin         | 11.39 µs    | 15.03 µs    | 0.76x   | Open Sans, ASCII pangrams + liga/kern.                 |
-| shape_arabic        | 290 µs      | 108 µs      | 2.70x   | Amiri, Quranic-grade rlig + IgnoreMarks.               |
-| shape_devanagari    | 419 µs      | 85.8 µs     | 4.89x   | Noto Sans Devanagari, reph + conjuncts.                |
-| shape_khmer         | 91.6 µs     | 49.0 µs     | 1.87x   | Noto Sans Khmer, USE state machine.                    |
-| shape_hebrew        | 10.99 µs    | 17.28 µs    | 0.64x   | Noto Sans Hebrew, GPOS mark-to-base/mark-to-mark.      |
+| Benchmark | sigilbuzz | rustybuzz | Ratio | Notes |
+|---|---|---|---|---|
+| shape_latin | 11.39 µs | 15.03 µs | 0.76x | Open Sans, ASCII pangrams with liga and kern. |
+| shape_arabic | 290 µs | 108 µs | 2.70x | Amiri, heavy rlig use with IgnoreMarks. |
+| shape_devanagari | 419 µs | 85.8 µs | 4.89x | Noto Sans Devanagari, reph and conjuncts. |
+| shape_khmer | 91.6 µs | 49.0 µs | 1.87x | Noto Sans Khmer, USE state machine. |
+| shape_hebrew | 10.99 µs | 17.28 µs | 0.64x | Noto Sans Hebrew, GPOS mark-to-base and mark-to-mark. |
 
-### 0.6.0 perf pass (PR closing #74 / #75 / #76)
+A ratio below 1 means sigilbuzz is faster.
 
-The 0.5.0 numbers above had Devanagari at 173x, Arabic at 32x, Khmer
-at 17x — every complex-script bench was an algorithmic outlier. Three
-fixes in `src/shape.rs` and `src/tables/gsub/*.rs` collapsed each
-into the < 5x rustybuzz envelope while leaving Latin and Hebrew
-faster than rustybuzz:
+### What changed in 0.6.0 (#74, #75, #76)
 
-1. **Hoist GSUB-id snapshot.** Context / chained-context / reverse-
-   chain matchers used to rebuild a `Vec<u16>` of every glyph id on
-   every cursor step. Now built once per `apply_gsub_lookup` call
-   (`GlyphIds`) and updated incrementally — Single/Alternate touch
-   one slot, Ligature/Multiple resync. Devanagari -17%.
+In 0.5.0, Devanagari took 173x as long as rustybuzz, Arabic 32x, and Khmer 17x. Every
+complex-script benchmark was an outlier for algorithmic reasons. Three fixes in
+`src/shape.rs` and `src/tables/gsub/*.rs` brought each of them under 5x and left Latin
+and Hebrew faster than rustybuzz:
 
-2. **Pre-parse subtables once per lookup.** ChainContextAny/
-   GsubContext format-3 parsing allocates four `Vec`s per call;
-   the cursor walk was paying that cost at every `at`. The parsed
-   form (`ParsedGsubSubtable`) is now constructed once at the
-   `apply_gsub_lookup` entry and reused across the whole cursor
-   walk. Devanagari -94%, Arabic -86%, Khmer -75%.
+1. Build the glyph ID snapshot once. The context, chained-context, and reverse-chain
+   matchers used to rebuild a `Vec<u16>` of every glyph ID at every cursor step. Now
+   `apply_gsub_lookup` builds it once (`GlyphIds`) and updates it as it goes. Single and
+   Alternate substitutions touch one slot. Ligature and Multiple resync. Devanagari
+   -17%.
 
-3. **Run-level "would_apply" + per-cursor digest.** Each lookup
-   asks "any glyph in the run in any subtable's primary coverage?"
-   before walking. Within the walk, only cursors whose glyph is in
-   the digest get full subtable dispatch; the rest skip with a
-   single `cov.contains` per parsed subtable. Mirrors HarfBuzz's
-   skip-iterator gate. Devanagari -23%, Arabic -37%, Khmer -47%.
+2. Parse each subtable once per lookup. Parsing a format 3 context subtable allocates
+   four `Vec`s, and the cursor walk used to pay that at every position. The parsed form
+   (`ParsedGsubSubtable`) is now built once when `apply_gsub_lookup` starts and reused
+   for the whole walk. Devanagari -94%, Arabic -86%, Khmer -75%.
 
-The chain-context matchers were also reordered to check input[0]
-before walking backtrack (HarfBuzz semantics), and the per-syllable
-`compute_half_mask` dry-run memoises `feature_would_substitute`
-results so repeated `(halant, c2)` pairs don't re-walk GSUB.
+3. Skip lookups that can't apply. Each lookup first checks whether any glyph in the
+   run is in any subtable's coverage. During the walk, only positions whose glyph is in
+   that set get full subtable dispatch. The rest skip after one `cov.contains` check
+   per subtable. This mirrors HarfBuzz's skip-iterator check. Devanagari -23%, Arabic
+   -37%, Khmer -47%.
 
-Latin and Hebrew benefit indirectly: the cursor walk savings apply
-to default `liga`/`calt`/`clig` and `mark`/`mkmk` GPOS as well —
-both ratios now sit *below* rustybuzz on this corpus.
+The chained-context matchers also check `input[0]` before walking the backtrack
+sequence, as HarfBuzz does. The per-syllable `compute_half_mask` dry run now caches
+`feature_would_substitute` results, so repeated `(halant, c2)` pairs don't walk GSUB
+again.
 
-## sigilbuzz-gpu encode bench
+Latin and Hebrew got faster as a side effect. The cursor walk savings also apply to
+the default `liga`, `calt`, and `clig` features and to `mark` and `mkmk` in GPOS.
 
-No rustybuzz comparison — rustybuzz does not ship a Slug-style
-outline encoder. Tracked against historical sigilbuzz-gpu runs.
+## GPU encoder (`sigilbuzz-gpu`)
 
-| glyph         | mean    | notes                                  |
-|---------------|---------|----------------------------------------|
-| opensans_A    | 852 ns  | Simple base glyph, mostly straight.    |
-| opensans_g    | 1.78 µs | Descender + closed two-storey curve.   |
-| opensans_O    | 979 ns  | Pure oval, all four cubic quadrants.   |
-| amiri_alef    | 896 ns  | Long vertical with thin tail.          |
+rustybuzz has no Slug-style outline encoder, so these numbers are only compared with
+earlier sigilbuzz-gpu runs.
 
-## sigilbuzz-paint evaluate bench
+| Glyph | Mean | Notes |
+|---|---|---|
+| opensans_A | 852 ns | Simple glyph, mostly straight lines. |
+| opensans_g | 1.78 µs | Descender and a closed two-story bowl. |
+| opensans_O | 979 ns | An oval, all four curved quadrants. |
+| amiri_alef | 896 ns | Long vertical stroke with a thin tail. |
 
-No rustybuzz comparison — COLRv1 evaluation is not part of
-rustybuzz. Tracked against historical sigilbuzz-paint runs.
+## COLRv1 evaluator (`sigilbuzz-paint`)
 
-| fixture                | mean   |
-|------------------------|--------|
-| solid                  | 58 ns  |
-| linear_gradient        | 92 ns  |
-| translate_scale        | 92 ns  |
-| composite              | 86 ns  |
-| radial_gradient        | 86 ns  |
-| sweep_gradient         | 97 ns  |
-| var_solid_at_coords    | 69 ns  |
+rustybuzz does not evaluate COLRv1, so these numbers are only compared with earlier
+sigilbuzz-paint runs.
 
-## Comparing against rustybuzz directly
+| Fixture | Mean |
+|---|---|
+| solid | 58 ns |
+| linear_gradient | 92 ns |
+| translate_scale | 92 ns |
+| composite | 86 ns |
+| radial_gradient | 86 ns |
+| sweep_gradient | 97 ns |
+| var_solid_at_coords | 69 ns |
 
-Each shape bench produces two Criterion entries side-by-side
-(`shape_<script>/sigilbuzz` and `shape_<script>/rustybuzz`) so a
-single `cargo bench` run reports both numbers without needing a
-second toolchain or a different binary. The ratios above were
-computed from the median timings of the matched groups.
+## Reading the Criterion output
+
+Each shaping benchmark defines two entries side by side, `shape_<script>/sigilbuzz`
+and `shape_<script>/rustybuzz`, so one `cargo bench` run reports both without a second
+toolchain or binary. The ratios above come from the median times of each pair.

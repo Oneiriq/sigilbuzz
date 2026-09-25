@@ -1,60 +1,60 @@
-# sigilbuzz — Contribution Rules
+# sigilbuzz contribution rules
 
-These rules exist because sigilbuzz is trying to be the text shaping engine the
-Rust ecosystem wished existed: modern, dependency-free, deterministic. Every
-rule below is in service of one of those three properties.
+sigilbuzz aims to be the text shaping engine the Rust ecosystem has been missing:
+modern, dependency-free, and deterministic. Every rule below protects one of those
+three properties.
 
 ## 1. Tooling
 
-Pure-Rust toolchain only:
+Pure Rust toolchain only:
 
 - `cargo build`, `cargo test`, `cargo fmt`, `cargo clippy`
-- Rust edition 2021, minimum supported Rust version declared in `Cargo.toml`
-- No `build.rs` shelling out to C / Python / Node
-- No WASM-specific bindgen shims in the core crate — `wasm32-unknown-unknown`
-  must work with stock `cargo build --target wasm32-unknown-unknown`
+- Rust edition 2021. The minimum supported Rust version is `rust-version` in the root
+  `Cargo.toml`.
+- No `build.rs` that shells out to C, Python, or Node.
+- No WASM-specific bindgen shims in the core crate. `wasm32-unknown-unknown` must work
+  with a plain `cargo build --target wasm32-unknown-unknown`.
 
 ## 2. Dependencies
 
-**Prefer writing it yourself.** Every dependency added to `Cargo.toml` must be
-justified in `docs/deps.md` with:
+Prefer writing it yourself. Every dependency added to a `Cargo.toml` needs an entry in
+`docs/deps.md` that covers:
 
-- What it buys us
-- Why an in-house implementation would be worse (size, correctness, perf)
-- The licence and whether it is dual MIT / Apache-2.0
-- Whether it adds transitive C build steps (hard no for the core crate)
+- What it buys us.
+- Why an in-house version would be worse (size, correctness, speed).
+- Its license, and whether it is dual MIT / Apache-2.0.
+- Whether it adds a C build step anywhere in its tree (never allowed in the core
+  crate).
 
-The `[dependencies]` section of the core crate starts empty and stays that way
-by default. `[dev-dependencies]` may include small utilities; be deliberate
-there too.
+The core crate's `[dependencies]` section is empty and stays that way. Small utilities
+are fine in `[dev-dependencies]`, but think about those too.
 
 ## 3. Determinism
 
-Same inputs produce the same outputs, byte-for-byte. This rules out:
+The same inputs produce the same outputs, byte for byte. That rules out:
 
-- `std::collections::hash_map::DefaultHasher` (uses per-process random seeds)
-- Any `rand::thread_rng()` call
-- Floating-point operations whose rounding depends on CPU flags; prefer fixed
-  point or explicitly documented rounding
-- Iteration over `HashMap`/`HashSet` where order reaches the public API
+- `std::collections::hash_map::DefaultHasher`, which uses a random seed per process.
+- Any `rand::thread_rng()` call.
+- Floating-point operations whose rounding depends on CPU flags. Prefer fixed point or
+  documented rounding.
+- Iterating a `HashMap` or `HashSet` where the order reaches the public API.
 
-Use `alloc::collections::BTreeMap` where associative ordering needs to be
-stable, or hand-rolled vectors for small / fixed-size maps.
+Use `alloc::collections::BTreeMap` when associative order must be stable, or plain
+vectors for small or fixed-size maps.
 
-## 4. `no_std` discipline
+## 4. `no_std`
 
-The core crate must compile with `--no-default-features` on stable Rust. That
-means:
+The core crate must compile with `--no-default-features` on stable Rust. That means:
 
-- `alloc` is allowed (`Vec`, `String`, `Box`, `BTreeMap`)
-- `std` is not allowed in non-`std`-feature code
-- File I/O lives behind the `std` feature flag
-- Error types implement `core::fmt::Display` + `core::error::Error` (stabilised
-  in Rust 1.81)
+- `alloc` is allowed (`Vec`, `String`, `Box`, `BTreeMap`).
+- `std` is not allowed outside code gated on the `std` feature.
+- File I/O lives behind the `std` feature.
+- Error types implement `core::fmt::Display` and `core::error::Error` (stable since
+  Rust 1.81).
 
 ## 5. Formatting, linting, tests
 
-Every PR must pass locally:
+Every change must pass these locally:
 
 ```
 cargo fmt --all --check
@@ -64,65 +64,66 @@ cargo test --all-features
 cargo build --no-default-features
 ```
 
-Treat warnings as errors. If clippy complains, fix the code or justify a
-targeted `#[allow(...)]` with a comment.
+Warnings are errors. If clippy complains, fix the code, or add a targeted
+`#[allow(...)]` with a comment explaining why.
 
-## 6. CI is for merges
+## 6. CI
 
-CI runs only on `push` to `main` (merge events) and `workflow_dispatch`. Do not
-add `pull_request` triggers without a conversation — the human driving the PR
-runs the gate locally.
+CI runs on pushes and pull requests to `main` and `release/**` branches, and on manual
+dispatch, using the same commands as above. Run the gate locally before you push. The
+pre-push hook (`scripts/install-hooks.sh`) does that for you.
 
 ## 7. Style
 
-- `snake_case` functions / variables, `PascalCase` types, `SCREAMING_SNAKE_CASE`
-  consts
-- 4-space indent, Unix newlines, max line length 100
-- Public functions carry `///` doc comments with at least one runnable
-  example where the signature permits
-- Prefer composition and traits to inheritance-shaped APIs
-- Prefer iterator chains to manual loops when legibility is equal
-- Use `tracing` for diagnostics once it becomes necessary — not `println!` and
-  not `eprintln!`. Until then, stay silent on the happy path.
+- `snake_case` functions and variables, `PascalCase` types, `SCREAMING_SNAKE_CASE`
+  constants.
+- 4-space indent, Unix newlines, maximum line length 100.
+- Public functions get `///` doc comments with at least one runnable example where the
+  signature allows it.
+- Prefer composition and traits over inheritance-shaped APIs.
+- Prefer iterator chains to manual loops when they read just as well.
+- Use `tracing` for diagnostics once they become necessary, never `println!` or
+  `eprintln!`. Until then, stay silent on the happy path.
+- Write docs, comments, and commit messages in plain American English. No em-dashes,
+  en-dashes, arrow glyphs, or other decorative Unicode punctuation.
 
 ## 8. Error handling
 
-- Every public fallible function returns `Result<T, sigilbuzz::Error>`
-- No `unwrap` / `expect` outside tests and docs examples
-- `panic!` is reserved for programmer errors (broken invariants), never for
-  user-facing parse or shape failures
-- Parse failures should surface the byte offset where the failure was detected
-  so users can debug malformed fonts
+- Every public fallible function returns `Result<T, sigilbuzz::Error>`.
+- No `unwrap` or `expect` outside tests and doc examples.
+- `panic!` is only for programmer errors (broken invariants), never for a bad font or
+  a shaping failure.
+- Parse errors report the byte offset where the problem was found, so people can debug
+  malformed fonts.
 
 ## 9. Unsafe
 
-`unsafe` is allowed when it earns its keep. Every `unsafe` block carries a
-`// SAFETY:` comment above it explaining the invariants the caller must uphold,
-and those invariants must be enforced by the surrounding safe API.
+`unsafe` is allowed when it earns its place. Every `unsafe` block has a `// SAFETY:`
+comment above it that explains the invariants the caller must uphold, and the
+surrounding safe API must enforce them.
 
 ## 10. Testing
 
-- Every table parser ships with hand-authored byte fixtures exercising the
-  happy path, the boundary conditions, and a truncated-input case
-- Shaping integration tests use real open-licence fonts (e.g. Open Sans) stored
-  under `tests/fixtures/`
-- Use `cargo test --all-features` as the one-command gate; golden files live
-  in `tests/golden/` and are regenerated with an explicit command, not
-  silently re-captured
+- Every table parser ships with hand-built byte fixtures that cover the normal case,
+  the boundaries, and a truncated input.
+- Shaping integration tests use real openly licensed fonts (for example Open Sans)
+  stored under `tests/fixtures/` and `tests/fonts/`.
+- `cargo test --all-features` is the one-command gate.
+- Expected-output fixtures are regenerated with an explicit command, never re-captured
+  silently.
 
 ## 11. Commits
 
-- Imperative mood subject, wrapped at ~72 columns
-- A body that explains *why*, not just *what*
-- One logical change per commit where that is feasible
-- No trailing "Generated by ..." footers — sigilbuzz commits are
-  indistinguishable from a human's
+- Imperative subject line, wrapped at about 72 columns.
+- A body that explains why the change was made.
+- One logical change per commit where you can.
+- No "Generated by ..." footers. sigilbuzz commits should read like any human's.
 
-## 12. Never do
+## 12. Never
 
-- Fabricate parse results or swallow errors in fast paths
-- Introduce non-determinism for performance without a feature flag
-- Re-export anything from a dependency through the public surface (would
-  couple our API to theirs)
-- Use emojis anywhere in code, docs, or commit messages
-- Bypass a failing lint with `#[allow(...)]` at crate scope
+- Fabricate parse results or swallow errors in fast paths.
+- Add non-determinism for speed without a feature flag.
+- Re-export anything from a dependency in the public API. That would tie our API to
+  theirs.
+- Use emojis in code, docs, or commit messages.
+- Silence a failing lint with a crate-wide `#[allow(...)]`.
