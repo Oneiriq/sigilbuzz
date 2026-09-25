@@ -34,7 +34,7 @@
 //!
 //! Subtables run sequentially, each one reading (and possibly
 //! mutating) the glyph stream produced by the previous subtable.
-//! sigilbuzz implements the three most common types:
+//! sigilbuzz implements five subtable types:
 //!
 //! - **Type 0**: Rearrangement. Stateless over classes but stateful
 //!   over a pending "marked glyph range"; used for Indic vowel
@@ -67,7 +67,7 @@ use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
 use crate::tables::layout::state_table::{
-    StateTableHeader, CLASS_DELETED_GLYPH, CLASS_END_OF_TEXT, CLASS_OUT_OF_BOUNDS,
+    lookup_class, StateTableHeader, CLASS_DELETED_GLYPH, CLASS_END_OF_TEXT, CLASS_OUT_OF_BOUNDS,
 };
 use crate::tables::parse::Reader;
 
@@ -77,6 +77,27 @@ const TYPE_CONTEXTUAL: u8 = 1;
 const TYPE_LIGATURE: u8 = 2;
 const TYPE_NON_CONTEXTUAL: u8 = 4;
 const TYPE_INSERTION: u8 = 5;
+
+/// Chain header: defaultFlags, chainLength, featureCount, subtableCount.
+const CHAIN_HEADER_LEN: usize = 16;
+/// Subtable header: length, coverage, subFeatureFlags.
+const SUBTABLE_HEADER_LEN: usize = 12;
+
+/// Insertion subtables stop inserting once the run would grow past
+/// this multiple of the input length. Each insertion subtable can
+/// multiply the run length, so without a cap a chain of them grows
+/// the run exponentially.
+const MAX_LEN_FACTOR: usize = 8;
+/// Floor for the run-length cap, so short runs can still take
+/// several full-size insertions.
+const MAX_LEN_MIN: usize = 1024;
+
+/// Upper bound on state-machine steps for a run of `len` glyphs.
+/// DontAdvance entries revisit a glyph, and a malformed table can
+/// keep doing that forever.
+fn max_steps(len: usize) -> usize {
+    len.saturating_mul(8).saturating_add(16)
+}
 
 /// Parsed `morx` table: owns pointers into the source bytes.
 #[derive(Debug, Clone)]
@@ -99,9 +120,8 @@ pub struct Subtable<'a> {
     /// Subtable `subFeatureFlags`. A subtable participates when
     /// `subFeatureFlags & chain.defaultFlags != 0`.
     sub_feature_flags: u32,
-    /// Parsed body, or `None` for subtable types we recognize but do
-    /// not yet implement (e.g. type 4 non-contextual, type 5
-    /// insertion). The `morx` iterator skips those silently.
+    /// Parsed body, or `None` for subtable types sigilbuzz does not
+    /// implement. [`Morx::apply`] skips those silently.
     body: Option<SubtableBody<'a>>,
 }
 
@@ -205,10 +225,13 @@ impl<'a> Morx<'a> {
         let _pad = r.read_u16()?;
         let n_chains = r.read_u32()?;
 
-        let mut chains = Vec::with_capacity(n_chains as usize);
+        // Every chain needs at least its header, so the remaining bytes
+        // bound how many chains can exist. Reserve no more than that.
+        let mut chains =
+            Vec::with_capacity((n_chains as usize).min(r.remaining() / CHAIN_HEADER_LEN));
         for _ in 0..n_chains {
             let chain_start = r.position();
-            if chain_start + 16 > data.len() {
+            if chain_start + CHAIN_HEADER_LEN > data.len() {
                 return Err(Error::Truncated {
                     offset: chain_start,
                     context: "morx chain header",
@@ -233,12 +256,14 @@ impl<'a> Morx<'a> {
             }
             // Skip feature array: 12 bytes per feature (u16 featureType,
             // u16 featureSetting, u32 enableFlags, u32 disableFlags).
-            r.skip(feature_count as usize * 12)?;
+            r.skip((feature_count as usize).saturating_mul(12))?;
 
-            let mut subtables = Vec::with_capacity(subtable_count as usize);
+            // Same bound as for chains: each subtable needs its header.
+            let room = chain_end.saturating_sub(r.position()) / SUBTABLE_HEADER_LEN;
+            let mut subtables = Vec::with_capacity((subtable_count as usize).min(room));
             for _ in 0..subtable_count {
                 let sub_start = r.position();
-                if sub_start + 12 > chain_end {
+                if sub_start + SUBTABLE_HEADER_LEN > chain_end {
                     return Err(Error::Truncated {
                         offset: sub_start,
                         context: "morx subtable header",
@@ -259,8 +284,14 @@ impl<'a> Morx<'a> {
                     });
                 }
                 // Subtable body starts right after the 12-byte header.
-                let body_off = sub_start + 12;
-                let body_bytes = &data[body_off..sub_end];
+                let body_off = sub_start + SUBTABLE_HEADER_LEN;
+                // A declared length shorter than the header leaves no
+                // body. Drop the subtable and continue after its header,
+                // so the cursor always moves forward.
+                let Some(body_bytes) = data.get(body_off..sub_end) else {
+                    r.seek(body_off)?;
+                    continue;
+                };
                 let sub_type = (coverage & 0xFF) as u8;
                 let body = parse_subtable_body(sub_type, body_bytes)?;
                 subtables.push(Subtable {
@@ -273,7 +304,10 @@ impl<'a> Morx<'a> {
                 default_flags,
                 subtables,
             });
-            r.seek(chain_end)?;
+            // A chain length shorter than the header would send the
+            // cursor back to this chain's start and read it again.
+            // Continue after the header instead.
+            r.seek(chain_end.max(chain_start + CHAIN_HEADER_LEN))?;
         }
 
         Ok(Self { version, chains })
@@ -304,10 +338,15 @@ impl<'a> Morx<'a> {
     ///
     /// The returned vector is the new glyph id stream; it is always
     /// the same length as the mapping vector.
+    ///
+    /// Insertion subtables stop inserting once the run would exceed
+    /// eight times the input length (at least 1024 glyphs), and each
+    /// subtable walk stops after eight state-machine steps per glyph.
     #[must_use]
     pub fn apply(&self, input: &[u16]) -> (Vec<u16>, Vec<usize>) {
         let mut glyphs: Vec<u16> = input.to_vec();
         let mut origins: Vec<usize> = (0..input.len()).collect();
+        let max_len = input.len().saturating_mul(MAX_LEN_FACTOR).max(MAX_LEN_MIN);
         for chain in &self.chains {
             for subtable in &chain.subtables {
                 if subtable.sub_feature_flags & chain.default_flags == 0 {
@@ -316,7 +355,7 @@ impl<'a> Morx<'a> {
                 let Some(ref body) = subtable.body else {
                     continue;
                 };
-                apply_subtable(body, &mut glyphs, &mut origins);
+                apply_subtable(body, &mut glyphs, &mut origins, max_len);
             }
         }
         (glyphs, origins)
@@ -358,7 +397,7 @@ fn parse_subtable_body(sub_type: u8, bytes: &[u8]) -> Result<Option<SubtableBody
         TYPE_NON_CONTEXTUAL => {
             // The whole body IS the AAT lookup table: no extra
             // header, no offsets. We hand the slice straight to
-            // [`lookup_via_state_table`] at apply time.
+            // [`lookup_value`] at apply time.
             Ok(Some(SubtableBody::NonContextual { lookup: bytes }))
         }
         TYPE_INSERTION => {
@@ -386,7 +425,7 @@ fn parse_subtable_body(sub_type: u8, bytes: &[u8]) -> Result<Option<SubtableBody
                 insertion_table,
             }))
         }
-        // Types 6+ remain deferred for now.
+        // Other subtable types are not implemented and are skipped.
         _ => Ok(None),
     }
 }
@@ -439,7 +478,12 @@ fn parse_ligature_body(bytes: &[u8]) -> Result<Option<SubtableBody<'_>>> {
     }))
 }
 
-fn apply_subtable(body: &SubtableBody<'_>, glyphs: &mut Vec<u16>, origins: &mut Vec<usize>) {
+fn apply_subtable(
+    body: &SubtableBody<'_>,
+    glyphs: &mut Vec<u16>,
+    origins: &mut Vec<usize>,
+    max_len: usize,
+) {
     match body {
         SubtableBody::Rearrangement(state) => apply_rearrangement(state, glyphs, origins),
         SubtableBody::Contextual {
@@ -456,7 +500,7 @@ fn apply_subtable(body: &SubtableBody<'_>, glyphs: &mut Vec<u16>, origins: &mut 
         SubtableBody::Insertion {
             state,
             insertion_table,
-        } => apply_insertion(state, insertion_table, glyphs, origins),
+        } => apply_insertion(state, insertion_table, glyphs, origins, max_len),
     }
 }
 
@@ -467,9 +511,15 @@ fn apply_rearrangement(state: &StateTableHeader<'_>, glyphs: &mut [u16], origins
     let mut i = 0;
     let mut first: Option<usize> = None;
     let mut last: Option<usize> = None;
+    let max_iters = max_steps(glyphs.len());
+    let mut iters = 0usize;
     // Iterate through the run, with an extra end-of-text step so a
     // state carrying a pending mark gets one more chance to fire.
     while i <= glyphs.len() {
+        iters += 1;
+        if iters > max_iters {
+            return;
+        }
         let class = class_for(state, glyphs.get(i).copied()).unwrap_or(CLASS_OUT_OF_BOUNDS);
         let Ok(entry_idx) = state.entry_index(cur_state, class) else {
             return;
@@ -517,7 +567,6 @@ fn rearrange(verb: u16, glyphs: &mut [u16], origins: &mut [usize], first: usize,
     // 5-element windows and stay no-op until a real font needs them,
     // because producing a wrong permutation would corrupt the glyph
     // stream worse than leaving it alone.
-    let _ = len;
     if let 1..=3 = verb {
         glyphs.swap(first, last);
         origins.swap(first, last);
@@ -531,7 +580,13 @@ fn apply_contextual(state: &StateTableHeader<'_>, substitutions: &[u8], glyphs: 
     let mut cur_state: u16 = 0;
     let mut mark: Option<usize> = None;
     let mut i = 0;
+    let max_iters = max_steps(glyphs.len());
+    let mut iters = 0usize;
     while i <= glyphs.len() {
+        iters += 1;
+        if iters > max_iters {
+            return;
+        }
         let class = class_for(state, glyphs.get(i).copied()).unwrap_or(CLASS_OUT_OF_BOUNDS);
         let Ok(entry_idx) = state.entry_index(cur_state, class) else {
             return;
@@ -547,17 +602,17 @@ fn apply_contextual(state: &StateTableHeader<'_>, substitutions: &[u8], glyphs: 
             .unwrap_or(0xFFFF);
 
         if mark_idx != 0xFFFF {
-            if let Some(m) = mark {
-                if m < glyphs.len() {
-                    if let Some(replacement) = sub_lookup(substitutions, mark_idx, glyphs[m]) {
-                        glyphs[m] = replacement;
-                    }
+            if let Some(slot) = mark.and_then(|m| glyphs.get_mut(m)) {
+                if let Some(replacement) = sub_lookup(substitutions, mark_idx, *slot) {
+                    *slot = replacement;
                 }
             }
         }
-        if cur_idx != 0xFFFF && i < glyphs.len() {
-            if let Some(replacement) = sub_lookup(substitutions, cur_idx, glyphs[i]) {
-                glyphs[i] = replacement;
+        if cur_idx != 0xFFFF {
+            if let Some(slot) = glyphs.get_mut(i) {
+                if let Some(replacement) = sub_lookup(substitutions, cur_idx, *slot) {
+                    *slot = replacement;
+                }
             }
         }
 
@@ -580,8 +635,8 @@ fn apply_contextual(state: &StateTableHeader<'_>, substitutions: &[u8], glyphs: 
 // Layout: u16 lookupCount, then u32 offsets[lookupCount] pointing at
 // the individual lookups relative to the substitutions blob.
 //
-// We wrap each lookup in the StateTableHeader's class-lookup helper
-// by mapping glyph -> replacement-glyph-id directly.
+// Each lookup maps glyph -> replacement glyph id directly through the
+// shared AAT lookup reader.
 fn sub_lookup(substitutions: &[u8], idx: u16, glyph: u16) -> Option<u16> {
     // The substitutions table is laid out as in the type-1 spec:
     // u16 nTables, u32 offsets[nTables] (relative to substitutions
@@ -607,7 +662,7 @@ fn sub_lookup(substitutions: &[u8], idx: u16, glyph: u16) -> Option<u16> {
     // Reuse the class-lookup machinery: class value == replacement
     // glyph id; out-of-bounds yields the reserved class, which we
     // map back to None so the caller knows not to substitute.
-    let Ok(replacement) = lookup_via_state_table(lookup, glyph) else {
+    let Ok(replacement) = lookup_value(lookup, glyph) else {
         return None;
     };
     if replacement == CLASS_OUT_OF_BOUNDS {
@@ -617,22 +672,13 @@ fn sub_lookup(substitutions: &[u8], idx: u16, glyph: u16) -> Option<u16> {
     }
 }
 
-/// Calls the format-2/6 AAT lookup parser without constructing a
-/// whole `StateTableHeader`. Not exposed outside this module.
-fn lookup_via_state_table(data: &[u8], glyph: u16) -> Result<u16> {
-    // Cheap trampoline via a throwaway header that only uses its
-    // class resolver. Build a synthetic 16-byte prefix that points
-    // class_table_off back at offset 16 so we can bolt the real
-    // lookup on. This avoids duplicating the format parser while
-    // keeping the call simple.
-    let mut synthetic = Vec::with_capacity(16 + data.len());
-    synthetic.extend_from_slice(&0u32.to_be_bytes()); // nClasses (unused)
-    synthetic.extend_from_slice(&16u32.to_be_bytes()); // class off = 16
-    synthetic.extend_from_slice(&0u32.to_be_bytes()); // state off (unused)
-    synthetic.extend_from_slice(&0u32.to_be_bytes()); // entry off (unused)
-    synthetic.extend_from_slice(data);
-    let hdr = StateTableHeader::parse(&synthetic)?;
-    hdr.class_of(glyph)
+/// Resolves `glyph` through the AAT lookup table at the start of
+/// `data`. Passes a glyph count of zero, so a format-0 lookup covers
+/// as many glyphs as the slice holds, the same rule
+/// [`StateTableHeader::class_of`] uses. Reads the lookup in place,
+/// without copying it.
+fn lookup_value(data: &[u8], glyph: u16) -> Result<u16> {
+    lookup_class(data, glyph, 0)
 }
 
 // --- Type 2: Ligature substitution ---
@@ -649,7 +695,15 @@ fn apply_ligature(
     let mut cur_state: u16 = 0;
     let mut component_stack: Vec<usize> = Vec::new();
     let mut i = 0;
+    // The step cap also bounds the component stack, since each step
+    // pushes at most one entry.
+    let max_iters = max_steps(glyphs.len());
+    let mut iters = 0usize;
     while i <= glyphs.len() {
+        iters += 1;
+        if iters > max_iters {
+            return;
+        }
         let class = class_for(state, glyphs.get(i).copied()).unwrap_or(CLASS_OUT_OF_BOUNDS);
         let Ok(entry_idx) = state.entry_index(cur_state, class) else {
             return;
@@ -704,67 +758,72 @@ fn perform_ligature_action(
     let mut action_pos = action_idx as usize;
     let mut consumed: Vec<usize> = Vec::new();
     loop {
-        if stack.is_empty() {
+        let Some(stack_top) = stack.pop() else {
             return;
-        }
-        let stack_top = stack.pop().unwrap();
+        };
         consumed.push(stack_top);
 
-        let action_off = action_pos * 4;
-        let Some(action_bytes) = lig_actions.get(action_off..action_off + 4) else {
+        let Some(action) = u32_at(lig_actions, action_pos) else {
             return;
         };
-        let action = u32::from_be_bytes([
-            action_bytes[0],
-            action_bytes[1],
-            action_bytes[2],
-            action_bytes[3],
-        ]);
 
         let raw_off = action & LIG_ACTION_OFFSET_MASK;
-        // Sign-extend from the 30-bit signed offset field to i32. Do
-        // the arithmetic with two's-complement-safe casts so clippy's
-        // cast_possible_wrap stays happy. We actively want the wrap,
-        // that is the point of the conversion.
+        // Sign-extend from the 30-bit signed offset field to i32. The
+        // `as` casts wrap on purpose: that is the conversion.
         let signed_off: i32 = if action & LIG_ACTION_OFFSET_SIGN != 0 {
-            #[allow(clippy::cast_possible_wrap)]
-            {
-                (raw_off | 0xC000_0000) as i32
-            }
+            (raw_off | 0xC000_0000) as i32
         } else {
-            #[allow(clippy::cast_possible_wrap)]
-            {
-                raw_off as i32
-            }
+            raw_off as i32
         };
-        let glyph_id = i32::from(glyphs[stack_top]);
-        let comp_idx = glyph_id + signed_off;
-        let comp_byte_off = (comp_idx as usize).saturating_mul(2);
-        let Some(comp_bytes) = components.get(comp_byte_off..comp_byte_off + 2) else {
+        // An earlier ligature in this walk removes glyphs but leaves
+        // the stack as is, so a stack entry can point past the run.
+        // Stop the action instead of reading out of bounds.
+        let Some(&glyph) = glyphs.get(stack_top) else {
             return;
         };
-        let comp_val = i32::from(u16::from_be_bytes([comp_bytes[0], comp_bytes[1]]));
-        offset = offset.wrapping_add(comp_val);
+        // Cannot overflow: the glyph is at most 0xFFFF and the offset
+        // is a 30-bit signed value.
+        let comp_idx = i32::from(glyph) + signed_off;
+        // A negative index points before the component table. Treat
+        // it like any other out-of-range read.
+        let Some(comp_val) = usize::try_from(comp_idx)
+            .ok()
+            .and_then(|idx| u16_at(components, idx))
+        else {
+            return;
+        };
+        offset = offset.wrapping_add(i32::from(comp_val));
 
         if action & LIG_ACTION_LAST != 0 {
             if action & LIG_ACTION_STORE != 0 {
-                let lig_byte_off = (offset as usize).saturating_mul(2);
-                if let Some(lig_bytes) = ligatures.get(lig_byte_off..lig_byte_off + 2) {
-                    let lig_glyph = u16::from_be_bytes([lig_bytes[0], lig_bytes[1]]);
+                let lig_glyph = usize::try_from(offset)
+                    .ok()
+                    .and_then(|idx| u16_at(ligatures, idx));
+                if let Some(lig_glyph) = lig_glyph {
                     // Replace the earliest consumed slot with the
                     // ligature, drop the later slots. Sort in
                     // ascending order so the earliest index lands
                     // first. Stack was LIFO so the natural order is
                     // reversed.
                     consumed.sort_unstable();
-                    let keep = consumed[0];
-                    glyphs[keep] = lig_glyph;
+                    let Some((&keep, rest)) = consumed.split_first() else {
+                        return;
+                    };
+                    if let Some(slot) = glyphs.get_mut(keep) {
+                        *slot = lig_glyph;
+                    }
                     // origins[keep] keeps the smallest originating
                     // input index so cluster merging finds the
                     // correct grapheme root.
                     // Remove every other consumed slot, highest index
-                    // first so earlier indices stay valid.
-                    for &idx in consumed.iter().skip(1).rev() {
+                    // first so earlier indices stay valid. A glyph
+                    // pushed twice shows up twice here, so an earlier
+                    // removal can shorten the run past a later index.
+                    // Skip those.
+                    for &idx in rest.iter().rev() {
+                        if idx >= glyphs.len().min(origins.len()) {
+                            continue;
+                        }
                         glyphs.remove(idx);
                         origins.remove(idx);
                         if idx < *cursor {
@@ -779,6 +838,20 @@ fn perform_ligature_action(
     }
 }
 
+/// Reads element `index` of a big-endian u16 array stored in `data`.
+fn u16_at(data: &[u8], index: usize) -> Option<u16> {
+    let start = index.checked_mul(2)?;
+    let bytes = data.get(start..)?.first_chunk::<2>()?;
+    Some(u16::from_be_bytes(*bytes))
+}
+
+/// Reads element `index` of a big-endian u32 array stored in `data`.
+fn u32_at(data: &[u8], index: usize) -> Option<u32> {
+    let start = index.checked_mul(4)?;
+    let bytes = data.get(start..)?.first_chunk::<4>()?;
+    Some(u32::from_be_bytes(*bytes))
+}
+
 // --- Type 4: Non-Contextual Substitution ---
 
 /// Walks every glyph in the run and replaces it with whatever the
@@ -788,7 +861,7 @@ fn perform_ligature_action(
 /// glyph", so a partly-broken subtable can't blank out the run.
 fn apply_non_contextual(lookup: &[u8], glyphs: &mut [u16]) {
     for slot in glyphs.iter_mut() {
-        if let Ok(replacement) = lookup_via_state_table(lookup, *slot) {
+        if let Ok(replacement) = lookup_value(lookup, *slot) {
             if replacement != CLASS_OUT_OF_BOUNDS {
                 *slot = replacement;
             }
@@ -810,11 +883,15 @@ fn apply_non_contextual(lookup: &[u8], glyphs: &mut [u16]) {
 ///
 /// The insertion-glyph table is a flat u16 array indexed in units of
 /// glyph ids (so byte offset = index * 2).
+///
+/// Insertions that would grow the run past `max_len` glyphs are
+/// dropped.
 fn apply_insertion(
     state: &StateTableHeader<'_>,
     insertion_table: &[u8],
     glyphs: &mut Vec<u16>,
     origins: &mut Vec<usize>,
+    max_len: usize,
 ) {
     const ENTRY_SIZE: usize = 8;
     let mut cur_state: u16 = 0;
@@ -823,7 +900,7 @@ fn apply_insertion(
     // Bound the walk: every glyph processed at most a handful of
     // times (DontAdvance retries) before we cap, so a malformed font
     // can't loop the shaper.
-    let max_iters = glyphs.len().saturating_mul(8) + 16;
+    let max_iters = max_steps(glyphs.len());
     let mut iters = 0usize;
     while i <= glyphs.len() {
         iters += 1;
@@ -867,6 +944,7 @@ fn apply_insertion(
                     pos,
                     glyphs,
                     origins,
+                    max_len,
                 );
                 if pos <= i {
                     i += n;
@@ -881,7 +959,15 @@ fn apply_insertion(
         if cur_index != 0xFFFF && cur_count > 0 && i <= glyphs.len() {
             let before = flags & FLAG_INS_CURRENT_BEFORE != 0;
             let pos = if before { i } else { i + 1 };
-            let n = splice_insertions(insertion_table, cur_index, cur_count, pos, glyphs, origins);
+            let n = splice_insertions(
+                insertion_table,
+                cur_index,
+                cur_count,
+                pos,
+                glyphs,
+                origins,
+                max_len,
+            );
             if before {
                 i += n;
             }
@@ -902,7 +988,8 @@ fn apply_insertion(
 /// Reads `count` u16 glyph ids from `insertion_table` at `index`
 /// and splices them into `glyphs` / `origins` at `pos`. Returns the
 /// number of glyphs actually inserted (zero when `pos` is past the
-/// run end or the table doesn't cover the request).
+/// run end, the table doesn't cover the request, or the run would
+/// grow past `max_len`).
 fn splice_insertions(
     insertion_table: &[u8],
     index: u16,
@@ -910,16 +997,20 @@ fn splice_insertions(
     pos: usize,
     glyphs: &mut Vec<u16>,
     origins: &mut Vec<usize>,
+    max_len: usize,
 ) -> usize {
-    if pos > glyphs.len() {
+    // `glyphs` and `origins` always have the same length.
+    if pos > glyphs.len().min(origins.len()) {
         return 0;
     }
     let inserts = read_insertions(insertion_table, index, count);
-    for (k, g) in inserts.iter().enumerate() {
-        glyphs.insert(pos + k, *g);
-        origins.insert(pos + k, usize::MAX);
+    let n = inserts.len();
+    if glyphs.len().saturating_add(n) > max_len {
+        return 0;
     }
-    inserts.len()
+    glyphs.splice(pos..pos, inserts);
+    origins.splice(pos..pos, core::iter::repeat(usize::MAX).take(n));
+    n
 }
 
 /// Reads `count` u16 glyph ids from the insertion-glyph table
@@ -1377,5 +1468,241 @@ mod tests {
         let m = Morx::parse(&bytes).unwrap();
         let (out, _) = m.apply(&[10, 20]);
         assert_eq!(out, &[10, 20]);
+    }
+
+    // -----------------------------------------------------------------
+    // Malformed input.
+    // -----------------------------------------------------------------
+
+    /// Wraps pre-built subtables (each with its 12-byte header) in a
+    /// version-2 morx table with one chain whose default flags are 1.
+    fn wrap_in_chain(subtables: &[&[u8]]) -> Vec<u8> {
+        let body_len: usize = subtables.iter().map(|s| s.len()).sum();
+        let mut table: Vec<u8> = Vec::new();
+        table.extend_from_slice(&2u16.to_be_bytes()); // version
+        table.extend_from_slice(&0u16.to_be_bytes()); // pad
+        table.extend_from_slice(&1u32.to_be_bytes()); // nChains
+        table.extend_from_slice(&1u32.to_be_bytes()); // defaultFlags
+        table.extend_from_slice(&((16 + body_len) as u32).to_be_bytes());
+        table.extend_from_slice(&0u32.to_be_bytes()); // featureCount
+        table.extend_from_slice(&(subtables.len() as u32).to_be_bytes());
+        for s in subtables {
+            table.extend_from_slice(s);
+        }
+        table
+    }
+
+    /// Prefixes `body` with a subtable header of type `sub_type` and
+    /// subFeatureFlags 1.
+    fn subtable(sub_type: u8, body: &[u8]) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(&((12 + body.len()) as u32).to_be_bytes());
+        out.extend_from_slice(&u32::from(sub_type).to_be_bytes());
+        out.extend_from_slice(&1u32.to_be_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// Builds a state-table subtable body with four classes, where
+    /// every glyph falls in class 1 (out of bounds). `ext_words` is the
+    /// number of type-specific u32 offsets after the 16-byte header.
+    /// Offset `k` points at `tail[k]`; the rest stay zero.
+    fn state_body(
+        ext_words: usize,
+        states: &[[u16; 4]],
+        entries: &[&[u8]],
+        tail: &[&[u8]],
+    ) -> Vec<u8> {
+        let class_off = 16 + 4 * ext_words;
+        // Format-6 lookup with no records: every glyph is out of bounds.
+        let lookup = build_lookup_format6(&[]);
+        let state_off = class_off + lookup.len();
+        let entry_off = state_off + states.len() * 8;
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(&4u32.to_be_bytes()); // nClasses
+        body.extend_from_slice(&(class_off as u32).to_be_bytes());
+        body.extend_from_slice(&(state_off as u32).to_be_bytes());
+        body.extend_from_slice(&(entry_off as u32).to_be_bytes());
+        let ext_start = body.len();
+        body.resize(ext_start + 4 * ext_words, 0);
+        body.extend_from_slice(&lookup);
+        for row in states {
+            for v in row {
+                body.extend_from_slice(&v.to_be_bytes());
+            }
+        }
+        for e in entries {
+            body.extend_from_slice(e);
+        }
+        for (k, part) in tail.iter().enumerate() {
+            let off = body.len() as u32;
+            body[ext_start + 4 * k..ext_start + 4 * k + 4].copy_from_slice(&off.to_be_bytes());
+            body.extend_from_slice(part);
+        }
+        body
+    }
+
+    #[test]
+    fn morx_huge_chain_count_does_not_reserve_memory() {
+        // nChains = u32::MAX with no chain data. The parser used to
+        // reserve room for four billion chains up front.
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&2u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert!(Morx::parse(&bytes).is_err());
+    }
+
+    #[test]
+    fn morx_huge_subtable_count_does_not_reserve_memory() {
+        // One chain claims u32::MAX subtables but carries none.
+        let mut bytes = wrap_in_chain(&[]);
+        bytes[20..24].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(Morx::parse(&bytes).is_err());
+    }
+
+    #[test]
+    fn morx_zero_length_chain_does_not_reread_itself() {
+        // A chain whose chainLength is 0 used to send the cursor back
+        // to its own start, so every one of the u32::MAX declared
+        // chains re-read the same header.
+        let mut bytes = wrap_in_chain(&[]);
+        bytes[4..8].copy_from_slice(&u32::MAX.to_be_bytes()); // nChains
+        bytes[12..16].copy_from_slice(&0u32.to_be_bytes()); // chainLength
+        assert!(Morx::parse(&bytes).is_err());
+    }
+
+    #[test]
+    fn morx_subtable_shorter_than_header_is_skipped() {
+        // First subtable declares length 0, which used to panic on a
+        // reversed slice range. It is dropped and the next one still
+        // applies.
+        let mut short = subtable(TYPE_NON_CONTEXTUAL, &[]);
+        short[0..4].copy_from_slice(&0u32.to_be_bytes());
+        let good = subtable(TYPE_NON_CONTEXTUAL, &build_lookup_format6(&[(5, 50)]));
+        let bytes = wrap_in_chain(&[&short, &good]);
+        let m = Morx::parse(&bytes).unwrap();
+        let (out, _) = m.apply(&[5, 6]);
+        assert_eq!(out, &[50, 6]);
+    }
+
+    /// Entry that keeps the state machine on the same glyph forever.
+    const STAY: u16 = FLAG_DONT_ADVANCE;
+
+    #[test]
+    fn morx_rearrangement_dont_advance_loop_terminates() {
+        let entry = [0u16.to_be_bytes(), STAY.to_be_bytes()].concat();
+        let body = state_body(0, &[[0, 0, 0, 0]], &[&entry], &[]);
+        let bytes = wrap_in_chain(&[&subtable(TYPE_REARRANGEMENT, &body)]);
+        let m = Morx::parse(&bytes).unwrap();
+        let (out, _) = m.apply(&[1, 2, 3]);
+        assert_eq!(out, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn morx_contextual_dont_advance_loop_terminates() {
+        let entry = [
+            0u16.to_be_bytes(),
+            STAY.to_be_bytes(),
+            0xFFFFu16.to_be_bytes(),
+            0xFFFFu16.to_be_bytes(),
+        ]
+        .concat();
+        let body = state_body(1, &[[0, 0, 0, 0]], &[&entry], &[]);
+        let bytes = wrap_in_chain(&[&subtable(TYPE_CONTEXTUAL, &body)]);
+        let m = Morx::parse(&bytes).unwrap();
+        let (out, _) = m.apply(&[1, 2, 3]);
+        assert_eq!(out, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn morx_ligature_dont_advance_loop_terminates() {
+        // Each step also pushes a component, so the old unbounded walk
+        // grew the component stack without limit.
+        let flags = STAY | FLAG_LIG_SET_COMPONENT;
+        let entry = [0u16.to_be_bytes(), flags.to_be_bytes(), 0u16.to_be_bytes()].concat();
+        let body = state_body(3, &[[0, 0, 0, 0]], &[&entry], &[]);
+        let bytes = wrap_in_chain(&[&subtable(TYPE_LIGATURE, &body)]);
+        let m = Morx::parse(&bytes).unwrap();
+        let (out, _) = m.apply(&[1, 2, 3]);
+        assert_eq!(out, &[1, 2, 3]);
+    }
+
+    /// Ligature entry: `(newState, flags, actionIndex = 0)`.
+    fn lig_entry(new_state: u16, flags: u16) -> Vec<u8> {
+        [
+            new_state.to_be_bytes(),
+            flags.to_be_bytes(),
+            0u16.to_be_bytes(),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn morx_ligature_duplicate_components_do_not_panic() {
+        // The glyph at index 1 is pushed three times (DontAdvance),
+        // then one action consumes all three pushes. Removing the
+        // duplicate slots used to call `Vec::remove` past the end.
+        let push_stay = FLAG_LIG_SET_COMPONENT | STAY;
+        let push_act = FLAG_LIG_SET_COMPONENT | FLAG_LIG_PERFORM_ACTION;
+        let entries = [
+            lig_entry(0, 0),
+            lig_entry(1, 0),
+            lig_entry(2, push_stay),
+            lig_entry(3, push_stay),
+            lig_entry(0, push_act),
+        ];
+        let entry_refs: Vec<&[u8]> = entries.iter().map(Vec::as_slice).collect();
+        let states = [[0, 1, 0, 0], [0, 2, 0, 0], [0, 3, 0, 0], [0, 4, 0, 0]];
+        let actions = [0u32, 0, LIG_ACTION_LAST | LIG_ACTION_STORE]
+            .iter()
+            .flat_map(|a| a.to_be_bytes())
+            .collect::<Vec<u8>>();
+        let components = [0u8; 12];
+        let ligatures = 99u16.to_be_bytes();
+        let body = state_body(
+            3,
+            &states,
+            &entry_refs,
+            &[&actions, &components, &ligatures],
+        );
+        let bytes = wrap_in_chain(&[&subtable(TYPE_LIGATURE, &body)]);
+        let m = Morx::parse(&bytes).unwrap();
+        let (out, origins) = m.apply(&[5, 5]);
+        assert_eq!(out.len(), origins.len());
+        assert!(out.len() <= 2);
+    }
+
+    #[test]
+    fn morx_ligature_negative_component_index_is_ignored() {
+        // The action offset is -10, so glyph 5 maps to component -5.
+        // Turning that into a byte offset used to overflow.
+        let minus_ten = 0u32.wrapping_sub(10);
+        let action = LIG_ACTION_LAST | LIG_ACTION_STORE | (minus_ten & LIG_ACTION_OFFSET_MASK);
+        let entry = lig_entry(0, FLAG_LIG_SET_COMPONENT | FLAG_LIG_PERFORM_ACTION);
+        let body = state_body(
+            3,
+            &[[0, 0, 0, 0]],
+            &[&entry],
+            &[&action.to_be_bytes(), &[0u8; 12], &99u16.to_be_bytes()],
+        );
+        let bytes = wrap_in_chain(&[&subtable(TYPE_LIGATURE, &body)]);
+        let m = Morx::parse(&bytes).unwrap();
+        let (out, _) = m.apply(&[5]);
+        assert_eq!(out, &[5]);
+    }
+
+    #[test]
+    fn morx_chained_insertions_stay_bounded() {
+        // Every subtable inserts glyph 7 after each glyph 7, so each
+        // one multiplied the run length by about nine. Eight of them
+        // grew one glyph into tens of millions.
+        let one = build_insertion_morx_after_trigger(7, 7);
+        let sub = &one[24..];
+        let bytes = wrap_in_chain(&[sub; 8]);
+        let m = Morx::parse(&bytes).unwrap();
+        let (out, origins) = m.apply(&[7]);
+        assert_eq!(out.len(), origins.len());
+        assert!(out.len() <= MAX_LEN_MIN, "run grew to {}", out.len());
     }
 }
