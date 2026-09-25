@@ -1,6 +1,6 @@
 [package]
 name = "sigilbuzz-capi"
-version = "0.2.1"
+version = "0.2.2"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -13,11 +13,42 @@ keywords = ["harfbuzz", "ffi", "shaping", "sigilbuzz"]
 categories = ["text-processing", "external-ffi-bindings"]
 
 [lib]
-# Build all three: a cdylib for `-lsigilbuzz` linkers, a staticlib for
-# CMake / Bazel projects that prefer to absorb the symbols, and an
-# rlib so downstream Rust consumers can pull the C wrappers in for
-# testing without going through dlopen.
+# Build all three: a cdylib for C programs that link dynamically, a
+# staticlib for projects that prefer to absorb the symbols, and an
+# rlib so Rust tests can call the C wrappers without going through
+# dlopen.
 crate-type = ["cdylib", "staticlib", "rlib"]
+
+# Install settings for `cargo cinstall` (https://github.com/lu-zero/cargo-c).
+# It installs the C library as `libsigilbuzz`, the header as
+# `sigilbuzz/hb.h`, a matching `sigilbuzz.pc`, and the CMake package
+# config. Plain `cargo build` names the output `sigilbuzz_capi` instead,
+# because the Rust library name `sigilbuzz` belongs to the core crate.
+[package.metadata.capi]
+min_version = "0.10.0"
+
+[package.metadata.capi.library]
+name = "sigilbuzz"
+
+[package.metadata.capi.header]
+name = "hb"
+subdirectory = "sigilbuzz"
+# The header is written by hand (`include/hb.h`), not generated.
+generation = false
+
+[package.metadata.capi.pkg_config]
+name = "sigilbuzz"
+filename = "sigilbuzz"
+description = "HarfBuzz-compatible text shaping library"
+
+[package.metadata.capi.install.include]
+# Installs as `<prefix>/include/sigilbuzz/hb.h`.
+asset = [{ from = "include/hb.h", to = "sigilbuzz" }]
+
+[package.metadata.capi.install.data]
+# Installs as `<prefix>/share/cmake/Sigilbuzz/SigilbuzzConfig.cmake`,
+# one of the places `find_package` looks.
+asset = [{ from = "cmake/SigilbuzzConfig.cmake", to = "cmake/Sigilbuzz" }]
 
 [features]
 # `std` is on by default, the same as the core shaper. The
@@ -36,6 +67,9 @@ default = ["std", "subset", "paint"]
 std = []
 subset = ["dep:sigilbuzz-subset"]
 paint = ["dep:sigilbuzz-paint"]
+# cargo-c turns this on for every `cargo cbuild` / `cargo cinstall`. It
+# gates nothing, but the feature has to exist.
+capi = []
 
 [dependencies]
 # The shaping core. No other required deps. This crate is a thin

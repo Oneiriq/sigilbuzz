@@ -4,19 +4,53 @@ A C library for [sigilbuzz](https://github.com/Oneiriq/sigilbuzz) that exports t
 same symbols as HarfBuzz: `hb_blob_create`, `hb_face_create`, `hb_shape`, and so on.
 C and C++ code written against HarfBuzz can link against it with no source changes.
 
-## Building and linking
+## Installing
 
-The crate builds a shared library (`cdylib`) and a static library (`staticlib`):
+Install with [cargo-c](https://github.com/lu-zero/cargo-c) (0.10.0 or later):
 
 ```sh
-cargo build --release -p sigilbuzz-capi
+cargo install cargo-c
+cargo cinstall --release -p sigilbuzz-capi --prefix /usr/local
 ```
 
-Cargo names the output `libsigilbuzz_capi` (`sigilbuzz_capi.dll` on Windows). The
-bundled pkg-config file (`sigilbuzz.pc.in`) and CMake module
-(`cmake/SigilbuzzConfig.cmake.in`) expect the library to be installed as
-`libsigilbuzz`, so rename it when you install it. After that, swap `-lharfbuzz` for
-`-lsigilbuzz` on your link line and use the header in `include/hb.h`.
+That installs everything a C or C++ project needs:
+
+- `libsigilbuzz`, shared and static (`sigilbuzz.dll` plus import library on Windows)
+- the header, as `include/sigilbuzz/hb.h`
+- `sigilbuzz.pc` for pkg-config
+- `SigilbuzzConfig.cmake` for CMake, in `share/cmake/Sigilbuzz/`
+
+To stage the files somewhere else first (for a distro package, say), add
+`--destdir <dir>`.
+
+## Using it
+
+With pkg-config, swap `harfbuzz` for `sigilbuzz`:
+
+```sh
+cc main.c $(pkg-config --cflags --libs sigilbuzz)
+```
+
+`--cflags` points at the `sigilbuzz` include directory, so `#include <hb.h>` works the
+same as it does with HarfBuzz.
+
+With CMake:
+
+```cmake
+find_package(Sigilbuzz REQUIRED)
+target_link_libraries(myapp PRIVATE Sigilbuzz::Sigilbuzz)
+```
+
+The CMake package reads its flags from `sigilbuzz.pc`, so it needs pkg-config (or
+pkgconf) installed. If you installed to a custom prefix, pass
+`-DCMAKE_PREFIX_PATH=<prefix>`.
+
+## Building without installing
+
+`cargo build --release -p sigilbuzz-capi` also builds the library, but it names the
+output `libsigilbuzz_capi` (`sigilbuzz_capi.dll` on Windows), because the name
+`sigilbuzz` belongs to the core Rust crate. Link that with `-lsigilbuzz_capi` and
+`-I crates/sigilbuzz-capi/include`. This is how the crate's own C tests build.
 
 The Rust `rlib` target exists only for the crate's own tests.
 
