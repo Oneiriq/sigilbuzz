@@ -320,7 +320,8 @@ const JOINING_TABLE: &[(u32, u32, JoiningType)] = &[
     // [`crate::ot::mongolian`] can promote the chosen variant onto
     // the previous letter without disturbing the chain.
     //
-    // 0x1806 TODO SOFT HYPHEN: Non-joining (used as line-break hint).
+    // 0x1806 MONGOLIAN TODO SOFT HYPHEN (Todo is the script name, not a
+    // work note): Non-joining (used as line-break hint).
     (0x1806, 0x1806, JoiningType::U),
     // 0x1807 SIBE SYLLABLE BOUNDARY MARKER: Dual.
     (0x1807, 0x1807, JoiningType::D),

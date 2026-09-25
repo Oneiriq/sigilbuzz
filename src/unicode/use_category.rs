@@ -13,12 +13,11 @@
 //!   pass and picks the correct positional feature bucket (`abvf`,
 //!   `blwf`, `pstf`, `pref`).
 //!
-//! sigilbuzz 0.2.0 wired up Khmer, Myanmar, Thai, Lao, and the Jamo
-//! subset of Hangul against these tables. 0.7.x extends the coverage
-//! to N'Ko, Buginese, Tai Tham, Balinese, Sundanese, Lepcha, Limbu,
-//! and Cham. The tables live here rather than inside a script-specific
-//! module because the same state machine consumes them for every USE
-//! script.
+//! The tables cover Khmer, Myanmar, Thai, Lao, the Jamo subset of
+//! Hangul, N'Ko, Buginese, Tai Tham, Balinese, Sundanese, Lepcha,
+//! Limbu, Cham, and the Brahmi-family historical scripts. They live
+//! here rather than inside a script-specific module because the same
+//! state machine consumes them for every USE script.
 //!
 //! # Sources
 //!
@@ -33,7 +32,6 @@
 /// from the MS USE documentation so OpenType spec readers can map
 /// straight across.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum UseCategory {
     /// Base consonant / independent letter: anchors a syllable.
     B,
@@ -84,7 +82,6 @@ pub enum UseCategory {
 /// used by the Indic shaper but with the USE-specific pre/below/post
 /// split laid out explicitly so the reorder pass can branch cleanly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum UsePosition {
     /// No positional role: the default for bases, whitespace, marks
     /// that attach at the overall glyph box.
@@ -104,13 +101,10 @@ pub enum UsePosition {
 /// Unknown codepoints return [`UsePosition::NotApplicable`].
 ///
 /// The arms are grouped by script rather than by category so the
-/// table reads top-to-bottom against the Unicode block layout;
-/// clippy's `match_same_arms` lint flags this as mergeable but
-/// merging across script boundaries destroys the script-locality
-/// that makes the table maintainable.
+/// table reads top-to-bottom against the Unicode block layout.
+/// Merging same-valued arms across script boundaries would destroy
+/// the script locality that makes the table maintainable.
 #[must_use]
-#[allow(clippy::match_same_arms)]
-#[allow(clippy::too_many_lines)]
 pub const fn use_position(ch: char) -> UsePosition {
     let cp = ch as u32;
     match cp {
@@ -395,12 +389,10 @@ pub const fn use_position(ch: char) -> UsePosition {
 /// (U+1100..U+11FF, U+A960..U+A97F, U+D7B0..U+D7FF) are covered. Format
 /// characters and variation selectors carry their shared USE categories.
 ///
-/// Arms are grouped by script / Unicode block. `match_same_arms` is
-/// silenced so the table reads top-to-bottom against the block layout
-/// and a reviewer can check each script slice in isolation.
+/// Arms are grouped by script / Unicode block so the table reads
+/// top-to-bottom against the block layout and a reviewer can check
+/// each script slice in isolation.
 #[must_use]
-#[allow(clippy::match_same_arms)]
-#[allow(clippy::too_many_lines)]
 pub const fn use_category(ch: char) -> UseCategory {
     let cp = ch as u32;
     match cp {
