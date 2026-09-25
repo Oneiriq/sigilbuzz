@@ -11,9 +11,9 @@
 //! the regions those rows reference.
 //!
 //! The rewriter is generic over the rows: callers (HVAR today,
-//! VVAR / MVAR later) supply the `(outer, inner)` set in
-//! deterministic order and receive a remap from old to new
-//! `(outer, inner)`. The output is a single `ItemVariationData`
+//! VVAR / MVAR later) pull the rows they need with [`pull_row`],
+//! dedupe them, and hand them to [`rebuild_store`] in the order they
+//! should be emitted. The output is a single `ItemVariationData`
 //! subtable in outer-index 0; per-glyph mappings are then short
 //! `(0, new_inner)` pairs the caller can pack into the densest
 //! `DeltaSetIndexMap` the inner range allows.
@@ -42,9 +42,8 @@ pub(crate) struct RebuiltStore {
     /// at some offset inside the new HVAR.
     pub bytes: Vec<u8>,
     /// Number of items in the rebuilt store (== kept-row count).
-    /// Exposed for callers that want to bound the inner index range
-    /// before building a `DeltaSetIndexMap`.
-    #[allow(dead_code)]
+    /// Only the unit tests read it back.
+    #[cfg(test)]
     pub item_count: u32,
 }
 
@@ -63,25 +62,21 @@ pub(crate) fn pull_row(
     inner: u16,
 ) -> Result<Option<PulledRow>, SubsetError> {
     let mut r = Reader::new(store_bytes);
-    let format = r.read_u16().map_err(|_| Self_truncated("ivs format"))?;
+    let format = r.read_u16().map_err(|_| truncated("ivs format"))?;
     if format != 1 {
         return Err(SubsetError::Unsupported(
             "ItemVariationStore format != 1 in HVAR",
         ));
     }
-    let _region_list_off = r.read_u32().map_err(|_| Self_truncated("ivs region off"))?;
-    let subtable_count = r
-        .read_u16()
-        .map_err(|_| Self_truncated("ivs subtable count"))?;
+    let _region_list_off = r.read_u32().map_err(|_| truncated("ivs region off"))?;
+    let subtable_count = r.read_u16().map_err(|_| truncated("ivs subtable count"))?;
     if outer >= subtable_count {
         return Ok(None);
     }
     // Skip ahead to the subtable offset for `outer`.
     r.skip(outer as usize * 4)
-        .map_err(|_| Self_truncated("ivs subtable skip"))?;
-    let subtable_off = r
-        .read_u32()
-        .map_err(|_| Self_truncated("ivs subtable off"))? as usize;
+        .map_err(|_| truncated("ivs subtable skip"))?;
+    let subtable_off = r.read_u32().map_err(|_| truncated("ivs subtable off"))? as usize;
 
     let row = read_subtable_row(store_bytes, subtable_off, inner)?;
     Ok(row)
@@ -91,33 +86,25 @@ pub(crate) fn pull_row(
 /// the absolute offset of the region list inside the store bytes.
 pub(crate) fn read_regions(store_bytes: &[u8]) -> Result<(u16, Vec<RegionTriple>), SubsetError> {
     let mut r = Reader::new(store_bytes);
-    let format = r.read_u16().map_err(|_| Self_truncated("ivs format"))?;
+    let format = r.read_u16().map_err(|_| truncated("ivs format"))?;
     if format != 1 {
         return Err(SubsetError::Unsupported(
             "ItemVariationStore format != 1 in HVAR",
         ));
     }
-    let region_list_off = r.read_u32().map_err(|_| Self_truncated("ivs region off"))? as usize;
+    let region_list_off = r.read_u32().map_err(|_| truncated("ivs region off"))? as usize;
 
     let mut rr =
-        Reader::at(store_bytes, region_list_off).map_err(|_| Self_truncated("ivs region list"))?;
-    let axis_count = rr
-        .read_u16()
-        .map_err(|_| Self_truncated("region axis count"))?;
-    let region_count = rr.read_u16().map_err(|_| Self_truncated("region count"))?;
+        Reader::at(store_bytes, region_list_off).map_err(|_| truncated("ivs region list"))?;
+    let axis_count = rr.read_u16().map_err(|_| truncated("region axis count"))?;
+    let region_count = rr.read_u16().map_err(|_| truncated("region count"))?;
     let mut out = Vec::with_capacity(region_count as usize);
     for _ in 0..region_count {
         let mut axes = Vec::with_capacity(axis_count as usize);
         for _ in 0..axis_count {
-            let start = rr
-                .read_f2dot14()
-                .map_err(|_| Self_truncated("region start"))?;
-            let peak = rr
-                .read_f2dot14()
-                .map_err(|_| Self_truncated("region peak"))?;
-            let end = rr
-                .read_f2dot14()
-                .map_err(|_| Self_truncated("region end"))?;
+            let start = rr.read_f2dot14().map_err(|_| truncated("region start"))?;
+            let peak = rr.read_f2dot14().map_err(|_| truncated("region peak"))?;
+            let end = rr.read_f2dot14().map_err(|_| truncated("region end"))?;
             axes.push((start, peak, end));
         }
         out.push(RegionTriple { axes });
@@ -129,6 +116,46 @@ pub(crate) fn read_regions(store_bytes: &[u8]) -> Result<(u16, Vec<RegionTriple>
 #[derive(Debug, Clone)]
 pub(crate) struct RegionTriple {
     pub axes: Vec<(f32, f32, f32)>,
+}
+
+/// Number of distinct `u16` region indexes.
+const REGION_INDEX_SPACE: usize = 1 << 16;
+
+/// Collects the union of regions referenced by `rows` in
+/// first-appearance order. Also returns, per source region index, its
+/// position in that list. Region indexes are `u16`, so the position
+/// table covers every index and each lookup is constant time.
+fn kept_regions(rows: &[PulledRow]) -> (Vec<u16>, Vec<Option<u32>>) {
+    let mut kept: Vec<u16> = Vec::new();
+    let mut position: Vec<Option<u32>> = alloc::vec![None; REGION_INDEX_SPACE];
+    for row in rows {
+        for &ri in &row.region_indexes {
+            if let Some(slot @ None) = position.get_mut(usize::from(ri)) {
+                *slot = Some(kept.len() as u32);
+                kept.push(ri);
+            }
+        }
+    }
+    (kept, position)
+}
+
+/// Upper bound on the byte length [`rebuild_store`] produces for the
+/// same inputs, computed without building it. Callers compare it
+/// against a budget before rebuilding, because every row is padded to
+/// the union of all rows' regions.
+pub(crate) fn rebuilt_store_len(rows: &[PulledRow], source_axis_count: u16) -> usize {
+    let (kept, _) = kept_regions(rows);
+    let regions = kept.len();
+    let region_list = regions
+        .saturating_mul(usize::from(source_axis_count))
+        .saturating_mul(6);
+    let subtable_rows = rows.len().saturating_mul(regions).saturating_mul(2);
+    // Store header (12) + region list header (4) + subtable header
+    // (6) + region index list + rows.
+    22usize
+        .saturating_add(region_list)
+        .saturating_add(regions.saturating_mul(2))
+        .saturating_add(subtable_rows)
 }
 
 /// Rebuilds an `ItemVariationStore` from a kept-row set. The output
@@ -145,27 +172,8 @@ pub(crate) fn rebuild_store(
     source_regions: &[RegionTriple],
 ) -> RebuiltStore {
     // Collect the union of regions referenced by the kept rows in
-    // first-appearance order. A `Vec` lookup is O(n) but the region
-    // count after dedup is at most a few dozen for any real font, so
-    // the linear scan is fine and gives us the deterministic order
-    // the briefing demands.
-    let mut kept_regions: Vec<u16> = Vec::new();
-    for row in rows {
-        for &ri in &row.region_indexes {
-            if !kept_regions.contains(&ri) {
-                kept_regions.push(ri);
-            }
-        }
-    }
-
-    // Build the new region list in the deduped order, plus a remap
-    // from source region index to new region index.
-    let mut region_remap: Vec<Option<u16>> = alloc::vec![None; source_regions.len()];
-    for (new_i, &old_i) in kept_regions.iter().enumerate() {
-        if (old_i as usize) < region_remap.len() {
-            region_remap[old_i as usize] = Some(new_i as u16);
-        }
-    }
+    // first-appearance order, which keeps the output deterministic.
+    let (kept_regions, position) = kept_regions(rows);
 
     // The new subtable references *every* kept region in its
     // per-row delta arrays. Source rows that referenced only a
@@ -188,12 +196,11 @@ pub(crate) fn rebuild_store(
 
     // Region list.
     let region_list_off = out.len() as u32;
-    out[region_list_off_slot..region_list_off_slot + 4]
-        .copy_from_slice(&region_list_off.to_be_bytes());
+    patch_u32(&mut out, region_list_off_slot, region_list_off);
     out.extend_from_slice(&source_axis_count.to_be_bytes());
     out.extend_from_slice(&region_index_count.to_be_bytes());
     for &old_i in &kept_regions {
-        let triples = &source_regions
+        let triples = source_regions
             .get(old_i as usize)
             .map(|r| r.axes.as_slice())
             .unwrap_or(&[]);
@@ -209,7 +216,7 @@ pub(crate) fn rebuild_store(
 
     // Subtable.
     let subtable_off = out.len() as u32;
-    out[subtable_off_slot..subtable_off_slot + 4].copy_from_slice(&subtable_off.to_be_bytes());
+    patch_u32(&mut out, subtable_off_slot, subtable_off);
 
     let item_count = rows.len() as u16;
     out.extend_from_slice(&item_count.to_be_bytes());
@@ -222,37 +229,48 @@ pub(crate) fn rebuild_store(
         out.extend_from_slice(&new_i.to_be_bytes());
     }
     // One row per item: emit deltas in new-region order. For each
-    // new region index, find the source slot in the row's
-    // region_indexes; if absent, write zero.
+    // new region index, take the row's first slot that references
+    // it. If none does, write zero.
+    let mut values: Vec<Option<i16>> = alloc::vec![None; kept_regions.len()];
     for row in rows {
-        for &kept_old_region in &kept_regions {
-            let mut value: i16 = 0;
-            for (slot, &row_old_region) in row.region_indexes.iter().enumerate() {
-                if row_old_region == kept_old_region {
-                    let raw = row.deltas.get(slot).copied().unwrap_or(0);
-                    value = raw.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-                    break;
-                }
+        values.fill(None);
+        for (slot, &row_old_region) in row.region_indexes.iter().enumerate() {
+            let new_slot = position
+                .get(usize::from(row_old_region))
+                .copied()
+                .flatten()
+                .and_then(|k| values.get_mut(k as usize));
+            if let Some(value @ None) = new_slot {
+                let raw = row.deltas.get(slot).copied().unwrap_or(0);
+                *value = Some(raw.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16);
             }
-            out.extend_from_slice(&value.to_be_bytes());
+        }
+        for value in &values {
+            out.extend_from_slice(&value.unwrap_or(0).to_be_bytes());
         }
     }
 
     RebuiltStore {
         bytes: out,
+        #[cfg(test)]
         item_count: u32::from(item_count),
     }
 }
 
+/// Overwrites the big-endian `u32` slot at `off` in `out`.
+fn patch_u32(out: &mut [u8], off: usize, value: u32) {
+    if let Some(slot) = out.get_mut(off..).and_then(<[u8]>::first_chunk_mut::<4>) {
+        *slot = value.to_be_bytes();
+    }
+}
+
 fn write_f2dot14(out: &mut Vec<u8>, v: f32) {
-    #[allow(clippy::cast_possible_truncation)]
     let raw = (v * 16384.0).round() as i16;
     out.extend_from_slice(&raw.to_be_bytes());
 }
 
 /// Returns a `SubsetError::Unsupported` with a short context.
-#[allow(non_snake_case)]
-fn Self_truncated(ctx: &'static str) -> SubsetError {
+fn truncated(ctx: &'static str) -> SubsetError {
     SubsetError::Unsupported(ctx)
 }
 
@@ -264,19 +282,19 @@ fn read_subtable_row(
     inner: u16,
 ) -> Result<Option<PulledRow>, SubsetError> {
     let mut r =
-        Reader::at(store_bytes, subtable_off).map_err(|_| Self_truncated("ivs subtable seek"))?;
-    let item_count = r.read_u16().map_err(|_| Self_truncated("ivs item count"))?;
+        Reader::at(store_bytes, subtable_off).map_err(|_| truncated("ivs subtable seek"))?;
+    let item_count = r.read_u16().map_err(|_| truncated("ivs item count"))?;
     if inner >= item_count {
         return Ok(None);
     }
     let word_delta_count_raw = r
         .read_u16()
-        .map_err(|_| Self_truncated("ivs word delta count"))?;
+        .map_err(|_| truncated("ivs word delta count"))?;
     let long_words = word_delta_count_raw & 0x8000 != 0;
     let word_delta_count = word_delta_count_raw & 0x7FFF;
     let region_index_count = r
         .read_u16()
-        .map_err(|_| Self_truncated("ivs region index count"))?;
+        .map_err(|_| truncated("ivs region index count"))?;
     if word_delta_count > region_index_count {
         return Err(SubsetError::Unsupported(
             "ItemVariationData wordDeltaCount > regionIndexCount",
@@ -284,50 +302,35 @@ fn read_subtable_row(
     }
     let mut region_indexes = Vec::with_capacity(region_index_count as usize);
     for _ in 0..region_index_count {
-        region_indexes.push(
-            r.read_u16()
-                .map_err(|_| Self_truncated("ivs region index"))?,
-        );
+        region_indexes.push(r.read_u16().map_err(|_| truncated("ivs region index"))?);
     }
     let delta_sets_off = r.position();
 
     let (wide, narrow) = if long_words { (4, 2) } else { (2, 1) };
-    let delta_set_size = word_delta_count as usize * wide
-        + (region_index_count - word_delta_count) as usize * narrow;
-    let row_off = delta_sets_off + inner as usize * delta_set_size;
-    if store_bytes.len() < row_off + delta_set_size {
-        return Err(Self_truncated("ivs delta set row"));
-    }
+    let word_delta_count = usize::from(word_delta_count);
+    let delta_set_size =
+        word_delta_count * wide + (usize::from(region_index_count) - word_delta_count) * narrow;
+    let row = usize::from(inner)
+        .checked_mul(delta_set_size)
+        .and_then(|row_off| delta_sets_off.checked_add(row_off))
+        .and_then(|row_off| store_bytes.get(row_off..))
+        .and_then(|rest| rest.get(..delta_set_size))
+        .ok_or(truncated("ivs delta set row"))?;
 
-    let mut deltas: Vec<i32> = Vec::with_capacity(region_index_count as usize);
-    let mut cursor = row_off;
-    for slot in 0..region_index_count {
-        let is_wide = slot < word_delta_count;
-        let value: i32 = match (is_wide, long_words) {
-            (true, true) => {
-                let v = i32::from_be_bytes([
-                    store_bytes[cursor],
-                    store_bytes[cursor + 1],
-                    store_bytes[cursor + 2],
-                    store_bytes[cursor + 3],
-                ]);
-                cursor += 4;
-                v
-            }
-            (true, false) | (false, true) => {
-                let v = i16::from_be_bytes([store_bytes[cursor], store_bytes[cursor + 1]]);
-                cursor += 2;
-                i32::from(v)
-            }
-            (false, false) => {
-                #[allow(clippy::cast_possible_wrap)]
-                let v = store_bytes[cursor] as i8;
-                cursor += 1;
-                i32::from(v)
-            }
-        };
-        deltas.push(value);
-    }
+    let (wide_bytes, narrow_bytes) = row
+        .split_at_checked(word_delta_count * wide)
+        .ok_or(truncated("ivs delta set row"))?;
+    let wide_values = wide_bytes.chunks_exact(wide).map(|b| match *b {
+        [b0, b1, b2, b3] => i32::from_be_bytes([b0, b1, b2, b3]),
+        [b0, b1] => i32::from(i16::from_be_bytes([b0, b1])),
+        _ => 0,
+    });
+    let narrow_values = narrow_bytes.chunks_exact(narrow).map(|b| match *b {
+        [b0, b1] => i32::from(i16::from_be_bytes([b0, b1])),
+        [b0] => i32::from(b0 as i8),
+        _ => 0,
+    });
+    let deltas: Vec<i32> = wide_values.chain(narrow_values).collect();
 
     Ok(Some(PulledRow {
         region_indexes,
@@ -340,7 +343,6 @@ mod tests {
     use super::*;
 
     fn write_f2dot14_t(out: &mut Vec<u8>, v: f32) {
-        #[allow(clippy::cast_possible_truncation)]
         let raw = (v * 16384.0).round() as i16;
         out.extend_from_slice(&raw.to_be_bytes());
     }
