@@ -158,6 +158,11 @@ pub struct SubrCall {
 /// of the byte stream. CFF1 charstrings stop at `endchar` or
 /// end-of-stream. Both behaviors produce the same call list.
 ///
+/// The stem count that sizes `hintmask` / `cntrmask` data starts at 0
+/// for every body. A subroutine that uses a hint mask set up by its
+/// caller's stem hints is therefore sized as if no stems were
+/// declared. This is a known limitation of the per-body scan.
+///
 /// # Errors
 ///
 /// Returns [`SubsetError::Unsupported`] on a truncated operand push,
@@ -180,7 +185,7 @@ pub fn scan_subr_calls(
     // can skip the right number of hintmask tail bytes.
     let mut stack: Vec<(i32, usize, usize)> = Vec::new();
     // Cumulative stem-pair count, for hintmask/cntrmask tail size.
-    let mut stem_count: u32 = 0;
+    let mut stem_count: usize = 0;
 
     while pos < charstring.len() {
         let b0 = charstring[pos];
@@ -238,22 +243,22 @@ pub fn scan_subr_calls(
             OP_HSTEM | OP_VSTEM | OP_HSTEMHM | OP_VSTEMHM => {
                 // Stem ops consume operand pairs; track stem count
                 // for any subsequent hintmask.
-                let n_pairs = (stack.len() as u32) / 2;
-                stem_count += n_pairs;
+                stem_count = stem_count.saturating_add(stack.len() / 2);
                 stack.clear();
                 pos += 1;
             }
             OP_HINTMASK | OP_CNTRMASK => {
                 // An implicit vstem may precede the first mask if
                 // there are operands left over.
-                let extra_pairs = (stack.len() as u32) / 2;
-                stem_count += extra_pairs;
+                stem_count = stem_count.saturating_add(stack.len() / 2);
                 stack.clear();
-                let mask_bytes = (stem_count as usize).div_ceil(8);
-                if pos + 1 + mask_bytes > charstring.len() {
-                    return Err(SubsetError::Unsupported("CFF hintmask tail truncated"));
-                }
-                pos += 1 + mask_bytes;
+                let mask_bytes = stem_count.div_ceil(8);
+                // `pos < len` here, so `pos + 1` cannot overflow.
+                let next = (pos + 1)
+                    .checked_add(mask_bytes)
+                    .filter(|&next| next <= charstring.len())
+                    .ok_or(SubsetError::Unsupported("CFF hintmask tail truncated"))?;
+                pos = next;
             }
             OP_ESCAPE => {
                 // Two-byte op: clear stack, advance two bytes. We
@@ -379,55 +384,55 @@ pub fn compute_kept_subrs(
 ) -> Result<(Vec<u32>, Vec<u32>), SubsetError> {
     let mut keep_local = alloc::vec![false; local_subrs.len()];
     let mut keep_global = alloc::vec![false; global_subrs.len()];
+    // Subroutines marked kept whose bodies still need a scan. Each
+    // subroutine enters the list at most once, so the walk costs one
+    // scan per kept body even when the call graph is a long chain.
+    let mut pending: Vec<(SubrKind, usize)> = Vec::new();
 
     // Seed: every call site in every kept charstring.
     for cs in kept_charstrings {
         for call in scan_subr_calls(cs, local_subrs.len(), global_subrs.len())? {
-            mark_call(call, &mut keep_local, &mut keep_global);
+            mark_call(call, &mut keep_local, &mut keep_global, &mut pending);
         }
     }
 
-    // Fixed point: each pass scans every kept subroutine body. If a
-    // newly-kept subr calls another, the next pass picks it up.
-    loop {
-        let before = count_kept(&keep_local) + count_kept(&keep_global);
-        for (i, sub) in local_subrs.iter().enumerate() {
-            if !keep_local[i] {
-                continue;
-            }
-            for call in scan_subr_calls(sub, local_subrs.len(), global_subrs.len())? {
-                mark_call(call, &mut keep_local, &mut keep_global);
-            }
-        }
-        for (i, sub) in global_subrs.iter().enumerate() {
-            if !keep_global[i] {
-                continue;
-            }
-            for call in scan_subr_calls(sub, local_subrs.len(), global_subrs.len())? {
-                mark_call(call, &mut keep_local, &mut keep_global);
-            }
-        }
-        let after = count_kept(&keep_local) + count_kept(&keep_global);
-        if after == before {
-            break;
+    // Transitive closure: a kept subroutine may call further ones.
+    while let Some((kind, idx)) = pending.pop() {
+        let body = match kind {
+            SubrKind::Local => local_subrs.get(idx),
+            SubrKind::Global => global_subrs.get(idx),
+        };
+        let Some(body) = body else {
+            continue;
+        };
+        for call in scan_subr_calls(body, local_subrs.len(), global_subrs.len())? {
+            mark_call(call, &mut keep_local, &mut keep_global, &mut pending);
         }
     }
 
     Ok((collect_kept(&keep_local), collect_kept(&keep_global)))
 }
 
-fn mark_call(call: SubrCall, keep_local: &mut [bool], keep_global: &mut [bool]) {
+/// Marks the subroutine `call` targets as kept and queues it for a
+/// scan when it was not kept before. Out-of-range targets are ignored.
+fn mark_call(
+    call: SubrCall,
+    keep_local: &mut [bool],
+    keep_global: &mut [bool],
+    pending: &mut Vec<(SubrKind, usize)>,
+) {
     let target = match call.kind {
         SubrKind::Local => keep_local,
         SubrKind::Global => keep_global,
     };
-    let idx = call.index_after_bias;
-    if idx < 0 {
+    let Ok(idx) = usize::try_from(call.index_after_bias) else {
         return;
-    }
-    let idx = idx as usize;
-    if idx < target.len() {
-        target[idx] = true;
+    };
+    if let Some(slot) = target.get_mut(idx) {
+        if !*slot {
+            *slot = true;
+            pending.push((call.kind, idx));
+        }
     }
 }
 
@@ -456,45 +461,52 @@ pub fn compute_cross_fd_globals(
 ) -> Result<Vec<bool>, SubsetError> {
     let n = global_subrs.len();
     let mut is_cross: Vec<bool> = alloc::vec![false; n];
-    // Pass 1: mark every global whose body directly calls a local.
+    // `callers[g]` lists every global whose body calls global `g`.
+    let mut callers: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
+    let mut pending: Vec<usize> = Vec::new();
+    // Pass 1: mark every global whose body directly calls a local, and
+    // record the global-to-global call edges.
     for (i, body) in global_subrs.iter().enumerate() {
         for call in scan_subr_calls(body, local_count, n)? {
-            if call.kind == SubrKind::Local {
-                is_cross[i] = true;
-                break;
+            match call.kind {
+                SubrKind::Local => {
+                    if let Some(flag) = is_cross.get_mut(i) {
+                        if !*flag {
+                            *flag = true;
+                            pending.push(i);
+                        }
+                    }
+                }
+                SubrKind::Global => {
+                    let callee = usize::try_from(call.index_after_bias)
+                        .ok()
+                        .and_then(|idx| callers.get_mut(idx));
+                    if let Some(list) = callee {
+                        list.push(i);
+                    }
+                }
             }
         }
     }
     // Pass 2: propagate transitively. If global G calls global G' and
     // G' is cross-FD, then G is cross-FD too (G's emitted body would
     // need to point at *one* duplicate of G' for *one* FD, which is
-    // exactly the cross-FD condition). Iterate to a fixed point.
-    loop {
-        let mut changed = false;
-        for (i, body) in global_subrs.iter().enumerate() {
-            if is_cross[i] {
-                continue;
-            }
-            for call in scan_subr_calls(body, local_count, n)? {
-                if call.kind == SubrKind::Global {
-                    let idx = call.index_after_bias;
-                    if idx >= 0 && (idx as usize) < n && is_cross[idx as usize] {
-                        is_cross[i] = true;
-                        changed = true;
-                        break;
-                    }
+    // exactly the cross-FD condition). Walking the reversed call edges
+    // visits each global at most once.
+    while let Some(callee) = pending.pop() {
+        let Some(list) = callers.get(callee) else {
+            continue;
+        };
+        for &caller in list {
+            if let Some(flag) = is_cross.get_mut(caller) {
+                if !*flag {
+                    *flag = true;
+                    pending.push(caller);
                 }
             }
         }
-        if !changed {
-            break;
-        }
     }
     Ok(is_cross)
-}
-
-fn count_kept(keep: &[bool]) -> usize {
-    keep.iter().filter(|k| **k).count()
 }
 
 fn collect_kept(keep: &[bool]) -> Vec<u32> {
@@ -623,10 +635,15 @@ pub fn encode_dict_offset_placeholder() -> Vec<u8> {
 /// Patches a placeholder offset slot emitted by
 /// [`encode_dict_offset_placeholder`] in-place with the real value.
 /// `slot_offset` is the byte offset of the leading `b0=29` byte within
-/// the buffer.
+/// the buffer. A slot that does not fit inside `buf` is left alone.
 pub fn patch_dict_offset(buf: &mut [u8], slot_offset: usize, value: i32) {
-    debug_assert_eq!(buf[slot_offset], 29, "placeholder must be b0=29");
-    buf[slot_offset + 1..slot_offset + 5].copy_from_slice(&value.to_be_bytes());
+    debug_assert_eq!(buf.get(slot_offset), Some(&29), "placeholder must be b0=29");
+    let operand = slot_offset
+        .checked_add(1)
+        .and_then(|start| buf.get_mut(start..)?.get_mut(..4));
+    if let Some(operand) = operand {
+        operand.copy_from_slice(&value.to_be_bytes());
+    }
 }
 
 /// Emits a charset in format 0 (per-gid 2-byte SID array, omitting
@@ -764,56 +781,46 @@ pub fn emit_encoding_auto(codes: &[u8]) -> Vec<u8> {
 /// Returns [`SubsetError::Unsupported`] for unknown formats or when the
 /// table is truncated.
 pub fn parse_fd_select(data: &[u8], off: usize, n_glyphs: usize) -> Result<Vec<u8>, SubsetError> {
-    if off >= data.len() {
+    let Some((&format, body)) = data.get(off..).and_then(<[u8]>::split_first) else {
         return Err(SubsetError::Unsupported("CFF FDSelect offset past end"));
-    }
-    let format = data[off];
+    };
     match format {
-        0 => {
-            if off + 1 + n_glyphs > data.len() {
-                return Err(SubsetError::Unsupported("CFF FDSelect format 0 truncated"));
-            }
-            Ok(data[off + 1..off + 1 + n_glyphs].to_vec())
-        }
+        0 => body
+            .get(..n_glyphs)
+            .map(<[u8]>::to_vec)
+            .ok_or(SubsetError::Unsupported("CFF FDSelect format 0 truncated")),
         3 => {
-            if off + 3 > data.len() {
+            let Some((n_ranges, mut rest)) = body.split_first_chunk::<2>() else {
                 return Err(SubsetError::Unsupported(
                     "CFF FDSelect format 3 header truncated",
                 ));
-            }
-            let n_ranges = u16::from_be_bytes([data[off + 1], data[off + 2]]) as usize;
-            let mut p = off + 3;
+            };
+            let n_ranges = usize::from(u16::from_be_bytes(*n_ranges));
             let mut ranges = Vec::with_capacity(n_ranges);
             for _ in 0..n_ranges {
-                if p + 3 > data.len() {
+                let Some((record, tail)) = rest.split_first_chunk::<3>() else {
                     return Err(SubsetError::Unsupported(
                         "CFF FDSelect format 3 range truncated",
                     ));
-                }
-                let first = u16::from_be_bytes([data[p], data[p + 1]]);
-                let fd = data[p + 2];
-                ranges.push((first, fd));
-                p += 3;
+                };
+                let &[first_hi, first_lo, fd] = record;
+                ranges.push((u16::from_be_bytes([first_hi, first_lo]), fd));
+                rest = tail;
             }
-            if p + 2 > data.len() {
+            let Some(sentinel) = rest.first_chunk::<2>() else {
                 return Err(SubsetError::Unsupported(
                     "CFF FDSelect format 3 sentinel truncated",
                 ));
-            }
-            let sentinel = u16::from_be_bytes([data[p], data[p + 1]]) as usize;
+            };
+            let sentinel = usize::from(u16::from_be_bytes(*sentinel));
             let mut out = alloc::vec![0u8; n_glyphs];
             for (i, &(first, fd)) in ranges.iter().enumerate() {
-                let start = first as usize;
-                let end = if i + 1 < n_ranges {
-                    ranges[i + 1].0 as usize
-                } else {
-                    sentinel
-                };
-                let bound = end.min(n_glyphs);
-                if start < bound {
-                    for slot in &mut out[start..bound] {
-                        *slot = fd;
-                    }
+                let start = usize::from(first);
+                let end = ranges
+                    .get(i + 1)
+                    .map_or(sentinel, |&(next, _)| usize::from(next));
+                if let Some(run) = out.get_mut(start..end.min(n_glyphs)) {
+                    run.fill(fd);
                 }
             }
             Ok(out)
@@ -899,17 +906,23 @@ pub fn renumber_subr_call(
     call: &SubrCall,
     new_raw_operand: i32,
 ) -> Result<(), SubsetError> {
-    let span_start = call.operand_byte_offset;
-    let span_end = span_start + call.operand_byte_len;
-    if span_end > charstring.len() {
-        return Err(SubsetError::Unsupported(
+    let span = call
+        .operand_byte_offset
+        .checked_add(call.operand_byte_len)
+        .and_then(|span_end| charstring.get_mut(call.operand_byte_offset..span_end))
+        .ok_or(SubsetError::Unsupported(
             "CFF charstring renumber span past end",
+        ))?;
+    // Re-encode at original width (pad to wider form when the natural
+    // encoding is shorter). The encoding always has `operand_byte_len`
+    // bytes, so it fills the span exactly.
+    let encoded = encode_int_operand_at_width(new_raw_operand, call.operand_byte_len)?;
+    if encoded.len() != span.len() {
+        return Err(SubsetError::Unsupported(
+            "CFF renumber: cannot pad operand to original width",
         ));
     }
-    // Re-encode at original width (pad to wider form when the natural
-    // encoding is shorter).
-    let encoded = encode_int_operand_at_width(new_raw_operand, call.operand_byte_len)?;
-    charstring[span_start..span_end].copy_from_slice(&encoded);
+    span.copy_from_slice(&encoded);
     Ok(())
 }
 
@@ -1046,6 +1059,32 @@ pub fn renumber_charstring_with_cross_fd(
     global_renumber: &[Option<u32>],
     cross_fd_override: &[Option<u32>],
 ) -> Result<(), SubsetError> {
+    renumber_charstring_impl(
+        charstring,
+        old_local_count,
+        old_global_count,
+        new_local_count,
+        new_global_count,
+        local_renumber,
+        global_renumber,
+        |old_idx| cross_fd_override.get(old_idx).copied().flatten(),
+    )
+}
+
+/// Shared body of [`renumber_charstring_with_cross_fd`]. The cross-FD
+/// override is a lookup function so callers can keep a sparse table.
+// Mirrors the argument list of the public wrapper above.
+#[allow(clippy::too_many_arguments)]
+fn renumber_charstring_impl(
+    charstring: &mut [u8],
+    old_local_count: usize,
+    old_global_count: usize,
+    new_local_count: usize,
+    new_global_count: usize,
+    local_renumber: &[Option<u32>],
+    global_renumber: &[Option<u32>],
+    cross_fd_override: impl Fn(usize) -> Option<u32>,
+) -> Result<(), SubsetError> {
     let calls = scan_subr_calls(charstring, old_local_count, old_global_count)?;
     let new_local_bias = subr_bias(new_local_count);
     let new_global_bias = subr_bias(new_global_count);
@@ -1054,20 +1093,20 @@ pub fn renumber_charstring_with_cross_fd(
         // offsets, but since we always re-encode at the original byte
         // width, the offsets stay stable. Reverse-iterate anyway as a
         // belt-and-suspenders against future variable-width changes.
-        let old_idx = call.index_after_bias;
-        if old_idx < 0 {
+        if call.index_after_bias < 0 {
             return Err(SubsetError::Unsupported(
                 "CFF charstring negative subr index after bias",
             ));
         }
-        let old_idx = old_idx as usize;
+        let old_idx = usize::try_from(call.index_after_bias)
+            .map_err(|_| SubsetError::Unsupported("CFF charstring calls dropped subroutine"))?;
         let new_idx =
             match call.kind {
                 SubrKind::Local => local_renumber.get(old_idx).copied().flatten().ok_or(
                     SubsetError::Unsupported("CFF charstring calls dropped subroutine"),
                 )?,
                 SubrKind::Global => {
-                    if let Some(Some(target)) = cross_fd_override.get(old_idx).copied() {
+                    if let Some(target) = cross_fd_override(old_idx) {
                         target
                     } else {
                         global_renumber.get(old_idx).copied().flatten().ok_or(
@@ -1259,59 +1298,168 @@ pub(crate) fn walk_dict(bytes: &[u8]) -> Result<Vec<DictEntry>, SubsetError> {
     Ok(out)
 }
 
+/// Returns the `(size, offset)` operands of a Private (op 18) DICT
+/// entry, or `None` when they are missing, non-integer, or negative.
+pub(crate) fn private_operands(entry: &DictEntry) -> Option<(u32, u32)> {
+    let [.., size, off] = entry.operands.as_slice() else {
+        return None;
+    };
+    let size = u32::try_from(size.int_value?).ok()?;
+    let off = u32::try_from(off.int_value?).ok()?;
+    Some((size, off))
+}
+
+/// INDEX reader for one table flavor ([`read_index`] or
+/// [`read_index_cff2`]).
+pub(crate) type IndexReader =
+    for<'b> fn(&'b [u8], usize) -> Result<(Vec<&'b [u8]>, usize), SubsetError>;
+
+/// Slices the Private DICT at `data[off..off + size]` and reads the
+/// local Subrs INDEX its op 19 points at (relative to the Private DICT
+/// start). Returns an empty Subrs list when op 19 is absent.
+pub(crate) fn read_private_dict<'a>(
+    data: &'a [u8],
+    size: u32,
+    off: u32,
+    read_subrs: IndexReader,
+    past_end: &'static str,
+) -> Result<(&'a [u8], Vec<&'a [u8]>), SubsetError> {
+    let start = off as usize;
+    let priv_bytes = start
+        .checked_add(size as usize)
+        .and_then(|end| data.get(start..end))
+        .ok_or(SubsetError::Unsupported(past_end))?;
+    // Walk the Private DICT for op 19. The last well-formed one wins.
+    let mut subrs_rel: Option<u32> = None;
+    for e in &walk_dict(priv_bytes)? {
+        if e.op == OP_SUBRS {
+            if let Some(v) = e.operands.last().and_then(|o| o.int_value) {
+                if let Ok(v) = u32::try_from(v) {
+                    subrs_rel = Some(v);
+                }
+            }
+        }
+    }
+    let locals = match subrs_rel {
+        Some(rel) => {
+            let abs = start
+                .checked_add(rel as usize)
+                .ok_or(SubsetError::Unsupported(past_end))?;
+            read_subrs(data, abs)?.0
+        }
+        None => Vec::new(),
+    };
+    Ok((priv_bytes, locals))
+}
+
+/// Error messages for one INDEX flavor. CFF1 and CFF2 INDEXes share a
+/// layout but report malformations under their own names.
+struct IndexErrors {
+    header_truncated: &'static str,
+    off_size_missing: &'static str,
+    off_size_out_of_range: &'static str,
+    offsets_truncated: &'static str,
+    final_offset_zero: &'static str,
+    data_past_end: &'static str,
+    offsets_non_monotone: &'static str,
+}
+
+const CFF1_INDEX_ERRORS: IndexErrors = IndexErrors {
+    header_truncated: "CFF INDEX header truncated",
+    off_size_missing: "CFF INDEX offSize missing",
+    off_size_out_of_range: "CFF INDEX offSize out of range",
+    offsets_truncated: "CFF INDEX offsets truncated",
+    final_offset_zero: "CFF INDEX final offset zero",
+    data_past_end: "CFF INDEX data past end",
+    offsets_non_monotone: "CFF INDEX offsets non-monotone",
+};
+
+const CFF2_INDEX_ERRORS: IndexErrors = IndexErrors {
+    header_truncated: "CFF2 INDEX header truncated",
+    off_size_missing: "CFF2 INDEX offSize missing",
+    off_size_out_of_range: "CFF2 INDEX offSize out of range",
+    offsets_truncated: "CFF2 INDEX offsets truncated",
+    final_offset_zero: "CFF2 INDEX final offset zero",
+    data_past_end: "CFF2 INDEX data past end",
+    offsets_non_monotone: "CFF2 INDEX offsets non-monotone",
+};
+
+/// Decodes a big-endian unsigned integer of 1..=4 bytes.
+fn read_be_uint(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .fold(0usize, |acc, &b| (acc << 8) | usize::from(b))
+}
+
+/// Shared INDEX reader. `count_len` is the width of the count field
+/// (2 for CFF1, 4 for CFF2). Every offset is checked against the data
+/// region before it is used, so a hostile offset array yields an error
+/// instead of an out-of-range slice.
+fn read_index_with<'a>(
+    bytes: &'a [u8],
+    pos: usize,
+    count_len: usize,
+    errs: &IndexErrors,
+) -> Result<(Vec<&'a [u8]>, usize), SubsetError> {
+    let count_bytes = bytes
+        .get(pos..)
+        .and_then(|b| b.get(..count_len))
+        .ok_or(SubsetError::Unsupported(errs.header_truncated))?;
+    let count = read_be_uint(count_bytes);
+    if count == 0 {
+        // Empty INDEX: just the count field, no offSize / offsets.
+        return Ok((Vec::new(), count_len));
+    }
+    // `pos + count_len` is in bounds: the count bytes were read above.
+    let off_size_pos = pos + count_len;
+    let off_size = usize::from(
+        *bytes
+            .get(off_size_pos)
+            .ok_or(SubsetError::Unsupported(errs.off_size_missing))?,
+    );
+    if !(1..=4).contains(&off_size) {
+        return Err(SubsetError::Unsupported(errs.off_size_out_of_range));
+    }
+    let off_table_start = off_size_pos + 1;
+    let off_table = count
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(off_size))
+        .and_then(|len| bytes.get(off_table_start..)?.get(..len))
+        .ok_or(SubsetError::Unsupported(errs.offsets_truncated))?;
+    let data_start = off_table_start + off_table.len();
+    let offsets: Vec<usize> = off_table.chunks_exact(off_size).map(read_be_uint).collect();
+    let last = offsets.last().copied().unwrap_or(0);
+    if last == 0 {
+        return Err(SubsetError::Unsupported(errs.final_offset_zero));
+    }
+    let data_len = last - 1;
+    let data = bytes
+        .get(data_start..)
+        .and_then(|b| b.get(..data_len))
+        .ok_or(SubsetError::Unsupported(errs.data_past_end))?;
+    let mut entries = Vec::with_capacity(count);
+    for w in offsets.windows(2) {
+        let &[a, b] = w else {
+            continue;
+        };
+        if a == 0 || b < a {
+            return Err(SubsetError::Unsupported(errs.offsets_non_monotone));
+        }
+        // An offset past the final one would slice beyond the data
+        // region. It also breaks monotonicity with the final offset.
+        let entry = data
+            .get(a - 1..b - 1)
+            .ok_or(SubsetError::Unsupported(errs.offsets_non_monotone))?;
+        entries.push(entry);
+    }
+    Ok((entries, data_start + data_len - pos))
+}
+
 /// Reads a CFF INDEX at `bytes[pos..]`, returning the entry slices
 /// (zero-copy into the input) plus the byte-length of the entire INDEX
 /// structure (so the caller can advance past it).
 pub(crate) fn read_index(bytes: &[u8], pos: usize) -> Result<(Vec<&[u8]>, usize), SubsetError> {
-    if pos + 2 > bytes.len() {
-        return Err(SubsetError::Unsupported("CFF INDEX header truncated"));
-    }
-    let count = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
-    if count == 0 {
-        return Ok((Vec::new(), 2));
-    }
-    if pos + 3 > bytes.len() {
-        return Err(SubsetError::Unsupported("CFF INDEX offSize missing"));
-    }
-    let off_size = bytes[pos + 2] as usize;
-    if !(1..=4).contains(&off_size) {
-        return Err(SubsetError::Unsupported("CFF INDEX offSize out of range"));
-    }
-    let off_table_start = pos + 3;
-    let off_table_end = off_table_start + (count + 1) * off_size;
-    if off_table_end > bytes.len() {
-        return Err(SubsetError::Unsupported("CFF INDEX offsets truncated"));
-    }
-    let mut offsets = Vec::with_capacity(count + 1);
-    for i in 0..=count {
-        let s = off_table_start + i * off_size;
-        let mut v = 0u32;
-        for &b in &bytes[s..s + off_size] {
-            v = (v << 8) | u32::from(b);
-        }
-        offsets.push(v as usize);
-    }
-    let data_start = off_table_end;
-    let last = *offsets.last().unwrap();
-    if last == 0 {
-        return Err(SubsetError::Unsupported("CFF INDEX final offset zero"));
-    }
-    let data_end = data_start + last - 1;
-    if data_end > bytes.len() {
-        return Err(SubsetError::Unsupported("CFF INDEX data past end"));
-    }
-    let mut entries = Vec::with_capacity(count);
-    for w in offsets.windows(2) {
-        let a = w[0];
-        let b = w[1];
-        if a == 0 || b < a {
-            return Err(SubsetError::Unsupported("CFF INDEX offsets non-monotone"));
-        }
-        let s = data_start + a - 1;
-        let e = data_start + b - 1;
-        entries.push(&bytes[s..e]);
-    }
-    Ok((entries, data_end - pos))
+    read_index_with(bytes, pos, 2, &CFF1_INDEX_ERRORS)
 }
 
 /// CFF2 INDEX reader. CFF2 widens the count field to u32 (CFF1 used
@@ -1321,57 +1469,7 @@ pub(crate) fn read_index_cff2(
     bytes: &[u8],
     pos: usize,
 ) -> Result<(Vec<&[u8]>, usize), SubsetError> {
-    if pos + 4 > bytes.len() {
-        return Err(SubsetError::Unsupported("CFF2 INDEX header truncated"));
-    }
-    let count =
-        u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as usize;
-    if count == 0 {
-        // CFF2 empty INDEX: just the 4-byte count, no offSize / offsets.
-        return Ok((Vec::new(), 4));
-    }
-    if pos + 5 > bytes.len() {
-        return Err(SubsetError::Unsupported("CFF2 INDEX offSize missing"));
-    }
-    let off_size = bytes[pos + 4] as usize;
-    if !(1..=4).contains(&off_size) {
-        return Err(SubsetError::Unsupported("CFF2 INDEX offSize out of range"));
-    }
-    let off_table_start = pos + 5;
-    let off_table_end = off_table_start + (count + 1) * off_size;
-    if off_table_end > bytes.len() {
-        return Err(SubsetError::Unsupported("CFF2 INDEX offsets truncated"));
-    }
-    let mut offsets = Vec::with_capacity(count + 1);
-    for i in 0..=count {
-        let s = off_table_start + i * off_size;
-        let mut v = 0u32;
-        for &b in &bytes[s..s + off_size] {
-            v = (v << 8) | u32::from(b);
-        }
-        offsets.push(v as usize);
-    }
-    let data_start = off_table_end;
-    let last = *offsets.last().unwrap();
-    if last == 0 {
-        return Err(SubsetError::Unsupported("CFF2 INDEX final offset zero"));
-    }
-    let data_end = data_start + last - 1;
-    if data_end > bytes.len() {
-        return Err(SubsetError::Unsupported("CFF2 INDEX data past end"));
-    }
-    let mut entries = Vec::with_capacity(count);
-    for w in offsets.windows(2) {
-        let a = w[0];
-        let b = w[1];
-        if a == 0 || b < a {
-            return Err(SubsetError::Unsupported("CFF2 INDEX offsets non-monotone"));
-        }
-        let s = data_start + a - 1;
-        let e = data_start + b - 1;
-        entries.push(&bytes[s..e]);
-    }
-    Ok((entries, data_end - pos))
+    read_index_with(bytes, pos, 4, &CFF2_INDEX_ERRORS)
 }
 
 /// Encodes a CFF2 INDEX (count is u32, layout otherwise identical to
@@ -1467,27 +1565,29 @@ struct ParsedCff1<'a> {
 
 /// Walks the source CFF1 table and captures every span the rewriter
 /// needs. CID-keyed fonts are detected (op `0x0C24` / `0x0C25` /
-/// `0x0C1E` present) and surfaced via `is_cid`; the orchestration
-/// declines to subset them in this release.
+/// `0x0C1E` present) and surfaced via `is_cid` so the orchestration
+/// can route them through `subset_cid_keyed`.
 fn parse_cff1(data: &[u8]) -> Result<ParsedCff1<'_>, SubsetError> {
-    if data.len() < 4 {
+    let Some(header) = data.first_chunk::<4>() else {
         return Err(SubsetError::Unsupported("CFF1 header truncated"));
-    }
-    let major = data[0];
-    let hdr_size = data[2] as usize;
+    };
+    let &[major, _, hdr_size, _] = header;
+    let header = header.as_slice();
+    let hdr_size = usize::from(hdr_size);
     if major != 1 {
         return Err(SubsetError::Unsupported("CFF1 major version != 1"));
     }
     if hdr_size < 4 || hdr_size > data.len() {
         return Err(SubsetError::Unsupported("CFF1 hdrSize invalid"));
     }
-    let header = &data[..4];
 
-    // Name INDEX.
-    let (name_entries, name_len) = read_index(data, hdr_size)?;
-    let name_index = &data[hdr_size..hdr_size + name_len];
-    let _ = name_entries;
+    // Name INDEX. `read_index` only returns lengths that stay inside
+    // `data`, so the spans below are always present.
+    let (_, name_len) = read_index(data, hdr_size)?;
     let mut pos = hdr_size + name_len;
+    let name_index = data
+        .get(hdr_size..pos)
+        .ok_or(SubsetError::Unsupported("CFF1 Name INDEX past end"))?;
 
     // Top DICT INDEX: first entry only.
     let (top_entries, top_index_len) = read_index(data, pos)?;
@@ -1499,7 +1599,9 @@ fn parse_cff1(data: &[u8]) -> Result<ParsedCff1<'_>, SubsetError> {
 
     // String INDEX.
     let (_, string_len) = read_index(data, pos)?;
-    let string_index = &data[pos..pos + string_len];
+    let string_index = data
+        .get(pos..pos + string_len)
+        .ok_or(SubsetError::Unsupported("CFF1 String INDEX past end"))?;
     pos += string_len;
 
     // Global Subr INDEX.
@@ -1537,13 +1639,9 @@ fn parse_cff1(data: &[u8]) -> Result<ParsedCff1<'_>, SubsetError> {
                     }
                 }
             }
-            OP_PRIVATE if e.operands.len() >= 2 => {
-                let s = e.operands[e.operands.len() - 2].int_value;
-                let o = e.operands[e.operands.len() - 1].int_value;
-                if let (Some(sv), Some(ov)) = (s, o) {
-                    if sv >= 0 && ov >= 0 {
-                        private = Some((sv as u32, ov as u32));
-                    }
+            OP_PRIVATE => {
+                if let Some(pair) = private_operands(e) {
+                    private = Some(pair);
                 }
             }
             OP_FD_ARRAY => {
@@ -1573,37 +1671,12 @@ fn parse_cff1(data: &[u8]) -> Result<ParsedCff1<'_>, SubsetError> {
     let (char_strings, _) = read_index(data, cs_off)?;
 
     // Private DICT + Local Subr INDEX.
-    let (private_dict, local_subrs): (&[u8], Vec<&[u8]>) = if let Some((size, off)) = private {
-        let off = off as usize;
-        let size = size as usize;
-        if off + size > data.len() {
-            return Err(SubsetError::Unsupported("CFF1 Private DICT past end"));
+    let (private_dict, local_subrs): (&[u8], Vec<&[u8]>) = match private {
+        Some((size, off)) => {
+            read_private_dict(data, size, off, read_index, "CFF1 Private DICT past end")?
         }
-        let priv_bytes = &data[off..off + size];
-        // Walk Private DICT for op 19 (Subrs offset, relative to Private).
-        let priv_entries = walk_dict(priv_bytes)?;
-        let mut subrs_rel_off: Option<u32> = None;
-        for e in &priv_entries {
-            if e.op == OP_SUBRS {
-                if let Some(v) = e.operands.last().and_then(|o| o.int_value) {
-                    if v >= 0 {
-                        subrs_rel_off = Some(v as u32);
-                    }
-                }
-            }
-        }
-        if let Some(rel) = subrs_rel_off {
-            let abs = off + rel as usize;
-            let (locals, _) = read_index(data, abs)?;
-            (priv_bytes, locals)
-        } else {
-            (priv_bytes, Vec::new())
-        }
-    } else {
-        (&[][..], Vec::new())
+        None => (&[][..], Vec::new()),
     };
-
-    let _ = encoding_off; // Used after parsing; suppress unused lint.
 
     Ok(ParsedCff1 {
         header,
@@ -1673,54 +1746,7 @@ fn extract_kept_charset_sids(
             "CFF1 predefined Expert / ExpertSubset charset not yet supported",
         ));
     } else {
-        let off = charset_off as usize;
-        if off >= data.len() {
-            return Err(SubsetError::Unsupported("CFF1 charset offset past end"));
-        }
-        let format = data[off];
-        let n_left = n_glyphs.saturating_sub(1);
-        let mut sids = alloc::vec![0u16; n_left];
-        match format {
-            0 => {
-                let body = &data[off + 1..];
-                if body.len() < n_left * 2 {
-                    return Err(SubsetError::Unsupported("CFF1 charset format 0 truncated"));
-                }
-                for (i, slot) in sids.iter_mut().enumerate() {
-                    *slot = u16::from_be_bytes([body[i * 2], body[i * 2 + 1]]);
-                }
-            }
-            1 | 2 => {
-                let record_size = if format == 1 { 3 } else { 4 };
-                let mut p = off + 1;
-                let mut written = 0usize;
-                while written < n_left {
-                    if p + record_size > data.len() {
-                        return Err(SubsetError::Unsupported(
-                            "CFF1 charset format 1/2 truncated",
-                        ));
-                    }
-                    let first = u16::from_be_bytes([data[p], data[p + 1]]);
-                    let n_l = if format == 1 {
-                        u16::from(data[p + 2])
-                    } else {
-                        u16::from_be_bytes([data[p + 2], data[p + 3]])
-                    };
-                    p += record_size;
-                    let take = (n_l as usize + 1).min(n_left - written);
-                    for k in 0..take {
-                        sids[written + k] = first + k as u16;
-                    }
-                    written += take;
-                }
-            }
-            _ => {
-                return Err(SubsetError::Unsupported(
-                    "CFF1 charset format not 0 / 1 / 2",
-                ));
-            }
-        }
-        sids
+        read_explicit_charset(data, charset_off as usize, n_glyphs.saturating_sub(1))?
     };
 
     // Project per-gid table onto the kept-gid set, skipping gid 0.
@@ -1736,11 +1762,69 @@ fn extract_kept_charset_sids(
     Ok(out)
 }
 
+/// Walks an explicit charset (format 0, 1, or 2) at `data[off..]` and
+/// returns the SIDs of gids `1..=n_left`.
+fn read_explicit_charset(data: &[u8], off: usize, n_left: usize) -> Result<Vec<u16>, SubsetError> {
+    let (&format, body) = data
+        .get(off..)
+        .and_then(<[u8]>::split_first)
+        .ok_or(SubsetError::Unsupported("CFF1 charset offset past end"))?;
+    let mut sids = alloc::vec![0u16; n_left];
+    match format {
+        0 => {
+            let body = n_left
+                .checked_mul(2)
+                .and_then(|len| body.get(..len))
+                .ok_or(SubsetError::Unsupported("CFF1 charset format 0 truncated"))?;
+            for (slot, sid) in sids.iter_mut().zip(body.chunks_exact(2)) {
+                *slot = u16::from_be_bytes([sid[0], sid[1]]);
+            }
+        }
+        1 | 2 => {
+            let record_size = if format == 1 { 3 } else { 4 };
+            let mut records = body;
+            let mut written = 0usize;
+            while written < n_left {
+                let (record, rest) =
+                    records
+                        .split_at_checked(record_size)
+                        .ok_or(SubsetError::Unsupported(
+                            "CFF1 charset format 1/2 truncated",
+                        ))?;
+                records = rest;
+                let (first, n_l) = match *record {
+                    [f0, f1, n] => (u16::from_be_bytes([f0, f1]), usize::from(n)),
+                    [f0, f1, n0, n1] => (
+                        u16::from_be_bytes([f0, f1]),
+                        usize::from(u16::from_be_bytes([n0, n1])),
+                    ),
+                    // `record_size` is 3 or 4, so no other shape occurs.
+                    _ => (0, 0),
+                };
+                let take = (n_l + 1).min(n_left - written);
+                // A range that runs past SID 0xFFFF is malformed. The
+                // SIDs wrap so the walk stays total.
+                for (k, slot) in sids.iter_mut().skip(written).take(take).enumerate() {
+                    *slot = first.wrapping_add(k as u16);
+                }
+                written += take;
+            }
+        }
+        _ => {
+            return Err(SubsetError::Unsupported(
+                "CFF1 charset format not 0 / 1 / 2",
+            ));
+        }
+    }
+    Ok(sids)
+}
+
 /// Reads the kept-gid char codes from the source Encoding. Returns one
 /// code per kept gid except gid 0, matching the charset's shape.
 ///
-/// Predefined encoding offsets `0` (Standard) and `1` (Expert) are
-/// expanded from the spec. Explicit encodings (>= 2) are walked.
+/// Predefined encoding offsets `0` (Standard) and `1` (Expert) are not
+/// expanded: every gid gets code 0. Explicit encodings (>= 2) are
+/// walked.
 fn extract_kept_encoding_codes(
     data: &[u8],
     encoding_off: u32,
@@ -1761,42 +1845,38 @@ fn extract_kept_encoding_codes(
         // round-trip test suite covers the explicit-Encoding path.
         // (Implemented as a no-op zero table, later format-auto'd.)
     } else {
-        let off = encoding_off as usize;
-        if off >= data.len() {
+        let Some((&format_byte, body)) = data
+            .get(encoding_off as usize..)
+            .and_then(<[u8]>::split_first)
+        else {
             return Err(SubsetError::Unsupported("CFF1 Encoding offset past end"));
-        }
-        let format = data[off] & 0x7F; // strip supplemental-encodings bit
+        };
+        let format = format_byte & 0x7F; // strip supplemental-encodings bit
         match format {
             0 => {
-                if off + 2 > data.len() {
+                let Some((&n_codes, codes)) = body.split_first() else {
                     return Err(SubsetError::Unsupported("CFF1 Encoding fmt 0 truncated"));
-                }
-                let n_codes = data[off + 1] as usize;
-                if off + 2 + n_codes > data.len() {
-                    return Err(SubsetError::Unsupported("CFF1 Encoding fmt 0 short"));
-                }
-                let limit = n_codes.min(n_left);
-                for i in 0..limit {
-                    per_gid[i] = data[off + 2 + i];
+                };
+                let codes = codes
+                    .get(..usize::from(n_codes))
+                    .ok_or(SubsetError::Unsupported("CFF1 Encoding fmt 0 short"))?;
+                for (slot, &code) in per_gid.iter_mut().zip(codes) {
+                    *slot = code;
                 }
             }
             1 => {
-                if off + 2 > data.len() {
+                let Some((&n_ranges, mut ranges)) = body.split_first() else {
                     return Err(SubsetError::Unsupported("CFF1 Encoding fmt 1 truncated"));
-                }
-                let n_ranges = data[off + 1] as usize;
-                let mut p = off + 2;
+                };
                 let mut written = 0usize;
                 for _ in 0..n_ranges {
-                    if p + 2 > data.len() {
+                    let Some((&[first, n_left_rec], rest)) = ranges.split_first_chunk::<2>() else {
                         return Err(SubsetError::Unsupported("CFF1 Encoding fmt 1 short"));
-                    }
-                    let first = data[p];
-                    let n_left_rec = data[p + 1] as usize;
-                    p += 2;
-                    let take = (n_left_rec + 1).min(n_left.saturating_sub(written));
-                    for k in 0..take {
-                        per_gid[written + k] = first.wrapping_add(k as u8);
+                    };
+                    ranges = rest;
+                    let take = (usize::from(n_left_rec) + 1).min(n_left.saturating_sub(written));
+                    for (k, slot) in per_gid.iter_mut().skip(written).take(take).enumerate() {
+                        *slot = first.wrapping_add(k as u8);
                     }
                     written += take;
                     if written >= n_left {
@@ -1857,38 +1937,33 @@ fn serialise_top_dict(
     let mut out = Vec::new();
     let mut slots = TopDictSlots::default();
     for e in entries {
-        let target = matches!(e.op, OP_CHARSTRINGS | OP_PRIVATE)
-            || (rebuild_charset && e.op == OP_CHARSET)
-            || (rebuild_encoding && e.op == OP_ENCODING);
-        if target {
-            // Drop the original operands; emit placeholders for the
-            // operands this op needs.
-            match e.op {
-                OP_CHARSET => {
-                    slots.charset_slot = Some(out.len());
-                    out.extend_from_slice(&encode_dict_offset_placeholder());
-                }
-                OP_ENCODING => {
-                    slots.encoding_slot = Some(out.len());
-                    out.extend_from_slice(&encode_dict_offset_placeholder());
-                }
-                OP_CHARSTRINGS => {
-                    slots.char_strings_slot = Some(out.len());
-                    out.extend_from_slice(&encode_dict_offset_placeholder());
-                }
-                OP_PRIVATE => {
-                    let size_slot = out.len();
-                    out.extend_from_slice(&encode_dict_offset_placeholder());
-                    let off_slot = out.len();
-                    out.extend_from_slice(&encode_dict_offset_placeholder());
-                    slots.private_slot = Some((size_slot, off_slot));
-                }
-                _ => unreachable!(),
+        // Targeted operators drop their original operands and get
+        // placeholders instead. Every other operator keeps its
+        // operands verbatim.
+        match e.op {
+            OP_CHARSET if rebuild_charset => {
+                slots.charset_slot = Some(out.len());
+                out.extend_from_slice(&encode_dict_offset_placeholder());
             }
-        } else {
-            // Preserve operands verbatim.
-            for o in &e.operands {
-                out.extend_from_slice(&o.raw);
+            OP_ENCODING if rebuild_encoding => {
+                slots.encoding_slot = Some(out.len());
+                out.extend_from_slice(&encode_dict_offset_placeholder());
+            }
+            OP_CHARSTRINGS => {
+                slots.char_strings_slot = Some(out.len());
+                out.extend_from_slice(&encode_dict_offset_placeholder());
+            }
+            OP_PRIVATE => {
+                let size_slot = out.len();
+                out.extend_from_slice(&encode_dict_offset_placeholder());
+                let off_slot = out.len();
+                out.extend_from_slice(&encode_dict_offset_placeholder());
+                slots.private_slot = Some((size_slot, off_slot));
+            }
+            _ => {
+                for o in &e.operands {
+                    out.extend_from_slice(&o.raw);
+                }
             }
         }
         // Emit operator bytes.
@@ -1967,17 +2042,17 @@ pub(crate) fn serialise_private_dict(
 /// (non-predefined) table; predefined-charset sources get an explicit
 /// rebuild to preserve the kept-gid SID mapping.
 ///
-/// CID-keyed sources (FDArray / FDSelect present) are declined. That
-/// flow needs a separate FDArray INDEX rebuild + FDSelect rewrite that
-/// belongs in a follow-up. Sources with predefined Expert /
-/// ExpertSubset charsets are likewise declined.
+/// CID-keyed sources (FDArray / FDSelect present) route through
+/// `subset_cid_keyed`, which also rebuilds the FDArray INDEX and
+/// rewrites FDSelect. Sources with predefined Expert / ExpertSubset
+/// charsets are declined.
 ///
 /// `kept_gids` must be sorted ascending and contain gid 0.
 ///
 /// # Errors
 ///
-/// Returns [`SubsetError::Unsupported`] for CID-keyed fonts or when
-/// the source uses a feature the orchestration doesn't yet rewrite.
+/// Returns [`SubsetError::Unsupported`] when the source is malformed or
+/// uses a feature the orchestration does not rewrite.
 pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8>, SubsetError> {
     let parsed = parse_cff1(cff_bytes)?;
     if parsed.is_cid {
@@ -2373,6 +2448,26 @@ pub(crate) fn serialise_font_dict(entries: &[DictEntry]) -> (Vec<u8>, Option<(us
     (out, private_slot)
 }
 
+/// Maps each source FD index to its position in `kept_fds_sorted`, which
+/// is also its new FD index. FD indexes are `u8`, so the table covers
+/// every possible index. Entries for dropped FDs stay 0 and are never
+/// read.
+pub(crate) fn kept_fd_positions(kept_fds_sorted: &[u8]) -> [usize; 256] {
+    let mut positions = [0usize; 256];
+    for (pos, &old_fd) in kept_fds_sorted.iter().enumerate() {
+        positions[usize::from(old_fd)] = pos;
+    }
+    positions
+}
+
+/// Looks up the FD-specific duplicate slot for source global `old_g` in
+/// a sorted `(old_g, new_slot)` table.
+fn override_slot(table: &[(u32, u32)], old_g: usize) -> Option<u32> {
+    let old_g = u32::try_from(old_g).ok()?;
+    let k = table.binary_search_by_key(&old_g, |&(g, _)| g).ok()?;
+    table.get(k).map(|&(_, slot)| slot)
+}
+
 /// CID-keyed CFF1 subset orchestration. See module-level header comment
 /// above for the high-level walk.
 fn subset_cid_keyed(
@@ -2425,46 +2520,21 @@ fn subset_cid_keyed(
     let mut fd_infos: Vec<FdInfo<'_>> = Vec::with_capacity(fd_array_entries.len());
     for fd_bytes in &fd_array_entries {
         let entries = walk_dict(fd_bytes)?;
-        let mut priv_info: Option<(u32, u32)> = None;
-        for e in &entries {
-            if e.op == OP_PRIVATE && e.operands.len() >= 2 {
-                let s = e.operands[e.operands.len() - 2].int_value;
-                let o = e.operands[e.operands.len() - 1].int_value;
-                if let (Some(sv), Some(ov)) = (s, o) {
-                    if sv >= 0 && ov >= 0 {
-                        priv_info = Some((sv as u32, ov as u32));
-                    }
-                }
-            }
-        }
-        let (private_dict, local_subrs): (&[u8], Vec<&[u8]>) = if let Some((size, off)) = priv_info
-        {
-            let off_u = off as usize;
-            let size_u = size as usize;
-            if off_u + size_u > cff_bytes.len() {
-                return Err(SubsetError::Unsupported("CFF1 CID Private DICT past end"));
-            }
-            let priv_bytes = &cff_bytes[off_u..off_u + size_u];
-            let priv_entries = walk_dict(priv_bytes)?;
-            let mut subrs_rel: Option<u32> = None;
-            for e in &priv_entries {
-                if e.op == OP_SUBRS {
-                    if let Some(v) = e.operands.last().and_then(|o| o.int_value) {
-                        if v >= 0 {
-                            subrs_rel = Some(v as u32);
-                        }
-                    }
-                }
-            }
-            if let Some(rel) = subrs_rel {
-                let abs = off_u + rel as usize;
-                let (locals, _) = read_index(cff_bytes, abs)?;
-                (priv_bytes, locals)
-            } else {
-                (priv_bytes, Vec::new())
-            }
-        } else {
-            (&[][..], Vec::new())
+        // The last well-formed Private operator wins.
+        let priv_info = entries
+            .iter()
+            .rev()
+            .filter(|e| e.op == OP_PRIVATE)
+            .find_map(private_operands);
+        let (private_dict, local_subrs): (&[u8], Vec<&[u8]>) = match priv_info {
+            Some((size, off)) => read_private_dict(
+                cff_bytes,
+                size,
+                off,
+                read_index,
+                "CFF1 CID Private DICT past end",
+            )?,
+            None => (&[][..], Vec::new()),
         };
         fd_infos.push(FdInfo {
             font_dict_entries: entries,
@@ -2493,15 +2563,13 @@ fn subset_cid_keyed(
     kept_fds_sorted.sort_unstable();
     kept_fds_sorted.dedup();
 
-    // FD renumber map: old_fd -> new_fd, or None when dropped.
-    let mut fd_renumber: Vec<Option<u8>> = alloc::vec![None; fd_infos.len()];
-    for (new_i, &old_i) in kept_fds_sorted.iter().enumerate() {
-        fd_renumber[old_i as usize] = Some(new_i as u8);
-    }
+    // FD renumber map: old_fd -> position in `kept_fds_sorted`, which is
+    // also the new FD index. Only kept FDs are ever looked up.
+    let fd_pos_of = kept_fd_positions(&kept_fds_sorted);
     // Per-kept-gid: new FD index.
     let new_fd_select: Vec<u8> = kept_fd_old
         .iter()
-        .map(|&old| fd_renumber[old as usize].unwrap())
+        .map(|&old| fd_pos_of[usize::from(old)] as u8)
         .collect();
 
     // Step 3: per-kept-FD subroutine keep-set.
@@ -2566,9 +2634,20 @@ fn subset_cid_keyed(
     // Reachability: walk every kept charstring and every kept local
     // subr in FD f; collect the set of globals they reach via the
     // global-call graph. Intersect with cross_fd_mask to get the
-    // duplicates needed for FD f.
-    let mut per_fd_cross_fd_targets: Vec<alloc::vec::Vec<bool>> =
-        alloc::vec![alloc::vec![false; old_global_count]; kept_fds_sorted.len()];
+    // duplicates needed for FD f. Each FD's target list is sorted by
+    // source global index.
+    //
+    // The rebuilt Global Subr INDEX holds the kept non-cross-FD globals
+    // plus one duplicate per (cross-FD global, FD) pair. Its count is a
+    // u16, so a layout past 65535 entries cannot be encoded. The check
+    // runs while the targets are collected, which also bounds the
+    // memory a hostile FDArray can make this step use.
+    let n_non_cross = kept_global_idx
+        .iter()
+        .filter(|&&g| !cross_fd_mask.get(g as usize).copied().unwrap_or(false))
+        .count();
+    let mut layout_len = n_non_cross;
+    let mut per_fd_cross_fd_targets: Vec<Vec<u32>> = Vec::with_capacity(kept_fds_sorted.len());
     for (fd_pos, &old_fd) in kept_fds_sorted.iter().enumerate() {
         // Bodies that originate calls in this FD: kept charstrings
         // belonging to old_fd plus all kept locals in old_fd.
@@ -2616,11 +2695,24 @@ fn subset_cid_keyed(
                 }
             }
         }
-        for (g, hit) in reached.iter().enumerate() {
-            if *hit && cross_fd_mask[g] {
-                per_fd_cross_fd_targets[fd_pos][g] = true;
+        let mut targets: Vec<u32> = Vec::new();
+        for (g, ((&hit, &cross), &kept)) in reached
+            .iter()
+            .zip(&cross_fd_mask)
+            .zip(&kept_global_set)
+            .enumerate()
+        {
+            if hit && cross && kept {
+                layout_len += 1;
+                if layout_len > usize::from(u16::MAX) {
+                    return Err(SubsetError::Unsupported(
+                        "CFF1 CID rebuilt Global Subr INDEX exceeds 65535 entries",
+                    ));
+                }
+                targets.push(g as u32);
             }
         }
+        per_fd_cross_fd_targets.push(targets);
     }
 
     // Build the new global INDEX layout:
@@ -2632,29 +2724,30 @@ fn subset_cid_keyed(
     // `global_renumber[i]` is the new slot for the canonical (non-cross-FD)
     // copy of source global `i`: `Some(slot)` only when global `i` is
     // *kept and not cross-FD*. Cross-FD globals route through
-    // `cross_fd_override_per_fd` instead.
+    // `per_fd_cross_fd_override` instead.
     let mut global_renumber: Vec<Option<u32>> = alloc::vec![None; old_global_count];
-    let mut new_global_layout: Vec<(u32, Option<u8>)> = Vec::new();
+    let mut new_global_layout: Vec<(u32, Option<u8>)> = Vec::with_capacity(layout_len);
     for &old_i in &kept_global_idx {
-        if !cross_fd_mask[old_i as usize] {
+        if !cross_fd_mask.get(old_i as usize).copied().unwrap_or(false) {
             let new_slot = new_global_layout.len() as u32;
-            global_renumber[old_i as usize] = Some(new_slot);
+            if let Some(slot) = global_renumber.get_mut(old_i as usize) {
+                *slot = Some(new_slot);
+            }
             new_global_layout.push((old_i, None));
         }
     }
-    // Per-FD override tables: per_fd_cross_fd_override[fd_pos][old_g] =
-    // Some(new_slot) when FD fd_pos calls cross-FD global old_g.
-    let mut per_fd_cross_fd_override: Vec<Vec<Option<u32>>> = (0..kept_fds_sorted.len())
-        .map(|_| alloc::vec![None; old_global_count])
-        .collect();
-    for (fd_pos, &old_fd) in kept_fds_sorted.iter().enumerate() {
-        for (old_g, &needs) in per_fd_cross_fd_targets[fd_pos].iter().enumerate() {
-            if needs && kept_global_set[old_g] {
-                let new_slot = new_global_layout.len() as u32;
-                per_fd_cross_fd_override[fd_pos][old_g] = Some(new_slot);
-                new_global_layout.push((old_g as u32, Some(old_fd)));
-            }
+    // Per-FD override tables: `(old_g, new_slot)` pairs sorted by
+    // `old_g`, one entry per cross-FD global the FD calls.
+    let mut per_fd_cross_fd_override: Vec<Vec<(u32, u32)>> =
+        Vec::with_capacity(kept_fds_sorted.len());
+    for (&old_fd, targets) in kept_fds_sorted.iter().zip(&per_fd_cross_fd_targets) {
+        let mut table: Vec<(u32, u32)> = Vec::with_capacity(targets.len());
+        for &old_g in targets {
+            let new_slot = new_global_layout.len() as u32;
+            table.push((old_g, new_slot));
+            new_global_layout.push((old_g, Some(old_fd)));
         }
+        per_fd_cross_fd_override.push(table);
     }
     let new_global_count = new_global_layout.len();
 
@@ -2664,12 +2757,13 @@ fn subset_cid_keyed(
     let mut new_charstrings: Vec<Vec<u8>> = Vec::with_capacity(kept_gids.len());
     for (i, &gid) in kept_gids.iter().enumerate() {
         let old_fd = kept_fd_old[i];
-        let new_fd_pos = kept_fds_sorted.iter().position(|&f| f == old_fd).unwrap();
+        let new_fd_pos = fd_pos_of[usize::from(old_fd)];
         let fd_local_subrs_old = &fd_infos[old_fd as usize].local_subrs;
         let fd_local_renumber = &per_fd_local_renumber[new_fd_pos];
         let new_local_count = per_fd_kept_local[new_fd_pos].len();
+        let overrides = &per_fd_cross_fd_override[new_fd_pos];
         let mut cs = parsed.char_strings[gid as usize].to_vec();
-        renumber_charstring_with_cross_fd(
+        renumber_charstring_impl(
             &mut cs,
             fd_local_subrs_old.len(),
             old_global_count,
@@ -2677,7 +2771,7 @@ fn subset_cid_keyed(
             new_global_count,
             fd_local_renumber,
             &global_renumber,
-            &per_fd_cross_fd_override[new_fd_pos],
+            |old_g| override_slot(overrides, old_g),
         )?;
         new_charstrings.push(cs);
     }
@@ -2694,8 +2788,9 @@ fn subset_cid_keyed(
             .iter()
             .map(|&idx| fd_local_subrs_old[idx as usize].to_vec())
             .collect();
+        let overrides = &per_fd_cross_fd_override[i];
         for sub in &mut new_locals {
-            renumber_charstring_with_cross_fd(
+            renumber_charstring_impl(
                 sub,
                 fd_local_subrs_old.len(),
                 old_global_count,
@@ -2703,7 +2798,7 @@ fn subset_cid_keyed(
                 new_global_count,
                 fd_local_renumber,
                 &global_renumber,
-                &per_fd_cross_fd_override[i],
+                |old_g| override_slot(overrides, old_g),
             )?;
         }
         new_per_fd_local_subrs.push(new_locals);
@@ -2730,10 +2825,11 @@ fn subset_cid_keyed(
     for &(old_g, dup_for_fd) in &new_global_layout {
         let mut body = parsed.global_subrs[old_g as usize].to_vec();
         if let Some(old_fd) = dup_for_fd {
-            let fd_pos = kept_fds_sorted.iter().position(|&f| f == old_fd).unwrap();
+            let fd_pos = fd_pos_of[usize::from(old_fd)];
             let fd_local_subrs_old = &fd_infos[old_fd as usize].local_subrs;
             let new_local_count = per_fd_kept_local[fd_pos].len();
-            renumber_charstring_with_cross_fd(
+            let overrides = &per_fd_cross_fd_override[fd_pos];
+            renumber_charstring_impl(
                 &mut body,
                 fd_local_subrs_old.len(),
                 old_global_count,
@@ -2741,23 +2837,21 @@ fn subset_cid_keyed(
                 new_global_count,
                 &per_fd_local_renumber[fd_pos],
                 &global_renumber,
-                &per_fd_cross_fd_override[fd_pos],
+                |old_g| override_slot(overrides, old_g),
             )?;
         } else {
             // Non-cross-FD: zero-sized local pool because the body
             // never issues a `callsubr`. If it did, the empty local
             // renumber table would surface a hard error.
-            let empty_local: Vec<Option<u32>> = Vec::new();
-            let empty_override: Vec<Option<u32>> = Vec::new();
-            renumber_charstring_with_cross_fd(
+            renumber_charstring_impl(
                 &mut body,
                 0,
                 old_global_count,
                 0,
                 new_global_count,
-                &empty_local,
+                &[],
                 &global_renumber,
-                &empty_override,
+                |_| None,
             )?;
         }
         new_global_subrs.push(body);
@@ -2965,7 +3059,6 @@ fn subset_cid_keyed(
 }
 
 #[cfg(test)]
-#[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
 mod tests {
     use super::*;
 
@@ -4577,5 +4670,51 @@ mod tests {
         assert_eq!(parsed.char_strings.len(), 1);
         // Exactly one duplicate should remain (the one for FD 0).
         assert_eq!(parsed.global_subrs.len(), 1);
+    }
+
+    /// CFF1 INDEX with two entries whose middle offset (200) points
+    /// past the final offset (2). Only 1 data byte exists.
+    const INDEX_WITH_OFFSET_PAST_END: &[u8] = &[0, 2, 1, 1, 200, 2, 0xAA];
+
+    #[test]
+    fn read_index_rejects_offset_past_final_offset() {
+        let r = read_index(INDEX_WITH_OFFSET_PAST_END, 0);
+        assert!(matches!(r, Err(SubsetError::Unsupported(_))));
+    }
+
+    #[test]
+    fn read_index_cff2_rejects_offset_past_final_offset() {
+        // Same shape with the CFF2 u32 count.
+        let index: &[u8] = &[0, 0, 0, 2, 1, 1, 200, 2, 0xAA];
+        let r = read_index_cff2(index, 0);
+        assert!(matches!(r, Err(SubsetError::Unsupported(_))));
+    }
+
+    #[test]
+    fn charset_range_past_last_sid_wraps_instead_of_overflowing() {
+        // Charset at offset 3: format 1, one range starting at SID
+        // 0xFFFF with nLeft = 1, covering gids 1 and 2.
+        let data: &[u8] = &[0, 0, 0, 1, 0xFF, 0xFF, 1];
+        let sids = extract_kept_charset_sids(data, 3, 3, &[0, 1, 2]).expect("charset");
+        assert_eq!(sids, alloc::vec![0xFFFFu16, 0]);
+    }
+
+    #[test]
+    fn cross_fd_detection_handles_long_global_chain() {
+        // Global i calls global i + 1 and the last one calls a local.
+        // Every global is cross-FD. Propagating one link per pass over
+        // all globals would be quadratic in the chain length.
+        const N: usize = 20_000;
+        let bias = subr_bias(N);
+        let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(N);
+        for i in 0..N - 1 {
+            let mut body = encode_int_operand(i as i32 + 1 - bias);
+            body.push(OP_CALLGSUBR);
+            bodies.push(body);
+        }
+        bodies.push(alloc::vec![139, OP_CALLSUBR]);
+        let refs: Vec<&[u8]> = bodies.iter().map(Vec::as_slice).collect();
+        let is_cross = compute_cross_fd_globals(&refs, 1).expect("cross-FD scan");
+        assert!(is_cross.iter().all(|&c| c));
     }
 }
