@@ -136,6 +136,7 @@ using it inside oniq. Real workloads there decide what gets built next.
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md): benchmark numbers against rustybuzz.
 - [docs/deps.md](docs/deps.md): every external dependency and why it is there.
 - [docs/RELEASING.md](docs/RELEASING.md): how a release is cut and published.
+- [fuzz/README.md](fuzz/README.md): the fuzz targets and how to run them.
 - [agent.md](agent.md): contribution rules.
 
 ## Development

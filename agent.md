@@ -109,6 +109,8 @@ surrounding safe API must enforce them.
 - Shaping integration tests use real openly licensed fonts (for example Open Sans)
   stored under `tests/fixtures/` and `tests/fonts/`.
 - `cargo test --workspace --all-features` is the one-command gate.
+- After changing anything that reads font, image, or text input, run the matching
+  fuzz target for a while. See `fuzz/README.md`.
 - Expected-output fixtures are regenerated with an explicit command, never re-captured
   silently.
 
