@@ -25,7 +25,7 @@ use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
 use crate::tables::outline::OutlineSink;
-use crate::tables::parse::Reader;
+use crate::tables::parse::{abs_f32, Reader};
 
 /// Subroutine recursion cap. CFF spec says 10 per Type 2.
 const MAX_SUBR_DEPTH: u8 = 10;
@@ -1016,7 +1016,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     let a = core::mem::take(&mut self.stack);
                     let dx_total = a[0] + a[2] + a[4] + a[6] + a[8];
                     let dy_total = a[1] + a[3] + a[5] + a[7] + a[9];
-                    let (dx_final, dy_final) = if dx_total.abs() > dy_total.abs() {
+                    let (dx_final, dy_final) = if abs_f32(dx_total) > abs_f32(dy_total) {
                         (a[10], -dy_total)
                     } else {
                         (-dx_total, a[10])

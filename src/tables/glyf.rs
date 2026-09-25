@@ -52,7 +52,7 @@ use crate::error::{Error, Result};
 use crate::tables::hmtx::Hmtx;
 use crate::tables::loca::Loca;
 use crate::tables::outline::OutlineSink;
-use crate::tables::parse::Reader;
+use crate::tables::parse::{abs_f32, Reader};
 use crate::tables::vmtx::Vmtx;
 
 /// Glyph bounding box in font design units.
@@ -990,7 +990,7 @@ fn emit_contour<S: OutlineSink>(coords: &[(f32, f32)], flags: &[FlatPoint], sink
 
     // Emit an explicit LineTo back to the start when we didn't
     // already land there. Matches ttf-parser / HarfBuzz convention.
-    if (cur_x - start_x).abs() > 1e-6 || (cur_y - start_y).abs() > 1e-6 {
+    if abs_f32(cur_x - start_x) > 1e-6 || abs_f32(cur_y - start_y) > 1e-6 {
         sink.line_to(start_x, start_y);
     }
     sink.close();

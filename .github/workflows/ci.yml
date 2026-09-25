@@ -48,3 +48,27 @@ jobs:
 
       - name: build (no_std)
         run: cargo build --no-default-features
+
+  msrv:
+    name: MSRV (Rust 1.81)
+    runs-on: [self-hosted, aur0]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust 1.81
+        uses: dtolnay/rust-toolchain@1.81
+
+      # Newer releases of some dependencies (clap, for one) need a newer Rust.
+      # Resolve the versions that still support 1.81, the way a 1.81 user's
+      # cargo would.
+      - name: Resolve 1.81-compatible dependencies
+        run: CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo +stable generate-lockfile
+
+      - name: check core (no_std)
+        run: cargo +1.81 check -p sigilbuzz --no-default-features
+
+      - name: check libraries and binaries
+        run: cargo +1.81 check --workspace --lib --bins --all-features

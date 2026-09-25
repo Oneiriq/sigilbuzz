@@ -48,7 +48,7 @@
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
-use crate::tables::parse::Reader;
+use crate::tables::parse::{abs_f32, Reader};
 
 /// A parsed `gvar` table.
 #[derive(Debug, Clone)]
@@ -441,7 +441,7 @@ fn tuple_scalar(peak: &[f32], start: Option<&[f32]>, end: Option<&[f32]>, coords
         if p == 0.0 {
             continue;
         }
-        if (c - p).abs() < f32::EPSILON {
+        if abs_f32(c - p) < f32::EPSILON {
             continue;
         }
         // Default region: [0, peak] or [peak, 0] depending on sign.
@@ -459,13 +459,13 @@ fn tuple_scalar(peak: &[f32], start: Option<&[f32]>, end: Option<&[f32]>, coords
             return 0.0;
         }
         if c < p {
-            if (p - s).abs() < f32::EPSILON {
+            if abs_f32(p - s) < f32::EPSILON {
                 return 0.0;
             }
             scalar *= (c - s) / (p - s);
         } else {
             // c > p
-            if (p - e).abs() < f32::EPSILON {
+            if abs_f32(p - e) < f32::EPSILON {
                 return 0.0;
             }
             scalar *= (e - c) / (e - p);
