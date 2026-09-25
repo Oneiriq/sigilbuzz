@@ -547,11 +547,13 @@ fn rewrite_pair_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
     // classes. The matrix bytes are preserved verbatim.
     let surviving_cd1: Vec<(u16, u16)> = cd1_pairs
         .iter()
-        .filter_map(|&(g, c)| Some((map.map(g)?, c)).filter(|_| c < class1_count))
+        .filter(|&&(_, c)| c < class1_count)
+        .filter_map(|&(g, c)| Some((map.map(g)?, c)))
         .collect();
     let surviving_cd2: Vec<(u16, u16)> = cd2_pairs
         .iter()
-        .filter_map(|&(g, c)| Some((map.map(g)?, c)).filter(|_| c < class2_count))
+        .filter(|&&(_, c)| c < class2_count)
+        .filter_map(|&(g, c)| Some((map.map(g)?, c)))
         .collect();
 
     let cd1_bytes_new = crate::classdef::emit_classdef(&surviving_cd1);

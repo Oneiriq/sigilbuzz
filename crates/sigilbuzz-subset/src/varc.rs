@@ -792,7 +792,7 @@ fn prune_multi_var_store(
     // outer-index shift into the existing `(outer, inner)` remap so the
     // record-rewrite path sees the final outer indices.
     if !outer_remap_collapse.is_empty() {
-        for (_, (no, _)) in remap.iter_mut() {
+        for (no, _) in remap.values_mut() {
             if let Some(&final_no) = outer_remap_collapse.get(no) {
                 *no = final_no;
             }
