@@ -75,7 +75,7 @@ pub unsafe extern "C" fn hb_face_collect_unicodes(face: *const hb_face_t, set: *
 /// the corresponding filter is "all scripts" / "all languages".
 ///
 /// # Safety
-/// `face` and `features` must each be null or valid;
+/// `face` and `features` must each be null or valid.
 /// `scripts`/`languages` must point to NUL-terminated `hb_tag_t[]`
 /// arrays when non-null.
 #[no_mangle]

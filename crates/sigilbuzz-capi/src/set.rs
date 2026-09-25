@@ -187,7 +187,7 @@ pub unsafe extern "C" fn hb_set_get_population(set: *const hb_set_t) -> u32 {
 /// further member exists; in that case `*codepoint` is left untouched.
 ///
 /// # Safety
-/// `set` must be null or valid; `codepoint` must be null or point to
+/// `set` must be null or valid. `codepoint` must be null or point to
 /// a writable `u32`.
 #[no_mangle]
 pub unsafe extern "C" fn hb_set_next(set: *const hb_set_t, codepoint: *mut u32) -> hb_bool_t {

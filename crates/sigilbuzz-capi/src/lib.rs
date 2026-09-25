@@ -280,7 +280,7 @@ mod spin_mutex {
     // SAFETY: SpinMutex owns its `T`, so moving it to another thread
     // moves the `T`, which is fine for `T: Send`.
     unsafe impl<T: Send> Send for SpinMutex<T> {}
-    // SAFETY: SpinMutex serializes access to `inner`; the AtomicBool
+    // SAFETY: SpinMutex serializes access to `inner`. The AtomicBool
     // is the only cross-thread observable. As with `std::sync::Mutex`,
     // handing out `&mut T` on another thread only needs `T: Send`.
     unsafe impl<T: Send> Sync for SpinMutex<T> {}
@@ -597,7 +597,7 @@ pub unsafe extern "C" fn hb_blob_reference(blob: *mut hb_blob_t) -> *mut hb_blob
 }
 
 /// # Safety
-/// `blob` must be null or valid; `length` may be null.
+/// `blob` must be null or valid. `length` may be null.
 #[no_mangle]
 pub unsafe extern "C" fn hb_blob_get_data(
     blob: *mut hb_blob_t,
@@ -873,7 +873,7 @@ pub unsafe extern "C" fn hb_font_set_scale(font: *mut hb_font_t, x_scale: c_int,
 }
 
 /// # Safety
-/// `font` must be null or valid; `x_scale`/`y_scale` may be null.
+/// `font` must be null or valid. `x_scale`/`y_scale` may be null.
 #[no_mangle]
 pub unsafe extern "C" fn hb_font_get_scale(
     font: *mut hb_font_t,
@@ -915,7 +915,7 @@ pub unsafe extern "C" fn hb_font_set_ppem(font: *mut hb_font_t, x_ppem: c_uint, 
 }
 
 /// # Safety
-/// `font` must be null or valid; `(variations, length)` must describe
+/// `font` must be null or valid. `(variations, length)` must describe
 /// a valid `hb_variation_t[]` slice when `variations` is non-null.
 #[no_mangle]
 pub unsafe extern "C" fn hb_font_set_variations(
@@ -1075,7 +1075,7 @@ fn item_range(total: usize, item_offset: c_uint, item_length: c_int) -> Option<(
 }
 
 /// # Safety
-/// `buffer` must be null or valid; `text` must point to at least
+/// `buffer` must be null or valid. `text` must point to at least
 /// `text_length` bytes (when `text_length >= 0`) or to a NUL-terminated
 /// string (when `text_length == -1`).
 #[no_mangle]
@@ -1110,7 +1110,7 @@ pub unsafe extern "C" fn hb_buffer_add_utf8(
 }
 
 /// # Safety
-/// `buffer` must be null or valid; `(text, text_length)` must describe a
+/// `buffer` must be null or valid. `(text, text_length)` must describe a
 /// valid `u16[]` slice (or NUL-terminated u16 array if `text_length == -1`).
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_add_utf16(
@@ -1235,7 +1235,7 @@ pub unsafe extern "C" fn hb_buffer_guess_segment_properties(buffer: *mut hb_buff
 }
 
 /// # Safety
-/// `buffer` must be null or valid; `length` may be null.
+/// `buffer` must be null or valid. `length` may be null.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_get_glyph_infos(
     buffer: *mut hb_buffer_t,
@@ -1267,7 +1267,7 @@ pub unsafe extern "C" fn hb_buffer_get_glyph_infos(
 }
 
 /// # Safety
-/// `buffer` must be null or valid; `length` may be null.
+/// `buffer` must be null or valid. `length` may be null.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_get_glyph_positions(
     buffer: *mut hb_buffer_t,
@@ -1313,7 +1313,7 @@ pub unsafe extern "C" fn hb_buffer_get_length(buffer: *mut hb_buffer_t) -> c_uin
 // ---------------------------------------------------------------------------
 
 /// # Safety
-/// `font` and `buffer` must be null or valid; `(features, num_features)`
+/// `font` and `buffer` must be null or valid. `(features, num_features)`
 /// must describe a valid `hb_feature_t[]` slice when `features` is
 /// non-null.
 #[no_mangle]

@@ -155,7 +155,7 @@ pub unsafe extern "C" fn hb_subset_or_fail(
     }
 
     // Add raw gids the caller pushed into the glyph set.
-    // sigilbuzz_subset::SubsetInput rejects out-of-range gids; we
+    // sigilbuzz_subset::SubsetInput rejects out-of-range gids. We
     // silently skip the ones that do not fit in u16 so the FFI
     // surface doesn't expose internal validation errors.
     {

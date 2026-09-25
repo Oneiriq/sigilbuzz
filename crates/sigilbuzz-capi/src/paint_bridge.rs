@@ -332,7 +332,7 @@ impl_setter!(
 /// not a valid glyph id and paints nothing.
 ///
 /// # Safety
-/// `font` and `funcs` must each be null or valid; `paint_data` may be
+/// `font` and `funcs` must each be null or valid. `paint_data` may be
 /// any pointer (it is threaded back to the consumer's callbacks
 /// unchanged).
 #[no_mangle]
