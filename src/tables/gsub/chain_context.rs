@@ -3,9 +3,8 @@
 //! Formats 1 (glyph-based) and 2 (class-based) are parsed via the
 //! shared `tables::layout::context` helpers; see
 //! [`ChainContextAny`] for the format-dispatching entry point every
-//! downstream caller should use. The original [`ChainContext`] struct
-//! implements format 3 only and stays public for backwards
-//! compatibility with the M2 shape driver.
+//! downstream caller should use. The [`ChainContext`] struct in this
+//! file implements format 3 only.
 //!
 //! Chained context is the mechanism behind `calt`, `clig`, and the
 //! positional-form GSUB features (`init`, `medi`, `fina`, `isol`)
@@ -13,10 +12,6 @@
 //! single chained-context rule says: "when this input sequence
 //! appears, preceded by these glyphs and followed by these others,
 //! run these nested lookups at these positions."
-//!
-//! sigilbuzz implements format 3, the explicit-coverage form. It is
-//! the format every modern font uses for `calt`; formats 1 (class
-//! set) and 2 (pure coverage) land when a real font needs them.
 //!
 //! # Format 3 layout
 //!
@@ -88,18 +83,14 @@ impl<'a> ChainContext<'a> {
         }
 
         let backtrack = parse_coverage_array(data, &mut r)?;
+        // An empty input is accepted. It makes the rule a zero-width
+        // assertion on backtrack and lookahead that can fire at any
+        // cursor. The spec does not forbid it and real fonts use it.
         let input = parse_coverage_array(data, &mut r)?;
-        if input.is_empty() {
-            // An empty input makes the lookup fire everywhere. The
-            // spec does not forbid it, but the common case is one
-            // or more input coverages. We accept it to match real
-            // fonts, which sometimes use a single backtrack/lookahead
-            // with an empty input as a zero-width assertion.
-        }
         let lookahead = parse_coverage_array(data, &mut r)?;
 
         let subst_count = r.read_u16()?;
-        let mut substitutions = Vec::with_capacity(subst_count as usize);
+        let mut substitutions = Vec::with_capacity(usize::from(subst_count).min(r.remaining() / 4));
         for _ in 0..subst_count {
             let sequence_index = r.read_u16()?;
             let lookup_list_index = r.read_u16()?;
@@ -252,7 +243,7 @@ impl<'a> ChainContextAny<'a> {
 
 fn parse_coverage_array<'a>(data: &'a [u8], r: &mut Reader<'_>) -> Result<Vec<Coverage<'a>>> {
     let count = r.read_u16()? as usize;
-    let mut out = Vec::with_capacity(count);
+    let mut out = Vec::with_capacity(count.min(r.remaining() / 2));
     for _ in 0..count {
         let off = r.read_u16()? as usize;
         let bytes = data.get(off..).ok_or(Error::Malformed {
@@ -413,6 +404,18 @@ mod tests {
         assert!(ctx.matches(&[30], 0));
         assert!(ctx.matches(&[99, 30, 88], 1));
         assert!(!ctx.matches(&[99, 30], 0));
+    }
+
+    #[test]
+    fn empty_input_with_backtrack_handles_cursor_past_the_run() {
+        // An empty-input rule skips the input check, so the backtrack
+        // walk used to start from a cursor past the run and index out
+        // of bounds.
+        let bytes = build_format3(&[&[7]], &[], &[], &[]);
+        let ctx = ChainContext::parse(&bytes).unwrap();
+        assert!(ctx.matches(&[7], 1));
+        assert!(ctx.matches(&[7], 5));
+        assert!(!ctx.matches(&[8], 5));
     }
 
     #[test]

@@ -55,7 +55,7 @@ impl<'a> ReverseChain<'a> {
         let backtrack = parse_coverage_array(data, &mut r)?;
         let lookahead = parse_coverage_array(data, &mut r)?;
         let glyph_count = r.read_u16()? as usize;
-        let mut substitutes = Vec::with_capacity(glyph_count);
+        let mut substitutes = Vec::with_capacity(glyph_count.min(r.remaining() / 2));
         for _ in 0..glyph_count {
             substitutes.push(r.read_u16()?);
         }
@@ -109,7 +109,7 @@ impl<'a> ReverseChain<'a> {
 
 fn parse_coverage_array<'a>(data: &'a [u8], r: &mut Reader<'_>) -> Result<Vec<Coverage<'a>>> {
     let count = r.read_u16()? as usize;
-    let mut out = Vec::with_capacity(count);
+    let mut out = Vec::with_capacity(count.min(r.remaining() / 2));
     for _ in 0..count {
         let off = r.read_u16()? as usize;
         let bytes = data.get(off..).ok_or(Error::Malformed {

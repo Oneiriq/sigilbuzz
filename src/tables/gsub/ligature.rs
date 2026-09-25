@@ -208,18 +208,13 @@ fn try_match_ligature_filtered(
         }
         cursor = pos + 1;
     }
-    let mut positions = if use_stack {
-        let mut v = alloc::vec::Vec::with_capacity(component_count as usize);
-        v.push(0);
-        v.extend_from_slice(&stack_positions[..tail]);
-        v
+    let mut positions = alloc::vec::Vec::with_capacity(component_count as usize);
+    positions.push(0);
+    if use_stack {
+        positions.extend_from_slice(&stack_positions[..tail]);
     } else {
-        let mut v = alloc::vec::Vec::with_capacity(component_count as usize);
-        v.push(0);
-        v.extend_from_slice(&heap_positions);
-        v
-    };
-    let _ = &mut positions; // ensure compiler keeps the chosen path
+        positions.extend_from_slice(&heap_positions);
+    }
     Some((ligature_glyph, positions))
 }
 
