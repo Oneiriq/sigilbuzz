@@ -44,8 +44,10 @@
 //! - `woff1-deflate`: pulls in `miniz_oxide` for the WOFF1 zlib codec.
 //!   With it disabled, `unwrap_woff1` rejects compressed tables and
 //!   `wrap_woff1` only emits uncompressed pass-through bodies.
-//! - `std`: currently a no-op marker; reserved for future no_std
-//!   callers wanting Vec-free APIs.
+//! - `std`: implements `std::error::Error` for [`WoffError`]. Without
+//!   it the crate builds as `no_std` on top of `alloc`. The `woff2`
+//!   feature also needs `std`, because the Brotli codec runs over
+//!   `std::io`.
 //!
 //! See `docs/deps.md` in the workspace root for the rationale on the
 //! runtime dependencies this crate brings (`brotli`, `miniz_oxide`).
@@ -64,6 +66,7 @@ use alloc::vec::Vec;
 
 mod error;
 mod reader;
+mod sfnt;
 mod woff1;
 #[cfg(feature = "woff2")]
 mod woff2;

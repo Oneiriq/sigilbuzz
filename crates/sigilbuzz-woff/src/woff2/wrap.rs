@@ -27,8 +27,8 @@ use crate::reader::Reader;
 
 use super::{KNOWN_TAGS, TAG_GLYF, TAG_LOCA, WOFF2_SIGNATURE};
 
-/// Knobs for `wrap_woff2`. Defaults match the brief: max-quality
-/// Brotli (slowest, smallest), preserve TT instructions.
+/// Knobs for `wrap_woff2`. Defaults: max-quality Brotli (slowest,
+/// smallest), preserve TT instructions.
 #[derive(Debug, Clone, Copy)]
 pub struct WrapOptions {
     /// Brotli quality, 0..=11. 11 is maximum compression and the
@@ -94,7 +94,6 @@ pub fn wrap_woff2_with_options(sfnt_bytes: &[u8], opts: WrapOptions) -> Result<V
         compressed.len(),
     )?;
     write_directory(&mut out, &entries);
-    let body_offset = out.len();
     out.extend_from_slice(&compressed);
     // WOFF2 §3: the file is padded to a 4-byte boundary.
     while out.len() % 4 != 0 {
@@ -102,9 +101,13 @@ pub fn wrap_woff2_with_options(sfnt_bytes: &[u8], opts: WrapOptions) -> Result<V
     }
     // Patch the header `length` field with the final file size now
     // that we know it. The spec stores total file length at offset 8.
-    let final_len = out.len() as u32;
-    out[8..12].copy_from_slice(&final_len.to_be_bytes());
-    let _ = body_offset;
+    let final_len = u32::try_from(out.len()).map_err(|_| WoffError::Malformed {
+        offset: 0,
+        context: "WOFF2 output is larger than 4 GiB",
+    })?;
+    if let Some(length_field) = out.get_mut(8..12) {
+        length_field.copy_from_slice(&final_len.to_be_bytes());
+    }
 
     Ok(out)
 }
@@ -114,24 +117,27 @@ pub fn wrap_woff2_with_options(sfnt_bytes: &[u8], opts: WrapOptions) -> Result<V
 // -----------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-struct SfntTable {
+struct SfntTable<'a> {
     tag: [u8; 4],
-    body: Vec<u8>,
+    /// Table bytes, borrowed from the input. Records may point at
+    /// shared bytes, so copying them could cost far more memory than
+    /// the input holds.
+    body: &'a [u8],
 }
 
 #[derive(Debug)]
-struct ParsedSfnt {
+struct ParsedSfnt<'a> {
     flavor: u32,
     /// Tables in original directory order.
-    tables: Vec<SfntTable>,
+    tables: Vec<SfntTable<'a>>,
     /// Sum of (header + per-table-record + each table padded to 4):
     /// the value the WOFF2 header advertises so the consumer can
     /// pre-allocate the unwrapped buffer.
     total_sfnt_size: u32,
 }
 
-impl ParsedSfnt {
-    fn parse(bytes: &[u8]) -> Result<Self> {
+impl<'a> ParsedSfnt<'a> {
+    fn parse(bytes: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(bytes);
         let flavor = r.read_u32("SFNT sfntVersion")?;
         // Accept TrueType (0x00010000), CFF (`OTTO`), and the rare
@@ -162,46 +168,41 @@ impl ParsedSfnt {
         // Read each table body. Tables in the SFNT are not guaranteed
         // to be in directory order, but we keep the *directory* order
         // for the WOFF2 emitter.
-        let mut tables: Vec<SfntTable> = Vec::with_capacity(num_tables);
+        let mut tables: Vec<SfntTable<'a>> = Vec::with_capacity(num_tables);
         let mut total_sfnt_size: u64 = 12 + 16 * (num_tables as u64);
         for (_, tag, offset, length) in &records {
             let off = *offset as usize;
-            let len = *length as usize;
-            let end = off.checked_add(len).ok_or(WoffError::Malformed {
-                offset: 0,
-                context: "SFNT table offset+length overflows",
+            let end = off
+                .checked_add(*length as usize)
+                .ok_or(WoffError::Malformed {
+                    offset: 0,
+                    context: "SFNT table offset+length overflows",
+                })?;
+            let body = bytes.get(off..end).ok_or(WoffError::UnexpectedEof {
+                offset: off,
+                context: "SFNT table body",
             })?;
-            if end > bytes.len() {
-                return Err(WoffError::UnexpectedEof {
-                    offset: off,
-                    context: "SFNT table body",
-                });
-            }
-            tables.push(SfntTable {
-                tag: *tag,
-                body: bytes[off..end].to_vec(),
-            });
+            tables.push(SfntTable { tag: *tag, body });
             // Each table is padded to 4 bytes in the SFNT footprint
             // we advertise.
-            let padded = (len + 3) & !3;
-            total_sfnt_size += padded as u64;
+            total_sfnt_size += (u64::from(*length) + 3) & !3;
         }
 
-        if total_sfnt_size > u64::from(u32::MAX) {
+        let Ok(total_sfnt_size) = u32::try_from(total_sfnt_size) else {
             return Err(WoffError::Malformed {
                 offset: 0,
                 context: "SFNT total size overflows u32",
             });
-        }
+        };
 
         Ok(Self {
             flavor,
             tables,
-            total_sfnt_size: total_sfnt_size as u32,
+            total_sfnt_size,
         })
     }
 
-    fn find(&self, tag: &[u8; 4]) -> Option<&SfntTable> {
+    fn find(&self, tag: &[u8; 4]) -> Option<&SfntTable<'a>> {
         self.tables.iter().find(|t| &t.tag == tag)
     }
 }
@@ -233,36 +234,50 @@ fn build_directory_and_payload(
     opts: WrapOptions,
 ) -> Result<(Vec<OutEntry>, Vec<u8>)> {
     // First pass: produce the transformed glyf payload (if any) so
-    // we know its size before we lay out the directory.
-    let glyf_transformed =
-        if let (Some(glyf), Some(loca)) = (parsed.find(&TAG_GLYF), parsed.find(&TAG_LOCA)) {
-            Some(super::wrap_transform::transform_glyf(
-                &glyf.body,
-                &loca.body,
-                parsed.find(b"head").map(|t| t.body.as_slice()),
-                parsed.find(b"maxp").map(|t| t.body.as_slice()),
-                opts.retain_hints,
-            )?)
-        } else {
-            None
-        };
+    // we know its size before we lay out the directory. WOFF2 only
+    // defines the transform for a glyf and loca pair, so one without
+    // the other is an error, as in the reference encoder.
+    let glyf_transformed = match (parsed.find(&TAG_GLYF), parsed.find(&TAG_LOCA)) {
+        (Some(glyf), Some(loca)) => super::wrap_transform::transform_glyf(
+            glyf.body,
+            loca.body,
+            parsed.find(b"head").map(|t| t.body),
+            parsed.find(b"maxp").map(|t| t.body),
+            opts.retain_hints,
+        )?,
+        (None, None) => Vec::new(),
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(WoffError::Malformed {
+                offset: 0,
+                context: "wrap_woff2: SFNT has only one of glyf and loca",
+            });
+        }
+    };
+
+    // Table bodies come from u32 lengths, so `as u32` on their lengths
+    // is exact. The transformed glyf is built here and gets checked.
+    let transformed_len =
+        u32::try_from(glyf_transformed.len()).map_err(|_| WoffError::Malformed {
+            offset: 0,
+            context: "wrap_woff2: transformed glyf is larger than 4 GiB",
+        })?;
 
     let mut entries: Vec<OutEntry> = Vec::with_capacity(parsed.tables.len());
     let mut payload: Vec<u8> = Vec::new();
 
     for t in &parsed.tables {
+        let orig_length = t.body.len() as u32;
         match t.tag {
             TAG_GLYF => {
                 // Emit transformed glyf.
-                let tx = glyf_transformed.as_ref().expect("glyf+loca check above");
                 entries.push(OutEntry {
                     tag: TAG_GLYF,
                     transform_version: 0,
-                    orig_length: t.body.len() as u32,
-                    transform_length: tx.len() as u32,
+                    orig_length,
+                    transform_length: transformed_len,
                     emit_transform_length: true,
                 });
-                payload.extend_from_slice(tx);
+                payload.extend_from_slice(&glyf_transformed);
             }
             TAG_LOCA => {
                 // Loca is dropped from the payload when glyf is
@@ -270,7 +285,7 @@ fn build_directory_and_payload(
                 entries.push(OutEntry {
                     tag: TAG_LOCA,
                     transform_version: 0,
-                    orig_length: t.body.len() as u32,
+                    orig_length,
                     transform_length: 0,
                     emit_transform_length: true,
                 });
@@ -279,11 +294,11 @@ fn build_directory_and_payload(
                 entries.push(OutEntry {
                     tag: t.tag,
                     transform_version: 0,
-                    orig_length: t.body.len() as u32,
-                    transform_length: t.body.len() as u32,
+                    orig_length,
+                    transform_length: orig_length,
                     emit_transform_length: false,
                 });
-                payload.extend_from_slice(&t.body);
+                payload.extend_from_slice(t.body);
             }
         }
     }
@@ -302,19 +317,21 @@ fn write_header(
     entries: &[OutEntry],
     compressed_len: usize,
 ) -> Result<()> {
-    if entries.len() > u16::MAX as usize {
-        return Err(WoffError::Malformed {
-            offset: 0,
-            context: "too many tables for WOFF2",
-        });
-    }
+    let num_tables = u16::try_from(entries.len()).map_err(|_| WoffError::Malformed {
+        offset: 0,
+        context: "too many tables for WOFF2",
+    })?;
+    let compressed_len = u32::try_from(compressed_len).map_err(|_| WoffError::Malformed {
+        offset: 0,
+        context: "WOFF2 compressed payload is larger than 4 GiB",
+    })?;
     out.extend_from_slice(&WOFF2_SIGNATURE.to_be_bytes());
     out.extend_from_slice(&flavor.to_be_bytes());
     out.extend_from_slice(&0u32.to_be_bytes()); // length, patched after body
-    out.extend_from_slice(&(entries.len() as u16).to_be_bytes()); // numTables
+    out.extend_from_slice(&num_tables.to_be_bytes()); // numTables
     out.extend_from_slice(&0u16.to_be_bytes()); // reserved
     out.extend_from_slice(&total_sfnt_size.to_be_bytes());
-    out.extend_from_slice(&(compressed_len as u32).to_be_bytes()); // totalCompressedSize
+    out.extend_from_slice(&compressed_len.to_be_bytes()); // totalCompressedSize
     out.extend_from_slice(&1u16.to_be_bytes()); // majorVersion
     out.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
     out.extend_from_slice(&0u32.to_be_bytes()); // metaOffset

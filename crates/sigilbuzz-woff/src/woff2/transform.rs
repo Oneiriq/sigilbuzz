@@ -120,15 +120,22 @@ const fn with_sign(flag: u8, magnitude: i32) -> i32 {
     }
 }
 
+/// Tests whether bit `gid` is set in a big-endian glyph bitmap. Bits
+/// past the end of the bitmap read as clear.
+fn bitmap_bit(bitmap: &[u8], gid: usize) -> bool {
+    bitmap
+        .get(gid / 8)
+        .is_some_and(|byte| (byte >> (7 - (gid % 8))) & 1 != 0)
+}
+
 /// Reconstructs the SFNT `glyf` and `loca` tables from a transformed
 /// WOFF2 glyf payload.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn reconstruct_glyf_and_loca(payload: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     let mut r = Reader::new(payload);
 
     let _reserved = r.read_u16("glyf reserved")?;
     let option_flags = r.read_u16("glyf optionFlags")?;
-    let num_glyphs = r.read_u16("glyf numGlyphs")? as usize;
+    let num_glyphs = usize::from(r.read_u16("glyf numGlyphs")?);
     let index_format = r.read_u16("glyf indexFormat")?;
     let n_contour_size = r.read_u32("glyf nContourStreamSize")? as usize;
     let n_points_size = r.read_u32("glyf nPointsStreamSize")? as usize;
@@ -170,8 +177,12 @@ pub(crate) fn reconstruct_glyf_and_loca(payload: &[u8]) -> Result<(Vec<u8>, Vec<
         None
     };
 
-    let bbox_bitmap = &bbox_stream[..bbox_bitmap_len];
-    let bbox_data = &bbox_stream[bbox_bitmap_len..];
+    let Some((bbox_bitmap, bbox_data)) = bbox_stream.split_at_checked(bbox_bitmap_len) else {
+        return Err(WoffError::Malformed {
+            offset: r.position(),
+            context: "glyf bboxStream smaller than bitmap",
+        });
+    };
 
     let mut n_points_reader = Reader::new(n_points_stream);
     let mut flag_reader = Reader::new(flag_stream);
@@ -180,17 +191,29 @@ pub(crate) fn reconstruct_glyf_and_loca(payload: &[u8]) -> Result<(Vec<u8>, Vec<
     let mut instr_reader = Reader::new(instruction_stream);
     let mut bbox_reader = Reader::new(bbox_data);
 
+    // loca stores u32 offsets, so glyf must stay within u32.
+    let glyf_offset = |glyf: &[u8]| {
+        u32::try_from(glyf.len()).map_err(|_| WoffError::Malformed {
+            offset: 0,
+            context: "reconstructed glyf is larger than 4 GiB",
+        })
+    };
+
     // glyf is 2-byte aligned; build it linearly.
     let mut glyf = Vec::with_capacity(payload.len() * 2);
     let mut offsets: Vec<u32> = Vec::with_capacity(num_glyphs + 1);
 
-    for gid in 0..num_glyphs {
-        offsets.push(glyf.len() as u32);
+    // The size check above makes this yield exactly `num_glyphs`
+    // two-byte records.
+    for (gid, n_contours_bytes) in n_contour_stream.chunks_exact(2).enumerate() {
+        offsets.push(glyf_offset(&glyf)?);
 
-        let n_contours =
-            i16::from_be_bytes([n_contour_stream[gid * 2], n_contour_stream[gid * 2 + 1]]);
+        let &[hi, lo] = n_contours_bytes else {
+            continue;
+        };
+        let n_contours = i16::from_be_bytes([hi, lo]);
 
-        let bbox_present = (bbox_bitmap[gid / 8] >> (7 - (gid % 8))) & 1 != 0;
+        let bbox_present = bitmap_bit(bbox_bitmap, gid);
 
         if n_contours == 0 {
             // Empty glyph: zero-length record. WOFF2 §5.1 forbids
@@ -237,7 +260,26 @@ pub(crate) fn reconstruct_glyf_and_loca(payload: &[u8]) -> Result<(Vec<u8>, Vec<
                         context: "simple glyph contour with zero points",
                     });
                 }
-                end_pts.push((total_points - 1) as u16);
+                // A larger total cannot be written as u16 end points.
+                // Without this check the end points were truncated and
+                // the point buffers below were sized from up to 2^31
+                // points.
+                let Ok(last_point) = u16::try_from(total_points - 1) else {
+                    return Err(WoffError::Malformed {
+                        offset: 0,
+                        context: "simple glyph has more than 65536 points",
+                    });
+                };
+                end_pts.push(last_point);
+            }
+
+            // Every point takes one flag byte, so a short flag stream
+            // is caught before the point buffers are allocated.
+            if flag_reader.remaining() < total_points as usize {
+                return Err(WoffError::UnexpectedEof {
+                    offset: flag_reader.position(),
+                    context: "simple flag",
+                });
             }
 
             // Walk the flag + glyph streams in lock-step.
@@ -254,23 +296,25 @@ pub(crate) fn reconstruct_glyf_and_loca(payload: &[u8]) -> Result<(Vec<u8>, Vec<
 
             // Instructions length follows the coords, length is
             // 255UInt16-encoded in glyphStream itself.
-            let instr_len = u32::from(glyph_reader.read_packed_u16()?);
+            let instr_len = glyph_reader.read_packed_u16()?;
             let instructions =
-                instr_reader.read_bytes(instr_len as usize, "simple instructions")?;
+                instr_reader.read_bytes(usize::from(instr_len), "simple instructions")?;
 
             // Compute bbox if not stored.
             let (x_min, y_min, x_max, y_max) = if let Some(b) = stored_bbox {
                 b
             } else {
+                // At most 65536 deltas of at most 32768 each, so the
+                // running sums stay within i32.
                 let mut acc_x: i32 = 0;
                 let mut acc_y: i32 = 0;
                 let mut bx_min = i32::MAX;
                 let mut by_min = i32::MAX;
                 let mut bx_max = i32::MIN;
                 let mut by_max = i32::MIN;
-                for i in 0..xs.len() {
-                    acc_x += i32::from(xs[i]);
-                    acc_y += i32::from(ys[i]);
+                for (&dx, &dy) in xs.iter().zip(&ys) {
+                    acc_x += i32::from(dx);
+                    acc_y += i32::from(dy);
                     bx_min = bx_min.min(acc_x);
                     by_min = by_min.min(acc_y);
                     bx_max = bx_max.max(acc_x);
@@ -294,12 +338,10 @@ pub(crate) fn reconstruct_glyf_and_loca(payload: &[u8]) -> Result<(Vec<u8>, Vec<
             for ep in &end_pts {
                 glyf.extend_from_slice(&ep.to_be_bytes());
             }
-            glyf.extend_from_slice(&(instr_len as u16).to_be_bytes());
+            glyf.extend_from_slice(&instr_len.to_be_bytes());
             glyf.extend_from_slice(instructions);
 
-            let overlap_first = overlap_bitmap
-                .map(|bm| (bm[gid / 8] >> (7 - (gid % 8))) & 1 != 0)
-                .unwrap_or(false);
+            let overlap_first = overlap_bitmap.is_some_and(|bm| bitmap_bit(bm, gid));
 
             let (packed_flags, x_bytes, y_bytes) =
                 pack_simple_glyph_coords(&on_curves, &xs, &ys, overlap_first);
@@ -368,10 +410,10 @@ pub(crate) fn reconstruct_glyf_and_loca(payload: &[u8]) -> Result<(Vec<u8>, Vec<
             }
 
             if had_instructions {
-                let instr_len = u32::from(glyph_reader.read_packed_u16()?);
+                let instr_len = glyph_reader.read_packed_u16()?;
                 let instructions =
-                    instr_reader.read_bytes(instr_len as usize, "composite instructions")?;
-                glyf.extend_from_slice(&(instr_len as u16).to_be_bytes());
+                    instr_reader.read_bytes(usize::from(instr_len), "composite instructions")?;
+                glyf.extend_from_slice(&instr_len.to_be_bytes());
                 glyf.extend_from_slice(instructions);
             }
 
@@ -380,7 +422,7 @@ pub(crate) fn reconstruct_glyf_and_loca(payload: &[u8]) -> Result<(Vec<u8>, Vec<
             }
         }
     }
-    offsets.push(glyf.len() as u32);
+    offsets.push(glyf_offset(&glyf)?);
 
     // Build loca per indexFormat: short = u16 offset/2; long = u32.
     let loca = if index_format == 0 {
@@ -424,17 +466,14 @@ fn pack_simple_glyph_coords(
     let mut x_bytes: Vec<u8> = Vec::new();
     let mut y_bytes: Vec<u8> = Vec::new();
 
-    for i in 0..n {
+    for (i, ((&on_curve, &dx), &dy)) in on_curves.iter().zip(xs).zip(ys).enumerate() {
         let mut f: u8 = 0;
-        if on_curves[i] {
+        if on_curve {
             f |= ON_CURVE_POINT;
         }
         if i == 0 && overlap_first {
             f |= OVERLAP_SIMPLE;
         }
-
-        let dx = xs[i];
-        let dy = ys[i];
 
         if dx == 0 {
             f |= X_IS_SAME_OR_POSITIVE_X_SHORT_VECTOR;
@@ -476,6 +515,82 @@ mod tests {
         assert_eq!(with_sign(1, 100), 100);
         assert_eq!(with_sign(0, 100), -100);
         assert_eq!(with_sign(3, 50), 50);
+    }
+
+    /// Builds a transformed glyf payload for a single simple glyph with
+    /// the given per-contour point counts. Every point is an on-curve
+    /// zero delta. No bbox is stored.
+    fn single_glyph_payload(contour_points: &[u16]) -> Vec<u8> {
+        let n_contours = i16::try_from(contour_points.len()).expect("contour count fits i16");
+        let total: usize = contour_points.iter().map(|&n| usize::from(n)).sum();
+        let mut n_points = Vec::new();
+        for &n in contour_points {
+            n_points.push(253);
+            n_points.extend_from_slice(&n.to_be_bytes());
+        }
+        let flags = vec![0u8; total];
+        let mut glyphs = vec![0u8; total];
+        glyphs.push(0); // instruction length
+        let bbox = [0u8; 4]; // bitmap only
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        payload.extend_from_slice(&0u16.to_be_bytes()); // optionFlags
+        payload.extend_from_slice(&1u16.to_be_bytes()); // numGlyphs
+        payload.extend_from_slice(&1u16.to_be_bytes()); // indexFormat = long
+        for size in [
+            2,
+            n_points.len(),
+            flags.len(),
+            glyphs.len(),
+            0,
+            bbox.len(),
+            0,
+        ] {
+            payload.extend_from_slice(&u32::try_from(size).unwrap().to_be_bytes());
+        }
+        payload.extend_from_slice(&n_contours.to_be_bytes());
+        payload.extend_from_slice(&n_points);
+        payload.extend_from_slice(&flags);
+        payload.extend_from_slice(&glyphs);
+        payload.extend_from_slice(&bbox);
+        payload
+    }
+
+    #[test]
+    fn glyph_with_65536_points_is_accepted() {
+        let (glyf, loca) =
+            reconstruct_glyf_and_loca(&single_glyph_payload(&[0x8000, 0x8000])).expect("decodes");
+        // The last end point is 65535.
+        assert_eq!(&glyf[12..14], &[0xFF, 0xFF]);
+        assert_eq!(loca.len(), 8);
+    }
+
+    #[test]
+    fn glyph_with_more_than_65536_points_is_rejected() {
+        // Two contours of 40000 points. The last end point (79999)
+        // does not fit u16. It used to be truncated to 14463, which
+        // produced a corrupt glyph. With 32767 contours the same path
+        // sized the point buffers from over two billion points.
+        let result = reconstruct_glyf_and_loca(&single_glyph_payload(&[40000, 40000]));
+        assert!(
+            matches!(result, Err(WoffError::Malformed { .. })),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn short_flag_stream_is_rejected_before_allocating_points() {
+        let mut payload = single_glyph_payload(&[1000]);
+        // Shrink flagStreamSize to 10 and move the rest of the flag
+        // bytes into glyphStream so every stream stays in bounds.
+        payload[16..20].copy_from_slice(&10u32.to_be_bytes());
+        payload[20..24].copy_from_slice(&(1001u32 + 990).to_be_bytes());
+        let result = reconstruct_glyf_and_loca(&payload);
+        assert!(
+            matches!(result, Err(WoffError::UnexpectedEof { .. })),
+            "got {result:?}"
+        );
     }
 
     #[test]
