@@ -69,6 +69,9 @@ valid input is unchanged except where noted.
   `shape()` call, like HarfBuzz), unbounded buffer growth from multiple substitution and
   `morx` insertion, SVG `<use>` fan-out, COLR paint graphs, and quadratic passes in
   bidi resolution, Indic and USE reordering, line wrapping, and subsetting.
+  Hyphenation checked all 4,938 US English patterns at every letter. It now checks
+  only the patterns that start with that letter, about 10 times faster with the same
+  result.
 - Subsetting a large font could produce broken layout tables. Rewritten GSUB and GPOS
   tables over 64 KB wrapped their 16-bit offsets. They now use Extension lookups when
   they need to.
