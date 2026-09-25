@@ -382,7 +382,6 @@ mod tests {
     use super::*;
 
     fn write_f2dot14(out: &mut Vec<u8>, v: f32) {
-        #[allow(clippy::cast_possible_truncation)]
         let raw = (v * 16384.0).round() as i16;
         out.extend_from_slice(&raw.to_be_bytes());
     }
@@ -443,7 +442,6 @@ mod tests {
                     if *long_words {
                         out.extend_from_slice(&d.to_be_bytes());
                     } else {
-                        #[allow(clippy::cast_possible_truncation)]
                         let v = *d as i16;
                         out.extend_from_slice(&v.to_be_bytes());
                     }

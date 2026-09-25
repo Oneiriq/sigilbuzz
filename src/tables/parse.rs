@@ -98,7 +98,6 @@ impl<'a> Reader<'a> {
 
     /// Reads a big-endian `i8`.
     pub fn read_i8(&mut self) -> Result<i8> {
-        #[allow(clippy::cast_possible_wrap)]
         Ok(self.read_u8()? as i8)
     }
 
@@ -141,7 +140,6 @@ impl<'a> Reader<'a> {
     /// in practice to `[-1.0, 1.0]`.
     pub fn read_f2dot14(&mut self) -> Result<f32> {
         let raw = self.read_i16()?;
-        #[allow(clippy::cast_precision_loss)]
         Ok(f32::from(raw) / 16384.0)
     }
 
@@ -150,7 +148,6 @@ impl<'a> Reader<'a> {
     /// user-space axis coordinates in `fvar` and `avar`.
     pub fn read_f16dot16(&mut self) -> Result<f32> {
         let raw = self.read_i32()?;
-        #[allow(clippy::cast_precision_loss)]
         Ok(raw as f32 / 65536.0)
     }
 

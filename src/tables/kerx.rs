@@ -1551,7 +1551,6 @@ mod tests {
         // 0 is set; the kern delta is the value with bit 0 cleared.
         // -50 is even (0xFFCE), so writing 0xFFCF keeps the magnitude
         // and adds the terminator. Reinterpret the bit pattern as i16.
-        #[allow(clippy::cast_possible_wrap)]
         let raw = 0xFFCFu16 as i16;
         body.extend_from_slice(&raw.to_be_bytes());
 
