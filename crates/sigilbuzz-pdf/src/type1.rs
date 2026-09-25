@@ -21,9 +21,8 @@
 //! authors have access to (Preview, pdfium, mupdf, Poppler) accept
 //! Type 1 fonts that ship the **cleartext** block twice in lieu of an
 //! encrypted half. The `/lenIV -1` directive in the private dict
-//! signals "charstrings are not eexec-encrypted." Skipping eexec keeps
-//! this PR small and focused; a follow-up can layer the cipher on top
-//! of the existing module if a non-Adobe consumer ever surfaces.
+//! signals "charstrings are not eexec-encrypted." The emitter does not
+//! implement the eexec cipher.
 //!
 //! # FontMatrix
 //!
@@ -91,11 +90,12 @@ pub struct Type1Font {
 
 /// Build a [`Type1Font`] for the given face and gid list.
 ///
-/// Glyphs are emitted in input order. The first 256 are encoded into
-/// the font's `/Encoding` vector (Type 1, like Type 3, is 8-bit on
-/// the consumer side); any tail beyond 256 still ships its charstring
-/// so a consumer that builds a Type 0 wrapper can address them, but
-/// they don't appear in the encoding.
+/// Glyphs are emitted in input order. The first 255 are encoded into
+/// the font's `/Encoding` vector at char codes 1 to 255 (Type 1, like
+/// Type 3, is 8-bit on the consumer side). Code 0 stays `/.notdef`.
+/// Any tail beyond 255 still ships its charstring so a consumer that
+/// builds a Type 0 wrapper can address them, but they don't appear in
+/// the encoding.
 ///
 /// Output is deterministic: the same face and gid slice produce a
 /// byte-identical [`Type1Font`].
@@ -103,7 +103,8 @@ pub struct Type1Font {
 /// # Errors
 ///
 /// Returns [`EmitError::InvalidUnitsPerEm`] if the face's `head`
-/// table reports `units_per_em == 0`.
+/// table reports `units_per_em == 0`. A `head` table the core parser
+/// rejects falls back to 1000 units per em instead.
 pub fn emit_type1_font(face: &Face<'_>, gids: &[GlyphId]) -> Result<Type1Font, EmitError> {
     let upem = face.head().map(|h| h.units_per_em).unwrap_or(1000);
     if upem == 0 {
@@ -132,10 +133,9 @@ pub fn emit_type1_font(face: &Face<'_>, gids: &[GlyphId]) -> Result<Type1Font, E
         };
     }
 
-    // Build the public font dict body. PostScript numbers are emitted
-    // by Display directly. No PDF-style ".0" trimming is required;
-    // the output is parsed by a PostScript interpreter, not a PDF
-    // tokenizer.
+    // Build the public font dict body. The FontMatrix scale is emitted
+    // by Display directly. It is always finite because `upem` is
+    // nonzero. The bbox values go through `ps_num`.
     let mut font_dict_body = Vec::new();
     font_dict_body.extend_from_slice(b"12 dict begin\n");
     font_dict_body.extend_from_slice(b"/FontInfo 4 dict dup begin\n");
@@ -166,10 +166,7 @@ pub fn emit_type1_font(face: &Face<'_>, gids: &[GlyphId]) -> Result<Type1Font, E
     // /.notdef, matching the Type 3 emitter's convention).
     font_dict_body.extend_from_slice(b"/Encoding 256 array\n");
     font_dict_body.extend_from_slice(b"0 1 255 {1 index exch /.notdef put} for\n");
-    for (idx, &gid) in (1_u16..).zip(gids.iter()) {
-        if idx > 255 {
-            break;
-        }
+    for (idx, &gid) in (1_u8..=255).zip(gids) {
         let line = format!("dup {idx} /g{gid} put\n");
         font_dict_body.extend_from_slice(line.as_bytes());
     }
@@ -240,8 +237,12 @@ pub fn emit_type1_font(face: &Face<'_>, gids: &[GlyphId]) -> Result<Type1Font, E
 /// Format an `f32` for inclusion in a PostScript number literal:
 /// matches the Type 3 stream.rs convention of stripping `.0` so the
 /// output is compact and snapshot-stable.
+///
+/// Non-finite inputs are coerced to `0`, as in stream.rs. PostScript
+/// has no literal for NaN or infinity.
 fn ps_num(value: f32) -> String {
-    let s = format!("{value}");
+    let safe = if value.is_finite() { value } else { 0.0 };
+    let s = format!("{safe}");
     if let Some(stripped) = s.strip_suffix(".0") {
         String::from(stripped)
     } else {
@@ -296,5 +297,14 @@ mod tests {
         assert_eq!(ps_num(0.0), "0");
         assert_eq!(ps_num(-100.0), "-100");
         assert_eq!(ps_num(0.5), "0.5");
+    }
+
+    #[test]
+    fn ps_num_coerces_non_finite_to_zero() {
+        // PostScript has no NaN or infinity literal. An outline with a
+        // non-finite coordinate used to leak "inf" into /FontBBox.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(ps_num(bad), "0", "non-finite {bad} leaked");
+        }
     }
 }
