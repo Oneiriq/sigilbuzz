@@ -635,8 +635,8 @@ fn apply_contextual(state: &StateTableHeader<'_>, substitutions: &[u8], glyphs: 
 // Layout: u16 lookupCount, then u32 offsets[lookupCount] pointing at
 // the individual lookups relative to the substitutions blob.
 //
-// Each lookup maps glyph -> replacement glyph id directly through the
-// shared AAT lookup reader.
+// Each lookup maps a glyph to its replacement glyph id directly
+// through the shared AAT lookup reader.
 fn sub_lookup(substitutions: &[u8], idx: u16, glyph: u16) -> Option<u16> {
     // The substitutions table is laid out as in the type-1 spec:
     // u16 nTables, u32 offsets[nTables] (relative to substitutions
@@ -1506,7 +1506,7 @@ mod tests {
     /// Builds a state-table subtable body with four classes, where
     /// every glyph falls in class 1 (out of bounds). `ext_words` is the
     /// number of type-specific u32 offsets after the 16-byte header.
-    /// Offset `k` points at `tail[k]`; the rest stay zero.
+    /// Offset `k` points at `tail[k]`. The rest stay zero.
     fn state_body(
         ext_words: usize,
         states: &[[u16; 4]],

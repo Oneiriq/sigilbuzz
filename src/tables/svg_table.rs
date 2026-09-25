@@ -154,8 +154,8 @@ impl<'a> Svg<'a> {
     /// "earlier-is-preferred" rule.
     #[must_use]
     pub fn document_for(&self, gid: u16) -> Option<SvgDocument<'a>> {
-        // Malformed records are skipped rather than ending the search;
-        // a later record might still be well-formed for this gid.
+        // Malformed records are skipped rather than ending the search.
+        // A later record might still be well-formed for this gid.
         self.documents()
             .find(|doc| doc.start_gid <= gid && gid <= doc.end_gid)
     }

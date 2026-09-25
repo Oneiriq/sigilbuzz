@@ -1087,7 +1087,7 @@ impl Format2<'_> {
             .checked_add(usize::from(left_value))?
             .checked_add(usize::from(right_value))?;
         // The cell must be a fully-contained i16. A left value past the
-        // row width would mean a malformed lookup table; the slice
+        // row width would mean a malformed lookup table. The slice
         // bound check covers that case too.
         let bytes = self.sub.get(cell_off..cell_off + 2)?;
         Some(i16::from_be_bytes([bytes[0], bytes[1]]))
