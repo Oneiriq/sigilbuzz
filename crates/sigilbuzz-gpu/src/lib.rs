@@ -53,7 +53,7 @@
 //!   Outlines", Journal of Computer Graphics Techniques (JCGT), 2017.
 //! - Charles Loop, Jim Blinn, "Resolution Independent Curve Rendering
 //!   using Programmable Graphics Hardware", SIGGRAPH 2005.
-//! - Thomas Sederberg, *Computer Aided Geometric Design*, §5.4: the
+//! - Thomas Sederberg, *Computer Aided Geometric Design*, section 5.4: the
 //!   third-difference error bound used by the cubic flattening pass.
 //!
 //! The companion shader-side reference is HarfBuzz's `hb_gpu`; we
