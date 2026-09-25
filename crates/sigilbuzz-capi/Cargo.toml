@@ -20,17 +20,17 @@ categories = ["text-processing", "external-ffi-bindings"]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
-# `std` is on by default — the same posture as the core shaper. The
+# `std` is on by default, the same as the core shaper. The
 # C surface itself does not need std (everything routes through
 # `extern crate alloc`), but `hb_blob_create_from_file` reads from
 # disk and requires `std::fs`.
 #
 # `subset` pulls in sigilbuzz-subset and unlocks the `hb_subset_*`
-# bridge; `paint` pulls in sigilbuzz-paint and unlocks the
+# bridge. `paint` pulls in sigilbuzz-paint and unlocks the
 # `hb_paint_*` bridge. Both are on by default so a stock
 # `cargo build -p sigilbuzz-capi` produces the full
-# HarfBuzz-symbol-compatible surface; downstream consumers that
-# want a leaner cdylib can disable them with
+# HarfBuzz-symbol-compatible surface. Consumers that want a
+# leaner cdylib can disable them with
 # `--no-default-features --features std`.
 default = ["std", "subset", "paint"]
 std = []
@@ -38,28 +38,27 @@ subset = ["dep:sigilbuzz-subset"]
 paint = ["dep:sigilbuzz-paint"]
 
 [dependencies]
-# The shaping core. No other deps — the whole point of the crate is
-# to be a thin extern-C veneer over sigilbuzz, so adding anything
-# else would defeat the value proposition.
+# The shaping core. No other required deps. This crate is a thin
+# extern-C layer over sigilbuzz, and it should stay that way.
 sigilbuzz = { workspace = true }
-# Optional — enabled by the `subset` cargo feature. Provides the
+# Optional, enabled by the `subset` cargo feature. Provides the
 # subsetter sigilbuzz-capi's `hb_subset_*` shim wraps.
 sigilbuzz-subset = { path = "../sigilbuzz-subset", version = "0.11.0", optional = true }
-# Optional — enabled by the `paint` cargo feature. Provides the
+# Optional, enabled by the `paint` cargo feature. Provides the
 # COLRv1 evaluator sigilbuzz-capi's `hb_paint_*` shim wraps.
 sigilbuzz-paint = { path = "../sigilbuzz-paint", version = "0.1.0", optional = true }
 
 [dev-dependencies]
 # `cc` builds the C source files in `tests/c/` against the cdylib
-# during `cargo test`. Dev-dep only; never enters the runtime
+# during `cargo test`. Dev-dep only. It never enters the runtime
 # closure of any release artifact.
 cc = "1.0"
 # `fd-lock` provides the OS-level advisory file lock used by the
-# C-link tests in `tests/c_link.rs` to serialise the workspace-wide
+# C-link tests in `tests/c_link.rs` to serialize the workspace-wide
 # cdylib rebuild step. A process-local `Mutex<()>` is not enough
 # under `cargo test --workspace`, where capi tests run alongside
 # other workspace crates that may also touch the cdylib's target
-# dir; the file lock survives across processes. Dev-dep only — the
+# dir. The file lock works across processes. Dev-dep only. The
 # crate itself ships no runtime locking.
 fd-lock = "4"
 

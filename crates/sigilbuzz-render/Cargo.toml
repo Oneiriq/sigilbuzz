@@ -1,12 +1,12 @@
 [package]
 name = "sigilbuzz-render"
-version = "0.8.0"
+version = "0.8.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Software CPU rasterizer for sigilbuzz — outlines, COLRv0 layered glyphs, variable-font coord-aware."
+description = "Software CPU rasterizer for sigilbuzz: outlines, COLRv0 and COLRv1 color glyphs, SVG-in-OT, and embedded bitmaps."
 publish = true
 readme = "README.md"
 keywords = ["sigilbuzz", "rasterizer", "fonts", "color"]

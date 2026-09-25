@@ -1,6 +1,6 @@
 [package]
 name = "sigilbuzz-woff"
-version = "0.3.0"
+version = "0.3.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -22,8 +22,8 @@ std = []
 # the feature drops the dep entirely for WOFF1-only consumers.
 woff2 = ["dep:brotli"]
 # WOFF1 zlib (deflate + adler32) for both wrap and unwrap directions.
-# Pulls in `miniz_oxide` — pure-Rust, no transitive deps. Disable the
-# feature to drop the dep entirely; `unwrap_woff1` then rejects
+# Pulls in `miniz_oxide` (pure Rust, no transitive deps). Disable the
+# feature to drop the dep entirely. `unwrap_woff1` then rejects
 # compressed tables with `Unsupported`, and `wrap_woff1` only emits
 # the uncompressed pass-through layout (compLength == origLength).
 woff1-deflate = ["dep:miniz_oxide"]
@@ -35,7 +35,7 @@ miniz_oxide = { version = "0.9", optional = true, default-features = false, feat
 
 [dev-dependencies]
 # Fixtures are loaded with include_bytes!. ttf-parser drives the
-# WOFF2 outline-parity test — same dev-dep already used by the
+# WOFF2 outline-parity test, the same dev-dep already used by the
 # shaper for outline parity. Never linked by sigilbuzz-woff proper.
 ttf-parser = "0.25"
 
