@@ -15,7 +15,7 @@ use clap::{Args as ClapArgs, Subcommand};
 
 use sigilbuzz::{Blob, Face};
 
-use super::util::{parse_gid_spec, read_font, CliResult};
+use super::util::{parse_gid_spec, read_font, status, CliResult};
 
 /// Arguments for `sigilbuzz pdf`.
 #[derive(Debug, ClapArgs)]
@@ -98,12 +98,12 @@ pub fn run(args: Args) -> CliResult {
             }
             std::fs::write(&output, &buf)
                 .map_err(|e| format!("write {}: {e}", output.display()))?;
-            eprintln!(
+            status(format_args!(
                 "wrote {} CharProcs ({} bytes) to {}",
                 t3.char_procs.len(),
                 buf.len(),
                 output.display()
-            );
+            ));
         }
     }
     Ok(())

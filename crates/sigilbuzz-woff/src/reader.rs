@@ -7,15 +7,13 @@ use crate::error::{Result, WoffError};
 
 /// Cursor over a byte slice with checked big-endian primitives.
 ///
-/// A handful of helpers are only used from the `woff2` module. We
-/// silence dead-code warnings rather than gating them per-feature
-/// because the file is internal and the methods are tiny.
+/// The helpers that only the `woff2` module uses are gated on the
+/// `woff2` feature.
 pub(crate) struct Reader<'a> {
     data: &'a [u8],
     pos: usize,
 }
 
-#[allow(dead_code)]
 impl<'a> Reader<'a> {
     pub(crate) const fn new(data: &'a [u8]) -> Self {
         Self { data, pos: 0 }
@@ -25,9 +23,10 @@ impl<'a> Reader<'a> {
         self.pos
     }
 
-    #[allow(dead_code)]
+    /// Bytes left between the cursor and the end of the data.
+    #[cfg(feature = "woff2")]
     pub(crate) const fn remaining(&self) -> usize {
-        self.data.len() - self.pos
+        self.data.len().saturating_sub(self.pos)
     }
 
     pub(crate) fn skip(&mut self, n: usize, ctx: &'static str) -> Result<()> {
@@ -50,40 +49,50 @@ impl<'a> Reader<'a> {
             offset: self.pos,
             context: "read overflows",
         })?;
-        if end > self.data.len() {
-            return Err(WoffError::UnexpectedEof {
+        let out = self
+            .data
+            .get(self.pos..end)
+            .ok_or(WoffError::UnexpectedEof {
                 offset: self.pos,
                 context: ctx,
-            });
-        }
-        let out = &self.data[self.pos..end];
+            })?;
         self.pos = end;
         Ok(out)
     }
 
+    /// Reads exactly `N` bytes as a fixed-size array.
+    fn read_array<const N: usize>(&mut self, ctx: &'static str) -> Result<[u8; N]> {
+        let start = self.pos;
+        let b = self.read_bytes(N, ctx)?;
+        b.first_chunk::<N>()
+            .copied()
+            .ok_or(WoffError::UnexpectedEof {
+                offset: start,
+                context: ctx,
+            })
+    }
+
+    #[cfg(feature = "woff2")]
     pub(crate) fn read_u8(&mut self, ctx: &'static str) -> Result<u8> {
-        let b = self.read_bytes(1, ctx)?;
-        Ok(b[0])
+        let [b] = self.read_array(ctx)?;
+        Ok(b)
     }
 
     pub(crate) fn read_u16(&mut self, ctx: &'static str) -> Result<u16> {
-        let b = self.read_bytes(2, ctx)?;
-        Ok(u16::from_be_bytes([b[0], b[1]]))
+        Ok(u16::from_be_bytes(self.read_array(ctx)?))
     }
 
+    #[cfg(feature = "woff2")]
     pub(crate) fn read_i16(&mut self, ctx: &'static str) -> Result<i16> {
-        let b = self.read_bytes(2, ctx)?;
-        Ok(i16::from_be_bytes([b[0], b[1]]))
+        Ok(i16::from_be_bytes(self.read_array(ctx)?))
     }
 
     pub(crate) fn read_u32(&mut self, ctx: &'static str) -> Result<u32> {
-        let b = self.read_bytes(4, ctx)?;
-        Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        Ok(u32::from_be_bytes(self.read_array(ctx)?))
     }
 
     pub(crate) fn read_tag(&mut self, ctx: &'static str) -> Result<[u8; 4]> {
-        let b = self.read_bytes(4, ctx)?;
-        Ok([b[0], b[1], b[2], b[3]])
+        self.read_array(ctx)
     }
 
     /// Reads a WOFF2 `UIntBase128` value.
@@ -92,6 +101,7 @@ impl<'a> Reader<'a> {
     /// data, MSB-first. The spec caps the field at 5 bytes (so the
     /// representable range is 32 bits) and forbids leading 0x80 bytes
     /// to keep the encoding canonical.
+    #[cfg(feature = "woff2")]
     pub(crate) fn read_uint_base128(&mut self) -> Result<u32> {
         let mut accum: u32 = 0;
         for i in 0..5 {
@@ -100,7 +110,7 @@ impl<'a> Reader<'a> {
             // canonical "leading zero" the spec calls out.
             if i == 0 && byte == 0x80 {
                 return Err(WoffError::Malformed {
-                    offset: self.pos - 1,
+                    offset: self.pos.saturating_sub(1),
                     context: "UIntBase128 with leading zero",
                 });
             }
@@ -108,7 +118,7 @@ impl<'a> Reader<'a> {
             // would be discarded.
             if accum & 0xFE00_0000 != 0 {
                 return Err(WoffError::Malformed {
-                    offset: self.pos - 1,
+                    offset: self.pos.saturating_sub(1),
                     context: "UIntBase128 overflow",
                 });
             }
@@ -129,6 +139,7 @@ impl<'a> Reader<'a> {
     /// Encoding: `253 <hi> <lo>` for raw 16-bit; `254 <byte>` for
     /// `byte + 506`; `255 <byte>` for `byte + 253`; otherwise the
     /// leading byte is the value itself.
+    #[cfg(feature = "woff2")]
     pub(crate) fn read_packed_u16(&mut self) -> Result<u16> {
         const ONE_MORE_BYTE_CODE_1: u8 = 255;
         const ONE_MORE_BYTE_CODE_2: u8 = 254;

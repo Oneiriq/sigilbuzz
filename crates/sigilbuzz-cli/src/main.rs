@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+use std::io::Write as _;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -69,7 +70,9 @@ fn main() -> ExitCode {
     match res {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("sigilbuzz: {e}");
+            // `eprintln!` would panic if stderr is closed. The exit
+            // code still reports the failure in that case.
+            let _ = writeln!(std::io::stderr(), "sigilbuzz: {e}");
             ExitCode::FAILURE
         }
     }

@@ -23,20 +23,20 @@ use crate::pattern::{Pattern, Patterns};
 /// Returns the byte offsets within `word` where soft-hyphen breaks are
 /// valid, applying the patterns in `patterns`.
 ///
-/// The returned offsets are *byte indices* into `word` and lie strictly
-/// between 1 and `word.len() - 1`. Offsets are filtered against the
-/// `left_min` / `right_min` thresholds carried by `patterns`.
+/// The returned offsets are *byte indices* into `word`, lie in
+/// `1..word.len()`, and always fall on a char boundary. Offsets are
+/// filtered against the `left_min` / `right_min` thresholds carried by
+/// `patterns`.
 ///
 /// # ASCII only
 ///
 /// Liang's algorithm and the bundled pattern files assume the word
-/// consists of 7-bit ASCII letters. Non-ASCII input is lower-cased
-/// where possible but characters outside the ASCII letter range are
-/// passed through verbatim and will simply fail to match any pattern,
-/// producing zero break opportunities.
+/// consists of 7-bit ASCII letters. ASCII letters match
+/// case-insensitively. Characters outside the ASCII letter range are
+/// passed through verbatim and never match a pattern letter.
 #[must_use]
 pub fn hyphenate(word: &str, patterns: &Patterns) -> Vec<usize> {
-    if word.len() < patterns.left_min + patterns.right_min {
+    if word.len() < patterns.left_min.saturating_add(patterns.right_min) {
         return Vec::new();
     }
 
@@ -63,13 +63,18 @@ pub fn hyphenate(word: &str, patterns: &Patterns) -> Vec<usize> {
     // Translate priority indices back to byte offsets in the *original*
     // word. The wrapped word is `.word.`, so a priority at wrapped
     // index `k` corresponds to offset `k - 1` in `word`. Valid break
-    // offsets are 1..word.len().
+    // offsets are 1..word.len(). A pattern with no letters matches at
+    // every byte, including bytes inside a multi-byte char, so offsets
+    // that split a char are dropped.
     let mut breaks = Vec::new();
     let upper = word.len() + 1;
     for (k, p) in priorities.iter().enumerate().take(upper).skip(2) {
         if p % 2 == 1 {
             let byte_offset = k - 1;
-            if byte_offset >= patterns.left_min && word.len() - byte_offset >= patterns.right_min {
+            if byte_offset >= patterns.left_min
+                && word.len() - byte_offset >= patterns.right_min
+                && word.is_char_boundary(byte_offset)
+            {
                 breaks.push(byte_offset);
             }
         }
