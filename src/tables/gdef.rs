@@ -25,8 +25,8 @@
 //!   iterator to restrict the set of marks that participate in a
 //!   match.
 //!
-//! `AttachList` and `LigCaretList` are still passed through
-//! untouched. Their parsers land when the shaper needs them.
+//! `AttachList` and `LigCaretList` are not parsed. The shaper does
+//! not use them.
 
 use crate::error::{Error, Result};
 use crate::tables::layout::{ClassDef, Coverage};
@@ -46,8 +46,8 @@ pub enum GlyphClass {
     /// in source fonts before feature compilation.
     Component,
     /// Class the font carries but sigilbuzz does not model yet. The
-    /// raw class value is preserved so future milestones can inspect
-    /// it without re-parsing.
+    /// raw class value is preserved so callers can inspect it without
+    /// re-parsing.
     Other(u16),
 }
 
@@ -239,7 +239,9 @@ fn parse_mark_glyph_sets(data: &[u8], sub_off: usize) -> Result<alloc::vec::Vec<
         });
     }
     let count = r.read_u16()? as usize;
-    let mut out = alloc::vec::Vec::with_capacity(count);
+    // Each coverage offset takes 4 bytes, so the remaining bytes bound
+    // how many sets the table can back.
+    let mut out = alloc::vec::Vec::with_capacity(count.min(r.remaining() / 4));
     for _ in 0..count {
         let rel = r.read_u32()? as usize;
         if rel == 0 {
