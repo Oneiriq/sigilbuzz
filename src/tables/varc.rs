@@ -671,7 +671,8 @@ fn sincos_pi(x: f32) -> (f32, f32) {
     // and so is each loop step below 2^25, so both paths give the same
     // angle wherever the loops finish. Clearing the sign of a zero
     // remainder matches what the loops produce.
-    if t.abs() > 16.0 {
+    // A range check instead of `abs`, which core lacks before Rust 1.85.
+    if !(-16.0..=16.0).contains(&t) {
         t %= 2.0;
         if t == 0.0 {
             t = 0.0;
