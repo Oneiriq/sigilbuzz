@@ -18,59 +18,70 @@
 //! # What is here
 //!
 //! - cmap -> glyph id, then the full shaping pipeline in spec order.
-//! - GSUB (lookup types 1, 4, 6 format 3, plus Extension type 7
-//!   unwrapping): `ccmp`, `rlig`, `liga`, `clig`, `calt` run by
+//! - GSUB lookup types 1 through 8, with Extension (type 7)
+//!   unwrapped: `ccmp`, `rlig`, `liga`, `clig`, `calt` run by
 //!   default; any user-enabled tag with non-zero value flows
-//!   through the same dispatcher. Chained-context lookups can
-//!   invoke other lookups at specific positions inside the match
-//!   window (the first recursive layer sigilbuzz supports).
+//!   through the same dispatcher. Context and chained-context
+//!   lookups invoke nested lookups at positions inside the match
+//!   window, up to `MAX_NESTED_DEPTH` levels deep.
 //! - hmtx advance lookup, post-substitution so ligature glyphs get
 //!   their own advance rather than the sum of their components.
-//! - GPOS (lookup types 1, 2, 4, 5, 6, plus Extension type 9
-//!   unwrapping): `kern` runs by default for pair adjustment,
-//!   `mark` runs by default for mark-to-base attachment, `mkmk`
-//!   for mark-to-mark stacking, and mark-to-ligature is dispatched
-//!   via the same `mark` feature when the subtable is present.
-//!   User-enabled GPOS tags flow through the same dispatcher.
+//! - GPOS lookup types 1, 2, 4, 5, 6, 7, and 8, with Extension
+//!   (type 9) unwrapped: `kern` runs by default for pair
+//!   adjustment, `mark` runs by default for mark-to-base
+//!   attachment, `mkmk` for mark-to-mark stacking, and
+//!   mark-to-ligature is dispatched via the same `mark` feature
+//!   when the subtable is present. User-enabled GPOS tags flow
+//!   through the same dispatcher.
 //! - Legacy `kern` table as a fallback for fonts whose GPOS has no
 //!   `kern` feature. Open Sans is the canonical example.
+//! - AAT `morx` and `kerx` for fonts without GSUB or GPOS kerning.
 //!
 //! Any default-on feature can be suppressed by a `Feature { tag,
 //! value: 0 }` entry.
 //!
-//! # What is not here yet
+//! # Limits
+//!
+//! Hostile fonts can nest lookups or chain multiple substitutions
+//! so that the work grows exponentially. Every lookup one `shape()`
+//! call applies therefore shares one `LookupBudget`: a cap on nested
+//! lookup calls and on how far multiple substitution may grow the
+//! run, sized like HarfBuzz's `max_ops` and `max_len`. Features the
+//! `ot` pre-shapers apply get a smaller budget each. Well-formed
+//! fonts stay far below the caps.
+//!
+//! # What is not here
 //!
 //! - Full Unicode NFC normalization. sigilbuzz ships the
 //!   composition half of NFC (opt-in via
 //!   [`crate::Buffer::set_normalize_nfc`]); canonical
-//!   decomposition and combining-class reordering do not run yet,
-//!   so pathological inputs that need reordering fall through
-//!   unchanged.
-//! - GSUB contextual non-chained (type 5), multiple substitution
-//!   (type 2), alternate (type 3), reverse chained (type 8),
-//!   and the format 1/2 variants of type 6.
-//! - GPOS cursive attachment (type 3) and contextual (types 7, 8).
-//! - Right-to-left reordering: `buffer.direction()` is consulted
-//!   but the output order is always logical = visual for now.
+//!   decomposition and combining-class reordering do not run, so
+//!   inputs that need reordering fall through unchanged.
+//! - GPOS cursive attachment (type 3).
+//! - Right-to-left reordering: `shape()` keeps the buffer order.
+//!   Use [`crate::Buffer::set_text_bidi`] to reorder mixed-direction
+//!   text into visual order before shaping.
 
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
 use crate::buffer::{script_priority_for, unicode_prop, Buffer, Glyph, ShapedRun};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::face::Face;
 use crate::font::Font;
-use crate::ot::arabic::{assign_joining_forms, JoiningForm};
+use crate::ot::arabic::{assign_from_types, JoiningForm};
 use crate::tables::gdef::{Gdef, GlyphClass};
 use crate::tables::gpos::{
-    lookup_type as gpos_lt, resolve_variation_delta, ChainContextPos, ContextPos, MarkBasePos,
-    MarkLigaPos, MarkMarkPos, PairPos, SinglePos, ValueRecord,
+    lookup_type as gpos_lt, resolve_variation_delta, ChainContextPos, ContextPos, MarkAttachment,
+    MarkBasePos, MarkLigaPos, MarkMarkPos, PairPos, SinglePos, ValueRecord,
 };
 use crate::tables::gsub::{
     lookup_type as gsub_lt, Alternate, ChainContextAny, Context as GsubContext, Ligature, Multiple,
     ReverseChain, Single,
 };
-use crate::tables::layout::{Lookup, MatchFilter, SequenceLookupRecord};
+use crate::tables::layout::{
+    FeatureList, LangSys, Lookup, MatchFilter, ScriptList, SequenceLookupRecord,
+};
 use crate::tables::variation_store::ItemVariationStore;
 use crate::tables::{Gpos, Gsub, KernTable, Kerx, Morx};
 use crate::unicode::{script_of, Script};
@@ -79,7 +90,7 @@ use crate::unicode::{script_of, Script};
 ///
 /// Decoupling this from the GPOS tables themselves means every
 /// apply function keeps the same shape for variable and static
-/// fonts; static callers pass [`VarCtx::none`] and every resolver
+/// fonts. With empty coords or no store every resolver
 /// short-circuits to zero without reading the store.
 #[derive(Debug, Clone, Copy)]
 struct VarCtx<'a> {
@@ -91,18 +102,6 @@ struct VarCtx<'a> {
 }
 
 impl VarCtx<'_> {
-    /// Builds a static-instance context: no coords, no store.
-    /// Every downstream resolver produces a zero delta. Used by
-    /// callers (and tests) that need to invoke a GPOS apply site
-    /// without having a font-coords view in hand.
-    #[allow(dead_code)]
-    const fn none() -> Self {
-        Self {
-            coords: &[],
-            store: None,
-        }
-    }
-
     /// True when the context can actually produce a non-zero delta:
     /// coords must be non-empty *and* a store must be attached.
     /// Callers use this to skip the resolver work entirely for the
@@ -129,16 +128,21 @@ impl VarCtx<'_> {
 /// record. `subtable` is the enclosing PairPos/SinglePos subtable
 /// bytes. Device/VariationIndex sub-offsets are always rooted
 /// there.
-#[allow(clippy::similar_names)]
+///
+/// The sums saturate: a font that stacks thousands of adjustments
+/// on one glyph pins the position at the `i32` bounds.
 fn apply_value_record(glyph: &mut Glyph, v: &ValueRecord, subtable: &[u8], var: &VarCtx<'_>) {
     let dx_place = var.resolve(subtable, v.x_placement_device_off);
     let dy_place = var.resolve(subtable, v.y_placement_device_off);
     let dx_adv = var.resolve(subtable, v.x_advance_device_off);
     let dy_adv = var.resolve(subtable, v.y_advance_device_off);
-    glyph.x_offset += i32::from(v.x_placement) + dx_place;
-    glyph.y_offset += i32::from(v.y_placement) + dy_place;
-    glyph.x_advance += i32::from(v.x_advance) + dx_adv;
-    glyph.y_advance += i32::from(v.y_advance) + dy_adv;
+    let add = |pos: i32, value: i16, delta: i32| {
+        pos.saturating_add(i32::from(value).saturating_add(delta))
+    };
+    glyph.x_offset = add(glyph.x_offset, v.x_placement, dx_place);
+    glyph.y_offset = add(glyph.y_offset, v.y_placement, dy_place);
+    glyph.x_advance = add(glyph.x_advance, v.x_advance, dx_adv);
+    glyph.y_advance = add(glyph.y_advance, v.y_advance, dy_adv);
 }
 
 /// Maximum recursion depth for nested-lookup dispatch. Matches the
@@ -146,6 +150,113 @@ fn apply_value_record(glyph: &mut Glyph, v: &ValueRecord, subtable: &[u8], var: 
 /// we assume the font is pathological (a cycle in the LookupList)
 /// and stop rather than overflow the stack.
 const MAX_NESTED_DEPTH: u8 = 16;
+
+/// Nested lookup calls allowed per input glyph. Mirrors HarfBuzz's
+/// `HB_BUFFER_MAX_OPS_FACTOR`. Real fonts nest a handful of lookups
+/// per glyph at most.
+const NESTED_OPS_PER_GLYPH: usize = 64;
+
+/// Floor for the nested-call budget of one [`shape`] call, so short
+/// runs still get room. Mirrors HarfBuzz's `HB_BUFFER_MAX_OPS_MIN`.
+const NESTED_OPS_MIN: usize = 16_384;
+
+/// Floor for the nested-call budget of one standalone feature
+/// application (the `ot` pre-shapers call those once per feature and
+/// sometimes once per syllable, so the floor stays small).
+const NESTED_OPS_MIN_STANDALONE: usize = 1024;
+
+/// How far multiple substitution may grow the run: this many glyphs
+/// per input glyph. Mirrors HarfBuzz's `HB_BUFFER_MAX_LEN_FACTOR`.
+const MAX_LEN_FACTOR: usize = 64;
+
+/// Floor for the run length one [`shape`] call may grow to. Mirrors
+/// HarfBuzz's `HB_BUFFER_MAX_LEN_MIN`.
+const MAX_LEN_MIN: usize = 16_384;
+
+/// Work limits for lookup application.
+///
+/// Depth alone does not stop a hostile font: a context rule with k
+/// nested records that point back at its own lookup makes k^16 calls
+/// before the depth cap bites, and a feature of lookups that each
+/// double the run grows it exponentially. The budget bounds both.
+/// When it runs out, further nested calls are skipped and further
+/// multiple substitutions are refused, as if their subtables had
+/// not matched. Top-level lookups keep running, each a single pass
+/// over the run.
+#[derive(Debug)]
+struct LookupBudget {
+    /// Nested lookup calls left.
+    nested_ops_left: usize,
+    /// Glyphs multiple substitution may still add to the run.
+    growth_left: usize,
+}
+
+impl LookupBudget {
+    /// Budget shared by every lookup one [`shape`] call applies over
+    /// a run of `input_len` glyphs.
+    fn for_shape(input_len: usize) -> Self {
+        let max_len = input_len.saturating_mul(MAX_LEN_FACTOR).max(MAX_LEN_MIN);
+        Self {
+            nested_ops_left: input_len
+                .saturating_mul(NESTED_OPS_PER_GLYPH)
+                .max(NESTED_OPS_MIN),
+            growth_left: max_len.saturating_sub(input_len),
+        }
+    }
+
+    /// Budget for one standalone feature application over `glyphs`,
+    /// used by the `pub(crate)` entry points the `ot` pre-shapers call.
+    ///
+    /// Those callers apply many features in a row, each with a fresh
+    /// budget, so the growth cap must not compound. It is tied to the
+    /// span of cluster values (source byte offsets), which multiple
+    /// substitution copies and never widens, rather than to the
+    /// current length.
+    fn for_run(glyphs: &[Glyph]) -> Self {
+        let span = match (
+            glyphs.iter().map(|g| g.cluster).min(),
+            glyphs.iter().map(|g| g.cluster).max(),
+        ) {
+            (Some(lo), Some(hi)) => ((hi - lo) as usize).saturating_add(1),
+            _ => 1,
+        };
+        Self {
+            nested_ops_left: glyphs
+                .len()
+                .saturating_mul(NESTED_OPS_PER_GLYPH)
+                .max(NESTED_OPS_MIN_STANDALONE),
+            growth_left: span
+                .saturating_mul(MAX_LEN_FACTOR)
+                .saturating_sub(glyphs.len()),
+        }
+    }
+
+    /// Spends one nested call. False once the budget is gone.
+    fn take_nested_op(&mut self) -> bool {
+        if self.nested_ops_left == 0 {
+            return false;
+        }
+        self.nested_ops_left -= 1;
+        true
+    }
+
+    /// True once no nested call is left.
+    fn exhausted(&self) -> bool {
+        self.nested_ops_left == 0
+    }
+
+    /// Spends room for `extra` new glyphs. False, spending nothing,
+    /// when the run may not grow that much.
+    fn take_growth(&mut self, extra: usize) -> bool {
+        match self.growth_left.checked_sub(extra) {
+            Some(left) => {
+                self.growth_left = left;
+                true
+            }
+            None => false,
+        }
+    }
+}
 
 /// One pre-parsed GSUB subtable, ready to drive a cursor walk.
 ///
@@ -303,6 +414,7 @@ fn apply_parsed_lookup_at(
     at: usize,
     depth: u8,
     alternate_index: u16,
+    budget: &mut LookupBudget,
 ) -> usize {
     if at >= glyphs.len() {
         return 0;
@@ -326,7 +438,7 @@ fn apply_parsed_lookup_at(
                     continue;
                 }
                 if let Some(seq) = m.apply(id) {
-                    if let Some(n) = expand_glyph_in_place(glyphs, at, &seq) {
+                    if let Some(n) = expand_glyph_in_place(glyphs, at, &seq, budget) {
                         ids.resync(glyphs);
                         return n;
                     }
@@ -344,7 +456,8 @@ fn apply_parsed_lookup_at(
                 }
             }
             ParsedGsubSubtable::Ligature(lig) => {
-                if let Some((out, positions)) = lig.apply_filtered(&ids.as_slice()[at..], filter) {
+                let window = ids.as_slice().get(at..).unwrap_or_default();
+                if let Some((out, positions)) = lig.apply_filtered(window, filter) {
                     glyphs[at].glyph_id = u32::from(out);
                     drain_ligature_components(glyphs, at, &positions);
                     ids.resync(glyphs);
@@ -369,8 +482,17 @@ fn apply_parsed_lookup_at(
                 }
             }
             ParsedGsubSubtable::Context(ctx) => {
-                let ran =
-                    apply_gsub_context_at(gsub, ctx, glyphs, ids, gdef, filter, at, depth + 1);
+                let ran = apply_gsub_context_at(
+                    gsub,
+                    ctx,
+                    glyphs,
+                    ids,
+                    gdef,
+                    filter,
+                    at,
+                    depth + 1,
+                    budget,
+                );
                 if ran > 0 {
                     return ran;
                 }
@@ -385,6 +507,7 @@ fn apply_parsed_lookup_at(
                     filter,
                     at,
                     depth + 1,
+                    budget,
                 );
                 if ran > 0 {
                     return ran;
@@ -470,13 +593,6 @@ pub struct Feature {
     pub value: u32,
 }
 
-/// Shapes `buffer` against `font` with optional feature overrides.
-///
-/// Feature tags with `value: 0` disable the corresponding feature
-/// for this call. Non-zero values enable a feature if the font
-/// supports it; unknown tags are accepted and ignored rather than
-/// returning an error.
-///
 /// Pre-iterates `text` and applies Hangul NFC jamo composition in a
 /// single pass: a Leading jamo (L) followed by a Vowel jamo (V) and
 /// optionally a Trailing jamo (T) collapses into the matching
@@ -587,15 +703,22 @@ fn hangul_compose(
     out
 }
 
+/// Shapes `buffer` against `font` with optional feature overrides.
+///
+/// Feature tags with `value: 0` disable the corresponding feature
+/// for this call. Non-zero values enable a feature if the font
+/// supports it. Unknown tags are accepted and ignored rather than
+/// returning an error.
+///
 /// # Errors
 ///
 /// Returns an error if the font is missing any of the tables required
 /// for basic shaping (`cmap`, `maxp`, `hhea`, `hmtx`) or if one of
-/// them is malformed.
-// The pipeline is a straight-line sequence of passes so
-// the order is visible in one place; breaking it into five stage
-// helpers would cost more in indirection than it buys in LOC.
-#[allow(clippy::too_many_lines)]
+/// them is malformed. Returns [`Error::Unsupported`] when the text is
+/// longer than `u32::MAX` bytes, since [`Glyph::cluster`] is a `u32`
+/// byte offset.
+// The pipeline is a straight-line sequence of passes so the order is
+// visible in one place.
 pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<ShapedRun> {
     let want_kern = !feature_disabled(features, *b"kern");
     let want_liga = !feature_disabled(features, *b"liga");
@@ -632,6 +755,13 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let raw_text = buffer.text();
     if raw_text.is_empty() {
         return Ok(ShapedRun::default());
+    }
+    // Clusters are `u32` byte offsets. Past this length every
+    // `as u32` cluster cast below would wrap.
+    if u32::try_from(raw_text.len()).is_err() {
+        return Err(Error::Unsupported {
+            context: "text longer than u32::MAX bytes",
+        });
     }
     // NFC composition pass runs before cmap lookup so precomposed
     // forms (é, ñ, ...) find their precomposed glyphs instead of
@@ -780,10 +910,15 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // Running each segment through its own cmap -> pre-shaper -> GSUB
     // -> GPOS chain is what lets mixed-script runs like `Hi שלום`
     // dispatch the Hebrew half under `hebr` features and the Latin
-    // half under DFLT in a single call. The pre-segmenter implementation
-    // resolved one global priority and missed script-specific lookups
-    // on whichever half lost the tie-break.
+    // half under DFLT in a single call. A single global priority
+    // would miss script-specific lookups on whichever half lost the
+    // tie-break.
     let segments = build_segments(&codepoints);
+
+    // One work budget for every lookup this call applies directly,
+    // across all segments (see `LookupBudget`). The `ot` pre-shapers
+    // run each feature under a budget of its own.
+    let mut budget = LookupBudget::for_shape(glyphs.len());
 
     // Dominant script: the first non-COMMON/INHERITED script in the
     // buffer. HarfBuzz (and rustybuzz) compute this once in
@@ -811,16 +946,26 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // handle further down.
     let gdef = face.gdef()?;
 
-    // Arabic joining forms are computed once, from the full text,
+    // Arabic joining forms are computed once, over the whole run,
     // because the state machine depends on surrounding letters (the
     // previous/next Arabic joining-type). A segment-local view would
     // lose the cross-boundary context, but in sigilbuzz every Arabic
     // segment is bounded by non-Arabic neighbors anyway, so global
     // computation is both correct and cheaper than recomputing per
     // segment.
+    //
+    // The forms are computed over `codepoints`, not the source text,
+    // so segment ranges index them directly. The split-vowel
+    // decompositions above make `codepoints` longer than the text.
+    // Their parts are non-joining or transparent, so the forms of
+    // the Arabic letters are the same either way.
     let has_arabic = codepoints.iter().any(|&c| script_of(c) == Script::Arabic);
     let arabic_forms: Vec<JoiningForm> = if has_arabic {
-        assign_joining_forms(text)
+        let types: Vec<_> = codepoints
+            .iter()
+            .map(|&c| crate::unicode::joining::joining_type(c))
+            .collect();
+        assign_from_types(&types)
     } else {
         Vec::new()
     };
@@ -1035,21 +1180,30 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 // ccmp must run before positional features so any
                 // composition/decomposition has settled first.
                 if !feature_disabled(features, *b"ccmp") {
-                    apply_gsub_feature(
+                    apply_gsub_feature_budgeted(
                         gsub,
                         &mut seg_glyphs,
                         gdef.as_ref(),
                         *b"ccmp",
                         0,
                         seg.script_priority,
+                        &mut budget,
                     );
                 }
                 // Arabic positional pass consumes only the segment's
                 // slice of the forms vector: cps/glyphs are 1:1 at
                 // this point (ccmp can rewrite ids but not lengths in
-                // practice for Arabic), so the slice aligns.
-                let forms_slice = &arabic_forms[seg.cp_range.clone()];
-                apply_arabic_positional_features(gsub, &mut seg_glyphs, gdef.as_ref(), forms_slice);
+                // practice for Arabic), so the slice aligns. The
+                // masked apply reads the mask with `get`, so a ccmp
+                // that did change the length only shifts the mask.
+                let forms_slice = arabic_forms.get(seg.cp_range.clone()).unwrap_or_default();
+                apply_arabic_positional_features(
+                    gsub,
+                    &mut seg_glyphs,
+                    gdef.as_ref(),
+                    forms_slice,
+                    &mut budget,
+                );
             }
             run_default_gsub(
                 gsub,
@@ -1060,6 +1214,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 is_vertical,
                 seg.script_priority,
                 seg_arabic_active,
+                &mut budget,
             );
         }
 
@@ -1077,15 +1232,21 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     glyphs = processed_glyphs;
 
     // AAT fallback. Consulted only when the font has no GSUB at all
-    // (that is how HarfBuzz decides between OpenType and AAT), and
-    // matches the issue scope. Legacy macOS Zapfino, older Apple
-    // Chancery variants, and most third-party AAT-only fonts land
-    // here. Runs after the segmented GSUB pass so a font that
-    // carries both only exercises the AAT path when the OpenType
-    // side is absent.
+    // (that is how HarfBuzz decides between OpenType and AAT).
+    // Legacy macOS Zapfino, older Apple Chancery variants, and most
+    // third-party AAT-only fonts land here. Runs after the segmented
+    // GSUB pass so a font that carries both only exercises the AAT
+    // path when the OpenType side is absent.
     if gsub.is_none() {
         if let Some(morx) = face.morx()? {
-            apply_morx(&morx, &mut glyphs);
+            let old_len = glyphs.len();
+            if let Some(origins) = apply_morx(&morx, &mut glyphs) {
+                // Ligatures and insertions change the glyph count, so
+                // the segment ranges recorded above no longer line up.
+                if glyphs.len() != old_len {
+                    seg_glyph_ranges = remap_segments(&seg_glyph_ranges, &origins);
+                }
+            }
         }
     }
 
@@ -1102,12 +1263,15 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // keep a zero advance in either axis. They rendered as space
     // earlier, but must not move the pen (HarfBuzz does the same).
     // We walk the character stream once to collect their cluster
-    // offsets and then skip them in the advance pass.
+    // offsets and then skip them in the advance pass. The offsets
+    // come out ascending, so the lookups below binary search.
     let default_ignorable_clusters: Vec<u32> = text
         .char_indices()
         .filter(|(_, c)| is_default_ignorable(*c))
         .map(|(i, _)| i as u32)
         .collect();
+    let is_ignorable_cluster =
+        |cluster: u32| default_ignorable_clusters.binary_search(&cluster).is_ok();
     if is_vertical {
         if let Some(ref vmtx) = vmtx {
             // VVAR carries per-glyph vertical-advance deltas;
@@ -1122,7 +1286,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 face.vvar()?
             };
             for glyph in &mut glyphs {
-                if default_ignorable_clusters.contains(&glyph.cluster) {
+                if is_ignorable_cluster(glyph.cluster) {
                     continue;
                 }
                 let id = glyph.glyph_id as u16;
@@ -1139,7 +1303,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                     raw = raw.saturating_add(rounded);
                 }
                 glyph.y_advance = if buffer.direction().is_forward() {
-                    -raw
+                    raw.saturating_neg()
                 } else {
                     raw
                 };
@@ -1152,7 +1316,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             let hhea = face.hhea()?;
             let fallback = (hhea.ascent as i32) - (hhea.descent as i32);
             for glyph in &mut glyphs {
-                if default_ignorable_clusters.contains(&glyph.cluster) {
+                if is_ignorable_cluster(glyph.cluster) {
                     continue;
                 }
                 glyph.y_advance = if buffer.direction().is_forward() {
@@ -1171,7 +1335,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             face.hvar()?
         };
         for glyph in &mut glyphs {
-            if default_ignorable_clusters.contains(&glyph.cluster) {
+            if is_ignorable_cluster(glyph.cluster) {
                 glyph.x_advance = 0;
                 continue;
             }
@@ -1205,7 +1369,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // of the hmtx default, so the final value matches rustybuzz.
     // Without this pass sigilbuzz double-applies the hmtx advance
     // for any mark that participates in a GPOS chained-context
-    // lookup, which is the 0.7.0 Limbu mark-advance follow-up.
+    // lookup.
     //
     // HarfBuzz selects exactly one shaper per buffer based on the
     // first non-common codepoint, so the gate is on the dominant
@@ -1214,13 +1378,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let dominant_zeroes_early = dominant_script.is_some_and(zeroes_marks_early);
     if dominant_zeroes_early {
         if let Some(ref gdef) = gdef {
-            for seg_out in &seg_glyph_ranges {
-                for glyph in &mut glyphs[seg_out.range.clone()] {
-                    if gdef.glyph_class(glyph.glyph_id as u16).is_mark() {
-                        glyph.x_advance = 0;
-                    }
-                }
-            }
+            zero_mark_advances(gdef, &mut glyphs, &seg_glyph_ranges);
         }
     }
 
@@ -1233,9 +1391,8 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let gpos = face.gpos()?;
     // Build the variable-font resolution context once. Passing this
     // through every GPOS apply site is what lets VariationIndex
-    // deltas inside a ValueRecord actually respond to the user's
-    // axis coords. Before PR #13 the deltas were read, parsed, and
-    // thrown away, so kerning was frozen at the default instance.
+    // deltas inside a ValueRecord respond to the user's axis coords
+    // (#13).
     let var = VarCtx {
         coords: font.coords(),
         store: gdef.as_ref().and_then(|g| g.item_variation_store()),
@@ -1247,13 +1404,22 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 continue;
             }
             let priority = seg_out.script_priority;
-            let seg_slice = &mut glyphs[seg_out.range.clone()];
-            if want_kern {
-                let ran =
-                    apply_gpos_feature(gpos, seg_slice, gdef.as_ref(), *b"kern", priority, &var);
-                if ran {
-                    gpos_kerned = true;
-                }
+            let Some(seg_slice) = glyphs.get_mut(seg_out.range.clone()) else {
+                continue;
+            };
+            let mut run_feature = |seg_slice: &mut [Glyph], tag: [u8; 4]| {
+                apply_gpos_feature(
+                    gpos,
+                    seg_slice,
+                    gdef.as_ref(),
+                    tag,
+                    priority,
+                    &var,
+                    &mut budget,
+                )
+            };
+            if want_kern && run_feature(seg_slice, *b"kern") {
+                gpos_kerned = true;
             }
             // `dist`: distance adjustments the Indic / USE shapers
             // rely on for conjunct forms. Keyed on the segment's
@@ -1261,20 +1427,13 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             // Khmer -> khmr/khm2/DFLT, etc.), and skipped for scripts
             // that never ship a `dist` feature.
             if !feature_disabled(features, *b"dist") {
-                apply_gpos_feature_in_scripts_with_var(
-                    gpos,
-                    seg_slice,
-                    gdef.as_ref(),
-                    *b"dist",
-                    priority,
-                    &var,
-                );
+                run_feature(seg_slice, *b"dist");
             }
             if !feature_disabled(features, *b"mark") {
-                apply_gpos_feature(gpos, seg_slice, gdef.as_ref(), *b"mark", priority, &var);
+                run_feature(seg_slice, *b"mark");
             }
             if !feature_disabled(features, *b"mkmk") {
-                apply_gpos_feature(gpos, seg_slice, gdef.as_ref(), *b"mkmk", priority, &var);
+                run_feature(seg_slice, *b"mkmk");
             }
             // User-enabled features beyond the defaults flow through
             // the same dispatch. Skip tags already handled above so
@@ -1286,7 +1445,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 if matches!(&feat.tag, b"kern" | b"mark" | b"mkmk" | b"liga") {
                     continue;
                 }
-                apply_gpos_feature(gpos, seg_slice, gdef.as_ref(), feat.tag, priority, &var);
+                run_feature(seg_slice, feat.tag);
             }
         }
     }
@@ -1328,13 +1487,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let dominant_zeroes_late = dominant_script.is_some_and(zeroes_marks_late);
     if dominant_zeroes_late {
         if let Some(ref gdef) = gdef {
-            for seg_out in &seg_glyph_ranges {
-                for glyph in &mut glyphs[seg_out.range.clone()] {
-                    if gdef.glyph_class(glyph.glyph_id as u16).is_mark() {
-                        glyph.x_advance = 0;
-                    }
-                }
-            }
+            zero_mark_advances(gdef, &mut glyphs, &seg_glyph_ranges);
         }
     }
 
@@ -1345,6 +1498,55 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
 /// `Feature { tag, value: 0 }` in the override list.
 fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
     features.iter().any(|f| f.tag == tag && f.value == 0)
+}
+
+/// Zeroes the advance of every glyph GDEF classes as a mark, inside
+/// the given segment ranges.
+fn zero_mark_advances(gdef: &Gdef<'_>, glyphs: &mut [Glyph], segments: &[ProcessedSegment]) {
+    for seg_out in segments {
+        let Some(seg_slice) = glyphs.get_mut(seg_out.range.clone()) else {
+            continue;
+        };
+        for glyph in seg_slice {
+            if gdef.glyph_class(glyph.glyph_id as u16).is_mark() {
+                glyph.x_advance = 0;
+            }
+        }
+    }
+}
+
+/// Rebuilds the post-GSUB segment ranges after `morx` changed the
+/// glyph count. `origins[k]` is the pre-morx index output glyph `k`
+/// came from, or an out-of-range value for a glyph `morx` inserted.
+/// Each output glyph joins the segment of its origin (an inserted
+/// glyph joins its left neighbor's), and consecutive glyphs of the
+/// same segment form one range.
+fn remap_segments(segments: &[ProcessedSegment], origins: &[usize]) -> Vec<ProcessedSegment> {
+    let segment_of = |origin: usize| {
+        let idx = segments.partition_point(|s| s.range.end <= origin);
+        segments
+            .get(idx)
+            .filter(|s| s.range.contains(&origin))
+            .map(|_| idx)
+    };
+    let mut out: Vec<ProcessedSegment> = Vec::new();
+    let mut current: Option<usize> = None;
+    for (k, &origin) in origins.iter().enumerate() {
+        let seg = segment_of(origin).or(current).unwrap_or(0);
+        let Some(priority) = segments.get(seg).map(|s| s.script_priority) else {
+            // No segments at all: nothing to attach the glyph to.
+            continue;
+        };
+        match out.last_mut() {
+            Some(last) if current == Some(seg) && last.range.end == k => last.range.end = k + 1,
+            _ => out.push(ProcessedSegment {
+                range: k..k + 1,
+                script_priority: priority,
+            }),
+        }
+        current = Some(seg);
+    }
+    out
 }
 
 /// HarfBuzz "zero mark widths early" set: the dominant scripts whose
@@ -1529,20 +1731,21 @@ fn run_default_gsub(
     is_vertical: bool,
     script_priority: &[[u8; 4]],
     arabic_positional_already_ran: bool,
+    budget: &mut LookupBudget,
 ) {
     // ccmp already ran before the Arabic positional pass; avoid
     // double-applying it here.
     if !arabic_positional_already_ran && !feature_disabled(features, *b"ccmp") {
-        apply_gsub_feature(gsub, glyphs, gdef, *b"ccmp", 0, script_priority);
+        apply_gsub_feature_budgeted(gsub, glyphs, gdef, *b"ccmp", 0, script_priority, budget);
     }
     if !feature_disabled(features, *b"rlig") {
-        apply_gsub_feature(gsub, glyphs, gdef, *b"rlig", 0, script_priority);
+        apply_gsub_feature_budgeted(gsub, glyphs, gdef, *b"rlig", 0, script_priority, budget);
     }
     if want_liga {
-        apply_gsub_feature(gsub, glyphs, gdef, *b"liga", 0, script_priority);
+        apply_gsub_feature_budgeted(gsub, glyphs, gdef, *b"liga", 0, script_priority, budget);
     }
     if !feature_disabled(features, *b"clig") {
-        apply_gsub_feature(gsub, glyphs, gdef, *b"clig", 0, script_priority);
+        apply_gsub_feature_budgeted(gsub, glyphs, gdef, *b"clig", 0, script_priority, budget);
     }
     // `calt` and `rclt` together: HarfBuzz's default horizontal
     // feature list enables both, and Mongolian fonts in particular
@@ -1574,7 +1777,7 @@ fn run_default_gsub(
         indices.sort_unstable();
         indices.dedup();
         for lookup_idx in indices {
-            apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, 0);
+            apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, 0, budget);
         }
     }
     // Vertical writing: HarfBuzz auto-enables `vrt2` when the font
@@ -1584,9 +1787,9 @@ fn run_default_gsub(
     if is_vertical {
         let has_vrt2 = feature_present(gsub, *b"vrt2");
         if has_vrt2 && !feature_disabled(features, *b"vrt2") {
-            apply_gsub_feature(gsub, glyphs, gdef, *b"vrt2", 0, script_priority);
+            apply_gsub_feature_budgeted(gsub, glyphs, gdef, *b"vrt2", 0, script_priority, budget);
         } else if !feature_disabled(features, *b"vert") {
-            apply_gsub_feature(gsub, glyphs, gdef, *b"vert", 0, script_priority);
+            apply_gsub_feature_budgeted(gsub, glyphs, gdef, *b"vert", 0, script_priority, budget);
         }
     }
     for feat in features {
@@ -1597,7 +1800,15 @@ fn run_default_gsub(
             continue;
         }
         let alternate_idx = (feat.value.saturating_sub(1)).min(u32::from(u16::MAX)) as u16;
-        apply_gsub_feature(gsub, glyphs, gdef, feat.tag, alternate_idx, script_priority);
+        apply_gsub_feature_budgeted(
+            gsub,
+            glyphs,
+            gdef,
+            feat.tag,
+            alternate_idx,
+            script_priority,
+            budget,
+        );
     }
 }
 
@@ -1623,7 +1834,15 @@ fn feature_present(gsub: &Gsub<'_>, tag: [u8; 4]) -> bool {
 }
 
 /// Applies every GSUB lookup reachable via the named feature tag
-/// to the glyph run in place. Supports lookup types:
+/// to the glyph run in place, walking the supplied script-tag
+/// priority list (`arab > DFLT` for Arabic, `dev2 > deva > DFLT` for
+/// Devanagari, plain `DFLT` otherwise). The Indic shaper needs the
+/// list because Devanagari fonts expose their reordering features
+/// under `deva`/`dev2` and leave DFLT with only the "universal"
+/// subset. Falls back to DFLT and then the first script when none
+/// of the requested tags carry the feature.
+///
+/// Supports every GSUB lookup type:
 ///
 /// - 1: Single substitution (`smcp`, `vert`, `salt`, `ss01`...)
 /// - 2: Multiple substitution (`ccmp` decomposition, some scripts)
@@ -1631,37 +1850,16 @@ fn feature_present(gsub: &Gsub<'_>, tag: [u8; 4]) -> bool {
 ///   alternate index comes from the feature `value` (1-indexed,
 ///   clamped into the alternate set)
 /// - 4: Ligature substitution (`liga`, `dlig`, `rlig`)
-/// - 6: Chained context substitution (`calt`, `clig`, `init`,
-///   `medi`, `fina`, `isol`) with recursive nested lookups
+/// - 5, 6: Context and chained context substitution (`calt`,
+///   `clig`, `init`, `medi`, `fina`, `isol`) with recursive nested
+///   lookups
+/// - 8: Reverse chained single substitution
 ///
 /// Extension (type 7) wrappers are unwrapped to the inner type.
 /// Unknown lookup types are silently skipped so callers can enable
 /// forward-compatible features without the run erroring out.
-pub(crate) fn apply_gsub_feature(
-    gsub: &Gsub<'_>,
-    glyphs: &mut Vec<Glyph>,
-    gdef: Option<&Gdef<'_>>,
-    tag: [u8; 4],
-    alternate_index: u16,
-    script_priority: &[[u8; 4]],
-) {
-    // Callers resolve the priority from run analysis: `arab > DFLT`
-    // for Arabic, `hebr > DFLT` for Hebrew, `dev2 > deva > DFLT` for
-    // Devanagari, plain `DFLT` otherwise. The script-priority walker
-    // inside `apply_gsub_feature_in_scripts` falls back when the
-    // preferred script does not carry the feature, so mixed-script
-    // runs still find the lookup under DFLT.
-    apply_gsub_feature_in_scripts(gsub, glyphs, gdef, tag, alternate_index, script_priority);
-}
-
-/// Same as [`apply_gsub_feature`] but walks the supplied script-tag
-/// priority list instead of just DFLT. The Indic shaper needs this
-/// because Devanagari fonts expose their reordering features under
-/// `deva`/`dev2` and leave DFLT with only the "universal" subset.
 ///
-/// Falls back to the first script in the list if none of the
-/// requested tags are present, matching the prior DFLT-fallback
-/// behavior.
+/// Runs under a fresh [`LookupBudget`] for this one feature.
 pub(crate) fn apply_gsub_feature_in_scripts(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
@@ -1669,6 +1867,29 @@ pub(crate) fn apply_gsub_feature_in_scripts(
     tag: [u8; 4],
     alternate_index: u16,
     script_priority: &[[u8; 4]],
+) {
+    let mut budget = LookupBudget::for_run(glyphs);
+    apply_gsub_feature_budgeted(
+        gsub,
+        glyphs,
+        gdef,
+        tag,
+        alternate_index,
+        script_priority,
+        &mut budget,
+    );
+}
+
+/// [`apply_gsub_feature_in_scripts`] under a caller-owned budget, so
+/// [`shape`] can share one budget across every lookup it applies.
+fn apply_gsub_feature_budgeted(
+    gsub: &Gsub<'_>,
+    glyphs: &mut Vec<Glyph>,
+    gdef: Option<&Gdef<'_>>,
+    tag: [u8; 4],
+    alternate_index: u16,
+    script_priority: &[[u8; 4]],
+    budget: &mut LookupBudget,
 ) {
     if glyphs.is_empty() {
         return;
@@ -1683,7 +1904,7 @@ pub(crate) fn apply_gsub_feature_in_scripts(
     }
 
     for lookup_idx in lookup_indices {
-        apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, alternate_index);
+        apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, alternate_index, budget);
     }
 }
 
@@ -1697,7 +1918,8 @@ pub(crate) fn apply_gsub_feature_in_scripts(
 /// positional features; lookups that don't understand the mask
 /// (chaining-context interior) fall through to the unmasked
 /// dispatcher, matching the behavior documented on
-/// [`apply_gsub_lookup_masked`].
+/// [`apply_gsub_lookup_masked`]. Runs under a fresh [`LookupBudget`]
+/// for this one feature.
 pub(crate) fn apply_gsub_feature_masked(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
@@ -1716,8 +1938,9 @@ pub(crate) fn apply_gsub_feature_masked(
     if lookup_indices.is_empty() {
         return;
     }
+    let mut budget = LookupBudget::for_run(glyphs);
     for lookup_idx in lookup_indices {
-        apply_gsub_lookup_masked(gsub, lookup_idx, glyphs, gdef, mask);
+        apply_gsub_lookup_masked(gsub, lookup_idx, glyphs, gdef, mask, &mut budget);
     }
 }
 
@@ -1732,6 +1955,7 @@ fn apply_arabic_positional_features(
     glyphs: &mut Vec<Glyph>,
     gdef: Option<&Gdef<'_>>,
     forms: &[JoiningForm],
+    budget: &mut LookupBudget,
 ) {
     for (form, tag) in [
         (JoiningForm::Isol, *b"isol"),
@@ -1749,7 +1973,7 @@ fn apply_arabic_positional_features(
         }
         let mask: Vec<bool> = forms.iter().map(|&f| f == form).collect();
         for lookup_idx in lookup_indices {
-            apply_gsub_lookup_masked(gsub, lookup_idx, glyphs, gdef, &mask);
+            apply_gsub_lookup_masked(gsub, lookup_idx, glyphs, gdef, &mask, budget);
         }
     }
 }
@@ -1773,6 +1997,7 @@ fn apply_gsub_lookup_masked(
     glyphs: &mut Vec<Glyph>,
     gdef: Option<&Gdef<'_>>,
     mask: &[bool],
+    budget: &mut LookupBudget,
 ) {
     let lookup_list = gsub.lookup_list();
     let Some(lookup) = lookup_list.get(lookup_idx) else {
@@ -1794,7 +2019,7 @@ fn apply_gsub_lookup_masked(
     // the unmasked driver so the cursor walk + first-subtable-wins
     // semantics still apply.
     if effective_lt == gsub_lt::CHAINED_CONTEXT || effective_lt == gsub_lt::CONTEXT {
-        apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, 0);
+        apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, 0, budget);
         return;
     }
 
@@ -1810,8 +2035,9 @@ fn apply_gsub_lookup_masked(
             i += 1;
             continue;
         }
-        let consumed =
-            apply_parsed_lookup_at(gsub, &parsed, &filter, glyphs, &mut ids, gdef, i, 0, 0);
+        let consumed = apply_parsed_lookup_at(
+            gsub, &parsed, &filter, glyphs, &mut ids, gdef, i, 0, 0, budget,
+        );
         if consumed > 0 {
             i += consumed;
         } else {
@@ -1842,6 +2068,7 @@ fn apply_gsub_lookup(
     glyphs: &mut Vec<Glyph>,
     gdef: Option<&Gdef<'_>>,
     alternate_index: u16,
+    budget: &mut LookupBudget,
 ) {
     let lookup_list = gsub.lookup_list();
     let Some(lookup) = lookup_list.get(lookup_idx) else {
@@ -1926,7 +2153,10 @@ fn apply_gsub_lookup(
     let mut i = 0;
     while i < glyphs.len() {
         if use_digest {
-            let id = ids.as_slice()[i];
+            // `ids` mirrors `glyphs`, so `i` is in range.
+            let Some(&id) = ids.as_slice().get(i) else {
+                break;
+            };
             if !cursor_in_digest(&parsed, id) {
                 i += 1;
                 continue;
@@ -1942,6 +2172,7 @@ fn apply_gsub_lookup(
             i,
             0,
             alternate_index,
+            budget,
         );
         if consumed > 0 {
             i += consumed;
@@ -1960,8 +2191,9 @@ fn apply_gsub_lookup(
 /// `depth` is the recursion depth: the caller passes `0` for its
 /// first invocation and each recursive edge increments by one; we
 /// bail out at [`MAX_NESTED_DEPTH`] so a pathological font loop
-/// cannot overflow the stack.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+/// cannot overflow the stack. Every call also spends one unit of
+/// `budget` and does nothing once the budget is gone.
+#[allow(clippy::too_many_arguments)]
 fn apply_gsub_lookup_at(
     gsub: &Gsub<'_>,
     lookup_idx: u16,
@@ -1971,11 +2203,15 @@ fn apply_gsub_lookup_at(
     at: usize,
     depth: u8,
     alternate_index: u16,
+    budget: &mut LookupBudget,
 ) -> usize {
     if depth >= MAX_NESTED_DEPTH {
         return 0;
     }
     if at >= glyphs.len() {
+        return 0;
+    }
+    if !budget.take_nested_op() {
         return 0;
     }
     let lookup_list = gsub.lookup_list();
@@ -2021,7 +2257,7 @@ fn apply_gsub_lookup_at(
                     continue;
                 }
                 if let Some(seq) = m.apply(id) {
-                    if let Some(n) = expand_glyph_in_place(glyphs, at, &seq) {
+                    if let Some(n) = expand_glyph_in_place(glyphs, at, &seq, budget) {
                         ids.resync(glyphs);
                         return n;
                     }
@@ -2045,7 +2281,8 @@ fn apply_gsub_lookup_at(
                 let Ok(lig) = Ligature::parse(inner_bytes) else {
                     continue;
                 };
-                if let Some((out, positions)) = lig.apply_filtered(&ids.as_slice()[at..], &filter) {
+                let window = ids.as_slice().get(at..).unwrap_or_default();
+                if let Some((out, positions)) = lig.apply_filtered(window, &filter) {
                     glyphs[at].glyph_id = u32::from(out);
                     drain_ligature_components(glyphs, at, &positions);
                     let span = positions.last().copied().map_or(0, |p| p + 1);
@@ -2057,8 +2294,17 @@ fn apply_gsub_lookup_at(
                 let Ok(ctx) = GsubContext::parse(inner_bytes) else {
                     continue;
                 };
-                let ran =
-                    apply_gsub_context_at(gsub, &ctx, glyphs, ids, gdef, &filter, at, depth + 1);
+                let ran = apply_gsub_context_at(
+                    gsub,
+                    &ctx,
+                    glyphs,
+                    ids,
+                    gdef,
+                    &filter,
+                    at,
+                    depth + 1,
+                    budget,
+                );
                 if ran > 0 {
                     return ran;
                 }
@@ -2076,6 +2322,7 @@ fn apply_gsub_lookup_at(
                     &filter,
                     at,
                     depth + 1,
+                    budget,
                 );
                 if ran > 0 {
                     return ran;
@@ -2114,9 +2361,14 @@ fn drain_ligature_components(glyphs: &mut Vec<Glyph>, at: usize, positions: &[us
         return;
     }
     // Iterate high-to-low so earlier indices stay valid while we
-    // remove later ones.
+    // remove later ones. The matcher only reports positions inside
+    // the window it was given, so the range check never skips a
+    // component in practice.
     for rel in positions.iter().skip(1).rev() {
-        glyphs.remove(at + rel);
+        let idx = at.saturating_add(*rel);
+        if idx < glyphs.len() {
+            glyphs.remove(idx);
+        }
     }
 }
 
@@ -2133,6 +2385,7 @@ fn apply_gsub_context_at(
     filter: &MatchFilter<'_>,
     at: usize,
     depth: u8,
+    budget: &mut LookupBudget,
 ) -> usize {
     // Match against the shadow `ids` slice: no per-cursor allocation.
     // Records that need to outlive the match call get cloned into a
@@ -2162,7 +2415,7 @@ fn apply_gsub_context_at(
             }
         }
     };
-    apply_nested_gsub_lookups(gsub, glyphs, ids, gdef, filter, at, depth, &lookups);
+    apply_nested_gsub_lookups(gsub, glyphs, ids, gdef, filter, at, depth, &lookups, budget);
     input_len.max(1)
 }
 
@@ -2178,6 +2431,7 @@ fn apply_gsub_chain_context_at(
     filter: &MatchFilter<'_>,
     at: usize,
     depth: u8,
+    budget: &mut LookupBudget,
 ) -> usize {
     let (input_len, lookups): (usize, Vec<SequenceLookupRecord>) = {
         let id_slice = ids.as_slice();
@@ -2210,7 +2464,7 @@ fn apply_gsub_chain_context_at(
             }
         }
     };
-    apply_nested_gsub_lookups(gsub, glyphs, ids, gdef, filter, at, depth, &lookups);
+    apply_nested_gsub_lookups(gsub, glyphs, ids, gdef, filter, at, depth, &lookups, budget);
     input_len.max(1)
 }
 
@@ -2231,8 +2485,12 @@ fn apply_nested_gsub_lookups(
     at: usize,
     depth: u8,
     lookups: &[SequenceLookupRecord],
+    budget: &mut LookupBudget,
 ) {
     for rec in lookups {
+        if budget.exhausted() {
+            return;
+        }
         let seq = rec.sequence_index as usize;
         let pos = if seq == 0 {
             at
@@ -2271,6 +2529,7 @@ fn apply_nested_gsub_lookups(
             pos,
             depth,
             0,
+            budget,
         );
     }
 }
@@ -2280,23 +2539,33 @@ fn apply_nested_gsub_lookups(
 /// still points back to its source codepoint. Returns the output
 /// length when `seq` is non-empty, `None` on a zero-length sequence
 /// (which the spec forbids but we treat as a safe no-op).
-fn expand_glyph_in_place(glyphs: &mut Vec<Glyph>, at: usize, seq: &[u16]) -> Option<usize> {
-    if seq.is_empty() {
+///
+/// Also returns `None`, leaving the run untouched, when `budget` has
+/// no room for the extra glyphs (see [`LookupBudget`]).
+fn expand_glyph_in_place(
+    glyphs: &mut Vec<Glyph>,
+    at: usize,
+    seq: &[u16],
+    budget: &mut LookupBudget,
+) -> Option<usize> {
+    let (&first, rest) = seq.split_first()?;
+    if at >= glyphs.len() || !budget.take_growth(rest.len()) {
         return None;
     }
-    let source_cluster = glyphs[at].cluster;
+    let source = glyphs.get_mut(at)?;
+    source.glyph_id = u32::from(first);
     // Inherit the source glyph's shaper-internal state so Indic
     // `indic_position` and unicode-property bits survive a
     // multiple-sub split. Rustybuzz does the same via its info mask.
-    let source_props = glyphs[at].unicode_props;
-    let source_pos = glyphs[at].indic_position;
-    glyphs[at].glyph_id = u32::from(seq[0]);
-    for (i, &out_gid) in seq.iter().enumerate().skip(1) {
-        let mut g = Glyph::new(u32::from(out_gid), source_cluster);
-        g.unicode_props = source_props;
-        g.indic_position = source_pos;
-        glyphs.insert(at + i, g);
-    }
+    let source = *source;
+    let inserted = rest.iter().map(|&out_gid| {
+        let mut g = Glyph::new(u32::from(out_gid), source.cluster);
+        g.unicode_props = source.unicode_props;
+        g.indic_position = source.indic_position;
+        g
+    });
+    let after = at + 1;
+    glyphs.splice(after..after, inserted);
     Some(seq.len())
 }
 
@@ -2321,35 +2590,46 @@ fn apply_reverse_chain_subtable(rc: &ReverseChain<'_>, glyphs: &mut [Glyph]) {
     }
 }
 
-/// Walks the default LangSys (DFLT -> first script) and returns the
-/// sorted set of lookup indices that the feature `tag` selects. A
-/// return value of `None` means no usable script, `Some(empty)`
-/// means the LangSys does not carry this feature.
-#[allow(dead_code)]
-fn lookup_indices_for_feature(gsub: &Gsub<'_>, tag: [u8; 4]) -> Option<Vec<u16>> {
-    lookup_indices_for_feature_in_scripts(gsub, tag, &[*b"DFLT"])
-}
-
-/// Script-priority variant of [`lookup_indices_for_feature`]. Walks
-/// the `script_priority` tags in order and returns lookup indices
-/// for the first script that carries the requested feature tag. A
-/// script that exists but lacks the feature simply yields an empty
-/// lookup list. Falls through to the next priority. If none of
-/// the priority scripts carry the feature, falls back to DFLT then
-/// the first script in the table (matching the generic-path
-/// default).
+/// Script-priority lookup-index collection for a GSUB feature tag.
+/// See [`collect_feature_lookup_indices`].
 fn lookup_indices_for_feature_in_scripts(
     gsub: &Gsub<'_>,
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
 ) -> Option<Vec<u16>> {
-    let script_list = gsub.script_list();
-    let feature_list = gsub.feature_list();
+    collect_feature_lookup_indices(
+        gsub.script_list(),
+        gsub.feature_list(),
+        tag,
+        script_priority,
+    )
+}
 
+/// Upper bound on the lookup-index references gathered for one
+/// feature tag in one LangSys. Real fonts list a few hundred. A
+/// hostile LangSys can list thousands of feature records that all
+/// share one feature table with thousands of lookups.
+const MAX_FEATURE_LOOKUP_REFS: usize = 1 << 20;
+
+/// Walks the `script_priority` tags in order and returns the sorted,
+/// deduplicated lookup indices for the first script that carries
+/// the requested feature tag. A script that exists but lacks the
+/// feature falls through to the next priority. If none of the
+/// priority scripts carry the feature, falls back to DFLT then the
+/// first script in the table (matching the generic-path default).
+///
+/// Returns `None` when no usable script exists. In the final
+/// fallback, `Some(empty)` means the LangSys does not carry the
+/// feature. Shared by the GSUB and GPOS drivers.
+fn collect_feature_lookup_indices(
+    script_list: &ScriptList<'_>,
+    feature_list: &FeatureList<'_>,
+    tag: [u8; 4],
+    script_priority: &[[u8; 4]],
+) -> Option<Vec<u16>> {
     // Try each requested script in order; the first one that carries
-    // the feature wins. Scripts present but lacking this tag still
-    // count as "found" and stop the fallback chain. Matches how
-    // HarfBuzz treats per-script feature overrides.
+    // the feature wins. Matches how HarfBuzz treats per-script
+    // feature overrides.
     for tag_pri in script_priority {
         let Some(script) = script_list.find(*tag_pri) else {
             continue;
@@ -2357,24 +2637,7 @@ fn lookup_indices_for_feature_in_scripts(
         let Some(lang_sys) = script.default_lang_sys() else {
             continue;
         };
-        let mut indices: Vec<u16> = Vec::new();
-        let mut has_feature = false;
-        for feat_idx in lang_sys.feature_indices() {
-            let Some((feat_tag, feature)) = feature_list.get(feat_idx) else {
-                continue;
-            };
-            if feat_tag != tag {
-                continue;
-            }
-            has_feature = true;
-            for idx in feature.lookup_indices() {
-                if !indices.contains(&idx) {
-                    indices.push(idx);
-                }
-            }
-        }
-        if has_feature {
-            indices.sort_unstable();
+        if let Some(indices) = lang_sys_lookup_indices(&lang_sys, feature_list, tag) {
             return Some(indices);
         }
     }
@@ -2389,22 +2652,40 @@ fn lookup_indices_for_feature_in_scripts(
             .or_else(|| script_list.iter().next().map(|(_, s)| s))?
     };
     let lang_sys = script.default_lang_sys()?;
+    Some(lang_sys_lookup_indices(&lang_sys, feature_list, tag).unwrap_or_default())
+}
+
+/// Sorted, deduplicated lookup indices of every feature record in
+/// `lang_sys` tagged `tag`, or `None` when no record carries the tag.
+///
+/// Each feature index is visited once and the lookup indices are
+/// deduplicated after one sort, so the cost stays linear in the table
+/// size. Gathering stops at [`MAX_FEATURE_LOOKUP_REFS`] references.
+fn lang_sys_lookup_indices(
+    lang_sys: &LangSys<'_>,
+    feature_list: &FeatureList<'_>,
+    tag: [u8; 4],
+) -> Option<Vec<u16>> {
+    let mut feature_indices: Vec<u16> = lang_sys.feature_indices().collect();
+    feature_indices.sort_unstable();
+    feature_indices.dedup();
+
     let mut indices: Vec<u16> = Vec::new();
-    for feat_idx in lang_sys.feature_indices() {
+    let mut has_feature = false;
+    for feat_idx in feature_indices {
         let Some((feat_tag, feature)) = feature_list.get(feat_idx) else {
             continue;
         };
         if feat_tag != tag {
             continue;
         }
-        for idx in feature.lookup_indices() {
-            if !indices.contains(&idx) {
-                indices.push(idx);
-            }
-        }
+        has_feature = true;
+        let room = MAX_FEATURE_LOOKUP_REFS.saturating_sub(indices.len());
+        indices.extend(feature.lookup_indices().take(room));
     }
     indices.sort_unstable();
-    Some(indices)
+    indices.dedup();
+    has_feature.then_some(indices)
 }
 
 /// Asks "would feature `tag`'s lookups substitute starting at the
@@ -2464,6 +2745,7 @@ pub(crate) fn feature_would_substitute(
 /// - 4: Mark-to-base attachment (mark)
 /// - 5: Mark-to-ligature attachment (mark on ligature components)
 /// - 6: Mark-to-mark attachment (mkmk stacking)
+/// - 7, 8: Contextual and chained-contextual positioning
 /// - 9: Extension (unwraps, re-dispatches)
 ///
 /// Returns `true` when at least one subtable of a supported type
@@ -2476,38 +2758,15 @@ fn apply_gpos_feature(
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
     var: &VarCtx<'_>,
+    budget: &mut LookupBudget,
 ) -> bool {
-    apply_gpos_feature_in_scripts_with_var(gpos, glyphs, gdef, tag, script_priority, var)
+    apply_gpos_feature_in_scripts_with_var(gpos, glyphs, gdef, tag, script_priority, var, budget)
 }
 
 /// Script-priority variant of [`apply_gpos_feature`]. Matches the
 /// GSUB equivalent: walks `script_priority` in order, stops at the
 /// first script that carries the feature tag, and falls back to
-/// DFLT / first script when none match.
-///
-/// Back-compat entry point for callers outside [`shape`] that do
-/// not yet thread a variable-font context; equivalent to calling
-/// the `_with_var` form with [`VarCtx::none`].
-#[allow(dead_code)]
-pub(crate) fn apply_gpos_feature_in_scripts(
-    gpos: &Gpos<'_>,
-    glyphs: &mut [Glyph],
-    gdef: Option<&Gdef<'_>>,
-    tag: [u8; 4],
-    script_priority: &[[u8; 4]],
-) -> bool {
-    apply_gpos_feature_in_scripts_with_var(
-        gpos,
-        glyphs,
-        gdef,
-        tag,
-        script_priority,
-        &VarCtx::none(),
-    )
-}
-
-/// Variable-font aware variant of
-/// [`apply_gpos_feature_in_scripts`]. Every ValueRecord delta
+/// DFLT / first script when none match. Every ValueRecord delta
 /// passes through the `var` context so VariationIndex-backed kern
 /// pairs scale with the active coords.
 fn apply_gpos_feature_in_scripts_with_var(
@@ -2517,6 +2776,7 @@ fn apply_gpos_feature_in_scripts_with_var(
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
     var: &VarCtx<'_>,
+    budget: &mut LookupBudget,
 ) -> bool {
     if glyphs.is_empty() {
         return false;
@@ -2592,14 +2852,16 @@ fn apply_gpos_feature_in_scripts_with_var(
                     let Ok(ctx) = ContextPos::parse(inner_bytes) else {
                         continue;
                     };
-                    apply_gpos_context_subtable(gpos, &ctx, glyphs, gdef, &filter, var);
+                    apply_gpos_context_subtable(gpos, &ctx, glyphs, gdef, &filter, var, budget);
                     ran_any = true;
                 }
                 gpos_lt::CHAINED_CONTEXT => {
                     let Ok(chain) = ChainContextPos::parse(inner_bytes) else {
                         continue;
                     };
-                    apply_gpos_chain_context_subtable(gpos, &chain, glyphs, gdef, &filter, var);
+                    apply_gpos_chain_context_subtable(
+                        gpos, &chain, glyphs, gdef, &filter, var, budget,
+                    );
                     ran_any = true;
                 }
                 _ => {}
@@ -2616,22 +2878,32 @@ fn apply_gpos_feature_in_scripts_with_var(
 /// context dispatch still needs recursion through this function to
 /// handle nested positioning-of-positioning.
 ///
+/// `ids` is the glyph-id snapshot of `glyphs`. Positioning never
+/// changes glyph ids, so the caller's snapshot stays valid.
+///
 /// `depth` guards against runaway recursion the same way the GSUB
 /// side does; bail out silently once we hit [`MAX_NESTED_DEPTH`].
-#[allow(clippy::too_many_lines)]
+/// Every call also spends one unit of `budget` and does nothing once
+/// the budget is gone.
+#[allow(clippy::too_many_arguments)]
 fn apply_gpos_lookup_at(
     gpos: &Gpos<'_>,
     lookup_idx: u16,
     glyphs: &mut [Glyph],
+    ids: &[u16],
     gdef: Option<&Gdef<'_>>,
     at: usize,
     depth: u8,
     var: &VarCtx<'_>,
+    budget: &mut LookupBudget,
 ) {
     if depth >= MAX_NESTED_DEPTH {
         return;
     }
     if at >= glyphs.len() {
+        return;
+    }
+    if !budget.take_nested_op() {
         return;
     }
     let lookup_list = gpos.lookup_list();
@@ -2677,16 +2949,20 @@ fn apply_gpos_lookup_at(
                 }
                 // Look up the partner via the skip-iterator so that
                 // marks (or any other filtered class) between two
-                // kerned bases do not defeat the match.
-                let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
-                let Some(partner) = filter.next_unskipped(&ids, at + 1) else {
+                // kerned bases do not defeat the match. The partner
+                // index is always past `at` and inside the run.
+                let Some(partner) = filter.next_unskipped(ids, at + 1) else {
                     continue;
                 };
-                let second = glyphs[partner].glyph_id as u16;
+                let (left, right) = glyphs.split_at_mut(partner);
+                let (Some(first_glyph), Some(second_glyph)) = (left.get_mut(at), right.first_mut())
+                else {
+                    continue;
+                };
+                let second = second_glyph.glyph_id as u16;
                 if let Some((v1, v2)) = pp.lookup(first, second) {
-                    let (left, right) = glyphs.split_at_mut(partner);
-                    apply_value_record(&mut left[at], &v1, inner_bytes, var);
-                    apply_value_record(&mut right[0], &v2, inner_bytes, var);
+                    apply_value_record(first_glyph, &v1, inner_bytes, var);
+                    apply_value_record(second_glyph, &v2, inner_bytes, var);
                     return;
                 }
             }
@@ -2694,10 +2970,8 @@ fn apply_gpos_lookup_at(
                 let Ok(mbp) = MarkBasePos::parse(inner_bytes) else {
                     continue;
                 };
-                // Mark-to-base needs the surrounding run; delegate to
-                // the subtable driver on a single-position slice.
-                // We pass the whole glyph slice so the driver can
-                // walk back to the actual base.
+                // Mark-to-base needs the surrounding run: the driver
+                // walks the whole slice so it can find the base.
                 apply_mark_base(&mbp, glyphs, gdef, &filter);
                 return;
             }
@@ -2719,25 +2993,35 @@ fn apply_gpos_lookup_at(
                 let Ok(ctx) = ContextPos::parse(inner_bytes) else {
                     continue;
                 };
-                let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
-                apply_gpos_context_at(gpos, &ctx, glyphs, &ids, gdef, &filter, at, depth + 1, var);
+                apply_gpos_context_at(
+                    gpos,
+                    &ctx,
+                    glyphs,
+                    ids,
+                    gdef,
+                    &filter,
+                    at,
+                    depth + 1,
+                    var,
+                    budget,
+                );
                 return;
             }
             gpos_lt::CHAINED_CONTEXT => {
                 let Ok(chain) = ChainContextPos::parse(inner_bytes) else {
                     continue;
                 };
-                let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
                 apply_gpos_chain_context_at(
                     gpos,
                     &chain,
                     glyphs,
-                    &ids,
+                    ids,
                     gdef,
                     &filter,
                     at,
                     depth + 1,
                     var,
+                    budget,
                 );
                 return;
             }
@@ -2750,6 +3034,7 @@ fn apply_gpos_lookup_at(
 /// every hit. Glyph-id snapshot is built once and reused across the
 /// cursor walk; positioning never changes glyph ids so the snapshot
 /// stays valid for the whole pass.
+#[allow(clippy::too_many_arguments)]
 fn apply_gpos_context_subtable(
     gpos: &Gpos<'_>,
     ctx: &ContextPos<'_>,
@@ -2757,11 +3042,13 @@ fn apply_gpos_context_subtable(
     gdef: Option<&Gdef<'_>>,
     filter: &MatchFilter<'_>,
     var: &VarCtx<'_>,
+    budget: &mut LookupBudget,
 ) {
     let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
     let mut i = 0;
     while i < glyphs.len() {
-        let consumed = apply_gpos_context_at(gpos, ctx, glyphs, &ids, gdef, filter, i, 0, var);
+        let consumed =
+            apply_gpos_context_at(gpos, ctx, glyphs, &ids, gdef, filter, i, 0, var, budget);
         if consumed > 0 {
             i += consumed;
         } else {
@@ -2772,6 +3059,7 @@ fn apply_gpos_context_subtable(
 
 /// Scans the run and applies a GPOS type-8 chained-context subtable
 /// on every hit.
+#[allow(clippy::too_many_arguments)]
 fn apply_gpos_chain_context_subtable(
     gpos: &Gpos<'_>,
     chain: &ChainContextPos<'_>,
@@ -2779,12 +3067,13 @@ fn apply_gpos_chain_context_subtable(
     gdef: Option<&Gdef<'_>>,
     filter: &MatchFilter<'_>,
     var: &VarCtx<'_>,
+    budget: &mut LookupBudget,
 ) {
     let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
     let mut i = 0;
     while i < glyphs.len() {
         let consumed =
-            apply_gpos_chain_context_at(gpos, chain, glyphs, &ids, gdef, filter, i, 0, var);
+            apply_gpos_chain_context_at(gpos, chain, glyphs, &ids, gdef, filter, i, 0, var, budget);
         if consumed > 0 {
             i += consumed;
         } else {
@@ -2804,6 +3093,7 @@ fn apply_gpos_context_at(
     at: usize,
     depth: u8,
     var: &VarCtx<'_>,
+    budget: &mut LookupBudget,
 ) -> usize {
     let (input_len, lookups): (usize, Vec<SequenceLookupRecord>) = match ctx {
         ContextPos::Format1(c) => {
@@ -2825,7 +3115,9 @@ fn apply_gpos_context_at(
             (n, c.lookups().to_vec())
         }
     };
-    apply_nested_gpos_lookups(gpos, glyphs, gdef, filter, ids, at, depth, &lookups, var);
+    apply_nested_gpos_lookups(
+        gpos, glyphs, gdef, filter, ids, at, depth, &lookups, var, budget,
+    );
     input_len.max(1)
 }
 
@@ -2840,6 +3132,7 @@ fn apply_gpos_chain_context_at(
     at: usize,
     depth: u8,
     var: &VarCtx<'_>,
+    budget: &mut LookupBudget,
 ) -> usize {
     let (input_len, lookups): (usize, Vec<SequenceLookupRecord>) = match chain {
         ChainContextPos::Format1(c) => {
@@ -2861,7 +3154,9 @@ fn apply_gpos_chain_context_at(
             (n, c.lookups().to_vec())
         }
     };
-    apply_nested_gpos_lookups(gpos, glyphs, gdef, filter, ids, at, depth, &lookups, var);
+    apply_nested_gpos_lookups(
+        gpos, glyphs, gdef, filter, ids, at, depth, &lookups, var, budget,
+    );
     input_len.max(1)
 }
 
@@ -2877,8 +3172,12 @@ fn apply_nested_gpos_lookups(
     depth: u8,
     lookups: &[SequenceLookupRecord],
     var: &VarCtx<'_>,
+    budget: &mut LookupBudget,
 ) {
     for rec in lookups {
+        if budget.exhausted() {
+            return;
+        }
         let seq = rec.sequence_index as usize;
         let pos = if seq == 0 {
             at
@@ -2896,81 +3195,33 @@ fn apply_nested_gpos_lookups(
             }
             pos
         };
-        apply_gpos_lookup_at(gpos, rec.lookup_list_index, glyphs, gdef, pos, depth, var);
+        apply_gpos_lookup_at(
+            gpos,
+            rec.lookup_list_index,
+            glyphs,
+            ids,
+            gdef,
+            pos,
+            depth,
+            var,
+            budget,
+        );
     }
 }
 
-/// Default-LangSys lookup-index collection for a GPOS feature tag,
-/// mirroring the GSUB helper.
-#[allow(dead_code)]
-fn gpos_lookup_indices_for_feature(gpos: &Gpos<'_>, tag: [u8; 4]) -> Option<Vec<u16>> {
-    gpos_lookup_indices_for_feature_in_scripts(gpos, tag, &[*b"DFLT"])
-}
-
-/// Script-priority GPOS helper. Twin of
-/// [`lookup_indices_for_feature_in_scripts`] for GSUB.
+/// Script-priority lookup-index collection for a GPOS feature tag.
+/// See [`collect_feature_lookup_indices`].
 fn gpos_lookup_indices_for_feature_in_scripts(
     gpos: &Gpos<'_>,
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
 ) -> Option<Vec<u16>> {
-    let script_list = gpos.script_list();
-    let feature_list = gpos.feature_list();
-
-    for tag_pri in script_priority {
-        let Some(script) = script_list.find(*tag_pri) else {
-            continue;
-        };
-        let Some(lang_sys) = script.default_lang_sys() else {
-            continue;
-        };
-        let mut indices: Vec<u16> = Vec::new();
-        let mut has_feature = false;
-        for feat_idx in lang_sys.feature_indices() {
-            let Some((feat_tag, feature)) = feature_list.get(feat_idx) else {
-                continue;
-            };
-            if feat_tag != tag {
-                continue;
-            }
-            has_feature = true;
-            for idx in feature.lookup_indices() {
-                if !indices.contains(&idx) {
-                    indices.push(idx);
-                }
-            }
-        }
-        if has_feature {
-            indices.sort_unstable();
-            return Some(indices);
-        }
-    }
-
-    let already_tried_dflt = script_priority.iter().any(|t| *t == *b"DFLT");
-    let script = if already_tried_dflt {
-        script_list.iter().next().map(|(_, s)| s)?
-    } else {
-        script_list
-            .find(*b"DFLT")
-            .or_else(|| script_list.iter().next().map(|(_, s)| s))?
-    };
-    let lang_sys = script.default_lang_sys()?;
-    let mut indices: Vec<u16> = Vec::new();
-    for feat_idx in lang_sys.feature_indices() {
-        let Some((feat_tag, feature)) = feature_list.get(feat_idx) else {
-            continue;
-        };
-        if feat_tag != tag {
-            continue;
-        }
-        for idx in feature.lookup_indices() {
-            if !indices.contains(&idx) {
-                indices.push(idx);
-            }
-        }
-    }
-    indices.sort_unstable();
-    Some(indices)
+    collect_feature_lookup_indices(
+        gpos.script_list(),
+        gpos.feature_list(),
+        tag,
+        script_priority,
+    )
 }
 
 /// Walks the run and applies the single-adjustment subtable to
@@ -3015,46 +3266,58 @@ fn apply_mark_base(
     let Some(gdef) = gdef else {
         return;
     };
+    walk_marks_with_base(glyphs, gdef, filter, |mark, base| {
+        mbp.attach(mark.glyph_id as u16, base.glyph_id as u16)
+    });
+}
 
+/// Shared walk for mark-to-base and mark-to-ligature. For each mark
+/// the filter keeps, finds the nearest preceding non-mark glyph (the
+/// base), asks `attach(mark, base)` for the anchor pair, and moves
+/// the mark onto the base anchor. "Class Other" glyphs count as
+/// bases, so exotic fonts do not silently drop marks. The delta
+/// accounts for the advance of every glyph from the base up to the
+/// mark (for example stacked marks), and the mark's own advance
+/// becomes zero.
+///
+/// The base index and that advance sum are carried forward as the
+/// walk goes, so a long run of marks costs one step per glyph rather
+/// than a walk back to the base for every mark. The sums saturate.
+fn walk_marks_with_base<F>(
+    glyphs: &mut [Glyph],
+    gdef: &Gdef<'_>,
+    filter: &MatchFilter<'_>,
+    mut attach: F,
+) where
+    F: FnMut(&Glyph, &Glyph) -> Option<MarkAttachment>,
+{
+    // Nearest preceding non-mark glyph, and the x_advance sum of
+    // `glyphs[base..i]` as it stands when glyph `i` is reached.
+    let mut base: Option<usize> = None;
+    let mut walked_advance: i32 = 0;
     for i in 0..glyphs.len() {
-        let mark_gid = glyphs[i].glyph_id as u16;
-        if !gdef.glyph_class(mark_gid).is_mark() {
+        let gid = glyphs[i].glyph_id as u16;
+        let is_mark = gdef.glyph_class(gid) == GlyphClass::Mark;
+        if !is_mark {
+            base = Some(i);
+            walked_advance = glyphs[i].x_advance;
             continue;
         }
         // LookupFlag gating: skip marks the filter tells us to ignore.
-        if filter.is_skipped(mark_gid) {
-            continue;
+        if !filter.is_skipped(gid) {
+            if let Some(a) = base.and_then(|b| attach(&glyphs[i], &glyphs[b])) {
+                let dx = (i32::from(a.base_anchor.x) - i32::from(a.mark_anchor.x))
+                    .saturating_sub(walked_advance);
+                let dy = i32::from(a.base_anchor.y) - i32::from(a.mark_anchor.y);
+                let mark = &mut glyphs[i];
+                mark.x_offset = mark.x_offset.saturating_add(dx);
+                mark.y_offset = mark.y_offset.saturating_add(dy);
+                // Marks do not advance the pen. Replace whatever hmtx
+                // reported with zero so successive text lines up.
+                mark.x_advance = 0;
+            }
         }
-        // Walk back to the nearest base. The immediate preceding
-        // glyph might be another mark (diacritic stacking); skip
-        // marks looking for the real base. Treat "class Other" as
-        // base-ish so exotic fonts do not silently drop marks.
-        let Some(base_i) = (0..i).rev().find(|&j| {
-            let cls = gdef.glyph_class(glyphs[j].glyph_id as u16);
-            cls != GlyphClass::Mark
-        }) else {
-            continue;
-        };
-        let base_gid = glyphs[base_i].glyph_id as u16;
-        let Some(attach) = mbp.attach(mark_gid, base_gid) else {
-            continue;
-        };
-
-        // Accumulate the advance between the base and the mark so
-        // the delta accounts for any glyphs (e.g. stacked marks)
-        // that sat in between.
-        let mut walked_advance: i32 = 0;
-        for glyph in &glyphs[base_i..i] {
-            walked_advance += glyph.x_advance;
-        }
-
-        let dx = i32::from(attach.base_anchor.x) - i32::from(attach.mark_anchor.x) - walked_advance;
-        let dy = i32::from(attach.base_anchor.y) - i32::from(attach.mark_anchor.y);
-        glyphs[i].x_offset += dx;
-        glyphs[i].y_offset += dy;
-        // Marks do not advance the pen. Replace whatever hmtx
-        // reported with zero so successive text lines up.
-        glyphs[i].x_advance = 0;
+        walked_advance = walked_advance.saturating_add(glyphs[i].x_advance);
     }
 }
 
@@ -3075,48 +3338,19 @@ fn apply_mark_liga(
     let Some(gdef) = gdef else {
         return;
     };
-
-    for i in 0..glyphs.len() {
-        let mark_gid = glyphs[i].glyph_id as u16;
-        if !gdef.glyph_class(mark_gid).is_mark() {
-            continue;
-        }
-        if filter.is_skipped(mark_gid) {
-            continue;
-        }
-        let Some(base_i) = (0..i).rev().find(|&j| {
-            let cls = gdef.glyph_class(glyphs[j].glyph_id as u16);
-            cls != GlyphClass::Mark
-        }) else {
-            continue;
-        };
-        let base_gid = glyphs[base_i].glyph_id as u16;
-
+    walk_marks_with_base(glyphs, gdef, filter, |mark, base| {
+        let mark_gid = mark.glyph_id as u16;
+        let base_gid = base.glyph_id as u16;
         // Derive a component index from the difference in cluster
         // values. A single-component ligature collapses to 0.
-        let cluster_delta = glyphs[i].cluster.saturating_sub(glyphs[base_i].cluster);
+        let cluster_delta = mark.cluster.saturating_sub(base.cluster);
         let component_index = cluster_delta.min(u32::from(u16::MAX)) as u16;
-
         // Try the computed component first; fall back to 0 so marks
         // on fonts that only anchor component 0 still land somewhere
         // sane instead of being dropped silently.
-        let attach = mlp
-            .attach(mark_gid, base_gid, component_index)
-            .or_else(|| mlp.attach(mark_gid, base_gid, 0));
-        let Some(attach) = attach else {
-            continue;
-        };
-
-        let mut walked_advance: i32 = 0;
-        for glyph in &glyphs[base_i..i] {
-            walked_advance += glyph.x_advance;
-        }
-        let dx = i32::from(attach.base_anchor.x) - i32::from(attach.mark_anchor.x) - walked_advance;
-        let dy = i32::from(attach.base_anchor.y) - i32::from(attach.mark_anchor.y);
-        glyphs[i].x_offset += dx;
-        glyphs[i].y_offset += dy;
-        glyphs[i].x_advance = 0;
-    }
+        mlp.attach(mark_gid, base_gid, component_index)
+            .or_else(|| mlp.attach(mark_gid, base_gid, 0))
+    });
 }
 
 /// Walks the run and stacks each mark glyph onto the immediately
@@ -3157,10 +3391,12 @@ fn apply_mark_mark(
         // own offsets to the attachment delta.
         let lower_mark_x = glyphs[i - 1].x_offset;
         let lower_mark_y = glyphs[i - 1].y_offset;
-        let dx = i32::from(attach.base_anchor.x) - i32::from(attach.mark_anchor.x) + lower_mark_x;
-        let dy = i32::from(attach.base_anchor.y) - i32::from(attach.mark_anchor.y) + lower_mark_y;
-        glyphs[i].x_offset += dx;
-        glyphs[i].y_offset += dy;
+        let dx = (i32::from(attach.base_anchor.x) - i32::from(attach.mark_anchor.x))
+            .saturating_add(lower_mark_x);
+        let dy = (i32::from(attach.base_anchor.y) - i32::from(attach.mark_anchor.y))
+            .saturating_add(lower_mark_y);
+        glyphs[i].x_offset = glyphs[i].x_offset.saturating_add(dx);
+        glyphs[i].y_offset = glyphs[i].y_offset.saturating_add(dy);
         glyphs[i].x_advance = 0;
     }
 }
@@ -3173,31 +3409,39 @@ fn apply_mark_mark(
 /// so clusters survive ligation: the surviving glyph inherits the
 /// first component's cluster, matching HarfBuzz's "merge clusters
 /// to earliest" policy.
-fn apply_morx(morx: &Morx<'_>, glyphs: &mut Vec<Glyph>) {
+///
+/// Returns `None` when the stream did not change. Otherwise returns
+/// one origin per output glyph (`usize::MAX` for a glyph with no
+/// single origin) so the caller can remap its segment ranges.
+fn apply_morx(morx: &Morx<'_>, glyphs: &mut Vec<Glyph>) -> Option<Vec<usize>> {
     if glyphs.is_empty() {
-        return;
+        return None;
     }
     let input_ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
     let (out_ids, origins) = morx.apply(&input_ids);
     if out_ids.len() == glyphs.len() && out_ids == input_ids {
-        return; // no change: avoid needless allocation
+        return None; // no change: avoid needless allocation
     }
     let mut rebuilt: Vec<Glyph> = Vec::with_capacity(out_ids.len());
+    let mut out_origins: Vec<usize> = Vec::with_capacity(out_ids.len());
     for (out_idx, &gid) in out_ids.iter().enumerate() {
         let origin = origins.get(out_idx).copied().unwrap_or(usize::MAX);
-        if origin < glyphs.len() {
-            let mut g = glyphs[origin];
+        if let Some(src) = glyphs.get(origin) {
+            let mut g = *src;
             g.glyph_id = u32::from(gid);
             rebuilt.push(g);
+            out_origins.push(origin);
         } else {
             // Synthesized output with no single origin: rare; fall
             // back to the lowest available cluster so layout does
             // not confuse renderer-side grapheme tracking.
             let cluster = glyphs.first().map_or(0, |g| g.cluster);
             rebuilt.push(Glyph::new(u32::from(gid), cluster));
+            out_origins.push(usize::MAX);
         }
     }
     *glyphs = rebuilt;
+    Some(out_origins)
 }
 
 /// AAT `kerx` apply pass.
@@ -3217,23 +3461,16 @@ fn apply_kerx(face: &Face<'_>, kerx: &Kerx<'_>, glyphs: &mut [Glyph]) -> Result<
     if glyphs.is_empty() {
         return Ok(());
     }
-    if glyphs.len() >= 2 {
-        for i in 0..glyphs.len() - 1 {
-            let left = glyphs[i].glyph_id as u16;
-            let right = glyphs[i + 1].glyph_id as u16;
-            let delta = i32::from(kerx.kern(left, right));
-            if delta != 0 {
-                let half = delta / 2;
-                glyphs[i].x_advance += delta - half;
-                glyphs[i + 1].x_advance += half;
-            }
-        }
+    for i in 0..glyphs.len() - 1 {
+        let left = glyphs[i].glyph_id as u16;
+        let right = glyphs[i + 1].glyph_id as u16;
+        split_pair_kern(glyphs, i, i32::from(kerx.kern(left, right)));
     }
     if kerx.has_state_machine() {
         let ids: alloc::vec::Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
         kerx.apply_state_machines(&ids, |idx, delta| {
             if let Some(g) = glyphs.get_mut(idx) {
-                g.x_advance += i32::from(delta);
+                g.x_advance = g.x_advance.saturating_add(i32::from(delta));
             }
         });
     }
@@ -3282,8 +3519,8 @@ fn apply_kerx_format4(face: &Face<'_>, kerx: &Kerx<'_>, glyphs: &mut [Glyph]) ->
             continue;
         };
         if let Some(g) = glyphs.get_mut(current_index) {
-            g.x_offset += dx;
-            g.y_offset += dy;
+            g.x_offset = g.x_offset.saturating_add(dx);
+            g.y_offset = g.y_offset.saturating_add(dy);
         }
     }
     Ok(())
@@ -3409,12 +3646,20 @@ fn apply_legacy_kern(kern: &KernTable<'_>, glyphs: &mut [Glyph]) {
     for i in 0..glyphs.len() - 1 {
         let left = glyphs[i].glyph_id as u16;
         let right = glyphs[i + 1].glyph_id as u16;
-        let delta = i32::from(kern.kern(left, right));
-        if delta != 0 {
-            let half = delta / 2;
-            glyphs[i].x_advance += delta - half;
-            glyphs[i + 1].x_advance += half;
-        }
+        split_pair_kern(glyphs, i, i32::from(kern.kern(left, right)));
+    }
+}
+
+/// Adds a pair kern `delta` to `glyphs[i]` and `glyphs[i + 1]`,
+/// split the way [`apply_legacy_kern`] describes. The sums saturate.
+fn split_pair_kern(glyphs: &mut [Glyph], i: usize, delta: i32) {
+    if delta == 0 {
+        return;
+    }
+    let half = delta / 2;
+    if let [left, right, ..] = glyphs.get_mut(i..).unwrap_or_default() {
+        left.x_advance = left.x_advance.saturating_add(delta - half);
+        right.x_advance = right.x_advance.saturating_add(half);
     }
 }
 
@@ -4210,4 +4455,140 @@ mod tests {
         assert_eq!(out.glyphs[0].glyph_id, 1);
         assert_eq!(out.glyphs[1].glyph_id, 2);
     }
+
+    #[test]
+    fn gsub_nested_fan_out_is_bounded() {
+        // Chain context whose one rule fires lookup 0 (itself) eight
+        // times at the same position. The depth guard alone allows
+        // 8^16 nested calls, which never finishes. The nested budget
+        // stops the walk after a few thousand.
+        let mut chain = Vec::new();
+        chain.extend_from_slice(&3u16.to_be_bytes()); // format
+        chain.extend_from_slice(&0u16.to_be_bytes()); // backtrack count
+        chain.extend_from_slice(&1u16.to_be_bytes()); // input count
+        chain.extend_from_slice(&0u16.to_be_bytes()); // input cov slot
+        chain.extend_from_slice(&0u16.to_be_bytes()); // lookahead count
+        chain.extend_from_slice(&8u16.to_be_bytes()); // lookup count
+        for _ in 0..8 {
+            chain.extend_from_slice(&0u16.to_be_bytes()); // seq
+            chain.extend_from_slice(&0u16.to_be_bytes()); // lookup 0 = self
+        }
+        let cov_off = chain.len();
+        chain.extend_from_slice(&build_cov_fmt1(&[1, 2, 3, 4, 5, 6]));
+        chain[6..8].copy_from_slice(&(cov_off as u16).to_be_bytes());
+        assert!(ChainContextAny::parse(&chain).is_ok());
+
+        let data = build_shapeable_font_with_gsub(&[(6, chain)], &[0]);
+        let blob = Blob::new(&data);
+        let face = Face::parse(&blob, 0).unwrap();
+        let font = Font::new(face, 16.0);
+        let features = [Feature {
+            tag: *b"test",
+            value: 1,
+        }];
+        let mut buf = Buffer::new();
+        buf.push_str("AB");
+        let out = shape(&font, &buf, &features).unwrap();
+        assert_eq!(out.glyphs.len(), 2);
+        assert_eq!(out.glyphs[0].glyph_id, 1);
+        assert_eq!(out.glyphs[1].glyph_id, 2);
+    }
+
+    #[test]
+    fn gsub_multiple_substitution_growth_is_capped() {
+        // Two lookups that each turn glyph A into 256 copies. Without
+        // a cap one character becomes 65 536 glyphs, and one more
+        // lookup exhausts memory. One shape() call may grow the run to
+        // max(64 x input glyphs, 16 384) glyphs and no further.
+        let lookups: Vec<(u16, Vec<u8>)> = (0..2).map(|_| (2, repeat_a_subtable(256))).collect();
+        let data = build_shapeable_font_with_gsub(&lookups, &[0, 1]);
+        let blob = Blob::new(&data);
+        let face = Face::parse(&blob, 0).unwrap();
+        let font = Font::new(face, 16.0);
+        let features = [Feature {
+            tag: *b"test",
+            value: 1,
+        }];
+
+        let mut buf = Buffer::new();
+        buf.push_str("A");
+        let out = shape(&font, &buf, &features).unwrap();
+        assert!(out.glyphs.len() > 256);
+        assert!(out.glyphs.len() <= MAX_LEN_MIN);
+        assert!(out.glyphs.iter().all(|g| g.glyph_id == 1 && g.cluster == 0));
+
+        // One lookup stays inside the cap and applies in full.
+        let data = build_shapeable_font_with_gsub(&lookups[..1], &[0]);
+        let blob = Blob::new(&data);
+        let face = Face::parse(&blob, 0).unwrap();
+        let font = Font::new(face, 16.0);
+        let out = shape(&font, &buf, &features).unwrap();
+        assert_eq!(out.glyphs.len(), 256);
+    }
+
+    #[test]
+    fn standalone_feature_growth_is_capped_per_source_byte() {
+        // The `ot` pre-shapers apply features one call at a time, so
+        // each call gets a fresh budget. The cap on those calls follows
+        // the cluster span and cannot compound: twelve doubling lookups
+        // leave one character at 64 glyphs, not 4096.
+        let lookups: Vec<(u16, Vec<u8>)> = (0..12).map(|_| (2, repeat_a_subtable(2))).collect();
+        let feature_indices: Vec<u16> = (0..12).collect();
+        let data = build_shapeable_font_with_gsub(&lookups, &feature_indices);
+        let blob = Blob::new(&data);
+        let face = Face::parse(&blob, 0).unwrap();
+        let gsub = face.gsub().unwrap().expect("GSUB");
+
+        let mut glyphs = alloc::vec![Glyph::new(1, 0)];
+        apply_gsub_feature_in_scripts(&gsub, &mut glyphs, None, *b"test", 0, &[*b"DFLT"]);
+        assert_eq!(glyphs.len(), MAX_LEN_FACTOR);
+        for _ in 0..2 {
+            apply_gsub_feature_in_scripts(&gsub, &mut glyphs, None, *b"test", 0, &[*b"DFLT"]);
+        }
+        assert_eq!(glyphs.len(), MAX_LEN_FACTOR);
+    }
+
+    /// Multiple substitution format 1 that maps glyph 1 to `count`
+    /// copies of itself.
+    fn repeat_a_subtable(count: u16) -> Vec<u8> {
+        let mut mult = Vec::new();
+        mult.extend_from_slice(&1u16.to_be_bytes()); // format
+        let cov_off = 8 + 2 + 2 * count;
+        mult.extend_from_slice(&cov_off.to_be_bytes()); // coverage offset
+        mult.extend_from_slice(&1u16.to_be_bytes()); // sequence count
+        mult.extend_from_slice(&8u16.to_be_bytes()); // sequence offset
+        mult.extend_from_slice(&count.to_be_bytes()); // glyph count
+        for _ in 0..count {
+            mult.extend_from_slice(&1u16.to_be_bytes());
+        }
+        mult.extend_from_slice(&build_cov_fmt1(&[1]));
+        mult
+    }
+
+    #[test]
+    fn remap_segments_follows_morx_origins() {
+        let segments = [
+            ProcessedSegment {
+                range: 0..2,
+                script_priority: DFLT_TEST,
+            },
+            ProcessedSegment {
+                range: 2..3,
+                script_priority: ARAB_TEST,
+            },
+        ];
+        // Glyphs 0 and 1 ligate. An inserted glyph follows the
+        // Arabic one.
+        let remapped = remap_segments(&segments, &[0, 2, usize::MAX]);
+        assert_eq!(remapped.len(), 2);
+        assert_eq!(remapped[0].range, 0..1);
+        assert_eq!(remapped[0].script_priority, DFLT_TEST);
+        assert_eq!(remapped[1].range, 1..3);
+        assert_eq!(remapped[1].script_priority, ARAB_TEST);
+
+        assert!(remap_segments(&[], &[0, 1]).is_empty());
+    }
+
+    const DFLT_TEST: &[[u8; 4]] = &[*b"DFLT"];
+    const ARAB_TEST: &[[u8; 4]] = &[*b"arab", *b"DFLT"];
 }
