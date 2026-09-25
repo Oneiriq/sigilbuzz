@@ -104,34 +104,19 @@ impl<'a> Vvar<'a> {
 /// two parsers stay independent if the mapping format ever forks
 /// for one of them.
 fn read_index_map(data: &[u8], start: usize, glyph_id: u16) -> Option<(u16, u16)> {
-    if data.len() < start + 2 {
-        return None;
-    }
-    let format = data[start];
-    let entry_format = data[start + 1];
-    let mut cursor = start + 2;
+    // Slice instead of adding to `start`, so a huge offset cannot
+    // overflow on 32-bit targets.
+    let (&format, rest) = data.get(start..)?.split_first()?;
+    let (&entry_format, rest) = rest.split_first()?;
 
-    let map_count = match format {
+    let (map_count, entries) = match format {
         0 => {
-            if data.len() < cursor + 2 {
-                return None;
-            }
-            let v = u16::from_be_bytes([data[cursor], data[cursor + 1]]) as u32;
-            cursor += 2;
-            v
+            let (count, entries) = rest.split_first_chunk::<2>()?;
+            (u32::from(u16::from_be_bytes(*count)), entries)
         }
         1 => {
-            if data.len() < cursor + 4 {
-                return None;
-            }
-            let v = u32::from_be_bytes([
-                data[cursor],
-                data[cursor + 1],
-                data[cursor + 2],
-                data[cursor + 3],
-            ]);
-            cursor += 4;
-            v
+            let (count, entries) = rest.split_first_chunk::<4>()?;
+            (u32::from_be_bytes(*count), entries)
         }
         _ => return None,
     };
@@ -149,15 +134,11 @@ fn read_index_map(data: &[u8], start: usize, glyph_id: u16) -> Option<(u16, u16)
     } else {
         map_count.saturating_sub(1)
     } as usize;
-    let entry_off = cursor + idx * entry_bytes;
-    if data.len() < entry_off + entry_bytes {
-        return None;
-    }
+    let entry = entries
+        .get(idx.checked_mul(entry_bytes)?..)?
+        .get(..entry_bytes)?;
 
-    let mut raw: u32 = 0;
-    for i in 0..entry_bytes {
-        raw = (raw << 8) | u32::from(data[entry_off + i]);
-    }
+    let raw = entry.iter().fold(0u32, |raw, &b| (raw << 8) | u32::from(b));
     let inner = (raw & inner_mask) as u16;
     let outer = (raw >> inner_bits) as u16;
     Some((outer, inner))
@@ -289,5 +270,14 @@ mod tests {
         let vvar = Vvar::parse(&out).unwrap();
         let d = vvar.top_side_bearing_delta(0, &[1.0]).unwrap();
         assert!((d - 40.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn index_map_offset_near_usize_max_yields_no_mapping() {
+        // `start + 2` used to overflow. On 32-bit targets a u32 map
+        // offset from the font can reach this range.
+        let data = [0u8; 8];
+        assert!(read_index_map(&data, usize::MAX - 1, 0).is_none());
+        assert!(read_index_map(&data, usize::MAX, 0).is_none());
     }
 }
