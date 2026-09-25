@@ -76,14 +76,13 @@ impl<'a> Math<'a> {
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(data);
         let major = r.read_u16()?;
-        let minor = r.read_u16()?;
+        let _minor = r.read_u16()?;
         if major != 1 {
             return Err(Error::Malformed {
                 offset: 0,
                 context: "unsupported MATH major version",
             });
         }
-        let _ = minor;
         let constants_off = r.read_u16()?;
         let glyph_info_off = r.read_u16()?;
         let variants_off = r.read_u16()?;
@@ -177,7 +176,6 @@ const MATH_CONSTANTS_LEN: usize =
 
 /// Indices into the MathValueRecord block (relative to
 /// [`FIRST_VALUE_RECORD`]). Order matches the OpenType MATH spec.
-#[allow(missing_docs)]
 mod c_idx {
     pub const MATH_LEADING: usize = 0;
     pub const AXIS_HEIGHT: usize = 1;
