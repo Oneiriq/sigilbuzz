@@ -470,7 +470,9 @@ fn decode_tuple_values_in_reader(r: &mut Reader<'_>, count: usize) -> Option<Vec
     let start = r.position();
     let remaining = r.remaining();
     let buf = r.peek_bytes(remaining).ok()?;
-    let mut out: Vec<i32> = Vec::with_capacity(count);
+    // One control byte yields at most 64 values, so reserve no more
+    // than the remaining bytes can encode.
+    let mut out: Vec<i32> = Vec::with_capacity(count.min(buf.len().saturating_mul(64)));
     let mut i = 0usize;
     while out.len() < count {
         if i >= buf.len() {
