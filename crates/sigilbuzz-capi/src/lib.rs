@@ -36,15 +36,18 @@
 //!
 //! Every transmute is contained inside this crate; no `unsafe`
 //! reaches the public Rust surface.
+//!
+//! # Null pointers and panics
+//!
+//! Every entry point accepts NULL for its object arguments and
+//! returns a neutral value (an empty object, 0, or NULL) instead of
+//! dereferencing it, as HarfBuzz does. No panic can unwind into C:
+//! Rust 1.81, the minimum supported version, aborts the process when
+//! a panic reaches an `extern "C"` function.
 
+// The exported names follow HarfBuzz (`hb_blob_t`, `hb_shape`), not
+// Rust naming conventions.
 #![allow(non_camel_case_types, non_snake_case)]
-#![allow(missing_docs)]
-#![allow(clippy::missing_safety_doc)]
-// `_face`-prefixed inner-struct fields are referenced from a few
-// non-FFI helper sites for lifetime-rooted borrows. The leading
-// underscore on the field is a documentation cue ("not for direct
-// public access"), not a "truly unused" marker.
-#![allow(clippy::used_underscore_binding)]
 
 extern crate alloc;
 
@@ -97,26 +100,12 @@ pub(crate) struct BlobInner {
     user_data: *mut c_void,
 }
 
-impl BlobInner {
-    /// Internal: build a `BlobInner` around bytes the bridge layer
-    /// already has in an `Arc`. No destroy callback: the bridge
-    /// owns the bytes outright. Only the `subset` cargo feature
-    /// references this helper today; gate to silence dead-code
-    /// warnings when the feature is off.
-    #[cfg(feature = "subset")]
-    pub(crate) fn from_data(data: Arc<Vec<u8>>) -> Self {
-        Self {
-            data,
-            user_destroy: None,
-            user_data: ptr::null_mut(),
-        }
-    }
-}
-
 // SAFETY: BlobInner does not access `user_data` itself. It only
 // hands the pointer back to `user_destroy`. The HarfBuzz contract
 // puts the burden of synchronization on the consumer; we mirror it.
 unsafe impl Send for BlobInner {}
+// SAFETY: see the `Send` impl above. No `&BlobInner` method reads or
+// writes through `user_data`.
 unsafe impl Sync for BlobInner {}
 
 impl Drop for BlobInner {
@@ -132,28 +121,23 @@ impl Drop for BlobInner {
     }
 }
 
+/// Opaque, refcounted handle to a byte buffer, usually font data.
+/// Mirrors HarfBuzz's `hb_blob_t`.
 #[repr(C)]
 pub struct hb_blob_t {
     pub(crate) inner: Arc<BlobInner>,
-}
-
-impl hb_blob_t {
-    /// Internal: build the public wrapper around an existing
-    /// `BlobInner` Arc. Only the `subset` cargo feature uses this
-    /// helper today.
-    #[cfg(feature = "subset")]
-    pub(crate) fn from_inner(inner: Arc<BlobInner>) -> Self {
-        Self { inner }
-    }
 }
 
 /// The face is a parsed SFNT directory plus the bytes it borrows
 /// from. The `Face<'static>` is a lie: its borrow is actually
 /// rooted in `_data`'s payload, which lives at least as long as the
 /// FaceInner. See the module-level lifetime erasure note.
+///
+/// Fields drop in declaration order, so `face` goes before the bytes
+/// it borrows.
 pub(crate) struct FaceInner {
-    _data: Arc<Vec<u8>>,
     pub(crate) face: Face<'static>,
+    _data: Arc<Vec<u8>>,
 }
 
 impl FaceInner {
@@ -165,7 +149,7 @@ impl FaceInner {
     /// uses this constructor today.
     #[cfg(feature = "subset")]
     pub(crate) fn from_arc(data: Arc<Vec<u8>>, face: Face<'static>) -> Self {
-        Self { _data: data, face }
+        Self { face, _data: data }
     }
 }
 
@@ -175,8 +159,12 @@ impl FaceInner {
 // no thread observes the face after `_data` drops (which can't
 // happen because they're held in the same struct), the bound holds.
 unsafe impl Send for FaceInner {}
+// SAFETY: see the `Send` impl above. Shared access only reads the
+// immutable face and bytes.
 unsafe impl Sync for FaceInner {}
 
+/// Opaque, refcounted handle to a parsed font face. Mirrors
+/// HarfBuzz's `hb_face_t`.
 #[repr(C)]
 pub struct hb_face_t {
     pub(crate) inner: Arc<FaceInner>,
@@ -199,33 +187,37 @@ impl hb_face_t {
 /// expose the same surface. Most callers configure the font once
 /// before shaping, so contention is negligible.
 pub(crate) struct FontInner {
-    // `_face` is the lifetime root for `state.font` (which holds a
-    // `Font<'static>` borrowed from this Arc, see SAFETY note below).
-    // The leading underscore signals "not for direct access" but a
-    // few internal call sites still need to read it; those are
-    // covered by the module-level `used_underscore_binding` allow.
-    pub(crate) _face: Arc<FaceInner>,
     pub(crate) state: spin_mutex::SpinMutex<FontState>,
+    /// Lifetime root for `state.font`, which holds a `Font<'static>`
+    /// borrowed from this Arc (see the SAFETY note below). Declared
+    /// after `state` so the font drops before the face.
+    pub(crate) face: Arc<FaceInner>,
 }
 
 struct FontState {
-    /// Mirror of `Font::size()`. We keep the Font in sync via
-    /// `Font::with_size`/`with_coords` after every setter.
+    /// Mirror of `Font::size()`. Every setter rebuilds `font` from
+    /// these fields through `build_font`.
     x_scale: i32,
     y_scale: i32,
     x_ppem: c_uint,
     y_ppem: c_uint,
+    /// Declared before `coords` so it drops before the slice it
+    /// borrows.
+    font: Font<'static>,
     /// Owned coords. `font` borrows these; mutating the vec
     /// invalidates the borrow, so any setter rebuilds the font.
     coords: Vec<f32>,
-    font: Font<'static>,
 }
 
 // SAFETY: Font<'_> is Clone + Send + Sync; the lifetime erasure is
-// rooted in `_face._data`. See FaceInner SAFETY note.
+// rooted in `face._data`. See FaceInner SAFETY note.
 unsafe impl Send for FontInner {}
+// SAFETY: see the `Send` impl above. The mutable state sits behind
+// `SpinMutex`, which serializes access.
 unsafe impl Sync for FontInner {}
 
+/// Opaque, refcounted handle to a face bound to a scale and
+/// variation coordinates. Mirrors HarfBuzz's `hb_font_t`.
 #[repr(C)]
 pub struct hb_font_t {
     pub(crate) inner: Arc<FontInner>,
@@ -249,23 +241,23 @@ struct BufferState {
     /// `hb_buffer_reset`, or `hb_buffer_clear_contents`.
     glyph_infos: Vec<hb_glyph_info_t>,
     glyph_positions: Vec<hb_glyph_position_t>,
-    /// True once `hb_buffer_set_*` or `_guess_segment_properties`
-    /// have populated direction/script/language. Until then
-    /// guess_segment_properties has work to do.
-    props_set: bool,
 }
 
+/// Opaque, refcounted shaping buffer: text in, glyphs out. Mirrors
+/// HarfBuzz's `hb_buffer_t`.
 #[repr(C)]
 pub struct hb_buffer_t {
     inner: Arc<BufferInner>,
 }
 
 // SAFETY: `BufferState` carries a `*const c_char` (`language`) that
-// is a pointer into the leaked language-intern table. Those strings
-// live for the process lifetime and are immutable, so the pointer
-// is `Send + Sync` for all observable purposes. The other fields
-// (Buffer, Vec<...>) are already Send + Sync.
+// is only stored and compared, never dereferenced by this crate. The
+// pointers this crate hands out point into the leaked language
+// intern table, which lives for the process lifetime. The other
+// fields (Buffer, Vec<...>) are already Send + Sync.
 unsafe impl Send for BufferInner {}
+// SAFETY: see the `Send` impl above. The state sits behind
+// `SpinMutex`, which serializes access.
 unsafe impl Sync for BufferInner {}
 
 // ---------------------------------------------------------------------------
@@ -285,9 +277,12 @@ mod spin_mutex {
         inner: UnsafeCell<T>,
     }
 
-    // SAFETY: SpinMutex serializes access to `inner`; the AtomicBool
-    // is the only cross-thread observable.
+    // SAFETY: SpinMutex owns its `T`, so moving it to another thread
+    // moves the `T`, which is fine for `T: Send`.
     unsafe impl<T: Send> Send for SpinMutex<T> {}
+    // SAFETY: SpinMutex serializes access to `inner`; the AtomicBool
+    // is the only cross-thread observable. As with `std::sync::Mutex`,
+    // handing out `&mut T` on another thread only needs `T: Send`.
     unsafe impl<T: Send> Sync for SpinMutex<T> {}
 
     impl<T> SpinMutex<T> {
@@ -317,14 +312,17 @@ mod spin_mutex {
     impl<T> Deref for SpinGuard<'_, T> {
         type Target = T;
         fn deref(&self) -> &T {
-            // SAFETY: lock() is held for the lifetime of the guard.
+            // SAFETY: the guard exists only while `locked` is true and
+            // this guard set it, so no other reference to `inner` is
+            // live. The returned borrow cannot outlive the guard.
             unsafe { &*self.mutex.inner.get() }
         }
     }
 
     impl<T> DerefMut for SpinGuard<'_, T> {
         fn deref_mut(&mut self) -> &mut T {
-            // SAFETY: lock() is held for the lifetime of the guard.
+            // SAFETY: as in `deref`. `&mut self` also rules out a
+            // second borrow through this same guard.
             unsafe { &mut *self.mutex.inner.get() }
         }
     }
@@ -364,38 +362,64 @@ pub type hb_destroy_func_t = unsafe extern "C" fn(*mut c_void);
 /// that matters from the C side is whether to invoke the destroy
 /// callback (which fires for any non-WRITABLE mode that has one).
 pub type hb_memory_mode_t = c_uint;
+/// The library copies the bytes. HarfBuzz value 0.
 pub const HB_MEMORY_MODE_DUPLICATE: hb_memory_mode_t = 0;
+/// The caller's bytes are read-only. HarfBuzz value 1.
 pub const HB_MEMORY_MODE_READONLY: hb_memory_mode_t = 1;
+/// The caller's bytes may be written in place. HarfBuzz value 2.
 pub const HB_MEMORY_MODE_WRITABLE: hb_memory_mode_t = 2;
+/// Read-only bytes that the library may copy to write. HarfBuzz
+/// value 3.
 pub const HB_MEMORY_MODE_READONLY_MAY_MAKE_WRITABLE: hb_memory_mode_t = 3;
 
 /// HarfBuzz direction enum. Values match `hb-common.h` exactly:
 /// LTR=4, RTL=5, TTB=6, BTT=7, INVALID=0.
 pub type hb_direction_t = c_uint;
+/// Direction not set.
 pub const HB_DIRECTION_INVALID: hb_direction_t = 0;
+/// Left to right.
 pub const HB_DIRECTION_LTR: hb_direction_t = 4;
+/// Right to left.
 pub const HB_DIRECTION_RTL: hb_direction_t = 5;
+/// Top to bottom.
 pub const HB_DIRECTION_TTB: hb_direction_t = 6;
+/// Bottom to top.
 pub const HB_DIRECTION_BTT: hb_direction_t = 7;
 
 /// HarfBuzz script enum: alias for `hb_tag_t`, value is the
 /// ISO 15924 four-letter code packed via HB_TAG.
 pub type hb_script_t = hb_tag_t;
+/// Script not set.
 pub const HB_SCRIPT_INVALID: hb_script_t = 0;
+/// ISO 15924 `Zyyy`, characters shared by many scripts.
 pub const HB_SCRIPT_COMMON: hb_script_t = tag(b"Zyyy");
+/// ISO 15924 `Zinh`, marks that take the script of their base.
 pub const HB_SCRIPT_INHERITED: hb_script_t = tag(b"Zinh");
+/// ISO 15924 `Latn`.
 pub const HB_SCRIPT_LATIN: hb_script_t = tag(b"Latn");
+/// ISO 15924 `Grek`.
 pub const HB_SCRIPT_GREEK: hb_script_t = tag(b"Grek");
+/// ISO 15924 `Cyrl`.
 pub const HB_SCRIPT_CYRILLIC: hb_script_t = tag(b"Cyrl");
+/// ISO 15924 `Arab`.
 pub const HB_SCRIPT_ARABIC: hb_script_t = tag(b"Arab");
+/// ISO 15924 `Hebr`.
 pub const HB_SCRIPT_HEBREW: hb_script_t = tag(b"Hebr");
+/// ISO 15924 `Deva`.
 pub const HB_SCRIPT_DEVANAGARI: hb_script_t = tag(b"Deva");
+/// ISO 15924 `Beng`.
 pub const HB_SCRIPT_BENGALI: hb_script_t = tag(b"Beng");
+/// ISO 15924 `Hani`.
 pub const HB_SCRIPT_HAN: hb_script_t = tag(b"Hani");
+/// ISO 15924 `Hang`.
 pub const HB_SCRIPT_HANGUL: hb_script_t = tag(b"Hang");
+/// ISO 15924 `Khmr`.
 pub const HB_SCRIPT_KHMER: hb_script_t = tag(b"Khmr");
+/// ISO 15924 `Mymr`.
 pub const HB_SCRIPT_MYANMAR: hb_script_t = tag(b"Mymr");
+/// ISO 15924 `Thai`.
 pub const HB_SCRIPT_THAI: hb_script_t = tag(b"Thai");
+/// ISO 15924 `Laoo`.
 pub const HB_SCRIPT_LAO: hb_script_t = tag(b"Laoo");
 
 /// Languages are interned `&'static str` pointers. We hand back a
@@ -414,10 +438,15 @@ const fn tag(s: &[u8; 4]) -> hb_tag_t {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct hb_glyph_info_t {
+    /// Before shaping, a Unicode codepoint. After shaping, a glyph id.
     pub codepoint: hb_codepoint_t,
+    /// Glyph flags. Always 0 in this implementation.
     pub mask: hb_mask_t,
+    /// Index of the input cluster this glyph belongs to.
     pub cluster: u32,
+    /// Private slot, kept for layout compatibility. Always 0.
     pub var1: u32,
+    /// Private slot, kept for layout compatibility. Always 0.
     pub var2: u32,
 }
 
@@ -426,10 +455,15 @@ pub struct hb_glyph_info_t {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct hb_glyph_position_t {
+    /// Horizontal pen advance after this glyph.
     pub x_advance: hb_position_t,
+    /// Vertical pen advance after this glyph.
     pub y_advance: hb_position_t,
+    /// Horizontal offset of the glyph from the pen position.
     pub x_offset: hb_position_t,
+    /// Vertical offset of the glyph from the pen position.
     pub y_offset: hb_position_t,
+    /// Private slot, kept for layout compatibility. Always 0.
     pub var: u32,
 }
 
@@ -437,9 +471,16 @@ pub struct hb_glyph_position_t {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct hb_feature_t {
+    /// OpenType feature tag, such as `liga`.
     pub tag: hb_tag_t,
+    /// Feature value. 0 turns the feature off, 1 turns it on, and
+    /// larger values pick an alternate.
     pub value: u32,
+    /// First cluster the override applies to. Not used by this
+    /// implementation, which applies overrides to the whole buffer.
     pub start: c_uint,
+    /// One past the last cluster the override applies to. Not used
+    /// by this implementation.
     pub end: c_uint,
 }
 
@@ -447,7 +488,9 @@ pub struct hb_feature_t {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct hb_variation_t {
+    /// Axis tag, such as `wght`.
     pub tag: hb_tag_t,
+    /// Axis value in user-space units.
     pub value: f32,
 }
 
@@ -482,7 +525,9 @@ pub unsafe extern "C" fn hb_blob_create(
     if length == 0 || data.is_null() {
         return empty_blob();
     }
-    // SAFETY: caller asserts (data, length) is a valid byte range.
+    // SAFETY: `data` is non-null and the caller guarantees it points
+    // to `length` readable bytes that stay valid for this call. The
+    // bytes are copied before returning.
     let bytes = unsafe { slice::from_raw_parts(data.cast::<u8>(), length as usize) };
     let owned = bytes.to_vec();
     let inner = Arc::new(BlobInner {
@@ -501,7 +546,8 @@ pub unsafe extern "C" fn hb_blob_create_from_file(file_name: *const c_char) -> *
     if file_name.is_null() {
         return empty_blob();
     }
-    // SAFETY: caller asserts NUL-terminated.
+    // SAFETY: `file_name` is non-null and the caller guarantees it
+    // points to a NUL-terminated string.
     let path_cstr = unsafe { core::ffi::CStr::from_ptr(file_name) };
     let Ok(path_str) = path_cstr.to_str() else {
         return empty_blob();
@@ -509,6 +555,12 @@ pub unsafe extern "C" fn hb_blob_create_from_file(file_name: *const c_char) -> *
     let Ok(bytes) = std::fs::read(path_str) else {
         return empty_blob();
     };
+    // Blob lengths cross the C boundary as `unsigned int`. Refuse a
+    // file whose length would not fit rather than report a truncated
+    // length.
+    if c_uint::try_from(bytes.len()).is_err() {
+        return empty_blob();
+    }
     let inner = Arc::new(BlobInner {
         data: Arc::new(bytes),
         user_destroy: None,
@@ -525,25 +577,27 @@ pub unsafe extern "C" fn hb_blob_destroy(blob: *mut hb_blob_t) {
     if blob.is_null() {
         return;
     }
-    // SAFETY: caller-asserted non-null pointer originally from
-    // Box::into_raw. Reclaim and drop.
+    // SAFETY: `blob` is non-null and the caller guarantees it came
+    // from `Box::into_raw` in an `hb_blob_*` constructor and has not
+    // been destroyed yet, so reclaiming the box is sound.
     drop(unsafe { Box::from_raw(blob) });
 }
 
 /// # Safety
-/// `blob` must be a valid `hb_blob_t*`.
+/// `blob` must be null or a valid `hb_blob_t*`.
 #[no_mangle]
 pub unsafe extern "C" fn hb_blob_reference(blob: *mut hb_blob_t) -> *mut hb_blob_t {
     if blob.is_null() {
         return empty_blob();
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `blob` is non-null and the caller guarantees it points
+    // to a live `hb_blob_t`.
     let inner = unsafe { (*blob).inner.clone() };
     Box::into_raw(Box::new(hb_blob_t { inner }))
 }
 
 /// # Safety
-/// `blob` must be valid; `length` may be null.
+/// `blob` must be null or valid; `length` may be null.
 #[no_mangle]
 pub unsafe extern "C" fn hb_blob_get_data(
     blob: *mut hb_blob_t,
@@ -551,29 +605,33 @@ pub unsafe extern "C" fn hb_blob_get_data(
 ) -> *const c_char {
     if blob.is_null() {
         if !length.is_null() {
-            // SAFETY: caller asserts length is writeable.
+            // SAFETY: `length` is non-null and the caller guarantees
+            // it points to a writable `unsigned int`.
             unsafe { *length = 0 };
         }
         return ptr::null();
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `blob` is non-null and the caller guarantees it points
+    // to a live `hb_blob_t`.
     let inner: &Arc<BlobInner> = unsafe { &(*blob).inner };
     let bytes: &[u8] = inner.data.as_slice();
     if !length.is_null() {
-        // SAFETY: caller asserts length is writeable.
+        // SAFETY: `length` is non-null and the caller guarantees it
+        // points to a writable `unsigned int`.
         unsafe { *length = bytes.len() as c_uint };
     }
     bytes.as_ptr().cast::<c_char>()
 }
 
 /// # Safety
-/// `blob` must be valid.
+/// `blob` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_blob_get_length(blob: *mut hb_blob_t) -> c_uint {
     if blob.is_null() {
         return 0;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `blob` is non-null and the caller guarantees it points
+    // to a live `hb_blob_t`.
     let inner: &Arc<BlobInner> = unsafe { &(*blob).inner };
     inner.data.len() as c_uint
 }
@@ -582,59 +640,60 @@ pub unsafe extern "C" fn hb_blob_get_length(blob: *mut hb_blob_t) -> c_uint {
 // Face
 // ---------------------------------------------------------------------------
 
-fn empty_face() -> *mut hb_face_t {
-    let data = Arc::new(Vec::new());
-    // An empty face cannot be constructed via `Face::parse_bytes`.
-    // Forge one by parsing a four-byte zero header and accepting
-    // the error; emit a placeholder FaceInner whose face is a
-    // throwaway. We never expose the internal face when num_tables
-    // is queried because the `inner.face.num_tables() == 0` branch
-    // always answers truthfully.
-    //
-    // The cleanest path is to lean on the same byte buffer as the
-    // empty blob: parse a synthetic minimal header.
+/// Builds the payload of an empty face: a TrueType header with zero
+/// tables. Every table lookup on it misses. Returns `None` only if
+/// the core parser rejects that header.
+fn empty_face_inner() -> Option<Arc<FaceInner>> {
     static EMPTY_SFNT: [u8; 12] = [
         0x00, 0x01, 0x00, 0x00, // sfntVersion = TrueType
         0x00, 0x00, // numTables = 0
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // searchRange/entrySelector/rangeShift
     ];
-    let face = match Face::parse_bytes(&EMPTY_SFNT, 0) {
-        Ok(f) => f,
-        Err(_) => unreachable!("synthetic empty SFNT must parse"),
-    };
-    // Lifetime-erase: the synthetic header is `'static`, so the
-    // transmute is a no-op (it's already 'static).
-    let face: Face<'static> = face;
-    let inner = Arc::new(FaceInner { _data: data, face });
-    Box::into_raw(Box::new(hb_face_t { inner }))
+    // The header is a `static`, so the parsed face is already
+    // `'static` and needs no lifetime erasure.
+    let face: Face<'static> = Face::parse_bytes(&EMPTY_SFNT, 0).ok()?;
+    Some(Arc::new(FaceInner {
+        face,
+        _data: Arc::new(Vec::new()),
+    }))
+}
+
+/// Returns a new handle to an empty face, the neutral result for a
+/// null or unparsable input. Falls back to NULL, which every entry
+/// point accepts, if the empty face cannot be built.
+fn empty_face() -> *mut hb_face_t {
+    empty_face_inner().map_or(ptr::null_mut(), |inner| {
+        Box::into_raw(Box::new(hb_face_t { inner }))
+    })
 }
 
 /// Constructs a face from the bytes in `blob` at index `index`.
 ///
 /// # Safety
-/// `blob` must be valid.
+/// `blob` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_face_create(blob: *mut hb_blob_t, index: c_uint) -> *mut hb_face_t {
     if blob.is_null() {
         return empty_face();
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `blob` is non-null and the caller guarantees it points
+    // to a live `hb_blob_t`.
     let blob_inner = unsafe { (*blob).inner.clone() };
     let bytes_arc: Arc<Vec<u8>> = blob_inner.data.clone();
     let bytes_slice: &[u8] = bytes_arc.as_slice();
-    // Parse with the slice's natural lifetime, then transmute to
-    // 'static. SAFETY: the Arc clone we hold in FaceInner pins the
-    // bytes for the lifetime of the FaceInner; the transmute only
-    // erases a borrow that is in fact rooted in heap-stable storage.
     let face = match Face::parse_bytes(bytes_slice, index) {
         Ok(f) => f,
         Err(_) => return empty_face(),
     };
+    // SAFETY: `face` borrows the heap buffer behind `bytes_arc`. The
+    // FaceInner built below owns a clone of that Arc, so the buffer
+    // does not move or drop while the face exists, and `face` drops
+    // first because of the field order in `FaceInner`.
     let face_static: Face<'static> =
         unsafe { core::mem::transmute::<Face<'_>, Face<'static>>(face) };
     let inner = Arc::new(FaceInner {
-        _data: bytes_arc,
         face: face_static,
+        _data: bytes_arc,
     });
     Box::into_raw(Box::new(hb_face_t { inner }))
 }
@@ -646,30 +705,34 @@ pub unsafe extern "C" fn hb_face_destroy(face: *mut hb_face_t) {
     if face.is_null() {
         return;
     }
-    // SAFETY: caller-asserted.
+    // SAFETY: `face` is non-null and the caller guarantees it came
+    // from `Box::into_raw` in an `hb_face_*` constructor and has not
+    // been destroyed yet.
     drop(unsafe { Box::from_raw(face) });
 }
 
 /// # Safety
-/// `face` must be valid.
+/// `face` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_face_reference(face: *mut hb_face_t) -> *mut hb_face_t {
     if face.is_null() {
         return empty_face();
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `face` is non-null and the caller guarantees it points
+    // to a live `hb_face_t`.
     let inner = unsafe { (*face).inner.clone() };
     Box::into_raw(Box::new(hb_face_t { inner }))
 }
 
 /// # Safety
-/// `face` must be valid.
+/// `face` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_face_get_glyph_count(face: *mut hb_face_t) -> c_uint {
     if face.is_null() {
         return 0;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `face` is non-null and the caller guarantees it points
+    // to a live `hb_face_t`.
     let inner: &Arc<FaceInner> = unsafe { &(*face).inner };
     inner
         .face
@@ -679,13 +742,14 @@ pub unsafe extern "C" fn hb_face_get_glyph_count(face: *mut hb_face_t) -> c_uint
 }
 
 /// # Safety
-/// `face` must be valid.
+/// `face` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_face_get_upem(face: *mut hb_face_t) -> c_uint {
     if face.is_null() {
         return 0;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `face` is non-null and the caller guarantees it points
+    // to a live `hb_face_t`.
     let inner: &Arc<FaceInner> = unsafe { &(*face).inner };
     inner
         .face
@@ -699,23 +763,20 @@ pub unsafe extern "C" fn hb_face_get_upem(face: *mut hb_face_t) -> c_uint {
 // ---------------------------------------------------------------------------
 
 /// Internal: build the FontState's Font from coords and size.
-fn build_font(
-    face_inner: &Arc<FaceInner>,
-    x_scale: i32,
-    _y_scale: i32,
-    coords: &[f32],
-) -> Font<'static> {
-    // sigilbuzz Font carries a single size; mirror x_scale into it.
-    // y_scale is preserved for hb_font_get_scale round-tripping.
+/// sigilbuzz's `Font` carries a single size, so `x_scale` feeds it.
+///
+/// # Safety
+/// `coords` must stay alive and in place for as long as the returned
+/// font is used. Callers pass `FontState::coords` (or an empty slice)
+/// and store the result in `FontState::font`, which drops first.
+unsafe fn build_font(face_inner: &Arc<FaceInner>, x_scale: i32, coords: &[f32]) -> Font<'static> {
     let face = face_inner.face.clone();
     let font = Font::new(face, x_scale as f32);
     if coords.is_empty() {
         font
     } else {
-        // SAFETY: `coords` lives in the FontState alongside this
-        // Font; the FontState owns both, so the borrow holds for
-        // the same lifetime as the Font<'static> lie itself:
-        // both are rooted in the FontInner's heap allocation.
+        // SAFETY: the caller keeps `coords` alive and unmoved for the
+        // lifetime of the returned font. See this function's contract.
         let coords_static: &'static [f32] =
             unsafe { core::mem::transmute::<&[f32], &'static [f32]>(coords) };
         font.with_coords(coords_static)
@@ -723,40 +784,25 @@ fn build_font(
 }
 
 /// # Safety
-/// `face` must be valid.
+/// `face` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_font_create(face: *mut hb_face_t) -> *mut hb_font_t {
-    if face.is_null() {
+    let face_inner = if face.is_null() {
         // Build an empty font around the empty face. Callers that
         // shape against this get an empty buffer back.
-        let face_ptr = empty_face();
-        // SAFETY: face_ptr was just constructed.
-        let face_inner = unsafe { (*face_ptr).inner.clone() };
-        // SAFETY: face_ptr was just Box::into_raw'd.
-        unsafe { hb_face_destroy(face_ptr) };
-        // upem fallback for empty face is 0; default to 1000.
-        let x_scale = 1000;
-        let y_scale = 1000;
-        let coords: Vec<f32> = Vec::new();
-        let font = build_font(&face_inner, x_scale, y_scale, &coords);
-        let state = FontState {
-            x_scale,
-            y_scale,
-            x_ppem: 0,
-            y_ppem: 0,
-            coords,
-            font,
+        let Some(inner) = empty_face_inner() else {
+            return ptr::null_mut();
         };
-        let inner = Arc::new(FontInner {
-            _face: face_inner,
-            state: spin_mutex::SpinMutex::new(state),
-        });
-        return Box::into_raw(Box::new(hb_font_t { inner }));
-    }
-    // SAFETY: caller asserts validity.
-    let face_inner = unsafe { (*face).inner.clone() };
+        inner
+    } else {
+        // SAFETY: `face` is non-null and the caller guarantees it
+        // points to a live `hb_face_t`.
+        unsafe { (*face).inner.clone() }
+    };
     // Default x_scale / y_scale follow HarfBuzz: they default to
-    // upem so an unscaled font produces design-unit output.
+    // upem so an unscaled font produces design-unit output. A face
+    // without a readable `head` table, such as the empty face, gets
+    // 1000.
     let upem_signed = i32::from(
         face_inner
             .face
@@ -764,19 +810,19 @@ pub unsafe extern "C" fn hb_font_create(face: *mut hb_face_t) -> *mut hb_font_t 
             .map(|h| h.units_per_em)
             .unwrap_or(1000),
     );
-    let coords: Vec<f32> = Vec::new();
-    let font = build_font(&face_inner, upem_signed, upem_signed, &coords);
+    // SAFETY: an empty coords slice is never borrowed by the font.
+    let font = unsafe { build_font(&face_inner, upem_signed, &[]) };
     let state = FontState {
         x_scale: upem_signed,
         y_scale: upem_signed,
         x_ppem: 0,
         y_ppem: 0,
-        coords,
         font,
+        coords: Vec::new(),
     };
     let inner = Arc::new(FontInner {
-        _face: face_inner,
         state: spin_mutex::SpinMutex::new(state),
+        face: face_inner,
     });
     Box::into_raw(Box::new(hb_font_t { inner }))
 }
@@ -788,46 +834,46 @@ pub unsafe extern "C" fn hb_font_destroy(font: *mut hb_font_t) {
     if font.is_null() {
         return;
     }
-    // SAFETY: caller-asserted.
+    // SAFETY: `font` is non-null and the caller guarantees it came
+    // from `Box::into_raw` in an `hb_font_*` constructor and has not
+    // been destroyed yet.
     drop(unsafe { Box::from_raw(font) });
 }
 
 /// # Safety
-/// `font` must be valid.
+/// `font` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_font_reference(font: *mut hb_font_t) -> *mut hb_font_t {
     if font.is_null() {
         return ptr::null_mut();
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `font` is non-null and the caller guarantees it points
+    // to a live `hb_font_t`.
     let inner = unsafe { (*font).inner.clone() };
     Box::into_raw(Box::new(hb_font_t { inner }))
 }
 
 /// # Safety
-/// `font` must be valid.
+/// `font` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_font_set_scale(font: *mut hb_font_t, x_scale: c_int, y_scale: c_int) {
     if font.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `font` is non-null and the caller guarantees it points
+    // to a live `hb_font_t`.
     let inner = unsafe { &(*font).inner };
     let mut state = inner.state.lock();
     state.x_scale = x_scale;
     state.y_scale = y_scale;
-    // Rebuild Font borrowing from the canonical `state.coords`. See
-    // `hb_font_set_variations` for the partial-borrow rationale.
-    let coords_ptr: *const [f32] = core::ptr::from_ref::<[f32]>(state.coords.as_slice());
-    // SAFETY: `state.coords` is heap-pinned for the duration of the
-    // lock; the raw pointer is solely used to bypass Rust's
-    // partial-borrow check on disjoint fields.
-    let coords_ref: &[f32] = unsafe { &*coords_ptr };
-    state.font = build_font(&inner._face, x_scale, y_scale, coords_ref);
+    // SAFETY: the new font borrows `state.coords`, which is not
+    // touched again until a later setter rebuilds the font. The font
+    // is stored next to the coords and drops before them.
+    state.font = unsafe { build_font(&inner.face, x_scale, &state.coords) };
 }
 
 /// # Safety
-/// `font` must be valid; `x_scale`/`y_scale` may be null.
+/// `font` must be null or valid; `x_scale`/`y_scale` may be null.
 #[no_mangle]
 pub unsafe extern "C" fn hb_font_get_scale(
     font: *mut hb_font_t,
@@ -837,27 +883,31 @@ pub unsafe extern "C" fn hb_font_get_scale(
     if font.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `font` is non-null and the caller guarantees it points
+    // to a live `hb_font_t`.
     let inner = unsafe { &(*font).inner };
     let state = inner.state.lock();
     if !x_scale.is_null() {
-        // SAFETY: caller asserts writeable.
+        // SAFETY: `x_scale` is non-null and the caller guarantees it
+        // points to a writable `int`.
         unsafe { *x_scale = state.x_scale };
     }
     if !y_scale.is_null() {
-        // SAFETY: caller asserts writeable.
+        // SAFETY: `y_scale` is non-null and the caller guarantees it
+        // points to a writable `int`.
         unsafe { *y_scale = state.y_scale };
     }
 }
 
 /// # Safety
-/// `font` must be valid.
+/// `font` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_font_set_ppem(font: *mut hb_font_t, x_ppem: c_uint, y_ppem: c_uint) {
     if font.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `font` is non-null and the caller guarantees it points
+    // to a live `hb_font_t`.
     let inner = unsafe { &(*font).inner };
     let mut state = inner.state.lock();
     state.x_ppem = x_ppem;
@@ -865,8 +915,8 @@ pub unsafe extern "C" fn hb_font_set_ppem(font: *mut hb_font_t, x_ppem: c_uint, 
 }
 
 /// # Safety
-/// `font` must be valid; `(variations, length)` must describe a valid
-/// `hb_variation_t[]` slice.
+/// `font` must be null or valid; `(variations, length)` must describe
+/// a valid `hb_variation_t[]` slice when `variations` is non-null.
 #[no_mangle]
 pub unsafe extern "C" fn hb_font_set_variations(
     font: *mut hb_font_t,
@@ -876,18 +926,20 @@ pub unsafe extern "C" fn hb_font_set_variations(
     if font.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `font` is non-null and the caller guarantees it points
+    // to a live `hb_font_t`.
     let inner = unsafe { &(*font).inner };
     let mut state = inner.state.lock();
     let vars: &[hb_variation_t] = if variations.is_null() || variations_length == 0 {
         &[]
     } else {
-        // SAFETY: caller asserts (variations, length) is a valid slice.
+        // SAFETY: `variations` is non-null and the caller guarantees
+        // it points to `variations_length` readable records.
         unsafe { slice::from_raw_parts(variations, variations_length as usize) }
     };
     // Resolve user-space axis values through fvar / avar to
     // normalized coords, the format Font expects.
-    let face = &inner._face.face;
+    let face = &inner.face.face;
     let coords = match (face.fvar(), face.avar()) {
         (Ok(Some(fvar)), avar_res) => {
             // Build a user-space vector: one entry per fvar axis,
@@ -895,14 +947,13 @@ pub unsafe extern "C" fn hb_font_set_variations(
             // `hb_variation_t` whose tag matches.
             let mut user: Vec<f32> = fvar.axes().iter().map(|a| a.default_value).collect();
             for v in vars {
-                if let Some(idx) = fvar
+                let slot = fvar
                     .axes()
                     .iter()
                     .position(|a| u32::from_be_bytes(a.tag) == v.tag)
-                {
-                    if idx < user.len() {
-                        user[idx] = v.value;
-                    }
+                    .and_then(|idx| user.get_mut(idx));
+                if let Some(slot) = slot {
+                    *slot = v.value;
                 }
             }
             let normalised = fvar.normalize_coords(&user);
@@ -913,26 +964,21 @@ pub unsafe extern "C" fn hb_font_set_variations(
         }
         _ => Vec::new(),
     };
+    // `state.font` borrows `state.coords`, so the font must be rebuilt
+    // every time the coords change.
     state.coords = coords;
-    // `state.coords` is now the canonical owner. `state.font` borrows
-    // from it via the transmute inside `build_font`; we must rebuild
-    // `state.font` whenever `state.coords` changes: the realloc
-    // could move the heap allocation and invalidate the borrow.
-    let coords_ptr: *const [f32] = core::ptr::from_ref::<[f32]>(state.coords.as_slice());
-    // SAFETY: `state.coords` is pinned to the FontState's heap
-    // allocation for as long as `state` is locked; we are the sole
-    // mutator. The pointer round-trips through a raw pointer to
-    // sidestep the partial-borrow check: Rust forbids holding
-    // `&state.coords` and `&mut state.font` simultaneously even
-    // though the two fields don't overlap.
-    let coords_ref: &[f32] = unsafe { &*coords_ptr };
-    state.font = build_font(&inner._face, state.x_scale, state.y_scale, coords_ref);
+    // SAFETY: the new font borrows `state.coords`, which is not
+    // touched again until a later setter rebuilds the font. The font
+    // is stored next to the coords and drops before them.
+    state.font = unsafe { build_font(&inner.face, state.x_scale, &state.coords) };
 }
 
 // ---------------------------------------------------------------------------
 // Buffer
 // ---------------------------------------------------------------------------
 
+/// Allocates an empty buffer with refcount 1. Direction, script, and
+/// language start unset.
 #[no_mangle]
 pub extern "C" fn hb_buffer_create() -> *mut hb_buffer_t {
     let state = BufferState {
@@ -942,7 +988,6 @@ pub extern "C" fn hb_buffer_create() -> *mut hb_buffer_t {
         language: ptr::null(),
         glyph_infos: Vec::new(),
         glyph_positions: Vec::new(),
-        props_set: false,
     };
     let inner = Arc::new(BufferInner {
         state: spin_mutex::SpinMutex::new(state),
@@ -957,30 +1002,34 @@ pub unsafe extern "C" fn hb_buffer_destroy(buffer: *mut hb_buffer_t) {
     if buffer.is_null() {
         return;
     }
-    // SAFETY: caller-asserted.
+    // SAFETY: `buffer` is non-null and the caller guarantees it came
+    // from `Box::into_raw` in an `hb_buffer_*` constructor and has not
+    // been destroyed yet.
     drop(unsafe { Box::from_raw(buffer) });
 }
 
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_reference(buffer: *mut hb_buffer_t) -> *mut hb_buffer_t {
     if buffer.is_null() {
         return ptr::null_mut();
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { (*buffer).inner.clone() };
     Box::into_raw(Box::new(hb_buffer_t { inner }))
 }
 
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_reset(buffer: *mut hb_buffer_t) {
     if buffer.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     state.buffer.clear();
@@ -989,17 +1038,17 @@ pub unsafe extern "C" fn hb_buffer_reset(buffer: *mut hb_buffer_t) {
     state.language = ptr::null();
     state.glyph_infos.clear();
     state.glyph_positions.clear();
-    state.props_set = false;
 }
 
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_clear_contents(buffer: *mut hb_buffer_t) {
     if buffer.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     state.buffer.set_text("");
@@ -1009,8 +1058,24 @@ pub unsafe extern "C" fn hb_buffer_clear_contents(buffer: *mut hb_buffer_t) {
     // hb_buffer_reset wipes them.
 }
 
+/// Returns the half-open range `[start, end)` of an item inside a text
+/// of `total` units, or `None` when `item_offset` is past the end. A
+/// negative `item_length` means "to the end of the text". The end is
+/// clamped to `total`.
+fn item_range(total: usize, item_offset: c_uint, item_length: c_int) -> Option<(usize, usize)> {
+    let start = usize::try_from(item_offset).ok()?;
+    if start > total {
+        return None;
+    }
+    let end = match usize::try_from(item_length) {
+        Ok(len) => start.saturating_add(len).min(total),
+        Err(_) => total,
+    };
+    Some((start, end))
+}
+
 /// # Safety
-/// `buffer` must be valid; `text` must point to at least
+/// `buffer` must be null or valid; `text` must point to at least
 /// `text_length` bytes (when `text_length >= 0`) or to a NUL-terminated
 /// string (when `text_length == -1`).
 #[no_mangle]
@@ -1024,37 +1089,29 @@ pub unsafe extern "C" fn hb_buffer_add_utf8(
     if buffer.is_null() || text.is_null() {
         return;
     }
-    // Normalize to a byte slice. -1 means "NUL-terminated".
-    let total_bytes: &[u8] = if text_length < 0 {
-        // SAFETY: caller asserts NUL-terminated.
-        let cstr = unsafe { core::ffi::CStr::from_ptr(text) };
-        cstr.to_bytes()
-    } else {
-        // SAFETY: caller asserts (text, text_length) is valid.
-        unsafe { slice::from_raw_parts(text.cast::<u8>(), text_length as usize) }
-    };
-    let start = item_offset as usize;
-    if start > total_bytes.len() {
-        return;
-    }
-    let end = if item_length < 0 {
-        total_bytes.len()
-    } else {
-        (start + item_length as usize).min(total_bytes.len())
-    };
-    let slice = &total_bytes[start..end];
-    let Ok(s) = core::str::from_utf8(slice) else {
+    // SAFETY: `text` is non-null and the caller guarantees the length
+    // contract of `c_str_bytes`. A negative length means
+    // NUL-terminated.
+    let total_bytes = unsafe { c_str_bytes(text, text_length) };
+    let Some((start, end)) = item_range(total_bytes.len(), item_offset, item_length) else {
         return;
     };
-    // SAFETY: caller asserts buffer validity.
+    let Some(item) = total_bytes.get(start..end) else {
+        return;
+    };
+    let Ok(s) = core::str::from_utf8(item) else {
+        return;
+    };
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     state.buffer.push_str(s);
 }
 
 /// # Safety
-/// `buffer` must be valid; `(text, text_length)` must describe a valid
-/// `u16[]` slice (or NUL-terminated u16 array if `text_length == -1`).
+/// `buffer` must be null or valid; `(text, text_length)` must describe a
+/// valid `u16[]` slice (or NUL-terminated u16 array if `text_length == -1`).
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_add_utf16(
     buffer: *mut hb_buffer_t,
@@ -1066,40 +1123,40 @@ pub unsafe extern "C" fn hb_buffer_add_utf16(
     if buffer.is_null() || text.is_null() {
         return;
     }
-    let total_units: &[u16] = if text_length < 0 {
+    let total_units: &[u16] = if let Ok(len) = usize::try_from(text_length) {
+        // SAFETY: `text` is non-null and the caller guarantees it
+        // points to `len` readable, aligned `u16` units.
+        unsafe { slice::from_raw_parts(text, len) }
+    } else {
         // Walk to the NUL.
         let mut len = 0usize;
-        // SAFETY: caller asserts NUL-terminated.
+        // SAFETY: the caller guarantees a NUL-terminated array, so
+        // every unit up to and including the NUL is readable.
         while unsafe { *text.add(len) } != 0 {
             len += 1;
         }
-        // SAFETY: caller asserts the run of `len` u16 units is valid.
+        // SAFETY: the loop above read `len` units before the NUL, so
+        // all of them are readable.
         unsafe { slice::from_raw_parts(text, len) }
-    } else {
-        // SAFETY: caller asserts (text, text_length) is valid.
-        unsafe { slice::from_raw_parts(text, text_length as usize) }
     };
-    let start = item_offset as usize;
-    if start > total_units.len() {
+    let Some((start, end)) = item_range(total_units.len(), item_offset, item_length) else {
         return;
-    }
-    let end = if item_length < 0 {
-        total_units.len()
-    } else {
-        (start + item_length as usize).min(total_units.len())
     };
-    let units = &total_units[start..end];
+    let Some(units) = total_units.get(start..end) else {
+        return;
+    };
     let Ok(s) = String::from_utf16(units) else {
         return;
     };
-    // SAFETY: caller asserts buffer validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     state.buffer.push_str(&s);
 }
 
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_set_direction(
     buffer: *mut hb_buffer_t,
@@ -1108,50 +1165,52 @@ pub unsafe extern "C" fn hb_buffer_set_direction(
     if buffer.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     state.direction = direction;
     state.buffer.set_direction(map_direction_in(direction));
-    state.props_set = true;
 }
 
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_set_script(buffer: *mut hb_buffer_t, script: hb_script_t) {
     if buffer.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     state.script = script;
-    state.props_set = true;
 }
 
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid. `language` is stored as an opaque
+/// value and never dereferenced.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_set_language(buffer: *mut hb_buffer_t, language: hb_language_t) {
     if buffer.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     state.language = language;
-    state.props_set = true;
 }
 
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_guess_segment_properties(buffer: *mut hb_buffer_t) {
     if buffer.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     if state.direction == HB_DIRECTION_INVALID {
@@ -1173,11 +1232,10 @@ pub unsafe extern "C" fn hb_buffer_guess_segment_properties(buffer: *mut hb_buff
         // default that lookups always have to fall back through.
         state.language = lang_und();
     }
-    state.props_set = true;
 }
 
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid; `length` may be null.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_get_glyph_infos(
     buffer: *mut hb_buffer_t,
@@ -1185,17 +1243,20 @@ pub unsafe extern "C" fn hb_buffer_get_glyph_infos(
 ) -> *mut hb_glyph_info_t {
     if buffer.is_null() {
         if !length.is_null() {
-            // SAFETY: caller asserts writeable.
+            // SAFETY: `length` is non-null and the caller guarantees
+            // it points to a writable `unsigned int`.
             unsafe { *length = 0 };
         }
         return ptr::null_mut();
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     let len = state.glyph_infos.len();
     if !length.is_null() {
-        // SAFETY: caller asserts writeable.
+        // SAFETY: `length` is non-null and the caller guarantees it
+        // points to a writable `unsigned int`.
         unsafe { *length = len as c_uint };
     }
     // The vector lives inside the locked BufferState; the pointer
@@ -1206,7 +1267,7 @@ pub unsafe extern "C" fn hb_buffer_get_glyph_infos(
 }
 
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid; `length` may be null.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_get_glyph_positions(
     buffer: *mut hb_buffer_t,
@@ -1214,30 +1275,34 @@ pub unsafe extern "C" fn hb_buffer_get_glyph_positions(
 ) -> *mut hb_glyph_position_t {
     if buffer.is_null() {
         if !length.is_null() {
-            // SAFETY: caller asserts writeable.
+            // SAFETY: `length` is non-null and the caller guarantees
+            // it points to a writable `unsigned int`.
             unsafe { *length = 0 };
         }
         return ptr::null_mut();
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     let len = state.glyph_positions.len();
     if !length.is_null() {
-        // SAFETY: caller asserts writeable.
+        // SAFETY: `length` is non-null and the caller guarantees it
+        // points to a writable `unsigned int`.
         unsafe { *length = len as c_uint };
     }
     state.glyph_positions.as_mut_ptr()
 }
 
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_get_length(buffer: *mut hb_buffer_t) -> c_uint {
     if buffer.is_null() {
         return 0;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let state = inner.state.lock();
     state.glyph_infos.len() as c_uint
@@ -1248,8 +1313,9 @@ pub unsafe extern "C" fn hb_buffer_get_length(buffer: *mut hb_buffer_t) -> c_uin
 // ---------------------------------------------------------------------------
 
 /// # Safety
-/// `font` and `buffer` must be valid; `(features, num_features)` must
-/// describe a valid `hb_feature_t[]` slice (or both null/zero).
+/// `font` and `buffer` must be null or valid; `(features, num_features)`
+/// must describe a valid `hb_feature_t[]` slice when `features` is
+/// non-null.
 #[no_mangle]
 pub unsafe extern "C" fn hb_shape(
     font: *mut hb_font_t,
@@ -1257,12 +1323,14 @@ pub unsafe extern "C" fn hb_shape(
     features: *const hb_feature_t,
     num_features: c_uint,
 ) {
-    // SAFETY: caller asserts validity.
+    // SAFETY: the caller upholds the contract of `hb_shape_full`,
+    // which is this function's contract. A null shaper list is
+    // always accepted.
     let _ = unsafe { hb_shape_full(font, buffer, features, num_features, ptr::null()) };
 }
 
 /// # Safety
-/// See `hb_shape`.
+/// See `hb_shape`. `_shaper_list` is ignored.
 #[no_mangle]
 pub unsafe extern "C" fn hb_shape_full(
     font: *mut hb_font_t,
@@ -1274,15 +1342,19 @@ pub unsafe extern "C" fn hb_shape_full(
     if font.is_null() || buffer.is_null() {
         return 0;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `font` is non-null and the caller guarantees it points
+    // to a live `hb_font_t`.
     let font_inner = unsafe { &(*font).inner };
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let buffer_inner = unsafe { &(*buffer).inner };
 
     // Build the feature list.
     let raw_features: &[hb_feature_t] = if features.is_null() || num_features == 0 {
         &[]
     } else {
-        // SAFETY: caller asserts validity.
+        // SAFETY: `features` is non-null and the caller guarantees it
+        // points to `num_features` readable records.
         unsafe { slice::from_raw_parts(features, num_features as usize) }
     };
     let sigil_features: Vec<Feature> = raw_features
@@ -1338,24 +1410,37 @@ pub unsafe extern "C" fn hb_shape_full(
 // Tag / Direction / Script / Language helpers
 // ---------------------------------------------------------------------------
 
+/// Reads a C string argument as bytes. A negative `len` means the
+/// string is NUL-terminated.
+///
 /// # Safety
-/// `s` must point to at least `len` bytes (or be NUL-terminated when
-/// `len == -1`).
+/// `s` must be non-null. When `len >= 0` it must point to `len`
+/// readable bytes, otherwise to a NUL-terminated string. The bytes
+/// must stay valid and unmodified for `'a`.
+unsafe fn c_str_bytes<'a>(s: *const c_char, len: c_int) -> &'a [u8] {
+    match usize::try_from(len) {
+        // SAFETY: the caller guarantees `len` readable bytes at `s`.
+        Ok(len) => unsafe { slice::from_raw_parts(s.cast::<u8>(), len) },
+        // SAFETY: the caller guarantees a NUL-terminated string at `s`
+        // when `len` is negative.
+        Err(_) => unsafe { core::ffi::CStr::from_ptr(s) }.to_bytes(),
+    }
+}
+
+/// # Safety
+/// `s` must be null, or point to at least `len` bytes (or be
+/// NUL-terminated when `len == -1`).
 #[no_mangle]
 pub unsafe extern "C" fn hb_tag_from_string(s: *const c_char, len: c_int) -> hb_tag_t {
     if s.is_null() {
         return 0;
     }
-    let bytes: &[u8] = if len < 0 {
-        // SAFETY: caller asserts NUL-terminated.
-        unsafe { core::ffi::CStr::from_ptr(s) }.to_bytes()
-    } else {
-        // SAFETY: caller asserts (s, len).
-        unsafe { slice::from_raw_parts(s.cast::<u8>(), len as usize) }
-    };
+    // SAFETY: `s` is non-null and the caller guarantees the length
+    // contract of `c_str_bytes`.
+    let bytes = unsafe { c_str_bytes(s, len) };
     let mut buf = [b' '; 4];
-    for (i, b) in bytes.iter().take(4).enumerate() {
-        buf[i] = *b;
+    for (dst, src) in buf.iter_mut().zip(bytes) {
+        *dst = *src;
     }
     u32::from_be_bytes(buf)
 }
@@ -1366,7 +1451,7 @@ pub unsafe extern "C" fn hb_tag_from_string(s: *const c_char, len: c_int) -> hb_
 /// expected to size the buffer.
 ///
 /// # Safety
-/// `buf` must be writeable for at least four bytes.
+/// `buf` must be null or writeable for at least four bytes.
 #[no_mangle]
 pub unsafe extern "C" fn hb_tag_to_string(tag: hb_tag_t, buf: *mut c_char) {
     if buf.is_null() {
@@ -1374,31 +1459,28 @@ pub unsafe extern "C" fn hb_tag_to_string(tag: hb_tag_t, buf: *mut c_char) {
     }
     let bytes = tag.to_be_bytes();
     for (i, b) in bytes.iter().enumerate() {
-        // SAFETY: caller asserts buf has 4 writable bytes.
+        // SAFETY: `buf` is non-null and the caller guarantees four
+        // writable bytes. `i` is below 4.
         unsafe { *buf.add(i) = *b as c_char };
     }
 }
 
 /// # Safety
-/// `s` must point to at least `len` bytes (or be NUL-terminated when
-/// `len == -1`).
+/// `s` must be null, or point to at least `len` bytes (or be
+/// NUL-terminated when `len == -1`).
 #[no_mangle]
 pub unsafe extern "C" fn hb_direction_from_string(s: *const c_char, len: c_int) -> hb_direction_t {
     if s.is_null() {
         return HB_DIRECTION_INVALID;
     }
-    let bytes: &[u8] = if len < 0 {
-        // SAFETY: caller asserts NUL-terminated.
-        unsafe { core::ffi::CStr::from_ptr(s) }.to_bytes()
-    } else {
-        // SAFETY: caller asserts (s, len).
-        unsafe { slice::from_raw_parts(s.cast::<u8>(), len as usize) }
-    };
-    if bytes.is_empty() {
-        return HB_DIRECTION_INVALID;
-    }
+    // SAFETY: `s` is non-null and the caller guarantees the length
+    // contract of `c_str_bytes`.
+    let bytes = unsafe { c_str_bytes(s, len) };
     // HarfBuzz only inspects the first character (case-insensitive).
-    match bytes[0].to_ascii_lowercase() {
+    let Some(first) = bytes.first() else {
+        return HB_DIRECTION_INVALID;
+    };
+    match first.to_ascii_lowercase() {
         b'l' => HB_DIRECTION_LTR,
         b'r' => HB_DIRECTION_RTL,
         b't' => HB_DIRECTION_TTB,
@@ -1416,23 +1498,21 @@ pub extern "C" fn hb_script_from_iso15924_tag(tag: hb_tag_t) -> hb_script_t {
 
 /// Languages are pointer-interned. We leak a CString the first time
 /// we see a given normalized language tag; subsequent lookups return
-/// the same pointer.
+/// the same pointer. As in C, the tag ends at the first NUL byte even
+/// when `len` counts past it.
 ///
 /// # Safety
-/// `s` must point to at least `len` bytes (or be NUL-terminated when
-/// `len == -1`).
+/// `s` must be null, or point to at least `len` bytes (or be
+/// NUL-terminated when `len == -1`).
 #[no_mangle]
 pub unsafe extern "C" fn hb_language_from_string(s: *const c_char, len: c_int) -> hb_language_t {
     if s.is_null() {
         return ptr::null();
     }
-    let bytes: &[u8] = if len < 0 {
-        // SAFETY: caller asserts NUL-terminated.
-        unsafe { core::ffi::CStr::from_ptr(s) }.to_bytes()
-    } else {
-        // SAFETY: caller asserts (s, len).
-        unsafe { slice::from_raw_parts(s.cast::<u8>(), len as usize) }
-    };
+    // SAFETY: `s` is non-null and the caller guarantees the length
+    // contract of `c_str_bytes`.
+    let bytes = unsafe { c_str_bytes(s, len) };
+    let bytes = bytes.split(|&b| b == 0).next().unwrap_or_default();
     if bytes.is_empty() {
         return ptr::null();
     }
@@ -1460,15 +1540,18 @@ const HB_COMPAT_MICRO: c_uint = 0;
 #[no_mangle]
 pub unsafe extern "C" fn hb_version(major: *mut c_uint, minor: *mut c_uint, micro: *mut c_uint) {
     if !major.is_null() {
-        // SAFETY: caller asserts writeable.
+        // SAFETY: `major` is non-null and the caller guarantees it
+        // points to a writable `unsigned int`.
         unsafe { *major = HB_COMPAT_MAJOR };
     }
     if !minor.is_null() {
-        // SAFETY: caller asserts writeable.
+        // SAFETY: `minor` is non-null and the caller guarantees it
+        // points to a writable `unsigned int`.
         unsafe { *minor = HB_COMPAT_MINOR };
     }
     if !micro.is_null() {
-        // SAFETY: caller asserts writeable.
+        // SAFETY: `micro` is non-null and the caller guarantees it
+        // points to a writable `unsigned int`.
         unsafe { *micro = HB_COMPAT_MICRO };
     }
 }
@@ -1522,24 +1605,30 @@ fn script_to_iso15924(s: sigilbuzz::unicode::Script) -> hb_script_t {
     }
 }
 
-// Language interning. A handful of well-known tags are pinned at
-// startup; new tags are interned via a simple Mutex<Vec<&'static
-// CStr>>.
+// Language interning. Each distinct tag is leaked once into a
+// Mutex<Vec<&'static CStr>> and looked up by value afterward.
 
 #[cfg(feature = "std")]
 fn intern_language(tag: &str) -> hb_language_t {
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Mutex, OnceLock, PoisonError};
     static INTERN: OnceLock<Mutex<Vec<&'static core::ffi::CStr>>> = OnceLock::new();
     let intern = INTERN.get_or_init(|| Mutex::new(Vec::new()));
-    let mut guard = intern.lock().unwrap();
+    // The table stays consistent even if a holder panicked: entries
+    // are only ever appended whole.
+    let mut guard = intern.lock().unwrap_or_else(PoisonError::into_inner);
     for cstr in guard.iter() {
         if cstr.to_bytes() == tag.as_bytes() {
             return cstr.as_ptr();
         }
     }
+    // A tag with a NUL byte would be stored under a different key
+    // than it is looked up by, and leak again on every call. The
+    // caller strips NUL bytes, so this only guards the invariant.
+    let Ok(owned) = std::ffi::CString::new(tag) else {
+        return lang_und();
+    };
     // Leak a fresh CString: language tags survive the lifetime of
     // the process, just as they do in HarfBuzz itself.
-    let owned = std::ffi::CString::new(tag).unwrap_or_else(|_| std::ffi::CString::default());
     let leaked: &'static core::ffi::CStr = Box::leak(owned.into_boxed_c_str());
     guard.push(leaked);
     leaked.as_ptr()
@@ -1577,6 +1666,8 @@ mod tests {
     #[test]
     fn shape_hello_matches_rust_api() {
         // C surface.
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             let blob = hb_blob_create(
                 OPEN_SANS.as_ptr().cast::<c_char>(),
@@ -1641,6 +1732,8 @@ mod tests {
 
     #[test]
     fn refcount_keeps_face_alive_after_blob_destroy() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             let blob = hb_blob_create(
                 OPEN_SANS.as_ptr().cast::<c_char>(),
@@ -1660,6 +1753,8 @@ mod tests {
 
     #[test]
     fn null_destroy_is_a_noop() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             hb_blob_destroy(ptr::null_mut());
             hb_face_destroy(ptr::null_mut());
@@ -1670,6 +1765,8 @@ mod tests {
 
     #[test]
     fn tag_round_trips() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             let t = hb_tag_from_string(c"Latn".as_ptr(), -1);
             assert_eq!(t, HB_SCRIPT_LATIN);
@@ -1713,6 +1810,8 @@ mod tests {
         let mut major: c_uint = 0;
         let mut minor: c_uint = 0;
         let mut micro: c_uint = 0;
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe { hb_version(&mut major, &mut minor, &mut micro) };
         assert_eq!(major, 8);
         assert_eq!(minor, 0);
@@ -1721,6 +1820,8 @@ mod tests {
 
     #[test]
     fn buffer_guess_segment_properties_seeds_latin_for_ascii() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             let buffer = hb_buffer_create();
             hb_buffer_add_utf8(buffer, c"Hello".as_ptr(), -1, 0, -1);
@@ -1738,6 +1839,8 @@ mod tests {
 
     #[test]
     fn utf16_input_matches_utf8() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             // "Hi" in UTF-16.
             let utf16: [u16; 2] = [b'H' as u16, b'i' as u16];

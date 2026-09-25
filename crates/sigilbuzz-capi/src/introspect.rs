@@ -13,9 +13,10 @@ use alloc::vec::Vec;
 use crate::set::hb_set_t;
 use crate::{hb_face_t, hb_tag_t, FaceInner};
 
-/// HarfBuzz layout-table tags. Match the upstream constants exactly.
+/// HarfBuzz layout-table tag for GSUB. Matches the upstream constant.
 pub const HB_OT_TAG_GSUB: hb_tag_t =
     ((b'G' as u32) << 24) | ((b'S' as u32) << 16) | ((b'U' as u32) << 8) | (b'B' as u32);
+/// HarfBuzz layout-table tag for GPOS. Matches the upstream constant.
 pub const HB_OT_TAG_GPOS: hb_tag_t =
     ((b'G' as u32) << 24) | ((b'P' as u32) << 16) | ((b'O' as u32) << 8) | (b'S' as u32);
 
@@ -28,13 +29,14 @@ const TAG_DFLT_LANG: [u8; 4] = *b"dflt";
 /// glyph id, adds the codepoint to `set`.
 ///
 /// # Safety
-/// `face` must be valid; `set` must be valid.
+/// `face` and `set` must each be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_face_collect_unicodes(face: *const hb_face_t, set: *mut hb_set_t) {
     if face.is_null() || set.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `face` is non-null and the caller guarantees it points
+    // to a live `hb_face_t`.
     let face_inner: &FaceInner = unsafe { &(*face).inner };
     let Ok(cmap) = face_inner.face.cmap() else {
         return;
@@ -47,10 +49,9 @@ pub unsafe extern "C" fn hb_face_collect_unicodes(face: *const hb_face_t, set: *
     // is a binary search over format 4/12 segments. The tight inner
     // loop locks the lookup to a few nanoseconds per call. The
     // alternative (exposing the cmap segment iterator) would
-    // require touching `src/tables/cmap.rs`, which is owned by
-    // sister branches.
-    // SAFETY: caller asserts validity; the BTreeSet behind `set`
-    // accepts arbitrary u32 inserts.
+    // require a new public API in the core crate's cmap parser.
+    // SAFETY: `set` is non-null and the caller guarantees it points
+    // to a live `hb_set_t`.
     unsafe {
         (*set).with_inner_mut(|s| {
             for cp in 0u32..=0x10FFFFu32 {
@@ -74,8 +75,9 @@ pub unsafe extern "C" fn hb_face_collect_unicodes(face: *const hb_face_t, set: *
 /// the corresponding filter is "all scripts" / "all languages".
 ///
 /// # Safety
-/// `face` must be valid; `features` must be valid; `scripts`/`languages`
-/// must point to NUL-terminated `hb_tag_t[]` arrays when non-null.
+/// `face` and `features` must each be null or valid;
+/// `scripts`/`languages` must point to NUL-terminated `hb_tag_t[]`
+/// arrays when non-null.
 #[no_mangle]
 pub unsafe extern "C" fn hb_ot_layout_collect_features(
     face: *const hb_face_t,
@@ -87,11 +89,14 @@ pub unsafe extern "C" fn hb_ot_layout_collect_features(
     if face.is_null() || features.is_null() {
         return;
     }
-    // SAFETY: caller asserts NUL-terminated u32 arrays when non-null.
+    // SAFETY: the caller guarantees `scripts` is null or a
+    // NUL-terminated `hb_tag_t[]`, which is `read_tag_list`'s contract.
     let script_filter: Option<Vec<[u8; 4]>> = unsafe { read_tag_list(scripts) };
+    // SAFETY: as above, for `languages`.
     let language_filter: Option<Vec<[u8; 4]>> = unsafe { read_tag_list(languages) };
 
-    // SAFETY: caller asserts validity.
+    // SAFETY: `face` is non-null and the caller guarantees it points
+    // to a live `hb_face_t`.
     let face_inner: &FaceInner = unsafe { &(*face).inner };
 
     match table_tag {
@@ -99,7 +104,8 @@ pub unsafe extern "C" fn hb_ot_layout_collect_features(
             let Ok(Some(gsub)) = face_inner.face.gsub() else {
                 return;
             };
-            // SAFETY: caller asserts validity of the set pointer.
+            // SAFETY: `features` is non-null and the caller guarantees
+            // it points to a live `hb_set_t`.
             unsafe {
                 (*features).with_inner_mut(|out| {
                     collect_features_from(
@@ -116,7 +122,8 @@ pub unsafe extern "C" fn hb_ot_layout_collect_features(
             let Ok(Some(gpos)) = face_inner.face.gpos() else {
                 return;
             };
-            // SAFETY: caller asserts validity of the set pointer.
+            // SAFETY: `features` is non-null and the caller guarantees
+            // it points to a live `hb_set_t`.
             unsafe {
                 (*features).with_inner_mut(|out| {
                     collect_features_from(
@@ -148,7 +155,9 @@ unsafe fn read_tag_list(ptr: *const hb_tag_t) -> Option<Vec<[u8; 4]>> {
     let mut out = Vec::new();
     let mut i: isize = 0;
     loop {
-        // SAFETY: caller asserts NUL-terminated.
+        // SAFETY: `ptr` is non-null and the caller guarantees a
+        // NUL-terminated array. The loop stops at the first zero, so
+        // every index read is at or before the terminator.
         let v = unsafe { *ptr.offset(i) };
         if v == 0 {
             break;
@@ -277,6 +286,8 @@ mod tests {
     const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
 
     fn make_face() -> (*mut crate::hb_blob_t, *mut crate::hb_face_t) {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             let blob = hb_blob_create(
                 OPEN_SANS.as_ptr().cast::<c_char>(),
@@ -292,6 +303,8 @@ mod tests {
 
     #[test]
     fn collect_unicodes_includes_basic_latin_for_open_sans() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             let (blob, face) = make_face();
             let set = hb_set_create();
@@ -316,6 +329,8 @@ mod tests {
 
     #[test]
     fn collect_features_gsub_against_open_sans_returns_known_tags() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             let (blob, face) = make_face();
             let set = hb_set_create();
@@ -333,6 +348,8 @@ mod tests {
 
     #[test]
     fn collect_features_unknown_table_tag_is_noop() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             let (blob, face) = make_face();
             let set = hb_set_create();
@@ -354,6 +371,8 @@ mod tests {
 
     #[test]
     fn null_inputs_are_noops() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             // No panics, no UB.
             hb_face_collect_unicodes(ptr::null(), ptr::null_mut());
