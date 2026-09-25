@@ -96,44 +96,40 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
     // for bytes in `[0, i)`, so the width of any half-open span
     // `[a, b)` is just `prefix[b] - prefix[a]`.
     let mut prefix: Vec<f32> = Vec::with_capacity(text.len() + 2);
-    prefix.push(0.0);
+    let mut running = 0.0_f32;
+    prefix.push(running);
     for advance in advance_at_byte.iter().take(text.len() + 1) {
-        let last = *prefix.last().expect("non-empty");
-        prefix.push(last + advance);
+        running += advance;
+        prefix.push(running);
     }
-    let span_width = |from: usize, to: usize| prefix[to] - prefix[from];
-    // UAX 14 LB7: trailing spaces hang into the right margin and do
-    // not count toward the line's measured width. Walk back from `to`
-    // skipping any character whose UAX 14 line-break class is `SP`:
-    // matches `LineBreakClass::SP` coverage (U+0020, U+1680,
-    // U+2000..=U+200A, U+205F, U+3000) plus tab (BA in the
-    // classifier but a soft break point in practice).
-    let trim_end = |to: usize| -> usize {
-        let mut end = to;
-        while end > 0 {
-            match text[..end].char_indices().next_back() {
-                Some((b, ch))
-                    if matches!(
-                        crate::class::line_break_class(ch),
-                        crate::class::LineBreakClass::SP
-                    ) || ch == '\t' =>
-                {
-                    end = b;
-                }
-                _ => break,
-            }
-        }
-        end
-    };
-    let measure = |from: usize, to: usize| span_width(from, trim_end(to));
 
-    // The per-line `width` we report to callers is the *measured*
-    // width, i.e. trailing space-class characters do not contribute
-    // to it, matching UAX 14 LB7 ("trailing spaces hang into the
-    // right margin"). The wrapping decisions above already use
-    // `measure`; we have to use it here too so the public field
-    // agrees with the budget the wrapper enforced.
-    let line_width = |from: usize, to: usize| span_width(from, trim_end(to));
+    // UAX 14 LB7: trailing spaces hang into the right margin and do
+    // not count toward the line's measured width. `hang_end[i]` is `i`
+    // with the run of hanging characters directly before it removed.
+    // Hanging characters are the UAX 14 `SP` class (U+0020, U+1680,
+    // U+2000..=U+200A, U+205F, U+3000) plus tab, which the classifier
+    // puts in `BA` but which acts as a soft break point in practice.
+    // The table is built in one forward pass, so a long whitespace run
+    // costs linear time instead of one backward walk per break
+    // opportunity. Only char boundaries are filled in. Every offset
+    // looked up below comes from the break iterator, and the iterator
+    // only yields char boundaries in `0..=text.len()`.
+    let mut hang_end = vec![0usize; text.len() + 1];
+    for (b, ch) in text.char_indices() {
+        let next = b + ch.len_utf8();
+        let hangs = ch == '\t'
+            || matches!(
+                crate::class::line_break_class(ch),
+                crate::class::LineBreakClass::SP
+            );
+        hang_end[next] = if hangs { hang_end[b] } else { next };
+    }
+
+    // Width of `[from, to)` without trailing hanging characters. The
+    // wrapper uses it both for its break decisions and for the
+    // reported `LineRange::width`, so the public field agrees with the
+    // budget the wrapper enforced.
+    let measure = |from: usize, to: usize| prefix[hang_end[to]] - prefix[from];
 
     let mut lines: Vec<LineRange> = Vec::new();
     let mut line_start = 0usize;
@@ -149,7 +145,7 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
                 lines.push(LineRange {
                     start_byte: line_start,
                     end_byte: offset,
-                    width: line_width(line_start, offset),
+                    width: measure(line_start, offset),
                 });
                 line_start = offset;
                 last_allowed = None;
@@ -166,7 +162,7 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
                         lines.push(LineRange {
                             start_byte: line_start,
                             end_byte: prev,
-                            width: line_width(line_start, prev),
+                            width: measure(line_start, prev),
                         });
                         line_start = prev;
                         // The current opportunity may itself fit on
@@ -183,7 +179,7 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
                                 lines.push(LineRange {
                                     start_byte: line_start,
                                     end_byte: offset,
-                                    width: line_width(line_start, offset),
+                                    width: measure(line_start, offset),
                                 });
                                 line_start = offset;
                             }
@@ -192,7 +188,7 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
                         lines.push(LineRange {
                             start_byte: line_start,
                             end_byte: offset,
-                            width: line_width(line_start, offset),
+                            width: measure(line_start, offset),
                         });
                         line_start = offset;
                         last_allowed = None;
@@ -212,7 +208,7 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
         lines.push(LineRange {
             start_byte: line_start,
             end_byte: text.len(),
-            width: line_width(line_start, text.len()),
+            width: measure(line_start, text.len()),
         });
     }
 
@@ -359,10 +355,9 @@ mod tests {
 
     #[test]
     fn trailing_unicode_spaces_excluded_from_line_width() {
-        // U+2003 EM SPACE is UAX 14 SP, but the wave-1 trim_end only
-        // hand-listed ' ', '\t', and U+3000. A trailing EM SPACE must
-        // be hung into the right margin and not contribute to the
-        // reported line width.
+        // U+2003 EM SPACE is UAX 14 SP, not only the ASCII space. A
+        // trailing EM SPACE must be hung into the right margin and not
+        // contribute to the reported line width.
         let text = "abc\u{2003}";
         let shaped = shape_uniform(text, 10);
         let lines = wrap_lines(
