@@ -60,6 +60,7 @@
 //! and `end`. A zero-width region (start == peak == end == 0)
 //! contributes a scalar of 1.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
@@ -98,10 +99,14 @@ impl<'a> ItemVariationStore<'a> {
         let region_count = rr.read_u16()?;
 
         // Validate that region list fits. Each region is
-        // axis_count * 6 bytes (3 * F2DOT14 per axis).
+        // axis_count * 6 bytes (3 * F2DOT14 per axis). Once this holds,
+        // offset arithmetic inside the region list cannot overflow.
         let regions_start = rr.position();
-        let regions_size = region_count as usize * axis_count as usize * 6;
-        if data.len() < regions_start + regions_size {
+        let regions_end = (region_count as usize)
+            .checked_mul(axis_count as usize)
+            .and_then(|n| n.checked_mul(6))
+            .and_then(|n| n.checked_add(regions_start));
+        if regions_end.map_or(true, |end| data.len() < end) {
             return Err(Error::Truncated {
                 offset: regions_start,
                 context: "ItemVariationStore region list truncated",
@@ -182,11 +187,24 @@ impl<'a> ItemVariationStore<'a> {
     pub fn region_scalars(&self, outer: u16, coords: &[f32]) -> Option<Vec<f32>> {
         let off = *self.subtable_offsets.get(outer as usize)?;
         let sub = ItemVariationData::parse(self.data, off as usize).ok()?;
-        let mut out = Vec::with_capacity(sub.region_indexes.len());
-        for &ri in &sub.region_indexes {
-            out.push(self.region_scalar(ri, coords).unwrap_or(0.0));
-        }
-        Some(out)
+        let scalars = self.scalars_for(&sub.region_indexes, coords);
+        Some(scalars.into_iter().map(|s| s.unwrap_or(0.0)).collect())
+    }
+
+    /// [`Self::region_scalar`] for each entry of `region_indexes`, in
+    /// order. Each distinct region is evaluated once, so a subtable
+    /// that names one many-axis region many times does not repeat the
+    /// work.
+    fn scalars_for(&self, region_indexes: &[u16], coords: &[f32]) -> Vec<Option<f32>> {
+        let mut cache: BTreeMap<u16, Option<f32>> = BTreeMap::new();
+        region_indexes
+            .iter()
+            .map(|&ri| {
+                *cache
+                    .entry(ri)
+                    .or_insert_with(|| self.region_scalar(ri, coords))
+            })
+            .collect()
     }
 
     /// Evaluates the delta for item `(outer, inner)` at the given
@@ -206,15 +224,15 @@ impl<'a> ItemVariationStore<'a> {
         let Some(deltas) = subtable.deltas_for(inner) else {
             return 0.0;
         };
+        let scalars = self.scalars_for(&subtable.region_indexes, coords);
         let mut out: f32 = 0.0;
         for (slot, d) in deltas.iter().enumerate() {
-            let Some(&region_idx) = subtable.region_indexes.get(slot) else {
+            let Some(&scalar) = scalars.get(slot) else {
                 break;
             };
-            let Some(scalar) = self.region_scalar(region_idx, coords) else {
+            let Some(scalar) = scalar else {
                 continue;
             };
-            #[allow(clippy::cast_precision_loss)]
             let delta_f = *d as f32;
             out += scalar * delta_f;
         }
@@ -226,16 +244,13 @@ impl<'a> ItemVariationStore<'a> {
 /// reader.
 fn f2dot14(data: &[u8], off: usize) -> f32 {
     let raw = i16::from_be_bytes([data[off], data[off + 1]]);
-    #[allow(clippy::cast_precision_loss)]
-    let v = f32::from(raw) / 16384.0;
-    v
+    f32::from(raw) / 16384.0
 }
 
 /// Triangular region function for one axis. Returns `1.0` at
 /// `peak`, tapering linearly to `0.0` at `start` and `end`, and
 /// clamped to zero outside that range. Matches the OpenType spec's
 /// `supportScalar` function.
-#[allow(clippy::float_cmp)]
 fn axis_scalar(start: f32, peak: f32, end: f32, coord: f32) -> f32 {
     // Per spec: a region with peak == 0 on any axis evaluates to 1
     // on that axis. The axis is "not used by this region".
@@ -302,8 +317,11 @@ impl<'a> ItemVariationData<'a> {
         }
         let delta_set_size = word_delta_count as usize * wide
             + (region_index_count - word_delta_count) as usize * narrow;
-        let need = delta_sets_off + item_count as usize * delta_set_size;
-        if full.len() < need {
+        // Once this holds, row offsets in `deltas_for` cannot overflow.
+        let need = (item_count as usize)
+            .checked_mul(delta_set_size)
+            .and_then(|n| n.checked_add(delta_sets_off));
+        if need.map_or(true, |need| full.len() < need) {
             return Err(Error::Truncated {
                 offset: delta_sets_off,
                 context: "ItemVariationData delta sets truncated",
@@ -350,11 +368,7 @@ impl<'a> ItemVariationData<'a> {
                     self.data[cursor],
                     self.data[cursor + 1],
                 ])),
-                (false, false) => {
-                    #[allow(clippy::cast_possible_wrap)]
-                    let v = self.data[cursor] as i8;
-                    i32::from(v)
-                }
+                (false, false) => i32::from(self.data[cursor] as i8),
             };
             out.push(value);
             cursor += advance;
@@ -510,5 +524,23 @@ mod tests {
         let s = ItemVariationStore::parse(&bytes).unwrap();
         let d = s.delta(0, 0, &[1.0]);
         assert!((d - 100_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn repeated_region_index_is_evaluated_once() {
+        // One region over 65535 axes, named 32767 times by one item
+        // (the most the test builder can encode). Every axis has peak
+        // 0, so no axis cuts the walk short. Evaluating the region once
+        // per mention took about two billion axis steps per delta.
+        let axes: u16 = u16::MAX;
+        let mentions: u16 = 0x7FFF;
+        let region = alloc::vec![(0.0_f32, 0.0_f32, 0.0_f32); usize::from(axes)];
+        let indexes = alloc::vec![0_u16; usize::from(mentions)];
+        let deltas = alloc::vec![alloc::vec![1_i32; usize::from(mentions)]];
+        let bytes = build_store(axes, &[&region], &[(indexes, deltas, false)]);
+        let s = ItemVariationStore::parse(&bytes).unwrap();
+        assert_eq!(s.delta(0, 0, &[]), f32::from(mentions));
+        let scalars = s.region_scalars(0, &[]).unwrap();
+        assert_eq!(scalars.len(), usize::from(mentions));
     }
 }
