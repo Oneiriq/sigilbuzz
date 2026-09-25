@@ -1512,7 +1512,6 @@ mod tests {
     fn build_translate_record(gid: u16, tx: i16, ty: i16) -> Vec<u8> {
         let flags = VC_HAVE_TRANSLATE_X | VC_HAVE_TRANSLATE_Y;
         let mut record = Vec::new();
-        #[allow(clippy::cast_possible_truncation)]
         record.push(flags as u8);
         record.extend_from_slice(&gid.to_be_bytes());
         record.extend_from_slice(&tx.to_be_bytes());

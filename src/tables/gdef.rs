@@ -501,7 +501,6 @@ mod tests {
     }
 
     fn write_f2dot14(out: &mut Vec<u8>, v: f32) {
-        #[allow(clippy::cast_possible_truncation)]
         let raw = (v * 16384.0).round() as i16;
         out.extend_from_slice(&raw.to_be_bytes());
     }

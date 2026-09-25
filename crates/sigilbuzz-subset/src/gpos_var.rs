@@ -833,7 +833,6 @@ mod tests {
         let subtable_slot = out.len();
         out.extend_from_slice(&0u32.to_be_bytes());
 
-        #[allow(clippy::cast_possible_truncation)]
         let region_start = out.len() as u32;
         out[region_off_slot..region_off_slot + 4].copy_from_slice(&region_start.to_be_bytes());
         out.extend_from_slice(&1u16.to_be_bytes()); // axisCount
@@ -843,7 +842,6 @@ mod tests {
         out.extend_from_slice(&16384i16.to_be_bytes());
         out.extend_from_slice(&16384i16.to_be_bytes());
 
-        #[allow(clippy::cast_possible_truncation)]
         let sub_start = out.len() as u32;
         out[subtable_slot..subtable_slot + 4].copy_from_slice(&sub_start.to_be_bytes());
         out.extend_from_slice(&1u16.to_be_bytes()); // itemCount

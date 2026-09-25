@@ -494,9 +494,7 @@ mod tests {
         data.push(0);
         // Component 2: glyph_id=3, x_offset=8, y_offset=-2
         data.extend_from_slice(&3u16.to_be_bytes());
-        #[allow(clippy::cast_sign_loss)]
         data.push(8i8 as u8);
-        #[allow(clippy::cast_sign_loss)]
         data.push(-2i8 as u8);
         let payload_len = data.len() as u32 - payload_off;
 
@@ -539,7 +537,6 @@ mod tests {
         data.extend_from_slice(&1u16.to_be_bytes());
         // Component: glyph_id=42, x_offset=-1, y_offset=3
         data.extend_from_slice(&42u16.to_be_bytes());
-        #[allow(clippy::cast_sign_loss)]
         data.push(-1i8 as u8);
         data.push(3);
         let payload_len = data.len() as u32 - payload_off;
