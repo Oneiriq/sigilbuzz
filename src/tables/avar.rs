@@ -56,10 +56,12 @@ impl Avar {
         let _reserved = r.read_u16()?;
         let axis_count = r.read_u16()? as usize;
 
-        let mut segment_maps = Vec::with_capacity(axis_count);
+        // Capacities are capped by the bytes left, since each
+        // SegmentMaps takes at least 2 bytes and each AxisValueMap 4.
+        let mut segment_maps = Vec::with_capacity(axis_count.min(r.remaining() / 2));
         for _ in 0..axis_count {
             let count = r.read_u16()? as usize;
-            let mut map = Vec::with_capacity(count);
+            let mut map = Vec::with_capacity(count.min(r.remaining() / 4));
             for _ in 0..count {
                 let from = r.read_f2dot14()?;
                 let to = r.read_f2dot14()?;

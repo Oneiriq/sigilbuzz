@@ -1,16 +1,3 @@
-// Parser-style code leans on bespoke index loops / byte-by-byte
-// walks; the pedantic range-loop lints add noise without clarifying
-// the spec-mirroring layout.
-#![allow(
-    clippy::bool_to_int_with_if,
-    clippy::elidable_lifetime_names,
-    clippy::map_unwrap_or,
-    clippy::too_many_lines,
-    clippy::too_many_arguments,
-    clippy::needless_range_loop,
-    clippy::similar_names
-)]
-
 //! `glyf`: TrueType glyph data.
 //!
 //! Parses the 10-byte glyph header, simple-glyph contour points, and
@@ -125,17 +112,15 @@ const FLAG_REPEAT: u8 = 0x08;
 const FLAG_X_SAME_OR_POS: u8 = 0x10;
 const FLAG_Y_SAME_OR_POS: u8 = 0x20;
 
-// Composite-glyph flag bits.
+// Composite-glyph flag bits. ROUND_XY_TO_GRID (0x0004),
+// WE_HAVE_INSTRUCTIONS (0x0100), and USE_MY_METRICS (0x0200) only
+// matter to hinting and metrics, so the outline walk ignores them.
 const COMP_ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
 const COMP_ARGS_ARE_XY_VALUES: u16 = 0x0002;
-const COMP_ROUND_XY_TO_GRID: u16 = 0x0004;
 const COMP_WE_HAVE_A_SCALE: u16 = 0x0008;
 const COMP_MORE_COMPONENTS: u16 = 0x0020;
 const COMP_WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
 const COMP_WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
-#[allow(dead_code)]
-const COMP_WE_HAVE_INSTRUCTIONS: u16 = 0x0100;
-const COMP_USE_MY_METRICS: u16 = 0x0200;
 const COMP_SCALED_COMPONENT_OFFSET: u16 = 0x0800;
 const COMP_UNSCALED_COMPONENT_OFFSET: u16 = 0x1000;
 
@@ -144,10 +129,52 @@ const COMP_UNSCALED_COMPONENT_OFFSET: u16 = 0x1000;
 /// exceed a handful of levels.
 const MAX_COMPOSITE_DEPTH: u8 = 64;
 
+/// Cap on the glyph records one outline walk may visit, the root
+/// glyph included. A composite can name the same child many times at
+/// every level, so the depth cap alone lets a few bytes expand into
+/// billions of visits. Real composites visit a handful of glyphs.
+const MAX_FLATTEN_GLYPHS: u32 = 1 << 16;
+
+/// Cap on the contour points one outline walk may lay down across
+/// every simple glyph it visits. One simple glyph holds at most
+/// 65,535 points, and real composites hold far fewer in total.
+const MAX_FLATTEN_POINTS: usize = 1 << 18;
+
+/// Remaining work for one outline walk. See [`MAX_FLATTEN_GLYPHS`]
+/// and [`MAX_FLATTEN_POINTS`].
+struct FlattenBudget {
+    glyphs: u32,
+    points: usize,
+}
+
+impl FlattenBudget {
+    const fn new() -> Self {
+        Self {
+            glyphs: MAX_FLATTEN_GLYPHS,
+            points: MAX_FLATTEN_POINTS,
+        }
+    }
+
+    fn take_glyph(&mut self) -> Result<()> {
+        self.glyphs = self.glyphs.checked_sub(1).ok_or(Error::Malformed {
+            offset: 0,
+            context: "glyf composite visits too many glyphs",
+        })?;
+        Ok(())
+    }
+
+    fn take_points(&mut self, n: usize) -> Result<()> {
+        self.points = self.points.checked_sub(n).ok_or(Error::Malformed {
+            offset: 0,
+            context: "glyf composite expands to too many points",
+        })?;
+        Ok(())
+    }
+}
+
 /// Rounds a float to the nearest `i16`, saturating at the type bounds.
 /// Mirrors the helper in [`crate::Face`]; duplicated here so the glyf
 /// module stays self-contained for `no_std` callers.
-#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 fn round_f32_to_i16(v: f32) -> i16 {
     let adj = if v >= 0.0 { v + 0.5 } else { v - 0.5 };
     let clamped = adj.max(i16::MIN as f32).min(i16::MAX as f32);
@@ -318,6 +345,7 @@ impl<'a> Glyf<'a> {
             &identity,
             &mut flat,
             0,
+            &mut FlattenBudget::new(),
         )?;
         if !drew {
             return Ok(None);
@@ -358,9 +386,9 @@ impl<'a> Glyf<'a> {
         metrics: Option<&PhantomMetrics<'_>>,
         sink: &mut S,
     ) -> Result<bool> {
-        // Two-pass flattening: phase 1 walks the glyph (and any
+        // Two-pass flattening: pass 1 walks the glyph (and any
         // composite children) into a flat point list with absolute
-        // coordinates; phase 2 emits ops contour by contour. The
+        // coordinates; pass 2 emits ops contour by contour. The
         // intermediate point list is what lets composite components
         // resolve `ARGS_ARE_XY_VALUES`-clear anchor-point matching:
         // arg1 indexes into the parent's already-flattened points
@@ -369,7 +397,16 @@ impl<'a> Glyf<'a> {
         // translation.
         let mut flat = FlatGlyph::default();
         let identity = Transform::identity();
-        let drew = self.flatten(loca, glyph_id, deltas, metrics, &identity, &mut flat, 0)?;
+        let drew = self.flatten(
+            loca,
+            glyph_id,
+            deltas,
+            metrics,
+            &identity,
+            &mut flat,
+            0,
+            &mut FlattenBudget::new(),
+        )?;
         if !drew {
             return Ok(false);
         }
@@ -380,7 +417,10 @@ impl<'a> Glyf<'a> {
     /// Flattens `glyph_id` (transformed by `tf`) into `out`. Returns
     /// `Ok(false)` for empty / out-of-range glyphs. Recurses through
     /// composite components, with `depth` capped by
-    /// [`MAX_COMPOSITE_DEPTH`].
+    /// [`MAX_COMPOSITE_DEPTH`] and the total work capped by `budget`.
+    // The walk threads its tables, transform, output, and limits
+    // through every level of the recursion.
+    #[allow(clippy::too_many_arguments)]
     fn flatten(
         &self,
         loca: &Loca<'_>,
@@ -390,6 +430,7 @@ impl<'a> Glyf<'a> {
         tf: &Transform,
         out: &mut FlatGlyph,
         depth: u8,
+        budget: &mut FlattenBudget,
     ) -> Result<bool> {
         if depth > MAX_COMPOSITE_DEPTH {
             return Err(Error::Malformed {
@@ -397,6 +438,7 @@ impl<'a> Glyf<'a> {
                 context: "glyf composite recursion exceeded cap",
             });
         }
+        budget.take_glyph()?;
         let Some(body) = self.glyph_bytes(loca, glyph_id)? else {
             return Ok(false);
         };
@@ -407,13 +449,15 @@ impl<'a> Glyf<'a> {
         let num_contours = r.read_i16()?;
         r.skip(8)?; // bbox
         if num_contours >= 0 {
-            flatten_simple_glyph(&mut r, num_contours as u16, deltas, tf, out)?;
+            flatten_simple_glyph(&mut r, num_contours as u16, deltas, tf, out, budget)?;
         } else {
-            self.flatten_composite(&mut r, loca, glyph_id, metrics, tf, out, depth)?;
+            self.flatten_composite(&mut r, loca, glyph_id, metrics, tf, out, depth, budget)?;
         }
         Ok(true)
     }
 
+    // Same parameter set as `flatten`, plus the component reader.
+    #[allow(clippy::too_many_arguments)]
     fn flatten_composite(
         &self,
         r: &mut Reader<'_>,
@@ -423,6 +467,7 @@ impl<'a> Glyf<'a> {
         parent_tf: &Transform,
         out: &mut FlatGlyph,
         depth: u8,
+        budget: &mut FlattenBudget,
     ) -> Result<()> {
         loop {
             let flags = r.read_u16()?;
@@ -504,6 +549,7 @@ impl<'a> Glyf<'a> {
                 &child_combined,
                 &mut child_flat,
                 depth + 1,
+                budget,
             )?;
 
             // Resolve the translation. Anchor-mode (ARGS_ARE_XY_VALUES
@@ -598,7 +644,6 @@ impl<'a> Glyf<'a> {
             if flags & COMP_MORE_COMPONENTS == 0 {
                 break;
             }
-            let _ = (COMP_ROUND_XY_TO_GRID, COMP_USE_MY_METRICS); // silence unused constants
         }
         // If WE_HAVE_INSTRUCTIONS is set the composite ends with a
         // u16 instruction count + that many bytes. We don't execute
@@ -674,9 +719,9 @@ struct Contour {
     end: usize,
 }
 
-/// Two-pass flatten target. Phase 1 of [`Glyf::outline`] fills this
+/// Two-pass flatten target. Pass 1 of [`Glyf::outline`] fills this
 /// with absolute coordinates (deltas + composite transforms already
-/// folded in); phase 2 walks `contours` and dispatches to the
+/// folded in); pass 2 walks `contours` and dispatches to the
 /// caller's [`OutlineSink`]. Composite anchor-mode resolution reaches
 /// into `points` to compute the parent <-> child anchor pair, which is
 /// why the intermediate representation exists.
@@ -727,6 +772,7 @@ fn flatten_simple_glyph(
     deltas: Option<&[(f32, f32)]>,
     tf: &Transform,
     out: &mut FlatGlyph,
+    budget: &mut FlattenBudget,
 ) -> Result<()> {
     if num_contours == 0 {
         return Ok(());
@@ -736,11 +782,8 @@ fn flatten_simple_glyph(
     for _ in 0..num_contours {
         end_pts.push(r.read_u16()?);
     }
-    let total_points = end_pts
-        .last()
-        .copied()
-        .map(|e| e.saturating_add(1))
-        .unwrap_or(0);
+    let total_points = end_pts.last().map_or(0, |e| e.saturating_add(1));
+    budget.take_points(usize::from(total_points))?;
 
     // instructions: skip.
     let instr_len = r.read_u16()? as usize;
@@ -954,11 +997,7 @@ fn emit_contour<S: OutlineSink>(coords: &[(f32, f32)], flags: &[FlatPoint], sink
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::vec_init_then_push,
-    clippy::cast_possible_wrap,
-    clippy::same_item_push
-)]
+#[allow(clippy::vec_init_then_push, clippy::same_item_push)]
 mod tests {
     use super::*;
     use crate::tables::head::IndexToLocFormat;
