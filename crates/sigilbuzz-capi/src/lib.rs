@@ -199,8 +199,6 @@ struct FontState {
     /// these fields through `build_font`.
     x_scale: i32,
     y_scale: i32,
-    x_ppem: c_uint,
-    y_ppem: c_uint,
     /// Declared before `coords` so it drops before the slice it
     /// borrows.
     font: Font<'static>,
@@ -857,8 +855,6 @@ pub unsafe extern "C" fn hb_font_create(face: *mut hb_face_t) -> *mut hb_font_t 
     let state = FontState {
         x_scale: upem_signed,
         y_scale: upem_signed,
-        x_ppem: 0,
-        y_ppem: 0,
         font,
         coords: Vec::new(),
     };
@@ -951,19 +947,17 @@ pub unsafe extern "C" fn hb_font_get_scale(
     }
 }
 
+/// Accepted so HarfBuzz callers link. It has no effect.
+///
+/// HarfBuzz uses the pixels-per-em values for hinting adjustments:
+/// the ppem-specific deltas in GPOS Device tables, and the bitmap
+/// strike it measures glyph extents from. sigilbuzz applies neither,
+/// so the values would change nothing and are not stored.
+///
 /// # Safety
-/// `font` must be null or valid.
+/// Any arguments are accepted. None are dereferenced.
 #[no_mangle]
-pub unsafe extern "C" fn hb_font_set_ppem(font: *mut hb_font_t, x_ppem: c_uint, y_ppem: c_uint) {
-    if font.is_null() {
-        return;
-    }
-    // SAFETY: `font` is non-null and the caller guarantees it points
-    // to a live `hb_font_t`.
-    let inner = unsafe { &(*font).inner };
-    let mut state = inner.state.lock();
-    state.x_ppem = x_ppem;
-    state.y_ppem = y_ppem;
+pub unsafe extern "C" fn hb_font_set_ppem(_font: *mut hb_font_t, _x_ppem: c_uint, _y_ppem: c_uint) {
 }
 
 /// # Safety
