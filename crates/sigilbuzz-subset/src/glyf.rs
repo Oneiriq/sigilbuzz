@@ -8,10 +8,9 @@
 //! Hint instructions (the simple-glyph `instructions[...]` byte run
 //! and any composite glyph's tail when `WE_HAVE_INSTRUCTIONS` is set)
 //! are stripped when [`crate::SubsetInput::retain_hints`] is false.
-//! Hints reference state from `cvt`/`fpgm`/`prep` which we never
-//! preserve, so leaving them in would crash a TT interpreter that
-//! tried to run them. Removing hints does not affect non-hinted
-//! rendering.
+//! Hints reference state from `cvt`/`fpgm`/`prep`, which the subset
+//! keeps only when `retain_hints` is set. Removing hints does not
+//! affect non-hinted rendering.
 //!
 //! `loca` is rebuilt from the new glyph offsets. Short loca holds
 //! `u16` offsets divided by two and tops out at 128 KiB; long loca

@@ -143,6 +143,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Glyph index alias. sigilbuzz uses raw `u16` glyph ids throughout.
 pub type GlyphId = u16;
 
+/// TrueType hinting tables that [`SubsetInput::retain_hints`] keeps or
+/// drops along with the glyph instructions.
+const HINTING_TABLES: [[u8; 4]; 3] = [*b"cvt ", *b"fpgm", *b"prep"];
+
 /// Subset configuration.
 #[derive(Debug, Clone)]
 pub struct SubsetInput {
@@ -150,8 +154,11 @@ pub struct SubsetInput {
     /// pieces will be added automatically by the dependency walker.
     /// Glyph 0 (`.notdef`) is always retained even when omitted.
     pub gids: Vec<GlyphId>,
-    /// If true, retain hinting / instructions. Defaults to false.
-    /// Currently honored only for simple glyphs in `glyf`.
+    /// If true, retain TrueType hinting: the instructions of simple
+    /// and composite glyphs in `glyf`, plus the `cvt `, `fpgm`, and
+    /// `prep` tables they depend on. Defaults to false, which strips
+    /// the instructions and drops those tables. CFF and CFF2
+    /// charstrings keep their hint operators either way.
     pub retain_hints: bool,
     /// If true, drop tables that don't have a subset implementation
     /// (the default). If false, encountering an unsupported table
@@ -468,10 +475,24 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         }
     }
 
+    // TrueType hinting tables. Kept glyph instructions call functions
+    // from `fpgm`, run after `prep`, and read `cvt `. None of the three
+    // names a glyph id, so they pass through verbatim when the
+    // instructions are kept, and are dropped with them otherwise.
+    if input.retain_hints {
+        for t in HINTING_TABLES {
+            if face.record(t).is_some() {
+                let bytes = face.table_bytes(t).map_err(SubsetError::from)?;
+                tables.push((t, bytes.to_vec()));
+            }
+        }
+    }
+
     // Walk every other table the source carries and decide.
     for rec in face.records() {
-        // Skip tables we already emitted.
-        if tables.iter().any(|(t, _)| *t == rec.tag) {
+        // Skip tables we already emitted, and hinting tables that
+        // `retain_hints` dropped on purpose.
+        if tables.iter().any(|(t, _)| *t == rec.tag) || HINTING_TABLES.contains(&rec.tag) {
             continue;
         }
         // Layout tables hit the plan above; even when their plan is
