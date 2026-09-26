@@ -27,7 +27,7 @@
 //!   pointing at a `<linearGradient>` / `<radialGradient>`.
 //! - Stroking: `stroke`, `stroke-width`, `stroke-linecap` (butt
 //!   minimum, round / square as best-effort), `stroke-linejoin` (miter
-//!   minimum, round / bevel as best-effort).
+//!   and bevel, round as best-effort).
 //! - `<linearGradient>` / `<radialGradient>` with `<stop>` children;
 //!   ramp evaluation reuses the COLRv1 implementation in
 //!   [`crate::colrv1`].
@@ -2633,9 +2633,9 @@ fn emit_stroked_polyline(
         out.push(PathOp::Close);
     }
 
-    // Joins. For miter (default): overlapping rectangles already paint
-    // the joint correctly. For round / bevel we approximate with a
-    // disk / triangle at each vertex.
+    // Joins. The overlapping rectangles leave a notch on the outer side
+    // of every corner. Round joins fill it with a disk at each vertex.
+    // Miter and bevel joins fill it with wedges below.
     if join == LineJoin::Round || cap == LineCap::Round {
         let join_at = |out: &mut Vec<PathOp>, p: (f32, f32)| {
             emit_disk(out, p.0, p.1, half);
@@ -2654,10 +2654,11 @@ fn emit_stroked_polyline(
         }
     }
 
-    // Miter spikes: when adjacent segments don't form a near-straight
-    // angle, fill the wedge between them so a sharp corner doesn't
-    // leave a notch. Falls back to bevel beyond the miter limit.
-    if join == LineJoin::Miter && n >= 3 {
+    // Miter and bevel wedges: when adjacent segments don't form a
+    // near-straight angle, fill the wedge between them so a sharp
+    // corner doesn't leave a notch. Miters fall back to bevels beyond
+    // the miter limit.
+    if join != LineJoin::Round && n >= 3 {
         let span = if closed { n } else { n - 2 };
         for i in 0..span {
             if out.len() >= MAX_STROKE_OPS {
@@ -2666,7 +2667,7 @@ fn emit_stroked_polyline(
             let prev = points[if closed && i == 0 { n - 1 } else { i }];
             let cur = points[if closed { (i + 1) % n } else { i + 1 }];
             let next = points[if closed { (i + 2) % n } else { i + 2 }];
-            emit_miter_join(out, prev, cur, next, half);
+            emit_join_wedges(out, prev, cur, next, half, join);
         }
     }
 }
@@ -2695,16 +2696,40 @@ fn emit_disk(out: &mut Vec<PathOp>, cx: f32, cy: f32, r: f32) {
     out.push(PathOp::Close);
 }
 
-/// Emits a miter-join wedge at vertex `cur`, given the previous and
-/// next polyline points. When the join angle is reflex enough that the
-/// miter would exceed `MITER_LIMIT * width`, a bevel triangle is used
-/// instead (matching SVG's stroke-miterlimit default of 4).
-fn emit_miter_join(
+/// Stroke edge corners at a join vertex `cur`: where the left and
+/// right edges of the incoming segment end, and where those of the
+/// outgoing segment start. Left is left of the direction of travel.
+struct JoinCorners {
+    a_left: (f32, f32),
+    b_left: (f32, f32),
+    a_right: (f32, f32),
+    b_right: (f32, f32),
+}
+
+/// Emits the bevel at `cur`: one triangle on each side, joining the
+/// join center to the two edge corners. Only the outer one shows. The
+/// inner one lies where the segment rectangles already overlap.
+fn emit_bevel_join(out: &mut Vec<PathOp>, cur: (f32, f32), c: &JoinCorners) {
+    for (a, b) in [(c.a_left, c.b_left), (c.a_right, c.b_right)] {
+        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
+        out.push(PathOp::LineTo { x: a.0, y: a.1 });
+        out.push(PathOp::LineTo { x: b.0, y: b.1 });
+        out.push(PathOp::Close);
+    }
+}
+
+/// Emits the join wedges at vertex `cur`, given the previous and next
+/// polyline points. A bevel join is a triangle on each side. A miter
+/// join extends the edges to their meeting point, and becomes a bevel
+/// when the miter would exceed `MITER_LIMIT * width` (SVG's
+/// stroke-miterlimit default of 4). Round joins are drawn elsewhere.
+fn emit_join_wedges(
     out: &mut Vec<PathOp>,
     prev: (f32, f32),
     cur: (f32, f32),
     next: (f32, f32),
     half: f32,
+    join: LineJoin,
 ) {
     let (ax, ay) = (cur.0 - prev.0, cur.1 - prev.1);
     let la = (ax * ax + ay * ay).sqrt();
@@ -2718,68 +2743,39 @@ fn emit_miter_join(
     // Outer perpendicular (left of travel) on each segment.
     let (na, na2) = ((-tay) * half, tax * half);
     let (nb, nb2) = ((-tby) * half, tbx * half);
-    // Outer corners.
-    let p_a_left = (cur.0 + na, cur.1 + na2);
-    let p_b_left = (cur.0 + nb, cur.1 + nb2);
-    let p_a_right = (cur.0 - na, cur.1 - na2);
-    let p_b_right = (cur.0 - nb, cur.1 - nb2);
+    let corners = JoinCorners {
+        a_left: (cur.0 + na, cur.1 + na2),
+        b_left: (cur.0 + nb, cur.1 + nb2),
+        a_right: (cur.0 - na, cur.1 - na2),
+        b_right: (cur.0 - nb, cur.1 - nb2),
+    };
+    if join == LineJoin::Bevel {
+        emit_bevel_join(out, cur, &corners);
+        return;
+    }
 
     // Compute miter point on the outer side. A small angle between
-    // segments means a long spike. Bail to bevel beyond the limit.
+    // segments means a long spike. Bail to bevel beyond the limit or
+    // at a near 180 degree turn.
     let dot = tax * tbx + tay * tby;
     let denom = 1.0 + dot;
-    if denom <= 1e-6 {
-        // Near 180° turn; bevel triangle on each side handles it.
-        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
-        out.push(PathOp::LineTo {
-            x: p_a_left.0,
-            y: p_a_left.1,
-        });
-        out.push(PathOp::LineTo {
-            x: p_b_left.0,
-            y: p_b_left.1,
-        });
-        out.push(PathOp::Close);
-        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
-        out.push(PathOp::LineTo {
-            x: p_a_right.0,
-            y: p_a_right.1,
-        });
-        out.push(PathOp::LineTo {
-            x: p_b_right.0,
-            y: p_b_right.1,
-        });
-        out.push(PathOp::Close);
-        return;
-    }
     // Miter spike length per the SVG appendix:
     //   m = half / sin(theta/2)   where  cos(theta) = -dot for "turn"
-    let miter_ratio = (2.0_f32 / denom).sqrt(); // = 1 / sin(theta/2)
+    let miter_ratio = if denom > 1e-6 {
+        (2.0_f32 / denom).sqrt() // = 1 / sin(theta/2)
+    } else {
+        f32::INFINITY
+    };
     if miter_ratio > MITER_LIMIT {
-        // Bevel: just two triangles connecting outer corners to the
-        // join center.
-        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
-        out.push(PathOp::LineTo {
-            x: p_a_left.0,
-            y: p_a_left.1,
-        });
-        out.push(PathOp::LineTo {
-            x: p_b_left.0,
-            y: p_b_left.1,
-        });
-        out.push(PathOp::Close);
-        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
-        out.push(PathOp::LineTo {
-            x: p_a_right.0,
-            y: p_a_right.1,
-        });
-        out.push(PathOp::LineTo {
-            x: p_b_right.0,
-            y: p_b_right.1,
-        });
-        out.push(PathOp::Close);
+        emit_bevel_join(out, cur, &corners);
         return;
     }
+    let JoinCorners {
+        a_left: p_a_left,
+        b_left: p_b_left,
+        a_right: p_a_right,
+        b_right: p_b_right,
+    } = corners;
     // Bisector direction.
     let bis_x = tax + tbx;
     let bis_y = tay + tby;
@@ -5012,6 +5008,27 @@ mod tests {
         // No fill (fill="none"), but one stroke fill.
         assert_eq!(doc.fills.len(), 1);
         assert!(doc.fills[0].is_stroke);
+    }
+
+    /// Strokes a right-angle corner at (50, 10) with the given join
+    /// and reports whether two pixels past the outer corner are
+    /// painted: (51, 8) lies inside the bevel, (53, 6) only inside the
+    /// miter.
+    fn outer_corner_pixels(join: &str) -> (bool, bool) {
+        let xml = alloc::format!(
+            r##"<svg viewBox="0 0 64 64"><path d="M 10 10 L 50 10 L 50 50" stroke="#000"
+                stroke-width="8" stroke-linejoin="{join}" fill="none"/></svg>"##
+        );
+        let doc = parse_document(&xml).unwrap();
+        let mut pix = ColorPixmap::new(64, 64);
+        render_doc(&mut pix, &doc, &Affine::identity(), 0.25);
+        (pix.get(51, 8)[3] > 0, pix.get(53, 6)[3] > 0)
+    }
+
+    #[test]
+    fn bevel_join_fills_the_outer_corner_without_a_spike() {
+        assert_eq!(outer_corner_pixels("bevel"), (true, false));
+        assert_eq!(outer_corner_pixels("miter"), (true, true));
     }
 
     #[test]
