@@ -159,6 +159,10 @@ pub struct InstanceInput {
     /// font as variable. A consumer that applies the variation tables
     /// on top of the baked values adds the deltas a second time unless
     /// `coords` is the default instance.
+    ///
+    /// Has no effect when [`InstanceInput::axis_pins`] keeps any axis
+    /// variable. The output is then still a variable font, so its
+    /// trimmed variation tables always stay.
     pub drop_var_tables: bool,
     /// Per-axis pin policy. An empty vector means "pin every axis"
     /// (the existing full-instancing behavior). When non-empty,
@@ -527,11 +531,9 @@ fn cff2_bake(
 ///   trimmed deltas so a shaper at `(Keep coords)` produces exactly
 ///   what the source produced at `(Keep coords, Pin coords)`.
 ///
-/// `drop_var_tables = false` is honored. The trimmed variation
-/// tables ride out either way; the field controls whether tables like
-/// `MVAR` get folded down into static metric fields. For the partial
-/// path we always keep the (trimmed) variation tables: they still
-/// drive the live axes.
+/// `input.drop_var_tables` is not read here. The output keeps live
+/// axes, so the trimmed variation tables always stay: they drive
+/// those axes.
 fn partial_instance(
     face: &Face<'_>,
     input: &InstanceInput,
