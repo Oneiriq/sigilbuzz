@@ -45,6 +45,11 @@ Added:
 - `sigilbuzz-paint`: `evaluate_with` and `EvalOptions` choose the variation coordinates,
   the CPAL palette and the foreground color in one call.
 - `sigilbuzz-render`: `Rasterizer::with_foreground` picks the COLR foreground color.
+- COLR `ClipList` parsing: `tables::colr::{ClipList, ClipBox}` and
+  `Colr::{clip_list, clip_box, clip_list_offset, var_index_map_offset}`.
+- `sigilbuzz-capi`: `hb_paint_funcs_set_color_glyph_func`. `hb_version` reports 8.2.0,
+  the HarfBuzz release that added that callback.
+- `sigilbuzz-paint`: `Transform2D::inverse`.
 
 Changed:
 
@@ -108,6 +113,18 @@ Changed:
 - `sigilbuzz-render` 0.9.0 paints COLRv1 foreground layers black by default (they were
   white), the same as COLRv0.
 - `sigilbuzz-svg` 0.2.0 writes foreground paints as `currentColor`.
+- COLRv1 glyphs are clipped to their ClipList box, or to bounds computed from the paint
+  tree, as in HarfBuzz; a glyph with unbounded paint renders empty. This holds in
+  `sigilbuzz-render` (pixmaps are sized to the clip box), `sigilbuzz-svg` and
+  `hb_font_paint_glyph`, which also emits HarfBuzz's root clip rectangle and offers
+  referenced glyphs to `color_glyph`.
+- `sigilbuzz-paint` reads COLR variation deltas only from the COLR table's own
+  ItemVariationStore and DeltaSetIndexMap. It used to fall back to GDEF's store and
+  read an index map from a made-up GDEF field. The renderers and the SVG writer now
+  draw from the paint walk, and `evaluate_with` emits isolated groups for composites.
+- `rasterize_colrv0_glyph` paints palette entries the font cannot supply in the
+  foreground color instead of returning `NoCpal` or `BadPaletteIndex`, and SVG-in-OT
+  `currentColor` follows `Rasterizer::with_foreground`.
 - The CLI's `--script` and `--language` flags take effect.
 
 - The minimum supported Rust version is now 1.81. The core crate already needed 1.81
@@ -155,6 +172,15 @@ Fixed:
   variable scale, rotate, skew, affine and sweep-angle deltas were added in raw units.
 - `sigilbuzz-render`: `rasterize_colrv1_glyph` ignored its `palette_index`, and sweep
   gradients were mirrored.
+- The COLR v1 header was read with four offsets instead of five, so
+  `Colr::var_store_offset` returned the DeltaSetIndexMap offset and variable COLRv1 fonts
+  built to the spec got no deltas. A v1 table cut short before its last offset is now
+  rejected.
+- COLRv1 rendering in `sigilbuzz-render`, `sigilbuzz-svg` and `evaluate_with`: a
+  transform below a `PaintGlyph` distorted the glyph outline (visible on gradient emoji),
+  composites blended into earlier layers instead of isolated groups, linear gradients
+  ignored their rotation point p2, and radial gradients under a non-uniform scale were
+  approximated.
 - `sigilbuzz-subset`: the subsetter dropped GDEF `MarkGlyphSetsDef`, `AttachList`,
   `LigCaretList` and the ItemVariationStore. Dropping the mark glyph sets broke every
   lookup that uses a mark filtering set.

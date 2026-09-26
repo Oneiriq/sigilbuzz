@@ -97,7 +97,7 @@ HarfBuzz added in 8.2:
 
 Differences from HarfBuzz: there is no `hb_paint_funcs_get_empty`,
 `hb_paint_funcs_set_user_data`, or `hb_paint_*` emitter functions, and the `image`
-callback for SVG and bitmap glyphs is never fired. `hb_version` still reports 8.0.0.
+callback for SVG and bitmap glyphs is never fired.
 `push_clip_glyph` expects the outline at font scale, as `hb_font_draw_glyph` would draw
 it, but sigilbuzz does not export `hb_font_draw_glyph`, so callers bring their own
 outlines.
@@ -136,7 +136,8 @@ HarfBuzz: drop those `hb_set_destroy` calls.
 
 ## Versioning
 
-`hb_version()` returns `(8, 0, 0)` to signal compatibility with the HarfBuzz 8.x ABI.
+`hb_version()` returns `(8, 2, 0)`, the HarfBuzz release whose API this crate covers (8.2 added
+the `color_glyph` paint callback).
 `hb_version_string()` returns `"sigilbuzz X.Y.Z (hb-compatible)"`, so logs and bug
 reports show which library is actually running.
 

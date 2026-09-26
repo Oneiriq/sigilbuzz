@@ -1464,12 +1464,13 @@ pub unsafe extern "C" fn hb_language_from_string(s: *const c_char, len: c_int) -
 // Version
 // ---------------------------------------------------------------------------
 
-/// HarfBuzz ABI version sigilbuzz advertises. We pick 8.0.0, the
-/// current stable major as of 2025, so consumers that gate on
-/// `hb_version_atleast(8, 0, 0)` succeed. The actual sigilbuzz
+/// HarfBuzz ABI version sigilbuzz advertises: 8.2.0, the release that
+/// added the `color_glyph` paint callback, the newest piece of the
+/// hb-paint surface this crate implements. Consumers that gate on
+/// `hb_version_atleast(8, 2, 0)` find it. The actual sigilbuzz
 /// version is exposed via `hb_version_string()`.
 const HB_COMPAT_MAJOR: c_uint = 8;
-const HB_COMPAT_MINOR: c_uint = 0;
+const HB_COMPAT_MINOR: c_uint = 2;
 const HB_COMPAT_MICRO: c_uint = 0;
 
 /// # Safety
@@ -1710,13 +1711,13 @@ mod tests {
     }
 
     #[test]
-    fn version_advertises_hb_compat_eight() {
+    fn version_advertises_hb_compat_eight_two() {
         let mut major: c_uint = 0;
         let mut minor: c_uint = 0;
         let mut micro: c_uint = 0;
         unsafe { hb_version(&mut major, &mut minor, &mut micro) };
         assert_eq!(major, 8);
-        assert_eq!(minor, 0);
+        assert_eq!(minor, 2);
         assert_eq!(micro, 0);
     }
 
