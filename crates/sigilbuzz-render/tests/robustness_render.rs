@@ -147,11 +147,11 @@ fn colr_v1() -> Vec<u8> {
     let mut c = Vec::new();
     c.extend_from_slice(&1u16.to_be_bytes()); // version
     c.extend_from_slice(&0u16.to_be_bytes()); // numBaseGlyphRecords
-    c.extend_from_slice(&30u32.to_be_bytes()); // baseGlyphRecordsOffset
-    c.extend_from_slice(&30u32.to_be_bytes()); // layerRecordsOffset
+    c.extend_from_slice(&34u32.to_be_bytes()); // baseGlyphRecordsOffset
+    c.extend_from_slice(&34u32.to_be_bytes()); // layerRecordsOffset
     c.extend_from_slice(&0u16.to_be_bytes()); // numLayerRecords
-    c.extend_from_slice(&30u32.to_be_bytes()); // baseGlyphListOffset
-    c.extend_from_slice(&[0; 12]); // layerList, clipList, varStore
+    c.extend_from_slice(&34u32.to_be_bytes()); // baseGlyphListOffset
+    c.extend_from_slice(&[0; 16]); // layerList, clipList, varIndexMap, varStore
     c.extend_from_slice(&1u32.to_be_bytes()); // BaseGlyphList count
     c.extend_from_slice(&1u16.to_be_bytes()); // gid
     c.extend_from_slice(&10u32.to_be_bytes()); // paint offset

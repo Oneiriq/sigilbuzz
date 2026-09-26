@@ -112,12 +112,12 @@ pub fn evaluate_at_coords(face: &Face<'_>, gid: GlyphId, coords: &[f32]) -> Vec<
         return out;
     };
     let cpal = face.cpal().ok().flatten();
-    let var_store = resolve_var_store(&colr).or_else(|| resolve_gdef_var_store(face));
+    let var_store = resolve_var_store(&colr);
     let Some(root) = colr.paint(gid) else {
         return out;
     };
 
-    let index_map = resolve_index_map(face);
+    let index_map = resolve_index_map(&colr);
     let mut ctx = EvalCtx {
         colr: &colr,
         cpal: cpal.as_ref(),
@@ -143,13 +143,10 @@ struct EvalCtx<'a, 'b> {
     colr: &'b Colr<'a>,
     cpal: Option<&'b Cpal<'a>>,
     var_store: Option<&'b ItemVariationStore<'a>>,
-    /// Optional DeltaSetIndexMap that redirects a paint's
-    /// `var_index_base + field_index` through an indirection table
-    /// before it hits the IVS. Spec-compliant variable color fonts
-    /// use this to share IVS rows across many paint records: without
-    /// it the evaluator would treat `var_index_base` as a literal
-    /// `(outer, inner)` pair, which only works for trivially-laid-out
-    /// IVS subtables.
+    /// Optional DeltaSetIndexMap from the COLR header. It redirects
+    /// a paint's `var_index_base + field_index` through an
+    /// indirection table before it hits the IVS. Without a map the
+    /// index splits directly into an `(outer, inner)` pair.
     index_map: Option<DeltaSetIndexMap<'a>>,
     coords: &'b [f32],
     /// Glyph ids whose paint trees are currently on the walk stack.
@@ -188,52 +185,12 @@ fn resolve_var_store<'a>(colr: &Colr<'a>) -> Option<ItemVariationStore<'a>> {
     ItemVariationStore::parse(&data[start..]).ok()
 }
 
-/// Falls back to the GDEF v1.3+ shared `ItemVariationStore` when the
-/// COLR table doesn't carry its own. Real-world variable color fonts
-/// often park the IVS in GDEF and reach into it from both COLR and
-/// GPOS. Without this fallback the evaluator silently emits the
-/// static (no-deltas) output for any such font even when `coords` is
-/// non-empty.
-fn resolve_gdef_var_store<'a>(face: &Face<'a>) -> Option<ItemVariationStore<'a>> {
-    let gdef = face.table_bytes(*b"GDEF").ok()?;
-    if gdef.len() < 18 {
-        return None;
-    }
-    let minor = u16::from_be_bytes([gdef[2], gdef[3]]);
-    if minor < 3 {
-        return None;
-    }
-    let ivs_off = u32::from_be_bytes([gdef[14], gdef[15], gdef[16], gdef[17]]) as usize;
-    if ivs_off == 0 || ivs_off >= gdef.len() {
-        return None;
-    }
-    ItemVariationStore::parse(&gdef[ivs_off..]).ok()
-}
-
-/// Looks for a DeltaSetIndexMap supplied via the font's GDEF table.
-///
-/// The OpenType spec puts the COLRv1 DeltaSetIndexMap inside the COLR
-/// header (`varIndexMapOffset`); sigilbuzz's COLR parser doesn't yet
-/// surface that field, so the paint crate accepts an alternate
-/// location: a paint-crate convention places a u32
-/// `deltaSetIndexMapOffset` at byte 18 of a v1.3 GDEF header, right
-/// after `itemVarStoreOffset`. Real-world v1.3 GDEFs leave those
-/// bytes absent, so the lookup returns `None` for them and the
-/// evaluator falls back to the no-indirection path.
-fn resolve_index_map<'a>(face: &Face<'a>) -> Option<DeltaSetIndexMap<'a>> {
-    let gdef = face.table_bytes(*b"GDEF").ok()?;
-    if gdef.len() < 22 {
-        return None;
-    }
-    let minor = u16::from_be_bytes([gdef[2], gdef[3]]);
-    if minor < 3 {
-        return None;
-    }
-    let map_off = u32::from_be_bytes([gdef[18], gdef[19], gdef[20], gdef[21]]) as usize;
-    if map_off == 0 || map_off >= gdef.len() {
-        return None;
-    }
-    DeltaSetIndexMap::parse(gdef, map_off)
+/// Resolves the DeltaSetIndexMap referenced by the COLRv1 header, if
+/// any. A missing or malformed map yields `None`, and variation
+/// indices then map directly to `(outer, inner)` pairs.
+fn resolve_index_map<'a>(colr: &Colr<'a>) -> Option<DeltaSetIndexMap<'a>> {
+    let off = colr.var_index_map_offset()?;
+    DeltaSetIndexMap::parse(colr.data(), usize::try_from(off).ok()?)
 }
 
 /// Walks one paint node. `xform` is the transform inherited from the

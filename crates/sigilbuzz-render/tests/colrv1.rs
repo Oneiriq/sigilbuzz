@@ -154,7 +154,7 @@ fn build_cpal_v0(colors: &[(u8, u8, u8, u8)]) -> Vec<u8> {
 /// BaseGlyphList start (same convention as the paint-crate evaluator
 /// fixtures).
 fn build_v1_header(glyph_id: u16) -> Vec<u8> {
-    let header_len: u32 = 30;
+    let header_len: u32 = 34;
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // version
     out.extend_from_slice(&0u16.to_be_bytes()); // numBaseGlyphRecords (v0)
@@ -164,8 +164,10 @@ fn build_v1_header(glyph_id: u16) -> Vec<u8> {
     out.extend_from_slice(&header_len.to_be_bytes()); // baseGlyphListOffset
     out.extend_from_slice(&0u32.to_be_bytes()); // layerListOffset
     out.extend_from_slice(&0u32.to_be_bytes()); // clipListOffset
-    out.extend_from_slice(&0u32.to_be_bytes()); // varStoreOffset
-                                                // BaseGlyphList: numRecords, then (gid, paintOffset).
+    out.extend_from_slice(&0u32.to_be_bytes()); // varIndexMapOffset
+    out.extend_from_slice(&0u32.to_be_bytes()); // itemVariationStoreOffset
+
+    // BaseGlyphList: numRecords, then (gid, paintOffset).
     out.extend_from_slice(&1u32.to_be_bytes());
     out.extend_from_slice(&glyph_id.to_be_bytes());
     out.extend_from_slice(&10u32.to_be_bytes());
@@ -474,16 +476,16 @@ fn build_var_solid_font() -> Vec<u8> {
     // when coords = [1.0].
     let ivs = build_ivs_one_axis_one_short_delta(-8192_i16);
 
-    // Compute COLR layout: header (30 bytes) -> paint body -> IVS.
-    // We need the IVS to live inside the COLR table data, accessed
-    // through `var_store_offset`. So we set varStoreOffset in the
-    // header to point past the paint body.
+    // Compute COLR layout: header (34 bytes), then the paint body,
+    // then the IVS. The IVS lives inside the COLR table data, reached
+    // through `itemVariationStoreOffset`, which points past the paint
+    // body.
     //
-    // Plan: write the v1 header with placeholder varStoreOffset, then
+    // Plan: write the v1 header with a placeholder store offset, then
     // append PaintVarSolid (8 bytes), then align, then the IVS, then
-    // patch varStoreOffset in the header.
+    // patch the store offset in the header.
     let mut colr = build_v1_header(1);
-    let var_store_off_slot = 26; // varStoreOffset is the last u32 in the header
+    let var_store_off_slot = 30; // itemVariationStoreOffset is the last u32 in the header
                                  // PaintGlyph(child=PaintVarSolid, outline=gid 1).
     let pglyph_start = colr.len();
     colr.push(10); // PaintGlyph

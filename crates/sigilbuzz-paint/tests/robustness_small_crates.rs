@@ -58,7 +58,7 @@ fn build_cpal() -> Vec<u8> {
 /// `layer_list_offset` is written into the header as given.
 /// The root paint offset is patched in by the caller.
 fn build_v1_header(layer_list_offset: u32) -> (Vec<u8>, usize) {
-    let header_len: u32 = 30;
+    let header_len: u32 = 34;
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // version
     out.extend_from_slice(&0u16.to_be_bytes()); // numBaseGlyphRecords
@@ -68,7 +68,8 @@ fn build_v1_header(layer_list_offset: u32) -> (Vec<u8>, usize) {
     out.extend_from_slice(&header_len.to_be_bytes()); // baseGlyphListOffset
     out.extend_from_slice(&layer_list_offset.to_be_bytes()); // layerListOffset
     out.extend_from_slice(&0u32.to_be_bytes()); // clipListOffset
-    out.extend_from_slice(&0u32.to_be_bytes()); // varStoreOffset
+    out.extend_from_slice(&0u32.to_be_bytes()); // varIndexMapOffset
+    out.extend_from_slice(&0u32.to_be_bytes()); // itemVariationStoreOffset
     let bgl = out.len();
     out.extend_from_slice(&1u32.to_be_bytes()); // numBaseGlyphPaintRecords
     out.extend_from_slice(&ROOT_GID.to_be_bytes());
@@ -123,7 +124,7 @@ fn shared_colr_layers_fan_out_terminates() {
     // PaintColrLayers(255 layers, first 0). Every layer is the same
     // node again, so a plain walk visits 255^64 nodes before the depth
     // cap stops it. It emits nothing, it just never returns.
-    let layer_list = 40usize;
+    let layer_list = 44usize;
     let paint = layer_list + 4 + 255 * 4;
     let (mut colr, bgl) = build_v1_header(layer_list as u32);
     assert_eq!(colr.len(), layer_list);
@@ -173,7 +174,7 @@ fn shared_gradient_stops_are_bounded() {
     // one PaintLinearGradient whose ColorLine holds 65535 stops. The
     // node count stays small, but resolving every stop would produce
     // over four billion ColorStop values.
-    let layer_list = 40usize;
+    let layer_list = 44usize;
     let entries = 510usize;
     let root = layer_list + 4 + entries * 4;
     let inner = root + 6;

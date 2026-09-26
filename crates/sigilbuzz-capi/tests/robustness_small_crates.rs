@@ -410,7 +410,7 @@ mod paint {
     /// COLRv1 with one base glyph whose paint is
     /// PaintGlyph(42) -> PaintSolid(palette 0).
     fn build_colr(base_glyph: u16) -> Vec<u8> {
-        let header_len: u32 = 30;
+        let header_len: u32 = 34;
         let mut out = Vec::new();
         out.extend_from_slice(&1u16.to_be_bytes()); // version
         out.extend_from_slice(&0u16.to_be_bytes()); // numBaseGlyphRecords
@@ -418,7 +418,7 @@ mod paint {
         out.extend_from_slice(&header_len.to_be_bytes()); // layerRecordsOffset
         out.extend_from_slice(&0u16.to_be_bytes()); // numLayerRecords
         out.extend_from_slice(&header_len.to_be_bytes()); // baseGlyphListOffset
-        out.extend_from_slice(&[0; 12]); // layerList, clipList, varIndexMap
+        out.extend_from_slice(&[0; 16]); // layerList, clipList, varIndexMap, varStore
         out.extend_from_slice(&1u32.to_be_bytes()); // BaseGlyphList count
         out.extend_from_slice(&base_glyph.to_be_bytes());
         out.extend_from_slice(&10u32.to_be_bytes()); // paint offset

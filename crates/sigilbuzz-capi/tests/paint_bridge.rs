@@ -75,7 +75,7 @@ fn build_cpal_v0(colors: &[(u8, u8, u8, u8)]) -> Vec<u8> {
 }
 
 fn build_v1_header(glyph_id: u16) -> Vec<u8> {
-    let header_len: usize = 30;
+    let header_len: usize = 34;
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes());
@@ -83,9 +83,10 @@ fn build_v1_header(glyph_id: u16) -> Vec<u8> {
     out.extend_from_slice(&(header_len as u32).to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes());
     out.extend_from_slice(&(header_len as u32).to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&0u32.to_be_bytes()); // layerListOffset
+    out.extend_from_slice(&0u32.to_be_bytes()); // clipListOffset
+    out.extend_from_slice(&0u32.to_be_bytes()); // varIndexMapOffset
+    out.extend_from_slice(&0u32.to_be_bytes()); // itemVariationStoreOffset
     out.extend_from_slice(&1u32.to_be_bytes());
     out.extend_from_slice(&glyph_id.to_be_bytes());
     out.extend_from_slice(&10u32.to_be_bytes());
@@ -253,7 +254,7 @@ fn build_fvar_wght() -> Vec<u8> {
 /// the axis maximum. The header layout and the store placement follow
 /// the fixtures in `sigilbuzz-paint/tests/evaluator.rs`.
 fn build_var_solid_colr() -> Vec<u8> {
-    let header_len: u32 = 30;
+    let header_len: u32 = 34;
     let mut colr = Vec::new();
     colr.extend_from_slice(&1u16.to_be_bytes()); // version
     colr.extend_from_slice(&0u16.to_be_bytes()); // numBaseGlyphRecords
@@ -263,6 +264,7 @@ fn build_var_solid_colr() -> Vec<u8> {
     colr.extend_from_slice(&header_len.to_be_bytes()); // baseGlyphList
     colr.extend_from_slice(&0u32.to_be_bytes()); // layerList
     colr.extend_from_slice(&0u32.to_be_bytes()); // clipList
+    colr.extend_from_slice(&0u32.to_be_bytes()); // varIndexMap
     let var_store_slot = colr.len();
     colr.extend_from_slice(&0u32.to_be_bytes()); // variation store
                                                  // BaseGlyphList with one record: glyph 7, paint right after it.
