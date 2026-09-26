@@ -393,7 +393,6 @@ fn write_uint_base128(out: &mut Vec<u8>, mut value: u32) {
 // Brotli encoder
 // -----------------------------------------------------------------------------
 
-#[cfg(feature = "woff2")]
 fn brotli_compress(input: &[u8], quality: u8) -> Result<Vec<u8>> {
     use brotli::enc::BrotliEncoderParams;
     use brotli::BrotliCompress;

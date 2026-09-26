@@ -103,19 +103,6 @@ impl DirEntry {
 ///   release doesn't yet handle (e.g. composite-glyph instructions
 ///   are supported, but `hmtx` transform v1 isn't).
 pub fn unwrap_woff2(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
-    #[cfg(not(feature = "woff2"))]
-    {
-        let _ = woff2_bytes;
-        return Err(WoffError::Woff2Disabled);
-    }
-    #[cfg(feature = "woff2")]
-    {
-        unwrap_woff2_inner(woff2_bytes)
-    }
-}
-
-#[cfg(feature = "woff2")]
-fn unwrap_woff2_inner(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
     let mut r = Reader::new(woff2_bytes);
 
     // --- Header ------------------------------------------------------------
@@ -325,7 +312,6 @@ fn unwrap_woff2_inner(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
 /// Largest accepted ratio between the declared table sum and the WOFF2
 /// file size. Real fonts stay far below it. Google's reference decoder
 /// rejects files above the same ratio.
-#[cfg(feature = "woff2")]
 const MAX_PLAUSIBLE_COMPRESSION_RATIO: u64 = 100;
 
 /// Brotli-decompresses `input`, refusing to produce more than
@@ -333,7 +319,6 @@ const MAX_PLAUSIBLE_COMPRESSION_RATIO: u64 = 100;
 ///
 /// Brotli can expand a few bytes into gigabytes, so decoding stops as
 /// soon as the output would pass the declared table sum.
-#[cfg(feature = "woff2")]
 fn brotli_decompress(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
     use brotli::BrotliDecompress;
     use std::io::{self, Cursor, Write};
@@ -412,7 +397,6 @@ mod tests {
     /// Builds a WOFF2 file with one untransformed `name` table that
     /// declares `orig_length` bytes and carries `payload` as its Brotli
     /// stream.
-    #[cfg(feature = "woff2")]
     fn single_table_woff2(orig_length: u8, payload: &[u8]) -> Vec<u8> {
         let mut woff2 = Vec::new();
         woff2.extend_from_slice(&WOFF2_SIGNATURE.to_be_bytes());
@@ -429,7 +413,6 @@ mod tests {
         woff2
     }
 
-    #[cfg(feature = "woff2")]
     fn brotli(raw: &[u8]) -> Vec<u8> {
         let params = brotli::enc::BrotliEncoderParams {
             quality: 1,
@@ -441,7 +424,6 @@ mod tests {
         out
     }
 
-    #[cfg(feature = "woff2")]
     #[test]
     fn unwraps_exact_payload() {
         let raw: Vec<u8> = (0u8..16).collect();
@@ -449,7 +431,6 @@ mod tests {
         assert_eq!(&sfnt[12 + 16..], raw.as_slice());
     }
 
-    #[cfg(feature = "woff2")]
     #[test]
     fn rejects_payload_larger_than_declared() {
         // The table declares 16 bytes but the Brotli stream expands to
@@ -464,14 +445,12 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "woff2")]
     #[test]
     fn rejects_payload_smaller_than_declared() {
         let result = unwrap_woff2(&single_table_woff2(16, &brotli(&[1, 2, 3])));
         assert!(matches!(result, Err(WoffError::Malformed { .. })));
     }
 
-    #[cfg(feature = "woff2")]
     #[test]
     fn rejects_non_zero_transform_version_on_non_glyf_loca() {
         // Build a minimal 1-table WOFF2 whose single directory entry
