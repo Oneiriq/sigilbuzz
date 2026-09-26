@@ -30,12 +30,13 @@
 //!   first x kept second cross <= 256 cells) and the pass-through path
 //!   for larger ones.
 //! - **Type 3 (cursive)**: Coverage + EntryExitRecord array. Filters
-//!   Coverage; drops corresponding entry/exit slots. Anchors travel
-//!   verbatim (coordinates only, no gid references).
+//!   Coverage; drops corresponding entry/exit slots. Anchors carry no
+//!   gid references and are copied whole (identical anchors share one
+//!   copy).
 //! - **Type 4 / 5 / 6 (mark attachment)**: Mark+Base / Mark+Liga /
 //!   Mark1+Mark2 Coverages with parallel MarkArray and BaseArray /
 //!   LigatureArray / Mark2Array entries. Filters both Coverages, drops
-//!   array entries in lockstep. Anchors and class IDs travel verbatim.
+//!   array entries in lockstep. Anchors and class IDs are copied whole.
 //! - **Type 9 (extension)**: pass-through after rewriting the inner
 //!   subtable. Falls back to a lookup drop when the inner type has no
 //!   rewriter.
@@ -47,6 +48,14 @@
 //! - **Type 8 (chained context positioning)**: formats 1 / 2 / 3,
 //!   mirroring the GSUB type-6 byte-level rewriter. Same driver hook
 //!   as type 7 for the lookup-renumber pass.
+//!
+//! # Device and VariationIndex tables
+//!
+//! ValueRecords and AnchorFormat3 records reach `Device` /
+//! `VariationIndex` tables through offsets measured from their parent
+//! table (the subtable, the PairSet, or the Anchor). Every rebuilt
+//! parent copies the tables its records reference and re-points the
+//! offsets; see [`crate::device`].
 
 use alloc::vec::Vec;
 
@@ -217,11 +226,9 @@ fn rewrite_single_adj(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable
             if surviving_gids.is_empty() {
                 return None;
             }
-            Some(emit_single_adj_format1(
-                value_format,
-                value_bytes,
-                &surviving_gids,
-            ))
+            let mut rs = emit_single_adj_format1(value_format, value_bytes, &surviving_gids);
+            carry_devices(&mut rs.bytes, sub, 6, 1, stride, &[(0, value_format)]);
+            Some(rs)
         }
         2 => {
             // Per-glyph ValueRecord array right after the header.
@@ -247,10 +254,37 @@ fn rewrite_single_adj(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable
             if surviving.is_empty() {
                 return None;
             }
-            Some(emit_single_adj_format2(value_format, &surviving))
+            let mut rs = emit_single_adj_format2(value_format, &surviving);
+            let count = surviving.len();
+            carry_devices(&mut rs.bytes, sub, 8, count, stride, &[(0, value_format)]);
+            Some(rs)
         }
         _ => None,
     }
+}
+
+/// Copies the Device / VariationIndex tables referenced by the
+/// ValueRecords that were copied verbatim into `out`, the rebuilt
+/// parent table, and re-points their offsets. `src_parent` is the
+/// source table the offsets are measured from: the subtable, or the
+/// PairSet for PairPos format 1. The records sit in `count` groups of
+/// `stride` bytes starting at `first`, laid out per `records`. See
+/// [`crate::device::relocate_value_records`].
+fn carry_devices(
+    out: &mut Vec<u8>,
+    src_parent: &[u8],
+    first: usize,
+    count: usize,
+    stride: usize,
+    records: &[(usize, u16)],
+) {
+    let run = crate::device::RecordRun {
+        first,
+        count,
+        stride,
+        records,
+    };
+    crate::device::relocate_value_records(out, 0, src_parent, &run);
 }
 
 fn emit_single_adj_format1(
@@ -404,7 +438,18 @@ fn rewrite_pair_pos_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
         // and dedupe.
         survivors.sort_by_key(|(g, _)| *g);
         survivors.dedup_by_key(|(g, _)| *g);
-        let new_set = encode_pair_set(&survivors, v1_size, v2_size);
+        let mut new_set = encode_pair_set(&survivors, v1_size, v2_size);
+        // PairValueRecord device offsets are relative to the PairSet,
+        // so the tables travel inside the rebuilt PairSet body.
+        let formats = [(0, value_format1), (v1_size, value_format2)];
+        carry_devices(
+            &mut new_set,
+            set_bytes,
+            4,
+            survivors.len(),
+            pvr_size,
+            &formats,
+        );
         surviving_sets.push((first_new, new_set));
     }
 
@@ -602,7 +647,7 @@ fn rewrite_pair_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
     let matrix_bytes =
         sub[records_off..records_off + class1_count as usize * class1_stride].to_vec();
 
-    Some(emit_pair_pos_format2(
+    let mut rs = emit_pair_pos_format2(
         value_format1,
         value_format2,
         class1_count,
@@ -611,7 +656,12 @@ fn rewrite_pair_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
         &cd1_bytes_new,
         &cd2_bytes_new,
         &matrix_bytes,
-    ))
+    );
+    let cells = class1_count as usize * class2_count as usize;
+    let v1_size = value_record_size(value_format1);
+    let formats = [(0, value_format1), (v1_size, value_format2)];
+    carry_devices(&mut rs.bytes, sub, records_off, cells, v_pair, &formats);
+    Some(rs)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -769,6 +819,7 @@ fn rewrite_pair_pos_format2_to_format1(
         v1_size,
         v2_size,
         &out_sets,
+        sub,
     ))
 }
 
@@ -828,14 +879,19 @@ fn class_of_gid(sub: &[u8], cd_off: usize, gid: u16) -> u16 {
 
 /// Emits a fmt-1 PairPos given pre-encoded value-pair bodies. Each
 /// body is the concatenation of the source's two ValueRecord byte
-/// sequences (which are gid-independent and travel verbatim).
+/// sequences (which are gid-independent and travel verbatim). Their
+/// device offsets are measured from `src_parent`, the source format 2
+/// subtable; the tables are copied into each new PairSet, which is the
+/// base format 1 measures them from.
 fn emit_pair_pos_format1_from_sets(
     value_format1: u16,
     value_format2: u16,
-    _v1_size: usize,
-    _v2_size: usize,
+    v1_size: usize,
+    v2_size: usize,
     sets: &[PairPosFmt1Set],
+    src_parent: &[u8],
 ) -> RewrittenSubtable {
+    let formats = [(0, value_format1), (v1_size, value_format2)];
     // Re-shape sets into the encoder's expected
     // `(first_new, encoded_pair_set_body)` format.
     let mut surviving_sets: Vec<(u16, Vec<u8>)> = Vec::with_capacity(sets.len());
@@ -846,6 +902,15 @@ fn emit_pair_pos_format1_from_sets(
             set_body.extend_from_slice(&second.to_be_bytes());
             set_body.extend_from_slice(body);
         }
+        let stride = 2 + v1_size + v2_size;
+        carry_devices(
+            &mut set_body,
+            src_parent,
+            4,
+            entries.len(),
+            stride,
+            &formats,
+        );
         surviving_sets.push((*first_new, set_body));
     }
     emit_pair_pos_format1(value_format1, value_format2, &surviving_sets)
@@ -911,30 +976,12 @@ fn rewrite_cursive(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     Some(emit_cursive(&surviving))
 }
 
-/// Reads an anchor table at `offset` inside `sub`. Returns an empty Vec
-/// for null offsets (0). Anchors are 6 bytes (fmt 1), 8 bytes (fmt 2),
-/// or 10 bytes (fmt 3).
+/// Reads an anchor table at `offset` inside `sub` into a standalone
+/// blob. Returns an empty Vec for null offsets (0). Format 3 anchors
+/// carry their Device / VariationIndex tables along, re-pointed
+/// relative to the blob (see [`crate::device::copy_anchor`]).
 fn read_anchor_bytes(sub: &[u8], offset: usize) -> Vec<u8> {
-    if offset == 0 {
-        return Vec::new();
-    }
-    let Some(slice) = sub.get(offset..) else {
-        return Vec::new();
-    };
-    if slice.len() < 6 {
-        return Vec::new();
-    }
-    let fmt = u16::from_be_bytes([slice[0], slice[1]]);
-    let len = match fmt {
-        1 => 6,
-        2 => 8,
-        3 => 10,
-        _ => return Vec::new(),
-    };
-    if slice.len() < len {
-        return Vec::new();
-    }
-    slice[..len].to_vec()
+    crate::device::copy_anchor(sub, offset)
 }
 
 fn emit_cursive(surviving: &[(u16, Vec<u8>, Vec<u8>)]) -> RewrittenSubtable {
@@ -947,21 +994,18 @@ fn emit_cursive(surviving: &[(u16, Vec<u8>, Vec<u8>)]) -> RewrittenSubtable {
     for _ in 0..surviving.len() {
         out.extend_from_slice(&[0u8; 4]); // entry/exit offset placeholders
     }
-    // Anchor bodies, then Coverage.
+    // Anchor bodies (identical anchors share one copy), then Coverage.
+    let mut anchors = crate::device::Dedup::default();
     for (i, (_g, entry, exit)) in surviving.iter().enumerate() {
         let entry_off: u16 = if entry.is_empty() {
             0
         } else {
-            let pos = out.len() as u16;
-            out.extend_from_slice(entry);
-            pos
+            anchors.place(&mut out, entry) as u16
         };
         let exit_off: u16 = if exit.is_empty() {
             0
         } else {
-            let pos = out.len() as u16;
-            out.extend_from_slice(exit);
-            pos
+            anchors.place(&mut out, exit) as u16
         };
         let rec = records_start + i * 4;
         out[rec..rec + 2].copy_from_slice(&entry_off.to_be_bytes());
@@ -1168,6 +1212,7 @@ fn rewrite_mark_attach(
             for _ in 0..component_count * mcc {
                 new_attach.extend_from_slice(&[0u8; 2]);
             }
+            let mut anchors = crate::device::Dedup::default();
             for ci in 0..component_count {
                 for c in 0..mcc {
                     let slot = 2 + (ci * mcc + c) * 2;
@@ -1178,8 +1223,7 @@ fn rewrite_mark_attach(
                     if anchor_bytes.is_empty() {
                         // null offset.
                     } else {
-                        let new_off = new_attach.len() as u16;
-                        new_attach.extend_from_slice(&anchor_bytes);
+                        let new_off = anchors.place(&mut new_attach, &anchor_bytes) as u16;
                         new_attach[new_slot..new_slot + 2].copy_from_slice(&new_off.to_be_bytes());
                     }
                 }
@@ -1226,9 +1270,9 @@ fn emit_mark_attach(
     for _ in 0..surviving_marks.len() {
         out.extend_from_slice(&[0u8; 4]); // markClass + anchorOffset placeholder
     }
+    let mut mark_anchors = crate::device::Dedup::default();
     for (i, (_g, mark_class, anchor_bytes)) in surviving_marks.iter().enumerate() {
-        let anchor_off = (out.len() - mark_array_start) as u16;
-        out.extend_from_slice(anchor_bytes);
+        let anchor_off = (mark_anchors.place(&mut out, anchor_bytes) - mark_array_start) as u16;
         let rec = mark_records_start + i * 4;
         out[rec..rec + 2].copy_from_slice(&mark_class.to_be_bytes());
         out[rec + 2..rec + 4].copy_from_slice(&anchor_off.to_be_bytes());
@@ -1247,13 +1291,13 @@ fn emit_mark_attach(
                 out.extend_from_slice(&[0u8; 2]);
             }
         }
+        let mut base_anchors = crate::device::Dedup::default();
         for (i, (_g, _attach, anchors)) in surviving_bases.iter().enumerate() {
             for (c, anchor) in anchors.iter().enumerate() {
                 if anchor.is_empty() {
                     continue;
                 }
-                let off = (out.len() - base_array_start) as u16;
-                out.extend_from_slice(anchor);
+                let off = (base_anchors.place(&mut out, anchor) - base_array_start) as u16;
                 let slot = records_start + i * mcc * 2 + c * 2;
                 out[slot..slot + 2].copy_from_slice(&off.to_be_bytes());
             }
@@ -2355,6 +2399,9 @@ fn rewrite_chain_context_pos_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<Re
     patch_array(la_slots_start, &new_la);
     Some(RewrittenSubtable { bytes: out })
 }
+
+#[cfg(test)]
+mod device_tests;
 
 #[cfg(test)]
 mod tests {

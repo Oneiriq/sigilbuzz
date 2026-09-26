@@ -766,6 +766,20 @@ pub(crate) fn bake_gpos_at_coords(
     walked.then_some(buf)
 }
 
+/// Zeros every device slot of a GPOS table that points at a
+/// `VariationIndex`. Static fields are left alone, which is exact at
+/// the default instance. Per-ppem hinting `Device` slots are kept.
+///
+/// Used by the subsetter when `retain_variations` is off, so the
+/// static output never references the `ItemVariationStore` it drops.
+pub(crate) fn strip_variation_indices(gpos: &mut [u8]) {
+    walk_gpos_device_slots(gpos, &mut |b, slot| {
+        if slot.delta_format(b) == Some(VARIATION_INDEX_DELTA_FORMAT) {
+            slot.clear(b);
+        }
+    });
+}
+
 #[cfg(test)]
 mod offset_base_tests;
 

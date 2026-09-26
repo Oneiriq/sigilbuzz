@@ -14,7 +14,10 @@ use alloc::vec::Vec;
 
 use sigilbuzz::tables::variation_store::ItemVariationStore;
 
-use super::{bake_gpos_at_coords, walk_gpos_device_slots, VARIATION_INDEX_DELTA_FORMAT};
+use super::{
+    bake_gpos_at_coords, strip_variation_indices, walk_gpos_device_slots,
+    VARIATION_INDEX_DELTA_FORMAT,
+};
 
 /// Delta of the decoy row (item 0) at coord 1.0.
 const DECOY_DELTA: i16 = 100;
@@ -355,4 +358,28 @@ fn rubik_device_slots_all_resolve_to_variation_indices() {
     }));
     assert!(total > 10_000, "expected Rubik device slots, saw {total}");
     assert_eq!(resolved, total);
+}
+
+#[test]
+fn strip_variation_indices_keeps_hinting_devices() {
+    let mut sub = Vec::new();
+    sub.extend_from_slice(&1u16.to_be_bytes()); // posFormat
+    sub.extend_from_slice(&12u16.to_be_bytes()); // coverage
+    sub.extend_from_slice(&0x00C4u16.to_be_bytes()); // xAdv + xAdvDev + yAdvDev
+    sub.extend_from_slice(&30i16.to_be_bytes()); // xAdvance
+    sub.extend_from_slice(&18u16.to_be_bytes()); // xAdvDevice -> VariationIndex
+    sub.extend_from_slice(&24u16.to_be_bytes()); // yAdvDevice -> hinting Device
+    sub.extend_from_slice(&[0, 1, 0, 1, 0, 8]); // coverage at 12
+    sub.extend_from_slice(&variation_index(1)); // 18
+                                                // Device format 1 covering ppem 12..12 at 24.
+    sub.extend_from_slice(&[0, 12, 0, 12, 0, 1, 0x40, 0]);
+    let (mut gpos, sub_off) = wrap_lookup(1, &sub);
+    strip_variation_indices(&mut gpos);
+    assert_eq!(
+        get_u16(&gpos, sub_off + 8),
+        0,
+        "VariationIndex slot cleared"
+    );
+    assert_eq!(get_u16(&gpos, sub_off + 10), 24, "Device slot kept");
+    assert_eq!(get_i16(&gpos, sub_off + 6), 30, "static field untouched");
 }

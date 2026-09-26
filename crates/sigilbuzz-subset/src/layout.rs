@@ -231,7 +231,14 @@ pub(crate) fn decide(
     };
     let gpos = if has_gpos {
         match build_gpos(face, &ctx) {
-            Some(b) => Decision::Rewrite(b),
+            Some(mut b) => {
+                // A static subset drops the GDEF ItemVariationStore, so
+                // no VariationIndex may point into it.
+                if !input.retain_variations {
+                    crate::gpos_var::strip_variation_indices(&mut b);
+                }
+                Decision::Rewrite(b)
+            }
             None => Decision::Drop,
         }
     } else {
