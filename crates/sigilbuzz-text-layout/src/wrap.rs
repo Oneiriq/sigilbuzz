@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 
 use sigilbuzz::Glyph;
 
+use crate::class::LineBreakClass;
 use crate::linebreak::{line_break_opportunities, BreakOpportunity};
 
 /// Inputs to [`wrap_lines`].
@@ -23,11 +24,12 @@ pub struct WrapOptions {
     /// `Glyph::x_advance` (font design units, unless the caller scales
     /// them first).
     pub max_width: f32,
-    /// When `true`, the wrapper only breaks at allowed UAX 14
-    /// opportunities. When `false`, it falls back to mid-cluster
-    /// breaks when no opportunity is reachable inside the budget, a
-    /// safety valve for very narrow `max_width` values that would
-    /// otherwise produce a single overflowing line.
+    /// When `true`, the wrapper only breaks at UAX 14 opportunities,
+    /// and a word wider than `max_width` stays whole on its own
+    /// overflowing line. When `false`, such a word is split between
+    /// glyph clusters so each line fits the budget. A line always
+    /// keeps at least one cluster, so a single cluster wider than the
+    /// budget still gets a line of its own.
     pub break_at_word_boundaries: bool,
 }
 
@@ -49,16 +51,18 @@ pub struct LineRange {
     /// End byte offset (exclusive) into the source text.
     pub end_byte: usize,
     /// Total advance width consumed by the glyphs of this line, with
-    /// trailing UAX 14 space-class characters ignored (LB7: trailing
-    /// spaces hang into the right margin and do not count toward the
-    /// line's measured width). This matches the budget the wrapper
-    /// enforced when picking the break.
+    /// trailing UAX 14 space-class characters and the line's own
+    /// mandatory break characters ignored (LB7: trailing spaces hang
+    /// into the right margin and do not count toward the line's
+    /// measured width). This matches the budget the wrapper enforced
+    /// when picking the break.
     pub width: f32,
 }
 
 /// Walks a slice of shaped [`Glyph`]s alongside its source `text`,
 /// breaking at UAX 14 opportunities whenever the running advance would
-/// exceed `options.max_width`.
+/// exceed `options.max_width`. Mandatory breaks always end a line, and
+/// the text before one is wrapped to the budget like any other text.
 ///
 /// Each glyph's [`sigilbuzz::Glyph::cluster`] field is treated as the
 /// byte offset of the source codepoint. Multi-glyph clusters
@@ -67,6 +71,34 @@ pub struct LineRange {
 ///
 /// The typical call site is
 /// `wrap_lines(&shape(font, buffer, &[])?.glyphs, buffer.text(), options)`.
+///
+/// ```
+/// use sigilbuzz::Glyph;
+/// use sigilbuzz_text_layout::{wrap_lines, WrapOptions};
+///
+/// // One glyph per letter, each 10 units wide.
+/// let text = "abcdef";
+/// let glyphs: Vec<Glyph> = (0..6)
+///     .map(|cluster| Glyph {
+///         glyph_id: 1,
+///         cluster,
+///         x_advance: 10,
+///         y_advance: 0,
+///         x_offset: 0,
+///         y_offset: 0,
+///         unicode_props: 0,
+///         indic_position: 0,
+///     })
+///     .collect();
+///
+/// // The word stays whole by default.
+/// let whole = WrapOptions { max_width: 20.0, break_at_word_boundaries: true };
+/// assert_eq!(wrap_lines(&glyphs, text, whole).len(), 1);
+///
+/// // Without word-boundary breaking it splits between clusters.
+/// let split = WrapOptions { max_width: 20.0, break_at_word_boundaries: false };
+/// assert_eq!(wrap_lines(&glyphs, text, split).len(), 3);
+/// ```
 #[must_use]
 pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<LineRange> {
     if text.is_empty() {
@@ -107,20 +139,27 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
     // not count toward the line's measured width. `hang_end[i]` is `i`
     // with the run of hanging characters directly before it removed.
     // Hanging characters are the UAX 14 `SP` class (U+0020, U+1680,
-    // U+2000..=U+200A, U+205F, U+3000) plus tab, which the classifier
-    // puts in `BA` but which acts as a soft break point in practice.
+    // U+2000..=U+200A, U+205F, U+3000), tab, which the classifier
+    // puts in `BA` but which acts as a soft break point in practice,
+    // and the mandatory break classes `BK`, `CR`, `LF`, and `NL`,
+    // which end a line without being drawn on it.
     // The table is built in one forward pass, so a long whitespace run
     // costs linear time instead of one backward walk per break
     // opportunity. Only char boundaries are filled in. Every offset
-    // looked up below comes from the break iterator, and the iterator
-    // only yields char boundaries in `0..=text.len()`.
+    // looked up below is a char boundary in `0..=text.len()`: break
+    // offsets from the iterator, and glyph cluster starts checked with
+    // `is_char_boundary`.
     let mut hang_end = vec![0usize; text.len() + 1];
     for (b, ch) in text.char_indices() {
         let next = b + ch.len_utf8();
         let hangs = ch == '\t'
             || matches!(
                 crate::class::line_break_class(ch),
-                crate::class::LineBreakClass::SP
+                LineBreakClass::SP
+                    | LineBreakClass::BK
+                    | LineBreakClass::CR
+                    | LineBreakClass::LF
+                    | LineBreakClass::NL
             );
         hang_end[next] = if hangs { hang_end[b] } else { next };
     }
@@ -128,77 +167,60 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
     // Width of `[from, to)` without trailing hanging characters. The
     // wrapper uses it both for its break decisions and for the
     // reported `LineRange::width`, so the public field agrees with the
-    // budget the wrapper enforced.
-    let measure = |from: usize, to: usize| prefix[hang_end[to]] - prefix[from];
+    // budget the wrapper enforced. A span made only of hanging
+    // characters measures zero.
+    let measure = |from: usize, to: usize| prefix[hang_end[to].max(from)] - prefix[from];
+
+    // Glyph cluster starts, the only places a word may be split when
+    // `break_at_word_boundaries` is off. Clusters that do not land on
+    // a char boundary inside the text are ignored.
+    let mut cluster_start = vec![false; text.len() + 1];
+    if !options.break_at_word_boundaries {
+        for g in glyphs {
+            let idx = g.cluster as usize;
+            if idx < text.len() && text.is_char_boundary(idx) {
+                cluster_start[idx] = true;
+            }
+        }
+    }
 
     let mut lines: Vec<LineRange> = Vec::new();
     let mut line_start = 0usize;
     let mut last_allowed: Option<usize> = None;
 
     for &(offset, kind) in &opportunities {
-        if offset <= line_start {
+        if offset <= line_start || kind == BreakOpportunity::Prohibited {
             continue;
         }
-        let measured = measure(line_start, offset);
+        // The budget applies before every kind of break, so the text
+        // before a mandatory break wraps like any other text.
+        if measure(line_start, offset) > options.max_width {
+            // Break at the last opportunity that still fit, if any.
+            if let Some(prev) = last_allowed.take() {
+                lines.push(line_range(line_start, prev, &measure));
+                line_start = prev;
+            }
+            // What remains is one word wider than the budget. It stays
+            // whole on its own line unless word-boundary breaking is
+            // off, in which case it splits between glyph clusters.
+            if !options.break_at_word_boundaries {
+                line_start = split_between_clusters(
+                    line_start,
+                    offset,
+                    &cluster_start,
+                    options.max_width,
+                    &measure,
+                    &mut lines,
+                );
+            }
+        }
         match kind {
             BreakOpportunity::Mandatory => {
-                lines.push(LineRange {
-                    start_byte: line_start,
-                    end_byte: offset,
-                    width: measure(line_start, offset),
-                });
+                lines.push(line_range(line_start, offset, &measure));
                 line_start = offset;
                 last_allowed = None;
             }
-            BreakOpportunity::Allowed => {
-                if measured <= options.max_width {
-                    // Still fits; remember as the latest valid break
-                    // and keep packing.
-                    last_allowed = Some(offset);
-                } else {
-                    // We just overflowed. Fall back to the previous
-                    // allowed break, if any.
-                    if let Some(prev) = last_allowed {
-                        lines.push(LineRange {
-                            start_byte: line_start,
-                            end_byte: prev,
-                            width: measure(line_start, prev),
-                        });
-                        line_start = prev;
-                        // The current opportunity may itself fit on
-                        // the new line. Re-evaluate.
-                        let new_measured = measure(line_start, offset);
-                        if new_measured <= options.max_width {
-                            last_allowed = Some(offset);
-                        } else {
-                            last_allowed = None;
-                            if !options.break_at_word_boundaries {
-                                // Hard split at the current offset
-                                // even though it overflows, so the
-                                // wrapper makes forward progress.
-                                lines.push(LineRange {
-                                    start_byte: line_start,
-                                    end_byte: offset,
-                                    width: measure(line_start, offset),
-                                });
-                                line_start = offset;
-                            }
-                        }
-                    } else if !options.break_at_word_boundaries {
-                        lines.push(LineRange {
-                            start_byte: line_start,
-                            end_byte: offset,
-                            width: measure(line_start, offset),
-                        });
-                        line_start = offset;
-                        last_allowed = None;
-                    } else {
-                        // Forced to keep this oversized run on one
-                        // line: there is no earlier breakpoint.
-                        last_allowed = Some(offset);
-                    }
-                }
-            }
+            BreakOpportunity::Allowed => last_allowed = Some(offset),
             BreakOpportunity::Prohibited => {}
         }
     }
@@ -213,6 +235,50 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
     }
 
     lines
+}
+
+/// Builds the [`LineRange`] for `[from, to)`.
+fn line_range(from: usize, to: usize, measure: &impl Fn(usize, usize) -> f32) -> LineRange {
+    LineRange {
+        start_byte: from,
+        end_byte: to,
+        width: measure(from, to),
+    }
+}
+
+/// Splits the overflowing span `[start, end)` between glyph clusters.
+/// Each line ends at the furthest cluster start that keeps it inside
+/// `max_width`, or after its first cluster when even that overflows.
+/// Pushes the full lines onto `lines` and returns the start of the
+/// remainder, which fits the budget or has no cluster start left to
+/// split at.
+fn split_between_clusters(
+    start: usize,
+    end: usize,
+    cluster_start: &[bool],
+    max_width: f32,
+    measure: &impl Fn(usize, usize) -> f32,
+    lines: &mut Vec<LineRange>,
+) -> usize {
+    let mut pos = start;
+    while measure(pos, end) > max_width {
+        let mut cut = None;
+        for b in (pos + 1..end).filter(|&b| cluster_start[b]) {
+            let fits = measure(pos, b) <= max_width;
+            if fits || cut.is_none() {
+                cut = Some(b);
+            }
+            if !fits {
+                break;
+            }
+        }
+        let Some(cut) = cut else {
+            break;
+        };
+        lines.push(line_range(pos, cut, measure));
+        pos = cut;
+    }
+    pos
 }
 
 #[cfg(test)]
@@ -401,5 +467,93 @@ mod tests {
             },
         );
         assert!(narrow.len() >= 2);
+    }
+
+    /// Wraps `text` with one 10-unit glyph per char and returns the
+    /// text of each line.
+    fn wrap_texts(text: &str, max_width: f32, break_at_word_boundaries: bool) -> Vec<&str> {
+        let options = WrapOptions {
+            max_width,
+            break_at_word_boundaries,
+        };
+        wrap_lines(&shape_uniform(text, 10), text, options)
+            .iter()
+            .map(|line| &text[line.start_byte..line.end_byte])
+            .collect()
+    }
+
+    #[test]
+    fn text_before_a_mandatory_break_wraps_to_the_budget() {
+        let lines = wrap_texts("The quick brown\nfox", 90.0, true);
+        assert_eq!(lines, ["The quick ", "brown\n", "fox"]);
+    }
+
+    #[test]
+    fn line_break_characters_do_not_count_toward_width() {
+        // "The quick" is exactly 90 wide. The newline ends the line
+        // without being drawn, so it must not push the line over.
+        let text = "The quick\r\nfox";
+        let lines = wrap_lines(
+            &shape_uniform(text, 10),
+            text,
+            WrapOptions {
+                max_width: 90.0,
+                break_at_word_boundaries: true,
+            },
+        );
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            &text[lines[0].start_byte..lines[0].end_byte],
+            "The quick\r\n"
+        );
+        assert!((lines[0].width - 90.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn blank_line_measures_zero() {
+        let text = "a\n\nb";
+        let lines = wrap_lines(&shape_uniform(text, 10), text, WrapOptions::default());
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1].width, 0.0);
+    }
+
+    #[test]
+    fn overlong_word_stays_whole_at_word_boundaries() {
+        let lines = wrap_texts("a verylongword b c", 30.0, true);
+        assert_eq!(lines, ["a ", "verylongword ", "b c"]);
+    }
+
+    #[test]
+    fn overlong_word_splits_between_clusters_without_word_boundaries() {
+        let lines = wrap_texts("a verylongword b", 30.0, false);
+        assert_eq!(lines, ["a ", "ver", "ylo", "ngw", "ord ", "b"]);
+    }
+
+    #[test]
+    fn cluster_split_applies_before_a_mandatory_break() {
+        let lines = wrap_texts("abcdef\nxy", 20.0, false);
+        assert_eq!(lines, ["ab", "cd", "ef\n", "xy"]);
+    }
+
+    #[test]
+    fn cluster_split_never_splits_a_multi_glyph_cluster() {
+        // Glyphs 0 and 1 form one cluster at byte 0 ("ab" as a
+        // ligature), so the only cluster starts are bytes 0 and 2.
+        let text = "abc";
+        let mut glyphs = shape_uniform(text, 10);
+        glyphs[1].cluster = 0;
+        let lines = wrap_lines(
+            &glyphs,
+            text,
+            WrapOptions {
+                max_width: 10.0,
+                break_at_word_boundaries: false,
+            },
+        );
+        let texts: Vec<&str> = lines
+            .iter()
+            .map(|line| &text[line.start_byte..line.end_byte])
+            .collect();
+        assert_eq!(texts, ["ab", "c"]);
     }
 }
