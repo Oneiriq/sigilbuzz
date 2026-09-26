@@ -9,7 +9,7 @@ Every crate in the workspace is below 1.0, so a minor release may break the API.
 crates are released together. Each release bumps the crates that changed, and one git
 tag covers the whole set. Companion crates keep their own version numbers, so pin
 versions that came out of the same release. For 0.22.0 that means `sigilbuzz = "0.22"`
-with, for example, `sigilbuzz-render = "0.8"` and `sigilbuzz-paint = "0.2"`.
+with, for example, `sigilbuzz-render = "0.9"` and `sigilbuzz-paint = "0.2"`.
 [RELEASING.md](RELEASING.md) has the release checklist.
 
 The target is 1.0 in 2026, with a stable shaping API and a documented path for

@@ -20,13 +20,100 @@ Added:
   between visual order (what `Glyph::cluster` indexes) and logical order (the source
   text), and reports the embedding level at each position. Use it to put carets and
   selections back into the original text.
+- Buffer script, language and context. `Buffer::set_script`, `set_language`,
+  `set_pre_context` and `set_post_context` (with getters and `Buffer::CONTEXT_LENGTH`)
+  now reach shaping. A set script shapes the whole buffer as that script. The language
+  picks the OpenType language system in GSUB and GPOS, and the context text lets
+  Arabic, N'Ko and Mongolian letters at the buffer edges join across it.
+- `Language`, a BCP 47 tag that maps to OpenType language system tags (at most three,
+  as in HarfBuzz). The table is generated from the OpenType language tag registry and
+  SIL's ISO 639 data; `cargo test --test language_table_gen -- --ignored` regenerates
+  it.
+- `Buffer::unset_direction`, `Buffer::has_explicit_direction`, and
+  `Buffer::set_insert_dotted_circle`. Broken Indic, Khmer, Myanmar and USE syllables now
+  get a U+25CC dotted circle, as in HarfBuzz.
+- `UnicodeScript::{iso15924_tag, from_iso15924_tag, horizontal_direction}` and
+  `Direction::horizontal_for_script`.
+- `ShapedRun` is re-exported from the crate root.
+- GPOS cursive attachment (lookup type 3). `curs` runs by default on horizontal runs;
+  it never ran before.
+- `sigilbuzz-capi`: `hb_buffer_add_utf32`, `hb_buffer_add_codepoints`,
+  `hb_buffer_add_latin1`, `hb_subset_input_reference`, `hb_subset_input_create_or_fail`,
+  `hb_paint_funcs_reference`, `hb_paint_funcs_make_immutable` and `_is_immutable`, the
+  `push_clip_rectangle`, `image` and `custom_palette_color` paint callbacks,
+  `hb_color_line_get_color_stops`, `hb_color_line_get_extend`, and `hb_color_get_*`.
+- `sigilbuzz-paint`: `evaluate_with` and `EvalOptions` choose the variation coordinates,
+  the CPAL palette and the foreground color in one call.
+- `sigilbuzz-render`: `Rasterizer::with_foreground` picks the COLR foreground color.
 
 Changed:
 
+- `shape()` returns right-to-left and bottom-to-top runs in visual order, reversed after
+  positioning as HarfBuzz does. It used to return them in logical order, although
+  `ShapedRun` promised visual order. Mark offsets use HarfBuzz's direction-aware rules.
+  Code that reversed RTL output itself must stop doing so.
+- Text in a direction that is not its script's own (Hebrew marked LTR, Latin marked RTL,
+  bottom-to-top) is shaped the way HarfBuzz does it: grapheme clusters are reversed, the
+  run is shaped in its native direction, and the result is reversed back.
+- `Buffer::set_text_bidi` now sets an explicit left-to-right shaping direction, because
+  the text it stores is already in visual order. The paragraph direction is still
+  available from `bidi_map().paragraph_direction()`.
+- Mongolian switches to vertical layout only when no direction was set.
+  `set_direction(Direction::Ltr)` now gives horizontal Mongolian (it used to need RTL).
+- Bottom-to-top runs report a negative `y_advance`, like top-to-bottom ones.
+- GSUB and GPOS take every feature from one script and one language system, as
+  HarfBuzz does, and a language system's required feature always applies. Latin,
+  Cyrillic, Greek, Han and kana runs try their own script tag before `DFLT`.
+- GPOS runs as one stage in lookup order: `abvm` and `blwm` run by default, a lookup
+  shared by several features runs once, the first matching subtable wins, and `kern`,
+  `dist` and `curs` run by default only on horizontal runs.
+- `locl` and `ccmp` run first, and `locl` is applied at all (it never was, so a
+  language system choice changed nothing).
+- Mark attachment follows HarfBuzz: GSUB records ligature components, mark-to-mark
+  checks components, base searches skip default ignorables, and the lookup's mark
+  coverage (not the GDEF class) decides what attaches. Attachment offsets are resolved
+  once, after all positioning, so marks follow kerning on their base.
+- Mark widths are zeroed in both axes, per HarfBuzz's shaper for each script.
+- Legacy `kern` and `kerx` pair values are split across both glyphs as in hb-kern.hh,
+  and `kerx` is preferred over `kern`.
+- Every Unicode default-ignorable character is hidden, after positioning rather than
+  before GSUB: its real glyph goes through GSUB and becomes the space glyph at the end.
+- Right-to-left runs mirror characters that have a mirror glyph and apply `rtlm`.
+- Joining types are generated from Unicode 17.0 `ArabicShaping.txt`, so marks and format
+  characters are transparent.
+- Leading digits and punctuation join the script run that follows them, and text with
+  no script shapes under `DFLT` (this changes `Buffer::script_runs`).
+- `Buffer::clear` also resets script, language, context and the explicit direction.
+- `tables::Anchor` has new public fields for its device offsets; building one with a
+  struct literal needs `..Anchor::default()`.
+- `sigilbuzz-capi` 0.3.0 follows HarfBuzz's object rules, which breaks C code written
+  against the old ones:
+  - `hb_*_reference(p)` returns `p` and adds a reference, for every object type. A
+    reference followed by two destroys used to double-free.
+  - `hb_subset_input_unicode_set` and `hb_subset_input_glyph_set` return a set owned by
+    the input. Do not destroy it.
+  - A face keeps its blob alive and a font keeps its face alive. The blob's destroy
+    callback runs when HarfBuzz runs it.
+  - The paint API matches HarfBuzz 8.0's `hb-paint.h`: setters take `user_data` and
+    `destroy`, callbacks receive their `user_data`, `push_clip_glyph` receives the font,
+    and groups are `push_group` / `pop_group`. `HB_COLOR` packs blue high and alpha low.
+  - `hb_buffer_clear_contents` resets direction, script, language and context, and
+    `hb_buffer_set_direction(HB_DIRECTION_INVALID)` unsets the direction.
+  - `hb_buffer_guess_segment_properties` guesses the script from the Unicode Script
+    property and takes the direction from it.
+- `sigilbuzz-paint` 0.2.0 keeps the COLR foreground color apart instead of painting it
+  white: `PaintSource::Solid` is `Solid { color, is_foreground }` and `ColorStop` has an
+  `is_foreground` field. The default foreground is opaque black, and a palette or entry
+  the font lacks resolves to the foreground, as in HarfBuzz.
+- `sigilbuzz-render` 0.9.0 paints COLRv1 foreground layers black by default (they were
+  white), the same as COLRv0.
+- `sigilbuzz-svg` 0.2.0 writes foreground paints as `currentColor`.
+- The CLI's `--script` and `--language` flags take effect.
+
 - The minimum supported Rust version is now 1.81. The core crate already needed 1.81
   for `core::error::Error`, so the old `rust-version = "1.75"` was wrong.
-- `sigilbuzz-woff` 0.3.1 and `sigilbuzz-render` 0.8.1 move to `miniz_oxide` 0.9.
-- `sigilbuzz-capi` 0.2.2 installs with `cargo cinstall` from cargo-c. That puts
+- `sigilbuzz-woff` 0.3.1 and `sigilbuzz-render` 0.9.0 move to `miniz_oxide` 0.9.
+- `sigilbuzz-capi` 0.3.0 installs with `cargo cinstall` from cargo-c. That puts
   `libsigilbuzz`, the header (`include/sigilbuzz/hb.h`), a generated `sigilbuzz.pc`, and
   a CMake package in place in one step. The old pkg-config and CMake templates had to be
   filled in by hand and looked for a `libsigilbuzz` that `cargo build` never produced
@@ -36,6 +123,63 @@ Changed:
   attribution terms. The license is still Apache-2.0.
 - The documentation was rewritten, and the release history moved out of
   `docs/ROADMAP.md` into this file.
+
+Fixed:
+
+- Mark positioning ignored AnchorFormat3 device tables, so marks in variable fonts stayed
+  at the default instance. VariationIndex deltas now apply to mark, mark-to-mark,
+  mark-to-ligature and cursive anchors.
+- PairPos format 1 device offsets are measured from the PairSet, as the spec says
+  (variable kerning in fonts like Rubik was wrong). The `var_kern.ttf` fixture is
+  rebuilt spec-correct by a Rust builder.
+- Default ignorables were hidden by matching cluster values, so a visible glyph that
+  shared a cluster with one lost its advance. `Glyph::unicode_props` was written but
+  never read; it now carries the per-glyph flag, and a GSUB substitution un-hides the
+  glyph, as in HarfBuzz.
+- A panic in `hb_shape` for Arabic buffers that also contain Thai, Lao, Khmer or Tamil
+  split vowels.
+- Indic and USE shaping of runs that do not start the text.
+- The bidi pairs for the tick square brackets (U+298D to U+2990).
+- Vertical runs now start each glyph from its vertical origin.
+- `sigilbuzz-capi`: `hb_buffer_set_script` and `hb_buffer_set_language` did nothing;
+  `hb_buffer_add_utf8` and `hb_buffer_add_utf16` reported clusters in the wrong units,
+  ignored the text around the item, and dropped a whole call on malformed input instead
+  of replacing bad code units with U+FFFD.
+- `sigilbuzz-capi`: `hb_set_t` kept its contents in a `RefCell` while claiming to be
+  thread-safe, so two threads reading one set (two `hb_subset_or_fail` calls sharing an
+  input) could corrupt it and abort. It now sits behind a lock.
+- `sigilbuzz-capi`: `hb_font_paint_glyph` ignored `palette_index`, `foreground_color`
+  and the font's variation coordinates, fired nothing for glyphs without color data,
+  and did not paint COLRv0 layers.
+- `sigilbuzz-paint`: sweep gradient angles lacked the COLRv1 half-turn bias, and
+  variable scale, rotate, skew, affine and sweep-angle deltas were added in raw units.
+- `sigilbuzz-render`: `rasterize_colrv1_glyph` ignored its `palette_index`, and sweep
+  gradients were mirrored.
+- `sigilbuzz-subset`: the subsetter dropped GDEF `MarkGlyphSetsDef`, `AttachList`,
+  `LigCaretList` and the ItemVariationStore. Dropping the mark glyph sets broke every
+  lookup that uses a mark filtering set.
+- `sigilbuzz-subset`: the instancer resolved AnchorFormat3 and PairSet device offsets
+  against the wrong table, so instanced fonts kept default-instance anchors and kerning,
+  and it now folds ligature caret variations too.
+- `sigilbuzz-subset`: GPOS Device and VariationIndex tables were not copied into
+  subsets, leaving dangling offsets; static subsets now leave VariationIndex tables out.
+- `sigilbuzz-subset`: rebuilt GSUB and GPOS tables over 64 KiB silently corrupted their
+  lookups and subtables. Lookups are promoted to Extension lookups, oversized mark and
+  PairPos format 1 subtables are split the way HarfBuzz splits them, and any other
+  overflow is reported as an error.
+- `sigilbuzz-subset`: context rules with no lookup records (`ignore sub`,
+  `ignore pos`) were dropped, so guarded rules such as Amiri's Allah ligature shaped
+  differently after subsetting.
+- `sigilbuzz-subset`: a malformed GDEF piece is left out instead of failing the whole
+  subset; no more panics on truncated mark arrays or SinglePos headers, or on 32-bit
+  targets from crafted GDEF offsets; full and partial instancing rebuild GDEF instead
+  of truncating it at the store, and partial instancing renumbers VariationIndex rows.
+- `sigilbuzz-text-layout`: a lone CR produced no mandatory line break.
+
+Removed:
+
+- The root crate's `alloc` feature. It gated nothing: the crate always needs `alloc`.
+  `std` now only adds filesystem helpers such as `Blob::from_path`.
 
 ## 0.21.0 (2026-04-25)
 
