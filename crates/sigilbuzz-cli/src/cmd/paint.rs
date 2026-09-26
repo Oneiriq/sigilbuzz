@@ -1,6 +1,6 @@
-//! `sigilbuzz paint` — prints the COLRv1 paint tree for a glyph.
+//! `sigilbuzz paint`: prints the COLRv1 paint tree for a glyph.
 //!
-//! Output is one [`DrawCmd`](sigilbuzz_paint::DrawCmd) per line in
+//! Output is one [`DrawCmd`] per line in
 //! evaluation order, formatted with Rust's default `{:?}` for the
 //! transform / paint payload. The format is intended for human
 //! inspection / golden-test diffing; consumers wanting structured

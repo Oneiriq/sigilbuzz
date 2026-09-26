@@ -34,6 +34,6 @@ fn open_sans_exposes_expected_name_strings() {
     assert!(version.starts_with("Version "), "got {version:?}");
 
     // Records iterator surfaces the raw directory so callers that
-    // need niche IDs (designer URL, license, …) still have a path.
+    // need niche IDs (designer URL, license, ...) still have a path.
     assert!(!name.records().is_empty());
 }

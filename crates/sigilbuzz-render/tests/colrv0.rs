@@ -1,4 +1,4 @@
-//! COLRv0 layered colour glyph composition.
+//! COLRv0 layered color glyph composition.
 //!
 //! Builds a synthetic SFNT in memory carrying just enough tables for
 //! the rasterizer's COLRv0 path:
@@ -7,7 +7,7 @@
 //!     positions inside the design-units grid.
 //!   - `COLR` v0: gid 0 (the base glyph) layers gid 1 (palette entry
 //!     0 = red) under gid 2 (palette entry 1 = blue).
-//!   - `CPAL` v0: one palette of two BGRA colours.
+//!   - `CPAL` v0: one palette of two BGRA colors.
 //!
 //! The expectation is:
 //!   - The composed pixmap covers the union of both squares.
@@ -172,7 +172,7 @@ fn build_colrv0_font() -> Vec<u8> {
         c
     };
 
-    // COLR v0: 1 base record (gid 0 → 2 layers starting at index 0),
+    // COLR v0: 1 base record (gid 0 -> 2 layers starting at index 0),
     // 2 layer records: [gid 1 / palette 0], [gid 2 / palette 1].
     let colr = {
         let mut c = Vec::new();
@@ -191,10 +191,10 @@ fn build_colrv0_font() -> Vec<u8> {
         c.extend_from_slice(&2u16.to_be_bytes()); // numLayers
         let layer_off = c.len() as u32;
         c[layer_slot..layer_slot + 4].copy_from_slice(&layer_off.to_be_bytes());
-        // Layer 0: gid 1, palette 0 (red, drawn first → underneath).
+        // Layer 0: gid 1, palette 0 (red, drawn first -> underneath).
         c.extend_from_slice(&1u16.to_be_bytes());
         c.extend_from_slice(&0u16.to_be_bytes());
-        // Layer 1: gid 2, palette 1 (blue, drawn second → on top).
+        // Layer 1: gid 2, palette 1 (blue, drawn second -> on top).
         c.extend_from_slice(&2u16.to_be_bytes());
         c.extend_from_slice(&1u16.to_be_bytes());
         align4(&mut c);
@@ -250,16 +250,16 @@ fn colrv0_two_layers_compose_with_palette() {
     assert_eq!(cpal.color(0, 1).unwrap().b, 255);
 
     let rast = Rasterizer::new();
-    // 1024 upem × 100pt size means 1 design unit ≈ 0.0977 px. The
-    // glyphs are 200×200 design units, so we get ~19.5 px squares.
+    // 1024 upem x 100pt size means 1 design unit ~ 0.0977 px. The
+    // glyphs are 200x200 design units, so we get ~19.5 px squares.
     let pix = rast
         .rasterize_colrv0_glyph(&face, 0, 0, 100.0, &[])
         .expect("composes");
     assert!(pix.width > 0 && pix.height > 0, "non-empty");
 
     // Find a pixel that is "only-red" by looking near the lower-left
-    // corner (gid 1 only — the red square). Find a "only-blue" pixel
-    // near the upper-right (gid 2 only — the blue square).
+    // corner (gid 1 only: the red square). Find a "only-blue" pixel
+    // near the upper-right (gid 2 only: the blue square).
     // The exact pixel grid depends on the Y-flip and offset, so we
     // scan and tally instead of asserting one indexed pixel.
     let mut red_only = 0;
@@ -426,7 +426,7 @@ fn build_colrv0_foreground_only_font() -> Vec<u8> {
         align4(&mut l);
         l
     };
-    // Single-palette CPAL — important: num_palettes = 1.
+    // Single-palette CPAL. Important: num_palettes = 1.
     let cpal = {
         let mut c = Vec::new();
         c.extend_from_slice(&0u16.to_be_bytes());
@@ -501,7 +501,7 @@ fn build_colrv0_foreground_only_font() -> Vec<u8> {
 
 #[test]
 fn colrv0_oob_palette_index_with_foreground_only_layers_errors() {
-    // Regression for issue #203 — pre-fix rasterizer accepted any
+    // Regression for issue #203: pre-fix rasterizer accepted any
     // palette_index when every layer was a foreground sentinel
     // (0xFFFF) because the per-layer cpal lookup that would have
     // detected the bad index was skipped.

@@ -1,6 +1,6 @@
 //! Minimum-viable baseline TIFF decoder for sbix `'tiff'` payloads.
 //!
-//! Hand-rolled from TIFF 6.0 (1992). Scope is deliberately narrow —
+//! Hand-rolled from TIFF 6.0 (1992). Scope is narrow:
 //! just enough to decode the TIFF payloads that show up in the very
 //! occasional sbix font that uses them, and nothing more. Real-world
 //! sbix TIFFs are vanishingly rare in 2026 (Apple has shipped PNG-only
@@ -13,10 +13,10 @@
 //! - **Compression = 1** (none) or **32773** (PackBits RLE). CCITT,
 //!   LZW, deflate, JPEG-in-TIFF, and the "old style" JPEG (compression
 //!   6/7) all surface [`RenderError::UnsupportedBitmap`].
-//! - **Strip-organised** (`StripOffsets` + `StripByteCounts` +
+//! - **Strip-organized** (`StripOffsets` + `StripByteCounts` +
 //!   `RowsPerStrip`); tiled TIFFs are rejected.
 //! - **Single image (one IFD)**. SubIFDs and additional IFD chains are
-//!   ignored — we only ever look at the first IFD's image data.
+//!   ignored. We only ever look at the first IFD's image data.
 //! - **PlanarConfiguration = 1** (chunky / interleaved). Planar (one
 //!   plane per sample) is rejected.
 //!
@@ -37,7 +37,7 @@
 //!
 //! An IFD (Image File Directory) is a u16 entry count, then that many
 //! 12-byte entries, then a u32 "next IFD" offset (zero terminates).
-//! Each entry is `{ tag: u16, type: u16, count: u32, value: u32 }` —
+//! Each entry is `{ tag: u16, type: u16, count: u32, value: u32 }`:
 //! `value` is either the inline data (when it fits in 4 bytes) or an
 //! offset into the file. The tags we care about are:
 //!
@@ -53,7 +53,7 @@
 //!
 //! - LZW / CCITT / deflate / JPEG-in-TIFF compression.
 //! - Tiled TIFFs, planar TIFFs, multi-IFD TIFFs.
-//! - `BitsPerSample` other than 8 (1-bit fax / 16-bit deep colour).
+//! - `BitsPerSample` other than 8 (1-bit fax / 16-bit deep color).
 //! - Photometrics other than RGB (PaletteColor, BlackIsZero,
 //!   WhiteIsZero, YCbCr, CIELab, etc.).
 //! - EXIF / GeoTIFF / GeoKey extensions.
@@ -68,7 +68,7 @@ use crate::pixmap::ColorPixmap;
 
 // ---------------------------------------------------------------------------
 // Tag identifiers (TIFF 6.0 §3 + §8). We define every tag we *consume*;
-// tags we don't recognise are skipped silently in [`parse_ifd`].
+// tags we don't recognize are skipped silently in [`parse_ifd`].
 // ---------------------------------------------------------------------------
 
 const TAG_IMAGE_WIDTH: u16 = 256;
@@ -107,7 +107,7 @@ const MAX_TIFF_DIM: u32 = 16_384;
 /// Decodes a TIFF byte slice into a premultiplied RGBA [`ColorPixmap`].
 ///
 /// See the module docs for the supported subset (baseline 8-bit RGB /
-/// RGBA, single IFD, strip-organised, no-compression or PackBits).
+/// RGBA, single IFD, strip-organized, no-compression or PackBits).
 /// Anything outside that subset surfaces either
 /// [`RenderError::BadTiff`] (structural failure: bad magic, truncated
 /// IFD, missing required tag, length mismatch) or
@@ -202,7 +202,7 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<ColorPixmap, RenderError> {
         }
         let strip_bytes = &bytes[off..end];
         let rows_in_strip = if i + 1 == expected_strips {
-            // Last strip may be short — `height % rows_per_strip` rows.
+            // Last strip may be short: `height % rows_per_strip` rows.
             let r = height as usize - i * rows_per_strip as usize;
             r.max(1)
         } else {
@@ -436,9 +436,9 @@ fn read_u32(bytes: &[u8], endian: Endian) -> u32 {
 /// appending exactly `expected` bytes. Each record is one signed-byte
 /// header `n`:
 ///
-///   * `0..=127`   → copy the next `n + 1` bytes literally.
-///   * `-127..=-1` → repeat the next byte `1 - n` times.
-///   * `-128`      → no-op (skip the header byte and continue).
+///   * `0..=127`   -> copy the next `n + 1` bytes literally.
+///   * `-127..=-1` -> repeat the next byte `1 - n` times.
+///   * `-128`      -> no-op (skip the header byte and continue).
 ///
 /// We bound the output to `expected` so a malformed strip can't blow
 /// up our accumulator past what the strip's row_bytes / rows_per_strip
@@ -469,7 +469,7 @@ fn packbits_decode(src: &[u8], expected: usize, out: &mut Vec<u8>) -> Result<(),
         } else {
             // Repeat run: 1 - n copies of the next byte.
             let run = 1 - n as i32;
-            // n ∈ [-127, -1] ⇒ run ∈ [2, 128]. Both fit u8.
+            // n in [-127, -1] => run in [2, 128]. Both fit u8.
             let run = run as usize;
             if i >= src.len() {
                 return Err(RenderError::BadTiff("packbits truncated repeat"));
@@ -522,7 +522,7 @@ mod tests {
     /// - bytes 8..12 : IFD count + 8 entries (12 bytes each = 96)
     ///   + next IFD offset (zero)
     /// - then BitsPerSample inline (3 SHORTs = 6 bytes don't fit
-    ///   in 4 bytes inline → external)
+    ///   in 4 bytes inline -> external)
     /// - then strip data
     fn build_uncompressed_rgb_tiff(
         width: u32,
@@ -577,7 +577,7 @@ mod tests {
         let strip_byte_counts_array_size = if strips == 1 { 0 } else { strips * 4 };
         let pixel_data_off = strip_byte_counts_off + strip_byte_counts_array_size;
 
-        // BitsPerSample (3 SHORTs) external — value is the offset.
+        // BitsPerSample (3 SHORTs) external: value is the offset.
         ifd_entries.push((
             TAG_BITS_PER_SAMPLE,
             FIELD_SHORT,
@@ -713,7 +713,7 @@ mod tests {
 
     #[test]
     fn decode_uncompressed_rgb_multiple_strips() {
-        // 4x4 image with 2 rows per strip → 2 strips. Pattern: row y
+        // 4x4 image with 2 rows per strip -> 2 strips. Pattern: row y
         // is filled with rgb = (y * 16, 128, 255 - y * 16) so we can
         // catch off-by-one strip stitching.
         let mut pixels = Vec::new();
@@ -786,9 +786,9 @@ mod tests {
         // Encode a simple known pattern by hand and verify the decoder
         // reproduces it. The encoded form below corresponds to:
         //   literal "AB" then "CCC" then literal "D":
-        //   header 1 (n=1 → 2 literals), 'A', 'B',
+        //   header 1 (n=1 -> 2 literals), 'A', 'B',
         //   header -2 (1 - (-2) = 3 repeats), 'C',
-        //   header 0 (n=0 → 1 literal), 'D'.
+        //   header 0 (n=0 -> 1 literal), 'D'.
         let encoded: [u8; 7] = [1, b'A', b'B', (-2i8) as u8, b'C', 0, b'D'];
         let mut out = Vec::new();
         packbits_decode(&encoded, 6, &mut out).unwrap();

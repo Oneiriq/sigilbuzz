@@ -10,8 +10,9 @@
 //! Criterion's variance numbers reflect engine drift rather than
 //! input churn.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use sigilbuzz::{shape, Blob, Buffer, Face, Font};
+use std::hint::black_box;
 
 const OPEN_SANS: &[u8] = include_bytes!("../tests/fixtures/opensans_regular.ttf");
 

@@ -139,7 +139,7 @@ pub(crate) fn rasterize(segments: &[Segment]) -> Render {
         })
         .collect();
 
-    // Reusable scratch buffers — one per scanline pass.
+    // Reusable scratch buffers, one per scanline pass.
     let mut crossings: Vec<(f32, i32)> = Vec::with_capacity(local.len());
     // Per-row coverage accumulator: f32 `0..=OVERSAMPLE` summed sub-row
     // contribution per pixel. We convert to u8 at the end.
@@ -323,7 +323,7 @@ mod tests {
         let lx_left = (1 - r.origin_x) as u32;
         let ly_mid = (5 - r.origin_y) as u32;
         let a_left = r.pixmap.get(lx_left, ly_mid);
-        // Half-pixel inset on the left edge → ~50% coverage there.
+        // Half-pixel inset on the left edge gives ~50% coverage there.
         assert!(
             a_left > 90 && a_left < 180,
             "expected anti-aliased left edge, got {a_left}"
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn nonfinite_y_does_not_panic_returns_empty() {
-        // Regression for issue #202 — y bbox was previously not
+        // Regression for issue #202: y bbox was previously not
         // checked for finiteness, so an INF y crashed the i32 cast +
         // pad with `attempt to add with overflow`.
         let segs = vec![

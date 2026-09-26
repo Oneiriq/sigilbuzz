@@ -1,4 +1,4 @@
-//! `VARC` — Variable Composite Glyphs.
+//! `VARC`: Variable Composite Glyphs.
 //!
 //! VARC is an OpenType 1.10 / 2024 extension (originating in the
 //! HarfBuzz "boring expansion spec") that lets variable-font composites
@@ -6,11 +6,11 @@
 //! and on each component's effective axis-coord vector.
 //!
 //! Where a classic `glyf` composite glues children with a static
-//! 2×2 + translate, a VARC composite carries:
+//! 2x2 + translate, a VARC composite carries:
 //!
 //! * a flag word per component selecting which transform fields are
 //!   present (translation, rotation, scale, skew, transformation
-//!   centre);
+//!   center);
 //! * an optional axis-indices index plus a `TupleValues` block of
 //!   user-coord values for the child's nested coord vector;
 //! * optional `MultiVarIdx` references that pull deltas from a
@@ -19,7 +19,7 @@
 //! sigilbuzz parses the table on demand and exposes the resolved
 //! component list at a given normalized coord vector via
 //! [`Varc::composite`]. The actual outline flattening is the caller's
-//! job — see [`crate::Face::glyph_outline_at_coords`], which delegates
+//! job. See [`crate::Face::glyph_outline_at_coords`], which delegates
 //! to VARC when the gid is covered.
 //!
 //! # Header
@@ -38,12 +38,12 @@
 //!
 //! Each component record is a flag-driven variable-length blob. See
 //! the boring-expansion-spec `VARC.md` for the full table; the comment
-//! at [`Varc::resolve_component`] enumerates which fields appear under
+//! at `Varc::resolve_component` enumerates which fields appear under
 //! which flags.
 //!
 //! # Scope
 //!
-//! Reading only — encoding and subsetting are out of scope and live in
+//! Reading only: encoding and subsetting are out of scope and live in
 //! their own follow-up tickets. ConditionList parsing is stubbed (we
 //! advance past it but never gate on conditions); in-the-wild VARC
 //! fonts shipped to date do not exercise conditions either.
@@ -75,7 +75,7 @@ pub struct Varc<'a> {
 pub struct VarcComponent {
     /// Glyph id of the child outline.
     pub gid: u16,
-    /// 2×2 + translate affine, in row-major
+    /// 2x2 + translate affine, in row-major
     /// `[xx, xy, yx, yy, tx, ty]` order. Apply as
     /// `(x', y') = (xx*x + xy*y + tx, yx*x + yy*y + ty)`.
     pub transform: [f32; 6],
@@ -88,7 +88,7 @@ pub struct VarcComponent {
 /// All components of a VARC composite at a specific coord vector.
 #[derive(Debug, Clone, Default)]
 pub struct VarcComposite {
-    /// In source order — components paint back-to-front.
+    /// In source order: components paint back-to-front.
     pub components: Vec<VarcComponent>,
 }
 
@@ -147,7 +147,7 @@ impl<'a> Varc<'a> {
         };
 
         // axisIndicesList is a CFF2 INDEX of TupleValues blocks. Each
-        // entry decodes to a list of u16 axis indices — except the
+        // entry decodes to a list of u16 axis indices, except the
         // length is the number of axis indices, which equals the
         // number of values in the TupleValues stream when each value
         // occupies one slot. The boring-expansion-spec encodes axis
@@ -207,7 +207,7 @@ impl<'a> Varc<'a> {
         let mut composite = VarcComposite::default();
         let mut r = Reader::new(raw);
         while !r.is_empty() {
-            // A VarComponent stops when bytes run out — reaching the
+            // A VarComponent stops when bytes run out. Reaching the
             // end mid-record means the font is malformed; we skip the
             // rest rather than error so a single bad glyph doesn't
             // tank the rest of the document.
@@ -250,7 +250,7 @@ impl<'a> Varc<'a> {
             // taken from the parent.)
             coords.to_vec()
         } else {
-            // No reset — the child operates in the same coord vector
+            // No reset: the child operates in the same coord vector
             // as the parent, with HAVE_AXES values *replacing* the
             // listed axes.
             coords.to_vec()
@@ -310,7 +310,7 @@ impl<'a> Varc<'a> {
             }
         }
 
-        // Transform variation index — present when TRANSFORM_HAS_VARIATION
+        // Transform variation index: present when TRANSFORM_HAS_VARIATION
         // is set, regardless of which transform fields are present.
         let transform_var_idx = if flags & VC_TRANSFORM_HAS_VARIATION != 0 {
             Some(read_uint32var(r)?)
@@ -321,7 +321,7 @@ impl<'a> Varc<'a> {
         // Read the present transform fields in spec order.
         let mut tx = 0.0_f32;
         let mut ty = 0.0_f32;
-        let mut rotation = 0.0_f32; // angle × π
+        let mut rotation = 0.0_f32; // angle * π
         let mut sx = 1.0_f32;
         let mut sy = 1.0_f32;
         let mut skew_x = 0.0_f32;
@@ -395,9 +395,9 @@ impl<'a> Varc<'a> {
         }
 
         // Build the affine. boring-expansion-spec composes:
-        //   T(tx + tcx, ty + tcy) ·
-        //   R(rotation × π) · S(sx, sy) ·
-        //   Skew(-skewX × π, skewY × π) ·
+        //   T(tx + tcx, ty + tcy) *
+        //   R(rotation * π) * S(sx, sy) *
+        //   Skew(-skewX * π, skewY * π) *
         //   T(-tcx, -tcy)
         let transform = compose_affine(tx, ty, rotation, sx, sy, skew_x, skew_y, tcx, tcy);
 
@@ -434,7 +434,7 @@ enum TransformField {
     TCenterY,
 }
 
-/// Variable-length integer encoding used by VARC. 1–5 bytes
+/// Variable-length integer encoding used by VARC. 1-5 bytes
 /// big-endian, sign-extension-free.
 fn read_uint32var(r: &mut Reader<'_>) -> Result<u32> {
     let b0 = r.read_u8()?;
@@ -612,8 +612,8 @@ fn read_f6dot10(r: &mut Reader<'_>) -> Result<f32> {
 /// boring-expansion-spec composition order:
 ///
 /// ```text
-///   T(tx + tcx, ty + tcy) · R(rotation × π) ·
-///   S(sx, sy) · Skew(-skewX × π, skewY × π) · T(-tcx, -tcy)
+///   T(tx + tcx, ty + tcy) * R(rotation * π) *
+///   S(sx, sy) * Skew(-skewX * π, skewY * π) * T(-tcx, -tcy)
 /// ```
 ///
 /// Returned in `[xx, xy, yx, yy, tx_eff, ty_eff]` row-major form.
@@ -636,7 +636,7 @@ fn compose_affine(
     // sigilbuzz is no_std; avoid libm by sticking to small-angle exact
     // values for the trig-free identity case (rotation == skew == 0).
     // For non-zero angles fall back to the polynomial approximations
-    // already used by the rest of the crate — no, we just use libm-free
+    // already used by the rest of the crate. No, we just use libm-free
     // f32::sin / f32::cos when std is on, and a Taylor expansion when
     // it isn't. Wait: core::f32 has no sin/cos in no_std. Use a
     // ChebyshevPad approximation good to ~5e-7 over [-π, π].
@@ -653,24 +653,24 @@ fn compose_affine(
     let tan_skx = sin_skx / cos_skx;
     let tan_sky = sin_sky / cos_sky;
 
-    // Build M = R · S · Skew. S applied to skew first:
+    // Build M = R * S * Skew. S applied to skew first:
     //   [ sx, 0 ]   [ 1, tan_skx ]   [ sx, sx*tan_skx ]
-    //   [ 0, sy ] · [ tan_sky, 1 ] = [ sy*tan_sky, sy ]
+    //   [ 0, sy ] * [ tan_sky, 1 ] = [ sy*tan_sky, sy ]
     let m_xx = sx;
     let m_xy = sx * tan_skx;
     let m_yx = sy * tan_sky;
     let m_yy = sy;
 
-    // Rotation × M:
+    // Rotation * M:
     //   [ cos, -sin ]   [ m_xx, m_xy ]
-    //   [ sin,  cos ] · [ m_yx, m_yy ]
+    //   [ sin,  cos ] * [ m_yx, m_yy ]
     let r_xx = cos_r * m_xx - sin_r * m_yx;
     let r_xy = cos_r * m_xy - sin_r * m_yy;
     let r_yx = sin_r * m_xx + cos_r * m_yx;
     let r_yy = sin_r * m_xy + cos_r * m_yy;
 
     // Effective translation:
-    //   p' = R·M·(p - tcenter) + (tcenter + translate)
+    //   p' = R*M*(p - tcenter) + (tcenter + translate)
     //   tx_eff = -(r_xx*tcx + r_xy*tcy) + tcx + tx
     //   ty_eff = -(r_yx*tcx + r_yy*tcy) + tcy + ty
     let tx_eff = -(r_xx * tcx + r_xy * tcy) + tcx + tx;
@@ -680,7 +680,7 @@ fn compose_affine(
 }
 
 /// `sin(x*π)` and `cos(x*π)` for `x` in `[-2, 2]`. Tight enough for
-/// glyph composites — VARC's F4.12 rotation field clamps at ±2π
+/// glyph composites. VARC's F4.12 rotation field clamps at ±2π
 /// regardless and font designers stay well inside ±π. Implemented
 /// via a Taylor series for `no_std`-friendliness.
 #[allow(clippy::many_single_char_names)]
@@ -810,7 +810,7 @@ mod tests {
         // 0xC1 0x02 0x03 = (1 << 16) | (2 << 8) | 3
         let mut r = Reader::new(&[0xC1, 0x02, 0x03]);
         assert_eq!(read_uint32var(&mut r).unwrap(), 0x10203);
-        // 0xE0 0x01 0x02 0x03 = (0 << 24) | …
+        // 0xE0 0x01 0x02 0x03 = (0 << 24) | ...
         let mut r = Reader::new(&[0xE0, 0x01, 0x02, 0x03]);
         assert_eq!(read_uint32var(&mut r).unwrap(), 0x01_0203);
         // 0xF0 + u32
@@ -873,7 +873,7 @@ mod tests {
         let mut record = Vec::new();
         record.push(0x90);
         record.push(0x00);
-        // 24-bit gid 0x010203 — but u16 truncation in the API means
+        // 24-bit gid 0x010203, but u16 truncation in the API means
         // we should pick a value that fits in u16.
         record.extend_from_slice(&[0x00, 0x12, 0x34]);
         let bytes = build_varc(&[1], &[&record], None, None);
@@ -921,7 +921,7 @@ mod tests {
         // Place the axis_indices at the right offset by building VARC
         // with axis_indices block.
         let flags = VC_HAVE_AXES;
-        // 0x02 < 0x80 → single byte uint32var.
+        // 0x02 < 0x80 -> single byte uint32var.
         let mut record = Vec::new();
         record.push(flags as u8);
         record.extend_from_slice(&3u16.to_be_bytes()); // gid 3
@@ -944,9 +944,9 @@ mod tests {
 
     #[test]
     fn rotation_rotates_unit_vector() {
-        // rotation = 0.5 (= 90° = 0.5 × π). F4DOT12 raw = 0.5 * 4096 = 2048.
+        // rotation = 0.5 (= 90° = 0.5 * π). F4DOT12 raw = 0.5 * 4096 = 2048.
         let flags = VC_HAVE_ROTATION;
-        // 0x40 = 64 < 0x80 → single byte.
+        // 0x40 = 64 < 0x80 -> single byte.
         let mut record = Vec::new();
         record.push(flags as u8);
         record.extend_from_slice(&5u16.to_be_bytes());
@@ -955,7 +955,7 @@ mod tests {
         let varc = Varc::parse(&bytes).unwrap();
         let comp = varc.composite(1, &[]).unwrap();
         let t = comp.components[0].transform;
-        // Apply transform to (1, 0) — should land near (0, 1).
+        // Apply transform to (1, 0). Should land near (0, 1).
         let x_out = t[0] * 1.0 + t[1] * 0.0 + t[4];
         let y_out = t[2] * 1.0 + t[3] * 0.0 + t[5];
         assert!(x_out.abs() < 1e-3, "expected 0, got {x_out}");

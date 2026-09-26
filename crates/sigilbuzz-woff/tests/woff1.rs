@@ -146,7 +146,7 @@ fn deflate_wrapped_face_shapes_hello_after_unwrap() {
 #[cfg(feature = "woff1-deflate")]
 #[test]
 fn deflate_quality_zero_still_round_trips() {
-    // Level 0 is store-only — the deflate stream just wraps the
+    // Level 0 is store-only: the deflate stream just wraps the
     // input in `BTYPE=00` blocks. A reasonable lower bound to
     // exercise.
     let wrapped = wrap_woff1_with_options(TTF, WrapWoff1Options { deflate_quality: 0 })
@@ -175,7 +175,7 @@ fn unwrap_rejects_corrupted_zlib_stream_in_table_body() {
         let comp = u32::from_be_bytes(wrapped[rec + 8..rec + 12].try_into().unwrap()) as usize;
         let orig = u32::from_be_bytes(wrapped[rec + 12..rec + 16].try_into().unwrap()) as usize;
         if comp < orig && comp > 8 {
-            // Flip a byte well past the zlib header — guaranteed to
+            // Flip a byte well past the zlib header, guaranteed to
             // sit inside the deflate payload.
             wrapped[offset + 4] ^= 0xFF;
             corrupted = true;
@@ -203,7 +203,7 @@ fn unwrap_rejects_compressed_tables_when_feature_disabled() {
         let smaller = orig - 1;
         bytes[rec + 8..rec + 12].copy_from_slice(&smaller.to_be_bytes());
     }
-    // We don't care about decompressing — only about hitting the
+    // We don't care about decompressing, only about hitting the
     // "feature disabled" branch.
     assert!(unwrap_woff1(&bytes).is_err());
 }

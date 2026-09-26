@@ -4,14 +4,14 @@
 //! Noto Sans Myanmar (OFL) and asserts the output matches byte-for-
 //! byte. Myanmar runs through sigilbuzz's Universal Shaping Engine
 //! pipeline (`src/ot/use_shaper`) with the Myanmar script-tag priority
-//! (`mym2` → `mymr` → `DFLT`) and the Myanmar-specific basic feature
+//! (`mym2` -> `mymr` -> `DFLT`) and the Myanmar-specific basic feature
 //! chain (`rphf` / `pref` / `blwf` / `pstf` / `abvf` / `cjct`).
 //!
 //! The corpus exercises:
 //!
 //!   * plain consonants (one syllable, no reorder)
 //!   * post-base vowel signs (aa)
-//!   * pre-base vowel sign (sign e — the only pre-base matra in
+//!   * pre-base vowel sign (sign e, the only pre-base matra in
 //!     Myanmar, U+1031)
 //!   * medial consonants (medial ya, ra, wa, ha)
 //!   * virama-linked subjoining consonant
@@ -38,100 +38,100 @@ struct Case {
 }
 
 const CORPUS: &[Case] = &[
-    // Empty run — identity.
+    // Empty run: identity.
     Case {
         text: "",
         note: "empty",
         compare_rustybuzz: true,
     },
-    // က — ka alone.
+    // က: ka alone.
     Case {
         text: "\u{1000}",
         note: "ka alone",
         compare_rustybuzz: true,
     },
-    // ကာ — ka + sign aa. Post-base matra, no reorder.
+    // ကာ: ka + sign aa. Post-base matra, no reorder.
     Case {
         text: "\u{1000}\u{102C}",
         note: "kaa (post-base aa)",
         compare_rustybuzz: true,
     },
-    // ကေ — ka + sign e. Pre-base matra — USE reorder moves sign-e
+    // ကေ: ka + sign e. Pre-base matra: USE reorder moves sign-e
     // before ka visually.
     Case {
         text: "\u{1000}\u{1031}",
         note: "ke (pre-base sign-e)",
         compare_rustybuzz: true,
     },
-    // ကိ — ka + sign i. Above-base matra.
+    // ကိ: ka + sign i. Above-base matra.
     Case {
         text: "\u{1000}\u{102D}",
         note: "ki (above-base i)",
         compare_rustybuzz: true,
     },
-    // ကု — ka + sign u. Below-base matra.
+    // ကု: ka + sign u. Below-base matra.
     Case {
         text: "\u{1000}\u{102F}",
         note: "ku (below-base u)",
         compare_rustybuzz: true,
     },
-    // ကံ — ka + anusvara. Final mark.
+    // ကံ: ka + anusvara. Final mark.
     Case {
         text: "\u{1000}\u{1036}",
         note: "kang (ka + anusvara)",
         compare_rustybuzz: true,
     },
-    // ကျ — ka + medial ya (U+103B). Consonant modifier.
+    // ကျ: ka + medial ya (U+103B). Consonant modifier.
     Case {
         text: "\u{1000}\u{103B}",
         note: "ka + medial ya",
         compare_rustybuzz: true,
     },
-    // ကြ — ka + medial ra (U+103C). Pre-base medial in Myanmar.
+    // ကြ: ka + medial ra (U+103C). Pre-base medial in Myanmar.
     Case {
         text: "\u{1000}\u{103C}",
         note: "ka + medial ra",
         compare_rustybuzz: true,
     },
-    // ကွ — ka + medial wa (U+103D).
+    // ကွ: ka + medial wa (U+103D).
     Case {
         text: "\u{1000}\u{103D}",
         note: "ka + medial wa",
         compare_rustybuzz: true,
     },
-    // ကှ — ka + medial ha (U+103E).
+    // ကှ: ka + medial ha (U+103E).
     Case {
         text: "\u{1000}\u{103E}",
         note: "ka + medial ha",
         compare_rustybuzz: true,
     },
-    // က္က — ka + virama + ka (stacked subscript).
+    // က္က: ka + virama + ka (stacked subscript).
     Case {
         text: "\u{1000}\u{1039}\u{1000}",
         note: "ka + virama + ka (subscript)",
         compare_rustybuzz: true,
     },
-    // အ — independent vowel a.
+    // အ: independent vowel a.
     Case {
         text: "\u{1021}",
         note: "independent vowel a",
         compare_rustybuzz: true,
     },
-    // ဣ — independent vowel i (U+1023).
+    // ဣ: independent vowel i (U+1023).
     Case {
         text: "\u{1023}",
         note: "independent vowel i",
         compare_rustybuzz: true,
     },
-    // မင်္ဂလာပါ — "Hello" (mingalaba). Exercises the kinzi prefix
+    // မင်္ဂလာပါ: "Hello" (mingalaba). Exercises the kinzi prefix
     // (`nga + asat + virama`) which sigilbuzz's Myanmar reorder
-    // moves to POS_AFTER_MAIN — immediately after the base
+    // moves to POS_AFTER_MAIN, immediately after the base
     // consonant. Once the triple sits after the base, `rphf`
     // collapses it to the font's kinzi glyph in the reph slot,
     // matching rustybuzz glyph-for-glyph.
     Case {
         text: "\u{1019}\u{1004}\u{103A}\u{1039}\u{1002}\u{101C}\u{102C}\u{1015}\u{102B}",
-        note: "mingalaba (hello) — kinzi reorder",
+        note: "mingalaba (hello): kinzi reorder",
         compare_rustybuzz: true,
     },
     // Myanmar digits 0-4.
@@ -146,13 +146,13 @@ const CORPUS: &[Case] = &[
         note: "mixed latin + myanmar",
         compare_rustybuzz: true,
     },
-    // Myanmar Extended-A — shan letter kha (U+AA60).
+    // Myanmar Extended-A: shan letter kha (U+AA60).
     Case {
         text: "\u{AA60}",
         note: "shan letter kha (Extended-A)",
         compare_rustybuzz: true,
     },
-    // Myanmar Extended-B — shan digit 0 (U+A9F0).
+    // Myanmar Extended-B: shan digit 0 (U+A9F0).
     Case {
         text: "\u{A9F0}",
         note: "shan digit 0 (Extended-B)",

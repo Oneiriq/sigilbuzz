@@ -1,33 +1,32 @@
 [workspace]
-# sigilbuzz is the shaping core at the repo root. Companion crates
-# (sigilbuzz-gpu for Slug outline encoding, sigilbuzz-paint for
-# COLRv1 evaluation, and any future serialiser backends like
-# sigilbuzz-pdf / sigilbuzz-svg) live under `crates/` and depend on
-# the shaping core. They answer to different constraints — GPU float
-# math and matrix composition don't belong in the no_std shaper.
+# The shaping core lives at the repo root. Companion crates (GPU
+# encoding, COLRv1 paint, rasterizing, subsetting, WOFF, PDF, SVG, and
+# so on) live under `crates/` and depend on the core. They work under
+# different constraints. GPU float math and matrix composition don't
+# belong in the no_std shaper.
 members = [".", "crates/*"]
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.81"
 authors = ["Shon Thomas <shonpt@outlook.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/Oneiriq/sigilbuzz"
 
 [workspace.dependencies]
-# Shared version pinning across the workspace. Companion crates use
-# `sigilbuzz = { workspace = true }` to pick up the shaper.
-sigilbuzz = { path = ".", version = "0.21.0" }
+# Shared version pin. Companion crates use `sigilbuzz = { workspace = true }`
+# to pick up the shaper.
+sigilbuzz = { path = ".", version = "0.22.0" }
 
 [package]
 name = "sigilbuzz"
-version = "0.21.0"
+version = "0.22.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Modern pure-Rust text shaping engine. A clean-room reimagining of HarfBuzz with an eye on the 2026 release."
+description = "Pure-Rust, clean-room text shaping engine with a HarfBuzz-style API. No runtime dependencies, works in no_std."
 publish = true
 readme = "README.md"
 keywords = ["text", "shaping", "opentype", "harfbuzz", "typography"]
@@ -37,24 +36,24 @@ categories = ["text-processing", "rendering", "no-std"]
 # Standalone library. No proc-macros, no C glue.
 
 [features]
-# Everything pure-Rust by default. `std` turns on allocation-backed
+# Everything is pure Rust by default. `std` turns on allocation-backed
 # conveniences (Vec/String in the public API, IO helpers). Turn it off
-# for embedded / no_std targets — the core shaping path does not need
+# for embedded and no_std targets. The core shaping path does not need
 # it.
 default = ["std"]
 std = ["alloc"]
 alloc = []
 
 [dependencies]
-# Intentionally empty. Every byte of parsing and shaping is sigilbuzz
-# code. Any new dependency requires an entry in docs/deps.md explaining
-# what it buys us and why it cannot be written in-house.
+# Empty on purpose. Every byte of parsing and shaping is sigilbuzz
+# code. Any new dependency needs an entry in docs/deps.md explaining
+# what it buys us and why it can't be written in-house.
 
 [dev-dependencies]
-# Tests may depend on sample fonts and timing utilities — add here,
+# Tests may depend on sample fonts and timing utilities. Add them here,
 # never in [dependencies].
-# rustybuzz is the reference implementation we compare against for
-# M1 parity. Dev-dep only: the core crate must never link against it.
+# rustybuzz is the reference the parity tests compare shaping output
+# against. Dev-dep only: the core crate must never link against it.
 rustybuzz = "0.20"
 # ttf-parser drives the outline-parity tests: we compare our
 # glyph_outline stream against its OutlineBuilder callbacks across
@@ -95,51 +94,51 @@ strip = "debuginfo"
 inherits = "release"
 debug = true
 
-# Workspace-wide lints. Every crate opts in via `[lints] workspace =
+# Workspace-wide lints. Every crate opts in with `[lints] workspace =
 # true` to enforce the rules in `docs/STABILITY.md`:
 #
-#   missing_docs = warn  — every `pub` item must carry a doc comment
-#                          so the public-API contract is self-documenting.
-#   unsafe_op_in_unsafe_fn = warn  — surface every unsafe operation
-#                          even inside an `unsafe fn` body.
+#   missing_docs = warn: every `pub` item must carry a doc comment so
+#                        the public API documents itself.
+#   unsafe_op_in_unsafe_fn = warn: surface every unsafe operation, even
+#                        inside an `unsafe fn` body.
 #
-# Per-crate `[lints]` blocks may add stricter rules (the root sigilbuzz
-# crate enables clippy::all + pedantic with selective allows below).
-# Companion crates inherit the workspace baseline only.
+# Per-crate `[lints]` blocks may add stricter rules. Today every crate
+# uses the workspace baseline, including clippy::all and pedantic with
+# the selective allows below.
 [workspace.lints.rust]
 missing_docs = "warn"
 unsafe_op_in_unsafe_fn = "warn"
 
-# Workspace-wide clippy enforcement. Hoisted in 0.20.0 after the
-# companion-crate pedantic cleanup (was previously root-only because
-# hoisting it surfaced ~100 pre-existing violations across the 11
-# companion crates — those have now been fixed or narrowly allowed,
-# see commit history on chore/companion-pedantic-cleanup).
+# Workspace-wide clippy enforcement. Hoisted from the root crate in
+# 0.20.0 after the companion-crate pedantic cleanup. Hoisting it earlier
+# surfaced about 100 existing violations across the 11 companion crates.
+# Those are now fixed or narrowly allowed (see the commit history on
+# chore/companion-pedantic-cleanup).
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
-# Selectively relaxed — these fire on patterns that are idiomatic in a
+# Selectively relaxed. These fire on patterns that are idiomatic in a
 # low-level parser and would otherwise add noise.
 cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 cast_lossless = "allow"       # `b'A' as u16` in test fixtures is clearer than `u16::from(b'A')`
-cast_sign_loss = "allow"      # `i16 as u16` for OpenType delta arithmetic is deliberate
+cast_sign_loss = "allow"      # `i16 as u16` for OpenType delta arithmetic is intended
 # `cast_possible_wrap` rounds out the cast family for binary parsers:
 # OpenType offsets are stored as `usize` in our parsers but written
 # back as `i32`/`i16` in encoded tables. The wrap is intentional and
 # bounded by the format spec, not a correctness concern.
 cast_possible_wrap = "allow"
 # doc_markdown fires constantly on CamelCase OpenType names like
-# ScriptList / FeatureList / ValueRecord / GSUB that are genuine
-# English prose references, not Rust identifiers. Relaxing it lets
-# the docs read like the OpenType spec they are describing.
+# ScriptList / FeatureList / ValueRecord / GSUB that are plain English
+# prose references, not Rust identifiers. Relaxing it lets the docs
+# read like the OpenType spec they describe.
 doc_markdown = "allow"
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 # `missing_docs_in_private_items` is noisy and not relevant to the
-# stability commitment — it would fire on every `fn helper()` in a
+# stability commitment. It would fire on every `fn helper()` in a
 # private module. We rely on `missing_docs` (rustc) to enforce the
 # public-API-doc rule and let private items document themselves on a
 # best-effort basis.
@@ -162,8 +161,8 @@ items_after_statements = "allow"
 # `u8::from(flag)`.
 bool_to_int_with_if = "allow"
 # `match_bool` / `single_match_else`: explicit match-on-bool/Option
-# patterns appear in encoder code where future variants are anticipated
-# (e.g. WOFF2 transform variants).
+# patterns appear in encoder code where future variants are expected
+# (for example WOFF2 transform variants).
 match_bool = "allow"
 single_match_else = "allow"
 # `float_cmp`: COLRv1 / variation-store code compares `f32` axis
@@ -171,11 +170,11 @@ single_match_else = "allow"
 # (0.0, 1.0, default). Tolerance comparisons would be wrong here.
 float_cmp = "allow"
 # `too_many_lines`: parsers for CFF/CFF2 INDEX/Top DICT, WOFF2 transform
-# tables, and gvar variation stores are intrinsically long state
-# machines. Splitting them obscures the spec mapping.
+# tables, and gvar variation stores are long state machines by nature.
+# Splitting them obscures the mapping to the spec.
 too_many_lines = "allow"
-# `struct_field_names`: e.g. `glyf_slot` / `loca_slot` / `cff_slot`
-# pattern in subset table allocation — the postfix carries semantic
+# `struct_field_names`: for example the `glyf_slot` / `loca_slot` /
+# `cff_slot` pattern in subset table allocation. The suffix carries
 # meaning, not redundancy.
 struct_field_names = "allow"
 # `unnecessary_wraps`: many parser entry points return `Result` even
@@ -184,7 +183,7 @@ struct_field_names = "allow"
 # fallible signature.
 unnecessary_wraps = "allow"
 # `trivially_copy_pass_by_ref`: a handful of helper signatures take
-# `&Tag` / `&u32` for symmetry with neighbouring fns that take a
+# `&Tag` / `&u32` for symmetry with neighboring fns that take a
 # real reference. Enforcing by-value here would make the signatures
 # inconsistent across each module.
 trivially_copy_pass_by_ref = "allow"
@@ -206,33 +205,32 @@ unreadable_literal = "allow"
 # `.map_or(default, f)` when the closure or default is non-trivial,
 # which is the common case in subset/pdf parsers.
 map_unwrap_or = "allow"
-# `struct_excessive_bools`: subset options structs (SubsetOptions etc.)
-# are flag bags by design — turning them into bitflags would change
+# `struct_excessive_bools`: subset options structs (SubsetInput etc.)
+# are flag bags by design. Turning them into bitflags would change
 # the public API for no readability gain.
 struct_excessive_bools = "allow"
 # `many_single_char_names`: 2D affine transform code uses the
-# canonical CSS / PostScript `a, b, c, d, e, f` matrix naming. The
-# single-letter names *are* the spec.
+# standard CSS / PostScript `a, b, c, d, e, f` matrix naming. The
+# single-letter names are the spec.
 many_single_char_names = "allow"
 # `match_same_arms`: parser dispatch tables sometimes have identical
-# bodies for distinct arms because the spec assigns different
-# semantic meaning to each tag — collapsing them would lose the
-# documentation value of the explicit arm list.
+# bodies for distinct arms because the spec gives each tag its own
+# meaning. Collapsing them would lose the explicit arm list, which
+# doubles as documentation.
 match_same_arms = "allow"
 # `explicit_iter_loop`: `BTreeMap::iter_mut()` cannot be replaced
 # with `&mut *m` because BTreeMap doesn't implement DerefMut. The
 # explicit form is required, not stylistic.
 explicit_iter_loop = "allow"
-# `needless_continue` in render/src/svg.rs is owned by the
-# svg-mask-text-on-path agent and intentionally retained for the
-# loop's structural symmetry across tag-kind dispatch arms.
+# `needless_continue`: render/src/svg.rs keeps an explicit `continue`
+# in each tag-kind dispatch arm so the arms stay symmetric.
 needless_continue = "allow"
 # `uninlined_format_args`: fires in test fixtures where `format!("{}", x)`
-# patterns predate the captured-identifier syntax. Net stylistic; we
-# don't want a churn-PR over it.
+# patterns predate the captured-identifier syntax. Purely stylistic, and
+# not worth a churn PR.
 uninlined_format_args = "allow"
 # `needless_pass_by_value`: clap-derived cli `Args` structs are
-# consumed by their `run(args)` entry points by convention — taking
+# consumed by their `run(args)` entry points by convention. Taking
 # them by value matches the standard `clap` example and lets
 # subcommands move owned `PathBuf`s without an extra `.clone()`.
 needless_pass_by_value = "allow"
@@ -241,15 +239,14 @@ needless_pass_by_value = "allow"
 borrow_as_ptr = "allow"
 # `checked_conversions`: `x <= u16::MAX as u32` reads more clearly as
 # a numeric comparison than `u16::try_from(x).is_ok()` in some hot
-# paths; we accept both forms.
+# paths. We accept both forms.
 checked_conversions = "allow"
 # `needless_raw_string_hashes`: SVG/XML fixtures use `r##"..."##`
 # uniformly so authors can paste in attribute strings containing `"`
-# without re-counting hashes. Letting clippy strip hashes per-fixture
+# without re-counting hashes. Letting clippy strip hashes per fixture
 # would create a maintenance trap.
 needless_raw_string_hashes = "allow"
 
-# Root crate inherits the workspace lint baseline. No per-crate
-# additions — the shaper already conforms to the strictest level.
+# The root crate inherits the workspace lint baseline with no additions.
 [lints]
 workspace = true

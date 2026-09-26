@@ -9,20 +9,20 @@
 //!
 //! Real-world SVG-in-OT documents (Twitter Color Emoji, Mozilla Firefox
 //! OS Emoji, designer fonts produced by `nanoemoji` / `fonttools`) use
-//! a small fraction of the full SVG 1.1 grammar. We deliberately
+//! a small fraction of the full SVG 1.1 grammar. We
 //! implement only that fraction:
 //!
 //! - `<svg>` with `viewBox` / `width` / `height` attributes.
 //! - `<g>` with optional `transform=` (`translate`, `scale`, `rotate`,
 //!   `matrix`).
 //! - `<path>` with `d=` containing M/L/H/V/C/Q/Z + relative variants.
-//! - `<rect>` / `<circle>` / `<ellipse>` shape primitives — converted
+//! - `<rect>` / `<circle>` / `<ellipse>` shape primitives, converted
 //!   to paths and run through the existing fill pipeline.
-//! - `<polygon>` / `<polyline>` / `<line>` shape primitives — converted
+//! - `<polygon>` / `<polyline>` / `<line>` shape primitives, converted
 //!   to paths via the SVG `points` list grammar (space- or
 //!   comma-separated coords). `<polygon>` closes back to the first
 //!   point; `<polyline>` is open; `<line>` is a single segment.
-//! - `fill="#RRGGBB"`, `fill="#RGB"`, `fill="rgb(...)"`, named colours,
+//! - `fill="#RRGGBB"`, `fill="#RGB"`, `fill="rgb(...)"`, named colors,
 //!   `fill="none"`, `fill-opacity` / `opacity`, plus `fill="url(#g)"`
 //!   pointing at a `<linearGradient>` / `<radialGradient>`.
 //! - Stroking: `stroke`, `stroke-width`, `stroke-linecap` (butt
@@ -39,7 +39,7 @@
 //! - `<mask>` (`mask-type="luminance"` default plus `mask-type="alpha"`
 //!   opt-in) containing any combination of the supported shape
 //!   primitives. The mask children are rendered into a same-size
-//!   scratch ColorPixmap; per-pixel BT.709 luminance × source alpha
+//!   scratch ColorPixmap; per-pixel BT.709 luminance * source alpha
 //!   gives the mask alpha for `luminance`, while `alpha` uses the
 //!   mask buffer's alpha channel directly. `maskUnits="userSpaceOnUse"`
 //!   (default) and `maskUnits="objectBoundingBox"` (mask region rect
@@ -56,29 +56,29 @@
 //!   `feGaussianBlur` (3-pass box-blur approximation), `feColorMatrix`
 //!   (matrix / saturate / hueRotate / luminanceToAlpha), `feOffset`,
 //!   `feFlood`, and `feMerge`. Drop-shadow chains
-//!   (`SourceAlpha` → blur → offset → merged under `SourceGraphic`)
-//!   compose end-to-end. Filters apply per shape (`element[filter=…]`);
+//!   (`SourceAlpha` -> blur -> offset -> merged under `SourceGraphic`)
+//!   compose end-to-end. Filters apply per shape (`element[filter=...]`);
 //!   group-level filter regions are rendered shape-by-shape.
 //!
 //! - `<textPath xlink:href="#id">` glyph placement along a referenced
 //!   `<path>`, via the consumer-pre-shape API
 //!   [`Rasterizer::rasterize_svg_glyph_with_text_paths`]. The renderer
-//!   does not shape text — the consumer feeds in pre-shaped
+//!   does not shape text. The consumer feeds in pre-shaped
 //!   [`TextPathGlyph`] runs (one entry per visual glyph, carrying a
 //!   gid and a user-space x-advance), and the renderer walks the
 //!   referenced path's arc length, fetching each glyph's outline from
 //!   the same [`Face`] and translating it to the cumulative-advance
-//!   position. Glyphs are placed axis-aligned only — tangent rotation
+//!   position. Glyphs are placed axis-aligned only. Tangent rotation
 //!   is deferred to a follow-up. `side="right"` and path cycling
 //!   (`startOffset` past path end) are also deferred.
 //!
-//! Anything outside this list — filter primitives beyond the set above
+//! Anything outside this list, filter primitives beyond the set above
 //! (`feTurbulence`, `feImage`, `feMorphology`, `feConvolveMatrix`,
 //! `feSpecularLighting`, `feDiffuseLighting`, `feComponentTransfer`,
 //! `feComposite` operators beyond source-over), nested `<mask>`
 //! references (mask-of-mask), animations, scripting, `style=`
 //! attributes, plain `<text>` rendering (text shaping is the
-//! consumer's responsibility — see sigilbuzz core) — is silently
+//! consumer's responsibility, see sigilbuzz core), is silently
 //! skipped. `<textPath>` is rendered only when the consumer supplies
 //! pre-shaped runs via the API above; un-paired `<textPath>` nodes
 //! (no matching [`TextPathInput`]) are silently skipped, matching the
@@ -87,21 +87,21 @@
 //! ## Pipeline
 //!
 //! ```text
-//!   Face.svg_document(gid)    → SvgDocument { data, gzipped }
-//!     │
-//!     │ gzipped → RenderError::SvgGzipped (no gzip dep here)
-//!     ▼
-//!   parse_document(xml)       → SvgDoc { viewbox, defs, fills, strokes }
-//!     │
-//!     │ each fill: { ops, paint, xform, clip? }
-//!     ▼
+//!   Face.svg_document(gid)    -> SvgDocument { data, gzipped }
+//!     |
+//!     | gzipped -> RenderError::SvgGzipped (no gzip dep here)
+//!     v
+//!   parse_document(xml)       -> SvgDoc { viewbox, defs, fills, strokes }
+//!     |
+//!     | each fill: { ops, paint, xform, clip? }
+//!     v
 //!   for each fill / stroke pass:
-//!     flatten(ops × world_xform) → Segment[]
-//!     raster(segments)           → Pixmap (alpha mask)
-//!     blit(mask × paint → out)   → ColorPixmap
+//!     flatten(ops * world_xform) -> Segment[]
+//!     raster(segments)           -> Pixmap (alpha mask)
+//!     blit(mask * paint -> out)  -> ColorPixmap
 //! ```
 //!
-//! No XML library on the read path — the parser is a hand-rolled tree
+//! No XML library on the read path. The parser is a hand-rolled tree
 //! walker. Coordinates are decimal numbers parsed with `f32::from_str`.
 
 use alloc::string::{String, ToString};
@@ -129,19 +129,19 @@ const MAX_GROUP_DEPTH: u32 = 32;
 /// gigabytes of work. 4096 is well above what real fonts produce.
 const MAX_FILLS: usize = 4096;
 
-/// Maximum nested `<use>` resolution depth. SVG mandates ≥ 16 in real
+/// Maximum nested `<use>` resolution depth. SVG mandates >= 16 in real
 /// engines; we match.
 const MAX_USE_DEPTH: u32 = 16;
 
 /// Miter cut-off ratio per SVG: when the miter would extend more than
-/// `4 × stroke-width` past the join, fall back to a bevel join.
+/// `4 * stroke-width` past the join, fall back to a bevel join.
 const MITER_LIMIT: f32 = 4.0;
 
 /// Maximum pixel dimension for a rasterized SVG-in-OT glyph. Matches
 /// the PNG decoder's per-dim ceiling (16384) so the bound is uniform
 /// across the public render surface. A combination of a font-supplied
 /// finite-but-extreme `viewBox` and a caller-supplied large `size_pt`
-/// can otherwise multiply up to a `u32::MAX × u32::MAX × 4` allocation
+/// can otherwise multiply up to a `u32::MAX * u32::MAX * 4` allocation
 /// that panics in the `Vec` macro before any rasterization runs.
 const MAX_RENDER_DIM: f32 = 16384.0;
 
@@ -153,14 +153,14 @@ impl Rasterizer {
     /// Rasterizes the SVG document for `gid` from the font's `SVG`
     /// table, returning a premultiplied RGBA [`ColorPixmap`].
     ///
-    /// `size_pt` is the rendering size in pixels — the SVG document's
-    /// viewBox is mapped onto a `size_pt × size_pt` square. If the
+    /// `size_pt` is the rendering size in pixels. The SVG document's
+    /// viewBox is mapped onto a `size_pt x size_pt` square. If the
     /// viewBox is non-square, the rendered bitmap preserves the
     /// document's aspect ratio (the longer axis maps to `size_pt`).
     ///
     /// `coords` is accepted for API symmetry with
     /// [`Self::rasterize_glyph`] and [`Self::rasterize_colrv0_glyph`]
-    /// but currently has no effect — SVG-in-OT documents are static
+    /// but currently has no effect. SVG-in-OT documents are static
     /// (no axis tagging), and HarfBuzz / CoreText behave the same way.
     ///
     /// # Errors
@@ -195,8 +195,8 @@ impl Rasterizer {
         if doc.view_w <= 0.0 || doc.view_h <= 0.0 {
             return Err(RenderError::Parse("svg viewBox"));
         }
-        // Map document → pixel space: scale the viewBox onto a
-        // size_pt × size_pt square, preserving aspect ratio.
+        // Map document to pixel space: scale the viewBox onto a
+        // size_pt x size_pt square, preserving aspect ratio.
         let s = (size_pt / doc.view_w).min(size_pt / doc.view_h);
         let world = Affine {
             xx: s,
@@ -209,7 +209,7 @@ impl Rasterizer {
 
         // Cap output dimensions before allocation. Without this guard
         // an extreme finite viewBox + matching size_pt yields a
-        // post-cast `u32::MAX × u32::MAX × 4` allocation that overflows
+        // post-cast `u32::MAX * u32::MAX * 4` allocation that overflows
         // `usize` even through `saturating_mul`, and `vec![0u8; len]`
         // panics with "capacity overflow". 16384 matches the PNG
         // decoder's per-dim ceiling (`Ihdr::parse`) so the bound is
@@ -240,7 +240,7 @@ impl Rasterizer {
     /// pre-shaped glyph runs along any `<textPath>` nodes whose
     /// `xlink:href` (or `href`) matches an entry in `text_paths`.
     ///
-    /// sigilbuzz-render does not shape text — the consumer supplies
+    /// sigilbuzz-render does not shape text. The consumer supplies
     /// already-shaped [`TextPathGlyph`] runs (one record per visual
     /// glyph, carrying a `gid` and a user-space `x_advance`). For each
     /// matched `<textPath>` the renderer:
@@ -262,7 +262,7 @@ impl Rasterizer {
     /// tangent; this is a known PoC limitation flagged by PR #236's
     /// defer-note and tracked for the next minor. `side="right"` and
     /// path cycling beyond a single cumulative-advance walk are also
-    /// deferred — extra glyphs whose advance overruns the path's total
+    /// deferred. Extra glyphs whose advance overruns the path's total
     /// length are silently dropped.
     ///
     /// `coords` flows through to glyph outline lookups so variable
@@ -359,17 +359,17 @@ impl Rasterizer {
 /// Pre-shaped input for one `<textPath>` element.
 ///
 /// sigilbuzz-render does not perform text shaping. To render a
-/// `<textPath xlink:href="#id">…</textPath>` the caller must
+/// `<textPath xlink:href="#id">...</textPath>` the caller must
 /// pre-shape the contained text into a sequence of [`TextPathGlyph`]
 /// records (one per visual glyph) and pass them in via
 /// [`Rasterizer::rasterize_svg_glyph_with_text_paths`]. The renderer
 /// then walks the referenced path's arc length and translates each
 /// glyph's outline onto its cumulative-advance position.
 ///
-/// `text_path_id` is the bare element id — the part after the `#` in
+/// `text_path_id` is the bare element id, the part after the `#` in
 /// `xlink:href="#id"`. Whichever `<textPath>` node matches by id has
 /// its content replaced with the supplied glyph runs (any text-bearing
-/// children inside the SVG `<textPath>` are ignored — this API is the
+/// children inside the SVG `<textPath>` are ignored: this API is the
 /// sole text source).
 ///
 /// `font_size` is the user-space height of one em; design-unit glyph
@@ -379,7 +379,7 @@ impl Rasterizer {
 ///
 /// `glyph_runs` is consumed in order. Cumulative `x_advance` walks the
 /// path; glyphs whose run-start position lands past the path's total
-/// arc length are silently dropped (path cycling is deferred — see the
+/// arc length are silently dropped (path cycling is deferred, see the
 /// module-level docs).
 #[derive(Debug, Clone)]
 pub struct TextPathInput<'a> {
@@ -387,7 +387,7 @@ pub struct TextPathInput<'a> {
     /// `xlink:href="#id"` (or `href="#id"`) attribute on a
     /// `<textPath>` node, with the leading `#` stripped.
     pub text_path_id: &'a str,
-    /// User-space units per em — converts design-unit glyph outlines
+    /// User-space units per em. Converts design-unit glyph outlines
     /// to the document's coordinate space.
     pub font_size: f32,
     /// Pre-shaped glyph stream. Walked left-to-right; each glyph is
@@ -398,7 +398,7 @@ pub struct TextPathInput<'a> {
 /// One pre-shaped glyph in a [`TextPathInput`] run.
 ///
 /// The consumer is responsible for shaping (cluster decomposition,
-/// kerning, ligatures, mark positioning) — sigilbuzz-render only
+/// kerning, ligatures, mark positioning). sigilbuzz-render only
 /// places. `gid` indexes into the same [`Face`] that owns the SVG
 /// document; the renderer fetches its outline via
 /// [`Face::glyph_outline_at_coords`].
@@ -406,7 +406,7 @@ pub struct TextPathInput<'a> {
 /// `x_advance` is in user-space units (the same coordinate system the
 /// SVG document's `viewBox` is expressed in). The glyph's *origin* is
 /// placed at the path-position corresponding to the *cumulative* run
-/// advance up to (and including) this glyph's pre-advance — i.e.
+/// advance up to (and including) this glyph's pre-advance, i.e.
 /// glyph 0 sits at advance 0, glyph 1 sits at glyph-0's `x_advance`,
 /// and so on.
 #[derive(Debug, Clone, Copy)]
@@ -430,7 +430,7 @@ pub struct TextPathGlyph {
 /// pre-shaped glyph translated onto the path's cumulative-advance
 /// position.
 ///
-/// Glyphs are placed axis-aligned only — no tangent rotation. Glyph
+/// Glyphs are placed axis-aligned only, no tangent rotation. Glyph
 /// outlines come back in font design units (y-up); we flip y while
 /// scaling by `font_size / upem` so the result lives in the SVG
 /// document's user-space (y-down) alongside the rest of the parsed
@@ -485,7 +485,7 @@ fn walk_for_text_paths(
             }
         }
         // `<textPath>` doesn't recurse into structural children for
-        // text-content extraction — the consumer-shaped runs are the
+        // text-content extraction. The consumer-shaped runs are the
         // sole source. Stop here.
         return;
     }
@@ -539,7 +539,7 @@ fn emit_text_path_fills(
 
     // Path lives in document user-space; flatten in identity so chord
     // coordinates land on the same space the rest of the SvgDoc fills
-    // already use. The world transform (doc → pixel) is applied per
+    // already use. The world transform (doc -> pixel) is applied per
     // Fill at raster time, so we don't double-apply it here.
     let polyline = build_arc_length_polyline(&path_ops);
     if polyline.is_empty() {
@@ -550,7 +550,7 @@ fn emit_text_path_fills(
         return;
     }
 
-    // Scale design units → user-space units. Y is flipped because
+    // Scale design units to user-space units. Y is flipped because
     // OT outlines are y-up and SVG document space is y-down.
     let scale = input.font_size / upem;
 
@@ -612,7 +612,7 @@ struct PolyPoint {
 /// chord's length onto the running total.
 ///
 /// Multi-contour paths concatenate their per-contour polylines back to
-/// back — the cumulative-advance walk treats them as one continuous
+/// back. The cumulative-advance walk treats them as one continuous
 /// stroke for placement, matching the simple PoC contract documented
 /// on [`TextPathInput`]. Tangent-rotation and per-contour breaks are
 /// deferred work.
@@ -647,7 +647,7 @@ fn build_arc_length_polyline(ops: &[PathOp]) -> Vec<PolyPoint> {
 
 /// Local copy of [`crate::flatten::DEFAULT_TOLERANCE`] held here so
 /// the textPath flattener keeps a stable subdivision policy
-/// independent of the top-level rasterizer's runtime tolerance —
+/// independent of the top-level rasterizer's runtime tolerance:
 /// arc-length walks want consistent chord lengths across calls.
 const DEFAULT_TOLERANCE_LOCAL: f32 = crate::flatten::DEFAULT_TOLERANCE;
 
@@ -733,8 +733,8 @@ fn transform_outline_ops(ops: &[PathOp], scale: f32, ox: f32, oy: f32) -> Vec<Pa
 // =========================================================================
 
 /// One paintable surface collected from the document. `ops` is in the
-/// document's intrinsic coordinate space — the world transform
-/// (document → pixel) is applied on top at rasterize time.
+/// document's intrinsic coordinate space. The world transform
+/// (document -> pixel) is applied on top at rasterize time.
 #[derive(Debug, Clone)]
 struct Fill {
     ops: Vec<PathOp>,
@@ -747,7 +747,7 @@ struct Fill {
     /// world transform apply to both).
     clip: Option<ClipShape>,
     /// Indicates whether this fill is the outline of a stroke (closed
-    /// fill ribbon) — affects nothing in rendering but documents the
+    /// fill ribbon). Affects nothing in rendering but documents the
     /// pipeline split.
     #[allow(dead_code)]
     is_stroke: bool,
@@ -758,17 +758,17 @@ struct Fill {
     /// the canvas via Porter-Duff source-over.
     filter: Option<Filter>,
     /// Optional alpha mask (SVG `<mask>` element) to apply to this
-    /// fill. Distinct from `clip` — clip is binary inside/outside,
+    /// fill. Distinct from `clip`: clip is binary inside/outside,
     /// mask is a continuous luminance-derived alpha multiplier (so
     /// gradient mask edges feather the masked element). When set, the
     /// element rasterizes to a SourceGraphic pixmap, the mask
     /// children are rendered into a same-size buffer, and per-pixel
-    /// BT.709 luminance × mask source alpha modulates the
+    /// BT.709 luminance * mask source alpha modulates the
     /// SourceGraphic alpha before composite.
     mask: Option<MaskShape>,
 }
 
-/// Paint source for a [`Fill`]. SVG-in-OT documents use solid colour
+/// Paint source for a [`Fill`]. SVG-in-OT documents use solid color
 /// almost exclusively, with the rare gradient for designer emoji.
 #[derive(Debug, Clone)]
 enum Paint {
@@ -788,7 +788,7 @@ struct GradientPaint {
     /// time.
     opacity: f32,
     /// `gradientTransform`. Composed onto the gradient geometry
-    /// *before* the document → pixel `world` matrix.
+    /// *before* the document -> pixel `world` matrix.
     gradient_xform: Affine,
 }
 
@@ -819,7 +819,7 @@ struct ClipShape {
 
 /// A parsed `<mask>` element. Stored as a list of [`Fill`] records
 /// because masks can hold any combination of shape primitives,
-/// gradients, and per-element transforms — the same machinery that
+/// gradients, and per-element transforms, the same machinery that
 /// renders the rest of the document. At render time the mask's fills
 /// paint into a same-size scratch ColorPixmap, then either a per-pixel
 /// BT.709 luminance derivation (`mask-type="luminance"`, the default)
@@ -832,7 +832,7 @@ struct MaskShape {
     /// default; alpha skips the BT.709 derivation and uses the mask
     /// buffer's alpha channel directly.
     mask_type: MaskType,
-    /// `maskUnits` — coordinate system the mask region (`x`, `y`,
+    /// `maskUnits`: coordinate system the mask region (`x`, `y`,
     /// `width`, `height`) is expressed in. `UserSpaceOnUse` is the
     /// SVG default for our prior implementation; `ObjectBoundingBox`
     /// reinterprets the region as `[0, 1]²` of the masked element's
@@ -840,9 +840,9 @@ struct MaskShape {
     units: MaskUnits,
     /// Mask region as parsed from `x`, `y`, `width`, `height`.
     /// Interpretation depends on `units`. When `units` is
-    /// `UserSpaceOnUse`, this is currently informational only — the
+    /// `UserSpaceOnUse`, this is currently informational only. The
     /// luminance fast path renders the mask body across the entire
-    /// canvas, matching the prior PR #236 behaviour.
+    /// canvas, matching the prior PR #236 behavior.
     region_x: f32,
     region_y: f32,
     region_w: f32,
@@ -861,7 +861,7 @@ enum MaskUnits {
     ObjectBoundingBox,
 }
 
-/// A parsed `<filter>` element — an ordered list of primitives forming
+/// A parsed `<filter>` element: an ordered list of primitives forming
 /// a small DAG keyed by `result=` names. The DAG is evaluated at render
 /// time against a `SourceGraphic` pixmap (the filtered shape rendered
 /// into a transparent buffer) and a `SourceAlpha` pixmap (same shape,
@@ -880,7 +880,7 @@ struct FilterPrimitive {
     /// `in="..."`. `None` means "use previous primitive's output, or
     /// SourceGraphic if no previous primitive".
     input: Option<String>,
-    /// Second input (only meaningful for primitives that take two — for
+    /// Second input (only meaningful for primitives that take two. For
     /// the v1 set, none do, but parsed for forward-compat).
     #[allow(dead_code)]
     input2: Option<String>,
@@ -896,19 +896,19 @@ struct FilterPrimitive {
 enum FilterOp {
     /// `feGaussianBlur stdDeviation="σ"` or `"σx σy"`. Implemented as a
     /// 3-pass box-blur approximation (separable, O(N) per pass per axis)
-    /// — visually indistinguishable from a true Gaussian for σ ≥ 1 and
+    /// that is visually indistinguishable from a true Gaussian for σ >= 1 and
     /// vastly faster than convolving a full kernel.
     GaussianBlur { std_dev_x: f32, std_dev_y: f32 },
-    /// `feColorMatrix` in any of its `type=` flavours.
+    /// `feColorMatrix` in any of its `type=` flavors.
     ColorMatrix { matrix: [f32; 20] },
-    /// `feOffset dx=… dy=…`. Pure translation, integer-rounded at blit
+    /// `feOffset dx=... dy=...`. Pure translation, integer-rounded at blit
     /// time.
     Offset { dx: f32, dy: f32 },
-    /// `feFlood flood-color=… flood-opacity=…`. Constant-color pixmap
+    /// `feFlood flood-color=... flood-opacity=...`. Constant-color pixmap
     /// of the filter region. Color stored straight (un-premultiplied);
     /// premultiplication happens at materialize time.
     Flood { color: [u8; 4] },
-    /// `feMerge` with N `<feMergeNode in="…">` children. Composites the
+    /// `feMerge` with N `<feMergeNode in="...">` children. Composites the
     /// inputs in document order via Porter-Duff source-over.
     Merge { inputs: Vec<String> },
 }
@@ -1051,7 +1051,7 @@ fn collect_defs<'a>(node: &'a Node, defs: &mut Defs<'a>) {
 #[derive(Debug, Clone)]
 struct ElemCtx {
     xform: Affine,
-    /// Inherited fill colour (straight RGBA). `None` means "use solid
+    /// Inherited fill color (straight RGBA). `None` means "use solid
     /// black" at paint time, matching the SVG default. Tracked
     /// separately from gradient paint so cascading respects both.
     fill_color: Option<[u8; 4]>,
@@ -1062,7 +1062,7 @@ struct ElemCtx {
     fill_opacity: f32,
     /// Element-level opacity factor in `[0, 1]`.
     opacity: f32,
-    /// Stroke colour (None = no stroke, default).
+    /// Stroke color (None = no stroke, default).
     stroke_color: Option<[u8; 4]>,
     stroke_width: f32,
     stroke_linecap: LineCap,
@@ -1070,13 +1070,13 @@ struct ElemCtx {
     /// Inherited stroke-opacity factor in `[0, 1]`.
     stroke_opacity: f32,
     /// Parsed `stroke-dasharray`. Empty means "no dashing". Odd-length
-    /// lists are normalised to even length by [`parse_dasharray`].
+    /// lists are normalized to even length by [`parse_dasharray`].
     stroke_dasharray: Vec<f32>,
     /// `stroke-dashoffset` (in user-space units), applied at the start
     /// of every contour.
     stroke_dashoffset: f32,
     /// Active clip-path href, applied to every fill / stroke produced
-    /// inside this subtree. Stored as the bare id (no `url(#…)` form).
+    /// inside this subtree. Stored as the bare id (no `url(#...)` form).
     clip_href: Option<String>,
     /// Active filter href (`filter="url(#id)"`). Stored as the bare id.
     /// Inherited like `clip_href`; resolved against the document `Defs`
@@ -1088,8 +1088,8 @@ struct ElemCtx {
     mask_href: Option<String>,
     /// Cycle-guard for nested mask resolution. `resolve_mask_shape`
     /// bumps this when it walks the mask body so any descendant
-    /// `mask="url(#…)"` reference (including the cyclic
-    /// `<mask id=a>…<rect mask=url(#b)>…<mask id=b>…<rect mask=url(#a)>`
+    /// `mask="url(#...)"` reference (including the cyclic
+    /// `<mask id=a>...<rect mask=url(#b)>...<mask id=b>...<rect mask=url(#a)>`
     /// case) is dropped at `emit_paint` rather than recursing back
     /// into the resolver. Keeps the stack bounded at the documented
     /// "mask-of-mask is unsupported" semantics.
@@ -1205,7 +1205,7 @@ fn walk(
             child_ctx.xform = child_ctx.xform.compose(&Affine::translate(ux, uy));
         }
         // Walk the referenced element with the use's context. Reset
-        // the group-nesting counter — `<use>` expansion is flattening,
+        // the group-nesting counter: `<use>` expansion is flattening,
         // not source-level nesting, so the only relevant cap is
         // `MAX_USE_DEPTH`.
         walk(target, doc, defs, &child_ctx, 0, use_depth + 1)?;
@@ -1354,9 +1354,9 @@ fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) 
         .as_deref()
         .and_then(|id| resolve_clip_shape(defs, id));
 
-    // Resolve the filter chain once per emission. Unrecognised /
-    // missing filter ids degrade to "no filter" — matches browser
-    // behaviour and keeps a typo from blanking the glyph.
+    // Resolve the filter chain once per emission. Unrecognized /
+    // missing filter ids degrade to "no filter", which matches browser
+    // behavior and keeps a typo from blanking the glyph.
     let filter = ctx
         .filter_href
         .as_deref()
@@ -1368,8 +1368,8 @@ fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) 
     //
     // `mask_depth` is the cycle-guard: once we are inside a
     // `resolve_mask_shape` walk (depth > 0), drop any nested mask
-    // reference so a `<mask id=a>…<rect mask=url(#b)>…<mask
-    // id=b>…<rect mask=url(#a)>` document can't recurse the
+    // reference so a `<mask id=a>...<rect mask=url(#b)>...<mask
+    // id=b>...<rect mask=url(#a)>` document can't recurse the
     // resolver into a stack overflow. mask-of-mask is documented as
     // deferred; this enforces it.
     let mask = if ctx.mask_depth == 0 {
@@ -1444,7 +1444,7 @@ fn resolve_fill_paint(defs: &Defs<'_>, ctx: &ElemCtx) -> Option<Paint> {
         if let Some(g) = resolve_gradient(defs, id, ctx) {
             return Some(Paint::Gradient(g));
         }
-        // url(#…) pointing to nothing falls back to default black.
+        // url(#...) pointing to nothing falls back to default black.
     }
     let base = ctx.fill_color.unwrap_or([0, 0, 0, 255]);
     if base[3] == 0 {
@@ -1463,7 +1463,7 @@ fn resolve_clip_shape(defs: &Defs<'_>, id: &str) -> Option<ClipShape> {
     if !name_eq(&cp.name, "clipPath") {
         return None;
     }
-    // Walk children — we support exactly one shape (path / rect /
+    // Walk children. We support exactly one shape (path / rect /
     // circle / ellipse). Multiple shapes inside a clipPath are still
     // accepted but only the first is used; this matches the
     // documented "single-path basic clipPath" deferral note.
@@ -1516,7 +1516,7 @@ fn resolve_clip_shape(defs: &Defs<'_>, id: &str) -> Option<ClipShape> {
 ///
 /// Returns `None` when the id doesn't point at a `<mask>` element or
 /// the mask has no renderable children. A self-referential mask
-/// (mask-of-mask) is not supported — nested mask references inside
+/// (mask-of-mask) is not supported. Nested mask references inside
 /// the mask body are dropped at walk time so the caller never sees a
 /// recursive composite.
 fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape> {
@@ -1525,7 +1525,7 @@ fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape> {
         return None;
     }
     // Build a tiny scratch SvgDoc so we can re-use `walk` end-to-end.
-    // The dimensions don't matter — render-time uses the masked
+    // The dimensions don't matter: render-time uses the masked
     // element's pixmap size, not the mask's viewBox.
     let mut scratch = SvgDoc {
         view_w: 1.0,
@@ -1538,11 +1538,11 @@ fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape> {
     if let Some(t) = mn.attr("transform").and_then(parse_transform) {
         ctx.xform = ctx.xform.compose(&t);
     }
-    // Drop any nested mask reference on the mask root itself —
+    // Drop any nested mask reference on the mask root itself:
     // mask-of-mask isn't supported; the brief defers it explicitly.
     ctx.mask_href = None;
     // Cycle-guard: bump `mask_depth` so any descendant `<rect
-    // mask="url(#…)">` inside the mask body falls out at
+    // mask="url(#...)">` inside the mask body falls out at
     // `emit_paint` rather than recursing back into
     // `resolve_mask_shape`. Caps the call stack at one level of mask
     // resolution.
@@ -1559,7 +1559,7 @@ fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape> {
         return None;
     }
     // Strip any nested mask references that survived from grand-
-    // children — mask-of-mask is documented as unsupported.
+    // children. Mask-of-mask is documented as unsupported.
     for f in &mut scratch.fills {
         f.mask = None;
     }
@@ -1575,9 +1575,9 @@ fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape> {
     // Per SVG spec the mask region defaults to the full bounding-box
     // window when `objectBoundingBox` (-10%, -10%, 120%, 120% in the
     // spec, but consumer-side OT-SVG fonts almost always use the
-    // simpler 0/0/1/1 window — we follow that simpler convention so
+    // simpler 0/0/1/1 window. We follow that simpler convention so
     // the test fixture in the brief reads cleanly). For
-    // `userSpaceOnUse`, the legacy PR #236 behaviour ignored the
+    // `userSpaceOnUse`, the legacy PR #236 behavior ignored the
     // region entirely, so we keep the parse but only consult it in
     // the bbox path.
     let region_x = mn.attr("x").and_then(parse_length).unwrap_or(0.0);
@@ -1597,9 +1597,9 @@ fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape> {
 }
 
 /// Resolves a `<filter id="...">` definition into a [`Filter`] record.
-/// Unknown / malformed primitives are skipped silently — the rest of
+/// Unknown / malformed primitives are skipped silently. The rest of
 /// the chain still runs. Returns `None` if the id doesn't point at a
-/// `<filter>` element or no recognised primitives were collected.
+/// `<filter>` element or no recognized primitives were collected.
 fn resolve_filter(defs: &Defs<'_>, id: &str) -> Option<Filter> {
     let f = defs.lookup(id)?;
     if !name_eq(&f.name, "filter") {
@@ -1691,7 +1691,7 @@ fn parse_std_deviation(s: &str) -> Option<(f32, f32)> {
 }
 
 /// Parses an `feColorMatrix` `values=` attribute under the named
-/// `type=` flavour. Returns a 4x5 row-major matrix (RGBA in, RGBA out
+/// `type=` flavor. Returns a 4x5 row-major matrix (RGBA in, RGBA out
 /// plus 1 column of bias). Failure modes (wrong arity, NaN) silently
 /// degrade to identity so downstream rendering stays sane.
 fn parse_color_matrix(kind: &str, values: &str) -> Option<[f32; 20]> {
@@ -1898,7 +1898,7 @@ fn parse_stop_offset(s: &str) -> f32 {
 }
 
 // =========================================================================
-// Stroke geometry: walk polyline → emit closed quad ribbons with caps
+// Stroke geometry: walk polyline -> emit closed quad ribbons with caps
 // and joins.
 // =========================================================================
 
@@ -2239,11 +2239,11 @@ fn flatten_cubic_polyline(
 /// path this draws each segment as a separate rectangle (butt cap +
 /// miter-style overlap). Adjacent segments overlap at joins so
 /// scanline winding fills the joint cleanly without explicit miter
-/// geometry — the result is visually identical to "miter" for typical
+/// geometry. The result is visually identical to "miter" for typical
 /// stroke widths and avoids the corner-case math.
 ///
 /// Round / square caps emit half-circles / extended rectangles at the
-/// open ends (best-effort follow-up — for now butt is the default).
+/// open ends (best-effort follow-up, for now butt is the default).
 fn emit_stroked_polyline(
     out: &mut Vec<PathOp>,
     points: &[(f32, f32)],
@@ -2325,7 +2325,7 @@ fn emit_stroked_polyline(
     }
 }
 
-/// Emits an axis-aligned octagon ("disk") of radius `r` centred at
+/// Emits an axis-aligned octagon ("disk") of radius `r` centered at
 /// `(cx, cy)`. 8 segments is the documented round-cap approximation.
 fn emit_disk(out: &mut Vec<PathOp>, cx: f32, cy: f32, r: f32) {
     if r <= 0.0 {
@@ -2379,7 +2379,7 @@ fn emit_miter_join(
     let p_b_right = (cur.0 - nb, cur.1 - nb2);
 
     // Compute miter point on the outer side. A small angle between
-    // segments means a long spike — bail to bevel beyond the limit.
+    // segments means a long spike. Bail to bevel beyond the limit.
     let dot = tax * tbx + tay * tby;
     let denom = 1.0 + dot;
     if denom <= 1e-6 {
@@ -2411,7 +2411,7 @@ fn emit_miter_join(
     let miter_ratio = (2.0_f32 / denom).sqrt(); // = 1 / sin(theta/2)
     if miter_ratio > MITER_LIMIT {
         // Bevel: just two triangles connecting outer corners to the
-        // join centre.
+        // join center.
         out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
         out.push(PathOp::LineTo {
             x: p_a_left.0,
@@ -2487,7 +2487,7 @@ fn emit_miter_join(
 
 /// Parses a `stroke-dasharray` attribute body. Empty / `none` /
 /// all-zero / unparseable inputs return an empty `Vec`. SVG mandates
-/// that odd-length lists are doubled (e.g. `"2 3 5"` →
+/// that odd-length lists are doubled (e.g. `"2 3 5"` ->
 /// `"2 3 5 2 3 5"`); we apply that here so the walker can iterate
 /// without worrying about parity.
 fn parse_dasharray(s: &str) -> Vec<f32> {
@@ -2505,7 +2505,7 @@ fn parse_dasharray(s: &str) -> Vec<f32> {
         let body = tok.trim_end_matches("px");
         match body.parse::<f32>() {
             Ok(n) if n.is_finite() && n >= 0.0 => nums.push(n),
-            _ => return Vec::new(), // SVG: any negative or invalid → ignore the whole list.
+            _ => return Vec::new(), // SVG: any negative or invalid -> ignore the whole list.
         }
     }
     if nums.is_empty() || nums.iter().all(|&v| v == 0.0) {
@@ -2521,7 +2521,7 @@ fn parse_dasharray(s: &str) -> Vec<f32> {
 /// Walks `points` by cumulative *true Bezier arc length* and returns
 /// the polylines that fall inside the "draw" phase of the dash pattern.
 /// `arc_lengths[i]` is the parent-curve arc length of the chord from
-/// `points[i]` to `points[(i + 1) % n]` — for straight chords this is
+/// `points[i]` to `points[(i + 1) % n]`. For straight chords this is
 /// the Euclidean distance, for chords flattened from Quad/Cubic Beziers
 /// it is the Roger Willcocks chord+control-polygon estimate (~0.05 %
 /// of the true Gauss-Legendre integral on typical sweeps). `pattern`
@@ -2531,12 +2531,12 @@ fn parse_dasharray(s: &str) -> Vec<f32> {
 /// Position mapping: a dash boundary at arc-length `s` along chord
 /// `i` lands geometrically at parameter `t = s / arc_lengths[i]`
 /// linearly between `points[i]` and `points[i+1]`. This is the
-/// standard mapping for chord-flattened curves — the dash is *placed*
+/// standard mapping for chord-flattened curves. The dash is *placed*
 /// at its true-arc-length position along the curve, but the geometry
 /// is interpolated on the chord (which is what the rasterizer
 /// already consumes).
 ///
-/// Behaviour at a glance:
+/// Behavior at a glance:
 ///
 /// - Stride alternates draw / skip starting from index 0 ("draw").
 /// - `offset` may be negative or larger than the pattern; reduced
@@ -2559,7 +2559,7 @@ fn dash_polyline(
     if total <= 0.0 || points.len() < 2 {
         return Vec::new();
     }
-    // Normalise offset into [0, total).
+    // Normalize offset into [0, total).
     let mut off = offset % total;
     if off < 0.0 {
         off += total;
@@ -2593,7 +2593,7 @@ fn dash_polyline(
         let dx = b.0 - a.0;
         let dy = b.1 - a.1;
         // True arc length of this chord segment (parent curve's sweep
-        // length, not the chord-Euclidean distance — they only differ
+        // length, not the chord-Euclidean distance. They only differ
         // for curve-flattened chords).
         let seg_arc = arc_lengths.get(i).copied().unwrap_or_else(|| {
             // Defensive fallback: parallel array missing this entry
@@ -2647,7 +2647,7 @@ fn dash_polyline(
 }
 
 // =========================================================================
-// Shape primitives → path
+// Shape primitives -> path
 // =========================================================================
 
 fn rect_to_path(node: &Node) -> Vec<PathOp> {
@@ -2762,7 +2762,7 @@ fn ellipse_to_path(node: &Node) -> Vec<PathOp> {
     ellipse_path(cx, cy, rx, ry)
 }
 
-/// Approximates a centred ellipse with four cubic Béziers using the
+/// Approximates a centered ellipse with four cubic Béziers using the
 /// standard kappa = 0.552_284_8. Drawing direction is clockwise (the
 /// rasterizer's non-zero winding handles either, but we stay
 /// consistent with `<rect>`).
@@ -2811,7 +2811,7 @@ fn ellipse_path(cx: f32, cy: f32, rx: f32, ry: f32) -> Vec<PathOp> {
 /// Parses an SVG `points="x1,y1 x2,y2 ..."` list. The grammar accepts
 /// any mix of whitespace and commas as separators (per SVG 1.1
 /// §9.7.1). Trailing odd coordinates (a stray "x" with no matching "y")
-/// are dropped silently — that's what every browser does in practice.
+/// are dropped silently. That's what every browser does in practice.
 fn parse_points_list(s: &str) -> Vec<(f32, f32)> {
     let mut out: Vec<(f32, f32)> = Vec::new();
     let mut nums: Vec<f32> = Vec::new();
@@ -2851,7 +2851,7 @@ fn parse_points_list(s: &str) -> Vec<(f32, f32)> {
             }
         }
         if !saw_digit {
-            // Bail out on unrecognised garbage; what's parsed so far
+            // Bail out on unrecognized garbage; what's parsed so far
             // stays.
             break;
         }
@@ -2977,7 +2977,7 @@ fn render_fill(out: &mut ColorPixmap, fill: &Fill, world: &Affine, tol: f32) {
 /// `mask`. The mask's children are rendered into a same-size scratch
 /// ColorPixmap; the per-pixel coverage factor is then either:
 ///
-/// - `mask-type="luminance"` (SVG default): BT.709 luminance × source
+/// - `mask-type="luminance"` (SVG default): BT.709 luminance * source
 ///   alpha (SVG 1.1 §14.4).
 /// - `mask-type="alpha"`: the mask buffer's alpha channel directly,
 ///   skipping the luminance derivation entirely.
@@ -2986,7 +2986,7 @@ fn render_fill(out: &mut ColorPixmap, fill: &Fill, world: &Affine, tol: f32) {
 /// height)` rect is interpreted in `[0, 1]²` of the masked element's
 /// bounding box (computed from `dst`'s non-zero alpha extent). Pixels
 /// outside that rect are forced to `m = 0`. `userSpaceOnUse` (the
-/// PR #236 behaviour) leaves the mask coverage unchanged across the
+/// PR #236 behavior) leaves the mask coverage unchanged across the
 /// whole canvas.
 fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &Affine, tol: f32) {
     if dst.is_empty() {
@@ -3025,7 +3025,7 @@ fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &Affine, tol
         None
     };
     // ObjectBoundingBox with no opaque pixels in `dst` collapses to a
-    // fully transparent result — nothing to mask, nothing to keep.
+    // fully transparent result: nothing to mask, nothing to keep.
     if mask_shape.units == MaskUnits::ObjectBoundingBox && bbox.is_none() {
         for px in dst.data.chunks_exact_mut(4) {
             px[0] = 0;
@@ -3036,7 +3036,7 @@ fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &Affine, tol
         return;
     }
 
-    // Per-pixel: derive a coverage factor m ∈ [0, 1] from the mask
+    // Per-pixel: derive a coverage factor m in [0, 1] from the mask
     // buffer (luminance or alpha), optionally zero it outside the
     // objectBoundingBox window, then scale every channel of dst by m.
     // dst is premultiplied, so scaling all four channels uniformly
@@ -3044,9 +3044,9 @@ fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &Affine, tol
     //
     // The mask buffer is also premultiplied (it came out of the same
     // render pipeline). For luminance we keep the integer-math trick
-    // from PR #236: luminance(premul_rgb) is already luminance × alpha
-    // because premul_rgb = straight_rgb × alpha, so no un-premultiply
-    // step is needed. Fixed-point: BT.709 weights ×1024 → 218 / 732 /
+    // from PR #236: luminance(premul_rgb) is already luminance * alpha
+    // because premul_rgb = straight_rgb * alpha, so no un-premultiply
+    // step is needed. Fixed-point: BT.709 weights * 1024 -> 218 / 732 /
     // 74 (sum 1024) for round-trip-stable integer math.
     let w = dst.width as i32;
     let h = dst.height as i32;
@@ -3171,7 +3171,7 @@ fn paint_into(
     }
 }
 
-/// Blits `mask × color` into `dst`, where `(ox, oy)` is the
+/// Blits `mask * color` into `dst`, where `(ox, oy)` is the
 /// device-space origin of the mask. Clipping is applied per-pixel
 /// against `clip` if provided.
 fn blit_solid(
@@ -3245,7 +3245,7 @@ fn blit_solid(
     }
 }
 
-/// Blits `mask × gradient` into `dst` using the COLRv1 ramp evaluator.
+/// Blits `mask * gradient` into `dst` using the COLRv1 ramp evaluator.
 fn blit_gradient(
     dst: &mut ColorPixmap,
     mask: &Pixmap,
@@ -3293,7 +3293,7 @@ fn blit_gradient(
                     continue;
                 }
             }
-            // Pixel centre in pixel space.
+            // Pixel center in pixel space.
             let abs_x = px as f32 + 0.5;
             let abs_y = py as f32 + 0.5;
             let sample = sample_svg_gradient(g, g_xf, abs_x, abs_y);
@@ -3329,9 +3329,9 @@ fn blit_gradient(
 }
 
 /// Evaluates a parsed SVG gradient at pixel-space `(x, y)`. Routes the
-/// gradient geometry through `g_xf` (document → pixel + any
+/// gradient geometry through `g_xf` (document -> pixel + any
 /// `gradientTransform`) before calling the COLRv1 projection
-/// primitives — same shape, same `Pad` / `Repeat` / `Reflect` semantics.
+/// primitives: same shape, same `Pad` / `Repeat` / `Reflect` semantics.
 fn sample_svg_gradient(g: &GradientPaint, g_xf: &Affine, x: f32, y: f32) -> [u8; 4] {
     let t_opt = match g.kind {
         GradKind::Linear { x1, y1, x2, y2 } => {
@@ -3370,11 +3370,11 @@ fn sample_svg_gradient(g: &GradientPaint, g_xf: &Affine, x: f32, y: f32) -> [u8;
 // canvas via Porter-Duff source-over.
 //
 // All intermediate buffers are full canvas size. This trades memory
-// for simplicity — feOffset + feMerge etc. don't need to track filter
+// for simplicity: feOffset + feMerge etc. don't need to track filter
 // regions, and shifting / blurring stays within the visible canvas.
 
 /// Walks the primitive list and returns the final pixmap. Built-in
-/// inputs `SourceGraphic` and `SourceAlpha` are materialised lazily.
+/// inputs `SourceGraphic` and `SourceAlpha` are materialized lazily.
 fn apply_filter(filter: &Filter, source: &ColorPixmap) -> ColorPixmap {
     use alloc::collections::BTreeMap;
     let mut named: BTreeMap<String, ColorPixmap> = BTreeMap::new();
@@ -3480,9 +3480,9 @@ fn composite_over(dst: &mut ColorPixmap, top: &ColorPixmap) {
 }
 
 /// Three-pass separable box-blur approximation. Each axis is convolved
-/// with a box kernel of radius `r ≈ ⌈σ⌉` three times, which approaches
+/// with a box kernel of radius `r ~= ceil(sigma)` three times, which approaches
 /// a true Gaussian by the central-limit theorem and is visually
-/// indistinguishable for σ ≥ 1.
+/// indistinguishable for σ >= 1.
 fn apply_gaussian_blur(src: &ColorPixmap, sx: f32, sy: f32) -> ColorPixmap {
     if (sx <= 0.0 && sy <= 0.0) || src.is_empty() {
         return src.clone();
@@ -3515,7 +3515,7 @@ fn box_blur_h(src: &ColorPixmap, r: i32) -> ColorPixmap {
     for y in 0..h {
         let row = (y * w) as usize * 4;
         // Sliding-window sum over the kernel. Out-of-bounds samples
-        // clamp to the edge ("EDGE" mode in SVG terms — closer to what
+        // clamp to the edge ("EDGE" mode in SVG terms, closer to what
         // browser engines do for filter regions touching the canvas
         // edge).
         let mut sr: u32 = 0;
@@ -3594,7 +3594,7 @@ fn box_blur_v(src: &ColorPixmap, r: i32) -> ColorPixmap {
     out
 }
 
-/// Applies a 4×5 colour matrix (RGBA + bias column) to a premultiplied
+/// Applies a 4x5 color matrix (RGBA + bias column) to a premultiplied
 /// pixmap. Per SVG 1.1 §15.18, `feColorMatrix` operates on
 /// non-premultiplied RGBA, so we un-premultiply, transform, clamp, and
 /// re-premultiply.
@@ -3653,7 +3653,7 @@ fn apply_offset(src: &ColorPixmap, dx: f32, dy: f32) -> ColorPixmap {
     out
 }
 
-/// Returns a same-size pixmap filled with a solid premultiplied colour.
+/// Returns a same-size pixmap filled with a solid premultiplied color.
 fn apply_flood(width: u32, height: u32, color: [u8; 4]) -> ColorPixmap {
     let mut out = ColorPixmap::new(width, height);
     // Premultiply.
@@ -3672,7 +3672,7 @@ fn apply_flood(width: u32, height: u32, color: [u8; 4]) -> ColorPixmap {
 }
 
 // =========================================================================
-// XML scanner → DOM
+// XML scanner -> DOM
 // =========================================================================
 
 fn parse_xml(xml: &str) -> Result<Node, RenderError> {
@@ -3912,7 +3912,7 @@ impl<'a> XmlParser<'a> {
 }
 
 // =========================================================================
-// Numeric / colour / transform parsing
+// Numeric / color / transform parsing
 // =========================================================================
 
 fn parse_viewbox(s: &str) -> Option<(f32, f32, f32, f32)> {
@@ -4456,7 +4456,7 @@ mod tests {
     #[test]
     fn use_recursion_guard_caps_at_depth() {
         // <use> pointing at a <g> that itself contains a <use> back at
-        // the parent — should bottom out at MAX_USE_DEPTH instead of
+        // the parent should bottom out at MAX_USE_DEPTH instead of
         // recursing forever.
         let xml = r##"<svg viewBox="0 0 100 100">
             <defs>
@@ -4545,7 +4545,7 @@ mod tests {
 
     #[test]
     fn mask_attaches_to_referencing_fill() {
-        // <mask> with a luminance body — black circle on white square.
+        // <mask> with a luminance body: black circle on white square.
         // The fill that references it should carry a non-empty
         // MaskShape with both child fills harvested.
         let xml = r##"<svg viewBox="0 0 100 100">
@@ -4617,7 +4617,7 @@ mod tests {
 
     #[test]
     fn mask_type_defaults_to_luminance() {
-        // No `mask-type=` attribute → MaskType::Luminance, matching
+        // No `mask-type=` attribute -> MaskType::Luminance, matching
         // the SVG spec default and the PR #236 baseline.
         let xml = r##"<svg viewBox="0 0 10 10">
             <defs>
@@ -4713,7 +4713,7 @@ mod tests {
         };
         apply_mask(&mut dst, &mask_shape, &world, 0.25);
         // Under alpha-mode the opaque-black mask body keeps every dst
-        // pixel intact (alpha = 255 → m = 255). Under luminance it
+        // pixel intact (alpha = 255 -> m = 255). Under luminance it
         // would have zeroed the pixels.
         for px in dst.data.chunks_exact(4) {
             assert_eq!(px[0], 255, "alpha-mask kept red channel intact");
@@ -4724,7 +4724,7 @@ mod tests {
     #[test]
     fn apply_mask_object_bounding_box_clips_to_region() {
         // maskUnits="objectBoundingBox" with x=0.25 y=0.25 w=0.5 h=0.5
-        // on a 100x100 opaque rect: only the [25, 75) × [25, 75) pixel
+        // on a 100x100 opaque rect: only the [25, 75) x [25, 75) pixel
         // region survives; everything outside is zeroed.
         let world = Affine::identity();
         let mut dst = ColorPixmap::new(100, 100);
@@ -4760,8 +4760,8 @@ mod tests {
             region_h: 0.5,
         };
         apply_mask(&mut dst, &mask_shape, &world, 0.25);
-        // Inside the [25, 75) box: pixels survive (white luminance ×
-        // opaque alpha = 255 → unchanged premultiplied red).
+        // Inside the [25, 75) box: pixels survive (white luminance *
+        // opaque alpha = 255 -> unchanged premultiplied red).
         let inside = dst.get(50, 50);
         assert_eq!(inside, [255, 0, 0, 255]);
         // Outside the box: forced to zero.
@@ -4872,7 +4872,7 @@ mod tests {
 
     #[test]
     fn dasharray_doubles_odd_length() {
-        // "2 3 5" → "2 3 5 2 3 5"
+        // "2 3 5" -> "2 3 5 2 3 5"
         assert_eq!(parse_dasharray("2 3 5"), vec![2.0, 3.0, 5.0, 2.0, 3.0, 5.0]);
     }
 
@@ -4891,7 +4891,7 @@ mod tests {
 
     #[test]
     fn dasharray_zero_only_yields_empty() {
-        // All zeros means "no dash" per the SVG spec — same as none.
+        // All zeros means "no dash" per the SVG spec, same as none.
         assert!(parse_dasharray("0 0 0 0").is_empty());
     }
 
@@ -4921,7 +4921,7 @@ mod tests {
     #[test]
     fn dash_walker_emits_alternating_subpolylines_on_a_line() {
         // 20-unit horizontal line with pattern "4 2": dashes at
-        // [0,4], [6,10], [12,16], [18,20] → 4 sub-polylines.
+        // [0,4], [6,10], [12,16], [18,20] -> 4 sub-polylines.
         let line = vec![(0.0, 0.0), (20.0, 0.0)];
         let arcs = straight_arcs(&line, false);
         let segs = dash_polyline(&line, &arcs, false, &[4.0, 2.0], 0.0);
@@ -4935,7 +4935,7 @@ mod tests {
     #[test]
     fn dash_walker_honours_offset() {
         // Same 20-unit line, pattern "4 2", offset=4 advances past the
-        // first 4-unit draw — the contour now opens with a 2-unit skip
+        // first 4-unit draw. The contour now opens with a 2-unit skip
         // (x=0..2), then dashes start at x=2.
         let line = vec![(0.0, 0.0), (20.0, 0.0)];
         let arcs = straight_arcs(&line, false);
@@ -5015,7 +5015,7 @@ mod tests {
     #[test]
     fn color_matrix_saturate_zero_collapses_red_channels() {
         let m = saturate_matrix(0.0);
-        // Pure red (1,0,0,1) → grey: each output channel ≈ 0.213.
+        // Pure red (1,0,0,1) -> gray: each output channel ~0.213.
         let r = m[0] * 1.0 + m[1] * 0.0 + m[2] * 0.0 + m[3] * 1.0 + m[4];
         let g = m[5] * 1.0 + m[6] * 0.0 + m[7] * 0.0 + m[8] * 1.0 + m[9];
         let b = m[10] * 1.0 + m[11] * 0.0 + m[12] * 0.0 + m[13] * 1.0 + m[14];
@@ -5070,7 +5070,7 @@ mod tests {
 
     /// Build the four-cubic kappa-circle and return the polyline +
     /// per-chord arc-length array, exactly as `flatten_to_polylines`
-    /// produces them. Returned circle is centred at `(cx, cy)` with
+    /// produces them. Returned circle is centered at `(cx, cy)` with
     /// radius `r`. Used by both the true-arc and chord-flatten dash
     /// count tests so they share input geometry.
     fn build_kappa_circle(cx: f32, cy: f32, r: f32) -> PolyLine {
@@ -5123,8 +5123,8 @@ mod tests {
     #[test]
     fn circle_of_cubics_dash_count_uses_true_arc_length() {
         // Radius-100 circle approximated by 4 cubics. True
-        // circumference = 2π·100 ≈ 628.32. With dasharray "10 10"
-        // (period 20) we expect ~31.4 dash periods around the circle —
+        // circumference = 2π*100 ~ 628.32. With dasharray "10 10"
+        // (period 20) we expect ~31.4 dash periods around the circle,
         // and since pattern starts on a draw, ~31 full dashes (the
         // half-cycle being a rendering edge).
         //
@@ -5153,7 +5153,7 @@ mod tests {
             true_arc_total > chord_total,
             "arc-length {true_arc_total} must exceed chord total {chord_total}"
         );
-        // Both should be close to 2π·100; arc-length should be much
+        // Both should be close to 2π*100; arc-length should be much
         // closer (sub-percent) than chord.
         let circumference = 2.0 * core::f32::consts::PI * 100.0;
         let arc_err = (true_arc_total - circumference).abs() / circumference;
@@ -5201,11 +5201,11 @@ mod tests {
             0.0,
         );
         // The arc-length walker must see at least as many full draw
-        // dashes as the chord walker — a longer "track" can only fit
+        // dashes as the chord walker. A longer "track" can only fit
         // more (or equal) dash periods, never fewer. This is the
         // observable signature of the fix.
         // The arc-length walker must produce at least as many full
-        // dashes as the chord walker — a longer track can only fit
+        // dashes as the chord walker. A longer track can only fit
         // equal or more periods. (At radius 100 with dash-period 20
         // both round to 32 dashes; the discriminating signal is the
         // length measurement above, not the count, but on circles
@@ -5216,9 +5216,9 @@ mod tests {
             segs.len(),
             chord_segs.len()
         );
-        // 628.32 / 20 ≈ 31.4 cycles → either 31 or 32 full draw
+        // 628.32 / 20 ~ 31.4 cycles, so either 31 or 32 full draw
         // sub-polylines depending on where the final dash boundary
-        // lands. The chord-flatten path measures ~627 (≈0.2 % short),
+        // lands. The chord-flatten path measures ~627 (about 0.2 % short),
         // which biases the count down by less than one. With true arc
         // length we should be right at the analytic count.
         assert!(
@@ -5230,7 +5230,7 @@ mod tests {
         // Also: total drawn arc length should be ~half the
         // circumference (since pattern is 50/50 draw/skip). Use the
         // chord lengths between dash sub-polyline points; for a circle
-        // discretised at 0.25 px tolerance these are within sub-pixel
+        // discretized at 0.25 px tolerance these are within sub-pixel
         // of the true sub-arc length.
         let drawn: f32 = segs
             .iter()
@@ -5245,8 +5245,8 @@ mod tests {
             })
             .sum();
         // Each dash is 10 arc-length units; chord-length of a 10-unit
-        // arc on a radius-100 circle is 2·100·sin(5/100) ≈ 9.996, so
-        // expected drawn (chord-measured) ≈ 31 · 9.996 ≈ 309.9. Allow a
+        // arc on a radius-100 circle is 2*100*sin(5/100) ~ 9.996, so
+        // expected drawn (chord-measured) ~ 31 * 9.996 ~ 309.9. Allow a
         // generous tolerance because the trailing partial dash can vary.
         assert!(
             drawn > 300.0 && drawn < 320.0,
@@ -5256,7 +5256,7 @@ mod tests {
 
     #[test]
     fn long_quadratic_with_continuous_dasharray_has_no_dash_break() {
-        // dasharray "1 0" → period 1, fully drawing (skip is zero
+        // dasharray "1 0" -> period 1, fully drawing (skip is zero
         // length). This must produce identical output to the
         // un-dashed stroke: every sub-polyline boundary the walker
         // emits coincides with a chord vertex, and the union of draw
@@ -5270,7 +5270,7 @@ mod tests {
         assert_eq!(doc.fills.len(), 1);
         assert!(doc.fills[0].is_stroke);
         // "1 0" parses to [1, 0]; sum is 1 > 0, so dashed path runs.
-        // The fill should cover the entire stroke ribbon — i.e. it has
+        // The fill should cover the entire stroke ribbon, i.e. it has
         // a non-trivial number of MoveTo records (one per draw run).
         let moveto_count = doc.fills[0]
             .ops
@@ -5306,7 +5306,7 @@ mod tests {
         // Pre-arc-length walker computed `seg_len` from chord points.
         // For a straight polyline `arc_lengths[i]` IS the chord
         // length, so the new walker must produce bit-identical output
-        // on this input — which is the contract the existing PR #227
+        // on this input, which is the contract the existing PR #227
         // tests rely on.
         //
         // Drive both: the new walker via the public API, and a
@@ -5381,7 +5381,7 @@ mod tests {
         assert!((p_corner.0 - 100.0).abs() < 1e-5 && (p_corner.1 - 0.0).abs() < 1e-5);
         let p_mid_second = sample_polyline_position(&poly, 150.0).unwrap();
         assert!((p_mid_second.0 - 100.0).abs() < 1e-5 && (p_mid_second.1 - 50.0).abs() < 1e-5);
-        // Past the total length → None (silent drop policy in
+        // Past the total length -> None (silent drop policy in
         // emit_text_path_fills).
         assert!(sample_polyline_position(&poly, 250.0).is_none());
     }
@@ -5466,8 +5466,8 @@ mod tests {
 
     #[test]
     fn arc_length_polyline_cubic_aggregates_chord_lengths() {
-        // A single cubic Bézier: M 0 0 C 0 100, 100 100, 100 0 — a
-        // hump from (0,0) to (100,0). Its true arc length is ≈146.
+        // A single cubic Bézier: M 0 0 C 0 100, 100 100, 100 0. A
+        // hump from (0,0) to (100,0). Its true arc length is about 146.
         // The polyline should have len > 1 chords and a non-trivial
         // total cum.
         let ops = vec![
@@ -5485,7 +5485,7 @@ mod tests {
         assert!(poly.len() > 2, "cubic should subdivide into many chords");
         let total = poly.last().unwrap().cum;
         // The cubic with controls at y=100 sweeps well above a tight
-        // arc — empirical chord-length total at default tolerance is
+        // arc. Empirical chord-length total at default tolerance is
         // ~200 (the curve's true arc length), not the much smaller
         // straight-line chord. Bound conservatively.
         assert!(

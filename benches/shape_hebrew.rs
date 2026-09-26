@@ -9,14 +9,15 @@
 //!
 //! Throughput is reported in codepoints per second.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use sigilbuzz::{shape, Blob, Buffer, Direction, Face, Font};
+use std::hint::black_box;
 
 const NOTO_HEBREW: &[u8] = include_bytes!("../tests/fonts/NotoSansHebrew-Regular.ttf");
 
 /// Hebrew corpus exercising plain consonants, niqqud-stacked words,
 /// cantillation marks, and final-form letters. Includes the opening
-/// of Genesis 1:1 — the canonical mkmk stress test.
+/// of Genesis 1:1, the canonical mkmk stress test.
 const CORPUS: &str = "שלום עולם. אנחנו בודקים את מנוע סיגלבז. \
     בְּרֵאשִׁית בָּרָא אֱלֹהִים אֵת הַשָּׁמַיִם וְאֵת הָאָרֶץ. \
     הללויה. בוקר טוב. תודה רבה. ירושלים בירת ישראל. \

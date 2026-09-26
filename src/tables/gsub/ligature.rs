@@ -1,8 +1,8 @@
-//! GSUB lookup type 4 — Ligature Substitution.
+//! GSUB lookup type 4: Ligature Substitution.
 //!
 //! Replaces a sequence of input glyphs with a single output glyph.
-//! The canonical use case is `fi` → `ﬁ`, but the lookup is general:
-//! any font-declared `(first, ...components) → ligatureGlyph` rule
+//! The canonical use case is `fi` -> `ﬁ`, but the lookup is general:
+//! any font-declared `(first, ...components) -> ligatureGlyph` rule
 //! fires when the input matches in order.
 //!
 //! # Subtable layout
@@ -160,8 +160,8 @@ impl<'a> Ligature<'a> {
 
 /// Filter-aware ligature match. Returns `(ligature_glyph, positions)`
 /// where `positions[k]` is the relative index into `glyphs` of the
-/// `k`-th matched component. The first component is always at index
-/// 0 — the caller gated it via coverage.
+/// `k`-th matched component. The first component is always at
+/// index 0 because the caller gated it via coverage.
 ///
 /// The two-pass shape (verify the tail components first, then
 /// allocate the positions `Vec` only on success) is deliberate: the
@@ -177,7 +177,7 @@ fn try_match_ligature_filtered(
     // Stack-buffered scan: walk every tail component and remember its
     // matched index. We can fit up to `STACK` components without
     // spilling (HarfBuzz hard-caps the same number); fall back to
-    // heap only for genuinely pathological ligatures.
+    // heap only for pathological ligatures.
     const STACK: usize = 16;
 
     let mut r = Reader::new(lig_bytes);
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn fi_ligature_fires_on_f_then_i() {
-        // Covered first glyph: 10 ('f'). Ligature: 10 + 20 → 100.
+        // Covered first glyph: 10 ('f'). Ligature: 10 + 20 -> 100.
         let bytes = build_subtable(&[(10, alloc::vec![(100, alloc::vec![20])])]);
         let lig = Ligature::parse(&bytes).unwrap();
         let out = lig.apply(&[10, 20, 30]).unwrap();
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn three_component_ligature_fires() {
-        // 10 + 20 + 30 → 500
+        // 10 + 20 + 30 -> 500
         let bytes = build_subtable(&[(10, alloc::vec![(500, alloc::vec![20, 30])])]);
         let lig = Ligature::parse(&bytes).unwrap();
         assert_eq!(lig.apply(&[10, 20, 30, 99]).unwrap(), (500, 3));
@@ -323,8 +323,8 @@ mod tests {
 
     #[test]
     fn first_match_wins_within_a_ligature_set() {
-        // First ligature: 10 + 20 → 100.
-        // Second ligature: 10 + 20 + 30 → 999. Will never fire because
+        // First ligature: 10 + 20 -> 100.
+        // Second ligature: 10 + 20 + 30 -> 999. Will never fire because
         // the shorter one is listed first and wins on (10, 20, 30).
         let bytes = build_subtable(&[(
             10,
@@ -382,7 +382,7 @@ mod tests {
         use crate::tables::gdef::Gdef;
         use crate::tables::layout::skip_iter::{MatchFilter, LOOKUP_FLAG_IGNORE_MARKS};
 
-        // Ligature: 10 + 20 → 100. Input stream carries a mark glyph
+        // Ligature: 10 + 20 -> 100. Input stream carries a mark glyph
         // 99 between 10 and 20; with IgnoreMarks the match still fires.
         let bytes = build_subtable(&[(10, alloc::vec![(100, alloc::vec![20])])]);
         let lig = Ligature::parse(&bytes).unwrap();

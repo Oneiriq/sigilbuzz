@@ -3,12 +3,12 @@
 //!
 //! These tests document the 0.7.0 contract:
 //!
-//! - `retain_layout = false` is the 0.5.0 baseline — layout tables are
+//! - `retain_layout = false` is the 0.5.0 baseline: layout tables are
 //!   dropped from the subset regardless of the closure size.
 //! - `retain_layout = true` (the default) preserves `GSUB`, `GPOS`,
 //!   and `GDEF` verbatim when the kept-gid set is the full font (the
 //!   gid_map is identity). Under a proper subset, the byte-level
-//!   rewriter rebuilds whatever layout content it has support for —
+//!   rewriter rebuilds whatever layout content it has support for:
 //!   today GSUB types 1/2/3/4/7 plus GPOS types 1/2/3/4/5/6/9 plus
 //!   GDEF GlyphClassDef and MarkAttachClassDef. Lookup types without
 //!   a rewriter drop, the drop cascade then drops empty subtables /
@@ -69,14 +69,14 @@ fn retain_layout_true_with_proper_subset_routes_through_rewriter() {
     //     drop. The drop cascade then drops empty lookups / features /
     //     scripts, and GSUB itself drops when no script survives.
     //   - GPOS types 1/2/3/4/5/6/9 have rewriters; types 7/8 (context)
-    //     drop. For Open Sans → {A, B} the few lookups that touch
+    //     drop. For Open Sans -> {A, B} the few lookups that touch
     //     these glyphs end up empty after pair filtering and the drop
     //     cascade removes GPOS entirely.
     //   - GDEF GlyphClassDef and MarkAttachClassDef are rewritten via
     //     the auto-format ClassDef emitter; AttachList / LigCaretList /
     //     MarkGlyphSetsDef / ItemVariationStore drop.
     //
-    // For a proper subset of Open Sans → {A, B}, GPOS drops; GSUB may
+    // For a proper subset of Open Sans -> {A, B}, GPOS drops; GSUB may
     // or may not survive depending on whether any single-sub lookup
     // covers A or B; GDEF survives because Open Sans carries
     // GlyphClassDef.
@@ -94,21 +94,21 @@ fn retain_layout_true_with_proper_subset_routes_through_rewriter() {
     let blob = Blob::from_vec(out.bytes);
     let subset_face = Face::parse(&blob, 0).unwrap();
     // GPOS drops here because Open Sans's pair-pos / mark lookups
-    // that cover A/B all empty out after filtering — none of the
+    // that cover A/B all empty out after filtering. None of the
     // surviving secondGlyphs / mark partners are in {A, B}. The drop
     // cascade then removes GPOS entirely.
     assert!(
         subset_face.record(tag::GPOS).is_none(),
         "GPOS expected to drop for the {{A, B}} subset of Open Sans",
     );
-    // GDEF must survive — Open Sans carries a GlyphClassDef, the
+    // GDEF must survive: Open Sans carries a GlyphClassDef, the
     // ClassDef rewriter handles it.
     assert!(
         subset_face.record(tag::GDEF).is_some(),
         "GDEF should survive via ClassDef rewriter",
     );
     // GSUB may or may not survive depending on the source's lookups.
-    // We don't pin the exact outcome — only that the subset built
+    // We don't pin the exact outcome, only that the subset built
     // cleanly and parses. (Tightening this assertion lands once the
     // remaining GSUB lookup types ship their rewriters.)
 }
@@ -131,7 +131,7 @@ fn retain_layout_true_with_identity_kept_set_preserves_layout_tables() {
     let blob = Blob::from_vec(out.bytes);
     let subset_face = Face::parse(&blob, 0).unwrap();
 
-    // Open Sans carries GSUB / GPOS / GDEF — verify the source has
+    // Open Sans carries GSUB / GPOS / GDEF. Verify the source has
     // them and the subset preserved them all.
     assert!(face.record(tag::GSUB).is_some());
     assert!(face.record(tag::GPOS).is_some());
@@ -164,7 +164,7 @@ fn retain_layout_default_is_true() {
 fn closure_pulls_in_ligature_components() {
     // Open Sans carries an `fi` ligature in `GSUB`. When the caller
     // asks for the ligature output gid alone, the closure walker must
-    // pull `f` and `i` in too — the ligature can't fire without them.
+    // pull `f` and `i` in too. The ligature can't fire without them.
     let face = open_sans_face();
     let gid_f = cmap_lookup(&face, 'f');
     let gid_i = cmap_lookup(&face, 'i');
@@ -184,7 +184,7 @@ fn closure_pulls_in_ligature_components() {
     let run = shape(&font, &buf, &[]).unwrap();
     // If shaping produced a single glyph, that's the fi ligature.
     if run.glyphs.len() != 1 {
-        // Open Sans build doesn't enable fi by default — skip the
+        // Open Sans build doesn't enable fi by default. Skip the
         // assertion but still validate the closure is at least
         // reflexive on the seed.
         let kept = sigilbuzz_subset::compute_closure(&face, &[gid_f, gid_i]).unwrap();
@@ -291,8 +291,8 @@ fn proper_subset_is_smaller_than_source() {
 #[test]
 fn closure_ligature_drop_propagates_through_subset() {
     // When we ask only for 'f' (not the fi ligature), the closure
-    // walker leaves the ligature gid out — `i` isn't kept, so the
-    // forward-pull rule (every component kept ⇒ result gid kept)
+    // walker leaves the ligature gid out: `i` isn't kept, so the
+    // forward-pull rule (every component kept => result gid kept)
     // doesn't fire and the ligature stays out of the subset.
     let face = open_sans_face();
     let gid_f = cmap_lookup(&face, 'f');
@@ -300,7 +300,7 @@ fn closure_ligature_drop_propagates_through_subset() {
     let kept = sigilbuzz_subset::compute_closure(&face, &[gid_f]).unwrap();
     assert!(kept.contains(&gid_f));
     assert!(kept.contains(&0));
-    // The closure must always be sorted ascending — callers depend on
+    // The closure must always be sorted ascending. Callers depend on
     // it for binary-searchable membership.
     for w in kept.windows(2) {
         assert!(w[0] < w[1], "closure not sorted: {w:?}");
@@ -325,7 +325,7 @@ fn closure_pulls_in_fi_ligature_when_both_components_kept() {
     buf.set_text("fi");
     let run = shape(&font, &buf, &[]).unwrap();
     if run.glyphs.len() != 1 {
-        // Open Sans build doesn't enable fi by default — nothing to
+        // Open Sans build doesn't enable fi by default. Nothing to
         // assert in the forward direction.
         return;
     }
@@ -346,8 +346,8 @@ fn open_sans_fi_subset_round_trips_through_shape() {
     // the fi ligature in via the forward type-4 walk; the rewriter
     // re-emits the ligature subtable around the new gid namespace).
     // Shaping "fi" against the subset must still produce a single
-    // glyph — the fi ligature — and that glyph's cluster index/source
-    // text mapping must match the source font's behaviour.
+    // glyph (the fi ligature) and that glyph's cluster index/source
+    // text mapping must match the source font's behavior.
     let face = open_sans_face();
     let gid_f = cmap_lookup(&face, 'f');
     let gid_i = cmap_lookup(&face, 'i');
@@ -373,11 +373,11 @@ fn open_sans_fi_subset_round_trips_through_shape() {
     let blob = Blob::from_vec(out.bytes.clone());
     let subset_face = Face::parse(&blob, 0).unwrap();
 
-    // GSUB must survive — the type 4 ligature subtable should have
+    // GSUB must survive: the type 4 ligature subtable should have
     // rewritten cleanly around the new namespace.
     assert!(
         subset_face.record(tag::GSUB).is_some(),
-        "GSUB must survive the {{f, i}} subset — the fi ligature lookup keeps it alive",
+        "GSUB must survive the {{f, i}} subset: the fi ligature lookup keeps it alive",
     );
 
     // Shape "fi" through the subset and verify the output is still a
@@ -427,7 +427,7 @@ fn open_sans_fi_subset_size_stays_small() {
     let pct = (out.bytes.len() as f64 / OPEN_SANS.len() as f64) * 100.0;
     assert!(
         pct < 5.0,
-        "Open Sans → {{f, i}} subset must stay under 5% of source; got {pct:.2}% ({} / {} bytes)",
+        "Open Sans -> {{f, i}} subset must stay under 5% of source; got {pct:.2}% ({} / {} bytes)",
         out.bytes.len(),
         OPEN_SANS.len(),
     );
@@ -435,7 +435,7 @@ fn open_sans_fi_subset_size_stays_small() {
 
 #[test]
 fn open_sans_fi_fl_subset_retains_both_ligatures() {
-    // Subset Open Sans → {f, i, l}. Both `fi` and `fl` ligatures (when
+    // Subset Open Sans -> {f, i, l}. Both `fi` and `fl` ligatures (when
     // present in the font's lookups) should round-trip and fire on
     // shape("fi") / shape("fl").
     let face = open_sans_face();
@@ -510,17 +510,17 @@ fn open_sans_fi_fl_subset_retains_both_ligatures() {
 
 #[test]
 fn amiri_arabic_subset_keeps_gsub_with_type2_lookups() {
-    // Pick an Arabic letter Amiri's type-2 lookup decomposes — covered
+    // Pick an Arabic letter Amiri's type-2 lookup decomposes. Covered
     // gids are uni08B6..uni08BA which decompose to a base + a small
     // mark. We feed the closure walker the input gid and trust it to
     // pull every sequence output through `pull_multiple`.
     let face = amiri_face();
-    // Arabic small letter beh with hamza above (U+08B6) — first input
+    // Arabic small letter beh with hamza above (U+08B6), first input
     // covered by the type-2 lookup we sampled above.
     let ch_input = char::from_u32(0x08B6).unwrap();
     let Some(input_gid) = face.cmap().unwrap().glyph_id(ch_input) else {
         // If the build flavor of Amiri here doesn't carry that codepoint,
-        // skip — the assertion below is conditional on the lookup firing.
+        // skip. The assertion below is conditional on the lookup firing.
         return;
     };
     let input = SubsetInput {
@@ -534,7 +534,7 @@ fn amiri_arabic_subset_keeps_gsub_with_type2_lookups() {
     let blob = Blob::from_vec(out.bytes);
     let subset_face = Face::parse(&blob, 0).unwrap();
 
-    // GSUB must survive — the type-2 lookup keeps it alive (other types
+    // GSUB must survive: the type-2 lookup keeps it alive (other types
     // beyond 1/2/3/4/7 drop, but at least one rewriter-handled lookup
     // covers our input gid).
     assert!(
@@ -544,7 +544,7 @@ fn amiri_arabic_subset_keeps_gsub_with_type2_lookups() {
 
     // Walk the rewritten GSUB and verify at least one type-2 subtable
     // exists with a non-empty Coverage. We don't pin the exact byte
-    // shape — only that the rewriter produced a parseable subtable.
+    // shape, only that the rewriter produced a parseable subtable.
     let gsub = subset_face.gsub().unwrap().expect("GSUB must parse");
     let lookups = gsub.lookup_list();
     let mut found_type2 = false;
@@ -573,7 +573,7 @@ fn amiri_arabic_subset_keeps_gsub_with_type2_lookups() {
 
 #[test]
 fn amiri_arabic_subset_is_byte_deterministic() {
-    // Determinism guard for the type-2 path: same input → same bytes.
+    // Determinism guard for the type-2 path: same input -> same bytes.
     let face = amiri_face();
     let ch_input = char::from_u32(0x08B6).unwrap();
     let Some(input_gid) = face.cmap().unwrap().glyph_id(ch_input) else {
@@ -647,12 +647,12 @@ fn rubik_aalt_subset_keeps_alternates_when_explicitly_requested() {
     if alts.len() < 2 {
         return; // need a non-default alternate to ask for explicitly
     }
-    // Pick a *non-default* alternate — index 1 — so we can verify the
+    // Pick a *non-default* alternate (index 1) so we can verify the
     // rewriter keeps the explicitly-requested one in addition to the
     // default that the closure walker pulls automatically.
     let alt_gid = alts[1];
 
-    // Subset → {base, explicit alternate}. The rewriter's type-3 path
+    // Subset -> {base, explicit alternate}. The rewriter's type-3 path
     // must keep the AlternateSet entry for the base, with at least one
     // surviving alternate (the one we asked for).
     let input = SubsetInput {
@@ -709,7 +709,7 @@ fn rubik_aalt_subset_pulls_default_alternate_via_closure() {
     // Closure-walker rule for type 3: requesting only the base gid
     // pulls the *default* alternate (index 0 of the alternate set) into
     // the closure. We can only assert the default-pulled-in direction
-    // here — Rubik has additional type-1 and type-4 lookups whose
+    // here. Rubik has additional type-1 and type-4 lookups whose
     // forward pull rules may also drag the non-default alternates in
     // (a type-1 `init` form mapping, for instance, would pull its
     // output by the SINGLE rule). The "non-default alternates stay out"
@@ -728,7 +728,7 @@ fn rubik_aalt_subset_pulls_default_alternate_via_closure() {
         return;
     }
 
-    // Subset → {base only}. The closure walker pulls in the default
+    // Subset -> {base only}. The closure walker pulls in the default
     // alternate via the type-3 walk.
     let input = SubsetInput {
         gids: vec![gid_input],
@@ -806,7 +806,7 @@ fn rubik_latin_subset_retains_gpos() {
     let subset_face = Face::parse(&blob, 0).unwrap();
     assert!(
         subset_face.record(tag::GPOS).is_some(),
-        "GPOS must survive a Latin-letter subset of Rubik — \
+        "GPOS must survive a Latin-letter subset of Rubik: \
          the pair-pos lookup retains at least one (first, second) pair",
     );
     // The rewritten GPOS must parse cleanly.
@@ -1023,7 +1023,7 @@ fn amiri_arabic_subset_round_trips_through_shape() {
     // crash or produce silently different output.
     let face = amiri_face();
     let cmap = face.cmap().unwrap();
-    // alef + lam + meem + dal — common letters Amiri may rewrite via
+    // alef + lam + meem + dal: common letters Amiri may rewrite via
     // `rlig` / `calt`.
     let chars = ['\u{0627}', '\u{0644}', '\u{0645}', '\u{062F}'];
     let mut gids: Vec<u16> = Vec::new();
@@ -1060,7 +1060,7 @@ fn amiri_arabic_subset_round_trips_through_shape() {
     let run_subset = shape(&font_subset, &buf, &[]).unwrap();
 
     // Sanity check: the subset shaping must produce the same glyph
-    // count as the source — chained-context lookups should still fire.
+    // count as the source. Chained-context lookups should still fire.
     assert_eq!(
         run_subset.glyphs.len(),
         src_glyph_count,
@@ -1074,7 +1074,7 @@ fn amiri_arabic_subset_round_trips_through_shape() {
 //
 // The unit tests in `gpos.rs` cover the per-format byte shape with
 // hand-built fixtures. These integration cases exercise the full
-// subset → reparse pipeline against real fonts so the two-phase GPOS
+// subset -> reparse pipeline against real fonts so the two-phase GPOS
 // driver and the PairPos fmt-1 fallback see realistic input.
 
 #[test]
@@ -1151,9 +1151,9 @@ fn amiri_subset_gpos_round_trip_is_byte_deterministic() {
 fn open_sans_av_subset_pairpos_fmt2_class_collapse_round_trips() {
     // Open Sans's `kern` lookup is a PairPos fmt-2 class matrix. A
     // subset down to {A, V} forces the small-subset fmt-1 fallback
-    // path: the surviving first × second cross-product is two cells,
+    // path: the surviving first x second cross-product is two cells,
     // well under the heuristic's 256-budget. The test only asserts
-    // the rewritten GPOS parses — the AV pair is the most-kerned
+    // the rewritten GPOS parses. The AV pair is the most-kerned
     // Latin pair, so any class-collapse breakage would surface here.
     let face = open_sans_face();
     let cmap = face.cmap().unwrap();
@@ -1188,7 +1188,7 @@ fn open_sans_av_subset_pairpos_fmt2_class_collapse_round_trips() {
 
 #[test]
 fn open_sans_av_subset_is_byte_deterministic() {
-    // Determinism guard for the PairPos fmt-2 → fmt-1 fallback.
+    // Determinism guard for the PairPos fmt-2 -> fmt-1 fallback.
     let face = open_sans_face();
     let cmap = face.cmap().unwrap();
     let Some(gid_a) = cmap.glyph_id('A') else {

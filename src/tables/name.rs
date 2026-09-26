@@ -1,9 +1,9 @@
-//! `name` — naming table.
+//! `name`: naming table.
 //!
-//! The `name` table holds human-readable strings — the family name,
-//! subfamily, version, copyright, designer credit, and so on — keyed
+//! The `name` table holds human-readable strings (the family name,
+//! subfamily, version, copyright, designer credit, and so on) keyed
 //! by a 16-bit Name ID, a platform/encoding pair, and a language ID.
-//! sigilbuzz parses the directory eagerly (it is small — typically a
+//! sigilbuzz parses the directory eagerly (it is small, typically a
 //! few dozen records) and decodes individual strings on demand.
 //!
 //! # Format
@@ -33,7 +33,7 @@
 //! `LangTagRecord` is `(u16 length, u16 offset)` for an additional
 //! BCP-47 language tag. Sigilbuzz parses the v1 header so the storage
 //! pointer lands in the right place but does not currently surface the
-//! langTag mapping — modern fonts rarely use it.
+//! langTag mapping. Modern fonts rarely use it.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -50,7 +50,7 @@ pub struct NameRecord {
     pub encoding_id: u16,
     /// Platform-specific language identifier.
     pub language_id: u16,
-    /// Name identifier (1 = family, 2 = subfamily, 4 = full name, …).
+    /// Name identifier (1 = family, 2 = subfamily, 4 = full name, ...).
     pub name_id: u16,
     /// Length of the string in bytes.
     pub length: u16,
@@ -82,13 +82,13 @@ const NAME_ID_SUBFAMILY: u16 = 2;
 const NAME_ID_UNIQUE: u16 = 3;
 /// Full name (typically "Family Subfamily").
 const NAME_ID_FULL: u16 = 4;
-/// Version string ("Version 1.234;…").
+/// Version string ("Version 1.234;...").
 const NAME_ID_VERSION: u16 = 5;
 /// PostScript name.
 const NAME_ID_POSTSCRIPT: u16 = 6;
-/// Typographic family — preferred over ID 1 when present (added in v4).
+/// Typographic family: preferred over ID 1 when present (added in v4).
 const NAME_ID_TYPOGRAPHIC_FAMILY: u16 = 16;
-/// Typographic subfamily — preferred over ID 2 when present.
+/// Typographic subfamily: preferred over ID 2 when present.
 const NAME_ID_TYPOGRAPHIC_SUBFAMILY: u16 = 17;
 
 impl<'a> Name<'a> {
@@ -161,10 +161,10 @@ impl<'a> Name<'a> {
     /// `(platformID, encodingID)` tuple under the OpenType-conventional
     /// preference order:
     ///
-    /// 1. `(3, 1)`  — Windows Unicode BMP (UTF-16BE)
-    /// 2. `(3, 10)` — Windows Unicode full repertoire (UTF-16BE)
-    /// 3. `(0, *)`  — Unicode platform (UTF-16BE)
-    /// 4. `(1, 0)`  — Macintosh Roman (single-byte)
+    /// 1. `(3, 1)`:   Windows Unicode BMP (UTF-16BE)
+    /// 2. `(3, 10)`:  Windows Unicode full repertoire (UTF-16BE)
+    /// 3. `(0, *)`:   Unicode platform (UTF-16BE)
+    /// 4. `(1, 0)`:   Macintosh Roman (single-byte)
     ///
     /// Records that decode cleanly under the highest available rank
     /// win; malformed ones (out-of-bounds offset, truncated string,
@@ -302,7 +302,7 @@ fn decode_mac_roman(bytes: &[u8]) -> String {
     out
 }
 
-/// Mac OS Roman → Unicode mapping for bytes `0x80..=0xFF`. Drawn
+/// Mac OS Roman to Unicode mapping for bytes `0x80..=0xFF`. Drawn
 /// directly from Apple's published `ROMAN.TXT` (unicode.org mirror).
 /// Indexed by `byte - 0x80`.
 #[rustfmt::skip]
@@ -519,7 +519,7 @@ mod tests {
 
     #[test]
     fn skips_unknown_platform_records() {
-        // Platform ID 2 (ISO) is recognised by the spec but sigilbuzz
+        // Platform ID 2 (ISO) is recognized by the spec but sigilbuzz
         // does not support it; the only other record (3, 1) should
         // still surface.
         let bytes = build_name(
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn decodes_mac_roman_high_bytes() {
-        // 0xA9 → © (U+00A9), 0xC3 → √ (U+221A), 0x41 → 'A'.
+        // 0xA9 -> © (U+00A9), 0xC3 -> √ (U+221A), 0x41 -> 'A'.
         let payload = vec![0x41, 0xA9, 0xC3];
         let bytes = build_name(0, &[(1, 0, 0, 1, payload)]);
         let name = Name::parse(&bytes).unwrap();

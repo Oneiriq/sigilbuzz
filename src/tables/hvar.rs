@@ -1,4 +1,4 @@
-//! `HVAR` — Horizontal Metrics Variations.
+//! `HVAR`: Horizontal Metrics Variations.
 //!
 //! Carries per-glyph advance-width deltas for a variable font.
 //! The shaper needs this because `hmtx` only holds the advances
@@ -11,13 +11,13 @@
 //!   u16       majorVersion = 1
 //!   u16       minorVersion = 0
 //!   Offset32  itemVariationStoreOffset
-//!   Offset32  advanceWidthMappingOffset    (may be 0 — use gid directly)
+//!   Offset32  advanceWidthMappingOffset    (may be 0: use gid directly)
 //!   Offset32  lsbMappingOffset             (optional, unused here)
 //!   Offset32  rsbMappingOffset             (optional, unused here)
 //! ```
 //!
 //! When `advanceWidthMappingOffset` is non-zero it points at a
-//! `DeltaSetIndexMap` — a glyph-id → `(outer, inner)` table. When
+//! `DeltaSetIndexMap`, a glyph-id -> `(outer, inner)` table. When
 //! zero, the glyph id *is* the inner index with outer = 0. The
 //! mapping table uses `entryFormat` to pack `(outer, inner)` into
 //! a variable number of bytes per entry.
@@ -66,7 +66,7 @@ impl<'a> Hvar<'a> {
     /// Returns the advance-width delta for `glyph_id` at the
     /// given normalized coordinates. The caller adds this (as a
     /// design-unit integer) to the base `hmtx` advance. Returns
-    /// `0.0` when the glyph has no entry — equivalent to "no
+    /// `0.0` when the glyph has no entry, equivalent to "no
     /// variation applies".
     #[must_use]
     pub fn advance_delta(&self, glyph_id: u16, coords: &[f32]) -> f32 {
@@ -125,7 +125,7 @@ fn read_index_map(data: &[u8], start: usize, glyph_id: u16) -> Option<(u16, u16)
     // mapping" so the caller emits a zero delta. Without this
     // guard, `map_count.saturating_sub(1)` quietly collapses to 0
     // and the decoder reads the first entry_bytes after the header
-    // as if they were a real entry — which they are not.
+    // as if they were a real entry, which they are not.
     if map_count == 0 {
         return None;
     }
@@ -137,7 +137,7 @@ fn read_index_map(data: &[u8], start: usize, glyph_id: u16) -> Option<(u16, u16)
     let inner_bits = (entry_format & 0x0F) as u32 + 1;
     let inner_mask: u32 = (1u32 << inner_bits) - 1;
 
-    // Clamp glyph id — spec says overruns map to the last entry.
+    // Clamp glyph id: spec says overruns map to the last entry.
     let idx = if (glyph_id as u32) < map_count {
         glyph_id as u32
     } else {
@@ -217,8 +217,8 @@ mod tests {
         let ivs = build_ivs_one_axis_one_region_one_item(50);
         let bytes = build_hvar_without_map(&ivs);
         let hvar = Hvar::parse(&bytes).unwrap();
-        // Only one item exists, at inner=0. GID 0 → delta 50 at
-        // coord 1.0; GID 1 out of range → 0.
+        // Only one item exists, at inner=0. GID 0 -> delta 50 at
+        // coord 1.0; GID 1 out of range -> 0.
         assert!((hvar.advance_delta(0, &[1.0]) - 50.0).abs() < 1e-3);
         assert!(hvar.advance_delta(1, &[1.0]).abs() < 1e-6);
     }

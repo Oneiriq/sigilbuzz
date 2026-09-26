@@ -1,4 +1,4 @@
-//! `sigilbuzz-hyphen` — Liang/Knuth pattern-driven hyphenation.
+//! `sigilbuzz-hyphen`: Liang/Knuth pattern-driven hyphenation.
 //!
 //! This companion crate implements [Liang's hyphenation algorithm][liang]
 //! (PhD thesis, Stanford 1983; widely deployed in TeX, OpenOffice, web
@@ -14,10 +14,10 @@
 //!
 //! # Headline entry points
 //!
-//! - [`hyphenate`] — the algorithm. Returns the byte offsets within a
+//! - [`hyphenate`]: the algorithm. Returns the byte offsets within a
 //!   word at which a soft-hyphen break is permitted.
-//! - [`Patterns::for_language`] — fetch a pre-bundled pattern set.
-//! - [`Patterns::parse`] — parse a custom newline-separated pattern
+//! - [`Patterns::for_language`]: fetch a pre-bundled pattern set.
+//! - [`Patterns::parse`]: parse a custom newline-separated pattern
 //!   list (e.g. for a language not bundled in this crate).
 //!
 //! # Quick start

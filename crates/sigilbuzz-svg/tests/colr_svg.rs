@@ -1,10 +1,10 @@
-//! Integration tests for the `color` feature path: COLRv1 → SVG.
+//! Integration tests for the `color` feature path: COLRv1 -> SVG.
 //!
 //! These build a synthetic SFNT carrying a hand-crafted COLR + CPAL
 //! pair (the technique mirrors `sigilbuzz-paint`'s evaluator tests so
 //! both crates stay parser-bug-equivalent). Detailed gradient-shape
 //! assertions live in the unit tests in `src/color.rs`; the
-//! integration tests here cover the public API contract — when the
+//! integration tests here cover the public API contract: when the
 //! face has no COLR, when the face has COLR but no backing outline,
 //! and when the face has neither (Open Sans fallback path).
 
@@ -84,7 +84,7 @@ fn f2dot14(v: f32) -> [u8; 2] {
 }
 
 // =========================================================================
-// Linear-gradient face: COLR present, no glyf — outline lookup yields
+// Linear-gradient face: COLR present, no glyf. Outline lookup yields
 // nothing, so the color SVG path returns None. This pins the
 // "no outline = no SVG" contract: the caller must fall back to
 // glyph_to_svg or to a renderer that doesn't depend on outlines.

@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 /// Owned or borrowed font data.
 ///
-/// Construction is cheap in both flavours — neither path copies the
+/// Construction is cheap in both flavors. Neither path copies the
 /// bytes. The borrow form is preferred when the caller has already
 /// mapped the font into memory.
 #[derive(Debug, Clone)]

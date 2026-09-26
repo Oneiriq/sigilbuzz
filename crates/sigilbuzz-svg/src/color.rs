@@ -1,4 +1,4 @@
-//! COLRv1 → SVG emission, gated on the `color` Cargo feature.
+//! COLRv1 -> SVG emission, gated on the `color` Cargo feature.
 //!
 //! This module consumes the [`DrawCmd`] stream from `sigilbuzz-paint`
 //! and turns it into an SVG fragment that mirrors the COLRv1 paint
@@ -8,8 +8,8 @@
 //! - linear / radial gradients land in a `<defs>` block and are
 //!   referenced via `fill="url(#grad-N)"`.
 //! - sweep gradients have no SVG 1.1 equivalent. We degrade them to a
-//!   linear gradient running across the gradient's centre — the
-//!   colours are right, the angular distribution is not. The output
+//!   linear gradient running across the gradient's center. The
+//!   colors are right, the angular distribution is not. The output
 //!   carries an `<!-- sweep-fallback -->` comment so consumers that
 //!   care can detect the substitution and route through a richer
 //!   renderer.
@@ -19,9 +19,9 @@
 //!   left to the SVG viewer's CSS engine.
 //!
 //! The walker re-walks the same DrawCmd stream sigilbuzz-paint emits
-//! to keep behaviour aligned with other renderers built on the
+//! to keep behavior aligned with other renderers built on the
 //! evaluator (PDF backend, GPU backend). It does not parse the COLRv1
-//! tree directly — that would duplicate the var-store / cycle-bounded
+//! tree directly. That would duplicate the var-store / cycle-bounded
 //! logic the evaluator already owns.
 
 use alloc::format;
@@ -48,7 +48,7 @@ pub fn glyph_to_svg_color(face: &Face<'_>, gid: GlyphId) -> Option<String> {
     glyph_to_svg_color_at_coords(face, gid, &[])
 }
 
-/// Variable-font flavour of [`glyph_to_svg_color`].
+/// Variable-font flavor of [`glyph_to_svg_color`].
 #[must_use]
 pub fn glyph_to_svg_color_at_coords(
     face: &Face<'_>,
@@ -73,7 +73,7 @@ pub fn glyph_to_svg_color_at_coords(
 fn render_color_svg(face: &Face<'_>, cmds: &[DrawCmd], coords: &[F2Dot14]) -> Option<String> {
     // First pass: for every FillGlyph in `cmds`, look up the
     // referenced outline. We push *one* `Option<LeafGeometry>` per
-    // FillGlyph — `None` for whitespace / out-of-range / empty-outline
+    // FillGlyph: `None` for whitespace / out-of-range / empty-outline
     // glyphs, `Some` for renderable ones. Storing one slot per
     // FillGlyph keeps the second pass aligned with the cmd stream
     // even when an interior leaf is missing; before, leaves were a
@@ -257,7 +257,7 @@ fn emit_gradient_def(defs: &mut Defs, g: &Gradient) -> String {
             let id = defs.allocate_id("grad");
             // SVG `radialGradient` lays out as (cx, cy) outer, (fx, fy) inner.
             // The inner radius `r0` is exposed via the SVG2 `fr` attribute;
-            // some viewers respect it, others ignore it — either way we emit
+            // some viewers respect it, others ignore it. Either way we emit
             // both circles so the data is preserved.
             let mut s = String::new();
             let _ = write!(
@@ -284,11 +284,11 @@ fn emit_gradient_def(defs: &mut Defs, g: &Gradient) -> String {
             end_angle,
         } => {
             // SVG 1.1 has no sweep gradient. We approximate with a
-            // linear gradient running through the sweep's centre,
-            // oriented along the sector's bisector. The colour bands
+            // linear gradient running through the sweep's center,
+            // oriented along the sector's bisector. The color bands
             // are placed in input order across the sweep's angular
             // extent; the spatial distribution is wrong but the
-            // colours are preserved. A `<!-- sweep-fallback -->`
+            // colors are preserved. A `<!-- sweep-fallback -->`
             // marker lets consumers detect and re-route.
             let id = defs.allocate_id("grad");
             let bisector = 0.5 * (start_angle + end_angle);
@@ -342,7 +342,7 @@ fn stop_tag(offset: f32, color: Color) -> String {
 }
 
 // =========================================================================
-// Colour + transform helpers
+// Color + transform helpers
 // =========================================================================
 
 fn color_to_rgb(c: Color) -> String {
@@ -381,8 +381,8 @@ fn fmt_num(v: f32) -> String {
 
 fn composite_to_blend_mode(mode: CompositeMode) -> &'static str {
     // The COLRv1 spec carries the full Porter-Duff alphabet plus the
-    // PDF blend modes. CSS / SVG only standardise the PDF blend modes
-    // — Porter-Duff cases that have no CSS equivalent fall back to
+    // PDF blend modes. CSS / SVG only standardize the PDF blend modes.
+    // Porter-Duff cases that have no CSS equivalent fall back to
     // `normal` so the output stays renderable. Consumers wanting full
     // fidelity should drive sigilbuzz-paint into a Porter-Duff-aware
     // backend (sigilbuzz-gpu, future sigilbuzz-pdf).
@@ -646,11 +646,11 @@ mod tests {
 
     #[test]
     fn missing_middle_outline_does_not_misalign_later_leaves() {
-        // Three FillGlyph cmds with distinguishable solid colours;
+        // Three FillGlyph cmds with distinguishable solid colors;
         // the middle glyph has no outline (its leaf slot is `None`).
         // Before issue #68 the second-pass walker advanced its
         // dense-leaf cursor only on `Some` slots, so the third
-        // FillGlyph silently picked up the second's `d=` payload —
+        // FillGlyph silently picked up the second's `d=` payload, and
         // here the fix routes each FillGlyph through its own
         // matching leaf slot, missing-outline ones emit nothing,
         // and later glyphs keep the path data the first pass paired
@@ -689,7 +689,7 @@ mod tests {
             "first fill missing or wrong d=: {body}"
         );
         // The second FillGlyph (green) had no outline and emits
-        // nothing — its colour must not appear anywhere in the body.
+        // nothing. Its color must not appear anywhere in the body.
         assert!(
             !body.contains("rgb(0,255,0)"),
             "missing-outline glyph leaked into body: {body}"

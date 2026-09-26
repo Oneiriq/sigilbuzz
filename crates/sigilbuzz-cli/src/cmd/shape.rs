@@ -1,4 +1,4 @@
-//! `sigilbuzz shape` — drives [`sigilbuzz::shape`] from the CLI.
+//! `sigilbuzz shape`: drives [`sigilbuzz::shape`] from the CLI.
 //!
 //! Output format mirrors `hb-shape`:
 //!
@@ -8,7 +8,7 @@
 //!
 //! one line per glyph, plus an optional `--json` flag for machine-
 //! readable output. The shape pipeline always runs at the font's
-//! design-unit size (size = 1.0 means we report raw advances) — there
+//! design-unit size (size = 1.0 means we report raw advances). There
 //! is no point-size knob in the CLI yet.
 
 use std::path::PathBuf;

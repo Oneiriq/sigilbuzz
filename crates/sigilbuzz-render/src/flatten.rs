@@ -55,10 +55,10 @@ pub enum FlattenedCurve {
 
 /// One straight edge in pixel coordinates.
 ///
-/// Produced by [`flatten`]. Coordinates are post-transform — the
+/// Produced by [`flatten`]. Coordinates are post-transform: the
 /// [`Affine`] applied during flattening has already moved them into
 /// device-pixel space, so consumers can read them directly without
-/// re-applying the design-units → pixels mapping.
+/// re-applying the design-units -> pixels mapping.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Segment {
     /// Start x (pixel space).
@@ -187,7 +187,7 @@ where
 /// Flattens an outline path, preserving per-source-Bézier boundaries.
 ///
 /// Sibling to [`flatten`]. Same input, same chord output, same
-/// `xform` and `tolerance` semantics — but the result is a
+/// `xform` and `tolerance` semantics, but the result is a
 /// `Vec<FlattenedCurve>` where each entry corresponds to exactly one
 /// drawing op from the input stream. A `LineTo` becomes one
 /// [`FlattenedCurve::Line`]; a `QuadTo` becomes one
@@ -198,7 +198,7 @@ where
 /// contour start. `MoveTo` and no-op `Close` (already at start)
 /// produce no entries.
 ///
-/// This is what MSDF-style generators want — RGB edge coloring picks
+/// This is what MSDF-style generators want: RGB edge coloring picks
 /// channels per *source curve*, not per chord, so the consumer needs
 /// to know which subset of chords came from one Bézier. The previous
 /// workaround was to call [`flatten`] one tiny `MoveTo+draw` op pair
@@ -331,7 +331,7 @@ impl Segment {
     /// True arc length of this straight segment.
     ///
     /// `Segment` holds two endpoints with no curvature data, so this is
-    /// the Euclidean chord distance — exact for `LineTo` edges and the
+    /// the Euclidean chord distance, exact for `LineTo` edges and the
     /// implicit close-line. For chord segments produced by curve
     /// flattening, callers that need the parent Bézier's true arc
     /// length should use [`arc_length_quad`] / [`arc_length_cubic`]
@@ -345,10 +345,10 @@ impl Segment {
 }
 
 /// Adaptive arc-length estimate of a quadratic Bézier defined by
-/// `(x0,y0) → (x1,y1) → (x2,y2)` (start, control, end).
+/// `(x0,y0) -> (x1,y1) -> (x2,y2)` (start, control, end).
 ///
 /// Uses the Roger Willcocks approximation:
-/// `arc ≈ (chord + control_polygon) / 2`. When the estimate of the
+/// `arc ~= (chord + control_polygon) / 2`. When the estimate of the
 /// whole disagrees with the sum of its half estimates by more than
 /// `tolerance`, the curve is split at `t=0.5` and the halves recursed.
 /// At default `tolerance = 0.01` the result is within ~0.05 % of the
@@ -427,7 +427,7 @@ fn arc_length_quad_rec(
 ///
 /// // Quarter-circle approximation: a cubic from (100, 0) sweeping
 /// // through control points (100, 55.228) and (55.228, 100) to
-/// // (0, 100). True quarter-circle arc is π/2 · 100 ≈ 157.08.
+/// // (0, 100). True quarter-circle arc is π/2 * 100 ~ 157.08.
 /// const K: f32 = 55.228_5;
 /// let l = arc_length_cubic(100.0, 0.0, 100.0, K, K, 100.0, 0.0, 100.0, 0.01);
 /// assert!((l - 157.08).abs() < 0.1, "got {l}");
@@ -455,14 +455,14 @@ pub fn arc_length_cubic(
 /// Used by stroke-dasharray when a dash boundary lands mid-curve and
 /// the caller needs the exact parametric position (e.g. for splitting
 /// the curve into draw / skip ranges before re-flattening). Returns
-/// `t ∈ [0, 1]`. If `target ≤ 0` returns 0; if `target` is at or past
+/// `t` in `[0, 1]`. If `target <= 0` returns 0; if `target` is at or past
 /// the curve's total arc length, returns 1.
 ///
 /// Implementation: bisection on the prefix-arc-length function
 /// `L(t) = arc_length(curve restricted to [0, t])`. Bisection is
 /// monotone-stable on cusps and pathological cubics where Newton's
-/// method can overshoot — the dasher must never panic on adversarial
-/// curves, so we accept ~25 iterations (≤ 1e-7 relative tolerance) for
+/// method can overshoot. The dasher must never panic on adversarial
+/// curves, so we accept ~25 iterations (<= 1e-7 relative tolerance) for
 /// robustness over Newton's quadratic convergence.
 ///
 /// `tolerance` controls the arc-length estimator accuracy under the
@@ -981,7 +981,7 @@ mod tests {
 
     #[test]
     fn flatten_grouped_segment_count_matches_flatten() {
-        // Same chord output, just grouped — concatenating the per-curve
+        // Same chord output, just grouped. Concatenating the per-curve
         // segment lists must equal flatten()'s flat output exactly.
         let ops = [
             PathOp::MoveTo { x: 0.0, y: 0.0 },
@@ -1011,7 +1011,7 @@ mod tests {
 
     #[test]
     fn flatten_grouped_close_at_start_emits_no_line() {
-        // Already at the contour start when Close hits — no implicit
+        // Already at the contour start when Close hits: no implicit
         // close-line, so the output is exactly the LineTo.
         let ops = [
             PathOp::MoveTo { x: 0.0, y: 0.0 },
@@ -1062,7 +1062,7 @@ mod tests {
     #[test]
     fn arc_length_quad_symmetric_arc() {
         // Quad with control at (50, 50) over chord (0,0)-(100,0). True
-        // arc length ≈ 114.7793 (analytic). Roger Willcocks adaptive
+        // arc length ~ 114.7793 (analytic). Roger Willcocks adaptive
         // should land within 0.05 of that.
         let l = arc_length_quad(0.0, 0.0, 50.0, 50.0, 100.0, 0.0, 0.01);
         assert!((l - 114.7793).abs() < 0.05, "true arc 114.7793, got {l}");
@@ -1078,8 +1078,8 @@ mod tests {
     #[test]
     fn arc_length_cubic_quarter_circle_kappa() {
         // Single cubic approximating a quarter circle of radius 100
-        // using kappa = 4/3 · (sqrt(2) - 1) ≈ 0.5522847.
-        // True quarter-circle arc = π/2 · 100 ≈ 157.0796. The cubic
+        // using kappa = 4/3 * (sqrt(2) - 1) ~ 0.5522847.
+        // True quarter-circle arc = π/2 * 100 ~ 157.0796. The cubic
         // approximates the circle to ~1e-3 relative error in shape; arc
         // length should land within ~0.1 of the true value.
         const K: f32 = 0.552_284_8 * 100.0;
@@ -1097,8 +1097,8 @@ mod tests {
 
     #[test]
     fn arc_length_quad_solve_t_clamps_below_zero_and_above_total() {
-        // target = 0  → t = 0
-        // target = ∞ → t = 1
+        // target = 0  -> t = 0
+        // target = ∞ -> t = 1
         let t0 = arc_length_quad_solve_t(0.0, 0.0, 50.0, 50.0, 100.0, 0.0, 0.0, 0.01);
         let t1 = arc_length_quad_solve_t(0.0, 0.0, 50.0, 50.0, 100.0, 0.0, 1e9, 0.01);
         assert!(t0.abs() < 1e-6);
@@ -1107,13 +1107,13 @@ mod tests {
 
     #[test]
     fn arc_length_quad_solve_t_finds_midpoint_arc() {
-        // Arc-length total ≈ 114.78. Half-length should land near
+        // Arc-length total ~ 114.78. Half-length should land near
         // t = 0.5 (the curve is symmetric about t = 0.5).
         let total = arc_length_quad(0.0, 0.0, 50.0, 50.0, 100.0, 0.0, 0.01);
         let t = arc_length_quad_solve_t(0.0, 0.0, 50.0, 50.0, 100.0, 0.0, 0.5 * total, 0.01);
         assert!(
             (t - 0.5).abs() < 1e-3,
-            "expected t ≈ 0.5 at midpoint arc length, got {t}"
+            "expected t ~ 0.5 at midpoint arc length, got {t}"
         );
     }
 

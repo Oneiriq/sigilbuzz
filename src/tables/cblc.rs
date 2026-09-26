@@ -1,8 +1,8 @@
-//! `CBLC` — Color Bitmap Location.
+//! `CBLC`: Color Bitmap Location.
 //!
 //! Companion to [`Cbdt`](crate::tables::cbdt::Cbdt): `CBLC` indexes
 //! into the data table by glyph id at one or more pixel-per-em sizes.
-//! Same layout as the older monochrome `EBLC` / `bloc` tables — the
+//! Same layout as the older monochrome `EBLC` / `bloc` tables: the
 //! "C" prefix only changes the expected payload type in `CBDT`
 //! (PNG / mask) versus the older 1-bit / 8-bit grayscale formats.
 //!
@@ -64,7 +64,7 @@ use crate::tables::parse::Reader;
 
 /// Per-axis line metrics for one strike. Mirrors `hhea` / `vhea` but
 /// expressed in pixels rather than design units. sigilbuzz exposes
-/// the raw fields for downstream layout — none of them feed the
+/// the raw fields for downstream layout. None of them feed the
 /// shaping pipeline today.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SbitLineMetrics {
@@ -90,7 +90,7 @@ pub struct SbitLineMetrics {
     pub min_after_bl: i8,
 }
 
-/// One BitmapSize record — a single resolution at which the font
+/// One BitmapSize record: a single resolution at which the font
 /// provides bitmap glyphs. A typical color-emoji font ships several
 /// (e.g. 32, 64, 96, 128, 160 ppem) so renderers can pick the closest
 /// match.
@@ -115,14 +115,14 @@ pub struct BitmapSize {
     pub ppem_x: u8,
     /// Pixels-per-em on the y axis.
     pub ppem_y: u8,
-    /// Bit depth of the pixel data — 32 means RGBA8, 1 / 2 / 4 / 8
+    /// Bit depth of the pixel data: 32 means RGBA8, 1 / 2 / 4 / 8
     /// indicate the older mask formats. CBDT today is always 32.
     pub bit_depth: u8,
     /// Flag byte: bit 0 = horizontal, bit 1 = vertical.
     pub flags: i8,
 }
 
-/// Big glyph metrics — the per-glyph metrics record stored either at
+/// Big glyph metrics: the per-glyph metrics record stored either at
 /// the head of an index sub-table (formats 2, 5) or inline with each
 /// glyph in `CBDT` (formats 18, 19). All fields are in pixels.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -163,7 +163,7 @@ impl BigGlyphMetrics {
     }
 }
 
-/// Small glyph metrics — the trimmed five-byte horizontal-only
+/// Small glyph metrics: the trimmed five-byte horizontal-only
 /// metrics record used by CBDT formats 17 and the EBDT formats 1/2/6.
 /// `vert*` fields default to zero when only the small variant is
 /// present; consumers needing vertical metrics fall back to vmtx /
@@ -220,7 +220,7 @@ pub struct CbdtLocation {
     pub metrics: Option<BigGlyphMetrics>,
 }
 
-/// Parsed `CBLC` table — header plus the size record array.
+/// Parsed `CBLC` table: header plus the size record array.
 #[derive(Debug, Clone, Copy)]
 pub struct Cblc<'a> {
     data: &'a [u8],
@@ -292,7 +292,7 @@ impl<'a> Cblc<'a> {
     }
 
     /// Picks the strike whose `ppem_y` is closest to `target_ppem`.
-    /// Ties prefer the larger size (sharper rasterisation when down-
+    /// Ties prefer the larger size (sharper rasterization when down-
     /// scaling); strikes that don't cover `glyph_id` are skipped.
     /// Returns `None` if no strike covers the glyph.
     #[must_use]
@@ -333,7 +333,7 @@ impl<'a> Cblc<'a> {
         }
         // Walk the IndexSubTableArray looking for the entry covering
         // `glyph_id`. Entries are sorted by firstGlyphIndex; a linear
-        // scan is fine — color-emoji fonts rarely exceed a handful.
+        // scan is fine: color-emoji fonts rarely exceed a handful.
         for i in 0..size.number_of_index_sub_tables as usize {
             let entry_off = array_off
                 .checked_add(i.checked_mul(8).ok_or(Error::Malformed {
@@ -609,7 +609,7 @@ fn parse_sbit_line_metrics(r: &mut Reader<'_>) -> SbitLineMetrics {
         max_before_bl: r.read_i8().unwrap_or(0),
         min_after_bl: r.read_i8().unwrap_or(0),
     };
-    // pad1, pad2 — keep the 12-byte stride.
+    // pad1, pad2: keep the 12-byte stride.
     let _ = r.skip(2);
     m
 }
@@ -621,7 +621,7 @@ mod tests {
 
     /// Builds a CBLC blob with one strike covering glyph ids 1..=2 at
     /// 32 ppem, exposing `index_format` so each test can pick its
-    /// flavour. The IndexSubTable's `image_data_offset` is whatever
+    /// flavor. The IndexSubTable's `image_data_offset` is whatever
     /// the test passes in.
     struct CblcBuilder {
         ppem: u8,
@@ -809,7 +809,7 @@ mod tests {
         .build();
         let cblc = Cblc::parse(&blob).unwrap();
         let size = cblc.size(0).unwrap();
-        // gid 1: not in sparse list → None
+        // gid 1: not in sparse list -> None
         assert!(cblc.locate(&size, 1).unwrap().is_none());
         let loc2 = cblc.locate(&size, 2).unwrap().unwrap();
         assert_eq!(loc2.offset, 0);
@@ -868,10 +868,10 @@ mod tests {
             out.push(1);
         }
         let cblc = Cblc::parse(&out).unwrap();
-        // 16 vs 64 → distance 24 vs 24 from ppem 40; tie prefers larger.
+        // 16 vs 64 -> distance 24 vs 24 from ppem 40; tie prefers larger.
         let strike40 = cblc.best_strike(3, 40).unwrap();
         assert_eq!(strike40.ppem_y, 64);
-        // ppem 20: distance 4 (16) vs 44 (64) → 16 wins.
+        // ppem 20: distance 4 (16) vs 44 (64) -> 16 wins.
         let strike20 = cblc.best_strike(3, 20).unwrap();
         assert_eq!(strike20.ppem_y, 16);
         // ppem 100: 64 wins.

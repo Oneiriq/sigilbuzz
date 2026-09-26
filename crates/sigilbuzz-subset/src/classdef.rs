@@ -3,11 +3,11 @@
 //! Given a list of `(new_gid, class_value)` pairs, emits a ClassDef
 //! table in the smaller of:
 //!
-//! - **Format 1** — `start_glyph + class_array`. Cost: `2 + 2 + 2 + 2*N`
+//! - **Format 1**: `start_glyph + class_array`. Cost: `2 + 2 + 2 + 2*N`
 //!   bytes where N spans every glyph from `min_gid` to `max_gid`,
 //!   inclusive (gaps cost 2 bytes each because every slot in the array
 //!   must be present).
-//! - **Format 2** — range records. Cost: `2 + 2 + 6*R` bytes where R
+//! - **Format 2**: range records. Cost: `2 + 2 + 6*R` bytes where R
 //!   is the number of contiguous runs that share a class.
 //!
 //! Glyphs absent from the input map are implicitly class 0; the
@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 
 /// Emits a ClassDef table from `(new_gid, class)` pairs. Pairs may
 /// arrive in any order. Class 0 entries are dropped because the spec
-/// gives unlisted glyphs class 0 by default — always cheaper to omit.
+/// gives unlisted glyphs class 0 by default, always cheaper to omit.
 #[must_use]
 pub fn emit_classdef(pairs: &[(u16, u16)]) -> Vec<u8> {
     let mut sorted: Vec<(u16, u16)> = pairs.iter().copied().filter(|(_, c)| *c != 0).collect();
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn dense_consecutive_run_with_same_class_picks_format2() {
-        // 10..=15 all class 1 — single range, 10 bytes vs format 1's 18.
+        // 10..=15 all class 1: single range, 10 bytes vs format 1's 18.
         let pairs: Vec<(u16, u16)> = (10..=15).map(|g| (g, 1)).collect();
         let bytes = emit_classdef(&pairs);
         assert_eq!(&bytes[0..2], &2u16.to_be_bytes());
@@ -130,7 +130,7 @@ mod tests {
     #[test]
     fn dense_alternating_classes_picks_format1() {
         // Adjacent gids, differing classes: every glyph is its own
-        // range in format 2 (4 ranges × 6 = 24 bytes), but format 1
+        // range in format 2 (4 ranges * 6 = 24 bytes), but format 1
         // packs them into 6 + 4*2 = 14 bytes.
         let bytes = emit_classdef(&[(10, 1), (11, 2), (12, 1), (13, 2)]);
         assert_eq!(&bytes[0..2], &1u16.to_be_bytes());

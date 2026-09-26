@@ -19,7 +19,7 @@
 //!   remapped through the identity (instancing keeps every glyph) and
 //!   their per-component translations preserved verbatim. Composite
 //!   variation (`WE_HAVE_VARIATION` / point-anchor deltas) is not
-//!   resynthesised on this pass — gvar's composite-glyph contribution
+//!   resynthesized on this pass: gvar's composite-glyph contribution
 //!   is conservatively dropped.
 //! - `hmtx` is rebuilt with each gid's advance + lsb adjusted by the
 //!   HVAR deltas at the requested coords (rounded to the nearest
@@ -33,14 +33,14 @@
 //! - `fvar`, `avar`, `gvar`, `HVAR` are dropped from the directory.
 //! - `GDEF` is preserved verbatim. Its embedded `ItemVariationStore` is
 //!   no longer reachable from any consumer because the surrounding
-//!   variable-font tables are gone, but the bytes ride along — pruning
+//!   variable-font tables are gone, but the bytes ride along. Pruning
 //!   it cleanly is staged for a sibling.
 //!
 //! When `drop_var_tables` is false the variable-font tables ride
 //! through verbatim. The glyf and hmtx bake still applies to *bake* the
 //! default-instance values into the outline / metric tables, so a
 //! consumer that ignores the variable-font tables sees the same shape
-//! as a consumer that does honour them.
+//! as a consumer that does honor them.
 //!
 //! # CFF2 baking
 //!
@@ -49,8 +49,8 @@
 //! `blend` to its scalar value at `coords`, strips `vsindex`, and
 //! emits a fresh CFF2 table without a VariationStore. Output is still
 //! CFF2-tagged (the SFNT directory entry remains `CFF2`) but no
-//! variable-font opcodes survive — consumers that ignore CFF2's
-//! variable surface see the same outline as a consumer that honours
+//! variable-font opcodes survive. Consumers that ignore CFF2's
+//! variable surface see the same outline as a consumer that honors
 //! it at the chosen instance.
 //!
 //! # VVAR-aware vmtx
@@ -64,8 +64,8 @@
 //!
 //! When the source carries `MVAR` we walk every value record, look up
 //! its delta at `coords`, and apply the rounded result to the target
-//! field per the spec's tag → field mapping (`hasc` → OS/2.sTypoAscender,
-//! `xhgt` → OS/2.sxHeight, `unds` → post.underlineThickness, …). The
+//! field per the spec's tag -> field mapping (`hasc` -> OS/2.sTypoAscender,
+//! `xhgt` -> OS/2.sxHeight, `unds` -> post.underlineThickness, ...). The
 //! patched tables are emitted; `MVAR` is dropped. Sources without
 //! `MVAR` pass these tables through unchanged.
 //!
@@ -76,7 +76,7 @@
 //! `ValueRecord` static field at `coords` and zeros the offset slot,
 //! then prunes `GDEF.ItemVariationStore`. Variable-position kerning
 //! (the `VariationIndex` shape on PairPos / SinglePos value records)
-//! therefore lands at the chosen instance — not the default — so the
+//! therefore lands at the chosen instance, not the default, so the
 //! static output renders correctly at the baked coord vector.
 //!
 //! The supported lookup types are GPOS Type 1 (SinglePos formats 1 / 2)
@@ -85,7 +85,7 @@
 //! variations on `Anchor` records, not `ValueRecord` fields; the
 //! Anchor bake is staged for a follow-up. Unsupported lookups still
 //! land in the output but their `VariationIndex` offsets are left
-//! intact — the GDEF.IVS prune that follows leaves them orphan, the
+//! intact. The GDEF.IVS prune that follows leaves them orphan, the
 //! same trade-off the simpler #173 path shipped.
 //!
 //! # Out of scope (deferred)
@@ -130,17 +130,17 @@ pub type F2Dot14 = f32;
 /// Per-axis pin policy for partial instancing.
 ///
 /// fontTools' `varLib.instancer.instantiateVariableFont(axisLimits=...)`
-/// supports pinning a *subset* of axes — the deltas for those axes fold
+/// supports pinning a *subset* of axes. The deltas for those axes fold
 /// into the static outlines / metrics at the chosen coord, while the
 /// remaining axes keep their variation surface and the output is still
 /// a variable font (just with fewer axes in `fvar`). [`AxisPin`] is the
-/// per-axis switch that drives that behaviour from
+/// per-axis switch that drives that behavior from
 /// [`InstanceInput::axis_pins`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AxisPin {
     /// Bake this axis at `coords[i]` into every variation table; drop
     /// the axis from `fvar` / `avar` and from every variation tuple
-    /// region. This is the existing full-instancing behaviour.
+    /// region. This is the existing full-instancing behavior.
     Pin,
     /// Keep this axis variable. The axis stays in `fvar` / `avar`;
     /// every variation tuple region keeps its dimension on this axis;
@@ -157,22 +157,22 @@ pub struct InstanceInput {
     /// `face.fvar()`'s axis count.
     pub coords: Vec<F2Dot14>,
     /// If true (the recommended setting), drop `fvar` / `avar` /
-    /// `HVAR` / `gvar` from the output. The font becomes static —
+    /// `HVAR` / `gvar` from the output. The font becomes static:
     /// shapers will ignore any axis coords passed alongside it.
     ///
-    /// If false, leave them in place. Any consumer that does honour
+    /// If false, leave them in place. Any consumer that does honor
     /// the variable-font tables will see deltas of zero relative to
     /// the baked outlines/metrics, so the result still renders
-    /// correctly at the chosen instance — but the file is larger and
+    /// correctly at the chosen instance, but the file is larger and
     /// shapers will still treat the font as variable.
     pub drop_var_tables: bool,
     /// Per-axis pin policy. An empty vector means "pin every axis"
-    /// (the existing full-instancing behaviour). When non-empty,
+    /// (the existing full-instancing behavior). When non-empty,
     /// length must equal `coords.len()`; each entry says whether the
     /// matching axis bakes (`Pin`) or stays variable (`Keep`).
     ///
     /// fontTools-equivalent of
-    /// `varLib.instancer.instantiateVariableFont(axisLimits={...})` —
+    /// `varLib.instancer.instantiateVariableFont(axisLimits={...})`:
     /// `Pin` axes correspond to a bare-coord entry in `axisLimits`,
     /// `Keep` axes correspond to an axis omitted from `axisLimits`.
     ///
@@ -183,7 +183,7 @@ pub struct InstanceInput {
     /// every Pin-axis dimension folded into the surviving deltas, and
     /// any tuple that contributes nothing at the pin coords is
     /// dropped. `gvar` is rewritten through the same
-    /// [`project_region_onto_kept_axes`] primitive: every per-tuple
+    /// `project_region_onto_kept_axes` primitive: every per-tuple
     /// peak / intermediate region keeps only its `Keep`-axis
     /// dimensions, every per-point delta scales by the Pin-axis
     /// support-scalar product, and tuples whose Pin support drops to
@@ -212,18 +212,18 @@ pub struct InstancedOutput {
 
 /// Instances `face` at `input.coords`. Returns the new font bytes.
 ///
-/// Closure walking is *not* performed — instancing keeps every glyph in
+/// Closure walking is *not* performed: instancing keeps every glyph in
 /// the source font; it's not a subset operation. Every gid `0..num_glyphs`
 /// rides through with its outline / metric baked.
 pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutput, SubsetError> {
     if face.record(tag::CFF1).is_some() && face.record(tag::GLYF).is_none() {
-        // Pure CFF1 source — there is no variable data to bake; just
+        // Pure CFF1 source: there is no variable data to bake; just
         // copy through. We still drop the variable-font directory
         // entries the caller asked us to drop.
         return cff1_passthrough(face, input);
     }
 
-    // Validate axis count up front. fvar is required for instancing —
+    // Validate axis count up front. fvar is required for instancing:
     // a static font has no axes and the API is meaningless.
     let fvar = face
         .fvar()
@@ -292,7 +292,7 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
 
     // hhea: start from MVAR-baked bytes (when MVAR carries vlgp etc.,
     // those ride through MVAR; for hhea-relevant tags the bake patches
-    // OS/2 not hhea — hhea gets the metrics-count patch unconditionally
+    // OS/2 not hhea: hhea gets the metrics-count patch unconditionally
     // via util::write_hhea_metrics_count below).
     let mut hhea_out = match mvar_bake.hhea.clone() {
         Some(bytes) => bytes,
@@ -303,7 +303,7 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     };
     util::write_hhea_metrics_count(&mut hhea_out, hmtx_out.number_of_h_metrics)?;
 
-    // maxp: pass through verbatim (glyph count is unchanged — instancing
+    // maxp: pass through verbatim (glyph count is unchanged: instancing
     // keeps every gid).
     let maxp_out = face
         .table_bytes(tag::MAXP)
@@ -348,7 +348,7 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     // (VariationIndex offsets on PairPos / SinglePos value records),
     // fold every resolvable variation into the static ValueRecord
     // field at `coords` and zero the offset slot. Runs *before* the
-    // GDEF.IVS prune below — the prune severs the only path back to
+    // GDEF.IVS prune below. The prune severs the only path back to
     // the IVS bytes, so any remaining VariationIndex would be orphan.
     let gpos_baked = if input.drop_var_tables {
         bake_gpos_var(face, &coords)?
@@ -516,7 +516,7 @@ fn cff2_bake(
 ///
 /// This path runs when `input.axis_pins` carries at least one
 /// `AxisPin::Keep` and the source has neither `gvar` nor `CFF2` (those
-/// tuple-projection paths are tracked as a follow-up to PR #183 — the
+/// tuple-projection paths are tracked as a follow-up to PR #183: the
 /// public surface there errors with `Unsupported` for now).
 ///
 /// The bake:
@@ -533,7 +533,7 @@ fn cff2_bake(
 ///   trimmed deltas so a shaper at `(Keep coords)` produces exactly
 ///   what the source produced at `(Keep coords, Pin coords)`.
 ///
-/// `drop_var_tables = false` is honoured — the trimmed variation
+/// `drop_var_tables = false` is honored. The trimmed variation
 /// tables ride out either way; the field controls whether tables like
 /// `MVAR` get folded down into static metric fields. For the partial
 /// path we always keep the (trimmed) variation tables: they still
@@ -592,7 +592,7 @@ fn partial_instance(
         if let Some(new_gdef) = bake_gdef_ivs_partial(gdef_bytes, &post_avar_coords, pins) {
             tables.push((tag::GDEF, new_gdef));
         } else {
-            // No IVS in GDEF — pass through.
+            // No IVS in GDEF: pass through.
             tables.push((tag::GDEF, gdef_bytes.to_vec()));
         }
     }
@@ -637,7 +637,7 @@ fn partial_instance(
 
 /// CFF1 (non-variable) instance pass: nothing to bake; rebuild the SFNT
 /// directory and optionally drop variable-font tables. CFF1 sources
-/// don't carry gvar / HVAR in practice but we honour the same
+/// don't carry gvar / HVAR in practice but we honor the same
 /// `drop_var_tables` switch for consistency.
 fn cff1_passthrough(
     face: &Face<'_>,
@@ -712,7 +712,7 @@ fn bake_glyf_loca(
                 // Composite: pass through verbatim. Component gids do
                 // not change (instancing keeps every glyph) so no
                 // rewrite is needed. Composite-level gvar deltas are
-                // conservatively dropped on this pass — the briefing
+                // conservatively dropped on this pass. The briefing
                 // calls them out as a deferral.
                 body.to_vec()
             }
@@ -789,7 +789,7 @@ fn bake_simple_glyph(
         .read_i16()
         .map_err(|_| SubsetError::Unsupported("instance: simple header"))?;
     debug_assert!(nc >= 0);
-    // Skip the source bbox — we recompute it below.
+    // Skip the source bbox. We recompute it below.
     r.skip(8)
         .map_err(|_| SubsetError::Unsupported("instance: simple bbox"))?;
 
@@ -808,9 +808,9 @@ fn bake_simple_glyph(
         .unwrap_or(0) as usize;
 
     // Instructions: read past them. We do not preserve hints in the
-    // baked output — they reference the source's `cvt` / `prep` /
+    // baked output. They reference the source's `cvt` / `prep` /
     // `fpgm`, which we forward verbatim, but the variable-font deltas
-    // mean the hinted grid no longer matches the rasterised outline.
+    // mean the hinted grid no longer matches the rasterized outline.
     // Stripping is the safest default and matches what fonttools'
     // instancer does in `--no-recalc-hints` mode.
     let instr_len =
@@ -896,7 +896,7 @@ fn bake_simple_glyph(
         ys.push(y_cur);
     }
 
-    // Apply deltas. gvar's PointDelta vector is sparse — points
+    // Apply deltas. gvar's PointDelta vector is sparse: points
     // without an entry pick up zero deltas. Phantom-point deltas (point
     // index >= total_points) influence advances via HVAR rather than
     // contour points, so we ignore them here.
@@ -1064,7 +1064,7 @@ fn encode_simple_coords(xs: &[i32], ys: &[i32], src_flags: &[u8], out: &mut Vec<
             out.push(v as u8);
             xpi += 1;
         } else if f & FLAG_X_SAME_OR_POS != 0 {
-            // No bytes — same as previous.
+            // No bytes: same as previous.
         } else {
             let v = x_payload[xpi];
             out.extend_from_slice(&v.to_be_bytes());
@@ -1192,7 +1192,7 @@ fn bake_vmtx(face: &Face<'_>, coords: &[f32], num_glyphs: u16) -> Result<VmtxBak
             number_of_long_ver_metrics: 0,
         });
     };
-    // vhea must be present whenever vmtx is — the parser uses
+    // vhea must be present whenever vmtx is. The parser uses
     // `numberOfLongVerMetrics` to slice the table. Confirm presence
     // here so a malformed source (vmtx without vhea) errors cleanly
     // before we try to re-emit. The actual long count is recomputed
@@ -1283,8 +1283,8 @@ struct MvarBake {
 
 /// Walks the source's `MVAR` records, applies each delta to its target
 /// field in OS/2 / hhea / vhea / post, and returns the patched table
-/// bytes. Tables that don't exist in the source — or whose fields no
-/// MVAR record references — return `None` (caller passes through the
+/// bytes. Tables that don't exist in the source, or whose fields no
+/// MVAR record references, return `None` (caller passes through the
 /// source bytes).
 fn bake_mvar_metrics(face: &Face<'_>, coords: &[f32]) -> Result<MvarBake, SubsetError> {
     let mvar = face.mvar().map_err(SubsetError::from)?;
@@ -1344,7 +1344,7 @@ fn apply_mvar_records(
     //   descent at offset 6
     //   lineGap at offset 8
     //
-    // vhea (OpenType / AAT): same layout as hhea — ascent/descent/lineGap
+    // vhea (OpenType / AAT): same layout as hhea, ascent/descent/lineGap
     // are at offsets 4/6/8.
 
     // Per OpenType MVAR spec each tag appears at most once in a
@@ -1389,7 +1389,7 @@ fn apply_mvar_records(
             t if t == mvar_tag::VERT_LINE_GAP => patch_i16(&mut vhea, 8, delta),
             t if t == mvar_tag::UNDERLINE_SIZE => patch_i16(&mut post, 10, delta),
             t if t == mvar_tag::UNDERLINE_OFFSET => patch_i16(&mut post, 8, delta),
-            _ => {} // unrecognised tag — silently ignore
+            _ => {} // unrecognized tag: silently ignore
         }
     }
 
@@ -1436,8 +1436,8 @@ fn patch_u16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
 //      `coords[i]` (the OpenType `supportScalar`-style ramp the
 //      shaper already uses to evaluate variation tables).
 //   2. Multiply the per-Pin-axis scalars together. If the product is
-//      zero — meaning the pin coord falls outside the tuple's region
-//      on at least one Pin-axis — the tuple contributes nothing at
+//      zero (meaning the pin coord falls outside the tuple's region
+//      on at least one Pin-axis), the tuple contributes nothing at
 //      this pin and gets dropped.
 //   3. Otherwise the survivor tuple keeps only the Keep-axis dimensions
 //      of its region triples; its delta payload is multiplied by the
@@ -1455,7 +1455,7 @@ fn patch_u16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
 
 /// Computes the support-scalar contribution of a single axis dimension
 /// at `coord`. Mirrors the OpenType `supportScalar` formula used by
-/// the gvar / IVS evaluators in `sigilbuzz::tables::gvar` —
+/// the gvar / IVS evaluators in `sigilbuzz::tables::gvar`,
 /// re-implemented here because the subset crate cannot import
 /// crate-private helpers from the parent crate, and the formula is
 /// trivially small.
@@ -1465,7 +1465,7 @@ fn patch_u16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
 /// when `coord` falls outside `[start, end]`.
 #[must_use]
 pub(crate) fn axis_support_scalar(start: f32, peak: f32, end: f32, coord: f32) -> f32 {
-    // Hardening (#185): any non-finite input returns 0 — the axis is
+    // Hardening (#185): any non-finite input returns 0. The axis is
     // treated as outside this region. This matches HarfBuzz's
     // hb_array_t::evaluate clamping behavior and prevents NaN/Inf from
     // propagating into the per-tuple scalar product downstream.
@@ -1523,11 +1523,11 @@ pub(crate) struct ProjectedTuple {
 /// for `Keep` axes are ignored).
 ///
 /// Returns `None` when the tuple contributes nothing at the pin coords
-/// — the survivor would have a zero pin-scalar and the caller should
+/// meaning the survivor would have a zero pin-scalar and the caller should
 /// drop the tuple entirely. Returns `Some(ProjectedTuple)` otherwise.
 ///
 /// Lengths must agree: `region.len() == pins.len() == coords.len()`.
-/// Mismatched inputs return `None` (defensive — callers should validate
+/// Mismatched inputs return `None` (defensive: callers should validate
 /// upstream, but a length skew should not produce silently-wrong deltas).
 #[must_use]
 pub(crate) fn project_region_onto_kept_axes(
@@ -1589,7 +1589,7 @@ pub(crate) fn project_region_onto_kept_axes(
 /// instance vector are removed (they would shadow the implicit default).
 ///
 /// Returns `None` when every axis pins (the all-pin case is the
-/// existing full-instancing behaviour and the caller drops fvar
+/// existing full-instancing behavior and the caller drops fvar
 /// outright when `drop_var_tables` is true).
 #[allow(dead_code)] // wired in by the partial-instancing integration commit
 fn bake_fvar_partial(fvar_bytes: &[u8], pins: &[AxisPin]) -> Option<Vec<u8>> {
@@ -1640,9 +1640,9 @@ fn bake_fvar_partial(fvar_bytes: &[u8], pins: &[AxisPin]) -> Option<Vec<u8>> {
     }
 
     // Decide the new instanceSize. Fixed-format: 20 (axis records) but
-    // for instances it's 4 (subfamilyNameID + flags) + 4 × axisCount
+    // for instances it's 4 (subfamilyNameID + flags) + 4 * axisCount
     // + optional 2 (postScriptNameID). We detect "with PS name" by
-    // checking source instance_size against 4 + 4 × axis_count.
+    // checking source instance_size against 4 + 4 * axis_count.
     let base_inst = 4usize + 4 * axis_count;
     let with_ps = instance_size == base_inst + 2;
     let new_instance_size = if with_ps {
@@ -1749,7 +1749,7 @@ fn bake_avar_partial(avar_bytes: &[u8], pins: &[AxisPin]) -> Option<Vec<u8>> {
         }
         let count = u16::from_be_bytes([avar_bytes[cursor], avar_bytes[cursor + 1]]) as usize;
         let start = cursor;
-        // Each AxisValueMap is 4 bytes (2 × F2DOT14).
+        // Each AxisValueMap is 4 bytes (2 x F2DOT14).
         let map_size = 2 + count * 4;
         if avar_bytes.len() < start + map_size {
             return None;
@@ -1782,7 +1782,7 @@ fn bake_avar_partial(avar_bytes: &[u8], pins: &[AxisPin]) -> Option<Vec<u8>> {
 /// Maps `(old_outer, old_inner)` source IVS rows to their new
 /// `(new_outer, new_inner)` indexes after a partial-instance rewrite.
 /// `None` means the source row exists but its surrounding subtable
-/// collapsed to nothing (every region dropped) — callers must treat
+/// collapsed to nothing (every region dropped). Callers must treat
 /// the row as "no variation" and leave the consumer field at its
 /// static value.
 #[derive(Debug, Clone, Default)]
@@ -1885,7 +1885,7 @@ pub(crate) fn bake_ivs_partial(
         return None;
     }
 
-    // Project each region. None → dropped; Some((new_index, scalar)).
+    // Project each region. None -> dropped; Some((new_index, scalar)).
     let mut region_remap: Vec<Option<(u16, f32)>> = Vec::with_capacity(region_count);
     let mut new_regions: Vec<Vec<(f32, f32, f32)>> = Vec::new();
     for ri in 0..region_count {
@@ -1911,7 +1911,7 @@ pub(crate) fn bake_ivs_partial(
     // Walk every subtable, project its regionIndexes through
     // region_remap, scale every delta by pin_scalar, and re-emit. We
     // emit each surviving subtable with a simple all-i16 or all-i32
-    // delta encoding — pick the smallest that fits every value.
+    // delta encoding: pick the smallest that fits every value.
     let mut new_outer_for_old: Vec<Option<u16>> = Vec::with_capacity(subtable_count);
     // Pre-encoded subtable bodies (everything past the subtable's own
     // header bytes are written below; we serialize them in order so
@@ -1921,7 +1921,7 @@ pub(crate) fn bake_ivs_partial(
     for sub_off in &subtable_offsets {
         let sub_off = *sub_off;
         // Subtable header: itemCount, wordDeltaCount, regionIndexCount,
-        // then regionIndexCount × u16 indexes, then itemCount delta
+        // then regionIndexCount x u16 indexes, then itemCount delta
         // rows.
         if ivs_bytes.len() < sub_off + 6 {
             return None;
@@ -2030,7 +2030,7 @@ pub(crate) fn bake_ivs_partial(
 
         // Decide encoding: pick all-i16 if every value fits, else
         // all-i32 (set LONG_WORDS bit, wordDeltaCount =
-        // surviving_slot_count). Simple and conservative — the IVS
+        // surviving_slot_count). Simple and conservative: the IVS
         // dedup pass in 0.13 doesn't run again on the partial output.
         let all_fit_i16 = item_rows
             .iter()
@@ -2072,7 +2072,7 @@ pub(crate) fn bake_ivs_partial(
     }
 
     // Note: when every subtable collapses we still emit a valid (but
-    // empty) IVS — the caller decides whether to drop the host table
+    // empty) IVS. The caller decides whether to drop the host table
     // entirely, but the RegionRemap stays meaningful (every lookup
     // returns None). A zero-region zero-subtable IVS is a 16-byte
     // skeleton: 8-byte header + 4-byte region list + 0 subtable
@@ -2133,13 +2133,13 @@ pub(crate) fn bake_ivs_partial(
 
 /// Re-emits a `DeltaSetIndexMap` with every entry's outer index
 /// rewritten through `remap`. Entries whose outer subtable collapsed
-/// land at `(new_subtable_count, 0)` — guaranteed out-of-range, so
+/// land at `(new_subtable_count, 0)`, guaranteed out-of-range, so
 /// IVS evaluation returns zero (the desired "no variation for this
 /// row" semantics).
 ///
 /// The output keeps the source's format (0 / 1) and entryFormat
 /// (bytes-per-entry, inner-bit-count) unchanged. The packed
-/// `(outer, inner)` may overflow the source's bit allocation — when
+/// `(outer, inner)` may overflow the source's bit allocation. When
 /// that happens we widen entryFormat conservatively.
 ///
 /// `start` is the offset into `data` where the map begins.
@@ -2186,7 +2186,7 @@ fn rewrite_delta_set_index_map(
     let inner_mask: u32 = (1u32 << inner_bits) - 1;
 
     if map_count == 0 {
-        // Nothing to rewrite — return a clone of the unchanged map
+        // Nothing to rewrite: return a clone of the unchanged map
         // header so the caller's offset surgery still works.
         return Some(data[start..cursor].to_vec());
     }
@@ -2264,7 +2264,7 @@ fn rewrite_delta_set_index_map(
 ///
 /// Returns `None` when the source HVAR is malformed or the IVS
 /// rewrite fails. The caller should fall through to dropping the
-/// table when this returns `None` — that's equivalent to "no advance
+/// table when this returns `None`. That's equivalent to "no advance
 /// variation," safe but slightly degraded.
 #[allow(dead_code)] // wired in by the partial-instancing integration commit
 fn bake_hvar_partial(hvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Option<Vec<u8>> {
@@ -2370,7 +2370,7 @@ fn bake_hvar_partial(hvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Opt
 
 /// Re-emits VVAR with its embedded IVS partial-projected and every
 /// DeltaSetIndexMap rewritten. VVAR's header is 24 bytes (4 ver + 5
-/// × o32: ivs / advance-height / tsb / bsb / vorg). The vorg map
+/// x o32: ivs / advance-height / tsb / bsb / vorg). The vorg map
 /// shares the IVS rows with the others; we rewrite it through the
 /// same remap.
 #[allow(dead_code)] // wired in by the partial-instancing integration commit
@@ -2438,7 +2438,7 @@ fn bake_vvar_partial(vvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Opt
 // ---------------------------------------------------------------------------
 
 /// Re-emits MVAR with its embedded IVS partial-projected. MVAR
-/// references rows by direct (outer, inner) in each value record —
+/// references rows by direct (outer, inner) in each value record,
 /// no DeltaSetIndexMap. Rows pointing at collapsed subtables get
 /// rewritten to `(new_subtable_count, 0)` (out-of-range; resolves to
 /// zero delta).
@@ -2463,7 +2463,7 @@ fn bake_mvar_partial(mvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Opt
         return None;
     }
     if store_off == 0 {
-        // No store — pass through unchanged.
+        // No store: pass through unchanged.
         return Some(mvar_bytes.to_vec());
     }
     if mvar_bytes.len() < store_off {
@@ -2513,7 +2513,7 @@ fn bake_mvar_partial(mvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Opt
 
 /// Re-emits GDEF with its embedded IVS partial-projected. The other
 /// GDEF tables (glyphClassDef, attachList, ligCaretList,
-/// markAttachClassDef, markGlyphSetsDef) ride through verbatim — they
+/// markAttachClassDef, markGlyphSetsDef) ride through verbatim: they
 /// don't carry variation indices.
 ///
 /// Unlike the prune-IVS path used for full instancing, this preserves
@@ -2597,7 +2597,7 @@ fn bake_gpos_var(face: &Face<'_>, coords: &[f32]) -> Result<Option<Vec<u8>>, Sub
 /// zeroed (and the store payload truncated from the table) when the
 /// source GDEF carries one. When the source has no GDEF or the IVS
 /// offset is already zero, returns `None` (caller passes through the
-/// source bytes — or omits GDEF entirely if absent).
+/// source bytes, or omits GDEF entirely if absent).
 ///
 /// GDEF v1.3 layout (28 bytes header, every offset is from start of
 /// table):
@@ -2616,7 +2616,7 @@ fn bake_gpos_var(face: &Face<'_>, coords: &[f32]) -> Result<Option<Vec<u8>>, Sub
 /// When v == 1.3 and itemVarStoreOffset != 0 we zero the offset in
 /// place and truncate the table at the IVS body's start (when the
 /// store sits at the tail of the table). When the store is in the
-/// middle of the table — rare in real fonts — we just zero the
+/// middle of the table (rare in real fonts), we just zero the
 /// offset; the orphan bytes ride through but are unreachable by any
 /// consumer.
 fn prune_gdef_ivs(face: &Face<'_>) -> Result<Option<Vec<u8>>, SubsetError> {
@@ -2645,7 +2645,7 @@ fn prune_gdef_ivs(face: &Face<'_>) -> Result<Option<Vec<u8>>, SubsetError> {
     // Truncate the IVS payload when it sits at the tail of the table
     // (the layout fontTools emits and that every real GDEF in the
     // wild uses). When the store is in the middle, leave the orphan
-    // bytes — they're unreachable now that the offset is zero.
+    // bytes. They're unreachable now that the offset is zero.
     let ivs_off_us = ivs_off as usize;
     if ivs_off_us < out.len() {
         // If IVS is the last referenced offset, truncate. Every other
@@ -2830,7 +2830,7 @@ mod tests {
 
     #[test]
     fn source_sans_round_trip_at_default_instance() {
-        // Source Sans 3 VF Latin Subset is a CFF2-flavoured VF. After
+        // Source Sans 3 VF Latin Subset is a CFF2-flavored VF. After
         // the 0.12.0 CFF2 blend bake landed, instancing produces a
         // static CFF2 face whose every glyph re-parses through the
         // standard outline pipeline.
@@ -2844,8 +2844,8 @@ mod tests {
         let out = instance(&face, &input).expect("CFF2 default-instance bake");
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
         // GDEF.IVS pruned: at default coords no IVS reference would
-        // resolve to a non-zero delta anyway, so the output's GDEF —
-        // when present — must have a zero IVS offset.
+        // resolve to a non-zero delta anyway, so the output's GDEF,
+        // when present, must have a zero IVS offset.
         if let Some(_gdef) = face.gdef().unwrap() {
             // Pruned baked GDEF: the IVS getter on the baked side is
             // None (offset zeroed by the prune step).
@@ -3041,7 +3041,7 @@ mod tests {
 
     #[test]
     fn rubik_gdef_ivs_pruned_when_present_at_v13() {
-        // Rubik's GDEF doesn't carry an IVS — but the prune
+        // Rubik's GDEF doesn't carry an IVS, but the prune
         // path should be a no-op rather than corrupt bytes.
         let face = rubik_face();
         let axis_count = face.fvar().unwrap().unwrap().axes().len();
@@ -3052,7 +3052,7 @@ mod tests {
         };
         let out = instance(&face, &input).unwrap();
         let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
-        // If the source had a GDEF, the baked face should too — and
+        // If the source had a GDEF, the baked face should too, and
         // it should still parse cleanly.
         if face.gdef().unwrap().is_some() {
             assert!(baked.gdef().unwrap().is_some());
@@ -3064,7 +3064,7 @@ mod tests {
     /// the post-bake assertions to confirm no orphan VariationIndex
     /// offsets survived the fold. Covers SinglePos / PairPos formats
     /// 1 and 2, CursivePos, Mark{Base,Lig,Mark}Pos, and Type 9
-    /// Extension wrappers around any of the above — the same set we
+    /// Extension wrappers around any of the above, the same set we
     /// explicitly bake.
     fn any_value_record_device_offset_nonzero(face: &Face<'_>) -> bool {
         let Ok(Some(gpos)) = face.gpos() else {
@@ -3223,7 +3223,7 @@ mod tests {
                 }
                 false
             }
-            // MarkBasePos / MarkMarkPos — same shape (mark + base/mark2 array).
+            // MarkBasePos / MarkMarkPos: same shape (mark + base/mark2 array).
             4 | 6 => mark_pair_has_nonzero_device_offset(sub),
             // MarkLigPos.
             5 => mark_lig_has_nonzero_device_offset(sub),
@@ -3423,7 +3423,7 @@ mod tests {
             u16::from_be_bytes([gpos_bytes[lookup_base + 6], gpos_bytes[lookup_base + 7]]) as usize;
         let sub_abs = lookup_base + sub_off;
         let sub = &gpos_bytes[sub_abs..];
-        // PairPos fmt 1 — first PairSet at the first set offset.
+        // PairPos fmt 1: first PairSet at the first set offset.
         let pair_set_rel = u16::from_be_bytes([sub[10], sub[11]]) as usize;
         // PairValueRecord 0 starts at +2 inside the PairSet, AV pair
         // bytes are: u16 secondGlyph (V), i16 x_advance, u16 device.
@@ -3434,7 +3434,7 @@ mod tests {
 
     #[test]
     fn var_kern_fixture_bake_at_default_coords_leaves_static_field_at_source() {
-        // At wght=400 the variation region peaks at zero scalar →
+        // At wght=400 the variation region peaks at zero scalar ->
         // delta is zero. The static x_advance must stay at the
         // source's 0 and the device offset must still be zeroed (the
         // bake unconditionally severs the offset to keep GDEF.IVS
@@ -3500,8 +3500,8 @@ mod tests {
 
     #[test]
     fn rubik_vmtx_passthrough_when_source_has_none() {
-        // Rubik VF is horizontal-only — no vmtx, no VVAR. The bake
-        // must not synthesise either.
+        // Rubik VF is horizontal-only: no vmtx, no VVAR. The bake
+        // must not synthesize either.
         let face = rubik_face();
         assert!(face.vmtx().unwrap().is_none(), "rubik has no vmtx");
         let axis_count = face.fvar().unwrap().unwrap().axes().len();
@@ -3522,7 +3522,7 @@ mod vvar_synthetic_tests {
     //! Synthetic-VF tests that exercise the VVAR-aware vmtx bake.
     //!
     //! No real fixture in sigilbuzz's test corpus carries `vmtx` +
-    //! `VVAR` together — most variable fonts in the wild are
+    //! `VVAR` together. Most variable fonts in the wild are
     //! horizontal-only. We unit-test the helpers directly with
     //! hand-built records rather than spinning up a synthetic SFNT
     //! around the bake. The integration shape (vmtx delta application
@@ -3551,7 +3551,7 @@ mod vvar_synthetic_tests {
     #[test]
     fn patch_i16_handles_short_buffer_gracefully() {
         let mut buf = Some(alloc::vec![0u8]);
-        // Out-of-range offset must not panic — short bufs survive.
+        // Out-of-range offset must not panic: short bufs survive.
         patch_i16(&mut buf, 10, 5);
         assert_eq!(buf.unwrap().len(), 1);
     }
@@ -3562,7 +3562,7 @@ mod vvar_synthetic_tests {
         // matches `bake_hmtx`: trailing identical advances collapse
         // into the tsb-only tail. The shared-advance run leaves 2
         // long entries (the loop bottoms at 1 then adds back 1 to
-        // anchor the shared advance — same as hmtx).
+        // anchor the shared advance, same as hmtx).
         let advances = alloc::vec![1000u16; 5];
         let tsbs = alloc::vec![10i16, 20, 30, 40, 50];
         let (bytes, n_long) = emit_vmtx_bytes(&advances, &tsbs);
@@ -3606,7 +3606,7 @@ mod vvar_synthetic_tests {
         const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
         let face = Face::parse_bytes(OPEN_SANS, 0).unwrap();
         let out = prune_gdef_ivs(&face).unwrap();
-        // OpenSans is GDEF v1.0 — no prune.
+        // OpenSans is GDEF v1.0, no prune.
         assert!(out.is_none());
     }
 
@@ -3645,7 +3645,7 @@ mod vvar_synthetic_tests {
         let region_off = ivs.len() as u32;
         ivs.extend_from_slice(&1u16.to_be_bytes()); // axisCount
         ivs.extend_from_slice(&1u16.to_be_bytes()); // regionCount
-                                                    // Region 0 axis 0 — start=0, peak=1.0, end=1.0 in F2DOT14.
+                                                    // Region 0 axis 0: start=0, peak=1.0, end=1.0 in F2DOT14.
         ivs.extend_from_slice(&0i16.to_be_bytes());
         ivs.extend_from_slice(&0x4000i16.to_be_bytes());
         ivs.extend_from_slice(&0x4000i16.to_be_bytes());
@@ -3688,7 +3688,7 @@ mod partial_instancing_tests {
     //! Unit tests for the partial-instancing public API + tuple
     //! projection math primitives. The variation-table emitters
     //! (HVAR / VVAR / MVAR / gvar / GDEF.IVS) all flow through these
-    //! primitives — the gvar tuple-projection follow-up wired the
+    //! primitives. The gvar tuple-projection follow-up wired the
     //! `axis_support_scalar` + `project_region_onto_kept_axes` pair
     //! into [`crate::gvar_partial::bake_gvar_partial`] so the
     //! reduced-axis VF's gvar surface stays consistent with the
@@ -3710,7 +3710,7 @@ mod partial_instancing_tests {
 
     #[test]
     fn axis_pin_default_is_empty_pin_every_axis() {
-        // The default `InstanceInput::axis_pins` is an empty Vec —
+        // The default `InstanceInput::axis_pins` is an empty Vec,
         // semantically "pin every axis" so existing callers that
         // never set the field keep getting full instancing. Anything
         // else would be a silent breaking change.
@@ -3731,7 +3731,7 @@ mod partial_instancing_tests {
             drop_var_tables: true,
             axis_pins: Vec::new(),
         };
-        let out = instance(&face, &input).expect("empty axis_pins → full bake");
+        let out = instance(&face, &input).expect("empty axis_pins -> full bake");
         let baked = Face::parse_bytes(&out.bytes, 0).expect("parse");
         assert!(baked.fvar().unwrap().is_none(), "fvar dropped");
     }
@@ -3768,7 +3768,7 @@ mod partial_instancing_tests {
         let input = InstanceInput {
             coords: alloc::vec![0.0_f32; axis_count],
             drop_var_tables: true,
-            // Length deliberately wrong.
+            // Length wrong on purpose.
             axis_pins: alloc::vec![AxisPin::Pin; axis_count + 1],
         };
         assert!(matches!(
@@ -3783,7 +3783,7 @@ mod partial_instancing_tests {
         // the partial-instance pass produces a reduced-axis VF (gvar
         // axisCount equals the Keep-axis count). Rubik is single-
         // axis (wght), so pinning the only axis is a degenerate
-        // partial — but the all-Keep case is the more meaningful
+        // partial, but the all-Keep case is the more meaningful
         // round-trip cover.
         let face = rubik_face();
         let axis_count = face.fvar().unwrap().unwrap().axes().len();
@@ -3801,7 +3801,7 @@ mod partial_instancing_tests {
     }
 
     // --------------------------------------------------------------
-    // axis_support_scalar — single-axis ramp matches OpenType spec.
+    // axis_support_scalar: single-axis ramp matches OpenType spec.
     // --------------------------------------------------------------
 
     #[test]
@@ -3814,21 +3814,21 @@ mod partial_instancing_tests {
     #[test]
     fn axis_support_scalar_zero_peak_means_axis_ignored() {
         // Per spec a peak of zero means the axis does not participate
-        // in the tuple — the scalar is 1 regardless of coord.
+        // in the tuple. The scalar is 1 regardless of coord.
         assert!((axis_support_scalar(0.0, 0.0, 0.0, 0.5) - 1.0).abs() < 1e-6);
         assert!((axis_support_scalar(-1.0, 0.0, 1.0, 0.5) - 1.0).abs() < 1e-6);
     }
 
     #[test]
     fn axis_support_scalar_outside_region_returns_zero() {
-        // coord beyond [start, end] → zero contribution.
+        // coord beyond [start, end] -> zero contribution.
         assert!(axis_support_scalar(0.0, 1.0, 1.0, -0.5).abs() < 1e-6);
         assert!(axis_support_scalar(0.0, 1.0, 1.0, 1.1).abs() < 1e-6);
     }
 
     #[test]
     fn axis_support_scalar_linear_ramp_below_peak() {
-        // start=0, peak=1, end=1 — coord=0.5 is halfway up the ramp.
+        // start=0, peak=1, end=1: coord=0.5 is halfway up the ramp.
         assert!((axis_support_scalar(0.0, 1.0, 1.0, 0.5) - 0.5).abs() < 1e-6);
         // 0.25 quarter up.
         assert!((axis_support_scalar(0.0, 1.0, 1.0, 0.25) - 0.25).abs() < 1e-6);
@@ -3836,8 +3836,8 @@ mod partial_instancing_tests {
 
     #[test]
     fn axis_support_scalar_linear_ramp_above_peak() {
-        // start=-1, peak=0.5, end=1 — coord=0.75 ramps down from 1 at
-        // peak to 0 at end. Halfway → 0.5.
+        // start=-1, peak=0.5, end=1: coord=0.75 ramps down from 1 at
+        // peak to 0 at end. Halfway -> 0.5.
         // (peak == 0 would short-circuit to 1.0 per the spec's
         // "axis ignored" convention; we use a non-zero peak here.)
         assert!((axis_support_scalar(-1.0, 0.5, 1.0, 0.75) - 0.5).abs() < 1e-6);
@@ -3845,19 +3845,19 @@ mod partial_instancing_tests {
 
     #[test]
     fn axis_support_scalar_degenerate_peak_eq_start_returns_zero() {
-        // peak == start, coord between them → division by zero
+        // peak == start, coord between them -> division by zero
         // guarded with a 0.0 fallback.
         assert!(axis_support_scalar(1.0, 1.0, 1.0, 0.5).abs() < 1e-6);
     }
 
     // --------------------------------------------------------------
-    // axis_support_scalar — non-finite inputs are clamped to 0.0
+    // axis_support_scalar: non-finite inputs are clamped to 0.0
     // (regression #185). Matches HarfBuzz hb_array_t::evaluate.
     // --------------------------------------------------------------
 
     #[test]
     fn axis_support_scalar_nan_coord_returns_zero() {
-        // NaN coord → axis is "outside the region": scalar 0.
+        // NaN coord -> axis is "outside the region": scalar 0.
         assert_eq!(axis_support_scalar(0.0, 1.0, 1.0, f32::NAN), 0.0);
     }
 
@@ -3870,7 +3870,7 @@ mod partial_instancing_tests {
 
     #[test]
     fn axis_support_scalar_nan_peak_returns_zero() {
-        // NaN peak — the region itself is corrupt; clamp to 0.
+        // NaN peak: the region itself is corrupt; clamp to 0.
         assert_eq!(axis_support_scalar(0.0, f32::NAN, 1.0, 0.5), 0.0);
     }
 
@@ -3886,7 +3886,7 @@ mod partial_instancing_tests {
     #[test]
     fn axis_support_scalar_degenerate_region_at_peak_returns_one() {
         // start == end == peak == coord: the spec's degenerate region
-        // collapses to a point and the coord lands on it → scalar 1.
+        // collapses to a point and the coord lands on it -> scalar 1.
         // (Without the (coord - peak).abs() < EPSILON short-circuit
         // this would divide by zero and produce NaN.)
         assert!((axis_support_scalar(0.5, 0.5, 0.5, 0.5) - 1.0).abs() < 1e-6);
@@ -3901,7 +3901,7 @@ mod partial_instancing_tests {
     }
 
     // --------------------------------------------------------------
-    // project_region_onto_kept_axes — full tuple projection.
+    // project_region_onto_kept_axes: full tuple projection.
     // --------------------------------------------------------------
 
     #[test]
@@ -3928,7 +3928,7 @@ mod partial_instancing_tests {
 
     #[test]
     fn project_pin_at_peak_passes_kept_axes_through_at_unit_scalar() {
-        // Pin axis at peak → scalar 1, kept axes ride through.
+        // Pin axis at peak -> scalar 1, kept axes ride through.
         let region = [(0.0_f32, 1.0, 1.0), (-1.0, -1.0, 0.0)];
         let pins = [AxisPin::Pin, AxisPin::Keep];
         let coords = [1.0, 0.0];
@@ -3945,7 +3945,7 @@ mod partial_instancing_tests {
         let pins = [AxisPin::Pin, AxisPin::Pin];
         let coords = [0.5, 0.5];
         let p = project_region_onto_kept_axes(&region, &pins, &coords).unwrap();
-        // Two ramps at 0.5 each → 0.25 product.
+        // Two ramps at 0.5 each -> 0.25 product.
         assert!((p.pin_scalar - 0.25).abs() < 1e-6);
         assert!(p.kept_axes.is_empty());
     }
@@ -3987,7 +3987,7 @@ mod partial_instancing_tests {
     #[test]
     fn project_two_pin_axes_multiplies_scalars() {
         // Both Pin axes contribute partial ramps; the survivor's
-        // pin_scalar is their product (0.5 × 0.25 = 0.125).
+        // pin_scalar is their product (0.5 * 0.25 = 0.125).
         let region = [(0.0_f32, 1.0, 1.0), (0.0, 1.0, 1.0)];
         let pins = [AxisPin::Pin, AxisPin::Pin];
         let coords = [0.5, 0.25];
@@ -4000,7 +4000,7 @@ mod partial_instancing_tests {
     }
 
     // --------------------------------------------------------------
-    // project_region_onto_kept_axes — non-finite Pin-axis inputs are
+    // project_region_onto_kept_axes: non-finite Pin-axis inputs are
     // clamped: the surviving tuple gets dropped rather than scaling
     // every delta by NaN/Inf (regression #186).
     // --------------------------------------------------------------
@@ -4032,7 +4032,7 @@ mod partial_instancing_tests {
     #[test]
     fn project_drops_tuple_when_pin_axis_region_is_nan() {
         // Corrupt region triple (NaN peak) on a Pin axis: drop the
-        // tuple — the math primitive returns 0.0 for non-finite
+        // tuple. The math primitive returns 0.0 for non-finite
         // inputs and project_region_onto_kept_axes treats that as
         // "axis outside the region".
         let region = [(0.0_f32, f32::NAN, 1.0), (0.0, 1.0, 1.0)];
@@ -4044,7 +4044,7 @@ mod partial_instancing_tests {
     #[test]
     fn project_ignores_nan_coord_on_keep_axis() {
         // Keep-axis coords are unused by the scalar pipeline; a NaN
-        // there must not poison the projection — the Pin axis still
+        // there must not poison the projection. The Pin axis still
         // produces a clean scalar and the tuple survives.
         let region = [(0.0_f32, 1.0, 1.0), (0.0, 1.0, 1.0)];
         let pins = [AxisPin::Pin, AxisPin::Keep];
@@ -4056,7 +4056,7 @@ mod partial_instancing_tests {
     }
 
     // --------------------------------------------------------------
-    // bake_fvar_partial — fvar trim.
+    // bake_fvar_partial: fvar trim.
     // --------------------------------------------------------------
 
     fn write_f16dot16(out: &mut Vec<u8>, v: f32) {
@@ -4121,14 +4121,14 @@ mod partial_instancing_tests {
 
     #[test]
     fn bake_fvar_partial_drops_pin_axis_records() {
-        // Pin wght, keep wdth — survivor fvar has only the wdth axis.
+        // Pin wght, keep wdth: survivor fvar has only the wdth axis.
         let bytes = build_fvar2(&[]);
         let trimmed = bake_fvar_partial(&bytes, &[AxisPin::Pin, AxisPin::Keep]).unwrap();
         // Header layout matches the spec: 16 bytes, axisCount = 1.
         assert_eq!(u16::from_be_bytes([trimmed[8], trimmed[9]]), 1);
         // First axis tag is now wdth.
         assert_eq!(&trimmed[16..20], b"wdth");
-        // Re-parse via the public Fvar parser — it must accept the
+        // Re-parse via the public Fvar parser. It must accept the
         // emitted bytes.
         let parsed = sigilbuzz::tables::Fvar::parse(&trimmed).unwrap();
         assert_eq!(parsed.axes().len(), 1);
@@ -4137,7 +4137,7 @@ mod partial_instancing_tests {
 
     #[test]
     fn bake_fvar_partial_keeps_kept_axis_in_source_order() {
-        // Pin wdth, keep wght → only wght survives.
+        // Pin wdth, keep wght -> only wght survives.
         let bytes = build_fvar2(&[]);
         let trimmed = bake_fvar_partial(&bytes, &[AxisPin::Keep, AxisPin::Pin]).unwrap();
         assert_eq!(u16::from_be_bytes([trimmed[8], trimmed[9]]), 1);
@@ -4146,11 +4146,11 @@ mod partial_instancing_tests {
 
     #[test]
     fn bake_fvar_partial_drops_instances_that_collapse_to_default() {
-        // Three instances: (Regular wght=400 wdth=100 — default-equal),
+        // Three instances: (Regular wght=400 wdth=100, default-equal),
         // (Bold wght=700 wdth=100), (Condensed wght=400 wdth=75).
         // With wght pinned, the (400, 100) instance collapses to "wdth
-        // default" → drop. The (700, 100) instance collapses to "wdth
-        // default" → drop. The (400, 75) survives at wdth=75.
+        // default" -> drop. The (700, 100) instance collapses to "wdth
+        // default" -> drop. The (400, 75) survives at wdth=75.
         let bytes = build_fvar2(&[
             (1, 0, [400.0, 100.0], None),
             (2, 0, [700.0, 100.0], None),
@@ -4169,12 +4169,12 @@ mod partial_instancing_tests {
         // = 4 + 4 * 1 + 2 = 10.
         assert_eq!(u16::from_be_bytes([trimmed[14], trimmed[15]]), 10);
         // Bold's (700, 100) collapses to wdth-default after Pin-wght
-        // — instance dropped. instanceCount = 0.
+        // (instance dropped). instanceCount = 0.
         assert_eq!(u16::from_be_bytes([trimmed[12], trimmed[13]]), 0);
     }
 
     // --------------------------------------------------------------
-    // bake_avar_partial — avar trim.
+    // bake_avar_partial: avar trim.
     // --------------------------------------------------------------
 
     fn build_avar2(map_a: &[(f32, f32)], map_b: &[(f32, f32)]) -> Vec<u8> {
@@ -4207,7 +4207,7 @@ mod partial_instancing_tests {
         let parsed = sigilbuzz::tables::Avar::parse(&trimmed).unwrap();
         assert_eq!(parsed.axis_count(), 1);
         // The surviving axis was axis 1 (the trivial 3-point identity).
-        // Confirm round-trip: 0.5 → 0.5.
+        // Confirm round-trip: 0.5 -> 0.5.
         assert!((parsed.remap(0, 0.5) - 0.5).abs() < 1e-3);
     }
 
@@ -4218,12 +4218,12 @@ mod partial_instancing_tests {
         let trimmed = bake_avar_partial(&bytes, &[AxisPin::Keep, AxisPin::Pin]).unwrap();
         let parsed = sigilbuzz::tables::Avar::parse(&trimmed).unwrap();
         assert_eq!(parsed.axis_count(), 1);
-        // The non-trivial map survived: 0.5 → 0.75.
+        // The non-trivial map survived: 0.5 -> 0.75.
         assert!((parsed.remap(0, 0.5) - 0.75).abs() < 1e-3);
     }
 
     // --------------------------------------------------------------
-    // bake_ivs_partial — IVS region trim + delta scale.
+    // bake_ivs_partial: IVS region trim + delta scale.
     // --------------------------------------------------------------
 
     /// Builds a 2-axis IVS with `regions`, `subtables[i] = (regionIndexes,
@@ -4300,7 +4300,7 @@ mod partial_instancing_tests {
     fn bake_ivs_partial_drops_region_when_pin_outside() {
         // Region peaks at wght=1, wdth=1. Pin wght=0 (outside [0, 1]
         // boundary trivially gives scalar=0 because peak=1, coord=0:
-        // ramp from start=0 to peak=1 → 0). Region drops, subtable
+        // ramp from start=0 to peak=1 -> 0). Region drops, subtable
         // collapses.
         let bytes = build_ivs2(
             &[[(0.5, 1.0, 1.0), (0.0, 1.0, 1.0)]],
@@ -4315,8 +4315,8 @@ mod partial_instancing_tests {
 
     #[test]
     fn bake_ivs_partial_scales_delta_by_pin_scalar() {
-        // Region with wght peak=1, wdth peak=1. Pin wght=0.5 → scalar
-        // 0.5. Source delta 100 → new delta 50.
+        // Region with wght peak=1, wdth peak=1. Pin wght=0.5 -> scalar
+        // 0.5. Source delta 100 -> new delta 50.
         let bytes = build_ivs2(
             &[[(0.0, 1.0, 1.0), (0.0, 1.0, 1.0)]],
             &[(alloc::vec![0], alloc::vec![alloc::vec![100]])],
@@ -4338,11 +4338,11 @@ mod partial_instancing_tests {
         // (Keep coord, Pin coord). Two regions, two-axis source, pin
         // wght=0.6, keep wdth. Item delta = (regionA: 100, regionB: 50).
         // Source A: peak=(1, 1), so scalar at (0.6, wdth) = 0.6 * wdth.
-        // Source B: peak=(0, 1) — wght peak=0 means "axis ignored" so
+        // Source B: peak=(0, 1), wght peak=0 means "axis ignored" so
         // scalar is just wdth.
         // Source eval at (0.6, wdth=1) = 0.6*1*100 + 1*1*50 = 110.
         // Trimmed eval at (wdth=1) = 1*60 + 1*50 = 110. (delta_A
-        // pre-scaled by 0.6 → 60; delta_B pre-scaled by 1 → 50.)
+        // pre-scaled by 0.6 -> 60; delta_B pre-scaled by 1 -> 50.)
         let bytes = build_ivs2(
             &[
                 [(0.0, 1.0, 1.0), (0.0, 1.0, 1.0)],
@@ -4375,8 +4375,8 @@ mod partial_instancing_tests {
         let pins = [AxisPin::Pin, AxisPin::Keep];
         let coords = [0.0, 0.0];
         let (_out, remap) = bake_ivs_partial(&bytes, &coords, &pins).unwrap();
-        // Subtable 0 referenced only region 0 — region 0 drops at
-        // coord=0 too (peak=1, coord=0 → scalar 0 on wght). So both
+        // Subtable 0 referenced only region 0. Region 0 drops at
+        // coord=0 too (peak=1, coord=0 -> scalar 0 on wght). So both
         // subtables collapse.
         assert_eq!(remap.lookup(0, 0), None);
         assert_eq!(remap.lookup(1, 0), None);
@@ -4394,7 +4394,7 @@ mod partial_instancing_tests {
             )],
         );
         let pins = [AxisPin::Pin, AxisPin::Keep];
-        let coords = [1.0, 0.0]; // pin at peak → scalar 1
+        let coords = [1.0, 0.0]; // pin at peak -> scalar 1
         let (out, remap) = bake_ivs_partial(&bytes, &coords, &pins).unwrap();
         let parsed = sigilbuzz::tables::variation_store::ItemVariationStore::parse(&out).unwrap();
         assert!((parsed.delta(0, 0, &[1.0]) - 100.0).abs() < 1e-3);
@@ -4405,7 +4405,7 @@ mod partial_instancing_tests {
 
     #[test]
     fn bake_ivs_partial_all_keep_is_identity_modulo_format() {
-        // With every axis Keep, the IVS must round-trip — same regions,
+        // With every axis Keep, the IVS must round-trip: same regions,
         // same deltas, just possibly re-encoded with a uniform format.
         let bytes = build_ivs2(
             &[
@@ -4462,7 +4462,7 @@ mod partial_instancing_tests {
     #[test]
     fn bake_hvar_partial_round_trips_at_keep_coord() {
         // 2-axis IVS, one region (peak at (1, 1)), one item delta = 100.
-        // Pin wght=0.5, keep wdth → delta scales to 50; HVAR's gid-0
+        // Pin wght=0.5, keep wdth -> delta scales to 50; HVAR's gid-0
         // delta at wdth=1 must be 50.
         let ivs = build_ivs2(
             &[[(0.0, 1.0, 1.0), (0.0, 1.0, 1.0)]],
@@ -4479,7 +4479,7 @@ mod partial_instancing_tests {
     #[test]
     fn bake_hvar_partial_zeroes_dropped_subtable_lookups() {
         // Region drops at the pin coord (peak at (1, 1), pin coord 0
-        // on wght → scalar 0). Subtable collapses; HVAR.advance_delta
+        // on wght -> scalar 0). Subtable collapses; HVAR.advance_delta
         // must return 0, not NaN, not panic.
         let ivs = build_ivs2(
             &[[(0.5, 1.0, 1.0), (0.0, 1.0, 1.0)]],
@@ -4490,12 +4490,12 @@ mod partial_instancing_tests {
             bake_hvar_partial(&hvar, &[0.0, 0.0], &[AxisPin::Pin, AxisPin::Keep]).expect("bake");
         let parsed = sigilbuzz::tables::Hvar::parse(&new_hvar).unwrap();
         // Subtable count is now zero; (outer=0, inner=0) is out of
-        // range → IVS evaluator returns 0.
+        // range -> IVS evaluator returns 0.
         let d = parsed.advance_delta(0, &[1.0]);
         assert!(d.abs() < 1e-3, "got {}", d);
     }
 
-    /// Builds an MVAR table with `records` × (tag, outer=0, inner=0)
+    /// Builds an MVAR table with `records` x (tag, outer=0, inner=0)
     /// pointing at the embedded IVS.
     fn build_mvar(records: &[[u8; 4]], ivs: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -4543,7 +4543,7 @@ mod partial_instancing_tests {
             bake_mvar_partial(&mvar, &[0.0, 0.0], &[AxisPin::Pin, AxisPin::Keep]).expect("bake");
         let parsed = sigilbuzz::tables::Mvar::parse(&new_mvar).unwrap();
         // Subtable collapsed; (outer=0, inner=0) is now out of range
-        // → 0 delta.
+        // -> 0 delta.
         let d = parsed.metric_delta(*b"hasc", &[1.0]).unwrap();
         assert!(d.abs() < 1e-3, "got {}", d);
     }
@@ -4589,8 +4589,8 @@ mod partial_instancing_tests {
 
     /// var_kern.ttf is a single-axis (wght) VF with GDEF.IVS carrying
     /// a one-region tuple. Pinning wght reduces to a static font (the
-    /// existing full-instance behaviour). Keeping wght is the
-    /// trivial-axis Keep case — the output keeps fvar + GDEF.IVS, both
+    /// existing full-instance behavior). Keeping wght is the
+    /// trivial-axis Keep case: the output keeps fvar + GDEF.IVS, both
     /// trimmed (axisCount = 1, regionCount = 1). At wght=1 the output
     /// IVS must produce the same delta as the source IVS at wght=1.
     #[test]
@@ -4607,7 +4607,7 @@ mod partial_instancing_tests {
         let new_fvar = baked.fvar().unwrap().expect("fvar survives");
         assert_eq!(new_fvar.axes().len(), 1);
         assert_eq!(new_fvar.axes()[0].tag, *b"wght");
-        // GDEF still has an IVS — the trimmed one.
+        // GDEF still has an IVS, the trimmed one.
         let baked_gdef = baked.gdef().unwrap().expect("GDEF survives");
         let store = baked_gdef
             .item_variation_store()
@@ -4640,7 +4640,7 @@ mod partial_instancing_tests {
         // path (which flattens to the static font). The gvar
         // projection has no `Keep` axes to preserve, so the bake
         // routes through `partial_instance` only when the input
-        // `axis_pins.contains(&Keep)` — for an all-Pin axis_pins it
+        // `axis_pins.contains(&Keep)`. For an all-Pin axis_pins it
         // routes through the existing full-instance path. This test
         // pins that contract: for all-Pin, partial == full.
         let face = rubik_face();
@@ -4691,7 +4691,7 @@ mod partial_instancing_tests {
     #[test]
     fn partial_instance_keep_on_cff2_source_emits_partial_var_font() {
         // Source Sans 3 is a single-axis CFF2 VF (wght). Keeping every
-        // axis Keep produces a partial-instanced VF byte-stream — the
+        // axis Keep produces a partial-instanced VF byte-stream: the
         // emit walks bake_cff2_partial which rewrites the VarStore +
         // blend operators with surviving regions only.
         let face = Face::parse_bytes(SOURCE_SANS, 0).unwrap();

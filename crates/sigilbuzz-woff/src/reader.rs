@@ -96,7 +96,7 @@ impl<'a> Reader<'a> {
         let mut accum: u32 = 0;
         for i in 0..5 {
             let byte = self.read_u8("UIntBase128")?;
-            // Reject `0x80` as the very first byte — that's a
+            // Reject `0x80` as the very first byte: that's a
             // canonical "leading zero" the spec calls out.
             if i == 0 && byte == 0x80 {
                 return Err(WoffError::Malformed {

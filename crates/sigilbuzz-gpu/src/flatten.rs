@@ -1,6 +1,6 @@
-//! Path flattening: cubic Bezier → list of quadratic Beziers.
+//! Path flattening: cubic Bezier -> list of quadratic Beziers.
 //!
-//! Slug rasterises quadratics natively. CFF charstrings produce
+//! Slug rasterizes quadratics natively. CFF charstrings produce
 //! cubics; we approximate every cubic with one or more quadratics
 //! whose maximum geometric error is bounded by `tolerance` (in design
 //! units).
@@ -9,7 +9,7 @@
 //!
 //! Given a cubic with control points `p0`, `p1`, `p2`, `p3` we form
 //! a candidate quadratic with control point
-//! `q1 = (3·p1 + 3·p2 - p0 - p3) / 4`. This is the classical
+//! `q1 = (3*p1 + 3*p2 - p0 - p3) / 4`. This is the classical
 //! "midpoint" approximation used in FreeType and Skia: the resulting
 //! quadratic shares the cubic's endpoints and tangents at `t=0` and
 //! `t=1` and matches the cubic exactly when its control polygon is
@@ -17,10 +17,10 @@
 //! cubic's control polygon, specifically
 //!
 //! ```text
-//!   err <= (sqrt(3) / 36) * | p0 - 3·p1 + 3·p2 - p3 |
+//!   err <= (sqrt(3) / 36) * | p0 - 3*p1 + 3*p2 - p3 |
 //! ```
 //!
-//! (See Sederberg, "Computer Aided Geometric Design", §5.4 — the
+//! (See Sederberg, "Computer Aided Geometric Design", section 5.4, the
 //! reference HarfBuzz uses internally.) When that bound exceeds the
 //! tolerance we subdivide the cubic at `t = 0.5` using De Casteljau
 //! and recurse on each half.
@@ -49,7 +49,7 @@ const MAX_DEPTH: u32 = 18;
 /// units.
 ///
 /// The endpoint of each emitted quadratic equals the start point of
-/// the next, so `out` is a *fan* sharing edges with its neighbours —
+/// the next, so `out` is a *fan* sharing edges with its neighbors:
 /// the caller threads them onto a path by reusing the previous
 /// quadratic's endpoint as `p0` for the next.
 pub(crate) fn cubic_to_quads(
@@ -85,7 +85,7 @@ pub(crate) fn cubic_to_quads(
         let m123 = mid(m12, m23);
         let m = mid(m012, m123);
 
-        // Push right then left so the left half pops first → emitted
+        // Push right then left so the left half pops first and emitted
         // segments stay in parameter order.
         stack.push((m, m123, m23, a3, depth + 1));
         stack.push((a0, m01, m012, m, depth + 1));

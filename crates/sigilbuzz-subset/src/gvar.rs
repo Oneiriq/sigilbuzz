@@ -3,12 +3,12 @@
 //! `gvar` carries per-glyph contour-point deltas as a sequence of
 //! `GlyphVariationData` blocks indexed by gid. Each block holds one
 //! or more *tuple variations*, each of which references a peak
-//! tuple — either embedded in the block or referenced by index into
+//! tuple, either embedded in the block or referenced by index into
 //! the file-wide *shared tuple list*.
 //!
 //! Subsetting copies one block per kept gid into the output, in the
 //! new-gid order, and rewrites the per-gid offset array. The shared
-//! tuple list is preserved verbatim — every kept block's references
+//! tuple list is preserved verbatim. Every kept block's references
 //! remain valid because the indexes never change. A future
 //! optimization could prune unreferenced shared tuples and rewrite
 //! the indexes; the size win is small for any realistic subset
@@ -120,7 +120,7 @@ pub(crate) fn subset_gvar(
         out.push(0);
     }
 
-    // Shared tuple list — copied verbatim from the source. The
+    // Shared tuple list: copied verbatim from the source. The
     // source's `sharedTuplesOffset` lands somewhere inside the
     // input bytes; we read `shared_tuples_len` bytes from there.
     if shared_tuples_len > 0 {
@@ -144,7 +144,7 @@ pub(crate) fn subset_gvar(
     Ok(Some(out))
 }
 
-/// Parsed gvar header — only the fields the subsetter needs.
+/// Parsed gvar header: only the fields the subsetter needs.
 #[derive(Debug, Clone, Copy)]
 struct GvarHeader {
     axis_count: u16,
@@ -204,7 +204,7 @@ fn parse_gvar_header(bytes: &[u8]) -> Result<GvarHeader, SubsetError> {
 /// Pulls the source `GlyphVariationData` body for `gid` out of the
 /// gvar table. Returns an empty `Vec` for gids past the source's
 /// glyph count, gids whose offset range is empty, or any malformed
-/// truncation — all of those are treated as "no variation data".
+/// truncation. All of those are treated as "no variation data".
 fn pull_glyph_body(bytes: &[u8], header: &GvarHeader, gid: u16) -> Vec<u8> {
     if gid >= header.glyph_count {
         return Vec::new();
@@ -268,7 +268,7 @@ mod tests {
     fn subset_gvar_preserves_per_glyph_deltas() {
         // Pull a kept gid's deltas from the source gvar and compare
         // against the same gid's deltas in the subset gvar at a
-        // non-default coord. They must match exactly — the subset is
+        // non-default coord. They must match exactly: the subset is
         // a verbatim copy of the per-glyph block.
         let face = rubik_face();
         let cmap = face.cmap().unwrap();

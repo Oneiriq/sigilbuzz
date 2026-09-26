@@ -2,18 +2,18 @@
 //!
 //! Starting from the caller's gid set, we expand transitively through:
 //!
-//! - **Composite components** in `glyf` — a kept composite glyph keeps
+//! - **Composite components** in `glyf`: a kept composite glyph keeps
 //!   every reference it needs to render correctly.
-//! - **Ligature components** in `GSUB` type 4 — if a kept gid is the
+//! - **Ligature components** in `GSUB` type 4: if a kept gid is the
 //!   *output* of a ligature substitution, every input component must
 //!   also survive so shaping the input string still triggers the
 //!   substitution. The forward direction is also pulled: if a kept
 //!   gid is the *first component* (i.e. listed in Coverage) **and**
 //!   every other component is also kept, the result gid is pulled in
-//!   too — otherwise `subset(face, &[f, i])` would silently lose the
+//!   too. Otherwise `subset(face, &[f, i])` would silently lose the
 //!   `fi` ligature gid and shaping the input pair against the subset
 //!   would fall back to the unligatured glyph stream.
-//! - **Mark-base anchor partners** in `GPOS` type 4 — when a kept mark
+//! - **Mark-base anchor partners** in `GPOS` type 4: when a kept mark
 //!   has an anchor pointing at a base, the base is pulled in, so the
 //!   mark can still attach. The opposite direction is *not* pulled in:
 //!   marks attach optionally, and a base subset that drops its marks
@@ -43,7 +43,7 @@ pub fn compute_closure(face: &Face<'_>, seed: &[u16]) -> Result<Vec<u16>, Subset
 
     // Bitset for membership: a Vec<bool> sized to num_glyphs is
     // O(numGlyphs) in memory but lookups are O(1) and writes are
-    // deterministic — no HashMap iteration order to worry about.
+    // deterministic: no HashMap iteration order to worry about.
     let mut keep = alloc::vec![false; num_glyphs as usize];
     keep[0] = true;
     for &g in seed {
@@ -61,7 +61,7 @@ pub fn compute_closure(face: &Face<'_>, seed: &[u16]) -> Result<Vec<u16>, Subset
         expand_gsub_ligatures(face, &mut keep)?;
         // Substitution-target pull-ins: GSUB type 1/2/3 outputs are
         // implicitly kept whenever their inputs are kept. The byte-
-        // level rewriter in `crate::gsub` honours the same rule when
+        // level rewriter in `crate::gsub` honors the same rule when
         // it filters surviving subtable pairs.
         crate::gsub::pull_in_substitution_targets(face, &mut keep);
         expand_gpos_mark_anchors(face, &mut keep)?;
@@ -125,7 +125,7 @@ fn expand_glyf_composites(face: &Face<'_>, keep: &mut [bool]) -> Result<(), Subs
 ///
 /// For each ligature whose output gid is currently kept, all of its
 /// input components are pulled in. We tolerate parse errors silently
-/// — a malformed GSUB subtable should not stop the closure walk; the
+/// (a malformed GSUB subtable should not stop the closure walk); the
 /// affected ligature simply does not contribute to the closure.
 fn expand_gsub_ligatures(face: &Face<'_>, keep: &mut [bool]) -> Result<(), SubsetError> {
     let Ok(Some(gsub)) = face.gsub() else {
@@ -152,7 +152,7 @@ fn expand_gsub_ligatures(face: &Face<'_>, keep: &mut [bool]) -> Result<(), Subse
 
 /// Walks GPOS lookup type 4 (Mark-to-Base) subtables, pulling in the
 /// base coverage when a kept gid is in the mark coverage. Symmetric
-/// types 5/6 (mark-to-liga, mark-to-mark) are left alone — the same
+/// types 5/6 (mark-to-liga, mark-to-mark) are left alone. The same
 /// "marks attach optionally" rule means a kept mark dragging in the
 /// host glyph is sufficient; types 5/6 follow once mark coverage
 /// pulls them in via the base coverage on type 4.
@@ -305,7 +305,7 @@ fn walk_ligature_set(set_bytes: &[u8], first_gid: Option<u16>, keep: &mut [bool]
             continue;
         }
 
-        // Backward direction (output kept → drag in every component).
+        // Backward direction (output kept -> drag in every component).
         // Necessary so shaping the input string in the subset still
         // fires the kept ligature.
         if (lig_glyph as usize) < keep.len() && keep[lig_glyph as usize] {
@@ -323,7 +323,7 @@ fn walk_ligature_set(set_bytes: &[u8], first_gid: Option<u16>, keep: &mut [bool]
             }
         }
 
-        // Forward direction (every component kept → drag in the result
+        // Forward direction (every component kept -> drag in the result
         // gid). Necessary so `subset(face, &[f, i])` carries the `fi`
         // ligature gid into the output; otherwise the rewritten GSUB
         // type 4 lookup would resolve a result gid that was dropped
@@ -375,7 +375,7 @@ fn walk_mark_attachment_subtable(sub: &[u8], keep: &mut [bool]) {
 
     // If any mark in the mark coverage is kept, pull in every base in
     // the base coverage. We don't try to resolve which specific anchor
-    // pairs are live — being conservative: a kept mark may attach to
+    // pairs are live, being conservative: a kept mark may attach to
     // any of the bases this lookup covers, so all of them survive.
     let any_mark_kept = mark_glyphs
         .iter()
@@ -490,7 +490,7 @@ fn composite_components(body: &[u8]) -> Result<Vec<u16>, SubsetError> {
         }
 
         if flags & COMP_MORE_COMPONENTS == 0 {
-            // Last component — instructions (if present) follow but
+            // Last component: instructions (if present) follow but
             // we don't care about them in the closure pass.
             let _ = flags & COMP_WE_HAVE_INSTRUCTIONS;
             break;
@@ -567,7 +567,7 @@ mod tests {
     // ===== walk_ligature_set forward / backward pull tests =====
 
     /// Builds a single-ligature set body. The set is the LigatureSet
-    /// table the GSUB type-4 walker consumes — coverage / outer subtable
+    /// table the GSUB type-4 walker consumes. Coverage / outer subtable
     /// framing is the caller's problem.
     fn build_lig_set(ligature_glyph: u16, tail: &[u16]) -> alloc::vec::Vec<u8> {
         let component_count = (tail.len() + 1) as u16;
@@ -612,8 +612,8 @@ mod tests {
     #[test]
     fn walk_ligature_set_does_not_pull_output_when_a_component_drops() {
         // Forward direction must hold off when *any* component is missing.
-        // Three-component ligature: 10 + 20 + 30 → 500. Keep 10 and 30
-        // but not 20 → must NOT pull 500.
+        // Three-component ligature: 10 + 20 + 30 -> 500. Keep 10 and 30
+        // but not 20 -> must NOT pull 500.
         let set = build_lig_set(500, &[20, 30]);
         let mut keep = alloc::vec![false; 1024];
         keep[10] = true;
@@ -628,7 +628,7 @@ mod tests {
     #[test]
     fn walk_ligature_set_does_not_pull_output_when_first_component_drops() {
         // Forward direction requires the first component (Coverage entry)
-        // to be kept too — a kept tail alone can't fire the lookup.
+        // to be kept too. A kept tail alone can't fire the lookup.
         let set = build_lig_set(100, &[20]);
         let mut keep = alloc::vec![false; 256];
         keep[20] = true; // first component (10) is NOT kept

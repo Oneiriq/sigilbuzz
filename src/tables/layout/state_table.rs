@@ -30,8 +30,8 @@
 //! ```
 //!
 //! sigilbuzz exposes just enough machinery for the three morx
-//! subtable types we implement (0 — rearrangement, 1 — contextual
-//! glyph substitution, 2 — ligature substitution) and kerx's
+//! subtable types we implement (0: rearrangement, 1: contextual
+//! glyph substitution, 2: ligature substitution) and kerx's
 //! state-based formats. The class-subtable parser here covers the
 //! three AAT lookup formats those tables actually use: format 0
 //! (simple array), format 2 (segment-array) and format 6
@@ -44,30 +44,30 @@
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
 
-/// Reserved state 0 — start of text / out of bounds. Every state
+/// Reserved state 0: start of text / out of bounds. Every state
 /// machine starts here.
 pub const START_OF_TEXT: u16 = 0;
 
-/// Reserved class 0 — end-of-text marker glyph. The subtable walker
+/// Reserved class 0: end-of-text marker glyph. The subtable walker
 /// injects this class after the last real glyph so state machines
 /// that carry pending actions (e.g. a pending rearrangement) get one
 /// more chance to fire before the run ends.
 pub const CLASS_END_OF_TEXT: u16 = 0;
-/// Reserved class 1 — out-of-bounds glyph id. Rare outside broken
+/// Reserved class 1: out-of-bounds glyph id. Rare outside broken
 /// fonts.
 pub const CLASS_OUT_OF_BOUNDS: u16 = 1;
-/// Reserved class 2 — deleted glyph. AAT allows earlier passes to
+/// Reserved class 2: deleted glyph. AAT allows earlier passes to
 /// tombstone a glyph without actually removing it from the buffer;
 /// sigilbuzz does not emit these, but the class is reserved in the
 /// layout so we respect its reservation.
 pub const CLASS_DELETED_GLYPH: u16 = 2;
-/// Reserved class 3 — end-of-line. AAT exposes this so subtables can
+/// Reserved class 3: end-of-line. AAT exposes this so subtables can
 /// conditionally disable actions at line breaks; sigilbuzz never
 /// assigns this to any glyph.
 pub const CLASS_END_OF_LINE: u16 = 3;
 
 /// Parsed header of an extended state table. The header owns no
-/// payload slices — callers combine this with the subtable bytes to
+/// payload slices. Callers combine this with the subtable bytes to
 /// walk the state array and the entry array themselves, because
 /// entry records are type-specific.
 ///
@@ -119,7 +119,7 @@ impl<'a> StateTableHeader<'a> {
         })
     }
 
-    /// Header size — every type-specific tail begins past this
+    /// Header size: every type-specific tail begins past this
     /// many bytes from the start of the state table.
     pub const SIZE: usize = 16;
 
@@ -133,7 +133,7 @@ impl<'a> StateTableHeader<'a> {
     /// [`CLASS_OUT_OF_BOUNDS`] when the glyph is outside every
     /// segment the class subtable covers.
     ///
-    /// Only lookup formats 0, 2 and 6 are handled — the formats
+    /// Only lookup formats 0, 2 and 6 are handled: the formats
     /// real morx/kerx fonts ship. Anything else yields
     /// [`Error::Unsupported`].
     pub fn class_of(&self, glyph_id: u16) -> Result<u16> {
@@ -171,7 +171,7 @@ impl<'a> StateTableHeader<'a> {
 
     /// Reads the 4-byte "new state + flags" prefix of the entry at
     /// `entry_index`. `entry_size` is the full per-entry size
-    /// (subtable-type specific — e.g. 8 for ligature subtables, 6
+    /// (subtable-type specific, e.g. 8 for ligature subtables, 6
     /// for contextual subtables). Returns `(new_state, flags)`.
     pub fn entry_prefix(&self, entry_index: u16, entry_size: usize) -> Result<(u16, u16)> {
         let off = self
@@ -193,7 +193,7 @@ impl<'a> StateTableHeader<'a> {
 
     /// Reads a `u16` tail field of the entry at `entry_index`.
     /// `tail_offset` is the byte offset *within* one entry, past the
-    /// 4-byte prefix — e.g. for a ligature subtable entry whose
+    /// 4-byte prefix. E.g. for a ligature subtable entry whose
     /// layout is `(newState, flags, ligActionIndex)`, `tail_offset`
     /// is 4 to read `ligActionIndex`.
     pub fn entry_tail_u16(
@@ -216,7 +216,7 @@ impl<'a> StateTableHeader<'a> {
         Ok(u16::from_be_bytes([slice[0], slice[1]]))
     }
 
-    /// Raw byte slice the header roots at — used by action-array
+    /// Raw byte slice the header roots at, used by action-array
     /// readers that live past the header but inside the subtable.
     #[must_use]
     pub const fn data(&self) -> &'a [u8] {
@@ -265,7 +265,7 @@ pub(crate) fn lookup_class(data: &[u8], glyph_id: u16, n_glyphs: u16) -> Result<
 //   u16 values[nGlyphs]
 //
 // The simplest AAT lookup: one u16 value per glyph in font order.
-// Used when the value stream is dense — kerx format 2's left- and
+// Used when the value stream is dense: kerx format 2's left- and
 // right-class tables are the canonical case, since they yield a
 // per-glyph byte offset that's almost always non-default.
 fn lookup_format0(data: &[u8], glyph_id: u16, n_glyphs: u16) -> Result<u16> {
@@ -294,7 +294,7 @@ fn lookup_format0(data: &[u8], glyph_id: u16, n_glyphs: u16) -> Result<u16> {
 
 // Format 2 layout:
 //   u16 format = 2
-//   u16 unitSize      (6 — header + 3xu16)
+//   u16 unitSize      (6: header + 3xu16)
 //   u16 nUnits
 //   u16 searchRange
 //   u16 entrySelector
@@ -363,7 +363,7 @@ fn lookup_format2(data: &[u8], glyph_id: u16) -> Result<u16> {
 
 // Format 6 layout:
 //   u16 format = 6
-//   u16 unitSize      (4 — u16 glyph + u16 value)
+//   u16 unitSize      (4: u16 glyph + u16 value)
 //   u16 nUnits
 //   u16 searchRange
 //   u16 entrySelector
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn format2_segments_resolve_ranges() {
-        // Segments: [10..=12] → class 4, [20..=25] → class 5.
+        // Segments: [10..=12] -> class 4, [20..=25] -> class 5.
         let mut tbl = Vec::new();
         tbl.extend_from_slice(&2u16.to_be_bytes()); // format
         tbl.extend_from_slice(&6u16.to_be_bytes()); // unitSize
@@ -484,7 +484,7 @@ mod tests {
 
     #[test]
     fn format0_simple_array_indexes_by_glyph_id() {
-        // 4-glyph font: gid 0 → 0, gid 1 → 12, gid 2 → 24, gid 3 → 36.
+        // 4-glyph font: gid 0 -> 0, gid 1 -> 12, gid 2 -> 24, gid 3 -> 36.
         let mut tbl = Vec::new();
         tbl.extend_from_slice(&0u16.to_be_bytes()); // format
         for v in [0u16, 12, 24, 36] {
@@ -500,7 +500,7 @@ mod tests {
 
     #[test]
     fn format0_truncated_slice_is_defensive() {
-        // Format byte but no payload — must not panic.
+        // Format byte but no payload: must not panic.
         let tbl = vec![0x00, 0x00];
         assert_eq!(lookup_class(&tbl, 0, 4).unwrap(), CLASS_OUT_OF_BOUNDS);
     }
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn unsupported_lookup_format_surfaces_error() {
         let mut tbl = Vec::new();
-        // Format 4 (segment array of u16 records — rare) is still
+        // Format 4 (segment array of u16 records, rare) is still
         // rejected until a real font needs it.
         tbl.extend_from_slice(&4u16.to_be_bytes());
         assert!(matches!(

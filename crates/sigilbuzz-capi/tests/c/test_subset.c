@@ -1,5 +1,5 @@
 /*
- * test_subset.c — drives the hb_subset_* bridge from C.
+ * test_subset.c: drives the hb_subset_* bridge from C.
  *
  * Loads Open Sans, asks the subsetter for a face containing only
  * U+0041 / U+0042 / U+0043, and asserts the result has exactly four

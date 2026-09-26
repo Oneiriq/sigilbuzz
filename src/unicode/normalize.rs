@@ -2,7 +2,7 @@
 //!
 //! `HarfBuzz` implicitly runs NFC on its input buffer before cmap
 //! lookup so that `e + U+0301` renders the same as `é`. sigilbuzz
-//! matches that behaviour when the caller opts in via
+//! matches that behavior when the caller opts in via
 //! [`crate::Buffer::set_normalize_nfc`]. This module supplies the
 //! composition half of NFC, which is what actually changes the
 //! output: once you have a starter codepoint followed by
@@ -22,15 +22,15 @@
 //! The composition table covers the ranges sigilbuzz has been
 //! able to curate by hand from the Unicode Character Database:
 //!
-//! - Latin-1 Supplement (U+00C0..U+00FF) — complete
-//! - Latin Extended-A (U+0100..U+017F) — complete
+//! - Latin-1 Supplement (U+00C0..U+00FF): complete
+//! - Latin Extended-A (U+0100..U+017F): complete
 //! - Common Greek monotonic precomposed forms
 //! - Common Cyrillic precomposed forms
 //!
 //! Hangul syllable composition is handled algorithmically, so the
 //! full 11,172-codepoint block works without any static data.
 //!
-//! Uncovered codepoints pass through unchanged — the shaper still
+//! Uncovered codepoints pass through unchanged. The shaper still
 //! gets the raw sequence, and fonts that anchor combining marks
 //! via GPOS will render fine. Only precomposed-oriented fonts
 //! (Open Sans is the canonical example) lose fidelity here.
@@ -40,7 +40,7 @@
 //! Greedy left-to-right pair composition: keep a running "last
 //! emitted" codepoint, and for every input codepoint try
 //! `compose_pair(last, next)`. On success, replace last with the
-//! composed codepoint and keep iterating — the new composite may
+//! composed codepoint and keep iterating. The new composite may
 //! itself compose with the following mark (e.g. Vietnamese
 //! stacked accents). On failure, commit last and move on.
 
@@ -102,7 +102,7 @@ fn compose_hangul(a: char, b: char) -> Option<char> {
     let s_range = HANGUL_SBASE..HANGUL_SBASE + HANGUL_SCOUNT;
     let t_range = HANGUL_TBASE + 1..HANGUL_TBASE + HANGUL_TCOUNT;
 
-    // Leading jamo + vowel jamo → LV syllable.
+    // Leading jamo + vowel jamo -> LV syllable.
     if l_range.contains(&ac) && v_range.contains(&bc) {
         let l_i = ac - HANGUL_LBASE;
         let v_i = bc - HANGUL_VBASE;
@@ -110,7 +110,7 @@ fn compose_hangul(a: char, b: char) -> Option<char> {
         return char::from_u32(lv);
     }
 
-    // LV syllable + trailing jamo → LVT syllable. The existing
+    // LV syllable + trailing jamo -> LVT syllable. The existing
     // syllable must have T=0 (i.e. be aligned on a `TCOUNT`
     // boundary) for composition to apply; otherwise a trailing
     // jamo cannot meaningfully attach.
@@ -136,12 +136,12 @@ fn compose_hangul(a: char, b: char) -> Option<char> {
 // ---------------------------------------------------------------------------
 
 const COMPOSITIONS: &[(u32, u32, u32)] = &[
-    // Latin-1 Supplement — uppercase.
+    // Latin-1 Supplement, uppercase.
     (0x0041, 0x0300, 0x00C0), // À
     (0x0041, 0x0301, 0x00C1), // Á
     (0x0041, 0x0302, 0x00C2), // Â
     (0x0041, 0x0303, 0x00C3), // Ã
-    (0x0041, 0x0304, 0x0100), // Ā  — Latin Extended-A
+    (0x0041, 0x0304, 0x0100), // Ā  (Latin Extended-A)
     (0x0041, 0x0306, 0x0102), // Ă
     (0x0041, 0x0308, 0x00C4), // Ä
     (0x0041, 0x030A, 0x00C5), // Å
@@ -218,7 +218,7 @@ const COMPOSITIONS: &[(u32, u32, u32)] = &[
     (0x005A, 0x0301, 0x0179), // Ź
     (0x005A, 0x0307, 0x017B), // Ż
     (0x005A, 0x030C, 0x017D), // Ž
-    // Latin-1 Supplement — lowercase.
+    // Latin-1 Supplement, lowercase.
     (0x0061, 0x0300, 0x00E0), // à
     (0x0061, 0x0301, 0x00E1), // á
     (0x0061, 0x0302, 0x00E2), // â
@@ -320,7 +320,7 @@ const COMPOSITIONS: &[(u32, u32, u32)] = &[
     (0x03C9, 0x0301, 0x03CE), // ώ
     (0x03CA, 0x0301, 0x0390), // ΐ  = iota + dialytika + tonos
     (0x03CB, 0x0301, 0x03B0), // ΰ  = upsilon + dialytika + tonos
-    // Cyrillic precomposed — common letters.
+    // Cyrillic precomposed, common letters.
     (0x0406, 0x0308, 0x0407), // Ї
     (0x0415, 0x0308, 0x0401), // Ё
     (0x0418, 0x0300, 0x040D), // Ѝ
@@ -374,13 +374,13 @@ mod tests {
 
     #[test]
     fn hangul_l_v_composes_to_syllable() {
-        // 'ㄱ' (U+1100) + 'ㅏ' (U+1161) → '가' (U+AC00).
+        // 'ㄱ' (U+1100) + 'ㅏ' (U+1161) -> '가' (U+AC00).
         assert_eq!(compose_pair('\u{1100}', '\u{1161}'), Some('\u{AC00}'));
     }
 
     #[test]
     fn hangul_lv_plus_t_composes_to_lvt() {
-        // '가' (U+AC00) + 'ㄱ' (U+11A8) → '각' (U+AC01).
+        // '가' (U+AC00) + 'ㄱ' (U+11A8) -> '각' (U+AC01).
         assert_eq!(compose_pair('\u{AC00}', '\u{11A8}'), Some('\u{AC01}'));
     }
 

@@ -2,7 +2,7 @@
 //!
 //! Issue #208 surface tests in `flatten_public_api.rs` lock the happy
 //! path; this companion suite exercises the corners called out in the
-//! wave 16 brief — empty op streams, degenerate cubics, very tight /
+//! wave 16 brief: empty op streams, degenerate cubics, very tight /
 //! zero / negative tolerances, NaN-poisoned coords. Goal: prove the
 //! public entry point degrades gracefully rather than panicking,
 //! infinite-looping, or blowing the stack.
@@ -54,7 +54,7 @@ fn flatten_pathological_cubic_cusp() {
 
 #[test]
 fn flatten_very_tight_tolerance() {
-    // Tolerance 0.01 — should produce many segments but not panic.
+    // Tolerance 0.01: should produce many segments but not panic.
     let ops = vec![
         PathOp::MoveTo { x: 0.0, y: 0.0 },
         PathOp::CubicTo {
@@ -107,7 +107,7 @@ fn flatten_negative_tolerance() {
 fn flatten_nan_input_does_not_panic() {
     // Pathological input with NaN should terminate via MAX_DEPTH and
     // not panic the recursive subdivider. The flatness comparison is
-    // NaN ≤ x → false on every recursion, so the depth cap is the
+    // NaN <= x -> false on every recursion, so the depth cap is the
     // only thing keeping the call tree finite. Document the
     // worst-case segment count so a future regression to a stricter
     // bound is visible (today: 2^MAX_DEPTH = 65_536).
@@ -146,8 +146,8 @@ fn flatten_downstream_consumer_smoke_test_through_face_outline() {
     // Walks the exact path a downstream MSDF / glyph-cache consumer
     // would: load a real font, pull Face::glyph_outline, hand the ops
     // to the public flatten() entry point. Locks the contract that
-    // sigilbuzz_render exports the *types* PathOp consumers need —
-    // including `sigilbuzz::tables::PathOp` itself — and that flatten
+    // sigilbuzz_render exports the *types* PathOp consumers need,
+    // including `sigilbuzz::tables::PathOp` itself, and that flatten
     // accepts the iterator shape `Outline::ops().iter().copied()`.
     use sigilbuzz::{Blob, Face};
 
@@ -165,7 +165,7 @@ fn flatten_downstream_consumer_smoke_test_through_face_outline() {
         "OpenSans 'A' outline must be non-empty"
     );
 
-    // Mimic a 24px raster: scale design-units → pixel space.
+    // Mimic a 24px raster: scale design-units to pixel space.
     let upem = face.head().unwrap().units_per_em as f32;
     let s = 24.0 / upem;
     let xform = Affine::scale(s, -s);
@@ -175,7 +175,7 @@ fn flatten_downstream_consumer_smoke_test_through_face_outline() {
         "downstream consumer must get a populated edge list, got {} segments",
         segs.len()
     );
-    // Edge list must form a chain — the load-bearing property MSDF
+    // Edge list must form a chain, the property MSDF
     // generators rely on. Tolerate small per-op rounding plus the
     // explicit Close-emitted terminator that jumps to the last MoveTo.
     let mut chain_breaks = 0;

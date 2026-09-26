@@ -1,54 +1,51 @@
 # sigilbuzz-pdf
 
-PDF font emitters for [sigilbuzz](https://github.com/Oneiriq/sigilbuzz)
-glyph outlines — Type 3, Type 1, and OTF/TrueType embedded.
+PDF font output for [sigilbuzz](https://github.com/Oneiriq/sigilbuzz) glyph outlines:
+Type 3, Type 1, and embedded OpenType or TrueType.
 
 ## What it does
 
-Translates a sigilbuzz `Face` plus a list of glyph IDs into one of
-three PDF font flavours:
+It takes a sigilbuzz `Face` and a list of glyph IDs and builds one of three kinds of
+PDF font:
 
-- `emit_type3_font` → a `Type3Font` data structure (`FontMatrix`,
-  `FontBBox`, `Encoding`, `Widths`, one `CharProc` content stream
-  per glyph). Each `PathOp` becomes a PDF drawing operator.
-- `emit_type1_font` → a `Type1Font` with separate font dict, private
-  dict, and `/CharStrings` byte buffers. Charstrings are *cleartext*
-  (eexec encryption is intentionally skipped — the private dict
-  declares `/lenIV -1`, which Adobe Reader and modern consumers
-  honour).
-- `emit_otf_embedded_font` → an `OtfEmbeddedFont` wrapper containing
-  a Type 0 font dict, font descriptor, the unmodified font program,
-  a 256-CID Identity-H map, and per-glyph widths in 1000-unit space.
-  Subsetting is the parallel `sigilbuzz-subset` crate's job.
+- `emit_type3_font` returns a `Type3Font` with `FontMatrix`, `FontBBox`, `Encoding`,
+  `Widths`, and one `CharProc` content stream per glyph. Each `PathOp` becomes a PDF
+  drawing operator.
+- `emit_type1_font` returns a `Type1Font` with the font dictionary, private dictionary,
+  and `/CharStrings` as byte buffers. The charstrings are left unencrypted. The private
+  dictionary declares `/lenIV -1`, which Adobe Reader and other current readers accept.
+- `emit_otf_embedded_font` returns an `OtfEmbeddedFont`: a Type 0 font dictionary, a
+  font descriptor, the unmodified font program, an Identity-H map, and per-glyph widths
+  in 1000-unit space. To embed a smaller font, subset it first with
+  `sigilbuzz-subset`.
 
-The crate stops at the data structure — it has no `lopdf` /
-`printpdf` dependency, so the consumer is in charge of serialising
-into a real PDF document. Output is deterministic: same inputs yield
-byte-identical output.
+The crate stops at these data structures. It has no `lopdf` or `printpdf` dependency,
+so writing them into a PDF document is up to you. The output is deterministic: the
+same inputs always give the same bytes.
 
 ## Quick start
 
 ```rust,no_run
 use sigilbuzz::{Blob, Face};
-use sigilbuzz_pdf::{emit_type3_font, emit_type1_font, emit_otf_embedded_font};
+use sigilbuzz_pdf::{emit_otf_embedded_font, emit_type1_font, emit_type3_font};
 
 let blob = Blob::from_path("./MyFont.ttf").unwrap();
 let face = Face::parse_bytes(blob.as_bytes(), 0).unwrap();
 
-// Pick a flavour:
-let t3 = emit_type3_font(&face, &[65, 66, 67]); // user-defined CharProcs
+// Pick one:
+let t3 = emit_type3_font(&face, &[65, 66, 67]); // drawn glyph procedures
 let t1 = emit_type1_font(&face, &[65, 66, 67]).unwrap(); // PostScript charstrings
 let otf = emit_otf_embedded_font(&face, blob.as_bytes(), &[65, 66, 67]); // /FontFile2
 ```
 
 ## Cargo features
 
-| Feature | Default | What it does                            |
-|---------|---------|-----------------------------------------|
-| `std`   | yes     | `Vec`-backed buffers and `String` ops.  |
+| Feature | Default | What it does |
+|---|---|---|
+| `std` | yes | `Vec`-backed buffers and `String` output. |
 
-Disable default features for `no_std + alloc` builds.
+Turn off default features for `no_std` with `alloc`.
 
 ## License
 
-Apache-2.0. See the workspace root `LICENSE-APACHE`.
+Apache-2.0. See the workspace root `LICENSE`.

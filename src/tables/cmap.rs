@@ -1,4 +1,4 @@
-//! `cmap` — character to glyph index mapping.
+//! `cmap`: character to glyph index mapping.
 //!
 //! A `cmap` table is a wrapper around one or more *subtables*, each
 //! declaring a `(platform, encoding)` pair and a format. sigilbuzz
@@ -7,10 +7,10 @@
 //!
 //! # Supported subtable formats
 //!
-//! - **Format 4** — segmented mapping of the Basic Multilingual Plane
+//! - **Format 4**: segmented mapping of the Basic Multilingual Plane
 //!   (U+0000..U+FFFF). The format every Latin / Cyrillic / Greek font
 //!   in existence has.
-//! - **Format 12** — sparse groups covering the full Unicode range,
+//! - **Format 12**: sparse groups covering the full Unicode range,
 //!   including supplementary planes. Preferred over format 4 when
 //!   both are present because it can answer astral codepoints.
 //!
@@ -121,7 +121,7 @@ impl<'a> Cmap<'a> {
     /// the font has no glyph for this codepoint.
     ///
     /// Glyph index `0` is the "missing glyph" by convention and is
-    /// treated as "no match" here — callers that want the .notdef
+    /// treated as "no match" here. Callers that want the .notdef
     /// glyph for unmappable text should fall back to 0 explicitly.
     #[must_use]
     pub fn glyph_id(&self, ch: char) -> Option<u16> {
@@ -139,7 +139,7 @@ impl<'a> Cmap<'a> {
 
 // Cheaper-is-better score. Returns None for unsupported combinations.
 // We peek at the subtable's format byte so Symbol fonts declared as
-// format 4 under (3, 0) still score — but we give them the lowest
+// format 4 under (3, 0) still score, but we give them the lowest
 // priority.
 fn encoding_score(platform: u16, encoding: u16, data: &[u8], subtable_offset: u32) -> Option<u32> {
     // Peek the first two bytes of the subtable to learn its format.
@@ -213,7 +213,7 @@ impl<'a> Format4<'a> {
             });
         }
         let seg_count = seg_count_x2 / 2;
-        // searchRange / entrySelector / rangeShift — informational.
+        // searchRange / entrySelector / rangeShift: informational.
         r.skip(6)?;
 
         // Lay out the four arrays. Format 4 packs:
@@ -479,7 +479,7 @@ pub(crate) fn build_format4(
 
     let mut out = Vec::new();
     out.extend_from_slice(&4u16.to_be_bytes()); // format
-                                                // length placeholder — patched later
+                                                // length placeholder, patched later
     let length_idx = out.len();
     out.extend_from_slice(&0u16.to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes()); // language
@@ -553,8 +553,8 @@ mod tests {
     #[test]
     fn format4_handles_multiple_segments() {
         let subtable = build_format4(&[
-            (b'0' as u16, b'9' as u16, -47), // '0' → 1
-            (b'A' as u16, b'Z' as u16, -54), // 'A' → 11
+            (b'0' as u16, b'9' as u16, -47), // '0' -> 1
+            (b'A' as u16, b'Z' as u16, -54), // 'A' -> 11
         ]);
         let cmap_bytes = build_cmap_wrapper(&[(3, 1, subtable)]);
         let cmap = Cmap::parse(&cmap_bytes).unwrap();
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn format12_preferred_over_format4_when_both_present() {
-        // Format 4 maps 'A' → 5. Format 12 maps 'A' → 42. Format 12
+        // Format 4 maps 'A' to 5. Format 12 maps 'A' to 42. Format 12
         // wins.
         let f4 = build_format4(&[(b'A' as u16, b'A' as u16, 4)]);
         let f12 = build_format12(&[(b'A' as u32, b'A' as u32, 42)]);
@@ -634,7 +634,7 @@ mod tests {
 
     #[test]
     fn rejects_cmap_with_no_supported_subtable() {
-        // Only Apple platform (1) which we don't recognise.
+        // Only Apple platform (1) which we don't recognize.
         let f4 = build_format4(&[(b'A' as u16, b'A' as u16, 4)]);
         let cmap_bytes = build_cmap_wrapper(&[(1, 0, f4)]);
         assert!(matches!(

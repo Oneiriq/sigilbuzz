@@ -1,12 +1,12 @@
-//! OpenType `ScriptList` — outermost layer of the GSUB / GPOS
+//! OpenType `ScriptList`: outermost layer of the GSUB / GPOS
 //! feature-selection tree.
 //!
 //! ```text
 //!   ScriptList
-//!     [ script_tag → Script ]
+//!     [ script_tag -> Script ]
 //!   Script
 //!     default_lang_sys    `LangSys`?
-//!     [ lang_sys_tag → `LangSys` ]
+//!     [ lang_sys_tag -> `LangSys` ]
 //!   `LangSys`
 //!     required_feature_index    u16   (0xFFFF = none)
 //!     feature_indices           [u16] (indices into FeatureList)
@@ -19,7 +19,7 @@
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
 
-/// `ScriptList` — the top-level directory of scripts carried by a
+/// `ScriptList`: the top-level directory of scripts carried by a
 /// GSUB or GPOS table.
 #[derive(Debug, Clone, Copy)]
 pub struct ScriptList<'a> {
@@ -69,7 +69,7 @@ impl<'a> ScriptList<'a> {
         }
     }
 
-    /// Looks a script up by tag. Binary search — records are sorted
+    /// Looks a script up by tag. Binary search: records are sorted
     /// by tag in every valid OpenType file.
     #[must_use]
     pub fn find(&self, tag: [u8; 4]) -> Option<Script<'a>> {
@@ -207,7 +207,7 @@ impl<'a> Script<'a> {
                     // start; `LangSys::parse_at` takes an absolute
                     // u16 offset into `data`. The naïve `(self.base
                     // + rel_off) as u16` silently wraps when the sum
-                    // exceeds `u16::MAX` — a Script placed past
+                    // exceeds `u16::MAX`: a Script placed past
                     // offset 0x8000 combined with a large rel_off is
                     // enough to do this. Surface overflow as a miss
                     // so a crafted font cannot redirect the parse to
@@ -239,7 +239,7 @@ impl<'a> Script<'a> {
     }
 }
 
-/// A single language system — the leaf of the script tree that
+/// A single language system: the leaf of the script tree that
 /// actually names the features in effect.
 #[derive(Debug, Clone, Copy)]
 pub struct LangSys<'a> {
@@ -354,7 +354,7 @@ mod tests {
         out
     }
 
-    /// (tag, defaultLangSysBody?, langSysRecordBodies) — a
+    /// (tag, defaultLangSysBody?, langSysRecordBodies): a
     /// flattened view of one script.
     type ScriptFixture<'a> = ([u8; 4], Option<Vec<u8>>, &'a [([u8; 4], Vec<u8>)]);
 
@@ -367,7 +367,7 @@ mod tests {
         // Simpler: walk once to compute sizes, then write.
         let mut out = Vec::new();
         out.extend_from_slice(&(scripts.len() as u16).to_be_bytes());
-        // Reserve space for script records: tag(4) + offset(2) × N.
+        // Reserve space for script records: tag(4) + offset(2) * N.
         let script_records_start = out.len();
         for _ in 0..scripts.len() {
             out.extend_from_slice(&[0u8; 6]);
@@ -513,9 +513,9 @@ mod tests {
         // buggy `(base + rel_off) as u16` wraps to 0x0010, where we
         // planted a byte-valid LangSys (feature_indices = [42]). A
         // correct implementation must not silently use that wrapped
-        // location — it must report the offset as unreachable.
+        // location. It must report the offset as unreachable.
         let script_off: u16 = 0x8010;
-        let rel_off: u16 = 0x8000; // base(0x8010) + rel(0x8000) = 0x10010 → wraps to 0x0010
+        let rel_off: u16 = 0x8000; // base(0x8010) + rel(0x8000) = 0x10010 -> wraps to 0x0010
         let wrap_to: usize = 0x0010;
 
         let mut bytes = Vec::new();

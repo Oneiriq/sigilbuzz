@@ -13,7 +13,7 @@ The output font `var_kern.ttf` carries:
   default-instance kern is 0; at wght=900 the pair tightens by 100
   design units.
 
-The fixture is intentionally minimal — the point is to exercise
+The fixture is intentionally minimal: the point is to exercise
 sigilbuzz's feature-variation wiring, not to look good.
 """
 
@@ -83,7 +83,7 @@ def main():
     fb.setupNameTable({"familyName": "SigilbuzzVarKern", "styleName": "Regular"})
     fb.setupPost()
 
-    # fvar — one axis, `wght`, range 400..900 default 400.
+    # fvar: one axis, `wght`, range 400..900 default 400.
     fb.setupFvar(
         axes=[("wght", 400.0, 400.0, 900.0, "Weight")],
         instances=[],
@@ -101,7 +101,7 @@ def main():
         # itemVariationDataCount = 1, itemVariationDataOffsets[1]
         header_size = 2 + 4 + 2 + 4  # 12 bytes
         # region list: u16 axisCount, u16 regionCount, then
-        # regionCount × axisCount × (start, peak, end) F2DOT14.
+        # regionCount x axisCount x (start, peak, end) F2DOT14.
         region_list = (
             struct.pack(">HH", 1, 1)  # axisCount, regionCount
             + struct.pack(">hhh", 0, 0x4000, 0x4000)  # start=0, peak=1, end=1
@@ -118,7 +118,7 @@ def main():
 
     # Build the GPOS table: one `kern` feature with a PairPos format 1
     # subtable. The ValueRecord for the first glyph carries
-    # valueFormat = X_ADVANCE | X_ADVANCE_DEVICE → 4 bytes. The
+    # valueFormat = X_ADVANCE | X_ADVANCE_DEVICE -> 4 bytes. The
     # device offset points at a VariationIndex table we embed in the
     # subtable tail. The X_ADVANCE i16 is 0 (default instance).
 
@@ -139,7 +139,7 @@ def main():
         #     u16 secondGlyph = gid_v
         #     ValueRecord1:
         #       i16 x_advance = 0
-        #       Offset16 x_advance_device → VariationIndex at subtable-relative offset
+        #       Offset16 x_advance_device -> VariationIndex at subtable-relative offset
         # Then coverage and variation index blobs appended.
         value_format1 = 0x0044
         value_format2 = 0
@@ -228,7 +228,7 @@ def main():
 
     gpos_bytes = build_gpos()
 
-    # GDEF v1.3: u16 major, u16 minor, u16×5 (v1.2 offsets), u32 itemVarStoreOff
+    # GDEF v1.3: u16 major, u16 minor, u16 x 5 (v1.2 offsets), u32 itemVarStoreOff
     # Version 1.3 header is 18 bytes. Keep glyphClassDef, etc. absent.
     gdef_header_size = 18
     gdef = (

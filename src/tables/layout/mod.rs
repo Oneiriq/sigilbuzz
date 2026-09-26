@@ -1,4 +1,4 @@
-//! OpenType Layout common primitives — the building blocks shared by
+//! OpenType Layout common primitives: the building blocks shared by
 //! every GSUB and GPOS lookup.
 //!
 //! [`Coverage`] answers "is glyph X in this lookup's domain, and if

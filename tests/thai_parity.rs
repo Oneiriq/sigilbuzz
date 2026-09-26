@@ -3,9 +3,9 @@
 //! Shapes a Thai corpus with both sigilbuzz and rustybuzz against
 //! Noto Sans Thai (OFL) and asserts the output matches byte-for-byte.
 //! Thai runs through sigilbuzz's Universal Shaping Engine pipeline
-//! (`src/ot/use_shaper`) with the Thai script-tag priority (`thai` →
+//! (`src/ot/use_shaper`) with the Thai script-tag priority (`thai` ->
 //! `DFLT`) and the reduced Thai/Lao feature chain (`ccmp` / `liga` /
-//! `calt` — Thai has no halant and no subjoining).
+//! `calt`, Thai has no halant and no subjoining).
 //!
 //! The corpus exercises:
 //!
@@ -17,7 +17,7 @@
 //!   * below-base vowels (sara u, sara uu, pinthu)
 //!   * tone marks (mai ek, mai tho, mai tri, mai chattawa)
 //!   * nikkhahit and thanthakhat
-//!   * the composed sara am (U+0E33) — a single codepoint that
+//!   * the composed sara am (U+0E33), a single codepoint that
 //!     renders as nikkhahit + sara aa
 //!   * Thai digits
 //!   * mixed Thai + Latin
@@ -45,92 +45,92 @@ const CORPUS: &[Case] = &[
         note: "empty",
         compare_rustybuzz: true,
     },
-    // ก — ko kai, base alone.
+    // ก: ko kai, base alone.
     Case {
         text: "\u{0E01}",
         note: "ko kai alone",
         compare_rustybuzz: true,
     },
-    // กา — ko + sara aa. Post-base matra, no reorder.
+    // กา: ko + sara aa. Post-base matra, no reorder.
     Case {
         text: "\u{0E01}\u{0E32}",
         note: "kaa (post-base aa)",
         compare_rustybuzz: true,
     },
-    // กิ — ko + sara i. Above-base matra.
+    // กิ: ko + sara i. Above-base matra.
     Case {
         text: "\u{0E01}\u{0E34}",
         note: "ki (above-base i)",
         compare_rustybuzz: true,
     },
-    // กี — ko + sara ii. Above-base matra.
+    // กี: ko + sara ii. Above-base matra.
     Case {
         text: "\u{0E01}\u{0E35}",
         note: "kii (above-base ii)",
         compare_rustybuzz: true,
     },
-    // กุ — ko + sara u. Below-base matra.
+    // กุ: ko + sara u. Below-base matra.
     Case {
         text: "\u{0E01}\u{0E38}",
         note: "ku (below-base u)",
         compare_rustybuzz: true,
     },
-    // กู — ko + sara uu. Below-base matra.
+    // กู: ko + sara uu. Below-base matra.
     Case {
         text: "\u{0E01}\u{0E39}",
         note: "kuu (below-base uu)",
         compare_rustybuzz: true,
     },
-    // เก — sara e + ko. Pre-base vowel typed before the base
+    // เก: sara e + ko. Pre-base vowel typed before the base
     // already; the reorder pass is a no-op.
     Case {
         text: "\u{0E40}\u{0E01}",
         note: "ke (pre-base sara e)",
         compare_rustybuzz: true,
     },
-    // แก — sara ae + ko.
+    // แก: sara ae + ko.
     Case {
         text: "\u{0E41}\u{0E01}",
         note: "kae (pre-base sara ae)",
         compare_rustybuzz: true,
     },
-    // โก — sara o + ko.
+    // โก: sara o + ko.
     Case {
         text: "\u{0E42}\u{0E01}",
         note: "ko (pre-base sara o)",
         compare_rustybuzz: true,
     },
-    // ใก — sara ai-maimuan + ko.
+    // ใก: sara ai-maimuan + ko.
     Case {
         text: "\u{0E43}\u{0E01}",
         note: "kai-maimuan",
         compare_rustybuzz: true,
     },
-    // ก่า — ko + mai ek + sara aa. Tone mark on a syllable.
+    // ก่า: ko + mai ek + sara aa. Tone mark on a syllable.
     Case {
         text: "\u{0E01}\u{0E48}\u{0E32}",
         note: "kaa with mai ek",
         compare_rustybuzz: true,
     },
-    // ก้อน — ko + mai tho + sara o-mai-muan-like + no.
+    // ก้อน: ko + mai tho + sara o-mai-muan-like + no.
     Case {
         text: "\u{0E01}\u{0E49}\u{0E2D}\u{0E19}",
         note: "kon (mai tho)",
         compare_rustybuzz: true,
     },
-    // กัน — ko + mai han-akat + no. Above-base + consonant close.
+    // กัน: ko + mai han-akat + no. Above-base + consonant close.
     Case {
         text: "\u{0E01}\u{0E31}\u{0E19}",
         note: "kan (mai han-akat)",
         compare_rustybuzz: true,
     },
-    // การ์ — ko + sara aa + ro + thanthakhat. Killer mark.
+    // การ์: ko + sara aa + ro + thanthakhat. Killer mark.
     Case {
         text: "\u{0E01}\u{0E32}\u{0E23}\u{0E4C}",
         note: "kaar (thanthakhat kills ro)",
         compare_rustybuzz: true,
     },
-    // สวัสดี — "hello". sa + wo + mai han-akat + sa + do + sara ii.
+    // สวัสดี: "hello". sa + wo + mai han-akat + sa + do + sara ii.
     Case {
         text: "\u{0E2A}\u{0E27}\u{0E31}\u{0E2A}\u{0E14}\u{0E35}",
         note: "sawatdi (hello)",

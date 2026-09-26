@@ -13,7 +13,7 @@
 //!   c2 = p2 + 2/3 * (c - p2)
 //! ```
 //!
-//! That is the conversion the emitter performs verbatim — no
+//! That is the conversion the emitter performs verbatim: no
 //! flattening, no error term, no subdivision. The cubic produced is
 //! mathematically equal to the original quadratic at every `t`.
 //!
@@ -24,7 +24,7 @@
 //!
 //! Type 3 d1 prologue: every CharProc must begin with the `d1`
 //! operator, which records the glyph's advance and bbox up-front so
-//! the PDF rasteriser does not have to scan the stream to find them.
+//! the PDF rasterizer does not have to scan the stream to find them.
 //! The format is `wx wy llx lly urx ury d1`, where `wy` is always 0
 //! for horizontal writing modes.
 
@@ -35,12 +35,12 @@ use sigilbuzz::tables::PathOp;
 use crate::Bbox;
 
 /// Format a single `f32` with the smallest representation that
-/// round-trips to the same value, then drop a trailing `.0` if any —
+/// round-trips to the same value, then drop a trailing `.0` if any:
 /// PDF parsers accept both `1` and `1.0`, and dropping the suffix
 /// keeps the output compact and snapshot-stable.
 ///
 /// Non-finite inputs (NaN, ±∞) are coerced to `0` because PDF
-/// numeric objects do not admit `NaN` / `inf` tokens — emitting them
+/// numeric objects do not admit `NaN` / `inf` tokens. Emitting them
 /// would break content-stream parsing in every conforming reader. A
 /// pathological glyph outline (CFF charstring whose blend evaluation
 /// overflows under extreme variation coords, for example) would
@@ -58,7 +58,7 @@ fn write_num(out: &mut Vec<u8>, value: f32) {
     out.extend_from_slice(trimmed.as_bytes());
 }
 
-/// A 32-byte ASCII scratch — kept tiny and inline so the no-std
+/// A 32-byte ASCII scratch, kept tiny and inline so the no-std
 /// build does not pull in any extra crate. Only the fmt::Write
 /// machinery is used.
 mod heapless_str {
@@ -123,9 +123,9 @@ pub fn emit_fill_epilogue(out: &mut Vec<u8>) {
 }
 
 /// Emit the PDF operator sequence corresponding to a PathOp slice
-/// into `out`. Tracks the current pen so `QuadTo` can synthesise the
+/// into `out`. Tracks the current pen so `QuadTo` can synthesize the
 /// cubic's `p0`. The pen starts unset; `QuadTo` issued before any
-/// `MoveTo` falls back to `(0, 0)` — that path is undefined in
+/// `MoveTo` falls back to `(0, 0)`. That path is undefined in
 /// well-formed sigilbuzz outlines so it is not a real concern, but
 /// the fallback keeps the emitter total.
 pub fn emit_path_ops(out: &mut Vec<u8>, ops: &[PathOp]) {
@@ -201,7 +201,7 @@ pub fn emit_path_ops(out: &mut Vec<u8>, ops: &[PathOp]) {
 /// Control points are included because PDF stores them verbatim; a
 /// curve's actual extent never exceeds its convex hull, so this is
 /// a safe (and sometimes loose) overestimate that matches what most
-/// PDF rasterisers expect from `FontBBox`.
+/// PDF rasterizers expect from `FontBBox`.
 pub fn outline_bbox(ops: &[PathOp]) -> Bbox {
     let mut bb = Bbox::empty();
     for op in ops {
@@ -258,7 +258,7 @@ mod tests {
         let mut out = Vec::new();
         emit_path_ops(&mut out, &ops);
         // Lock the byte stream verbatim so any future change to the
-        // emitter has to update this fixture deliberately.
+        // emitter has to update this fixture.
         let expected = "0 0 m\n30 0 l\n50 0 60 10 60 30 c\nh\n";
         assert_eq!(s(&out), expected);
     }
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn write_num_coerces_non_finite_to_zero() {
-        // Issue #216: PDF numeric tokens cannot be NaN / inf — those
+        // Issue #216: PDF numeric tokens cannot be NaN / inf, those
         // would fail to parse in every conforming reader. A pathological
         // glyph outline whose coords overflow under variation evaluation
         // could otherwise leak literal "NaN"/"inf"/"-inf" tokens into the

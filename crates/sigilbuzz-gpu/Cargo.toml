@@ -20,7 +20,7 @@ std = []
 sigilbuzz = { workspace = true }
 
 [dev-dependencies]
-# No extra runtime fixtures — fonts loaded with include_bytes!.
+# No extra runtime fixtures. Fonts are loaded with include_bytes!.
 # Criterion drives the encode bench. Dev-dep only.
 criterion = "0.8"
 

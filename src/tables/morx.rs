@@ -1,17 +1,17 @@
-//! `morx` — Apple Extended Glyph Metamorphosis.
+//! `morx`: Apple Extended Glyph Metamorphosis.
 //!
 //! `morx` is Apple's successor to `mort`. AAT-only fonts (legacy
 //! macOS Zapfino, older Apple Chancery variants, and most third-party
 //! AAT designs) ship substitution logic here instead of in GSUB.
 //! sigilbuzz consults `morx` only when the font has no GSUB, so
-//! modern OpenType fonts are unaffected — this mirrors HarfBuzz's
+//! modern OpenType fonts are unaffected. This mirrors HarfBuzz's
 //! AAT shaper policy.
 //!
 //! # Layout
 //!
 //! ```text
-//!   u16 version       (2 — without subtable coverage;
-//!                      3 — with u32 subtable coverage)
+//!   u16 version       (2: without subtable coverage;
+//!                      3: with u32 subtable coverage)
 //!   u16 _pad
 //!   u32 nChains
 //!   Chain chains[nChains]
@@ -19,7 +19,7 @@
 //!   Chain:
 //!     u32 defaultFlags
 //!     u32 chainLength   (bytes, incl. this header)
-//!     u32 featureCount  (feature selectors — sigilbuzz ignores these
+//!     u32 featureCount  (feature selectors: sigilbuzz ignores these
 //!                        and applies only the defaults)
 //!     u32 subtableCount
 //!     Feature features[featureCount]
@@ -36,26 +36,26 @@
 //! mutating) the glyph stream produced by the previous subtable.
 //! sigilbuzz implements the three most common types:
 //!
-//! - **Type 0** — Rearrangement. Stateless over classes but stateful
+//! - **Type 0**: Rearrangement. Stateless over classes but stateful
 //!   over a pending "marked glyph range"; used for Indic vowel
 //!   reordering in AAT-only Indic fonts.
-//! - **Type 1** — Contextual Glyph Substitution. Each state-entry
+//! - **Type 1**: Contextual Glyph Substitution. Each state-entry
 //!   carries two indexes into a substitution lookup; classic home
 //!   of Apple Chancery's contextual swashes.
-//! - **Type 2** — Ligature Substitution. State machine walks the
+//! - **Type 2**: Ligature Substitution. State machine walks the
 //!   input, stacking pending glyphs; on an accept entry it looks up
 //!   a ligature action array to emit a single replacement.
-//! - **Type 4** — Non-Contextual Substitution. The simplest morx
-//!   subtable type: just an AAT lookup table giving a gid → gid
+//! - **Type 4**: Non-Contextual Substitution. The simplest morx
+//!   subtable type: just an AAT lookup table giving a gid -> gid
 //!   replacement applied unconditionally to every glyph in the run.
-//! - **Type 5** — Insertion. State machine that inserts up to five
+//! - **Type 5**: Insertion. State machine that inserts up to five
 //!   glyphs before / after the current position based on context.
 //!   Used by Apple Chancery to inject decorative glyphs and by
 //!   Hebrew / Arabic AAT fonts for cantillation marks.
 //!
 //! # Feature selector handling
 //!
-//! AAT chains parameterise subtables by 16-bit feature selectors
+//! AAT chains parameterize subtables by 16-bit feature selectors
 //! (e.g. "contextual alternates on/off"). sigilbuzz applies only
 //! the chain's `defaultFlags`; a subtable's `subFeatureFlags`
 //! decides participation by ANDing with the default flags, and
@@ -78,7 +78,7 @@ const TYPE_LIGATURE: u8 = 2;
 const TYPE_NON_CONTEXTUAL: u8 = 4;
 const TYPE_INSERTION: u8 = 5;
 
-/// Parsed `morx` table — owns pointers into the source bytes.
+/// Parsed `morx` table: owns pointers into the source bytes.
 #[derive(Debug, Clone)]
 pub struct Morx<'a> {
     version: u16,
@@ -92,14 +92,14 @@ pub struct Chain<'a> {
     subtables: Vec<Subtable<'a>>,
 }
 
-/// A single `morx` subtable — a state-machine-driven transform over
+/// A single `morx` subtable: a state-machine-driven transform over
 /// the glyph stream.
 #[derive(Debug, Clone)]
 pub struct Subtable<'a> {
     /// Subtable `subFeatureFlags`. A subtable participates when
     /// `subFeatureFlags & chain.defaultFlags != 0`.
     sub_feature_flags: u32,
-    /// Parsed body, or `None` for subtable types we recognise but do
+    /// Parsed body, or `None` for subtable types we recognize but do
     /// not yet implement (e.g. type 4 non-contextual, type 5
     /// insertion). The `morx` iterator skips those silently.
     body: Option<SubtableBody<'a>>,
@@ -107,20 +107,20 @@ pub struct Subtable<'a> {
 
 #[derive(Debug, Clone)]
 enum SubtableBody<'a> {
-    /// Type 0 — Rearrangement. Body is a plain state table header
+    /// Type 0: Rearrangement. Body is a plain state table header
     /// followed by its backing arrays. Entries are 4 bytes
-    /// (newState, flags) — the 16-bit flags encode the verb in their
+    /// (newState, flags). The 16-bit flags encode the verb in their
     /// high four bits and the mark/advance flags in the low bits.
     Rearrangement(StateTableHeader<'a>),
-    /// Type 1 — Contextual substitution. State-table entries are
+    /// Type 1: Contextual substitution. State-table entries are
     /// 8 bytes: (newState, flags, markIndex, currentIndex). Marks
     /// and current-indices are into a parallel "substitution lookup
-    /// table" — an array of AAT lookups, one per index.
+    /// table": an array of AAT lookups, one per index.
     Contextual {
         state: StateTableHeader<'a>,
         substitutions: &'a [u8],
     },
-    /// Type 2 — Ligature substitution. State-table entries are
+    /// Type 2: Ligature substitution. State-table entries are
     /// 6 bytes: (newState, flags, actionIndex). Actions reference
     /// a three-array group: ligAction (u32), component (u16),
     /// ligature (u16).
@@ -130,15 +130,15 @@ enum SubtableBody<'a> {
         components: &'a [u8],
         ligatures: &'a [u8],
     },
-    /// Type 4 — Non-contextual substitution. The body is one AAT
+    /// Type 4: Non-contextual substitution. The body is one AAT
     /// lookup table mapping every input glyph id directly to its
     /// replacement; the "no rule" sentinel falls back to the input.
     NonContextual { lookup: &'a [u8] },
-    /// Type 5 — Insertion. The state machine walks the input; on an
+    /// Type 5: Insertion. The state machine walks the input; on an
     /// insertion entry, it splices `currentInsertCount` glyphs from
     /// `currentInsertList` before / after the current glyph, and
     /// `markedInsertCount` glyphs at the most recent mark. Inserted
-    /// glyphs are u16 ids drawn from the `insertion glyph table` — a
+    /// glyphs are u16 ids drawn from the `insertion glyph table`, a
     /// flat u16 array indexed by the entry's u16 list offsets.
     Insertion {
         state: StateTableHeader<'a>,
@@ -147,9 +147,9 @@ enum SubtableBody<'a> {
 }
 
 // --- Type 0 flags ---
-// bit 15: MarkFirst  — remember the current position as "first"
-// bit 14: DontAdvance — stay on the same glyph
-// bit 13: MarkLast   — remember the current position as "last"
+// bit 15: MarkFirst:   remember the current position as "first"
+// bit 14: DontAdvance: stay on the same glyph
+// bit 13: MarkLast:    remember the current position as "last"
 // bits 12-8 reserved
 // bits 7-0 verb (0..15)
 const FLAG_MARK_FIRST: u16 = 1 << 15;
@@ -158,27 +158,27 @@ const FLAG_MARK_LAST: u16 = 1 << 13;
 const FLAG_REARRANGE_VERB_MASK: u16 = 0x000F;
 
 // --- Type 1 flags ---
-// bit 15: SetMark   — record current position as the "mark"
+// bit 15: SetMark: record current position as the "mark"
 const FLAG_CTX_SET_MARK: u16 = 1 << 15;
 // bit 14: DontAdvance reused
 
 // --- Type 2 flags ---
-// bit 15: SetComponent — push current glyph onto the component stack
+// bit 15: SetComponent: push current glyph onto the component stack
 const FLAG_LIG_SET_COMPONENT: u16 = 1 << 15;
 // bit 14: DontAdvance reused
-// bit 13: PerformAction — run the ligature action referenced by the entry
+// bit 13: PerformAction: run the ligature action referenced by the entry
 const FLAG_LIG_PERFORM_ACTION: u16 = 1 << 13;
 
 // --- Type 5 flags ---
-// bit 15: SetMark — record the current position as the mark
+// bit 15: SetMark: record the current position as the mark
 const FLAG_INS_SET_MARK: u16 = 1 << 15;
 // bit 14: DontAdvance reused
-// bit 13: CurrentIsKashidaLike — kashida hint, ignored for shaping correctness
-// bit 12: MarkedIsKashidaLike   — kashida hint, ignored
-// bit 11: CurrentInsertBefore — insert relative to the current glyph: 0 = after, 1 = before
-// bit 10: MarkedInsertBefore  — insert relative to the marked glyph
-// bits 5-9: currentInsertCount (5 bits → max 31)
-// bits 0-4: markedInsertCount  (5 bits → max 31)
+// bit 13: CurrentIsKashidaLike: kashida hint, ignored for shaping correctness
+// bit 12: MarkedIsKashidaLike:  kashida hint, ignored
+// bit 11: CurrentInsertBefore:  insert relative to the current glyph (0 = after, 1 = before)
+// bit 10: MarkedInsertBefore:   insert relative to the marked glyph
+// bits 5-9: currentInsertCount (5 bits -> max 31)
+// bits 0-4: markedInsertCount  (5 bits -> max 31)
 const FLAG_INS_CURRENT_BEFORE: u16 = 1 << 11;
 const FLAG_INS_MARKED_BEFORE: u16 = 1 << 10;
 const FLAG_INS_CURRENT_COUNT_MASK: u16 = 0x03E0;
@@ -298,9 +298,9 @@ impl<'a> Morx<'a> {
     /// callers can carry cluster / unicode-props metadata across
     /// ligation without the morx module having to know about
     /// `Glyph`. A mapping entry of `usize::MAX` marks a glyph that
-    /// was synthesised without a single originating input (used for
-    /// ligatures — the ligature inherits the lowest-index parent's
-    /// cluster via [`merge_runs`]).
+    /// was synthesized without a single originating input (used for
+    /// ligatures: the ligature inherits the lowest-index parent's
+    /// cluster via `merge_runs`).
     ///
     /// The returned vector is the new glyph id stream; it is always
     /// the same length as the mapping vector.
@@ -356,7 +356,7 @@ fn parse_subtable_body(sub_type: u8, bytes: &[u8]) -> Result<Option<SubtableBody
         }
         TYPE_LIGATURE => parse_ligature_body(bytes),
         TYPE_NON_CONTEXTUAL => {
-            // The whole body IS the AAT lookup table — no extra
+            // The whole body IS the AAT lookup table: no extra
             // header, no offsets. We hand the slice straight to
             // [`lookup_via_state_table`] at apply time.
             Ok(Some(SubtableBody::NonContextual { lookup: bytes }))
@@ -501,9 +501,9 @@ fn apply_rearrangement(state: &StateTableHeader<'_>, glyphs: &mut [u16], origins
     }
 }
 
-// Rearrangement verbs — standard AAT table of 16 permutations on a
+// Rearrangement verbs: standard AAT table of 16 permutations on a
 // window described by (A = first, B = first+1, C?, D = last-1, E = last).
-// Only the verbs sigilbuzz is likely to see (1 = "Ax → xA" and
+// Only the verbs sigilbuzz is likely to see (1 = "Ax -> xA" and
 // related swaps) are implemented; unknown verbs are a no-op so an
 // unsupported rearrangement can't corrupt the glyph stream.
 fn rearrange(verb: u16, glyphs: &mut [u16], origins: &mut [usize], first: usize, last: usize) {
@@ -512,7 +512,7 @@ fn rearrange(verb: u16, glyphs: &mut [u16], origins: &mut [usize], first: usize,
         return;
     }
     // Rearrangement verbs 1 / 2 / 3 all reduce to the same single
-    // swap in sigilbuzz's two-element window coverage — a
+    // swap in sigilbuzz's two-element window coverage, a
     // conservative subset. Rarer verbs (4..=15) handle 3- to
     // 5-element windows and stay no-op until a real font needs them,
     // because producing a wrong permutation would corrupt the glyph
@@ -724,7 +724,7 @@ fn perform_ligature_action(
         let raw_off = action & LIG_ACTION_OFFSET_MASK;
         // Sign-extend from the 30-bit signed offset field to i32. Do
         // the arithmetic with two's-complement-safe casts so clippy's
-        // cast_possible_wrap stays happy — we actively want the wrap,
+        // cast_possible_wrap stays happy. We actively want the wrap,
         // that is the point of the conversion.
         let signed_off: i32 = if action & LIG_ACTION_OFFSET_SIGN != 0 {
             #[allow(clippy::cast_possible_wrap)]
@@ -754,7 +754,7 @@ fn perform_ligature_action(
                     // Replace the earliest consumed slot with the
                     // ligature, drop the later slots. Sort in
                     // ascending order so the earliest index lands
-                    // first — stack was LIFO so the natural order is
+                    // first. Stack was LIFO so the natural order is
                     // reversed.
                     consumed.sort_unstable();
                     let keep = consumed[0];
@@ -848,7 +848,7 @@ fn apply_insertion(
             ((flags & FLAG_INS_CURRENT_COUNT_MASK) >> FLAG_INS_CURRENT_COUNT_SHIFT) as usize;
         let mark_count = (flags & FLAG_INS_MARKED_COUNT_MASK) as usize;
 
-        // Apply marked insertions first — they sit earlier in the
+        // Apply marked insertions first. They sit earlier in the
         // run, so splicing them first leaves the current-position
         // index valid afterwards. When the marked position lands at
         // or before the cursor, we shift the cursor forward by the
@@ -924,7 +924,7 @@ fn splice_insertions(
 
 /// Reads `count` u16 glyph ids from the insertion-glyph table
 /// starting at `index` (units of u16, not bytes). Returns an empty
-/// vector if the slice doesn't cover the request — the caller treats
+/// vector if the slice doesn't cover the request. The caller treats
 /// that as "no insertion".
 fn read_insertions(table: &[u8], index: u16, count: usize) -> Vec<u16> {
     let start = index as usize * 2;
@@ -986,7 +986,7 @@ mod tests {
         //
         // Classes (6): 0=EOT, 1=OOB, 2=DEL, 3=EOL, 4=f, 5=i.
         //
-        // State table: 3 states × 6 classes × u16.
+        // State table: 3 states * 6 classes * u16.
         //   State 0 (start):
         //     class 4 (f) -> entry 1 (newState=1, SetComponent)
         //     everything else -> entry 0 (newState=0, noop)
@@ -995,13 +995,13 @@ mod tests {
         //                             SetComponent | PerformAction)
         //     everything else -> entry 0 (noop, reset)
         //
-        // Entries (3 × 6 bytes):
+        // Entries (3 * 6 bytes):
         //   #0: newState=0, flags=0,              actionIdx=0
         //   #1: newState=1, flags=0x8000 (SetComp), actionIdx=0
         //   #2: newState=0, flags=0xA000 (SetComp|Perform), actionIdx=0
         //
-        // LigAction array (1 × u32):
-        //   #0: LAST | STORE | offset=0        → 0xC000_0000
+        // LigAction array (1 * u32):
+        //   #0: LAST | STORE | offset=0        -> 0xC000_0000
         //
         // Components (f_gid entry): the sum of offsets accumulated
         // into ligature-table index; we want the accumulated
@@ -1010,13 +1010,13 @@ mod tests {
         // glyph + signed_action_offset. With signed_offset = 0 and
         // glyph in {f_gid, i_gid} we read components[f_gid] and
         // components[i_gid]. Size the components table generously,
-        // zero everywhere except — we want ligatures[0] = lig_gid.
+        // zero everywhere except: we want ligatures[0] = lig_gid.
         //
         // So: components is size max(f_gid, i_gid)+1, all zero.
         //     ligatures is size 1, ligatures[0] = lig_gid.
         //
         // NB: With one action word using LAST|STORE, both the 'f'
-        // and the 'i' push pops one action read — but the state
+        // and the 'i' push pops one action read, but the state
         // machine is wired so only the second pop happens on the
         // last (PerformAction) entry, and it is that single read
         // that carries LAST|STORE. See FLAG_LIG_PERFORM_ACTION
@@ -1064,7 +1064,7 @@ mod tests {
         body.extend_from_slice(&0xA000u16.to_be_bytes());
         body.extend_from_slice(&0u16.to_be_bytes());
 
-        // Ligature actions: two words — one per component. Walked in
+        // Ligature actions: two words, one per component. Walked in
         // reverse pop order, so the first word corresponds to the
         // last-pushed glyph (i_gid here) and the second (with LAST |
         // STORE) to the first-pushed (f_gid). Both contribute zero
@@ -1173,12 +1173,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Type 4 — Non-contextual substitution.
+    // Type 4: Non-contextual substitution.
     // -----------------------------------------------------------------
 
     /// Builds a morx version-2 table with a single chain containing
     /// a single type-4 subtable. The subtable's body is one AAT
-    /// lookup (format 6) that maps `pairs` (gid_in → gid_out).
+    /// lookup (format 6) that maps `pairs` (gid_in -> gid_out).
     fn build_non_contextual_morx(pairs: &[(u16, u16)]) -> Vec<u8> {
         let mut sorted = pairs.to_vec();
         sorted.sort_by_key(|p| p.0);
@@ -1210,7 +1210,7 @@ mod tests {
 
     #[test]
     fn morx_non_contextual_substitutes_known_glyphs() {
-        // gid 5 → gid 50, gid 7 → gid 70. Untouched glyphs pass through.
+        // gid 5 -> gid 50, gid 7 -> gid 70. Untouched glyphs pass through.
         let bytes = build_non_contextual_morx(&[(5, 50), (7, 70)]);
         let m = Morx::parse(&bytes).unwrap();
         let (out, _) = m.apply(&[5, 9, 7]);
@@ -1234,7 +1234,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Type 5 — Insertion.
+    // Type 5: Insertion.
     // -----------------------------------------------------------------
 
     /// Builds a morx version-2 table with one chain that carries a
@@ -1244,9 +1244,9 @@ mod tests {
     /// State machine:
     ///   class 4 = trigger_gid; everything else falls through.
     ///   State 0 (only state):
-    ///     class 4 → entry 1 (currentInsertCount=1, inserts the
+    ///     class 4 -> entry 1 (currentInsertCount=1, inserts the
     ///                        single-glyph table starting at index 0).
-    ///     other classes → entry 0 (noop).
+    ///     other classes -> entry 0 (noop).
     fn build_insertion_morx_after_trigger(trigger_gid: u16, marker_gid: u16) -> Vec<u8> {
         let class_lookup = build_lookup_format6(&[(trigger_gid, 4)]);
 
@@ -1254,8 +1254,8 @@ mod tests {
         //   0..16   state-table header
         //  16..20   insertionGlyphTable offset (u32)
         //  20..     class lookup (aligned to 2)
-        //  ..       state array (1 state × 5 classes × u16) = 10 B
-        //  ..       entry array (2 entries × 8 B) = 16 B
+        //  ..       state array (1 state * 5 classes * u16) = 10 B
+        //  ..       entry array (2 entries * 8 B) = 16 B
         //  ..       insertion glyph table (one u16 = marker_gid)
         let n_classes: u32 = 5;
         let n_states: u32 = 1;
@@ -1295,8 +1295,8 @@ mod tests {
         body.extend_from_slice(&0xFFFFu16.to_be_bytes()); // cur idx
         body.extend_from_slice(&0xFFFFu16.to_be_bytes()); // mark idx
                                                           // #1 insert 1 glyph after current (CurrentInsertCount=1, no
-                                                          // before-flag → after, list at index 0).
-                                                          // Flags: count=1 in bits 5..9 → 1 << 5 = 0x0020.
+                                                          // before-flag -> after, list at index 0).
+                                                          // Flags: count=1 in bits 5..9 -> 1 << 5 = 0x0020.
         let entry1_flags: u16 = 1 << FLAG_INS_CURRENT_COUNT_SHIFT;
         body.extend_from_slice(&0u16.to_be_bytes()); // newState
         body.extend_from_slice(&entry1_flags.to_be_bytes());
@@ -1336,7 +1336,7 @@ mod tests {
         let (out, origins) = m.apply(&[1, 7, 2]);
         // Trigger lands at index 1; marker is inserted *after* it.
         assert_eq!(out, &[1, 7, 99, 2]);
-        // Inserted glyph has no originating input — marked with
+        // Inserted glyph has no originating input, marked with
         // usize::MAX.
         assert_eq!(origins, &[0, 1, usize::MAX, 2]);
     }
@@ -1368,7 +1368,7 @@ mod tests {
     #[test]
     fn morx_skips_subtable_with_disabled_feature() {
         // Build a normal morx and then clobber the chain's
-        // defaultFlags to zero — the subtable's sub_feature_flags &
+        // defaultFlags to zero. The subtable's sub_feature_flags &
         // default_flags = 0, so apply should be a noop.
         let mut bytes = build_ligature_morx(10, 20, 99);
         // table header 8 bytes, then chain defaultFlags is the next

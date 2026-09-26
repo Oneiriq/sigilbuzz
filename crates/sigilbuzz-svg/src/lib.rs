@@ -1,14 +1,14 @@
-//! `sigilbuzz-svg` — SVG serialiser for sigilbuzz glyph outlines and
+//! `sigilbuzz-svg`: SVG serializer for sigilbuzz glyph outlines and
 //! COLRv1 color glyphs.
 //!
 //! sigilbuzz exposes glyph outlines as a flat
-//! [`PathOp`](sigilbuzz::tables::PathOp) stream and (via the
+//! [`PathOp`] stream and (via the
 //! `sigilbuzz-paint` companion) a flat [`DrawCmd`](sigilbuzz_paint::DrawCmd)
 //! stream for color glyphs. This crate turns either of those into a
 //! self-contained `<svg>` element ready to drop into a document, a
 //! preview tool, or a font-debug page.
 //!
-//! The output is plain text — there is no XML library on the write
+//! The output is plain text: there is no XML library on the write
 //! path. SVG path data, gradient stops, and transform matrices are all
 //! emitted with `core::fmt` formatting and a single
 //! deterministic-precision policy ([`PRECISION`] decimals). Same input
@@ -83,7 +83,7 @@ pub const VIEWBOX_MARGIN: f32 = 32.0;
 // Public outline API
 // =========================================================================
 
-/// Serialises the static outline of `gid` into a complete SVG
+/// Serializes the static outline of `gid` into a complete SVG
 /// document. Returns `None` when the glyph has no outline (whitespace
 /// or out-of-range gid) or the font carries no outline table the core
 /// crate can read.
@@ -99,8 +99,8 @@ pub fn glyph_to_svg(face: &Face<'_>, gid: GlyphId) -> Option<String> {
     glyph_to_svg_at_coords(face, gid, &[])
 }
 
-/// Variable-font flavour of [`glyph_to_svg`]. `coords` is the
-/// normalized axis vector — pass an empty slice for the static
+/// Variable-font flavor of [`glyph_to_svg`]. `coords` is the
+/// normalized axis vector. Pass an empty slice for the static
 /// outline (equivalent to [`glyph_to_svg`]).
 #[must_use]
 pub fn glyph_to_svg_at_coords(face: &Face<'_>, gid: GlyphId, coords: &[F2Dot14]) -> Option<String> {
@@ -120,8 +120,8 @@ pub fn glyph_to_svg_at_coords(face: &Face<'_>, gid: GlyphId, coords: &[F2Dot14])
 /// Converts a `PathOp` stream into an SVG `d=` attribute payload.
 ///
 /// The mapping is the canonical one from the SVG 1.1 path grammar:
-/// `MoveTo` → `M`, `LineTo` → `L`, `QuadTo` → `Q`, `CubicTo` → `C`,
-/// `Close` → `Z`. Each op is space-prefixed so the output is a
+/// `MoveTo` -> `M`, `LineTo` -> `L`, `QuadTo` -> `Q`, `CubicTo` -> `C`,
+/// `Close` -> `Z`. Each op is space-prefixed so the output is a
 /// well-formed path data string when concatenated.
 #[must_use]
 pub fn path_data(ops: &[PathOp]) -> String {
@@ -169,7 +169,7 @@ fn append_cmd(out: &mut String, cmd: char, coords: &[f32]) {
 /// trim policy means the same input always produces the same bytes.
 ///
 /// Non-finite inputs (NaN, ±∞) are coerced to `0` so the emitted SVG
-/// stays well-formed — `format!("{NaN:.3}")` round-trips to the
+/// stays well-formed: `format!("{NaN:.3}")` round-trips to the
 /// literal string `"NaN"` and `format!("{inf:.3}")` to `"inf"`,
 /// neither of which is a valid SVG numeric token. A pathological
 /// glyph outline (e.g. a CFF charstring whose blend evaluation
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn deterministic_output() {
-        // Same input twice → identical bytes.
+        // Same input twice -> identical bytes.
         let svg1 = render_outline_svg("M 0 0 Z", (0.0, 0.0, 5.0, 5.0));
         let svg2 = render_outline_svg("M 0 0 Z", (0.0, 0.0, 5.0, 5.0));
         assert_eq!(svg1, svg2);
@@ -398,7 +398,7 @@ mod tests {
         // whose blend evaluation overflows under extreme variation
         // coords) could leak NaN / ±inf into the float formatter, which
         // round-trips them as the literal strings "NaN" / "inf" / "-inf"
-        // — none of which is a valid SVG numeric token. The emitter
+        // (none of which is a valid SVG numeric token). The emitter
         // must coerce non-finite values to 0 so the document stays
         // well-formed.
         for &bad in &[f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
@@ -438,7 +438,7 @@ mod tests {
         let d = path_data(&ops);
         assert!(!d.contains("NaN"), "NaN leaked: {d:?}");
         assert!(!d.contains("inf"), "inf leaked: {d:?}");
-        // The SVG must remain well-formed — verify only valid path
+        // The SVG must remain well-formed: verify only valid path
         // command letters and digits / spaces / minus / dot show up.
         for ch in d.chars() {
             assert!(

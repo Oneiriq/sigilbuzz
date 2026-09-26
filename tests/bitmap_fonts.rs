@@ -127,7 +127,7 @@ fn sbix_synthetic_face_glyph_bitmap_unified_accessor() {
 
 #[test]
 fn face_glyph_bitmap_returns_none_for_outline_only_font() {
-    // Open Sans has no CBDT, no sbix — should yield None cleanly.
+    // Open Sans has no CBDT, no sbix. Should yield None cleanly.
     let bytes = std::fs::read("tests/fixtures/opensans_regular.ttf").unwrap();
     let blob = Blob::new(&bytes);
     let face = Face::parse(&blob, 0).unwrap();

@@ -1,23 +1,25 @@
 # sigilbuzz-render
 
-Software CPU rasterizer for [sigilbuzz](https://github.com/Oneiriq/sigilbuzz):
-turns glyph outlines (TrueType, CFF, CFF2, VARC) into 8-bit alpha pixmaps
-and composes COLRv0 layered colour glyphs against a CPAL palette.
+A software rasterizer for [sigilbuzz](https://github.com/Oneiriq/sigilbuzz). It turns
+glyphs into pixels on the CPU, for every kind of glyph a modern font can carry.
 
 ## What it does
 
-- Walks `Face::glyph_outline_at_coords` and flattens the resulting
-  quadratic / cubic Bezier outline.
-- Runs a non-zero-winding trapezoid scanline rasterizer with 256-level
-  anti-aliasing. Pure Rust, zero runtime dependencies beyond
-  `sigilbuzz` and `sigilbuzz-paint`.
-- For colour fonts, composes COLRv0 layers (`gid` × palette entry)
-  via `over` blending into a premultiplied RGBA pixmap.
-- Variable-font aware: thread normalized axis coords through every
-  entry point.
+- Outlines from TrueType, CFF, CFF2, and VARC fonts become 8-bit alpha pixmaps. The
+  rasterizer is a non-zero-winding trapezoid scanline algorithm with 256-level
+  anti-aliasing.
+- COLRv0 and COLRv1 color glyphs render into premultiplied RGBA pixmaps, including
+  gradients, compositing, clipping, and variations.
+- SVG-in-OT glyphs render too: paths, shapes, strokes and dashes, gradients, `<use>`,
+  clip paths, masks, a set of filter primitives, and `<textPath>`.
+- Embedded bitmaps from CBDT, sbix, and EBDT tables are decoded and scaled. PNG, JPEG
+  (baseline and progressive), and TIFF images are supported.
+- Every entry point takes normalized axis coordinates, so variable fonts work
+  throughout.
 
-COLRv1, SVG-in-OT and CBDT/sbix bitmaps are out of scope here and land
-in 0.15.0+.
+It also exposes the pieces it is built from: `flatten` and `flatten_grouped` turn
+curves into line segments (the grouped form is what MSDF generators need), and
+`encode_png` / `decode_png` handle PNG.
 
 ## Quick start
 
@@ -29,17 +31,22 @@ let blob = Blob::from_path("./MyFont.ttf").unwrap();
 let face = Face::parse_bytes(blob.as_bytes(), 0).unwrap();
 let rast = Rasterizer::new();
 let pix = rast.rasterize_glyph(&face, 42, 48.0, &[]).unwrap();
-// pix.data: Vec<u8> of length pix.width * pix.height (alpha).
+// pix.data is a Vec<u8> of pix.width * pix.height alpha values.
 ```
+
+## Dependencies
+
+`sigilbuzz`, `sigilbuzz-paint` for COLRv1, and `miniz_oxide` for PNG compression.
+`docs/deps.md` in the workspace root explains the last one.
 
 ## Cargo features
 
-| Feature | Default | What it does                            |
-|---------|---------|-----------------------------------------|
-| `std`   | yes     | Standard-library conveniences.          |
+| Feature | Default | What it does |
+|---|---|---|
+| `std` | yes | Standard library conveniences. |
 
-Disable default features for `no_std + alloc` builds.
+Turn off default features for `no_std` with `alloc`.
 
 ## License
 
-Apache-2.0. See the workspace root `LICENSE-APACHE`.
+Apache-2.0. See the workspace root `LICENSE`.

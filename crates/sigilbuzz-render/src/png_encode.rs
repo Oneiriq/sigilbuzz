@@ -6,14 +6,14 @@
 //!
 //! ```text
 //!   ColorPixmap (premul RGBA)
-//!         │  un-premultiply per pixel (a==0 → 0,0,0)
-//!         ▼
+//!         |  un-premultiply per pixel (a==0 -> 0,0,0)
+//!         v
 //!   raw scanlines: filter byte 0 + width*4 bytes
-//!         │  miniz_oxide zlib (level 6)
-//!         ▼
+//!         |  miniz_oxide zlib (level 6)
+//!         v
 //!   IDAT body
-//!         │
-//!         ▼
+//!         |
+//!         v
 //!   signature || IHDR || IDAT || IEND
 //! ```
 //!
@@ -25,11 +25,11 @@
 //!   slightly larger files than a smart filter heuristic would yield.
 //! - **No interlacing.** Adam7 is decoder-side only.
 //! - **No ancillary chunks.** No `gAMA` / `sRGB` / `pHYs` /
-//!   `tEXt` — bytes carry the colour they were given.
+//!   `tEXt`. Bytes carry the color they were given.
 //!
 //! # Determinism
 //!
-//! Same input → byte-identical output. miniz_oxide's deflate is
+//! Same input -> byte-identical output. miniz_oxide's deflate is
 //! deterministic at fixed compression level; the encoder injects no
 //! entropy beyond the pixel data.
 
@@ -37,7 +37,7 @@ use alloc::vec::Vec;
 
 use crate::pixmap::{ColorPixmap, Pixmap};
 
-/// PNG signature bytes — every PNG starts with this 8-byte header.
+/// PNG signature bytes: every PNG starts with this 8-byte header.
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 
 /// Encode a [`ColorPixmap`] as a complete PNG byte stream.
@@ -48,7 +48,7 @@ const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 /// regardless of the stored RGB (which is already zero in our pipeline
 /// but defensive-zeroed here too).
 ///
-/// A zero-dimension pixmap encodes to a syntactically valid 0×0 PNG —
+/// A zero-dimension pixmap encodes to a syntactically valid 0x0 PNG:
 /// the spec does not actually forbid it on the encoding side, although
 /// our decoder rejects zero-dimension PNGs on the way back in. Callers
 /// that round-trip through `decode_png` should guard against empty
@@ -78,10 +78,10 @@ pub fn encode_png(pixmap: &ColorPixmap) -> Vec<u8> {
 ///
 /// The single-byte coverage value is written as the gray sample. The
 /// decoder treats grayscale `g` as RGBA `(g, g, g, 255)`, so a
-/// `Pixmap → encode_png_alpha → decode_png` round-trip surfaces the
+/// `Pixmap -> encode_png_alpha -> decode_png` round-trip surfaces the
 /// original alpha as `pixmap_out.get(x, y)[0]`. We choose color type 0
 /// rather than color type 4 (gray + alpha) because the consumer of an
-/// alpha-only Pixmap is typically a glyph mask — the alpha *is* the
+/// alpha-only Pixmap is typically a glyph mask: the alpha *is* the
 /// gray sample, and emitting it as such avoids redundant
 /// `(value, value)` byte pairs in the IDAT.
 #[must_use]
@@ -97,8 +97,8 @@ pub fn encode_png_alpha(pixmap: &Pixmap) -> Vec<u8> {
     assemble_png(pixmap.width, pixmap.height, 0, &raw)
 }
 
-/// Build the four PNG sections — signature, IHDR, IDAT, IEND — from
-/// width/height/colour-type/raw-scanline-bytes and concatenate.
+/// Build the four PNG sections (signature, IHDR, IDAT, IEND) from
+/// width/height/color-type/raw-scanline-bytes and concatenate.
 ///
 /// `raw` is the per-row `(filter byte || row payload)` block expected
 /// by the PNG spec; this routine zlib-compresses it into the IDAT
@@ -130,8 +130,8 @@ fn assemble_png(width: u32, height: u32, color_type: u8, raw: &[u8]) -> Vec<u8> 
 /// Convert a single premultiplied RGB sample back to straight alpha.
 ///
 /// Formula: `s = (p * 255 + a/2) / a` (rounded division). When `a == 0`
-/// the colour is fully transparent and the spec is silent on what RGB
-/// to write, so we zero it out — this is what consumers expect when a
+/// the color is fully transparent and the spec is silent on what RGB
+/// to write, so we zero it out. This is what consumers expect when a
 /// PNG is run through `decode_png` again.
 ///
 /// Saturates at 255 so a malformed pixmap with `p > a` (which violates
@@ -159,7 +159,7 @@ fn unpremultiply(r: u8, g: u8, b: u8, a: u8) -> (u8, u8, u8) {
 
 /// Append a single PNG chunk (length, type, data, CRC) to `out`.
 ///
-/// The CRC32 is computed over the chunk **type and data** together —
+/// The CRC32 is computed over the chunk **type and data** together:
 /// the length prefix is excluded, per the PNG spec.
 fn write_chunk(out: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) {
     // u32 BE length.
@@ -174,13 +174,13 @@ fn write_chunk(out: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) {
 }
 
 // ---------------------------------------------------------------------------
-// CRC32 (ISO 3309), the standard PNG flavour.
+// CRC32 (ISO 3309), the standard PNG flavor.
 // ---------------------------------------------------------------------------
 
 /// Streaming CRC32 with the PNG-standard polynomial (`0xEDB88320`,
 /// reflected `0x04C11DB7`). The table is built at compile time via a
-/// `const fn` — no `std::sync::Once`, no allocator touch, no thread
-/// synchronisation needed (pure function of the polynomial).
+/// `const fn`: no `std::sync::Once`, no allocator touch, no thread
+/// synchronization needed (pure function of the polynomial).
 #[derive(Debug, Clone, Copy)]
 struct Crc32 {
     state: u32,
@@ -207,7 +207,7 @@ impl Crc32 {
 }
 
 /// Build the 256-entry CRC32 lookup table. `const fn` so the table is
-/// available at compile time — no runtime initialisation cost and no
+/// available at compile time, no runtime initialization cost and no
 /// static-mut data. The polynomial constant `0xEDB88320` is the
 /// reflected form of the ISO 3309 polynomial, which is what the PNG
 /// spec uses (Section 5.5).
@@ -270,7 +270,7 @@ mod tests {
     fn write_chunk_emits_length_type_data_crc() {
         // A 13-byte IHDR-shaped payload: width=1, height=1, all zeros
         // for the rest. We only verify the framing here, not the IHDR
-        // semantics — that's the next commit.
+        // semantics. That's the next commit.
         let mut buf = Vec::new();
         let payload = [0u8; 13];
         write_chunk(&mut buf, *b"IHDR", &payload);
@@ -363,7 +363,7 @@ mod tests {
             }
         }
         // Punch a transparent corner at (0, 0). Premul invariant:
-        // a == 0 → rgb == 0, which is what we store.
+        // a == 0 -> rgb == 0, which is what we store.
         let idx = 0;
         p.data[idx] = 0;
         p.data[idx + 1] = 0;
@@ -383,7 +383,7 @@ mod tests {
         let decoded = decode_png(&bytes).unwrap();
         assert_eq!(decoded.width, 1);
         assert_eq!(decoded.height, 1);
-        // Round-trip through unpremul → straight RGBA → re-premul. With
+        // Round-trip through unpremul -> straight RGBA -> re-premul. With
         // rounded division on both sides, premul values can shift by ±1.
         let got = decoded.get(0, 0);
         assert!((got[0] as i32 - 10).abs() <= 1, "r drift: {} vs 10", got[0]);
@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn encode_png_wide_1024x1() {
-        // Stripe a horizontal gradient across a 1024×1 pixmap and make
+        // Stripe a horizontal gradient across a 1024x1 pixmap and make
         // sure the encoder handles a pathologically short, wide image
         // without error and that decode reproduces every pixel exactly.
         let mut p = ColorPixmap::new(1024, 1);

@@ -10,7 +10,7 @@
 //!
 //! The triplet decoder follows the algorithmic form used by Google's
 //! reference `woff2` C++ implementation rather than a 128-entry
-//! lookup table — the spec defines the same encoding both ways, but
+//! lookup table. The spec defines the same encoding both ways, but
 //! the algorithmic form is unambiguous about sign conventions and
 //! the splitting of the 4/4 X/Y nibbles.
 
@@ -194,7 +194,7 @@ pub(crate) fn reconstruct_glyf_and_loca(payload: &[u8]) -> Result<(Vec<u8>, Vec<
 
         if n_contours == 0 {
             // Empty glyph: zero-length record. WOFF2 §5.1 forbids
-            // an empty glyph from carrying a stored bbox — accepting
+            // an empty glyph from carrying a stored bbox: accepting
             // it silently would leave the bbox stream cursor in the
             // wrong place and corrupt every subsequent glyph's bbox
             // decode (Google's reference woff2 rejects this for the
@@ -548,7 +548,7 @@ mod tests {
         // instructionStream: empty.
 
         let result = reconstruct_glyf_and_loca(&payload);
-        // Per WOFF2 §5.1 the decoder must reject this payload — an
+        // Per WOFF2 §5.1 the decoder must reject this payload: an
         // empty glyph with a bbox bit set is malformed input.
         assert!(
             result.is_err(),

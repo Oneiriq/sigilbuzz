@@ -3,8 +3,8 @@
 //! `hmtx` packs `numberOfHMetrics` long-metric records (advance + LSB)
 //! at the front, then a tail of LSB-only records for glyphs whose
 //! advance equals the last long-metric. We re-emit one long metric
-//! per kept gid; the optimisation of merging trailing identical
-//! advances into the LSB tail is left for a follow-up — the size
+//! per kept gid; the optimization of merging trailing identical
+//! advances into the LSB tail is left for a follow-up. The size
 //! cost is at most 2 bytes per glyph.
 
 use alloc::vec::Vec;
@@ -72,6 +72,6 @@ pub fn subset_hmtx(face: &Face<'_>, kept: &[u16]) -> Result<HmtxOut, SubsetError
 #[cfg(test)]
 mod tests {
     // hmtx tests live in the integration suite where a real Face is
-    // available — the unit-level surface here is just a couple of
+    // available. The unit-level surface here is just a couple of
     // arithmetic loops.
 }

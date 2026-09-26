@@ -7,12 +7,12 @@
 //! item, plus the per-region scalars that combine into the final
 //! advance delta. Subsetting walks every kept glyph, collects the
 //! `(outer, inner)` pairs it references, and emits a fresh store
-//! that holds only those rows — deduped across the source — plus
+//! that holds only those rows (deduped across the source) plus
 //! the regions those rows reference.
 //!
 //! The rewriter is generic over the rows: callers (HVAR today,
 //! VVAR / MVAR later) supply the `(outer, inner)` set in
-//! deterministic order and receive a remap from old → new
+//! deterministic order and receive a remap from old to new
 //! `(outer, inner)`. The output is a single `ItemVariationData`
 //! subtable in outer-index 0; per-glyph mappings are then short
 //! `(0, new_inner)` pairs the caller can pack into the densest
@@ -38,7 +38,7 @@ pub(crate) struct PulledRow {
 
 /// Result of rebuilding an `ItemVariationStore` from a kept-row set.
 pub(crate) struct RebuiltStore {
-    /// Serialized `ItemVariationStore` bytes — caller embeds these
+    /// Serialized `ItemVariationStore` bytes. Caller embeds these
     /// at some offset inside the new HVAR.
     pub bytes: Vec<u8>,
     /// Number of items in the rebuilt store (== kept-row count).
@@ -135,7 +135,7 @@ pub(crate) struct RegionTriple {
 /// has exactly one `ItemVariationData` subtable (outer index 0)
 /// containing every kept row in the order supplied. Region indexes
 /// are remapped through the deduped output region list. All deltas
-/// are emitted in the wide form (i16) for simplicity — every source
+/// are emitted in the wide form (i16) for simplicity. Every source
 /// HVAR we have measured already uses this form for the bulk of its
 /// rows, and the byte-budget difference for short rows is small
 /// against the table's overall size.
@@ -159,7 +159,7 @@ pub(crate) fn rebuild_store(
     }
 
     // Build the new region list in the deduped order, plus a remap
-    // from source region index → new region index.
+    // from source region index to new region index.
     let mut region_remap: Vec<Option<u16>> = alloc::vec![None; source_regions.len()];
     for (new_i, &old_i) in kept_regions.iter().enumerate() {
         if (old_i as usize) < region_remap.len() {
@@ -170,7 +170,7 @@ pub(crate) fn rebuild_store(
     // The new subtable references *every* kept region in its
     // per-row delta arrays. Source rows that referenced only a
     // subset of regions are padded with zero deltas in the slots
-    // they didn't reference — this lets the output use a single
+    // they didn't reference. This lets the output use a single
     // shared region-index list for every row, which keeps the
     // emitter trivial and the layout deterministic.
     let region_index_count = kept_regions.len() as u16;
@@ -198,7 +198,7 @@ pub(crate) fn rebuild_store(
             .map(|r| r.axes.as_slice())
             .unwrap_or(&[]);
         // If the source had fewer axes than the header advertises,
-        // pad with zero axes — keeps the byte layout valid.
+        // pad with zero axes (keeps the byte layout valid).
         for axis_i in 0..source_axis_count as usize {
             let (start, peak, end) = triples.get(axis_i).copied().unwrap_or((0.0, 0.0, 0.0));
             write_f2dot14(&mut out, start);
@@ -449,7 +449,7 @@ mod tests {
         // first row referenced old_region 1 and so its delta lives
         // in new-region slot 0.
         assert_eq!(pulled0.deltas, alloc::vec![10, 0]);
-        // Second row referenced old_region 0 → slot 1.
+        // Second row referenced old_region 0 -> slot 1.
         assert_eq!(pulled1.deltas, alloc::vec![0, 20]);
     }
 }

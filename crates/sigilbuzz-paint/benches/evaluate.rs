@@ -6,12 +6,13 @@
 //! a different paint shape so regressions show up per-feature
 //! instead of being averaged into one number.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use sigilbuzz::Face;
 use sigilbuzz_paint::{evaluate, evaluate_at_coords};
+use std::hint::black_box;
 
 // =========================================================================
-// Fixture builders — copies of the helpers in tests/evaluator.rs. The
+// Fixture builders: copies of the helpers in tests/evaluator.rs. The
 // duplication is intentional: benches cannot reach into a sibling
 // crate's test sources, and pulling in a third file just for the
 // helpers would mean wiring up a `[[bin]]` or a path-included
@@ -286,7 +287,7 @@ fn bench_evaluate(c: &mut Criterion) {
         });
     }
 
-    // PaintVar* with a coord slice — separate benchmark because it
+    // PaintVar* with a coord slice: separate benchmark because it
     // uses `evaluate_at_coords` rather than `evaluate`.
     let var_bytes = var_solid_fixture();
     let var_face = Face::parse_bytes(&var_bytes, 0).expect("face");

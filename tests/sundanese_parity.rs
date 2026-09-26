@@ -33,7 +33,7 @@ const CORPUS: &[Case] = &[
         note: "empty",
         compare_rustybuzz: true,
     },
-    // ᮃ U+1B83 — letter a. Single base.
+    // ᮃ U+1B83: letter a. Single base.
     Case {
         text: "\u{1B83}",
         note: "a alone",

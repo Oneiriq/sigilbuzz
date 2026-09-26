@@ -1,4 +1,4 @@
-//! `maxp` — maximum profile.
+//! `maxp`: maximum profile.
 //!
 //! Two distinct layouts exist: version 0.5 (CFF / OpenType outlines)
 //! which is six bytes and only carries `numGlyphs`, and version 1.0

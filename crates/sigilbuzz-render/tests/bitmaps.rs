@@ -3,9 +3,9 @@
 //! Drives [`Rasterizer::rasterize_bitmap_glyph`] against the
 //! synthetic CBDT and sbix fixtures already used by the parser tests
 //! (`tests/fixtures/cbdt_synthetic.ttf`,
-//! `tests/fixtures/sbix_synthetic.ttf`). Both fixtures ship a 1×1
-//! transparent RGBA PNG at a 32 ppem strike — small but enough to
-//! validate the full pipeline (face → strike → PNG decode → rescale).
+//! `tests/fixtures/sbix_synthetic.ttf`). Both fixtures ship a 1x1
+//! transparent RGBA PNG at a 32 ppem strike, small but enough to
+//! validate the full pipeline (face -> strike -> PNG decode -> rescale).
 
 use sigilbuzz::{Blob, Face};
 use sigilbuzz_render::{
@@ -21,11 +21,11 @@ fn cbdt_synthetic_renders_at_strike_size() {
     let blob = Blob::new(CBDT_FONT);
     let face = Face::parse(&blob, 0).unwrap();
     let rast = Rasterizer::new();
-    // Strike is 32 ppem; ask for 32 → no rescale.
+    // Strike is 32 ppem; ask for 32 -> no rescale.
     let pix = rast
         .rasterize_bitmap_glyph(&face, 1, 32.0, &[])
         .expect("CBDT bitmap renders");
-    // Synthetic PNG is 1×1 RGBA-transparent.
+    // Synthetic PNG is 1x1 RGBA-transparent.
     assert_eq!(pix.width, 1);
     assert_eq!(pix.height, 1);
     assert_eq!(pix.get(0, 0), [0, 0, 0, 0]);
@@ -36,7 +36,7 @@ fn cbdt_synthetic_rescales_when_size_off_strike() {
     let blob = Blob::new(CBDT_FONT);
     let face = Face::parse(&blob, 0).unwrap();
     let rast = Rasterizer::new();
-    // Strike is 32 ppem; ask for 64 → 2× upscale of a 1×1 to 2×2.
+    // Strike is 32 ppem; ask for 64 -> 2x upscale of a 1x1 to 2x2.
     let pix = rast
         .rasterize_bitmap_glyph(&face, 1, 64.0, &[])
         .expect("CBDT bitmap renders at upscaled size");
@@ -86,7 +86,7 @@ fn rescale_zero_size_is_empty() {
 }
 
 /// Issue #226: a hostile combination of small-ppem strike + extreme
-/// `size_pt` used to multiply up to a `u32::MAX × u32::MAX × 4`
+/// `size_pt` used to multiply up to a `u32::MAX * u32::MAX * 4`
 /// allocation that panicked with "capacity overflow" in
 /// `ColorPixmap::new`. The fix caps the rescale target at 16384 per
 /// dim (matching the PNG decoder ceiling) and surfaces the structured
@@ -96,8 +96,8 @@ fn rasterize_bitmap_extreme_size_pt_returns_bad_size_not_oom_panic() {
     let blob = Blob::new(CBDT_FONT);
     let face = Face::parse(&blob, 0).unwrap();
     let rast = Rasterizer::new();
-    // Strike is 32 ppem with a 1×1 PNG. size_pt = 1e9 yields scale =
-    // 1e9 / 32 ≈ 3.1e7, dst dims would be ≈ 3.1e7 — way past the cap.
+    // Strike is 32 ppem with a 1x1 PNG. size_pt = 1e9 yields scale =
+    // 1e9 / 32 ~ 3.1e7, dst dims would be ~3.1e7, way past the cap.
     let err = rast
         .rasterize_bitmap_glyph(&face, 1, 1.0e9, &[])
         .expect_err("extreme size_pt must not OOM-panic");
@@ -117,7 +117,7 @@ fn rescale_bilinear_extreme_target_is_empty_not_panic() {
     let out = rescale_bilinear(&src, u32::MAX, u32::MAX);
     assert!(
         out.is_empty(),
-        "extreme dst dims must clamp to empty, got {}×{}",
+        "extreme dst dims must clamp to empty, got {}x{}",
         out.width,
         out.height
     );
@@ -125,9 +125,9 @@ fn rescale_bilinear_extreme_target_is_empty_not_panic() {
 
 #[test]
 fn decode_png_round_trips_with_known_payload() {
-    // 1×1 fully transparent RGBA PNG. Built deterministically by
+    // 1x1 fully transparent RGBA PNG. Built deterministically by
     // `build_cbdt_fixture.py`'s `_make_png(1, 1, b"\x00\x00\x00\x00")`
-    // — the same shape the CBDT/sbix fixtures embed.
+    // (the same shape the CBDT/sbix fixtures embed).
     let png_hex = concat!(
         "89504e470d0a1a0a",
         "0000000d49484452",
@@ -257,7 +257,7 @@ fn build_sbix_strike(num_glyphs: u16, ppem: u16, glyphs: &[Option<([u8; 4], Vec<
 
 #[test]
 fn sbix_dupe_tag_recurses_to_target_gid() {
-    // gid 0: empty; gid 1: dupe → gid 2; gid 2: real PNG (1×1).
+    // gid 0: empty; gid 1: dupe -> gid 2; gid 2: real PNG (1x1).
     let png_hex = concat!(
         "89504e470d0a1a0a",
         "0000000d49484452",
@@ -269,7 +269,7 @@ fn sbix_dupe_tag_recurses_to_target_gid() {
     let png = hex_to_bytes(png_hex);
     let glyphs = vec![
         None,                               // gid 0 .notdef
-        Some((*b"dupe", vec![0x00, 0x02])), // gid 1 → dupe to gid 2
+        Some((*b"dupe", vec![0x00, 0x02])), // gid 1 -> dupe to gid 2
         Some((*b"png ", png)),              // gid 2 carries the PNG
     ];
     let sbix = build_sbix_strike(3, 16, &glyphs);
@@ -286,7 +286,7 @@ fn sbix_dupe_tag_recurses_to_target_gid() {
 
 #[test]
 fn sbix_dupe_self_reference_is_unsupported() {
-    // gid 1 dupes back to gid 1 — guarded against; surfaces Unsupported.
+    // gid 1 dupes back to gid 1. Guarded against; surfaces Unsupported.
     let glyphs = vec![None, Some((*b"dupe", vec![0x00, 0x01]))];
     let sbix = build_sbix_strike(2, 16, &glyphs);
     let font = build_sfnt(vec![(*b"maxp", maxp_05(2)), (*b"sbix", sbix)]);
@@ -301,7 +301,7 @@ fn sbix_dupe_self_reference_is_unsupported() {
 
 #[test]
 fn sbix_dupe_chain_exceeding_depth_cap_is_unsupported() {
-    // gid 1→2→3→4→5→6 is 5 hops; SBIX_DUPE_MAX_DEPTH is 4 so this
+    // gid 1->2->3->4->5->6 is 5 hops; SBIX_DUPE_MAX_DEPTH is 4 so this
     // bottoms out without panicking and without infinite-looping.
     let glyphs = vec![
         None,
@@ -325,7 +325,7 @@ fn sbix_dupe_chain_exceeding_depth_cap_is_unsupported() {
 
 #[test]
 fn sbix_jpg_truncated_payload_returns_bad_jpeg() {
-    // sbix carrying a malformed 'jpg ' payload — the in-crate JPEG
+    // sbix carrying a malformed 'jpg ' payload: the in-crate JPEG
     // decoder rejects it cleanly with BadJpeg rather than panicking.
     // (Pre-0.20 this surfaced UnsupportedBitmap because we didn't
     // even try; now we do, so a truncated APP0-only stream fails at
@@ -410,7 +410,7 @@ fn build_eblc_one_glyph(ppem: u8, glyph_size: u32) -> Vec<u8> {
     blob.push(1); // bitDepth = mono
     blob.push(0x01); // flags = horizontal
 
-    // IndexSubTableArray entry — first/last/additionalOffset (=8, just past this entry)
+    // IndexSubTableArray entry: first/last/additionalOffset (=8, just past this entry)
     blob.extend_from_slice(&1u16.to_be_bytes());
     blob.extend_from_slice(&1u16.to_be_bytes());
     blob.extend_from_slice(&8u32.to_be_bytes()); // additional offset (relative to array base)
@@ -435,8 +435,8 @@ fn build_ebdt(entry: &[u8]) -> Vec<u8> {
 
 #[test]
 fn ebdt_synthetic_renders_mono_glyph_at_strike_size() {
-    // 16×16 'A' silhouette — byte-aligned 1bpp, 32 bytes (2 per row).
-    // Just need a recognisable shape; spot-check a known set bit.
+    // 16x16 'A' silhouette: byte-aligned 1bpp, 32 bytes (2 per row).
+    // Just need a recognizable shape; spot-check a known set bit.
     let mut mask = vec![0u8; 32];
     // Top: row 0 has crossbar bits in middle.
     mask[0] = 0b0011_1100;
@@ -449,7 +449,7 @@ fn ebdt_synthetic_renders_mono_glyph_at_strike_size() {
     // EBDT table = 4-byte header + entry; EBLC's image_data_offset is
     // 0, so glyph offset 0 lands at the *start* of EBDT (the header).
     // Shift the entry into a position the EBLC offset can address by
-    // wrapping it — but our EBLC builder uses image_data_offset = 0,
+    // wrapping it, but our EBLC builder uses image_data_offset = 0,
     // so the glyph entry must start at byte 0 of EBDT (i.e. before the
     // header). EBDT::parse expects the 4-byte version header first;
     // adjust the EBLC builder to use image_data_offset = 4.
@@ -516,7 +516,7 @@ fn ebdt_synthetic_falls_back_when_only_ebdt_present() {
     let mask = [0xffu8; 2]; // 8x2 all-set
     let entry = ebdt_format1_entry(8, 2, &mask);
     let eblc = build_eblc_one_glyph(16, entry.len() as u32);
-    // Patch the image_data_offset from 0 → 4 (past EBDT version header).
+    // Patch the image_data_offset from 0 to 4 (past EBDT version header).
     // Locate the IndexSubTable header inside the eblc blob: header(8) +
     // bitmap_size(48) + array_entry(8) = 64; image_data_offset is at
     // bytes 68..72.
@@ -542,13 +542,13 @@ fn ebdt_synthetic_falls_back_when_only_ebdt_present() {
 }
 
 // ---------------------------------------------------------------------------
-// EBDT format 8 (composite mono bitmaps) — synthetic 3-glyph fixtures.
+// EBDT format 8 (composite mono bitmaps): synthetic 3-glyph fixtures.
 //
 // Layout common to every test below:
 //   gid 0  .notdef (no entry)
 //   gid 1  composite that references gids 2 and 3
-//   gid 2  4×4 fully-set mono square at (0, 0)
-//   gid 3  2×2 fully-set mono square at (8, 0)
+//   gid 2  4x4 fully-set mono square at (0, 0)
+//   gid 3  2x2 fully-set mono square at (8, 0)
 // EBLC carries one strike at 16 ppem with index format 1 covering
 // gids 1..=3. Glyph entries within EBDT live in directory order; the
 // EBLC u32 offsets address them relative to image_data_offset.
@@ -593,12 +593,12 @@ fn build_ebdt_multi(entries: &[Vec<u8>]) -> Vec<u8> {
 
 #[test]
 fn ebdt_format8_composite_overlays_two_components() {
-    // Parent (gid 1): 16-wide × 4-tall canvas, format 8.
-    // gid 2: 4×4 fully-set mono square at offset (0, 0).
-    // gid 3: 2×2 fully-set mono square at offset (8, 0).
+    // Parent (gid 1): 16-wide x 4-tall canvas, format 8.
+    // gid 2: 4x4 fully-set mono square at offset (0, 0).
+    // gid 3: 2x2 fully-set mono square at offset (8, 0).
     //
     // Each glyph carries its own image_format, so the EBLC strike has
-    // three IndexSubTables — one per gid — sharing the same data
+    // three IndexSubTables (one per gid) sharing the same data
     // table.
     use sigilbuzz::{Blob, Face};
     use sigilbuzz_render::Rasterizer;
@@ -649,8 +649,8 @@ fn ebdt_format8_composite_overlays_two_components() {
     let pix = rast
         .rasterize_bitmap_glyph(&face, 1, 16.0, &[])
         .expect("composite renders");
-    // Parent canvas should be 16×4. Component gid 2 covers x=0..=3
-    // y=0..=3 (4×4). Component gid 3 covers x=8..=9 y=0..=1 (2×2).
+    // Parent canvas should be 16x4. Component gid 2 covers x=0..=3
+    // y=0..=3 (4x4). Component gid 3 covers x=8..=9 y=0..=1 (2x2).
     assert_eq!(pix.width, 16);
     assert_eq!(pix.height, 4);
     // Inside gid 2's footprint: opaque black.
@@ -661,7 +661,7 @@ fn ebdt_format8_composite_overlays_two_components() {
     // Inside gid 3's footprint at offset (8, 0): opaque black.
     assert_eq!(pix.get(8, 0), [0, 0, 0, 255]);
     assert_eq!(pix.get(9, 1), [0, 0, 0, 255]);
-    // Outside gid 3's 2×2 footprint: transparent.
+    // Outside gid 3's 2x2 footprint: transparent.
     assert_eq!(pix.get(10, 0), [0, 0, 0, 0]);
     assert_eq!(pix.get(8, 2), [0, 0, 0, 0]);
 }
@@ -765,7 +765,7 @@ fn ebdt_composite_two_glyph_cycle_surfaces_decode_failed() {
     use sigilbuzz::{Blob, Face};
     use sigilbuzz_render::Rasterizer;
 
-    // gid 1 → gid 2 → gid 1. Both are composites.
+    // gid 1 -> gid 2 -> gid 1. Both are composites.
     let parent1 = ebdt_fmt8_composite_entry(8, 4, &[(2, 0, 0)]);
     let parent2 = ebdt_fmt8_composite_entry(8, 4, &[(1, 0, 0)]);
     let ebdt = build_ebdt_multi(&[parent1.clone(), parent2.clone()]);
@@ -844,9 +844,9 @@ fn sbix_jp2_returns_unsupported_not_panic() {
 // Wave-21 adversarial: sbix `'tiff'` payload-shape coverage.
 //
 // The TIFF decoder is owned by the sibling PR (feature/sbix-tiff-decoder)
-// and not yet on release/0.21.0 — every payload here lands at the
+// and not yet on release/0.21.0. Every payload here lands at the
 // `UnsupportedBitmap` fast path. The point of these tests is to pin
-// no-panic behaviour for the malformed shapes the sibling brief calls
+// no-panic behavior for the malformed shapes the sibling brief calls
 // out (bad magic / wrong byte order / unknown compression / truncated
 // strip / multi-IFD) so when the sibling implementation lands, the
 // regression bar already has the adversarial fixtures wired up.
@@ -874,7 +874,7 @@ fn sbix_tiff_bad_magic_returns_unsupported() {
     );
 }
 
-/// Big-endian "MM" signature with magic — sibling brief calls out
+/// Big-endian "MM" signature with magic. Sibling brief calls out
 /// "wrong byte order"; the TIFF decoder either accepts BE (returns
 /// BadTiff for the empty content) or rejects up front. Either way:
 /// no panic.
@@ -898,7 +898,7 @@ fn sbix_tiff_big_endian_byte_order_returns_unsupported() {
     );
 }
 
-/// Empty payload. Most parsers explode on unindexed reads — the
+/// Empty payload. Most parsers explode on unindexed reads: the
 /// dispatcher / TIFF decoder must catch this before any unguarded
 /// indexing happens.
 #[test]
@@ -922,12 +922,12 @@ fn sbix_tiff_empty_payload_returns_unsupported() {
 
 /// Multi-IFD shape: single IFD containing one entry whose chained
 /// next-IFD offset points back to itself (would loop forever in a
-/// naive walker). Either rejected outright or surfaced as BadTiff —
+/// naive walker). Either rejected outright or surfaced as BadTiff,
 /// must NOT recurse forever.
 #[test]
 fn sbix_tiff_multi_ifd_self_chain_returns_unsupported() {
     // II 42 IFD-off=8; IFD: count=1; entry (12 bytes of zeros);
-    // next-IFD-offset = 8 (same as first IFD → cycle).
+    // next-IFD-offset = 8 (same as first IFD -> cycle).
     let mut payload = vec![0x49, 0x49, 0x2a, 0x00];
     payload.extend_from_slice(&8u32.to_le_bytes());
     payload.extend_from_slice(&1u16.to_le_bytes()); // entry count
@@ -982,7 +982,7 @@ fn sbix_tiff_truncated_strip_returns_unsupported() {
 }
 
 /// Unknown-compression shape: tag 259 (Compression) with an
-/// unrecognised value.
+/// unrecognized value.
 #[test]
 fn sbix_tiff_unknown_compression_returns_unsupported() {
     let mut payload = vec![0x49, 0x49, 0x2a, 0x00];

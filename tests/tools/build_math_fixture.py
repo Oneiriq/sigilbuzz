@@ -2,27 +2,27 @@
 """Synthesise a tiny TTF that carries an OpenType `MATH` table.
 
 Real math fonts (STIX 2 Math, Latin Modern Math, Asana Math) are 150 KB
-to 700 KB unsubset — far too heavy to vendor for the integration test
+to 700 KB unsubset, far too heavy to vendor for the integration test
 sigilbuzz needs. Instead we hand-roll a minimum-viable font with three
 glyphs and a hand-laid `MATH` table that exercises every subtable
 parser:
 
-- `MathConstants` — populated with realistic non-zero values so the
+- `MathConstants`: populated with realistic non-zero values so the
   integration test can sanity-check the parser end-to-end.
-- `MathGlyphInfo` — italics correction for gid 1 ("italic-f"-shaped
+- `MathGlyphInfo`: italics correction for gid 1 ("italic-f"-shaped
   glyph), top-accent attachment for the same, extended-shape coverage
   for gid 2 (the tall integral), and a top-right kern for gid 1.
-- `MathVariants` — gid 2 (the integral, mapped to U+222B via cmap)
+- `MathVariants`: gid 2 (the integral, mapped to U+222B via cmap)
   has a vertical glyph construction with two progressive variants
   and an assembly composed of three parts (top, extender, bottom).
 
 The font has 4 glyphs:
   gid 0 = .notdef
-  gid 1 = math italic 'f'  (cmap: U+1D453 → 𝑓)
+  gid 1 = math italic 'f'  (cmap: U+1D453 -> 𝑓)
   gid 2 = ∫                (cmap: U+222B)
   gid 3 = an extender variant for the integral
 
-Glyph outlines are empty — the integration test only consumes the
+Glyph outlines are empty: the integration test only consumes the
 MATH table via the Face accessor, never the outlines.
 
 Output: tests/fixtures/math_synthetic.ttf
@@ -204,7 +204,7 @@ def build_math_glyph_info() -> bytes:
     ext_shape = coverage_fmt1([2])          # gid 2 (∫) is extended
     kern_info = build_math_kern_info(1)
 
-    # Header is 8 bytes: 4 × Offset16.
+    # Header is 8 bytes: 4 x Offset16.
     italics_off = 8
     top_off = italics_off + len(italics)
     ext_off = top_off + len(top_acc)
@@ -349,12 +349,12 @@ def build_hmtx(num_glyphs: int) -> bytes:
 
 
 def build_cmap() -> bytes:
-    """Format-4 cmap mapping U+222B → gid 2 and U+1D453 (𝑓) → gid 1.
+    """Format-4 cmap mapping U+222B -> gid 2 and U+1D453 (𝑓) -> gid 1.
     U+1D453 is in the SMP, so format 4 alone can't reach it; we
     cheat and remap the 'italic-f' to a BMP slot the integration
     test agrees on (e.g., U+0066 'f'). This is *only* a fixture.
     """
-    # Map ranges for chars f (0x66) → gid 1 and ∫ (0x222B) → gid 2.
+    # Map ranges for chars f (0x66) -> gid 1 and ∫ (0x222B) -> gid 2.
     # Glyph deltas: gid - char (mod 65536).
     # End/start/idDelta/idRangeOffset arrays:
     end = [0x0066, 0x222B, 0xFFFF]
@@ -368,7 +368,7 @@ def build_cmap() -> bytes:
     search_range = 1
     while search_range * 2 <= seg_count:
         search_range *= 2
-    search_range *= 2  # 2 × largest power of 2 ≤ seg_count
+    search_range *= 2  # 2 * largest power of 2 <= seg_count
     entry_selector = 0
     sr = search_range // 2
     while sr > 1:
@@ -407,7 +407,7 @@ def build_cmap() -> bytes:
 
 def build_loca(num_glyphs: int) -> bytes:
     # short loca: (num_glyphs + 1) u16 offsets in 2-byte units. All
-    # zero → every glyph is empty.
+    # zero -> every glyph is empty.
     out = b""
     for _ in range(num_glyphs + 1):
         out += u16(0)

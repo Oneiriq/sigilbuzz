@@ -11,16 +11,16 @@ The output font `aat_synthetic.ttf` carries:
 
 - Six glyphs (`.notdef`, `f`, `i`, `fi`, `A`, `V`), each a tiny
   rectangle outline so glyf stays under ~200 bytes.
-- A cmap mapping U+0066 → f, U+0069 → i, U+0041 → A, U+0056 → V.
+- A cmap mapping U+0066 -> f, U+0069 -> i, U+0041 -> A, U+0056 -> V.
   The ligature `fi` glyph is only reachable via the morx substitution,
   so it is absent from the cmap.
 - A `morx` version-2 table with one chain and one type-2 (ligature)
-  subtable: (f, i) → fi.
-- A `kerx` version-2 table with one format-0 subtable: (A, V) → -50.
+  subtable: (f, i) -> fi.
+- A `kerx` version-2 table with one format-0 subtable: (A, V) -> -50.
 - Deliberately NO GSUB and NO GPOS, so sigilbuzz exercises the AAT
   fallback path.
 
-The fixture is ~2.8 KB — small enough to check into the repo.
+The fixture is ~2.8 KB, small enough to check into the repo.
 
 Run:
     python3 tests/tools/build_aat_fixture.py
@@ -79,7 +79,7 @@ def lookup_format6(pairs):
 
 def build_morx_body() -> bytes:
     """Returns a morx subtable body (type 2, ligature substitution)
-    that maps (f, i) → fi_lig.
+    that maps (f, i) -> fi_lig.
 
     Layout, relative to the subtable body start:
 
@@ -88,7 +88,7 @@ def build_morx_body() -> bytes:
       28 : class subtable (format 6)
       .. : state array
       .. : entry array
-      .. : ligAction (2 × u32)
+      .. : ligAction (2 x u32)
       .. : components (u16 table, indexed by glyph id + signed offset)
       .. : ligatures  (u16 table, indexed by accumulated offset)
     """
@@ -106,14 +106,14 @@ def build_morx_body() -> bytes:
         body += b"\x00"
     state_off = len(body)
 
-    # 2 states × 6 classes × u16.
+    # 2 states x 6 classes x u16.
     n_classes = 6
     n_states = 2
     state_array = [0] * (n_states * n_classes)
-    # State 0: class 4 (f) → entry 1.
+    # State 0: class 4 (f) -> entry 1.
     state_array[0 * n_classes + 4] = 1
-    # State 1: class 5 (i) → entry 2. Any other class falls back to
-    # entry 0 (noop) — we pre-initialized with zeros.
+    # State 1: class 5 (i) -> entry 2. Any other class falls back to
+    # entry 0 (noop). We pre-initialized with zeros.
     state_array[1 * n_classes + 5] = 2
     for v in state_array:
         body += struct.pack(">H", v)
@@ -127,7 +127,7 @@ def build_morx_body() -> bytes:
     # #2 SetComponent | PerformAction, newState=0, actionIdx=0
     body += struct.pack(">HHH", 0, 0xA000, 0)
 
-    # LigAction (2 × u32). Walked in reverse pop order, so:
+    # LigAction (2 x u32). Walked in reverse pop order, so:
     #   action[0] corresponds to i_gid (last pushed)
     #   action[1] corresponds to f_gid (first pushed, carries LAST|STORE)
     # Offsets are chosen so the sum into the ligature index is 0,
@@ -150,7 +150,7 @@ def build_morx_body() -> bytes:
 
     lig_action_off = len(body)
     body += action(False, False, -GID_I)  # i: + comp[0] = 0
-    body += action(True, True, -GID_F)    # f: + comp[0] = 0 → ligatures[0]
+    body += action(True, True, -GID_F)    # f: + comp[0] = 0 -> ligatures[0]
 
     # Components: index = glyph + signed offset = 0 for both paths.
     # So components[0] = 0 suffices. Padded so any in-range glyph id

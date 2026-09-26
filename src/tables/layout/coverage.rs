@@ -6,7 +6,7 @@
 //! sequence:
 //!
 //! 1. Is this glyph covered?
-//! 2. If yes, at what index — so the lookup can pick the right entry
+//! 2. If yes, at what index, so the lookup can pick the right entry
 //!    out of a parallel array of substitutions or adjustments.
 //!
 //! Both questions resolve via a single [`Coverage::index_of`] call:
@@ -15,7 +15,7 @@
 //!
 //! # Formats
 //!
-//! ## Format 1 — `GlyphArray`
+//! ## Format 1: `GlyphArray`
 //!
 //! ```text
 //!   u16 coverageFormat   = 1
@@ -26,7 +26,7 @@
 //! Coverage index of a hit is its position in `glyphArray`. Binary
 //! search finds it in `O(log n)`.
 //!
-//! ## Format 2 — `RangeRecords`
+//! ## Format 2: `RangeRecords`
 //!
 //! ```text
 //!   u16 coverageFormat   = 2
@@ -318,14 +318,14 @@ mod tests {
         // Malformed font: startCoverageIndex = 0xFFFE combined with a
         // range wider than two glyphs pushes the resulting coverage
         // index past u16::MAX. Spec formula is `startCov + (g - start)`
-        // — unchecked addition panics in debug and wraps in release,
+        // and unchecked addition panics in debug and wraps in release,
         // so Coverage must surface overflow as a miss.
         let bytes = build_format2(&[(0, 10, 0xFFFE)]);
         let cov = Coverage::parse(&bytes).unwrap();
         // In-range but within u16: startCov + 0 = 0xFFFE, + 1 = 0xFFFF.
         assert_eq!(cov.index_of(0), Some(0xFFFE));
         assert_eq!(cov.index_of(1), Some(0xFFFF));
-        // Past u16::MAX — must not panic or wrap.
+        // Past u16::MAX: must not panic or wrap.
         assert_eq!(cov.index_of(2), None);
         assert_eq!(cov.index_of(10), None);
     }

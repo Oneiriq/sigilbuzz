@@ -98,7 +98,7 @@ pub fn subset_glyf_loca(
         offsets.push(cursor);
     }
 
-    // Short loca caps at 0x1FFFE bytes (last offset / 2 ≤ u16::MAX).
+    // Short loca caps at 0x1FFFE bytes (last offset / 2 <= u16::MAX).
     let long_loca = *offsets.last().unwrap_or(&0) > 0x1_FFFE;
 
     let mut glyf_out = Vec::with_capacity(cursor as usize);
@@ -214,7 +214,7 @@ fn rewrite_composite(
         let component = u16::from_be_bytes([body[cursor + 2], body[cursor + 3]]);
 
         // Look up the new gid. If a referenced component is dropped
-        // we have a problem — that's a closure bug. Fail loudly.
+        // we have a problem: that's a closure bug. Fail loudly.
         let new_gid = old_to_new
             .get(component as usize)
             .copied()
@@ -279,14 +279,14 @@ fn rewrite_composite(
             return Err(SubsetError::Unsupported("composite instructions past body"));
         }
         if retain_hints {
-            // Patch flags to keep WE_HAVE_INSTRUCTIONS — already
+            // Patch flags to keep WE_HAVE_INSTRUCTIONS, already
             // emitted above for the last component, so the bit
             // survives.
             out.extend_from_slice(&body[cursor..instr_end]);
         } else {
             // Clear WE_HAVE_INSTRUCTIONS in the last emitted flags
             // word. We know exactly where we wrote it: at offset
-            // out.len() - (header + ... ) — recalculating is
+            // out.len() - (header + ... ). Recalculating is
             // fiddly, so we patch by scanning for the last
             // occurrence of the bit pattern. Simpler: walk back
             // 4 bytes per flags entry... Actually we kept track of
@@ -381,7 +381,7 @@ mod tests {
         // Map old gid 5 -> new gid 17.
         let mut map = alloc::vec![None; 16];
         map.push(Some(17u16)); // index 16
-                               // Need slot 5 too — fix sizing.
+                               // Need slot 5 too. Fix sizing.
         let mut map = alloc::vec![None::<u16>; 6];
         map[5] = Some(17);
         let out = rewrite_composite(&body, &map, false).unwrap();

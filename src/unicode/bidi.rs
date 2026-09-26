@@ -3,13 +3,13 @@
 //! 0.1.0 shipped only the paragraph-direction first-strong rule (P2 /
 //! P3). 0.10.0 fills in the rest:
 //!
-//! - **P1-P3** — paragraph-direction (already shipped, kept).
-//! - **X1-X10** — explicit-embedding / override / isolate stack.
-//! - **W1-W7** — weak-type resolution.
-//! - **N1-N2** — neutral resolution. (N0 paired-bracket handling
-//!   is intentionally deferred — see module note below.)
-//! - **I1-I2** — implicit-level resolution.
-//! - **L1-L4** — post-resolve normalization + reorder (rule L2).
+//! - **P1-P3**: paragraph-direction (already shipped, kept).
+//! - **X1-X10**: explicit-embedding / override / isolate stack.
+//! - **W1-W7**: weak-type resolution.
+//! - **N1-N2**: neutral resolution. (N0 paired-bracket handling
+//!   is intentionally deferred. See module note below.)
+//! - **I1-I2**: implicit-level resolution.
+//! - **L1-L4**: post-resolve normalization + reorder (rule L2).
 //!
 //! The algorithm is implemented as a sequence of array-mutation
 //! passes against a single working buffer of (`BidiClass`, `level`)
@@ -18,16 +18,16 @@
 //!
 //! ## N0 paired-bracket handling
 //!
-//! UAX #9 §3.3.5 — paired-bracket pass. After W1-W7 resolve the weak
+//! UAX #9 §3.3.5: paired-bracket pass. After W1-W7 resolve the weak
 //! types but before N1 / N2 sweep neutrals, brackets that pair across
 //! the isolating-run sequence get a strong type assigned according to
 //! the surrounding embedding context. The pair codepoint table lives
 //! in [`crate::unicode::bidi_brackets`] (curated extract of
-//! `BidiBrackets.txt` — ASCII + CJK + math families).
+//! `BidiBrackets.txt`: ASCII + CJK + math families).
 //!
 //! Brackets that don't pair (unbalanced opener / closer, opener
 //! without a matching closer) fall through unchanged and N1's
-//! surrounding-strong fallback handles them — exactly the behaviour
+//! surrounding-strong fallback handles them, exactly the behavior
 //! shipped before N0 landed.
 //!
 //! ## Public API
@@ -35,10 +35,10 @@
 //! [`BidiInfo::new`] runs the full algorithm against a paragraph and
 //! exposes:
 //!
-//! - [`BidiInfo::paragraph_direction`] — resolved paragraph direction.
-//! - [`BidiInfo::levels`] — per-character embedding level (L1-L4
-//!   normalised).
-//! - [`BidiInfo::reorder`] — visual-order character-index permutation
+//! - [`BidiInfo::paragraph_direction`]: resolved paragraph direction.
+//! - [`BidiInfo::levels`]: per-character embedding level (L1-L4
+//!   normalized).
+//! - [`BidiInfo::reorder`]: visual-order character-index permutation
 //!   (rule L2).
 //!
 //! Buffer integration uses [`crate::buffer::Buffer::set_text_bidi`],
@@ -94,7 +94,7 @@ fn paragraph_direction_with_isolates(text: &str) -> Direction {
     Direction::Ltr
 }
 
-/// Per-character bidi state — the working pair the algorithm mutates.
+/// Per-character bidi state: the working pair the algorithm mutates.
 #[derive(Debug, Clone, Copy)]
 struct BidiCell {
     /// Resolved Bidi_Class. Mutated by W1-W7 / N1-N2 / I1-I2.
@@ -122,7 +122,7 @@ pub struct BidiInfo {
 impl BidiInfo {
     /// Runs the algorithm against `text`. If `paragraph_dir` is
     /// `None`, P2 / P3 resolves it from the first strong character.
-    /// Otherwise the override is honoured (matches the
+    /// Otherwise the override is honored (matches the
     /// `unicode-bidi` API).
     #[must_use]
     pub fn new(text: &str, paragraph_dir: Option<Direction>) -> Self {
@@ -203,7 +203,7 @@ impl BidiInfo {
         // reverse the contiguous span at or above that level.
         let max_level = self.levels.iter().copied().max().unwrap_or(0);
         let min_level = self.levels.iter().copied().min().unwrap_or(0);
-        // Lowest odd level — anything below it is purely-LTR and
+        // Lowest odd level: anything below it is purely-LTR and
         // never gets reversed.
         let lowest_odd = if min_level % 2 == 1 {
             min_level
@@ -258,7 +258,7 @@ enum Override {
 
 /// Resolves an FSI initiator at `start` to either [`BidiClass::Lri`] or
 /// [`BidiClass::Rli`] per UAX 9 §X5c: scan the matched isolated
-/// subsequence for the first strong character (R / AL → RLI, L → LRI),
+/// subsequence for the first strong character (R / AL -> RLI, L -> LRI),
 /// skipping any nested isolates per BD9. Default is LRI when the
 /// scan finds no strong type or the FSI has no matching PDI, mirroring
 /// the P3 LTR fallback.
@@ -277,7 +277,7 @@ fn fsi_resolves_to(cells: &[BidiCell], start: usize) -> BidiClass {
         if cls == BidiClass::Pdi {
             if depth == 0 {
                 // End of this FSI's isolated subsequence reached
-                // without a strong type — default to LRI.
+                // without a strong type. Default to LRI.
                 return BidiClass::Lri;
             }
             depth -= 1;
@@ -291,7 +291,7 @@ fn fsi_resolves_to(cells: &[BidiCell], start: usize) -> BidiClass {
             }
         }
     }
-    // No matching PDI / no strong type seen — default LTR.
+    // No matching PDI / no strong type seen: default LTR.
     BidiClass::Lri
 }
 
@@ -300,7 +300,7 @@ fn fsi_resolves_to(cells: &[BidiCell], start: usize) -> BidiClass {
 /// the explicit-format pass deletes (rule X9) keep their level but
 /// have their class overwritten by directional override per X4 / X5.
 /// LRE/RLE/LRO/RLO/PDF/BN keep their original class for the X9 filter
-/// later — the convention used here is to mark them with their
+/// later. The convention used here is to mark them with their
 /// explicit-format class so `is_explicit()` can drop them.
 #[allow(clippy::too_many_lines)]
 fn explicit_levels(cells: &mut [BidiCell], para_level: u8) {
@@ -447,7 +447,7 @@ fn explicit_levels(cells: &mut [BidiCell], para_level: u8) {
             }
         }
     }
-    // X8: handled implicitly — paragraph end pops everything.
+    // X8: handled implicitly. Paragraph end pops everything.
 }
 
 /// "Strong" classification for N1: maps L to L; R / EN / AN to R;
@@ -460,7 +460,7 @@ const fn n_strong(c: BidiClass) -> Option<BidiClass> {
     }
 }
 
-/// True for "neutral and isolate" types per UAX #9 BD11 — the
+/// True for "neutral and isolate" types per UAX #9 BD11, the
 /// targets of N1 / N2 resolution.
 const fn is_ni(c: BidiClass) -> bool {
     matches!(
@@ -505,7 +505,7 @@ struct LevelRun {
     level: u8,
 }
 
-/// One "isolating run sequence" per UAX #9 BD13 — a chain of level
+/// One "isolating run sequence" per UAX #9 BD13: a chain of level
 /// runs joined by isolate-initiator / PDI pairs.
 #[derive(Debug, Clone)]
 struct IsolatingSequence {
@@ -513,9 +513,9 @@ struct IsolatingSequence {
     indices: Vec<usize>,
     /// Embedding level shared by every cell in the sequence.
     level: u8,
-    /// `sos` (start-of-sequence) directional class — L or R.
+    /// `sos` (start-of-sequence) directional class: L or R.
     sos: BidiClass,
-    /// `eos` (end-of-sequence) directional class — L or R.
+    /// `eos` (end-of-sequence) directional class: L or R.
     eos: BidiClass,
 }
 
@@ -732,7 +732,7 @@ const N0_BRACKET_STACK_MAX: usize = 63;
 ///    takes that direction iff the strong before the opener (or sos)
 ///    is the opposite direction; if it's the embedding direction
 ///    (or no strong before), the pair takes the embedding direction.
-///    No strong inside → the pair is left alone (N1 / N2 handle it).
+///    No strong inside -> the pair is left alone (N1 / N2 handle it).
 /// 3. When a pair fires, both bracket cells get their class swapped
 ///    to the resolved strong (L or R), plus any NSMs immediately
 ///    following each bracket within the sequence per N0's
@@ -762,7 +762,7 @@ fn apply_n0(classes: &mut [BidiClass], chars: &[char], seq: &IsolatingSequence) 
     // text order, which here means opener position).
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     for (i, &ci) in seq.indices.iter().enumerate() {
-        // Brackets must come from the ON neutral class — N0 only
+        // Brackets must come from the ON neutral class: N0 only
         // touches characters whose post-W class is ON. Skip anything
         // already promoted to a strong / weak class by W1-W7.
         if classes[i] != BidiClass::On {
@@ -793,7 +793,7 @@ fn apply_n0(classes: &mut [BidiClass], chars: &[char], seq: &IsolatingSequence) 
     if pairs.is_empty() {
         return;
     }
-    // Process pairs in opener-position order — the UAX 9 algorithm
+    // Process pairs in opener-position order: the UAX 9 algorithm
     // resolves earlier-opened pairs first so a later pair can see the
     // earlier pair's resolution as a strong type.
     pairs.sort_by_key(|&(open, _)| open);
@@ -818,7 +818,7 @@ fn apply_n0(classes: &mut [BidiClass], chars: &[char], seq: &IsolatingSequence) 
         let resolved = if saw_embed {
             Some(embed_strong)
         } else if saw_opposite {
-            // Establish the strong context preceding the opener — walk
+            // Establish the strong context preceding the opener: walk
             // back through the sequence's resolved classes until a
             // strong type or the sos is found.
             let mut k = open;
@@ -865,7 +865,7 @@ fn apply_n0(classes: &mut [BidiClass], chars: &[char], seq: &IsolatingSequence) 
 }
 
 /// Maps a post-W class to its N0 strong category. EN / AN both count
-/// as R direction for N0 (per the spec — EN/AN are "weak strong").
+/// as R direction for N0 (per the spec: EN/AN are "weak strong").
 const fn strong_for_n0(c: BidiClass) -> Option<BidiClass> {
     match c {
         BidiClass::L => Some(BidiClass::L),
@@ -889,7 +889,7 @@ fn resolve_sequence(
     if n == 0 {
         return;
     }
-    // Snapshot the sequence into a working vector — cheaper to mutate
+    // Snapshot the sequence into a working vector: cheaper to mutate
     // than reaching through `seq.indices` constantly.
     let mut classes: Vec<BidiClass> = seq.indices.iter().map(|&i| cells[i].cls).collect();
 
@@ -904,7 +904,7 @@ fn resolve_sequence(
         }
     }
 
-    // ---- W2: EN preceded by AL (skipping non-strong) → AN. ----
+    // ---- W2: EN preceded by AL (skipping non-strong) -> AN. ----
     for i in 0..n {
         if classes[i] == BidiClass::En {
             // Walk backward through non-strong classes.
@@ -924,14 +924,14 @@ fn resolve_sequence(
         }
     }
 
-    // ---- W3: AL → R. ----
+    // ---- W3: AL -> R. ----
     for c in &mut classes {
         if *c == BidiClass::Al {
             *c = BidiClass::R;
         }
     }
 
-    // ---- W4: ES/CS between two ENs → EN; CS between two ANs → AN. ----
+    // ---- W4: ES/CS between two ENs -> EN; CS between two ANs -> AN. ----
     for i in 1..n.saturating_sub(1) {
         let here = classes[i];
         if here == BidiClass::Es || here == BidiClass::Cs {
@@ -945,7 +945,7 @@ fn resolve_sequence(
         }
     }
 
-    // ---- W5: sequence of ETs adjacent to EN → EN. ----
+    // ---- W5: sequence of ETs adjacent to EN -> EN. ----
     let mut i = 0;
     while i < n {
         if classes[i] == BidiClass::Et {
@@ -970,14 +970,14 @@ fn resolve_sequence(
         }
     }
 
-    // ---- W6: remaining ES, ET, CS → ON. ----
+    // ---- W6: remaining ES, ET, CS -> ON. ----
     for c in &mut classes {
         if matches!(*c, BidiClass::Es | BidiClass::Et | BidiClass::Cs) {
             *c = BidiClass::On;
         }
     }
 
-    // ---- W7: EN preceded by L (skipping non-strong) → L. ----
+    // ---- W7: EN preceded by L (skipping non-strong) -> L. ----
     for i in 0..n {
         if classes[i] == BidiClass::En {
             let mut k = i;
@@ -1043,8 +1043,8 @@ fn resolve_sequence(
     }
 
     // ---- I1 / I2: implicit levels. ----
-    // I1 (even level): R → +1, AN/EN → +2.
-    // I2 (odd level):  L/EN/AN → +1.
+    // I1 (even level): R -> +1, AN/EN -> +2.
+    // I2 (odd level):  L/EN/AN -> +1.
     for (idx_in_seq, &cell_i) in seq.indices.iter().enumerate() {
         let lvl = cells[cell_i].level;
         let cls = classes[idx_in_seq];
@@ -1072,7 +1072,7 @@ fn resolve_sequence(
 /// L1: reset segment separators (S), paragraph separators (B), and
 /// any whitespace / isolate-format characters at the end of a line
 /// or before a B/S to the paragraph level. We don't have explicit
-/// line breaking here — we apply L1 paragraph-globally, treating the
+/// line breaking here. We apply L1 paragraph-globally, treating the
 /// whole input as one line. (Line-breaking is the consumer's job.)
 fn apply_l1(cells: &mut [BidiCell], para_level: u8, _text: &str) {
     let n = cells.len();
@@ -1089,7 +1089,7 @@ fn apply_l1(cells: &mut [BidiCell], para_level: u8, _text: &str) {
     // resolution mutated the working class. Walk backwards from each
     // S/B, resetting trailing WS/Iso runs.
     // The "originals" are recoverable only if we re-classify from
-    // text — which we don't have here as chars indexed; cheaper to
+    // text, which we don't have here as chars indexed; cheaper to
     // remember an L1-eligible flag during the X-pass. As a
     // pragmatic approximation we reset based on the post-W class:
     // any cell whose post-W class is WS/Iso/B/S gets reset.
@@ -1127,7 +1127,7 @@ fn apply_l1(cells: &mut [BidiCell], para_level: u8, _text: &str) {
     }
 }
 
-/// Helper for L1 — currently just returns the post-W class. Kept as
+/// Helper for L1: currently just returns the post-W class. Kept as
 /// a function to make it easy to wire in a separate "original class"
 /// snapshot later if BidiTest conformance demands strict L1 fidelity.
 const fn bidi_class_at(cells: &[BidiCell], i: usize) -> BidiClass {
@@ -1209,14 +1209,14 @@ mod tests {
 
     #[test]
     fn ltr_then_hebrew_keeps_latin_at_zero_hebrew_at_one() {
-        // "A " + "ב" (Hebrew bet) — paragraph LTR.
+        // "A " + "ב" (Hebrew bet): paragraph LTR.
         let info = BidiInfo::new("A ב", None);
         assert_eq!(info.paragraph_direction(), Direction::Ltr);
-        // 'A' L → 0; ' ' WS reset to 0 (L1 trailing); 'ב' R → 1.
+        // 'A' L -> 0; ' ' WS reset to 0 (L1 trailing); 'ב' R -> 1.
         // After L1 trailing-whitespace reset on the space (it's not
-        // trailing — Hebrew letter follows), space stays at 0.
+        // trailing: Hebrew letter follows), space stays at 0.
         // Actually the space comes between two strong runs; N1
-        // sees L on one side and R on the other → no rule fires;
+        // sees L on one side and R on the other, so no rule fires;
         // N2 sets it to embedding (0). So levels: [0, 0, 1].
         assert_eq!(info.levels(), &[0, 0, 1]);
         // L2 reverses chars at level >= 1 (just the bet).
@@ -1244,7 +1244,7 @@ mod tests {
     fn explicit_paragraph_direction_overrides_first_strong() {
         let info = BidiInfo::new("Hello", Some(Direction::Rtl));
         assert_eq!(info.paragraph_direction(), Direction::Rtl);
-        // Latin in RTL paragraph → level 2.
+        // Latin in RTL paragraph -> level 2.
         assert_eq!(info.levels(), &[2, 2, 2, 2, 2]);
     }
 
@@ -1260,35 +1260,35 @@ mod tests {
 
     #[test]
     fn w2_en_after_al_becomes_an() {
-        // Arabic alef + ASCII '1'. W2 fires: EN after AL → AN.
-        // W3: AL→R. Embedding level 1. I2 at odd: AN→+1 → level 2.
+        // Arabic alef + ASCII '1'. W2 fires: EN after AL -> AN.
+        // W3: AL->R. Embedding level 1. I2 at odd: AN->+1 -> level 2.
         let info = BidiInfo::new("\u{0627}1", None);
         assert_eq!(info.paragraph_direction(), Direction::Rtl);
         let levels = info.levels();
         assert_eq!(levels.len(), 2);
-        // Arabic alef: AL → R → odd, no bump → level 1.
+        // Arabic alef: AL -> R -> odd, no bump -> level 1.
         assert_eq!(levels[0], 1);
-        // '1' became AN; embedding 1; AN bumped +1 → level 2.
+        // '1' became AN; embedding 1; AN bumped +1 -> level 2.
         assert_eq!(levels[1], 2);
     }
 
     #[test]
     fn w4_es_between_ens_promotes_in_rtl() {
         // "1+2" in default paragraph: sos=L, W7 turns the EN run
-        // back to L → level 0. To exercise W4 cleanly we force
-        // RTL paragraph: sos=R, no W7 promotion → digits keep EN.
+        // back to L -> level 0. To exercise W4 cleanly we force
+        // RTL paragraph: sos=R, no W7 promotion -> digits keep EN.
         let info = BidiInfo::new("1+2", Some(Direction::Rtl));
         let levels = info.levels();
         assert_eq!(levels.len(), 3);
-        // Embedding 1 for ENs; I2 bumps EN by 1 → level 2.
+        // Embedding 1 for ENs; I2 bumps EN by 1 -> level 2.
         // The ES becomes EN via W4 (between two ENs).
         assert_eq!(levels, &[2, 2, 2]);
     }
 
     #[test]
     fn w5_et_adjacent_to_en_becomes_en_in_rtl() {
-        // "$1" — ET EN. W5 turns ET into EN. Default-LTR paragraph
-        // would then run W7 and downgrade EN→L. Force RTL to see
+        // "$1": ET EN. W5 turns ET into EN. Default-LTR paragraph
+        // would then run W7 and downgrade EN->L. Force RTL to see
         // pure W5 effect.
         let info = BidiInfo::new("$1", Some(Direction::Rtl));
         let levels = info.levels();
@@ -1299,7 +1299,7 @@ mod tests {
 
     #[test]
     fn w7_en_after_l_becomes_l() {
-        // "A1" — L EN. W7 fires: EN preceded by L → L. So both at
+        // "A1": L EN. W7 fires: EN preceded by L -> L. So both at
         // level 0 in an LTR paragraph.
         let info = BidiInfo::new("A1", None);
         let levels = info.levels();
@@ -1312,7 +1312,7 @@ mod tests {
     #[test]
     fn n2_neutral_takes_embedding() {
         // Pure-neutral paragraph: just '!'. Default paragraph LTR,
-        // N2 sets ON to L → level 0.
+        // N2 sets ON to L -> level 0.
         let info = BidiInfo::new("!", None);
         assert_eq!(info.levels(), &[0]);
     }
@@ -1321,9 +1321,9 @@ mod tests {
 
     #[test]
     fn n0_ascii_parens_in_rtl_paragraph_take_r() {
-        // ב ( ב ב ב )  — Hebrew letter, opener, three Hebrew, closer.
+        // ב ( ב ב ב ): Hebrew letter, opener, three Hebrew, closer.
         // Embedding direction R; brackets surround a pure-R run so N0
-        // fires and both parens resolve as R → all level 1.
+        // fires and both parens resolve as R -> all level 1.
         let info = BidiInfo::new("\u{05D1}(\u{05D1}\u{05D1}\u{05D1})", None);
         assert_eq!(info.paragraph_direction(), Direction::Rtl);
         let levels = info.levels();
@@ -1335,7 +1335,7 @@ mod tests {
 
     #[test]
     fn n0_ascii_parens_in_ltr_paragraph_take_l() {
-        // A ( ב ב ב ) C — LTR paragraph, brackets around an inner
+        // A ( ב ב ב ) C: LTR paragraph, brackets around an inner
         // Hebrew run. Embedding is L (paragraph LTR); the run inside
         // is R, but with no L between them the pair takes the
         // surrounding context. The text before the opener is L (A),
@@ -1354,14 +1354,14 @@ mod tests {
 
     #[test]
     fn n0_brackets_with_embedding_strong_inside_take_embedding() {
-        // A ( ב A ב ) — brackets enclose mixed content with the
+        // A ( ב A ב ): brackets enclose mixed content with the
         // embedding direction's strong (L: 'A') present. N0's first
         // rule: if embed-strong appears between open and close, the
         // pair takes embed-strong.
         let info = BidiInfo::new("A(\u{05D1}A\u{05D1})", None);
         let levels = info.levels();
         assert_eq!(levels.len(), 6);
-        // Brackets resolve to L (embedding) — level 0.
+        // Brackets resolve to L (embedding): level 0.
         assert_eq!(levels[1], 0);
         assert_eq!(levels[5], 0);
     }
@@ -1376,24 +1376,24 @@ mod tests {
         assert_eq!(levels.len(), 5);
         assert_eq!(levels[0], 0, "A at L");
         // The corner brackets enclose pure-R content with a leading L
-        // before — N0 picks embedding (L) → brackets at level 0.
+        // before. N0 picks embedding (L) -> brackets at level 0.
         assert_eq!(levels[1], 0, "open corner bracket at embedding L");
         assert_eq!(levels[4], 0, "close corner bracket at embedding L");
     }
 
     #[test]
     fn n0_nested_brackets_resolve_independently() {
-        // A [ ( ב ) ב ] B — outer square brackets and inner parens.
-        // Inner: ב only → no L strong → opposite (R) seen → preceding
+        // A [ ( ב ) ב ] B: outer square brackets and inner parens.
+        // Inner: ב only -> no L strong -> opposite (R) seen -> preceding
         //   text before '(' is '['. Looking at preceding strong: '['
         //   has not yet been resolved by N0; it's still ON. So look
         //   further back: 'A' (L) precedes. Embedding L; opposite R.
         //   No embed-strong inside, so check preceding strong: L
         //   (from A). Preceding != opposite, so take embed = L.
-        //   Inner brackets → L.
+        //   Inner brackets -> L.
         // Outer: span includes '(', ')', and ב; both brackets are
         //   now L by inner's N0 pass plus the inner ב is R. Embed
-        //   strong (L) seen → outer brackets → L.
+        //   strong (L) seen -> outer brackets -> L.
         let info = BidiInfo::new("A[(\u{05D1})\u{05D1}]B", None);
         let levels = info.levels();
         assert_eq!(levels.len(), 8);
@@ -1420,7 +1420,7 @@ mod tests {
 
     #[test]
     fn n0_mismatched_bracket_skips() {
-        // A ( ב ] ב ) — opener `(` paired with `)`; the misplaced
+        // A ( ב ] ב ): opener `(` paired with `)`; the misplaced
         // `]` is a stray closer with no matching `[` opener. BD16
         // says skip the unmatched closer. The paren pair still fires
         // and resolves to L (embedding) for the LTR paragraph.
@@ -1434,8 +1434,8 @@ mod tests {
 
     #[test]
     fn n1_neutral_between_two_rs_takes_r() {
-        // ב!ב — three chars. N1 should set the '!' to R, then I1
-        // bumps R by 1 → all level 1.
+        // ב!ב: three chars. N1 should set the '!' to R, then I1
+        // bumps R by 1 -> all level 1.
         let info = BidiInfo::new("\u{05D1}!\u{05D1}", None);
         assert_eq!(info.paragraph_direction(), Direction::Rtl);
         let levels = info.levels();
@@ -1449,27 +1449,27 @@ mod tests {
 
     #[test]
     fn rle_pdf_pair_embeds_then_pops() {
-        // RLE 'A' PDF 'B' — 'A' is inside an RTL embedding (level 1),
+        // RLE 'A' PDF 'B': 'A' is inside an RTL embedding (level 1),
         // 'B' is at the paragraph level (0).
         let info = BidiInfo::new("\u{202B}A\u{202C}B", None);
         let levels = info.levels();
         assert_eq!(levels.len(), 4);
         // RLE itself: keeps paragraph level (0).
         assert_eq!(levels[0], 0);
-        // 'A' inside RLE → embedded at level 1, then I2 bumps L
-        // by 1 → level 2.
+        // 'A' inside RLE -> embedded at level 1, then I2 bumps L
+        // by 1 -> level 2.
         assert_eq!(levels[1], 2);
         // PDF: paragraph level.
         assert_eq!(levels[2], 0);
-        // 'B' back at paragraph level → 0.
+        // 'B' back at paragraph level -> 0.
         assert_eq!(levels[3], 0);
     }
 
     #[test]
     fn fsi_with_latin_inside_resolves_as_lri() {
-        // 'A' FSI 'X' PDI 'B' — first strong inside FSI is L, so FSI
+        // 'A' FSI 'X' PDI 'B': first strong inside FSI is L, so FSI
         // must behave as LRI (embed at next *even* level, here 2).
-        // 'X' is L → I1 even-level no bump → level 2.
+        // 'X' is L -> I1 even-level no bump -> level 2.
         let info = BidiInfo::new("A\u{2068}X\u{2069}B", None);
         let levels = info.levels();
         assert_eq!(levels.len(), 5);
@@ -1480,7 +1480,7 @@ mod tests {
 
     #[test]
     fn fsi_with_hebrew_inside_resolves_as_rli() {
-        // 'A' FSI 'אבג' PDI 'B' — first strong inside FSI is R, so
+        // 'A' FSI 'אבג' PDI 'B': first strong inside FSI is R, so
         // FSI must behave as RLI (embed at next *odd* level, here 1).
         // Hebrew letters at level 1; B at paragraph 0.
         let info = BidiInfo::new("A\u{2068}\u{05D0}\u{05D1}\u{05D2}\u{2069}B", None);
@@ -1495,7 +1495,7 @@ mod tests {
 
     #[test]
     fn fsi_with_no_strong_inside_defaults_to_lri() {
-        // 'A' FSI '!!!' PDI 'B' — no strong type inside FSI, so default
+        // 'A' FSI '!!!' PDI 'B': no strong type inside FSI, so default
         // is LRI: embed at level 2 in LTR paragraph; '!' chars resolve
         // to L via N2 at level 2.
         let info = BidiInfo::new("A\u{2068}!!!\u{2069}B", None);
@@ -1510,7 +1510,7 @@ mod tests {
 
     #[test]
     fn fsi_skips_nested_isolates_when_resolving() {
-        // 'A' FSI LRI 'B' PDI 'ש' PDI 'C' — first strong AT FSI's
+        // 'A' FSI LRI 'B' PDI 'ש' PDI 'C': first strong AT FSI's
         // own depth must be 'ש' (R), not the nested LRI's 'B'. So FSI
         // should resolve as RLI: embed level 1, hebrew at 1, 'B'
         // (inside the nested LRI at FSI+1=2) at the inner LRI's
@@ -1528,7 +1528,7 @@ mod tests {
 
     #[test]
     fn lri_pdi_isolate_pair_works() {
-        // 'A' LRI 'B' PDI 'C' — straightforward LTR isolate.
+        // 'A' LRI 'B' PDI 'C': straightforward LTR isolate.
         let info = BidiInfo::new("A\u{2066}B\u{2069}C", None);
         let levels = info.levels();
         assert_eq!(levels.len(), 5);
@@ -1556,7 +1556,7 @@ mod tests {
 
     #[test]
     fn reorder_mixed_latin_hebrew_in_ltr_para() {
-        // "A" + Hebrew bet gimel + "B"  →  level 0 1 1 0
+        // "A" + Hebrew bet gimel + "B"  ->  level 0 1 1 0
         // L2 reverses the level-1 span: visual = A gimel bet B.
         let info = BidiInfo::new("A\u{05D1}\u{05D2}B", None);
         let levels = info.levels();
@@ -1569,7 +1569,7 @@ mod tests {
     // 10 curated entries from BidiCharacterTest.txt. Each row is
     // (text, paragraph_dir_override, expected per-char levels).
     //
-    // Entries are paraphrased — the reference test uses raw
+    // Entries are paraphrased: the reference test uses raw
     // codepoints; here we hand-pick a representative slice so the
     // intent is readable.
 
@@ -1605,14 +1605,14 @@ mod tests {
                 para: None,
                 levels: &[1, 2, 1],
             },
-            // 5. Digit-only paragraph: sos=L, W7 turns EN→L → level 0.
+            // 5. Digit-only paragraph: sos=L, W7 turns EN->L -> level 0.
             Case {
                 text: "123",
                 para: None,
                 levels: &[0, 0, 0],
             },
-            // 6. Arabic letter + ASCII digit. W2: EN→AN; W3: AL→R;
-            //    odd embedding 1, I2 bumps AN by 1 → level 2.
+            // 6. Arabic letter + ASCII digit. W2: EN->AN; W3: AL->R;
+            //    odd embedding 1, I2 bumps AN by 1 -> level 2.
             Case {
                 text: "\u{0627}1",
                 para: None,
@@ -1620,14 +1620,14 @@ mod tests {
             },
             // 7. ET adjacent to EN: "$1" with paragraph LTR. W5
             //    turns ET into EN, then W7 turns the EN run back
-            //    into L (sos=L) → level 0.
+            //    into L (sos=L) -> level 0.
             Case {
                 text: "$1",
                 para: None,
                 levels: &[0, 0],
             },
             // 8. ES between two ENs in LTR para: W4 turns ES into
-            //    EN, W7 then turns the run into L → level 0.
+            //    EN, W7 then turns the run into L -> level 0.
             Case {
                 text: "1+2",
                 para: None,

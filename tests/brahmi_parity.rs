@@ -8,7 +8,7 @@
 //! The corpus exercises:
 //!
 //!   * single base consonants (BMP-style classification, but the
-//!     codepoints sit in the SMP — U+11000..U+1107F)
+//!     codepoints sit in the SMP: U+11000..U+1107F)
 //!   * consonant + above-base vowel sign (sign-i U+11039)
 //!   * consonant + post-base vowel sign (sign-aa U+11038)
 //!   * consonant + virama + consonant (conjunct via U+11046)
@@ -34,7 +34,7 @@ const CORPUS: &[Case] = &[
         note: "empty",
         compare_rustybuzz: true,
     },
-    // U+11015 — letter ka. Single base.
+    // U+11015: letter ka. Single base.
     Case {
         text: "\u{11015}",
         note: "ka alone",
@@ -128,7 +128,7 @@ fn brahmi_corpus_matches_rustybuzz() {
 #[test]
 fn brahmi_smoke_test_runs() {
     // Smoke test: shape a Brahmi run without panicking. Verifies the
-    // Brahmi codepath is wired up — categorization, script routing,
+    // Brahmi codepath is wired up: categorization, script routing,
     // segmenter, and USE shaping pipeline all execute.
     let blob = Blob::new(NOTO_BRAHMI);
     let face = Face::parse(&blob, 0).expect("parse sigilbuzz face");

@@ -1,11 +1,11 @@
-//! `CBDT` — Color Bitmap Data.
+//! `CBDT`: Color Bitmap Data.
 //!
 //! `CBDT` holds the bitmap pixels themselves; [`Cblc`](crate::tables::cblc::Cblc)
 //! is the index that turns a glyph id at a given strike into a byte
 //! offset into this table.
 //!
 //! sigilbuzz stops at "return the raw payload bytes plus their
-//! metrics". Decoding PNG / mask data is the consumer's job — every
+//! metrics". Decoding PNG / mask data is the consumer's job: every
 //! sane caller already has a PNG decoder, and pulling one in here
 //! would violate the no-default-feature build.
 //!
@@ -23,8 +23,8 @@
 //! ```
 //!
 //! Formats 1-9 are the legacy EBDT mask formats (1-bit, 8-bit, etc.).
-//! sigilbuzz's API still works for those — `BitmapData::Mask` is the
-//! pass-through variant — but consumers of CBDT today are uniformly
+//! sigilbuzz's API still works for those (`BitmapData::Mask` is the
+//! pass-through variant), but consumers of CBDT today are uniformly
 //! looking at PNG payloads.
 
 use crate::error::{Error, Result};
@@ -42,17 +42,17 @@ pub enum GlyphBitmapMetrics {
     Big(BigGlyphMetrics),
 }
 
-/// A parsed CBDT entry — payload bytes plus their format and metrics.
+/// A parsed CBDT entry: payload bytes plus their format and metrics.
 /// Borrows into the CBDT table; cloning is a slice-copy.
 #[derive(Debug, Clone, Copy)]
 pub struct GlyphBitmap<'a> {
     /// CBDT image format id (17 / 18 / 19 etc.). Mirrors the
     /// `imageFormat` field from CBLC's IndexSubTable header.
     pub image_format: u16,
-    /// Per-glyph metrics. Always present after parsing — for format
+    /// Per-glyph metrics. Always present after parsing: for format
     /// 19 the strike-level metrics from CBLC are folded in.
     pub metrics: GlyphBitmapMetrics,
-    /// The raw payload — PNG bytes for formats 17-19, mask bytes for
+    /// The raw payload: PNG bytes for formats 17-19, mask bytes for
     /// the older formats. sigilbuzz never decodes.
     pub data: &'a [u8],
 }

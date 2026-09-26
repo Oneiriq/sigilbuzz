@@ -1,4 +1,4 @@
-//! GSUB lookup type 3 — Alternate Substitution.
+//! GSUB lookup type 3: Alternate Substitution.
 //!
 //! Replaces one input glyph with one output chosen from an
 //! `AlternateSet`. The choice is driven by the feature's *value*:

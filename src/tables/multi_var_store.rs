@@ -1,4 +1,4 @@
-//! `MultiItemVariationStore` — VARC's multi-tuple variation store.
+//! `MultiItemVariationStore`: VARC's multi-tuple variation store.
 //!
 //! Sibling primitive to [`crate::tables::ItemVariationStore`]. Where the
 //! IVS used by HVAR / VVAR / MVAR / GDEF stores per-region triples
@@ -320,10 +320,10 @@ impl<'a> MultiVarStore<'a> {
     }
 
     /// Decodes the delta-set payload for `(outer, inner)` as a flat
-    /// `TupleValues` stream of `value_count × region_count` deltas
-    /// (region-major: tuple-0-region-0, tuple-0-region-1, …,
-    /// tuple-1-region-0, …) and resolves them against `coords`,
-    /// returning `value_count` summed deltas — one per output value.
+    /// `TupleValues` stream of `value_count * region_count` deltas
+    /// (region-major: tuple-0-region-0, tuple-0-region-1, ...,
+    /// tuple-1-region-0, ...) and resolves them against `coords`,
+    /// returning `value_count` summed deltas, one per output value.
     ///
     /// Returns `None` when indices are out of range or the payload
     /// cannot decode the requested length.
@@ -385,16 +385,16 @@ fn axis_scalar(start: f32, peak: f32, end: f32, coord: f32) -> f32 {
 }
 
 // ----------------------------------------------------------------------
-// TupleValues decoder — VARC's packed delta encoding.
+// TupleValues decoder: VARC's packed delta encoding.
 // ----------------------------------------------------------------------
 //
 // Each delta-set entry is a stream of control-byte runs. The encoding
 // is a backward-compatible extension of the gvar packed-delta scheme:
 //
 //   control byte:
-//     bit 7 (0x80) — DELTAS_ARE_ZERO  (run of zeros, no payload)
-//     bit 6 (0x40) — DELTAS_ARE_WORDS (i16 deltas, else i8)
-//     bits 0..5    — runLength - 1    (1..64 deltas in this run)
+//     bit 7 (0x80):  DELTAS_ARE_ZERO  (run of zeros, no payload)
+//     bit 6 (0x40):  DELTAS_ARE_WORDS (i16 deltas, else i8)
+//     bits 0..5:     runLength - 1    (1..64 deltas in this run)
 //
 //   When DELTAS_ARE_ZERO and DELTAS_ARE_WORDS are both set, the run
 //   carries i32 deltas instead. (boring-expansion-spec extension.)
@@ -416,7 +416,7 @@ pub(crate) fn decode_tuple_values(data: &[u8], count: usize) -> Option<Vec<i32>>
         let words = ctrl & 0x40 != 0;
         for _ in 0..run_len {
             if out.len() >= count {
-                return None; // run overruns target — malformed
+                return None; // run overruns target: malformed
             }
             let delta: i32 = match (zeros, words) {
                 (true, false) => 0,

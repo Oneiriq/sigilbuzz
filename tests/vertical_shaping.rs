@@ -25,7 +25,7 @@ fn build_vertical_font() -> Vec<u8> {
     head.extend_from_slice(&0i16.to_be_bytes());
     head.extend_from_slice(&0i16.to_be_bytes());
 
-    // maxp 0.5 — 4 glyphs
+    // maxp 0.5 (4 glyphs)
     let mut maxp = Vec::new();
     maxp.extend_from_slice(&0x0000_5000u32.to_be_bytes());
     maxp.extend_from_slice(&4u16.to_be_bytes());
@@ -42,7 +42,7 @@ fn build_vertical_font() -> Vec<u8> {
     hhea.extend_from_slice(&0i16.to_be_bytes());
     hhea.extend_from_slice(&4u16.to_be_bytes());
 
-    // hmtx — four longs
+    // hmtx: four longs
     let mut hmtx = Vec::new();
     for (adv, lsb) in &[(0u16, 0i16), (500, 0), (600, 0), (700, 0)] {
         hmtx.extend_from_slice(&adv.to_be_bytes());
@@ -61,7 +61,7 @@ fn build_vertical_font() -> Vec<u8> {
     vhea.extend_from_slice(&0i16.to_be_bytes());
     vhea.extend_from_slice(&4u16.to_be_bytes());
 
-    // vmtx — four longs, deliberately different from hmtx
+    // vmtx: four longs, different from hmtx
     let mut vmtx = Vec::new();
     for (adv, tsb) in &[(0u16, 0i16), (1000, 0), (1100, 0), (1200, 0)] {
         vmtx.extend_from_slice(&adv.to_be_bytes());
@@ -216,7 +216,7 @@ fn vertical_bottom_to_top_preserves_positive_advance() {
 
     let run = shape(&font, &buffer, &[]).unwrap();
     assert_eq!(run.len(), 1);
-    // BTT is a reverse vertical flow — the advance stays positive so
+    // BTT is a reverse vertical flow. The advance stays positive so
     // the pen walks upward.
     assert_eq!(run.glyphs[0].y_advance, 1200);
     assert_eq!(run.glyphs[0].x_advance, 0);

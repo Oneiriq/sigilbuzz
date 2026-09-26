@@ -3,48 +3,48 @@
 //! Walks every lookup in the source `GPOS` table and produces a new
 //! `GPOS` whose Coverage / ClassDef / glyph references resolve against
 //! the new gid namespace defined by the caller's [`GidMap`]. GPOS
-//! lookups don't introduce new gids — they only reposition existing
-//! ones — so the rewriter is purely a filter + remap pass over the
+//! lookups don't introduce new gids (they only reposition existing
+//! ones), so the rewriter is purely a filter + remap pass over the
 //! per-type byte layout.
 //!
 //! # Per-lookup-type coverage
 //!
 //! As of this commit the rewriter ships byte-level support for:
 //!
-//! - **Type 1 (single-adj)** — formats 1 (uniform ValueRecord) and 2
+//! - **Type 1 (single-adj)**: formats 1 (uniform ValueRecord) and 2
 //!   (per-glyph ValueRecord array). Filters Coverage; for fmt 2 drops
 //!   the corresponding ValueRecord slots in lockstep. The ValueRecord
-//!   bytes themselves travel verbatim — they contain no gid references.
-//! - **Type 2 (pair-adj) format 1** — explicit pair entries. Filters
+//!   bytes themselves travel verbatim. They contain no gid references.
+//! - **Type 2 (pair-adj) format 1**: explicit pair entries. Filters
 //!   Coverage of the first glyph; for each surviving PairSet, walks
 //!   PairValueRecords and drops pairs whose `secondGlyph` was dropped.
 //!   Empty PairSets collapse to a Coverage drop.
-//! - **Type 2 (pair-adj) format 2** — class-based matrix. The rewriter
+//! - **Type 2 (pair-adj) format 2**: class-based matrix. The rewriter
 //!   has two strategies: a fast pass-through that preserves source
 //!   class IDs and the matrix bytes verbatim (filtering both ClassDefs
-//!   through the GidMap), and a fmt-1 fallback that synthesises an
+//!   through the GidMap), and a fmt-1 fallback that synthesizes an
 //!   explicit pair table from the kept-gid cross-product when class
 //!   collapse would otherwise leave the matrix carrying rows/columns
 //!   that no surviving gid can reach. The driver picks the fmt-1
-//!   fallback for small subsets (≤ 8 surviving first-glyphs or kept
-//!   first × kept second cross ≤ 256 cells) and the pass-through path
+//!   fallback for small subsets (<= 8 surviving first-glyphs or kept
+//!   first x kept second cross <= 256 cells) and the pass-through path
 //!   for larger ones.
-//! - **Type 3 (cursive)** — Coverage + EntryExitRecord array. Filters
+//! - **Type 3 (cursive)**: Coverage + EntryExitRecord array. Filters
 //!   Coverage; drops corresponding entry/exit slots. Anchors travel
 //!   verbatim (coordinates only, no gid references).
-//! - **Type 4 / 5 / 6 (mark attachment)** — Mark+Base / Mark+Liga /
+//! - **Type 4 / 5 / 6 (mark attachment)**: Mark+Base / Mark+Liga /
 //!   Mark1+Mark2 Coverages with parallel MarkArray and BaseArray /
 //!   LigatureArray / Mark2Array entries. Filters both Coverages, drops
 //!   array entries in lockstep. Anchors and class IDs travel verbatim.
-//! - **Type 9 (extension)** — pass-through after rewriting the inner
+//! - **Type 9 (extension)**: pass-through after rewriting the inner
 //!   subtable. Falls back to a lookup drop when the inner type has no
 //!   rewriter.
 //!
-//! - **Type 7 (context positioning)** — formats 1 / 2 / 3, mirroring
+//! - **Type 7 (context positioning)**: formats 1 / 2 / 3, mirroring
 //!   the GSUB type-5 byte-level rewriter. Nested `PosLookupRecord`s
 //!   are renumbered through the GPOS lookup-list renumber map driven
 //!   by the two-phase build in [`crate::layout::build_gpos`].
-//! - **Type 8 (chained context positioning)** — formats 1 / 2 / 3,
+//! - **Type 8 (chained context positioning)**: formats 1 / 2 / 3,
 //!   mirroring the GSUB type-6 byte-level rewriter. Same driver hook
 //!   as type 7 for the lookup-renumber pass.
 
@@ -107,7 +107,7 @@ fn rewrite_subtable(ctx: &RewriterCtx, lookup_type: u16, sub: &[u8]) -> Option<R
 }
 
 /// Returns the effective GPOS lookup type when the lookup is a
-/// context-family type (7 or 8) — including the case where it is
+/// context-family type (7 or 8), including the case where it is
 /// wrapped in an Extension lookup (type 9). Returns `None` otherwise.
 ///
 /// Used by the GPOS driver to identify lookups whose nested
@@ -143,9 +143,9 @@ fn unwrap_extension_lookup_type(lookup: &sigilbuzz::tables::layout::Lookup<'_>) 
 /// entry pointing at a variable-length `LigatureAttach`.
 #[derive(Copy, Clone)]
 enum MarkAttachKind {
-    /// Type 4 / 6 — base / mark2 array.
+    /// Type 4 / 6: base / mark2 array.
     FixedClassRow,
-    /// Type 5 — ligature array.
+    /// Type 5: ligature array.
     LigatureAttach,
 }
 
@@ -158,7 +158,7 @@ enum MarkAttachKind {
 type SurvivingBase = (u16, Vec<u8>, Vec<Vec<u8>>);
 
 // ---------------------------------------------------------------------------
-// Type 1 — Single Adjustment
+// Type 1: Single Adjustment
 // ---------------------------------------------------------------------------
 
 /// Rewrites a Single Adjustment subtable.
@@ -304,7 +304,7 @@ fn value_record_size(format: u16) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Type 2 — Pair Adjustment
+// Type 2: Pair Adjustment
 // ---------------------------------------------------------------------------
 
 /// Rewrites a PairPos subtable. Dispatches on format.
@@ -487,13 +487,13 @@ fn emit_pair_pos_format1(
 /// Two strategies, picked by [`should_use_format1_fallback`]:
 ///
 /// 1. **Fmt-2 pass-through** (the cheap path). When the kept-gid set
-///    spans enough classes that synthesising explicit pairs would be
+///    spans enough classes that synthesizing explicit pairs would be
 ///    bytes-heavy, we walk both ClassDefs and rewrite them through the
-///    GidMap. Source class IDs are preserved verbatim — `emit_classdef`
+///    GidMap. Source class IDs are preserved verbatim: `emit_classdef`
 ///    keeps `(new_gid, original_class)` so matrix indices stay valid;
 ///    the matrix bytes travel verbatim.
 /// 2. **Fmt-1 fallback** (the precise path). When the surviving first
-///    × second cross-product is small, we enumerate every kept pair,
+///    x second cross-product is small, we enumerate every kept pair,
 ///    look up its `(class1, class2)` in the source ClassDefs, read the
 ///    source matrix cell, drop pairs that resolve to all-zero
 ///    ValueRecords, and emit a brand-new fmt-1 PairPos. This is the
@@ -545,9 +545,9 @@ fn rewrite_pair_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
     surviving_cov.sort_unstable();
     surviving_cov.dedup();
 
-    // Class-collapse fallback: when synthesising an explicit fmt-1
+    // Class-collapse fallback: when synthesizing an explicit fmt-1
     // table would be cheaper or strictly more correct (e.g. the
-    // surviving first × second cross-product is small enough that
+    // surviving first x second cross-product is small enough that
     // class-pair indirection no longer pays off), enumerate every
     // (first, second) pair from the kept sets, resolve its
     // (class1, class2) via the source ClassDefs, and read the source
@@ -570,7 +570,7 @@ fn rewrite_pair_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
 
     // Filter ClassDefs: keep (new_gid, class) pairs whose class is
     // still valid in the matrix (< classNCount). We do not renumber
-    // classes — the matrix bytes are preserved verbatim.
+    // classes. The matrix bytes are preserved verbatim.
     let surviving_cd1: Vec<(u16, u16)> = cd1_pairs
         .iter()
         .filter_map(|&(g, c)| {
@@ -597,7 +597,7 @@ fn rewrite_pair_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
     let cd1_bytes_new = crate::classdef::emit_classdef(&surviving_cd1);
     let cd2_bytes_new = crate::classdef::emit_classdef(&surviving_cd2);
 
-    // Matrix bytes travel verbatim — neither ValueRecord field nor
+    // Matrix bytes travel verbatim: neither ValueRecord field nor
     // class indices changed.
     let matrix_bytes =
         sub[records_off..records_off + class1_count as usize * class1_stride].to_vec();
@@ -655,14 +655,14 @@ fn emit_pair_pos_format2(
     RewrittenSubtable { bytes: out }
 }
 
-/// Heuristic: pick the fmt-1 fallback when the surviving first × second
+/// Heuristic: pick the fmt-1 fallback when the surviving first x second
 /// cross-product is small enough that emitting an explicit pair table
 /// is competitive with carrying the full class matrix verbatim.
 ///
 /// The fallback fires when:
-/// - Coverage shrunk to ≤ 8 first-glyphs (small kerning subsets, e.g.
+/// - Coverage shrunk to <= 8 first-glyphs (small kerning subsets, e.g.
 ///   the {A, V} case), or
-/// - the kept first × kept second cross-product fits a 256-cell budget,
+/// - the kept first x kept second cross-product fits a 256-cell budget,
 ///   so the explicit pair table can't bloat past the source matrix.
 ///
 /// Otherwise we use the cheap fmt-2 pass-through path. The matrix
@@ -684,10 +684,10 @@ fn should_use_format1_fallback(
 /// One PairPos fmt-1 first-glyph set: `(new_first_gid, [(new_second_gid, value_pair_bytes)])`.
 type PairPosFmt1Set = (u16, Vec<(u16, Vec<u8>)>);
 
-/// Synthesises a fmt-1 PairPos around the kept-gid cross-product.
-/// Walks every `(first_old, first_new) × (second_old)` and reads the
+/// Synthesizes a fmt-1 PairPos around the kept-gid cross-product.
+/// Walks every `(first_old, first_new) * (second_old)` and reads the
 /// source matrix cell at `(class1, class2)`. Drops pairs whose source
-/// cell is all-zero (no kerning to preserve) — the lookup answer is
+/// cell is all-zero (no kerning to preserve). The lookup answer is
 /// then equivalent to "not covered".
 #[allow(clippy::too_many_arguments)]
 fn rewrite_pair_pos_format2_to_format1(
@@ -709,7 +709,7 @@ fn rewrite_pair_pos_format2_to_format1(
     let class2_stride = v_pair;
     let class1_stride = class2_count as usize * class2_stride;
 
-    // Build a quick (gid → class) lookup for both ClassDefs by parsing
+    // Build a quick (gid -> class) lookup for both ClassDefs by parsing
     // them from the source bytes once. Class 0 is the implicit default.
     let cd1_class_of = |gid: u16| -> u16 { class_of_gid(sub, cd1_off, gid) };
     let cd2_class_of = |gid: u16| -> u16 { class_of_gid(sub, cd2_off, gid) };
@@ -717,7 +717,7 @@ fn rewrite_pair_pos_format2_to_format1(
     // Enumerate the kept-gid universe as the candidate second-glyph
     // set. Classes 1..N appear in `cd2_pairs`, but class 0 (the
     // "everything else" bucket) carries any gid the source classDef2
-    // doesn't list explicitly — and class-0 columns can still hold
+    // doesn't list explicitly, and class-0 columns can still hold
     // non-zero kerning. Walking the GidMap directly catches that.
     let _ = cd2_pairs; // class lookups happen via cd2_class_of below.
     let kept_seconds: Vec<(u16, u16)> = map.iter_kept().collect();
@@ -742,7 +742,7 @@ fn rewrite_pair_pos_format2_to_format1(
             let Some(cell) = cell_bytes(c1, c2) else {
                 continue;
             };
-            // Drop all-zero cells — no kerning to carry.
+            // Drop all-zero cells: no kerning to carry.
             if cell.iter().all(|b| *b == 0) {
                 continue;
             }
@@ -772,7 +772,7 @@ fn rewrite_pair_pos_format2_to_format1(
     ))
 }
 
-/// Reads a single (gid → class) value from a ClassDef stored at
+/// Reads a single (gid -> class) value from a ClassDef stored at
 /// `cd_off` inside `sub`. Returns 0 (the implicit default) on any
 /// parse failure.
 fn class_of_gid(sub: &[u8], cd_off: usize, gid: u16) -> u16 {
@@ -852,7 +852,7 @@ fn emit_pair_pos_format1_from_sets(
 }
 
 // ---------------------------------------------------------------------------
-// Type 3 — Cursive Attachment
+// Type 3: Cursive Attachment
 // ---------------------------------------------------------------------------
 
 /// Rewrites a Cursive Attachment subtable.
@@ -976,7 +976,7 @@ fn emit_cursive(surviving: &[(u16, Vec<u8>, Vec<u8>)]) -> RewrittenSubtable {
 }
 
 // ---------------------------------------------------------------------------
-// Type 4 / 5 / 6 — Mark Attachment (Mark-to-Base, Mark-to-Liga, Mark-to-Mark)
+// Type 4 / 5 / 6: Mark Attachment (Mark-to-Base, Mark-to-Liga, Mark-to-Mark)
 // ---------------------------------------------------------------------------
 
 /// Rewrites a mark-attachment subtable. The three lookup types share
@@ -1024,7 +1024,7 @@ fn emit_cursive(surviving: &[(u16, Vec<u8>, Vec<u8>)]) -> RewrittenSubtable {
 /// ```
 ///
 /// We dispatch on the lookup type via [`MarkAttachKind`] passed in by
-/// the caller — auto-detecting layout from the bytes alone is fragile
+/// the caller. Auto-detecting layout from the bytes alone is fragile
 /// because for `markClassCount == 1` a LigatureArray's attach offset
 /// can coincide with a valid type-4 anchor offset.
 fn rewrite_mark_attach(
@@ -1078,7 +1078,7 @@ fn rewrite_mark_attach(
         // Anchor offset is relative to MarkArray base.
         let anchor_bytes = read_anchor_bytes(mark_array_bytes, anchor_off_rel);
         if anchor_bytes.is_empty() {
-            // Marks always have anchors — a null offset would be a
+            // Marks always have anchors. A null offset would be a
             // malformed font. Skip.
             continue;
         }
@@ -1093,7 +1093,7 @@ fn rewrite_mark_attach(
     // class-anchor row (type 4 / 6) or a variable-component attach
     // (type 5). We auto-detect by parsing the first 2 bytes as `count`
     // and checking whether the array length matches the type-4 layout
-    // (count × markClassCount × 2 + 2 bytes header).
+    // (count * markClassCount * 2 + 2 bytes header).
     let base_array_bytes = sub.get(base_array_off..)?;
     if base_array_bytes.len() < 2 {
         return None;
@@ -1106,7 +1106,7 @@ fn rewrite_mark_attach(
     let surviving_bases: Vec<SurvivingBase> = if is_type4_or_6 {
         // Per-base array of class-anchored anchors. We collect for
         // each surviving entry its (new_gid, marker_for_type4, anchor
-        // body slots) — the marker is empty Vec, the anchor slots are
+        // body slots): the marker is empty Vec, the anchor slots are
         // a list of mcc anchor-byte vectors (empty = null).
         let mut out: Vec<SurvivingBase> = Vec::new();
         for (i, &g_old) in base_glyphs.iter().enumerate().take(base_pair) {
@@ -1126,7 +1126,7 @@ fn rewrite_mark_attach(
         }
         out
     } else {
-        // Type 5 (Mark-to-Liga) — ligatureArray with attach bodies.
+        // Type 5 (Mark-to-Liga): ligatureArray with attach bodies.
         // For each surviving ligature, capture the LigatureAttach body
         // and re-emit it (we need to remap nothing inside, since
         // anchor offsets are relative to the LigatureAttach itself
@@ -1148,7 +1148,7 @@ fn rewrite_mark_attach(
                 continue;
             };
             // Compute the attach body length: u16 componentCount +
-            // componentCount × mcc × 2 anchor offsets + the anchor
+            // componentCount * mcc * 2 anchor offsets + the anchor
             // bodies.
             if attach_bytes.len() < 2 {
                 continue;
@@ -1295,7 +1295,7 @@ fn emit_mark_attach(
 }
 
 // ---------------------------------------------------------------------------
-// Type 9 — Extension Positioning
+// Type 9: Extension Positioning
 // ---------------------------------------------------------------------------
 
 /// Rewrites a GPOS Extension subtable. Wrapper layout:
@@ -1333,7 +1333,7 @@ fn rewrite_extension(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable>
     Some(RewrittenSubtable { bytes: out })
 }
 
-// ===== GPOS types 7 / 8 — contextual / chained-contextual positioning =====
+// ===== GPOS types 7 / 8: contextual / chained-contextual positioning =====
 //
 // Structurally identical to GSUB types 5 / 6: the same three formats
 // (glyph rule sets, class rule sets, coverage arrays) drive a list of
@@ -1343,14 +1343,14 @@ fn rewrite_extension(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable>
 // [`crate::layout::build_gpos`] once the GPOS lookup-list renumber is
 // known. See [`context_lookup_type`] for the driver hook.
 //
-// We share the `PatchedLookupRecord` walker with GSUB — the four-byte
+// We share the `PatchedLookupRecord` walker with GSUB: the four-byte
 // record layout is identical, only the dispatcher target differs.
 
 use crate::gsub::{encode_lookup_records, parse_and_remap_lookup_records};
 
 /// Rewrites a GPOS type 7 (Context Positioning) subtable. Auto-
 /// dispatches on the leading u16 format. Mirrors `rewrite_type5` from
-/// the GSUB rewriter — only the lookup-record dispatcher target
+/// the GSUB rewriter. Only the lookup-record dispatcher target
 /// differs at runtime, the byte layout is identical.
 fn rewrite_context_pos(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     if sub.len() < 2 {
@@ -2383,7 +2383,7 @@ mod tests {
         GidMap::from_table(table)
     }
 
-    // ----- Type 1 — Single Adjustment -----
+    // ----- Type 1: Single Adjustment -----
 
     fn build_single_adj_format1(covered: &[u16], value_format: u16, fields: &[i16]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -2421,7 +2421,7 @@ mod tests {
 
     #[test]
     fn rewrite_single_adj_format1_remaps_coverage() {
-        // Covered: 10, 20, 30. Map 10→1, 20→2, drop 30. Shared
+        // Covered: 10, 20, 30. Map 10->1, 20->2, drop 30. Shared
         // x_advance = -25 should still apply.
         let bytes = build_single_adj_format1(&[10, 20, 30], X_ADVANCE, &[-25]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (20, 2)]);
@@ -2466,7 +2466,7 @@ mod tests {
 
     #[test]
     fn rewrite_single_adj_format1_preserves_value_record_with_multiple_fields() {
-        // value_format = X_PLACEMENT | X_ADVANCE → two i16 fields.
+        // value_format = X_PLACEMENT | X_ADVANCE -> two i16 fields.
         let bytes = build_single_adj_format1(&[5], X_PLACEMENT | X_ADVANCE, &[4, -10]);
         let map = map_from_pairs(&[(0, 0), (5, 1)]);
         let ctx = RewriterCtx {
@@ -2480,7 +2480,7 @@ mod tests {
         assert_eq!(v.x_advance, -10);
     }
 
-    // ----- Type 2 — Pair Adjustment, format 1 -----
+    // ----- Type 2: Pair Adjustment, format 1 -----
 
     fn build_pair_pos_format1(covered: &[u16], pairs: &[&[(u16, i16, i16)]]) -> Vec<u8> {
         assert_eq!(covered.len(), pairs.len());
@@ -2514,8 +2514,8 @@ mod tests {
 
     #[test]
     fn rewrite_pair_pos_format1_keeps_surviving_pairs() {
-        // first 10 → second {15, 25}; first 20 → second {5}.
-        // Map: 10→1, 15→2, 20→3, drop 5, drop 25.
+        // first 10 -> second {15, 25}; first 20 -> second {5}.
+        // Map: 10->1, 15->2, 20->3, drop 5, drop 25.
         let bytes =
             build_pair_pos_format1(&[10, 20], &[&[(15, -30, 0), (25, 5, 0)], &[(5, -50, 0)]]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (15, 2), (20, 3)]);
@@ -2525,7 +2525,7 @@ mod tests {
         };
         let rs = rewrite_pair_pos_format1(&ctx, &bytes).unwrap();
         let pp = PairPos::parse(&rs.bytes).unwrap();
-        // (1, 2) → -30 survives; (1, 25)/(3, 5) drop.
+        // (1, 2) -> -30 survives; (1, 25)/(3, 5) drop.
         let (v1, _) = pp.lookup(1, 2).unwrap();
         assert_eq!(v1.x_advance, -30);
         // First 3 (was 20) had only second 5 which dropped; that
@@ -2545,7 +2545,7 @@ mod tests {
         assert!(rewrite_pair_pos_format1(&ctx, &bytes).is_none());
     }
 
-    // ----- Type 2 — Pair Adjustment, format 2 -----
+    // ----- Type 2: Pair Adjustment, format 2 -----
 
     fn build_classdef_format1(start: u16, values: &[u16]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -2597,9 +2597,9 @@ mod tests {
 
     #[test]
     fn rewrite_pair_pos_format2_pass_through_when_class_structure_preserved() {
-        // Coverage: 10, 11. classDef1: both class 1. classDef2: 20→0, 21→1, 22→2.
-        // Matrix 2×3: [[0,0,0], [0,-25,-15]].
-        // Map every gid to itself but down by 1 (10→9, etc.). Class
+        // Coverage: 10, 11. classDef1: both class 1. classDef2: 20->0, 21->1, 22->2.
+        // Matrix 2x3: [[0,0,0], [0,-25,-15]].
+        // Map every gid to itself but down by 1 (10->9, etc.). Class
         // structure is preserved (we keep all members of each class).
         let cd1 = build_classdef_format1(10, &[1, 1]);
         let cd2 = build_classdef_format1(20, &[0, 1, 2]);
@@ -2613,15 +2613,15 @@ mod tests {
         };
         let rs = rewrite_pair_pos_format2(&ctx, &bytes).unwrap();
         let pp = PairPos::parse(&rs.bytes).unwrap();
-        // (9, 20) → class1=1, class2=1 → -25.
+        // (9, 20) -> class1=1, class2=1 -> -25.
         let (v1, _) = pp.lookup(9, 20).unwrap();
         assert_eq!(v1.x_advance, -25);
-        // (10, 21) → class1=1, class2=2 → -15.
+        // (10, 21) -> class1=1, class2=2 -> -15.
         let (v1b, _) = pp.lookup(10, 21).unwrap();
         assert_eq!(v1b.x_advance, -15);
     }
 
-    // ----- Type 4 — Mark to Base -----
+    // ----- Type 4: Mark to Base -----
 
     fn build_anchor(x: i16, y: i16) -> Vec<u8> {
         let mut out = Vec::new();
@@ -2706,7 +2706,7 @@ mod tests {
     fn rewrite_mark_base_keeps_surviving_marks_and_bases() {
         // marks: 20 (class 0, anchor (10,0)), 21 (class 1, anchor (12,0))
         // bases: 5 with anchors (250,500), (260,600) for classes 0/1.
-        // Map: 20→1, 21→2, 5→3.
+        // Map: 20->1, 21->2, 5->3.
         let bytes = build_mark_base_pos(
             &[20, 21],
             &[5],
@@ -2751,7 +2751,7 @@ mod tests {
         assert!(rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::FixedClassRow).is_none());
     }
 
-    // ----- Type 5 — Mark to Liga -----
+    // ----- Type 5: Mark to Liga -----
 
     #[allow(clippy::type_complexity)]
     fn build_mark_liga_pos(
@@ -2860,7 +2860,7 @@ mod tests {
         assert_eq!(a1.base_anchor.x, 400);
     }
 
-    // ----- Type 6 — Mark to Mark -----
+    // ----- Type 6: Mark to Mark -----
 
     #[test]
     fn rewrite_mark_mark_keeps_round_trip() {
@@ -2879,7 +2879,7 @@ mod tests {
         assert_eq!(attach.base_anchor.y, 600);
     }
 
-    // ----- Type 9 — Extension wrapper around inner type 1 -----
+    // ----- Type 9: Extension wrapper around inner type 1 -----
 
     #[test]
     fn rewrite_extension_wraps_inner_single_adj() {
@@ -2905,7 +2905,7 @@ mod tests {
         assert_eq!(parsed.adjustment(1).unwrap().x_advance, -25);
     }
 
-    // ----- Type 3 — Cursive -----
+    // ----- Type 3: Cursive -----
 
     type CursiveAnchor = Option<(i16, i16)>;
 
@@ -3008,13 +3008,13 @@ mod tests {
             gid_map: &map,
             lookup_renumber: None,
         };
-        // Format 0 inside a context subtable is unknown — it falls
+        // Format 0 inside a context subtable is unknown. It falls
         // out as None and the cascade drops the lookup.
         let dummy: Vec<&[u8]> = vec![&[0u8; 6]];
         assert!(rewrite_lookup(&ctx, gpos_type::CONTEXT, 0, None, &dummy).is_none());
     }
 
-    // ----- Type 7 — Context Positioning -----
+    // ----- Type 7: Context Positioning -----
 
     fn build_pos_lookup_records(records: &[(u16, u16)]) -> Vec<u8> {
         let mut out = Vec::with_capacity(records.len() * 4);
@@ -3104,7 +3104,7 @@ mod tests {
         assert_eq!(glyph_count, 2);
         let rec_count = u16::from_be_bytes([rs.bytes[rule_abs + 2], rs.bytes[rule_abs + 3]]);
         assert_eq!(rec_count, 1);
-        // Tail (1 entry): the remapped 20 → 2.
+        // Tail (1 entry): the remapped 20 -> 2.
         let tail0 = u16::from_be_bytes([rs.bytes[rule_abs + 4], rs.bytes[rule_abs + 5]]);
         assert_eq!(tail0, 2);
         // Record: sequence=0, lookup=7 (renumbered from 3).
@@ -3117,7 +3117,7 @@ mod tests {
     #[test]
     fn rewrite_context_pos_format1_drops_when_input_tail_drops() {
         let bytes = build_context_pos_format1(&[10], &[vec![(vec![20], vec![(0, 3)])]]);
-        // Drop gid 20 — the rule can't fire.
+        // Drop gid 20: the rule can't fire.
         let map = map_from_pairs(&[(0, 0), (10, 1)]);
         let ctx = RewriterCtx {
             gid_map: &map,
@@ -3150,7 +3150,7 @@ mod tests {
     fn rewrite_context_pos_format3_remaps_lookup_index() {
         let bytes = build_context_pos_format3(&[vec![10, 11], vec![20]], &[(0, 1), (1, 5)]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (11, 2), (20, 3)]);
-        // renumber drops 5 → record at sequence_index=1 falls out, only
+        // renumber drops 5 -> record at sequence_index=1 falls out, only
         // the (0, 1) record with new lookup index 9 survives.
         let renumber: Vec<Option<u16>> = vec![
             Some(0u16),
@@ -3193,7 +3193,7 @@ mod tests {
         assert!(rewrite_context_pos(&ctx, &bytes).is_none());
     }
 
-    // ----- Type 8 — Chained Context Positioning -----
+    // ----- Type 8: Chained Context Positioning -----
 
     /// Builds a fmt-3 chained-context positioning subtable.
     fn build_chain_context_pos_format3(
@@ -3260,7 +3260,7 @@ mod tests {
     fn rewrite_chain_context_pos_format3_drops_when_backtrack_empties() {
         let bytes =
             build_chain_context_pos_format3(&[vec![5]], &[vec![10]], &[vec![30]], &[(0, 1)]);
-        // Drop gid 5 — backtrack coverage empties → subtable dies.
+        // Drop gid 5: backtrack coverage empties -> subtable dies.
         let map = map_from_pairs(&[(0, 0), (10, 100), (30, 300)]);
         let ctx = RewriterCtx {
             gid_map: &map,
@@ -3320,19 +3320,19 @@ mod tests {
         assert!(sigilbuzz::tables::gpos::ContextPos::parse(&rs.bytes).is_ok());
     }
 
-    // ----- PairPos format 2 — class collapse via fmt-1 fallback -----
+    // ----- PairPos format 2: class collapse via fmt-1 fallback -----
 
     #[test]
     fn rewrite_pair_pos_format2_class_collapse_uses_format1_fallback() {
-        // Source: 4 first-glyphs in 2 classes (10/11 → class 1, 12/13 →
-        // class 2); 4 second-glyphs in 2 classes (20/21 → class 1,
-        // 22/23 → class 2). Matrix:
+        // Source: 4 first-glyphs in 2 classes (10/11 -> class 1, 12/13 ->
+        // class 2); 4 second-glyphs in 2 classes (20/21 -> class 1,
+        // 22/23 -> class 2). Matrix:
         //
         //   class1=0: [0, 0, 0]
         //   class1=1: [0, -10, -20]
         //   class1=2: [0, -30, -40]
         //
-        // Drop 11 and 13 — the kept set spans class 1 (via 10) and
+        // Drop 11 and 13: the kept set spans class 1 (via 10) and
         // class 2 (via 12) on the first axis, but only class 1
         // (via 20) and class 2 (via 22) on the second.
         let cd1 = build_classdef_format1(10, &[1, 1, 2, 2]);
@@ -3348,23 +3348,23 @@ mod tests {
         };
         let rs = rewrite_pair_pos_format2(&ctx, &bytes).unwrap();
         let pp = PairPos::parse(&rs.bytes).unwrap();
-        // (1, 3) → original (10, 20), class1=1 × class2=1 → -10.
+        // (1, 3) -> original (10, 20), class1=1 x class2=1 -> -10.
         let (v1, _) = pp.lookup(1, 3).unwrap();
         assert_eq!(v1.x_advance, -10);
-        // (1, 4) → (10, 22), class1=1 × class2=2 → -20.
+        // (1, 4) -> (10, 22), class1=1 x class2=2 -> -20.
         let (v1b, _) = pp.lookup(1, 4).unwrap();
         assert_eq!(v1b.x_advance, -20);
-        // (2, 3) → (12, 20), class1=2 × class2=1 → -30.
+        // (2, 3) -> (12, 20), class1=2 x class2=1 -> -30.
         let (v1c, _) = pp.lookup(2, 3).unwrap();
         assert_eq!(v1c.x_advance, -30);
-        // (2, 4) → (12, 22), class1=2 × class2=2 → -40.
+        // (2, 4) -> (12, 22), class1=2 x class2=2 -> -40.
         let (v1d, _) = pp.lookup(2, 4).unwrap();
         assert_eq!(v1d.x_advance, -40);
     }
 
     #[test]
     fn rewrite_pair_pos_format2_class_collapse_drops_zero_kerning() {
-        // Same shape as above but matrix[1][1] = 0 — the (1, 3) pair
+        // Same shape as above but matrix[1][1] = 0. The (1, 3) pair
         // should drop because the surviving cell is all-zero.
         let cd1 = build_classdef_format1(10, &[1, 1]);
         let cd2 = build_classdef_format1(20, &[1, 1]);
@@ -3375,7 +3375,7 @@ mod tests {
             gid_map: &map,
             lookup_renumber: None,
         };
-        // Every cell is zero → no surviving pairs → subtable drops.
+        // Every cell is zero -> no surviving pairs -> subtable drops.
         assert!(rewrite_pair_pos_format2(&ctx, &bytes).is_none());
     }
 
@@ -3384,7 +3384,7 @@ mod tests {
         // When the kept set is large the heuristic in
         // `should_use_format1_fallback` keeps us on the fmt-2
         // pass-through. We exercise that path by building a kept-gid
-        // set whose first × second cross product blows past the 256
+        // set whose first x second cross product blows past the 256
         // budget. The matrix bytes survive verbatim through the
         // pass-through path.
         let covered: Vec<u16> = (10..=30).collect();
@@ -3394,7 +3394,7 @@ mod tests {
         let matrix: &[&[i16]] = &[&[0, 0], &[0, -25]];
         let bytes = build_pair_pos_format2(&covered, &cd1, &cd2, matrix);
 
-        // Keep everything (large kept set; cross product = 21 × ~21 = 441 > 256).
+        // Keep everything (large kept set; cross product = 21 * ~21 = 441 > 256).
         let mut pairs: Vec<(u16, u16)> = alloc::vec![(0, 0)];
         for g in 10..=30 {
             pairs.push((g, g - 9));
@@ -3409,7 +3409,7 @@ mod tests {
         };
         let rs = rewrite_pair_pos_format2(&ctx, &bytes).unwrap();
         let pp = PairPos::parse(&rs.bytes).unwrap();
-        // (1, 22) → original (10, 40): class1=1, class2=1 → -25.
+        // (1, 22) -> original (10, 40): class1=1, class2=1 -> -25.
         let (v1, _) = pp.lookup(1, 22).unwrap();
         assert_eq!(v1.x_advance, -25);
     }

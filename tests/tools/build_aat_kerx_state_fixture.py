@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Synthesise an AAT-only font that exercises `kerx` subtable
-format 1 — state-machine kerning.
+format 1: state-machine kerning.
 
 Sister script to `build_aat_fixture.py` and
 `build_aat_kerx_fmt2_fixture.py`. Single-purpose: the only kerning
@@ -11,8 +11,8 @@ The font has six glyphs (`.notdef`, A, B, C, D, space) with cmap
 entries for the five real letters plus space. The state machine
 contextually kerns:
 
-- (A, B) → -40 (only when A is the run start or follows a non-space)
-- (C, D) → -25 (always, when the C is on the kern stack)
+- (A, B) -> -40 (only when A is the run start or follows a non-space)
+- (C, D) -> -25 (always, when the C is on the kern stack)
 
 The state machine has four states so each kern rule fires only in
 its specific context:
@@ -24,7 +24,7 @@ its specific context:
 - State 2 ("after C"): D pops the C and emits -26; A pushes and
   goes to state 1; everything else returns to state 0.
 - State 3 ("after space"): A is silently dropped (no push) and
-  returns to state 0 — that's the kern-suppression semantics. C
+  returns to state 0. That's the kern-suppression semantics. C
   still pushes (CD kerns even after a space).
 
 Deliberately NO GSUB and NO GPOS so sigilbuzz's `kerx` fallback
@@ -109,7 +109,7 @@ def build_lookup_format6(pairs):
 
 
 def build_kerx_table() -> bytes:
-    # Class lookup: each real glyph → its class. Anything else falls
+    # Class lookup: each real glyph -> its class. Anything else falls
     # to the reserved out-of-bounds class (handled by the lookup
     # primitive, returns class 1).
     class_lookup = build_lookup_format6([
@@ -120,55 +120,55 @@ def build_kerx_table() -> bytes:
         (GID_SPACE, CLASS_SP),
     ])
 
-    # State array (N_STATES rows × N_CLASSES u16 entry indices).
+    # State array (N_STATES rows x N_CLASSES u16 entry indices).
     #
     # Entries:
-    #   #0  noop, → state 0
-    #   #1  PUSH (A),  → state 1   (so we know an A is on top)
-    #   #2  PUSH (C),  → state 2   (so we know a C is on top)
-    #   #3  apply -40, → state 0   (B after A)
-    #   #4  apply -26, → state 0   (D after C)
-    #   #5  noop,      → state 3   (saw a space)
-    #   #6  noop,      → state 1   (saw an A — used from state 2 to switch contexts cleanly)
+    #   #0  noop, -> state 0
+    #   #1  PUSH (A),  -> state 1   (so we know an A is on top)
+    #   #2  PUSH (C),  -> state 2   (so we know a C is on top)
+    #   #3  apply -40, -> state 0   (B after A)
+    #   #4  apply -26, -> state 0   (D after C)
+    #   #5  noop,      -> state 3   (saw a space)
+    #   #6  noop,      -> state 1   (saw an A, used from state 2 to switch contexts cleanly)
     #
-    # State 0 — idle.
+    # State 0: idle.
     state0 = [0] * N_CLASSES
     state0[CLASS_A] = 1
     state0[CLASS_C] = 2
     state0[CLASS_SP] = 5
-    # State 1 — after A pushed.
+    # State 1: after A pushed.
     state1 = [0] * N_CLASSES
     state1[CLASS_A] = 1   # re-push
     state1[CLASS_B] = 3   # AB kern fires
     state1[CLASS_C] = 2   # rotate to "after C"
     state1[CLASS_SP] = 5
-    # State 2 — after C pushed.
+    # State 2: after C pushed.
     state2 = [0] * N_CLASSES
     state2[CLASS_A] = 6   # switch to "after A" context (re-push happens via entry 6)
     state2[CLASS_C] = 2   # re-push C
     state2[CLASS_D] = 4   # CD kern fires
     state2[CLASS_SP] = 5
-    # State 3 — after space.
+    # State 3: after space.
     state3 = [0] * N_CLASSES
-    state3[CLASS_A] = 0   # NO push — suppresses next AB kern
+    state3[CLASS_A] = 0   # NO push, suppresses next AB kern
     state3[CLASS_C] = 2   # CD pair still kerns even after a space
     state3[CLASS_SP] = 5  # stay in "after space"
 
     # Entries: (newState, flags, valueIndex). 6 bytes each.
     entries = [
         (0, 0,         VALUE_INDEX_NONE),  # #0 noop
-        (1, FLAG_PUSH, VALUE_INDEX_NONE),  # #1 PUSH A → state 1
-        (2, FLAG_PUSH, VALUE_INDEX_NONE),  # #2 PUSH C → state 2
-        (0, 0,         0),                 # #3 apply -40 → state 0
-        (0, 0,         2),                 # #4 apply -26 → state 0
-        (3, 0,         VALUE_INDEX_NONE),  # #5 → state 3
-        (1, FLAG_PUSH, VALUE_INDEX_NONE),  # #6 PUSH A → state 1 (rotate)
+        (1, FLAG_PUSH, VALUE_INDEX_NONE),  # #1 PUSH A -> state 1
+        (2, FLAG_PUSH, VALUE_INDEX_NONE),  # #2 PUSH C -> state 2
+        (0, 0,         0),                 # #3 apply -40 -> state 0
+        (0, 0,         2),                 # #4 apply -26 -> state 0
+        (3, 0,         VALUE_INDEX_NONE),  # #5 -> state 3
+        (1, FLAG_PUSH, VALUE_INDEX_NONE),  # #6 PUSH A -> state 1 (rotate)
     ]
 
     # Value table: two i16 values, each terminator-marked.
-    # -40 → 0xFFD8 (even). With bit 0 set: 0xFFD9 (still parses to -40).
-    # -25 → 0xFFE7 (odd already — has bit 0 set as a side effect).
-    #     Read back: raw=-25 (i16), bit 0 set → terminator; masked
+    # -40 -> 0xFFD8 (even). With bit 0 set: 0xFFD9 (still parses to -40).
+    # -25 -> 0xFFE7 (odd already, has bit 0 set as a side effect).
+    #     Read back: raw=-25 (i16), bit 0 set -> terminator; masked
     #     value = -25 & ~1 = -26. To preserve -25 exactly we'd want to
     #     pre-bias by 1 before encoding; but the AAT convention is the
     #     value list always carries even kern deltas (the spec

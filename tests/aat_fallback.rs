@@ -1,11 +1,11 @@
-//! AAT fallback shaping — Apple `morx` ligation and `kerx` kerning
+//! AAT fallback shaping: Apple `morx` ligation and `kerx` kerning
 //! when the font omits GSUB and GPOS.
 //!
 //! Two fixtures live here:
 //!
 //! - `tests/fixtures/aat_synthetic.ttf` (1 KB) carries six glyphs
 //!   (.notdef, f, i, fi, A, V) plus a `morx` v2 ligature subtable
-//!   `(f, i) → fi` and a `kerx` v2 format-0 subtable `(A, V) → -50`.
+//!   `(f, i) -> fi` and a `kerx` v2 format-0 subtable `(A, V) -> -50`.
 //! - `tests/fixtures/aat_kerx_fmt2.ttf` (~900 B) carries six glyphs
 //!   (.notdef, A, B, V, W, X) plus a `kerx` v2 format-2 subtable
 //!   that uses an AAT compound-class layout: `{A, B}` are left
@@ -13,7 +13,7 @@
 //!   matrix `[[0, 0, 0], [0, -30, -50]]`. So `(A, V)` and `(B, V)`
 //!   kern -30, while `(A, W)` and `(B, W)` kern -50.
 //!
-//! Each font has deliberately neither GSUB nor GPOS, so these tests
+//! Each font has neither GSUB nor GPOS, so these tests
 //! exercise sigilbuzz's AAT fallback path. Regenerate with
 //! `python3 tests/tools/build_aat_fixture.py` and
 //! `python3 tests/tools/build_aat_kerx_fmt2_fixture.py`.
@@ -21,7 +21,7 @@
 //! # No rustybuzz parity
 //!
 //! rustybuzz 0.20 (and the underlying ttf-parser) has no AAT
-//! shaper — it ignores `morx` / `kerx` entirely and returns the
+//! shaper: it ignores `morx` / `kerx` entirely and returns the
 //! unshaped glyph stream. This is sigilbuzz-only coverage.
 
 use sigilbuzz::{shape, Blob, Buffer, Face, Font};
@@ -96,7 +96,7 @@ fn morx_leaves_non_matching_sequences_alone() {
 #[test]
 fn kerx_pair_reduces_a_advance_by_fifty() {
     // hmtx gives A and V each 500-unit advances. The kerx pair
-    // (A, V) → -50 should land on A (half-split means A gets
+    // (A, V) -> -50 should land on A (half-split means A gets
     // delta - delta/2 = -25 - -25 = -25... actually -50/2 = -25,
     // so A gets -50 - (-25) = -25 and V gets -25, see
     // HarfBuzz/sigilbuzz legacy-kern semantics).
@@ -126,13 +126,13 @@ fn kerx_pair_not_present_leaves_advances_intact() {
 }
 
 // ---------------------------------------------------------------------
-// kerx format 2 — compound-class kerning. Uses the dedicated
+// kerx format 2: compound-class kerning. Uses the dedicated
 // aat_kerx_fmt2.ttf fixture so the test font carries no morx and
 // no GPOS, isolating the format-2 apply path.
 // ---------------------------------------------------------------------
 
 /// Half-split distribution of `delta` across a kern pair, matching
-/// the policy in `apply_kerx`. Centralised here so the fixture-side
+/// the policy in `apply_kerx`. Centralized here so the fixture-side
 /// expectations stay readable when several pairs use different
 /// deltas.
 const fn half_split(delta: i32) -> (i32, i32) {
@@ -176,7 +176,7 @@ fn kerx_fmt2_class_pair_av_kerns_minus_thirty() {
 #[test]
 fn kerx_fmt2_class_pair_bv_shares_av_delta() {
     // (B, V): B is left class 1 (same as A), V is right class 1.
-    // The compound-class scheme is the whole point — both rows of
+    // The compound-class scheme is the whole point: both rows of
     // the matrix's left class should produce the same delta.
     let glyphs = shape_with(AAT_KERX_FMT2, "BV");
     assert_eq!(glyphs.len(), 2);
@@ -206,7 +206,7 @@ fn kerx_fmt2_class_pair_bw_shares_aw_delta() {
 
 #[test]
 fn kerx_fmt2_default_classes_kern_zero() {
-    // (V, A): V is left class 0, A is right class 0 — matrix[0][0] = 0.
+    // (V, A): V is left class 0, A is right class 0, matrix[0][0] = 0.
     let glyphs = shape_with(AAT_KERX_FMT2, "VA");
     assert_eq!(glyphs.len(), 2);
     assert_eq!(glyphs[0].x_advance, 500, "V untouched");
@@ -216,9 +216,9 @@ fn kerx_fmt2_default_classes_kern_zero() {
 #[test]
 fn kerx_fmt2_handles_multi_pair_run() {
     // "ABVW" yields three pairs:
-    //   (A, B): left 1, right 0 → matrix[1][0] = 0
-    //   (B, V): left 1, right 1 → -30
-    //   (V, W): left 0, right 2 → matrix[0][2] = 0
+    //   (A, B): left 1, right 0 -> matrix[1][0] = 0
+    //   (B, V): left 1, right 1 -> -30
+    //   (V, W): left 0, right 2 -> matrix[0][2] = 0
     // Only the middle pair contributes; the run's total advance
     // should drop by exactly 30 vs the un-kerned run.
     let glyphs = shape_with(AAT_KERX_FMT2, "ABVW");

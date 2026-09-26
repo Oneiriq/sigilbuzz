@@ -1,4 +1,4 @@
-//! GSUB lookup type 6 — Chained Context Substitution.
+//! GSUB lookup type 6: Chained Context Substitution.
 //!
 //! Formats 1 (glyph-based) and 2 (class-based) are parsed via the
 //! shared `tables::layout::context` helpers; see
@@ -36,7 +36,7 @@
 //! ```
 //!
 //! Backtrack coverages are listed in *reverse* match order per the
-//! spec — `backtrackCoverageOffsets[0]` is the glyph immediately
+//! spec: `backtrackCoverageOffsets[0]` is the glyph immediately
 //! before the input, `[1]` is the one before that, and so on.
 //! sigilbuzz preserves that ordering internally and reverses on
 //! iteration so callers do not have to think about it.
@@ -51,12 +51,12 @@ use crate::tables::parse::Reader;
 /// A parsed chained-context-substitution subtable (format 3).
 #[derive(Debug, Clone)]
 pub struct ChainContext<'a> {
-    /// Coverage tables the *backtrack* context must match — index 0
+    /// Coverage tables the *backtrack* context must match. Index 0
     /// is the glyph immediately before the input.
     backtrack: Vec<Coverage<'a>>,
     /// Coverage tables the *input* must match in order.
     input: Vec<Coverage<'a>>,
-    /// Coverage tables the *lookahead* must match in order — index
+    /// Coverage tables the *lookahead* must match in order. Index
     /// 0 is the glyph immediately after the input.
     lookahead: Vec<Coverage<'a>>,
     /// Nested lookups to invoke when the context matches.
@@ -90,7 +90,7 @@ impl<'a> ChainContext<'a> {
         let backtrack = parse_coverage_array(data, &mut r)?;
         let input = parse_coverage_array(data, &mut r)?;
         if input.is_empty() {
-            // An empty input makes the lookup fire everywhere — the
+            // An empty input makes the lookup fire everywhere. The
             // spec does not forbid it, but the common case is one
             // or more input coverages. We accept it to match real
             // fonts, which sometimes use a single backtrack/lookahead
@@ -126,7 +126,7 @@ impl<'a> ChainContext<'a> {
 
     /// Coverage of the first input glyph, exposed for the run-level
     /// "would_apply" precheck. `None` only for the rare empty-input
-    /// chain rule, where the lookup matches at every cursor — caller
+    /// chain rule, where the lookup matches at every cursor. Caller
     /// then conservatively schedules the cursor walk.
     #[must_use]
     pub fn input_first_coverage(&self) -> Option<&Coverage<'a>> {
@@ -153,8 +153,8 @@ impl<'a> ChainContext<'a> {
     /// Filter-aware match. Returns the raw span of the input window
     /// (first to last matched glyph, inclusive) or `None` when any
     /// of the three coverage arrays fails to align. The backtrack
-    /// and lookahead steps honour the skip-iterator semantics of
-    /// the active `LookupFlag` — skipped glyphs (typically marks)
+    /// and lookahead steps honor the skip-iterator semantics of
+    /// the active `LookupFlag`: skipped glyphs (typically marks)
     /// between two matched backtrack positions do not block the
     /// match.
     #[must_use]
@@ -216,15 +216,15 @@ impl<'a> ChainContext<'a> {
 
 /// A format-dispatching wrapper over every chained-context
 /// subtable. The shape driver calls [`ChainContextAny::parse`] and
-/// then matches on the variant — format 1 and 2 reuse the shared
+/// then matches on the variant. Format 1 and 2 reuse the shared
 /// layout-level parsers.
 #[derive(Debug, Clone)]
 pub enum ChainContextAny<'a> {
-    /// Format 1 — glyph-based.
+    /// Format 1: glyph-based.
     Format1(crate::tables::layout::ChainContext1<'a>),
-    /// Format 2 — class-based.
+    /// Format 2: class-based.
     Format2(crate::tables::layout::ChainContext2<'a>),
-    /// Format 3 — coverage-based (the original sigilbuzz
+    /// Format 3: coverage-based (the original sigilbuzz
     /// implementation, kept for BC).
     Format3(ChainContext<'a>),
 }
@@ -394,7 +394,7 @@ mod tests {
         let bytes = build_format3(&[&[10]], &[&[30]], &[], &[(0, 1)]);
         let ctx = ChainContext::parse(&bytes).unwrap();
         // Input at position 0 with one-glyph backtrack requirement
-        // cannot match — there is nothing behind position 0.
+        // cannot match: there is nothing behind position 0.
         assert!(!ctx.matches(&[30, 40], 0));
     }
 

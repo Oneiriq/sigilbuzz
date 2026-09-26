@@ -1,103 +1,93 @@
-# Releasing sigilbuzz to crates.io
+# Releasing
 
-This is the operator runbook for cutting a release of the sigilbuzz
-workspace and pushing it to crates.io. Every workspace member ships
-under the same version line and the same Apache-2.0 license, but
-each crate is published as its own artifact and crates.io requires
-them in dependency order.
+How to cut a release of the sigilbuzz workspace and publish it to crates.io. All 12
+crates are Apache-2.0 and ship from one git tag, but each one is its own package on
+crates.io with its own version number.
 
-## Publish order
+## Versions
 
-The companion crates depend on the shaper, so `sigilbuzz` itself has
-to land on the registry before any of them. Within the companion
-group, `sigilbuzz-svg` has an optional dependency on `sigilbuzz-paint`
-and `sigilbuzz-render` has a hard dependency on `sigilbuzz-paint`, so
-both trail it. The full topological order is:
+- The root crate `sigilbuzz` and its pin in `[workspace.dependencies]` always move
+  together. Bump both.
+- A companion crate gets a new version when it changed in the release. Before 1.0,
+  bump the minor version for API changes and the patch version for everything else.
+- Once the crates are on crates.io, a companion crate that exposes sigilbuzz types in
+  its API (for example a function that takes `&Face`) needs a minor bump every time the
+  core crate gets one. Otherwise its published version keeps depending on the older,
+  incompatible core.
+- The minimum supported Rust version is `rust-version` in `[workspace.package]`. If you
+  raise it, say so in the changelog.
 
-1. **`sigilbuzz`** — the shaping core. No workspace dependencies.
-2. **`sigilbuzz-paint`** — depends on `sigilbuzz`.
-3. **`sigilbuzz-gpu`** — depends on `sigilbuzz`.
-4. **`sigilbuzz-render`** — depends on `sigilbuzz` and `sigilbuzz-paint`.
-5. **`sigilbuzz-svg`** — depends on `sigilbuzz`; optional dep on `sigilbuzz-paint`.
-6. **`sigilbuzz-pdf`** — depends on `sigilbuzz`.
+## Checklist
 
-After step 1 publishes, allow a minute or two for crates.io's index to
-propagate before kicking off step 2 — otherwise the dependency
-resolution for the companions will fail to find the new sigilbuzz
-version.
+1. Move the "unreleased" section of [CHANGELOG.md](../CHANGELOG.md) to the new version
+   and date.
+2. Bump versions as described above.
+3. Run the gate. The pre-push hook runs the same commands, so this is also what
+   happens on push. Never bypass the hook with `--no-verify`.
 
-## Dry-run before each release
+   ```bash
+   cargo fmt --all --check
+   cargo clippy --all-targets -- -D warnings
+   cargo clippy --no-default-features --all-targets -- -D warnings
+   cargo test --all-features
+   cargo build --no-default-features
+   ```
 
-Before tagging anything, sanity-check every member with a dry-run:
+4. Dry-run the publish:
 
-```bash
-for crate in sigilbuzz sigilbuzz-paint sigilbuzz-gpu sigilbuzz-render sigilbuzz-svg sigilbuzz-pdf; do
-    cargo publish -p "$crate" --dry-run --no-verify --allow-dirty
-done
-```
+   ```bash
+   cargo publish --workspace --dry-run
+   ```
 
-`--no-verify` skips the rebuild for speed; drop it for the actual
-release commit so cargo verifies the packaged tarball compiles
-end-to-end.
+   This packages every crate, then builds each one from its packaged form in
+   dependency order. Workspace crates that are not on crates.io yet resolve locally, so
+   the dry run works before the first real publish.
 
-### Bootstrap caveat
+5. Merge to `main`, then tag the release commit:
 
-Until `sigilbuzz` itself has at least one published version on
-crates.io, the companion-crate dry-runs will fail with
-`no matching package named 'sigilbuzz' found / location searched:
-crates.io index`. This is expected — cargo resolves
-`{ workspace = true }` deps against the real registry during
-packaging. It is **not** a metadata bug in the companion crate.
-After the first real `cargo publish -p sigilbuzz` lands, every
-companion's dry-run will pass.
-
-## Workflow: tag → release → publish
-
-1. **Bump versions.** Edit the `[package]` `version` line in the root
-   `Cargo.toml` and each `crates/*/Cargo.toml`. The companions track
-   their own version, but in practice we bump them all in lockstep.
-   Update `[workspace.dependencies] sigilbuzz` to match.
-2. **Test gate.** `cargo test --workspace` and clippy (default +
-   `--no-default-features`) must be green. The pre-push hook enforces
-   this; never bypass it with `--no-verify`.
-3. **Tag.** Cut a git tag of the form `vX.Y.Z` on the `main` branch
-   commit that bumps the versions:
    ```bash
    git tag -a vX.Y.Z -m "Release vX.Y.Z"
    git push origin vX.Y.Z
    ```
-4. **GitHub release.** `gh release create vX.Y.Z --generate-notes`
-   to produce a draft release from the tag, then edit the notes for
-   release-worthy items (breaking changes, headline features).
-5. **Publish.** From the tagged commit, in the order above:
+
+6. Create the GitHub release and paste this version's changelog section as the notes:
+
    ```bash
-   cargo publish -p sigilbuzz
-   # wait ~60s for index propagation
-   cargo publish -p sigilbuzz-paint
-   cargo publish -p sigilbuzz-gpu
-   cargo publish -p sigilbuzz-render
-   cargo publish -p sigilbuzz-svg
-   cargo publish -p sigilbuzz-pdf
+   gh release create vX.Y.Z --title vX.Y.Z --notes-file notes.md
    ```
-   Each `cargo publish` rebuilds the crate, packs it, and pushes to
-   crates.io. Drop `--no-verify` here.
-6. **Announce.** Edit the GitHub release notes to mention the
-   crates.io URLs once they are live.
 
-## Path + version dependencies
+7. Publish from the tagged commit. You need a crates.io API token (`cargo login`).
 
-`sigilbuzz`'s entry in `[workspace.dependencies]` is
-`{ path = ".", version = "X.Y.Z" }` and `sigilbuzz-svg`'s optional
-`sigilbuzz-paint` dep follows the same shape. cargo uses the path
-locally and the version when packaging for crates.io, so you do not
-need to strip `path` at publish time. Verify with
-`cargo publish --dry-run` if in doubt.
+   ```bash
+   cargo publish --workspace
+   ```
 
-## What this PR does not do
+   Cargo publishes the crates in dependency order. If it stops partway, publish the
+   rest with `cargo publish -p <crate>`, following the order below.
 
-`feature/crates-publish` only flips `publish = true`, finalises
-metadata, ensures the LICENSE file is the full Apache-2.0 text, and
-verifies every member with `cargo publish --dry-run`. It does not
-publish anything. The first real `cargo publish` waits on a tagged
-release of 0.5.0 (or later) once the workspace is ready for a public
-audience.
+8. Add the crates.io links to the GitHub release notes.
+
+## Publish order
+
+Crates in the same group don't depend on each other and can go in any order.
+
+1. `sigilbuzz`
+2. `sigilbuzz-paint`, `sigilbuzz-gpu`, `sigilbuzz-pdf`, `sigilbuzz-subset`,
+   `sigilbuzz-woff`, `sigilbuzz-text-layout`
+3. `sigilbuzz-render` (needs paint), `sigilbuzz-svg` (paint), `sigilbuzz-capi` (subset
+   and paint), `sigilbuzz-hyphen` (text-layout)
+4. `sigilbuzz-cli` (subset, paint, gpu, svg, pdf, and woff)
+
+## Path plus version dependencies
+
+Workspace crates depend on each other with both a path and a version, for example
+`sigilbuzz = { path = ".", version = "0.22.0" }`. Cargo uses the path when building
+locally and the version when packaging for crates.io, so there is nothing to strip
+before publishing. When you bump a crate, update the version in every place that
+depends on it. The dry run fails if they disagree.
+
+## Package size
+
+The core crate packs to about 2.6 MiB compressed, mostly test fonts. The crates.io
+limit is 10 MiB. If a new fixture pushes it close, add an `exclude` list to the
+package manifest.

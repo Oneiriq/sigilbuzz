@@ -25,7 +25,7 @@ pub struct WrapOptions {
     pub max_width: f32,
     /// When `true`, the wrapper only breaks at allowed UAX 14
     /// opportunities. When `false`, it falls back to mid-cluster
-    /// breaks when no opportunity is reachable inside the budget — a
+    /// breaks when no opportunity is reachable inside the budget, a
     /// safety valve for very narrow `max_width` values that would
     /// otherwise produce a single overflowing line.
     pub break_at_word_boundaries: bool,
@@ -104,7 +104,7 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
     let span_width = |from: usize, to: usize| prefix[to] - prefix[from];
     // UAX 14 LB7: trailing spaces hang into the right margin and do
     // not count toward the line's measured width. Walk back from `to`
-    // skipping any character whose UAX 14 line-break class is `SP` —
+    // skipping any character whose UAX 14 line-break class is `SP`:
     // matches `LineBreakClass::SP` coverage (U+0020, U+1680,
     // U+2000..=U+200A, U+205F, U+3000) plus tab (BA in the
     // classifier but a soft break point in practice).
@@ -128,7 +128,7 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
     let measure = |from: usize, to: usize| span_width(from, trim_end(to));
 
     // The per-line `width` we report to callers is the *measured*
-    // width — i.e. trailing space-class characters do not contribute
+    // width, i.e. trailing space-class characters do not contribute
     // to it, matching UAX 14 LB7 ("trailing spaces hang into the
     // right margin"). The wrapping decisions above already use
     // `measure`; we have to use it here too so the public field
@@ -170,7 +170,7 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
                         });
                         line_start = prev;
                         // The current opportunity may itself fit on
-                        // the new line — re-evaluate.
+                        // the new line. Re-evaluate.
                         let new_measured = measure(line_start, offset);
                         if new_measured <= options.max_width {
                             last_allowed = Some(offset);
@@ -198,7 +198,7 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
                         last_allowed = None;
                     } else {
                         // Forced to keep this oversized run on one
-                        // line — there is no earlier breakpoint.
+                        // line: there is no earlier breakpoint.
                         last_allowed = Some(offset);
                     }
                 }
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn the_quick_brown_fox_breaks_after_quick() {
-        // Each char advance == 10. "The quick" is 9 chars → 90.
+        // Each char advance == 10. "The quick" is 9 chars -> 90.
         // max_width == 90 forces a break right after "quick".
         let text = "The quick brown fox";
         let shaped = shape_uniform(text, 10);
@@ -282,7 +282,7 @@ mod tests {
             },
         );
         assert!(lines.len() >= 2, "got {} lines: {:?}", lines.len(), lines);
-        // First line should contain "The quick" — break lands at the
+        // First line should contain "The quick": break lands at the
         // last allowed opportunity inside the 90-unit budget, which is
         // the space after "quick" (offset 9 or 10).
         let first = &text[lines[0].start_byte..lines[0].end_byte];
@@ -333,7 +333,7 @@ mod tests {
 
     #[test]
     fn trailing_spaces_do_not_count_toward_line_width() {
-        // "abc   " — 3 letters + 3 trailing spaces, advance 10 each.
+        // "abc   ": 3 letters + 3 trailing spaces, advance 10 each.
         // Per UAX 14 LB7 trailing spaces hang into the right margin,
         // so the reported width must be 30 (the letters only), not 60.
         let text = "abc   ";
@@ -385,7 +385,7 @@ mod tests {
     fn mixed_cjk_latin_wraps_in_either_regime() {
         let text = "Hello世界";
         let shaped = shape_uniform(text, 10);
-        // Wide budget — fits everything.
+        // Wide budget: fits everything.
         let wide = wrap_lines(
             &shaped,
             text,
@@ -396,7 +396,7 @@ mod tests {
         );
         assert_eq!(wide.len(), 1);
 
-        // Narrow budget — must break at the Latin/CJK boundary at minimum.
+        // Narrow budget: must break at the Latin/CJK boundary at minimum.
         let narrow = wrap_lines(
             &shaped,
             text,

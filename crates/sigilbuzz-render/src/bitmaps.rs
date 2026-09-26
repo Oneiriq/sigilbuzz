@@ -4,28 +4,28 @@
 //! color emoji), `sbix` (Apple color emoji), and `EBDT`/`EBLC`
 //! (Microsoft monochrome bitmap embeds) and returns the result as a
 //! [`ColorPixmap`]. Pulls strikes through the `Face::glyph_bitmap`
-//! unified accessor — strike selection happens inside the parser,
+//! unified accessor. Strike selection happens inside the parser,
 //! this module is responsible for the pixel-side work: PNG decode,
 //! 1bpp-mask unpack, sbix dupe-tag recursion, and (when the requested
 //! size doesn't match the strike) bilinear rescale.
 //!
 //! ```text
 //!   Face::glyph_bitmap(gid, ppem)
-//!         │
-//!         ▼
+//!         |
+//!         v
 //!   GlyphBitmapEntry::{Cbdt | Sbix | Ebdt}
-//!         │
-//!         ├── Cbdt → decode_png
-//!         ├── Sbix png  → decode_png
-//!         ├── Sbix dupe → recurse to referenced gid
-//!         ├── Sbix jpg → decode_jpeg (baseline 8-bit YCbCr/gray)
-//!         ├── Sbix tiff/jp2 → UnsupportedBitmap
-//!         └── Ebdt → unpack 1bpp mask → black-on-transparent RGBA
-//!         │
-//!         ▼
+//!         |
+//!         +-- Cbdt -> decode_png
+//!         +-- Sbix png  -> decode_png
+//!         +-- Sbix dupe -> recurse to referenced gid
+//!         +-- Sbix jpg -> decode_jpeg (baseline 8-bit YCbCr/gray)
+//!         +-- Sbix tiff/jp2 -> UnsupportedBitmap
+//!         +-- Ebdt -> unpack 1bpp mask -> black-on-transparent RGBA
+//!         |
+//!         v
 //!   ColorPixmap (premul RGBA)
-//!         │
-//!         ▼  rescale_bilinear if size_pt mismatches strike ppem
+//!         |
+//!         v  rescale_bilinear if size_pt mismatches strike ppem
 //!   ColorPixmap (rendered to caller's size)
 //! ```
 //!
@@ -51,7 +51,7 @@
 //! - **No interlacing.** Adam7 isn't used in font embeds.
 //! - **No ancillary chunks beyond IHDR / IDAT / IEND.** The PNG
 //!   decoder skips unknown chunks (per PNG spec) but doesn't apply
-//!   gAMA / sRGB / iCCP — the colours emerge in whatever space the
+//!   gAMA / sRGB / iCCP: the colors emerge in whatever space the
 //!   embed already lives in, which is conventionally sRGB.
 
 use alloc::vec;
@@ -79,7 +79,7 @@ const SBIX_DUPE_MAX_DEPTH: u8 = 4;
 /// reference plain (non-composite) glyphs one level deep; legitimate
 /// nested composites are exceedingly rare and deeper than 4 levels
 /// almost certainly indicates a cycle or pathological font. Mirrors
-/// the sbix `'dupe'` cap from #221 for the same reason — bound the
+/// the sbix `'dupe'` cap from #221 for the same reason: bound the
 /// blast radius of a malicious or malformed font.
 const EBDT_COMPOSITE_MAX_DEPTH: u8 = 4;
 
@@ -97,7 +97,7 @@ const EBDT_COMPOSITE_MAX_DEPTH: u8 = 4;
 /// variable-axis variants) but kept in the signature for parity with
 /// the outline path; future variants may consume it.
 ///
-/// Dispatch priority is **CBDT (color) > sbix png > EBDT (mono)** —
+/// Dispatch priority is **CBDT (color) > sbix png > EBDT (mono)**,
 /// see [`Face::glyph_bitmap`](sigilbuzz::Face::glyph_bitmap). Within
 /// the sbix variant, `'png '` decodes inline, `'jpg '` decodes via
 /// the in-crate baseline JPEG decoder ([`crate::decode_jpeg`]),
@@ -105,18 +105,18 @@ const EBDT_COMPOSITE_MAX_DEPTH: u8 = 4;
 /// `'tiff'` / `'jp2 '` surface [`RenderError::UnsupportedBitmap`].
 ///
 /// Returns:
-/// - `Ok(pixmap)` — decoded and (optionally) rescaled bitmap.
-/// - `Err(RenderError::NoBitmap(gid))` — no strike covers `gid`, or
+/// - `Ok(pixmap)`: decoded and (optionally) rescaled bitmap.
+/// - `Err(RenderError::NoBitmap(gid))`: no strike covers `gid`, or
 ///   the font carries no bitmap tables.
-/// - `Err(RenderError::UnsupportedBitmap)` — sbix payload is tiff /
+/// - `Err(RenderError::UnsupportedBitmap)`: sbix payload is tiff /
 ///   jp2, or `'dupe'` recursion exceeds the depth cap.
-/// - `Err(RenderError::BadJpeg(...))` — sbix `'jpg '` payload failed
+/// - `Err(RenderError::BadJpeg(...))`: sbix `'jpg '` payload failed
 ///   to decode (truncated, progressive, arithmetic-coded, etc.).
-/// - `Err(RenderError::BitmapDecodeFailed(_))` — EBDT composite
+/// - `Err(RenderError::BitmapDecodeFailed(_))`: EBDT composite
 ///   (formats 8 / 9) recursion hit a cycle, self-reference, OOB
 ///   component glyph id, missing-at-strike component, or
 ///   `EBDT_COMPOSITE_MAX_DEPTH`.
-/// - `Err(RenderError::BadPng(...))` — PNG payload failed to decode.
+/// - `Err(RenderError::BadPng(...))`: PNG payload failed to decode.
 ///
 /// # Errors
 /// Surfaces all of the above plus [`RenderError::BadSize`] for a
@@ -203,14 +203,14 @@ fn rasterize_bitmap_inner_full(
             }
             // JPEG: hand-rolled baseline decoder. Supports 8-bit
             // sequential YCbCr (4:4:4 / 4:2:2 / 4:2:0) and grayscale
-            // — the slice that real-world font sbix payloads land in.
+            // (the slice that real-world font sbix payloads land in).
             // Progressive scan / arithmetic coding / 16-bit / restart
             // markers surface as `BadJpeg`; we re-tag as
             // `UnsupportedBitmap` so callers can fall back to outlines
             // exactly as before.
             TAG_JPG => (decode_jpeg(glyph.data)?, f32::from(ppem)),
             // TIFF: hand-rolled baseline decoder. Supports 8-bit RGB
-            // / RGBA, single IFD, strip-organised, uncompressed or
+            // / RGBA, single IFD, strip-organized, uncompressed or
             // PackBits (compression 1 / 32773). LZW / CCITT / JPEG-in-
             // TIFF / tiled / planar / multi-IFD surface `BadTiff` or
             // `UnsupportedBitmap`.
@@ -219,7 +219,7 @@ fn rasterize_bitmap_inner_full(
             // even rarer than JPEG in real fonts. Surface cleanly so
             // callers can fall back to outlines.
             TAG_JP2 => return Err(RenderError::UnsupportedBitmap),
-            // Unknown four-byte tag — treat as unsupported rather
+            // Unknown four-byte tag: treat as unsupported rather
             // than guessing.
             _ => return Err(RenderError::UnsupportedBitmap),
         },
@@ -287,7 +287,7 @@ fn needs_rescale(decoded: &ColorPixmap, strike_ppem: f32, size_pt: f32) -> bool 
 }
 
 // ---------------------------------------------------------------------------
-// PNG decoder — minimal IHDR / IDAT / IEND walk, miniz_oxide for the
+// PNG decoder: minimal IHDR / IDAT / IEND walk, miniz_oxide for the
 // zlib step, hand-rolled per-row defilter. No interlacing.
 // ---------------------------------------------------------------------------
 
@@ -363,7 +363,7 @@ pub fn decode_png(bytes: &[u8]) -> Result<ColorPixmap, RenderError> {
             }
             b"IEND" => break,
             _ => {
-                // Ancillary chunk — skip silently. (PNG spec says
+                // Ancillary chunk: skip silently. (PNG spec says
                 // unknown chunks with the lower-case first letter are
                 // safe to ignore; for embeds we ignore them all.)
             }
@@ -637,7 +637,7 @@ fn read_u32(bytes: &[u8]) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// EBDT mono → RGBA.
+// EBDT mono -> RGBA.
 //
 // EBDT format 1 / 6 is byte-aligned: each scanline starts on a fresh
 // byte, so the row stride is `ceil(width / 8)` bytes. Format 2 / 5 / 7
@@ -645,7 +645,7 @@ fn read_u32(bytes: &[u8]) -> u32 {
 // In both cases the most-significant bit of each byte is the leftmost
 // pixel.
 //
-// The mono → RGBA conversion is "set bits = opaque black, unset bits
+// The mono -> RGBA conversion is "set bits = opaque black, unset bits
 // = fully transparent". This matches the historical reading of EBDT
 // (the alpha mask is the glyph) and lets the rest of the pipeline
 // composite the result like any other premultiplied RGBA pixmap.
@@ -656,13 +656,13 @@ fn read_u32(bytes: &[u8]) -> u32 {
 /// fully transparent `(0, 0, 0, 0)`.
 ///
 /// Accepts the byte-aligned (formats 1 / 6) and bit-aligned (formats
-/// 2 / 5 / 7) variants — see [`BitPacking`]. Composite formats 8 / 9
+/// 2 / 5 / 7) variants. See [`BitPacking`]. Composite formats 8 / 9
 /// never reach this entry point because the underlying parser surfaces
 /// them as `Unsupported`.
 ///
 /// # Errors
 /// Returns [`RenderError::UnsupportedBitmap`] when the mask payload
-/// is too short for the declared `width × height` (a malformed embed).
+/// is too short for the declared `width * height` (a malformed embed).
 pub fn decode_ebdt_mono(bitmap: &EbdtBitmap<'_>) -> Result<ColorPixmap, RenderError> {
     let w = bitmap.metrics.width() as u32;
     let h = bitmap.metrics.height() as u32;
@@ -680,7 +680,7 @@ pub fn decode_ebdt_mono(bitmap: &EbdtBitmap<'_>) -> Result<ColorPixmap, RenderEr
 /// Renders an EBDT composite glyph (formats 8 / 9) by alpha-overlaying
 /// each component's mono mask onto a parent canvas sized by the
 /// composite's own metrics. Recurses through the EBDT pipeline at the
-/// **same strike** the parent was found in — a component whose
+/// **same strike** the parent was found in: a component whose
 /// `glyph_id` has no EBDT entry at the parent's `ppem_y` surfaces
 /// [`RenderError::BitmapDecodeFailed`] rather than silently falling
 /// back to a different strike.
@@ -720,7 +720,7 @@ fn decode_ebdt_composite(
     composite_chain.push(gid);
     let result = (|| -> Result<(), RenderError> {
         for comp in bitmap.components() {
-            // Self-reference and ancestor-cycle guards — separate from
+            // Self-reference and ancestor-cycle guards, separate from
             // the depth cap so they surface a precise error message
             // even at depth 1.
             if comp.glyph_id == gid {
@@ -730,7 +730,7 @@ fn decode_ebdt_composite(
                 return Err(RenderError::BitmapDecodeFailed("composite cycle"));
             }
             // OOB rejection: glyph id beyond what the font enumerates.
-            // maxp may genuinely fail on malformed fonts; fall through
+            // maxp may fail on malformed fonts; fall through
             // to the strike resolution below in that case rather than
             // letting a parse failure mask a strike-mismatch error.
             if let Ok(maxp) = face.maxp() {
@@ -742,7 +742,7 @@ fn decode_ebdt_composite(
             }
             // Strike consistency: the component must resolve at the
             // parent strike's ppem_y. We pass `parent_ppem_y` and then
-            // verify the entry that came back is genuinely at that
+            // verify the entry that came back is at that
             // ppem_y; if Face::glyph_bitmap fell back to a different
             // strike (or returned None), we surface an error rather
             // than silently composite from the wrong size.
@@ -798,7 +798,7 @@ fn decode_ebdt_composite(
 /// Source-over alpha-blends `src` onto `dst` at integer pixel offset
 /// `(dx, dy)`. Both pixmaps must be premultiplied RGBA. Pixels of
 /// `src` that fall outside `dst` are clipped silently. Fully
-/// transparent source pixels are skipped — this matters for EBDT
+/// transparent source pixels are skipped. This matters for EBDT
 /// masks where most of the source is alpha=0.
 fn blit_source_over(dst: &mut ColorPixmap, src: &ColorPixmap, dx: i32, dy: i32) {
     if src.is_empty() || dst.is_empty() {
@@ -917,12 +917,12 @@ fn write_mono_pixel(out: &mut ColorPixmap, x: u32, y: u32, set: bool) {
 /// Bilinearly resample `src` to a new size. Operates on premultiplied
 /// RGBA so the alpha channel stays consistent with the rest of the
 /// render pipeline; sampling premul is the right thing here because
-/// edges that are partly transparent already have their colours
+/// edges that are partly transparent already have their colors
 /// scaled by alpha.
 ///
 /// Degenerate cases:
-/// - `src` empty or `dst_w == 0 || dst_h == 0` → empty pixmap.
-/// - `dst_w == src.width && dst_h == src.height` → clone of `src`.
+/// - `src` empty or `dst_w == 0 || dst_h == 0` -> empty pixmap.
+/// - `dst_w == src.width && dst_h == src.height` -> clone of `src`.
 #[must_use]
 pub fn rescale_bilinear(src: &ColorPixmap, dst_w: u32, dst_h: u32) -> ColorPixmap {
     if src.is_empty() || dst_w == 0 || dst_h == 0 {
@@ -934,7 +934,7 @@ pub fn rescale_bilinear(src: &ColorPixmap, dst_w: u32, dst_h: u32) -> ColorPixma
     // Cap target dimensions: an out-of-range `dst_w` / `dst_h` (e.g.
     // a caller miscomputing from a hostile size_pt) would otherwise
     // panic in `vec![0u8; w*h*4]`. The ceiling matches the PNG
-    // decoder's bound; callers that genuinely need larger surfaces
+    // decoder's bound; callers that need larger surfaces
     // should resample in tiles.
     #[allow(clippy::cast_precision_loss)]
     if dst_w as f32 > MAX_BITMAP_DIM || dst_h as f32 > MAX_BITMAP_DIM {
@@ -946,7 +946,7 @@ pub fn rescale_bilinear(src: &ColorPixmap, dst_w: u32, dst_h: u32) -> ColorPixma
     let dw = dst_w as f32;
     let dh = dst_h as f32;
     // Map dst pixel centers to src space. The half-pixel offset keeps
-    // the rescale edge-aligned: a 2× upscale of a 2-px image lands the
+    // the rescale edge-aligned: a 2x upscale of a 2-px image lands the
     // first dst pixel at src x = 0.25 etc.
     for y in 0..dst_h {
         let sy = ((y as f32 + 0.5) * sh / dh) - 0.5;
@@ -984,8 +984,8 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 mod tests {
     use super::*;
 
-    /// Builds an in-memory PNG with the given solid colour. RGBA,
-    /// 8-bit, no interlacing — exercises the `IHDR/IDAT/IEND` walk
+    /// Builds an in-memory PNG with the given solid color. RGBA,
+    /// 8-bit, no interlacing. Exercises the `IHDR/IDAT/IEND` walk
     /// without needing a real font fixture.
     fn build_solid_rgba_png(r: u8, g: u8, b: u8, a: u8, w: u32, h: u32) -> Vec<u8> {
         let mut raw = Vec::with_capacity(((w * 4 + 1) * h) as usize);
@@ -1093,7 +1093,7 @@ mod tests {
         assert!(rescale_bilinear(&src, 0, 0).is_empty());
     }
 
-    // -------- EBDT mono → RGBA --------
+    // -------- EBDT mono -> RGBA --------
     use sigilbuzz::tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
     use sigilbuzz::tables::ebdt::{BitPacking, EbdtBitmap, EbdtMetrics};
 
@@ -1135,8 +1135,8 @@ mod tests {
     #[test]
     fn ebdt_byte_aligned_decodes_mono_to_rgba() {
         // 8 wide, 2 tall, byte-aligned: 2 bytes total.
-        // Row 0: 0b10101010 → set,unset,set,unset,...
-        // Row 1: 0b11110000 → 4 set then 4 unset.
+        // Row 0: 0b10101010 -> set,unset,set,unset,...
+        // Row 1: 0b11110000 -> 4 set then 4 unset.
         let bm = ebdt_byte_aligned(8, 2, &[0b1010_1010, 0b1111_0000]);
         let pix = decode_ebdt_mono(&bm).unwrap();
         assert_eq!(pix.width, 8);
@@ -1159,8 +1159,8 @@ mod tests {
     fn ebdt_byte_aligned_handles_non_byte_widths() {
         // 5 wide, 2 tall: row stride = ceil(5/8) = 1 byte. Trailing
         // 3 bits in each byte are padding.
-        // Row 0: 0b11111000 → all 5 pixels set.
-        // Row 1: 0b00000000 → all 5 pixels unset.
+        // Row 0: 0b11111000 -> all 5 pixels set.
+        // Row 1: 0b00000000 -> all 5 pixels unset.
         let bm = ebdt_byte_aligned(5, 2, &[0b1111_1000, 0b0000_0000]);
         let pix = decode_ebdt_mono(&bm).unwrap();
         for x in 0..5 {
@@ -1244,7 +1244,7 @@ mod tests {
 
     #[test]
     fn blit_source_over_pastes_opaque_pixels_at_offset() {
-        // Source is a 2×2 fully-opaque white square; canvas is 4×4
+        // Source is a 2x2 fully-opaque white square; canvas is 4x4
         // black. Blitting at (1, 1) should leave (0, 0) and the right
         // / bottom edges black, and the four pixels (1,1)..(2,2) white.
         let mut dst = ColorPixmap::new(4, 4);
@@ -1277,9 +1277,9 @@ mod tests {
 
     #[test]
     fn blit_source_over_clips_negative_offsets() {
-        // Source 4×4 white, canvas 2×2 black. Blitting at (-2, -2)
-        // should hit just the bottom-right 2×2 of the source onto the
-        // top-left 2×2 of the canvas. No panics.
+        // Source 4x4 white, canvas 2x2 black. Blitting at (-2, -2)
+        // should hit just the bottom-right 2x2 of the source onto the
+        // top-left 2x2 of the canvas. No panics.
         let mut dst = ColorPixmap::new(2, 2);
         for i in 0..4 {
             dst.data[i * 4 + 3] = 255;
@@ -1293,7 +1293,7 @@ mod tests {
         }
         blit_source_over(&mut dst, &src, -2, -2);
         // All canvas pixels should now be white (the clipped portion
-        // covers the whole 2×2 canvas).
+        // covers the whole 2x2 canvas).
         for y in 0..2 {
             for x in 0..2 {
                 assert_eq!(dst.get(x, y), [255, 255, 255, 255]);
@@ -1366,7 +1366,7 @@ mod tests {
         // Issue #231: an empty tRNS chunk on a grayscale PNG used to be
         // interpreted as `Some(0)` because the decoder reached for
         // `t.last().unwrap_or(0)`. That marked every gray-0 pixel as
-        // transparent — a black glyph round-tripped to a fully blank
+        // transparent: a black glyph round-tripped to a fully blank
         // pixmap.
         let png = build_gray_png_with_trns(0, 1, 1, &[]);
         let pix = decode_png(&png).unwrap();
@@ -1402,7 +1402,7 @@ mod tests {
     #[test]
     fn decode_png_gray_well_formed_trns_marks_match_transparent() {
         // Sanity check that the well-formed 2-byte tRNS path keeps
-        // working — the gray value 5 in the second byte (low byte of
+        // working: the gray value 5 in the second byte (low byte of
         // the big-endian 16-bit sample) marks gray-5 pixels transparent.
         let png = build_gray_png_with_trns(5, 1, 1, &[0, 5]);
         let pix = decode_png(&png).unwrap();
@@ -1412,12 +1412,12 @@ mod tests {
     #[test]
     fn paeth_predictor_matches_spec_examples() {
         // PNG spec: p = a + b - c; predictor = whichever of {a, b, c}
-        // is closest to p (ties → a, then b).
-        // a=10 b=20 c=30 → p=0; pa=10 pb=20 pc=30 → returns a=10.
+        // is closest to p (ties -> a, then b).
+        // a=10 b=20 c=30 -> p=0; pa=10 pb=20 pc=30 -> returns a=10.
         assert_eq!(paeth(10, 20, 30), 10);
-        // a=b=c → p == a, all distances zero → a wins.
+        // a=b=c -> p == a, all distances zero -> a wins.
         assert_eq!(paeth(50, 50, 50), 50);
-        // a=0 b=0 c=255 → p = -255; pa=255 pb=255 pc=510 → tie pa==pb,
+        // a=0 b=0 c=255 -> p = -255; pa=255 pb=255 pc=510 -> tie pa==pb,
         // ties prefer a.
         assert_eq!(paeth(0, 0, 255), 0);
     }

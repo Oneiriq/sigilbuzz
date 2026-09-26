@@ -21,7 +21,7 @@
 //! the `SkipIter` is just a `(position, direction)` cursor over a
 //! `&[u16]` glyph-id slice that hands back only the non-skipped
 //! positions. Callers convert back to the absolute glyph position
-//! via the iterator's own index — so the `input_len` they report up
+//! via the iterator's own index, so the `input_len` they report up
 //! to the dispatcher covers the full *raw* span of the match,
 //! including the skipped glyphs in between.
 //!
@@ -33,20 +33,20 @@ use crate::tables::layout::Coverage;
 
 // Public re-export so call sites can write `layout::LOOKUP_FLAG_*`
 // without digging into this module.
-/// `LookupFlag` — `RightToLeft` bit. Indicates the lookup runs in
+/// `LookupFlag`: `RightToLeft` bit. Indicates the lookup runs in
 /// RTL direction. Only GPOS type 3 (cursive) currently uses it; this
 /// module parses but does not act on it.
 pub const LOOKUP_FLAG_RIGHT_TO_LEFT: u16 = 0x0001;
-/// `LookupFlag` — `IgnoreBaseGlyphs`. Skip glyphs classed
+/// `LookupFlag`: `IgnoreBaseGlyphs`. Skip glyphs classed
 /// [`GlyphClass::Base`] during matching.
 pub const LOOKUP_FLAG_IGNORE_BASE_GLYPHS: u16 = 0x0002;
-/// `LookupFlag` — `IgnoreLigatures`. Skip glyphs classed
+/// `LookupFlag`: `IgnoreLigatures`. Skip glyphs classed
 /// [`GlyphClass::Ligature`] during matching.
 pub const LOOKUP_FLAG_IGNORE_LIGATURES: u16 = 0x0004;
-/// `LookupFlag` — `IgnoreMarks`. Skip glyphs classed
+/// `LookupFlag`: `IgnoreMarks`. Skip glyphs classed
 /// [`GlyphClass::Mark`] during matching.
 pub const LOOKUP_FLAG_IGNORE_MARKS: u16 = 0x0008;
-/// `LookupFlag` — `UseMarkFilteringSet`. When set, the lookup's
+/// `LookupFlag`: `UseMarkFilteringSet`. When set, the lookup's
 /// trailing `markFilteringSet` u16 indexes a `MarkGlyphSetsDef`
 /// coverage in GDEF; marks *not* in that coverage are skipped.
 pub const LOOKUP_FLAG_USE_MARK_FILTERING_SET: u16 = 0x0010;
@@ -62,7 +62,7 @@ pub const LOOKUP_FLAG_MARK_ATTACHMENT_TYPE_MASK: u16 = 0xFF00;
 ///
 /// Holds only borrowed data and never allocates. Construct once per
 /// lookup via [`MatchFilter::for_lookup`] and hand it to every
-/// context/chained-context matcher the lookup triggers — plus every
+/// context/chained-context matcher the lookup triggers, plus every
 /// GPOS pair-adjustment walk for the same lookup.
 #[derive(Debug, Clone, Copy)]
 pub struct MatchFilter<'a> {
@@ -93,7 +93,7 @@ impl<'a> MatchFilter<'a> {
     ///
     /// `mark_filtering_set_index` is the u16 that sits after the
     /// subtable offsets when `LOOKUP_FLAG_USE_MARK_FILTERING_SET` is
-    /// on — read it once from the `Lookup` header and pass it here.
+    /// on. Read it once from the `Lookup` header and pass it here.
     #[must_use]
     pub fn for_lookup(
         flag: u16,
@@ -117,7 +117,7 @@ impl<'a> MatchFilter<'a> {
         }
     }
 
-    /// `true` when the filter is a pass-through — every glyph is
+    /// `true` when the filter is a pass-through: every glyph is
     /// accepted. Hot-path dispatchers take a short-circuit to avoid
     /// the per-step class query when the flag is zero.
     #[must_use]
@@ -137,7 +137,7 @@ impl<'a> MatchFilter<'a> {
             // Without GDEF we cannot classify glyphs; treat every
             // glyph as a base (matching the spec default). That
             // means IgnoreBaseGlyphs/Ligatures/Marks all degrade to
-            // "skip nothing" — identical to the pass-through branch.
+            // "skip nothing", identical to the pass-through branch.
             return false;
         };
         let class = gdef.glyph_class(glyph_id);
@@ -152,7 +152,7 @@ impl<'a> MatchFilter<'a> {
                 return true;
             }
             // MarkAttachmentType: non-zero means "restrict to marks
-            // of this attachment class" — other marks are skipped.
+            // of this attachment class". Other marks are skipped.
             if self.mark_attach_type != 0 {
                 let attach = gdef.mark_attach_class(glyph_id) as u8;
                 if attach != self.mark_attach_type {
@@ -162,7 +162,7 @@ impl<'a> MatchFilter<'a> {
             // UseMarkFilteringSet: a mark not listed in the
             // coverage is skipped. When the flag is set but the
             // coverage is missing (e.g. malformed font) every mark
-            // is skipped — the conservative choice HarfBuzz makes.
+            // is skipped, the conservative choice HarfBuzz makes.
             if (self.flag & LOOKUP_FLAG_USE_MARK_FILTERING_SET) != 0 {
                 match self.mark_set {
                     Some(cov) => {
@@ -201,9 +201,9 @@ impl<'a> MatchFilter<'a> {
 }
 
 /// Forward/backward skip-iterator over a glyph-id slice. Each call
-/// to [`SkipIter::next`] advances past zero or more filtered glyphs
+/// to `SkipIter::next` advances past zero or more filtered glyphs
 /// and returns the next unfiltered `(index, glyph_id)` pair.
-/// [`SkipIter::prev`] walks the other direction. Both methods leave
+/// `SkipIter::prev` walks the other direction. Both methods leave
 /// the cursor positioned *after* the returned index on the direction
 /// of travel, so chaining works.
 ///
@@ -231,7 +231,7 @@ impl<'g, 'f> SkipIter<'g, 'f> {
         }
     }
 
-    /// Resets the cursor to `pos`. Cheap — the iterator caches
+    /// Resets the cursor to `pos`. Cheap: the iterator caches
     /// nothing beyond the integer.
     pub fn reset(&mut self, pos: usize) {
         self.cursor = pos;
@@ -438,17 +438,17 @@ mod tests {
         gdef_bytes.extend_from_slice(&1u16.to_be_bytes()); // format
         gdef_bytes.extend_from_slice(&10u16.to_be_bytes()); // start
         gdef_bytes.extend_from_slice(&3u16.to_be_bytes()); // count
-        gdef_bytes.extend_from_slice(&1u16.to_be_bytes()); // 10 → base
-        gdef_bytes.extend_from_slice(&3u16.to_be_bytes()); // 11 → mark
-        gdef_bytes.extend_from_slice(&3u16.to_be_bytes()); // 12 → mark
+        gdef_bytes.extend_from_slice(&1u16.to_be_bytes()); // 10 -> base
+        gdef_bytes.extend_from_slice(&3u16.to_be_bytes()); // 11 -> mark
+        gdef_bytes.extend_from_slice(&3u16.to_be_bytes()); // 12 -> mark
 
         let mac_off = gdef_bytes.len() as u16;
         gdef_bytes[mac_slot..mac_slot + 2].copy_from_slice(&mac_off.to_be_bytes());
         gdef_bytes.extend_from_slice(&1u16.to_be_bytes()); // format
         gdef_bytes.extend_from_slice(&11u16.to_be_bytes()); // start
         gdef_bytes.extend_from_slice(&2u16.to_be_bytes()); // count
-        gdef_bytes.extend_from_slice(&1u16.to_be_bytes()); // 11 → attach 1
-        gdef_bytes.extend_from_slice(&2u16.to_be_bytes()); // 12 → attach 2
+        gdef_bytes.extend_from_slice(&1u16.to_be_bytes()); // 11 -> attach 1
+        gdef_bytes.extend_from_slice(&2u16.to_be_bytes()); // 12 -> attach 2
 
         let gdef = Gdef::parse(&gdef_bytes).unwrap();
         // Flag with MarkAttachmentType=1 in the high byte. Low byte zero.
@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn use_mark_filtering_set_skips_marks_outside_the_coverage() {
         // v1.2 GDEF with mark glyph sets = [cov{11}]. Flag 0x0010 with
-        // index 0 → only mark 11 survives; mark 12 is skipped.
+        // index 0 -> only mark 11 survives; mark 12 is skipped.
         let mut gdef_bytes = Vec::new();
         gdef_bytes.extend_from_slice(&1u16.to_be_bytes()); // major
         gdef_bytes.extend_from_slice(&2u16.to_be_bytes()); // minor
@@ -475,9 +475,9 @@ mod tests {
         gdef_bytes.extend_from_slice(&1u16.to_be_bytes()); // format 1
         gdef_bytes.extend_from_slice(&10u16.to_be_bytes()); // start
         gdef_bytes.extend_from_slice(&3u16.to_be_bytes()); // count
-        gdef_bytes.extend_from_slice(&1u16.to_be_bytes()); // 10 → base
-        gdef_bytes.extend_from_slice(&3u16.to_be_bytes()); // 11 → mark
-        gdef_bytes.extend_from_slice(&3u16.to_be_bytes()); // 12 → mark
+        gdef_bytes.extend_from_slice(&1u16.to_be_bytes()); // 10 -> base
+        gdef_bytes.extend_from_slice(&3u16.to_be_bytes()); // 11 -> mark
+        gdef_bytes.extend_from_slice(&3u16.to_be_bytes()); // 12 -> mark
 
         let mgs_sub_off = gdef_bytes.len();
         gdef_bytes[mgs_slot..mgs_slot + 2].copy_from_slice(&(mgs_sub_off as u16).to_be_bytes());
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn missing_gdef_neutralises_flag() {
         let f = MatchFilter::for_lookup(LOOKUP_FLAG_IGNORE_MARKS, None, None);
-        // Without GDEF every glyph reads as base → nothing is skipped
+        // Without GDEF every glyph reads as base -> nothing is skipped
         // even though the flag says "ignore marks".
         assert!(!f.is_skipped(99));
     }

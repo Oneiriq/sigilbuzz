@@ -1,4 +1,4 @@
-//! `sigilbuzz svg` — emit a self-contained `<svg>` document for one
+//! `sigilbuzz svg`: emit a self-contained `<svg>` document for one
 //! glyph.
 //!
 //! Wraps [`sigilbuzz_svg::glyph_to_svg`] for the outline-only path and
@@ -21,7 +21,7 @@ pub struct Args {
     pub gid: u16,
     /// Output SVG path.
     pub output: PathBuf,
-    /// Use COLRv1 colour rendering when the font carries a paint tree
+    /// Use COLRv1 color rendering when the font carries a paint tree
     /// for this glyph; falls back to outline-only when it does not.
     #[arg(long)]
     pub color: bool,

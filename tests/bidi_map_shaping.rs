@@ -1,7 +1,7 @@
 //! End-to-end contract of [`sigilbuzz::BidiMap`]: shape a
 //! mixed-direction run through `Buffer::set_text_bidi` and prove that
 //! every emitted cluster value maps back to the character it came
-//! from in the ORIGINAL logical string — the capability RTL caret
+//! from in the ORIGINAL logical string, the capability RTL caret
 //! math in consumers (oniq) was blocked on.
 
 use sigilbuzz::{shape, Blob, Buffer, Direction, Face, Font};
@@ -9,7 +9,7 @@ use sigilbuzz::{shape, Blob, Buffer, Direction, Face, Font};
 const NOTO_HEBREW: &[u8] = include_bytes!("fonts/NotoSansHebrew-Regular.ttf");
 
 /// Mixed logical text: LTR Latin, RTL Hebrew, digits. The Hebrew font
-/// may lack Latin letter glyphs — irrelevant here, since missing
+/// may lack Latin letter glyphs. Irrelevant here, since missing
 /// glyphs still carry correct cluster values.
 const MIXED: &str = "abc \u{05E9}\u{05DC}\u{05D5}\u{05DD} 123";
 

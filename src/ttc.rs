@@ -10,8 +10,8 @@
 //!     0     u32    ttcTag        'ttcf'
 //!     4     u32    version       0x00010000 or 0x00020000
 //!     8     u32    numFonts
-//!    12    ×N u32  tableDirectoryOffsets   absolute, from file start
-//!   (v2 appends dsigTag / dsigLength / dsigOffset — ignored)
+//!    12    xN u32  tableDirectoryOffsets   absolute, from file start
+//!   (v2 appends dsigTag / dsigLength / dsigOffset, ignored)
 //! ```
 //!
 //! Member table directories record table offsets **absolute from the
@@ -22,7 +22,7 @@
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
 
-/// `'ttcf'` — the collection magic at byte 0.
+/// `'ttcf'`: the collection magic at byte 0.
 pub(crate) const TTCF_MAGIC: u32 = 0x7474_6366;
 
 /// Returns the number of fonts in a TrueType Collection, or `None`

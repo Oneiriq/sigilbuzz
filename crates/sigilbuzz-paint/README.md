@@ -4,16 +4,18 @@ COLRv1 paint evaluator for [sigilbuzz](https://github.com/Oneiriq/sigilbuzz).
 
 ## What it does
 
-sigilbuzz parses the COLRv1 paint tree as a borrowed enum
-(`sigilbuzz::tables::colr::ColrPaint`); this companion crate walks
-that tree and emits a flat `DrawCmd` stream a renderer can turn into
-pixels. The walker composes nested affine transforms into a single
-2x3 matrix per leaf, resolves `ColorLine` stops against the active
-CPAL palette (with per-stop alpha), brackets `PaintComposite` children
-with `PushLayer` / `PopLayer` for blend-mode-aware compositing, and
-detects cycles through `ColrGlyph` references with a visited-set.
-Malformed input never panics — bad sub-offsets and unknown formats
-truncate the stream rather than producing a partial paint.
+sigilbuzz parses a COLRv1 paint tree into a borrowed enum
+(`sigilbuzz::tables::colr::ColrPaint`). This crate walks that tree and emits a flat
+list of `DrawCmd`s that a renderer can turn into pixels. Along the way it:
+
+- Combines nested transforms into one 2x3 matrix per leaf.
+- Resolves `ColorLine` stops against the active CPAL palette, including per-stop alpha.
+- Wraps `PaintComposite` children in `PushLayer` / `PopLayer` so the renderer can
+  blend them.
+- Follows `ColrGlyph` references and stops on cycles.
+
+Malformed fonts never cause a panic. A bad offset or an unknown paint format ends the
+command list early instead of producing a half-built paint.
 
 ## Quick start
 
@@ -25,7 +27,7 @@ use sigilbuzz_paint::{evaluate, DrawCmd};
 let cmds: Vec<DrawCmd> = evaluate(face, 42);
 for cmd in &cmds {
     match cmd {
-        DrawCmd::FillGlyph { gid, transform, paint } => { /* rasterise */ }
+        DrawCmd::FillGlyph { gid, transform, paint } => { /* rasterize */ }
         DrawCmd::PushLayer { composite_mode } => {}
         DrawCmd::PopLayer => {}
     }
@@ -33,14 +35,16 @@ for cmd in &cmds {
 # }
 ```
 
+For variable fonts, `evaluate_at_coords` takes normalized axis coordinates.
+
 ## Cargo features
 
-| Feature | Default | What it does                            |
-|---------|---------|-----------------------------------------|
-| `std`   | yes     | `Vec`-backed `DrawCmd` streams.         |
+| Feature | Default | What it does |
+|---|---|---|
+| `std` | yes | `Vec`-backed `DrawCmd` lists. |
 
-Disable default features for `no_std + alloc` builds.
+Turn off default features for `no_std` with `alloc`.
 
 ## License
 
-Apache-2.0. See the workspace root `LICENSE-APACHE`.
+Apache-2.0. See the workspace root `LICENSE`.

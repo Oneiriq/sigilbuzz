@@ -26,7 +26,7 @@ pub fn write_hhea_metrics_count(hhea: &mut [u8], n: u16) -> Result<(), SubsetErr
     Ok(())
 }
 
-/// Patches `vhea.numberOfLongVerMetrics` (last two bytes of the table —
+/// Patches `vhea.numberOfLongVerMetrics` (last two bytes of the table,
 /// vhea v1.0 / v1.1 share an identical byte layout to `hhea`).
 pub fn write_vhea_metrics_count(vhea: &mut [u8], n: u16) -> Result<(), SubsetError> {
     if vhea.len() < 36 {
@@ -47,7 +47,7 @@ pub fn write_maxp_num_glyphs(maxp: &mut [u8], n: u16) -> Result<(), SubsetError>
 }
 
 /// Builds a `post` format-3 table. Format 3 carries no glyph names
-/// at all — the only payload is the 32-byte header. We pull
+/// at all: the only payload is the 32-byte header. We pull
 /// `italicAngle` / `underlinePosition` / `underlineThickness` /
 /// `isFixedPitch` from the source font when present so kerning-
 /// adjacent renderers that consult these still get sane values.

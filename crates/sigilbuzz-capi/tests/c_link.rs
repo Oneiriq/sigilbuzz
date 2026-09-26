@@ -5,8 +5,8 @@
 //! test` has just built, runs it, and asserts exit 0.
 //!
 //! This is the canonical "does sigilbuzz really link as a HarfBuzz
-//! drop-in?" check. The C source includes only `hb.h` — no
-//! sigilbuzz-specific headers — so any drift between the symbol set
+//! drop-in?" check. The C source includes only `hb.h` (no
+//! sigilbuzz-specific headers), so any drift between the symbol set
 //! `hb.h` declares and the symbols the cdylib actually exports
 //! surfaces here at link time.
 //!
@@ -22,7 +22,7 @@ use std::process::Command;
 /// Acquires the workspace-level cdylib build lock used by every
 /// C-link test in this file.
 ///
-/// History: #101 introduced a process-local `Mutex<()>` to serialise
+/// History: #101 introduced a process-local `Mutex<()>` to serialize
 /// the `cargo build -p sigilbuzz-capi --lib` invocations these tests
 /// fan out. That worked while `cargo test -p sigilbuzz-capi` was the
 /// only consumer of the cdylib output, but under
@@ -37,7 +37,7 @@ use std::process::Command;
 /// An OS-level advisory file lock at
 /// `target/sigilbuzz-capi.lock` survives the process boundary, so
 /// every workspace job cooperates on the same lock regardless of
-/// which crate started it. The lock file itself is content-free —
+/// which crate started it. The lock file itself is content-free:
 /// only its inode matters.
 fn acquire_workspace_build_lock() -> fd_lock::RwLock<File> {
     let dir = locate_target_dir();
@@ -88,9 +88,9 @@ fn run_c_test(source_filename: &str, exe_basename: &str) {
     //    set the C source links against matches the source we just
     //    edited.
     //
-    //    The build is serialised via a workspace-level file lock so
-    //    concurrent C-link tests — even ones running in sibling
-    //    workspace crates under `cargo test --workspace` — don't
+    //    The build is serialized via a workspace-level file lock so
+    //    concurrent C-link tests (even ones running in sibling
+    //    workspace crates under `cargo test --workspace`) don't
     //    race on the cdylib output path. We hold the *exclusive*
     //    write side of the lock for the duration of `cargo build`
     //    so no other job can observe the cdylib mid-rebuild, then
@@ -134,7 +134,7 @@ fn run_c_test(source_filename: &str, exe_basename: &str) {
     );
 
     // 3. Compile the C source with cc. We do not link inside this
-    //    invocation — cc would default to producing an object file —
+    //    invocation (cc would default to producing an object file),
     //    so we drive the compiler manually for the executable step.
     let out_dir = target_dir.join("debug").join("c_link_test");
     std::fs::create_dir_all(&out_dir).unwrap();
@@ -193,7 +193,7 @@ fn run_c_test(source_filename: &str, exe_basename: &str) {
 /// target / debug / libNAME.dylib.
 fn locate_target_dir() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // crate dir → crates/ → workspace root
+    // crate dir -> crates/ -> workspace root
     let workspace_root = manifest
         .parent()
         .and_then(|p| p.parent())

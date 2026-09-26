@@ -1,4 +1,4 @@
-//! `avar` subsetting — pass-through.
+//! `avar` subsetting: pass-through.
 //!
 //! The Axis Variations table refines `fvar`'s normalized
 //! coordinates with per-axis piecewise-linear remaps. Each remap is

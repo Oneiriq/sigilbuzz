@@ -115,7 +115,7 @@ fn source_sans_vf_cff2_a_rasterizes_with_lit_pixels() {
 
 #[test]
 fn source_code_pro_cff1_a_rasterizes_with_lit_pixels() {
-    // Coverage for the static-CFF1 path. Same outline plumbing —
+    // Coverage for the static-CFF1 path. Same outline plumbing:
     // ensures the fix to read_index didn't break u16 INDEX parsing.
     let blob = Blob::new(SOURCE_CODE_PRO);
     let face = Face::parse(&blob, 0).unwrap();

@@ -10,7 +10,7 @@
 //!
 //!   * single base consonants
 //!   * post-base vowel signs (sign-ii / sign-uu / sign-o)
-//!   * pre-base vowel signs (sign-e / sign-eu / sign-i — reorder
+//!   * pre-base vowel signs (sign-e / sign-eu / sign-i, reorder
 //!     fires)
 //!   * below-base vowel sign (sign-u)
 //!   * final consonants (e.g. ran sign U+1C36)
@@ -34,7 +34,7 @@ const CORPUS: &[Case] = &[
         note: "empty",
         compare_rustybuzz: true,
     },
-    // ᰀ U+1C00 — letter ka. Single base.
+    // ᰀ U+1C00: letter ka. Single base.
     Case {
         text: "\u{1C00}",
         note: "ka alone",

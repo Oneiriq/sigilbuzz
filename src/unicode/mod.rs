@@ -22,7 +22,7 @@ pub enum Script {
     Latin,
     /// CJK unified ideographs and kana.
     Han,
-    /// Arabic family — Arabic, Persian, Urdu presentations.
+    /// Arabic family: Arabic, Persian, Urdu presentations.
     Arabic,
     /// Hebrew.
     Hebrew,
@@ -56,7 +56,7 @@ pub enum Script {
     /// applies. Covers main block U+1000..U+109F plus Myanmar
     /// Extended-A U+AA60..U+AA7F and Extended-B U+A9E0..U+A9FF.
     Myanmar,
-    /// Thai. Routed through the USE pipeline — no coeng-style
+    /// Thai. Routed through the USE pipeline: no coeng-style
     /// subscripts but the same mark reorder + feature-chain shape.
     /// Covers U+0E00..U+0E7F.
     Thai,
@@ -70,7 +70,7 @@ pub enum Script {
     /// jamo in logical order.
     Hangul,
     /// Tibetan (U+0F00..U+0FFF). Stacked above/below-base subjoined
-    /// consonants — runs through the feature-loop-only Tibetan shaper
+    /// consonants: runs through the feature-loop-only Tibetan shaper
     /// in [`crate::ot::tibetan`].
     Tibetan,
     /// Mongolian (U+1800..U+18AF). Cursive-joining like Arabic, with
@@ -105,7 +105,7 @@ pub enum Script {
     Cham,
     /// Brahmi (U+11000..U+1107F). The 3rd-century-BCE ancestor of
     /// every Brahmic script. Historical / scholarly use only. SMP
-    /// block — codepoints are u32-wide. USE pipeline.
+    /// block: codepoints are u32-wide. USE pipeline.
     Brahmi,
     /// Sharada (U+11180..U+111DF). Historical Kashmiri / Sanskrit
     /// script (8th century). Still used liturgically. USE pipeline.
@@ -119,7 +119,7 @@ pub enum Script {
     /// Modi (U+11600..U+1165F). Historical script for Marathi
     /// (17th century). USE pipeline.
     Modi,
-    /// Anything else — returned when sigilbuzz has no specialised
+    /// Anything else: returned when sigilbuzz has no specialized
     /// table for the codepoint's script.
     Other,
 }
@@ -179,7 +179,7 @@ impl Script {
 
 /// Returns the script bucket for a character.
 ///
-/// This is a deliberately sparse classifier — only the codepoints
+/// This is a sparse classifier: only the codepoints
 /// sigilbuzz knows how to shape differently are listed. The
 /// fallthrough is [`Script::Other`], which the shaper treats with the
 /// generic path.
@@ -193,7 +193,7 @@ pub const fn script_of(ch: char) -> Script {
         0x0370..=0x03FF | 0x1F00..=0x1FFF => Script::Greek,
         // Cyrillic + supplements
         0x0400..=0x052F => Script::Cyrillic,
-        // Hebrew — main block plus the Hebrew presentation forms
+        // Hebrew: main block plus the Hebrew presentation forms
         // (U+FB1D..U+FB4F). Alphabetic Presentation Forms splits
         // between Hebrew (U+FB1D..U+FB4F) and Armenian/Latin (below
         // U+FB1D), so classify the Hebrew sub-block explicitly.
@@ -202,7 +202,7 @@ pub const fn script_of(ch: char) -> Script {
         // block (U+FB50..U+FDFF) starts immediately after the Hebrew
         // presentation forms above, so no overlap.
         0x0600..=0x06FF | 0x0750..=0x077F | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF => Script::Arabic,
-        // N'Ko — RTL alphabetic, Manding family. Block ends at U+07FF
+        // N'Ko: RTL alphabetic, Manding family. Block ends at U+07FF
         // and abuts the Samaritan / Mandaic blocks at U+0800.
         0x07C0..=0x07FF => Script::NKo,
         // Devanagari
@@ -239,7 +239,7 @@ pub const fn script_of(ch: char) -> Script {
         0x1A20..=0x1AAF => Script::TaiTham,
         // Balinese.
         0x1B00..=0x1B7F => Script::Balinese,
-        // Sundanese (West Java) — main block + supplement
+        // Sundanese (West Java): main block + supplement
         // (U+1CC0..U+1CCF holds Sundanese punctuation/numerals).
         0x1B80..=0x1BBF | 0x1CC0..=0x1CCF => Script::Sundanese,
         // Lepcha (Sikkim).
@@ -247,7 +247,7 @@ pub const fn script_of(ch: char) -> Script {
         // Cham (Cambodia / Vietnam).
         0xAA00..=0xAA5F => Script::Cham,
         // --- Brahmi-family historical scripts (SMP) -------------
-        // Brahmi (3rd century BCE — ancestor of all Brahmic).
+        // Brahmi (3rd century BCE, ancestor of all Brahmic).
         0x11000..=0x1107F => Script::Brahmi,
         // Sharada (Kashmiri / Sanskrit, 8th century).
         0x11180..=0x111DF => Script::Sharada,
@@ -261,17 +261,17 @@ pub const fn script_of(ch: char) -> Script {
         // precomposed Hangul Syllables + Hangul Compatibility Jamo.
         // The USE routing in shape.rs only triggers for the Jamo
         // ranges; precomposed syllables flow through the default
-        // pipeline — matches HarfBuzz / rustybuzz.
+        // pipeline. Matches HarfBuzz / rustybuzz.
         0x1100..=0x11FF | 0xA960..=0xA97F | 0xAC00..=0xD7A3 | 0xD7B0..=0xD7FF | 0x3130..=0x318F => {
             Script::Hangul
         }
-        // Tibetan — base block. Stacked subjoined consonants live
+        // Tibetan: base block. Stacked subjoined consonants live
         // in U+0F90..U+0FBC; the whole block routes through the
         // Tibetan feature-loop shaper.
         0x0F00..=0x0FFF => Script::Tibetan,
         // Khmer + Khmer Symbols
         0x1780..=0x17FF | 0x19E0..=0x19FF => Script::Khmer,
-        // Mongolian — main block. Mongolian Supplement (U+11660..)
+        // Mongolian: main block. Mongolian Supplement (U+11660..)
         // is intentionally out of scope for the bootstrap classifier
         // since cargo's `char` is `u32` but the binding is `const fn`
         // and the supplement lives outside the Basic Multilingual
@@ -285,7 +285,7 @@ pub const fn script_of(ch: char) -> Script {
 }
 
 /// Returns `true` if the codepoint is a Hangul Jamo (Leading / Vowel /
-/// Trailing / Extended-A / Extended-B) — the subset of Hangul that USE
+/// Trailing / Extended-A / Extended-B), the subset of Hangul that USE
 /// reorders via the `ljmo`/`vjmo`/`tjmo` features. Precomposed syllables
 /// (U+AC00..U+D7A3) and Compatibility Jamo (U+3130..U+318F) stay on the
 /// default path.
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn unknown_scripts_fall_through_to_other() {
-        // Armenian — not in the bootstrap table.
+        // Armenian: not in the bootstrap table.
         assert_eq!(script_of('\u{0531}'), Script::Other);
     }
 
@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn classifies_myanmar() {
-        // ကာ — U+1000 (consonant ka) + U+102C (sign aa).
+        // ကာ: U+1000 (consonant ka) + U+102C (sign aa).
         assert_eq!(script_of('\u{1000}'), Script::Myanmar);
         assert_eq!(script_of('\u{102C}'), Script::Myanmar);
         // Myanmar Extended-A (e.g. Shan sign maun).
@@ -412,7 +412,7 @@ mod tests {
         // ก U+0E01 (consonant ko kai), ั U+0E31 (mai han-akat).
         assert_eq!(script_of('\u{0E01}'), Script::Thai);
         assert_eq!(script_of('\u{0E31}'), Script::Thai);
-        // Block end — Thai digits.
+        // Block end: Thai digits.
         assert_eq!(script_of('\u{0E50}'), Script::Thai);
     }
 
@@ -427,7 +427,7 @@ mod tests {
     fn classifies_hangul() {
         // Jamo: leading ᄀ (U+1100), vowel ᅡ (U+1161), trailing ᆨ
         // (U+11A8). Precomposed 가 (U+AC00) also in the Hangul
-        // bucket — `is_hangul_jamo` separates the USE-routed subset.
+        // bucket: `is_hangul_jamo` separates the USE-routed subset.
         assert_eq!(script_of('\u{1100}'), Script::Hangul);
         assert_eq!(script_of('\u{1161}'), Script::Hangul);
         assert_eq!(script_of('\u{11A8}'), Script::Hangul);

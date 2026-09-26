@@ -23,7 +23,7 @@ use sigilbuzz_capi::{
 };
 
 // =========================================================================
-// Fixture builders — mirrored from sigilbuzz-paint's evaluator tests
+// Fixture builders, mirrored from sigilbuzz-paint's evaluator tests
 // so the FFI bridge is exercised against the same canonical layout.
 // =========================================================================
 
@@ -136,7 +136,7 @@ fn paint_glyph_against_solid_colr_fires_color_and_clip_callbacks() {
     LAST_COLOR.store(0, Ordering::SeqCst);
 
     // Build a tiny COLR with a single base-glyph PaintGlyph(outline=42)
-    // → PaintSolid(palette=0, alpha=1.0). The COLR base glyph is 7.
+    // -> PaintSolid(palette=0, alpha=1.0). The COLR base glyph is 7.
     let mut colr = build_v1_header(7);
     let pglyph_start = colr.len();
     colr.push(10); // PaintGlyph
@@ -154,7 +154,7 @@ fn paint_glyph_against_solid_colr_fires_color_and_clip_callbacks() {
     colr.extend_from_slice(&f2dot14(1.0)); // alpha 1.0
 
     // Palette 0 = pure red. The bridge converts to BGRA: alpha 0xFF,
-    // red 0xFF, green 0x00, blue 0x00 → 0xFF_FF_00_00.
+    // red 0xFF, green 0x00, blue 0x00 -> 0xFF_FF_00_00.
     let cpal = build_cpal_v0(&[(255, 0, 0, 255)]);
     let bytes = build_face_bytes(&colr, &cpal);
 
@@ -179,7 +179,7 @@ fn paint_glyph_against_solid_colr_fires_color_and_clip_callbacks() {
 
         // The DrawCmd stream for this fixture is one FillGlyph with
         // gid=42, transform=identity, paint=Solid(red). The bridge
-        // therefore emits push_clip_glyph(42) → color(red) → pop_clip.
+        // therefore emits push_clip_glyph(42) -> color(red) -> pop_clip.
         // No transform should be pushed because the accumulated
         // transform is identity.
         assert_eq!(PUSH_CLIP_GLYPH_CALLS.load(Ordering::SeqCst), 1);

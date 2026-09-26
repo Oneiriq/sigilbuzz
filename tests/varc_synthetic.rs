@@ -11,7 +11,7 @@
 //! gid-2 outline shifted by the VARC component's translation.
 //!
 //! `fontTools` 4.50+ has VARC support; for now we hand-pack the bytes
-//! to keep CI free of Python dependencies — same posture as other
+//! to keep CI free of Python dependencies, same posture as other
 //! synthetic-font fixtures in `tests/`.
 
 use sigilbuzz::tables::PathOp;
@@ -46,7 +46,7 @@ fn build_square_glyph() -> Vec<u8> {
                                               // Per-point flags: ON_CURVE (0x01), X_SHORT (0x02), Y_SHORT (0x04).
                                               // Coords as signed bytes then.
                                               // Use repeat-flag for compactness? Keep it simple: 4 separate
-                                              // flag bytes with X_SHORT|Y_SHORT|ON_CURVE = 0x07 — coords as
+                                              // flag bytes with X_SHORT|Y_SHORT|ON_CURVE = 0x07, coords as
                                               // unsigned i8 abs values, X_SAME / Y_SAME bits decide sign.
                                               // For (0,0),(100,0),(100,100),(0,100), x deltas = 0,100,0,-100
                                               // and y deltas = 0,0,100,0.
@@ -54,7 +54,7 @@ fn build_square_glyph() -> Vec<u8> {
                                               // bit4=X_SAME(if X_SHORT then sign), bit5=Y_SAME(same).
                                               // We'll use long-form coords (no shortcuts) by setting flags to
                                               // ON_CURVE only (0x01): then x and y read as i16 deltas after.
-    g.extend_from_slice(&[0x01u8; 4]); // ON_CURVE, no short, no same — once per point
+    g.extend_from_slice(&[0x01u8; 4]); // ON_CURVE, no short, no same, once per point
                                        // X deltas (i16): 0, 100, 0, -100
     for d in [0i16, 100, 0, -100] {
         g.extend_from_slice(&d.to_be_bytes());
@@ -110,7 +110,7 @@ fn build_minimal_varc() -> Vec<u8> {
 
 /// Builds a minimal SFNT carrying head/maxp/hhea/hmtx/loca/glyf/VARC.
 /// gid 0 is .notdef (empty), gid 1 is empty (VARC composite), gid 2
-/// is a 100×100 square.
+/// is a 100x100 square.
 #[allow(clippy::too_many_lines)]
 fn build_synthetic_font() -> Vec<u8> {
     // Build the substantive table payloads first.
@@ -194,7 +194,7 @@ fn build_synthetic_font() -> Vec<u8> {
     // Pad each glyph to a 2-byte boundary (loca short).
     let mut glyf = Vec::new();
     let off0 = glyf.len();
-    // gid 0 empty — no bytes, loca[0] = loca[1] indicates empty.
+    // gid 0 empty: no bytes, loca[0] = loca[1] indicates empty.
     let off1 = glyf.len();
     // gid 1 empty
     let off2 = glyf.len();
@@ -228,7 +228,7 @@ fn build_synthetic_font() -> Vec<u8> {
     };
 
     // Assemble in alphabetical-tag order with a 12-byte SFNT header
-    // and 7 × 16-byte table records.
+    // and 7 x 16-byte table records.
     let num_tables = 7u16;
     let header_len = 12 + num_tables as usize * 16;
     let payloads: Vec<([u8; 4], &[u8])> = vec![
@@ -245,7 +245,7 @@ fn build_synthetic_font() -> Vec<u8> {
     // SFNT header: TrueType version 1.0
     out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
     out.extend_from_slice(&num_tables.to_be_bytes());
-    // searchRange / entrySelector / rangeShift — uninspected by Face.
+    // searchRange / entrySelector / rangeShift: uninspected by Face.
     out.extend_from_slice(&0u16.to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes());
@@ -323,7 +323,7 @@ fn varc_uncovered_gid_falls_through_to_glyf() {
     let bytes = build_synthetic_font();
     let blob = Blob::new(&bytes);
     let face = Face::parse(&blob, 0).unwrap();
-    // gid 2 is not VARC-covered → comes straight from glyf.
+    // gid 2 is not VARC-covered -> comes straight from glyf.
     let outline = face.glyph_outline(2).unwrap().expect("outline");
     assert!(!outline.is_empty(), "square should produce ops");
 }

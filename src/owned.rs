@@ -20,7 +20,7 @@
 //! let bytes = std::fs::read("font.ttf").unwrap();
 //! let owned = OwnedFace::parse(bytes, 0).unwrap();
 //!
-//! // Parse once, extract outlines forever — no lifetime to fight.
+//! // Parse once, extract outlines forever. No lifetime to fight.
 //! let face = owned.as_face();
 //! let outline = face.glyph_outline(42).unwrap();
 //! ```
@@ -33,12 +33,12 @@ use crate::face::{Face, TableRecord};
 
 /// A parsed SFNT face that owns its font bytes.
 ///
-/// The owned analogue of [`Face`]: same parse, same validation, but the
+/// The owned analog of [`Face`]: same parse, same validation, but the
 /// data rides along behind an `Arc<[u8]>` instead of a borrow. Build one
 /// with [`OwnedFace::parse`], then call [`OwnedFace::as_face`] to get a
 /// [`Face`] view scoped to any call site that needs the full table API.
 ///
-/// Cloning is cheap — the font bytes are shared, only the short table
+/// Cloning is cheap: the font bytes are shared, only the short table
 /// directory is copied.
 #[derive(Debug, Clone)]
 pub struct OwnedFace {
@@ -77,7 +77,7 @@ impl OwnedFace {
 
     /// Returns a borrowed [`Face`] view over the owned bytes.
     ///
-    /// This does **not** re-parse the font — the table directory
+    /// This does **not** re-parse the font. The table directory
     /// captured at [`OwnedFace::parse`] time is reused (the record list
     /// is a small copy, typically a few hundred bytes). The returned
     /// `Face` borrows from `self`, so it is meant to be created where
@@ -117,7 +117,7 @@ impl OwnedFace {
     }
 }
 
-// One parse serving many threads is the whole point — pin it at compile
+// One parse serving many threads is the whole point. Pin it at compile
 // time so a future field can't silently take it away.
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}

@@ -15,7 +15,7 @@
 //!   * mixed Mongolian + Latin
 //!
 //! Both engines are forced to a horizontal direction. sigilbuzz's
-//! buffer is set to RTL — that reads as "explicit horizontal", so
+//! buffer is set to RTL. That reads as "explicit horizontal", so
 //! the auto-vertical default for Mongolian does not kick in.
 //! rustybuzz's buffer is set to LTR; sigilbuzz processes glyphs in
 //! logical order regardless of buffer direction (it does not reverse
@@ -42,12 +42,12 @@ const CORPUS: &[Case] = &[
         text: "",
         note: "empty",
     },
-    // U+1820 MONGOLIAN LETTER A — alone is `isol`.
+    // U+1820 MONGOLIAN LETTER A: alone is `isol`.
     Case {
         text: "\u{1820}",
         note: "A alone (isol)",
     },
-    // A + E (U+1820 + U+1821). Init + fina pair — exercises the
+    // A + E (U+1820 + U+1821). Init + fina pair exercises the
     // joining state machine boundaries on a 2-letter chain.
     Case {
         text: "\u{1820}\u{1821}",
@@ -59,7 +59,7 @@ const CORPUS: &[Case] = &[
         text: "\u{1820}\u{180E}\u{1821}",
         note: "A + MVS + E (joining breaks)",
     },
-    // Mixed Latin + Mongolian — the segmenter must split correctly
+    // Mixed Latin + Mongolian: the segmenter must split correctly
     // so Mongolian features only see the Mongolian segment, and
     // Latin only sees the DFLT-priority Latin segment.
     Case {
@@ -167,7 +167,7 @@ fn mongolian_corpus_matches_rustybuzz() {
 
 #[test]
 fn multiletter_chains_match_rustybuzz() {
-    // Regression coverage for #118 — sigilbuzz used to leave the
+    // Regression coverage for #118: sigilbuzz used to leave the
     // transient `masculine` / `feminine` marker glyph (gid 1490 /
     // 1491 in Noto Sans Mongolian) in the stream on every chain of
     // three or more dual-joining letters because the apply_forward
@@ -222,14 +222,14 @@ fn multiletter_chains_match_rustybuzz() {
 #[test]
 fn auto_vertical_default_engages_for_mongolian_dominant_run() {
     // A pure Mongolian run with the buffer's default LTR direction
-    // should pick vertical metrics — y_advance non-zero, x_advance
-    // zero — courtesy of the auto-vertical hook in `shape()`.
+    // should pick vertical metrics (y_advance non-zero, x_advance
+    // zero), courtesy of the auto-vertical hook in `shape()`.
     let blob = Blob::new(NOTO_MONGOLIAN);
     let face = Face::parse(&blob, 0).expect("parse face");
     let font = Font::new(face, 1000.0);
 
     let mut buffer = Buffer::new();
-    // Default direction is LTR — do NOT set any direction here.
+    // Default direction is LTR. Do NOT set any direction here.
     buffer.push_str("\u{1820}\u{1821}");
     let shaped = shape(&font, &buffer, &[]).expect("shape Mongolian default");
 
@@ -245,7 +245,7 @@ fn auto_vertical_default_engages_for_mongolian_dominant_run() {
 
 #[test]
 fn explicit_horizontal_overrides_mongolian_default() {
-    // Setting RTL explicitly opts into horizontal layout — y_advance
+    // Setting RTL explicitly opts into horizontal layout: y_advance
     // stays zero, x_advance carries the hmtx value.
     let blob = Blob::new(NOTO_MONGOLIAN);
     let face = Face::parse(&blob, 0).expect("parse face");

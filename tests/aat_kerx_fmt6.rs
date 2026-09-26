@@ -1,9 +1,9 @@
-//! AAT `kerx` format-6 (simple n×m kerning array) — end-to-end shape
+//! AAT `kerx` format-6 (simple n x m kerning array): end-to-end shape
 //! pass.
 //!
 //! Fixture: `tests/fixtures/aat_kerx_fmt6.ttf` (~900 B) carries six
 //! glyphs (.notdef, A, B, V, W, X) plus a `kerx` v2 format-6 subtable
-//! with a 2×3 grid:
+//! with a 2x3 grid:
 //!
 //! - row 0 (default) / row 1 ({A, B})
 //! - col 0 (default) / col 1 ({V}) / col 2 ({W})
@@ -17,7 +17,7 @@
 //!
 //! # No rustybuzz parity
 //!
-//! rustybuzz 0.20 has no AAT shaper — it ignores `kerx` entirely.
+//! rustybuzz 0.20 has no AAT shaper. It ignores `kerx` entirely.
 //! This is sigilbuzz-only coverage. Regenerate with
 //! `python3 tests/tools/build_aat_kerx_fmt6_fixture.py`.
 
@@ -103,7 +103,7 @@ fn fmt6_class_pair_bw_shares_aw_delta() {
 
 #[test]
 fn fmt6_default_classes_kern_zero() {
-    // (V, A): V is row 0, A is col 0 — matrix[0][0] = 0.
+    // (V, A): V is row 0, A is col 0, matrix[0][0] = 0.
     let glyphs = shape_text("VA");
     assert_eq!(glyphs.len(), 2);
     assert_eq!(glyphs[0].x_advance, 500, "V untouched");
@@ -113,9 +113,9 @@ fn fmt6_default_classes_kern_zero() {
 #[test]
 fn fmt6_handles_multi_pair_run() {
     // "ABVW" yields three pairs:
-    //   (A, B): row 1, col 0 → matrix[1][0] = 0
-    //   (B, V): row 1, col 1 → -30
-    //   (V, W): row 0, col 2 → matrix[0][2] = 0
+    //   (A, B): row 1, col 0 -> matrix[1][0] = 0
+    //   (B, V): row 1, col 1 -> -30
+    //   (V, W): row 0, col 2 -> matrix[0][2] = 0
     // Only the middle pair contributes; the run's total advance
     // should drop by exactly 30 vs the un-kerned run.
     let glyphs = shape_text("ABVW");

@@ -6,7 +6,7 @@
 //!
 //! - Decode the document, walk `<path>` / `<g>` geometry, fill it via
 //!   the existing trapezoid rasterizer.
-//! - Honour `<g transform="scale(...)">` by scaling the rendered
+//! - Honor `<g transform="scale(...)">` by scaling the rendered
 //!   bitmap accordingly.
 //! - Handle Bezier curves through the same flatten step the outline
 //!   path uses.
@@ -193,7 +193,7 @@ fn svg_solid_red_square_fills_to_red_pixmap() {
     assert_eq!(pix.width, 100);
     assert_eq!(pix.height, 100);
 
-    // A pixel near the centre must be solid opaque red. Edges may
+    // A pixel near the center must be solid opaque red. Edges may
     // anti-alias so we sample at (50, 50).
     let p = pix.get(50, 50);
     assert_eq!(p, [255, 0, 0, 255], "centre should be solid red, got {p:?}");
@@ -350,7 +350,7 @@ fn svg_bad_size_rejected() {
 // =========================================================================
 
 /// A diagonal stroke at 45° on a transparent background should leave a
-/// row of opaque pixels along the line and nothing elsewhere — proves
+/// row of opaque pixels along the line and nothing elsewhere. Proves
 /// the stroke ribbon is built and rasterized through the fill pipeline.
 #[test]
 fn svg_stroke_paints_a_line() {
@@ -379,7 +379,7 @@ fn svg_stroke_paints_a_line() {
     );
 }
 
-/// Linear gradient red → blue. Sampling the left edge should be red,
+/// Linear gradient red to blue. Sampling the left edge should be red,
 /// the right edge blue, and the middle should be a roughly even blend.
 #[test]
 fn svg_linear_gradient_ramps_red_to_blue() {
@@ -410,7 +410,7 @@ fn svg_linear_gradient_ramps_red_to_blue() {
         right[2] > 200 && right[0] < 50,
         "right edge should be blue, got {right:?}"
     );
-    // Mid should have noticeable contributions from both ends —
+    // Mid should have noticeable contributions from both ends:
     // anti-aliased coverage, plus the blend ramp.
     assert!(
         mid[0] > 30 && mid[2] > 30,
@@ -459,19 +459,19 @@ fn svg_clip_path_masks_rect_to_circle() {
     let rast = Rasterizer::new();
     let pix = rast.rasterize_svg_glyph(&face, 1, 100.0, &[]).unwrap();
 
-    // Centre is inside the clip → opaque.
+    // Center is inside the clip -> opaque.
     let centre = pix.get(50, 50);
     assert!(
         centre[3] > 200,
         "centre should be inside clip, got {centre:?}"
     );
-    // Corner is outside the clip → transparent.
+    // Corner is outside the clip -> transparent.
     let corner = pix.get(5, 5);
     assert_eq!(
         corner[3], 0,
         "corner should be outside clip, got {corner:?}"
     );
-    // Far edge of the rect (well outside the 20-radius circle) →
+    // Far edge of the rect (well outside the 20-radius circle) ->
     // transparent.
     let far = pix.get(90, 90);
     assert_eq!(far[3], 0, "far edge should be outside clip, got {far:?}");
@@ -511,13 +511,13 @@ fn svg_rect_circle_ellipse_render_as_filled_shapes() {
     let r = count_filled(rect);
     let c = count_filled(circle);
     let e = count_filled(ellipse);
-    // Rect 80x80 ≈ 6400. Circle pi*40^2 ≈ 5026. Ellipse pi*40*20 ≈ 2513.
+    // Rect 80x80 ~6400. Circle pi*40^2 ~5026. Ellipse pi*40*20 ~2513.
     assert!(r > 5500 && r < 7000, "rect coverage out of range: {r}");
     assert!(c > 4400 && c < 5600, "circle coverage out of range: {c}");
     assert!(e > 2100 && e < 2900, "ellipse coverage out of range: {e}");
 }
 
-/// Round-cornered rect emits cubic geometry — coverage should be lower
+/// Round-cornered rect emits cubic geometry. Coverage should be lower
 /// than a sharp-cornered rect with the same outer bounds (the corners
 /// are shaved off).
 #[test]
@@ -560,7 +560,7 @@ fn svg_rect_with_rounded_corners_loses_corner_pixels() {
 /// and surfaces the structured `BadSize` error instead.
 #[test]
 fn svg_extreme_viewbox_returns_bad_size_not_oom_panic() {
-    // 1e30 viewBox with 1e30 size_pt → scale s = 1, width_f = 1e30,
+    // 1e30 viewBox with 1e30 size_pt -> scale s = 1, width_f = 1e30,
     // (width_f as u32) saturates to u32::MAX, and the destination
     // pixmap allocation would otherwise overflow.
     let payload =
@@ -628,7 +628,7 @@ fn svg_polygon_fills_a_triangle() {
     let above = pix.get(50, 5);
     assert_eq!(above[3], 0, "above triangle should be transparent");
 
-    // Coverage should be ~half the bbox of the triangle (60x60 → ~1800).
+    // Coverage should be ~half the bbox of the triangle (60x60 -> ~1800).
     let mut filled = 0u32;
     for y in 0..pix.height {
         for x in 0..pix.width {
@@ -665,7 +665,7 @@ fn svg_polyline_strokes_without_filling() {
         top[3] > 200 && top[0] < 30,
         "top stroke should be opaque black, got {top:?}"
     );
-    // Interior of the C (y=50, x=50) should be transparent — polyline
+    // Interior of the C (y=50, x=50) should be transparent. Polyline
     // doesn't auto-close.
     let inside = pix.get(50, 50);
     assert_eq!(
@@ -706,7 +706,7 @@ fn svg_line_strokes_a_segment() {
 
 /// `<line stroke-dasharray="4 2">`: dashed horizontal line. Coverage
 /// of the stroke band should fall to roughly draw / (draw + skip) of
-/// the un-dashed total — i.e. approximately 4/(4+2) = 67%.
+/// the un-dashed total, i.e. approximately 4/(4+2) = 67%.
 #[test]
 fn svg_line_with_dasharray_alternates_lit_and_unlit() {
     let solid = b"<svg viewBox=\"0 0 100 100\">\
@@ -739,13 +739,13 @@ fn svg_line_with_dasharray_alternates_lit_and_unlit() {
     let s = count_opaque(solid);
     let d = count_opaque(dashed);
     let ratio = d as f32 / s.max(1) as f32;
-    // Pattern is 4 on / 2 off → about 2/3 lit.
+    // Pattern is 4 on / 2 off -> about 2/3 lit.
     assert!(
         ratio > 0.55 && ratio < 0.85,
         "dashed/solid coverage ratio out of range: {ratio} (solid={s}, dashed={d})"
     );
     // Find at least one transparent pixel along y=50 between x=15
-    // and x=85 — proves at least one "skip" gap was rendered.
+    // and x=85. Proves at least one "skip" gap was rendered.
     let bytes = build_svg_font(dashed);
     let blob = Blob::new(&bytes);
     let face = Face::parse(&blob, 0).unwrap();
@@ -797,7 +797,7 @@ fn svg_rect_with_dasharray_strokes_all_four_edges() {
     let s = count_opaque(solid);
     let d = count_opaque(dashed);
     let ratio = d as f32 / s.max(1) as f32;
-    // Dashes are 50/50 → approx half coverage.
+    // Dashes are 50/50 -> approx half coverage.
     assert!(
         ratio > 0.30 && ratio < 0.70,
         "dashed/solid rect coverage ratio out of range: {ratio} (solid={s}, dashed={d})"
@@ -873,14 +873,14 @@ fn filter_gaussian_blur_softens_sharp_edges() {
         halo[3] > 0 && halo[3] < 255,
         "blur halo pixel should have partial alpha, got {halo:?}"
     );
-    // Centre stays opaque-ish.
+    // Center stays opaque-ish.
     let mid = pix.get(50, 50);
     assert!(mid[3] > 200, "centre should stay opaque, got {mid:?}");
 }
 
 #[test]
 fn filter_color_matrix_saturate_zero_yields_grey() {
-    // A red square run through saturate=0 must emerge grey (R==G==B).
+    // A red square run through saturate=0 must emerge gray (R==G==B).
     let payload = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 50 50">
         <defs>
             <filter id="g">
@@ -920,7 +920,7 @@ fn filter_color_matrix_hue_rotate_180_inverts_hue() {
     let rast = Rasterizer::new();
     let pix = rast.rasterize_svg_glyph(&face, 1, 50.0, &[]).unwrap();
     let p = pix.get(25, 25);
-    // The dominant channel should no longer be R — G and B should
+    // The dominant channel should no longer be R. G and B should
     // dominate over R after a 180-degree hue rotation of pure red.
     assert!(
         (p[1] as i32 + p[2] as i32) > p[0] as i32,
@@ -961,8 +961,8 @@ fn filter_offset_translates_output() {
 #[test]
 fn filter_flood_plus_merge_under_source_yields_drop_shadow() {
     // The classic feFlood + feMerge drop-shadow chain:
-    //   feFlood colour → flood result
-    //   feMerge: flood, SourceGraphic → composite
+    //   feFlood color -> flood result
+    //   feMerge: flood, SourceGraphic -> composite
     // Both layers cover the canvas; we verify the source is on top
     // (visible at the rect) and the flood is visible elsewhere.
     let payload = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 50 50">
@@ -999,8 +999,8 @@ fn filter_flood_plus_merge_under_source_yields_drop_shadow() {
 
 #[test]
 fn filter_drop_shadow_chain_produces_offset_blur_under_source() {
-    // End-to-end drop-shadow: SourceAlpha → Gaussian blur → offset
-    // (positive dx,dy) → flood-coloured shadow merged under the
+    // End-to-end drop-shadow: SourceAlpha -> Gaussian blur -> offset
+    // (positive dx,dy) -> flood-colored shadow merged under the
     // SourceGraphic.
     let payload = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
         <defs>
@@ -1030,7 +1030,7 @@ fn filter_drop_shadow_chain_produces_offset_blur_under_source() {
     // Shadow shows as semi-transparent dark pixels in the
     // bottom-right halo (just past the rect edge).
     let shadow_count = count_pixels(&pix, |p| {
-        // Greyish (low chroma), partially opaque shadow.
+        // Grayish (low chroma), partially opaque shadow.
         let max = p[0].max(p[1]).max(p[2]);
         p[3] > 0 && p[3] < 250 && max < 50
     });
@@ -1057,9 +1057,9 @@ fn filter_drop_shadow_chain_produces_offset_blur_under_source() {
 
 #[test]
 fn filter_color_matrix_luminance_to_alpha() {
-    // luminanceToAlpha drops the colour channels and writes luminance
-    // into alpha. A bright source yields a grey-ish opaque pixel
-    // (R=G=B=0, A=luma scaled — but we render premul, so all channels
+    // luminanceToAlpha drops the color channels and writes luminance
+    // into alpha. A bright source yields a gray-ish opaque pixel
+    // (R=G=B=0, A=luma scaled, but we render premul, so all channels
     // end up zero with positive alpha).
     let payload = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 50 50">
         <defs>
@@ -1076,7 +1076,7 @@ fn filter_color_matrix_luminance_to_alpha() {
     let pix = rast.rasterize_svg_glyph(&face, 1, 50.0, &[]).unwrap();
     let p = pix.get(25, 25);
     // RGB should be 0 (luminanceToAlpha zeroes them); alpha is the
-    // computed luma of white = 1.0 → 255.
+    // computed luma of white = 1.0 -> 255.
     assert_eq!(p[0], 0, "RGB should be zeroed, got {p:?}");
     assert!(p[3] > 200, "alpha should track luma, got {p:?}");
 }
@@ -1089,7 +1089,7 @@ fn filter_color_matrix_luminance_to_alpha() {
 /// This is the spec-quoted minimum-viable mask test from PR #205 /
 /// #219's deferral: the discriminating output is "red square with a
 /// circular cutout", which proves both luminance derivation
-/// (white→1.0, black→0.0) and per-pixel alpha multiplication.
+/// (white->1.0, black->0.0) and per-pixel alpha multiplication.
 #[test]
 fn svg_mask_cuts_circular_hole_in_red_square() {
     let payload = b"<svg viewBox=\"0 0 100 100\">\
@@ -1107,7 +1107,7 @@ fn svg_mask_cuts_circular_hole_in_red_square() {
     let rast = Rasterizer::new();
     let pix = rast.rasterize_svg_glyph(&face, 1, 100.0, &[]).unwrap();
 
-    // Centre of the black circle → fully masked out (alpha = 0).
+    // Center of the black circle -> fully masked out (alpha = 0).
     let centre = pix.get(50, 50);
     assert_eq!(
         centre[3], 0,
@@ -1115,7 +1115,7 @@ fn svg_mask_cuts_circular_hole_in_red_square() {
     );
 
     // Corner of the rect (well outside the circle, in the mask's
-    // white surround) → opaque red, mask alpha is 1.0.
+    // white surround) -> opaque red, mask alpha is 1.0.
     let corner = pix.get(5, 5);
     assert!(
         corner[3] > 200 && corner[0] > 200 && corner[1] < 30 && corner[2] < 30,
@@ -1123,7 +1123,7 @@ fn svg_mask_cuts_circular_hole_in_red_square() {
     );
 
     // A point just inside the circle's edge should still be
-    // transparent (mask black centre is a luminance-zero region).
+    // transparent (mask black center is a luminance-zero region).
     let inside = pix.get(50, 30);
     assert!(
         inside[3] < 50,
@@ -1131,7 +1131,7 @@ fn svg_mask_cuts_circular_hole_in_red_square() {
     );
 }
 
-/// Mask with `mask=url(#missing)` — the masked element should still
+/// Mask with `mask=url(#missing)`: the masked element should still
 /// render as if no mask were applied. Matches the clipPath / filter
 /// degrade-gracefully policy.
 #[test]
@@ -1152,15 +1152,15 @@ fn svg_mask_missing_id_renders_unmasked() {
     );
 }
 
-/// Mask with a half-luminance grey body should produce a half-opaque
-/// red square — the luminance derivation must produce a *continuous*
+/// Mask with a half-luminance gray body should produce a half-opaque
+/// red square. The luminance derivation must produce a *continuous*
 /// alpha multiplier rather than the binary in/out a clipPath would.
 /// This is the discriminating signal between mask and clipPath
 /// handling.
 #[test]
 fn svg_mask_grey_body_produces_partial_alpha() {
-    // Pure-luminance grey (#808080) → BT.709 luminance ≈ 0.502, so
-    // we expect alpha ≈ 128 over the rect.
+    // Pure-luminance gray (#808080) -> BT.709 luminance ~0.502, so
+    // we expect alpha ~128 over the rect.
     let payload = b"<svg viewBox=\"0 0 50 50\">\
                     <defs>\
                       <mask id=\"g\">\
@@ -1181,7 +1181,7 @@ fn svg_mask_grey_body_produces_partial_alpha() {
         p[3] > 100 && p[3] < 160,
         "grey mask should produce ~half alpha, got {p:?}"
     );
-    // Source colour was opaque red; the surviving pixel should be a
+    // Source color was opaque red; the surviving pixel should be a
     // ~half-opaque premultiplied red.
     assert!(p[0] > 100 && p[1] < 30 && p[2] < 30, "channels: {p:?}");
 }
@@ -1191,7 +1191,7 @@ fn svg_mask_grey_body_produces_partial_alpha() {
 // =========================================================================
 //
 // PR #236 deferred SVG `<textPath>` because the renderer doesn't shape
-// text. The new entry — `rasterize_svg_glyph_with_text_paths` — takes
+// text. The new entry, `rasterize_svg_glyph_with_text_paths`, takes
 // a pre-shaped run from the consumer (one record per visual glyph,
 // carrying gid + x_advance) and walks the referenced path's
 // arc-length, translating each glyph's outline onto its
@@ -1199,10 +1199,10 @@ fn svg_mask_grey_body_produces_partial_alpha() {
 // 0.22.0 follow-up work.
 //
 // The font built below has gid 0 = .notdef (empty), gid 1 = SVG-bearing,
-// gid 2 = a 100×100 square outlined glyph. The SVG document on gid 1
+// gid 2 = a 100x100 square outlined glyph. The SVG document on gid 1
 // references gid 2 via the textPath API.
 
-/// Builds a tiny TrueType simple-glyph: an axis-aligned 100×100 square
+/// Builds a tiny TrueType simple-glyph: an axis-aligned 100x100 square
 /// at design-unit origin (0,0). Same encoding used by
 /// `tests/varc_synthetic.rs`.
 fn build_square_simple_glyph() -> Vec<u8> {
@@ -1224,7 +1224,7 @@ fn build_square_simple_glyph() -> Vec<u8> {
     g
 }
 
-/// Mirrors `build_svg_font` but installs a 100×100 square glyph at gid 2
+/// Mirrors `build_svg_font` but installs a 100x100 square glyph at gid 2
 /// so the textPath consumer can reference it.
 fn build_svg_font_with_square_at_gid2(svg_payload: &[u8]) -> Vec<u8> {
     let head = {
@@ -1347,12 +1347,12 @@ fn textpath_axis_aligned_horizontal_line_places_glyphs_along_x() {
     // <textPath href="#line">consumer-pre-shape</textPath>
     //
     // The line spans 190 user-space units along x at y=50. Three
-    // pre-shaped glyphs (gid 2 = 100×100 square in design units) at
-    // font_size=20 (scale 20/1024 ≈ 0.0195) and x_advance=40 each:
-    //   glyph 0 → x=10  (cum 0)
-    //   glyph 1 → x=50  (cum 40)
-    //   glyph 2 → x=90  (cum 80)
-    // Each glyph paints a tiny ~2×2 px square in user space. We
+    // pre-shaped glyphs (gid 2 = 100x100 square in design units) at
+    // font_size=20 (scale 20/1024 ~0.0195) and x_advance=40 each:
+    //   glyph 0 -> x=10  (cum 0)
+    //   glyph 1 -> x=50  (cum 40)
+    //   glyph 2 -> x=90  (cum 80)
+    // Each glyph paints a tiny ~2x2 px square in user space. We
     // assert the rasterized canvas has opaque pixels around each
     // expected glyph origin and is empty above/below the line.
     let payload = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 100">
@@ -1388,9 +1388,9 @@ fn textpath_axis_aligned_horizontal_line_places_glyphs_along_x() {
         .unwrap();
 
     // Canvas is at least the viewBox width; rendered with size_pt = 220
-    // and viewBox 220×100, scale factor = 1.0. Each glyph is a 100-unit
-    // square in design units → ≈2 user-space units after font_size/upem
-    // (20/1024) → ~2 pixels (because user-space → pixel scale = 1).
+    // and viewBox 220x100, scale factor = 1.0. Each glyph is a 100-unit
+    // square in design units -> ~2 user-space units after font_size/upem
+    // (20/1024) -> ~2 pixels (because user-space -> pixel scale = 1).
     assert!(pix.width >= 220);
     assert_eq!(pix.height, 100);
 
@@ -1522,8 +1522,8 @@ fn textpath_curved_path_translates_glyphs_along_curve_axis_aligned() {
     }
     assert!(start_blue, "start of curve should have a blue glyph");
 
-    // Mid-arc: at cumulative advance ≈ 60, the arc-length walk on a
-    // gentle arch lands near x ≈ 30..70 (the curve climbs slowly at
+    // Mid-arc: at cumulative advance ~60, the arc-length walk on a
+    // gentle arch lands near x ~30..70 (the curve climbs slowly at
     // first because of the y=0 controls bowing it up). Confirm
     // *some* blue pixel exists in the mid-canvas region above y=80.
     let mut mid_blue = false;
@@ -1541,7 +1541,7 @@ fn textpath_curved_path_translates_glyphs_along_curve_axis_aligned() {
 
 #[test]
 fn textpath_unmatched_id_silently_skips() {
-    // <textPath href="#missing"> with no matching def — the run is
+    // <textPath href="#missing"> with no matching def: the run is
     // silently dropped. The base SVG document still renders.
     let payload = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
         <path d="M 0 0 L 100 0 L 100 100 L 0 100 Z" fill="#00FF00"/>
@@ -1587,7 +1587,7 @@ fn svg_existing_synthetic_fixture_round_trips() {
     let rast = Rasterizer::new();
     let pix = rast.rasterize_svg_glyph(&face, 1, 64.0, &[]);
     // Either we successfully render an empty-but-shaped pixmap (no
-    // <path>s in the doc), or we surface a structured Parse error —
+    // <path>s in the doc), or we surface a structured Parse error:
     // both prove the entry point hooked up correctly.
     match pix {
         Ok(p) => {
@@ -1602,18 +1602,18 @@ fn svg_existing_synthetic_fixture_round_trips() {
 // Wave-21 adversarial pass: sibling-feature deferral surfaces.
 //
 // The named features (mask-type=alpha, maskUnits=objectBoundingBox,
-// <textPath>) are currently *deferred* on release/0.21.0 — siblings own
+// <textPath>) are currently *deferred* on release/0.21.0. Siblings own
 // the implementation. These tests pin the documented degrade-to-default
-// behaviour so that:
+// behavior so that:
 //
 //   (a) on the current release tip, malformed adversarial input does
 //       not panic / propagate parse errors, and
 //   (b) when the sibling PRs land, any change in semantics is caught
-//       at the existing assertions (a sibling that flips behaviour from
+//       at the existing assertions (a sibling that flips behavior from
 //       "render unmasked" to "panic on empty body" would fail here).
 // =========================================================================
 
-/// `mask-type="alpha"` is documented as deferred — falls back to the
+/// `mask-type="alpha"` is documented as deferred. Falls back to the
 /// luminance default. An *empty* mask body should still parse cleanly
 /// and degrade gracefully (the masked element renders as if the mask
 /// wasn't applied, since `resolve_mask_shape` returns `None` for an
@@ -1645,12 +1645,12 @@ fn svg_mask_alpha_with_empty_body_does_not_panic() {
 }
 
 /// `maskUnits="objectBoundingBox"` with a zero-area shape's bbox.
-/// Currently deferred — falls back to userSpaceOnUse. The assertion
+/// Currently deferred, falls back to userSpaceOnUse. The assertion
 /// here is purely structural: rasterizer doesn't panic, doesn't divide
 /// by zero, and returns a finite pixmap.
 #[test]
 fn svg_mask_object_bounding_box_with_zero_size_target_does_not_panic() {
-    // The masked <rect> has zero width — bbox is degenerate. A naive
+    // The masked <rect> has zero width: bbox is degenerate. A naive
     // objectBoundingBox implementation that scales by `1/bbox_w` would
     // hit /0 here.
     let payload = b"<svg viewBox=\"0 0 100 100\">\
@@ -1665,7 +1665,7 @@ fn svg_mask_object_bounding_box_with_zero_size_target_does_not_panic() {
     let blob = Blob::new(&bytes);
     let face = Face::parse(&blob, 0).unwrap();
     let rast = Rasterizer::new();
-    // Should produce a pixmap (possibly fully transparent — zero-width
+    // Should produce a pixmap (possibly fully transparent: zero-width
     // rect emits nothing) without panicking.
     let pix = rast
         .rasterize_svg_glyph(&face, 1, 100.0, &[])
@@ -1673,7 +1673,7 @@ fn svg_mask_object_bounding_box_with_zero_size_target_does_not_panic() {
     assert!(pix.width > 0 && pix.height > 0);
 }
 
-/// `<textPath>` is documented as unsupported on release/0.21.0 — the
+/// `<textPath>` is documented as unsupported on release/0.21.0. The
 /// rasterizer must skip the element silently and return an empty
 /// pixmap rather than panic. Sibling PR will replace this assertion.
 #[test]
@@ -1687,7 +1687,7 @@ fn svg_textpath_empty_text_does_not_panic() {
     let face = Face::parse(&blob, 0).unwrap();
     let rast = Rasterizer::new();
     let pix = rast.rasterize_svg_glyph(&face, 1, 100.0, &[]);
-    // Either an empty pixmap or a structured Parse error — never a
+    // Either an empty pixmap or a structured Parse error, never a
     // panic. (BadSvg/Parse counts as 'structured' here.)
     match pix {
         Ok(p) => assert!(p.width > 0 && p.height > 0),
@@ -1739,7 +1739,7 @@ fn svg_textpath_zero_length_path_does_not_panic() {
 
 /// Adversarial: a `<mask>` containing only a *nested* `<mask>`
 /// reference. The deferred `mask-of-mask` case must not recurse
-/// infinitely or panic — `resolve_mask_shape` strips inner mask refs.
+/// infinitely or panic. `resolve_mask_shape` strips inner mask refs.
 #[test]
 fn svg_mask_of_mask_does_not_recurse_forever() {
     let payload = b"<svg viewBox=\"0 0 50 50\">\
@@ -1765,7 +1765,7 @@ fn svg_mask_of_mask_does_not_recurse_forever() {
 
 /// Adversarial: a `<filter>` whose first primitive references an
 /// unknown named result. `apply_filter` falls back to a same-size
-/// transparent pixmap for unknown names — no panic on `unwrap_or_else`.
+/// transparent pixmap for unknown names, no panic on `unwrap_or_else`.
 #[test]
 fn svg_filter_with_unknown_named_input_does_not_panic() {
     let payload = b"<svg viewBox=\"0 0 50 50\">\

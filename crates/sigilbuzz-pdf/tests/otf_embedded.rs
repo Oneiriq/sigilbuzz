@@ -3,7 +3,7 @@
 //! The OTF emitter ships the input font bytes verbatim, builds a
 //! 256-CID Identity-H map, and tabulates per-glyph widths in PDF
 //! 1000-unit character space. None of that requires actually
-//! parsing the outline — the test just confirms the wrapper data
+//! parsing the outline. The test just confirms the wrapper data
 //! structure is internally consistent.
 
 use sigilbuzz::Face;
@@ -34,7 +34,7 @@ fn opensans_ascii_emits_consistent_otf_embedded_font() {
 
     let font = emit_otf_embedded_font(&face, OPENSANS_BYTES, &gids);
 
-    // Program is the input font bytes verbatim — no subsetting.
+    // Program is the input font bytes verbatim, no subsetting.
     assert_eq!(
         font.program.len(),
         OPENSANS_BYTES.len(),
@@ -42,7 +42,7 @@ fn opensans_ascii_emits_consistent_otf_embedded_font() {
     );
     assert_eq!(font.program, OPENSANS_BYTES);
 
-    // CIDToGIDMap is exactly 2 bytes × 256 entries.
+    // CIDToGIDMap is exactly 2 bytes x 256 entries.
     assert_eq!(font.cid_to_gid_map.len(), 2 * 256);
 
     // Each requested gid contributes one entry to the widths
@@ -72,7 +72,7 @@ fn cid_to_gid_map_is_identity_for_first_few_cids() {
     let gids = ascii_printable_gids(&face);
     let font = emit_otf_embedded_font(&face, OPENSANS_BYTES, &gids);
 
-    // CID 0 is reserved for /.notdef → gid 0.
+    // CID 0 is reserved for /.notdef -> gid 0.
     assert_eq!(&font.cid_to_gid_map[0..2], &[0u8, 0u8]);
 
     // CIDs 1.. should map to the requested gids in order.

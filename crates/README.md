@@ -1,17 +1,30 @@
 # Companion crates
 
-- `sigilbuzz-gpu` — Slug-algorithm outline encoder for GPU rasterisation. Depends on the outline-extraction APIs exposed by `sigilbuzz`.
-- `sigilbuzz-paint` — COLRv1 paint evaluation helpers (transform composition, ColorLine sampling, Composite blending). Depends on `sigilbuzz` for paint-tree traversal.
+The shaping core is the root crate. These crates build on it. Each one is a workspace
+member, pulls in `sigilbuzz` with `workspace = true`, and has its own README.
 
-Each crate is a workspace member and pulls `sigilbuzz` via `workspace = true` in its dependency list. Release cadence is independent; each companion carries its own semver.
+| Crate | What it does |
+|---|---|
+| [`sigilbuzz-render`](sigilbuzz-render) | CPU rasterizer for outlines, color glyphs, SVG-in-OT, and embedded bitmaps. |
+| [`sigilbuzz-paint`](sigilbuzz-paint) | COLRv1 paint evaluator that emits a flat list of draw commands. |
+| [`sigilbuzz-gpu`](sigilbuzz-gpu) | Slug outline encoder for GPU rendering. |
+| [`sigilbuzz-subset`](sigilbuzz-subset) | Font subsetter and variable-font instancer. |
+| [`sigilbuzz-woff`](sigilbuzz-woff) | WOFF1 and WOFF2 wrap and unwrap. |
+| [`sigilbuzz-svg`](sigilbuzz-svg) | Glyph outlines and COLRv1 glyphs as SVG. |
+| [`sigilbuzz-pdf`](sigilbuzz-pdf) | Type 3, Type 1, and embedded OpenType fonts for PDF. |
+| [`sigilbuzz-text-layout`](sigilbuzz-text-layout) | Line breaking, word wrap, and word boundaries. |
+| [`sigilbuzz-hyphen`](sigilbuzz-hyphen) | Liang hyphenation. |
+| [`sigilbuzz-capi`](sigilbuzz-capi) | HarfBuzz-compatible C API. |
+| [`sigilbuzz-cli`](sigilbuzz-cli) | The `sigilbuzz` command-line tool. |
 
-# Benchmarks
+The crates are released together, but each keeps its own version number.
+[docs/RELEASING.md](../docs/RELEASING.md) explains how versions move.
 
-Criterion benches live at the workspace root (`benches/`) and inside
-each companion crate (`crates/sigilbuzz-{gpu,paint}/benches/`). They
-run by default under `cargo bench` and are dev-only — Criterion is a
-`[dev-dependencies]` entry on every crate that ships benches and
-never enters the runtime closure.
+## Benchmarks
+
+Criterion benchmarks live in `benches/` at the workspace root and in
+`crates/sigilbuzz-gpu/benches/` and `crates/sigilbuzz-paint/benches/`. Criterion is a
+dev-dependency everywhere, so it never ships in a release.
 
 Run everything:
 
@@ -19,9 +32,8 @@ Run everything:
 cargo bench --workspace
 ```
 
-Run a single shape bench (each one shapes a 200-codepoint corpus
-through both sigilbuzz and rustybuzz back-to-back so you can compare
-ratios in one shot):
+Run one shaping benchmark. Each one shapes the same 200-codepoint text with sigilbuzz
+and rustybuzz back to back, so you can compare them in one run:
 
 ```sh
 cargo bench --bench shape_latin
@@ -31,16 +43,14 @@ cargo bench --bench shape_khmer
 cargo bench --bench shape_hebrew
 ```
 
-Run the encoder / paint benches (no rustybuzz baseline — rustybuzz
-does not ship either of these subsystems):
+Run the encoder and paint benchmarks. rustybuzz has neither feature, so these have no
+comparison:
 
 ```sh
 cargo bench -p sigilbuzz-gpu --bench encode
 cargo bench -p sigilbuzz-paint --bench evaluate
 ```
 
-Comparing against rustybuzz: the shape benches define two functions
-per group (`sigilbuzz` and `rustybuzz`) so Criterion's HTML report
-plots them side by side. The latest captured numbers, ratios, and
-follow-up issues for any regression worse than 2x rustybuzz live in
-[`docs/PERFORMANCE.md`](../docs/PERFORMANCE.md).
+Each shaping benchmark defines a `sigilbuzz` and a `rustybuzz` function in the same
+group, so Criterion's HTML report plots them side by side. The latest numbers are in
+[docs/PERFORMANCE.md](../docs/PERFORMANCE.md).

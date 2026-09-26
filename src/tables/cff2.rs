@@ -14,7 +14,7 @@
     clippy::needless_bool
 )]
 
-//! `CFF2` — CFF for variable fonts.
+//! `CFF2`: CFF for variable fonts.
 //!
 //! CFF2 is CFF1 with the Name INDEX, String INDEX, Encoding, Charset,
 //! and Top DICT INDEX removed; the single Top DICT lives inline in
@@ -87,7 +87,7 @@ impl<'a> Cff2<'a> {
         let top_dict_bytes = &data[top_dict_start..top_dict_end];
         let top = Cff2TopDict::parse(top_dict_bytes)?;
 
-        // Global Subr INDEX — immediately after the Top DICT.
+        // Global Subr INDEX: immediately after the Top DICT.
         let mut g_reader = Reader::at(data, top_dict_end)?;
         let global_subrs = read_index2(&mut g_reader)?;
 
@@ -99,7 +99,7 @@ impl<'a> Cff2<'a> {
         let mut cs_reader = Reader::at(data, cs_off)?;
         let char_strings = read_index2(&mut cs_reader)?;
 
-        // FDArray — CFF2 always uses it.
+        // FDArray: CFF2 always uses it.
         let fd_array_off = top.fd_array.ok_or(Error::Malformed {
             offset: 0,
             context: "CFF2 Top DICT missing FDArray",
@@ -165,8 +165,8 @@ impl<'a> Cff2<'a> {
             .unwrap_or(&[]);
 
         // Parse the variation store. CFF2 charstrings call `blend`
-        // even at the default instance (empty coords) — the operator
-        // pops `n` defaults plus `n × n_regions` per-region deltas
+        // even at the default instance (empty coords). The operator
+        // pops `n` defaults plus `n * n_regions` per-region deltas
         // off the stack. Without an IVS the interpreter must guess
         // `n_regions` from surplus stack depth, and that guess is
         // wrong whenever a `blend` is followed by additional
@@ -208,18 +208,18 @@ impl<'a> Cff2<'a> {
 
 #[derive(Debug, Default)]
 struct Cff2TopDict {
-    /// Operator 17 — CharStrings.
+    /// Operator 17: CharStrings.
     char_strings: Option<u32>,
-    /// Operator 12 36 — FDArray.
+    /// Operator 12 36: FDArray.
     fd_array: Option<u32>,
-    /// Operator 12 37 — FDSelect.
+    /// Operator 12 37: FDSelect.
     fd_select: Option<u32>,
-    /// Operator 24 — VariationStore offset.
+    /// Operator 24: VariationStore offset.
     vstore: Option<u32>,
-    /// Operator 18 — Private (size, offset). CFF2 Font DICTs only;
+    /// Operator 18: Private (size, offset). CFF2 Font DICTs only;
     /// the main Top DICT never carries one.
     private: Option<(u32, u32)>,
-    /// Operator 19 — Local Subrs offset (relative to Private DICT).
+    /// Operator 19: Local Subrs offset (relative to Private DICT).
     local_subrs_off: Option<u32>,
 }
 
@@ -272,7 +272,7 @@ fn read_dict_int(r: &mut Reader<'_>) -> Result<i32> {
         let v = r.read_i32()?;
         Ok(v)
     } else if b0 == 30 {
-        // Real — skip content, yield 0.
+        // Real: skip content, yield 0.
         loop {
             let b = r.read_u8()?;
             if (b & 0x0F) == 0x0F || (b >> 4) == 0x0F {
@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn cff2_blend_without_context_yields_defaults() {
-        // Same charstring, but no BlendContext provided — the
+        // Same charstring, but no BlendContext provided. The
         // interpreter falls back to the default values and ignores
         // the delta columns.
         let mut cs = Vec::new();

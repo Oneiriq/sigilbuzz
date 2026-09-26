@@ -8,13 +8,13 @@
 //!
 //! As of this commit the rewriter ships byte-level support for:
 //!
-//! - **GlyphClassDef** — ClassDef remap (filter dropped gids out, then
+//! - **GlyphClassDef**: ClassDef remap (filter dropped gids out, then
 //!   remap to new gids; auto-format-pick via the existing emitter).
-//! - **MarkAttachClassDef** — ClassDef remap, same shape as
+//! - **MarkAttachClassDef**: ClassDef remap, same shape as
 //!   GlyphClassDef.
 //!
-//! Other GDEF subtables — `AttachList`, `LigCaretList`,
-//! `MarkGlyphSetsDef`, `ItemVariationStore` — are dropped from the
+//! Other GDEF subtables (`AttachList`, `LigCaretList`,
+//! `MarkGlyphSetsDef`, `ItemVariationStore`) are dropped from the
 //! rewritten output. Most callers that disable layout-aware shaping
 //! for a heavy subset don't notice because GPOS drops too (see
 //! [`crate::gpos`]) and these ancillary tables are only consulted
@@ -69,7 +69,7 @@ pub(crate) fn rewrite_gdef(face: &sigilbuzz::Face<'_>, map: &GidMap) -> Option<V
     };
 
     // If both classdefs drop and we don't carry anything else, the
-    // whole GDEF is empty — the caller drops it.
+    // whole GDEF is empty. The caller drops it.
     if new_glyph_class.is_none() && new_mark_attach.is_none() {
         return None;
     }
@@ -78,7 +78,7 @@ pub(crate) fn rewrite_gdef(face: &sigilbuzz::Face<'_>, map: &GidMap) -> Option<V
     // rewrite. Other subtable offsets are zeroed.
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // major
-    out.extend_from_slice(&0u16.to_be_bytes()); // minor — drop to v1.0; we don't carry mark glyph sets / IVS yet.
+    out.extend_from_slice(&0u16.to_be_bytes()); // minor: drop to v1.0; we don't carry mark glyph sets / IVS yet.
     let _ = minor;
 
     // Header offsets get patched once we know the subtable positions.
@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn rewrite_classdef_filters_dropped_gids() {
         // Build a tiny ClassDef format 2 inline for the helper.
-        // Class assignments: gid 5→1, gid 6→2, gid 10→3.
+        // Class assignments: gid 5->1, gid 6->2, gid 10->3.
         let mut cd_bytes = Vec::new();
         cd_bytes.extend_from_slice(&2u16.to_be_bytes()); // format
         cd_bytes.extend_from_slice(&3u16.to_be_bytes()); // rangeCount
@@ -137,7 +137,7 @@ mod tests {
             cd_bytes.extend_from_slice(&end.to_be_bytes());
             cd_bytes.extend_from_slice(&class.to_be_bytes());
         }
-        // GidMap: 5→1 (kept), 6 dropped, 10→3 (kept). Rebuild to length 11.
+        // GidMap: 5->1 (kept), 6 dropped, 10->3 (kept). Rebuild to length 11.
         let mut table = vec![None; 11];
         table[0] = Some(0);
         table[5] = Some(1);
@@ -146,8 +146,8 @@ mod tests {
 
         let new_cd = rewrite_classdef_subtable(&cd_bytes, 0, &map).unwrap();
         let parsed = ClassDef::parse(&new_cd).unwrap();
-        assert_eq!(parsed.class_of(1), 1, "gid 5→1 keeps class 1");
-        assert_eq!(parsed.class_of(3), 3, "gid 10→3 keeps class 3");
-        assert_eq!(parsed.class_of(2), 0, "gid 6 dropped → unlisted = class 0");
+        assert_eq!(parsed.class_of(1), 1, "gid 5->1 keeps class 1");
+        assert_eq!(parsed.class_of(3), 3, "gid 10->3 keeps class 3");
+        assert_eq!(parsed.class_of(2), 0, "gid 6 dropped -> unlisted = class 0");
     }
 }

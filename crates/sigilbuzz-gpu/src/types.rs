@@ -1,9 +1,9 @@
 //! Plain-old-data types that make up an encoded Slug glyph.
 //!
-//! These structs are deliberately `repr`-friendly: every field is a
+//! These structs are `repr`-friendly: every field is a
 //! primitive `f32` / `u32`, every aggregate is `Copy` where possible.
 //! Consumers can transmute / cast `&[QuadSegment]` and `&[Band]` to
-//! byte slices for SSBO upload without further marshalling.
+//! byte slices for SSBO upload without further marshaling.
 
 use alloc::vec::Vec;
 
@@ -73,7 +73,7 @@ impl Bbox {
     }
 
     /// True when the box has zero or negative extent on either axis,
-    /// the typical signal that the glyph carries no rasterisable
+    /// the typical signal that the glyph carries no rasterizable
     /// outline.
     #[must_use]
     #[inline]
@@ -107,7 +107,7 @@ impl Default for Bbox {
 
 /// A single quadratic Bezier segment of a glyph contour.
 ///
-/// All Slug primitives are quadratic — cubic curves from CFF fonts
+/// All Slug primitives are quadratic. Cubic curves from CFF fonts
 /// are flattened upstream by [`crate::encode_glyph`] before band
 /// decomposition.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -136,12 +136,12 @@ pub struct Band {
     pub segment_count: u32,
 }
 
-/// A glyph encoded for GPU rasterisation.
+/// A glyph encoded for GPU rasterization.
 ///
 /// Layout note: the segment pool is *not* deduplicated across bands.
 /// A curve crossing several bands is recorded once per band so the
 /// fragment shader can iterate the band's slice without touching
-/// any out-of-band data. This trades memory for shader simplicity —
+/// any out-of-band data. This trades memory for shader simplicity,
 /// it is the standard Slug layout.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SlugGlyph {

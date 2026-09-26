@@ -1,9 +1,9 @@
-//! GPOS lookup type 5 — Mark-to-Ligature Attachment.
+//! GPOS lookup type 5: Mark-to-Ligature Attachment.
 //!
 //! Attaches a combining mark onto a specific *component* of a
 //! preceding ligature glyph. A Latin `ﬁ` ligature with an acute
 //! accent should pin the accent above the `i` component, not above
-//! the overall glyph box — so the subtable stores one anchor row
+//! the overall glyph box, so the subtable stores one anchor row
 //! per component.
 //!
 //! # Subtable layout
@@ -123,7 +123,7 @@ impl<'a> MarkLigaPos<'a> {
 }
 
 // --------------------------------------------------------------------------
-// MarkArray — identical in wire format to the one in mark_base.
+// MarkArray: identical in wire format to the one in mark_base.
 // --------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]
@@ -174,7 +174,7 @@ impl<'a> MarkArray<'a> {
 }
 
 // --------------------------------------------------------------------------
-// LigatureArray / LigatureAttach — per-component anchor rows.
+// LigatureArray / LigatureAttach: per-component anchor rows.
 // --------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]

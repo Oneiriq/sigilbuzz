@@ -1,4 +1,4 @@
-//! OpenType Layout — GSUB / GPOS / GDEF machinery.
+//! OpenType Layout: GSUB / GPOS / GDEF machinery.
 //!
 //! Nothing meaningful here yet beyond placeholder tag constants. This
 //! is the module that will grow a full script-to-feature-list table,

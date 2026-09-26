@@ -3,7 +3,7 @@
 //! Shapes a small Tibetan corpus with both sigilbuzz and rustybuzz
 //! against Noto Serif Tibetan (OFL) and asserts the output matches.
 //! Tibetan runs through sigilbuzz's feature-loop-only Tibetan shaper
-//! in `src/ot/tibetan.rs` — no reordering, just `abvs`/`blws` driven
+//! in `src/ot/tibetan.rs`: no reordering, just `abvs`/`blws` driven
 //! from the script-tag priority `[tibt, DFLT]`.
 //!
 //! The corpus exercises:
@@ -30,53 +30,53 @@ struct Case {
 }
 
 const CORPUS: &[Case] = &[
-    // Empty — neither engine should emit glyphs.
+    // Empty: neither engine should emit glyphs.
     Case {
         text: "",
         note: "empty",
     },
-    // ཀ — KA (U+0F40), simplest consonant alone. No reorder, no
+    // ཀ: KA (U+0F40), simplest consonant alone. No reorder, no
     // subjoined, no vowel.
     Case {
         text: "\u{0F40}",
         note: "KA alone",
     },
-    // ཨ — A (U+0F68). Another base consonant; exercises the cmap
+    // ཨ: A (U+0F68). Another base consonant; exercises the cmap
     // path for a different glyph.
     Case {
         text: "\u{0F68}",
         note: "A alone",
     },
-    // ཀི — KA + sign I (U+0F72). Above-base vowel; `abvs` should
+    // ཀི: KA + sign I (U+0F72). Above-base vowel; `abvs` should
     // pick the contextual form.
     Case {
         text: "\u{0F40}\u{0F72}",
         note: "KA + sign I (above-base)",
     },
-    // ཀུ — KA + sign U (U+0F74). Below-base vowel; `blws` may apply
+    // ཀུ: KA + sign U (U+0F74). Below-base vowel; `blws` may apply
     // depending on font.
     Case {
         text: "\u{0F40}\u{0F74}",
         note: "KA + sign U (below-base)",
     },
-    // ཀྱ — KA (U+0F40) + subjoined YA (U+0FB1). Below-base
+    // ཀྱ: KA (U+0F40) + subjoined YA (U+0FB1). Below-base
     // subjoined consonant, the canonical Tibetan stack.
     Case {
         text: "\u{0F40}\u{0FB1}",
         note: "KA + subjoined YA",
     },
-    // ཀྲ — KA + subjoined RA (U+0FB2). Another stack.
+    // ཀྲ: KA + subjoined RA (U+0FB2). Another stack.
     Case {
         text: "\u{0F40}\u{0FB2}",
         note: "KA + subjoined RA",
     },
-    // སྐྲ — SA + subjoined KA + subjoined RA. Three-deep stack —
+    // སྐྲ: SA + subjoined KA + subjoined RA. Three-deep stack that
     // exercises multiple `blws` lookups in sequence.
     Case {
         text: "\u{0F66}\u{0F90}\u{0FB2}",
         note: "SA + subjoined KA + subjoined RA",
     },
-    // Mixed Tibetan + Latin — segmenter must split correctly so
+    // Mixed Tibetan + Latin: segmenter must split correctly so
     // Tibetan features only see the Tibetan segment.
     Case {
         text: "Hi \u{0F40}",

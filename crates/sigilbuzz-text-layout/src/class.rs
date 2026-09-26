@@ -5,13 +5,13 @@
 //! quotation forms, hyphens) and CJK ideographs at every grapheme
 //! boundary. Anything we have not classified falls back to
 //! [`LineBreakClass::AL`], which is the UAX 14 default class for
-//! "alphabetic" — a safe choice that participates in normal
-//! pair-table behaviour without inventing breaks.
+//! "alphabetic", a safe choice that participates in normal
+//! pair-table behavior without inventing breaks.
 
 /// UAX #14 line-break class, restricted to the subset we implement.
 ///
 /// Variants mirror the spec's two-letter abbreviations (`BK`, `CR`,
-/// `LF`, …) so the pair-table reads like the spec.
+/// `LF`, ...) so the pair-table reads like the spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum LineBreakClass {
@@ -23,7 +23,7 @@ pub enum LineBreakClass {
     LF,
     /// Next line (LB5).
     NL,
-    /// Word joiner — never break around (LB11).
+    /// Word joiner: never break around (LB11).
     WJ,
     /// Close punctuation (LB13).
     CL,
@@ -41,13 +41,13 @@ pub enum LineBreakClass {
     CM,
     /// Space (LB7 / LB18).
     SP,
-    /// Break-after — hyphen-minus, en-dash, etc. (LB21).
+    /// Break-after: hyphen-minus, en-dash, etc. (LB21).
     BA,
     /// Break-before (LB21).
     BB,
-    /// Hyphen — break-after but with NU interaction (LB21).
+    /// Hyphen: break-after but with NU interaction (LB21).
     HY,
-    /// Alphabetic — Latin / Greek / Cyrillic letters (LB28).
+    /// Alphabetic: Latin / Greek / Cyrillic letters (LB28).
     AL,
     /// Numeric (LB23 / LB25).
     NU,
@@ -55,11 +55,11 @@ pub enum LineBreakClass {
     PR,
     /// Postfix numeric (LB25).
     PO,
-    /// Ideographic — CJK, Yi, etc. (LB23a / LB29).
+    /// Ideographic: CJK, Yi, etc. (LB23a / LB29).
     ID,
     /// Exclamation / question marks (LB13).
     EX,
-    /// Zero-width space — break after (LB8).
+    /// Zero-width space: break after (LB8).
     ZW,
     /// Emoji base (LB30b).
     EB,
@@ -74,7 +74,7 @@ pub enum LineBreakClass {
 pub fn line_break_class(c: char) -> LineBreakClass {
     let cp = c as u32;
 
-    // Mandatory break / line-feed family — the LB4–LB6 controls.
+    // Mandatory break / line-feed family: the LB4-LB6 controls.
     match cp {
         0x000B | 0x000C | 0x0085 | 0x2028 | 0x2029 => return LineBreakClass::BK,
         0x000D => return LineBreakClass::CR,
@@ -100,7 +100,7 @@ pub fn line_break_class(c: char) -> LineBreakClass {
         return LineBreakClass::SP;
     }
     if cp == 0x00A0 || cp == 0x202F {
-        // Non-breaking space — GL in UAX 14.
+        // Non-breaking space: GL in UAX 14.
         return LineBreakClass::GL;
     }
     // Tab counts as BA in our subset (break-after) so wrapping treats it
@@ -121,7 +121,7 @@ pub fn line_break_class(c: char) -> LineBreakClass {
         0x002D => return LineBreakClass::HY,
         // Exclamation / question / colon / semicolon / ASCII fullwidth.
         0x0021 | 0x003F => return LineBreakClass::EX,
-        // Comma, period, colon, semicolon — non-starters in UAX 14.
+        // Comma, period, colon, semicolon: non-starters in UAX 14.
         0x002C | 0x002E | 0x003A | 0x003B => return LineBreakClass::NS,
         // Slash and other break-after punctuation.
         0x002F => return LineBreakClass::BA,
@@ -131,7 +131,7 @@ pub fn line_break_class(c: char) -> LineBreakClass {
         0x0030..=0x0039 => return LineBreakClass::NU,
         // Currency / prefix-numeric (PR).
         0x0024 | 0x00A3 | 0x00A5 | 0x20AC | 0x00A2 => return LineBreakClass::PR,
-        // Postfix-numeric (PO) — percent / per-mille / degree.
+        // Postfix-numeric (PO): percent / per-mille / degree.
         0x0025 | 0x00B0 | 0x2030 | 0x2031 => return LineBreakClass::PO,
         _ => {}
     }
@@ -144,7 +144,7 @@ pub fn line_break_class(c: char) -> LineBreakClass {
         return LineBreakClass::QU;
     }
 
-    // Dashes — en/em/figure/horizontal-bar are BA. Soft-hyphen → BA.
+    // Dashes: en/em/figure/horizontal-bar are BA. Soft-hyphen -> BA.
     if matches!(cp, 0x2010 | 0x2012 | 0x2013 | 0x2014 | 0x2015 | 0x00AD) {
         return LineBreakClass::BA;
     }
@@ -155,8 +155,8 @@ pub fn line_break_class(c: char) -> LineBreakClass {
     }
 
     // CJK ideographic ranges. We treat each as its own break point
-    // (LB29/LB30) — matches the UAX 14 spec and gives Chinese / Japanese
-    // / Korean text the per-grapheme wrap behaviour the user expects.
+    // (LB29/LB30), which matches the UAX 14 spec and gives Chinese / Japanese
+    // / Korean text the per-grapheme wrap behavior the user expects.
     if (0x3040..=0x309F).contains(&cp)        // Hiragana
         || (0x30A0..=0x30FF).contains(&cp)    // Katakana
         || (0x3400..=0x4DBF).contains(&cp)    // CJK Ext A
@@ -170,7 +170,7 @@ pub fn line_break_class(c: char) -> LineBreakClass {
     }
 
     // Halfwidth / fullwidth CJK punctuation that *must not* start a
-    // line — non-starters in UAX 14.
+    // line: non-starters in UAX 14.
     if matches!(
         cp,
         0x3001 | 0x3002 | 0xFF01 | 0xFF0C | 0xFF0E | 0xFF1A | 0xFF1B | 0xFF1F
@@ -203,14 +203,14 @@ pub fn line_break_class(c: char) -> LineBreakClass {
         return LineBreakClass::CM;
     }
 
-    // Emoji modifiers — Fitzpatrick skin tones (LB30b).
+    // Emoji modifiers: Fitzpatrick skin tones (LB30b).
     if (0x1F3FB..=0x1F3FF).contains(&cp) {
         return LineBreakClass::EM;
     }
 
     // Common emoji bases. We err on the side of covering pictographic
     // ranges; over-classifying as EB is benign because EB only matters
-    // in the EB×EM rule.
+    // in the EB x EM rule.
     if (0x1F300..=0x1F5FF).contains(&cp)
         || (0x1F600..=0x1F64F).contains(&cp)
         || (0x1F900..=0x1F9FF).contains(&cp)

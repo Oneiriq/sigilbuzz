@@ -11,7 +11,7 @@
 //!   * single base consonants
 //!   * tedung post-base vowel (U+1B35)
 //!   * above-base vowel signs (sign-i U+1B36, sign-u U+1B38)
-//!   * pre-base vowel sign (sign-e U+1B3E — reorder fires)
+//!   * pre-base vowel sign (sign-e U+1B3E, reorder fires)
 //!   * adeg adeg halant (U+1B44) terminating a syllable
 //!   * mixed Balinese + Latin
 //!
@@ -33,7 +33,7 @@ const CORPUS: &[Case] = &[
         note: "empty",
         compare_rustybuzz: true,
     },
-    // ᬓ U+1B13 — letter ka. Single base.
+    // ᬓ U+1B13: letter ka. Single base.
     Case {
         text: "\u{1B13}",
         note: "ka alone",
@@ -57,7 +57,7 @@ const CORPUS: &[Case] = &[
         note: "ku (ka + sign-u)",
         compare_rustybuzz: true,
     },
-    // ka + sign-e (U+1B3E, pre-base — reorder fires).
+    // ka + sign-e (U+1B3E, pre-base, reorder fires).
     Case {
         text: "\u{1B13}\u{1B3E}",
         note: "ke (ka + sign-e, pre-base)",
@@ -69,7 +69,7 @@ const CORPUS: &[Case] = &[
         note: "ka + adeg adeg",
         compare_rustybuzz: true,
     },
-    // ᬑ U+1B11 — independent vowel o.
+    // ᬑ U+1B11: independent vowel o.
     Case {
         text: "\u{1B11}",
         note: "independent o",

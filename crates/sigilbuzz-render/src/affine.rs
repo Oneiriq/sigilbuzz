@@ -89,7 +89,7 @@ impl Affine {
     }
 
     /// Returns `self * other`. Reading left-to-right, this applies
-    /// `other` first and then `self` — the same convention HarfBuzz
+    /// `other` first and then `self`, the same convention HarfBuzz
     /// and Cairo use for nested COLR transforms.
     #[must_use]
     pub fn compose(&self, other: &Self) -> Self {

@@ -17,7 +17,7 @@
 //!
 //! Forward-direction wrap (which would need Brotli encoding plus the
 //! forward `glyf` transform) is intentionally out of scope for this
-//! release — the brief calls out 0.7.0 as the target.
+//! release. The brief calls out 0.7.0 as the target.
 //!
 //! Spec: <https://www.w3.org/TR/WOFF2/>
 
@@ -38,7 +38,7 @@ pub(crate) const TAG_LOCA: [u8; 4] = *b"loca";
 
 /// 5-bit known-tag table from the WOFF2 spec, table 3.
 ///
-/// Index 63 is reserved as the "arbitrary tag follows" marker — we
+/// Index 63 is reserved as the "arbitrary tag follows" marker, so we
 /// don't list it here.
 pub(crate) const KNOWN_TAGS: [&[u8; 4]; 63] = [
     b"cmap", b"head", b"hhea", b"hmtx", b"maxp", b"name", b"OS/2", b"post", b"cvt ", b"fpgm",
@@ -55,7 +55,7 @@ struct DirEntry {
     tag: [u8; 4],
     /// Transform version, bits 6-7 of the flag byte.
     transform_version: u8,
-    /// Length of the table after any inverse transform — the size we
+    /// Length of the table after any inverse transform, the size we
     /// expect to land in the final SFNT.
     orig_length: u32,
     /// Length of the *bytes inside the brotli payload* for this table.
@@ -140,7 +140,7 @@ fn unwrap_woff2_inner(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
     let _total_sfnt_size = r.read_u32("WOFF2 totalSfntSize")?;
     let total_compressed_size = r.read_u32("WOFF2 totalCompressedSize")? as usize;
     // majorVersion, minorVersion, metaOffset, metaLength,
-    // metaOrigLength, privOffset, privLength — none affect the SFNT
+    // metaOrigLength, privOffset, privLength. None affect the SFNT
     // we rebuild.
     r.skip(2 + 2 + 4 + 4 + 4 + 4 + 4, "WOFF2 header tail")?;
 
@@ -198,7 +198,7 @@ fn unwrap_woff2_inner(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
 
     // Collect the final table bytes, keyed by directory order. We
     // need an indirection because the transformed glyf/loca pair is
-    // emitted together — loca's bytes are a side product of glyf
+    // emitted together: loca's bytes are a side product of glyf
     // reconstruction.
     let mut payload_cursor = 0usize;
     let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(num_tables);
@@ -240,10 +240,10 @@ fn unwrap_woff2_inner(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
             // by-product of glyf, not as its own stream).
             bodies.push(Vec::new());
         } else {
-            // Untransformed table — copy as-is.
+            // Untransformed table: copy as-is.
             if e.transformed() {
                 // Future-proofing: any other transform we don't
-                // recognise is rejected loudly.
+                // recognize is rejected loudly.
                 return Err(WoffError::Unsupported {
                     context: "unknown WOFF2 transform on a non-glyf table",
                 });
@@ -257,8 +257,8 @@ fn unwrap_woff2_inner(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
     // Patch loca with the reconstructed table.
     if let (Some(li), Some(loca)) = (loca_idx, reconstructed_loca) {
         // Spec: when glyf is transformed, loca's `transformLength`
-        // must be zero. We don't enforce that here — bodies[li] is
-        // empty regardless because we initialised it as such.
+        // must be zero. We don't enforce that here: bodies[li] is
+        // empty regardless because we initialized it as such.
         bodies[li] = loca;
     }
 
@@ -359,7 +359,7 @@ mod tests {
     fn rejects_non_zero_transform_version_on_non_glyf_loca() {
         // Build a minimal 1-table WOFF2 whose single directory entry
         // is `cmap` (known tag index 0) with transformVersion=1. The
-        // bytes after the directory are irrelevant — the crate must
+        // bytes after the directory are irrelevant. The crate must
         // error before attempting Brotli decompression. Without the
         // guard, the entry was treated as untransformed and `cmap`'s
         // transformed payload (which doesn't exist for `cmap`) would
@@ -381,7 +381,7 @@ mod tests {
         // knownTag 0 = "cmap"; transformVersion 1.
         let flags: u8 = 1 << 6;
         woff2.push(flags);
-        // origLength: UIntBase128 of 16 → single byte 0x10.
+        // origLength: UIntBase128 of 16 -> single byte 0x10.
         woff2.push(0x10);
 
         let result = unwrap_woff2(&woff2);

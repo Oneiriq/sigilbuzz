@@ -1,8 +1,8 @@
 //! Shared primitives for the OpenType contextual / chained-contextual
 //! lookup families (GSUB type 5 & 6, GPOS type 7 & 8).
 //!
-//! GSUB and GPOS disagree on what the nested lookups *do* — GSUB
-//! rewrites glyph ids, GPOS adjusts advances and offsets — but the
+//! GSUB and GPOS disagree on what the nested lookups *do* (GSUB
+//! rewrites glyph ids, GPOS adjusts advances and offsets), but the
 //! outer shape is identical: match a window of the glyph stream
 //! against a Coverage / ClassDef / explicit-glyph pattern, and fire
 //! a list of nested `(sequenceIndex, lookupListIndex)` records at
@@ -11,14 +11,14 @@
 //! This module owns the parsing of the three subtable formats used
 //! by both families:
 //!
-//! - Format 1 — glyph-based. The first input glyph drives a coverage
+//! - Format 1: glyph-based. The first input glyph drives a coverage
 //!   index; each coverage entry points at a `RuleSet` of explicit
 //!   glyph-id sequences.
-//! - Format 2 — class-based. The first input glyph's coverage gate
+//! - Format 2: class-based. The first input glyph's coverage gate
 //!   picks a `ClassSet`; each class set stores class-id sequences
 //!   that are matched via one shared `ClassDef` (contextual) or
 //!   three (backtrack / input / lookahead) for chained-context.
-//! - Format 3 — explicit-coverage arrays for every window position.
+//! - Format 3: explicit-coverage arrays for every window position.
 //!
 //! Every lookup type that uses these formats shares the
 //! `SequenceLookupRecord` payload, a `(sequenceIndex, lookupListIndex)`
@@ -31,7 +31,7 @@ use crate::tables::layout::skip_iter::MatchFilter;
 use crate::tables::layout::{ClassDef, Coverage};
 use crate::tables::parse::Reader;
 
-/// `(sequenceIndex, lookupListIndex)` — the position inside the
+/// `(sequenceIndex, lookupListIndex)`: the position inside the
 /// matched input window where the nested lookup fires, and which
 /// entry of the enclosing `LookupList` it dispatches to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,10 +67,10 @@ pub fn parse_sequence_lookup_records(
 }
 
 // ---------------------------------------------------------------------
-// Contextual (non-chained) format 1 — glyph-based
+// Contextual (non-chained) format 1: glyph-based
 // ---------------------------------------------------------------------
 
-/// Format 1 — glyph-based contextual rules. The covered first glyph
+/// Format 1: glyph-based contextual rules. The covered first glyph
 /// selects a `RuleSet`; each rule inside carries the remaining input
 /// glyph ids to match plus the nested lookup records.
 #[derive(Debug, Clone)]
@@ -122,7 +122,7 @@ impl<'a> Context1<'a> {
         let mut rule_sets = Vec::with_capacity(rule_set_count);
         for off in rule_set_offs {
             if off == 0 {
-                // NULL ruleset — spec permits it.
+                // NULL ruleset: spec permits it.
                 rule_sets.push(None);
                 continue;
             }
@@ -195,10 +195,10 @@ fn parse_rule1(data: &[u8]) -> Result<Rule1> {
 }
 
 // ---------------------------------------------------------------------
-// Contextual format 2 — class-based
+// Contextual format 2: class-based
 // ---------------------------------------------------------------------
 
-/// Format 2 — class-based contextual rules. One shared `ClassDef`
+/// Format 2: class-based contextual rules. One shared `ClassDef`
 /// defines every glyph's class; the first input glyph's coverage
 /// gates matching and its class index selects a `ClassSet`.
 #[derive(Debug, Clone)]
@@ -332,10 +332,10 @@ fn parse_class_rule2(data: &[u8]) -> Result<ClassRule2> {
 }
 
 // ---------------------------------------------------------------------
-// Contextual format 3 — coverage-based
+// Contextual format 3: coverage-based
 // ---------------------------------------------------------------------
 
-/// Format 3 — coverage-based contextual rules. A single sequence of
+/// Format 3: coverage-based contextual rules. A single sequence of
 /// coverages describes the input window; each position carries one
 /// coverage to match against.
 #[derive(Debug, Clone)]
@@ -407,8 +407,8 @@ impl<'a> Context3<'a> {
         if self.input.is_empty() {
             return Some(0);
         }
-        // First input glyph must be at position `i` (coverage gate —
-        // the caller positioned us here deliberately; we do not skip
+        // First input glyph must be at position `i` (coverage gate:
+        // the caller positioned us here on purpose; we do not skip
         // the first glyph).
         if !self.input[0].contains(*glyphs.get(i)?) {
             return None;
@@ -428,10 +428,10 @@ impl<'a> Context3<'a> {
 }
 
 // ---------------------------------------------------------------------
-// Chained-context format 1 — glyph-based
+// Chained-context format 1: glyph-based
 // ---------------------------------------------------------------------
 
-/// Format 1 — glyph-based chained-context rules. The covered first
+/// Format 1: glyph-based chained-context rules. The covered first
 /// input glyph gates the match; each rule carries backtrack / input
 /// tail / lookahead glyph-id sequences plus nested lookups.
 #[derive(Debug, Clone)]
@@ -450,12 +450,12 @@ pub struct ChainRuleSet1 {
 /// One chained glyph-id rule.
 #[derive(Debug, Clone)]
 pub struct ChainRule1 {
-    /// Backtrack glyph ids, listed in *reverse* match order per spec —
+    /// Backtrack glyph ids, listed in *reverse* match order per spec:
     /// index 0 is the glyph immediately before the input.
     pub backtrack: Vec<u16>,
     /// Remaining input glyph ids after the coverage-matched first.
     pub input_tail: Vec<u16>,
-    /// Lookahead glyph ids, forward order — index 0 is the glyph
+    /// Lookahead glyph ids, forward order. Index 0 is the glyph
     /// immediately after the input.
     pub lookahead: Vec<u16>,
     /// Nested lookups to fire, relative to the matched input window.
@@ -563,10 +563,10 @@ fn parse_chain_rule1(data: &[u8]) -> Result<ChainRule1> {
 }
 
 // ---------------------------------------------------------------------
-// Chained-context format 2 — class-based
+// Chained-context format 2: class-based
 // ---------------------------------------------------------------------
 
-/// Format 2 — class-based chained-context rules. Three `ClassDef`s
+/// Format 2: class-based chained-context rules. Three `ClassDef`s
 /// cover backtrack / input / lookahead classes; a `ClassSet` is
 /// selected by the first input glyph's class.
 #[derive(Debug, Clone)]
@@ -735,12 +735,12 @@ fn parse_chain_class_rule2(data: &[u8]) -> Result<ChainClassRule2> {
 }
 
 // ---------------------------------------------------------------------
-// Matchers — return (input_len, &lookups) on a successful match.
+// Matchers: return (input_len, &lookups) on a successful match.
 // ---------------------------------------------------------------------
 
 impl Context1<'_> {
     /// Tries every rule in the ruleset for `glyphs[i]`. Pass-through
-    /// filter shorthand — equivalent to [`Context1::matches_filtered`]
+    /// filter shorthand, equivalent to [`Context1::matches_filtered`]
     /// with `MatchFilter::none()`.
     #[must_use]
     pub fn matches(&self, glyphs: &[u16], i: usize) -> Option<(usize, &[SequenceLookupRecord])> {
@@ -750,7 +750,7 @@ impl Context1<'_> {
     /// Filter-aware match: walks the input stream via the
     /// skip-iterator semantics baked into `filter`. Returns the span
     /// (from the first input glyph to the last, inclusive) in raw
-    /// glyph positions — the dispatcher uses this to advance past
+    /// glyph positions. The dispatcher uses this to advance past
     /// the whole match region, skipped glyphs included.
     #[must_use]
     pub fn matches_filtered(
@@ -789,7 +789,7 @@ impl Context2<'_> {
         self.matches_filtered(glyphs, i, &MatchFilter::none())
     }
 
-    /// Filter-aware match — see [`Context1::matches_filtered`] for
+    /// Filter-aware match. See [`Context1::matches_filtered`] for
     /// the input-span convention.
     #[must_use]
     pub fn matches_filtered(
@@ -844,7 +844,7 @@ impl ChainContext1<'_> {
         let cov_i = self.coverage.index_of(first)?;
         let set = self.rule_set(cov_i)?;
         'rules: for rule in &set.rules {
-            // Backtrack — walk left from `i` via prev_unskipped, one
+            // Backtrack: walk left from `i` via prev_unskipped, one
             // entry per backtrack step.
             let mut bt_cursor = i;
             for &g in &rule.backtrack {
@@ -869,7 +869,7 @@ impl ChainContext1<'_> {
                 last = pos;
                 cursor = pos + 1;
             }
-            // Lookahead — walk right from `last+1`.
+            // Lookahead: walk right from `last+1`.
             let mut la_cursor = last + 1;
             for &g in &rule.lookahead {
                 let Some(pos) = filter.next_unskipped(glyphs, la_cursor) else {
@@ -947,10 +947,10 @@ impl ChainContext2<'_> {
 }
 
 // ---------------------------------------------------------------------
-// Chained-context format 3 — coverage-based, GSUB/GPOS agnostic
+// Chained-context format 3: coverage-based, GSUB/GPOS agnostic
 // ---------------------------------------------------------------------
 
-/// Format 3 — coverage-based chained-context rules. Three parallel
+/// Format 3: coverage-based chained-context rules. Three parallel
 /// coverage arrays cover backtrack / input / lookahead.
 #[derive(Debug, Clone)]
 pub struct ChainContext3<'a> {
@@ -1035,7 +1035,7 @@ impl<'a> ChainContext3<'a> {
             last = pos;
             cursor = pos + 1;
         }
-        // Backtrack — walk left from `i`.
+        // Backtrack: walk left from `i`.
         let mut bt_cursor = i;
         for cov in &self.backtrack {
             let pos = filter.prev_unskipped(glyphs, bt_cursor)?;
@@ -1044,7 +1044,7 @@ impl<'a> ChainContext3<'a> {
             }
             bt_cursor = pos;
         }
-        // Lookahead — walk right from last+1.
+        // Lookahead: walk right from last+1.
         let mut la_cursor = last + 1;
         for cov in &self.lookahead {
             let pos = filter.next_unskipped(glyphs, la_cursor)?;
@@ -1150,7 +1150,7 @@ mod tests {
         assert_eq!(lookups[0].sequence_index, 1);
         assert_eq!(lookups[0].lookup_list_index, 7);
 
-        // First glyph uncovered — no match.
+        // First glyph uncovered: no match.
         assert!(ctx.matches(&[11, 20, 30], 0).is_none());
         // Input tail mismatch.
         assert!(ctx.matches(&[10, 21, 30], 0).is_none());
@@ -1388,7 +1388,7 @@ mod tests {
     }
 
     /// Build a minimal GDEF where each listed glyph has the given class.
-    /// ClassDef format 2 requires sorted ranges — the helper sorts
+    /// ClassDef format 2 requires sorted ranges. The helper sorts
     /// the caller's (gid, class) pairs to avoid silent binary-search
     /// misses.
     fn build_gdef_with_classes(classes: &[(u16, u16)]) -> alloc::vec::Vec<u8> {
@@ -1482,7 +1482,7 @@ mod tests {
         let gdef = Gdef::parse(&gdef_bytes).unwrap();
         let filter = MatchFilter::for_lookup(LOOKUP_FLAG_IGNORE_MARKS, Some(&gdef), None);
 
-        // [10, 99, 20, 30] — plain matcher fails on the mark in backtrack (i=2).
+        // [10, 99, 20, 30]: plain matcher fails on the mark in backtrack (i=2).
         assert!(!ctx.matches(&[10, 99, 20, 30], 2));
         // With the filter, the mark is skipped and the match fires.
         assert_eq!(ctx.matches_filtered(&[10, 99, 20, 30], 2, &filter), Some(1));

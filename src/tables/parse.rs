@@ -126,7 +126,7 @@ impl<'a> Reader<'a> {
         Ok(i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
     }
 
-    /// Reads an SFNT tag — four ASCII-ish bytes treated as an opaque
+    /// Reads an SFNT tag: four ASCII-ish bytes treated as an opaque
     /// `[u8; 4]`. Parsers compare tags against byte literals like
     /// `b"cmap"`, which is both deterministic and `no_std`-friendly.
     pub fn read_tag(&mut self) -> Result<[u8; 4]> {

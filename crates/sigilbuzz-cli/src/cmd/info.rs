@@ -1,4 +1,4 @@
-//! `sigilbuzz info` — dump font metadata.
+//! `sigilbuzz info`: dump font metadata.
 //!
 //! Output:
 //!

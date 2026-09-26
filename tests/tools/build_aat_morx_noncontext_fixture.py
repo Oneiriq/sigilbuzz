@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Synthesise an AAT-only font that exercises `morx` subtable
-type 4 — non-contextual substitution.
+type 4: non-contextual substitution.
 
 Type 4 is the simplest morx subtable: just an AAT lookup table
-mapping gid → gid, applied unconditionally to every glyph in the
+mapping gid -> gid, applied unconditionally to every glyph in the
 run. Real-world use case: small-caps subsidiary glyphs swapped in
 when the user enables a small-cap feature.
 
-This fixture's mapping: A → A.smcp (gid 5). Other glyphs pass
+This fixture's mapping: A -> A.smcp (gid 5). Other glyphs pass
 through. The font also has B and a separate `B.smcp` slot so the
 test can prove only the mapped glyph swaps.
 
@@ -18,7 +18,7 @@ Glyphs:
   gid 3 A.smcp
   gid 4 B.smcp
 
-Mapping (type 4 lookup): A=1 → 3 (A.smcp).
+Mapping (type 4 lookup): A=1 -> 3 (A.smcp).
 B is *not* mapped, so it stays gid 2 even though B.smcp exists.
 
 Deliberately NO GSUB so sigilbuzz's `morx` fallback runs.
@@ -66,7 +66,7 @@ def build_lookup_format6(pairs):
 
 def build_morx_table() -> bytes:
     # Type 4 body = the AAT lookup table itself.
-    body = build_lookup_format6([(1, 3)])  # gid 1 (A) → gid 3 (A.smcp)
+    body = build_lookup_format6([(1, 3)])  # gid 1 (A) -> gid 3 (A.smcp)
 
     sub_len = 12 + len(body)
     sub = bytearray()

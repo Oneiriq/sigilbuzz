@@ -1,11 +1,11 @@
-//! `BASE` — Baseline table.
+//! `BASE`: Baseline table.
 //!
 //! Provides per-script baseline metrics plus min/max boundaries so a
 //! typesetting engine can align glyphs from different scripts on a
 //! common typographic baseline. The classic example is mixed
 //! Latin / CJK / Hebrew / math text, where each script wants a
 //! different y-coordinate for its own baseline (`romn`, `ideo`,
-//! `hang`, `math`, `hebr`, …) and the engine consults BASE to pick
+//! `hang`, `math`, `hebr`, ...) and the engine consults BASE to pick
 //! one shared anchor and shift the rest accordingly.
 //!
 //! sigilbuzz exposes the parsed structure; the actual line-stacking
@@ -61,7 +61,7 @@
 //!     u16        format = 1
 //!     i16        coordinate
 //!
-//!   BaseCoord (format 2, contour-point — sigilbuzz returns the
+//!   BaseCoord (format 2, contour-point: sigilbuzz returns the
 //!   stored coordinate without resolving the point):
 //!     u16        format = 2
 //!     i16        coordinate
@@ -179,7 +179,7 @@ impl<'a> Base<'a> {
     }
 }
 
-/// One axis of the BASE table — either the horizontal-text axis or
+/// One axis of the BASE table: either the horizontal-text axis or
 /// the vertical-text axis. Carries an ordered list of baseline
 /// tags and a per-script table of values keyed off those tags.
 #[derive(Debug, Clone)]
@@ -202,7 +202,7 @@ impl<'a> BaseAxis<'a> {
 
         // Offsets in the spec are relative to the axis table start.
         // sigilbuzz stores the absolute positions to keep accessors
-        // simple — they always slice from `data`.
+        // simple: they always slice from `data`.
         let tag_list_off = if tag_list_rel == 0 {
             0
         } else {
@@ -303,7 +303,7 @@ impl<'a> BaseAxis<'a> {
 }
 
 /// Per-script baseline values. Backed by the axis's ordered tag
-/// list — `baseline()` matches an incoming tag against the parent
+/// list: `baseline()` matches an incoming tag against the parent
 /// axis's tag list, then reads the matching `BaseValues` slot.
 #[derive(Debug, Clone)]
 pub struct BaseScript<'a> {
@@ -330,7 +330,7 @@ impl<'a> BaseScript<'a> {
         let base_values_rel = r.read_u16()?;
         let default_min_max_rel = r.read_u16()?;
         // baseLangSysCount + records follow but sigilbuzz doesn't
-        // expose per-langSys MinMax overrides today — they're
+        // expose per-langSys MinMax overrides today. They're
         // exceedingly rare in real fonts.
 
         let base_values_off = if base_values_rel == 0 {
@@ -389,7 +389,7 @@ impl<'a> BaseScript<'a> {
 
     /// Like [`Self::baseline`] but applies any v1.1 IVS deltas at
     /// the given normalized axis coordinates. When the BaseCoord
-    /// is format 1 or format 2 — or the table has no IVS — this
+    /// is format 1 or format 2 (or the table has no IVS), this
     /// returns the same value as [`Self::baseline`].
     #[must_use]
     pub fn baseline_at_coords(&self, tag: [u8; 4], coords: &[f32]) -> Option<i16> {
@@ -442,14 +442,14 @@ impl<'a> BaseScript<'a> {
 
     /// Returns the `(min, max)` design-unit clamps for the script.
     /// `feature_tag` selects a feature-specific override (e.g.
-    /// `b"sups"` for superscripts) — pass `None` for the script's
+    /// `b"sups"` for superscripts). Pass `None` for the script's
     /// default range. Returns `None` when the script ships no
     /// MinMax entry.
     ///
     /// Spec note: when `feature_tag` is supplied but no record
     /// matches it, sigilbuzz falls back to the default range
     /// rather than returning `None`. That matches the line-stacking
-    /// rule clients want — "give me the tightest available clamp,
+    /// rule clients want: "give me the tightest available clamp,
     /// using the feature-specific one if present".
     #[must_use]
     pub fn min_max(&self, feature_tag: Option<[u8; 4]>) -> Option<(i16, i16)> {
@@ -511,7 +511,7 @@ fn read_base_coord(data: &[u8], off: usize) -> Option<(i16, Option<(u16, u16)>)>
             let inner = dr.read_u16().ok()?;
             let fmt = dr.read_u16().ok()?;
             if fmt != 0x8000 {
-                // Plain Device table — sigilbuzz doesn't apply
+                // Plain Device table: sigilbuzz doesn't apply
                 // ppem-keyed adjustments to baselines, so treat
                 // as static.
                 return Some((coord, None));
@@ -523,7 +523,7 @@ fn read_base_coord(data: &[u8], off: usize) -> Option<(i16, Option<(u16, u16)>)>
 }
 
 /// Reads the static coordinate of a BaseCoord at absolute offset
-/// `off`. Drops the variation index — used by `min_max`, which
+/// `off`. Drops the variation index. Used by `min_max`, which
 /// doesn't expose IVS-varied clamps (the few real fonts shipping
 /// these mark them static).
 fn read_base_coord_static(data: &[u8], off: usize) -> Option<i16> {
@@ -1020,7 +1020,7 @@ mod tests {
         let script = axis.script(*b"latn").unwrap();
         // baseline() always returns the static coord.
         assert_eq!(script.baseline(*b"romn"), Some(50));
-        // At coord 0 the IVS region (0..1..1) yields scalar 0 → no
+        // At coord 0 the IVS region (0..1..1) yields scalar 0, so no
         // delta.
         assert_eq!(script.baseline_at_coords(*b"romn", &[0.0]), Some(50));
     }
@@ -1032,7 +1032,7 @@ mod tests {
         let axis = base.horizontal_axis().unwrap();
         let script = axis.script(*b"latn").unwrap();
         // At coord 1.0 the region yields scalar 1.0 and the delta
-        // is 30 → 50 + 30 = 80.
+        // is 30, so 50 + 30 = 80.
         assert_eq!(script.baseline_at_coords(*b"romn", &[1.0]), Some(80));
         // At coord 0.5 the linear taper gives 50 + 15 = 65.
         assert_eq!(script.baseline_at_coords(*b"romn", &[0.5]), Some(65));

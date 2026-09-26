@@ -1,64 +1,167 @@
 # sigilbuzz
 
-A modern, pure-Rust text shaping engine — clean-room, zero-dependency, and built to take advantage of the 2026 HarfBuzz release.
+sigilbuzz is a text shaping engine written in pure Rust. You give it a font and a
+string. It gives you back glyph IDs and positions, ready to draw. The API follows the
+HarfBuzz model (blob, face, font, buffer, shape), so it will feel familiar if you have
+used HarfBuzz or rustybuzz.
 
-> A **sigil** is an inscribed mark that carries meaning. sigilbuzz turns runs of codepoints into positioned glyphs so the marks you put on screen are actually the marks you meant.
+The core crate has no runtime dependencies, builds under `no_std`, and returns the
+same output for the same input every time.
 
 ## Status
 
-Pre-alpha, private repository. The plan is to harden sigilbuzz by
-dogfooding it as the shaping backend for [oniq](https://github.com/Oneiriq/oniq)
-until it reaches a **very capable 0.1.0**, then open it up publicly.
-Nothing is published to crates.io and `Cargo.toml` carries
-`publish = false` so the lock cannot be bypassed by accident.
+The current release is 0.22.0. sigilbuzz is still pre-1.0, so a minor release can
+change the API. The names exported from the crate root are the ones I intend to keep
+stable. [docs/STABILITY.md](docs/STABILITY.md) lists them.
+
+## What it supports
+
+- OpenType layout: every GSUB and GPOS lookup type, GDEF, feature variations, and the
+  legacy `kern` table.
+- AAT `morx` and `kerx`, used when a font has no GSUB or GPOS.
+- Complex scripts: Arabic, Hebrew, Devanagari and the rest of the Indic family,
+  Khmer, Myanmar, Thai, Lao, Tibetan, Mongolian, N'Ko, Old Hangul, plus the scripts
+  handled by the Universal Shaping Engine (Balinese, Brahmi, Buginese, Cham, Khojki,
+  Lepcha, Limbu, Modi, Sharada, Sundanese, Tai Tham, Tirhuta).
+- Mixed-script runs, bidi (UAX 9 with paired brackets), and vertical text.
+- Variable fonts: `fvar`, `avar`, `gvar`, `HVAR`, `VVAR`, `MVAR`, and VARC composite
+  glyphs.
+- Glyph outlines from TrueType `glyf`, CFF, and CFF2.
+- Color fonts: COLRv0, COLRv1, CPAL, SVG-in-OT, CBDT/CBLC, sbix, and EBDT/EBLC.
+- TrueType Collections (`.ttc`), plus the `name`, `BASE`, and `MATH` tables.
+
+Script shaping is checked against rustybuzz on real fonts (Open Sans, Amiri, and the
+Noto families under `tests/fonts/`).
+
+## Crates
+
+The repository is a Cargo workspace. The shaping engine is the root crate. Everything
+else is optional and lives under `crates/`.
+
+| Crate | What it does |
+|---|---|
+| `sigilbuzz` | Parses fonts, shapes text, and exposes outlines and font tables. |
+| `sigilbuzz-render` | CPU rasterizer for outlines, color glyphs, SVG-in-OT, and embedded bitmaps. Includes a PNG encoder. |
+| `sigilbuzz-paint` | Walks a COLRv1 paint tree and emits a flat list of draw commands. |
+| `sigilbuzz-gpu` | Encodes outlines for GPU rendering with the Slug algorithm. |
+| `sigilbuzz-subset` | Font subsetter and variable-font instancer, similar to `hb-subset`. |
+| `sigilbuzz-woff` | WOFF1 and WOFF2 wrap and unwrap. |
+| `sigilbuzz-svg` | Writes glyph outlines and COLRv1 glyphs as SVG. |
+| `sigilbuzz-pdf` | Emits Type 3, Type 1, and embedded OpenType fonts for PDF. |
+| `sigilbuzz-text-layout` | Line breaking (UAX 14), word wrap, and word boundaries. |
+| `sigilbuzz-hyphen` | Liang hyphenation with bundled US English patterns. |
+| `sigilbuzz-capi` | A C library that exports HarfBuzz's `hb_*` symbols, so C code can link it in place of HarfBuzz. |
+| `sigilbuzz-cli` | The `sigilbuzz` command-line tool, similar to `hb-shape` and `hb-subset`. |
+
+Each crate has its own README with an example.
+
+## Quick start
+
+```toml
+[dependencies]
+sigilbuzz = "0.22"
+```
+
+```rust
+use sigilbuzz::{feature, shape, Blob, Buffer, Face, Feature, Font};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let blob = Blob::from_path("OpenSans-Regular.ttf")?;
+    let face = Face::parse(&blob, 0)?;
+    let font = Font::new(face, 16.0);
+
+    let mut buffer = Buffer::new();
+    buffer.push_str("Hello, world");
+
+    let features = [Feature { tag: feature::LIGA, value: 1 }];
+    let run = shape(&font, &buffer, &features)?;
+    for glyph in &run.glyphs {
+        println!("gid {} advance {} cluster {}", glyph.glyph_id, glyph.x_advance, glyph.cluster);
+    }
+    Ok(())
+}
+```
+
+A few things you will likely need next:
+
+- Right-to-left text: call `buffer.set_direction(Direction::Rtl)`.
+- Mixed-direction text: use `buffer.set_text_bidi(text)` in place of `push_str`. It runs
+  the Unicode bidi algorithm and reorders the text before shaping. `buffer.bidi_map()`
+  maps between logical and visual byte offsets afterward.
+- Variable fonts: `font.with_coords(&coords)` shapes at a given set of normalized axis
+  coordinates.
+- Font collections: pass the member index to `Face::parse`. `fonts_in_collection` tells
+  you how many members a `.ttc` file has.
+- A face you can cache or share across threads: `OwnedFace` owns its bytes and has no
+  lifetime parameter.
 
 ## Goals
 
-- **Pure Rust.** No C, no FFI, no transitive C toolchain requirement. Works everywhere stable Rust does, including `wasm32-unknown-unknown`.
-- **Zero external dependencies** in the core crate. Every byte of TTF/OTF parsing, OpenType feature evaluation, and glyph positioning is sigilbuzz code. Dependencies are reviewed case-by-case and justified in `docs/deps.md`.
-- **`no_std` friendly.** The default build pulls `std` for ergonomics, but the core shaping path compiles and runs under `#![no_std] + alloc`.
-- **Deterministic.** Same inputs — font bytes, feature set, direction, script — always produce the same shaped output. Byte-for-byte. This matters for replays, lockstep networking, and golden-file tests.
-- **2026 HarfBuzz parity, eventually.** Including the new GPU rasterizer, `hb_gpu_paint_t` color-glyph encoder, and the PDF/SVG paint surfaces. Those will ship as optional modules on top of the shaping core.
+- Pure Rust. No C, no FFI, no C toolchain. It builds anywhere stable Rust builds,
+  including `wasm32-unknown-unknown`.
+- No runtime dependencies in the core crate. A few companion crates take one where
+  writing our own made no sense (Brotli for WOFF2, zlib for WOFF1 and PNG, clap for the
+  CLI). [docs/deps.md](docs/deps.md) explains each one.
+- `no_std` support. The default build uses `std`, but the shaping path runs under
+  `no_std` with `alloc`.
+- Deterministic output. The same font, text, features, and direction produce the same
+  glyphs, byte for byte. That matters for replays, lockstep networking, and golden-file
+  tests.
+- Keep up with current HarfBuzz, including the newer pieces like GPU outline encoding,
+  color paint, and PDF and SVG output.
 
 ## Non-goals
 
-- Being a drop-in C-level replacement for libharfbuzz. The API is HarfBuzz-shaped (Blob → Face → Font → Buffer → shape), but the ergonomics are Rust's, not C's.
-- 100 % bug-for-bug parity with old HarfBuzz versions. Where HarfBuzz has historical cruft, sigilbuzz picks the shape that's easier to reason about.
+- The Rust API follows HarfBuzz's structure with Rust types and ownership. It does not
+  mirror the C API. C callers can use `sigilbuzz-capi`, which exports the `hb_*`
+  symbols.
+- sigilbuzz does not aim for bug-for-bug compatibility with older HarfBuzz releases.
+  Where HarfBuzz keeps a behavior for historical reasons, sigilbuzz picks the simpler
+  rule.
 
-## Why another one
+## Why I built it
 
-- rustybuzz has not published a release since November 2024.
-- harfbuzz-rs has not moved meaningfully since 2021 and is pinned to a HarfBuzz 2.x era.
-- The 2026 HarfBuzz release introduces a GPU rasterizer, COLR paint, and PDF/SVG output — none of which are reachable from Rust today.
+I needed a shaper for oniq, another Oneiriq project, and the Rust options had stalled.
+When I started in early 2026, rustybuzz had not published a release since November 2024.
+harfbuzz-rs had barely changed since 2021 and still targeted HarfBuzz 2.x. The 2026
+HarfBuzz release added a GPU rasterizer, COLR paint, and PDF and SVG output, and none of
+it was reachable from Rust. So I wrote a shaper that covers it. I test sigilbuzz by
+using it inside oniq. Real workloads there decide what gets built next.
 
-If the Rust typography stack wants those capabilities, someone has to write them. This is that project.
+## Documentation
 
-## Layout
-
-```
-src/
-├── lib.rs          public surface, re-exports
-├── error.rs        Error + Result types
-├── blob.rs         owned/borrowed font-data container
-├── face.rs         parsed SFNT directory, table access
-├── font.rs         Face + size → metrics source
-├── buffer.rs       text run → shaped-glyph pipeline
-├── shape.rs        the shape() entry point
-├── tables/         SFNT / OpenType table parsers (BE, no deps)
-├── unicode/        Unicode property data needed for shaping
-└── ot/             OpenType feature evaluation (GSUB / GPOS / ...)
-```
+- [CHANGELOG.md](CHANGELOG.md): what shipped in each release.
+- [docs/ROADMAP.md](docs/ROADMAP.md): what comes next.
+- [docs/STABILITY.md](docs/STABILITY.md): which APIs are stable before 1.0.
+- [docs/PERFORMANCE.md](docs/PERFORMANCE.md): benchmark numbers against rustybuzz.
+- [docs/deps.md](docs/deps.md): every external dependency and why it is there.
+- [docs/RELEASING.md](docs/RELEASING.md): how a release is cut and published.
+- [agent.md](agent.md): contribution rules.
 
 ## Development
 
-After cloning, install the pre-push hook that mirrors the CI gate:
+After cloning, install the pre-push hook. It runs the same checks as CI:
 
 ```bash
 scripts/install-hooks.sh
 ```
 
-The hook runs `cargo fmt --all --check`, clippy (with and without default features), `cargo test --all-features`, and the `no_std` build. CI on GitHub Actions only runs on merges into `main`, so this hook is the primary gate. Never bypass it with `--no-verify`.
+The hook runs `cargo fmt --all --check`, clippy with and without default features,
+`cargo test --all-features`, and the `no_std` build. CI runs the same checks on pushes
+and pull requests to `main` and `release/**` branches, but the hook catches problems
+first. Don't bypass it with `--no-verify`.
+
+Where things live:
+
+- `src/`: the shaping core. `tables/` holds the font table parsers, `ot/` the OpenType
+  layout engine and script shapers, `unicode/` the Unicode property data.
+- `crates/`: the companion crates.
+- `tests/`: integration and parity tests. Fonts live in `tests/fixtures/` and
+  `tests/fonts/`.
+- `benches/`: Criterion benchmarks that run sigilbuzz and rustybuzz side by side.
+
+The minimum supported Rust version is 1.81.
 
 ## License
 
-Apache-2.0. See `LICENSE-APACHE`.
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

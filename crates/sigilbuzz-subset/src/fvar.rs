@@ -1,4 +1,4 @@
-//! `fvar` subsetting — pass-through.
+//! `fvar` subsetting: pass-through.
 //!
 //! The Font Variations table describes the *axis space* of a variable
 //! font: tag, min/default/max user-space coordinates, and the optional
@@ -9,15 +9,15 @@
 //! We retain the table for two reasons:
 //!
 //! 1. Without `fvar` the resulting font is a *static* font: shapers
-//!    will refuse to honour axis coordinates passed by the caller and
+//!    will refuse to honor axis coordinates passed by the caller and
 //!    `Face::fvar()` will return `None`. A subset of a variable font
 //!    that drops `fvar` is no longer a variable font.
-//! 2. The `name` table — which we already pass through — references
+//! 2. The `name` table, which we already pass through, references
 //!    `fvar.axisNameID` and `fvar.instanceSubfamilyNameID`. Those name
 //!    records would become orphaned strings if `fvar` disappeared.
 //!
 //! The 0.5.0 baseline dropped `fvar` along with every other variable-
-//! font table. Callers who want that behaviour back set
+//! font table. Callers who want that behavior back set
 //! [`crate::SubsetInput::retain_variations`] to `false`.
 
 use alloc::vec::Vec;

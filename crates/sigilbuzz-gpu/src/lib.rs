@@ -1,4 +1,4 @@
-//! sigilbuzz-gpu — CPU-side outline encoder for GPU rasterisation.
+//! sigilbuzz-gpu: CPU-side outline encoder for GPU rasterization.
 //!
 //! This crate consumes the per-glyph outlines exposed by
 //! [`sigilbuzz::Face::glyph_outline`] and packs them into a flat,
@@ -9,24 +9,24 @@
 //!
 //! ```text
 //!   Face                     SlugGlyph
-//!     │                       ┌──────────────────────────┐
-//!     │ glyph_outline(gid)    │ bbox: Bbox               │
-//!     ▼                       │ bands: Vec<Band>         │
-//!   Outline (PathOps)         │ segments: Vec<QuadSeg>   │
-//!     │                       └──────────────────────────┘
-//!     │ flatten cubics
-//!     ▼
+//!     |                       +--------------------------+
+//!     | glyph_outline(gid)    | bbox: Bbox               |
+//!     v                       | bands: Vec<Band>         |
+//!   Outline (PathOps)         | segments: Vec<QuadSeg>   |
+//!     |                       +--------------------------+
+//!     | flatten cubics
+//!     v
 //!   QuadPath
-//!     │
-//!     │ band-decompose (N bands tiling the bbox y-range)
-//!     ▼
+//!     |
+//!     | band-decompose (N bands tiling the bbox y-range)
+//!     v
 //!   SlugGlyph
 //! ```
 //!
 //! The output buffers (`bands`, `segments`) are designed so a consumer
 //! can upload them as SSBOs / texture buffers and run a fragment
 //! shader that walks the band's segment list to compute coverage.
-//! The shader side is deliberately out of scope — sigilbuzz-gpu only
+//! The shader side is out of scope: sigilbuzz-gpu only
 //! produces the encoded data.
 //!
 //! # Quick start
@@ -53,12 +53,12 @@
 //!   Outlines", Journal of Computer Graphics Techniques (JCGT), 2017.
 //! - Charles Loop, Jim Blinn, "Resolution Independent Curve Rendering
 //!   using Programmable Graphics Hardware", SIGGRAPH 2005.
-//! - Thomas Sederberg, *Computer Aided Geometric Design*, §5.4 — the
+//! - Thomas Sederberg, *Computer Aided Geometric Design*, §5.4: the
 //!   third-difference error bound used by the cubic flattening pass.
 //!
 //! The companion shader-side reference is HarfBuzz's `hb_gpu`; we
-//! deliberately omit a default shader here so consumers can target
-//! whatever graphics API (Metal, Vulkan, WebGPU, …) suits them.
+//! omit a default shader here so consumers can target
+//! whatever graphics API (Metal, Vulkan, WebGPU, ...) suits them.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_op_in_unsafe_fn)]

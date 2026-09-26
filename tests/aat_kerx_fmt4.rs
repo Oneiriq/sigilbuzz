@@ -1,10 +1,10 @@
-//! AAT `kerx` format-4 (control-point kerning) — parse-only
+//! AAT `kerx` format-4 (control-point kerning): parse-only
 //! end-to-end coverage.
 //!
 //! Format 4 attaches glyphs at exact control points (or anchor
 //! points, or inline FUnit coordinates) instead of via advance
 //! adjustment. The apply path needs glyf-point or ankr coordinate
-//! reads which sigilbuzz's kerx module deliberately keeps
+//! reads which sigilbuzz's kerx module keeps
 //! out-of-band; until that lands the format-4 subtable parses
 //! cleanly but emits no kern.
 //!
@@ -12,13 +12,13 @@
 //!
 //! 1. A kerx that ships a format-4 subtable does not fail the parser.
 //! 2. The format-4 subtable does not consume bytes that belong to
-//!    its neighbours — a sibling format-0 subtable still applies
+//!    its neighbors: a sibling format-0 subtable still applies
 //!    its pair lookup unmolested.
 //!
 //! Fixture: `tests/fixtures/aat_kerx_fmt4.ttf` (~900 B) carries six
 //! glyphs (.notdef, A, B, V, W, X) plus a `kerx` v2 table with two
-//! subtables — a format-4 (action type 2 = coordinates, no-op state
-//! machine) followed by a format-0 with a single (A, V) → -42 pair.
+//! subtables: a format-4 (action type 2 = coordinates, no-op state
+//! machine) followed by a format-0 with a single (A, V) -> -42 pair.
 //!
 //! Regenerate with `python3 tests/tools/build_aat_kerx_fmt4_fixture.py`.
 
@@ -56,7 +56,7 @@ fn fmt4_fixture_parses_with_format4_and_format0_subtables() {
 
 #[test]
 fn fmt4_does_not_drop_sibling_format0_pair() {
-    // (A, V) → -42 lives in the format-0 subtable that sits next to
+    // (A, V) -> -42 lives in the format-0 subtable that sits next to
     // the format-4. If the format-4 parse path were eating bytes
     // sloppily, the format-0 subtable would never load and (A, V)
     // would shape with no kern.
@@ -76,13 +76,13 @@ fn fmt4_does_not_drop_sibling_format0_pair() {
     assert_eq!(
         glyphs[0].x_advance + glyphs[1].x_advance,
         1000 - 42,
-        "total tightens by 42 — fmt4 neighbour did not corrupt fmt0"
+        "total tightens by 42: fmt4 neighbor did not corrupt fmt0"
     );
 }
 
 #[test]
 fn fmt4_emits_no_kern_for_unrelated_pairs() {
-    // Format 4's apply path is a stub — neither (B, V) nor any
+    // Format 4's apply path is a stub: neither (B, V) nor any
     // other pair the state machine might "match" produces a kern.
     // The format-0 subtable also has no rule for these pairs, so
     // shaping must leave advances at 500.

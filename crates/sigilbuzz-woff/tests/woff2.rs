@@ -1,11 +1,11 @@
-//! WOFF2 unwrap test — Brotli + glyf/loca inverse transform.
+//! WOFF2 unwrap test: Brotli + glyf/loca inverse transform.
 //!
 //! The vendored `opensans_latin.woff2` is the same subset that's also
 //! shipped as a plain TTF (`opensans_latin.ttf`); after Brotli decode
 //! and the inverse `glyf` transform the *contour shapes* must match
 //! the reference TTF byte-for-byte. We don't compare the entire glyf
 //! table verbatim because the WOFF2 transform doesn't preserve flag
-//! compression — instead we walk every glyph through `ttf-parser`'s
+//! compression. Instead we walk every glyph through `ttf-parser`'s
 //! outline visitor and compare the emitted `MoveTo` / `LineTo` /
 //! `CurveTo` / `Close` callbacks.
 //!
@@ -117,7 +117,7 @@ fn wrap_then_unwrap_recovers_glyph_outlines() {
     // walk every glyph through ttf-parser. The contour shapes must
     // match the reference TTF byte-for-byte (we don't compare the
     // entire glyf verbatim because the WOFF2 transform doesn't
-    // preserve flag-byte compression — same caveat as the existing
+    // preserve flag-byte compression, same caveat as the existing
     // unwrap-only test).
     use ttf_parser::{Face as TtfFace, OutlineBuilder};
 
@@ -198,7 +198,7 @@ fn wrap_rejects_non_sfnt_input() {
 
 #[test]
 fn wrap_then_unwrap_byte_equivalence_report() {
-    // Diagnostic — outline-equivalence is the load-bearing
+    // Diagnostic: outline-equivalence is the main
     // assertion (see `wrap_then_unwrap_recovers_glyph_outlines`).
     // Byte-exact round-trip is *not* expected because the WOFF2
     // forward transform doesn't preserve simple-glyph flag-byte
@@ -219,7 +219,7 @@ fn wrap_then_unwrap_byte_equivalence_report() {
 
 #[test]
 fn wrap_compression_report() {
-    // Not strictly an assertion-only test — useful when comparing
+    // Not strictly an assertion-only test. Useful when comparing
     // against the bundled reference woff2. Run with
     // `cargo test --test woff2 wrap_compression_report -- --nocapture`.
     let wrapped = wrap_woff2(TTF).expect("wraps");

@@ -6,12 +6,12 @@
 //! modern Hangul" invariant is also exercised. Hangul Jamo runs route
 //! through sigilbuzz's Universal Shaping Engine pipeline
 //! (`src/ot/use_shaper`) with the Hangul script-tag priority (`hang`
-//! → `jamo` → `DFLT`) and the jamo feature chain (`ccmp` / `ljmo` /
+//! -> `jamo` -> `DFLT`) and the jamo feature chain (`ccmp` / `ljmo` /
 //! `vjmo` / `tjmo` / `calt`).
 //!
 //! The corpus exercises:
 //!
-//!   * a single precomposed syllable (modern Hangul path — must NOT
+//!   * a single precomposed syllable (modern Hangul path: must NOT
 //!     go through the USE machine)
 //!   * Jamo L + V (leading choseong + vowel jungseong)
 //!   * Jamo L + V + T (full LVT triple)
@@ -42,14 +42,14 @@ const CORPUS: &[Case] = &[
         note: "empty",
         compare_rustybuzz: true,
     },
-    // 가 — precomposed syllable U+AC00 (kiyeok + a). Flows through
+    // 가: precomposed syllable U+AC00 (kiyeok + a). Flows through
     // the default path, NOT the USE pipeline.
     Case {
         text: "\u{AC00}",
         note: "precomposed syllable 가",
         compare_rustybuzz: true,
     },
-    // ᄀ + ᅡ — leading kiyeok (U+1100) + vowel a (U+1161). Two-
+    // ᄀ + ᅡ: leading kiyeok (U+1100) + vowel a (U+1161). Two-
     // jamo LV syllable; the font's ljmo / vjmo features pick the
     // choseong and jungseong variant forms.
     Case {
@@ -57,14 +57,14 @@ const CORPUS: &[Case] = &[
         note: "jamo L + V (ka)",
         compare_rustybuzz: true,
     },
-    // ᄀ + ᅡ + ᆨ — LVT triple (kiyeok + a + kiyeok-final). The
+    // ᄀ + ᅡ + ᆨ: LVT triple (kiyeok + a + kiyeok-final). The
     // tjmo feature picks the jongseong variant.
     Case {
         text: "\u{1100}\u{1161}\u{11A8}",
         note: "jamo L + V + T (kak)",
         compare_rustybuzz: true,
     },
-    // ᄂ + ᅧ + ᆼ — nieun + yeo + ieung-final.
+    // ᄂ + ᅧ + ᆼ: nieun + yeo + ieung-final.
     Case {
         text: "\u{1102}\u{1167}\u{11BC}",
         note: "jamo L + V + T (nyeong)",
@@ -76,7 +76,7 @@ const CORPUS: &[Case] = &[
         note: "jamo Extended-A L + V",
         compare_rustybuzz: true,
     },
-    // Jamo Extended-B trailing jamo (U+D7CB — kiyeok-rieul).
+    // Jamo Extended-B trailing jamo (U+D7CB, kiyeok-rieul).
     Case {
         text: "\u{1100}\u{1161}\u{D7CB}",
         note: "jamo L + V + Extended-B T",
@@ -91,14 +91,14 @@ const CORPUS: &[Case] = &[
     },
     // Mixed Latin + jamo. HarfBuzz picks one shaper for the whole
     // buffer based on the first non-COMMON script, so this run
-    // dispatches under the Latin (default) shaper — the jamo
+    // dispatches under the Latin (default) shaper. The jamo
     // codepoints pass through raw cmap lookups with no
     // `ljmo`/`vjmo`/`tjmo` positional variants. sigilbuzz now
     // matches: `shape.rs` gates Hangul-shaper activation on the
     // buffer's dominant script.
     Case {
         text: "Hi \u{1100}\u{1161}",
-        note: "latin + jamo — dominant-script gate selects default shaper",
+        note: "latin + jamo: dominant-script gate selects default shaper",
         compare_rustybuzz: true,
     },
 ];

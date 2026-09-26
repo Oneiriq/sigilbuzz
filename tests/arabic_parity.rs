@@ -7,41 +7,41 @@
 //! The corpus exercises the complete surface area of sigilbuzz's M4
 //! Arabic pass:
 //!
-//! - **Every slot of the joining state machine** — `isol`, `init`,
+//! - **Every slot of the joining state machine**: `isol`, `init`,
 //!   `medi`, `fina`, on real fonts. The state machine assigns forms
 //!   on codepoints; Amiri's GSUB rewrites glyph ids per form.
-//! - **Cursive chains across `R` / `D` boundaries** — alef (R)
+//! - **Cursive chains across `R` / `D` boundaries**: alef (R)
 //!   resets the chain, lam-alef (LA) is the classic two-letter run.
-//! - **Two separate Arabic words in one buffer** — space as a joining
+//! - **Two separate Arabic words in one buffer**: space as a joining
 //!   break, both words should shape independently.
-//! - **ZWJ / ZWNJ default-ignorable behaviour** — ZWJ forces a join
+//! - **ZWJ / ZWNJ default-ignorable behavior**: ZWJ forces a join
 //!   across a visual gap; ZWNJ breaks one. HarfBuzz renders both
 //!   with a zero-advance space glyph; sigilbuzz matches.
-//! - **Tatweel (`C`)** — join-causing character propagates joining
+//! - **Tatweel (`C`)**: join-causing character propagates joining
 //!   through itself without changing shape.
-//! - **Arabic + Latin mixed runs** — the Latin half shapes the same
+//! - **Arabic + Latin mixed runs**: the Latin half shapes the same
 //!   whether or not Arabic is present in the buffer.
 //!
 //! # Contextual `rlig` coverage
 //!
 //! Amiri's `rlig` feature is ~40 lookups of GSUB type 5/6 for
-//! Quranic-grade vocalised shaping and well-known ligatures. Many
-//! of those lookups rely on `LookupFlag` skip-iterator semantics —
+//! Quranic-grade vocalized shaping and well-known ligatures. Many
+//! of those lookups rely on `LookupFlag` skip-iterator semantics:
 //! IgnoreMarks lets the context matcher hop over combining marks
-//! inside the input window. With those bits honoured, two more
+//! inside the input window. With those bits honored, two more
 //! probes now match rustybuzz glyph-for-glyph:
 //!
-//! - `al_salaam_matches_rustybuzz` — "al-salaam" exercises the
+//! - `al_salaam_matches_rustybuzz`: "al-salaam" exercises the
 //!   alef-lam + sin-lam-alef-mim chain, whose Amiri rules skip
 //!   marks in context.
-//! - `vocalised_marhaba_matches_rustybuzz` — marhaba with combining
+//! - `vocalised_marhaba_matches_rustybuzz`: marhaba with combining
 //!   fatha / sukun / kasratan marks, which previously broke rlig's
 //!   IgnoreMarks-gated rules.
 //!
 //! Allah, bism-Allah, and the surrounding Quranic-grade rlig corpus
 //! also match rustybuzz glyph-for-glyph after the GSUB rule-ordering
 //! fix in #21: Amiri's `rlig` lookups carry chained-context subtables
-//! whose first-subtable-wins semantics are load-bearing — earlier
+//! whose first-subtable-wins semantics matter: earlier
 //! subtables with `SubstCount = 0` intentionally block later
 //! subtables at the same cursor (see `allah_matches_rustybuzz`).
 //!
@@ -54,23 +54,23 @@ const AMIRI: &[u8] = include_bytes!("fixtures/amiri_regular.ttf");
 
 /// Pure Arabic strings that must shape identically in both engines.
 ///
-/// - `ا` — lone alef, gets isolated form.
-/// - `با` — beh-alef. Covers `init` + `fina` and the R-letter
+/// - `ا`: lone alef, gets isolated form.
+/// - `با`: beh-alef. Covers `init` + `fina` and the R-letter
 ///   chain-break rule on the next iteration if there was one.
-/// - `لا` — lam-alef. Classic two-letter Arabic pair.
-/// - `بب` — double beh. Forces `init` and `fina` on a dual-joining
+/// - `لا`: lam-alef. Classic two-letter Arabic pair.
+/// - `بب`: double beh. Forces `init` and `fina` on a dual-joining
 ///   pair.
-/// - `بسم` — bism. Three dual-joining letters in sequence — hits
+/// - `بسم`: bism. Three dual-joining letters in sequence. Hits
 ///   every form except `isol`.
-/// - `مرحبا` — marhaba / hello. Full sweep through init / fina /
+/// - `مرحبا`: marhaba / hello. Full sweep through init / fina /
 ///   init / medi / fina, the most-cited Arabic shaping demo.
-/// - `العربية` — al-arabiyya / the Arabic. Unvocalised; exercises the
+/// - `العربية`: al-arabiyya / the Arabic. Unvocalized; exercises the
 ///   alef-lam chain.
-/// - `محمد` — Muhammad. Double meem plus medial hah and final dal.
-/// - `بب بب` — two separate words. Space breaks the cursive chain.
-/// - `مرحبا مرحبا` — hello hello. Space-broken repetition.
-/// - `ـ` — lone tatweel. Join-causing (C) with no neighbours.
-/// - `بـب` — beh + tatweel + beh. Tatweel bridges a joining chain.
+/// - `محمد`: Muhammad. Double meem plus medial hah and final dal.
+/// - `بب بب`: two separate words. Space breaks the cursive chain.
+/// - `مرحبا مرحبا`: hello hello. Space-broken repetition.
+/// - `ـ`: lone tatweel. Join-causing (C) with no neighbors.
+/// - `بـب`: beh + tatweel + beh. Tatweel bridges a joining chain.
 const ARABIC_CORPUS: &[&str] = &[
     "\u{0627}",
     "\u{0628}\u{0627}",
@@ -91,13 +91,13 @@ const ARABIC_CORPUS: &[&str] = &[
 /// that while still verifying the joining state machine propagates
 /// correctly through the format character.
 const ZWJ_CORPUS: &[&str] = &[
-    "\u{0628}\u{200D}",         // beh + ZWJ — beh forced into init
-    "\u{200D}\u{0628}",         // ZWJ + beh — beh forced into fina
-    "\u{0628}\u{200C}\u{0628}", // beh + ZWNJ + beh — joining broken
+    "\u{0628}\u{200D}",         // beh + ZWJ: beh forced into init
+    "\u{200D}\u{0628}",         // ZWJ + beh: beh forced into fina
+    "\u{0628}\u{200C}\u{0628}", // beh + ZWNJ + beh: joining broken
 ];
 
 /// Features to disable on rustybuzz so its output reflects the
-/// surface sigilbuzz currently implements. Empty — the Arabic pass
+/// surface sigilbuzz currently implements. Empty: the Arabic pass
 /// turns the same defaults on that rustybuzz does for Amiri.
 fn disabled_features() -> [Feature; 0] {
     []
@@ -245,15 +245,15 @@ fn compare_shape(text: &str) -> (Vec<u32>, Vec<u32>, Vec<i32>, Vec<i32>) {
 
 /// "Al-salaam" (peace). Alef-lam + sin-lam-alef-mim. The sin's
 /// `init` form plus the lam-alef ligature both depend on
-/// IgnoreMarks contexts in rlig — those rules fire only with
-/// LookupFlag skip-iterators honoured.
+/// IgnoreMarks contexts in rlig. Those rules fire only with
+/// LookupFlag skip-iterators honored.
 #[test]
 fn al_salaam_matches_rustybuzz() {
     let text = "\u{0627}\u{0644}\u{0633}\u{0644}\u{0627}\u{0645}";
     assert_parity_on(text);
 }
 
-/// Vocalised marhaba — the same word the smoke test exercises, but
+/// Vocalized marhaba: the same word the smoke test exercises, but
 /// with combining fatha / sukun / kasratan marks. Amiri's rlig
 /// has mark-aware contextual rules that previously failed to
 /// match because our context dispatcher could not skip marks.
@@ -264,12 +264,12 @@ fn vocalised_marhaba_matches_rustybuzz() {
     assert_parity_on(text);
 }
 
-/// "Allah" — alef + lam + lam + heh (`\u{0627}\u{0644}\u{0644}\u{0647}`).
+/// "Allah": alef + lam + lam + heh (`\u{0627}\u{0644}\u{0644}\u{0647}`).
 /// The canonical rlig regression for issue #21: Amiri's lookup 42 has
 /// eight chained-context subtables whose first match consumes the
 /// cursor *with `SubstCount = 0`*, intentionally blocking subtables
 /// 1+ at that cursor. The previous dispatcher walked each subtable
-/// across the run independently — subtable 1 then re-matched the same
+/// across the run independently. Subtable 1 then re-matched the same
 /// alef-lam-lam-heh window and fired its nested L41 single subst,
 /// producing rare init/medi/fina variants instead of the canonical
 /// Allah ligature.
@@ -279,7 +279,7 @@ fn allah_matches_rustybuzz() {
     assert_parity_on(text);
 }
 
-/// "Bism-Allah" — `\u{0628}\u{0633}\u{0645} \u{0627}\u{0644}\u{0644}\u{0647}`.
+/// "Bism-Allah": `\u{0628}\u{0633}\u{0645} \u{0627}\u{0644}\u{0644}\u{0647}`.
 /// Allah preceded by "bism" + space; the second word of the buffer
 /// re-runs the rlig dispatcher under the same conditions.
 #[test]
@@ -288,7 +288,7 @@ fn bism_allah_matches_rustybuzz() {
     assert_parity_on(text);
 }
 
-/// "Muhammad" — `\u{0645}\u{062D}\u{0645}\u{062F}`. Double meem +
+/// "Muhammad": `\u{0645}\u{062D}\u{0645}\u{062F}`. Double meem +
 /// medial hah + final dal. Hits Amiri's hah-class chained-context
 /// rewrites, which go through L43-style multi-subst rules.
 #[test]
@@ -297,16 +297,16 @@ fn muhammad_matches_rustybuzz() {
     assert_parity_on(text);
 }
 
-/// "Lillah" (`\u{0644}\u{0644}\u{0647}`) — the `lam-lam-heh` ligature
+/// "Lillah" (`\u{0644}\u{0644}\u{0647}`): the `lam-lam-heh` ligature
 /// chain in isolation. The rlig dispatcher picks the same canonical
-/// lillah ligature only when subtable ordering is honoured.
+/// lillah ligature only when subtable ordering is honored.
 #[test]
 fn lillah_matches_rustybuzz() {
     let text = "\u{0644}\u{0644}\u{0647}";
     assert_parity_on(text);
 }
 
-/// "Qul" (`\u{0642}\u{0644}`) — qaf + lam, a two-letter init/fina
+/// "Qul" (`\u{0642}\u{0644}`): qaf + lam, a two-letter init/fina
 /// pair that has historically been a subtable-ordering tripwire on
 /// rlig-flush fonts.
 #[test]
@@ -315,7 +315,7 @@ fn qul_matches_rustybuzz() {
     assert_parity_on(text);
 }
 
-/// "Akbar" (`\u{0623}\u{0643}\u{0628}\u{0631}`) — alef-with-hamza +
+/// "Akbar" (`\u{0623}\u{0643}\u{0628}\u{0631}`): alef-with-hamza +
 /// kaf + beh + reh. Mixes positional features with rlig context
 /// rewrites whose first-match-wins selection differs from later
 /// subtables.
@@ -360,7 +360,7 @@ fn mixed_arabic_and_latin_runs_shape_each_half_correctly() {
     let shaped_mixed = shape(&font, &buf, &[]).expect("shape mixed");
 
     // First 5 glyphs of the mixed run should equal the pure-Latin
-    // shape — the Arabic codepoints start at byte offset 6 (after
+    // shape. The Arabic codepoints start at byte offset 6 (after
     // "hello ").
     for (i, (lat, mix)) in shaped_latin
         .glyphs

@@ -10,21 +10,21 @@
 //!
 //! ```text
 //!   font_bytes (raw .ttf/.otf bytes)
-//!         │
-//!         ▼  emit_otf_embedded_font
+//!         |
+//!         v  emit_otf_embedded_font
 //!   OtfEmbeddedFont
-//!     ├ font_dict_body       /Type /Font /Subtype /Type0 ...
-//!     ├ descriptor_body      /Type /FontDescriptor /FontFile2 N 0 R ...
-//!     ├ program              raw font_bytes verbatim
-//!     ├ cid_to_gid_map       2 bytes × 256 entries (Identity-H)
-//!     └ widths               (gid, advance-in-1000-units) pairs
+//!     + font_dict_body       /Type /Font /Subtype /Type0 ...
+//!     + descriptor_body      /Type /FontDescriptor /FontFile2 N 0 R ...
+//!     + program              raw font_bytes verbatim
+//!     + cid_to_gid_map       2 bytes x 256 entries (Identity-H)
+//!     + widths               (gid, advance-in-1000-units) pairs
 //! ```
 //!
 //! # Subsetting is a separate concern
 //!
 //! `program` is the unmodified `font_bytes` slice the caller hands
 //! in. Real-world PDFs typically subset the font program down to
-//! just the glyphs that appear in the document — that work lives in
+//! just the glyphs that appear in the document. That work lives in
 //! the `sigilbuzz-subset` crate (parallel development). Once that
 //! lands, a 0.6.0 wiring step will let `emit_otf_embedded_font` take
 //! a pre-subset byte slice the same way it takes the full one today;
@@ -36,7 +36,7 @@
 //! emitter divides each gid's hmtx advance by `units_per_em` and
 //! multiplies by 1000. A 2048-upem face's 1366-unit advance becomes
 //! ~667 in the widths array. The conversion is `f32` to keep the
-//! consumer free to round however it likes when serialising the PDF
+//! consumer free to round however it likes when serializing the PDF
 //! `/W` array.
 //!
 //! # CIDToGIDMap
@@ -46,7 +46,7 @@
 //! CID; each entry is a 2-byte big-endian gid. The emitter produces
 //! a 256-CID map (512 bytes) suitable for fonts the caller drives
 //! with single-byte char codes wrapped in an Identity-H Type 0
-//! parent — the small map keeps PDF object size down. Callers that
+//! parent. The small map keeps PDF object size down. Callers that
 //! need a full 16-bit CID range can grow the map after the fact;
 //! the inner data layout (2 bytes BE per CID) is stable.
 
@@ -60,24 +60,24 @@ use crate::GlyphId;
 
 /// PDF font dictionary fragments for an OTF/TrueType-embedded font.
 ///
-/// All fields are independent so a downstream PDF serialiser can
+/// All fields are independent so a downstream PDF serializer can
 /// stitch them into a Type 0 / CIDFontType2 font object without
 /// reparsing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OtfEmbeddedFont {
-    /// Top-level font dictionary body — `/Type /Font /Subtype /Type0
+    /// Top-level font dictionary body: `/Type /Font /Subtype /Type0
     /// /BaseFont /SigilbuzzEmbedded /Encoding /Identity-H
     /// /DescendantFonts [<<...>>]`. References the descriptor and
     /// CIDToGIDMap stream by indirect placeholders the consumer
     /// substitutes when assembling the PDF.
     pub font_dict_body: Vec<u8>,
-    /// Font descriptor body — `/Type /FontDescriptor /FontFile2 N 0
+    /// Font descriptor body: `/Type /FontDescriptor /FontFile2 N 0
     /// R` (or `/FontFile3` for CFF). The descriptor includes the
     /// stock metric placeholders (`/Ascent`, `/Descent`, `/CapHeight`,
     /// `/StemV`) the consumer is expected to fill from the face's
     /// `OS/2` and `head` tables.
     pub descriptor_body: Vec<u8>,
-    /// The font program bytes — for now an unmodified copy of the
+    /// The font program bytes: for now an unmodified copy of the
     /// `font_bytes` slice the caller passed in. A future
     /// `sigilbuzz-subset`-driven path will substitute a subset
     /// program here without changing the public type.
@@ -97,7 +97,7 @@ pub struct OtfEmbeddedFont {
 ///
 /// `font_bytes` is copied verbatim into [`OtfEmbeddedFont::program`].
 /// The caller is responsible for handing in the same byte slice the
-/// `Face` was parsed from — there is no integrity check, since the
+/// `Face` was parsed from. There is no integrity check, since the
 /// face itself was the integrity check upstream.
 ///
 /// Output is deterministic: the same face, byte slice, and gid list
@@ -116,10 +116,10 @@ pub fn emit_otf_embedded_font(
     };
     let hmtx = face.hmtx().ok();
 
-    // CIDToGIDMap: 256 CIDs × 2 bytes BE. CID 0 is reserved for
+    // CIDToGIDMap: 256 CIDs x 2 bytes BE. CID 0 is reserved for
     // /.notdef per spec; we fill it with gid 0 (which faces always
     // expose as the .notdef glyph). The rest map sequentially to
-    // the input gids — extra slots stay at gid 0 (notdef).
+    // the input gids. Extra slots stay at gid 0 (notdef).
     let mut cid_to_gid_map = vec![0u8; 512];
     for (idx, &gid) in (1u16..).zip(gids.iter()) {
         if idx >= 256 {
@@ -174,7 +174,7 @@ pub fn emit_otf_embedded_font(
     );
     font_dict_body.extend_from_slice(b"  /FontDescriptor <descriptor obj>\n");
     font_dict_body.extend_from_slice(b"  /CIDToGIDMap <cidmap obj>\n");
-    // /W array — the caller can re-emit this from `widths` if they
+    // /W array: the caller can re-emit this from `widths` if they
     // prefer a different rounding strategy. We provide one in the
     // dict so the emitted body is self-contained for the simple case.
     font_dict_body.extend_from_slice(b"  /W [");
@@ -195,7 +195,7 @@ pub fn emit_otf_embedded_font(
     descriptor_body.extend_from_slice(b"/ItalicAngle 0\n");
     // Stock metric placeholders. A full implementation would pull
     // these from OS/2 + head; the placeholders keep the dict
-    // well-formed and let the consumer override before serialisation.
+    // well-formed and let the consumer override before serialization.
     descriptor_body.extend_from_slice(b"/Ascent 800\n");
     descriptor_body.extend_from_slice(b"/Descent -200\n");
     descriptor_body.extend_from_slice(b"/CapHeight 700\n");
@@ -226,7 +226,7 @@ pub fn emit_otf_embedded_font(
     }
 }
 
-/// Format a width with a single decimal at most — keeps the PDF
+/// Format a width with a single decimal at most to keep the PDF
 /// `/W` array compact while preserving sub-unit precision.
 fn fmt_width(w: f32) -> alloc::string::String {
     let s = format!("{w}");

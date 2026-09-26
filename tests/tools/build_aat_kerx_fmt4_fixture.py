@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Synthesise an AAT-only font that exercises `kerx` subtable
-format 4 — control-point kerning (parse-only coverage).
+format 4: control-point kerning (parse-only coverage).
 
 Format 4 needs glyf-point or ankr coordinate reads to produce real
 offsets; sigilbuzz's apply path is a stub for now (see the kerx
@@ -10,7 +10,7 @@ pair, so the integration test can prove both:
 
   1. The format-4 subtable doesn't trip the parser.
   2. The format-4 subtable doesn't drop its surrounding format-0
-     pair on the floor — both subtables stay in the parsed kerx.
+     pair on the floor: both subtables stay in the parsed kerx.
 
 The font has six glyphs (`.notdef`, A, B, V, W, X) with cmap entries
 for the four real letters.
@@ -57,7 +57,7 @@ def build_format4_subtable() -> bytes:
     """One format-4 subtable. State machine has one state and four
     classes (the AAT-reserved minimum); everything points at a single
     no-op entry. The flags word selects action type 2 (coordinates)
-    and points at a single 8-byte action record of zeros — enough to
+    and points at a single 8-byte action record of zeros, enough to
     exercise the parser without driving any offset.
     """
     n_classes = 4
@@ -89,7 +89,7 @@ def build_format4_subtable() -> bytes:
     body += class_lookup
     while len(body) < state_off:
         body += b"\x00"
-    # State row (1 state × 4 classes).
+    # State row (1 state x 4 classes).
     for _ in range(n_classes):
         body += struct.pack(">H", 0)
     # Entry 0: noop.
@@ -107,7 +107,7 @@ def build_format4_subtable() -> bytes:
 
 
 def build_format0_subtable() -> bytes:
-    """One format-0 subtable with a single pair (A, V) → -42 so the
+    """One format-0 subtable with a single pair (A, V) -> -42 so the
     integration test can prove the format-4 neighbour didn't poison
     the rest of the kerx."""
     pairs = [(GID_A, GID_V, -42)]

@@ -132,7 +132,7 @@ mod tests {
     fn mixed_latin_cjk_breaks_at_transition() {
         let bounds = boundaries("Hi世界");
         assert!(!bounds.is_empty());
-        // First boundary lands at byte offset 2 ("Hi" → "世").
+        // First boundary lands at byte offset 2 ("Hi" -> "世").
         assert_eq!(bounds[0], 2);
     }
 

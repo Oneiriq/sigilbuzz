@@ -1,14 +1,14 @@
 //! Legacy `kern` table.
 //!
-//! Before OpenType standardised GPOS pair adjustment, fonts carried
+//! Before OpenType standardized GPOS pair adjustment, fonts carried
 //! kerning in a dedicated `kern` table. Many widely-deployed fonts
-//! (Open Sans is a popular one) still do — their GPOS is either
+//! (Open Sans is a popular one) still do: their GPOS is either
 //! absent or present-but-empty. The shaper falls back to this table
 //! whenever the GPOS kern feature yields no lookups.
 //!
 //! # Format
 //!
-//! The Microsoft / OpenType flavour of version 0:
+//! The Microsoft / OpenType flavor of version 0:
 //!
 //! ```text
 //!   u16 version      = 0
@@ -37,12 +37,12 @@
 //! - Horizontal kerning (bit 0 set)
 //! - Kerning values (bit 1 clear)
 //! - Format 0 (individual pairs)
-//! - Additive mode (bit 3 clear) — each matching subtable adds
+//! - Additive mode (bit 3 clear): each matching subtable adds
 //!
 //! Vertical kerning, minimum-value subtables, cross-stream, and
-//! other formats are recognised and silently skipped. Override
+//! other formats are recognized and silently skipped. Override
 //! subtables are treated as additive because sigilbuzz does not
-//! keep per-subtable state — this is the same shortcut HarfBuzz
+//! keep per-subtable state. This is the same shortcut HarfBuzz
 //! takes for legacy kern.
 //!
 //! # Apple version 1.0
@@ -50,7 +50,7 @@
 //! Apple's alternative format starts with a `u32 version =
 //! 0x00010000`. It is extremely rare in the wild; sigilbuzz skips
 //! it with an explicit error so a malformed font can be
-//! distinguished from a genuinely unsupported one.
+//! distinguished from an unsupported one.
 
 use alloc::vec::Vec;
 
@@ -78,7 +78,7 @@ struct Format0<'a> {
 
 impl<'a> KernTable<'a> {
     /// Parses a `kern` table. Fonts whose `kern` is absent should
-    /// not reach this function — the caller checks `Face::table_bytes`
+    /// not reach this function. The caller checks `Face::table_bytes`
     /// first.
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(data);
@@ -106,8 +106,8 @@ impl<'a> KernTable<'a> {
             let coverage = r.read_u16()?;
 
             // The `length` field is only u16, which means subtables
-            // larger than ~64 KiB — rare but real, Open Sans is one
-            // — cannot represent their true size. Treat an out-of-
+            // larger than ~64 KiB (rare but real, Open Sans is one)
+            // cannot represent their true size. Treat an out-of-
             // bounds declared length as evidence the u16 overflowed
             // and fall back to the remainder of the table. FreeType
             // and HarfBuzz use the same workaround.
@@ -122,7 +122,7 @@ impl<'a> KernTable<'a> {
             let horizontal = coverage & COVERAGE_HORIZONTAL != 0;
             let minimum = coverage & COVERAGE_MINIMUM != 0;
 
-            // Skip subtables we do not understand — but consume
+            // Skip subtables we do not understand, but consume
             // their bytes so the next iteration is positioned
             // correctly.
             if sub_version != 0 || format != 0 || !horizontal || minimum {
@@ -138,7 +138,7 @@ impl<'a> KernTable<'a> {
             let pairs_bytes = n_pairs as usize * 6;
             // Prefer the true payload extent: if the declared
             // subtable end does not fit the pairs but the overall
-            // table does, trust the pair count — this is the u16
+            // table does, trust the pair count. This is the u16
             // overflow case.
             let effective_end = if pairs_off + pairs_bytes > subtable_end
                 && pairs_off + pairs_bytes <= data.len()
@@ -170,7 +170,7 @@ impl<'a> KernTable<'a> {
 
     /// Sum of kerning deltas for the pair `(left, right)` across
     /// every usable subtable. Returns 0 when no subtable contains
-    /// the pair — this is also the "no adjustment" value, and
+    /// the pair. This is also the "no adjustment" value, and
     /// consumers wanting to distinguish "missing" from "zero" should
     /// reach for a richer API later.
     #[must_use]

@@ -2,7 +2,7 @@
 //!
 //! [`evaluate`] walks the COLRv1 paint DAG rooted at a base glyph and
 //! returns a flat [`DrawCmd`] sequence. Transforms compose, gradients
-//! resolve to f32 colour stops, and `PaintComposite` nodes wrap their
+//! resolve to f32 color stops, and `PaintComposite` nodes wrap their
 //! child output in [`DrawCmd::PushLayer`] / [`DrawCmd::PopLayer`].
 //!
 //! Determinism: the output for a given (face, gid, coords) tuple is
@@ -34,13 +34,13 @@ pub type GlyphId = u16;
 /// pre-pick a different palette before calling the evaluator.
 const DEFAULT_PALETTE_INDEX: u16 = 0;
 
-/// Sentinel palette index meaning "use the foreground text colour".
+/// Sentinel palette index meaning "use the foreground text color".
 /// COLRv1 reserves `0xFFFF` for this; the evaluator resolves it to
 /// opaque white so renderers can apply their own foreground overlay.
 const FOREGROUND_PALETTE_INDEX: u16 = 0xFFFF;
 
 /// Maximum DAG-walk depth. Defensive cap above and beyond the
-/// visited-set cycle check — a deeply linear chain still exits before
+/// visited-set cycle check. A deeply linear chain still exits before
 /// blowing the stack.
 const MAX_DEPTH: usize = 64;
 
@@ -62,7 +62,7 @@ pub enum DrawCmd {
         /// What to fill the outline with.
         paint: PaintSource,
     },
-    /// Begin a layer — used to wrap a composite group. The matching
+    /// Begin a layer, used to wrap a composite group. The matching
     /// [`DrawCmd::PopLayer`] applies `composite_mode` against the
     /// surface below.
     PushLayer {
@@ -78,13 +78,13 @@ pub enum DrawCmd {
 pub enum PaintSource {
     /// Solid RGBA fill.
     Solid(Color),
-    /// Resolved gradient — palette indices already substituted for
+    /// Resolved gradient: palette indices already substituted for
     /// f32 RGBA, alpha multiplied in, geometry in design-unit space.
     Gradient(Gradient),
 }
 
 /// Walks `face`'s COLRv1 paint tree for `gid`, returning the draw
-/// commands required to render the colour glyph. Equivalent to
+/// commands required to render the color glyph. Equivalent to
 /// [`evaluate_at_coords`] with empty `coords`.
 #[must_use]
 pub fn evaluate(face: &Face<'_>, gid: GlyphId) -> Vec<DrawCmd> {
@@ -93,7 +93,7 @@ pub fn evaluate(face: &Face<'_>, gid: GlyphId) -> Vec<DrawCmd> {
 
 /// Same as [`evaluate`] but applies variation deltas from `coords` to
 /// every `PaintVar*` node visited. `coords` is the normalized axis
-/// vector — the same shape sigilbuzz's
+/// vector, the same shape sigilbuzz's
 /// [`Face::glyph_outline_at_coords`](sigilbuzz::Face::glyph_outline_at_coords)
 /// accepts. An empty slice is the static (no-deltas) path.
 #[must_use]
@@ -135,8 +135,8 @@ struct EvalCtx<'a, 'b> {
     var_store: Option<&'b ItemVariationStore<'a>>,
     /// Optional DeltaSetIndexMap that redirects a paint's
     /// `var_index_base + field_index` through an indirection table
-    /// before it hits the IVS. Spec-compliant variable colour fonts
-    /// use this to share IVS rows across many paint records — without
+    /// before it hits the IVS. Spec-compliant variable color fonts
+    /// use this to share IVS rows across many paint records: without
     /// it the evaluator would treat `var_index_base` as a literal
     /// `(outer, inner)` pair, which only works for trivially-laid-out
     /// IVS subtables.
@@ -162,9 +162,9 @@ fn resolve_var_store<'a>(colr: &Colr<'a>) -> Option<ItemVariationStore<'a>> {
 }
 
 /// Falls back to the GDEF v1.3+ shared `ItemVariationStore` when the
-/// COLR table doesn't carry its own. Real-world variable colour fonts
+/// COLR table doesn't carry its own. Real-world variable color fonts
 /// often park the IVS in GDEF and reach into it from both COLR and
-/// GPOS — without this fallback the evaluator silently emits the
+/// GPOS. Without this fallback the evaluator silently emits the
 /// static (no-deltas) output for any such font even when `coords` is
 /// non-empty.
 fn resolve_gdef_var_store<'a>(face: &Face<'a>) -> Option<ItemVariationStore<'a>> {
@@ -231,7 +231,7 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
         }
         ColrPaint::ColrGlyph { glyph_id } => {
             if ctx.visited.contains(&glyph_id) {
-                // Cycle — bail without emitting partial output for
+                // Cycle: bail without emitting partial output for
                 // this subtree.
                 return;
             }
@@ -253,7 +253,7 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
             alpha,
             var_index_base,
         } => {
-            // Alpha is F2DOT14 — the IVS delta arrives as an int16
+            // Alpha is F2DOT14. The IVS delta arrives as an int16
             // count of F2DOT14 ticks, so we divide by 16384 to land
             // in the same `0.0..=1.0` scale as `alpha`.
             let alpha = alpha + var_delta_f2dot14(ctx, var_index_base, 0);
@@ -745,7 +745,7 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
 ///
 /// `PaintGlyph` paints the *child* paint, masked through `glyph_id`'s
 /// outline. For now the evaluator collapses the mask into the
-/// `FillGlyph` command's `gid` field — leaf paints carry the outline
+/// `FillGlyph` command's `gid` field. Leaf paints carry the outline
 /// glyph they're filling, and intermediate `PaintGlyph` containers
 /// override the leaf's `gid` for any descendants. This works for the
 /// vast majority of COLRv1 fonts because `PaintGlyph` always wraps a
@@ -798,7 +798,7 @@ fn walk_with_transform(
 /// 1. backdrop draw commands,
 /// 2. `PushLayer { mode }`,
 /// 3. source draw commands,
-/// 4. `PopLayer` — the consumer blends the layer over the backdrop.
+/// 4. `PopLayer`: the consumer blends the layer over the backdrop.
 fn walk_composite(
     ctx: &mut EvalCtx<'_, '_>,
     source_off: PaintOffset,
@@ -927,9 +927,9 @@ fn emit_sweep_gradient(
 // CPAL resolution + ColorLine sampling
 // =========================================================================
 
-/// Resolves a CPAL palette entry to a float-channel colour. Falls back
+/// Resolves a CPAL palette entry to a float-channel color. Falls back
 /// to opaque white for the `0xFFFF` foreground sentinel and to fully
-/// transparent for any other lookup miss — never panics.
+/// transparent for any other lookup miss. Never panics.
 fn resolve_palette_color(cpal: Option<&Cpal<'_>>, palette_index: u16) -> Color {
     if palette_index == FOREGROUND_PALETTE_INDEX {
         return Color::new(1.0, 1.0, 1.0, 1.0);
@@ -1056,7 +1056,7 @@ fn f(v: Fword) -> f32 {
 // DeltaSetIndexMap
 // =========================================================================
 
-/// Borrowed view over a `DeltaSetIndexMap` — a flat array of packed
+/// Borrowed view over a `DeltaSetIndexMap`, a flat array of packed
 /// `(outer, inner)` pairs that COLRv1 fonts use to share IVS rows
 /// between many paint records. The on-disk layout matches the
 /// `DeltaSetIndexMapFormat0/1` records the OpenType spec defines for
@@ -1066,7 +1066,7 @@ fn f(v: Fword) -> f32 {
 ///   u8   format          // 0 = u16 mapCount, 1 = u32 mapCount
 ///   u8   entryFormat     // bits 4-5: bytes/entry - 1; bits 0-3: inner-bits - 1
 ///   u16  mapCount        // (or u32 when format == 1)
-///   u8[] entries         // (mapCount × bytesPerEntry) packed pairs
+///   u8[] entries         // (mapCount * bytesPerEntry) packed pairs
 /// ```
 ///
 /// Lookups clamp out-of-range indices to the last entry, mirroring
@@ -1080,7 +1080,7 @@ struct DeltaSetIndexMap<'a> {
     entry_bytes: usize,
     /// Bit-width of the inner index (1..=16).
     inner_bits: u32,
-    /// `(1 << inner_bits) - 1` — pre-computed for the hot path.
+    /// `(1 << inner_bits) - 1`, pre-computed for the hot path.
     inner_mask: u32,
     /// Number of (outer, inner) entries the map carries.
     map_count: u32,

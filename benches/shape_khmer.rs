@@ -2,15 +2,16 @@
 
 //! Khmer shaping bench: sigilbuzz vs rustybuzz.
 //!
-//! Stresses the Universal Shaping Engine (USE) state machine —
+//! Stresses the Universal Shaping Engine (USE) state machine:
 //! category classifier + syllable matcher + USE-specific reorder
 //! pass. Khmer is the cleanest pure-USE workload because it has no
 //! AAT fallback and no Indic-2 reorder shortcut.
 //!
 //! Throughput is reported in codepoints per second.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use sigilbuzz::{shape, Blob, Buffer, Face, Font};
+use std::hint::black_box;
 
 const NOTO_KHMER: &[u8] = include_bytes!("../tests/fonts/NotoSansKhmer-Regular.ttf");
 

@@ -1,4 +1,4 @@
-//! GSUB lookup type 8 — Reverse Chained Contextual Single Substitution.
+//! GSUB lookup type 8: Reverse Chained Contextual Single Substitution.
 //!
 //! The "reverse chained" lookup is a one-glyph substitution (like
 //! type 1) that runs *backwards* over the run and that matches a
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn substitutes_when_context_matches() {
-        // Input {10} → substitute 100. Backtrack: [5]. Lookahead: [30].
+        // Input {10} -> substitute 100. Backtrack: [5]. Lookahead: [30].
         let bytes = build_subtable(&[10], &[&[5]], &[&[30]], &[100]);
         let rc = ReverseChain::parse(&bytes).unwrap();
         assert_eq!(rc.context_len(), (1, 1));
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn returns_per_coverage_index_substitute() {
-        // Coverage {10, 11, 12} → substitutes {100, 101, 102}.
+        // Coverage {10, 11, 12} -> substitutes {100, 101, 102}.
         let bytes = build_subtable(&[10, 11, 12], &[], &[], &[100, 101, 102]);
         let rc = ReverseChain::parse(&bytes).unwrap();
         assert_eq!(rc.apply(&[10], 0), Some(100));

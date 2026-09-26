@@ -1,8 +1,8 @@
-//! GPOS lookup type 6 — Mark-to-Mark Attachment.
+//! GPOS lookup type 6: Mark-to-Mark Attachment.
 //!
 //! Attaches one combining mark onto another. In the sequence
 //! `a + ̂ + ̇` (circumflex then dot-above), the dot-above needs to
-//! stack on top of the circumflex, not on the `a` — which is what
+//! stack on top of the circumflex, not on the `a`, which is what
 //! mark-to-base already handled. This lookup is what drives the
 //! stacking.
 //!
@@ -24,7 +24,7 @@
 //! mark1 glyph (the mark being attached).
 //!
 //! `Mark2Array`: for each covered mark2 glyph, an array of
-//! `markClassCount` anchor offsets — the anchors on the *base* mark
+//! `markClassCount` anchor offsets: the anchors on the *base* mark
 //! at which an incoming mark of each class will land.
 //!
 //! # Attachment math
@@ -110,7 +110,7 @@ impl<'a> MarkMarkPos<'a> {
 }
 
 // --------------------------------------------------------------------------
-// Mark1Array — records for the "upper" mark being attached.
+// Mark1Array: records for the "upper" mark being attached.
 // --------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]
@@ -161,7 +161,7 @@ impl<'a> Mark1Array<'a> {
 }
 
 // --------------------------------------------------------------------------
-// Mark2Array — anchor rows for the "lower" mark onto which mark1 attaches.
+// Mark2Array: anchor rows for the "lower" mark onto which mark1 attaches.
 // --------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]
@@ -189,7 +189,7 @@ impl<'a> Mark2Array<'a> {
         if data.len() < need {
             return Err(Error::Truncated {
                 offset: records_off,
-                context: "mark2Array records shorter than mark2Count × markClassCount",
+                context: "mark2Array records shorter than mark2Count * markClassCount",
             });
         }
         Ok(Self {

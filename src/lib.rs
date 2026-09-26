@@ -1,32 +1,47 @@
-//! sigilbuzz — a modern pure-Rust text shaping engine.
+//! sigilbuzz is a pure-Rust text shaping engine.
 //!
-//! # Overview
-//!
-//! sigilbuzz turns a run of Unicode scalar values into a sequence of
-//! positioned glyphs drawn from a chosen font. The pipeline follows the
-//! `HarfBuzz` shape:
+//! It turns a run of Unicode text into positioned glyphs from a font. The
+//! pipeline follows HarfBuzz:
 //!
 //! ```text
-//!   Blob (raw bytes)  →  Face (parsed SFNT directory)
-//!                         │
-//!                         ↓
-//!                       Font (Face + size)    +    Buffer (text + state)
-//!                                       \      │
-//!                                        ↓     ↓
-//!                                       shape(font, buffer, features)
-//!                                                 │
-//!                                                 ↓
-//!                                            Vec<Glyph>
+//! Blob (raw bytes) -> Face (parsed font)
+//!                       |
+//!                       v
+//!                 Font (face + size)   +   Buffer (text + direction)
+//!                       |                      |
+//!                       +----------+-----------+
+//!                                  |
+//!                                  v
+//!                  shape(font, buffer, features) -> ShapedRun
 //! ```
 //!
-//! See [`Blob`], [`Face`], [`Font`], [`Buffer`], and [`shape`] for the
-//! pieces in order.
+//! # Example
+//!
+//! ```
+//! use sigilbuzz::{feature, shape, Buffer, Face, Feature, Font};
+//!
+//! let data = include_bytes!("../tests/fixtures/opensans_regular.ttf");
+//! let face = Face::parse_bytes(data, 0)?;
+//! let font = Font::new(face, 16.0);
+//!
+//! let mut buffer = Buffer::new();
+//! buffer.push_str("Hello");
+//!
+//! let run = shape(&font, &buffer, &[Feature { tag: feature::KERN, value: 1 }])?;
+//! assert_eq!(run.glyphs.len(), 5);
+//! for glyph in &run.glyphs {
+//!     println!("gid {} advance {}", glyph.glyph_id, glyph.x_advance);
+//! }
+//! # Ok::<(), sigilbuzz::Error>(())
+//! ```
+//!
+//! See [`Blob`], [`Face`], [`Font`], [`Buffer`], and [`shape`] for each step.
 //!
 //! # `no_std`
 //!
 //! The crate compiles with `--no-default-features` on stable Rust. The
-//! default `std` feature enables filesystem helpers and a richer `Error`
-//! implementation. Everything on the shaping path works without either.
+//! default `std` feature adds filesystem helpers such as `Blob::from_path`.
+//! Everything on the shaping path works without it.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -47,7 +62,7 @@ mod ttc;
 // Public-but-experimental: the OpenType Layout module exposes the
 // shape-engine internals (Arabic / Indic / USE / Mongolian / Tibetan
 // state machines, feature tag constants). The shaper is a stable API
-// via [`shape`]; the per-script machinery here is not — its types and
+// via [`shape`]; the per-script machinery here is not. Its types and
 // signatures will move as the shaping pipeline evolves toward 1.0. The
 // module is `pub` so companion crates that experiment with custom
 // shapers can still reach it, but it is hidden from rustdoc to signal
@@ -82,12 +97,12 @@ pub use ttc::fonts_in_collection;
 // is implementation detail subject to redesign before 1.0. The items
 // re-exported here are the subset that downstream consumers writing
 // custom shapers or feature pipelines reasonably want as crate-root
-// names — see `docs/STABILITY.md`.
+// names (see `docs/STABILITY.md`).
 //
 // Promoted in 0.20.0 (audit follow-up #235):
-//   - `ot::feature` — OpenType feature-tag byte-literal constants
+//   - `ot::feature`: OpenType feature-tag byte-literal constants
 //     (LIGA, KERN, CALT, etc.) usable as `Feature::tag` keys.
-//   - `ot::arabic::JoiningForm` — the Arabic joining-form enum, the
+//   - `ot::arabic::JoiningForm`: the Arabic joining-form enum, the
 //     stable output of `ot::arabic::assign_joining_forms`.
 pub use ot::arabic::JoiningForm;
 pub use ot::feature;
@@ -102,15 +117,15 @@ pub use ot::feature;
 // char-to-script entry points.
 //
 // Promoted in 0.20.0:
-//   - `unicode::Script as UnicodeScript` — coarse script bucket
+//   - `unicode::Script as UnicodeScript`: coarse script bucket
 //     consumed by `sigilbuzz-capi` for `hb_script_t` mapping.
-//   - `unicode::script_of`, `unicode::is_hangul_jamo` — char
+//   - `unicode::script_of`, `unicode::is_hangul_jamo`: char
 //     classifiers.
-//   - `unicode::bidi::BidiInfo` — UAX #9 result type (per-char
+//   - `unicode::bidi::BidiInfo`: UAX #9 result type (per-char
 //     embedding levels + paragraph direction + L2 reorder).
-//   - `unicode::bidi_class::{BidiClass, bidi_class}` — the
+//   - `unicode::bidi_class::{BidiClass, bidi_class}`: the
 //     UCD `Bidi_Class` enum and the char-to-class lookup.
-//   - `unicode::joining::JoiningType` — Arabic / Mongolian
+//   - `unicode::joining::JoiningType`: Arabic / Mongolian
 //     joining-type enum.
 pub use unicode::bidi::BidiInfo;
 pub use unicode::bidi_class::{bidi_class, BidiClass};

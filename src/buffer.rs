@@ -2,11 +2,11 @@
 //!
 //! A [`Buffer`] is fed one text run at a time, then passed to
 //! [`crate::shape`] along with a [`crate::Font`]. On a successful
-//! shape it yields a vector of [`Glyph`]s — each carrying the glyph
+//! shape it yields a vector of [`Glyph`]s, each carrying the glyph
 //! index the renderer should emit plus the position of that glyph
 //! relative to the pen.
 //!
-//! The API mirrors `HarfBuzz`'s `hb_buffer_t` deliberately, so a
+//! The API mirrors `HarfBuzz`'s `hb_buffer_t`, so a
 //! consumer who already knows `HarfBuzz` can reach for sigilbuzz without
 //! relearning concepts.
 
@@ -52,14 +52,14 @@ impl Direction {
 /// combining marks).
 ///
 /// In addition to the rendered fields, `Glyph` carries two
-/// shaper-internal scratch fields — `unicode_props` and
-/// `indic_position` — that the Indic / complex-script shapers use
+/// shaper-internal scratch fields (`unicode_props` and
+/// `indic_position`) that the Indic / complex-script shapers use
 /// to track per-glyph state across GSUB passes. Renderers and
 /// most callers can ignore them; they are public so the shaper
 /// modules inside this crate can round-trip state through `Vec<Glyph>`
 /// without stashing a parallel array. Stable bits of `unicode_props`
 /// are set once during buffer preparation (default-ignorable,
-/// joiner, …); `indic_position` is an [`IndicPosition`] value that
+/// joiner, ...); `indic_position` is an `IndicPosition` value that
 /// survives ligature substitutions (the surviving glyph inherits
 /// the first-component position).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,8 +81,8 @@ pub struct Glyph {
     pub y_offset: i32,
     /// Shaper-internal Unicode property bits. Set once during buffer
     /// preparation and carried across GSUB so later passes can query
-    /// "was this glyph's source a joiner / default-ignorable / …?"
-    /// without re-deriving from the cluster. See [`unicode_prop`].
+    /// "was this glyph's source a joiner / default-ignorable / ...?"
+    /// without re-deriving from the cluster. See `unicode_prop`.
     pub unicode_props: u16,
     /// Shaper-internal Indic positional role, set during Indic
     /// syllable segmentation and consulted by the final-reorder
@@ -95,7 +95,7 @@ pub struct Glyph {
 /// for future expansion without shifting existing meanings.
 pub mod unicode_prop {
     /// The glyph's source codepoint is a Unicode default-ignorable
-    /// format character (ZWJ, ZWNJ, LRM, RLM, …).
+    /// format character (ZWJ, ZWNJ, LRM, RLM, ...).
     pub const DEFAULT_IGNORABLE: u16 = 1 << 0;
     /// The glyph's source codepoint is a joiner (ZWJ).
     pub const JOINER: u16 = 1 << 1;
@@ -103,9 +103,9 @@ pub mod unicode_prop {
     pub const NON_JOINER: u16 = 1 << 2;
 }
 
-/// Indic positional role — stored in [`Glyph::indic_position`] as
+/// Indic positional role, stored in [`Glyph::indic_position`] as
 /// `u8`. Mirrors HarfBuzz's `ot_position_t` so that a future port
-/// of the richer Indic reorder (pref, below-form resolution, …) can
+/// of the richer Indic reorder (pref, below-form resolution, ...) can
 /// drop the constants in without a rename. Only the slots
 /// sigilbuzz currently uses are documented; reserved intermediate
 /// values keep parity with HarfBuzz so the enum's integer layout
@@ -114,7 +114,7 @@ pub mod unicode_prop {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // reserved slots mirror HarfBuzz's ot_position_t
 pub enum IndicPosition {
-    /// Default / unresolved — also used for non-Indic glyphs.
+    /// Default / unresolved, also used for non-Indic glyphs.
     Start = 0,
     /// A leading `ra` that is a reph candidate. Set on the glyph
     /// carrying the reph before GSUB runs; the reph glyph inherits
@@ -122,34 +122,34 @@ pub enum IndicPosition {
     RaToBecomeReph = 1,
     /// Pre-base matra (before the base consonant visually).
     PreM = 2,
-    /// Pre-base consonant — reserved.
+    /// Pre-base consonant (reserved).
     PreC = 3,
     /// The base consonant of a syllable.
     BaseC = 4,
-    /// After the main consonant — reserved.
+    /// After the main consonant (reserved).
     AfterMain = 5,
-    /// Above-base glyph — reserved.
+    /// Above-base glyph (reserved).
     AboveC = 6,
-    /// Before sub-joined form — reserved.
+    /// Before sub-joined form (reserved).
     BeforeSub = 7,
-    /// Below-base glyph — reserved.
+    /// Below-base glyph (reserved).
     BelowC = 8,
-    /// After sub-joined form — reserved.
+    /// After sub-joined form (reserved).
     AfterSub = 9,
     /// Before post-base position. Target slot for Devanagari reph.
     BeforePost = 10,
-    /// Post-base glyph — reserved.
+    /// Post-base glyph (reserved).
     PostC = 11,
-    /// After post-base position — reserved.
+    /// After post-base position (reserved).
     AfterPost = 12,
-    /// Syllable modifier / vedic — reserved.
+    /// Syllable modifier / vedic (reserved).
     Smvd = 13,
-    /// End-of-syllable sentinel — reserved.
+    /// End-of-syllable sentinel (reserved).
     End = 14,
 }
 
 impl Glyph {
-    /// Minimal constructor used by the shaper pipeline — everything
+    /// Minimal constructor used by the shaper pipeline: everything
     /// but the glyph id and cluster starts at zero. Exists so the
     /// hot spots in `shape()` stay short even as we grow more
     /// scratch fields.
@@ -220,9 +220,9 @@ impl Buffer {
     ///
     /// Use this when you have mixed-direction input (Latin + Hebrew,
     /// Arabic + ASCII digits, etc.) and want the shaper to receive
-    /// the run already partitioned into visual order — matching
+    /// the run already partitioned into visual order, matching
     /// HarfBuzz's `hb_buffer_guess_segment_properties` + bidi
-    /// reorder behaviour.
+    /// reorder behavior.
     ///
     /// The plain [`Self::set_text`] is left untouched: existing
     /// 0.1.0 consumers (oniq, demos) that handle direction
@@ -263,7 +263,7 @@ impl Buffer {
     /// values from shaping this buffer, as long as the opt-in NFC
     /// pass ([`Self::set_normalize_nfc`]) does not recompose the text
     /// (composition shortens it and shifts offsets after any composed
-    /// pair — feed precomposed input when combining the two).
+    /// pair. Feed precomposed input when combining the two).
     #[must_use]
     pub const fn bidi_map(&self) -> Option<&crate::bidi_map::BidiMap> {
         self.bidi_map.as_ref()
@@ -288,7 +288,7 @@ impl Buffer {
 
     /// Enables or disables the implicit NFC composition pass that
     /// runs before glyph lookup. Off by default. Turn this on to
-    /// match HarfBuzz's behaviour, where `e + U+0301` renders the
+    /// match HarfBuzz's behavior, where `e + U+0301` renders the
     /// same as the precomposed `é`.
     pub fn set_normalize_nfc(&mut self, enabled: bool) {
         self.normalize_nfc = enabled;
@@ -310,7 +310,7 @@ impl Buffer {
     }
 
     /// Splits the buffer's text into maximal script runs and yields
-    /// one [`ScriptRun`] per run. Consecutive codepoints sharing the
+    /// one `ScriptRun` per run. Consecutive codepoints sharing the
     /// same resolved script collapse into a single run; `COMMON`
     /// (digits, punctuation, ASCII space, ZWJ/ZWNJ/bidi marks) and
     /// `INHERITED` (combining marks) codepoints extend whichever real
@@ -319,7 +319,7 @@ impl Buffer {
     ///
     /// A leading `COMMON`/`INHERITED` span before the first real
     /// script codepoint takes `Script::Other` with the default `DFLT`
-    /// priority — same treatment HarfBuzz gives a pure-digits or
+    /// priority, same treatment HarfBuzz gives a pure-digits or
     /// pure-punctuation run.
     ///
     /// The returned vector is empty for an empty buffer. Callers walk
@@ -341,7 +341,7 @@ impl Buffer {
             // marks inherit their cluster base's script via the
             // `script_of` range table). So the only codepoints we
             // still need to actively extend are the Unicode format
-            // characters — ZWJ/ZWNJ/LRM/RLM/ALM — plus any other char
+            // characters (ZWJ/ZWNJ/LRM/RLM/ALM) plus any other char
             // that `script_of` could not classify. Everything with a
             // real script bucket attaches normally through the
             // script-equality test below.
@@ -392,7 +392,7 @@ pub struct ScriptRun {
     /// Resolved script for the run. `Script::Other` for unknown /
     /// pure-COMMON runs with no real-script codepoint.
     pub script: Script,
-    /// Script-tag priority list (e.g. `&[b"arab", b"DFLT"]`) — what
+    /// Script-tag priority list (e.g. `&[b"arab", b"DFLT"]`): what
     /// the OpenType dispatcher walks to locate this run's features.
     pub script_priority: &'static [[u8; 4]],
 }
@@ -462,15 +462,15 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
         Script::Khojki => KHOJKI_SCRIPT_PRIORITY,
         Script::Tirhuta => TIRHUTA_SCRIPT_PRIORITY,
         Script::Modi => MODI_SCRIPT_PRIORITY,
-        // Latin / Greek / Cyrillic / Han / Other — DFLT is where Latin
+        // Latin / Greek / Cyrillic / Han / Other: DFLT is where Latin
         // shipped features live and where anything we do not have
-        // specialised dispatch for falls back.
+        // specialized dispatch for falls back.
         _ => DFLT_ONLY,
     }
 }
 
 /// True for codepoints HarfBuzz treats as `COMMON` or `INHERITED`
-/// for segmentation purposes — they should extend the adjacent
+/// for segmentation purposes. They should extend the adjacent
 /// real-script run rather than carve their own segment.
 ///
 /// Covers:
@@ -479,15 +479,15 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
 ///   ASCII digits so `"Price: 100 شلوم"` keeps the Arabic tail from
 ///   detaching on the digits.
 /// - Latin-1 punctuation / symbols (U+00A0..U+00BF).
-/// - The Unicode format-character block sigilbuzz already recognises
+/// - The Unicode format-character block sigilbuzz already recognizes
 ///   (ZWJ / ZWNJ / LRM / RLM / ALM).
-/// - Unicode `INHERITED` combining-mark blocks — Combining
+/// - Unicode `INHERITED` combining-mark blocks: Combining
 ///   Diacritical Marks (U+0300..U+036F), the Supplement
 ///   (U+1DC0..U+1DFF), Combining Diacritical Marks for Symbols
 ///   (U+20D0..U+20FF), and Combining Half Marks (U+FE20..U+FE2F).
 ///   Without these, `"e\u{0301}"` segments into Latin + Other
 ///   because `script_of` has no rule for U+0300 and drops the
-///   mark into `Script::Other` — breaking `ccmp` dispatch and
+///   mark into `Script::Other`, breaking `ccmp` dispatch and
 ///   any cross-mark GSUB context.
 ///
 /// Everything else resolves via [`script_of`]; runs of the same
@@ -506,7 +506,7 @@ const fn is_common_or_inherited(ch: char) -> bool {
         | 0x007B..=0x007F
         // Latin-1 punctuation / symbols block
         | 0x00A0..=0x00BF
-        // Unicode format characters the shaper recognises.
+        // Unicode format characters the shaper recognizes.
         | 0x200C | 0x200D | 0x200E | 0x200F | 0x061C
         // INHERITED combining-mark blocks.
         | 0x0300..=0x036F
@@ -583,14 +583,14 @@ mod tests {
         // \u{05E9}\u{05DC}\u{05D5}\u{05DD} = "שלום" (shalom).
         b.set_text_bidi("\u{05E9}\u{05DC}\u{05D5}\u{05DD}");
         // After visual reorder the chars are in reverse logical
-        // order — what the shaper expects for an RTL run.
+        // order, what the shaper expects for an RTL run.
         assert_eq!(b.text(), "\u{05DD}\u{05D5}\u{05DC}\u{05E9}");
         assert_eq!(b.direction(), Direction::Rtl);
     }
 
     #[test]
     fn set_text_bidi_handles_mixed_latin_hebrew_arabic() {
-        // "Hello עברית مرحبا" — Latin + Hebrew + Arabic. Paragraph
+        // "Hello עברית مرحبا": Latin + Hebrew + Arabic. Paragraph
         // is LTR (first strong is 'H'). Visual order: "Hello "
         // followed by the RTL runs reversed. Specifically:
         //   - Latin "Hello " stays at level 0.
@@ -612,7 +612,7 @@ mod tests {
         assert_eq!(visual[0], 'H');
         assert_eq!(visual[5], ' ');
         // Last char of the RTL run (logically Arabic alef U+0627)
-        // should appear early in the visual order — it sits at the
+        // should appear early in the visual order: it sits at the
         // tail of the level-1 span, which L2 reverses to the front.
         assert_eq!(visual[6], '\u{0627}');
     }
@@ -649,12 +649,12 @@ mod tests {
         b.push_str("Hi \u{05E9}\u{05DC}\u{05D5}\u{05DD}");
         let runs = b.script_runs();
         assert_eq!(runs.len(), 2);
-        // "Hi " — space is Latin in our classifier, so it stays on
+        // "Hi ": space is Latin in our classifier, so it stays on
         // the first run.
         assert_eq!(runs[0].script, Script::Latin);
         assert_eq!(runs[0].byte_range, 0..3);
         assert_eq!(runs[1].script, Script::Hebrew);
-        // Hebrew letters are 2 UTF-8 bytes each; 4 chars × 2 = 8
+        // Hebrew letters are 2 UTF-8 bytes each; 4 chars * 2 = 8
         // bytes starting at offset 3.
         assert_eq!(runs[1].byte_range, 3..11);
         assert_eq!(runs[1].script_priority, &[*b"hebr", *b"DFLT"]);
@@ -662,7 +662,7 @@ mod tests {
 
     #[test]
     fn script_runs_common_digits_stick_to_preceding_script() {
-        // "Price: ₪100 שלום" — digits land in Script::Latin bucket
+        // "Price: ₪100 שלום": digits land in Script::Latin bucket
         // via script_of, so they extend the Latin prefix. The shekel
         // sign U+20AA falls outside our range table (Script::Other)
         // but still extends the previous run because it is a COMMON
@@ -692,7 +692,7 @@ mod tests {
     fn script_runs_three_scripts_emits_three_segments() {
         // Latin SPACE Arabic SPACE Hebrew. The spaces are COMMON and
         // attach to the preceding real script, so transitioning
-        // Latin → Arabic → Hebrew produces exactly three segments.
+        // Latin -> Arabic -> Hebrew produces exactly three segments.
         let mut b = Buffer::new();
         b.push_str("Read \u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064A}\u{0629} \u{05E9}\u{05DC}\u{05D5}\u{05DD}");
         let runs = b.script_runs();
@@ -704,7 +704,7 @@ mod tests {
 
     #[test]
     fn script_runs_are_deterministic() {
-        // Same input twice — segmentation must agree byte-for-byte.
+        // Same input twice: segmentation must agree byte-for-byte.
         let mut b1 = Buffer::new();
         b1.push_str("Hi \u{05E9}\u{05DC}\u{05D5}\u{05DD} 100 \u{0627}\u{0644}");
         let mut b2 = Buffer::new();
@@ -728,7 +728,7 @@ mod tests {
     fn script_runs_combining_mark_inherits_base_script() {
         // "é" as base + Unicode combining acute (U+0301). The combining
         // mark has Unicode script == INHERITED, which the segmenter
-        // must resolve to the preceding Latin run — otherwise the mark
+        // must resolve to the preceding Latin run. Otherwise the mark
         // gets carved into its own Script::Other segment and GSUB's
         // `ccmp` decomposition pass fires under the wrong priority.
         let mut b = Buffer::new();
@@ -742,7 +742,7 @@ mod tests {
     #[test]
     fn script_runs_arabic_with_quranic_mark_stays_one_segment() {
         // U+06D6 ARABIC SMALL HIGH LIGATURE SAD is an Arabic-script
-        // combining mark — its Script property is Arabic, not
+        // combining mark: its Script property is Arabic, not
         // Inherited, so it already collapses via the equality check.
         // This test pins the Arabic baseline so the Inherited fix does
         // not accidentally widen the COMMON bucket past real-script

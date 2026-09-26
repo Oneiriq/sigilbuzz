@@ -8,43 +8,43 @@
 //!
 //! # The six joining types
 //!
-//! - **U** — Non-joining. Does not connect to its neighbours on
+//! - **U**: Non-joining. Does not connect to its neighbors on
 //!   either side (hamza U+0621, brackets, most punctuation).
-//! - **R** — Right-joining. Connects to the *previous* (right-side in
+//! - **R**: Right-joining. Connects to the *previous* (right-side in
 //!   logical order for RTL) letter only (alef U+0627, dal U+062F,
 //!   reh U+0631, zain U+0632, waw U+0648, alef maksura variants).
-//! - **D** — Dual-joining. Connects on both sides (beh U+0628, teh
+//! - **D**: Dual-joining. Connects on both sides (beh U+0628, teh
 //!   U+062A, seen U+0633, the bulk of Arabic letters).
-//! - **C** — Join-causing. Forces joining behaviour through itself
+//! - **C**: Join-causing. Forces joining behavior through itself
 //!   without having a visual form that changes (tatweel U+0640,
 //!   ZWJ U+200D).
-//! - **T** — Transparent. Skipped by the joining state machine but
+//! - **T**: Transparent. Skipped by the joining state machine but
 //!   kept in the glyph run (combining marks, harakat, Arabic digits'
 //!   diacritical additions).
-//! - **L** — Left-joining. Exists in the spec for completeness; no
+//! - **L**: Left-joining. Exists in the spec for completeness; no
 //!   codepoint currently assigned. Included so future tables can grow.
 //!
 //! # Coverage
 //!
 //! Curated from `ArabicShaping.txt` (Unicode 15.1, 2023-09-11):
 //!
-//! - `U+0600..U+06FF` (Arabic) — every assigned letter + mark
-//! - `U+0750..U+077F` (Arabic Supplement) — all letters
+//! - `U+0600..U+06FF` (Arabic): every assigned letter + mark
+//! - `U+0750..U+077F` (Arabic Supplement): all letters
 //! - `U+0870..U+089F` (Arabic Extended-B, partial)
-//! - `U+08A0..U+08FF` (Arabic Extended-A) — letters and marks
-//! - `U+1800..U+18AA` (Mongolian) — letters + Free Variation Selectors
-//! - `U+200C..U+200D` — ZWNJ (non-joiner) / ZWJ (join-causing)
+//! - `U+08A0..U+08FF` (Arabic Extended-A): letters and marks
+//! - `U+1800..U+18AA` (Mongolian): letters + Free Variation Selectors
+//! - `U+200C..U+200D`: ZWNJ (non-joiner) / ZWJ (join-causing)
 //!
 //! Codepoints outside the Arabic family return [`JoiningType::U`]
-//! (non-joining), which is the safe default — it does not change the
-//! shape of any neighbouring Arabic letter. The state machine treats
+//! (non-joining), which is the safe default: it does not change the
+//! shape of any neighboring Arabic letter. The state machine treats
 //! a non-Arabic letter exactly like a run boundary.
 //!
 //! # Table style
 //!
 //! The table is a hand-transcribed sorted array of
 //! `(start, end, type)` tuples, searched with a single binary pass.
-//! This matches the style of [`crate::unicode::normalize`] — no
+//! This matches the style of [`crate::unicode::normalize`]: no
 //! generated code, small, easy to audit against the spec by eye.
 
 /// The six Arabic joining types from `ArabicShaping.txt`.
@@ -67,12 +67,12 @@ pub enum JoiningType {
 
 /// Returns the joining type for `ch`. Non-Arabic codepoints map to
 /// [`JoiningType::U`], which the state machine treats as a run
-/// boundary — the neighbouring Arabic letter therefore gets its
+/// boundary. The neighboring Arabic letter therefore gets its
 /// isolated or final form, matching the OpenType spec.
 #[must_use]
 pub fn joining_type(ch: char) -> JoiningType {
     let cp = ch as u32;
-    // Fast reject for the dominant case — everything outside the
+    // Fast reject for the dominant case: everything outside the
     // Arabic family (plus the ZWJ/ZWNJ pair) is non-joining.
     if !is_arabic_range(cp) {
         return JoiningType::U;
@@ -104,18 +104,18 @@ const fn is_arabic_range(cp: u32) -> bool {
         // Arabic Presentation Forms (handled separately below).
         0x0600..=0x06FF
         | 0x0750..=0x077F
-        // N'Ko — same Arabic-style joining state machine.
+        // N'Ko: same Arabic-style joining state machine.
         | 0x07C0..=0x07FF
         | 0x0870..=0x089F
         | 0x08A0..=0x08FF
         | 0xFB50..=0xFDFF
         | 0xFE70..=0xFEFF
-        // Mongolian — letters + Free Variation Selectors. Mongolian
+        // Mongolian: letters + Free Variation Selectors. Mongolian
         // shapes through the same joining-state machine as Arabic
         // (same `init`/`medi`/`fina`/`isol` GSUB feature tags), so
         // the joining table is the natural place for it.
         | 0x1800..=0x18AF
-        // ZWNJ / ZWJ — bidi format characters that participate in
+        // ZWNJ / ZWJ: bidi format characters that participate in
         // joining even though they are not Arabic letters.
         | 0x200C..=0x200D
     )
@@ -128,16 +128,16 @@ const fn is_arabic_range(cp: u32) -> bool {
 ///
 /// Entries derived from Unicode 15.1 `ArabicShaping.txt`. Any code
 /// point not covered here defaults to `U` via the lookup
-/// fall-through — matching the spec's "No_Joining_Group / U" default
+/// fall-through, matching the spec's "No_Joining_Group / U" default
 /// for unlisted characters.
 #[rustfmt::skip]
 const JOINING_TABLE: &[(u32, u32, JoiningType)] = &[
     // --- U+0600..U+063F block ---
-    // 0x0600..0x0605 — Arabic number signs, all Transparent prefix marks.
+    // 0x0600..0x0605: Arabic number signs, all Transparent prefix marks.
     (0x0600, 0x0605, JoiningType::U),
     // Arabic combining marks / vowel signs (Transparent).
     (0x0610, 0x061A, JoiningType::T),
-    // 0x061C Arabic letter mark — Transparent.
+    // 0x061C Arabic letter mark: Transparent.
     (0x061C, 0x061C, JoiningType::T),
     // Hamza, isolated letters (Non-joining).
     (0x0621, 0x0621, JoiningType::U),
@@ -147,7 +147,7 @@ const JOINING_TABLE: &[(u32, u32, JoiningType)] = &[
     (0x0626, 0x0626, JoiningType::D),
     // Alef (Right).
     (0x0627, 0x0627, JoiningType::R),
-    // Beh, Teh Marbuta, Teh, Theh — D, R, D, D.
+    // Beh, Teh Marbuta, Teh, Theh: D, R, D, D.
     (0x0628, 0x0628, JoiningType::D),
     (0x0629, 0x0629, JoiningType::R),
     (0x062A, 0x062B, JoiningType::D),
@@ -171,9 +171,9 @@ const JOINING_TABLE: &[(u32, u32, JoiningType)] = &[
     (0x064A, 0x064A, JoiningType::D),
     // Fathatan..shadda..sukun (Transparent vowel marks).
     (0x064B, 0x065F, JoiningType::T),
-    // 0x0660..0x0669 — Arabic-Indic digits (Non-joining).
+    // 0x0660..0x0669: Arabic-Indic digits (Non-joining).
     (0x0660, 0x0669, JoiningType::U),
-    // 0x066A..0x066D — percent / decimal separator / five-pointed star (U).
+    // 0x066A..0x066D: percent / decimal separator / five-pointed star (U).
     (0x066A, 0x066D, JoiningType::U),
     // Dotless beh / qaf / feh (Right / Dual / Dual).
     (0x066E, 0x066E, JoiningType::D),
@@ -186,7 +186,7 @@ const JOINING_TABLE: &[(u32, u32, JoiningType)] = &[
     (0x0674, 0x0674, JoiningType::U),
     // High hamza alef / waw / yeh (Right).
     (0x0675, 0x0677, JoiningType::R),
-    // Tteheh, Tteh, Beeh, Beheh, ... — the bulk Dual-joining block.
+    // Tteheh, Tteh, Beeh, Beheh, ...: the bulk Dual-joining block.
     (0x0678, 0x0687, JoiningType::D),
     // Ddal, Dahal family (Right).
     (0x0688, 0x0699, JoiningType::R),
@@ -198,18 +198,18 @@ const JOINING_TABLE: &[(u32, u32, JoiningType)] = &[
     (0x06C0, 0x06C0, JoiningType::R),
     // Heh goal (Dual).
     (0x06C1, 0x06C2, JoiningType::D),
-    // Teh marbuta goal, Kirghiz oe, Kirghiz yu, Oe — Right.
+    // Teh marbuta goal, Kirghiz oe, Kirghiz yu, Oe: Right.
     (0x06C3, 0x06CB, JoiningType::R),
     // Farsi yeh (Dual).
     (0x06CC, 0x06CC, JoiningType::D),
-    // Waw with ring, Yeh with tail — Right.
+    // Waw with ring, Yeh with tail: Right.
     (0x06CD, 0x06CD, JoiningType::R),
-    // E, Yu, Yeh barree variants — Dual / Right mix.
+    // E, Yu, Yeh barree variants: Dual / Right mix.
     (0x06CE, 0x06CE, JoiningType::D),
     (0x06CF, 0x06CF, JoiningType::R),
     (0x06D0, 0x06D1, JoiningType::D),
     (0x06D2, 0x06D3, JoiningType::R),
-    // Dot above, small medial yeh — Non-joining / Transparent.
+    // Dot above, small medial yeh: Non-joining / Transparent.
     (0x06D4, 0x06D4, JoiningType::U),
     (0x06D5, 0x06D5, JoiningType::R),
     (0x06D6, 0x06DC, JoiningType::T),
@@ -223,7 +223,7 @@ const JOINING_TABLE: &[(u32, u32, JoiningType)] = &[
     (0x06E9, 0x06E9, JoiningType::U),
     // Empty centre low / high stops (Transparent).
     (0x06EA, 0x06ED, JoiningType::T),
-    // Dal / reh with small v — Right.
+    // Dal / reh with small v: Right.
     (0x06EE, 0x06EF, JoiningType::R),
     // Extended Arabic-Indic digits (Non-joining).
     (0x06F0, 0x06F9, JoiningType::U),
@@ -235,7 +235,7 @@ const JOINING_TABLE: &[(u32, u32, JoiningType)] = &[
     (0x06FF, 0x06FF, JoiningType::D),
 
     // --- U+0750..U+077F Arabic Supplement ---
-    // Beh / peh / tteh family variants for African languages — all Dual
+    // Beh / peh / tteh family variants for African languages: all Dual
     // in the supplement, with a single Right-joining reh entry.
     (0x0750, 0x0755, JoiningType::D),
     (0x0756, 0x0756, JoiningType::D),
@@ -253,27 +253,27 @@ const JOINING_TABLE: &[(u32, u32, JoiningType)] = &[
 
     // --- U+07C0..U+07FF N'Ko ---
     // N'Ko is RTL alphabetic with cursive joining of the same shape
-    // as Arabic — every letter has an init/medi/fina/isol form
+    // as Arabic: every letter has an init/medi/fina/isol form
     // selected by the same state machine. The categorization mirrors
     // rustybuzz's `gen-arabic-table.py` output: digits + tone marks
-    // are X (fallback to U / T by general-category — non-spacing
+    // are X (fallback to U / T by general-category: non-spacing
     // marks become T, everything else U), letters 07CA..07EA are
     // Dual, and 07FA Lajanyalan (low-tone mark stretcher) is Dual.
-    // 07C0..07C9 — N'Ko digits (Non-joining).
+    // 07C0..07C9: N'Ko digits (Non-joining).
     (0x07C0, 0x07C9, JoiningType::U),
-    // 07CA..07EA — N'Ko letters (Dual-joining).
+    // 07CA..07EA: N'Ko letters (Dual-joining).
     (0x07CA, 0x07EA, JoiningType::D),
-    // 07EB..07F3 — N'Ko combining tone marks (Transparent — the
+    // 07EB..07F3: N'Ko combining tone marks (Transparent: the
     // joining state machine threads them through without breaking
     // the cursive chain).
     (0x07EB, 0x07F3, JoiningType::T),
-    // 07F4..07F5 — N'Ko high/low tone apostrophes (Non-joining).
+    // 07F4..07F5: N'Ko high/low tone apostrophes (Non-joining).
     (0x07F4, 0x07F5, JoiningType::U),
-    // 07F6..07F9 — N'Ko symbols + punctuation (Non-joining).
+    // 07F6..07F9: N'Ko symbols + punctuation (Non-joining).
     (0x07F6, 0x07F9, JoiningType::U),
-    // 07FA — N'Ko Lajanyalan (Dual-joining).
+    // 07FA: N'Ko Lajanyalan (Dual-joining).
     (0x07FA, 0x07FA, JoiningType::D),
-    // 07FD — N'Ko Dantayalan (Transparent — combining low-tone mark).
+    // 07FD: N'Ko Dantayalan (Transparent, combining low-tone mark).
     (0x07FD, 0x07FD, JoiningType::T),
 
     // --- U+0870..U+088E Arabic Extended-B (Quranic) ---
@@ -315,48 +315,48 @@ const JOINING_TABLE: &[(u32, u32, JoiningType)] = &[
     // type matches the values rustybuzz's generated table assigns
     // (`gen-arabic-table.py` from the HarfBuzz tree). Mongolian's
     // joining flow is the same as Arabic: dual-joining letters take
-    // `init`/`medi`/`fina` based on neighbours, and Free Variation
+    // `init`/`medi`/`fina` based on neighbors, and Free Variation
     // Selectors are transparent so the post-FVS form selection in
     // [`crate::ot::mongolian`] can promote the chosen variant onto
     // the previous letter without disturbing the chain.
     //
-    // 0x1806 TODO SOFT HYPHEN — Non-joining (used as line-break hint).
+    // 0x1806 TODO SOFT HYPHEN: Non-joining (used as line-break hint).
     (0x1806, 0x1806, JoiningType::U),
-    // 0x1807 SIBE SYLLABLE BOUNDARY MARKER — Dual.
+    // 0x1807 SIBE SYLLABLE BOUNDARY MARKER: Dual.
     (0x1807, 0x1807, JoiningType::D),
-    // 0x180A NIRUGU — Dual (a connecting baseline).
+    // 0x180A NIRUGU: Dual (a connecting baseline).
     (0x180A, 0x180A, JoiningType::D),
-    // 0x180B..0x180D Free Variation Selectors 1/2/3 — Transparent.
+    // 0x180B..0x180D Free Variation Selectors 1/2/3: Transparent.
     // FVS4 (U+180F, Unicode 14.0) joins them. The Mongolian shaper
     // promotes the FVS-selected variant onto the preceding letter
     // after joining-form assignment; the FVS itself does not join.
     (0x180B, 0x180D, JoiningType::T),
-    // 0x180E MONGOLIAN VOWEL SEPARATOR — Non-joining. Breaks the
+    // 0x180E MONGOLIAN VOWEL SEPARATOR: Non-joining. Breaks the
     // cursive chain so the preceding letter takes its final form.
     (0x180E, 0x180E, JoiningType::U),
-    // 0x180F FVS4 — Transparent (Unicode 14.0).
+    // 0x180F FVS4: Transparent (Unicode 14.0).
     (0x180F, 0x180F, JoiningType::T),
-    // 0x1820..0x1877 Mongolian letters — bulk Dual-joining block.
+    // 0x1820..0x1877 Mongolian letters: bulk Dual-joining block.
     // Covers Mongolian, Galik, Manchu, and Sibe letters; every
     // assigned letter in this range is dual-joining.
     (0x1820, 0x1877, JoiningType::D),
-    // 0x1880..0x1884 — Mongolian letters: ali gali anusvara, visarga,
+    // 0x1880..0x1884 Mongolian letters: ali gali anusvara, visarga,
     // damaru, ubadama, three baluda. Non-joining symbols.
     (0x1880, 0x1884, JoiningType::U),
     // 0x1885..0x1886 Mongolian letter ali gali baluda + ali gali three
-    // baluda — Transparent combining marks.
+    // baluda: Transparent combining marks.
     (0x1885, 0x1886, JoiningType::T),
-    // 0x1887..0x18A8 Mongolian Galik / Manchu / Sibe letters — Dual.
+    // 0x1887..0x18A8 Mongolian Galik / Manchu / Sibe letters: Dual.
     (0x1887, 0x18A8, JoiningType::D),
-    // 0x18A9 MONGOLIAN LETTER ALI GALI DAGALGA — Non-joining; rustybuzz
+    // 0x18A9 MONGOLIAN LETTER ALI GALI DAGALGA: Non-joining; rustybuzz
     // marks this position as `X` (no joining data) which we treat as U.
     (0x18A9, 0x18A9, JoiningType::U),
-    // 0x18AA MONGOLIAN LETTER MANCHU ALI GALI LHA — Dual.
+    // 0x18AA MONGOLIAN LETTER MANCHU ALI GALI LHA: Dual.
     (0x18AA, 0x18AA, JoiningType::D),
 
     // --- Format characters that participate in joining ---
-    (0x200C, 0x200C, JoiningType::U), // ZWNJ — breaks joining
-    (0x200D, 0x200D, JoiningType::C), // ZWJ — forces joining
+    (0x200C, 0x200C, JoiningType::U), // ZWNJ: breaks joining
+    (0x200D, 0x200D, JoiningType::C), // ZWJ: forces joining
 ];
 
 #[cfg(test)]
@@ -372,18 +372,18 @@ mod tests {
 
     #[test]
     fn alef_is_right_joining() {
-        // U+0627 ARABIC LETTER ALEF — connects only on the right.
+        // U+0627 ARABIC LETTER ALEF: connects only on the right.
         assert_eq!(joining_type('\u{0627}'), JoiningType::R);
-        // U+0622..0625 — alef variants.
+        // U+0622..0625: alef variants.
         assert_eq!(joining_type('\u{0622}'), JoiningType::R);
         assert_eq!(joining_type('\u{0625}'), JoiningType::R);
     }
 
     #[test]
     fn beh_is_dual_joining() {
-        // U+0628 ARABIC LETTER BEH — connects both sides.
+        // U+0628 ARABIC LETTER BEH: connects both sides.
         assert_eq!(joining_type('\u{0628}'), JoiningType::D);
-        // U+062A TEH, U+062B THEH — also D.
+        // U+062A TEH, U+062B THEH: also D.
         assert_eq!(joining_type('\u{062A}'), JoiningType::D);
         assert_eq!(joining_type('\u{062B}'), JoiningType::D);
     }
@@ -397,13 +397,13 @@ mod tests {
 
     #[test]
     fn tatweel_is_join_causing() {
-        // U+0640 ARABIC TATWEEL — the stretching baseline glyph.
+        // U+0640 ARABIC TATWEEL: the stretching baseline glyph.
         assert_eq!(joining_type('\u{0640}'), JoiningType::C);
     }
 
     #[test]
     fn harakat_are_transparent() {
-        // U+064E FATHA, U+064F DAMMA, U+0650 KASRA — vowel marks
+        // U+064E FATHA, U+064F DAMMA, U+0650 KASRA: vowel marks
         // skipped by the joining state machine.
         assert_eq!(joining_type('\u{064E}'), JoiningType::T);
         assert_eq!(joining_type('\u{064F}'), JoiningType::T);
@@ -421,20 +421,20 @@ mod tests {
 
     #[test]
     fn hamza_is_non_joining() {
-        // U+0621 ARABIC LETTER HAMZA — visually isolated.
+        // U+0621 ARABIC LETTER HAMZA: visually isolated.
         assert_eq!(joining_type('\u{0621}'), JoiningType::U);
     }
 
     #[test]
     fn supplement_letters_classify() {
         // U+0750 ARABIC LETTER BEH WITH THREE DOTS HORIZONTALLY
-        // BELOW — dual-joining.
+        // BELOW: dual-joining.
         assert_eq!(joining_type('\u{0750}'), JoiningType::D);
     }
 
     #[test]
     fn extended_a_letters_classify() {
-        // U+08A0 ARABIC LETTER BEH WITH SMALL V BELOW — Dual.
+        // U+08A0 ARABIC LETTER BEH WITH SMALL V BELOW: Dual.
         assert_eq!(joining_type('\u{08A0}'), JoiningType::D);
     }
 
@@ -442,7 +442,7 @@ mod tests {
     fn cjk_and_greek_fall_through_to_non_joining() {
         assert_eq!(joining_type('字'), JoiningType::U);
         assert_eq!(joining_type('Δ'), JoiningType::U);
-        // Above BMP — astral code point.
+        // Above BMP: astral code point.
         assert_eq!(joining_type('\u{1F600}'), JoiningType::U);
     }
 

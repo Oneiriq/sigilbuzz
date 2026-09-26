@@ -7,7 +7,7 @@
 //! The output is deterministic: given the same `Face`, `glyph_id`,
 //! and [`SlugOptions`], the encoder produces the same `bands` and
 //! `segments` byte-for-byte. Segment ordering inside each band
-//! follows path-traversal order — the same order in which they were
+//! follows path-traversal order, the same order in which they were
 //! produced by the upstream PathOp stream.
 
 use alloc::vec::Vec;
@@ -26,7 +26,7 @@ pub struct SlugOptions {
     /// height in em-units.
     pub band_count: Option<u32>,
     /// Maximum allowed geometric error (design units) when flattening
-    /// cubic Beziers into quadratics. Defaults to 1 design unit —
+    /// cubic Beziers into quadratics. Defaults to 1 design unit,
     /// well below the "perceptible" threshold on a 2048-upem font.
     /// Callers can tighten or loosen this per glyph if they want a
     /// different memory / accuracy trade-off, or to tune for fonts
@@ -36,12 +36,12 @@ pub struct SlugOptions {
 
 impl SlugOptions {
     /// Default cubic-flattening tolerance in design units (1.0 unit
-    /// ≈ 0.0005 em on a 2048-upem font).
+    /// ~0.0005 em on a 2048-upem font).
     pub const DEFAULT_CUBIC_TOLERANCE: f32 = 1.0;
 
     /// Minimum effective cubic tolerance. A caller who sets
     /// `cubic_tolerance` to 0, a negative value, or NaN is clamped up
-    /// to this floor — smaller values subdivide exponentially without
+    /// to this floor. Smaller values subdivide exponentially without
     /// improving the visible result on any real glyph.
     pub const MIN_CUBIC_TOLERANCE: f32 = 1.0 / 64.0;
 }
@@ -58,7 +58,7 @@ impl Default for SlugOptions {
 /// Encodes the static outline of `glyph_id` from `face` using `opts`.
 ///
 /// Returns `None` when the glyph has no outline (whitespace, missing
-/// glyph id) or when the outline has zero rasterisable extent. Errors
+/// glyph id) or when the outline has zero rasterizable extent. Errors
 /// from outline extraction are swallowed into `None`; callers who
 /// need to distinguish the two cases can call
 /// [`Face::glyph_outline`] directly first.
@@ -86,7 +86,7 @@ pub fn encode_glyph_at_coords(
 #[must_use]
 pub(crate) fn encode_outline_ops(ops: &[PathOp], opts: &SlugOptions) -> Option<SlugGlyph> {
     // Reject paths with non-finite coordinates before we spend work
-    // flattening — a NaN reaching the De Casteljau loop fails the
+    // flattening. A NaN reaching the De Casteljau loop fails the
     // tolerance comparison and drives subdivision to MAX_DEPTH,
     // emitting ~2^18 useless segments per cubic.
     if !ops_are_finite(ops) {
@@ -107,10 +107,10 @@ pub(crate) fn encode_outline_ops(ops: &[PathOp], opts: &SlugOptions) -> Option<S
         return None;
     }
 
-    // Compute bbox from segments — the most reliable source. Glyf
+    // Compute bbox from segments, the most reliable source. Glyf
     // bbox in the font header is *not* always tight (composites
     // approximate, hinting changes extents) and we want a bbox that
-    // genuinely contains every emitted segment.
+    // contains every emitted segment.
     let bbox = segment_pool_bbox(&segments);
     if bbox.is_empty() {
         return None;
@@ -352,7 +352,7 @@ fn band_indices_for(
     let lo = clamp_floor(lo_f, band_count);
     let mut hi = clamp_ceil(hi_f, band_count);
     if hi <= lo {
-        // Zero-height segment (e.g. horizontal line) — make sure it
+        // Zero-height segment (e.g. horizontal line): make sure it
         // still lands in exactly one band so the renderer sees it.
         hi = (lo + 1).min(band_count);
     }
@@ -597,7 +597,7 @@ mod tests {
         let g = encode_outline_ops(&ops, &opts).unwrap();
         // At the minimum clamp (1/64 unit) this curve resolves in well
         // under 200 segments. Anchor on a conservative bound so future
-        // tightening of the floor doesn't break the assertion — the
+        // tightening of the floor doesn't break the assertion. The
         // important point is that we're not hitting 2^18.
         assert!(
             g.segments.len() < 2048,

@@ -11,7 +11,7 @@ Output font ``svg_synthetic.ttf`` carries:
 
 - Two glyphs (``.notdef``, ``circle``) with rectangle outlines so the
   ``glyf`` / ``loca`` tables stay well-formed.
-- A cmap mapping U+0041 → circle.
+- A cmap mapping U+0041 -> circle.
 - An `SVG ` (note trailing space) table with one document covering
   gid 1, holding a tiny `<svg>...<circle>...</svg>` payload.
 

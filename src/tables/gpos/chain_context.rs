@@ -1,7 +1,7 @@
-//! GPOS lookup type 8 — Chained Contextual Positioning.
+//! GPOS lookup type 8: Chained Contextual Positioning.
 //!
 //! Same three-format shape as GSUB type 6. The shared
-//! `tables::layout::context` helpers do the parsing and matching —
+//! `tables::layout::context` helpers do the parsing and matching:
 //! this file is just the GPOS-side enum so the positioning
 //! dispatcher stays symmetric with the substitution dispatcher.
 
@@ -12,11 +12,11 @@ use crate::tables::parse::Reader;
 /// A parsed GPOS type-8 chained-context-positioning subtable.
 #[derive(Debug, Clone)]
 pub enum ChainContextPos<'a> {
-    /// Format 1 — glyph-based.
+    /// Format 1: glyph-based.
     Format1(ChainContext1<'a>),
-    /// Format 2 — class-based.
+    /// Format 2: class-based.
     Format2(ChainContext2<'a>),
-    /// Format 3 — coverage-based.
+    /// Format 3: coverage-based.
     Format3(ChainContext3<'a>),
 }
 

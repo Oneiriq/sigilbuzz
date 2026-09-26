@@ -4,8 +4,8 @@
 //! shaper's bundled fixtures via a relative include, drive a few
 //! glyphs through [`glyph_to_svg`], and assert structural invariants
 //! of the output: well-formed `<svg>` framing, a single `d="..."`
-//! attribute, deterministic re-emission. We deliberately avoid an
-//! XML parser dependency on the *output* path — the production crate
+//! attribute, deterministic re-emission. We avoid an
+//! XML parser dependency on the *output* path. The production crate
 //! does no XML parsing at all, and these tests stay matched to the
 //! production policy by checking byte-level structure rather than
 //! parsing the result.

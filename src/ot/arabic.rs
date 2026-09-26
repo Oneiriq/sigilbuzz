@@ -3,21 +3,21 @@
 //! Given a sequence of codepoints in logical (memory) order, this
 //! module computes the joining-form feature tag for each one:
 //!
-//! - `isol` — stands alone, no joining on either side
-//! - `init` — initial (joins on the trailing side)
-//! - `medi` — medial (joins on both sides)
-//! - `fina` — final (joins on the leading side)
+//! - `isol`: stands alone, no joining on either side
+//! - `init`: initial (joins on the trailing side)
+//! - `medi`: medial (joins on both sides)
+//! - `fina`: final (joins on the leading side)
 //!
 //! The decision per position depends on the [`JoiningType`] of its
-//! two nearest *non-transparent* neighbours. Transparent codepoints
-//! (harakat, combining marks) are threaded through unchanged — they
+//! two nearest *non-transparent* neighbors. Transparent codepoints
+//! (harakat, combining marks) are threaded through unchanged. They
 //! inherit no feature of their own, and they do not influence the
 //! shape of the letters around them.
 //!
 //! # The four shape slots on an OpenType font
 //!
 //! Standard Arabic fonts carry up to four glyphs per dual-joining
-//! letter — isolated, initial, medial, final. The OpenType way to
+//! letter: isolated, initial, medial, final. The OpenType way to
 //! select between them is to tag each input position with exactly
 //! one of the `isol` / `init` / `medi` / `fina` features, and let
 //! the GSUB dispatcher swap the glyph id through the font's
@@ -32,14 +32,14 @@
 //! feature for the current position is:
 //!
 //! ```text
-//!   current is R  or U   →  isol            if prev is not D/C/L
-//!                        →  fina            otherwise
-//!   current is D  or C   →  isol            if prev is not D/C/L and next is not D/C/R
-//!                        →  init            if prev is not D/C/L and next is     D/C/R
-//!                        →  fina            if prev is     D/C/L and next is not D/C/R
-//!                        →  medi            if prev is     D/C/L and next is     D/C/R
-//!   current is L         →  (mirror; no Unicode 15.1 characters hit this)
-//!   current is T         →  transparent — caller carries the tag through
+//!   current is R  or U   ->  isol            if prev is not D/C/L
+//!                        ->  fina            otherwise
+//!   current is D  or C   ->  isol            if prev is not D/C/L and next is not D/C/R
+//!                        ->  init            if prev is not D/C/L and next is     D/C/R
+//!                        ->  fina            if prev is     D/C/L and next is not D/C/R
+//!                        ->  medi            if prev is     D/C/L and next is     D/C/R
+//!   current is L         ->  (mirror; no Unicode 15.1 characters hit this)
+//!   current is T         ->  transparent: caller carries the tag through
 //! ```
 //!
 //! The state machine below is that table, flattened.
@@ -51,19 +51,19 @@ use crate::unicode::joining::{joining_type, JoiningType};
 /// Which OpenType feature the Arabic joining pass should apply at a
 /// given position. `None` means the position did not match any of
 /// the cursive forms and should not be touched by
-/// `init`/`medi`/`fina`/`isol` — applies to non-Arabic spacers in the
+/// `init`/`medi`/`fina`/`isol`. Applies to non-Arabic spacers in the
 /// run and to transparent marks that inherit from their base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoiningForm {
-    /// Isolated form — `isol` feature.
+    /// Isolated form: `isol` feature.
     Isol,
-    /// Initial form (joins on trailing side) — `init` feature.
+    /// Initial form (joins on trailing side): `init` feature.
     Init,
-    /// Medial form (joins on both sides) — `medi` feature.
+    /// Medial form (joins on both sides): `medi` feature.
     Medi,
-    /// Final form (joins on leading side) — `fina` feature.
+    /// Final form (joins on leading side): `fina` feature.
     Fina,
-    /// No feature selected — transparent mark, or a position with a
+    /// No feature selected: transparent mark, or a position with a
     /// joining type the state machine leaves alone.
     None,
 }
@@ -88,8 +88,8 @@ impl JoiningForm {
 ///
 /// The caller is expected to have already split runs by script so
 /// that the input here is (mostly) Arabic; a non-Arabic codepoint
-/// is treated as a boundary — it carries [`JoiningForm::None`] and
-/// forces the neighbouring Arabic letter into its final or isolated
+/// is treated as a boundary: it carries [`JoiningForm::None`] and
+/// forces the neighboring Arabic letter into its final or isolated
 /// form, which matches the way OpenType shapers handle mixed runs.
 #[must_use]
 pub fn assign_joining_forms(text: &str) -> Vec<JoiningForm> {
@@ -111,15 +111,15 @@ pub fn assign_from_types(types: &[JoiningType]) -> Vec<JoiningForm> {
 }
 
 /// Computes the joining form at position `i`. Transparent positions
-/// return [`JoiningForm::None`] — the caller's glyph at that cluster
+/// return [`JoiningForm::None`]: the caller's glyph at that cluster
 /// is a combining mark that rides along with its base.
 fn form_at(types: &[JoiningType], i: usize) -> JoiningForm {
     let current = types[i];
     match current {
         JoiningType::T => JoiningForm::None,
         JoiningType::U => {
-            // Non-joining letter — always isolated, regardless of
-            // neighbours. Hamza is the canonical example.
+            // Non-joining letter: always isolated, regardless of
+            // neighbors. Hamza is the canonical example.
             JoiningForm::Isol
         }
         JoiningType::R => {
@@ -135,7 +135,7 @@ fn form_at(types: &[JoiningType], i: usize) -> JoiningForm {
         }
         JoiningType::D | JoiningType::C => {
             // Dual / join-causing connect on both sides. Four-way
-            // decision based on both neighbours.
+            // decision based on both neighbors.
             let prev_joins = prev_joins_toward_us(types, i);
             let next_joins = next_joins_toward_us(types, i);
             match (prev_joins, next_joins) {
@@ -146,7 +146,7 @@ fn form_at(types: &[JoiningType], i: usize) -> JoiningForm {
             }
         }
         JoiningType::L => {
-            // Mirror of R — connects only on the trailing side. No
+            // Mirror of R: connects only on the trailing side. No
             // Unicode 15.1 characters map here, but the state machine
             // stays symmetric so the table is future-proof.
             if next_joins_toward_us(types, i) {
@@ -159,7 +159,7 @@ fn form_at(types: &[JoiningType], i: usize) -> JoiningForm {
 }
 
 /// True when the nearest non-transparent code point *before* `i`
-/// connects on *its* trailing side — i.e. it is dual-joining
+/// connects on *its* trailing side, i.e. it is dual-joining
 /// (`D`), join-causing (`C`), or left-joining (`L`). That is the
 /// full set of types that draw a connector into the letter at
 /// position `i`.
@@ -177,7 +177,7 @@ fn prev_joins_toward_us(types: &[JoiningType], i: usize) -> bool {
 }
 
 /// True when the nearest non-transparent code point *after* `i`
-/// connects on *its* leading side — i.e. it is dual-joining (`D`),
+/// connects on *its* leading side, i.e. it is dual-joining (`D`),
 /// join-causing (`C`), or right-joining (`R`).
 fn next_joins_toward_us(types: &[JoiningType], i: usize) -> bool {
     let mut j = i + 1;
@@ -195,7 +195,7 @@ fn next_joins_toward_us(types: &[JoiningType], i: usize) -> bool {
 mod tests {
     use super::*;
 
-    /// Handy helper — map the literal to its joining forms as a
+    /// Handy helper: map the literal to its joining forms as a
     /// `Vec<JoiningForm>`.
     fn forms(text: &str) -> Vec<JoiningForm> {
         assign_joining_forms(text)
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn single_alef_is_isolated() {
-        // U+0627 ALEF alone has no neighbour to join with — isol.
+        // U+0627 ALEF alone has no neighbor to join with: isol.
         assert_eq!(forms("\u{0627}"), alloc::vec![JoiningForm::Isol]);
     }
 
@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn beh_beh_pair_splits_into_init_and_fina() {
-        // "BB" — first beh connects forward, second beh connects
+        // "BB": first beh connects forward, second beh connects
         // backward. Forward: init + fina.
         let got = forms("\u{0628}\u{0628}");
         assert_eq!(got, alloc::vec![JoiningForm::Init, JoiningForm::Fina]);
@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn alef_breaks_medial_run_on_its_trailing_side() {
-        // "BAB" — alef is Right-joining. It joins to the preceding
+        // "BAB": alef is Right-joining. It joins to the preceding
         // beh (so alef is `fina`), but does not feed the trailing
         // beh (so the trailing beh loses its medial form and falls
         // back to isolated).
@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn tatweel_acts_as_join_causing_bridge() {
         // Beh + tatweel + beh. Tatweel (C) propagates joining
-        // through itself without changing shape — so the first beh
+        // through itself without changing shape, so the first beh
         // is init, the tatweel is medi (C is treated like D), and
         // the second beh is fina.
         let got = forms("\u{0628}\u{0640}\u{0628}");
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn zwj_before_letter_forces_final_form() {
-        // ZWJ + beh — caller wants the beh in its final form even
+        // ZWJ + beh: caller wants the beh in its final form even
         // though it is at the start of the input. ZWJ is Join-causing
         // and carries no visual glyph of its own, but it tells the
         // state machine "pretend there is a joiner to my left."
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn zwnj_breaks_joining_at_boundary() {
-        // ZWNJ is Non_joining (U) — breaks the chain. "BeB" with
+        // ZWNJ is Non_joining (U): breaks the chain. "BeB" with
         // ZWNJ in the middle: first beh is isol (trailing ZWNJ breaks
         // join), ZWNJ itself is isol from the state machine (carried
         // through as None-equivalent isol), second beh is isol too.
@@ -313,12 +313,12 @@ mod tests {
 
     #[test]
     fn word_salam_shapes_correctly() {
-        // س ل ا م — seen, lam, alef, meem
+        // س ل ا م: seen, lam, alef, meem
         // seen D, lam D, alef R, meem D.
-        // seen sees lam after → init.
-        // lam sees seen before and alef after → medi.
-        // alef (R) sees lam before → fina; does not feed meem.
-        // meem sees nothing before it that joins toward meem (alef is R) → isol.
+        // seen sees lam after -> init.
+        // lam sees seen before and alef after -> medi.
+        // alef (R) sees lam before -> fina; does not feed meem.
+        // meem sees nothing before it that joins toward meem (alef is R) -> isol.
         let got = forms("\u{0633}\u{0644}\u{0627}\u{0645}");
         assert_eq!(
             got,
@@ -333,15 +333,15 @@ mod tests {
 
     #[test]
     fn word_marhaba_shapes_correctly() {
-        // مرحبا — meem, reh, hah, beh, alef
+        // مرحبا: meem, reh, hah, beh, alef
         // meem D, reh R, hah D, beh D, alef R.
-        // meem: next reh is R (joins on its leading side) → init.
-        // reh (R): prev meem is D (joins on trailing side) → fina.
+        // meem: next reh is R (joins on its leading side) -> init.
+        // reh (R): prev meem is D (joins on trailing side) -> fina.
         //   reh is R so it does not feed forward; hah sees nothing
-        //   joining toward it from the left → isol (not init).
-        // hah: prev reh is R (no), next beh is D (yes) → init.
-        // beh: prev hah D (yes), next alef R (yes) → medi.
-        // alef (R): prev beh D (yes) → fina.
+        //   joining toward it from the left -> isol (not init).
+        // hah: prev reh is R (no), next beh is D (yes) -> init.
+        // beh: prev hah D (yes), next alef R (yes) -> medi.
+        // alef (R): prev beh D (yes) -> fina.
         let got = forms("\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}");
         assert_eq!(
             got,

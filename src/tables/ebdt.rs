@@ -1,4 +1,4 @@
-//! `EBDT` — Embedded Bitmap Data (Microsoft, monochrome).
+//! `EBDT`: Embedded Bitmap Data (Microsoft, monochrome).
 //!
 //! `EBDT` is the predecessor to [`Cbdt`](crate::tables::cbdt::Cbdt):
 //! same indexing model (offsets resolved via
@@ -25,11 +25,11 @@
 //!   format 8.
 //!
 //! sigilbuzz returns the parsed [`EbdtBitmap`] which carries the
-//! resolved metrics, the bit-packing flavour, and the raw mask bytes.
+//! resolved metrics, the bit-packing flavor, and the raw mask bytes.
 //! For composite formats 8 / 9 the [`EbdtBitmap::data`] slice is empty
 //! and the parsed component records hang off [`EbdtBitmap::components`].
 //! The renderer is responsible for unpacking the 1bpp data and for
-//! recursing into composite components — see `sigilbuzz-render::bitmaps`.
+//! recursing into composite components (see `sigilbuzz-render::bitmaps`).
 
 use crate::error::{Error, Result};
 use crate::tables::cblc::{BigGlyphMetrics, CbdtLocation, SmallGlyphMetrics};
@@ -96,7 +96,7 @@ pub struct EbdtComponent {
     pub y_offset: i8,
 }
 
-/// A parsed EBDT entry — metrics, packing flavour, and either the raw
+/// A parsed EBDT entry: metrics, packing flavor, and either the raw
 /// mask bytes (formats 1 / 2 / 5 / 6 / 7) or the parsed component
 /// references (formats 8 / 9).
 #[derive(Debug, Clone, Copy)]
@@ -108,7 +108,7 @@ pub struct EbdtBitmap<'a> {
     pub metrics: EbdtMetrics,
     /// Whether the mask is byte- or bit-aligned per scanline. For
     /// composite formats (8 / 9) this is set to
-    /// [`BitPacking::ByteAligned`] but is not meaningful — the
+    /// [`BitPacking::ByteAligned`] but is not meaningful: the
     /// component records carry no mask of their own.
     pub packing: BitPacking,
     /// Raw mask bytes. Most-significant bit of each byte holds the
@@ -186,7 +186,7 @@ impl<'a> Ebdt<'a> {
     /// For formats 1 / 2 / 6 / 7 the inline header carries the
     /// metrics; for format 5 the strike-level metrics from
     /// [`CbdtLocation::metrics`] are used (if absent, a zero
-    /// `BigGlyphMetrics` substitutes — sigilbuzz never panics on a
+    /// `BigGlyphMetrics` substitutes: sigilbuzz never panics on a
     /// malformed pairing).
     pub fn glyph_bitmap(&self, loc: &CbdtLocation) -> Result<EbdtBitmap<'a>> {
         let start = loc.offset as usize;
@@ -406,7 +406,7 @@ mod tests {
         let mut data = header();
         let payload_off = data.len() as u32;
         data.extend_from_slice(&[3, 5, 0, 3, 6]); // 3-tall 5-wide
-                                                  // bit-aligned: 15 bits packed → 2 bytes
+                                                  // bit-aligned: 15 bits packed -> 2 bytes
         data.extend_from_slice(&[0xFF, 0xC0]);
         let payload_len = data.len() as u32 - payload_off;
 

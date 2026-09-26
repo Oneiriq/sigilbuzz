@@ -1,13 +1,13 @@
-//! `GDEF` — Glyph Definition table.
+//! `GDEF`: Glyph Definition table.
 //!
 //! Tells the shaper what each glyph *is*: a plain base glyph, the
 //! output of a ligature substitution, a combining mark, or a
 //! component that makes up a ligature. Downstream passes use this
 //! to decide whether a glyph participates in positioning, and if so
-//! how it attaches to its neighbours.
+//! how it attaches to its neighbors.
 //!
-//! `GDEF` is technically optional — plenty of simple fonts do not
-//! carry one. Callers that hit [`Face::table_bytes`] for `GDEF` get
+//! `GDEF` is technically optional: plenty of simple fonts do not
+//! carry one. Callers that hit [`crate::Face::table_bytes`] for `GDEF` get
 //! [`crate::Error::MissingTable`] and must be prepared to fall back
 //! to "treat every glyph as a base," which is what [`GlyphClass`]
 //! returns by default.
@@ -16,17 +16,17 @@
 //!
 //! sigilbuzz consumes:
 //!
-//! - `GlyphClassDef` — per-glyph base/ligature/mark/component class.
-//! - `MarkAttachClassDef` — per-mark attachment class, consulted by
+//! - `GlyphClassDef`: per-glyph base/ligature/mark/component class.
+//! - `MarkAttachClassDef`: per-mark attachment class, consulted by
 //!   the `LookupFlag` skip-iterator when the high byte of the flag is
 //!   non-zero.
-//! - `MarkGlyphSetsDef` (v1.2+) — a list of Coverage tables indexed
+//! - `MarkGlyphSetsDef` (v1.2+): a list of Coverage tables indexed
 //!   by `LookupFlag`'s `markFilteringSet` slot. Used by the skip-
 //!   iterator to restrict the set of marks that participate in a
 //!   match.
 //!
 //! `AttachList` and `LigCaretList` are still passed through
-//! untouched — their parsers land when the shaper needs them.
+//! untouched. Their parsers land when the shaper needs them.
 
 use crate::error::{Error, Result};
 use crate::tables::layout::{ClassDef, Coverage};
@@ -42,7 +42,7 @@ pub enum GlyphClass {
     Ligature,
     /// Combining mark glyph (attaches to a preceding base).
     Mark,
-    /// Component of a ligature — rarely emitted; usually only seen
+    /// Component of a ligature. Rarely emitted; usually only seen
     /// in source fonts before feature compilation.
     Component,
     /// Class the font carries but sigilbuzz does not model yet. The
@@ -70,7 +70,7 @@ impl GlyphClass {
         matches!(self, Self::Mark)
     }
 
-    /// True if this is a base or ligature glyph — the kinds that
+    /// True if this is a base or ligature glyph, the kinds that
     /// accept mark attachments.
     #[must_use]
     pub const fn is_base_or_ligature(self) -> bool {
@@ -117,7 +117,7 @@ impl<'a> Gdef<'a> {
         // Added in 1.2:
         //   markGlyphSetsDefOff
         // Added in 1.3:
-        //   itemVarStoreOffset (Offset32) — the shared variation store
+        //   itemVarStoreOffset (Offset32): the shared variation store
         //   that every GPOS VariationIndex sub-offset indirects into.
         let glyph_class_def_off = r.read_u16()?;
         let _attach_list_off = r.read_u16()?;
@@ -162,7 +162,7 @@ impl<'a> Gdef<'a> {
 
     /// Resolves the glyph class for `glyph_id`. Returns
     /// [`GlyphClass::Base`] when the font omits `GlyphClassDef` or
-    /// does not list this glyph — the same default the OpenType
+    /// does not list this glyph, the same default the OpenType
     /// spec prescribes.
     #[must_use]
     pub fn glyph_class(&self, glyph_id: u16) -> GlyphClass {
@@ -197,7 +197,7 @@ impl<'a> Gdef<'a> {
     /// `VariationIndex` sub-offset in the font's GPOS value records
     /// or anchors resolves its `(outer, inner)` pair against this
     /// store under the active variation coords. Fonts without a v1.3
-    /// header — or a zero `itemVarStoreOffset` — return `None`, and
+    /// header (or a zero `itemVarStoreOffset`) return `None`, and
     /// the shaper treats every VariationIndex as a zero delta.
     #[must_use]
     pub const fn item_variation_store(&self) -> Option<&ItemVariationStore<'a>> {
@@ -408,7 +408,7 @@ mod tests {
         let gdef = Gdef::parse(&gdef_bytes).unwrap();
         // Glyph 10 is declared a Mark.
         assert_eq!(gdef.glyph_class(10), GlyphClass::Mark);
-        // Glyph 100 is not listed — ClassDef returns 0, which we map
+        // Glyph 100 is not listed. ClassDef returns 0, which we map
         // to Base (the spec default).
         assert_eq!(gdef.glyph_class(100), GlyphClass::Base);
     }
@@ -453,7 +453,7 @@ mod tests {
         assert_eq!(gdef.mark_attach_class(10), 5);
         assert_eq!(gdef.mark_attach_class(11), 6);
         assert_eq!(gdef.mark_attach_class(12), 7);
-        // Unlisted glyph → class 0.
+        // Unlisted glyph -> class 0.
         assert_eq!(gdef.mark_attach_class(99), 0);
     }
 
@@ -534,7 +534,7 @@ mod tests {
     }
 
     /// Builds a v1.3 GDEF with only the itemVarStore slot populated.
-    /// Header layout for v1.3: u16 major + u16 minor + u16 × 4 (v1.0)
+    /// Header layout for v1.3: u16 major + u16 minor + u16 * 4 (v1.0)
     /// + u16 mgs + u32 ivs = 18 bytes.
     fn build_gdef_v13_with_ivs_only(ivs: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -559,14 +559,14 @@ mod tests {
         let bytes = build_gdef_v13_with_ivs_only(&ivs);
         let gdef = Gdef::parse(&bytes).unwrap();
         let store = gdef.item_variation_store().expect("v1.3 IVS");
-        // At coord 1.0 the single region peaks — delta = 75.
+        // At coord 1.0 the single region peaks: delta = 75.
         let d = store.delta(0, 0, &[1.0]);
         assert!((d - 75.0).abs() < 1e-3);
     }
 
     #[test]
     fn v13_with_zero_itemvarstore_offset_yields_none() {
-        // Build a v1.3 header whose itemVarStoreOffset stays 0 — the
+        // Build a v1.3 header whose itemVarStoreOffset stays 0, the
         // spec's "this table omits the optional IVS" sentinel. The
         // parser must not chase the zero offset or the IVS accessor
         // would return Some pointing at garbage.

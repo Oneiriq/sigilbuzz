@@ -10,11 +10,11 @@
 //!
 //! Every opaque type (`hb_blob_t`, `hb_face_t`, `hb_font_t`,
 //! `hb_buffer_t`) is a thin `#[repr(C)]` wrapper around an
-//! `alloc::sync::Arc<Inner>`. `hb_*_destroy` drops the wrapper —
+//! `alloc::sync::Arc<Inner>`. `hb_*_destroy` drops the wrapper:
 //! the Arc destructor handles refcount decrement and resource
 //! release. `hb_*_reference` allocates a fresh wrapper backed by a
 //! cloned Arc handle. Cloning a wrapper without going through
-//! `hb_*_reference` is undefined behaviour, just as in HarfBuzz
+//! `hb_*_reference` is undefined behavior, just as in HarfBuzz
 //! itself.
 //!
 //! # Lifetime erasure
@@ -58,7 +58,7 @@ use core::slice;
 
 use sigilbuzz::{shape, Buffer, Direction, Face, Feature, Font};
 
-// `hb_set_t` lives in its own module — the opaque integer-set type
+// `hb_set_t` lives in its own module, the opaque integer-set type
 // the subset and introspection bridges need. It has no dependency on
 // the rest of the crate, so it ships unconditionally. `introspect`
 // follows the same posture: it doesn't reach into the subsetter or
@@ -86,7 +86,7 @@ pub(crate) struct BlobInner {
     /// extend the same backing storage past the original blob's
     /// lifetime.
     pub(crate) data: Arc<Vec<u8>>,
-    /// Optional caller-supplied destroy callback — fires once, when
+    /// Optional caller-supplied destroy callback: fires once, when
     /// the BlobInner is dropped. HarfBuzz's `hb_blob_create` accepts
     /// `mode`, `user_data`, and `destroy` so callers passing
     /// `HB_MEMORY_MODE_READONLY` can use mmap'd buffers and have
@@ -99,7 +99,7 @@ pub(crate) struct BlobInner {
 
 impl BlobInner {
     /// Internal: build a `BlobInner` around bytes the bridge layer
-    /// already has in an `Arc`. No destroy callback — the bridge
+    /// already has in an `Arc`. No destroy callback: the bridge
     /// owns the bytes outright. Only the `subset` cargo feature
     /// references this helper today; gate to silence dead-code
     /// warnings when the feature is off.
@@ -113,7 +113,7 @@ impl BlobInner {
     }
 }
 
-// SAFETY: BlobInner does not access `user_data` itself — it only
+// SAFETY: BlobInner does not access `user_data` itself. It only
 // hands the pointer back to `user_destroy`. The HarfBuzz contract
 // puts the burden of synchronization on the consumer; we mirror it.
 unsafe impl Send for BlobInner {}
@@ -148,7 +148,7 @@ impl hb_blob_t {
 }
 
 /// The face is a parsed SFNT directory plus the bytes it borrows
-/// from. The `Face<'static>` is a lie — its borrow is actually
+/// from. The `Face<'static>` is a lie: its borrow is actually
 /// rooted in `_data`'s payload, which lives at least as long as the
 /// FaceInner. See the module-level lifetime erasure note.
 pub(crate) struct FaceInner {
@@ -172,8 +172,8 @@ impl FaceInner {
 // SAFETY: Face<'_> is Clone + Send + Sync (it holds &[u8] + Vec<TableRecord>).
 // The 'static lifetime is fictitious; the actual backing storage is
 // `_data`, which is itself Send + Sync via Arc<Vec<u8>>. As long as
-// no thread observes the face after `_data` drops — which can't
-// happen because they're held in the same struct — the bound holds.
+// no thread observes the face after `_data` drops (which can't
+// happen because they're held in the same struct), the bound holds.
 unsafe impl Send for FaceInner {}
 unsafe impl Sync for FaceInner {}
 
@@ -200,7 +200,7 @@ impl hb_face_t {
 /// before shaping, so contention is negligible.
 pub(crate) struct FontInner {
     // `_face` is the lifetime root for `state.font` (which holds a
-    // `Font<'static>` borrowed from this Arc — see SAFETY note below).
+    // `Font<'static>` borrowed from this Arc, see SAFETY note below).
     // The leading underscore signals "not for direct access" but a
     // few internal call sites still need to read it; those are
     // covered by the module-level `used_underscore_binding` allow.
@@ -231,7 +231,7 @@ pub struct hb_font_t {
     pub(crate) inner: Arc<FontInner>,
 }
 
-/// The shaping buffer — text in, glyphs out. HarfBuzz makes
+/// The shaping buffer: text in, glyphs out. HarfBuzz makes
 /// `hb_buffer_t` mutable (the caller pushes text into it), so we
 /// wrap a `Mutex` around the inner state.
 struct BufferInner {
@@ -285,7 +285,7 @@ mod spin_mutex {
         inner: UnsafeCell<T>,
     }
 
-    // SAFETY: SpinMutex serialises access to `inner`; the AtomicBool
+    // SAFETY: SpinMutex serializes access to `inner`; the AtomicBool
     // is the only cross-thread observable.
     unsafe impl<T: Send> Send for SpinMutex<T> {}
     unsafe impl<T: Send> Sync for SpinMutex<T> {}
@@ -346,11 +346,11 @@ pub type hb_bool_t = c_int;
 /// HarfBuzz codepoints / glyph ids are 32-bit unsigned.
 pub type hb_codepoint_t = u32;
 
-/// Tag = four ASCII characters packed BE into a u32 (`'L','a','t','n'` →
+/// Tag = four ASCII characters packed BE into a u32 (`'L','a','t','n'` ->
 /// `0x4C61746E`). Match HarfBuzz's HB_TAG macro.
 pub type hb_tag_t = u32;
 
-/// Buffer cluster — `u32`, just an opaque tag.
+/// Buffer cluster: `u32`, just an opaque tag.
 pub type hb_mask_t = u32;
 
 /// HarfBuzz's signed 16.16 position type for advances and offsets.
@@ -359,8 +359,8 @@ pub type hb_position_t = i32;
 /// HarfBuzz's destroy callback signature.
 pub type hb_destroy_func_t = unsafe extern "C" fn(*mut c_void);
 
-/// HarfBuzz memory mode. Forwarded but not actually distinguished —
-/// sigilbuzz always copies via the Arc<Vec<u8>>, so the only thing
+/// HarfBuzz memory mode. Forwarded but not actually distinguished:
+/// sigilbuzz always copies via the `Arc<Vec<u8>>`, so the only thing
 /// that matters from the C side is whether to invoke the destroy
 /// callback (which fires for any non-WRITABLE mode that has one).
 pub type hb_memory_mode_t = c_uint;
@@ -378,7 +378,7 @@ pub const HB_DIRECTION_RTL: hb_direction_t = 5;
 pub const HB_DIRECTION_TTB: hb_direction_t = 6;
 pub const HB_DIRECTION_BTT: hb_direction_t = 7;
 
-/// HarfBuzz script enum — alias for `hb_tag_t`, value is the
+/// HarfBuzz script enum: alias for `hb_tag_t`, value is the
 /// ISO 15924 four-letter code packed via HB_TAG.
 pub type hb_script_t = hb_tag_t;
 pub const HB_SCRIPT_INVALID: hb_script_t = 0;
@@ -714,7 +714,7 @@ fn build_font(
     } else {
         // SAFETY: `coords` lives in the FontState alongside this
         // Font; the FontState owns both, so the borrow holds for
-        // the same lifetime as the Font<'static> lie itself —
+        // the same lifetime as the Font<'static> lie itself:
         // both are rooted in the FontInner's heap allocation.
         let coords_static: &'static [f32] =
             unsafe { core::mem::transmute::<&[f32], &'static [f32]>(coords) };
@@ -818,7 +818,7 @@ pub unsafe extern "C" fn hb_font_set_scale(font: *mut hb_font_t, x_scale: c_int,
     state.y_scale = y_scale;
     // Rebuild Font borrowing from the canonical `state.coords`. See
     // `hb_font_set_variations` for the partial-borrow rationale.
-    let coords_ptr: *const [f32] = state.coords.as_slice() as *const [f32];
+    let coords_ptr: *const [f32] = core::ptr::from_ref::<[f32]>(state.coords.as_slice());
     // SAFETY: `state.coords` is heap-pinned for the duration of the
     // lock; the raw pointer is solely used to bypass Rust's
     // partial-borrow check on disjoint fields.
@@ -886,12 +886,12 @@ pub unsafe extern "C" fn hb_font_set_variations(
         unsafe { slice::from_raw_parts(variations, variations_length as usize) }
     };
     // Resolve user-space axis values through fvar / avar to
-    // normalised coords, the format Font expects.
+    // normalized coords, the format Font expects.
     let face = &inner._face.face;
     let coords = match (face.fvar(), face.avar()) {
         (Ok(Some(fvar)), avar_res) => {
             // Build a user-space vector: one entry per fvar axis,
-            // initialised to the axis default; then overlay any
+            // initialized to the axis default; then overlay any
             // `hb_variation_t` whose tag matches.
             let mut user: Vec<f32> = fvar.axes().iter().map(|a| a.default_value).collect();
             for v in vars {
@@ -916,13 +916,13 @@ pub unsafe extern "C" fn hb_font_set_variations(
     state.coords = coords;
     // `state.coords` is now the canonical owner. `state.font` borrows
     // from it via the transmute inside `build_font`; we must rebuild
-    // `state.font` whenever `state.coords` changes — the realloc
+    // `state.font` whenever `state.coords` changes: the realloc
     // could move the heap allocation and invalidate the borrow.
-    let coords_ptr: *const [f32] = state.coords.as_slice() as *const [f32];
+    let coords_ptr: *const [f32] = core::ptr::from_ref::<[f32]>(state.coords.as_slice());
     // SAFETY: `state.coords` is pinned to the FontState's heap
     // allocation for as long as `state` is locked; we are the sole
     // mutator. The pointer round-trips through a raw pointer to
-    // sidestep the partial-borrow check — Rust forbids holding
+    // sidestep the partial-borrow check: Rust forbids holding
     // `&state.coords` and `&mut state.font` simultaneously even
     // though the two fields don't overlap.
     let coords_ref: &[f32] = unsafe { &*coords_ptr };
@@ -1005,7 +1005,7 @@ pub unsafe extern "C" fn hb_buffer_clear_contents(buffer: *mut hb_buffer_t) {
     state.buffer.set_text("");
     state.glyph_infos.clear();
     state.glyph_positions.clear();
-    // direction/script/language survive a clear_contents — only
+    // direction/script/language survive a clear_contents: only
     // hb_buffer_reset wipes them.
 }
 
@@ -1024,7 +1024,7 @@ pub unsafe extern "C" fn hb_buffer_add_utf8(
     if buffer.is_null() || text.is_null() {
         return;
     }
-    // Normalise to a byte slice. -1 means "NUL-terminated".
+    // Normalize to a byte slice. -1 means "NUL-terminated".
     let total_bytes: &[u8] = if text_length < 0 {
         // SAFETY: caller asserts NUL-terminated.
         let cstr = unsafe { core::ffi::CStr::from_ptr(text) };
@@ -1161,7 +1161,7 @@ pub unsafe extern "C" fn hb_buffer_guess_segment_properties(buffer: *mut hb_buff
     }
     if state.script == HB_SCRIPT_INVALID {
         // Use the first script-bearing codepoint to seed the script
-        // tag — match HarfBuzz's behaviour. sigilbuzz's
+        // tag, matching HarfBuzz's behavior. sigilbuzz's
         // `script_runs()` does the heavy lifting; we project its
         // first run's script into the matching ISO 15924 tag.
         let runs = state.buffer.script_runs();
@@ -1293,7 +1293,7 @@ pub unsafe extern "C" fn hb_shape_full(
         })
         .collect();
 
-    // Lock both. Order: font first, then buffer — deterministic so
+    // Lock both. Order: font first, then buffer, deterministic so
     // two threads shaping with the same pair never deadlock.
     let font_state = font_inner.state.lock();
     let mut buffer_state = buffer_inner.state.lock();
@@ -1407,7 +1407,7 @@ pub unsafe extern "C" fn hb_direction_from_string(s: *const c_char, len: c_int) 
     }
 }
 
-/// HarfBuzz's `hb_script_from_iso15924_tag` is a passthrough — the
+/// HarfBuzz's `hb_script_from_iso15924_tag` is a passthrough: the
 /// tag IS the script identifier.
 #[no_mangle]
 pub extern "C" fn hb_script_from_iso15924_tag(tag: hb_tag_t) -> hb_script_t {
@@ -1415,7 +1415,7 @@ pub extern "C" fn hb_script_from_iso15924_tag(tag: hb_tag_t) -> hb_script_t {
 }
 
 /// Languages are pointer-interned. We leak a CString the first time
-/// we see a given normalised language tag; subsequent lookups return
+/// we see a given normalized language tag; subsequent lookups return
 /// the same pointer.
 ///
 /// # Safety
@@ -1447,8 +1447,8 @@ pub unsafe extern "C" fn hb_language_from_string(s: *const c_char, len: c_int) -
 // Version
 // ---------------------------------------------------------------------------
 
-/// HarfBuzz ABI version sigilbuzz advertises. We pick 8.0.0 — the
-/// current stable major as of 2025 — so consumers that gate on
+/// HarfBuzz ABI version sigilbuzz advertises. We pick 8.0.0, the
+/// current stable major as of 2025, so consumers that gate on
 /// `hb_version_atleast(8, 0, 0)` succeed. The actual sigilbuzz
 /// version is exposed via `hb_version_string()`.
 const HB_COMPAT_MAJOR: c_uint = 8;
@@ -1537,7 +1537,7 @@ fn intern_language(tag: &str) -> hb_language_t {
             return cstr.as_ptr();
         }
     }
-    // Leak a fresh CString — language tags survive the lifetime of
+    // Leak a fresh CString: language tags survive the lifetime of
     // the process, just as they do in HarfBuzz itself.
     let owned = std::ffi::CString::new(tag).unwrap_or_else(|_| std::ffi::CString::default());
     let leaked: &'static core::ffi::CStr = Box::leak(owned.into_boxed_c_str());
@@ -1560,7 +1560,7 @@ fn lang_und() -> hb_language_t {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — Rust-side equivalence harness
+// Tests: Rust-side equivalence harness
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1594,7 +1594,7 @@ mod tests {
             assert!(!font.is_null());
             // Default scale is upem; preserve to stay in design units.
             let buffer = hb_buffer_create();
-            hb_buffer_add_utf8(buffer, b"Hello\0".as_ptr().cast::<c_char>(), -1, 0, -1);
+            hb_buffer_add_utf8(buffer, c"Hello".as_ptr(), -1, 0, -1);
             hb_buffer_set_direction(buffer, HB_DIRECTION_LTR);
             hb_buffer_set_script(buffer, HB_SCRIPT_LATIN);
 
@@ -1650,7 +1650,7 @@ mod tests {
                 None,
             );
             let face = hb_face_create(blob, 0);
-            // Drop the blob handle first — face must still respond.
+            // Drop the blob handle first. Face must still respond.
             hb_blob_destroy(blob);
             let upem = hb_face_get_upem(face);
             assert!(upem > 0);
@@ -1671,7 +1671,7 @@ mod tests {
     #[test]
     fn tag_round_trips() {
         unsafe {
-            let t = hb_tag_from_string(b"Latn\0".as_ptr().cast::<c_char>(), -1);
+            let t = hb_tag_from_string(c"Latn".as_ptr(), -1);
             assert_eq!(t, HB_SCRIPT_LATIN);
             let mut buf = [0i8; 4];
             hb_tag_to_string(t, buf.as_mut_ptr());
@@ -1723,7 +1723,7 @@ mod tests {
     fn buffer_guess_segment_properties_seeds_latin_for_ascii() {
         unsafe {
             let buffer = hb_buffer_create();
-            hb_buffer_add_utf8(buffer, b"Hello\0".as_ptr().cast::<c_char>(), -1, 0, -1);
+            hb_buffer_add_utf8(buffer, c"Hello".as_ptr(), -1, 0, -1);
             hb_buffer_guess_segment_properties(buffer);
             // direction defaults to LTR; script should be Latin.
             // Read direction and script back via the state mutex.

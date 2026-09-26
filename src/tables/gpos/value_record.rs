@@ -1,4 +1,4 @@
-//! OpenType `ValueRecord` — the variable-length positioning delta
+//! OpenType `ValueRecord`: the variable-length positioning delta
 //! used throughout GPOS.
 //!
 //! A `ValueRecord`'s shape is controlled by a separate `u16` flags
@@ -13,14 +13,14 @@
 //! | 0x0002 | y_placement           | `i16`      |
 //! | 0x0004 | x_advance             | `i16`      |
 //! | 0x0008 | y_advance             | `i16`      |
-//! | 0x0010 | x_placement_device    | `Offset16` → Device / VariationIndex |
-//! | 0x0020 | y_placement_device    | `Offset16` → Device / VariationIndex |
-//! | 0x0040 | x_advance_device      | `Offset16` → Device / VariationIndex |
-//! | 0x0080 | y_advance_device      | `Offset16` → Device / VariationIndex |
+//! | 0x0010 | x_placement_device    | `Offset16` -> Device / VariationIndex |
+//! | 0x0020 | y_placement_device    | `Offset16` -> Device / VariationIndex |
+//! | 0x0040 | x_advance_device      | `Offset16` -> Device / VariationIndex |
+//! | 0x0080 | y_advance_device      | `Offset16` -> Device / VariationIndex |
 //!
 //! Each device offset is relative to the start of the enclosing
-//! subtable (PairPos, SinglePos, …). When the referenced table has
-//! `deltaFormat = 0x8000` it is a `VariationIndex` — an outer/inner
+//! subtable (PairPos, SinglePos, ...). When the referenced table has
+//! `deltaFormat = 0x8000` it is a `VariationIndex`: an outer/inner
 //! pair indexing into GDEF's shared `ItemVariationStore`, which is
 //! how variable-font kerning actually scales with axis coords. The
 //! non-variation `Device` shape encodes per-ppem hinting deltas;
@@ -28,7 +28,7 @@
 //! units).
 //!
 //! The record carries the raw `u16` offsets verbatim so the shaper
-//! can resolve them against the subtable data slice at apply time —
+//! can resolve them against the subtable data slice at apply time,
 //! see [`resolve_variation_delta`].
 
 use crate::error::Result;
@@ -55,7 +55,7 @@ pub const Y_ADVANCE_DEVICE: u16 = 0x0080;
 
 /// Bitmask of every field the spec defines. Bits outside this range
 /// are reserved and must be zero; sigilbuzz tolerates malformed fonts
-/// that leave them set by ignoring them — both `size` and `parse`
+/// that leave them set by ignoring them. Both `size` and `parse`
 /// agree to skip those bits so the two stay in lockstep.
 const DEFINED_BITS: u16 = X_PLACEMENT
     | Y_PLACEMENT
@@ -95,7 +95,7 @@ impl ValueRecord {
     /// format word occupies. Each set *defined* bit in `format` is
     /// one i16 (or Offset16, same size), so the size is `2 *
     /// popcount(format & DEFINED_BITS)`. Reserved bits are ignored
-    /// — they must agree with [`ValueRecord::parse`], which also
+    /// because they must agree with [`ValueRecord::parse`], which also
     /// skips them, otherwise a malformed font that sets a reserved
     /// bit would drive `size` and `parse` out of lockstep and
     /// mis-align every subsequent record in an array.
@@ -156,7 +156,7 @@ fn round_delta(delta: f32) -> i32 {
 /// Resolves one `Device` / `VariationIndex` slot against the
 /// enclosing subtable bytes and the shared `ItemVariationStore`.
 ///
-/// - `device_off == 0` → the value record did not carry this slot
+/// - `device_off == 0` -> the value record did not carry this slot
 ///   (or the spec-blessed "null"). Returns `0`.
 /// - The referenced table is a `Device` (per-ppem hinting). sigilbuzz
 ///   runs in design units, so return `0`.
@@ -186,7 +186,7 @@ pub fn resolve_variation_delta(
             Some(s) => round_delta(s.delta(outer, inner, coords)),
             None => 0,
         },
-        // Device (hinting) — the shaper has no ppem. The subtable is
+        // Device (hinting): the shaper has no ppem. The subtable is
         // parsed for completeness but contributes nothing here.
         DeviceOrVariationIndex::Device { .. } => 0,
     }
@@ -305,7 +305,7 @@ mod tests {
         let mut r = make_reader(&bytes);
         let v = ValueRecord::parse(&mut r, malformed).unwrap();
         assert_eq!(v.x_advance, -32);
-        // Cursor moved exactly as `size` predicted — no reserved
+        // Cursor moved exactly as `size` predicted: no reserved
         // bit crept in to advance it further.
         assert_eq!(r.position(), ValueRecord::size(malformed));
     }
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn resolve_variation_index_reads_from_store() {
-        // delta = 80 at coord 1.0 → rounded to 80.
+        // delta = 80 at coord 1.0 -> rounded to 80.
         let ivs = build_ivs_one_region_one_item(80);
         let store = ItemVariationStore::parse(&ivs).unwrap();
         let subtable = build_subtable_with_variation_index(8, 0, 0);
@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn resolve_variation_index_scales_with_coord() {
-        // delta = 100 at coord 0.25 → 25, at coord 0.75 → 75.
+        // delta = 100 at coord 0.25 -> 25, at coord 0.75 -> 75.
         let ivs = build_ivs_one_region_one_item(100);
         let store = ItemVariationStore::parse(&ivs).unwrap();
         let subtable = build_subtable_with_variation_index(16, 0, 0);
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn resolve_without_ivs_yields_zero_even_for_variation_index() {
         // Font malformed or hinting-only: GDEF has no IVS. We refuse
-        // to materialise a delta without a store.
+        // to materialize a delta without a store.
         let subtable = build_subtable_with_variation_index(8, 0, 0);
         assert_eq!(resolve_variation_delta(&subtable, 8, None, &[0.5]), 0);
     }

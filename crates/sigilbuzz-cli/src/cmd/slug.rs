@@ -1,8 +1,8 @@
-//! `sigilbuzz slug` — encode a glyph for GPU rendering.
+//! `sigilbuzz slug`: encode a glyph for GPU rendering.
 //!
 //! Wraps [`sigilbuzz_gpu::encode_glyph`] and emits the resulting
 //! [`SlugGlyph`](sigilbuzz_gpu::SlugGlyph) as hand-rolled JSON. We
-//! deliberately do not pull in `serde` here — `serde_json` is a
+//! do not pull in `serde` here: `serde_json` is a
 //! future-PR commitment, not an integration this binary should bring
 //! in alone (see `docs/deps.md`).
 
@@ -99,7 +99,7 @@ fn f(v: f32) -> String {
         return "0".to_string();
     }
     // Strip trailing zeros and a dangling `.` so integral values print
-    // as integers — keeps the output diff-friendly.
+    // as integers, which keeps the output diff-friendly.
     let s = format!("{v:.6}");
     let trimmed = s.trim_end_matches('0').trim_end_matches('.');
     if trimmed.is_empty() || trimmed == "-" {

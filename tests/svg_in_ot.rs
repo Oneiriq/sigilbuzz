@@ -8,7 +8,7 @@
 //! check the expose-bytes contract: sigilbuzz returns the raw XML
 //! payload intact, exposes the gzip-magic bit (false here, the
 //! fixture is plain ASCII), and never tries to parse the XML or
-//! rasterise.
+//! rasterize.
 
 use sigilbuzz::{Blob, Face};
 
@@ -34,7 +34,7 @@ fn svg_synthetic_document_for_gid_returns_payload() {
     assert!(!doc.gzipped, "fixture is plain ASCII, not gzipped");
 
     // The fixture's payload starts with `<svg` and contains a
-    // `<circle>`. We don't parse the XML — just confirm the bytes
+    // `<circle>`. We don't parse the XML, just confirm the bytes
     // round-trip intact.
     let text = core::str::from_utf8(doc.data).expect("ascii payload");
     assert!(text.starts_with("<svg"));
@@ -55,7 +55,7 @@ fn svg_synthetic_returns_none_for_uncovered_gid() {
 
 #[test]
 fn face_svg_returns_none_for_outline_only_font() {
-    // Open Sans has no SVG table — should yield None cleanly.
+    // Open Sans has no SVG table: should yield None cleanly.
     let bytes = std::fs::read("tests/fixtures/opensans_regular.ttf").unwrap();
     let blob = Blob::new(&bytes);
     let face = Face::parse(&blob, 0).unwrap();

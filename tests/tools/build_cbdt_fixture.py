@@ -5,15 +5,15 @@ Real Noto Color Emoji ships at 12+ MB; for parser tests we just need
 a structurally valid pair of CBDT + CBLC tables with one strike, one
 glyph, one PNG. fontTools rejects empty CBDT/CBLC scaffolding when
 no image is present, so we splice both tables in as raw bytes via
-``DefaultTable`` — mirroring the AAT fixture builder.
+``DefaultTable``, mirroring the AAT fixture builder.
 
 The output font ``cbdt_synthetic.ttf`` carries:
 
 - Two glyphs (``.notdef``, ``smile``) with trivial rectangle outlines.
-- A cmap mapping U+0041 → smile.
+- A cmap mapping U+0041 -> smile.
 - A CBLC strike at 32 ppem with one IndexSubTable in format 17
   (small metrics + PNG data, the most common CBDT variant today).
-- A CBDT record carrying a 67-byte 1×1 transparent PNG.
+- A CBDT record carrying a 67-byte 1x1 transparent PNG.
 
 Run:
     python3 tests/tools/build_cbdt_fixture.py
@@ -57,7 +57,7 @@ def _make_png(width: int, height: int, rgba: bytes) -> bytes:
     return sig + ihdr + idat + iend
 
 
-# Tiny 1×1 transparent RGBA PNG. Real PNG (signature + IHDR + IDAT +
+# Tiny 1x1 transparent RGBA PNG. Real PNG (signature + IHDR + IDAT +
 # IEND with valid CRCs and zlib stream).
 TINY_PNG = _make_png(1, 1, b"\x00\x00\x00\x00")
 
@@ -96,13 +96,13 @@ def build_cblc(image_data_offset: int, image_size: int) -> bytes:
     header_len = 8
     bitmap_size_len = 48
     index_array_off = header_len + bitmap_size_len  # = 56
-    # IndexSubTableArray: 1 entry × 8 bytes.
+    # IndexSubTableArray: 1 entry x 8 bytes.
     array_len = 8
     sub_off_relative = array_len  # subtable starts right after the array
-    # IndexSubTable header: 8 B + (count+1) × 4 B for fmt 1.
+    # IndexSubTable header: 8 B + (count+1) * 4 B for fmt 1.
     # Two glyphs covered (gids 0 and 1), three offsets.
     sub_header = 8
-    sub_payload = (1 + 1) * 4  # 2 glyphs → 3 offsets ... wait: count + 1
+    sub_payload = (1 + 1) * 4  # 2 glyphs -> 3 offsets ... wait: count + 1
     # Actually: count = lastGid - firstGid + 1, here 1 (only gid 1 in
     # this strike), so 2 offsets. Make first sentinel 0, second sentinel
     # equals image size.

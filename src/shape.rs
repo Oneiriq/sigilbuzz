@@ -3,27 +3,27 @@
 //! # Pipeline
 //!
 //! ```text
-//!   buffer.text  →  split into chars (cluster = UTF-8 byte offset)
-//!                →  cmap.glyph_id(ch)  (falls back to .notdef when missing)
-//!                →  hmtx.advance(gid)  (advance in font design units)
-//!                →  Glyph { glyph_id, cluster, x_advance, ... }
+//!   buffer.text  ->  split into chars (cluster = UTF-8 byte offset)
+//!                ->  cmap.glyph_id(ch)  (falls back to .notdef when missing)
+//!                ->  hmtx.advance(gid)  (advance in font design units)
+//!                ->  Glyph { glyph_id, cluster, x_advance, ... }
 //! ```
 //!
 //! Advances are emitted in the font's design units (i.e. the grid
 //! defined by `head.unitsPerEm`). Callers that want pixels can scale
 //! by `font.size() / font.units_per_em()` at render time. Keeping the
 //! shaper output in design units matches `rustybuzz`'s default and
-//! preserves determinism — every intermediate value is an integer.
+//! preserves determinism: every intermediate value is an integer.
 //!
 //! # What is here
 //!
-//! - cmap → glyph id, then the full shaping pipeline in spec order.
+//! - cmap -> glyph id, then the full shaping pipeline in spec order.
 //! - GSUB (lookup types 1, 4, 6 format 3, plus Extension type 7
 //!   unwrapping): `ccmp`, `rlig`, `liga`, `clig`, `calt` run by
 //!   default; any user-enabled tag with non-zero value flows
 //!   through the same dispatcher. Chained-context lookups can
 //!   invoke other lookups at specific positions inside the match
-//!   window — the first recursive layer sigilbuzz supports.
+//!   window (the first recursive layer sigilbuzz supports).
 //! - hmtx advance lookup, post-substitution so ligature glyphs get
 //!   their own advance rather than the sum of their components.
 //! - GPOS (lookup types 1, 2, 4, 5, 6, plus Extension type 9
@@ -40,7 +40,7 @@
 //!
 //! # What is not here yet
 //!
-//! - Full Unicode NFC normalisation. sigilbuzz ships the
+//! - Full Unicode NFC normalization. sigilbuzz ships the
 //!   composition half of NFC (opt-in via
 //!   [`crate::Buffer::set_normalize_nfc`]); canonical
 //!   decomposition and combining-class reordering do not run yet,
@@ -50,7 +50,7 @@
 //!   (type 2), alternate (type 3), reverse chained (type 8),
 //!   and the format 1/2 variants of type 6.
 //! - GPOS cursive attachment (type 3) and contextual (types 7, 8).
-//! - Right-to-left reordering — `buffer.direction()` is consulted
+//! - Right-to-left reordering: `buffer.direction()` is consulted
 //!   but the output order is always logical = visual for now.
 
 use alloc::borrow::Cow;
@@ -83,7 +83,7 @@ use crate::unicode::{script_of, Script};
 /// short-circuits to zero without reading the store.
 #[derive(Debug, Clone, Copy)]
 struct VarCtx<'a> {
-    /// Normalised axis coords. Empty for the default instance.
+    /// Normalized axis coords. Empty for the default instance.
     coords: &'a [f32],
     /// GDEF's shared `ItemVariationStore`. Required for every
     /// `VariationIndex` the ValueRecord's device slots point at.
@@ -91,7 +91,7 @@ struct VarCtx<'a> {
 }
 
 impl VarCtx<'_> {
-    /// Builds a static-instance context — no coords, no store.
+    /// Builds a static-instance context: no coords, no store.
     /// Every downstream resolver produces a zero delta. Used by
     /// callers (and tests) that need to invoke a GPOS apply site
     /// without having a font-coords view in hand.
@@ -127,7 +127,7 @@ impl VarCtx<'_> {
 /// Applies one `ValueRecord` to `glyph`, folding in any
 /// Device/VariationIndex deltas the `subtable` carries for this
 /// record. `subtable` is the enclosing PairPos/SinglePos subtable
-/// bytes — Device/VariationIndex sub-offsets are always rooted
+/// bytes. Device/VariationIndex sub-offsets are always rooted
 /// there.
 #[allow(clippy::similar_names)]
 fn apply_value_record(glyph: &mut Glyph, v: &ValueRecord, subtable: &[u8], var: &VarCtx<'_>) {
@@ -153,7 +153,7 @@ const MAX_NESTED_DEPTH: u8 = 16;
 /// enum and reuses the parsed views across every cursor step. Without
 /// the cache, ChainContext / Context format-3 parsing allocates three
 /// or four `Vec<Coverage>` and a `Vec<SubstLookupRecord>` on every
-/// cursor — `O(N × subtables)` allocations for a single feature, the
+/// cursor: `O(N * subtables)` allocations for a single feature, the
 /// lion's share of the Devanagari regression.
 enum ParsedGsubSubtable<'a> {
     Single(Single<'a>),
@@ -165,10 +165,10 @@ enum ParsedGsubSubtable<'a> {
     ReverseChained(ReverseChain<'a>),
 }
 
-/// Parses the subtables of a single `Lookup` — handling the Extension
+/// Parses the subtables of a single `Lookup`, handling the Extension
 /// type-7 unwrap so the caller never sees raw lookup type 7. Returns
 /// the parsed list in spec order; subtables that fail to parse are
-/// silently dropped, matching the per-cursor behaviour the inline
+/// silently dropped, matching the per-cursor behavior the inline
 /// `apply_gsub_lookup_at` walker had before the cache was introduced.
 fn parse_lookup_subtables<'a>(lookup: &Lookup<'a>, raw_lt: u16) -> Vec<ParsedGsubSubtable<'a>> {
     let count = lookup.subtable_count() as usize;
@@ -216,7 +216,7 @@ fn parse_lookup_subtables<'a>(lookup: &Lookup<'a>, raw_lt: u16) -> Vec<ParsedGsu
     out
 }
 
-/// Returns the "primary" coverage table for a parsed subtable — the
+/// Returns the "primary" coverage table for a parsed subtable: the
 /// coverage on the cursor glyph. Used by the run-level `would_apply`
 /// precheck and by the cursor digest in `apply_gsub_lookup`. `None`
 /// means the subtable's coverage isn't a single `Coverage` table
@@ -239,7 +239,7 @@ fn primary_coverage_of<'a, 'b>(
 }
 
 /// Reports whether at least one glyph in `ids` could trigger any
-/// subtable in `parsed` — a fast pre-filter so the cursor walk in
+/// subtable in `parsed`, a fast pre-filter so the cursor walk in
 /// `apply_gsub_lookup` skips lookups whose coverage doesn't intersect
 /// the run at all. Mirrors HarfBuzz's `would_apply` skip; returns
 /// `true` conservatively when a subtable doesn't expose its primary
@@ -351,7 +351,7 @@ fn apply_parsed_lookup_at(
                     // Ligature emits 1 glyph from N matched components.
                     // The cursor must advance past the ligature output
                     // *and* any skipped (filtered) glyphs that survived
-                    // inside the matched window — in HarfBuzz's
+                    // inside the matched window: in HarfBuzz's
                     // input/output buffer model that is `idx + span` in
                     // INPUT space; in our in-place model the buffer
                     // already shrunk by `(positions.len() - 1)` glyphs,
@@ -360,7 +360,7 @@ fn apply_parsed_lookup_at(
                     //
                     // Returning the raw input span over-advances by the
                     // number of consumed components, which silently skips
-                    // the next-letter slot — visible as Mongolian's calt
+                    // the next-letter slot, visible as Mongolian's calt
                     // marker-pass leaking marker glyphs on 3+ letter
                     // chains (#118).
                     let span = positions.last().copied().map_or(0, |p| p + 1);
@@ -409,7 +409,7 @@ fn apply_parsed_lookup_at(
 /// shadow buffer existed every cursor step rebuilt that slice via
 /// `glyphs.iter().map(...).collect()`, which is `O(N²)` for a feature
 /// that fires on every glyph. We keep the shadow in sync manually
-/// after each substitution — Single/Alternate touch one slot,
+/// after each substitution: Single/Alternate touch one slot,
 /// Ligature/Multiple change length and trigger a full resync.
 #[derive(Debug)]
 struct GlyphIds {
@@ -440,7 +440,7 @@ impl GlyphIds {
 
     /// Length-changing substitution (ligature drain, multiple-sub
     /// expansion). Cheaper than maintaining diff edits inside every
-    /// driver — these substitutions are far less common than context
+    /// driver. These substitutions are far less common than context
     /// matches anyway.
     fn resync(&mut self, glyphs: &[Glyph]) {
         self.ids.clear();
@@ -450,7 +450,7 @@ impl GlyphIds {
     }
 }
 
-/// Builds a [`MatchFilter`] scoped to one lookup — honouring its
+/// Builds a [`MatchFilter`] scoped to one lookup, honoring its
 /// `LookupFlag`, GDEF-backed glyph classes, and the optional
 /// `markFilteringSet` trailer when the font carries one.
 fn filter_for_lookup<'a>(lookup: &Lookup<'a>, gdef: Option<&'a Gdef<'a>>) -> MatchFilter<'a> {
@@ -459,7 +459,7 @@ fn filter_for_lookup<'a>(lookup: &Lookup<'a>, gdef: Option<&'a Gdef<'a>>) -> Mat
 
 /// One entry in a feature list passed to [`shape`]. The tag is a
 /// four-byte OpenType feature tag (e.g. `b"liga"`, `b"kern"`, `b"smcp"`);
-/// the value is interpreted per-feature — typically `0` disables and
+/// the value is interpreted per-feature: typically `0` disables and
 /// any non-zero value enables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Feature {
@@ -482,17 +482,17 @@ pub struct Feature {
 /// optionally a Trailing jamo (T) collapses into the matching
 /// precomposed syllable in U+AC00..U+D7A3 *when* the font carries a
 /// cmap entry for the precomposed codepoint. HarfBuzz / rustybuzz do
-/// exactly this, so matching the behaviour is mandatory for byte-
+/// exactly this, so matching the behavior is mandatory for byte-
 /// parity on modern Korean corpora.
 ///
 /// Extended-B trailing jamo (U+D7CB..U+D7FB) abort composition of
 /// the whole L+V+T triple so the font's `ljmo` / `vjmo` / `tjmo`
-/// features can shape each jamo on its own — matches rustybuzz.
+/// features can shape each jamo on its own (matches rustybuzz).
 ///
 /// Returns a vector of `(byte_offset, char)` pairs that replaces the
 /// normal `text.char_indices()` sequence in the main shaping loop.
 /// The byte offset is the offset of the FIRST codepoint in the
-/// composed cluster — the L for an L+V / L+V+T composition — so
+/// composed cluster (the L for an L+V / L+V+T composition), so
 /// downstream cluster tracking still maps glyphs back to the
 /// original UTF-8 stream.
 fn hangul_compose(
@@ -504,7 +504,7 @@ fn hangul_compose(
     // per-run basis and the Hangul preprocessor (the NFC compose)
     // runs only when that shaper is active. sigilbuzz's segmenter
     // splits scripts but the Hangul preprocessor still has to see
-    // the segment's L+V(+T) window to run — so we gate on "the
+    // the segment's L+V(+T) window to run, so we gate on "the
     // buffer is Hangul / whitespace / default-ignorable only".
     // Mixed-script buffers (e.g. "Hi " + jamo) bypass composition;
     // the jamo runs through its own segment under `hang` but stays
@@ -523,7 +523,7 @@ fn hangul_compose(
             continue;
         }
         // L jamo range: U+1100..U+1112 (the 19 modern leading
-        // consonants). Extended-A (U+A960..) do NOT compose — they
+        // consonants). Extended-A (U+A960..) do NOT compose: they
         // stay as jamo so `ljmo` picks them up.
         let l_index = if (0x1100..=0x1112).contains(&(ch as u32)) {
             Some((ch as u32) - 0x1100)
@@ -592,7 +592,7 @@ fn hangul_compose(
 /// Returns an error if the font is missing any of the tables required
 /// for basic shaping (`cmap`, `maxp`, `hhea`, `hmtx`) or if one of
 /// them is malformed.
-// The pipeline is deliberately a straight-line sequence of passes so
+// The pipeline is a straight-line sequence of passes so
 // the order is visible in one place; breaking it into five stage
 // helpers would cost more in indirection than it buys in LOC.
 #[allow(clippy::too_many_lines)]
@@ -644,13 +644,13 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     };
     let text: &str = &text;
 
-    // Step 1: codepoint → glyph id via cmap. Clusters are byte
+    // Step 1: codepoint -> glyph id via cmap. Clusters are byte
     // offsets from the start of the text so later passes can track
     // which input characters coalesce into a single output glyph.
     //
     // Default-ignorable Unicode format characters (ZWJ, ZWNJ, and
     // the U+200E/U+200F bidi marks) drive the joining state machine
-    // but should not render — HarfBuzz replaces their glyph id with
+    // but should not render. HarfBuzz replaces their glyph id with
     // U+0020 (SPACE) after joining-form selection. sigilbuzz mirrors
     // that: record the space glyph once, then swap the
     // default-ignorable glyphs below. We keep the joining-type view
@@ -669,7 +669,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // precomposed codepoint. The Jamo sub-blocks outside the modern
     // compositional range (Extended-A L, Extended-B T) suppress
     // composition so the font's `ljmo` / `vjmo` / `tjmo` features can
-    // shape each jamo independently — matches HarfBuzz / rustybuzz.
+    // shape each jamo independently (matches HarfBuzz / rustybuzz).
     //
     // Returns `(byte_offset, char)` pairs; the byte offset is always
     // the first codepoint of the composed cluster, so cluster
@@ -701,7 +701,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         // Thai sara am (U+0E33) and Lao lao am (U+0EB3). HarfBuzz
         // decomposes these composed vowels into
         // `nikkhahit / niggahita + sara aa` at buffer-prep time,
-        // before shape enters the state machine — the font's
+        // before shape enters the state machine: the font's
         // mark-positioning tables target the decomposed pair, not
         // the composed codepoint. We do the same here so the cmap
         // lookup lands on the two components and every downstream
@@ -709,10 +709,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         // rustybuzz does.
         if matches!(ch, '\u{0E33}' | '\u{0EB3}') {
             let (pre, post) = if ch == '\u{0E33}' {
-                // Thai sara am → nikkhahit (U+0E4D) + sara aa (U+0E32).
+                // Thai sara am -> nikkhahit (U+0E4D) + sara aa (U+0E32).
                 ('\u{0E4D}', '\u{0E32}')
             } else {
-                // Lao lao am → niggahita (U+0ECD) + sara aa (U+0EB2).
+                // Lao lao am -> niggahita (U+0ECD) + sara aa (U+0EB2).
                 ('\u{0ECD}', '\u{0EB2}')
             };
             for &component in &[pre, post] {
@@ -728,8 +728,8 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         // three-part) sequence. HarfBuzz's Indic shaper runs this
         // before syllable reordering so the pre-base half can be
         // picked up by the positional-category reorder. sigilbuzz
-        // does it at codepoint push time — same entry point as Khmer
-        // — so downstream passes never see the composed form.
+        // does it at codepoint push time (same entry point as Khmer)
+        // so downstream passes never see the composed form.
         if let Some(parts) = crate::ot::indic::split_matra_decompose(ch) {
             for &component in parts {
                 let gid = u32::from(cmap.glyph_id(component).unwrap_or(0));
@@ -771,21 +771,21 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // Step 1.5: Segment the run into maximal same-script spans. Each
     // segment carries its own script priority (e.g. Arabic `arab` ->
     // DFLT, Hebrew `hebr` -> DFLT), its codepoint range in the
-    // `codepoints` vec we just filled, and — after we finish GSUB
-    // below — its post-substitution glyph range. Pre-GSUB the two
+    // `codepoints` vec we just filled, and (after we finish GSUB
+    // below) its post-substitution glyph range. Pre-GSUB the two
     // ranges coincide because cmap is 1:1 (Khmer's split-vowel
     // preprocessor above added both codepoints and glyphs in lockstep,
     // so the 1:1 invariant still holds here).
     //
-    // Running each segment through its own cmap → pre-shaper → GSUB
-    // → GPOS chain is what lets mixed-script runs like `Hi שלום`
+    // Running each segment through its own cmap -> pre-shaper -> GSUB
+    // -> GPOS chain is what lets mixed-script runs like `Hi שלום`
     // dispatch the Hebrew half under `hebr` features and the Latin
     // half under DFLT in a single call. The pre-segmenter implementation
     // resolved one global priority and missed script-specific lookups
     // on whichever half lost the tie-break.
     let segments = build_segments(&codepoints);
 
-    // Dominant script — the first non-COMMON/INHERITED script in the
+    // Dominant script: the first non-COMMON/INHERITED script in the
     // buffer. HarfBuzz (and rustybuzz) compute this once in
     // `guess_segment_properties` and use it to select a single shaper
     // for the whole run; features the shaper activates only fire when
@@ -814,8 +814,8 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // Arabic joining forms are computed once, from the full text,
     // because the state machine depends on surrounding letters (the
     // previous/next Arabic joining-type). A segment-local view would
-    // lose the cross-boundary context — but in sigilbuzz every Arabic
-    // segment is bounded by non-Arabic neighbours anyway, so global
+    // lose the cross-boundary context, but in sigilbuzz every Arabic
+    // segment is bounded by non-Arabic neighbors anyway, so global
     // computation is both correct and cheaper than recomputing per
     // segment.
     let has_arabic = codepoints.iter().any(|&c| script_of(c) == Script::Arabic);
@@ -825,7 +825,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         Vec::new()
     };
 
-    // Step 2 (per segment): pre-shaper → GSUB. We build the result by
+    // Step 2 (per segment): pre-shaper -> GSUB. We build the result by
     // concatenating per-segment processed glyph sub-vecs; each segment
     // processes its own slice of codepoints/glyphs so contextual
     // lookups in one script can never see the other script's glyphs
@@ -1008,7 +1008,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         }
         // Hangul routes through USE only for Jamo-decomposed text.
         // Precomposed syllables (U+AC00..U+D7A3) still pass through
-        // the default GSUB/GPOS chain — `ljmo`/`vjmo`/`tjmo` are
+        // the default GSUB/GPOS chain: `ljmo`/`vjmo`/`tjmo` are
         // no-ops on them, so running the pipeline is harmless but
         // wasteful. Additionally gate on the buffer's dominant
         // script: HarfBuzz picks one shaper for the whole run based
@@ -1045,7 +1045,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                     );
                 }
                 // Arabic positional pass consumes only the segment's
-                // slice of the forms vector — cps/glyphs are 1:1 at
+                // slice of the forms vector: cps/glyphs are 1:1 at
                 // this point (ccmp can rewrite ids but not lengths in
                 // practice for Arabic), so the slice aligns.
                 let forms_slice = &arabic_forms[seg.cp_range.clone()];
@@ -1072,12 +1072,12 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         });
     }
 
-    // Reassemble — segments were concatenated in left-to-right order
+    // Reassemble: segments were concatenated in left-to-right order
     // so the buffer's visual ordering survives the round-trip.
     glyphs = processed_glyphs;
 
     // AAT fallback. Consulted only when the font has no GSUB at all
-    // — that is how HarfBuzz decides between OpenType and AAT, and
+    // (that is how HarfBuzz decides between OpenType and AAT), and
     // matches the issue scope. Legacy macOS Zapfino, older Apple
     // Chancery variants, and most third-party AAT-only fonts land
     // here. Runs after the segmented GSUB pass so a font that
@@ -1099,7 +1099,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // advance by the per-coord delta.
     //
     // Default-ignorable format characters (ZWJ, ZWNJ, bidi marks)
-    // keep a zero advance in either axis — they rendered as space
+    // keep a zero advance in either axis. They rendered as space
     // earlier, but must not move the pen (HarfBuzz does the same).
     // We walk the character stream once to collect their cluster
     // offsets and then skip them in the advance pass.
@@ -1113,7 +1113,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             // VVAR carries per-glyph vertical-advance deltas;
             // applies only when the font is variable and the user
             // requested non-default coords. Same pattern as the
-            // horizontal branch's HVAR usage below — we resolve
+            // horizontal branch's HVAR usage below: we resolve
             // once and consult per-glyph inside the loop.
             let coords = font.coords();
             let vvar = if coords.is_empty() {
@@ -1179,7 +1179,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             let base = i32::from(hmtx.advance(id).unwrap_or(0));
             glyph.x_advance = if let Some(ref hvar) = hvar {
                 let delta = hvar.advance_delta(id, coords);
-                // Round-to-nearest without pulling in libm — the
+                // Round-to-nearest without pulling in libm: the
                 // delta arithmetic is small, so add-0.5 / subtract-0.5
                 // suffices.
                 let rounded = if delta >= 0.0 {
@@ -1194,7 +1194,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         }
     }
 
-    // Mark-width zeroing — phase 1 (early). The USE shaper and the
+    // Mark-width zeroing: phase 1 (early). The USE shaper and the
     // Myanmar shaper both ship with
     // `zero_width_marks = HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_EARLY`
     // in HarfBuzz, so before the GPOS pass every glyph that GDEF
@@ -1202,14 +1202,14 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // chained-context kern (e.g. Noto Sans Limbu's `kern` lookup
     // that adds a back-positioning advance to specific mark glyphs)
     // then writes the *delta* onto the cleared advance, not on top
-    // of the hmtx default — so the final value matches rustybuzz.
+    // of the hmtx default, so the final value matches rustybuzz.
     // Without this pass sigilbuzz double-applies the hmtx advance
     // for any mark that participates in a GPOS chained-context
     // lookup, which is the 0.7.0 Limbu mark-advance follow-up.
     //
     // HarfBuzz selects exactly one shaper per buffer based on the
     // first non-common codepoint, so the gate is on the dominant
-    // script — a Latin-majority `Hi <limbu>` run uses the default
+    // script: a Latin-majority `Hi <limbu>` run uses the default
     // shaper (late-zero) on every segment, including the Limbu one.
     let dominant_zeroes_early = dominant_script.is_some_and(zeroes_marks_early);
     if dominant_zeroes_early {
@@ -1224,17 +1224,17 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         }
     }
 
-    // Step 4: GPOS passes — per segment, so each segment dispatches
+    // Step 4: GPOS passes, per segment, so each segment dispatches
     // under its own script-tag priority. Kern first, then `dist`
     // (pre-mark), mark, mkmk, then user-enabled GPOS features. A GPOS
-    // kern hit on *any* segment inhibits the legacy-kern fallback —
+    // kern hit on *any* segment inhibits the legacy-kern fallback, which
     // matches the spec: the modern table wins whenever it carries any
     // usable data for the run.
     let gpos = face.gpos()?;
     // Build the variable-font resolution context once. Passing this
     // through every GPOS apply site is what lets VariationIndex
     // deltas inside a ValueRecord actually respond to the user's
-    // axis coords — before PR #13 the deltas were read, parsed, and
+    // axis coords. Before PR #13 the deltas were read, parsed, and
     // thrown away, so kerning was frozen at the default instance.
     let var = VarCtx {
         coords: font.coords(),
@@ -1255,10 +1255,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                     gpos_kerned = true;
                 }
             }
-            // `dist` — distance adjustments the Indic / USE shapers
+            // `dist`: distance adjustments the Indic / USE shapers
             // rely on for conjunct forms. Keyed on the segment's
-            // resolved script priority (Devanagari → dev2/deva/DFLT,
-            // Khmer → khmr/khm2/DFLT, etc.), and skipped for scripts
+            // resolved script priority (Devanagari -> dev2/deva/DFLT,
+            // Khmer -> khmr/khm2/DFLT, etc.), and skipped for scripts
             // that never ship a `dist` feature.
             if !feature_disabled(features, *b"dist") {
                 apply_gpos_feature_in_scripts_with_var(
@@ -1293,7 +1293,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
 
     // Legacy `kern` is a fallback: only runs when GPOS kern produced
     // no lookups on any segment. GPOS wins even with zero-delta hits
-    // — the spec's design, not a sigilbuzz quirk.
+    // (the spec's design, not a sigilbuzz quirk).
     let mut legacy_kerned = false;
     if want_kern && !gpos_kerned {
         if let Some(kern) = face.kern()? {
@@ -1304,24 +1304,24 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // AAT `kerx` is the last-resort fallback: GPOS kern absent AND
     // legacy `kern` absent. In practice fonts ship one of the three,
     // not several; keeping legacy ahead preserves existing
-    // behaviour and matches HarfBuzz ordering.
+    // behavior and matches HarfBuzz ordering.
     if want_kern && !gpos_kerned && !legacy_kerned {
         if let Some(kerx) = face.kerx()? {
             apply_kerx(face, &kerx, &mut glyphs)?;
         }
     }
 
-    // Mark-width zeroing — phase 2 (late). HarfBuzz's default,
+    // Mark-width zeroing: phase 2 (late). HarfBuzz's default,
     // Arabic, Hebrew, Thai and Lao shapers ship
     // `zero_width_marks = HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_LATE`:
     // mark advances are zeroed *after* GPOS, so any chained-context
     // kern that wrote a positioning delta on top of the hmtx default
     // is preserved while the underlying mark advance still ends at
-    // zero. The gate is on the dominant script — a `Hi <limbu>`
+    // zero. The gate is on the dominant script: a `Hi <limbu>`
     // mixed run with a Latin majority takes this late-zero path on
     // every segment, including Limbu.
     //
-    // Indic / Khmer / Hangul / Myanmar are excluded — their shapers
+    // Indic / Khmer / Hangul / Myanmar are excluded: their shapers
     // ship `HB_OT_SHAPE_ZERO_WIDTH_MARKS_NONE`, so post-base matras
     // keep their hmtx advance through the entire pipeline (they are
     // bases dressed up as marks for OpenType GDEF reasons).
@@ -1347,7 +1347,7 @@ fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
     features.iter().any(|f| f.tag == tag && f.value == 0)
 }
 
-/// HarfBuzz "zero mark widths early" set — the dominant scripts whose
+/// HarfBuzz "zero mark widths early" set: the dominant scripts whose
 /// shaper sets `zero_width_marks = HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_EARLY`
 /// (USE shaper + Myanmar). Used to gate the early-zero pass that fires
 /// before GPOS, so chained-context kern lookups that write a mark's
@@ -1371,11 +1371,11 @@ fn zeroes_marks_early(script: Script) -> bool {
     )
 }
 
-/// HarfBuzz "zero mark widths late" set — dominant scripts whose
+/// HarfBuzz "zero mark widths late" set: dominant scripts whose
 /// shaper sets `zero_width_marks = HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_LATE`
 /// (default / Arabic / Hebrew / Thai / Lao). The dominant-script gate
 /// reads this when deciding whether to zero mark advances after GPOS.
-/// Indic / Khmer / Hangul are explicitly excluded — their shapers ship
+/// Indic / Khmer / Hangul are explicitly excluded: their shapers ship
 /// `HB_OT_SHAPE_ZERO_WIDTH_MARKS_NONE`, so a post-base matra (a "mark"
 /// in GDEF terms but a base in shaping terms) must retain its hmtx
 /// advance through the entire pipeline.
@@ -1407,7 +1407,7 @@ struct Segment {
     script_priority: &'static [[u8; 4]],
 }
 
-/// Post-GSUB slice of the fully-assembled `glyphs` vector — one per
+/// Post-GSUB slice of the fully-assembled `glyphs` vector, one per
 /// pre-shaped segment. The GPOS loop reads this back to dispatch
 /// kern / mark / mkmk / dist / user-enabled features against the
 /// correct script tag priority for each slice.
@@ -1467,8 +1467,8 @@ fn build_segments(codepoints: &[char]) -> Vec<Segment> {
 
 /// Shape-time COMMON / INHERITED predicate: stays in lockstep with
 /// the buffer-level `is_common_or_inherited` in `buffer.rs`. Kept
-/// inside `shape.rs` so the Khmer-split synthetic codepoints — which
-/// never land in the buffer's text — still segment correctly.
+/// inside `shape.rs` so the Khmer-split synthetic codepoints (which
+/// never land in the buffer's text) still segment correctly.
 const fn is_common_for_segmentation(ch: char) -> bool {
     let cp = ch as u32;
     matches!(
@@ -1479,7 +1479,7 @@ const fn is_common_for_segmentation(ch: char) -> bool {
         | 0x007B..=0x007F
         | 0x00A0..=0x00BF
         | 0x200C | 0x200D | 0x200E | 0x200F | 0x061C
-        // INHERITED combining-mark blocks — must extend the preceding
+        // INHERITED combining-mark blocks: must extend the preceding
         // real-script segment so GSUB dispatches under the right
         // priority. Matches `buffer::is_common_or_inherited`.
         | 0x0300..=0x036F
@@ -1490,12 +1490,12 @@ const fn is_common_for_segmentation(ch: char) -> bool {
 }
 
 /// True for the small set of Unicode format characters the shaper
-/// should render as space rather than their own glyph — the ones
+/// should render as space rather than their own glyph: the ones
 /// whose job is to influence the shaping pipeline without carrying
 /// a visual form. HarfBuzz calls these "default ignorable" and
 /// rewrites them to the space glyph after shaping.
 ///
-/// Coverage is deliberately narrow — only the characters that (a)
+/// Coverage is narrow on purpose: only the characters that (a)
 /// drive joining decisions and (b) would otherwise render as a
 /// glyph in fonts like Amiri (which has drawable glyphs for ZWJ
 /// variants). Other default-ignorable characters (e.g. the variation
@@ -1513,7 +1513,7 @@ const fn is_default_ignorable(ch: char) -> bool {
 }
 
 /// Runs the default GSUB feature chain and any user-enabled extras.
-/// Order matches the spec: `ccmp` → `rlig` → `liga` → `clig` →
+/// Order matches the spec: `ccmp` -> `rlig` -> `liga` -> `clig` ->
 /// `calt`, then `vrt2` / `vert` for vertical runs. HarfBuzz's Latin
 /// fallback shaper turns the horizontal list on by default;
 /// sigilbuzz follows suit. User-enabled features beyond that list
@@ -1551,7 +1551,7 @@ fn run_default_gsub(
     // lookups in turn double-applies on those fonts. Mirror
     // HarfBuzz's "each lookup runs once per pass" rule by collecting
     // both lookup index lists, deduplicating, and applying the
-    // union in ascending lookup-index order — the same order the
+    // union in ascending lookup-index order, the same order the
     // GSUB FeatureList walks them.
     if !feature_disabled(features, *b"calt") || !feature_disabled(features, *b"rclt") {
         let mut indices: Vec<u16> = Vec::new();
@@ -1579,7 +1579,7 @@ fn run_default_gsub(
     }
     // Vertical writing: HarfBuzz auto-enables `vrt2` when the font
     // carries it, otherwise falls back to `vert`. The two tags
-    // cannot be active together — `vrt2` (Vertical Alternates &
+    // cannot be active together: `vrt2` (Vertical Alternates &
     // Rotation) is the superset, so prefer it.
     if is_vertical {
         let has_vrt2 = feature_present(gsub, *b"vrt2");
@@ -1615,9 +1615,9 @@ fn is_handled_gsub_tag(tag: [u8; 4]) -> bool {
 /// feature tag. Used by the vertical-writing dispatcher to decide
 /// between `vrt2` (preferred if present) and `vert` (fallback).
 fn feature_present(gsub: &Gsub<'_>, tag: [u8; 4]) -> bool {
-    // Vertical-writing probe runs before we know the script — use the
-    // Latin-style script order (DFLT → first) to match the previous
-    // behaviour. Arabic fonts do not ship vert/vrt2, so this choice is
+    // Vertical-writing probe runs before we know the script. Use the
+    // Latin-style script order (DFLT -> first) to match the previous
+    // behavior. Arabic fonts do not ship vert/vrt2, so this choice is
     // not observable in practice.
     lookup_indices_for_feature_in_scripts(gsub, tag, &[*b"DFLT"]).is_some_and(|v| !v.is_empty())
 }
@@ -1625,13 +1625,13 @@ fn feature_present(gsub: &Gsub<'_>, tag: [u8; 4]) -> bool {
 /// Applies every GSUB lookup reachable via the named feature tag
 /// to the glyph run in place. Supports lookup types:
 ///
-/// - 1 — Single substitution (`smcp`, `vert`, `salt`, `ss01`…)
-/// - 2 — Multiple substitution (`ccmp` decomposition, some scripts)
-/// - 3 — Alternate substitution (`salt`, `swsh`, `aalt`) — the
+/// - 1: Single substitution (`smcp`, `vert`, `salt`, `ss01`...)
+/// - 2: Multiple substitution (`ccmp` decomposition, some scripts)
+/// - 3: Alternate substitution (`salt`, `swsh`, `aalt`). The
 ///   alternate index comes from the feature `value` (1-indexed,
 ///   clamped into the alternate set)
-/// - 4 — Ligature substitution (`liga`, `dlig`, `rlig`)
-/// - 6 — Chained context substitution (`calt`, `clig`, `init`,
+/// - 4: Ligature substitution (`liga`, `dlig`, `rlig`)
+/// - 6: Chained context substitution (`calt`, `clig`, `init`,
 ///   `medi`, `fina`, `isol`) with recursive nested lookups
 ///
 /// Extension (type 7) wrappers are unwrapped to the inner type.
@@ -1661,7 +1661,7 @@ pub(crate) fn apply_gsub_feature(
 ///
 /// Falls back to the first script in the list if none of the
 /// requested tags are present, matching the prior DFLT-fallback
-/// behaviour.
+/// behavior.
 pub(crate) fn apply_gsub_feature_in_scripts(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
@@ -1690,13 +1690,13 @@ pub(crate) fn apply_gsub_feature_in_scripts(
 /// Applies a single feature's lookups only at glyph positions where
 /// `mask[i]` is true. Used by the Indic shaper to gate `half` off
 /// on consonants whose post-halant partner is already going to be
-/// consumed by `blwf` — mirrors HarfBuzz's per-glyph feature mask
+/// consumed by `blwf`. Mirrors HarfBuzz's per-glyph feature mask
 /// machinery at the one spot sigilbuzz currently needs it.
 ///
 /// Shares the masked lookup dispatcher with Arabic
 /// positional features; lookups that don't understand the mask
 /// (chaining-context interior) fall through to the unmasked
-/// dispatcher, matching the behaviour documented on
+/// dispatcher, matching the behavior documented on
 /// [`apply_gsub_lookup_masked`].
 pub(crate) fn apply_gsub_feature_masked(
     gsub: &Gsub<'_>,
@@ -1721,8 +1721,8 @@ pub(crate) fn apply_gsub_feature_masked(
     }
 }
 
-/// Applies the four Arabic positional features — `isol`, `init`,
-/// `medi`, `fina` — each restricted to the glyph positions whose
+/// Applies the four Arabic positional features (`isol`, `init`,
+/// `medi`, `fina`), each restricted to the glyph positions whose
 /// [`JoiningForm`] matches. The forms slice stays aligned with the
 /// glyph run because we call this before any `ccmp`/`rlig`/`liga`
 /// substitution has shrunk or expanded the stream (see the call
@@ -1755,14 +1755,14 @@ fn apply_arabic_positional_features(
 }
 
 /// Applies a single GSUB lookup only at positions where `mask[i]`
-/// is true. Used by the Arabic positional pass — `isol` at positions
+/// is true. Used by the Arabic positional pass: `isol` at positions
 /// tagged `Isol`, `init` at `Init`, and so on, and by the Indic
 /// shaper for `half`/`pref`/`pres` gating.
 ///
 /// Per-glyph lookup types (SINGLE / MULTIPLE / ALTERNATE / LIGATURE)
 /// only fire when the mask at the cursor position is true.
 /// Chained-context lookups inside a positional feature run over the
-/// full glyph stream — the rules' coverage already encodes their
+/// full glyph stream. The rules' coverage already encodes their
 /// positional intent.
 ///
 /// Like [`apply_gsub_lookup`], this walks the cursor once and tries
@@ -1825,14 +1825,14 @@ fn apply_gsub_lookup_masked(
 /// cursor tries the lookup's subtables in spec order, taking the
 /// first subtable that matches and advancing the cursor past the
 /// consumed input window. The previous implementation walked each
-/// subtable across the whole run independently — that re-fired later
+/// subtable across the whole run independently. That re-fired later
 /// subtables on positions that an earlier one had already matched
 /// (with `SubstCount=0`, common in Amiri's `rlig`), producing
 /// glyph-id divergences from rustybuzz on Allah / bism-Allah and
-/// other Quranic-grade vocalised forms (issue #21).
+/// other Quranic-grade vocalized forms (issue #21).
 ///
 /// Reverse-chained lookups (type 8) iterate right-to-left and are
-/// not a per-cursor "first match" thing — they substitute coverage-
+/// not a per-cursor "first match" thing. They substitute coverage-
 /// matched glyphs in place, with each lookup's subtables walking the
 /// frozen-prefix snapshot. Detected via lookup type and dispatched
 /// separately.
@@ -1902,7 +1902,7 @@ fn apply_gsub_lookup(
 
     // Run-level "would_apply" precheck. If no glyph in the run can
     // possibly trigger any subtable's primary coverage, the cursor
-    // walk has nothing to do — skip it. Saves the per-cursor coverage
+    // walk has nothing to do. Skip it. Saves the per-cursor coverage
     // probe on lookups that target glyph subsets the run never
     // contains (very common: every Indic feature dispatched against
     // a run that doesn't carry that feature's anchor consonants).
@@ -1911,7 +1911,7 @@ fn apply_gsub_lookup(
     }
 
     // Forward cursor walk: cursor visits only positions whose glyph
-    // is in the lookup's primary coverage union — HarfBuzz calls
+    // is in the lookup's primary coverage union. HarfBuzz calls
     // this the "digest" walk. Falls back to visiting every position
     // when at least one subtable's primary coverage isn't a single
     // `Coverage` table (chain-context format 1/2, reverse-chain).
@@ -2104,7 +2104,7 @@ fn apply_gsub_lookup_at(
 /// `glyphs[at]`; this helper only performs the drain.
 ///
 /// `positions` is the relative-offset list returned by
-/// [`Ligature::apply_filtered`] — `positions[0] == 0` (the
+/// [`Ligature::apply_filtered`]: `positions[0] == 0` (the
 /// already-consumed first component), and every subsequent entry is
 /// the index of a matched component inside `glyphs[at..]`. Any
 /// index strictly inside the span that is *not* listed is a skipped
@@ -2134,7 +2134,7 @@ fn apply_gsub_context_at(
     at: usize,
     depth: u8,
 ) -> usize {
-    // Match against the shadow `ids` slice — no per-cursor allocation.
+    // Match against the shadow `ids` slice: no per-cursor allocation.
     // Records that need to outlive the match call get cloned into a
     // small heap buffer so we can release the borrow on `ids` before
     // dispatching nested lookups (which mutate `ids` via the glyphs
@@ -2218,7 +2218,7 @@ fn apply_gsub_chain_context_at(
 /// input window and dispatches each nested lookup at the matching
 /// absolute glyph position. `sequence_index` counts *unfiltered*
 /// input positions, so we walk the skip-iterator `seq_idx` times
-/// from `at` to find the corresponding raw index — marks (or other
+/// from `at` to find the corresponding raw index. Marks (or other
 /// skipped glyphs) between matched components never appear in the
 /// sequence-index space.
 #[allow(clippy::too_many_arguments)]
@@ -2259,7 +2259,7 @@ fn apply_nested_gsub_lookups(
             }
             walked
         };
-        // Nested alternate lookups always pick index 0 — feature
+        // Nested alternate lookups always pick index 0: feature
         // value-based selection is a top-level concept and does not
         // propagate into a recursed lookup.
         apply_gsub_lookup_at(
@@ -2321,7 +2321,7 @@ fn apply_reverse_chain_subtable(rc: &ReverseChain<'_>, glyphs: &mut [Glyph]) {
     }
 }
 
-/// Walks the default LangSys (DFLT → first script) and returns the
+/// Walks the default LangSys (DFLT -> first script) and returns the
 /// sorted set of lookup indices that the feature `tag` selects. A
 /// return value of `None` means no usable script, `Some(empty)`
 /// means the LangSys does not carry this feature.
@@ -2334,7 +2334,7 @@ fn lookup_indices_for_feature(gsub: &Gsub<'_>, tag: [u8; 4]) -> Option<Vec<u16>>
 /// the `script_priority` tags in order and returns lookup indices
 /// for the first script that carries the requested feature tag. A
 /// script that exists but lacks the feature simply yields an empty
-/// lookup list — falls through to the next priority. If none of
+/// lookup list. Falls through to the next priority. If none of
 /// the priority scripts carry the feature, falls back to DFLT then
 /// the first script in the table (matching the generic-path
 /// default).
@@ -2348,7 +2348,7 @@ fn lookup_indices_for_feature_in_scripts(
 
     // Try each requested script in order; the first one that carries
     // the feature wins. Scripts present but lacking this tag still
-    // count as "found" and stop the fallback chain — matches how
+    // count as "found" and stop the fallback chain. Matches how
     // HarfBuzz treats per-script feature overrides.
     for tag_pri in script_priority {
         let Some(script) = script_list.find(*tag_pri) else {
@@ -2412,7 +2412,7 @@ fn lookup_indices_for_feature_in_scripts(
 /// finder to tag post-halant consonants as below-base (POS_BELOW_C)
 /// when the font's `blwf` feature contains a substitution that would
 /// consume `virama + consonant` (new-spec) or `consonant + virama`
-/// (old-spec) — mirrors HarfBuzz's `consonant_position_from_face`.
+/// (old-spec). Mirrors HarfBuzz's `consonant_position_from_face`.
 ///
 /// The implementation is a dry-run: copy the candidate glyph slice
 /// into a throw-away buffer, run the feature's lookups over it, and
@@ -2432,7 +2432,7 @@ pub(crate) fn feature_would_substitute(
     if glyph_ids.is_empty() {
         return false;
     }
-    // Build a throw-away glyph slice — cluster values don't matter,
+    // Build a throw-away glyph slice: cluster values don't matter,
     // only glyph ids survive the dry run. Start clusters at 0 so a
     // ligature merge collapses them to 0 deterministically.
     let mut scratch: Vec<Glyph> = glyph_ids
@@ -2459,12 +2459,12 @@ pub(crate) fn feature_would_substitute(
 /// Applies every GPOS lookup reachable via the named feature tag
 /// to the glyph run in place. Supports lookup types:
 ///
-/// - 1 — Single adjustment (uniform or per-glyph ValueRecord)
-/// - 2 — Pair adjustment (kern)
-/// - 4 — Mark-to-base attachment (mark)
-/// - 5 — Mark-to-ligature attachment (mark on ligature components)
-/// - 6 — Mark-to-mark attachment (mkmk stacking)
-/// - 9 — Extension (unwraps, re-dispatches)
+/// - 1: Single adjustment (uniform or per-glyph ValueRecord)
+/// - 2: Pair adjustment (kern)
+/// - 4: Mark-to-base attachment (mark)
+/// - 5: Mark-to-ligature attachment (mark on ligature components)
+/// - 6: Mark-to-mark attachment (mkmk stacking)
+/// - 9: Extension (unwraps, re-dispatches)
 ///
 /// Returns `true` when at least one subtable of a supported type
 /// actually ran. Callers use this to decide whether to fall back
@@ -2610,8 +2610,8 @@ fn apply_gpos_feature_in_scripts_with_var(
 }
 
 /// Applies a nested GPOS lookup at one specific position in the
-/// run. Unlike `apply_gsub_lookup_at` the run length is stable —
-/// positioning never inserts or deletes glyphs — so there is no
+/// run. Unlike `apply_gsub_lookup_at` the run length is stable.
+/// Positioning never inserts or deletes glyphs, so there is no
 /// return value for "how many glyphs consumed". Context / chained-
 /// context dispatch still needs recursion through this function to
 /// handle nested positioning-of-positioning.
@@ -2865,7 +2865,7 @@ fn apply_gpos_chain_context_at(
     input_len.max(1)
 }
 
-/// See [`apply_nested_gsub_lookups`] — this is the GPOS twin.
+/// See [`apply_nested_gsub_lookups`]. This is the GPOS twin.
 #[allow(clippy::too_many_arguments)]
 fn apply_nested_gpos_lookups(
     gpos: &Gpos<'_>,
@@ -2999,7 +2999,7 @@ fn apply_single_pos(
 /// Walks the run and, for each mark glyph (per GDEF), finds the
 /// nearest preceding base and attaches via the subtable's anchor
 /// tables. Without GDEF we cannot distinguish marks from bases and
-/// the pass is a no-op — that matches HarfBuzz's behaviour.
+/// the pass is a no-op. That matches HarfBuzz's behavior.
 ///
 /// The lookup's `LookupFlag` gates which marks participate. A lookup
 /// that carries a `UseMarkFilteringSet` or `MarkAttachmentType`
@@ -3052,7 +3052,7 @@ fn apply_mark_base(
         let dy = i32::from(attach.base_anchor.y) - i32::from(attach.mark_anchor.y);
         glyphs[i].x_offset += dx;
         glyphs[i].y_offset += dy;
-        // Marks do not advance the pen — replace whatever hmtx
+        // Marks do not advance the pen. Replace whatever hmtx
         // reported with zero so successive text lines up.
         glyphs[i].x_advance = 0;
     }
@@ -3165,7 +3165,7 @@ fn apply_mark_mark(
     }
 }
 
-/// AAT `morx` substitution pass — runs only when the font has no
+/// AAT `morx` substitution pass: runs only when the font has no
 /// GSUB. The morx parser returns a new glyph id stream plus an
 /// origin vector; each output index carries the input index it was
 /// derived from (or the smallest input index for a ligature). We
@@ -3180,7 +3180,7 @@ fn apply_morx(morx: &Morx<'_>, glyphs: &mut Vec<Glyph>) {
     let input_ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
     let (out_ids, origins) = morx.apply(&input_ids);
     if out_ids.len() == glyphs.len() && out_ids == input_ids {
-        return; // no change — avoid needless allocation
+        return; // no change: avoid needless allocation
     }
     let mut rebuilt: Vec<Glyph> = Vec::with_capacity(out_ids.len());
     for (out_idx, &gid) in out_ids.iter().enumerate() {
@@ -3190,7 +3190,7 @@ fn apply_morx(morx: &Morx<'_>, glyphs: &mut Vec<Glyph>) {
             g.glyph_id = u32::from(gid);
             rebuilt.push(g);
         } else {
-            // Synthesised output with no single origin — rare; fall
+            // Synthesized output with no single origin: rare; fall
             // back to the lowest available cluster so layout does
             // not confuse renderer-side grapheme tracking.
             let cluster = glyphs.first().map_or(0, |g| g.cluster);
@@ -3211,7 +3211,7 @@ fn apply_morx(morx: &Morx<'_>, glyphs: &mut Vec<Glyph>) {
 /// - Format 1 (state-machine) walks the run through an AAT state
 ///   table; each value-list pop targets a single stacked glyph and
 ///   the delta is applied directly to that glyph's `x_advance`. No
-///   half-split — the state machine already chose which glyph to
+///   half-split: the state machine already chose which glyph to
 ///   land on (typically the left of the pair).
 fn apply_kerx(face: &Face<'_>, kerx: &Kerx<'_>, glyphs: &mut [Glyph]) -> Result<()> {
     if glyphs.is_empty() {
@@ -3248,18 +3248,18 @@ fn apply_kerx(face: &Face<'_>, kerx: &Kerx<'_>, glyphs: &mut [Glyph]) -> Result<
 ///
 /// Three event types appear:
 ///
-/// - **Coordinates** (action type 2) — inline FUnit deltas; resolves
+/// - **Coordinates** (action type 2): inline FUnit deltas; resolves
 ///   directly to `(mark - current)` without external lookups.
-/// - **ControlPoints** (action type 0) — pairs of glyf-point indices.
+/// - **ControlPoints** (action type 0): pairs of glyf-point indices.
 ///   [`Face::glyph_points`] returns the points in glyf-natural order
 ///   (contour points + 4 phantoms); the offset comes from
 ///   `mark[mpi] - current[cpi]`.
-/// - **AnchorPoints** (action type 1) — pairs of `ankr` indices.
+/// - **AnchorPoints** (action type 1): pairs of `ankr` indices.
 ///   [`crate::tables::Ankr::anchor_for`] maps `(gid, idx)` to
 ///   `(x, y)`; same `mark - current` math.
 ///
 /// Per #166's contract, an out-of-range index, a missing `ankr`
-/// table, or a CFF-only font (no glyf) drops the kern silently —
+/// table, or a CFF-only font (no glyf) drops the kern silently,
 /// matching the type-2 path's conservative posture for malformed
 /// records. Errors only bubble when a *parsed* table turns out to
 /// be malformed mid-walk.
@@ -3267,7 +3267,7 @@ fn apply_kerx_format4(face: &Face<'_>, kerx: &Kerx<'_>, glyphs: &mut [Glyph]) ->
     let ids: alloc::vec::Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
     let ankr = face.ankr()?;
     // Cache `Face::glyph_points` lookups across events. A single run
-    // can fire the same glyph as the mark or current many times — a
+    // can fire the same glyph as the mark or current many times: a
     // long "ABABAB" pattern would otherwise re-flatten A twice per
     // pair. `None` (no points / no glyf / out of range) is a real
     // result and worth caching too.
@@ -3291,8 +3291,8 @@ fn apply_kerx_format4(face: &Face<'_>, kerx: &Kerx<'_>, glyphs: &mut [Glyph]) ->
 
 /// Resolves one [`Kerx4Action`] event to `(current_glyph_index, dx,
 /// dy)`. Returns `Ok(None)` when the event references an unavailable
-/// glyph point / anchor — silent drop, mirroring the type-2 path's
-/// behaviour for malformed records.
+/// glyph point / anchor: silent drop, mirroring the type-2 path's
+/// behavior for malformed records.
 fn resolve_kerx4_event(
     evt: crate::tables::kerx::Kerx4Action,
     face: &Face<'_>,
@@ -3369,7 +3369,7 @@ fn resolve_kerx4_event(
     }
 }
 
-/// Reads `Face::glyph_points(gid)` once per `gid`, memoising the
+/// Reads `Face::glyph_points(gid)` once per `gid`, memoizing the
 /// result. Cloning the cached Vec is cheaper than re-flattening a
 /// composite glyph; callers that want the raw slice should refactor
 /// the caller chain to take a reference, but the current cache shape
@@ -3390,7 +3390,7 @@ fn cached_glyph_points(
 /// Applies deltas from the legacy `kern` table to the glyph run.
 ///
 /// HarfBuzz (and therefore rustybuzz) does not apply the whole
-/// delta to the left glyph — it splits it roughly in half across
+/// delta to the left glyph. It splits it roughly in half across
 /// the pair, with the bigger share landing on the left:
 ///
 /// ```text
@@ -3401,7 +3401,7 @@ fn cached_glyph_points(
 ///
 /// sigilbuzz matches that so legacy-kerned output lines up with
 /// rustybuzz byte-for-byte; the two-sided distribution also keeps
-/// clustering less visible if a renderer quantises advances.
+/// clustering less visible if a renderer quantizes advances.
 fn apply_legacy_kern(kern: &KernTable<'_>, glyphs: &mut [Glyph]) {
     if glyphs.len() < 2 {
         return;
@@ -3427,7 +3427,7 @@ fn apply_legacy_kern(kern: &KernTable<'_>, glyphs: &mut [Glyph]) {
 ///   u32  extensionOffset   (relative to the Extension subtable)
 /// ```
 ///
-/// The inner offset is u32 — that is why Extension exists, to reach
+/// The inner offset is u32. That is why Extension exists, to reach
 /// past the 64k limit a plain Offset16 imposes.
 fn resolve_extension(bytes: &[u8]) -> Option<(u16, &[u8])> {
     if bytes.len() < 8 {
@@ -3452,7 +3452,7 @@ fn apply_pair_pos(
     if glyphs.len() < 2 {
         return;
     }
-    // Precompute the id vector once — the filter cost is one GDEF
+    // Precompute the id vector once: the filter cost is one GDEF
     // lookup per hop, but walking the whole window fresh per index
     // via next_unskipped already avoids revisiting filtered glyphs.
     let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
@@ -3480,7 +3480,7 @@ fn apply_pair_pos(
         }
         // Advance to the position of the second glyph; HarfBuzz uses
         // a per-pair stride so a single glyph can kern against both
-        // its left and right neighbours in one pass.
+        // its left and right neighbors in one pass.
         i = j;
     }
 }
@@ -3513,12 +3513,12 @@ mod tests {
         head.extend_from_slice(&0i16.to_be_bytes()); // indexToLocFormat
         head.extend_from_slice(&0i16.to_be_bytes()); // glyphDataFormat
 
-        // maxp 0.5 — 4 glyphs.
+        // maxp 0.5: 4 glyphs.
         let mut maxp = Vec::new();
         maxp.extend_from_slice(&0x0000_5000u32.to_be_bytes());
         maxp.extend_from_slice(&4u16.to_be_bytes());
 
-        // hhea — numberOfHMetrics = 4.
+        // hhea: numberOfHMetrics = 4.
         let mut hhea = Vec::new();
         hhea.extend_from_slice(&1u16.to_be_bytes()); // majorVersion
         hhea.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
@@ -3530,14 +3530,14 @@ mod tests {
         hhea.extend_from_slice(&0i16.to_be_bytes()); // metricDataFormat
         hhea.extend_from_slice(&4u16.to_be_bytes()); // numberOfHMetrics
 
-        // hmtx — (advance, lsb) x 4.
+        // hmtx: (advance, lsb) x 4.
         let mut hmtx = Vec::new();
         for (adv, lsb) in &[(0u16, 0i16), (500, 0), (600, 0), (700, 0)] {
             hmtx.extend_from_slice(&adv.to_be_bytes());
             hmtx.extend_from_slice(&lsb.to_be_bytes());
         }
 
-        // cmap — format 4 mapping 'A'..='C' to glyphs 1..=3.
+        // cmap: format 4 mapping 'A'..='C' to glyphs 1..=3.
         // idDelta = -64 gives: 'A' (0x41) -> 1, 'B' -> 2, 'C' -> 3.
         let cmap_sub = build_format4(&[(b'A' as u16, b'C' as u16, -64)]);
         let cmap = build_cmap_wrapper(&[(3, 1, cmap_sub)]);
@@ -3668,8 +3668,8 @@ mod tests {
     fn normalize_nfc_flag_collapses_decomposed_input() {
         // Test font has no cmap entry for 'e', combining acute, or
         // precomposed 'é', so every path ends up at .notdef. The
-        // meaningful difference is glyph count: NFC off → 2 glyphs
-        // (e + combining acute both go to .notdef); NFC on → 1 glyph
+        // meaningful difference is glyph count: NFC off -> 2 glyphs
+        // (e + combining acute both go to .notdef); NFC on -> 1 glyph
         // (the pair composes to 'é' before cmap).
         let data = build_shapeable_font();
         let blob = Blob::new(&data);
@@ -3734,7 +3734,7 @@ mod tests {
     /// table carrying whatever lookup subtables the caller provides.
     /// Each entry of `lookups` is `(lookup_type, subtable_bytes)`;
     /// only the lookup indices in `feature_indices` fire from the
-    /// top-level `test` feature — the rest are still in the
+    /// top-level `test` feature. The rest are still in the
     /// LookupList so nested-lookup dispatch can reach them.
     fn build_shapeable_font_with_gsub(
         lookups: &[(u16, Vec<u8>)],
@@ -3937,8 +3937,8 @@ mod tests {
     #[test]
     fn gsub_context_fmt3_runs_nested_single_substitution() {
         // Setup: shape "ABC" where glyph A=1, B=2, C=3.
-        // Lookup 0: single-sub that rewrites glyph 2 → 9.
-        // Lookup 1: context fmt 3 — input = cov{1}, cov{2}, cov{3};
+        // Lookup 0: single-sub that rewrites glyph 2 -> 9.
+        // Lookup 1: context fmt 3, input = cov{1}, cov{2}, cov{3};
         //           nested lookup (seq=1, lk=0) i.e. fire lookup 0 on
         //           the B position.
         let single = build_single_fmt2_subst(&[2], &[9]);
@@ -4007,7 +4007,7 @@ mod tests {
         // Rule: for first glyph of class 2 (vowels B, E), if the
         // preceding glyph is class 1 (A/D) and the following glyph
         // is class 3 (C), run nested single-sub at seq 0 that maps
-        // B→7, E→8 (glyph in slot 7/8).
+        // B->7, E->8 (glyph in slot 7/8).
         //
         // Lookup layout:
         //   Lookup 0: single-sub explicit, coverage={2,5}, subs={7,8}.
@@ -4020,7 +4020,7 @@ mod tests {
         //   u16 backtrackClassDefOffset
         //   u16 inputClassDefOffset
         //   u16 lookaheadClassDefOffset
-        //   u16 classSetCount (4 — classes 0..=3, nulls for 0, 1, 3)
+        //   u16 classSetCount (4: classes 0..=3, nulls for 0, 1, 3)
         //   u16 classSetOffsets[]
         let mut cc = Vec::new();
         cc.extend_from_slice(&2u16.to_be_bytes()); // format
@@ -4079,7 +4079,7 @@ mod tests {
             value: 1,
         }];
 
-        // "ABC": A=class1, B=class2, C=class3 -> fires, B→7.
+        // "ABC": A=class1, B=class2, C=class3 -> fires, B->7.
         let mut buf = Buffer::new();
         buf.push_str("ABC");
         let out = shape(&font, &buf, &features).unwrap();
@@ -4087,7 +4087,7 @@ mod tests {
         assert_eq!(out.glyphs[0].glyph_id, 1); // A unchanged
         assert_eq!(out.glyphs[2].glyph_id, 3); // C unchanged
 
-        // "DEC": D=class1, E=class2, C=class3 -> fires, E→8.
+        // "DEC": D=class1, E=class2, C=class3 -> fires, E->8.
         let mut buf = Buffer::new();
         buf.push_str("DEC");
         let out = shape(&font, &buf, &features).unwrap();
@@ -4113,13 +4113,13 @@ mod tests {
         // Fixture: glyphs 1=A, 2=B, 3=C, 4=D, 5=E, 6=F.
         //
         // Reverse-chain rule: cover {2,5} (B, E). When lookahead is
-        // {3,6} (C, F) substitute B→7, E→8. No backtrack.
+        // {3,6} (C, F) substitute B->7, E->8. No backtrack.
         //
         // "BECF": walked right-to-left:
         //   pos 3 (F): not in coverage, skip.
         //   pos 2 (C): not in coverage, skip.
         //   pos 1 (E): cov idx = 1 -> sub 8; lookahead glyph is
-        //              currently C which is in {3,6}; substitute E→8.
+        //              currently C which is in {3,6}; substitute E->8.
         //   pos 0 (B): cov idx = 0 -> sub 7; lookahead glyph is
         //              (post-sub) 8 which is NOT in {3,6}, so reject.
         // Expected out: [B=2, E->8, C=3, F=6].
@@ -4176,7 +4176,7 @@ mod tests {
         //
         // The subtable matches any single glyph at pos i (input
         // coverage = {all glyphs 1..=6}), no backtrack/lookahead,
-        // and fires lookup 0 at seq 0 — the lookup itself.
+        // and fires lookup 0 at seq 0 (the lookup itself).
         let mut chain = Vec::new();
         chain.extend_from_slice(&3u16.to_be_bytes()); // format
         chain.extend_from_slice(&0u16.to_be_bytes()); // backtrack count

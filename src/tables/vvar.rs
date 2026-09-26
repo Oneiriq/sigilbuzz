@@ -1,9 +1,9 @@
-//! `VVAR` — Vertical Metrics Variations.
+//! `VVAR`: Vertical Metrics Variations.
 //!
 //! HVAR's vertical sibling. Carries per-glyph advance-height and
 //! top-side-bearing deltas for a variable font that supports
 //! vertical layout. Without VVAR a variable font with `vmtx` keeps
-//! the same advances at every axis instance — which works for
+//! the same advances at every axis instance, which works for
 //! horizontal-only fonts but loses correctness for CJK / vertical
 //! Latin runs whose vertical metrics need to track weight or
 //! width changes.
@@ -14,14 +14,14 @@
 //!   u16       majorVersion = 1
 //!   u16       minorVersion = 0
 //!   Offset32  itemVariationStoreOffset
-//!   Offset32  advanceHeightMappingOffset      (may be 0 — use gid)
+//!   Offset32  advanceHeightMappingOffset      (may be 0, use gid)
 //!   Offset32  tsbMappingOffset                (optional)
 //!   Offset32  bsbMappingOffset                (optional, unused here)
 //!   Offset32  vorgMappingOffset               (optional, unused here)
 //! ```
 //!
 //! Each mapping offset, when non-zero, points at a
-//! `DeltaSetIndexMap` (glyph id → `(outer, inner)`). The decoder
+//! `DeltaSetIndexMap` (glyph id -> `(outer, inner)`). The decoder
 //! is shared with [`super::hvar`].
 
 use crate::error::{Error, Result};
@@ -100,7 +100,7 @@ impl<'a> Vvar<'a> {
 }
 
 /// Reads a `(outer, inner)` index pair from a `DeltaSetIndexMap`.
-/// Identical to HVAR's helper — kept private to each module so the
+/// Identical to HVAR's helper, kept private to each module so the
 /// two parsers stay independent if the mapping format ever forks
 /// for one of them.
 fn read_index_map(data: &[u8], start: usize, glyph_id: u16) -> Option<(u16, u16)> {
@@ -225,7 +225,7 @@ mod tests {
         let bytes = build_vvar_without_maps(&ivs);
         let vvar = Vvar::parse(&bytes).unwrap();
         assert!((vvar.advance_height_delta(0, &[1.0]) - 80.0).abs() < 1e-3);
-        // GID 1 has no item — yields zero, not panic.
+        // GID 1 has no item: yields zero, not panic.
         assert!(vvar.advance_height_delta(1, &[1.0]).abs() < 1e-6);
     }
 
@@ -247,7 +247,7 @@ mod tests {
     }
 
     /// When the table doesn't ship a tsb mapping the helper
-    /// returns `None` — distinct from "mapping present but glyph
+    /// returns `None`, distinct from "mapping present but glyph
     /// has no entry". Lets consumers tell the two cases apart.
     #[test]
     fn missing_tsb_map_returns_none() {
@@ -278,11 +278,11 @@ mod tests {
         out.extend_from_slice(&ivs);
 
         // DeltaSetIndexMap: format 0 (u16 mapCount).
-        // entryFormat: 0x00 → 1 byte per entry, 1 inner bit.
+        // entryFormat: 0x00 -> 1 byte per entry, 1 inner bit.
         let map_off = out.len() as u32;
         out[tsb_off_slot..tsb_off_slot + 4].copy_from_slice(&map_off.to_be_bytes());
         out.push(0); // format
-        out.push(0); // entryFormat — 1 byte entries, inner bits = 1
+        out.push(0); // entryFormat: 1 byte entries, inner bits = 1
         out.extend_from_slice(&1u16.to_be_bytes()); // mapCount
         out.push(0); // single entry: outer=0, inner=0
 

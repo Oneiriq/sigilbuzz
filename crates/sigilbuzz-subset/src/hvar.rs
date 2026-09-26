@@ -1,7 +1,7 @@
 //! `HVAR` subsetting.
 //!
 //! HVAR carries per-glyph advance-width deltas as
-//! `(outer, inner) → ItemVariationStore` lookups. The outer index
+//! `(outer, inner) -> ItemVariationStore` lookups. The outer index
 //! selects an `ItemVariationData` subtable; the inner index picks a
 //! delta row within it. The mapping from gid to `(outer, inner)` is
 //! either implicit (`outer = 0`, `inner = gid`) or explicit via a
@@ -13,18 +13,18 @@
 //! - a fresh `ItemVariationStore` containing only the referenced
 //!   rows (deduped across the source so rows shared between glyphs
 //!   stay shared in the output),
-//! - a fresh `DeltaSetIndexMap` mapping `new_gid → (0, new_inner)`
+//! - a fresh `DeltaSetIndexMap` mapping `new_gid -> (0, new_inner)`
 //!   in `format 0` (compact `u16` map count) when the inner range
 //!   fits, else `format 1` for big subsets.
 //!
-//! The output store always uses outer index 0 — we never bother with
+//! The output store always uses outer index 0. We never bother with
 //! multiple subtables. The OpenType spec permits multiple outer
 //! groupings to enable better delta packing per group, but for the
 //! sizes a font subsetter produces the savings are negligible
 //! against the rest of the table and the single-outer layout keeps
 //! the rewriter trivial. Glyphs with no source row map to
 //! `(0, 0)` of the output, where row 0 is a synthesized all-zero
-//! row — equivalent to "no advance variation for this gid".
+//! row, equivalent to "no advance variation for this gid".
 
 use alloc::vec::Vec;
 
@@ -51,7 +51,7 @@ pub(crate) fn subset_hvar(
         .get(parsed.store_off..)
         .ok_or(SubsetError::Unsupported("HVAR store offset past end"))?;
 
-    // Step 1 — pull each kept gid's source row. Glyphs missing from
+    // Step 1: pull each kept gid's source row. Glyphs missing from
     // the source map (or out of range) yield None and are routed
     // through the synthesized zero-row in the output.
     let mut pulled_rows: Vec<PulledRow> = Vec::with_capacity(kept.len() + 1);
@@ -60,7 +60,7 @@ pub(crate) fn subset_hvar(
         region_indexes: Vec::new(),
         deltas: Vec::new(),
     });
-    // Map `new_gid → output_inner_index`. We assign inner indexes in
+    // Map `new_gid -> output_inner_index`. We assign inner indexes in
     // first-appearance (i.e. kept order) so the layout is
     // deterministic; identical source rows are deduped onto the same
     // inner slot to keep the table small.
@@ -73,7 +73,7 @@ pub(crate) fn subset_hvar(
             match read_index_map(hvar_bytes, parsed.advance_map_off as usize, old_gid) {
                 Some(p) => p,
                 None => {
-                    // No mapping → falls back to the synthesized
+                    // No mapping -> falls back to the synthesized
                     // zero row at output inner 0.
                     new_inner_per_gid[new_gid] = 0;
                     continue;
@@ -105,17 +105,17 @@ pub(crate) fn subset_hvar(
         }
     }
 
-    // Step 2 — rebuild the ItemVariationStore from the pulled rows.
+    // Step 2: rebuild the ItemVariationStore from the pulled rows.
     let (axis_count, regions) = read_regions(store_bytes)?;
     let rebuilt = rebuild_store(&pulled_rows, axis_count, &regions);
 
-    // Step 3 — build the new DeltaSetIndexMap mapping
-    // new_gid → (0, new_inner). Pick the densest format the inner
+    // Step 3: build the new DeltaSetIndexMap mapping
+    // new_gid -> (0, new_inner). Pick the densest format the inner
     // range allows.
     let max_inner = new_inner_per_gid.iter().copied().max().unwrap_or(0);
     let map_bytes = build_index_map(&new_inner_per_gid, max_inner);
 
-    // Step 4 — assemble the HVAR header.
+    // Step 4: assemble the HVAR header.
     let mut out: Vec<u8> = Vec::with_capacity(20 + map_bytes.len() + rebuilt.bytes.len());
     out.extend_from_slice(&1u16.to_be_bytes()); // major
     out.extend_from_slice(&0u16.to_be_bytes()); // minor
@@ -225,7 +225,7 @@ fn rows_equal(a: &PulledRow, b: &PulledRow) -> bool {
 }
 
 /// Builds a fresh `DeltaSetIndexMap`. Outer is always 0, so each
-/// entry's outer-bit slice is zero — we encode the inner index
+/// entry's outer-bit slice is zero. We encode the inner index
 /// alone in the densest fitting form.
 ///
 /// The choice between `format 0` (u16 mapCount) and `format 1`
@@ -353,7 +353,7 @@ mod tests {
         let new_hvar = ParsedHvar::parse(&new_bytes).expect("parse subset HVAR");
         let coords = face.fvar().unwrap().unwrap().normalize_coords(&[900.0]);
         // Whatever the source had for .notdef, the output must
-        // honour it. .notdef is typically invariant (delta 0).
+        // honor it. .notdef is typically invariant (delta 0).
         let got = new_hvar.advance_delta(0, &coords);
         let want = face.hvar().unwrap().unwrap().advance_delta(0, &coords);
         assert!((got - want).abs() <= 1.0);

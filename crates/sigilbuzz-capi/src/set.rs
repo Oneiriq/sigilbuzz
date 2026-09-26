@@ -1,4 +1,4 @@
-//! `hb_set_t` — opaque integer set used by the subset and
+//! `hb_set_t`: opaque integer set used by the subset and
 //! introspection bridges.
 //!
 //! HarfBuzz's `hb_set_t` is a refcounted, mutable, sparse set of
@@ -6,7 +6,7 @@
 //! "glyph set" inputs, and the introspection helpers
 //! (`hb_face_collect_unicodes` / `hb_ot_layout_collect_features`)
 //! hand back populated sets. We back it with an
-//! `Arc<RefCell<BTreeSet<u32>>>` — `BTreeSet` keeps iteration in
+//! `Arc<RefCell<BTreeSet<u32>>>`. `BTreeSet` keeps iteration in
 //! ascending order (the contract `hb_set_next` advertises) and
 //! `Arc<RefCell<...>>` lets the same set be observed through multiple
 //! refcount handles, mirroring HarfBuzz's "an `hb_subset_input_t`
@@ -18,9 +18,9 @@
 //!
 //! # Refcount contract
 //!
-//! - `hb_set_create` → refcount 1.
-//! - `hb_set_reference(set)` → refcount + 1, returns a fresh handle.
-//! - `hb_set_destroy(set)` → refcount - 1, frees the BTreeSet when it
+//! - `hb_set_create` -> refcount 1.
+//! - `hb_set_reference(set)` -> refcount + 1, returns a fresh handle.
+//! - `hb_set_destroy(set)` -> refcount - 1, frees the BTreeSet when it
 //!   hits zero.
 
 extern crate alloc;
@@ -41,10 +41,10 @@ pub struct hb_set_t {
 }
 
 // SAFETY: `RefCell` is `!Sync`, but every access is gated by the C
-// ABI surface — the C caller never holds a `&` to the underlying
+// ABI surface: the C caller never holds a `&` to the underlying
 // BTreeSet across a callback boundary. The Send/Sync claims here
 // match the contract HarfBuzz itself documents: an `hb_set_t` is
-// safe to share between threads as long as accesses are serialised
+// safe to share between threads as long as accesses are serialized
 // externally. See the module-level note on the safety story.
 unsafe impl Send for hb_set_t {}
 unsafe impl Sync for hb_set_t {}
@@ -204,7 +204,7 @@ pub unsafe extern "C" fn hb_set_next(set: *const hb_set_t, codepoint: *mut u32) 
     let next = unsafe {
         (*set).with_inner(|s| {
             if current == u32::MAX {
-                // Sentinel "before the first member" — pick the
+                // Sentinel "before the first member": pick the
                 // smallest entry. HarfBuzz documents
                 // `HB_SET_VALUE_INVALID == 0xFFFFFFFFu`.
                 s.iter().next().copied()

@@ -1,5 +1,5 @@
 /*
- * test_introspect.c — drives hb_face_collect_unicodes and
+ * test_introspect.c: drives hb_face_collect_unicodes and
  * hb_ot_layout_collect_features against Open Sans.
  *
  * Both helpers populate an `hb_set_t` the caller hands in. The test

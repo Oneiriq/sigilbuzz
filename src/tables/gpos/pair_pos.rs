@@ -1,4 +1,4 @@
-//! GPOS lookup type 2 — Pair Adjustment.
+//! GPOS lookup type 2: Pair Adjustment.
 //!
 //! Pair adjustment is the mechanism that delivers kerning. Given two
 //! adjacent glyphs `(first, second)`, the lookup returns a pair of
@@ -8,11 +8,11 @@
 //!
 //! Two subtable formats exist:
 //!
-//! - **Format 1** — one explicit entry per pair. Fast to look up;
+//! - **Format 1**: one explicit entry per pair. Fast to look up;
 //!   used by small fonts or by fonts that hand-tune unusual pairs.
-//! - **Format 2** — class-based. Every glyph is assigned a first
+//! - **Format 2**: class-based. Every glyph is assigned a first
 //!   class and a second class via [`ClassDef`] tables, and the
-//!   adjustment for a pair is a single lookup into a `class1 ×
+//!   adjustment for a pair is a single lookup into a `class1 *
 //!   class2` matrix. Used by every serious Latin font because it
 //!   compresses thousands of individual pair rules into a small
 //!   grid.
@@ -22,7 +22,7 @@ use crate::tables::gpos::value_record::ValueRecord;
 use crate::tables::layout::{ClassDef, Coverage};
 use crate::tables::parse::Reader;
 
-/// A parsed Pair Adjustment subtable — either format 1 or format 2.
+/// A parsed Pair Adjustment subtable, either format 1 or format 2.
 #[derive(Debug, Clone)]
 pub enum PairPos<'a> {
     /// Explicit per-pair entries.
@@ -50,7 +50,7 @@ impl<'a> PairPos<'a> {
     ///
     /// Returns the pair of `ValueRecord`s (which the shaper applies
     /// to the two glyphs) or `None` if the pair is not covered. A
-    /// pair with all-zero fields is returned as `Some` — the lookup
+    /// pair with all-zero fields is returned as `Some`. The lookup
     /// hit but happened to have no delta, which is still different
     /// from "no rule."
     pub fn lookup(&self, first: u16, second: u16) -> Option<(ValueRecord, ValueRecord)> {
@@ -136,7 +136,7 @@ impl<'a> PairPosFormat1<'a> {
         let record_size =
             2 + ValueRecord::size(self.value_format1) + ValueRecord::size(self.value_format2);
 
-        // Binary search over the PairSet — secondGlyph ids are sorted.
+        // Binary search over the PairSet: secondGlyph ids are sorted.
         let mut lo: u16 = 0;
         let mut hi: u16 = pair_count;
         while lo < hi {
@@ -164,7 +164,7 @@ impl<'a> PairPosFormat1<'a> {
 // Format 2
 // ---------------------------------------------------------------------------
 
-/// Pair Adjustment, format 2. A class1 × class2 grid of
+/// Pair Adjustment, format 2. A class1 x class2 grid of
 /// `ValueRecord` pairs. Every glyph that the coverage table
 /// mentions gets its class1 from `classDef1`; the second glyph's
 /// class is looked up in `classDef2` unconditionally (coverage
@@ -410,7 +410,7 @@ mod tests {
     fn format2_class_matrix_lookup_returns_expected_delta() {
         // Coverage: glyphs 10, 11. classDef1: both in class 1.
         // classDef2: glyphs 20..=22 in classes 0, 1, 2.
-        // Matrix 2×3 (class1 × class2):
+        // Matrix 2x3 (class1 x class2):
         //   class1=0: [0, 0, 0]          (unused since covered glyphs are class 1)
         //   class1=1: [0, -25, -15]
         let covered = &[10, 11];
@@ -421,11 +421,11 @@ mod tests {
         let bytes = build_pair_pos_format2(covered, &class_def1, &class_def2, matrix);
         let pp = PairPos::parse(&bytes).unwrap();
 
-        // Pair (10, 21) → class1=1, class2=1 → -25.
+        // Pair (10, 21) -> class1=1, class2=1 -> -25.
         let (v1, v2) = pp.lookup(10, 21).unwrap();
         assert_eq!(v1.x_advance, -25);
         assert_eq!(v2, ValueRecord::default());
-        // Pair (11, 22) → class1=1, class2=2 → -15.
+        // Pair (11, 22) -> class1=1, class2=2 -> -15.
         let (v1b, _) = pp.lookup(11, 22).unwrap();
         assert_eq!(v1b.x_advance, -15);
     }

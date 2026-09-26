@@ -12,20 +12,20 @@
 //! Per the Microsoft Tibetan shaping doc, the order is:
 //!
 //! ```text
-//!   ccmp → abvs → blws → calt → liga
+//!   ccmp -> abvs -> blws -> calt -> liga
 //! ```
 //!
-//! - `ccmp` — glyph composition / decomposition (e.g. precomposed
+//! - `ccmp`: glyph composition / decomposition (e.g. precomposed
 //!   stacks vs. base + subjoined sequences).
-//! - `abvs` — above-base substitution. Selects the form of
+//! - `abvs`: above-base substitution. Selects the form of
 //!   above-base vowel signs / marks given the base they ride.
-//! - `blws` — below-base substitution. Selects the subjoined
+//! - `blws`: below-base substitution. Selects the subjoined
 //!   consonant variant for U+0F90..U+0FBC. The bulk of Tibetan
 //!   stacking happens here.
-//! - `calt` — contextual alternates. Tibetan fonts use this for
+//! - `calt`: contextual alternates. Tibetan fonts use this for
 //!   vowel-sign positioning shims and for some punctuation
 //!   variants.
-//! - `liga` — standard ligatures. Optional in Tibetan but kept in
+//! - `liga`: standard ligatures. Optional in Tibetan but kept in
 //!   the chain so a font that ships `liga` lookups under `tibt`
 //!   still gets them.
 //!
@@ -37,7 +37,7 @@
 //!
 //! Tibetan's logical order matches its visual order. A syllable
 //! like ཀྱ (KA + subjoined YA) is encoded U+0F40 U+0FA1, the base
-//! sits left and the subjoined letter directly under — same as
+//! sits left and the subjoined letter directly under, same as
 //! the encoding order. That means the feature pass runs straight
 //! over the run with no pre-pass; a per-syllable splitter would
 //! cost more than it buys.
@@ -46,7 +46,7 @@
 //!
 //! Tibetan fonts register their features under the OpenType script
 //! tag `tibt`. There is no Indic2-style new-tag variant for
-//! Tibetan — `tibt` covers both old and new builds — so the
+//! Tibetan (`tibt` covers both old and new builds), so the
 //! priority list is `[tibt, DFLT]`.
 
 use alloc::vec::Vec;
@@ -65,12 +65,12 @@ pub const TIBT_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"tibt", *b"DFLT"];
 
 /// Tibetan script-specific feature chain.
 ///
-/// Only `abvs` and `blws` need the Tibetan shaper to drive them —
+/// Only `abvs` and `blws` need the Tibetan shaper to drive them:
 /// the above-base substitution runs first so vowel-sign forms
 /// settle before the below-base subjoined consonant pass picks the
 /// stacked variants.
 ///
-/// `ccmp`, `calt`, and `liga` are intentionally not listed here —
+/// `ccmp`, `calt`, and `liga` are intentionally not listed here:
 /// the generic [`crate::shape`] default-GSUB pass applies them
 /// (under the segment's `tibt`/DFLT priority) after this shaper
 /// returns, matching how the Indic shaper interleaves with the
@@ -87,7 +87,7 @@ pub const fn is_tibetan(ch: char) -> bool {
     matches!(ch as u32, 0x0F00..=0x0FFF)
 }
 
-/// Entry point — applies the Tibetan feature chain to one segment
+/// Entry point: applies the Tibetan feature chain to one segment
 /// of `glyphs`. `codepoints` and `glyphs` are 1:1 on entry; after
 /// the call `glyphs` may have shrunk (ligature) or grown (multiple
 /// substitution).
@@ -105,7 +105,7 @@ pub fn shape_tibetan(
     if codepoints.is_empty() || glyphs.is_empty() {
         return;
     }
-    // No reordering pass — Tibetan's logical order matches visual.
+    // No reordering pass: Tibetan's logical order matches visual.
     // Run the feature chain in the documented order. Each call is a
     // no-op when the font does not advertise that feature under
     // `tibt` / DFLT.

@@ -1,25 +1,27 @@
-//! `sigilbuzz-render` — software CPU rasterizer for sigilbuzz.
+//! `sigilbuzz-render`: software CPU rasterizer for sigilbuzz.
 //!
-//! Turns glyph outlines from [`sigilbuzz::Face::glyph_outline`] /
+//! Turns glyph outlines from [`sigilbuzz::Face::glyph_outline`] and
 //! [`sigilbuzz::Face::glyph_outline_at_coords`] into 8-bit alpha
-//! [`Pixmap`]s, and composes COLRv0 layered colour glyphs against a
-//! CPAL palette into RGBA [`ColorPixmap`]s. Pure Rust, no runtime
-//! deps; the rasterizer is a clean-room non-zero-winding trapezoid
-//! scanline algorithm with 256-level anti-aliasing.
+//! [`Pixmap`]s. For color fonts it renders COLRv0 and COLRv1 glyphs,
+//! SVG-in-OT documents, and embedded bitmaps (CBDT, sbix, EBDT) into
+//! premultiplied RGBA [`ColorPixmap`]s. The rasterizer is a clean-room
+//! non-zero-winding trapezoid scanline algorithm with 256-level
+//! anti-aliasing, written in pure Rust. Its only dependency outside
+//! sigilbuzz is `miniz_oxide`, used for PNG compression.
 //!
 //! ```text
 //!   Face                           Pixmap
-//!     │                             ┌──────────────┐
-//!     │ glyph_outline(gid)          │ width: u32   │
-//!     ▼                             │ height: u32  │
-//!   Outline (PathOps)               │ data: Vec<u8>│  (alpha)
-//!     │                             └──────────────┘
-//!     │ flatten curves
-//!     ▼
+//!     |                             +--------------+
+//!     | glyph_outline(gid)          | width: u32   |
+//!     v                             | height: u32  |
+//!   Outline (PathOps)               | data: Vec<u8>|  (alpha)
+//!     |                             +--------------+
+//!     | flatten curves
+//!     v
 //!   Edges per scanline
-//!     │
-//!     │ trapezoid scan + winding
-//!     ▼
+//!     |
+//!     | trapezoid scan + winding
+//!     v
 //!   Pixmap (8-bit alpha)
 //! ```
 //!
@@ -61,7 +63,7 @@
 //! source curve's chord chunk grouped under a [`FlattenedCurve`]
 //! variant. Use this when downstream code needs per-source-Bézier
 //! identity (MSDF RGB edge coloring, signed-distance generators,
-//! etc.) — it replaces the workaround of calling [`flatten`] one
+//! etc.). It replaces the workaround of calling [`flatten`] one
 //! tiny `MoveTo + draw` op pair at a time per Bézier.
 //!
 //! ```
@@ -83,7 +85,7 @@
 //!
 //! # Out of scope
 //!
-//! - sbix `'jp2 '` decoding (deferred — JPEG-2000 is rare in font
+//! - sbix `'jp2 '` decoding (deferred: JPEG-2000 is rare in font
 //!   embeds and would be its own substantial decoder). sbix `'jpg '`
 //!   *is* now decoded via the hand-rolled baseline decoder in
 //!   [`decode_jpeg`], and sbix `'tiff'` is decoded via the baseline

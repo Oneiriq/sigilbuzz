@@ -3,13 +3,14 @@
 //! Slug-encoder bench: outline extraction + flattening + band
 //! decomposition for representative glyphs across two fonts.
 //!
-//! No rustybuzz comparison — rustybuzz does not ship a Slug-style
+//! No rustybuzz comparison: rustybuzz does not ship a Slug-style
 //! GPU outline encoder, so this bench tracks sigilbuzz-gpu against
 //! its own historical numbers in `docs/PERFORMANCE.md`.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use sigilbuzz::{Blob, Face};
 use sigilbuzz_gpu::{encode_glyph, SlugOptions};
+use std::hint::black_box;
 
 const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
 const AMIRI: &[u8] = include_bytes!("../../../tests/fixtures/amiri_regular.ttf");
@@ -28,10 +29,10 @@ fn bench_encode(c: &mut Criterion) {
     let amiri_face = Face::parse(&amiri_blob, 0).expect("parse amiri");
 
     // Representative shapes:
-    //   'A'  — simple, mostly-straight base glyph
-    //   'g'  — descender + closed curve, oblique two-storey
-    //   'O'  — pure oval, all four cubic quadrants
-    //   'ا'  — Arabic alef, long vertical with tiny tail
+    //   'A': simple, mostly-straight base glyph
+    //   'g': descender + closed curve, oblique two-story
+    //   'O': pure oval, all four cubic quadrants
+    //   'ا': Arabic alef, long vertical with tiny tail
     let cases: &[(&str, u16)] = &[
         ("opensans_A", glyph_for(&opens_face, 'A')),
         ("opensans_g", glyph_for(&opens_face, 'g')),

@@ -11,9 +11,9 @@ encoder.
 Output font ``sbix_synthetic.ttf`` carries:
 
 - Two glyphs (``.notdef``, ``smile``) with rectangle outlines.
-- A cmap mapping U+0041 → smile.
+- A cmap mapping U+0041 -> smile.
 - An sbix table at version 1 with one strike at 32 ppem, two glyph
-  data slots — gid 0 empty, gid 1 carrying a 1×1 PNG payload tagged
+  data slots: gid 0 empty, gid 1 carrying a 1x1 PNG payload tagged
   ``'png '``.
 
 Run:

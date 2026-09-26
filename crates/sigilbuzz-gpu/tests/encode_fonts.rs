@@ -3,7 +3,7 @@
 //! These tests load Open Sans (TrueType / glyf) and Amiri (CFF) and
 //! drive [`sigilbuzz_gpu::encode_glyph`] over a representative slice
 //! of glyphs. They assert structural invariants of the encoded
-//! output rather than exact numeric matches — the latter belongs in
+//! output rather than exact numeric matches. The latter belongs in
 //! the unit tests.
 
 use sigilbuzz::Face;
@@ -145,7 +145,7 @@ fn open_sans_ascii_glyphs_encode_cleanly() {
 #[test]
 fn open_sans_first_two_hundred_gids_encode_cleanly() {
     let face = Face::parse_bytes(OPENSANS_BYTES, 0).expect("parse Open Sans");
-    // Dense gid sweep — exercises path cases beyond the cmap-mapped
+    // Dense gid sweep: exercises path cases beyond the cmap-mapped
     // ASCII range (e.g. ligatures, alternates).
     let clean = sweep(&face, 0_u16..200, |_, _| {});
     // Most low gids in Open Sans have outlines; .notdef + a handful
