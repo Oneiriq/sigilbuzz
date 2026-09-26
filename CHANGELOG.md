@@ -76,6 +76,18 @@ Added:
 - `ClassDef::empty` and `ClassDef::parse_at`.
 - `fuzz/`: cargo-fuzz targets for every part of the workspace that reads untrusted
   input. See [fuzz/README.md](fuzz/README.md).
+- cmap format 14, Unicode Variation Sequences: `Cmap::variation_glyph`,
+  `Cmap::variation_selectors`, `Cmap::variation_unicodes`, and `Face::variation_glyph`,
+  read from the subtable under `(0, 5)` as HarfBuzz reads it. Shaping uses it as
+  HarfBuzz's normalizer does: a character followed by a variation selector (U+FE00 to
+  U+FE0F, U+E0100 to U+E01EF) takes the glyph the font gives the pair, or the
+  character's usual glyph for a default sequence, and the selector is dropped with its
+  cluster merged into the character's. Pairs the font does not list shape as before.
+  Output changes only for fonts with a format 14 subtable. A format 14 subtable that
+  does not fit is ignored.
+- `sigilbuzz-capi`: `hb_font_get_nominal_glyph`, `hb_font_get_variation_glyph`,
+  `hb_font_get_glyph`, `hb_face_collect_variation_selectors`, and
+  `hb_face_collect_variation_unicodes`.
 
 Changed:
 

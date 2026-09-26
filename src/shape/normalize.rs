@@ -38,10 +38,10 @@
 //! `glyph_props`); after reordering, one that blocked no reordering is
 //! un-hidden, as in HarfBuzz.
 //!
-//! sigilbuzz's cmap parser has no format 14 subtable, so a base and
-//! variation selector never map to a variant glyph: both map on their
-//! own and GSUB sees them, as HarfBuzz does when the font lacks the
-//! variation.
+//! A character followed by a variation selector maps through the
+//! font's cmap format 14 subtable, as in HarfBuzz: when the font has a
+//! glyph for the sequence, that glyph replaces both characters.
+//! Otherwise both map on their own and GSUB sees them.
 
 mod hooks;
 
@@ -318,15 +318,43 @@ impl Normalizer<'_> {
         }
     }
 
-    /// `handle_variation_selector_cluster`, without cmap format 14: a
-    /// cluster with a variation selector is not normalized; each
+    /// `handle_variation_selector_cluster`: a cluster with a variation
+    /// selector is not normalized. A character followed by a selector
+    /// takes the glyph the font's format 14 subtable gives the pair
+    /// ([`Cmap::variation_glyph`]), and the selector goes away, its
+    /// cluster merged into the character's (`replace_glyphs (2, 1)`).
+    /// When the font has no glyph for the pair, both characters map on
+    /// their own, and so does any further selector. Every other
     /// character maps on its own (glyph 0 when the font lacks it).
     fn map_variation_selector_cluster(&self, cluster: &[NormChar], out: &mut Vec<NormChar>) {
-        out.extend(
-            cluster
-                .iter()
-                .map(|c| c.with_glyph(self.nominal(c.ch).unwrap_or(0))),
-        );
+        let mut chars = cluster.to_vec();
+        let nominal = |c: NormChar| c.with_glyph(self.nominal(c.ch).unwrap_or(0));
+        let mut i = 0;
+        while i + 1 < chars.len() {
+            if !is_variation_selector(chars[i + 1].ch) {
+                out.push(nominal(chars[i]));
+                i += 1;
+                continue;
+            }
+            match self.cmap.variation_glyph(chars[i].ch, chars[i + 1].ch) {
+                Some(glyph) => {
+                    merge_clusters(&mut chars, i, i + 2, self.level);
+                    out.push(chars[i].with_glyph(u32::from(glyph)));
+                }
+                None => {
+                    out.push(nominal(chars[i]));
+                    out.push(nominal(chars[i + 1]));
+                }
+            }
+            i += 2;
+            while i < chars.len() && is_variation_selector(chars[i].ch) {
+                out.push(nominal(chars[i]));
+                i += 1;
+            }
+        }
+        if let Some(&last) = chars.get(i) {
+            out.push(nominal(last));
+        }
     }
 
     /// `decompose_current_character`: maps `cur`, decomposing it when

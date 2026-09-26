@@ -181,6 +181,23 @@ void       hb_font_set_variations(hb_font_t            *font,
                                   const hb_variation_t *variations,
                                   unsigned int          variations_length);
 
+/* Glyph lookups through the cmap. On a miss they return 0 and store 0 in
+ * `glyph`. hb_font_get_variation_glyph reads the format 14 subtable: a
+ * default sequence gives the base character's glyph. hb_font_get_glyph
+ * is hb_font_get_variation_glyph for a nonzero selector and
+ * hb_font_get_nominal_glyph otherwise. */
+hb_bool_t hb_font_get_nominal_glyph(hb_font_t      *font,
+                                    hb_codepoint_t  unicode,
+                                    hb_codepoint_t *glyph);
+hb_bool_t hb_font_get_variation_glyph(hb_font_t      *font,
+                                      hb_codepoint_t  unicode,
+                                      hb_codepoint_t  variation_selector,
+                                      hb_codepoint_t *glyph);
+hb_bool_t hb_font_get_glyph(hb_font_t      *font,
+                            hb_codepoint_t  unicode,
+                            hb_codepoint_t  variation_selector,
+                            hb_codepoint_t *glyph);
+
 /* ---------- Buffer ---------- */
 
 hb_buffer_t *hb_buffer_create(void);
@@ -693,6 +710,13 @@ void hb_font_paint_glyph(hb_font_t *font,
 #define HB_OT_TAG_GPOS HB_TAG('G','P','O','S')
 
 void hb_face_collect_unicodes(const hb_face_t *face, hb_set_t *set);
+
+/* The variation selectors the face's cmap format 14 subtable has records
+ * for, and the base characters it lists with one selector. */
+void hb_face_collect_variation_selectors(const hb_face_t *face, hb_set_t *out);
+void hb_face_collect_variation_unicodes(const hb_face_t *face,
+                                        hb_codepoint_t   variation_selector,
+                                        hb_set_t        *out);
 
 void hb_ot_layout_collect_features(const hb_face_t *face,
                                    hb_tag_t          table_tag,

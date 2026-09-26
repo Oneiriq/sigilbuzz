@@ -131,7 +131,8 @@ pub use face::{
     hb_face_create, hb_face_destroy, hb_face_get_glyph_count, hb_face_get_upem, hb_face_reference,
 };
 pub use font::{
-    hb_font_create, hb_font_destroy, hb_font_get_scale, hb_font_reference, hb_font_set_ppem,
+    hb_font_create, hb_font_destroy, hb_font_get_glyph, hb_font_get_nominal_glyph,
+    hb_font_get_scale, hb_font_get_variation_glyph, hb_font_reference, hb_font_set_ppem,
     hb_font_set_scale, hb_font_set_variations,
 };
 pub use opaque::{hb_blob_t, hb_buffer_t, hb_face_t, hb_font_t};

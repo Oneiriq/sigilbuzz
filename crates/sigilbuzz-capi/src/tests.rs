@@ -203,3 +203,69 @@ fn utf16_input_matches_utf8() {
         hb_buffer_destroy(buf16);
     }
 }
+
+/// `hb_font_get_nominal_glyph`, `hb_font_get_variation_glyph`, and
+/// `hb_font_get_glyph` against a font with a cmap format 14 subtable.
+/// The expected glyphs come from HarfBuzz 14.5.0 (uharfbuzz).
+#[test]
+fn glyph_lookups_match_harfbuzz() {
+    const NOTO_CJK_UVS: &[u8] =
+        include_bytes!("../../../tests/fixtures/noto_sans_cjk_jp_uvs_subset.otf");
+    // SAFETY: every pointer passed here is null or a live handle
+    // created in this test, and each handle is destroyed once.
+    unsafe {
+        let blob = hb_blob_create(
+            NOTO_CJK_UVS.as_ptr().cast::<c_char>(),
+            NOTO_CJK_UVS.len() as c_uint,
+            HB_MEMORY_MODE_READONLY,
+            ptr::null_mut(),
+            None,
+        );
+        let face = hb_face_create(blob, 0);
+        let font = hb_font_create(face);
+        let mut glyph: hb_codepoint_t = 99;
+
+        assert_eq!(hb_font_get_nominal_glyph(font, 0x845B, &mut glyph), 1);
+        assert_eq!(glyph, 12);
+        assert_eq!(hb_font_get_nominal_glyph(font, 0xFE00, &mut glyph), 0);
+        assert_eq!(glyph, 0);
+        // Not a Unicode scalar value.
+        assert_eq!(hb_font_get_nominal_glyph(font, 0xD800, &mut glyph), 0);
+
+        let variations = [
+            (0x845B, 0xE0100, Some(29)),
+            (0x845B, 0xE0101, Some(12)),
+            (0x845B, 0xE0102, None),
+            (0x6F22, 0xFE00, Some(21)),
+            (0x3001, 0xFE00, Some(7)),
+            (0x61, 0xFE00, None),
+            (0x9089, 0xE0100, Some(19)),
+            (0x9089, 0xE0102, Some(33)),
+        ];
+        for (unicode, selector, want) in variations {
+            glyph = 99;
+            let found = hb_font_get_variation_glyph(font, unicode, selector, &mut glyph);
+            assert_eq!(found, hb_bool_t::from(want.is_some()), "{unicode:X}");
+            assert_eq!(glyph, want.unwrap_or(0), "{unicode:X} {selector:X}");
+            glyph = 99;
+            let found = hb_font_get_glyph(font, unicode, selector, &mut glyph);
+            assert_eq!(found, hb_bool_t::from(want.is_some()), "{unicode:X}");
+            assert_eq!(glyph, want.unwrap_or(0), "{unicode:X} {selector:X}");
+        }
+        // A zero selector is a nominal lookup.
+        assert_eq!(hb_font_get_glyph(font, 0x6F22, 0, &mut glyph), 1);
+        assert_eq!(glyph, 10);
+
+        // Null font and null out pointer.
+        assert_eq!(hb_font_get_glyph(ptr::null_mut(), 0x6F22, 0, &mut glyph), 0);
+        assert_eq!(glyph, 0);
+        assert_eq!(
+            hb_font_get_variation_glyph(font, 0x6F22, 0xFE00, ptr::null_mut()),
+            1
+        );
+
+        hb_font_destroy(font);
+        hb_face_destroy(face);
+        hb_blob_destroy(blob);
+    }
+}

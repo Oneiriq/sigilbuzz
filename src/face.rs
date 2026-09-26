@@ -273,6 +273,29 @@ impl<'a> Face<'a> {
         Cmap::parse(self.table_bytes(tag::CMAP)?)
     }
 
+    /// The glyph for the variation sequence `ch` followed by `selector`
+    /// (for example U+FE00 VARIATION SELECTOR-1), or `None` when the
+    /// font does not list the sequence. HarfBuzz's
+    /// `hb_font_get_variation_glyph`. See [`Cmap::variation_glyph`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the error [`Self::cmap`] returns.
+    ///
+    /// ```
+    /// use sigilbuzz::Face;
+    ///
+    /// let data = include_bytes!("../tests/fixtures/noto_sans_cjk_jp_uvs_subset.otf");
+    /// let face = Face::parse_bytes(data, 0)?;
+    /// // U+6F22 with VS1 has its own glyph in this font.
+    /// assert_eq!(face.variation_glyph('\u{6F22}', '\u{FE00}')?, Some(21));
+    /// assert_eq!(face.variation_glyph('a', '\u{FE00}')?, None);
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
+    pub fn variation_glyph(&self, ch: char, selector: char) -> Result<Option<u16>> {
+        Ok(self.cmap()?.variation_glyph(ch, selector))
+    }
+
     /// Parses the `name` table if the font carries one. Used by font
     /// browsers and rendering frontends that surface the family /
     /// subfamily / full name to end users. Returns `Ok(None)` for the
