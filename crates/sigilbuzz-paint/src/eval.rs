@@ -22,9 +22,10 @@ use sigilbuzz::tables::variation_store::ItemVariationStore;
 use sigilbuzz::Face;
 
 use crate::color::Color;
+use crate::deltas::Deltas;
 use crate::gradient::{ColorStop, Extend, Gradient, GradientKind};
 use crate::options::{EvalOptions, Palette};
-use crate::transform::{angle_to_radians, Transform2D};
+use crate::transform::{angle_to_radians, sweep_angle_to_radians, Transform2D};
 
 /// Glyph-id alias. Mirrors the on-disk u16 used throughout sigilbuzz.
 pub type GlyphId = u16;
@@ -32,7 +33,7 @@ pub type GlyphId = u16;
 /// Maximum DAG-walk depth. Defensive cap above and beyond the
 /// visited-set cycle check. A deeply linear chain still exits before
 /// blowing the stack.
-const MAX_DEPTH: usize = 64;
+pub(crate) const MAX_DEPTH: usize = 64;
 
 /// One unit of work emitted by the evaluator.
 ///
@@ -124,18 +125,14 @@ pub fn evaluate_with(face: &Face<'_>, gid: GlyphId, options: &EvalOptions<'_>) -
         return out;
     };
     let cpal = face.cpal().ok().flatten();
-    let var_store = resolve_var_store(&colr).or_else(|| resolve_gdef_var_store(face));
     let Some(root) = colr.paint(gid) else {
         return out;
     };
 
-    let index_map = resolve_index_map(face);
     let mut ctx = EvalCtx {
         colr: &colr,
         palette: Palette::new(cpal.as_ref(), options),
-        var_store: var_store.as_ref(),
-        index_map,
-        coords: options.coords(),
+        deltas: Deltas::new(face, &colr, options.coords()),
         visited: Vec::new(),
         out: &mut out,
     };
@@ -154,16 +151,8 @@ struct EvalCtx<'a, 'b> {
     colr: &'b Colr<'a>,
     /// Selected CPAL palette plus the foreground color.
     palette: Palette<'a, 'b>,
-    var_store: Option<&'b ItemVariationStore<'a>>,
-    /// Optional DeltaSetIndexMap that redirects a paint's
-    /// `var_index_base + field_index` through an indirection table
-    /// before it hits the IVS. Spec-compliant variable color fonts
-    /// use this to share IVS rows across many paint records: without
-    /// it the evaluator would treat `var_index_base` as a literal
-    /// `(outer, inner)` pair, which only works for trivially-laid-out
-    /// IVS subtables.
-    index_map: Option<DeltaSetIndexMap<'a>>,
-    coords: &'b [f32],
+    /// Variation deltas at the requested coordinates.
+    deltas: Deltas<'a, 'b>,
     /// Glyph ids whose paint trees are currently on the walk stack.
     /// `PaintColrGlyph` checks this before recursing.
     visited: Vec<GlyphId>,
@@ -173,7 +162,7 @@ struct EvalCtx<'a, 'b> {
 /// Resolves the var store referenced by the COLRv1 header, if any.
 /// A missing or malformed offset yields `None`; the walker treats that
 /// the same as "no variation deltas".
-fn resolve_var_store<'a>(colr: &Colr<'a>) -> Option<ItemVariationStore<'a>> {
+pub(crate) fn resolve_var_store<'a>(colr: &Colr<'a>) -> Option<ItemVariationStore<'a>> {
     let off = colr.var_store_offset()?;
     let data = colr.data();
     let start = off as usize;
@@ -189,7 +178,7 @@ fn resolve_var_store<'a>(colr: &Colr<'a>) -> Option<ItemVariationStore<'a>> {
 /// GPOS. Without this fallback the evaluator silently emits the
 /// static (no-deltas) output for any such font even when `coords` is
 /// non-empty.
-fn resolve_gdef_var_store<'a>(face: &Face<'a>) -> Option<ItemVariationStore<'a>> {
+pub(crate) fn resolve_gdef_var_store<'a>(face: &Face<'a>) -> Option<ItemVariationStore<'a>> {
     let gdef = face.table_bytes(*b"GDEF").ok()?;
     if gdef.len() < 18 {
         return None;
@@ -215,7 +204,7 @@ fn resolve_gdef_var_store<'a>(face: &Face<'a>) -> Option<ItemVariationStore<'a>>
 /// after `itemVarStoreOffset`. Real-world v1.3 GDEFs leave those
 /// bytes absent, so the lookup returns `None` for them and the
 /// evaluator falls back to the no-indirection path.
-fn resolve_index_map<'a>(face: &Face<'a>) -> Option<DeltaSetIndexMap<'a>> {
+pub(crate) fn resolve_index_map<'a>(face: &Face<'a>) -> Option<DeltaSetIndexMap<'a>> {
     let gdef = face.table_bytes(*b"GDEF").ok()?;
     if gdef.len() < 22 {
         return None;
@@ -244,8 +233,11 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
             num_layers,
             first_layer_index,
         } => {
-            for i in 0..num_layers as u32 {
-                let Some(layer) = ctx.colr.layer_paint(first_layer_index + i) else {
+            for i in 0..u32::from(num_layers) {
+                let Some(layer) = first_layer_index
+                    .checked_add(i)
+                    .and_then(|index| ctx.colr.layer_paint(index))
+                else {
                     return;
                 };
                 walk_paint(ctx, layer, xform, depth + 1);
@@ -405,8 +397,8 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
         } => {
             let dcx = var_delta(ctx, var_index_base, 0);
             let dcy = var_delta(ctx, var_index_base, 1);
-            let dsa = var_delta(ctx, var_index_base, 2);
-            let dea = var_delta(ctx, var_index_base, 3);
+            let dsa = var_delta_f2dot14(ctx, var_index_base, 2);
+            let dea = var_delta_f2dot14(ctx, var_index_base, 3);
             emit_sweep_gradient(
                 ctx,
                 color_line,
@@ -458,13 +450,14 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
             dy,
             var_index_base,
         } => {
+            // Affine2x3 fields are 16.16 Fixed, so deltas are too.
             let m = Transform2D {
-                xx: xx + var_delta(ctx, var_index_base, 0),
-                yx: yx + var_delta(ctx, var_index_base, 1),
-                xy: xy + var_delta(ctx, var_index_base, 2),
-                yy: yy + var_delta(ctx, var_index_base, 3),
-                dx: dx + var_delta(ctx, var_index_base, 4),
-                dy: dy + var_delta(ctx, var_index_base, 5),
+                xx: xx + var_delta_fixed(ctx, var_index_base, 0),
+                yx: yx + var_delta_fixed(ctx, var_index_base, 1),
+                xy: xy + var_delta_fixed(ctx, var_index_base, 2),
+                yy: yy + var_delta_fixed(ctx, var_index_base, 3),
+                dx: dx + var_delta_fixed(ctx, var_index_base, 4),
+                dy: dy + var_delta_fixed(ctx, var_index_base, 5),
             };
             walk_with_transform(ctx, paint_offset, xform, m, depth);
         }
@@ -512,8 +505,8 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
             scale_y,
             var_index_base,
         } => {
-            let dsx = var_delta(ctx, var_index_base, 0);
-            let dsy = var_delta(ctx, var_index_base, 1);
+            let dsx = var_delta_f2dot14(ctx, var_index_base, 0);
+            let dsy = var_delta_f2dot14(ctx, var_index_base, 1);
             walk_with_transform(
                 ctx,
                 paint_offset,
@@ -543,8 +536,8 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
             center_y,
             var_index_base,
         } => {
-            let dsx = var_delta(ctx, var_index_base, 0);
-            let dsy = var_delta(ctx, var_index_base, 1);
+            let dsx = var_delta_f2dot14(ctx, var_index_base, 0);
+            let dsy = var_delta_f2dot14(ctx, var_index_base, 1);
             let dcx = var_delta(ctx, var_index_base, 2);
             let dcy = var_delta(ctx, var_index_base, 3);
             walk_with_transform(
@@ -571,7 +564,7 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
             scale,
             var_index_base,
         } => {
-            let ds = var_delta(ctx, var_index_base, 0);
+            let ds = var_delta_f2dot14(ctx, var_index_base, 0);
             walk_with_transform(
                 ctx,
                 paint_offset,
@@ -599,7 +592,7 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
             center_y,
             var_index_base,
         } => {
-            let ds = var_delta(ctx, var_index_base, 0);
+            let ds = var_delta_f2dot14(ctx, var_index_base, 0);
             let dcx = var_delta(ctx, var_index_base, 1);
             let dcy = var_delta(ctx, var_index_base, 2);
             walk_with_transform(
@@ -626,7 +619,7 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
             angle,
             var_index_base,
         } => {
-            let da = var_delta(ctx, var_index_base, 0);
+            let da = var_delta_f2dot14(ctx, var_index_base, 0);
             walk_with_transform(
                 ctx,
                 paint_offset,
@@ -654,7 +647,7 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
             center_y,
             var_index_base,
         } => {
-            let da = var_delta(ctx, var_index_base, 0);
+            let da = var_delta_f2dot14(ctx, var_index_base, 0);
             let dcx = var_delta(ctx, var_index_base, 1);
             let dcy = var_delta(ctx, var_index_base, 2);
             walk_with_transform(
@@ -686,8 +679,8 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
             y_skew_angle,
             var_index_base,
         } => {
-            let dxa = var_delta(ctx, var_index_base, 0);
-            let dya = var_delta(ctx, var_index_base, 1);
+            let dxa = var_delta_f2dot14(ctx, var_index_base, 0);
+            let dya = var_delta_f2dot14(ctx, var_index_base, 1);
             walk_with_transform(
                 ctx,
                 paint_offset,
@@ -724,8 +717,8 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
             center_y,
             var_index_base,
         } => {
-            let dxa = var_delta(ctx, var_index_base, 0);
-            let dya = var_delta(ctx, var_index_base, 1);
+            let dxa = var_delta_f2dot14(ctx, var_index_base, 0);
+            let dya = var_delta_f2dot14(ctx, var_index_base, 1);
             let dcx = var_delta(ctx, var_index_base, 2);
             let dcy = var_delta(ctx, var_index_base, 3);
             walk_with_transform(
@@ -939,8 +932,8 @@ fn emit_sweep_gradient(
         paint: PaintSource::Gradient(Gradient {
             kind: GradientKind::Sweep {
                 center: (cx, cy),
-                start_angle: angle_to_radians(start_angle),
-                end_angle: angle_to_radians(end_angle),
+                start_angle: sweep_angle_to_radians(start_angle),
+                end_angle: sweep_angle_to_radians(end_angle),
             },
             stops,
             extend,
@@ -961,46 +954,20 @@ fn resolve_stops(
     _var_base: Option<VarIndexBase>,
 ) -> Vec<ColorStop> {
     // VarColorLine carries a per-stop `varIndexBase`; non-var lines
-    // surface `u32::MAX` for that field, which the `delta` lookup
+    // surface `u32::MAX` for that field, which the delta lookup
     // collapses to a zero contribution. We therefore use the same
     // code path for both forms.
     let mut out = Vec::with_capacity(color_line.len() as usize);
-    let coords = ctx.coords;
-    let var_store = ctx.var_store;
-
     for (stop, stop_var) in color_line.stops_variable() {
-        let mut offset = stop.stop_offset;
-        let mut alpha = stop.alpha;
-        if let Some(store) = var_store {
-            if stop_var != u32::MAX && !coords.is_empty() {
-                // Stops route through the same DeltaSetIndexMap as
-                // paint fields when one is present: the per-stop
-                // varIndexBase is treated as a flat index into the
-                // map that resolves to (outer, inner) pairs.
-                let (off_outer, off_inner) = match ctx.index_map.as_ref() {
-                    Some(map) => match map.lookup(stop_var) {
-                        Some(pair) => pair,
-                        None => continue,
-                    },
-                    None => ((stop_var >> 16) as u16, stop_var as u16),
-                };
-                let (a_outer, a_inner) = match ctx.index_map.as_ref() {
-                    Some(map) => match map.lookup(stop_var.wrapping_add(1)) {
-                        Some(pair) => pair,
-                        None => (off_outer, off_inner.wrapping_add(1)),
-                    },
-                    None => (off_outer, off_inner.wrapping_add(1)),
-                };
-                // Stop offset and per-stop alpha are both F2DOT14, so
-                // the IVS' integer delta needs the same /16384 scale
-                // we apply to PaintVarSolid alpha.
-                offset += store.delta(off_outer, off_inner, coords) / 16384.0;
-                alpha += store.delta(a_outer, a_inner, coords) / 16384.0;
-            }
-        }
-        let (color, is_foreground) = ctx.palette.resolve(stop.palette_index, alpha);
+        // A stop whose index-map entry cannot be read is dropped.
+        let Some((d_offset, d_alpha)) = ctx.deltas.stop(stop_var) else {
+            continue;
+        };
+        let (color, is_foreground) = ctx
+            .palette
+            .resolve(stop.palette_index, stop.alpha + d_alpha);
         out.push(ColorStop {
-            offset,
+            offset: stop.stop_offset + d_offset,
             color,
             is_foreground,
         });
@@ -1012,51 +979,20 @@ fn resolve_stops(
 // Variation-store helpers
 // =========================================================================
 
-/// Looks up a variation delta for the `field_index`-th variable field
-/// of a paint that records `var_index_base` as its anchor.
-///
-/// The COLRv1 spec resolves variable fields through one of two paths:
-///
-/// 1. **No indirection (default).** `var_index_base + field_index` is
-///    the on-disk `(outer, inner)` pair; the IVS row at that pair is
-///    the delta source. This is what fonts get when they don't carry
-///    a `varIndexMap`.
-/// 2. **DeltaSetIndexMap indirection.** When the font supplies a
-///    `varIndexMap`, `var_index_base + field_index` is treated as a
-///    *flat index* into the map; the map yields the actual
-///    `(outer, inner)` pair, which then resolves through the IVS.
-///
-/// Returns `0.0` when the var store is absent, `var_index_base` is
-/// the no-deltas sentinel, or `coords` is empty.
+/// Raw delta for a paint field; see [`Deltas::raw`].
 fn var_delta(ctx: &EvalCtx<'_, '_>, var_index_base: VarIndexBase, field_index: u16) -> f32 {
-    if var_index_base == VarIndexBase::MAX || ctx.coords.is_empty() {
-        return 0.0;
-    }
-    let Some(store) = ctx.var_store else {
-        return 0.0;
-    };
-    let flat_index = var_index_base.wrapping_add(u32::from(field_index));
-    let (outer, inner) = if let Some(map) = ctx.index_map.as_ref() {
-        match map.lookup(flat_index) {
-            Some(pair) => pair,
-            None => return 0.0,
-        }
-    } else {
-        ((flat_index >> 16) as u16, flat_index as u16)
-    };
-    store.delta(outer, inner, ctx.coords)
+    ctx.deltas.raw(var_index_base, field_index)
 }
 
-/// Variant of [`var_delta`] for fields whose base values live in
-/// F2DOT14 fixed-point. The OpenType variation spec requires deltas
-/// to share the same units as the field they patch, so an IVS that
-/// stores a raw `int16` of `8192` represents a delta of `0.5` in
-/// F2DOT14 space. The sigilbuzz `ItemVariationStore::delta` returns
-/// that integer as `f32`; this helper finishes the conversion by
-/// dividing by 16384 so the caller can add directly to an
-/// already-scaled F2DOT14 value.
+/// Delta for an F2DOT14 paint field (alpha, scale, angle). The IVS
+/// stores deltas in the field's own units, so a raw 8192 is 0.5.
 fn var_delta_f2dot14(ctx: &EvalCtx<'_, '_>, var_index_base: VarIndexBase, field_index: u16) -> f32 {
-    var_delta(ctx, var_index_base, field_index) / 16384.0
+    ctx.deltas.f2dot14(var_index_base, field_index)
+}
+
+/// Delta for a 16.16 Fixed paint field (`VarAffine2x3`).
+fn var_delta_fixed(ctx: &EvalCtx<'_, '_>, var_index_base: VarIndexBase, field_index: u16) -> f32 {
+    ctx.deltas.fixed(var_index_base, field_index)
 }
 
 /// Helper widening an `Fword` (i16 design-unit coord) to f32.
@@ -1086,7 +1022,7 @@ fn f(v: Fword) -> f32 {
 /// the spec's "the index is clamped to mapCount - 1 if it is greater
 /// than or equal to mapCount" rule.
 #[derive(Debug, Clone, Copy)]
-struct DeltaSetIndexMap<'a> {
+pub(crate) struct DeltaSetIndexMap<'a> {
     /// Slice covering exactly the map's entry array.
     entries: &'a [u8],
     /// Bytes per entry (1..=4).
@@ -1151,7 +1087,7 @@ impl<'a> DeltaSetIndexMap<'a> {
     /// Looks up the `(outer, inner)` pair at flat `index`, clamping
     /// to the last entry per spec. Returns `None` when the map is
     /// empty.
-    fn lookup(&self, index: u32) -> Option<(u16, u16)> {
+    pub(crate) fn lookup(&self, index: u32) -> Option<(u16, u16)> {
         if self.map_count == 0 {
             return None;
         }

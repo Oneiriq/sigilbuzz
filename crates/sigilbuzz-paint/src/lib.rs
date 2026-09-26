@@ -51,6 +51,7 @@
 extern crate alloc;
 
 mod color;
+mod deltas;
 mod eval;
 mod gradient;
 mod options;

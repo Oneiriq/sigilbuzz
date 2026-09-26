@@ -108,7 +108,10 @@ pub enum GradientKind {
         r1: f32,
     },
     /// Sweep (conic) gradient around `center`. Angles in radians; `0`
-    /// is the +x axis, increasing counter-clockwise.
+    /// is the +x axis, increasing counter-clockwise (y up, in design
+    /// units). The font stores each angle with a half-turn bias; the
+    /// evaluator has already removed it, so a stored `a` arrives as
+    /// `(a + 1) * pi`.
     Sweep {
         /// Center of the sweep.
         center: (f32, f32),

@@ -583,16 +583,17 @@ fn radial_gradient_resolves_two_circle_geometry_and_stops() {
 fn sweep_gradient_resolves_centre_angles_and_three_stops() {
     // PaintSweepGradient layout: u8 fmt=8, Offset24 colorLine, i16 cx,
     // i16 cy, F2Dot14 startAngle, F2Dot14 endAngle, 11 bytes after
-    // the header. COLRv1 stores angles as F2Dot14 multiples of 180°,
-    // so endAngle = π radians == on-disk 1.0.
+    // the header. COLRv1 stores sweep angles as F2Dot14 multiples of
+    // 180 degrees with a bias of 1.0, so on-disk -1.0 is 0 radians and
+    // on-disk 0.0 is pi.
     let mut colr = build_v1_header(60);
     let paint_start = colr.len();
     colr.push(8); // PaintSweepGradient
     colr.extend_from_slice(&[0, 0, 0]); // Offset24 colorLine placeholder
     colr.extend_from_slice(&50i16.to_be_bytes()); // cx
     colr.extend_from_slice(&50i16.to_be_bytes()); // cy
-    colr.extend_from_slice(&f2dot14(0.0)); // startAngle = 0
-    colr.extend_from_slice(&f2dot14(1.0)); // endAngle = 1.0 -> π rad
+    colr.extend_from_slice(&f2dot14(-1.0)); // startAngle -> 0 rad
+    colr.extend_from_slice(&f2dot14(0.0)); // endAngle -> pi rad
 
     let cl_start = colr.len();
     let cl_rel = (cl_start - paint_start) as u32;
@@ -631,13 +632,10 @@ fn sweep_gradient_resolves_centre_angles_and_three_stops() {
                     end_angle,
                 } => {
                     assert_eq!(center, (50.0, 50.0));
-                    assert!(start_angle.abs() < 1e-6, "start_angle = {start_angle}");
-                    // F2Dot14 1.0 corresponds to π radians.
+                    assert_eq!(start_angle, 0.0, "start_angle = {start_angle}");
+                    // Biased F2Dot14 0.0 corresponds to pi radians.
                     let pi = core::f32::consts::PI;
-                    assert!(
-                        (end_angle - pi).abs() < 1e-4,
-                        "end_angle was {end_angle}, expected π"
-                    );
+                    assert_eq!(end_angle, pi, "end_angle was {end_angle}, expected pi");
                 }
                 ref other => panic!("expected sweep gradient, got {other:?}"),
             }

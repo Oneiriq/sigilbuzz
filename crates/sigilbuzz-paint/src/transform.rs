@@ -160,6 +160,18 @@ pub(crate) fn angle_to_radians(f2dot14_angle: f32) -> f32 {
     f2dot14_angle * PI
 }
 
+/// Converts a `PaintSweepGradient` start or end angle into radians.
+///
+/// Sweep angles carry a bias of one half-turn: the stored F2DOT14
+/// value plus 1.0 is the angle in multiples of 180 degrees, so the
+/// `[-2, 2)` F2DOT14 range covers -180 to 540 degrees and a full turn
+/// can be encoded. fontTools reads these fields as `BiasedAngle`, and
+/// HarfBuzz hands `(angle + 1) * pi` to its sweep-gradient callback.
+#[must_use]
+pub(crate) fn sweep_angle_to_radians(f2dot14_angle: f32) -> f32 {
+    (f2dot14_angle + 1.0) * PI
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +235,15 @@ mod tests {
         // F2DOT14 angle of 1.0 means pi radians per the COLRv1 spec.
         assert!((angle_to_radians(1.0) - PI).abs() < 1e-6);
         assert!((angle_to_radians(0.5) - PI / 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sweep_angles_carry_a_half_turn_bias() {
+        // Stored -1.0 is 0 degrees, 0.0 is 180, 1.0 is a full turn.
+        assert_eq!(sweep_angle_to_radians(-1.0), 0.0);
+        assert_eq!(sweep_angle_to_radians(0.0), PI);
+        assert_eq!(sweep_angle_to_radians(1.0), 2.0 * PI);
+        // Same float product HarfBuzz computes: (a + 1) * pi.
+        assert_eq!(sweep_angle_to_radians(0.25), (0.25_f32 + 1.0) * PI);
     }
 }

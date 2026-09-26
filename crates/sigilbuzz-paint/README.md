@@ -57,6 +57,9 @@ let cmds = evaluate_with(face, 42, &options);
 # }
 ```
 
+Sweep gradient angles come out in radians. COLRv1 stores them with a half-turn bias, so
+a stored angle `a` is `(a + 1) * pi` radians, the value HarfBuzz reports too.
+
 ## Cargo features
 
 | Feature | Default | What it does |
