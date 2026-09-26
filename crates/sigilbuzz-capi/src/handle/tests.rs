@@ -11,9 +11,7 @@
 //!   the last reference to the blob goes. Faces and fonts hold their
 //!   blob, so the callback also proves those were released.
 
-use super::*;
-
-use alloc::sync::Weak;
+use alloc::sync::{Arc, Weak};
 use core::ffi::{c_char, c_uint, c_void};
 use core::mem::ManuallyDrop;
 use core::ptr;
