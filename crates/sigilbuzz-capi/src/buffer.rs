@@ -11,17 +11,20 @@ use sigilbuzz::Buffer;
 use crate::common::map_direction_in;
 use crate::opaque::BufferInner;
 use crate::{
-    buffer_text, handle, hb_buffer_t, hb_direction_t, hb_glyph_info_t, hb_glyph_position_t,
-    hb_language_t, hb_script_t, spin_mutex, BufferState, HB_DIRECTION_INVALID, HB_SCRIPT_INVALID,
+    buffer_flags, buffer_text, handle, hb_buffer_t, hb_direction_t, hb_glyph_info_t,
+    hb_glyph_position_t, hb_language_t, hb_script_t, spin_mutex, BufferState, HB_DIRECTION_INVALID,
+    HB_SCRIPT_INVALID,
 };
 
 // ---------------------------------------------------------------------------
 // Buffer
 // ---------------------------------------------------------------------------
 
+/// Creates an empty buffer with HarfBuzz's default flags and cluster
+/// level (`HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES`).
 #[no_mangle]
 pub extern "C" fn hb_buffer_create() -> *mut hb_buffer_t {
-    let state = BufferState {
+    let mut state = BufferState {
         buffer: Buffer::new(),
         direction: HB_DIRECTION_INVALID,
         script: HB_SCRIPT_INVALID,
@@ -30,7 +33,10 @@ pub extern "C" fn hb_buffer_create() -> *mut hb_buffer_t {
         glyph_positions: Vec::new(),
         props_set: false,
         clusters: buffer_text::ClusterTable::default(),
+        flags: buffer_flags::HB_BUFFER_FLAG_DEFAULT,
+        cluster_level: buffer_flags::HB_BUFFER_CLUSTER_LEVEL_DEFAULT,
     };
+    buffer_flags::restore_defaults(&mut state);
     handle::into_raw(hb_buffer_t {
         inner: BufferInner {
             state: spin_mutex::SpinMutex::new(state),
@@ -61,6 +67,10 @@ pub unsafe extern "C" fn hb_buffer_reference(buffer: *mut hb_buffer_t) -> *mut h
     unsafe { handle::reference(buffer) }
 }
 
+/// Empties the buffer and restores every setting, HarfBuzz's
+/// `hb_buffer_reset`: the flags and cluster level go back to their
+/// defaults, then everything `hb_buffer_clear_contents` drops goes too.
+///
 /// # Safety
 /// `buffer` must be valid.
 #[no_mangle]
@@ -71,15 +81,13 @@ pub unsafe extern "C" fn hb_buffer_reset(buffer: *mut hb_buffer_t) {
     // SAFETY: caller asserts validity.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
-    state.buffer.clear();
-    state.direction = HB_DIRECTION_INVALID;
-    state.script = HB_SCRIPT_INVALID;
-    state.language = ptr::null();
-    state.glyph_infos.clear();
-    state.glyph_positions.clear();
-    state.props_set = false;
+    buffer_flags::restore_defaults(&mut state);
+    buffer_text::clear_contents(&mut state);
 }
 
+/// Empties the buffer but keeps its settings (flags and cluster
+/// level), HarfBuzz's `hb_buffer_clear_contents`.
+///
 /// # Safety
 /// `buffer` must be valid.
 #[no_mangle]

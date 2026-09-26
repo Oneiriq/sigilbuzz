@@ -89,6 +89,8 @@ pub mod subset_bridge;
 
 mod blob;
 mod buffer;
+// `hb_buffer_set_flags`, `hb_buffer_set_cluster_level`, and their getters.
+mod buffer_flags;
 mod common;
 mod face;
 mod font;
@@ -105,6 +107,15 @@ pub use buffer::{
     hb_buffer_destroy, hb_buffer_get_glyph_infos, hb_buffer_get_glyph_positions,
     hb_buffer_get_length, hb_buffer_guess_segment_properties, hb_buffer_reference, hb_buffer_reset,
     hb_buffer_set_direction, hb_buffer_set_language, hb_buffer_set_script,
+};
+pub use buffer_flags::{
+    hb_buffer_cluster_level_t, hb_buffer_flags_t, hb_buffer_get_cluster_level, hb_buffer_get_flags,
+    hb_buffer_set_cluster_level, hb_buffer_set_flags, HB_BUFFER_CLUSTER_LEVEL_CHARACTERS,
+    HB_BUFFER_CLUSTER_LEVEL_DEFAULT, HB_BUFFER_CLUSTER_LEVEL_GRAPHEMES,
+    HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS, HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES,
+    HB_BUFFER_FLAG_BOT, HB_BUFFER_FLAG_DEFAULT, HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE,
+    HB_BUFFER_FLAG_EOT, HB_BUFFER_FLAG_PRESERVE_DEFAULT_IGNORABLES,
+    HB_BUFFER_FLAG_REMOVE_DEFAULT_IGNORABLES,
 };
 pub(crate) use common::lang_und;
 pub use common::{

@@ -9,8 +9,8 @@ use core::ptr;
 use sigilbuzz::{Buffer, Face, Font};
 
 use crate::{
-    buffer_text, hb_destroy_func_t, hb_direction_t, hb_glyph_info_t, hb_glyph_position_t,
-    hb_language_t, hb_script_t, spin_mutex,
+    buffer_flags, buffer_text, hb_destroy_func_t, hb_direction_t, hb_glyph_info_t,
+    hb_glyph_position_t, hb_language_t, hb_script_t, spin_mutex,
 };
 
 // ---------------------------------------------------------------------------
@@ -180,6 +180,11 @@ pub(crate) struct BufferState {
     /// Caller-unit cluster for every character added so far; see
     /// `buffer_text`.
     pub(crate) clusters: buffer_text::ClusterTable,
+    /// The flags as `hb_buffer_set_flags` got them, bits sigilbuzz
+    /// ignores included, so `hb_buffer_get_flags` returns them.
+    pub(crate) flags: buffer_flags::hb_buffer_flags_t,
+    /// The cluster level as `hb_buffer_set_cluster_level` got it.
+    pub(crate) cluster_level: buffer_flags::hb_buffer_cluster_level_t,
 }
 
 /// Refcounted buffer. C holds the `Arc` pointer to this struct; see
