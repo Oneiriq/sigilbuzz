@@ -44,10 +44,11 @@
 //! - `woff1-deflate`: pulls in `miniz_oxide` for the WOFF1 zlib codec.
 //!   With it disabled, `unwrap_woff1` rejects compressed tables and
 //!   `wrap_woff1` only emits uncompressed pass-through bodies.
-//! - `std`: implements `std::error::Error` for [`WoffError`]. Without
-//!   it the crate builds as `no_std` on top of `alloc`. The `woff2`
-//!   feature also needs `std`, because the Brotli codec runs over
-//!   `std::io`.
+//! - `std`: implements `std::error::Error` for [`WoffError`]. The
+//!   crate's own code needs only `alloc` without it, but the crate
+//!   depends on `sigilbuzz` with its default `std` feature, so it
+//!   still needs a target with `std`. The `woff2` feature also needs
+//!   `std`, because the Brotli codec runs over `std::io`.
 //!
 //! See `docs/deps.md` in the workspace root for the rationale on the
 //! runtime dependencies this crate brings (`brotli`, `miniz_oxide`).

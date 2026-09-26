@@ -44,8 +44,9 @@
 //!
 //! # No-std
 //!
-//! `sigilbuzz-gpu` builds with `--no-default-features`. It still uses
-//! `alloc::vec::Vec`; the encoder does not require `std`.
+//! The encoder needs only `alloc`. The crate still depends on
+//! `sigilbuzz` with its default `std` feature, so even with
+//! `--no-default-features` it needs a target with `std`.
 //!
 //! # References
 //!

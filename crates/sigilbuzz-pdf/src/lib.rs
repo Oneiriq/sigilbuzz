@@ -69,9 +69,10 @@
 //!
 //! # No-std
 //!
-//! `sigilbuzz-pdf` builds with `--no-default-features`. It uses
-//! `alloc::vec::Vec` and `alloc::string::String`; the emitter never
-//! requires `std`.
+//! The emitter needs only `alloc::vec::Vec` and
+//! `alloc::string::String`. The crate still depends on `sigilbuzz`
+//! with its default `std` feature, so even with
+//! `--no-default-features` it needs a target with `std`.
 //!
 //! [`PathOp`]: sigilbuzz::tables::PathOp
 

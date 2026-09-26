@@ -36,7 +36,7 @@ For color glyphs, use `glyph_to_svg_color`. For variable fonts,
 
 | Feature | Default | What it does |
 |---|---|---|
-| `std` | yes | `String`-backed output. |
+| `std` | yes | Builds the crate against `std`. It adds no API. |
 | `color` | yes | Pulls in `sigilbuzz-paint` for COLRv1 output. Turn it off for outlines only. |
 
 Turn off default features to build without the paint dependency.

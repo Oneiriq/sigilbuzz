@@ -43,9 +43,11 @@ let pix = rast.rasterize_glyph(&face, 42, 48.0, &[]).unwrap();
 
 | Feature | Default | What it does |
 |---|---|---|
-| `std` | yes | Standard library conveniences. |
+| `std` | yes | Implements `std::error::Error` for `RenderError`. |
 
-Turn off default features for `no_std` with `alloc`.
+The crate's own code needs only `alloc`, but it depends on `sigilbuzz` with that crate's
+default `std` feature. Turning off default features here therefore does not make it
+`no_std`, and it still needs a target with `std`.
 
 ## License
 
