@@ -357,10 +357,11 @@ pub type hb_position_t = i32;
 /// HarfBuzz's destroy callback signature.
 pub type hb_destroy_func_t = unsafe extern "C" fn(*mut c_void);
 
-/// HarfBuzz memory mode. Forwarded but not actually distinguished:
-/// sigilbuzz always copies via the `Arc<Vec<u8>>`, so the only thing
-/// that matters from the C side is whether to invoke the destroy
-/// callback (which fires for any non-WRITABLE mode that has one).
+/// HarfBuzz memory mode. sigilbuzz copies the bytes in every mode, so
+/// the mode only decides when `hb_blob_create` calls the destroy
+/// callback. `HB_MEMORY_MODE_DUPLICATE` calls it before returning, as
+/// HarfBuzz does once it has made its copy. Every other mode calls it
+/// when the last reference to the blob is released.
 pub type hb_memory_mode_t = c_uint;
 /// The library copies the bytes. HarfBuzz value 0.
 pub const HB_MEMORY_MODE_DUPLICATE: hb_memory_mode_t = 0;
@@ -510,19 +511,32 @@ fn empty_blob() -> *mut hb_blob_t {
     Box::into_raw(Box::new(hb_blob_t { inner }))
 }
 
+/// Creates a blob holding a copy of `length` bytes at `data`.
+///
+/// `destroy`, when non-null, is called exactly once with `user_data`.
+/// As in HarfBuzz, that happens before this function returns when
+/// `mode` is `HB_MEMORY_MODE_DUPLICATE` or when there are no bytes to
+/// hold (`length == 0` or a null `data`). Otherwise it happens when
+/// the blob's last reference is released.
+///
 /// # Safety
 /// `data` must point to `length` bytes (or be null with `length == 0`).
-/// `destroy`, when non-null, is called exactly once with `user_data`
-/// when the blob's refcount reaches zero.
+/// `destroy`, when non-null, must accept `user_data`.
 #[no_mangle]
 pub unsafe extern "C" fn hb_blob_create(
     data: *const c_char,
     length: c_uint,
-    _mode: hb_memory_mode_t,
+    mode: hb_memory_mode_t,
     user_data: *mut c_void,
     destroy: Option<hb_destroy_func_t>,
 ) -> *mut hb_blob_t {
     if length == 0 || data.is_null() {
+        if let Some(destroy) = destroy {
+            // SAFETY: caller-supplied function pointer. The contract
+            // is that it accepts `user_data`. The empty blob does not
+            // keep `user_data`, so this is its only call.
+            unsafe { destroy(user_data) };
+        }
         return empty_blob();
     }
     // SAFETY: `data` is non-null and the caller guarantees it points
@@ -530,9 +544,19 @@ pub unsafe extern "C" fn hb_blob_create(
     // bytes are copied before returning.
     let bytes = unsafe { slice::from_raw_parts(data.cast::<u8>(), length as usize) };
     let owned = bytes.to_vec();
+    let user_destroy = if mode == HB_MEMORY_MODE_DUPLICATE {
+        if let Some(destroy) = destroy {
+            // SAFETY: as above. The blob holds its own copy of the
+            // bytes and does not keep `user_data`.
+            unsafe { destroy(user_data) };
+        }
+        None
+    } else {
+        destroy
+    };
     let inner = Arc::new(BlobInner {
         data: Arc::new(owned),
-        user_destroy: destroy,
+        user_destroy,
         user_data,
     });
     Box::into_raw(Box::new(hb_blob_t { inner }))
