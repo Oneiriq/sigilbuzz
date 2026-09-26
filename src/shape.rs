@@ -34,8 +34,10 @@
 //!   same dispatcher. Attachments are recorded while the lookups run
 //!   and resolved into final offsets in one direction-aware pass
 //!   after all positioning (see the `attach` submodule).
-//! - Legacy `kern` table as a fallback for fonts whose GPOS has no
-//!   `kern` feature. Open Sans is the canonical example.
+//! - Legacy `kern` and AAT `kerx` pair kerning as a fallback for fonts
+//!   whose GPOS has no `kern` feature (Open Sans is the canonical
+//!   example), split across each pair the way HarfBuzz does (the
+//!   `kern` submodule).
 //!
 //! Any default-on feature can be suppressed by a `Feature { tag,
 //! value: 0 }` entry.
@@ -84,7 +86,9 @@
 
 mod attach;
 mod dotted_circle;
+mod gpos;
 mod ignorables;
+mod kern;
 mod native_direction;
 mod required;
 mod rotate;
@@ -108,7 +112,7 @@ use crate::tables::gsub::{
 };
 use crate::tables::layout::{Lookup, MatchFilter, SequenceLookupRecord};
 use crate::tables::variation_store::ItemVariationStore;
-use crate::tables::{Gpos, Gsub, KernTable, Kerx, Morx};
+use crate::tables::{Gpos, Gsub, Kerx, Morx};
 use crate::unicode::joining::{joining_type, JoiningType};
 use crate::unicode::{script_of, Script};
 
@@ -1418,23 +1422,15 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         }
     }
 
-    // Legacy `kern` is a fallback: only runs when GPOS kern produced
-    // no lookups on any segment. GPOS wins even with zero-delta hits
-    // (the spec's design, not a sigilbuzz quirk).
-    let mut legacy_kerned = false;
+    // Pair-kerning fallbacks, only when GPOS kern produced no lookups
+    // on any segment (GPOS wins even with zero-delta hits). HarfBuzz
+    // prefers AAT `kerx` to the legacy `kern` table; both split each
+    // pair's value the way hb-kern.hh does (see the `kern` module).
     if want_kern && !gpos_kerned {
-        if let Some(kern) = face.kern()? {
-            apply_legacy_kern(&kern, &mut glyphs);
-            legacy_kerned = true;
-        }
-    }
-    // AAT `kerx` is the last-resort fallback: GPOS kern absent AND
-    // legacy `kern` absent. In practice fonts ship one of the three,
-    // not several; keeping legacy ahead preserves existing
-    // behavior and matches HarfBuzz ordering.
-    if want_kern && !gpos_kerned && !legacy_kerned {
         if let Some(kerx) = face.kerx()? {
-            apply_kerx(face, &kerx, &mut glyphs)?;
+            kern::apply_kerx_table(face, &kerx, &mut glyphs, gdef.as_ref(), direction)?;
+        } else if let Some(table) = face.kern()? {
+            kern::apply_kern_table(&table, &mut glyphs, gdef.as_ref(), direction);
         }
     }
 
@@ -3232,49 +3228,6 @@ fn apply_morx(morx: &Morx<'_>, glyphs: &mut Vec<Glyph>) {
     *glyphs = rebuilt;
 }
 
-/// AAT `kerx` apply pass.
-///
-/// Two passes run in sequence:
-///
-/// - Format 0 / 2 (pair-list and compound-class) emit a delta per
-///   adjacent pair; we distribute it half-on-left, half-on-right
-///   exactly like [`apply_legacy_kern`] so kerx output lines up
-///   with the macOS renderer for the same pairs.
-/// - Format 1 (state-machine) walks the run through an AAT state
-///   table; each value-list pop targets a single stacked glyph and
-///   the delta is applied directly to that glyph's `x_advance`. No
-///   half-split: the state machine already chose which glyph to
-///   land on (typically the left of the pair).
-fn apply_kerx(face: &Face<'_>, kerx: &Kerx<'_>, glyphs: &mut [Glyph]) -> Result<()> {
-    if glyphs.is_empty() {
-        return Ok(());
-    }
-    if glyphs.len() >= 2 {
-        for i in 0..glyphs.len() - 1 {
-            let left = glyphs[i].glyph_id as u16;
-            let right = glyphs[i + 1].glyph_id as u16;
-            let delta = i32::from(kerx.kern(left, right));
-            if delta != 0 {
-                let half = delta / 2;
-                glyphs[i].x_advance += delta - half;
-                glyphs[i + 1].x_advance += half;
-            }
-        }
-    }
-    if kerx.has_state_machine() {
-        let ids: alloc::vec::Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
-        kerx.apply_state_machines(&ids, |idx, delta| {
-            if let Some(g) = glyphs.get_mut(idx) {
-                g.x_advance += i32::from(delta);
-            }
-        });
-    }
-    if kerx.has_format4() {
-        apply_kerx_format4(face, kerx, glyphs)?;
-    }
-    Ok(())
-}
-
 /// Resolves every fmt-4 event the state machine emits across `glyphs`
 /// and applies the resulting offset to the current glyph.
 ///
@@ -3417,37 +3370,6 @@ fn cached_glyph_points(
     let v = face.glyph_points(gid)?;
     cache.insert(gid, v.clone());
     Ok(v)
-}
-
-/// Applies deltas from the legacy `kern` table to the glyph run.
-///
-/// HarfBuzz (and therefore rustybuzz) does not apply the whole
-/// delta to the left glyph. It splits it roughly in half across
-/// the pair, with the bigger share landing on the left:
-///
-/// ```text
-///   half          = delta / 2            // truncating toward zero
-///   left.advance  += delta - half        // e.g. -21 when delta=-41
-///   right.advance += half                // e.g. -20 when delta=-41
-/// ```
-///
-/// sigilbuzz matches that so legacy-kerned output lines up with
-/// rustybuzz byte-for-byte; the two-sided distribution also keeps
-/// clustering less visible if a renderer quantizes advances.
-fn apply_legacy_kern(kern: &KernTable<'_>, glyphs: &mut [Glyph]) {
-    if glyphs.len() < 2 {
-        return;
-    }
-    for i in 0..glyphs.len() - 1 {
-        let left = glyphs[i].glyph_id as u16;
-        let right = glyphs[i + 1].glyph_id as u16;
-        let delta = i32::from(kern.kern(left, right));
-        if delta != 0 {
-            let half = delta / 2;
-            glyphs[i].x_advance += delta - half;
-            glyphs[i + 1].x_advance += half;
-        }
-    }
 }
 
 /// Resolves a GPOS/GSUB type-9 Extension subtable to its inner
