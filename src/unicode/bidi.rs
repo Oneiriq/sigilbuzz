@@ -1,20 +1,18 @@
 //! UAX #9 Unicode Bidirectional Algorithm.
 //!
-//! 0.1.0 shipped only the paragraph-direction first-strong rule (P2 /
-//! P3). 0.10.0 fills in the rest:
-//!
-//! - **P1-P3**: paragraph-direction (already shipped, kept).
+//! - **P1-P3**: paragraph direction.
 //! - **X1-X10**: explicit-embedding / override / isolate stack.
 //! - **W1-W7**: weak-type resolution.
-//! - **N1-N2**: neutral resolution. (N0 paired-bracket handling
-//!   is intentionally deferred. See module note below.)
+//! - **N0-N2**: paired-bracket and neutral resolution.
 //! - **I1-I2**: implicit-level resolution.
 //! - **L1-L4**: post-resolve normalization + reorder (rule L2).
 //!
 //! The algorithm is implemented as a sequence of array-mutation
 //! passes against a single working buffer of (`BidiClass`, `level`)
 //! pairs, mirroring the reference implementation. Output is exposed
-//! through [`BidiInfo`].
+//! through [`BidiInfo`]. Every pass is linear in the text length (L2
+//! is linear per embedding level), so hostile input such as a long
+//! digit run or a deep stack of isolates stays cheap.
 //!
 //! ## N0 paired-bracket handling
 //!
@@ -27,8 +25,7 @@
 //!
 //! Brackets that don't pair (unbalanced opener / closer, opener
 //! without a matching closer) fall through unchanged and N1's
-//! surrounding-strong fallback handles them, exactly the behavior
-//! shipped before N0 landed.
+//! surrounding-strong fallback handles them.
 //!
 //! ## Public API
 //!
@@ -43,9 +40,8 @@
 //!
 //! Buffer integration uses [`crate::buffer::Buffer::set_text_bidi`],
 //! which auto-runs the bidi pipeline before shaping. The plain
-//! [`crate::buffer::Buffer::set_text`] is left untouched for backward
-//! compat with 0.1.0 consumers (oniq, demos) that handle direction
-//! themselves.
+//! [`crate::buffer::Buffer::set_text`] does not reorder, for callers
+//! that handle direction themselves.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -60,8 +56,6 @@ const MAX_DEPTH: u8 = 125;
 /// Applies UAX #9 rules P2 and P3 to `text` and returns the
 /// paragraph-level direction. LTR when no strong character exists
 /// in the run (whitespace-only, symbol-only, empty input).
-///
-/// Kept on the public surface so 0.1.0 callers don't break.
 #[must_use]
 pub fn paragraph_direction(text: &str) -> Direction {
     paragraph_direction_with_isolates(text)
@@ -155,12 +149,12 @@ impl BidiInfo {
         // then run W1-W7 + N0 + N1-N2 + I1-I2 per sequence.
         let isolating_sequences = build_isolating_sequences(&cells, para_level);
         for seq in isolating_sequences {
-            resolve_sequence(&mut cells, &chars, &seq, para_level);
+            resolve_sequence(&mut cells, &chars, &seq);
         }
 
         // L1: reset trailing whitespace, segment separators, and
         // paragraph separators back to the paragraph level.
-        apply_l1(&mut cells, para_level, text);
+        apply_l1(&mut cells, para_level);
 
         let levels: Vec<u8> = cells.iter().map(|c| c.level).collect();
         BidiInfo {
@@ -256,43 +250,51 @@ enum Override {
     Rtl,
 }
 
-/// Resolves an FSI initiator at `start` to either [`BidiClass::Lri`] or
-/// [`BidiClass::Rli`] per UAX 9 §X5c: scan the matched isolated
-/// subsequence for the first strong character (R / AL -> RLI, L -> LRI),
+/// Resolves every FSI initiator to either [`BidiClass::Lri`] or
+/// [`BidiClass::Rli`] per UAX 9 §X5c: the first strong character of
+/// the FSI's isolated subsequence decides (R / AL -> RLI, L -> LRI),
 /// skipping any nested isolates per BD9. Default is LRI when the
-/// scan finds no strong type or the FSI has no matching PDI, mirroring
-/// the P3 LTR fallback.
-fn fsi_resolves_to(cells: &[BidiCell], start: usize) -> BidiClass {
-    debug_assert!(matches!(
-        cells.get(start).map(|c| c.cls),
-        Some(BidiClass::Fsi)
-    ));
-    let mut depth: u32 = 0;
-    for cell in cells.iter().skip(start + 1) {
-        let cls = cell.cls;
+/// subsequence has no strong type or the FSI has no matching PDI,
+/// mirroring the P3 LTR fallback.
+///
+/// One pass with a stack of open isolate initiators: a strong
+/// character can only decide the innermost open FSI, and a PDI closes
+/// the innermost open initiator. Scanning forward from every FSI
+/// instead is quadratic on a long run of FSIs.
+fn resolve_fsis(cells: &mut [BidiCell]) {
+    // Open isolate initiators, innermost last: (index, FSI still
+    // waiting for its first strong character).
+    let mut open: Vec<(usize, bool)> = Vec::new();
+    for j in 0..cells.len() {
+        let cls = cells[j].cls;
         if cls.is_isolate_initiator() {
-            depth = depth.saturating_add(1);
-            continue;
-        }
-        if cls == BidiClass::Pdi {
-            if depth == 0 {
-                // End of this FSI's isolated subsequence reached
-                // without a strong type. Default to LRI.
-                return BidiClass::Lri;
+            open.push((j, cls == BidiClass::Fsi));
+        } else if cls == BidiClass::Pdi {
+            // End of the innermost isolated subsequence. An FSI that
+            // saw no strong type defaults to LRI.
+            if let Some((idx, true)) = open.pop() {
+                cells[idx].cls = BidiClass::Lri;
             }
-            depth -= 1;
-            continue;
-        }
-        if depth == 0 {
-            match cls {
-                BidiClass::L => return BidiClass::Lri,
-                BidiClass::R | BidiClass::Al => return BidiClass::Rli,
-                _ => {}
+        } else if let Some((idx, pending)) = open.last_mut() {
+            if *pending {
+                let resolved = match cls {
+                    BidiClass::L => Some(BidiClass::Lri),
+                    BidiClass::R | BidiClass::Al => Some(BidiClass::Rli),
+                    _ => None,
+                };
+                if let Some(r) = resolved {
+                    cells[*idx].cls = r;
+                    *pending = false;
+                }
             }
         }
     }
-    // No matching PDI / no strong type seen: default LTR.
-    BidiClass::Lri
+    // No matching PDI and no strong type seen: default LTR.
+    for (idx, pending) in open {
+        if pending {
+            cells[idx].cls = BidiClass::Lri;
+        }
+    }
 }
 
 /// Implements X1-X10. Sets `cells[i].level` to the embedding level
@@ -302,7 +304,6 @@ fn fsi_resolves_to(cells: &[BidiCell], start: usize) -> BidiClass {
 /// LRE/RLE/LRO/RLO/PDF/BN keep their original class for the X9 filter
 /// later. The convention used here is to mark them with their
 /// explicit-format class so `is_explicit()` can drop them.
-#[allow(clippy::too_many_lines)]
 fn explicit_levels(cells: &mut [BidiCell], para_level: u8) {
     let mut stack: Vec<StackEntry> = Vec::with_capacity(8);
     stack.push(StackEntry {
@@ -315,16 +316,12 @@ fn explicit_levels(cells: &mut [BidiCell], para_level: u8) {
     let mut overflow_embedding: u32 = 0;
     let mut valid_isolate_count: u32 = 0;
 
-    for i in 0..cells.len() {
-        // Resolve FSI to LRI or RLI before processing per UAX 9 §X5c
-        // by scanning the matched isolated subsequence for its first
-        // strong character. Skip nested isolates (BD9). When the
-        // first strong is R or AL, FSI behaves as RLI; otherwise as
-        // LRI (default LTR per the spec, matching the P3 fallback).
-        if cells[i].cls == BidiClass::Fsi {
-            cells[i].cls = fsi_resolves_to(cells, i);
-        }
-        let cell = &mut cells[i];
+    // Resolve FSI to LRI or RLI before processing per UAX 9 §X5c.
+    // The resolution reads only the original classes, so doing it for
+    // every FSI up front matches doing it as the loop reaches each one.
+    resolve_fsis(cells);
+
+    for cell in cells.iter_mut() {
         match cell.cls {
             // X2-X5: explicit embedding / override.
             BidiClass::Rle | BidiClass::Lre | BidiClass::Rlo | BidiClass::Lro => {
@@ -369,7 +366,7 @@ fn explicit_levels(cells: &mut [BidiCell], para_level: u8) {
                     Override::Rtl => cell.cls = BidiClass::R,
                     Override::None => {}
                 }
-                // FSI was resolved to LRI / RLI at the loop entry, so
+                // FSI was resolved to LRI / RLI before the loop, so
                 // only Rli is RTL here.
                 let is_rtl = cell.cls == BidiClass::Rli;
                 let new_level = if is_rtl {
@@ -562,7 +559,6 @@ fn build_level_runs(cells: &[BidiCell]) -> Vec<LevelRun> {
 /// Joins level runs into BD13 isolating-run sequences. Each isolate
 /// initiator (LRI / RLI / FSI) hands off to the level run starting
 /// inside the isolate; the matching PDI rejoins.
-#[allow(clippy::too_many_lines)]
 fn build_isolating_sequences(cells: &[BidiCell], para_level: u8) -> Vec<IsolatingSequence> {
     let runs = build_level_runs(cells);
     if runs.is_empty() {
@@ -593,10 +589,10 @@ fn build_isolating_sequences(cells: &[BidiCell], para_level: u8) -> Vec<Isolatin
         }
         let mut seq_runs: Vec<usize> = vec![ri];
         used[ri] = true;
-        // Follow isolate-initiator chains.
+        // Follow isolate-initiator chains. Level runs are never empty,
+        // so `last()` always yields a cell.
         let mut cursor = ri;
-        loop {
-            let last_idx = *runs[cursor].indices.last().unwrap();
+        while let Some(&last_idx) = runs[cursor].indices.last() {
             let last_cls = cells[last_idx].cls;
             if !last_cls.is_isolate_initiator() {
                 break;
@@ -630,8 +626,11 @@ fn build_isolating_sequences(cells: &[BidiCell], para_level: u8) -> Vec<Isolatin
             level = runs[ri].level;
             indices.extend_from_slice(&runs[ri].indices);
         }
+        // Every sequence holds at least one non-empty run.
+        let (Some(&first_idx), Some(&last_idx)) = (indices.first(), indices.last()) else {
+            continue;
+        };
         // sos / eos per BD13.
-        let first_idx = indices[0];
         let sos_level = if first_idx == 0 {
             para_level
         } else {
@@ -648,7 +647,6 @@ fn build_isolating_sequences(cells: &[BidiCell], para_level: u8) -> Vec<Isolatin
                 }
             }
         };
-        let last_idx = *indices.last().unwrap();
         // For eos: if the sequence ends in an isolate initiator that
         // had no matching PDI, eos is max(level, paragraph). Else
         // it's the level of the next cell beyond the sequence.
@@ -878,13 +876,7 @@ const fn strong_for_n0(c: BidiClass) -> Option<BidiClass> {
 // W1-W7 + N0-N2 + I1-I2 against one isolating-run sequence.
 // ---------------------------------------------------------------------
 
-#[allow(clippy::too_many_lines)]
-fn resolve_sequence(
-    cells: &mut [BidiCell],
-    chars: &[char],
-    seq: &IsolatingSequence,
-    _para_level: u8,
-) {
+fn resolve_sequence(cells: &mut [BidiCell], chars: &[char], seq: &IsolatingSequence) {
     let n = seq.indices.len();
     if n == 0 {
         return;
@@ -905,22 +897,16 @@ fn resolve_sequence(
     }
 
     // ---- W2: EN preceded by AL (skipping non-strong) -> AN. ----
-    for i in 0..n {
-        if classes[i] == BidiClass::En {
-            // Walk backward through non-strong classes.
-            let mut k = i;
-            let prev = loop {
-                if k == 0 {
-                    break seq.sos;
-                }
-                k -= 1;
-                if classes[k].is_strong() {
-                    break classes[k];
-                }
-            };
-            if prev == BidiClass::Al {
-                classes[i] = BidiClass::An;
-            }
+    // Carry the last strong class forward instead of walking back
+    // from every EN, which is quadratic on a long digit run. W2 only
+    // writes AN, which is not strong, so the carried value matches
+    // the backward walk.
+    let mut last_strong = seq.sos;
+    for c in &mut classes {
+        if c.is_strong() {
+            last_strong = *c;
+        } else if *c == BidiClass::En && last_strong == BidiClass::Al {
+            *c = BidiClass::An;
         }
     }
 
@@ -978,21 +964,16 @@ fn resolve_sequence(
     }
 
     // ---- W7: EN preceded by L (skipping non-strong) -> L. ----
-    for i in 0..n {
-        if classes[i] == BidiClass::En {
-            let mut k = i;
-            let prev = loop {
-                if k == 0 {
-                    break seq.sos;
-                }
-                k -= 1;
-                if classes[k].is_strong() || classes[k] == BidiClass::R {
-                    break classes[k];
-                }
-            };
-            if prev == BidiClass::L {
-                classes[i] = BidiClass::L;
-            }
+    // Same forward carry as W2. An EN that becomes L is itself the
+    // nearest strong type for the ENs after it, exactly as a
+    // backward walk would find it.
+    let mut last_strong = seq.sos;
+    for c in &mut classes {
+        if *c == BidiClass::En && last_strong == BidiClass::L {
+            *c = BidiClass::L;
+        }
+        if c.is_strong() {
+            last_strong = *c;
         }
     }
 
@@ -1074,25 +1055,17 @@ fn resolve_sequence(
 /// or before a B/S to the paragraph level. We don't have explicit
 /// line breaking here. We apply L1 paragraph-globally, treating the
 /// whole input as one line. (Line-breaking is the consumer's job.)
-fn apply_l1(cells: &mut [BidiCell], para_level: u8, _text: &str) {
+fn apply_l1(cells: &mut [BidiCell], para_level: u8) {
     let n = cells.len();
     if n == 0 {
         return;
     }
-    // First pass: each S or B resets to the paragraph level. Any
-    // whitespace / isolate-format characters preceding it also reset.
-    for i in 0..n {
-        let cls = bidi_class_at(cells, i); // raw class re-lookup
-        let _ = cls; // silence: we use cells[i].cls below; keep signature simple
-    }
-    // We need the *original* Bidi_Class for L1 because explicit-level
-    // resolution mutated the working class. Walk backwards from each
-    // S/B, resetting trailing WS/Iso runs.
-    // The "originals" are recoverable only if we re-classify from
-    // text, which we don't have here as chars indexed; cheaper to
-    // remember an L1-eligible flag during the X-pass. As a
-    // pragmatic approximation we reset based on the post-W class:
-    // any cell whose post-W class is WS/Iso/B/S gets reset.
+    // Each S or B resets to the paragraph level, and so does any run
+    // of whitespace / isolate-format characters before it. Strict L1
+    // needs the *original* Bidi_Class, which explicit-level resolution
+    // has overwritten by now. As an approximation we reset based on
+    // the resolved class: any cell whose resolved class is WS/Iso/B/S
+    // gets reset. Walk backwards from each S/B.
     let mut i = n;
     let mut reset_run = false;
     while i > 0 {
@@ -1125,13 +1098,6 @@ fn apply_l1(cells: &mut [BidiCell], para_level: u8, _text: &str) {
             _ => break,
         }
     }
-}
-
-/// Helper for L1: currently just returns the post-W class. Kept as
-/// a function to make it easy to wire in a separate "original class"
-/// snapshot later if BidiTest conformance demands strict L1 fidelity.
-const fn bidi_class_at(cells: &[BidiCell], i: usize) -> BidiClass {
-    cells[i].cls
 }
 
 // ---------------------------------------------------------------------

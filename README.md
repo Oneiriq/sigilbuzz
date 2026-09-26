@@ -136,6 +136,7 @@ using it inside oniq. Real workloads there decide what gets built next.
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md): benchmark numbers against rustybuzz.
 - [docs/deps.md](docs/deps.md): every external dependency and why it is there.
 - [docs/RELEASING.md](docs/RELEASING.md): how a release is cut and published.
+- [fuzz/README.md](fuzz/README.md): the fuzz targets and how to run them.
 - [agent.md](agent.md): contribution rules.
 
 ## Development
@@ -147,7 +148,7 @@ scripts/install-hooks.sh
 ```
 
 The hook runs `cargo fmt --all --check`, clippy with and without default features,
-`cargo test --all-features`, and the `no_std` build. CI runs the same checks on pushes
+`cargo test --workspace --all-features`, and the `no_std` build. CI runs the same checks on pushes
 and pull requests to `main` and `release/**` branches, but the hook catches problems
 first. Don't bypass it with `--no-verify`.
 

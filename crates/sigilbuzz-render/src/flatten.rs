@@ -90,6 +90,10 @@ pub struct Segment {
 /// suitable for scanline rasterization, MSDF generation, or any other
 /// edge-list consumer.
 ///
+/// Work is bounded for hostile input: a curve with a NaN or infinite
+/// control point is emitted as its chord, and once 2^20 segments exist
+/// every further curve is emitted as its chord too.
+///
 /// # Example
 ///
 /// ```
@@ -110,6 +114,21 @@ pub fn flatten<I>(ops: I, xform: &Affine, tolerance: f32) -> Vec<Segment>
 where
     I: IntoIterator<Item = PathOp>,
 {
+    flatten_limited(ops, xform, tolerance, MAX_SEGMENTS)
+}
+
+/// [`flatten`] with an explicit subdivision budget. Once `limit`
+/// segments have been emitted, each remaining curve contributes only
+/// its chord. Output below the budget is identical to [`flatten`].
+pub(crate) fn flatten_limited<I>(
+    ops: I,
+    xform: &Affine,
+    tolerance: f32,
+    limit: usize,
+) -> Vec<Segment>
+where
+    I: IntoIterator<Item = PathOp>,
+{
     let mut segs = Vec::new();
     let mut sx = 0.0_f32;
     let mut sy = 0.0_f32;
@@ -118,6 +137,7 @@ where
     let mut have_start = false;
     let tol = tolerance.max(1e-3);
     let tol_sq = tol * tol;
+    let mut budget = limit;
 
     for op in ops {
         match op {
@@ -131,12 +151,16 @@ where
             }
             PathOp::LineTo { x, y } => {
                 let (px, py) = xform.apply(x, y);
-                segs.push(Segment {
-                    x0: cx,
-                    y0: cy,
-                    x1: px,
-                    y1: py,
-                });
+                push_segment(
+                    &mut segs,
+                    &mut budget,
+                    Segment {
+                        x0: cx,
+                        y0: cy,
+                        x1: px,
+                        y1: py,
+                    },
+                );
                 cx = px;
                 cy = py;
             }
@@ -148,7 +172,18 @@ where
             } => {
                 let (p1x, p1y) = xform.apply(ccx, ccy);
                 let (p2x, p2y) = xform.apply(x, y);
-                flatten_quad(cx, cy, p1x, p1y, p2x, p2y, tol_sq, &mut segs, 0);
+                flatten_quad(
+                    cx,
+                    cy,
+                    p1x,
+                    p1y,
+                    p2x,
+                    p2y,
+                    tol_sq,
+                    &mut segs,
+                    &mut budget,
+                    0,
+                );
                 cx = p2x;
                 cy = p2y;
             }
@@ -163,18 +198,35 @@ where
                 let (p1x, p1y) = xform.apply(c1x, c1y);
                 let (p2x, p2y) = xform.apply(c2x, c2y);
                 let (p3x, p3y) = xform.apply(x, y);
-                flatten_cubic(cx, cy, p1x, p1y, p2x, p2y, p3x, p3y, tol_sq, &mut segs, 0);
+                flatten_cubic(
+                    cx,
+                    cy,
+                    p1x,
+                    p1y,
+                    p2x,
+                    p2y,
+                    p3x,
+                    p3y,
+                    tol_sq,
+                    &mut segs,
+                    &mut budget,
+                    0,
+                );
                 cx = p3x;
                 cy = p3y;
             }
             PathOp::Close => {
                 if have_start && (cx != sx || cy != sy) {
-                    segs.push(Segment {
-                        x0: cx,
-                        y0: cy,
-                        x1: sx,
-                        y1: sy,
-                    });
+                    push_segment(
+                        &mut segs,
+                        &mut budget,
+                        Segment {
+                            x0: cx,
+                            y0: cy,
+                            x1: sx,
+                            y1: sy,
+                        },
+                    );
                 }
                 cx = sx;
                 cy = sy;
@@ -243,6 +295,8 @@ where
     let mut have_start = false;
     let tol = tolerance.max(1e-3);
     let tol_sq = tol * tol;
+    // Shared with every curve so the chord output matches `flatten`.
+    let mut budget = MAX_SEGMENTS;
 
     for op in ops {
         match op {
@@ -256,6 +310,7 @@ where
             }
             PathOp::LineTo { x, y } => {
                 let (px, py) = xform.apply(x, y);
+                budget = budget.saturating_sub(1);
                 out.push(FlattenedCurve::Line(Segment {
                     x0: cx,
                     y0: cy,
@@ -274,7 +329,18 @@ where
                 let (p1x, p1y) = xform.apply(ccx, ccy);
                 let (p2x, p2y) = xform.apply(x, y);
                 let mut segs = Vec::new();
-                flatten_quad(cx, cy, p1x, p1y, p2x, p2y, tol_sq, &mut segs, 0);
+                flatten_quad(
+                    cx,
+                    cy,
+                    p1x,
+                    p1y,
+                    p2x,
+                    p2y,
+                    tol_sq,
+                    &mut segs,
+                    &mut budget,
+                    0,
+                );
                 out.push(FlattenedCurve::Quad(segs));
                 cx = p2x;
                 cy = p2y;
@@ -291,13 +357,27 @@ where
                 let (p2x, p2y) = xform.apply(c2x, c2y);
                 let (p3x, p3y) = xform.apply(x, y);
                 let mut segs = Vec::new();
-                flatten_cubic(cx, cy, p1x, p1y, p2x, p2y, p3x, p3y, tol_sq, &mut segs, 0);
+                flatten_cubic(
+                    cx,
+                    cy,
+                    p1x,
+                    p1y,
+                    p2x,
+                    p2y,
+                    p3x,
+                    p3y,
+                    tol_sq,
+                    &mut segs,
+                    &mut budget,
+                    0,
+                );
                 out.push(FlattenedCurve::Cubic(segs));
                 cx = p3x;
                 cy = p3y;
             }
             PathOp::Close => {
                 if have_start && (cx != sx || cy != sy) {
+                    budget = budget.saturating_sub(1);
                     out.push(FlattenedCurve::Line(Segment {
                         x0: cx,
                         y0: cy,
@@ -314,6 +394,19 @@ where
 }
 
 const MAX_DEPTH: u32 = 16;
+
+/// Segment budget for one [`flatten`] or [`flatten_grouped`] call, and
+/// for the combined layers of one color glyph or SVG document. Curve
+/// subdivision stops once this many segments exist, so hostile control
+/// points cannot turn each curve into `2^MAX_DEPTH` segments. Real
+/// glyph outlines produce a few thousand.
+pub(crate) const MAX_SEGMENTS: usize = 1 << 20;
+
+/// Appends `seg` and charges it against the subdivision budget.
+fn push_segment(out: &mut Vec<Segment>, budget: &mut usize, seg: Segment) {
+    *budget = budget.saturating_sub(1);
+    out.push(seg);
+}
 
 // =========================================================================
 // Bezier arc-length estimators.
@@ -650,6 +743,14 @@ fn arc_length_cubic_rec(
     left + right
 }
 
+/// True when subdividing further cannot help: the depth cap or the
+/// segment budget is reached, or a control point is NaN or infinite.
+/// Midpoints of non-finite points stay non-finite, so splitting them
+/// would only emit `2^MAX_DEPTH` unusable segments.
+fn stop_subdividing(depth: u32, budget: usize, points: &[f32]) -> bool {
+    depth >= MAX_DEPTH || budget == 0 || !points.iter().all(|v| v.is_finite())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn flatten_quad(
     x0: f32,
@@ -660,6 +761,7 @@ fn flatten_quad(
     y2: f32,
     tol_sq: f32,
     out: &mut Vec<Segment>,
+    budget: &mut usize,
     depth: u32,
 ) {
     // Squared perpendicular distance from the control point to the
@@ -676,13 +778,17 @@ fn flatten_quad(
         let ey = y1 - y0;
         ex * ex + ey * ey
     };
-    if depth >= MAX_DEPTH || dist_sq <= 4.0 * tol_sq {
-        out.push(Segment {
-            x0,
-            y0,
-            x1: x2,
-            y1: y2,
-        });
+    if stop_subdividing(depth, *budget, &[x0, y0, x1, y1, x2, y2]) || dist_sq <= 4.0 * tol_sq {
+        push_segment(
+            out,
+            budget,
+            Segment {
+                x0,
+                y0,
+                x1: x2,
+                y1: y2,
+            },
+        );
         return;
     }
     // Midpoint subdivide via de Casteljau.
@@ -692,8 +798,8 @@ fn flatten_quad(
     let m12y = 0.5 * (y1 + y2);
     let mx = 0.5 * (m01x + m12x);
     let my = 0.5 * (m01y + m12y);
-    flatten_quad(x0, y0, m01x, m01y, mx, my, tol_sq, out, depth + 1);
-    flatten_quad(mx, my, m12x, m12y, x2, y2, tol_sq, out, depth + 1);
+    flatten_quad(x0, y0, m01x, m01y, mx, my, tol_sq, out, budget, depth + 1);
+    flatten_quad(mx, my, m12x, m12y, x2, y2, tol_sq, out, budget, depth + 1);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -708,6 +814,7 @@ fn flatten_cubic(
     y3: f32,
     tol_sq: f32,
     out: &mut Vec<Segment>,
+    budget: &mut usize,
     depth: u32,
 ) {
     // Wang's bound for cubic flatness: sample the perpendicular
@@ -727,13 +834,19 @@ fn flatten_cubic(
         let e2y = y2 - y0;
         (e1x * e1x + e1y * e1y, e2x * e2x + e2y * e2y)
     };
-    if depth >= MAX_DEPTH || (d1_sq <= tol_sq && d2_sq <= tol_sq) {
-        out.push(Segment {
-            x0,
-            y0,
-            x1: x3,
-            y1: y3,
-        });
+    if stop_subdividing(depth, *budget, &[x0, y0, x1, y1, x2, y2, x3, y3])
+        || (d1_sq <= tol_sq && d2_sq <= tol_sq)
+    {
+        push_segment(
+            out,
+            budget,
+            Segment {
+                x0,
+                y0,
+                x1: x3,
+                y1: y3,
+            },
+        );
         return;
     }
     // de Casteljau subdivide at t=0.5.
@@ -760,6 +873,7 @@ fn flatten_cubic(
         my,
         tol_sq,
         out,
+        budget,
         depth + 1,
     );
     flatten_cubic(
@@ -773,6 +887,7 @@ fn flatten_cubic(
         y3,
         tol_sq,
         out,
+        budget,
         depth + 1,
     );
 }
@@ -1151,5 +1266,54 @@ mod tests {
             0.01,
         );
         assert!(t.is_finite() && (0.0..=1.0).contains(&t), "got {t}");
+    }
+
+    #[test]
+    fn non_finite_curves_emit_a_single_chord() {
+        // NaN or infinite control points used to subdivide to
+        // MAX_DEPTH and emit 2^16 segments per curve.
+        let ops = [
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::QuadTo {
+                cx: f32::NAN,
+                cy: 0.0,
+                x: 10.0,
+                y: 0.0,
+            },
+            PathOp::CubicTo {
+                c1x: 0.0,
+                c1y: f32::INFINITY,
+                c2x: 0.0,
+                c2y: 0.0,
+                x: 20.0,
+                y: 5.0,
+            },
+        ];
+        assert_eq!(flatten(ops, &Affine::identity(), 0.25).len(), 2);
+        let grouped = flatten_grouped(ops, &Affine::identity(), 0.25);
+        assert_eq!(grouped.len(), 2);
+        assert!(grouped.iter().all(|c| match c {
+            FlattenedCurve::Quad(s) | FlattenedCurve::Cubic(s) => s.len() == 1,
+            FlattenedCurve::Line(_) => false,
+        }));
+    }
+
+    #[test]
+    fn subdivision_stops_at_the_segment_budget() {
+        // Finite but huge control points still subdivide 16 levels
+        // deep. 64 such curves used to produce four million segments.
+        let mut ops = alloc::vec![PathOp::MoveTo { x: 0.0, y: 0.0 }];
+        for _ in 0..64 {
+            ops.push(PathOp::QuadTo {
+                cx: 0.0,
+                cy: 1e30,
+                x: 1.0,
+                y: 0.0,
+            });
+        }
+        let segs = flatten(ops.iter().copied(), &Affine::identity(), 0.25);
+        assert!(segs.len() <= MAX_SEGMENTS + ops.len(), "{}", segs.len());
+        let grouped = flatten_grouped(ops.iter().copied(), &Affine::identity(), 0.25);
+        assert_eq!(ungroup(&grouped), segs);
     }
 }

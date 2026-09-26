@@ -18,8 +18,9 @@
 //!         +-- Cbdt -> decode_png
 //!         +-- Sbix png  -> decode_png
 //!         +-- Sbix dupe -> recurse to referenced gid
-//!         +-- Sbix jpg -> decode_jpeg (baseline 8-bit YCbCr/gray)
-//!         +-- Sbix tiff/jp2 -> UnsupportedBitmap
+//!         +-- Sbix jpg -> decode_jpeg (8-bit YCbCr/gray)
+//!         +-- Sbix tiff -> decode_tiff (baseline 8-bit RGB/RGBA)
+//!         +-- Sbix jp2 -> UnsupportedBitmap
 //!         +-- Ebdt -> unpack 1bpp mask -> black-on-transparent RGBA
 //!         |
 //!         v
@@ -31,13 +32,12 @@
 //!
 //! # Scope
 //!
-//! - **PNG, baseline JPEG, and 1bpp mono.** sbix `'jpg '` is decoded
-//!   via the in-crate baseline decoder ([`crate::decode_jpeg`]); sbix
-//!   `'tiff'` / `'jp2 '` return [`RenderError::UnsupportedBitmap`];
-//!   implementing those decoders
-//!   from scratch is each its own project and they're rare in font
-//!   embeds. The bitmap-emoji ecosystem in 2026 is overwhelmingly
-//!   PNG-only.
+//! - **PNG, JPEG, baseline TIFF, and 1bpp mono.** sbix `'jpg '` is
+//!   decoded via the in-crate decoder ([`crate::decode_jpeg`]) and
+//!   sbix `'tiff'` via [`crate::decode_tiff`]. sbix `'jp2 '` returns
+//!   [`RenderError::UnsupportedBitmap`]: a JPEG 2000 decoder is its
+//!   own project and the format is rare in font embeds. The
+//!   bitmap-emoji ecosystem in 2026 is overwhelmingly PNG-only.
 //! - **sbix `'dupe'`** is supported via a depth-limited recursion to
 //!   the referenced gid's bitmap.
 //! - **EBDT formats 1, 2, 5, 6, 7** (1bpp byte-aligned and bit-aligned
@@ -46,8 +46,9 @@
 //!   the referenced component gids at the parent's strike, alpha-
 //!   overlay each on a parent canvas, and surface
 //!   [`RenderError::BitmapDecodeFailed`] on cycles, self-references,
-//!   missing-at-strike components, or recursion past
-//!   [`EBDT_COMPOSITE_MAX_DEPTH`].
+//!   missing-at-strike components, recursion past
+//!   [`EBDT_COMPOSITE_MAX_DEPTH`], or more than
+//!   [`EBDT_COMPOSITE_MAX_COMPONENTS`] component expansions in total.
 //! - **No interlacing.** Adam7 isn't used in font embeds.
 //! - **No ancillary chunks beyond IHDR / IDAT / IEND.** The PNG
 //!   decoder skips unknown chunks (per PNG spec) but doesn't apply
@@ -83,6 +84,14 @@ const SBIX_DUPE_MAX_DEPTH: u8 = 4;
 /// blast radius of a malicious or malformed font.
 const EBDT_COMPOSITE_MAX_DEPTH: u8 = 4;
 
+/// Maximum number of EBDT composite components expanded while
+/// rendering one glyph, counted across every recursion level. The depth
+/// cap alone still allows a fan-out of `n^4` expansions when each
+/// composite lists `n` components, so a small font could otherwise
+/// request billions of blits. Real composites list a handful of
+/// components.
+const EBDT_COMPOSITE_MAX_COMPONENTS: u32 = 1024;
+
 /// Entry point: rasterizes the embedded bitmap glyph for `gid` at
 /// the requested pixel size.
 ///
@@ -100,22 +109,26 @@ const EBDT_COMPOSITE_MAX_DEPTH: u8 = 4;
 /// Dispatch priority is **CBDT (color) > sbix png > EBDT (mono)**,
 /// see [`Face::glyph_bitmap`](sigilbuzz::Face::glyph_bitmap). Within
 /// the sbix variant, `'png '` decodes inline, `'jpg '` decodes via
-/// the in-crate baseline JPEG decoder ([`crate::decode_jpeg`]),
-/// `'dupe'` recurses (with a depth cap) into the referenced gid, and
-/// `'tiff'` / `'jp2 '` surface [`RenderError::UnsupportedBitmap`].
+/// the in-crate JPEG decoder ([`crate::decode_jpeg`]), `'tiff'`
+/// decodes via [`crate::decode_tiff`], `'dupe'` recurses (with a depth
+/// cap) into the referenced gid, and `'jp2 '` surfaces
+/// [`RenderError::UnsupportedBitmap`].
 ///
 /// Returns:
 /// - `Ok(pixmap)`: decoded and (optionally) rescaled bitmap.
 /// - `Err(RenderError::NoBitmap(gid))`: no strike covers `gid`, or
 ///   the font carries no bitmap tables.
-/// - `Err(RenderError::UnsupportedBitmap)`: sbix payload is tiff /
-///   jp2, or `'dupe'` recursion exceeds the depth cap.
+/// - `Err(RenderError::UnsupportedBitmap)`: sbix payload is jp2 or an
+///   unknown tag, a TIFF uses an unsupported feature, or `'dupe'`
+///   recursion exceeds the depth cap.
 /// - `Err(RenderError::BadJpeg(...))`: sbix `'jpg '` payload failed
-///   to decode (truncated, progressive, arithmetic-coded, etc.).
+///   to decode (truncated, arithmetic-coded, etc.).
+/// - `Err(RenderError::BadTiff(...))`: sbix `'tiff'` payload failed
+///   structural validation.
 /// - `Err(RenderError::BitmapDecodeFailed(_))`: EBDT composite
 ///   (formats 8 / 9) recursion hit a cycle, self-reference, OOB
-///   component glyph id, missing-at-strike component, or
-///   `EBDT_COMPOSITE_MAX_DEPTH`.
+///   component glyph id, missing-at-strike component,
+///   `EBDT_COMPOSITE_MAX_DEPTH`, or `EBDT_COMPOSITE_MAX_COMPONENTS`.
 /// - `Err(RenderError::BadPng(...))`: PNG payload failed to decode.
 ///
 /// # Errors
@@ -129,32 +142,37 @@ pub fn rasterize_bitmap_glyph(
     size_pt: f32,
     _coords: &[f32],
 ) -> Result<ColorPixmap, RenderError> {
-    rasterize_bitmap_inner(face, gid, size_pt, 0)
+    let mut composite = CompositeState {
+        chain: Vec::new(),
+        depth: 0,
+        components_left: EBDT_COMPOSITE_MAX_COMPONENTS,
+    };
+    rasterize_bitmap_inner(face, gid, size_pt, 0, &mut composite)
 }
 
+/// EBDT composite recursion bookkeeping, threaded through
+/// [`rasterize_bitmap_inner`].
+struct CompositeState {
+    /// Gids currently being expanded as EBDT composite parents, used
+    /// for cycle detection (a component referring back to any ancestor
+    /// in the chain is a cycle, not just a direct self-reference).
+    chain: Vec<u16>,
+    /// EBDT-composite expansion level. Independent of the sbix-side
+    /// `dupe_depth` counter.
+    depth: u8,
+    /// Component expansions still allowed for this glyph. Shared by
+    /// every recursion level so the total work stays bounded.
+    components_left: u32,
+}
+
+/// Rasterizes `gid` and threads the sbix `'dupe'` depth and the EBDT
+/// composite bookkeeping through the recursion.
 fn rasterize_bitmap_inner(
     face: &Face<'_>,
     gid: u16,
     size_pt: f32,
     dupe_depth: u8,
-) -> Result<ColorPixmap, RenderError> {
-    rasterize_bitmap_inner_full(face, gid, size_pt, dupe_depth, &mut Vec::new(), 0)
-}
-
-/// Same as [`rasterize_bitmap_inner`] but threads the composite
-/// recursion bookkeeping through. `composite_chain` is the list of
-/// gids currently being expanded as EBDT composite parents, used for
-/// cycle detection (a component referring back to any ancestor in the
-/// chain is a cycle, not just a direct self-reference).
-/// `composite_depth` counts EBDT-composite expansion levels and is
-/// independent of `dupe_depth` (the sbix-side counter).
-fn rasterize_bitmap_inner_full(
-    face: &Face<'_>,
-    gid: u16,
-    size_pt: f32,
-    dupe_depth: u8,
-    composite_chain: &mut Vec<u16>,
-    composite_depth: u8,
+    composite: &mut CompositeState,
 ) -> Result<ColorPixmap, RenderError> {
     if !size_pt.is_finite() || size_pt <= 0.0 {
         return Err(RenderError::BadSize(size_pt));
@@ -185,29 +203,20 @@ fn rasterize_bitmap_inner_full(
                 // size_pt so strike picking happens against the
                 // referenced gid's coverage. A self-reference will
                 // hit the depth cap rather than loop forever.
-                if glyph.data.len() < 2 {
+                let &[hi, lo, ..] = glyph.data else {
                     return Err(RenderError::UnsupportedBitmap);
-                }
-                let alias = u16::from_be_bytes([glyph.data[0], glyph.data[1]]);
+                };
+                let alias = u16::from_be_bytes([hi, lo]);
                 if alias == gid {
                     return Err(RenderError::UnsupportedBitmap);
                 }
-                return rasterize_bitmap_inner_full(
-                    face,
-                    alias,
-                    size_pt,
-                    dupe_depth + 1,
-                    composite_chain,
-                    composite_depth,
-                );
+                return rasterize_bitmap_inner(face, alias, size_pt, dupe_depth + 1, composite);
             }
-            // JPEG: hand-rolled baseline decoder. Supports 8-bit
-            // sequential YCbCr (4:4:4 / 4:2:2 / 4:2:0) and grayscale
+            // JPEG: hand-rolled decoder. Supports 8-bit baseline and
+            // progressive YCbCr (4:4:4 / 4:2:2 / 4:2:0) and grayscale
             // (the slice that real-world font sbix payloads land in).
-            // Progressive scan / arithmetic coding / 16-bit / restart
-            // markers surface as `BadJpeg`; we re-tag as
-            // `UnsupportedBitmap` so callers can fall back to outlines
-            // exactly as before.
+            // Arithmetic coding, 16-bit precision, restart markers,
+            // and AC refinement scans surface as `BadJpeg`.
             TAG_JPG => (decode_jpeg(glyph.data)?, f32::from(ppem)),
             // TIFF: hand-rolled baseline decoder. Supports 8-bit RGB
             // / RGBA, single IFD, strip-organized, uncompressed or
@@ -225,14 +234,7 @@ fn rasterize_bitmap_inner_full(
         },
         GlyphBitmapEntry::Ebdt { ppem_y, bitmap, .. } => {
             if bitmap.is_composite() {
-                let pix = decode_ebdt_composite(
-                    face,
-                    gid,
-                    &bitmap,
-                    ppem_y,
-                    composite_chain,
-                    composite_depth,
-                )?;
+                let pix = decode_ebdt_composite(face, gid, &bitmap, ppem_y, composite)?;
                 (pix, f32::from(ppem_y))
             } else {
                 (decode_ebdt_mono(&bitmap)?, f32::from(ppem_y))
@@ -259,9 +261,7 @@ fn rasterize_bitmap_inner_full(
     {
         return Err(RenderError::BadSize(size_pt));
     }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let dst_w = (dst_w_f as u32).max(1);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let dst_h = (dst_h_f as u32).max(1);
     Ok(rescale_bilinear(&decoded, dst_w, dst_h))
 }
@@ -303,37 +303,30 @@ const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 /// # Errors
 /// Returns [`RenderError::BadPng`] on any structural problem.
 pub fn decode_png(bytes: &[u8]) -> Result<ColorPixmap, RenderError> {
-    if bytes.len() < 8 || bytes[..8] != PNG_SIGNATURE {
+    let Some(mut rest) = bytes.strip_prefix(&PNG_SIGNATURE) else {
         return Err(RenderError::BadPng("missing PNG signature"));
-    }
-    let mut cursor = 8usize;
+    };
     let mut ihdr: Option<Ihdr> = None;
     let mut idat = Vec::<u8>::new();
     let mut plte: Option<Vec<[u8; 3]>> = None;
     let mut trns: Option<Vec<u8>> = None;
     loop {
-        if cursor + 8 > bytes.len() {
+        let Some((&[l0, l1, l2, l3, k0, k1, k2, k3], body)) = rest.split_first_chunk::<8>() else {
             return Err(RenderError::BadPng("truncated chunk header"));
-        }
-        let len = read_u32(&bytes[cursor..cursor + 4]) as usize;
-        let kind = [
-            bytes[cursor + 4],
-            bytes[cursor + 5],
-            bytes[cursor + 6],
-            bytes[cursor + 7],
-        ];
-        cursor += 8;
-        let data_end = cursor
-            .checked_add(len)
-            .ok_or(RenderError::BadPng("chunk length overflow"))?;
-        if data_end + 4 > bytes.len() {
+        };
+        let len = u32::from_be_bytes([l0, l1, l2, l3]) as usize;
+        let kind = [k0, k1, k2, k3];
+        // `body` starts with the chunk data, then its 4-byte CRC.
+        let Some(data) = body.get(..len) else {
             return Err(RenderError::BadPng("truncated chunk body"));
-        }
-        let data = &bytes[cursor..data_end];
+        };
         // Skip CRC; PNG embeds in fonts have already been validated
         // by the font producer and we don't gain anything by failing
         // a render on a CRC mismatch.
-        cursor = data_end + 4;
+        let Some(next) = body.get(len..).and_then(|r| r.get(4..)) else {
+            return Err(RenderError::BadPng("truncated chunk body"));
+        };
+        rest = next;
 
         match &kind {
             b"IHDR" => {
@@ -385,16 +378,14 @@ struct Ihdr {
 
 impl Ihdr {
     fn parse(data: &[u8]) -> Result<Self, RenderError> {
-        if data.len() != 13 {
+        let Some((&[w0, w1, w2, w3, h0, h1, h2, h3], tail)) = data.split_first_chunk::<8>() else {
             return Err(RenderError::BadPng("IHDR length not 13"));
-        }
-        let width = read_u32(&data[0..4]);
-        let height = read_u32(&data[4..8]);
-        let bit_depth = data[8];
-        let color_type = data[9];
-        let compression = data[10];
-        let filter = data[11];
-        let interlace = data[12];
+        };
+        let &[bit_depth, color_type, compression, filter, interlace] = tail else {
+            return Err(RenderError::BadPng("IHDR length not 13"));
+        };
+        let width = u32::from_be_bytes([w0, w1, w2, w3]);
+        let height = u32::from_be_bytes([h0, h1, h2, h3]);
         if compression != 0 || filter != 0 {
             return Err(RenderError::BadPng("unsupported compression/filter"));
         }
@@ -446,16 +437,28 @@ fn decode_image(
     plte: Option<&[[u8; 3]]>,
     trns: Option<&[u8]>,
 ) -> Result<ColorPixmap, RenderError> {
-    let raw = miniz_oxide::inflate::decompress_to_vec_zlib(idat)
-        .map_err(|_| RenderError::BadPng("zlib inflate failed"))?;
     let bpp = ihdr.bytes_per_pixel();
     let row_bytes = (ihdr.width as usize)
         .checked_mul(bpp)
         .ok_or(RenderError::BadPng("row size overflow"))?;
     // Filter byte + row payload, height rows.
-    let expected = (row_bytes + 1)
+    let stride = row_bytes
+        .checked_add(1)
+        .ok_or(RenderError::BadPng("row size overflow"))?;
+    let expected = stride
         .checked_mul(ihdr.height as usize)
         .ok_or(RenderError::BadPng("decompressed size overflow"))?;
+    // Inflate at most one byte past the size the header implies. A
+    // longer stream is already a length mismatch, so the limit stops a
+    // small IDAT from inflating into gigabytes before that check runs.
+    let raw =
+        miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(idat, expected.saturating_add(1))
+            .map_err(|e| match e.status {
+            miniz_oxide::inflate::TINFLStatus::HasMoreOutput => {
+                RenderError::BadPng("decompressed length mismatch")
+            }
+            _ => RenderError::BadPng("zlib inflate failed"),
+        })?;
     if raw.len() != expected {
         return Err(RenderError::BadPng("decompressed length mismatch"));
     }
@@ -464,14 +467,14 @@ fn decode_image(
     // reconstruction uses the previous row.
     let mut prev_row = vec![0u8; row_bytes];
     let mut cur_row = vec![0u8; row_bytes];
-    let mut pixels = Vec::with_capacity((ihdr.width * ihdr.height) as usize * 4);
+    let mut pixels = Vec::with_capacity((ihdr.width as usize * ihdr.height as usize) * 4);
 
-    let mut cursor = 0usize;
-    for _y in 0..ihdr.height {
-        let filter = raw[cursor];
-        cursor += 1;
-        let row = &raw[cursor..cursor + row_bytes];
-        cursor += row_bytes;
+    // `raw.len() == stride * height`, so this yields exactly one chunk
+    // per row and each chunk holds the filter byte plus `row_bytes`.
+    for chunk in raw.chunks_exact(stride) {
+        let Some((&filter, row)) = chunk.split_first() else {
+            continue;
+        };
         defilter_row(filter, row, &prev_row, &mut cur_row, bpp)?;
         // Transcode this row into RGBA.
         emit_row(ihdr, plte, trns, &cur_row, &mut pixels)?;
@@ -632,10 +635,6 @@ fn push_premul(out: &mut Vec<u8>, r: u8, g: u8, b: u8, a: u8) {
     }
 }
 
-fn read_u32(bytes: &[u8]) -> u32 {
-    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
-}
-
 // ---------------------------------------------------------------------------
 // EBDT mono -> RGBA.
 //
@@ -657,8 +656,10 @@ fn read_u32(bytes: &[u8]) -> u32 {
 ///
 /// Accepts the byte-aligned (formats 1 / 6) and bit-aligned (formats
 /// 2 / 5 / 7) variants. See [`BitPacking`]. Composite formats 8 / 9
-/// never reach this entry point because the underlying parser surfaces
-/// them as `Unsupported`.
+/// carry component records instead of a mask, so a composite entry
+/// with a non-zero size fails the length check below.
+/// [`rasterize_bitmap_glyph`] renders composites by recursing into
+/// their components.
 ///
 /// # Errors
 /// Returns [`RenderError::UnsupportedBitmap`] when the mask payload
@@ -685,12 +686,14 @@ pub fn decode_ebdt_mono(bitmap: &EbdtBitmap<'_>) -> Result<ColorPixmap, RenderEr
 /// [`RenderError::BitmapDecodeFailed`] rather than silently falling
 /// back to a different strike.
 ///
-/// The recursion is bounded three ways:
+/// The recursion is bounded four ways:
 ///   1. A hard depth cap ([`EBDT_COMPOSITE_MAX_DEPTH`]).
 ///   2. A self-reference guard (a component whose `glyph_id` equals
 ///      the current composite's `gid`).
 ///   3. A cycle guard against the full ancestor chain (a component
 ///      whose `glyph_id` matches any gid currently being expanded).
+///   4. A total component budget ([`EBDT_COMPOSITE_MAX_COMPONENTS`])
+///      shared by every level, which bounds the fan-out.
 ///
 /// Compositing uses source-over alpha blending in premultiplied space.
 /// EBDT mono masks are 0/255 alpha so the result is conceptually a
@@ -702,10 +705,9 @@ fn decode_ebdt_composite(
     gid: u16,
     bitmap: &EbdtBitmap<'_>,
     parent_ppem_y: u8,
-    composite_chain: &mut Vec<u16>,
-    composite_depth: u8,
+    composite: &mut CompositeState,
 ) -> Result<ColorPixmap, RenderError> {
-    if composite_depth >= EBDT_COMPOSITE_MAX_DEPTH {
+    if composite.depth >= EBDT_COMPOSITE_MAX_DEPTH {
         return Err(RenderError::BitmapDecodeFailed("composite depth exceeded"));
     }
     let parent_w = u32::from(bitmap.metrics.width());
@@ -717,16 +719,23 @@ fn decode_ebdt_composite(
     let canvas_h = parent_h;
     let mut canvas = ColorPixmap::new(canvas_w, canvas_h);
 
-    composite_chain.push(gid);
+    composite.chain.push(gid);
+    composite.depth += 1;
     let result = (|| -> Result<(), RenderError> {
         for comp in bitmap.components() {
+            let Some(left) = composite.components_left.checked_sub(1) else {
+                return Err(RenderError::BitmapDecodeFailed(
+                    "composite component budget exceeded",
+                ));
+            };
+            composite.components_left = left;
             // Self-reference and ancestor-cycle guards, separate from
             // the depth cap so they surface a precise error message
             // even at depth 1.
             if comp.glyph_id == gid {
                 return Err(RenderError::BitmapDecodeFailed("composite self-reference"));
             }
-            if composite_chain.contains(&comp.glyph_id) {
+            if composite.chain.contains(&comp.glyph_id) {
                 return Err(RenderError::BitmapDecodeFailed("composite cycle"));
             }
             // OOB rejection: glyph id beyond what the font enumerates.
@@ -773,14 +782,8 @@ fn decode_ebdt_composite(
                     ));
                 }
             }
-            let comp_pix = rasterize_bitmap_inner_full(
-                face,
-                comp.glyph_id,
-                parent_ppem_size,
-                0,
-                composite_chain,
-                composite_depth + 1,
-            )?;
+            let comp_pix =
+                rasterize_bitmap_inner(face, comp.glyph_id, parent_ppem_size, 0, composite)?;
             blit_source_over(
                 &mut canvas,
                 &comp_pix,
@@ -790,7 +793,8 @@ fn decode_ebdt_composite(
         }
         Ok(())
     })();
-    composite_chain.pop();
+    composite.depth -= 1;
+    composite.chain.pop();
     result?;
     Ok(canvas)
 }
@@ -818,13 +822,11 @@ fn blit_source_over(dst: &mut ColorPixmap, src: &ColorPixmap, dx: i32, dy: i32) 
             if tx < 0 || tx >= dw {
                 continue;
             }
-            #[allow(clippy::cast_sign_loss)]
             let s_idx = (sy as usize * src.width as usize + sx as usize) * 4;
             let sa = src.data[s_idx + 3];
             if sa == 0 {
                 continue;
             }
-            #[allow(clippy::cast_sign_loss)]
             let d_idx = (ty as usize * dst.width as usize + tx as usize) * 4;
             // Premultiplied source-over: out = src + dst * (1 - src.a).
             let inv = 255u32 - u32::from(sa);
@@ -834,7 +836,6 @@ fn blit_source_over(dst: &mut ColorPixmap, src: &ColorPixmap, dx: i32, dy: i32) 
                 // (d * inv + 127) / 255 keeps rounding stable; matches
                 // push_premul above.
                 let blended = s + (d * inv + 127) / 255;
-                #[allow(clippy::cast_possible_truncation)]
                 let v = blended.min(255) as u8;
                 dst.data[d_idx + c] = v;
             }
@@ -936,7 +937,6 @@ pub fn rescale_bilinear(src: &ColorPixmap, dst_w: u32, dst_h: u32) -> ColorPixma
     // panic in `vec![0u8; w*h*4]`. The ceiling matches the PNG
     // decoder's bound; callers that need larger surfaces
     // should resample in tiles.
-    #[allow(clippy::cast_precision_loss)]
     if dst_w as f32 > MAX_BITMAP_DIM || dst_h as f32 > MAX_BITMAP_DIM {
         return ColorPixmap::new(0, 0);
     }
@@ -951,12 +951,12 @@ pub fn rescale_bilinear(src: &ColorPixmap, dst_w: u32, dst_h: u32) -> ColorPixma
     for y in 0..dst_h {
         let sy = ((y as f32 + 0.5) * sh / dh) - 0.5;
         let y0 = sy.floor().max(0.0) as u32;
-        let y1 = (y0 + 1).min(src.height - 1);
+        let y1 = y0.saturating_add(1).min(src.height - 1);
         let fy = (sy - y0 as f32).clamp(0.0, 1.0);
         for x in 0..dst_w {
             let sx = ((x as f32 + 0.5) * sw / dw) - 0.5;
             let x0 = sx.floor().max(0.0) as u32;
-            let x1 = (x0 + 1).min(src.width - 1);
+            let x1 = x0.saturating_add(1).min(src.width - 1);
             let fx = (sx - x0 as f32).clamp(0.0, 1.0);
             let p00 = src.get(x0, y0);
             let p10 = src.get(x1, y0);
@@ -1420,5 +1420,44 @@ mod tests {
         // a=0 b=0 c=255 -> p = -255; pa=255 pb=255 pc=510 -> tie pa==pb,
         // ties prefer a.
         assert_eq!(paeth(0, 0, 255), 0);
+    }
+
+    #[test]
+    fn idat_inflating_past_the_header_size_is_rejected() {
+        // A 1x1 RGBA header with an IDAT that inflates to 4 MiB. The
+        // inflater now stops one byte past the 5 bytes the header
+        // allows instead of materializing the whole stream.
+        let idat = miniz_oxide::deflate::compress_to_vec_zlib(&vec![0u8; 4 << 20], 6);
+        let mut png = Vec::new();
+        png.extend_from_slice(&PNG_SIGNATURE);
+        write_chunk(&mut png, *b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0]);
+        write_chunk(&mut png, *b"IDAT", &idat);
+        write_chunk(&mut png, *b"IEND", &[]);
+        assert_eq!(
+            decode_png(&png),
+            Err(RenderError::BadPng("decompressed length mismatch"))
+        );
+        // A stream one byte long still reports the same mismatch.
+        let short = miniz_oxide::deflate::compress_to_vec_zlib(&[0u8; 6], 6);
+        let mut png = Vec::new();
+        png.extend_from_slice(&PNG_SIGNATURE);
+        write_chunk(&mut png, *b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0]);
+        write_chunk(&mut png, *b"IDAT", &short);
+        write_chunk(&mut png, *b"IEND", &[]);
+        assert_eq!(
+            decode_png(&png),
+            Err(RenderError::BadPng("decompressed length mismatch"))
+        );
+    }
+
+    #[test]
+    fn exact_size_idat_still_decodes() {
+        // The limit is one byte past the expected size, so a stream
+        // that ends exactly at it inflates in full.
+        for (w, h) in [(1, 1), (3, 7), (64, 2)] {
+            let png = build_solid_rgba_png(9, 8, 7, 255, w, h);
+            let pix = decode_png(&png).expect("decodes");
+            assert_eq!((pix.width, pix.height), (w, h));
+        }
     }
 }

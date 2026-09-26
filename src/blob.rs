@@ -23,13 +23,6 @@ impl<'a> Blob<'a> {
     /// Wraps a borrowed byte slice.
     #[must_use]
     pub const fn new(data: &'a [u8]) -> Self {
-        // `Cow::Borrowed` is not `const`-callable on stable yet, so the
-        // const constructor exists only for the borrowed case via a
-        // manual construction below in the non-const path.
-        Self::from_borrowed(data)
-    }
-
-    const fn from_borrowed(data: &'a [u8]) -> Self {
         Self {
             data: Cow::Borrowed(data),
         }

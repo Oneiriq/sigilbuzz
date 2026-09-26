@@ -2,10 +2,9 @@
 //!
 //! `hmtx` packs `numberOfHMetrics` long-metric records (advance + LSB)
 //! at the front, then a tail of LSB-only records for glyphs whose
-//! advance equals the last long-metric. We re-emit one long metric
-//! per kept gid; the optimization of merging trailing identical
-//! advances into the LSB tail is left for a follow-up. The size
-//! cost is at most 2 bytes per glyph.
+//! advance equals the last long-metric. We re-emit the kept gids in
+//! new-gid order and fold a trailing run of identical advances into
+//! the LSB-only tail.
 
 use alloc::vec::Vec;
 
@@ -44,11 +43,11 @@ pub fn subset_hmtx(face: &Face<'_>, kept: &[u16]) -> Result<HmtxOut, SubsetError
         while long_count > 1 && advances[long_count - 1] == last {
             long_count -= 1;
         }
-        // The loop above stops one *before* the run starts; the
-        // run starts at long_count, so the long block is 0..long_count + 1
-        // ... but the spec wants the long block to *include* one entry
-        // with the runs's advance so trailing LSBs align. Bump it by
-        // one to keep the canonical form.
+        // The loop leaves `long_count` at the index where the run of
+        // trailing identical advances starts (or at 1 when every
+        // advance matches). The long block must include the run's
+        // first entry, whose advance the LSB-only tail inherits, so
+        // bump it by one.
         long_count += 1;
     }
     if long_count == 0 {

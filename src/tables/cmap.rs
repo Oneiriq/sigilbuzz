@@ -26,9 +26,9 @@
 //! | 1 (fmt 4)   | 2             | (3, 1)                 |
 //!
 //! Microsoft Symbol encoding `(3, 0)` is intentionally ignored: real
-//! Symbol fonts need per-codepoint PUA remapping and the handful of
-//! glyphs that matters will be reachable through another subtable in
-//! any font sigilbuzz cares about for M1.
+//! Symbol fonts need per-codepoint PUA remapping. Fonts that ship a
+//! Symbol subtable usually also ship a Unicode one, and sigilbuzz
+//! reads that instead.
 
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
@@ -137,17 +137,13 @@ impl<'a> Cmap<'a> {
     }
 }
 
-// Cheaper-is-better score. Returns None for unsupported combinations.
-// We peek at the subtable's format byte so Symbol fonts declared as
-// format 4 under (3, 0) still score, but we give them the lowest
-// priority.
+// Cheaper-is-better score. Returns None for unsupported combinations,
+// including the Symbol encoding (3, 0). We peek at the subtable's
+// format so only format 4 and format 12 subtables score.
 fn encoding_score(platform: u16, encoding: u16, data: &[u8], subtable_offset: u32) -> Option<u32> {
     // Peek the first two bytes of the subtable to learn its format.
-    let start = subtable_offset as usize;
-    if start + 2 > data.len() {
-        return None;
-    }
-    let format = u16::from_be_bytes([data[start], data[start + 1]]);
+    let head = data.get(subtable_offset as usize..)?.get(..2)?;
+    let format = u16::from_be_bytes([head[0], head[1]]);
 
     let format_tier: u32 = match format {
         12 => 0,
@@ -362,8 +358,11 @@ impl<'a> Format12<'a> {
         let _language = r.read_u32()?;
         let num_groups = r.read_u32()?;
         let groups_off = r.position();
-        let need = num_groups as usize * 12;
-        if groups_off + need > data.len() {
+        // Saturating: on 32-bit targets `num_groups * 12` can exceed
+        // usize, and a wrapped value would pass the check and leave
+        // `group` reading out of bounds.
+        let need = (num_groups as usize).saturating_mul(12);
+        if groups_off.saturating_add(need) > data.len() {
             return Err(Error::Truncated {
                 offset: groups_off,
                 context: "format 12 group table does not fit",

@@ -56,6 +56,7 @@
 //! and per-region scalar evaluation; consumers fold scalars back into
 //! their own tuple decoding.
 
+use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -80,6 +81,16 @@ pub(crate) fn read_cff2_index<'a>(r: &mut Reader<'a>) -> Result<Vec<&'a [u8]>> {
             context: "CFF2 INDEX offSize out of range",
         });
     }
+    // The offset array holds `count + 1` entries. Make sure the data
+    // holds all of them before reserving memory sized by `count`.
+    let offsets_len = count
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(off_size))
+        .ok_or(Error::Malformed {
+            offset: r.position(),
+            context: "CFF2 INDEX offset array overflow",
+        })?;
+    r.peek_bytes(offsets_len)?;
     let mut offsets = Vec::with_capacity(count + 1);
     for _ in 0..=count {
         let bytes = r.read_bytes(off_size)?;
@@ -99,26 +110,25 @@ pub(crate) fn read_cff2_index<'a>(r: &mut Reader<'a>) -> Result<Vec<&'a [u8]>> {
             context: "CFF2 INDEX total length zero",
         });
     }
+    // Bounds check. After it, `data_start + total - 1` cannot overflow.
+    r.peek_bytes(total - 1)?;
     let data_end = data_start + (total - 1);
-    let _ = r.peek_bytes(total - 1)?; // bounds-check
     let mut out = Vec::with_capacity(count);
-    for w in offsets.windows(2) {
-        let a = w[0];
-        let b = w[1];
+    for (&a, &b) in offsets.iter().zip(offsets.iter().skip(1)) {
         if a == 0 || b < a {
             return Err(Error::Malformed {
                 offset: r.position(),
                 context: "CFF2 INDEX offsets non-monotone",
             });
         }
-        let start = data_start + a - 1;
-        let end = data_start + b - 1;
-        if end > data_end {
+        if b > total {
             return Err(Error::Malformed {
-                offset: end,
+                offset: data_start.saturating_add(b - 1),
                 context: "CFF2 INDEX entry past end",
             });
         }
+        let start = data_start + a - 1;
+        let end = data_start + b - 1;
         // Reach back into the underlying slice via a temp reader.
         let mut tmp = *r;
         tmp.seek(start)?;
@@ -127,6 +137,21 @@ pub(crate) fn read_cff2_index<'a>(r: &mut Reader<'a>) -> Result<Vec<&'a [u8]>> {
     }
     r.seek(data_end)?;
     Ok(out)
+}
+
+/// Takes `n` records from the parse budget, or fails when the store
+/// would expand into more records than it has bytes.
+///
+/// Records that do not overlap take at least one byte each, so a
+/// well-formed store always fits. A store whose offsets overlap, so
+/// the same bytes parse as many large records, runs out instead of
+/// allocating without bound.
+fn spend(budget: &mut usize, n: usize, offset: usize) -> Result<()> {
+    *budget = budget.checked_sub(n).ok_or(Error::Malformed {
+        offset,
+        context: "MultiItemVariationStore records overlap",
+    })?;
+    Ok(())
 }
 
 /// One sparse variation region: a list of `(axisIndex, start, peak,
@@ -162,10 +187,16 @@ struct MultiItemVarData<'a> {
 }
 
 /// A parsed `MultiItemVariationStore`.
+///
+/// Offsets that repeat are parsed once: `region_slots[i]` names the
+/// entry of `regions` that region index `i` resolves to, and
+/// `subtable_slots` does the same for `subtables`.
 #[derive(Debug, Clone)]
 pub struct MultiVarStore<'a> {
     regions: Vec<SparseRegion>,
+    region_slots: Vec<usize>,
     subtables: Vec<MultiItemVarData<'a>>,
+    subtable_slots: Vec<usize>,
 }
 
 impl<'a> MultiVarStore<'a> {
@@ -186,6 +217,10 @@ impl<'a> MultiVarStore<'a> {
             subtable_offsets.push(r.read_u32()? as usize);
         }
 
+        // Every parsed axis record, region index, and delta set takes
+        // one unit of this budget. See `spend`.
+        let mut budget = data.len();
+
         // SparseVariationRegionList.
         let mut rr = Reader::at(data, region_list_off)?;
         let region_count = rr.read_u16()? as usize;
@@ -193,12 +228,22 @@ impl<'a> MultiVarStore<'a> {
         for _ in 0..region_count {
             region_offsets.push(rr.read_u32()? as usize);
         }
-        let mut regions = Vec::with_capacity(region_count);
+        let mut regions = Vec::new();
+        let mut region_slots = Vec::with_capacity(region_count);
+        let mut seen: BTreeMap<usize, usize> = BTreeMap::new();
         for off in region_offsets {
+            if let Some(&slot) = seen.get(&off) {
+                region_slots.push(slot);
+                continue;
+            }
             // Region offsets are relative to the region list start.
-            let abs = region_list_off + off;
+            let abs = region_list_off.checked_add(off).ok_or(Error::Malformed {
+                offset: region_list_off,
+                context: "MultiItemVariationStore region offset overflow",
+            })?;
             let mut sr = Reader::at(data, abs)?;
             let axis_count = sr.read_u16()? as usize;
+            spend(&mut budget, axis_count, abs)?;
             let mut axes = Vec::with_capacity(axis_count);
             for _ in 0..axis_count {
                 let axis_index = sr.read_u16()?;
@@ -212,12 +257,21 @@ impl<'a> MultiVarStore<'a> {
                     end,
                 });
             }
+            let slot = regions.len();
             regions.push(SparseRegion { axes });
+            seen.insert(off, slot);
+            region_slots.push(slot);
         }
 
         // MultiItemVariationData subtables.
-        let mut subtables = Vec::with_capacity(subtable_count);
+        let mut subtables = Vec::new();
+        let mut subtable_slots = Vec::with_capacity(subtable_count);
+        let mut seen: BTreeMap<usize, usize> = BTreeMap::new();
         for off in subtable_offsets {
+            if let Some(&slot) = seen.get(&off) {
+                subtable_slots.push(slot);
+                continue;
+            }
             let mut sr = Reader::at(data, off)?;
             let format = sr.read_u8()?;
             if format != 1 {
@@ -227,37 +281,53 @@ impl<'a> MultiVarStore<'a> {
                 });
             }
             let region_index_count = sr.read_u16()? as usize;
+            spend(&mut budget, region_index_count, off)?;
             let mut region_indexes = Vec::with_capacity(region_index_count);
             for _ in 0..region_index_count {
                 region_indexes.push(sr.read_u16()?);
             }
             let delta_sets = read_cff2_index(&mut sr)?;
+            spend(&mut budget, delta_sets.len(), off)?;
+            let slot = subtables.len();
             subtables.push(MultiItemVarData {
                 region_indexes,
                 delta_sets,
             });
+            seen.insert(off, slot);
+            subtable_slots.push(slot);
         }
 
-        Ok(Self { regions, subtables })
+        Ok(Self {
+            regions,
+            region_slots,
+            subtables,
+            subtable_slots,
+        })
     }
 
     /// Number of variation regions in the region list.
     #[must_use]
     pub fn region_count(&self) -> u16 {
-        self.regions.len() as u16
+        self.region_slots.len() as u16
     }
 
     /// Number of `MultiItemVariationData` subtables (outer index max).
     #[must_use]
     pub fn subtable_count(&self) -> u16 {
-        self.subtables.len() as u16
+        self.subtable_slots.len() as u16
     }
 
     /// Returns the sparse region at `region_index`, or `None` if the
     /// index is out of range.
     #[must_use]
     pub fn region(&self, region_index: u16) -> Option<&SparseRegion> {
-        self.regions.get(region_index as usize)
+        let slot = *self.region_slots.get(region_index as usize)?;
+        self.regions.get(slot)
+    }
+
+    fn subtable(&self, outer: u16) -> Option<&MultiItemVarData<'a>> {
+        let slot = *self.subtable_slots.get(outer as usize)?;
+        self.subtables.get(slot)
     }
 
     /// Per-region scalar at `region_index` for the given normalized
@@ -265,18 +335,31 @@ impl<'a> MultiVarStore<'a> {
     /// (i.e. the region does not use them).
     #[must_use]
     pub fn region_scalar(&self, region_index: u16, coords: &[f32]) -> f32 {
-        let Some(region) = self.region(region_index) else {
-            return 0.0;
-        };
-        let mut scalar = 1.0_f32;
-        for axis in &region.axes {
-            let coord = *coords.get(axis.axis_index as usize).unwrap_or(&0.0);
-            scalar *= axis_scalar(axis.start, axis.peak, axis.end, coord);
-            if scalar == 0.0 {
-                return 0.0;
-            }
+        match self.region(region_index) {
+            Some(region) => sparse_region_scalar(region, coords),
+            None => 0.0,
         }
-        scalar
+    }
+
+    /// Scalars for each entry of `region_indexes`, in order. Each
+    /// distinct region is evaluated once, so a subtable that names one
+    /// large region many times does not repeat the work.
+    fn scalars_for(&self, region_indexes: &[u16], coords: &[f32]) -> Vec<f32> {
+        let mut cache: BTreeMap<usize, f32> = BTreeMap::new();
+        region_indexes
+            .iter()
+            .map(|&ri| {
+                let Some(&slot) = self.region_slots.get(ri as usize) else {
+                    return 0.0;
+                };
+                let Some(region) = self.regions.get(slot) else {
+                    return 0.0;
+                };
+                *cache
+                    .entry(slot)
+                    .or_insert_with(|| sparse_region_scalar(region, coords))
+            })
+            .collect()
     }
 
     /// Per-region scalars for all regions referenced by subtable `outer`,
@@ -284,29 +367,20 @@ impl<'a> MultiVarStore<'a> {
     /// out of range.
     #[must_use]
     pub fn region_scalars(&self, outer: u16, coords: &[f32]) -> Option<Vec<f32>> {
-        let sub = self.subtables.get(outer as usize)?;
-        let mut out = Vec::with_capacity(sub.region_indexes.len());
-        for &ri in &sub.region_indexes {
-            out.push(self.region_scalar(ri, coords));
-        }
-        Some(out)
+        let sub = self.subtable(outer)?;
+        Some(self.scalars_for(&sub.region_indexes, coords))
     }
 
     /// Number of regions referenced by subtable `outer`.
     #[must_use]
     pub fn variation_region_count(&self, outer: u16) -> Option<u16> {
-        Some(self.subtables.get(outer as usize)?.region_indexes.len() as u16)
+        Some(self.subtable(outer)?.region_indexes.len() as u16)
     }
 
     /// Region indexes referenced by subtable `outer`.
     #[must_use]
     pub fn region_indexes(&self, outer: u16) -> Option<&[u16]> {
-        Some(
-            self.subtables
-                .get(outer as usize)?
-                .region_indexes
-                .as_slice(),
-        )
+        Some(self.subtable(outer)?.region_indexes.as_slice())
     }
 
     /// Raw `TupleValues` byte slice for delta set `(outer, inner)`.
@@ -315,7 +389,7 @@ impl<'a> MultiVarStore<'a> {
     /// tuple length and fold per-region scalars back in themselves.
     #[must_use]
     pub fn delta_set_bytes(&self, outer: u16, inner: u32) -> Option<&'a [u8]> {
-        let sub = self.subtables.get(outer as usize)?;
+        let sub = self.subtable(outer)?;
         sub.delta_sets.get(inner as usize).copied()
     }
 
@@ -335,33 +409,42 @@ impl<'a> MultiVarStore<'a> {
         value_count: usize,
         coords: &[f32],
     ) -> Option<Vec<f32>> {
-        let sub = self.subtables.get(outer as usize)?;
+        let sub = self.subtable(outer)?;
         let raw = sub.delta_sets.get(inner as usize).copied()?;
         let region_count = sub.region_indexes.len();
         let total = value_count.checked_mul(region_count)?;
         let deltas = decode_tuple_values(raw, total)?;
-        let scalars: Vec<f32> = sub
-            .region_indexes
-            .iter()
-            .map(|&ri| self.region_scalar(ri, coords))
-            .collect();
+        let scalars = self.scalars_for(&sub.region_indexes, coords);
         let mut out = vec![0.0_f32; value_count];
-        for (v, slot) in out.iter_mut().enumerate() {
-            let row = v * region_count;
-            for (r, scalar) in scalars.iter().enumerate() {
-                #[allow(clippy::cast_precision_loss)]
-                let d = deltas[row + r] as f32;
-                *slot += d * scalar;
+        // With no regions every output delta stays zero.
+        if region_count > 0 {
+            for (slot, row) in out.iter_mut().zip(deltas.chunks_exact(region_count)) {
+                for (&d, scalar) in row.iter().zip(&scalars) {
+                    *slot += d as f32 * scalar;
+                }
             }
         }
         Some(out)
     }
 }
 
+/// Scalar of one sparse region at `coords`: the product of its
+/// per-axis falloffs, stopping early at zero.
+fn sparse_region_scalar(region: &SparseRegion, coords: &[f32]) -> f32 {
+    let mut scalar = 1.0_f32;
+    for axis in &region.axes {
+        let coord = *coords.get(axis.axis_index as usize).unwrap_or(&0.0);
+        scalar *= axis_scalar(axis.start, axis.peak, axis.end, coord);
+        if scalar == 0.0 {
+            return 0.0;
+        }
+    }
+    scalar
+}
+
 /// Triangular region falloff for one axis. Returns `1.0` at `peak`,
 /// tapering linearly to `0.0` at `start` and `end`. Mirrors the
 /// classic `supportScalar` from the OpenType spec.
-#[allow(clippy::float_cmp)]
 fn axis_scalar(start: f32, peak: f32, end: f32, coord: f32) -> f32 {
     if peak == 0.0 && start <= 0.0 && end >= 0.0 {
         return 1.0;
@@ -403,7 +486,9 @@ fn axis_scalar(start: f32, peak: f32, end: f32, coord: f32) -> f32 {
 /// Returns `None` on truncation or if the stream encodes more deltas
 /// than `count`.
 pub(crate) fn decode_tuple_values(data: &[u8], count: usize) -> Option<Vec<i32>> {
-    let mut out: Vec<i32> = Vec::with_capacity(count);
+    // One control byte yields at most 64 deltas, so `data` cannot
+    // encode more than `64 * data.len()` of them. Reserve no more.
+    let mut out: Vec<i32> = Vec::with_capacity(count.min(data.len().saturating_mul(64)));
     let mut i = 0usize;
     while out.len() < count {
         if i >= data.len() {
@@ -440,7 +525,6 @@ pub(crate) fn decode_tuple_values(data: &[u8], count: usize) -> Option<Vec<i32>>
                     if i >= data.len() {
                         return None;
                     }
-                    #[allow(clippy::cast_possible_wrap)]
                     let v = data[i] as i8;
                     i += 1;
                     i32::from(v)
@@ -462,7 +546,6 @@ mod tests {
     use alloc::vec;
 
     fn write_f2dot14(out: &mut Vec<u8>, v: f32) {
-        #[allow(clippy::cast_possible_truncation)]
         let raw = (v * 16384.0).round() as i16;
         out.extend_from_slice(&raw.to_be_bytes());
     }
@@ -644,5 +727,117 @@ mod tests {
         let mut r = Reader::new(&bytes);
         let entries = read_cff2_index(&mut r).unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn cff2_index_huge_count_fails_before_reserving_memory() {
+        // count = u32::MAX with no offset array. The reader used to
+        // reserve room for four billion offsets first.
+        let bytes = [0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+        let mut r = Reader::new(&bytes);
+        assert!(read_cff2_index(&mut r).is_err());
+    }
+
+    /// Store header plus a region list of `count` offsets, where
+    /// `offsets(i)` gives offset `i` (relative to the region list).
+    /// `tail` follows the offset array.
+    fn store_with_region_offsets(count: u16, offsets: impl Fn(u16) -> u32, tail: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // format
+        out.extend_from_slice(&8u32.to_be_bytes()); // region list at 8
+        out.extend_from_slice(&0u16.to_be_bytes()); // no subtables
+        out.extend_from_slice(&count.to_be_bytes());
+        for i in 0..count {
+            out.extend_from_slice(&offsets(i).to_be_bytes());
+        }
+        out.extend_from_slice(tail);
+        out
+    }
+
+    #[test]
+    fn aliased_region_offsets_parse_once() {
+        // 65535 region offsets name one region with 65535 axes. Each
+        // copy used to be parsed separately, about 68 GB in total.
+        let count = u16::MAX;
+        let region_rel = 2 + 4 * u32::from(count);
+        let mut region = Vec::new();
+        region.extend_from_slice(&count.to_be_bytes());
+        region.resize(2 + 8 * usize::from(count), 0);
+        let bytes = store_with_region_offsets(count, |_| region_rel, &region);
+        let s = MultiVarStore::parse(&bytes).unwrap();
+        assert_eq!(s.region_count(), count);
+        assert_eq!(s.region(count - 1).unwrap().axes.len(), usize::from(count));
+    }
+
+    #[test]
+    fn overlapping_region_offsets_are_rejected() {
+        // Region offsets two bytes apart inside a block of 0xFF bytes.
+        // Every one of them reads as a region with 65535 axes, so the
+        // store used to expand into about 68 GB of axis records.
+        let count = u16::MAX;
+        let region_rel = 2 + 4 * u32::from(count);
+        let block = vec![0xFF_u8; 2 + 8 * 65535 + 2 * usize::from(count)];
+        let bytes = store_with_region_offsets(count, |i| region_rel + 2 * u32::from(i), &block);
+        assert!(matches!(
+            MultiVarStore::parse(&bytes),
+            Err(Error::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn aliased_subtable_offsets_parse_once() {
+        // 65535 subtable offsets name one subtable whose delta-set
+        // INDEX has 100 000 empty entries. Each copy used to be parsed
+        // separately, about 100 GB of slices.
+        let count = u16::MAX;
+        let entries: u32 = 100_000;
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // format
+        let region_off_slot = out.len();
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&count.to_be_bytes());
+        let sub_off = (out.len() + 4 * usize::from(count)) as u32;
+        for _ in 0..count {
+            out.extend_from_slice(&sub_off.to_be_bytes());
+        }
+        out.push(1); // MultiItemVariationData format
+        out.extend_from_slice(&0u16.to_be_bytes()); // no region indexes
+        out.extend_from_slice(&entries.to_be_bytes());
+        out.push(1); // offSize
+        out.resize(out.len() + entries as usize + 1, 1); // all offsets = 1
+        let region_list = out.len() as u32;
+        out[region_off_slot..region_off_slot + 4].copy_from_slice(&region_list.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes()); // no regions
+        let s = MultiVarStore::parse(&out).unwrap();
+        assert_eq!(s.subtable_count(), count);
+        assert_eq!(s.delta_set_bytes(count - 1, entries - 1), Some(&[][..]));
+    }
+
+    #[test]
+    fn resolve_deltas_huge_value_count_does_not_reserve_memory() {
+        // The decoder used to reserve `value_count * region_count`
+        // deltas before looking at the payload.
+        let bytes = build_store(&[vec![(0, 0.0, 1.0, 1.0)]], &[0], &[&[0x00, 0x05]]);
+        let s = MultiVarStore::parse(&bytes).unwrap();
+        assert!(s.resolve_deltas(0, 0, 1 << 40, &[0.0]).is_none());
+    }
+
+    #[test]
+    fn repeated_region_index_is_evaluated_once() {
+        // One region with 65535 axes, named 65535 times by the
+        // subtable. Evaluating it once per mention took about four
+        // billion axis steps.
+        let region = vec![(0_u16, 0.0_f32, 0.0_f32, 0.0_f32); 65535];
+        let indexes = vec![0_u16; 65535];
+        // 65535 zero deltas: 1023 runs of 64 plus one run of 63.
+        let mut payload = vec![0xBF_u8; 1023];
+        payload.push(0xBE);
+        let bytes = build_store(&[region], &indexes, &[&payload]);
+        let s = MultiVarStore::parse(&bytes).unwrap();
+        let deltas = s.resolve_deltas(0, 0, 1, &[]).unwrap();
+        assert_eq!(deltas, vec![0.0]);
+        let scalars = s.region_scalars(0, &[]).unwrap();
+        assert_eq!(scalars.len(), 65535);
+        assert!(scalars.iter().all(|&v| v == 1.0));
     }
 }

@@ -31,13 +31,14 @@
 //! FDArray, FDSelect, and the VariationStore are referenced by absolute
 //! offset from that dict.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::cff::{
     compute_kept_subrs, emit_fd_select_auto, encode_dict_offset_placeholder, encode_index_cff2,
-    parse_fd_select, patch_dict_offset, read_index_cff2, renumber_charstring, serialise_font_dict,
-    serialise_private_dict, walk_dict, DictEntry, OP_CHARSTRINGS, OP_FD_ARRAY, OP_FD_SELECT,
-    OP_PRIVATE, OP_SUBRS, OP_VSTORE,
+    kept_fd_positions, parse_fd_select, patch_dict_offset, private_operands, read_index_cff2,
+    read_private_dict, renumber_charstring, serialise_font_dict, serialise_private_dict, subr_bias,
+    walk_dict, DictEntry, OP_CHARSTRINGS, OP_FD_ARRAY, OP_FD_SELECT, OP_PRIVATE, OP_VSTORE,
 };
 use crate::SubsetError;
 
@@ -127,22 +128,22 @@ struct ParsedCff2<'a> {
 }
 
 fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
-    if data.len() < 5 {
+    let Some(&[major, _, hdr_size, len_hi, len_lo]) = data.first_chunk::<5>() else {
         return Err(SubsetError::Unsupported("CFF2 header truncated"));
-    }
-    let major = data[0];
+    };
     if major != 2 {
         return Err(SubsetError::Unsupported("CFF2 major version != 2"));
     }
-    let hdr_size = data[2] as usize;
+    let hdr_size = usize::from(hdr_size);
     if hdr_size < 5 {
         return Err(SubsetError::Unsupported("CFF2 hdrSize < 5"));
     }
-    let top_dict_length = u16::from_be_bytes([data[3], data[4]]) as usize;
-    if data.len() < hdr_size + top_dict_length {
-        return Err(SubsetError::Unsupported("CFF2 Top DICT past end"));
-    }
-    let top_dict = &data[hdr_size..hdr_size + top_dict_length];
+    let top_dict_length = usize::from(u16::from_be_bytes([len_hi, len_lo]));
+    // Both terms are small, so the sum cannot overflow.
+    let g_pos = hdr_size + top_dict_length;
+    let top_dict = data
+        .get(hdr_size..g_pos)
+        .ok_or(SubsetError::Unsupported("CFF2 Top DICT past end"))?;
 
     // Walk Top DICT for offsets.
     let entries = walk_dict(top_dict)?;
@@ -185,7 +186,6 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
     }
 
     // Global Subr INDEX is immediately after the Top DICT.
-    let g_pos = hdr_size + top_dict_length;
     let (global_subrs, _) = read_index_cff2(data, g_pos)?;
 
     let cs_off = cs_off.ok_or(SubsetError::Unsupported(
@@ -203,45 +203,21 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
     let mut per_fd_local_subrs: Vec<Vec<&[u8]>> = Vec::with_capacity(fd_array.len());
     for fd_bytes in &fd_array {
         let fd_entries = walk_dict(fd_bytes)?;
-        let mut priv_info: Option<(u32, u32)> = None;
-        for e in &fd_entries {
-            if e.op == OP_PRIVATE && e.operands.len() >= 2 {
-                let s = e.operands[e.operands.len() - 2].int_value;
-                let o = e.operands[e.operands.len() - 1].int_value;
-                if let (Some(sv), Some(ov)) = (s, o) {
-                    if sv >= 0 && ov >= 0 {
-                        priv_info = Some((sv as u32, ov as u32));
-                    }
-                }
-            }
-        }
-        let (priv_bytes, locals) = if let Some((size, off)) = priv_info {
-            let off_u = off as usize;
-            let size_u = size as usize;
-            if off_u + size_u > data.len() {
-                return Err(SubsetError::Unsupported("CFF2 Private DICT past end"));
-            }
-            let priv_bytes = &data[off_u..off_u + size_u];
-            let priv_entries = walk_dict(priv_bytes)?;
-            let mut subrs_rel: Option<u32> = None;
-            for e in &priv_entries {
-                if e.op == OP_SUBRS {
-                    if let Some(v) = e.operands.last().and_then(|o| o.int_value) {
-                        if v >= 0 {
-                            subrs_rel = Some(v as u32);
-                        }
-                    }
-                }
-            }
-            if let Some(rel) = subrs_rel {
-                let abs = off_u + rel as usize;
-                let (locals, _) = read_index_cff2(data, abs)?;
-                (priv_bytes, locals)
-            } else {
-                (priv_bytes, Vec::new())
-            }
-        } else {
-            (&[][..], Vec::new())
+        // The last well-formed Private operator wins.
+        let priv_info = fd_entries
+            .iter()
+            .rev()
+            .filter(|e| e.op == OP_PRIVATE)
+            .find_map(private_operands);
+        let (priv_bytes, locals) = match priv_info {
+            Some((size, off)) => read_private_dict(
+                data,
+                size,
+                off,
+                read_index_cff2,
+                "CFF2 Private DICT past end",
+            )?,
+            None => (&[][..], Vec::new()),
         };
         per_fd_private.push(priv_bytes);
         per_fd_local_subrs.push(locals);
@@ -264,16 +240,15 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
     };
 
     let vstore_blob = if let Some(off) = vstore_off {
-        let off_u = off as usize;
-        if off_u + 2 > data.len() {
+        let from_off = data.get(off as usize..).unwrap_or_default();
+        let Some(len) = from_off.first_chunk::<2>() else {
             return Err(SubsetError::Unsupported("CFF2 VariationStore truncated"));
-        }
-        let len = u16::from_be_bytes([data[off_u], data[off_u + 1]]) as usize;
-        let end = off_u + 2 + len;
-        if end > data.len() {
-            return Err(SubsetError::Unsupported("CFF2 VariationStore past end"));
-        }
-        Some(&data[off_u..end])
+        };
+        let len = usize::from(u16::from_be_bytes(*len));
+        let blob = from_off
+            .get(..2 + len)
+            .ok_or(SubsetError::Unsupported("CFF2 VariationStore past end"))?;
+        Some(blob)
     } else {
         None
     };
@@ -363,13 +338,10 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
     kept_fds_sorted.sort_unstable();
     kept_fds_sorted.dedup();
 
-    let mut fd_renumber: Vec<Option<u8>> = alloc::vec![None; parsed.fd_array.len()];
-    for (new_i, &old_i) in kept_fds_sorted.iter().enumerate() {
-        fd_renumber[old_i as usize] = Some(new_i as u8);
-    }
+    let fd_pos_of = kept_fd_positions(&kept_fds_sorted);
     let new_fd_select: Vec<u8> = kept_fd_old
         .iter()
-        .map(|&old| fd_renumber[old as usize].unwrap())
+        .map(|&old| fd_pos_of[usize::from(old)] as u8)
         .collect();
 
     // Step 3: per-kept-FD subroutine keep-set. Each kept FD runs its
@@ -447,7 +419,7 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn emit_with_keep_set(
     cff_bytes: &[u8],
     parsed: &ParsedCff2<'_>,
@@ -477,10 +449,11 @@ fn emit_with_keep_set(
     }
 
     // Step 5: rewrite each kept charstring.
+    let fd_pos_of = kept_fd_positions(kept_fds_sorted);
     let mut new_charstrings: Vec<Vec<u8>> = Vec::with_capacity(kept_gids.len());
     for (i, &gid) in kept_gids.iter().enumerate() {
         let old_fd = kept_fd_old[i];
-        let new_fd_pos = kept_fds_sorted.iter().position(|&f| f == old_fd).unwrap();
+        let new_fd_pos = fd_pos_of[usize::from(old_fd)];
         let fd_local_subrs_old = &parsed.per_fd_local_subrs[old_fd as usize];
         let fd_local_renumber = &per_fd_local_renumber[new_fd_pos];
         let new_local_count = per_fd_kept_local[new_fd_pos].len();
@@ -765,25 +738,30 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
     }
 
     // Parse the VariationStore (when present) so we can resolve blends.
-    let ivs = if let Some(blob) = parsed.vstore_blob {
-        // blob includes the 2-byte length prefix; the underlying
-        // ItemVariationStore parser consumes the body without the
-        // prefix.
-        if blob.len() < 2 {
-            return Err(SubsetError::Unsupported(
-                "CFF2 VariationStore blob too short",
-            ));
-        }
-        Some(
-            ItemVariationStore::parse(&blob[2..])
+    // The blob includes the 2-byte length prefix. The underlying
+    // ItemVariationStore parser consumes the body without the prefix.
+    let ivs_bytes = match parsed.vstore_blob {
+        Some(blob) => Some(blob.get(2..).ok_or(SubsetError::Unsupported(
+            "CFF2 VariationStore blob too short",
+        ))?),
+        None => None,
+    };
+    let ivs = match ivs_bytes {
+        Some(body) => Some(
+            ItemVariationStore::parse(body)
                 .map_err(|_| SubsetError::Unsupported("CFF2 VariationStore parse failed"))?,
-        )
-    } else {
-        None
+        ),
+        None => None,
     };
 
     // Per-FD: bake every charstring with subr inlining and blend
     // resolution.
+    let blend = BlendCache::new(ivs.as_ref(), ivs_bytes.unwrap_or_default(), coords);
+    let mut baker = Baker::new(
+        blend,
+        &parsed.global_subrs,
+        bake_token_budget(cff_bytes.len()),
+    );
     let mut new_charstrings: Vec<Vec<u8>> = Vec::with_capacity(n_glyphs);
     for (gid, cs) in parsed.char_strings.iter().enumerate() {
         let fd = parsed
@@ -796,8 +774,7 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
             .get(fd as usize)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let mut baker = Baker::new(coords, ivs.as_ref(), &parsed.global_subrs, local_subrs);
-        let baked = baker.bake_charstring(cs)?;
+        let baked = baker.bake_charstring(cs, local_subrs)?;
         new_charstrings.push(baked);
     }
 
@@ -810,13 +787,13 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
         new_private_body: Vec<u8>,
     }
     let mut fd_emits: Vec<FdBakeEmit> = Vec::with_capacity(parsed.fd_array.len());
-    for fd_bytes in &parsed.fd_array {
+    for (fd_bytes, &private_dict) in parsed.fd_array.iter().zip(&parsed.per_fd_private) {
         let fd_entries = walk_dict(fd_bytes)?;
         let (font_dict_body, font_dict_private_slot) = serialise_font_dict(&fd_entries);
-        let priv_entries = if parsed.per_fd_private[fd_emits.len()].is_empty() {
+        let priv_entries = if private_dict.is_empty() {
             Vec::new()
         } else {
-            walk_dict(parsed.per_fd_private[fd_emits.len()])?
+            walk_dict(private_dict)?
         };
         // No local subrs survive the bake.
         let (new_private_body, _) = serialise_private_dict(&priv_entries, false);
@@ -972,13 +949,161 @@ const OP_HVCURVETO: u8 = 31;
 
 const MAX_BAKE_DEPTH: u8 = 10;
 
+/// Minimum number of charstring tokens (operand pushes plus operators,
+/// counted inside inlined subroutines too) one bake may process.
+const MIN_BAKE_TOKENS: usize = 1 << 22;
+
+/// Token allowance per byte of the source CFF2 table.
+const BAKE_TOKENS_PER_BYTE: usize = 64;
+
+/// Token budget for baking every charstring of a CFF2 table of
+/// `table_len` bytes.
+///
+/// Subroutine inlining can expand a small table exponentially: a chain
+/// of nested subroutines that each call the next one ten times grows
+/// tenfold per level, and the depth limit allows ten levels. The budget
+/// stops such a walk with an error. It scales with the table size and
+/// sits far above the inlined size of real fonts.
+fn bake_token_budget(table_len: usize) -> usize {
+    table_len
+        .saturating_mul(BAKE_TOKENS_PER_BYTE)
+        .max(MIN_BAKE_TOKENS)
+}
+
+/// Charges one token against `budget`, failing once it is spent.
+fn charge_token(budget: &mut usize, err: &'static str) -> Result<(), SubsetError> {
+    *budget = budget.checked_sub(1).ok_or(SubsetError::Unsupported(err))?;
+    Ok(())
+}
+
+/// Resolves the absolute subroutine index a `callsubr` / `callgsubr`
+/// operand selects, or `None` when it falls outside `subrs`.
+fn biased_subr<'s>(subrs: &[&'s [u8]], operand: f32) -> Option<&'s [u8]> {
+    // Float-to-int casts saturate, and NaN maps to 0.
+    let raw = operand as i32;
+    let abs = i64::from(raw) + i64::from(subr_bias(subrs.len()));
+    usize::try_from(abs)
+        .ok()
+        .and_then(|i| subrs.get(i))
+        .copied()
+}
+
+/// Region counts and region scalars for every `vsindex` a bake
+/// touches, resolved once per table.
+///
+/// A charstring can issue a `blend` every few bytes, and resolving a
+/// subtable walks its whole region list. Caching per `vsindex` keeps
+/// the bake linear in the charstring size.
+struct BlendCache<'a> {
+    ivs: Option<&'a ItemVariationStore<'a>>,
+    /// Source IVS bytes (without the CFF2 length prefix).
+    ivs_bytes: &'a [u8],
+    /// Scalar of every region in the region list at the bake coords.
+    region_scalars: Vec<f32>,
+    coords: &'a [f32],
+    resolved: BTreeMap<u16, (usize, Vec<f32>)>,
+}
+
+impl<'a> BlendCache<'a> {
+    fn new(
+        ivs: Option<&'a ItemVariationStore<'a>>,
+        ivs_bytes: &'a [u8],
+        coords: &'a [f32],
+    ) -> Self {
+        let region_scalars = ivs
+            .map(|s| {
+                (0..s.region_count())
+                    .map(|r| s.region_scalar(r, coords).unwrap_or(0.0))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            ivs,
+            ivs_bytes,
+            region_scalars,
+            coords,
+            resolved: BTreeMap::new(),
+        }
+    }
+
+    /// Returns `(region_count, scalars)` for subtable `vsindex`: the
+    /// number of deltas one blended value carries, and the scalar that
+    /// multiplies each of them. Both are empty when the subtable does
+    /// not resolve.
+    fn resolve(&mut self, vsindex: u16) -> (usize, &[f32]) {
+        let Self {
+            ivs,
+            ivs_bytes,
+            region_scalars,
+            coords,
+            resolved,
+        } = self;
+        let (count, scalars) = resolved.entry(vsindex).or_insert_with(|| {
+            let Some(store) = *ivs else {
+                return (0, Vec::new());
+            };
+            let Some(count) = store.variation_region_count(vsindex) else {
+                return (0, Vec::new());
+            };
+            let scalars = subtable_region_indexes(ivs_bytes, vsindex)
+                .filter(|indexes| indexes.len() == usize::from(count))
+                .map(|indexes| {
+                    indexes
+                        .map(|ri| region_scalars.get(usize::from(ri)).copied().unwrap_or(0.0))
+                        .collect()
+                })
+                .or_else(|| store.region_scalars(vsindex, coords))
+                .unwrap_or_default();
+            (usize::from(count), scalars)
+        });
+        (*count, scalars.as_slice())
+    }
+}
+
+/// Iterates the region indexes of IVS subtable `outer`, or returns
+/// `None` when the header or index list is truncated.
+fn subtable_region_indexes(
+    ivs_bytes: &[u8],
+    outer: u16,
+) -> Option<impl ExactSizeIterator<Item = u16> + '_> {
+    let slot = 8 + usize::from(outer) * 4;
+    let sub_off = read_u32_at(ivs_bytes, slot)? as usize;
+    let count = usize::from(read_u16_at(ivs_bytes, sub_off.checked_add(4)?)?);
+    let list = ivs_bytes
+        .get(sub_off.checked_add(6)?..)?
+        .get(..count.checked_mul(2)?)?;
+    Some(
+        list.chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]])),
+    )
+}
+
+/// Reads a big-endian `u16` at `off`, or `None` past the end.
+fn read_u16_at(data: &[u8], off: usize) -> Option<u16> {
+    data.get(off..)?
+        .first_chunk::<2>()
+        .copied()
+        .map(u16::from_be_bytes)
+}
+
+/// Reads a big-endian `u32` at `off`, or `None` past the end.
+fn read_u32_at(data: &[u8], off: usize) -> Option<u32> {
+    data.get(off..)?
+        .first_chunk::<4>()
+        .copied()
+        .map(u32::from_be_bytes)
+}
+
 /// CFF2 charstring baker. Walks a charstring's operand stream
 /// resolving `blend` to scalars and inlining `callsubr` /
 /// `callgsubr`. Emits a fresh charstring with no blend / vsindex /
 /// subr-call ops.
+///
+/// One baker serves a whole table: blend data and the token budget are
+/// shared across glyphs, and the per-glyph state is reset by
+/// [`Baker::bake_charstring`].
 struct Baker<'a> {
-    coords: &'a [f32],
-    ivs: Option<&'a ItemVariationStore<'a>>,
+    blend: BlendCache<'a>,
     global_subrs: &'a [&'a [u8]],
     local_subrs: &'a [&'a [u8]],
     /// Operand stack: floats so blend deltas don't lose precision.
@@ -988,32 +1113,35 @@ struct Baker<'a> {
     /// Current vsindex (which IVS subtable blend draws from).
     vsindex: u16,
     /// Running stem count, for hintmask / cntrmask tail size.
-    stem_count: u32,
-    /// Set after the first move/hint operator (used by stem tracking).
-    seen_first_op: bool,
+    stem_count: usize,
+    /// Tokens left for the rest of the table.
+    budget: usize,
 }
 
 impl<'a> Baker<'a> {
-    fn new(
-        coords: &'a [f32],
-        ivs: Option<&'a ItemVariationStore<'a>>,
-        global_subrs: &'a [&'a [u8]],
-        local_subrs: &'a [&'a [u8]],
-    ) -> Self {
+    fn new(blend: BlendCache<'a>, global_subrs: &'a [&'a [u8]], budget: usize) -> Self {
         Self {
-            coords,
-            ivs,
+            blend,
             global_subrs,
-            local_subrs,
+            local_subrs: &[],
             stack: Vec::new(),
             out: Vec::new(),
             vsindex: 0,
             stem_count: 0,
-            seen_first_op: false,
+            budget,
         }
     }
 
-    fn bake_charstring(&mut self, cs: &[u8]) -> Result<Vec<u8>, SubsetError> {
+    fn bake_charstring(
+        &mut self,
+        cs: &[u8],
+        local_subrs: &'a [&'a [u8]],
+    ) -> Result<Vec<u8>, SubsetError> {
+        self.local_subrs = local_subrs;
+        self.stack.clear();
+        self.out = Vec::new();
+        self.vsindex = 0;
+        self.stem_count = 0;
         self.run(cs, 0)?;
         Ok(core::mem::take(&mut self.out))
     }
@@ -1025,22 +1153,16 @@ impl<'a> Baker<'a> {
             ));
         }
         let mut pos = 0;
-        while pos < code.len() {
-            let b0 = code[pos];
-            if b0 >= 32 {
+        while let Some(&b0) = code.get(pos) {
+            charge_token(
+                &mut self.budget,
+                "CFF2 bake: charstring work budget exceeded",
+            )?;
+            if b0 >= 32 || b0 == OP_SHORTINT {
                 let (val, len) = decode_operand_f32(code, pos)
                     .ok_or(SubsetError::Unsupported("CFF2 bake: operand truncated"))?;
                 self.stack.push(val);
                 pos += len;
-                continue;
-            }
-            if b0 == OP_SHORTINT {
-                if pos + 3 > code.len() {
-                    return Err(SubsetError::Unsupported("CFF2 bake: shortint truncated"));
-                }
-                let v = i16::from_be_bytes([code[pos + 1], code[pos + 2]]);
-                self.stack.push(f32::from(v));
-                pos += 3;
                 continue;
             }
             // Operator.
@@ -1059,26 +1181,16 @@ impl<'a> Baker<'a> {
                             "CFF2 bake: vsindex operand out of range",
                         ));
                     }
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    {
-                        self.vsindex = v as u16;
-                    }
+                    self.vsindex = v as u16;
                     pos += 1;
                 }
                 OP_CALLSUBR => {
                     let idx = self.stack.pop().ok_or(SubsetError::Unsupported(
                         "CFF2 bake: callsubr without operand",
                     ))?;
-                    #[allow(clippy::cast_possible_truncation)]
-                    let raw = idx as i32;
-                    let bias = subr_bias(self.local_subrs.len());
-                    let abs = raw + bias;
-                    if abs < 0 || (abs as usize) >= self.local_subrs.len() {
-                        return Err(SubsetError::Unsupported(
-                            "CFF2 bake: callsubr index out of range",
-                        ));
-                    }
-                    let body = self.local_subrs[abs as usize];
+                    let body = biased_subr(self.local_subrs, idx).ok_or(
+                        SubsetError::Unsupported("CFF2 bake: callsubr index out of range"),
+                    )?;
                     self.run(body, depth + 1)?;
                     pos += 1;
                 }
@@ -1086,16 +1198,9 @@ impl<'a> Baker<'a> {
                     let idx = self.stack.pop().ok_or(SubsetError::Unsupported(
                         "CFF2 bake: callgsubr without operand",
                     ))?;
-                    #[allow(clippy::cast_possible_truncation)]
-                    let raw = idx as i32;
-                    let bias = subr_bias(self.global_subrs.len());
-                    let abs = raw + bias;
-                    if abs < 0 || (abs as usize) >= self.global_subrs.len() {
-                        return Err(SubsetError::Unsupported(
-                            "CFF2 bake: callgsubr index out of range",
-                        ));
-                    }
-                    let body = self.global_subrs[abs as usize];
+                    let body = biased_subr(self.global_subrs, idx).ok_or(
+                        SubsetError::Unsupported("CFF2 bake: callgsubr index out of range"),
+                    )?;
                     self.run(body, depth + 1)?;
                     pos += 1;
                 }
@@ -1107,37 +1212,32 @@ impl<'a> Baker<'a> {
                     return Ok(());
                 }
                 OP_HSTEM | OP_VSTEM | OP_HSTEMHM | OP_VSTEMHM => {
-                    let n_pairs = (self.stack.len() as u32) / 2;
-                    self.stem_count += n_pairs;
+                    self.stem_count = self.stem_count.saturating_add(self.stack.len() / 2);
                     self.flush_stack();
                     self.out.push(b0);
-                    self.seen_first_op = true;
                     pos += 1;
                 }
                 OP_HINTMASK | OP_CNTRMASK => {
-                    let extra_pairs = (self.stack.len() as u32) / 2;
-                    self.stem_count += extra_pairs;
+                    self.stem_count = self.stem_count.saturating_add(self.stack.len() / 2);
                     self.flush_stack();
                     self.out.push(b0);
-                    self.seen_first_op = true;
-                    let mask_bytes = (self.stem_count as usize).div_ceil(8);
-                    if pos + 1 + mask_bytes > code.len() {
-                        return Err(SubsetError::Unsupported(
+                    let mask_bytes = self.stem_count.div_ceil(8);
+                    let mask = code
+                        .get(pos + 1..)
+                        .and_then(|rest| rest.get(..mask_bytes))
+                        .ok_or(SubsetError::Unsupported(
                             "CFF2 bake: hintmask tail truncated",
-                        ));
-                    }
-                    self.out
-                        .extend_from_slice(&code[pos + 1..pos + 1 + mask_bytes]);
+                        ))?;
+                    self.out.extend_from_slice(mask);
                     pos += 1 + mask_bytes;
                 }
                 OP_ESCAPE => {
-                    if pos + 2 > code.len() {
-                        return Err(SubsetError::Unsupported("CFF2 bake: escape truncated"));
-                    }
+                    let &b1 = code
+                        .get(pos + 1)
+                        .ok_or(SubsetError::Unsupported("CFF2 bake: escape truncated"))?;
                     self.flush_stack();
                     self.out.push(b0);
-                    self.out.push(code[pos + 1]);
-                    self.seen_first_op = true;
+                    self.out.push(b1);
                     pos += 2;
                 }
                 OP_RMOVETO | OP_HMOVETO | OP_VMOVETO | OP_RLINETO | OP_HLINETO | OP_VLINETO
@@ -1145,7 +1245,6 @@ impl<'a> Baker<'a> {
                 | OP_RCURVELINE | OP_RLINECURVE => {
                     self.flush_stack();
                     self.out.push(b0);
-                    self.seen_first_op = true;
                     pos += 1;
                 }
                 _ => {
@@ -1159,6 +1258,7 @@ impl<'a> Baker<'a> {
     }
 
     fn apply_blend(&mut self) -> Result<(), SubsetError> {
+        const UNDERFLOW: SubsetError = SubsetError::Unsupported("CFF2 bake: blend stack underflow");
         // Stack: n master values, n*nRegions delta values, n itself on top.
         let n_raw = self.stack.pop().ok_or(SubsetError::Unsupported(
             "CFF2 bake: blend without count operand",
@@ -1168,34 +1268,30 @@ impl<'a> Baker<'a> {
                 "CFF2 bake: blend count operand negative",
             ));
         }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        // Saturating cast: NaN gives 0, huge values underflow below.
         let n = n_raw as usize;
         if n == 0 {
             return Ok(());
         }
-        let n_regions = self
-            .ivs
-            .and_then(|s| s.variation_region_count(self.vsindex))
-            .map(|c| c as usize)
-            .unwrap_or(0);
-        let total_deltas = n * n_regions;
-        if self.stack.len() < n + total_deltas {
-            return Err(SubsetError::Unsupported("CFF2 bake: blend stack underflow"));
-        }
-        let scalars = self
-            .ivs
-            .and_then(|s| s.region_scalars(self.vsindex, self.coords))
-            .unwrap_or_default();
-        let start = self.stack.len() - n - total_deltas;
-        for i in 0..n {
-            let mut accum = 0.0_f32;
-            for j in 0..n_regions {
-                let delta = self.stack[start + n + i * n_regions + j];
-                if let Some(&s) = scalars.get(j) {
+        let (n_regions, scalars) = self.blend.resolve(self.vsindex);
+        let needed = n
+            .checked_mul(n_regions)
+            .and_then(|total_deltas| total_deltas.checked_add(n))
+            .ok_or(UNDERFLOW)?;
+        let start = self.stack.len().checked_sub(needed).ok_or(UNDERFLOW)?;
+        let (masters, deltas) = self
+            .stack
+            .get_mut(start..)
+            .and_then(|tail| tail.split_at_mut_checked(n))
+            .ok_or(UNDERFLOW)?;
+        if n_regions > 0 {
+            for (master, row) in masters.iter_mut().zip(deltas.chunks_exact(n_regions)) {
+                let mut accum = 0.0_f32;
+                for (&delta, &s) in row.iter().zip(scalars) {
                     accum += s * delta;
                 }
+                *master += accum;
             }
-            self.stack[start + i] += accum;
         }
         self.stack.truncate(start + n);
         Ok(())
@@ -1207,8 +1303,7 @@ impl<'a> Baker<'a> {
     /// fixed form (`b0=255`) when needed and the integer forms
     /// otherwise.
     fn flush_stack(&mut self) {
-        let stack = core::mem::take(&mut self.stack);
-        for v in stack {
+        for v in self.stack.drain(..) {
             encode_charstring_number(v, &mut self.out);
         }
     }
@@ -1258,7 +1353,6 @@ fn encode_charstring_number(v: f32, out: &mut Vec<u8>) {
     let rounded = v.round();
     let is_integer = (v - rounded).abs() < 1e-6;
     if is_integer && (-32768.0..=32767.0).contains(&rounded) {
-        #[allow(clippy::cast_possible_truncation)]
         let iv = rounded as i32;
         if (-107..=107).contains(&iv) {
             out.push((iv + 139) as u8);
@@ -1271,7 +1365,6 @@ fn encode_charstring_number(v: f32, out: &mut Vec<u8>) {
             out.push(((v0 >> 8) + 251) as u8);
             out.push((v0 & 0xff) as u8);
         } else {
-            #[allow(clippy::cast_possible_truncation)]
             let bytes = (iv as i16).to_be_bytes();
             out.push(OP_SHORTINT);
             out.push(bytes[0]);
@@ -1279,20 +1372,9 @@ fn encode_charstring_number(v: f32, out: &mut Vec<u8>) {
         }
     } else {
         // 16.16 fixed.
-        #[allow(clippy::cast_possible_truncation)]
         let raw = (v * 65536.0).round() as i32;
         out.push(255);
         out.extend_from_slice(&raw.to_be_bytes());
-    }
-}
-
-fn subr_bias(count: usize) -> i32 {
-    if count < 1240 {
-        107
-    } else if count < 33_900 {
-        1131
-    } else {
-        32_768
     }
 }
 
@@ -1352,12 +1434,9 @@ pub(crate) fn bake_cff2_partial(
     let Some(vstore_blob) = parsed.vstore_blob else {
         return Ok(cff_bytes.to_vec());
     };
-    if vstore_blob.len() < 2 {
-        return Err(SubsetError::Unsupported(
-            "CFF2 VariationStore blob too short",
-        ));
-    }
-    let src_ivs_bytes = &vstore_blob[2..];
+    let src_ivs_bytes = vstore_blob.get(2..).ok_or(SubsetError::Unsupported(
+        "CFF2 VariationStore blob too short",
+    ))?;
 
     // Build the trimmed IVS via the IVS-bearing-table primitive.
     let (new_ivs_bytes, _remap) = crate::instance::bake_ivs_partial(src_ivs_bytes, coords, pins)
@@ -1382,6 +1461,12 @@ pub(crate) fn bake_cff2_partial(
 
     // Per-FD: rewrite each charstring with subr inlining + blend
     // rewrite.
+    let mut rewriter = PartialBaker::new(
+        &src_ivs,
+        &survivors,
+        &parsed.global_subrs,
+        bake_token_budget(cff_bytes.len()),
+    );
     let mut new_charstrings: Vec<Vec<u8>> = Vec::with_capacity(n_glyphs);
     for (gid, cs) in parsed.char_strings.iter().enumerate() {
         let fd = parsed
@@ -1394,9 +1479,7 @@ pub(crate) fn bake_cff2_partial(
             .get(fd as usize)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let mut rewriter =
-            PartialBaker::new(&src_ivs, &survivors, &parsed.global_subrs, local_subrs);
-        let baked = rewriter.bake_charstring(cs)?;
+        let baked = rewriter.bake_charstring(cs, local_subrs)?;
         new_charstrings.push(baked);
     }
 
@@ -1557,67 +1640,49 @@ fn compute_subtable_survivors(
     coords: &[f32],
     pins: &[crate::instance::AxisPin],
 ) -> Option<Vec<Option<CffSubtableSurvivors>>> {
-    if ivs_bytes.len() < 8 {
+    if read_u16_at(ivs_bytes, 0)? != 1 {
         return None;
     }
-    let format = u16::from_be_bytes([ivs_bytes[0], ivs_bytes[1]]);
-    if format != 1 {
-        return None;
-    }
-    let region_list_off =
-        u32::from_be_bytes([ivs_bytes[2], ivs_bytes[3], ivs_bytes[4], ivs_bytes[5]]) as usize;
-    let subtable_count = u16::from_be_bytes([ivs_bytes[6], ivs_bytes[7]]) as usize;
-    if ivs_bytes.len() < 8 + subtable_count * 4 {
-        return None;
-    }
-    let mut subtable_offsets: Vec<usize> = Vec::with_capacity(subtable_count);
-    for i in 0..subtable_count {
-        let off = u32::from_be_bytes([
-            ivs_bytes[8 + i * 4],
-            ivs_bytes[8 + i * 4 + 1],
-            ivs_bytes[8 + i * 4 + 2],
-            ivs_bytes[8 + i * 4 + 3],
-        ]) as usize;
-        subtable_offsets.push(off);
-    }
+    let region_list_off = read_u32_at(ivs_bytes, 2)? as usize;
+    let subtable_count = usize::from(read_u16_at(ivs_bytes, 6)?);
+    let subtable_offsets: Vec<usize> = ivs_bytes
+        .get(8..)?
+        .get(..subtable_count * 4)?
+        .chunks_exact(4)
+        .map(|off| u32::from_be_bytes([off[0], off[1], off[2], off[3]]) as usize)
+        .collect();
 
-    if ivs_bytes.len() < region_list_off + 4 {
-        return None;
-    }
-    let axis_count =
-        u16::from_be_bytes([ivs_bytes[region_list_off], ivs_bytes[region_list_off + 1]]) as usize;
-    let region_count = u16::from_be_bytes([
-        ivs_bytes[region_list_off + 2],
-        ivs_bytes[region_list_off + 3],
-    ]) as usize;
+    let axis_count = usize::from(read_u16_at(ivs_bytes, region_list_off)?);
+    let region_count = usize::from(read_u16_at(ivs_bytes, region_list_off.checked_add(2)?)?);
     if pins.len() != axis_count || coords.len() != axis_count {
         return None;
     }
-    let regions_start = region_list_off + 4;
+    // The count reads above put `region_list_off + 4` inside the data.
     let region_size = axis_count * 6;
-    if ivs_bytes.len() < regions_start + region_count * region_size {
-        return None;
-    }
+    let regions = ivs_bytes
+        .get(region_list_off + 4..)?
+        .get(..region_count.checked_mul(region_size)?)?;
 
     // Project each region onto Keep axes; track new index + scalar.
     // None -> dropped at pin coords.
     let mut region_remap: Vec<Option<(u16, f32)>> = Vec::with_capacity(region_count);
     let mut next_new_idx: u16 = 0;
     for ri in 0..region_count {
-        let base = regions_start + ri * region_size;
-        let mut region: alloc::vec::Vec<(f32, f32, f32)> =
-            alloc::vec::Vec::with_capacity(axis_count);
-        for axis_i in 0..axis_count {
-            let off = base + axis_i * 6;
-            let s = read_f2dot14_at(ivs_bytes, off);
-            let p = read_f2dot14_at(ivs_bytes, off + 2);
-            let e = read_f2dot14_at(ivs_bytes, off + 4);
-            region.push((s, p, e));
-        }
+        let base = ri * region_size;
+        let region: Vec<(f32, f32, f32)> = (0..axis_count)
+            .map(|axis_i| {
+                let off = base + axis_i * 6;
+                (
+                    read_f2dot14_at(regions, off),
+                    read_f2dot14_at(regions, off + 2),
+                    read_f2dot14_at(regions, off + 4),
+                )
+            })
+            .collect();
         match crate::instance::project_region_onto_kept_axes(&region, pins, coords) {
             Some(p) => {
                 region_remap.push(Some((next_new_idx, p.pin_scalar)));
-                next_new_idx += 1;
+                next_new_idx = next_new_idx.saturating_add(1);
             }
             None => region_remap.push(None),
         }
@@ -1625,26 +1690,17 @@ fn compute_subtable_survivors(
 
     let mut per_subtable: Vec<Option<CffSubtableSurvivors>> = Vec::with_capacity(subtable_count);
     let mut new_outer: u16 = 0;
-    for sub_off in &subtable_offsets {
-        let sub_off = *sub_off;
-        if ivs_bytes.len() < sub_off + 6 {
-            return None;
-        }
-        let item_count = u16::from_be_bytes([ivs_bytes[sub_off], ivs_bytes[sub_off + 1]]);
-        let region_index_count =
-            u16::from_be_bytes([ivs_bytes[sub_off + 4], ivs_bytes[sub_off + 5]]) as usize;
-        let ri_start = sub_off + 6;
-        if ivs_bytes.len() < ri_start + region_index_count * 2 {
-            return None;
-        }
-        let mut surviving: alloc::vec::Vec<(u16, f32)> = alloc::vec::Vec::new();
-        for slot in 0..region_index_count {
-            let old_ri = u16::from_be_bytes([
-                ivs_bytes[ri_start + slot * 2],
-                ivs_bytes[ri_start + slot * 2 + 1],
-            ]);
-            if let Some(Some((_new_ri, scalar))) = region_remap.get(old_ri as usize) {
-                #[allow(clippy::cast_possible_truncation)]
+    for &sub_off in &subtable_offsets {
+        let item_count = read_u16_at(ivs_bytes, sub_off)?;
+        let region_index_count = usize::from(read_u16_at(ivs_bytes, sub_off.checked_add(4)?)?);
+        // The read above put `sub_off + 6` inside the data.
+        let region_indexes = ivs_bytes
+            .get(sub_off + 6..)?
+            .get(..region_index_count * 2)?;
+        let mut surviving: Vec<(u16, f32)> = Vec::new();
+        for (slot, old_ri) in region_indexes.chunks_exact(2).enumerate() {
+            let old_ri = usize::from(u16::from_be_bytes([old_ri[0], old_ri[1]]));
+            if let Some(Some((_new_ri, scalar))) = region_remap.get(old_ri) {
                 surviving.push((slot as u16, *scalar));
             }
         }
@@ -1655,16 +1711,15 @@ fn compute_subtable_survivors(
                 new_outer,
                 surviving,
             }));
-            new_outer += 1;
+            new_outer = new_outer.saturating_add(1);
         }
     }
     Some(per_subtable)
 }
 
-/// Reads an F2DOT14 from `data[off..]`.
+/// Reads an F2DOT14 from `data[off..]`, or 0 past the end.
 fn read_f2dot14_at(data: &[u8], off: usize) -> f32 {
-    let raw = i16::from_be_bytes([data[off], data[off + 1]]);
-    f32::from(raw) / 16384.0
+    read_u16_at(data, off).map_or(0.0, |raw| f32::from(raw as i16) / 16384.0)
 }
 
 // CFF2 charstring partial-rewrite baker. Walks the source charstring
@@ -1678,6 +1733,10 @@ fn read_f2dot14_at(data: &[u8], off: usize) -> f32 {
 // Subroutines are inlined into the output charstring so the rebuilt
 // CFF2 carries empty Subr INDEXes. Cross-call vsindex tracking
 // would otherwise need stack modeling.
+//
+// One baker serves a whole table: the region-count cache and the token
+// budget are shared across glyphs, and the per-glyph state is reset by
+// `bake_charstring`.
 struct PartialBaker<'a> {
     src_ivs: &'a ItemVariationStore<'a>,
     survivors: &'a [Option<CffSubtableSurvivors>],
@@ -1696,7 +1755,11 @@ struct PartialBaker<'a> {
     /// before each blend whose surviving subtable's `new_outer`
     /// differs from the last value we wrote.
     last_emitted_new_outer: Option<u16>,
-    stem_count: u32,
+    stem_count: usize,
+    /// Source region count per `vsindex`, resolved once per table.
+    region_counts: BTreeMap<u16, usize>,
+    /// Tokens left for the rest of the table.
+    budget: usize,
 }
 
 impl<'a> PartialBaker<'a> {
@@ -1704,24 +1767,54 @@ impl<'a> PartialBaker<'a> {
         src_ivs: &'a ItemVariationStore<'a>,
         survivors: &'a [Option<CffSubtableSurvivors>],
         global_subrs: &'a [&'a [u8]],
-        local_subrs: &'a [&'a [u8]],
+        budget: usize,
     ) -> Self {
         Self {
             src_ivs,
             survivors,
             global_subrs,
-            local_subrs,
+            local_subrs: &[],
             out: Vec::new(),
             stack_starts: Vec::new(),
             src_vsindex: 0,
             last_emitted_new_outer: None,
             stem_count: 0,
+            region_counts: BTreeMap::new(),
+            budget,
         }
     }
 
-    fn bake_charstring(&mut self, cs: &[u8]) -> Result<Vec<u8>, SubsetError> {
+    fn bake_charstring(
+        &mut self,
+        cs: &[u8],
+        local_subrs: &'a [&'a [u8]],
+    ) -> Result<Vec<u8>, SubsetError> {
+        self.local_subrs = local_subrs;
+        self.out = Vec::new();
+        self.stack_starts.clear();
+        self.src_vsindex = 0;
+        self.last_emitted_new_outer = None;
+        self.stem_count = 0;
         self.run(cs, 0)?;
         Ok(core::mem::take(&mut self.out))
+    }
+
+    /// Pops the top operand, decodes its value from `out`, and removes
+    /// its bytes from `out`.
+    fn pop_operand(
+        &mut self,
+        missing: &'static str,
+        bad: &'static str,
+    ) -> Result<f32, SubsetError> {
+        let start = self
+            .stack_starts
+            .pop()
+            .ok_or(SubsetError::Unsupported(missing))?;
+        let v = decode_operand_f32(&self.out, start)
+            .ok_or(SubsetError::Unsupported(bad))?
+            .0;
+        self.out.truncate(start);
+        Ok(v)
     }
 
     fn run(&mut self, code: &[u8], depth: u8) -> Result<(), SubsetError> {
@@ -1731,34 +1824,28 @@ impl<'a> PartialBaker<'a> {
             ));
         }
         let mut pos = 0;
-        while pos < code.len() {
-            let b0 = code[pos];
-            if b0 >= 32 {
+        while let Some(&b0) = code.get(pos) {
+            charge_token(
+                &mut self.budget,
+                "CFF2 partial bake: charstring work budget exceeded",
+            )?;
+            if b0 >= 32 || b0 == OP_SHORTINT {
                 let len = match b0 {
-                    32..=246 => 1,
+                    OP_SHORTINT => 3,
                     247..=254 => 2,
                     255 => 5,
-                    _ => unreachable!(),
+                    _ => 1,
                 };
-                if pos + len > code.len() {
-                    return Err(SubsetError::Unsupported(
-                        "CFF2 partial bake: push operand truncated",
-                    ));
-                }
+                let push = code.get(pos..).and_then(|rest| rest.get(..len)).ok_or(
+                    SubsetError::Unsupported(if b0 == OP_SHORTINT {
+                        "CFF2 partial bake: shortint truncated"
+                    } else {
+                        "CFF2 partial bake: push operand truncated"
+                    }),
+                )?;
                 self.stack_starts.push(self.out.len());
-                self.out.extend_from_slice(&code[pos..pos + len]);
+                self.out.extend_from_slice(push);
                 pos += len;
-                continue;
-            }
-            if b0 == OP_SHORTINT {
-                if pos + 3 > code.len() {
-                    return Err(SubsetError::Unsupported(
-                        "CFF2 partial bake: shortint truncated",
-                    ));
-                }
-                self.stack_starts.push(self.out.len());
-                self.out.extend_from_slice(&code[pos..pos + 3]);
-                pos += 3;
                 continue;
             }
             match b0 {
@@ -1767,69 +1854,37 @@ impl<'a> PartialBaker<'a> {
                     pos += 1;
                 }
                 OP_VSINDEX => {
-                    let start = self.stack_starts.pop().ok_or(SubsetError::Unsupported(
+                    let v = self.pop_operand(
                         "CFF2 partial bake: vsindex without operand",
-                    ))?;
-                    let v = decode_operand_f32(&self.out, start)
-                        .ok_or(SubsetError::Unsupported(
-                            "CFF2 partial bake: vsindex operand decode failed",
-                        ))?
-                        .0;
+                        "CFF2 partial bake: vsindex operand decode failed",
+                    )?;
                     if !(0.0..=f32::from(u16::MAX)).contains(&v) {
                         return Err(SubsetError::Unsupported(
                             "CFF2 partial bake: vsindex operand out of range",
                         ));
                     }
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    {
-                        self.src_vsindex = v as u16;
-                    }
-                    self.out.truncate(start);
+                    self.src_vsindex = v as u16;
                     pos += 1;
                 }
                 OP_CALLSUBR => {
-                    let start = self.stack_starts.pop().ok_or(SubsetError::Unsupported(
+                    let raw = self.pop_operand(
                         "CFF2 partial bake: callsubr without operand",
-                    ))?;
-                    let raw = decode_operand_f32(&self.out, start)
-                        .ok_or(SubsetError::Unsupported(
-                            "CFF2 partial bake: callsubr operand decode failed",
-                        ))?
-                        .0;
-                    self.out.truncate(start);
-                    #[allow(clippy::cast_possible_truncation)]
-                    let raw_i = raw as i32;
-                    let bias = subr_bias(self.local_subrs.len());
-                    let abs = raw_i + bias;
-                    if abs < 0 || (abs as usize) >= self.local_subrs.len() {
-                        return Err(SubsetError::Unsupported(
-                            "CFF2 partial bake: callsubr index out of range",
-                        ));
-                    }
-                    let body = self.local_subrs[abs as usize];
+                        "CFF2 partial bake: callsubr operand decode failed",
+                    )?;
+                    let body = biased_subr(self.local_subrs, raw).ok_or(
+                        SubsetError::Unsupported("CFF2 partial bake: callsubr index out of range"),
+                    )?;
                     self.run(body, depth + 1)?;
                     pos += 1;
                 }
                 OP_CALLGSUBR => {
-                    let start = self.stack_starts.pop().ok_or(SubsetError::Unsupported(
+                    let raw = self.pop_operand(
                         "CFF2 partial bake: callgsubr without operand",
-                    ))?;
-                    let raw = decode_operand_f32(&self.out, start)
-                        .ok_or(SubsetError::Unsupported(
-                            "CFF2 partial bake: callgsubr operand decode failed",
-                        ))?
-                        .0;
-                    self.out.truncate(start);
-                    #[allow(clippy::cast_possible_truncation)]
-                    let raw_i = raw as i32;
-                    let bias = subr_bias(self.global_subrs.len());
-                    let abs = raw_i + bias;
-                    if abs < 0 || (abs as usize) >= self.global_subrs.len() {
-                        return Err(SubsetError::Unsupported(
-                            "CFF2 partial bake: callgsubr index out of range",
-                        ));
-                    }
-                    let body = self.global_subrs[abs as usize];
+                        "CFF2 partial bake: callgsubr operand decode failed",
+                    )?;
+                    let body = biased_subr(self.global_subrs, raw).ok_or(
+                        SubsetError::Unsupported("CFF2 partial bake: callgsubr index out of range"),
+                    )?;
                     self.run(body, depth + 1)?;
                     pos += 1;
                 }
@@ -1845,36 +1900,32 @@ impl<'a> PartialBaker<'a> {
                     return Ok(());
                 }
                 OP_HSTEM | OP_VSTEM | OP_HSTEMHM | OP_VSTEMHM => {
-                    let n_pairs = (self.stack_starts.len() as u32) / 2;
-                    self.stem_count += n_pairs;
+                    self.stem_count = self.stem_count.saturating_add(self.stack_starts.len() / 2);
                     self.stack_starts.clear();
                     self.out.push(b0);
                     pos += 1;
                 }
                 OP_HINTMASK | OP_CNTRMASK => {
-                    let extra_pairs = (self.stack_starts.len() as u32) / 2;
-                    self.stem_count += extra_pairs;
+                    self.stem_count = self.stem_count.saturating_add(self.stack_starts.len() / 2);
                     self.stack_starts.clear();
                     self.out.push(b0);
-                    let mask_bytes = (self.stem_count as usize).div_ceil(8);
-                    if pos + 1 + mask_bytes > code.len() {
-                        return Err(SubsetError::Unsupported(
+                    let mask_bytes = self.stem_count.div_ceil(8);
+                    let mask = code
+                        .get(pos + 1..)
+                        .and_then(|rest| rest.get(..mask_bytes))
+                        .ok_or(SubsetError::Unsupported(
                             "CFF2 partial bake: hintmask tail truncated",
-                        ));
-                    }
-                    self.out
-                        .extend_from_slice(&code[pos + 1..pos + 1 + mask_bytes]);
+                        ))?;
+                    self.out.extend_from_slice(mask);
                     pos += 1 + mask_bytes;
                 }
                 OP_ESCAPE => {
-                    if pos + 2 > code.len() {
-                        return Err(SubsetError::Unsupported(
-                            "CFF2 partial bake: escape truncated",
-                        ));
-                    }
+                    let &b1 = code.get(pos + 1).ok_or(SubsetError::Unsupported(
+                        "CFF2 partial bake: escape truncated",
+                    ))?;
                     self.stack_starts.clear();
                     self.out.push(b0);
-                    self.out.push(code[pos + 1]);
+                    self.out.push(b1);
                     pos += 2;
                 }
                 OP_RMOVETO | OP_HMOVETO | OP_VMOVETO | OP_RLINETO | OP_HLINETO | OP_VLINETO
@@ -1902,47 +1953,42 @@ impl<'a> PartialBaker<'a> {
     /// post-blend stack values directly, equivalent to `n, 0, blend`
     /// post-execution).
     fn apply_blend(&mut self) -> Result<(), SubsetError> {
-        // Pop the count operand.
-        let count_start = self.stack_starts.pop().ok_or(SubsetError::Unsupported(
+        // Pop the count operand and strip it from `out`. It is
+        // re-emitted below.
+        let n_raw = self.pop_operand(
             "CFF2 partial bake: blend without count operand",
-        ))?;
-        let n_raw = decode_operand_f32(&self.out, count_start)
-            .ok_or(SubsetError::Unsupported(
-                "CFF2 partial bake: blend count decode failed",
-            ))?
-            .0;
-        // Strip the count operand from `out`. We'll re-emit it below.
-        self.out.truncate(count_start);
+            "CFF2 partial bake: blend count decode failed",
+        )?;
         if !(0.0..=f32::from(u16::MAX)).contains(&n_raw) {
             return Err(SubsetError::Unsupported(
                 "CFF2 partial bake: blend count out of range",
             ));
         }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let n = n_raw as usize;
         if n == 0 {
             return Ok(());
         }
 
         // Source subtable info.
-        let old_k = self
-            .src_ivs
-            .variation_region_count(self.src_vsindex)
-            .map(usize::from)
-            .unwrap_or(0);
-        let total_deltas = n * old_k;
-        if self.stack_starts.len() < n + total_deltas {
-            return Err(SubsetError::Unsupported(
-                "CFF2 partial bake: blend stack underflow",
-            ));
-        }
+        let src_ivs = self.src_ivs;
+        let old_k = *self
+            .region_counts
+            .entry(self.src_vsindex)
+            .or_insert_with_key(|&v| src_ivs.variation_region_count(v).map_or(0, usize::from));
+        let underflow = SubsetError::Unsupported("CFF2 partial bake: blend stack underflow");
+        let total_deltas = n.checked_mul(old_k).ok_or(underflow.clone())?;
+        let delta_first_idx = self
+            .stack_starts
+            .len()
+            .checked_sub(total_deltas)
+            .filter(|&first| first >= n)
+            .ok_or(underflow)?;
 
         // Decode every delta operand from out (these are still live in
         // the byte stream; we'll truncate over them shortly).
-        let delta_first_idx = self.stack_starts.len() - total_deltas;
+        let delta_starts = self.stack_starts.get(delta_first_idx..).unwrap_or_default();
         let mut src_deltas: Vec<f32> = Vec::with_capacity(total_deltas);
-        for slot in 0..total_deltas {
-            let start = self.stack_starts[delta_first_idx + slot];
+        for &start in delta_starts {
             let v = decode_operand_f32(&self.out, start)
                 .ok_or(SubsetError::Unsupported(
                     "CFF2 partial bake: delta decode failed",
@@ -1954,8 +2000,9 @@ impl<'a> PartialBaker<'a> {
         // Truncate `out` to the byte position before the first delta
         // push. The n masters' bytes survive; everything from the
         // first delta to the end of the count operand is gone. Drop
-        // the corresponding `stack_starts` entries.
-        let truncate_to = self.stack_starts[delta_first_idx];
+        // the corresponding `stack_starts` entries. With no deltas
+        // (a subtable with zero regions) nothing is cut.
+        let truncate_to = delta_starts.first().copied().unwrap_or(self.out.len());
         self.stack_starts.truncate(delta_first_idx);
         self.out.truncate(truncate_to);
 
@@ -1990,9 +2037,14 @@ impl<'a> PartialBaker<'a> {
         // pin_scalar.
         for i in 0..n {
             for &(slot, scalar) in &survivor.surviving {
-                let src = src_deltas[i * old_k + slot as usize];
-                let scaled = src * scalar;
-                encode_charstring_number(scaled, &mut self.out);
+                let src = i
+                    .checked_mul(old_k)
+                    .and_then(|row| row.checked_add(usize::from(slot)))
+                    .and_then(|k| src_deltas.get(k))
+                    .ok_or(SubsetError::Unsupported(
+                        "CFF2 partial bake: blend delta slot out of range",
+                    ))?;
+                encode_charstring_number(src * scalar, &mut self.out);
             }
         }
         // Emit the count operand and blend op.
@@ -2012,7 +2064,6 @@ impl<'a> PartialBaker<'a> {
 }
 
 #[cfg(test)]
-#[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
 mod tests {
     use super::*;
     use crate::cff::{emit_fd_select_format0, encode_int_operand, scan_subr_calls, subr_bias};
@@ -2718,5 +2769,83 @@ mod tests {
         );
         // Blend op survives.
         assert!(cs.contains(&16u8), "blend op survives partial bake");
+    }
+
+    /// Local subroutines 0..=9 where subroutine `k` calls subroutine
+    /// `k - 1` ten times and subroutine 0 is empty. Inlining a call to
+    /// subroutine 9 expands to a billion calls of subroutine 0.
+    fn subr_bomb() -> Vec<Vec<u8>> {
+        let mut subrs: Vec<Vec<u8>> = alloc::vec![Vec::new()];
+        for k in 1..10u8 {
+            // The bias is 107 for fewer than 1240 subrs, so index
+            // `k - 1` is pushed as the single byte (k - 1) - 107 + 139.
+            subrs.push([k - 1 + 32, 10].repeat(10));
+        }
+        subrs
+    }
+
+    /// Charstring that calls local subroutine 9 of [`subr_bomb`].
+    const CALL_SUBR_9: &[u8] = &[9 + 32, 10];
+
+    #[test]
+    fn bake_at_coords_stops_exponential_subr_expansion() {
+        let subrs = subr_bomb();
+        let refs: Vec<&[u8]> = subrs.iter().map(Vec::as_slice).collect();
+        let cff = build_synthetic_cff2_with_local_subrs(&[CALL_SUBR_9], &[0], &refs, None);
+        let r = bake_at_coords(&cff, &[]);
+        assert!(matches!(r, Err(SubsetError::Unsupported(_))), "{r:?}");
+    }
+
+    #[test]
+    fn bake_cff2_partial_stops_exponential_subr_expansion() {
+        let ivs = build_ivs1_for_cff2(
+            &[[(0.0, 1.0, 1.0)]],
+            &[(alloc::vec![0], alloc::vec![alloc::vec![50i16]])],
+        );
+        let subrs = subr_bomb();
+        let refs: Vec<&[u8]> = subrs.iter().map(Vec::as_slice).collect();
+        let cff = build_synthetic_cff2_with_local_subrs(&[CALL_SUBR_9], &[0], &refs, Some(&ivs));
+        let r = bake_cff2_partial(&cff, &[1.0], &[AxisPin::Keep]);
+        assert!(matches!(r, Err(SubsetError::Unsupported(_))), "{r:?}");
+    }
+
+    #[test]
+    fn bake_cff2_partial_blend_on_missing_subtable_keeps_masters() {
+        // The store has one subtable, but the charstring selects
+        // subtable 3 before blending. With no regions to read, the
+        // blend must leave its master in place instead of indexing past
+        // the operand stack.
+        let ivs = build_ivs1_for_cff2(
+            &[[(0.0, 1.0, 1.0)]],
+            &[(alloc::vec![0], alloc::vec![alloc::vec![50i16]])],
+        );
+        // 0 0 rmoveto, 3 vsindex, 0 1 blend, hmoveto.
+        let cs: &[u8] = &[139, 139, 21, 142, 15, 139, 140, 16, 22];
+        let cff = build_synthetic_cff2(&[cs], &[0], Some(&ivs));
+        let new_cff = bake_cff2_partial(&cff, &[1.0], &[AxisPin::Keep]).expect("partial bake");
+        let parsed = parse_cff2(&new_cff).expect("parse");
+        assert_eq!(parsed.char_strings[0], &[139u8, 139, 21, 139, 22][..]);
+    }
+
+    #[test]
+    fn bake_at_coords_rejects_callsubr_operand_past_i32() {
+        // 8000 regions that all peak at the bake coordinate. Nine
+        // chained blends of 8000 deltas of 32767 each push the operand
+        // past i32::MAX before a callsubr consumes it.
+        const REGIONS: u16 = 8000;
+        let regions: Vec<[(f32, f32, f32); 1]> = (0..REGIONS).map(|_| [(0.0, 1.0, 1.0)]).collect();
+        let ivs = build_ivs1_for_cff2(&regions, &[((0..REGIONS).collect(), Vec::new())]);
+        let max_shortint = [28u8, 0x7F, 0xFF];
+        let mut cs: Vec<u8> = max_shortint.to_vec();
+        for _ in 0..9 {
+            for _ in 0..REGIONS {
+                cs.extend_from_slice(&max_shortint);
+            }
+            cs.extend_from_slice(&[140, 16]); // 1 blend
+        }
+        cs.push(10); // callsubr
+        let cff = build_synthetic_cff2(&[cs.as_slice()], &[0], Some(&ivs));
+        let r = bake_at_coords(&cff, &[1.0]);
+        assert!(matches!(r, Err(SubsetError::Unsupported(_))), "{r:?}");
     }
 }

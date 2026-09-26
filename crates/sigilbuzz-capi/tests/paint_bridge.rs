@@ -158,6 +158,8 @@ fn paint_glyph_against_solid_colr_fires_color_and_clip_callbacks() {
     let cpal = build_cpal_v0(&[(255, 0, 0, 255)]);
     let bytes = build_face_bytes(&colr, &cpal);
 
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or a slice that outlives the call.
     unsafe {
         let blob = hb_blob_create(
             bytes.as_ptr().cast::<c_char>(),

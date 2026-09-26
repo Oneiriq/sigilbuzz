@@ -30,17 +30,17 @@
 //! When [`InstanceInput::drop_var_tables`] is true (the recommended
 //! default for the "ship as static" workflow):
 //!
-//! - `fvar`, `avar`, `gvar`, `HVAR` are dropped from the directory.
-//! - `GDEF` is preserved verbatim. Its embedded `ItemVariationStore` is
-//!   no longer reachable from any consumer because the surrounding
-//!   variable-font tables are gone, but the bytes ride along. Pruning
-//!   it cleanly is staged for a sibling.
+//! - `fvar`, `avar`, `gvar`, `HVAR`, `VVAR`, `MVAR` are dropped from
+//!   the directory.
+//! - `GDEF` keeps its other subtables, but its embedded
+//!   `ItemVariationStore` is pruned after the GPOS variation bake (see
+//!   below).
 //!
 //! When `drop_var_tables` is false the variable-font tables ride
-//! through verbatim. The glyf and hmtx bake still applies to *bake* the
-//! default-instance values into the outline / metric tables, so a
-//! consumer that ignores the variable-font tables sees the same shape
-//! as a consumer that does honor them.
+//! through verbatim next to the baked outline and metric tables. A
+//! consumer that ignores the variable-font tables sees the baked
+//! instance. A consumer that also applies them adds the deltas a second
+//! time unless `coords` is the default instance.
 //!
 //! # CFF2 baking
 //!
@@ -79,28 +79,21 @@
 //! therefore lands at the chosen instance, not the default, so the
 //! static output renders correctly at the baked coord vector.
 //!
-//! The supported lookup types are GPOS Type 1 (SinglePos formats 1 / 2)
-//! and Type 2 (PairPos formats 1 / 2), including those wrapped in a
-//! Type 9 Extension lookup. `Mark*` and `Cursive` lookups carry their
-//! variations on `Anchor` records, not `ValueRecord` fields; the
-//! Anchor bake is staged for a follow-up. Unsupported lookups still
-//! land in the output but their `VariationIndex` offsets are left
-//! intact. The GDEF.IVS prune that follows leaves them orphan, the
-//! same trade-off the simpler #173 path shipped.
+//! The supported lookup types are GPOS Type 1 (SinglePos formats 1 / 2),
+//! Type 2 (PairPos formats 1 / 2), and the anchor-carrying Types 3 to 6
+//! (CursivePos, MarkBasePos, MarkLigPos, MarkMarkPos), including those
+//! wrapped in a Type 9 Extension lookup. See [`crate::gpos_var`].
+//! Unsupported lookups still land in the output but their
+//! `VariationIndex` offsets are left intact. The GDEF.IVS prune that
+//! follows leaves them orphan, the same trade-off the simpler #173 path
+//! shipped.
 //!
-//! # Out of scope (deferred)
+//! # Partial instancing
 //!
-//! - **CFF2 partial instancing** (some axes pinned, others left
-//!   variable on a CFF2 source). The gvar / TrueType partial path is
-//!   wired through [`crate::gvar_partial::bake_gvar_partial`]; the
-//!   CFF2 VarStore equivalent lands separately.
-//! - **Mark / Cursive GPOS Anchor variations.** GPOS Types 3 / 4 / 5 / 6
-//!   carry per-x/y `Device` / `VariationIndex` offsets on their
-//!   `Anchor` records; this pass folds `ValueRecord` variations only.
-//!   Anchor variations ride through with their `VariationIndex`
-//!   offsets intact and are then orphaned by the GDEF.IVS prune,
-//!   matching the #173 trade-off for that subset of GPOS. The Anchor
-//!   bake is tracked as a follow-up.
+//! When [`InstanceInput::axis_pins`] keeps some axes variable, the
+//! bake emits a reduced-axis variable font instead. `gvar` goes through
+//! [`crate::gvar_partial::bake_gvar_partial`] and the CFF2 VarStore
+//! through [`crate::cff2::bake_cff2_partial`].
 //!
 //! # Determinism
 //!
@@ -110,6 +103,7 @@
 //! point round happens through `f32::round()` so the same inputs always
 //! hit the same integer.
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::tag;
@@ -118,7 +112,7 @@ use sigilbuzz::Face;
 
 use crate::sfnt;
 use crate::util;
-use crate::{GlyphId, SubsetError};
+use crate::SubsetError;
 
 /// F2DOT14 normalized axis coordinate. Matches the on-disk encoding the
 /// VF spec uses: a signed 2.14 fixed-point in the range `[-1.0, 1.0]`,
@@ -160,11 +154,11 @@ pub struct InstanceInput {
     /// `HVAR` / `gvar` from the output. The font becomes static:
     /// shapers will ignore any axis coords passed alongside it.
     ///
-    /// If false, leave them in place. Any consumer that does honor
-    /// the variable-font tables will see deltas of zero relative to
-    /// the baked outlines/metrics, so the result still renders
-    /// correctly at the chosen instance, but the file is larger and
-    /// shapers will still treat the font as variable.
+    /// If false, leave them in place next to the baked outlines and
+    /// metrics. The file is larger and shapers will still treat the
+    /// font as variable. A consumer that applies the variation tables
+    /// on top of the baked values adds the deltas a second time unless
+    /// `coords` is the default instance.
     pub drop_var_tables: bool,
     /// Per-axis pin policy. An empty vector means "pin every axis"
     /// (the existing full-instancing behavior). When non-empty,
@@ -187,9 +181,9 @@ pub struct InstanceInput {
     /// peak / intermediate region keeps only its `Keep`-axis
     /// dimensions, every per-point delta scales by the Pin-axis
     /// support-scalar product, and tuples whose Pin support drops to
-    /// zero are dropped. CFF2's VarStore partial-projection is still
-    /// staged; a CFF2 source with `Keep` still surfaces an
-    /// `Unsupported` error today.
+    /// zero are dropped. A CFF2 source has its VarStore projected the
+    /// same way, and every `blend` is rewritten to the surviving
+    /// regions.
     pub axis_pins: Vec<AxisPin>,
 }
 
@@ -515,9 +509,7 @@ fn cff2_bake(
 /// Partial-instance bake: produces a reduced-axis variable font.
 ///
 /// This path runs when `input.axis_pins` carries at least one
-/// `AxisPin::Keep` and the source has neither `gvar` nor `CFF2` (those
-/// tuple-projection paths are tracked as a follow-up to PR #183: the
-/// public surface there errors with `Unsupported` for now).
+/// `AxisPin::Keep`.
 ///
 /// The bake:
 /// - re-emits `fvar` with only the surviving axes (and instances whose
@@ -527,6 +519,8 @@ fn cff2_bake(
 ///   `ItemVariationStore` partial-projected through `pins` / `coords`,
 ///   each DeltaSetIndexMap rewritten to point at the new subtable
 ///   indexes,
+/// - rewrites `gvar` tuples and the CFF2 VarStore (plus every `blend`)
+///   through the same projection,
 /// - rides `glyf` / `hmtx` / `vmtx` / `head` / `hhea` / `maxp` /
 ///   layout / and other tables through verbatim. The Keep-axis
 ///   variations stay live; the Pin-axis dimensions fold into the
@@ -712,8 +706,7 @@ fn bake_glyf_loca(
                 // Composite: pass through verbatim. Component gids do
                 // not change (instancing keeps every glyph) so no
                 // rewrite is needed. Composite-level gvar deltas are
-                // conservatively dropped on this pass. The briefing
-                // calls them out as a deferral.
+                // not applied: this is a known limitation of the bake.
                 body.to_vec()
             }
         };
@@ -899,21 +892,23 @@ fn bake_simple_glyph(
     // Apply deltas. gvar's PointDelta vector is sparse: points
     // without an entry pick up zero deltas. Phantom-point deltas (point
     // index >= total_points) influence advances via HVAR rather than
-    // contour points, so we ignore them here.
+    // contour points, so we ignore them here. When a point appears
+    // more than once, its first entry wins. The dense per-point table
+    // keeps the lookup linear for glyphs with many points.
+    let mut point_deltas: Vec<Option<(f32, f32)>> = alloc::vec![None; total_points];
+    for d in deltas {
+        if let Some(slot @ None) = point_deltas.get_mut(usize::from(d.point)) {
+            *slot = Some((d.dx, d.dy));
+        }
+    }
     let mut baked_x: Vec<i32> = Vec::with_capacity(total_points);
     let mut baked_y: Vec<i32> = Vec::with_capacity(total_points);
-    for i in 0..total_points {
-        let mut x = xs[i] as f32;
-        let mut y = ys[i] as f32;
-        // Look up delta for point i (linear scan: the typical glyph
-        // has < 100 points and < 20 deltas, so this beats a HashMap
-        // and stays no_std-clean).
-        for d in deltas {
-            if d.point as usize == i {
-                x += d.dx;
-                y += d.dy;
-                break;
-            }
+    for ((&x, &y), delta) in xs.iter().zip(&ys).zip(&point_deltas) {
+        let mut x = x as f32;
+        let mut y = y as f32;
+        if let Some((dx, dy)) = *delta {
+            x += dx;
+            y += dy;
         }
         baked_x.push(round_half_to_even(x));
         baked_y.push(round_half_to_even(y));
@@ -1094,8 +1089,9 @@ fn round_half_to_even(v: f32) -> i32 {
     // doesn't mandate a specific rounding mode for instancing, but
     // round-half-to-even is what fonttools' instancer uses, and it
     // matches IEEE 754's default.
-    #[allow(clippy::cast_possible_truncation)]
-    let r = if (v - v.floor() - 0.5).abs() < f32::EPSILON {
+    if (v - v.floor() - 0.5).abs() < f32::EPSILON {
+        // Only values below 2^23 in magnitude have a fractional part,
+        // so `f + 1` cannot overflow.
         let f = v.floor() as i32;
         if f % 2 == 0 {
             f
@@ -1104,8 +1100,7 @@ fn round_half_to_even(v: f32) -> i32 {
         }
     } else {
         v.round() as i32
-    };
-    r
+    }
 }
 
 fn clamp_i16(v: i32) -> i16 {
@@ -1137,7 +1132,6 @@ fn bake_hmtx(face: &Face<'_>, coords: &[f32], num_glyphs: u16) -> Result<HmtxBak
         // hmtx advances are unsigned; clamp at 0 if a delta would
         // underflow. In practice this only happens with malformed
         // HVAR data.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let new_adv = (f32::from(base_adv) + adv_delta).round().max(0.0) as i32;
         advances.push(new_adv.clamp(0, i32::from(u16::MAX)) as u16);
         lsbs.push(base_lsb);
@@ -1225,7 +1219,6 @@ fn bake_vmtx(face: &Face<'_>, coords: &[f32], num_glyphs: u16) -> Result<VmtxBak
             Some(v) if !coords.is_empty() => v.top_side_bearing_delta(gid, coords).unwrap_or(0.0),
             _ => 0.0,
         };
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let new_adv = (f32::from(base_adv) + adv_delta).round().max(0.0) as i32;
         advances.push(new_adv.clamp(0, i32::from(u16::MAX)) as u16);
         let new_tsb = (f32::from(base_tsb) + tsb_delta).round() as i32;
@@ -1353,43 +1346,58 @@ fn apply_mvar_records(
     // once per record, doubling its effect on the rebuilt OS/2 / hhea
     // / vhea / post fields. Dedup with first-wins so the rebuild
     // matches the spec-conforming case bit-for-bit.
-    let mut seen: Vec<[u8; 4]> = Vec::new();
-    for (rec_tag, _) in mvar.entries() {
-        if seen.contains(&rec_tag) {
+    //
+    // Only the tags below patch a field, so every other record is
+    // skipped before its delta is evaluated. The first record for a
+    // tag carries the `(outer, inner)` pair `Mvar::metric_delta` would
+    // look up, so the delta is read from it directly. Both keep the
+    // walk linear in the record count.
+    let Some(store) = mvar.variation_store() else {
+        return Ok(MvarBake {
+            os2,
+            hhea,
+            vhea,
+            post,
+        });
+    };
+    let mut seen: BTreeSet<[u8; 4]> = BTreeSet::new();
+    for (rec_tag, (outer, inner)) in mvar.entries() {
+        let (buf, off, signed) = match rec_tag {
+            t if t == mvar_tag::HORIZ_ASCENDER => (&mut os2, 68, true),
+            t if t == mvar_tag::HORIZ_DESCENDER => (&mut os2, 70, true),
+            t if t == mvar_tag::HORIZ_LINE_GAP => (&mut os2, 72, true),
+            t if t == mvar_tag::HORIZ_CLIPPING_ASCENT => (&mut os2, 74, false),
+            t if t == mvar_tag::HORIZ_CLIPPING_DESCENT => (&mut os2, 76, false),
+            t if t == mvar_tag::X_HEIGHT => (&mut os2, 86, true),
+            t if t == mvar_tag::CAP_HEIGHT => (&mut os2, 88, true),
+            t if t == mvar_tag::SUBSCRIPT_X_SIZE => (&mut os2, 10, true),
+            t if t == mvar_tag::SUBSCRIPT_Y_SIZE => (&mut os2, 12, true),
+            t if t == mvar_tag::SUBSCRIPT_X_OFFSET => (&mut os2, 14, true),
+            t if t == mvar_tag::SUBSCRIPT_Y_OFFSET => (&mut os2, 16, true),
+            t if t == mvar_tag::SUPERSCRIPT_X_SIZE => (&mut os2, 18, true),
+            t if t == mvar_tag::SUPERSCRIPT_Y_SIZE => (&mut os2, 20, true),
+            t if t == mvar_tag::SUPERSCRIPT_X_OFFSET => (&mut os2, 22, true),
+            t if t == mvar_tag::SUPERSCRIPT_Y_OFFSET => (&mut os2, 24, true),
+            t if t == mvar_tag::STRIKEOUT_SIZE => (&mut os2, 26, true),
+            t if t == mvar_tag::STRIKEOUT_OFFSET => (&mut os2, 28, true),
+            t if t == mvar_tag::VERT_ASCENDER => (&mut vhea, 4, true),
+            t if t == mvar_tag::VERT_DESCENDER => (&mut vhea, 6, true),
+            t if t == mvar_tag::VERT_LINE_GAP => (&mut vhea, 8, true),
+            t if t == mvar_tag::UNDERLINE_SIZE => (&mut post, 10, true),
+            t if t == mvar_tag::UNDERLINE_OFFSET => (&mut post, 8, true),
+            _ => continue, // unrecognized tag: silently ignore
+        };
+        if !seen.insert(rec_tag) {
             continue;
         }
-        seen.push(rec_tag);
-        let Some(d) = mvar.metric_delta(rec_tag, coords) else {
-            continue;
-        };
-        let delta = d.round() as i32;
+        let delta = store.delta(outer, inner, coords).round() as i32;
         if delta == 0 {
             continue;
         }
-        match rec_tag {
-            t if t == mvar_tag::HORIZ_ASCENDER => patch_i16(&mut os2, 68, delta),
-            t if t == mvar_tag::HORIZ_DESCENDER => patch_i16(&mut os2, 70, delta),
-            t if t == mvar_tag::HORIZ_LINE_GAP => patch_i16(&mut os2, 72, delta),
-            t if t == mvar_tag::HORIZ_CLIPPING_ASCENT => patch_u16(&mut os2, 74, delta),
-            t if t == mvar_tag::HORIZ_CLIPPING_DESCENT => patch_u16(&mut os2, 76, delta),
-            t if t == mvar_tag::X_HEIGHT => patch_i16(&mut os2, 86, delta),
-            t if t == mvar_tag::CAP_HEIGHT => patch_i16(&mut os2, 88, delta),
-            t if t == mvar_tag::SUBSCRIPT_X_SIZE => patch_i16(&mut os2, 10, delta),
-            t if t == mvar_tag::SUBSCRIPT_Y_SIZE => patch_i16(&mut os2, 12, delta),
-            t if t == mvar_tag::SUBSCRIPT_X_OFFSET => patch_i16(&mut os2, 14, delta),
-            t if t == mvar_tag::SUBSCRIPT_Y_OFFSET => patch_i16(&mut os2, 16, delta),
-            t if t == mvar_tag::SUPERSCRIPT_X_SIZE => patch_i16(&mut os2, 18, delta),
-            t if t == mvar_tag::SUPERSCRIPT_Y_SIZE => patch_i16(&mut os2, 20, delta),
-            t if t == mvar_tag::SUPERSCRIPT_X_OFFSET => patch_i16(&mut os2, 22, delta),
-            t if t == mvar_tag::SUPERSCRIPT_Y_OFFSET => patch_i16(&mut os2, 24, delta),
-            t if t == mvar_tag::STRIKEOUT_SIZE => patch_i16(&mut os2, 26, delta),
-            t if t == mvar_tag::STRIKEOUT_OFFSET => patch_i16(&mut os2, 28, delta),
-            t if t == mvar_tag::VERT_ASCENDER => patch_i16(&mut vhea, 4, delta),
-            t if t == mvar_tag::VERT_DESCENDER => patch_i16(&mut vhea, 6, delta),
-            t if t == mvar_tag::VERT_LINE_GAP => patch_i16(&mut vhea, 8, delta),
-            t if t == mvar_tag::UNDERLINE_SIZE => patch_i16(&mut post, 10, delta),
-            t if t == mvar_tag::UNDERLINE_OFFSET => patch_i16(&mut post, 8, delta),
-            _ => {} // unrecognized tag: silently ignore
+        if signed {
+            patch_i16(buf, off, delta);
+        } else {
+            patch_u16(buf, off, delta);
         }
     }
 
@@ -1401,28 +1409,37 @@ fn apply_mvar_records(
     })
 }
 
-fn patch_i16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
-    let Some(b) = buf.as_mut() else {
-        return;
-    };
-    if b.len() < off + 2 {
-        return;
-    }
-    let cur = i16::from_be_bytes([b[off], b[off + 1]]);
-    let new = (i32::from(cur) + delta).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-    b[off..off + 2].copy_from_slice(&new.to_be_bytes());
+/// Returns the two bytes at `buf[off..off + 2]`, or `None` when the
+/// table is absent or too short.
+fn field_bytes(buf: &mut Option<Vec<u8>>, off: usize) -> Option<&mut [u8; 2]> {
+    buf.as_mut()?.get_mut(off..)?.first_chunk_mut::<2>()
 }
 
-fn patch_u16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
-    let Some(b) = buf.as_mut() else {
+/// Adds `delta` to the big-endian `i16` at `off`, clamping to the field
+/// range. A delta from a long-word variation store can reach
+/// `i32::MAX`, so the sum saturates before the clamp.
+fn patch_i16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
+    let Some(field) = field_bytes(buf, off) else {
         return;
     };
-    if b.len() < off + 2 {
+    let cur = i16::from_be_bytes(*field);
+    let new = i32::from(cur)
+        .saturating_add(delta)
+        .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    *field = new.to_be_bytes();
+}
+
+/// Adds `delta` to the big-endian `u16` at `off`, clamping to the field
+/// range.
+fn patch_u16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
+    let Some(field) = field_bytes(buf, off) else {
         return;
-    }
-    let cur = u16::from_be_bytes([b[off], b[off + 1]]);
-    let new = (i32::from(cur) + delta).clamp(0, i32::from(u16::MAX)) as u16;
-    b[off..off + 2].copy_from_slice(&new.to_be_bytes());
+    };
+    let cur = u16::from_be_bytes(*field);
+    let new = i32::from(cur)
+        .saturating_add(delta)
+        .clamp(0, i32::from(u16::MAX)) as u16;
+    *field = new.to_be_bytes();
 }
 
 // ---------------------------------------------------------------------------
@@ -1450,7 +1467,7 @@ fn patch_u16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
 // rewriters (HVAR / VVAR / MVAR / gvar / GDEF.IVS) consume to emit
 // trimmed `ItemVariationStore` / gvar tuples in a partial-instance
 // font. They are tested in isolation here so the math stays correct
-// regardless of which table a follow-up wires them into first.
+// independently of the table rewriters that use them.
 // ---------------------------------------------------------------------------
 
 /// Computes the support-scalar contribution of a single axis dimension
@@ -1591,7 +1608,6 @@ pub(crate) fn project_region_onto_kept_axes(
 /// Returns `None` when every axis pins (the all-pin case is the
 /// existing full-instancing behavior and the caller drops fvar
 /// outright when `drop_var_tables` is true).
-#[allow(dead_code)] // wired in by the partial-instancing integration commit
 fn bake_fvar_partial(fvar_bytes: &[u8], pins: &[AxisPin]) -> Option<Vec<u8>> {
     if pins.iter().all(|p| matches!(p, AxisPin::Pin)) {
         return None;
@@ -1722,7 +1738,6 @@ fn bake_fvar_partial(fvar_bytes: &[u8], pins: &[AxisPin]) -> Option<Vec<u8>> {
 
 /// Re-emits an `avar` table with every Pin-axis segment map dropped.
 /// Returns `None` when every axis pins.
-#[allow(dead_code)] // wired in by the partial-instancing integration commit
 fn bake_avar_partial(avar_bytes: &[u8], pins: &[AxisPin]) -> Option<Vec<u8>> {
     if pins.iter().all(|p| matches!(p, AxisPin::Pin)) {
         return None;
@@ -1786,7 +1801,6 @@ fn bake_avar_partial(avar_bytes: &[u8], pins: &[AxisPin]) -> Option<Vec<u8>> {
 /// the row as "no variation" and leave the consumer field at its
 /// static value.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)] // wired in by the partial-instancing integration commit
 pub(crate) struct RegionRemap {
     /// Per-source-outer entries. Each entry is either:
     /// - `Some(new_outer)`: the subtable survives at this index, with
@@ -1800,7 +1814,6 @@ pub(crate) struct RegionRemap {
     new_outer_for_old: Vec<Option<u16>>,
 }
 
-#[allow(dead_code)] // wired in by the partial-instancing integration commit
 impl RegionRemap {
     /// Returns the new (outer, inner) for an old row, or `None` when
     /// the surrounding subtable collapsed.
@@ -1810,19 +1823,53 @@ impl RegionRemap {
     }
 }
 
-/// Reads an F2DOT14 from a byte slice at `off`.
+/// Reads a big-endian `u16` at `off`, or `None` past the end.
+fn read_u16_at(data: &[u8], off: usize) -> Option<u16> {
+    data.get(off..)?
+        .first_chunk::<2>()
+        .copied()
+        .map(u16::from_be_bytes)
+}
+
+/// Reads a big-endian `u32` at `off`, or `None` past the end.
+fn read_u32_at(data: &[u8], off: usize) -> Option<u32> {
+    data.get(off..)?
+        .first_chunk::<4>()
+        .copied()
+        .map(u32::from_be_bytes)
+}
+
+/// Reads an F2DOT14 from a byte slice at `off`, or 0 past the end.
 fn read_f2dot14(data: &[u8], off: usize) -> f32 {
-    let raw = i16::from_be_bytes([data[off], data[off + 1]]);
-    f32::from(raw) / 16384.0
+    read_u16_at(data, off).map_or(0.0, |raw| f32::from(raw as i16) / 16384.0)
 }
 
 /// Writes an F2DOT14 to a byte vector.
 fn write_f2dot14_bytes(out: &mut Vec<u8>, v: f32) {
-    #[allow(clippy::cast_possible_truncation)]
     let raw = (v * 16384.0)
         .round()
         .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
     out.extend_from_slice(&raw.to_be_bytes());
+}
+
+/// Decodes one `ItemVariationData` delta row: `word_delta_count` wide
+/// entries followed by narrow ones. `row` holds exactly one row.
+fn decode_delta_row(row: &[u8], word_delta_count: usize, long_words: bool) -> Vec<i32> {
+    let (src_wide, src_narrow) = if long_words { (4, 2) } else { (2, 1) };
+    let (wide, narrow) = row
+        .split_at_checked(word_delta_count * src_wide)
+        .unwrap_or((row, &[]));
+    let wide = wide.chunks_exact(src_wide).map(|b| match *b {
+        [b0, b1, b2, b3] => i32::from_be_bytes([b0, b1, b2, b3]),
+        [b0, b1] => i32::from(i16::from_be_bytes([b0, b1])),
+        _ => 0,
+    });
+    let narrow = narrow.chunks_exact(src_narrow).map(|b| match *b {
+        [b0, b1] => i32::from(i16::from_be_bytes([b0, b1])),
+        [b0] => i32::from(b0 as i8),
+        _ => 0,
+    });
+    wide.chain(narrow).collect()
 }
 
 /// Re-emits an `ItemVariationStore` with every Pin-axis dimension
@@ -1830,74 +1877,67 @@ fn write_f2dot14_bytes(out: &mut Vec<u8>, v: f32) {
 /// success, `None` when:
 /// - the input is malformed,
 /// - the input is not format 1, or
-/// - every region drops at the pin coords (consumers should treat
-///   every row as zero-delta and emit no IVS).
+/// - its subtables overlap so heavily that rewriting them would read
+///   far more bytes than the store holds (see below).
+///
+/// When every region drops at the pin coords the result is a valid
+/// IVS with no subtables, and every `RegionRemap` lookup returns
+/// `None`.
 ///
 /// The output IVS uses the same format-1 layout: a region list with
 /// only the Keep-axis dimensions, plus one `ItemVariationData` per
 /// surviving source subtable. Subtables whose region list collapses
 /// entirely are elided (see `RegionRemap`).
-#[allow(dead_code)] // wired in by the partial-instancing integration commit
+///
+/// Subtable offsets may point at the same bytes. Each offset is
+/// rewritten separately, so a store whose offsets all alias one large
+/// subtable would expand without bound. The rewrite therefore charges
+/// every subtable's source span against a budget of a few times the
+/// store size. Subtables in a well-formed store occupy disjoint spans,
+/// so their total never reaches the budget.
 pub(crate) fn bake_ivs_partial(
     ivs_bytes: &[u8],
     coords: &[f32],
     pins: &[AxisPin],
 ) -> Option<(Vec<u8>, RegionRemap)> {
-    if ivs_bytes.len() < 8 {
+    if read_u16_at(ivs_bytes, 0)? != 1 {
         return None;
     }
-    let format = u16::from_be_bytes([ivs_bytes[0], ivs_bytes[1]]);
-    if format != 1 {
-        return None;
-    }
-    let region_list_off =
-        u32::from_be_bytes([ivs_bytes[2], ivs_bytes[3], ivs_bytes[4], ivs_bytes[5]]) as usize;
-    let subtable_count = u16::from_be_bytes([ivs_bytes[6], ivs_bytes[7]]) as usize;
-    if ivs_bytes.len() < 8 + subtable_count * 4 {
-        return None;
-    }
-    let mut subtable_offsets: Vec<usize> = Vec::with_capacity(subtable_count);
-    for i in 0..subtable_count {
-        let off = u32::from_be_bytes([
-            ivs_bytes[8 + i * 4],
-            ivs_bytes[8 + i * 4 + 1],
-            ivs_bytes[8 + i * 4 + 2],
-            ivs_bytes[8 + i * 4 + 3],
-        ]) as usize;
-        subtable_offsets.push(off);
-    }
+    let region_list_off = read_u32_at(ivs_bytes, 2)? as usize;
+    let subtable_count = usize::from(read_u16_at(ivs_bytes, 6)?);
+    let subtable_offsets: Vec<usize> = ivs_bytes
+        .get(8..)?
+        .get(..subtable_count * 4)?
+        .chunks_exact(4)
+        .map(|off| u32::from_be_bytes([off[0], off[1], off[2], off[3]]) as usize)
+        .collect();
 
-    if ivs_bytes.len() < region_list_off + 4 {
-        return None;
-    }
-    let axis_count =
-        u16::from_be_bytes([ivs_bytes[region_list_off], ivs_bytes[region_list_off + 1]]) as usize;
-    let region_count = u16::from_be_bytes([
-        ivs_bytes[region_list_off + 2],
-        ivs_bytes[region_list_off + 3],
-    ]) as usize;
+    let axis_count = usize::from(read_u16_at(ivs_bytes, region_list_off)?);
+    let region_count = usize::from(read_u16_at(ivs_bytes, region_list_off.checked_add(2)?)?);
     if pins.len() != axis_count || coords.len() != axis_count {
         return None;
     }
-    let regions_start = region_list_off + 4;
+    // The count reads above put `region_list_off + 4` inside the data.
     let region_size = axis_count * 6;
-    if ivs_bytes.len() < regions_start + region_count * region_size {
-        return None;
-    }
+    let regions = ivs_bytes
+        .get(region_list_off + 4..)?
+        .get(..region_count.checked_mul(region_size)?)?;
 
     // Project each region. None -> dropped; Some((new_index, scalar)).
     let mut region_remap: Vec<Option<(u16, f32)>> = Vec::with_capacity(region_count);
     let mut new_regions: Vec<Vec<(f32, f32, f32)>> = Vec::new();
     for ri in 0..region_count {
-        let base = regions_start + ri * region_size;
-        let mut region: Vec<(f32, f32, f32)> = Vec::with_capacity(axis_count);
-        for axis_i in 0..axis_count {
-            let off = base + axis_i * 6;
-            let s = read_f2dot14(ivs_bytes, off);
-            let p = read_f2dot14(ivs_bytes, off + 2);
-            let e = read_f2dot14(ivs_bytes, off + 4);
-            region.push((s, p, e));
-        }
+        let base = ri * region_size;
+        let region: Vec<(f32, f32, f32)> = (0..axis_count)
+            .map(|axis_i| {
+                let off = base + axis_i * 6;
+                (
+                    read_f2dot14(regions, off),
+                    read_f2dot14(regions, off + 2),
+                    read_f2dot14(regions, off + 4),
+                )
+            })
+            .collect();
         match project_region_onto_kept_axes(&region, pins, coords) {
             Some(p) => {
                 let new_idx = new_regions.len() as u16;
@@ -1917,35 +1957,30 @@ pub(crate) fn bake_ivs_partial(
     // header bytes are written below; we serialize them in order so
     // offsets land deterministically).
     let mut new_subtables: Vec<Vec<u8>> = Vec::new();
+    // Source bytes the subtable walk may still read. See the doc
+    // comment for why overlapping subtables need a cap.
+    let mut read_budget = ivs_bytes.len().saturating_mul(4).saturating_add(1 << 16);
 
-    for sub_off in &subtable_offsets {
-        let sub_off = *sub_off;
+    for &sub_off in &subtable_offsets {
         // Subtable header: itemCount, wordDeltaCount, regionIndexCount,
         // then regionIndexCount x u16 indexes, then itemCount delta
         // rows.
-        if ivs_bytes.len() < sub_off + 6 {
-            return None;
-        }
-        let item_count = u16::from_be_bytes([ivs_bytes[sub_off], ivs_bytes[sub_off + 1]]) as usize;
-        let wdc_raw = u16::from_be_bytes([ivs_bytes[sub_off + 2], ivs_bytes[sub_off + 3]]);
+        let item_count = usize::from(read_u16_at(ivs_bytes, sub_off)?);
+        let wdc_raw = read_u16_at(ivs_bytes, sub_off.checked_add(2)?)?;
+        let region_index_count = usize::from(read_u16_at(ivs_bytes, sub_off.checked_add(4)?)?);
         let long_words = wdc_raw & 0x8000 != 0;
-        let word_delta_count = (wdc_raw & 0x7FFF) as usize;
-        let region_index_count =
-            u16::from_be_bytes([ivs_bytes[sub_off + 4], ivs_bytes[sub_off + 5]]) as usize;
+        let word_delta_count = usize::from(wdc_raw & 0x7FFF);
         if word_delta_count > region_index_count {
             return None;
         }
+        // The reads above put `sub_off + 6` inside the data.
         let ri_start = sub_off + 6;
-        if ivs_bytes.len() < ri_start + region_index_count * 2 {
-            return None;
-        }
-        let mut region_indexes: Vec<u16> = Vec::with_capacity(region_index_count);
-        for i in 0..region_index_count {
-            region_indexes.push(u16::from_be_bytes([
-                ivs_bytes[ri_start + i * 2],
-                ivs_bytes[ri_start + i * 2 + 1],
-            ]));
-        }
+        let region_index_bytes = ivs_bytes.get(ri_start..)?.get(..region_index_count * 2)?;
+        read_budget = read_budget.checked_sub(6 + region_index_bytes.len())?;
+        let region_indexes: Vec<u16> = region_index_bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
 
         // Per-source-slot survival list: index into source slot,
         // produces (new_region_index, scalar).
@@ -1972,66 +2007,33 @@ pub(crate) fn bake_ivs_partial(
         };
         let row_size =
             word_delta_count * src_wide + (region_index_count - word_delta_count) * src_narrow;
-        let rows_start = ri_start + region_index_count * 2;
-        if ivs_bytes.len() < rows_start + item_count * row_size {
-            return None;
-        }
+        let rows = ivs_bytes
+            .get(ri_start + region_index_bytes.len()..)?
+            .get(..item_count.checked_mul(row_size)?)?;
+        read_budget = read_budget.checked_sub(rows.len())?;
 
         // For each item, build its surviving row of i32 deltas
-        // (post-pin-scalar).
+        // (post-pin-scalar). `row_size` is at least 1 here because a
+        // surviving slot implies at least one region index.
         let mut item_rows: Vec<Vec<i32>> = Vec::with_capacity(item_count);
-        for it in 0..item_count {
-            let row_off = rows_start + it * row_size;
-            // Walk source slots, decoding each.
-            let mut src_deltas: Vec<i32> = Vec::with_capacity(region_index_count);
-            let mut cursor = row_off;
-            for slot in 0..region_index_count {
-                let is_wide = slot < word_delta_count;
-                let value: i32 = match (is_wide, long_words) {
-                    (true, true) => {
-                        let v = i32::from_be_bytes([
-                            ivs_bytes[cursor],
-                            ivs_bytes[cursor + 1],
-                            ivs_bytes[cursor + 2],
-                            ivs_bytes[cursor + 3],
-                        ]);
-                        cursor += 4;
-                        v
-                    }
-                    (true, false) | (false, true) => {
-                        let v = i32::from(i16::from_be_bytes([
-                            ivs_bytes[cursor],
-                            ivs_bytes[cursor + 1],
-                        ]));
-                        cursor += 2;
-                        v
-                    }
-                    (false, false) => {
-                        #[allow(clippy::cast_possible_wrap)]
-                        let v = ivs_bytes[cursor] as i8;
-                        cursor += 1;
-                        i32::from(v)
-                    }
-                };
-                src_deltas.push(value);
-            }
+        for row in rows.chunks_exact(row_size.max(1)) {
+            let src_deltas = decode_delta_row(row, word_delta_count, long_words);
             // Apply scalar to each surviving slot, build the new row in
             // surviving-slot order.
-            let mut new_row: Vec<i32> = Vec::with_capacity(surviving_slots.len());
-            for &(slot, _new_ri, scalar) in &surviving_slots {
-                #[allow(clippy::cast_precision_loss)]
-                let scaled = src_deltas[slot] as f32 * scalar;
-                #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-                let rounded = scaled.round() as i32;
-                new_row.push(rounded);
-            }
+            let new_row: Vec<i32> = surviving_slots
+                .iter()
+                .map(|&(slot, _new_ri, scalar)| {
+                    let scaled = src_deltas.get(slot).copied().unwrap_or(0) as f32 * scalar;
+                    scaled.round() as i32
+                })
+                .collect();
             item_rows.push(new_row);
         }
 
         // Decide encoding: pick all-i16 if every value fits, else
         // all-i32 (set LONG_WORDS bit, wordDeltaCount =
-        // surviving_slot_count). Simple and conservative: the IVS
-        // dedup pass in 0.13 doesn't run again on the partial output.
+        // surviving_slot_count). Simple and conservative: the partial
+        // output is not run through another IVS dedup pass.
         let all_fit_i16 = item_rows
             .iter()
             .flat_map(|r| r.iter())
@@ -2058,7 +2060,6 @@ pub(crate) fn bake_ivs_partial(
         for row in &item_rows {
             for &v in row {
                 if all_fit_i16 {
-                    #[allow(clippy::cast_possible_truncation)]
                     let v16 = v as i16;
                     sub_bytes.extend_from_slice(&v16.to_be_bytes());
                 } else {
@@ -2115,13 +2116,15 @@ pub(crate) fn bake_ivs_partial(
     }
 
     // Subtables.
-    let mut cursor = out.len();
     for (i, sub) in new_subtables.iter().enumerate() {
-        let off_u32 = cursor as u32;
-        let slot = subtable_off_slot + i * 4;
-        out[slot..slot + 4].copy_from_slice(&off_u32.to_be_bytes());
+        let off_u32 = out.len() as u32;
+        if let Some(slot) = out
+            .get_mut(subtable_off_slot + i * 4..)
+            .and_then(<[u8]>::first_chunk_mut::<4>)
+        {
+            *slot = off_u32.to_be_bytes();
+        }
         out.extend_from_slice(sub);
-        cursor += sub.len();
     }
 
     Some((out, RegionRemap { new_outer_for_old }))
@@ -2137,10 +2140,10 @@ pub(crate) fn bake_ivs_partial(
 /// IVS evaluation returns zero (the desired "no variation for this
 /// row" semantics).
 ///
-/// The output keeps the source's format (0 / 1) and entryFormat
-/// (bytes-per-entry, inner-bit-count) unchanged. The packed
-/// `(outer, inner)` may overflow the source's bit allocation. When
-/// that happens we widen entryFormat conservatively.
+/// The output keeps the source's format (0 / 1). The entryFormat is
+/// recomputed as the smallest one that fits every rewritten
+/// `(outer, inner)` pair, since the new pairs may need more or fewer
+/// bits than the source's.
 ///
 /// `start` is the offset into `data` where the map begins.
 fn rewrite_delta_set_index_map(
@@ -2149,34 +2152,17 @@ fn rewrite_delta_set_index_map(
     remap: &RegionRemap,
     new_subtable_count: u16,
 ) -> Option<Vec<u8>> {
-    if data.len() < start + 2 {
-        return None;
-    }
-    let format = data[start];
-    let entry_format = data[start + 1];
-    let mut cursor = start + 2;
+    let map = data.get(start..)?;
+    let (&[format, entry_format], rest) = map.split_first_chunk::<2>()?;
 
-    let map_count: u32 = match format {
+    let (map_count, header_len, entry_data): (u32, usize, &[u8]) = match format {
         0 => {
-            if data.len() < cursor + 2 {
-                return None;
-            }
-            let v = u16::from_be_bytes([data[cursor], data[cursor + 1]]) as u32;
-            cursor += 2;
-            v
+            let (count, entry_data) = rest.split_first_chunk::<2>()?;
+            (u32::from(u16::from_be_bytes(*count)), 4, entry_data)
         }
         1 => {
-            if data.len() < cursor + 4 {
-                return None;
-            }
-            let v = u32::from_be_bytes([
-                data[cursor],
-                data[cursor + 1],
-                data[cursor + 2],
-                data[cursor + 3],
-            ]);
-            cursor += 4;
-            v
+            let (count, entry_data) = rest.split_first_chunk::<4>()?;
+            (u32::from_be_bytes(*count), 6, entry_data)
         }
         _ => return None,
     };
@@ -2188,21 +2174,15 @@ fn rewrite_delta_set_index_map(
     if map_count == 0 {
         // Nothing to rewrite: return a clone of the unchanged map
         // header so the caller's offset surgery still works.
-        return Some(data[start..cursor].to_vec());
+        return map.get(..header_len).map(<[u8]>::to_vec);
     }
 
-    if data.len() < cursor + (map_count as usize) * entry_bytes {
-        return None;
-    }
+    let entry_data = entry_data.get(..(map_count as usize).checked_mul(entry_bytes)?)?;
 
     // Decode every entry, remap, then decide the new entryFormat.
     let mut new_entries: Vec<(u16, u16)> = Vec::with_capacity(map_count as usize);
-    for i in 0..map_count as usize {
-        let off = cursor + i * entry_bytes;
-        let mut raw: u32 = 0;
-        for b in 0..entry_bytes {
-            raw = (raw << 8) | u32::from(data[off + b]);
-        }
+    for entry in entry_data.chunks_exact(entry_bytes) {
+        let raw = entry.iter().fold(0u32, |raw, &b| (raw << 8) | u32::from(b));
         let inner = (raw & inner_mask) as u16;
         let outer = (raw >> inner_bits) as u16;
         let (new_outer, new_inner) = match remap.lookup(outer, inner) {
@@ -2266,7 +2246,6 @@ fn rewrite_delta_set_index_map(
 /// rewrite fails. The caller should fall through to dropping the
 /// table when this returns `None`. That's equivalent to "no advance
 /// variation," safe but slightly degraded.
-#[allow(dead_code)] // wired in by the partial-instancing integration commit
 fn bake_hvar_partial(hvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Option<Vec<u8>> {
     // HVAR header: u16 major, u16 minor, o32 ivs, o32 advance, o32 lsb,
     // o32 rsb. 20 bytes.
@@ -2299,7 +2278,7 @@ fn bake_hvar_partial(hvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Opt
     }
     let (new_ivs, remap) = bake_ivs_partial(&hvar_bytes[ivs_off..], coords, pins)?;
     // Read new subtable count from the just-emitted IVS.
-    let new_subtable_count = u16::from_be_bytes([new_ivs[6], new_ivs[7]]);
+    let new_subtable_count = read_u16_at(&new_ivs, 6)?;
 
     // Rewrite each non-zero map.
     let new_advance_map = if advance_off != 0 {
@@ -2373,7 +2352,6 @@ fn bake_hvar_partial(hvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Opt
 /// x o32: ivs / advance-height / tsb / bsb / vorg). The vorg map
 /// shares the IVS rows with the others; we rewrite it through the
 /// same remap.
-#[allow(dead_code)] // wired in by the partial-instancing integration commit
 fn bake_vvar_partial(vvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Option<Vec<u8>> {
     if vvar_bytes.len() < 24 {
         return None;
@@ -2399,7 +2377,7 @@ fn bake_vvar_partial(vvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Opt
         return None;
     }
     let (new_ivs, remap) = bake_ivs_partial(&vvar_bytes[ivs_off..], coords, pins)?;
-    let new_subtable_count = u16::from_be_bytes([new_ivs[6], new_ivs[7]]);
+    let new_subtable_count = read_u16_at(&new_ivs, 6)?;
 
     let mut new_maps: [Option<Vec<u8>>; 4] = [None, None, None, None];
     for (i, off) in map_offs.iter().enumerate() {
@@ -2446,7 +2424,6 @@ fn bake_vvar_partial(vvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Opt
 /// The MVAR header has `valueRecordSize >= 8`; we preserve the
 /// source's record_size and only patch the first 8 bytes of each
 /// record (tag + outer + inner).
-#[allow(dead_code)] // wired in by the partial-instancing integration commit
 fn bake_mvar_partial(mvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Option<Vec<u8>> {
     if mvar_bytes.len() < 12 {
         return None;
@@ -2470,7 +2447,7 @@ fn bake_mvar_partial(mvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Opt
         return None;
     }
     let (new_ivs, remap) = bake_ivs_partial(&mvar_bytes[store_off..], coords, pins)?;
-    let new_subtable_count = u16::from_be_bytes([new_ivs[6], new_ivs[7]]);
+    let new_subtable_count = read_u16_at(&new_ivs, 6)?;
 
     // Layout: 12-byte header + records + IVS. Preserve record_size.
     let records_start: usize = 12;
@@ -2521,37 +2498,32 @@ fn bake_mvar_partial(mvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Opt
 /// trimmed IVS. GPOS Anchor variations + future GDEF-resident
 /// VariationIndex consumers (mark / cursive bake) reach the trimmed
 /// regions through the same offset.
-#[allow(dead_code)] // wired in by the partial-instancing integration commit
 fn bake_gdef_ivs_partial(gdef_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Option<Vec<u8>> {
-    if gdef_bytes.len() < 18 {
-        return None;
-    }
-    let major = u16::from_be_bytes([gdef_bytes[0], gdef_bytes[1]]);
-    let minor = u16::from_be_bytes([gdef_bytes[2], gdef_bytes[3]]);
+    // The GDEF v1.3 header is 18 bytes. itemVarStoreOffset sits at 14.
+    const HEADER_LEN: usize = 18;
+    let major = read_u16_at(gdef_bytes, 0)?;
+    let minor = read_u16_at(gdef_bytes, 2)?;
     if major != 1 || minor < 3 {
         return None;
     }
-    let ivs_off = u32::from_be_bytes([
-        gdef_bytes[14],
-        gdef_bytes[15],
-        gdef_bytes[16],
-        gdef_bytes[17],
-    ]) as usize;
-    if ivs_off == 0 {
+    let ivs_off = read_u32_at(gdef_bytes, 14)? as usize;
+    // Zero means "no IVS". An offset inside the header overlaps the
+    // offset slot this rewrite patches, so it is treated as malformed.
+    if ivs_off < HEADER_LEN {
         return None;
     }
-    if gdef_bytes.len() < ivs_off {
-        return None;
-    }
-    let (new_ivs, _remap) = bake_ivs_partial(&gdef_bytes[ivs_off..], coords, pins)?;
+    let (body, ivs) = gdef_bytes.split_at_checked(ivs_off)?;
+    let (new_ivs, _remap) = bake_ivs_partial(ivs, coords, pins)?;
 
     // The non-IVS GDEF body (everything before ivs_off) rides through
     // verbatim. Patch the IVS offset to the truncated body's tail and
     // append the new IVS.
     let mut out = Vec::with_capacity(ivs_off + new_ivs.len());
-    out.extend_from_slice(&gdef_bytes[..ivs_off]);
+    out.extend_from_slice(body);
     let new_ivs_off: u32 = ivs_off as u32;
-    out[14..18].copy_from_slice(&new_ivs_off.to_be_bytes());
+    if let Some(slot) = out.get_mut(14..).and_then(<[u8]>::first_chunk_mut::<4>) {
+        *slot = new_ivs_off.to_be_bytes();
+    }
     out.extend_from_slice(&new_ivs);
     Some(out)
 }
@@ -2666,12 +2638,6 @@ fn prune_gdef_ivs(face: &Face<'_>) -> Result<Option<Vec<u8>>, SubsetError> {
     }
     Ok(Some(out))
 }
-
-// silence clippy warning about unused GlyphId import from lib (kept for
-// public surface symmetry with the rest of the crate).
-const _: () = {
-    let _: Option<GlyphId> = None;
-};
 
 #[cfg(test)]
 mod tests {
@@ -3688,11 +3654,10 @@ mod partial_instancing_tests {
     //! Unit tests for the partial-instancing public API + tuple
     //! projection math primitives. The variation-table emitters
     //! (HVAR / VVAR / MVAR / gvar / GDEF.IVS) all flow through these
-    //! primitives. The gvar tuple-projection follow-up wired the
-    //! `axis_support_scalar` + `project_region_onto_kept_axes` pair
-    //! into [`crate::gvar_partial::bake_gvar_partial`] so the
-    //! reduced-axis VF's gvar surface stays consistent with the
-    //! reduced-axis IVS surfaces.
+    //! primitives. [`crate::gvar_partial::bake_gvar_partial`] uses the
+    //! same `axis_support_scalar` + `project_region_onto_kept_axes`
+    //! pair, so the reduced-axis VF's gvar surface stays consistent
+    //! with the reduced-axis IVS surfaces.
     //!
     //! fontTools-equivalent of
     //! `varLib.instancer.instantiateVariableFont(axisLimits=...)`.
@@ -4060,13 +4025,11 @@ mod partial_instancing_tests {
     // --------------------------------------------------------------
 
     fn write_f16dot16(out: &mut Vec<u8>, v: f32) {
-        #[allow(clippy::cast_possible_truncation)]
         let raw = (v * 65536.0).round() as i32;
         out.extend_from_slice(&raw.to_be_bytes());
     }
 
     fn write_f2dot14(out: &mut Vec<u8>, v: f32) {
-        #[allow(clippy::cast_possible_truncation)]
         let raw = (v * 16384.0).round() as i16;
         out.extend_from_slice(&raw.to_be_bytes());
     }
@@ -4762,5 +4725,157 @@ mod partial_instancing_tests {
         let a = instance(&face, &empty).expect("empty");
         let b = instance(&face, &pinned).expect("Pin");
         assert_eq!(a.bytes, b.bytes, "Pin must equal empty axis_pins");
+    }
+}
+
+#[cfg(test)]
+mod robustness_tests {
+    //! Hostile-input regressions for the instancing helpers.
+
+    use super::*;
+
+    /// Serializes a 1-axis IVS with one region peaking at +1 and one
+    /// subtable of `rows`, each row one delta. `long` selects i32 rows.
+    fn one_region_ivs(subtable_count: u16, rows: &[i32], long: bool) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // format
+        let region_list_off = 8 + 4 * u32::from(subtable_count);
+        out.extend_from_slice(&region_list_off.to_be_bytes());
+        out.extend_from_slice(&subtable_count.to_be_bytes());
+        // Every subtable offset points at the same subtable.
+        let subtable_off = region_list_off + 4 + 6;
+        for _ in 0..subtable_count {
+            out.extend_from_slice(&subtable_off.to_be_bytes());
+        }
+        out.extend_from_slice(&1u16.to_be_bytes()); // axisCount
+        out.extend_from_slice(&1u16.to_be_bytes()); // regionCount
+        out.extend_from_slice(&0i16.to_be_bytes());
+        out.extend_from_slice(&0x4000i16.to_be_bytes());
+        out.extend_from_slice(&0x4000i16.to_be_bytes());
+        out.extend_from_slice(&(rows.len() as u16).to_be_bytes()); // itemCount
+        let word_delta_count: u16 = if long { 0x8001 } else { 0 };
+        out.extend_from_slice(&word_delta_count.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes()); // regionIndexCount
+        out.extend_from_slice(&0u16.to_be_bytes()); // regionIndexes[0]
+        for &row in rows {
+            if long {
+                out.extend_from_slice(&row.to_be_bytes());
+            } else {
+                out.push(row as i8 as u8);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn gdef_ivs_offset_inside_header_is_rejected() {
+        // GDEF 1.3 whose itemVarStoreOffset (4) points into its own
+        // header. The bytes from offset 4 still form a valid IVS
+        // (format 1, region list at +18, no subtables). Rewriting it
+        // used to patch bytes 14..18 of a 4-byte buffer.
+        let mut gdef: Vec<u8> = Vec::new();
+        gdef.extend_from_slice(&1u16.to_be_bytes()); // major
+        gdef.extend_from_slice(&3u16.to_be_bytes()); // minor
+        gdef.extend_from_slice(&1u16.to_be_bytes()); // glyphClassDef, read as IVS format
+        gdef.extend_from_slice(&18u32.to_be_bytes()); // attach + ligCaret, read as region list offset
+        gdef.extend_from_slice(&0u16.to_be_bytes()); // markAttach, read as subtable count
+        gdef.extend_from_slice(&0u16.to_be_bytes()); // markGlyphSets
+        gdef.extend_from_slice(&4u32.to_be_bytes()); // itemVarStoreOffset
+        gdef.extend_from_slice(&[0, 0, 0, 0]); // padding up to the region list
+        gdef.extend_from_slice(&1u16.to_be_bytes()); // axisCount
+        gdef.extend_from_slice(&0u16.to_be_bytes()); // regionCount
+        assert!(bake_ivs_partial(&gdef[4..], &[0.0], &[AxisPin::Keep]).is_some());
+        assert!(bake_gdef_ivs_partial(&gdef, &[0.0], &[AxisPin::Keep]).is_none());
+    }
+
+    #[test]
+    fn mvar_long_word_delta_saturates_the_patched_field() {
+        // One `hasc` record whose long-word delta is i32::MAX. Adding it
+        // to sTypoAscender used to overflow i32 before the clamp.
+        let ivs = one_region_ivs(1, &[i32::MAX], true);
+        let mut mvar: Vec<u8> = Vec::new();
+        mvar.extend_from_slice(&1u16.to_be_bytes()); // major
+        mvar.extend_from_slice(&0u16.to_be_bytes()); // minor
+        mvar.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        mvar.extend_from_slice(&8u16.to_be_bytes()); // valueRecordSize
+        mvar.extend_from_slice(&1u16.to_be_bytes()); // valueRecordCount
+        mvar.extend_from_slice(&20u16.to_be_bytes()); // itemVariationStoreOffset
+        mvar.extend_from_slice(b"hasc");
+        mvar.extend_from_slice(&0u16.to_be_bytes()); // outer
+        mvar.extend_from_slice(&0u16.to_be_bytes()); // inner
+        mvar.extend_from_slice(&ivs);
+        let mvar = sigilbuzz::tables::Mvar::parse(&mvar).expect("MVAR");
+        let mut os2 = alloc::vec![0u8; 96];
+        os2[68..70].copy_from_slice(&800i16.to_be_bytes());
+        let baked = apply_mvar_records(&mvar, &[1.0], Some(os2), None, None, None).unwrap();
+        let out = baked.os2.unwrap();
+        assert_eq!(i16::from_be_bytes([out[68], out[69]]), i16::MAX);
+    }
+
+    #[test]
+    fn mvar_with_many_records_is_walked_in_linear_time() {
+        // 65535 distinct unrecognized tags and no variation store. A
+        // per-record scan of every earlier record is quadratic.
+        let count: u16 = u16::MAX;
+        let mut mvar: Vec<u8> = Vec::new();
+        mvar.extend_from_slice(&1u16.to_be_bytes()); // major
+        mvar.extend_from_slice(&0u16.to_be_bytes()); // minor
+        mvar.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        mvar.extend_from_slice(&8u16.to_be_bytes()); // valueRecordSize
+        mvar.extend_from_slice(&count.to_be_bytes());
+        mvar.extend_from_slice(&0u16.to_be_bytes()); // no store
+        for i in 0..count {
+            let [hi, lo] = i.to_be_bytes();
+            mvar.extend_from_slice(&[b'z', b'z', hi, lo, 0, 0, 0, 0]);
+        }
+        let mvar = sigilbuzz::tables::Mvar::parse(&mvar).expect("MVAR");
+        let os2 = alloc::vec![0u8; 96];
+        let baked = apply_mvar_records(&mvar, &[1.0], Some(os2.clone()), None, None, None).unwrap();
+        assert_eq!(baked.os2, Some(os2));
+    }
+
+    #[test]
+    fn simple_glyph_with_many_points_bakes_in_linear_time() {
+        // One contour of 65535 points, every flag repeated, every
+        // coordinate "same as previous", and one delta per point. A
+        // per-point scan of the delta list is quadratic.
+        let last_point: u16 = u16::MAX - 1;
+        let total = usize::from(last_point) + 1;
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(&1i16.to_be_bytes()); // numberOfContours
+        body.extend_from_slice(&[0; 8]); // bbox
+        body.extend_from_slice(&last_point.to_be_bytes());
+        body.extend_from_slice(&0u16.to_be_bytes()); // instructionLength
+        let flag = FLAG_ON_CURVE | FLAG_X_SAME_OR_POS | FLAG_Y_SAME_OR_POS;
+        let mut remaining = total;
+        while remaining > 0 {
+            let run = remaining.min(256);
+            body.push(flag | FLAG_REPEAT);
+            body.push((run - 1) as u8);
+            remaining -= run;
+        }
+        let deltas: Vec<sigilbuzz::tables::PointDelta> = (0..=last_point)
+            .map(|point| sigilbuzz::tables::PointDelta {
+                point,
+                dx: 1.0,
+                dy: 0.0,
+            })
+            .collect();
+        let baked = bake_simple_glyph(&body, &deltas).expect("bake");
+        // Every point moved by +1 on x: the new bbox is (1, 0, 1, 0).
+        assert_eq!(&baked[2..10], &[0, 1, 0, 0, 0, 1, 0, 0]);
+    }
+
+    #[test]
+    fn ivs_with_aliased_subtables_is_rejected() {
+        // 2000 subtable offsets that all point at one subtable of 30000
+        // rows. Rewriting each offset separately used to emit 2000
+        // copies of the subtable.
+        let rows: Vec<i32> = (0..30_000).map(|i| i % 100).collect();
+        let ivs = one_region_ivs(2000, &rows, false);
+        assert!(bake_ivs_partial(&ivs, &[1.0], &[AxisPin::Keep]).is_none());
+        // A single reference to the same subtable still rewrites.
+        let single = one_region_ivs(1, &rows, false);
+        assert!(bake_ivs_partial(&single, &[1.0], &[AxisPin::Keep]).is_some());
     }
 }

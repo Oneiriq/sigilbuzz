@@ -1,26 +1,3 @@
-// CFF parsing is a dense index-driven walk of the spec; pedantic
-// range-loop / elidable-lifetime / bool-to-int lints fire on every
-// op and obscure the table layout, so they're relaxed at file scope.
-#![allow(
-    clippy::bool_to_int_with_if,
-    clippy::elidable_lifetime_names,
-    clippy::map_unwrap_or,
-    clippy::manual_div_ceil,
-    clippy::needless_range_loop,
-    clippy::too_many_lines,
-    clippy::struct_excessive_bools,
-    clippy::trivially_copy_pass_by_ref,
-    clippy::similar_names,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_truncation,
-    clippy::unnecessary_wraps,
-    clippy::collapsible_if,
-    clippy::collapsible_match,
-    clippy::let_unit_value,
-    clippy::unit_arg,
-    clippy::needless_bool
-)]
-
 //! `CFF `: Compact Font Format, version 1.
 //!
 //! Adobe's Type 2 charstring container, wrapped in a CFF header and a
@@ -48,7 +25,7 @@ use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
 use crate::tables::outline::OutlineSink;
-use crate::tables::parse::Reader;
+use crate::tables::parse::{abs_f32, Reader};
 
 /// Subroutine recursion cap. CFF spec says 10 per Type 2.
 const MAX_SUBR_DEPTH: u8 = 10;
@@ -58,6 +35,13 @@ const CFF1_STACK_LIMIT: usize = 48;
 
 /// Operand-stack cap for CFF2 charstrings. CFF2 spec §3.1 ceiling.
 const CFF2_STACK_LIMIT: usize = 513;
+
+/// Cap on the operands and operators one glyph may execute, counted
+/// across every subroutine call. The depth cap alone does not bound
+/// the work: a subroutine that calls the next one many times, ten
+/// levels deep, runs for an exponential number of steps. Real glyphs
+/// stay far below this limit.
+const MAX_CHARSTRING_OPS: u32 = 100_000;
 
 /// A parsed `CFF ` table view.
 #[derive(Debug, Clone)]
@@ -233,41 +217,57 @@ fn read_index_body<'a>(r: &mut Reader<'a>, count: u32) -> Result<Vec<&'a [u8]>> 
             context: "CFF INDEX offSize out of range",
         });
     }
-    let mut offsets = Vec::with_capacity(count as usize + 1);
-    for _ in 0..=count {
+    // The offset array alone takes (count + 1) * offSize bytes. Check
+    // that before allocating, so a huge count in a short table cannot
+    // request gigabytes of memory.
+    let n_offsets = (count as usize).saturating_add(1);
+    if n_offsets.saturating_mul(off_size) > r.remaining() {
+        return Err(Error::Truncated {
+            offset: r.position(),
+            context: "CFF INDEX offset array",
+        });
+    }
+    let mut offsets = Vec::with_capacity(n_offsets);
+    for _ in 0..n_offsets {
         offsets.push(read_offset(r, off_size)?);
     }
-    // Data region begins after the final offset field.
+    // Data region begins after the final offset field. CFF offsets
+    // are 1-based, so the last offset minus one is the data length.
     let data_start = r.position();
+    let data_len = offsets
+        .last()
+        .and_then(|&last| (last as usize).checked_sub(1))
+        .ok_or(Error::Malformed {
+            offset: data_start,
+            context: "CFF INDEX offsets non-monotone",
+        })?;
+    let rest = r.peek_bytes(r.remaining())?;
     let mut out = Vec::with_capacity(count as usize);
     for w in offsets.windows(2) {
         let a = w[0] as usize;
         let b = w[1] as usize;
         if a == 0 || b < a {
             return Err(Error::Malformed {
-                offset: r.position(),
+                offset: data_start,
                 context: "CFF INDEX offsets non-monotone",
             });
         }
-        // CFF offsets are 1-based.
-        let start = data_start + a - 1;
-        let end = data_start + b - 1;
-        if end > data_start + offsets[offsets.len() - 1] as usize - 1 + 1 {
-            // soft sanity check; the strict bound is data length.
-        }
-        if end > data_start + (*offsets.last().unwrap() as usize - 1) {
+        let start = a - 1;
+        let end = b - 1;
+        if end > data_len {
             return Err(Error::Malformed {
-                offset: end,
+                offset: data_start.saturating_add(end),
                 context: "CFF INDEX entry past end",
             });
         }
-        // Build slice manually via reader's underlying data.
-        let slice = reader_slice(r, start, end)?;
-        out.push(slice);
+        let entry = rest.get(start..end).ok_or(Error::Truncated {
+            offset: data_start.saturating_add(start),
+            context: "CFF INDEX entry past end of data",
+        })?;
+        out.push(entry);
     }
     // Advance the reader past the last entry.
-    let total = *offsets.last().unwrap_or(&1) as usize - 1;
-    r.seek(data_start + total)?;
+    r.skip(data_len)?;
     Ok(out)
 }
 
@@ -278,16 +278,6 @@ fn read_offset(r: &mut Reader<'_>, off_size: usize) -> Result<u32> {
         v = (v << 8) | u32::from(byte);
     }
     Ok(v)
-}
-
-/// Hack helper: slices out of the Reader's underlying buffer by
-/// absolute offsets. Exposed via `Reader::peek_bytes` after a `seek`
-/// round-trip. Used only during INDEX parsing above.
-fn reader_slice<'a>(r: &Reader<'a>, start: usize, end: usize) -> Result<&'a [u8]> {
-    let mut tmp = *r;
-    tmp.seek(start)?;
-    let n = end - start;
-    tmp.peek_bytes(n)
 }
 
 fn slice_at(data: &[u8], off: usize, len: usize) -> Result<&[u8]> {
@@ -325,6 +315,9 @@ pub(crate) struct TopDict {
 }
 
 impl TopDict {
+    // Each operator keeps one arm with its operand-count check inside,
+    // so the dispatch reads like the spec's operator table.
+    #[allow(clippy::collapsible_match)]
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
         let mut out = Self {
             charstring_type: 2,
@@ -384,7 +377,6 @@ impl DictOperand {
     fn as_u32(&self) -> Option<u32> {
         match *self {
             Self::Integer(i) if i >= 0 => Some(i as u32),
-            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
             Self::Real(f) if f >= 0.0 => Some(f as u32),
             _ => None,
         }
@@ -396,7 +388,6 @@ fn read_dict_operand(r: &mut Reader<'_>) -> Result<DictOperand> {
     if b0 == 28 {
         let hi = r.read_u8()?;
         let lo = r.read_u8()?;
-        #[allow(clippy::cast_possible_wrap)]
         let v = i16::from_be_bytes([hi, lo]) as i32;
         Ok(DictOperand::Integer(v))
     } else if b0 == 29 {
@@ -448,7 +439,10 @@ fn read_local_subrs<'a>(
     let Some(off) = priv_dict.local_subrs_off else {
         return Ok(Vec::new());
     };
-    let subr_off = priv_off + off as usize;
+    let subr_off = priv_off.checked_add(off as usize).ok_or(Error::Malformed {
+        offset: priv_off,
+        context: "CFF Local Subrs offset overflow",
+    })?;
     let mut r = Reader::at(data, subr_off)?;
     read_index(&mut r)
 }
@@ -470,32 +464,40 @@ fn parse_fd_select(data: &[u8], off: usize, n_glyphs: usize) -> Result<Vec<u8>> 
         }
         3 => {
             let n_ranges = r.read_u16()? as usize;
-            let mut out = alloc::vec![0u8; n_glyphs];
             let mut ranges = Vec::with_capacity(n_ranges);
             for _ in 0..n_ranges {
-                let first = r.read_u16()?;
+                let first = r.read_u16()? as usize;
                 let fd = r.read_u8()?;
                 ranges.push((first, fd));
             }
-            let sentinel = r.read_u16()?;
-            for i in 0..n_ranges {
-                let start = ranges[i].0 as usize;
-                let end = if i + 1 < n_ranges {
-                    ranges[i + 1].0 as usize
-                } else {
-                    sentinel as usize
-                };
-                let fd = ranges[i].1;
-                for g in start..end.min(n_glyphs) {
-                    out[g] = fd;
-                }
-            }
-            Ok(out)
+            let sentinel = r.read_u16()? as usize;
+            Ok(fill_fd_ranges(&ranges, sentinel, n_glyphs))
         }
         _ => Err(Error::Unsupported {
             context: "CFF FDSelect format != 0/3",
         }),
     }
+}
+
+/// Expands FDSelect `(first_glyph, fd)` ranges into one entry per
+/// glyph. Range `i` covers glyphs up to the next range's first glyph,
+/// and the last range ends at `sentinel`. Shared with CFF2.
+///
+/// Ranges must ascend. `filled` skips glyphs an earlier range already
+/// wrote, so unsorted ranges cannot make the fill quadratic. For
+/// sorted ranges it changes nothing.
+pub(crate) fn fill_fd_ranges(ranges: &[(usize, u8)], sentinel: usize, n_glyphs: usize) -> Vec<u8> {
+    let mut out = alloc::vec![0u8; n_glyphs];
+    let mut filled = 0usize;
+    for (i, &(first, fd)) in ranges.iter().enumerate() {
+        let end = ranges.get(i + 1).map_or(sentinel, |next| next.0);
+        let end = end.min(n_glyphs);
+        for slot in out.get_mut(first.max(filled)..end).into_iter().flatten() {
+            *slot = fd;
+        }
+        filled = filled.max(end);
+    }
+    out
 }
 
 // ----------------------------------------------------------------------------
@@ -563,6 +565,9 @@ pub(crate) struct Interp<'a, 'b, S: OutlineSink> {
     /// True after the first move operator. Needed to close open
     /// contours at endchar.
     in_contour: bool,
+    /// Operands and operators executed so far, checked against
+    /// [`MAX_CHARSTRING_OPS`].
+    ops: u32,
     /// CFF2 blend support.
     pub(crate) blend: Option<BlendContext<'b>>,
 }
@@ -595,6 +600,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             is_cff2,
             done: false,
             in_contour: false,
+            ops: 0,
             blend: None,
         }
     }
@@ -611,24 +617,27 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             if self.done {
                 return Ok(());
             }
+            self.ops += 1;
+            if self.ops > MAX_CHARSTRING_OPS {
+                return Err(Error::Malformed {
+                    offset: r.position(),
+                    context: "CFF charstring exceeds operation limit",
+                });
+            }
             let b0 = r.read_u8()?;
             if (32..=246).contains(&b0) {
-                #[allow(clippy::cast_precision_loss)]
                 self.push((i32::from(b0) - 139) as f32)?;
             } else if (247..=250).contains(&b0) {
                 let b1 = r.read_u8()?;
-                #[allow(clippy::cast_precision_loss)]
                 let v = ((i32::from(b0) - 247) * 256 + i32::from(b1) + 108) as f32;
                 self.push(v)?;
             } else if (251..=254).contains(&b0) {
                 let b1 = r.read_u8()?;
-                #[allow(clippy::cast_precision_loss)]
                 let v = (-(i32::from(b0) - 251) * 256 - i32::from(b1) - 108) as f32;
                 self.push(v)?;
             } else if b0 == 255 {
                 // 16.16 fixed.
                 let raw = r.read_i32()?;
-                #[allow(clippy::cast_precision_loss)]
                 self.push(raw as f32 / 65536.0)?;
             } else if b0 == op_code::SHORTINT {
                 let v = r.read_i16()?;
@@ -657,7 +666,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                 let extra = (self.stack.len() as u32) / 2;
                 self.stem_count += extra;
                 self.stack.clear();
-                let n_bytes = (self.stem_count as usize + 7) / 8;
+                let n_bytes = (self.stem_count as usize).div_ceil(8);
                 r.skip(n_bytes)?;
             }
             op_code::RMOVETO => {
@@ -843,9 +852,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             }
             op_code::CALLSUBR => {
                 let idx = self.pop()?;
-                let bias = subr_bias(self.local.len());
-                let i = (idx as i32 + bias) as usize;
-                let subr = self.local.get(i).copied().ok_or(Error::Malformed {
+                let subr = biased_subr(self.local, idx).ok_or(Error::Malformed {
                     offset: 0,
                     context: "CFF callsubr out of range",
                 })?;
@@ -853,9 +860,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             }
             op_code::CALLGSUBR => {
                 let idx = self.pop()?;
-                let bias = subr_bias(self.global.len());
-                let i = (idx as i32 + bias) as usize;
-                let subr = self.global.get(i).copied().ok_or(Error::Malformed {
+                let subr = biased_subr(self.global, idx).ok_or(Error::Malformed {
                     offset: 0,
                     context: "CFF callgsubr out of range",
                 })?;
@@ -963,6 +968,9 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
         Ok(())
     }
 
+    // Each flex variant keeps one arm with its arity check inside,
+    // so the four variants stay parallel.
+    #[allow(clippy::collapsible_match)]
     fn flex(&mut self, esc: u8) -> Result<()> {
         // Flex expands to two rrcurvetos. For outline extraction we
         // emit the two cubics directly; flex-specific depth / height
@@ -1008,7 +1016,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     let a = core::mem::take(&mut self.stack);
                     let dx_total = a[0] + a[2] + a[4] + a[6] + a[8];
                     let dy_total = a[1] + a[3] + a[5] + a[7] + a[9];
-                    let (dx_final, dy_final) = if dx_total.abs() > dy_total.abs() {
+                    let (dx_final, dy_final) = if abs_f32(dx_total) > abs_f32(dy_total) {
                         (a[10], -dy_total)
                     } else {
                         (-dx_total, a[10])
@@ -1036,6 +1044,9 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
         self.y = y;
     }
 
+    // The blend loops index the stack, the deltas, and the scalars in
+    // lockstep, which reads more clearly with explicit indices.
+    #[allow(clippy::needless_range_loop)]
     fn apply_blend(&mut self) -> Result<()> {
         // Stack layout: n default values, followed by n*nRegions
         // delta values, followed by the count `n`. `nRegions` is
@@ -1046,10 +1057,19 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
         // keep the interpreter balanced so parsing continues past
         // BLEND.
         let n_raw = self.pop()?;
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let n = n_raw as usize;
         if n == 0 {
             return Ok(());
+        }
+        let underflow = Error::Malformed {
+            offset: 0,
+            context: "CFF2 blend: stack underflow",
+        };
+        // `n` comes from a float operand and can be huge. The stack
+        // must hold at least `n` values, which keeps the products
+        // below from overflowing.
+        if n > self.stack.len() {
+            return Err(underflow);
         }
         let n_regions = self
             .blend
@@ -1064,10 +1084,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             );
         let total_deltas = n * n_regions;
         if self.stack.len() < n + total_deltas {
-            return Err(Error::Malformed {
-                offset: 0,
-                context: "CFF2 blend: stack underflow",
-            });
+            return Err(underflow);
         }
         let start = self.stack.len() - n - total_deltas;
         let mut deltas = alloc::vec![0.0_f32; n];
@@ -1177,12 +1194,16 @@ fn subr_bias(count: usize) -> i32 {
     }
 }
 
+/// Resolves a biased subroutine number popped off the operand stack.
+/// Blended CFF2 operands can hold any float, so the sum is checked
+/// and negative or huge indices resolve to `None`.
+fn biased_subr<'a>(subrs: &[&'a [u8]], idx: f32) -> Option<&'a [u8]> {
+    let i = (idx as i32).checked_add(subr_bias(subrs.len()))?;
+    subrs.get(usize::try_from(i).ok()?).copied()
+}
+
 #[cfg(test)]
-#[allow(
-    clippy::vec_init_then_push,
-    clippy::cast_possible_wrap,
-    clippy::same_item_push
-)]
+#[allow(clippy::vec_init_then_push, clippy::same_item_push)]
 mod tests {
     use super::*;
     use crate::tables::outline::{Outline, PathOp};
@@ -1484,5 +1505,33 @@ mod tests {
         let parsed = Cff::parse(&cff).unwrap();
         let mut o = Outline::new();
         assert!(parsed.outline(0, &mut o).is_err());
+    }
+
+    #[test]
+    fn charstring_exponential_subr_calls_hit_op_limit() {
+        // Ten global subrs. Subr k calls subr k + 1 twenty times and
+        // subr 9 only returns. The depth stays within the cap of 10,
+        // but the call tree has 20^9 leaves, so without an operation
+        // limit the walk never finishes. With ten subrs the bias is
+        // 107, so subr k is pushed as the single byte
+        // k - 107 + 139 = k + 32.
+        let mut subrs: Vec<Vec<u8>> = Vec::new();
+        for k in 0..9u8 {
+            let mut s = Vec::new();
+            for _ in 0..20 {
+                s.push(k + 1 + 32);
+                s.push(op_code::CALLGSUBR);
+            }
+            s.push(op_code::RETURN);
+            subrs.push(s);
+        }
+        subrs.push(alloc::vec![op_code::RETURN]);
+        let globals: Vec<&[u8]> = subrs.iter().map(Vec::as_slice).collect();
+        let locals: Vec<&[u8]> = Vec::new();
+        let cs = [32, op_code::CALLGSUBR, op_code::ENDCHAR];
+        let mut out = Outline::new();
+        let mut interp = Interp::new(&globals, &locals, &mut out, false);
+        let err = interp.run(&cs, 0).unwrap_err();
+        assert!(matches!(err, Error::Malformed { .. }));
     }
 }

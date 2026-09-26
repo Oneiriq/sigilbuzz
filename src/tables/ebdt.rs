@@ -129,9 +129,7 @@ impl<'a> EbdtBitmap<'a> {
         // 4 bytes per record. The byte slice was sized to a multiple
         // of 4 by the parser, and `num_components` is u16, so the
         // count fits.
-        #[allow(clippy::cast_possible_truncation)]
-        let n = (self.components_raw.len() / 4) as u16;
-        n
+        (self.components_raw.len() / 4) as u16
     }
 
     /// Iterates parsed [`EbdtComponent`] records for composite formats
@@ -139,9 +137,7 @@ impl<'a> EbdtBitmap<'a> {
     pub fn components(&self) -> impl Iterator<Item = EbdtComponent> + 'a {
         self.components_raw.chunks_exact(4).map(|c| EbdtComponent {
             glyph_id: u16::from_be_bytes([c[0], c[1]]),
-            #[allow(clippy::cast_possible_wrap)]
             x_offset: c[2] as i8,
-            #[allow(clippy::cast_possible_wrap)]
             y_offset: c[3] as i8,
         })
     }
@@ -248,7 +244,7 @@ impl<'a> Ebdt<'a> {
             }
             6 => {
                 // Big metrics + byte-aligned 1bpp.
-                let metrics = parse_big(&mut r)?;
+                let metrics = BigGlyphMetrics::parse(&mut r)?;
                 let data_start = r.position();
                 Ok(EbdtBitmap {
                     image_format: 6,
@@ -260,7 +256,7 @@ impl<'a> Ebdt<'a> {
             }
             7 => {
                 // Big metrics + bit-aligned 1bpp.
-                let metrics = parse_big(&mut r)?;
+                let metrics = BigGlyphMetrics::parse(&mut r)?;
                 let data_start = r.position();
                 Ok(EbdtBitmap {
                     image_format: 7,
@@ -293,7 +289,7 @@ impl<'a> Ebdt<'a> {
             9 => {
                 // Composite, big metrics. No padding between metrics
                 // and num_components.
-                let metrics = parse_big(&mut r)?;
+                let metrics = BigGlyphMetrics::parse(&mut r)?;
                 let components_raw = read_components(&mut r, slice)?;
                 Ok(EbdtBitmap {
                     image_format: 9,
@@ -333,19 +329,6 @@ fn read_components<'a>(r: &mut Reader<'a>, slice: &'a [u8]) -> Result<&'a [u8]> 
         });
     }
     Ok(&slice[start..end])
-}
-
-fn parse_big(r: &mut Reader<'_>) -> Result<BigGlyphMetrics> {
-    Ok(BigGlyphMetrics {
-        height: r.read_u8()?,
-        width: r.read_u8()?,
-        hori_bearing_x: r.read_i8()?,
-        hori_bearing_y: r.read_i8()?,
-        hori_advance: r.read_u8()?,
-        vert_bearing_x: r.read_i8()?,
-        vert_bearing_y: r.read_i8()?,
-        vert_advance: r.read_u8()?,
-    })
 }
 
 #[cfg(test)]
@@ -511,9 +494,7 @@ mod tests {
         data.push(0);
         // Component 2: glyph_id=3, x_offset=8, y_offset=-2
         data.extend_from_slice(&3u16.to_be_bytes());
-        #[allow(clippy::cast_sign_loss)]
         data.push(8i8 as u8);
-        #[allow(clippy::cast_sign_loss)]
         data.push(-2i8 as u8);
         let payload_len = data.len() as u32 - payload_off;
 
@@ -556,7 +537,6 @@ mod tests {
         data.extend_from_slice(&1u16.to_be_bytes());
         // Component: glyph_id=42, x_offset=-1, y_offset=3
         data.extend_from_slice(&42u16.to_be_bytes());
-        #[allow(clippy::cast_sign_loss)]
         data.push(-1i8 as u8);
         data.push(3);
         let payload_len = data.len() as u32 - payload_off;

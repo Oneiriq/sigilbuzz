@@ -10,7 +10,7 @@ use clap::Args as ClapArgs;
 
 use sigilbuzz::{Blob, Face};
 
-use super::util::{read_font, CliResult};
+use super::util::{read_font, status, CliResult};
 
 /// Arguments for `sigilbuzz svg`.
 #[derive(Debug, ClapArgs)]
@@ -47,6 +47,10 @@ pub fn run(args: Args) -> CliResult {
     })?;
     std::fs::write(&args.output, &svg)
         .map_err(|e| format!("write {}: {e}", args.output.display()))?;
-    eprintln!("wrote {} bytes to {}", svg.len(), args.output.display());
+    status(format_args!(
+        "wrote {} bytes to {}",
+        svg.len(),
+        args.output.display()
+    ));
     Ok(())
 }

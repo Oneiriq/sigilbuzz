@@ -14,8 +14,7 @@
 //! either fully NFD (no precomposed forms) or fully NFC
 //! (precomposed up front) round-trip correctly; pathological
 //! inputs (precomposed glyph followed by yet another mark in the
-//! wrong order) fall through unchanged. A full NFC pass lands
-//! when the shaper's needs demand it.
+//! wrong order) fall through unchanged.
 //!
 //! # Coverage
 //!
@@ -67,9 +66,9 @@ pub fn compose_pair(a: char, b: char) -> Option<char> {
 pub fn compose_str(input: &str) -> String {
     let mut out: Vec<char> = Vec::with_capacity(input.len());
     for ch in input.chars() {
-        if let Some(last) = out.last().copied() {
-            if let Some(composed) = compose_pair(last, ch) {
-                *out.last_mut().unwrap() = composed;
+        if let Some(last) = out.last_mut() {
+            if let Some(composed) = compose_pair(*last, ch) {
+                *last = composed;
                 continue;
             }
         }

@@ -2,18 +2,15 @@
 //!
 //! This module owns the VARC subset path: closure expansion (walking
 //! every kept VARC-covered gid for its referenced component gids) and
-//! the eventual table re-emit (Coverage / VarCompositeGlyph rewrite +
-//! MultiVarStore pass-through). The first commit only ships the
-//! closure walker; the table-rewrite emit lands alongside the driver
-//! wire-up in a follow-up commit.
+//! the table re-emit (Coverage / VarCompositeGlyph rewrite plus a
+//! pruned MultiVarStore).
 //!
-//! # Closure phase
+//! # Closure walk
 //!
 //! For every VARC-covered gid in the kept set, walk the component
-//! records and pull each referenced gid into the kept set. Iterate to
-//! a fixed point: pulled-in gids may themselves be VARC-covered, and
-//! so on. The walk caps recursion at 64 levels (the same hard cap the
-//! parser uses against malicious cycles).
+//! records and pull each referenced gid into the kept set. A worklist
+//! visits each newly kept gid once, so pulled-in gids that are
+//! themselves VARC-covered cascade, and component cycles terminate.
 //!
 //! # Component record layout (recap)
 //!
@@ -37,6 +34,7 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::tables::Varc;
 use sigilbuzz::Face;
 
+use crate::util::{WorkBudget, WORK_LIMIT};
 use crate::{GlyphId, SubsetError};
 
 // Variable-component flag bits (mirrors the parser's set, kept private
@@ -59,22 +57,18 @@ const VC_GID_IS_24BIT: u32 = 1 << 12;
 const VC_HAVE_SKEW_X: u32 = 1 << 13;
 const VC_HAVE_SKEW_Y: u32 = 1 << 14;
 
-/// Maximum nesting depth for the closure walk. Matches the parser's
-/// `MAX_VARC_DEPTH` cap on `Face::glyph_outline_at_coords`.
-const MAX_VARC_DEPTH: usize = 64;
+/// A valid Coverage lists each glyph at most once, so it never has more
+/// than this many entries. [`CoverageIter`] stops there.
+const MAX_COVERAGE_ENTRIES: usize = 1 << 16;
 
-/// Expand `kept` to include every gid referenced (transitively) by a
-/// VARC-covered gid already in the set. Iterates to a fixed point so
-/// references to other VARC-covered gids cascade.
+/// Expand `keep` to include every gid referenced (transitively) by a
+/// VARC-covered gid already in the set. References to other
+/// VARC-covered gids cascade.
 ///
 /// Tolerates malformed records silently. A single bad component record
-/// should not stop the closure walk.
-///
-/// `BTreeSet` flavor: used by callers that already model the kept set
-/// as a sorted set; the closure driver uses [`varc_closure_bitset`] for
-/// the existing `Vec<bool>` representation.
-#[allow(dead_code)] // public API surface. The in-tree driver uses the bitset variant
-pub(crate) fn varc_closure(face: &Face<'_>, kept: &mut BTreeSet<GlyphId>) {
+/// should not stop the closure walk. Stops early once `budget` is
+/// spent.
+pub(crate) fn varc_closure_bitset(face: &Face<'_>, keep: &mut [bool], budget: &WorkBudget) {
     let Ok(Some(varc)) = face.varc() else {
         return;
     };
@@ -85,68 +79,44 @@ pub(crate) fn varc_closure(face: &Face<'_>, kept: &mut BTreeSet<GlyphId>) {
         return;
     };
 
-    for _ in 0..MAX_VARC_DEPTH {
-        let before = kept.len();
-        let snapshot: Vec<GlyphId> = kept.iter().copied().collect();
-        for g in snapshot {
-            if !varc.covers(g) {
-                continue;
-            }
-            let Some(idx) = parsed.coverage_index_of(g) else {
-                continue;
-            };
-            let Some(record) = parsed.glyph_record(idx) else {
-                continue;
-            };
-            for child in walk_component_gids(record) {
-                kept.insert(child);
-            }
-        }
-        if kept.len() == before {
-            break;
+    // Coverage index for every gid in the font, first match wins like a
+    // linear scan of the table. Built once so each lookup is O(1).
+    let mut index_of: Vec<Option<usize>> = alloc::vec![None; keep.len()];
+    let mut entries = 0usize;
+    for (gid, idx) in parsed.coverage_iter() {
+        entries += 1;
+        if let Some(slot @ None) = index_of.get_mut(gid as usize) {
+            *slot = Some(idx);
         }
     }
-}
+    if !budget.spend(entries + keep.len()) {
+        return;
+    }
 
-/// `Vec<bool>` flavor of the closure walk. Wires into the existing
-/// closure driver in [`crate::closure`] which uses a bitset keyed by
-/// gid. Same fixed-point iteration as [`varc_closure`].
-pub(crate) fn varc_closure_bitset(face: &Face<'_>, keep: &mut [bool]) {
-    let Ok(Some(varc)) = face.varc() else {
-        return;
-    };
-    let Ok(varc_bytes) = face.table_bytes(tag::VARC) else {
-        return;
-    };
-    let Ok(parsed) = ParsedVarc::parse(varc_bytes) else {
-        return;
-    };
-
-    for _ in 0..MAX_VARC_DEPTH {
-        let before = keep.iter().filter(|k| **k).count();
-        let snapshot: Vec<GlyphId> = (0..keep.len())
-            .filter(|i| keep[*i])
-            .map(|i| i as GlyphId)
-            .collect();
-        for g in snapshot {
-            if !varc.covers(g) {
-                continue;
-            }
-            let Some(idx) = parsed.coverage_index_of(g) else {
-                continue;
-            };
-            let Some(record) = parsed.glyph_record(idx) else {
-                continue;
-            };
-            for child in walk_component_gids(record) {
-                if (child as usize) < keep.len() {
-                    keep[child as usize] = true;
-                }
-            }
+    let mut stack: Vec<GlyphId> = keep
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &k)| if k { Some(i as GlyphId) } else { None })
+        .collect();
+    while let Some(g) = stack.pop() {
+        if !varc.covers(g) {
+            continue;
         }
-        let after = keep.iter().filter(|k| **k).count();
-        if after == before {
-            break;
+        let Some(idx) = index_of.get(g as usize).copied().flatten() else {
+            continue;
+        };
+        let Some(record) = parsed.glyph_record(idx) else {
+            continue;
+        };
+        let children = walk_component_gids(record);
+        if !budget.spend(1 + children.len()) {
+            return;
+        }
+        for child in children {
+            if let Some(slot @ false) = keep.get_mut(child as usize) {
+                *slot = true;
+                stack.push(child);
+            }
         }
     }
 }
@@ -164,8 +134,11 @@ pub(crate) fn varc_closure_bitset(face: &Face<'_>, keep: &mut [bool]) {
 /// unreferenced delta-set entry (and collapses subtables that become
 /// empty), re-emits the MVS, and rewrites the surviving records'
 /// `MultiVarIdx` slots through the remap. ConditionList and
-/// AxisIndicesList are still preserved verbatim. Pruning those is a
-/// future follow-up.
+/// AxisIndicesList are preserved verbatim.
+///
+/// A malformed coverage can list a glyph twice or send two glyphs to
+/// the same record. Only the first such entry survives, so the output
+/// never holds more records than the source.
 pub(crate) fn subset_varc(
     src_varc: &Varc<'_>,
     src_bytes: &[u8],
@@ -179,9 +152,11 @@ pub(crate) fn subset_varc(
     // Determine which coverage entries survive. Walk in source coverage
     // order so we can pull the right glyph record per entry.
     let kept_set: BTreeSet<GlyphId> = kept_gids.iter().copied().collect();
+    let mut seen_gids: BTreeSet<GlyphId> = BTreeSet::new();
+    let mut seen_records: BTreeSet<usize> = BTreeSet::new();
     let mut surviving: Vec<(GlyphId, usize)> = Vec::new();
     for (gid, idx) in parsed.coverage_iter() {
-        if kept_set.contains(&gid) {
+        if kept_set.contains(&gid) && seen_gids.insert(gid) && seen_records.insert(idx) {
             surviving.push((gid, idx));
         }
     }
@@ -243,7 +218,8 @@ pub(crate) fn subset_varc(
     let new_coverage = build_coverage_format1(renumbered.iter().map(|(g, _)| *g));
 
     // glyphRecords CFF2 INDEX over the rewritten records.
-    let new_glyph_records = build_cff2_index(&new_records);
+    let new_glyph_records = try_build_cff2_index(&new_records)
+        .ok_or(SubsetError::Unsupported("VARC glyph records exceed 4 GiB"))?;
 
     // Pass-throughs (MVS now handled separately by `new_var_store`).
     let condition_list_bytes = parsed.condition_list_bytes();
@@ -267,64 +243,63 @@ pub(crate) fn subset_varc(
     let gr_off_slot = out.len();
     out.extend_from_slice(&0u32.to_be_bytes());
 
-    // coverage
-    let cov_start = out.len() as u32;
-    out[cov_off_slot..cov_off_slot + 4].copy_from_slice(&cov_start.to_be_bytes());
-    out.extend_from_slice(&new_coverage);
-    while out.len() % 4 != 0 {
-        out.push(0);
-    }
-
-    // varStore (rewritten with only the kept entries)
-    if let Some(vs) = &new_var_store {
-        let vs_start = out.len() as u32;
-        out[vs_off_slot..vs_off_slot + 4].copy_from_slice(&vs_start.to_be_bytes());
-        out.extend_from_slice(vs);
-        while out.len() % 4 != 0 {
-            out.push(0);
-        }
-    }
-
-    // conditionList
-    if let Some(cl) = condition_list_bytes {
-        let cl_start = out.len() as u32;
-        out[cl_off_slot..cl_off_slot + 4].copy_from_slice(&cl_start.to_be_bytes());
-        out.extend_from_slice(cl);
-        while out.len() % 4 != 0 {
-            out.push(0);
-        }
-    }
-
-    // axisIndicesList
-    if let Some(ail) = axis_indices_bytes {
-        let ail_start = out.len() as u32;
-        out[ail_off_slot..ail_off_slot + 4].copy_from_slice(&ail_start.to_be_bytes());
-        out.extend_from_slice(ail);
+    // Blocks in source order: coverage, varStore (rewritten with only
+    // the kept entries), conditionList, axisIndicesList. Each one is
+    // followed by 4-byte alignment padding.
+    let blocks = [
+        (cov_off_slot, Some(new_coverage.as_slice())),
+        (vs_off_slot, new_var_store.as_deref()),
+        (cl_off_slot, condition_list_bytes),
+        (ail_off_slot, axis_indices_bytes),
+    ];
+    for (slot, block) in blocks {
+        let Some(block) = block else {
+            continue;
+        };
+        patch_offset32(&mut out, slot)?;
+        out.extend_from_slice(block);
         while out.len() % 4 != 0 {
             out.push(0);
         }
     }
 
     // glyphRecords
-    let gr_start = out.len() as u32;
-    out[gr_off_slot..gr_off_slot + 4].copy_from_slice(&gr_start.to_be_bytes());
+    patch_offset32(&mut out, gr_off_slot)?;
     out.extend_from_slice(&new_glyph_records);
 
     Ok(Some(out))
 }
 
+/// Points the Offset32 at `slot` to the current end of `out`.
+fn patch_offset32(out: &mut [u8], slot: usize) -> Result<(), SubsetError> {
+    let pos = u32::try_from(out.len())
+        .map_err(|_| SubsetError::Unsupported("VARC output exceeds 4 GiB"))?;
+    out.get_mut(slot..slot + 4)
+        .ok_or(SubsetError::Unsupported("VARC offset slot out of range"))?
+        .copy_from_slice(&pos.to_be_bytes());
+    Ok(())
+}
+
 /// Builds a CFF2 INDEX over the given entries, picking the smallest
 /// off_size that fits. Determinism: identical inputs always produce
 /// identical output bytes.
+#[cfg(test)]
 fn build_cff2_index(entries: &[Vec<u8>]) -> Vec<u8> {
-    let count = entries.len() as u32;
+    try_build_cff2_index(entries).unwrap_or_default()
+}
+
+/// Builds a CFF2 INDEX over the given entries, picking the smallest
+/// off_size that fits. Returns `None` when the entries do not fit the
+/// INDEX's 32-bit counts and offsets.
+fn try_build_cff2_index(entries: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let count = u32::try_from(entries.len()).ok()?;
     let mut out = Vec::new();
     out.extend_from_slice(&count.to_be_bytes());
     if entries.is_empty() {
-        return out;
+        return Some(out);
     }
-    let total: u32 = entries.iter().map(|e| e.len() as u32).sum();
-    let max_off = total + 1;
+    let total: usize = entries.iter().map(Vec::len).sum();
+    let max_off = u32::try_from(total).ok()?.checked_add(1)?;
     let off_size: u8 = if max_off <= 0xFF {
         1
     } else if max_off <= 0xFFFF {
@@ -335,32 +310,22 @@ fn build_cff2_index(entries: &[Vec<u8>]) -> Vec<u8> {
         4
     };
     out.push(off_size);
-    let write_off = |out: &mut Vec<u8>, v: u32| match off_size {
-        1 => {
-            #[allow(clippy::cast_possible_truncation)]
-            out.push(v as u8);
-        }
-        2 => {
-            #[allow(clippy::cast_possible_truncation)]
-            out.extend_from_slice(&(v as u16).to_be_bytes());
-        }
-        3 => {
-            out.push(((v >> 16) & 0xFF) as u8);
-            out.push(((v >> 8) & 0xFF) as u8);
-            out.push((v & 0xFF) as u8);
-        }
-        _ => out.extend_from_slice(&v.to_be_bytes()),
+    // Offsets are at most `max_off`, which fits `off_size` bytes.
+    let write_off = |out: &mut Vec<u8>, v: u32| {
+        let bytes = v.to_be_bytes();
+        out.extend_from_slice(&bytes[4 - usize::from(off_size)..]);
     };
     let mut cursor: u32 = 1;
     write_off(&mut out, cursor);
     for e in entries {
+        // Each step stays at or below `max_off`.
         cursor += e.len() as u32;
         write_off(&mut out, cursor);
     }
     for e in entries {
         out.extend_from_slice(e);
     }
-    out
+    Some(out)
 }
 
 /// Internal lightweight parse of a VARC table: enumerates coverage
@@ -409,10 +374,7 @@ impl<'a> ParsedVarc<'a> {
         markers.sort_unstable();
         markers.dedup();
 
-        let block_end = |start: usize| -> usize {
-            let next = markers.iter().copied().find(|m| *m > start);
-            next.unwrap_or(data.len())
-        };
+        let block_end = |start: usize| -> usize { next_marker(&markers, start, data.len()) };
 
         let var_store = if var_store_off == 0 {
             None
@@ -472,6 +434,7 @@ impl<'a> ParsedVarc<'a> {
     }
 
     /// Parses the coverage table to find the index of `gid`.
+    #[cfg(test)]
     fn coverage_index_of(&self, gid: GlyphId) -> Option<usize> {
         coverage_index_of(self.coverage_bytes, gid)
     }
@@ -484,9 +447,20 @@ impl<'a> ParsedVarc<'a> {
     }
 }
 
+/// Returns the smallest entry of the sorted `markers` that is greater
+/// than `start`, or `fallback` when there is none.
+fn next_marker(markers: &[usize], start: usize, fallback: usize) -> usize {
+    let i = markers.partition_point(|&m| m <= start);
+    markers.get(i).copied().unwrap_or(fallback)
+}
+
 /// Iterator over coverage entries yielding `(gid, record_index)` pairs.
 /// Used by [`subset_varc`] to walk the source coverage in order while
 /// filtering on the kept-gid set.
+///
+/// Stops after [`MAX_COVERAGE_ENTRIES`] entries: a valid coverage never
+/// has more, and overlapping ranges in a malformed one could otherwise
+/// yield billions of entries.
 struct CoverageIter<'a> {
     bytes: &'a [u8],
     format: u16,
@@ -495,23 +469,22 @@ struct CoverageIter<'a> {
     /// For format 2: which range we're inside.
     range_idx: usize,
     /// For format 2: current glyph inside the range (offset from start).
-    range_offset: u16,
+    /// Wider than a gid so a full `0..=0xFFFF` range can step past its
+    /// end.
+    range_offset: u32,
+    /// Entries yielded so far.
+    yielded: usize,
 }
 
 impl<'a> CoverageIter<'a> {
     fn new(bytes: &'a [u8]) -> Self {
-        if bytes.len() < 4 {
-            return Self {
-                bytes,
-                format: 0,
-                count: 0,
-                cursor: 0,
-                range_idx: 0,
-                range_offset: 0,
-            };
-        }
-        let format = u16::from_be_bytes([bytes[0], bytes[1]]);
-        let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+        let (format, count) = match (
+            crate::layout::read_u16(bytes, 0),
+            crate::layout::read_u16(bytes, 2),
+        ) {
+            (Some(format), Some(count)) => (format, usize::from(count)),
+            _ => (0, 0),
+        };
         Self {
             bytes,
             format,
@@ -519,45 +492,39 @@ impl<'a> CoverageIter<'a> {
             cursor: 0,
             range_idx: 0,
             range_offset: 0,
+            yielded: 0,
         }
     }
-}
 
-impl Iterator for CoverageIter<'_> {
-    type Item = (GlyphId, usize);
-
-    fn next(&mut self) -> Option<Self::Item> {
+    fn next_entry(&mut self) -> Option<(GlyphId, usize)> {
         match self.format {
             1 => {
                 if self.cursor >= self.count {
                     return None;
                 }
-                let off = 4 + self.cursor * 2;
-                if off + 2 > self.bytes.len() {
-                    return None;
-                }
-                let g = u16::from_be_bytes([self.bytes[off], self.bytes[off + 1]]);
+                let g = crate::layout::read_u16(self.bytes, 4 + self.cursor * 2)?;
                 let idx = self.cursor;
                 self.cursor += 1;
                 Some((g, idx))
             }
             2 => {
                 while self.range_idx < self.count {
-                    let off = 4 + self.range_idx * 6;
-                    if off + 6 > self.bytes.len() {
-                        return None;
-                    }
-                    let start = u16::from_be_bytes([self.bytes[off], self.bytes[off + 1]]);
-                    let end = u16::from_be_bytes([self.bytes[off + 2], self.bytes[off + 3]]);
-                    let start_cov = u16::from_be_bytes([self.bytes[off + 4], self.bytes[off + 5]]);
-                    let span = end.saturating_sub(start);
+                    let rec = self
+                        .bytes
+                        .get(4 + self.range_idx * 6..)?
+                        .first_chunk::<6>()?;
+                    let start = u16::from_be_bytes([rec[0], rec[1]]);
+                    let end = u16::from_be_bytes([rec[2], rec[3]]);
+                    let start_cov = u16::from_be_bytes([rec[4], rec[5]]);
+                    let span = u32::from(end.saturating_sub(start));
                     if self.range_offset > span {
                         self.range_idx += 1;
                         self.range_offset = 0;
                         continue;
                     }
-                    let g = start.checked_add(self.range_offset)?;
-                    let idx = (start_cov as usize) + (self.range_offset as usize);
+                    // start + range_offset <= end, so this fits a gid.
+                    let g = u16::try_from(u32::from(start) + self.range_offset).ok()?;
+                    let idx = usize::from(start_cov) + self.range_offset as usize;
                     self.range_offset += 1;
                     return Some((g, idx));
                 }
@@ -568,13 +535,27 @@ impl Iterator for CoverageIter<'_> {
     }
 }
 
+impl Iterator for CoverageIter<'_> {
+    type Item = (GlyphId, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.yielded >= MAX_COVERAGE_ENTRIES {
+            return None;
+        }
+        let entry = self.next_entry()?;
+        self.yielded += 1;
+        Some(entry)
+    }
+}
+
 /// Builds a Coverage format-1 table from a sorted ascending iterator of
-/// gids. Used by [`subset_varc`] to emit the rewritten coverage.
+/// gids. Used by [`subset_varc`] to emit the rewritten coverage. The
+/// caller passes at most one entry per gid, so the count fits in 16
+/// bits.
 fn build_coverage_format1(gids: impl IntoIterator<Item = GlyphId>) -> Vec<u8> {
     let gids: Vec<GlyphId> = gids.into_iter().collect();
     let mut out = Vec::with_capacity(4 + gids.len() * 2);
     out.extend_from_slice(&1u16.to_be_bytes()); // format
-    #[allow(clippy::cast_possible_truncation)]
     let count = gids.len() as u16;
     out.extend_from_slice(&count.to_be_bytes());
     for g in gids {
@@ -585,89 +566,50 @@ fn build_coverage_format1(gids: impl IntoIterator<Item = GlyphId>) -> Vec<u8> {
 
 /// Reads u32 BE at `off`, bounds-checked.
 fn read_u32(data: &[u8], off: usize) -> Result<u32, &'static str> {
-    let bytes = data.get(off..off + 4).ok_or("u32 OOB")?;
-    Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    let bytes = data
+        .get(off..)
+        .and_then(<[u8]>::first_chunk::<4>)
+        .ok_or("u32 OOB")?;
+    Ok(u32::from_be_bytes(*bytes))
 }
 
 /// Walks a coverage table for the index of `gid`. Mirrors the parser's
 /// search; returns `usize` so callers can index into the glyph-records
 /// vec directly.
+#[cfg(test)]
 fn coverage_index_of(bytes: &[u8], gid: GlyphId) -> Option<usize> {
-    if bytes.len() < 4 {
-        return None;
-    }
-    let format = u16::from_be_bytes([bytes[0], bytes[1]]);
-    let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
-    match format {
-        1 => {
-            let need = 4 + count * 2;
-            if bytes.len() < need {
-                return None;
-            }
-            for i in 0..count {
-                let off = 4 + i * 2;
-                let g = u16::from_be_bytes([bytes[off], bytes[off + 1]]);
-                if g == gid {
-                    return Some(i);
-                }
-            }
-            None
-        }
-        2 => {
-            let need = 4 + count * 6;
-            if bytes.len() < need {
-                return None;
-            }
-            for i in 0..count {
-                let off = 4 + i * 6;
-                let start = u16::from_be_bytes([bytes[off], bytes[off + 1]]);
-                let end = u16::from_be_bytes([bytes[off + 2], bytes[off + 3]]);
-                let start_cov = u16::from_be_bytes([bytes[off + 4], bytes[off + 5]]);
-                if gid >= start && gid <= end {
-                    let cov = (start_cov as usize) + (gid - start) as usize;
-                    return Some(cov);
-                }
-            }
-            None
-        }
-        _ => None,
-    }
+    CoverageIter::new(bytes).find_map(|(g, idx)| (g == gid).then_some(idx))
 }
 
 /// Parses a CFF2 INDEX (u32 count + u8 offSize + offsets + data),
 /// returning one byte slice per entry. Mirrors the layout the parser
 /// uses for `glyphRecords`.
 fn parse_cff2_index(block: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
-    if block.len() < 4 {
-        return Err("CFF2 INDEX truncated header");
-    }
-    let count = u32::from_be_bytes([block[0], block[1], block[2], block[3]]) as usize;
+    let count = read_u32(block, 0).map_err(|_| "CFF2 INDEX truncated header")? as usize;
     if count == 0 {
         return Ok(Vec::new());
     }
-    if block.len() < 5 {
-        return Err("CFF2 INDEX truncated offSize");
-    }
-    let off_size = block[4] as usize;
+    let off_size = usize::from(*block.get(4).ok_or("CFF2 INDEX truncated offSize")?);
     if !(1..=4).contains(&off_size) {
         return Err("CFF2 INDEX offSize out of range");
     }
     let offsets_start = 5;
-    let offsets_bytes = (count + 1) * off_size;
-    if block.len() < offsets_start + offsets_bytes {
-        return Err("CFF2 INDEX offsets truncated");
-    }
-    let mut offsets: Vec<usize> = Vec::with_capacity(count + 1);
-    for i in 0..=count {
-        let off = offsets_start + i * off_size;
-        let mut v = 0u32;
-        for k in 0..off_size {
-            v = (v << 8) | u32::from(block[off + k]);
-        }
-        offsets.push(v as usize);
-    }
+    let offsets_bytes = count
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(off_size))
+        .ok_or("CFF2 INDEX offsets truncated")?;
     let data_start = offsets_start + offsets_bytes;
-    let total = *offsets.last().unwrap();
+    let offset_table = block
+        .get(offsets_start..data_start)
+        .ok_or("CFF2 INDEX offsets truncated")?;
+    // The offset table fits in `block`, which bounds this allocation.
+    let offsets: Vec<usize> = offset_table
+        .chunks_exact(off_size)
+        .map(|c| c.iter().fold(0usize, |v, &b| (v << 8) | usize::from(b)))
+        .collect();
+    let Some(&total) = offsets.last() else {
+        return Err("CFF2 INDEX offsets truncated");
+    };
     if total == 0 {
         return Err("CFF2 INDEX total length zero");
     }
@@ -677,17 +619,14 @@ fn parse_cff2_index(block: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
     }
     let mut out: Vec<&[u8]> = Vec::with_capacity(count);
     for w in offsets.windows(2) {
-        let a = w[0];
-        let b = w[1];
+        let (a, b) = (w[0], w[1]);
         if a == 0 || b < a {
             return Err("CFF2 INDEX offsets non-monotone");
         }
-        let s = data_start + a - 1;
-        let e = data_start + b - 1;
-        if e > block.len() {
-            return Err("CFF2 INDEX entry past end");
-        }
-        out.push(&block[s..e]);
+        let entry = block
+            .get(data_start + a - 1..data_start + b - 1)
+            .ok_or("CFF2 INDEX entry past end")?;
+        out.push(entry);
     }
     Ok(out)
 }
@@ -716,12 +655,19 @@ fn parse_cff2_index(block: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
 /// won't appear in the remap either, so the caller's
 /// [`rewrite_component_record`] will surface the orphan via the
 /// `Unsupported` path.
+///
+/// Subtables and regions may share bytes in the source, and each kept
+/// copy is written out separately. The copies are charged to a work
+/// budget, and a store that would grow past it is rejected.
 type MvsRemap = BTreeMap<(u16, u16), (u16, u16)>;
 
 fn prune_multi_var_store(
     src: &[u8],
     referenced: &BTreeSet<(u16, u16)>,
 ) -> Result<(MvsRemap, Option<Vec<u8>>), SubsetError> {
+    const TOO_LARGE: SubsetError =
+        SubsetError::Unsupported("VARC MVS too large to prune; subtables share data");
+    let budget = WorkBudget::new(WORK_LIMIT);
     let parsed = ParsedMvs::parse(src)
         .map_err(|_| SubsetError::Unsupported("VARC MVS malformed during prune"))?;
 
@@ -737,36 +683,33 @@ fn prune_multi_var_store(
     // non-empty.
     let mut new_subtables: Vec<RewrittenMvsSubtable> = Vec::new();
     let mut remap: BTreeMap<(u16, u16), (u16, u16)> = BTreeMap::new();
-    for (old_outer, sub) in parsed.subtables.iter().enumerate() {
-        #[allow(clippy::cast_possible_truncation)]
-        let old_outer_u16 = old_outer as u16;
-        let Some(kept_inners) = by_outer.get(&old_outer_u16) else {
+    for (old_outer, sub) in parsed.subtables() {
+        let Some(kept_inners) = by_outer.get(&old_outer) else {
             continue;
         };
         // Keep only inners that exist in the source (defensive: an
         // out-of-range source ref means the source font is malformed).
-        let mut kept_pairs: Vec<(u16, &[u8])> = Vec::new();
-        for &inner in kept_inners {
-            let Some(bytes) = sub.delta_sets.get(inner as usize).copied() else {
-                continue;
-            };
-            kept_pairs.push((inner, bytes));
-        }
+        // `kept_inners` is a BTreeSet, so the pairs come out sorted by
+        // inner index.
+        let kept_pairs: Vec<(u16, &[u8])> = kept_inners
+            .iter()
+            .filter_map(|&inner| Some((inner, *sub.delta_sets.get(inner as usize)?)))
+            .collect();
         if kept_pairs.is_empty() {
             continue;
         }
-        // Sorted by inner index: kept_inners is a BTreeSet so already
-        // ascending; re-sort defensively in case future paths feed
-        // unsorted refs in.
-        kept_pairs.sort_by_key(|(i, _)| *i);
+        let copied: usize = kept_pairs.iter().map(|(_, b)| b.len()).sum();
+        if !budget.spend(sub.region_indexes.len() + copied) {
+            return Err(TOO_LARGE);
+        }
 
-        #[allow(clippy::cast_possible_truncation)]
+        // At most one subtable per source outer index, so this fits.
         let new_outer = new_subtables.len() as u16;
         let mut new_delta_sets: Vec<Vec<u8>> = Vec::with_capacity(kept_pairs.len());
         for (new_inner_idx, (old_inner, bytes)) in kept_pairs.iter().enumerate() {
-            #[allow(clippy::cast_possible_truncation)]
+            // At most one entry per source inner index, so this fits.
             let new_inner = new_inner_idx as u16;
-            remap.insert((old_outer_u16, *old_inner), (new_outer, new_inner));
+            remap.insert((old_outer, *old_inner), (new_outer, new_inner));
             new_delta_sets.push((*bytes).to_vec());
         }
         new_subtables.push(RewrittenMvsSubtable {
@@ -811,32 +754,30 @@ fn prune_multi_var_store(
             // matches the parser's behavior for an OOB region.
             continue;
         };
-        #[allow(clippy::cast_possible_truncation)]
+        if !budget.spend(payload.len()) {
+            return Err(TOO_LARGE);
+        }
+        // At most one entry per source region index, so this fits.
         let new_ri = kept_region_payloads.len() as u16;
         region_remap.insert(old_ri, new_ri);
         kept_region_payloads.push(payload);
     }
 
     // Renumber each surviving subtable's region_indexes through the
-    // remap. Drop indexes that lacked a kept region (defensive: if a
-    // subtable ends up with zero region indexes after this filter,
-    // every region it referenced was orphaned, which shouldn't happen
-    // when the subtable prune is correct; we drop the subtable in that
-    // case to keep the output structurally valid).
+    // remap. Drop indexes that lacked a kept region. A subtable left
+    // with zero region indexes has only orphaned regions, so it is
+    // dropped to keep the output structurally valid.
     let mut pruned_subtables: Vec<RewrittenMvsSubtable> = Vec::with_capacity(new_subtables.len());
     let mut outer_remap_collapse: BTreeMap<u16, u16> = BTreeMap::new();
     for (old_outer, sub) in new_subtables.into_iter().enumerate() {
-        let mut new_region_indexes: Vec<u16> = Vec::with_capacity(sub.region_indexes.len());
-        for ri in &sub.region_indexes {
-            if let Some(&new_ri) = region_remap.get(ri) {
-                new_region_indexes.push(new_ri);
-            }
-        }
+        let new_region_indexes: Vec<u16> = sub
+            .region_indexes
+            .iter()
+            .filter_map(|ri| region_remap.get(ri).copied())
+            .collect();
         if new_region_indexes.is_empty() {
-            // Defensive collapse: see comment above.
             continue;
         }
-        #[allow(clippy::cast_possible_truncation)]
         let new_outer = pruned_subtables.len() as u16;
         if (old_outer as u16) != new_outer {
             outer_remap_collapse.insert(old_outer as u16, new_outer);
@@ -849,12 +790,9 @@ fn prune_multi_var_store(
 
     // If a subtable was dropped during the region collapse, fold the
     // outer-index shift into the existing `(outer, inner)` remap so the
-    // record-rewrite path sees the final outer indices. In practice
-    // this branch is dead (the subtable prune above already drops
-    // empty subtables) but guards against future edits where a
-    // subtable could survive subtable pruning yet collapse here.
+    // record-rewrite path sees the final outer indices.
     if !outer_remap_collapse.is_empty() {
-        for (_, (no, _)) in remap.iter_mut() {
+        for (no, _) in remap.values_mut() {
             if let Some(&final_no) = outer_remap_collapse.get(no) {
                 *no = final_no;
             }
@@ -869,7 +807,8 @@ fn prune_multi_var_store(
     }
 
     let new_region_list_bytes = build_region_list_bytes(&kept_region_payloads);
-    let new_bytes = emit_multi_var_store(&new_region_list_bytes, &pruned_subtables);
+    let new_bytes = emit_multi_var_store(&new_region_list_bytes, &pruned_subtables)
+        .ok_or(SubsetError::Unsupported("VARC MVS exceeds 4 GiB"))?;
     Ok((remap, Some(new_bytes)))
 }
 
@@ -882,25 +821,23 @@ fn prune_multi_var_store(
 ///   Offset32  variationRegionOffsets[regionCount] (relative to block start)
 ///   <region payloads, concatenated in input order>
 /// ```
+///
+/// Callers pass at most one payload per source region index, so the
+/// count fits in 16 bits, and the prune budget keeps the block far
+/// below 4 GiB.
 fn build_region_list_bytes(payloads: &[&[u8]]) -> Vec<u8> {
     let mut out = Vec::new();
-    #[allow(clippy::cast_possible_truncation)]
     let count = payloads.len() as u16;
     out.extend_from_slice(&count.to_be_bytes());
     let off_table_start = out.len();
-    for _ in payloads {
-        out.extend_from_slice(&0u32.to_be_bytes());
-    }
-    let mut starts: Vec<u32> = Vec::with_capacity(payloads.len());
-    for p in payloads {
-        #[allow(clippy::cast_possible_truncation)]
+    out.resize(off_table_start + payloads.len() * 4, 0);
+    for (i, p) in payloads.iter().enumerate() {
         let start = out.len() as u32;
-        starts.push(start);
-        out.extend_from_slice(p);
-    }
-    for (i, s) in starts.iter().enumerate() {
         let slot = off_table_start + i * 4;
-        out[slot..slot + 4].copy_from_slice(&s.to_be_bytes());
+        if let Some(dst) = out.get_mut(slot..slot + 4) {
+            dst.copy_from_slice(&start.to_be_bytes());
+        }
+        out.extend_from_slice(p);
     }
     out
 }
@@ -941,21 +878,18 @@ fn collect_referenced_regions(subtables: &[RewrittenMvsSubtable]) -> BTreeSet<u1
 ///   <region payloads>
 /// ```
 fn parse_region_list(bytes: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
-    if bytes.len() < 2 {
-        return Err("MVS region list header truncated");
-    }
-    let count = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
+    let count =
+        usize::from(crate::layout::read_u16(bytes, 0).ok_or("MVS region list header truncated")?);
     let off_table_end = 2 + count * 4;
-    if bytes.len() < off_table_end {
-        return Err("MVS region list offsets truncated");
-    }
+    let offset_table = bytes
+        .get(2..off_table_end)
+        .ok_or("MVS region list offsets truncated")?;
     // Read region offsets (relative to region-list start). Their
     // ascending order plus the block end give us each region's byte
     // span.
     let mut offsets: Vec<usize> = Vec::with_capacity(count);
-    for i in 0..count {
-        let p = 2 + i * 4;
-        let v = u32::from_be_bytes([bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3]]) as usize;
+    for c in offset_table.chunks_exact(4) {
+        let v = u32::from_be_bytes([c[0], c[1], c[2], c[3]]) as usize;
         if v < off_table_end || v > bytes.len() {
             return Err("MVS region offset OOB");
         }
@@ -968,25 +902,19 @@ fn parse_region_list(bytes: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
     sorted_bounds.dedup();
     let mut regions: Vec<&[u8]> = Vec::with_capacity(count);
     for &start in &offsets {
-        let end = sorted_bounds
-            .iter()
-            .copied()
-            .find(|m| *m > start)
-            .unwrap_or(bytes.len());
+        let end = next_marker(&sorted_bounds, start, bytes.len());
         let region = bytes.get(start..end).ok_or("MVS region body OOB")?;
         // Sanity: at least the axisCount u16 must fit.
-        if region.len() < 2 {
-            return Err("MVS region axisCount truncated");
-        }
-        let axis_count = u16::from_be_bytes([region[0], region[1]]) as usize;
-        let need = 2 + axis_count * 8;
-        if region.len() < need {
-            return Err("MVS region axes truncated");
-        }
+        let axis_count = usize::from(
+            crate::layout::read_u16(region, 0).ok_or("MVS region axisCount truncated")?,
+        );
         // Trim any trailing padding the source may have between
         // regions: emit only the region's structural bytes so the
         // rewriter produces a tightly-packed region list.
-        regions.push(&region[..need]);
+        let body = region
+            .get(..2 + axis_count * 8)
+            .ok_or("MVS region axes truncated")?;
+        regions.push(body);
     }
     Ok(regions)
 }
@@ -999,7 +927,10 @@ struct ParsedMvs<'a> {
     /// table) + every region payload, concatenated as in the source.
     /// The pruner re-emits these as-is.
     region_list_bytes: Vec<u8>,
-    subtables: Vec<ParsedMvsSubtable<'a>>,
+    /// For each source outer index, the position of its parsed body in
+    /// `bodies`. Subtables that share an offset share one body.
+    subtable_body: Vec<usize>,
+    bodies: Vec<ParsedMvsSubtable<'a>>,
 }
 
 struct ParsedMvsSubtable<'a> {
@@ -1009,137 +940,141 @@ struct ParsedMvsSubtable<'a> {
 
 impl<'a> ParsedMvs<'a> {
     fn parse(data: &'a [u8]) -> Result<Self, &'static str> {
-        if data.len() < 8 {
+        let (Some(format), Ok(region_list_off), Some(subtable_count)) = (
+            crate::layout::read_u16(data, 0),
+            read_u32(data, 2),
+            crate::layout::read_u16(data, 6),
+        ) else {
             return Err("MVS header truncated");
-        }
-        let format = u16::from_be_bytes([data[0], data[1]]);
+        };
         if format != 1 {
             return Err("MVS unsupported format");
         }
-        let region_list_off = u32::from_be_bytes([data[2], data[3], data[4], data[5]]) as usize;
-        let subtable_count = u16::from_be_bytes([data[6], data[7]]) as usize;
-        let mut subtable_offsets: Vec<usize> = Vec::with_capacity(subtable_count);
-        for i in 0..subtable_count {
-            let off = 8 + i * 4;
-            if off + 4 > data.len() {
-                return Err("MVS subtable offset OOB");
-            }
-            let v = u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
-                as usize;
-            subtable_offsets.push(v);
-        }
+        let region_list_off = region_list_off as usize;
+        let subtable_count = usize::from(subtable_count);
+        let offset_table = data
+            .get(8..8 + subtable_count * 4)
+            .ok_or("MVS subtable offset OOB")?;
+        let subtable_offsets: Vec<usize> = offset_table
+            .chunks_exact(4)
+            .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]) as usize)
+            .collect();
+
+        // Every block ends at the next-greater block start, or at the
+        // end of the data.
+        let mut markers: Vec<usize> = subtable_offsets.clone();
+        markers.push(region_list_off);
+        markers.sort_unstable();
+        markers.dedup();
 
         // Region list: bytes from `region_list_off` to the start of
         // the next block. The region list contains its own offset
         // array; for the pruner we don't need to decode regions, just
         // capture the byte range.
-        let region_list_end = compute_block_end(
-            data.len(),
-            region_list_off,
-            &[region_list_off]
-                .iter()
-                .chain(subtable_offsets.iter())
-                .copied()
-                .collect::<Vec<_>>(),
-        );
+        let region_list_end = next_marker(&markers, region_list_off, data.len());
         let region_list_bytes = data
             .get(region_list_off..region_list_end)
             .ok_or("MVS region list OOB")?
             .to_vec();
 
-        // Subtables.
-        let mut markers: Vec<usize> = subtable_offsets.clone();
-        markers.push(region_list_off);
-        markers.push(data.len());
-        let mut subtables: Vec<ParsedMvsSubtable<'a>> = Vec::with_capacity(subtable_count);
+        // Subtables. Blocks between distinct markers never overlap, so
+        // parsing each distinct offset once keeps the work linear in
+        // the data size.
+        let mut body_at: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut bodies: Vec<ParsedMvsSubtable<'a>> = Vec::new();
+        let mut subtable_body: Vec<usize> = Vec::with_capacity(subtable_count);
         for &off in &subtable_offsets {
-            let sub_end = compute_block_end(data.len(), off, &markers);
-            let block = data.get(off..sub_end).ok_or("MVS subtable OOB")?;
-            if block.len() < 3 {
-                return Err("MVS subtable header truncated");
+            if let Some(&body) = body_at.get(&off) {
+                subtable_body.push(body);
+                continue;
             }
-            if block[0] != 1 {
-                return Err("MVS unsupported subtable format");
-            }
-            let region_index_count = u16::from_be_bytes([block[1], block[2]]) as usize;
-            let need = 3 + region_index_count * 2;
-            if block.len() < need {
-                return Err("MVS subtable region indexes OOB");
-            }
-            let mut region_indexes: Vec<u16> = Vec::with_capacity(region_index_count);
-            for i in 0..region_index_count {
-                let p = 3 + i * 2;
-                region_indexes.push(u16::from_be_bytes([block[p], block[p + 1]]));
-            }
-            let idx_start = need;
-            // Use the absolute offset within `data` so the returned
-            // slices outlive `block` (they borrow from `data`, lifetime
-            // `'a`). `parse_cff2_index` takes a single slice and
-            // returns sub-slices of it; we feed it the tail of `data`
-            // starting at this subtable's CFF2 INDEX block.
-            let abs_off = off + idx_start;
-            let idx_block: &'a [u8] = data.get(abs_off..sub_end).ok_or("MVS delta index OOB")?;
-            let delta_sets: Vec<&'a [u8]> = if idx_block.len() < 4 {
-                Vec::new()
-            } else {
-                parse_cff2_index(idx_block).map_err(|_| "MVS delta CFF2 INDEX malformed")?
-            };
-            subtables.push(ParsedMvsSubtable {
-                region_indexes,
-                delta_sets,
-            });
+            let sub_end = next_marker(&markers, off, data.len());
+            let parsed = Self::parse_subtable(data, off, sub_end)?;
+            body_at.insert(off, bodies.len());
+            subtable_body.push(bodies.len());
+            bodies.push(parsed);
         }
 
         Ok(Self {
             region_list_bytes,
-            subtables,
+            subtable_body,
+            bodies,
         })
     }
-}
 
-/// Returns the end offset of a block that starts at `start`, given a
-/// list of all block start offsets in the table. The block ends at the
-/// next-greater offset, or at `data_len` if none follow.
-fn compute_block_end(data_len: usize, start: usize, all_offsets: &[usize]) -> usize {
-    let mut next = data_len;
-    for &o in all_offsets {
-        if o > start && o < next {
-            next = o;
+    /// Parses the subtable stored in `data[off..sub_end]`.
+    fn parse_subtable(
+        data: &'a [u8],
+        off: usize,
+        sub_end: usize,
+    ) -> Result<ParsedMvsSubtable<'a>, &'static str> {
+        let block = data.get(off..sub_end).ok_or("MVS subtable OOB")?;
+        let (Some(&subtable_format), Some(region_index_count)) =
+            (block.first(), crate::layout::read_u16(block, 1))
+        else {
+            return Err("MVS subtable header truncated");
+        };
+        if subtable_format != 1 {
+            return Err("MVS unsupported subtable format");
         }
+        let need = 3 + usize::from(region_index_count) * 2;
+        let region_indexes: Vec<u16> = block
+            .get(3..need)
+            .ok_or("MVS subtable region indexes OOB")?
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        // Borrow the delta INDEX from `data` so the returned slices
+        // carry lifetime `'a`.
+        let idx_block: &'a [u8] = data.get(off + need..sub_end).ok_or("MVS delta index OOB")?;
+        let delta_sets: Vec<&'a [u8]> = if idx_block.len() < 4 {
+            Vec::new()
+        } else {
+            parse_cff2_index(idx_block).map_err(|_| "MVS delta CFF2 INDEX malformed")?
+        };
+        Ok(ParsedMvsSubtable {
+            region_indexes,
+            delta_sets,
+        })
     }
-    next
+
+    /// Iterates `(outer_index, subtable)` in source order.
+    fn subtables(&self) -> impl Iterator<Item = (u16, &ParsedMvsSubtable<'a>)> + '_ {
+        self.subtable_body
+            .iter()
+            .enumerate()
+            .filter_map(|(outer, &body)| Some((u16::try_from(outer).ok()?, self.bodies.get(body)?)))
+    }
 }
 
 /// Re-emits the MVS bytes from rewritten subtables. Region list is
 /// spliced in verbatim from the source. Subtable offsets are computed
 /// fresh; each subtable carries its CFF2 INDEX of delta-set bytes.
-fn emit_multi_var_store(region_list_bytes: &[u8], subtables: &[RewrittenMvsSubtable]) -> Vec<u8> {
+/// Returns `None` when the store does not fit its 32-bit offsets.
+fn emit_multi_var_store(
+    region_list_bytes: &[u8],
+    subtables: &[RewrittenMvsSubtable],
+) -> Option<Vec<u8>> {
     // Header layout:
     //   u16  format = 1
     //   u32  regionListOffset
     //   u16  subtableCount
     //   u32  subtableOffsets[subtableCount]
-    let header_len = 2 + 4 + 2 + subtables.len() * 4;
-
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes());
     let region_off_slot = out.len();
     out.extend_from_slice(&0u32.to_be_bytes());
-    #[allow(clippy::cast_possible_truncation)]
-    let subtable_count = subtables.len() as u16;
+    let subtable_count = u16::try_from(subtables.len()).ok()?;
     out.extend_from_slice(&subtable_count.to_be_bytes());
     let sub_off_slots_start = out.len();
-    for _ in subtables {
-        out.extend_from_slice(&0u32.to_be_bytes());
-    }
-    debug_assert_eq!(out.len(), header_len);
+    out.resize(sub_off_slots_start + subtables.len() * 4, 0);
 
     // Region list directly follows the header, 4-byte aligned (the
     // header already ends on a 4-byte boundary because subtable
     // offsets are u32).
-    #[allow(clippy::cast_possible_truncation)]
-    let region_off = out.len() as u32;
-    out[region_off_slot..region_off_slot + 4].copy_from_slice(&region_off.to_be_bytes());
+    let region_off = u32::try_from(out.len()).ok()?;
+    out.get_mut(region_off_slot..region_off_slot + 4)?
+        .copy_from_slice(&region_off.to_be_bytes());
     out.extend_from_slice(region_list_bytes);
     while out.len() % 4 != 0 {
         out.push(0);
@@ -1147,24 +1082,23 @@ fn emit_multi_var_store(region_list_bytes: &[u8], subtables: &[RewrittenMvsSubta
 
     // Subtables, each preceded by 4-byte alignment.
     for (i, sub) in subtables.iter().enumerate() {
-        #[allow(clippy::cast_possible_truncation)]
-        let sub_off = out.len() as u32;
+        let sub_off = u32::try_from(out.len()).ok()?;
         let slot = sub_off_slots_start + i * 4;
-        out[slot..slot + 4].copy_from_slice(&sub_off.to_be_bytes());
+        out.get_mut(slot..slot + 4)?
+            .copy_from_slice(&sub_off.to_be_bytes());
         out.push(1); // format
-        #[allow(clippy::cast_possible_truncation)]
-        let ric = sub.region_indexes.len() as u16;
+        let ric = u16::try_from(sub.region_indexes.len()).ok()?;
         out.extend_from_slice(&ric.to_be_bytes());
         for ri in &sub.region_indexes {
             out.extend_from_slice(&ri.to_be_bytes());
         }
-        out.extend_from_slice(&build_cff2_index(&sub.delta_sets));
+        out.extend_from_slice(&try_build_cff2_index(&sub.delta_sets)?);
         while out.len() % 4 != 0 {
             out.push(0);
         }
     }
 
-    out
+    Some(out)
 }
 
 /// Walks a single VarComposite glyph record and yields the gid of every
@@ -1205,10 +1139,10 @@ fn walk_component_var_idxs(record: &[u8]) -> Vec<(u16, u16)> {
         match parse_one_component(record, cursor) {
             Some((info, next)) => {
                 if let Some((_, _, v)) = info.axis_var_idx {
-                    out.push(((v >> 16) as u16, (v & 0xFFFF) as u16));
+                    out.push(split_var_idx(v));
                 }
                 if let Some((_, _, v)) = info.transform_var_idx {
-                    out.push(((v >> 16) as u16, (v & 0xFFFF) as u16));
+                    out.push(split_var_idx(v));
                 }
                 if next <= cursor {
                     break;
@@ -1221,6 +1155,11 @@ fn walk_component_var_idxs(record: &[u8]) -> Vec<(u16, u16)> {
     out
 }
 
+/// Splits a MultiVarIdx into its `(outer, inner)` halves.
+fn split_var_idx(v: u32) -> (u16, u16) {
+    ((v >> 16) as u16, (v & 0xFFFF) as u16)
+}
+
 /// Per-component metadata extracted by `parse_one_component`.
 struct ComponentInfo {
     /// Source-file gid this component points at.
@@ -1230,8 +1169,7 @@ struct ComponentInfo {
     gid_range: (usize, usize),
     /// True when the gid was encoded as 24 bits (VC_GID_IS_24BIT). The
     /// rewrite path keeps this width even if the new gid would fit in
-    /// 16 bits. That's a future compaction follow-up and would
-    /// otherwise risk shifting subsequent component records.
+    /// 16 bits, so the gid field never changes size.
     gid_is_24bit: bool,
     /// Byte range + old value of the axis-values MultiVarIdx, when
     /// `VC_AXIS_VALUES_HAVE_VARIATION` is set. The MVS pruning path
@@ -1251,28 +1189,17 @@ fn parse_one_component(record: &[u8], start: usize) -> Option<(ComponentInfo, us
 
     let gid_start = cur;
     let (gid, gid_is_24bit, after_gid) = if flags & VC_GID_IS_24BIT != 0 {
-        if cur + 3 > record.len() {
-            return None;
-        }
-        let g = (u32::from(record[cur]) << 16)
-            | (u32::from(record[cur + 1]) << 8)
-            | u32::from(record[cur + 2]);
+        let b = record.get(cur..)?.first_chunk::<3>()?;
+        let g = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         // sigilbuzz uses u16 gids throughout; a u24 source gid > 0xFFFF
         // would silently truncate to its low 16 bits and lie about the
         // reference graph (#196). Treat it as a malformed component and
         // bail. The walker's caller treats `None` as "no further
         // components in this record" and skips it tolerantly.
-        if g > u32::from(u16::MAX) {
-            return None;
-        }
-        #[allow(clippy::cast_possible_truncation)]
-        let gid = g as u16;
+        let gid = u16::try_from(g).ok()?;
         (gid, true, cur + 3)
     } else {
-        if cur + 2 > record.len() {
-            return None;
-        }
-        let g = u16::from_be_bytes([record[cur], record[cur + 1]]);
+        let g = crate::layout::read_u16(record, cur)?;
         (g, false, cur + 2)
     };
     let gid_end = after_gid;
@@ -1310,34 +1237,20 @@ fn parse_one_component(record: &[u8], start: usize) -> Option<(ComponentInfo, us
     }
 
     // i16 transform fields, in spec order. Each present flag adds 2 bytes.
-    let mut field_count = 0usize;
-    if flags & VC_HAVE_TRANSLATE_X != 0 {
-        field_count += 1;
-    }
-    if flags & VC_HAVE_TRANSLATE_Y != 0 {
-        field_count += 1;
-    }
-    if flags & VC_HAVE_ROTATION != 0 {
-        field_count += 1;
-    }
-    if flags & VC_HAVE_SCALE_X != 0 {
-        field_count += 1;
-    }
-    if flags & VC_HAVE_SCALE_Y != 0 {
-        field_count += 1;
-    }
-    if flags & VC_HAVE_SKEW_X != 0 {
-        field_count += 1;
-    }
-    if flags & VC_HAVE_SKEW_Y != 0 {
-        field_count += 1;
-    }
-    if flags & VC_HAVE_TCENTER_X != 0 {
-        field_count += 1;
-    }
-    if flags & VC_HAVE_TCENTER_Y != 0 {
-        field_count += 1;
-    }
+    let field_count = [
+        VC_HAVE_TRANSLATE_X,
+        VC_HAVE_TRANSLATE_Y,
+        VC_HAVE_ROTATION,
+        VC_HAVE_SCALE_X,
+        VC_HAVE_SCALE_Y,
+        VC_HAVE_SKEW_X,
+        VC_HAVE_SKEW_Y,
+        VC_HAVE_TCENTER_X,
+        VC_HAVE_TCENTER_Y,
+    ]
+    .iter()
+    .filter(|&&bit| flags & bit != 0)
+    .count();
     let bytes_needed = field_count * 2;
     if cur + bytes_needed > record.len() {
         return None;
@@ -1359,12 +1272,10 @@ fn parse_one_component(record: &[u8], start: usize) -> Option<(ComponentInfo, us
 /// Reads exactly one TupleValues run-control plus its payload, returning
 /// the byte position immediately after.
 fn consume_tuple_values_one_run(data: &[u8], start: usize) -> Option<usize> {
-    let mut cur = start;
-    if cur >= data.len() {
-        return Some(cur);
-    }
-    let ctrl = data[cur];
-    cur += 1;
+    let Some(&ctrl) = data.get(start) else {
+        return Some(start);
+    };
+    let cur = start + 1;
     let run_len = (ctrl & 0x3F) as usize + 1;
     let zeros = ctrl & 0x80 != 0;
     let words = ctrl & 0x40 != 0;
@@ -1378,59 +1289,40 @@ fn consume_tuple_values_one_run(data: &[u8], start: usize) -> Option<usize> {
     if cur + need > data.len() {
         return None;
     }
-    cur += need;
-    Some(cur)
+    Some(cur + need)
 }
 
 /// Reads a uint32var starting at `off` in `data`. Returns the value plus
 /// the byte position immediately after.
 fn read_uint32var(data: &[u8], off: usize) -> Option<(u32, usize)> {
-    if off >= data.len() {
-        return None;
-    }
-    let b0 = data[off];
+    let rest = data.get(off..)?;
+    let b0 = *rest.first()?;
     match b0 {
         0x00..=0x7F => Some((u32::from(b0), off + 1)),
         0x80..=0xBF => {
-            if off + 2 > data.len() {
-                return None;
-            }
-            let b1 = data[off + 1];
-            Some((((u32::from(b0) - 0x80) << 8) | u32::from(b1), off + 2))
+            let b = rest.first_chunk::<2>()?;
+            Some((((u32::from(b0) - 0x80) << 8) | u32::from(b[1]), off + 2))
         }
         0xC0..=0xDF => {
-            if off + 3 > data.len() {
-                return None;
-            }
-            let b1 = data[off + 1];
-            let b2 = data[off + 2];
+            let b = rest.first_chunk::<3>()?;
             Some((
-                ((u32::from(b0) - 0xC0) << 16) | (u32::from(b1) << 8) | u32::from(b2),
+                ((u32::from(b0) - 0xC0) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]),
                 off + 3,
             ))
         }
         0xE0..=0xEF => {
-            if off + 4 > data.len() {
-                return None;
-            }
-            let b1 = data[off + 1];
-            let b2 = data[off + 2];
-            let b3 = data[off + 3];
+            let b = rest.first_chunk::<4>()?;
             Some((
                 ((u32::from(b0) - 0xE0) << 24)
-                    | (u32::from(b1) << 16)
-                    | (u32::from(b2) << 8)
-                    | u32::from(b3),
+                    | (u32::from(b[1]) << 16)
+                    | (u32::from(b[2]) << 8)
+                    | u32::from(b[3]),
                 off + 4,
             ))
         }
         0xF0..=0xFF => {
-            if off + 5 > data.len() {
-                return None;
-            }
-            let v =
-                u32::from_be_bytes([data[off + 1], data[off + 2], data[off + 3], data[off + 4]]);
-            Some((v, off + 5))
+            let b = rest.first_chunk::<5>()?;
+            Some((u32::from_be_bytes([b[1], b[2], b[3], b[4]]), off + 5))
         }
     }
 }
@@ -1459,33 +1351,21 @@ fn rewrite_component_gids(
 ///
 /// Returns the encoded bytes (1-5 bytes long).
 fn encode_uint32var(v: u32) -> Vec<u8> {
+    let b = v.to_be_bytes();
     if v <= 0x7F {
-        #[allow(clippy::cast_possible_truncation)]
-        let b = v as u8;
-        alloc::vec![b]
+        alloc::vec![b[3]]
     } else if v <= 0x3FFF {
         // Two-byte form: top bits (0x80..=0xBF) carry the high 6 bits.
-        let hi = ((v >> 8) & 0x3F) as u8 | 0x80;
-        let lo = (v & 0xFF) as u8;
-        alloc::vec![hi, lo]
+        alloc::vec![b[2] | 0x80, b[3]]
     } else if v <= 0x001F_FFFF {
         // Three-byte form: top bits (0xC0..=0xDF).
-        let hi = ((v >> 16) & 0x1F) as u8 | 0xC0;
-        let m = ((v >> 8) & 0xFF) as u8;
-        let lo = (v & 0xFF) as u8;
-        alloc::vec![hi, m, lo]
+        alloc::vec![b[1] | 0xC0, b[2], b[3]]
     } else if v <= 0x0FFF_FFFF {
         // Four-byte form: top bits (0xE0..=0xEF).
-        let hi = ((v >> 24) & 0x0F) as u8 | 0xE0;
-        let b1 = ((v >> 16) & 0xFF) as u8;
-        let b2 = ((v >> 8) & 0xFF) as u8;
-        let lo = (v & 0xFF) as u8;
-        alloc::vec![hi, b1, b2, lo]
+        alloc::vec![b[0] | 0xE0, b[1], b[2], b[3]]
     } else {
         // Five-byte form: 0xF0 marker + u32 BE.
-        let mut out = alloc::vec![0xF0_u8];
-        out.extend_from_slice(&v.to_be_bytes());
-        out
+        alloc::vec![0xF0, b[0], b[1], b[2], b[3]]
     }
 }
 
@@ -1509,70 +1389,61 @@ fn rewrite_component_record(
     new_gid_for: &dyn Fn(GlyphId) -> Option<GlyphId>,
     var_idx_remap: &dyn Fn(u16, u16) -> Option<(u16, u16)>,
 ) -> Result<Vec<u8>, SubsetError> {
+    const BAD_SPLICE: SubsetError = SubsetError::Unsupported("VARC component splice out of order");
     let mut out: Vec<u8> = Vec::with_capacity(record.len());
     let mut copy_from = 0usize;
     let mut cursor = 0usize;
     while cursor < record.len() {
-        match parse_one_component(record, cursor) {
-            Some((info, next)) => {
-                let new_gid = new_gid_for(info.gid).ok_or(SubsetError::Unsupported(
-                    "VARC component gid not in kept set",
-                ))?;
+        let Some((info, next)) = parse_one_component(record, cursor) else {
+            break;
+        };
+        let new_gid = new_gid_for(info.gid).ok_or(SubsetError::Unsupported(
+            "VARC component gid not in kept set",
+        ))?;
 
-                // Splice points inside this component, in source byte
-                // order. (gid first, then axis_var_idx, then
-                // transform_var_idx.)
-                let mut splices: Vec<(usize, usize, Vec<u8>)> = Vec::new();
-                splices.push((
-                    info.gid_range.0,
-                    info.gid_range.1,
-                    if info.gid_is_24bit {
-                        let mut v = alloc::vec![0u8];
-                        v.extend_from_slice(&new_gid.to_be_bytes());
-                        v
-                    } else {
-                        new_gid.to_be_bytes().to_vec()
-                    },
-                ));
-                if let Some((s, e, v)) = info.axis_var_idx {
-                    let outer = (v >> 16) as u16;
-                    let inner = (v & 0xFFFF) as u16;
-                    let (no, ni) = var_idx_remap(outer, inner).ok_or(SubsetError::Unsupported(
-                        "VARC axis-values MultiVarIdx not in kept MVS set",
-                    ))?;
-                    let new_v = (u32::from(no) << 16) | u32::from(ni);
-                    splices.push((s, e, encode_uint32var(new_v)));
-                }
-                if let Some((s, e, v)) = info.transform_var_idx {
-                    let outer = (v >> 16) as u16;
-                    let inner = (v & 0xFFFF) as u16;
-                    let (no, ni) = var_idx_remap(outer, inner).ok_or(SubsetError::Unsupported(
-                        "VARC transform MultiVarIdx not in kept MVS set",
-                    ))?;
-                    let new_v = (u32::from(no) << 16) | u32::from(ni);
-                    splices.push((s, e, encode_uint32var(new_v)));
-                }
-
-                // Splices are already in component-byte-order (gid
-                // before any var_idx), but be defensive so future
-                // reorders don't silently corrupt records.
-                splices.sort_by_key(|(s, _, _)| *s);
-
-                for (s, e, bytes) in splices {
-                    out.extend_from_slice(&record[copy_from..s]);
-                    out.extend_from_slice(&bytes);
-                    copy_from = e;
-                }
-
-                if next <= cursor {
-                    break;
-                }
-                cursor = next;
-            }
-            None => break,
+        // Splice points inside this component, in source byte order:
+        // gid first, then axis_var_idx, then transform_var_idx.
+        let mut splices: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+        splices.push((
+            info.gid_range.0,
+            info.gid_range.1,
+            if info.gid_is_24bit {
+                let mut v = alloc::vec![0u8];
+                v.extend_from_slice(&new_gid.to_be_bytes());
+                v
+            } else {
+                new_gid.to_be_bytes().to_vec()
+            },
+        ));
+        if let Some((s, e, v)) = info.axis_var_idx {
+            let (outer, inner) = split_var_idx(v);
+            let (no, ni) = var_idx_remap(outer, inner).ok_or(SubsetError::Unsupported(
+                "VARC axis-values MultiVarIdx not in kept MVS set",
+            ))?;
+            let new_v = (u32::from(no) << 16) | u32::from(ni);
+            splices.push((s, e, encode_uint32var(new_v)));
         }
+        if let Some((s, e, v)) = info.transform_var_idx {
+            let (outer, inner) = split_var_idx(v);
+            let (no, ni) = var_idx_remap(outer, inner).ok_or(SubsetError::Unsupported(
+                "VARC transform MultiVarIdx not in kept MVS set",
+            ))?;
+            let new_v = (u32::from(no) << 16) | u32::from(ni);
+            splices.push((s, e, encode_uint32var(new_v)));
+        }
+
+        for (s, e, bytes) in splices {
+            out.extend_from_slice(record.get(copy_from..s).ok_or(BAD_SPLICE)?);
+            out.extend_from_slice(&bytes);
+            copy_from = e;
+        }
+
+        if next <= cursor {
+            break;
+        }
+        cursor = next;
     }
-    out.extend_from_slice(&record[copy_from..]);
+    out.extend_from_slice(record.get(copy_from..).ok_or(BAD_SPLICE)?);
     Ok(out)
 }
 
@@ -1641,7 +1512,6 @@ mod tests {
     fn build_translate_record(gid: u16, tx: i16, ty: i16) -> Vec<u8> {
         let flags = VC_HAVE_TRANSLATE_X | VC_HAVE_TRANSLATE_Y;
         let mut record = Vec::new();
-        #[allow(clippy::cast_possible_truncation)]
         record.push(flags as u8);
         record.extend_from_slice(&gid.to_be_bytes());
         record.extend_from_slice(&tx.to_be_bytes());
@@ -1979,5 +1849,74 @@ mod tests {
         // Just a u16 region count of 0; no offset table, no payloads.
         assert_eq!(bytes.len(), 2);
         assert_eq!(&bytes[..2], &0u16.to_be_bytes());
+    }
+
+    /// Builds a coverage format-2 table from `(start, end, start_cov)`
+    /// range records.
+    fn build_coverage_format2(ranges: &[(u16, u16, u16)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&2u16.to_be_bytes());
+        out.extend_from_slice(&(ranges.len() as u16).to_be_bytes());
+        for (start, end, cov) in ranges {
+            out.extend_from_slice(&start.to_be_bytes());
+            out.extend_from_slice(&end.to_be_bytes());
+            out.extend_from_slice(&cov.to_be_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn coverage_iter_stops_after_a_full_glyph_range() {
+        // A range covering every glyph used to overflow the u16 range
+        // offset after gid 0xFFFF: a panic in debug builds and an
+        // endless iterator in release builds.
+        let cov = build_coverage_format2(&[(0, 0xFFFF, 0)]);
+        let mut count = 0usize;
+        let mut last = None;
+        for entry in CoverageIter::new(&cov) {
+            count += 1;
+            last = Some(entry);
+        }
+        assert_eq!(count, 1 << 16);
+        assert_eq!(last, Some((0xFFFF, 0xFFFF)));
+    }
+
+    #[test]
+    fn coverage_iter_caps_overlapping_ranges() {
+        // Repeated full ranges would otherwise yield 65536 entries each.
+        let cov = build_coverage_format2(&[(0, 0xFFFF, 0); 64]);
+        assert_eq!(CoverageIter::new(&cov).count(), MAX_COVERAGE_ENTRIES);
+    }
+
+    #[test]
+    fn subset_keeps_one_record_per_gid_and_record_index() {
+        // Coverage lists gid 5 twice (both at record 0) and sends gid 6
+        // to record 0 as well. Only the first entry survives, so the output
+        // carries one record instead of copying record 0 three times.
+        let rec = build_translate_record(7, 1, 2);
+        let mut bytes = build_varc(&[5], &[&rec]);
+        let cov = build_coverage_format2(&[(5, 5, 0), (5, 5, 0), (6, 6, 0)]);
+        let cov_off = bytes.len() as u32;
+        bytes[4..8].copy_from_slice(&cov_off.to_be_bytes());
+        bytes.extend_from_slice(&cov);
+        let varc = sigilbuzz::tables::Varc::parse(&bytes).unwrap();
+        let map = |g: u16| Some(g);
+        let out = subset_varc(&varc, &bytes, &[5, 6, 7], &map)
+            .unwrap()
+            .unwrap();
+        let new_varc = sigilbuzz::tables::Varc::parse(&out).unwrap();
+        assert_eq!(new_varc.glyph_record_count(), 1);
+        assert!(new_varc.covers(5));
+    }
+
+    #[test]
+    fn parse_cff2_index_rejects_counts_past_the_block() {
+        // A count near u32::MAX must be rejected by the length check,
+        // not by an allocation or an overflowing size computation.
+        let mut block = Vec::new();
+        block.extend_from_slice(&u32::MAX.to_be_bytes());
+        block.push(4);
+        block.extend_from_slice(&[0u8; 16]);
+        assert!(parse_cff2_index(&block).is_err());
     }
 }

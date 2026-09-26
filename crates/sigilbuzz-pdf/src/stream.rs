@@ -39,60 +39,37 @@ use crate::Bbox;
 /// PDF parsers accept both `1` and `1.0`, and dropping the suffix
 /// keeps the output compact and snapshot-stable.
 ///
-/// Non-finite inputs (NaN, ±∞) are coerced to `0` because PDF
-/// numeric objects do not admit `NaN` / `inf` tokens. Emitting them
-/// would break content-stream parsing in every conforming reader. A
-/// pathological glyph outline (CFF charstring whose blend evaluation
-/// overflows under extreme variation coords, for example) would
-/// otherwise leak those literals into the output. See issue #216.
+/// Non-finite inputs (NaN and the infinities) are coerced to `0`
+/// because PDF numeric objects do not admit `NaN` / `inf` tokens.
+/// Emitting them would break content-stream parsing in every
+/// conforming reader. A pathological glyph outline (CFF charstring
+/// whose blend evaluation overflows under extreme variation coords,
+/// for example) would otherwise leak those literals into the output.
+/// See issue #216.
+///
+/// The digits are written straight into `out`. The `{}` form of an
+/// `f32` never uses an exponent, so it can run to about 48 bytes
+/// (`f32::MAX` has 39 digits, the smallest subnormal has 45 decimal
+/// places). Every digit is kept.
 fn write_num(out: &mut Vec<u8>, value: f32) {
-    let safe = if value.is_finite() { value } else { 0.0 };
     use core::fmt::Write;
-    // Buffered into a local stack string so we can post-process the
-    // ".0" suffix without an allocation. 32 bytes is comfortably
-    // larger than any f32's `{}` rendering (max ~15 chars).
-    let mut buf = heapless_str::HeaplessStr::<32>::new();
-    let _ = write!(buf, "{safe}");
-    let s = buf.as_str();
-    let trimmed = s.strip_suffix(".0").unwrap_or(s);
-    out.extend_from_slice(trimmed.as_bytes());
+    let safe = if value.is_finite() { value } else { 0.0 };
+    let start = out.len();
+    // Writing into a `Vec<u8>` never fails, so the result is ignored.
+    let _ = write!(VecWriter(out), "{safe}");
+    if out.get(start..).is_some_and(|s| s.ends_with(b".0")) {
+        out.truncate(out.len().saturating_sub(2));
+    }
 }
 
-/// A 32-byte ASCII scratch, kept tiny and inline so the no-std
-/// build does not pull in any extra crate. Only the fmt::Write
-/// machinery is used.
-mod heapless_str {
-    use core::fmt;
+/// Adapts a byte vector to `fmt::Write` so `write!` can append to it
+/// without a temporary `String`.
+struct VecWriter<'a>(&'a mut Vec<u8>);
 
-    pub struct HeaplessStr<const N: usize> {
-        buf: [u8; N],
-        len: usize,
-    }
-
-    impl<const N: usize> HeaplessStr<N> {
-        pub const fn new() -> Self {
-            Self {
-                buf: [0; N],
-                len: 0,
-            }
-        }
-        pub fn as_str(&self) -> &str {
-            // SAFETY: only `fmt::Write` mutates `buf`, and that path
-            // only writes valid UTF-8 strings up to `len`.
-            unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
-        }
-    }
-
-    impl<const N: usize> fmt::Write for HeaplessStr<N> {
-        fn write_str(&mut self, s: &str) -> fmt::Result {
-            let bytes = s.as_bytes();
-            if self.len + bytes.len() > N {
-                return Err(fmt::Error);
-            }
-            self.buf[self.len..self.len + bytes.len()].copy_from_slice(bytes);
-            self.len += bytes.len();
-            Ok(())
-        }
+impl core::fmt::Write for VecWriter<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.0.extend_from_slice(s.as_bytes());
+        Ok(())
     }
 }
 
@@ -371,6 +348,26 @@ mod tests {
             write_num(&mut out, bad);
             assert_eq!(s(&out), "0", "non-finite {bad} leaked: {:?}", s(&out));
         }
+    }
+
+    #[test]
+    fn write_num_keeps_every_digit_of_long_values() {
+        // The Display form of these values is longer than 32 bytes.
+        // A fixed 32-byte scratch used to cut them short, so f32::MAX
+        // came out as "34028235".
+        let mut out = Vec::new();
+        write_num(&mut out, f32::MAX);
+        assert_eq!(s(&out), "340282350000000000000000000000000000000");
+
+        out.clear();
+        write_num(&mut out, -f32::MAX);
+        assert_eq!(s(&out), "-340282350000000000000000000000000000000");
+
+        out.clear();
+        write_num(&mut out, 1.0e-40);
+        let text = s(&out);
+        assert!(text.ends_with('1'), "tiny value lost its digits: {text:?}");
+        assert!(text.parse::<f32>().is_ok_and(|v| v == 1.0e-40));
     }
 
     #[test]

@@ -1,11 +1,9 @@
 #!/bin/bash
 # sigilbuzz pre-push hook.
 #
-# Mirrors the GitHub Actions CI gate so every push arrives green. CI
-# itself only runs on push-to-main and workflow_dispatch, so if this
-# hook does not catch a failure the feature branch may reach main
-# with a regression that Actions then discovers post-merge. Do not
-# skip with --no-verify.
+# Runs the same checks as CI, so problems show up before the push instead
+# of after. Clippy and the tests cover the whole workspace, not just the
+# root crate. Do not skip with --no-verify.
 #
 # Install by symlinking or copying into .git/hooks/pre-push:
 #
@@ -20,14 +18,14 @@ echo "[sigilbuzz pre-push] running local CI gate..."
 echo "  -> cargo fmt --all --check"
 cargo fmt --all --check
 
-echo "  -> cargo clippy --all-targets -- -D warnings"
-cargo clippy --all-targets -- -D warnings
+echo "  -> cargo clippy --workspace --all-targets -- -D warnings"
+cargo clippy --workspace --all-targets -- -D warnings
 
-echo "  -> cargo clippy --no-default-features --all-targets -- -D warnings"
-cargo clippy --no-default-features --all-targets -- -D warnings
+echo "  -> cargo clippy --workspace --no-default-features --all-targets -- -D warnings"
+cargo clippy --workspace --no-default-features --all-targets -- -D warnings
 
-echo "  -> cargo test --all-features"
-cargo test --all-features
+echo "  -> cargo test --workspace --all-features"
+cargo test --workspace --all-features
 
 echo "  -> cargo build --no-default-features"
 cargo build --no-default-features

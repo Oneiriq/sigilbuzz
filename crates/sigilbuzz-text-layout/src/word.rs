@@ -68,17 +68,20 @@ impl Iterator for WordBreakIter<'_> {
         if self.finished {
             return None;
         }
-        let bytes = self.text.as_bytes();
         loop {
-            if self.pos >= bytes.len() {
+            // `pos` only ever advances by whole chars, so this finds no
+            // char only at the end of the text.
+            let Some(ch) = self
+                .text
+                .get(self.pos..)
+                .and_then(|rest| rest.chars().next())
+            else {
                 self.finished = true;
                 if self.prev_kind.is_some() {
                     return Some(self.text.len());
                 }
                 return None;
-            }
-            let rest = &self.text[self.pos..];
-            let ch = rest.chars().next().expect("non-empty rest");
+            };
             let len = ch.len_utf8();
             let kind = classify(ch);
             let next_pos = self.pos + len;
