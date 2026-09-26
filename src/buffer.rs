@@ -95,7 +95,9 @@ pub struct Glyph {
 /// for future expansion without shifting existing meanings.
 pub mod unicode_prop {
     /// The glyph's source codepoint is a Unicode default-ignorable
-    /// format character (ZWJ, ZWNJ, LRM, RLM, ...).
+    /// format character (ZWJ, ZWNJ, LRM, RLM, ...) and GSUB has not
+    /// substituted it. Shaping gives glyphs that still carry this bit
+    /// a zero advance; any GSUB substitution clears it, as in HarfBuzz.
     pub const DEFAULT_IGNORABLE: u16 = 1 << 0;
     /// The glyph's source codepoint is a joiner (ZWJ).
     pub const JOINER: u16 = 1 << 1;

@@ -315,7 +315,7 @@ fn apply_parsed_lookup_at(
                     continue;
                 }
                 if let Some(out) = single.apply(id) {
-                    glyphs[at].glyph_id = u32::from(out);
+                    substitute_glyph(&mut glyphs[at], out);
                     ids.set(at, out);
                     return 1;
                 }
@@ -338,14 +338,14 @@ fn apply_parsed_lookup_at(
                     continue;
                 }
                 if let Some(out) = alt.apply(id, alternate_index) {
-                    glyphs[at].glyph_id = u32::from(out);
+                    substitute_glyph(&mut glyphs[at], out);
                     ids.set(at, out);
                     return 1;
                 }
             }
             ParsedGsubSubtable::Ligature(lig) => {
                 if let Some((out, positions)) = lig.apply_filtered(&ids.as_slice()[at..], filter) {
-                    glyphs[at].glyph_id = u32::from(out);
+                    substitute_glyph(&mut glyphs[at], out);
                     drain_ligature_components(glyphs, at, &positions);
                     ids.resync(glyphs);
                     // Ligature emits 1 glyph from N matched components.
@@ -392,7 +392,7 @@ fn apply_parsed_lookup_at(
             }
             ParsedGsubSubtable::ReverseChained(rc) => {
                 if let Some(out) = rc.apply(ids.as_slice(), at) {
-                    glyphs[at].glyph_id = u32::from(out);
+                    substitute_glyph(&mut glyphs[at], out);
                     ids.set(at, out);
                     return 1;
                 }
@@ -749,10 +749,11 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         } else {
             u32::from(cmap.glyph_id(ch).unwrap_or(0))
         };
-        // `unicode_props` is set once here and survives ligation /
-        // multiple-sub / final-reorder untouched. The Indic shaper
-        // relies on this to distinguish a ZWJ-triggered reph mode
-        // from an implicit one without re-scanning the text.
+        // `unicode_props` is set once here and follows the glyph
+        // through ligation, multiple substitution and final reorder.
+        // The zero-advance pass after positioning reads the
+        // DEFAULT_IGNORABLE bit; GSUB clears it on any glyph it
+        // substitutes (`substitute_glyph`), matching HarfBuzz.
         let mut props: u16 = 0;
         if is_default_ignorable(ch) {
             props |= unicode_prop::DEFAULT_IGNORABLE;
@@ -1101,13 +1102,13 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // Default-ignorable format characters (ZWJ, ZWNJ, bidi marks)
     // keep a zero advance in either axis. They rendered as space
     // earlier, but must not move the pen (HarfBuzz does the same).
-    // We walk the character stream once to collect their cluster
-    // offsets and then skip them in the advance pass.
-    let default_ignorable_clusters: Vec<u32> = text
-        .char_indices()
-        .filter(|(_, c)| is_default_ignorable(*c))
-        .map(|(i, _)| i as u32)
-        .collect();
+    // The per-glyph `unicode_props` bit set at cmap time identifies
+    // them. A cluster match is not enough: clusters merge through
+    // ligatures and multiple substitutions, so a visible glyph can
+    // share a cluster value with an ignorable one. GSUB clears the bit
+    // on any glyph it substitutes (see `substitute_glyph`).
+    let is_hidden_ignorable =
+        |glyph: &Glyph| glyph.unicode_props & unicode_prop::DEFAULT_IGNORABLE != 0;
     if is_vertical {
         if let Some(ref vmtx) = vmtx {
             // VVAR carries per-glyph vertical-advance deltas;
@@ -1122,7 +1123,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 face.vvar()?
             };
             for glyph in &mut glyphs {
-                if default_ignorable_clusters.contains(&glyph.cluster) {
+                if is_hidden_ignorable(glyph) {
                     continue;
                 }
                 let id = glyph.glyph_id as u16;
@@ -1152,7 +1153,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             let hhea = face.hhea()?;
             let fallback = (hhea.ascent as i32) - (hhea.descent as i32);
             for glyph in &mut glyphs {
-                if default_ignorable_clusters.contains(&glyph.cluster) {
+                if is_hidden_ignorable(glyph) {
                     continue;
                 }
                 glyph.y_advance = if buffer.direction().is_forward() {
@@ -1171,7 +1172,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             face.hvar()?
         };
         for glyph in &mut glyphs {
-            if default_ignorable_clusters.contains(&glyph.cluster) {
+            if is_hidden_ignorable(glyph) {
                 glyph.x_advance = 0;
                 continue;
             }
@@ -2007,7 +2008,7 @@ fn apply_gsub_lookup_at(
                     continue;
                 }
                 if let Some(out) = single.apply(id) {
-                    glyphs[at].glyph_id = u32::from(out);
+                    substitute_glyph(&mut glyphs[at], out);
                     ids.set(at, out);
                     return 1;
                 }
@@ -2036,7 +2037,7 @@ fn apply_gsub_lookup_at(
                     continue;
                 }
                 if let Some(out) = alt.apply(id, alternate_index) {
-                    glyphs[at].glyph_id = u32::from(out);
+                    substitute_glyph(&mut glyphs[at], out);
                     ids.set(at, out);
                     return 1;
                 }
@@ -2046,7 +2047,7 @@ fn apply_gsub_lookup_at(
                     continue;
                 };
                 if let Some((out, positions)) = lig.apply_filtered(&ids.as_slice()[at..], &filter) {
-                    glyphs[at].glyph_id = u32::from(out);
+                    substitute_glyph(&mut glyphs[at], out);
                     drain_ligature_components(glyphs, at, &positions);
                     let span = positions.last().copied().map_or(0, |p| p + 1);
                     ids.resync(glyphs);
@@ -2086,7 +2087,7 @@ fn apply_gsub_lookup_at(
                     continue;
                 };
                 if let Some(out) = rc.apply(ids.as_slice(), at) {
-                    glyphs[at].glyph_id = u32::from(out);
+                    substitute_glyph(&mut glyphs[at], out);
                     ids.set(at, out);
                     return 1;
                 }
@@ -2288,9 +2289,9 @@ fn expand_glyph_in_place(glyphs: &mut Vec<Glyph>, at: usize, seq: &[u16]) -> Opt
     // Inherit the source glyph's shaper-internal state so Indic
     // `indic_position` and unicode-property bits survive a
     // multiple-sub split. Rustybuzz does the same via its info mask.
-    let source_props = glyphs[at].unicode_props;
     let source_pos = glyphs[at].indic_position;
-    glyphs[at].glyph_id = u32::from(seq[0]);
+    substitute_glyph(&mut glyphs[at], seq[0]);
+    let source_props = glyphs[at].unicode_props;
     for (i, &out_gid) in seq.iter().enumerate().skip(1) {
         let mut g = Glyph::new(u32::from(out_gid), source_cluster);
         g.unicode_props = source_props;
@@ -2298,6 +2299,19 @@ fn expand_glyph_in_place(glyphs: &mut Vec<Glyph>, at: usize, seq: &[u16]) -> Opt
         glyphs.insert(at + i, g);
     }
     Some(seq.len())
+}
+
+/// Writes a GSUB substitution result into `glyph`.
+///
+/// Besides swapping the glyph id, this clears
+/// [`unicode_prop::DEFAULT_IGNORABLE`]: HarfBuzz stops hiding a
+/// default-ignorable glyph once GSUB has substituted it, because the
+/// font asked to draw something in its place. Every GSUB write site
+/// goes through here so the zero-advance pass in [`shape`] can trust
+/// the bit.
+fn substitute_glyph(glyph: &mut Glyph, gid: u16) {
+    glyph.glyph_id = u32::from(gid);
+    glyph.unicode_props &= !unicode_prop::DEFAULT_IGNORABLE;
 }
 
 /// Reverse chained single substitution (GSUB type 8). Walks the run
@@ -2315,7 +2329,7 @@ fn apply_reverse_chain_subtable(rc: &ReverseChain<'_>, glyphs: &mut [Glyph]) {
     let mut ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
     for i in (0..glyphs.len()).rev() {
         if let Some(out) = rc.apply(&ids, i) {
-            glyphs[i].glyph_id = u32::from(out);
+            substitute_glyph(&mut glyphs[i], out);
             ids[i] = out;
         }
     }
@@ -3991,6 +4005,71 @@ mod tests {
         buffer2.push_str("AB");
         let shaped2 = shape(&font, &buffer2, &features).unwrap();
         assert_eq!(shaped2.glyphs[1].glyph_id, 2);
+    }
+
+    #[test]
+    fn substitute_glyph_clears_only_the_ignorable_bit() {
+        let mut g = Glyph::new(0, 4);
+        g.unicode_props = unicode_prop::DEFAULT_IGNORABLE | unicode_prop::JOINER;
+        substitute_glyph(&mut g, 7);
+        assert_eq!(g.glyph_id, 7);
+        assert_eq!(g.unicode_props, unicode_prop::JOINER);
+        assert_eq!(g.cluster, 4);
+    }
+
+    #[test]
+    fn multiple_substitution_marks_every_output_glyph_substituted() {
+        let mut g = Glyph::new(0, 2);
+        g.unicode_props = unicode_prop::DEFAULT_IGNORABLE | unicode_prop::NON_JOINER;
+        let mut glyphs = alloc::vec![Glyph::new(1, 0), g];
+        assert_eq!(expand_glyph_in_place(&mut glyphs, 1, &[5, 6]), Some(2));
+        assert_eq!(glyphs.len(), 3);
+        for out in &glyphs[1..] {
+            assert_eq!(out.unicode_props, unicode_prop::NON_JOINER);
+            assert_eq!(out.cluster, 2);
+        }
+    }
+
+    #[test]
+    fn unsubstituted_ignorable_has_zero_advance() {
+        // ZWJ maps to the space glyph, which this font lacks, so it
+        // lands on glyph 0. The ignorable pass keeps it at zero.
+        let data =
+            build_shapeable_font_with_gsub(&[(1, build_single_fmt2_subst(&[0], &[3]))], &[0]);
+        let blob = Blob::new(&data);
+        let face = Face::parse(&blob, 0).unwrap();
+        let font = Font::new(face, 16.0);
+        let mut buffer = Buffer::new();
+        buffer.push_str("A\u{200D}B");
+        let shaped = shape(&font, &buffer, &[]).unwrap();
+        let ids: Vec<u32> = shaped.glyphs.iter().map(|g| g.glyph_id).collect();
+        let advances: Vec<i32> = shaped.glyphs.iter().map(|g| g.x_advance).collect();
+        assert_eq!(ids, [1, 0, 2]);
+        assert_eq!(advances, [500, 0, 600]);
+    }
+
+    #[test]
+    fn gsub_substituted_ignorable_keeps_its_advance() {
+        // A single substitution rewrites the ZWJ slot (glyph 0) to
+        // glyph 3 (advance 700). HarfBuzz stops hiding a
+        // default-ignorable once GSUB substitutes it, so the pen must
+        // move by glyph 3's advance.
+        let data =
+            build_shapeable_font_with_gsub(&[(1, build_single_fmt2_subst(&[0], &[3]))], &[0]);
+        let blob = Blob::new(&data);
+        let face = Face::parse(&blob, 0).unwrap();
+        let font = Font::new(face, 16.0);
+        let mut buffer = Buffer::new();
+        buffer.push_str("A\u{200D}B");
+        let features = [Feature {
+            tag: *b"test",
+            value: 1,
+        }];
+        let shaped = shape(&font, &buffer, &features).unwrap();
+        let ids: Vec<u32> = shaped.glyphs.iter().map(|g| g.glyph_id).collect();
+        let advances: Vec<i32> = shaped.glyphs.iter().map(|g| g.x_advance).collect();
+        assert_eq!(ids, [1, 3, 2]);
+        assert_eq!(advances, [500, 700, 600]);
     }
 
     #[test]
