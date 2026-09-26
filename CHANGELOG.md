@@ -50,6 +50,11 @@ Added:
 - `sigilbuzz-capi`: `hb_paint_funcs_set_color_glyph_func`. `hb_version` reports 8.2.0,
   the HarfBuzz release that added that callback.
 - `sigilbuzz-paint`: `Transform2D::inverse`.
+- `sigilbuzz-subset` 0.12.0: `SubsetWarning`, returned in `SubsetOutput::warnings` and
+  `InstancedOutput::warnings`. Every malformed layout or variation structure the
+  subsetter leaves out, instead of failing the run, is reported with its table, byte
+  offset and reason. The new fields break struct literals.
+- `ClassDef::empty` and `ClassDef::parse_at`.
 
 Changed:
 
@@ -200,6 +205,20 @@ Fixed:
   subset; no more panics on truncated mark arrays or SinglePos headers, or on 32-bit
   targets from crafted GDEF offsets; full and partial instancing rebuild GDEF instead
   of truncating it at the store, and partial instancing renumbers VariationIndex rows.
+- `sigilbuzz-subset`: subsets and instances of variable fonts keep GSUB and GPOS
+  FeatureVariations. Subsets remap their indices, full instances apply the record that
+  matches their coordinates, and partial instances settle pinned-axis conditions and
+  renumber the kept axes. They used to be written as version 1.0 and lose them.
+- `sigilbuzz-subset`: the closure keeps GSUB reverse chaining (type 8) substitutes.
+- `sigilbuzz-subset`: partial instancing checks every ItemVariationStore, HVAR, VVAR
+  and MVAR offset and size (no wraparound on 32-bit targets); a table it cannot rebuild
+  is dropped and reported instead of carried through with stale axes, and MVAR records
+  past 64 KiB are an error.
+- A null ClassDef offset is read as every glyph in class 0, as in HarfBuzz. The shaper
+  used to parse the subtable itself as the ClassDef, so chained context format 2
+  subtables with a null backtrack ClassDef (as fontmake writes them) failed to parse or
+  matched invented classes. PairPos format 2 and the subsetter's class-based rewriters
+  had the same bug.
 - `sigilbuzz-text-layout`: a lone CR produced no mandatory line break.
 
 Removed:
