@@ -273,10 +273,14 @@ mod tests {
         user_data: *mut c_void,
     ) -> c_uint {
         assert_eq!(user_data as usize, 0xAB);
+        // SAFETY: the test points `data` at three live stops.
         let stops = unsafe { &*data.cast::<[hb_color_stop_t; 3]>() };
         if !count.is_null() && !out.is_null() {
             let avail = stops.get(start as usize..).unwrap_or(&[]);
+            // SAFETY: the accessor's caller guarantees `count` is readable.
             let n = (unsafe { *count } as usize).min(avail.len());
+            // SAFETY: `out` has room for `*count >= n` stops and does not
+            // overlap `stops`; `count` is writable.
             unsafe {
                 ptr::copy_nonoverlapping(avail.as_ptr(), out, n);
                 *count = n as c_uint;
@@ -321,6 +325,8 @@ mod tests {
         };
         let mut out = [stop(9.0, 0); 4];
         let mut count: c_uint = 4;
+        // SAFETY: `line` and `stops` are live locals and `out` has room
+        // for `count` stops.
         unsafe {
             let total = hb_color_line_get_color_stops(&mut line, 1, &mut count, out.as_mut_ptr());
             assert_eq!((total, count), (3, 2));
@@ -336,6 +342,8 @@ mod tests {
     #[test]
     fn null_line_and_null_functions_are_empty_pad() {
         let mut count: c_uint = 5;
+        // SAFETY: null lines are accepted, `empty` is a live local, and
+        // no stop buffer is written.
         unsafe {
             assert_eq!(
                 hb_color_line_get_color_stops(ptr::null_mut(), 0, &mut count, ptr::null_mut()),

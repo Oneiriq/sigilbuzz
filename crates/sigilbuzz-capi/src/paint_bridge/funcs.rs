@@ -694,6 +694,8 @@ mod tests {
     fn create_reference_destroy_round_trips() {
         let f = hb_paint_funcs_create();
         assert!(!f.is_null());
+        // SAFETY: `f` is live with one reference; the extra one taken
+        // here is released, then the original.
         unsafe {
             assert_eq!(hb_paint_funcs_reference(f), f, "reference returns f");
             hb_paint_funcs_destroy(f);
@@ -706,6 +708,8 @@ mod tests {
     #[test]
     fn replacing_a_callback_destroys_the_old_user_data_once() {
         let f = hb_paint_funcs_create();
+        // SAFETY: `f` is live until the final destroy; the user_data
+        // tags are never dereferenced.
         unsafe {
             hb_paint_funcs_set_pop_clip_func(f, Some(noop), tag(0x1001), Some(record_destroy));
             assert_eq!(destroyed(0x1001), 0);
@@ -725,6 +729,8 @@ mod tests {
     #[test]
     fn null_func_destroys_the_new_user_data_immediately() {
         let f = hb_paint_funcs_create();
+        // SAFETY: `f` is live until the final destroy; the user_data
+        // tags are never dereferenced.
         unsafe {
             hb_paint_funcs_set_push_group_func(f, Some(noop), tag(0x2001), Some(record_destroy));
             hb_paint_funcs_set_push_group_func(f, None, tag(0x2002), Some(record_destroy));
@@ -741,6 +747,8 @@ mod tests {
     #[test]
     fn immutable_tables_refuse_setters() {
         let f = hb_paint_funcs_create();
+        // SAFETY: `f` is live until its destroy; null is accepted by
+        // every function called on it here.
         unsafe {
             assert_eq!(hb_paint_funcs_is_immutable(f), 0);
             hb_paint_funcs_set_pop_transform_func(f, Some(noop), tag(0x3001), Some(record_destroy));
@@ -760,6 +768,8 @@ mod tests {
 
     #[test]
     fn null_table_still_destroys_the_user_data() {
+        // SAFETY: a null table is accepted; the tag is never
+        // dereferenced.
         unsafe {
             hb_paint_funcs_set_color_func(ptr::null_mut(), None, tag(0x4001), Some(record_destroy));
         }
@@ -769,6 +779,8 @@ mod tests {
     #[test]
     fn freeing_destroys_every_slot_in_harfbuzz_order() {
         let f = hb_paint_funcs_create();
+        // SAFETY: `f` is live until its destroy; the user_data tags are
+        // never dereferenced.
         unsafe {
             // Install in reverse order; destruction follows slot order.
             hb_paint_funcs_set_pop_group_func(f, None, tag(0x5000), None);
