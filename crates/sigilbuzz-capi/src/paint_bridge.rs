@@ -32,7 +32,9 @@ use alloc::boxed::Box;
 use core::ffi::c_void;
 
 use crate::{hb_bool_t, hb_font_t};
-use sigilbuzz_paint::{evaluate_at_coords, Color, DrawCmd, GradientKind, PaintSource, Transform2D};
+use sigilbuzz_paint::{
+    evaluate_with_palette, Color, DrawCmd, GradientKind, PaintSource, Transform2D,
+};
 
 /// HarfBuzz's packed BGRA color. Layout: byte 0 = blue, byte 1 = green,
 /// byte 2 = red, byte 3 = alpha. Matches the `HB_COLOR(b, g, r, a)`
@@ -322,10 +324,12 @@ impl_setter!(
 
 /// Walks the COLRv1 paint tree for `gid` against `font`'s face, firing
 /// callbacks on `funcs` for each draw operation. `paint_data` is
-/// threaded through to every callback. `_palette_index` and
-/// `_foreground_color` are accepted for HarfBuzz signature parity
-/// only: the evaluator always uses its default palette, and solid
-/// colors are always reported with `is_foreground` set to 0.
+/// threaded through to every callback. `palette_index` picks the CPAL
+/// palette colors resolve in, as in HarfBuzz. A color in a palette the
+/// font does not have comes out transparent, where HarfBuzz reports
+/// the foreground color. `_foreground_color` is accepted for HarfBuzz
+/// signature parity only: solid colors are always reported with
+/// `is_foreground` set to 0.
 ///
 /// Paint evaluation applies the variation coordinates set on `font`
 /// with `hb_font_set_variations`, as HarfBuzz does. A `gid` above
@@ -341,7 +345,7 @@ pub unsafe extern "C" fn hb_font_paint_glyph(
     gid: u32,
     funcs: *mut hb_paint_funcs_t,
     paint_data: *mut c_void,
-    _palette_index: u32,
+    palette_index: u32,
     _foreground_color: hb_color_t,
 ) {
     if font.is_null() || funcs.is_null() {
@@ -361,7 +365,10 @@ pub unsafe extern "C" fn hb_font_paint_glyph(
     // callbacks run. A callback may call back into the font.
     let coords = font_inner.state.lock().coords.clone();
 
-    let cmds = evaluate_at_coords(face, gid, &coords);
+    // CPAL palette indices are 16-bit, so a larger index names no
+    // palette.
+    let palette = u16::try_from(palette_index).unwrap_or(u16::MAX);
+    let cmds = evaluate_with_palette(face, gid, &coords, palette);
 
     // Walk the DrawCmd stream and dispatch. Each callback slot is
     // read again right before use because a callback may replace the

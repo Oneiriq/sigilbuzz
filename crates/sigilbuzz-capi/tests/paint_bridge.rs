@@ -357,3 +357,60 @@ fn paint_glyph_applies_font_variations() {
         hb_blob_destroy(blob);
     }
 }
+
+/// HarfBuzz resolves colors in the palette the caller passes.
+#[test]
+fn paint_glyph_uses_the_requested_palette() {
+    // PaintSolid on glyph 7 using palette entry 0.
+    let mut colr = build_v1_header(7);
+    colr.push(2); // PaintSolid
+    colr.extend_from_slice(&0u16.to_be_bytes()); // palette entry 0
+    colr.extend_from_slice(&f2dot14(1.0)); // alpha 1.0
+                                           // CPAL with two one-entry palettes: red, then blue.
+    let mut cpal = Vec::new();
+    for word in [0u16, 1, 2, 2] {
+        cpal.extend_from_slice(&word.to_be_bytes()); // version, entries, palettes, records
+    }
+    cpal.extend_from_slice(&16u32.to_be_bytes()); // colorRecordsArrayOffset
+    cpal.extend_from_slice(&0u16.to_be_bytes()); // palette 0 starts at record 0
+    cpal.extend_from_slice(&1u16.to_be_bytes()); // palette 1 starts at record 1
+    cpal.extend_from_slice(&[0, 0, 255, 255]); // BGRA red
+    cpal.extend_from_slice(&[255, 0, 0, 255]); // BGRA blue
+    let bytes = build_face_bytes(&colr, &cpal);
+
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or a slice that outlives the call.
+    unsafe {
+        let blob = hb_blob_create(
+            bytes.as_ptr().cast::<c_char>(),
+            bytes.len() as c_uint,
+            HB_MEMORY_MODE_READONLY,
+            ptr::null_mut(),
+            None,
+        );
+        let face = hb_face_create(blob, 0);
+        let font = hb_font_create(face);
+        let funcs = hb_paint_funcs_create();
+        hb_paint_funcs_set_color_func(funcs, Some(cb_record_color));
+        let color = AtomicU32::new(0);
+        let data = ptr::from_ref(&color).cast_mut().cast::<c_void>();
+
+        hb_font_paint_glyph(font, 7, funcs, data, 0, 0);
+        assert_eq!(
+            color.load(Ordering::SeqCst),
+            0xFFFF_0000,
+            "palette 0 is red"
+        );
+        hb_font_paint_glyph(font, 7, funcs, data, 1, 0);
+        assert_eq!(
+            color.load(Ordering::SeqCst),
+            0xFF00_00FF,
+            "palette 1 is blue"
+        );
+
+        hb_paint_funcs_destroy(funcs);
+        hb_font_destroy(font);
+        hb_face_destroy(face);
+        hb_blob_destroy(blob);
+    }
+}
