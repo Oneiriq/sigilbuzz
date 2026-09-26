@@ -24,9 +24,9 @@ use super::Buffer;
 ///
 /// let mut buffer = Buffer::new();
 /// assert_eq!(buffer.flags(), BufferFlags::DEFAULT);
-/// buffer.set_flags(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE | BufferFlags::EOT);
-/// assert!(buffer.flags().contains(BufferFlags::EOT));
-/// assert_eq!(buffer.flags().bits(), 0x12);
+/// buffer.set_flags(BufferFlags::BOT | BufferFlags::EOT);
+/// assert!(buffer.flags().contains(BufferFlags::BOT));
+/// assert_eq!(buffer.flags().bits(), 0x3);
 /// ```
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufferFlags(u32);
@@ -34,18 +34,34 @@ pub struct BufferFlags(u32);
 impl BufferFlags {
     /// No flags, HarfBuzz's `HB_BUFFER_FLAG_DEFAULT`.
     pub const DEFAULT: Self = Self(0);
+    /// The text starts a paragraph (`HB_BUFFER_FLAG_BOT`). With it, and
+    /// no pre-context, a combining mark at the very start of the text
+    /// gets a U+25CC DOTTED CIRCLE to sit on, unless
+    /// [`Self::DO_NOT_INSERT_DOTTED_CIRCLE`] is also set or the font has
+    /// no glyph for U+25CC.
+    pub const BOT: Self = Self(0x01);
     /// The text ends a paragraph (`HB_BUFFER_FLAG_EOT`). HarfBuzz's
     /// OpenType shaper reads no end-of-text state, so this flag is
     /// kept for callers but changes nothing, there as here.
     pub const EOT: Self = Self(0x02);
-    /// Never insert U+25CC DOTTED CIRCLE for a broken Indic, Khmer,
-    /// Myanmar, or USE syllable
+    /// Default-ignorable characters (ZWJ, variation selectors, bidi
+    /// controls, ...) keep the font's glyph and its advance instead of
+    /// being hidden (`HB_BUFFER_FLAG_PRESERVE_DEFAULT_IGNORABLES`).
+    /// Takes precedence over [`Self::REMOVE_DEFAULT_IGNORABLES`].
+    pub const PRESERVE_DEFAULT_IGNORABLES: Self = Self(0x04);
+    /// Default-ignorable characters are deleted from the output, their
+    /// clusters merged into a neighbor, instead of being drawn as an
+    /// invisible zero-width space glyph
+    /// (`HB_BUFFER_FLAG_REMOVE_DEFAULT_IGNORABLES`).
+    pub const REMOVE_DEFAULT_IGNORABLES: Self = Self(0x08);
+    /// Never insert U+25CC DOTTED CIRCLE, neither for a broken Indic,
+    /// Khmer, Myanmar, or USE syllable nor at the start of the text
     /// (`HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE`). Useful when the
     /// run continues text shaped earlier.
     pub const DO_NOT_INSERT_DOTTED_CIRCLE: Self = Self(0x10);
 
     /// Every flag sigilbuzz defines.
-    const KNOWN: u32 = 0x12;
+    const KNOWN: u32 = 0x1F;
 
     /// The empty set, same as [`Self::DEFAULT`].
     #[must_use]
@@ -89,7 +105,7 @@ impl BufferFlags {
     /// ```
     /// use sigilbuzz::BufferFlags;
     ///
-    /// assert_eq!(BufferFlags::from_bits_truncate(0x22), BufferFlags::EOT);
+    /// assert_eq!(BufferFlags::from_bits_truncate(0x21), BufferFlags::BOT);
     /// ```
     #[must_use]
     pub const fn from_bits_truncate(bits: u32) -> Self {
@@ -147,9 +163,9 @@ impl BufferFlags {
     /// ```
     /// use sigilbuzz::BufferFlags;
     ///
-    /// let mut flags = BufferFlags::EOT;
+    /// let mut flags = BufferFlags::BOT;
     /// flags.set(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE, true);
-    /// flags.set(BufferFlags::EOT, false);
+    /// flags.set(BufferFlags::BOT, false);
     /// assert_eq!(flags, BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE);
     /// ```
     pub fn set(&mut self, other: Self, value: bool) {
@@ -353,27 +369,30 @@ mod tests {
     #[test]
     fn flag_values_match_harfbuzz() {
         assert_eq!(BufferFlags::DEFAULT.bits(), 0x00);
+        assert_eq!(BufferFlags::BOT.bits(), 0x01);
         assert_eq!(BufferFlags::EOT.bits(), 0x02);
+        assert_eq!(BufferFlags::PRESERVE_DEFAULT_IGNORABLES.bits(), 0x04);
+        assert_eq!(BufferFlags::REMOVE_DEFAULT_IGNORABLES.bits(), 0x08);
         assert_eq!(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE.bits(), 0x10);
-        assert_eq!(BufferFlags::all().bits(), 0x12);
+        assert_eq!(BufferFlags::all().bits(), 0x1F);
     }
 
     #[test]
     fn flag_set_operations() {
-        let circle = BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE;
         let mut f = BufferFlags::empty();
         assert!(f.is_empty());
-        f |= circle;
+        f |= BufferFlags::BOT;
         f.insert(BufferFlags::EOT);
-        assert!(f.contains(circle | BufferFlags::EOT));
-        assert!(f.intersects(BufferFlags::EOT));
-        assert_eq!(f - circle, BufferFlags::EOT);
-        assert_eq!(f & circle, circle);
+        assert!(f.contains(BufferFlags::BOT | BufferFlags::EOT));
+        assert!(!f.contains(BufferFlags::BOT | BufferFlags::REMOVE_DEFAULT_IGNORABLES));
+        assert!(f.intersects(BufferFlags::EOT | BufferFlags::REMOVE_DEFAULT_IGNORABLES));
+        assert_eq!(f - BufferFlags::BOT, BufferFlags::EOT);
+        assert_eq!(f & BufferFlags::BOT, BufferFlags::BOT);
         f -= BufferFlags::EOT;
-        assert_eq!(f, circle);
+        assert_eq!(f, BufferFlags::BOT);
         f &= BufferFlags::EOT;
         assert!(f.is_empty());
-        assert_eq!(BufferFlags::from_bits(0x12), Some(BufferFlags::all()));
+        assert_eq!(BufferFlags::from_bits(0x1F), Some(BufferFlags::all()));
         assert_eq!(BufferFlags::from_bits(0x40), None);
         assert_eq!(BufferFlags::from_bits_truncate(0xFF), BufferFlags::all());
     }
@@ -399,13 +418,13 @@ mod tests {
         let mut b = Buffer::new();
         assert_eq!(b.flags(), BufferFlags::DEFAULT);
         assert_eq!(b.cluster_level(), ClusterLevel::MonotoneCharacters);
-        b.set_flags(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE | BufferFlags::EOT);
+        b.set_flags(BufferFlags::BOT | BufferFlags::REMOVE_DEFAULT_IGNORABLES);
         b.set_cluster_level(ClusterLevel::Characters);
         b.push_str("abc");
         b.clear();
         assert_eq!(
             b.flags(),
-            BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE | BufferFlags::EOT
+            BufferFlags::BOT | BufferFlags::REMOVE_DEFAULT_IGNORABLES
         );
         assert_eq!(b.cluster_level(), ClusterLevel::Characters);
     }

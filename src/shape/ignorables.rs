@@ -11,11 +11,14 @@
 //! sigilbuzz follows the same order: [`unicode_props`] marks the
 //! glyphs at cmap time, GSUB clears the mark on any glyph it
 //! substitutes, and [`zero_width`] and [`hide`] run after positioning.
+//! The buffer flags `PRESERVE_DEFAULT_IGNORABLES` (keep the glyph and
+//! its advance) and `REMOVE_DEFAULT_IGNORABLES` (delete the glyph)
+//! change the last two steps exactly as they do in HarfBuzz.
 
 use alloc::vec::Vec;
 
 use super::cluster::merge_clusters;
-use crate::buffer::{unicode_prop, ClusterLevel, Glyph};
+use crate::buffer::{unicode_prop, BufferFlags, ClusterLevel, Glyph};
 
 /// HarfBuzz's `hb_unicode_funcs_t::is_default_ignorable` (in
 /// `hb-unicode.hh`): Default_Ignorable_Code_Point, except the Hangul
@@ -78,14 +81,36 @@ pub(super) fn zero_width(glyphs: &mut [Glyph], vertical: bool) {
     }
 }
 
-/// `hb_ot_hide_default_ignorables`: swaps every hidden glyph for the
-/// font's space glyph, or, when the font has none, deletes it and
-/// merges its cluster into a neighbor the way HarfBuzz's
-/// `delete_glyphs_inplace` does: backward at every cluster `level`,
-/// forward (into the next glyph) only at the monotone ones. `glyphs`
-/// is in output order.
-pub(super) fn hide(glyphs: &mut Vec<Glyph>, space: Option<u32>, level: ClusterLevel) {
-    if let Some(space) = space {
+/// True when [`zero_width`] should run for a buffer with `flags`:
+/// HarfBuzz skips the zeroing when the ignorables are to be preserved
+/// (they keep the font's advance) or removed (they go away anyway).
+pub(super) fn zeroes(flags: BufferFlags) -> bool {
+    !flags.intersects(
+        BufferFlags::PRESERVE_DEFAULT_IGNORABLES | BufferFlags::REMOVE_DEFAULT_IGNORABLES,
+    )
+}
+
+/// `hb_ot_hide_default_ignorables`, for a buffer with `flags` and
+/// cluster `level`. `glyphs` is in output order.
+///
+/// - With [`BufferFlags::PRESERVE_DEFAULT_IGNORABLES`], nothing
+///   happens: the glyphs keep the font's glyph and advance.
+/// - Otherwise every hidden glyph becomes the font's space glyph,
+///   unless [`BufferFlags::REMOVE_DEFAULT_IGNORABLES`] is set or the
+///   font has no space; then the glyph is deleted and its cluster
+///   merged into a neighbor, as HarfBuzz's `delete_glyphs_inplace`
+///   does: backward at every level, forward (into the next glyph)
+///   only at the monotone levels.
+pub(super) fn hide(
+    glyphs: &mut Vec<Glyph>,
+    space: Option<u32>,
+    flags: BufferFlags,
+    level: ClusterLevel,
+) {
+    if flags.contains(BufferFlags::PRESERVE_DEFAULT_IGNORABLES) {
+        return;
+    }
+    if let Some(space) = space.filter(|_| !flags.contains(BufferFlags::REMOVE_DEFAULT_IGNORABLES)) {
         for glyph in glyphs.iter_mut().filter(|g| is_hidden(g)) {
             glyph.glyph_id = space;
         }
@@ -225,7 +250,7 @@ mod tests {
     #[test]
     fn hide_swaps_in_the_space_glyph() {
         let mut glyphs = alloc::vec![glyph(1, 0, false), glyph(9, 1, true)];
-        hide(&mut glyphs, Some(3), MC);
+        hide(&mut glyphs, Some(3), BufferFlags::DEFAULT, MC);
         let ids: Vec<u32> = glyphs.iter().map(|g| g.glyph_id).collect();
         assert_eq!(ids, [1, 3]);
     }
@@ -234,24 +259,55 @@ mod tests {
     fn hide_without_a_space_glyph_deletes_and_merges_clusters() {
         // Leading ignorable: merged forward.
         let mut glyphs = alloc::vec![glyph(9, 0, true), glyph(1, 3, false)];
-        hide(&mut glyphs, None, MC);
+        hide(&mut glyphs, None, BufferFlags::DEFAULT, MC);
         let got: Vec<(u32, u32)> = glyphs.iter().map(|g| (g.glyph_id, g.cluster)).collect();
         assert_eq!(got, [(1, 0)]);
         // Ignorable after a glyph: its larger cluster just goes away.
         let mut glyphs = alloc::vec![glyph(1, 0, false), glyph(9, 1, true), glyph(2, 4, false)];
-        hide(&mut glyphs, None, MC);
+        hide(&mut glyphs, None, BufferFlags::DEFAULT, MC);
         let got: Vec<(u32, u32)> = glyphs.iter().map(|g| (g.glyph_id, g.cluster)).collect();
         assert_eq!(got, [(1, 0), (2, 4)]);
         // Right-to-left output: the ignorable's smaller cluster merges
         // backward into the glyphs before it.
         let mut glyphs = alloc::vec![glyph(2, 4, false), glyph(5, 4, false), glyph(9, 1, true)];
-        hide(&mut glyphs, None, MC);
+        hide(&mut glyphs, None, BufferFlags::DEFAULT, MC);
         let got: Vec<(u32, u32)> = glyphs.iter().map(|g| (g.glyph_id, g.cluster)).collect();
         assert_eq!(got, [(2, 1), (5, 1)]);
     }
 
     fn ids_and_clusters(glyphs: &[Glyph]) -> Vec<(u32, u32)> {
         glyphs.iter().map(|g| (g.glyph_id, g.cluster)).collect()
+    }
+
+    #[test]
+    fn preserve_keeps_the_real_glyph_and_skips_zeroing() {
+        let flags = BufferFlags::PRESERVE_DEFAULT_IGNORABLES;
+        assert!(!zeroes(flags));
+        // Preserve wins over remove, as in HarfBuzz.
+        assert!(!zeroes(flags | BufferFlags::REMOVE_DEFAULT_IGNORABLES));
+        let mut glyphs = alloc::vec![glyph(1, 0, false), glyph(9, 1, true)];
+        hide(
+            &mut glyphs,
+            Some(3),
+            flags | BufferFlags::REMOVE_DEFAULT_IGNORABLES,
+            MC,
+        );
+        assert_eq!(ids_and_clusters(&glyphs), [(1, 0), (9, 1)]);
+        assert_eq!(glyphs[1].x_advance, 500);
+    }
+
+    #[test]
+    fn remove_deletes_even_with_a_space_glyph() {
+        assert!(!zeroes(BufferFlags::REMOVE_DEFAULT_IGNORABLES));
+        assert!(zeroes(BufferFlags::BOT | BufferFlags::EOT));
+        let mut glyphs = alloc::vec![glyph(1, 0, false), glyph(9, 1, true), glyph(2, 4, false)];
+        hide(
+            &mut glyphs,
+            Some(3),
+            BufferFlags::REMOVE_DEFAULT_IGNORABLES,
+            MC,
+        );
+        assert_eq!(ids_and_clusters(&glyphs), [(1, 0), (2, 4)]);
     }
 
     #[test]
@@ -266,10 +322,10 @@ mod tests {
             (ClusterLevel::Graphemes, (1, 3)),
         ] {
             let mut glyphs = alloc::vec![glyph(9, 0, true), glyph(1, 3, false)];
-            hide(&mut glyphs, None, level);
+            hide(&mut glyphs, None, BufferFlags::DEFAULT, level);
             assert_eq!(ids_and_clusters(&glyphs), [forward], "{level:?}");
             let mut glyphs = alloc::vec![glyph(2, 4, false), glyph(9, 1, true)];
-            hide(&mut glyphs, None, level);
+            hide(&mut glyphs, None, BufferFlags::DEFAULT, level);
             assert_eq!(ids_and_clusters(&glyphs), [(2, 1)], "{level:?}");
         }
     }

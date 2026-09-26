@@ -114,6 +114,9 @@ pub(super) const fn is_common_for_segmentation(ch: char) -> bool {
         | 0x007B..=0x007F
         | 0x00A0..=0x00BF
         | 0x200C | 0x200D | 0x200E | 0x200F | 0x061C
+        // U+25CC DOTTED CIRCLE is Common: the one `hb_insert_dotted_circle`
+        // puts at the start of the text belongs to the mark after it.
+        | 0x25CC
         // INHERITED combining-mark blocks: must extend the preceding
         // real-script segment so GSUB dispatches under the right
         // priority. Matches `buffer::is_common_or_inherited`.

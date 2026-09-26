@@ -541,8 +541,8 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
 ///   ASCII digits so `"Price: 100 شلوم"` keeps the Arabic tail from
 ///   detaching on the digits.
 /// - Latin-1 punctuation / symbols (U+00A0..U+00BF).
-/// - The Unicode format-character block sigilbuzz already recognizes
-///   (ZWJ / ZWNJ / LRM / RLM / ALM).
+/// - The format characters sigilbuzz recognizes (ZWJ / ZWNJ / LRM /
+///   RLM / ALM) and the dotted circle, U+25CC, a Common symbol.
 /// - Unicode `INHERITED` combining-mark blocks: Combining
 ///   Diacritical Marks (U+0300..U+036F), the Supplement
 ///   (U+1DC0..U+1DFF), Combining Diacritical Marks for Symbols
@@ -568,8 +568,8 @@ const fn is_common_or_inherited(ch: char) -> bool {
         | 0x007B..=0x007F
         // Latin-1 punctuation / symbols block
         | 0x00A0..=0x00BF
-        // Unicode format characters the shaper recognizes.
-        | 0x200C | 0x200D | 0x200E | 0x200F | 0x061C
+        // Format characters the shaper recognizes, U+25CC DOTTED CIRCLE.
+        | 0x200C | 0x200D | 0x200E | 0x200F | 0x061C | 0x25CC
         // INHERITED combining-mark blocks.
         | 0x0300..=0x036F
         | 0x1DC0..=0x1DFF

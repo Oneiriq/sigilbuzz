@@ -15,7 +15,8 @@
 //! on glyph id, advance, and offset. Clusters are left out: these
 //! buffers keep sigilbuzz's default cluster level, MONOTONE_CHARACTERS,
 //! while rustybuzz defaults to MONOTONE_GRAPHEMES, which merges a
-//! grapheme's clusters (`hb_form_clusters`).
+//! grapheme's clusters (`hb_form_clusters`). `buffer_flags_parity.rs`
+//! compares hidden and removed ignorables' clusters level by level.
 //!
 //! Known gaps, not covered here: HarfBuzz's lookup matcher also skips
 //! default-ignorable glyphs inside a match (ZWJ within `liga` input, any

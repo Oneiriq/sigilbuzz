@@ -77,12 +77,14 @@ signatures only change in a major version.
   - `Buffer::unset_direction`: forget the caller's direction, like HarfBuzz's
     `hb_buffer_set_direction(buffer, HB_DIRECTION_INVALID)`
   - `BufferFlags` and `Buffer::{set_flags, flags}`: HarfBuzz's buffer flags with
-    HarfBuzz's values (`EOT`, `DO_NOT_INSERT_DOTTED_CIRCLE`). They replace the
+    HarfBuzz's values (`BOT`, `EOT`, `PRESERVE_DEFAULT_IGNORABLES`,
+    `REMOVE_DEFAULT_IGNORABLES`, `DO_NOT_INSERT_DOTTED_CIRCLE`). They replace the
     `Buffer::{set_insert_dotted_circle, insert_dotted_circle}` pair that 0.22.0
-    development builds had, and survive `Buffer::clear`.
+    development builds had.
   - `ClusterLevel` and `Buffer::{set_cluster_level, cluster_level}`: HarfBuzz's four
     cluster levels. A Rust `Buffer` defaults to `MonotoneCharacters`; the C API
-    defaults to HarfBuzz's `MONOTONE_GRAPHEMES`. The level survives `Buffer::clear`.
+    defaults to HarfBuzz's `MONOTONE_GRAPHEMES`. Both settings survive
+    `Buffer::clear`.
 
 `sigilbuzz-render`:
 

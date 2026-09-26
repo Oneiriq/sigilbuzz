@@ -72,7 +72,7 @@
 //! vertical top-to-bottom layout. An explicit
 //! [`crate::Direction::Ltr`] keeps Mongolian horizontal.
 //!
-//! # Clusters
+//! # Clusters and buffer flags
 //!
 //! Every glyph starts with the UTF-8 offset of its character as its
 //! cluster. The buffer's [`crate::ClusterLevel`] then decides, at each
@@ -81,7 +81,9 @@
 //! grapheme in a non-native direction, ligatures, the Indic, Khmer,
 //! Myanmar, and USE reorderings, Thai and Lao SARA AM, Old Hangul jamo
 //! sequences, and deleted default ignorables (see the `cluster`
-//! submodule).
+//! submodule). The [`crate::BufferFlags`] add HarfBuzz's dotted circle
+//! at the start of a paragraph (`BOT`), turn dotted circles off, and
+//! keep or remove default-ignorable glyphs instead of hiding them.
 //!
 //! # What is not here yet
 //!

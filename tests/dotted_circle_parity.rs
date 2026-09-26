@@ -2,9 +2,11 @@
 //!
 //! A dependent mark that starts a syllable in an Indic, Khmer,
 //! Myanmar, or USE script gets U+25CC DOTTED CIRCLE inserted in front
-//! of it, as HarfBuzz's `hb_syllabic_insert_dotted_circles` does.
-//! `BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE` turns that off, and a
-//! font with no dotted circle glyph gets none.
+//! of it, as HarfBuzz's `hb_syllabic_insert_dotted_circles` does. With
+//! `BufferFlags::BOT` and no pre-context, a combining mark of any
+//! script at the very start of the text gets one too
+//! (`hb_insert_dotted_circle`). `BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE`
+//! turns both off, and a font with no dotted circle glyph gets none.
 //!
 //! Glyph ids, clusters, advances, and offsets are compared with
 //! rustybuzz 0.20 at its default cluster level, MONOTONE_GRAPHEMES.
@@ -127,4 +129,49 @@ fn the_flag_turns_insertion_off() {
 #[test]
 fn fonts_without_a_dotted_circle_get_none() {
     assert_parity(OPEN_SANS, &["\u{093F}", "\u{17C1}\u{1780}"], true);
+    assert_parity_with(OPEN_SANS, &["\u{0301}a"], BufferFlags::BOT, "");
+}
+
+/// Text that opens with a combining mark of a script without a
+/// syllabic shaper.
+const LEADING_MARKS: &[&str] = &["\u{0301}a", "\u{0301}\u{0308}", "\u{FE0F}x"];
+
+#[test]
+fn bot_puts_a_dotted_circle_under_a_leading_mark() {
+    // Noto Sans Devanagari has U+25CC and Latin letters.
+    assert_parity_with(DEVANAGARI, LEADING_MARKS, BufferFlags::BOT, "");
+    let circle = sigilbuzz_rows(DEVANAGARI, "\u{25CC}", BufferFlags::DEFAULT, "")[0].0;
+    let rows = sigilbuzz_rows(DEVANAGARI, "\u{0301}a", BufferFlags::BOT, "");
+    assert_eq!(rows[0].0, circle);
+    // The circle takes the mark's cluster.
+    assert_eq!((rows[0].1, rows[1].1), (0, 0));
+    // A syllabic shaper sees a valid syllable then: one circle only.
+    assert_parity_with(
+        DEVANAGARI,
+        &["\u{093F}", "\u{094D}\u{0915}"],
+        BufferFlags::BOT,
+        "",
+    );
+}
+
+#[test]
+fn bot_circle_needs_bot_no_pre_context_and_no_opt_out() {
+    // Without BOT, no circle for a Latin mark.
+    assert_parity_with(DEVANAGARI, LEADING_MARKS, BufferFlags::DEFAULT, "");
+    assert_eq!(
+        sigilbuzz_rows(DEVANAGARI, "\u{0301}a", BufferFlags::DEFAULT, "").len(),
+        2
+    );
+    // Pre-context means the text does not really start here.
+    assert_parity_with(DEVANAGARI, LEADING_MARKS, BufferFlags::BOT, "a");
+    assert_eq!(
+        sigilbuzz_rows(DEVANAGARI, "\u{0301}a", BufferFlags::BOT, "a").len(),
+        2
+    );
+    // The opt-out flag wins.
+    let both = BufferFlags::BOT | BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE;
+    assert_parity_with(DEVANAGARI, LEADING_MARKS, both, "");
+    assert_parity_with(DEVANAGARI, DEVANAGARI_BROKEN, both, "");
+    // EOT changes nothing.
+    assert_parity_with(DEVANAGARI, LEADING_MARKS, BufferFlags::EOT, "");
 }

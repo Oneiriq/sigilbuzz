@@ -125,6 +125,22 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let mut cont: Vec<bool> = Vec::with_capacity(text.len());
     let flags = buffer.flags();
     let level = buffer.cluster_level();
+    // HarfBuzz's `hb_insert_dotted_circle`: a paragraph start (BOT)
+    // with no pre-context that opens with a combining mark gets a
+    // dotted circle, with the mark's cluster, for the mark to sit on.
+    if flags.contains(BufferFlags::BOT)
+        && !flags.contains(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE)
+        && buffer.pre_context().is_empty()
+        && typed.first().is_some_and(|&c| cluster::is_unicode_mark(c))
+    {
+        if let (Some(&(cluster, _)), Some(circle)) =
+            (composed_chars.first(), cmap.glyph_id('\u{25CC}'))
+        {
+            glyphs.push(Glyph::new(u32::from(circle), cluster));
+            codepoints.push('\u{25CC}');
+            cont.push(false);
+        }
+    }
     // Backward runs mirror paired punctuation (see `rotate`); these
     // are the indices in `codepoints` that were replaced.
     let backward = !direction.is_forward();
@@ -716,6 +732,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         dominant_script,
         has_gsub: gsub.is_some(),
         applied_morx,
+        zero_ignorables: ignorables::zeroes(flags),
     };
     position::position(&inputs, &mut glyphs, &seg_glyph_ranges)?;
 
@@ -725,9 +742,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         glyphs.reverse();
     }
 
-    // Then the ignorables become the invisible space glyph.
+    // Then the ignorables become the invisible space glyph (or are
+    // kept or removed, as the buffer flags ask).
     let space = cmap.glyph_id(' ').map(u32::from);
-    ignorables::hide(&mut glyphs, space, level);
+    ignorables::hide(&mut glyphs, space, flags, level);
 
     Ok(ShapedRun { glyphs })
 }

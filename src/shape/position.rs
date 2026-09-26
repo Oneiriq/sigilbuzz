@@ -105,6 +105,9 @@ pub(super) struct Inputs<'a> {
     pub(super) has_gsub: bool,
     /// The AAT `morx` table did the substitution.
     pub(super) applied_morx: bool,
+    /// Default ignorables get zero advances (the buffer flags neither
+    /// preserve nor remove them).
+    pub(super) zero_ignorables: bool,
 }
 
 /// Positions `glyphs` (default advances already set), segment by
@@ -206,7 +209,9 @@ pub(super) fn position(
     if zero_marks && zeroing == MarkZeroing::Late {
         zero_mark_widths(glyphs, input.gdef, adjust_offsets);
     }
-    super::ignorables::zero_width(glyphs, !horizontal);
+    if input.zero_ignorables {
+        super::ignorables::zero_width(glyphs, !horizontal);
+    }
 
     // Attachment offsets are resolved only now, against the final
     // advances, with the direction-specific advance compensation.
