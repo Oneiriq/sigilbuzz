@@ -44,7 +44,9 @@
 //! - **Type 7 (context positioning)**: formats 1 / 2 / 3, mirroring
 //!   the GSUB type-5 byte-level rewriter. Nested `PosLookupRecord`s
 //!   are renumbered through the GPOS lookup-list renumber map driven
-//!   by the two-phase build in [`crate::layout::build_gpos`].
+//!   by the two-phase build in [`crate::layout::build_gpos`]. Rules
+//!   left without records (`ignore pos`) are kept, since they stop
+//!   the later rules of their lookup from matching.
 //! - **Type 8 (chained context positioning)**: formats 1 / 2 / 3,
 //!   mirroring the GSUB type-6 byte-level rewriter. Same driver hook
 //!   as type 7 for the lookup-renumber pass.
@@ -1499,9 +1501,6 @@ fn rewrite_context_pos_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<V
             ) else {
                 continue;
             };
-            if records.is_empty() {
-                continue;
-            }
             let mut body = Vec::with_capacity(4 + records.len() * 4);
             body.extend_from_slice(&0u16.to_be_bytes());
             body.extend_from_slice(&(records.len() as u16).to_be_bytes());
@@ -1536,9 +1535,6 @@ fn rewrite_context_pos_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<V
         else {
             continue;
         };
-        if records.is_empty() {
-            continue;
-        }
 
         let mut body = Vec::with_capacity(4 + tail * 2 + records.len() * 4);
         body.extend_from_slice(&(glyph_count as u16).to_be_bytes());
@@ -1742,9 +1738,6 @@ fn rewrite_context_pos_class_set(
         else {
             continue;
         };
-        if records.is_empty() {
-            continue;
-        }
         let mut body = Vec::with_capacity(4 + tail * 2 + records.len() * 4);
         body.extend_from_slice(&(glyph_count as u16).to_be_bytes());
         body.extend_from_slice(&(records.len() as u16).to_be_bytes());
@@ -1809,9 +1802,6 @@ fn rewrite_context_pos_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<Rewritte
 
     let recs_off = cov_offs_off + glyph_count * 2;
     let records = parse_and_remap_lookup_records(sub, recs_off, lookup_count, ctx.lookup_renumber)?;
-    if records.is_empty() {
-        return None;
-    }
 
     let mut out = Vec::new();
     out.extend_from_slice(&3u16.to_be_bytes());
@@ -1987,9 +1977,6 @@ fn rewrite_chain_context_pos_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Op
         ) else {
             continue;
         };
-        if records.is_empty() {
-            continue;
-        }
 
         let mut body = Vec::new();
         body.extend_from_slice(&(new_bt.len() as u16).to_be_bytes());
@@ -2254,9 +2241,6 @@ fn rewrite_chain_context_pos_class_set(
         ) else {
             continue;
         };
-        if records.is_empty() {
-            continue;
-        }
 
         let mut body = Vec::new();
         body.extend_from_slice(&(bt_classes.len() as u16).to_be_bytes());
@@ -2362,9 +2346,6 @@ fn rewrite_chain_context_pos_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<Re
 
     let records =
         parse_and_remap_lookup_records(sub, recs_start, lookup_count, ctx.lookup_renumber)?;
-    if records.is_empty() {
-        return None;
-    }
 
     let mut out = Vec::new();
     out.extend_from_slice(&3u16.to_be_bytes());
@@ -3229,7 +3210,9 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_context_pos_format3_drops_when_record_targets_dropped() {
+    fn rewrite_context_pos_format3_keeps_rule_when_record_targets_dropped() {
+        // Left without records the rule acts as `ignore pos`: it still
+        // stops the later subtables of its lookup, so it must stay.
         let bytes = build_context_pos_format3(&[vec![10]], &[(0, 5)]);
         let map = map_from_pairs(&[(0, 0), (10, 1)]);
         let renumber: Vec<Option<u16>> = vec![None, None, None, None, None, None];
@@ -3237,7 +3220,27 @@ mod tests {
             gid_map: &map,
             lookup_renumber: Some(&renumber),
         };
-        assert!(rewrite_context_pos(&ctx, &bytes).is_none());
+        let rs = rewrite_context_pos(&ctx, &bytes).expect("the rule survives");
+        let glyph_count = u16::from_be_bytes([rs.bytes[2], rs.bytes[3]]);
+        let rec_count = u16::from_be_bytes([rs.bytes[4], rs.bytes[5]]);
+        assert_eq!((glyph_count, rec_count), (1, 0));
+    }
+
+    #[test]
+    fn rewrite_chain_context_pos_format3_keeps_source_ignore_rule() {
+        // Compiled from `ignore pos a b' c;`: no records to begin with.
+        let bytes = build_chain_context_pos_format3(&[vec![5]], &[vec![10]], &[vec![30]], &[]);
+        let map = map_from_pairs(&[(0, 0), (5, 50), (10, 100), (30, 300)]);
+        let renumber: Vec<Option<u16>> = vec![Some(0)];
+        let ctx = RewriterCtx {
+            gid_map: &map,
+            lookup_renumber: Some(&renumber),
+        };
+        let rs = rewrite_chain_context_pos(&ctx, &bytes).expect("the ignore rule survives");
+        // u16 fmt, then per sequence a count and its Offset16s, then
+        // the record count.
+        let at = |pos: usize| u16::from_be_bytes([rs.bytes[pos], rs.bytes[pos + 1]]);
+        assert_eq!((at(2), at(6), at(10), at(14)), (1, 1, 1, 0));
     }
 
     // ----- Type 8: Chained Context Positioning -----

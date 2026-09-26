@@ -30,7 +30,9 @@
 //!   position Coverage through the GidMap; drops any Rule whose input
 //!   tail loses a gid; drops nested `SubstLookupRecord`s whose target
 //!   lookup dropped (renumber map is wired in by the GSUB driver in a
-//!   second pass, see [`context_lookup_type`]).
+//!   second pass, see [`context_lookup_type`]). A Rule that ends up
+//!   with no records is kept: it is an `ignore sub` rule, or behaves
+//!   like one, and still shields the rules after it.
 //! - **Type 6 (chained context)**: formats 1, 2, 3. Mirrors type 5
 //!   with three sequences (backtrack / input / lookahead). Drops a
 //!   ChainRule when any required gid in any of the three sequences is
@@ -745,9 +747,16 @@ pub(crate) struct PatchedLookupRecord {
 
 /// Walks `count` `SubstLookupRecord` entries from `bytes` starting at
 /// `off`. When `lookup_renumber` is `Some`, drops any record whose
-/// target lookup is `None` (was dropped in phase 1) and remaps survivors
-/// through the map. Returns the surviving records. Each record is
-/// 4 bytes: `u16 sequence_index, u16 lookup_list_index`.
+/// target lookup is `None` (it did not survive the rewrite) and remaps
+/// survivors through the map. Returns the surviving records. Each
+/// record is 4 bytes: `u16 sequence_index, u16 lookup_list_index`.
+///
+/// An empty result does not make the rule disposable. A rule without
+/// records is how `ignore sub` / `ignore pos` statements compile: it
+/// applies nothing, but once it matches, the shaper moves on without
+/// trying the later rules and subtables of the lookup at that
+/// position. Dropping it would let those later rules fire where the
+/// source font suppressed them, so every caller keeps the rule.
 ///
 /// Shared between GSUB context (types 5 / 6 / 8) and GPOS context
 /// (types 7 / 8). `PosLookupRecord` has the same 4-byte layout as
@@ -770,9 +779,8 @@ pub(crate) fn parse_and_remap_lookup_records(
         let new_li = match lookup_renumber {
             Some(map) => match map.get(li as usize) {
                 Some(Some(n)) => *n,
-                // Dropped target: drop this record. A context rule
-                // with no surviving nested lookups is meaningless and
-                // its subtable will be considered empty.
+                // Dropped target: drop this record only. The rule
+                // itself stays, see above.
                 _ => continue,
             },
             None => li,
@@ -906,9 +914,6 @@ fn rewrite_type5_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
             ) else {
                 continue;
             };
-            if records.is_empty() {
-                continue;
-            }
             let mut body = Vec::with_capacity(4 + records.len() * 4);
             body.extend_from_slice(&0u16.to_be_bytes());
             body.extend_from_slice(&(records.len() as u16).to_be_bytes());
@@ -946,11 +951,9 @@ fn rewrite_type5_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
         else {
             continue;
         };
-        if records.is_empty() {
-            // Rule with surviving input but no surviving nested lookup
-            // is meaningless. Drop it.
-            continue;
-        }
+        // A rule left without records still matches and still stops
+        // the later rules of this lookup, so it stays (see
+        // `parse_and_remap_lookup_records`).
 
         // Rule body: u16 glyphCount, u16 substLookupRecordCount,
         //            u16 input_tail[count-1], SubstLookupRecord[].
@@ -1207,9 +1210,6 @@ fn rewrite_type5_class_set(
         else {
             continue;
         };
-        if records.is_empty() {
-            continue;
-        }
         let mut body = Vec::with_capacity(4 + tail * 2 + records.len() * 4);
         body.extend_from_slice(&(glyph_count as u16).to_be_bytes());
         body.extend_from_slice(&(records.len() as u16).to_be_bytes());
@@ -1277,9 +1277,6 @@ fn rewrite_type5_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
 
     let recs_off = cov_offs_off + glyph_count * 2;
     let records = parse_and_remap_lookup_records(sub, recs_off, lookup_count, ctx.lookup_renumber)?;
-    if records.is_empty() {
-        return None;
-    }
 
     // Emit:
     //   header (6 bytes)
@@ -1485,9 +1482,6 @@ fn rewrite_type6_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
         ) else {
             continue;
         };
-        if records.is_empty() {
-            continue;
-        }
 
         // Rule body.
         let mut body = Vec::new();
@@ -1778,9 +1772,6 @@ fn rewrite_type6_class_set(
         ) else {
             continue;
         };
-        if records.is_empty() {
-            continue;
-        }
 
         let mut body = Vec::new();
         body.extend_from_slice(&(bt_classes.len() as u16).to_be_bytes());
@@ -1887,9 +1878,6 @@ fn rewrite_type6_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
 
     let records =
         parse_and_remap_lookup_records(sub, recs_start, lookup_count, ctx.lookup_renumber)?;
-    if records.is_empty() {
-        return None;
-    }
 
     // Emit:
     //   header bytes
@@ -3250,7 +3238,9 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_type5_format1_drops_rule_when_all_records_drop() {
+    fn rewrite_type5_format1_keeps_rule_when_all_records_drop() {
+        // A rule without records is an `ignore sub` rule: it still
+        // matches and still shields the rules after it.
         let bytes = build_type5_format1(&[(10, vec![(vec![20], vec![(0, 5)])])]);
         let map = map_from_pairs(&[(0, 0), (10, 9), (20, 19)]);
         let renumber = vec![None, None, None, None, None, None]; // all dropped
@@ -3258,7 +3248,14 @@ mod tests {
             gid_map: &map,
             lookup_renumber: Some(&renumber),
         };
-        assert!(rewrite_type5(&ctx, &bytes).is_none());
+        let rs = rewrite_type5(&ctx, &bytes).expect("the rule survives");
+        let at = |pos: usize| usize::from(u16::from_be_bytes([rs.bytes[pos], rs.bytes[pos + 1]]));
+        let set = at(6);
+        assert_eq!(at(set), 1, "one rule in the set");
+        let rule = set + at(set + 2);
+        assert_eq!(at(rule), 2, "glyphCount");
+        assert_eq!(at(rule + 2), 0, "no records left");
+        assert_eq!(at(rule + 4), 19, "input tail remapped");
     }
 
     #[test]
@@ -3454,15 +3451,38 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_type6_format3_drops_subtable_when_all_records_drop() {
-        let bytes = build_type6_format3(&[], &[vec![10]], &[], &[(0, 1), (1, 5)]);
-        let map = map_from_pairs(&[(0, 0), (10, 100)]);
+    fn rewrite_type6_format3_keeps_subtable_when_all_records_drop() {
+        // The subtable becomes an `ignore sub` rule, which still stops
+        // the later subtables of its lookup from matching.
+        let bytes = build_type6_format3(&[vec![5]], &[vec![10]], &[], &[(0, 1), (1, 5)]);
+        let map = map_from_pairs(&[(0, 0), (5, 50), (10, 100)]);
         let renumber = vec![None, None, None, None, None, None];
         let ctx = RewriterCtx {
             gid_map: &map,
             lookup_renumber: Some(&renumber),
         };
-        assert!(rewrite_type6(&ctx, &bytes).is_none());
+        let rs = rewrite_type6(&ctx, &bytes).expect("the subtable survives");
+        let parsed = sigilbuzz::tables::gsub::ChainContext::parse(&rs.bytes).unwrap();
+        assert_eq!(parsed.context_len(), (1, 1, 0));
+        assert!(parsed.substitutions().is_empty());
+    }
+
+    #[test]
+    fn rewrite_type6_format3_keeps_source_ignore_rule() {
+        // Compiled from `ignore sub a b' c;`: no records at all, even
+        // before any lookup drops.
+        let bytes = build_type6_format3(&[vec![5]], &[vec![10]], &[vec![30]], &[]);
+        let map = map_from_pairs(&[(0, 0), (5, 50), (10, 100), (30, 300)]);
+        for renumber in [None, Some(alloc::vec![Some(0u16)])] {
+            let ctx = RewriterCtx {
+                gid_map: &map,
+                lookup_renumber: renumber.as_deref(),
+            };
+            let rs = rewrite_type6(&ctx, &bytes).expect("the ignore rule survives");
+            let parsed = sigilbuzz::tables::gsub::ChainContext::parse(&rs.bytes).unwrap();
+            assert_eq!(parsed.context_len(), (1, 1, 1));
+            assert!(parsed.substitutions().is_empty());
+        }
     }
 
     #[test]

@@ -266,12 +266,12 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
     let gsub_table = face.gsub().ok().flatten()?;
     let lookups = gsub_table.lookup_list();
 
-    // Phase 1: per-lookup rewrite. Context-style lookups (types
+    // First pass: per-lookup rewrite. Context-style lookups (types
     // 5 / 6) carry nested `SubstLookupRecord` entries that point at
     // sibling lookups by index; on this pass we don't yet know
     // which sibling lookups survive, so the rewriters preserve the
     // source's lookup-list indices verbatim and we patch them in
-    // phase 2 once the renumber map is known.
+    // the second pass once the renumber map is known.
     let mut rewritten: Vec<Option<RewrittenLookup>> = Vec::with_capacity(lookups.len() as usize);
     for li in 0..lookups.len() {
         let Some(lookup) = lookups.get(li) else {
@@ -294,14 +294,15 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
         rewritten.push(rewritten_lookup);
     }
 
-    // Phase 2: iterate context-lookup renumber to a fixed point.
-    // Each iteration rebuilds the renumber map from the surviving
-    // lookups, then re-rewrites every context-style lookup with the
-    // new map; a context lookup whose `SubstLookupRecord`s all point
-    // at dropped lookups loses every subtable and falls out, which
-    // may in turn cascade into other context lookups losing their
-    // targets. Bounded by `lookups.len()` since each iteration only
-    // ever drops more lookups (or stabilizes).
+    // Second pass: re-rewrite every context-style lookup with the renumber
+    // map so its `SubstLookupRecord`s name the new lookup indices and
+    // records aiming at dropped lookups go. Rules left without records
+    // stay (they act as `ignore sub` rules), so a context lookup only
+    // drops when its glyph coverage empties, which the first pass already
+    // saw. The loop is a guard: should a lookup still drop here, the
+    // renumber map is rebuilt and the pass repeats. Bounded by
+    // `lookups.len()` since each iteration only ever drops more
+    // lookups (or stabilizes).
     let mut renumber = build_renumber(&rewritten);
     for _ in 0..lookups.len() {
         let mut changed = false;
@@ -310,7 +311,7 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
             lookup_renumber: Some(&renumber),
         };
         for li in 0..lookups.len() {
-            // Only re-rewrite slots that survived phase 1; nothing to
+            // Only re-rewrite slots that survived the first pass; nothing to
             // resurrect here.
             if rewritten
                 .get(li as usize)
@@ -339,9 +340,8 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
                 lookup.mark_filtering_set(),
                 &subtable_bodies,
             );
-            // A context lookup whose every nested target dropped
-            // returns None now that the renumber knows. Mark it as
-            // dropped and trigger another pass.
+            // Not expected (see above), but a lookup that drops here
+            // is marked dropped and triggers another pass.
             if new_lookup.is_none() {
                 if rewritten[li as usize].is_some() {
                     rewritten[li as usize] = None;
@@ -357,7 +357,7 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
         renumber = build_renumber(&rewritten);
     }
 
-    // Phase 3: rewrite features and scripts. ScriptList walks raw
+    // Last: rewrite features and scripts. ScriptList walks raw
     // bytes because the parser doesn't expose enumeration of named
     // LangSys records.
     let feature_list = gsub_table.feature_list();
@@ -382,17 +382,17 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
     )
 }
 
-/// Drives the GPOS rewrite, same two-phase shape as [`build_gsub`].
+/// Drives the GPOS rewrite, same two-pass shape as [`build_gsub`].
 /// The per-type rewriters cover every GPOS lookup type (1-9). Context
 /// lookups (types 7 / 8) carry nested `PosLookupRecord`s pointing at
-/// sibling lookups by index; phase 1 preserves the source indices,
-/// phase 2 rewrites them through the renumber map iterated to a fixed
+/// sibling lookups by index; the first pass keeps the source indices,
+/// the second pass rewrites them through the renumber map iterated to a fixed
 /// point.
 pub(crate) fn build_gpos(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> {
     let gpos_table = face.gpos().ok().flatten()?;
     let lookups = gpos_table.lookup_list();
 
-    // Phase 1: per-lookup rewrite. Context-style lookups
+    // First pass: per-lookup rewrite. Context-style lookups
     // (types 7 / 8) preserve the source's lookup-list indices so we
     // can decide what survives before patching.
     let mut rewritten: Vec<Option<RewrittenLookup>> = Vec::with_capacity(lookups.len() as usize);
@@ -417,10 +417,9 @@ pub(crate) fn build_gpos(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
         rewritten.push(rewritten_lookup);
     }
 
-    // Phase 2: iterate context-lookup renumber to a fixed point.
-    // Mirrors the GSUB driver: a context lookup whose every nested
-    // `PosLookupRecord` points at a dropped sibling collapses, which
-    // can in turn make other context lookups collapse.
+    // Second pass: patch the `PosLookupRecord`s of every context-style
+    // lookup through the renumber map. Mirrors the GSUB driver,
+    // including keeping rules left without records (`ignore pos`).
     let mut renumber = build_renumber(&rewritten);
     for _ in 0..lookups.len() {
         let mut changed = false;
