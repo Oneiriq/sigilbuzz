@@ -299,11 +299,18 @@ impl Rasterizer {
     /// Rasterizes a COLRv1 paint-tree color glyph into a premultiplied
     /// RGBA [`ColorPixmap`].
     ///
-    /// Walks the paint tree via `sigilbuzz-paint`'s evaluator, then
-    /// composites every leaf paint (solid / linear / radial / sweep
-    /// gradient), clipped through any enclosing `PaintGlyph` outline
-    /// and blended through any `PaintComposite` mode, into a single
-    /// surface sized to the union bounding box of every fill.
+    /// Walks the paint tree the way HarfBuzz's `hb_font_paint_glyph`
+    /// does and draws every fill (solid / linear / radial / sweep
+    /// gradient) inside its enclosing clips, with each `PaintComposite`
+    /// blending isolated source and backdrop layers. A transform below a
+    /// `PaintGlyph` moves the fill, not the outline that clips it, and
+    /// gradients stay exact under any transform.
+    ///
+    /// The surface is the glyph's clip box, as in HarfBuzz: its ClipList
+    /// box when it has one, else the bounds of its paint tree, rounded
+    /// out to whole pixels plus a one-pixel transparent margin. Paint
+    /// outside the box is clipped. A glyph whose paint is not bounded by
+    /// any clip renders as an empty pixmap.
     ///
     /// `palette_index` selects the CPAL palette that solid fills and
     /// gradient stops resolve against. Unlike
@@ -318,7 +325,8 @@ impl Rasterizer {
     /// - [`RenderError::ColrV1NotFound`] when the font has no v1
     ///   paint record for `gid`.
     /// - [`RenderError::BadSize`] when `size_pt` is non-finite or
-    ///   non-positive.
+    ///   non-positive, or the clip box would exceed 16384 pixels on a
+    ///   side.
     /// - [`RenderError::BadUpem`] when the font has zero `units_per_em`.
     /// - [`RenderError::Parse`] when the underlying parser refuses
     ///   one of the tables we need.
