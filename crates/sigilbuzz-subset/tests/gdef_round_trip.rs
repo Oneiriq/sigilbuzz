@@ -261,8 +261,7 @@ fn rubik_subset_keeps_carets_mark_sets_and_the_variation_store() {
     assert_carets_remapped(&source, &out, true);
     assert_mark_sets_remapped(&source, &out);
 
-    // The store is copied verbatim and placed last, which is where the
-    // instancer's prune and partial bake expect it.
+    // The store is copied verbatim and placed last.
     let src_gdef = source.table_bytes(tag::GDEF).unwrap();
     let subset_face = Face::parse_bytes(&out.bytes, 0).unwrap();
     let gdef = subset_face.table_bytes(tag::GDEF).unwrap();

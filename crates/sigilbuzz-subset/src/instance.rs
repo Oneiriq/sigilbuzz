@@ -107,9 +107,12 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::tables::Reader;
 use sigilbuzz::Face;
 
+mod gdef_store;
+
 use crate::sfnt;
 use crate::util;
 use crate::{GlyphId, SubsetError};
+use gdef_store::{prune_gdef_store, GdefBake};
 
 /// F2DOT14 normalized axis coordinate. Matches the on-disk encoding the
 /// VF spec uses: a signed 2.14 fixed-point in the range `[-1.0, 1.0]`,
@@ -353,13 +356,13 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     // GDEF: when the source carries an ItemVariationStore and the
     // caller wants the static "ship as static" output, prune it. See
     // module header for the GPOS-bake-then-IVS-prune ordering.
-    let gdef_pruned = if input.drop_var_tables {
-        prune_gdef_ivs(face, &coords)?
+    let gdef_bake = if input.drop_var_tables {
+        prune_gdef_store(face, &coords)?
     } else {
-        None
+        GdefBake::Unchanged
     };
-    if let Some(b) = gdef_pruned.clone() {
-        tables.push((tag::GDEF, b));
+    if let GdefBake::Rebuilt(b) = &gdef_bake {
+        tables.push((tag::GDEF, b.clone()));
     }
 
     // Carry every other table through verbatim, with a drop list for
@@ -378,7 +381,7 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         }
         // GDEF was handled above (either pruned or dropped from the
         // pruning path).
-        if rec.tag == tag::GDEF && gdef_pruned.is_some() {
+        if rec.tag == tag::GDEF && !matches!(gdef_bake, GdefBake::Unchanged) {
             continue;
         }
         // GPOS was handled above when the variation bake produced a
@@ -468,13 +471,13 @@ fn cff2_bake(
         tables.push((tag::GPOS, b));
     }
 
-    let gdef_pruned = if input.drop_var_tables {
-        prune_gdef_ivs(face, coords)?
+    let gdef_bake = if input.drop_var_tables {
+        prune_gdef_store(face, coords)?
     } else {
-        None
+        GdefBake::Unchanged
     };
-    if let Some(b) = gdef_pruned.clone() {
-        tables.push((tag::GDEF, b));
+    if let GdefBake::Rebuilt(b) = &gdef_bake {
+        tables.push((tag::GDEF, b.clone()));
     }
 
     for rec in face.records() {
@@ -489,7 +492,7 @@ fn cff2_bake(
         {
             continue;
         }
-        if rec.tag == tag::GDEF && gdef_pruned.is_some() {
+        if rec.tag == tag::GDEF && !matches!(gdef_bake, GdefBake::Unchanged) {
             continue;
         }
         if rec.tag == tag::GPOS && gpos_baked.is_some() {
@@ -2580,92 +2583,6 @@ fn bake_gpos_var(face: &Face<'_>, coords: &[f32]) -> Result<Option<Vec<u8>>, Sub
     ))
 }
 
-// ---------------------------------------------------------------------------
-// GDEF.IVS pruning
-// ---------------------------------------------------------------------------
-
-/// Returns a GDEF byte buffer with its `ItemVariationStore` offset
-/// zeroed (and the store payload truncated from the table) when the
-/// source GDEF carries one. When the source has no GDEF or the IVS
-/// offset is already zero, returns `None` (caller passes through the
-/// source bytes, or omits GDEF entirely if absent).
-///
-/// GDEF v1.3 layout (28 bytes header, every offset is from start of
-/// table):
-///
-/// ```text
-///   u16  majorVersion
-///   u16  minorVersion
-///   o16  glyphClassDefOffset
-///   o16  attachListOffset
-///   o16  ligCaretListOffset
-///   o16  markAttachClassDefOffset
-///   o16  markGlyphSetsDefOffset       (v1.2+, may be 0)
-///   o32  itemVarStoreOffset           (v1.3, may be 0)
-/// ```
-///
-/// When v == 1.3 and itemVarStoreOffset != 0 we zero the offset in
-/// place and truncate the table at the IVS body's start (when the
-/// store sits at the tail of the table). When the store is in the
-/// middle of the table (rare in real fonts), we just zero the
-/// offset; the orphan bytes ride through but are unreachable by any
-/// consumer.
-///
-/// Before the store goes, every LigCaretList format 3 caret has its
-/// VariationIndex delta at `coords` folded into its coordinate (see
-/// [`crate::gdef::fold_caret_variations`]), so carets land at the
-/// instance rather than at the default.
-fn prune_gdef_ivs(face: &Face<'_>, coords: &[f32]) -> Result<Option<Vec<u8>>, SubsetError> {
-    let bytes = match face.table_bytes(tag::GDEF) {
-        Ok(b) => b,
-        Err(_) => return Ok(None),
-    };
-    // GDEF header (v1.3) is 18 bytes: u16 major, u16 minor,
-    // o16 glyphClass, o16 attach, o16 ligCaret, o16 markAttach,
-    // o16 markGlyphSets (v1.2+), o32 itemVarStore (v1.3).
-    if bytes.len() < 18 {
-        return Ok(None);
-    }
-    let major = u16::from_be_bytes([bytes[0], bytes[1]]);
-    let minor = u16::from_be_bytes([bytes[2], bytes[3]]);
-    if major != 1 || minor < 3 {
-        // No IVS in v1.0 / v1.2; pass through.
-        return Ok(None);
-    }
-    let ivs_off = u32::from_be_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
-    if ivs_off == 0 {
-        return Ok(None);
-    }
-    let mut out = bytes.to_vec();
-    let gdef = face.gdef().map_err(SubsetError::from)?;
-    let store = gdef.as_ref().and_then(|g| g.item_variation_store());
-    crate::gdef::fold_caret_variations(&mut out, store, coords);
-    out[14..18].copy_from_slice(&0u32.to_be_bytes());
-    // Truncate the IVS payload when it sits at the tail of the table
-    // (the layout fontTools emits and that every real GDEF in the
-    // wild uses). When the store is in the middle, leave the orphan
-    // bytes. They're unreachable now that the offset is zero.
-    let ivs_off_us = ivs_off as usize;
-    if ivs_off_us < out.len() {
-        // If IVS is the last referenced offset, truncate. Every other
-        // offset in the GDEF header sits before the IVS payload in
-        // well-formed fonts; we check that no other offset (glyphClass
-        // / attachList / ligCaretList / markAttach / markGlyphSets)
-        // points past `ivs_off`.
-        let mut max_other: usize = 0;
-        for slot in [4, 6, 8, 10, 12] {
-            let off = u16::from_be_bytes([out[slot], out[slot + 1]]) as usize;
-            if off > max_other {
-                max_other = off;
-            }
-        }
-        if max_other <= ivs_off_us {
-            out.truncate(ivs_off_us);
-        }
-    }
-    Ok(Some(out))
-}
-
 // silence clippy warning about unused GlyphId import from lib (kept for
 // public surface symmetry with the rest of the crate).
 const _: () = {
@@ -3620,16 +3537,6 @@ mod vvar_synthetic_tests {
         let mut vhea = alloc::vec![0u8; 36];
         crate::util::write_vhea_metrics_count(&mut vhea, 7).unwrap();
         assert_eq!(&vhea[34..36], &7u16.to_be_bytes());
-    }
-
-    #[test]
-    fn prune_gdef_returns_none_for_missing_table() {
-        // OPEN_SANS has GDEF but it's v1.0 (no IVS).
-        const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
-        let face = Face::parse_bytes(OPEN_SANS, 0).unwrap();
-        let out = prune_gdef_ivs(&face, &[]).unwrap();
-        // OpenSans is GDEF v1.0, no prune.
-        assert!(out.is_none());
     }
 
     /// Builds a minimal MVAR table carrying `records` (each pointing

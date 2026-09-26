@@ -87,7 +87,7 @@ pub(crate) fn rewrite_gdef(
 ///   Offset16 markGlyphSetsDefOffset      (1.2+)
 ///   Offset32 itemVarStoreOffset          (1.3+)
 /// ```
-fn rewrite_gdef_bytes(
+pub(crate) fn rewrite_gdef_bytes(
     bytes: &[u8],
     map: &GidMap,
     keep_variations: bool,
