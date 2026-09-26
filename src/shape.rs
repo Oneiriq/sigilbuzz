@@ -77,6 +77,7 @@
 //!   fallback mark positioner HarfBuzz uses for fonts without GPOS.
 
 mod attach;
+mod ignorables;
 mod required;
 
 use alloc::borrow::Cow;
@@ -684,19 +685,15 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // offsets from the start of the text so later passes can track
     // which input characters coalesce into a single output glyph.
     //
-    // Default-ignorable Unicode format characters (ZWJ, ZWNJ, and
-    // the U+200E/U+200F bidi marks) drive the joining state machine
-    // but should not render. HarfBuzz replaces their glyph id with
-    // U+0020 (SPACE) after joining-form selection. sigilbuzz mirrors
-    // that: record the space glyph once, then swap the
-    // default-ignorable glyphs below. We keep the joining-type view
-    // on the original codepoints so the state machine still sees
-    // ZWJ/ZWNJ correctly.
+    // Default-ignorable characters (ZWJ, ZWNJ, bidi controls,
+    // variation selectors, ...) map through cmap like any other, so
+    // GSUB rules that name their glyphs still match; the passes in
+    // the `ignorables` module hide them after positioning, as
+    // HarfBuzz does.
     //
     // We also capture the raw `char` list alongside the glyphs so
     // the Indic shaper can consult Unicode properties per-codepoint
     // without re-scanning the UTF-8 stream.
-    let space_gid = u32::from(cmap.glyph_id('\u{0020}').unwrap_or(0));
     let mut glyphs: Vec<Glyph> = Vec::with_capacity(text.len());
     let mut codepoints: Vec<char> = Vec::with_capacity(text.len());
     // Preprocess Hangul Jamo NFC composition: L + V (+ optional T)
@@ -780,27 +777,14 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             // they come from the same Unicode block.
             continue;
         }
-        let glyph_id = if is_default_ignorable(ch) {
-            space_gid
-        } else {
-            u32::from(cmap.glyph_id(ch).unwrap_or(0))
-        };
+        let glyph_id = u32::from(cmap.glyph_id(ch).unwrap_or(0));
         // `unicode_props` is set once here and follows the glyph
         // through ligation, multiple substitution and final reorder.
-        // The zero-advance pass after positioning reads the
-        // DEFAULT_IGNORABLE bit; GSUB clears it on any glyph it
-        // substitutes (`substitute_glyph`), matching HarfBuzz.
-        let mut props: u16 = 0;
-        if is_default_ignorable(ch) {
-            props |= unicode_prop::DEFAULT_IGNORABLE;
-        }
-        if ch == '\u{200D}' {
-            props |= unicode_prop::JOINER;
-        } else if ch == '\u{200C}' {
-            props |= unicode_prop::NON_JOINER;
-        }
+        // The passes after positioning read the DEFAULT_IGNORABLE bit;
+        // GSUB clears it on any glyph it substitutes
+        // (`substitute_glyph`), matching HarfBuzz.
         let mut glyph = Glyph::new(glyph_id, cluster as u32);
-        glyph.unicode_props = props;
+        glyph.unicode_props = ignorables::unicode_props(ch);
         glyphs.push(glyph);
         codepoints.push(ch);
     }
@@ -1190,16 +1174,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // Font coord slice combined with an HVAR table adjusts each
     // advance by the per-coord delta.
     //
-    // Default-ignorable format characters (ZWJ, ZWNJ, bidi marks)
-    // keep a zero advance in either axis. They rendered as space
-    // earlier, but must not move the pen (HarfBuzz does the same).
-    // The per-glyph `unicode_props` bit set at cmap time identifies
-    // them. A cluster match is not enough: clusters merge through
-    // ligatures and multiple substitutions, so a visible glyph can
-    // share a cluster value with an ignorable one. GSUB clears the bit
-    // on any glyph it substitutes (see `substitute_glyph`).
-    let is_hidden_ignorable =
-        |glyph: &Glyph| glyph.unicode_props & unicode_prop::DEFAULT_IGNORABLE != 0;
+    // Default-ignorable glyphs get their font advance here like any
+    // other; `ignorables::zero_width` zeroes it after positioning, as
+    // HarfBuzz does, so a kerning pair that involves one cannot leave
+    // it with an advance.
     if is_vertical {
         if let Some(ref vmtx) = vmtx {
             // VVAR carries per-glyph vertical-advance deltas;
@@ -1214,9 +1192,6 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 face.vvar()?
             };
             for glyph in &mut glyphs {
-                if is_hidden_ignorable(glyph) {
-                    continue;
-                }
                 let id = glyph.glyph_id as u16;
                 // HarfBuzz convention: vertical y_advance is negative
                 // in both TTB and BTT, so the pen moves downward; BTT
@@ -1241,9 +1216,6 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             let hhea = face.hhea()?;
             let fallback = (hhea.ascent as i32) - (hhea.descent as i32);
             for glyph in &mut glyphs {
-                if is_hidden_ignorable(glyph) {
-                    continue;
-                }
                 glyph.y_advance = -fallback;
                 glyph.x_advance = 0;
             }
@@ -1256,10 +1228,6 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             face.hvar()?
         };
         for glyph in &mut glyphs {
-            if is_hidden_ignorable(glyph) {
-                glyph.x_advance = 0;
-                continue;
-            }
             let id = glyph.glyph_id as u16;
             let base = i32::from(hmtx.advance(id).unwrap_or(0));
             glyph.x_advance = if let Some(ref hvar) = hvar {
@@ -1441,6 +1409,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         }
     }
 
+    // Default ignorables lose their advance once every other advance
+    // is final (HarfBuzz's position_finish_advances order).
+    ignorables::zero_width(&mut glyphs, is_vertical);
+
     // Attachment offsets are resolved only now, against the final
     // advances (kerning and mark zeroing included), with the
     // direction-specific advance compensation.
@@ -1451,6 +1423,9 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     if !direction.is_forward() {
         glyphs.reverse();
     }
+
+    // Then the ignorables become the invisible space glyph.
+    ignorables::hide(&mut glyphs, cmap.glyph_id(' ').map(u32::from));
 
     Ok(ShapedRun { glyphs })
 }
@@ -1609,29 +1584,6 @@ const fn is_common_for_segmentation(ch: char) -> bool {
         | 0x1DC0..=0x1DFF
         | 0x20D0..=0x20FF
         | 0xFE20..=0xFE2F
-    )
-}
-
-/// True for the small set of Unicode format characters the shaper
-/// should render as space rather than their own glyph: the ones
-/// whose job is to influence the shaping pipeline without carrying
-/// a visual form. HarfBuzz calls these "default ignorable" and
-/// rewrites them to the space glyph after shaping.
-///
-/// Coverage is narrow on purpose: only the characters that (a)
-/// drive joining decisions and (b) would otherwise render as a
-/// glyph in fonts like Amiri (which has drawable glyphs for ZWJ
-/// variants). Other default-ignorable characters (e.g. the variation
-/// selectors) pass through via their cmap mapping, which typically
-/// hits `.notdef` and becomes invisible through another path.
-const fn is_default_ignorable(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x200C  // ZERO WIDTH NON-JOINER
-        | 0x200D  // ZERO WIDTH JOINER
-        | 0x200E  // LEFT-TO-RIGHT MARK
-        | 0x200F  // RIGHT-TO-LEFT MARK
-        | 0x061C // ARABIC LETTER MARK
     )
 }
 
@@ -3959,9 +3911,10 @@ mod tests {
     }
 
     #[test]
-    fn unsubstituted_ignorable_has_zero_advance() {
-        // ZWJ maps to the space glyph, which this font lacks, so it
-        // lands on glyph 0. The ignorable pass keeps it at zero.
+    fn unsubstituted_ignorable_without_a_space_glyph_is_deleted() {
+        // This font maps neither ZWJ nor space. HarfBuzz hides an
+        // ignorable by swapping in the space glyph, and deletes it
+        // when there is none; the pen does not move for it either way.
         let data =
             build_shapeable_font_with_gsub(&[(1, build_single_fmt2_subst(&[0], &[3]))], &[0]);
         let blob = Blob::new(&data);
@@ -3972,8 +3925,10 @@ mod tests {
         let shaped = shape(&font, &buffer, &[]).unwrap();
         let ids: Vec<u32> = shaped.glyphs.iter().map(|g| g.glyph_id).collect();
         let advances: Vec<i32> = shaped.glyphs.iter().map(|g| g.x_advance).collect();
-        assert_eq!(ids, [1, 0, 2]);
-        assert_eq!(advances, [500, 0, 600]);
+        let clusters: Vec<u32> = shaped.glyphs.iter().map(|g| g.cluster).collect();
+        assert_eq!(ids, [1, 2]);
+        assert_eq!(advances, [500, 600]);
+        assert_eq!(clusters, [0, 4]);
     }
 
     #[test]
