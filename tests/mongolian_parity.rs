@@ -262,31 +262,51 @@ fn explicit_horizontal_overrides_mongolian_default() {
 }
 
 #[test]
-fn explicit_rtl_mongolian_is_horizontal_and_reversed() {
-    // RTL is an explicit horizontal direction too, and like every
-    // backward direction it returns the run reversed (visual order).
+fn explicit_rtl_mongolian_is_horizontal_and_read_as_visual_order() {
+    // RTL is an explicit horizontal direction too. Mongolian is not a
+    // right-to-left script, so, as in HarfBuzz, an RTL buffer holds the
+    // letters in visual order: sigilbuzz shapes the reversed text in
+    // Mongolian's native direction, and the joining forms follow that
+    // reading (hb_ensure_native_direction). Bottom-to-top likewise
+    // shapes the reversed text top to bottom.
     let blob = Blob::new(NOTO_MONGOLIAN);
     let face = Face::parse(&blob, 0).expect("parse face");
     let font = Font::new(face, 1000.0);
-    let text = "\u{1820}\u{1821}";
+    let rb_face = rustybuzz::Face::from_slice(NOTO_MONGOLIAN, 0).expect("parse rustybuzz face");
+    let text = "\u{1820}\u{1821}\u{1822}";
 
-    let mut ltr = Buffer::new();
-    ltr.set_direction(Direction::Ltr);
-    ltr.push_str(text);
-    let ltr = shape(&font, &ltr, &[]).expect("shape LTR");
+    for (direction, rb_direction) in [
+        (Direction::Rtl, rustybuzz::Direction::RightToLeft),
+        (Direction::Btt, rustybuzz::Direction::BottomToTop),
+    ] {
+        let mut buffer = Buffer::new();
+        buffer.set_direction(direction);
+        buffer.push_str(text);
+        let ours: Vec<(u32, u32)> = shape(&font, &buffer, &[])
+            .expect("shape")
+            .glyphs
+            .iter()
+            .map(|g| (g.glyph_id, g.cluster))
+            .collect();
+        let mut rb_buf = rustybuzz::UnicodeBuffer::new();
+        rb_buf.set_direction(rb_direction);
+        rb_buf.push_str(text);
+        let theirs: Vec<(u32, u32)> = rustybuzz::shape(&rb_face, &[], rb_buf)
+            .glyph_infos()
+            .iter()
+            .map(|i| (i.glyph_id, i.cluster))
+            .collect();
+        assert_eq!(ours, theirs, "{direction:?}");
+    }
 
     let mut rtl = Buffer::new();
     rtl.set_direction(Direction::Rtl);
     rtl.push_str(text);
     let rtl = shape(&font, &rtl, &[]).expect("shape RTL");
-
     assert!(rtl
         .glyphs
         .iter()
         .all(|g| g.y_advance == 0 && g.x_advance != 0));
-    let mut reversed = rtl.glyphs.clone();
-    reversed.reverse();
-    assert_eq!(ltr.glyphs, reversed);
 }
 
 #[test]

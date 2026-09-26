@@ -31,22 +31,20 @@ pub(super) fn mirror(ch: char, cmap: &Cmap<'_>) -> (char, bool) {
 }
 
 /// Applies `rtlm` to the glyphs of a segment whose code points were
-/// not replaced by their mirror. `range` is the segment's range in the
-/// run's code point list and `mirrored` the sorted indices, in that
-/// list, of the replaced code points. Glyphs must still be one per
-/// code point.
+/// not replaced by their mirror; `mirrored` says, per code point of
+/// the segment, whether it was. Glyphs must still be one per code
+/// point.
 pub(super) fn apply_rtlm(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
     gdef: Option<&Gdef<'_>>,
     script_priority: &[[u8; 4]],
     features: &[Feature],
-    range: core::ops::Range<usize>,
-    mirrored: &[usize],
+    mirrored: &[bool],
 ) {
     if feature_disabled(features, *b"rtlm") {
         return;
     }
-    let mask: Vec<bool> = range.map(|i| mirrored.binary_search(&i).is_err()).collect();
+    let mask: Vec<bool> = mirrored.iter().map(|m| !m).collect();
     apply_gsub_feature_masked(gsub, glyphs, gdef, *b"rtlm", script_priority, &mask);
 }

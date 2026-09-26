@@ -53,6 +53,12 @@
 //! [`crate::Direction::Ttb`]) come out in logical order. Vertical runs
 //! report negative `y_advance` values in both TTB and BTT.
 //!
+//! An explicit direction that is not the script's native one (Arabic
+//! or Hebrew in an LTR buffer, Latin in an RTL one, any BTT buffer)
+//! means, as in HarfBuzz, that the text is already in that visual
+//! order: the graphemes are reversed and shaped in the native
+//! direction (see the `native_direction` submodule).
+//!
 //! When the caller never set a direction
 //! ([`crate::Buffer::has_explicit_direction`] is false) the buffer
 //! shapes as LTR, except that a Mongolian-dominant run switches to
@@ -79,6 +85,7 @@
 mod attach;
 mod dotted_circle;
 mod ignorables;
+mod native_direction;
 mod required;
 mod rotate;
 
@@ -823,6 +830,36 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // A caller-set script (Buffer::set_script) replaces the
     // segmentation: the whole buffer is one run under that script, the
     // way HarfBuzz shapes one buffer with one script.
+    //
+    // The buffer's script, as HarfBuzz guesses it: the caller's, or
+    // that of the first script-bearing character in the text's order.
+    let buffer_script: Option<Script> = buffer.script().or_else(|| {
+        codepoints
+            .iter()
+            .copied()
+            .find(|&c| !is_common_for_segmentation(c))
+            .map(script_of)
+    });
+    // A caller-chosen direction that is not the script's native one
+    // reads the text as already in that visual order: shape its
+    // graphemes reversed, in the native direction (see
+    // `native_direction`). Mirroring above followed the caller's.
+    // HarfBuzz decides this for a buffer of one script; a buffer that
+    // sigilbuzz splits into several script runs keeps the direction.
+    let mut mirrored_mask = alloc::vec![false; codepoints.len()];
+    for &i in &mirrored {
+        mirrored_mask[i] = true;
+    }
+    let one_run = buffer.script().is_some() || build_segments(&codepoints).len() <= 1;
+    let direction = if buffer.has_explicit_direction() && one_run {
+        let native = native_direction::resolve(direction, buffer_script, &codepoints);
+        if native != direction {
+            native_direction::reverse_graphemes(&mut codepoints, &mut glyphs, &mut mirrored_mask);
+        }
+        native
+    } else {
+        direction
+    };
     let segments = match buffer.script() {
         Some(script) => alloc::vec![Segment {
             cp_range: 0..codepoints.len(),
@@ -846,13 +883,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // pre-pass on dominant-script is the smallest knob that keeps
     // parity clean on pure Hangul runs while matching HarfBuzz on
     // Latin-majority mixed runs.
-    let dominant_script: Option<Script> = buffer.script().or_else(|| {
-        codepoints
-            .iter()
-            .copied()
-            .find(|&c| !is_common_for_segmentation(c))
-            .map(script_of)
-    });
+    let dominant_script = buffer_script;
 
     // The buffer language picks each script's language system for
     // every GSUB and GPOS feature lookup, including the ones the
@@ -932,17 +963,9 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             let priority = seg.script_priority;
             required::apply_unscheduled(gsub, &mut seg_glyphs, gdef.as_ref(), priority, &plan);
             if backward {
-                let range = seg.cp_range.clone();
+                let mirrored = &mirrored_mask[seg.cp_range.clone()];
                 let gdef = gdef.as_ref();
-                rotate::apply_rtlm(
-                    gsub,
-                    &mut seg_glyphs,
-                    gdef,
-                    priority,
-                    features,
-                    range,
-                    &mirrored,
-                );
+                rotate::apply_rtlm(gsub, &mut seg_glyphs, gdef, priority, features, mirrored);
             }
         }
 
@@ -2339,10 +2362,41 @@ fn drain_ligature_components(glyphs: &mut Vec<Glyph>, at: usize, positions: &[us
     if positions.len() <= 1 {
         return;
     }
+    // The matched span shares one cluster, the smallest in it, as in
+    // HarfBuzz's merge_clusters (ligate_input). The first component is
+    // not always the smallest: text shaped in reversed grapheme order
+    // (see `native_direction`) runs its clusters downward.
+    let end = (at + positions.last().map_or(1, |p| p + 1)).min(glyphs.len());
+    merge_clusters(glyphs, at, end);
     // Iterate high-to-low so earlier indices stay valid while we
     // remove later ones.
     for rel in positions.iter().skip(1).rev() {
         glyphs.remove(at + rel);
+    }
+}
+
+/// HarfBuzz's `hb_buffer_t::merge_clusters` for `glyphs[start..end]`:
+/// the range takes its smallest cluster, extended over neighbors that
+/// shared a cluster with its ends.
+fn merge_clusters(glyphs: &mut [Glyph], mut start: usize, mut end: usize) {
+    if end <= start + 1 {
+        return;
+    }
+    let Some(cluster) = glyphs[start..end].iter().map(|g| g.cluster).min() else {
+        return;
+    };
+    if cluster != glyphs[end - 1].cluster {
+        while end < glyphs.len() && glyphs[end - 1].cluster == glyphs[end].cluster {
+            end += 1;
+        }
+    }
+    if cluster != glyphs[start].cluster {
+        while start > 0 && glyphs[start - 1].cluster == glyphs[start].cluster {
+            start -= 1;
+        }
+    }
+    for g in &mut glyphs[start..end] {
+        g.cluster = cluster;
     }
 }
 

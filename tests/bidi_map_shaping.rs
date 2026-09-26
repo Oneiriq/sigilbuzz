@@ -115,8 +115,15 @@ fn shape_bidi(font_bytes: &[u8], text: &str) -> Vec<Pinned> {
 /// Order, glyph ids, clusters, and advances are exactly what the
 /// shaper produced before RTL output became visual order. Two mark
 /// offsets moved with the attachment rework: a mark now follows a
-/// kerning placement on its base (the lamed's +19 and the resh's -40
-/// below), as in HarfBuzz.
+/// kerning placement on its base (the lamed's +19 below), as in
+/// HarfBuzz.
+///
+/// The all-Hebrew paragraph is one script run in an LTR buffer, which
+/// HarfBuzz reads as text in visual order (hb_ensure_native_direction):
+/// it reverses the graphemes and shapes them right to left. Its pins
+/// are that output, which matches rustybuzz on the same visual text
+/// apart from the order of the marks within a grapheme (HarfBuzz sorts
+/// them by combining class) and the grapheme clusters.
 #[test]
 fn set_text_bidi_output_is_pinned() {
     const AMIRI: &[u8] = include_bytes!("fixtures/amiri_regular.ttf");
@@ -160,17 +167,17 @@ fn set_text_bidi_output_is_pinned() {
             NOTO_HEBREW,
             "\u{05D1}\u{05BC}\u{05B0}\u{05E8}\u{05B5}\u{05D0}\u{05E9}\u{05C1}\u{05B4}\u{05D9}\u{05EA}",
             &[
-                (107, 0, 671, 0, -14, 0),
-                (138, 2, 295, 0, 0, 0),
-                (45, 4, 0, 0, -209, 0),
+                (107, 0, 685, 0, 0, 0),
                 (100, 6, 0, 0, 0, 0),
+                (45, 4, 0, 0, 66, 0),
+                (138, 2, 275, 0, -20, 0),
                 (96, 8, 730, 0, 0, 0),
-                (3, 10, 632, 0, 0, 0),
-                (117, 12, 0, 0, -459, 0),
-                (86, 14, 483, 0, -40, 0),
-                (95, 16, 0, 0, -203, 0),
-                (15, 18, 0, 0, -425, 0),
-                (12, 20, 572, 0, 0, 0),
+                (117, 12, 0, 0, 153, 0),
+                (3, 10, 612, 0, -20, 0),
+                (15, 18, 0, 0, 98, 0),
+                (95, 16, 0, 0, 320, 0),
+                (86, 14, 523, 0, 0, 0),
+                (12, 20, 547, 0, -25, 0),
             ],
         ),
         (

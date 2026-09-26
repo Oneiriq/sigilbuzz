@@ -333,20 +333,14 @@ fn kamatz_on_bet_offsets_match_rustybuzz_in_both_directions() {
     // the anchor only moves it horizontally under the bet.
     assert_ne!(mark_rtl.3, 0, "mark-to-base must move the kamatz");
 
-    // An explicit LTR shape of the same text keeps logical order and
-    // uses the forward convention (subtract the base advance). There
-    // is no rustybuzz comparison here: for a script whose native
-    // direction is RTL, HarfBuzz reverses the graphemes and shapes RTL
-    // when asked for LTR, which sigilbuzz does not do.
+    // Asked for LTR, HarfBuzz reads Hebrew as text already in visual
+    // order: it reverses the graphemes (the bet keeps its kamatz),
+    // shapes RTL, and reverses the output back. One grapheme reverses
+    // to itself, so the result is the RTL one.
     let ltr = sigilbuzz_positions(text, Direction::Ltr);
-    let (base_ltr, mark_ltr) = (ltr[0], ltr[1]);
-    assert_eq!(base_ltr.0, base_rtl.0);
-    assert_eq!(mark_ltr.0, mark_rtl.0);
-
-    // Both land the mark on the same spot relative to the bet: the
-    // two x offsets differ by exactly the bet's advance.
-    assert_eq!(mark_rtl.3 - mark_ltr.3, base_ltr.1);
-    assert_eq!(mark_rtl.4, mark_ltr.4);
+    let rb_ltr = rustybuzz_positions(text, RbDirection::LeftToRight, rustybuzz::script::HEBREW);
+    assert_eq!(ltr, rb_ltr, "LTR bet + kamatz");
+    assert_eq!(ltr, rtl);
 }
 
 #[test]
@@ -371,14 +365,24 @@ fn stacked_niqqud_offsets_match_rustybuzz_in_rtl() {
 }
 
 #[test]
-fn rtl_output_is_the_reverse_of_the_logical_glyph_sequence() {
-    // Same glyphs and advances as an LTR shape, just reversed, for a
-    // run without marks (marks change offsets between conventions).
+fn ltr_hebrew_is_read_as_visual_order() {
+    // HarfBuzz's hb_ensure_native_direction: an LTR buffer of Hebrew
+    // holds the letters as drawn, so shaping it is shaping the
+    // reversed text RTL.
+    for text in [
+        "\u{05E9}\u{05DC}\u{05D5}\u{05DD}",
+        "\u{05E9}\u{05C1}\u{05B8}\u{05DC}\u{05D5}\u{05B9}\u{05DD}",
+    ] {
+        let ltr = sigilbuzz_positions(text, Direction::Ltr);
+        let rb = rustybuzz_positions(text, RbDirection::LeftToRight, rustybuzz::script::HEBREW);
+        assert_eq!(ltr, rb, "LTR {text:?}");
+    }
     let text = "\u{05E9}\u{05DC}\u{05D5}\u{05DD}";
-    let ltr = sigilbuzz_positions(text, Direction::Ltr);
-    let mut rtl = sigilbuzz_positions(text, Direction::Rtl);
-    rtl.reverse();
-    assert_eq!(ltr, rtl);
+    let reversed: String = text.chars().rev().collect();
+    assert_eq!(
+        sigilbuzz_positions(text, Direction::Ltr),
+        sigilbuzz_positions(&reversed, Direction::Rtl)
+    );
 }
 
 #[test]
