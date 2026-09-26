@@ -44,19 +44,14 @@
 //!    features (`pres`, `abvs`, `blws`, `psts`, `haln`) and then
 //!    `liga`, `clig`, `calt`.
 //!
-//! # What isn't here yet
+//! # Known limitations
 //!
-//! - Matra decomposition (split vowel signs). Devanagari does not
-//!   have any split matras in the base block; Tamil/Sinhala/Kannada
-//!   have some (e.g. Tamil U+0BCA `OA = e + aa`) that a future
-//!   matra-decompose pass will handle. Current impl treats them as
-//!   opaque VowelDependent; the font's `pres` feature can still fire.
-//! - Per-glyph feature masking.
-//! - [`RephMode::Explicit`] / [`RephMode::LogRepha`] reph detection.
-//!   Sigilbuzz 0.2.0 treats all scripts as Implicit for the purposes
-//!   of reph candidate tagging; Telugu/Sinhala/Malayalam LogRepha
-//!   flows get filed as follow-up issues and their parity tests
-//!   exclude strings that depend on the difference.
+//! - Split matras (e.g. Tamil U+0BCA `O = e + aa`) are decomposed
+//!   before cmap by [`super::split_matra_decompose`], so this module
+//!   only ever sees their components.
+//! - Only `half` runs with a per-glyph mask. The other basic features
+//!   run across the whole run and rely on the font's lookups to touch
+//!   only the right glyphs.
 
 use alloc::vec::Vec;
 
@@ -155,19 +150,7 @@ pub fn shape_indic(
     // `RaToBecomeReph` tag we set above, which the ligature path
     // preserved on the surviving glyph.
     let byte_offsets = cluster_byte_offsets(codepoints);
-    for syllable in &syllables {
-        let byte_start = byte_offsets[syllable.start];
-        let byte_end = byte_offsets[syllable.end];
-        let original_glyph_count = syllable.end - syllable.start;
-        final_reorder(
-            glyphs,
-            byte_start,
-            byte_end,
-            original_glyph_count,
-            config.reph_pos,
-            config.reph_mode,
-        );
-    }
+    final_reorder_all(glyphs, &syllables, &byte_offsets, config);
 
     // Presentation features.
     if let Some(gsub) = gsub {
@@ -186,8 +169,11 @@ pub fn shape_devanagari(
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
 ) {
-    let config =
-        super::indic_config_for(Script::Devanagari).expect("Devanagari always has an Indic config");
+    // `indic_config_for` has a Devanagari entry, so the early return
+    // never fires.
+    let Some(config) = super::indic_config_for(Script::Devanagari) else {
+        return;
+    };
     shape_indic(gsub, gdef, codepoints, glyphs, &config);
 }
 
@@ -344,16 +330,11 @@ fn scan_consonant_syllable(cps: &[char], start: usize, config: &IndicConfig) -> 
     let ra_halant_prefix = implicit_ra_halant || explicit_ra_halant_zwj || logrepha_prefix;
 
     // Advance past a LogRepha head so the syllable machine picks up
-    // the following base consonant as the syllable's base. For
-    // Explicit the ZWJ sits between the halant and the base; the
-    // existing (C H)+ loop below treats ZWJ as non-consonant and
-    // stops, so we walk it manually here.
+    // the following base consonant as the syllable's base. An
+    // Explicit `ra + halant + ZWJ` head needs no special step: the
+    // (C H)+ loop below consumes the ZWJ that follows a halant.
     if logrepha_prefix {
         i += 1;
-    } else if explicit_ra_halant_zwj {
-        // Skip the ZWJ after ra+halant; the head now points at the
-        // base consonant. The ra+halant pair will be swallowed by
-        // the (C H)+ loop below as normal.
     }
 
     let mut base_index: Option<usize> = None;
@@ -562,32 +543,91 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
 
     // Collect pre-base matra indices inside the syllable, excluding
     // the base and anything preceding it.
+    let Some(after_base) = codepoints.get(base + 1..syllable.end) else {
+        return;
+    };
     let mut to_move: Vec<usize> = Vec::new();
-    for (offset, &ch) in codepoints[base + 1..syllable.end].iter().enumerate() {
+    for (offset, &ch) in after_base.iter().enumerate() {
         if positional_category(ch) == IndicPositionalCategory::Left
             && syllabic_category(ch) == IndicSyllabicCategory::VowelDependent
         {
             to_move.push(base + 1 + offset);
         }
     }
-    if to_move.is_empty() {
+    let Some(&last_move) = to_move.last() else {
+        return;
+    };
+
+    // Each pre-base matra, taken from the last one back, is rotated
+    // to the base position: the glyph at the matra index moves to
+    // `base` and the glyphs in between shift right by one. The
+    // rotations are relative to `base`, largest first.
+    let rotations: Vec<usize> = to_move.iter().rev().map(|&idx| idx - base).collect();
+    rotate_prefixes_right(&mut glyphs[base..=last_move], &rotations);
+}
+
+/// Applies a sequence of prefix rotations to `items`. For each `r` in
+/// `rotations`, in order, the item at index `r` moves to index 0 and
+/// the items at `0..r` shift right by one.
+///
+/// `rotations` must be strictly decreasing and every entry must be
+/// below `items.len()`. Anything else leaves `items` unchanged.
+///
+/// Applying the rotations one at a time costs `O(len * rotations)`,
+/// which a syllable with thousands of pre-base matras turns into a
+/// hang. This version computes the same permutation in linear time.
+/// While a rotation index `r` is at least the number of items already
+/// moved to the front in the current pass, it picks the untouched item
+/// at index `r - moved`. Once a rotation index falls inside the moved
+/// prefix, every later one does too, so the rest of the rotations run
+/// again on that prefix alone.
+fn rotate_prefixes_right<T: Copy>(items: &mut [T], rotations: &[usize]) {
+    let valid = rotations.windows(2).all(|w| w[0] > w[1])
+        && !rotations.first().is_some_and(|&r| r >= items.len());
+    if !valid {
         return;
     }
-
-    // Take each pre-base matra and splice it in just before the
-    // reph prefix (if any) or just before the base. The reph
-    // stays leftmost and the matra slots in after the reph's
-    // halant, i.e. before the base still.
-    let insertion_point = base;
-
-    // Move in reverse so later indices remain valid while we drain.
-    for &idx in to_move.iter().rev() {
-        let glyph = glyphs[idx];
-        // Shift glyphs[insertion_point..idx] right by one.
-        for j in (insertion_point..idx).rev() {
-            glyphs[j + 1] = glyphs[j];
+    let mut len = items.len();
+    let mut rest = rotations;
+    let mut scratch: Vec<T> = Vec::with_capacity(len);
+    while !rest.is_empty() {
+        let Some(work) = items.get_mut(..len) else {
+            return;
+        };
+        // Rotations that pick from the untouched items in this pass.
+        let picks = rest
+            .iter()
+            .enumerate()
+            .take_while(|&(moved, &r)| r >= moved)
+            .count();
+        // Item picked by rotation `t` sits at `rest[t] - t`. Those
+        // indices strictly decrease with `t`, and the last pick lands
+        // at the front of the result.
+        scratch.clear();
+        for (t, &r) in rest[..picks].iter().enumerate().rev() {
+            scratch.push(work[r - t]);
         }
-        glyphs[insertion_point] = glyph;
+        let mut picked = rest[..picks]
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(t, &r)| r - t)
+            .peekable();
+        for (i, &item) in work.iter().enumerate() {
+            if picked.peek() == Some(&i) {
+                picked.next();
+            } else {
+                scratch.push(item);
+            }
+        }
+        // Every index of `work` was pushed exactly once, so the lengths
+        // match. The guard only keeps a broken invariant from panicking.
+        if scratch.len() != work.len() {
+            return;
+        }
+        work.copy_from_slice(&scratch);
+        len = picks;
+        rest = &rest[picks..];
     }
 }
 
@@ -723,11 +763,10 @@ fn cluster_byte_offsets(codepoints: &[char]) -> Vec<u32> {
 
 /// Final reordering for one Indic syllable, in glyph space.
 ///
-/// `byte_start` and `byte_end` are UTF-8 byte offsets that bound the
-/// syllable's clusters: any glyph whose `cluster` falls in
-/// `[byte_start, byte_end)` belongs to this syllable. Cluster byte
-/// offsets are stable across GSUB (ligatures keep the first
-/// component's cluster, multiple-sub replicates it), so this
+/// `syllable_glyphs` lists, in ascending order, the indices of the
+/// glyphs whose `cluster` falls in the syllable's UTF-8 byte range.
+/// Cluster byte offsets are stable across GSUB (ligatures keep the
+/// first component's cluster, multiple-sub replicates it), so this
 /// mapping works even after `rphf` has collapsed `ra + halant` into
 /// a single reph glyph.
 ///
@@ -764,23 +803,20 @@ fn cluster_byte_offsets(codepoints: &[char]) -> Vec<u32> {
 /// Cluster metadata on the moved reph is rewritten to the
 /// syllable's base cluster so byte offsets attributed to the reph
 /// match HarfBuzz's behavior (`merge_clusters` in rustybuzz).
-fn final_reorder(
+///
+/// Returns the inclusive index range whose glyphs were moved and
+/// given the syllable's cluster, or `None` when nothing moved.
+fn final_reorder_members(
     glyphs: &mut [Glyph],
-    byte_start: u32,
-    byte_end: u32,
+    syllable_glyphs: &[usize],
     original_glyph_count: usize,
     reph_pos: RephPosition,
     reph_mode: RephMode,
-) {
-    // Collect glyph indices that belong to this syllable.
-    let syllable_glyphs: Vec<usize> = glyphs
-        .iter()
-        .enumerate()
-        .filter(|(_, g)| g.cluster >= byte_start && g.cluster < byte_end)
-        .map(|(i, _)| i)
-        .collect();
+) -> Option<(usize, usize)> {
+    let (&first_in_syllable, &last_in_syllable) =
+        (syllable_glyphs.first()?, syllable_glyphs.last()?);
     if syllable_glyphs.len() < 2 {
-        return;
+        return None;
     }
 
     // For Implicit / Explicit modes the ra+halant pair collapses to
@@ -790,25 +826,20 @@ fn final_reorder(
     // is encoded as its own codepoint with its own glyph, so we
     // always run the reorder regardless of glyph-count shrinkage.
     if reph_mode != RephMode::LogRepha && syllable_glyphs.len() >= original_glyph_count {
-        return;
+        return None;
     }
 
     // Find the reph within this syllable.
-    let Some(&reph_idx) = syllable_glyphs
+    let &reph_idx = syllable_glyphs
         .iter()
-        .find(|&&i| glyphs[i].indic_position == IndicPosition::RaToBecomeReph as u8)
-    else {
-        return;
-    };
+        .find(|&&i| glyphs[i].indic_position == IndicPosition::RaToBecomeReph as u8)?;
 
-    let first_in_syllable = *syllable_glyphs.first().unwrap();
     if reph_idx != first_in_syllable {
         // Already moved, nothing to do.
-        return;
+        return None;
     }
 
     // Compute target slot per-script.
-    let last_in_syllable = *syllable_glyphs.last().unwrap();
     // Walker A: "end of syllable past trailing SMVD marks". Drops
     // vedic / cantillation marks off the tail so the reph sits just
     // before them rather than visually at the very end. Used by
@@ -842,7 +873,7 @@ fn final_reorder(
     };
 
     if target == reph_idx {
-        return; // Nothing to move past.
+        return None; // Nothing to move past.
     }
 
     // Move `glyphs[reph_idx]` to `target` by shifting the slots
@@ -859,6 +890,117 @@ fn final_reorder(
         glyphs[i].cluster = base_cluster;
     }
     glyphs[target] = reph;
+    Some((reph_idx, target))
+}
+
+/// Runs the final reorder for every syllable, in order, in time
+/// linear in the glyph count.
+///
+/// A glyph belongs to the syllable whose byte range holds its
+/// cluster. Rather than rescanning every glyph once per syllable, the
+/// glyph indices are bucketed by syllable up front. A reorder rewrites
+/// the cluster of every glyph between the reph and its target to the
+/// syllable's own cluster, so those glyphs can no longer belong to a
+/// later syllable. `owner` records that, and each bucket is filtered by
+/// it before use. The result is the same as filtering all glyphs by
+/// byte range just before each syllable is reordered.
+fn final_reorder_all(
+    glyphs: &mut [Glyph],
+    syllables: &[Syllable],
+    byte_offsets: &[u32],
+    config: &IndicConfig,
+) {
+    const NO_OWNER: usize = usize::MAX;
+    let byte_range = |s: &Syllable| -> (u32, u32) {
+        let start = byte_offsets.get(s.start).copied().unwrap_or(u32::MAX);
+        let end = byte_offsets.get(s.end).copied().unwrap_or(start);
+        (start, end)
+    };
+    let starts: Vec<u32> = syllables.iter().map(|s| byte_range(s).0).collect();
+
+    // Syllables are consecutive, so their byte ranges are sorted and
+    // disjoint. The owner is the last syllable starting at or before
+    // the cluster, if its range reaches the cluster.
+    let mut owner: Vec<usize> = glyphs
+        .iter()
+        .map(|g| {
+            let Some(k) = starts.partition_point(|&s| s <= g.cluster).checked_sub(1) else {
+                return NO_OWNER;
+            };
+            match syllables.get(k) {
+                Some(s) if g.cluster < byte_range(s).1 => k,
+                _ => NO_OWNER,
+            }
+        })
+        .collect();
+
+    // Bucket glyph indices by owner, ascending within each bucket.
+    let mut bucket_start = alloc::vec![0usize; syllables.len() + 1];
+    for &k in &owner {
+        if k != NO_OWNER {
+            bucket_start[k + 1] += 1;
+        }
+    }
+    for k in 0..syllables.len() {
+        bucket_start[k + 1] += bucket_start[k];
+    }
+    let mut fill = bucket_start.clone();
+    let mut bucketed = alloc::vec![0usize; bucket_start[syllables.len()]];
+    for (i, &k) in owner.iter().enumerate() {
+        if k != NO_OWNER {
+            bucketed[fill[k]] = i;
+            fill[k] += 1;
+        }
+    }
+
+    let mut members: Vec<usize> = Vec::new();
+    for (k, syllable) in syllables.iter().enumerate() {
+        members.clear();
+        members.extend(
+            bucketed[bucket_start[k]..bucket_start[k + 1]]
+                .iter()
+                .copied()
+                .filter(|&i| owner[i] == k),
+        );
+        let original_glyph_count = syllable.end - syllable.start;
+        if let Some((from, to)) = final_reorder_members(
+            glyphs,
+            &members,
+            original_glyph_count,
+            config.reph_pos,
+            config.reph_mode,
+        ) {
+            for slot in &mut owner[from..=to] {
+                *slot = k;
+            }
+        }
+    }
+}
+
+/// Test entry point: reorders the syllable whose glyph clusters fall
+/// in `[byte_start, byte_end)`.
+#[cfg(test)]
+fn final_reorder(
+    glyphs: &mut [Glyph],
+    byte_start: u32,
+    byte_end: u32,
+    original_glyph_count: usize,
+    reph_pos: RephPosition,
+    reph_mode: RephMode,
+) {
+    let syllable_glyphs: Vec<usize> = glyphs
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| g.cluster >= byte_start && g.cluster < byte_end)
+        .map(|(i, _)| i)
+        .collect();
+    final_reorder_members(
+        glyphs,
+        &syllable_glyphs,
+        original_glyph_count,
+        reph_pos,
+        reph_mode,
+    );
 }
 
 #[cfg(test)]
@@ -1127,8 +1269,7 @@ mod tests {
     #[test]
     fn telugu_ra_halant_is_not_reph_under_explicit_mode() {
         // Telugu's RephMode is Explicit: bare ra+virama does NOT
-        // tag a reph candidate. Only ra+virama+ZWJ would (not yet
-        // implemented, follow-up issue).
+        // tag a reph candidate. Only ra+virama+ZWJ does.
         let cp = cps("\u{0C30}\u{0C4D}\u{0C15}");
         let config = indic_config_for(Script::Telugu).unwrap();
         let syl = segment_syllables(&cp, &config);
@@ -1244,5 +1385,148 @@ mod tests {
     fn non_split_matra_returns_none() {
         assert!(super::super::split_matra_decompose('\u{0BBE}').is_none());
         assert!(super::super::split_matra_decompose('\u{0D15}').is_none());
+    }
+
+    /// Small deterministic generator for the differential tests.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 33) as usize) % bound.max(1)
+        }
+    }
+
+    /// The one-rotation-at-a-time loop that `rotate_prefixes_right`
+    /// replaces, kept as the reference.
+    fn rotate_prefixes_one_by_one(items: &mut [u32], rotations: &[usize]) {
+        for &r in rotations {
+            let item = items[r];
+            for j in (0..r).rev() {
+                items[j + 1] = items[j];
+            }
+            items[0] = item;
+        }
+    }
+
+    #[test]
+    fn rotate_prefixes_right_matches_one_by_one_rotation() {
+        let mut rng = Lcg(7);
+        for _ in 0..3000 {
+            let len = 1 + rng.below(24);
+            let density = 1 + rng.below(4);
+            let mut rotations: Vec<usize> = (1..len).filter(|_| rng.below(density) == 0).collect();
+            rotations.reverse();
+            let mut expected: Vec<u32> = (0..len as u32).collect();
+            rotate_prefixes_one_by_one(&mut expected, &rotations);
+            let mut got: Vec<u32> = (0..len as u32).collect();
+            rotate_prefixes_right(&mut got, &rotations);
+            assert_eq!(got, expected, "len {len} rotations {rotations:?}");
+        }
+    }
+
+    #[test]
+    fn rotate_prefixes_right_ignores_invalid_rotations() {
+        let mut items = [1u32, 2, 3];
+        rotate_prefixes_right(&mut items, &[3]);
+        rotate_prefixes_right(&mut items, &[1, 2]);
+        assert_eq!(items, [1, 2, 3]);
+    }
+
+    #[test]
+    fn final_reorder_all_matches_per_syllable_scan() {
+        let positions = [
+            IndicPosition::Start,
+            IndicPosition::RaToBecomeReph,
+            IndicPosition::BaseC,
+            IndicPosition::Smvd,
+        ];
+        let reph_positions = [
+            RephPosition::AfterMain,
+            RephPosition::BeforeSub,
+            RephPosition::AfterSub,
+            RephPosition::BeforePost,
+            RephPosition::AfterPost,
+        ];
+        let reph_modes = [RephMode::Implicit, RephMode::Explicit, RephMode::LogRepha];
+        let mut rng = Lcg(11);
+        for _ in 0..3000 {
+            // Consecutive syllables over `n` three-byte codepoints.
+            let n = 1 + rng.below(12);
+            let mut syllables = Vec::new();
+            let mut start = 0;
+            while start < n {
+                let end = (start + 1 + rng.below(4)).min(n);
+                syllables.push(Syllable {
+                    kind: SyllableKind::Consonant,
+                    start,
+                    end,
+                    base_index: Some(start),
+                    has_reph: false,
+                });
+                start = end;
+            }
+            let byte_offsets: Vec<u32> = (0..=n as u32).map(|i| i * 3).collect();
+            // Glyphs with arbitrary clusters, including interleaved
+            // syllables and clusters past the end of the run.
+            let glyph_count = rng.below(16);
+            let glyphs: Vec<Glyph> = (0..glyph_count)
+                .map(|i| {
+                    let mut g = Glyph::new(i as u32, rng.below(3 * n + 4) as u32);
+                    g.indic_position = positions[rng.below(positions.len())] as u8;
+                    g
+                })
+                .collect();
+            let mut config = deva_config();
+            config.reph_pos = reph_positions[rng.below(reph_positions.len())];
+            config.reph_mode = reph_modes[rng.below(reph_modes.len())];
+
+            let mut expected = glyphs.clone();
+            for s in &syllables {
+                final_reorder(
+                    &mut expected,
+                    byte_offsets[s.start],
+                    byte_offsets[s.end],
+                    s.end - s.start,
+                    config.reph_pos,
+                    config.reph_mode,
+                );
+            }
+            let mut got = glyphs;
+            final_reorder_all(&mut got, &syllables, &byte_offsets, &config);
+            assert_eq!(got, expected);
+        }
+    }
+
+    #[test]
+    fn long_run_of_pre_base_matras_reorders_in_linear_time() {
+        // One consonant followed by 200000 pre-base matras is a single
+        // consonant syllable. Moving the matras one rotation at a time
+        // cost about 2e10 glyph copies.
+        const N: usize = 200_000;
+        let mut cp = vec!['\u{0915}'];
+        cp.extend(core::iter::repeat('\u{093F}').take(N));
+        let mut glyphs = fake_glyphs(cp.len());
+        for s in &segment_syllables(&cp, &deva_config()) {
+            initial_reorder(&cp, &mut glyphs, s);
+        }
+        let mut ids: Vec<u32> = glyphs.iter().map(|g| g.glyph_id).collect();
+        ids.sort_unstable();
+        assert!(ids.iter().copied().eq(1..=cp.len() as u32));
+    }
+
+    #[test]
+    fn many_syllables_final_reorder_in_linear_time() {
+        // 200000 one-consonant syllables. Scanning every glyph once per
+        // syllable cost about 4e10 cluster comparisons.
+        const N: usize = 200_000;
+        let cp = vec!['\u{0915}'; N];
+        let mut glyphs: Vec<Glyph> = (0..N).map(|i| Glyph::new(1, (i * 3) as u32)).collect();
+        shape_indic(None, None, &cp, &mut glyphs, &deva_config());
+        assert_eq!(glyphs.len(), N);
+        assert_eq!(glyphs[N - 1].cluster, ((N - 1) * 3) as u32);
     }
 }

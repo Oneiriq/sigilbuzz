@@ -13,18 +13,18 @@
 //! they point at is dropped along with the rest of the variable-font
 //! surface.
 //!
-//! The first cut (#173) shipped the simple escape-hatch: drop GDEF.IVS
-//! and leave the GPOS subtables pointing at orphan offsets. Consumers
-//! that resolve a Device/VariationIndex offset off a `ValueRecord` got
-//! garbage; consumers that ignore them (the common case for static
-//! pipelines) saw the default-instance value.
+//! Dropping GDEF.IVS alone would leave the GPOS subtables pointing at
+//! orphan offsets. Consumers that resolve a Device/VariationIndex
+//! offset off a `ValueRecord` would get garbage; consumers that ignore
+//! them (the common case for static pipelines) would see the
+//! default-instance value.
 //!
-//! This module replaces that with the proper bake. For every supported
-//! lookup type we walk the subtable's `ValueRecord` byte ranges, look
-//! up each `VariationIndex` offset in the source `ItemVariationStore`,
-//! resolve the delta at the bake's `coords`, fold the rounded result
-//! into the static field (saturating-add), and zero the offset slot so
-//! a downstream consumer cannot follow it.
+//! This module performs the bake instead. For every supported lookup
+//! type we walk the subtable's `ValueRecord` byte ranges, look up each
+//! `VariationIndex` offset in the source `ItemVariationStore`, resolve
+//! the delta at the bake's `coords`, fold the rounded result into the
+//! static field (saturating-add), and zero the offset slot so a
+//! downstream consumer cannot follow it.
 //!
 //! # Coverage
 //!
@@ -54,10 +54,20 @@
 //! `add-0.5/subtract-0.5` rule as the HVAR / MVAR bakes so the three
 //! stay in byte-for-byte lockstep. Saturating addition guards against
 //! ValueRecord field overflow on extreme coords.
+//!
+//! # Work limit
+//!
+//! Folding zeroes each offset it follows, so visiting a subtable twice
+//! changes nothing. The driver therefore visits each subtable once even
+//! when many lookups share it, and charges a [`WorkBudget`] for every
+//! record it walks. A GPOS that exhausts the budget is left unbaked.
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::variation_store::ItemVariationStore;
+
+use crate::util::{WorkBudget, WORK_LIMIT};
 
 /// Defined ValueRecord format bits: bits 0x0001..=0x0080. Mirrors the
 /// `DEFINED_BITS` constant in `sigilbuzz::tables::gpos::value_record`.
@@ -91,13 +101,19 @@ const fn value_record_size(format: u16) -> usize {
     (format & VALUE_FORMAT_DEFINED).count_ones() as usize * 2
 }
 
+/// Reads a big-endian `u16` at `off` as a `usize`, or `None` past the
+/// end.
+fn read_u16(buf: &[u8], off: usize) -> Option<usize> {
+    crate::layout::read_u16(buf, off).map(usize::from)
+}
+
 /// Rounds the variation store's float delta to the nearest design-unit
 /// integer. Matches the rule the HVAR/MVAR/value_record pipelines use
-/// so the four stay in byte-for-byte lockstep.
+/// so the four stay in byte-for-byte lockstep. The `as` cast saturates
+/// on huge values and maps NaN to 0.
 #[must_use]
 #[inline]
 fn round_delta(delta: f32) -> i32 {
-    #[allow(clippy::cast_possible_truncation)]
     if delta >= 0.0 {
         (delta + 0.5) as i32
     } else {
@@ -139,53 +155,47 @@ fn fold_one_field(
     store: Option<&ItemVariationStore<'_>>,
     coords: &[f32],
 ) {
-    if device_off_pos + 2 > subtable_buf.len() {
+    let Some(slot) = subtable_buf.get_mut(device_off_pos..device_off_pos.saturating_add(2)) else {
         return;
-    }
-    let device_off = u16::from_be_bytes([
-        subtable_buf[device_off_pos],
-        subtable_buf[device_off_pos + 1],
-    ]) as usize;
+    };
+    let device_off = usize::from(u16::from_be_bytes([slot[0], slot[1]]));
     if device_off == 0 {
         return;
     }
     // Always zero the offset, even when we can't resolve the delta:
     // the GDEF.IVS prune that follows would leave it pointing at an
     // orphan otherwise.
-    subtable_buf[device_off_pos] = 0;
-    subtable_buf[device_off_pos + 1] = 0;
+    slot.copy_from_slice(&[0, 0]);
 
-    if device_off + 6 > subtable_buf.len() {
+    let (Some(outer), Some(inner), Some(delta_format)) = (
+        read_u16(subtable_buf, device_off),
+        read_u16(subtable_buf, device_off + 2),
+        read_u16(subtable_buf, device_off + 4),
+    ) else {
         return;
-    }
-    let first = u16::from_be_bytes([subtable_buf[device_off], subtable_buf[device_off + 1]]);
-    let second = u16::from_be_bytes([subtable_buf[device_off + 2], subtable_buf[device_off + 3]]);
-    let delta_format =
-        u16::from_be_bytes([subtable_buf[device_off + 4], subtable_buf[device_off + 5]]);
-    if delta_format != VARIATION_INDEX_DELTA_FORMAT {
+    };
+    if delta_format != usize::from(VARIATION_INDEX_DELTA_FORMAT) {
         // Plain Device: leave the static field alone.
         return;
     }
-    let outer = first;
-    let inner = second;
 
     let Some(store) = store else {
         return;
     };
-    let scaled = round_delta(store.delta(outer, inner, coords));
-    if scaled == 0 || static_field_pos + 2 > subtable_buf.len() {
+    let scaled = round_delta(store.delta(outer as u16, inner as u16, coords));
+    if scaled == 0 {
         return;
     }
-    let cur = i16::from_be_bytes([
-        subtable_buf[static_field_pos],
-        subtable_buf[static_field_pos + 1],
-    ]);
+    let Some(field) = subtable_buf.get_mut(static_field_pos..static_field_pos.saturating_add(2))
+    else {
+        return;
+    };
+    let cur = i16::from_be_bytes([field[0], field[1]]);
     let new = i32::from(cur)
         .saturating_add(scaled)
         .clamp(i32::from(i16::MIN), i32::from(i16::MAX));
-    #[allow(clippy::cast_possible_truncation)]
-    let new_i16 = new as i16;
-    subtable_buf[static_field_pos..static_field_pos + 2].copy_from_slice(&new_i16.to_be_bytes());
+    // Clamped to the i16 range just above.
+    field.copy_from_slice(&(new as i16).to_be_bytes());
 }
 
 /// Folds every defined `VariationIndex` slot in the ValueRecord at
@@ -206,10 +216,11 @@ fn fold_one_field(
 /// ```
 ///
 /// Each device-offset bit is paired with one static field bit:
-/// `0x0010 ↔ 0x0001`, `0x0020 ↔ 0x0002`, `0x0040 ↔ 0x0004`,
-/// `0x0080 ↔ 0x0008`. When a device-offset bit is set but the paired
-/// static field bit is *not*, the spec doesn't define a fold target:
-/// we zero the offset slot and skip the static-field write.
+/// `0x0010` with `0x0001`, `0x0020` with `0x0002`, `0x0040` with
+/// `0x0004`, and `0x0080` with `0x0008`. When a device-offset bit is
+/// set but the paired static field bit is *not*, the spec doesn't
+/// define a fold target: we zero the offset slot and skip the
+/// static-field write.
 pub(crate) fn fold_value_record(
     subtable_buf: &mut [u8],
     vr_pos: usize,
@@ -222,51 +233,27 @@ pub(crate) fn fold_value_record(
     // A static field is present at `cursor` only if its bit is set;
     // when absent we record `usize::MAX` and `fold_one_field` falls
     // through to the offset-zero path.
-    let x_pl_pos = if format & VR_X_PLACEMENT != 0 {
-        let p = cursor;
-        cursor += 2;
-        p
-    } else {
-        usize::MAX
-    };
-    let y_pl_pos = if format & VR_Y_PLACEMENT != 0 {
-        let p = cursor;
-        cursor += 2;
-        p
-    } else {
-        usize::MAX
-    };
-    let x_ad_pos = if format & VR_X_ADVANCE != 0 {
-        let p = cursor;
-        cursor += 2;
-        p
-    } else {
-        usize::MAX
-    };
-    let y_ad_pos = if format & VR_Y_ADVANCE != 0 {
-        let p = cursor;
-        cursor += 2;
-        p
-    } else {
-        usize::MAX
-    };
-
-    if format & VR_X_PLACEMENT_DEVICE != 0 {
-        fold_one_field(subtable_buf, x_pl_pos, cursor, store, coords);
-        cursor += 2;
+    let mut static_pos = [usize::MAX; 4];
+    for (pos, bit) in
+        static_pos
+            .iter_mut()
+            .zip([VR_X_PLACEMENT, VR_Y_PLACEMENT, VR_X_ADVANCE, VR_Y_ADVANCE])
+    {
+        if format & bit != 0 {
+            *pos = cursor;
+            cursor += 2;
+        }
     }
-    if format & VR_Y_PLACEMENT_DEVICE != 0 {
-        fold_one_field(subtable_buf, y_pl_pos, cursor, store, coords);
-        cursor += 2;
-    }
-    if format & VR_X_ADVANCE_DEVICE != 0 {
-        fold_one_field(subtable_buf, x_ad_pos, cursor, store, coords);
-        cursor += 2;
-    }
-    if format & VR_Y_ADVANCE_DEVICE != 0 {
-        fold_one_field(subtable_buf, y_ad_pos, cursor, store, coords);
-        // No more after y_advance_device; cursor unused.
-        let _ = cursor;
+    for (pos, bit) in static_pos.into_iter().zip([
+        VR_X_PLACEMENT_DEVICE,
+        VR_Y_PLACEMENT_DEVICE,
+        VR_X_ADVANCE_DEVICE,
+        VR_Y_ADVANCE_DEVICE,
+    ]) {
+        if format & bit != 0 {
+            fold_one_field(subtable_buf, pos, cursor, store, coords);
+            cursor += 2;
+        }
     }
 }
 
@@ -303,19 +290,14 @@ pub(crate) fn fold_anchor_variations(
     store: Option<&ItemVariationStore<'_>>,
     coords: &[f32],
 ) {
-    if anchor_off == 0 {
+    if anchor_off == 0 || anchor_off.saturating_add(10) > subtable_buf.len() {
+        // Null anchor, or too short for format 3. Formats 1 and 2 have
+        // no variation slots anyway.
         return;
     }
-    if anchor_off + 6 > subtable_buf.len() {
-        return;
-    }
-    let format = u16::from_be_bytes([subtable_buf[anchor_off], subtable_buf[anchor_off + 1]]);
-    if format != 3 {
+    if read_u16(subtable_buf, anchor_off) != Some(3) {
         // Format 1 / 2: no Device/VariationIndex slots. Format 0 or
         // anything > 3 is malformed; ride through.
-        return;
-    }
-    if anchor_off + 10 > subtable_buf.len() {
         return;
     }
     let x_pos = anchor_off + 2;
@@ -326,499 +308,401 @@ pub(crate) fn fold_anchor_variations(
     fold_one_field(subtable_buf, y_pos, y_dev_pos, store, coords);
 }
 
-/// Folds every Anchor in a CursivePos subtable starting at `sub_off`
-/// within `gpos_buf`.
-///
-/// Layout (CursivePos format 1):
-/// ```text
-///   u16 posFormat = 1
-///   u16 coverageOffset
-///   u16 entryExitCount
-///   EntryExitRecord[entryExitCount]:
-///     u16 entryAnchorOffset
-///     u16 exitAnchorOffset
-/// ```
-fn fold_cursive_pos(
-    gpos_buf: &mut [u8],
-    sub_off: usize,
-    store: Option<&ItemVariationStore<'_>>,
-    coords: &[f32],
-) {
-    let Some(sub) = gpos_buf.get(sub_off..) else {
-        return;
-    };
-    if sub.len() < 6 {
-        return;
-    }
-    let format = u16::from_be_bytes([sub[0], sub[1]]);
-    if format != 1 {
-        return;
-    }
-    let entry_exit_count = u16::from_be_bytes([sub[4], sub[5]]) as usize;
-    let records_off = 6usize;
-    let need = records_off + entry_exit_count * 4;
-    if sub.len() < need {
-        return;
-    }
-    // Collect anchor offsets first so we don't overlap mut/immut borrows.
-    let mut anchor_offs: Vec<usize> = Vec::with_capacity(entry_exit_count * 2);
-    for i in 0..entry_exit_count {
-        let rec = records_off + i * 4;
-        anchor_offs.push(u16::from_be_bytes([sub[rec], sub[rec + 1]]) as usize);
-        anchor_offs.push(u16::from_be_bytes([sub[rec + 2], sub[rec + 3]]) as usize);
-    }
-    for off in anchor_offs {
-        fold_anchor_variations(&mut gpos_buf[sub_off..], off, store, coords);
-    }
+/// Shared inputs of one bake pass.
+struct Bake<'s, 'c> {
+    store: Option<&'s ItemVariationStore<'s>>,
+    coords: &'c [f32],
+    budget: WorkBudget,
 }
 
-/// Walks every Anchor in a `MarkArray` at `mark_array_off` (relative to
-/// `subtable_buf`) and folds its variation slots.
-///
-/// MarkArray layout:
-/// ```text
-///   u16 markCount
-///   MarkRecord[markCount]:
-///     u16 class
-///     u16 markAnchorOffset (relative to MarkArray start)
-/// ```
-///
-/// Note that `markAnchorOffset` is relative to the MarkArray, not to
-/// the enclosing subtable. We add `mark_array_off` to land in
-/// subtable-relative space before calling `fold_anchor_variations`.
-fn fold_mark_array(
-    subtable_buf: &mut [u8],
-    mark_array_off: usize,
-    store: Option<&ItemVariationStore<'_>>,
-    coords: &[f32],
-) {
-    if mark_array_off + 2 > subtable_buf.len() {
-        return;
+impl Bake<'_, '_> {
+    /// Charges `units` of work. Returns false once the budget is spent.
+    fn spend(&self, units: usize) -> bool {
+        self.budget.spend(units)
     }
-    let mark_count = u16::from_be_bytes([
-        subtable_buf[mark_array_off],
-        subtable_buf[mark_array_off + 1],
-    ]) as usize;
-    let records_off = mark_array_off + 2;
-    if records_off + mark_count * 4 > subtable_buf.len() {
-        return;
+
+    fn anchor(&self, buf: &mut [u8], off: usize) {
+        fold_anchor_variations(buf, off, self.store, self.coords);
     }
-    let mut anchor_offs: Vec<usize> = Vec::with_capacity(mark_count);
-    for i in 0..mark_count {
-        let rec = records_off + i * 4;
-        let anchor_rel =
-            u16::from_be_bytes([subtable_buf[rec + 2], subtable_buf[rec + 3]]) as usize;
-        if anchor_rel == 0 {
-            anchor_offs.push(0);
-        } else {
-            anchor_offs.push(mark_array_off + anchor_rel);
+
+    fn value_record(&self, buf: &mut [u8], pos: usize, format: u16) {
+        fold_value_record(buf, pos, format, self.store, self.coords);
+    }
+
+    /// Folds one subtable of GPOS lookup type `lookup_type` starting at
+    /// `sub_off` within `gpos_buf`.
+    fn subtable(&self, gpos_buf: &mut [u8], lookup_type: u16, sub_off: usize) {
+        let Some(sub) = gpos_buf.get_mut(sub_off..) else {
+            return;
+        };
+        match lookup_type {
+            1 => self.single_pos(sub),
+            2 => self.pair_pos(sub),
+            3 => self.cursive_pos(sub),
+            4 | 6 => self.mark_base_or_mark_pos(sub),
+            5 => self.mark_lig_pos(sub),
+            _ => {}
         }
     }
-    for off in anchor_offs {
-        fold_anchor_variations(subtable_buf, off, store, coords);
-    }
-}
 
-/// Walks every Anchor in a `BaseArray` (or `Mark2Array`, same shape).
-///
-/// BaseArray layout:
-/// ```text
-///   u16 baseCount
-///   BaseRecord[baseCount]:
-///     u16 baseAnchorOffsets[markClassCount]   (each relative to BaseArray)
-/// ```
-///
-/// The flat anchor matrix is `baseCount * markClassCount` u16 offsets,
-/// each relative to `base_array_off`.
-fn fold_base_or_mark2_array(
-    subtable_buf: &mut [u8],
-    base_array_off: usize,
-    mark_class_count: usize,
-    store: Option<&ItemVariationStore<'_>>,
-    coords: &[f32],
-) {
-    if base_array_off + 2 > subtable_buf.len() {
-        return;
-    }
-    let base_count = u16::from_be_bytes([
-        subtable_buf[base_array_off],
-        subtable_buf[base_array_off + 1],
-    ]) as usize;
-    let records_off = base_array_off + 2;
-    let total = base_count * mark_class_count;
-    if records_off + total * 2 > subtable_buf.len() {
-        return;
-    }
-    let mut anchor_offs: Vec<usize> = Vec::with_capacity(total);
-    for i in 0..total {
-        let pos = records_off + i * 2;
-        let rel = u16::from_be_bytes([subtable_buf[pos], subtable_buf[pos + 1]]) as usize;
-        if rel == 0 {
-            anchor_offs.push(0);
-        } else {
-            anchor_offs.push(base_array_off + rel);
+    /// Folds every Anchor in a CursivePos subtable.
+    ///
+    /// Layout (CursivePos format 1):
+    /// ```text
+    ///   u16 posFormat = 1
+    ///   u16 coverageOffset
+    ///   u16 entryExitCount
+    ///   EntryExitRecord[entryExitCount]:
+    ///     u16 entryAnchorOffset
+    ///     u16 exitAnchorOffset
+    /// ```
+    fn cursive_pos(&self, sub: &mut [u8]) {
+        if read_u16(sub, 0) != Some(1) {
+            return;
+        }
+        let Some(entry_exit_count) = read_u16(sub, 4) else {
+            return;
+        };
+        let Some(records) = sub.get(6..6 + entry_exit_count * 4) else {
+            return;
+        };
+        if !self.spend(entry_exit_count) {
+            return;
+        }
+        // Collect anchor offsets first so we don't overlap mut/immut borrows.
+        let anchor_offs: Vec<usize> = records
+            .chunks_exact(2)
+            .map(|c| usize::from(u16::from_be_bytes([c[0], c[1]])))
+            .collect();
+        for off in anchor_offs {
+            self.anchor(sub, off);
         }
     }
-    for off in anchor_offs {
-        fold_anchor_variations(subtable_buf, off, store, coords);
-    }
-}
 
-/// Folds every Anchor in a MarkBasePos subtable starting at `sub_off`.
-///
-/// Layout (MarkBasePos format 1):
-/// ```text
-///   u16 posFormat = 1
-///   u16 markCoverageOffset
-///   u16 baseCoverageOffset
-///   u16 markClassCount
-///   o16 markArrayOffset
-///   o16 baseArrayOffset
-/// ```
-fn fold_mark_base_pos(
-    gpos_buf: &mut [u8],
-    sub_off: usize,
-    store: Option<&ItemVariationStore<'_>>,
-    coords: &[f32],
-) {
-    let Some(sub) = gpos_buf.get(sub_off..) else {
-        return;
-    };
-    if sub.len() < 12 {
-        return;
-    }
-    let format = u16::from_be_bytes([sub[0], sub[1]]);
-    if format != 1 {
-        return;
-    }
-    let mark_class_count = u16::from_be_bytes([sub[6], sub[7]]) as usize;
-    let mark_array_off = u16::from_be_bytes([sub[8], sub[9]]) as usize;
-    let base_array_off = u16::from_be_bytes([sub[10], sub[11]]) as usize;
-    let buf = &mut gpos_buf[sub_off..];
-    fold_mark_array(buf, mark_array_off, store, coords);
-    fold_base_or_mark2_array(buf, base_array_off, mark_class_count, store, coords);
-}
-
-/// Folds every Anchor in a MarkMarkPos subtable starting at `sub_off`.
-///
-/// Layout (MarkMarkPos format 1):
-/// ```text
-///   u16 posFormat = 1
-///   u16 mark1CoverageOffset
-///   u16 mark2CoverageOffset
-///   u16 markClassCount
-///   o16 mark1ArrayOffset
-///   o16 mark2ArrayOffset
-/// ```
-///
-/// Identical shape to MarkBasePos with `Mark2Array` substituted for
-/// `BaseArray`. The `Mark2Array` matrix dimensions match
-/// `BaseArray`'s: `mark2Count * markClassCount`.
-fn fold_mark_mark_pos(
-    gpos_buf: &mut [u8],
-    sub_off: usize,
-    store: Option<&ItemVariationStore<'_>>,
-    coords: &[f32],
-) {
-    let Some(sub) = gpos_buf.get(sub_off..) else {
-        return;
-    };
-    if sub.len() < 12 {
-        return;
-    }
-    let format = u16::from_be_bytes([sub[0], sub[1]]);
-    if format != 1 {
-        return;
-    }
-    let mark_class_count = u16::from_be_bytes([sub[6], sub[7]]) as usize;
-    let mark1_array_off = u16::from_be_bytes([sub[8], sub[9]]) as usize;
-    let mark2_array_off = u16::from_be_bytes([sub[10], sub[11]]) as usize;
-    let buf = &mut gpos_buf[sub_off..];
-    fold_mark_array(buf, mark1_array_off, store, coords);
-    fold_base_or_mark2_array(buf, mark2_array_off, mark_class_count, store, coords);
-}
-
-/// Folds every Anchor in a MarkLigPos subtable starting at `sub_off`.
-///
-/// Layout (MarkLigPos format 1):
-/// ```text
-///   u16 posFormat = 1
-///   u16 markCoverageOffset
-///   u16 ligatureCoverageOffset
-///   u16 markClassCount
-///   o16 markArrayOffset
-///   o16 ligatureArrayOffset
-///
-///   LigatureArray (at ligatureArrayOffset):
-///     u16 ligatureCount
-///     o16 ligatureAttachOffsets[ligatureCount]   (relative to LigatureArray)
-///
-///   LigatureAttach (at each ligatureAttachOffset):
-///     u16 componentCount
-///     ComponentRecord[componentCount]:
-///       o16 ligatureAnchorOffsets[markClassCount]  (relative to LigatureAttach)
-/// ```
-fn fold_mark_lig_pos(
-    gpos_buf: &mut [u8],
-    sub_off: usize,
-    store: Option<&ItemVariationStore<'_>>,
-    coords: &[f32],
-) {
-    let Some(sub) = gpos_buf.get(sub_off..) else {
-        return;
-    };
-    if sub.len() < 12 {
-        return;
-    }
-    let format = u16::from_be_bytes([sub[0], sub[1]]);
-    if format != 1 {
-        return;
-    }
-    let mark_class_count = u16::from_be_bytes([sub[6], sub[7]]) as usize;
-    let mark_array_off = u16::from_be_bytes([sub[8], sub[9]]) as usize;
-    let lig_array_off = u16::from_be_bytes([sub[10], sub[11]]) as usize;
-
-    // MarkArray walks like the other Mark* lookups.
-    fold_mark_array(&mut gpos_buf[sub_off..], mark_array_off, store, coords);
-
-    // LigatureArray: collect every ligatureAttach offset and every
-    // ComponentRecord's anchor offsets, then fold in one pass to keep
-    // the borrows simple.
-    let buf = &gpos_buf[sub_off..];
-    if lig_array_off + 2 > buf.len() {
-        return;
-    }
-    let lig_count = u16::from_be_bytes([buf[lig_array_off], buf[lig_array_off + 1]]) as usize;
-    let lig_attach_offs_start = lig_array_off + 2;
-    if lig_attach_offs_start + lig_count * 2 > buf.len() {
-        return;
-    }
-    let mut lig_attach_abs: Vec<usize> = Vec::with_capacity(lig_count);
-    for i in 0..lig_count {
-        let pos = lig_attach_offs_start + i * 2;
-        let rel = u16::from_be_bytes([buf[pos], buf[pos + 1]]) as usize;
-        if rel == 0 {
-            continue;
+    /// Walks every Anchor in a `MarkArray` at `mark_array_off` (relative
+    /// to `sub`) and folds its variation slots.
+    ///
+    /// MarkArray layout:
+    /// ```text
+    ///   u16 markCount
+    ///   MarkRecord[markCount]:
+    ///     u16 class
+    ///     u16 markAnchorOffset (relative to MarkArray start)
+    /// ```
+    ///
+    /// Note that `markAnchorOffset` is relative to the MarkArray, not to
+    /// the enclosing subtable. We add `mark_array_off` to land in
+    /// subtable-relative space before folding.
+    fn mark_array(&self, sub: &mut [u8], mark_array_off: usize) {
+        let Some(mark_count) = read_u16(sub, mark_array_off) else {
+            return;
+        };
+        let records_off = mark_array_off + 2;
+        let Some(records) = sub.get(records_off..records_off + mark_count * 4) else {
+            return;
+        };
+        if !self.spend(mark_count) {
+            return;
         }
-        lig_attach_abs.push(lig_array_off + rel);
+        let anchor_offs: Vec<usize> = records
+            .chunks_exact(4)
+            .map(
+                |rec| match usize::from(u16::from_be_bytes([rec[2], rec[3]])) {
+                    0 => 0,
+                    rel => mark_array_off + rel,
+                },
+            )
+            .collect();
+        for off in anchor_offs {
+            self.anchor(sub, off);
+        }
     }
 
-    let mut anchor_abs: Vec<usize> = Vec::new();
-    for la_off in lig_attach_abs {
-        if la_off + 2 > buf.len() {
-            continue;
+    /// Walks every Anchor in a `BaseArray` (or `Mark2Array`, same shape).
+    ///
+    /// BaseArray layout:
+    /// ```text
+    ///   u16 baseCount
+    ///   BaseRecord[baseCount]:
+    ///     u16 baseAnchorOffsets[markClassCount]   (each relative to BaseArray)
+    /// ```
+    ///
+    /// The flat anchor matrix is `baseCount * markClassCount` u16 offsets,
+    /// each relative to `base_array_off`.
+    fn base_or_mark2_array(&self, sub: &mut [u8], base_array_off: usize, mark_class_count: usize) {
+        let Some(base_count) = read_u16(sub, base_array_off) else {
+            return;
+        };
+        let records_off = base_array_off + 2;
+        // Both counts are 16-bit, so the product needs checked math on
+        // 32-bit targets.
+        let Some(total) = base_count.checked_mul(mark_class_count) else {
+            return;
+        };
+        let Some(records) = total
+            .checked_mul(2)
+            .and_then(|len| sub.get(records_off..records_off.checked_add(len)?))
+        else {
+            return;
+        };
+        if !self.spend(total) {
+            return;
         }
-        let comp_count = u16::from_be_bytes([buf[la_off], buf[la_off + 1]]) as usize;
-        let comps_off = la_off + 2;
+        let anchor_offs: Vec<usize> = records
+            .chunks_exact(2)
+            .map(|c| match usize::from(u16::from_be_bytes([c[0], c[1]])) {
+                0 => 0,
+                rel => base_array_off + rel,
+            })
+            .collect();
+        for off in anchor_offs {
+            self.anchor(sub, off);
+        }
+    }
+
+    /// Folds every Anchor in a MarkBasePos (type 4) or MarkMarkPos
+    /// (type 6) subtable.
+    ///
+    /// Layout (MarkBasePos / MarkMarkPos format 1):
+    /// ```text
+    ///   u16 posFormat = 1
+    ///   u16 markCoverageOffset     (mark1CoverageOffset)
+    ///   u16 baseCoverageOffset     (mark2CoverageOffset)
+    ///   u16 markClassCount
+    ///   o16 markArrayOffset        (mark1ArrayOffset)
+    ///   o16 baseArrayOffset        (mark2ArrayOffset)
+    /// ```
+    ///
+    /// The `Mark2Array` matrix dimensions match `BaseArray`'s:
+    /// `mark2Count * markClassCount`.
+    fn mark_base_or_mark_pos(&self, sub: &mut [u8]) {
+        if sub.len() < 12 || read_u16(sub, 0) != Some(1) {
+            return;
+        }
+        let (Some(mark_class_count), Some(mark_array_off), Some(base_array_off)) =
+            (read_u16(sub, 6), read_u16(sub, 8), read_u16(sub, 10))
+        else {
+            return;
+        };
+        self.mark_array(sub, mark_array_off);
+        self.base_or_mark2_array(sub, base_array_off, mark_class_count);
+    }
+
+    /// Folds every Anchor in a MarkLigPos subtable.
+    ///
+    /// Layout (MarkLigPos format 1):
+    /// ```text
+    ///   u16 posFormat = 1
+    ///   u16 markCoverageOffset
+    ///   u16 ligatureCoverageOffset
+    ///   u16 markClassCount
+    ///   o16 markArrayOffset
+    ///   o16 ligatureArrayOffset
+    ///
+    ///   LigatureArray (at ligatureArrayOffset):
+    ///     u16 ligatureCount
+    ///     o16 ligatureAttachOffsets[ligatureCount]   (relative to LigatureArray)
+    ///
+    ///   LigatureAttach (at each ligatureAttachOffset):
+    ///     u16 componentCount
+    ///     ComponentRecord[componentCount]:
+    ///       o16 ligatureAnchorOffsets[markClassCount]  (relative to LigatureAttach)
+    /// ```
+    fn mark_lig_pos(&self, sub: &mut [u8]) {
+        if sub.len() < 12 || read_u16(sub, 0) != Some(1) {
+            return;
+        }
+        let (Some(mark_class_count), Some(mark_array_off), Some(lig_array_off)) =
+            (read_u16(sub, 6), read_u16(sub, 8), read_u16(sub, 10))
+        else {
+            return;
+        };
+
+        // MarkArray walks like the other Mark* lookups.
+        self.mark_array(sub, mark_array_off);
+
+        // LigatureArray: collect every ligatureAttach offset and every
+        // ComponentRecord's anchor offsets, then fold in one pass to keep
+        // the borrows simple.
+        let Some(lig_count) = read_u16(sub, lig_array_off) else {
+            return;
+        };
+        let lig_attach_offs_start = lig_array_off + 2;
+        let Some(attach_offsets) =
+            sub.get(lig_attach_offs_start..lig_attach_offs_start + lig_count * 2)
+        else {
+            return;
+        };
+        if !self.spend(lig_count) {
+            return;
+        }
+        let lig_attach_abs: Vec<usize> = attach_offsets
+            .chunks_exact(2)
+            .map(|c| usize::from(u16::from_be_bytes([c[0], c[1]])))
+            .filter(|&rel| rel != 0)
+            .map(|rel| lig_array_off + rel)
+            .collect();
+
         let row_size = mark_class_count * 2;
-        if comps_off + comp_count * row_size > buf.len() {
-            continue;
+        let mut anchor_abs: Vec<usize> = Vec::new();
+        for la_off in lig_attach_abs {
+            let Some(comp_count) = read_u16(sub, la_off) else {
+                continue;
+            };
+            let comps_off = la_off + 2;
+            // Checked for 32-bit targets: both factors come from 16-bit
+            // counts.
+            let Some(rows) = comp_count
+                .checked_mul(row_size)
+                .and_then(|len| sub.get(comps_off..comps_off.checked_add(len)?))
+            else {
+                continue;
+            };
+            if !self.spend(rows.len() / 2) {
+                return;
+            }
+            // ligatureAnchorOffsets are relative to LigatureAttach.
+            anchor_abs.extend(
+                rows.chunks_exact(2)
+                    .map(|c| usize::from(u16::from_be_bytes([c[0], c[1]])))
+                    .filter(|&rel| rel != 0)
+                    .map(|rel| la_off + rel),
+            );
         }
-        for c in 0..comp_count {
-            let row = comps_off + c * row_size;
-            for k in 0..mark_class_count {
-                let pos = row + k * 2;
-                let rel = u16::from_be_bytes([buf[pos], buf[pos + 1]]) as usize;
-                if rel == 0 {
-                    continue;
+        for off in anchor_abs {
+            self.anchor(sub, off);
+        }
+    }
+
+    /// Folds every ValueRecord variation slot in a SinglePos subtable.
+    fn single_pos(&self, sub: &mut [u8]) {
+        let (Some(format), Some(value_format)) = (read_u16(sub, 0), read_u16(sub, 4)) else {
+            return;
+        };
+        let value_format = value_format as u16;
+        if value_format & 0x00F0 == 0 {
+            // No device-offset fields: no variation work to do.
+            return;
+        }
+        let stride = value_record_size(value_format);
+        match format {
+            1 => {
+                // One shared ValueRecord at offset 6 from subtable start.
+                if sub.len() < 6 + stride {
+                    return;
                 }
-                // ligatureAnchorOffsets are relative to LigatureAttach.
-                anchor_abs.push(la_off + rel);
+                self.value_record(sub, 6, value_format);
             }
+            2 => {
+                // Per-glyph array at offset 8.
+                let Some(value_count) = read_u16(sub, 6) else {
+                    return;
+                };
+                if sub.len() < 8 + value_count * stride || !self.spend(value_count) {
+                    return;
+                }
+                for i in 0..value_count {
+                    self.value_record(sub, 8 + i * stride, value_format);
+                }
+            }
+            _ => {}
         }
     }
-    let mbuf = &mut gpos_buf[sub_off..];
-    for off in anchor_abs {
-        fold_anchor_variations(mbuf, off, store, coords);
-    }
-}
 
-// ---------------------------------------------------------------------------
-// Per-lookup-type fold
-// ---------------------------------------------------------------------------
+    /// Folds every ValueRecord variation slot in a PairPos subtable.
+    fn pair_pos(&self, sub: &mut [u8]) {
+        match read_u16(sub, 0) {
+            Some(1) => self.pair_pos_format1(sub),
+            Some(2) => self.pair_pos_format2(sub),
+            _ => {}
+        }
+    }
 
-/// Folds every ValueRecord variation slot in a SinglePos subtable
-/// starting at `sub_off` within `gpos_buf`.
-fn fold_single_pos(
-    gpos_buf: &mut [u8],
-    sub_off: usize,
-    store: Option<&ItemVariationStore<'_>>,
-    coords: &[f32],
-) {
-    let Some(sub) = gpos_buf.get(sub_off..) else {
-        return;
-    };
-    if sub.len() < 6 {
-        return;
-    }
-    let format = u16::from_be_bytes([sub[0], sub[1]]);
-    let value_format = u16::from_be_bytes([sub[4], sub[5]]);
-    if value_format & 0x00F0 == 0 {
-        // No device-offset fields: no variation work to do.
-        return;
-    }
-    let stride = value_record_size(value_format);
-    match format {
-        1 => {
-            // One shared ValueRecord at offset 6 from subtable start.
-            if sub.len() < 6 + stride {
+    fn pair_pos_format1(&self, sub: &mut [u8]) {
+        let (Some(value_format1), Some(value_format2), Some(pair_set_count)) =
+            (read_u16(sub, 4), read_u16(sub, 6), read_u16(sub, 8))
+        else {
+            return;
+        };
+        let (value_format1, value_format2) = (value_format1 as u16, value_format2 as u16);
+        if (value_format1 | value_format2) & 0x00F0 == 0 {
+            return;
+        }
+        let v1_size = value_record_size(value_format1);
+        let v2_size = value_record_size(value_format2);
+        let pvr_size = 2 + v1_size + v2_size;
+        let set_offsets_off = 10usize;
+        // Collect set offsets first, then fold each set in turn: the
+        // borrow of `sub` ends here.
+        let Some(set_offsets) = sub.get(set_offsets_off..set_offsets_off + pair_set_count * 2)
+        else {
+            return;
+        };
+        if !self.spend(pair_set_count) {
+            return;
+        }
+        let set_offs: Vec<usize> = set_offsets
+            .chunks_exact(2)
+            .map(|c| usize::from(u16::from_be_bytes([c[0], c[1]])))
+            .collect();
+
+        for set_off in set_offs {
+            let Some(pair_value_count) = read_u16(sub, set_off) else {
+                continue;
+            };
+            if set_off + 2 + pair_value_count * pvr_size > sub.len() {
+                continue;
+            }
+            if !self.spend(pair_value_count) {
                 return;
             }
-            fold_value_record(&mut gpos_buf[sub_off..], 6, value_format, store, coords);
-        }
-        2 => {
-            // Per-glyph array at offset 8.
-            if sub.len() < 8 {
-                return;
-            }
-            let value_count = u16::from_be_bytes([sub[6], sub[7]]) as usize;
-            let need = 8 + value_count * stride;
-            if sub.len() < need {
-                return;
-            }
-            for i in 0..value_count {
-                let vr = 8 + i * stride;
-                fold_value_record(&mut gpos_buf[sub_off..], vr, value_format, store, coords);
+            for j in 0..pair_value_count {
+                let pvr_off = set_off + 2 + j * pvr_size;
+                // ValueRecord1 starts after the 2-byte secondGlyph.
+                let vr1_pos = pvr_off + 2;
+                let vr2_pos = vr1_pos + v1_size;
+                self.value_record(sub, vr1_pos, value_format1);
+                self.value_record(sub, vr2_pos, value_format2);
             }
         }
-        _ => {}
-    }
-}
-
-/// Folds every ValueRecord variation slot in a PairPos subtable
-/// starting at `sub_off` within `gpos_buf`.
-fn fold_pair_pos(
-    gpos_buf: &mut [u8],
-    sub_off: usize,
-    store: Option<&ItemVariationStore<'_>>,
-    coords: &[f32],
-) {
-    let Some(sub) = gpos_buf.get(sub_off..) else {
-        return;
-    };
-    if sub.len() < 2 {
-        return;
-    }
-    let format = u16::from_be_bytes([sub[0], sub[1]]);
-    match format {
-        1 => fold_pair_pos_format1(gpos_buf, sub_off, store, coords),
-        2 => fold_pair_pos_format2(gpos_buf, sub_off, store, coords),
-        _ => {}
-    }
-}
-
-fn fold_pair_pos_format1(
-    gpos_buf: &mut [u8],
-    sub_off: usize,
-    store: Option<&ItemVariationStore<'_>>,
-    coords: &[f32],
-) {
-    let sub_len = gpos_buf.len() - sub_off;
-    let sub = &gpos_buf[sub_off..];
-    if sub.len() < 10 {
-        return;
-    }
-    let value_format1 = u16::from_be_bytes([sub[4], sub[5]]);
-    let value_format2 = u16::from_be_bytes([sub[6], sub[7]]);
-    let pair_set_count = u16::from_be_bytes([sub[8], sub[9]]) as usize;
-    if (value_format1 | value_format2) & 0x00F0 == 0 {
-        return;
-    }
-    let v1_size = value_record_size(value_format1);
-    let v2_size = value_record_size(value_format2);
-    let pvr_size = 2 + v1_size + v2_size;
-    let set_offsets_off = 10usize;
-    if sub.len() < set_offsets_off + pair_set_count * 2 {
-        return;
-    }
-    // Collect set offsets first, then fold each set in turn: the
-    // borrow of `sub` ends here.
-    let mut set_offs: Vec<usize> = Vec::with_capacity(pair_set_count);
-    for i in 0..pair_set_count {
-        let off_off = set_offsets_off + i * 2;
-        let set_off = u16::from_be_bytes([sub[off_off], sub[off_off + 1]]) as usize;
-        set_offs.push(set_off);
     }
 
-    for set_off in set_offs {
-        if set_off >= sub_len || set_off + 2 > sub_len {
-            continue;
+    fn pair_pos_format2(&self, sub: &mut [u8]) {
+        if sub.len() < 16 {
+            return;
         }
-        let pair_value_count =
-            u16::from_be_bytes([gpos_buf[sub_off + set_off], gpos_buf[sub_off + set_off + 1]])
-                as usize;
-        let need = 2 + pair_value_count * pvr_size;
-        if set_off + need > sub_len {
-            continue;
+        let (Some(value_format1), Some(value_format2), Some(class1_count), Some(class2_count)) = (
+            read_u16(sub, 4),
+            read_u16(sub, 6),
+            read_u16(sub, 12),
+            read_u16(sub, 14),
+        ) else {
+            return;
+        };
+        let (value_format1, value_format2) = (value_format1 as u16, value_format2 as u16);
+        if (value_format1 | value_format2) & 0x00F0 == 0 {
+            return;
         }
-        for j in 0..pair_value_count {
-            let pvr_off = set_off + 2 + j * pvr_size;
-            // ValueRecord1 starts after the 2-byte secondGlyph.
-            let vr1_pos = pvr_off + 2;
+        let v1_size = value_record_size(value_format1);
+        let v2_size = value_record_size(value_format2);
+        let cell_size = v1_size + v2_size;
+        let records_off = 16usize;
+        // The matrix size can exceed a 32-bit `usize`, so it is checked.
+        let Some(cells) = class1_count.checked_mul(class2_count) else {
+            return;
+        };
+        let fits = cells
+            .checked_mul(cell_size)
+            .and_then(|len| records_off.checked_add(len))
+            .is_some_and(|need| need <= sub.len());
+        if !fits || !self.spend(cells) {
+            return;
+        }
+        for cell in 0..cells {
+            let vr1_pos = records_off + cell * cell_size;
             let vr2_pos = vr1_pos + v1_size;
-            fold_value_record(
-                &mut gpos_buf[sub_off..],
-                vr1_pos,
-                value_format1,
-                store,
-                coords,
-            );
-            fold_value_record(
-                &mut gpos_buf[sub_off..],
-                vr2_pos,
-                value_format2,
-                store,
-                coords,
-            );
-        }
-    }
-}
-
-fn fold_pair_pos_format2(
-    gpos_buf: &mut [u8],
-    sub_off: usize,
-    store: Option<&ItemVariationStore<'_>>,
-    coords: &[f32],
-) {
-    let sub = &gpos_buf[sub_off..];
-    if sub.len() < 16 {
-        return;
-    }
-    let value_format1 = u16::from_be_bytes([sub[4], sub[5]]);
-    let value_format2 = u16::from_be_bytes([sub[6], sub[7]]);
-    let class1_count = u16::from_be_bytes([sub[12], sub[13]]) as usize;
-    let class2_count = u16::from_be_bytes([sub[14], sub[15]]) as usize;
-    if (value_format1 | value_format2) & 0x00F0 == 0 {
-        return;
-    }
-    let v1_size = value_record_size(value_format1);
-    let v2_size = value_record_size(value_format2);
-    let cell_size = v1_size + v2_size;
-    let row_size = class2_count * cell_size;
-    let records_off = 16usize;
-    let need = records_off + class1_count * row_size;
-    if sub.len() < need {
-        return;
-    }
-    for i in 0..class1_count {
-        for j in 0..class2_count {
-            let cell_off = records_off + i * row_size + j * cell_size;
-            let vr1_pos = cell_off;
-            let vr2_pos = cell_off + v1_size;
-            fold_value_record(
-                &mut gpos_buf[sub_off..],
-                vr1_pos,
-                value_format1,
-                store,
-                coords,
-            );
-            fold_value_record(
-                &mut gpos_buf[sub_off..],
-                vr2_pos,
-                value_format2,
-                store,
-                coords,
-            );
+            self.value_record(sub, vr1_pos, value_format1);
+            self.value_record(sub, vr2_pos, value_format2);
         }
     }
 }
@@ -828,13 +712,15 @@ fn fold_pair_pos_format2(
 // ---------------------------------------------------------------------------
 
 /// Walks every lookup in the source GPOS table; for the supported
-/// lookup types (Type 1 SinglePos, Type 2 PairPos) folds every
-/// `VariationIndex`-bearing ValueRecord field into the static field
-/// at `coords` and zeros the offset slot. Lookup types we do not
+/// lookup types (SinglePos, PairPos, CursivePos, MarkBasePos,
+/// MarkLigPos, MarkMarkPos, and Extension lookups wrapping them) folds
+/// every `VariationIndex`-bearing field into its static field at
+/// `coords` and zeros the offset slot. Lookup types we do not
 /// understand ride through verbatim.
 ///
-/// Returns `Some(new_gpos_bytes)` when the source carries GPOS, else
-/// `None` (caller passes through). The returned table is byte-for-byte
+/// Returns `Some(new_gpos_bytes)` when the source header parses, else
+/// `None` (caller passes through). Also returns `None` when the walk
+/// exhausts its work budget. The returned table is byte-for-byte
 /// identical to the source for every byte we did not touch. Only the
 /// fields we folded into and the offset slots we zeroed change.
 pub(crate) fn bake_gpos_at_coords(
@@ -845,105 +731,88 @@ pub(crate) fn bake_gpos_at_coords(
     if gpos_bytes.len() < 10 {
         return None;
     }
-    let major = u16::from_be_bytes([gpos_bytes[0], gpos_bytes[1]]);
-    if major != 1 {
+    if read_u16(gpos_bytes, 0)? != 1 {
         return None;
     }
-    let lookup_list_off = u16::from_be_bytes([gpos_bytes[8], gpos_bytes[9]]) as usize;
-    if lookup_list_off + 2 > gpos_bytes.len() {
-        return None;
-    }
-    let lookup_count =
-        u16::from_be_bytes([gpos_bytes[lookup_list_off], gpos_bytes[lookup_list_off + 1]]) as usize;
+    let lookup_list_off = read_u16(gpos_bytes, 8)?;
+    let lookup_count = read_u16(gpos_bytes, lookup_list_off)?;
     let offsets_start = lookup_list_off + 2;
-    if offsets_start + lookup_count * 2 > gpos_bytes.len() {
-        return None;
-    }
+    let lookup_offsets = gpos_bytes.get(offsets_start..offsets_start + lookup_count * 2)?;
 
-    // Collect (lookup_type, lookup_base, [subtable_abs_off, ...]) for
-    // every lookup. We do not patch context/chain/extension lookups:
-    // those are passed through.
+    // Every header and offset is read from the immutable source; the
+    // folds write into this copy.
     let mut buf = gpos_bytes.to_vec();
+    let bake = Bake {
+        store,
+        coords,
+        budget: WorkBudget::new(WORK_LIMIT),
+    };
+    // `(subtable offset, lookup type)` pairs already folded.
+    let mut visited: BTreeSet<(usize, u16)> = BTreeSet::new();
 
-    // Re-read everything from the immutable copy so we don't accidentally
-    // mutate while we are walking the headers.
-    for li in 0..lookup_count {
-        let off_pos = offsets_start + li * 2;
-        let lookup_off =
-            u16::from_be_bytes([gpos_bytes[off_pos], gpos_bytes[off_pos + 1]]) as usize;
+    for lookup_off in lookup_offsets
+        .chunks_exact(2)
+        .map(|c| usize::from(u16::from_be_bytes([c[0], c[1]])))
+    {
         let lookup_base = lookup_list_off + lookup_off;
-        if lookup_base + 6 > gpos_bytes.len() {
+        let (Some(lookup_type), Some(subtable_count)) = (
+            crate::layout::read_u16(gpos_bytes, lookup_base),
+            read_u16(gpos_bytes, lookup_base + 4),
+        ) else {
             continue;
-        }
-        let lookup_type =
-            u16::from_be_bytes([gpos_bytes[lookup_base], gpos_bytes[lookup_base + 1]]);
-        let subtable_count =
-            u16::from_be_bytes([gpos_bytes[lookup_base + 4], gpos_bytes[lookup_base + 5]]) as usize;
+        };
         let subtable_offsets_off = lookup_base + 6;
-        if subtable_offsets_off + subtable_count * 2 > gpos_bytes.len() {
+        let Some(subtable_offsets) =
+            gpos_bytes.get(subtable_offsets_off..subtable_offsets_off + subtable_count * 2)
+        else {
             continue;
+        };
+        if !bake.spend(1 + subtable_count) {
+            return None;
         }
-        for si in 0..subtable_count {
-            let so_pos = subtable_offsets_off + si * 2;
-            let sub_rel = u16::from_be_bytes([gpos_bytes[so_pos], gpos_bytes[so_pos + 1]]) as usize;
+        for sub_rel in subtable_offsets
+            .chunks_exact(2)
+            .map(|c| usize::from(u16::from_be_bytes([c[0], c[1]])))
+        {
             let sub_abs = lookup_base + sub_rel;
             if sub_abs >= gpos_bytes.len() {
                 continue;
             }
-            match lookup_type {
-                // Type 1: SinglePos.
-                1 => fold_single_pos(&mut buf, sub_abs, store, coords),
-                // Type 2: PairPos.
-                2 => fold_pair_pos(&mut buf, sub_abs, store, coords),
-                // Type 3: CursivePos.
-                3 => fold_cursive_pos(&mut buf, sub_abs, store, coords),
-                // Type 4: MarkBasePos.
-                4 => fold_mark_base_pos(&mut buf, sub_abs, store, coords),
-                // Type 5: MarkLigPos.
-                5 => fold_mark_lig_pos(&mut buf, sub_abs, store, coords),
-                // Type 6: MarkMarkPos.
-                6 => fold_mark_mark_pos(&mut buf, sub_abs, store, coords),
-                // Type 9: Extension. The extension subtable is a
-                // 2-byte format + 2-byte extensionLookupType + 4-byte
-                // extensionOffset (relative to the extension subtable
-                // start). Recurse into the inner subtable so we cover
-                // every supported type that font compilers wrap in
-                // Extension lookups (common in large GPOS tables).
-                9 => {
-                    if sub_abs + 8 > gpos_bytes.len() {
-                        continue;
-                    }
-                    let ext_type =
-                        u16::from_be_bytes([gpos_bytes[sub_abs + 2], gpos_bytes[sub_abs + 3]]);
-                    let ext_off = u32::from_be_bytes([
-                        gpos_bytes[sub_abs + 4],
-                        gpos_bytes[sub_abs + 5],
-                        gpos_bytes[sub_abs + 6],
-                        gpos_bytes[sub_abs + 7],
-                    ]) as usize;
-                    let inner_abs = sub_abs + ext_off;
-                    if inner_abs >= gpos_bytes.len() {
-                        continue;
-                    }
-                    match ext_type {
-                        1 => fold_single_pos(&mut buf, inner_abs, store, coords),
-                        2 => fold_pair_pos(&mut buf, inner_abs, store, coords),
-                        3 => fold_cursive_pos(&mut buf, inner_abs, store, coords),
-                        4 => fold_mark_base_pos(&mut buf, inner_abs, store, coords),
-                        5 => fold_mark_lig_pos(&mut buf, inner_abs, store, coords),
-                        6 => fold_mark_mark_pos(&mut buf, inner_abs, store, coords),
-                        _ => {}
-                    }
-                }
-                // Context (7) / ChainContext (8): nested rule
-                // dispatchers; their nested lookups are reached via
-                // the LookupList loop above so any anchor variations
-                // ride through that path too.
-                _ => {}
+            // Type 9: Extension. The extension subtable is a 2-byte
+            // format + 2-byte extensionLookupType + 4-byte
+            // extensionOffset (relative to the extension subtable
+            // start). Recurse into the inner subtable so we cover
+            // every supported type that font compilers wrap in
+            // Extension lookups (common in large GPOS tables).
+            //
+            // Context (7) / ChainContext (8) are nested rule
+            // dispatchers; their nested lookups are reached via the
+            // LookupList loop so any anchor variations ride through
+            // that path too.
+            let (inner_type, inner_abs) = if lookup_type == 9 {
+                let Some(header) = gpos_bytes.get(sub_abs..sub_abs + 8) else {
+                    continue;
+                };
+                let ext_type = u16::from_be_bytes([header[2], header[3]]);
+                let ext_off =
+                    u32::from_be_bytes([header[4], header[5], header[6], header[7]]) as usize;
+                let Some(inner_abs) = sub_abs.checked_add(ext_off) else {
+                    continue;
+                };
+                (ext_type, inner_abs)
+            } else {
+                (lookup_type, sub_abs)
+            };
+            if inner_abs >= gpos_bytes.len() || !visited.insert((inner_abs, inner_type)) {
+                continue;
             }
+            bake.subtable(&mut buf, inner_type, inner_abs);
         }
     }
 
+    if bake.budget.is_spent() {
+        return None;
+    }
     Some(buf)
 }
 
@@ -964,7 +833,6 @@ mod tests {
         let subtable_slot = out.len();
         out.extend_from_slice(&0u32.to_be_bytes());
 
-        #[allow(clippy::cast_possible_truncation)]
         let region_start = out.len() as u32;
         out[region_off_slot..region_off_slot + 4].copy_from_slice(&region_start.to_be_bytes());
         out.extend_from_slice(&1u16.to_be_bytes()); // axisCount
@@ -974,7 +842,6 @@ mod tests {
         out.extend_from_slice(&16384i16.to_be_bytes());
         out.extend_from_slice(&16384i16.to_be_bytes());
 
-        #[allow(clippy::cast_possible_truncation)]
         let sub_start = out.len() as u32;
         out[subtable_slot..subtable_slot + 4].copy_from_slice(&sub_start.to_be_bytes());
         out.extend_from_slice(&1u16.to_be_bytes()); // itemCount
@@ -1834,5 +1701,63 @@ mod tests {
         for off in [m1_x_dev_pos, m1_y_dev_pos, m2_x_dev_pos, m2_y_dev_pos] {
             assert_eq!(u16::from_be_bytes([baked[off], baked[off + 1]]), 0);
         }
+    }
+
+    #[test]
+    fn fold_value_record_device_without_static_field_skips_write() {
+        // ValueFormat 0x0010: xPlaDevice without xPlacement. The static
+        // position is the `usize::MAX` sentinel, which used to overflow
+        // (debug) or index out of bounds (release) once the delta was
+        // non-zero.
+        let mut buf = vec![0u8; 8];
+        // ValueRecord at 0: one Offset16 pointing at byte 2.
+        buf[0..2].copy_from_slice(&2u16.to_be_bytes());
+        // VariationIndex at byte 2: outer=0, inner=0, deltaFormat=0x8000.
+        buf[6..8].copy_from_slice(&0x8000u16.to_be_bytes());
+        let ivs_bytes = build_ivs_one_region_one_item(80);
+        let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
+        fold_value_record(&mut buf, 0, 0x0010, Some(&store), &[1.0]);
+        // The offset slot is zeroed and nothing else changes.
+        assert_eq!(&buf[0..2], &[0, 0]);
+        assert_eq!(&buf[6..8], &0x8000u16.to_be_bytes());
+    }
+
+    #[test]
+    fn bake_visits_a_shared_subtable_once() {
+        // Two lookup-list entries point at the same SinglePos lookup, so
+        // its subtable is reached twice. Folding is idempotent, so the
+        // second visit is skipped and the result matches one visit.
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&1u16.to_be_bytes()); // posFormat 1
+        sub.extend_from_slice(&0u16.to_be_bytes()); // coverage (unused)
+        sub.extend_from_slice(&0x0011u16.to_be_bytes()); // xPlacement + device
+        sub.extend_from_slice(&10i16.to_be_bytes()); // xPlacement
+        sub.extend_from_slice(&10u16.to_be_bytes()); // device offset
+        sub.extend_from_slice(&0u16.to_be_bytes()); // outer
+        sub.extend_from_slice(&0u16.to_be_bytes()); // inner
+        sub.extend_from_slice(&0x8000u16.to_be_bytes()); // VariationIndex
+
+        let mut gpos = Vec::new();
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&[0u8; 4]); // script / feature lists unused
+        gpos.extend_from_slice(&10u16.to_be_bytes()); // lookupListOffset
+                                                      // LookupList at 10: two entries, both at offset 6.
+        gpos.extend_from_slice(&2u16.to_be_bytes());
+        gpos.extend_from_slice(&6u16.to_be_bytes());
+        gpos.extend_from_slice(&6u16.to_be_bytes());
+        // Lookup at 16: type 1, flag 0, one subtable at offset 8.
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&8u16.to_be_bytes());
+        gpos.extend_from_slice(&sub);
+
+        let ivs_bytes = build_ivs_one_region_one_item(80);
+        let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
+        let baked = bake_gpos_at_coords(&gpos, Some(&store), &[1.0]).unwrap();
+        let x = i16::from_be_bytes([baked[24 + 6], baked[24 + 7]]);
+        assert_eq!(x, 90);
+        assert_eq!(&baked[24 + 8..24 + 10], &[0, 0]);
     }
 }

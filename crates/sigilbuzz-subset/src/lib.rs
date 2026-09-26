@@ -158,23 +158,20 @@ pub struct SubsetInput {
     /// surfaces [`SubsetError::Unsupported`].
     pub drop_unhandled: bool,
     /// If true (the default), retain layout tables (`GSUB`, `GPOS`,
-    /// `GDEF`) when the closure walker has pulled in every glyph the
-    /// remaining lookups reference, i.e. when the layout machinery
-    /// can be passed through verbatim with no gid renumbering risk.
-    /// When false, layout tables are dropped, matching the 0.5.0
-    /// behavior. Callers that explicitly want a hint-free, layout-
-    /// free subset (e.g. embedded PDF font streams) should set this
-    /// to false.
+    /// `GDEF`) on the `glyf` path. They pass through verbatim when
+    /// every glyph survives and are rewritten for the new glyph ids
+    /// otherwise. When false, layout tables are dropped. Callers that
+    /// explicitly want a hint-free, layout-free subset (e.g. embedded
+    /// PDF font streams) should set this to false.
     pub retain_layout: bool,
     /// If true (the default), retain variable-font tables (`fvar`,
-    /// `avar`, `gvar`, `HVAR`) so the resulting subset still varies
-    /// under axis coordinates. `fvar` and `avar` are passed through
-    /// verbatim; `gvar` is rebuilt with one entry per kept gid;
-    /// `HVAR` is rebuilt around a fresh `DeltaSetIndexMap` plus a
+    /// `avar`, `gvar`, `HVAR`, `VARC`) so the resulting subset still
+    /// varies under axis coordinates. `fvar` and `avar` are passed
+    /// through verbatim; `gvar` is rebuilt with one entry per kept
+    /// gid; `HVAR` is rebuilt around a fresh `DeltaSetIndexMap` plus a
     /// deduped `ItemVariationStore`. When false, every variable-font
-    /// table is dropped, matching the 0.5.0 baseline. The resulting
-    /// subset behaves as a static font pinned to the source's default
-    /// instance.
+    /// table is dropped. The resulting subset behaves as a static font
+    /// pinned to the source's default instance.
     pub retain_variations: bool,
 }
 
@@ -208,7 +205,8 @@ pub enum SubsetError {
     /// so this only fires when the caller's slice is empty
     /// and `drop_unhandled` is false.
     EmptyGidSet,
-    /// A gid past the source font's `numGlyphs` was supplied.
+    /// A gid past the source font's `numGlyphs` was supplied. Also
+    /// reported for gid 0 when the source font has no glyphs at all.
     GidOutOfRange {
         /// The offending gid.
         gid: GlyphId,
@@ -216,8 +214,11 @@ pub enum SubsetError {
         num_glyphs: u16,
     },
     /// The source font uses a feature sigilbuzz-subset cannot yet
-    /// process: typically CFF / CFF2 outlines or, with
-    /// `drop_unhandled = false`, any of the deferred tables.
+    /// process, or data it cannot rewrite safely. Examples: a table
+    /// without a subset implementation when `drop_unhandled` is false,
+    /// a composite glyph that names a glyph past `numGlyphs`, or tables
+    /// that share data so heavily that the rebuilt copy would explode
+    /// in size.
     Unsupported(&'static str),
     /// A sigilbuzz parse error bubbled up while inspecting the
     /// source font.
@@ -270,14 +271,13 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
     // them under a non-identity gid map for both non-CID and CID-keyed
     // CFF1 plus CFF2.
     //
-    // Today the dispatch handles three cases cleanly:
+    // The dispatch handles three cases:
     //
     // 1. The kept gid set after closure is the source font's identity
     //    (every gid kept). The CFF / CFF2 table and its dependencies
     //    are passed through verbatim and the surrounding sfnt directory
     //    is rebuilt around them. This mirrors the
-    //    [`layout::Decision::Preserve`] strategy from `feature/subset-
-    //    layout-rewriter` for GSUB / GPOS / GDEF.
+    //    [`layout::Decision::Preserve`] strategy for GSUB / GPOS / GDEF.
     // 2. CFF1 non-identity (non-CID and CID-keyed) routes through
     //    [`cff_non_identity`] which calls [`cff::subset_non_identity`].
     // 3. CFF2 non-identity routes through [`cff2_non_identity`] which
@@ -329,12 +329,14 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         return Err(SubsetError::EmptyGidSet);
     }
 
-    // Closure walk: expand to include composite components in glyf.
-    // Gid 0 is always retained per the SFNT convention.
+    // Closure walk: expand to include composite components, layout
+    // partners, and VARC components. Gid 0 is always retained per the
+    // SFNT convention.
     let kept = closure::compute_closure(face, &input.gids)?;
 
     // Build the old->new map. New gids are 0..N in old-order, with
-    // gid 0 always at slot 0.
+    // gid 0 always at slot 0. The closure only returns gids below
+    // `num_glyphs`, so every new gid and the count fit in u16.
     let mut gid_map: Vec<(GlyphId, GlyphId)> = kept
         .iter()
         .enumerate()
@@ -453,14 +455,12 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         // VARC: re-emit when the source carries the table. Coverage
         // entries renumber per the new gid map and component records
         // are rewritten to point at the new gid namespace; the
-        // MultiVarStore is preserved verbatim.
+        // MultiVarStore is pruned to the entries the kept records use.
         if let Some(varc) = face.varc()? {
             let varc_bytes = face.table_bytes(tag::VARC).map_err(SubsetError::from)?;
             let lookup = |old: GlyphId| -> Option<GlyphId> {
-                gid_map
-                    .binary_search_by_key(&old, |(o, _)| *o)
-                    .ok()
-                    .map(|i| gid_map[i].1)
+                let i = gid_map.binary_search_by_key(&old, |(o, _)| *o).ok()?;
+                gid_map.get(i).map(|&(_, new)| new)
             };
             if let Some(b) = varc::subset_varc(&varc, varc_bytes, &kept, &lookup)? {
                 tables.push((tag::VARC, b));
@@ -493,8 +493,8 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         // appear here. We returned early above.
         if !input.drop_unhandled {
             // Strict mode: any table without an implementation aborts.
-            // kern / vhea / vmtx / VORG / COLR / CPAL / morx / kerx:
-            // none of these are subset-aware in 0.6.0 either.
+            // kern / vhea / vmtx / VORG / COLR / CPAL / morx / kerx
+            // have no subset implementation.
             return Err(SubsetError::Unsupported(
                 "table not yet handled by sigilbuzz-subset; pass drop_unhandled=true",
             ));
@@ -522,8 +522,8 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
 ///
 /// Variable-font tables (`fvar`, `avar`, `gvar`, `HVAR`) and layout
 /// tables (`GSUB` / `GPOS` / `GDEF`) are dropped on the non-identity
-/// path. CFF1 fonts rarely carry them, and a follow-up wires the
-/// existing rewriters in once the orchestration baseline lands.
+/// path. CFF1 fonts rarely carry them, and the rewriters used on the
+/// `glyf` path are not wired in here.
 fn cff_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, SubsetError> {
     // Build the gid_map.
     let mut gid_map: Vec<(GlyphId, GlyphId)> = kept
@@ -589,8 +589,7 @@ fn cff_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, S
 /// fresh SFNT directory around it. CFF2 fonts pair with cmap, hmtx,
 /// hhea, head, name, OS/2. Every other table the source carries
 /// (including layout / variable-font tables) is dropped on the
-/// non-identity path; the rewriters ride alongside the CFF1 flow's same
-/// follow-up that wires those in.
+/// non-identity path, as on the CFF1 path.
 fn cff2_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, SubsetError> {
     let mut gid_map: Vec<(GlyphId, GlyphId)> = kept
         .iter()

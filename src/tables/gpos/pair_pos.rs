@@ -118,9 +118,9 @@ impl<'a> PairPosFormat1<'a> {
         })
     }
 
-    fn pair_set_offset(&self, i: u16) -> u16 {
+    fn pair_set_offset(&self, i: u16) -> Option<u16> {
         let off = self.pair_set_offsets_off + i as usize * 2;
-        u16::from_be_bytes([self.data[off], self.data[off + 1]])
+        Reader::at(self.data, off).ok()?.read_u16().ok()
     }
 
     fn lookup(&self, first: u16, second: u16) -> Option<(ValueRecord, ValueRecord)> {
@@ -128,7 +128,7 @@ impl<'a> PairPosFormat1<'a> {
         if cov >= self.pair_set_count {
             return None;
         }
-        let set_off = self.pair_set_offset(cov) as usize;
+        let set_off = self.pair_set_offset(cov)? as usize;
         let set_bytes = self.data.get(set_off..)?;
 
         let mut r = Reader::new(set_bytes);
@@ -203,11 +203,13 @@ impl<'a> PairPosFormat2<'a> {
         let class1_records_off = r.position();
 
         let value_record_pair = ValueRecord::size(value_format1) + ValueRecord::size(value_format2);
-        let class2_record_stride = value_record_pair;
-        let class1_record_stride = class2_count as usize * class2_record_stride;
-
-        let need = class1_records_off + class1_count as usize * class1_record_stride;
-        if data.len() < need {
+        // class1Count * class2Count * 32 bytes can overflow a 32-bit
+        // usize, so every step is checked.
+        let need = usize::from(class1_count)
+            .checked_mul(usize::from(class2_count))
+            .and_then(|cells| cells.checked_mul(value_record_pair))
+            .and_then(|len| class1_records_off.checked_add(len));
+        if !need.is_some_and(|need| need <= data.len()) {
             return Err(Error::Truncated {
                 offset: class1_records_off,
                 context: "pairPos format2 class records shorter than declared",

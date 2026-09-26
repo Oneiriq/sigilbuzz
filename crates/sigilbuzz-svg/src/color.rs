@@ -13,10 +13,10 @@
 //!   carries an `<!-- sweep-fallback -->` comment so consumers that
 //!   care can detect the substitution and route through a richer
 //!   renderer.
-//! - `PushLayer` / `PopLayer` map to `<g>` wrappers; SVG's blend modes
-//!   only cover a subset of the COLRv1 composite list, so unsupported
-//!   modes are passed through as `style="mix-blend-mode: <name>"` and
-//!   left to the SVG viewer's CSS engine.
+//! - `PushLayer` / `PopLayer` map to `<g style="mix-blend-mode:...">`
+//!   wrappers. CSS blend modes only cover a subset of the COLRv1
+//!   composite list, so Porter-Duff modes with no CSS equivalent fall
+//!   back to `normal`.
 //!
 //! The walker re-walks the same DrawCmd stream sigilbuzz-paint emits
 //! to keep behavior aligned with other renderers built on the
@@ -93,10 +93,9 @@ fn render_color_svg(face: &Face<'_>, cmds: &[DrawCmd], coords: &[F2Dot14]) -> Op
             }
         }
     }
+    // `bbox` is set only when some leaf is `Some`, so `None` here also
+    // covers the case where every leaf is missing.
     let bbox = bbox?;
-    if leaves.iter().all(Option::is_none) {
-        return None;
-    }
 
     // Second pass: walk the cmd stream alongside the leaf list,
     // emitting defs (gradients) and the body (paths + groups). The
@@ -385,7 +384,7 @@ fn composite_to_blend_mode(mode: CompositeMode) -> &'static str {
     // Porter-Duff cases that have no CSS equivalent fall back to
     // `normal` so the output stays renderable. Consumers wanting full
     // fidelity should drive sigilbuzz-paint into a Porter-Duff-aware
-    // backend (sigilbuzz-gpu, future sigilbuzz-pdf).
+    // backend.
     match mode {
         CompositeMode::Clear => "normal",
         CompositeMode::Src => "normal",

@@ -47,9 +47,9 @@ use sigilbuzz_paint::{
 
 use crate::affine::Affine;
 use crate::error::RenderError;
-use crate::flatten::flatten;
+use crate::flatten::{flatten_limited, Segment, MAX_SEGMENTS};
 use crate::pixmap::{ColorPixmap, Pixmap};
-use crate::raster::rasterize as raster;
+use crate::raster::{raster_bounds, rasterize as raster, RasterBounds, MAX_RASTER_DIM};
 
 /// Public entry: walks the `DrawCmd` stream `sigilbuzz-paint` would
 /// produce for `gid` and renders it to a premultiplied RGBA pixmap.
@@ -105,10 +105,17 @@ pub(crate) fn rasterize_colrv1(
         dy: 0.0,
     };
 
-    // First pass: pre-rasterize every FillGlyph leaf to discover the
-    // overall bounding box. This matches the strategy used by the
-    // COLRv0 path: no surface allocation until we know the union.
+    // First pass: flatten every FillGlyph leaf and find where its mask
+    // will land, to discover the overall bounding box. This matches
+    // the strategy used by the COLRv0 path: no surface allocation
+    // until we know the union. Masks are rasterized one at a time in
+    // the second pass, so memory holds one mask however many leaves
+    // the paint graph produces.
     let mut leaves: Vec<Leaf> = Vec::new();
+    // All leaves share one segment budget, so a paint graph that
+    // repeats a heavy outline thousands of times stays bounded. Leaves
+    // past the budget are skipped.
+    let mut budget = MAX_SEGMENTS;
     for cmd in &cmds {
         if let DrawCmd::FillGlyph {
             gid: fill_gid,
@@ -116,6 +123,10 @@ pub(crate) fn rasterize_colrv1(
             paint,
         } = cmd
         {
+            if budget == 0 {
+                leaves.push(Leaf::Empty);
+                continue;
+            }
             let xform = transform.then(to_pixels);
             let affine = transform_to_affine(xform);
             let outline = face
@@ -129,16 +140,19 @@ pub(crate) fn rasterize_colrv1(
                 leaves.push(Leaf::Empty);
                 continue;
             }
-            let segs = flatten(outline.ops().iter().copied(), &affine, tolerance);
+            let segs = flatten_limited(outline.ops().iter().copied(), &affine, tolerance, budget);
+            budget = budget.saturating_sub(segs.len());
             if segs.is_empty() {
                 leaves.push(Leaf::Empty);
                 continue;
             }
-            let r = raster(&segs);
+            let Some(bounds) = raster_bounds(&segs) else {
+                leaves.push(Leaf::Empty);
+                continue;
+            };
             leaves.push(Leaf::Glyph {
-                mask: r.pixmap,
-                origin_x: r.origin_x,
-                origin_y: r.origin_y,
+                segs,
+                bounds,
                 paint: paint.clone(),
                 paint_xform: xform,
             });
@@ -153,21 +167,12 @@ pub(crate) fn rasterize_colrv1(
     let mut max_y = i32::MIN;
     let mut any = false;
     for leaf in &leaves {
-        if let Leaf::Glyph {
-            mask,
-            origin_x,
-            origin_y,
-            ..
-        } = leaf
-        {
-            if mask.is_empty() {
-                continue;
-            }
+        if let Leaf::Glyph { bounds, .. } = leaf {
             any = true;
-            min_x = min_x.min(*origin_x);
-            min_y = min_y.min(*origin_y);
-            max_x = max_x.max(*origin_x + mask.width as i32);
-            max_y = max_y.max(*origin_y + mask.height as i32);
+            min_x = min_x.min(bounds.origin_x);
+            min_y = min_y.min(bounds.origin_y);
+            max_x = max_x.max(bounds.origin_x + bounds.width as i32);
+            max_y = max_y.max(bounds.origin_y + bounds.height as i32);
         }
     }
     if !any || max_x <= min_x || max_y <= min_y {
@@ -175,85 +180,94 @@ pub(crate) fn rasterize_colrv1(
     }
     let width = (max_x - min_x) as u32;
     let height = (max_y - min_y) as u32;
+    // The union contains every leaf, so this also covers a single leaf
+    // that is too large to rasterize.
+    if width > MAX_RASTER_DIM || height > MAX_RASTER_DIM {
+        return Err(RenderError::BadSize(size_pt));
+    }
+    // Every pushed layer is a full canvas. Bound how many can be alive
+    // at once by their combined pixel count.
+    let canvas_pixels = u64::from(width) * u64::from(height);
+    let max_live_layers = (MAX_LAYER_STACK_PIXELS / canvas_pixels).max(1);
 
-    // Layer stack. The bottom is the destination; PushLayer adds a
-    // fresh transparent surface on top.
-    let mut stack: Vec<Layer> = Vec::with_capacity(4);
-    stack.push(Layer {
-        pixmap: ColorPixmap::new(width, height),
-        mode: CompositeMode::SrcOver,
-    });
+    // Layer stack. `base` is the destination. PushLayer adds a fresh
+    // transparent surface on top of it.
+    let mut base = ColorPixmap::new(width, height);
+    let mut pushed: Vec<Layer> = Vec::new();
 
     let mut leaf_iter = leaves.into_iter();
     for cmd in cmds {
         match cmd {
             DrawCmd::FillGlyph { .. } => {
-                let leaf = leaf_iter
-                    .next()
-                    .expect("leaf vec built from cmd stream stays in lock-step");
+                // `leaves` holds one entry per FillGlyph in `cmds`, so
+                // this never runs dry. Skipping is a harmless fallback.
+                let Some(leaf) = leaf_iter.next() else {
+                    continue;
+                };
                 let Leaf::Glyph {
-                    mask,
-                    origin_x,
-                    origin_y,
+                    segs,
                     paint,
                     paint_xform,
+                    ..
                 } = leaf
                 else {
                     continue;
                 };
-                let dx = origin_x - min_x;
-                let dy = origin_y - min_y;
+                let r = raster(&segs);
+                let dx = r.origin_x - min_x;
+                let dy = r.origin_y - min_y;
                 // Translate paint coords from union-bbox space into
                 // mask-local space when sampling the gradient.
                 let bbox_origin = (min_x, min_y);
-                let top = stack.last_mut().expect("layer stack never empty");
-                paint_glyph_into_layer(
-                    &mut top.pixmap,
-                    &mask,
-                    dx,
-                    dy,
-                    &paint,
-                    paint_xform,
-                    bbox_origin,
-                );
+                let top = pushed.last_mut().map_or(&mut base, |l| &mut l.pixmap);
+                paint_glyph_into_layer(top, &r.pixmap, dx, dy, &paint, paint_xform, bbox_origin);
             }
             DrawCmd::PushLayer { composite_mode } => {
-                stack.push(Layer {
+                if pushed.len() as u64 + 1 >= max_live_layers {
+                    return Err(RenderError::BadSize(size_pt));
+                }
+                pushed.push(Layer {
                     pixmap: ColorPixmap::new(width, height),
                     mode: composite_mode,
                 });
             }
             DrawCmd::PopLayer => {
-                if stack.len() < 2 {
-                    // Mismatched pop: evaluator guarantees pairing
-                    // but we stay defensive against future cmd-stream
-                    // changes.
+                // A pop with nothing pushed is ignored: the evaluator
+                // guarantees pairing but we stay defensive against
+                // future cmd-stream changes.
+                let Some(top) = pushed.pop() else {
                     continue;
-                }
-                let top = stack.pop().expect("len >= 2 above");
-                let parent = stack.last_mut().expect("len >= 1 above");
-                composite_layer(&mut parent.pixmap, &top.pixmap, top.mode);
+                };
+                let parent = pushed.last_mut().map_or(&mut base, |l| &mut l.pixmap);
+                composite_layer(parent, &top.pixmap, top.mode);
             }
         }
     }
 
-    Ok(stack.remove(0).pixmap)
+    Ok(base)
 }
+
+/// Combined pixel count of the COLRv1 layer stack (the base canvas
+/// plus every pushed layer that is alive at once). Pushing past it
+/// fails with [`RenderError::BadSize`]. At 4 bytes per pixel this is
+/// 4 GiB, reached only by huge canvases or very deep composite nesting.
+const MAX_LAYER_STACK_PIXELS: u64 = 1 << 30;
 
 /// Per-leaf data captured during the first pass.
 enum Leaf {
-    /// Outline rasterized to alpha + the paint that fills it.
+    /// Flattened outline + the paint that fills it.
     Glyph {
-        mask: Pixmap,
-        origin_x: i32,
-        origin_y: i32,
+        /// Outline edges in pixel space.
+        segs: Vec<Segment>,
+        /// Where the rasterized mask lands.
+        bounds: RasterBounds,
         paint: PaintSource,
         /// Design-units-to-pixel transform that was used to flatten
         /// the outline. The same transform takes paint coordinates
         /// (also given in design units) into pixel space.
         paint_xform: Transform2D,
     },
-    /// Skipped leaf (no outline / empty / out-of-range).
+    /// Skipped leaf (no outline / empty / out-of-range / over budget).
     Empty,
 }
 
@@ -448,8 +462,8 @@ fn matrix_scale(m: Transform2D) -> f32 {
 /// normalized parameter `t` such that `a + t * (b - a)` is the
 /// closest point on the line. Returns `None` when `a == b`.
 ///
-/// Re-exported through the crate so the SVG path can reuse the same
-/// projection logic for `<linearGradient>` (PR #205 deferral).
+/// `pub(crate)` so the SVG path can reuse the same
+/// projection logic for `<linearGradient>`.
 pub(crate) fn project_linear(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> Option<f32> {
     let dx = b.0 - a.0;
     let dy = b.1 - a.1;
@@ -465,7 +479,7 @@ pub(crate) fn project_linear(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> Opt
 /// Returns the larger valid root in `[0, +inf)` (the "outer" branch).
 ///
 /// `pub(crate)` so the SVG path can reuse the same code for
-/// `<radialGradient>` (PR #205 deferral).
+/// `<radialGradient>`.
 pub(crate) fn project_radial(
     c0: (f32, f32),
     r0: f32,
@@ -548,8 +562,7 @@ fn project_sweep(
 /// Applies the extend mode to a gradient parameter `t`, returning the
 /// in-`[0, 1]` value used to sample the stops.
 ///
-/// `pub(crate)` so the SVG path can reuse the COLRv1 ramp behavior
-/// (PR #205 deferral).
+/// `pub(crate)` so the SVG path can reuse the COLRv1 ramp behavior.
 pub(crate) fn apply_extend(t: f32, extend: Extend) -> f32 {
     match extend {
         Extend::Pad => t.clamp(0.0, 1.0),

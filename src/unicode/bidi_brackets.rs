@@ -37,7 +37,6 @@ pub struct BracketEntry {
 /// Returns the bracket entry for `cp`, or `None` if the codepoint is
 /// not in the curated pair set.
 #[must_use]
-#[allow(clippy::too_many_lines)] // ~80 codepoint pairs. Flat match is the clearest layout
 pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
     // Sorted by `cp` so a future binary-search rewrite stays trivial;
     // the const-fn match is fine for ~80 entries: rustc lowers it to

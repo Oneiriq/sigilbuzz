@@ -5,6 +5,8 @@
 # different constraints. GPU float math and matrix composition don't
 # belong in the no_std shaper.
 members = [".", "crates/*"]
+# The cargo-fuzz targets are their own workspace and need nightly.
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2021"

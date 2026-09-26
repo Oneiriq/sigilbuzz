@@ -154,19 +154,19 @@ impl<'a> StateTableHeader<'a> {
     /// Reads the entry index sitting at `(state, class)` in the
     /// state array.
     pub fn entry_index(&self, state: u16, class: u16) -> Result<u16> {
-        let row = state as usize * self.n_classes as usize;
-        let off = self
-            .state_array_off
-            .checked_add((row + class as usize) * 2)
+        // `nClasses` is a u32 from the file, so the row arithmetic can
+        // overflow a 32-bit usize. Every step is checked.
+        let off = usize::try_from(self.n_classes)
+            .ok()
+            .and_then(|n| usize::from(state).checked_mul(n))
+            .and_then(|row| row.checked_add(usize::from(class)))
+            .and_then(|cell| cell.checked_mul(2))
+            .and_then(|rel| self.state_array_off.checked_add(rel))
             .ok_or(Error::Malformed {
                 offset: self.state_array_off,
                 context: "state-array index overflow",
             })?;
-        let slice = self.data.get(off..off + 2).ok_or(Error::Truncated {
-            offset: off,
-            context: "state-array cell",
-        })?;
-        Ok(u16::from_be_bytes([slice[0], slice[1]]))
+        read_u16_at(self.data, off, "state-array cell")
     }
 
     /// Reads the 4-byte "new state + flags" prefix of the entry at
@@ -174,17 +174,20 @@ impl<'a> StateTableHeader<'a> {
     /// (subtable-type specific, e.g. 8 for ligature subtables, 6
     /// for contextual subtables). Returns `(new_state, flags)`.
     pub fn entry_prefix(&self, entry_index: u16, entry_size: usize) -> Result<(u16, u16)> {
-        let off = self
-            .entry_table_off
-            .checked_add(entry_index as usize * entry_size)
+        let off = usize::from(entry_index)
+            .checked_mul(entry_size)
+            .and_then(|rel| self.entry_table_off.checked_add(rel))
             .ok_or(Error::Malformed {
                 offset: self.entry_table_off,
                 context: "entry-array index overflow",
             })?;
-        let slice = self.data.get(off..off + 4).ok_or(Error::Truncated {
-            offset: off,
-            context: "entry prefix",
-        })?;
+        let slice = off
+            .checked_add(4)
+            .and_then(|end| self.data.get(off..end))
+            .ok_or(Error::Truncated {
+                offset: off,
+                context: "entry prefix",
+            })?;
         Ok((
             u16::from_be_bytes([slice[0], slice[1]]),
             u16::from_be_bytes([slice[2], slice[3]]),
@@ -202,18 +205,15 @@ impl<'a> StateTableHeader<'a> {
         entry_size: usize,
         tail_offset: usize,
     ) -> Result<u16> {
-        let off = self
-            .entry_table_off
-            .checked_add(entry_index as usize * entry_size + tail_offset)
+        let off = usize::from(entry_index)
+            .checked_mul(entry_size)
+            .and_then(|rel| rel.checked_add(tail_offset))
+            .and_then(|rel| self.entry_table_off.checked_add(rel))
             .ok_or(Error::Malformed {
                 offset: self.entry_table_off,
                 context: "entry tail index overflow",
             })?;
-        let slice = self.data.get(off..off + 2).ok_or(Error::Truncated {
-            offset: off,
-            context: "entry tail u16",
-        })?;
-        Ok(u16::from_be_bytes([slice[0], slice[1]]))
+        read_u16_at(self.data, off, "entry tail u16")
     }
 
     /// Raw byte slice the header roots at, used by action-array
@@ -221,6 +221,18 @@ impl<'a> StateTableHeader<'a> {
     #[must_use]
     pub const fn data(&self) -> &'a [u8] {
         self.data
+    }
+}
+
+/// Reads the big-endian u16 at `off`, or reports `Truncated` when the
+/// two bytes are not inside `data`.
+fn read_u16_at(data: &[u8], off: usize, context: &'static str) -> Result<u16> {
+    match off.checked_add(2).and_then(|end| data.get(off..end)) {
+        Some(&[hi, lo]) => Ok(u16::from_be_bytes([hi, lo])),
+        _ => Err(Error::Truncated {
+            offset: off,
+            context,
+        }),
     }
 }
 
@@ -442,6 +454,29 @@ mod tests {
             out.extend_from_slice(&v.to_be_bytes());
         }
         out
+    }
+
+    #[test]
+    fn huge_class_count_and_entry_index_report_errors() {
+        // nClasses = u32::MAX makes `state * nClasses` overflow a
+        // 32-bit usize. Every cell and entry read past the table must
+        // come back as an error, never a panic or a wrapped offset.
+        let mut data = Vec::new();
+        data.extend_from_slice(&u32::MAX.to_be_bytes()); // nClasses
+        data.extend_from_slice(&16u32.to_be_bytes()); // class table
+        data.extend_from_slice(&16u32.to_be_bytes()); // state array
+        data.extend_from_slice(&16u32.to_be_bytes()); // entry table
+        data.extend_from_slice(&[0u8; 4]);
+        let header = StateTableHeader::parse(&data).unwrap();
+        assert_eq!(header.entry_index(0, 0).unwrap(), 0);
+        assert!(header.entry_index(u16::MAX, u16::MAX).is_err());
+        assert!(header.entry_index(1, 0).is_err());
+        assert!(header.entry_prefix(u16::MAX, usize::MAX).is_err());
+        assert!(header
+            .entry_tail_u16(u16::MAX, usize::MAX, usize::MAX)
+            .is_err());
+        assert!(header.entry_prefix(0, 8).is_ok());
+        assert!(header.entry_prefix(1, 8).is_err());
     }
 
     #[test]

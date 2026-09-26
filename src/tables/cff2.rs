@@ -1,19 +1,3 @@
-// CFF2 reuses CFF1's table walking; same relaxations apply.
-#![allow(
-    clippy::bool_to_int_with_if,
-    clippy::elidable_lifetime_names,
-    clippy::map_unwrap_or,
-    clippy::manual_div_ceil,
-    clippy::needless_range_loop,
-    clippy::too_many_lines,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_truncation,
-    clippy::similar_names,
-    clippy::collapsible_if,
-    clippy::collapsible_match,
-    clippy::needless_bool
-)]
-
 //! `CFF2`: CFF for variable fonts.
 //!
 //! CFF2 is CFF1 with the Name INDEX, String INDEX, Encoding, Charset,
@@ -38,7 +22,7 @@
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
-use crate::tables::cff::{read_index2, BlendContext};
+use crate::tables::cff::{fill_fd_ranges, read_index2, BlendContext};
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::Reader;
 use crate::tables::variation_store::ItemVariationStore;
@@ -224,6 +208,9 @@ struct Cff2TopDict {
 }
 
 impl Cff2TopDict {
+    // Each operator keeps one arm with its operand-count check inside,
+    // so the dispatch reads like the spec's operator table.
+    #[allow(clippy::collapsible_match)]
     fn parse(bytes: &[u8]) -> Result<Self> {
         let mut out = Self::default();
         let mut r = Reader::new(bytes);
@@ -324,7 +311,10 @@ fn read_local_subrs<'a>(
     let Some(off) = priv_dict.local_subrs_off else {
         return Ok(Vec::new());
     };
-    let subr_off = priv_off + off as usize;
+    let subr_off = priv_off.checked_add(off as usize).ok_or(Error::Malformed {
+        offset: priv_off,
+        context: "CFF2 Local Subrs offset overflow",
+    })?;
     let mut r = Reader::at(data, subr_off)?;
     read_index2(&mut r)
 }
@@ -342,52 +332,28 @@ fn parse_fd_select(data: &[u8], off: usize, n_glyphs: usize) -> Result<Vec<u8>> 
         }
         3 => {
             let n_ranges = r.read_u16()? as usize;
-            let mut out = alloc::vec![0u8; n_glyphs];
             let mut ranges = Vec::with_capacity(n_ranges);
             for _ in 0..n_ranges {
-                let first = r.read_u16()?;
+                let first = r.read_u16()? as usize;
                 let fd = r.read_u8()?;
                 ranges.push((first, fd));
             }
-            let sentinel = r.read_u16()?;
-            for i in 0..n_ranges {
-                let start = ranges[i].0 as usize;
-                let end = if i + 1 < n_ranges {
-                    ranges[i + 1].0 as usize
-                } else {
-                    sentinel as usize
-                };
-                let fd = ranges[i].1;
-                for g in start..end.min(n_glyphs) {
-                    out[g] = fd;
-                }
-            }
-            Ok(out)
+            let sentinel = r.read_u16()? as usize;
+            Ok(fill_fd_ranges(&ranges, sentinel, n_glyphs))
         }
         4 => {
             // Format 4: 32-bit ranges. Used by huge CID fonts.
             let n_ranges = r.read_u32()? as usize;
-            let mut out = alloc::vec![0u8; n_glyphs];
-            let mut ranges = Vec::with_capacity(n_ranges);
+            // Each Range4 takes 6 bytes, so the remaining bytes bound
+            // how many ranges the table can back.
+            let mut ranges = Vec::with_capacity(n_ranges.min(r.remaining() / 6));
             for _ in 0..n_ranges {
                 let first = r.read_u32()? as usize;
                 let fd = r.read_u16()? as u8;
                 ranges.push((first, fd));
             }
             let sentinel = r.read_u32()? as usize;
-            for i in 0..n_ranges {
-                let start = ranges[i].0;
-                let end = if i + 1 < n_ranges {
-                    ranges[i + 1].0
-                } else {
-                    sentinel
-                };
-                let fd = ranges[i].1;
-                for g in start..end.min(n_glyphs) {
-                    out[g] = fd;
-                }
-            }
-            Ok(out)
+            Ok(fill_fd_ranges(&ranges, sentinel, n_glyphs))
         }
         _ => Err(Error::Unsupported {
             context: "CFF2 FDSelect format unsupported",
@@ -396,11 +362,7 @@ fn parse_fd_select(data: &[u8], off: usize, n_glyphs: usize) -> Result<Vec<u8>> 
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::vec_init_then_push,
-    clippy::cast_possible_wrap,
-    clippy::same_item_push
-)]
+#[allow(clippy::vec_init_then_push, clippy::same_item_push)]
 mod tests {
     use super::*;
     use crate::tables::cff::{op_code, BlendContext, Interp2};
@@ -518,5 +480,61 @@ mod tests {
             }
             _ => panic!("expected MoveTo"),
         }
+    }
+
+    /// Builds an ItemVariationStore with one axis and one region that
+    /// peaks at coord 1.0, plus one subtable that lists that region
+    /// `columns` times. At coord 1.0 every column scales by 1.0.
+    fn build_wide_ivs(columns: u16) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // format
+        out.extend_from_slice(&12u32.to_be_bytes()); // regionListOffset
+        out.extend_from_slice(&1u16.to_be_bytes()); // itemVariationDataCount
+        out.extend_from_slice(&22u32.to_be_bytes()); // subtable offset
+        out.extend_from_slice(&1u16.to_be_bytes()); // axisCount
+        out.extend_from_slice(&1u16.to_be_bytes()); // regionCount
+        out.extend_from_slice(&0i16.to_be_bytes()); // start 0.0
+        out.extend_from_slice(&0x4000i16.to_be_bytes()); // peak 1.0
+        out.extend_from_slice(&0x4000i16.to_be_bytes()); // end 1.0
+        assert_eq!(out.len(), 22);
+        out.extend_from_slice(&0u16.to_be_bytes()); // itemCount
+        out.extend_from_slice(&0u16.to_be_bytes()); // wordDeltaCount
+        out.extend_from_slice(&columns.to_be_bytes()); // regionIndexCount
+        for _ in 0..columns {
+            out.extend_from_slice(&0u16.to_be_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn callgsubr_with_blended_index_past_i32_is_out_of_range() {
+        // Each blend adds 511 deltas of 32767 to one running value, so
+        // 140 blends push it past i32::MAX. Adding the subroutine bias
+        // to that value used to overflow.
+        let ivs_bytes = build_wide_ivs(511);
+        let ivs = ItemVariationStore::parse(&ivs_bytes).unwrap();
+        let mut cs = alloc::vec![139]; // running value starts at 0
+        for _ in 0..140 {
+            for _ in 0..511 {
+                cs.push(op_code::SHORTINT);
+                cs.extend_from_slice(&i16::MAX.to_be_bytes());
+            }
+            cs.push(140); // n = 1
+            cs.push(op_code::BLEND);
+        }
+        cs.push(op_code::CALLGSUBR);
+
+        let coords = [1.0_f32];
+        let blend = BlendContext {
+            coords: &coords,
+            ivs: &ivs,
+            vsindex: 0,
+        };
+        let globals: Vec<&[u8]> = Vec::new();
+        let locals: Vec<&[u8]> = Vec::new();
+        let mut out = Outline::new();
+        let mut interp = Interp2::new(&globals, &locals, &mut out, Some(blend));
+        let err = interp.run(&cs, 0).unwrap_err();
+        assert!(matches!(err, Error::Malformed { .. }), "{err:?}");
     }
 }

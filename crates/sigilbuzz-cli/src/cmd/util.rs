@@ -1,15 +1,28 @@
 //! Shared helpers used by more than one subcommand.
-//!
-//! Helpers grow alongside the subcommand that first needs them so the
-//! scaffold commit stays small. Once a helper is referenced by more
-//! than one subcommand it lives here.
 
 use std::fmt::Write as _;
+use std::io::{self, Write as _};
 use std::path::Path;
 
 /// CLI-level error alias. Concrete errors are stringified at the
 /// subcommand boundary so the dispatcher only has to print them.
 pub type CliResult<T = ()> = Result<T, String>;
+
+/// Runs `body` against a buffered, locked stdout, then flushes it. A
+/// failed write, such as a pipe whose reader has exited, becomes an
+/// error instead of the panic `print!` raises.
+pub fn with_stdout(body: impl FnOnce(&mut dyn io::Write) -> io::Result<()>) -> CliResult {
+    let mut out = io::BufWriter::new(io::stdout().lock());
+    body(&mut out)
+        .and_then(|()| out.flush())
+        .map_err(|e| format!("write stdout: {e}"))
+}
+
+/// Writes one status line to stderr. A failed write is ignored
+/// because there is nowhere left to report it.
+pub fn status(msg: std::fmt::Arguments<'_>) {
+    let _ = writeln!(io::stderr(), "{msg}");
+}
 
 /// Renders a 4-byte tag as ASCII, escaping non-printable bytes.
 pub fn tag_to_string(tag: [u8; 4]) -> String {
@@ -74,8 +87,7 @@ pub fn parse_gid_spec(s: &str) -> CliResult<Vec<u16>> {
             return Ok((lo..=hi).collect());
         }
         // Exclusive: hi == lo means an empty range. hi < lo is
-        // reversed (and would otherwise underflow when we subtract
-        // one to find the inclusive upper bound).
+        // reversed.
         if hi < lo {
             return Err(format!("gid range {lo}..{hi} is reversed"));
         }
@@ -179,15 +191,14 @@ pub fn parse_feature_list(s: &str) -> CliResult<Vec<sigilbuzz::Feature>> {
             ),
             None => (body, if negated { 0 } else { 1 }),
         };
-        if tag_str.len() != 4 || !tag_str.is_ascii() {
-            return Err(format!(
-                "feature tag '{tag_str}' must be exactly 4 ASCII bytes"
-            ));
-        }
-        let mut tag = [b' '; 4];
-        for (i, b) in tag_str.bytes().enumerate() {
-            tag[i] = b;
-        }
+        let tag: [u8; 4] = match tag_str.as_bytes().try_into() {
+            Ok(tag) if tag_str.is_ascii() => tag,
+            _ => {
+                return Err(format!(
+                    "feature tag '{tag_str}' must be exactly 4 ASCII bytes"
+                ));
+            }
+        };
         let value = if negated { 0 } else { value };
         out.push(sigilbuzz::Feature { tag, value });
     }

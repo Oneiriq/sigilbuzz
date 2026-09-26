@@ -14,8 +14,7 @@
 //! single 6-byte range that beats Format 1 once N >= 4.
 //!
 //! The two helpers below, [`emit_coverage_from_pairs`] and
-//! [`emit_coverage_from_glyphs`], produce byte-deterministic output
-//! and never allocate beyond the returned `Vec<u8>`.
+//! [`emit_coverage_from_glyphs`], produce byte-deterministic output.
 
 use alloc::vec::Vec;
 
@@ -70,12 +69,9 @@ fn emit_from_sorted(sorted: &[(u16, u16)]) -> Vec<u8> {
 
     // Format 1 only encodes the gid array; it implies coverage
     // index == position-in-array, so it's only viable when the
-    // caller's indices match `0..N`. Comparing f1_bytes against
-    // f2_bytes without that gate picked Format 1 for non-identity
-    // inputs that then fell back to a single-gid Format 2 list,
-    // throwing away the merge opportunity (e.g. three consecutive
-    // pairs with indices 5,6,7 emitted as 22 bytes instead of the
-    // 10-byte single-range Format 2).
+    // caller's indices match `0..N`. Otherwise Format 2 keeps the
+    // indices and still merges consecutive runs (e.g. three
+    // consecutive pairs with indices 5,6,7 fit one 10-byte range).
     let f1_viable = sorted
         .iter()
         .enumerate()
@@ -89,21 +85,11 @@ fn emit_from_sorted(sorted: &[(u16, u16)]) -> Vec<u8> {
     }
 }
 
+/// Emits Format 1. The caller has checked that every coverage index
+/// equals its position in `sorted` and that Format 1 is no larger than
+/// Format 2. All 65536 glyphs with such indices fold into one range,
+/// so the glyph count here fits in 16 bits.
 fn emit_format1(sorted: &[(u16, u16)]) -> Vec<u8> {
-    // Format 1 expects coverage index = position in glyphArray. If the
-    // caller passed a non-identity mapping we still emit Format 1 only
-    // when those coincide; emit_from_sorted's dispatch already ensured
-    // that. But to be safe, we re-validate: when indices don't follow
-    // 0..N, fall back to Format 2 unconditionally.
-    let identity = sorted
-        .iter()
-        .enumerate()
-        .all(|(i, &(_, idx))| idx as usize == i);
-    if !identity {
-        // Synthesize a single big Format 2 list.
-        let ranges: Vec<(u16, u16, u16)> = sorted.iter().map(|&(g, i)| (g, g, i)).collect();
-        return emit_format2(&ranges);
-    }
     let mut out = Vec::with_capacity(4 + sorted.len() * 2);
     out.extend_from_slice(&1u16.to_be_bytes());
     out.extend_from_slice(&(sorted.len() as u16).to_be_bytes());
@@ -114,6 +100,10 @@ fn emit_format1(sorted: &[(u16, u16)]) -> Vec<u8> {
 }
 
 fn emit_format2(ranges: &[(u16, u16, u16)]) -> Vec<u8> {
+    // rangeCount is 16 bits. Only a caller that gives each of the 65536
+    // glyphs its own range exceeds it; no Coverage can express that, so
+    // the last range is left out.
+    let ranges = ranges.get(..usize::from(u16::MAX)).unwrap_or(ranges);
     let mut out = Vec::with_capacity(4 + ranges.len() * 6);
     out.extend_from_slice(&2u16.to_be_bytes());
     out.extend_from_slice(&(ranges.len() as u16).to_be_bytes());

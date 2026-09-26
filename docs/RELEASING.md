@@ -27,9 +27,9 @@ crates.io with its own version number.
 
    ```bash
    cargo fmt --all --check
-   cargo clippy --all-targets -- -D warnings
-   cargo clippy --no-default-features --all-targets -- -D warnings
-   cargo test --all-features
+   cargo clippy --workspace --all-targets -- -D warnings
+   cargo clippy --workspace --no-default-features --all-targets -- -D warnings
+   cargo test --workspace --all-features
    cargo build --no-default-features
    ```
 

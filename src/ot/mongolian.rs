@@ -30,9 +30,9 @@
 //!   in [`crate::shape`] so a buffer with the default LTR
 //!   direction picks vertical metrics and the `vert`/`vrt2` GSUB
 //!   features when the run is dominantly Mongolian. Consumers who
-//!   want horizontal Mongolian set the buffer's direction to LTR /
-//!   RTL explicitly via a future `set_horizontal()` flag, or use
-//!   the existing [`crate::buffer::Buffer::set_direction`] API.
+//!   want horizontal Mongolian set the buffer's direction to RTL
+//!   with [`crate::buffer::Buffer::set_direction`], or shape a run
+//!   that is not dominantly Mongolian.
 //!
 //! # Feature order
 //!
@@ -61,15 +61,15 @@ use crate::unicode::joining::{joining_type, JoiningType};
 /// default LangSys.
 pub const MONG_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"mong", *b"DFLT"];
 
-/// Mongolian shaper has no script-specific feature chain of its
-/// own beyond the four positional (`isol`/`init`/`medi`/`fina`)
-/// features run masked below. `ccmp` runs in the generic default
-/// GSUB pass before the positional features. Actually after, in
-/// HarfBuzz's order, but for Mongolian fonts on the 0.7.0 corpus
-/// the `ccmp` lookups are SINGLE_SUBST and order-insensitive.
-/// `calt` and `liga` also fire afterward in default-GSUB; nothing
-/// for the Mongolian shaper to drive itself.
-#[allow(dead_code)]
+/// Features the Mongolian shaper runs before the positional pass.
+/// Always empty.
+///
+/// The shaper drives only the four positional features
+/// (`isol`/`init`/`medi`/`fina`), masked by joining form. `ccmp`,
+/// `calt` and `liga` run in the generic default GSUB pass after this
+/// shaper returns. HarfBuzz runs `ccmp` before the positional
+/// features. The Mongolian fonts in the test corpus ship `ccmp` as
+/// single substitutions, so the order does not change their output.
 pub const MONG_FEATURES_PRE: &[&[u8; 4]] = &[];
 
 /// True for every codepoint that is part of the Mongolian block.
@@ -120,9 +120,10 @@ pub fn assign_mongolian_forms(codepoints: &[char]) -> Vec<JoiningForm> {
 /// Entry point: shapes one Mongolian run.
 ///
 /// `codepoints` and `glyphs` start 1:1 (a glyph per codepoint, post
-/// cmap). The shaper runs `ccmp`, then the four positional features
-/// gated on the joining-form vector, then `calt`/`liga`. After the
-/// call `glyphs` may have shrunk through ligature collapse.
+/// cmap). The shaper runs the four positional features gated on the
+/// joining-form vector. The generic GSUB pass runs `ccmp`, `calt`
+/// and `liga`. After the call `glyphs` may have shrunk through
+/// ligature collapse.
 pub fn shape_mongolian(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,

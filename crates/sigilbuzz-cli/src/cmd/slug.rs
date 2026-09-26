@@ -1,10 +1,8 @@
 //! `sigilbuzz slug`: encode a glyph for GPU rendering.
 //!
 //! Wraps [`sigilbuzz_gpu::encode_glyph`] and emits the resulting
-//! [`SlugGlyph`](sigilbuzz_gpu::SlugGlyph) as hand-rolled JSON. We
-//! do not pull in `serde` here: `serde_json` is a
-//! future-PR commitment, not an integration this binary should bring
-//! in alone (see `docs/deps.md`).
+//! [`SlugGlyph`](sigilbuzz_gpu::SlugGlyph) as hand-rolled JSON. The
+//! binary does not depend on `serde` (see `docs/deps.md`).
 
 use std::path::PathBuf;
 
@@ -13,7 +11,7 @@ use clap::Args as ClapArgs;
 use sigilbuzz::{Blob, Face};
 use sigilbuzz_gpu::{encode_glyph, SlugOptions};
 
-use super::util::{read_font, CliResult};
+use super::util::{read_font, with_stdout, CliResult};
 
 /// Arguments for `sigilbuzz slug`.
 #[derive(Debug, ClapArgs)]
@@ -54,42 +52,46 @@ pub fn run(args: Args) -> CliResult {
     };
 
     // Hand-rolled JSON. SlugGlyph is small and the field layout is
-    // stable; this is the documented "no serde dep yet" path.
-    print!("{{\"bbox\":");
-    print!(
-        "{{\"xmin\":{},\"ymin\":{},\"xmax\":{},\"ymax\":{}}}",
-        f(glyph.bbox.xmin),
-        f(glyph.bbox.ymin),
-        f(glyph.bbox.xmax),
-        f(glyph.bbox.ymax),
-    );
-    print!(",\"bands\":[");
-    for (i, b) in glyph.bands.iter().enumerate() {
-        if i > 0 {
-            print!(",");
+    // stable, so no serde dependency is needed.
+    with_stdout(|out| {
+        write!(out, "{{\"bbox\":")?;
+        write!(
+            out,
+            "{{\"xmin\":{},\"ymin\":{},\"xmax\":{},\"ymax\":{}}}",
+            f(glyph.bbox.xmin),
+            f(glyph.bbox.ymin),
+            f(glyph.bbox.xmax),
+            f(glyph.bbox.ymax),
+        )?;
+        write!(out, ",\"bands\":[")?;
+        for (i, b) in glyph.bands.iter().enumerate() {
+            if i > 0 {
+                write!(out, ",")?;
+            }
+            write!(
+                out,
+                "{{\"segment_offset\":{},\"segment_count\":{}}}",
+                b.segment_offset, b.segment_count
+            )?;
         }
-        print!(
-            "{{\"segment_offset\":{},\"segment_count\":{}}}",
-            b.segment_offset, b.segment_count
-        );
-    }
-    print!("],\"segments\":[");
-    for (i, s) in glyph.segments.iter().enumerate() {
-        if i > 0 {
-            print!(",");
+        write!(out, "],\"segments\":[")?;
+        for (i, s) in glyph.segments.iter().enumerate() {
+            if i > 0 {
+                write!(out, ",")?;
+            }
+            write!(
+                out,
+                "{{\"p0\":[{},{}],\"p1\":[{},{}],\"p2\":[{},{}]}}",
+                f(s.p0.x),
+                f(s.p0.y),
+                f(s.p1.x),
+                f(s.p1.y),
+                f(s.p2.x),
+                f(s.p2.y),
+            )?;
         }
-        print!(
-            "{{\"p0\":[{},{}],\"p1\":[{},{}],\"p2\":[{},{}]}}",
-            f(s.p0.x),
-            f(s.p0.y),
-            f(s.p1.x),
-            f(s.p1.y),
-            f(s.p2.x),
-            f(s.p2.y),
-        );
-    }
-    println!("]}}");
-    Ok(())
+        writeln!(out, "]}}")
+    })
 }
 
 /// Format an `f32` deterministically. JSON does not natively allow

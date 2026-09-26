@@ -59,9 +59,6 @@ pub struct Colr<'a> {
     base_glyph_list_off: u32,
     /// Absolute offset to the v1 LayerList block, or 0 if absent.
     layer_list_off: u32,
-    /// Absolute offset to the v1 ClipList block, or 0 if absent.
-    #[allow(dead_code)]
-    clip_list_off: u32,
     /// Absolute offset to the v1 ItemVariationStore, or 0 if absent.
     var_store_off: u32,
 }
@@ -117,13 +114,14 @@ impl<'a> Colr<'a> {
 
         let mut base_glyph_list_off = 0u32;
         let mut layer_list_off = 0u32;
-        let mut clip_list_off = 0u32;
         let mut var_store_off = 0u32;
         if version >= 1 {
-            // v1 appends four Offset32 fields to the header.
+            // v1 appends four Offset32 fields to the header. The
+            // ClipList offset is read and dropped: nothing in
+            // sigilbuzz consumes clip boxes.
             base_glyph_list_off = r.read_u32()?;
             layer_list_off = r.read_u32()?;
-            clip_list_off = r.read_u32()?;
+            let _clip_list_off = r.read_u32()?;
             var_store_off = r.read_u32()?;
         }
 
@@ -135,7 +133,6 @@ impl<'a> Colr<'a> {
             num_layer_records,
             base_glyph_list_off,
             layer_list_off,
-            clip_list_off,
             var_store_off,
         })
     }
@@ -224,17 +221,11 @@ impl<'a> Colr<'a> {
             return None;
         }
         let list_start = self.base_glyph_list_off as usize;
-        if list_start + 4 > self.data.len() {
-            return None;
-        }
-        let count = u32::from_be_bytes([
-            self.data[list_start],
-            self.data[list_start + 1],
-            self.data[list_start + 2],
-            self.data[list_start + 3],
-        ]) as usize;
+        let count = read_u32_at(self.data, list_start)? as usize;
         let recs_start = list_start + 4;
-        let recs_end = recs_start.checked_add(count * 6)?;
+        // Checked: on 32-bit targets `count * 6` can overflow, and a
+        // wrapped end would let the search below index out of bounds.
+        let recs_end = recs_start.checked_add(count.checked_mul(6)?)?;
         if recs_end > self.data.len() {
             return None;
         }
@@ -287,28 +278,14 @@ impl<'a> Colr<'a> {
             return None;
         }
         let list_start = self.layer_list_off as usize;
-        if list_start + 4 > self.data.len() {
-            return None;
-        }
-        let count = u32::from_be_bytes([
-            self.data[list_start],
-            self.data[list_start + 1],
-            self.data[list_start + 2],
-            self.data[list_start + 3],
-        ]);
+        let count = read_u32_at(self.data, list_start)?;
         if layer_index >= count {
             return None;
         }
-        let entry = list_start + 4 + layer_index as usize * 4;
-        if entry + 4 > self.data.len() {
-            return None;
-        }
-        let paint_rel = u32::from_be_bytes([
-            self.data[entry],
-            self.data[entry + 1],
-            self.data[entry + 2],
-            self.data[entry + 3],
-        ]);
+        let entry = (layer_index as usize)
+            .checked_mul(4)?
+            .checked_add(list_start + 4)?;
+        let paint_rel = read_u32_at(self.data, entry)?;
         let abs = (list_start as u32).checked_add(paint_rel)?;
         self.paint_at(abs)
     }
@@ -319,6 +296,13 @@ impl<'a> Colr<'a> {
     pub const fn data(&self) -> &'a [u8] {
         self.data
     }
+}
+
+/// Reads a big-endian `u32` at `off`, or `None` when fewer than four
+/// bytes remain.
+fn read_u32_at(data: &[u8], off: usize) -> Option<u32> {
+    let bytes = data.get(off..)?.get(..4)?;
+    Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 // =========================================================================
@@ -518,37 +502,77 @@ impl ColorLine<'_> {
 }
 
 /// Composite mode for `PaintComposite`. Values match the COLR spec.
+/// Modes 0 to 12 are the Porter-Duff operators. Modes 13 to 27 are
+/// the separable and non-separable blend modes from the W3C
+/// Compositing and Blending spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(missing_docs)]
 #[repr(u8)]
 pub enum CompositeMode {
+    /// Porter-Duff clear: the result is fully transparent.
     Clear = 0,
+    /// Porter-Duff source: keep the source only.
     Src = 1,
+    /// Porter-Duff destination: keep the backdrop only.
     Dest = 2,
+    /// Porter-Duff source over: source drawn on top of the backdrop.
     SrcOver = 3,
+    /// Porter-Duff destination over: backdrop drawn on top of the
+    /// source.
     DestOver = 4,
+    /// Porter-Duff source in: source where the backdrop is opaque.
     SrcIn = 5,
+    /// Porter-Duff destination in: backdrop where the source is
+    /// opaque.
     DestIn = 6,
+    /// Porter-Duff source out: source where the backdrop is
+    /// transparent.
     SrcOut = 7,
+    /// Porter-Duff destination out: backdrop where the source is
+    /// transparent.
     DestOut = 8,
+    /// Porter-Duff source atop: source over the backdrop, clipped to
+    /// the backdrop.
     SrcAtop = 9,
+    /// Porter-Duff destination atop: backdrop over the source, clipped
+    /// to the source.
     DestAtop = 10,
+    /// Porter-Duff XOR: each shape only where the other is absent.
     Xor = 11,
+    /// Porter-Duff plus: source and backdrop added and clamped.
     Plus = 12,
+    /// Screen blend: inverted multiply, always at least as light.
     Screen = 13,
+    /// Overlay blend: multiply or screen, chosen by the backdrop.
     Overlay = 14,
+    /// Darken blend: the darker of source and backdrop per channel.
     Darken = 15,
+    /// Lighten blend: the lighter of source and backdrop per channel.
     Lighten = 16,
+    /// Color dodge blend: brightens the backdrop by the source.
     ColorDodge = 17,
+    /// Color burn blend: darkens the backdrop by the source.
     ColorBurn = 18,
+    /// Hard light blend: multiply or screen, chosen by the source.
     HardLight = 19,
+    /// Soft light blend: a softer version of hard light.
     SoftLight = 20,
+    /// Difference blend: absolute difference of the channels.
     Difference = 21,
+    /// Exclusion blend: like difference with lower contrast.
     Exclusion = 22,
+    /// Multiply blend: product of the channels, always at least as
+    /// dark.
     Multiply = 23,
+    /// Hue blend: source hue with backdrop saturation and luminosity.
     HslHue = 24,
+    /// Saturation blend: source saturation with backdrop hue and
+    /// luminosity.
     HslSaturation = 25,
+    /// Color blend: source hue and saturation with backdrop
+    /// luminosity.
     HslColor = 26,
+    /// Luminosity blend: source luminosity with backdrop hue and
+    /// saturation.
     HslLuminosity = 27,
 }
 
@@ -982,7 +1006,6 @@ impl<'a> ColrPaint<'a> {
     // The paint tree spans 32 distinct formats so the match is
     // necessarily long. Splitting per-format would hurt locality more
     // than it would help readability, so keep the big `match` intact.
-    #[allow(clippy::too_many_lines, clippy::similar_names)]
     pub fn parse(data: &'a [u8], offset: usize) -> Result<Self> {
         if offset >= data.len() {
             return Err(Error::Truncated {

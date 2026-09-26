@@ -106,7 +106,7 @@ fn mid(a: Vec2, b: Vec2) -> Vec2 {
     Vec2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5)
 }
 
-/// Samples a cubic Bezier at `t ∈ [0, 1]`. Used in tests to verify
+/// Samples a cubic Bezier at `t` in `[0, 1]`. Used in tests to verify
 /// the flattening accuracy.
 #[cfg(test)]
 pub(crate) fn cubic_at(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, t: f32) -> Vec2 {
@@ -121,7 +121,7 @@ pub(crate) fn cubic_at(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, t: f32) -> Vec2 {
     )
 }
 
-/// Samples a quadratic Bezier at `t ∈ [0, 1]`. Used in tests.
+/// Samples a quadratic Bezier at `t` in `[0, 1]`. Used in tests.
 #[cfg(test)]
 pub(crate) fn quad_at(p0: Vec2, p1: Vec2, p2: Vec2, t: f32) -> Vec2 {
     let u = 1.0 - t;

@@ -20,6 +20,8 @@ Added:
   between visual order (what `Glyph::cluster` indexes) and logical order (the source
   text), and reports the embedding level at each position. Use it to put carets and
   selections back into the original text.
+- `fuzz/`: cargo-fuzz targets for every part of the workspace that reads untrusted
+  input. See [fuzz/README.md](fuzz/README.md).
 
 Changed:
 
@@ -36,6 +38,56 @@ Changed:
   attribution terms. The license is still Apache-2.0.
 - The documentation was rewritten, and the release history moved out of
   `docs/ROADMAP.md` into this file.
+- CI and the pre-push hook lint and test the whole workspace. They used to cover only
+  the root crate. CI also checks the minimum Rust version, including every `no_std`
+  build.
+- Every companion crate gets a patch release for the fixes below: `sigilbuzz-subset`
+  0.11.1, `sigilbuzz-paint` 0.1.1, `sigilbuzz-svg` 0.1.2, `sigilbuzz-pdf` 0.2.2,
+  `sigilbuzz-gpu` 0.1.1, `sigilbuzz-text-layout` 0.1.1, `sigilbuzz-hyphen` 0.1.1, and
+  `sigilbuzz-cli` 0.1.1.
+
+Fixed:
+
+A hardening pass for hostile input. Fonts, images, and text can come from anywhere,
+and a malformed one must not crash, hang, or exhaust memory. Shipped code no longer
+contains `unwrap`, `expect`, or panic macros, and every fix has a regression test.
+Fuzzing found the first bugs, and a review of every crate found the rest. Output for
+valid input is unchanged except where noted.
+
+- Panics on malformed fonts in CFF (INDEX offsets, charstring operands, subroutine
+  indexes), AAT `morx`, the GSUB and GPOS skip iterator, the JPEG decoder, and WOFF2
+  wrapping. One panic was reachable with an ordinary font and ordinary text: an Arabic
+  letter after a decomposed Thai vowel crashed the Arabic joining step, and on longer
+  text it misaligned the joining forms.
+- Allocations sized from counts in the file without checking the data behind them: up
+  to 17 GB in CFF2, 200 GB in `morx`, 32 GB in `MultiItemVariationStore`, 25 GB in
+  contextual rule sets, 8.6 GB in `gvar` subsetting, and 30 GB in the rasterizer.
+  Decompression in WOFF1, WOFF2, PNG, JPEG, and TIFF is now capped by what the input
+  can plausibly hold.
+- Hangs and runaway work: CFF subroutine bombs, composite glyphs that fan out (`glyf`,
+  VARC, EBDT), cyclic `morx` chains, nested GSUB and GPOS lookups (now bounded per
+  `shape()` call, like HarfBuzz), unbounded buffer growth from multiple substitution and
+  `morx` insertion, SVG `<use>` fan-out, COLR paint graphs, and quadratic passes in
+  bidi resolution, Indic and USE reordering, line wrapping, and subsetting.
+  Hyphenation checked all 4,938 US English patterns at every letter. It now checks
+  only the patterns that start with that letter, about 10 times faster with the same
+  result.
+- Subsetting a large font could produce broken layout tables. Rewritten GSUB and GPOS
+  tables over 64 KB wrapped their 16-bit offsets. They now use Extension lookups when
+  they need to.
+- `BASE` offsets past 64 KB were truncated, so baseline tags were read from the wrong
+  place.
+- The `no_std` builds did not compile on Rust 1.81, the declared minimum.
+- `sigilbuzz-capi`: `hb_set_t` was not safe to share between threads,
+  `hb_font_paint_glyph` truncated glyph ids above 65535, and a language string with an
+  embedded NUL leaked memory on every call. Every `unsafe` block now says why it is
+  sound.
+- `sigilbuzz-cli`: writing to a closed pipe panicked. It now reports an error.
+- `sigilbuzz-woff`: the `woff2` feature did not build without the default features.
+
+The new limits only affect fonts far beyond anything real, for example a glyph with
+more than 65,536 points, or a `shape()` call that needs more than 64 lookup
+applications per glyph (never fewer than 16,384 in total).
 
 ## 0.21.0 (2026-04-25)
 

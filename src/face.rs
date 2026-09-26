@@ -70,11 +70,10 @@ pub struct Face<'a> {
 
 /// Rounds a float to the nearest `i16`, saturating at the type bounds.
 /// A `no_std`-friendly replacement for `f32::round() as i16`, which
-/// would otherwise drag in `libm`.
-#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+/// would otherwise drag in `libm`. NaN maps to `i16::MIN`.
 fn round_f32_to_i16(v: f32) -> i16 {
-    // Add-half trick: positive -> +0.5 floor, negative -> -0.5 ceil.
-    // Clamp to i16 range before the `as` cast to dodge UB on overflow.
+    // Add-half trick: positive -> +0.5 then truncate, negative ->
+    // -0.5 then truncate. The clamp makes the saturation explicit.
     let adj = if v >= 0.0 { v + 0.5 } else { v - 0.5 };
     let clamped = adj.max(i16::MIN as f32).min(i16::MAX as f32);
     clamped as i16
@@ -145,7 +144,9 @@ impl<'a> Face<'a> {
         // from num_tables and not trusted by any sigilbuzz consumer.
         r.skip(6)?;
 
-        let mut records = Vec::with_capacity(num_tables);
+        // Each record takes 16 bytes. Size the allocation by the
+        // records the data can hold, not by the claimed count.
+        let mut records = Vec::with_capacity(num_tables.min(r.remaining() / 16));
         for _ in 0..num_tables {
             let tag = r.read_tag()?;
             let _checksum = r.read_u32()?;
@@ -227,10 +228,15 @@ impl<'a> Face<'a> {
     pub fn table_bytes(&self, tag: [u8; 4]) -> Result<&'a [u8]> {
         let record = self.record(tag).ok_or(Error::MissingTable { tag })?;
         let start = record.offset as usize;
-        let end = start + record.length as usize;
         // `parse_bytes` has already validated that this range is
-        // in-bounds, so the slice is safe.
-        Ok(&self.data[start..end])
+        // in-bounds. The checked form keeps the lookup total anyway.
+        start
+            .checked_add(record.length as usize)
+            .and_then(|end| self.data.get(start..end))
+            .ok_or(Error::Malformed {
+                offset: start,
+                context: "table extends past end of font",
+            })
     }
 
     /// Parses the `head` table.
@@ -268,10 +274,8 @@ impl<'a> Face<'a> {
 
     /// Parses the `name` table if the font carries one. Used by font
     /// browsers and rendering frontends that surface the family /
-    /// subfamily / full name to end users; before this accessor
-    /// landed the only way out of the crate was a placeholder string
-    /// in the consumer (oniq #210). Returns `Ok(None)` for the rare
-    /// fonts that omit `name` entirely.
+    /// subfamily / full name to end users. Returns `Ok(None)` for the
+    /// rare fonts that omit `name` entirely.
     pub fn name(&self) -> Result<Option<Name<'a>>> {
         match self.table_bytes(tag::NAME) {
             Ok(bytes) => Ok(Some(Name::parse(bytes)?)),
@@ -559,7 +563,6 @@ impl<'a> Face<'a> {
         if !x_lo.is_finite() {
             return Ok(Some(base));
         }
-        #[allow(clippy::cast_possible_truncation)]
         let adjusted = GlyphBounds {
             x_min: base.x_min.saturating_add(round_f32_to_i16(x_lo)),
             y_min: base.y_min.saturating_add(round_f32_to_i16(y_lo)),
@@ -606,17 +609,24 @@ impl<'a> Face<'a> {
         glyph_id: u16,
         coords: &[f32],
     ) -> Result<Option<Outline>> {
-        self.glyph_outline_at_coords_inner(glyph_id, coords, 0)
+        let mut budget = VarcBudget {
+            components_left: MAX_VARC_COMPONENTS,
+            ops_left: MAX_VARC_OPS,
+        };
+        self.glyph_outline_at_coords_inner(glyph_id, coords, 0, &mut budget)
     }
 
     /// Recursive entry point used by VARC composite resolution.
     /// `depth` caps recursion through nested VARC composites the
-    /// same way [`Glyf::flatten`] caps `glyf` composites.
+    /// same way [`Glyf::flatten`] caps `glyf` composites. `budget`
+    /// caps the total work: depth alone still lets a glyph whose
+    /// components share children expand exponentially.
     fn glyph_outline_at_coords_inner(
         &self,
         glyph_id: u16,
         coords: &[f32],
         depth: u8,
+        budget: &mut VarcBudget,
     ) -> Result<Option<Outline>> {
         const MAX_VARC_DEPTH: u8 = 64;
         if depth > MAX_VARC_DEPTH {
@@ -636,9 +646,28 @@ impl<'a> Face<'a> {
                 if let Some(composite) = varc.composite(glyph_id, coords) {
                     let mut out = Outline::new();
                     for comp in &composite.components {
-                        let child =
-                            self.glyph_outline_at_coords_inner(comp.gid, &comp.coords, depth + 1)?;
+                        budget.components_left =
+                            budget
+                                .components_left
+                                .checked_sub(1)
+                                .ok_or(Error::Malformed {
+                                    offset: 0,
+                                    context: "VARC composite exceeds component budget",
+                                })?;
+                        let child = self.glyph_outline_at_coords_inner(
+                            comp.gid,
+                            &comp.coords,
+                            depth + 1,
+                            budget,
+                        )?;
                         if let Some(child) = child {
+                            budget.ops_left = budget
+                                .ops_left
+                                .checked_sub(child.ops().len())
+                                .ok_or(Error::Malformed {
+                                    offset: 0,
+                                    context: "VARC composite exceeds outline budget",
+                                })?;
                             for op in child.ops() {
                                 out.push(transform_path_op(*op, comp.transform));
                             }
@@ -650,9 +679,9 @@ impl<'a> Face<'a> {
         }
 
         // CFF / CFF2 path: presence of `CFF2` wins over `CFF ` since
-        // variable fonts ship only CFF2. TODO: CFF parsers land in a
-        // later commit; for now fall through to glyf if either is
-        // present alongside glyf, and error on CFF-only fonts.
+        // variable fonts ship only CFF2. `CFF ` is used only when the
+        // font has no `glyf`. A font carrying both takes the TrueType
+        // path below.
         if self.record(tag::CFF2).is_some() {
             let cff2 = self.cff2()?;
             let mut out = Outline::new();
@@ -965,6 +994,24 @@ impl<'a> Face<'a> {
         }
         Ok(None)
     }
+}
+
+/// Most VARC components one outline request may resolve, summed over
+/// every nesting level. Mirrors HarfBuzz's graph edge cap. Real VARC
+/// glyphs use a few dozen.
+const MAX_VARC_COMPONENTS: usize = 2048;
+
+/// Most path ops VARC composition may copy into composite outlines
+/// for one outline request, summed over every nesting level.
+const MAX_VARC_OPS: usize = 1 << 20;
+
+/// Remaining work for one [`Face::glyph_outline_at_coords`] call.
+/// Components that share children can make the resolved outline
+/// grow exponentially with depth, so the whole request shares one
+/// budget and fails with `Malformed` when it runs out.
+struct VarcBudget {
+    components_left: usize,
+    ops_left: usize,
 }
 
 /// Applies a row-major `[xx, xy, yx, yy, tx, ty]` affine to a single

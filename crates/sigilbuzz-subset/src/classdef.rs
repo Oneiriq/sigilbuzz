@@ -25,11 +25,11 @@ pub fn emit_classdef(pairs: &[(u16, u16)]) -> Vec<u8> {
     sorted.sort_unstable_by_key(|(gid, _)| *gid);
     sorted.dedup_by_key(|(gid, _)| *gid);
 
-    if sorted.is_empty() {
+    let (Some(&(min_gid, _)), Some(&(max_gid, _))) = (sorted.first(), sorted.last()) else {
         // Empty Format 2: 2 + 2 = 4 bytes, smaller than empty Format 1
         // (2 + 2 + 2 + 0 = 6).
         return emit_format2_empty();
-    }
+    };
 
     // Build ranges for Format 2.
     let mut ranges: Vec<(u16, u16, u16)> = Vec::new();
@@ -42,13 +42,14 @@ pub fn emit_classdef(pairs: &[(u16, u16)]) -> Vec<u8> {
         }
     }
 
-    let min_gid = sorted.first().unwrap().0;
-    let max_gid = sorted.last().unwrap().0;
+    // `sorted` is ascending, so `max_gid >= min_gid`.
     let span = (max_gid - min_gid) as usize + 1;
     let f1_bytes = 6 + span * 2;
     let f2_bytes = 4 + ranges.len() * 6;
 
-    if f1_bytes <= f2_bytes {
+    // Format 1's glyphCount is 16 bits, so a span of all 65536 glyphs
+    // can only be written as Format 2.
+    if f1_bytes <= f2_bytes && span <= usize::from(u16::MAX) {
         emit_format1(min_gid, max_gid, &sorted)
     } else {
         emit_format2(&ranges)
@@ -62,11 +63,18 @@ fn emit_format2_empty() -> Vec<u8> {
     out
 }
 
+/// Emits Format 1 for `sorted` pairs whose gids all lie in
+/// `min_gid..=max_gid`. The caller keeps that span within 16 bits.
 fn emit_format1(min_gid: u16, max_gid: u16, sorted: &[(u16, u16)]) -> Vec<u8> {
     let span = (max_gid - min_gid) as usize + 1;
     let mut classes: Vec<u16> = alloc::vec![0u16; span];
     for &(gid, class) in sorted {
-        classes[(gid - min_gid) as usize] = class;
+        if let Some(slot) = gid
+            .checked_sub(min_gid)
+            .and_then(|i| classes.get_mut(i as usize))
+        {
+            *slot = class;
+        }
     }
     let mut out = Vec::with_capacity(6 + span * 2);
     out.extend_from_slice(&1u16.to_be_bytes());
@@ -79,6 +87,10 @@ fn emit_format1(min_gid: u16, max_gid: u16, sorted: &[(u16, u16)]) -> Vec<u8> {
 }
 
 fn emit_format2(ranges: &[(u16, u16, u16)]) -> Vec<u8> {
+    // rangeCount is 16 bits. Only a caller that gives each of the 65536
+    // glyphs its own range exceeds it; no ClassDef can express that, so
+    // the last range is left out.
+    let ranges = ranges.get(..usize::from(u16::MAX)).unwrap_or(ranges);
     let mut out = Vec::with_capacity(4 + ranges.len() * 6);
     out.extend_from_slice(&2u16.to_be_bytes());
     out.extend_from_slice(&(ranges.len() as u16).to_be_bytes());
@@ -174,5 +186,19 @@ mod tests {
         assert!(class == 1 || class == 2);
         let bytes2 = emit_classdef(&[(10, 1), (10, 2)]);
         assert_eq!(bytes, bytes2);
+    }
+
+    #[test]
+    fn full_glyph_span_uses_format2() {
+        // Alternating classes over all 65536 glyphs make Format 1 look
+        // smaller, but its 16-bit glyphCount would wrap to 0.
+        let pairs: Vec<(u16, u16)> = (0..=u16::MAX).map(|g| (g, 1 + g % 2)).collect();
+        let bytes = emit_classdef(&pairs);
+        assert_eq!(&bytes[0..2], &2u16.to_be_bytes());
+        assert_eq!(&bytes[2..4], &u16::MAX.to_be_bytes());
+        let cd = ClassDef::parse(&bytes).unwrap();
+        assert_eq!(cd.class_of(0), 1);
+        assert_eq!(cd.class_of(1), 2);
+        assert_eq!(cd.class_of(40_001), 2);
     }
 }

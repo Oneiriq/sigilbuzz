@@ -7,7 +7,7 @@
 //!
 //! # Per-lookup-type coverage
 //!
-//! As of this commit the rewriter ships byte-level support for:
+//! The rewriter supports:
 //!
 //! - **Type 1 (single-sub)**: formats 1 (delta) and 2 (explicit). Auto-
 //!   selects between formats; falls back to format 2 when a remapped
@@ -48,15 +48,22 @@
 //! features that name no surviving lookup, and scripts whose features
 //! have all been dropped. See [`super::layout`].
 //!
-//! Issue tracking the remaining lookup types: see the sibling issue
-//! filed alongside this module.
+//! A subtable whose rewritten form no longer fits its 16-bit offsets
+//! is dropped. Every rewriter charges the [`GidMap`] work budget for
+//! the records it walks (see [`super::layout`]).
+//!
+//! [`GidMap`]: crate::layout::GidMap
 
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::gsub::lookup_type as gsub_type;
 
 use crate::coverage::emit_coverage_from_pairs;
-use crate::layout::{parse_coverage_glyphs, RewriterCtx, RewrittenLookup, RewrittenSubtable};
+use crate::layout::{
+    parse_coverage_glyphs, patch_offset16, push_count16, read_u16, GidMap, RewriterCtx,
+    RewrittenLookup, RewrittenSubtable,
+};
+use crate::util::WorkBudget;
 
 /// Rewrites a single GSUB lookup. Returns `None` if the lookup has no
 /// surviving subtables after rewriting (drop cascade will remove the
@@ -71,7 +78,15 @@ pub(crate) fn rewrite_lookup(
     let mut rewritten_subs: Vec<RewrittenSubtable> = Vec::new();
 
     for &sub_bytes in subtable_bodies {
+        if !ctx.gid_map.spend(1) {
+            return None;
+        }
         if let Some(rs) = rewrite_subtable(ctx, lookup_type, sub_bytes) {
+            // Charge the output too, so shared offsets cannot multiply
+            // the rewritten table past the budget.
+            if !ctx.gid_map.spend(rs.bytes.len()) {
+                return None;
+            }
             rewritten_subs.push(rs);
         }
     }
@@ -130,7 +145,7 @@ fn rewrite_single(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     let format = u16::from_be_bytes([sub[0], sub[1]]);
     let cov_off = u16::from_be_bytes([sub[2], sub[3]]) as usize;
     let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let covered = ctx.gid_map.coverage_glyphs(cov_bytes)?;
 
     // Build the (input -> output) pairs in the *old* gid namespace
     // first, then drop pairs whose input or output is not in the kept
@@ -190,31 +205,25 @@ fn rewrite_single(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     new_pairs.sort_unstable_by_key(|(g, _)| *g);
     new_pairs.dedup_by_key(|(g, _)| *g);
 
-    Some(emit_single_subtable(&new_pairs))
+    emit_single_subtable(&new_pairs)
 }
 
 /// Encodes a single-sub subtable, picking format 1 vs format 2 by
 /// byte size. Coverage is emitted directly into the subtable body so
-/// callers don't need to track sub-offsets.
-fn emit_single_subtable(pairs: &[(u16, u16)]) -> RewrittenSubtable {
+/// callers don't need to track sub-offsets. Returns `None` when the
+/// Coverage offset does not fit in 16 bits.
+fn emit_single_subtable(pairs: &[(u16, u16)]) -> Option<RewrittenSubtable> {
     // Try format 1 (delta). Viable only if every pair's
     // (output - input) wraps to the same i16. We compute the candidate
     // delta from the first pair and verify every other pair matches
     // under wrapping arithmetic.
-    let f1_delta: Option<i16> = if pairs.is_empty() {
-        None
-    } else {
-        let (in0, out0) = pairs[0];
+    let f1_delta: Option<i16> = pairs.first().and_then(|&(in0, out0)| {
         let candidate = out0.wrapping_sub(in0) as i16;
-        let viable = pairs
+        pairs
             .iter()
-            .all(|&(i, o)| (o.wrapping_sub(i)) as i16 == candidate);
-        if viable {
-            Some(candidate)
-        } else {
-            None
-        }
-    };
+            .all(|&(i, o)| (o.wrapping_sub(i)) as i16 == candidate)
+            .then_some(candidate)
+    });
 
     // Format 1 cost: 6 bytes header + Coverage size (emitted right after).
     // Format 2 cost: 6 bytes header + 2 * count + Coverage size.
@@ -231,25 +240,21 @@ fn emit_single_subtable(pairs: &[(u16, u16)]) -> RewrittenSubtable {
     if let Some(delta) = f1_delta {
         // Format 1.
         out.extend_from_slice(&1u16.to_be_bytes()); // substFormat
-                                                    // Coverage offset placeholder.
-        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes()); // coverage offset placeholder
         out.extend_from_slice(&delta.to_be_bytes());
-        let cov_off = out.len() as u16;
-        out.extend_from_slice(&cov_bytes);
-        out[2..4].copy_from_slice(&cov_off.to_be_bytes());
     } else {
         // Format 2.
         out.extend_from_slice(&2u16.to_be_bytes()); // substFormat
         out.extend_from_slice(&0u16.to_be_bytes()); // coverage offset placeholder
-        out.extend_from_slice(&(pairs.len() as u16).to_be_bytes()); // glyphCount
+        push_count16(&mut out, pairs.len())?; // glyphCount
         for &(_, sub_gid) in pairs {
             out.extend_from_slice(&sub_gid.to_be_bytes());
         }
-        let cov_off = out.len() as u16;
-        out.extend_from_slice(&cov_bytes);
-        out[2..4].copy_from_slice(&cov_off.to_be_bytes());
     }
-    RewrittenSubtable { bytes: out }
+    let cov_off = out.len();
+    patch_offset16(&mut out, 2, cov_off)?;
+    out.extend_from_slice(&cov_bytes);
+    Some(RewrittenSubtable { bytes: out })
 }
 
 /// Rewrites a GSUB type 2 (Multiple Substitution) subtable.
@@ -289,7 +294,7 @@ fn rewrite_type2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         return None;
     }
     let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let covered = ctx.gid_map.coverage_glyphs(cov_bytes)?;
     let pair_count = covered.len().min(seq_count);
 
     let map = ctx.gid_map;
@@ -312,6 +317,9 @@ fn rewrite_type2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         let need = 2 + glyph_count * 2;
         if seq_bytes.len() < need {
             continue;
+        }
+        if !map.spend(glyph_count) {
+            return None;
         }
         // Every substitute must be kept. A missing output gid would
         // emit a substitution that points at a dropped slot: there's
@@ -347,26 +355,39 @@ fn rewrite_type2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         return None;
     }
 
-    Some(emit_type2_subtable(&surviving))
+    emit_offset_array_subtable(&surviving)
 }
 
-/// Encodes a complete MultipleSubstFormat1 subtable around already-
-/// rewritten `(new_input_gid, sequence_bytes)` pairs.
-fn emit_type2_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
+/// Encodes the shared layout of MultipleSubstFormat1,
+/// AlternateSubstFormat1, LigatureSubstFormat1, and the format 1
+/// context subtables around already-rewritten `(new_first_gid, body)`
+/// pairs:
+///
+/// ```text
+///   u16      format = 1
+///   Offset16 coverageOffset
+///   u16      count
+///   Offset16 offsets[count]      (subtable-relative)
+///   bodies, tightly packed in input order
+///   Coverage, appended last
+/// ```
+///
+/// Each gid is paired with its index in the offset array;
+/// `emit_coverage_from_pairs` sorts by gid and falls back to format 2
+/// when those indices aren't a 0..N sequence after sorting. Returns
+/// `None` when an offset does not fit in 16 bits.
+fn emit_offset_array_subtable(surviving: &[(u16, Vec<u8>)]) -> Option<RewrittenSubtable> {
     let mut out = Vec::new();
-    out.extend_from_slice(&1u16.to_be_bytes()); // substFormat
+    out.extend_from_slice(&1u16.to_be_bytes()); // format
     let cov_off_slot = out.len();
     out.extend_from_slice(&0u16.to_be_bytes()); // coverageOffset placeholder
-    out.extend_from_slice(&(surviving.len() as u16).to_be_bytes()); // sequenceCount
-    let seq_offsets_start = out.len();
-    for _ in 0..surviving.len() {
-        out.extend_from_slice(&[0u8; 2]); // sequenceOffset placeholder
-    }
-    for (i, (_input_gid, seq_body)) in surviving.iter().enumerate() {
+    push_count16(&mut out, surviving.len())?;
+    let offsets_start = out.len();
+    out.resize(offsets_start + surviving.len() * 2, 0);
+    for (i, (_first_gid, body)) in surviving.iter().enumerate() {
         let body_start = out.len();
-        out.extend_from_slice(seq_body);
-        let slot = seq_offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        patch_offset16(&mut out, offsets_start + i * 2, body_start)?;
+        out.extend_from_slice(body);
     }
     let pairs: Vec<(u16, u16)> = surviving
         .iter()
@@ -374,10 +395,10 @@ fn emit_type2_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
         .map(|(i, (g, _))| (*g, i as u16))
         .collect();
     let cov_bytes = emit_coverage_from_pairs(&pairs);
-    let cov_off = out.len() as u16;
+    let cov_off = out.len();
+    patch_offset16(&mut out, cov_off_slot, cov_off)?;
     out.extend_from_slice(&cov_bytes);
-    out[cov_off_slot..cov_off_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
-    RewrittenSubtable { bytes: out }
+    Some(RewrittenSubtable { bytes: out })
 }
 
 /// Rewrites a GSUB type 3 (Alternate Substitution) subtable.
@@ -421,7 +442,7 @@ fn rewrite_type3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         return None;
     }
     let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let covered = ctx.gid_map.coverage_glyphs(cov_bytes)?;
     let pair_count = covered.len().min(alt_set_count);
 
     let map = ctx.gid_map;
@@ -444,6 +465,9 @@ fn rewrite_type3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         let need = 2 + glyph_count * 2;
         if alt_bytes.len() < need {
             continue;
+        }
+        if !map.spend(glyph_count) {
+            return None;
         }
         // Filter alternates to those that survive; remap survivors.
         let mut new_alts: Vec<u16> = Vec::with_capacity(glyph_count);
@@ -472,37 +496,7 @@ fn rewrite_type3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         return None;
     }
 
-    Some(emit_type3_subtable(&surviving))
-}
-
-/// Encodes a complete AlternateSubstFormat1 subtable around already-
-/// rewritten `(new_input_gid, alt_set_bytes)` pairs.
-fn emit_type3_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
-    let mut out = Vec::new();
-    out.extend_from_slice(&1u16.to_be_bytes()); // substFormat
-    let cov_off_slot = out.len();
-    out.extend_from_slice(&0u16.to_be_bytes()); // coverageOffset placeholder
-    out.extend_from_slice(&(surviving.len() as u16).to_be_bytes()); // alternateSetCount
-    let alt_offsets_start = out.len();
-    for _ in 0..surviving.len() {
-        out.extend_from_slice(&[0u8; 2]); // alternateSetOffset placeholder
-    }
-    for (i, (_input_gid, alt_body)) in surviving.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(alt_body);
-        let slot = alt_offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
-    }
-    let pairs: Vec<(u16, u16)> = surviving
-        .iter()
-        .enumerate()
-        .map(|(i, (g, _))| (*g, i as u16))
-        .collect();
-    let cov_bytes = emit_coverage_from_pairs(&pairs);
-    let cov_off = out.len() as u16;
-    out.extend_from_slice(&cov_bytes);
-    out[cov_off_slot..cov_off_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
-    RewrittenSubtable { bytes: out }
+    emit_offset_array_subtable(&surviving)
 }
 
 /// Rewrites a GSUB type 4 (Ligature Substitution) subtable.
@@ -555,7 +549,7 @@ fn rewrite_type4(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         return None;
     }
     let cov_bytes = sub.get(cov_off..)?;
-    let first_components = parse_coverage_glyphs(cov_bytes);
+    let first_components = ctx.gid_map.coverage_glyphs(cov_bytes)?;
     // Spec requires Coverage entry count == ligatureSetCount; tolerate
     // a malformed source by capping at the smaller of the two.
     let pair_count = first_components.len().min(set_count);
@@ -588,17 +582,18 @@ fn rewrite_type4(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         return None;
     }
 
-    Some(emit_type4_subtable(&surviving_sets))
+    emit_offset_array_subtable(&surviving_sets)
 }
 
 /// Rewrites a single LigatureSet. Returns `None` when every ligature in
-/// the set drops (caller propagates that to "Coverage entry dies").
+/// the set drops (caller propagates that to "Coverage entry dies"), or
+/// when the work budget runs out.
 fn rewrite_ligature_set(set_bytes: &[u8], map: &crate::layout::GidMap) -> Option<Vec<u8>> {
     if set_bytes.len() < 2 {
         return None;
     }
     let lig_count = u16::from_be_bytes([set_bytes[0], set_bytes[1]]) as usize;
-    if set_bytes.len() < 2 + lig_count * 2 {
+    if set_bytes.len() < 2 + lig_count * 2 || !map.spend(lig_count) {
         return None;
     }
     // Each surviving ligature: (new ligatureGlyph, new componentCount,
@@ -623,6 +618,9 @@ fn rewrite_ligature_set(set_bytes: &[u8], map: &crate::layout::GidMap) -> Option
         let need = 4 + tail * 2;
         if lig_bytes.len() < need {
             continue;
+        }
+        if !map.spend(tail) {
+            return None;
         }
         // Result gid must survive. Otherwise the substitution has
         // nowhere to go.
@@ -658,67 +656,37 @@ fn rewrite_ligature_set(set_bytes: &[u8], map: &crate::layout::GidMap) -> Option
     //   u16 ligatureCount
     //   Offset16 ligatureOffsets[ligatureCount]
     //   Ligature[] bodies (tightly packed in the same order)
-    let mut out = Vec::new();
-    out.extend_from_slice(&(survivors.len() as u16).to_be_bytes());
-    let offsets_start = out.len();
-    for _ in 0..survivors.len() {
-        out.extend_from_slice(&[0u8; 2]); // placeholder
-    }
-    for (i, (lig_glyph, component_count, tail)) in survivors.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(&lig_glyph.to_be_bytes());
-        out.extend_from_slice(&component_count.to_be_bytes());
-        for c in tail {
-            out.extend_from_slice(&c.to_be_bytes());
-        }
-        let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
-    }
-    Some(out)
+    let bodies: Vec<Vec<u8>> = survivors
+        .iter()
+        .map(|(lig_glyph, component_count, tail)| {
+            let mut body = Vec::with_capacity(4 + tail.len() * 2);
+            body.extend_from_slice(&lig_glyph.to_be_bytes());
+            body.extend_from_slice(&component_count.to_be_bytes());
+            for c in tail {
+                body.extend_from_slice(&c.to_be_bytes());
+            }
+            body
+        })
+        .collect();
+    emit_offset_list(&bodies)
 }
 
-/// Encodes a complete LigatureSubst format-1 subtable around the
-/// already-rewritten `(first_gid_new, ligature_set_bytes)` pairs.
-///
-/// Layout we emit:
-///   - 6-byte header (format, coverageOffset placeholder, setCount)
-///   - LigatureSet offsets array (one Offset16 per surviving entry)
-///   - LigatureSet bodies tightly packed in input order
-///   - Coverage table appended last, its offset patched into the header
-fn emit_type4_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
+/// Encodes a `u16 count` + `Offset16 offsets[count]` list followed by
+/// the bodies, tightly packed in the same order. Offsets are relative
+/// to the start of the list. This is the shape of LigatureSet,
+/// RuleSet, ClassSet, and their chained and GPOS counterparts. Returns
+/// `None` when an offset does not fit in 16 bits.
+pub(crate) fn emit_offset_list(bodies: &[Vec<u8>]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
-    out.extend_from_slice(&1u16.to_be_bytes()); // substFormat
-    let cov_off_slot = out.len();
-    out.extend_from_slice(&0u16.to_be_bytes()); // coverageOffset placeholder
-    out.extend_from_slice(&(surviving.len() as u16).to_be_bytes()); // ligatureSetCount
-    let set_offsets_start = out.len();
-    for _ in 0..surviving.len() {
-        out.extend_from_slice(&[0u8; 2]); // ligatureSetOffset placeholder
-    }
-
-    // LigatureSet bodies, in iteration order so Coverage indices match.
-    for (i, (_first_gid, set_body)) in surviving.iter().enumerate() {
+    push_count16(&mut out, bodies.len())?;
+    let offsets_start = out.len();
+    out.resize(offsets_start + bodies.len() * 2, 0);
+    for (i, body) in bodies.iter().enumerate() {
         let body_start = out.len();
-        out.extend_from_slice(set_body);
-        let slot = set_offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        patch_offset16(&mut out, offsets_start + i * 2, body_start)?;
+        out.extend_from_slice(body);
     }
-
-    // Coverage. Pair every kept first-gid with its index in the
-    // ligatureSetOffsets array: emit_coverage_from_pairs sorts by gid
-    // and falls back to format 2 when those indices aren't a 0..N
-    // sequence after sorting.
-    let pairs: Vec<(u16, u16)> = surviving
-        .iter()
-        .enumerate()
-        .map(|(i, (g, _))| (*g, i as u16))
-        .collect();
-    let cov_bytes = emit_coverage_from_pairs(&pairs);
-    let cov_off = out.len() as u16;
-    out.extend_from_slice(&cov_bytes);
-    out[cov_off_slot..cov_off_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
-
-    RewrittenSubtable { bytes: out }
+    Some(out)
 }
 
 // ===== GSUB types 5 / 6 / 8: contextual / chained / reverse-chain =====
@@ -745,7 +713,7 @@ pub(crate) struct PatchedLookupRecord {
 
 /// Walks `count` `SubstLookupRecord` entries from `bytes` starting at
 /// `off`. When `lookup_renumber` is `Some`, drops any record whose
-/// target lookup is `None` (was dropped in phase 1) and remaps survivors
+/// target lookup is `None` (was dropped by the first pass) and remaps survivors
 /// through the map. Returns the surviving records. Each record is
 /// 4 bytes: `u16 sequence_index, u16 lookup_list_index`.
 ///
@@ -796,7 +764,7 @@ pub(crate) fn encode_lookup_records(records: &[PatchedLookupRecord]) -> Vec<u8> 
 
 /// Rewrites a GSUB type 5 (Context Substitution) subtable. Auto-
 /// dispatches on the leading u16 format.
-fn rewrite_type5(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
+pub(crate) fn rewrite_type5(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     if sub.len() < 2 {
         return None;
     }
@@ -838,7 +806,7 @@ fn rewrite_type5_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
         return None;
     }
     let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let covered = ctx.gid_map.coverage_glyphs(cov_bytes)?;
     let pair_count = covered.len().min(set_count);
     let map = ctx.gid_map;
 
@@ -869,7 +837,7 @@ fn rewrite_type5_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     if surviving_sets.is_empty() {
         return None;
     }
-    Some(emit_context_format1(&surviving_sets))
+    emit_offset_array_subtable(&surviving_sets)
 }
 
 fn rewrite_type5_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>> {
@@ -877,10 +845,10 @@ fn rewrite_type5_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
         return None;
     }
     let rule_count = u16::from_be_bytes([set_bytes[0], set_bytes[1]]) as usize;
-    if set_bytes.len() < 2 + rule_count * 2 {
+    let map = ctx.gid_map;
+    if set_bytes.len() < 2 + rule_count * 2 || !map.spend(rule_count) {
         return None;
     }
-    let map = ctx.gid_map;
 
     let mut surviving_rules: Vec<Vec<u8>> = Vec::new();
     for i in 0..rule_count {
@@ -894,6 +862,9 @@ fn rewrite_type5_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
         }
         let glyph_count = u16::from_be_bytes([rule_bytes[0], rule_bytes[1]]) as usize;
         let lookup_count = u16::from_be_bytes([rule_bytes[2], rule_bytes[3]]) as usize;
+        if !map.spend(glyph_count + lookup_count) {
+            return None;
+        }
         if glyph_count == 0 {
             // Zero-input rule: preserve as-is (parsing tolerates it).
             // Patch nested-lookups only.
@@ -971,50 +942,7 @@ fn rewrite_type5_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
     //   u16      ruleCount
     //   Offset16 ruleOffsets[ruleCount]    (RuleSet-relative)
     //   Rule[] bodies
-    let mut out = Vec::new();
-    out.extend_from_slice(&(surviving_rules.len() as u16).to_be_bytes());
-    let offsets_start = out.len();
-    for _ in 0..surviving_rules.len() {
-        out.extend_from_slice(&[0u8; 2]);
-    }
-    for (i, body) in surviving_rules.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(body);
-        let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
-    }
-    Some(out)
-}
-
-/// Emits a Context Substitution Format 1 subtable around the
-/// `(new_first_gid, rule_set_bytes)` pairs produced by
-/// [`rewrite_type5_rule_set`].
-fn emit_context_format1(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
-    let mut out = Vec::new();
-    out.extend_from_slice(&1u16.to_be_bytes()); // substFormat
-    let cov_off_slot = out.len();
-    out.extend_from_slice(&0u16.to_be_bytes()); // coverage offset placeholder
-    out.extend_from_slice(&(surviving.len() as u16).to_be_bytes()); // ruleSetCount
-    let set_offsets_start = out.len();
-    for _ in 0..surviving.len() {
-        out.extend_from_slice(&[0u8; 2]);
-    }
-    for (i, (_first, set_body)) in surviving.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(set_body);
-        let slot = set_offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
-    }
-    let pairs: Vec<(u16, u16)> = surviving
-        .iter()
-        .enumerate()
-        .map(|(i, (g, _))| (*g, i as u16))
-        .collect();
-    let cov_bytes = emit_coverage_from_pairs(&pairs);
-    let cov_off = out.len() as u16;
-    out.extend_from_slice(&cov_bytes);
-    out[cov_off_slot..cov_off_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
-    RewrittenSubtable { bytes: out }
+    emit_offset_list(&surviving_rules)
 }
 
 /// GSUB type 5 format 2 (class-based contextual substitution).
@@ -1056,7 +984,7 @@ fn rewrite_type5_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
         return None;
     }
     let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let covered = ctx.gid_map.coverage_glyphs(cov_bytes)?;
     let cd_bytes = sub.get(cd_off..)?;
     let map = ctx.gid_map;
 
@@ -1070,7 +998,7 @@ fn rewrite_type5_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     // class ids still have at least one glyph; class indices in
     // ClassRule.input_classes_tail that are no longer reachable cause
     // the rule to die (it could never match in the new namespace).
-    let cd_pairs_old = crate::layout::parse_classdef_pairs_from_bytes(cd_bytes);
+    let cd_pairs_old = ctx.gid_map.classdef_pairs(cd_bytes)?;
     let mut cd_pairs_new: Vec<(u16, u16)> = Vec::with_capacity(cd_pairs_old.len());
     let mut reachable_classes: Vec<bool> = Vec::new();
     for (gid_old, class) in &cd_pairs_old {
@@ -1138,20 +1066,28 @@ fn rewrite_type5_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
             let body_start = out.len();
             out.extend_from_slice(set_body);
             let slot = set_offsets_start + i * 2;
-            out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+            patch_offset16(&mut out, slot, body_start)?;
         }
         // Else leave the slot at zero (NULL ClassSet).
     }
     // Coverage.
-    let cov_off = out.len() as u16;
-    let cov_emitted = crate::coverage::emit_coverage_from_glyphs(&new_covered);
-    out.extend_from_slice(&cov_emitted);
-    out[cov_slot..cov_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
+    append_at_offset16(
+        &mut out,
+        cov_slot,
+        &crate::coverage::emit_coverage_from_glyphs(&new_covered),
+    )?;
     // ClassDef.
-    let cd_off = out.len() as u16;
-    out.extend_from_slice(&new_cd_bytes);
-    out[cd_slot..cd_slot + 2].copy_from_slice(&cd_off.to_be_bytes());
+    append_at_offset16(&mut out, cd_slot, &new_cd_bytes)?;
     Some(RewrittenSubtable { bytes: out })
+}
+
+/// Appends `body` to `out` and points the Offset16 at `slot` at it.
+/// Returns `None` when the body starts past the 16-bit range.
+pub(crate) fn append_at_offset16(out: &mut Vec<u8>, slot: usize, body: &[u8]) -> Option<()> {
+    let start = out.len();
+    patch_offset16(out, slot, start)?;
+    out.extend_from_slice(body);
+    Some(())
 }
 
 fn rewrite_type5_class_set(
@@ -1163,7 +1099,8 @@ fn rewrite_type5_class_set(
         return None;
     }
     let rule_count = u16::from_be_bytes([set_bytes[0], set_bytes[1]]) as usize;
-    if set_bytes.len() < 2 + rule_count * 2 {
+    let map = ctx.gid_map;
+    if set_bytes.len() < 2 + rule_count * 2 || !map.spend(rule_count) {
         return None;
     }
     let mut surviving_rules: Vec<Vec<u8>> = Vec::new();
@@ -1178,6 +1115,9 @@ fn rewrite_type5_class_set(
         }
         let glyph_count = u16::from_be_bytes([rule_bytes[0], rule_bytes[1]]) as usize;
         let lookup_count = u16::from_be_bytes([rule_bytes[2], rule_bytes[3]]) as usize;
+        if !map.spend(glyph_count + lookup_count) {
+            return None;
+        }
         let tail = glyph_count.saturating_sub(1);
         let need = 4 + tail * 2 + lookup_count * 4;
         if rule_bytes.len() < need {
@@ -1222,19 +1162,7 @@ fn rewrite_type5_class_set(
     if surviving_rules.is_empty() {
         return None;
     }
-    let mut out = Vec::new();
-    out.extend_from_slice(&(surviving_rules.len() as u16).to_be_bytes());
-    let offsets_start = out.len();
-    for _ in 0..surviving_rules.len() {
-        out.extend_from_slice(&[0u8; 2]);
-    }
-    for (i, body) in surviving_rules.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(body);
-        let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
-    }
-    Some(out)
+    emit_offset_list(&surviving_rules)
 }
 
 /// GSUB type 5 format 3 (coverage-based contextual substitution).
@@ -1257,23 +1185,10 @@ fn rewrite_type5_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     if sub.len() < need {
         return None;
     }
-    let map = ctx.gid_map;
-
     // Rewrite each input Coverage. If any becomes empty, drop the whole
     // subtable. A context rule with no possible match for one position
     // can't fire.
-    let mut new_cov_bytes: Vec<Vec<u8>> = Vec::with_capacity(glyph_count);
-    for j in 0..glyph_count {
-        let off_off = cov_offs_off + j * 2;
-        let cov_off = u16::from_be_bytes([sub[off_off], sub[off_off + 1]]) as usize;
-        let cov_bytes = sub.get(cov_off..)?;
-        let covered = parse_coverage_glyphs(cov_bytes);
-        let new_covered: Vec<u16> = covered.iter().filter_map(|&g| map.map(g)).collect();
-        if new_covered.is_empty() {
-            return None;
-        }
-        new_cov_bytes.push(crate::coverage::emit_coverage_from_glyphs(&new_covered));
-    }
+    let new_cov_bytes = rewrite_coverage_array(ctx.gid_map, sub, cov_offs_off, glyph_count)?;
 
     let recs_off = cov_offs_off + glyph_count * 2;
     let records = parse_and_remap_lookup_records(sub, recs_off, lookup_count, ctx.lookup_renumber)?;
@@ -1295,17 +1210,26 @@ fn rewrite_type5_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
         out.extend_from_slice(&[0u8; 2]);
     }
     out.extend_from_slice(&encode_lookup_records(&records));
-    for (i, cov) in new_cov_bytes.iter().enumerate() {
-        let body_start = out.len() as u16;
-        out.extend_from_slice(cov);
-        let slot = cov_offs_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&body_start.to_be_bytes());
-    }
+    append_bodies_at_offsets16(&mut out, cov_offs_start, &new_cov_bytes)?;
     Some(RewrittenSubtable { bytes: out })
 }
 
+/// Appends each of `bodies` to `out` and points the Offset16 at
+/// `slots_start + 2 * i` at body `i`. Returns `None` when a body starts
+/// past the 16-bit range.
+pub(crate) fn append_bodies_at_offsets16(
+    out: &mut Vec<u8>,
+    slots_start: usize,
+    bodies: &[Vec<u8>],
+) -> Option<()> {
+    for (i, body) in bodies.iter().enumerate() {
+        append_at_offset16(out, slots_start + i * 2, body)?;
+    }
+    Some(())
+}
+
 /// Rewrites a GSUB type 6 (Chained Context Substitution) subtable.
-fn rewrite_type6(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
+pub(crate) fn rewrite_type6(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     if sub.len() < 2 {
         return None;
     }
@@ -1351,7 +1275,7 @@ fn rewrite_type6_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
         return None;
     }
     let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let covered = ctx.gid_map.coverage_glyphs(cov_bytes)?;
     let pair_count = covered.len().min(set_count);
     let map = ctx.gid_map;
 
@@ -1377,7 +1301,7 @@ fn rewrite_type6_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     if surviving_sets.is_empty() {
         return None;
     }
-    Some(emit_context_format1(&surviving_sets))
+    emit_offset_array_subtable(&surviving_sets)
 }
 
 fn rewrite_type6_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>> {
@@ -1385,10 +1309,10 @@ fn rewrite_type6_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
         return None;
     }
     let rule_count = u16::from_be_bytes([set_bytes[0], set_bytes[1]]) as usize;
-    if set_bytes.len() < 2 + rule_count * 2 {
+    let map = ctx.gid_map;
+    if set_bytes.len() < 2 + rule_count * 2 || !map.spend(rule_count) {
         return None;
     }
-    let map = ctx.gid_map;
     let mut surviving_rules: Vec<Vec<u8>> = Vec::new();
     for i in 0..rule_count {
         let off_off = 2 + i * 2;
@@ -1426,6 +1350,9 @@ fn rewrite_type6_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
         let recs_start = p;
         if rule_bytes.len() < recs_start + lookup_count * 4 {
             continue;
+        }
+        if !map.spend(bt_count + in_count + la_count + lookup_count) {
+            return None;
         }
 
         // Remap each gid sequence; drop the rule if any required gid
@@ -1511,19 +1438,7 @@ fn rewrite_type6_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
     if surviving_rules.is_empty() {
         return None;
     }
-    let mut out = Vec::new();
-    out.extend_from_slice(&(surviving_rules.len() as u16).to_be_bytes());
-    let offsets_start = out.len();
-    for _ in 0..surviving_rules.len() {
-        out.extend_from_slice(&[0u8; 2]);
-    }
-    for (i, body) in surviving_rules.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(body);
-        let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
-    }
-    Some(out)
+    emit_offset_list(&surviving_rules)
 }
 
 /// GSUB type 6 format 2 (class-based chained-context substitution).
@@ -1566,7 +1481,7 @@ fn rewrite_type6_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     }
     let map = ctx.gid_map;
     let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let covered = ctx.gid_map.coverage_glyphs(cov_bytes)?;
     let new_covered: Vec<u16> = covered.iter().filter_map(|&g| map.map(g)).collect();
     if new_covered.is_empty() {
         return None;
@@ -1576,9 +1491,9 @@ fn rewrite_type6_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     let in_cd_bytes = sub.get(in_cd_off..)?;
     let la_cd_bytes = sub.get(la_cd_off..)?;
 
-    let bt_pairs_old = crate::layout::parse_classdef_pairs_from_bytes(bt_cd_bytes);
-    let in_pairs_old = crate::layout::parse_classdef_pairs_from_bytes(in_cd_bytes);
-    let la_pairs_old = crate::layout::parse_classdef_pairs_from_bytes(la_cd_bytes);
+    let bt_pairs_old = ctx.gid_map.classdef_pairs(bt_cd_bytes)?;
+    let in_pairs_old = ctx.gid_map.classdef_pairs(in_cd_bytes)?;
+    let la_pairs_old = ctx.gid_map.classdef_pairs(la_cd_bytes)?;
 
     let remap = |pairs: &[(u16, u16)]| -> (Vec<(u16, u16)>, Vec<bool>) {
         let mut new_pairs: Vec<(u16, u16)> = Vec::with_capacity(pairs.len());
@@ -1657,21 +1572,17 @@ fn rewrite_type6_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
             let body_start = out.len();
             out.extend_from_slice(set_body);
             let slot = set_offsets_start + i * 2;
-            out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+            patch_offset16(&mut out, slot, body_start)?;
         }
     }
-    let cov_off = out.len() as u16;
-    out.extend_from_slice(&crate::coverage::emit_coverage_from_glyphs(&new_covered));
-    out[cov_slot..cov_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
-    let bt_off = out.len() as u16;
-    out.extend_from_slice(&new_bt_cd);
-    out[bt_slot..bt_slot + 2].copy_from_slice(&bt_off.to_be_bytes());
-    let in_off = out.len() as u16;
-    out.extend_from_slice(&new_in_cd);
-    out[in_slot..in_slot + 2].copy_from_slice(&in_off.to_be_bytes());
-    let la_off = out.len() as u16;
-    out.extend_from_slice(&new_la_cd);
-    out[la_slot..la_slot + 2].copy_from_slice(&la_off.to_be_bytes());
+    append_at_offset16(
+        &mut out,
+        cov_slot,
+        &crate::coverage::emit_coverage_from_glyphs(&new_covered),
+    )?;
+    append_at_offset16(&mut out, bt_slot, &new_bt_cd)?;
+    append_at_offset16(&mut out, in_slot, &new_in_cd)?;
+    append_at_offset16(&mut out, la_slot, &new_la_cd)?;
     Some(RewrittenSubtable { bytes: out })
 }
 
@@ -1686,7 +1597,7 @@ fn rewrite_type6_class_set(
         return None;
     }
     let rule_count = u16::from_be_bytes([set_bytes[0], set_bytes[1]]) as usize;
-    if set_bytes.len() < 2 + rule_count * 2 {
+    if set_bytes.len() < 2 + rule_count * 2 || !ctx.gid_map.spend(rule_count) {
         return None;
     }
     let class_reachable = |reachable: &[bool], c: u16| -> bool {
@@ -1728,6 +1639,12 @@ fn rewrite_type6_class_set(
         let recs_start = p;
         if rule_bytes.len() < recs_start + lookup_count * 4 {
             continue;
+        }
+        if !ctx
+            .gid_map
+            .spend(bt_count + in_count + la_count + lookup_count)
+        {
+            return None;
         }
 
         let mut all_reachable = true;
@@ -1802,19 +1719,7 @@ fn rewrite_type6_class_set(
     if surviving_rules.is_empty() {
         return None;
     }
-    let mut out = Vec::new();
-    out.extend_from_slice(&(surviving_rules.len() as u16).to_be_bytes());
-    let offsets_start = out.len();
-    for _ in 0..surviving_rules.len() {
-        out.extend_from_slice(&[0u8; 2]);
-    }
-    for (i, body) in surviving_rules.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(body);
-        let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
-    }
-    Some(out)
+    emit_offset_list(&surviving_rules)
 }
 
 /// GSUB type 6 format 3 (coverage-based chained-context substitution).
@@ -1866,24 +1771,9 @@ fn rewrite_type6_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
         return None;
     }
 
-    let read_cov_array = |start: usize, count: usize| -> Option<Vec<Vec<u8>>> {
-        let mut out = Vec::with_capacity(count);
-        for j in 0..count {
-            let off_off = start + j * 2;
-            let cov_off = u16::from_be_bytes([sub[off_off], sub[off_off + 1]]) as usize;
-            let cov_bytes = sub.get(cov_off..)?;
-            let covered = parse_coverage_glyphs(cov_bytes);
-            let new_covered: Vec<u16> = covered.iter().filter_map(|&g| map.map(g)).collect();
-            if new_covered.is_empty() {
-                return None;
-            }
-            out.push(crate::coverage::emit_coverage_from_glyphs(&new_covered));
-        }
-        Some(out)
-    };
-    let new_bt = read_cov_array(bt_offs_start, bt_count)?;
-    let new_in = read_cov_array(in_offs_start, in_count)?;
-    let new_la = read_cov_array(la_offs_start, la_count)?;
+    let new_bt = rewrite_coverage_array(map, sub, bt_offs_start, bt_count)?;
+    let new_in = rewrite_coverage_array(map, sub, in_offs_start, in_count)?;
+    let new_la = rewrite_coverage_array(map, sub, la_offs_start, la_count)?;
 
     let records =
         parse_and_remap_lookup_records(sub, recs_start, lookup_count, ctx.lookup_renumber)?;
@@ -1916,18 +1806,33 @@ fn rewrite_type6_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     out.extend_from_slice(&(records.len() as u16).to_be_bytes());
     out.extend_from_slice(&encode_lookup_records(&records));
 
-    let mut patch_array = |slots_start: usize, covs: &[Vec<u8>]| {
-        for (i, cov) in covs.iter().enumerate() {
-            let body_start = out.len() as u16;
-            out.extend_from_slice(cov);
-            let slot = slots_start + i * 2;
-            out[slot..slot + 2].copy_from_slice(&body_start.to_be_bytes());
-        }
-    };
-    patch_array(bt_slots_start, &new_bt);
-    patch_array(in_slots_start, &new_in);
-    patch_array(la_slots_start, &new_la);
+    append_bodies_at_offsets16(&mut out, bt_slots_start, &new_bt)?;
+    append_bodies_at_offsets16(&mut out, in_slots_start, &new_in)?;
+    append_bodies_at_offsets16(&mut out, la_slots_start, &new_la)?;
     Some(RewrittenSubtable { bytes: out })
+}
+
+/// Rewrites `count` Coverage tables whose Offset16s start at `start` in
+/// `sub`, filtering each through the gid map. Returns `None` when any
+/// of them loses every glyph: a context position with no possible match
+/// can never fire.
+fn rewrite_coverage_array(
+    map: &GidMap,
+    sub: &[u8],
+    start: usize,
+    count: usize,
+) -> Option<Vec<Vec<u8>>> {
+    let mut out = Vec::with_capacity(count);
+    for j in 0..count {
+        let cov_off = usize::from(read_u16(sub, start + j * 2)?);
+        let covered = map.coverage_glyphs(sub.get(cov_off..)?)?;
+        let new_covered: Vec<u16> = covered.iter().filter_map(|&g| map.map(g)).collect();
+        if new_covered.is_empty() {
+            return None;
+        }
+        out.push(crate::coverage::emit_coverage_from_glyphs(&new_covered));
+    }
+    Some(out)
 }
 
 /// Rewrites a GSUB type 8 (Reverse Chained Single Substitution) subtable.
@@ -1976,7 +1881,7 @@ fn rewrite_type8(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     }
 
     let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let covered = ctx.gid_map.coverage_glyphs(cov_bytes)?;
     if covered.len() != glyph_count {
         // Spec requires they match; tolerate mismatch by capping at the
         // smaller of the two on read but treat as malformed for emission.
@@ -2005,23 +1910,8 @@ fn rewrite_type8(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     // Backtrack / lookahead Coverages: every Coverage slot must
     // survive. A reverse-chain rule whose context window has any
     // empty Coverage can never match, so drop the subtable.
-    let read_cov_array = |start: usize, count: usize| -> Option<Vec<Vec<u8>>> {
-        let mut out = Vec::with_capacity(count);
-        for j in 0..count {
-            let off_off = start + j * 2;
-            let cov_off = u16::from_be_bytes([sub[off_off], sub[off_off + 1]]) as usize;
-            let cov_bytes = sub.get(cov_off..)?;
-            let covered = parse_coverage_glyphs(cov_bytes);
-            let new_covered: Vec<u16> = covered.iter().filter_map(|&g| map.map(g)).collect();
-            if new_covered.is_empty() {
-                return None;
-            }
-            out.push(crate::coverage::emit_coverage_from_glyphs(&new_covered));
-        }
-        Some(out)
-    };
-    let new_bt = read_cov_array(bt_offs_start, bt_count)?;
-    let new_la = read_cov_array(la_offs_start, la_count)?;
+    let new_bt = rewrite_coverage_array(map, sub, bt_offs_start, bt_count)?;
+    let new_la = rewrite_coverage_array(map, sub, la_offs_start, la_count)?;
 
     // Emit:
     //   u16      substFormat = 1
@@ -2052,21 +1942,15 @@ fn rewrite_type8(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         out.extend_from_slice(&sub_gid.to_be_bytes());
     }
     // Input coverage.
-    let cov_off_new = out.len() as u16;
     let inputs_only: Vec<u16> = new_pairs.iter().map(|&(g, _)| g).collect();
-    out.extend_from_slice(&crate::coverage::emit_coverage_from_glyphs(&inputs_only));
-    out[cov_slot..cov_slot + 2].copy_from_slice(&cov_off_new.to_be_bytes());
+    append_at_offset16(
+        &mut out,
+        cov_slot,
+        &crate::coverage::emit_coverage_from_glyphs(&inputs_only),
+    )?;
     // Backtrack / lookahead bodies.
-    let mut patch_array = |slots_start: usize, covs: &[Vec<u8>]| {
-        for (i, cov) in covs.iter().enumerate() {
-            let body_start = out.len() as u16;
-            out.extend_from_slice(cov);
-            let slot = slots_start + i * 2;
-            out[slot..slot + 2].copy_from_slice(&body_start.to_be_bytes());
-        }
-    };
-    patch_array(bt_slots_start, &new_bt);
-    patch_array(la_slots_start, &new_la);
+    append_bodies_at_offsets16(&mut out, bt_slots_start, &new_bt)?;
+    append_bodies_at_offsets16(&mut out, la_slots_start, &new_la)?;
     Some(RewrittenSubtable { bytes: out })
 }
 
@@ -2109,8 +1993,13 @@ fn rewrite_extension(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable>
 /// Iterates the source GSUB lookups; for each kept input glyph that a
 /// type-1/2/3 lookup covers, marks the substitution output(s) as kept.
 /// Mutates `keep` in place and returns whether anything was added so
-/// the caller can decide to re-run the closure pass.
-pub(crate) fn pull_in_substitution_targets(face: &sigilbuzz::Face<'_>, keep: &mut [bool]) -> bool {
+/// the caller can decide to re-run the closure pass. Stops early once
+/// `budget` is spent.
+pub(crate) fn pull_in_substitution_targets(
+    face: &sigilbuzz::Face<'_>,
+    keep: &mut [bool],
+    budget: &WorkBudget,
+) -> bool {
     let Ok(Some(gsub)) = face.gsub() else {
         return false;
     };
@@ -2120,6 +2009,9 @@ pub(crate) fn pull_in_substitution_targets(face: &sigilbuzz::Face<'_>, keep: &mu
         let Some(lookup) = lookups.get(li) else {
             continue;
         };
+        if !budget.spend(1 + usize::from(lookup.subtable_count())) {
+            return changed;
+        }
         let lt = unwrap_extension_lookup_type(&lookup);
         for si in 0..lookup.subtable_count() {
             let Some(sub) = subtable_with_extension(&lookup, si) else {
@@ -2127,19 +2019,44 @@ pub(crate) fn pull_in_substitution_targets(face: &sigilbuzz::Face<'_>, keep: &mu
             };
             match lt {
                 gsub_type::SINGLE => {
-                    changed |= pull_single(sub, keep);
+                    changed |= pull_single_in(sub, keep, budget);
                 }
                 gsub_type::MULTIPLE => {
-                    changed |= pull_multiple(sub, keep);
+                    changed |= pull_multiple_in(sub, keep, budget);
                 }
                 gsub_type::ALTERNATE => {
-                    changed |= pull_alternate_default(sub, keep);
+                    changed |= pull_alternate_default_in(sub, keep, budget);
                 }
                 _ => {}
             }
         }
     }
     changed
+}
+
+/// Enumerates a Coverage table and charges `budget` for it. Returns
+/// `None` once the budget is spent.
+fn budgeted_coverage(cov_bytes: &[u8], budget: &WorkBudget) -> Option<Vec<u16>> {
+    if budget.is_spent() {
+        return None;
+    }
+    let covered = parse_coverage_glyphs(cov_bytes);
+    budget.spend(covered.len() + 1).then_some(covered)
+}
+
+#[cfg(test)]
+fn pull_single(sub: &[u8], keep: &mut [bool]) -> bool {
+    pull_single_in(sub, keep, &WorkBudget::new(crate::util::WORK_LIMIT))
+}
+
+#[cfg(test)]
+fn pull_multiple(sub: &[u8], keep: &mut [bool]) -> bool {
+    pull_multiple_in(sub, keep, &WorkBudget::new(crate::util::WORK_LIMIT))
+}
+
+#[cfg(test)]
+fn pull_alternate_default(sub: &[u8], keep: &mut [bool]) -> bool {
+    pull_alternate_default_in(sub, keep, &WorkBudget::new(crate::util::WORK_LIMIT))
 }
 
 fn unwrap_extension_lookup_type(lookup: &sigilbuzz::tables::layout::Lookup<'_>) -> u16 {
@@ -2172,7 +2089,7 @@ fn subtable_with_extension<'a>(
 
 /// Pulls in the substitute glyph for every kept input glyph in a
 /// type-1 (single-sub) subtable.
-fn pull_single(sub: &[u8], keep: &mut [bool]) -> bool {
+fn pull_single_in(sub: &[u8], keep: &mut [bool], budget: &WorkBudget) -> bool {
     if sub.len() < 4 {
         return false;
     }
@@ -2181,7 +2098,9 @@ fn pull_single(sub: &[u8], keep: &mut [bool]) -> bool {
     let Some(cov_bytes) = sub.get(cov_off..) else {
         return false;
     };
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let Some(covered) = budgeted_coverage(cov_bytes, budget) else {
+        return false;
+    };
     let mut changed = false;
     match format {
         1 => {
@@ -2231,7 +2150,7 @@ fn pull_single(sub: &[u8], keep: &mut [bool]) -> bool {
 
 /// Pulls in every substitute in the sequence for every kept input in a
 /// type-2 (multiple-sub) subtable.
-fn pull_multiple(sub: &[u8], keep: &mut [bool]) -> bool {
+fn pull_multiple_in(sub: &[u8], keep: &mut [bool], budget: &WorkBudget) -> bool {
     if sub.len() < 6 {
         return false;
     }
@@ -2244,7 +2163,9 @@ fn pull_multiple(sub: &[u8], keep: &mut [bool]) -> bool {
     let Some(cov_bytes) = sub.get(cov_off..) else {
         return false;
     };
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let Some(covered) = budgeted_coverage(cov_bytes, budget) else {
+        return false;
+    };
     if covered.len() != seq_count {
         return false;
     }
@@ -2269,6 +2190,9 @@ fn pull_multiple(sub: &[u8], keep: &mut [bool]) -> bool {
         if seq_bytes.len() < need {
             continue;
         }
+        if !budget.spend(glyph_count) {
+            return changed;
+        }
         for j in 0..glyph_count {
             let goff = 2 + j * 2;
             let target = u16::from_be_bytes([seq_bytes[goff], seq_bytes[goff + 1]]);
@@ -2285,7 +2209,7 @@ fn pull_multiple(sub: &[u8], keep: &mut [bool]) -> bool {
 /// in a type-3 (alternate-sub) subtable. User-selected alternates ride
 /// in only when their alternate-set output happens to be reachable
 /// some other way.
-fn pull_alternate_default(sub: &[u8], keep: &mut [bool]) -> bool {
+fn pull_alternate_default_in(sub: &[u8], keep: &mut [bool], budget: &WorkBudget) -> bool {
     if sub.len() < 6 {
         return false;
     }
@@ -2298,7 +2222,9 @@ fn pull_alternate_default(sub: &[u8], keep: &mut [bool]) -> bool {
     let Some(cov_bytes) = sub.get(cov_off..) else {
         return false;
     };
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let Some(covered) = budgeted_coverage(cov_bytes, budget) else {
+        return false;
+    };
     if covered.len() != alt_set_count {
         return false;
     }

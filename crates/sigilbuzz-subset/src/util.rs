@@ -1,11 +1,70 @@
-//! Small in-place rewrites for tables we mostly pass through.
+//! Small in-place rewrites for tables we mostly pass through, plus the
+//! work budget shared by the table walkers.
 
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
 use crate::SubsetError;
+
+/// Default number of work units one walk over font data may spend.
+///
+/// Layout, VARC, and GPOS tables can point many records at the same
+/// bytes, so a small table can describe billions of records. Each
+/// walker charges a [`WorkBudget`] for the records and bytes it
+/// visits, and gives up once the budget runs out.
+///
+/// The heaviest font under `tests/` spends under a million units, so
+/// this leaves more than an order of magnitude of headroom. Lowering it
+/// to 2^18 does change the output of the bundled fonts, so it is not a
+/// limit real fonts approach.
+pub(crate) const WORK_LIMIT: u64 = 1 << 24;
+
+/// A counter of work units left for one walk over font data.
+///
+/// Uses a [`Cell`] so walkers that only hold a shared reference can
+/// still charge it.
+pub(crate) struct WorkBudget {
+    left: Cell<u64>,
+}
+
+impl WorkBudget {
+    /// Creates a budget holding `units` work units.
+    pub(crate) const fn new(units: u64) -> Self {
+        Self {
+            left: Cell::new(units),
+        }
+    }
+
+    /// Spends `units`. Returns false, and empties the budget, when
+    /// fewer than `units` remain.
+    pub(crate) fn spend(&self, units: usize) -> bool {
+        let units = units as u64;
+        match self.left.get().checked_sub(units) {
+            Some(rest) => {
+                self.left.set(rest);
+                true
+            }
+            None => {
+                self.left.set(0);
+                false
+            }
+        }
+    }
+
+    /// True once a call to [`WorkBudget::spend`] has failed or the
+    /// budget has reached zero.
+    pub(crate) fn is_spent(&self) -> bool {
+        self.left.get() == 0
+    }
+
+    /// Refills the budget to `units`.
+    pub(crate) fn reset(&self, units: u64) {
+        self.left.set(units);
+    }
+}
 
 /// Patches `head.indexToLocFormat` (offset 50: 0=short, 1=long).
 pub fn write_index_to_loc_format(head: &mut [u8], long: bool) {
@@ -119,5 +178,19 @@ mod tests {
         let mut maxp = alloc::vec![0u8; 6];
         write_maxp_num_glyphs(&mut maxp, 9000).unwrap();
         assert_eq!(&maxp[4..6], &9000u16.to_be_bytes());
+    }
+
+    #[test]
+    fn work_budget_empties_when_overspent() {
+        let budget = WorkBudget::new(10);
+        assert!(budget.spend(4));
+        assert!(!budget.is_spent());
+        assert!(budget.spend(6));
+        assert!(budget.is_spent());
+        let budget = WorkBudget::new(10);
+        assert!(!budget.spend(11));
+        assert!(budget.is_spent());
+        budget.reset(3);
+        assert!(budget.spend(3));
     }
 }
