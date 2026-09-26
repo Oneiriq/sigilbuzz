@@ -36,13 +36,13 @@ categories = ["text-processing", "rendering", "no-std"]
 # Standalone library. No proc-macros, no C glue.
 
 [features]
-# Everything is pure Rust by default. `std` turns on allocation-backed
-# conveniences (Vec/String in the public API, IO helpers). Turn it off
-# for embedded and no_std targets. The core shaping path does not need
-# it.
+# Everything is pure Rust by default. The crate always links `alloc`
+# (Vec and String are part of the shaping API), so there is no `alloc`
+# feature to toggle. `std` only adds filesystem helpers such as
+# `Blob::from_path`. Turn it off for embedded and no_std targets; the
+# shaping path does not need it.
 default = ["std"]
-std = ["alloc"]
-alloc = []
+std = []
 
 [dependencies]
 # Empty on purpose. Every byte of parsing and shaping is sigilbuzz
