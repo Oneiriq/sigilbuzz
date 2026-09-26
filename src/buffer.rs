@@ -375,10 +375,18 @@ pub struct ScriptRun {
     pub script_priority: &'static [[u8; 4]],
 }
 
-/// DFLT-only priority for Latin / Greek / Cyrillic / Han / unknown
-/// scripts. Interned as a static so `script_priority_for` can return
-/// a `'static` reference.
+/// DFLT-only priority for text with no recognized script.
+/// Interned as a static so `script_priority_for` can return a
+/// `'static` reference.
 const DFLT_ONLY: &[[u8; 4]] = &[*b"DFLT"];
+/// Latin script-tag priority: `latn` then DFLT fallback.
+const LATN_PRIORITY: &[[u8; 4]] = &[*b"latn", *b"DFLT"];
+/// Greek script-tag priority: `grek` then DFLT fallback.
+const GREK_PRIORITY: &[[u8; 4]] = &[*b"grek", *b"DFLT"];
+/// Cyrillic script-tag priority: `cyrl` then DFLT fallback.
+const CYRL_PRIORITY: &[[u8; 4]] = &[*b"cyrl", *b"DFLT"];
+/// Han script-tag priority: `hani` then DFLT fallback.
+const HANI_PRIORITY: &[[u8; 4]] = &[*b"hani", *b"DFLT"];
 /// Arabic script-tag priority: `arab` then DFLT fallback.
 const ARAB_PRIORITY: &[[u8; 4]] = &[*b"arab", *b"DFLT"];
 /// Hebrew script-tag priority: `hebr` then DFLT fallback.
@@ -408,6 +416,11 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
         THAI_SCRIPT_PRIORITY, TIRHUTA_SCRIPT_PRIORITY,
     };
     match script {
+        // HarfBuzz looks up a script's own OpenType tag before DFLT.
+        Script::Latin => LATN_PRIORITY,
+        Script::Greek => GREK_PRIORITY,
+        Script::Cyrillic => CYRL_PRIORITY,
+        Script::Han => HANI_PRIORITY,
         Script::Arabic => ARAB_PRIORITY,
         Script::Hebrew => HEBR_PRIORITY,
         Script::Devanagari => DEVA_SCRIPT_PRIORITY,
@@ -440,10 +453,8 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
         Script::Khojki => KHOJKI_SCRIPT_PRIORITY,
         Script::Tirhuta => TIRHUTA_SCRIPT_PRIORITY,
         Script::Modi => MODI_SCRIPT_PRIORITY,
-        // Latin / Greek / Cyrillic / Han / Other: DFLT is where Latin
-        // shipped features live and where anything we do not have
-        // specialized dispatch for falls back.
-        _ => DFLT_ONLY,
+        // Text with no recognized script falls back to DFLT.
+        Script::Other => DFLT_ONLY,
     }
 }
 
@@ -618,7 +629,7 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].script, Script::Latin);
         assert_eq!(runs[0].byte_range, 0..5);
-        assert_eq!(runs[0].script_priority, &[*b"DFLT"]);
+        assert_eq!(runs[0].script_priority, &[*b"latn", *b"DFLT"]);
     }
 
     #[test]
@@ -694,7 +705,8 @@ mod tests {
     fn script_priority_for_common_scripts() {
         assert_eq!(script_priority_for(Script::Arabic), &[*b"arab", *b"DFLT"]);
         assert_eq!(script_priority_for(Script::Hebrew), &[*b"hebr", *b"DFLT"]);
-        assert_eq!(script_priority_for(Script::Latin), &[*b"DFLT"]);
+        assert_eq!(script_priority_for(Script::Latin), &[*b"latn", *b"DFLT"]);
+        assert_eq!(script_priority_for(Script::Cyrillic), &[*b"cyrl", *b"DFLT"]);
         assert_eq!(script_priority_for(Script::Other), &[*b"DFLT"]);
         assert_eq!(
             script_priority_for(Script::Khmer),

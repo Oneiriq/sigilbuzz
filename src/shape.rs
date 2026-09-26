@@ -927,7 +927,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // for the whole run; features the shaper activates only fire when
     // the buffer's dominant script matches. sigilbuzz's per-segment
     // dispatch still runs each segment under its own script priority
-    // (Hebrew half under `hebr`, Latin half under DFLT), but the
+    // (Hebrew half under `hebr`, Latin half under `latn`), but the
     // complex-shaper pre-pass for Old Hangul needs the dominant-script
     // gate to match HarfBuzz: a mixed `Hi 가` run hands `ljmo`/`vjmo`
     // the jamo segment under HarfBuzz's default shaper (no positional
@@ -1828,9 +1828,9 @@ fn is_handled_gsub_tag(tag: [u8; 4]) -> bool {
 /// between `vrt2` (preferred if present) and `vert` (fallback).
 fn feature_present(gsub: &Gsub<'_>, tag: [u8; 4]) -> bool {
     // Vertical-writing probe runs before we know the script. Use the
-    // Latin-style script order (DFLT -> first) to match the previous
-    // behavior. Arabic fonts do not ship vert/vrt2, so this choice is
-    // not observable in practice.
+    // DFLT -> first script order to match the previous behavior.
+    // Arabic fonts do not ship vert/vrt2, so this choice is not
+    // observable in practice.
     lookup_indices_for_feature_in_scripts(gsub, tag, &[*b"DFLT"]).is_some_and(|v| !v.is_empty())
 }
 
