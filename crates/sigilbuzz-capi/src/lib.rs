@@ -1381,15 +1381,26 @@ pub unsafe extern "C" fn hb_shape(
     let _ = unsafe { hb_shape_full(font, buffer, features, num_features, ptr::null()) };
 }
 
+/// Shapes `buffer` with `font`, like `hb_shape`, using only the
+/// shapers named in `shaper_list`.
+///
+/// sigilbuzz has one shaper, the OpenType shaper HarfBuzz calls `ot`.
+/// A null `shaper_list` means the default list. A list that does not
+/// name `ot` has no shaper sigilbuzz can run. The call then returns 0,
+/// as HarfBuzz does when none of the requested shapers is available,
+/// and the buffer holds no glyphs. An empty buffer returns 1 whatever
+/// the list says, also as in HarfBuzz.
+///
 /// # Safety
-/// See `hb_shape`. `_shaper_list` is ignored.
+/// See `hb_shape`. `shaper_list` must be null or point to an array
+/// of NUL-terminated strings that ends with a null pointer.
 #[no_mangle]
 pub unsafe extern "C" fn hb_shape_full(
     font: *mut hb_font_t,
     buffer: *mut hb_buffer_t,
     features: *const hb_feature_t,
     num_features: c_uint,
-    _shaper_list: *const *const c_char,
+    shaper_list: *const *const c_char,
 ) -> hb_bool_t {
     if font.is_null() || buffer.is_null() {
         return 0;
@@ -1400,6 +1411,18 @@ pub unsafe extern "C" fn hb_shape_full(
     // SAFETY: `buffer` is non-null and the caller guarantees it points
     // to a live `hb_buffer_t`.
     let buffer_inner = unsafe { &(*buffer).inner };
+
+    // SAFETY: the caller guarantees `shaper_list` is null or a
+    // null-terminated array of C strings.
+    if !unsafe { shaper_list_names_ot(shaper_list) } {
+        let mut buffer_state = buffer_inner.state.lock();
+        if buffer_state.buffer.is_empty() {
+            return 1;
+        }
+        buffer_state.glyph_infos.clear();
+        buffer_state.glyph_positions.clear();
+        return 0;
+    }
 
     // Build the feature list.
     let raw_features: &[hb_feature_t] = if features.is_null() || num_features == 0 {
@@ -1482,6 +1505,33 @@ unsafe fn c_str_bytes<'a>(s: *const c_char, len: c_int) -> &'a [u8] {
         // SAFETY: the caller guarantees a NUL-terminated string at `s`
         // when `len` is negative.
         Err(_) => unsafe { core::ffi::CStr::from_ptr(s) }.to_bytes(),
+    }
+}
+
+/// True when `shaper_list` is null (the default list) or names the
+/// `ot` shaper.
+///
+/// # Safety
+/// `shaper_list` must be null or point to an array of NUL-terminated
+/// strings that ends with a null pointer.
+unsafe fn shaper_list_names_ot(shaper_list: *const *const c_char) -> bool {
+    if shaper_list.is_null() {
+        return true;
+    }
+    let mut i = 0usize;
+    loop {
+        // SAFETY: the caller guarantees a null-terminated array, and
+        // the loop stops at the terminator, so index `i` is in bounds.
+        let name = unsafe { *shaper_list.add(i) };
+        if name.is_null() {
+            return false;
+        }
+        // SAFETY: every entry before the terminator is a
+        // NUL-terminated string, per the caller's contract.
+        if unsafe { core::ffi::CStr::from_ptr(name) }.to_bytes() == b"ot" {
+            return true;
+        }
+        i += 1;
     }
 }
 
