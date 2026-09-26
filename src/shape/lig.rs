@@ -18,9 +18,11 @@
 //! it follows each glyph through every reorder and substitution
 //! without a parallel array. Bits 8 to 15 hold HarfBuzz's `lig_props`
 //! byte verbatim (ligature id in the top three bits, the "is the
-//! ligature glyph" flag in bit 4, the component in the low four) and
-//! bit 7 holds the "multiplied" glyph property; see
-//! [`match_prop`], which the matching rules read the same bits through.
+//! ligature glyph" flag in bit 4, the component in the low four), bit
+//! 7 holds the "multiplied" glyph property, and bit 6 the "ligated"
+//! one (any ligature substitution's output); see [`match_prop`], which
+//! the matching rules read the same bits through, and
+//! [`crate::buffer::unicode_prop`] for the whole layout.
 //!
 //! Ligation also updates the synthesized glyph class fonts without a
 //! GDEF `GlyphClassDef` match against (HarfBuzz's `_set_glyph_class`
@@ -64,6 +66,12 @@ pub(super) fn lig_comp(g: &Glyph) -> u8 {
 /// True when the glyph came out of a multiple substitution.
 pub(super) fn is_multiplied(g: &Glyph) -> bool {
     MatchGlyph::from(g).is_multiplied()
+}
+
+/// True when a ligature substitution produced the glyph
+/// (`_hb_glyph_info_ligated`).
+pub(super) fn is_ligated(g: &Glyph) -> bool {
+    MatchGlyph::from(g).is_ligated()
 }
 
 fn set_for_ligature(g: &mut Glyph, lig_id: u8, num_comps: u8) {
@@ -214,7 +222,7 @@ pub(super) fn ligate(
 
     let lig = &mut glyphs[at];
     substitute(lig, lig_gid);
-    lig.unicode_props &= !match_prop::MULTIPLIED;
+    lig.unicode_props = (lig.unicode_props & !match_prop::MULTIPLIED) | match_prop::LIGATED;
     if is_ligature {
         set_for_ligature(lig, new_id, total_comps.min(15) as u8);
         set_synthesized_class(lig, match_prop::SYNTHESIZED_LIGATURE);

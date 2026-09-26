@@ -108,6 +108,7 @@ mod aat;
 mod attach;
 mod cluster;
 mod dotted_circle;
+mod fallback;
 mod features;
 mod glyph_props;
 mod gpos;

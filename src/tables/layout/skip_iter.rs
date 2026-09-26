@@ -74,13 +74,12 @@ const IGNORE_FLAGS: u16 =
     LOOKUP_FLAG_IGNORE_BASE_GLYPHS | LOOKUP_FLAG_IGNORE_LIGATURES | LOOKUP_FLAG_IGNORE_MARKS;
 
 /// Bits of [`MatchGlyph::props`], the same layout the shaper keeps in
-/// `Glyph::unicode_props`.
+/// `Glyph::unicode_props`; [`crate::buffer::unicode_prop`] maps all
+/// sixteen.
 ///
 /// The low byte holds the matching properties HarfBuzz keeps in
 /// `unicode_props` and `glyph_props`; the high byte is HarfBuzz's
-/// `lig_props` byte verbatim (ligature id in its top three bits, the
-/// "is the ligature glyph" flag in bit 4, the component index in the
-/// low four).
+/// `lig_props` byte verbatim.
 pub mod match_prop {
     /// Unsubstituted default-ignorable character (the same bit as
     /// `crate::buffer::unicode_prop::DEFAULT_IGNORABLE`).
@@ -101,6 +100,10 @@ pub mod match_prop {
     pub const SYNTHESIZED_LIGATURE: u16 = 1 << 4;
     /// Synthesized class value: mark.
     pub const SYNTHESIZED_MARK: u16 = 2 << 4;
+    /// HarfBuzz's `HB_OT_LAYOUT_GLYPH_PROPS_LIGATED`: a ligature
+    /// substitution produced the glyph, whether or not it counts as a
+    /// ligature for component tracking.
+    pub const LIGATED: u16 = 1 << 6;
     /// HarfBuzz's `HB_OT_LAYOUT_GLYPH_PROPS_MULTIPLIED`: the glyph came
     /// out of a multiple substitution.
     pub const MULTIPLIED: u16 = 1 << 7;
@@ -185,6 +188,12 @@ impl MatchGlyph {
     #[must_use]
     pub const fn is_multiplied(self) -> bool {
         self.props & match_prop::MULTIPLIED != 0
+    }
+
+    /// True when a ligature substitution produced the glyph.
+    #[must_use]
+    pub const fn is_ligated(self) -> bool {
+        self.props & match_prop::LIGATED != 0
     }
 
     /// The glyph class the shaper synthesized for it.

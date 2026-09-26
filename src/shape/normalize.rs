@@ -28,8 +28,11 @@
 //! cluster levels only.
 //!
 //! Characters a font maps neither directly nor through a decomposition
-//! get glyph 0, except that U+2011 NON-BREAKING HYPHEN falls back to
-//! the U+2010 HYPHEN glyph.
+//! get glyph 0, with two exceptions: a space character (U+2002 EN
+//! SPACE, U+202F NARROW NO-BREAK SPACE, ...) takes the space glyph and
+//! records its kind so positioning can fix its width (see
+//! `fallback::adjust_spaces`), and U+2011 NON-BREAKING HYPHEN falls
+//! back to the U+2010 HYPHEN glyph.
 //!
 //! A COMBINING GRAPHEME JOINER starts hidden (GSUB cannot skip it, see
 //! `glyph_props`); after reordering, one that blocked no reordering is
@@ -45,6 +48,7 @@ mod hooks;
 use alloc::vec::Vec;
 
 use super::cluster::{merge_clusters, Clustered};
+use super::fallback;
 use super::segment::Segment;
 use super::shaper::{NormalizationMode, Shaper};
 use super::{glyph_props, ignorables};
@@ -329,6 +333,17 @@ impl Normalizer<'_> {
         if !shortest {
             if let Some(glyph) = self.nominal(u) {
                 out.push(cur.with_glyph(glyph));
+                return;
+            }
+        }
+        // Every space character with a fallback is a space separator
+        // (General_Category Zs), which is what HarfBuzz checks first.
+        let kind = fallback::space_fallback(u);
+        if kind != fallback::space::NOT_SPACE {
+            if let Some(space) = self.nominal(' ') {
+                let mut c = cur.with_glyph(space);
+                c.class |= kind << char_class::SPACE_SHIFT;
+                out.push(c);
                 return;
             }
         }

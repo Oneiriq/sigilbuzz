@@ -105,15 +105,33 @@ pub struct Glyph {
     pub combining_class: u8,
 }
 
-/// Bits packed into [`Glyph::unicode_props`]. Laid out to leave room
-/// for future expansion without shifting existing meanings.
+/// Bits packed into [`Glyph::unicode_props`].
 ///
-/// Bits 3 to 5 hold the shaper's other matching props (hidden
-/// ignorables and the synthesized glyph class, see
-/// [`crate::tables::layout::skip_iter::match_prop`]) and bits 7 to 15
-/// its ligature bookkeeping (the ligature id and component index GSUB
-/// records for GPOS mark attachment, HarfBuzz's `lig_props`); callers
-/// building glyphs by hand should leave them zero.
+/// This is the one map of all sixteen bits; the constants live where
+/// their users are:
+///
+/// | Bits | Meaning | Constant |
+/// |------|---------|----------|
+/// | 0 | unsubstituted default ignorable | [`DEFAULT_IGNORABLE`] |
+/// | 1 | ZWJ | [`JOINER`] |
+/// | 2 | ZWNJ | [`NON_JOINER`] |
+/// | 3 | hidden ignorable (CGJ, Mongolian FVS, tags) | `match_prop::HIDDEN` |
+/// | 4, 5 | synthesized glyph class | `match_prop::SYNTHESIZED_CLASS` |
+/// | 6 | output of a ligature substitution | `match_prop::LIGATED` |
+/// | 7 | output of a multiple substitution | `match_prop::MULTIPLIED` |
+/// | 8 to 15 | HarfBuzz's `lig_props` byte | `match_prop::LIG_PROPS_SHIFT` |
+///
+/// The `match_prop` constants are in
+/// [`crate::tables::layout::skip_iter::match_prop`], which the lookup
+/// matching rules read. The `lig_props` byte holds the ligature id in
+/// its top three bits, the "is the ligature glyph" flag in bit 4, and
+/// the component index in the low four; GSUB records it for GPOS mark
+/// attachment. Bits 3 to 15 are the shaper's own: callers building
+/// glyphs by hand should leave them zero.
+///
+/// [`DEFAULT_IGNORABLE`]: crate::buffer::unicode_prop::DEFAULT_IGNORABLE
+/// [`JOINER`]: crate::buffer::unicode_prop::JOINER
+/// [`NON_JOINER`]: crate::buffer::unicode_prop::NON_JOINER
 pub mod unicode_prop {
     /// The glyph's source codepoint is default ignorable in HarfBuzz's
     /// sense (ZWJ, ZWNJ, bidi controls, variation selectors, soft

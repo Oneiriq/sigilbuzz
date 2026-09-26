@@ -1,6 +1,7 @@
-//! The positioning pass: mark-width zeroing, GPOS, the kerning
-//! fallbacks, and attachment resolution, in HarfBuzz's order
-//! (`hb_ot_position_plan` in hb-ot-shape.cc).
+//! The positioning pass: the fallback space widths, mark-width
+//! zeroing, GPOS, the kerning fallbacks, and attachment resolution, in
+//! HarfBuzz's order (`hb_ot_position_default` and `hb_ot_position_plan`
+//! in hb-ot-shape.cc).
 //!
 //! Which table positions the run follows HarfBuzz's plan:
 //!
@@ -20,6 +21,7 @@
 use alloc::vec::Vec;
 
 use super::attach::{self, Attach};
+use super::fallback;
 use super::gpos::{self, GposCx};
 use super::shaper::{MarkZeroing, Shaper};
 use super::{kern, Feature, ProcessedSegment, VarCtx};
@@ -70,6 +72,10 @@ pub(super) fn position(
     let direction = input.direction;
     let horizontal = direction.is_horizontal();
     let face = input.face;
+
+    // Space characters drawn with the space glyph get their own
+    // widths first, with the default advances (`hb_ot_position_default`).
+    fallback::adjust_spaces(face, input.var.coords, glyphs, horizontal)?;
 
     // Kerning is requested by `kern` (on by default) for horizontal
     // runs and by `vkrn` (off by default) for vertical ones.
@@ -236,7 +242,7 @@ fn glyph_top_and_height(face: &Face<'_>, id: u16) -> Result<Option<(i32, i32)>> 
 
 /// Rounds a variation delta to the nearest unit, halves away from
 /// zero, the way the advance deltas are rounded elsewhere.
-fn round_half_away(delta: f32) -> i32 {
+pub(super) fn round_half_away(delta: f32) -> i32 {
     if delta >= 0.0 {
         (delta + 0.5) as i32
     } else {
