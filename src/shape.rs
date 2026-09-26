@@ -1546,6 +1546,24 @@ struct ProcessedSegment {
     script_priority: &'static [[u8; 4]],
 }
 
+/// The script tags a segment of `script` tries. The Han bucket also
+/// holds Hiragana and Katakana, which HarfBuzz tags `kana`, not `hani`
+/// (`hb_ot_tags_from_script`); a segment whose first script-bearing
+/// character is kana takes `kana`, as HarfBuzz's buffer would.
+fn segment_priority(script: Script, cps: &[char]) -> &'static [[u8; 4]] {
+    const KANA_PRIORITY: &[[u8; 4]] = &[*b"kana", *b"DFLT"];
+    let kana = script == Script::Han
+        && cps
+            .iter()
+            .find(|&&c| !is_common_for_segmentation(c))
+            .is_some_and(|&c| matches!(c as u32, 0x3040..=0x30FF));
+    if kana {
+        KANA_PRIORITY
+    } else {
+        script_priority_for(script)
+    }
+}
+
 /// Splits the post-cmap codepoint stream into [`Segment`]s whose
 /// scripts agree with the buffer-level [`crate::buffer::Buffer::script_runs`]
 /// segmentation: COMMON codepoints (ASCII space/digits/punctuation,
@@ -1580,7 +1598,7 @@ fn build_segments(codepoints: &[char]) -> Vec<Segment> {
                 segments.push(Segment {
                     cp_range: current_start..i,
                     script: s,
-                    script_priority: script_priority_for(s),
+                    script_priority: segment_priority(s, &codepoints[current_start..i]),
                 });
                 current_start = i;
                 current_script = Some(resolved);
@@ -1594,7 +1612,7 @@ fn build_segments(codepoints: &[char]) -> Vec<Segment> {
         segments.push(Segment {
             cp_range: current_start..codepoints.len(),
             script: s,
-            script_priority: script_priority_for(s),
+            script_priority: segment_priority(s, &codepoints[current_start..]),
         });
     }
     segments
@@ -3455,6 +3473,18 @@ mod tests {
     use crate::font::Font;
     use crate::tables::cmap::{build_cmap_wrapper, build_format4};
     use alloc::vec::Vec;
+
+    #[test]
+    fn kana_led_segments_use_the_kana_script_tag() {
+        let priority = |text: &str| {
+            let cps: Vec<char> = text.chars().collect();
+            build_segments(&cps)[0].script_priority
+        };
+        assert_eq!(priority("\u{30AB}\u{30CA}")[0], *b"kana");
+        assert_eq!(priority("\u{3067}\u{3059}\u{65E5}\u{672C}")[0], *b"kana");
+        assert_eq!(priority("\u{65E5}\u{672C}\u{3067}\u{3059}")[0], *b"hani");
+        assert_eq!(priority("12 \u{30AB}")[0], *b"kana");
+    }
 
     /// Minimal font with head / maxp / hhea / hmtx / cmap sufficient
     /// for `shape()` to run against real ASCII text. Glyph 0 is
