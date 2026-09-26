@@ -86,7 +86,7 @@ sigilbuzz-paint = { path = "../sigilbuzz-paint", version = "0.1.0", optional = t
 # `cc` builds the C source files in `tests/c/` against the cdylib
 # during `cargo test`. Dev-dep only. It never enters the runtime
 # closure of any release artifact.
-cc = "1.0"
+cc = "1.5"
 # `fd-lock` provides the OS-level advisory file lock used by the
 # C-link tests in `tests/c_link.rs` to serialize the workspace-wide
 # cdylib rebuild step. A process-local `Mutex<()>` is not enough
