@@ -58,36 +58,58 @@ use alloc::vec::Vec;
 use sigilbuzz::tables::gsub::lookup_type as gsub_type;
 
 use crate::coverage::emit_coverage_from_pairs;
+use crate::device::Dedup;
 use crate::layout::{parse_coverage_glyphs, RewriterCtx, RewrittenLookup, RewrittenSubtable};
+use crate::SubsetError;
 
 /// Rewrites a single GSUB lookup. Returns `None` if the lookup has no
 /// surviving subtables after rewriting (drop cascade will remove the
-/// lookup).
+/// lookup), and an error when a rebuilt subtable outgrows its 16-bit
+/// offsets (see [`crate::offset16`]).
 pub(crate) fn rewrite_lookup(
     ctx: &RewriterCtx,
     lookup_type: u16,
     lookup_flag: u16,
     mark_filtering_set: Option<u16>,
     subtable_bodies: &[&[u8]],
-) -> Option<RewrittenLookup> {
+) -> Result<Option<RewrittenLookup>, SubsetError> {
     let mut rewritten_subs: Vec<RewrittenSubtable> = Vec::new();
 
     for &sub_bytes in subtable_bodies {
-        if let Some(rs) = rewrite_subtable(ctx, lookup_type, sub_bytes) {
-            rewritten_subs.push(rs);
-        }
+        let rewritten = rewrite_subtable(ctx, lookup_type, sub_bytes);
+        ctx.offsets
+            .check(overflow_context(lookup_type, sub_bytes))?;
+        rewritten_subs.extend(rewritten);
     }
 
     if rewritten_subs.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    Some(RewrittenLookup {
+    Ok(Some(RewrittenLookup {
         lookup_type,
         lookup_flag,
         mark_filtering_set,
         subtables: rewritten_subs,
-    })
+    }))
+}
+
+/// Names the subtable type an Offset16 overflow is reported against,
+/// looking through an Extension wrapper.
+fn overflow_context(lookup_type: u16, sub: &[u8]) -> &'static str {
+    let kind = match (lookup_type, sub.get(2..4)) {
+        (gsub_type::EXTENSION, Some(inner)) => u16::from_be_bytes([inner[0], inner[1]]),
+        _ => lookup_type,
+    };
+    match kind {
+        gsub_type::SINGLE => "GSUB SingleSubst rewrite: an offset exceeds 64 KiB",
+        gsub_type::MULTIPLE => "GSUB MultipleSubst rewrite: an offset exceeds 64 KiB",
+        gsub_type::ALTERNATE => "GSUB AlternateSubst rewrite: an offset exceeds 64 KiB",
+        gsub_type::LIGATURE => "GSUB LigatureSubst rewrite: an offset exceeds 64 KiB",
+        gsub_type::CONTEXT => "GSUB ContextSubst rewrite: an offset exceeds 64 KiB",
+        gsub_type::CHAINED_CONTEXT => "GSUB ChainContextSubst rewrite: an offset exceeds 64 KiB",
+        _ => "GSUB ReverseChainSingleSubst rewrite: an offset exceeds 64 KiB",
+    }
 }
 
 fn rewrite_subtable(ctx: &RewriterCtx, lookup_type: u16, sub: &[u8]) -> Option<RewrittenSubtable> {
@@ -192,13 +214,13 @@ fn rewrite_single(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     new_pairs.sort_unstable_by_key(|(g, _)| *g);
     new_pairs.dedup_by_key(|(g, _)| *g);
 
-    Some(emit_single_subtable(&new_pairs))
+    Some(emit_single_subtable(ctx, &new_pairs))
 }
 
 /// Encodes a single-sub subtable, picking format 1 vs format 2 by
 /// byte size. Coverage is emitted directly into the subtable body so
 /// callers don't need to track sub-offsets.
-fn emit_single_subtable(pairs: &[(u16, u16)]) -> RewrittenSubtable {
+fn emit_single_subtable(ctx: &RewriterCtx, pairs: &[(u16, u16)]) -> RewrittenSubtable {
     // Try format 1 (delta). Viable only if every pair's
     // (output - input) wraps to the same i16. We compute the candidate
     // delta from the first pair and verify every other pair matches
@@ -236,7 +258,7 @@ fn emit_single_subtable(pairs: &[(u16, u16)]) -> RewrittenSubtable {
                                                     // Coverage offset placeholder.
         out.extend_from_slice(&0u16.to_be_bytes());
         out.extend_from_slice(&delta.to_be_bytes());
-        let cov_off = out.len() as u16;
+        let cov_off = ctx.off16(out.len());
         out.extend_from_slice(&cov_bytes);
         out[2..4].copy_from_slice(&cov_off.to_be_bytes());
     } else {
@@ -247,7 +269,7 @@ fn emit_single_subtable(pairs: &[(u16, u16)]) -> RewrittenSubtable {
         for &(_, sub_gid) in pairs {
             out.extend_from_slice(&sub_gid.to_be_bytes());
         }
-        let cov_off = out.len() as u16;
+        let cov_off = ctx.off16(out.len());
         out.extend_from_slice(&cov_bytes);
         out[2..4].copy_from_slice(&cov_off.to_be_bytes());
     }
@@ -349,12 +371,12 @@ fn rewrite_type2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         return None;
     }
 
-    Some(emit_type2_subtable(&surviving))
+    Some(emit_type2_subtable(ctx, &surviving))
 }
 
 /// Encodes a complete MultipleSubstFormat1 subtable around already-
 /// rewritten `(new_input_gid, sequence_bytes)` pairs.
-fn emit_type2_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
+fn emit_type2_subtable(ctx: &RewriterCtx, surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // substFormat
     let cov_off_slot = out.len();
@@ -364,11 +386,11 @@ fn emit_type2_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
     for _ in 0..surviving.len() {
         out.extend_from_slice(&[0u8; 2]); // sequenceOffset placeholder
     }
+    let mut bodies = Dedup::default();
     for (i, (_input_gid, seq_body)) in surviving.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(seq_body);
+        let body_start = bodies.place(&mut out, seq_body);
         let slot = seq_offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
     }
     let pairs: Vec<(u16, u16)> = surviving
         .iter()
@@ -376,7 +398,7 @@ fn emit_type2_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
         .map(|(i, (g, _))| (*g, i as u16))
         .collect();
     let cov_bytes = emit_coverage_from_pairs(&pairs);
-    let cov_off = out.len() as u16;
+    let cov_off = ctx.off16(out.len());
     out.extend_from_slice(&cov_bytes);
     out[cov_off_slot..cov_off_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
     RewrittenSubtable { bytes: out }
@@ -474,12 +496,12 @@ fn rewrite_type3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         return None;
     }
 
-    Some(emit_type3_subtable(&surviving))
+    Some(emit_type3_subtable(ctx, &surviving))
 }
 
 /// Encodes a complete AlternateSubstFormat1 subtable around already-
 /// rewritten `(new_input_gid, alt_set_bytes)` pairs.
-fn emit_type3_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
+fn emit_type3_subtable(ctx: &RewriterCtx, surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // substFormat
     let cov_off_slot = out.len();
@@ -489,11 +511,11 @@ fn emit_type3_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
     for _ in 0..surviving.len() {
         out.extend_from_slice(&[0u8; 2]); // alternateSetOffset placeholder
     }
+    let mut bodies = Dedup::default();
     for (i, (_input_gid, alt_body)) in surviving.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(alt_body);
+        let body_start = bodies.place(&mut out, alt_body);
         let slot = alt_offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
     }
     let pairs: Vec<(u16, u16)> = surviving
         .iter()
@@ -501,7 +523,7 @@ fn emit_type3_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
         .map(|(i, (g, _))| (*g, i as u16))
         .collect();
     let cov_bytes = emit_coverage_from_pairs(&pairs);
-    let cov_off = out.len() as u16;
+    let cov_off = ctx.off16(out.len());
     out.extend_from_slice(&cov_bytes);
     out[cov_off_slot..cov_off_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
     RewrittenSubtable { bytes: out }
@@ -580,7 +602,7 @@ fn rewrite_type4(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         let Some(set_bytes) = sub.get(set_off..) else {
             continue;
         };
-        let Some(rewritten_set) = rewrite_ligature_set(set_bytes, map) else {
+        let Some(rewritten_set) = rewrite_ligature_set(set_bytes, ctx) else {
             continue;
         };
         surviving_sets.push((first_new, rewritten_set));
@@ -590,12 +612,13 @@ fn rewrite_type4(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         return None;
     }
 
-    Some(emit_type4_subtable(&surviving_sets))
+    Some(emit_type4_subtable(ctx, &surviving_sets))
 }
 
 /// Rewrites a single LigatureSet. Returns `None` when every ligature in
 /// the set drops (caller propagates that to "Coverage entry dies").
-fn rewrite_ligature_set(set_bytes: &[u8], map: &crate::layout::GidMap) -> Option<Vec<u8>> {
+fn rewrite_ligature_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>> {
+    let map = ctx.gid_map;
     if set_bytes.len() < 2 {
         return None;
     }
@@ -674,7 +697,7 @@ fn rewrite_ligature_set(set_bytes: &[u8], map: &crate::layout::GidMap) -> Option
             out.extend_from_slice(&c.to_be_bytes());
         }
         let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
     }
     Some(out)
 }
@@ -687,7 +710,7 @@ fn rewrite_ligature_set(set_bytes: &[u8], map: &crate::layout::GidMap) -> Option
 ///   - LigatureSet offsets array (one Offset16 per surviving entry)
 ///   - LigatureSet bodies tightly packed in input order
 ///   - Coverage table appended last, its offset patched into the header
-fn emit_type4_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
+fn emit_type4_subtable(ctx: &RewriterCtx, surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // substFormat
     let cov_off_slot = out.len();
@@ -699,11 +722,11 @@ fn emit_type4_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
     }
 
     // LigatureSet bodies, in iteration order so Coverage indices match.
+    let mut bodies = Dedup::default();
     for (i, (_first_gid, set_body)) in surviving.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(set_body);
+        let body_start = bodies.place(&mut out, set_body);
         let slot = set_offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
     }
 
     // Coverage. Pair every kept first-gid with its index in the
@@ -716,7 +739,7 @@ fn emit_type4_subtable(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
         .map(|(i, (g, _))| (*g, i as u16))
         .collect();
     let cov_bytes = emit_coverage_from_pairs(&pairs);
-    let cov_off = out.len() as u16;
+    let cov_off = ctx.off16(out.len());
     out.extend_from_slice(&cov_bytes);
     out[cov_off_slot..cov_off_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
 
@@ -877,7 +900,7 @@ fn rewrite_type5_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     if surviving_sets.is_empty() {
         return None;
     }
-    Some(emit_context_format1(&surviving_sets))
+    Some(emit_context_format1(ctx, &surviving_sets))
 }
 
 fn rewrite_type5_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>> {
@@ -980,11 +1003,11 @@ fn rewrite_type5_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
     for _ in 0..surviving_rules.len() {
         out.extend_from_slice(&[0u8; 2]);
     }
+    let mut bodies = Dedup::default();
     for (i, body) in surviving_rules.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(body);
+        let body_start = bodies.place(&mut out, body);
         let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
     }
     Some(out)
 }
@@ -992,7 +1015,7 @@ fn rewrite_type5_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
 /// Emits a Context Substitution Format 1 subtable around the
 /// `(new_first_gid, rule_set_bytes)` pairs produced by
 /// [`rewrite_type5_rule_set`].
-fn emit_context_format1(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
+fn emit_context_format1(ctx: &RewriterCtx, surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // substFormat
     let cov_off_slot = out.len();
@@ -1002,11 +1025,11 @@ fn emit_context_format1(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
     for _ in 0..surviving.len() {
         out.extend_from_slice(&[0u8; 2]);
     }
+    let mut bodies = Dedup::default();
     for (i, (_first, set_body)) in surviving.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(set_body);
+        let body_start = bodies.place(&mut out, set_body);
         let slot = set_offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
     }
     let pairs: Vec<(u16, u16)> = surviving
         .iter()
@@ -1014,7 +1037,7 @@ fn emit_context_format1(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
         .map(|(i, (g, _))| (*g, i as u16))
         .collect();
     let cov_bytes = emit_coverage_from_pairs(&pairs);
-    let cov_off = out.len() as u16;
+    let cov_off = ctx.off16(out.len());
     out.extend_from_slice(&cov_bytes);
     out[cov_off_slot..cov_off_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
     RewrittenSubtable { bytes: out }
@@ -1136,22 +1159,22 @@ fn rewrite_type5_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     for _ in 0..set_count {
         out.extend_from_slice(&[0u8; 2]); // placeholder
     }
+    let mut bodies = Dedup::default();
     for (i, set_opt) in surviving_sets.iter().enumerate() {
         if let Some(set_body) = set_opt {
-            let body_start = out.len();
-            out.extend_from_slice(set_body);
+            let body_start = bodies.place(&mut out, set_body);
             let slot = set_offsets_start + i * 2;
-            out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+            out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
         }
         // Else leave the slot at zero (NULL ClassSet).
     }
     // Coverage.
-    let cov_off = out.len() as u16;
+    let cov_off = ctx.off16(out.len());
     let cov_emitted = crate::coverage::emit_coverage_from_glyphs(&new_covered);
     out.extend_from_slice(&cov_emitted);
     out[cov_slot..cov_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
     // ClassDef.
-    let cd_off = out.len() as u16;
+    let cd_off = ctx.off16(out.len());
     out.extend_from_slice(&new_cd_bytes);
     out[cd_slot..cd_slot + 2].copy_from_slice(&cd_off.to_be_bytes());
     Some(RewrittenSubtable { bytes: out })
@@ -1228,11 +1251,11 @@ fn rewrite_type5_class_set(
     for _ in 0..surviving_rules.len() {
         out.extend_from_slice(&[0u8; 2]);
     }
+    let mut bodies = Dedup::default();
     for (i, body) in surviving_rules.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(body);
+        let body_start = bodies.place(&mut out, body);
         let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
     }
     Some(out)
 }
@@ -1292,9 +1315,9 @@ fn rewrite_type5_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
         out.extend_from_slice(&[0u8; 2]);
     }
     out.extend_from_slice(&encode_lookup_records(&records));
+    let mut bodies = Dedup::default();
     for (i, cov) in new_cov_bytes.iter().enumerate() {
-        let body_start = out.len() as u16;
-        out.extend_from_slice(cov);
+        let body_start = ctx.off16(bodies.place(&mut out, cov));
         let slot = cov_offs_start + i * 2;
         out[slot..slot + 2].copy_from_slice(&body_start.to_be_bytes());
     }
@@ -1374,7 +1397,7 @@ fn rewrite_type6_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     if surviving_sets.is_empty() {
         return None;
     }
-    Some(emit_context_format1(&surviving_sets))
+    Some(emit_context_format1(ctx, &surviving_sets))
 }
 
 fn rewrite_type6_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>> {
@@ -1511,11 +1534,11 @@ fn rewrite_type6_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
     for _ in 0..surviving_rules.len() {
         out.extend_from_slice(&[0u8; 2]);
     }
+    let mut bodies = Dedup::default();
     for (i, body) in surviving_rules.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(body);
+        let body_start = bodies.place(&mut out, body);
         let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
     }
     Some(out)
 }
@@ -1646,24 +1669,24 @@ fn rewrite_type6_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     for _ in 0..set_count {
         out.extend_from_slice(&[0u8; 2]);
     }
+    let mut bodies = Dedup::default();
     for (i, set_opt) in surviving_sets.iter().enumerate() {
         if let Some(set_body) = set_opt {
-            let body_start = out.len();
-            out.extend_from_slice(set_body);
+            let body_start = bodies.place(&mut out, set_body);
             let slot = set_offsets_start + i * 2;
-            out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+            out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
         }
     }
-    let cov_off = out.len() as u16;
+    let cov_off = ctx.off16(out.len());
     out.extend_from_slice(&crate::coverage::emit_coverage_from_glyphs(&new_covered));
     out[cov_slot..cov_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
-    let bt_off = out.len() as u16;
+    let bt_off = ctx.off16(out.len());
     out.extend_from_slice(&new_bt_cd);
     out[bt_slot..bt_slot + 2].copy_from_slice(&bt_off.to_be_bytes());
-    let in_off = out.len() as u16;
+    let in_off = ctx.off16(out.len());
     out.extend_from_slice(&new_in_cd);
     out[in_slot..in_slot + 2].copy_from_slice(&in_off.to_be_bytes());
-    let la_off = out.len() as u16;
+    let la_off = ctx.off16(out.len());
     out.extend_from_slice(&new_la_cd);
     out[la_slot..la_slot + 2].copy_from_slice(&la_off.to_be_bytes());
     Some(RewrittenSubtable { bytes: out })
@@ -1799,11 +1822,11 @@ fn rewrite_type6_class_set(
     for _ in 0..surviving_rules.len() {
         out.extend_from_slice(&[0u8; 2]);
     }
+    let mut bodies = Dedup::default();
     for (i, body) in surviving_rules.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(body);
+        let body_start = bodies.place(&mut out, body);
         let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
     }
     Some(out)
 }
@@ -1904,10 +1927,10 @@ fn rewrite_type6_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     out.extend_from_slice(&(records.len() as u16).to_be_bytes());
     out.extend_from_slice(&encode_lookup_records(&records));
 
+    let mut bodies = Dedup::default();
     let mut patch_array = |slots_start: usize, covs: &[Vec<u8>]| {
         for (i, cov) in covs.iter().enumerate() {
-            let body_start = out.len() as u16;
-            out.extend_from_slice(cov);
+            let body_start = ctx.off16(bodies.place(&mut out, cov));
             let slot = slots_start + i * 2;
             out[slot..slot + 2].copy_from_slice(&body_start.to_be_bytes());
         }
@@ -2040,15 +2063,15 @@ fn rewrite_type8(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         out.extend_from_slice(&sub_gid.to_be_bytes());
     }
     // Input coverage.
-    let cov_off_new = out.len() as u16;
+    let cov_off_new = ctx.off16(out.len());
     let inputs_only: Vec<u16> = new_pairs.iter().map(|&(g, _)| g).collect();
     out.extend_from_slice(&crate::coverage::emit_coverage_from_glyphs(&inputs_only));
     out[cov_slot..cov_slot + 2].copy_from_slice(&cov_off_new.to_be_bytes());
     // Backtrack / lookahead bodies.
+    let mut bodies = Dedup::default();
     let mut patch_array = |slots_start: usize, covs: &[Vec<u8>]| {
         for (i, cov) in covs.iter().enumerate() {
-            let body_start = out.len() as u16;
-            out.extend_from_slice(cov);
+            let body_start = ctx.off16(bodies.place(&mut out, cov));
             let slot = slots_start + i * 2;
             out[slot..slot + 2].copy_from_slice(&body_start.to_be_bytes());
         }
@@ -2388,10 +2411,7 @@ mod tests {
             (266, 5),
             (267, 6),
         ]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_single(&ctx, &bytes).unwrap();
         // Verify the rewritten subtable parses and applies correctly.
         let parsed = sigilbuzz::tables::gsub::Single::parse(&rs.bytes).unwrap();
@@ -2417,10 +2437,7 @@ mod tests {
             (25, 9),
             (35, 11),
         ]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_single(&ctx, &bytes).unwrap();
         // Format must be 2 because no constant delta works.
         assert_eq!(&rs.bytes[0..2], &2u16.to_be_bytes());
@@ -2436,10 +2453,7 @@ mod tests {
         // kept set. New gid map: 10->1, 30->3, 100->11, 300->33.
         let bytes = build_single_format2(&[10, 20, 30], &[100, 200, 300]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (30, 3), (100, 11), (300, 33)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_single(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Single::parse(&rs.bytes).unwrap();
         assert_eq!(parsed.apply(1), Some(11));
@@ -2454,10 +2468,7 @@ mod tests {
         // 10->100 stays, 20->200 dies because 200 is dropped.
         let bytes = build_single_format2(&[10, 20], &[100, 200]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (20, 2), (100, 11)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_single(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Single::parse(&rs.bytes).unwrap();
         assert_eq!(parsed.apply(1), Some(11));
@@ -2471,10 +2482,7 @@ mod tests {
     fn rewrite_single_returns_none_when_all_pairs_drop() {
         let bytes = build_single_format2(&[10, 20], &[100, 200]);
         let map = map_from_pairs(&[(0, 0)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_single(&ctx, &bytes).is_none());
     }
 
@@ -2488,10 +2496,7 @@ mod tests {
         out.extend_from_slice(&8u32.to_be_bytes()); // inner offset = 8
         out.extend_from_slice(&inner);
         let map = map_from_pairs(&[(0, 0), (10, 1), (11, 2), (15, 7), (16, 8)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_extension(&ctx, &out).unwrap();
         // Output must still be an Extension wrapper around a single-sub.
         assert_eq!(&rs.bytes[0..2], &1u16.to_be_bytes());
@@ -2585,10 +2590,7 @@ mod tests {
         // 1: 10->9, 20->19, 100->99.
         let bytes = build_type4_subtable(&[(10, vec![(100, vec![20])])]);
         let map = map_from_pairs(&[(0, 0), (10, 9), (20, 19), (100, 99)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_type4(&ctx, &bytes).unwrap();
 
         // Round-trip through the parser to validate semantics.
@@ -2605,10 +2607,7 @@ mod tests {
         // surviving LigatureSet anchors it.
         let bytes = build_type4_subtable(&[(10, vec![(100, vec![20])])]);
         let map = map_from_pairs(&[(0, 0), (10, 9), (20, 19)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         // Only one Ligature in one LigatureSet; that ligature dies, so
         // the LigatureSet is empty, the Coverage entry dies, the
         // Coverage empties, the subtable dies.
@@ -2621,10 +2620,7 @@ mod tests {
         // dies (single missing component kills the rule).
         let bytes = build_type4_subtable(&[(10, vec![(100, vec![20, 30])])]);
         let map = map_from_pairs(&[(0, 0), (10, 9), (30, 29), (100, 99)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_type4(&ctx, &bytes).is_none());
     }
 
@@ -2641,10 +2637,7 @@ mod tests {
             (100, 99),
             (200, 199), // 200 stays mapped, but its tail (30) is dropped
         ]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_type4(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Ligature::parse(&rs.bytes).unwrap();
         // 9, 19 still fires.
@@ -2667,10 +2660,7 @@ mod tests {
         // Map keeps everything *except* 10 (first comp drops) and 100
         // (output of the only 10-ligature drops). 40 + 50 + 200 stay.
         let map = map_from_pairs(&[(0, 0), (40, 39), (50, 49), (200, 199), (20, 19)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_type4(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Ligature::parse(&rs.bytes).unwrap();
         // The 40-rooted ligature still fires.
@@ -2692,10 +2682,7 @@ mod tests {
         // Single-set, single-ligature subtable; drop everything.
         let bytes = build_type4_subtable(&[(10, vec![(100, vec![20])])]);
         let map = map_from_pairs(&[(0, 0)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_type4(&ctx, &bytes).is_none());
     }
 
@@ -2717,10 +2704,7 @@ mod tests {
         //   Total            = 6 + 2 + 10 + 6 = 24 bytes
         let bytes = build_type4_subtable(&[(10, vec![(100, vec![20])])]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (20, 2), (100, 3)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_type4(&ctx, &bytes).unwrap();
         assert_eq!(
             rs.bytes.len(),
@@ -2747,10 +2731,7 @@ mod tests {
             (101, 7),
             (200, 8),
         ]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let a = rewrite_type4(&ctx, &bytes).unwrap();
         let b = rewrite_type4(&ctx, &bytes).unwrap();
         assert_eq!(a.bytes, b.bytes);
@@ -2762,10 +2743,7 @@ mod tests {
         // rewrite_type4 and not a fall-through drop.
         let bytes = build_type4_subtable(&[(10, vec![(100, vec![20])])]);
         let map = map_from_pairs(&[(0, 0), (10, 9), (20, 19), (100, 99)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_subtable(&ctx, gsub_type::LIGATURE, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Ligature::parse(&rs.bytes).unwrap();
         assert_eq!(parsed.apply(&[9, 19]).unwrap(), (99, 2));
@@ -2805,10 +2783,7 @@ mod tests {
         // Input gid 100 decomposes to [40, 50, 60]. Renumber down by 1.
         let bytes = build_type2_subtable(&[(100, vec![40, 50, 60])]);
         let map = map_from_pairs(&[(0, 0), (40, 39), (50, 49), (60, 59), (100, 99)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_type2(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Multiple::parse(&rs.bytes).unwrap();
         assert_eq!(parsed.apply(99), Some(vec![39, 49, 59]));
@@ -2823,10 +2798,7 @@ mod tests {
         // gid.
         let bytes = build_type2_subtable(&[(100, vec![40, 50, 60])]);
         let map = map_from_pairs(&[(0, 0), (40, 39), (60, 59), (100, 99)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         // Single-entry subtable; that entry dies -> subtable dies.
         assert!(rewrite_type2(&ctx, &bytes).is_none());
     }
@@ -2844,10 +2816,7 @@ mod tests {
             (200, 199),
             // 100 not in the map -> its Coverage entry dies.
         ]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_type2(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Multiple::parse(&rs.bytes).unwrap();
         // Surviving entry: input 199 -> [69].
@@ -2861,10 +2830,7 @@ mod tests {
     fn rewrite_type2_returns_none_when_coverage_empties() {
         let bytes = build_type2_subtable(&[(100, vec![40, 50])]);
         let map = map_from_pairs(&[(0, 0)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_type2(&ctx, &bytes).is_none());
     }
 
@@ -2872,10 +2838,7 @@ mod tests {
     fn rewrite_type2_via_dispatcher() {
         let bytes = build_type2_subtable(&[(100, vec![40, 50])]);
         let map = map_from_pairs(&[(0, 0), (40, 39), (50, 49), (100, 99)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_subtable(&ctx, gsub_type::MULTIPLE, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Multiple::parse(&rs.bytes).unwrap();
         assert_eq!(parsed.apply(99), Some(vec![39, 49]));
@@ -2900,10 +2863,7 @@ mod tests {
             (200, 8),
             (300, 9),
         ]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let a = rewrite_type2(&ctx, &bytes).unwrap();
         let b = rewrite_type2(&ctx, &bytes).unwrap();
         assert_eq!(a.bytes, b.bytes);
@@ -2968,10 +2928,7 @@ mod tests {
         // Input 10 has alternates [100, 101, 102].
         let bytes = build_type3_subtable(&[(10, vec![100, 101, 102])]);
         let map = map_from_pairs(&[(0, 0), (10, 9), (100, 99), (101, 100), (102, 101)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_type3(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Alternate::parse(&rs.bytes).unwrap();
         assert_eq!(parsed.apply(9, 0), Some(99));
@@ -2986,10 +2943,7 @@ mod tests {
         // surviving set is [100, 102] (renumbered).
         let bytes = build_type3_subtable(&[(10, vec![100, 101, 102])]);
         let map = map_from_pairs(&[(0, 0), (10, 9), (100, 99), (102, 101)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_type3(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Alternate::parse(&rs.bytes).unwrap();
         assert_eq!(parsed.apply(9, 0), Some(99));
@@ -3003,10 +2957,7 @@ mod tests {
         // second survives untouched.
         let bytes = build_type3_subtable(&[(10, vec![100, 101]), (20, vec![200])]);
         let map = map_from_pairs(&[(0, 0), (10, 9), (20, 19), (200, 199)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_type3(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Alternate::parse(&rs.bytes).unwrap();
         // First entry's input (gid 9) is no longer covered.
@@ -3019,10 +2970,7 @@ mod tests {
     fn rewrite_type3_returns_none_when_coverage_empties() {
         let bytes = build_type3_subtable(&[(10, vec![100, 101])]);
         let map = map_from_pairs(&[(0, 0)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_type3(&ctx, &bytes).is_none());
     }
 
@@ -3030,10 +2978,7 @@ mod tests {
     fn rewrite_type3_via_dispatcher() {
         let bytes = build_type3_subtable(&[(10, vec![100, 101])]);
         let map = map_from_pairs(&[(0, 0), (10, 9), (100, 99), (101, 100)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_subtable(&ctx, gsub_type::ALTERNATE, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Alternate::parse(&rs.bytes).unwrap();
         assert_eq!(parsed.apply(9, 0), Some(99));
@@ -3053,10 +2998,7 @@ mod tests {
             (201, 6),
             (202, 7),
         ]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let a = rewrite_type3(&ctx, &bytes).unwrap();
         let b = rewrite_type3(&ctx, &bytes).unwrap();
         assert_eq!(a.bytes, b.bytes);
@@ -3178,10 +3120,7 @@ mod tests {
         // First gid 10 has one rule: tail [20], one nested lookup at seq 0.
         let bytes = build_type5_format1(&[(10, vec![(vec![20], vec![(0, 1)])])]);
         let map = map_from_pairs(&[(0, 0), (10, 9), (20, 19)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_type5(&ctx, &bytes).unwrap();
         // Round-trip through the parser to validate semantics.
         let parsed = sigilbuzz::tables::gsub::Context::parse(&rs.bytes).unwrap();
@@ -3201,10 +3140,7 @@ mod tests {
         // coverage entry dies, subtable dies.
         let bytes = build_type5_format1(&[(10, vec![(vec![20], vec![(0, 1)])])]);
         let map = map_from_pairs(&[(0, 0), (10, 9)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_type5(&ctx, &bytes).is_none());
     }
 
@@ -3212,10 +3148,7 @@ mod tests {
     fn rewrite_type5_format1_drops_when_first_glyph_drops() {
         let bytes = build_type5_format1(&[(10, vec![(vec![20], vec![(0, 1)])])]);
         let map = map_from_pairs(&[(0, 0), (20, 19)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_type5(&ctx, &bytes).is_none());
     }
 
@@ -3226,10 +3159,7 @@ mod tests {
         let bytes = build_type5_format1(&[(10, vec![(vec![20], vec![(0, 1), (1, 2)])])]);
         let map = map_from_pairs(&[(0, 0), (10, 9), (20, 19)]);
         let renumber = vec![Some(0u16), Some(0u16), None]; // index 2 dropped
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: Some(&renumber),
-        };
+        let ctx = RewriterCtx::new(&map, Some(&renumber));
         let rs = rewrite_type5(&ctx, &bytes).unwrap();
         // Verify only one record survives by checking byte size: rule
         // body grows by 4 bytes per record, so we just confirm the
@@ -3244,10 +3174,7 @@ mod tests {
         let bytes = build_type5_format1(&[(10, vec![(vec![20], vec![(0, 5)])])]);
         let map = map_from_pairs(&[(0, 0), (10, 9), (20, 19)]);
         let renumber = vec![None, None, None, None, None, None]; // all dropped
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: Some(&renumber),
-        };
+        let ctx = RewriterCtx::new(&map, Some(&renumber));
         let rs = rewrite_type5(&ctx, &bytes).expect("the rule survives");
         let at = |pos: usize| usize::from(u16::from_be_bytes([rs.bytes[pos], rs.bytes[pos + 1]]));
         let set = at(6);
@@ -3263,10 +3190,7 @@ mod tests {
         // input positions: [10, 11], [20, 21]; one record (0, 1).
         let bytes = build_type5_format3(&[vec![10, 11], vec![20, 21]], &[(0, 1)]);
         let map = map_from_pairs(&[(0, 0), (10, 100), (11, 101), (20, 200), (21, 201)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_type5(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Context::parse(&rs.bytes).unwrap();
         if let sigilbuzz::tables::gsub::Context::Format3(c) = parsed {
@@ -3286,10 +3210,7 @@ mod tests {
         // Drop both glyphs at position 1 -> that coverage empties -> subtable dies.
         let bytes = build_type5_format3(&[vec![10, 11], vec![20, 21]], &[(0, 1)]);
         let map = map_from_pairs(&[(0, 0), (10, 100), (11, 101)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_type5(&ctx, &bytes).is_none());
     }
 
@@ -3305,10 +3226,7 @@ mod tests {
             Some(8u16),
             Some(9u16),
         ];
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: Some(&renumber),
-        };
+        let ctx = RewriterCtx::new(&map, Some(&renumber));
         let rs = rewrite_type5(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Context::parse(&rs.bytes).unwrap();
         if let sigilbuzz::tables::gsub::Context::Format3(c) = parsed {
@@ -3326,10 +3244,7 @@ mod tests {
     fn rewrite_type5_format3_is_byte_deterministic() {
         let bytes = build_type5_format3(&[vec![10, 11], vec![20]], &[(0, 1), (1, 2)]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (11, 2), (20, 3)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let a = rewrite_type5(&ctx, &bytes).unwrap();
         let b = rewrite_type5(&ctx, &bytes).unwrap();
         assert_eq!(a.bytes, b.bytes);
@@ -3392,10 +3307,7 @@ mod tests {
             &[(0, 1)],
         );
         let map = map_from_pairs(&[(0, 0), (5, 50), (10, 100), (11, 101), (12, 102), (30, 300)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_type6(&ctx, &bytes).unwrap();
         // Format-3 chained context parses through ChainContext.
         let parsed = sigilbuzz::tables::gsub::ChainContext::parse(&rs.bytes).unwrap();
@@ -3408,10 +3320,7 @@ mod tests {
         // Backtrack [5]: drop 5 -> backtrack coverage empties -> subtable dies.
         let bytes = build_type6_format3(&[vec![5]], &[vec![10]], &[vec![30]], &[(0, 1)]);
         let map = map_from_pairs(&[(0, 0), (10, 100), (30, 300)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_type6(&ctx, &bytes).is_none());
     }
 
@@ -3419,10 +3328,7 @@ mod tests {
     fn rewrite_type6_format3_drops_when_lookahead_position_empties() {
         let bytes = build_type6_format3(&[vec![5]], &[vec![10]], &[vec![30]], &[(0, 1)]);
         let map = map_from_pairs(&[(0, 0), (5, 50), (10, 100)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_type6(&ctx, &bytes).is_none());
     }
 
@@ -3439,10 +3345,7 @@ mod tests {
             Some(4u16),
             None,
         ];
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: Some(&renumber),
-        };
+        let ctx = RewriterCtx::new(&map, Some(&renumber));
         let rs = rewrite_type6(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::ChainContext::parse(&rs.bytes).unwrap();
         // One record survives.
@@ -3457,10 +3360,7 @@ mod tests {
         let bytes = build_type6_format3(&[vec![5]], &[vec![10]], &[], &[(0, 1), (1, 5)]);
         let map = map_from_pairs(&[(0, 0), (5, 50), (10, 100)]);
         let renumber = vec![None, None, None, None, None, None];
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: Some(&renumber),
-        };
+        let ctx = RewriterCtx::new(&map, Some(&renumber));
         let rs = rewrite_type6(&ctx, &bytes).expect("the subtable survives");
         let parsed = sigilbuzz::tables::gsub::ChainContext::parse(&rs.bytes).unwrap();
         assert_eq!(parsed.context_len(), (1, 1, 0));
@@ -3474,10 +3374,7 @@ mod tests {
         let bytes = build_type6_format3(&[vec![5]], &[vec![10]], &[vec![30]], &[]);
         let map = map_from_pairs(&[(0, 0), (5, 50), (10, 100), (30, 300)]);
         for renumber in [None, Some(alloc::vec![Some(0u16)])] {
-            let ctx = RewriterCtx {
-                gid_map: &map,
-                lookup_renumber: renumber.as_deref(),
-            };
+            let ctx = RewriterCtx::new(&map, renumber.as_deref());
             let rs = rewrite_type6(&ctx, &bytes).expect("the ignore rule survives");
             let parsed = sigilbuzz::tables::gsub::ChainContext::parse(&rs.bytes).unwrap();
             assert_eq!(parsed.context_len(), (1, 1, 1));
@@ -3489,10 +3386,7 @@ mod tests {
     fn rewrite_type6_format3_is_byte_deterministic() {
         let bytes = build_type6_format3(&[vec![5]], &[vec![10, 11]], &[vec![30]], &[(0, 1)]);
         let map = map_from_pairs(&[(0, 0), (5, 50), (10, 100), (11, 101), (30, 300)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let a = rewrite_type6(&ctx, &bytes).unwrap();
         let b = rewrite_type6(&ctx, &bytes).unwrap();
         assert_eq!(a.bytes, b.bytes);
@@ -3502,10 +3396,7 @@ mod tests {
     fn rewrite_type6_via_dispatcher() {
         let bytes = build_type6_format3(&[], &[vec![10]], &[], &[(0, 1)]);
         let map = map_from_pairs(&[(0, 0), (10, 100)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_subtable(&ctx, gsub_type::CHAINED_CONTEXT, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::ChainContext::parse(&rs.bytes);
         assert!(parsed.is_ok());
@@ -3561,10 +3452,7 @@ mod tests {
         // Coverage {10}, backtrack [{5}], lookahead [{30}], substitute {100}.
         let bytes = build_type8(&[10], &[vec![5]], &[vec![30]], &[100]);
         let map = map_from_pairs(&[(0, 0), (5, 50), (10, 1), (30, 3), (100, 99)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_type8(&ctx, &bytes).unwrap();
         let rc = sigilbuzz::tables::gsub::ReverseChain::parse(&rs.bytes).unwrap();
         // Apply with surrounding context: [50, 1, 3] -> 99.
@@ -3576,10 +3464,7 @@ mod tests {
         // Coverage {10, 20}, substitutes {100, 200}; drop 200.
         let bytes = build_type8(&[10, 20], &[], &[], &[100, 200]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (20, 2), (100, 99)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_type8(&ctx, &bytes).unwrap();
         let rc = sigilbuzz::tables::gsub::ReverseChain::parse(&rs.bytes).unwrap();
         // 1 still substitutes to 99; 2 (was 20) is no longer covered.
@@ -3591,10 +3476,7 @@ mod tests {
     fn rewrite_type8_drops_pair_when_input_drops() {
         let bytes = build_type8(&[10, 20], &[], &[], &[100, 200]);
         let map = map_from_pairs(&[(0, 0), (20, 2), (200, 199)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_type8(&ctx, &bytes).unwrap();
         let rc = sigilbuzz::tables::gsub::ReverseChain::parse(&rs.bytes).unwrap();
         assert_eq!(rc.apply(&[2], 0), Some(199));
@@ -3604,10 +3486,7 @@ mod tests {
     fn rewrite_type8_drops_subtable_when_input_coverage_empties() {
         let bytes = build_type8(&[10], &[], &[], &[100]);
         let map = map_from_pairs(&[(0, 0)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_type8(&ctx, &bytes).is_none());
     }
 
@@ -3616,10 +3495,7 @@ mod tests {
         // Backtrack [{5}]: drop 5 -> backtrack coverage empties -> subtable dies.
         let bytes = build_type8(&[10], &[vec![5]], &[], &[100]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (100, 99)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_type8(&ctx, &bytes).is_none());
     }
 
@@ -3627,10 +3503,7 @@ mod tests {
     fn rewrite_type8_drops_subtable_when_lookahead_coverage_empties() {
         let bytes = build_type8(&[10], &[], &[vec![30]], &[100]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (100, 99)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_type8(&ctx, &bytes).is_none());
     }
 
@@ -3646,10 +3519,7 @@ mod tests {
             (100, 99),
             (101, 98),
         ]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let a = rewrite_type8(&ctx, &bytes).unwrap();
         let b = rewrite_type8(&ctx, &bytes).unwrap();
         assert_eq!(a.bytes, b.bytes);
@@ -3659,10 +3529,7 @@ mod tests {
     fn rewrite_type8_via_dispatcher() {
         let bytes = build_type8(&[10], &[], &[], &[100]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (100, 99)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_subtable(&ctx, gsub_type::REVERSE_CHAINED, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::ReverseChain::parse(&rs.bytes);
         assert!(parsed.is_ok());
@@ -3672,10 +3539,7 @@ mod tests {
     fn rewrite_type5_via_dispatcher() {
         let bytes = build_type5_format3(&[vec![10]], &[(0, 1)]);
         let map = map_from_pairs(&[(0, 0), (10, 100)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_subtable(&ctx, gsub_type::CONTEXT, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::Context::parse(&rs.bytes);
         assert!(parsed.is_ok());

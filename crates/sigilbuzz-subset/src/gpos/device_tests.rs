@@ -135,13 +135,10 @@ fn keep(pairs: &[(u16, u16)]) -> GidMap {
 }
 
 fn rewrite(lookup_type: u16, sub: &[u8], map: &GidMap) -> Vec<u8> {
-    let ctx = RewriterCtx {
-        gid_map: map,
-        lookup_renumber: None,
-    };
-    rewrite_subtable(&ctx, lookup_type, sub)
-        .expect("subtable survives")
-        .bytes
+    let ctx = RewriterCtx::new(map, None);
+    let mut pieces = rewrite_subtable(&ctx, lookup_type, sub);
+    assert_eq!(pieces.len(), 1, "subtable survives whole");
+    pieces.remove(0).bytes
 }
 
 /// Walks every device slot of `sub` (a `lookup_type` subtable) and

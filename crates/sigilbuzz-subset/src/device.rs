@@ -99,23 +99,28 @@ impl Dedup {
 /// table it names. The slot still holds the source offset, measured
 /// from `src_parent`. The copy lands at the end of `out` (shared with
 /// any identical table already placed through `pool`) and the slot is
-/// rewritten relative to `out_base`. Unresolvable tables, and copies
-/// whose offset would not fit in 16 bits, clear the slot.
+/// rewritten relative to `out_base`. An unresolvable table clears the
+/// slot. A copy whose offset would not fit in 16 bits clears it too
+/// and returns `false`, so the caller can report the overflow.
 fn relocate_slot(
     out: &mut Vec<u8>,
     slot: usize,
     out_base: usize,
     src_parent: &[u8],
     pool: &mut Dedup,
-) {
+) -> bool {
     let Some(src_off) = read_u16(out, slot) else {
-        return;
+        return true;
     };
-    let new_off = device_table(src_parent, usize::from(src_off))
-        .map(|table| pool.place(out, table) - out_base)
-        .and_then(|rel| u16::try_from(rel).ok())
-        .unwrap_or(0);
+    let (new_off, fits) = match device_table(src_parent, usize::from(src_off)) {
+        Some(table) => match u16::try_from(pool.place(out, table) - out_base) {
+            Ok(rel) => (rel, true),
+            Err(_) => (0, false),
+        },
+        None => (0, true),
+    };
     write_u16(out, slot, new_off);
+    fits
 }
 
 /// Copies the Anchor at `offset` inside `parent` into a standalone blob.
@@ -153,6 +158,7 @@ pub(crate) fn copy_anchor(parent: &[u8], offset: usize) -> Vec<u8> {
     if len == 10 {
         let mut pool = Dedup::default();
         for slot in [6, 8] {
+            // Right behind the 10-byte header, the copies always fit.
             relocate_slot(&mut out, slot, 0, anchor, &mut pool);
         }
     }
@@ -181,14 +187,16 @@ pub(crate) struct RecordRun<'a> {
 /// table the records came from (see the module docs). Every referenced
 /// table is appended to `out`, identical tables sharing one copy, and
 /// each slot is rewritten relative to `out_base`, the start of the
-/// rebuilt parent inside `out`.
+/// rebuilt parent inside `out`. Returns `false` when a copy landed out
+/// of 16-bit reach of the parent (its slot is cleared).
 pub(crate) fn relocate_value_records(
     out: &mut Vec<u8>,
     out_base: usize,
     src_parent: &[u8],
     run: &RecordRun<'_>,
-) {
+) -> bool {
     let mut pool = Dedup::default();
+    let mut fits = true;
     for group in 0..run.count {
         for &(rel, format) in run.records {
             // Device slots follow the four static fields.
@@ -196,12 +204,13 @@ pub(crate) fn relocate_value_records(
                 run.first + group * run.stride + rel + 2 * (format & 0x000F).count_ones() as usize;
             for bit in [0x0010u16, 0x0020, 0x0040, 0x0080] {
                 if format & bit != 0 {
-                    relocate_slot(out, slot, out_base, src_parent, &mut pool);
+                    fits &= relocate_slot(out, slot, out_base, src_parent, &mut pool);
                     slot += 2;
                 }
             }
         }
     }
+    fits
 }
 
 #[cfg(test)]

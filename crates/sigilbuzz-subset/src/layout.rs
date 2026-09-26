@@ -58,6 +58,7 @@ use alloc::vec::Vec;
 use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
+use crate::offset16::Offset16Guard;
 use crate::{gdef, gpos, gsub, GlyphId, SubsetError, SubsetInput};
 
 /// A new-namespace gid translator. `map(old) -> Some(new)` when the
@@ -131,6 +132,25 @@ pub(crate) struct RewriterCtx<'a> {
     /// lookup-list indices unchanged so the caller can decide what
     /// survives and rebuild the renumber map afterwards.
     pub lookup_renumber: Option<&'a [Option<u16>]>,
+    /// Offset16s of the rebuilt subtables that could not reach their
+    /// targets. The lookup rewriters check it after every subtable.
+    pub offsets: Offset16Guard,
+}
+
+impl<'a> RewriterCtx<'a> {
+    pub(crate) fn new(gid_map: &'a GidMap, lookup_renumber: Option<&'a [Option<u16>]>) -> Self {
+        Self {
+            gid_map,
+            lookup_renumber,
+            offsets: Offset16Guard::default(),
+        }
+    }
+
+    /// Narrows a distance inside a rebuilt subtable to an Offset16,
+    /// recording an overflow in [`RewriterCtx::offsets`].
+    pub(crate) fn off16(&self, distance: usize) -> u16 {
+        self.offsets.narrow(distance)
+    }
 }
 
 /// One subtable's worth of rewritten bytes.
@@ -218,13 +238,10 @@ pub(crate) fn decide(
     // Non-identity: invoke the rewriter. Each driver returns either
     // bytes to substitute or None when the whole table dropped.
     let map = GidMap::from_kept(kept);
-    let ctx = RewriterCtx {
-        gid_map: &map,
-        lookup_renumber: None,
-    };
+    let ctx = RewriterCtx::new(&map, None);
 
     let gsub = if has_gsub {
-        match build_gsub(face, &ctx) {
+        match build_gsub(face, &ctx)? {
             Some(b) => Decision::Rewrite(b),
             None => Decision::Drop,
         }
@@ -232,7 +249,7 @@ pub(crate) fn decide(
         Decision::Drop
     };
     let gpos = if has_gpos {
-        match build_gpos(face, &ctx) {
+        match build_gpos(face, &ctx)? {
             Some(mut b) => {
                 // A static subset drops the GDEF ItemVariationStore, so
                 // no VariationIndex may point into it.
@@ -262,8 +279,13 @@ pub(crate) fn decide(
 /// rewriter, then runs the drop cascade and renumbers surviving
 /// lookups. Returns the new GSUB bytes or `None` when the table
 /// drops entirely.
-pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> {
-    let gsub_table = face.gsub().ok().flatten()?;
+pub(crate) fn build_gsub(
+    face: &Face<'_>,
+    ctx: &RewriterCtx,
+) -> Result<Option<Vec<u8>>, SubsetError> {
+    let Ok(Some(gsub_table)) = face.gsub() else {
+        return Ok(None);
+    };
     let lookups = gsub_table.lookup_list();
 
     // First pass: per-lookup rewrite. Context-style lookups (types
@@ -290,7 +312,7 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
             lookup.flag(),
             lookup.mark_filtering_set(),
             &subtable_bodies,
-        );
+        )?;
         rewritten.push(rewritten_lookup);
     }
 
@@ -306,10 +328,7 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
     let mut renumber = build_renumber(&rewritten);
     for _ in 0..lookups.len() {
         let mut changed = false;
-        let inner_ctx = RewriterCtx {
-            gid_map: ctx.gid_map,
-            lookup_renumber: Some(&renumber),
-        };
+        let inner_ctx = RewriterCtx::new(ctx.gid_map, Some(&renumber));
         for li in 0..lookups.len() {
             // Only re-rewrite slots that survived the first pass; nothing to
             // resurrect here.
@@ -339,7 +358,7 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
                 lookup.flag(),
                 lookup.mark_filtering_set(),
                 &subtable_bodies,
-            );
+            )?;
             // Not expected (see above), but a lookup that drops here
             // is marked dropped and triggers another pass.
             if new_lookup.is_none() {
@@ -363,15 +382,22 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
     let feature_list = gsub_table.feature_list();
     let new_features = rewrite_features(*feature_list, &renumber)?;
 
-    let gsub_bytes = face.table_bytes(tag::GSUB).ok()?;
+    let Ok(gsub_bytes) = face.table_bytes(tag::GSUB) else {
+        return Ok(None);
+    };
     let script_list_off = u16::from_be_bytes([gsub_bytes[4], gsub_bytes[5]]) as usize;
-    let script_list_bytes = gsub_bytes.get(script_list_off..)?;
-    let new_scripts =
-        rewrite_scripts_from_bytes(script_list_bytes, &new_features.feature_renumber)?;
+    let Some(script_list_bytes) = gsub_bytes.get(script_list_off..) else {
+        return Ok(None);
+    };
+    let Some(new_scripts) =
+        rewrite_scripts_from_bytes(script_list_bytes, &new_features.feature_renumber)?
+    else {
+        return Ok(None);
+    };
 
     let new_lookups: Vec<RewrittenLookup> = rewritten.into_iter().flatten().collect();
     if new_lookups.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     assemble_layout_table(
@@ -380,6 +406,7 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
         &new_lookups,
         sigilbuzz::tables::gsub::lookup_type::EXTENSION,
     )
+    .map(Some)
 }
 
 /// Drives the GPOS rewrite, same two-pass shape as [`build_gsub`].
@@ -388,8 +415,13 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
 /// sibling lookups by index; the first pass keeps the source indices,
 /// the second pass rewrites them through the renumber map iterated to a fixed
 /// point.
-pub(crate) fn build_gpos(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> {
-    let gpos_table = face.gpos().ok().flatten()?;
+pub(crate) fn build_gpos(
+    face: &Face<'_>,
+    ctx: &RewriterCtx,
+) -> Result<Option<Vec<u8>>, SubsetError> {
+    let Ok(Some(gpos_table)) = face.gpos() else {
+        return Ok(None);
+    };
     let lookups = gpos_table.lookup_list();
 
     // First pass: per-lookup rewrite. Context-style lookups
@@ -413,7 +445,7 @@ pub(crate) fn build_gpos(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
             lookup.flag(),
             lookup.mark_filtering_set(),
             &subtable_bodies,
-        );
+        )?;
         rewritten.push(rewritten_lookup);
     }
 
@@ -423,10 +455,7 @@ pub(crate) fn build_gpos(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
     let mut renumber = build_renumber(&rewritten);
     for _ in 0..lookups.len() {
         let mut changed = false;
-        let inner_ctx = RewriterCtx {
-            gid_map: ctx.gid_map,
-            lookup_renumber: Some(&renumber),
-        };
+        let inner_ctx = RewriterCtx::new(ctx.gid_map, Some(&renumber));
         for li in 0..lookups.len() {
             if rewritten
                 .get(li as usize)
@@ -452,7 +481,7 @@ pub(crate) fn build_gpos(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
                 lookup.flag(),
                 lookup.mark_filtering_set(),
                 &subtable_bodies,
-            );
+            )?;
             if new_lookup.is_none() {
                 if rewritten[li as usize].is_some() {
                     rewritten[li as usize] = None;
@@ -471,15 +500,22 @@ pub(crate) fn build_gpos(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
     let feature_list = gpos_table.feature_list();
     let new_features = rewrite_features(*feature_list, &renumber)?;
 
-    let gpos_bytes = face.table_bytes(tag::GPOS).ok()?;
+    let Ok(gpos_bytes) = face.table_bytes(tag::GPOS) else {
+        return Ok(None);
+    };
     let script_list_off = u16::from_be_bytes([gpos_bytes[4], gpos_bytes[5]]) as usize;
-    let script_list_bytes = gpos_bytes.get(script_list_off..)?;
-    let new_scripts =
-        rewrite_scripts_from_bytes(script_list_bytes, &new_features.feature_renumber)?;
+    let Some(script_list_bytes) = gpos_bytes.get(script_list_off..) else {
+        return Ok(None);
+    };
+    let Some(new_scripts) =
+        rewrite_scripts_from_bytes(script_list_bytes, &new_features.feature_renumber)?
+    else {
+        return Ok(None);
+    };
 
     let new_lookups: Vec<RewrittenLookup> = rewritten.into_iter().flatten().collect();
     if new_lookups.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     assemble_layout_table(
@@ -488,6 +524,7 @@ pub(crate) fn build_gpos(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
         &new_lookups,
         sigilbuzz::tables::gpos::lookup_type::EXTENSION,
     )
+    .map(Some)
 }
 
 /// Builds an `Option<u16>` array indexed by old lookup index. `Some(n)`
@@ -519,7 +556,8 @@ struct RewrittenFeatures {
 fn rewrite_features(
     feature_list: sigilbuzz::tables::layout::FeatureList<'_>,
     lookup_renumber: &[Option<u16>],
-) -> Option<RewrittenFeatures> {
+) -> Result<RewrittenFeatures, SubsetError> {
+    let offsets = Offset16Guard::default();
     let mut surviving: Vec<([u8; 4], Vec<u16>)> = Vec::new();
     let mut feature_renumber: Vec<Option<u16>> = Vec::with_capacity(feature_list.len() as usize);
     for fi in 0..feature_list.len() {
@@ -558,11 +596,12 @@ fn rewrite_features(
         }
         let rec_off = records_start + i * 6;
         out[rec_off..rec_off + 4].copy_from_slice(tag);
-        let body_off = body_start as u16;
+        let body_off = offsets.narrow(body_start);
         out[rec_off + 4..rec_off + 6].copy_from_slice(&body_off.to_be_bytes());
     }
+    offsets.check("FeatureList rewrite: an offset exceeds 64 KiB")?;
 
-    Some(RewrittenFeatures {
+    Ok(RewrittenFeatures {
         bytes: out,
         feature_renumber,
     })
@@ -574,16 +613,19 @@ fn rewrite_features(
 /// dropped, drops any Script with no surviving default LangSys + no
 /// surviving named LangSys, and returns the new bytes when at least
 /// one script survives.
-fn rewrite_scripts_from_bytes(bytes: &[u8], feature_renumber: &[Option<u16>]) -> Option<Vec<u8>> {
+fn rewrite_scripts_from_bytes(
+    bytes: &[u8],
+    feature_renumber: &[Option<u16>],
+) -> Result<Option<Vec<u8>>, SubsetError> {
     // ScriptList:
     //   u16 scriptCount
     //   ScriptRecord records[scriptCount]: { tag(4) + Offset16 (relative to ScriptList start) }
     if bytes.len() < 2 {
-        return None;
+        return Ok(None);
     }
     let script_count = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
     if bytes.len() < 2 + script_count * 6 {
-        return None;
+        return Ok(None);
     }
 
     type ScriptEntry = (
@@ -652,7 +694,7 @@ fn rewrite_scripts_from_bytes(bytes: &[u8], feature_renumber: &[Option<u16>]) ->
     }
 
     if surviving_scripts.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     // Encode ScriptList:
@@ -660,6 +702,7 @@ fn rewrite_scripts_from_bytes(bytes: &[u8], feature_renumber: &[Option<u16>]) ->
     //   ScriptRecord records[scriptCount]: { tag(4) + Offset16 }
     //   Script[] bodies (each: defaultLangSysOffset + langSysCount + LangSysRecord[])
     //   LangSys[] bodies (each: lookupOrderOffset(0) + reqFeatureIndex + featureCount + indices[])
+    let offsets = Offset16Guard::default();
     let mut out = Vec::new();
     out.extend_from_slice(&(surviving_scripts.len() as u16).to_be_bytes());
     let script_records_start = out.len();
@@ -671,7 +714,7 @@ fn rewrite_scripts_from_bytes(bytes: &[u8], feature_renumber: &[Option<u16>]) ->
         // Patch the ScriptRecord pointing at this body.
         let rec_off = script_records_start + i * 6;
         out[rec_off..rec_off + 4].copy_from_slice(script_tag);
-        let body_off_u16 = script_body_start as u16;
+        let body_off_u16 = offsets.narrow(script_body_start);
         out[rec_off + 4..rec_off + 6].copy_from_slice(&body_off_u16.to_be_bytes());
 
         let default_slot = out.len();
@@ -686,7 +729,7 @@ fn rewrite_scripts_from_bytes(bytes: &[u8], feature_renumber: &[Option<u16>]) ->
             let langsys_body_pos = out.len() - script_body_start;
             out.extend_from_slice(&encode_langsys(d));
             out[default_slot..default_slot + 2]
-                .copy_from_slice(&(langsys_body_pos as u16).to_be_bytes());
+                .copy_from_slice(&offsets.narrow(langsys_body_pos).to_be_bytes());
         }
         // Named LangSys bodies.
         for (j, (ls_tag, ls)) in langsystems.iter().enumerate() {
@@ -694,10 +737,12 @@ fn rewrite_scripts_from_bytes(bytes: &[u8], feature_renumber: &[Option<u16>]) ->
             out.extend_from_slice(&encode_langsys(ls));
             let lr_off = langsys_records_start + j * 6;
             out[lr_off..lr_off + 4].copy_from_slice(ls_tag);
-            out[lr_off + 4..lr_off + 6].copy_from_slice(&(langsys_body_pos as u16).to_be_bytes());
+            out[lr_off + 4..lr_off + 6]
+                .copy_from_slice(&offsets.narrow(langsys_body_pos).to_be_bytes());
         }
     }
-    Some(out)
+    offsets.check("ScriptList rewrite: an offset exceeds 64 KiB")?;
+    Ok(Some(out))
 }
 
 struct RewrittenLangSys {
@@ -769,14 +814,14 @@ fn encode_langsys(ls: &RewrittenLangSys) -> Vec<u8> {
 /// identical). Builds the LookupList around the rewritten lookups
 /// through [`crate::lookup_list::emit`], which falls back to Extension
 /// lookups (`extension_type`: 7 for GSUB, 9 for GPOS) when the lookups
-/// outgrow 16-bit offsets. Returns `None` when the header offsets
-/// themselves cannot fit.
+/// outgrow 16-bit offsets. Errors when the header offsets themselves,
+/// or even the Extension layout, cannot fit.
 fn assemble_layout_table(
     script_list: &[u8],
     feature_list: &[u8],
     lookups: &[RewrittenLookup],
     extension_type: u16,
-) -> Option<Vec<u8>> {
+) -> Result<Vec<u8>, SubsetError> {
     // GSUB/GPOS header (v1.0):
     //   u16 majorVersion = 1
     //   u16 minorVersion = 0
@@ -785,9 +830,13 @@ fn assemble_layout_table(
     //   Offset16 lookupListOffset
     let header_len: u16 = 10;
     let script_list_off = header_len;
-    let feature_list_off = u16::try_from(usize::from(header_len) + script_list.len()).ok()?;
-    let lookup_list_off = u16::try_from(usize::from(feature_list_off) + feature_list.len()).ok()?;
-    let lookup_list = crate::lookup_list::emit(lookups, extension_type)?;
+    let offsets = Offset16Guard::default();
+    let feature_list_off = offsets.narrow(usize::from(header_len) + script_list.len());
+    let lookup_list_off = offsets.narrow(usize::from(feature_list_off) + feature_list.len());
+    offsets.check("layout rewrite: the ScriptList and FeatureList exceed 64 KiB")?;
+    let lookup_list = crate::lookup_list::emit(lookups, extension_type).ok_or(
+        SubsetError::Unsupported("layout rewrite: the LookupList outgrows even Extension lookups"),
+    )?;
 
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes());
@@ -798,7 +847,7 @@ fn assemble_layout_table(
     out.extend_from_slice(script_list);
     out.extend_from_slice(feature_list);
     out.extend_from_slice(&lookup_list);
-    Some(out)
+    Ok(out)
 }
 
 // === Byte-level helpers used by the rewriters and the closure walker. ===

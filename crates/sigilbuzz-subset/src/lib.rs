@@ -37,7 +37,11 @@
 //! - Passed through: `name` and `OS/2`.
 //! - Layout (`GSUB`, `GPOS`, `GDEF`): kept verbatim when every glyph
 //!   survives, rewritten at the byte level when glyph IDs change. Set
-//!   [`SubsetInput::retain_layout`] to `false` to drop them.
+//!   [`SubsetInput::retain_layout`] to `false` to drop them. A rebuilt
+//!   mark attachment or PairPos format 1 subtable that outgrows its
+//!   16-bit offsets is split into several; any other subtable that
+//!   does fails the subset with [`SubsetError::Unsupported`] rather
+//!   than wrap an offset.
 //! - Variations: `fvar` and `avar` pass through. `gvar` is rebuilt with one
 //!   entry per kept glyph, `HVAR` around a fresh `DeltaSetIndexMap` and a
 //!   deduplicated `ItemVariationStore`, and `VARC` around the kept
@@ -121,6 +125,7 @@ mod hvar;
 mod instance;
 mod layout;
 mod lookup_list;
+mod offset16;
 mod sfnt;
 mod util;
 mod varc;

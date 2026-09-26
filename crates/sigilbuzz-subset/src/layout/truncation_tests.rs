@@ -51,10 +51,7 @@ fn sweep(face: &Face<'_>, is_gsub: bool) -> usize {
             for cut in cuts(sub.len()) {
                 let body = [&sub[..cut]];
                 for renumber in [None, Some(renumber.as_slice())] {
-                    let ctx = RewriterCtx {
-                        gid_map: &map,
-                        lookup_renumber: renumber,
-                    };
+                    let ctx = RewriterCtx::new(&map, renumber);
                     let kind = lookup.lookup_type();
                     if is_gsub {
                         let _ = gsub::rewrite_lookup(&ctx, kind, 0, None, &body);

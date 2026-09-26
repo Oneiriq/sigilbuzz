@@ -18,7 +18,9 @@
 //! - **Type 2 (pair-adj) format 1**: explicit pair entries. Filters
 //!   Coverage of the first glyph; for each surviving PairSet, walks
 //!   PairValueRecords and drops pairs whose `secondGlyph` was dropped.
-//!   Empty PairSets collapse to a Coverage drop.
+//!   Empty PairSets collapse to a Coverage drop. A subtable too big
+//!   for its 16-bit offsets is split into runs of first glyphs (see
+//!   [`pair_sets`]).
 //! - **Type 2 (pair-adj) format 2**: class-based matrix. The rewriter
 //!   has two strategies: a fast pass-through that preserves source
 //!   class IDs and the matrix bytes verbatim (filtering both ClassDefs
@@ -37,6 +39,8 @@
 //!   Mark1+Mark2 Coverages with parallel MarkArray and BaseArray /
 //!   LigatureArray / Mark2Array entries. Filters both Coverages, drops
 //!   array entries in lockstep. Anchors and class IDs are copied whole.
+//!   A subtable too big for its 16-bit offsets is split by mark class,
+//!   and by base glyph within a class (see [`mark_attach`]).
 //! - **Type 9 (extension)**: pass-through after rewriting the inner
 //!   subtable. Falls back to a lookup drop when the inner type has no
 //!   rewriter.
@@ -59,61 +63,94 @@
 //! parent copies the tables its records reference and re-points the
 //! offsets; see [`crate::device`].
 
+mod mark_attach;
+mod pair_sets;
+
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::gpos::lookup_type as gpos_type;
 
 use crate::coverage::emit_coverage_from_pairs;
+use crate::device::Dedup;
 use crate::layout::{
     parse_classdef_pairs_from_bytes, parse_coverage_glyphs, RewriterCtx, RewrittenLookup,
     RewrittenSubtable,
 };
+use crate::SubsetError;
+use mark_attach::{rewrite_mark_attach, MarkAttachKind};
+use pair_sets::{emit_pair_sets, PairSets};
 
 /// Rewrites a single GPOS lookup. Returns `None` if the lookup has no
 /// surviving subtables after rewriting (drop cascade will remove the
-/// lookup).
+/// lookup), and an error when a rebuilt subtable outgrows its 16-bit
+/// offsets even after splitting (see [`crate::offset16`]).
 pub(crate) fn rewrite_lookup(
     ctx: &RewriterCtx,
     lookup_type: u16,
     lookup_flag: u16,
     mark_filtering_set: Option<u16>,
     subtable_bodies: &[&[u8]],
-) -> Option<RewrittenLookup> {
+) -> Result<Option<RewrittenLookup>, SubsetError> {
     let mut rewritten_subs: Vec<RewrittenSubtable> = Vec::new();
 
     for &sub_bytes in subtable_bodies {
-        if let Some(rs) = rewrite_subtable(ctx, lookup_type, sub_bytes) {
-            rewritten_subs.push(rs);
-        }
+        let rewritten = rewrite_subtable(ctx, lookup_type, sub_bytes);
+        ctx.offsets
+            .check(overflow_context(lookup_type, sub_bytes))?;
+        rewritten_subs.extend(rewritten);
     }
 
     if rewritten_subs.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    Some(RewrittenLookup {
+    Ok(Some(RewrittenLookup {
         lookup_type,
         lookup_flag,
         mark_filtering_set,
         subtables: rewritten_subs,
-    })
+    }))
 }
 
-fn rewrite_subtable(ctx: &RewriterCtx, lookup_type: u16, sub: &[u8]) -> Option<RewrittenSubtable> {
+/// Names the subtable type an Offset16 overflow is reported against,
+/// looking through an Extension wrapper.
+fn overflow_context(lookup_type: u16, sub: &[u8]) -> &'static str {
+    let kind = match (lookup_type, sub.get(2..4)) {
+        (gpos_type::EXTENSION, Some(inner)) => u16::from_be_bytes([inner[0], inner[1]]),
+        _ => lookup_type,
+    };
+    match kind {
+        gpos_type::SINGLE_ADJUSTMENT => "GPOS SinglePos rewrite: an offset exceeds 64 KiB",
+        gpos_type::PAIR_ADJUSTMENT => "GPOS PairPos rewrite: an offset exceeds 64 KiB",
+        gpos_type::CURSIVE_ATTACHMENT => "GPOS CursivePos rewrite: an offset exceeds 64 KiB",
+        gpos_type::MARK_TO_BASE => "GPOS MarkBasePos rewrite: one mark class and base overflow",
+        gpos_type::MARK_TO_LIGATURE => {
+            "GPOS MarkLigPos rewrite: one mark class and ligature overflow"
+        }
+        gpos_type::MARK_TO_MARK => "GPOS MarkMarkPos rewrite: one mark class and mark overflow",
+        gpos_type::CONTEXT => "GPOS ContextPos rewrite: an offset exceeds 64 KiB",
+        _ => "GPOS ChainContextPos rewrite: an offset exceeds 64 KiB",
+    }
+}
+
+/// Rewrites one subtable. Mark attachment and PairPos format 1
+/// subtables may come back split into several; every other type
+/// yields at most one.
+fn rewrite_subtable(ctx: &RewriterCtx, lookup_type: u16, sub: &[u8]) -> Vec<RewrittenSubtable> {
     match lookup_type {
-        gpos_type::SINGLE_ADJUSTMENT => rewrite_single_adj(ctx, sub),
+        gpos_type::SINGLE_ADJUSTMENT => rewrite_single_adj(ctx, sub).into_iter().collect(),
         gpos_type::PAIR_ADJUSTMENT => rewrite_pair_pos(ctx, sub),
-        gpos_type::CURSIVE_ATTACHMENT => rewrite_cursive(ctx, sub),
+        gpos_type::CURSIVE_ATTACHMENT => rewrite_cursive(ctx, sub).into_iter().collect(),
         gpos_type::MARK_TO_BASE | gpos_type::MARK_TO_MARK => {
             rewrite_mark_attach(ctx, sub, MarkAttachKind::FixedClassRow)
         }
         gpos_type::MARK_TO_LIGATURE => {
             rewrite_mark_attach(ctx, sub, MarkAttachKind::LigatureAttach)
         }
-        gpos_type::CONTEXT => rewrite_context_pos(ctx, sub),
-        gpos_type::CHAINED_CONTEXT => rewrite_chain_context_pos(ctx, sub),
+        gpos_type::CONTEXT => rewrite_context_pos(ctx, sub).into_iter().collect(),
+        gpos_type::CHAINED_CONTEXT => rewrite_chain_context_pos(ctx, sub).into_iter().collect(),
         gpos_type::EXTENSION => rewrite_extension(ctx, sub),
-        _ => None,
+        _ => Vec::new(),
     }
 }
 
@@ -147,26 +184,6 @@ fn unwrap_extension_lookup_type(lookup: &sigilbuzz::tables::layout::Lookup<'_>) 
     }
     u16::from_be_bytes([sub[2], sub[3]])
 }
-
-/// Distinguishes the "second array" layout shared by mark-attachment
-/// lookups. Types 4 and 6 use a fixed `markClassCount` row of anchor
-/// offsets per coverage entry; type 5 uses one Offset16 per coverage
-/// entry pointing at a variable-length `LigatureAttach`.
-#[derive(Copy, Clone)]
-enum MarkAttachKind {
-    /// Type 4 / 6: base / mark2 array.
-    FixedClassRow,
-    /// Type 5: ligature array.
-    LigatureAttach,
-}
-
-/// One surviving entry in the second array of a mark-attach lookup.
-/// For type 4 / 6 (`MarkAttachKind::FixedClassRow`) the second slot is
-/// empty and the third holds `markClassCount` anchor-byte vectors
-/// (an empty vector means a null offset). For type 5
-/// (`MarkAttachKind::LigatureAttach`) the second slot holds the
-/// already-rewritten LigatureAttach body and the third is empty.
-type SurvivingBase = (u16, Vec<u8>, Vec<Vec<u8>>);
 
 // ---------------------------------------------------------------------------
 // Type 1: Single Adjustment
@@ -228,8 +245,8 @@ fn rewrite_single_adj(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable
             if surviving_gids.is_empty() {
                 return None;
             }
-            let mut rs = emit_single_adj_format1(value_format, value_bytes, &surviving_gids);
-            carry_devices(&mut rs.bytes, sub, 6, 1, stride, &[(0, value_format)]);
+            let mut rs = emit_single_adj_format1(ctx, value_format, value_bytes, &surviving_gids);
+            carry_devices(ctx, &mut rs.bytes, sub, 6, 1, stride, &[(0, value_format)]);
             Some(rs)
         }
         2 => {
@@ -256,9 +273,17 @@ fn rewrite_single_adj(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable
             if surviving.is_empty() {
                 return None;
             }
-            let mut rs = emit_single_adj_format2(value_format, &surviving);
+            let mut rs = emit_single_adj_format2(ctx, value_format, &surviving);
             let count = surviving.len();
-            carry_devices(&mut rs.bytes, sub, 8, count, stride, &[(0, value_format)]);
+            carry_devices(
+                ctx,
+                &mut rs.bytes,
+                sub,
+                8,
+                count,
+                stride,
+                &[(0, value_format)],
+            );
             Some(rs)
         }
         _ => None,
@@ -271,8 +296,10 @@ fn rewrite_single_adj(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable
 /// source table the offsets are measured from: the subtable, or the
 /// PairSet for PairPos format 1. The records sit in `count` groups of
 /// `stride` bytes starting at `first`, laid out per `records`. See
-/// [`crate::device::relocate_value_records`].
+/// [`crate::device::relocate_value_records`]. A copy the rebuilt parent
+/// cannot address is recorded in [`RewriterCtx::offsets`].
 fn carry_devices(
+    ctx: &RewriterCtx,
     out: &mut Vec<u8>,
     src_parent: &[u8],
     first: usize,
@@ -286,10 +313,13 @@ fn carry_devices(
         stride,
         records,
     };
-    crate::device::relocate_value_records(out, 0, src_parent, &run);
+    if !crate::device::relocate_value_records(out, 0, src_parent, &run) {
+        ctx.offsets.record();
+    }
 }
 
 fn emit_single_adj_format1(
+    ctx: &RewriterCtx,
     value_format: u16,
     value_bytes: &[u8],
     surviving_gids: &[u16],
@@ -300,14 +330,18 @@ fn emit_single_adj_format1(
     out.extend_from_slice(&0u16.to_be_bytes()); // coverageOffset placeholder
     out.extend_from_slice(&value_format.to_be_bytes());
     out.extend_from_slice(value_bytes);
-    let cov_off = out.len() as u16;
+    let cov_off = ctx.off16(out.len());
     let cov_bytes = crate::coverage::emit_coverage_from_glyphs(surviving_gids);
     out.extend_from_slice(&cov_bytes);
     out[cov_slot..cov_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
     RewrittenSubtable { bytes: out }
 }
 
-fn emit_single_adj_format2(value_format: u16, surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
+fn emit_single_adj_format2(
+    ctx: &RewriterCtx,
+    value_format: u16,
+    surviving: &[(u16, Vec<u8>)],
+) -> RewrittenSubtable {
     let mut out = Vec::new();
     out.extend_from_slice(&2u16.to_be_bytes()); // posFormat
     let cov_slot = out.len();
@@ -317,7 +351,7 @@ fn emit_single_adj_format2(value_format: u16, surviving: &[(u16, Vec<u8>)]) -> R
     for (_, body) in surviving {
         out.extend_from_slice(body);
     }
-    let cov_off = out.len() as u16;
+    let cov_off = ctx.off16(out.len());
     let pairs: Vec<(u16, u16)> = surviving
         .iter()
         .enumerate()
@@ -343,16 +377,14 @@ fn value_record_size(format: u16) -> usize {
 // Type 2: Pair Adjustment
 // ---------------------------------------------------------------------------
 
-/// Rewrites a PairPos subtable. Dispatches on format.
-fn rewrite_pair_pos(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
-    if sub.len() < 2 {
-        return None;
-    }
-    let format = u16::from_be_bytes([sub[0], sub[1]]);
-    match format {
-        1 => rewrite_pair_pos_format1(ctx, sub),
-        2 => rewrite_pair_pos_format2(ctx, sub),
-        _ => None,
+/// Rewrites a PairPos subtable. Dispatches on format. Format 1 output
+/// (including the format 2 fallback) may be split into several
+/// subtables, see [`pair_sets`].
+fn rewrite_pair_pos(ctx: &RewriterCtx, sub: &[u8]) -> Vec<RewrittenSubtable> {
+    match sub.get(..2) {
+        Some([0, 1]) => rewrite_pair_pos_format1(ctx, sub),
+        Some([0, 2]) => rewrite_pair_pos_format2(ctx, sub).unwrap_or_default(),
+        _ => Vec::new(),
     }
 }
 
@@ -377,7 +409,18 @@ fn rewrite_pair_pos(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> 
 ///     ValueRecord valueRecord1   (sized by valueFormat1)
 ///     ValueRecord valueRecord2   (sized by valueFormat2)
 /// ```
-fn rewrite_pair_pos_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
+fn rewrite_pair_pos_format1(ctx: &RewriterCtx, sub: &[u8]) -> Vec<RewrittenSubtable> {
+    match read_pair_pos_format1(ctx, sub) {
+        Some((value_format1, value_format2, sets)) => {
+            emit_pair_sets(ctx, value_format1, value_format2, sets)
+        }
+        None => Vec::new(),
+    }
+}
+
+/// Reads the kept first glyphs of a PairPos format 1 subtable with
+/// their rebuilt PairSets. `None` when nothing survives.
+fn read_pair_pos_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<(u16, u16, PairSets)> {
     if sub.len() < 10 {
         return None;
     }
@@ -445,6 +488,7 @@ fn rewrite_pair_pos_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
         // so the tables travel inside the rebuilt PairSet body.
         let formats = [(0, value_format1), (v1_size, value_format2)];
         carry_devices(
+            ctx,
             &mut new_set,
             set_bytes,
             4,
@@ -458,12 +502,7 @@ fn rewrite_pair_pos_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
     if surviving_sets.is_empty() {
         return None;
     }
-
-    Some(emit_pair_pos_format1(
-        value_format1,
-        value_format2,
-        &surviving_sets,
-    ))
+    Some((value_format1, value_format2, surviving_sets))
 }
 
 fn encode_pair_set(survivors: &[(u16, Vec<u8>)], _v1: usize, _v2: usize) -> Vec<u8> {
@@ -474,40 +513,6 @@ fn encode_pair_set(survivors: &[(u16, Vec<u8>)], _v1: usize, _v2: usize) -> Vec<
         out.extend_from_slice(body);
     }
     out
-}
-
-fn emit_pair_pos_format1(
-    value_format1: u16,
-    value_format2: u16,
-    surviving: &[(u16, Vec<u8>)],
-) -> RewrittenSubtable {
-    let mut out = Vec::new();
-    out.extend_from_slice(&1u16.to_be_bytes()); // posFormat
-    let cov_slot = out.len();
-    out.extend_from_slice(&0u16.to_be_bytes()); // coverageOffset placeholder
-    out.extend_from_slice(&value_format1.to_be_bytes());
-    out.extend_from_slice(&value_format2.to_be_bytes());
-    out.extend_from_slice(&(surviving.len() as u16).to_be_bytes()); // pairSetCount
-    let set_offsets_start = out.len();
-    for _ in 0..surviving.len() {
-        out.extend_from_slice(&[0u8; 2]);
-    }
-    for (i, (_first, set_body)) in surviving.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(set_body);
-        let slot = set_offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
-    }
-    let cov_off = out.len() as u16;
-    let pairs: Vec<(u16, u16)> = surviving
-        .iter()
-        .enumerate()
-        .map(|(i, (g, _))| (*g, i as u16))
-        .collect();
-    let cov_bytes = emit_coverage_from_pairs(&pairs);
-    out.extend_from_slice(&cov_bytes);
-    out[cov_slot..cov_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
-    RewrittenSubtable { bytes: out }
 }
 
 /// Rewrites PairPos format 2 (class-based matrix).
@@ -546,7 +551,7 @@ fn emit_pair_pos_format1(
 ///    ValueRecords, and emit a brand-new fmt-1 PairPos. This is the
 ///    safest answer when class collapse would otherwise leave the new
 ///    matrix carrying rows/columns that no surviving gid can reach.
-fn rewrite_pair_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
+fn rewrite_pair_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<Vec<RewrittenSubtable>> {
     if sub.len() < 16 {
         return None;
     }
@@ -601,6 +606,7 @@ fn rewrite_pair_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
     // matrix cell directly.
     if should_use_format1_fallback(&surviving_first, &cd2_pairs, map) {
         return rewrite_pair_pos_format2_to_format1(
+            ctx,
             sub,
             &surviving_first,
             &cd2_pairs,
@@ -650,6 +656,7 @@ fn rewrite_pair_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
         sub[records_off..records_off + class1_count as usize * class1_stride].to_vec();
 
     let mut rs = emit_pair_pos_format2(
+        ctx,
         value_format1,
         value_format2,
         class1_count,
@@ -662,12 +669,21 @@ fn rewrite_pair_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
     let cells = class1_count as usize * class2_count as usize;
     let v1_size = value_record_size(value_format1);
     let formats = [(0, value_format1), (v1_size, value_format2)];
-    carry_devices(&mut rs.bytes, sub, records_off, cells, v_pair, &formats);
-    Some(rs)
+    carry_devices(
+        ctx,
+        &mut rs.bytes,
+        sub,
+        records_off,
+        cells,
+        v_pair,
+        &formats,
+    );
+    Some(alloc::vec![rs])
 }
 
 #[allow(clippy::too_many_arguments)]
 fn emit_pair_pos_format2(
+    ctx: &RewriterCtx,
     value_format1: u16,
     value_format2: u16,
     class1_count: u16,
@@ -691,16 +707,16 @@ fn emit_pair_pos_format2(
     out.extend_from_slice(&class2_count.to_be_bytes());
     out.extend_from_slice(matrix_bytes);
 
-    let cov_start = out.len() as u16;
+    let cov_start = ctx.off16(out.len());
     let cov_emitted = crate::coverage::emit_coverage_from_glyphs(surviving_cov);
     out.extend_from_slice(&cov_emitted);
     out[cov_slot..cov_slot + 2].copy_from_slice(&cov_start.to_be_bytes());
 
-    let cd1_start = out.len() as u16;
+    let cd1_start = ctx.off16(out.len());
     out.extend_from_slice(cd1_bytes);
     out[cd1_slot..cd1_slot + 2].copy_from_slice(&cd1_start.to_be_bytes());
 
-    let cd2_start = out.len() as u16;
+    let cd2_start = ctx.off16(out.len());
     out.extend_from_slice(cd2_bytes);
     out[cd2_slot..cd2_slot + 2].copy_from_slice(&cd2_start.to_be_bytes());
 
@@ -743,6 +759,7 @@ type PairPosFmt1Set = (u16, Vec<(u16, Vec<u8>)>);
 /// then equivalent to "not covered".
 #[allow(clippy::too_many_arguments)]
 fn rewrite_pair_pos_format2_to_format1(
+    ctx: &RewriterCtx,
     sub: &[u8],
     surviving_first: &[(u16, u16)],
     cd2_pairs: &[(u16, u16)],
@@ -754,7 +771,7 @@ fn rewrite_pair_pos_format2_to_format1(
     cd1_off: usize,
     cd2_off: usize,
     map: &crate::layout::GidMap,
-) -> Option<RewrittenSubtable> {
+) -> Option<Vec<RewrittenSubtable>> {
     let v1_size = value_record_size(value_format1);
     let v2_size = value_record_size(value_format2);
     let v_pair = v1_size + v2_size;
@@ -816,6 +833,7 @@ fn rewrite_pair_pos_format2_to_format1(
 
     // Emit fmt-1 PairPos around `out_sets`.
     Some(emit_pair_pos_format1_from_sets(
+        ctx,
         value_format1,
         value_format2,
         v1_size,
@@ -886,13 +904,14 @@ fn class_of_gid(sub: &[u8], cd_off: usize, gid: u16) -> u16 {
 /// subtable; the tables are copied into each new PairSet, which is the
 /// base format 1 measures them from.
 fn emit_pair_pos_format1_from_sets(
+    ctx: &RewriterCtx,
     value_format1: u16,
     value_format2: u16,
     v1_size: usize,
     v2_size: usize,
     sets: &[PairPosFmt1Set],
     src_parent: &[u8],
-) -> RewrittenSubtable {
+) -> Vec<RewrittenSubtable> {
     let formats = [(0, value_format1), (v1_size, value_format2)];
     // Re-shape sets into the encoder's expected
     // `(first_new, encoded_pair_set_body)` format.
@@ -906,6 +925,7 @@ fn emit_pair_pos_format1_from_sets(
         }
         let stride = 2 + v1_size + v2_size;
         carry_devices(
+            ctx,
             &mut set_body,
             src_parent,
             4,
@@ -915,7 +935,7 @@ fn emit_pair_pos_format1_from_sets(
         );
         surviving_sets.push((*first_new, set_body));
     }
-    emit_pair_pos_format1(value_format1, value_format2, &surviving_sets)
+    emit_pair_sets(ctx, value_format1, value_format2, surviving_sets)
 }
 
 // ---------------------------------------------------------------------------
@@ -975,7 +995,7 @@ fn rewrite_cursive(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         return None;
     }
 
-    Some(emit_cursive(&surviving))
+    Some(emit_cursive(ctx, &surviving))
 }
 
 /// Reads an anchor table at `offset` inside `sub` into a standalone
@@ -986,361 +1006,32 @@ fn read_anchor_bytes(sub: &[u8], offset: usize) -> Vec<u8> {
     crate::device::copy_anchor(sub, offset)
 }
 
-fn emit_cursive(surviving: &[(u16, Vec<u8>, Vec<u8>)]) -> RewrittenSubtable {
+fn emit_cursive(ctx: &RewriterCtx, surviving: &[(u16, Vec<u8>, Vec<u8>)]) -> RewrittenSubtable {
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // posFormat
-    let cov_slot = out.len();
     out.extend_from_slice(&0u16.to_be_bytes()); // coverageOffset placeholder
     out.extend_from_slice(&(surviving.len() as u16).to_be_bytes());
     let records_start = out.len();
     for _ in 0..surviving.len() {
         out.extend_from_slice(&[0u8; 4]); // entry/exit offset placeholders
     }
-    // Anchor bodies (identical anchors share one copy), then Coverage.
-    let mut anchors = crate::device::Dedup::default();
-    for (i, (_g, entry, exit)) in surviving.iter().enumerate() {
-        let entry_off: u16 = if entry.is_empty() {
-            0
-        } else {
-            anchors.place(&mut out, entry) as u16
-        };
-        let exit_off: u16 = if exit.is_empty() {
-            0
-        } else {
-            anchors.place(&mut out, exit) as u16
-        };
-        let rec = records_start + i * 4;
-        out[rec..rec + 2].copy_from_slice(&entry_off.to_be_bytes());
-        out[rec + 2..rec + 4].copy_from_slice(&exit_off.to_be_bytes());
-    }
-    let cov_off = out.len() as u16;
+    // Coverage first, so the anchors after it are the only part that
+    // can push an offset out of 16-bit reach.
+    let cov_off = ctx.off16(out.len());
+    out[2..4].copy_from_slice(&cov_off.to_be_bytes());
     let gids: Vec<u16> = surviving.iter().map(|(g, _, _)| *g).collect();
-    let cov_bytes = crate::coverage::emit_coverage_from_glyphs(&gids);
-    out.extend_from_slice(&cov_bytes);
-    out[cov_slot..cov_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
-    RewrittenSubtable { bytes: out }
-}
-
-// ---------------------------------------------------------------------------
-// Type 4 / 5 / 6: Mark Attachment (Mark-to-Base, Mark-to-Liga, Mark-to-Mark)
-// ---------------------------------------------------------------------------
-
-/// Rewrites a mark-attachment subtable. The three lookup types share
-/// the same 12-byte header shape:
-///
-/// ```text
-///   u16      posFormat = 1
-///   Offset16 markCoverageOffset       (== mark1 for mark-to-mark)
-///   Offset16 baseCoverageOffset       (== ligature / mark2 for 5/6)
-///   u16      markClassCount
-///   Offset16 markArrayOffset
-///   Offset16 baseArrayOffset          (== ligatureArray / mark2Array)
-/// ```
-///
-/// `MarkArray` (at `markArrayOffset`):
-///
-/// ```text
-///   u16 markCount
-///   MarkRecord records[markCount]:
-///     u16      markClass
-///     Offset16 markAnchorOffset       (relative to MarkArray)
-/// ```
-///
-/// For type 4 / type 6 the second array (`BaseArray` / `Mark2Array`):
-///
-/// ```text
-///   u16 baseCount
-///   BaseRecord records[baseCount]:
-///     Offset16 baseAnchorOffsets[markClassCount]   (relative to array;
-///                                                   0 = no anchor)
-/// ```
-///
-/// For type 5 (Mark-to-Liga) the second array is a `LigatureArray`:
-///
-/// ```text
-///   u16      ligatureCount
-///   Offset16 ligatureAttachOffsets[ligatureCount]   (relative to array)
-///
-///   LigatureAttach (at each offset):
-///     u16 componentCount
-///     ComponentRecord records[componentCount]:
-///       Offset16 ligatureAnchorOffsets[markClassCount]   (relative to
-///                                                         LigatureAttach;
-///                                                         0 = no anchor)
-/// ```
-///
-/// We dispatch on the lookup type via [`MarkAttachKind`] passed in by
-/// the caller. Auto-detecting layout from the bytes alone is fragile
-/// because for `markClassCount == 1` a LigatureArray's attach offset
-/// can coincide with a valid type-4 anchor offset.
-fn rewrite_mark_attach(
-    ctx: &RewriterCtx,
-    sub: &[u8],
-    kind: MarkAttachKind,
-) -> Option<RewrittenSubtable> {
-    if sub.len() < 12 {
-        return None;
-    }
-    let format = u16::from_be_bytes([sub[0], sub[1]]);
-    if format != 1 {
-        return None;
-    }
-    let mark_cov_off = u16::from_be_bytes([sub[2], sub[3]]) as usize;
-    let base_cov_off = u16::from_be_bytes([sub[4], sub[5]]) as usize;
-    let mark_class_count = u16::from_be_bytes([sub[6], sub[7]]);
-    let mark_array_off = u16::from_be_bytes([sub[8], sub[9]]) as usize;
-    let base_array_off = u16::from_be_bytes([sub[10], sub[11]]) as usize;
-
-    let mark_cov_bytes = sub.get(mark_cov_off..)?;
-    let base_cov_bytes = sub.get(base_cov_off..)?;
-    let mark_glyphs = parse_coverage_glyphs(mark_cov_bytes);
-    let base_glyphs = parse_coverage_glyphs(base_cov_bytes);
-    let map = ctx.gid_map;
-
-    // Filter MarkArray entries by surviving mark glyphs. We need the
-    // raw (markClass, anchorBody) for each survivor.
-    let mark_array_bytes = sub.get(mark_array_off..)?;
-    if mark_array_bytes.len() < 2 {
-        return None;
-    }
-    let mark_count = u16::from_be_bytes([mark_array_bytes[0], mark_array_bytes[1]]) as usize;
-    if mark_array_bytes.len() < 2 + mark_count * 4 {
-        return None;
-    }
-    let mark_pair = mark_glyphs.len().min(mark_count);
-
-    // Surviving mark records: (new_mark_gid, mark_class, anchor_bytes).
-    let mut surviving_marks: Vec<(u16, u16, Vec<u8>)> = Vec::new();
-    for (i, &g_old) in mark_glyphs.iter().enumerate().take(mark_pair) {
-        let Some(g_new) = map.map(g_old) else {
-            continue;
-        };
-        let rec_off = 2 + i * 4;
-        let mark_class =
-            u16::from_be_bytes([mark_array_bytes[rec_off], mark_array_bytes[rec_off + 1]]);
-        let anchor_off_rel =
-            u16::from_be_bytes([mark_array_bytes[rec_off + 2], mark_array_bytes[rec_off + 3]])
-                as usize;
-        // Anchor offset is relative to MarkArray base.
-        let anchor_bytes = read_anchor_bytes(mark_array_bytes, anchor_off_rel);
-        if anchor_bytes.is_empty() {
-            // Marks always have anchors. A null offset would be a
-            // malformed font. Skip.
-            continue;
-        }
-        surviving_marks.push((g_new, mark_class, anchor_bytes));
-    }
-    if surviving_marks.is_empty() {
-        return None;
-    }
-
-    // Filter base/ligature/mark2 array entries by surviving base
-    // glyphs. The shape depends on whether each entry has a fixed
-    // class-anchor row (type 4 / 6) or a variable-component attach
-    // (type 5). We auto-detect by parsing the first 2 bytes as `count`
-    // and checking whether the array length matches the type-4 layout
-    // (count * markClassCount * 2 + 2 bytes header).
-    let base_array_bytes = sub.get(base_array_off..)?;
-    if base_array_bytes.len() < 2 {
-        return None;
-    }
-    let base_count = u16::from_be_bytes([base_array_bytes[0], base_array_bytes[1]]) as usize;
-    let base_pair = base_glyphs.len().min(base_count);
-    let mcc = mark_class_count as usize;
-    let is_type4_or_6 = matches!(kind, MarkAttachKind::FixedClassRow);
-
-    let surviving_bases: Vec<SurvivingBase> = if is_type4_or_6 {
-        // Per-base array of class-anchored anchors. We collect for
-        // each surviving entry its (new_gid, marker_for_type4, anchor
-        // body slots): the marker is empty Vec, the anchor slots are
-        // a list of mcc anchor-byte vectors (empty = null). A
-        // BaseArray too short for its records drops the subtable.
-        if base_array_bytes.len() < 2 + base_pair * mcc * 2 {
-            return None;
-        }
-        let mut out: Vec<SurvivingBase> = Vec::new();
-        for (i, &g_old) in base_glyphs.iter().enumerate().take(base_pair) {
-            let Some(g_new) = map.map(g_old) else {
-                continue;
-            };
-            let row_off = 2 + i * mcc * 2;
-            let mut anchors: Vec<Vec<u8>> = Vec::with_capacity(mcc);
-            for c in 0..mcc {
-                let slot = row_off + c * 2;
-                let anchor_off_rel =
-                    u16::from_be_bytes([base_array_bytes[slot], base_array_bytes[slot + 1]])
-                        as usize;
-                anchors.push(read_anchor_bytes(base_array_bytes, anchor_off_rel));
-            }
-            out.push((g_new, Vec::new(), anchors));
-        }
-        out
-    } else {
-        // Type 5 (Mark-to-Liga): ligatureArray with attach bodies.
-        // For each surviving ligature, capture the LigatureAttach body
-        // and re-emit it (we need to remap nothing inside, since
-        // anchor offsets are relative to the LigatureAttach itself
-        // and travel verbatim). Survivor stored as
-        // (new_gid, attach_body_bytes, []).
-        let mut out: Vec<SurvivingBase> = Vec::new();
-        for (i, &g_old) in base_glyphs.iter().enumerate().take(base_pair) {
-            let Some(g_new) = map.map(g_old) else {
-                continue;
-            };
-            let off_slot = 2 + i * 2;
-            if base_array_bytes.len() < off_slot + 2 {
-                continue;
-            }
-            let attach_off_rel =
-                u16::from_be_bytes([base_array_bytes[off_slot], base_array_bytes[off_slot + 1]])
-                    as usize;
-            let Some(attach_bytes) = base_array_bytes.get(attach_off_rel..) else {
-                continue;
-            };
-            // Compute the attach body length: u16 componentCount +
-            // componentCount * mcc * 2 anchor offsets + the anchor
-            // bodies.
-            if attach_bytes.len() < 2 {
-                continue;
-            }
-            let component_count = u16::from_be_bytes([attach_bytes[0], attach_bytes[1]]) as usize;
-            let comp_records_size = component_count * mcc * 2;
-            let comp_records_end = 2 + comp_records_size;
-            if attach_bytes.len() < comp_records_end {
-                continue;
-            }
-            // Re-emit the attach body with anchor offsets re-threaded
-            // (they're attach-relative). Each surviving anchor body is
-            // copied verbatim.
-            let mut new_attach = Vec::new();
-            new_attach.extend_from_slice(&(component_count as u16).to_be_bytes());
-            let new_records_start = new_attach.len();
-            for _ in 0..component_count * mcc {
-                new_attach.extend_from_slice(&[0u8; 2]);
-            }
-            let mut anchors = crate::device::Dedup::default();
-            for ci in 0..component_count {
-                for c in 0..mcc {
-                    let slot = 2 + (ci * mcc + c) * 2;
-                    let anchor_off_rel =
-                        u16::from_be_bytes([attach_bytes[slot], attach_bytes[slot + 1]]) as usize;
-                    let anchor_bytes = read_anchor_bytes(attach_bytes, anchor_off_rel);
-                    let new_slot = new_records_start + (ci * mcc + c) * 2;
-                    if anchor_bytes.is_empty() {
-                        // null offset.
-                    } else {
-                        let new_off = anchors.place(&mut new_attach, &anchor_bytes) as u16;
-                        new_attach[new_slot..new_slot + 2].copy_from_slice(&new_off.to_be_bytes());
-                    }
-                }
-            }
-            out.push((g_new, new_attach, Vec::new()));
-        }
-        out
-    };
-
-    if surviving_bases.is_empty() {
-        return None;
-    }
-
-    Some(emit_mark_attach(
-        mark_class_count,
-        &surviving_marks,
-        &surviving_bases,
-        is_type4_or_6,
-    ))
-}
-
-fn emit_mark_attach(
-    mark_class_count: u16,
-    surviving_marks: &[(u16, u16, Vec<u8>)],
-    surviving_bases: &[SurvivingBase],
-    is_type4_or_6: bool,
-) -> RewrittenSubtable {
-    let mut out = Vec::new();
-    out.extend_from_slice(&1u16.to_be_bytes()); // posFormat
-    let mark_cov_slot = out.len();
-    out.extend_from_slice(&0u16.to_be_bytes()); // markCoverageOffset placeholder
-    let base_cov_slot = out.len();
-    out.extend_from_slice(&0u16.to_be_bytes()); // baseCoverageOffset placeholder
-    out.extend_from_slice(&mark_class_count.to_be_bytes());
-    let mark_array_slot = out.len();
-    out.extend_from_slice(&0u16.to_be_bytes()); // markArrayOffset placeholder
-    let base_array_slot = out.len();
-    out.extend_from_slice(&0u16.to_be_bytes()); // baseArrayOffset placeholder
-
-    // MarkArray.
-    let mark_array_start = out.len();
-    out.extend_from_slice(&(surviving_marks.len() as u16).to_be_bytes());
-    let mark_records_start = out.len();
-    for _ in 0..surviving_marks.len() {
-        out.extend_from_slice(&[0u8; 4]); // markClass + anchorOffset placeholder
-    }
-    let mut mark_anchors = crate::device::Dedup::default();
-    for (i, (_g, mark_class, anchor_bytes)) in surviving_marks.iter().enumerate() {
-        let anchor_off = (mark_anchors.place(&mut out, anchor_bytes) - mark_array_start) as u16;
-        let rec = mark_records_start + i * 4;
-        out[rec..rec + 2].copy_from_slice(&mark_class.to_be_bytes());
-        out[rec + 2..rec + 4].copy_from_slice(&anchor_off.to_be_bytes());
-    }
-
-    // Base/Liga/Mark2 array.
-    let base_array_start = out.len();
-    out.extend_from_slice(&(surviving_bases.len() as u16).to_be_bytes());
-    let mcc = mark_class_count as usize;
-
-    if is_type4_or_6 {
-        // Per-base records: mcc anchor offsets each.
-        let records_start = out.len();
-        for _ in 0..surviving_bases.len() {
-            for _ in 0..mcc {
-                out.extend_from_slice(&[0u8; 2]);
+    out.extend_from_slice(&crate::coverage::emit_coverage_from_glyphs(&gids));
+    // Anchor bodies; identical anchors share one copy.
+    let mut anchors = Dedup::default();
+    for (i, (_g, entry, exit)) in surviving.iter().enumerate() {
+        let rec = records_start + i * 4;
+        for (slot, anchor) in [(rec, entry), (rec + 2, exit)] {
+            if !anchor.is_empty() {
+                let at = ctx.off16(anchors.place(&mut out, anchor));
+                out[slot..slot + 2].copy_from_slice(&at.to_be_bytes());
             }
         }
-        let mut base_anchors = crate::device::Dedup::default();
-        for (i, (_g, _attach, anchors)) in surviving_bases.iter().enumerate() {
-            for (c, anchor) in anchors.iter().enumerate() {
-                if anchor.is_empty() {
-                    continue;
-                }
-                let off = (base_anchors.place(&mut out, anchor) - base_array_start) as u16;
-                let slot = records_start + i * mcc * 2 + c * 2;
-                out[slot..slot + 2].copy_from_slice(&off.to_be_bytes());
-            }
-        }
-    } else {
-        // LigatureArray: one Offset16 per ligature, each pointing at
-        // an already-rewritten LigatureAttach body.
-        let attach_offsets_start = out.len();
-        for _ in 0..surviving_bases.len() {
-            out.extend_from_slice(&[0u8; 2]);
-        }
-        for (i, (_g, attach_body, _)) in surviving_bases.iter().enumerate() {
-            let attach_off = (out.len() - base_array_start) as u16;
-            out.extend_from_slice(attach_body);
-            let slot = attach_offsets_start + i * 2;
-            out[slot..slot + 2].copy_from_slice(&attach_off.to_be_bytes());
-        }
     }
-
-    // Coverages last.
-    let mark_cov_off = out.len() as u16;
-    let mark_gids: Vec<u16> = surviving_marks.iter().map(|(g, _, _)| *g).collect();
-    let mark_cov_bytes = crate::coverage::emit_coverage_from_glyphs(&mark_gids);
-    out.extend_from_slice(&mark_cov_bytes);
-
-    let base_cov_off = out.len() as u16;
-    let base_gids: Vec<u16> = surviving_bases.iter().map(|(g, _, _)| *g).collect();
-    let base_cov_bytes = crate::coverage::emit_coverage_from_glyphs(&base_gids);
-    out.extend_from_slice(&base_cov_bytes);
-
-    out[mark_cov_slot..mark_cov_slot + 2].copy_from_slice(&mark_cov_off.to_be_bytes());
-    out[base_cov_slot..base_cov_slot + 2].copy_from_slice(&base_cov_off.to_be_bytes());
-    out[mark_array_slot..mark_array_slot + 2]
-        .copy_from_slice(&(mark_array_start as u16).to_be_bytes());
-    out[base_array_slot..base_array_slot + 2]
-        .copy_from_slice(&(base_array_start as u16).to_be_bytes());
-
     RewrittenSubtable { bytes: out }
 }
 
@@ -1357,30 +1048,34 @@ fn emit_mark_attach(
 /// ```
 ///
 /// Recurses into the inner subtable using the wrapped lookup type, then
-/// re-emits a fresh Extension wrapper around the rewritten inner bytes.
-fn rewrite_extension(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
-    if sub.len() < 8 {
-        return None;
-    }
-    let format = u16::from_be_bytes([sub[0], sub[1]]);
-    if format != 1 {
-        return None;
-    }
-    let inner_type = u16::from_be_bytes([sub[2], sub[3]]);
-    let inner_off = u32::from_be_bytes([sub[4], sub[5], sub[6], sub[7]]) as usize;
-    if inner_type == gpos_type::EXTENSION {
-        // Spec disallows Extension referring to Extension.
-        return None;
-    }
-    let inner = sub.get(inner_off..)?;
-    let rewritten_inner = rewrite_subtable(ctx, inner_type, inner)?;
-    // Re-wrap: inner sits at offset 8 in the new wrapper.
-    let mut out = Vec::with_capacity(8 + rewritten_inner.bytes.len());
-    out.extend_from_slice(&1u16.to_be_bytes());
-    out.extend_from_slice(&inner_type.to_be_bytes());
-    out.extend_from_slice(&8u32.to_be_bytes());
-    out.extend_from_slice(&rewritten_inner.bytes);
-    Some(RewrittenSubtable { bytes: out })
+/// re-emits a fresh Extension wrapper around each rewritten inner
+/// subtable (a split inner subtable gets one wrapper per piece).
+fn rewrite_extension(ctx: &RewriterCtx, sub: &[u8]) -> Vec<RewrittenSubtable> {
+    let (Some(&[0, 1]), Some(kind), Some(off)) = (sub.get(..2), sub.get(2..4), sub.get(4..8))
+    else {
+        return Vec::new();
+    };
+    let inner_type = u16::from_be_bytes([kind[0], kind[1]]);
+    let inner_off = u32::from_be_bytes([off[0], off[1], off[2], off[3]]) as usize;
+    // Spec disallows Extension referring to Extension.
+    let Some(inner) = sub
+        .get(inner_off..)
+        .filter(|_| inner_type != gpos_type::EXTENSION)
+    else {
+        return Vec::new();
+    };
+    rewrite_subtable(ctx, inner_type, inner)
+        .into_iter()
+        .map(|piece| {
+            // Re-wrap: inner sits at offset 8 in the new wrapper.
+            let mut out = Vec::with_capacity(8 + piece.bytes.len());
+            out.extend_from_slice(&1u16.to_be_bytes());
+            out.extend_from_slice(&inner_type.to_be_bytes());
+            out.extend_from_slice(&8u32.to_be_bytes());
+            out.extend_from_slice(&piece.bytes);
+            RewrittenSubtable { bytes: out }
+        })
+        .collect()
 }
 
 // ===== GPOS types 7 / 8: contextual / chained-contextual positioning =====
@@ -1470,7 +1165,7 @@ fn rewrite_context_pos_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<Rewritte
     if surviving_sets.is_empty() {
         return None;
     }
-    Some(emit_context_pos_format1(&surviving_sets))
+    Some(emit_context_pos_format1(ctx, &surviving_sets))
 }
 
 fn rewrite_context_pos_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>> {
@@ -1559,16 +1254,16 @@ fn rewrite_context_pos_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<V
     for _ in 0..surviving_rules.len() {
         out.extend_from_slice(&[0u8; 2]);
     }
+    let mut bodies = Dedup::default();
     for (i, body) in surviving_rules.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(body);
+        let body_start = bodies.place(&mut out, body);
         let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
     }
     Some(out)
 }
 
-fn emit_context_pos_format1(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
+fn emit_context_pos_format1(ctx: &RewriterCtx, surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // posFormat
     let cov_off_slot = out.len();
@@ -1578,11 +1273,11 @@ fn emit_context_pos_format1(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
     for _ in 0..surviving.len() {
         out.extend_from_slice(&[0u8; 2]);
     }
+    let mut bodies = Dedup::default();
     for (i, (_first, set_body)) in surviving.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(set_body);
+        let body_start = bodies.place(&mut out, set_body);
         let slot = set_offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
     }
     let pairs: Vec<(u16, u16)> = surviving
         .iter()
@@ -1590,7 +1285,7 @@ fn emit_context_pos_format1(surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
         .map(|(i, (g, _))| (*g, i as u16))
         .collect();
     let cov_bytes = crate::coverage::emit_coverage_from_pairs(&pairs);
-    let cov_off = out.len() as u16;
+    let cov_off = ctx.off16(out.len());
     out.extend_from_slice(&cov_bytes);
     out[cov_off_slot..cov_off_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
     RewrittenSubtable { bytes: out }
@@ -1675,19 +1370,19 @@ fn rewrite_context_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<Rewritte
     for _ in 0..set_count {
         out.extend_from_slice(&[0u8; 2]);
     }
+    let mut bodies = Dedup::default();
     for (i, set_opt) in surviving_sets.iter().enumerate() {
         if let Some(set_body) = set_opt {
-            let body_start = out.len();
-            out.extend_from_slice(set_body);
+            let body_start = bodies.place(&mut out, set_body);
             let slot = set_offsets_start + i * 2;
-            out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+            out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
         }
     }
-    let cov_off = out.len() as u16;
+    let cov_off = ctx.off16(out.len());
     let cov_emitted = crate::coverage::emit_coverage_from_glyphs(&new_covered);
     out.extend_from_slice(&cov_emitted);
     out[cov_slot..cov_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
-    let cd_off = out.len() as u16;
+    let cd_off = ctx.off16(out.len());
     out.extend_from_slice(&new_cd_bytes);
     out[cd_slot..cd_slot + 2].copy_from_slice(&cd_off.to_be_bytes());
     Some(RewrittenSubtable { bytes: out })
@@ -1760,11 +1455,11 @@ fn rewrite_context_pos_class_set(
     for _ in 0..surviving_rules.len() {
         out.extend_from_slice(&[0u8; 2]);
     }
+    let mut bodies = Dedup::default();
     for (i, body) in surviving_rules.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(body);
+        let body_start = bodies.place(&mut out, body);
         let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
     }
     Some(out)
 }
@@ -1816,9 +1511,9 @@ fn rewrite_context_pos_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<Rewritte
         out.extend_from_slice(&[0u8; 2]);
     }
     out.extend_from_slice(&encode_lookup_records(&records));
+    let mut bodies = Dedup::default();
     for (i, cov) in new_cov_bytes.iter().enumerate() {
-        let body_start = out.len() as u16;
-        out.extend_from_slice(cov);
+        let body_start = ctx.off16(bodies.place(&mut out, cov));
         let slot = cov_offs_start + i * 2;
         out[slot..slot + 2].copy_from_slice(&body_start.to_be_bytes());
     }
@@ -1877,7 +1572,7 @@ fn rewrite_chain_context_pos_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<Re
     if surviving_sets.is_empty() {
         return None;
     }
-    Some(emit_context_pos_format1(&surviving_sets))
+    Some(emit_context_pos_format1(ctx, &surviving_sets))
 }
 
 fn rewrite_chain_context_pos_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>> {
@@ -2009,11 +1704,11 @@ fn rewrite_chain_context_pos_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Op
     for _ in 0..surviving_rules.len() {
         out.extend_from_slice(&[0u8; 2]);
     }
+    let mut bodies = Dedup::default();
     for (i, body) in surviving_rules.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(body);
+        let body_start = bodies.place(&mut out, body);
         let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
     }
     Some(out)
 }
@@ -2119,24 +1814,24 @@ fn rewrite_chain_context_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<Re
     for _ in 0..set_count {
         out.extend_from_slice(&[0u8; 2]);
     }
+    let mut bodies = Dedup::default();
     for (i, set_opt) in surviving_sets.iter().enumerate() {
         if let Some(set_body) = set_opt {
-            let body_start = out.len();
-            out.extend_from_slice(set_body);
+            let body_start = bodies.place(&mut out, set_body);
             let slot = set_offsets_start + i * 2;
-            out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+            out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
         }
     }
-    let cov_off = out.len() as u16;
+    let cov_off = ctx.off16(out.len());
     out.extend_from_slice(&crate::coverage::emit_coverage_from_glyphs(&new_covered));
     out[cov_slot..cov_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
-    let bt_off = out.len() as u16;
+    let bt_off = ctx.off16(out.len());
     out.extend_from_slice(&new_bt_cd);
     out[bt_slot..bt_slot + 2].copy_from_slice(&bt_off.to_be_bytes());
-    let in_off = out.len() as u16;
+    let in_off = ctx.off16(out.len());
     out.extend_from_slice(&new_in_cd);
     out[in_slot..in_slot + 2].copy_from_slice(&in_off.to_be_bytes());
-    let la_off = out.len() as u16;
+    let la_off = ctx.off16(out.len());
     out.extend_from_slice(&new_la_cd);
     out[la_slot..la_slot + 2].copy_from_slice(&la_off.to_be_bytes());
     Some(RewrittenSubtable { bytes: out })
@@ -2272,11 +1967,11 @@ fn rewrite_chain_context_pos_class_set(
     for _ in 0..surviving_rules.len() {
         out.extend_from_slice(&[0u8; 2]);
     }
+    let mut bodies = Dedup::default();
     for (i, body) in surviving_rules.iter().enumerate() {
-        let body_start = out.len();
-        out.extend_from_slice(body);
+        let body_start = bodies.place(&mut out, body);
         let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&(body_start as u16).to_be_bytes());
+        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
     }
     Some(out)
 }
@@ -2371,10 +2066,10 @@ fn rewrite_chain_context_pos_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<Re
     out.extend_from_slice(&(records.len() as u16).to_be_bytes());
     out.extend_from_slice(&encode_lookup_records(&records));
 
+    let mut bodies = Dedup::default();
     let mut patch_array = |slots_start: usize, covs: &[Vec<u8>]| {
         for (i, cov) in covs.iter().enumerate() {
-            let body_start = out.len() as u16;
-            out.extend_from_slice(cov);
+            let body_start = ctx.off16(bodies.place(&mut out, cov));
             let slot = slots_start + i * 2;
             out[slot..slot + 2].copy_from_slice(&body_start.to_be_bytes());
         }
@@ -2389,12 +2084,22 @@ fn rewrite_chain_context_pos_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<Re
 mod device_tests;
 
 #[cfg(test)]
+mod split_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::layout::GidMap;
     use alloc::vec;
     use sigilbuzz::tables::gpos::value_record::{X_ADVANCE, X_PLACEMENT};
     use sigilbuzz::tables::gpos::{MarkBasePos, MarkLigaPos, MarkMarkPos, PairPos, SinglePos};
+
+    /// The single subtable a rewrite produced; the fixtures here are
+    /// far too small to be split.
+    fn one(mut pieces: Vec<RewrittenSubtable>) -> RewrittenSubtable {
+        assert_eq!(pieces.len(), 1, "expected one subtable");
+        pieces.remove(0)
+    }
 
     fn build_coverage_format1(glyphs: &[u16]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -2457,10 +2162,7 @@ mod tests {
         // x_advance = -25 should still apply.
         let bytes = build_single_adj_format1(&[10, 20, 30], X_ADVANCE, &[-25]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (20, 2)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_single_adj(&ctx, &bytes).unwrap();
         let parsed = SinglePos::parse(&rs.bytes).unwrap();
         assert_eq!(parsed.adjustment(1).unwrap().x_advance, -25);
@@ -2473,10 +2175,7 @@ mod tests {
         // Three glyphs with per-glyph deltas. Drop the middle one.
         let bytes = build_single_adj_format2(&[10, 20, 30], X_ADVANCE, &[&[-5], &[-10], &[-15]]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (30, 3)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_single_adj(&ctx, &bytes).unwrap();
         let parsed = SinglePos::parse(&rs.bytes).unwrap();
         assert_eq!(parsed.adjustment(1).unwrap().x_advance, -5);
@@ -2489,10 +2188,7 @@ mod tests {
     fn rewrite_single_adj_returns_none_when_all_dropped() {
         let bytes = build_single_adj_format1(&[10, 20], X_ADVANCE, &[-5]);
         let map = map_from_pairs(&[(0, 0)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_single_adj(&ctx, &bytes).is_none());
     }
 
@@ -2501,10 +2197,7 @@ mod tests {
         // value_format = X_PLACEMENT | X_ADVANCE -> two i16 fields.
         let bytes = build_single_adj_format1(&[5], X_PLACEMENT | X_ADVANCE, &[4, -10]);
         let map = map_from_pairs(&[(0, 0), (5, 1)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_single_adj(&ctx, &bytes).unwrap();
         let parsed = SinglePos::parse(&rs.bytes).unwrap();
         let v = parsed.adjustment(1).unwrap();
@@ -2551,11 +2244,8 @@ mod tests {
         let bytes =
             build_pair_pos_format1(&[10, 20], &[&[(15, -30, 0), (25, 5, 0)], &[(5, -50, 0)]]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (15, 2), (20, 3)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
-        let rs = rewrite_pair_pos_format1(&ctx, &bytes).unwrap();
+        let ctx = RewriterCtx::new(&map, None);
+        let rs = one(rewrite_pair_pos_format1(&ctx, &bytes));
         let pp = PairPos::parse(&rs.bytes).unwrap();
         // (1, 2) -> -30 survives; (1, 25)/(3, 5) drop.
         let (v1, _) = pp.lookup(1, 2).unwrap();
@@ -2570,11 +2260,8 @@ mod tests {
     fn rewrite_pair_pos_format1_returns_none_when_all_drop() {
         let bytes = build_pair_pos_format1(&[10], &[&[(15, -30, 0)]]);
         let map = map_from_pairs(&[(0, 0)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
-        assert!(rewrite_pair_pos_format1(&ctx, &bytes).is_none());
+        let ctx = RewriterCtx::new(&map, None);
+        assert!(rewrite_pair_pos_format1(&ctx, &bytes).is_empty());
     }
 
     // ----- Type 2: Pair Adjustment, format 2 -----
@@ -2639,11 +2326,8 @@ mod tests {
         let bytes = build_pair_pos_format2(&[10, 11], &cd1, &cd2, matrix);
 
         let map = map_from_pairs(&[(0, 0), (10, 9), (11, 10), (20, 19), (21, 20), (22, 21)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
-        let rs = rewrite_pair_pos_format2(&ctx, &bytes).unwrap();
+        let ctx = RewriterCtx::new(&map, None);
+        let rs = one(rewrite_pair_pos_format2(&ctx, &bytes).unwrap());
         let pp = PairPos::parse(&rs.bytes).unwrap();
         // (9, 20) -> class1=1, class2=1 -> -25.
         let (v1, _) = pp.lookup(9, 20).unwrap();
@@ -2747,11 +2431,12 @@ mod tests {
             &[vec![Some((250, 500)), Some((260, 600))]],
         );
         let map = map_from_pairs(&[(0, 0), (5, 3), (20, 1), (21, 2)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
-        let rs = rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::FixedClassRow).unwrap();
+        let ctx = RewriterCtx::new(&map, None);
+        let rs = one(rewrite_mark_attach(
+            &ctx,
+            &bytes,
+            MarkAttachKind::FixedClassRow,
+        ));
         let mbp = MarkBasePos::parse(&rs.bytes).unwrap();
         let a0 = mbp.attach(1, 3).unwrap();
         let a1 = mbp.attach(2, 3).unwrap();
@@ -2765,22 +2450,16 @@ mod tests {
     fn rewrite_mark_base_drops_when_marks_drop() {
         let bytes = build_mark_base_pos(&[20], &[5], 1, &[(0, (10, 0))], &[vec![Some((250, 500))]]);
         let map = map_from_pairs(&[(0, 0), (5, 1)]); // mark 20 dropped
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
-        assert!(rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::FixedClassRow).is_none());
+        let ctx = RewriterCtx::new(&map, None);
+        assert!(rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::FixedClassRow).is_empty());
     }
 
     #[test]
     fn rewrite_mark_base_drops_when_bases_drop() {
         let bytes = build_mark_base_pos(&[20], &[5], 1, &[(0, (10, 0))], &[vec![Some((250, 500))]]);
         let map = map_from_pairs(&[(0, 0), (20, 1)]); // base 5 dropped
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
-        assert!(rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::FixedClassRow).is_none());
+        let ctx = RewriterCtx::new(&map, None);
+        assert!(rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::FixedClassRow).is_empty());
     }
 
     // ----- Type 5: Mark to Liga -----
@@ -2880,11 +2559,12 @@ mod tests {
             &[vec![vec![Some((100, 600))], vec![Some((400, 600))]]],
         );
         let map = map_from_pairs(&[(0, 0), (30, 1), (50, 2)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
-        let rs = rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::LigatureAttach).unwrap();
+        let ctx = RewriterCtx::new(&map, None);
+        let rs = one(rewrite_mark_attach(
+            &ctx,
+            &bytes,
+            MarkAttachKind::LigatureAttach,
+        ));
         let mlp = MarkLigaPos::parse(&rs.bytes).unwrap();
         let a0 = mlp.attach(1, 2, 0).unwrap();
         let a1 = mlp.attach(1, 2, 1).unwrap();
@@ -2900,11 +2580,12 @@ mod tests {
         // Mark-to-mark uses the same shape as mark-to-base.
         let bytes = build_mark_base_pos(&[30], &[5], 1, &[(0, (5, 0))], &[vec![Some((100, 600))]]);
         let map = map_from_pairs(&[(0, 0), (5, 1), (30, 2)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
-        let rs = rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::FixedClassRow).unwrap();
+        let ctx = RewriterCtx::new(&map, None);
+        let rs = one(rewrite_mark_attach(
+            &ctx,
+            &bytes,
+            MarkAttachKind::FixedClassRow,
+        ));
         let mmp = MarkMarkPos::parse(&rs.bytes).unwrap();
         let attach = mmp.attach(2, 1).unwrap();
         assert_eq!(attach.base_anchor.x, 100);
@@ -2922,11 +2603,8 @@ mod tests {
         out.extend_from_slice(&8u32.to_be_bytes()); // inner offset = 8
         out.extend_from_slice(&inner);
         let map = map_from_pairs(&[(0, 0), (10, 1)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
-        let rs = rewrite_extension(&ctx, &out).unwrap();
+        let ctx = RewriterCtx::new(&map, None);
+        let rs = one(rewrite_extension(&ctx, &out));
         // Verify the wrapper is preserved and inner parses.
         assert_eq!(&rs.bytes[0..2], &1u16.to_be_bytes());
         let inner_type = u16::from_be_bytes([rs.bytes[2], rs.bytes[3]]);
@@ -2988,10 +2666,7 @@ mod tests {
             ],
         );
         let map = map_from_pairs(&[(0, 0), (10, 1), (20, 2)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_cursive(&ctx, &bytes).unwrap();
         // Verify it parses as a valid GPOS subtable header: format 1.
         assert_eq!(&rs.bytes[0..2], &1u16.to_be_bytes());
@@ -3013,10 +2688,7 @@ mod tests {
             ],
         );
         let map = map_from_pairs(&[(0, 0), (10, 1)]); // 20 dropped
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_cursive(&ctx, &bytes).unwrap();
         let count = u16::from_be_bytes([rs.bytes[4], rs.bytes[5]]);
         assert_eq!(count, 1);
@@ -3026,24 +2698,20 @@ mod tests {
     fn rewrite_cursive_returns_none_when_all_dropped() {
         let bytes = build_cursive(&[10], &[(Some((0, 0)), Some((100, 0)))]);
         let map = map_from_pairs(&[(0, 0)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_cursive(&ctx, &bytes).is_none());
     }
 
     #[test]
     fn rewrite_lookup_drops_malformed_context() {
         let map = map_from_pairs(&[(0, 0), (10, 1)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         // Format 0 inside a context subtable is unknown. It falls
         // out as None and the cascade drops the lookup.
         let dummy: Vec<&[u8]> = vec![&[0u8; 6]];
-        assert!(rewrite_lookup(&ctx, gpos_type::CONTEXT, 0, None, &dummy).is_none());
+        assert!(rewrite_lookup(&ctx, gpos_type::CONTEXT, 0, None, &dummy)
+            .unwrap()
+            .is_none());
     }
 
     // ----- Type 7: Context Positioning -----
@@ -3114,10 +2782,7 @@ mod tests {
         let bytes = build_context_pos_format1(&[10], &[vec![(vec![20], vec![(0, 3)])]]);
         let map = map_from_pairs(&[(0, 0), (10, 1), (20, 2)]);
         let renumber: Vec<Option<u16>> = vec![Some(0), Some(1), Some(2), Some(7)];
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: Some(&renumber),
-        };
+        let ctx = RewriterCtx::new(&map, Some(&renumber));
         let rs = rewrite_context_pos(&ctx, &bytes).unwrap();
         // Subtable parses through the shared layout::Context1 helper.
         let parsed = sigilbuzz::tables::gpos::ContextPos::parse(&rs.bytes).unwrap();
@@ -3151,10 +2816,7 @@ mod tests {
         let bytes = build_context_pos_format1(&[10], &[vec![(vec![20], vec![(0, 3)])]]);
         // Drop gid 20: the rule can't fire.
         let map = map_from_pairs(&[(0, 0), (10, 1)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_context_pos(&ctx, &bytes).is_none());
     }
 
@@ -3192,10 +2854,7 @@ mod tests {
             Some(4u16),
             None,
         ];
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: Some(&renumber),
-        };
+        let ctx = RewriterCtx::new(&map, Some(&renumber));
         let rs = rewrite_context_pos(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gpos::ContextPos::parse(&rs.bytes).unwrap();
         assert!(matches!(
@@ -3220,10 +2879,7 @@ mod tests {
         let bytes = build_context_pos_format3(&[vec![10]], &[(0, 5)]);
         let map = map_from_pairs(&[(0, 0), (10, 1)]);
         let renumber: Vec<Option<u16>> = vec![None, None, None, None, None, None];
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: Some(&renumber),
-        };
+        let ctx = RewriterCtx::new(&map, Some(&renumber));
         let rs = rewrite_context_pos(&ctx, &bytes).expect("the rule survives");
         let glyph_count = u16::from_be_bytes([rs.bytes[2], rs.bytes[3]]);
         let rec_count = u16::from_be_bytes([rs.bytes[4], rs.bytes[5]]);
@@ -3236,10 +2892,7 @@ mod tests {
         let bytes = build_chain_context_pos_format3(&[vec![5]], &[vec![10]], &[vec![30]], &[]);
         let map = map_from_pairs(&[(0, 0), (5, 50), (10, 100), (30, 300)]);
         let renumber: Vec<Option<u16>> = vec![Some(0)];
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: Some(&renumber),
-        };
+        let ctx = RewriterCtx::new(&map, Some(&renumber));
         let rs = rewrite_chain_context_pos(&ctx, &bytes).expect("the ignore rule survives");
         // u16 fmt, then per sequence a count and its Offset16s, then
         // the record count.
@@ -3298,10 +2951,7 @@ mod tests {
             &[(0, 1)],
         );
         let map = map_from_pairs(&[(0, 0), (5, 50), (10, 100), (11, 101), (12, 102), (30, 300)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         let rs = rewrite_chain_context_pos(&ctx, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gpos::ChainContextPos::parse(&rs.bytes).unwrap();
         assert!(matches!(
@@ -3316,10 +2966,7 @@ mod tests {
             build_chain_context_pos_format3(&[vec![5]], &[vec![10]], &[vec![30]], &[(0, 1)]);
         // Drop gid 5: backtrack coverage empties -> subtable dies.
         let map = map_from_pairs(&[(0, 0), (10, 100), (30, 300)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         assert!(rewrite_chain_context_pos(&ctx, &bytes).is_none());
     }
 
@@ -3329,10 +2976,7 @@ mod tests {
         let map = map_from_pairs(&[(0, 0), (10, 100)]);
         let renumber: Vec<Option<u16>> =
             vec![Some(0), Some(1), Some(2), Some(3), Some(4), Some(11)];
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: Some(&renumber),
-        };
+        let ctx = RewriterCtx::new(&map, Some(&renumber));
         let rs = rewrite_chain_context_pos(&ctx, &bytes).unwrap();
         // Format-3 chain layout: u16 fmt, u16 btCount, Offset16[bt],
         // u16 inCount, Offset16[in], u16 laCount, Offset16[la],
@@ -3354,11 +2998,8 @@ mod tests {
     fn rewrite_chain_context_pos_via_dispatcher() {
         let bytes = build_chain_context_pos_format3(&[], &[vec![10]], &[], &[(0, 1)]);
         let map = map_from_pairs(&[(0, 0), (10, 100)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
-        let rs = rewrite_subtable(&ctx, gpos_type::CHAINED_CONTEXT, &bytes).unwrap();
+        let ctx = RewriterCtx::new(&map, None);
+        let rs = one(rewrite_subtable(&ctx, gpos_type::CHAINED_CONTEXT, &bytes));
         assert!(sigilbuzz::tables::gpos::ChainContextPos::parse(&rs.bytes).is_ok());
     }
 
@@ -3366,11 +3007,8 @@ mod tests {
     fn rewrite_context_pos_via_dispatcher() {
         let bytes = build_context_pos_format3(&[vec![10]], &[(0, 1)]);
         let map = map_from_pairs(&[(0, 0), (10, 100)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
-        let rs = rewrite_subtable(&ctx, gpos_type::CONTEXT, &bytes).unwrap();
+        let ctx = RewriterCtx::new(&map, None);
+        let rs = one(rewrite_subtable(&ctx, gpos_type::CONTEXT, &bytes));
         assert!(sigilbuzz::tables::gpos::ContextPos::parse(&rs.bytes).is_ok());
     }
 
@@ -3396,11 +3034,8 @@ mod tests {
 
         // Drop 11 and 13.
         let map = map_from_pairs(&[(0, 0), (10, 1), (12, 2), (20, 3), (22, 4)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
-        let rs = rewrite_pair_pos_format2(&ctx, &bytes).unwrap();
+        let ctx = RewriterCtx::new(&map, None);
+        let rs = one(rewrite_pair_pos_format2(&ctx, &bytes).unwrap());
         let pp = PairPos::parse(&rs.bytes).unwrap();
         // (1, 3) -> original (10, 20), class1=1 x class2=1 -> -10.
         let (v1, _) = pp.lookup(1, 3).unwrap();
@@ -3425,10 +3060,7 @@ mod tests {
         let matrix: &[&[i16]] = &[&[0, 0], &[0, 0]];
         let bytes = build_pair_pos_format2(&[10, 11], &cd1, &cd2, matrix);
         let map = map_from_pairs(&[(0, 0), (10, 1), (20, 2)]);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
+        let ctx = RewriterCtx::new(&map, None);
         // Every cell is zero -> no surviving pairs -> subtable drops.
         assert!(rewrite_pair_pos_format2(&ctx, &bytes).is_none());
     }
@@ -3457,11 +3089,8 @@ mod tests {
             pairs.push((g, g - 18));
         }
         let map = map_from_pairs(&pairs);
-        let ctx = RewriterCtx {
-            gid_map: &map,
-            lookup_renumber: None,
-        };
-        let rs = rewrite_pair_pos_format2(&ctx, &bytes).unwrap();
+        let ctx = RewriterCtx::new(&map, None);
+        let rs = one(rewrite_pair_pos_format2(&ctx, &bytes).unwrap());
         let pp = PairPos::parse(&rs.bytes).unwrap();
         // (1, 22) -> original (10, 40): class1=1, class2=1 -> -25.
         let (v1, _) = pp.lookup(1, 22).unwrap();
