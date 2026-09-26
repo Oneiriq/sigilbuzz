@@ -27,7 +27,8 @@ use alloc::vec::Vec;
 
 use super::attach::{self, Attach, AttachSubtable, LookupCx};
 use super::{
-    feature_disabled, filter_for_lookup, resolve_extension, Feature, VarCtx, MAX_NESTED_DEPTH,
+    feature_disabled, filter_for_lookup, resolve_extension, Feature, LookupBudget, VarCtx,
+    MAX_NESTED_DEPTH,
 };
 use crate::buffer::Glyph;
 use crate::tables::gdef::Gdef;
@@ -112,12 +113,14 @@ pub(super) struct GposCx<'a> {
     pub(super) var: &'a VarCtx<'a>,
 }
 
-/// Applies `lookups` in order across `glyphs`.
+/// Applies `lookups` in order across `glyphs`. Nested lookup calls
+/// spend `budget` (see [`LookupBudget`]).
 pub(super) fn apply_stage(
     cx: &GposCx<'_>,
     glyphs: &mut [Glyph],
     att: &mut Attach<'_>,
     lookups: &[StageLookup],
+    budget: &mut LookupBudget,
 ) {
     if glyphs.is_empty() {
         return;
@@ -126,7 +129,7 @@ pub(super) fn apply_stage(
     // serves every match of the stage.
     let run: Vec<MatchGlyph> = glyphs.iter().map(MatchGlyph::from).collect();
     for l in lookups {
-        apply_lookup(cx, glyphs, att, &run, *l);
+        apply_lookup(cx, glyphs, att, &run, *l, budget);
     }
 }
 
@@ -204,16 +207,18 @@ fn parse_subtables<'a>(lookup: &Lookup<'a>) -> Vec<PosSubtable<'a>> {
     out
 }
 
-/// Per-lookup state shared by every subtable of one lookup: its flags
-/// and its feature's joiner handling.
+/// Per-lookup state shared by every subtable of one lookup: its flags,
+/// its feature's joiner handling, and its index in the LookupList.
 struct LookupState<'a> {
     mcx: MatchContext<'a>,
+    index: u16,
 }
 
 impl<'a> LookupState<'a> {
-    fn new(lookup: &Lookup<'a>, gdef: Option<&'a Gdef<'a>>, joiners: Joiners) -> Self {
+    fn new(lookup: &Lookup<'a>, gdef: Option<&'a Gdef<'a>>, joiners: Joiners, index: u16) -> Self {
         Self {
             mcx: MatchContext::new(filter_for_lookup(lookup, gdef), LayoutTable::Gpos, joiners),
+            index,
         }
     }
 }
@@ -225,6 +230,7 @@ fn apply_lookup(
     att: &mut Attach<'_>,
     run: &[MatchGlyph],
     stage: StageLookup,
+    budget: &mut LookupBudget,
 ) {
     let Some(lookup) = cx.gpos.lookup_list().get(stage.index) else {
         return;
@@ -233,14 +239,19 @@ fn apply_lookup(
     if subtables.is_empty() {
         return;
     }
-    let state = LookupState::new(&lookup, cx.gdef, stage.joiners);
+    let state = LookupState::new(&lookup, cx.gdef, stage.joiners, stage.index);
+    // Each lookup starts with no remembered mark base, as in HarfBuzz.
+    att.reset_base_cache();
     let mut i = 0;
     while i < glyphs.len() {
-        if state.mcx.filter().is_skipped(run[i]) {
+        if run
+            .get(i)
+            .is_some_and(|&g| state.mcx.filter().is_skipped(g))
+        {
             i += 1;
             continue;
         }
-        i = match apply_subtables_at(cx, &subtables, &state, glyphs, att, run, i, 0) {
+        i = match apply_subtables_at(cx, &subtables, &state, glyphs, att, run, i, 0, budget) {
             Some(next) => next.max(i + 1),
             None => i + 1,
         };
@@ -250,7 +261,9 @@ fn apply_lookup(
 /// Applies one lookup at position `at` only, for a contextual
 /// lookup's nested records. As in HarfBuzz the glyph's properties are
 /// not checked against the nested lookup's flags; its subtables just
-/// try to apply, with the outer feature's joiner handling.
+/// try to apply, with the outer feature's joiner handling. Every call
+/// spends one unit of `budget` and does nothing once the budget is
+/// gone.
 #[allow(clippy::too_many_arguments)]
 fn apply_lookup_at(
     cx: &GposCx<'_>,
@@ -261,16 +274,17 @@ fn apply_lookup_at(
     at: usize,
     joiners: Joiners,
     depth: u8,
+    budget: &mut LookupBudget,
 ) {
-    if depth >= MAX_NESTED_DEPTH || at >= glyphs.len() {
+    if depth >= MAX_NESTED_DEPTH || at >= glyphs.len() || !budget.take_nested_op() {
         return;
     }
     let Some(lookup) = cx.gpos.lookup_list().get(lookup_index) else {
         return;
     };
     let subtables = parse_subtables(&lookup);
-    let state = LookupState::new(&lookup, cx.gdef, joiners);
-    apply_subtables_at(cx, &subtables, &state, glyphs, att, run, at, depth);
+    let state = LookupState::new(&lookup, cx.gdef, joiners, lookup_index);
+    apply_subtables_at(cx, &subtables, &state, glyphs, att, run, at, depth, budget);
 }
 
 /// Tries each subtable at `at` in order. Returns where the cursor goes
@@ -285,18 +299,22 @@ fn apply_subtables_at(
     run: &[MatchGlyph],
     at: usize,
     depth: u8,
+    budget: &mut LookupBudget,
 ) -> Option<usize> {
     let horizontal = att.direction.is_horizontal();
     let mcx = &state.mcx;
     for sub in subtables {
         let next = match sub {
-            PosSubtable::Single(sp, base) => sp.adjustment(glyphs[at].glyph_id as u16).map(|v| {
-                apply_value(&mut glyphs[at], &v, base, cx.var, horizontal);
-                at + 1
-            }),
+            PosSubtable::Single(sp, base) => {
+                let glyph = glyphs.get_mut(at)?;
+                sp.adjustment(glyph.glyph_id as u16).map(|v| {
+                    apply_value(glyph, &v, base, cx.var, horizontal);
+                    at + 1
+                })
+            }
             PosSubtable::Pair(pp) => apply_pair(pp, state, glyphs, at, cx.var, horizontal),
             PosSubtable::Attach(sub) => {
-                let lcx = LookupCx::new(mcx.input(), cx.var);
+                let lcx = LookupCx::new(mcx.input(), cx.var, state.index);
                 attach::apply_at(sub, glyphs, att, &lcx, at).then_some(at + 1)
             }
             PosSubtable::Context(ctx) => {
@@ -305,7 +323,9 @@ fn apply_subtables_at(
                     ContextPos::Format2(c) => c.matches(run, at, mcx),
                     ContextPos::Format3(c) => c.matches(run, at, mcx).map(|m| (m, c.lookups())),
                 }?;
-                Some(apply_nested(cx, state, glyphs, att, run, m, records, depth))
+                Some(apply_nested(
+                    cx, state, glyphs, att, run, m, records, depth, budget,
+                ))
             }
             PosSubtable::Chain(chain) => {
                 let (m, records) = match chain {
@@ -315,7 +335,9 @@ fn apply_subtables_at(
                         c.matches(run, at, mcx).map(|m| (m, c.lookups()))
                     }
                 }?;
-                Some(apply_nested(cx, state, glyphs, att, run, m, records, depth))
+                Some(apply_nested(
+                    cx, state, glyphs, att, run, m, records, depth, budget,
+                ))
             }
         };
         if next.is_some() {
@@ -337,8 +359,8 @@ fn apply_pair(
     var: &VarCtx<'_>,
     horizontal: bool,
 ) -> Option<usize> {
+    let first = glyphs.get(at)?.glyph_id as u16;
     let j = Skipper::new(state.mcx.input()).next(glyphs, at + 1)?;
-    let first = glyphs[at].glyph_id as u16;
     let second = glyphs[j].glyph_id as u16;
     let (v1, v2, base) = pp.lookup_with_device_base(first, second)?;
     let (left, right) = glyphs.split_at_mut(j);
@@ -350,7 +372,7 @@ fn apply_pair(
 /// Dispatches a contextual match's nested lookup records at the
 /// matched input positions (HarfBuzz's `apply_lookup`; positioning
 /// never changes the run's length). Returns where the walk continues:
-/// the end of the match.
+/// the end of the match. Records past the end of `budget` do not run.
 #[allow(clippy::too_many_arguments)]
 fn apply_nested(
     cx: &GposCx<'_>,
@@ -361,11 +383,15 @@ fn apply_nested(
     mut m: InputMatch,
     records: &[SequenceLookupRecord],
     depth: u8,
+    budget: &mut LookupBudget,
 ) -> usize {
     let joiners = state.mcx.joiners();
     let len = glyphs.len();
     apply_records(&mut m.positions, m.end, len, records, |lookup, at| {
-        apply_lookup_at(cx, lookup, glyphs, att, run, at, joiners, depth + 1);
+        if budget.exhausted() {
+            return None;
+        }
+        apply_lookup_at(cx, lookup, glyphs, att, run, at, joiners, depth + 1, budget);
         Some(0)
     })
 }
@@ -376,6 +402,9 @@ fn apply_nested(
 /// negated there because font space grows upward while vertical
 /// advances run downward. Device / VariationIndex deltas follow the
 /// same rules; `base` is the table their offsets are measured from.
+///
+/// The sums saturate: a font that stacks thousands of adjustments on
+/// one glyph pins the position at the `i32` bounds.
 pub(super) fn apply_value(
     glyph: &mut Glyph,
     v: &ValueRecord,
@@ -383,12 +412,22 @@ pub(super) fn apply_value(
     var: &VarCtx<'_>,
     horizontal: bool,
 ) {
-    glyph.x_offset += i32::from(v.x_placement) + var.resolve(base, v.x_placement_device_off);
-    glyph.y_offset += i32::from(v.y_placement) + var.resolve(base, v.y_placement_device_off);
+    let delta =
+        |value: i16, device: u16| i32::from(value).saturating_add(var.resolve(base, device));
+    glyph.x_offset = glyph
+        .x_offset
+        .saturating_add(delta(v.x_placement, v.x_placement_device_off));
+    glyph.y_offset = glyph
+        .y_offset
+        .saturating_add(delta(v.y_placement, v.y_placement_device_off));
     if horizontal {
-        glyph.x_advance += i32::from(v.x_advance) + var.resolve(base, v.x_advance_device_off);
+        glyph.x_advance = glyph
+            .x_advance
+            .saturating_add(delta(v.x_advance, v.x_advance_device_off));
     } else {
-        glyph.y_advance -= i32::from(v.y_advance) + var.resolve(base, v.y_advance_device_off);
+        glyph.y_advance = glyph
+            .y_advance
+            .saturating_sub(delta(v.y_advance, v.y_advance_device_off));
     }
 }
 

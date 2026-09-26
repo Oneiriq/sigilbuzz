@@ -3,7 +3,8 @@
 
 use super::super::indic_config_for;
 use super::reorder::{
-    cluster_byte_offsets, final_reorder, initial_reorder, merge_pre_base_matras, tag_positions,
+    cluster_byte_offsets, final_reorder, initial_reorder, merge_pre_base_matras,
+    rotate_prefixes_right, tag_positions,
 };
 use super::*;
 use crate::buffer::IndicPosition;
@@ -282,8 +283,7 @@ fn tamil_consonant_syllable_segments() {
 #[test]
 fn telugu_ra_halant_is_not_reph_under_explicit_mode() {
     // Telugu's RephMode is Explicit: bare ra+virama does NOT
-    // tag a reph candidate. Only ra+virama+ZWJ would (not yet
-    // implemented, follow-up issue).
+    // tag a reph candidate. Only ra+virama+ZWJ does.
     let cp = cps("\u{0C30}\u{0C4D}\u{0C15}");
     let config = indic_config_for(Script::Telugu).unwrap();
     let syl = segment_syllables(&cp, &config);
@@ -468,4 +468,154 @@ fn initial_reorder_merges_glyphs_displaced_past_the_base() {
         }
         assert_eq!(clusters_of(&glyphs), clusters, "{level:?}");
     }
+}
+
+/// Small deterministic generator for the differential tests.
+struct Lcg(u64);
+
+impl Lcg {
+    fn below(&mut self, bound: usize) -> usize {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((self.0 >> 33) as usize) % bound.max(1)
+    }
+}
+
+/// The one-rotation-at-a-time loop that `rotate_prefixes_right`
+/// replaces, kept as the reference.
+fn rotate_prefixes_one_by_one(items: &mut [u32], rotations: &[usize]) {
+    for &r in rotations {
+        let item = items[r];
+        for j in (0..r).rev() {
+            items[j + 1] = items[j];
+        }
+        items[0] = item;
+    }
+}
+
+#[test]
+fn rotate_prefixes_right_matches_one_by_one_rotation() {
+    let mut rng = Lcg(7);
+    for _ in 0..3000 {
+        let len = 1 + rng.below(24);
+        let density = 1 + rng.below(4);
+        let mut rotations: Vec<usize> = (1..len).filter(|_| rng.below(density) == 0).collect();
+        rotations.reverse();
+        let mut expected: Vec<u32> = (0..len as u32).collect();
+        rotate_prefixes_one_by_one(&mut expected, &rotations);
+        let mut got: Vec<u32> = (0..len as u32).collect();
+        rotate_prefixes_right(&mut got, &rotations);
+        assert_eq!(got, expected, "len {len} rotations {rotations:?}");
+    }
+}
+
+#[test]
+fn rotate_prefixes_right_ignores_invalid_rotations() {
+    let mut items = [1u32, 2, 3];
+    rotate_prefixes_right(&mut items, &[3]);
+    rotate_prefixes_right(&mut items, &[1, 2]);
+    assert_eq!(items, [1, 2, 3]);
+}
+
+#[test]
+fn final_reorder_all_matches_per_syllable_scan() {
+    let positions = [
+        IndicPosition::Start,
+        IndicPosition::RaToBecomeReph,
+        IndicPosition::BaseC,
+        IndicPosition::PreM,
+        IndicPosition::Smvd,
+    ];
+    let levels = [ClusterLevel::MonotoneCharacters, ClusterLevel::Characters];
+    let reph_positions = [
+        RephPosition::AfterMain,
+        RephPosition::BeforeSub,
+        RephPosition::AfterSub,
+        RephPosition::BeforePost,
+        RephPosition::AfterPost,
+    ];
+    let reph_modes = [RephMode::Implicit, RephMode::Explicit, RephMode::LogRepha];
+    let mut rng = Lcg(11);
+    for _ in 0..3000 {
+        // Consecutive syllables over `n` three-byte codepoints.
+        let n = 1 + rng.below(12);
+        let mut syllables = Vec::new();
+        let mut start = 0;
+        while start < n {
+            let end = (start + 1 + rng.below(4)).min(n);
+            syllables.push(Syllable {
+                kind: SyllableKind::Consonant,
+                start,
+                end,
+                base_index: Some(start),
+                has_reph: false,
+            });
+            start = end;
+        }
+        let byte_offsets: Vec<u32> = (0..=n as u32).map(|i| i * 3).collect();
+        // Glyphs with arbitrary clusters, including interleaved
+        // syllables and clusters past the end of the run.
+        let glyph_count = rng.below(16);
+        let glyphs: Vec<Glyph> = (0..glyph_count)
+            .map(|i| {
+                let mut g = Glyph::new(i as u32, rng.below(3 * n + 4) as u32);
+                g.indic_position = positions[rng.below(positions.len())] as u8;
+                g
+            })
+            .collect();
+        let mut config = deva_config();
+        config.reph_pos = reph_positions[rng.below(reph_positions.len())];
+        config.reph_mode = reph_modes[rng.below(reph_modes.len())];
+        let level = levels[rng.below(levels.len())];
+
+        let mut expected = glyphs.clone();
+        for s in &syllables {
+            let (start, end) = (byte_offsets[s.start], byte_offsets[s.end]);
+            merge_pre_base_matras(&mut expected, start, end, level);
+            final_reorder(
+                &mut expected,
+                start,
+                end,
+                s.end - s.start,
+                config.reph_pos,
+                config.reph_mode,
+                level,
+            );
+        }
+        let mut got = glyphs;
+        final_reorder_all(&mut got, &syllables, &byte_offsets, &config, level);
+        assert_eq!(got, expected);
+    }
+}
+
+#[test]
+fn long_run_of_pre_base_matras_reorders_in_linear_time() {
+    // One consonant followed by 200000 pre-base matras is a single
+    // consonant syllable. Moving the matras one rotation at a time
+    // cost about 2e10 glyph copies.
+    const N: usize = 200_000;
+    let mut cp = vec!['\u{0915}'];
+    cp.extend(core::iter::repeat('\u{093F}').take(N));
+    let mut glyphs = fake_glyphs(cp.len());
+    for s in &segment_syllables(&cp, &deva_config()) {
+        initial_reorder(&cp, &mut glyphs, s, ClusterLevel::MonotoneCharacters);
+    }
+    let mut ids: Vec<u32> = glyphs.iter().map(|g| g.glyph_id).collect();
+    ids.sort_unstable();
+    assert!(ids.iter().copied().eq(1..=cp.len() as u32));
+}
+
+#[test]
+fn many_syllables_final_reorder_in_linear_time() {
+    // 200000 one-consonant syllables. Scanning every glyph once per
+    // syllable cost about 4e10 cluster comparisons.
+    const N: usize = 200_000;
+    let cp = vec!['\u{0915}'; N];
+    let mut glyphs: Vec<Glyph> = (0..N).map(|i| Glyph::new(1, (i * 3) as u32)).collect();
+    let level = ClusterLevel::MonotoneCharacters;
+    shape_indic(None, None, &cp, &mut glyphs, &deva_config(), level);
+    assert_eq!(glyphs.len(), N);
+    assert_eq!(glyphs[N - 1].cluster, ((N - 1) * 3) as u32);
 }

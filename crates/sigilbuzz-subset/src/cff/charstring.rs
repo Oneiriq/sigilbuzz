@@ -99,6 +99,11 @@ pub struct SubrCall {
 /// of the byte stream. CFF1 charstrings stop at `endchar` or
 /// end-of-stream. Both behaviors produce the same call list.
 ///
+/// The stem count that sizes `hintmask` / `cntrmask` data starts at 0
+/// for every body. A subroutine that uses a hint mask set up by its
+/// caller's stem hints is therefore sized as if no stems were
+/// declared. This is a known limitation of the per-body scan.
+///
 /// # Errors
 ///
 /// Returns [`SubsetError::Unsupported`] on a truncated operand push,
@@ -121,7 +126,7 @@ pub fn scan_subr_calls(
     // can skip the right number of hintmask tail bytes.
     let mut stack: Vec<(i32, usize, usize)> = Vec::new();
     // Cumulative stem-pair count, for hintmask/cntrmask tail size.
-    let mut stem_count: u32 = 0;
+    let mut stem_count: usize = 0;
 
     while pos < charstring.len() {
         let b0 = charstring[pos];
@@ -179,22 +184,22 @@ pub fn scan_subr_calls(
             OP_HSTEM | OP_VSTEM | OP_HSTEMHM | OP_VSTEMHM => {
                 // Stem ops consume operand pairs; track stem count
                 // for any subsequent hintmask.
-                let n_pairs = (stack.len() as u32) / 2;
-                stem_count += n_pairs;
+                stem_count = stem_count.saturating_add(stack.len() / 2);
                 stack.clear();
                 pos += 1;
             }
             OP_HINTMASK | OP_CNTRMASK => {
                 // An implicit vstem may precede the first mask if
                 // there are operands left over.
-                let extra_pairs = (stack.len() as u32) / 2;
-                stem_count += extra_pairs;
+                stem_count = stem_count.saturating_add(stack.len() / 2);
                 stack.clear();
-                let mask_bytes = (stem_count as usize).div_ceil(8);
-                if pos + 1 + mask_bytes > charstring.len() {
-                    return Err(SubsetError::Unsupported("CFF hintmask tail truncated"));
-                }
-                pos += 1 + mask_bytes;
+                let mask_bytes = stem_count.div_ceil(8);
+                // `pos < len` here, so `pos + 1` cannot overflow.
+                let next = (pos + 1)
+                    .checked_add(mask_bytes)
+                    .filter(|&next| next <= charstring.len())
+                    .ok_or(SubsetError::Unsupported("CFF hintmask tail truncated"))?;
+                pos = next;
             }
             OP_ESCAPE => {
                 // Two-byte op: clear stack, advance two bytes. We
@@ -320,55 +325,55 @@ pub fn compute_kept_subrs(
 ) -> Result<(Vec<u32>, Vec<u32>), SubsetError> {
     let mut keep_local = alloc::vec![false; local_subrs.len()];
     let mut keep_global = alloc::vec![false; global_subrs.len()];
+    // Subroutines marked kept whose bodies still need a scan. Each
+    // subroutine enters the list at most once, so the walk costs one
+    // scan per kept body even when the call graph is a long chain.
+    let mut pending: Vec<(SubrKind, usize)> = Vec::new();
 
     // Seed: every call site in every kept charstring.
     for cs in kept_charstrings {
         for call in scan_subr_calls(cs, local_subrs.len(), global_subrs.len())? {
-            mark_call(call, &mut keep_local, &mut keep_global);
+            mark_call(call, &mut keep_local, &mut keep_global, &mut pending);
         }
     }
 
-    // Fixed point: each pass scans every kept subroutine body. If a
-    // newly-kept subr calls another, the next pass picks it up.
-    loop {
-        let before = count_kept(&keep_local) + count_kept(&keep_global);
-        for (i, sub) in local_subrs.iter().enumerate() {
-            if !keep_local[i] {
-                continue;
-            }
-            for call in scan_subr_calls(sub, local_subrs.len(), global_subrs.len())? {
-                mark_call(call, &mut keep_local, &mut keep_global);
-            }
-        }
-        for (i, sub) in global_subrs.iter().enumerate() {
-            if !keep_global[i] {
-                continue;
-            }
-            for call in scan_subr_calls(sub, local_subrs.len(), global_subrs.len())? {
-                mark_call(call, &mut keep_local, &mut keep_global);
-            }
-        }
-        let after = count_kept(&keep_local) + count_kept(&keep_global);
-        if after == before {
-            break;
+    // Transitive closure: a kept subroutine may call further ones.
+    while let Some((kind, idx)) = pending.pop() {
+        let body = match kind {
+            SubrKind::Local => local_subrs.get(idx),
+            SubrKind::Global => global_subrs.get(idx),
+        };
+        let Some(body) = body else {
+            continue;
+        };
+        for call in scan_subr_calls(body, local_subrs.len(), global_subrs.len())? {
+            mark_call(call, &mut keep_local, &mut keep_global, &mut pending);
         }
     }
 
     Ok((collect_kept(&keep_local), collect_kept(&keep_global)))
 }
 
-fn mark_call(call: SubrCall, keep_local: &mut [bool], keep_global: &mut [bool]) {
+/// Marks the subroutine `call` targets as kept and queues it for a
+/// scan when it was not kept before. Out-of-range targets are ignored.
+fn mark_call(
+    call: SubrCall,
+    keep_local: &mut [bool],
+    keep_global: &mut [bool],
+    pending: &mut Vec<(SubrKind, usize)>,
+) {
     let target = match call.kind {
         SubrKind::Local => keep_local,
         SubrKind::Global => keep_global,
     };
-    let idx = call.index_after_bias;
-    if idx < 0 {
+    let Ok(idx) = usize::try_from(call.index_after_bias) else {
         return;
-    }
-    let idx = idx as usize;
-    if idx < target.len() {
-        target[idx] = true;
+    };
+    if let Some(slot) = target.get_mut(idx) {
+        if !*slot {
+            *slot = true;
+            pending.push((call.kind, idx));
+        }
     }
 }
 
@@ -397,45 +402,52 @@ pub fn compute_cross_fd_globals(
 ) -> Result<Vec<bool>, SubsetError> {
     let n = global_subrs.len();
     let mut is_cross: Vec<bool> = alloc::vec![false; n];
-    // Pass 1: mark every global whose body directly calls a local.
+    // `callers[g]` lists every global whose body calls global `g`.
+    let mut callers: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
+    let mut pending: Vec<usize> = Vec::new();
+    // Pass 1: mark every global whose body directly calls a local, and
+    // record the global-to-global call edges.
     for (i, body) in global_subrs.iter().enumerate() {
         for call in scan_subr_calls(body, local_count, n)? {
-            if call.kind == SubrKind::Local {
-                is_cross[i] = true;
-                break;
+            match call.kind {
+                SubrKind::Local => {
+                    if let Some(flag) = is_cross.get_mut(i) {
+                        if !*flag {
+                            *flag = true;
+                            pending.push(i);
+                        }
+                    }
+                }
+                SubrKind::Global => {
+                    let callee = usize::try_from(call.index_after_bias)
+                        .ok()
+                        .and_then(|idx| callers.get_mut(idx));
+                    if let Some(list) = callee {
+                        list.push(i);
+                    }
+                }
             }
         }
     }
     // Pass 2: propagate transitively. If global G calls global G' and
     // G' is cross-FD, then G is cross-FD too (G's emitted body would
     // need to point at *one* duplicate of G' for *one* FD, which is
-    // exactly the cross-FD condition). Iterate to a fixed point.
-    loop {
-        let mut changed = false;
-        for (i, body) in global_subrs.iter().enumerate() {
-            if is_cross[i] {
-                continue;
-            }
-            for call in scan_subr_calls(body, local_count, n)? {
-                if call.kind == SubrKind::Global {
-                    let idx = call.index_after_bias;
-                    if idx >= 0 && (idx as usize) < n && is_cross[idx as usize] {
-                        is_cross[i] = true;
-                        changed = true;
-                        break;
-                    }
+    // exactly the cross-FD condition). Walking the reversed call edges
+    // visits each global at most once.
+    while let Some(callee) = pending.pop() {
+        let Some(list) = callers.get(callee) else {
+            continue;
+        };
+        for &caller in list {
+            if let Some(flag) = is_cross.get_mut(caller) {
+                if !*flag {
+                    *flag = true;
+                    pending.push(caller);
                 }
             }
         }
-        if !changed {
-            break;
-        }
     }
     Ok(is_cross)
-}
-
-fn count_kept(keep: &[bool]) -> usize {
-    keep.iter().filter(|k| **k).count()
 }
 
 fn collect_kept(keep: &[bool]) -> Vec<u32> {
@@ -465,17 +477,23 @@ pub fn renumber_subr_call(
     call: &SubrCall,
     new_raw_operand: i32,
 ) -> Result<(), SubsetError> {
-    let span_start = call.operand_byte_offset;
-    let span_end = span_start + call.operand_byte_len;
-    if span_end > charstring.len() {
-        return Err(SubsetError::Unsupported(
+    let span = call
+        .operand_byte_offset
+        .checked_add(call.operand_byte_len)
+        .and_then(|span_end| charstring.get_mut(call.operand_byte_offset..span_end))
+        .ok_or(SubsetError::Unsupported(
             "CFF charstring renumber span past end",
+        ))?;
+    // Re-encode at original width (pad to wider form when the natural
+    // encoding is shorter). The encoding always has `operand_byte_len`
+    // bytes, so it fills the span exactly.
+    let encoded = encode_int_operand_at_width(new_raw_operand, call.operand_byte_len)?;
+    if encoded.len() != span.len() {
+        return Err(SubsetError::Unsupported(
+            "CFF renumber: cannot pad operand to original width",
         ));
     }
-    // Re-encode at original width (pad to wider form when the natural
-    // encoding is shorter).
-    let encoded = encode_int_operand_at_width(new_raw_operand, call.operand_byte_len)?;
-    charstring[span_start..span_end].copy_from_slice(&encoded);
+    span.copy_from_slice(&encoded);
     Ok(())
 }
 
@@ -612,6 +630,32 @@ pub fn renumber_charstring_with_cross_fd(
     global_renumber: &[Option<u32>],
     cross_fd_override: &[Option<u32>],
 ) -> Result<(), SubsetError> {
+    renumber_charstring_impl(
+        charstring,
+        old_local_count,
+        old_global_count,
+        new_local_count,
+        new_global_count,
+        local_renumber,
+        global_renumber,
+        |old_idx| cross_fd_override.get(old_idx).copied().flatten(),
+    )
+}
+
+/// Shared body of [`renumber_charstring_with_cross_fd`]. The cross-FD
+/// override is a lookup function so callers can keep a sparse table.
+// Mirrors the argument list of the public wrapper above.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn renumber_charstring_impl(
+    charstring: &mut [u8],
+    old_local_count: usize,
+    old_global_count: usize,
+    new_local_count: usize,
+    new_global_count: usize,
+    local_renumber: &[Option<u32>],
+    global_renumber: &[Option<u32>],
+    cross_fd_override: impl Fn(usize) -> Option<u32>,
+) -> Result<(), SubsetError> {
     let calls = scan_subr_calls(charstring, old_local_count, old_global_count)?;
     let new_local_bias = subr_bias(new_local_count);
     let new_global_bias = subr_bias(new_global_count);
@@ -620,20 +664,20 @@ pub fn renumber_charstring_with_cross_fd(
         // offsets, but since we always re-encode at the original byte
         // width, the offsets stay stable. Reverse-iterate anyway as a
         // belt-and-suspenders against future variable-width changes.
-        let old_idx = call.index_after_bias;
-        if old_idx < 0 {
+        if call.index_after_bias < 0 {
             return Err(SubsetError::Unsupported(
                 "CFF charstring negative subr index after bias",
             ));
         }
-        let old_idx = old_idx as usize;
+        let old_idx = usize::try_from(call.index_after_bias)
+            .map_err(|_| SubsetError::Unsupported("CFF charstring calls dropped subroutine"))?;
         let new_idx =
             match call.kind {
                 SubrKind::Local => local_renumber.get(old_idx).copied().flatten().ok_or(
                     SubsetError::Unsupported("CFF charstring calls dropped subroutine"),
                 )?,
                 SubrKind::Global => {
-                    if let Some(Some(target)) = cross_fd_override.get(old_idx).copied() {
+                    if let Some(target) = cross_fd_override(old_idx) {
                         target
                     } else {
                         global_renumber.get(old_idx).copied().flatten().ok_or(

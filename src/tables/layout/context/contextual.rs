@@ -3,7 +3,10 @@
 
 use alloc::vec::Vec;
 
-use super::{parse_sequence_lookup_records, SequenceLookupRecord};
+use super::{
+    parse_sequence_lookup_records, parse_shared_sets, read_offset_array, read_rule_offsets,
+    read_u16_array, rule_bytes, RuleBudget, SequenceLookupRecord,
+};
 use crate::error::{Error, Result};
 use crate::tables::layout::skip_iter::{match_input, InputMatch, MatchContext, MatchGlyph};
 use crate::tables::layout::{ClassDef, Coverage};
@@ -19,13 +22,16 @@ use crate::tables::parse::Reader;
 #[derive(Debug, Clone)]
 pub struct Context1<'a> {
     pub(super) coverage: Coverage<'a>,
-    rule_sets: Vec<Option<RuleSet1>>,
+    /// Index into `sets` for each coverage index, `None` for a NULL
+    /// rule set.
+    set_slots: Vec<Option<usize>>,
+    sets: Vec<RuleSet1>,
 }
 
 /// All rules keyed off a single covered first glyph.
 #[derive(Debug, Clone)]
 pub struct RuleSet1 {
-    /// Rules tried in declaration order; first match wins.
+    /// Rules tried in declaration order. The first match wins.
     pub rules: Vec<Rule1>,
 }
 
@@ -52,32 +58,24 @@ impl<'a> Context1<'a> {
             });
         }
         let coverage_off = r.read_u16()? as usize;
-        let rule_set_count = r.read_u16()? as usize;
-        let mut rule_set_offs = Vec::with_capacity(rule_set_count);
-        for _ in 0..rule_set_count {
-            rule_set_offs.push(r.read_u16()? as usize);
-        }
+        let rule_set_offs = read_offset_array(&mut r)?;
         let coverage = Coverage::parse(data.get(coverage_off..).ok_or(Error::Malformed {
             offset: coverage_off,
             context: "context format 1 coverage offset past end",
         })?)?;
 
-        let mut rule_sets = Vec::with_capacity(rule_set_count);
-        for off in rule_set_offs {
-            if off == 0 {
-                // NULL ruleset: spec permits it.
-                rule_sets.push(None);
-                continue;
-            }
-            let set_bytes = data.get(off..).ok_or(Error::Malformed {
-                offset: off,
-                context: "context format 1 ruleSet offset past end",
-            })?;
-            rule_sets.push(Some(parse_rule_set1(data, off, set_bytes)?));
-        }
+        let mut budget = RuleBudget::for_table(data);
+        let (set_slots, sets) = parse_shared_sets(
+            data,
+            &rule_set_offs,
+            "context format 1 ruleSet offset past end",
+            &mut budget,
+            parse_rule_set1,
+        )?;
         Ok(Self {
             coverage,
-            rule_sets,
+            set_slots,
+            sets,
         })
     }
 
@@ -92,44 +90,35 @@ impl<'a> Context1<'a> {
     /// the subtable carries a NULL slot.
     #[must_use]
     pub fn rule_set(&self, coverage_index: u16) -> Option<&RuleSet1> {
-        self.rule_sets.get(coverage_index as usize)?.as_ref()
+        let set = (*self.set_slots.get(coverage_index as usize)?)?;
+        self.sets.get(set)
     }
 }
 
-fn parse_rule_set1(full: &[u8], set_off: usize, set_bytes: &[u8]) -> Result<RuleSet1> {
-    let mut r = Reader::new(set_bytes);
-    let rule_count = r.read_u16()? as usize;
-    let mut rule_offs = Vec::with_capacity(rule_count);
-    for _ in 0..rule_count {
-        rule_offs.push(r.read_u16()? as usize);
-    }
-    let mut rules = Vec::with_capacity(rule_count);
+fn parse_rule_set1(
+    full: &[u8],
+    set_off: usize,
+    set_bytes: &[u8],
+    budget: &mut RuleBudget,
+) -> Result<RuleSet1> {
+    let rule_offs = read_rule_offsets(set_off, set_bytes, budget)?;
+    let mut rules = Vec::with_capacity(rule_offs.len());
     for off in rule_offs {
-        let abs = set_off + off;
-        let bytes = full.get(abs..).ok_or(Error::Malformed {
-            offset: abs,
-            context: "context format 1 rule offset past end",
-        })?;
-        rules.push(parse_rule1(bytes)?);
+        let (abs, bytes) = rule_bytes(full, set_off, off, "context format 1 rule offset past end")?;
+        rules.push(parse_rule1(bytes, abs, budget)?);
     }
     Ok(RuleSet1 { rules })
 }
 
-fn parse_rule1(data: &[u8]) -> Result<Rule1> {
+fn parse_rule1(data: &[u8], abs: usize, budget: &mut RuleBudget) -> Result<Rule1> {
     let mut r = Reader::new(data);
     let glyph_count = r.read_u16()? as usize;
     let lookup_count = r.read_u16()?;
-    if glyph_count == 0 {
-        // Rule with zero input is meaningless; treat as no-match.
-        return Ok(Rule1 {
-            input_tail: Vec::new(),
-            lookups: parse_sequence_lookup_records(&mut r, lookup_count)?,
-        });
-    }
-    let mut input_tail = Vec::with_capacity(glyph_count - 1);
-    for _ in 0..glyph_count - 1 {
-        input_tail.push(r.read_u16()?);
-    }
+    // A rule with zero input glyphs is meaningless. It parses with an
+    // empty tail, the same as a one-glyph rule.
+    let tail_len = glyph_count.saturating_sub(1);
+    budget.charge(abs, tail_len + 2 * usize::from(lookup_count))?;
+    let input_tail = read_u16_array(&mut r, tail_len)?;
     let lookups = parse_sequence_lookup_records(&mut r, lookup_count)?;
     Ok(Rule1 {
         input_tail,
@@ -148,13 +137,15 @@ fn parse_rule1(data: &[u8]) -> Result<Rule1> {
 pub struct Context2<'a> {
     pub(super) coverage: Coverage<'a>,
     pub(super) class_def: ClassDef<'a>,
-    class_sets: Vec<Option<ClassSet2>>,
+    /// Index into `sets` for each class, `None` for a NULL class set.
+    set_slots: Vec<Option<usize>>,
+    sets: Vec<ClassSet2>,
 }
 
 /// All class-based rules keyed off a single input class.
 #[derive(Debug, Clone)]
 pub struct ClassSet2 {
-    /// Rules tried in declaration order; first match wins.
+    /// Rules tried in declaration order. The first match wins.
     pub rules: Vec<ClassRule2>,
 }
 
@@ -181,11 +172,7 @@ impl<'a> Context2<'a> {
         }
         let coverage_off = r.read_u16()? as usize;
         let class_def_off = r.read_u16()? as usize;
-        let class_set_count = r.read_u16()? as usize;
-        let mut set_offs = Vec::with_capacity(class_set_count);
-        for _ in 0..class_set_count {
-            set_offs.push(r.read_u16()? as usize);
-        }
+        let set_offs = read_offset_array(&mut r)?;
 
         let coverage = Coverage::parse(data.get(coverage_off..).ok_or(Error::Malformed {
             offset: coverage_off,
@@ -197,22 +184,19 @@ impl<'a> Context2<'a> {
             "context format 2 classDef offset past end",
         )?;
 
-        let mut class_sets = Vec::with_capacity(class_set_count);
-        for off in set_offs {
-            if off == 0 {
-                class_sets.push(None);
-                continue;
-            }
-            let set_bytes = data.get(off..).ok_or(Error::Malformed {
-                offset: off,
-                context: "context format 2 classSet offset past end",
-            })?;
-            class_sets.push(Some(parse_class_set2(data, off, set_bytes)?));
-        }
+        let mut budget = RuleBudget::for_table(data);
+        let (set_slots, sets) = parse_shared_sets(
+            data,
+            &set_offs,
+            "context format 2 classSet offset past end",
+            &mut budget,
+            parse_class_set2,
+        )?;
         Ok(Self {
             coverage,
             class_def,
-            class_sets,
+            set_slots,
+            sets,
         })
     }
 
@@ -231,46 +215,36 @@ impl<'a> Context2<'a> {
     /// ClassSet for a given class index, or `None` when absent.
     #[must_use]
     pub fn class_set(&self, class_index: u16) -> Option<&ClassSet2> {
-        self.class_sets.get(class_index as usize)?.as_ref()
+        let set = (*self.set_slots.get(class_index as usize)?)?;
+        self.sets.get(set)
     }
 }
 
-fn parse_class_set2(full: &[u8], set_off: usize, set_bytes: &[u8]) -> Result<ClassSet2> {
-    let mut r = Reader::new(set_bytes);
-    let rule_count = r.read_u16()? as usize;
-    let mut offs = Vec::with_capacity(rule_count);
-    for _ in 0..rule_count {
-        offs.push(r.read_u16()? as usize);
-    }
-    let mut rules = Vec::with_capacity(rule_count);
-    for off in offs {
-        let abs = set_off + off;
-        let bytes = full.get(abs..).ok_or(Error::Malformed {
-            offset: abs,
-            context: "context format 2 rule offset past end",
-        })?;
-        rules.push(parse_class_rule2(bytes)?);
+fn parse_class_set2(
+    full: &[u8],
+    set_off: usize,
+    set_bytes: &[u8],
+    budget: &mut RuleBudget,
+) -> Result<ClassSet2> {
+    let rule_offs = read_rule_offsets(set_off, set_bytes, budget)?;
+    let mut rules = Vec::with_capacity(rule_offs.len());
+    for off in rule_offs {
+        let (abs, bytes) = rule_bytes(full, set_off, off, "context format 2 rule offset past end")?;
+        rules.push(parse_class_rule2(bytes, abs, budget)?);
     }
     Ok(ClassSet2 { rules })
 }
 
-fn parse_class_rule2(data: &[u8]) -> Result<ClassRule2> {
+fn parse_class_rule2(data: &[u8], abs: usize, budget: &mut RuleBudget) -> Result<ClassRule2> {
     let mut r = Reader::new(data);
     let glyph_count = r.read_u16()? as usize;
     let lookup_count = r.read_u16()?;
-    if glyph_count == 0 {
-        return Ok(ClassRule2 {
-            input_classes_tail: Vec::new(),
-            lookups: parse_sequence_lookup_records(&mut r, lookup_count)?,
-        });
-    }
-    let mut input = Vec::with_capacity(glyph_count - 1);
-    for _ in 0..glyph_count - 1 {
-        input.push(r.read_u16()?);
-    }
+    let tail_len = glyph_count.saturating_sub(1);
+    budget.charge(abs, tail_len + 2 * usize::from(lookup_count))?;
+    let input_classes_tail = read_u16_array(&mut r, tail_len)?;
     let lookups = parse_sequence_lookup_records(&mut r, lookup_count)?;
     Ok(ClassRule2 {
-        input_classes_tail: input,
+        input_classes_tail,
         lookups,
     })
 }
@@ -301,12 +275,12 @@ impl<'a> Context3<'a> {
         }
         let glyph_count = r.read_u16()? as usize;
         let lookup_count = r.read_u16()?;
-        let mut cov_offs = Vec::with_capacity(glyph_count);
+        let mut cov_offs = Vec::with_capacity(glyph_count.min(r.remaining() / 2));
         for _ in 0..glyph_count {
             cov_offs.push(r.read_u16()? as usize);
         }
         let lookups = parse_sequence_lookup_records(&mut r, lookup_count)?;
-        let mut input = Vec::with_capacity(glyph_count);
+        let mut input = Vec::with_capacity(cov_offs.len());
         for off in cov_offs {
             let bytes = data.get(off..).ok_or(Error::Malformed {
                 offset: off,

@@ -2,9 +2,8 @@
 //!
 //! A single error enum keeps the public surface small. Variants either
 //! carry a byte offset (parse failures, so callers can bisect a bad
-//! font) or a brief reason string. The type is `Copy`-free because the
-//! reason strings are owned `&'static str` slices; no allocation on the
-//! error path.
+//! font) or a brief reason string. The reason strings are
+//! `&'static str`, so building an error never allocates.
 
 use core::fmt;
 
@@ -41,9 +40,10 @@ pub enum Error {
         tag: [u8; 4],
     },
 
-    /// The feature in question is recognized but not yet implemented.
-    /// Used sparingly during the bootstrap period. Every `Unsupported`
-    /// variant should have a tracking issue.
+    /// The input is well-formed but uses something sigilbuzz does not
+    /// handle, for example a table format it does not implement, a
+    /// non-zero font index on a plain TTF/OTF file, or text longer
+    /// than `u32::MAX` bytes.
     Unsupported {
         /// Brief human-readable context.
         context: &'static str,

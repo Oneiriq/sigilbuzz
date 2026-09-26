@@ -604,3 +604,92 @@ fn context_walks_skip_zwj_always_and_zwnj_unless_manual() {
     assert!(ctx.matches(&[b, zwnj, i, l], 2, &manual).is_none());
     assert!(ctx.matches(&[b, i, zwnj, l], 1, &manual).is_none());
 }
+
+// ------------------------- Parse budget -------------------------
+
+fn push_repeated_u16(out: &mut Vec<u8>, value: u16, count: usize) {
+    for _ in 0..count {
+        out.extend_from_slice(&value.to_be_bytes());
+    }
+}
+
+#[test]
+fn chain_context1_many_offsets_to_one_large_rule_hit_the_budget() {
+    // One rule set with 65535 rule offsets that all point at the
+    // same rule. The rule sits inside the offset array, so every
+    // count it reads is R and it stores about 40000 values.
+    // Copying that rule 65535 times would need gigabytes.
+    const R: u16 = 10_000;
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes()); // format
+    out.extend_from_slice(&8u16.to_be_bytes()); // coverage offset
+    out.extend_from_slice(&1u16.to_be_bytes()); // rule set count
+    out.extend_from_slice(&14u16.to_be_bytes()); // rule set offset
+    out.extend_from_slice(&build_coverage_format1(&[5]));
+    assert_eq!(out.len(), 14);
+    out.extend_from_slice(&u16::MAX.to_be_bytes()); // rule count
+    push_repeated_u16(&mut out, R, usize::from(u16::MAX));
+    assert!(matches!(
+        ChainContext1::parse(&out),
+        Err(Error::Malformed { .. })
+    ));
+}
+
+#[test]
+fn context1_overlapping_rule_sets_hit_the_budget() {
+    // 16000 rule-set offsets two bytes apart, all inside one run of
+    // the u16 value V. Every set reads V rules of V glyphs and V
+    // lookups. The offsets differ, so the sets cannot share one
+    // parsed copy, and parsing all of them would need about 25 GB.
+    const V: u16 = 512;
+    const SETS: usize = 16_000;
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes()); // format
+    let cov_off = 6 + 2 * SETS;
+    let region = cov_off + 6;
+    out.extend_from_slice(&(cov_off as u16).to_be_bytes());
+    out.extend_from_slice(&(SETS as u16).to_be_bytes());
+    for j in 0..SETS {
+        out.extend_from_slice(&((region + 2 * j) as u16).to_be_bytes());
+    }
+    out.extend_from_slice(&build_coverage_format1(&[5]));
+    assert_eq!(out.len(), region);
+    push_repeated_u16(&mut out, V, SETS + 4 * usize::from(V));
+    assert!(matches!(
+        Context1::parse(&out),
+        Err(Error::Malformed { .. })
+    ));
+}
+
+#[test]
+fn context1_slots_sharing_a_rule_set_offset_all_match() {
+    // Coverage [10, 11, 12]. All three rule-set offsets point at the
+    // same set, whose one rule is input [first, 20] with lookup
+    // (0, 3). The shared set must answer for every coverage index.
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes()); // format
+    out.extend_from_slice(&12u16.to_be_bytes()); // coverage offset
+    out.extend_from_slice(&3u16.to_be_bytes()); // rule set count
+    for _ in 0..3 {
+        out.extend_from_slice(&22u16.to_be_bytes()); // shared rule set
+    }
+    out.extend_from_slice(&build_coverage_format1(&[10, 11, 12]));
+    assert_eq!(out.len(), 22);
+    out.extend_from_slice(&1u16.to_be_bytes()); // rule count
+    out.extend_from_slice(&4u16.to_be_bytes()); // rule offset
+    out.extend_from_slice(&2u16.to_be_bytes()); // glyphCount
+    out.extend_from_slice(&1u16.to_be_bytes()); // lookupCount
+    out.extend_from_slice(&20u16.to_be_bytes()); // tail[0]
+    out.extend_from_slice(&0u16.to_be_bytes()); // seq
+    out.extend_from_slice(&3u16.to_be_bytes()); // lookup index
+
+    let ctx = Context1::parse(&out).unwrap();
+    for first in [10u16, 11, 12] {
+        let (m, lookups) = ctx.matches(&run(&[first, 20]), 0, &PLAIN).unwrap();
+        assert_eq!(span(&m), 2);
+        assert_eq!(lookups[0].lookup_list_index, 3);
+    }
+    assert!(ctx.matches(&run(&[10, 21]), 0, &PLAIN).is_none());
+    assert_eq!(ctx.rule_set(2).unwrap().rules.len(), 1);
+    assert!(ctx.rule_set(3).is_none());
+}

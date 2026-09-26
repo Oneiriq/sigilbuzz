@@ -98,39 +98,42 @@ pub unsafe extern "C" fn hb_set_reference(set: *mut hb_set_t) -> *mut hb_set_t {
 /// Adds `codepoint` to the set. No-op if already present.
 ///
 /// # Safety
-/// `set` must be valid.
+/// `set` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_set_add(set: *mut hb_set_t, codepoint: u32) {
     if set.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `set` is non-null and the caller guarantees it points
+    // to a live `hb_set_t`.
     unsafe { (*set).with_inner_mut(|s| s.insert(codepoint)) };
 }
 
 /// Removes `codepoint` from the set. No-op if absent.
 ///
 /// # Safety
-/// `set` must be valid.
+/// `set` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_set_del(set: *mut hb_set_t, codepoint: u32) {
     if set.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `set` is non-null and the caller guarantees it points
+    // to a live `hb_set_t`.
     unsafe { (*set).with_inner_mut(|s| s.remove(&codepoint)) };
 }
 
 /// Returns 1 if `codepoint` is in the set, 0 otherwise.
 ///
 /// # Safety
-/// `set` must be valid.
+/// `set` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_set_has(set: *const hb_set_t, codepoint: u32) -> hb_bool_t {
     if set.is_null() {
         return 0;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `set` is non-null and the caller guarantees it points
+    // to a live `hb_set_t`.
     unsafe {
         if (*set).with_inner(|s| s.contains(&codepoint)) {
             1
@@ -143,13 +146,14 @@ pub unsafe extern "C" fn hb_set_has(set: *const hb_set_t, codepoint: u32) -> hb_
 /// Returns the number of integers currently in the set.
 ///
 /// # Safety
-/// `set` must be valid.
+/// `set` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_set_get_population(set: *const hb_set_t) -> u32 {
     if set.is_null() {
         return 0;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `set` is non-null and the caller guarantees it points
+    // to a live `hb_set_t`.
     unsafe { (*set).with_inner(|s| s.len()) as u32 }
 }
 
@@ -160,15 +164,18 @@ pub unsafe extern "C" fn hb_set_get_population(set: *const hb_set_t) -> u32 {
 /// further member exists; in that case `*codepoint` is left untouched.
 ///
 /// # Safety
-/// `set` must be valid; `codepoint` must point to a writable `u32`.
+/// `set` must be null or valid. `codepoint` must be null or point to
+/// a writable `u32`.
 #[no_mangle]
 pub unsafe extern "C" fn hb_set_next(set: *const hb_set_t, codepoint: *mut u32) -> hb_bool_t {
     if set.is_null() || codepoint.is_null() {
         return 0;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `codepoint` is non-null and the caller guarantees it
+    // points to a readable and writable `u32`.
     let current = unsafe { *codepoint };
-    // SAFETY: caller asserts validity.
+    // SAFETY: `set` is non-null and the caller guarantees it points
+    // to a live `hb_set_t`.
     let next = unsafe {
         (*set).with_inner(|s| {
             if current == u32::MAX {
@@ -189,7 +196,8 @@ pub unsafe extern "C" fn hb_set_next(set: *const hb_set_t, codepoint: *mut u32) 
     };
     match next {
         Some(v) => {
-            // SAFETY: caller asserts writeable.
+            // SAFETY: `codepoint` is non-null and the caller
+            // guarantees it points to a writable `u32`.
             unsafe { *codepoint = v };
             1
         }
@@ -205,6 +213,8 @@ mod tests {
 
     #[test]
     fn create_destroy_null_safe() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             hb_set_destroy(ptr::null_mut());
             assert!(hb_set_reference(ptr::null_mut()).is_null());
@@ -214,6 +224,8 @@ mod tests {
     #[test]
     fn add_has_population() {
         let s = hb_set_create();
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             assert_eq!(hb_set_get_population(s), 0);
             hb_set_add(s, 65);
@@ -232,6 +244,8 @@ mod tests {
     #[test]
     fn next_walks_ascending() {
         let s = hb_set_create();
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             hb_set_add(s, 100);
             hb_set_add(s, 1);
@@ -252,6 +266,8 @@ mod tests {
 
     #[test]
     fn reference_shares_payload() {
+        // SAFETY: every pointer passed here is a live handle created in
+        // this test, and each reference is released once.
         unsafe {
             let a = hb_set_create();
             hb_set_add(a, 7);
@@ -272,6 +288,8 @@ mod tests {
 
     #[test]
     fn empty_next_yields_false() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             let s = hb_set_create();
             let mut cp: u32 = u32::MAX;
@@ -282,6 +300,8 @@ mod tests {
 
     #[test]
     fn null_setters_are_noops() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             hb_set_add(ptr::null_mut(), 5);
             hb_set_del(ptr::null_mut(), 5);

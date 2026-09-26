@@ -3,10 +3,10 @@
 
 use alloc::vec::Vec;
 
-use crate::coverage::emit_coverage_from_pairs;
+use super::rewrite_coverage_array;
+use super::single::{emit_offset_array_subtable, emit_offset_list};
 use crate::device::Dedup;
-use crate::layout::{parse_coverage_glyphs, RewriterCtx, RewrittenSubtable};
-
+use crate::layout::{RewriterCtx, RewrittenSubtable};
 // ===== GSUB types 5 / 6 / 8: contextual / chained / reverse-chain =====
 //
 // These types wire glyph-stream context into the substitution pipeline.
@@ -88,7 +88,7 @@ pub(crate) fn encode_lookup_records(records: &[PatchedLookupRecord]) -> Vec<u8> 
 
 /// Rewrites a GSUB type 5 (Context Substitution) subtable. Auto-
 /// dispatches on the leading u16 format.
-pub(super) fn rewrite_type5(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
+pub(crate) fn rewrite_type5(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     if sub.len() < 2 {
         return None;
     }
@@ -130,7 +130,7 @@ fn rewrite_type5_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
         return None;
     }
     let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let covered = ctx.gid_map.coverage_glyphs(cov_bytes)?;
     let pair_count = covered.len().min(set_count);
     let map = ctx.gid_map;
 
@@ -161,7 +161,7 @@ fn rewrite_type5_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     if surviving_sets.is_empty() {
         return None;
     }
-    Some(emit_context_format1(ctx, &surviving_sets))
+    Some(emit_offset_array_subtable(ctx, &surviving_sets))
 }
 
 fn rewrite_type5_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>> {
@@ -169,10 +169,10 @@ fn rewrite_type5_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
         return None;
     }
     let rule_count = u16::from_be_bytes([set_bytes[0], set_bytes[1]]) as usize;
-    if set_bytes.len() < 2 + rule_count * 2 {
+    let map = ctx.gid_map;
+    if set_bytes.len() < 2 + rule_count * 2 || !map.spend(rule_count) {
         return None;
     }
-    let map = ctx.gid_map;
 
     let mut surviving_rules: Vec<Vec<u8>> = Vec::new();
     for i in 0..rule_count {
@@ -186,6 +186,9 @@ fn rewrite_type5_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
         }
         let glyph_count = u16::from_be_bytes([rule_bytes[0], rule_bytes[1]]) as usize;
         let lookup_count = u16::from_be_bytes([rule_bytes[2], rule_bytes[3]]) as usize;
+        if !map.spend(glyph_count + lookup_count) {
+            return None;
+        }
         if glyph_count == 0 {
             // Zero-input rule: preserve as-is (parsing tolerates it).
             // Patch nested-lookups only.
@@ -258,53 +261,7 @@ fn rewrite_type5_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
     //   u16      ruleCount
     //   Offset16 ruleOffsets[ruleCount]    (RuleSet-relative)
     //   Rule[] bodies
-    let mut out = Vec::new();
-    out.extend_from_slice(&(surviving_rules.len() as u16).to_be_bytes());
-    let offsets_start = out.len();
-    for _ in 0..surviving_rules.len() {
-        out.extend_from_slice(&[0u8; 2]);
-    }
-    let mut bodies = Dedup::default();
-    for (i, body) in surviving_rules.iter().enumerate() {
-        let body_start = bodies.place(&mut out, body);
-        let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
-    }
-    Some(out)
-}
-
-/// Emits a Context Substitution Format 1 subtable around the
-/// `(new_first_gid, rule_set_bytes)` pairs produced by
-/// [`rewrite_type5_rule_set`].
-pub(super) fn emit_context_format1(
-    ctx: &RewriterCtx,
-    surviving: &[(u16, Vec<u8>)],
-) -> RewrittenSubtable {
-    let mut out = Vec::new();
-    out.extend_from_slice(&1u16.to_be_bytes()); // substFormat
-    let cov_off_slot = out.len();
-    out.extend_from_slice(&0u16.to_be_bytes()); // coverage offset placeholder
-    out.extend_from_slice(&(surviving.len() as u16).to_be_bytes()); // ruleSetCount
-    let set_offsets_start = out.len();
-    for _ in 0..surviving.len() {
-        out.extend_from_slice(&[0u8; 2]);
-    }
-    let mut bodies = Dedup::default();
-    for (i, (_first, set_body)) in surviving.iter().enumerate() {
-        let body_start = bodies.place(&mut out, set_body);
-        let slot = set_offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
-    }
-    let pairs: Vec<(u16, u16)> = surviving
-        .iter()
-        .enumerate()
-        .map(|(i, (g, _))| (*g, i as u16))
-        .collect();
-    let cov_bytes = emit_coverage_from_pairs(&pairs);
-    let cov_off = ctx.off16(out.len());
-    out.extend_from_slice(&cov_bytes);
-    out[cov_off_slot..cov_off_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
-    RewrittenSubtable { bytes: out }
+    Some(emit_offset_list(ctx, &surviving_rules))
 }
 
 /// GSUB type 5 format 2 (class-based contextual substitution).
@@ -346,8 +303,8 @@ fn rewrite_type5_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
         return None;
     }
     let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
-    let cd_pairs_old = crate::layout::classdef_pairs_at(sub, cd_off)?;
+    let covered = ctx.gid_map.coverage_glyphs(cov_bytes)?;
+    let cd_pairs_old = ctx.gid_map.classdef_pairs_at(sub, cd_off)?;
     let map = ctx.gid_map;
 
     // Filter Coverage to surviving first glyphs and rebuild it.
@@ -452,7 +409,8 @@ fn rewrite_type5_class_set(
         return None;
     }
     let rule_count = u16::from_be_bytes([set_bytes[0], set_bytes[1]]) as usize;
-    if set_bytes.len() < 2 + rule_count * 2 {
+    let map = ctx.gid_map;
+    if set_bytes.len() < 2 + rule_count * 2 || !map.spend(rule_count) {
         return None;
     }
     let mut surviving_rules: Vec<Vec<u8>> = Vec::new();
@@ -467,6 +425,9 @@ fn rewrite_type5_class_set(
         }
         let glyph_count = u16::from_be_bytes([rule_bytes[0], rule_bytes[1]]) as usize;
         let lookup_count = u16::from_be_bytes([rule_bytes[2], rule_bytes[3]]) as usize;
+        if !map.spend(glyph_count + lookup_count) {
+            return None;
+        }
         let tail = glyph_count.saturating_sub(1);
         let need = 4 + tail * 2 + lookup_count * 4;
         if rule_bytes.len() < need {
@@ -508,19 +469,7 @@ fn rewrite_type5_class_set(
     if surviving_rules.is_empty() {
         return None;
     }
-    let mut out = Vec::new();
-    out.extend_from_slice(&(surviving_rules.len() as u16).to_be_bytes());
-    let offsets_start = out.len();
-    for _ in 0..surviving_rules.len() {
-        out.extend_from_slice(&[0u8; 2]);
-    }
-    let mut bodies = Dedup::default();
-    for (i, body) in surviving_rules.iter().enumerate() {
-        let body_start = bodies.place(&mut out, body);
-        let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
-    }
-    Some(out)
+    Some(emit_offset_list(ctx, &surviving_rules))
 }
 
 /// GSUB type 5 format 3 (coverage-based contextual substitution).
@@ -543,23 +492,10 @@ fn rewrite_type5_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     if sub.len() < need {
         return None;
     }
-    let map = ctx.gid_map;
-
     // Rewrite each input Coverage. If any becomes empty, drop the whole
     // subtable. A context rule with no possible match for one position
     // can't fire.
-    let mut new_cov_bytes: Vec<Vec<u8>> = Vec::with_capacity(glyph_count);
-    for j in 0..glyph_count {
-        let off_off = cov_offs_off + j * 2;
-        let cov_off = u16::from_be_bytes([sub[off_off], sub[off_off + 1]]) as usize;
-        let cov_bytes = sub.get(cov_off..)?;
-        let covered = parse_coverage_glyphs(cov_bytes);
-        let new_covered: Vec<u16> = covered.iter().filter_map(|&g| map.map(g)).collect();
-        if new_covered.is_empty() {
-            return None;
-        }
-        new_cov_bytes.push(crate::coverage::emit_coverage_from_glyphs(&new_covered));
-    }
+    let new_cov_bytes = rewrite_coverage_array(ctx.gid_map, sub, cov_offs_off, glyph_count)?;
 
     let recs_off = cov_offs_off + glyph_count * 2;
     let records = parse_and_remap_lookup_records(sub, recs_off, lookup_count, ctx.lookup_renumber)?;

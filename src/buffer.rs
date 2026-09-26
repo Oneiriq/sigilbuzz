@@ -149,15 +149,12 @@ pub mod unicode_prop {
 }
 
 /// Indic positional role, stored in [`Glyph::indic_position`] as
-/// `u8`. Mirrors HarfBuzz's `ot_position_t` so that a future port
-/// of the richer Indic reorder (pref, below-form resolution, ...) can
-/// drop the constants in without a rename. Only the slots
-/// sigilbuzz currently uses are documented; reserved intermediate
-/// values keep parity with HarfBuzz so the enum's integer layout
-/// does not shift.
+/// `u8`. The discriminants mirror HarfBuzz's `ot_position_t`, so a
+/// port of the richer Indic reorder (pref, below-form resolution,
+/// ...) can add the missing slots (`PreC = 3`, `AfterMain = 5`
+/// through `AfterPost = 12`, `End = 14`) without renumbering these.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // reserved slots mirror HarfBuzz's ot_position_t
 pub enum IndicPosition {
     /// Default / unresolved, also used for non-Indic glyphs.
     Start = 0,
@@ -167,30 +164,11 @@ pub enum IndicPosition {
     RaToBecomeReph = 1,
     /// Pre-base matra (before the base consonant visually).
     PreM = 2,
-    /// Pre-base consonant (reserved).
-    PreC = 3,
     /// The base consonant of a syllable.
     BaseC = 4,
-    /// After the main consonant (reserved).
-    AfterMain = 5,
-    /// Above-base glyph (reserved).
-    AboveC = 6,
-    /// Before sub-joined form (reserved).
-    BeforeSub = 7,
-    /// Below-base glyph (reserved).
-    BelowC = 8,
-    /// After sub-joined form (reserved).
-    AfterSub = 9,
-    /// Before post-base position. Target slot for Devanagari reph.
-    BeforePost = 10,
-    /// Post-base glyph (reserved).
-    PostC = 11,
-    /// After post-base position (reserved).
-    AfterPost = 12,
-    /// Syllable modifier / vedic (reserved).
+    /// Syllable modifier / vedic. The final reorder places a reph
+    /// before any trailing run of these.
     Smvd = 13,
-    /// End-of-syllable sentinel (reserved).
-    End = 14,
 }
 
 impl Glyph {
@@ -415,10 +393,8 @@ impl Buffer {
                 raw
             };
             match current {
-                Some((s, start)) if s == resolved => {
-                    // Extend the active run.
-                    let _ = start;
-                }
+                // Extend the active run.
+                Some((s, _)) if s == resolved => {}
                 Some((s, start)) => {
                     runs.push(ScriptRun {
                         byte_range: start..byte,
@@ -461,9 +437,9 @@ pub struct ScriptRun {
     pub script_priority: &'static [[u8; 4]],
 }
 
-/// DFLT-only priority for Latin / Greek / Cyrillic / Han / unknown
-/// scripts. Interned as a static so `script_priority_for` can return
-/// a `'static` reference.
+/// DFLT-only priority for text with no recognized script.
+/// Interned as a static so `script_priority_for` can return a
+/// `'static` reference.
 const DFLT_ONLY: &[[u8; 4]] = &[*b"DFLT"];
 /// Arabic script-tag priority: `arab` then DFLT fallback.
 const ARAB_PRIORITY: &[[u8; 4]] = &[*b"arab", *b"DFLT"];
@@ -842,6 +818,7 @@ mod tests {
         assert_eq!(script_priority_for(Script::Arabic), &[*b"arab", *b"DFLT"]);
         assert_eq!(script_priority_for(Script::Hebrew), &[*b"hebr", *b"DFLT"]);
         assert_eq!(script_priority_for(Script::Latin), &[*b"latn", *b"DFLT"]);
+        assert_eq!(script_priority_for(Script::Cyrillic), &[*b"cyrl", *b"DFLT"]);
         assert_eq!(script_priority_for(Script::Other), &[*b"DFLT"]);
         assert_eq!(
             script_priority_for(Script::Khmer),

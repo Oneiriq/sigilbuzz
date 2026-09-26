@@ -474,3 +474,36 @@ fn lists_inside_the_header_cannot_be_folded() {
     assert_eq!(read(&out), Ok(None));
     assert_eq!(warnings.len(), 1, "{warnings:?}");
 }
+
+/// Records that all share one condition set of 65535 conditions name
+/// far more conditions than the table holds. Reading them stops once
+/// the work budget runs out instead of reading every copy.
+#[test]
+fn shared_condition_sets_are_charged_to_a_budget() {
+    let records: u32 = 400;
+    let conditions = u16::MAX;
+    // GSUB 1.1 header with the FeatureVariations right after it.
+    let mut table = Vec::new();
+    push(&mut table, &[1, 1, 0, 0, 0]);
+    table.extend_from_slice(&14u32.to_be_bytes());
+    let fv = table.len();
+    push(&mut table, &[1, 0]);
+    table.extend_from_slice(&records.to_be_bytes());
+    let set = 8 + records as usize * 8;
+    for _ in 0..records {
+        table.extend_from_slice(&(set as u32).to_be_bytes());
+        table.extend_from_slice(&0u32.to_be_bytes());
+    }
+    // The condition set, every condition pointing at one AxisRange.
+    push(&mut table, &[conditions]);
+    let condition = 2 + usize::from(conditions) * 4;
+    for _ in 0..conditions {
+        table.extend_from_slice(&(condition as u32).to_be_bytes());
+    }
+    push(&mut table, &[1, 0, 0, 0x4000]);
+    assert_eq!(table.len(), fv + set + condition + 8);
+    assert!(matches!(
+        read(&table),
+        Err(Error::Malformed { offset, .. }) if offset == fv
+    ));
+}

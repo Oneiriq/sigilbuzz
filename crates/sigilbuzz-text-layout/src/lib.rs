@@ -14,8 +14,9 @@
 //!   and a width budget to produce [`LineRange`]s.
 //! - [`word_breaks`]: simplified UAX 29 word-segmentation iterator.
 //!
-//! The crate is `no_std`-friendly when the default `std` feature is
-//! turned off; `wrap_lines` and the iterators all live in `alloc`.
+//! `wrap_lines` and the iterators need only `alloc`. The crate still
+//! depends on `sigilbuzz` with its default `std` feature, so even with
+//! the `std` feature off it needs a target with `std`.
 //!
 //! # Coverage
 //!

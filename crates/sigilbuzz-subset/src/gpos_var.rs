@@ -62,10 +62,22 @@
 //! `add-0.5/subtract-0.5` rule as the HVAR / MVAR bakes so the three
 //! stay in byte-for-byte lockstep. Saturating addition guards against
 //! ValueRecord field overflow on extreme coords.
+//!
+//! # Work limit
+//!
+//! Every visitor of the walk is idempotent: folding or clearing an
+//! offset zeroes it, and renumbering a shared table is decided once.
+//! So the walk visits each subtable once even when many lookups share
+//! it, and charges a [`WorkBudget`] for every record it walks. A GPOS
+//! that exhausts the budget stops the walk, and a bake of it is left
+//! undone.
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::variation_store::ItemVariationStore;
+
+use crate::util::{WorkBudget, WORK_LIMIT};
 
 mod anchors;
 mod value_records;
@@ -214,13 +226,19 @@ pub(crate) fn fold_one_field(
 // ---------------------------------------------------------------------------
 
 /// Walks one subtable of the given (non-extension) lookup type.
-fn walk_subtable(buf: &mut [u8], lookup_type: u16, sub_abs: usize, visit: &mut SlotVisitor<'_>) {
+fn walk_subtable(
+    buf: &mut [u8],
+    lookup_type: u16,
+    sub_abs: usize,
+    visit: &mut SlotVisitor<'_>,
+    budget: &WorkBudget,
+) {
     match lookup_type {
-        1 => walk_single_pos(buf, sub_abs, visit),
-        2 => walk_pair_pos(buf, sub_abs, visit),
-        3 => walk_cursive_pos(buf, sub_abs, visit),
-        4 | 6 => walk_mark_base_or_mark_pos(buf, sub_abs, visit),
-        5 => walk_mark_lig_pos(buf, sub_abs, visit),
+        1 => walk_single_pos(buf, sub_abs, visit, budget),
+        2 => walk_pair_pos(buf, sub_abs, visit, budget),
+        3 => walk_cursive_pos(buf, sub_abs, visit, budget),
+        4 | 6 => walk_mark_base_or_mark_pos(buf, sub_abs, visit, budget),
+        5 => walk_mark_lig_pos(buf, sub_abs, visit, budget),
         // Context (7) / ChainContext (8) carry no device slots of
         // their own; the lookups they dispatch to are reached through
         // the LookupList loop.
@@ -236,10 +254,13 @@ fn walk_subtable(buf: &mut [u8], lookup_type: u16, sub_abs: usize, visit: &mut S
 /// Slots are reported in lookup order, subtable order, then record
 /// order, so a visitor that mutates the buffer sees a deterministic
 /// sequence. A slot shared by several records (compilers dedupe
-/// identical anchors) is reported once per referencing record.
+/// identical anchors) is reported once per referencing record, but a
+/// subtable shared by several lookups is walked once (see the module
+/// docs).
 ///
 /// Returns `false` when the GPOS header or LookupList is malformed and
-/// nothing was walked.
+/// nothing was walked, or when the walk ran out of its work budget and
+/// stopped part way.
 pub(crate) fn walk_gpos_device_slots(gpos: &mut [u8], visit: &mut SlotVisitor<'_>) -> bool {
     if gpos.len() < 10 || read_u16(gpos, 0) != Some(1) {
         return false;
@@ -254,6 +275,9 @@ pub(crate) fn walk_gpos_device_slots(gpos: &mut [u8], visit: &mut SlotVisitor<'_
     if offsets_start + lookup_count * 2 > gpos.len() {
         return false;
     }
+    let budget = WorkBudget::new(WORK_LIMIT);
+    // `(subtable position, lookup type)` pairs already walked.
+    let mut visited: BTreeSet<(usize, u16)> = BTreeSet::new();
     for li in 0..lookup_count {
         let Some(lookup_off) = read_u16(gpos, offsets_start + li * 2).map(usize::from) else {
             continue;
@@ -268,6 +292,9 @@ pub(crate) fn walk_gpos_device_slots(gpos: &mut [u8], visit: &mut SlotVisitor<'_
         if subtable_offsets_off + subtable_count as usize * 2 > gpos.len() {
             continue;
         }
+        if !budget.spend(1 + usize::from(subtable_count)) {
+            return false;
+        }
         for si in 0..subtable_count as usize {
             let Some(sub_rel) = read_u16(gpos, subtable_offsets_off + si * 2) else {
                 continue;
@@ -277,7 +304,9 @@ pub(crate) fn walk_gpos_device_slots(gpos: &mut [u8], visit: &mut SlotVisitor<'_
                 continue;
             }
             if lookup_type != 9 {
-                walk_subtable(gpos, lookup_type, sub_abs, visit);
+                if visited.insert((sub_abs, lookup_type)) {
+                    walk_subtable(gpos, lookup_type, sub_abs, visit, &budget);
+                }
                 continue;
             }
             // Type 9: Extension. u16 format, u16 extensionLookupType,
@@ -295,12 +324,12 @@ pub(crate) fn walk_gpos_device_slots(gpos: &mut [u8], visit: &mut SlotVisitor<'_
             let Some(inner_abs) = sub_abs.checked_add(ext_off) else {
                 continue;
             };
-            if inner_abs < gpos.len() && ext_type != 9 {
-                walk_subtable(gpos, ext_type, inner_abs, visit);
+            if inner_abs < gpos.len() && ext_type != 9 && visited.insert((inner_abs, ext_type)) {
+                walk_subtable(gpos, ext_type, inner_abs, visit, &budget);
             }
         }
     }
-    true
+    !budget.is_spent()
 }
 
 /// Folds every supported `VariationIndex` in the source GPOS into the

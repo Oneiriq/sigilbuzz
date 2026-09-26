@@ -26,12 +26,12 @@
 //!   the mode and hooks of the shaper HarfBuzz picks for the script
 //!   (the `shaper` submodule). Then the full shaping pipeline in spec
 //!   order.
-//! - GSUB (lookup types 1, 4, 6 format 3, plus Extension type 7
-//!   unwrapping): `ccmp`, `rlig`, `liga`, `clig`, `calt` run by
+//! - GSUB lookup types 1 through 8, with Extension (type 7)
+//!   unwrapped: `ccmp`, `rlig`, `liga`, `clig`, `calt` run by
 //!   default; any user-enabled tag with non-zero value flows
-//!   through the same dispatcher. Chained-context lookups can
-//!   invoke other lookups at specific positions inside the match
-//!   window (the first recursive layer sigilbuzz supports).
+//!   through the same dispatcher. Context and chained-context
+//!   lookups invoke nested lookups at positions inside the match
+//!   window, up to `MAX_NESTED_DEPTH` levels deep.
 //! - hmtx advance lookup, post-substitution so ligature glyphs get
 //!   their own advance rather than the sum of their components.
 //! - GPOS (lookup types 1 through 8, plus Extension type 9
@@ -53,6 +53,7 @@
 //!   widths of space characters drawn with the space glyph, and, when
 //!   no GPOS, `kerx`, or cross-stream `kern` table positions the run,
 //!   marks placed from their combining classes and glyph extents.
+//! - AAT `morx` substitution for fonts without GSUB.
 //!
 //! Any default-on feature can be suppressed by a `Feature { tag,
 //! value: 0 }` entry.
@@ -97,11 +98,18 @@
 //! at the start of a paragraph (`BOT`), turn dotted circles off, and
 //! keep or remove default-ignorable glyphs instead of hiding them.
 //!
-//! # What is not here yet
+//! # Limits
 //!
-//! - GSUB contextual non-chained (type 5), multiple substitution
-//!   (type 2), alternate (type 3), reverse chained (type 8),
-//!   and the format 1/2 variants of type 6.
+//! Hostile fonts can nest lookups or chain multiple substitutions
+//! so that the work grows exponentially. Every lookup one `shape()`
+//! call applies therefore shares one `LookupBudget`: a cap on nested
+//! lookup calls and on how far multiple substitution may grow the
+//! run, sized like HarfBuzz's `max_ops` and `max_len`. Features the
+//! `ot` pre-shapers apply get a smaller budget each. Well-formed
+//! fonts stay far below the caps.
+//!
+//! # What is not here
+//!
 //! - Automatic direction detection: an unset direction shapes as LTR
 //!   even for Arabic or Hebrew text. Set [`crate::Direction::Rtl`]
 //!   explicitly to get HarfBuzz's RTL behavior and visual order.
@@ -143,6 +151,7 @@ pub(crate) use joiners::JoinerTable;
 pub use pipeline::shape;
 use segment::ProcessedSegment;
 
+use crate::buffer::Glyph;
 use crate::tables::gpos::resolve_variation_delta;
 use crate::tables::variation_store::ItemVariationStore;
 
@@ -150,7 +159,7 @@ use crate::tables::variation_store::ItemVariationStore;
 ///
 /// Decoupling this from the GPOS tables themselves means every
 /// apply function keeps the same shape for variable and static
-/// fonts; static callers pass [`VarCtx::none`] and every resolver
+/// fonts. With empty coords or no store every resolver
 /// short-circuits to zero without reading the store.
 #[derive(Debug, Clone, Copy)]
 struct VarCtx<'a> {
@@ -162,11 +171,10 @@ struct VarCtx<'a> {
 }
 
 impl VarCtx<'_> {
-    /// Builds a static-instance context: no coords, no store.
-    /// Every downstream resolver produces a zero delta. Used by
-    /// callers (and tests) that need to invoke a GPOS apply site
-    /// without having a font-coords view in hand.
-    #[allow(dead_code)]
+    /// A static-instance context: no coords, no store. Every resolver
+    /// produces a zero delta. Unit tests use it to call a GPOS apply
+    /// site without a font.
+    #[cfg(test)]
     const fn none() -> Self {
         Self {
             coords: &[],
@@ -200,6 +208,113 @@ impl VarCtx<'_> {
 /// we assume the font is pathological (a cycle in the LookupList)
 /// and stop rather than overflow the stack.
 const MAX_NESTED_DEPTH: u8 = 16;
+
+/// Nested lookup calls allowed per input glyph. Mirrors HarfBuzz's
+/// `HB_BUFFER_MAX_OPS_FACTOR`. Real fonts nest a handful of lookups
+/// per glyph at most.
+const NESTED_OPS_PER_GLYPH: usize = 64;
+
+/// Floor for the nested-call budget of one [`shape`] call, so short
+/// runs still get room. Mirrors HarfBuzz's `HB_BUFFER_MAX_OPS_MIN`.
+const NESTED_OPS_MIN: usize = 16_384;
+
+/// Floor for the nested-call budget of one standalone feature
+/// application (the `ot` pre-shapers call those once per feature and
+/// sometimes once per syllable, so the floor stays small).
+const NESTED_OPS_MIN_STANDALONE: usize = 1024;
+
+/// How far multiple substitution may grow the run: this many glyphs
+/// per input glyph. Mirrors HarfBuzz's `HB_BUFFER_MAX_LEN_FACTOR`.
+const MAX_LEN_FACTOR: usize = 64;
+
+/// Floor for the run length one [`shape`] call may grow to. Mirrors
+/// HarfBuzz's `HB_BUFFER_MAX_LEN_MIN`.
+const MAX_LEN_MIN: usize = 16_384;
+
+/// Work limits for lookup application.
+///
+/// Depth alone does not stop a hostile font: a context rule with k
+/// nested records that point back at its own lookup makes k^16 calls
+/// before the depth cap bites, and a feature of lookups that each
+/// double the run grows it exponentially. The budget bounds both.
+/// When it runs out, further nested calls are skipped and further
+/// multiple substitutions are refused, as if their subtables had
+/// not matched. Top-level lookups keep running, each a single pass
+/// over the run.
+#[derive(Debug)]
+struct LookupBudget {
+    /// Nested lookup calls left.
+    nested_ops_left: usize,
+    /// Glyphs multiple substitution may still add to the run.
+    growth_left: usize,
+}
+
+impl LookupBudget {
+    /// Budget shared by every lookup one [`shape`] call applies over
+    /// a run of `input_len` glyphs.
+    fn for_shape(input_len: usize) -> Self {
+        let max_len = input_len.saturating_mul(MAX_LEN_FACTOR).max(MAX_LEN_MIN);
+        Self {
+            nested_ops_left: input_len
+                .saturating_mul(NESTED_OPS_PER_GLYPH)
+                .max(NESTED_OPS_MIN),
+            growth_left: max_len.saturating_sub(input_len),
+        }
+    }
+
+    /// Budget for one standalone feature application over `glyphs`,
+    /// used by the `pub(crate)` entry points the `ot` pre-shapers call.
+    ///
+    /// Those callers apply many features in a row, each with a fresh
+    /// budget, so the growth cap must not compound. It is tied to the
+    /// span of cluster values (source byte offsets), which multiple
+    /// substitution copies and never widens, rather than to the
+    /// current length.
+    fn for_run(glyphs: &[Glyph]) -> Self {
+        let span = match (
+            glyphs.iter().map(|g| g.cluster).min(),
+            glyphs.iter().map(|g| g.cluster).max(),
+        ) {
+            (Some(lo), Some(hi)) => ((hi - lo) as usize).saturating_add(1),
+            _ => 1,
+        };
+        Self {
+            nested_ops_left: glyphs
+                .len()
+                .saturating_mul(NESTED_OPS_PER_GLYPH)
+                .max(NESTED_OPS_MIN_STANDALONE),
+            growth_left: span
+                .saturating_mul(MAX_LEN_FACTOR)
+                .saturating_sub(glyphs.len()),
+        }
+    }
+
+    /// Spends one nested call. False once the budget is gone.
+    fn take_nested_op(&mut self) -> bool {
+        if self.nested_ops_left == 0 {
+            return false;
+        }
+        self.nested_ops_left -= 1;
+        true
+    }
+
+    /// True once no nested call is left.
+    fn exhausted(&self) -> bool {
+        self.nested_ops_left == 0
+    }
+
+    /// Spends room for `extra` new glyphs. False, spending nothing,
+    /// when the run may not grow that much.
+    fn take_growth(&mut self, extra: usize) -> bool {
+        match self.growth_left.checked_sub(extra) {
+            Some(left) => {
+                self.growth_left = left;
+                true
+            }
+            None => false,
+        }
+    }
+}
 
 /// One entry in a feature list passed to [`shape`]. The tag is a
 /// four-byte OpenType feature tag (e.g. `b"liga"`, `b"kern"`, `b"smcp"`);

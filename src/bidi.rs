@@ -242,11 +242,6 @@ impl BidiParagraph {
     /// The whole text is one paragraph: split it at paragraph separators
     /// (UAX #9 rule P1) before calling this.
     ///
-    /// # Panics
-    ///
-    /// Panics if `text` is longer than `u32::MAX` bytes, the range
-    /// [`Glyph::cluster`] can address.
-    ///
     /// ```
     /// use sigilbuzz::{BidiParagraph, BidiRun, Direction};
     ///
@@ -262,10 +257,6 @@ impl BidiParagraph {
     /// ```
     #[must_use]
     pub fn new(text: &str, direction: Option<Direction>) -> Self {
-        assert!(
-            u32::try_from(text.len()).is_ok(),
-            "paragraph text exceeds u32::MAX bytes"
-        );
         let direction = direction.map(|d| {
             if d == Direction::Rtl {
                 Direction::Rtl

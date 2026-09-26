@@ -1,11 +1,10 @@
 //! Unit tests for the partial-instancing public API + tuple
 //! projection math primitives. The variation-table emitters
 //! (HVAR / VVAR / MVAR / gvar / GDEF.IVS) all flow through these
-//! primitives. The gvar tuple-projection follow-up wired the
-//! `axis_support_scalar` + `project_region_onto_kept_axes` pair
-//! into [`crate::gvar_partial::bake_gvar_partial`] so the
-//! reduced-axis VF's gvar surface stays consistent with the
-//! reduced-axis IVS surfaces.
+//! primitives. [`crate::gvar_partial::bake_gvar_partial`] uses the
+//! same `axis_support_scalar` + `project_region_onto_kept_axes`
+//! pair, so the reduced-axis VF's gvar surface stays consistent
+//! with the reduced-axis IVS surfaces.
 //!
 //! fontTools-equivalent of
 //! `varLib.instancer.instantiateVariableFont(axisLimits=...)`.
@@ -121,13 +120,11 @@ fn axis_pins_with_keep_on_gvar_source_emits_partial_vf() {
 }
 
 fn write_f16dot16(out: &mut Vec<u8>, v: f32) {
-    #[allow(clippy::cast_possible_truncation)]
     let raw = (v * 65536.0).round() as i32;
     out.extend_from_slice(&raw.to_be_bytes());
 }
 
 fn write_f2dot14(out: &mut Vec<u8>, v: f32) {
-    #[allow(clippy::cast_possible_truncation)]
     let raw = (v * 16384.0).round() as i16;
     out.extend_from_slice(&raw.to_be_bytes());
 }

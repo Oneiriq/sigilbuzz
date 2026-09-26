@@ -40,34 +40,56 @@ use crate::buffer::Direction;
 /// UAX #9 rule pseudocode (`L`, `R`, `AL`, `EN`, ...) so cross-checking
 /// against the spec stays mechanical.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum BidiClass {
     // Strong types.
+    /// Left-to-right (`L`): Latin, Greek, Cyrillic, CJK, ...
     L,
+    /// Right-to-left (`R`): Hebrew and other non-Arabic RTL letters.
     R,
+    /// Arabic letter (`AL`): Arabic, Syriac, Thaana, ...
     Al,
     // Weak types.
+    /// European number (`EN`): ASCII and other European digits.
     En,
+    /// European number separator (`ES`): plus and minus signs.
     Es,
+    /// European number terminator (`ET`): currency, percent, degree.
     Et,
+    /// Arabic number (`AN`): Arabic-Indic digits and separators.
     An,
+    /// Common number separator (`CS`): comma, period, colon, slash.
     Cs,
+    /// Nonspacing mark (`NSM`): takes the class of its base.
     Nsm,
+    /// Boundary neutral (`BN`): controls and default ignorables.
     Bn,
     // Neutral types.
+    /// Paragraph separator (`B`).
     B,
+    /// Segment separator (`S`): tab and the like.
     S,
+    /// Whitespace (`WS`).
     Ws,
+    /// Other neutral (`ON`): punctuation, symbols, brackets.
     On,
     // Explicit formatting.
+    /// Left-to-right embedding (`LRE`, U+202A).
     Lre,
+    /// Left-to-right override (`LRO`, U+202D).
     Lro,
+    /// Right-to-left embedding (`RLE`, U+202B).
     Rle,
+    /// Right-to-left override (`RLO`, U+202E).
     Rlo,
+    /// Pop directional formatting (`PDF`, U+202C).
     Pdf,
+    /// Left-to-right isolate (`LRI`, U+2066).
     Lri,
+    /// Right-to-left isolate (`RLI`, U+2067).
     Rli,
+    /// First strong isolate (`FSI`, U+2068).
     Fsi,
+    /// Pop directional isolate (`PDI`, U+2069).
     Pdi,
 }
 
@@ -133,7 +155,6 @@ pub const fn strong_for_direction(dir: Direction) -> BidiClass {
 /// curated set fall through to [`BidiClass::On`] (Other Neutral),
 /// which is the safe default for the algorithm.
 #[must_use]
-#[allow(clippy::match_same_arms, clippy::too_many_lines)]
 pub const fn bidi_class(ch: char) -> BidiClass {
     let cp = ch as u32;
     match cp {

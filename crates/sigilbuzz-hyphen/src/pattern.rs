@@ -20,6 +20,7 @@
 //!   `letters="hyph"`, `priorities=[0,0,3,0]`.
 
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -44,10 +45,58 @@ pub(crate) struct Pattern {
 pub struct Patterns {
     /// Internal pattern table. Implementation-private.
     pub(crate) inner: Vec<Pattern>,
+    /// Pattern indexes grouped by first byte, built once by `parse`.
+    pub(crate) index: PatternIndex,
     /// Minimum letters before the first break (typically 2-3).
     pub left_min: usize,
     /// Minimum letters after the last break (typically 2-3).
     pub right_min: usize,
+}
+
+/// Groups patterns by the first byte of their letters.
+///
+/// A pattern can only match where its first byte matches, so `hyphenate`
+/// checks one small group per position instead of every pattern. Without
+/// this, a long run of letters cost word length times the full pattern
+/// count (about 4,900 for US English).
+#[derive(Debug, Clone)]
+pub(crate) struct PatternIndex {
+    /// `by_first[b]` holds the indexes of patterns whose letters start
+    /// with byte `b`.
+    by_first: Vec<Vec<usize>>,
+    /// Patterns with no letters. They can match at every position.
+    no_letters: Vec<usize>,
+}
+
+impl PatternIndex {
+    fn build(patterns: &[Pattern]) -> Self {
+        let mut by_first = vec![Vec::new(); 256];
+        let mut no_letters = Vec::new();
+        for (i, pattern) in patterns.iter().enumerate() {
+            match pattern.letters.as_bytes().first() {
+                Some(&b) => {
+                    if let Some(group) = by_first.get_mut(usize::from(b.to_ascii_lowercase())) {
+                        group.push(i);
+                    }
+                }
+                None => no_letters.push(i),
+            }
+        }
+        Self {
+            by_first,
+            no_letters,
+        }
+    }
+
+    /// Indexes of the patterns that could match at a position whose byte
+    /// is `b`.
+    pub(crate) fn candidates(&self, b: u8) -> impl Iterator<Item = usize> + '_ {
+        let group = self
+            .by_first
+            .get(usize::from(b.to_ascii_lowercase()))
+            .map_or(&[][..], Vec::as_slice);
+        self.no_letters.iter().chain(group).copied()
+    }
 }
 
 /// Errors raised by [`Patterns::parse`].
@@ -115,8 +164,10 @@ impl Patterns {
             }
             inner.push(parse_one(trimmed, line_no)?);
         }
+        let index = PatternIndex::build(&inner);
         Ok(Self {
             inner,
+            index,
             left_min: 2,
             right_min: 3,
         })

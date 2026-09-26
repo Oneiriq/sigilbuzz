@@ -15,13 +15,14 @@
 //! [`sigilbuzz::BidiParagraph`]: every embedding-level run in its own
 //! direction, the runs in visual order, clusters indexing the input.
 
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use clap::Args as ClapArgs;
 
 use sigilbuzz::{shape, BidiParagraph, Blob, Buffer, Face, Font, Glyph, Language, UnicodeScript};
 
-use super::util::{parse_direction, parse_feature_list, read_font, CliResult};
+use super::util::{parse_direction, parse_feature_list, read_font, with_stdout, CliResult};
 
 /// Parses a four-letter ISO 15924 code, case-insensitively. A code
 /// sigilbuzz has no shaper bucket for (including `Zyyy`, `Zinh`) gives
@@ -107,30 +108,34 @@ pub fn run(args: Args) -> CliResult {
     }
     .map_err(|e| format!("shape: {e:?}"))?;
 
-    if args.json {
-        print_json(&run.glyphs);
-    } else {
-        for g in &run.glyphs {
-            println!(
-                "gid={} advance={} cluster={}",
-                g.glyph_id, g.x_advance, g.cluster
-            );
+    with_stdout(|out| {
+        if args.json {
+            write_json(out, &run.glyphs)
+        } else {
+            for g in &run.glyphs {
+                writeln!(
+                    out,
+                    "gid={} advance={} cluster={}",
+                    g.glyph_id, g.x_advance, g.cluster
+                )?;
+            }
+            Ok(())
         }
-    }
-    Ok(())
+    })
 }
 
-fn print_json(glyphs: &[Glyph]) {
+fn write_json(out: &mut dyn Write, glyphs: &[Glyph]) -> io::Result<()> {
     // Hand-rolled JSON emission to avoid a serde dep.
-    print!("[");
+    write!(out, "[")?;
     for (i, g) in glyphs.iter().enumerate() {
         if i > 0 {
-            print!(",");
+            write!(out, ",")?;
         }
-        print!(
+        write!(
+            out,
             "{{\"gid\":{},\"cluster\":{},\"x_advance\":{},\"y_advance\":{},\"x_offset\":{},\"y_offset\":{}}}",
             g.glyph_id, g.cluster, g.x_advance, g.y_advance, g.x_offset, g.y_offset
-        );
+        )?;
     }
-    println!("]");
+    writeln!(out, "]")
 }

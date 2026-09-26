@@ -3,6 +3,9 @@
 
 use alloc::vec::Vec;
 
+#[cfg(test)]
+use super::MAX_DASH_SPLITS;
+
 // =========================================================================
 // Stroke dasharray
 // =========================================================================
@@ -40,6 +43,26 @@ pub(super) fn parse_dasharray(s: &str) -> Vec<f32> {
     nums
 }
 
+/// [`dash_polyline_limited`] with a fresh split budget.
+#[cfg(test)]
+pub(super) fn dash_polyline(
+    points: &[(f32, f32)],
+    arc_lengths: &[f32],
+    closed: bool,
+    pattern: &[f32],
+    offset: f32,
+) -> Vec<Vec<(f32, f32)>> {
+    let mut splits_left = MAX_DASH_SPLITS;
+    dash_polyline_limited(
+        points,
+        arc_lengths,
+        closed,
+        pattern,
+        offset,
+        &mut splits_left,
+    )
+}
+
 /// Walks `points` by cumulative *true Bezier arc length* and returns
 /// the polylines that fall inside the "draw" phase of the dash pattern.
 /// `arc_lengths[i]` is the parent-curve arc length of the chord from
@@ -68,16 +91,26 @@ pub(super) fn parse_dasharray(s: &str) -> Vec<f32> {
 ///   the same way as any other.
 /// - For straight-chord polylines (rect, polygon, polyline, line,
 ///   `LineTo` paths), `arc_lengths[i]` is exactly the Euclidean
-///   distance, so this function is bit-identical to the previous
-///   chord-only walker on those inputs.
-pub(super) fn dash_polyline(
+///   distance, so this function is bit-identical to a chord-only
+///   walker on those inputs.
+///
+/// Each dash boundary walked costs one unit of `splits_left`, a budget
+/// shared across the calls for one stroke. When it runs out the walk
+/// stops and returns the dashes found so far. This also ends the walk
+/// when float rounding stops a tiny dash length from advancing along a
+/// long path.
+pub(super) fn dash_polyline_limited(
     points: &[(f32, f32)],
     arc_lengths: &[f32],
     closed: bool,
     pattern: &[f32],
     offset: f32,
+    splits_left: &mut usize,
 ) -> Vec<Vec<(f32, f32)>> {
     let total: f32 = pattern.iter().sum();
+    let Some(&first) = pattern.first() else {
+        return Vec::new();
+    };
     if total <= 0.0 || points.len() < 2 {
         return Vec::new();
     }
@@ -89,8 +122,13 @@ pub(super) fn dash_polyline(
     // The current dash index (even = draw, odd = skip) and remaining
     // length within that dash segment after consuming `off`.
     let mut idx = 0usize;
-    let mut remaining = pattern[0];
-    while off > 0.0 && remaining <= off {
+    let mut remaining = first;
+    // `off < total`, so this finishes within one pass over the pattern
+    // plus rounding slack. The bound stops a pattern whose entries are
+    // too small to change `off` from cycling forever.
+    let mut steps_left = pattern.len().saturating_mul(2).saturating_add(1);
+    while off > 0.0 && remaining <= off && steps_left > 0 {
+        steps_left -= 1;
         off -= remaining;
         idx = (idx + 1) % pattern.len();
         remaining = pattern[idx];
@@ -130,6 +168,10 @@ pub(super) fn dash_polyline(
         // Walk the segment, splitting at every dash boundary in
         // arc-length space.
         while seg_arc - s_consumed > remaining {
+            let Some(left) = splits_left.checked_sub(1) else {
+                return out;
+            };
+            *splits_left = left;
             // Boundary lands at arc-length `s_consumed + remaining`
             // along this chord; map to chord parameter `t` linearly.
             // For straight chords this is exact; for curve chords the

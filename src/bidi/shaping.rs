@@ -5,7 +5,7 @@ use core::ops::Range;
 
 use super::{BidiParagraph, BidiRun, ShapedBidiRun};
 use crate::buffer::{Buffer, BufferFlags, ShapedRun};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::font::Font;
 use crate::shape::{shape, Feature};
 
@@ -32,7 +32,9 @@ impl BidiParagraph {
     ///
     /// # Errors
     ///
-    /// Returns the error [`crate::shape`] returns for the font.
+    /// Returns the error [`crate::shape`] returns for the font, and
+    /// [`Error::Unsupported`] when the range ends past `u32::MAX` bytes,
+    /// since [`crate::Glyph::cluster`] is a `u32` byte offset.
     ///
     /// # Panics
     ///
@@ -62,6 +64,12 @@ impl BidiParagraph {
     ) -> Result<ShapedRun> {
         self.check_range(&run.range);
         let range = run.range.clone();
+        // Every cluster is at most the range's end once offset below.
+        if u32::try_from(range.end).is_err() {
+            return Err(Error::Unsupported {
+                context: "bidi run ends past u32::MAX bytes",
+            });
+        }
         let mut run_buffer = buffer.clone();
         run_buffer.set_text(&self.text[range.clone()]);
         run_buffer.set_direction(run.direction());
@@ -69,10 +77,11 @@ impl BidiParagraph {
         run_buffer.set_post_context(&self.text[range.end..]);
         run_buffer.set_flags(run_flags(buffer.flags(), &range, self.text.len()));
         let mut shaped = shape(font, &run_buffer, features)?;
-        // `new` checked that the text fits in u32, so the sum does too.
+        // The range ends within u32 (checked above), and every cluster
+        // is an offset into the range, so the sums fit.
         let offset = range.start as u32;
         for glyph in &mut shaped.glyphs {
-            glyph.cluster += offset;
+            glyph.cluster = glyph.cluster.saturating_add(offset);
         }
         Ok(shaped)
     }

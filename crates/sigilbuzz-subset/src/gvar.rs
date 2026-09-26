@@ -9,11 +9,9 @@
 //! Subsetting copies one block per kept gid into the output, in the
 //! new-gid order, and rewrites the per-gid offset array. The shared
 //! tuple list is preserved verbatim. Every kept block's references
-//! remain valid because the indexes never change. A future
-//! optimization could prune unreferenced shared tuples and rewrite
-//! the indexes; the size win is small for any realistic subset
-//! against the bulk of the per-glyph delta data, so the briefing
-//! flags this as 0.7.0+.
+//! remain valid because the indexes never change. Unreferenced
+//! shared tuples are not pruned: the size win is small for any
+//! realistic subset against the bulk of the per-glyph delta data.
 //!
 //! The output picks the smaller offset format (short or long) by
 //! the size of the data block: short caps at `0x1FFFE` bytes (each
@@ -40,11 +38,37 @@ pub(crate) fn subset_gvar(
     };
     let header = parse_gvar_header(bytes)?;
 
+    // The shared tuple list is copied verbatim into the output. Check
+    // that the source actually holds it before any size derived from
+    // its header counts reaches an allocation.
+    let shared_tuples_len =
+        usize::from(header.axis_count) * usize::from(header.shared_tuple_count) * 2;
+    let shared_tuples = if shared_tuples_len > 0 {
+        let src_start = header.shared_tuples_off as usize;
+        let src_end = src_start
+            .checked_add(shared_tuples_len)
+            .ok_or(SubsetError::Unsupported("gvar shared tuples overflow"))?;
+        bytes
+            .get(src_start..src_end)
+            .ok_or(SubsetError::Unsupported(
+                "gvar shared tuples past end of source",
+            ))?
+    } else {
+        &[][..]
+    };
+
     // Pull one body per kept gid (empty Vec when source has no
-    // entry for that gid).
+    // entry for that gid). Kept gids are distinct, and a well-formed
+    // table stores each glyph's data in its own byte range, so the
+    // bodies add up to at most the table size. Offsets that make many
+    // glyphs share one large range would multiply the output instead.
     let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(kept.len());
+    let mut body_budget = bytes.len();
     for &old_gid in kept {
         let body = pull_glyph_body(bytes, &header, old_gid);
+        body_budget = body_budget
+            .checked_sub(body.len())
+            .ok_or(SubsetError::Unsupported("gvar glyph data ranges overlap"))?;
         bodies.push(body);
     }
 
@@ -80,8 +104,6 @@ pub(crate) fn subset_gvar(
     let header_len = 20;
     let off_entry_size: usize = if long_offsets { 4 } else { 2 };
     let offsets_len = (kept.len() + 1) * off_entry_size;
-    let shared_tuples_len =
-        usize::from(header.axis_count) * usize::from(header.shared_tuple_count) * 2;
 
     // Round offsets-block up to 4-byte alignment per the spec hint
     // (data array is aligned for u32 reads).
@@ -120,21 +142,9 @@ pub(crate) fn subset_gvar(
         out.push(0);
     }
 
-    // Shared tuple list: copied verbatim from the source. The
-    // source's `sharedTuplesOffset` lands somewhere inside the
-    // input bytes; we read `shared_tuples_len` bytes from there.
-    if shared_tuples_len > 0 {
-        let src_start = header.shared_tuples_off as usize;
-        let src_end = src_start
-            .checked_add(shared_tuples_len)
-            .ok_or(SubsetError::Unsupported("gvar shared tuples overflow"))?;
-        let chunk = bytes
-            .get(src_start..src_end)
-            .ok_or(SubsetError::Unsupported(
-                "gvar shared tuples past end of source",
-            ))?;
-        out.extend_from_slice(chunk);
-    }
+    // Shared tuple list: copied verbatim from the source (validated
+    // above).
+    out.extend_from_slice(shared_tuples);
 
     // Data array.
     for body in &bodies {
@@ -206,43 +216,44 @@ fn parse_gvar_header(bytes: &[u8]) -> Result<GvarHeader, SubsetError> {
 /// glyph count, gids whose offset range is empty, or any malformed
 /// truncation. All of those are treated as "no variation data".
 fn pull_glyph_body(bytes: &[u8], header: &GvarHeader, gid: u16) -> Vec<u8> {
+    glyph_body_range(bytes, header, gid)
+        .and_then(|range| bytes.get(range))
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default()
+}
+
+/// Resolves the byte range of `gid`'s body inside `bytes`, or `None`
+/// when the entry is missing, empty, or malformed.
+fn glyph_body_range(
+    bytes: &[u8],
+    header: &GvarHeader,
+    gid: u16,
+) -> Option<core::ops::Range<usize>> {
     if gid >= header.glyph_count {
-        return Vec::new();
+        return None;
     }
     let entry_size: usize = if header.long_offsets { 4 } else { 2 };
-    let off_a = header.glyph_offsets_start + gid as usize * entry_size;
-    let off_b = off_a + entry_size;
-    if bytes.len() < off_b + entry_size {
-        return Vec::new();
-    }
-    let (start, end) = if header.long_offsets {
-        let a = u32::from_be_bytes([
-            bytes[off_a],
-            bytes[off_a + 1],
-            bytes[off_a + 2],
-            bytes[off_a + 3],
-        ]);
-        let b = u32::from_be_bytes([
-            bytes[off_b],
-            bytes[off_b + 1],
-            bytes[off_b + 2],
-            bytes[off_b + 3],
-        ]);
-        (a, b)
-    } else {
-        let a = u16::from_be_bytes([bytes[off_a], bytes[off_a + 1]]);
-        let b = u16::from_be_bytes([bytes[off_b], bytes[off_b + 1]]);
-        (u32::from(a) * 2, u32::from(b) * 2)
+    let off_a = header.glyph_offsets_start + usize::from(gid) * entry_size;
+    // Both offsets are read from the array entry pair at `off_a`.
+    let pair = bytes.get(off_a..)?.get(..entry_size * 2)?;
+    let (start, end) = match *pair {
+        [a0, a1, a2, a3, b0, b1, b2, b3] => (
+            u32::from_be_bytes([a0, a1, a2, a3]),
+            u32::from_be_bytes([b0, b1, b2, b3]),
+        ),
+        [a0, a1, b0, b1] => (
+            u32::from(u16::from_be_bytes([a0, a1])) * 2,
+            u32::from(u16::from_be_bytes([b0, b1])) * 2,
+        ),
+        _ => return None,
     };
     if end <= start {
-        return Vec::new();
+        return None;
     }
-    let body_start = header.data_array_off as usize + start as usize;
-    let body_end = header.data_array_off as usize + end as usize;
-    if body_end > bytes.len() || body_start >= body_end {
-        return Vec::new();
-    }
-    bytes[body_start..body_end].to_vec()
+    let data_array_off = header.data_array_off as usize;
+    let body_start = data_array_off.checked_add(start as usize)?;
+    let body_end = data_array_off.checked_add(end as usize)?;
+    (body_end <= bytes.len()).then_some(body_start..body_end)
 }
 
 #[cfg(test)]
@@ -319,5 +330,65 @@ mod tests {
             parsed.axis_count(),
             face.gvar().unwrap().unwrap().axis_count()
         );
+    }
+
+    /// Wraps `gvar` in an SFNT whose only table it is.
+    fn font_with_gvar(gvar: Vec<u8>) -> Vec<u8> {
+        crate::sfnt::build(0x0001_0000, &[(tag::GVAR, gvar)])
+    }
+
+    /// gvar header with the given counts and offsets.
+    fn gvar_header(
+        axis_count: u16,
+        shared_tuple_count: u16,
+        shared_tuples_off: u32,
+        glyph_count: u16,
+        long_offsets: bool,
+        data_array_off: u32,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // major
+        out.extend_from_slice(&0u16.to_be_bytes()); // minor
+        out.extend_from_slice(&axis_count.to_be_bytes());
+        out.extend_from_slice(&shared_tuple_count.to_be_bytes());
+        out.extend_from_slice(&shared_tuples_off.to_be_bytes());
+        out.extend_from_slice(&glyph_count.to_be_bytes());
+        out.extend_from_slice(&u16::from(long_offsets).to_be_bytes());
+        out.extend_from_slice(&data_array_off.to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn shared_tuple_list_past_end_is_rejected_before_allocating() {
+        // axisCount and sharedTupleCount at their maximum claim an
+        // 8.6 GB shared tuple list that the table does not hold. The
+        // output buffer used to be sized from that claim.
+        let mut gvar = gvar_header(u16::MAX, u16::MAX, 24, 1, false, 24);
+        gvar.extend_from_slice(&[0, 0, 0, 0]); // offsets[0..=1]
+        let font = font_with_gvar(gvar);
+        let face = Face::parse_bytes(&font, 0).unwrap();
+        let r = subset_gvar(&face, &[0]);
+        assert!(matches!(r, Err(SubsetError::Unsupported(_))), "{r:?}");
+    }
+
+    #[test]
+    fn glyphs_sharing_one_data_range_are_rejected() {
+        // 2000 glyphs whose offsets alternate 0, 100000, 0, ... so every
+        // other glyph claims the same 100 KB body. Copying it once per
+        // glyph multiplied the table size by a thousand.
+        const GLYPHS: u16 = 2000;
+        const BODY: u32 = 100_000;
+        let data_array_off = 20 + (u32::from(GLYPHS) + 1) * 4;
+        let mut gvar = gvar_header(1, 0, 0, GLYPHS, true, data_array_off);
+        for i in 0..=u32::from(GLYPHS) {
+            let off = if i % 2 == 0 { 0 } else { BODY };
+            gvar.extend_from_slice(&off.to_be_bytes());
+        }
+        gvar.resize(gvar.len() + BODY as usize, 0);
+        let font = font_with_gvar(gvar);
+        let face = Face::parse_bytes(&font, 0).unwrap();
+        let kept: Vec<u16> = (0..GLYPHS).collect();
+        let r = subset_gvar(&face, &kept);
+        assert!(matches!(r, Err(SubsetError::Unsupported(_))), "{r:?}");
     }
 }

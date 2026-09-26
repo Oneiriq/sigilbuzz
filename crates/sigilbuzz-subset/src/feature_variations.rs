@@ -57,6 +57,7 @@ use sigilbuzz::Error;
 use crate::device::Dedup;
 use crate::offset16::Offset16Guard;
 use crate::read::{array_at, offset32_at, slice_at, u16_at, u32_at};
+use crate::util::{WorkBudget, WORK_LIMIT};
 use crate::warnings::{Diag, Warnings};
 use crate::SubsetError;
 
@@ -127,12 +128,27 @@ pub(crate) fn read(table: &[u8]) -> Result<Option<FeatureVariations>, Error> {
         context: CTX,
     })?;
     array_at(table, at + 8, count, 8, CTX)?;
+    // Records may share condition sets and substitution tables, so a
+    // small table can name far more conditions and lookups than it
+    // holds. Every one read is charged to a work budget.
+    let budget = WorkBudget::new(WORK_LIMIT);
+    let charge = |units: usize| {
+        if budget.spend(units) {
+            Ok(())
+        } else {
+            Err(Error::Malformed {
+                offset: at,
+                context: "FeatureVariations name more records than the subsetter reads",
+            })
+        }
+    };
     let mut records = Vec::new();
     for i in 0..count {
         let slot = at + 8 + i * 8;
+        charge(1)?;
         records.push(Record {
-            conditions: read_condition_set(table, at, slot)?,
-            substitutions: read_substitutions(table, at, slot + 4)?,
+            conditions: read_condition_set(table, at, slot, &charge)?,
+            substitutions: read_substitutions(table, at, slot + 4, &charge)?,
             substitution_offset: u32_at(table, slot + 4, CTX)?,
         });
     }
@@ -141,13 +157,19 @@ pub(crate) fn read(table: &[u8]) -> Result<Option<FeatureVariations>, Error> {
 
 /// Reads the ConditionSet named by the Offset32 at `slot`, measured
 /// from the FeatureVariations at `fv`.
-fn read_condition_set(table: &[u8], fv: usize, slot: usize) -> Result<Vec<Condition>, Error> {
+fn read_condition_set(
+    table: &[u8],
+    fv: usize,
+    slot: usize,
+    charge: &dyn Fn(usize) -> Result<(), Error>,
+) -> Result<Vec<Condition>, Error> {
     if u32_at(table, slot, CTX)? == 0 {
         return Ok(Vec::new());
     }
     let set = offset32_at(table, slot, fv, OFFSET)?;
     let count = usize::from(u16_at(table, set, CTX)?);
     array_at(table, set + 2, count, 4, CTX)?;
+    charge(count)?;
     let mut conditions = Vec::with_capacity(count);
     for i in 0..count {
         let at = offset32_at(table, set + 2 + i * 4, set, OFFSET)?;
@@ -168,7 +190,12 @@ fn read_condition_set(table: &[u8], fv: usize, slot: usize) -> Result<Vec<Condit
 
 /// Reads the FeatureTableSubstitution named by the Offset32 at `slot`,
 /// measured from the FeatureVariations at `fv`.
-fn read_substitutions(table: &[u8], fv: usize, slot: usize) -> Result<Vec<Substitution>, Error> {
+fn read_substitutions(
+    table: &[u8],
+    fv: usize,
+    slot: usize,
+    charge: &dyn Fn(usize) -> Result<(), Error>,
+) -> Result<Vec<Substitution>, Error> {
     if u32_at(table, slot, CTX)? == 0 {
         return Ok(Vec::new());
     }
@@ -181,12 +208,14 @@ fn read_substitutions(table: &[u8], fv: usize, slot: usize) -> Result<Vec<Substi
     }
     let count = usize::from(u16_at(table, fts + 4, CTX)?);
     array_at(table, fts + 6, count, 6, CTX)?;
+    charge(count)?;
     let mut substitutions = Vec::with_capacity(count);
     for i in 0..count {
         let rec = fts + 6 + i * 6;
         let alternate = offset32_at(table, rec + 2, fts, OFFSET)?;
         let params = u16_at(table, alternate, CTX)?;
         let lookup_count = usize::from(u16_at(table, alternate + 2, CTX)?);
+        charge(lookup_count)?;
         let lookups = array_at(table, alternate + 4, lookup_count, 2, CTX)?
             .chunks_exact(2)
             .map(|b| u16::from_be_bytes([b[0], b[1]]))
@@ -429,6 +458,9 @@ fn settle(
     warnings: &Warnings,
 ) -> Settled {
     let mut kept: Vec<(usize, Vec<Condition>)> = Vec::new();
+    // Each record is compared with every one kept before it, so the
+    // comparisons are charged to a work budget.
+    let budget = WorkBudget::new(WORK_LIMIT);
     'records: for (index, record) in fv.records.iter().enumerate() {
         let mut left = Vec::new();
         for &condition in &record.conditions {
@@ -464,6 +496,19 @@ fn settle(
         }
         left.sort_unstable();
         left.dedup();
+        let work = kept
+            .iter()
+            .map(|(_, earlier)| 1 + earlier.len() * left.len())
+            .sum();
+        if !budget.spend(work) {
+            warnings.push(
+                table_tag,
+                fv.at,
+                "FeatureVariations name more records than the instancer compares",
+                "the FeatureVariations",
+            );
+            return Settled::Gone;
+        }
         if kept
             .iter()
             .any(|(_, earlier)| earlier.iter().all(|c| left.contains(c)))

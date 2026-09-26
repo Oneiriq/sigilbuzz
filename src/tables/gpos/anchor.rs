@@ -110,11 +110,11 @@ impl Anchor {
         })?;
         let mut anchor = Self::parse(slice).map_err(|e| match e {
             Error::Malformed { offset: o, context } => Error::Malformed {
-                offset: offset + o,
+                offset: offset.saturating_add(o),
                 context,
             },
             Error::Truncated { offset: o, context } => Error::Truncated {
-                offset: offset + o,
+                offset: offset.saturating_add(o),
                 context,
             },
             other => other,

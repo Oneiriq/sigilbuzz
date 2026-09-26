@@ -37,10 +37,10 @@
 
 use sigilbuzz::{shape, Blob, Buffer, Face, Feature, Font};
 
-/// Built by [`fixture::build`]: two glyphs ("A" and "V"), one `wght`
-/// axis (400 to 900), and a GPOS kern pair whose x_advance delta is
-/// -100 at wght=900 and 0 at wght=400 via a VariationIndex into
-/// GDEF's ItemVariationStore.
+/// Built by [`fixture::build`]: three glyphs ("A", "V", and an unkerned
+/// "B" that lets a subset drop a glyph), one `wght` axis (400 to 900),
+/// and a GPOS kern pair whose x_advance delta is -100 at wght=900 and 0
+/// at wght=400 via a VariationIndex into GDEF's ItemVariationStore.
 const VAR_KERN: &[u8] = include_bytes!("fixtures/var_kern.ttf");
 const RUBIK: &[u8] = include_bytes!("fixtures/rubik_vf.ttf");
 
@@ -190,6 +190,10 @@ mod fixture {
     const UPEM: u16 = 1000;
     const GID_A: u16 = 1;
     const GID_V: u16 = 2;
+    /// Not kerned. A subset that keeps only A and V drops it, which
+    /// makes the subsetter rewrite the layout tables.
+    const GID_B: u16 = 3;
+    const NUM_GLYPHS: u16 = 4;
 
     fn head() -> Vec<u8> {
         let mut t = Vec::new();
@@ -225,14 +229,14 @@ mod fixture {
         be16(&mut t, 0); // caretSlopeRun
         t.extend_from_slice(&[0; 10]); // caretOffset + 4 reserved
         be16(&mut t, 0); // metricDataFormat
-        be16(&mut t, 3); // numberOfHMetrics
+        be16(&mut t, NUM_GLYPHS); // numberOfHMetrics
         t
     }
 
     fn maxp() -> Vec<u8> {
         let mut t = Vec::new();
         be32(&mut t, 0x0001_0000);
-        be16(&mut t, 3); // numGlyphs
+        be16(&mut t, NUM_GLYPHS); // numGlyphs
         be16(&mut t, 4); // maxPoints
         be16(&mut t, 1); // maxContours
         be16(&mut t, 0); // maxCompositePoints
@@ -244,17 +248,18 @@ mod fixture {
 
     fn hmtx() -> Vec<u8> {
         let mut t = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..NUM_GLYPHS {
             be16(&mut t, 500);
             be16(&mut t, 0);
         }
         t
     }
 
-    /// cmap with one format 4 subtable: A -> 1, V -> 2.
+    /// cmap with one format 4 subtable: A -> 1, B -> 3, V -> 2.
     fn cmap() -> Vec<u8> {
-        let segs: [(u16, u16); 3] = [
+        let segs: [(u16, u16); 4] = [
             (u16::from(b'A'), GID_A),
+            (u16::from(b'B'), GID_B),
             (u16::from(b'V'), GID_V),
             (0xFFFF, 0),
         ];
@@ -263,9 +268,9 @@ mod fixture {
         be16(&mut sub, 16 + 8 * segs.len() as u16); // length
         be16(&mut sub, 0); // language
         be16(&mut sub, 2 * segs.len() as u16); // segCountX2
-        be16(&mut sub, 4); // searchRange
-        be16(&mut sub, 1); // entrySelector
-        be16(&mut sub, 2); // rangeShift
+        be16(&mut sub, 8); // searchRange: 2 * 2^floor(log2(segCount))
+        be16(&mut sub, 2); // entrySelector
+        be16(&mut sub, 0); // rangeShift
         for (code, _) in segs {
             be16(&mut sub, code); // endCode
         }
@@ -295,12 +300,12 @@ mod fixture {
         t
     }
 
-    /// One rectangle contour per glyph: `.notdef` 400x700, A and V
+    /// One rectangle contour per glyph: `.notdef` 400x700, A, V, and B
     /// 500x1000.
     fn glyf_loca() -> (Vec<u8>, Vec<u8>) {
         let mut glyf = Vec::new();
         let mut loca = Vec::new();
-        for (w, h) in [(400i16, 700i16), (500, 1000), (500, 1000)] {
+        for (w, h) in [(400i16, 700i16), (500, 1000), (500, 1000), (500, 1000)] {
             be16(&mut loca, (glyf.len() / 2) as u16);
             be16(&mut glyf, 1); // numberOfContours
             for v in [0, 0, w, h] {
@@ -337,6 +342,30 @@ mod fixture {
         }
         be16(&mut t, 0); // flags
         be16(&mut t, 256); // axisNameID
+        t
+    }
+
+    /// name with the family name (ID 1) and the `wght` axis name
+    /// (ID 256, which fvar points at). The subsetter copies `name`, so a
+    /// font without one cannot be subset.
+    fn name() -> Vec<u8> {
+        let strings: [(u16, &str); 2] = [(1, "VarKern"), (256, "Weight")];
+        let mut t = Vec::new();
+        be16(&mut t, 0); // format
+        be16(&mut t, strings.len() as u16); // count
+        be16(&mut t, 6 + 12 * strings.len() as u16); // storageOffset
+        let mut storage = Vec::new();
+        for (id, text) in strings {
+            let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+            be16(&mut t, 3); // platform: Windows
+            be16(&mut t, 1); // encoding: Unicode BMP
+            be16(&mut t, 0x0409); // language: en-US
+            be16(&mut t, id);
+            be16(&mut t, utf16.len() as u16);
+            be16(&mut t, storage.len() as u16);
+            storage.extend_from_slice(&utf16);
+        }
+        t.extend_from_slice(&storage);
         t
     }
 
@@ -454,7 +483,7 @@ mod fixture {
     /// table checksums and `head.checkSumAdjustment` filled in.
     pub fn build() -> Vec<u8> {
         let (glyf, loca) = glyf_loca();
-        let tables: [([u8; 4], Vec<u8>); 10] = [
+        let tables: [([u8; 4], Vec<u8>); 11] = [
             (*b"GDEF", gdef()),
             (*b"GPOS", gpos()),
             (*b"cmap", cmap()),
@@ -465,11 +494,12 @@ mod fixture {
             (*b"hmtx", hmtx()),
             (*b"loca", loca),
             (*b"maxp", maxp()),
+            (*b"name", name()),
         ];
         let mut out = Vec::new();
         be32(&mut out, 0x0001_0000); // sfntVersion
         be16(&mut out, tables.len() as u16);
-        be16(&mut out, 128); // searchRange: 8 tables * 16
+        be16(&mut out, 128); // searchRange: 16 * the largest power of two <= 11
         be16(&mut out, 3); // entrySelector
         be16(&mut out, (tables.len() as u16) * 16 - 128); // rangeShift
         let mut offset = 12 + 16 * tables.len();

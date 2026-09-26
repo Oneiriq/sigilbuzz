@@ -6,22 +6,36 @@ use alloc::vec::Vec;
 
 use crate::pixmap::ColorPixmap;
 
-use super::document::Defs;
+use super::document::{node_cost, Defs};
 use super::model::{Filter, FilterOp, FilterPrimitive};
 use super::style::{parse_color, parse_length, parse_opacity};
 use super::xml::{name_eq, Node};
+use super::{MAX_BLUR_RADIUS, MAX_FILTER_PRIMITIVES};
 
 /// Resolves a `<filter id="...">` definition into a [`Filter`] record.
 /// Unknown / malformed primitives are skipped silently. The rest of
-/// the chain still runs. Returns `None` if the id doesn't point at a
-/// `<filter>` element or no recognized primitives were collected.
+/// the chain still runs. Primitives past [`MAX_FILTER_PRIMITIVES`] are
+/// ignored. Returns `None` if the id doesn't point at a `<filter>`
+/// element or no recognized primitives were collected.
 pub(super) fn resolve_filter(defs: &Defs<'_>, id: &str) -> Option<Filter> {
     let f = defs.lookup(id)?;
-    if !name_eq(&f.name, "filter") {
+    if !name_eq(&f.name, "filter") || !defs.charge_work(node_cost(f)) {
         return None;
     }
     let mut primitives = Vec::new();
     for c in &f.children {
+        if primitives.len() >= MAX_FILTER_PRIMITIVES {
+            break;
+        }
+        // `feMerge` also reads its `feMergeNode` children.
+        let cost = c
+            .children
+            .iter()
+            .map(node_cost)
+            .fold(node_cost(c), usize::saturating_add);
+        if !defs.charge_work(cost) {
+            return None;
+        }
         if let Some(p) = parse_filter_primitive(c) {
             primitives.push(p);
         }
@@ -34,7 +48,6 @@ pub(super) fn resolve_filter(defs: &Defs<'_>, id: &str) -> Option<Filter> {
 
 fn parse_filter_primitive(node: &Node) -> Option<FilterPrimitive> {
     let input = node.attr("in").map(|s| s.trim().to_string());
-    let input2 = node.attr("in2").map(|s| s.trim().to_string());
     let result = node.attr("result").map(|s| s.trim().to_string());
 
     let op = if name_eq(&node.name, "feGaussianBlur") {
@@ -85,12 +98,7 @@ fn parse_filter_primitive(node: &Node) -> Option<FilterPrimitive> {
         return None;
     };
 
-    Some(FilterPrimitive {
-        input,
-        input2,
-        result,
-        op,
-    })
+    Some(FilterPrimitive { input, result, op })
 }
 
 /// `stdDeviation` may be a single number or two whitespace-separated
@@ -215,12 +223,9 @@ pub(super) fn apply_filter(filter: &Filter, source: &ColorPixmap) -> ColorPixmap
     for prim in &filter.primitives {
         let in_pix: ColorPixmap = match prim.input.as_deref() {
             Some("SourceGraphic") => source.clone(),
-            Some("SourceAlpha") => {
-                if source_alpha.is_none() {
-                    source_alpha = Some(make_source_alpha(source));
-                }
-                source_alpha.as_ref().unwrap().clone()
-            }
+            Some("SourceAlpha") => source_alpha
+                .get_or_insert_with(|| make_source_alpha(source))
+                .clone(),
             Some(name) => named
                 .get(name)
                 .cloned()
@@ -241,12 +246,9 @@ pub(super) fn apply_filter(filter: &Filter, source: &ColorPixmap) -> ColorPixmap
                 for name in inputs {
                     let layer = match name.as_str() {
                         "SourceGraphic" => source.clone(),
-                        "SourceAlpha" => {
-                            if source_alpha.is_none() {
-                                source_alpha = Some(make_source_alpha(source));
-                            }
-                            source_alpha.as_ref().unwrap().clone()
-                        }
+                        "SourceAlpha" => source_alpha
+                            .get_or_insert_with(|| make_source_alpha(source))
+                            .clone(),
                         other => named
                             .get(other)
                             .cloned()
@@ -314,12 +316,12 @@ pub(super) fn composite_over(dst: &mut ColorPixmap, top: &ColorPixmap) {
 /// with a box kernel of radius `r ~= ceil(sigma)` three times, which approaches
 /// a true Gaussian by the central-limit theorem and is visually
 /// indistinguishable for σ >= 1.
-fn apply_gaussian_blur(src: &ColorPixmap, sx: f32, sy: f32) -> ColorPixmap {
+pub(super) fn apply_gaussian_blur(src: &ColorPixmap, sx: f32, sy: f32) -> ColorPixmap {
     if (sx <= 0.0 && sy <= 0.0) || src.is_empty() {
         return src.clone();
     }
-    let rx = (sx.max(0.0)).ceil() as i32;
-    let ry = (sy.max(0.0)).ceil() as i32;
+    let rx = ((sx.max(0.0)).ceil() as i32).min(MAX_BLUR_RADIUS);
+    let ry = ((sy.max(0.0)).ceil() as i32).min(MAX_BLUR_RADIUS);
     let mut buf = src.clone();
     if rx > 0 {
         for _ in 0..3 {
@@ -332,6 +334,17 @@ fn apply_gaussian_blur(src: &ColorPixmap, sx: f32, sy: f32) -> ColorPixmap {
         }
     }
     buf
+}
+
+/// Sum of `sample(k)` over `k` in `-r..=r` with `k` clamped into
+/// `0..len`, as the edge-extending blur window needs. Counts the
+/// clamped samples instead of visiting them, so the cost is at most
+/// `len` samples however large `r` is. `r >= 0` and `len >= 1`.
+pub(super) fn clamped_window_sum(r: i32, len: i32, sample: impl Fn(i32) -> u32) -> u32 {
+    let inside = r.min(len - 1);
+    let below = r as u32 * sample(0);
+    let above = (r - inside) as u32 * sample(len - 1);
+    (0..=inside).map(&sample).sum::<u32>() + below + above
 }
 
 fn box_blur_h(src: &ColorPixmap, r: i32) -> ColorPixmap {
@@ -349,19 +362,12 @@ fn box_blur_h(src: &ColorPixmap, r: i32) -> ColorPixmap {
         // clamp to the edge ("EDGE" mode in SVG terms, closer to what
         // browser engines do for filter regions touching the canvas
         // edge).
-        let mut sr: u32 = 0;
-        let mut sg: u32 = 0;
-        let mut sb: u32 = 0;
-        let mut sa: u32 = 0;
         // Prime the window with [-r, r] samples.
-        for kx in -r..=r {
-            let cx = kx.clamp(0, w - 1);
-            let i = row + cx as usize * 4;
-            sr += src.data[i] as u32;
-            sg += src.data[i + 1] as u32;
-            sb += src.data[i + 2] as u32;
-            sa += src.data[i + 3] as u32;
-        }
+        let sample = |c: usize| move |kx: i32| src.data[row + kx as usize * 4 + c] as u32;
+        let mut sr = clamped_window_sum(r, w, sample(0));
+        let mut sg = clamped_window_sum(r, w, sample(1));
+        let mut sb = clamped_window_sum(r, w, sample(2));
+        let mut sa = clamped_window_sum(r, w, sample(3));
         for x in 0..w {
             let oi = row + x as usize * 4;
             out.data[oi] = (sr / kernel) as u8;
@@ -394,18 +400,11 @@ fn box_blur_v(src: &ColorPixmap, r: i32) -> ColorPixmap {
     let stride = (w as usize) * 4;
     for x in 0..w {
         let col = x as usize * 4;
-        let mut sr: u32 = 0;
-        let mut sg: u32 = 0;
-        let mut sb: u32 = 0;
-        let mut sa: u32 = 0;
-        for ky in -r..=r {
-            let cy = ky.clamp(0, h - 1);
-            let i = col + cy as usize * stride;
-            sr += src.data[i] as u32;
-            sg += src.data[i + 1] as u32;
-            sb += src.data[i + 2] as u32;
-            sa += src.data[i + 3] as u32;
-        }
+        let sample = |c: usize| move |ky: i32| src.data[col + ky as usize * stride + c] as u32;
+        let mut sr = clamped_window_sum(r, h, sample(0));
+        let mut sg = clamped_window_sum(r, h, sample(1));
+        let mut sb = clamped_window_sum(r, h, sample(2));
+        let mut sa = clamped_window_sum(r, h, sample(3));
         for y in 0..h {
             let oi = col + y as usize * stride;
             out.data[oi] = (sr / kernel) as u8;
@@ -457,19 +456,21 @@ fn apply_color_matrix(src: &ColorPixmap, m: &[f32; 20]) -> ColorPixmap {
 
 /// Translates a pixmap by `(dx, dy)` device-space pixels. Out-of-bounds
 /// reads return transparent black; the destination is fresh.
-fn apply_offset(src: &ColorPixmap, dx: f32, dy: f32) -> ColorPixmap {
+pub(super) fn apply_offset(src: &ColorPixmap, dx: f32, dy: f32) -> ColorPixmap {
     let mut out = ColorPixmap::new(src.width, src.height);
+    // `as i32` saturates for huge offsets, so the subtractions below
+    // saturate too. Any saturated source index is out of range.
     let dxi = dx.round() as i32;
     let dyi = dy.round() as i32;
     let w = src.width as i32;
     let h = src.height as i32;
     for y in 0..h {
-        let sy = y - dyi;
+        let sy = y.saturating_sub(dyi);
         if sy < 0 || sy >= h {
             continue;
         }
         for x in 0..w {
-            let sx = x - dxi;
+            let sx = x.saturating_sub(dxi);
             if sx < 0 || sx >= w {
                 continue;
             }

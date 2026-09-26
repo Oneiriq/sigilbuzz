@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use super::pair_sets::{emit_pair_sets, PairSets};
 use super::single_adj::{carry_devices, value_record_size};
 
-use crate::layout::{classdef_pairs_at, parse_coverage_glyphs, RewriterCtx, RewrittenSubtable};
+use crate::layout::{RewriterCtx, RewrittenSubtable};
 
 // ---------------------------------------------------------------------------
 // Type 2: Pair Adjustment
@@ -68,7 +68,7 @@ fn read_pair_pos_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<(u16, u16, Pai
         return None;
     }
     let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let covered = ctx.gid_map.coverage_glyphs(cov_bytes)?;
     let pair_count = covered.len().min(pair_set_count);
 
     let v1_size = value_record_size(value_format1);
@@ -95,6 +95,9 @@ fn read_pair_pos_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<(u16, u16, Pai
         let need = 2 + pair_value_count * pvr_size;
         if set_bytes.len() < need {
             continue;
+        }
+        if !map.spend(pair_value_count) {
+            return None;
         }
         // Filter PairValueRecords by surviving secondGlyph.
         let mut survivors: Vec<(u16, Vec<u8>)> = Vec::new();
@@ -203,19 +206,21 @@ pub(super) fn rewrite_pair_pos_format2(
     let records_off = 16usize;
 
     let v_pair = value_record_size(value_format1) + value_record_size(value_format2);
-    let class2_stride = v_pair;
-    let class1_stride = class2_count as usize * class2_stride;
-    let need = records_off + class1_count as usize * class1_stride;
-    if sub.len() < need {
-        return None;
-    }
-
-    let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
-    let cd1_pairs = classdef_pairs_at(sub, cd1_off)?;
-    let cd2_pairs = classdef_pairs_at(sub, cd2_off)?;
+    // The matrix can exceed a 32-bit `usize` on hostile counts, so the
+    // size is computed with checked math.
+    let matrix_len = usize::from(class1_count)
+        .checked_mul(usize::from(class2_count))?
+        .checked_mul(v_pair)?;
+    let matrix = sub.get(records_off..records_off.checked_add(matrix_len)?)?;
 
     let map = ctx.gid_map;
+    let cov_bytes = sub.get(cov_off..)?;
+    let covered = map.coverage_glyphs(cov_bytes)?;
+    let cd1_pairs = map.classdef_pairs_at(sub, cd1_off)?;
+    let cd2_pairs = map.classdef_pairs_at(sub, cd2_off)?;
+    if !map.spend(matrix.len()) {
+        return None;
+    }
 
     // Build kept (old, new) lists for both axes. The first-axis kept
     // set is Coverage ∩ kept-gids; the second-axis kept set spans every
@@ -240,20 +245,22 @@ pub(super) fn rewrite_pair_pos_format2(
     // (first, second) pair from the kept sets, resolve its
     // (class1, class2) via the source ClassDefs, and read the source
     // matrix cell directly.
-    if should_use_format1_fallback(&surviving_first, &cd2_pairs, map) {
+    if should_use_format1_fallback(&surviving_first, map) {
+        let matrix = PairClassMatrix {
+            cells: matrix,
+            class1_count,
+            class2_count,
+            cell_size: v_pair,
+        };
         return rewrite_pair_pos_format2_to_format1(
             ctx,
             sub,
             &surviving_first,
+            &cd1_pairs,
             &cd2_pairs,
             value_format1,
             value_format2,
-            class1_count,
-            class2_count,
-            records_off,
-            cd1_off,
-            cd2_off,
-            map,
+            &matrix,
         );
     }
 
@@ -288,8 +295,7 @@ pub(super) fn rewrite_pair_pos_format2(
 
     // Matrix bytes travel verbatim: neither ValueRecord field nor
     // class indices changed.
-    let matrix_bytes =
-        sub[records_off..records_off + class1_count as usize * class1_stride].to_vec();
+    let matrix_bytes = matrix.to_vec();
 
     let mut rs = emit_pair_pos_format2(
         ctx,
@@ -374,13 +380,12 @@ fn emit_pair_pos_format2(
 /// preserves source class IDs verbatim.
 fn should_use_format1_fallback(
     surviving_first: &[(u16, u16)],
-    _cd2_pairs: &[(u16, u16)],
     map: &crate::layout::GidMap,
 ) -> bool {
     // Kept-set size approximates the second-glyph universe (every kept
     // gid is a candidate second glyph through classDef2's class-0
     // default, even if it isn't listed explicitly).
-    let kept_count = map.iter_kept().count();
+    let kept_count = map.kept_len();
     let cross = surviving_first.len() * kept_count.max(1);
     surviving_first.len() <= 8 || cross <= 256
 }
@@ -388,63 +393,92 @@ fn should_use_format1_fallback(
 /// One PairPos fmt-1 first-glyph set: `(new_first_gid, [(new_second_gid, value_pair_bytes)])`.
 type PairPosFmt1Set = (u16, Vec<(u16, Vec<u8>)>);
 
+/// The Class1Record matrix of a PairPos format 2 subtable.
+struct PairClassMatrix<'a> {
+    /// `class1_count * class2_count` cells of `cell_size` bytes each.
+    cells: &'a [u8],
+    class1_count: u16,
+    class2_count: u16,
+    /// Bytes per cell: both ValueRecords.
+    cell_size: usize,
+}
+
+impl<'a> PairClassMatrix<'a> {
+    /// Returns the raw value-pair bytes at `(c1, c2)`, or `None` when
+    /// either class is out of range.
+    fn cell(&self, c1: u16, c2: u16) -> Option<&'a [u8]> {
+        if c1 >= self.class1_count || c2 >= self.class2_count {
+            return None;
+        }
+        let index = usize::from(c1) * usize::from(self.class2_count) + usize::from(c2);
+        let off = index.checked_mul(self.cell_size)?;
+        self.cells.get(off..off.checked_add(self.cell_size)?)
+    }
+}
+
+/// Sorts ClassDef `(gid, class)` pairs by gid for [`class_in`]. The
+/// sort is stable, so when a malformed table lists a glyph twice the
+/// entry that comes first in the table stays first.
+fn sorted_by_gid(pairs: &[(u16, u16)]) -> Vec<(u16, u16)> {
+    let mut sorted = pairs.to_vec();
+    sorted.sort_by_key(|&(g, _)| g);
+    sorted
+}
+
+/// Looks up the class of `gid` in `(gid, class)` pairs sorted by
+/// [`sorted_by_gid`]. Unlisted glyphs are class 0.
+fn class_in(sorted: &[(u16, u16)], gid: u16) -> u16 {
+    let i = sorted.partition_point(|&(g, _)| g < gid);
+    match sorted.get(i) {
+        Some(&(g, class)) if g == gid => class,
+        _ => 0,
+    }
+}
+
 /// Synthesizes a fmt-1 PairPos around the kept-gid cross-product.
 /// Walks every `(first_old, first_new) * (second_old)` and reads the
 /// source matrix cell at `(class1, class2)`. Drops pairs whose source
 /// cell is all-zero (no kerning to preserve). The lookup answer is
-/// then equivalent to "not covered".
+/// then equivalent to "not covered". The cross-product is charged to
+/// the work budget up front.
 #[allow(clippy::too_many_arguments)]
 fn rewrite_pair_pos_format2_to_format1(
     ctx: &RewriterCtx,
     sub: &[u8],
     surviving_first: &[(u16, u16)],
+    cd1_pairs: &[(u16, u16)],
     cd2_pairs: &[(u16, u16)],
     value_format1: u16,
     value_format2: u16,
-    class1_count: u16,
-    class2_count: u16,
-    records_off: usize,
-    cd1_off: usize,
-    cd2_off: usize,
-    map: &crate::layout::GidMap,
+    matrix: &PairClassMatrix<'_>,
 ) -> Option<Vec<RewrittenSubtable>> {
+    let map = ctx.gid_map;
     let v1_size = value_record_size(value_format1);
     let v2_size = value_record_size(value_format2);
-    let v_pair = v1_size + v2_size;
-    let class2_stride = v_pair;
-    let class1_stride = class2_count as usize * class2_stride;
-
-    // Build a quick (gid -> class) lookup for both ClassDefs by parsing
-    // them from the source bytes once. Class 0 is the implicit default.
-    let cd1_class_of = |gid: u16| -> u16 { class_of_gid(sub, cd1_off, gid) };
-    let cd2_class_of = |gid: u16| -> u16 { class_of_gid(sub, cd2_off, gid) };
 
     // Enumerate the kept-gid universe as the candidate second-glyph
     // set. Classes 1..N appear in `cd2_pairs`, but class 0 (the
     // "everything else" bucket) carries any gid the source classDef2
     // doesn't list explicitly, and class-0 columns can still hold
-    // non-zero kerning. Walking the GidMap directly catches that.
-    let _ = cd2_pairs; // class lookups happen via cd2_class_of below.
-    let kept_seconds: Vec<(u16, u16)> = map.iter_kept().collect();
-
-    // Compute the cell at (class1, class2). Returns the raw value-pair
-    // bytes when both indices are in range, an empty slice otherwise.
-    let cell_bytes = |c1: u16, c2: u16| -> Option<&[u8]> {
-        if c1 >= class1_count || c2 >= class2_count {
-            return None;
-        }
-        let off = records_off + c1 as usize * class1_stride + c2 as usize * class2_stride;
-        sub.get(off..off + v_pair)
-    };
+    // non-zero kerning. Walking the GidMap directly catches that. Each
+    // second glyph's class is resolved once, outside the pair loop.
+    let cd1_sorted = sorted_by_gid(cd1_pairs);
+    let cd2_sorted = sorted_by_gid(cd2_pairs);
+    let kept_seconds: Vec<(u16, u16)> = map
+        .iter_kept()
+        .map(|(second_old, second_new)| (second_new, class_in(&cd2_sorted, second_old)))
+        .collect();
+    if !map.spend(surviving_first.len().saturating_mul(kept_seconds.len())) {
+        return None;
+    }
 
     // Build (first_new, [(second_new, value_pair_bytes), ...]).
     let mut out_sets: Vec<PairPosFmt1Set> = Vec::new();
     for &(first_old, first_new) in surviving_first {
-        let c1 = cd1_class_of(first_old);
+        let c1 = class_in(&cd1_sorted, first_old);
         let mut entries: Vec<(u16, Vec<u8>)> = Vec::new();
-        for &(second_old, second_new) in &kept_seconds {
-            let c2 = cd2_class_of(second_old);
-            let Some(cell) = cell_bytes(c1, c2) else {
+        for &(second_new, c2) in &kept_seconds {
+            let Some(cell) = matrix.cell(c1, c2) else {
                 continue;
             };
             // Drop all-zero cells: no kerning to carry.
@@ -477,64 +511,6 @@ fn rewrite_pair_pos_format2_to_format1(
         &out_sets,
         sub,
     ))
-}
-
-/// Reads a single (gid -> class) value from a ClassDef stored at
-/// `cd_off` inside `sub`. Returns 0 (the implicit default) on any
-/// parse failure.
-fn class_of_gid(sub: &[u8], cd_off: usize, gid: u16) -> u16 {
-    // A null offset is the empty ClassDef: every glyph is class 0.
-    if cd_off == 0 {
-        return 0;
-    }
-    let Some(cd) = sub.get(cd_off..) else {
-        return 0;
-    };
-    if cd.len() < 2 {
-        return 0;
-    }
-    let format = u16::from_be_bytes([cd[0], cd[1]]);
-    match format {
-        1 => {
-            if cd.len() < 6 {
-                return 0;
-            }
-            let start = u16::from_be_bytes([cd[2], cd[3]]);
-            let count = u16::from_be_bytes([cd[4], cd[5]]) as usize;
-            if gid < start {
-                return 0;
-            }
-            let idx = (gid - start) as usize;
-            if idx >= count {
-                return 0;
-            }
-            let off = 6 + idx * 2;
-            if cd.len() < off + 2 {
-                return 0;
-            }
-            u16::from_be_bytes([cd[off], cd[off + 1]])
-        }
-        2 => {
-            if cd.len() < 4 {
-                return 0;
-            }
-            let count = u16::from_be_bytes([cd[2], cd[3]]) as usize;
-            for i in 0..count {
-                let off = 4 + i * 6;
-                if cd.len() < off + 6 {
-                    return 0;
-                }
-                let start = u16::from_be_bytes([cd[off], cd[off + 1]]);
-                let end = u16::from_be_bytes([cd[off + 2], cd[off + 3]]);
-                let class = u16::from_be_bytes([cd[off + 4], cd[off + 5]]);
-                if gid >= start && gid <= end {
-                    return class;
-                }
-            }
-            0
-        }
-        _ => 0,
-    }
 }
 
 /// Emits a fmt-1 PairPos given pre-encoded value-pair bodies. Each

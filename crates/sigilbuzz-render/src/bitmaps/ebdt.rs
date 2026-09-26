@@ -1,15 +1,12 @@
 //! EBDT monochrome bitmap decode, including composite (formats 8 / 9)
 //! expansion.
 
-use alloc::vec::Vec;
-
 use sigilbuzz::tables::ebdt::{BitPacking, EbdtBitmap};
 use sigilbuzz::{Face, GlyphBitmapEntry};
 
-use super::{rasterize_bitmap_inner_full, EBDT_COMPOSITE_MAX_DEPTH};
+use super::{rasterize_bitmap_inner, CompositeState, EBDT_COMPOSITE_MAX_DEPTH};
 use crate::error::RenderError;
 use crate::pixmap::ColorPixmap;
-
 // ---------------------------------------------------------------------------
 // EBDT mono -> RGBA.
 //
@@ -31,8 +28,10 @@ use crate::pixmap::ColorPixmap;
 ///
 /// Accepts the byte-aligned (formats 1 / 6) and bit-aligned (formats
 /// 2 / 5 / 7) variants. See [`BitPacking`]. Composite formats 8 / 9
-/// never reach this entry point because the underlying parser surfaces
-/// them as `Unsupported`.
+/// carry component records instead of a mask, so a composite entry
+/// with a non-zero size fails the length check below.
+/// [`rasterize_bitmap_glyph`](super::rasterize_bitmap_glyph) renders
+/// composites by recursing into their components.
 ///
 /// # Errors
 /// Returns [`RenderError::UnsupportedBitmap`] when the mask payload
@@ -59,12 +58,14 @@ pub fn decode_ebdt_mono(bitmap: &EbdtBitmap<'_>) -> Result<ColorPixmap, RenderEr
 /// [`RenderError::BitmapDecodeFailed`] rather than silently falling
 /// back to a different strike.
 ///
-/// The recursion is bounded three ways:
+/// The recursion is bounded four ways:
 ///   1. A hard depth cap ([`EBDT_COMPOSITE_MAX_DEPTH`]).
 ///   2. A self-reference guard (a component whose `glyph_id` equals
 ///      the current composite's `gid`).
 ///   3. A cycle guard against the full ancestor chain (a component
 ///      whose `glyph_id` matches any gid currently being expanded).
+///   4. A total component budget ([`EBDT_COMPOSITE_MAX_COMPONENTS`])
+///      shared by every level, which bounds the fan-out.
 ///
 /// Compositing uses source-over alpha blending in premultiplied space.
 /// EBDT mono masks are 0/255 alpha so the result is conceptually a
@@ -76,10 +77,9 @@ pub(super) fn decode_ebdt_composite(
     gid: u16,
     bitmap: &EbdtBitmap<'_>,
     parent_ppem_y: u8,
-    composite_chain: &mut Vec<u16>,
-    composite_depth: u8,
+    composite: &mut CompositeState,
 ) -> Result<ColorPixmap, RenderError> {
-    if composite_depth >= EBDT_COMPOSITE_MAX_DEPTH {
+    if composite.depth >= EBDT_COMPOSITE_MAX_DEPTH {
         return Err(RenderError::BitmapDecodeFailed("composite depth exceeded"));
     }
     let parent_w = u32::from(bitmap.metrics.width());
@@ -91,16 +91,23 @@ pub(super) fn decode_ebdt_composite(
     let canvas_h = parent_h;
     let mut canvas = ColorPixmap::new(canvas_w, canvas_h);
 
-    composite_chain.push(gid);
+    composite.chain.push(gid);
+    composite.depth += 1;
     let result = (|| -> Result<(), RenderError> {
         for comp in bitmap.components() {
+            let Some(left) = composite.components_left.checked_sub(1) else {
+                return Err(RenderError::BitmapDecodeFailed(
+                    "composite component budget exceeded",
+                ));
+            };
+            composite.components_left = left;
             // Self-reference and ancestor-cycle guards, separate from
             // the depth cap so they surface a precise error message
             // even at depth 1.
             if comp.glyph_id == gid {
                 return Err(RenderError::BitmapDecodeFailed("composite self-reference"));
             }
-            if composite_chain.contains(&comp.glyph_id) {
+            if composite.chain.contains(&comp.glyph_id) {
                 return Err(RenderError::BitmapDecodeFailed("composite cycle"));
             }
             // OOB rejection: glyph id beyond what the font enumerates.
@@ -147,14 +154,8 @@ pub(super) fn decode_ebdt_composite(
                     ));
                 }
             }
-            let comp_pix = rasterize_bitmap_inner_full(
-                face,
-                comp.glyph_id,
-                parent_ppem_size,
-                0,
-                composite_chain,
-                composite_depth + 1,
-            )?;
+            let comp_pix =
+                rasterize_bitmap_inner(face, comp.glyph_id, parent_ppem_size, 0, composite)?;
             blit_source_over(
                 &mut canvas,
                 &comp_pix,
@@ -164,7 +165,8 @@ pub(super) fn decode_ebdt_composite(
         }
         Ok(())
     })();
-    composite_chain.pop();
+    composite.depth -= 1;
+    composite.chain.pop();
     result?;
     Ok(canvas)
 }
@@ -192,13 +194,11 @@ pub(super) fn blit_source_over(dst: &mut ColorPixmap, src: &ColorPixmap, dx: i32
             if tx < 0 || tx >= dw {
                 continue;
             }
-            #[allow(clippy::cast_sign_loss)]
             let s_idx = (sy as usize * src.width as usize + sx as usize) * 4;
             let sa = src.data[s_idx + 3];
             if sa == 0 {
                 continue;
             }
-            #[allow(clippy::cast_sign_loss)]
             let d_idx = (ty as usize * dst.width as usize + tx as usize) * 4;
             // Premultiplied source-over: out = src + dst * (1 - src.a).
             let inv = 255u32 - u32::from(sa);
@@ -208,7 +208,6 @@ pub(super) fn blit_source_over(dst: &mut ColorPixmap, src: &ColorPixmap, dx: i32
                 // (d * inv + 127) / 255 keeps rounding stable; matches
                 // push_premul above.
                 let blended = s + (d * inv + 127) / 255;
-                #[allow(clippy::cast_possible_truncation)]
                 let v = blended.min(255) as u8;
                 dst.data[d_idx + c] = v;
             }

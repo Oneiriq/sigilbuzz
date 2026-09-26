@@ -55,10 +55,10 @@ const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 /// inputs themselves.
 #[must_use]
 pub fn encode_png(pixmap: &ColorPixmap) -> Vec<u8> {
-    // Color type 6 = RGBA, 4 bytes per pixel.
-    let mut raw = Vec::with_capacity(
-        ((pixmap.width as usize) * 4 + 1).saturating_mul(pixmap.height as usize),
-    );
+    // Color type 6 = RGBA, 4 bytes per pixel, plus one filter byte per
+    // row. Sized from `data` so a pixmap whose public dimensions
+    // overstate its buffer cannot request an impossible capacity.
+    let mut raw = Vec::with_capacity(pixmap.data.len().saturating_add(pixmap.height as usize));
     for y in 0..pixmap.height {
         raw.push(0u8); // filter: None
         for x in 0..pixmap.width {
@@ -86,8 +86,7 @@ pub fn encode_png(pixmap: &ColorPixmap) -> Vec<u8> {
 /// `(value, value)` byte pairs in the IDAT.
 #[must_use]
 pub fn encode_png_alpha(pixmap: &Pixmap) -> Vec<u8> {
-    let mut raw =
-        Vec::with_capacity(((pixmap.width as usize) + 1).saturating_mul(pixmap.height as usize));
+    let mut raw = Vec::with_capacity(pixmap.data.len().saturating_add(pixmap.height as usize));
     for y in 0..pixmap.height {
         raw.push(0u8); // filter: None
         for x in 0..pixmap.width {
@@ -192,11 +191,11 @@ impl Crc32 {
     }
 
     fn update(&mut self, bytes: &[u8]) {
-        let table = crc32_table();
         let mut s = self.state;
         for &b in bytes {
+            // The mask keeps the index below 256, the table length.
             let idx = ((s ^ b as u32) & 0xFF) as usize;
-            s = (s >> 8) ^ table[idx];
+            s = (s >> 8) ^ CRC32_TABLE[idx];
         }
         self.state = s;
     }
@@ -206,11 +205,14 @@ impl Crc32 {
     }
 }
 
-/// Build the 256-entry CRC32 lookup table. `const fn` so the table is
-/// available at compile time, no runtime initialization cost and no
-/// static-mut data. The polynomial constant `0xEDB88320` is the
-/// reflected form of the ISO 3309 polynomial, which is what the PNG
-/// spec uses (Section 5.5).
+/// The CRC32 lookup table, evaluated at compile time.
+const CRC32_TABLE: [u32; 256] = crc32_table();
+
+/// Build the 256-entry CRC32 lookup table. `const fn` so
+/// [`CRC32_TABLE`] is built at compile time, with no runtime
+/// initialization cost and no static-mut data. The polynomial
+/// constant `0xEDB88320` is the reflected form of the ISO 3309
+/// polynomial, which is what the PNG spec uses (Section 5.5).
 const fn crc32_table() -> [u32; 256] {
     let mut table = [0u32; 256];
     let mut n = 0u32;

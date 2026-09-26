@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use super::op_code;
 use crate::error::{Error, Result};
 use crate::tables::outline::OutlineSink;
-use crate::tables::parse::Reader;
+use crate::tables::parse::{abs_f32, Reader};
 
 /// Subroutine recursion cap. CFF spec says 10 per Type 2.
 const MAX_SUBR_DEPTH: u8 = 10;
@@ -15,6 +15,13 @@ const CFF1_STACK_LIMIT: usize = 48;
 
 /// Operand-stack cap for CFF2 charstrings. CFF2 spec §3.1 ceiling.
 const CFF2_STACK_LIMIT: usize = 513;
+
+/// Cap on the operands and operators one glyph may execute, counted
+/// across every subroutine call. The depth cap alone does not bound
+/// the work: a subroutine that calls the next one many times, ten
+/// levels deep, runs for an exponential number of steps. Real glyphs
+/// stay far below this limit.
+const MAX_CHARSTRING_OPS: u32 = 100_000;
 
 // ----------------------------------------------------------------------------
 // Type 2 charstring interpreter.
@@ -43,6 +50,9 @@ pub(crate) struct Interp<'a, 'b, S: OutlineSink> {
     /// True after the first move operator. Needed to close open
     /// contours at endchar.
     in_contour: bool,
+    /// Operands and operators executed so far, checked against
+    /// [`MAX_CHARSTRING_OPS`].
+    ops: u32,
     /// CFF2 blend support.
     pub(crate) blend: Option<BlendContext<'b>>,
 }
@@ -75,6 +85,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             is_cff2,
             done: false,
             in_contour: false,
+            ops: 0,
             blend: None,
         }
     }
@@ -91,24 +102,27 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             if self.done {
                 return Ok(());
             }
+            self.ops += 1;
+            if self.ops > MAX_CHARSTRING_OPS {
+                return Err(Error::Malformed {
+                    offset: r.position(),
+                    context: "CFF charstring exceeds operation limit",
+                });
+            }
             let b0 = r.read_u8()?;
             if (32..=246).contains(&b0) {
-                #[allow(clippy::cast_precision_loss)]
                 self.push((i32::from(b0) - 139) as f32)?;
             } else if (247..=250).contains(&b0) {
                 let b1 = r.read_u8()?;
-                #[allow(clippy::cast_precision_loss)]
                 let v = ((i32::from(b0) - 247) * 256 + i32::from(b1) + 108) as f32;
                 self.push(v)?;
             } else if (251..=254).contains(&b0) {
                 let b1 = r.read_u8()?;
-                #[allow(clippy::cast_precision_loss)]
                 let v = (-(i32::from(b0) - 251) * 256 - i32::from(b1) - 108) as f32;
                 self.push(v)?;
             } else if b0 == 255 {
                 // 16.16 fixed.
                 let raw = r.read_i32()?;
-                #[allow(clippy::cast_precision_loss)]
                 self.push(raw as f32 / 65536.0)?;
             } else if b0 == op_code::SHORTINT {
                 let v = r.read_i16()?;
@@ -137,7 +151,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                 let extra = (self.stack.len() as u32) / 2;
                 self.stem_count += extra;
                 self.stack.clear();
-                let n_bytes = (self.stem_count as usize + 7) / 8;
+                let n_bytes = (self.stem_count as usize).div_ceil(8);
                 r.skip(n_bytes)?;
             }
             op_code::RMOVETO => {
@@ -323,9 +337,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             }
             op_code::CALLSUBR => {
                 let idx = self.pop()?;
-                let bias = subr_bias(self.local.len());
-                let i = (idx as i32 + bias) as usize;
-                let subr = self.local.get(i).copied().ok_or(Error::Malformed {
+                let subr = biased_subr(self.local, idx).ok_or(Error::Malformed {
                     offset: 0,
                     context: "CFF callsubr out of range",
                 })?;
@@ -333,9 +345,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             }
             op_code::CALLGSUBR => {
                 let idx = self.pop()?;
-                let bias = subr_bias(self.global.len());
-                let i = (idx as i32 + bias) as usize;
-                let subr = self.global.get(i).copied().ok_or(Error::Malformed {
+                let subr = biased_subr(self.global, idx).ok_or(Error::Malformed {
                     offset: 0,
                     context: "CFF callgsubr out of range",
                 })?;
@@ -443,6 +453,9 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
         Ok(())
     }
 
+    // Each flex variant keeps one arm with its arity check inside,
+    // so the four variants stay parallel.
+    #[allow(clippy::collapsible_match)]
     fn flex(&mut self, esc: u8) -> Result<()> {
         // Flex expands to two rrcurvetos. For outline extraction we
         // emit the two cubics directly; flex-specific depth / height
@@ -488,7 +501,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     let a = core::mem::take(&mut self.stack);
                     let dx_total = a[0] + a[2] + a[4] + a[6] + a[8];
                     let dy_total = a[1] + a[3] + a[5] + a[7] + a[9];
-                    let (dx_final, dy_final) = if dx_total.abs() > dy_total.abs() {
+                    let (dx_final, dy_final) = if abs_f32(dx_total) > abs_f32(dy_total) {
                         (a[10], -dy_total)
                     } else {
                         (-dx_total, a[10])
@@ -516,6 +529,9 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
         self.y = y;
     }
 
+    // The blend loops index the stack, the deltas, and the scalars in
+    // lockstep, which reads more clearly with explicit indices.
+    #[allow(clippy::needless_range_loop)]
     fn apply_blend(&mut self) -> Result<()> {
         // Stack layout: n default values, followed by n*nRegions
         // delta values, followed by the count `n`. `nRegions` is
@@ -526,10 +542,19 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
         // keep the interpreter balanced so parsing continues past
         // BLEND.
         let n_raw = self.pop()?;
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let n = n_raw as usize;
         if n == 0 {
             return Ok(());
+        }
+        let underflow = Error::Malformed {
+            offset: 0,
+            context: "CFF2 blend: stack underflow",
+        };
+        // `n` comes from a float operand and can be huge. The stack
+        // must hold at least `n` values, which keeps the products
+        // below from overflowing.
+        if n > self.stack.len() {
+            return Err(underflow);
         }
         let n_regions = self
             .blend
@@ -544,10 +569,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             );
         let total_deltas = n * n_regions;
         if self.stack.len() < n + total_deltas {
-            return Err(Error::Malformed {
-                offset: 0,
-                context: "CFF2 blend: stack underflow",
-            });
+            return Err(underflow);
         }
         let start = self.stack.len() - n - total_deltas;
         let mut deltas = alloc::vec![0.0_f32; n];
@@ -655,4 +677,12 @@ pub(super) fn subr_bias(count: usize) -> i32 {
     } else {
         32_768
     }
+}
+
+/// Resolves a biased subroutine number popped off the operand stack.
+/// Blended CFF2 operands can hold any float, so the sum is checked
+/// and negative or huge indices resolve to `None`.
+fn biased_subr<'a>(subrs: &[&'a [u8]], idx: f32) -> Option<&'a [u8]> {
+    let i = (idx as i32).checked_add(subr_bias(subrs.len()))?;
+    subrs.get(usize::try_from(i).ok()?).copied()
 }

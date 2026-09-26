@@ -274,17 +274,11 @@ impl<'a> Colr<'a> {
             return None;
         }
         let list_start = self.base_glyph_list_off as usize;
-        if list_start + 4 > self.data.len() {
-            return None;
-        }
-        let count = u32::from_be_bytes([
-            self.data[list_start],
-            self.data[list_start + 1],
-            self.data[list_start + 2],
-            self.data[list_start + 3],
-        ]) as usize;
+        let count = read_u32_at(self.data, list_start)? as usize;
         let recs_start = list_start + 4;
-        let recs_end = recs_start.checked_add(count * 6)?;
+        // Checked: on 32-bit targets `count * 6` can overflow, and a
+        // wrapped end would let the search below index out of bounds.
+        let recs_end = recs_start.checked_add(count.checked_mul(6)?)?;
         if recs_end > self.data.len() {
             return None;
         }
@@ -337,28 +331,14 @@ impl<'a> Colr<'a> {
             return None;
         }
         let list_start = self.layer_list_off as usize;
-        if list_start + 4 > self.data.len() {
-            return None;
-        }
-        let count = u32::from_be_bytes([
-            self.data[list_start],
-            self.data[list_start + 1],
-            self.data[list_start + 2],
-            self.data[list_start + 3],
-        ]);
+        let count = read_u32_at(self.data, list_start)?;
         if layer_index >= count {
             return None;
         }
-        let entry = list_start + 4 + layer_index as usize * 4;
-        if entry + 4 > self.data.len() {
-            return None;
-        }
-        let paint_rel = u32::from_be_bytes([
-            self.data[entry],
-            self.data[entry + 1],
-            self.data[entry + 2],
-            self.data[entry + 3],
-        ]);
+        let entry = (layer_index as usize)
+            .checked_mul(4)?
+            .checked_add(list_start + 4)?;
+        let paint_rel = read_u32_at(self.data, entry)?;
         let abs = (list_start as u32).checked_add(paint_rel)?;
         self.paint_at(abs)
     }
@@ -369,6 +349,13 @@ impl<'a> Colr<'a> {
     pub const fn data(&self) -> &'a [u8] {
         self.data
     }
+}
+
+/// Reads a big-endian `u32` at `off`, or `None` when fewer than four
+/// bytes remain.
+fn read_u32_at(data: &[u8], off: usize) -> Option<u32> {
+    let bytes = data.get(off..)?.get(..4)?;
+    Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 // =========================================================================

@@ -28,7 +28,7 @@ use super::AxisPin;
 // rewriters (HVAR / VVAR / MVAR / gvar / GDEF.IVS) consume to emit
 // trimmed `ItemVariationStore` / gvar tuples in a partial-instance
 // font. They are tested in isolation here so the math stays correct
-// regardless of which table a follow-up wires them into first.
+// independently of the table rewriters that use them.
 // ---------------------------------------------------------------------------
 
 /// Computes the support-scalar contribution of a single axis dimension

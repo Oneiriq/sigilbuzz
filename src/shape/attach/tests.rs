@@ -231,6 +231,7 @@ fn lookup_cx<'a>(filter: MatchFilter<'a>, ignore_zwj: bool, var: &'a VarCtx<'a>)
     LookupCx::new(
         MatchContext::new(filter, LayoutTable::Gpos, joiners).input(),
         var,
+        0,
     )
 }
 
@@ -261,10 +262,7 @@ fn run_lookup_zwj(
         ignore_zwj,
         var,
     );
-    let mut att = Attach {
-        direction,
-        slots: &mut slots,
-    };
+    let mut att = Attach::new(direction, &mut slots);
     apply_lookup(subs, glyphs, &mut att, &cx);
     slots
 }
@@ -548,10 +546,7 @@ fn mark_mark_stacks_onto_the_previous_mark() {
     let mut slots = new_slots(3);
     let var = VarCtx::none();
     let cx = lookup_cx(MatchFilter::for_lookup(0, Some(&gdef), None), true, &var);
-    let mut att = Attach {
-        direction: Direction::Ltr,
-        slots: &mut slots,
-    };
+    let mut att = Attach::new(Direction::Ltr, &mut slots);
     let mark_subs = [AttachSubtable::parse(gpos_lt::MARK_TO_BASE, &base).unwrap()];
     let mkmk_subs = [AttachSubtable::parse(gpos_lt::MARK_TO_MARK, &mkmk).unwrap()];
     apply_lookup(&mark_subs, &mut glyphs, &mut att, &cx);
@@ -718,10 +713,7 @@ fn cursive_reattachment_reverses_the_old_chain() {
     let mut slots = new_slots(3);
     let filter = MatchFilter::none();
     let var = VarCtx::none();
-    let mut att = Attach {
-        direction: Direction::Ltr,
-        slots: &mut slots,
-    };
+    let mut att = Attach::new(Direction::Ltr, &mut slots);
     // First lookup (no RightToLeft): 1 hangs from 0.
     let cx = lookup_cx(filter, true, &var);
     apply_lookup(&ltr_flagless, &mut glyphs, &mut att, &cx);
@@ -750,10 +742,7 @@ fn cursive_separates_a_parent_attached_to_its_new_child() {
     let mut slots = new_slots(2);
     let filter = MatchFilter::none();
     let var = VarCtx::none();
-    let mut att = Attach {
-        direction: Direction::Rtl,
-        slots: &mut slots,
-    };
+    let mut att = Attach::new(Direction::Rtl, &mut slots);
     for flag in [LOOKUP_FLAG_RIGHT_TO_LEFT, 0] {
         let cx = lookup_cx(filter.with_flag(flag), true, &var);
         apply_lookup(&subs, &mut glyphs, &mut att, &cx);
@@ -773,10 +762,7 @@ fn apply_at_ignores_positions_past_the_end() {
     let filter = MatchFilter::none();
     let var = VarCtx::none();
     let cx = lookup_cx(filter, true, &var);
-    let mut att = Attach {
-        direction: Direction::Ltr,
-        slots: &mut slots,
-    };
+    let mut att = Attach::new(Direction::Ltr, &mut slots);
     assert!(!apply_at(&sub, &mut glyphs, &mut att, &cx, 5));
     assert!(!apply_at(&sub, &mut glyphs, &mut att, &cx, 0));
 }

@@ -8,6 +8,11 @@ updates:
       time: "06:00"
       timezone: "America/Anchorage"
     open-pull-requests-limit: 5
+    ignore:
+      # The MSRV job pins this action to the minimum supported Rust version
+      # (`@1.81` names a Rust release, not an action release). It moves only
+      # together with `rust-version` in Cargo.toml.
+      - dependency-name: "dtolnay/rust-toolchain"
     groups:
       actions-minor-patch:
         update-types:
@@ -18,7 +23,10 @@ updates:
       - github-actions
 
   - package-ecosystem: cargo
-    directory: /
+    # The fuzz targets are their own workspace, so list them separately.
+    directories:
+      - /
+      - /fuzz
     schedule:
       interval: weekly
       day: monday

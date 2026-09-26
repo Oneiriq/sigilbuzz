@@ -13,12 +13,11 @@
 //!   pass and picks the correct positional feature bucket (`abvf`,
 //!   `blwf`, `pstf`, `pref`).
 //!
-//! sigilbuzz 0.2.0 wired up Khmer, Myanmar, Thai, Lao, and the Jamo
-//! subset of Hangul against these tables. 0.7.x extends the coverage
-//! to N'Ko, Buginese, Tai Tham, Balinese, Sundanese, Lepcha, Limbu,
-//! and Cham. The tables live here rather than inside a script-specific
-//! module because the same state machine consumes them for every USE
-//! script.
+//! The tables cover Khmer, Myanmar, Thai, Lao, the Jamo subset of
+//! Hangul, N'Ko, Buginese, Tai Tham, Balinese, Sundanese, Lepcha,
+//! Limbu, Cham, and the Brahmi-family historical scripts. They live
+//! here rather than inside a script-specific module because the same
+//! state machine consumes them for every USE script.
 //!
 //! # Sources
 //!
@@ -39,7 +38,6 @@ pub use positions::use_position;
 /// from the MS USE documentation so OpenType spec readers can map
 /// straight across.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum UseCategory {
     /// Base consonant / independent letter: anchors a syllable.
     B,
@@ -90,7 +88,6 @@ pub enum UseCategory {
 /// used by the Indic shaper but with the USE-specific pre/below/post
 /// split laid out explicitly so the reorder pass can branch cleanly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum UsePosition {
     /// No positional role: the default for bases, whitespace, marks
     /// that attach at the overall glyph box.

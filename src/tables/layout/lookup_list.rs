@@ -81,9 +81,7 @@ impl<'a> LookupList<'a> {
 pub struct Lookup<'a> {
     data: &'a [u8],
     base: usize,
-    #[allow(clippy::struct_field_names)]
     lookup_type: u16,
-    #[allow(clippy::struct_field_names)]
     lookup_flag: u16,
     subtable_offsets_off: usize,
     subtable_count: u16,

@@ -13,6 +13,7 @@
 /// Variants mirror the spec's two-letter abbreviations (`BK`, `CR`,
 /// `LF`, ...) so the pair-table reads like the spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// The public variant names are the spec's class codes, so they stay upper case.
 #[allow(clippy::upper_case_acronyms)]
 pub enum LineBreakClass {
     /// Mandatory break (LB4).

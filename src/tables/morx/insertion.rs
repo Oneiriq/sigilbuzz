@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 
 use super::{
-    class_for, FLAG_DONT_ADVANCE, FLAG_INS_CURRENT_BEFORE, FLAG_INS_CURRENT_COUNT_MASK,
+    class_for, max_steps, FLAG_DONT_ADVANCE, FLAG_INS_CURRENT_BEFORE, FLAG_INS_CURRENT_COUNT_MASK,
     FLAG_INS_CURRENT_COUNT_SHIFT, FLAG_INS_MARKED_BEFORE, FLAG_INS_MARKED_COUNT_MASK,
     FLAG_INS_SET_MARK,
 };
@@ -23,11 +23,15 @@ use crate::tables::layout::state_table::{StateTableHeader, CLASS_OUT_OF_BOUNDS};
 ///
 /// The insertion-glyph table is a flat u16 array indexed in units of
 /// glyph ids (so byte offset = index * 2).
+///
+/// Insertions that would grow the run past `max_len` glyphs are
+/// dropped.
 pub(super) fn apply_insertion(
     state: &StateTableHeader<'_>,
     insertion_table: &[u8],
     glyphs: &mut Vec<u16>,
     origins: &mut Vec<usize>,
+    max_len: usize,
 ) {
     const ENTRY_SIZE: usize = 8;
     let mut cur_state: u16 = 0;
@@ -36,7 +40,7 @@ pub(super) fn apply_insertion(
     // Bound the walk: every glyph processed at most a handful of
     // times (DontAdvance retries) before we cap, so a malformed font
     // can't loop the shaper.
-    let max_iters = glyphs.len().saturating_mul(8) + 16;
+    let max_iters = max_steps(glyphs.len());
     let mut iters = 0usize;
     while i <= glyphs.len() {
         iters += 1;
@@ -80,6 +84,7 @@ pub(super) fn apply_insertion(
                     pos,
                     glyphs,
                     origins,
+                    max_len,
                 );
                 if pos <= i {
                     i += n;
@@ -94,7 +99,15 @@ pub(super) fn apply_insertion(
         if cur_index != 0xFFFF && cur_count > 0 && i <= glyphs.len() {
             let before = flags & FLAG_INS_CURRENT_BEFORE != 0;
             let pos = if before { i } else { i + 1 };
-            let n = splice_insertions(insertion_table, cur_index, cur_count, pos, glyphs, origins);
+            let n = splice_insertions(
+                insertion_table,
+                cur_index,
+                cur_count,
+                pos,
+                glyphs,
+                origins,
+                max_len,
+            );
             if before {
                 i += n;
             }
@@ -115,7 +128,8 @@ pub(super) fn apply_insertion(
 /// Reads `count` u16 glyph ids from `insertion_table` at `index`
 /// and splices them into `glyphs` / `origins` at `pos`. Returns the
 /// number of glyphs actually inserted (zero when `pos` is past the
-/// run end or the table doesn't cover the request).
+/// run end, the table doesn't cover the request, or the run would
+/// grow past `max_len`).
 fn splice_insertions(
     insertion_table: &[u8],
     index: u16,
@@ -123,16 +137,20 @@ fn splice_insertions(
     pos: usize,
     glyphs: &mut Vec<u16>,
     origins: &mut Vec<usize>,
+    max_len: usize,
 ) -> usize {
-    if pos > glyphs.len() {
+    // `glyphs` and `origins` always have the same length.
+    if pos > glyphs.len().min(origins.len()) {
         return 0;
     }
     let inserts = read_insertions(insertion_table, index, count);
-    for (k, g) in inserts.iter().enumerate() {
-        glyphs.insert(pos + k, *g);
-        origins.insert(pos + k, usize::MAX);
+    let n = inserts.len();
+    if glyphs.len().saturating_add(n) > max_len {
+        return 0;
     }
-    inserts.len()
+    glyphs.splice(pos..pos, inserts);
+    origins.splice(pos..pos, core::iter::repeat(usize::MAX).take(n));
+    n
 }
 
 /// Reads `count` u16 glyph ids from the insertion-glyph table

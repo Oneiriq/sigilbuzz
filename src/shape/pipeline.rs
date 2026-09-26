@@ -6,24 +6,33 @@ use alloc::vec::Vec;
 
 use super::aat::apply_morx;
 use super::features::{
-    apply_arabic_positional_features, apply_gsub_features_merged, early_default_features,
+    apply_arabic_positional_features, apply_gsub_features_merged_budgeted, early_default_features,
     run_default_gsub,
 };
 use super::hangul::hangul_compose;
 use super::normalize::{self, Normalizer};
-use super::segment::{build_segments, is_common_for_segmentation, ProcessedSegment, Segment};
+use super::segment::{
+    build_segments, is_common_for_segmentation, remap_segments, ProcessedSegment, Segment,
+};
 use super::shaper::Shaper;
 use super::{
     cluster, dotted_circle, feature_disabled, ignorables, native_direction, position, required,
-    rotate, thai, Feature, JoinerTable, VarCtx,
+    rotate, thai, Feature, JoinerTable, LookupBudget, VarCtx,
 };
 use crate::buffer::{script_priority_for, Buffer, BufferFlags, Direction, Glyph, ShapedRun};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::font::Font;
 use crate::ot::arabic::{assign_from_types_in_context, JoiningContext, JoiningForm};
 use crate::unicode::joining::{joining_type, JoiningType};
 use crate::unicode::{script_of, Script};
 
+/// Shapes `buffer` against `font` with optional feature overrides.
+///
+/// Feature tags with `value: 0` disable the corresponding feature
+/// for this call. Non-zero values enable a feature if the font
+/// supports it. Unknown tags are accepted and ignored rather than
+/// returning an error.
+///
 /// # Output order
 ///
 /// Glyphs come back in visual order, like HarfBuzz: logical order for
@@ -34,11 +43,11 @@ use crate::unicode::{script_of, Script};
 ///
 /// Returns an error if the font is missing any of the tables required
 /// for basic shaping (`cmap`, `maxp`, `hhea`, `hmtx`) or if one of
-/// them is malformed.
-// The pipeline is a straight-line sequence of passes so
-// the order is visible in one place; breaking it into five stage
-// helpers would cost more in indirection than it buys in LOC.
-#[allow(clippy::too_many_lines)]
+/// them is malformed. Returns [`Error::Unsupported`] when the text is
+/// longer than `u32::MAX` bytes, since [`Glyph::cluster`] is a `u32`
+/// byte offset.
+// The pipeline is a straight-line sequence of passes so the order is
+// visible in one place.
 pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<ShapedRun> {
     let want_liga = !feature_disabled(features, *b"liga");
     // Vertical layout: explicit when the buffer direction is TTB/BTT,
@@ -81,6 +90,13 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let text = buffer.text();
     if text.is_empty() {
         return Ok(ShapedRun::default());
+    }
+    // Clusters are `u32` byte offsets. Past this length every
+    // `as u32` cluster cast below would wrap.
+    if u32::try_from(text.len()).is_err() {
+        return Err(Error::Unsupported {
+            context: "text longer than u32::MAX bytes",
+        });
     }
 
     // Step 1: the characters to shape, before normalization maps them
@@ -177,9 +193,9 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // Running each segment through its own cmap -> pre-shaper -> GSUB
     // -> GPOS chain is what lets mixed-script runs like `Hi שלום`
     // dispatch the Hebrew half under `hebr` features and the Latin
-    // half under DFLT in a single call. The pre-segmenter implementation
-    // resolved one global priority and missed script-specific lookups
-    // on whichever half lost the tie-break.
+    // half under `latn` in a single call. A single global priority
+    // would miss script-specific lookups on whichever half lost the
+    // tie-break.
     //
     // A caller-set script (Buffer::set_script) replaces the
     // segmentation: the whole buffer is one run under that script, the
@@ -274,13 +290,18 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         },
     );
 
+    // One work budget for every lookup this call applies directly,
+    // across all segments (see `LookupBudget`). The `ot` pre-shapers
+    // run each feature under a budget of its own.
+    let mut budget = LookupBudget::for_shape(glyphs.len());
+
     // Dominant script: the first non-COMMON/INHERITED script in the
     // buffer. HarfBuzz (and rustybuzz) compute this once in
     // `guess_segment_properties` and use it to select a single shaper
     // for the whole run; features the shaper activates only fire when
     // the buffer's dominant script matches. sigilbuzz's per-segment
     // dispatch still runs each segment under its own script priority
-    // (Hebrew half under `hebr`, Latin half under DFLT), but the
+    // (Hebrew half under `hebr`, Latin half under `latn`), but the
     // complex-shaper pre-pass for Old Hangul needs the dominant-script
     // gate to match HarfBuzz: a mixed `Hi 가` run hands `ljmo`/`vjmo`
     // the jamo segment under HarfBuzz's default shaper (no positional
@@ -341,9 +362,16 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         // Take an owned sub-vec of this segment's glyphs so ligature
         // substitution can shrink or multiple-sub can grow the slice
         // without touching the rest of the run.
-        let seg_glyphs_src = glyphs[seg.cp_range.clone()].to_vec();
-        let seg_cps = &codepoints[seg.cp_range.clone()];
-        let mut seg_glyphs = seg_glyphs_src;
+        // Segments come from `codepoints`, and glyphs are still one
+        // per code point here, so both ranges exist. A range that does
+        // not is skipped rather than trusted.
+        let (Some(seg_glyphs_src), Some(seg_cps)) = (
+            glyphs.get(seg.cp_range.clone()),
+            codepoints.get(seg.cp_range.clone()),
+        ) else {
+            continue;
+        };
+        let mut seg_glyphs = seg_glyphs_src.to_vec();
 
         // A required feature whose tag no later pass applies runs
         // first, as HarfBuzz runs it in GSUB stage 0; the direction
@@ -362,10 +390,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             };
             let priority = seg.script_priority;
             let gdef = gdef.as_ref();
-            required::apply_unscheduled(gsub, &mut seg_glyphs, gdef, priority, &plan);
+            required::apply_unscheduled(gsub, &mut seg_glyphs, gdef, priority, &plan, &mut budget);
             let direction_tags = rotate::direction_features(target_direction);
             let table = JoinerTable::for_segment(seg.script, plan.arabic, dominant_script);
-            apply_gsub_features_merged(
+            apply_gsub_features_merged_budgeted(
                 gsub,
                 &mut seg_glyphs,
                 gdef,
@@ -373,9 +401,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 direction_tags,
                 priority,
                 table,
+                &mut budget,
             );
             if backward {
-                let mirrored = &mirrored_mask[seg.cp_range.clone()];
+                let mirrored = mirrored_mask.get(seg.cp_range.clone()).unwrap_or_default();
                 rotate::apply_rtlm(gsub, &mut seg_glyphs, gdef, priority, features, mirrored);
             }
         }
@@ -588,7 +617,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 // any composition/decomposition and localized forms
                 // have settled first (HarfBuzz's Arabic shaper puts
                 // them in one stage ahead of isol/fina/medi/init).
-                apply_gsub_features_merged(
+                apply_gsub_features_merged_budgeted(
                     gsub,
                     &mut seg_glyphs,
                     gdef.as_ref(),
@@ -596,13 +625,22 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                     &[*b"ccmp", *b"locl"],
                     seg.script_priority,
                     joiner_table,
+                    &mut budget,
                 );
                 // Arabic positional pass consumes only the segment's
                 // slice of the forms vector: cps/glyphs are 1:1 at
                 // this point (ccmp can rewrite ids but not lengths in
-                // practice for Arabic), so the slice aligns.
-                let forms_slice = arabic_forms.get(seg.cp_range.clone()).unwrap_or(&[]);
-                apply_arabic_positional_features(gsub, &mut seg_glyphs, gdef.as_ref(), forms_slice);
+                // practice for Arabic), so the slice aligns. The
+                // masked apply reads the mask with `get`, so a ccmp
+                // that did change the length only shifts the mask.
+                let forms_slice = arabic_forms.get(seg.cp_range.clone()).unwrap_or_default();
+                apply_arabic_positional_features(
+                    gsub,
+                    &mut seg_glyphs,
+                    gdef.as_ref(),
+                    forms_slice,
+                    &mut budget,
+                );
             }
             run_default_gsub(
                 gsub,
@@ -615,6 +653,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 early_default_features(seg_arabic_active, seg.script, dominant_script),
                 joiner_table,
                 buffer_shaper == Shaper::Hangul,
+                &mut budget,
             );
         }
 
@@ -632,16 +671,22 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     glyphs = processed_glyphs;
 
     // AAT fallback. Consulted only when the font has no GSUB at all
-    // (that is how HarfBuzz decides between OpenType and AAT), and
-    // matches the issue scope. Legacy macOS Zapfino, older Apple
-    // Chancery variants, and most third-party AAT-only fonts land
-    // here. Runs after the segmented GSUB pass so a font that
-    // carries both only exercises the AAT path when the OpenType
-    // side is absent.
+    // (that is how HarfBuzz decides between OpenType and AAT).
+    // Legacy macOS Zapfino, older Apple Chancery variants, and most
+    // third-party AAT-only fonts land here. Runs after the segmented
+    // GSUB pass so a font that carries both only exercises the AAT
+    // path when the OpenType side is absent.
     let mut applied_morx = false;
     if gsub.is_none() {
         if let Some(morx) = face.morx()? {
-            apply_morx(&morx, &mut glyphs);
+            let old_len = glyphs.len();
+            if let Some(origins) = apply_morx(&morx, &mut glyphs) {
+                // Ligatures and insertions change the glyph count, so
+                // the segment ranges recorded above no longer line up.
+                if glyphs.len() != old_len {
+                    seg_glyph_ranges = remap_segments(&seg_glyph_ranges, &origins);
+                }
+            }
             applied_morx = true;
         }
     }
@@ -687,7 +732,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                     };
                     raw = raw.saturating_add(rounded);
                 }
-                glyph.y_advance = -raw;
+                glyph.y_advance = raw.saturating_neg();
                 glyph.x_advance = 0;
             }
         } else {
@@ -756,7 +801,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         zero_ignorables: ignorables::zeroes(flags),
         fallback_marks,
     };
-    position::position(&inputs, &mut glyphs, &seg_glyph_ranges)?;
+    position::position(&inputs, &mut glyphs, &seg_glyph_ranges, &mut budget)?;
 
     // Backward directions shaped in logical order; hand them back in
     // visual order, as HarfBuzz does at the end of positioning.

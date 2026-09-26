@@ -116,6 +116,16 @@ fn build_layout(
         }
     };
     let diag = ctx.diag.for_table(kind.tag, bytes);
+    let map = ctx.gid_map;
+    map.reset_budget();
+    let out_of_budget = || {
+        diag.at(
+            0,
+            "the rewrite needs more work than the subsetter allows",
+            "the whole table",
+        );
+        Ok(None)
+    };
     let (lookups, feature_list) = match (kind.parse)(bytes) {
         Ok(lists) => lists,
         Err(e) => {
@@ -149,10 +159,16 @@ fn build_layout(
     };
     let mut rewritten: Vec<Option<RewrittenLookup>> = Vec::with_capacity(sources.len());
     for source in &sources {
+        if !map.spend(1 + source.as_ref().map_or(0, |s| s.subtables.len())) {
+            return out_of_budget();
+        }
         rewritten.push(match source {
             Some(source) => rewrite(&first, source)?,
             None => None,
         });
+    }
+    if map.budget_spent() {
+        return out_of_budget();
     }
 
     // Second pass: context lookups again, with the renumber map.
@@ -170,12 +186,21 @@ fn build_layout(
             };
             // Only lookups that survived the first pass, and only
             // context ones: the others do not depend on the map.
-            if rewritten[li].is_none() || (kind.context_lookup_type)(&source.lookup).is_none() {
+            let Some(slot) = rewritten.get_mut(li) else {
                 continue;
+            };
+            if slot.is_none() || (kind.context_lookup_type)(&source.lookup).is_none() {
+                continue;
+            }
+            if !map.spend(1 + source.subtables.len()) {
+                return out_of_budget();
             }
             let new_lookup = rewrite(&inner, source)?;
             changed |= new_lookup.is_none();
-            rewritten[li] = new_lookup;
+            *slot = new_lookup;
+        }
+        if map.budget_spent() {
+            return out_of_budget();
         }
         if !changed {
             break;
@@ -195,17 +220,24 @@ fn build_layout(
 
     // Last: features and scripts. The ScriptList is walked as raw
     // bytes because the parser only looks LangSys records up by tag.
-    let new_features = rewrite_features(
+    let Some(new_features) = rewrite_features(
         feature_list,
         &renumber,
         &live_alternates,
         &diag,
         header_offset(bytes, 6),
-    )?;
-    let script_list = bytes.get(header_offset(bytes, 4)..).unwrap_or_default();
-    let Some(new_scripts) =
-        rewrite_scripts_from_bytes(script_list, &new_features.feature_renumber, &diag)?
+        map,
+    )?
     else {
+        return out_of_budget();
+    };
+    let script_list = bytes.get(header_offset(bytes, 4)..).unwrap_or_default();
+    let new_scripts =
+        rewrite_scripts_from_bytes(script_list, &new_features.feature_renumber, &diag, map)?;
+    if map.budget_spent() {
+        return out_of_budget();
+    }
+    let Some(new_scripts) = new_scripts else {
         return Ok(None);
     };
 
@@ -287,7 +319,9 @@ pub(super) fn build_renumber(rewritten: &[Option<RewrittenLookup>]) -> Vec<Optio
     for slot in rewritten {
         if slot.is_some() {
             out.push(Some(next));
-            next += 1;
+            // At most `u16::MAX` lookups exist, so the last survivor
+            // gets index `u16::MAX - 1` and this never saturates.
+            next = next.saturating_add(1);
         } else {
             out.push(None);
         }
@@ -302,7 +336,7 @@ pub(super) fn build_renumber(rewritten: &[Option<RewrittenLookup>]) -> Vec<Optio
 /// outgrow 16-bit offsets. With `feature_variations` the table is
 /// version 1.1 and carries them after the LookupList. Errors when the
 /// header offsets themselves, or even the Extension layout, cannot fit.
-fn assemble_layout_table(
+pub(super) fn assemble_layout_table(
     script_list: &[u8],
     feature_list: &[u8],
     lookups: &[RewrittenLookup],

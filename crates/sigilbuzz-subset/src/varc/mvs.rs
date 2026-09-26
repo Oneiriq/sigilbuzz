@@ -4,7 +4,8 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
-use super::{build_cff2_index, parse_cff2_index};
+use super::{next_marker, parse_cff2_index, read_u32, try_build_cff2_index};
+use crate::util::{WorkBudget, WORK_LIMIT};
 use crate::SubsetError;
 
 /// Prunes a `MultiItemVariationStore` to keep only the delta-set
@@ -31,12 +32,19 @@ use crate::SubsetError;
 /// won't appear in the remap either, so the caller's
 /// [`rewrite_component_record`](super::rewrite_component_record) will surface the orphan via the
 /// `Unsupported` path.
+///
+/// Subtables and regions may share bytes in the source, and each kept
+/// copy is written out separately. The copies are charged to a work
+/// budget, and a store that would grow past it is rejected.
 pub(super) type MvsRemap = BTreeMap<(u16, u16), (u16, u16)>;
 
 pub(super) fn prune_multi_var_store(
     src: &[u8],
     referenced: &BTreeSet<(u16, u16)>,
 ) -> Result<(MvsRemap, Option<Vec<u8>>), SubsetError> {
+    const TOO_LARGE: SubsetError =
+        SubsetError::Unsupported("VARC MVS too large to prune; subtables share data");
+    let budget = WorkBudget::new(WORK_LIMIT);
     let parsed = ParsedMvs::parse(src)
         .map_err(|_| SubsetError::Unsupported("VARC MVS malformed during prune"))?;
 
@@ -52,36 +60,33 @@ pub(super) fn prune_multi_var_store(
     // non-empty.
     let mut new_subtables: Vec<RewrittenMvsSubtable> = Vec::new();
     let mut remap: BTreeMap<(u16, u16), (u16, u16)> = BTreeMap::new();
-    for (old_outer, sub) in parsed.subtables.iter().enumerate() {
-        #[allow(clippy::cast_possible_truncation)]
-        let old_outer_u16 = old_outer as u16;
-        let Some(kept_inners) = by_outer.get(&old_outer_u16) else {
+    for (old_outer, sub) in parsed.subtables() {
+        let Some(kept_inners) = by_outer.get(&old_outer) else {
             continue;
         };
         // Keep only inners that exist in the source (defensive: an
         // out-of-range source ref means the source font is malformed).
-        let mut kept_pairs: Vec<(u16, &[u8])> = Vec::new();
-        for &inner in kept_inners {
-            let Some(bytes) = sub.delta_sets.get(inner as usize).copied() else {
-                continue;
-            };
-            kept_pairs.push((inner, bytes));
-        }
+        // `kept_inners` is a BTreeSet, so the pairs come out sorted by
+        // inner index.
+        let kept_pairs: Vec<(u16, &[u8])> = kept_inners
+            .iter()
+            .filter_map(|&inner| Some((inner, *sub.delta_sets.get(inner as usize)?)))
+            .collect();
         if kept_pairs.is_empty() {
             continue;
         }
-        // Sorted by inner index: kept_inners is a BTreeSet so already
-        // ascending; re-sort defensively in case future paths feed
-        // unsorted refs in.
-        kept_pairs.sort_by_key(|(i, _)| *i);
+        let copied: usize = kept_pairs.iter().map(|(_, b)| b.len()).sum();
+        if !budget.spend(sub.region_indexes.len() + copied) {
+            return Err(TOO_LARGE);
+        }
 
-        #[allow(clippy::cast_possible_truncation)]
+        // At most one subtable per source outer index, so this fits.
         let new_outer = new_subtables.len() as u16;
         let mut new_delta_sets: Vec<Vec<u8>> = Vec::with_capacity(kept_pairs.len());
         for (new_inner_idx, (old_inner, bytes)) in kept_pairs.iter().enumerate() {
-            #[allow(clippy::cast_possible_truncation)]
+            // At most one entry per source inner index, so this fits.
             let new_inner = new_inner_idx as u16;
-            remap.insert((old_outer_u16, *old_inner), (new_outer, new_inner));
+            remap.insert((old_outer, *old_inner), (new_outer, new_inner));
             new_delta_sets.push((*bytes).to_vec());
         }
         new_subtables.push(RewrittenMvsSubtable {
@@ -126,32 +131,30 @@ pub(super) fn prune_multi_var_store(
             // matches the parser's behavior for an OOB region.
             continue;
         };
-        #[allow(clippy::cast_possible_truncation)]
+        if !budget.spend(payload.len()) {
+            return Err(TOO_LARGE);
+        }
+        // At most one entry per source region index, so this fits.
         let new_ri = kept_region_payloads.len() as u16;
         region_remap.insert(old_ri, new_ri);
         kept_region_payloads.push(payload);
     }
 
     // Renumber each surviving subtable's region_indexes through the
-    // remap. Drop indexes that lacked a kept region (defensive: if a
-    // subtable ends up with zero region indexes after this filter,
-    // every region it referenced was orphaned, which shouldn't happen
-    // when the subtable prune is correct; we drop the subtable in that
-    // case to keep the output structurally valid).
+    // remap. Drop indexes that lacked a kept region. A subtable left
+    // with zero region indexes has only orphaned regions, so it is
+    // dropped to keep the output structurally valid.
     let mut pruned_subtables: Vec<RewrittenMvsSubtable> = Vec::with_capacity(new_subtables.len());
     let mut outer_remap_collapse: BTreeMap<u16, u16> = BTreeMap::new();
     for (old_outer, sub) in new_subtables.into_iter().enumerate() {
-        let mut new_region_indexes: Vec<u16> = Vec::with_capacity(sub.region_indexes.len());
-        for ri in &sub.region_indexes {
-            if let Some(&new_ri) = region_remap.get(ri) {
-                new_region_indexes.push(new_ri);
-            }
-        }
+        let new_region_indexes: Vec<u16> = sub
+            .region_indexes
+            .iter()
+            .filter_map(|ri| region_remap.get(ri).copied())
+            .collect();
         if new_region_indexes.is_empty() {
-            // Defensive collapse: see comment above.
             continue;
         }
-        #[allow(clippy::cast_possible_truncation)]
         let new_outer = pruned_subtables.len() as u16;
         if (old_outer as u16) != new_outer {
             outer_remap_collapse.insert(old_outer as u16, new_outer);
@@ -164,12 +167,9 @@ pub(super) fn prune_multi_var_store(
 
     // If a subtable was dropped during the region collapse, fold the
     // outer-index shift into the existing `(outer, inner)` remap so the
-    // record-rewrite path sees the final outer indices. In practice
-    // this branch is dead (the subtable prune above already drops
-    // empty subtables) but guards against future edits where a
-    // subtable could survive subtable pruning yet collapse here.
+    // record-rewrite path sees the final outer indices.
     if !outer_remap_collapse.is_empty() {
-        for (_, (no, _)) in remap.iter_mut() {
+        for (no, _) in remap.values_mut() {
             if let Some(&final_no) = outer_remap_collapse.get(no) {
                 *no = final_no;
             }
@@ -184,7 +184,8 @@ pub(super) fn prune_multi_var_store(
     }
 
     let new_region_list_bytes = build_region_list_bytes(&kept_region_payloads);
-    let new_bytes = emit_multi_var_store(&new_region_list_bytes, &pruned_subtables);
+    let new_bytes = emit_multi_var_store(&new_region_list_bytes, &pruned_subtables)
+        .ok_or(SubsetError::Unsupported("VARC MVS exceeds 4 GiB"))?;
     Ok((remap, Some(new_bytes)))
 }
 
@@ -197,25 +198,23 @@ pub(super) fn prune_multi_var_store(
 ///   Offset32  variationRegionOffsets[regionCount] (relative to block start)
 ///   <region payloads, concatenated in input order>
 /// ```
+///
+/// Callers pass at most one payload per source region index, so the
+/// count fits in 16 bits, and the prune budget keeps the block far
+/// below 4 GiB.
 pub(super) fn build_region_list_bytes(payloads: &[&[u8]]) -> Vec<u8> {
     let mut out = Vec::new();
-    #[allow(clippy::cast_possible_truncation)]
     let count = payloads.len() as u16;
     out.extend_from_slice(&count.to_be_bytes());
     let off_table_start = out.len();
-    for _ in payloads {
-        out.extend_from_slice(&0u32.to_be_bytes());
-    }
-    let mut starts: Vec<u32> = Vec::with_capacity(payloads.len());
-    for p in payloads {
-        #[allow(clippy::cast_possible_truncation)]
+    out.resize(off_table_start + payloads.len() * 4, 0);
+    for (i, p) in payloads.iter().enumerate() {
         let start = out.len() as u32;
-        starts.push(start);
-        out.extend_from_slice(p);
-    }
-    for (i, s) in starts.iter().enumerate() {
         let slot = off_table_start + i * 4;
-        out[slot..slot + 4].copy_from_slice(&s.to_be_bytes());
+        if let Some(dst) = out.get_mut(slot..slot + 4) {
+            dst.copy_from_slice(&start.to_be_bytes());
+        }
+        out.extend_from_slice(p);
     }
     out
 }
@@ -256,21 +255,18 @@ pub(super) fn collect_referenced_regions(subtables: &[RewrittenMvsSubtable]) -> 
 ///   <region payloads>
 /// ```
 pub(super) fn parse_region_list(bytes: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
-    if bytes.len() < 2 {
-        return Err("MVS region list header truncated");
-    }
-    let count = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
+    let count =
+        usize::from(crate::layout::read_u16(bytes, 0).ok_or("MVS region list header truncated")?);
     let off_table_end = 2 + count * 4;
-    if bytes.len() < off_table_end {
-        return Err("MVS region list offsets truncated");
-    }
+    let offset_table = bytes
+        .get(2..off_table_end)
+        .ok_or("MVS region list offsets truncated")?;
     // Read region offsets (relative to region-list start). Their
     // ascending order plus the block end give us each region's byte
     // span.
     let mut offsets: Vec<usize> = Vec::with_capacity(count);
-    for i in 0..count {
-        let p = 2 + i * 4;
-        let v = u32::from_be_bytes([bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3]]) as usize;
+    for c in offset_table.chunks_exact(4) {
+        let v = u32::from_be_bytes([c[0], c[1], c[2], c[3]]) as usize;
         if v < off_table_end || v > bytes.len() {
             return Err("MVS region offset OOB");
         }
@@ -283,25 +279,19 @@ pub(super) fn parse_region_list(bytes: &[u8]) -> Result<Vec<&[u8]>, &'static str
     sorted_bounds.dedup();
     let mut regions: Vec<&[u8]> = Vec::with_capacity(count);
     for &start in &offsets {
-        let end = sorted_bounds
-            .iter()
-            .copied()
-            .find(|m| *m > start)
-            .unwrap_or(bytes.len());
+        let end = next_marker(&sorted_bounds, start, bytes.len());
         let region = bytes.get(start..end).ok_or("MVS region body OOB")?;
         // Sanity: at least the axisCount u16 must fit.
-        if region.len() < 2 {
-            return Err("MVS region axisCount truncated");
-        }
-        let axis_count = u16::from_be_bytes([region[0], region[1]]) as usize;
-        let need = 2 + axis_count * 8;
-        if region.len() < need {
-            return Err("MVS region axes truncated");
-        }
+        let axis_count = usize::from(
+            crate::layout::read_u16(region, 0).ok_or("MVS region axisCount truncated")?,
+        );
         // Trim any trailing padding the source may have between
         // regions: emit only the region's structural bytes so the
         // rewriter produces a tightly-packed region list.
-        regions.push(&region[..need]);
+        let body = region
+            .get(..2 + axis_count * 8)
+            .ok_or("MVS region axes truncated")?;
+        regions.push(body);
     }
     Ok(regions)
 }
@@ -314,7 +304,10 @@ struct ParsedMvs<'a> {
     /// table) + every region payload, concatenated as in the source.
     /// The pruner re-emits these as-is.
     region_list_bytes: Vec<u8>,
-    subtables: Vec<ParsedMvsSubtable<'a>>,
+    /// For each source outer index, the position of its parsed body in
+    /// `bodies`. Subtables that share an offset share one body.
+    subtable_body: Vec<usize>,
+    bodies: Vec<ParsedMvsSubtable<'a>>,
 }
 
 struct ParsedMvsSubtable<'a> {
@@ -324,137 +317,141 @@ struct ParsedMvsSubtable<'a> {
 
 impl<'a> ParsedMvs<'a> {
     fn parse(data: &'a [u8]) -> Result<Self, &'static str> {
-        if data.len() < 8 {
+        let (Some(format), Ok(region_list_off), Some(subtable_count)) = (
+            crate::layout::read_u16(data, 0),
+            read_u32(data, 2),
+            crate::layout::read_u16(data, 6),
+        ) else {
             return Err("MVS header truncated");
-        }
-        let format = u16::from_be_bytes([data[0], data[1]]);
+        };
         if format != 1 {
             return Err("MVS unsupported format");
         }
-        let region_list_off = u32::from_be_bytes([data[2], data[3], data[4], data[5]]) as usize;
-        let subtable_count = u16::from_be_bytes([data[6], data[7]]) as usize;
-        let mut subtable_offsets: Vec<usize> = Vec::with_capacity(subtable_count);
-        for i in 0..subtable_count {
-            let off = 8 + i * 4;
-            if off + 4 > data.len() {
-                return Err("MVS subtable offset OOB");
-            }
-            let v = u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
-                as usize;
-            subtable_offsets.push(v);
-        }
+        let region_list_off = region_list_off as usize;
+        let subtable_count = usize::from(subtable_count);
+        let offset_table = data
+            .get(8..8 + subtable_count * 4)
+            .ok_or("MVS subtable offset OOB")?;
+        let subtable_offsets: Vec<usize> = offset_table
+            .chunks_exact(4)
+            .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]) as usize)
+            .collect();
+
+        // Every block ends at the next-greater block start, or at the
+        // end of the data.
+        let mut markers: Vec<usize> = subtable_offsets.clone();
+        markers.push(region_list_off);
+        markers.sort_unstable();
+        markers.dedup();
 
         // Region list: bytes from `region_list_off` to the start of
         // the next block. The region list contains its own offset
         // array; for the pruner we don't need to decode regions, just
         // capture the byte range.
-        let region_list_end = compute_block_end(
-            data.len(),
-            region_list_off,
-            &[region_list_off]
-                .iter()
-                .chain(subtable_offsets.iter())
-                .copied()
-                .collect::<Vec<_>>(),
-        );
+        let region_list_end = next_marker(&markers, region_list_off, data.len());
         let region_list_bytes = data
             .get(region_list_off..region_list_end)
             .ok_or("MVS region list OOB")?
             .to_vec();
 
-        // Subtables.
-        let mut markers: Vec<usize> = subtable_offsets.clone();
-        markers.push(region_list_off);
-        markers.push(data.len());
-        let mut subtables: Vec<ParsedMvsSubtable<'a>> = Vec::with_capacity(subtable_count);
+        // Subtables. Blocks between distinct markers never overlap, so
+        // parsing each distinct offset once keeps the work linear in
+        // the data size.
+        let mut body_at: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut bodies: Vec<ParsedMvsSubtable<'a>> = Vec::new();
+        let mut subtable_body: Vec<usize> = Vec::with_capacity(subtable_count);
         for &off in &subtable_offsets {
-            let sub_end = compute_block_end(data.len(), off, &markers);
-            let block = data.get(off..sub_end).ok_or("MVS subtable OOB")?;
-            if block.len() < 3 {
-                return Err("MVS subtable header truncated");
+            if let Some(&body) = body_at.get(&off) {
+                subtable_body.push(body);
+                continue;
             }
-            if block[0] != 1 {
-                return Err("MVS unsupported subtable format");
-            }
-            let region_index_count = u16::from_be_bytes([block[1], block[2]]) as usize;
-            let need = 3 + region_index_count * 2;
-            if block.len() < need {
-                return Err("MVS subtable region indexes OOB");
-            }
-            let mut region_indexes: Vec<u16> = Vec::with_capacity(region_index_count);
-            for i in 0..region_index_count {
-                let p = 3 + i * 2;
-                region_indexes.push(u16::from_be_bytes([block[p], block[p + 1]]));
-            }
-            let idx_start = need;
-            // Use the absolute offset within `data` so the returned
-            // slices outlive `block` (they borrow from `data`, lifetime
-            // `'a`). `parse_cff2_index` takes a single slice and
-            // returns sub-slices of it; we feed it the tail of `data`
-            // starting at this subtable's CFF2 INDEX block.
-            let abs_off = off + idx_start;
-            let idx_block: &'a [u8] = data.get(abs_off..sub_end).ok_or("MVS delta index OOB")?;
-            let delta_sets: Vec<&'a [u8]> = if idx_block.len() < 4 {
-                Vec::new()
-            } else {
-                parse_cff2_index(idx_block).map_err(|_| "MVS delta CFF2 INDEX malformed")?
-            };
-            subtables.push(ParsedMvsSubtable {
-                region_indexes,
-                delta_sets,
-            });
+            let sub_end = next_marker(&markers, off, data.len());
+            let parsed = Self::parse_subtable(data, off, sub_end)?;
+            body_at.insert(off, bodies.len());
+            subtable_body.push(bodies.len());
+            bodies.push(parsed);
         }
 
         Ok(Self {
             region_list_bytes,
-            subtables,
+            subtable_body,
+            bodies,
         })
     }
-}
 
-/// Returns the end offset of a block that starts at `start`, given a
-/// list of all block start offsets in the table. The block ends at the
-/// next-greater offset, or at `data_len` if none follow.
-fn compute_block_end(data_len: usize, start: usize, all_offsets: &[usize]) -> usize {
-    let mut next = data_len;
-    for &o in all_offsets {
-        if o > start && o < next {
-            next = o;
+    /// Parses the subtable stored in `data[off..sub_end]`.
+    fn parse_subtable(
+        data: &'a [u8],
+        off: usize,
+        sub_end: usize,
+    ) -> Result<ParsedMvsSubtable<'a>, &'static str> {
+        let block = data.get(off..sub_end).ok_or("MVS subtable OOB")?;
+        let (Some(&subtable_format), Some(region_index_count)) =
+            (block.first(), crate::layout::read_u16(block, 1))
+        else {
+            return Err("MVS subtable header truncated");
+        };
+        if subtable_format != 1 {
+            return Err("MVS unsupported subtable format");
         }
+        let need = 3 + usize::from(region_index_count) * 2;
+        let region_indexes: Vec<u16> = block
+            .get(3..need)
+            .ok_or("MVS subtable region indexes OOB")?
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        // Borrow the delta INDEX from `data` so the returned slices
+        // carry lifetime `'a`.
+        let idx_block: &'a [u8] = data.get(off + need..sub_end).ok_or("MVS delta index OOB")?;
+        let delta_sets: Vec<&'a [u8]> = if idx_block.len() < 4 {
+            Vec::new()
+        } else {
+            parse_cff2_index(idx_block).map_err(|_| "MVS delta CFF2 INDEX malformed")?
+        };
+        Ok(ParsedMvsSubtable {
+            region_indexes,
+            delta_sets,
+        })
     }
-    next
+
+    /// Iterates `(outer_index, subtable)` in source order.
+    fn subtables(&self) -> impl Iterator<Item = (u16, &ParsedMvsSubtable<'a>)> + '_ {
+        self.subtable_body
+            .iter()
+            .enumerate()
+            .filter_map(|(outer, &body)| Some((u16::try_from(outer).ok()?, self.bodies.get(body)?)))
+    }
 }
 
 /// Re-emits the MVS bytes from rewritten subtables. Region list is
 /// spliced in verbatim from the source. Subtable offsets are computed
 /// fresh; each subtable carries its CFF2 INDEX of delta-set bytes.
-fn emit_multi_var_store(region_list_bytes: &[u8], subtables: &[RewrittenMvsSubtable]) -> Vec<u8> {
+/// Returns `None` when the store does not fit its 32-bit offsets.
+fn emit_multi_var_store(
+    region_list_bytes: &[u8],
+    subtables: &[RewrittenMvsSubtable],
+) -> Option<Vec<u8>> {
     // Header layout:
     //   u16  format = 1
     //   u32  regionListOffset
     //   u16  subtableCount
     //   u32  subtableOffsets[subtableCount]
-    let header_len = 2 + 4 + 2 + subtables.len() * 4;
-
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes());
     let region_off_slot = out.len();
     out.extend_from_slice(&0u32.to_be_bytes());
-    #[allow(clippy::cast_possible_truncation)]
-    let subtable_count = subtables.len() as u16;
+    let subtable_count = u16::try_from(subtables.len()).ok()?;
     out.extend_from_slice(&subtable_count.to_be_bytes());
     let sub_off_slots_start = out.len();
-    for _ in subtables {
-        out.extend_from_slice(&0u32.to_be_bytes());
-    }
-    debug_assert_eq!(out.len(), header_len);
+    out.resize(sub_off_slots_start + subtables.len() * 4, 0);
 
     // Region list directly follows the header, 4-byte aligned (the
     // header already ends on a 4-byte boundary because subtable
     // offsets are u32).
-    #[allow(clippy::cast_possible_truncation)]
-    let region_off = out.len() as u32;
-    out[region_off_slot..region_off_slot + 4].copy_from_slice(&region_off.to_be_bytes());
+    let region_off = u32::try_from(out.len()).ok()?;
+    out.get_mut(region_off_slot..region_off_slot + 4)?
+        .copy_from_slice(&region_off.to_be_bytes());
     out.extend_from_slice(region_list_bytes);
     while out.len() % 4 != 0 {
         out.push(0);
@@ -462,22 +459,21 @@ fn emit_multi_var_store(region_list_bytes: &[u8], subtables: &[RewrittenMvsSubta
 
     // Subtables, each preceded by 4-byte alignment.
     for (i, sub) in subtables.iter().enumerate() {
-        #[allow(clippy::cast_possible_truncation)]
-        let sub_off = out.len() as u32;
+        let sub_off = u32::try_from(out.len()).ok()?;
         let slot = sub_off_slots_start + i * 4;
-        out[slot..slot + 4].copy_from_slice(&sub_off.to_be_bytes());
+        out.get_mut(slot..slot + 4)?
+            .copy_from_slice(&sub_off.to_be_bytes());
         out.push(1); // format
-        #[allow(clippy::cast_possible_truncation)]
-        let ric = sub.region_indexes.len() as u16;
+        let ric = u16::try_from(sub.region_indexes.len()).ok()?;
         out.extend_from_slice(&ric.to_be_bytes());
         for ri in &sub.region_indexes {
             out.extend_from_slice(&ri.to_be_bytes());
         }
-        out.extend_from_slice(&build_cff2_index(&sub.delta_sets));
+        out.extend_from_slice(&try_build_cff2_index(&sub.delta_sets)?);
         while out.len() % 4 != 0 {
             out.push(0);
         }
     }
 
-    out
+    Some(out)
 }

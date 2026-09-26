@@ -1,0 +1,93 @@
+[package]
+name = "sigilbuzz-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "cargo-fuzz targets for the sigilbuzz workspace. Not published."
+
+[package.metadata]
+cargo-fuzz = true
+
+# Kept out of the main workspace so `cargo build` and `cargo test` at the
+# repo root never need nightly or libFuzzer.
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sigilbuzz = { path = ".." }
+sigilbuzz-gpu = { path = "../crates/sigilbuzz-gpu" }
+sigilbuzz-hyphen = { path = "../crates/sigilbuzz-hyphen" }
+sigilbuzz-paint = { path = "../crates/sigilbuzz-paint" }
+sigilbuzz-pdf = { path = "../crates/sigilbuzz-pdf" }
+sigilbuzz-render = { path = "../crates/sigilbuzz-render" }
+sigilbuzz-subset = { path = "../crates/sigilbuzz-subset" }
+sigilbuzz-svg = { path = "../crates/sigilbuzz-svg" }
+sigilbuzz-text-layout = { path = "../crates/sigilbuzz-text-layout" }
+sigilbuzz-woff = { path = "../crates/sigilbuzz-woff" }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "face"
+path = "fuzz_targets/face.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shape"
+path = "fuzz_targets/shape.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shape_text"
+path = "fuzz_targets/shape_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "subset"
+path = "fuzz_targets/subset.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "woff"
+path = "fuzz_targets/woff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "render"
+path = "fuzz_targets/render.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "images"
+path = "fuzz_targets/images.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "outputs"
+path = "fuzz_targets/outputs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "text"
+path = "fuzz_targets/text.rs"
+test = false
+doc = false
+bench = false

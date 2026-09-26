@@ -8,7 +8,7 @@ use core::slice;
 
 use sigilbuzz::Buffer;
 
-use crate::common::map_direction_in;
+use crate::common::{c_str_bytes, map_direction_in};
 use crate::opaque::BufferInner;
 use crate::{
     buffer_flags, buffer_text, handle, hb_buffer_t, hb_direction_t, hb_glyph_info_t,
@@ -20,8 +20,10 @@ use crate::{
 // Buffer
 // ---------------------------------------------------------------------------
 
-/// Creates an empty buffer with HarfBuzz's default flags and cluster
-/// level (`HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES`).
+/// Allocates an empty buffer with refcount 1, HarfBuzz's default flags,
+/// and its default cluster level
+/// (`HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES`). Direction, script,
+/// and language start unset.
 #[no_mangle]
 pub extern "C" fn hb_buffer_create() -> *mut hb_buffer_t {
     let mut state = BufferState {
@@ -31,7 +33,6 @@ pub extern "C" fn hb_buffer_create() -> *mut hb_buffer_t {
         language: ptr::null(),
         glyph_infos: Vec::new(),
         glyph_positions: Vec::new(),
-        props_set: false,
         clusters: buffer_text::ClusterTable::default(),
         flags: buffer_flags::HB_BUFFER_FLAG_DEFAULT,
         cluster_level: buffer_flags::HB_BUFFER_CLUSTER_LEVEL_DEFAULT,
@@ -72,13 +73,14 @@ pub unsafe extern "C" fn hb_buffer_reference(buffer: *mut hb_buffer_t) -> *mut h
 /// defaults, then everything `hb_buffer_clear_contents` drops goes too.
 ///
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_reset(buffer: *mut hb_buffer_t) {
     if buffer.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     buffer_flags::restore_defaults(&mut state);
@@ -89,13 +91,14 @@ pub unsafe extern "C" fn hb_buffer_reset(buffer: *mut hb_buffer_t) {
 /// level), HarfBuzz's `hb_buffer_clear_contents`.
 ///
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_clear_contents(buffer: *mut hb_buffer_t) {
     if buffer.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     // Like HarfBuzz, this also resets direction, script, language, and
@@ -104,7 +107,7 @@ pub unsafe extern "C" fn hb_buffer_clear_contents(buffer: *mut hb_buffer_t) {
 }
 
 /// # Safety
-/// `buffer` must be valid; `text` must point to at least
+/// `buffer` must be null or valid. `text` must point to at least
 /// `text_length` bytes (when `text_length >= 0`) or to a NUL-terminated
 /// string (when `text_length == -1`).
 #[no_mangle]
@@ -118,16 +121,12 @@ pub unsafe extern "C" fn hb_buffer_add_utf8(
     if buffer.is_null() || text.is_null() {
         return;
     }
-    // Normalize to a byte slice. -1 means "NUL-terminated".
-    let total_bytes: &[u8] = if text_length < 0 {
-        // SAFETY: caller asserts NUL-terminated.
-        let cstr = unsafe { core::ffi::CStr::from_ptr(text) };
-        cstr.to_bytes()
-    } else {
-        // SAFETY: caller asserts (text, text_length) is valid.
-        unsafe { slice::from_raw_parts(text.cast::<u8>(), text_length as usize) }
-    };
-    // SAFETY: caller asserts buffer validity.
+    // SAFETY: `text` is non-null and the caller guarantees the length
+    // contract of `c_str_bytes`. A negative length means
+    // NUL-terminated.
+    let total_bytes = unsafe { c_str_bytes(text, text_length) };
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     // Clusters are byte offsets into `text`, context comes from the
@@ -143,8 +142,8 @@ pub unsafe extern "C" fn hb_buffer_add_utf8(
 }
 
 /// # Safety
-/// `buffer` must be valid; `(text, text_length)` must describe a valid
-/// `u16[]` slice (or NUL-terminated u16 array if `text_length == -1`).
+/// `buffer` must be null or valid. `(text, text_length)` must describe a
+/// valid `u16[]` slice (or NUL-terminated u16 array if `text_length == -1`).
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_add_utf16(
     buffer: *mut hb_buffer_t,
@@ -156,20 +155,24 @@ pub unsafe extern "C" fn hb_buffer_add_utf16(
     if buffer.is_null() || text.is_null() {
         return;
     }
-    let total_units: &[u16] = if text_length < 0 {
+    let total_units: &[u16] = if let Ok(len) = usize::try_from(text_length) {
+        // SAFETY: `text` is non-null and the caller guarantees it
+        // points to `len` readable, aligned `u16` units.
+        unsafe { slice::from_raw_parts(text, len) }
+    } else {
         // Walk to the NUL.
         let mut len = 0usize;
-        // SAFETY: caller asserts NUL-terminated.
+        // SAFETY: the caller guarantees a NUL-terminated array, so
+        // every unit up to and including the NUL is readable.
         while unsafe { *text.add(len) } != 0 {
             len += 1;
         }
-        // SAFETY: caller asserts the run of `len` u16 units is valid.
+        // SAFETY: the loop above read `len` units before the NUL, so
+        // all of them are readable.
         unsafe { slice::from_raw_parts(text, len) }
-    } else {
-        // SAFETY: caller asserts (text, text_length) is valid.
-        unsafe { slice::from_raw_parts(text, text_length as usize) }
     };
-    // SAFETY: caller asserts buffer validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     // Clusters are UTF-16 code-unit offsets into `text`; lone
@@ -183,8 +186,15 @@ pub unsafe extern "C" fn hb_buffer_add_utf16(
     );
 }
 
+/// Sets the direction `hb_shape` lays the text out in.
+///
+/// Vertical directions switch to vertical metrics, as in HarfBuzz.
+/// RTL and BTT runs come back in visual order (reversed), also as in
+/// HarfBuzz. `HB_DIRECTION_INVALID`, or any other value outside
+/// LTR..BTT, puts the buffer back to "unset".
+///
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_set_direction(
     buffer: *mut hb_buffer_t,
@@ -193,7 +203,8 @@ pub unsafe extern "C" fn hb_buffer_set_direction(
     if buffer.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     // HB_DIRECTION_INVALID (or any other value outside LTR..BTT) puts
@@ -209,34 +220,49 @@ pub unsafe extern "C" fn hb_buffer_set_direction(
             state.buffer.unset_direction();
         }
     }
-    state.props_set = true;
 }
 
+/// Sets the buffer's script.
+///
+/// As in HarfBuzz, the script picks the script-specific shaper and the
+/// OpenType script tables for the whole buffer. A script sigilbuzz has
+/// no shaper for (and Common, Inherited, or Unknown) leaves the core
+/// free to split the text into script runs.
+///
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_set_script(buffer: *mut hb_buffer_t, script: hb_script_t) {
     if buffer.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     state.script = script;
-    // A script sigilbuzz has a bucket for shapes the whole buffer;
-    // anything else leaves per-run script segmentation in place.
+    // A script sigilbuzz has a bucket for shapes the whole buffer.
+    // Anything else leaves per-run script segmentation in place.
     state.buffer.set_script(buffer_text::core_script(script));
-    state.props_set = true;
 }
 
+/// Sets the buffer's language.
+///
+/// As in HarfBuzz, the language picks the OpenType language system
+/// `hb_shape` uses. Null, or a tag that does not parse, selects each
+/// script's default language system.
+///
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid. `language` must be null or a
+/// NUL-terminated tag string, such as one `hb_language_from_string`
+/// returns.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_set_language(buffer: *mut hb_buffer_t, language: hb_language_t) {
     if buffer.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     state.language = language;
@@ -245,17 +271,26 @@ pub unsafe extern "C" fn hb_buffer_set_language(buffer: *mut hb_buffer_t, langua
     state
         .buffer
         .set_language(unsafe { buffer_text::core_language(language) });
-    state.props_set = true;
 }
 
+/// Fills in the script, direction, and language that are not set yet,
+/// in HarfBuzz's order.
+///
+/// The script comes from the first character whose Script property is
+/// not Common, Inherited, or Unknown. The direction comes from that
+/// script: RTL for Arabic, Hebrew, and the other right-to-left scripts,
+/// LTR otherwise. HarfBuzz takes the language from the process locale.
+/// sigilbuzz uses `und`, which selects the default language system.
+///
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_guess_segment_properties(buffer: *mut hb_buffer_t) {
     if buffer.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     // Script first, then the direction from the script (RTL for
@@ -264,7 +299,7 @@ pub unsafe extern "C" fn hb_buffer_guess_segment_properties(buffer: *mut hb_buff
 }
 
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid. `length` may be null.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_get_glyph_infos(
     buffer: *mut hb_buffer_t,
@@ -272,17 +307,20 @@ pub unsafe extern "C" fn hb_buffer_get_glyph_infos(
 ) -> *mut hb_glyph_info_t {
     if buffer.is_null() {
         if !length.is_null() {
-            // SAFETY: caller asserts writeable.
+            // SAFETY: `length` is non-null and the caller guarantees
+            // it points to a writable `unsigned int`.
             unsafe { *length = 0 };
         }
         return ptr::null_mut();
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     let len = state.glyph_infos.len();
     if !length.is_null() {
-        // SAFETY: caller asserts writeable.
+        // SAFETY: `length` is non-null and the caller guarantees it
+        // points to a writable `unsigned int`.
         unsafe { *length = len as c_uint };
     }
     // The vector lives inside the locked BufferState; the pointer
@@ -293,7 +331,7 @@ pub unsafe extern "C" fn hb_buffer_get_glyph_infos(
 }
 
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid. `length` may be null.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_get_glyph_positions(
     buffer: *mut hb_buffer_t,
@@ -301,30 +339,34 @@ pub unsafe extern "C" fn hb_buffer_get_glyph_positions(
 ) -> *mut hb_glyph_position_t {
     if buffer.is_null() {
         if !length.is_null() {
-            // SAFETY: caller asserts writeable.
+            // SAFETY: `length` is non-null and the caller guarantees
+            // it points to a writable `unsigned int`.
             unsafe { *length = 0 };
         }
         return ptr::null_mut();
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     let len = state.glyph_positions.len();
     if !length.is_null() {
-        // SAFETY: caller asserts writeable.
+        // SAFETY: `length` is non-null and the caller guarantees it
+        // points to a writable `unsigned int`.
         unsafe { *length = len as c_uint };
     }
     state.glyph_positions.as_mut_ptr()
 }
 
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_get_length(buffer: *mut hb_buffer_t) -> c_uint {
     if buffer.is_null() {
         return 0;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `buffer` is non-null and the caller guarantees it points
+    // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let state = inner.state.lock();
     state.glyph_infos.len() as c_uint

@@ -29,7 +29,6 @@ pub fn rescale_bilinear(src: &ColorPixmap, dst_w: u32, dst_h: u32) -> ColorPixma
     // panic in `vec![0u8; w*h*4]`. The ceiling matches the PNG
     // decoder's bound; callers that need larger surfaces
     // should resample in tiles.
-    #[allow(clippy::cast_precision_loss)]
     if dst_w as f32 > MAX_BITMAP_DIM || dst_h as f32 > MAX_BITMAP_DIM {
         return ColorPixmap::new(0, 0);
     }
@@ -44,12 +43,12 @@ pub fn rescale_bilinear(src: &ColorPixmap, dst_w: u32, dst_h: u32) -> ColorPixma
     for y in 0..dst_h {
         let sy = ((y as f32 + 0.5) * sh / dh) - 0.5;
         let y0 = sy.floor().max(0.0) as u32;
-        let y1 = (y0 + 1).min(src.height - 1);
+        let y1 = y0.saturating_add(1).min(src.height - 1);
         let fy = (sy - y0 as f32).clamp(0.0, 1.0);
         for x in 0..dst_w {
             let sx = ((x as f32 + 0.5) * sw / dw) - 0.5;
             let x0 = sx.floor().max(0.0) as u32;
-            let x1 = (x0 + 1).min(src.width - 1);
+            let x1 = x0.saturating_add(1).min(src.width - 1);
             let fx = (sx - x0 as f32).clamp(0.0, 1.0);
             let p00 = src.get(x0, y0);
             let p10 = src.get(x1, y0);

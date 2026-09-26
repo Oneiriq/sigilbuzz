@@ -83,7 +83,6 @@ pub(super) fn parse_tuple_header(
 }
 
 pub(super) fn write_f2dot14(out: &mut Vec<u8>, v: f32) {
-    #[allow(clippy::cast_possible_truncation)]
     let raw = (v * 16384.0)
         .round()
         .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
@@ -241,7 +240,6 @@ pub(super) fn read_packed_deltas_n(
                 return Err(SubsetError::Unsupported("gvar partial: deltas i8"));
             }
             for _ in 0..take {
-                #[allow(clippy::cast_possible_wrap)]
                 let v = data[cursor] as i8;
                 cursor += 1;
                 out.push(i32::from(v));
@@ -317,7 +315,6 @@ pub(super) fn encode_packed_deltas(values: &[i32], out: &mut Vec<u8>) {
                 run += 1;
             }
             // Control byte: ALL_ZERO | (run - 1).
-            #[allow(clippy::cast_possible_truncation)]
             let control: u8 = DELTA_ALL_ZERO | ((run - 1) as u8 & DELTA_COUNT_MASK);
             out.push(control);
             i += run;
@@ -332,11 +329,9 @@ pub(super) fn encode_packed_deltas(values: &[i32], out: &mut Vec<u8>) {
             {
                 run += 1;
             }
-            #[allow(clippy::cast_possible_truncation)]
             let control: u8 = (run - 1) as u8 & DELTA_COUNT_MASK; // i8 run
             out.push(control);
             for k in 0..run {
-                #[allow(clippy::cast_possible_truncation)]
                 let b = values[i + k] as i8 as u8;
                 out.push(b);
             }
@@ -351,13 +346,11 @@ pub(super) fn encode_packed_deltas(values: &[i32], out: &mut Vec<u8>) {
             {
                 run += 1;
             }
-            #[allow(clippy::cast_possible_truncation)]
             let control: u8 = DELTA_WORDS | ((run - 1) as u8 & DELTA_COUNT_MASK);
             out.push(control);
             for k in 0..run {
                 let v = values[i + k];
                 let clamped = v.clamp(i32::from(i16::MIN), i32::from(i16::MAX));
-                #[allow(clippy::cast_possible_truncation)]
                 let v16 = clamped as i16;
                 out.extend_from_slice(&v16.to_be_bytes());
             }

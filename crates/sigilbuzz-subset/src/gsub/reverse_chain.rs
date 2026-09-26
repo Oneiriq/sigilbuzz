@@ -2,8 +2,9 @@
 
 use alloc::vec::Vec;
 
+use super::rewrite_coverage_array;
 use crate::device::Dedup;
-use crate::layout::{parse_coverage_glyphs, RewriterCtx, RewrittenSubtable};
+use crate::layout::{RewriterCtx, RewrittenSubtable};
 
 /// Rewrites a GSUB type 8 (Reverse Chained Single Substitution) subtable.
 ///
@@ -51,7 +52,7 @@ pub(super) fn rewrite_type8(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
     }
 
     let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let covered = ctx.gid_map.coverage_glyphs(cov_bytes)?;
     if covered.len() != glyph_count {
         // Spec requires they match; tolerate mismatch by capping at the
         // smaller of the two on read but treat as malformed for emission.
@@ -90,23 +91,8 @@ pub(super) fn rewrite_type8(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
     // Backtrack / lookahead Coverages: every Coverage slot must
     // survive. A reverse-chain rule whose context window has any
     // empty Coverage can never match, so drop the subtable.
-    let read_cov_array = |start: usize, count: usize| -> Option<Vec<Vec<u8>>> {
-        let mut out = Vec::with_capacity(count);
-        for j in 0..count {
-            let off_off = start + j * 2;
-            let cov_off = u16::from_be_bytes([sub[off_off], sub[off_off + 1]]) as usize;
-            let cov_bytes = sub.get(cov_off..)?;
-            let covered = parse_coverage_glyphs(cov_bytes);
-            let new_covered: Vec<u16> = covered.iter().filter_map(|&g| map.map(g)).collect();
-            if new_covered.is_empty() {
-                return None;
-            }
-            out.push(crate::coverage::emit_coverage_from_glyphs(&new_covered));
-        }
-        Some(out)
-    };
-    let new_bt = read_cov_array(bt_offs_start, bt_count)?;
-    let new_la = read_cov_array(la_offs_start, la_count)?;
+    let new_bt = rewrite_coverage_array(map, sub, bt_offs_start, bt_count)?;
+    let new_la = rewrite_coverage_array(map, sub, la_offs_start, la_count)?;
 
     // Emit:
     //   u16      substFormat = 1

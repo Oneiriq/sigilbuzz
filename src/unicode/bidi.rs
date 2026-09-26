@@ -15,7 +15,9 @@
 //! The algorithm is implemented as a sequence of array-mutation
 //! passes against a single working buffer of (`BidiClass`, `level`)
 //! pairs, mirroring the reference implementation. Output is exposed
-//! through [`BidiInfo`].
+//! through [`BidiInfo`]. Every pass is linear in the text length (L2
+//! is linear per embedding level), so hostile input such as a long
+//! digit run or a deep stack of isolates stays cheap.
 //!
 //! The text is one paragraph: rule P1 (splitting at paragraph
 //! separators) is left to the caller.
@@ -39,8 +41,7 @@
 //!
 //! Brackets that don't pair (unbalanced opener / closer, opener
 //! without a matching closer) fall through unchanged and N1's
-//! surrounding-strong fallback handles them, exactly the behavior
-//! shipped before N0 landed.
+//! surrounding-strong fallback handles them.
 //!
 //! ## Public API
 //!
@@ -73,8 +74,6 @@ pub use crate::unicode::bidi_class::{bidi_class, BidiClass};
 /// Applies UAX #9 rules P2 and P3 to `text` and returns the
 /// paragraph-level direction. LTR when no strong character exists
 /// in the run (whitespace-only, symbol-only, empty input).
-///
-/// Kept on the public surface so 0.1.0 callers don't break.
 #[must_use]
 pub fn paragraph_direction(text: &str) -> Direction {
     paragraph_direction_with_isolates(text)
@@ -171,7 +170,7 @@ impl BidiInfo {
         // then run W1-W7 + N0 + N1-N2 + I1-I2 per sequence.
         let isolating_sequences = build_isolating_sequences(&cells, para_level);
         for seq in isolating_sequences {
-            resolve_sequence(&mut cells, &chars, &seq, para_level);
+            resolve_sequence(&mut cells, &chars, &seq);
         }
 
         // The characters X9 removed follow the character before them.

@@ -7,7 +7,7 @@
 //!
 //! # Per-lookup-type coverage
 //!
-//! As of this commit the rewriter ships byte-level support for:
+//! The rewriter supports:
 //!
 //! - **Type 1 (single-sub)**: formats 1 (delta) and 2 (explicit). Auto-
 //!   selects between formats; falls back to format 2 when a remapped
@@ -53,14 +53,20 @@
 //! features that name no surviving lookup, and scripts whose features
 //! have all been dropped. See [`super::layout`].
 //!
-//! Issue tracking the remaining lookup types: see the sibling issue
-//! filed alongside this module.
+//! A rebuilt subtable that no longer fits its 16-bit offsets fails the
+//! subset (see [`crate::offset16`]). Every rewriter charges the
+//! [`GidMap`] work budget for the records it walks, and a table whose
+//! rewrite runs the budget out is dropped (see [`super::layout`]).
+//!
+//! [`GidMap`]: crate::layout::GidMap
 
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::gsub::lookup_type as gsub_type;
 
-use crate::layout::{extension_target, RewriterCtx, RewrittenLookup, RewrittenSubtable};
+use crate::layout::{
+    extension_target, read_u16, GidMap, RewriterCtx, RewrittenLookup, RewrittenSubtable,
+};
 use crate::warnings::error_context;
 use crate::SubsetError;
 
@@ -71,14 +77,13 @@ mod ligature;
 mod reverse_chain;
 mod single;
 
-use chain_context::rewrite_type6;
-use context::rewrite_type5;
+pub(crate) use chain_context::rewrite_type6;
+pub(crate) use context::rewrite_type5;
 use ligature::rewrite_type4;
 use reverse_chain::rewrite_type8;
 use single::{rewrite_single, rewrite_type2, rewrite_type3};
 
 pub(crate) use closure::pull_in_substitution_targets;
-pub(crate) use context::{encode_lookup_records, parse_and_remap_lookup_records};
 
 /// Rewrites a single GSUB lookup. Returns `None` if the lookup has no
 /// surviving subtables after rewriting (drop cascade will remove the
@@ -95,10 +100,20 @@ pub(crate) fn rewrite_lookup(
     let mut rewritten_subs: Vec<RewrittenSubtable> = Vec::new();
 
     for &sub_bytes in subtable_bodies {
+        if !ctx.gid_map.spend(1) {
+            return Ok(None);
+        }
         let rewritten = rewrite_subtable(ctx, lookup_type, sub_bytes);
         ctx.offsets
             .check(overflow_context(lookup_type, sub_bytes))?;
-        if rewritten.is_none() {
+        // Charge the output too, so shared offsets cannot multiply the
+        // rewritten table past the budget.
+        if let Some(rs) = &rewritten {
+            if !ctx.gid_map.spend(rs.bytes.len()) {
+                return Ok(None);
+            }
+        }
+        if rewritten.is_none() && !ctx.gid_map.budget_spent() {
             report_unreadable(ctx, lookup_type, sub_bytes);
         }
         rewritten_subs.extend(rewritten);
@@ -246,6 +261,29 @@ fn unwrap_extension_lookup_type(lookup: &sigilbuzz::tables::layout::Lookup<'_>) 
         return lookup.lookup_type();
     }
     u16::from_be_bytes([sub[2], sub[3]])
+}
+
+/// Rewrites `count` Coverage tables whose Offset16s start at `start` in
+/// `sub`, filtering each through the gid map. Returns `None` when any
+/// of them loses every glyph: a context position with no possible match
+/// can never fire.
+fn rewrite_coverage_array(
+    map: &GidMap,
+    sub: &[u8],
+    start: usize,
+    count: usize,
+) -> Option<Vec<Vec<u8>>> {
+    let mut out = Vec::with_capacity(count);
+    for j in 0..count {
+        let cov_off = usize::from(read_u16(sub, start + j * 2)?);
+        let covered = map.coverage_glyphs(sub.get(cov_off..)?)?;
+        let new_covered: Vec<u16> = covered.iter().filter_map(|&g| map.map(g)).collect();
+        if new_covered.is_empty() {
+            return None;
+        }
+        out.push(crate::coverage::emit_coverage_from_glyphs(&new_covered));
+    }
+    Some(out)
 }
 
 #[cfg(test)]

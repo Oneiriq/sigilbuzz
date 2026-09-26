@@ -329,7 +329,10 @@ fn language_subtag(prefix: &str) -> &str {
     };
     let rest = &prefix[dash + 1..];
     let next_len = rest.find('-').unwrap_or(rest.len());
-    if prefix.len() >= 6 && next_len == 3 && rest.as_bytes()[0].is_ascii_alphabetic() {
+    if prefix.len() >= 6
+        && next_len == 3
+        && rest.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+    {
         rest
     } else {
         prefix

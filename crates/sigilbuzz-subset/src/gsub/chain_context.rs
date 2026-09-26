@@ -2,12 +2,14 @@
 
 use alloc::vec::Vec;
 
-use super::context::{emit_context_format1, encode_lookup_records, parse_and_remap_lookup_records};
+use super::context::{encode_lookup_records, parse_and_remap_lookup_records};
+use super::rewrite_coverage_array;
+use super::single::{emit_offset_array_subtable, emit_offset_list};
 use crate::device::Dedup;
-use crate::layout::{parse_coverage_glyphs, RewriterCtx, RewrittenSubtable};
+use crate::layout::{RewriterCtx, RewrittenSubtable};
 
 /// Rewrites a GSUB type 6 (Chained Context Substitution) subtable.
-pub(super) fn rewrite_type6(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
+pub(crate) fn rewrite_type6(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     if sub.len() < 2 {
         return None;
     }
@@ -53,7 +55,7 @@ fn rewrite_type6_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
         return None;
     }
     let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let covered = ctx.gid_map.coverage_glyphs(cov_bytes)?;
     let pair_count = covered.len().min(set_count);
     let map = ctx.gid_map;
 
@@ -79,7 +81,7 @@ fn rewrite_type6_format1(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     if surviving_sets.is_empty() {
         return None;
     }
-    Some(emit_context_format1(ctx, &surviving_sets))
+    Some(emit_offset_array_subtable(ctx, &surviving_sets))
 }
 
 fn rewrite_type6_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>> {
@@ -87,10 +89,10 @@ fn rewrite_type6_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
         return None;
     }
     let rule_count = u16::from_be_bytes([set_bytes[0], set_bytes[1]]) as usize;
-    if set_bytes.len() < 2 + rule_count * 2 {
+    let map = ctx.gid_map;
+    if set_bytes.len() < 2 + rule_count * 2 || !map.spend(rule_count) {
         return None;
     }
-    let map = ctx.gid_map;
     let mut surviving_rules: Vec<Vec<u8>> = Vec::new();
     for i in 0..rule_count {
         let off_off = 2 + i * 2;
@@ -128,6 +130,9 @@ fn rewrite_type6_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
         let recs_start = p;
         if rule_bytes.len() < recs_start + lookup_count * 4 {
             continue;
+        }
+        if !map.spend(bt_count + in_count + la_count + lookup_count) {
+            return None;
         }
 
         // Remap each gid sequence; drop the rule if any required gid
@@ -210,19 +215,7 @@ fn rewrite_type6_rule_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>
     if surviving_rules.is_empty() {
         return None;
     }
-    let mut out = Vec::new();
-    out.extend_from_slice(&(surviving_rules.len() as u16).to_be_bytes());
-    let offsets_start = out.len();
-    for _ in 0..surviving_rules.len() {
-        out.extend_from_slice(&[0u8; 2]);
-    }
-    let mut bodies = Dedup::default();
-    for (i, body) in surviving_rules.iter().enumerate() {
-        let body_start = bodies.place(&mut out, body);
-        let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
-    }
-    Some(out)
+    Some(emit_offset_list(ctx, &surviving_rules))
 }
 
 /// GSUB type 6 format 2 (class-based chained-context substitution).
@@ -265,15 +258,15 @@ fn rewrite_type6_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     }
     let map = ctx.gid_map;
     let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let covered = ctx.gid_map.coverage_glyphs(cov_bytes)?;
     let new_covered: Vec<u16> = covered.iter().filter_map(|&g| map.map(g)).collect();
     if new_covered.is_empty() {
         return None;
     }
 
-    let bt_pairs_old = crate::layout::classdef_pairs_at(sub, bt_cd_off)?;
-    let in_pairs_old = crate::layout::classdef_pairs_at(sub, in_cd_off)?;
-    let la_pairs_old = crate::layout::classdef_pairs_at(sub, la_cd_off)?;
+    let bt_pairs_old = ctx.gid_map.classdef_pairs_at(sub, bt_cd_off)?;
+    let in_pairs_old = ctx.gid_map.classdef_pairs_at(sub, in_cd_off)?;
+    let la_pairs_old = ctx.gid_map.classdef_pairs_at(sub, la_cd_off)?;
 
     let remap = |pairs: &[(u16, u16)]| -> (Vec<(u16, u16)>, Vec<bool>) {
         let mut new_pairs: Vec<(u16, u16)> = Vec::with_capacity(pairs.len());
@@ -381,7 +374,7 @@ fn rewrite_type6_class_set(
         return None;
     }
     let rule_count = u16::from_be_bytes([set_bytes[0], set_bytes[1]]) as usize;
-    if set_bytes.len() < 2 + rule_count * 2 {
+    if set_bytes.len() < 2 + rule_count * 2 || !ctx.gid_map.spend(rule_count) {
         return None;
     }
     let class_reachable = |reachable: &[bool], c: u16| -> bool {
@@ -423,6 +416,12 @@ fn rewrite_type6_class_set(
         let recs_start = p;
         if rule_bytes.len() < recs_start + lookup_count * 4 {
             continue;
+        }
+        if !ctx
+            .gid_map
+            .spend(bt_count + in_count + la_count + lookup_count)
+        {
+            return None;
         }
 
         let mut all_reachable = true;
@@ -494,19 +493,7 @@ fn rewrite_type6_class_set(
     if surviving_rules.is_empty() {
         return None;
     }
-    let mut out = Vec::new();
-    out.extend_from_slice(&(surviving_rules.len() as u16).to_be_bytes());
-    let offsets_start = out.len();
-    for _ in 0..surviving_rules.len() {
-        out.extend_from_slice(&[0u8; 2]);
-    }
-    let mut bodies = Dedup::default();
-    for (i, body) in surviving_rules.iter().enumerate() {
-        let body_start = bodies.place(&mut out, body);
-        let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
-    }
-    Some(out)
+    Some(emit_offset_list(ctx, &surviving_rules))
 }
 
 /// GSUB type 6 format 3 (coverage-based chained-context substitution).
@@ -558,24 +545,9 @@ fn rewrite_type6_format3(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
         return None;
     }
 
-    let read_cov_array = |start: usize, count: usize| -> Option<Vec<Vec<u8>>> {
-        let mut out = Vec::with_capacity(count);
-        for j in 0..count {
-            let off_off = start + j * 2;
-            let cov_off = u16::from_be_bytes([sub[off_off], sub[off_off + 1]]) as usize;
-            let cov_bytes = sub.get(cov_off..)?;
-            let covered = parse_coverage_glyphs(cov_bytes);
-            let new_covered: Vec<u16> = covered.iter().filter_map(|&g| map.map(g)).collect();
-            if new_covered.is_empty() {
-                return None;
-            }
-            out.push(crate::coverage::emit_coverage_from_glyphs(&new_covered));
-        }
-        Some(out)
-    };
-    let new_bt = read_cov_array(bt_offs_start, bt_count)?;
-    let new_in = read_cov_array(in_offs_start, in_count)?;
-    let new_la = read_cov_array(la_offs_start, la_count)?;
+    let new_bt = rewrite_coverage_array(map, sub, bt_offs_start, bt_count)?;
+    let new_in = rewrite_coverage_array(map, sub, in_offs_start, in_count)?;
+    let new_la = rewrite_coverage_array(map, sub, la_offs_start, la_count)?;
 
     let records =
         parse_and_remap_lookup_records(sub, recs_start, lookup_count, ctx.lookup_renumber)?;

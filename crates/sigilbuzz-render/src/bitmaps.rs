@@ -18,8 +18,9 @@
 //!         +-- Cbdt -> decode_png
 //!         +-- Sbix png  -> decode_png
 //!         +-- Sbix dupe -> recurse to referenced gid
-//!         +-- Sbix jpg -> decode_jpeg (baseline 8-bit YCbCr/gray)
-//!         +-- Sbix tiff/jp2 -> UnsupportedBitmap
+//!         +-- Sbix jpg -> decode_jpeg (8-bit YCbCr/gray)
+//!         +-- Sbix tiff -> decode_tiff (baseline 8-bit RGB/RGBA)
+//!         +-- Sbix jp2 -> UnsupportedBitmap
 //!         +-- Ebdt -> unpack 1bpp mask -> black-on-transparent RGBA
 //!         |
 //!         v
@@ -31,13 +32,12 @@
 //!
 //! # Scope
 //!
-//! - **PNG, baseline JPEG, and 1bpp mono.** sbix `'jpg '` is decoded
-//!   via the in-crate baseline decoder ([`crate::decode_jpeg`]); sbix
-//!   `'tiff'` / `'jp2 '` return [`RenderError::UnsupportedBitmap`];
-//!   implementing those decoders
-//!   from scratch is each its own project and they're rare in font
-//!   embeds. The bitmap-emoji ecosystem in 2026 is overwhelmingly
-//!   PNG-only.
+//! - **PNG, JPEG, baseline TIFF, and 1bpp mono.** sbix `'jpg '` is
+//!   decoded via the in-crate decoder ([`crate::decode_jpeg`]) and
+//!   sbix `'tiff'` via [`crate::decode_tiff`]. sbix `'jp2 '` returns
+//!   [`RenderError::UnsupportedBitmap`]: a JPEG 2000 decoder is its
+//!   own project and the format is rare in font embeds. The
+//!   bitmap-emoji ecosystem in 2026 is overwhelmingly PNG-only.
 //! - **sbix `'dupe'`** is supported via a depth-limited recursion to
 //!   the referenced gid's bitmap.
 //! - **EBDT formats 1, 2, 5, 6, 7** (1bpp byte-aligned and bit-aligned
@@ -46,8 +46,9 @@
 //!   the referenced component gids at the parent's strike, alpha-
 //!   overlay each on a parent canvas, and surface
 //!   [`RenderError::BitmapDecodeFailed`] on cycles, self-references,
-//!   missing-at-strike components, or recursion past
-//!   [`EBDT_COMPOSITE_MAX_DEPTH`].
+//!   missing-at-strike components, recursion past
+//!   [`EBDT_COMPOSITE_MAX_DEPTH`], or more than
+//!   [`EBDT_COMPOSITE_MAX_COMPONENTS`] component expansions in total.
 //! - **No interlacing.** Adam7 isn't used in font embeds.
 //! - **No ancillary chunks beyond IHDR / IDAT / IEND.** The PNG
 //!   decoder skips unknown chunks (per PNG spec) but doesn't apply
@@ -91,6 +92,14 @@ const SBIX_DUPE_MAX_DEPTH: u8 = 4;
 /// blast radius of a malicious or malformed font.
 const EBDT_COMPOSITE_MAX_DEPTH: u8 = 4;
 
+/// Maximum number of EBDT composite components expanded while
+/// rendering one glyph, counted across every recursion level. The depth
+/// cap alone still allows a fan-out of `n^4` expansions when each
+/// composite lists `n` components, so a small font could otherwise
+/// request billions of blits. Real composites list a handful of
+/// components.
+const EBDT_COMPOSITE_MAX_COMPONENTS: u32 = 1024;
+
 /// Entry point: rasterizes the embedded bitmap glyph for `gid` at
 /// the requested pixel size.
 ///
@@ -108,22 +117,26 @@ const EBDT_COMPOSITE_MAX_DEPTH: u8 = 4;
 /// Dispatch priority is **CBDT (color) > sbix png > EBDT (mono)**,
 /// see [`Face::glyph_bitmap`](sigilbuzz::Face::glyph_bitmap). Within
 /// the sbix variant, `'png '` decodes inline, `'jpg '` decodes via
-/// the in-crate baseline JPEG decoder ([`crate::decode_jpeg`]),
-/// `'dupe'` recurses (with a depth cap) into the referenced gid, and
-/// `'tiff'` / `'jp2 '` surface [`RenderError::UnsupportedBitmap`].
+/// the in-crate JPEG decoder ([`crate::decode_jpeg`]), `'tiff'`
+/// decodes via [`crate::decode_tiff`], `'dupe'` recurses (with a depth
+/// cap) into the referenced gid, and `'jp2 '` surfaces
+/// [`RenderError::UnsupportedBitmap`].
 ///
 /// Returns:
 /// - `Ok(pixmap)`: decoded and (optionally) rescaled bitmap.
 /// - `Err(RenderError::NoBitmap(gid))`: no strike covers `gid`, or
 ///   the font carries no bitmap tables.
-/// - `Err(RenderError::UnsupportedBitmap)`: sbix payload is tiff /
-///   jp2, or `'dupe'` recursion exceeds the depth cap.
+/// - `Err(RenderError::UnsupportedBitmap)`: sbix payload is jp2 or an
+///   unknown tag, a TIFF uses an unsupported feature, or `'dupe'`
+///   recursion exceeds the depth cap.
 /// - `Err(RenderError::BadJpeg(...))`: sbix `'jpg '` payload failed
-///   to decode (truncated, progressive, arithmetic-coded, etc.).
+///   to decode (truncated, arithmetic-coded, etc.).
+/// - `Err(RenderError::BadTiff(...))`: sbix `'tiff'` payload failed
+///   structural validation.
 /// - `Err(RenderError::BitmapDecodeFailed(_))`: EBDT composite
 ///   (formats 8 / 9) recursion hit a cycle, self-reference, OOB
-///   component glyph id, missing-at-strike component, or
-///   `EBDT_COMPOSITE_MAX_DEPTH`.
+///   component glyph id, missing-at-strike component,
+///   `EBDT_COMPOSITE_MAX_DEPTH`, or `EBDT_COMPOSITE_MAX_COMPONENTS`.
 /// - `Err(RenderError::BadPng(...))`: PNG payload failed to decode.
 ///
 /// # Errors
@@ -137,32 +150,37 @@ pub fn rasterize_bitmap_glyph(
     size_pt: f32,
     _coords: &[f32],
 ) -> Result<ColorPixmap, RenderError> {
-    rasterize_bitmap_inner(face, gid, size_pt, 0)
+    let mut composite = CompositeState {
+        chain: Vec::new(),
+        depth: 0,
+        components_left: EBDT_COMPOSITE_MAX_COMPONENTS,
+    };
+    rasterize_bitmap_inner(face, gid, size_pt, 0, &mut composite)
 }
 
+/// EBDT composite recursion bookkeeping, threaded through
+/// [`rasterize_bitmap_inner`].
+struct CompositeState {
+    /// Gids currently being expanded as EBDT composite parents, used
+    /// for cycle detection (a component referring back to any ancestor
+    /// in the chain is a cycle, not just a direct self-reference).
+    chain: Vec<u16>,
+    /// EBDT-composite expansion level. Independent of the sbix-side
+    /// `dupe_depth` counter.
+    depth: u8,
+    /// Component expansions still allowed for this glyph. Shared by
+    /// every recursion level so the total work stays bounded.
+    components_left: u32,
+}
+
+/// Rasterizes `gid` and threads the sbix `'dupe'` depth and the EBDT
+/// composite bookkeeping through the recursion.
 fn rasterize_bitmap_inner(
     face: &Face<'_>,
     gid: u16,
     size_pt: f32,
     dupe_depth: u8,
-) -> Result<ColorPixmap, RenderError> {
-    rasterize_bitmap_inner_full(face, gid, size_pt, dupe_depth, &mut Vec::new(), 0)
-}
-
-/// Same as [`rasterize_bitmap_inner`] but threads the composite
-/// recursion bookkeeping through. `composite_chain` is the list of
-/// gids currently being expanded as EBDT composite parents, used for
-/// cycle detection (a component referring back to any ancestor in the
-/// chain is a cycle, not just a direct self-reference).
-/// `composite_depth` counts EBDT-composite expansion levels and is
-/// independent of `dupe_depth` (the sbix-side counter).
-fn rasterize_bitmap_inner_full(
-    face: &Face<'_>,
-    gid: u16,
-    size_pt: f32,
-    dupe_depth: u8,
-    composite_chain: &mut Vec<u16>,
-    composite_depth: u8,
+    composite: &mut CompositeState,
 ) -> Result<ColorPixmap, RenderError> {
     if !size_pt.is_finite() || size_pt <= 0.0 {
         return Err(RenderError::BadSize(size_pt));
@@ -193,29 +211,20 @@ fn rasterize_bitmap_inner_full(
                 // size_pt so strike picking happens against the
                 // referenced gid's coverage. A self-reference will
                 // hit the depth cap rather than loop forever.
-                if glyph.data.len() < 2 {
+                let &[hi, lo, ..] = glyph.data else {
                     return Err(RenderError::UnsupportedBitmap);
-                }
-                let alias = u16::from_be_bytes([glyph.data[0], glyph.data[1]]);
+                };
+                let alias = u16::from_be_bytes([hi, lo]);
                 if alias == gid {
                     return Err(RenderError::UnsupportedBitmap);
                 }
-                return rasterize_bitmap_inner_full(
-                    face,
-                    alias,
-                    size_pt,
-                    dupe_depth + 1,
-                    composite_chain,
-                    composite_depth,
-                );
+                return rasterize_bitmap_inner(face, alias, size_pt, dupe_depth + 1, composite);
             }
-            // JPEG: hand-rolled baseline decoder. Supports 8-bit
-            // sequential YCbCr (4:4:4 / 4:2:2 / 4:2:0) and grayscale
+            // JPEG: hand-rolled decoder. Supports 8-bit baseline and
+            // progressive YCbCr (4:4:4 / 4:2:2 / 4:2:0) and grayscale
             // (the slice that real-world font sbix payloads land in).
-            // Progressive scan / arithmetic coding / 16-bit / restart
-            // markers surface as `BadJpeg`; we re-tag as
-            // `UnsupportedBitmap` so callers can fall back to outlines
-            // exactly as before.
+            // Arithmetic coding, 16-bit precision, restart markers,
+            // and AC refinement scans surface as `BadJpeg`.
             TAG_JPG => (decode_jpeg(glyph.data)?, f32::from(ppem)),
             // TIFF: hand-rolled baseline decoder. Supports 8-bit RGB
             // / RGBA, single IFD, strip-organized, uncompressed or
@@ -233,14 +242,7 @@ fn rasterize_bitmap_inner_full(
         },
         GlyphBitmapEntry::Ebdt { ppem_y, bitmap, .. } => {
             if bitmap.is_composite() {
-                let pix = decode_ebdt_composite(
-                    face,
-                    gid,
-                    &bitmap,
-                    ppem_y,
-                    composite_chain,
-                    composite_depth,
-                )?;
+                let pix = decode_ebdt_composite(face, gid, &bitmap, ppem_y, composite)?;
                 (pix, f32::from(ppem_y))
             } else {
                 (decode_ebdt_mono(&bitmap)?, f32::from(ppem_y))
@@ -267,9 +269,7 @@ fn rasterize_bitmap_inner_full(
     {
         return Err(RenderError::BadSize(size_pt));
     }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let dst_w = (dst_w_f as u32).max(1);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let dst_h = (dst_h_f as u32).max(1);
     Ok(rescale_bilinear(&decoded, dst_w, dst_h))
 }

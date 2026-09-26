@@ -66,9 +66,14 @@ impl Iterator for LineBreakIter<'_> {
         if self.finished {
             return None;
         }
-        let bytes = self.text.as_bytes();
         loop {
-            if self.pos >= bytes.len() {
+            // Decode the next char. `pos` only ever advances by whole
+            // chars, so this finds no char only at the end of the text.
+            let Some(ch) = self
+                .text
+                .get(self.pos..)
+                .and_then(|rest| rest.chars().next())
+            else {
                 self.finished = true;
                 // End-of-text is always a (Mandatory) break point so
                 // the wrapper has a sentinel to flush its last line.
@@ -76,11 +81,7 @@ impl Iterator for LineBreakIter<'_> {
                     return Some((self.text.len(), BreakOpportunity::Mandatory));
                 }
                 return None;
-            }
-
-            // Decode next char.
-            let rest = &self.text[self.pos..];
-            let ch = rest.chars().next().expect("non-empty rest");
+            };
             let ch_len = ch.len_utf8();
             let next_pos = self.pos + ch_len;
             let curr = line_break_class(ch);

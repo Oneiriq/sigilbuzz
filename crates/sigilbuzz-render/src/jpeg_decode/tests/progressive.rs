@@ -15,7 +15,7 @@ use super::*;
 /// `dc / 8 + 128` (clamped). This exercises the progressive
 /// dispatch end-to-end: SOF2 walker entry, two `read_sos_progressive`
 /// calls, `scan_dc_first` + `scan_ac_first`, and `finalize_progressive`.
-fn build_progressive_grayscale_jpeg(dc: i32) -> Vec<u8> {
+pub(super) fn build_progressive_grayscale_jpeg(dc: i32) -> Vec<u8> {
     let mut out = vec![0xFF, MARKER_SOI];
 
     // DQT: single identity table at dest 0.
@@ -233,8 +233,8 @@ fn progressive_sos_rejects_ac_scan_with_ss_greater_than_se() {
 #[test]
 fn progressive_ac_refinement_scan_is_unsupported() {
     // SOF2 + an AC scan with Ah=1 (refinement). The implementation
-    // surfaces this as BadJpeg explicitly per the PR's deferred-scope
-    // note.
+    // surfaces this as BadJpeg explicitly because AC refinement
+    // is not implemented.
     let mut bytes = vec![0xFF, MARKER_SOI];
     bytes.push(0xFF);
     bytes.push(MARKER_DQT);

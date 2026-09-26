@@ -9,10 +9,9 @@
 //! - **Baseline sequential DCT (SOF0)** plus **progressive DCT (SOF2)**
 //!   first-time DC and AC scans, plus DC successive-approximation
 //!   refinement. AC successive-approximation refinement scans (Ah > 0
-//!   on an AC band) are surfaced as [`RenderError::BadJpeg`],
-//!   uncommon in real-world font payloads but explicitly out of scope
-//!   for this PR. No arithmetic coding (SOF9..15), no hierarchical
-//!   (SOFE).
+//!   on an AC band) are surfaced as [`RenderError::BadJpeg`]. They are
+//!   uncommon in real-world font payloads and not implemented. No
+//!   arithmetic coding (SOF9..15), no hierarchical (SOFE).
 //! - **YCbCr** (3-component) and **grayscale** (1-component).
 //! - **Sampling factors:** 4:4:4, 4:2:2, 4:2:0, and any combination
 //!   where each component's max sampling factor is `<= 2`.
@@ -21,6 +20,10 @@
 //! - **No restart markers, no thumbnails, no EXIF parsing.** APP*
 //!   segments are skipped silently; RSTm segments produce
 //!   [`RenderError::BadJpeg`].
+//! - **Size backed by data.** Every 8x8 block costs at least one bit
+//!   of entropy-coded data, so a frame header that declares more
+//!   blocks than eight per remaining input byte is rejected before
+//!   any sample buffer is allocated.
 //!
 //! Output is a premultiplied RGBA [`ColorPixmap`] with alpha = 255
 //! (JPEG has no transparency channel).
@@ -51,7 +54,7 @@
 //! - SIMD or fixed-point IDCT: the hot path here is tiny font emoji
 //!   bitmaps, not high-throughput photo decode.
 //!
-//! See [`super::bitmaps::decode_sbix_glyph`] for the dispatch site.
+//! See [`crate::rasterize_bitmap_glyph`] for the dispatch site.
 //! Spec reference: ITU-T T.81 Annex F (sequential DCT-based mode of
 //! operation).
 
@@ -177,7 +180,7 @@ impl<'a> Decoder<'a> {
 
     fn decode(&mut self) -> Result<ColorPixmap, RenderError> {
         // Verify SOI.
-        if self.src.len() < 2 || self.src[0] != 0xFF || self.src[1] != MARKER_SOI {
+        if !self.src.starts_with(&[0xFF, MARKER_SOI]) {
             return Err(RenderError::BadJpeg("missing SOI"));
         }
         self.cursor = 2;
@@ -408,16 +411,38 @@ impl<'a> Decoder<'a> {
             });
         }
         self.components = comps;
+
+        // Every block the scans will visit costs at least one bit of
+        // entropy-coded data (a DC code in the first scan), and that
+        // data follows this segment. A header that claims more blocks
+        // than the rest of the stream can carry is malformed, and
+        // rejecting it here keeps a few header bytes from sizing
+        // gigabytes of coefficient and sample buffers.
+        let (mcus_x, mcus_y) = self.mcu_grid();
+        let total_blocks: u64 = self
+            .components
+            .iter()
+            .map(|c| {
+                u64::from(mcus_x)
+                    * u64::from(c.h_sampling)
+                    * u64::from(mcus_y)
+                    * u64::from(c.v_sampling)
+            })
+            .sum();
+        let remaining = self.src.len().saturating_sub(self.cursor) as u64;
+        if total_blocks > remaining.saturating_mul(8) {
+            return Err(RenderError::BadJpeg("frame larger than entropy data"));
+        }
+
         if progressive {
             self.allocate_progressive_buffers();
         }
         Ok(())
     }
 
-    /// Allocate per-component coefficient buffers sized to the
-    /// component's full block grid. Called after SOF2 parses the
-    /// component list.
-    fn allocate_progressive_buffers(&mut self) {
+    /// MCU grid size `(mcus_x, mcus_y)` for the current frame. An MCU
+    /// spans `8 * max_h` by `8 * max_v` pixels.
+    fn mcu_grid(&self) -> (u32, u32) {
         let max_h = self
             .components
             .iter()
@@ -432,8 +457,17 @@ impl<'a> Decoder<'a> {
             .unwrap_or(1);
         let mcu_w_px = u32::from(max_h) * 8;
         let mcu_h_px = u32::from(max_v) * 8;
-        let mcus_x = self.width.div_ceil(mcu_w_px);
-        let mcus_y = self.height.div_ceil(mcu_h_px);
+        (
+            self.width.div_ceil(mcu_w_px),
+            self.height.div_ceil(mcu_h_px),
+        )
+    }
+
+    /// Allocate per-component coefficient buffers sized to the
+    /// component's full block grid. Called after SOF2 parses the
+    /// component list.
+    fn allocate_progressive_buffers(&mut self) {
+        let (mcus_x, mcus_y) = self.mcu_grid();
         self.coeffs = Vec::with_capacity(self.components.len());
         self.blocks_per_comp = Vec::with_capacity(self.components.len());
         for comp in &self.components {
@@ -448,6 +482,13 @@ impl<'a> Decoder<'a> {
 // ---------------------------------------------------------------------------
 // Tests.
 // ---------------------------------------------------------------------------
+
+/// Table in slot `selector`, or `None` when the slot is empty or the
+/// selector points past the four slots the format defines. Scan
+/// headers carry 4-bit selectors, so values up to 15 reach this.
+fn table_slot<T>(slots: &[Option<T>], selector: u8) -> Option<&T> {
+    slots.get(usize::from(selector)).and_then(Option::as_ref)
+}
 
 #[cfg(test)]
 mod tests;

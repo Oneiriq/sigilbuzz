@@ -3,7 +3,7 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::ffi::{c_uint, c_void};
+use core::ffi::c_void;
 use core::ptr;
 
 use sigilbuzz::{Buffer, Face, Font};
@@ -52,6 +52,8 @@ impl BlobInner {
 // hands the pointer back to `user_destroy`. The HarfBuzz contract
 // puts the burden of synchronization on the consumer; we mirror it.
 unsafe impl Send for BlobInner {}
+// SAFETY: see the `Send` impl above. No `&BlobInner` method reads or
+// writes through `user_data`.
 unsafe impl Sync for BlobInner {}
 
 impl Drop for BlobInner {
@@ -67,8 +69,9 @@ impl Drop for BlobInner {
     }
 }
 
-/// Refcounted blob. C holds the `Arc` pointer to this struct; see the
-/// `handle` module.
+/// Opaque, refcounted handle to a byte buffer, usually font data.
+/// Mirrors HarfBuzz's `hb_blob_t`. C holds the `Arc` pointer to this
+/// struct, as the `handle` module describes.
 #[repr(C)]
 pub struct hb_blob_t {
     pub(crate) inner: BlobInner,
@@ -78,12 +81,15 @@ pub struct hb_blob_t {
 /// from. The `Face<'static>` is a lie: its borrow is actually
 /// rooted in `_blob`'s bytes, which live at least as long as the
 /// FaceInner. See the module-level lifetime erasure note.
+///
+/// Fields drop in declaration order, so `face` goes before the bytes
+/// it borrows.
 pub(crate) struct FaceInner {
+    pub(crate) face: Face<'static>,
     /// The blob the face was built from. HarfBuzz faces reference
     /// their blob too, so the blob's destroy callback fires only once
     /// every face (and font) built on it is gone.
     _blob: Arc<hb_blob_t>,
-    pub(crate) face: Face<'static>,
 }
 
 impl FaceInner {
@@ -92,7 +98,7 @@ impl FaceInner {
     /// Callers do the `transmute::<Face<'_>, Face<'static>>`
     /// themselves so this helper stays unsafe-free.
     pub(crate) fn from_blob(blob: Arc<hb_blob_t>, face: Face<'static>) -> Self {
-        Self { _blob: blob, face }
+        Self { face, _blob: blob }
     }
 }
 
@@ -102,10 +108,13 @@ impl FaceInner {
 // as no thread observes the face after `_blob` drops (which can't
 // happen because they're held in the same struct), the bound holds.
 unsafe impl Send for FaceInner {}
+// SAFETY: see the `Send` impl above. Shared access only reads the
+// immutable face and bytes.
 unsafe impl Sync for FaceInner {}
 
-/// Refcounted face. C holds the `Arc` pointer to this struct; see the
-/// `handle` module.
+/// Opaque, refcounted handle to a parsed font face. Mirrors
+/// HarfBuzz's `hb_face_t`. C holds the `Arc` pointer to this struct,
+/// as the `handle` module describes.
 #[repr(C)]
 pub struct hb_face_t {
     pub(crate) inner: FaceInner,
@@ -118,38 +127,39 @@ pub struct hb_face_t {
 /// expose the same surface. Most callers configure the font once
 /// before shaping, so contention is negligible.
 pub(crate) struct FontInner {
-    // `_face` is the lifetime root for `state.font` (which holds a
-    // `Font<'static>` borrowed from this face, see SAFETY note below).
-    // It is a reference to the same face object C sees, so a font keeps
-    // its face alive the way HarfBuzz fonts do.
-    // The leading underscore signals "not for direct access" but a
-    // few internal call sites still need to read it; those are
-    // covered by the module-level `used_underscore_binding` allow.
-    pub(crate) _face: Arc<hb_face_t>,
     pub(crate) state: spin_mutex::SpinMutex<FontState>,
+    /// Lifetime root for `state.font`, which holds a `Font<'static>`
+    /// borrowed from this face (see the SAFETY note below). It is a
+    /// reference to the same face object C sees, so a font keeps its
+    /// face alive the way HarfBuzz fonts do. Declared after `state` so
+    /// the font drops before the face.
+    pub(crate) face: Arc<hb_face_t>,
 }
 
 pub(crate) struct FontState {
-    /// Mirror of `Font::size()`. We keep the Font in sync via
-    /// `Font::with_size`/`with_coords` after every setter.
+    /// Mirror of `Font::size()`. Every setter rebuilds `font` from
+    /// these fields through `build_font`.
     pub(crate) x_scale: i32,
     pub(crate) y_scale: i32,
-    pub(crate) x_ppem: c_uint,
-    pub(crate) y_ppem: c_uint,
+    /// Declared before `coords` so it drops before the slice it
+    /// borrows.
+    pub(crate) font: Font<'static>,
     /// Owned coords. `font` borrows these; mutating the vec
     /// invalidates the borrow, so any setter rebuilds the font.
     pub(crate) coords: Vec<f32>,
-    pub(crate) font: Font<'static>,
 }
 
 // SAFETY: Font<'_> is Clone + Send + Sync; the lifetime erasure is
-// rooted in `_face`, which keeps the face (and its blob) alive. See
+// rooted in `face`, which keeps the face (and its blob) alive. See
 // the FaceInner SAFETY note.
 unsafe impl Send for FontInner {}
+// SAFETY: see the `Send` impl above. The mutable state sits behind
+// `SpinMutex`, which serializes access.
 unsafe impl Sync for FontInner {}
 
-/// Refcounted font. C holds the `Arc` pointer to this struct; see the
-/// `handle` module.
+/// Opaque, refcounted handle to a face bound to a scale and
+/// variation coordinates. Mirrors HarfBuzz's `hb_font_t`. C holds the
+/// `Arc` pointer to this struct, as the `handle` module describes.
 #[repr(C)]
 pub struct hb_font_t {
     pub(crate) inner: FontInner,
@@ -173,12 +183,8 @@ pub(crate) struct BufferState {
     /// `hb_buffer_reset`, or `hb_buffer_clear_contents`.
     pub(crate) glyph_infos: Vec<hb_glyph_info_t>,
     pub(crate) glyph_positions: Vec<hb_glyph_position_t>,
-    /// True once `hb_buffer_set_*` or `_guess_segment_properties`
-    /// have populated direction/script/language. Until then
-    /// guess_segment_properties has work to do.
-    pub(crate) props_set: bool,
-    /// Caller-unit cluster for every character added so far; see
-    /// `buffer_text`.
+    /// Caller-unit cluster for every character added so far, as the
+    /// `buffer_text` module describes.
     pub(crate) clusters: buffer_text::ClusterTable,
     /// The flags as `hb_buffer_set_flags` got them, bits sigilbuzz
     /// ignores included, so `hb_buffer_get_flags` returns them.
@@ -187,17 +193,20 @@ pub(crate) struct BufferState {
     pub(crate) cluster_level: buffer_flags::hb_buffer_cluster_level_t,
 }
 
-/// Refcounted buffer. C holds the `Arc` pointer to this struct; see
-/// the `handle` module.
+/// Opaque, refcounted shaping buffer: text in, glyphs out. Mirrors
+/// HarfBuzz's `hb_buffer_t`. C holds the `Arc` pointer to this struct,
+/// as the `handle` module describes.
 #[repr(C)]
 pub struct hb_buffer_t {
     pub(crate) inner: BufferInner,
 }
 
 // SAFETY: `BufferState` carries a `*const c_char` (`language`) that
-// is a pointer into the leaked language-intern table. Those strings
-// live for the process lifetime and are immutable, so the pointer
-// is `Send + Sync` for all observable purposes. The other fields
-// (Buffer, Vec<...>) are already Send + Sync.
+// is only stored and compared, never dereferenced by this crate. The
+// pointers this crate hands out point into the leaked language
+// intern table, which lives for the process lifetime. The other
+// fields (Buffer, Vec<...>) are already Send + Sync.
 unsafe impl Send for BufferInner {}
+// SAFETY: see the `Send` impl above. The state sits behind
+// `SpinMutex`, which serializes access.
 unsafe impl Sync for BufferInner {}

@@ -111,7 +111,7 @@ pub use ttc::fonts_in_collection;
 // custom shapers or feature pipelines reasonably want as crate-root
 // names (see `docs/STABILITY.md`).
 //
-// Promoted in 0.20.0 (audit follow-up #235):
+// Promoted in 0.20.0 (#235):
 //   - `ot::feature`: OpenType feature-tag byte-literal constants
 //     (LIGA, KERN, CALT, etc.) usable as `Feature::tag` keys.
 //   - `ot::arabic::JoiningForm`: the Arabic joining-form enum, the

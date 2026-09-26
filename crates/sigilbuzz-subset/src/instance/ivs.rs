@@ -20,7 +20,6 @@ use crate::SubsetError;
 /// the row as "no variation" and leave the consumer field at its
 /// static value.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)] // wired in by the partial-instancing integration commit
 pub(crate) struct RegionRemap {
     /// Per-source-outer entries. Each entry is either:
     /// - `Some(new_outer)`: the subtable survives at this index, with
@@ -34,7 +33,6 @@ pub(crate) struct RegionRemap {
     new_outer_for_old: Vec<Option<u16>>,
 }
 
-#[allow(dead_code)] // wired in by the partial-instancing integration commit
 impl RegionRemap {
     /// Returns the new (outer, inner) for an old row, or `None` when
     /// the surrounding subtable collapsed.
@@ -51,7 +49,6 @@ fn f2dot14(raw: [u8; 2]) -> f32 {
 
 /// Writes an F2DOT14 to a byte vector.
 fn write_f2dot14_bytes(out: &mut Vec<u8>, v: f32) {
-    #[allow(clippy::cast_possible_truncation)]
     let raw = (v * 16384.0)
         .round()
         .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
@@ -109,8 +106,10 @@ pub(crate) fn bake_ivs_partial(
 /// # Errors
 ///
 /// A parse error, measured from the start of `ivs_bytes`, when the
-/// store is malformed, not format 1, or has an axis count that differs
-/// from `pins`; [`SubsetError::Unsupported`] when the projected store
+/// store is malformed, not format 1, has an axis count that differs
+/// from `pins`, or has subtables that overlap so heavily that
+/// projecting them would read far more bytes than the store holds.
+/// [`SubsetError::Unsupported`] when the projected store
 /// outgrows its Offset32s. Offsets and sizes are checked, so a crafted
 /// Offset32 cannot wrap a 32-bit `usize`.
 pub(crate) fn project_ivs(
@@ -120,6 +119,14 @@ pub(crate) fn project_ivs(
 ) -> Result<(Vec<u8>, RegionRemap), SubsetError> {
     const CTX: &str = "ItemVariationStore truncated";
     const OFFSET: &str = "ItemVariationStore offset past the end";
+    // Subtable offsets may alias one large subtable, and each offset is
+    // projected on its own, so the output could grow without bound. The
+    // walk reads at most a few times the store's size. The subtables of
+    // a well-formed store occupy disjoint spans and never reach that.
+    const ALIASED: sigilbuzz::Error = sigilbuzz::Error::Malformed {
+        offset: 6,
+        context: "ItemVariationStore subtables overlap too much to project",
+    };
     if read::u16_at(ivs_bytes, 0, CTX)? != 1 {
         return Err(sigilbuzz::Error::Malformed {
             offset: 0,
@@ -192,6 +199,9 @@ pub(crate) fn project_ivs(
     // header bytes are written below; we serialize them in order so
     // offsets land deterministically).
     let mut new_subtables: Vec<Vec<u8>> = Vec::new();
+    // Source bytes the subtable walk may still read. See the doc
+    // comment for why overlapping subtables need a cap.
+    let mut read_budget = ivs_bytes.len().saturating_mul(4).saturating_add(1 << 16);
 
     for sub_off in &subtable_offsets {
         let Some(sub_off) = *sub_off else {
@@ -213,12 +223,16 @@ pub(crate) fn project_ivs(
             }
             .into());
         }
+        // The reads above put `sub_off + 6` inside the data.
         let ri_start = sub_off + 6;
-        let region_indexes: Vec<u16> =
-            read::array_at(ivs_bytes, ri_start, region_index_count, 2, CTX)?
-                .chunks_exact(2)
-                .map(|b| u16::from_be_bytes([b[0], b[1]]))
-                .collect();
+        let region_index_bytes = read::array_at(ivs_bytes, ri_start, region_index_count, 2, CTX)?;
+        read_budget = read_budget
+            .checked_sub(6 + region_index_bytes.len())
+            .ok_or(ALIASED)?;
+        let region_indexes: Vec<u16> = region_index_bytes
+            .chunks_exact(2)
+            .map(|b| u16::from_be_bytes([b[0], b[1]]))
+            .collect();
 
         // Per-source-slot survival list: index into source slot,
         // produces (new_region_index, scalar).
@@ -247,9 +261,11 @@ pub(crate) fn project_ivs(
             word_delta_count * src_wide + (region_index_count - word_delta_count) * src_narrow;
         let rows_start = ri_start + region_index_count * 2;
         let rows = read::array_at(ivs_bytes, rows_start, item_count, row_size, CTX)?;
+        read_budget = read_budget.checked_sub(rows.len()).ok_or(ALIASED)?;
 
         // For each item, build its surviving row of i32 deltas
-        // (post-pin-scalar).
+        // (post-pin-scalar). `row_size` is at least 1 here because a
+        // surviving slot implies at least one region index.
         let mut item_rows: Vec<Vec<i32>> = Vec::with_capacity(item_count);
         for it in 0..item_count {
             let row = &rows[it * row_size..(it + 1) * row_size];
@@ -285,21 +301,20 @@ pub(crate) fn project_ivs(
             }
             // Apply scalar to each surviving slot, build the new row in
             // surviving-slot order.
-            let mut new_row: Vec<i32> = Vec::with_capacity(surviving_slots.len());
-            for &(slot, _new_ri, scalar) in &surviving_slots {
-                #[allow(clippy::cast_precision_loss)]
-                let scaled = src_deltas[slot] as f32 * scalar;
-                #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-                let rounded = scaled.round() as i32;
-                new_row.push(rounded);
-            }
+            let new_row: Vec<i32> = surviving_slots
+                .iter()
+                .map(|&(slot, _new_ri, scalar)| {
+                    let scaled = src_deltas.get(slot).copied().unwrap_or(0) as f32 * scalar;
+                    scaled.round() as i32
+                })
+                .collect();
             item_rows.push(new_row);
         }
 
         // Decide encoding: pick all-i16 if every value fits, else
         // all-i32 (set LONG_WORDS bit, wordDeltaCount =
-        // surviving_slot_count). Simple and conservative: the IVS
-        // dedup pass in 0.13 doesn't run again on the partial output.
+        // surviving_slot_count). Simple and conservative: the partial
+        // output is not run through another IVS dedup pass.
         let all_fit_i16 = item_rows
             .iter()
             .flat_map(|r| r.iter())
@@ -326,7 +341,6 @@ pub(crate) fn project_ivs(
         for row in &item_rows {
             for &v in row {
                 if all_fit_i16 {
-                    #[allow(clippy::cast_possible_truncation)]
                     let v16 = v as i16;
                     sub_bytes.extend_from_slice(&v16.to_be_bytes());
                 } else {

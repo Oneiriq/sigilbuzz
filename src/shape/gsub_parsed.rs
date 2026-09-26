@@ -9,7 +9,7 @@ use super::gsub::{
     apply_gsub_chain_context_at, apply_gsub_context_at, expand_glyph_in_place, substitute_glyph,
     GsubCx,
 };
-use super::{lig, resolve_extension};
+use super::{lig, resolve_extension, LookupBudget};
 use crate::buffer::Glyph;
 use crate::tables::gdef::Gdef;
 use crate::tables::gsub::{
@@ -156,7 +156,8 @@ pub(super) fn cursor_in_digest(parsed: &[ParsedGsubSubtable<'_>], id: u16) -> bo
 /// `nested` is set when a contextual lookup dispatched this one:
 /// reverse chaining substitutions do not apply then, as in HarfBuzz.
 /// The glyph at `at` is not checked against the lookup's flags here;
-/// the top-level walk does that, a nested dispatch does not.
+/// the top-level walk does that, a nested dispatch does not. Nested
+/// lookups and multiple substitutions spend `budget`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_parsed_lookup_at(
     cx: &GsubCx<'_>,
@@ -168,6 +169,7 @@ pub(super) fn apply_parsed_lookup_at(
     depth: u8,
     alternate_index: u16,
     nested: bool,
+    budget: &mut LookupBudget,
 ) -> Option<usize> {
     if at >= glyphs.len() {
         return None;
@@ -182,7 +184,7 @@ pub(super) fn apply_parsed_lookup_at(
             }),
             ParsedGsubSubtable::Multiple(m) => m
                 .apply(id)
-                .and_then(|seq| expand_glyph_in_place(glyphs, at, &seq))
+                .and_then(|seq| expand_glyph_in_place(glyphs, at, &seq, budget))
                 .map(|n| {
                     run.resync(glyphs);
                     at + n
@@ -211,10 +213,10 @@ pub(super) fn apply_parsed_lookup_at(
                 })
             }
             ParsedGsubSubtable::Context(ctx) => {
-                apply_gsub_context_at(cx, ctx, mcx, glyphs, run, at, depth + 1)
+                apply_gsub_context_at(cx, ctx, mcx, glyphs, run, at, depth + 1, budget)
             }
             ParsedGsubSubtable::ChainContext(chain) => {
-                apply_gsub_chain_context_at(cx, chain, mcx, glyphs, run, at, depth + 1)
+                apply_gsub_chain_context_at(cx, chain, mcx, glyphs, run, at, depth + 1, budget)
             }
             ParsedGsubSubtable::ReverseChained(rc) => {
                 if nested {

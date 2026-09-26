@@ -26,12 +26,13 @@
 //! `(0, 0)` of the output, where row 0 is a synthesized all-zero
 //! row, equivalent to "no advance variation for this gid".
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
-use crate::variation_store::{pull_row, read_regions, rebuild_store, PulledRow};
+use crate::variation_store::{pull_row, read_regions, rebuild_store, rebuilt_store_len, PulledRow};
 use crate::{GlyphId, SubsetError};
 
 /// Subsets HVAR for `kept` (kept gids in new-gid order). Returns
@@ -60,13 +61,27 @@ pub(crate) fn subset_hvar(
         region_indexes: Vec::new(),
         deltas: Vec::new(),
     });
+    // Output slot of every distinct row content seen so far. Identical
+    // source rows are deduped onto the same inner slot to keep the
+    // table small. The first slot is the synthesized all-zero row,
+    // which absorbs source rows that are themselves empty.
+    let mut slot_by_row: BTreeMap<(Vec<u16>, Vec<i32>), u16> = BTreeMap::new();
+    slot_by_row.insert((Vec::new(), Vec::new()), 0);
+    // Output slot already resolved for a source `(outer, inner)`
+    // pair. Many glyphs can share a pair, and pulling the same row
+    // again would repeat the same work.
+    let mut slot_by_pair: BTreeMap<(u16, u16), u16> = BTreeMap::new();
+    // Source row entries the pulls may still read. Distinct pairs in
+    // a well-formed store read disjoint rows, so their total stays
+    // near the store size. Subtable offsets that alias one large
+    // subtable would otherwise let a small table cost quadratic time.
+    let mut pull_budget = store_bytes.len().saturating_mul(4).saturating_add(1 << 16);
     // Map `new_gid -> output_inner_index`. We assign inner indexes in
     // first-appearance (i.e. kept order) so the layout is
-    // deterministic; identical source rows are deduped onto the same
-    // inner slot to keep the table small.
-    let mut new_inner_per_gid: Vec<u16> = alloc::vec![0u16; kept.len()];
+    // deterministic.
+    let mut new_inner_per_gid: Vec<u16> = Vec::with_capacity(kept.len());
 
-    for (new_gid, &old_gid) in kept.iter().enumerate() {
+    for &old_gid in kept {
         let (outer, inner) = if parsed.advance_map_off == 0 {
             (0u16, old_gid)
         } else {
@@ -75,38 +90,51 @@ pub(crate) fn subset_hvar(
                 None => {
                     // No mapping -> falls back to the synthesized
                     // zero row at output inner 0.
-                    new_inner_per_gid[new_gid] = 0;
+                    new_inner_per_gid.push(0);
                     continue;
                 }
             }
         };
-        let row_opt = pull_row(store_bytes, outer, inner)?;
-        match row_opt {
-            None => {
-                new_inner_per_gid[new_gid] = 0;
-            }
+        if let Some(&slot) = slot_by_pair.get(&(outer, inner)) {
+            new_inner_per_gid.push(slot);
+            continue;
+        }
+        let slot = match pull_row(store_bytes, outer, inner)? {
+            None => 0,
             Some(row) => {
-                // Dedupe against earlier rows. A row that equals a
-                // previously-pulled row (same regions, same deltas)
-                // collapses onto that row's slot. The first slot is
-                // the synthesized all-zero row, which absorbs source
-                // rows that are themselves zero.
-                let dedup_idx = pulled_rows.iter().position(|r| rows_equal(r, &row));
-                let slot = match dedup_idx {
-                    Some(i) => i as u16,
+                pull_budget = pull_budget
+                    .checked_sub(row.region_indexes.len() + row.deltas.len())
+                    .ok_or(SubsetError::Unsupported(
+                        "HVAR store rows overlap past the store size",
+                    ))?;
+                let key = (row.region_indexes, row.deltas);
+                match slot_by_row.get(&key) {
+                    Some(&slot) => slot,
                     None => {
                         let idx = pulled_rows.len() as u16;
-                        pulled_rows.push(row);
+                        pulled_rows.push(PulledRow {
+                            region_indexes: key.0.clone(),
+                            deltas: key.1.clone(),
+                        });
+                        slot_by_row.insert(key, idx);
                         idx
                     }
-                };
-                new_inner_per_gid[new_gid] = slot;
+                }
             }
-        }
+        };
+        slot_by_pair.insert((outer, inner), slot);
+        new_inner_per_gid.push(slot);
     }
 
     // Step 2: rebuild the ItemVariationStore from the pulled rows.
+    // Every output row is padded to the union of all rows' regions,
+    // so rows drawn from many small subtables can multiply the size.
+    // Refuse outputs far beyond anything the source could justify.
     let (axis_count, regions) = read_regions(store_bytes)?;
+    let max_store_len = hvar_bytes.len().saturating_mul(256).max(1 << 24);
+    if rebuilt_store_len(&pulled_rows, axis_count) > max_store_len {
+        return Err(SubsetError::Unsupported("HVAR rebuilt store too large"));
+    }
     let rebuilt = rebuild_store(&pulled_rows, axis_count, &regions);
 
     // Step 3: build the new DeltaSetIndexMap mapping
@@ -166,30 +194,20 @@ fn parse_hvar_header(bytes: &[u8]) -> Result<HvarHeader, SubsetError> {
 /// but lives here so the subsetter does not depend on the parser's
 /// return type.
 fn read_index_map(data: &[u8], start: usize, gid: u16) -> Option<(u16, u16)> {
-    if data.len() < start + 4 {
+    let map = data.get(start..)?;
+    // The map header is at least 4 bytes (format 0).
+    if map.len() < 4 {
         return None;
     }
-    let format = data[start];
-    let entry_format = data[start + 1];
-    let mut cursor = start + 2;
-    let map_count = match format {
+    let (&[format, entry_format], rest) = map.split_first_chunk::<2>()?;
+    let (map_count, entries) = match format {
         0 => {
-            let v = u16::from_be_bytes([data[cursor], data[cursor + 1]]) as u32;
-            cursor += 2;
-            v
+            let (count, entries) = rest.split_first_chunk::<2>()?;
+            (u32::from(u16::from_be_bytes(*count)), entries)
         }
         1 => {
-            if data.len() < cursor + 4 {
-                return None;
-            }
-            let v = u32::from_be_bytes([
-                data[cursor],
-                data[cursor + 1],
-                data[cursor + 2],
-                data[cursor + 3],
-            ]);
-            cursor += 4;
-            v
+            let (count, entries) = rest.split_first_chunk::<4>()?;
+            (u32::from_be_bytes(*count), entries)
         }
         _ => return None,
     };
@@ -199,29 +217,19 @@ fn read_index_map(data: &[u8], start: usize, gid: u16) -> Option<(u16, u16)> {
     let entry_bytes = ((entry_format >> 4) & 0x03) as usize + 1;
     let inner_bits = (entry_format & 0x0F) as u32 + 1;
     let inner_mask: u32 = (1u32 << inner_bits) - 1;
-    let idx = if (gid as u32) < map_count {
-        gid as u32
+    let idx = if u32::from(gid) < map_count {
+        u32::from(gid)
     } else {
         map_count.saturating_sub(1)
     } as usize;
-    let entry_off = cursor + idx * entry_bytes;
-    if data.len() < entry_off + entry_bytes {
-        return None;
-    }
-    let mut raw: u32 = 0;
-    for i in 0..entry_bytes {
-        raw = (raw << 8) | u32::from(data[entry_off + i]);
-    }
+    let entry = idx
+        .checked_mul(entry_bytes)
+        .and_then(|entry_off| entries.get(entry_off..))
+        .and_then(|rest| rest.get(..entry_bytes))?;
+    let raw = entry.iter().fold(0u32, |raw, &b| (raw << 8) | u32::from(b));
     let inner = (raw & inner_mask) as u16;
     let outer = (raw >> inner_bits) as u16;
     Some((outer, inner))
-}
-
-fn rows_equal(a: &PulledRow, b: &PulledRow) -> bool {
-    if a.region_indexes != b.region_indexes {
-        return false;
-    }
-    a.deltas == b.deltas
 }
 
 /// Builds a fresh `DeltaSetIndexMap`. Outer is always 0, so each
@@ -357,5 +365,157 @@ mod tests {
         let got = new_hvar.advance_delta(0, &coords);
         let want = face.hvar().unwrap().unwrap().advance_delta(0, &coords);
         assert!((got - want).abs() <= 1.0);
+    }
+
+    /// One `ItemVariationData` subtable: region indexes plus i8 rows.
+    struct TestSubtable {
+        region_indexes: Vec<u16>,
+        rows: Vec<Vec<i8>>,
+    }
+
+    /// Serializes an IVS whose region list has `axis_count` axes and
+    /// `region_count` regions (all zero), plus `subtables`. Each entry
+    /// of `subtable_refs` is the index of the subtable its offset
+    /// points at, so offsets may alias.
+    fn test_store(
+        axis_count: u16,
+        region_count: u16,
+        subtables: &[TestSubtable],
+        subtable_refs: &[usize],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // format
+        let region_list_off = 8 + 4 * subtable_refs.len() as u32;
+        out.extend_from_slice(&region_list_off.to_be_bytes());
+        out.extend_from_slice(&(subtable_refs.len() as u16).to_be_bytes());
+        let offsets_at = out.len();
+        out.resize(out.len() + 4 * subtable_refs.len(), 0);
+        out.extend_from_slice(&axis_count.to_be_bytes());
+        out.extend_from_slice(&region_count.to_be_bytes());
+        out.resize(
+            out.len() + usize::from(axis_count) * usize::from(region_count) * 6,
+            0,
+        );
+        let mut subtable_offs = Vec::new();
+        for sub in subtables {
+            subtable_offs.push(out.len() as u32);
+            out.extend_from_slice(&(sub.rows.len() as u16).to_be_bytes());
+            out.extend_from_slice(&0u16.to_be_bytes()); // all narrow
+            out.extend_from_slice(&(sub.region_indexes.len() as u16).to_be_bytes());
+            for ri in &sub.region_indexes {
+                out.extend_from_slice(&ri.to_be_bytes());
+            }
+            for row in &sub.rows {
+                out.extend(row.iter().map(|&d| d as u8));
+            }
+        }
+        for (i, &sub) in subtable_refs.iter().enumerate() {
+            let at = offsets_at + 4 * i;
+            out[at..at + 4].copy_from_slice(&subtable_offs[sub].to_be_bytes());
+        }
+        out
+    }
+
+    /// Wraps `store` in an HVAR with an optional DeltaSetIndexMap, then
+    /// in an SFNT whose only table is that HVAR.
+    fn font_with_hvar(store: &[u8], advance_map: Option<&[u8]>) -> Vec<u8> {
+        let mut hvar = Vec::new();
+        hvar.extend_from_slice(&1u16.to_be_bytes()); // major
+        hvar.extend_from_slice(&0u16.to_be_bytes()); // minor
+        hvar.extend_from_slice(&20u32.to_be_bytes()); // store
+        let map_off = advance_map.map_or(0, |_| 20 + store.len() as u32);
+        hvar.extend_from_slice(&map_off.to_be_bytes());
+        hvar.extend_from_slice(&0u32.to_be_bytes()); // lsb map
+        hvar.extend_from_slice(&0u32.to_be_bytes()); // rsb map
+        hvar.extend_from_slice(store);
+        if let Some(map) = advance_map {
+            hvar.extend_from_slice(map);
+        }
+        crate::sfnt::build(0x0001_0000, &[(tag::HVAR, hvar)])
+    }
+
+    #[test]
+    fn padding_rows_to_out_of_range_regions_is_bounded() {
+        // A 60000-axis region list with no regions, and one row that
+        // references 2000 region indexes. Padding each referenced
+        // region to 60000 axes used to build a 720 MB store.
+        let store = test_store(
+            60_000,
+            0,
+            &[TestSubtable {
+                region_indexes: (0..2000).collect(),
+                rows: alloc::vec![alloc::vec![1; 2000]],
+            }],
+            &[0],
+        );
+        let font = font_with_hvar(&store, None);
+        let face = Face::parse_bytes(&font, 0).unwrap();
+        let r = subset_hvar(&face, &[0]);
+        assert!(matches!(r, Err(SubsetError::Unsupported(_))), "{r:?}");
+    }
+
+    #[test]
+    fn many_wide_rows_rebuild_in_linear_time() {
+        // 200 distinct rows over the same 5000 regions. Region dedup
+        // and row emission used per-region linear scans, which made
+        // this rebuild take billions of steps.
+        const REGIONS: u16 = 5000;
+        let rows: Vec<Vec<i8>> = (0..200)
+            .map(|i: i32| {
+                (0..i32::from(REGIONS))
+                    .map(|j| ((i * 7 + j) % 251) as i8)
+                    .collect()
+            })
+            .collect();
+        let store = test_store(
+            1,
+            REGIONS,
+            &[TestSubtable {
+                region_indexes: (0..REGIONS).collect(),
+                rows,
+            }],
+            &[0],
+        );
+        let font = font_with_hvar(&store, None);
+        let face = Face::parse_bytes(&font, 0).unwrap();
+        let kept: Vec<u16> = (0..200).collect();
+        let out = subset_hvar(&face, &kept).expect("subset").expect("HVAR");
+        // Header (20) + store header (12) + region list (4 + 6 per
+        // region) + subtable header (6) + 2 bytes per region index +
+        // 201 rows (the zero row plus 200 distinct ones) of 2 bytes per
+        // region, then a 1-byte-entry index map for 200 glyphs.
+        let store_len = 12 + 4 + 6 * 5000 + 6 + 2 * 5000 + 201 * 2 * 5000;
+        assert_eq!(out.len(), 20 + store_len + 4 + 200);
+    }
+
+    #[test]
+    fn aliased_subtables_do_not_multiply_row_pulls() {
+        // 20000 subtable offsets all point at one subtable whose single
+        // row references 20000 regions, and every glyph maps to a
+        // different offset. Each pull re-read the whole row.
+        const N: u16 = 20_000;
+        let store = test_store(
+            1,
+            0,
+            &[TestSubtable {
+                region_indexes: (0..N).collect(),
+                rows: alloc::vec![alloc::vec![1; usize::from(N)]],
+            }],
+            &alloc::vec![0; usize::from(N)],
+        );
+        // DeltaSetIndexMap format 0, 2-byte entries, 1 inner bit:
+        // entry for gid i is (outer i, inner 0).
+        let mut map = Vec::new();
+        map.push(0); // format
+        map.push(0x10); // entryFormat: 2 bytes, 1 inner bit
+        map.extend_from_slice(&N.to_be_bytes());
+        for i in 0..N {
+            map.extend_from_slice(&(i << 1).to_be_bytes());
+        }
+        let font = font_with_hvar(&store, Some(&map));
+        let face = Face::parse_bytes(&font, 0).unwrap();
+        let kept: Vec<u16> = (0..N).collect();
+        let r = subset_hvar(&face, &kept);
+        assert!(matches!(r, Err(SubsetError::Unsupported(_))), "{r:?}");
     }
 }

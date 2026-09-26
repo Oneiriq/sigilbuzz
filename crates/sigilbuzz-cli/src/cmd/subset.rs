@@ -13,7 +13,7 @@ use clap::Args as ClapArgs;
 use sigilbuzz::{Blob, Face};
 use sigilbuzz_subset::{subset, SubsetInput};
 
-use super::util::{parse_gid_spec, parse_unicode_list, read_font, CliResult};
+use super::util::{parse_gid_spec, parse_unicode_list, read_font, status, CliResult};
 
 /// Arguments for `sigilbuzz subset`.
 #[derive(Debug, ClapArgs)]
@@ -86,11 +86,11 @@ pub fn run(args: Args) -> CliResult {
     let out = subset(&face, &input).map_err(|e| format!("subset: {e}"))?;
     std::fs::write(&args.output, &out.bytes)
         .map_err(|e| format!("write {}: {e}", args.output.display()))?;
-    eprintln!(
+    status(format_args!(
         "wrote {} bytes ({} kept glyphs) to {}",
         out.bytes.len(),
         out.gid_map.len(),
         args.output.display()
-    );
+    ));
     Ok(())
 }

@@ -55,54 +55,7 @@ pub(super) fn extract_kept_charset_sids(
             "CFF1 predefined Expert / ExpertSubset charset not yet supported",
         ));
     } else {
-        let off = charset_off as usize;
-        if off >= data.len() {
-            return Err(SubsetError::Unsupported("CFF1 charset offset past end"));
-        }
-        let format = data[off];
-        let n_left = n_glyphs.saturating_sub(1);
-        let mut sids = alloc::vec![0u16; n_left];
-        match format {
-            0 => {
-                let body = &data[off + 1..];
-                if body.len() < n_left * 2 {
-                    return Err(SubsetError::Unsupported("CFF1 charset format 0 truncated"));
-                }
-                for (i, slot) in sids.iter_mut().enumerate() {
-                    *slot = u16::from_be_bytes([body[i * 2], body[i * 2 + 1]]);
-                }
-            }
-            1 | 2 => {
-                let record_size = if format == 1 { 3 } else { 4 };
-                let mut p = off + 1;
-                let mut written = 0usize;
-                while written < n_left {
-                    if p + record_size > data.len() {
-                        return Err(SubsetError::Unsupported(
-                            "CFF1 charset format 1/2 truncated",
-                        ));
-                    }
-                    let first = u16::from_be_bytes([data[p], data[p + 1]]);
-                    let n_l = if format == 1 {
-                        u16::from(data[p + 2])
-                    } else {
-                        u16::from_be_bytes([data[p + 2], data[p + 3]])
-                    };
-                    p += record_size;
-                    let take = (n_l as usize + 1).min(n_left - written);
-                    for k in 0..take {
-                        sids[written + k] = first + k as u16;
-                    }
-                    written += take;
-                }
-            }
-            _ => {
-                return Err(SubsetError::Unsupported(
-                    "CFF1 charset format not 0 / 1 / 2",
-                ));
-            }
-        }
-        sids
+        read_explicit_charset(data, charset_off as usize, n_glyphs.saturating_sub(1))?
     };
 
     // Project per-gid table onto the kept-gid set, skipping gid 0.
@@ -118,11 +71,69 @@ pub(super) fn extract_kept_charset_sids(
     Ok(out)
 }
 
+/// Walks an explicit charset (format 0, 1, or 2) at `data[off..]` and
+/// returns the SIDs of gids `1..=n_left`.
+fn read_explicit_charset(data: &[u8], off: usize, n_left: usize) -> Result<Vec<u16>, SubsetError> {
+    let (&format, body) = data
+        .get(off..)
+        .and_then(<[u8]>::split_first)
+        .ok_or(SubsetError::Unsupported("CFF1 charset offset past end"))?;
+    let mut sids = alloc::vec![0u16; n_left];
+    match format {
+        0 => {
+            let body = n_left
+                .checked_mul(2)
+                .and_then(|len| body.get(..len))
+                .ok_or(SubsetError::Unsupported("CFF1 charset format 0 truncated"))?;
+            for (slot, sid) in sids.iter_mut().zip(body.chunks_exact(2)) {
+                *slot = u16::from_be_bytes([sid[0], sid[1]]);
+            }
+        }
+        1 | 2 => {
+            let record_size = if format == 1 { 3 } else { 4 };
+            let mut records = body;
+            let mut written = 0usize;
+            while written < n_left {
+                let (record, rest) =
+                    records
+                        .split_at_checked(record_size)
+                        .ok_or(SubsetError::Unsupported(
+                            "CFF1 charset format 1/2 truncated",
+                        ))?;
+                records = rest;
+                let (first, n_l) = match *record {
+                    [f0, f1, n] => (u16::from_be_bytes([f0, f1]), usize::from(n)),
+                    [f0, f1, n0, n1] => (
+                        u16::from_be_bytes([f0, f1]),
+                        usize::from(u16::from_be_bytes([n0, n1])),
+                    ),
+                    // `record_size` is 3 or 4, so no other shape occurs.
+                    _ => (0, 0),
+                };
+                let take = (n_l + 1).min(n_left - written);
+                // A range that runs past SID 0xFFFF is malformed. The
+                // SIDs wrap so the walk stays total.
+                for (k, slot) in sids.iter_mut().skip(written).take(take).enumerate() {
+                    *slot = first.wrapping_add(k as u16);
+                }
+                written += take;
+            }
+        }
+        _ => {
+            return Err(SubsetError::Unsupported(
+                "CFF1 charset format not 0 / 1 / 2",
+            ));
+        }
+    }
+    Ok(sids)
+}
+
 /// Reads the kept-gid char codes from the source Encoding. Returns one
 /// code per kept gid except gid 0, matching the charset's shape.
 ///
-/// Predefined encoding offsets `0` (Standard) and `1` (Expert) are
-/// expanded from the spec. Explicit encodings (>= 2) are walked.
+/// Predefined encoding offsets `0` (Standard) and `1` (Expert) are not
+/// expanded: every gid gets code 0. Explicit encodings (>= 2) are
+/// walked.
 pub(super) fn extract_kept_encoding_codes(
     data: &[u8],
     encoding_off: u32,
@@ -143,42 +154,38 @@ pub(super) fn extract_kept_encoding_codes(
         // round-trip test suite covers the explicit-Encoding path.
         // (Implemented as a no-op zero table, later format-auto'd.)
     } else {
-        let off = encoding_off as usize;
-        if off >= data.len() {
+        let Some((&format_byte, body)) = data
+            .get(encoding_off as usize..)
+            .and_then(<[u8]>::split_first)
+        else {
             return Err(SubsetError::Unsupported("CFF1 Encoding offset past end"));
-        }
-        let format = data[off] & 0x7F; // strip supplemental-encodings bit
+        };
+        let format = format_byte & 0x7F; // strip supplemental-encodings bit
         match format {
             0 => {
-                if off + 2 > data.len() {
+                let Some((&n_codes, codes)) = body.split_first() else {
                     return Err(SubsetError::Unsupported("CFF1 Encoding fmt 0 truncated"));
-                }
-                let n_codes = data[off + 1] as usize;
-                if off + 2 + n_codes > data.len() {
-                    return Err(SubsetError::Unsupported("CFF1 Encoding fmt 0 short"));
-                }
-                let limit = n_codes.min(n_left);
-                for i in 0..limit {
-                    per_gid[i] = data[off + 2 + i];
+                };
+                let codes = codes
+                    .get(..usize::from(n_codes))
+                    .ok_or(SubsetError::Unsupported("CFF1 Encoding fmt 0 short"))?;
+                for (slot, &code) in per_gid.iter_mut().zip(codes) {
+                    *slot = code;
                 }
             }
             1 => {
-                if off + 2 > data.len() {
+                let Some((&n_ranges, mut ranges)) = body.split_first() else {
                     return Err(SubsetError::Unsupported("CFF1 Encoding fmt 1 truncated"));
-                }
-                let n_ranges = data[off + 1] as usize;
-                let mut p = off + 2;
+                };
                 let mut written = 0usize;
                 for _ in 0..n_ranges {
-                    if p + 2 > data.len() {
+                    let Some((&[first, n_left_rec], rest)) = ranges.split_first_chunk::<2>() else {
                         return Err(SubsetError::Unsupported("CFF1 Encoding fmt 1 short"));
-                    }
-                    let first = data[p];
-                    let n_left_rec = data[p + 1] as usize;
-                    p += 2;
-                    let take = (n_left_rec + 1).min(n_left.saturating_sub(written));
-                    for k in 0..take {
-                        per_gid[written + k] = first.wrapping_add(k as u8);
+                    };
+                    ranges = rest;
+                    let take = (usize::from(n_left_rec) + 1).min(n_left.saturating_sub(written));
+                    for (k, slot) in per_gid.iter_mut().skip(written).take(take).enumerate() {
+                        *slot = first.wrapping_add(k as u8);
                     }
                     written += take;
                     if written >= n_left {

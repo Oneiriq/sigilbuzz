@@ -21,8 +21,9 @@
 //! byte-for-byte stable. The walk is depth-first, backdrop before
 //! source, and never reorders.
 //!
-//! Robustness: malformed offsets, unknown formats, and reference
-//! cycles all truncate the output. The walker never panics.
+//! Robustness: malformed offsets, unknown formats, reference cycles,
+//! and paint graphs that expand past a fixed work budget all truncate
+//! the output. The walker never panics.
 
 use alloc::vec::Vec;
 

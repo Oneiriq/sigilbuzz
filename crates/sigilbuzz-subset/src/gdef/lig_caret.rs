@@ -47,6 +47,12 @@ pub(super) fn rewrite(
 ) -> Result<Option<Vec<u8>>, SubsetError> {
     let mut entries = Vec::new();
     for (new_gid, lig_glyph) in kept_entries(table, off, map, "GDEF LigCaretList", diag)? {
+        // Many ligatures can share one LigGlyph, so its carets are
+        // charged on every visit.
+        let carets = u16_at(table, lig_glyph, CTX).map_or(0, usize::from);
+        if !map.spend(1 + carets) {
+            return Err(super::out_of_budget(off).into());
+        }
         match rewrite_lig_glyph(table, lig_glyph, plan, diag) {
             Ok(body) => entries.push((new_gid, body)),
             Err(SubsetError::Parse(e)) => diag.error(&e, "one ligature's carets"),

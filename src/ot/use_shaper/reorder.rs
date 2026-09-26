@@ -35,7 +35,10 @@ pub(super) fn initial_reorder(
     let Some(base) = syllable.base_index else {
         return;
     };
-    if syllable.end > glyphs.len() || syllable.end > codepoints.len() {
+    if syllable.end > glyphs.len()
+        || syllable.end > codepoints.len()
+        || !(syllable.start..syllable.end).contains(&base)
+    {
         return;
     }
 
@@ -100,7 +103,7 @@ pub(super) fn initial_reorder(
     // coeng pair travel to the syllable start, the kinzi triple to
     // just after the base.
     let pair = pre_cons_idx.filter(|&pc| pc >= syl_start && pc + 1 < syl_end);
-    let kinzi = kinzi_idx.filter(|&kz| kz + 2 < syl_end);
+    let kinzi = kinzi_idx.filter(|&kz| kz >= syl_start && kz + 2 < syl_end);
     let mut span = to_move.last().map(|&last| syl_start..last + 1);
     if let Some(pc) = pair {
         span = Some(syl_start..span.map_or(pc + 2, |s| s.end.max(pc + 2)));
@@ -112,16 +115,18 @@ pub(super) fn initial_reorder(
         merge_clusters(glyphs, span.start, span.end, level);
     }
     let original: Vec<Glyph> = glyphs[syl_start..syl_end].to_vec();
-    let mut rebuilt: Vec<Glyph> = Vec::with_capacity(syl_end - syl_start);
+    let mut rebuilt: Vec<Glyph> = Vec::with_capacity(original.len());
 
-    // Set of indices whose glyphs are consumed by the earlier
-    // buckets and must not be re-emitted by the fall-through.
-    let mut consumed: Vec<usize> = Vec::new();
+    // Syllable-relative flags for glyphs consumed by the earlier
+    // buckets, which the fall-through must not re-emit. A flag array
+    // keeps the pass linear in the syllable length even when a
+    // syllable carries thousands of pre-base signs.
+    let mut consumed = alloc::vec![false; original.len()];
 
     // 1. Pre-base matras, in logical order.
     for &idx in &to_move {
         rebuilt.push(original[idx - syl_start]);
-        consumed.push(idx);
+        consumed[idx - syl_start] = true;
     }
     // 2. Pre-base consonant pair (coeng + ra). Both glyphs move to
     //    the start of the syllable so the `pref` GSUB feature sees
@@ -129,42 +134,38 @@ pub(super) fn initial_reorder(
     //    already sits before the base.
     if let Some(pc) = pre_cons_idx {
         if pc >= syl_start && pc + 1 < syl_end {
-            rebuilt.push(original[pc - syl_start]);
-            rebuilt.push(original[pc + 1 - syl_start]);
-            consumed.push(pc);
-            consumed.push(pc + 1);
+            for rel in [pc - syl_start, pc + 1 - syl_start] {
+                rebuilt.push(original[rel]);
+                consumed[rel] = true;
+            }
         }
     }
     // 3. Mark the kinzi triple as consumed so the fall-through
     //    doesn't re-emit them at the syllable head; we inject them
     //    right after the base consonant below.
-    if let Some(kz) = kinzi_idx {
-        if kz + 2 < syl_end {
-            consumed.push(kz);
-            consumed.push(kz + 1);
-            consumed.push(kz + 2);
-        }
+    if let Some(kz) = kinzi {
+        consumed[kz - syl_start..=kz + 2 - syl_start].fill(true);
     }
     // 4. Everything else, in original order, with the kinzi triple
     //    injected immediately after the base consonant.
-    for idx in syl_start..syl_end {
-        if consumed.contains(&idx) {
+    for (rel, &glyph) in original.iter().enumerate() {
+        if consumed[rel] {
             continue;
         }
-        rebuilt.push(original[idx - syl_start]);
-        if idx == base {
-            if let Some(kz) = kinzi_idx {
-                if kz + 2 < syl_end {
-                    rebuilt.push(original[kz - syl_start]);
-                    rebuilt.push(original[kz + 1 - syl_start]);
-                    rebuilt.push(original[kz + 2 - syl_start]);
-                }
+        rebuilt.push(glyph);
+        if syl_start + rel == base {
+            if let Some(kz) = kinzi {
+                rebuilt.extend_from_slice(&original[kz - syl_start..=kz + 2 - syl_start]);
             }
         }
     }
 
-    debug_assert_eq!(rebuilt.len(), syl_end - syl_start);
-    glyphs[syl_start..syl_end].copy_from_slice(&rebuilt);
+    // Every glyph of the syllable is emitted exactly once for the
+    // syllables the segmenter builds. If a future category table ever
+    // breaks that, keep the syllable as it was instead of panicking.
+    if rebuilt.len() == original.len() {
+        glyphs[syl_start..syl_end].copy_from_slice(&rebuilt);
+    }
 }
 
 /// Reorder category tag: a halant (`H`).
@@ -251,21 +252,77 @@ pub(super) fn record_pref(before: &[u32], glyphs: &mut [Glyph]) {
 /// or to just after the last halant before it that did not ligate,
 /// merging the clusters it passes at the monotone `level`s. Only the
 /// first glyph of a multiple substitution moves. Clears the tags.
+///
+/// HarfBuzz moves each glyph on its own, which costs time quadratic in
+/// the number of pre-base glyphs one insertion point collects. Here the
+/// moves to one insertion point are collected and applied together
+/// (see [`move_to_insertion_point`]), so the pass stays linear.
 pub(super) fn reorder_pre_base(glyphs: &mut [Glyph], level: ClusterLevel) {
+    let mut moves: Vec<usize> = Vec::new();
+    let mut scratch: Vec<Glyph> = Vec::new();
     for range in syllable_ranges(glyphs) {
         let mut j = range.start;
+        moves.clear();
         for i in range {
+            // Moves only ever touch glyphs before `i`, so these are the
+            // glyph's own tags whether or not earlier moves ran yet.
             let m = MatchGlyph::from(&glyphs[i]);
             let category = glyphs[i].indic_position & TAG_CATEGORY;
             if category == TAG_HALANT && !m.is_ligated() {
+                move_to_insertion_point(glyphs, j, &moves, level, &mut scratch);
+                moves.clear();
                 j = i + 1;
             } else if category == TAG_PRE_BASE && m.lig_comp() == 0 && j < i {
-                merge_clusters(glyphs, j, i + 1, level);
-                glyphs[j..=i].rotate_right(1);
+                moves.push(i);
             }
         }
+        move_to_insertion_point(glyphs, j, &moves, level, &mut scratch);
     }
     for g in glyphs {
         g.indic_position = IndicPosition::Start as u8;
+    }
+}
+
+/// Applies the moves one insertion point `j` collected, in one pass:
+/// each glyph at `moves` (ascending, all after `j`) moves to `j` in
+/// turn, so the last one ends up first, and the glyphs they pass shift
+/// right. That is the order moving them one at a time leaves.
+///
+/// One at a time, each move also merges the clusters from `j` through
+/// the moved glyph. The ranges all start at `j` and grow, and the
+/// glyphs of a merged range share one cluster, so the moves inside
+/// it do not change any cluster. On a run whose clusters rise or fall
+/// monotonically, as they do at the monotone levels, merging the
+/// widest range once leaves the same clusters as merging each range
+/// in turn.
+fn move_to_insertion_point(
+    glyphs: &mut [Glyph],
+    j: usize,
+    moves: &[usize],
+    level: ClusterLevel,
+    scratch: &mut Vec<Glyph>,
+) {
+    let (Some(&first), Some(&last)) = (moves.first(), moves.last()) else {
+        return;
+    };
+    let ascending = moves.windows(2).all(|w| w[0] < w[1]);
+    if !ascending || first <= j || last >= glyphs.len() {
+        return;
+    }
+    merge_clusters(glyphs, j, last + 1, level);
+    let span = &mut glyphs[j..=last];
+    scratch.clear();
+    scratch.extend(moves.iter().rev().map(|&i| span[i - j]));
+    let mut next_move = moves.iter().peekable();
+    for (k, &g) in span.iter().enumerate() {
+        if next_move.peek() == Some(&&(j + k)) {
+            next_move.next();
+        } else {
+            scratch.push(g);
+        }
+    }
+    // Ascending moves inside the span make the lengths match.
+    if scratch.len() == span.len() {
+        span.copy_from_slice(scratch);
     }
 }

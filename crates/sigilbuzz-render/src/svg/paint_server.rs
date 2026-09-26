@@ -7,7 +7,7 @@ use sigilbuzz_paint::{Color as PaintColor, ColorStop, Extend};
 
 use crate::affine::Affine;
 
-use super::document::{Defs, ElemCtx};
+use super::document::{node_cost, Defs, ElemCtx};
 use super::model::{GradKind, GradientPaint, Paint};
 use super::style::{color_value, parse_length, parse_opacity, parse_transform};
 use super::xml::{name_eq, Node};
@@ -50,6 +50,16 @@ fn resolve_gradient(defs: &Defs<'_>, id: &str, ctx: &ElemCtx) -> Option<Gradient
     if !is_linear && !is_radial {
         return None;
     }
+    // Every fill that references the gradient parses its stops again.
+    let stops_cost = |n: &Node| {
+        n.children
+            .iter()
+            .map(node_cost)
+            .fold(node_cost(n), usize::saturating_add)
+    };
+    if !defs.charge_work(stops_cost(node)) {
+        return None;
+    }
     // Stops can come from this node or, via xlink:href, an ancestor
     // gradient. A single hop of resolution is enough for every real
     // SVG-in-OT we've seen.
@@ -68,6 +78,9 @@ fn resolve_gradient(defs: &Defs<'_>, id: &str, ctx: &ElemCtx) -> Option<Gradient
             .and_then(|s| s.strip_prefix('#'))
         {
             if let Some(parent) = defs.lookup(href) {
+                if !defs.charge_work(stops_cost(parent)) {
+                    return None;
+                }
                 for c in &parent.children {
                     if name_eq(&c.name, "stop") {
                         if let Some(s) = parse_stop(c, ctx.current_color) {
@@ -121,29 +134,30 @@ fn resolve_gradient(defs: &Defs<'_>, id: &str, ctx: &ElemCtx) -> Option<Gradient
 /// `current` is the `currentColor` of the element the gradient paints.
 fn parse_stop(node: &Node, current: [u8; 4]) -> Option<ColorStop> {
     let offset = node.attr("offset").map(parse_stop_offset).unwrap_or(0.0);
-    // stop-color is the canonical attribute; some authoring tools fold
-    // it into a CSS-ish style="stop-color:#rgb;stop-opacity:0.5". Be
-    // tolerant.
+    // stop-color and stop-opacity are presentation attributes. Some
+    // authoring tools fold them into a CSS-ish
+    // style="stop-color:#rgb;stop-opacity:0.5" instead. A style
+    // declaration wins over the attribute, as in CSS. Chunks without
+    // a colon, such as the empty one after a trailing semicolon, are
+    // skipped.
     let mut color = node
         .attr("stop-color")
         .and_then(|v| color_value(v, current))
         .unwrap_or([0, 0, 0, 255]);
-    let stop_opacity = node
+    let mut stop_opacity = node
         .attr("stop-opacity")
         .and_then(parse_opacity)
         .unwrap_or(1.0);
     if let Some(style) = node.attr("style") {
-        for chunk in style.split(';') {
-            let mut parts = chunk.splitn(2, ':');
-            let key = parts.next()?.trim();
-            let val = parts.next()?.trim();
+        for (key, val) in style.split(';').filter_map(|chunk| chunk.split_once(':')) {
+            let (key, val) = (key.trim(), val.trim());
             if key.eq_ignore_ascii_case("stop-color") {
                 if let Some(c) = color_value(val, current) {
                     color = c;
                 }
             } else if key.eq_ignore_ascii_case("stop-opacity") {
-                if let Some(_o) = parse_opacity(val) {
-                    // applied below
+                if let Some(o) = parse_opacity(val) {
+                    stop_opacity = o;
                 }
             }
         }

@@ -5,12 +5,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::huffman::{extend, BitReader, ZIGZAG};
-use super::idct::idct;
-use super::Decoder;
+use super::idct::{idct_cos_table, idct_with_table};
+use super::{table_slot, Decoder};
 use crate::error::RenderError;
 use crate::pixmap::ColorPixmap;
 
-impl Decoder<'_> {
+impl<'a> Decoder<'a> {
     // -----------------------------------------------------------------
     // Progressive (SOF2) entropy decode.
     //
@@ -25,10 +25,10 @@ impl Decoder<'_> {
 
     pub(super) fn read_sos_progressive(&mut self) -> Result<(), RenderError> {
         let body = self.read_segment()?;
-        if body.is_empty() {
+        let Some(&n_scan) = body.first() else {
             return Err(RenderError::BadJpeg("empty SOS"));
-        }
-        let n_scan = body[0] as usize;
+        };
+        let n_scan = usize::from(n_scan);
         if n_scan == 0 || n_scan > self.components.len() {
             return Err(RenderError::BadJpeg("SOS component count out of range"));
         }
@@ -53,11 +53,11 @@ impl Decoder<'_> {
             self.components[comp_idx].ac_huff = ac;
             scan_indices.push(comp_idx);
         }
-        let tail = &body[1 + 2 * n_scan..];
-        let ss = tail[0];
-        let se = tail[1];
-        let ah = tail[2] >> 4;
-        let al = tail[2] & 0x0F;
+        let Some(&[ss, se, ah_al, ..]) = body.get(1 + 2 * n_scan..) else {
+            return Err(RenderError::BadJpeg("truncated SOS"));
+        };
+        let ah = ah_al >> 4;
+        let al = ah_al & 0x0F;
 
         // Validate band parameters per T.81 §F.2.2.1.
         if ss > 63 || se > 63 {
@@ -85,12 +85,11 @@ impl Decoder<'_> {
             return Err(RenderError::BadJpeg("progressive Ah/Al out of range"));
         }
 
-        // AC successive-approximation refinement is thorny
-        // (bit-plane walking over the existing nonzero coefficients),
-        // and the deferred-scope note in the module-level docs makes
-        // this an explicit non-goal for the PR. Surface it before any
-        // table validation so callers see a stable error message
-        // regardless of the upstream stream's table layout.
+        // AC successive-approximation refinement (bit-plane walking
+        // over the existing nonzero coefficients) is not implemented.
+        // Surface it before any table validation so callers see a
+        // stable error message regardless of the upstream stream's
+        // table layout.
         if !is_dc && ah != 0 {
             return Err(RenderError::BadJpeg(
                 "progressive AC refinement scans not supported",
@@ -100,10 +99,10 @@ impl Decoder<'_> {
         // Validate Huffman tables for the scan participants.
         for &ci in &scan_indices {
             let comp = &self.components[ci];
-            if is_dc && self.dc_huff[comp.dc_huff as usize].is_none() {
+            if is_dc && table_slot(&self.dc_huff, comp.dc_huff).is_none() {
                 return Err(RenderError::BadJpeg("missing DC Huffman table"));
             }
-            if !is_dc && self.ac_huff[comp.ac_huff as usize].is_none() {
+            if !is_dc && table_slot(&self.ac_huff, comp.ac_huff).is_none() {
                 return Err(RenderError::BadJpeg("missing AC Huffman table"));
             }
         }
@@ -113,16 +112,16 @@ impl Decoder<'_> {
         // cursor past the entropy bytes it consumed (up to but not
         // including the next marker).
         let consumed = {
-            let entropy = &self.src[self.cursor..];
-            let mut br = BitReader::new(entropy);
+            let src: &'a [u8] = self.src;
+            let mut br = BitReader::new(src.get(self.cursor..).unwrap_or_default());
             if is_dc {
                 if ah == 0 {
                     self.scan_dc_first(&mut br, &scan_indices, al)?;
                 } else {
                     self.scan_dc_refine(&mut br, &scan_indices, al)?;
                 }
-            } else {
-                self.scan_ac_first(&mut br, scan_indices[0], ss, se, al)?;
+            } else if let &[ci] = scan_indices.as_slice() {
+                self.scan_ac_first(&mut br, ci, ss, se, al)?;
             }
             br.pos
         };
@@ -139,27 +138,13 @@ impl Decoder<'_> {
         scan_indices: &[usize],
         al: u8,
     ) -> Result<(), RenderError> {
-        let max_h = self
-            .components
-            .iter()
-            .map(|c| c.h_sampling)
-            .max()
-            .unwrap_or(1);
-        let max_v = self
-            .components
-            .iter()
-            .map(|c| c.v_sampling)
-            .max()
-            .unwrap_or(1);
-        let mcus_x = self.width.div_ceil(u32::from(max_h) * 8);
-        let mcus_y = self.height.div_ceil(u32::from(max_v) * 8);
+        let (mcus_x, mcus_y) = self.mcu_grid();
         let mut prev_dc = vec![0i32; self.components.len()];
 
         // Single-component scans iterate the component's own block
         // grid; multi-component scans walk in MCU order.
-        if scan_indices.len() == 1 {
-            let ci = scan_indices[0];
-            let (bw, bh) = self.blocks_per_comp[ci];
+        if let &[ci] = scan_indices {
+            let (bw, bh) = self.blocks_per_comp.get(ci).copied().unwrap_or((0, 0));
             for by in 0..bh {
                 for bx in 0..bw {
                     self.decode_dc_first_block(br, ci, bx, by, &mut prev_dc[ci], al)?;
@@ -203,9 +188,8 @@ impl Decoder<'_> {
         al: u8,
     ) -> Result<(), RenderError> {
         let comp = self.components[ci];
-        let dc_tbl = self.dc_huff[comp.dc_huff as usize]
-            .as_ref()
-            .expect("validated");
+        let dc_tbl = table_slot(&self.dc_huff, comp.dc_huff)
+            .ok_or(RenderError::BadJpeg("missing DC Huffman table"))?;
         let t = br.decode_huff(dc_tbl)?;
         if t > 15 {
             return Err(RenderError::BadJpeg("invalid DC magnitude"));
@@ -213,13 +197,22 @@ impl Decoder<'_> {
         let raw = br.read_bits(t);
         let diff = extend(raw, t);
         *prev_dc = prev_dc.wrapping_add(diff);
-        let (bw, _bh) = self.blocks_per_comp[ci];
-        let block_idx = (by * bw + bx) as usize;
-        let coeff_off = block_idx * 64;
         // Point-transform: shift left by `al`. The value can fit in
         // i16 because JPEG DC differences are bounded by ±2^11.
-        self.coeffs[ci][coeff_off] = ((*prev_dc) << al) as i16;
+        if let Some(slot) = self.dc_slot(ci, bx, by) {
+            *slot = ((*prev_dc) << al) as i16;
+        }
         Ok(())
+    }
+
+    /// Mutable DC coefficient of block `(bx, by)` in component `ci`,
+    /// or `None` when the block lies outside the component's grid.
+    fn dc_slot(&mut self, ci: usize, bx: u32, by: u32) -> Option<&mut i16> {
+        let &(bw, _bh) = self.blocks_per_comp.get(ci)?;
+        let block_idx = (by as usize)
+            .checked_mul(bw as usize)?
+            .checked_add(bx as usize)?;
+        self.coeffs.get_mut(ci)?.get_mut(block_idx.checked_mul(64)?)
     }
 
     /// Refinement DC scan (Ah > 0). Reads one bit per block and ORs
@@ -230,24 +223,10 @@ impl Decoder<'_> {
         scan_indices: &[usize],
         al: u8,
     ) -> Result<(), RenderError> {
-        let max_h = self
-            .components
-            .iter()
-            .map(|c| c.h_sampling)
-            .max()
-            .unwrap_or(1);
-        let max_v = self
-            .components
-            .iter()
-            .map(|c| c.v_sampling)
-            .max()
-            .unwrap_or(1);
-        let mcus_x = self.width.div_ceil(u32::from(max_h) * 8);
-        let mcus_y = self.height.div_ceil(u32::from(max_v) * 8);
+        let (mcus_x, mcus_y) = self.mcu_grid();
 
-        if scan_indices.len() == 1 {
-            let ci = scan_indices[0];
-            let (bw, bh) = self.blocks_per_comp[ci];
+        if let &[ci] = scan_indices {
+            let (bw, bh) = self.blocks_per_comp.get(ci).copied().unwrap_or((0, 0));
             for by in 0..bh {
                 for bx in 0..bw {
                     self.refine_dc_block(br, ci, bx, by, al);
@@ -277,9 +256,9 @@ impl Decoder<'_> {
     fn refine_dc_block(&mut self, br: &mut BitReader<'_>, ci: usize, bx: u32, by: u32, al: u8) {
         let bit = br.read_bits(1);
         if bit != 0 {
-            let (bw, _bh) = self.blocks_per_comp[ci];
-            let coeff_off = ((by * bw + bx) as usize) * 64;
-            self.coeffs[ci][coeff_off] |= 1i16 << al;
+            if let Some(slot) = self.dc_slot(ci, bx, by) {
+                *slot |= 1i16 << al;
+            }
         }
     }
 
@@ -295,11 +274,13 @@ impl Decoder<'_> {
         al: u8,
     ) -> Result<(), RenderError> {
         let comp = self.components[ci];
-        let (bw, bh) = self.blocks_per_comp[ci];
+        let (bw, bh) = self.blocks_per_comp.get(ci).copied().unwrap_or((0, 0));
+        let ac_tbl = table_slot(&self.ac_huff, comp.ac_huff)
+            .ok_or(RenderError::BadJpeg("missing AC Huffman table"))?;
+        let Some(coeffs) = self.coeffs.get_mut(ci) else {
+            return Ok(());
+        };
         let mut eob_run: u32 = 0;
-        // Avoid borrowing &self.ac_huff across &mut self.coeffs.
-        // Decode in a tight loop with the Huffman table reference held
-        // for just the inner block.
         for by in 0..bh {
             for bx in 0..bw {
                 let block_idx = (by * bw + bx) as usize;
@@ -308,9 +289,6 @@ impl Decoder<'_> {
                     eob_run -= 1;
                     continue;
                 }
-                let ac_tbl = self.ac_huff[comp.ac_huff as usize]
-                    .as_ref()
-                    .expect("validated");
                 let mut k = ss;
                 while k <= se {
                     let rs = br.decode_huff(ac_tbl)?;
@@ -336,7 +314,9 @@ impl Decoder<'_> {
                     let raw = br.read_bits(size);
                     let val = extend(raw, size);
                     let nat = ZIGZAG[k as usize];
-                    self.coeffs[ci][coeff_off + nat] = (val << al) as i16;
+                    if let Some(slot) = coeffs.get_mut(coeff_off + nat) {
+                        *slot = (val << al) as i16;
+                    }
                     k = k.saturating_add(1);
                 }
             }
@@ -347,11 +327,12 @@ impl Decoder<'_> {
     /// Run IDCT over each component's accumulated coefficient buffer
     /// and compose into the final RGBA pixmap.
     pub(super) fn finalize_progressive(&mut self) -> Result<ColorPixmap, RenderError> {
-        // Validate quantization tables for every component.
+        // Resolve quantization tables for every component.
+        let mut qts: Vec<&[i32; 64]> = Vec::with_capacity(self.components.len());
         for comp in &self.components {
-            if self.qt[comp.qt_dest as usize].is_none() {
-                return Err(RenderError::BadJpeg("missing quantization table"));
-            }
+            let qt = table_slot(&self.qt, comp.qt_dest)
+                .ok_or(RenderError::BadJpeg("missing quantization table"))?;
+            qts.push(qt);
         }
         let max_h = self
             .components
@@ -365,10 +346,8 @@ impl Decoder<'_> {
             .map(|c| c.v_sampling)
             .max()
             .unwrap_or(1);
-        let mcu_w_px = u32::from(max_h) * 8;
-        let mcu_h_px = u32::from(max_v) * 8;
-        let mcus_x = self.width.div_ceil(mcu_w_px);
-        let mcus_y = self.height.div_ceil(mcu_h_px);
+        let (mcus_x, mcus_y) = self.mcu_grid();
+        let cos = idct_cos_table();
 
         let mut planes: Vec<Vec<u8>> = self
             .components
@@ -385,39 +364,38 @@ impl Decoder<'_> {
             .map(|c| (mcus_x * 8 * u32::from(c.h_sampling)) as usize)
             .collect();
 
-        for (ci, comp) in self.components.iter().enumerate() {
-            let (bw, bh) = self.blocks_per_comp[ci];
-            let qt = self.qt[comp.qt_dest as usize].as_ref().expect("validated");
-            let stride = plane_strides[ci];
-            for by in 0..bh {
-                for bx in 0..bw {
-                    let coeff_off = ((by * bw + bx) as usize) * 64;
-                    // Dequantize + de-zig-zag into a natural-order
-                    // buffer the IDCT consumes. The accumulator is in
-                    // zig-zag order with the DC at index 0.
-                    let mut natural = [0i32; 64];
-                    natural[0] = i32::from(self.coeffs[ci][coeff_off]) * qt[0];
-                    for k in 1..64 {
-                        let v = i32::from(self.coeffs[ci][coeff_off + k]);
-                        let nat = ZIGZAG[k];
-                        natural[nat] = v * qt[k];
-                    }
-                    let mut samples = [0u8; 64];
-                    idct(&natural, &mut samples);
-                    let block_x = (bx * 8) as usize;
-                    let block_y = (by * 8) as usize;
-                    for j in 0..8 {
-                        for i in 0..8 {
-                            let dst_idx = (block_y + j) * stride + (block_x + i);
-                            if dst_idx < planes[ci].len() {
-                                planes[ci][dst_idx] = samples[j * 8 + i];
-                            }
+        for (ci, (qt, plane)) in qts.iter().zip(planes.iter_mut()).enumerate() {
+            let (bw, bh) = self.blocks_per_comp.get(ci).copied().unwrap_or((0, 0));
+            let (Some(coeffs), Some(&stride)) = (self.coeffs.get(ci), plane_strides.get(ci)) else {
+                continue;
+            };
+            // One 64-coefficient zig-zag block per grid cell. The buffer
+            // was sized from the same grid, so this visits every block.
+            for (block_idx, block) in coeffs.chunks_exact(64).enumerate().take((bw * bh) as usize) {
+                let bx = block_idx as u32 % bw;
+                let by = block_idx as u32 / bw;
+                // Dequantize + de-zig-zag into a natural-order
+                // buffer the IDCT consumes. The accumulator is in
+                // zig-zag order with the DC at index 0.
+                let mut natural = [0i32; 64];
+                for (k, (&v, &q)) in block.iter().zip(qt.iter()).enumerate() {
+                    natural[ZIGZAG[k]] = i32::from(v) * q;
+                }
+                let mut samples = [0u8; 64];
+                idct_with_table(&natural, &mut samples, &cos);
+                let block_x = (bx * 8) as usize;
+                let block_y = (by * 8) as usize;
+                for j in 0..8 {
+                    for i in 0..8 {
+                        let dst_idx = (block_y + j) * stride + (block_x + i);
+                        if let Some(px) = plane.get_mut(dst_idx) {
+                            *px = samples[j * 8 + i];
                         }
                     }
                 }
             }
         }
 
-        Ok(self.compose_planes(&planes, &plane_strides, max_h, max_v))
+        self.compose_planes(&planes, &plane_strides, max_h, max_v)
     }
 }

@@ -20,7 +20,6 @@ use super::AxisPin;
 /// Returns `None` when every axis pins (the all-pin case is the
 /// existing full-instancing behavior and the caller drops fvar
 /// outright when `drop_var_tables` is true).
-#[allow(dead_code)] // wired in by the partial-instancing integration commit
 pub(super) fn bake_fvar_partial(fvar_bytes: &[u8], pins: &[AxisPin]) -> Option<Vec<u8>> {
     if pins.iter().all(|p| matches!(p, AxisPin::Pin)) {
         return None;
@@ -151,7 +150,6 @@ pub(super) fn bake_fvar_partial(fvar_bytes: &[u8], pins: &[AxisPin]) -> Option<V
 
 /// Re-emits an `avar` table with every Pin-axis segment map dropped.
 /// Returns `None` when every axis pins.
-#[allow(dead_code)] // wired in by the partial-instancing integration commit
 pub(super) fn bake_avar_partial(avar_bytes: &[u8], pins: &[AxisPin]) -> Option<Vec<u8>> {
     if pins.iter().all(|p| matches!(p, AxisPin::Pin)) {
         return None;

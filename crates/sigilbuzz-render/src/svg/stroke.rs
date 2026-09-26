@@ -5,9 +5,9 @@ use alloc::vec::Vec;
 
 use sigilbuzz::tables::PathOp;
 
-use super::dash::dash_polyline;
+use super::dash::dash_polyline_limited;
 use super::document::{LineCap, LineJoin};
-use super::MITER_LIMIT;
+use super::{MAX_DASH_SPLITS, MAX_POLYLINE_POINTS, MAX_STROKE_OPS, MITER_LIMIT};
 
 // =========================================================================
 // Stroke geometry: walk polyline -> emit closed quad ribbons with caps
@@ -24,6 +24,10 @@ use super::MITER_LIMIT;
 /// segment direction. Joins between segments are filled with
 /// miter / round / bevel geometry, and the open ends carry the
 /// configured cap shape.
+///
+/// Also returns the work spent, in polyline points, dash boundaries,
+/// and emitted operations, so the caller can charge it to the
+/// document budget.
 pub(super) fn stroke_to_fill(
     ops: &[PathOp],
     stroke_width: f32,
@@ -31,17 +35,22 @@ pub(super) fn stroke_to_fill(
     join: LineJoin,
     dasharray: &[f32],
     dashoffset: f32,
-) -> Vec<PathOp> {
+) -> (Vec<PathOp>, usize) {
     if stroke_width <= 0.0 {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let polylines = flatten_to_polylines(ops);
     let half = stroke_width * 0.5;
     let mut out: Vec<PathOp> = Vec::new();
+    let mut splits_left = MAX_DASH_SPLITS;
+    let points: usize = polylines.iter().map(|p| p.points.len()).sum();
 
     let dashed = !dasharray.is_empty() && dasharray.iter().any(|&v| v > 0.0);
 
     for poly in &polylines {
+        if out.len() >= MAX_STROKE_OPS {
+            break;
+        }
         if poly.points.len() < 2 {
             continue;
         }
@@ -50,14 +59,18 @@ pub(super) fn stroke_to_fill(
             // chord-flattened polyline cumulative length, which is
             // always slightly short of the curve), emit only the "draw"
             // phase segments as fresh open polylines.
-            let segs = dash_polyline(
+            let segs = dash_polyline_limited(
                 &poly.points,
                 &poly.arc_lengths,
                 poly.closed,
                 dasharray,
                 dashoffset,
+                &mut splits_left,
             );
             for seg in segs {
+                if out.len() >= MAX_STROKE_OPS {
+                    break;
+                }
                 if seg.len() >= 2 {
                     emit_stroked_polyline(&mut out, &seg, false, half, cap, join);
                 }
@@ -66,7 +79,10 @@ pub(super) fn stroke_to_fill(
             emit_stroked_polyline(&mut out, &poly.points, poly.closed, half, cap, join);
         }
     }
-    out
+    let work = points
+        .saturating_add(MAX_DASH_SPLITS - splits_left)
+        .saturating_add(out.len());
+    (out, work)
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +120,8 @@ pub(super) fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
     let mut cx = 0.0_f32;
     let mut cy = 0.0_f32;
     let mut open = false;
+    // Curve subdivision stops once this many points exist in total.
+    let mut budget = MAX_POLYLINE_POINTS;
 
     let push_line = |cur: &mut Vec<(f32, f32)>, arcs: &mut Vec<f32>, x: f32, y: f32| {
         let dup = cur
@@ -161,7 +179,19 @@ pub(super) fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
                 x,
                 y,
             } => {
-                flatten_quad_polyline(&mut cur, &mut cur_arc, cx, cy, ccx, ccy, x, y, 0.25, 0);
+                flatten_quad_polyline(
+                    &mut cur,
+                    &mut cur_arc,
+                    cx,
+                    cy,
+                    ccx,
+                    ccy,
+                    x,
+                    y,
+                    0.25,
+                    &mut budget,
+                    0,
+                );
                 cx = x;
                 cy = y;
             }
@@ -185,6 +215,7 @@ pub(super) fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
                     x,
                     y,
                     0.25,
+                    &mut budget,
                     0,
                 );
                 cx = x;
@@ -226,6 +257,7 @@ fn flatten_quad_polyline(
     x2: f32,
     y2: f32,
     tol: f32,
+    budget: &mut usize,
     depth: u32,
 ) {
     let dx = x2 - x0;
@@ -239,7 +271,10 @@ fn flatten_quad_polyline(
         let ey = y1 - y0;
         ex * ex + ey * ey
     };
-    if depth >= 16 || dist_sq <= 4.0 * tol * tol {
+    if stop_polyline_subdivision(depth, *budget, &[x0, y0, x1, y1, x2, y2])
+        || dist_sq <= 4.0 * tol * tol
+    {
+        *budget = budget.saturating_sub(1);
         if out
             .last()
             .map(|p| (p.0 - x2).abs() > 1e-6 || (p.1 - y2).abs() > 1e-6)
@@ -260,8 +295,39 @@ fn flatten_quad_polyline(
     let m01 = (0.5 * (x0 + x1), 0.5 * (y0 + y1));
     let m12 = (0.5 * (x1 + x2), 0.5 * (y1 + y2));
     let m = (0.5 * (m01.0 + m12.0), 0.5 * (m01.1 + m12.1));
-    flatten_quad_polyline(out, arcs, x0, y0, m01.0, m01.1, m.0, m.1, tol, depth + 1);
-    flatten_quad_polyline(out, arcs, m.0, m.1, m12.0, m12.1, x2, y2, tol, depth + 1);
+    flatten_quad_polyline(
+        out,
+        arcs,
+        x0,
+        y0,
+        m01.0,
+        m01.1,
+        m.0,
+        m.1,
+        tol,
+        budget,
+        depth + 1,
+    );
+    flatten_quad_polyline(
+        out,
+        arcs,
+        m.0,
+        m.1,
+        m12.0,
+        m12.1,
+        x2,
+        y2,
+        tol,
+        budget,
+        depth + 1,
+    );
+}
+
+/// True when polyline subdivision must stop: the depth cap or the
+/// point budget is reached, or a control point is NaN or infinite
+/// (splitting those only yields more non-finite points).
+fn stop_polyline_subdivision(depth: u32, budget: usize, points: &[f32]) -> bool {
+    depth >= 16 || budget == 0 || !points.iter().all(|v| v.is_finite())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -277,6 +343,7 @@ fn flatten_cubic_polyline(
     x3: f32,
     y3: f32,
     tol: f32,
+    budget: &mut usize,
     depth: u32,
 ) {
     let dx = x3 - x0;
@@ -293,7 +360,10 @@ fn flatten_cubic_polyline(
         let e2y = y2 - y0;
         (e1x * e1x + e1y * e1y, e2x * e2x + e2y * e2y)
     };
-    if depth >= 16 || (d1 <= tol * tol && d2 <= tol * tol) {
+    if stop_polyline_subdivision(depth, *budget, &[x0, y0, x1, y1, x2, y2, x3, y3])
+        || (d1 <= tol * tol && d2 <= tol * tol)
+    {
+        *budget = budget.saturating_sub(1);
         if out
             .last()
             .map(|p| (p.0 - x3).abs() > 1e-6 || (p.1 - y3).abs() > 1e-6)
@@ -329,6 +399,7 @@ fn flatten_cubic_polyline(
         m.0,
         m.1,
         tol,
+        budget,
         depth + 1,
     );
     flatten_cubic_polyline(
@@ -343,6 +414,7 @@ fn flatten_cubic_polyline(
         x3,
         y3,
         tol,
+        budget,
         depth + 1,
     );
 }
@@ -354,8 +426,10 @@ fn flatten_cubic_polyline(
 /// geometry. The result is visually identical to "miter" for typical
 /// stroke widths and avoids the corner-case math.
 ///
-/// Round / square caps emit half-circles / extended rectangles at the
-/// open ends (best-effort follow-up, for now butt is the default).
+/// Round / square caps emit octagon disks / extended rectangles at the
+/// open ends. Butt is the default.
+///
+/// Stops early once `out` holds [`MAX_STROKE_OPS`] operations.
 fn emit_stroked_polyline(
     out: &mut Vec<PathOp>,
     points: &[(f32, f32)],
@@ -371,6 +445,9 @@ fn emit_stroked_polyline(
     let segs = if closed { n } else { n - 1 };
 
     for i in 0..segs {
+        if out.len() >= MAX_STROKE_OPS {
+            return;
+        }
         let a = points[i];
         let b = points[(i + 1) % n];
         let (dx, dy) = (b.0 - a.0, b.1 - a.1);
@@ -405,9 +482,9 @@ fn emit_stroked_polyline(
         out.push(PathOp::Close);
     }
 
-    // Joins. For miter (default): overlapping rectangles already paint
-    // the joint correctly. For round / bevel we approximate with a
-    // disk / triangle at each vertex.
+    // Joins. The overlapping rectangles leave a notch on the outer side
+    // of every corner. Round joins fill it with a disk at each vertex.
+    // Miter and bevel joins fill it with wedges below.
     if join == LineJoin::Round || cap == LineCap::Round {
         let join_at = |out: &mut Vec<PathOp>, p: (f32, f32)| {
             emit_disk(out, p.0, p.1, half);
@@ -415,6 +492,9 @@ fn emit_stroked_polyline(
         let start = if closed { 0 } else { 1 };
         let end = if closed { n } else { n - 1 };
         for p in &points[start..end] {
+            if out.len() >= MAX_STROKE_OPS {
+                return;
+            }
             join_at(out, *p);
         }
         if !closed && cap == LineCap::Round {
@@ -423,16 +503,20 @@ fn emit_stroked_polyline(
         }
     }
 
-    // Miter spikes: when adjacent segments don't form a near-straight
-    // angle, fill the wedge between them so a sharp corner doesn't
-    // leave a notch. Falls back to bevel beyond the miter limit.
-    if join == LineJoin::Miter && n >= 3 {
+    // Miter and bevel wedges: when adjacent segments don't form a
+    // near-straight angle, fill the wedge between them so a sharp
+    // corner doesn't leave a notch. Miters fall back to bevels beyond
+    // the miter limit.
+    if join != LineJoin::Round && n >= 3 {
         let span = if closed { n } else { n - 2 };
         for i in 0..span {
+            if out.len() >= MAX_STROKE_OPS {
+                return;
+            }
             let prev = points[if closed && i == 0 { n - 1 } else { i }];
             let cur = points[if closed { (i + 1) % n } else { i + 1 }];
             let next = points[if closed { (i + 2) % n } else { i + 2 }];
-            emit_miter_join(out, prev, cur, next, half);
+            emit_join_wedges(out, prev, cur, next, half, join);
         }
     }
 }
@@ -461,16 +545,40 @@ fn emit_disk(out: &mut Vec<PathOp>, cx: f32, cy: f32, r: f32) {
     out.push(PathOp::Close);
 }
 
-/// Emits a miter-join wedge at vertex `cur`, given the previous and
-/// next polyline points. When the join angle is reflex enough that the
-/// miter would exceed `MITER_LIMIT * width`, a bevel triangle is used
-/// instead (matching SVG's stroke-miterlimit default of 4).
-fn emit_miter_join(
+/// Stroke edge corners at a join vertex `cur`: where the left and
+/// right edges of the incoming segment end, and where those of the
+/// outgoing segment start. Left is left of the direction of travel.
+struct JoinCorners {
+    a_left: (f32, f32),
+    b_left: (f32, f32),
+    a_right: (f32, f32),
+    b_right: (f32, f32),
+}
+
+/// Emits the bevel at `cur`: one triangle on each side, joining the
+/// join center to the two edge corners. Only the outer one shows. The
+/// inner one lies where the segment rectangles already overlap.
+fn emit_bevel_join(out: &mut Vec<PathOp>, cur: (f32, f32), c: &JoinCorners) {
+    for (a, b) in [(c.a_left, c.b_left), (c.a_right, c.b_right)] {
+        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
+        out.push(PathOp::LineTo { x: a.0, y: a.1 });
+        out.push(PathOp::LineTo { x: b.0, y: b.1 });
+        out.push(PathOp::Close);
+    }
+}
+
+/// Emits the join wedges at vertex `cur`, given the previous and next
+/// polyline points. A bevel join is a triangle on each side. A miter
+/// join extends the edges to their meeting point, and becomes a bevel
+/// when the miter would exceed `MITER_LIMIT * width` (SVG's
+/// stroke-miterlimit default of 4). Round joins are drawn elsewhere.
+fn emit_join_wedges(
     out: &mut Vec<PathOp>,
     prev: (f32, f32),
     cur: (f32, f32),
     next: (f32, f32),
     half: f32,
+    join: LineJoin,
 ) {
     let (ax, ay) = (cur.0 - prev.0, cur.1 - prev.1);
     let la = (ax * ax + ay * ay).sqrt();
@@ -484,68 +592,39 @@ fn emit_miter_join(
     // Outer perpendicular (left of travel) on each segment.
     let (na, na2) = ((-tay) * half, tax * half);
     let (nb, nb2) = ((-tby) * half, tbx * half);
-    // Outer corners.
-    let p_a_left = (cur.0 + na, cur.1 + na2);
-    let p_b_left = (cur.0 + nb, cur.1 + nb2);
-    let p_a_right = (cur.0 - na, cur.1 - na2);
-    let p_b_right = (cur.0 - nb, cur.1 - nb2);
+    let corners = JoinCorners {
+        a_left: (cur.0 + na, cur.1 + na2),
+        b_left: (cur.0 + nb, cur.1 + nb2),
+        a_right: (cur.0 - na, cur.1 - na2),
+        b_right: (cur.0 - nb, cur.1 - nb2),
+    };
+    if join == LineJoin::Bevel {
+        emit_bevel_join(out, cur, &corners);
+        return;
+    }
 
     // Compute miter point on the outer side. A small angle between
-    // segments means a long spike. Bail to bevel beyond the limit.
+    // segments means a long spike. Bail to bevel beyond the limit or
+    // at a near 180 degree turn.
     let dot = tax * tbx + tay * tby;
     let denom = 1.0 + dot;
-    if denom <= 1e-6 {
-        // Near 180° turn; bevel triangle on each side handles it.
-        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
-        out.push(PathOp::LineTo {
-            x: p_a_left.0,
-            y: p_a_left.1,
-        });
-        out.push(PathOp::LineTo {
-            x: p_b_left.0,
-            y: p_b_left.1,
-        });
-        out.push(PathOp::Close);
-        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
-        out.push(PathOp::LineTo {
-            x: p_a_right.0,
-            y: p_a_right.1,
-        });
-        out.push(PathOp::LineTo {
-            x: p_b_right.0,
-            y: p_b_right.1,
-        });
-        out.push(PathOp::Close);
-        return;
-    }
     // Miter spike length per the SVG appendix:
     //   m = half / sin(theta/2)   where  cos(theta) = -dot for "turn"
-    let miter_ratio = (2.0_f32 / denom).sqrt(); // = 1 / sin(theta/2)
+    let miter_ratio = if denom > 1e-6 {
+        (2.0_f32 / denom).sqrt() // = 1 / sin(theta/2)
+    } else {
+        f32::INFINITY
+    };
     if miter_ratio > MITER_LIMIT {
-        // Bevel: just two triangles connecting outer corners to the
-        // join center.
-        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
-        out.push(PathOp::LineTo {
-            x: p_a_left.0,
-            y: p_a_left.1,
-        });
-        out.push(PathOp::LineTo {
-            x: p_b_left.0,
-            y: p_b_left.1,
-        });
-        out.push(PathOp::Close);
-        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
-        out.push(PathOp::LineTo {
-            x: p_a_right.0,
-            y: p_a_right.1,
-        });
-        out.push(PathOp::LineTo {
-            x: p_b_right.0,
-            y: p_b_right.1,
-        });
-        out.push(PathOp::Close);
+        emit_bevel_join(out, cur, &corners);
         return;
     }
+    let JoinCorners {
+        a_left: p_a_left,
+        b_left: p_b_left,
+        a_right: p_a_right,
+        b_right: p_b_right,
+    } = corners;
     // Bisector direction.
     let bis_x = tax + tbx;
     let bis_y = tay + tby;

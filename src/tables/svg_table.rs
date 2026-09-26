@@ -154,61 +154,39 @@ impl<'a> Svg<'a> {
     /// "earlier-is-preferred" rule.
     #[must_use]
     pub fn document_for(&self, gid: u16) -> Option<SvgDocument<'a>> {
-        for i in 0..self.num_entries as usize {
-            // Records are bound-checked at parse time, so each 12-byte
-            // window is in-range.
-            let off = i * RECORD_LEN;
-            let rec = &self.records[off..off + RECORD_LEN];
-            let start_gid = u16::from_be_bytes([rec[0], rec[1]]);
-            let end_gid = u16::from_be_bytes([rec[2], rec[3]]);
-            if gid < start_gid || gid > end_gid {
-                continue;
-            }
-            let doc_off = u32::from_be_bytes([rec[4], rec[5], rec[6], rec[7]]) as usize;
-            let doc_len = u32::from_be_bytes([rec[8], rec[9], rec[10], rec[11]]) as usize;
-            let abs_start = self.list_off.checked_add(doc_off)?;
-            let abs_end = abs_start.checked_add(doc_len)?;
-            if abs_end > self.data.len() {
-                // Malformed record: skip rather than panic; a later
-                // record might still be well-formed for this gid.
-                continue;
-            }
-            let payload = &self.data[abs_start..abs_end];
-            let gzipped = payload.len() >= 2 && payload[0..2] == GZIP_MAGIC;
-            return Some(SvgDocument {
-                start_gid,
-                end_gid,
-                data: payload,
-                gzipped,
-            });
-        }
-        None
+        // Malformed records are skipped rather than ending the search.
+        // A later record might still be well-formed for this gid.
+        self.documents()
+            .find(|doc| doc.start_gid <= gid && gid <= doc.end_gid)
     }
 
     /// Iterates every record in directory order, yielding the parsed
     /// `SvgDocument`. Records that fail bounds checks are skipped so
     /// one malformed entry doesn't blind callers to its siblings.
     pub fn documents(&self) -> impl Iterator<Item = SvgDocument<'a>> + '_ {
-        (0..self.num_entries as usize).filter_map(move |i| {
-            let off = i * RECORD_LEN;
-            let rec = self.records.get(off..off + RECORD_LEN)?;
-            let start_gid = u16::from_be_bytes([rec[0], rec[1]]);
-            let end_gid = u16::from_be_bytes([rec[2], rec[3]]);
-            let doc_off = u32::from_be_bytes([rec[4], rec[5], rec[6], rec[7]]) as usize;
-            let doc_len = u32::from_be_bytes([rec[8], rec[9], rec[10], rec[11]]) as usize;
-            let abs_start = self.list_off.checked_add(doc_off)?;
-            let abs_end = abs_start.checked_add(doc_len)?;
-            if abs_end > self.data.len() {
-                return None;
-            }
-            let payload = &self.data[abs_start..abs_end];
-            let gzipped = payload.len() >= 2 && payload[0..2] == GZIP_MAGIC;
-            Some(SvgDocument {
-                start_gid,
-                end_gid,
-                data: payload,
-                gzipped,
-            })
+        self.records
+            .chunks_exact(RECORD_LEN)
+            .filter_map(move |rec| self.decode_record(rec))
+    }
+
+    /// Decodes one 12-byte `SVGDocumentRecord`, or returns `None` when
+    /// its payload falls outside the table.
+    fn decode_record(&self, rec: &[u8]) -> Option<SvgDocument<'a>> {
+        let (gids, rest) = rec.split_first_chunk::<4>()?;
+        let (doc_off, rest) = rest.split_first_chunk::<4>()?;
+        let (doc_len, _) = rest.split_first_chunk::<4>()?;
+        let start_gid = u16::from_be_bytes([gids[0], gids[1]]);
+        let end_gid = u16::from_be_bytes([gids[2], gids[3]]);
+        let doc_off = u32::from_be_bytes(*doc_off) as usize;
+        let doc_len = u32::from_be_bytes(*doc_len) as usize;
+        let abs_start = self.list_off.checked_add(doc_off)?;
+        let abs_end = abs_start.checked_add(doc_len)?;
+        let payload = self.data.get(abs_start..abs_end)?;
+        Some(SvgDocument {
+            start_gid,
+            end_gid,
+            data: payload,
+            gzipped: payload.starts_with(&GZIP_MAGIC),
         })
     }
 }

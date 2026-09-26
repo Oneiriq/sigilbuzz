@@ -4,10 +4,10 @@
 //! every SE-Asian, SE-Indic and archaic-South-Asian script that does
 //! not fit Arabic or Indic2 runs through. Khmer, Myanmar, Tai Tham,
 //! Buginese, New Tai Lue, Cham, Old Hangul, Hanifi Rohingya are all
-//! USE clients. 0.2.0 wires up Khmer as the pilot; the other scripts
-//! add incrementally by extending the per-codepoint tables in
-//! [`crate::unicode::use_category`] and registering their script tag
-//! in this module's script priority table.
+//! USE clients. Each script gets an entry point below that pairs its
+//! script-tag priority with a feature chain. A new script needs its
+//! codepoints in the per-codepoint tables of
+//! [`crate::unicode::use_category`] and an entry point here.
 //!
 //! # Pipeline
 //!

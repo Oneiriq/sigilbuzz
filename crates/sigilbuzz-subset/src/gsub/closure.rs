@@ -7,6 +7,7 @@ use sigilbuzz::tables::gsub::lookup_type as gsub_type;
 
 use super::unwrap_extension_lookup_type;
 use crate::layout::parse_coverage_glyphs;
+use crate::util::WorkBudget;
 
 /// Walks a parsed GSUB table and pulls in implicit substitution
 /// targets (types 1, 2, 3 and 8) for every kept input glyph. The
@@ -16,8 +17,13 @@ use crate::layout::parse_coverage_glyphs;
 /// Iterates the source GSUB lookups; for each kept input glyph that a
 /// type-1/2/3/8 lookup covers, marks the substitution output(s) as
 /// kept. Mutates `keep` in place and returns whether anything was
-/// added so the caller can decide to re-run the closure pass.
-pub(crate) fn pull_in_substitution_targets(face: &sigilbuzz::Face<'_>, keep: &mut [bool]) -> bool {
+/// added so the caller can decide to re-run the closure pass. Stops
+/// early once `budget` is spent.
+pub(crate) fn pull_in_substitution_targets(
+    face: &sigilbuzz::Face<'_>,
+    keep: &mut [bool],
+    budget: &WorkBudget,
+) -> bool {
     let Ok(Some(gsub)) = face.gsub() else {
         return false;
     };
@@ -27,6 +33,9 @@ pub(crate) fn pull_in_substitution_targets(face: &sigilbuzz::Face<'_>, keep: &mu
         let Some(lookup) = lookups.get(li) else {
             continue;
         };
+        if !budget.spend(1 + usize::from(lookup.subtable_count())) {
+            return changed;
+        }
         let lt = unwrap_extension_lookup_type(&lookup);
         for si in 0..lookup.subtable_count() {
             let Some(sub) = subtable_with_extension(&lookup, si) else {
@@ -34,22 +43,52 @@ pub(crate) fn pull_in_substitution_targets(face: &sigilbuzz::Face<'_>, keep: &mu
             };
             match lt {
                 gsub_type::SINGLE => {
-                    changed |= pull_single(sub, keep);
+                    changed |= pull_single_in(sub, keep, budget);
                 }
                 gsub_type::MULTIPLE => {
-                    changed |= pull_multiple(sub, keep);
+                    changed |= pull_multiple_in(sub, keep, budget);
                 }
                 gsub_type::ALTERNATE => {
-                    changed |= pull_alternate_default(sub, keep);
+                    changed |= pull_alternate_default_in(sub, keep, budget);
                 }
                 gsub_type::REVERSE_CHAINED => {
-                    changed |= pull_reverse_chain(sub, keep);
+                    changed |= pull_reverse_chain_in(sub, keep, budget);
                 }
                 _ => {}
             }
         }
     }
     changed
+}
+
+/// Enumerates a Coverage table and charges `budget` for it. Returns
+/// `None` once the budget is spent.
+fn budgeted_coverage(cov_bytes: &[u8], budget: &WorkBudget) -> Option<Vec<u16>> {
+    if budget.is_spent() {
+        return None;
+    }
+    let covered = parse_coverage_glyphs(cov_bytes);
+    budget.spend(covered.len() + 1).then_some(covered)
+}
+
+#[cfg(test)]
+pub(super) fn pull_reverse_chain(sub: &[u8], keep: &mut [bool]) -> bool {
+    pull_reverse_chain_in(sub, keep, &WorkBudget::new(crate::util::WORK_LIMIT))
+}
+
+#[cfg(test)]
+pub(super) fn pull_single(sub: &[u8], keep: &mut [bool]) -> bool {
+    pull_single_in(sub, keep, &WorkBudget::new(crate::util::WORK_LIMIT))
+}
+
+#[cfg(test)]
+pub(super) fn pull_multiple(sub: &[u8], keep: &mut [bool]) -> bool {
+    pull_multiple_in(sub, keep, &WorkBudget::new(crate::util::WORK_LIMIT))
+}
+
+#[cfg(test)]
+pub(super) fn pull_alternate_default(sub: &[u8], keep: &mut [bool]) -> bool {
+    pull_alternate_default_in(sub, keep, &WorkBudget::new(crate::util::WORK_LIMIT))
 }
 
 fn subtable_with_extension<'a>(
@@ -69,7 +108,7 @@ fn subtable_with_extension<'a>(
 
 /// Pulls in the substitute glyph for every kept input glyph in a
 /// type-1 (single-sub) subtable.
-pub(super) fn pull_single(sub: &[u8], keep: &mut [bool]) -> bool {
+pub(super) fn pull_single_in(sub: &[u8], keep: &mut [bool], budget: &WorkBudget) -> bool {
     if sub.len() < 4 {
         return false;
     }
@@ -78,7 +117,9 @@ pub(super) fn pull_single(sub: &[u8], keep: &mut [bool]) -> bool {
     let Some(cov_bytes) = sub.get(cov_off..) else {
         return false;
     };
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let Some(covered) = budgeted_coverage(cov_bytes, budget) else {
+        return false;
+    };
     let mut changed = false;
     match format {
         1 => {
@@ -128,7 +169,7 @@ pub(super) fn pull_single(sub: &[u8], keep: &mut [bool]) -> bool {
 
 /// Pulls in every substitute in the sequence for every kept input in a
 /// type-2 (multiple-sub) subtable.
-pub(super) fn pull_multiple(sub: &[u8], keep: &mut [bool]) -> bool {
+pub(super) fn pull_multiple_in(sub: &[u8], keep: &mut [bool], budget: &WorkBudget) -> bool {
     if sub.len() < 6 {
         return false;
     }
@@ -141,7 +182,9 @@ pub(super) fn pull_multiple(sub: &[u8], keep: &mut [bool]) -> bool {
     let Some(cov_bytes) = sub.get(cov_off..) else {
         return false;
     };
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let Some(covered) = budgeted_coverage(cov_bytes, budget) else {
+        return false;
+    };
     if covered.len() != seq_count {
         return false;
     }
@@ -166,6 +209,9 @@ pub(super) fn pull_multiple(sub: &[u8], keep: &mut [bool]) -> bool {
         if seq_bytes.len() < need {
             continue;
         }
+        if !budget.spend(glyph_count) {
+            return changed;
+        }
         for j in 0..glyph_count {
             let goff = 2 + j * 2;
             let target = u16::from_be_bytes([seq_bytes[goff], seq_bytes[goff + 1]]);
@@ -182,7 +228,11 @@ pub(super) fn pull_multiple(sub: &[u8], keep: &mut [bool]) -> bool {
 /// in a type-3 (alternate-sub) subtable. User-selected alternates ride
 /// in only when their alternate-set output happens to be reachable
 /// some other way.
-pub(super) fn pull_alternate_default(sub: &[u8], keep: &mut [bool]) -> bool {
+pub(super) fn pull_alternate_default_in(
+    sub: &[u8],
+    keep: &mut [bool],
+    budget: &WorkBudget,
+) -> bool {
     if sub.len() < 6 {
         return false;
     }
@@ -195,7 +245,9 @@ pub(super) fn pull_alternate_default(sub: &[u8], keep: &mut [bool]) -> bool {
     let Some(cov_bytes) = sub.get(cov_off..) else {
         return false;
     };
-    let covered = parse_coverage_glyphs(cov_bytes);
+    let Some(covered) = budgeted_coverage(cov_bytes, budget) else {
+        return false;
+    };
     if covered.len() != alt_set_count {
         return false;
     }
@@ -239,10 +291,11 @@ pub(super) fn pull_alternate_default(sub: &[u8], keep: &mut [bool]) -> bool {
 /// substitutes in.
 ///
 /// The layout is the one
-/// [`rewrite_type8`](super::reverse_chain::rewrite_type8) reads; a
+/// [`rewrite_type8`](super::reverse_chain::rewrite_type8) reads. A
 /// subtable whose Coverage and substitute counts disagree is skipped,
-/// as there.
-pub(super) fn pull_reverse_chain(sub: &[u8], keep: &mut [bool]) -> bool {
+/// as there. Every Coverage walked is charged to `budget`, and the
+/// pass stops once it is spent.
+pub(super) fn pull_reverse_chain_in(sub: &[u8], keep: &mut [bool], budget: &WorkBudget) -> bool {
     let read = |pos: usize| -> Option<usize> {
         let b = sub.get(pos..pos.checked_add(2)?)?;
         Some(usize::from(u16::from_be_bytes([b[0], b[1]])))
@@ -252,7 +305,8 @@ pub(super) fn pull_reverse_chain(sub: &[u8], keep: &mut [bool]) -> bool {
         (0..count).all(|j| {
             read(first_slot + j * 2)
                 .and_then(|off| sub.get(off..))
-                .is_some_and(|cov| parse_coverage_glyphs(cov).into_iter().any(is_kept))
+                .and_then(|cov| budgeted_coverage(cov, budget))
+                .is_some_and(|glyphs| glyphs.into_iter().any(is_kept))
         })
     };
     if read(0) != Some(1) {
@@ -269,7 +323,10 @@ pub(super) fn pull_reverse_chain(sub: &[u8], keep: &mut [bool]) -> bool {
     let Some(glyph_count) = read(glyph_count_at) else {
         return false;
     };
-    let Some(covered) = sub.get(cov_off..).map(parse_coverage_glyphs) else {
+    let Some(covered) = sub
+        .get(cov_off..)
+        .and_then(|cov| budgeted_coverage(cov, budget))
+    else {
         return false;
     };
     if covered.len() != glyph_count

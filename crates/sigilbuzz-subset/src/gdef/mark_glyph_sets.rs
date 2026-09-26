@@ -66,6 +66,13 @@ pub(super) fn rewrite(
             Vec::new()
         } else if let Some(at) = off.checked_add(rel).filter(|&at| at < table.len()) {
             coverage(table, at)
+                .and_then(|glyphs| {
+                    if map.spend(1 + glyphs.len()) {
+                        Ok(glyphs)
+                    } else {
+                        Err(super::out_of_budget(at))
+                    }
+                })
                 .unwrap_or_else(|e| {
                     diag.error(&e, "the glyphs of one mark glyph set");
                     Vec::new()
@@ -82,7 +89,11 @@ pub(super) fn rewrite(
             Vec::new()
         };
         any_glyphs |= !glyphs.is_empty();
-        let at = coverages.place(&mut out, &emit_coverage_from_glyphs(&glyphs)) as u32;
+        let at = u32::try_from(coverages.place(&mut out, &emit_coverage_from_glyphs(&glyphs)))
+            .map_err(|_| Error::Malformed {
+                offset: slot,
+                context: "GDEF MarkGlyphSetsDef rewrite exceeds 4 GiB",
+            })?;
         out[4 + i * 4..8 + i * 4].copy_from_slice(&at.to_be_bytes());
     }
     Ok(MarkGlyphSets {

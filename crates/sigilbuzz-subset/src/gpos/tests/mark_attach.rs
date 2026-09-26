@@ -243,3 +243,31 @@ fn rewrite_mark_mark_keeps_round_trip() {
     assert_eq!(attach.base_anchor.x, 100);
     assert_eq!(attach.base_anchor.y, 600);
 }
+
+#[test]
+fn rewrite_mark_base_with_truncated_base_array_drops_the_base() {
+    // BaseArray claims one base with four anchor offsets, but the
+    // subtable ends after the first offset. Reading the missing row
+    // used to index past the end.
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&1u16.to_be_bytes()); // posFormat
+    bytes.extend_from_slice(&12u16.to_be_bytes()); // markCoverage
+    bytes.extend_from_slice(&18u16.to_be_bytes()); // baseCoverage
+    bytes.extend_from_slice(&4u16.to_be_bytes()); // markClassCount
+    bytes.extend_from_slice(&24u16.to_be_bytes()); // markArray
+    bytes.extend_from_slice(&36u16.to_be_bytes()); // baseArray
+    bytes.extend_from_slice(&build_coverage_format1(&[10])); // 12..18
+    bytes.extend_from_slice(&build_coverage_format1(&[20])); // 18..24
+                                                             // MarkArray at 24: one record, class 0, anchor at +6.
+    bytes.extend_from_slice(&1u16.to_be_bytes());
+    bytes.extend_from_slice(&0u16.to_be_bytes());
+    bytes.extend_from_slice(&6u16.to_be_bytes());
+    bytes.extend_from_slice(&build_anchor(5, 7)); // 30..36
+                                                  // BaseArray at 36: baseCount 1, then a single anchor offset.
+    bytes.extend_from_slice(&1u16.to_be_bytes());
+    bytes.extend_from_slice(&0u16.to_be_bytes());
+
+    let map = map_from_pairs(&[(0, 0), (10, 1), (20, 2)]);
+    let ctx = RewriterCtx::new(&map, None);
+    assert!(rewrite_mark_attach(&ctx, &bytes, MarkAttachKind::FixedClassRow).is_empty());
+}

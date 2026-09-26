@@ -2,7 +2,9 @@
 //! ValueRecord walks, and (in `anchors`) the anchor walks.
 
 use super::anchors::visit_anchor;
-use super::value_records::{value_record_size, VR_X_ADVANCE, VR_X_ADVANCE_DEVICE};
+use super::value_records::{
+    value_record_size, visit_value_record, VR_X_ADVANCE, VR_X_ADVANCE_DEVICE,
+};
 use super::*;
 use alloc::vec;
 
@@ -374,4 +376,65 @@ fn bake_without_ivs_zeros_offsets_without_changing_static_fields() {
     // Offset zeroed.
     let baked_off = u16::from_be_bytes([baked[device_off_pos], baked[device_off_pos + 1]]);
     assert_eq!(baked_off, 0);
+}
+
+#[test]
+fn value_record_device_without_static_field_skips_write() {
+    // ValueFormat 0x0010: xPlaDevice without xPlacement. The slot
+    // has no static field to fold into, which used to overflow
+    // (debug) or index out of bounds (release) once the delta was
+    // non-zero.
+    let mut buf = vec![0u8; 8];
+    // ValueRecord at 0: one Offset16 pointing at byte 2.
+    buf[0..2].copy_from_slice(&2u16.to_be_bytes());
+    // VariationIndex at byte 2: outer=0, inner=0, deltaFormat=0x8000.
+    buf[6..8].copy_from_slice(&0x8000u16.to_be_bytes());
+    let ivs_bytes = build_ivs_one_region_one_item(80);
+    let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
+    visit_value_record(&mut buf, 0, 0, 0x0010, &mut |b, slot| {
+        assert_eq!(slot.field, None);
+        fold_one_field(b, slot, Some(&store), &[1.0]);
+    });
+    // The offset slot is zeroed and nothing else changes.
+    assert_eq!(&buf[0..2], &[0, 0]);
+    assert_eq!(&buf[6..8], &0x8000u16.to_be_bytes());
+}
+
+#[test]
+fn bake_visits_a_shared_subtable_once() {
+    // Two lookup-list entries point at the same SinglePos lookup, so
+    // its subtable is reached twice. Folding is idempotent, so the
+    // second visit is skipped and the result matches one visit.
+    let mut sub = Vec::new();
+    sub.extend_from_slice(&1u16.to_be_bytes()); // posFormat 1
+    sub.extend_from_slice(&0u16.to_be_bytes()); // coverage (unused)
+    sub.extend_from_slice(&0x0011u16.to_be_bytes()); // xPlacement + device
+    sub.extend_from_slice(&10i16.to_be_bytes()); // xPlacement
+    sub.extend_from_slice(&10u16.to_be_bytes()); // device offset
+    sub.extend_from_slice(&0u16.to_be_bytes()); // outer
+    sub.extend_from_slice(&0u16.to_be_bytes()); // inner
+    sub.extend_from_slice(&0x8000u16.to_be_bytes()); // VariationIndex
+
+    let mut gpos = Vec::new();
+    gpos.extend_from_slice(&1u16.to_be_bytes());
+    gpos.extend_from_slice(&0u16.to_be_bytes());
+    gpos.extend_from_slice(&[0u8; 4]); // script / feature lists unused
+    gpos.extend_from_slice(&10u16.to_be_bytes()); // lookupListOffset
+                                                  // LookupList at 10: two entries, both at offset 6.
+    gpos.extend_from_slice(&2u16.to_be_bytes());
+    gpos.extend_from_slice(&6u16.to_be_bytes());
+    gpos.extend_from_slice(&6u16.to_be_bytes());
+    // Lookup at 16: type 1, flag 0, one subtable at offset 8.
+    gpos.extend_from_slice(&1u16.to_be_bytes());
+    gpos.extend_from_slice(&0u16.to_be_bytes());
+    gpos.extend_from_slice(&1u16.to_be_bytes());
+    gpos.extend_from_slice(&8u16.to_be_bytes());
+    gpos.extend_from_slice(&sub);
+
+    let ivs_bytes = build_ivs_one_region_one_item(80);
+    let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
+    let baked = bake_gpos_at_coords(&gpos, Some(&store), &[1.0]).unwrap();
+    let x = i16::from_be_bytes([baked[24 + 6], baked[24 + 7]]);
+    assert_eq!(x, 90);
+    assert_eq!(&baked[24 + 8..24 + 10], &[0, 0]);
 }

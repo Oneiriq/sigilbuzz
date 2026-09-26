@@ -444,3 +444,42 @@ fn paeth_predictor_matches_spec_examples() {
     // ties prefer a.
     assert_eq!(paeth(0, 0, 255), 0);
 }
+
+#[test]
+fn idat_inflating_past_the_header_size_is_rejected() {
+    // A 1x1 RGBA header with an IDAT that inflates to 4 MiB. The
+    // inflater now stops one byte past the 5 bytes the header
+    // allows instead of materializing the whole stream.
+    let idat = miniz_oxide::deflate::compress_to_vec_zlib(&vec![0u8; 4 << 20], 6);
+    let mut png = Vec::new();
+    png.extend_from_slice(&PNG_SIGNATURE);
+    write_chunk(&mut png, *b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0]);
+    write_chunk(&mut png, *b"IDAT", &idat);
+    write_chunk(&mut png, *b"IEND", &[]);
+    assert_eq!(
+        decode_png(&png),
+        Err(RenderError::BadPng("decompressed length mismatch"))
+    );
+    // A stream one byte long still reports the same mismatch.
+    let short = miniz_oxide::deflate::compress_to_vec_zlib(&[0u8; 6], 6);
+    let mut png = Vec::new();
+    png.extend_from_slice(&PNG_SIGNATURE);
+    write_chunk(&mut png, *b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0]);
+    write_chunk(&mut png, *b"IDAT", &short);
+    write_chunk(&mut png, *b"IEND", &[]);
+    assert_eq!(
+        decode_png(&png),
+        Err(RenderError::BadPng("decompressed length mismatch"))
+    );
+}
+
+#[test]
+fn exact_size_idat_still_decodes() {
+    // The limit is one byte past the expected size, so a stream
+    // that ends exactly at it inflates in full.
+    for (w, h) in [(1, 1), (3, 7), (64, 2)] {
+        let png = build_solid_rgba_png(9, 8, 7, 255, w, h);
+        let pix = decode_png(&png).expect("decodes");
+        assert_eq!((pix.width, pix.height), (w, h));
+    }
+}

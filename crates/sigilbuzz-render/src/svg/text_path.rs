@@ -11,14 +11,14 @@ use crate::affine::Affine;
 use crate::flatten::flatten;
 
 use super::clip_mask::{resolve_clip_shape, resolve_mask_shape};
-use super::document::{Defs, ElemCtx};
+use super::document::{doc_full, push_fill, visit_cost, Defs, ElemCtx};
 use super::filter::resolve_filter;
 use super::model::{Fill, Paint, SvgDoc};
 use super::paint_server::resolve_fill_paint;
 use super::path::parse_path_d;
 use super::style::inherit_attrs;
 use super::xml::{name_eq, Node};
-use super::{TextPathInput, MAX_FILLS, MAX_GROUP_DEPTH};
+use super::{TextPathInput, MAX_GROUP_DEPTH};
 
 // =========================================================================
 // textPath resolution
@@ -73,7 +73,7 @@ fn walk_for_text_paths(
     if depth > MAX_GROUP_DEPTH {
         return;
     }
-    if doc.fills.len() >= MAX_FILLS {
+    if doc_full(doc, defs) || !defs.charge_work(visit_cost(node, parent)) {
         return;
     }
     let ctx = inherit_attrs(parent, node);
@@ -107,7 +107,7 @@ fn walk_for_text_paths(
             text_paths,
             depth + 1,
         );
-        if doc.fills.len() >= MAX_FILLS {
+        if doc_full(doc, defs) {
             break;
         }
     }
@@ -135,6 +135,11 @@ fn emit_text_path_fills(
     let Some(d_attr) = target.attr("d") else {
         return;
     };
+    // Each matching `<textPath>` re-parses and re-flattens the
+    // referenced path, so both costs come out of the work budget.
+    if !defs.charge_work(d_attr.len()) {
+        return;
+    }
     let Ok(path_ops) = parse_path_d(d_attr) else {
         return;
     };
@@ -147,7 +152,7 @@ fn emit_text_path_fills(
     // already use. The world transform (doc -> pixel) is applied per
     // Fill at raster time, so we don't double-apply it here.
     let polyline = build_arc_length_polyline(&path_ops);
-    if polyline.is_empty() {
+    if polyline.is_empty() || !defs.charge_work(polyline.len()) {
         return;
     }
     let total = polyline.last().map_or(0.0, |p| p.cum);
@@ -163,10 +168,14 @@ fn emit_text_path_fills(
 
     let mut cum = 0.0_f32;
     for g in &input.glyph_runs {
-        if doc.fills.len() >= MAX_FILLS {
+        if doc_full(doc, defs) {
             break;
         }
         if cum > total {
+            break;
+        }
+        // Locating the glyph scans the polyline.
+        if !defs.charge_work(polyline.len()) {
             break;
         }
         let Some(pos) = sample_polyline_position(&polyline, cum) else {
@@ -176,24 +185,29 @@ fn emit_text_path_fills(
             if !outline.is_empty() {
                 let translated = transform_outline_ops(outline.ops(), scale, pos.0, pos.1);
                 if !translated.is_empty() {
-                    doc.fills.push(Fill {
-                        ops: translated,
-                        paint: fill_paint.clone(),
-                        xform: ctx.xform,
-                        clip: ctx
-                            .clip_href
-                            .as_deref()
-                            .and_then(|id| resolve_clip_shape(defs, id)),
-                        is_stroke: false,
-                        filter: ctx
-                            .filter_href
-                            .as_deref()
-                            .and_then(|id| resolve_filter(defs, id)),
-                        mask: ctx
-                            .mask_href
-                            .as_deref()
-                            .and_then(|id| resolve_mask_shape(defs, id)),
-                    });
+                    push_fill(
+                        doc,
+                        defs,
+                        Fill {
+                            ops: translated,
+                            paint: fill_paint.clone(),
+                            xform: ctx.xform,
+                            clip: ctx
+                                .clip_href
+                                .as_deref()
+                                .and_then(|id| resolve_clip_shape(defs, id)),
+                            #[cfg(test)]
+                            is_stroke: false,
+                            filter: ctx
+                                .filter_href
+                                .as_deref()
+                                .and_then(|id| resolve_filter(defs, id)),
+                            mask: ctx
+                                .mask_href
+                                .as_deref()
+                                .and_then(|id| resolve_mask_shape(defs, id)),
+                        },
+                    );
                 }
             }
         }
@@ -218,9 +232,9 @@ pub(super) struct PolyPoint {
 ///
 /// Multi-contour paths concatenate their per-contour polylines back to
 /// back. The cumulative-advance walk treats them as one continuous
-/// stroke for placement, matching the simple PoC contract documented
-/// on [`TextPathInput`]. Tangent-rotation and per-contour breaks are
-/// deferred work.
+/// stroke for placement, matching the contract documented on
+/// [`TextPathInput`]. Tangent rotation and per-contour breaks are not
+/// supported.
 pub(super) fn build_arc_length_polyline(ops: &[PathOp]) -> Vec<PolyPoint> {
     let segs = flatten(
         ops.iter().copied(),

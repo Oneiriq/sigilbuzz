@@ -13,7 +13,6 @@ pub(super) struct Format2<'a> {
     /// plus the format-2 body). All recorded offsets are relative
     /// to byte 0 of this slice, matching the spec.
     sub: &'a [u8],
-    row_width: u32,
     left_class_off: usize,
     right_class_off: usize,
     array_off: usize,
@@ -34,12 +33,8 @@ pub(super) fn parse_format2(
             context: "kerx format 2 header",
         });
     }
-    let row_width = u32::from_be_bytes([
-        data[body_start],
-        data[body_start + 1],
-        data[body_start + 2],
-        data[body_start + 3],
-    ]);
+    // Bytes 0..4 hold rowWidth. The left class values are already
+    // multiplied by it, so the lookup never needs it.
     let left_off = u32::from_be_bytes([
         data[body_start + 4],
         data[body_start + 5],
@@ -69,7 +64,6 @@ pub(super) fn parse_format2(
     let sub = &data[sub_start..sub_end];
     Ok(Some(Format2 {
         sub,
-        row_width,
         left_class_off: left_off,
         right_class_off: right_off,
         array_off,
@@ -104,11 +98,9 @@ impl Format2<'_> {
             .array_off
             .checked_add(usize::from(left_value))?
             .checked_add(usize::from(right_value))?;
-        // The cell must be a fully-contained i16. row_width is also
-        // a sanity hint: a left value beyond row_width would mean a
-        // malformed lookup table, but again we tolerate it by
-        // letting the slice bound check do the work.
-        let _ = self.row_width; // referenced for the doc-driven invariant
+        // The cell must be a fully-contained i16. A left value past the
+        // row width would mean a malformed lookup table. The slice
+        // bound check covers that case too.
         let bytes = self.sub.get(cell_off..cell_off + 2)?;
         Some(i16::from_be_bytes([bytes[0], bytes[1]]))
     }

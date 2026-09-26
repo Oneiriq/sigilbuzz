@@ -20,7 +20,7 @@ std = []
 # `brotli-decompressor` we used in 0.6.0) ships both directions, so
 # 0.7.0 collapses to a single dep behind the woff2 feature. Disabling
 # the feature drops the dep entirely for WOFF1-only consumers.
-woff2 = ["dep:brotli"]
+woff2 = ["std", "dep:brotli"]
 # WOFF1 zlib (deflate + adler32) for both wrap and unwrap directions.
 # Pulls in `miniz_oxide` (pure Rust, no transitive deps). Disable the
 # feature to drop the dep entirely. `unwrap_woff1` then rejects

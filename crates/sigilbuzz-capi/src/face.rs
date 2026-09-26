@@ -3,6 +3,7 @@
 
 use alloc::sync::Arc;
 use core::ffi::c_uint;
+use core::ptr;
 
 use sigilbuzz::Face;
 
@@ -14,36 +15,27 @@ use crate::{handle, hb_blob_t, hb_face_t, FaceInner};
 // ---------------------------------------------------------------------------
 
 /// Fresh empty face, used in error paths. Like [`empty_blob`](crate::blob::empty_blob), an
-/// ordinary object the caller destroys as usual.
+/// ordinary object the caller destroys as usual. Falls back to NULL,
+/// which every entry point accepts, if the empty face cannot be built.
 fn empty_face() -> *mut hb_face_t {
-    handle::arc_into_raw(empty_face_arc())
+    empty_face_arc().map_or(ptr::null_mut(), handle::arc_into_raw)
 }
 
-pub(crate) fn empty_face_arc() -> Arc<hb_face_t> {
-    // An empty face cannot be constructed via `Face::parse_bytes`.
-    // Forge one by parsing a four-byte zero header and accepting
-    // the error; emit a placeholder FaceInner whose face is a
-    // throwaway. We never expose the internal face when num_tables
-    // is queried because the `inner.face.num_tables() == 0` branch
-    // always answers truthfully.
-    //
-    // The cleanest path is to lean on the same byte buffer as the
-    // empty blob: parse a synthetic minimal header.
+/// Builds an empty face: a TrueType header with zero tables, so every
+/// table lookup on it misses. Returns `None` only if the core parser
+/// rejects that header.
+pub(crate) fn empty_face_arc() -> Option<Arc<hb_face_t>> {
     static EMPTY_SFNT: [u8; 12] = [
         0x00, 0x01, 0x00, 0x00, // sfntVersion = TrueType
         0x00, 0x00, // numTables = 0
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // searchRange/entrySelector/rangeShift
     ];
-    let face = match Face::parse_bytes(&EMPTY_SFNT, 0) {
-        Ok(f) => f,
-        Err(_) => unreachable!("synthetic empty SFNT must parse"),
-    };
-    // Lifetime-erase: the synthetic header is `'static`, so the
-    // transmute is a no-op (it's already 'static).
-    let face: Face<'static> = face;
-    Arc::new(hb_face_t {
+    // The header is a `static`, so the parsed face is already
+    // `'static` and needs no lifetime erasure.
+    let face: Face<'static> = Face::parse_bytes(&EMPTY_SFNT, 0).ok()?;
+    Some(Arc::new(hb_face_t {
         inner: FaceInner::from_blob(empty_blob_arc(), face),
-    })
+    }))
 }
 
 /// Builds a face that references `blob` and borrows its bytes.
@@ -52,7 +44,8 @@ pub(crate) fn face_from_blob(blob: Arc<hb_blob_t>, index: c_uint) -> Option<Arc<
     let parsed = Face::parse_bytes(blob.inner.data.as_slice(), index).ok()?;
     // SAFETY: `parsed` borrows `blob.inner.data`, a heap buffer that is
     // never resized and lives as long as the blob. The FaceInner built
-    // below holds a reference to that blob for its whole life, so the
+    // below holds a reference to that blob for its whole life and
+    // declares `face` first, so the face drops before the blob and the
     // erased `'static` borrow never outlives the bytes.
     let face_static: Face<'static> =
         unsafe { core::mem::transmute::<Face<'_>, Face<'static>>(parsed) };
@@ -73,7 +66,8 @@ pub unsafe extern "C" fn hb_face_create(blob: *mut hb_blob_t, index: c_uint) -> 
     if blob.is_null() {
         return empty_face();
     }
-    // SAFETY: caller asserts `blob` is a live handle.
+    // SAFETY: `blob` is non-null and the caller guarantees it is a live
+    // handle, so taking a new reference to it is sound.
     let blob = unsafe { handle::retain(blob.cast_const()) };
     match face_from_blob(blob, index) {
         Some(face) => handle::arc_into_raw(face),
@@ -104,13 +98,14 @@ pub unsafe extern "C" fn hb_face_reference(face: *mut hb_face_t) -> *mut hb_face
 }
 
 /// # Safety
-/// `face` must be valid.
+/// `face` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_face_get_glyph_count(face: *mut hb_face_t) -> c_uint {
     if face.is_null() {
         return 0;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `face` is non-null and the caller guarantees it points
+    // to a live `hb_face_t`.
     let inner: &FaceInner = unsafe { &(*face).inner };
     inner
         .face
@@ -120,13 +115,14 @@ pub unsafe extern "C" fn hb_face_get_glyph_count(face: *mut hb_face_t) -> c_uint
 }
 
 /// # Safety
-/// `face` must be valid.
+/// `face` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_face_get_upem(face: *mut hb_face_t) -> c_uint {
     if face.is_null() {
         return 0;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `face` is non-null and the caller guarantees it points
+    // to a live `hb_face_t`.
     let inner: &FaceInner = unsafe { &(*face).inner };
     inner
         .face

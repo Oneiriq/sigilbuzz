@@ -44,19 +44,14 @@
 //!    features (`pres`, `abvs`, `blws`, `psts`, `haln`) and then
 //!    `liga`, `clig`, `calt`.
 //!
-//! # What isn't here yet
+//! # Known limitations
 //!
-//! - Matra decomposition (split vowel signs). Devanagari does not
-//!   have any split matras in the base block; Tamil/Sinhala/Kannada
-//!   have some (e.g. Tamil U+0BCA `OA = e + aa`) that a future
-//!   matra-decompose pass will handle. Current impl treats them as
-//!   opaque VowelDependent; the font's `pres` feature can still fire.
-//! - Per-glyph feature masking.
-//! - [`RephMode::Explicit`] / [`RephMode::LogRepha`] reph detection.
-//!   Sigilbuzz 0.2.0 treats all scripts as Implicit for the purposes
-//!   of reph candidate tagging; Telugu/Sinhala/Malayalam LogRepha
-//!   flows get filed as follow-up issues and their parity tests
-//!   exclude strings that depend on the difference.
+//! - Split matras (e.g. Tamil U+0BCA `O = e + aa`) decompose in the
+//!   shaper's normalization, with the Indic shaper's hooks, so this
+//!   module only ever sees their components.
+//! - Only `half` runs with a per-glyph mask. The other basic features
+//!   run across the whole run and rely on the font's lookups to touch
+//!   only the right glyphs.
 
 mod reorder;
 mod syllable;
@@ -64,8 +59,7 @@ mod syllable;
 use alloc::vec::Vec;
 
 use reorder::{
-    code_point_clusters, compute_half_mask, final_reorder, initial_reorder, merge_pre_base_matras,
-    tag_positions,
+    code_point_clusters, compute_half_mask, final_reorder_all, initial_reorder, tag_positions,
 };
 pub(crate) use syllable::{segment_syllables, Syllable, SyllableKind};
 
@@ -181,21 +175,8 @@ pub fn shape_indic(
     // reph glyph via `rphf`; we locate it by the
     // `RaToBecomeReph` tag we set above, which the ligature path
     // preserved on the surviving glyph.
-    for syllable in &syllables {
-        let byte_start = byte_offsets[syllable.start];
-        let byte_end = byte_offsets[syllable.end];
-        let original_glyph_count = syllable.end - syllable.start;
-        merge_pre_base_matras(glyphs, byte_start, byte_end, level);
-        final_reorder(
-            glyphs,
-            byte_start,
-            byte_end,
-            original_glyph_count,
-            config.reph_pos,
-            config.reph_mode,
-            level,
-        );
-    }
+    // Pre-base matras merge their clusters with the base first.
+    final_reorder_all(glyphs, &syllables, &byte_offsets, config, level);
 
     // Presentation features.
     if let Some(gsub) = gsub {
@@ -220,8 +201,11 @@ pub fn shape_devanagari(
     glyphs: &mut Vec<Glyph>,
     level: ClusterLevel,
 ) {
-    let config =
-        super::indic_config_for(Script::Devanagari).expect("Devanagari always has an Indic config");
+    // `indic_config_for` has a Devanagari entry, so the early return
+    // never fires.
+    let Some(config) = super::indic_config_for(Script::Devanagari) else {
+        return;
+    };
     shape_indic(gsub, gdef, codepoints, glyphs, &config, level);
 }
 

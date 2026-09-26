@@ -4,7 +4,7 @@
 //! produces a new font where the variable-font deltas have been folded
 //! into the underlying glyph outlines and metrics. The result is a
 //! static font that consumers without VF awareness (older PDF renderers,
-//! legacy print pipelines, sigilbuzz's own oniq-test feed) can use as
+//! legacy print pipelines, test feeds that expect static fonts) can use as
 //! though the source had been designed at the chosen instance.
 //!
 //! # What lands on the static side
@@ -30,16 +30,17 @@
 //! When [`InstanceInput::drop_var_tables`] is true (the recommended
 //! default for the "ship as static" workflow):
 //!
-//! - `fvar`, `avar`, `gvar`, `HVAR` are dropped from the directory.
+//! - `fvar`, `avar`, `gvar`, `HVAR`, `VVAR`, `MVAR` are dropped from
+//!   the directory.
 //! - `GDEF` keeps every subtable but its `ItemVariationStore`, which is
 //!   pruned once the GPOS bake (see below) and the LigCaretList caret
 //!   fold have resolved every `VariationIndex` that pointed into it.
 //!
 //! When `drop_var_tables` is false the variable-font tables ride
-//! through verbatim. The glyf and hmtx bake still applies to *bake* the
-//! default-instance values into the outline / metric tables, so a
-//! consumer that ignores the variable-font tables sees the same shape
-//! as a consumer that does honor them.
+//! through verbatim next to the baked outline and metric tables. A
+//! consumer that ignores the variable-font tables sees the baked
+//! instance. A consumer that also applies them adds the deltas a second
+//! time unless `coords` is the default instance.
 //!
 //! # CFF2 baking
 //!
@@ -97,12 +98,12 @@
 //! renumbers the axes that stay, as HarfBuzz's instancer does. See
 //! [`crate::feature_variations`].
 //!
-//! # Out of scope (deferred)
+//! # Partial instancing
 //!
-//! - **CFF2 partial instancing** (some axes pinned, others left
-//!   variable on a CFF2 source). The gvar / TrueType partial path is
-//!   wired through [`crate::gvar_partial::bake_gvar_partial`]; the
-//!   CFF2 VarStore equivalent lands separately.
+//! When [`InstanceInput::axis_pins`] keeps some axes variable, the
+//! bake emits a reduced-axis variable font instead. `gvar` goes through
+//! [`crate::gvar_partial::bake_gvar_partial`] and the CFF2 VarStore
+//! through [`crate::cff2::bake_cff2_partial`].
 //!
 //! # Determinism
 //!
@@ -130,7 +131,7 @@ mod store_remap;
 use crate::sfnt;
 use crate::util;
 use crate::warnings::Warnings;
-use crate::{GlyphId, SubsetError, SubsetWarning};
+use crate::{SubsetError, SubsetWarning};
 use gdef_store::{prune_gdef_store, GdefBake};
 use glyf::bake_glyf_loca;
 use metrics::{bake_hmtx, bake_mvar_metrics, bake_vmtx};
@@ -179,11 +180,15 @@ pub struct InstanceInput {
     /// `HVAR` / `gvar` from the output. The font becomes static:
     /// shapers will ignore any axis coords passed alongside it.
     ///
-    /// If false, leave them in place. Any consumer that does honor
-    /// the variable-font tables will see deltas of zero relative to
-    /// the baked outlines/metrics, so the result still renders
-    /// correctly at the chosen instance, but the file is larger and
-    /// shapers will still treat the font as variable.
+    /// If false, leave them in place next to the baked outlines and
+    /// metrics. The file is larger and shapers will still treat the
+    /// font as variable. A consumer that applies the variation tables
+    /// on top of the baked values adds the deltas a second time unless
+    /// `coords` is the default instance.
+    ///
+    /// Has no effect when [`InstanceInput::axis_pins`] keeps any axis
+    /// variable. The output is then still a variable font, so its
+    /// trimmed variation tables always stay.
     pub drop_var_tables: bool,
     /// Per-axis pin policy. An empty vector means "pin every axis"
     /// (the existing full-instancing behavior). When non-empty,
@@ -206,9 +211,9 @@ pub struct InstanceInput {
     /// peak / intermediate region keeps only its `Keep`-axis
     /// dimensions, every per-point delta scales by the Pin-axis
     /// support-scalar product, and tuples whose Pin support drops to
-    /// zero are dropped. CFF2's VarStore partial-projection is still
-    /// staged; a CFF2 source with `Keep` still surfaces an
-    /// `Unsupported` error today.
+    /// zero are dropped. A CFF2 source has its VarStore projected the
+    /// same way, and every `blend` is rewritten to the surviving
+    /// regions.
     pub axis_pins: Vec<AxisPin>,
 }
 
@@ -229,7 +234,7 @@ pub struct InstancedOutput {
     pub bytes: Vec<u8>,
     /// Pieces of the source font left out of the instance because they
     /// could not be read, sorted by table and offset. Empty for a well
-    /// formed font. See [`SubsetWarning`].
+    /// formed font. At most 65,536 are kept. See [`SubsetWarning`].
     pub warnings: Vec<SubsetWarning>,
 }
 
@@ -613,12 +618,6 @@ fn bake_gpos_var(face: &Face<'_>, coords: &[f32]) -> Result<Option<Vec<u8>>, Sub
     ))
 }
 
-// silence clippy warning about unused GlyphId import from lib (kept for
-// public surface symmetry with the rest of the crate).
-const _: () = {
-    let _: Option<GlyphId> = None;
-};
-
 #[cfg(test)]
 mod tests;
 
@@ -627,3 +626,6 @@ mod vvar_synthetic_tests;
 
 #[cfg(test)]
 mod partial_instancing_tests;
+
+#[cfg(test)]
+mod robustness_tests;

@@ -69,12 +69,13 @@ use crate::unicode::joining::{joining_type, JoiningType};
 /// default LangSys.
 pub const MONG_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"mong", *b"DFLT"];
 
-/// Mongolian shaper has no script-specific feature chain of its
-/// own beyond `locl` + `ccmp` and the four positional
-/// (`isol`/`init`/`medi`/`fina`) features run masked below. `calt`
-/// and `liga` fire afterward in default-GSUB; nothing for the
-/// Mongolian shaper to drive itself.
-#[allow(dead_code)]
+/// Features the Mongolian shaper runs before the positional pass.
+/// Always empty.
+///
+/// The shaper drives `locl` + `ccmp` and the four positional features
+/// (`isol`/`init`/`medi`/`fina`), masked by joining form. `calt` and
+/// `liga` run in the generic default GSUB pass after this shaper
+/// returns.
 pub const MONG_FEATURES_PRE: &[&[u8; 4]] = &[];
 
 /// True for every codepoint that is part of the Mongolian block.

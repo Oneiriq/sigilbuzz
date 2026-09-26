@@ -27,7 +27,7 @@ use super::attach::{self, Attach};
 use super::fallback::{self, MarkPositioner};
 use super::gpos::{self, GposCx};
 use super::shaper::{MarkZeroing, Shaper};
-use super::{kern, Feature, ProcessedSegment, VarCtx};
+use super::{kern, Feature, LookupBudget, ProcessedSegment, VarCtx};
 use crate::buffer::{Direction, Glyph};
 use crate::error::Result;
 use crate::face::Face;
@@ -109,6 +109,7 @@ pub(super) fn position(
     input: &Inputs<'_>,
     glyphs: &mut [Glyph],
     segments: &[ProcessedSegment],
+    budget: &mut LookupBudget,
 ) -> Result<()> {
     let direction = input.direction;
     let horizontal = direction.is_horizontal();
@@ -182,11 +183,14 @@ pub(super) fn position(
                 let lookups = gpos::stage_lookups(input.features, horizontal, &required, |tag| {
                     lookups_for(gpos, tag, seg.script_priority)
                 });
-                let mut att = Attach {
-                    direction,
-                    slots: &mut slots[seg.range.clone()],
+                let (Some(seg_glyphs), Some(seg_slots)) = (
+                    glyphs.get_mut(seg.range.clone()),
+                    slots.get_mut(seg.range.clone()),
+                ) else {
+                    continue;
                 };
-                gpos::apply_stage(&cx, &mut glyphs[seg.range.clone()], &mut att, &lookups);
+                let mut att = Attach::new(direction, seg_slots);
+                gpos::apply_stage(&cx, seg_glyphs, &mut att, &lookups, budget);
             }
         }
     }

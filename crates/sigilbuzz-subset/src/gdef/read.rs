@@ -9,10 +9,14 @@ use alloc::vec::Vec;
 
 use sigilbuzz::Error;
 
+use crate::layout::MAX_GLYPH_ENTRIES;
 pub(super) use crate::read::{slice_at, u16_at, u32_at};
 
 /// Lists the `(glyph, class)` pairs of the ClassDef table at `off`,
-/// leaving out glyphs of class 0.
+/// leaving out glyphs of class 0. The walk stops after
+/// [`MAX_GLYPH_ENTRIES`] pairs: a valid table never lists more, and
+/// overlapping ranges in a malformed one could otherwise expand into
+/// billions of entries.
 ///
 /// ```text
 ///   format 1: u16 format, u16 startGlyphID, u16 glyphCount,
@@ -49,7 +53,11 @@ pub(super) fn class_def(table: &[u8], off: usize) -> Result<Vec<(u16, u16)>, Err
                 let class = u16_at(table, rec + 4, CTX)?;
                 // A range that ends before it starts names no glyph.
                 if class != 0 {
-                    out.extend((start..=end).map(|gid| (gid, class)));
+                    let room = MAX_GLYPH_ENTRIES.saturating_sub(out.len());
+                    if room == 0 {
+                        break;
+                    }
+                    out.extend((start..=end).take(room).map(|gid| (gid, class)));
                 }
             }
         }
@@ -64,7 +72,8 @@ pub(super) fn class_def(table: &[u8], off: usize) -> Result<Vec<(u16, u16)>, Err
 }
 
 /// Lists the `(glyph, coverage index)` pairs of the Coverage table at
-/// `off`, in table order.
+/// `off`, in table order. The walk stops after [`MAX_GLYPH_ENTRIES`]
+/// glyphs, as [`class_def`] does.
 ///
 /// ```text
 ///   format 1: u16 format, u16 glyphCount, u16 glyphArray[glyphCount]
@@ -94,7 +103,11 @@ pub(super) fn coverage(table: &[u8], off: usize) -> Result<Vec<(u16, u16)>, Erro
                         context: "GDEF Coverage range ends before it starts",
                     });
                 }
-                for (k, gid) in (start..=end).enumerate() {
+                let room = MAX_GLYPH_ENTRIES.saturating_sub(out.len());
+                if room == 0 {
+                    break;
+                }
+                for (k, gid) in (start..=end).enumerate().take(room) {
                     out.push((gid, first_index.wrapping_add(k as u16)));
                 }
             }

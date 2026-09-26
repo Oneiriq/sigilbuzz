@@ -54,6 +54,24 @@
 //! Per-type rewriters slot in here one at a time; the per-type module
 //! call sites are stable, so adding a new lookup-type rewriter does
 //! not require touching this module.
+//!
+//! ## Work budget
+//!
+//! Offsets in a layout table may point many records at the same
+//! bytes, so a small table can describe billions of rules. The
+//! [`GidMap`] carries a [`WorkBudget`] that every rewriter charges for
+//! the records it visits and the bytes it emits. When the budget runs
+//! out the driver drops the whole table and reports it through the
+//! subset warnings.
+//!
+//! ## Offset overflow
+//!
+//! Every emitted offset is range-checked (see [`crate::offset16`]). A
+//! rebuilt subtable that no longer fits its 16-bit offsets fails the
+//! subset, after the mark attachment and PairPos rewriters have tried
+//! splitting it. When the LookupList itself overflows,
+//! [`crate::lookup_list`] moves every subtable behind an Extension
+//! lookup, which uses 32-bit offsets.
 
 use alloc::vec::Vec;
 
@@ -61,6 +79,7 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
 use crate::offset16::Offset16Guard;
+use crate::util::{WorkBudget, WORK_LIMIT};
 use crate::warnings::{Diag, Warnings};
 use crate::{gdef, GlyphId, SubsetError, SubsetInput};
 
@@ -68,16 +87,28 @@ mod bytes;
 mod driver;
 mod lists;
 
-pub(crate) use bytes::{classdef_pairs_at, extension_target, parse_coverage_glyphs};
+use bytes::parse_classdef_pairs_from_bytes;
+pub(crate) use bytes::{extension_target, parse_coverage_glyphs, read_u16};
 pub(crate) use driver::{build_gpos, build_gsub};
+
+/// A valid Coverage or ClassDef lists each glyph at most once, so it
+/// never names more than this many glyphs. The byte walkers stop
+/// there, which bounds their output on overlapping ranges.
+pub(crate) const MAX_GLYPH_ENTRIES: usize = 1 << 16;
 
 /// A new-namespace gid translator. `map(old) -> Some(new)` when the
 /// gid is kept, `None` when it has been dropped.
 ///
-/// Built once per subset from the closure walker's kept-gid set.
+/// Built once per subset from the closure walker's kept-gid set. It
+/// also carries the work budget the layout rewriters charge (see the
+/// module docs).
 pub(crate) struct GidMap {
     /// Indexed by old gid; `None` means the gid was dropped.
     table: Vec<Option<u16>>,
+    /// Number of `Some` entries in `table`.
+    kept_len: usize,
+    /// Work left for the current table rewrite.
+    budget: WorkBudget,
 }
 
 impl GidMap {
@@ -90,20 +121,88 @@ impl GidMap {
         let max = kept.iter().copied().max().unwrap_or(0);
         let mut table = alloc::vec![None; max as usize + 1];
         for (new, &old) in kept.iter().enumerate() {
-            table[old as usize] = Some(new as u16);
+            if let Some(slot) = table.get_mut(old as usize) {
+                *slot = Some(new as u16);
+            }
         }
-        Self { table }
+        Self::with_table(table)
     }
 
     #[cfg(test)]
     pub(crate) fn from_table(table: Vec<Option<u16>>) -> Self {
-        Self { table }
+        Self::with_table(table)
+    }
+
+    fn with_table(table: Vec<Option<u16>>) -> Self {
+        let kept_len = table.iter().filter(|slot| slot.is_some()).count();
+        Self {
+            table,
+            kept_len,
+            budget: WorkBudget::new(WORK_LIMIT),
+        }
+    }
+
+    /// Number of kept gids, the length of [`GidMap::iter_kept`].
+    pub(crate) fn kept_len(&self) -> usize {
+        self.kept_len
     }
 
     /// Translates `old` to its new gid, or `None` if dropped.
     #[must_use]
     pub(crate) fn map(&self, old: u16) -> Option<u16> {
         self.table.get(old as usize).copied().flatten()
+    }
+
+    /// Charges `units` of work to the rewrite budget. Returns false once
+    /// the budget is spent. The caller should stop and drop its output.
+    pub(crate) fn spend(&self, units: usize) -> bool {
+        self.budget.spend(units)
+    }
+
+    /// True once the rewrite budget has run out.
+    pub(crate) fn budget_spent(&self) -> bool {
+        self.budget.is_spent()
+    }
+
+    /// Refills the rewrite budget before the next table.
+    pub(crate) fn reset_budget(&self) {
+        self.budget.reset(WORK_LIMIT);
+    }
+
+    /// Enumerates a Coverage table's glyphs (see
+    /// [`parse_coverage_glyphs`]) and charges the budget for them.
+    /// Returns `None` once the budget is spent.
+    pub(crate) fn coverage_glyphs(&self, bytes: &[u8]) -> Option<Vec<u16>> {
+        if self.budget_spent() {
+            return None;
+        }
+        let glyphs = parse_coverage_glyphs(bytes);
+        self.spend(glyphs.len() + 1).then_some(glyphs)
+    }
+
+    /// Enumerates a ClassDef table's `(gid, class)` pairs (see
+    /// [`parse_classdef_pairs_from_bytes`]) and charges the budget for
+    /// them. Returns `None` once the budget is spent.
+    pub(crate) fn classdef_pairs(&self, bytes: &[u8]) -> Option<Vec<(u16, u16)>> {
+        if self.budget_spent() {
+            return None;
+        }
+        let pairs = parse_classdef_pairs_from_bytes(bytes);
+        self.spend(pairs.len() + 1).then_some(pairs)
+    }
+
+    /// The `(gid, class)` pairs of the ClassDef that `offset` points at
+    /// inside `sub`, class 0 left out, charged to the budget like
+    /// [`GidMap::classdef_pairs`]. A null offset is the spec's empty
+    /// ClassDef, every glyph in class 0, so it yields no pairs. fontmake
+    /// leaves the backtrack ClassDef of chained context format 2 null
+    /// this way. Returns `None` for an offset past the end of
+    /// `sub` or once the budget is spent.
+    pub(crate) fn classdef_pairs_at(&self, sub: &[u8], offset: usize) -> Option<Vec<(u16, u16)>> {
+        if offset == 0 {
+            return Some(Vec::new());
+        }
+        self.classdef_pairs(sub.get(offset..)?)
     }
 
     /// Iterates over every kept `(old_gid, new_gid)` pair in old-gid
@@ -136,8 +235,8 @@ impl GidMap {
 pub(crate) struct RewriterCtx<'a> {
     pub gid_map: &'a GidMap,
     /// Optional old -> new lookup-index map. Set during the second
-    /// pass over context-style lookups (GSUB types 5 / 6) so their
-    /// nested `SubstLookupRecord` entries can be patched. `None` on
+    /// pass over context-style lookups (GSUB types 5 / 6, GPOS types
+    /// 7 / 8) so their nested lookup records can be patched. `None` on
     /// the first pass. Context rewriters preserve the source's
     /// lookup-list indices unchanged so the caller can decide what
     /// survives and rebuild the renumber map afterwards.
@@ -170,6 +269,13 @@ impl<'a> RewriterCtx<'a> {
     /// recording an overflow in [`RewriterCtx::offsets`].
     pub(crate) fn off16(&self, distance: usize) -> u16 {
         self.offsets.narrow(distance)
+    }
+
+    /// Narrows an entry count of a rebuilt subtable to a u16, recording
+    /// an overflow in [`RewriterCtx::offsets`] the way
+    /// [`RewriterCtx::off16`] does for offsets.
+    pub(crate) fn count16(&self, count: usize) -> u16 {
+        self.offsets.narrow(count)
     }
 }
 
@@ -251,7 +357,7 @@ pub(crate) fn decide(
         } else {
             Decision::Preserve
         };
-        let gdef_store = face.table_bytes(tag::GDEF).ok().is_some_and(|gdef| {
+        let gdef_store = face.table_bytes(tag::GDEF).is_ok_and(|gdef| {
             let minor = gdef
                 .get(2..4)
                 .map_or(0, |b| u16::from_be_bytes([b[0], b[1]]));
@@ -306,6 +412,7 @@ pub(crate) fn decide(
         Decision::Drop
     };
     let gdef = if has_gdef {
+        map.reset_budget();
         match gdef::rewrite_gdef(face, &map, input.retain_variations, warnings)? {
             Some(b) => Decision::Rewrite(b),
             None => Decision::Drop,

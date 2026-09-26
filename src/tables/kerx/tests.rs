@@ -5,6 +5,23 @@
 use super::*;
 use alloc::vec;
 
+#[test]
+fn many_subtables_do_not_overflow_kern_sum() {
+    // 70000 format-0 subtables each kern (1, 2) by 32767. Their sum
+    // passes i32::MAX, and the plain `+=` used to overflow.
+    let one = build_kerx_format0(&[(1, 2, i16::MAX)]);
+    let sub = &one[8..];
+    let n: u32 = 70_000;
+    let mut bytes = one[..4].to_vec();
+    bytes.extend_from_slice(&n.to_be_bytes());
+    for _ in 0..n {
+        bytes.extend_from_slice(sub);
+    }
+    let k = Kerx::parse(&bytes, 10).unwrap();
+    assert_eq!(k.subtable_count(), n as usize);
+    assert_eq!(k.kern(1, 2), i16::MAX);
+}
+
 mod format1;
 mod format4;
 mod format6;

@@ -147,7 +147,8 @@ impl ValueRecord {
 /// lockstep.
 #[must_use]
 fn round_delta(delta: f32) -> i32 {
-    #[allow(clippy::cast_possible_truncation)]
+    // `as` saturates on overflow and maps NaN to zero, so no delta
+    // the variation store returns can panic here.
     if delta >= 0.0 {
         (delta + 0.5) as i32
     } else {
@@ -316,7 +317,6 @@ mod tests {
     // -------- resolve_variation_delta --------
 
     fn write_f2dot14(out: &mut Vec<u8>, v: f32) {
-        #[allow(clippy::cast_possible_truncation)]
         let raw = (v * 16384.0).round() as i16;
         out.extend_from_slice(&raw.to_be_bytes());
     }

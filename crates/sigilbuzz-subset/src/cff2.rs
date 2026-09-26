@@ -31,11 +31,15 @@
 //! FDArray, FDSelect, and the VariationStore are referenced by absolute
 //! offset from that dict.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+use sigilbuzz::tables::variation_store::ItemVariationStore;
+
 use crate::cff::{
-    encode_dict_offset_placeholder, parse_fd_select, read_index_cff2, walk_dict, DictEntry,
-    OP_CHARSTRINGS, OP_FD_ARRAY, OP_FD_SELECT, OP_PRIVATE, OP_SUBRS, OP_VSTORE,
+    encode_dict_offset_placeholder, parse_fd_select, private_operands, read_index_cff2,
+    read_private_dict, subr_bias, walk_dict, DictEntry, OP_CHARSTRINGS, OP_FD_ARRAY, OP_FD_SELECT,
+    OP_PRIVATE, OP_VSTORE,
 };
 use crate::SubsetError;
 
@@ -131,22 +135,22 @@ struct ParsedCff2<'a> {
 }
 
 fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
-    if data.len() < 5 {
+    let Some(&[major, _, hdr_size, len_hi, len_lo]) = data.first_chunk::<5>() else {
         return Err(SubsetError::Unsupported("CFF2 header truncated"));
-    }
-    let major = data[0];
+    };
     if major != 2 {
         return Err(SubsetError::Unsupported("CFF2 major version != 2"));
     }
-    let hdr_size = data[2] as usize;
+    let hdr_size = usize::from(hdr_size);
     if hdr_size < 5 {
         return Err(SubsetError::Unsupported("CFF2 hdrSize < 5"));
     }
-    let top_dict_length = u16::from_be_bytes([data[3], data[4]]) as usize;
-    if data.len() < hdr_size + top_dict_length {
-        return Err(SubsetError::Unsupported("CFF2 Top DICT past end"));
-    }
-    let top_dict = &data[hdr_size..hdr_size + top_dict_length];
+    let top_dict_length = usize::from(u16::from_be_bytes([len_hi, len_lo]));
+    // Both terms are small, so the sum cannot overflow.
+    let g_pos = hdr_size + top_dict_length;
+    let top_dict = data
+        .get(hdr_size..g_pos)
+        .ok_or(SubsetError::Unsupported("CFF2 Top DICT past end"))?;
 
     // Walk Top DICT for offsets.
     let entries = walk_dict(top_dict)?;
@@ -189,7 +193,6 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
     }
 
     // Global Subr INDEX is immediately after the Top DICT.
-    let g_pos = hdr_size + top_dict_length;
     let (global_subrs, _) = read_index_cff2(data, g_pos)?;
 
     let cs_off = cs_off.ok_or(SubsetError::Unsupported(
@@ -207,45 +210,21 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
     let mut per_fd_local_subrs: Vec<Vec<&[u8]>> = Vec::with_capacity(fd_array.len());
     for fd_bytes in &fd_array {
         let fd_entries = walk_dict(fd_bytes)?;
-        let mut priv_info: Option<(u32, u32)> = None;
-        for e in &fd_entries {
-            if e.op == OP_PRIVATE && e.operands.len() >= 2 {
-                let s = e.operands[e.operands.len() - 2].int_value;
-                let o = e.operands[e.operands.len() - 1].int_value;
-                if let (Some(sv), Some(ov)) = (s, o) {
-                    if sv >= 0 && ov >= 0 {
-                        priv_info = Some((sv as u32, ov as u32));
-                    }
-                }
-            }
-        }
-        let (priv_bytes, locals) = if let Some((size, off)) = priv_info {
-            let off_u = off as usize;
-            let size_u = size as usize;
-            if off_u + size_u > data.len() {
-                return Err(SubsetError::Unsupported("CFF2 Private DICT past end"));
-            }
-            let priv_bytes = &data[off_u..off_u + size_u];
-            let priv_entries = walk_dict(priv_bytes)?;
-            let mut subrs_rel: Option<u32> = None;
-            for e in &priv_entries {
-                if e.op == OP_SUBRS {
-                    if let Some(v) = e.operands.last().and_then(|o| o.int_value) {
-                        if v >= 0 {
-                            subrs_rel = Some(v as u32);
-                        }
-                    }
-                }
-            }
-            if let Some(rel) = subrs_rel {
-                let abs = off_u + rel as usize;
-                let (locals, _) = read_index_cff2(data, abs)?;
-                (priv_bytes, locals)
-            } else {
-                (priv_bytes, Vec::new())
-            }
-        } else {
-            (&[][..], Vec::new())
+        // The last well-formed Private operator wins.
+        let priv_info = fd_entries
+            .iter()
+            .rev()
+            .filter(|e| e.op == OP_PRIVATE)
+            .find_map(private_operands);
+        let (priv_bytes, locals) = match priv_info {
+            Some((size, off)) => read_private_dict(
+                data,
+                size,
+                off,
+                read_index_cff2,
+                "CFF2 Private DICT past end",
+            )?,
+            None => (&[][..], Vec::new()),
         };
         per_fd_private.push(priv_bytes);
         per_fd_local_subrs.push(locals);
@@ -268,16 +247,15 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
     };
 
     let vstore_blob = if let Some(off) = vstore_off {
-        let off_u = off as usize;
-        if off_u + 2 > data.len() {
+        let from_off = data.get(off as usize..).unwrap_or_default();
+        let Some(len) = from_off.first_chunk::<2>() else {
             return Err(SubsetError::Unsupported("CFF2 VariationStore truncated"));
-        }
-        let len = u16::from_be_bytes([data[off_u], data[off_u + 1]]) as usize;
-        let end = off_u + 2 + len;
-        if end > data.len() {
-            return Err(SubsetError::Unsupported("CFF2 VariationStore past end"));
-        }
-        Some(&data[off_u..end])
+        };
+        let len = usize::from(u16::from_be_bytes(*len));
+        let blob = from_off
+            .get(..2 + len)
+            .ok_or(SubsetError::Unsupported("CFF2 VariationStore past end"))?;
+        Some(blob)
     } else {
         None
     };
@@ -327,6 +305,151 @@ const OP_HVCURVETO: u8 = 31;
 
 const MAX_BAKE_DEPTH: u8 = 10;
 
+/// Minimum number of charstring tokens (operand pushes plus operators,
+/// counted inside inlined subroutines too) one bake may process.
+const MIN_BAKE_TOKENS: usize = 1 << 22;
+
+/// Token allowance per byte of the source CFF2 table.
+const BAKE_TOKENS_PER_BYTE: usize = 64;
+
+/// Token budget for baking every charstring of a CFF2 table of
+/// `table_len` bytes.
+///
+/// Subroutine inlining can expand a small table exponentially: a chain
+/// of nested subroutines that each call the next one ten times grows
+/// tenfold per level, and the depth limit allows ten levels. The budget
+/// stops such a walk with an error. It scales with the table size and
+/// sits far above the inlined size of real fonts.
+fn bake_token_budget(table_len: usize) -> usize {
+    table_len
+        .saturating_mul(BAKE_TOKENS_PER_BYTE)
+        .max(MIN_BAKE_TOKENS)
+}
+
+/// Charges one token against `budget`, failing once it is spent.
+fn charge_token(budget: &mut usize, err: &'static str) -> Result<(), SubsetError> {
+    *budget = budget.checked_sub(1).ok_or(SubsetError::Unsupported(err))?;
+    Ok(())
+}
+
+/// Resolves the absolute subroutine index a `callsubr` / `callgsubr`
+/// operand selects, or `None` when it falls outside `subrs`.
+fn biased_subr<'s>(subrs: &[&'s [u8]], operand: f32) -> Option<&'s [u8]> {
+    // Float-to-int casts saturate, and NaN maps to 0.
+    let raw = operand as i32;
+    let abs = i64::from(raw) + i64::from(subr_bias(subrs.len()));
+    usize::try_from(abs)
+        .ok()
+        .and_then(|i| subrs.get(i))
+        .copied()
+}
+
+/// Region counts and region scalars for every `vsindex` a bake
+/// touches, resolved once per table.
+///
+/// A charstring can issue a `blend` every few bytes, and resolving a
+/// subtable walks its whole region list. Caching per `vsindex` keeps
+/// the bake linear in the charstring size.
+struct BlendCache<'a> {
+    ivs: Option<&'a ItemVariationStore<'a>>,
+    /// Source IVS bytes (without the CFF2 length prefix).
+    ivs_bytes: &'a [u8],
+    /// Scalar of every region in the region list at the bake coords.
+    region_scalars: Vec<f32>,
+    coords: &'a [f32],
+    resolved: BTreeMap<u16, (usize, Vec<f32>)>,
+}
+
+impl<'a> BlendCache<'a> {
+    fn new(
+        ivs: Option<&'a ItemVariationStore<'a>>,
+        ivs_bytes: &'a [u8],
+        coords: &'a [f32],
+    ) -> Self {
+        let region_scalars = ivs
+            .map(|s| {
+                (0..s.region_count())
+                    .map(|r| s.region_scalar(r, coords).unwrap_or(0.0))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            ivs,
+            ivs_bytes,
+            region_scalars,
+            coords,
+            resolved: BTreeMap::new(),
+        }
+    }
+
+    /// Returns `(region_count, scalars)` for subtable `vsindex`: the
+    /// number of deltas one blended value carries, and the scalar that
+    /// multiplies each of them. Both are empty when the subtable does
+    /// not resolve.
+    fn resolve(&mut self, vsindex: u16) -> (usize, &[f32]) {
+        let Self {
+            ivs,
+            ivs_bytes,
+            region_scalars,
+            coords,
+            resolved,
+        } = self;
+        let (count, scalars) = resolved.entry(vsindex).or_insert_with(|| {
+            let Some(store) = *ivs else {
+                return (0, Vec::new());
+            };
+            let Some(count) = store.variation_region_count(vsindex) else {
+                return (0, Vec::new());
+            };
+            let scalars = subtable_region_indexes(ivs_bytes, vsindex)
+                .filter(|indexes| indexes.len() == usize::from(count))
+                .map(|indexes| {
+                    indexes
+                        .map(|ri| region_scalars.get(usize::from(ri)).copied().unwrap_or(0.0))
+                        .collect()
+                })
+                .or_else(|| store.region_scalars(vsindex, coords))
+                .unwrap_or_default();
+            (usize::from(count), scalars)
+        });
+        (*count, scalars.as_slice())
+    }
+}
+
+/// Iterates the region indexes of IVS subtable `outer`, or returns
+/// `None` when the header or index list is truncated.
+fn subtable_region_indexes(
+    ivs_bytes: &[u8],
+    outer: u16,
+) -> Option<impl ExactSizeIterator<Item = u16> + '_> {
+    let slot = 8 + usize::from(outer) * 4;
+    let sub_off = read_u32_at(ivs_bytes, slot)? as usize;
+    let count = usize::from(read_u16_at(ivs_bytes, sub_off.checked_add(4)?)?);
+    let list = ivs_bytes
+        .get(sub_off.checked_add(6)?..)?
+        .get(..count.checked_mul(2)?)?;
+    Some(
+        list.chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]])),
+    )
+}
+
+/// Reads a big-endian `u16` at `off`, or `None` past the end.
+fn read_u16_at(data: &[u8], off: usize) -> Option<u16> {
+    data.get(off..)?
+        .first_chunk::<2>()
+        .copied()
+        .map(u16::from_be_bytes)
+}
+
+/// Reads a big-endian `u32` at `off`, or `None` past the end.
+fn read_u32_at(data: &[u8], off: usize) -> Option<u32> {
+    data.get(off..)?
+        .first_chunk::<4>()
+        .copied()
+        .map(u32::from_be_bytes)
+}
+
 /// Decodes a single push operand at `data[pos..]` into an f32 plus
 /// byte-length. Mirrors `crate::cff::decode_operand` but preserves
 /// fractional values from the 16.16-fixed (b0=255) form.
@@ -371,7 +494,6 @@ fn encode_charstring_number(v: f32, out: &mut Vec<u8>) {
     let rounded = v.round();
     let is_integer = (v - rounded).abs() < 1e-6;
     if is_integer && (-32768.0..=32767.0).contains(&rounded) {
-        #[allow(clippy::cast_possible_truncation)]
         let iv = rounded as i32;
         if (-107..=107).contains(&iv) {
             out.push((iv + 139) as u8);
@@ -384,7 +506,6 @@ fn encode_charstring_number(v: f32, out: &mut Vec<u8>) {
             out.push(((v0 >> 8) + 251) as u8);
             out.push((v0 & 0xff) as u8);
         } else {
-            #[allow(clippy::cast_possible_truncation)]
             let bytes = (iv as i16).to_be_bytes();
             out.push(OP_SHORTINT);
             out.push(bytes[0]);
@@ -392,23 +513,11 @@ fn encode_charstring_number(v: f32, out: &mut Vec<u8>) {
         }
     } else {
         // 16.16 fixed.
-        #[allow(clippy::cast_possible_truncation)]
         let raw = (v * 65536.0).round() as i32;
         out.push(255);
         out.extend_from_slice(&raw.to_be_bytes());
     }
 }
 
-fn subr_bias(count: usize) -> i32 {
-    if count < 1240 {
-        107
-    } else if count < 33_900 {
-        1131
-    } else {
-        32_768
-    }
-}
-
 #[cfg(test)]
-#[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
 mod tests;

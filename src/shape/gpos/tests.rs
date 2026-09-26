@@ -123,6 +123,34 @@ fn value_records_move_the_advance_of_the_run_direction_only() {
     assert_eq!((g.x_advance, g.y_advance), (500, -1040));
 }
 
+/// Stacked adjustments pin a position at the `i32` bounds instead of
+/// overflowing (which panics in debug builds).
+#[test]
+fn value_records_saturate_at_the_i32_bounds() {
+    let v = ValueRecord {
+        x_placement: i16::MAX,
+        y_placement: i16::MIN,
+        x_advance: i16::MAX,
+        y_advance: i16::MAX,
+        ..ValueRecord::default()
+    };
+    let var = VarCtx::none();
+    let mut g = glyph(1);
+    g.x_offset = i32::MAX - 1;
+    g.y_offset = i32::MIN + 1;
+    g.x_advance = i32::MAX - 1;
+    apply_value(&mut g, &v, &[], &var, true);
+    assert_eq!(
+        (g.x_offset, g.y_offset, g.x_advance),
+        (i32::MAX, i32::MIN, i32::MAX)
+    );
+
+    let mut g = glyph(1);
+    g.y_advance = i32::MIN + 1;
+    apply_value(&mut g, &v, &[], &var, false);
+    assert_eq!(g.y_advance, i32::MIN);
+}
+
 fn be16(out: &mut Vec<u8>, v: u16) {
     out.extend_from_slice(&v.to_be_bytes());
 }
@@ -176,6 +204,7 @@ fn pair_pos_format1(v1_x_advance: i16, value_format2: u16, device: bool) -> Vec<
 fn state(filter: MatchFilter<'_>) -> LookupState<'_> {
     LookupState {
         mcx: MatchContext::new(filter, LayoutTable::Gpos, Joiners::AUTO),
+        index: 0,
     }
 }
 
@@ -237,6 +266,7 @@ fn pair_finds_the_second_glyph_across_default_ignorables() {
     let mut glyphs = vec![glyph(1), zwj, glyph(2)];
     let manual = LookupState {
         mcx: MatchContext::new(MatchFilter::none(), LayoutTable::Gpos, Joiners::MANUAL),
+        index: 0,
     };
     let next = apply_pair(&pp, &manual, &mut glyphs, 0, &VarCtx::none(), true);
     assert_eq!(next, None);

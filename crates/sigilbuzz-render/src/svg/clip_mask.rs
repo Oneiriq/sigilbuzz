@@ -6,31 +6,32 @@ use alloc::vec::Vec;
 use crate::affine::Affine;
 use crate::pixmap::ColorPixmap;
 
-use super::document::{walk, Defs, ElemCtx};
+use super::document::{doc_full, node_cost, walk, Defs, ElemCtx};
 use super::model::{ClipShape, MaskShape, MaskType, MaskUnits, SvgDoc};
 use super::path::{
     circle_to_path, ellipse_to_path, line_to_path, parse_path_d, polygon_to_path, polyline_to_path,
     rect_to_path,
 };
-use super::render::render_fill;
+use super::render::{render_fill, RenderBudget};
 use super::style::{parse_length, parse_transform};
 use super::xml::name_eq;
-use super::MAX_FILLS;
 
 pub(super) fn resolve_clip_shape(defs: &Defs<'_>, id: &str) -> Option<ClipShape> {
     let cp = defs.lookup(id)?;
-    if !name_eq(&cp.name, "clipPath") {
+    if !name_eq(&cp.name, "clipPath") || !defs.charge_work(node_cost(cp)) {
         return None;
     }
     // Walk children. We support exactly one shape (path / rect /
     // circle / ellipse). Multiple shapes inside a clipPath are still
-    // accepted but only the first is used; this matches the
-    // documented "single-path basic clipPath" deferral note.
+    // accepted but only the first is used.
     let mut local_xform = Affine::identity();
     if let Some(t) = cp.attr("transform").and_then(parse_transform) {
         local_xform = local_xform.compose(&t);
     }
     for c in &cp.children {
+        if !defs.charge_work(node_cost(c)) {
+            return None;
+        }
         let child_ops = if name_eq(&c.name, "path") {
             c.attr("d").and_then(|d| parse_path_d(d).ok())
         } else if name_eq(&c.name, "rect") {
@@ -80,7 +81,7 @@ pub(super) fn resolve_clip_shape(defs: &Defs<'_>, id: &str) -> Option<ClipShape>
 /// recursive composite.
 pub(super) fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape> {
     let mn = defs.lookup(id)?;
-    if !name_eq(&mn.name, "mask") {
+    if !name_eq(&mn.name, "mask") || !defs.charge_work(node_cost(mn)) {
         return None;
     }
     // Build a tiny scratch SvgDoc so we can re-use `walk` end-to-end.
@@ -98,7 +99,7 @@ pub(super) fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape>
         ctx.xform = ctx.xform.compose(&t);
     }
     // Drop any nested mask reference on the mask root itself:
-    // mask-of-mask isn't supported; the brief defers it explicitly.
+    // mask-of-mask isn't supported.
     ctx.mask_href = None;
     // Cycle-guard: bump `mask_depth` so any descendant `<rect
     // mask="url(#...)">` inside the mask body falls out at
@@ -108,8 +109,9 @@ pub(super) fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape>
     ctx.mask_depth = ctx.mask_depth.saturating_add(1);
     for child in &mn.children {
         // Sanity: cap mask-internal fill count at the same MAX_FILLS
-        // ceiling as the document.
-        if scratch.fills.len() >= MAX_FILLS {
+        // ceiling as the document. The work and storage budgets are
+        // the document's own.
+        if doc_full(&scratch, defs) {
             break;
         }
         let _ = walk(child, &mut scratch, defs, &ctx, 0, 0);
@@ -134,11 +136,9 @@ pub(super) fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape>
     // Per SVG spec the mask region defaults to the full bounding-box
     // window when `objectBoundingBox` (-10%, -10%, 120%, 120% in the
     // spec, but consumer-side OT-SVG fonts almost always use the
-    // simpler 0/0/1/1 window. We follow that simpler convention so
-    // the test fixture in the brief reads cleanly). For
-    // `userSpaceOnUse`, the legacy PR #236 behavior ignored the
-    // region entirely, so we keep the parse but only consult it in
-    // the bbox path.
+    // simpler 0/0/1/1 window, which is the default we use). For
+    // `userSpaceOnUse` the region is ignored, so we keep the parse but
+    // only consult it in the bbox path.
     let region_x = mn.attr("x").and_then(parse_length).unwrap_or(0.0);
     let region_y = mn.attr("y").and_then(parse_length).unwrap_or(0.0);
     let region_w = mn.attr("width").and_then(parse_length).unwrap_or(1.0);
@@ -167,10 +167,17 @@ pub(super) fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape>
 /// When `maskUnits="objectBoundingBox"` the mask's `(x, y, width,
 /// height)` rect is interpreted in `[0, 1]²` of the masked element's
 /// bounding box (computed from `dst`'s non-zero alpha extent). Pixels
-/// outside that rect are forced to `m = 0`. `userSpaceOnUse` (the
-/// PR #236 behavior) leaves the mask coverage unchanged across the
-/// whole canvas.
-pub(super) fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &Affine, tol: f32) {
+/// outside that rect are forced to `m = 0`. `userSpaceOnUse` leaves
+/// the mask coverage unchanged across the whole canvas.
+///
+/// Mask children draw from `budget` like any other fill.
+pub(super) fn apply_mask_budgeted(
+    dst: &mut ColorPixmap,
+    mask_shape: &MaskShape,
+    world: &Affine,
+    tol: f32,
+    budget: &mut RenderBudget,
+) {
     if dst.is_empty() {
         return;
     }
@@ -179,7 +186,7 @@ pub(super) fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &
     // element in pixel space.
     let mut mask_buf = ColorPixmap::new(dst.width, dst.height);
     for f in &mask_shape.fills {
-        render_fill(&mut mask_buf, f, world, tol);
+        render_fill(&mut mask_buf, f, world, tol, budget);
     }
 
     // For `objectBoundingBox`, derive the bbox from `dst`'s non-zero
@@ -225,8 +232,8 @@ pub(super) fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &
     // preserves the invariant.
     //
     // The mask buffer is also premultiplied (it came out of the same
-    // render pipeline). For luminance we keep the integer-math trick
-    // from PR #236: luminance(premul_rgb) is already luminance * alpha
+    // render pipeline). For luminance we use an integer-math shortcut:
+    // luminance(premul_rgb) is already luminance * alpha
     // because premul_rgb = straight_rgb * alpha, so no un-premultiply
     // step is needed. Fixed-point: BT.709 weights * 1024 -> 218 / 732 /
     // 74 (sum 1024) for round-trip-stable integer math.
@@ -276,6 +283,12 @@ pub(super) fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &
             dst.data[i * 4 + 3] = ((da * m + 127) / 255) as u8;
         }
     }
+}
+
+/// [`apply_mask_budgeted`] with a fresh render budget.
+#[cfg(test)]
+pub(super) fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &Affine, tol: f32) {
+    apply_mask_budgeted(dst, mask_shape, world, tol, &mut RenderBudget::new());
 }
 
 /// Returns the inclusive-min / exclusive-max pixel extent of the

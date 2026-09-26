@@ -339,3 +339,125 @@ fn use_reorder_moves_the_glyph_pref_substituted() {
     reorder::reorder_pre_base(&mut glyphs, ClusterLevel::MonotoneCharacters);
     assert_eq!(ids_and_clusters(&glyphs), (vec![20, 1], vec![0, 0]));
 }
+
+#[test]
+fn long_run_of_pre_base_signs_reorders_in_linear_time() {
+    // Khmer ka followed by 200000 sign-e is one consonant syllable
+    // whose pre-base signs all move. Checking each glyph against a
+    // list of moved indices cost about 4e10 comparisons.
+    const N: usize = 200_000;
+    let mut cp = vec!['\u{1780}'];
+    cp.extend(core::iter::repeat('\u{17C1}').take(N));
+    let mut glyphs = fake_glyphs(cp.len());
+    shape_khmer(
+        None,
+        None,
+        &cp,
+        &mut glyphs,
+        ClusterLevel::MonotoneCharacters,
+    );
+    // The signs move to the front in order, then the base.
+    assert_eq!(glyphs.len(), N + 1);
+    assert_eq!(glyphs[0].glyph_id, 2);
+    assert_eq!(glyphs[N - 1].glyph_id, N as u32 + 1);
+    assert_eq!(glyphs[N].glyph_id, 1);
+}
+
+#[test]
+fn many_syllables_merge_clusters_in_linear_time() {
+    // 200000 Khmer digits are 200000 one-wide syllables. Visiting
+    // every glyph once per syllable cost about 4e10 comparisons.
+    const N: usize = 200_000;
+    let cp = vec!['\u{17E0}'; N];
+    let mut glyphs: Vec<Glyph> = (0..N).map(|i| Glyph::new(1, (i * 3) as u32)).collect();
+    shape_khmer(
+        None,
+        None,
+        &cp,
+        &mut glyphs,
+        ClusterLevel::MonotoneCharacters,
+    );
+    assert_eq!(glyphs[N - 1].cluster, ((N - 1) * 3) as u32);
+}
+
+#[test]
+fn long_run_of_use_pre_base_signs_reorders_in_linear_time() {
+    // Balinese ka followed by 200000 taling is one syllable whose
+    // signs all move to its start. Moving them one at a time cost
+    // about 2e10 glyph copies.
+    const N: usize = 200_000;
+    let mut text = alloc::string::String::from("\u{1B13}");
+    text.extend(core::iter::repeat('\u{1B3E}').take(N));
+    let mut glyphs = tagged(&text);
+    reorder::reorder_pre_base(&mut glyphs, ClusterLevel::MonotoneCharacters);
+    // Each sign moves in front of the ones before it, so they end up
+    // reversed, then the base.
+    assert_eq!(glyphs.len(), N + 1);
+    assert_eq!(glyphs[0].glyph_id, N as u32 + 1);
+    assert_eq!(glyphs[N - 1].glyph_id, 2);
+    assert_eq!(glyphs[N].glyph_id, 1);
+    assert!(glyphs.iter().all(|g| g.cluster == 0));
+}
+
+/// HarfBuzz's `reorder_syllable_use` loop, one move and one merge at a
+/// time, as the reference for the batched pass. Reads the tags
+/// `reorder::tag_syllables` writes (serial in the high nibble, 1 for a
+/// halant and 2 for a pre-base glyph in the low one).
+fn reorder_one_by_one(glyphs: &mut [Glyph], level: ClusterLevel) {
+    let serial = |g: &Glyph| g.indic_position >> 4;
+    let mut start = 0;
+    while start < glyphs.len() {
+        let end = (start..glyphs.len())
+            .find(|&i| serial(&glyphs[i]) != serial(&glyphs[start]))
+            .unwrap_or(glyphs.len());
+        let mut j = start;
+        for i in start..end {
+            let m = crate::tables::layout::skip_iter::MatchGlyph::from(&glyphs[i]);
+            let category = glyphs[i].indic_position & 0x0F;
+            if category == 1 && !m.is_ligated() {
+                j = i + 1;
+            } else if category == 2 && m.lig_comp() == 0 && j < i {
+                crate::shape::merge_clusters(glyphs, j, i + 1, level);
+                glyphs[j..=i].rotate_right(1);
+            }
+        }
+        start = end;
+    }
+    for g in glyphs.iter_mut() {
+        g.indic_position = 0;
+    }
+}
+
+#[test]
+fn use_reorder_matches_moving_one_glyph_at_a_time() {
+    // Balinese ka, adeg adeg, taling, and a post-base sign, in every
+    // mix up to six long, with rising and falling clusters.
+    let alphabet = ['\u{1B13}', '\u{1B44}', '\u{1B3E}', '\u{1B38}'];
+    let levels = [
+        ClusterLevel::MonotoneGraphemes,
+        ClusterLevel::MonotoneCharacters,
+        ClusterLevel::Characters,
+    ];
+    for len in 1..=6u32 {
+        for code in 0..4u32.pow(len) {
+            let text: alloc::string::String = (0..len)
+                .map(|k| alphabet[(code / 4u32.pow(k) % 4) as usize])
+                .collect();
+            for level in levels {
+                for falling in [false, true] {
+                    let mut glyphs = tagged(&text);
+                    if falling {
+                        let n = glyphs.len() as u32;
+                        for (k, g) in glyphs.iter_mut().enumerate() {
+                            g.cluster = 3 * (n - k as u32);
+                        }
+                    }
+                    let mut expected = glyphs.clone();
+                    reorder_one_by_one(&mut expected, level);
+                    reorder::reorder_pre_base(&mut glyphs, level);
+                    assert_eq!(glyphs, expected, "{text:?} {level:?} falling {falling}");
+                }
+            }
+        }
+    }
+}

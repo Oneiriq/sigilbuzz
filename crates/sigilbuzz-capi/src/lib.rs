@@ -46,15 +46,18 @@
 //!
 //! Every transmute is contained inside this crate; no `unsafe`
 //! reaches the public Rust surface.
+//!
+//! # Null pointers and panics
+//!
+//! Every entry point accepts NULL for its object arguments and
+//! returns a neutral value (an empty object, 0, or NULL) instead of
+//! dereferencing it, as HarfBuzz does. No panic can unwind into C:
+//! Rust 1.81, the minimum supported version, aborts the process when
+//! a panic reaches an `extern "C"` function.
 
+// The exported names follow HarfBuzz (`hb_blob_t`, `hb_shape`), not
+// Rust naming conventions.
 #![allow(non_camel_case_types, non_snake_case)]
-#![allow(missing_docs)]
-#![allow(clippy::missing_safety_doc)]
-// `_face`-prefixed inner-struct fields are referenced from a few
-// non-FFI helper sites for lifetime-rooted borrows. The leading
-// underscore on the field is a documentation cue ("not for direct
-// public access"), not a "truly unused" marker.
-#![allow(clippy::used_underscore_binding)]
 
 extern crate alloc;
 
@@ -164,43 +167,70 @@ pub type hb_position_t = i32;
 /// HarfBuzz's destroy callback signature.
 pub type hb_destroy_func_t = unsafe extern "C" fn(*mut c_void);
 
-/// HarfBuzz memory mode. Forwarded but not actually distinguished:
-/// sigilbuzz always copies via the `Arc<Vec<u8>>`, so the only thing
-/// that matters from the C side is whether to invoke the destroy
-/// callback (which fires for any non-WRITABLE mode that has one).
+/// HarfBuzz memory mode. sigilbuzz copies the bytes in every mode, so
+/// the mode only decides when `hb_blob_create` calls the destroy
+/// callback. `HB_MEMORY_MODE_DUPLICATE` calls it before returning, as
+/// HarfBuzz does once it has made its copy. Every other mode calls it
+/// when the last reference to the blob is released.
 pub type hb_memory_mode_t = c_uint;
+/// The library copies the bytes. HarfBuzz value 0.
 pub const HB_MEMORY_MODE_DUPLICATE: hb_memory_mode_t = 0;
+/// The caller's bytes are read-only. HarfBuzz value 1.
 pub const HB_MEMORY_MODE_READONLY: hb_memory_mode_t = 1;
+/// The caller's bytes may be written in place. HarfBuzz value 2.
 pub const HB_MEMORY_MODE_WRITABLE: hb_memory_mode_t = 2;
+/// Read-only bytes that the library may copy to write. HarfBuzz
+/// value 3.
 pub const HB_MEMORY_MODE_READONLY_MAY_MAKE_WRITABLE: hb_memory_mode_t = 3;
 
 /// HarfBuzz direction enum. Values match `hb-common.h` exactly:
 /// LTR=4, RTL=5, TTB=6, BTT=7, INVALID=0.
 pub type hb_direction_t = c_uint;
+/// Direction not set.
 pub const HB_DIRECTION_INVALID: hb_direction_t = 0;
+/// Left to right.
 pub const HB_DIRECTION_LTR: hb_direction_t = 4;
+/// Right to left.
 pub const HB_DIRECTION_RTL: hb_direction_t = 5;
+/// Top to bottom.
 pub const HB_DIRECTION_TTB: hb_direction_t = 6;
+/// Bottom to top.
 pub const HB_DIRECTION_BTT: hb_direction_t = 7;
 
 /// HarfBuzz script enum: alias for `hb_tag_t`, value is the
 /// ISO 15924 four-letter code packed via HB_TAG.
 pub type hb_script_t = hb_tag_t;
+/// Script not set.
 pub const HB_SCRIPT_INVALID: hb_script_t = 0;
+/// ISO 15924 `Zyyy`, characters shared by many scripts.
 pub const HB_SCRIPT_COMMON: hb_script_t = tag(b"Zyyy");
+/// ISO 15924 `Zinh`, marks that take the script of their base.
 pub const HB_SCRIPT_INHERITED: hb_script_t = tag(b"Zinh");
+/// ISO 15924 `Latn`.
 pub const HB_SCRIPT_LATIN: hb_script_t = tag(b"Latn");
+/// ISO 15924 `Grek`.
 pub const HB_SCRIPT_GREEK: hb_script_t = tag(b"Grek");
+/// ISO 15924 `Cyrl`.
 pub const HB_SCRIPT_CYRILLIC: hb_script_t = tag(b"Cyrl");
+/// ISO 15924 `Arab`.
 pub const HB_SCRIPT_ARABIC: hb_script_t = tag(b"Arab");
+/// ISO 15924 `Hebr`.
 pub const HB_SCRIPT_HEBREW: hb_script_t = tag(b"Hebr");
+/// ISO 15924 `Deva`.
 pub const HB_SCRIPT_DEVANAGARI: hb_script_t = tag(b"Deva");
+/// ISO 15924 `Beng`.
 pub const HB_SCRIPT_BENGALI: hb_script_t = tag(b"Beng");
+/// ISO 15924 `Hani`.
 pub const HB_SCRIPT_HAN: hb_script_t = tag(b"Hani");
+/// ISO 15924 `Hang`.
 pub const HB_SCRIPT_HANGUL: hb_script_t = tag(b"Hang");
+/// ISO 15924 `Khmr`.
 pub const HB_SCRIPT_KHMER: hb_script_t = tag(b"Khmr");
+/// ISO 15924 `Mymr`.
 pub const HB_SCRIPT_MYANMAR: hb_script_t = tag(b"Mymr");
+/// ISO 15924 `Thai`.
 pub const HB_SCRIPT_THAI: hb_script_t = tag(b"Thai");
+/// ISO 15924 `Laoo`.
 pub const HB_SCRIPT_LAO: hb_script_t = tag(b"Laoo");
 
 /// Languages are interned `&'static str` pointers. We hand back a
@@ -219,10 +249,15 @@ const fn tag(s: &[u8; 4]) -> hb_tag_t {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct hb_glyph_info_t {
+    /// Before shaping, a Unicode codepoint. After shaping, a glyph id.
     pub codepoint: hb_codepoint_t,
+    /// Glyph flags. Always 0 in this implementation.
     pub mask: hb_mask_t,
+    /// Index of the input cluster this glyph belongs to.
     pub cluster: u32,
+    /// Private slot, kept for layout compatibility. Always 0.
     pub var1: u32,
+    /// Private slot, kept for layout compatibility. Always 0.
     pub var2: u32,
 }
 
@@ -231,10 +266,15 @@ pub struct hb_glyph_info_t {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct hb_glyph_position_t {
+    /// Horizontal pen advance after this glyph.
     pub x_advance: hb_position_t,
+    /// Vertical pen advance after this glyph.
     pub y_advance: hb_position_t,
+    /// Horizontal offset of the glyph from the pen position.
     pub x_offset: hb_position_t,
+    /// Vertical offset of the glyph from the pen position.
     pub y_offset: hb_position_t,
+    /// Private slot, kept for layout compatibility. Always 0.
     pub var: u32,
 }
 
@@ -242,9 +282,16 @@ pub struct hb_glyph_position_t {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct hb_feature_t {
+    /// OpenType feature tag, such as `liga`.
     pub tag: hb_tag_t,
+    /// Feature value. 0 turns the feature off, 1 turns it on, and
+    /// larger values pick an alternate.
     pub value: u32,
+    /// First cluster the override applies to. Not used by this
+    /// implementation, which applies overrides to the whole buffer.
     pub start: c_uint,
+    /// One past the last cluster the override applies to. Not used
+    /// by this implementation.
     pub end: c_uint,
 }
 
@@ -252,7 +299,9 @@ pub struct hb_feature_t {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct hb_variation_t {
+    /// Axis tag, such as `wght`.
     pub tag: hb_tag_t,
+    /// Axis value in user-space units.
     pub value: f32,
 }
 

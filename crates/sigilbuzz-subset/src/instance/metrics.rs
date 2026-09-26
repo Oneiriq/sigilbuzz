@@ -1,6 +1,7 @@
 //! The metric bakes of a full instance: hmtx through HVAR, vmtx through
 //! VVAR, and the OS/2, hhea, vhea and post fields MVAR varies.
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::tag;
@@ -38,7 +39,6 @@ pub(super) fn bake_hmtx(
         // hmtx advances are unsigned; clamp at 0 if a delta would
         // underflow. In practice this only happens with malformed
         // HVAR data.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let new_adv = (f32::from(base_adv) + adv_delta).round().max(0.0) as i32;
         advances.push(new_adv.clamp(0, i32::from(u16::MAX)) as u16);
         lsbs.push(base_lsb);
@@ -130,7 +130,6 @@ pub(super) fn bake_vmtx(
             Some(v) if !coords.is_empty() => v.top_side_bearing_delta(gid, coords).unwrap_or(0.0),
             _ => 0.0,
         };
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let new_adv = (f32::from(base_adv) + adv_delta).round().max(0.0) as i32;
         advances.push(new_adv.clamp(0, i32::from(u16::MAX)) as u16);
         let new_tsb = (f32::from(base_tsb) + tsb_delta).round() as i32;
@@ -258,43 +257,58 @@ pub(super) fn apply_mvar_records(
     // once per record, doubling its effect on the rebuilt OS/2 / hhea
     // / vhea / post fields. Dedup with first-wins so the rebuild
     // matches the spec-conforming case bit-for-bit.
-    let mut seen: Vec<[u8; 4]> = Vec::new();
-    for (rec_tag, _) in mvar.entries() {
-        if seen.contains(&rec_tag) {
+    //
+    // Only the tags below patch a field, so every other record is
+    // skipped before its delta is evaluated. The first record for a
+    // tag carries the `(outer, inner)` pair `Mvar::metric_delta` would
+    // look up, so the delta is read from it directly. Both keep the
+    // walk linear in the record count.
+    let Some(store) = mvar.variation_store() else {
+        return Ok(MvarBake {
+            os2,
+            hhea,
+            vhea,
+            post,
+        });
+    };
+    let mut seen: BTreeSet<[u8; 4]> = BTreeSet::new();
+    for (rec_tag, (outer, inner)) in mvar.entries() {
+        let (buf, off, signed) = match rec_tag {
+            t if t == mvar_tag::HORIZ_ASCENDER => (&mut os2, 68, true),
+            t if t == mvar_tag::HORIZ_DESCENDER => (&mut os2, 70, true),
+            t if t == mvar_tag::HORIZ_LINE_GAP => (&mut os2, 72, true),
+            t if t == mvar_tag::HORIZ_CLIPPING_ASCENT => (&mut os2, 74, false),
+            t if t == mvar_tag::HORIZ_CLIPPING_DESCENT => (&mut os2, 76, false),
+            t if t == mvar_tag::X_HEIGHT => (&mut os2, 86, true),
+            t if t == mvar_tag::CAP_HEIGHT => (&mut os2, 88, true),
+            t if t == mvar_tag::SUBSCRIPT_X_SIZE => (&mut os2, 10, true),
+            t if t == mvar_tag::SUBSCRIPT_Y_SIZE => (&mut os2, 12, true),
+            t if t == mvar_tag::SUBSCRIPT_X_OFFSET => (&mut os2, 14, true),
+            t if t == mvar_tag::SUBSCRIPT_Y_OFFSET => (&mut os2, 16, true),
+            t if t == mvar_tag::SUPERSCRIPT_X_SIZE => (&mut os2, 18, true),
+            t if t == mvar_tag::SUPERSCRIPT_Y_SIZE => (&mut os2, 20, true),
+            t if t == mvar_tag::SUPERSCRIPT_X_OFFSET => (&mut os2, 22, true),
+            t if t == mvar_tag::SUPERSCRIPT_Y_OFFSET => (&mut os2, 24, true),
+            t if t == mvar_tag::STRIKEOUT_SIZE => (&mut os2, 26, true),
+            t if t == mvar_tag::STRIKEOUT_OFFSET => (&mut os2, 28, true),
+            t if t == mvar_tag::VERT_ASCENDER => (&mut vhea, 4, true),
+            t if t == mvar_tag::VERT_DESCENDER => (&mut vhea, 6, true),
+            t if t == mvar_tag::VERT_LINE_GAP => (&mut vhea, 8, true),
+            t if t == mvar_tag::UNDERLINE_SIZE => (&mut post, 10, true),
+            t if t == mvar_tag::UNDERLINE_OFFSET => (&mut post, 8, true),
+            _ => continue, // unrecognized tag: silently ignore
+        };
+        if !seen.insert(rec_tag) {
             continue;
         }
-        seen.push(rec_tag);
-        let Some(d) = mvar.metric_delta(rec_tag, coords) else {
-            continue;
-        };
-        let delta = d.round() as i32;
+        let delta = store.delta(outer, inner, coords).round() as i32;
         if delta == 0 {
             continue;
         }
-        match rec_tag {
-            t if t == mvar_tag::HORIZ_ASCENDER => patch_i16(&mut os2, 68, delta),
-            t if t == mvar_tag::HORIZ_DESCENDER => patch_i16(&mut os2, 70, delta),
-            t if t == mvar_tag::HORIZ_LINE_GAP => patch_i16(&mut os2, 72, delta),
-            t if t == mvar_tag::HORIZ_CLIPPING_ASCENT => patch_u16(&mut os2, 74, delta),
-            t if t == mvar_tag::HORIZ_CLIPPING_DESCENT => patch_u16(&mut os2, 76, delta),
-            t if t == mvar_tag::X_HEIGHT => patch_i16(&mut os2, 86, delta),
-            t if t == mvar_tag::CAP_HEIGHT => patch_i16(&mut os2, 88, delta),
-            t if t == mvar_tag::SUBSCRIPT_X_SIZE => patch_i16(&mut os2, 10, delta),
-            t if t == mvar_tag::SUBSCRIPT_Y_SIZE => patch_i16(&mut os2, 12, delta),
-            t if t == mvar_tag::SUBSCRIPT_X_OFFSET => patch_i16(&mut os2, 14, delta),
-            t if t == mvar_tag::SUBSCRIPT_Y_OFFSET => patch_i16(&mut os2, 16, delta),
-            t if t == mvar_tag::SUPERSCRIPT_X_SIZE => patch_i16(&mut os2, 18, delta),
-            t if t == mvar_tag::SUPERSCRIPT_Y_SIZE => patch_i16(&mut os2, 20, delta),
-            t if t == mvar_tag::SUPERSCRIPT_X_OFFSET => patch_i16(&mut os2, 22, delta),
-            t if t == mvar_tag::SUPERSCRIPT_Y_OFFSET => patch_i16(&mut os2, 24, delta),
-            t if t == mvar_tag::STRIKEOUT_SIZE => patch_i16(&mut os2, 26, delta),
-            t if t == mvar_tag::STRIKEOUT_OFFSET => patch_i16(&mut os2, 28, delta),
-            t if t == mvar_tag::VERT_ASCENDER => patch_i16(&mut vhea, 4, delta),
-            t if t == mvar_tag::VERT_DESCENDER => patch_i16(&mut vhea, 6, delta),
-            t if t == mvar_tag::VERT_LINE_GAP => patch_i16(&mut vhea, 8, delta),
-            t if t == mvar_tag::UNDERLINE_SIZE => patch_i16(&mut post, 10, delta),
-            t if t == mvar_tag::UNDERLINE_OFFSET => patch_i16(&mut post, 8, delta),
-            _ => {} // unrecognized tag: silently ignore
+        if signed {
+            patch_i16(buf, off, delta);
+        } else {
+            patch_u16(buf, off, delta);
         }
     }
 
@@ -306,26 +320,35 @@ pub(super) fn apply_mvar_records(
     })
 }
 
-pub(super) fn patch_i16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
-    let Some(b) = buf.as_mut() else {
-        return;
-    };
-    if b.len() < off + 2 {
-        return;
-    }
-    let cur = i16::from_be_bytes([b[off], b[off + 1]]);
-    let new = (i32::from(cur) + delta).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-    b[off..off + 2].copy_from_slice(&new.to_be_bytes());
+/// Returns the two bytes at `buf[off..off + 2]`, or `None` when the
+/// table is absent or too short.
+fn field_bytes(buf: &mut Option<Vec<u8>>, off: usize) -> Option<&mut [u8; 2]> {
+    buf.as_mut()?.get_mut(off..)?.first_chunk_mut::<2>()
 }
 
-pub(super) fn patch_u16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
-    let Some(b) = buf.as_mut() else {
+/// Adds `delta` to the big-endian `i16` at `off`, clamping to the field
+/// range. A delta from a long-word variation store can reach
+/// `i32::MAX`, so the sum saturates before the clamp.
+pub(super) fn patch_i16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
+    let Some(field) = field_bytes(buf, off) else {
         return;
     };
-    if b.len() < off + 2 {
+    let cur = i16::from_be_bytes(*field);
+    let new = i32::from(cur)
+        .saturating_add(delta)
+        .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    *field = new.to_be_bytes();
+}
+
+/// Adds `delta` to the big-endian `u16` at `off`, clamping to the field
+/// range.
+pub(super) fn patch_u16(buf: &mut Option<Vec<u8>>, off: usize, delta: i32) {
+    let Some(field) = field_bytes(buf, off) else {
         return;
-    }
-    let cur = u16::from_be_bytes([b[off], b[off + 1]]);
-    let new = (i32::from(cur) + delta).clamp(0, i32::from(u16::MAX)) as u16;
-    b[off..off + 2].copy_from_slice(&new.to_be_bytes());
+    };
+    let cur = u16::from_be_bytes(*field);
+    let new = i32::from(cur)
+        .saturating_add(delta)
+        .clamp(0, i32::from(u16::MAX)) as u16;
+    *field = new.to_be_bytes();
 }
