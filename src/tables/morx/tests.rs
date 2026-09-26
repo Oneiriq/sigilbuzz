@@ -1,0 +1,430 @@
+//! Tests for the `morx` parser and its subtable types.
+
+use super::*;
+
+/// Local copy of the format-6 lookup builder used by the
+/// state_table tests; duplicated here so the morx tests do not
+/// reach into a sibling test module (`mod tests` is private).
+fn build_lookup_format6(pairs: &[(u16, u16)]) -> alloc::vec::Vec<u8> {
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    out.extend_from_slice(&6u16.to_be_bytes()); // format
+    out.extend_from_slice(&4u16.to_be_bytes()); // unitSize
+    out.extend_from_slice(&(pairs.len() as u16).to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    for (g, v) in pairs {
+        out.extend_from_slice(&g.to_be_bytes());
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+    out
+}
+
+// Builds a morx version-2 header, one chain with one type-2
+// ligature subtable. Returns the table bytes plus, for debugging,
+// the offset of the subtable body within the table.
+//
+// The ligature mapping: class 4 = 'f' glyph, class 5 = 'i'
+// glyph. A successful walk (class 4, then class 5) emits a
+// single replacement glyph.
+fn build_ligature_morx(f_gid: u16, i_gid: u16, lig_gid: u16) -> alloc::vec::Vec<u8> {
+    // --- Inner subtable body layout ---
+    // Header (16B): nClasses=6, classOff, stateOff, entryOff.
+    // Then 12B: ligActionOff, componentOff, ligatureOff.
+    //
+    // We lay out arrays immediately after the 28-byte subtable
+    // body prefix in a deterministic order.
+    //
+    // Classes (6): 0=EOT, 1=OOB, 2=DEL, 3=EOL, 4=f, 5=i.
+    //
+    // State table: 3 states * 6 classes * u16.
+    //   State 0 (start):
+    //     class 4 (f) -> entry 1 (newState=1, SetComponent)
+    //     everything else -> entry 0 (newState=0, noop)
+    //   State 1 (seen f):
+    //     class 5 (i) -> entry 2 (newState=0,
+    //                             SetComponent | PerformAction)
+    //     everything else -> entry 0 (noop, reset)
+    //
+    // Entries (3 * 6 bytes):
+    //   #0: newState=0, flags=0,              actionIdx=0
+    //   #1: newState=1, flags=0x8000 (SetComp), actionIdx=0
+    //   #2: newState=0, flags=0xA000 (SetComp|Perform), actionIdx=0
+    //
+    // LigAction array (1 * u32):
+    //   #0: LAST | STORE | offset=0        -> 0xC000_0000
+    //
+    // Components (f_gid entry): the sum of offsets accumulated
+    // into ligature-table index; we want the accumulated
+    // offset to be 0, i.e. components[f_gid] + components[i_gid]
+    // = 0. Simplest: both contribute 0. But we must index by
+    // glyph + signed_action_offset. With signed_offset = 0 and
+    // glyph in {f_gid, i_gid} we read components[f_gid] and
+    // components[i_gid]. Size the components table generously,
+    // zero everywhere except: we want ligatures[0] = lig_gid.
+    //
+    // So: components is size max(f_gid, i_gid)+1, all zero.
+    //     ligatures is size 1, ligatures[0] = lig_gid.
+    //
+    // NB: With one action word using LAST|STORE, both the 'f'
+    // and the 'i' push pops one action read, but the state
+    // machine is wired so only the second pop happens on the
+    // last (PerformAction) entry, and it is that single read
+    // that carries LAST|STORE. See FLAG_LIG_PERFORM_ACTION
+    // semantics in apply_ligature: it executes on both popped
+    // components in a single call, re-entering the loop.
+    use alloc::vec;
+
+    let classes = build_lookup_format6(&[(f_gid, 4), (i_gid, 5)]);
+    // Header placeholder (16B) + 12B extension.
+    let mut body: Vec<u8> = vec![0; 28];
+
+    let class_off = body.len();
+    body.extend_from_slice(&classes);
+
+    // State array offset must be 2-byte aligned; extend to even.
+    if body.len() % 2 != 0 {
+        body.push(0);
+    }
+    let state_off = body.len();
+    let n_classes = 6u16;
+    let n_states = 2u16;
+    // state rows
+    let nc = n_classes as usize;
+    let mut row = vec![0u16; nc * n_states as usize];
+    // State 0 : class 4 (f) -> entry 1, else entry 0
+    row[4] = 1;
+    // State 1 : class 5 (i) -> entry 2, else entry 0
+    row[nc + 5] = 2;
+    for v in &row {
+        body.extend_from_slice(&v.to_be_bytes());
+    }
+
+    // Entries
+    let entry_off = body.len();
+    // #0 noop
+    body.extend_from_slice(&0u16.to_be_bytes()); // newState
+    body.extend_from_slice(&0u16.to_be_bytes()); // flags
+    body.extend_from_slice(&0u16.to_be_bytes()); // actionIdx
+                                                 // #1 SetComponent -> state 1
+    body.extend_from_slice(&1u16.to_be_bytes()); // newState
+    body.extend_from_slice(&0x8000u16.to_be_bytes());
+    body.extend_from_slice(&0u16.to_be_bytes());
+    // #2 SetComponent|Perform -> state 0
+    body.extend_from_slice(&0u16.to_be_bytes());
+    body.extend_from_slice(&0xA000u16.to_be_bytes());
+    body.extend_from_slice(&0u16.to_be_bytes());
+
+    // Ligature actions: two words, one per component. Walked in
+    // reverse pop order, so the first word corresponds to the
+    // last-pushed glyph (i_gid here) and the second (with LAST |
+    // STORE) to the first-pushed (f_gid). Both contribute zero
+    // to the accumulated offset so the emitted ligature index is
+    // 0, which maps to `ligatures[0] = lig_gid`.
+    let lig_action_off = body.len();
+    // Offset = -i_gid so glyph + offset = 0, picking
+    // components[0] = 0. Use negative sign encoding.
+    let neg_i: u32 = LIG_ACTION_OFFSET_SIGN | ((-(i_gid as i32)) as u32 & LIG_ACTION_OFFSET_MASK);
+    body.extend_from_slice(&neg_i.to_be_bytes());
+    // Last action word for f: offset = -f_gid, plus LAST | STORE.
+    let neg_f: u32 = LIG_ACTION_LAST
+        | LIG_ACTION_STORE
+        | LIG_ACTION_OFFSET_SIGN
+        | ((-(f_gid as i32)) as u32 & LIG_ACTION_OFFSET_MASK);
+    body.extend_from_slice(&neg_f.to_be_bytes());
+
+    // Components: index by glyph. Pad to max(f_gid, i_gid) + 1.
+    let comp_off = body.len();
+    let comp_count = core::cmp::max(f_gid, i_gid) as usize + 1;
+    body.extend_from_slice(&alloc::vec![0u8; comp_count * 2]);
+
+    // Ligatures: one entry at index 0 = lig_gid.
+    let lig_off = body.len();
+    body.extend_from_slice(&lig_gid.to_be_bytes());
+
+    // Fill in the header pieces we deferred. All offsets are
+    // relative to the subtable body start.
+    let mut write_u32 = |pos: usize, v: u32| {
+        body[pos..pos + 4].copy_from_slice(&v.to_be_bytes());
+    };
+    write_u32(0, n_classes as u32); // nClasses
+    write_u32(4, class_off as u32);
+    write_u32(8, state_off as u32);
+    write_u32(12, entry_off as u32);
+    write_u32(16, lig_action_off as u32);
+    write_u32(20, comp_off as u32);
+    write_u32(24, lig_off as u32);
+
+    // Wrap in subtable header (12B) + chain header (16B) +
+    // table header (8B).
+    let sub_len = 12 + body.len();
+    let mut subtable: Vec<u8> = Vec::new();
+    subtable.extend_from_slice(&(sub_len as u32).to_be_bytes()); // length
+    subtable.extend_from_slice(&(0x0000_0002u32).to_be_bytes()); // coverage: type 2
+    subtable.extend_from_slice(&(0x0000_0001u32).to_be_bytes()); // subFeatureFlags
+    subtable.extend_from_slice(&body);
+
+    let chain_len = 16 + subtable.len();
+    let mut chain: Vec<u8> = Vec::new();
+    chain.extend_from_slice(&(0x0000_0001u32).to_be_bytes()); // defaultFlags
+    chain.extend_from_slice(&(chain_len as u32).to_be_bytes());
+    chain.extend_from_slice(&0u32.to_be_bytes()); // featureCount
+    chain.extend_from_slice(&1u32.to_be_bytes()); // subtableCount
+    chain.extend_from_slice(&subtable);
+
+    let mut table: Vec<u8> = Vec::new();
+    table.extend_from_slice(&2u16.to_be_bytes()); // version
+    table.extend_from_slice(&0u16.to_be_bytes()); // pad
+    table.extend_from_slice(&1u32.to_be_bytes()); // nChains
+    table.extend_from_slice(&chain);
+    table
+}
+
+#[test]
+fn morx_parses_version_and_chains() {
+    let bytes = build_ligature_morx(10, 20, 99);
+    let m = Morx::parse(&bytes).unwrap();
+    assert_eq!(m.version(), 2);
+    assert_eq!(m.chains().len(), 1);
+}
+
+#[test]
+fn morx_ligature_subtable_produces_single_glyph() {
+    let bytes = build_ligature_morx(10, 20, 99);
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, origins) = m.apply(&[10, 20]);
+    assert_eq!(out, &[99]);
+    assert_eq!(origins.len(), 1);
+    // The ligature inherits the smaller originating index (the f
+    // was input slot 0) so cluster merging finds the f's cluster
+    // as the canonical root.
+    assert_eq!(origins[0], 0);
+}
+
+#[test]
+fn morx_ligature_keeps_non_matching_input_intact() {
+    let bytes = build_ligature_morx(10, 20, 99);
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, _) = m.apply(&[10, 30, 20]);
+    // f, then x (out of class), then i: no ligation.
+    assert_eq!(out, &[10, 30, 20]);
+}
+
+#[test]
+fn morx_rejects_unknown_version() {
+    let mut bytes: Vec<u8> = Vec::new();
+    bytes.extend_from_slice(&7u16.to_be_bytes());
+    bytes.extend_from_slice(&0u16.to_be_bytes());
+    bytes.extend_from_slice(&0u32.to_be_bytes());
+    assert!(matches!(
+        Morx::parse(&bytes),
+        Err(Error::Unsupported { .. })
+    ));
+}
+
+// -----------------------------------------------------------------
+// Type 4: Non-contextual substitution.
+// -----------------------------------------------------------------
+
+/// Builds a morx version-2 table with a single chain containing
+/// a single type-4 subtable. The subtable's body is one AAT
+/// lookup (format 6) that maps `pairs` (gid_in -> gid_out).
+fn build_non_contextual_morx(pairs: &[(u16, u16)]) -> Vec<u8> {
+    let mut sorted = pairs.to_vec();
+    sorted.sort_by_key(|p| p.0);
+    let lookup = build_lookup_format6(&sorted);
+
+    let body = lookup;
+    let sub_len = 12 + body.len();
+    let mut subtable: Vec<u8> = Vec::new();
+    subtable.extend_from_slice(&(sub_len as u32).to_be_bytes());
+    subtable.extend_from_slice(&0x0000_0004u32.to_be_bytes()); // type 4
+    subtable.extend_from_slice(&0x0000_0001u32.to_be_bytes()); // subFeatureFlags
+    subtable.extend_from_slice(&body);
+
+    let chain_len = 16 + subtable.len();
+    let mut chain: Vec<u8> = Vec::new();
+    chain.extend_from_slice(&0x0000_0001u32.to_be_bytes()); // defaultFlags
+    chain.extend_from_slice(&(chain_len as u32).to_be_bytes());
+    chain.extend_from_slice(&0u32.to_be_bytes()); // featureCount
+    chain.extend_from_slice(&1u32.to_be_bytes()); // subtableCount
+    chain.extend_from_slice(&subtable);
+
+    let mut table: Vec<u8> = Vec::new();
+    table.extend_from_slice(&2u16.to_be_bytes()); // version
+    table.extend_from_slice(&0u16.to_be_bytes());
+    table.extend_from_slice(&1u32.to_be_bytes()); // nChains
+    table.extend_from_slice(&chain);
+    table
+}
+
+#[test]
+fn morx_non_contextual_substitutes_known_glyphs() {
+    // gid 5 -> gid 50, gid 7 -> gid 70. Untouched glyphs pass through.
+    let bytes = build_non_contextual_morx(&[(5, 50), (7, 70)]);
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, _) = m.apply(&[5, 9, 7]);
+    assert_eq!(out, &[50, 9, 70]);
+}
+
+#[test]
+fn morx_non_contextual_leaves_unmapped_glyphs_alone() {
+    let bytes = build_non_contextual_morx(&[(5, 50)]);
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, _) = m.apply(&[1, 2, 3]);
+    assert_eq!(out, &[1, 2, 3]);
+}
+
+#[test]
+fn morx_non_contextual_handles_empty_input() {
+    let bytes = build_non_contextual_morx(&[(5, 50)]);
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, _) = m.apply(&[]);
+    assert!(out.is_empty());
+}
+
+// -----------------------------------------------------------------
+// Type 5: Insertion.
+// -----------------------------------------------------------------
+
+/// Builds a morx version-2 table with one chain that carries a
+/// single type-5 (insertion) subtable wired to inject `marker_gid`
+/// after every `trigger_gid` it sees.
+///
+/// State machine:
+///   class 4 = trigger_gid; everything else falls through.
+///   State 0 (only state):
+///     class 4 -> entry 1 (currentInsertCount=1, inserts the
+///                        single-glyph table starting at index 0).
+///     other classes -> entry 0 (noop).
+fn build_insertion_morx_after_trigger(trigger_gid: u16, marker_gid: u16) -> Vec<u8> {
+    let class_lookup = build_lookup_format6(&[(trigger_gid, 4)]);
+
+    // Body layout (relative to body start):
+    //   0..16   state-table header
+    //  16..20   insertionGlyphTable offset (u32)
+    //  20..     class lookup (aligned to 2)
+    //  ..       state array (1 state * 5 classes * u16) = 10 B
+    //  ..       entry array (2 entries * 8 B) = 16 B
+    //  ..       insertion glyph table (one u16 = marker_gid)
+    let n_classes: u32 = 5;
+    let n_states: u32 = 1;
+    let n_entries: usize = 2;
+
+    let header_len = 20;
+    let class_off = header_len;
+    let class_end = class_off + class_lookup.len();
+    let state_off = class_end + (class_end % 2);
+    let state_bytes = (n_states * n_classes) as usize * 2;
+    let entry_off = state_off + state_bytes;
+    let entry_bytes = n_entries * 8;
+    let ins_off = entry_off + entry_bytes;
+    let ins_bytes = 2usize;
+
+    let body_len = ins_off + ins_bytes;
+
+    let mut body: Vec<u8> = Vec::with_capacity(body_len);
+    body.extend_from_slice(&n_classes.to_be_bytes());
+    body.extend_from_slice(&(class_off as u32).to_be_bytes());
+    body.extend_from_slice(&(state_off as u32).to_be_bytes());
+    body.extend_from_slice(&(entry_off as u32).to_be_bytes());
+    body.extend_from_slice(&(ins_off as u32).to_be_bytes());
+    body.extend_from_slice(&class_lookup);
+    if body.len() < state_off {
+        body.resize(state_off, 0);
+    }
+    // State 0:
+    let s0: [u16; 5] = [0, 0, 0, 0, 1];
+    for v in &s0 {
+        body.extend_from_slice(&v.to_be_bytes());
+    }
+    // Entries (newState, flags, currentInsertIndex, markedInsertIndex)
+    // #0 noop
+    body.extend_from_slice(&0u16.to_be_bytes());
+    body.extend_from_slice(&0u16.to_be_bytes()); // flags
+    body.extend_from_slice(&0xFFFFu16.to_be_bytes()); // cur idx
+    body.extend_from_slice(&0xFFFFu16.to_be_bytes()); // mark idx
+                                                      // #1 insert 1 glyph after current (CurrentInsertCount=1, no
+                                                      // before-flag -> after, list at index 0).
+                                                      // Flags: count=1 in bits 5..9 -> 1 << 5 = 0x0020.
+    let entry1_flags: u16 = 1 << FLAG_INS_CURRENT_COUNT_SHIFT;
+    body.extend_from_slice(&0u16.to_be_bytes()); // newState
+    body.extend_from_slice(&entry1_flags.to_be_bytes());
+    body.extend_from_slice(&0u16.to_be_bytes()); // currentInsertIndex = 0
+    body.extend_from_slice(&0xFFFFu16.to_be_bytes()); // markedInsertIndex
+                                                      // Insertion glyph table.
+    body.extend_from_slice(&marker_gid.to_be_bytes());
+
+    let sub_len = 12 + body.len();
+    let mut subtable: Vec<u8> = Vec::new();
+    subtable.extend_from_slice(&(sub_len as u32).to_be_bytes());
+    subtable.extend_from_slice(&0x0000_0005u32.to_be_bytes()); // type 5
+    subtable.extend_from_slice(&0x0000_0001u32.to_be_bytes()); // subFeatureFlags
+    subtable.extend_from_slice(&body);
+
+    let chain_len = 16 + subtable.len();
+    let mut chain: Vec<u8> = Vec::new();
+    chain.extend_from_slice(&0x0000_0001u32.to_be_bytes()); // defaultFlags
+    chain.extend_from_slice(&(chain_len as u32).to_be_bytes());
+    chain.extend_from_slice(&0u32.to_be_bytes());
+    chain.extend_from_slice(&1u32.to_be_bytes());
+    chain.extend_from_slice(&subtable);
+
+    let mut table: Vec<u8> = Vec::new();
+    table.extend_from_slice(&2u16.to_be_bytes());
+    table.extend_from_slice(&0u16.to_be_bytes());
+    table.extend_from_slice(&1u32.to_be_bytes());
+    table.extend_from_slice(&chain);
+    table
+}
+
+#[test]
+fn morx_insertion_appends_marker_after_trigger() {
+    // trigger gid 7, marker gid 99.
+    let bytes = build_insertion_morx_after_trigger(7, 99);
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, origins) = m.apply(&[1, 7, 2]);
+    // Trigger lands at index 1; marker is inserted *after* it.
+    assert_eq!(out, &[1, 7, 99, 2]);
+    // Inserted glyph has no originating input, marked with
+    // usize::MAX.
+    assert_eq!(origins, &[0, 1, usize::MAX, 2]);
+}
+
+#[test]
+fn morx_insertion_handles_no_trigger() {
+    let bytes = build_insertion_morx_after_trigger(7, 99);
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, _) = m.apply(&[1, 2, 3]);
+    assert_eq!(out, &[1, 2, 3], "no insertion when trigger absent");
+}
+
+#[test]
+fn morx_insertion_fires_for_each_trigger() {
+    let bytes = build_insertion_morx_after_trigger(7, 99);
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, _) = m.apply(&[7, 7]);
+    assert_eq!(out, &[7, 99, 7, 99]);
+}
+
+#[test]
+fn morx_insertion_handles_empty_input() {
+    let bytes = build_insertion_morx_after_trigger(7, 99);
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, _) = m.apply(&[]);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn morx_skips_subtable_with_disabled_feature() {
+    // Build a normal morx and then clobber the chain's
+    // defaultFlags to zero. The subtable's sub_feature_flags &
+    // default_flags = 0, so apply should be a noop.
+    let mut bytes = build_ligature_morx(10, 20, 99);
+    // table header 8 bytes, then chain defaultFlags is the next
+    // u32 at offset 8.
+    bytes[8..12].copy_from_slice(&0u32.to_be_bytes());
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, _) = m.apply(&[10, 20]);
+    assert_eq!(out, &[10, 20]);
+}
