@@ -11,6 +11,11 @@
 //!   property as ISO 15924 codes, from `Scripts.txt` and the `sc`
 //!   rows of `PropertyValueAliases.txt`, for
 //!   `hb_buffer_guess_segment_properties`.
+//! - `src/unicode/general_category_table.rs`: the letter (L*), mark
+//!   (Mn, Mc, Me), and decimal number (Nd) ranges of
+//!   `General_Category`, and `Extended_Pictographic` from
+//!   `emoji-data.txt`, for HarfBuzz's grapheme and native-direction
+//!   rules.
 //!
 //! # Sources
 //!
@@ -21,11 +26,13 @@
 //! removed:
 //!
 //! - `ArabicShaping.txt`: every data line.
-//! - `DerivedGeneralCategory.txt`: the Mn, Me, and Cf lines.
+//! - `DerivedGeneralCategory.txt`: the Lu, Ll, Lt, Lm, Lo, Mn, Mc, Me,
+//!   Nd, and Cf lines.
 //! - `BidiMirroring.txt`: every data line (the commented-out list of
 //!   mirrored characters without a mirror glyph is dropped).
 //! - `Scripts.txt`: every data line.
 //! - `PropertyValueAliases.txt`: the `sc` (Script) lines.
+//! - `emoji-data.txt`: the `Extended_Pictographic` lines.
 //!
 //! # Commands
 //!
@@ -36,11 +43,11 @@
 //! ```
 //!
 //! Refresh the snapshots first by pointing `SIGILBUZZ_UCD_DIR` at a
-//! directory holding the five files as downloaded from
+//! directory holding the six files as downloaded from
 //! `https://www.unicode.org/Public/<version>/ucd/`
-//! (`DerivedGeneralCategory.txt` is under `extracted/` there), with
-//! `SIGILBUZZ_UCD_VERSION` (for example `17.0.0`) and
-//! `SIGILBUZZ_UCD_RETRIEVED=YYYY-MM-DD` set.
+//! (`DerivedGeneralCategory.txt` is under `extracted/` there and
+//! `emoji-data.txt` under `emoji/`), with `SIGILBUZZ_UCD_VERSION` (for
+//! example `17.0.0`) and `SIGILBUZZ_UCD_RETRIEVED=YYYY-MM-DD` set.
 //!
 //! The non-ignored test in this file regenerates every table in memory
 //! and fails when a committed file has drifted from the snapshots.
@@ -54,10 +61,15 @@ const GENERAL_CATEGORY: &str = "DerivedGeneralCategory.txt";
 const BIDI_MIRRORING: &str = "BidiMirroring.txt";
 const SCRIPTS: &str = "Scripts.txt";
 const ALIASES: &str = "PropertyValueAliases.txt";
+const EMOJI_DATA: &str = "emoji-data.txt";
 
 const JOINING_RS: &str = "src/unicode/joining_table.rs";
 const MIRRORING_RS: &str = "src/unicode/mirroring_table.rs";
 const SCRIPT_RS: &str = "crates/sigilbuzz-capi/src/script_table.rs";
+const CATEGORY_RS: &str = "src/unicode/general_category_table.rs";
+
+/// The General_Category values the snapshot keeps.
+const KEPT_CATEGORIES: &[&str] = &["Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Cf"];
 
 /// Maximum emitted line width, matching the crate's rustfmt setting.
 const MAX_WIDTH: usize = 100;
@@ -162,7 +174,9 @@ fn generate_joining() -> String {
     let categories = load(GENERAL_CATEGORY);
     let mut types = vec!['U'; CODE_SPACE];
     for row in &categories.rows {
-        assert!(matches!(row[1].as_str(), "Mn" | "Me" | "Cf"), "{row:?}");
+        if !matches!(row[1].as_str(), "Mn" | "Me" | "Cf") {
+            continue;
+        }
         let (start, end) = parse_range(&row[0]);
         for cp in start..=end {
             types[cp as usize] = 'T';
@@ -285,6 +299,65 @@ fn generate_scripts() -> String {
     out
 }
 
+// --- General categories and Extended_Pictographic -------------------------------
+
+fn generate_categories() -> String {
+    let categories = load(GENERAL_CATEGORY);
+    let emoji = load(EMOJI_DATA);
+    let mut classes = vec![' '; CODE_SPACE];
+    for row in &categories.rows {
+        let class = match row[1].as_str() {
+            "Lu" | "Ll" | "Lt" | "Lm" | "Lo" => 'L',
+            "Mn" | "Mc" | "Me" => 'M',
+            "Nd" => 'N',
+            _ => continue,
+        };
+        let (start, end) = parse_range(&row[0]);
+        for cp in start..=end {
+            classes[cp as usize] = class;
+        }
+    }
+    let mut pictographic = vec![false; CODE_SPACE];
+    for row in &emoji.rows {
+        assert_eq!(row[1], "Extended_Pictographic", "{row:?}");
+        let (start, end) = parse_range(&row[0]);
+        for cp in start..=end {
+            pictographic[cp as usize] = true;
+        }
+    }
+
+    let mut out = String::new();
+    file_header(&mut out, &[&categories, &emoji]);
+    out.push_str("// Code point ranges read best in hex without digit separators.\n");
+    out.push_str("#![allow(clippy::unreadable_literal)]\n\n");
+    out.push_str("use super::general_category::GeneralCategoryClass::{self, DecimalNumber, Letter, Mark};\n\n");
+    out.push_str("/// Letters (Lu, Ll, Lt, Lm, Lo), marks (Mn, Mc, Me), and decimal\n");
+    out.push_str("/// numbers (Nd). Sorted, non-overlapping, inclusive.\n");
+    out.push_str("pub(super) static CLASSES: &[(u32, u32, GeneralCategoryClass)] = &[\n");
+    let items: Vec<String> = runs(&classes, ' ')
+        .iter()
+        .map(|(s, e, c)| {
+            let name = match c {
+                'L' => "Letter",
+                'M' => "Mark",
+                _ => "DecimalNumber",
+            };
+            format!("(0x{s:04X}, 0x{e:04X}, {name})")
+        })
+        .collect();
+    emit_wrapped(&mut out, &items);
+    out.push_str("];\n\n");
+    out.push_str("/// `Extended_Pictographic` ranges. Sorted, non-overlapping, inclusive.\n");
+    out.push_str("pub(super) static EXTENDED_PICTOGRAPHIC: &[(u32, u32)] = &[\n");
+    let items: Vec<String> = runs(&pictographic, false)
+        .iter()
+        .map(|(s, e, _)| format!("(0x{s:04X}, 0x{e:04X})"))
+        .collect();
+    emit_wrapped(&mut out, &items);
+    out.push_str("];\n");
+    out
+}
+
 // --- Snapshot refresh ------------------------------------------------------------
 
 /// Reduces a downloaded UCD file to a snapshot: the provenance lines,
@@ -320,17 +393,20 @@ fn refresh_snapshots() {
     let retrieved =
         std::env::var("SIGILBUZZ_UCD_RETRIEVED").expect("set SIGILBUZZ_UCD_RETRIEVED=YYYY-MM-DD");
     let base = format!("https://www.unicode.org/Public/{version}/ucd");
-    let jobs: [(&str, String, Keep); 5] = [
+    let jobs: [(&str, String, Keep); 6] = [
         (ARABIC_SHAPING, format!("{base}/{ARABIC_SHAPING}"), |_| true),
         (
             GENERAL_CATEGORY,
             format!("{base}/extracted/{GENERAL_CATEGORY}"),
-            |f| matches!(f.get(1), Some(&("Mn" | "Me" | "Cf"))),
+            |f| f.get(1).is_some_and(|gc| KEPT_CATEGORIES.contains(gc)),
         ),
         (BIDI_MIRRORING, format!("{base}/{BIDI_MIRRORING}"), |_| true),
         (SCRIPTS, format!("{base}/{SCRIPTS}"), |_| true),
         (ALIASES, format!("{base}/{ALIASES}"), |f| {
             f.first() == Some(&"sc")
+        }),
+        (EMOJI_DATA, format!("{base}/emoji/{EMOJI_DATA}"), |f| {
+            f.get(1) == Some(&"Extended_Pictographic")
         }),
     ];
     std::fs::create_dir_all(snapshot_dir()).expect("create snapshot dir");
@@ -341,11 +417,12 @@ fn refresh_snapshots() {
     }
 }
 
-fn outputs() -> [(&'static str, String); 3] {
+fn outputs() -> [(&'static str, String); 4] {
     [
         (JOINING_RS, generate_joining()),
         (MIRRORING_RS, generate_mirroring()),
         (SCRIPT_RS, generate_scripts()),
+        (CATEGORY_RS, generate_categories()),
     ]
 }
 

@@ -10,6 +10,9 @@
 pub mod bidi;
 pub mod bidi_brackets;
 pub mod bidi_class;
+pub mod general_category;
+#[rustfmt::skip]
+mod general_category_table;
 pub mod indic_category;
 pub mod joining;
 #[rustfmt::skip]
