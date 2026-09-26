@@ -179,7 +179,7 @@ static int check_paint_funcs(void) {
     CHECK(hb_paint_funcs_reference(funcs) == funcs, 60,
           "hb_paint_funcs_reference must return its argument");
     hb_paint_funcs_destroy(funcs);
-    hb_paint_funcs_set_color_func(funcs, NULL);
+    hb_paint_funcs_set_color_func(funcs, NULL, NULL, NULL);
     hb_paint_funcs_destroy(funcs);
     return 0;
 }

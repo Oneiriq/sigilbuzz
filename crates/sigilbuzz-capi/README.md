@@ -65,6 +65,37 @@ The subset and paint functions sit behind the `subset` and `paint` cargo feature
 are on by default. For a smaller library, build with
 `--no-default-features --features std`.
 
+## Painting color glyphs
+
+The paint API matches HarfBuzz 8.0's `hb-paint.h`:
+
+- Setters are `hb_paint_funcs_set_X_func(funcs, func, user_data, destroy)` for
+  `push_transform`, `pop_transform`, `push_clip_glyph`, `push_clip_rectangle`,
+  `pop_clip`, `color`, `image`, `linear_gradient`, `radial_gradient`,
+  `sweep_gradient`, `push_group`, `pop_group`, and `custom_palette_color`. Every
+  callback gets its own `user_data` as its last argument. `destroy` runs when the
+  callback is replaced, when the funcs object is freed, or right away for a NULL
+  `func` or after `hb_paint_funcs_make_immutable`.
+- `hb_color_t` packs blue in the high byte and alpha in the low byte (`HB_COLOR(b, g,
+  r, a)`), and `hb_color_line_t` is HarfBuzz's public struct, so C code may call its
+  function pointers directly.
+- `hb_font_paint_glyph` fires callbacks in HarfBuzz's order: a root transform to font
+  scale around COLRv1 glyphs, inverse-root / clip / root around each `PaintGlyph`, one
+  transform per transform paint, two groups per composite with the mode on
+  `pop_group`, and sweep angles in radians as `(stored angle + 1) * pi`. COLRv0 layers
+  and plain glyphs paint as `push_clip_glyph`, `color`, `pop_clip`.
+- Colors resolve as in HarfBuzz: entry `0xFFFF` is the foreground (`is_foreground =
+  1`), other entries try `custom_palette_color`, then the CPAL palette, then fall back
+  to the foreground (`is_foreground = 0`). The paint alpha multiplies the alpha byte
+  and is truncated.
+
+Differences from HarfBuzz: there is no `color_glyph` callback (it is HarfBuzz 8.2 API),
+no `hb_paint_funcs_get_empty`, `hb_paint_funcs_set_user_data`, or `hb_paint_*` emitter
+functions, and the clip rectangle HarfBuzz pushes around COLRv1 glyphs and the `image`
+callback for SVG and bitmap glyphs are never fired. `push_clip_glyph` expects the
+outline at font scale, as `hb_font_draw_glyph` would draw it, but sigilbuzz does not
+export `hb_font_draw_glyph`, so callers bring their own outlines.
+
 ## ABI
 
 Enum values (`HB_DIRECTION_LTR == 4`, `HB_SCRIPT_LATIN == HB_TAG('L','a','t','n')`, and
