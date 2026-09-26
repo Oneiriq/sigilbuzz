@@ -162,9 +162,10 @@ release.
   through the module path (for example `tables::layout::FeatureList` or
   `tables::gpos::ChainContextPos`) are not.
 - `sigilbuzz_paint::walk`: the paint-tree walk in HarfBuzz's callback order
-  (`paint_glyph`, `PaintSink`, `ColorRef`, `StopRef`, `ColorLineRef`, `Painted`).
-  sigilbuzz-capi drives its `hb_paint_funcs_t` bridge from it. Renderers should use
-  `evaluate_with`.
+  (`paint_glyph`, `paint_glyph_unclipped`, `PaintSink`, `RootClip`, `Resolver`,
+  `ColorRef`, `StopRef`, `ColorLineRef`, `Painted`). sigilbuzz-capi drives its
+  `hb_paint_funcs_t` bridge from it, and sigilbuzz-render and sigilbuzz-svg draw from
+  it. Other renderers should use `evaluate_with`.
 
 ### Tier 3: internal
 

@@ -2,11 +2,11 @@
 //! COLRv1 color glyphs.
 //!
 //! sigilbuzz exposes glyph outlines as a flat
-//! [`PathOp`] stream and (via the
-//! `sigilbuzz-paint` companion) a flat [`DrawCmd`](sigilbuzz_paint::DrawCmd)
-//! stream for color glyphs. This crate turns either of those into a
-//! self-contained `<svg>` element ready to drop into a document, a
-//! preview tool, or a font-debug page.
+//! [`PathOp`] stream and (via the `sigilbuzz-paint` companion) a
+//! walk of each color glyph's COLRv1 paint tree in HarfBuzz's order.
+//! This crate turns either of those into a self-contained `<svg>`
+//! element ready to drop into a document, a preview tool, or a
+//! font-debug page.
 //!
 //! The output is plain text: there is no XML library on the write
 //! path. SVG path data, gradient stops, and transform matrices are all
@@ -23,8 +23,8 @@
 //!
 //! ## Sweep gradients
 //!
-//! SVG 1.1 has no native sweep / conic gradient. The COLRv1 evaluator
-//! still emits one for `PaintSweepGradient`, so this crate degrades
+//! SVG 1.1 has no native sweep / conic gradient. The COLRv1 walk
+//! still reports one for `PaintSweepGradient`, so this crate degrades
 //! it to an SVG `<linearGradient>` running across the gradient's
 //! bounding box, with a comment in the output noting the substitution.
 //! That keeps the SVG well-formed in every viewer; consumers that

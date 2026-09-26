@@ -1,52 +1,58 @@
 //! COLRv1 -> SVG emission, gated on the `color` Cargo feature.
 //!
-//! This module consumes the [`DrawCmd`] stream from `sigilbuzz-paint`
-//! and turns it into an SVG fragment that mirrors the COLRv1 paint
-//! tree's intent:
+//! This module drives the paint walk from `sigilbuzz-paint`
+//! (`walk::paint_glyph`, HarfBuzz's callback order) and writes an SVG
+//! fragment that mirrors the COLRv1 paint tree:
 //!
-//! - solid `PaintSolid` leaves render as `<path fill="rgb(...)" .../>`.
-//! - linear / radial gradients land in a `<defs>` block and are
-//!   referenced via `fill="url(#grad-N)"`.
-//! - fills and gradient stops on COLR palette entry `0xFFFF` (the text
+//! - A fill paints its innermost clip: a `PaintGlyph` outline becomes
+//!   `<path transform=... d=...>` with the transform in effect at the
+//!   `PaintGlyph`, so a transform below the `PaintGlyph` moves only the
+//!   paint. Enclosing clips (outer glyphs, ClipList boxes) become
+//!   `<clipPath>` definitions applied by `<g clip-path=...>` wrappers.
+//! - Solid fills are `fill="rgb(...)"`; linear and radial gradients land
+//!   in a `<defs>` block, referenced via `fill="url(#grad-N)"`, with a
+//!   `gradientTransform` carrying the paint's own transform, so they are
+//!   exact under any transform. A linear gradient's rotation point
+//!   `p2` is folded into its end point.
+//! - Fills and gradient stops on COLR palette entry `0xFFFF` (the text
 //!   color) use `currentColor`, with the paint alpha as `fill-opacity`
 //!   or `stop-opacity`, so the glyph takes the color of the text it is
 //!   embedded in.
-//! - sweep gradients have no SVG 1.1 equivalent. We degrade them to a
-//!   linear gradient running across the gradient's center. The
-//!   colors are right, the angular distribution is not. The output
-//!   carries an `<!-- sweep-fallback -->` comment so consumers that
-//!   care can detect the substitution and route through a richer
-//!   renderer.
-//! - `PushLayer` / `PopLayer` map to `<g>` wrappers; SVG's blend modes
-//!   only cover a subset of the COLRv1 composite list, so unsupported
-//!   modes are passed through as `style="mix-blend-mode: <name>"` and
-//!   left to the SVG viewer's CSS engine.
-//!
-//! The walker re-walks the same DrawCmd stream sigilbuzz-paint emits
-//! to keep behavior aligned with other renderers built on the
-//! evaluator (PDF backend, GPU backend). It does not parse the COLRv1
-//! tree directly. That would duplicate the var-store / cycle-bounded
-//! logic the evaluator already owns.
+//! - Sweep gradients have no SVG 1.1 equivalent. We degrade them to a
+//!   linear gradient running across the gradient's center. The colors
+//!   are right, the angular distribution is not. The output carries an
+//!   `<!-- sweep-fallback -->` comment so consumers that care can detect
+//!   the substitution and route through a richer renderer.
+//! - Each `PaintComposite` is an isolated `<g style="isolation:isolate">`
+//!   holding the backdrop and a `<g style="mix-blend-mode:...">` holding
+//!   the source. SVG's blend modes only cover a subset of the COLRv1
+//!   composite list, so Porter-Duff modes are written as `normal`.
+//! - The `viewBox` is the glyph's clip box, as in HarfBuzz: its ClipList
+//!   box (which also clips the drawing) or the bounds of its paint tree,
+//!   plus [`VIEWBOX_MARGIN`]. A glyph whose paint escapes every clip is
+//!   unbounded and produces no SVG.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
+use sigilbuzz::tables::PathOp;
 use sigilbuzz::Face;
+use sigilbuzz_paint::walk::{paint_glyph, ColorLineRef, ColorRef, PaintSink, Resolver, RootClip};
 use sigilbuzz_paint::{
-    evaluate_with, Color, ColorStop, CompositeMode, DrawCmd, EvalOptions, Gradient, GradientKind,
-    PaintSource, Transform2D,
+    Color, ColorStop, CompositeMode, EvalOptions, Extend, GradientKind, Transform2D,
 };
 
-use crate::{path_bbox, path_data, push_num, F2Dot14, GlyphId, VIEWBOX_MARGIN};
+use crate::{path_data, push_num, F2Dot14, GlyphId, VIEWBOX_MARGIN};
 
 /// Emits a complete `<svg>` document for `gid`'s COLRv1 color glyph.
 ///
-/// Returns `None` when the glyph has no COLRv1 paint or none of the
-/// referenced outline glyphs carry a non-empty path. In that case the
-/// caller can fall back to [`crate::glyph_to_svg`] for a black
-/// outline rendering.
+/// Returns `None` when the glyph has no COLRv1 paint, when its paint is
+/// unbounded (no clip or ClipList box encloses it), or when nothing it
+/// paints has a visible shape (every clipping outline glyph is missing
+/// or empty). In that case the caller can fall back to
+/// [`crate::glyph_to_svg`] for a black outline rendering.
 ///
 /// Paints on the foreground palette entry (the text color) are filled
 /// with `currentColor`, so the glyph inherits the CSS `color` of the
@@ -64,82 +70,327 @@ pub fn glyph_to_svg_color_at_coords(
     gid: GlyphId,
     coords: &[F2Dot14],
 ) -> Option<String> {
+    let colr = face.colr().ok().flatten()?;
+    colr.paint(gid)?;
     // An opaque foreground keeps foreground alphas equal to the paint
     // alpha, which is what `fill-opacity` / `stop-opacity` need next to
     // `currentColor`.
     let options = EvalOptions::new()
         .with_coords(coords)
         .with_foreground(Color::BLACK);
-    let cmds = evaluate_with(face, gid, &options);
-    if cmds.is_empty() {
+    let cpal = face.cpal().ok().flatten();
+    let mut sink = SvgSink {
+        face,
+        coords,
+        resolver: Resolver::new(cpal.as_ref(), &options),
+        transforms: alloc::vec![Transform2D::IDENTITY],
+        frames: Vec::new(),
+        view: None,
+        defs: Defs::default(),
+        body: String::new(),
+        painted: false,
+    };
+    paint_glyph(face, gid, coords, &mut sink);
+    if !sink.painted {
         return None;
     }
-    render_color_svg(face, &cmds, coords)
+    let view = sink.view?;
+    Some(assemble_svg(view, &sink.defs.into_svg(), &sink.body))
 }
 
 // =========================================================================
-// Render pipeline
+// The sink
 // =========================================================================
 
-fn render_color_svg(face: &Face<'_>, cmds: &[DrawCmd], coords: &[F2Dot14]) -> Option<String> {
-    // First pass: for every FillGlyph in `cmds`, look up the
-    // referenced outline. We push *one* `Option<LeafGeometry>` per
-    // FillGlyph: `None` for whitespace / out-of-range / empty-outline
-    // glyphs, `Some` for renderable ones. Storing one slot per
-    // FillGlyph keeps the second pass aligned with the cmd stream
-    // even when an interior leaf is missing; before, leaves were a
-    // dense Vec and the second pass walked the full cmd stream, so
-    // a missing-outline FillGlyph in the middle silently re-mapped
-    // every later FillGlyph to the wrong leaf (issue #68).
-    let mut bbox: Option<(f32, f32, f32, f32)> = None;
-    let mut leaves: Vec<Option<LeafGeometry>> = Vec::new();
-    for cmd in cmds {
-        if let DrawCmd::FillGlyph { gid, transform, .. } = cmd {
-            let leaf = build_leaf(face, *gid, coords, *transform);
-            if let Some((leaf, projected)) = leaf {
-                bbox = Some(union_bbox(bbox, projected));
-                leaves.push(Some(leaf));
-            } else {
-                leaves.push(None);
+/// A clip shape: a glyph outline or a rectangle, each with the
+/// transform in effect when it was pushed.
+#[derive(Debug, Clone)]
+enum Shape {
+    Glyph(GlyphId, Transform2D),
+    Rect([f32; 4], Transform2D),
+}
+
+/// One open push: a clip (written lazily as a `<g clip-path>` wrapper),
+/// a group (written at once as `<g>`, styled when it closes), or a root
+/// clip from computed bounds, which only sizes the viewBox.
+#[derive(Debug, Clone)]
+enum Frame {
+    Clip { shape: Shape, written: bool },
+    Group { at: usize },
+    Bounds,
+}
+
+struct SvgSink<'f, 'a, 'c, 'r> {
+    face: &'f Face<'a>,
+    coords: &'c [f32],
+    resolver: Resolver<'r, 'r>,
+    /// Paint space to design units.
+    transforms: Vec<Transform2D>,
+    frames: Vec<Frame>,
+    /// The root clip rectangle in design units, when bounded.
+    view: Option<[f32; 4]>,
+    defs: Defs,
+    body: String,
+    /// Whether any fill produced a shape.
+    painted: bool,
+}
+
+impl SvgSink<'_, '_, '_, '_> {
+    fn top(&self) -> Transform2D {
+        self.transforms
+            .last()
+            .copied()
+            .unwrap_or(Transform2D::IDENTITY)
+    }
+
+    /// Path data for a clip shape, or `None` for an empty glyph.
+    fn shape_path(&self, shape: &Shape) -> Option<String> {
+        match shape {
+            Shape::Glyph(gid, _) => {
+                let outline = self
+                    .face
+                    .glyph_outline_at_coords(*gid, self.coords)
+                    .ok()
+                    .flatten()?;
+                (!outline.is_empty()).then(|| path_data(outline.ops()))
             }
+            Shape::Rect([x0, y0, x1, y1], _) => Some(path_data(&[
+                PathOp::MoveTo { x: *x0, y: *y0 },
+                PathOp::LineTo { x: *x1, y: *y0 },
+                PathOp::LineTo { x: *x1, y: *y1 },
+                PathOp::LineTo { x: *x0, y: *y1 },
+                PathOp::Close,
+            ])),
         }
     }
-    let bbox = bbox?;
-    if leaves.iter().all(Option::is_none) {
-        return None;
+
+    /// Opens `<g clip-path>` wrappers for every clip frame not written
+    /// yet, below index `end`.
+    fn write_clips(&mut self, end: usize) {
+        for i in 0..end {
+            let Frame::Clip {
+                shape,
+                written: false,
+            } = &self.frames[i]
+            else {
+                continue;
+            };
+            let shape = shape.clone();
+            let id = self.defs.allocate_id("clip");
+            let mut def = format!(r#"<clipPath id="{id}"><path"#);
+            if let Some(t) = transform_attr(shape_transform(&shape)) {
+                let _ = write!(def, r#" transform="{t}""#);
+            }
+            let d = self.shape_path(&shape).unwrap_or_default();
+            let _ = write!(def, r#" d="{d}"/></clipPath>"#);
+            self.defs.push(def);
+            let _ = write!(self.body, r#"<g clip-path="url(#{id})">"#);
+            self.frames[i] = Frame::Clip {
+                shape,
+                written: true,
+            };
+        }
     }
 
-    // Second pass: walk the cmd stream alongside the leaf list,
-    // emitting defs (gradients) and the body (paths + groups). The
-    // FillGlyph counter advances on every FillGlyph cmd whether or
-    // not its leaf is `Some`, keeping the two streams in lockstep.
-    let (defs, body) = emit_defs_and_body(cmds, &leaves);
-
-    Some(assemble_svg(bbox, &defs, &body))
-}
-
-/// Resolves one FillGlyph's outline + transform into a `LeafGeometry`
-/// plus its projected bbox. Returns `None` when the outline is missing
-/// or empty, or when the bbox computation has nothing to fold (a
-/// `Close`-only path stream, in theory).
-fn build_leaf(
-    face: &Face<'_>,
-    gid: GlyphId,
-    coords: &[F2Dot14],
-    transform: Transform2D,
-) -> Option<(LeafGeometry, (f32, f32, f32, f32))> {
-    let outline = face.glyph_outline_at_coords(gid, coords).ok().flatten()?;
-    if outline.is_empty() {
-        return None;
+    /// Paints the current clip with `fill`. A gradient's geometry stays
+    /// in paint space; its `gradientTransform` maps it into the user
+    /// space of the shape it fills.
+    fn fill(&mut self, fill: Fill<'_>) {
+        // The innermost clip, when it is still pending, is the shape;
+        // everything else wraps it. Otherwise fill the whole view.
+        let n = self.frames.len();
+        let innermost = match self.frames.last() {
+            Some(Frame::Clip {
+                shape,
+                written: false,
+            }) => Some(shape.clone()),
+            _ => None,
+        };
+        let shape = match innermost {
+            Some(shape) => {
+                self.write_clips(n - 1);
+                shape
+            }
+            None => {
+                self.write_clips(n);
+                let Some(view) = self.view else {
+                    return;
+                };
+                Shape::Rect(view, Transform2D::IDENTITY)
+            }
+        };
+        let Some(d) = self.shape_path(&shape) else {
+            return;
+        };
+        let shape_t = shape_transform(&shape);
+        let paint = match fill {
+            Fill::Solid(color, is_foreground) => {
+                let mut s = format!(r#" fill="{}""#, fill_color(color, is_foreground));
+                if color.a < 1.0 - 1e-6 {
+                    let _ = write!(s, r#" fill-opacity="{}""#, fmt_num(color.a));
+                }
+                s
+            }
+            Fill::Gradient(line, kind) => {
+                let to_shape = shape_t
+                    .inverse()
+                    .map_or(Transform2D::IDENTITY, |inv| self.top().then(inv));
+                let stops = self.resolver.stops(line);
+                let id = emit_gradient_def(&mut self.defs, kind, &stops, line.extend, to_shape);
+                format!(r#" fill="url(#{id})""#)
+            }
+        };
+        self.body.push_str("<path");
+        if let Some(t) = transform_attr(shape_t) {
+            let _ = write!(self.body, r#" transform="{t}""#);
+        }
+        let _ = write!(self.body, r#" d="{d}"{paint}/>"#);
+        self.painted = true;
     }
-    let d = path_data(outline.ops());
-    let local_bbox = path_bbox(outline.ops())?;
-    let projected = project_bbox(transform, local_bbox);
-    Some((LeafGeometry { d }, projected))
 }
 
-struct LeafGeometry {
-    d: String,
+/// What a fill paints.
+enum Fill<'l> {
+    Solid(Color, bool),
+    Gradient(ColorLineRef<'l>, GradientKind),
+}
+
+fn shape_transform(shape: &Shape) -> Transform2D {
+    match shape {
+        Shape::Glyph(_, t) | Shape::Rect(_, t) => *t,
+    }
+}
+
+impl PaintSink for SvgSink<'_, '_, '_, '_> {
+    fn push_transform(&mut self, transform: Transform2D) {
+        let t = transform.then(self.top());
+        self.transforms.push(t);
+    }
+
+    // Design units are the output space: the root transform is the
+    // identity.
+    fn push_root_transform(&mut self) {
+        self.transforms.push(self.top());
+    }
+
+    fn push_inverse_root_transform(&mut self) {
+        self.transforms.push(self.top());
+    }
+
+    fn pop_transform(&mut self) {
+        if self.transforms.len() > 1 {
+            self.transforms.pop();
+        }
+    }
+
+    fn push_clip_glyph(&mut self, glyph: GlyphId) {
+        let shape = Shape::Glyph(glyph, self.top());
+        self.frames.push(Frame::Clip {
+            shape,
+            written: false,
+        });
+    }
+
+    fn push_clip_rectangle(&mut self, x_min: f32, y_min: f32, x_max: f32, y_max: f32) {
+        let shape = Shape::Rect([x_min, y_min, x_max, y_max], self.top());
+        self.frames.push(Frame::Clip {
+            shape,
+            written: false,
+        });
+    }
+
+    fn push_root_clip(&mut self, clip: RootClip) {
+        let (x0, y0, x1, y1) = clip.rect();
+        if clip.is_bounded() && x0 < x1 && y0 < y1 {
+            self.view = Some([x0, y0, x1, y1]);
+        }
+        // A ClipList box clips the drawing; computed bounds enclose all
+        // of it already, so they only size the viewBox.
+        let frame = match clip {
+            RootClip::ClipBox { .. } => Frame::Clip {
+                shape: Shape::Rect([x0, y0, x1, y1], Transform2D::IDENTITY),
+                written: false,
+            },
+            RootClip::Extents { .. } => Frame::Bounds,
+        };
+        self.frames.push(frame);
+    }
+
+    fn pop_clip(&mut self) {
+        if let Some(Frame::Clip { written: true, .. }) = self.frames.pop() {
+            self.body.push_str("</g>");
+        }
+    }
+
+    fn push_group(&mut self) {
+        let n = self.frames.len();
+        self.write_clips(n);
+        self.frames.push(Frame::Group {
+            at: self.body.len(),
+        });
+        self.body.push_str("<g>");
+    }
+
+    fn pop_group(&mut self, mode: CompositeMode) {
+        let Some(Frame::Group { at }) = self.frames.pop() else {
+            return;
+        };
+        let style = match mode {
+            CompositeMode::SrcOver => String::from(r#" style="isolation:isolate""#),
+            mode => format!(
+                r#" style="mix-blend-mode:{}""#,
+                composite_to_blend_mode(mode)
+            ),
+        };
+        self.body.insert_str(at + 2, &style);
+        self.body.push_str("</g>");
+    }
+
+    fn color(&mut self, color: ColorRef) {
+        let (color, is_foreground) = self.resolver.color(color);
+        self.fill(Fill::Solid(color, is_foreground));
+    }
+
+    fn linear_gradient(
+        &mut self,
+        line: ColorLineRef<'_>,
+        p0: (f32, f32),
+        p1: (f32, f32),
+        p2: (f32, f32),
+    ) {
+        self.fill(Fill::Gradient(line, GradientKind::Linear { p0, p1, p2 }));
+    }
+
+    fn radial_gradient(
+        &mut self,
+        line: ColorLineRef<'_>,
+        c0: (f32, f32),
+        r0: f32,
+        c1: (f32, f32),
+        r1: f32,
+    ) {
+        self.fill(Fill::Gradient(
+            line,
+            GradientKind::Radial { c0, r0, c1, r1 },
+        ));
+    }
+
+    fn sweep_gradient(
+        &mut self,
+        line: ColorLineRef<'_>,
+        center: (f32, f32),
+        start_angle: f32,
+        end_angle: f32,
+    ) {
+        self.fill(Fill::Gradient(
+            line,
+            GradientKind::Sweep {
+                center,
+                start_angle,
+                end_angle,
+            },
+        ));
+    }
 }
 
 #[derive(Default)]
@@ -171,132 +422,54 @@ impl Defs {
     }
 }
 
-fn emit_defs_and_body(cmds: &[DrawCmd], leaves: &[Option<LeafGeometry>]) -> (String, String) {
-    let mut defs = Defs::default();
-    let mut body = String::new();
-    let mut leaf_idx: usize = 0;
-
-    for cmd in cmds {
-        match cmd {
-            DrawCmd::FillGlyph {
-                transform, paint, ..
-            } => {
-                // The leaf list has exactly one slot per FillGlyph in
-                // input order; advance on every FillGlyph so the next
-                // one keeps lockstep with the cmd stream. Missing-
-                // outline glyphs (`None` slot) emit nothing.
-                let slot = leaves.get(leaf_idx);
-                leaf_idx += 1;
-                if let Some(Some(leaf)) = slot {
-                    emit_fill(&mut defs, &mut body, *transform, paint, &leaf.d);
-                }
-            }
-            DrawCmd::PushLayer { composite_mode } => {
-                push_layer(&mut body, *composite_mode);
-            }
-            DrawCmd::PopLayer => {
-                body.push_str("</g>");
-            }
-        }
-    }
-
-    (defs.into_svg(), body)
-}
-
-fn emit_fill(
-    defs: &mut Defs,
-    body: &mut String,
-    transform: Transform2D,
-    paint: &PaintSource,
-    d: &str,
-) {
-    let xform = transform_attr(transform);
-    match paint {
-        // The evaluator's foreground is opaque, so a foreground fill's
-        // alpha is exactly the paint alpha.
-        PaintSource::Solid {
-            color: c,
-            is_foreground,
-        } => {
-            body.push_str("<path");
-            if let Some(t) = xform {
-                let _ = write!(body, r#" transform="{t}""#);
-            }
-            let _ = write!(
-                body,
-                r#" d="{d}" fill="{}""#,
-                fill_color(*c, *is_foreground)
-            );
-            if c.a < 1.0 - 1e-6 {
-                let _ = write!(body, r#" fill-opacity="{}""#, fmt_num(c.a));
-            }
-            body.push_str("/>");
-        }
-        PaintSource::Gradient(g) => {
-            let id = emit_gradient_def(defs, g);
-            body.push_str("<path");
-            if let Some(t) = xform {
-                let _ = write!(body, r#" transform="{t}""#);
-            }
-            let _ = write!(body, r#" d="{d}" fill="url(#{id})"/>"#);
-        }
-    }
-}
-
-fn push_layer(body: &mut String, mode: CompositeMode) {
-    let blend = composite_to_blend_mode(mode);
-    let _ = write!(body, r#"<g style="mix-blend-mode:{blend}">"#);
-}
-
 // =========================================================================
 // Gradient defs
 // =========================================================================
 
-fn emit_gradient_def(defs: &mut Defs, g: &Gradient) -> String {
-    match g.kind {
-        GradientKind::Linear { p0, p1, .. } => {
-            let id = defs.allocate_id("grad");
-            let mut s = String::new();
+/// Writes the gradient definition and returns its id. `to_shape` maps
+/// the gradient's paint space into the user space of the filled shape.
+fn emit_gradient_def(
+    defs: &mut Defs,
+    kind: GradientKind,
+    stops: &[ColorStop],
+    extend: Extend,
+    to_shape: Transform2D,
+) -> String {
+    let id = defs.allocate_id("grad");
+    let spread = spread_method(extend);
+    let transform = transform_attr(to_shape)
+        .map(|t| format!(r#" gradientTransform="{t}""#))
+        .unwrap_or_default();
+    let mut s = String::new();
+    let tag = match kind {
+        GradientKind::Linear { p0, p1, p2 } => {
+            let (a, b) = reduce_linear_anchors(p0, p1, p2);
             let _ = write!(
                 s,
-                r#"<linearGradient id="{id}" gradientUnits="userSpaceOnUse" x1="{}" y1="{}" x2="{}" y2="{}" spreadMethod="{}">"#,
-                fmt_num(p0.0),
-                fmt_num(p0.1),
-                fmt_num(p1.0),
-                fmt_num(p1.1),
-                spread_method(g),
+                r#"<linearGradient id="{id}" gradientUnits="userSpaceOnUse" x1="{}" y1="{}" x2="{}" y2="{}" spreadMethod="{spread}"{transform}>"#,
+                fmt_num(a.0),
+                fmt_num(a.1),
+                fmt_num(b.0),
+                fmt_num(b.1),
             );
-            for stop in &g.stops {
-                s.push_str(&stop_tag(stop));
-            }
-            s.push_str("</linearGradient>");
-            defs.push(s);
-            id
+            "linearGradient"
         }
         GradientKind::Radial { c0, r0, c1, r1 } => {
-            let id = defs.allocate_id("grad");
-            // SVG `radialGradient` lays out as (cx, cy) outer, (fx, fy) inner.
-            // The inner radius `r0` is exposed via the SVG2 `fr` attribute;
-            // some viewers respect it, others ignore it. Either way we emit
-            // both circles so the data is preserved.
-            let mut s = String::new();
+            // SVG `radialGradient` lays out as (cx, cy) outer, (fx, fy)
+            // inner. The inner radius `r0` is SVG2's `fr`; some viewers
+            // respect it, others ignore it. Either way both circles are
+            // written so the data is preserved.
             let _ = write!(
                 s,
-                r#"<radialGradient id="{id}" gradientUnits="userSpaceOnUse" cx="{}" cy="{}" r="{}" fx="{}" fy="{}" fr="{}" spreadMethod="{}">"#,
+                r#"<radialGradient id="{id}" gradientUnits="userSpaceOnUse" cx="{}" cy="{}" r="{}" fx="{}" fy="{}" fr="{}" spreadMethod="{spread}"{transform}>"#,
                 fmt_num(c1.0),
                 fmt_num(c1.1),
                 fmt_num(r1),
                 fmt_num(c0.0),
                 fmt_num(c0.1),
                 fmt_num(r0),
-                spread_method(g),
             );
-            for stop in &g.stops {
-                s.push_str(&stop_tag(stop));
-            }
-            s.push_str("</radialGradient>");
-            defs.push(s);
-            id
+            "radialGradient"
         }
         GradientKind::Sweep {
             center,
@@ -305,42 +478,56 @@ fn emit_gradient_def(defs: &mut Defs, g: &Gradient) -> String {
         } => {
             // SVG 1.1 has no sweep gradient. We approximate with a
             // linear gradient running through the sweep's center,
-            // oriented along the sector's bisector. The color bands
-            // are placed in input order across the sweep's angular
-            // extent; the spatial distribution is wrong but the
-            // colors are preserved. A `<!-- sweep-fallback -->`
-            // marker lets consumers detect and re-route.
-            let id = defs.allocate_id("grad");
+            // oriented along the sector's bisector. The colors are
+            // preserved; the angular distribution is not. A
+            // `<!-- sweep-fallback -->` marker lets consumers detect
+            // and re-route.
             let bisector = 0.5 * (start_angle + end_angle);
-            let dx = bisector.cos();
-            let dy = bisector.sin();
-            let r = 1.0_f32; // unit-vector axis; userSpaceOnUse keeps coords stable.
-            let mut s = String::new();
+            let (dx, dy) = (bisector.cos(), bisector.sin());
             s.push_str("<!-- sweep-fallback -->");
             let _ = write!(
                 s,
-                r#"<linearGradient id="{id}" gradientUnits="userSpaceOnUse" x1="{}" y1="{}" x2="{}" y2="{}" spreadMethod="{}">"#,
-                fmt_num(center.0 - dx * r),
-                fmt_num(center.1 - dy * r),
-                fmt_num(center.0 + dx * r),
-                fmt_num(center.1 + dy * r),
-                spread_method(g),
+                r#"<linearGradient id="{id}" gradientUnits="userSpaceOnUse" x1="{}" y1="{}" x2="{}" y2="{}" spreadMethod="{spread}"{transform}>"#,
+                fmt_num(center.0 - dx),
+                fmt_num(center.1 - dy),
+                fmt_num(center.0 + dx),
+                fmt_num(center.1 + dy),
             );
-            for stop in &g.stops {
-                s.push_str(&stop_tag(stop));
-            }
-            s.push_str("</linearGradient>");
-            defs.push(s);
-            id
+            "linearGradient"
         }
+    };
+    for stop in stops {
+        s.push_str(&stop_tag(stop));
     }
+    let _ = write!(s, "</{tag}>");
+    defs.push(s);
+    id
 }
 
-fn spread_method(g: &Gradient) -> &'static str {
-    match g.extend {
-        sigilbuzz_paint::Extend::Pad => "pad",
-        sigilbuzz_paint::Extend::Repeat => "repeat",
-        sigilbuzz_paint::Extend::Reflect => "reflect",
+/// Folds a COLRv1 linear gradient's rotation point `p2` into its end
+/// point: color lines run parallel to `p0 p2`, so the gradient runs
+/// from `p0` to `p1` projected onto the normal of `p0 p2`. With `p2` on
+/// `p0` the gradient is plain `p0 -> p1`.
+fn reduce_linear_anchors(
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+) -> ((f32, f32), (f32, f32)) {
+    let (q1x, q1y) = (p1.0 - p0.0, p1.1 - p0.1);
+    let (q2x, q2y) = (p2.0 - p0.0, p2.1 - p0.1);
+    let s = q2x * q2x + q2y * q2y;
+    if s < 0.000_001 {
+        return (p0, p1);
+    }
+    let k = (q2x * q1x + q2y * q1y) / s;
+    (p0, (p1.0 - k * q2x, p1.1 - k * q2y))
+}
+
+fn spread_method(extend: Extend) -> &'static str {
+    match extend {
+        Extend::Pad => "pad",
+        Extend::Repeat => "repeat",
+        Extend::Reflect => "reflect",
     }
 }
 
@@ -414,22 +601,9 @@ fn composite_to_blend_mode(mode: CompositeMode) -> &'static str {
     // PDF blend modes. CSS / SVG only standardize the PDF blend modes.
     // Porter-Duff cases that have no CSS equivalent fall back to
     // `normal` so the output stays renderable. Consumers wanting full
-    // fidelity should drive sigilbuzz-paint into a Porter-Duff-aware
-    // backend (sigilbuzz-gpu, future sigilbuzz-pdf).
+    // fidelity should use a Porter-Duff-aware backend such as
+    // sigilbuzz-render.
     match mode {
-        CompositeMode::Clear => "normal",
-        CompositeMode::Src => "normal",
-        CompositeMode::Dest => "normal",
-        CompositeMode::SrcOver => "normal",
-        CompositeMode::DestOver => "normal",
-        CompositeMode::SrcIn => "normal",
-        CompositeMode::DestIn => "normal",
-        CompositeMode::SrcOut => "normal",
-        CompositeMode::DestOut => "normal",
-        CompositeMode::SrcAtop => "normal",
-        CompositeMode::DestAtop => "normal",
-        CompositeMode::Xor => "normal",
-        CompositeMode::Plus => "normal",
         CompositeMode::Screen => "screen",
         CompositeMode::Overlay => "overlay",
         CompositeMode::Darken => "darken",
@@ -445,45 +619,7 @@ fn composite_to_blend_mode(mode: CompositeMode) -> &'static str {
         CompositeMode::HslSaturation => "saturation",
         CompositeMode::HslColor => "color",
         CompositeMode::HslLuminosity => "luminosity",
-    }
-}
-
-// =========================================================================
-// Bounding-box composition
-// =========================================================================
-
-fn project_bbox(t: Transform2D, b: (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
-    let corners = [
-        t.apply(b.0, b.1),
-        t.apply(b.2, b.1),
-        t.apply(b.0, b.3),
-        t.apply(b.2, b.3),
-    ];
-    let mut mnx = f32::INFINITY;
-    let mut mny = f32::INFINITY;
-    let mut mxx = f32::NEG_INFINITY;
-    let mut mxy = f32::NEG_INFINITY;
-    for (x, y) in corners {
-        if x < mnx {
-            mnx = x;
-        }
-        if x > mxx {
-            mxx = x;
-        }
-        if y < mny {
-            mny = y;
-        }
-        if y > mxy {
-            mxy = y;
-        }
-    }
-    (mnx, mny, mxx, mxy)
-}
-
-fn union_bbox(a: Option<(f32, f32, f32, f32)>, b: (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
-    match a {
-        None => b,
-        Some(a) => (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)),
+        _ => "normal",
     }
 }
 
@@ -491,8 +627,11 @@ fn union_bbox(a: Option<(f32, f32, f32, f32)>, b: (f32, f32, f32, f32)) -> (f32,
 // Outer SVG framing
 // =========================================================================
 
-fn assemble_svg(bbox: (f32, f32, f32, f32), defs: &str, body: &str) -> String {
-    let (min_x, min_y, max_x, max_y) = bbox;
+/// Frames `body` in an `<svg>` whose viewBox is `view` (design units,
+/// `[x_min, y_min, x_max, y_max]`) plus the margin, flipped so y points
+/// up as in the font.
+fn assemble_svg(view: [f32; 4], defs: &str, body: &str) -> String {
+    let [min_x, min_y, max_x, max_y] = view;
     let vx = min_x - VIEWBOX_MARGIN;
     let vy = min_y - VIEWBOX_MARGIN;
     let vw = (max_x - min_x) + 2.0 * VIEWBOX_MARGIN;
@@ -521,6 +660,14 @@ fn assemble_svg(bbox: (f32, f32, f32, f32), defs: &str, body: &str) -> String {
 mod tests {
     use super::*;
 
+    fn red_blue_green() -> Vec<ColorStop> {
+        alloc::vec![
+            ColorStop::new(0.0, Color::new(1.0, 0.0, 0.0, 1.0)),
+            ColorStop::new(0.5, Color::new(0.0, 1.0, 0.0, 1.0)),
+            ColorStop::new(1.0, Color::new(0.0, 0.0, 1.0, 1.0)),
+        ]
+    }
+
     #[test]
     fn solid_color_is_rgb() {
         let c = Color::new(1.0, 0.5, 0.0, 1.0);
@@ -541,22 +688,19 @@ mod tests {
 
     #[test]
     fn linear_gradient_def_includes_all_stops() {
-        use sigilbuzz_paint::{ColorStop, Extend, Gradient, GradientKind};
-        let g = Gradient {
-            kind: GradientKind::Linear {
-                p0: (0.0, 0.0),
-                p1: (100.0, 0.0),
-                p2: (0.0, 100.0),
-            },
-            stops: alloc::vec![
-                ColorStop::new(0.0, Color::new(1.0, 0.0, 0.0, 1.0)),
-                ColorStop::new(0.5, Color::new(0.0, 1.0, 0.0, 1.0)),
-                ColorStop::new(1.0, Color::new(0.0, 0.0, 1.0, 1.0)),
-            ],
-            extend: Extend::Pad,
+        let kind = GradientKind::Linear {
+            p0: (0.0, 0.0),
+            p1: (100.0, 0.0),
+            p2: (0.0, 100.0),
         };
         let mut defs = Defs::default();
-        let id = emit_gradient_def(&mut defs, &g);
+        let id = emit_gradient_def(
+            &mut defs,
+            kind,
+            &red_blue_green(),
+            Extend::Pad,
+            Transform2D::IDENTITY,
+        );
         let svg = defs.into_svg();
         assert!(svg.contains("<linearGradient"), "missing tag: {svg}");
         assert_eq!(svg.matches("<stop ").count(), 3);
@@ -565,50 +709,74 @@ mod tests {
         assert!(svg.contains(r#"x2="100""#));
         assert!(svg.contains(r#"spreadMethod="pad""#));
         assert!(svg.contains(r#"stop-color="rgb(255,0,0)""#));
+        assert!(!svg.contains("gradientTransform"), "{svg}");
     }
 
     #[test]
-    fn radial_gradient_def_includes_all_stops() {
-        use sigilbuzz_paint::{ColorStop, Extend, Gradient, GradientKind};
-        let g = Gradient {
-            kind: GradientKind::Radial {
-                c0: (10.0, 20.0),
-                r0: 5.0,
-                c1: (10.0, 20.0),
-                r1: 50.0,
-            },
-            stops: alloc::vec![
-                ColorStop::new(0.0, Color::new(1.0, 1.0, 1.0, 1.0)),
-                ColorStop::new(1.0, Color::new(0.0, 0.0, 0.0, 1.0)),
-            ],
-            extend: Extend::Reflect,
+    fn linear_gradient_folds_in_the_rotation_point() {
+        // Color lines parallel to the diagonal p0 p2: the gradient runs
+        // from p0 toward (50, -50).
+        let kind = GradientKind::Linear {
+            p0: (0.0, 0.0),
+            p1: (100.0, 0.0),
+            p2: (100.0, 100.0),
         };
         let mut defs = Defs::default();
-        emit_gradient_def(&mut defs, &g);
+        emit_gradient_def(
+            &mut defs,
+            kind,
+            &red_blue_green(),
+            Extend::Pad,
+            Transform2D::IDENTITY,
+        );
+        let svg = defs.into_svg();
+        assert!(svg.contains(r#"x1="0" y1="0" x2="50" y2="-50""#), "{svg}");
+    }
+
+    #[test]
+    fn gradients_carry_the_paint_transform() {
+        let kind = GradientKind::Radial {
+            c0: (10.0, 20.0),
+            r0: 5.0,
+            c1: (10.0, 20.0),
+            r1: 50.0,
+        };
+        let mut defs = Defs::default();
+        emit_gradient_def(
+            &mut defs,
+            kind,
+            &red_blue_green(),
+            Extend::Reflect,
+            Transform2D::scale(2.0, 1.0),
+        );
         let svg = defs.into_svg();
         assert!(svg.contains("<radialGradient"));
         assert!(svg.contains(r#"r="50""#));
         assert!(svg.contains(r#"fr="5""#));
         assert!(svg.contains(r#"spreadMethod="reflect""#));
+        // The scale stays on the gradient, so the circle becomes an
+        // exact ellipse.
+        assert!(
+            svg.contains(r#"gradientTransform="matrix(2 0 0 1 0 0)""#),
+            "{svg}"
+        );
     }
 
     #[test]
     fn sweep_gradient_falls_back_to_linear_with_marker() {
-        use sigilbuzz_paint::{ColorStop, Extend, Gradient, GradientKind};
-        let g = Gradient {
-            kind: GradientKind::Sweep {
-                center: (0.0, 0.0),
-                start_angle: 0.0,
-                end_angle: core::f32::consts::PI,
-            },
-            stops: alloc::vec![
-                ColorStop::new(0.0, Color::new(1.0, 0.0, 0.0, 1.0)),
-                ColorStop::new(1.0, Color::new(0.0, 0.0, 1.0, 1.0)),
-            ],
-            extend: Extend::Pad,
+        let kind = GradientKind::Sweep {
+            center: (0.0, 0.0),
+            start_angle: 0.0,
+            end_angle: core::f32::consts::PI,
         };
         let mut defs = Defs::default();
-        emit_gradient_def(&mut defs, &g);
+        emit_gradient_def(
+            &mut defs,
+            kind,
+            &red_blue_green(),
+            Extend::Pad,
+            Transform2D::IDENTITY,
+        );
         let svg = defs.into_svg();
         // SVG 1.1 has no sweep. We emit a linearGradient and prefix
         // it with a sweep-fallback comment so consumers can detect.
@@ -618,173 +786,32 @@ mod tests {
     }
 
     #[test]
-    fn solid_fill_includes_opacity_when_alpha_below_one() {
-        let mut defs = Defs::default();
-        let mut body = String::new();
-        emit_fill(
-            &mut defs,
-            &mut body,
-            Transform2D::IDENTITY,
-            &PaintSource::Solid {
-                color: Color::new(0.5, 0.5, 0.5, 0.5),
-                is_foreground: false,
-            },
-            "M 0 0 Z",
-        );
-        assert!(body.contains(r#"fill="rgb(128,128,128)""#));
-        assert!(body.contains(r#"fill-opacity="0.5""#));
-    }
-
-    #[test]
-    fn solid_fill_omits_opacity_at_full_alpha() {
-        let mut defs = Defs::default();
-        let mut body = String::new();
-        emit_fill(
-            &mut defs,
-            &mut body,
-            Transform2D::IDENTITY,
-            &PaintSource::Solid {
-                color: Color::new(0.0, 0.0, 0.0, 1.0),
-                is_foreground: false,
-            },
-            "M 0 0 Z",
-        );
-        assert!(!body.contains("fill-opacity"));
-    }
-
-    #[test]
-    fn foreground_solid_fills_with_current_color() {
-        let mut defs = Defs::default();
-        let mut body = String::new();
-        emit_fill(
-            &mut defs,
-            &mut body,
-            Transform2D::IDENTITY,
-            &PaintSource::Solid {
-                color: Color::new(0.0, 0.0, 0.0, 0.5),
+    fn foreground_stops_use_current_color() {
+        let stops = [
+            ColorStop::new(0.0, Color::new(1.0, 0.0, 0.0, 1.0)),
+            ColorStop {
+                offset: 1.0,
+                color: Color::new(0.0, 0.0, 0.0, 0.25),
                 is_foreground: true,
             },
-            "M 0 0 Z",
-        );
-        assert!(body.contains(r#"fill="currentColor""#), "{body}");
-        assert!(body.contains(r#"fill-opacity="0.5""#), "{body}");
-        assert!(!body.contains("rgb("), "{body}");
-    }
-
-    #[test]
-    fn foreground_stops_use_current_color() {
-        use sigilbuzz_paint::{Extend, Gradient, GradientKind};
-        let g = Gradient {
-            kind: GradientKind::Linear {
-                p0: (0.0, 0.0),
-                p1: (100.0, 0.0),
-                p2: (0.0, 100.0),
-            },
-            stops: alloc::vec![
-                ColorStop::new(0.0, Color::new(1.0, 0.0, 0.0, 1.0)),
-                ColorStop {
-                    offset: 1.0,
-                    color: Color::new(0.0, 0.0, 0.0, 0.25),
-                    is_foreground: true,
-                },
-                ColorStop {
-                    offset: 1.0,
-                    color: Color::BLACK,
-                    is_foreground: true,
-                },
-            ],
-            extend: Extend::Pad,
-        };
-        let mut defs = Defs::default();
-        emit_gradient_def(&mut defs, &g);
-        let svg = defs.into_svg();
-        assert!(
-            svg.contains(r#"<stop offset="0" stop-color="rgb(255,0,0)"/>"#),
-            "{svg}"
-        );
-        assert!(
-            svg.contains(r#"<stop offset="1" stop-color="currentColor" stop-opacity="0.25"/>"#),
-            "{svg}"
-        );
-        assert!(
-            svg.contains(r#"<stop offset="1" stop-color="currentColor"/>"#),
-            "{svg}"
-        );
-    }
-
-    #[test]
-    fn push_layer_emits_blend_mode_group() {
-        let mut body = String::new();
-        push_layer(&mut body, CompositeMode::Multiply);
-        assert!(body.contains(r#"style="mix-blend-mode:multiply""#));
-    }
-
-    #[test]
-    fn missing_middle_outline_does_not_misalign_later_leaves() {
-        // Three FillGlyph cmds with distinguishable solid colors;
-        // the middle glyph has no outline (its leaf slot is `None`).
-        // Before issue #68 the second-pass walker advanced its
-        // dense-leaf cursor only on `Some` slots, so the third
-        // FillGlyph silently picked up the second's `d=` payload, and
-        // here the fix routes each FillGlyph through its own
-        // matching leaf slot, missing-outline ones emit nothing,
-        // and later glyphs keep the path data the first pass paired
-        // with them.
-        let cmds = alloc::vec![
-            DrawCmd::FillGlyph {
-                gid: 1,
-                transform: Transform2D::IDENTITY,
-                paint: PaintSource::Solid {
-                    color: Color::new(1.0, 0.0, 0.0, 1.0),
-                    is_foreground: false
-                },
-            },
-            DrawCmd::FillGlyph {
-                gid: 2,
-                transform: Transform2D::IDENTITY,
-                paint: PaintSource::Solid {
-                    color: Color::new(0.0, 1.0, 0.0, 1.0),
-                    is_foreground: false
-                },
-            },
-            DrawCmd::FillGlyph {
-                gid: 3,
-                transform: Transform2D::IDENTITY,
-                paint: PaintSource::Solid {
-                    color: Color::new(0.0, 0.0, 1.0, 1.0),
-                    is_foreground: false
-                },
+            ColorStop {
+                offset: 1.0,
+                color: Color::BLACK,
+                is_foreground: true,
             },
         ];
-        let leaves: alloc::vec::Vec<Option<LeafGeometry>> = alloc::vec![
-            Some(LeafGeometry {
-                d: alloc::string::String::from("M 0 0 L 1 0 Z"),
-            }),
-            None,
-            Some(LeafGeometry {
-                d: alloc::string::String::from("M 0 0 L 3 0 Z"),
-            }),
-        ];
+        let tags: Vec<String> = stops.iter().map(stop_tag).collect();
+        assert_eq!(tags[0], r#"<stop offset="0" stop-color="rgb(255,0,0)"/>"#);
+        assert_eq!(
+            tags[1],
+            r#"<stop offset="1" stop-color="currentColor" stop-opacity="0.25"/>"#
+        );
+        assert_eq!(tags[2], r#"<stop offset="1" stop-color="currentColor"/>"#);
+    }
 
-        let (_defs, body) = emit_defs_and_body(&cmds, &leaves);
-        // The first FillGlyph (red) should land on its own leaf.
-        assert!(
-            body.contains(r#"d="M 0 0 L 1 0 Z" fill="rgb(255,0,0)""#),
-            "first fill missing or wrong d=: {body}"
-        );
-        // The second FillGlyph (green) had no outline and emits
-        // nothing. Its color must not appear anywhere in the body.
-        assert!(
-            !body.contains("rgb(0,255,0)"),
-            "missing-outline glyph leaked into body: {body}"
-        );
-        // The third FillGlyph (blue) keeps its original `d` rather
-        // than picking up the second slot's path. Before the fix
-        // this assertion failed because the dense-leaf cursor walked
-        // the wrong way and blue inherited green's geometry.
-        assert!(
-            body.contains(r#"d="M 0 0 L 3 0 Z" fill="rgb(0,0,255)""#),
-            "third fill leaf misaligned: {body}"
-        );
+    #[test]
+    fn porter_duff_modes_blend_as_normal() {
+        assert_eq!(composite_to_blend_mode(CompositeMode::Multiply), "multiply");
+        assert_eq!(composite_to_blend_mode(CompositeMode::DestIn), "normal");
     }
 }
