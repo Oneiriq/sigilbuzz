@@ -33,7 +33,7 @@ Changed:
   a CMake package in place in one step. The old pkg-config and CMake templates had to be
   filled in by hand and looked for a `libsigilbuzz` that `cargo build` never produced
   (it builds `libsigilbuzz_capi`). They are gone.
-- The companion crate benchmarks moved to Criterion 0.8.
+- All benchmarks moved to Criterion 0.8.
 - A full `LICENSE` file now sits at the repo root, and `NOTICE` spells out the
   attribution terms. The license is still Apache-2.0.
 - The documentation was rewritten, and the release history moved out of
