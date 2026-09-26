@@ -23,7 +23,8 @@
 //! the lookups of its tag, which is where HarfBuzz schedules a required
 //! feature whose tag the shaper knows. [`required_feature`] exposes it
 //! so the shaper can run it at the start of GSUB when its tag is one
-//! the pipeline never applies.
+//! the pipeline never applies, and add it to the single GPOS stage
+//! whatever its tag.
 //!
 //! [`Script::select_lang_sys`]: crate::tables::layout::Script::select_lang_sys
 

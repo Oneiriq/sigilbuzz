@@ -3,7 +3,8 @@
 //! HarfBuzz runs every GPOS feature of a shaping plan in one stage:
 //! it collects the lookups of all enabled features (`abvm`, `blwm`,
 //! `mark`, `mkmk`, plus `curs`, `dist` and `kern` for horizontal runs,
-//! plus whatever the caller enables), and applies them once each in
+//! plus whatever the caller enables, plus the language system's
+//! required feature whatever its tag), and applies them once each in
 //! lookup-list order ([`stage_lookups`], [`apply_stage`]). A lookup
 //! shared by two features runs once, and the font's lookup order,
 //! not the feature order, decides what runs first.
@@ -60,9 +61,14 @@ pub(super) struct StageLookup {
 /// zero-valued [`Feature`] are left out; any other tag the caller
 /// turns on joins the stage. `lookups_for` resolves one tag to its
 /// lookup indices for the run's script.
+///
+/// `required` holds the lookups of the language system's required
+/// feature. HarfBuzz adds those to the GPOS stage whatever their tag
+/// and whether or not the caller disabled it, with automatic joiners.
 pub(super) fn stage_lookups(
     features: &[Feature],
     horizontal: bool,
+    required: &[u16],
     mut lookups_for: impl FnMut([u8; 4]) -> Vec<u16>,
 ) -> Vec<StageLookup> {
     let mut tags: Vec<[u8; 4]> = COMMON_FEATURES.to_vec();
@@ -79,6 +85,9 @@ pub(super) fn stage_lookups(
         Some(l) => l.joiners = l.joiners.and(joiners),
         None => out.push(StageLookup { index, joiners }),
     };
+    for &index in required {
+        add(index, Joiners::AUTO);
+    }
     for tag in tags {
         if feature_disabled(features, tag) {
             continue;

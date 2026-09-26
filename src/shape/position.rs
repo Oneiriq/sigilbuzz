@@ -185,7 +185,8 @@ pub(super) fn position(
                 if seg.range.is_empty() {
                     continue;
                 }
-                let lookups = gpos::stage_lookups(input.features, horizontal, |tag| {
+                let required = required_lookups(gpos, seg.script_priority);
+                let lookups = gpos::stage_lookups(input.features, horizontal, &required, |tag| {
                     lookups_for(gpos, tag, seg.script_priority)
                 });
                 let mut att = Attach {
@@ -304,6 +305,20 @@ fn lookups_for(gpos: &Gpos<'_>, tag: [u8; 4], script_priority: &[[u8; 4]]) -> Ve
         tag,
         script_priority,
     )
+    .unwrap_or_default()
+}
+
+/// Lookups of the required feature of the language system GPOS picks
+/// for one segment's script, which join the GPOS stage whatever their
+/// tag (HarfBuzz's `hb_ot_map_builder_t::compile`).
+fn required_lookups(gpos: &Gpos<'_>, script_priority: &[[u8; 4]]) -> Vec<u16> {
+    crate::ot::layout_select::required_feature(
+        gpos.script_list(),
+        gpos.feature_list(),
+        gpos.language_tags(),
+        script_priority,
+    )
+    .map(|(_, lookups)| lookups)
     .unwrap_or_default()
 }
 
