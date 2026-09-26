@@ -64,6 +64,14 @@ const CORPUS: &[Case] = &[
         note: "digit zero",
         compare_rustybuzz: true,
     },
+    // ka + anusvara: a GDEF mark with a nonzero hmtx advance. The
+    // USE shaper HarfBuzz runs for Brahmi zeroes mark advances before
+    // GPOS.
+    Case {
+        text: "\u{11015}\u{11001}",
+        note: "ka + anusvara (mark advance zeroed)",
+        compare_rustybuzz: true,
+    },
     // Mixed Latin + Brahmi.
     Case {
         text: "Hi \u{11015}\u{11038}",

@@ -1329,15 +1329,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // shaper (late-zero) on every segment, including the Limbu one.
     let dominant_zeroes_early = dominant_script.is_some_and(zeroes_marks_early);
     if dominant_zeroes_early {
-        if let Some(ref gdef) = gdef {
-            for seg_out in &seg_glyph_ranges {
-                for glyph in &mut glyphs[seg_out.range.clone()] {
-                    if gdef.glyph_class(glyph.glyph_id as u16).is_mark() {
-                        glyph.x_advance = 0;
-                    }
-                }
-            }
-        }
+        zero_mark_widths(&mut glyphs, gdef.as_ref());
     }
 
     // Step 4: GPOS passes, per segment, so each segment dispatches
@@ -1444,7 +1436,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // mixed run with a Latin majority takes this late-zero path on
     // every segment, including Limbu.
     //
-    // Indic / Khmer / Hangul / Myanmar are excluded: their shapers
+    // Indic / Khmer / Hangul are excluded: their shapers
     // ship `HB_OT_SHAPE_ZERO_WIDTH_MARKS_NONE`, so post-base matras
     // keep their hmtx advance through the entire pipeline (they are
     // bases dressed up as marks for OpenType GDEF reasons).
@@ -1453,15 +1445,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // shaper, so it zeroes late too.
     let dominant_zeroes_late = dominant_script.map_or(true, zeroes_marks_late);
     if dominant_zeroes_late {
-        if let Some(ref gdef) = gdef {
-            for seg_out in &seg_glyph_ranges {
-                for glyph in &mut glyphs[seg_out.range.clone()] {
-                    if gdef.glyph_class(glyph.glyph_id as u16).is_mark() {
-                        glyph.x_advance = 0;
-                    }
-                }
-            }
-        }
+        zero_mark_widths(&mut glyphs, gdef.as_ref());
     }
 
     // Default ignorables lose their advance once every other advance
@@ -1491,12 +1475,31 @@ fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
     features.iter().any(|f| f.tag == tag && f.value == 0)
 }
 
+/// HarfBuzz's `zero_mark_widths_by_gdef`: every GDEF mark loses both
+/// advances, so marks in vertical runs stop moving the pen too.
+fn zero_mark_widths(glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>) {
+    let Some(gdef) = gdef else {
+        return;
+    };
+    for glyph in glyphs {
+        if gdef.glyph_class(glyph.glyph_id as u16).is_mark() {
+            glyph.x_advance = 0;
+            glyph.y_advance = 0;
+        }
+    }
+}
+
 /// HarfBuzz "zero mark widths early" set: the dominant scripts whose
 /// shaper sets `zero_width_marks = HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_EARLY`
 /// (USE shaper + Myanmar). Used to gate the early-zero pass that fires
 /// before GPOS, so chained-context kern lookups that write a mark's
 /// repositioning advance write a *delta* onto a cleared baseline rather
 /// than doubling the hmtx default.
+///
+/// The set follows `hb_ot_shaper_categorize` (hb-ot-shaper.hh):
+/// Sinhala, Tibetan, Mongolian, N'Ko and the Brahmic scripts below all
+/// go to the Universal Shaping Engine there, whichever pipeline
+/// sigilbuzz runs them through.
 fn zeroes_marks_early(script: Script) -> bool {
     matches!(
         script,
@@ -1510,6 +1513,13 @@ fn zeroes_marks_early(script: Script) -> bool {
             | Script::Limbu
             | Script::Cham
             | Script::Mongolian
+            | Script::Tibetan
+            | Script::Sinhala
+            | Script::Brahmi
+            | Script::Sharada
+            | Script::Khojki
+            | Script::Tirhuta
+            | Script::Modi
             // Myanmar shaper, also EARLY.
             | Script::Myanmar
     )
@@ -3604,6 +3614,38 @@ mod tests {
         assert_eq!(shaped.len(), 2);
         assert_eq!(shaped.glyphs[0].cluster, 0);
         assert_eq!(shaped.glyphs[1].cluster, 2);
+    }
+
+    #[test]
+    fn mark_zeroing_follows_the_harfbuzz_shaper_of_each_script() {
+        // Universal Shaping Engine and Myanmar shaper: before GPOS.
+        for s in [
+            Script::Tibetan,
+            Script::Brahmi,
+            Script::Sharada,
+            Script::Khojki,
+            Script::Tirhuta,
+            Script::Modi,
+            Script::Mongolian,
+            Script::NKo,
+            Script::Sinhala,
+            Script::Myanmar,
+        ] {
+            assert!(zeroes_marks_early(s) && !zeroes_marks_late(s), "{s:?}");
+        }
+        // Indic, Khmer and Hangul shapers: never.
+        for s in [
+            Script::Devanagari,
+            Script::Tamil,
+            Script::Khmer,
+            Script::Hangul,
+        ] {
+            assert!(!zeroes_marks_early(s) && !zeroes_marks_late(s), "{s:?}");
+        }
+        // Default, Arabic, Hebrew and Thai shapers: after positioning.
+        for s in [Script::Arabic, Script::Hebrew, Script::Thai, Script::Latin] {
+            assert!(!zeroes_marks_early(s) && zeroes_marks_late(s), "{s:?}");
+        }
     }
 
     #[test]

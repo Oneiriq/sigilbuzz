@@ -352,3 +352,39 @@ fn unset_direction_brings_back_the_auto_vertical_default() {
         "TTB advances are negative"
     );
 }
+
+#[test]
+fn vertical_mark_advances_are_zeroed_in_both_axes() {
+    // U+1885 (a GDEF mark) after a letter, shaped top to bottom. The
+    // USE shaper HarfBuzz runs for Mongolian zeroes a mark's x and y
+    // advances before GPOS; zeroing only x would leave the mark's
+    // vertical advance moving the pen a full em.
+    let text = "\u{1820}\u{1885}";
+    let blob = Blob::new(NOTO_MONGOLIAN);
+    let face = Face::parse(&blob, 0).expect("parse face");
+    let font = Font::new(face, 1000.0);
+    let mut buffer = Buffer::new();
+    buffer.set_direction(Direction::Ttb);
+    buffer.push_str(text);
+    let sig: Vec<(u32, i32, i32)> = shape(&font, &buffer, &[])
+        .expect("shape TTB")
+        .glyphs
+        .iter()
+        .map(|g| (g.glyph_id, g.x_advance, g.y_advance))
+        .collect();
+
+    let rb_face = rustybuzz::Face::from_slice(NOTO_MONGOLIAN, 0).expect("parse rustybuzz face");
+    let mut rb_buf = rustybuzz::UnicodeBuffer::new();
+    rb_buf.push_str(text);
+    rb_buf.set_direction(rustybuzz::Direction::TopToBottom);
+    let rb_out = rustybuzz::shape(&rb_face, &[], rb_buf);
+    let rb: Vec<(u32, i32, i32)> = rb_out
+        .glyph_infos()
+        .iter()
+        .zip(rb_out.glyph_positions())
+        .map(|(i, p)| (i.glyph_id, p.x_advance, p.y_advance))
+        .collect();
+
+    assert_eq!(sig, rb);
+    assert_eq!((sig[1].1, sig[1].2), (0, 0), "the mark has no advance");
+}
