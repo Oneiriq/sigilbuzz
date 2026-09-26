@@ -84,7 +84,7 @@ pub mod unicode;
 
 pub use bidi_map::BidiMap;
 pub use blob::Blob;
-pub use buffer::{Buffer, Direction, Glyph};
+pub use buffer::{Buffer, Direction, Glyph, ShapedRun};
 pub use error::{Error, Result};
 pub use face::{Face, GlyphBitmapEntry};
 pub use font::Font;

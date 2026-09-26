@@ -74,3 +74,21 @@ fn feature_constants_via_root_name() {
     assert_eq!(feature::KERN, *b"kern");
     assert_eq!(feature::CALT, *b"calt");
 }
+
+#[test]
+fn shaped_run_is_nameable_from_the_root() {
+    // `shape` returns a `ShapedRun`; callers that store or pass the
+    // run around need to name the type without reaching into a
+    // private module.
+    use sigilbuzz::{shape, Blob, Buffer, Face, Font, ShapedRun};
+
+    let blob = Blob::new(include_bytes!("fixtures/opensans_regular.ttf"));
+    let face = Face::parse(&blob, 0).expect("parse Open Sans");
+    let font = Font::new(face, 1000.0);
+    let mut buffer = Buffer::new();
+    buffer.push_str("Hi");
+    let run: ShapedRun = shape(&font, &buffer, &[]).expect("shape");
+    assert_eq!(run.len(), 2);
+    assert!(!run.is_empty());
+    assert!(ShapedRun::default().is_empty());
+}

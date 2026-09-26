@@ -26,6 +26,7 @@ signatures only change in a major version.
 `sigilbuzz` (root crate):
 
 - `Blob`, `Face`, `Font`, `Buffer`, `Glyph`, `Direction`, `Feature`
+- `ShapedRun`: the positioned glyph run `shape` returns (`glyphs`, `len`, `is_empty`)
 - `OwnedFace`: a face that owns its bytes, for caching and sharing across threads
 - `BidiMap`: the logical/visual byte map kept by `Buffer::set_text_bidi`
   (`Buffer::bidi_map`, `BidiMap::{new, from_order, visual_to_logical,
