@@ -2,7 +2,6 @@
 //! per-segment pre-shaper and GSUB pass, advances, and positioning,
 //! in that order.
 
-use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
 use super::aat::apply_morx;
@@ -11,10 +10,12 @@ use super::features::{
     run_default_gsub,
 };
 use super::hangul::hangul_compose;
+use super::normalize::{self, Normalizer};
 use super::segment::{build_segments, is_common_for_segmentation, ProcessedSegment, Segment};
+use super::shaper::Shaper;
 use super::{
-    cluster, dotted_circle, feature_disabled, glyph_props, ignorables, native_direction, position,
-    required, rotate, thai, Feature, JoinerTable, VarCtx,
+    cluster, dotted_circle, feature_disabled, ignorables, native_direction, position, required,
+    rotate, thai, Feature, JoinerTable, VarCtx,
 };
 use crate::buffer::{script_priority_for, Buffer, BufferFlags, Direction, Glyph, ShapedRun};
 use crate::error::Result;
@@ -73,24 +74,16 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // horizontal callers keep the cheap "hmtx only" path.
     let vmtx = if is_vertical { face.vmtx()? } else { None };
 
-    let raw_text = buffer.text();
-    if raw_text.is_empty() {
+    let text = buffer.text();
+    if text.is_empty() {
         return Ok(ShapedRun::default());
     }
-    // NFC composition pass runs before cmap lookup so precomposed
-    // forms (é, ñ, ...) find their precomposed glyphs instead of
-    // the decomposed base + combining-mark pair. Opt-in; see
-    // Buffer::set_normalize_nfc.
-    let text: Cow<'_, str> = if buffer.normalize_nfc() {
-        Cow::Owned(crate::unicode::normalize::compose_str(raw_text))
-    } else {
-        Cow::Borrowed(raw_text)
-    };
-    let text: &str = &text;
 
-    // Step 1: codepoint -> glyph id via cmap. Clusters are byte
-    // offsets from the start of the text so later passes can track
-    // which input characters coalesce into a single output glyph.
+    // Step 1: the characters to shape, before normalization maps them
+    // to glyphs. Clusters are byte offsets from the start of the text
+    // so later passes can track which input characters coalesce into
+    // a single output glyph; until normalization, `glyphs` only
+    // carries those clusters.
     //
     // Default-ignorable characters (ZWJ, ZWNJ, bidi controls,
     // variation selectors, ...) map through cmap like any other, so
@@ -98,8 +91,8 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // the `ignorables` module hide them after positioning, as
     // HarfBuzz does.
     //
-    // We also capture the raw `char` list alongside the glyphs so
-    // the Indic shaper can consult Unicode properties per-codepoint
+    // We also keep the `char` list alongside the glyphs so the
+    // complex shapers can consult Unicode properties per code point
     // without re-scanning the UTF-8 stream.
     let mut glyphs: Vec<Glyph> = Vec::with_capacity(text.len());
     let mut codepoints: Vec<char> = Vec::with_capacity(text.len());
@@ -125,6 +118,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let mut cont: Vec<bool> = Vec::with_capacity(text.len());
     let flags = buffer.flags();
     let level = buffer.cluster_level();
+    // Backward runs mirror paired punctuation (see `rotate`); this
+    // says which entries of `codepoints` were replaced.
+    let backward = !direction.is_forward();
+    let mut mirrored_mask: Vec<bool> = Vec::with_capacity(text.len());
     // HarfBuzz's `hb_insert_dotted_circle`: a paragraph start (BOT)
     // with no pre-context that opens with a combining mark gets a
     // dotted circle, with the mark's cluster, for the mark to sit on.
@@ -132,68 +129,46 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         && !flags.contains(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE)
         && buffer.pre_context().is_empty()
         && typed.first().is_some_and(|&c| cluster::is_unicode_mark(c))
+        && cmap.glyph_id('\u{25CC}').is_some()
     {
-        if let (Some(&(cluster, _)), Some(circle)) =
-            (composed_chars.first(), cmap.glyph_id('\u{25CC}'))
-        {
-            glyphs.push(Glyph::new(u32::from(circle), cluster));
+        if let Some(&(cluster, _)) = composed_chars.first() {
+            glyphs.push(Glyph::new(0, cluster));
             codepoints.push('\u{25CC}');
             cont.push(false);
+            mirrored_mask.push(false);
         }
     }
-    // Backward runs mirror paired punctuation (see `rotate`); these
-    // are the indices in `codepoints` that were replaced.
-    let backward = !direction.is_forward();
-    let mut mirrored: Vec<usize> = Vec::new();
     for (k, (cluster, ch)) in composed_chars.iter().copied().enumerate() {
         if let Some(parts) = split_before_cmap(ch) {
             for (n, &component) in parts.iter().enumerate() {
-                let gid = u32::from(cmap.glyph_id(component).unwrap_or(0));
-                glyphs.push(Glyph::new(gid, cluster));
+                glyphs.push(Glyph::new(0, cluster));
                 codepoints.push(component);
                 cont.push(n > 0 || typed_cont[k]);
+                mirrored_mask.push(false);
             }
             continue;
         }
         cont.push(typed_cont[k]);
-        let ch = if backward {
-            let (m, replaced) = rotate::mirror(ch, &cmap);
-            if replaced {
-                mirrored.push(codepoints.len());
-            }
-            m
+        let (ch, mirrored) = if backward {
+            rotate::mirror(ch, &cmap)
         } else {
-            ch
+            (ch, false)
         };
-        let glyph_id = u32::from(cmap.glyph_id(ch).unwrap_or(0));
-        // `unicode_props` is set once here and follows the glyph
-        // through ligation, multiple substitution and final reorder.
-        // The passes after positioning read the DEFAULT_IGNORABLE bit;
-        // GSUB clears it on any glyph it substitutes
-        // (`substitute_glyph`), matching HarfBuzz.
-        let mut glyph = Glyph::new(glyph_id, cluster);
-        glyph.unicode_props = ignorables::unicode_props(ch);
-        glyphs.push(glyph);
+        glyphs.push(Glyph::new(0, cluster));
         codepoints.push(ch);
+        mirrored_mask.push(mirrored);
     }
     // `hb_form_clusters`: at the grapheme levels each grapheme takes
     // one cluster.
     cluster::form_clusters(&mut glyphs, &cont, level);
-    // The matching props (hidden ignorables, synthesized glyph
-    // classes) come from each glyph's own character, decomposed
-    // pieces included; glyphs and code points are still one to one.
-    for (glyph, &ch) in glyphs.iter_mut().zip(&codepoints) {
-        glyph.unicode_props |= glyph_props::initial(ch);
-    }
 
     // Step 1.5: Segment the run into maximal same-script spans. Each
     // segment carries its own script priority (e.g. Arabic `arab` ->
     // DFLT, Hebrew `hebr` -> DFLT), its codepoint range in the
     // `codepoints` vec we just filled, and (after we finish GSUB
     // below) its post-substitution glyph range. Pre-GSUB the two
-    // ranges coincide because cmap is 1:1 (Khmer's split-vowel
-    // preprocessor above added both codepoints and glyphs in lockstep,
-    // so the 1:1 invariant still holds here).
+    // ranges coincide: normalization (below) keeps one glyph per code
+    // point.
     //
     // Running each segment through its own cmap -> pre-shaper -> GSUB
     // -> GPOS chain is what lets mixed-script runs like `Hi שלום`
@@ -221,10 +196,6 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // `native_direction`). Mirroring above followed the caller's.
     // HarfBuzz decides this for a buffer of one script; a buffer that
     // sigilbuzz splits into several script runs keeps the direction.
-    let mut mirrored_mask = alloc::vec![false; codepoints.len()];
-    for &i in &mirrored {
-        mirrored_mask[i] = true;
-    }
     let one_run = buffer.script().is_some() || build_segments(&codepoints).len() <= 1;
     let direction = if buffer.has_explicit_direction() && one_run {
         let native = native_direction::resolve(direction, buffer_script, &codepoints);
@@ -243,7 +214,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // The rest of HarfBuzz's SARA AM handling, which (like its Thai
     // shaper) runs once the text is in the direction it shapes in.
     thai::preprocess(&mut codepoints, &mut glyphs, &mut mirrored_mask, level);
-    let segments = match buffer.script() {
+    let mut segments = match buffer.script() {
         Some(script) => alloc::vec![Segment {
             cp_range: 0..codepoints.len(),
             script,
@@ -251,6 +222,35 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         }],
         None => build_segments(&codepoints),
     };
+
+    // The buffer language picks each script's language system for
+    // every GSUB and GPOS feature lookup, including the ones the
+    // complex shapers run (see `crate::ot::layout_select`).
+    let language_tags: &[[u8; 4]] = buffer
+        .language()
+        .map_or(&[], crate::Language::ot_language_tags);
+    let gpos = face.gpos()?.map(|g| g.with_language_tags(language_tags));
+
+    // Step 1.75: normalization, which also maps the characters to
+    // glyphs. Each segment normalizes with the mode and hooks of the
+    // shaper HarfBuzz gives its script (see `normalize`), so its code
+    // points and glyphs stay one to one.
+    let has_gpos_mark = |priority: &[[u8; 4]]| {
+        gpos.as_ref()
+            .is_some_and(|g| position::has_feature(g, *b"mark", priority))
+    };
+    normalize::normalize_segments(
+        &mut codepoints,
+        &mut glyphs,
+        &mut mirrored_mask,
+        &mut segments,
+        |seg| Normalizer {
+            cmap: &cmap,
+            shaper: Shaper::for_script(seg.script, !is_vertical),
+            has_gpos_mark: has_gpos_mark(seg.script_priority),
+            level,
+        },
+    );
 
     // Dominant script: the first non-COMMON/INHERITED script in the
     // buffer. HarfBuzz (and rustybuzz) compute this once in
@@ -268,12 +268,6 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // Latin-majority mixed runs.
     let dominant_script = buffer_script;
 
-    // The buffer language picks each script's language system for
-    // every GSUB and GPOS feature lookup, including the ones the
-    // complex shapers run (see `crate::ot::layout_select`).
-    let language_tags: &[[u8; 4]] = buffer
-        .language()
-        .map_or(&[], crate::Language::ot_language_tags);
     let gsub = face.gsub()?.map(|g| {
         g.with_language_tags(language_tags)
             .with_cluster_level(level)
@@ -723,7 +717,6 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // segment (so each segment dispatches under its own script-tag
     // priority), the `kerx` / legacy `kern` fallbacks, and attachment
     // resolution, in HarfBuzz's order; see the `position` submodule.
-    let gpos = face.gpos()?.map(|g| g.with_language_tags(language_tags));
     // Build the variable-font resolution context once. Passing this
     // through every GPOS apply site is what lets VariationIndex
     // deltas inside a ValueRecord actually respond to the user's
@@ -760,27 +753,18 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     Ok(ShapedRun { glyphs })
 }
 
-/// The parts `ch` is split into before the cmap lookup, each keeping
-/// its cluster, or `None` for a character that maps as it is.
+/// The parts `ch` is split into before normalization, each keeping its
+/// cluster, or `None` for a character that is not split.
 ///
-/// - Khmer U+17C4 / U+17C5 become the pre-base sign-e plus sign-aa /
-///   sign-au, so the syllable machine sees the pre-base part.
-///   (HarfBuzz's Khmer `decompose` hook keeps U+17C4 / U+17C5 itself
-///   as the second part, and also splits U+17BE..U+17C0.)
-/// - Thai SARA AM (U+0E33) and Lao AM (U+0EB3) become NIKHAHIT plus
-///   SARA AA, as HarfBuzz's Thai shaper does before GSUB: the font's
-///   mark positioning targets the pair (see the `thai` module for the
-///   rest of that step).
-/// - Tamil and Sinhala split matras become their pre-base and
-///   post-base parts, HarfBuzz's Indic decomposition, so the pre-base
-///   half takes part in syllable reordering. The parts keep their
-///   parent's script, so segmentation is unchanged.
+/// Thai SARA AM (U+0E33) and Lao AM (U+0EB3) become NIKHAHIT plus SARA
+/// AA, as HarfBuzz's Thai shaper does before normalization: the font's
+/// mark positioning targets the pair (see the `thai` module for the
+/// rest of that step). Split vowels of the Indic, Khmer, and USE
+/// scripts decompose in normalization, with those shapers' hooks.
 fn split_before_cmap(ch: char) -> Option<&'static [char]> {
     match ch {
-        '\u{17C4}' => Some(&['\u{17C1}', '\u{17B6}']),
-        '\u{17C5}' => Some(&['\u{17C1}', '\u{17B7}']),
         '\u{0E33}' => Some(&['\u{0E4D}', '\u{0E32}']),
         '\u{0EB3}' => Some(&['\u{0ECD}', '\u{0EB2}']),
-        _ => crate::ot::indic::split_matra_decompose(ch),
+        _ => None,
     }
 }

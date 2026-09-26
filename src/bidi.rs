@@ -210,13 +210,13 @@ pub struct ShapedBidiRun {
 /// # Ok::<(), sigilbuzz::Error>(())
 /// ```
 ///
+/// Shaping normalizes each run against the font, as HarfBuzz does
+/// (decomposing, reordering marks, recomposing), but every glyph keeps
+/// the byte offset of a character it came from, so clusters always
+/// index the paragraph text.
+///
 /// # Limits
 ///
-/// - The opt-in NFC pass ([`Buffer::set_normalize_nfc`]) composes each
-///   run before shaping and does not map clusters back: after a
-///   composed pair, a run's clusters index the composed text and drift
-///   from the paragraph text. Feed precomposed text, or leave NFC off,
-///   where clusters matter.
 /// - Vertical text has no bidi runs. Shape it with [`crate::shape`] and
 ///   a vertical direction.
 #[derive(Debug, Clone)]

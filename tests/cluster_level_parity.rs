@@ -338,7 +338,9 @@ fn graphemes_level_forms_graphemes_without_monotone_merges() {
 
 #[test]
 fn the_default_level_is_monotone_characters() {
-    let text = "e\u{0301}";
+    // A base and a mark that do not compose (normalization would fold
+    // "e\u{0301}" into one glyph at every level).
+    let text = "q\u{0301}";
     let blob = Blob::new(OPEN_SANS);
     let font = Font::new(Face::parse(&blob, 0).expect("face"), 1000.0);
     let mut buffer = Buffer::new();

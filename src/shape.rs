@@ -4,7 +4,9 @@
 //!
 //! ```text
 //!   buffer.text  ->  split into chars (cluster = UTF-8 byte offset)
-//!                ->  cmap.glyph_id(ch)  (falls back to .notdef when missing)
+//!                ->  normalize against the font's cmap (decompose, reorder
+//!                    marks, recompose), mapping each char to its glyph id
+//!                    (.notdef when missing)
 //!                ->  hmtx.advance(gid)  (advance in font design units)
 //!                ->  Glyph { glyph_id, cluster, x_advance, ... }
 //! ```
@@ -17,7 +19,13 @@
 //!
 //! # What is here
 //!
-//! - cmap -> glyph id, then the full shaping pipeline in spec order.
+//! - HarfBuzz's font-aware normalization, which also maps characters
+//!   to glyphs (the `normalize` submodule): clusters decompose into
+//!   what the font supports, marks sort by combining class, and base
+//!   and mark pairs recompose when the font has the composite, with
+//!   the mode and hooks of the shaper HarfBuzz picks for the script
+//!   (the `shaper` submodule). Then the full shaping pipeline in spec
+//!   order.
 //! - GSUB (lookup types 1, 4, 6 format 3, plus Extension type 7
 //!   unwrapping): `ccmp`, `rlig`, `liga`, `clig`, `calt` run by
 //!   default; any user-enabled tag with non-zero value flows
@@ -87,12 +95,6 @@
 //!
 //! # What is not here yet
 //!
-//! - Full Unicode NFC normalization. sigilbuzz ships the
-//!   composition half of NFC (opt-in via
-//!   [`crate::Buffer::set_normalize_nfc`]); canonical
-//!   decomposition and combining-class reordering do not run yet,
-//!   so pathological inputs that need reordering fall through
-//!   unchanged.
 //! - GSUB contextual non-chained (type 5), multiple substitution
 //!   (type 2), alternate (type 3), reverse chained (type 8),
 //!   and the format 1/2 variants of type 6.
@@ -117,11 +119,13 @@ mod joiners;
 mod kern;
 mod lig;
 mod native_direction;
+mod normalize;
 mod pipeline;
 mod position;
 mod required;
 mod rotate;
 mod segment;
+mod shaper;
 mod thai;
 
 use aat::apply_kerx_format4;

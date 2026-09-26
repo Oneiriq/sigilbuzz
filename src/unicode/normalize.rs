@@ -103,24 +103,6 @@ pub fn compose(a: char, b: char) -> Option<char> {
     char::from_u32(COMPOSITIONS[i].2)
 }
 
-/// Greedy left-to-right pairwise composition of `input`, the pass
-/// [`crate::Buffer::set_normalize_nfc`] runs: each character composes
-/// with the one emitted before it when [`compose`] has a composite.
-#[must_use]
-pub fn compose_str(input: &str) -> alloc::string::String {
-    let mut out: alloc::vec::Vec<char> = alloc::vec::Vec::with_capacity(input.len());
-    for ch in input.chars() {
-        if let Some(last) = out.last_mut() {
-            if let Some(composed) = compose(*last, ch) {
-                *last = composed;
-                continue;
-            }
-        }
-        out.push(ch);
-    }
-    out.into_iter().collect()
-}
-
 /// The `Canonical_Combining_Class` of `ch`: zero for starters, the
 /// class number (1 to 240) for combining marks that reorder.
 ///

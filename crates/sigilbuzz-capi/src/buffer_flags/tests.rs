@@ -210,12 +210,13 @@ fn null_buffers_are_harmless() {
 fn the_cluster_level_changes_shaped_clusters() {
     let font = TestFont::new(OPEN_SANS);
     let buffer = hb_buffer_create();
-    // The default groups the combining acute with its base ...
-    assert_eq!(clusters(&font.shape(buffer, "e\u{0301}")), [0, 0]);
+    // The default groups the combining acute with its base (q has no
+    // precomposed form, so normalization keeps both glyphs) ...
+    assert_eq!(clusters(&font.shape(buffer, "q\u{0301}")), [0, 0]);
     // ... and MONOTONE_CHARACTERS keeps it apart.
     // SAFETY: created above.
     unsafe { hb_buffer_set_cluster_level(buffer, HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS) };
-    assert_eq!(clusters(&font.shape(buffer, "e\u{0301}")), [0, 1]);
+    assert_eq!(clusters(&font.shape(buffer, "q\u{0301}")), [0, 1]);
     // SAFETY: created above.
     unsafe { hb_buffer_destroy(buffer) };
 }

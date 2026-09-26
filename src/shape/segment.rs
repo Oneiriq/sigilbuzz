@@ -8,9 +8,10 @@ use crate::unicode::{script_of, Script};
 
 /// One shape-time segment: a maximal run of codepoints that share a
 /// resolved script. `cp_range` is a half-open range into the
-/// post-cmap `codepoints` vector (not into the buffer text, because
-/// Khmer split-vowel preprocessing can insert synthetic codepoints).
-/// Pre-GSUB, `glyphs[cp_range]` covers exactly the same glyphs.
+/// `codepoints` vector (not into the buffer text, because
+/// preprocessing and normalization change the characters; the
+/// normalizer rewrites the ranges after it runs). Pre-GSUB,
+/// `glyphs[cp_range]` covers exactly the same glyphs.
 #[derive(Debug)]
 pub(super) struct Segment {
     pub(super) cp_range: core::ops::Range<usize>,

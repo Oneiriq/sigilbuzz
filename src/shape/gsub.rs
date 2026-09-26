@@ -330,12 +330,15 @@ pub(super) fn expand_glyph_in_place(
     // `indic_position` and unicode-property bits survive a
     // multiple-sub split. Rustybuzz does the same via its info mask.
     let source_pos = glyphs[at].indic_position;
+    let (source_class, source_combining) = (glyphs[at].char_class, glyphs[at].combining_class);
     substitute_glyph(&mut glyphs[at], seq[0]);
     let source_props = glyphs[at].unicode_props;
     for (i, &out_gid) in seq.iter().enumerate().skip(1) {
         let mut g = Glyph::new(u32::from(out_gid), source_cluster);
         g.unicode_props = source_props;
         g.indic_position = source_pos;
+        g.char_class = source_class;
+        g.combining_class = source_combining;
         glyphs.insert(at + i, g);
     }
     // Component numbering for GPOS mark attachment (see `lig`).

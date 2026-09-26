@@ -16,6 +16,7 @@ use core::ops::Range;
 
 use crate::unicode::{script_of, Script};
 
+pub mod char_class;
 mod flags;
 pub use flags::{BufferFlags, ClusterLevel};
 
@@ -54,10 +55,10 @@ impl Direction {
 /// produce negative displacements (contextual kerning, backtracking
 /// combining marks).
 ///
-/// In addition to the rendered fields, `Glyph` carries two
-/// shaper-internal scratch fields (`unicode_props` and
-/// `indic_position`) that the Indic / complex-script shapers use
-/// to track per-glyph state across GSUB passes. Renderers and
+/// In addition to the rendered fields, `Glyph` carries shaper-internal
+/// scratch fields (`unicode_props`, `indic_position`, `char_class`, and
+/// `combining_class`) that the shaping stages use to track per-glyph
+/// state across GSUB passes. Renderers and
 /// most callers can ignore them; they are public so the shaper
 /// modules inside this crate can round-trip state through `Vec<Glyph>`
 /// without stashing a parallel array. Stable bits of `unicode_props`
@@ -92,6 +93,16 @@ pub struct Glyph {
     /// pass. Zero (`IndicPosition::Start`) for non-Indic glyphs and
     /// for Indic glyphs whose role has not been resolved yet.
     pub indic_position: u8,
+    /// Shaper-internal `char_class` bits of the glyph's source
+    /// character, set by normalization and carried through GSUB like
+    /// [`Self::unicode_props`] (a ligature keeps its first component's).
+    pub char_class: u8,
+    /// Shaper-internal combining class of the glyph's source character
+    /// when it is a mark: HarfBuzz's modified combining class (see
+    /// `unicode::normalize::modified_combining_class`), as the mark
+    /// reordering and fallback positioning adjust it. Zero for every
+    /// other glyph.
+    pub combining_class: u8,
 }
 
 /// Bits packed into [`Glyph::unicode_props`]. Laid out to leave room
@@ -178,6 +189,8 @@ impl Glyph {
             y_offset: 0,
             unicode_props: 0,
             indic_position: IndicPosition::Start as u8,
+            char_class: 0,
+            combining_class: 0,
         }
     }
 }
@@ -198,11 +211,6 @@ pub struct Buffer {
     /// the LTR default and `shape()` may choose vertical layout for
     /// Mongolian-dominant text. [`Buffer::clear`] resets it.
     pub(crate) direction_explicit: bool,
-    /// When `true`, `shape()` composes the input text via
-    /// [`crate::unicode::normalize::compose_str`] before glyph
-    /// lookup. Matches HarfBuzz's implicit NFC pass for the
-    /// ranges sigilbuzz has curated tables for.
-    pub(crate) normalize_nfc: bool,
     /// Script the whole buffer shapes as, set by
     /// [`Buffer::set_script`]. `None` segments the text into script
     /// runs. Accessors live in `buffer_props.rs`.
@@ -319,20 +327,6 @@ impl Buffer {
         self.direction_explicit
     }
 
-    /// True when [`Buffer::set_normalize_nfc`] has been enabled.
-    #[must_use]
-    pub const fn normalize_nfc(&self) -> bool {
-        self.normalize_nfc
-    }
-
-    /// Enables or disables the implicit NFC composition pass that
-    /// runs before glyph lookup. Off by default. Turn this on to
-    /// match HarfBuzz's behavior, where `e + U+0301` renders the
-    /// same as the precomposed `é`.
-    pub fn set_normalize_nfc(&mut self, enabled: bool) {
-        self.normalize_nfc = enabled;
-    }
-
     /// Clears the text and resets direction to the unset LTR default.
     /// Like HarfBuzz's `hb_buffer_clear_contents`, this also forgets
     /// the script, language, and pre- and post-context.
@@ -340,7 +334,6 @@ impl Buffer {
         self.text.clear();
         self.direction = Direction::Ltr;
         self.direction_explicit = false;
-        self.normalize_nfc = false;
         self.script = None;
         self.language = None;
         self.pre_context.clear();

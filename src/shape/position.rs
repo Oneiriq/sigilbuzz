@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 
 use super::attach::{self, Attach};
 use super::gpos::{self, GposCx};
+use super::shaper::{MarkZeroing, Shaper};
 use super::{kern, Feature, ProcessedSegment, VarCtx};
 use crate::buffer::{Direction, Glyph};
 use crate::error::Result;
@@ -30,65 +31,12 @@ use crate::tables::layout::{GlyphClasses, MatchGlyph};
 use crate::tables::{tag, Gpos};
 use crate::unicode::Script;
 
-/// When HarfBuzz zeroes the advances of GDEF marks, a property of the
-/// shaper it picks for a script (`zero_width_marks`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MarkZeroing {
-    /// Never: the Indic, Khmer and Hangul shapers keep mark advances.
-    None,
-    /// Before GPOS: the USE and Myanmar shapers.
-    Early,
-    /// After positioning: the default, Arabic, Hebrew and Thai shapers.
-    Late,
-}
-
 /// The mark-zeroing behavior of the shaper HarfBuzz uses for `script`
-/// (`hb_ot_shaper_categorize` in hb-ot-shaper.hh). Sinhala, Tibetan,
-/// Mongolian and N'Ko all go to the Universal Shaping Engine there,
-/// whatever pipeline sigilbuzz runs them through.
+/// (see [`Shaper`]). Sinhala, Tibetan, Mongolian and N'Ko all go to
+/// the Universal Shaping Engine there, whatever pipeline sigilbuzz runs
+/// them through.
 pub(super) fn mark_zeroing(script: Script) -> MarkZeroing {
-    match script {
-        // Indic shaper (Sinhala excepted), Khmer shaper, Hangul shaper.
-        Script::Devanagari
-        | Script::Bengali
-        | Script::Gurmukhi
-        | Script::Gujarati
-        | Script::Oriya
-        | Script::Tamil
-        | Script::Telugu
-        | Script::Kannada
-        | Script::Malayalam
-        | Script::Khmer
-        | Script::Hangul => MarkZeroing::None,
-        // Universal Shaping Engine and the Myanmar shaper.
-        Script::Sinhala
-        | Script::Myanmar
-        | Script::Tibetan
-        | Script::Mongolian
-        | Script::NKo
-        | Script::Buginese
-        | Script::TaiTham
-        | Script::Balinese
-        | Script::Sundanese
-        | Script::Lepcha
-        | Script::Limbu
-        | Script::Cham
-        | Script::Brahmi
-        | Script::Sharada
-        | Script::Khojki
-        | Script::Tirhuta
-        | Script::Modi => MarkZeroing::Early,
-        // Arabic, Hebrew and Thai shapers, and the default shaper.
-        Script::Arabic
-        | Script::Hebrew
-        | Script::Thai
-        | Script::Lao
-        | Script::Latin
-        | Script::Greek
-        | Script::Cyrillic
-        | Script::Han
-        | Script::Other => MarkZeroing::Late,
-    }
+    Shaper::for_script(script, true).mark_zeroing()
 }
 
 /// Everything the positioning pass reads besides the glyphs.
@@ -294,6 +242,13 @@ fn round_half_away(delta: f32) -> i32 {
     } else {
         (delta - 0.5) as i32
     }
+}
+
+/// True when GPOS has lookups for feature `tag` under the script tags
+/// of `script_priority` (HarfBuzz's `has_gpos_mark` asks this of
+/// `mark`).
+pub(super) fn has_feature(gpos: &Gpos<'_>, tag: [u8; 4], script_priority: &[[u8; 4]]) -> bool {
+    !lookups_for(gpos, tag, script_priority).is_empty()
 }
 
 /// Lookup indices feature `tag` selects for one segment's script.

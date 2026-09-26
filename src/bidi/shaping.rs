@@ -18,8 +18,8 @@ impl BidiParagraph {
     /// `run.level` (right to left for odd levels), whatever the levels
     /// inside the range are.
     ///
-    /// `buffer` carries the shaping settings: script, language, NFC
-    /// composition, dotted circles, and any other option a [`Buffer`]
+    /// `buffer` carries the shaping settings: script, language, cluster
+    /// level, buffer flags, and any other option a [`Buffer`]
     /// holds. Its text, direction, and context are not used. The run
     /// gets the paragraph text in its range, the run's direction, and
     /// the paragraph text before and after the range as pre- and

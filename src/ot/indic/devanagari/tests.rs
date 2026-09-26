@@ -390,26 +390,6 @@ fn logrepha_reorder_moves_reph_past_base() {
     assert_eq!(g[1].indic_position, IndicPosition::RaToBecomeReph as u8);
 }
 
-#[test]
-fn tamil_split_matra_decomposes() {
-    // U+0BCB (OO) should be split into U+0BC7 + U+0BBE.
-    let parts = super::super::split_matra_decompose('\u{0BCB}');
-    assert_eq!(parts, Some(&['\u{0BC7}', '\u{0BBE}'][..]));
-}
-
-#[test]
-fn sinhala_three_part_matra_decomposes() {
-    // U+0DDD splits into three components.
-    let parts = super::super::split_matra_decompose('\u{0DDD}');
-    assert_eq!(parts, Some(&['\u{0DD9}', '\u{0DCF}', '\u{0DCA}'][..]));
-}
-
-#[test]
-fn non_split_matra_returns_none() {
-    assert!(super::super::split_matra_decompose('\u{0BBE}').is_none());
-    assert!(super::super::split_matra_decompose('\u{0D15}').is_none());
-}
-
 /// Glyphs with the given `(indic position, cluster)` pairs.
 fn tagged(rows: &[(IndicPosition, u32)]) -> Vec<Glyph> {
     rows.iter()

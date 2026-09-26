@@ -18,9 +18,9 @@
 //!   GDEF `GlyphClassDef`; GSUB updates it as it ligates and expands
 //!   glyphs (see the `lig` module).
 //!
-//! HarfBuzz also un-hides a COMBINING GRAPHEME JOINER when it did not
-//! block any mark reordering during normalization; sigilbuzz does not
-//! reorder marks yet, so a CGJ stays hidden.
+//! Normalization (the `normalize` module) sets these props for the
+//! characters it produces, and un-hides a COMBINING GRAPHEME JOINER
+//! that did not block any mark reordering, as HarfBuzz does.
 
 use super::ignorables;
 use crate::buffer::Glyph;

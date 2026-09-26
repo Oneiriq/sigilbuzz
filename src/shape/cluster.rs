@@ -29,51 +29,75 @@ use crate::unicode::general_category::{
     general_category_class, is_extended_pictographic, GeneralCategoryClass,
 };
 
-/// `merge_clusters_impl`: `glyphs[start..end]` takes its smallest
+/// Something with a cluster: a glyph, or a character the normalizer
+/// has not mapped to a glyph yet. The merges work on either.
+pub(crate) trait Clustered {
+    /// The cluster.
+    fn cluster(&self) -> u32;
+    /// Replaces the cluster.
+    fn set_cluster(&mut self, cluster: u32);
+}
+
+impl Clustered for Glyph {
+    fn cluster(&self) -> u32 {
+        self.cluster
+    }
+
+    fn set_cluster(&mut self, cluster: u32) {
+        self.cluster = cluster;
+    }
+}
+
+/// `merge_clusters_impl`: `items[start..end]` takes its smallest
 /// cluster, extended over neighbors that shared a cluster with an end
 /// of the range whose cluster changes.
-fn merge_impl(glyphs: &mut [Glyph], mut start: usize, mut end: usize) {
-    let end_limit = glyphs.len();
+fn merge_impl<T: Clustered>(items: &mut [T], mut start: usize, mut end: usize) {
+    let end_limit = items.len();
     if end > end_limit || end <= start + 1 {
         return;
     }
-    let Some(cluster) = glyphs[start..end].iter().map(|g| g.cluster).min() else {
+    let Some(cluster) = items[start..end].iter().map(Clustered::cluster).min() else {
         return;
     };
-    if cluster != glyphs[end - 1].cluster {
-        while end < end_limit && glyphs[end - 1].cluster == glyphs[end].cluster {
+    if cluster != items[end - 1].cluster() {
+        while end < end_limit && items[end - 1].cluster() == items[end].cluster() {
             end += 1;
         }
     }
-    if cluster != glyphs[start].cluster {
-        while start > 0 && glyphs[start - 1].cluster == glyphs[start].cluster {
+    if cluster != items[start].cluster() {
+        while start > 0 && items[start - 1].cluster() == items[start].cluster() {
             start -= 1;
         }
     }
-    for g in &mut glyphs[start..end] {
-        g.cluster = cluster;
+    for item in &mut items[start..end] {
+        item.set_cluster(cluster);
     }
 }
 
 /// HarfBuzz's `hb_buffer_t::merge_clusters` (and `merge_out_clusters`)
-/// for `glyphs[start..end]`: merges only at the monotone levels.
-pub(crate) fn merge_clusters(glyphs: &mut [Glyph], start: usize, end: usize, level: ClusterLevel) {
+/// for `items[start..end]`: merges only at the monotone levels.
+pub(crate) fn merge_clusters<T: Clustered>(
+    items: &mut [T],
+    start: usize,
+    end: usize,
+    level: ClusterLevel,
+) {
     if level.is_monotone() {
-        merge_impl(glyphs, start, end);
+        merge_impl(items, start, end);
     }
 }
 
 /// HarfBuzz's `merge_grapheme_clusters` (and
-/// `merge_out_grapheme_clusters`) for `glyphs[start..end]`: merges only
+/// `merge_out_grapheme_clusters`) for `items[start..end]`: merges only
 /// at the grapheme levels.
-pub(crate) fn merge_grapheme_clusters(
-    glyphs: &mut [Glyph],
+pub(crate) fn merge_grapheme_clusters<T: Clustered>(
+    items: &mut [T],
     start: usize,
     end: usize,
     level: ClusterLevel,
 ) {
     if level.is_graphemes() {
-        merge_impl(glyphs, start, end);
+        merge_impl(items, start, end);
     }
 }
 
