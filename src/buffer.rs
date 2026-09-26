@@ -658,7 +658,11 @@ const fn is_common_or_inherited(ch: char) -> bool {
 /// placing each glyph at the current pen position plus its
 /// `(x_offset, y_offset)` and then adding `(x_advance, y_advance)` to
 /// the pen. Vertical runs report negative `y_advance` values (the pen
-/// moves down) for both TTB and BTT.
+/// moves down) for both TTB and BTT, and their offsets place each
+/// glyph's horizontal origin: like HarfBuzz, shaping moves every
+/// glyph from its vertical origin (centered horizontally, at the
+/// `VORG` height or the top of its box plus the `vmtx` top side
+/// bearing) to its horizontal one.
 ///
 /// One known difference remains: when the requested horizontal
 /// direction is not the script's native one (LTR Hebrew, RTL Latin),

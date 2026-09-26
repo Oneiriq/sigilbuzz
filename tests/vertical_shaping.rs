@@ -229,8 +229,9 @@ fn vertical_bottom_to_top_negates_advance_and_reverses() {
     assert!(run.glyphs.iter().all(|g| g.x_advance == 0));
 }
 
-/// `(glyph_id, cluster, x_advance, y_advance)` per output glyph.
-type VPos = (u32, u32, i32, i32);
+/// `(glyph_id, cluster, x_advance, y_advance, x_offset, y_offset)` per
+/// output glyph.
+type VPos = (u32, u32, i32, i32, i32, i32);
 
 fn sigilbuzz_vertical(data: &[u8], text: &str, direction: Direction) -> Vec<VPos> {
     let blob = Blob::new(data);
@@ -242,7 +243,16 @@ fn sigilbuzz_vertical(data: &[u8], text: &str, direction: Direction) -> Vec<VPos
     let run = shape(&font, &buffer, &[]).unwrap();
     run.glyphs
         .iter()
-        .map(|g| (g.glyph_id, g.cluster, g.x_advance, g.y_advance))
+        .map(|g| {
+            (
+                g.glyph_id,
+                g.cluster,
+                g.x_advance,
+                g.y_advance,
+                g.x_offset,
+                g.y_offset,
+            )
+        })
         .collect()
 }
 
@@ -255,15 +265,25 @@ fn rustybuzz_vertical(data: &[u8], text: &str, direction: rustybuzz::Direction) 
     out.glyph_infos()
         .iter()
         .zip(out.glyph_positions())
-        .map(|(i, p)| (i.glyph_id, i.cluster, p.x_advance, p.y_advance))
+        .map(|(i, p)| {
+            (
+                i.glyph_id,
+                i.cluster,
+                p.x_advance,
+                p.y_advance,
+                p.x_offset,
+                p.y_offset,
+            )
+        })
         .collect()
 }
 
 #[test]
-fn vertical_order_and_advances_match_rustybuzz() {
-    // Offsets are left out: rustybuzz moves every vertical glyph by
-    // its vertical origin, which sigilbuzz does not apply yet. Order,
-    // clusters, and advance signs are the direction contract.
+fn vertical_order_advances_and_origins_match_rustybuzz() {
+    // Order, clusters, and advance signs are the direction contract.
+    // The offsets carry each glyph's move from its vertical origin to
+    // its horizontal one; this font has no outlines, so the vertical
+    // origin sits at the ascender.
     let data = build_vertical_font();
     for text in ["A", "ABC", "CAB"] {
         assert_eq!(
@@ -275,6 +295,51 @@ fn vertical_order_and_advances_match_rustybuzz() {
             sigilbuzz_vertical(&data, text, Direction::Btt),
             rustybuzz_vertical(&data, text, rustybuzz::Direction::BottomToTop),
             "BTT {text:?}"
+        );
+    }
+}
+
+/// Top-to-bottom runs in real fonts: glyf outlines without `vmtx`
+/// (Open Sans: the vertical origin centers the glyph box in the
+/// ascender-to-descender span), CFF outlines (Source Code Pro: the
+/// origin falls back to the ascender), and `vmtx` with marks (Noto
+/// Sans Mongolian: the origin is the box top plus the top side
+/// bearing, the mark's advance is zeroed in both axes, and the mark
+/// attaches to its base).
+#[test]
+fn real_fonts_match_rustybuzz_top_to_bottom() {
+    let cases: [(&[u8], &str); 5] = [
+        (include_bytes!("fixtures/opensans_regular.ttf"), "AVAT"),
+        (include_bytes!("fixtures/opensans_regular.ttf"), "A b"),
+        (
+            include_bytes!("fonts/SourceCodePro-Latin-Subset.otf"),
+            "Abc",
+        ),
+        (
+            include_bytes!("fonts/NotoSansMongolian-Regular.ttf"),
+            "\u{1820}\u{1885}",
+        ),
+        (
+            include_bytes!("fonts/NotoSansMongolian-Regular.ttf"),
+            "\u{1820}\u{1821}\u{1822}",
+        ),
+    ];
+    // Clusters are left out: HarfBuzz merges a mark's cluster into its
+    // base's, which sigilbuzz does not do yet.
+    let positions = |rows: Vec<VPos>| -> Vec<(u32, i32, i32, i32, i32)> {
+        rows.into_iter()
+            .map(|(id, _, xa, ya, xo, yo)| (id, xa, ya, xo, yo))
+            .collect()
+    };
+    for (data, text) in cases {
+        assert_eq!(
+            positions(sigilbuzz_vertical(data, text, Direction::Ttb)),
+            positions(rustybuzz_vertical(
+                data,
+                text,
+                rustybuzz::Direction::TopToBottom
+            )),
+            "TTB {text:?}"
         );
     }
 }

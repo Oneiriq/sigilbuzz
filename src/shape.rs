@@ -56,7 +56,9 @@
 //! leftmost glyph first, byte-for-byte what HarfBuzz and rustybuzz
 //! return. Forward directions ([`crate::Direction::Ltr`],
 //! [`crate::Direction::Ttb`]) come out in logical order. Vertical runs
-//! report negative `y_advance` values in both TTB and BTT.
+//! report negative `y_advance` values in both TTB and BTT, with every
+//! glyph moved from its vertical origin to its horizontal one before
+//! GPOS, as HarfBuzz does.
 //!
 //! An explicit direction that is not the script's native one (Arabic
 //! or Hebrew in an LTR buffer, Latin in an RTL one, any BTT buffer)
@@ -1271,6 +1273,8 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 glyph.x_advance = 0;
             }
         }
+        // Offsets are relative to each glyph's horizontal origin.
+        position::subtract_vertical_origins(face, font.coords(), &mut glyphs)?;
     } else {
         let coords = font.coords();
         let hvar = if coords.is_empty() {

@@ -214,6 +214,81 @@ pub(super) fn position(
     Ok(())
 }
 
+/// HarfBuzz's default vertical positioning (`hb_ot_position_default`):
+/// GPOS and the renderer work from a glyph's horizontal origin, so
+/// every glyph of a vertical run is moved from its vertical origin
+/// there. The vertical origin sits half the horizontal advance to the
+/// right of the horizontal one and, vertically, at the `VORG` value;
+/// without `VORG` it is the top of the glyph's box plus the `vmtx` top
+/// side bearing, or with no `vmtx` the top of a box centered in the
+/// ascender-to-descender span. Glyphs with no outline data (CFF fonts
+/// without `VORG`) use the ascender.
+///
+/// The ascender and descender come from `hhea`; a font that asks for
+/// its `OS/2` typographic metrics instead (`USE_TYPO_METRICS`) gets
+/// hhea values here, as it already does for the vertical advance
+/// fallback.
+pub(super) fn subtract_vertical_origins(
+    face: &Face<'_>,
+    coords: &[f32],
+    glyphs: &mut [Glyph],
+) -> Result<()> {
+    let hmtx = face.hmtx()?;
+    let hvar = if coords.is_empty() {
+        None
+    } else {
+        face.hvar()?
+    };
+    let vorg = face.vorg()?;
+    let vmtx = face.vmtx()?;
+    let hhea = face.hhea()?;
+    let (ascender, descender) = (i32::from(hhea.ascent), i32::from(hhea.descent));
+    for g in glyphs {
+        let id = g.glyph_id as u16;
+        let mut h_advance = i32::from(hmtx.advance(id).unwrap_or(0));
+        if let Some(ref hvar) = hvar {
+            h_advance = h_advance.saturating_add(round_half_away(hvar.advance_delta(id, coords)));
+        }
+        let y_origin = match vorg {
+            Some(ref vorg) => i32::from(vorg.vert_origin_y(id)),
+            None => match glyph_top_and_height(face, id)? {
+                Some((top, height)) => match vmtx {
+                    Some(ref vmtx) => top + i32::from(vmtx.tsb(id).unwrap_or(0)),
+                    None => top + (((ascender - descender) - height) >> 1),
+                },
+                None => ascender,
+            },
+        };
+        g.x_offset -= h_advance / 2;
+        g.y_offset -= y_origin;
+    }
+    Ok(())
+}
+
+/// Top (`yMax`) and height of a glyph's outline box from `glyf`: zero
+/// for a glyph without an outline, `None` when the font has no `glyf`.
+fn glyph_top_and_height(face: &Face<'_>, id: u16) -> Result<Option<(i32, i32)>> {
+    match face.glyph_bounds(id) {
+        Ok(Some(b)) => Ok(Some((
+            i32::from(b.y_max),
+            i32::from(b.y_max) - i32::from(b.y_min),
+        ))),
+        Ok(None) => Ok(Some((0, 0))),
+        Err(crate::error::Error::MissingTable { .. }) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Rounds a variation delta to the nearest unit, halves away from
+/// zero, the way the advance deltas are rounded elsewhere.
+fn round_half_away(delta: f32) -> i32 {
+    if delta >= 0.0 {
+        (delta + 0.5) as i32
+    } else {
+        (delta - 0.5) as i32
+    }
+}
+
 /// Lookup indices feature `tag` selects for one segment's script.
 fn lookups_for(gpos: &Gpos<'_>, tag: [u8; 4], script_priority: &[[u8; 4]]) -> Vec<u16> {
     crate::ot::layout_select::feature_lookup_indices(
