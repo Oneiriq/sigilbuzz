@@ -85,7 +85,8 @@ These are used by tests and benchmarks only. They never end up in a published cr
 dependency tree.
 
 - `rustybuzz` and `ttf-parser`: the reference implementations for the shaping and
-  outline parity tests.
+  outline parity tests. `sigilbuzz-subset` also takes `rustybuzz` to check that
+  instanced and subset fonts position glyphs the way the variable source does.
 - `criterion`: benchmarks.
 - `cc` and `fd-lock` (in `sigilbuzz-capi`): compile the C test programs and serialize
   the library build across test processes.

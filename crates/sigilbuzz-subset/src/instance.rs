@@ -79,14 +79,13 @@
 //! therefore lands at the chosen instance, not the default, so the
 //! static output renders correctly at the baked coord vector.
 //!
-//! The supported lookup types are GPOS Type 1 (SinglePos formats 1 / 2)
-//! and Type 2 (PairPos formats 1 / 2), including those wrapped in a
-//! Type 9 Extension lookup. `Mark*` and `Cursive` lookups carry their
-//! variations on `Anchor` records, not `ValueRecord` fields; the
-//! Anchor bake is staged for a follow-up. Unsupported lookups still
-//! land in the output but their `VariationIndex` offsets are left
-//! intact. The GDEF.IVS prune that follows leaves them orphan, the
-//! same trade-off the simpler #173 path shipped.
+//! The supported lookup types are GPOS Type 1 (SinglePos formats 1 / 2),
+//! Type 2 (PairPos formats 1 / 2), Type 3 (CursivePos), and Types 4 / 5
+//! / 6 (mark attachment), including those wrapped in a Type 9 Extension
+//! lookup. `Mark*` and `Cursive` lookups carry their variations on
+//! AnchorFormat3 records, whose device offsets are measured from the
+//! Anchor itself; PairPos format 1 measures its from the PairSet. See
+//! [`crate::gpos_var`] for the per-structure offset bases.
 //!
 //! # Out of scope (deferred)
 //!
@@ -94,13 +93,6 @@
 //!   variable on a CFF2 source). The gvar / TrueType partial path is
 //!   wired through [`crate::gvar_partial::bake_gvar_partial`]; the
 //!   CFF2 VarStore equivalent lands separately.
-//! - **Mark / Cursive GPOS Anchor variations.** GPOS Types 3 / 4 / 5 / 6
-//!   carry per-x/y `Device` / `VariationIndex` offsets on their
-//!   `Anchor` records; this pass folds `ValueRecord` variations only.
-//!   Anchor variations ride through with their `VariationIndex`
-//!   offsets intact and are then orphaned by the GDEF.IVS prune,
-//!   matching the #173 trade-off for that subset of GPOS. The Anchor
-//!   bake is tracked as a follow-up.
 //!
 //! # Determinism
 //!
@@ -345,9 +337,9 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     }
 
     // GPOS variation bake: when the source carries GPOS variations
-    // (VariationIndex offsets on PairPos / SinglePos value records),
-    // fold every resolvable variation into the static ValueRecord
-    // field at `coords` and zero the offset slot. Runs *before* the
+    // (VariationIndex offsets on value records and anchors), fold
+    // every resolvable variation into the static field it adjusts at
+    // `coords` and zero the offset slot. Runs *before* the
     // GDEF.IVS prune below. The prune severs the only path back to
     // the IVS bytes, so any remaining VariationIndex would be orphan.
     let gpos_baked = if input.drop_var_tables {
@@ -2571,8 +2563,8 @@ fn bake_gdef_ivs_partial(gdef_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) ->
 /// MarkBasePos / MarkLigPos / MarkMarkPos, and Type 9 Extension
 /// wrappers around any of those. Mark*/Cursive lookups carry their
 /// variations on `Anchor` records (xDevice / yDevice on AnchorFormat
-/// 3); those slots resolve through the same VariationIndex path used
-/// for ValueRecord device offsets.
+/// 3); those slots resolve against the Anchor, through the same
+/// VariationIndex path used for ValueRecord device offsets.
 ///
 /// The bake reads its `ItemVariationStore` from the *source* GDEF, not
 /// from a re-parsed copy, so it sees every region the source uses
@@ -3382,6 +3374,28 @@ mod tests {
         false
     }
 
+    /// `var_kern.ttf` measures its PairValueRecord device offset from
+    /// the PairPos subtable, but the spec measures it from the PairSet
+    /// (the base the bake uses). Returns a copy with the offset rebased
+    /// onto the PairSet so the fixture resolves its VariationIndex.
+    fn var_kern_with_pair_set_relative_device() -> Vec<u8> {
+        let face = Face::parse_bytes(VAR_KERN, 0).unwrap();
+        let rec = face.records().iter().find(|r| r.tag == tag::GPOS).unwrap();
+        let gpos_start = rec.offset as usize;
+        let gpos = face.table_bytes(tag::GPOS).unwrap();
+        let rd = |p: usize| u16::from_be_bytes([gpos[p], gpos[p + 1]]) as usize;
+        let lookup_base = rd(8) + rd(rd(8) + 2);
+        let sub_abs = lookup_base + rd(lookup_base + 6);
+        let pair_set = rd(sub_abs + 10);
+        // PairValueRecord 0: secondGlyph, xAdvance, xAdvDevice.
+        let slot = sub_abs + pair_set + 6;
+        let rebased = (rd(slot) - pair_set) as u16;
+        let mut bytes = VAR_KERN.to_vec();
+        let abs = gpos_start + slot;
+        bytes[abs..abs + 2].copy_from_slice(&rebased.to_be_bytes());
+        bytes
+    }
+
     #[test]
     fn var_kern_fixture_bake_at_wght_900_folds_pair_pos_advance() {
         // The synthetic var_kern fixture carries a single PairPos
@@ -3389,7 +3403,8 @@ mod tests {
         // on the AV pair plus a VariationIndex that resolves to -100.
         // After the bake, the baked GPOS must carry x_advance=-100
         // statically and the device offset slot must be zero.
-        let face = Face::parse_bytes(VAR_KERN, 0).unwrap();
+        let bytes = var_kern_with_pair_set_relative_device();
+        let face = Face::parse_bytes(&bytes, 0).unwrap();
         let coords = face.fvar().unwrap().unwrap().normalize_coords(&[900.0]);
         let input = InstanceInput {
             coords: coords.clone(),

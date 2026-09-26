@@ -21,6 +21,11 @@ sigilbuzz = { workspace = true }
 
 [dev-dependencies]
 # Fixtures load via include_bytes!.
+# rustybuzz is the reference the instancing and subsetting parity tests
+# shape against: it applies GPOS anchor and ValueRecord variations, so
+# a baked or subset font can be checked against the variable source.
+# Dev-dep only, and already pinned by the root crate's parity tests.
+rustybuzz = "0.20"
 
 [lints]
 workspace = true
