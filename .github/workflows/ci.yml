@@ -53,7 +53,7 @@ jobs:
     name: MSRV (Rust 1.81)
     runs-on: [self-hosted, aur0]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install stable
         uses: dtolnay/rust-toolchain@stable
