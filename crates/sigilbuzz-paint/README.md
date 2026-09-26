@@ -10,6 +10,8 @@ list of `DrawCmd`s that a renderer can turn into pixels. Along the way it:
 
 - Combines nested transforms into one 2x3 matrix per leaf.
 - Resolves `ColorLine` stops against the selected CPAL palette, including per-stop alpha.
+- Applies variation deltas from the COLR table's own item variation store, through its
+  DeltaSetIndexMap when it has one, as HarfBuzz does.
 - Keeps the foreground color apart. Solid fills and gradient stops that use COLR palette
   entry `0xFFFF` (the text color) carry `is_foreground == true`.
 - Wraps `PaintComposite` children in `PushLayer` / `PopLayer` so the renderer can

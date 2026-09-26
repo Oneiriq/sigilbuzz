@@ -18,7 +18,6 @@ use alloc::vec::Vec;
 use sigilbuzz::tables::colr::{
     ColorLine, Colr, ColrPaint, CompositeMode, F2Dot14, Fword, PaintOffset, VarIndexBase,
 };
-use sigilbuzz::tables::variation_store::ItemVariationStore;
 use sigilbuzz::Face;
 
 use crate::color::Color;
@@ -132,7 +131,7 @@ pub fn evaluate_with(face: &Face<'_>, gid: GlyphId, options: &EvalOptions<'_>) -
     let mut ctx = EvalCtx {
         colr: &colr,
         palette: Palette::new(cpal.as_ref(), options),
-        deltas: Deltas::new(face, &colr, options.coords()),
+        deltas: Deltas::new(&colr, options.coords()),
         visited: Vec::new(),
         out: &mut out,
     };
@@ -157,67 +156,6 @@ struct EvalCtx<'a, 'b> {
     /// `PaintColrGlyph` checks this before recursing.
     visited: Vec<GlyphId>,
     out: &'b mut Vec<DrawCmd>,
-}
-
-/// Resolves the var store referenced by the COLRv1 header, if any.
-/// A missing or malformed offset yields `None`; the walker treats that
-/// the same as "no variation deltas".
-pub(crate) fn resolve_var_store<'a>(colr: &Colr<'a>) -> Option<ItemVariationStore<'a>> {
-    let off = colr.var_store_offset()?;
-    let data = colr.data();
-    let start = off as usize;
-    if start >= data.len() {
-        return None;
-    }
-    ItemVariationStore::parse(&data[start..]).ok()
-}
-
-/// Falls back to the GDEF v1.3+ shared `ItemVariationStore` when the
-/// COLR table doesn't carry its own. Real-world variable color fonts
-/// often park the IVS in GDEF and reach into it from both COLR and
-/// GPOS. Without this fallback the evaluator silently emits the
-/// static (no-deltas) output for any such font even when `coords` is
-/// non-empty.
-pub(crate) fn resolve_gdef_var_store<'a>(face: &Face<'a>) -> Option<ItemVariationStore<'a>> {
-    let gdef = face.table_bytes(*b"GDEF").ok()?;
-    if gdef.len() < 18 {
-        return None;
-    }
-    let minor = u16::from_be_bytes([gdef[2], gdef[3]]);
-    if minor < 3 {
-        return None;
-    }
-    let ivs_off = u32::from_be_bytes([gdef[14], gdef[15], gdef[16], gdef[17]]) as usize;
-    if ivs_off == 0 || ivs_off >= gdef.len() {
-        return None;
-    }
-    ItemVariationStore::parse(&gdef[ivs_off..]).ok()
-}
-
-/// Looks for a DeltaSetIndexMap supplied via the font's GDEF table.
-///
-/// The OpenType spec puts the COLRv1 DeltaSetIndexMap inside the COLR
-/// header (`varIndexMapOffset`); sigilbuzz's COLR parser doesn't yet
-/// surface that field, so the paint crate accepts an alternate
-/// location: a paint-crate convention places a u32
-/// `deltaSetIndexMapOffset` at byte 18 of a v1.3 GDEF header, right
-/// after `itemVarStoreOffset`. Real-world v1.3 GDEFs leave those
-/// bytes absent, so the lookup returns `None` for them and the
-/// evaluator falls back to the no-indirection path.
-pub(crate) fn resolve_index_map<'a>(face: &Face<'a>) -> Option<DeltaSetIndexMap<'a>> {
-    let gdef = face.table_bytes(*b"GDEF").ok()?;
-    if gdef.len() < 22 {
-        return None;
-    }
-    let minor = u16::from_be_bytes([gdef[2], gdef[3]]);
-    if minor < 3 {
-        return None;
-    }
-    let map_off = u32::from_be_bytes([gdef[18], gdef[19], gdef[20], gdef[21]]) as usize;
-    if map_off == 0 || map_off >= gdef.len() {
-        return None;
-    }
-    DeltaSetIndexMap::parse(gdef, map_off)
 }
 
 /// Walks one paint node. `xform` is the transform inherited from the
@@ -959,10 +897,7 @@ fn resolve_stops(
     // code path for both forms.
     let mut out = Vec::with_capacity(color_line.len() as usize);
     for (stop, stop_var) in color_line.stops_variable() {
-        // A stop whose index-map entry cannot be read is dropped.
-        let Some((d_offset, d_alpha)) = ctx.deltas.stop(stop_var) else {
-            continue;
-        };
+        let (d_offset, d_alpha) = ctx.deltas.stop(stop_var);
         let (color, is_foreground) = ctx
             .palette
             .resolve(stop.palette_index, stop.alpha + d_alpha);
@@ -999,113 +934,4 @@ fn var_delta_fixed(ctx: &EvalCtx<'_, '_>, var_index_base: VarIndexBase, field_in
 #[inline]
 fn f(v: Fword) -> f32 {
     v as f32
-}
-
-// =========================================================================
-// DeltaSetIndexMap
-// =========================================================================
-
-/// Borrowed view over a `DeltaSetIndexMap`, a flat array of packed
-/// `(outer, inner)` pairs that COLRv1 fonts use to share IVS rows
-/// between many paint records. The on-disk layout matches the
-/// `DeltaSetIndexMapFormat0/1` records the OpenType spec defines for
-/// HVAR / VVAR / GDEF / COLR.
-///
-/// ```text
-///   u8   format          // 0 = u16 mapCount, 1 = u32 mapCount
-///   u8   entryFormat     // bits 4-5: bytes/entry - 1; bits 0-3: inner-bits - 1
-///   u16  mapCount        // (or u32 when format == 1)
-///   u8[] entries         // (mapCount * bytesPerEntry) packed pairs
-/// ```
-///
-/// Lookups clamp out-of-range indices to the last entry, mirroring
-/// the spec's "the index is clamped to mapCount - 1 if it is greater
-/// than or equal to mapCount" rule.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct DeltaSetIndexMap<'a> {
-    /// Slice covering exactly the map's entry array.
-    entries: &'a [u8],
-    /// Bytes per entry (1..=4).
-    entry_bytes: usize,
-    /// Bit-width of the inner index (1..=16).
-    inner_bits: u32,
-    /// `(1 << inner_bits) - 1`, pre-computed for the hot path.
-    inner_mask: u32,
-    /// Number of (outer, inner) entries the map carries.
-    map_count: u32,
-}
-
-impl<'a> DeltaSetIndexMap<'a> {
-    /// Parses a DeltaSetIndexMap rooted at byte `start` of `data`.
-    /// Returns `None` if the header is truncated or carries an
-    /// unknown format.
-    fn parse(data: &'a [u8], start: usize) -> Option<Self> {
-        if data.len() < start + 4 {
-            return None;
-        }
-        let format = data[start];
-        let entry_format = data[start + 1];
-        let mut cursor = start + 2;
-        let map_count = match format {
-            0 => {
-                let v = u16::from_be_bytes([data[cursor], data[cursor + 1]]) as u32;
-                cursor += 2;
-                v
-            }
-            1 => {
-                if data.len() < cursor + 4 {
-                    return None;
-                }
-                let v = u32::from_be_bytes([
-                    data[cursor],
-                    data[cursor + 1],
-                    data[cursor + 2],
-                    data[cursor + 3],
-                ]);
-                cursor += 4;
-                v
-            }
-            _ => return None,
-        };
-        let entry_bytes = ((entry_format >> 4) & 0x03) as usize + 1;
-        let inner_bits = u32::from(entry_format & 0x0F) + 1;
-        let total = (map_count as usize).checked_mul(entry_bytes)?;
-        if data.len() < cursor + total {
-            return None;
-        }
-        let entries = &data[cursor..cursor + total];
-        let inner_mask = (1u32 << inner_bits).wrapping_sub(1);
-        Some(Self {
-            entries,
-            entry_bytes,
-            inner_bits,
-            inner_mask,
-            map_count,
-        })
-    }
-
-    /// Looks up the `(outer, inner)` pair at flat `index`, clamping
-    /// to the last entry per spec. Returns `None` when the map is
-    /// empty.
-    pub(crate) fn lookup(&self, index: u32) -> Option<(u16, u16)> {
-        if self.map_count == 0 {
-            return None;
-        }
-        let idx = if index < self.map_count {
-            index
-        } else {
-            self.map_count - 1
-        } as usize;
-        let off = idx * self.entry_bytes;
-        if self.entries.len() < off + self.entry_bytes {
-            return None;
-        }
-        let mut raw: u32 = 0;
-        for i in 0..self.entry_bytes {
-            raw = (raw << 8) | u32::from(self.entries[off + i]);
-        }
-        let inner = (raw & self.inner_mask) as u16;
-        let outer = (raw >> self.inner_bits) as u16;
-        Some((outer, inner))
-    }
 }

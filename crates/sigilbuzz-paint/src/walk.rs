@@ -151,7 +151,7 @@ pub fn paint_glyph(
     if let Some(root) = colr.paint(glyph) {
         let mut walker = Walker {
             colr: &colr,
-            deltas: Deltas::new(face, &colr, coords),
+            deltas: Deltas::new(&colr, coords),
             visited: alloc::vec![glyph],
             sink,
         };
@@ -596,7 +596,7 @@ impl Walker<'_, '_, '_> {
         color_line
             .stops_variable()
             .map(|(stop, stop_var)| {
-                let (d_offset, d_alpha) = self.deltas.stop(stop_var).unwrap_or((0.0, 0.0));
+                let (d_offset, d_alpha) = self.deltas.stop(stop_var);
                 StopRef {
                     offset: stop.stop_offset + d_offset,
                     color: ColorRef {

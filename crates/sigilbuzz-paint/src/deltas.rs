@@ -1,109 +1,194 @@
-//! Variation-delta lookup for `PaintVar*` fields and `VarColorStop`s.
+//! Variation deltas for `PaintVar*` fields and `VarColorStop`s.
 //!
-//! Both the flattening evaluator ([`crate::evaluate_with`]) and the
-//! HarfBuzz-order walker ([`crate::walk`]) resolve deltas through the
-//! same [`Deltas`] value, so the two never disagree about units or
-//! index-map handling.
+//! Every variable COLRv1 value names a delta by `varIndexBase + i`,
+//! where `i` is the field's position in its record. The delta comes from
+//! COLR's own ItemVariationStore, exactly as HarfBuzz reads it:
+//!
+//! - When the COLR header has a DeltaSetIndexMap, the index is mapped
+//!   through it first. The map yields a packed `(outer, inner)` pair; an
+//!   index past the end of the map uses the last entry, and a map with
+//!   no entries passes the index through unchanged.
+//! - Otherwise the index itself is the pair: `outer` in the high 16
+//!   bits, `inner` in the low 16 bits.
+//!
+//! No other table is consulted; GDEF's variation store belongs to GDEF
+//! and GPOS. The sentinel `0xFFFFFFFF` and an empty coordinate slice
+//! both mean "no delta".
+//!
+//! Both [`crate::evaluate_with`] and [`crate::walk`] read deltas through
+//! the same [`Deltas`] value, so they never disagree about units or index
+//! mapping.
 
 use sigilbuzz::tables::colr::{Colr, VarIndexBase};
 use sigilbuzz::tables::variation_store::ItemVariationStore;
-use sigilbuzz::Face;
 
-use crate::eval::{resolve_gdef_var_store, resolve_index_map, resolve_var_store, DeltaSetIndexMap};
+/// `varIndexBase` value meaning "this record does not vary".
+const NO_VARIATION: VarIndexBase = VarIndexBase::MAX;
 
-/// Variation deltas for one evaluation: the font's item variation
-/// store, its optional index map, and the normalized coordinates.
-/// Shared by every paint-tree walk in this crate.
+/// Variation deltas for one evaluation: COLR's item variation store,
+/// its optional index map, and the normalized coordinates.
 pub(crate) struct Deltas<'a, 'c> {
-    var_store: Option<ItemVariationStore<'a>>,
-    /// Optional DeltaSetIndexMap that redirects a paint's
-    /// `var_index_base + field_index` through an indirection table
-    /// before it hits the IVS. Spec-compliant variable color fonts
-    /// use this to share IVS rows across many paint records.
-    index_map: Option<DeltaSetIndexMap<'a>>,
+    store: Option<ItemVariationStore<'a>>,
+    map: Option<DeltaSetIndexMap<'a>>,
     coords: &'c [f32],
 }
 
 impl<'a, 'c> Deltas<'a, 'c> {
-    /// Finds the variation store (COLR's own, else GDEF's) and index
-    /// map for `face`.
-    pub(crate) fn new(face: &Face<'a>, colr: &Colr<'a>, coords: &'c [f32]) -> Self {
-        Self {
-            var_store: resolve_var_store(colr).or_else(|| resolve_gdef_var_store(face)),
-            index_map: resolve_index_map(face),
-            coords,
-        }
+    /// Reads the variation store and index map named by `colr`'s header.
+    /// An offset that does not lead to a well-formed structure is
+    /// treated as absent, which is what HarfBuzz's sanitizer does to it.
+    pub(crate) fn new(colr: &Colr<'a>, coords: &'c [f32]) -> Self {
+        let data = colr.data();
+        let store = colr
+            .var_store_offset()
+            .and_then(|off| data.get(off as usize..))
+            .and_then(|bytes| ItemVariationStore::parse(bytes).ok());
+        let map = colr
+            .var_index_map_offset()
+            .and_then(|off| DeltaSetIndexMap::parse(data, off as usize));
+        Self { store, map, coords }
     }
 
-    /// Looks up the raw delta for the `field_index`-th variable field
-    /// of a paint that records `var_index_base` as its anchor.
-    ///
-    /// The COLRv1 spec resolves variable fields through one of two
-    /// paths:
-    ///
-    /// 1. **No indirection (default).** `var_index_base + field_index`
-    ///    is the on-disk `(outer, inner)` pair; the IVS row at that
-    ///    pair is the delta source.
-    /// 2. **DeltaSetIndexMap indirection.** `var_index_base +
-    ///    field_index` is a *flat index* into the map; the map yields
-    ///    the actual `(outer, inner)` pair.
-    ///
-    /// The delta is in the field's raw units (design units, or F2DOT14
-    /// / Fixed ticks). Returns `0.0` when the var store is absent,
-    /// `var_index_base` is the no-deltas sentinel, or `coords` is empty.
-    pub(crate) fn raw(&self, var_index_base: VarIndexBase, field_index: u16) -> f32 {
-        if var_index_base == VarIndexBase::MAX || self.coords.is_empty() {
+    /// The raw delta for field `field` of a record whose base index is
+    /// `base`, in the field's own units (design units, or F2DOT14 /
+    /// Fixed ticks).
+    pub(crate) fn raw(&self, base: VarIndexBase, field: u16) -> f32 {
+        if base == NO_VARIATION || self.coords.is_empty() {
             return 0.0;
         }
-        let Some(store) = self.var_store.as_ref() else {
+        let Some(store) = self.store.as_ref() else {
             return 0.0;
         };
-        let flat_index = var_index_base.wrapping_add(u32::from(field_index));
-        let (outer, inner) = if let Some(map) = self.index_map.as_ref() {
-            match map.lookup(flat_index) {
-                Some(pair) => pair,
-                None => return 0.0,
-            }
-        } else {
-            ((flat_index >> 16) as u16, flat_index as u16)
-        };
-        store.delta(outer, inner, self.coords)
+        let index = base.wrapping_add(u32::from(field));
+        let index = self.map.as_ref().map_or(index, |map| map.map(index));
+        store.delta((index >> 16) as u16, index as u16, self.coords)
     }
 
-    /// Delta for an F2DOT14 field, as a fraction: a raw delta of 8192
-    /// ticks is 0.5.
-    pub(crate) fn f2dot14(&self, var_index_base: VarIndexBase, field_index: u16) -> f32 {
-        self.raw(var_index_base, field_index) / 16384.0
+    /// Delta for an F2DOT14 field, as a fraction: 8192 ticks is 0.5.
+    pub(crate) fn f2dot14(&self, base: VarIndexBase, field: u16) -> f32 {
+        self.raw(base, field) / 16384.0
     }
 
     /// Delta for a 16.16 Fixed field, as a fraction.
-    pub(crate) fn fixed(&self, var_index_base: VarIndexBase, field_index: u16) -> f32 {
-        self.raw(var_index_base, field_index) / 65536.0
+    pub(crate) fn fixed(&self, base: VarIndexBase, field: u16) -> f32 {
+        self.raw(base, field) / 65536.0
     }
 
-    /// Offset and alpha deltas (both F2DOT14 fractions) for a
-    /// `VarColorStop` whose `varIndexBase` is `stop_var`. Stops route
-    /// through the same index map as paint fields. Returns `None` when
-    /// the map cannot resolve the offset entry.
-    pub(crate) fn stop(&self, stop_var: u32) -> Option<(f32, f32)> {
-        let Some(store) = self.var_store.as_ref() else {
-            return Some((0.0, 0.0));
+    /// Offset and alpha deltas (both F2DOT14 fractions) of a
+    /// `VarColorStop` whose `varIndexBase` is `base`.
+    pub(crate) fn stop(&self, base: VarIndexBase) -> (f32, f32) {
+        (self.f2dot14(base, 0), self.f2dot14(base, 1))
+    }
+}
+
+/// A borrowed `DeltaSetIndexMap` (format 0 or 1):
+///
+/// ```text
+///   u8   format        // 0: u16 mapCount, 1: u32 mapCount
+///   u8   entryFormat   // bits 4-5: bytes per entry - 1; bits 0-3: inner bits - 1
+///   u16 / u32 mapCount
+///   u8[] entries       // mapCount * bytes per entry, big-endian
+/// ```
+#[derive(Debug, Clone, Copy)]
+struct DeltaSetIndexMap<'a> {
+    entries: &'a [u8],
+    entry_bytes: usize,
+    inner_bits: u32,
+    map_count: u32,
+}
+
+impl<'a> DeltaSetIndexMap<'a> {
+    /// Parses the map at absolute offset `start` of `data`. Returns
+    /// `None` for an unknown format or a map that does not fit, which
+    /// leaves indices unmapped, as in HarfBuzz.
+    fn parse(data: &'a [u8], start: usize) -> Option<Self> {
+        let format = *data.get(start)?;
+        let entry_format = *data.get(start + 1)?;
+        let (map_count, entries_at) = match format {
+            0 => {
+                let b = data.get(start + 2..start + 4)?;
+                (u32::from(u16::from_be_bytes([b[0], b[1]])), start + 4)
+            }
+            1 => {
+                let b = data.get(start + 2..start + 6)?;
+                (u32::from_be_bytes([b[0], b[1], b[2], b[3]]), start + 6)
+            }
+            _ => return None,
         };
-        if stop_var == u32::MAX || self.coords.is_empty() {
-            return Some((0.0, 0.0));
+        let entry_bytes = usize::from((entry_format >> 4) & 0x03) + 1;
+        let inner_bits = u32::from(entry_format & 0x0F) + 1;
+        let len = (map_count as usize).checked_mul(entry_bytes)?;
+        let entries = data.get(entries_at..entries_at.checked_add(len)?)?;
+        Some(Self {
+            entries,
+            entry_bytes,
+            inner_bits,
+            map_count,
+        })
+    }
+
+    /// Maps a flat index to the packed `outer << 16 | inner` the
+    /// variation store reads.
+    fn map(&self, index: u32) -> u32 {
+        if self.map_count == 0 {
+            return index;
         }
-        let (off_outer, off_inner) = match self.index_map.as_ref() {
-            Some(map) => map.lookup(stop_var)?,
-            None => ((stop_var >> 16) as u16, stop_var as u16),
-        };
-        let (a_outer, a_inner) = self
-            .index_map
-            .as_ref()
-            .and_then(|map| map.lookup(stop_var.wrapping_add(1)))
-            .unwrap_or((off_outer, off_inner.wrapping_add(1)));
-        Some((
-            store.delta(off_outer, off_inner, self.coords) / 16384.0,
-            store.delta(a_outer, a_inner, self.coords) / 16384.0,
-        ))
+        let index = index.min(self.map_count - 1) as usize;
+        let at = index * self.entry_bytes;
+        let raw = self.entries[at..at + self.entry_bytes]
+            .iter()
+            .fold(0u32, |acc, b| (acc << 8) | u32::from(*b));
+        let outer = raw >> self.inner_bits;
+        let inner = raw & ((1u32 << self.inner_bits) - 1);
+        (outer << 16) | inner
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec::Vec;
+
+    /// Format `format` map with 1-byte entries and 4 inner bits.
+    fn map_bytes(format: u8, entries: &[u8]) -> Vec<u8> {
+        let mut out = alloc::vec![format, 0x03];
+        if format == 0 {
+            out.extend_from_slice(&(entries.len() as u16).to_be_bytes());
+        } else {
+            out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        }
+        out.extend_from_slice(entries);
+        out
+    }
+
+    #[test]
+    fn map_splits_entries_into_outer_and_inner() {
+        for format in [0, 1] {
+            let bytes = map_bytes(format, &[0x12, 0x3F]);
+            let map = DeltaSetIndexMap::parse(&bytes, 0).expect("parses");
+            assert_eq!(map.map(0), (1 << 16) | 2);
+            assert_eq!(map.map(1), (3 << 16) | 0xF);
+            // Past the end: the last entry.
+            assert_eq!(map.map(7), (3 << 16) | 0xF);
+        }
+    }
+
+    #[test]
+    fn empty_map_passes_indices_through() {
+        let bytes = map_bytes(0, &[]);
+        let map = DeltaSetIndexMap::parse(&bytes, 0).expect("parses");
+        assert_eq!(map.map(0x0002_0003), 0x0002_0003);
+    }
+
+    #[test]
+    fn wide_entries_and_unknown_formats() {
+        // Two-byte entries, 16 inner bits: 0x0102 -> outer 0, inner 0x102.
+        let bytes = [0u8, 0x1F, 0, 1, 0x01, 0x02];
+        let map = DeltaSetIndexMap::parse(&bytes, 0).expect("parses");
+        assert_eq!(map.map(0), 0x0102);
+        assert!(DeltaSetIndexMap::parse(&[2, 0, 0, 0], 0).is_none());
+        // Entries that run past the data.
+        assert!(DeltaSetIndexMap::parse(&[0, 0, 0, 5, 1], 0).is_none());
+        assert!(DeltaSetIndexMap::parse(&[1, 0, 0], 0).is_none());
     }
 }
