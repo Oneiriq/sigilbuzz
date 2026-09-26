@@ -30,8 +30,8 @@ use crate::transform::{angle_to_radians, Transform2D};
 /// Glyph-id alias. Mirrors the on-disk u16 used throughout sigilbuzz.
 pub type GlyphId = u16;
 
-/// Palette index used for CPAL lookups. The evaluator always resolves
-/// colors against palette 0, the COLRv1 default.
+/// CPAL palette that [`evaluate`] and [`evaluate_at_coords`] resolve
+/// colors against. Palette 0 is the font's default.
 const DEFAULT_PALETTE_INDEX: u16 = 0;
 
 /// Sentinel palette index meaning "use the foreground text color".
@@ -107,6 +107,32 @@ pub fn evaluate(face: &Face<'_>, gid: GlyphId) -> Vec<DrawCmd> {
 /// accepts. An empty slice is the static (no-deltas) path.
 #[must_use]
 pub fn evaluate_at_coords(face: &Face<'_>, gid: GlyphId, coords: &[f32]) -> Vec<DrawCmd> {
+    evaluate_with_palette(face, gid, coords, DEFAULT_PALETTE_INDEX)
+}
+
+/// Same as [`evaluate_at_coords`] but resolves colors against CPAL
+/// palette `palette`, so a caller can pick one of the font's
+/// alternate palettes (a dark theme, for example). Colors in a
+/// palette the font does not have resolve to transparent, the same
+/// as a missing palette entry.
+///
+/// ```no_run
+/// use sigilbuzz::Face;
+/// use sigilbuzz_paint::evaluate_with_palette;
+///
+/// # fn demo(face: &Face<'_>) {
+/// // Glyph 42 in the font's second palette, at the default instance.
+/// let cmds = evaluate_with_palette(face, 42, &[], 1);
+/// # let _ = cmds;
+/// # }
+/// ```
+#[must_use]
+pub fn evaluate_with_palette(
+    face: &Face<'_>,
+    gid: GlyphId,
+    coords: &[f32],
+    palette: u16,
+) -> Vec<DrawCmd> {
     let mut out = Vec::new();
     let Ok(Some(colr)) = face.colr() else {
         return out;
@@ -121,6 +147,7 @@ pub fn evaluate_at_coords(face: &Face<'_>, gid: GlyphId, coords: &[f32]) -> Vec<
     let mut ctx = EvalCtx {
         colr: &colr,
         cpal: cpal.as_ref(),
+        palette,
         var_store: var_store.as_ref(),
         index_map,
         coords,
@@ -142,6 +169,8 @@ pub fn evaluate_at_coords(face: &Face<'_>, gid: GlyphId, coords: &[f32]) -> Vec<
 struct EvalCtx<'a, 'b> {
     colr: &'b Colr<'a>,
     cpal: Option<&'b Cpal<'a>>,
+    /// CPAL palette that colors resolve against.
+    palette: u16,
     var_store: Option<&'b ItemVariationStore<'a>>,
     /// Optional DeltaSetIndexMap from the COLR header. It redirects
     /// a paint's `var_index_base + field_index` through an
@@ -809,7 +838,8 @@ fn walk_composite(
 // =========================================================================
 
 fn emit_solid(ctx: &mut EvalCtx<'_, '_>, palette_index: u16, alpha: F2Dot14, xform: Transform2D) {
-    let color = resolve_palette_color(ctx.cpal, palette_index).with_alpha_multiplied(alpha);
+    let color =
+        resolve_palette_color(ctx.cpal, ctx.palette, palette_index).with_alpha_multiplied(alpha);
     ctx.out.push(DrawCmd::FillGlyph {
         gid: 0,
         transform: xform,
@@ -916,14 +946,14 @@ fn emit_sweep_gradient(
 /// Resolves a CPAL palette entry to a float-channel color. Falls back
 /// to opaque white for the `0xFFFF` foreground sentinel and to fully
 /// transparent for any other lookup miss. Never panics.
-fn resolve_palette_color(cpal: Option<&Cpal<'_>>, palette_index: u16) -> Color {
+fn resolve_palette_color(cpal: Option<&Cpal<'_>>, palette: u16, palette_index: u16) -> Color {
     if palette_index == FOREGROUND_PALETTE_INDEX {
         return Color::new(1.0, 1.0, 1.0, 1.0);
     }
     let Some(cpal) = cpal else {
         return Color::TRANSPARENT;
     };
-    cpal.color(DEFAULT_PALETTE_INDEX, palette_index)
+    cpal.color(palette, palette_index)
         .map(Color::from_cpal)
         .unwrap_or(Color::TRANSPARENT)
 }
@@ -943,6 +973,7 @@ fn resolve_stops(ctx: &mut EvalCtx<'_, '_>, color_line: ColorLine<'_>) -> Option
     let coords = ctx.coords;
     let var_store = ctx.var_store;
     let cpal = ctx.cpal;
+    let palette = ctx.palette;
 
     for (stop, stop_var) in color_line.stops_variable() {
         let mut offset = stop.stop_offset;
@@ -974,7 +1005,8 @@ fn resolve_stops(ctx: &mut EvalCtx<'_, '_>, color_line: ColorLine<'_>) -> Option
                 alpha += store.delta(a_outer, a_inner, coords) / 16384.0;
             }
         }
-        let color = resolve_palette_color(cpal, stop.palette_index).with_alpha_multiplied(alpha);
+        let color =
+            resolve_palette_color(cpal, palette, stop.palette_index).with_alpha_multiplied(alpha);
         out.push(ColorStop { offset, color });
     }
     Some(out)

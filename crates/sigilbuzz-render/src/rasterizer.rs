@@ -303,13 +303,14 @@ impl Rasterizer {
     /// and blended through any `PaintComposite` mode, into a single
     /// surface sized to the union bounding box of every fill.
     ///
-    /// `palette_index` is forwarded for forward compatibility with
-    /// COLRv0; the COLRv1 evaluator currently always uses palette 0
-    /// for stop color lookups.
+    /// `palette_index` picks the CPAL palette that solid and gradient
+    /// stop colors resolve against. Palette 0 is the font's default.
     ///
     /// # Errors
     /// - [`RenderError::ColrV1NotFound`] when the font has no v1
     ///   paint record for `gid`.
+    /// - [`RenderError::BadPaletteIndex`] when `palette_index` is not
+    ///   0 and the font's `CPAL` has no such palette.
     /// - [`RenderError::BadSize`] when `size_pt` is non-finite or
     ///   non-positive, when the composed glyph would exceed 16384
     ///   pixels on a side, or when nested composite layers would need

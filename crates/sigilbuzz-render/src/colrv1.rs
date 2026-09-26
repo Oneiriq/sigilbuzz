@@ -1,7 +1,7 @@
 //! COLRv1 paint-tree rasterization.
 //!
 //! [`rasterize_colrv1`] consumes a flat [`DrawCmd`] stream emitted by
-//! [`sigilbuzz_paint::evaluate_at_coords`] and turns it into a single
+//! [`sigilbuzz_paint::evaluate_with_palette`] and turns it into a single
 //! premultiplied RGBA [`ColorPixmap`]. The flow is:
 //!
 //! 1. Walk the `DrawCmd` stream linearly. Maintain a *layer stack* of
@@ -41,8 +41,8 @@ use alloc::vec::Vec;
 
 use sigilbuzz::Face;
 use sigilbuzz_paint::{
-    evaluate_at_coords, Color, CompositeMode, DrawCmd, Extend, Gradient, GradientKind, PaintSource,
-    Transform2D,
+    evaluate_with_palette, Color, CompositeMode, DrawCmd, Extend, Gradient, GradientKind,
+    PaintSource, Transform2D,
 };
 
 use crate::affine::Affine;
@@ -54,17 +54,16 @@ use crate::raster::{raster_bounds, rasterize as raster, RasterBounds, MAX_RASTER
 /// Public entry: walks the `DrawCmd` stream `sigilbuzz-paint` would
 /// produce for `gid` and renders it to a premultiplied RGBA pixmap.
 ///
-/// `palette_index` is forwarded to the evaluator's CPAL lookups; the
-/// evaluator currently always uses palette 0 internally, so this
-/// argument is reserved for the API parity with `rasterize_colrv0_glyph`
-/// and is wired through for forward compatibility.
+/// `palette_index` picks the CPAL palette every color resolves
+/// against. Palette 0 is always accepted. Any other index must name a
+/// palette the font has.
 ///
 /// `tolerance` is the per-glyph curve flattening tolerance in pixel
 /// units (same semantics as [`crate::Rasterizer`]'s field).
 pub(crate) fn rasterize_colrv1(
     face: &Face<'_>,
     gid: u16,
-    _palette_index: u16,
+    palette_index: u16,
     size_pt: f32,
     coords: &[f32],
     tolerance: f32,
@@ -89,7 +88,22 @@ pub(crate) fn rasterize_colrv1(
         }
     }
 
-    let cmds = evaluate_at_coords(face, gid, coords);
+    // Palette 0 stays valid without a CPAL table, as before. Any other
+    // palette must exist, the same rule the COLRv0 path applies.
+    if palette_index != 0 {
+        let num_palettes = face
+            .cpal()
+            .map_err(|_| RenderError::Parse("cpal"))?
+            .map_or(0, |cpal| cpal.num_palettes());
+        if palette_index >= num_palettes {
+            return Err(RenderError::BadPaletteIndex {
+                palette: palette_index,
+                entry: 0xFFFF,
+            });
+        }
+    }
+
+    let cmds = evaluate_with_palette(face, gid, coords, palette_index);
     if cmds.is_empty() {
         return Ok(ColorPixmap::new(0, 0));
     }

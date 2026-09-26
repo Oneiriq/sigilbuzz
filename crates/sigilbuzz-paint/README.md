@@ -36,6 +36,7 @@ for cmd in &cmds {
 ```
 
 For variable fonts, `evaluate_at_coords` takes normalized axis coordinates.
+`evaluate_with_palette` also takes the index of the CPAL palette to resolve colors in.
 
 ## Cargo features
 

@@ -54,7 +54,9 @@ mod gradient;
 mod transform;
 
 pub use color::Color;
-pub use eval::{evaluate, evaluate_at_coords, DrawCmd, GlyphId, PaintSource};
+pub use eval::{
+    evaluate, evaluate_at_coords, evaluate_with_palette, DrawCmd, GlyphId, PaintSource,
+};
 pub use gradient::{ColorStop, Extend, Gradient, GradientKind};
 pub use sigilbuzz::tables::colr::CompositeMode;
 pub use transform::Transform2D;
