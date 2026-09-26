@@ -12,11 +12,12 @@ Fonts used by the integration tests.
   Fischer, OFL 1.1, from the `googlefonts/rubik` repository. `tests/variable_fonts.rs`
   uses it to exercise the `fvar`, `avar`, and `HVAR` advance-delta pipeline and `gvar`
   outline deltas against rustybuzz's output at the same axis coordinate.
-- `var_kern.ttf`: a synthetic 972-byte variable font with two glyphs ("A" and "V"), one
-  `wght` axis (400 to 900), and a GPOS kern pair whose `x_advance` delta is -100 at
-  wght=900 and 0 at wght=400, through a VariationIndex and ItemVariationStore. Built
-  deterministically by `tests/tools/build_var_kern_fixture.py`. `tests/variable_kern.rs`
-  uses it to exercise the GPOS feature-variation support added for issue #13.
+- `var_kern.ttf`: a synthetic 1012-byte variable font with three glyphs ("A", "V", and an
+  unkerned "B" that lets a subset drop a glyph), one `wght` axis (400 to 900), and a GPOS
+  kern pair whose `x_advance` delta is -100 at wght=900 and 0 at wght=400, through a
+  VariationIndex and ItemVariationStore. Built deterministically by
+  `tests/tools/build_var_kern_fixture.py`. `tests/variable_kern.rs` uses it to exercise
+  the GPOS feature-variation support added for issue #13.
 - `cbdt_synthetic.ttf`: a synthetic 860-byte font with one CBDT/CBLC strike at 32 ppem,
   one PNG bitmap glyph, a CBLC index subtable in format 1 (variable metrics, u32
   offsets), and a CBDT record in format 17 (small metrics plus PNG data). Built

@@ -105,6 +105,7 @@ mod classdef;
 mod closure;
 mod cmap;
 mod coverage;
+mod device;
 mod fvar;
 mod gdef;
 mod glyf;

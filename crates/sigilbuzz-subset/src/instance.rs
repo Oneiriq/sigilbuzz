@@ -2649,7 +2649,7 @@ mod tests {
     const SOURCE_SANS: &[u8] =
         include_bytes!("../../../tests/fonts/SourceSans3VF-Latin-Subset.otf");
     const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
-    /// 972-byte synthetic VF with a single PairPos format 1 lookup
+    /// 1012-byte synthetic VF with a single PairPos format 1 lookup
     /// whose AV pair carries a VariationIndex into a one-region IVS;
     /// at wght=900 the delta is -100, at wght=400 it is 0. Built by
     /// `tests/tools/build_var_kern_fixture.py`. See

@@ -12,12 +12,16 @@
 //!   remap to new gids; auto-format-pick via the existing emitter).
 //! - **MarkAttachClassDef**: ClassDef remap, same shape as
 //!   GlyphClassDef.
+//! - **ItemVariationStore**: copied verbatim. Its rows are keyed by
+//!   `(outer, inner)` pairs, not glyph ids, so the VariationIndex
+//!   tables the GPOS rewrite carries over still name the right rows.
+//!   The output is a version 1.3 table when the store is present.
 //!
 //! Other GDEF subtables (`AttachList`, `LigCaretList`,
-//! `MarkGlyphSetsDef`, `ItemVariationStore`) are not rewritten yet and
-//! are dropped from the output, which is always a version 1.0 table.
-//! Lookups that name a mark filtering set keep that index, so shaping
-//! with the subset ignores their mark filter.
+//! `MarkGlyphSetsDef`) are not rewritten yet and are dropped from the
+//! output, which is otherwise a version 1.0 table. Lookups that name a
+//! mark filtering set keep that index, so shaping with the subset
+//! ignores their mark filter.
 
 use alloc::vec::Vec;
 
@@ -27,6 +31,10 @@ use crate::layout::{patch_offset16, read_u16, GidMap};
 /// Rewrites a `GDEF` table. Returns `None` if every contained
 /// subtable drops to nothing, or if the rewritten ClassDefs no longer
 /// fit their 16-bit offsets.
+///
+/// The ItemVariationStore is copied as the byte range from its offset
+/// to the end of the source table. Every offset inside the store is
+/// relative to its start and unsigned, so that range holds all of it.
 pub(crate) fn rewrite_gdef(face: &sigilbuzz::Face<'_>, map: &GidMap) -> Option<Vec<u8>> {
     let bytes = face.table_bytes(sigilbuzz::tables::tag::GDEF).ok()?;
 
@@ -43,8 +51,22 @@ pub(crate) fn rewrite_gdef(face: &sigilbuzz::Face<'_>, map: &GidMap) -> Option<V
     if major != 1 {
         return None;
     }
+    let minor = read_u16(bytes, 2)?;
     let glyph_class_off = usize::from(read_u16(bytes, 4)?);
     let mark_attach_off = usize::from(read_u16(bytes, 10)?);
+    let var_store = if minor >= 3 {
+        let off = bytes
+            .get(14..18)
+            .map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+        // Offsets inside the 18-byte v1.3 header are malformed.
+        usize::try_from(off)
+            .ok()
+            .filter(|&off| off >= V13_HEADER_LEN)
+            .and_then(|off| bytes.get(off..))
+            .filter(|store| !store.is_empty())
+    } else {
+        None
+    };
 
     // Rewrite GlyphClassDef.
     let new_glyph_class = if glyph_class_off != 0 {
@@ -61,15 +83,17 @@ pub(crate) fn rewrite_gdef(face: &sigilbuzz::Face<'_>, map: &GidMap) -> Option<V
 
     // If both classdefs drop and we don't carry anything else, the
     // whole GDEF is empty. The caller drops it.
-    if new_glyph_class.is_none() && new_mark_attach.is_none() {
+    if new_glyph_class.is_none() && new_mark_attach.is_none() && var_store.is_none() {
         return None;
     }
 
-    // Re-emit a v1.0 GDEF with only the subtables we know how to
-    // rewrite. Other subtable offsets are zeroed.
+    // Re-emit a v1.0 GDEF, or v1.3 when the store is carried, with
+    // only the subtables we know how to rewrite. Other subtable
+    // offsets are zeroed.
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // major
-    out.extend_from_slice(&0u16.to_be_bytes()); // minor: v1.0 carries no mark glyph sets or IVS.
+    let minor: u16 = if var_store.is_some() { 3 } else { 0 };
+    out.extend_from_slice(&minor.to_be_bytes());
 
     // Header offsets get patched once we know the subtable positions.
     let glyph_class_slot = out.len();
@@ -78,6 +102,11 @@ pub(crate) fn rewrite_gdef(face: &sigilbuzz::Face<'_>, map: &GidMap) -> Option<V
     out.extend_from_slice(&0u16.to_be_bytes()); // ligCaretList offset (dropped)
     let mark_attach_slot = out.len();
     out.extend_from_slice(&0u16.to_be_bytes()); // markAttachClassDef offset
+    let var_store_slot = out.len() + 2;
+    if var_store.is_some() {
+        out.extend_from_slice(&0u16.to_be_bytes()); // markGlyphSetsDef offset (dropped)
+        out.extend_from_slice(&0u32.to_be_bytes()); // itemVarStore offset
+    }
 
     if let Some(gc) = new_glyph_class.as_deref() {
         let pos = out.len();
@@ -89,9 +118,17 @@ pub(crate) fn rewrite_gdef(face: &sigilbuzz::Face<'_>, map: &GidMap) -> Option<V
         patch_offset16(&mut out, mark_attach_slot, pos)?;
         out.extend_from_slice(ma);
     }
+    if let Some(store) = var_store {
+        let pos = u32::try_from(out.len()).ok()?;
+        out[var_store_slot..var_store_slot + 4].copy_from_slice(&pos.to_be_bytes());
+        out.extend_from_slice(store);
+    }
 
     Some(out)
 }
+
+/// Length of a version 1.3 GDEF header.
+const V13_HEADER_LEN: usize = 18;
 
 fn rewrite_classdef_subtable(bytes: &[u8], offset: usize, map: &GidMap) -> Option<Vec<u8>> {
     let body = bytes.get(offset..)?;
