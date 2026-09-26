@@ -140,8 +140,9 @@ impl<'a> ParsedSfnt<'a> {
     fn parse(bytes: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(bytes);
         let flavor = r.read_u32("SFNT sfntVersion")?;
-        // Accept TrueType (0x00010000), CFF (`OTTO`), and the rare
-        // collection wrappers we'd normally reject upstream.
+        // Accept TrueType (0x00010000), CFF (`OTTO`), and the legacy
+        // Apple `true` and `typ1` flavors. Font collections (`ttcf`)
+        // are not supported.
         match flavor {
             0x0001_0000 | 0x4F54_544F /* OTTO */ | 0x7472_7565 /* true */ |
             0x7479_7031 /* typ1 */ => {}
