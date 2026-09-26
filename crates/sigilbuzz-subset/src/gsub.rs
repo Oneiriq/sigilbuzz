@@ -43,7 +43,10 @@
 //! - **Type 8 (reverse chain)**: format 1. Filters Coverage to
 //!   surviving input gids whose substitute gid also survives; rewrites
 //!   the backtrack and lookahead Coverage arrays; drops the subtable
-//!   when any Coverage in the context window empties out.
+//!   when any Coverage in the context window empties out. The closure
+//!   keeps the substitute of every kept input whose context can still
+//!   match (see [`pull_in_substitution_targets`]), so a pair only
+//!   loses its substitute when its subtable drops anyway.
 //!
 //! Every other lookup type drops its lookup. The drop cascade then
 //! removes empty subtables, lookups with no surviving subtable,
@@ -1994,7 +1997,11 @@ fn rewrite_type8(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         return None;
     }
 
-    // Pair surviving covered gids with their replacement gids.
+    // Pair surviving covered gids with their replacement gids. The
+    // closure keeps the substitute of every kept input whose context
+    // can still match (see `pull_reverse_chain`), so a pair only loses
+    // its substitute here when its context cannot match either, and
+    // the context check below then drops the whole subtable.
     let mut new_pairs: Vec<(u16, u16)> = Vec::new();
     for (i, &input_old) in covered.iter().enumerate() {
         let Some(input_new) = map.map(input_old) else {
@@ -2113,14 +2120,14 @@ fn rewrite_extension(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable>
 }
 
 /// Walks a parsed GSUB table and pulls in implicit substitution
-/// targets (type 1/2/3) for every kept input glyph. The closure walker
-/// already pulls in ligature components (type 4) and mark-base
-/// partners; this fills in the substitution-target side.
+/// targets (types 1, 2, 3 and 8) for every kept input glyph. The
+/// closure walker already pulls in ligature components (type 4) and
+/// mark-base partners; this fills in the substitution-target side.
 ///
 /// Iterates the source GSUB lookups; for each kept input glyph that a
-/// type-1/2/3 lookup covers, marks the substitution output(s) as kept.
-/// Mutates `keep` in place and returns whether anything was added so
-/// the caller can decide to re-run the closure pass.
+/// type-1/2/3/8 lookup covers, marks the substitution output(s) as
+/// kept. Mutates `keep` in place and returns whether anything was
+/// added so the caller can decide to re-run the closure pass.
 pub(crate) fn pull_in_substitution_targets(face: &sigilbuzz::Face<'_>, keep: &mut [bool]) -> bool {
     let Ok(Some(gsub)) = face.gsub() else {
         return false;
@@ -2145,6 +2152,9 @@ pub(crate) fn pull_in_substitution_targets(face: &sigilbuzz::Face<'_>, keep: &mu
                 }
                 gsub_type::ALTERNATE => {
                     changed |= pull_alternate_default(sub, keep);
+                }
+                gsub_type::REVERSE_CHAINED => {
+                    changed |= pull_reverse_chain(sub, keep);
                 }
                 _ => {}
             }
@@ -2337,6 +2347,73 @@ fn pull_alternate_default(sub: &[u8], keep: &mut [bool]) -> bool {
         if (target as usize) < keep.len() && !keep[target as usize] {
             keep[target as usize] = true;
             changed = true;
+        }
+    }
+    changed
+}
+
+/// Pulls in the substitute of every kept input glyph in a type-8
+/// (reverse chaining single substitution) subtable whose context can
+/// still match, the rule HarfBuzz's closure applies: every backtrack
+/// and lookahead Coverage must list at least one kept glyph. A context
+/// that has lost every glyph at one of its positions can never match,
+/// and [`rewrite_type8`] drops that subtable, so its substitutes are
+/// not needed. The closure loop reruns this pass, so context glyphs
+/// kept later still bring the substitutes in.
+///
+/// The layout is the one [`rewrite_type8`] reads; a subtable whose
+/// Coverage and substitute counts disagree is skipped, as there.
+fn pull_reverse_chain(sub: &[u8], keep: &mut [bool]) -> bool {
+    let read = |pos: usize| -> Option<usize> {
+        let b = sub.get(pos..pos.checked_add(2)?)?;
+        Some(usize::from(u16::from_be_bytes([b[0], b[1]])))
+    };
+    let is_kept = |g: u16| keep.get(usize::from(g)).copied().unwrap_or(false);
+    let context_can_match = |first_slot: usize, count: usize| {
+        (0..count).all(|j| {
+            read(first_slot + j * 2)
+                .and_then(|off| sub.get(off..))
+                .is_some_and(|cov| parse_coverage_glyphs(cov).into_iter().any(is_kept))
+        })
+    };
+    if read(0) != Some(1) {
+        return false;
+    }
+    let (Some(cov_off), Some(bt_count)) = (read(2), read(4)) else {
+        return false;
+    };
+    let la_count_at = 6 + bt_count * 2;
+    let Some(la_count) = read(la_count_at) else {
+        return false;
+    };
+    let glyph_count_at = la_count_at + 2 + la_count * 2;
+    let Some(glyph_count) = read(glyph_count_at) else {
+        return false;
+    };
+    let Some(covered) = sub.get(cov_off..).map(parse_coverage_glyphs) else {
+        return false;
+    };
+    if covered.len() != glyph_count
+        || !context_can_match(6, bt_count)
+        || !context_can_match(la_count_at + 2, la_count)
+    {
+        return false;
+    }
+    let mut targets = Vec::new();
+    for (i, &g) in covered.iter().enumerate() {
+        if !is_kept(g) {
+            continue;
+        }
+        let Some(target) = read(glyph_count_at + 2 + i * 2) else {
+            return false;
+        };
+        targets.push(target);
+    }
+    let mut changed = false;
+    for target in targets {
+        if let Some(slot) = keep.get_mut(target) {
+            changed |= !*slot;
+            *slot = true;
         }
     }
     changed
@@ -3533,6 +3610,69 @@ mod tests {
         let rs = rewrite_subtable(&ctx, gsub_type::REVERSE_CHAINED, &bytes).unwrap();
         let parsed = sigilbuzz::tables::gsub::ReverseChain::parse(&rs.bytes);
         assert!(parsed.is_ok());
+    }
+
+    /// A keep bitset over glyphs `0..256` with `kept` set.
+    fn keep_set(kept: &[u16]) -> Vec<bool> {
+        let mut keep = vec![false; 256];
+        for &g in kept {
+            keep[usize::from(g)] = true;
+        }
+        keep
+    }
+
+    #[test]
+    fn closure_pulls_reverse_chain_substitutes_of_kept_inputs() {
+        // 10 -> 100 and 11 -> 101 after a 5 and before a 30 or 31.
+        let bytes = build_type8(&[10, 11], &[vec![5]], &[vec![30, 31]], &[100, 101]);
+        let mut keep = keep_set(&[5, 10, 31]);
+        assert!(pull_reverse_chain(&bytes, &mut keep));
+        assert!(keep[100], "the kept input's substitute joins the closure");
+        assert!(!keep[101], "an input that is not kept brings nothing in");
+        assert!(
+            !pull_reverse_chain(&bytes, &mut keep),
+            "a second pass adds nothing"
+        );
+    }
+
+    #[test]
+    fn closure_skips_reverse_chain_rules_whose_context_cannot_match() {
+        let bytes = build_type8(&[10], &[vec![5]], &[vec![30]], &[100]);
+        for kept in [&[10u16, 30][..], &[5, 10], &[10]] {
+            let mut keep = keep_set(kept);
+            assert!(!pull_reverse_chain(&bytes, &mut keep), "kept {kept:?}");
+            assert!(!keep[100], "kept {kept:?}");
+        }
+    }
+
+    #[test]
+    fn closure_then_rewrite_keeps_the_reverse_chain_substitution() {
+        // Keeping the input and its context glyphs is enough: the
+        // closure adds the substitute and the rewrite keeps the pair.
+        let bytes = build_type8(&[10], &[vec![5]], &[vec![30]], &[100]);
+        let mut keep = keep_set(&[0, 5, 10, 30]);
+        pull_reverse_chain(&bytes, &mut keep);
+        let kept: Vec<u16> = (0..256u16).filter(|&g| keep[usize::from(g)]).collect();
+        let map = GidMap::from_kept(&kept);
+        let rs = rewrite_type8(&RewriterCtx::new(&map, None), &bytes).expect("subtable survives");
+        let rc = sigilbuzz::tables::gsub::ReverseChain::parse(&rs.bytes).unwrap();
+        let new = |g: u16| map.map(g).unwrap();
+        assert_eq!(
+            rc.apply(&[new(5), new(10), new(30)], 1),
+            Some(new(100)),
+            "the subset still substitutes in context"
+        );
+    }
+
+    #[test]
+    fn closure_ignores_truncated_reverse_chain_subtables() {
+        let bytes = build_type8(&[10], &[vec![5]], &[vec![30]], &[100]);
+        for len in 0..bytes.len() {
+            let mut keep = keep_set(&[5, 10, 30]);
+            let before = keep.clone();
+            pull_reverse_chain(&bytes[..len], &mut keep);
+            assert_eq!(keep, before, "cut at {len}");
+        }
     }
 
     #[test]

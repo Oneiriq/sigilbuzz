@@ -60,7 +60,8 @@ pub fn compute_closure(face: &Face<'_>, seed: &[u16]) -> Result<Vec<u16>, Subset
         expand_glyf_composites(face, &mut keep)?;
         expand_gsub_ligatures(face, &mut keep)?;
         // Substitution-target pull-ins: GSUB type 1/2/3 outputs are
-        // implicitly kept whenever their inputs are kept. The byte-
+        // implicitly kept whenever their inputs are kept, and type 8
+        // outputs when their context can still match too. The byte-
         // level rewriter in `crate::gsub` honors the same rule when
         // it filters surviving subtable pairs.
         crate::gsub::pull_in_substitution_targets(face, &mut keep);
