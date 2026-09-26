@@ -455,3 +455,81 @@ fn bake_cff2_partial_scales_blend_delta_by_pin_scalar() {
     // Blend op survives.
     assert!(cs.contains(&16u8), "blend op survives partial bake");
 }
+
+/// Local subroutines 0..=9 where subroutine `k` calls subroutine
+/// `k - 1` ten times and subroutine 0 is empty. Inlining a call to
+/// subroutine 9 expands to a billion calls of subroutine 0.
+fn subr_bomb() -> Vec<Vec<u8>> {
+    let mut subrs: Vec<Vec<u8>> = alloc::vec![Vec::new()];
+    for k in 1..10u8 {
+        // The bias is 107 for fewer than 1240 subrs, so index
+        // `k - 1` is pushed as the single byte (k - 1) - 107 + 139.
+        subrs.push([k - 1 + 32, 10].repeat(10));
+    }
+    subrs
+}
+
+/// Charstring that calls local subroutine 9 of [`subr_bomb`].
+const CALL_SUBR_9: &[u8] = &[9 + 32, 10];
+
+#[test]
+fn bake_at_coords_stops_exponential_subr_expansion() {
+    let subrs = subr_bomb();
+    let refs: Vec<&[u8]> = subrs.iter().map(Vec::as_slice).collect();
+    let cff = build_synthetic_cff2_with_local_subrs(&[CALL_SUBR_9], &[0], &refs, None);
+    let r = bake_at_coords(&cff, &[]);
+    assert!(matches!(r, Err(SubsetError::Unsupported(_))), "{r:?}");
+}
+
+#[test]
+fn bake_cff2_partial_stops_exponential_subr_expansion() {
+    let ivs = build_ivs1_for_cff2(
+        &[[(0.0, 1.0, 1.0)]],
+        &[(alloc::vec![0], alloc::vec![alloc::vec![50i16]])],
+    );
+    let subrs = subr_bomb();
+    let refs: Vec<&[u8]> = subrs.iter().map(Vec::as_slice).collect();
+    let cff = build_synthetic_cff2_with_local_subrs(&[CALL_SUBR_9], &[0], &refs, Some(&ivs));
+    let r = bake_cff2_partial(&cff, &[1.0], &[AxisPin::Keep]);
+    assert!(matches!(r, Err(SubsetError::Unsupported(_))), "{r:?}");
+}
+
+#[test]
+fn bake_cff2_partial_blend_on_missing_subtable_keeps_masters() {
+    // The store has one subtable, but the charstring selects
+    // subtable 3 before blending. With no regions to read, the
+    // blend must leave its master in place instead of indexing past
+    // the operand stack.
+    let ivs = build_ivs1_for_cff2(
+        &[[(0.0, 1.0, 1.0)]],
+        &[(alloc::vec![0], alloc::vec![alloc::vec![50i16]])],
+    );
+    // 0 0 rmoveto, 3 vsindex, 0 1 blend, hmoveto.
+    let cs: &[u8] = &[139, 139, 21, 142, 15, 139, 140, 16, 22];
+    let cff = build_synthetic_cff2(&[cs], &[0], Some(&ivs));
+    let new_cff = bake_cff2_partial(&cff, &[1.0], &[AxisPin::Keep]).expect("partial bake");
+    let parsed = parse_cff2(&new_cff).expect("parse");
+    assert_eq!(parsed.char_strings[0], &[139u8, 139, 21, 139, 22][..]);
+}
+
+#[test]
+fn bake_at_coords_rejects_callsubr_operand_past_i32() {
+    // 8000 regions that all peak at the bake coordinate. Nine
+    // chained blends of 8000 deltas of 32767 each push the operand
+    // past i32::MAX before a callsubr consumes it.
+    const REGIONS: u16 = 8000;
+    let regions: Vec<[(f32, f32, f32); 1]> = (0..REGIONS).map(|_| [(0.0, 1.0, 1.0)]).collect();
+    let ivs = build_ivs1_for_cff2(&regions, &[((0..REGIONS).collect(), Vec::new())]);
+    let max_shortint = [28u8, 0x7F, 0xFF];
+    let mut cs: Vec<u8> = max_shortint.to_vec();
+    for _ in 0..9 {
+        for _ in 0..REGIONS {
+            cs.extend_from_slice(&max_shortint);
+        }
+        cs.extend_from_slice(&[140, 16]); // 1 blend
+    }
+    cs.push(10); // callsubr
+    let cff = build_synthetic_cff2(&[cs.as_slice()], &[0], Some(&ivs));
+    let r = bake_at_coords(&cff, &[1.0]);
+    assert!(matches!(r, Err(SubsetError::Unsupported(_))), "{r:?}");
+}

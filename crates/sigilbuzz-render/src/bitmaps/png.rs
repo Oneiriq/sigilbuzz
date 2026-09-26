@@ -23,37 +23,30 @@ pub(super) const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0
 /// # Errors
 /// Returns [`RenderError::BadPng`] on any structural problem.
 pub fn decode_png(bytes: &[u8]) -> Result<ColorPixmap, RenderError> {
-    if bytes.len() < 8 || bytes[..8] != PNG_SIGNATURE {
+    let Some(mut rest) = bytes.strip_prefix(&PNG_SIGNATURE) else {
         return Err(RenderError::BadPng("missing PNG signature"));
-    }
-    let mut cursor = 8usize;
+    };
     let mut ihdr: Option<Ihdr> = None;
     let mut idat = Vec::<u8>::new();
     let mut plte: Option<Vec<[u8; 3]>> = None;
     let mut trns: Option<Vec<u8>> = None;
     loop {
-        if cursor + 8 > bytes.len() {
+        let Some((&[l0, l1, l2, l3, k0, k1, k2, k3], body)) = rest.split_first_chunk::<8>() else {
             return Err(RenderError::BadPng("truncated chunk header"));
-        }
-        let len = read_u32(&bytes[cursor..cursor + 4]) as usize;
-        let kind = [
-            bytes[cursor + 4],
-            bytes[cursor + 5],
-            bytes[cursor + 6],
-            bytes[cursor + 7],
-        ];
-        cursor += 8;
-        let data_end = cursor
-            .checked_add(len)
-            .ok_or(RenderError::BadPng("chunk length overflow"))?;
-        if data_end + 4 > bytes.len() {
+        };
+        let len = u32::from_be_bytes([l0, l1, l2, l3]) as usize;
+        let kind = [k0, k1, k2, k3];
+        // `body` starts with the chunk data, then its 4-byte CRC.
+        let Some(data) = body.get(..len) else {
             return Err(RenderError::BadPng("truncated chunk body"));
-        }
-        let data = &bytes[cursor..data_end];
+        };
         // Skip CRC; PNG embeds in fonts have already been validated
         // by the font producer and we don't gain anything by failing
         // a render on a CRC mismatch.
-        cursor = data_end + 4;
+        let Some(next) = body.get(len..).and_then(|r| r.get(4..)) else {
+            return Err(RenderError::BadPng("truncated chunk body"));
+        };
+        rest = next;
 
         match &kind {
             b"IHDR" => {
@@ -105,16 +98,14 @@ struct Ihdr {
 
 impl Ihdr {
     fn parse(data: &[u8]) -> Result<Self, RenderError> {
-        if data.len() != 13 {
+        let Some((&[w0, w1, w2, w3, h0, h1, h2, h3], tail)) = data.split_first_chunk::<8>() else {
             return Err(RenderError::BadPng("IHDR length not 13"));
-        }
-        let width = read_u32(&data[0..4]);
-        let height = read_u32(&data[4..8]);
-        let bit_depth = data[8];
-        let color_type = data[9];
-        let compression = data[10];
-        let filter = data[11];
-        let interlace = data[12];
+        };
+        let &[bit_depth, color_type, compression, filter, interlace] = tail else {
+            return Err(RenderError::BadPng("IHDR length not 13"));
+        };
+        let width = u32::from_be_bytes([w0, w1, w2, w3]);
+        let height = u32::from_be_bytes([h0, h1, h2, h3]);
         if compression != 0 || filter != 0 {
             return Err(RenderError::BadPng("unsupported compression/filter"));
         }
@@ -166,16 +157,28 @@ fn decode_image(
     plte: Option<&[[u8; 3]]>,
     trns: Option<&[u8]>,
 ) -> Result<ColorPixmap, RenderError> {
-    let raw = miniz_oxide::inflate::decompress_to_vec_zlib(idat)
-        .map_err(|_| RenderError::BadPng("zlib inflate failed"))?;
     let bpp = ihdr.bytes_per_pixel();
     let row_bytes = (ihdr.width as usize)
         .checked_mul(bpp)
         .ok_or(RenderError::BadPng("row size overflow"))?;
     // Filter byte + row payload, height rows.
-    let expected = (row_bytes + 1)
+    let stride = row_bytes
+        .checked_add(1)
+        .ok_or(RenderError::BadPng("row size overflow"))?;
+    let expected = stride
         .checked_mul(ihdr.height as usize)
         .ok_or(RenderError::BadPng("decompressed size overflow"))?;
+    // Inflate at most one byte past the size the header implies. A
+    // longer stream is already a length mismatch, so the limit stops a
+    // small IDAT from inflating into gigabytes before that check runs.
+    let raw =
+        miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(idat, expected.saturating_add(1))
+            .map_err(|e| match e.status {
+            miniz_oxide::inflate::TINFLStatus::HasMoreOutput => {
+                RenderError::BadPng("decompressed length mismatch")
+            }
+            _ => RenderError::BadPng("zlib inflate failed"),
+        })?;
     if raw.len() != expected {
         return Err(RenderError::BadPng("decompressed length mismatch"));
     }
@@ -184,14 +187,14 @@ fn decode_image(
     // reconstruction uses the previous row.
     let mut prev_row = vec![0u8; row_bytes];
     let mut cur_row = vec![0u8; row_bytes];
-    let mut pixels = Vec::with_capacity((ihdr.width * ihdr.height) as usize * 4);
+    let mut pixels = Vec::with_capacity((ihdr.width as usize * ihdr.height as usize) * 4);
 
-    let mut cursor = 0usize;
-    for _y in 0..ihdr.height {
-        let filter = raw[cursor];
-        cursor += 1;
-        let row = &raw[cursor..cursor + row_bytes];
-        cursor += row_bytes;
+    // `raw.len() == stride * height`, so this yields exactly one chunk
+    // per row and each chunk holds the filter byte plus `row_bytes`.
+    for chunk in raw.chunks_exact(stride) {
+        let Some((&filter, row)) = chunk.split_first() else {
+            continue;
+        };
         defilter_row(filter, row, &prev_row, &mut cur_row, bpp)?;
         // Transcode this row into RGBA.
         emit_row(ihdr, plte, trns, &cur_row, &mut pixels)?;
@@ -350,8 +353,4 @@ fn push_premul(out: &mut Vec<u8>, r: u8, g: u8, b: u8, a: u8) {
         out.push(((b as u32 * aa + 127) / 255) as u8);
         out.push(a);
     }
-}
-
-fn read_u32(bytes: &[u8]) -> u32 {
-    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }

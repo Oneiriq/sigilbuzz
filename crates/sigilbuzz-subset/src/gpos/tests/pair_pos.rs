@@ -212,3 +212,43 @@ fn rewrite_pair_pos_format2_pass_through_for_large_subsets() {
     let (v1, _) = pp.lookup(1, 22).unwrap();
     assert_eq!(v1.x_advance, -25);
 }
+
+#[test]
+fn rewrite_pair_pos_format2_fallback_handles_a_large_class_def2() {
+    // One first glyph triggers the fmt-1 fallback, and every one of
+    // 65535 kept glyphs looks up its class in a ClassDef with one
+    // range per glyph. A linear scan per lookup made this take
+    // billions of steps.
+    let range_count: u16 = u16::MAX;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&2u16.to_be_bytes()); // posFormat
+    bytes.extend_from_slice(&20u16.to_be_bytes()); // coverage
+    bytes.extend_from_slice(&X_ADVANCE.to_be_bytes()); // valueFormat1
+    bytes.extend_from_slice(&0u16.to_be_bytes()); // valueFormat2
+    bytes.extend_from_slice(&26u16.to_be_bytes()); // classDef1
+    bytes.extend_from_slice(&30u16.to_be_bytes()); // classDef2
+    bytes.extend_from_slice(&1u16.to_be_bytes()); // class1Count
+    bytes.extend_from_slice(&2u16.to_be_bytes()); // class2Count
+    bytes.extend_from_slice(&0i16.to_be_bytes()); // cell (0, 0)
+    bytes.extend_from_slice(&(-30i16).to_be_bytes()); // cell (0, 1)
+    bytes.extend_from_slice(&build_coverage_format1(&[5])); // 20..26
+    bytes.extend_from_slice(&2u16.to_be_bytes()); // classDef1: empty format 2
+    bytes.extend_from_slice(&0u16.to_be_bytes());
+    bytes.extend_from_slice(&2u16.to_be_bytes()); // classDef2 at 30
+    bytes.extend_from_slice(&range_count.to_be_bytes());
+    for g in 0..range_count {
+        bytes.extend_from_slice(&g.to_be_bytes());
+        bytes.extend_from_slice(&g.to_be_bytes());
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+    }
+
+    let table: Vec<Option<u16>> = (0..range_count).map(Some).collect();
+    let map = GidMap::from_table(table);
+    let ctx = RewriterCtx::new(&map, None);
+    // Every kept glyph kerns after glyph 5. The PairSet is large, but
+    // only its start has to lie within 16 bits of the subtable, so
+    // one subtable holds it. The point is that the rewrite finishes.
+    let subs = rewrite_pair_pos_format2(&ctx, &bytes).unwrap_or_default();
+    assert_eq!(subs.len(), 1);
+    assert!(ctx.offsets.check("pair pos").is_ok());
+}

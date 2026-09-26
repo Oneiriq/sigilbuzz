@@ -9,15 +9,15 @@
 //!    (`0x774F4632`, "wOF2") and reserved field.
 //! 2. Walks the table directory, decoding the 5-bit known-tag
 //!    enumeration and the `UIntBase128` length fields.
-//! 3. Brotli-decompresses the payload (`brotli-decompressor`).
+//! 3. Brotli-decompresses the payload (`brotli`), capped at the
+//!    declared table sum.
 //! 4. Splits the decompressed buffer back into per-table slices.
 //! 5. Inverts the WOFF2 `glyf` / `loca` transform when present so the
 //!    SFNT we hand back parses with `sigilbuzz::Face`.
 //! 6. Stitches an SFNT directory + bodies, padded to 4 bytes.
 //!
-//! Forward-direction wrap (which would need Brotli encoding plus the
-//! forward `glyf` transform) is intentionally out of scope for this
-//! release. The brief calls out 0.7.0 as the target.
+//! The forward direction (SFNT to WOFF2) lives in `wrap.rs` and
+//! `wrap_transform.rs`.
 //!
 //! Spec: <https://www.w3.org/TR/WOFF2/>
 
@@ -103,19 +103,6 @@ impl DirEntry {
 ///   release doesn't yet handle (e.g. composite-glyph instructions
 ///   are supported, but `hmtx` transform v1 isn't).
 pub fn unwrap_woff2(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
-    #[cfg(not(feature = "woff2"))]
-    {
-        let _ = woff2_bytes;
-        return Err(WoffError::Woff2Disabled);
-    }
-    #[cfg(feature = "woff2")]
-    {
-        unwrap_woff2_inner(woff2_bytes)
-    }
-}
-
-#[cfg(feature = "woff2")]
-fn unwrap_woff2_inner(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
     let mut r = Reader::new(woff2_bytes);
 
     // --- Header ------------------------------------------------------------
@@ -129,7 +116,8 @@ fn unwrap_woff2_inner(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
     }
     let flavor = r.read_u32("WOFF2 flavor")?;
     let _length = r.read_u32("WOFF2 length")?;
-    let num_tables = r.read_u16("WOFF2 numTables")? as usize;
+    let num_tables_u16 = r.read_u16("WOFF2 numTables")?;
+    let num_tables = usize::from(num_tables_u16);
     let reserved = r.read_u16("WOFF2 reserved")?;
     if reserved != 0 {
         return Err(WoffError::BadMagic {
@@ -151,10 +139,10 @@ fn unwrap_woff2_inner(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
         let flags = r.read_u8("WOFF2 flag byte")?;
         let known = flags & 0x3F;
         let transform_version = (flags >> 6) & 0x03;
-        let tag = if known == 63 {
-            r.read_tag("WOFF2 arbitrary tag")?
-        } else {
-            *KNOWN_TAGS[known as usize]
+        // Index 63 is the only value past the end of the table.
+        let tag = match KNOWN_TAGS.get(usize::from(known)) {
+            Some(tag) => **tag,
+            None => r.read_tag("WOFF2 arbitrary tag")?,
         };
         let orig_length = r.read_uint_base128()?;
         let transform_length = match tag {
@@ -184,8 +172,25 @@ fn unwrap_woff2_inner(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
 
     // --- Brotli payload ---------------------------------------------------
 
+    let payload_offset = r.position();
     let payload = r.read_bytes(total_compressed_size, "WOFF2 brotli payload")?;
-    let total_uncompressed: usize = entries.iter().map(|e| e.payload_len() as usize).sum();
+    let total_uncompressed: u64 = entries.iter().map(|e| u64::from(e.payload_len())).sum();
+    // Reject a declared size that no real font compresses to. The
+    // reference decoder applies the same ratio limit. Without it a
+    // tiny file could make us reserve and fill gigabytes.
+    let plausible_limit = MAX_PLAUSIBLE_COMPRESSION_RATIO.saturating_mul(woff2_bytes.len() as u64);
+    if total_uncompressed > plausible_limit {
+        return Err(WoffError::Malformed {
+            offset: payload_offset,
+            context: "declared table sum implausibly large for the file size",
+        });
+    }
+    let Ok(total_uncompressed) = usize::try_from(total_uncompressed) else {
+        return Err(WoffError::Malformed {
+            offset: payload_offset,
+            context: "declared table sum does not fit in memory",
+        });
+    };
     let decompressed = brotli_decompress(payload, total_uncompressed)?;
     if decompressed.len() < total_uncompressed {
         return Err(WoffError::Malformed {
@@ -200,34 +205,30 @@ fn unwrap_woff2_inner(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
     // need an indirection because the transformed glyf/loca pair is
     // emitted together: loca's bytes are a side product of glyf
     // reconstruction.
-    let mut payload_cursor = 0usize;
     let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(num_tables);
 
     // Locate any transformed glyf+loca pair so we can run them
     // together; loca is then overwritten when we get to its
     // directory slot.
-    let glyf_idx = entries.iter().position(|e| e.tag == TAG_GLYF);
+    let glyf_transformed = entries
+        .iter()
+        .find(|e| e.tag == TAG_GLYF)
+        .is_some_and(DirEntry::transformed);
     let loca_idx = entries.iter().position(|e| e.tag == TAG_LOCA);
-    let glyf_transformed = glyf_idx.is_some_and(|i| entries[i].transformed());
-
-    // Pre-compute payload offsets so we can index into the slice
-    // independent of iteration order.
-    let mut payload_offsets = Vec::with_capacity(num_tables);
-    {
-        let mut c = 0usize;
-        for e in &entries {
-            payload_offsets.push(c);
-            c += e.payload_len() as usize;
-        }
-    }
 
     // First pass: copy untransformed bodies verbatim and reconstruct
-    // glyf/loca when they're transformed.
+    // glyf/loca when they're transformed. Table payloads sit back to
+    // back in directory order.
     let mut reconstructed_loca: Option<Vec<u8>> = None;
-    for (i, e) in entries.iter().enumerate() {
-        let start = payload_offsets[i];
-        let end = start + e.payload_len() as usize;
-        let body = &decompressed[start..end];
+    let mut payload_cursor = 0usize;
+    for e in &entries {
+        let start = payload_cursor;
+        let end = start.saturating_add(e.payload_len() as usize);
+        payload_cursor = end;
+        let body = decompressed.get(start..end).ok_or(WoffError::Malformed {
+            offset: payload_offset,
+            context: "table extends past the decompressed payload",
+        })?;
 
         if e.tag == TAG_GLYF && e.transformed() {
             let (new_glyf, new_loca) = transform::reconstruct_glyf_and_loca(body)?;
@@ -250,64 +251,118 @@ fn unwrap_woff2_inner(woff2_bytes: &[u8]) -> Result<Vec<u8>> {
             }
             bodies.push(body.to_vec());
         }
-        payload_cursor = end;
     }
-    let _ = payload_cursor;
 
     // Patch loca with the reconstructed table.
     if let (Some(li), Some(loca)) = (loca_idx, reconstructed_loca) {
         // Spec: when glyf is transformed, loca's `transformLength`
-        // must be zero. We don't enforce that here: bodies[li] is
+        // must be zero. We don't enforce that here: the loca slot is
         // empty regardless because we initialized it as such.
-        bodies[li] = loca;
+        if let Some(slot) = bodies.get_mut(li) {
+            *slot = loca;
+        }
     }
 
     // --- Stitch SFNT ------------------------------------------------------
 
-    let (search_range, entry_selector, range_shift) = sfnt_search_params(num_tables as u16);
+    let (search_range, entry_selector, range_shift) = crate::sfnt::search_params(num_tables_u16);
     let header_size = 12 + 16 * num_tables;
     let mut sfnt = Vec::new();
     sfnt.extend_from_slice(&flavor.to_be_bytes());
-    sfnt.extend_from_slice(&(num_tables as u16).to_be_bytes());
+    sfnt.extend_from_slice(&num_tables_u16.to_be_bytes());
     sfnt.extend_from_slice(&search_range.to_be_bytes());
     sfnt.extend_from_slice(&entry_selector.to_be_bytes());
     sfnt.extend_from_slice(&range_shift.to_be_bytes());
 
-    let dir_start = sfnt.len();
-    sfnt.resize(dir_start + 16 * num_tables, 0);
+    // Directory. Each body lands at the next 4-byte boundary after the
+    // previous one, so every offset is known up front. The SFNT
+    // directory stores u32 offsets and lengths, so the rebuilt font
+    // must fit in u32.
+    let too_large = WoffError::Malformed {
+        offset: 0,
+        context: "rebuilt SFNT is larger than 4 GiB",
+    };
+    let mut body_offset = header_size;
+    for (e, body) in entries.iter().zip(&bodies) {
+        let (Ok(offset), Ok(len)) = (u32::try_from(body_offset), u32::try_from(body.len())) else {
+            return Err(too_large);
+        };
+        sfnt.extend_from_slice(&e.tag);
+        sfnt.extend_from_slice(&checksum_table(body).to_be_bytes());
+        sfnt.extend_from_slice(&offset.to_be_bytes());
+        sfnt.extend_from_slice(&len.to_be_bytes());
+        body_offset = body_offset.saturating_add(body.len().saturating_add(3) & !3);
+    }
+    if u32::try_from(body_offset).is_err() {
+        return Err(too_large);
+    }
     debug_assert_eq!(sfnt.len(), header_size);
 
-    for (i, (e, body)) in entries.iter().zip(bodies.iter()).enumerate() {
-        let body_offset = sfnt.len() as u32;
-        let body_len = body.len() as u32;
+    sfnt.reserve(body_offset - header_size);
+    for body in &bodies {
         sfnt.extend_from_slice(body);
         while sfnt.len() % 4 != 0 {
             sfnt.push(0);
         }
-
-        let checksum = checksum_table(body);
-
-        let rec = dir_start + i * 16;
-        sfnt[rec..rec + 4].copy_from_slice(&e.tag);
-        sfnt[rec + 4..rec + 8].copy_from_slice(&checksum.to_be_bytes());
-        sfnt[rec + 8..rec + 12].copy_from_slice(&body_offset.to_be_bytes());
-        sfnt[rec + 12..rec + 16].copy_from_slice(&body_len.to_be_bytes());
     }
 
     Ok(sfnt)
 }
 
-#[cfg(feature = "woff2")]
+/// Largest accepted ratio between the declared table sum and the WOFF2
+/// file size. Real fonts stay far below it. Google's reference decoder
+/// rejects files above the same ratio.
+const MAX_PLAUSIBLE_COMPRESSION_RATIO: u64 = 100;
+
+/// Brotli-decompresses `input`, refusing to produce more than
+/// `expected_len` bytes.
+///
+/// Brotli can expand a few bytes into gigabytes, so decoding stops as
+/// soon as the output would pass the declared table sum.
 fn brotli_decompress(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
     use brotli::BrotliDecompress;
-    use std::io::Cursor;
+    use std::io::{self, Cursor, Write};
 
-    let mut out: Vec<u8> = Vec::with_capacity(expected_len);
+    /// A `Vec` sink that fails instead of growing past `limit`.
+    struct CappedSink {
+        out: Vec<u8>,
+        limit: usize,
+        overflowed: bool,
+    }
+
+    impl Write for CappedSink {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if buf.len() > self.limit.saturating_sub(self.out.len()) {
+                self.overflowed = true;
+                return Err(io::Error::other("brotli output passes the declared size"));
+            }
+            self.out.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut sink = CappedSink {
+        out: Vec::with_capacity(expected_len),
+        limit: expected_len,
+        overflowed: false,
+    };
     let mut reader = Cursor::new(input);
-    BrotliDecompress(&mut reader, &mut out).map_err(|_| WoffError::BrotliDecode {
-        context: "BrotliDecompress returned an error",
-    })?;
-    Ok(out)
+    if BrotliDecompress(&mut reader, &mut sink).is_err() {
+        if sink.overflowed {
+            return Err(WoffError::Malformed {
+                offset: 0,
+                context: "decompressed payload larger than declared table sum",
+            });
+        }
+        return Err(WoffError::BrotliDecode {
+            context: "BrotliDecompress returned an error",
+        });
+    }
+    Ok(sink.out)
 }
 
 /// SFNT table checksum: sum of big-endian u32s, with the table
@@ -327,21 +382,6 @@ fn checksum_table(body: &[u8]) -> u32 {
     sum
 }
 
-fn sfnt_search_params(num_tables: u16) -> (u16, u16, u16) {
-    if num_tables == 0 {
-        return (0, 0, 0);
-    }
-    let mut entry_selector: u16 = 0;
-    let mut pow2: u16 = 1;
-    while pow2 * 2 <= num_tables {
-        pow2 *= 2;
-        entry_selector += 1;
-    }
-    let search_range = pow2 * 16;
-    let range_shift = num_tables * 16 - search_range;
-    (search_range, entry_selector, range_shift)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,7 +394,63 @@ mod tests {
         assert_eq!(KNOWN_TAGS[11], b"loca");
     }
 
-    #[cfg(feature = "woff2")]
+    /// Builds a WOFF2 file with one untransformed `name` table that
+    /// declares `orig_length` bytes and carries `payload` as its Brotli
+    /// stream.
+    fn single_table_woff2(orig_length: u8, payload: &[u8]) -> Vec<u8> {
+        let mut woff2 = Vec::new();
+        woff2.extend_from_slice(&WOFF2_SIGNATURE.to_be_bytes());
+        woff2.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // flavor
+        woff2.extend_from_slice(&0u32.to_be_bytes()); // length
+        woff2.extend_from_slice(&1u16.to_be_bytes()); // numTables
+        woff2.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        woff2.extend_from_slice(&0u32.to_be_bytes()); // totalSfntSize
+        woff2.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
+        woff2.extend_from_slice(&[0u8; 24]); // header tail
+        woff2.push(5); // known tag 5 = `name`, transformVersion 0
+        woff2.push(orig_length); // UIntBase128, single byte
+        woff2.extend_from_slice(payload);
+        woff2
+    }
+
+    fn brotli(raw: &[u8]) -> Vec<u8> {
+        let params = brotli::enc::BrotliEncoderParams {
+            quality: 1,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        brotli::BrotliCompress(&mut std::io::Cursor::new(raw), &mut out, &params)
+            .expect("brotli compresses");
+        out
+    }
+
+    #[test]
+    fn unwraps_exact_payload() {
+        let raw: Vec<u8> = (0u8..16).collect();
+        let sfnt = unwrap_woff2(&single_table_woff2(16, &brotli(&raw))).expect("unwraps");
+        assert_eq!(&sfnt[12 + 16..], raw.as_slice());
+    }
+
+    #[test]
+    fn rejects_payload_larger_than_declared() {
+        // The table declares 16 bytes but the Brotli stream expands to
+        // 8 MiB. The whole stream used to be decoded into memory and
+        // the extra bytes silently dropped. Decoding must now stop at
+        // the declared size.
+        let bomb = brotli(&vec![0u8; 8 << 20]);
+        let result = unwrap_woff2(&single_table_woff2(16, &bomb));
+        assert!(
+            matches!(result, Err(WoffError::Malformed { context, .. }) if context.contains("larger")),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_payload_smaller_than_declared() {
+        let result = unwrap_woff2(&single_table_woff2(16, &brotli(&[1, 2, 3])));
+        assert!(matches!(result, Err(WoffError::Malformed { .. })));
+    }
+
     #[test]
     fn rejects_non_zero_transform_version_on_non_glyf_loca() {
         // Build a minimal 1-table WOFF2 whose single directory entry

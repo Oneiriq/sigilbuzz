@@ -71,11 +71,10 @@ pub struct Face<'a> {
 
 /// Rounds a float to the nearest `i16`, saturating at the type bounds.
 /// A `no_std`-friendly replacement for `f32::round() as i16`, which
-/// would otherwise drag in `libm`.
-#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+/// would otherwise drag in `libm`. NaN maps to `i16::MIN`.
 fn round_f32_to_i16(v: f32) -> i16 {
-    // Add-half trick: positive -> +0.5 floor, negative -> -0.5 ceil.
-    // Clamp to i16 range before the `as` cast to dodge UB on overflow.
+    // Add-half trick: positive -> +0.5 then truncate, negative ->
+    // -0.5 then truncate. The clamp makes the saturation explicit.
     let adj = if v >= 0.0 { v + 0.5 } else { v - 0.5 };
     let clamped = adj.max(i16::MIN as f32).min(i16::MAX as f32);
     clamped as i16
@@ -146,7 +145,9 @@ impl<'a> Face<'a> {
         // from num_tables and not trusted by any sigilbuzz consumer.
         r.skip(6)?;
 
-        let mut records = Vec::with_capacity(num_tables);
+        // Each record takes 16 bytes. Size the allocation by the
+        // records the data can hold, not by the claimed count.
+        let mut records = Vec::with_capacity(num_tables.min(r.remaining() / 16));
         for _ in 0..num_tables {
             let tag = r.read_tag()?;
             let _checksum = r.read_u32()?;
@@ -228,10 +229,15 @@ impl<'a> Face<'a> {
     pub fn table_bytes(&self, tag: [u8; 4]) -> Result<&'a [u8]> {
         let record = self.record(tag).ok_or(Error::MissingTable { tag })?;
         let start = record.offset as usize;
-        let end = start + record.length as usize;
         // `parse_bytes` has already validated that this range is
-        // in-bounds, so the slice is safe.
-        Ok(&self.data[start..end])
+        // in-bounds. The checked form keeps the lookup total anyway.
+        start
+            .checked_add(record.length as usize)
+            .and_then(|end| self.data.get(start..end))
+            .ok_or(Error::Malformed {
+                offset: start,
+                context: "table extends past end of font",
+            })
     }
 
     /// Parses the `head` table.
@@ -269,10 +275,8 @@ impl<'a> Face<'a> {
 
     /// Parses the `name` table if the font carries one. Used by font
     /// browsers and rendering frontends that surface the family /
-    /// subfamily / full name to end users; before this accessor
-    /// landed the only way out of the crate was a placeholder string
-    /// in the consumer (oniq #210). Returns `Ok(None)` for the rare
-    /// fonts that omit `name` entirely.
+    /// subfamily / full name to end users. Returns `Ok(None)` for the
+    /// rare fonts that omit `name` entirely.
     pub fn name(&self) -> Result<Option<Name<'a>>> {
         match self.table_bytes(tag::NAME) {
             Ok(bytes) => Ok(Some(Name::parse(bytes)?)),

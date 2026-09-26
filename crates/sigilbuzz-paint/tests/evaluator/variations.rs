@@ -552,6 +552,26 @@ fn delta_set_index_map_redirects_var_index_base_through_colr() {
 }
 
 #[test]
+fn gdef_variation_store_does_not_feed_colr_paints() {
+    // COLRv1 variation indices refer to the store in the COLR header.
+    // HarfBuzz never reads GDEF's store for COLR, so a COLR without a
+    // store of its own stays static even when GDEF carries one.
+    let colr = build_v1_multi_colr(&build_ivs_test_paints(), &[]);
+    let cpal = build_cpal_v0(&[(255, 255, 255, 255), (255, 0, 0, 255), (0, 255, 0, 255)]);
+    let gdef = build_gdef_v13(&build_ivs_test_store(), &[]);
+    let bytes = build_face_bytes_with_gdef(&colr, &cpal, &gdef);
+    let face = Face::parse_bytes(&bytes, 0).expect("face parses");
+
+    match evaluate_at_coords(&face, 1, &[1.0]).as_slice() {
+        [DrawCmd::FillGlyph {
+            paint: PaintSource::Solid { color: c, .. },
+            ..
+        }] => assert!((c.a - 1.0).abs() < 1e-4, "alpha was {}", c.a),
+        other => panic!("solid: unexpected {other:?}"),
+    }
+}
+
+#[test]
 fn gdef_variation_data_is_never_read_for_colr() {
     // COLR without a variation store of its own, next to a GDEF that
     // carries the IVS and, right after its header, what an old

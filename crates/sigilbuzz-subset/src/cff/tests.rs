@@ -1,9 +1,11 @@
-//! Unit tests for the CFF charstring analysis layer.
+//! Unit tests for the CFF charstring analysis layer and the INDEX and
+//! charset readers.
 
 use super::charstring::{
     compute_cross_fd_globals, decode_operand, OP_CALLGSUBR, OP_CALLSUBR, OP_ENDCHAR, OP_ESCAPE,
     OP_HINTMASK, OP_HSTEM, OP_RETURN, OP_RMOVETO, OP_SHORTINT,
 };
+use super::reader::read_index;
 use super::*;
 
 mod cid;
@@ -285,4 +287,50 @@ fn scan_unknown_op_errors() {
     let cs = [9u8];
     let r = scan_subr_calls(&cs, 0, 0);
     assert!(r.is_err());
+}
+
+/// CFF1 INDEX with two entries whose middle offset (200) points
+/// past the final offset (2). Only 1 data byte exists.
+const INDEX_WITH_OFFSET_PAST_END: &[u8] = &[0, 2, 1, 1, 200, 2, 0xAA];
+
+#[test]
+fn read_index_rejects_offset_past_final_offset() {
+    let r = read_index(INDEX_WITH_OFFSET_PAST_END, 0);
+    assert!(matches!(r, Err(SubsetError::Unsupported(_))));
+}
+
+#[test]
+fn read_index_cff2_rejects_offset_past_final_offset() {
+    // Same shape with the CFF2 u32 count.
+    let index: &[u8] = &[0, 0, 0, 2, 1, 1, 200, 2, 0xAA];
+    let r = read_index_cff2(index, 0);
+    assert!(matches!(r, Err(SubsetError::Unsupported(_))));
+}
+
+#[test]
+fn charset_range_past_last_sid_wraps_instead_of_overflowing() {
+    // Charset at offset 3: format 1, one range starting at SID
+    // 0xFFFF with nLeft = 1, covering gids 1 and 2.
+    let data: &[u8] = &[0, 0, 0, 1, 0xFF, 0xFF, 1];
+    let sids = extract_kept_charset_sids(data, 3, 3, &[0, 1, 2]).expect("charset");
+    assert_eq!(sids, alloc::vec![0xFFFFu16, 0]);
+}
+
+#[test]
+fn cross_fd_detection_handles_long_global_chain() {
+    // Global i calls global i + 1 and the last one calls a local.
+    // Every global is cross-FD. Propagating one link per pass over
+    // all globals would be quadratic in the chain length.
+    const N: usize = 20_000;
+    let bias = subr_bias(N);
+    let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(N);
+    for i in 0..N - 1 {
+        let mut body = encode_int_operand(i as i32 + 1 - bias);
+        body.push(OP_CALLGSUBR);
+        bodies.push(body);
+    }
+    bodies.push(alloc::vec![139, OP_CALLSUBR]);
+    let refs: Vec<&[u8]> = bodies.iter().map(Vec::as_slice).collect();
+    let is_cross = compute_cross_fd_globals(&refs, 1).expect("cross-FD scan");
+    assert!(is_cross.iter().all(|&c| c));
 }

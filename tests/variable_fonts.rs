@@ -120,11 +120,11 @@ fn advance_deltas_match_rustybuzz_across_wght_axis() {
 #[test]
 fn default_instance_matches_rustybuzz_without_coords() {
     // When Font::with_coords is not called, sigilbuzz must produce
-    // the same advances as rustybuzz with no variations set. Corpus
-    // avoids kerning pairs rubik renders differently in
-    // the two engines (pre-existing shaper divergence that the
-    // parity test in rustybuzz_parity.rs is the right home for).
-    let corpus = ["A", "Hello", "o"];
+    // the same advances as rustybuzz with no variations set. Rubik
+    // keeps its class kerning under the `latn` and `cyrl` scripts,
+    // not DFLT, so the kerned pairs check that Latin and Cyrillic
+    // text use those script tables, as in HarfBuzz.
+    let corpus = ["A", "Hello", "o", "AV", "To", "Yo", "\u{0413}\u{043E}"];
     for text in &corpus {
         let sig = sigilbuzz_advances(RUBIK, &[], text);
         let rb = rustybuzz_advances(RUBIK, 0.0, text);

@@ -25,10 +25,9 @@
 //! `program` is the unmodified `font_bytes` slice the caller hands
 //! in. Real-world PDFs typically subset the font program down to
 //! just the glyphs that appear in the document. That work lives in
-//! the `sigilbuzz-subset` crate (parallel development). Once that
-//! lands, a 0.6.0 wiring step will let `emit_otf_embedded_font` take
-//! a pre-subset byte slice the same way it takes the full one today;
-//! the public surface here doesn't need to change.
+//! the `sigilbuzz-subset` crate. A caller that wants a subset program
+//! subsets first, parses the subset bytes into a `Face`, and passes
+//! both here.
 //!
 //! # Widths
 //!
@@ -77,10 +76,8 @@ pub struct OtfEmbeddedFont {
     /// `/StemV`) the consumer is expected to fill from the face's
     /// `OS/2` and `head` tables.
     pub descriptor_body: Vec<u8>,
-    /// The font program bytes: for now an unmodified copy of the
-    /// `font_bytes` slice the caller passed in. A future
-    /// `sigilbuzz-subset`-driven path will substitute a subset
-    /// program here without changing the public type.
+    /// The font program bytes: an unmodified copy of the `font_bytes`
+    /// slice the caller passed in.
     pub program: Vec<u8>,
     /// 2-bytes-per-CID Identity-H mapping. Length is always
     /// `2 * 256 = 512`. Each pair is a big-endian gid; the entry at
@@ -118,16 +115,11 @@ pub fn emit_otf_embedded_font(
 
     // CIDToGIDMap: 256 CIDs x 2 bytes BE. CID 0 is reserved for
     // /.notdef per spec; we fill it with gid 0 (which faces always
-    // expose as the .notdef glyph). The rest map sequentially to
-    // the input gids. Extra slots stay at gid 0 (notdef).
+    // expose as the .notdef glyph). CIDs 1 to 255 map sequentially to
+    // the first 255 input gids. Extra slots stay at gid 0 (notdef).
     let mut cid_to_gid_map = vec![0u8; 512];
-    for (idx, &gid) in (1u16..).zip(gids.iter()) {
-        if idx >= 256 {
-            break;
-        }
-        let off = (idx as usize) * 2;
-        cid_to_gid_map[off] = (gid >> 8) as u8;
-        cid_to_gid_map[off + 1] = (gid & 0xff) as u8;
+    for (slot, &gid) in cid_to_gid_map.chunks_exact_mut(2).skip(1).zip(gids) {
+        slot.copy_from_slice(&gid.to_be_bytes());
     }
 
     // Widths: convert each gid's design-unit advance to PDF 1000-unit
@@ -148,7 +140,7 @@ pub fn emit_otf_embedded_font(
     // distinction picks /FontFile3 vs /FontFile2 in the descriptor.
     // Every TrueType file starts with the sfnt scaler 0x00010000 or
     // 'true'; OTF starts with 'OTTO'.
-    let is_cff_otf = font_bytes.len() >= 4 && &font_bytes[..4] == b"OTTO";
+    let is_cff_otf = font_bytes.starts_with(b"OTTO");
 
     // Top-level Type 0 font dict. The consumer is expected to
     // substitute "<descriptor obj>" and "<cidmap obj>" with concrete
@@ -226,8 +218,10 @@ pub fn emit_otf_embedded_font(
     }
 }
 
-/// Format a width with a single decimal at most to keep the PDF
-/// `/W` array compact while preserving sub-unit precision.
+/// Format a width with the shortest representation that round-trips,
+/// which keeps the PDF `/W` array compact while preserving sub-unit
+/// precision. Widths are always finite: the advance is a `u16` and
+/// the divisor is at least 1.
 fn fmt_width(w: f32) -> alloc::string::String {
     let s = format!("{w}");
     // Strip ".0" the same way stream.rs does so the output matches

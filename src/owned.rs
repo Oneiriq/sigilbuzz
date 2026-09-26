@@ -59,9 +59,10 @@ impl OwnedFace {
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`Face::parse`]: `Malformed` for a
-    /// bad header or out-of-bounds table record, `Unsupported` for
-    /// TrueType Collections.
+    /// Returns the same errors as [`Face::parse`]. `Malformed` covers a
+    /// bad header, an out-of-bounds table record, or a collection
+    /// `index` past `numFonts`. `Unsupported` covers a non-zero `index`
+    /// on a plain TTF/OTF file.
     pub fn parse(data: impl Into<Arc<[u8]>>, index: u32) -> Result<Self> {
         let data: Arc<[u8]> = data.into();
         let (sfnt_version, records) = {

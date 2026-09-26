@@ -4,7 +4,10 @@
 
 use alloc::vec::Vec;
 
-use super::{parse_sequence_lookup_records, SequenceLookupRecord};
+use super::{
+    parse_sequence_lookup_records, parse_shared_sets, read_offset_array, read_rule_offsets,
+    read_u16_array, rule_bytes, RuleBudget, SequenceLookupRecord,
+};
 use crate::error::{Error, Result};
 use crate::tables::layout::skip_iter::MatchFilter;
 use crate::tables::layout::{ClassDef, Coverage};
@@ -20,13 +23,16 @@ use crate::tables::parse::Reader;
 #[derive(Debug, Clone)]
 pub struct ChainContext1<'a> {
     pub(super) coverage: Coverage<'a>,
-    rule_sets: Vec<Option<ChainRuleSet1>>,
+    /// Index into `sets` for each coverage index, `None` for a NULL
+    /// rule set.
+    set_slots: Vec<Option<usize>>,
+    sets: Vec<ChainRuleSet1>,
 }
 
 /// All chained rules keyed off a single covered first input glyph.
 #[derive(Debug, Clone)]
 pub struct ChainRuleSet1 {
-    /// Rules tried in declaration order; first match wins.
+    /// Rules tried in declaration order. The first match wins.
     pub rules: Vec<ChainRule1>,
 }
 
@@ -57,32 +63,25 @@ impl<'a> ChainContext1<'a> {
             });
         }
         let coverage_off = r.read_u16()? as usize;
-        let set_count = r.read_u16()? as usize;
-        let mut set_offs = Vec::with_capacity(set_count);
-        for _ in 0..set_count {
-            set_offs.push(r.read_u16()? as usize);
-        }
+        let set_offs = read_offset_array(&mut r)?;
 
         let coverage = Coverage::parse(data.get(coverage_off..).ok_or(Error::Malformed {
             offset: coverage_off,
             context: "chain context format 1 coverage offset past end",
         })?)?;
 
-        let mut rule_sets = Vec::with_capacity(set_count);
-        for off in set_offs {
-            if off == 0 {
-                rule_sets.push(None);
-                continue;
-            }
-            let set_bytes = data.get(off..).ok_or(Error::Malformed {
-                offset: off,
-                context: "chain context format 1 ruleSet offset past end",
-            })?;
-            rule_sets.push(Some(parse_chain_rule_set1(data, off, set_bytes)?));
-        }
+        let mut budget = RuleBudget::for_table(data);
+        let (set_slots, sets) = parse_shared_sets(
+            data,
+            &set_offs,
+            "chain context format 1 ruleSet offset past end",
+            &mut budget,
+            parse_chain_rule_set1,
+        )?;
         Ok(Self {
             coverage,
-            rule_sets,
+            set_slots,
+            sets,
         })
     }
 
@@ -95,53 +94,76 @@ impl<'a> ChainContext1<'a> {
     /// Ruleset at a given coverage index.
     #[must_use]
     pub fn rule_set(&self, coverage_index: u16) -> Option<&ChainRuleSet1> {
-        self.rule_sets.get(coverage_index as usize)?.as_ref()
+        let set = (*self.set_slots.get(coverage_index as usize)?)?;
+        self.sets.get(set)
     }
 }
 
-fn parse_chain_rule_set1(full: &[u8], set_off: usize, set_bytes: &[u8]) -> Result<ChainRuleSet1> {
-    let mut r = Reader::new(set_bytes);
-    let rule_count = r.read_u16()? as usize;
-    let mut offs = Vec::with_capacity(rule_count);
-    for _ in 0..rule_count {
-        offs.push(r.read_u16()? as usize);
-    }
-    let mut rules = Vec::with_capacity(rule_count);
-    for off in offs {
-        let abs = set_off + off;
-        let bytes = full.get(abs..).ok_or(Error::Malformed {
-            offset: abs,
-            context: "chain context format 1 rule offset past end",
-        })?;
-        rules.push(parse_chain_rule1(bytes)?);
+fn parse_chain_rule_set1(
+    full: &[u8],
+    set_off: usize,
+    set_bytes: &[u8],
+    budget: &mut RuleBudget,
+) -> Result<ChainRuleSet1> {
+    let rule_offs = read_rule_offsets(set_off, set_bytes, budget)?;
+    let mut rules = Vec::with_capacity(rule_offs.len());
+    for off in rule_offs {
+        let (abs, bytes) = rule_bytes(
+            full,
+            set_off,
+            off,
+            "chain context format 1 rule offset past end",
+        )?;
+        rules.push(parse_chain_rule1(bytes, abs, budget)?);
     }
     Ok(ChainRuleSet1 { rules })
 }
 
-fn parse_chain_rule1(data: &[u8]) -> Result<ChainRule1> {
+/// The four arrays every chained format 1 or format 2 rule carries.
+struct ChainRuleArrays {
+    backtrack: Vec<u16>,
+    input_tail: Vec<u16>,
+    lookahead: Vec<u16>,
+    lookups: Vec<SequenceLookupRecord>,
+}
+
+/// Reads backtrack, input tail, lookahead, and nested lookups for one
+/// chained rule. Each array is charged against `budget` before it is
+/// allocated.
+fn parse_chain_rule_arrays(
+    data: &[u8],
+    abs: usize,
+    budget: &mut RuleBudget,
+) -> Result<ChainRuleArrays> {
     let mut r = Reader::new(data);
     let bt_count = r.read_u16()? as usize;
-    let mut backtrack = Vec::with_capacity(bt_count);
-    for _ in 0..bt_count {
-        backtrack.push(r.read_u16()?);
-    }
+    budget.charge(abs, bt_count)?;
+    let backtrack = read_u16_array(&mut r, bt_count)?;
     let input_count = r.read_u16()? as usize;
-    let mut input_tail = Vec::with_capacity(input_count.saturating_sub(1));
-    for _ in 0..input_count.saturating_sub(1) {
-        input_tail.push(r.read_u16()?);
-    }
+    let tail_len = input_count.saturating_sub(1);
+    budget.charge(abs, tail_len)?;
+    let input_tail = read_u16_array(&mut r, tail_len)?;
     let la_count = r.read_u16()? as usize;
-    let mut lookahead = Vec::with_capacity(la_count);
-    for _ in 0..la_count {
-        lookahead.push(r.read_u16()?);
-    }
+    budget.charge(abs, la_count)?;
+    let lookahead = read_u16_array(&mut r, la_count)?;
     let lookup_count = r.read_u16()?;
+    budget.charge(abs, 2 * usize::from(lookup_count))?;
     let lookups = parse_sequence_lookup_records(&mut r, lookup_count)?;
-    Ok(ChainRule1 {
+    Ok(ChainRuleArrays {
         backtrack,
         input_tail,
         lookahead,
         lookups,
+    })
+}
+
+fn parse_chain_rule1(data: &[u8], abs: usize, budget: &mut RuleBudget) -> Result<ChainRule1> {
+    let arrays = parse_chain_rule_arrays(data, abs, budget)?;
+    Ok(ChainRule1 {
+        backtrack: arrays.backtrack,
+        input_tail: arrays.input_tail,
+        lookahead: arrays.lookahead,
+        lookups: arrays.lookups,
     })
 }
 
@@ -158,13 +180,16 @@ pub struct ChainContext2<'a> {
     pub(super) backtrack_class: ClassDef<'a>,
     pub(super) input_class: ClassDef<'a>,
     pub(super) lookahead_class: ClassDef<'a>,
-    class_sets: Vec<Option<ChainClassSet2>>,
+    /// Index into `sets` for each input class, `None` for a NULL
+    /// class set.
+    set_slots: Vec<Option<usize>>,
+    sets: Vec<ChainClassSet2>,
 }
 
 /// All chained class-based rules keyed off a single input class.
 #[derive(Debug, Clone)]
 pub struct ChainClassSet2 {
-    /// Rules tried in declaration order; first match wins.
+    /// Rules tried in declaration order. The first match wins.
     pub rules: Vec<ChainClassRule2>,
 }
 
@@ -196,11 +221,7 @@ impl<'a> ChainContext2<'a> {
         let bt_cd_off = r.read_u16()? as usize;
         let in_cd_off = r.read_u16()? as usize;
         let la_cd_off = r.read_u16()? as usize;
-        let set_count = r.read_u16()? as usize;
-        let mut set_offs = Vec::with_capacity(set_count);
-        for _ in 0..set_count {
-            set_offs.push(r.read_u16()? as usize);
-        }
+        let set_offs = read_offset_array(&mut r)?;
 
         let coverage = Coverage::parse(data.get(coverage_off..).ok_or(Error::Malformed {
             offset: coverage_off,
@@ -222,24 +243,21 @@ impl<'a> ChainContext2<'a> {
             "chain context format 2 lookaheadClassDef offset past end",
         )?;
 
-        let mut class_sets = Vec::with_capacity(set_count);
-        for off in set_offs {
-            if off == 0 {
-                class_sets.push(None);
-                continue;
-            }
-            let set_bytes = data.get(off..).ok_or(Error::Malformed {
-                offset: off,
-                context: "chain context format 2 classSet offset past end",
-            })?;
-            class_sets.push(Some(parse_chain_class_set2(data, off, set_bytes)?));
-        }
+        let mut budget = RuleBudget::for_table(data);
+        let (set_slots, sets) = parse_shared_sets(
+            data,
+            &set_offs,
+            "chain context format 2 classSet offset past end",
+            &mut budget,
+            parse_chain_class_set2,
+        )?;
         Ok(Self {
             coverage,
             backtrack_class,
             input_class,
             lookahead_class,
-            class_sets,
+            set_slots,
+            sets,
         })
     }
 
@@ -270,53 +288,42 @@ impl<'a> ChainContext2<'a> {
     /// ClassSet at a given class index.
     #[must_use]
     pub fn class_set(&self, class_index: u16) -> Option<&ChainClassSet2> {
-        self.class_sets.get(class_index as usize)?.as_ref()
+        let set = (*self.set_slots.get(class_index as usize)?)?;
+        self.sets.get(set)
     }
 }
 
-fn parse_chain_class_set2(full: &[u8], set_off: usize, set_bytes: &[u8]) -> Result<ChainClassSet2> {
-    let mut r = Reader::new(set_bytes);
-    let rule_count = r.read_u16()? as usize;
-    let mut offs = Vec::with_capacity(rule_count);
-    for _ in 0..rule_count {
-        offs.push(r.read_u16()? as usize);
-    }
-    let mut rules = Vec::with_capacity(rule_count);
-    for off in offs {
-        let abs = set_off + off;
-        let bytes = full.get(abs..).ok_or(Error::Malformed {
-            offset: abs,
-            context: "chain context format 2 rule offset past end",
-        })?;
-        rules.push(parse_chain_class_rule2(bytes)?);
+fn parse_chain_class_set2(
+    full: &[u8],
+    set_off: usize,
+    set_bytes: &[u8],
+    budget: &mut RuleBudget,
+) -> Result<ChainClassSet2> {
+    let rule_offs = read_rule_offsets(set_off, set_bytes, budget)?;
+    let mut rules = Vec::with_capacity(rule_offs.len());
+    for off in rule_offs {
+        let (abs, bytes) = rule_bytes(
+            full,
+            set_off,
+            off,
+            "chain context format 2 rule offset past end",
+        )?;
+        rules.push(parse_chain_class_rule2(bytes, abs, budget)?);
     }
     Ok(ChainClassSet2 { rules })
 }
 
-fn parse_chain_class_rule2(data: &[u8]) -> Result<ChainClassRule2> {
-    let mut r = Reader::new(data);
-    let bt_count = r.read_u16()? as usize;
-    let mut backtrack = Vec::with_capacity(bt_count);
-    for _ in 0..bt_count {
-        backtrack.push(r.read_u16()?);
-    }
-    let input_count = r.read_u16()? as usize;
-    let mut input = Vec::with_capacity(input_count.saturating_sub(1));
-    for _ in 0..input_count.saturating_sub(1) {
-        input.push(r.read_u16()?);
-    }
-    let la_count = r.read_u16()? as usize;
-    let mut lookahead = Vec::with_capacity(la_count);
-    for _ in 0..la_count {
-        lookahead.push(r.read_u16()?);
-    }
-    let lookup_count = r.read_u16()?;
-    let lookups = parse_sequence_lookup_records(&mut r, lookup_count)?;
+fn parse_chain_class_rule2(
+    data: &[u8],
+    abs: usize,
+    budget: &mut RuleBudget,
+) -> Result<ChainClassRule2> {
+    let arrays = parse_chain_rule_arrays(data, abs, budget)?;
     Ok(ChainClassRule2 {
-        backtrack,
-        input_classes_tail: input,
-        lookahead,
-        lookups,
+        backtrack: arrays.backtrack,
+        input_classes_tail: arrays.input_tail,
+        lookahead: arrays.lookahead,
+        lookups: arrays.lookups,
     })
 }
 
@@ -433,7 +440,7 @@ impl<'a> ChainContext3<'a> {
 
 fn parse_coverage_array<'a>(data: &'a [u8], r: &mut Reader<'_>) -> Result<Vec<Coverage<'a>>> {
     let count = r.read_u16()? as usize;
-    let mut out = Vec::with_capacity(count);
+    let mut out = Vec::with_capacity(count.min(r.remaining() / 2));
     for _ in 0..count {
         let off = r.read_u16()? as usize;
         let bytes = data.get(off..).ok_or(Error::Malformed {

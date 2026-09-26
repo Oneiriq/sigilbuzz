@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 
 use crate::device::{copy_anchor, Dedup};
-use crate::layout::{parse_coverage_glyphs, RewriterCtx, RewrittenSubtable};
+use crate::layout::{RewriterCtx, RewrittenSubtable};
 
 // ---------------------------------------------------------------------------
 // Type 3: Cursive Attachment
@@ -40,9 +40,9 @@ pub(super) fn rewrite_cursive(ctx: &RewriterCtx, sub: &[u8]) -> Option<Rewritten
         return None;
     }
     let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
-    let pair_count = covered.len().min(count);
     let map = ctx.gid_map;
+    let covered = map.coverage_glyphs(cov_bytes)?;
+    let pair_count = covered.len().min(count);
 
     // Survivor: (new_gid, entry_anchor_bytes, exit_anchor_bytes). An
     // empty Vec stands in for "null offset (0)".

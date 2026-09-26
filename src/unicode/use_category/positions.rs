@@ -8,13 +8,10 @@ use super::UsePosition;
 /// Unknown codepoints return [`UsePosition::NotApplicable`].
 ///
 /// The arms are grouped by script rather than by category so the
-/// table reads top-to-bottom against the Unicode block layout;
-/// clippy's `match_same_arms` lint flags this as mergeable but
-/// merging across script boundaries destroys the script-locality
-/// that makes the table maintainable.
+/// table reads top-to-bottom against the Unicode block layout.
+/// Merging same-valued arms across script boundaries would destroy
+/// the script locality that makes the table maintainable.
 #[must_use]
-#[allow(clippy::match_same_arms)]
-#[allow(clippy::too_many_lines)]
 pub const fn use_position(ch: char) -> UsePosition {
     let cp = ch as u32;
     match cp {

@@ -20,7 +20,10 @@ pub(super) fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllabl
     let Some(base) = syllable.base_index else {
         return;
     };
-    if syllable.end > glyphs.len() || syllable.end > codepoints.len() {
+    if syllable.end > glyphs.len()
+        || syllable.end > codepoints.len()
+        || !(syllable.start..syllable.end).contains(&base)
+    {
         return;
     }
 
@@ -82,16 +85,19 @@ pub(super) fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllabl
     let syl_start = syllable.start;
     let syl_end = syllable.end;
     let original: Vec<Glyph> = glyphs[syl_start..syl_end].to_vec();
-    let mut rebuilt: Vec<Glyph> = Vec::with_capacity(syl_end - syl_start);
+    let mut rebuilt: Vec<Glyph> = Vec::with_capacity(original.len());
 
-    // Set of indices whose glyphs are consumed by the earlier
-    // buckets and must not be re-emitted by the fall-through.
-    let mut consumed: Vec<usize> = Vec::new();
+    // Syllable-relative flags for glyphs consumed by the earlier
+    // buckets, which the fall-through must not re-emit. A flag array
+    // keeps the pass linear in the syllable length even when a
+    // syllable carries thousands of pre-base signs.
+    let mut consumed = alloc::vec![false; original.len()];
+    let kinzi = kinzi_idx.filter(|&kz| kz >= syl_start && kz + 2 < syl_end);
 
     // 1. Pre-base matras, in logical order.
     for &idx in &to_move {
         rebuilt.push(original[idx - syl_start]);
-        consumed.push(idx);
+        consumed[idx - syl_start] = true;
     }
     // 2. Pre-base consonant pair (coeng + ra). Both glyphs move to
     //    the start of the syllable so the `pref` GSUB feature sees
@@ -99,42 +105,38 @@ pub(super) fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllabl
     //    already sits before the base.
     if let Some(pc) = pre_cons_idx {
         if pc >= syl_start && pc + 1 < syl_end {
-            rebuilt.push(original[pc - syl_start]);
-            rebuilt.push(original[pc + 1 - syl_start]);
-            consumed.push(pc);
-            consumed.push(pc + 1);
+            for rel in [pc - syl_start, pc + 1 - syl_start] {
+                rebuilt.push(original[rel]);
+                consumed[rel] = true;
+            }
         }
     }
     // 3. Mark the kinzi triple as consumed so the fall-through
     //    doesn't re-emit them at the syllable head; we inject them
     //    right after the base consonant below.
-    if let Some(kz) = kinzi_idx {
-        if kz + 2 < syl_end {
-            consumed.push(kz);
-            consumed.push(kz + 1);
-            consumed.push(kz + 2);
-        }
+    if let Some(kz) = kinzi {
+        consumed[kz - syl_start..=kz + 2 - syl_start].fill(true);
     }
     // 4. Everything else, in original order, with the kinzi triple
     //    injected immediately after the base consonant.
-    for idx in syl_start..syl_end {
-        if consumed.contains(&idx) {
+    for (rel, &glyph) in original.iter().enumerate() {
+        if consumed[rel] {
             continue;
         }
-        rebuilt.push(original[idx - syl_start]);
-        if idx == base {
-            if let Some(kz) = kinzi_idx {
-                if kz + 2 < syl_end {
-                    rebuilt.push(original[kz - syl_start]);
-                    rebuilt.push(original[kz + 1 - syl_start]);
-                    rebuilt.push(original[kz + 2 - syl_start]);
-                }
+        rebuilt.push(glyph);
+        if syl_start + rel == base {
+            if let Some(kz) = kinzi {
+                rebuilt.extend_from_slice(&original[kz - syl_start..=kz + 2 - syl_start]);
             }
         }
     }
 
-    debug_assert_eq!(rebuilt.len(), syl_end - syl_start);
-    glyphs[syl_start..syl_end].copy_from_slice(&rebuilt);
+    // Every glyph of the syllable is emitted exactly once for the
+    // syllables the segmenter builds. If a future category table ever
+    // breaks that, keep the syllable as it was instead of panicking.
+    if rebuilt.len() == original.len() {
+        glyphs[syl_start..syl_end].copy_from_slice(&rebuilt);
+    }
 }
 
 /// Returns a length-`codepoints.len() + 1` array mapping each code
@@ -158,7 +160,7 @@ pub(super) fn code_point_clusters(codepoints: &[char], glyphs: &[Glyph]) -> Vec<
 /// Returns a length-`codepoints.len() + 1` array mapping codepoint
 /// index to UTF-8 byte offset. `out[i]` is the byte offset of the
 /// i'th codepoint; `out[len]` is the total byte length.
-fn cluster_byte_offsets(codepoints: &[char]) -> Vec<u32> {
+pub(super) fn cluster_byte_offsets(codepoints: &[char]) -> Vec<u32> {
     let mut out = Vec::with_capacity(codepoints.len() + 1);
     let mut byte = 0u32;
     for &c in codepoints {
@@ -174,21 +176,29 @@ fn cluster_byte_offsets(codepoints: &[char]) -> Vec<u32> {
 /// rustybuzz behavior. Downstream callers see one cluster id per
 /// syllable (the byte offset of the first codepoint) even when GSUB
 /// substitutions have collapsed glyphs inside the syllable.
+///
+/// Syllables are consecutive, so their byte ranges are sorted and
+/// disjoint and a glyph falls in at most one of them. Rewriting a
+/// cluster to its syllable's start keeps it inside that range, so one
+/// pass with a binary search per glyph gives the same result as
+/// visiting every glyph once per syllable, in `O(n log s)` time.
 pub(super) fn merge_syllable_clusters(
     glyphs: &mut [Glyph],
     syllables: &[Syllable],
     byte_offsets: &[u32],
 ) {
-    for syl in syllables {
-        if syl.end == syl.start {
+    let ranges: Vec<(u32, u32)> = syllables
+        .iter()
+        .filter(|syl| syl.end > syl.start)
+        .filter_map(|syl| Some((*byte_offsets.get(syl.start)?, *byte_offsets.get(syl.end)?)))
+        .collect();
+    for g in glyphs {
+        let after = ranges.partition_point(|&(start, _)| start <= g.cluster);
+        let Some(&(start, end)) = after.checked_sub(1).and_then(|k| ranges.get(k)) else {
             continue;
-        }
-        let byte_start = byte_offsets[syl.start];
-        let byte_end = byte_offsets[syl.end];
-        for g in glyphs.iter_mut() {
-            if g.cluster >= byte_start && g.cluster < byte_end {
-                g.cluster = byte_start;
-            }
+        };
+        if g.cluster < end {
+            g.cluster = start;
         }
     }
 }
@@ -199,8 +209,8 @@ pub(super) fn merge_syllable_clusters(
 /// [`UsePosition::BelowBase`] (the textbook medial-ra), moves the
 /// substituted glyph to the front of the syllable so it visually sits
 /// before the base. Mirrors rustybuzz's `record_pref` ->
-/// `reorder_syllable_use` pair, but only for the medial-ra case the
-/// 0.8.0 corpus exercises (Cham). Length-preserving.
+/// `reorder_syllable_use` pair, but only for the medial-ra case
+/// (Cham). Length-preserving.
 pub(super) fn pref_reorder(
     codepoints: &[char],
     glyphs: &mut [Glyph],
@@ -213,7 +223,11 @@ pub(super) fn pref_reorder(
     let Some(base) = syllable.base_index else {
         return;
     };
-    if syllable.end > glyphs.len() || syllable.end > codepoints.len() {
+    if syllable.end > glyphs.len()
+        || syllable.end > codepoints.len()
+        || syllable.end > pre_ids.len()
+        || !(syllable.start..syllable.end).contains(&base)
+    {
         return;
     }
 
@@ -240,19 +254,19 @@ pub(super) fn pref_reorder(
     let syl_start = syllable.start;
     let syl_end = syllable.end;
     let original: Vec<Glyph> = glyphs[syl_start..syl_end].to_vec();
-    let mut rebuilt: Vec<Glyph> = Vec::with_capacity(syl_end - syl_start);
+    let mut rebuilt: Vec<Glyph> = Vec::with_capacity(original.len());
+    let mut moved = alloc::vec![false; original.len()];
 
     // 1. Substituted pre-base forms in logical order.
     for &idx in &to_move {
         rebuilt.push(original[idx - syl_start]);
+        moved[idx - syl_start] = true;
     }
     // 2. Everything else, in original order.
-    for idx in syl_start..syl_end {
-        if to_move.contains(&idx) {
-            continue;
+    for (rel, &glyph) in original.iter().enumerate() {
+        if !moved[rel] {
+            rebuilt.push(glyph);
         }
-        rebuilt.push(original[idx - syl_start]);
     }
-    debug_assert_eq!(rebuilt.len(), syl_end - syl_start);
     glyphs[syl_start..syl_end].copy_from_slice(&rebuilt);
 }

@@ -16,8 +16,7 @@ use crate::tables::layout::state_table::{
 ///
 /// Action type lives in flags bits 30-31:
 /// - 0 = control points (u16 pairs into glyf points)
-/// - 1 = anchor points (u16 pairs into ankr). sigilbuzz emits zero
-///   for this case; ankr support is a follow-up.
+/// - 1 = anchor points (u16 pairs into ankr)
 /// - 2 = coordinates    (four i16 in FUnits, inline)
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Format4<'a> {
@@ -43,8 +42,9 @@ pub(super) struct Format4<'a> {
 /// - 1 (anchor points):  u16 pairs of `ankr` indices
 /// - 2 (coordinates):    four i16 (left x/y, right x/y) per record
 ///
-/// sigilbuzz validates the offset / range for the action table but
-/// the actual apply walk is deferred. See module docs.
+/// Parsing only checks that the action table starts inside the body.
+/// Each record read in [`Format4::apply`] is bounds-checked on its
+/// own.
 pub(super) fn parse_format4(
     data: &[u8],
     sub_start: usize,

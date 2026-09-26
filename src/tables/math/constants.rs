@@ -23,7 +23,6 @@ pub(super) const MATH_CONSTANTS_LEN: usize =
 
 /// Indices into the MathValueRecord block (relative to
 /// [`FIRST_VALUE_RECORD`]). Order matches the OpenType MATH spec.
-#[allow(missing_docs)]
 mod c_idx {
     pub const MATH_LEADING: usize = 0;
     pub const AXIS_HEIGHT: usize = 1;

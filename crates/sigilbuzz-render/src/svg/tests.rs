@@ -4,14 +4,19 @@
 //! child modules.
 
 use super::*;
+use alloc::string::String;
 use alloc::vec;
 
 use sigilbuzz::tables::PathOp;
 
+use super::dash::dash_polyline;
 use super::document::{parse_document, parse_url_ref};
+use super::filter::{apply_gaussian_blur, apply_offset, clamped_window_sum};
 use super::model::{Fill, GradKind, Paint, SvgDoc};
 use super::paint_server::parse_stop_offset;
 use super::path::{parse_path_d, parse_points_list};
+use super::render::{render_doc, render_fill, RenderBudget};
+use super::stroke::flatten_to_polylines;
 use super::style::{parse_color, parse_transform, parse_viewbox};
 
 mod dash;
@@ -285,6 +290,34 @@ fn linear_gradient_collected_with_stops() {
 }
 
 #[test]
+fn stop_style_sets_color_and_opacity() {
+    // The style declarations win over the attributes, and the
+    // trailing semicolon does not drop the stop.
+    let xml = r##"<svg viewBox="0 0 10 10">
+        <defs>
+            <linearGradient id="g" x1="0" y1="0" x2="10" y2="0">
+                <stop offset="0" stop-opacity="1" style="stop-color:#00FF00;stop-opacity:0.25;"/>
+                <stop offset="1" stop-color="#0000FF" stop-opacity="0.5"/>
+            </linearGradient>
+        </defs>
+        <rect x="0" y="0" width="10" height="10" fill="url(#g)"/>
+    </svg>"##;
+    let doc = parse_document(xml).unwrap();
+    let Paint::Gradient(g) = &doc.fills[0].paint else {
+        panic!("expected gradient fill");
+    };
+    assert_eq!(g.stops.len(), 2);
+    let first = g.stops[0].color;
+    assert!((first.g - 1.0).abs() < 1e-6 && first.r.abs() < 1e-6);
+    assert!(
+        (first.a - 0.25).abs() < 1e-6,
+        "style opacity, got {}",
+        first.a
+    );
+    assert!((g.stops[1].color.a - 0.5).abs() < 1e-6, "attribute opacity");
+}
+
+#[test]
 fn radial_gradient_parsed() {
     let xml = r##"<svg viewBox="0 0 10 10">
         <defs>
@@ -311,6 +344,27 @@ fn stroke_emits_outline_fill() {
     // No fill (fill="none"), but one stroke fill.
     assert_eq!(doc.fills.len(), 1);
     assert!(doc.fills[0].is_stroke);
+}
+
+/// Strokes a right-angle corner at (50, 10) with the given join
+/// and reports whether two pixels past the outer corner are
+/// painted: (51, 8) lies inside the bevel, (53, 6) only inside the
+/// miter.
+fn outer_corner_pixels(join: &str) -> (bool, bool) {
+    let xml = alloc::format!(
+        r##"<svg viewBox="0 0 64 64"><path d="M 10 10 L 50 10 L 50 50" stroke="#000"
+            stroke-width="8" stroke-linejoin="{join}" fill="none"/></svg>"##
+    );
+    let doc = parse_document(&xml).unwrap();
+    let mut pix = ColorPixmap::new(64, 64);
+    render_doc(&mut pix, &doc, &Affine::identity(), 0.25);
+    (pix.get(51, 8)[3] > 0, pix.get(53, 6)[3] > 0)
+}
+
+#[test]
+fn bevel_join_fills_the_outer_corner_without_a_spike() {
+    assert_eq!(outer_corner_pixels("bevel"), (true, false));
+    assert_eq!(outer_corner_pixels("miter"), (true, true));
 }
 
 #[test]
@@ -422,4 +476,198 @@ fn polygon_with_too_few_points_drops() {
     </svg>"#;
     let doc = parse_document(xml).unwrap();
     assert!(doc.fills.is_empty());
+}
+
+#[test]
+fn path_d_number_after_closepath_is_an_error() {
+    // A number after `Z` used to repeat the closepath without
+    // consuming input, looping forever while pushing Close ops.
+    assert!(parse_path_d("M0 0 L1 0 Z 1 1").is_err());
+    assert!(parse_path_d("m0 0 z5").is_err());
+}
+
+#[test]
+fn parse_color_rejects_six_bytes_of_non_ascii_hex() {
+    // Six bytes of text where byte 2 falls inside a character used
+    // to panic on the slice.
+    assert_eq!(parse_color("#a\u{20AC}bc"), None);
+    assert_eq!(parse_color("#\u{e9}\u{e9}\u{e9}"), None);
+}
+
+#[test]
+fn use_fan_out_is_bounded_by_the_work_budget() {
+    // Ten levels of groups that each reference the next level ten
+    // times expand to 10^10 element visits. This used to hang.
+    use core::fmt::Write;
+    let mut xml = String::from(r#"<svg viewBox="0 0 10 10"><defs>"#);
+    for level in 0..10 {
+        write!(xml, r#"<g id="l{level}">"#).unwrap();
+        for _ in 0..10 {
+            write!(xml, r##"<use href="#l{}"/>"##, level + 1).unwrap();
+        }
+        xml.push_str("</g>");
+    }
+    xml.push_str(r##"<g id="l10"/></defs><use href="#l0"/></svg>"##);
+    assert_eq!(
+        parse_document(&xml).unwrap_err(),
+        RenderError::Parse("svg work cap")
+    );
+}
+
+#[test]
+fn repeated_large_clip_is_bounded_by_the_ops_budget() {
+    // Every fill used to carry its own copy of the clip path, so
+    // 4096 fills sharing a 20k-op clip stored 80M operations.
+    use core::fmt::Write;
+    let mut clip = String::from("M0 0");
+    for i in 0..20_000 {
+        write!(clip, " L{} {}", i % 97, i % 89).unwrap();
+    }
+    let mut xml = String::from(r#"<svg viewBox="0 0 10 10"><defs><clipPath id="c">"#);
+    write!(xml, r#"<path d="{clip}"/></clipPath></defs>"#).unwrap();
+    for _ in 0..4096 {
+        xml.push_str(r#"<rect width="5" height="5" clip-path="url(#c)"/>"#);
+    }
+    xml.push_str("</svg>");
+    let doc = parse_document(&xml).unwrap();
+    let stored: usize = doc.fills.iter().map(Fill::weight).sum();
+    assert!(stored <= MAX_DOC_OPS, "stored {stored} ops");
+    assert!(doc.fills.len() < 4096);
+}
+
+#[test]
+fn filter_keeps_at_most_max_primitives() {
+    let mut xml = String::from(r#"<svg viewBox="0 0 10 10"><defs><filter id="f">"#);
+    for _ in 0..500 {
+        xml.push_str(r#"<feOffset dx="1"/>"#);
+    }
+    xml.push_str(r##"</filter></defs><rect width="5" height="5" filter="url(#f)"/></svg>"##);
+    let doc = parse_document(&xml).unwrap();
+    let f = doc.fills[0].filter.as_ref().expect("filter attached");
+    assert_eq!(f.primitives.len(), MAX_FILTER_PRIMITIVES);
+}
+
+#[test]
+fn shared_mask_rendering_is_bounded_by_the_pass_budget() {
+    // Every masked fill renders all mask children again, so fills
+    // times children grows without limit. Here 1000 fills with a
+    // 100-child mask would need about 102k canvas passes.
+    use core::fmt::Write;
+    let mut xml = String::from(r#"<svg viewBox="0 0 16 16"><defs><mask id="m">"#);
+    for i in 0..100 {
+        write!(
+            xml,
+            r#"<rect x="{}" y="0" width="1" height="16" fill="white"/>"#,
+            i % 16
+        )
+        .unwrap();
+    }
+    xml.push_str("</mask></defs>");
+    for _ in 0..1000 {
+        xml.push_str(r#"<rect width="8" height="8" fill="red" mask="url(#m)"/>"#);
+    }
+    xml.push_str("</svg>");
+    let doc = parse_document(&xml).unwrap();
+    assert_eq!(doc.fills.len(), 1000);
+    let mut out = ColorPixmap::new(16, 16);
+    let mut budget = RenderBudget::new();
+    for fill in &doc.fills {
+        render_fill(&mut out, fill, &Affine::identity(), 0.25, &mut budget);
+    }
+    assert!(budget.passes_left < doc.fills[0].render_passes() + 100);
+    assert_eq!(out.get(4, 4)[3], 255, "early fills still render");
+}
+
+#[test]
+fn repeated_mask_resolution_is_bounded_by_the_work_budget() {
+    // Each masked element walks the whole mask body again. With a
+    // 1000-child mask and 4000 elements that is four million
+    // element visits, so the parse stops at the work budget.
+    let mut xml = String::from(r#"<svg viewBox="0 0 16 16"><defs><mask id="m">"#);
+    for _ in 0..1000 {
+        xml.push_str(r#"<rect width="1" height="16" fill="white"/>"#);
+    }
+    xml.push_str("</mask></defs>");
+    for _ in 0..4000 {
+        xml.push_str(r#"<rect width="8" height="8" fill="red" mask="url(#m)"/>"#);
+    }
+    xml.push_str("</svg>");
+    assert_eq!(
+        parse_document(&xml).unwrap_err(),
+        RenderError::Parse("svg work cap")
+    );
+}
+
+#[test]
+fn tiny_dash_on_a_long_line_stops_at_the_split_budget() {
+    // Past ~16384 units a 0.001 dash no longer advances the walk
+    // position, so this used to loop forever.
+    let pts = [(0.0, 0.0), (100_000.0, 0.0)];
+    let segs = dash_polyline(&pts, &[100_000.0], false, &[0.001, 0.001], 0.0);
+    assert!(!segs.is_empty());
+    assert!(segs.len() <= MAX_DASH_SPLITS);
+}
+
+#[test]
+fn non_finite_curves_do_not_multiply_stroke_points() {
+    // A NaN control point used to subdivide 16 levels deep and emit
+    // 65536 points per curve.
+    let ops = [
+        PathOp::MoveTo { x: 0.0, y: 0.0 },
+        PathOp::QuadTo {
+            cx: f32::NAN,
+            cy: 0.0,
+            x: 10.0,
+            y: 0.0,
+        },
+        PathOp::CubicTo {
+            c1x: f32::INFINITY,
+            c1y: 0.0,
+            c2x: 0.0,
+            c2y: 0.0,
+            x: 20.0,
+            y: 5.0,
+        },
+    ];
+    let polys = flatten_to_polylines(&ops);
+    let points: usize = polys.iter().map(|p| p.points.len()).sum();
+    assert_eq!(points, 3);
+}
+
+#[test]
+fn huge_blur_radius_is_clamped() {
+    let mut src = ColorPixmap::new(7, 5);
+    for (i, b) in src.data.iter_mut().enumerate() {
+        *b = (i * 37 % 256) as u8;
+    }
+    // Used to overflow `r * 2 + 1` (a panic in debug builds) and
+    // visit four billion window samples per row.
+    let out = apply_gaussian_blur(&src, 1e30, f32::INFINITY);
+    assert_eq!((out.width, out.height), (7, 5));
+}
+
+#[test]
+fn counted_blur_window_matches_the_sample_by_sample_sum() {
+    for r in 0..24 {
+        for len in 1..12 {
+            let sample = |k: i32| (k * 13 + 7) as u32 % 256;
+            let naive: u32 = (-r..=r).map(|k| sample(k.clamp(0, len - 1))).sum();
+            assert_eq!(clamped_window_sum(r, len, sample), naive, "r {r} len {len}");
+        }
+    }
+}
+
+#[test]
+fn huge_filter_offset_does_not_overflow() {
+    let mut src = ColorPixmap::new(4, 4);
+    src.data.fill(200);
+    // `y - dy` used to overflow `i32` once the offset saturated.
+    for (dx, dy) in [
+        (0.0, -1e30),
+        (-1e30, 0.0),
+        (f32::NEG_INFINITY, f32::INFINITY),
+    ] {
+        let out = apply_offset(&src, dx, dy);
+        assert!(out.data.iter().all(|&b| b == 0));
+    }
 }

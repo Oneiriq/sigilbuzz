@@ -19,9 +19,7 @@ use crate::SubsetError;
 /// Partial-instance bake: produces a reduced-axis variable font.
 ///
 /// This path runs when `input.axis_pins` carries at least one
-/// `AxisPin::Keep` and the source has neither `gvar` nor `CFF2` (those
-/// tuple-projection paths are tracked as a follow-up to PR #183: the
-/// public surface there errors with `Unsupported` for now).
+/// `AxisPin::Keep`.
 ///
 /// The bake:
 /// - re-emits `fvar` with only the surviving axes (and instances whose
@@ -48,11 +46,9 @@ use crate::SubsetError;
 /// table cannot wrap a 32-bit `usize`; a rebuilt table that outgrows
 /// its own offsets is an error.
 ///
-/// `drop_var_tables = false` is honored. The trimmed variation
-/// tables ride out either way; the field controls whether tables like
-/// `MVAR` get folded down into static metric fields. For the partial
-/// path we always keep the (trimmed) variation tables: they still
-/// drive the live axes.
+/// `input.drop_var_tables` is not read here. The output keeps live
+/// axes, so the trimmed variation tables always stay: they drive
+/// those axes.
 pub(super) fn partial_instance(
     face: &Face<'_>,
     input: &InstanceInput,

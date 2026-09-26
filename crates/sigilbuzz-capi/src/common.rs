@@ -21,24 +21,64 @@ use crate::{
 // Tag / Direction / Script / Language helpers
 // ---------------------------------------------------------------------------
 
+/// Reads a C string argument as bytes. A negative `len` means the
+/// string is NUL-terminated.
+///
 /// # Safety
-/// `s` must point to at least `len` bytes (or be NUL-terminated when
-/// `len == -1`).
+/// `s` must be non-null. When `len >= 0` it must point to `len`
+/// readable bytes, otherwise to a NUL-terminated string. The bytes
+/// must stay valid and unmodified for `'a`.
+pub(crate) unsafe fn c_str_bytes<'a>(s: *const c_char, len: c_int) -> &'a [u8] {
+    match usize::try_from(len) {
+        // SAFETY: the caller guarantees `len` readable bytes at `s`.
+        Ok(len) => unsafe { slice::from_raw_parts(s.cast::<u8>(), len) },
+        // SAFETY: the caller guarantees a NUL-terminated string at `s`
+        // when `len` is negative.
+        Err(_) => unsafe { core::ffi::CStr::from_ptr(s) }.to_bytes(),
+    }
+}
+
+/// True when `shaper_list` is null (the default list) or names the
+/// `ot` shaper.
+///
+/// # Safety
+/// `shaper_list` must be null or point to an array of NUL-terminated
+/// strings that ends with a null pointer.
+pub(crate) unsafe fn shaper_list_names_ot(shaper_list: *const *const c_char) -> bool {
+    if shaper_list.is_null() {
+        return true;
+    }
+    let mut i = 0usize;
+    loop {
+        // SAFETY: the caller guarantees a null-terminated array, and
+        // the loop stops at the terminator, so index `i` is in bounds.
+        let name = unsafe { *shaper_list.add(i) };
+        if name.is_null() {
+            return false;
+        }
+        // SAFETY: every entry before the terminator is a
+        // NUL-terminated string, per the caller's contract.
+        if unsafe { core::ffi::CStr::from_ptr(name) }.to_bytes() == b"ot" {
+            return true;
+        }
+        i += 1;
+    }
+}
+
+/// # Safety
+/// `s` must be null, or point to at least `len` bytes (or be
+/// NUL-terminated when `len == -1`).
 #[no_mangle]
 pub unsafe extern "C" fn hb_tag_from_string(s: *const c_char, len: c_int) -> hb_tag_t {
     if s.is_null() {
         return 0;
     }
-    let bytes: &[u8] = if len < 0 {
-        // SAFETY: caller asserts NUL-terminated.
-        unsafe { core::ffi::CStr::from_ptr(s) }.to_bytes()
-    } else {
-        // SAFETY: caller asserts (s, len).
-        unsafe { slice::from_raw_parts(s.cast::<u8>(), len as usize) }
-    };
+    // SAFETY: `s` is non-null and the caller guarantees the length
+    // contract of `c_str_bytes`.
+    let bytes = unsafe { c_str_bytes(s, len) };
     let mut buf = [b' '; 4];
-    for (i, b) in bytes.iter().take(4).enumerate() {
-        buf[i] = *b;
+    for (dst, src) in buf.iter_mut().zip(bytes) {
+        *dst = *src;
     }
     u32::from_be_bytes(buf)
 }
@@ -49,7 +89,7 @@ pub unsafe extern "C" fn hb_tag_from_string(s: *const c_char, len: c_int) -> hb_
 /// expected to size the buffer.
 ///
 /// # Safety
-/// `buf` must be writeable for at least four bytes.
+/// `buf` must be null or writeable for at least four bytes.
 #[no_mangle]
 pub unsafe extern "C" fn hb_tag_to_string(tag: hb_tag_t, buf: *mut c_char) {
     if buf.is_null() {
@@ -57,31 +97,28 @@ pub unsafe extern "C" fn hb_tag_to_string(tag: hb_tag_t, buf: *mut c_char) {
     }
     let bytes = tag.to_be_bytes();
     for (i, b) in bytes.iter().enumerate() {
-        // SAFETY: caller asserts buf has 4 writable bytes.
+        // SAFETY: `buf` is non-null and the caller guarantees four
+        // writable bytes. `i` is below 4.
         unsafe { *buf.add(i) = *b as c_char };
     }
 }
 
 /// # Safety
-/// `s` must point to at least `len` bytes (or be NUL-terminated when
-/// `len == -1`).
+/// `s` must be null, or point to at least `len` bytes (or be
+/// NUL-terminated when `len == -1`).
 #[no_mangle]
 pub unsafe extern "C" fn hb_direction_from_string(s: *const c_char, len: c_int) -> hb_direction_t {
     if s.is_null() {
         return HB_DIRECTION_INVALID;
     }
-    let bytes: &[u8] = if len < 0 {
-        // SAFETY: caller asserts NUL-terminated.
-        unsafe { core::ffi::CStr::from_ptr(s) }.to_bytes()
-    } else {
-        // SAFETY: caller asserts (s, len).
-        unsafe { slice::from_raw_parts(s.cast::<u8>(), len as usize) }
-    };
-    if bytes.is_empty() {
-        return HB_DIRECTION_INVALID;
-    }
+    // SAFETY: `s` is non-null and the caller guarantees the length
+    // contract of `c_str_bytes`.
+    let bytes = unsafe { c_str_bytes(s, len) };
     // HarfBuzz only inspects the first character (case-insensitive).
-    match bytes[0].to_ascii_lowercase() {
+    let Some(first) = bytes.first() else {
+        return HB_DIRECTION_INVALID;
+    };
+    match first.to_ascii_lowercase() {
         b'l' => HB_DIRECTION_LTR,
         b'r' => HB_DIRECTION_RTL,
         b't' => HB_DIRECTION_TTB,
@@ -99,23 +136,21 @@ pub extern "C" fn hb_script_from_iso15924_tag(tag: hb_tag_t) -> hb_script_t {
 
 /// Languages are pointer-interned. We leak a CString the first time
 /// we see a given normalized language tag; subsequent lookups return
-/// the same pointer.
+/// the same pointer. As in C, the tag ends at the first NUL byte even
+/// when `len` counts past it.
 ///
 /// # Safety
-/// `s` must point to at least `len` bytes (or be NUL-terminated when
-/// `len == -1`).
+/// `s` must be null, or point to at least `len` bytes (or be
+/// NUL-terminated when `len == -1`).
 #[no_mangle]
 pub unsafe extern "C" fn hb_language_from_string(s: *const c_char, len: c_int) -> hb_language_t {
     if s.is_null() {
         return ptr::null();
     }
-    let bytes: &[u8] = if len < 0 {
-        // SAFETY: caller asserts NUL-terminated.
-        unsafe { core::ffi::CStr::from_ptr(s) }.to_bytes()
-    } else {
-        // SAFETY: caller asserts (s, len).
-        unsafe { slice::from_raw_parts(s.cast::<u8>(), len as usize) }
-    };
+    // SAFETY: `s` is non-null and the caller guarantees the length
+    // contract of `c_str_bytes`.
+    let bytes = unsafe { c_str_bytes(s, len) };
+    let bytes = bytes.split(|&b| b == 0).next().unwrap_or_default();
     if bytes.is_empty() {
         return ptr::null();
     }
@@ -144,15 +179,18 @@ const HB_COMPAT_MICRO: c_uint = 0;
 #[no_mangle]
 pub unsafe extern "C" fn hb_version(major: *mut c_uint, minor: *mut c_uint, micro: *mut c_uint) {
     if !major.is_null() {
-        // SAFETY: caller asserts writeable.
+        // SAFETY: `major` is non-null and the caller guarantees it
+        // points to a writable `unsigned int`.
         unsafe { *major = HB_COMPAT_MAJOR };
     }
     if !minor.is_null() {
-        // SAFETY: caller asserts writeable.
+        // SAFETY: `minor` is non-null and the caller guarantees it
+        // points to a writable `unsigned int`.
         unsafe { *minor = HB_COMPAT_MINOR };
     }
     if !micro.is_null() {
-        // SAFETY: caller asserts writeable.
+        // SAFETY: `micro` is non-null and the caller guarantees it
+        // points to a writable `unsigned int`.
         unsafe { *micro = HB_COMPAT_MICRO };
     }
 }
@@ -190,24 +228,30 @@ pub(crate) fn map_direction_in(d: hb_direction_t) -> Option<Direction> {
     }
 }
 
-// Language interning. A handful of well-known tags are pinned at
-// startup; new tags are interned via a simple Mutex<Vec<&'static
-// CStr>>.
+// Language interning. Each distinct tag is leaked once into a
+// Mutex<Vec<&'static CStr>> and looked up by value afterward.
 
 #[cfg(feature = "std")]
 fn intern_language(tag: &str) -> hb_language_t {
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Mutex, OnceLock, PoisonError};
     static INTERN: OnceLock<Mutex<Vec<&'static core::ffi::CStr>>> = OnceLock::new();
     let intern = INTERN.get_or_init(|| Mutex::new(Vec::new()));
-    let mut guard = intern.lock().unwrap();
+    // The table stays consistent even if a holder panicked: entries
+    // are only ever appended whole.
+    let mut guard = intern.lock().unwrap_or_else(PoisonError::into_inner);
     for cstr in guard.iter() {
         if cstr.to_bytes() == tag.as_bytes() {
             return cstr.as_ptr();
         }
     }
+    // A tag with a NUL byte would be stored under a different key
+    // than it is looked up by, and leak again on every call. The
+    // caller strips NUL bytes, so this only guards the invariant.
+    let Ok(owned) = std::ffi::CString::new(tag) else {
+        return lang_und();
+    };
     // Leak a fresh CString: language tags survive the lifetime of
     // the process, just as they do in HarfBuzz itself.
-    let owned = std::ffi::CString::new(tag).unwrap_or_else(|_| std::ffi::CString::default());
     let leaked: &'static core::ffi::CStr = Box::leak(owned.into_boxed_c_str());
     guard.push(leaked);
     leaked.as_ptr()

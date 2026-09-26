@@ -124,10 +124,15 @@ pub fn encode_dict_offset_placeholder() -> Vec<u8> {
 /// Patches a placeholder offset slot emitted by
 /// [`encode_dict_offset_placeholder`] in-place with the real value.
 /// `slot_offset` is the byte offset of the leading `b0=29` byte within
-/// the buffer.
+/// the buffer. A slot that does not fit inside `buf` is left alone.
 pub fn patch_dict_offset(buf: &mut [u8], slot_offset: usize, value: i32) {
-    debug_assert_eq!(buf[slot_offset], 29, "placeholder must be b0=29");
-    buf[slot_offset + 1..slot_offset + 5].copy_from_slice(&value.to_be_bytes());
+    debug_assert_eq!(buf.get(slot_offset), Some(&29), "placeholder must be b0=29");
+    let operand = slot_offset
+        .checked_add(1)
+        .and_then(|start| buf.get_mut(start..)?.get_mut(..4));
+    if let Some(operand) = operand {
+        operand.copy_from_slice(&value.to_be_bytes());
+    }
 }
 
 /// Emits a charset in format 0 (per-gid 2-byte SID array, omitting
@@ -265,56 +270,46 @@ pub fn emit_encoding_auto(codes: &[u8]) -> Vec<u8> {
 /// Returns [`SubsetError::Unsupported`] for unknown formats or when the
 /// table is truncated.
 pub fn parse_fd_select(data: &[u8], off: usize, n_glyphs: usize) -> Result<Vec<u8>, SubsetError> {
-    if off >= data.len() {
+    let Some((&format, body)) = data.get(off..).and_then(<[u8]>::split_first) else {
         return Err(SubsetError::Unsupported("CFF FDSelect offset past end"));
-    }
-    let format = data[off];
+    };
     match format {
-        0 => {
-            if off + 1 + n_glyphs > data.len() {
-                return Err(SubsetError::Unsupported("CFF FDSelect format 0 truncated"));
-            }
-            Ok(data[off + 1..off + 1 + n_glyphs].to_vec())
-        }
+        0 => body
+            .get(..n_glyphs)
+            .map(<[u8]>::to_vec)
+            .ok_or(SubsetError::Unsupported("CFF FDSelect format 0 truncated")),
         3 => {
-            if off + 3 > data.len() {
+            let Some((n_ranges, mut rest)) = body.split_first_chunk::<2>() else {
                 return Err(SubsetError::Unsupported(
                     "CFF FDSelect format 3 header truncated",
                 ));
-            }
-            let n_ranges = u16::from_be_bytes([data[off + 1], data[off + 2]]) as usize;
-            let mut p = off + 3;
+            };
+            let n_ranges = usize::from(u16::from_be_bytes(*n_ranges));
             let mut ranges = Vec::with_capacity(n_ranges);
             for _ in 0..n_ranges {
-                if p + 3 > data.len() {
+                let Some((record, tail)) = rest.split_first_chunk::<3>() else {
                     return Err(SubsetError::Unsupported(
                         "CFF FDSelect format 3 range truncated",
                     ));
-                }
-                let first = u16::from_be_bytes([data[p], data[p + 1]]);
-                let fd = data[p + 2];
-                ranges.push((first, fd));
-                p += 3;
+                };
+                let &[first_hi, first_lo, fd] = record;
+                ranges.push((u16::from_be_bytes([first_hi, first_lo]), fd));
+                rest = tail;
             }
-            if p + 2 > data.len() {
+            let Some(sentinel) = rest.first_chunk::<2>() else {
                 return Err(SubsetError::Unsupported(
                     "CFF FDSelect format 3 sentinel truncated",
                 ));
-            }
-            let sentinel = u16::from_be_bytes([data[p], data[p + 1]]) as usize;
+            };
+            let sentinel = usize::from(u16::from_be_bytes(*sentinel));
             let mut out = alloc::vec![0u8; n_glyphs];
             for (i, &(first, fd)) in ranges.iter().enumerate() {
-                let start = first as usize;
-                let end = if i + 1 < n_ranges {
-                    ranges[i + 1].0 as usize
-                } else {
-                    sentinel
-                };
-                let bound = end.min(n_glyphs);
-                if start < bound {
-                    for slot in &mut out[start..bound] {
-                        *slot = fd;
-                    }
+                let start = usize::from(first);
+                let end = ranges
+                    .get(i + 1)
+                    .map_or(sentinel, |&(next, _)| usize::from(next));
+                if let Some(run) = out.get_mut(start..end.min(n_glyphs)) {
+                    run.fill(fd);
                 }
             }
             Ok(out)

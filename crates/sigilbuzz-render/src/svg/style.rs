@@ -12,6 +12,7 @@ use super::xml::{attr_matches, Node};
 /// Computes the inherited [`ElemCtx`] for `node`, given `parent`.
 pub(super) fn inherit_attrs(parent: &ElemCtx, node: &Node) -> ElemCtx {
     let mut ctx = parent.clone();
+    ctx.nesting = parent.nesting.saturating_add(1);
     // `color` sets this element's `currentColor` before its own paints
     // read it.
     if let Some(c) = node
@@ -152,9 +153,11 @@ pub(super) fn parse_color(s: &str) -> Option<[u8; 4]> {
     }
     if let Some(rest) = s.strip_prefix('#') {
         if rest.len() == 6 {
-            let r = u8::from_str_radix(&rest[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&rest[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&rest[4..6], 16).ok()?;
+            // `get` rather than slicing: six bytes of non-ASCII text can
+            // put a byte offset inside a character.
+            let r = u8::from_str_radix(rest.get(0..2)?, 16).ok()?;
+            let g = u8::from_str_radix(rest.get(2..4)?, 16).ok()?;
+            let b = u8::from_str_radix(rest.get(4..6)?, 16).ok()?;
             return Some([r, g, b, 255]);
         }
         if rest.len() == 3 {

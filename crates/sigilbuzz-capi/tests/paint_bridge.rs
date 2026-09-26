@@ -428,3 +428,61 @@ fn null_font_or_funcs_is_a_no_op() {
     }
     assert!(log.events.borrow().is_empty());
 }
+
+// =========================================================================
+// Palette and variation coordinates
+// =========================================================================
+
+/// Sets the font's `wght` axis.
+fn set_wght(s: &Setup, value: f32) {
+    let v = sigilbuzz_capi::hb_variation_t {
+        tag: u32::from_be_bytes(*b"wght"),
+        value,
+    };
+    // SAFETY: the font is live and `v` is one valid variation.
+    unsafe { sigilbuzz_capi::hb_font_set_variations(s.font, &v, 1) };
+}
+
+/// HarfBuzz paints with the variation coordinates set on the font.
+/// The bridge used to paint the default instance whatever the font's
+/// variations were.
+#[test]
+fn paint_glyph_applies_font_variations() {
+    // Glyph 7: PaintVarSolid on palette entry 0 whose alpha drops by
+    // 0.5 at the wght maximum.
+    let colr = colr(&[], &[(7, var_solid(0, 1.0, 0))], &ivs(&[-8192]));
+    let cpal = cpal(&[&[RED]]);
+    let s = Setup::new(&sfnt(&[
+        (b"COLR", &colr),
+        (b"CPAL", &cpal),
+        (b"fvar", &fvar()),
+    ]));
+    assert_eq!(unrooted(&s.paint(7, 0, FG)), [Ev::Color(0, HB_RED)]);
+    set_wght(&s, 900.0);
+    // Alpha 1.0 - 0.5 = 0.5. HarfBuzz multiplies the alpha byte and
+    // truncates: 0xFF * 0.5 = 127.5 becomes 0x7F.
+    assert_eq!(
+        unrooted(&s.paint(7, 0, FG)),
+        [Ev::Color(0, hb_color(0, 0, 255, 0x7F))]
+    );
+}
+
+/// HarfBuzz resolves colors in the palette the caller passes.
+#[test]
+fn paint_glyph_uses_the_requested_palette() {
+    // Glyph 7: PaintSolid on palette entry 0. Palette 0 holds red and
+    // palette 1 holds blue.
+    let colr = colr(&[], &[(7, solid(0, 1.0))], &[]);
+    let cpal = cpal(&[&[RED], &[(0, 0, 255, 255)]]);
+    let s = Setup::new(&sfnt(&[(b"COLR", &colr), (b"CPAL", &cpal)]));
+    assert_eq!(
+        unrooted(&s.paint(7, 0, FG)),
+        [Ev::Color(0, HB_RED)],
+        "palette 0 is red"
+    );
+    assert_eq!(
+        unrooted(&s.paint(7, 1, FG)),
+        [Ev::Color(0, hb_color(255, 0, 0, 255))],
+        "palette 1 is blue"
+    );
+}

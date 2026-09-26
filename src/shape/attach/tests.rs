@@ -247,11 +247,9 @@ fn run_lookup_zwj(
         mark_filtering_set: None,
         ignore_zwj,
         var,
+        lookup_index: 0,
     };
-    let mut att = Attach {
-        direction,
-        slots: &mut slots,
-    };
+    let mut att = Attach::new(direction, &mut slots);
     apply_lookup(subs, glyphs, &mut att, &cx);
     slots
 }
@@ -542,11 +540,9 @@ fn mark_mark_stacks_onto_the_previous_mark() {
         mark_filtering_set: None,
         ignore_zwj: true,
         var: &var,
+        lookup_index: 0,
     };
-    let mut att = Attach {
-        direction: Direction::Ltr,
-        slots: &mut slots,
-    };
+    let mut att = Attach::new(Direction::Ltr, &mut slots);
     let mark_subs = [AttachSubtable::parse(gpos_lt::MARK_TO_BASE, &base).unwrap()];
     let mkmk_subs = [AttachSubtable::parse(gpos_lt::MARK_TO_MARK, &mkmk).unwrap()];
     apply_lookup(&mark_subs, &mut glyphs, &mut att, &cx);
@@ -713,10 +709,7 @@ fn cursive_reattachment_reverses_the_old_chain() {
     let mut slots = new_slots(3);
     let filter = MatchFilter::none();
     let var = VarCtx::none();
-    let mut att = Attach {
-        direction: Direction::Ltr,
-        slots: &mut slots,
-    };
+    let mut att = Attach::new(Direction::Ltr, &mut slots);
     // First lookup (no RightToLeft): 1 hangs from 0.
     let cx = LookupCx {
         gdef: None,
@@ -725,6 +718,7 @@ fn cursive_reattachment_reverses_the_old_chain() {
         mark_filtering_set: None,
         ignore_zwj: true,
         var: &var,
+        lookup_index: 0,
     };
     apply_lookup(&ltr_flagless, &mut glyphs, &mut att, &cx);
     assert_eq!(att.slots[1], cursive_slot(-1));
@@ -738,6 +732,7 @@ fn cursive_reattachment_reverses_the_old_chain() {
         mark_filtering_set: None,
         ignore_zwj: true,
         var: &var,
+        lookup_index: 0,
     };
     apply_lookup(&rtl_flagged, &mut glyphs, &mut att, &cx);
     assert_eq!(att.slots[1], cursive_slot(1));
@@ -759,10 +754,7 @@ fn cursive_separates_a_parent_attached_to_its_new_child() {
     let mut slots = new_slots(2);
     let filter = MatchFilter::none();
     let var = VarCtx::none();
-    let mut att = Attach {
-        direction: Direction::Rtl,
-        slots: &mut slots,
-    };
+    let mut att = Attach::new(Direction::Rtl, &mut slots);
     for flag in [LOOKUP_FLAG_RIGHT_TO_LEFT, 0] {
         let cx = LookupCx {
             gdef: None,
@@ -771,6 +763,7 @@ fn cursive_separates_a_parent_attached_to_its_new_child() {
             mark_filtering_set: None,
             ignore_zwj: true,
             var: &var,
+            lookup_index: 0,
         };
         apply_lookup(&subs, &mut glyphs, &mut att, &cx);
     }
@@ -795,11 +788,9 @@ fn apply_at_ignores_positions_past_the_end() {
         mark_filtering_set: None,
         ignore_zwj: true,
         var: &var,
+        lookup_index: 0,
     };
-    let mut att = Attach {
-        direction: Direction::Ltr,
-        slots: &mut slots,
-    };
+    let mut att = Attach::new(Direction::Ltr, &mut slots);
     assert!(!apply_at(&sub, &mut glyphs, &mut att, &cx, 5));
     assert!(!apply_at(&sub, &mut glyphs, &mut att, &cx, 0));
 }

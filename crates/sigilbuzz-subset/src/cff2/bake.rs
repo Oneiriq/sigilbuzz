@@ -6,11 +6,12 @@ use alloc::vec::Vec;
 use sigilbuzz::tables::variation_store::ItemVariationStore;
 
 use super::{
-    decode_operand_f32, encode_charstring_number, parse_cff2, serialise_cff2_top_dict, subr_bias,
-    MAX_BAKE_DEPTH, OP_BLEND, OP_CALLGSUBR, OP_CALLSUBR, OP_CNTRMASK, OP_ESCAPE, OP_HHCURVETO,
-    OP_HINTMASK, OP_HLINETO, OP_HMOVETO, OP_HSTEM, OP_HSTEMHM, OP_HVCURVETO, OP_RCURVELINE,
-    OP_RETURN, OP_RLINECURVE, OP_RLINETO, OP_RMOVETO, OP_RRCURVETO, OP_SHORTINT, OP_VHCURVETO,
-    OP_VLINETO, OP_VMOVETO, OP_VSINDEX, OP_VSTEM, OP_VSTEMHM, OP_VVCURVETO,
+    bake_token_budget, biased_subr, charge_token, decode_operand_f32, encode_charstring_number,
+    parse_cff2, serialise_cff2_top_dict, BlendCache, MAX_BAKE_DEPTH, OP_BLEND, OP_CALLGSUBR,
+    OP_CALLSUBR, OP_CNTRMASK, OP_ESCAPE, OP_HHCURVETO, OP_HINTMASK, OP_HLINETO, OP_HMOVETO,
+    OP_HSTEM, OP_HSTEMHM, OP_HVCURVETO, OP_RCURVELINE, OP_RETURN, OP_RLINECURVE, OP_RLINETO,
+    OP_RMOVETO, OP_RRCURVETO, OP_SHORTINT, OP_VHCURVETO, OP_VLINETO, OP_VMOVETO, OP_VSINDEX,
+    OP_VSTEM, OP_VSTEMHM, OP_VVCURVETO,
 };
 use crate::cff::{
     emit_fd_select_auto, encode_index_cff2, patch_dict_offset, serialise_font_dict,
@@ -57,25 +58,30 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
     }
 
     // Parse the VariationStore (when present) so we can resolve blends.
-    let ivs = if let Some(blob) = parsed.vstore_blob {
-        // blob includes the 2-byte length prefix; the underlying
-        // ItemVariationStore parser consumes the body without the
-        // prefix.
-        if blob.len() < 2 {
-            return Err(SubsetError::Unsupported(
-                "CFF2 VariationStore blob too short",
-            ));
-        }
-        Some(
-            ItemVariationStore::parse(&blob[2..])
+    // The blob includes the 2-byte length prefix. The underlying
+    // ItemVariationStore parser consumes the body without the prefix.
+    let ivs_bytes = match parsed.vstore_blob {
+        Some(blob) => Some(blob.get(2..).ok_or(SubsetError::Unsupported(
+            "CFF2 VariationStore blob too short",
+        ))?),
+        None => None,
+    };
+    let ivs = match ivs_bytes {
+        Some(body) => Some(
+            ItemVariationStore::parse(body)
                 .map_err(|_| SubsetError::Unsupported("CFF2 VariationStore parse failed"))?,
-        )
-    } else {
-        None
+        ),
+        None => None,
     };
 
     // Per-FD: bake every charstring with subr inlining and blend
     // resolution.
+    let blend = BlendCache::new(ivs.as_ref(), ivs_bytes.unwrap_or_default(), coords);
+    let mut baker = Baker::new(
+        blend,
+        &parsed.global_subrs,
+        bake_token_budget(cff_bytes.len()),
+    );
     let mut new_charstrings: Vec<Vec<u8>> = Vec::with_capacity(n_glyphs);
     for (gid, cs) in parsed.char_strings.iter().enumerate() {
         let fd = parsed
@@ -88,8 +94,7 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
             .get(fd as usize)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let mut baker = Baker::new(coords, ivs.as_ref(), &parsed.global_subrs, local_subrs);
-        let baked = baker.bake_charstring(cs)?;
+        let baked = baker.bake_charstring(cs, local_subrs)?;
         new_charstrings.push(baked);
     }
 
@@ -102,13 +107,13 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
         new_private_body: Vec<u8>,
     }
     let mut fd_emits: Vec<FdBakeEmit> = Vec::with_capacity(parsed.fd_array.len());
-    for fd_bytes in &parsed.fd_array {
+    for (fd_bytes, &private_dict) in parsed.fd_array.iter().zip(&parsed.per_fd_private) {
         let fd_entries = walk_dict(fd_bytes)?;
         let (font_dict_body, font_dict_private_slot) = serialise_font_dict(&fd_entries);
-        let priv_entries = if parsed.per_fd_private[fd_emits.len()].is_empty() {
+        let priv_entries = if private_dict.is_empty() {
             Vec::new()
         } else {
-            walk_dict(parsed.per_fd_private[fd_emits.len()])?
+            walk_dict(private_dict)?
         };
         // No local subrs survive the bake.
         let (new_private_body, _) = serialise_private_dict(&priv_entries, false);
@@ -236,9 +241,12 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
 /// resolving `blend` to scalars and inlining `callsubr` /
 /// `callgsubr`. Emits a fresh charstring with no blend / vsindex /
 /// subr-call ops.
+///
+/// One baker serves a whole table: blend data and the token budget are
+/// shared across glyphs, and the per-glyph state is reset by
+/// [`Baker::bake_charstring`].
 struct Baker<'a> {
-    coords: &'a [f32],
-    ivs: Option<&'a ItemVariationStore<'a>>,
+    blend: BlendCache<'a>,
     global_subrs: &'a [&'a [u8]],
     local_subrs: &'a [&'a [u8]],
     /// Operand stack: floats so blend deltas don't lose precision.
@@ -248,32 +256,35 @@ struct Baker<'a> {
     /// Current vsindex (which IVS subtable blend draws from).
     vsindex: u16,
     /// Running stem count, for hintmask / cntrmask tail size.
-    stem_count: u32,
-    /// Set after the first move/hint operator (used by stem tracking).
-    seen_first_op: bool,
+    stem_count: usize,
+    /// Tokens left for the rest of the table.
+    budget: usize,
 }
 
 impl<'a> Baker<'a> {
-    fn new(
-        coords: &'a [f32],
-        ivs: Option<&'a ItemVariationStore<'a>>,
-        global_subrs: &'a [&'a [u8]],
-        local_subrs: &'a [&'a [u8]],
-    ) -> Self {
+    fn new(blend: BlendCache<'a>, global_subrs: &'a [&'a [u8]], budget: usize) -> Self {
         Self {
-            coords,
-            ivs,
+            blend,
             global_subrs,
-            local_subrs,
+            local_subrs: &[],
             stack: Vec::new(),
             out: Vec::new(),
             vsindex: 0,
             stem_count: 0,
-            seen_first_op: false,
+            budget,
         }
     }
 
-    fn bake_charstring(&mut self, cs: &[u8]) -> Result<Vec<u8>, SubsetError> {
+    fn bake_charstring(
+        &mut self,
+        cs: &[u8],
+        local_subrs: &'a [&'a [u8]],
+    ) -> Result<Vec<u8>, SubsetError> {
+        self.local_subrs = local_subrs;
+        self.stack.clear();
+        self.out = Vec::new();
+        self.vsindex = 0;
+        self.stem_count = 0;
         self.run(cs, 0)?;
         Ok(core::mem::take(&mut self.out))
     }
@@ -285,22 +296,16 @@ impl<'a> Baker<'a> {
             ));
         }
         let mut pos = 0;
-        while pos < code.len() {
-            let b0 = code[pos];
-            if b0 >= 32 {
+        while let Some(&b0) = code.get(pos) {
+            charge_token(
+                &mut self.budget,
+                "CFF2 bake: charstring work budget exceeded",
+            )?;
+            if b0 >= 32 || b0 == OP_SHORTINT {
                 let (val, len) = decode_operand_f32(code, pos)
                     .ok_or(SubsetError::Unsupported("CFF2 bake: operand truncated"))?;
                 self.stack.push(val);
                 pos += len;
-                continue;
-            }
-            if b0 == OP_SHORTINT {
-                if pos + 3 > code.len() {
-                    return Err(SubsetError::Unsupported("CFF2 bake: shortint truncated"));
-                }
-                let v = i16::from_be_bytes([code[pos + 1], code[pos + 2]]);
-                self.stack.push(f32::from(v));
-                pos += 3;
                 continue;
             }
             // Operator.
@@ -319,26 +324,16 @@ impl<'a> Baker<'a> {
                             "CFF2 bake: vsindex operand out of range",
                         ));
                     }
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    {
-                        self.vsindex = v as u16;
-                    }
+                    self.vsindex = v as u16;
                     pos += 1;
                 }
                 OP_CALLSUBR => {
                     let idx = self.stack.pop().ok_or(SubsetError::Unsupported(
                         "CFF2 bake: callsubr without operand",
                     ))?;
-                    #[allow(clippy::cast_possible_truncation)]
-                    let raw = idx as i32;
-                    let bias = subr_bias(self.local_subrs.len());
-                    let abs = raw + bias;
-                    if abs < 0 || (abs as usize) >= self.local_subrs.len() {
-                        return Err(SubsetError::Unsupported(
-                            "CFF2 bake: callsubr index out of range",
-                        ));
-                    }
-                    let body = self.local_subrs[abs as usize];
+                    let body = biased_subr(self.local_subrs, idx).ok_or(
+                        SubsetError::Unsupported("CFF2 bake: callsubr index out of range"),
+                    )?;
                     self.run(body, depth + 1)?;
                     pos += 1;
                 }
@@ -346,16 +341,9 @@ impl<'a> Baker<'a> {
                     let idx = self.stack.pop().ok_or(SubsetError::Unsupported(
                         "CFF2 bake: callgsubr without operand",
                     ))?;
-                    #[allow(clippy::cast_possible_truncation)]
-                    let raw = idx as i32;
-                    let bias = subr_bias(self.global_subrs.len());
-                    let abs = raw + bias;
-                    if abs < 0 || (abs as usize) >= self.global_subrs.len() {
-                        return Err(SubsetError::Unsupported(
-                            "CFF2 bake: callgsubr index out of range",
-                        ));
-                    }
-                    let body = self.global_subrs[abs as usize];
+                    let body = biased_subr(self.global_subrs, idx).ok_or(
+                        SubsetError::Unsupported("CFF2 bake: callgsubr index out of range"),
+                    )?;
                     self.run(body, depth + 1)?;
                     pos += 1;
                 }
@@ -367,37 +355,32 @@ impl<'a> Baker<'a> {
                     return Ok(());
                 }
                 OP_HSTEM | OP_VSTEM | OP_HSTEMHM | OP_VSTEMHM => {
-                    let n_pairs = (self.stack.len() as u32) / 2;
-                    self.stem_count += n_pairs;
+                    self.stem_count = self.stem_count.saturating_add(self.stack.len() / 2);
                     self.flush_stack();
                     self.out.push(b0);
-                    self.seen_first_op = true;
                     pos += 1;
                 }
                 OP_HINTMASK | OP_CNTRMASK => {
-                    let extra_pairs = (self.stack.len() as u32) / 2;
-                    self.stem_count += extra_pairs;
+                    self.stem_count = self.stem_count.saturating_add(self.stack.len() / 2);
                     self.flush_stack();
                     self.out.push(b0);
-                    self.seen_first_op = true;
-                    let mask_bytes = (self.stem_count as usize).div_ceil(8);
-                    if pos + 1 + mask_bytes > code.len() {
-                        return Err(SubsetError::Unsupported(
+                    let mask_bytes = self.stem_count.div_ceil(8);
+                    let mask = code
+                        .get(pos + 1..)
+                        .and_then(|rest| rest.get(..mask_bytes))
+                        .ok_or(SubsetError::Unsupported(
                             "CFF2 bake: hintmask tail truncated",
-                        ));
-                    }
-                    self.out
-                        .extend_from_slice(&code[pos + 1..pos + 1 + mask_bytes]);
+                        ))?;
+                    self.out.extend_from_slice(mask);
                     pos += 1 + mask_bytes;
                 }
                 OP_ESCAPE => {
-                    if pos + 2 > code.len() {
-                        return Err(SubsetError::Unsupported("CFF2 bake: escape truncated"));
-                    }
+                    let &b1 = code
+                        .get(pos + 1)
+                        .ok_or(SubsetError::Unsupported("CFF2 bake: escape truncated"))?;
                     self.flush_stack();
                     self.out.push(b0);
-                    self.out.push(code[pos + 1]);
-                    self.seen_first_op = true;
+                    self.out.push(b1);
                     pos += 2;
                 }
                 OP_RMOVETO | OP_HMOVETO | OP_VMOVETO | OP_RLINETO | OP_HLINETO | OP_VLINETO
@@ -405,7 +388,6 @@ impl<'a> Baker<'a> {
                 | OP_RCURVELINE | OP_RLINECURVE => {
                     self.flush_stack();
                     self.out.push(b0);
-                    self.seen_first_op = true;
                     pos += 1;
                 }
                 _ => {
@@ -419,6 +401,7 @@ impl<'a> Baker<'a> {
     }
 
     fn apply_blend(&mut self) -> Result<(), SubsetError> {
+        const UNDERFLOW: SubsetError = SubsetError::Unsupported("CFF2 bake: blend stack underflow");
         // Stack: n master values, n*nRegions delta values, n itself on top.
         let n_raw = self.stack.pop().ok_or(SubsetError::Unsupported(
             "CFF2 bake: blend without count operand",
@@ -428,34 +411,30 @@ impl<'a> Baker<'a> {
                 "CFF2 bake: blend count operand negative",
             ));
         }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        // Saturating cast: NaN gives 0, huge values underflow below.
         let n = n_raw as usize;
         if n == 0 {
             return Ok(());
         }
-        let n_regions = self
-            .ivs
-            .and_then(|s| s.variation_region_count(self.vsindex))
-            .map(|c| c as usize)
-            .unwrap_or(0);
-        let total_deltas = n * n_regions;
-        if self.stack.len() < n + total_deltas {
-            return Err(SubsetError::Unsupported("CFF2 bake: blend stack underflow"));
-        }
-        let scalars = self
-            .ivs
-            .and_then(|s| s.region_scalars(self.vsindex, self.coords))
-            .unwrap_or_default();
-        let start = self.stack.len() - n - total_deltas;
-        for i in 0..n {
-            let mut accum = 0.0_f32;
-            for j in 0..n_regions {
-                let delta = self.stack[start + n + i * n_regions + j];
-                if let Some(&s) = scalars.get(j) {
+        let (n_regions, scalars) = self.blend.resolve(self.vsindex);
+        let needed = n
+            .checked_mul(n_regions)
+            .and_then(|total_deltas| total_deltas.checked_add(n))
+            .ok_or(UNDERFLOW)?;
+        let start = self.stack.len().checked_sub(needed).ok_or(UNDERFLOW)?;
+        let (masters, deltas) = self
+            .stack
+            .get_mut(start..)
+            .and_then(|tail| tail.split_at_mut_checked(n))
+            .ok_or(UNDERFLOW)?;
+        if n_regions > 0 {
+            for (master, row) in masters.iter_mut().zip(deltas.chunks_exact(n_regions)) {
+                let mut accum = 0.0_f32;
+                for (&delta, &s) in row.iter().zip(scalars) {
                     accum += s * delta;
                 }
+                *master += accum;
             }
-            self.stack[start + i] += accum;
         }
         self.stack.truncate(start + n);
         Ok(())
@@ -467,8 +446,7 @@ impl<'a> Baker<'a> {
     /// fixed form (`b0=255`) when needed and the integer forms
     /// otherwise.
     fn flush_stack(&mut self) {
-        let stack = core::mem::take(&mut self.stack);
-        for v in stack {
+        for v in self.stack.drain(..) {
             encode_charstring_number(v, &mut self.out);
         }
     }

@@ -98,7 +98,6 @@ impl<'a> Reader<'a> {
 
     /// Reads a big-endian `i8`.
     pub fn read_i8(&mut self) -> Result<i8> {
-        #[allow(clippy::cast_possible_wrap)]
         Ok(self.read_u8()? as i8)
     }
 
@@ -141,7 +140,6 @@ impl<'a> Reader<'a> {
     /// in practice to `[-1.0, 1.0]`.
     pub fn read_f2dot14(&mut self) -> Result<f32> {
         let raw = self.read_i16()?;
-        #[allow(clippy::cast_precision_loss)]
         Ok(f32::from(raw) / 16384.0)
     }
 
@@ -150,7 +148,6 @@ impl<'a> Reader<'a> {
     /// user-space axis coordinates in `fvar` and `avar`.
     pub fn read_f16dot16(&mut self) -> Result<f32> {
         let raw = self.read_i32()?;
-        #[allow(clippy::cast_precision_loss)]
         Ok(raw as f32 / 65536.0)
     }
 
@@ -174,9 +171,36 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// Absolute value of an `f32`.
+///
+/// `f32::abs` is not available in `core` on the minimum supported Rust
+/// version, so `no_std` builds cannot call it. Clearing the sign bit gives
+/// the same result for every input, NaN included.
+pub(crate) fn abs_f32(x: f32) -> f32 {
+    f32::from_bits(x.to_bits() & 0x7fff_ffff)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abs_f32_matches_std_abs() {
+        for x in [
+            0.0f32,
+            -0.0,
+            1.5,
+            -1.5,
+            f32::MIN,
+            f32::MAX,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ] {
+            assert_eq!(abs_f32(x).to_bits(), x.abs().to_bits());
+        }
+        assert!(abs_f32(f32::NAN).is_nan());
+        assert!(abs_f32(-f32::NAN).is_sign_positive());
+    }
 
     #[test]
     fn reads_big_endian_integers_in_sequence() {

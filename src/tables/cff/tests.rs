@@ -303,3 +303,31 @@ fn charstring_endchar_rejects_seac_four_args() {
     let mut o = Outline::new();
     assert!(parsed.outline(0, &mut o).is_err());
 }
+
+#[test]
+fn charstring_exponential_subr_calls_hit_op_limit() {
+    // Ten global subrs. Subr k calls subr k + 1 twenty times and
+    // subr 9 only returns. The depth stays within the cap of 10,
+    // but the call tree has 20^9 leaves, so without an operation
+    // limit the walk never finishes. With ten subrs the bias is
+    // 107, so subr k is pushed as the single byte
+    // k - 107 + 139 = k + 32.
+    let mut subrs: Vec<Vec<u8>> = Vec::new();
+    for k in 0..9u8 {
+        let mut s = Vec::new();
+        for _ in 0..20 {
+            s.push(k + 1 + 32);
+            s.push(op_code::CALLGSUBR);
+        }
+        s.push(op_code::RETURN);
+        subrs.push(s);
+    }
+    subrs.push(alloc::vec![op_code::RETURN]);
+    let globals: Vec<&[u8]> = subrs.iter().map(Vec::as_slice).collect();
+    let locals: Vec<&[u8]> = Vec::new();
+    let cs = [32, op_code::CALLGSUBR, op_code::ENDCHAR];
+    let mut out = Outline::new();
+    let mut interp = Interp::new(&globals, &locals, &mut out, false);
+    let err = interp.run(&cs, 0).unwrap_err();
+    assert!(matches!(err, Error::Malformed { .. }));
+}

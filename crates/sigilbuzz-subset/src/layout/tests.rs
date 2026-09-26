@@ -2,7 +2,7 @@
 //! and the lookup renumber.
 
 use super::bytes::parse_classdef_pairs_from_bytes;
-use super::driver::build_renumber;
+use super::driver::{assemble_layout_table, build_renumber};
 use super::*;
 use alloc::{vec, vec::Vec};
 
@@ -126,13 +126,14 @@ fn classdef_pairs_at_reads_a_null_offset_as_empty() {
     sub.extend_from_slice(&2u16.to_be_bytes()); // subtable format
     sub.extend_from_slice(&1u16.to_be_bytes());
     sub.extend_from_slice(&[0, 5, 0, 5, 0, 9]);
-    assert_eq!(classdef_pairs_at(&sub, 0), Some(Vec::new()));
+    let map = GidMap::from_kept(&[0]);
+    assert_eq!(map.classdef_pairs_at(&sub, 0), Some(Vec::new()));
     let cd_off = sub.len();
     sub.extend_from_slice(&2u16.to_be_bytes()); // ClassDef format 2
     sub.extend_from_slice(&1u16.to_be_bytes()); // rangeCount
     sub.extend_from_slice(&[0, 8, 0, 8, 0, 2]);
-    assert_eq!(classdef_pairs_at(&sub, cd_off), Some(vec![(8, 2)]));
-    assert_eq!(classdef_pairs_at(&sub, sub.len() + 1), None);
+    assert_eq!(map.classdef_pairs_at(&sub, cd_off), Some(vec![(8, 2)]));
+    assert_eq!(map.classdef_pairs_at(&sub, sub.len() + 1), None);
 }
 
 #[test]
@@ -154,4 +155,134 @@ fn build_renumber_skips_dropped() {
     ];
     let r = build_renumber(&rewritten);
     assert_eq!(r, vec![Some(0), None, Some(1)]);
+}
+
+/// Format 2 table (Coverage or ClassDef) with `count` copies of a
+/// range covering every glyph, all in class 1.
+fn overlapping_full_ranges(count: u16) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&2u16.to_be_bytes());
+    bytes.extend_from_slice(&count.to_be_bytes());
+    for _ in 0..count {
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&0xFFFFu16.to_be_bytes());
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+    }
+    bytes
+}
+
+#[test]
+fn parse_coverage_glyphs_caps_overlapping_ranges() {
+    // 65535 full ranges describe about 4.3 billion entries in 393 KB.
+    // The walk used to materialize all of them.
+    let bytes = overlapping_full_ranges(u16::MAX);
+    assert_eq!(parse_coverage_glyphs(&bytes).len(), MAX_GLYPH_ENTRIES);
+}
+
+#[test]
+fn parse_classdef_pairs_caps_overlapping_ranges() {
+    let bytes = overlapping_full_ranges(u16::MAX);
+    assert_eq!(
+        parse_classdef_pairs_from_bytes(&bytes).len(),
+        MAX_GLYPH_ENTRIES
+    );
+}
+
+#[test]
+fn gid_map_budget_stops_coverage_walks() {
+    let map = GidMap::from_kept(&[0, 1]);
+    let bytes = overlapping_full_ranges(1);
+    assert!(map.coverage_glyphs(&bytes).is_some());
+    assert!(!map.spend(usize::MAX));
+    assert!(map.budget_spent());
+    assert!(map.coverage_glyphs(&bytes).is_none());
+    assert!(map.classdef_pairs(&bytes).is_none());
+    map.reset_budget();
+    assert!(map.coverage_glyphs(&bytes).is_some());
+}
+
+/// One lookup of type 1 holding `count` subtables of `size` bytes
+/// each. Subtable bytes start with format 1 so they read as valid.
+fn big_lookup(count: usize, size: usize) -> RewrittenLookup {
+    let mut body = vec![0u8; size];
+    body[1] = 1;
+    RewrittenLookup {
+        lookup_type: 1,
+        lookup_flag: 0,
+        mark_filtering_set: None,
+        subtables: (0..count)
+            .map(|_| RewrittenSubtable {
+                bytes: body.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// Reads `(lookup type, [(wrapped type, subtable offset)])` for each
+/// lookup of an assembled table, following Extension records.
+fn read_lookups(table: &[u8], ext: u16) -> Vec<(u16, Vec<(u16, usize)>)> {
+    let rd = |o: usize| usize::from(u16::from_be_bytes([table[o], table[o + 1]]));
+    let ll = rd(8);
+    (0..rd(ll))
+        .map(|i| {
+            let base = ll + rd(ll + 2 + i * 2);
+            let ty = rd(base) as u16;
+            let subs = (0..rd(base + 4))
+                .map(|s| {
+                    let sub = base + rd(base + 6 + s * 2);
+                    if ty == ext {
+                        let off = u32::from_be_bytes([
+                            table[sub + 4],
+                            table[sub + 5],
+                            table[sub + 6],
+                            table[sub + 7],
+                        ]) as usize;
+                        (rd(sub + 2) as u16, sub + off)
+                    } else {
+                        (ty, sub)
+                    }
+                })
+                .collect();
+            (ty, subs)
+        })
+        .collect()
+}
+
+#[test]
+fn assemble_keeps_inline_layout_when_offsets_fit() {
+    let lookups = vec![big_lookup(2, 100)];
+    let table = assemble_layout_table(&[0, 0], &[0, 0], &lookups, 7, None).unwrap();
+    let read = read_lookups(&table, 7);
+    assert_eq!(read.len(), 1);
+    assert_eq!(read[0].0, 1);
+}
+
+#[test]
+fn assemble_promotes_to_extension_lookups_past_16_bit_offsets() {
+    // Three lookups of 40 KB each: the third lookup starts past
+    // 64 KB, which used to wrap its Offset16 and point it at the
+    // wrong bytes.
+    let lookups = vec![
+        big_lookup(1, 40_000),
+        big_lookup(1, 40_000),
+        big_lookup(2, 30_000),
+    ];
+    let table = assemble_layout_table(&[0, 0], &[0, 0], &lookups, 7, None).unwrap();
+    let read = read_lookups(&table, 7);
+    assert_eq!(read.len(), 3);
+    for (lookup, subs) in &read {
+        assert_eq!(*lookup, 7, "every lookup becomes an Extension lookup");
+        for &(wrapped, off) in subs {
+            assert_eq!(wrapped, 1);
+            assert_eq!(&table[off..off + 2], &1u16.to_be_bytes());
+        }
+    }
+    assert_eq!(read[2].1.len(), 2);
+}
+
+#[test]
+fn assemble_fails_when_script_and_feature_lists_overflow() {
+    let lookups = vec![big_lookup(1, 10)];
+    let huge = vec![0u8; 70_000];
+    assert!(assemble_layout_table(&huge, &[0, 0], &lookups, 7, None).is_err());
 }

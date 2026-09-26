@@ -66,8 +66,7 @@ pub(super) fn bake_glyf_loca(
                 // Composite: pass through verbatim. Component gids do
                 // not change (instancing keeps every glyph) so no
                 // rewrite is needed. Composite-level gvar deltas are
-                // conservatively dropped on this pass. The briefing
-                // calls them out as a deferral.
+                // not applied: this is a known limitation of the bake.
                 body.to_vec()
             }
         };
@@ -125,16 +124,16 @@ pub(super) fn bake_glyf_loca(
 }
 
 // Simple-glyph flag bits.
-const FLAG_ON_CURVE: u8 = 0x01;
+pub(super) const FLAG_ON_CURVE: u8 = 0x01;
 const FLAG_X_SHORT: u8 = 0x02;
 const FLAG_Y_SHORT: u8 = 0x04;
-const FLAG_REPEAT: u8 = 0x08;
-const FLAG_X_SAME_OR_POS: u8 = 0x10;
-const FLAG_Y_SAME_OR_POS: u8 = 0x20;
+pub(super) const FLAG_REPEAT: u8 = 0x08;
+pub(super) const FLAG_X_SAME_OR_POS: u8 = 0x10;
+pub(super) const FLAG_Y_SAME_OR_POS: u8 = 0x20;
 
 /// Re-encodes a simple glyph with `deltas` applied to its contour
 /// points. The new bbox is recomputed from the baked coordinates.
-fn bake_simple_glyph(
+pub(super) fn bake_simple_glyph(
     body: &[u8],
     deltas: &[sigilbuzz::tables::PointDelta],
 ) -> Result<Vec<u8>, SubsetError> {
@@ -253,21 +252,23 @@ fn bake_simple_glyph(
     // Apply deltas. gvar's PointDelta vector is sparse: points
     // without an entry pick up zero deltas. Phantom-point deltas (point
     // index >= total_points) influence advances via HVAR rather than
-    // contour points, so we ignore them here.
+    // contour points, so we ignore them here. When a point appears
+    // more than once, its first entry wins. The dense per-point table
+    // keeps the lookup linear for glyphs with many points.
+    let mut point_deltas: Vec<Option<(f32, f32)>> = alloc::vec![None; total_points];
+    for d in deltas {
+        if let Some(slot @ None) = point_deltas.get_mut(usize::from(d.point)) {
+            *slot = Some((d.dx, d.dy));
+        }
+    }
     let mut baked_x: Vec<i32> = Vec::with_capacity(total_points);
     let mut baked_y: Vec<i32> = Vec::with_capacity(total_points);
-    for i in 0..total_points {
-        let mut x = xs[i] as f32;
-        let mut y = ys[i] as f32;
-        // Look up delta for point i (linear scan: the typical glyph
-        // has < 100 points and < 20 deltas, so this beats a HashMap
-        // and stays no_std-clean).
-        for d in deltas {
-            if d.point as usize == i {
-                x += d.dx;
-                y += d.dy;
-                break;
-            }
+    for ((&x, &y), delta) in xs.iter().zip(&ys).zip(&point_deltas) {
+        let mut x = x as f32;
+        let mut y = y as f32;
+        if let Some((dx, dy)) = *delta {
+            x += dx;
+            y += dy;
         }
         baked_x.push(round_half_to_even(x));
         baked_y.push(round_half_to_even(y));
@@ -448,8 +449,9 @@ fn round_half_to_even(v: f32) -> i32 {
     // doesn't mandate a specific rounding mode for instancing, but
     // round-half-to-even is what fonttools' instancer uses, and it
     // matches IEEE 754's default.
-    #[allow(clippy::cast_possible_truncation)]
-    let r = if (v - v.floor() - 0.5).abs() < f32::EPSILON {
+    if (v - v.floor() - 0.5).abs() < f32::EPSILON {
+        // Only values below 2^23 in magnitude have a fractional part,
+        // so `f + 1` cannot overflow.
         let f = v.floor() as i32;
         if f % 2 == 0 {
             f
@@ -458,8 +460,7 @@ fn round_half_to_even(v: f32) -> i32 {
         }
     } else {
         v.round() as i32
-    };
-    r
+    }
 }
 
 pub(super) fn clamp_i16(v: i32) -> i16 {

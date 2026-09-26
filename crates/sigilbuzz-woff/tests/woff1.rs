@@ -207,3 +207,40 @@ fn unwrap_rejects_compressed_tables_when_feature_disabled() {
     // "feature disabled" branch.
     assert!(unwrap_woff1(&bytes).is_err());
 }
+
+/// totalSfntSize in the WOFF1 header (bytes 16..20).
+fn total_sfnt_size(woff: &[u8]) -> u32 {
+    u32::from_be_bytes([woff[16], woff[17], woff[18], woff[19]])
+}
+
+/// The WOFF1 spec defines totalSfntSize as the SFNT header, the table
+/// directory, and every table padded to four bytes. The wrapper used
+/// to write the input length instead, which is short when the input's
+/// last table is not padded. This input is one 5-byte table with no
+/// trailing padding: 33 bytes long, 36 once unwrapped.
+#[test]
+fn wrap_writes_the_padded_sfnt_size() {
+    let mut sfnt = Vec::new();
+    sfnt.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    sfnt.extend_from_slice(&1u16.to_be_bytes()); // numTables
+    sfnt.extend_from_slice(&[0; 6]);
+    sfnt.extend_from_slice(b"test");
+    sfnt.extend_from_slice(&0u32.to_be_bytes()); // checksum
+    sfnt.extend_from_slice(&28u32.to_be_bytes()); // offset
+    sfnt.extend_from_slice(&5u32.to_be_bytes()); // length
+    sfnt.extend_from_slice(b"abcde");
+    assert_eq!(sfnt.len(), 33);
+
+    let woff = wrap_woff1(&sfnt).expect("wraps");
+    assert_eq!(total_sfnt_size(&woff), 36);
+    let unwrapped = unwrap_woff1(&woff).expect("unwraps");
+    assert_eq!(unwrapped.len(), 36);
+}
+
+/// For a font whose tables are already padded the value is the file
+/// size, as before.
+#[test]
+fn wrap_writes_the_file_size_for_a_padded_font() {
+    let woff = wrap_woff1(TTF).expect("wraps");
+    assert_eq!(total_sfnt_size(&woff) as usize, TTF.len());
+}

@@ -61,6 +61,9 @@ impl<'a> ScriptList<'a> {
     }
 
     /// Iterates `(tag, Script)` pairs in record order.
+    // The iterator yields owned `(tag, Script)` values and the list is
+    // `Copy`, so an `IntoIterator for &ScriptList` impl would add API
+    // surface without any benefit.
     #[allow(clippy::iter_without_into_iter)]
     pub fn iter(&self) -> ScriptIter<'a> {
         ScriptIter {
@@ -205,7 +208,7 @@ impl<'a> Script<'a> {
                 core::cmp::Ordering::Equal => {
                     // `rel_off` is relative to the Script table
                     // start; `LangSys::parse_at` takes an absolute
-                    // u16 offset into `data`. The naïve `(self.base
+                    // u16 offset into `data`. The naive `(self.base
                     // + rel_off) as u16` silently wraps when the sum
                     // exceeds `u16::MAX`: a Script placed past
                     // offset 0x8000 combined with a large rel_off is

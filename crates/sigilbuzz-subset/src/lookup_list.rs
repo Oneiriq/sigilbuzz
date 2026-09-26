@@ -47,34 +47,40 @@ pub(crate) fn emit(lookups: &[RewrittenLookup], extension_type: u16) -> Option<V
     compact(lookups).or_else(|| extension(lookups, extension_type))
 }
 
+/// Writes `value` at `pos`. Callers only write slots they reserved.
 fn put_u16(out: &mut [u8], pos: usize, value: u16) {
-    out[pos..pos + 2].copy_from_slice(&value.to_be_bytes());
+    if let Some(slot) = out.get_mut(pos..pos + 2) {
+        slot.copy_from_slice(&value.to_be_bytes());
+    }
 }
 
 /// Appends a Lookup header with zeroed subtable offsets and returns the
-/// position of the first offset slot.
-fn push_header(out: &mut Vec<u8>, lookup: &RewrittenLookup, lookup_type: u16) -> usize {
+/// position of the first offset slot. `None` when the lookup has more
+/// subtables than its 16-bit count can hold, which splitting a hostile
+/// subtable into many pieces could produce.
+fn push_header(out: &mut Vec<u8>, lookup: &RewrittenLookup, lookup_type: u16) -> Option<usize> {
+    let count = u16::try_from(lookup.subtables.len()).ok()?;
     out.extend_from_slice(&lookup_type.to_be_bytes());
     out.extend_from_slice(&lookup.lookup_flag.to_be_bytes());
-    out.extend_from_slice(&(lookup.subtables.len() as u16).to_be_bytes());
+    out.extend_from_slice(&count.to_be_bytes());
     let slots = out.len();
     out.resize(slots + lookup.subtables.len() * 2, 0);
     if let Some(set) = lookup.mark_filtering_set {
         out.extend_from_slice(&set.to_be_bytes());
     }
-    slots
+    Some(slots)
 }
 
 /// Each Lookup followed by its subtables. `None` when an offset would
 /// not fit in 16 bits.
 fn compact(lookups: &[RewrittenLookup]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
-    out.extend_from_slice(&(lookups.len() as u16).to_be_bytes());
+    out.extend_from_slice(&u16::try_from(lookups.len()).ok()?.to_be_bytes());
     out.resize(2 + lookups.len() * 2, 0);
     for (i, lookup) in lookups.iter().enumerate() {
         let lookup_start = out.len();
         put_u16(&mut out, 2 + i * 2, u16::try_from(lookup_start).ok()?);
-        let slots = push_header(&mut out, lookup, lookup.lookup_type);
+        let slots = push_header(&mut out, lookup, lookup.lookup_type)?;
         for (j, sub) in lookup.subtables.iter().enumerate() {
             let rel = u16::try_from(out.len() - lookup_start).ok()?;
             put_u16(&mut out, slots + j * 2, rel);
@@ -103,14 +109,14 @@ fn inner_of(lookup: &RewrittenLookup, bytes: &[u8], extension_type: u16) -> (u16
 /// extension subtables, then the bodies.
 fn extension(lookups: &[RewrittenLookup], extension_type: u16) -> Option<Vec<u8>> {
     let mut out = Vec::new();
-    out.extend_from_slice(&(lookups.len() as u16).to_be_bytes());
+    out.extend_from_slice(&u16::try_from(lookups.len()).ok()?.to_be_bytes());
     out.resize(2 + lookups.len() * 2, 0);
     // (header start, first offset slot) per lookup.
     let mut headers = Vec::with_capacity(lookups.len());
     for (i, lookup) in lookups.iter().enumerate() {
         let lookup_start = out.len();
         put_u16(&mut out, 2 + i * 2, u16::try_from(lookup_start).ok()?);
-        let slots = push_header(&mut out, lookup, extension_type);
+        let slots = push_header(&mut out, lookup, extension_type)?;
         headers.push((lookup_start, slots));
     }
     // (extension subtable position, body) in lookup order.
@@ -132,7 +138,8 @@ fn extension(lookups: &[RewrittenLookup], extension_type: u16) -> Option<Vec<u8>
     }
     for (at, body) in bodies {
         let rel = u32::try_from(out.len() - at).ok()?;
-        out[at + 4..at + 8].copy_from_slice(&rel.to_be_bytes());
+        out.get_mut(at + 4..at + 8)?
+            .copy_from_slice(&rel.to_be_bytes());
         out.extend_from_slice(&body);
     }
     Some(out)

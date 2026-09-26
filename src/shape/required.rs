@@ -14,7 +14,7 @@
 //! [`apply_unscheduled`] runs the required feature when no pass of
 //! the segment's pipeline will apply its tag.
 
-use super::{apply_gsub_lookup, feature_disabled, Feature};
+use super::{apply_gsub_lookup, feature_disabled, Feature, LookupBudget};
 use crate::buffer::Glyph;
 use crate::ot::indic::devanagari::{INDIC_BASIC_FEATURES, INDIC_PRESENTATION_FEATURES};
 use crate::ot::indic::indic_config_for;
@@ -122,13 +122,15 @@ impl SegmentPlan<'_> {
 
 /// Runs the required feature of the language system the segment
 /// selects, when its tag is one `plan` never applies. Call before the
-/// segment's first GSUB lookup.
+/// segment's first GSUB lookup. The lookups spend `budget`, the one
+/// the whole [`super::shape`] call shares.
 pub(super) fn apply_unscheduled(
     gsub: &Gsub<'_>,
     glyphs: &mut alloc::vec::Vec<Glyph>,
     gdef: Option<&Gdef<'_>>,
     script_priority: &[[u8; 4]],
     plan: &SegmentPlan<'_>,
+    budget: &mut LookupBudget,
 ) {
     if glyphs.is_empty() {
         return;
@@ -145,7 +147,7 @@ pub(super) fn apply_unscheduled(
         return;
     }
     for lookup in lookups {
-        apply_gsub_lookup(gsub, lookup, glyphs, gdef, 0);
+        apply_gsub_lookup(gsub, lookup, glyphs, gdef, 0, budget);
     }
 }
 

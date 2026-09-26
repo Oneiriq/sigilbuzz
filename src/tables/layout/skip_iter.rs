@@ -193,10 +193,12 @@ impl<'a> MatchFilter<'a> {
     /// Convenience wrapper: walks `glyphs[..end]` backward and
     /// returns the first index (closer to `end-1`) that is not
     /// skipped. `None` if the prefix is empty or every preceding
-    /// glyph is filtered out.
+    /// glyph is filtered out. An `end` past the slice walks the
+    /// whole slice.
     #[must_use]
     pub fn prev_unskipped(&self, glyphs: &[u16], end: usize) -> Option<usize> {
-        (0..end).rev().find(|&i| !self.is_skipped(glyphs[i]))
+        let prefix = glyphs.get(..end).unwrap_or(glyphs);
+        prefix.iter().rposition(|&g| !self.is_skipped(g))
     }
 }
 
@@ -265,8 +267,10 @@ impl<'g, 'f> SkipIter<'g, 'f> {
 
     /// Returns the next unfiltered glyph strictly before the current
     /// cursor, decrementing the cursor past it. `None` when the
-    /// prefix contains only filtered glyphs.
+    /// prefix contains only filtered glyphs. A cursor past the end of
+    /// the slice first moves back to the end.
     pub fn prev_glyph(&mut self) -> Option<(usize, u16)> {
+        self.cursor = self.cursor.min(self.glyphs.len());
         while self.cursor > 0 {
             self.cursor -= 1;
             let i = self.cursor;
@@ -519,5 +523,19 @@ mod tests {
         assert_eq!(f.prev_unskipped(&glyphs, 2), Some(0));
         assert_eq!(f.prev_unskipped(&glyphs, 1), Some(0));
         assert_eq!(f.prev_unskipped(&glyphs, 0), None);
+    }
+
+    #[test]
+    fn backward_walks_from_past_the_end_stay_in_bounds() {
+        // A start or end past the slice used to index out of bounds.
+        let f = MatchFilter::none();
+        let glyphs = [10u16, 11, 12];
+        assert_eq!(f.prev_unskipped(&glyphs, 10), Some(2));
+        assert_eq!(f.prev_unskipped(&[], 10), None);
+        let mut it = SkipIter::new(&glyphs, &f, 10);
+        assert_eq!(it.prev_glyph(), Some((2, 12)));
+        let mut it = SkipIter::new(&glyphs, &f, usize::MAX);
+        assert_eq!(it.prev_glyph(), Some((2, 12)));
+        assert_eq!(it.next_glyph(), Some((2, 12)));
     }
 }

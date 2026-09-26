@@ -6,6 +6,8 @@ use alloc::vec::Vec;
 
 use sigilbuzz::tables::layout::FeatureList;
 
+use super::bytes::{read_tag, read_u16};
+use super::GidMap;
 use crate::offset16::Offset16Guard;
 use crate::warnings::Diag;
 use crate::SubsetError;
@@ -22,15 +24,17 @@ pub(super) struct RewrittenFeatures {
 /// Returns the new bytes plus a feature-index renumber map.
 ///
 /// A feature whose table cannot be read is dropped and reported
-/// through `diag` at its FeatureRecord; `list_at` is where the
-/// FeatureList starts in the table.
+/// through `diag` at its FeatureRecord. `list_at` is where the
+/// FeatureList starts in the table. Returns `Ok(None)` once the work
+/// budget in `map` runs out.
 pub(super) fn rewrite_features(
     feature_list: FeatureList<'_>,
     lookup_renumber: &[Option<u16>],
     live_alternates: &[bool],
     diag: &Diag<'_>,
     list_at: usize,
-) -> Result<RewrittenFeatures, SubsetError> {
+    map: &GidMap,
+) -> Result<Option<RewrittenFeatures>, SubsetError> {
     let offsets = Offset16Guard::default();
     let mut surviving: Vec<([u8; 4], Vec<u16>)> = Vec::new();
     let mut feature_renumber: Vec<Option<u16>> = Vec::with_capacity(feature_list.len() as usize);
@@ -44,6 +48,9 @@ pub(super) fn rewrite_features(
             feature_renumber.push(None);
             continue;
         };
+        if !map.spend(1 + usize::from(feature.len())) {
+            return Ok(None);
+        }
         let new_indices: Vec<u16> = feature
             .lookup_indices()
             .filter_map(|li| lookup_renumber.get(li as usize).copied().flatten())
@@ -84,10 +91,10 @@ pub(super) fn rewrite_features(
     }
     offsets.check("FeatureList rewrite: an offset exceeds 64 KiB")?;
 
-    Ok(RewrittenFeatures {
+    Ok(Some(RewrittenFeatures {
         bytes: out,
         feature_renumber,
-    })
+    }))
 }
 
 /// Rewrites the ScriptList by walking the raw bytes (the parser
@@ -98,12 +105,14 @@ pub(super) fn rewrite_features(
 /// one script survives.
 ///
 /// A script or language system that cannot be read is dropped and
-/// reported through `diag`; `bytes` is the ScriptList, a sub-slice of
-/// the table `diag` reports against.
+/// reported through `diag`. `bytes` is the ScriptList, a sub-slice of
+/// the table `diag` reports against. The walk charges the work budget
+/// in `map` and returns `Ok(None)` once it runs out.
 pub(super) fn rewrite_scripts_from_bytes(
     bytes: &[u8],
     feature_renumber: &[Option<u16>],
     diag: &Diag<'_>,
+    map: &GidMap,
 ) -> Result<Option<Vec<u8>>, SubsetError> {
     // ScriptList:
     //   u16 scriptCount
@@ -134,13 +143,12 @@ pub(super) fn rewrite_scripts_from_bytes(
 
     for i in 0..script_count {
         let rec_off = 2 + i * 6;
-        let tag = [
-            bytes[rec_off],
-            bytes[rec_off + 1],
-            bytes[rec_off + 2],
-            bytes[rec_off + 3],
-        ];
-        let script_off = u16::from_be_bytes([bytes[rec_off + 4], bytes[rec_off + 5]]) as usize;
+        let (Some(tag), Some(script_off)) =
+            (read_tag(bytes, rec_off), read_u16(bytes, rec_off + 4))
+        else {
+            continue;
+        };
+        let script_off = usize::from(script_off);
         let Some(script_body) = bytes.get(script_off..).filter(|b| b.len() >= 4) else {
             diag.in_part(
                 bytes,
@@ -154,8 +162,16 @@ pub(super) fn rewrite_scripts_from_bytes(
         //   Offset16 defaultLangSysOffset (Script-relative; 0 means none)
         //   u16      langSysCount
         //   LangSysRecord records[langSysCount]: { tag(4) + Offset16 (Script-relative) }
-        let default_off = u16::from_be_bytes([script_body[0], script_body[1]]) as usize;
-        let langsys_count = u16::from_be_bytes([script_body[2], script_body[3]]) as usize;
+        let (Some(default_off), Some(langsys_count)) =
+            (read_u16(script_body, 0), read_u16(script_body, 2))
+        else {
+            continue;
+        };
+        let default_off = usize::from(default_off);
+        let langsys_count = usize::from(langsys_count);
+        if !map.spend(1 + langsys_count) {
+            return Ok(None);
+        }
         let langsys_records_off = 4;
         let langsys_records_end = langsys_records_off + langsys_count * 6;
         if script_body.len() < langsys_records_end {
@@ -169,7 +185,7 @@ pub(super) fn rewrite_scripts_from_bytes(
         }
 
         let default = if default_off != 0 {
-            read_langsys(script_body, 0, default_off, feature_renumber, diag)
+            read_langsys(script_body, 0, default_off, feature_renumber, diag, map)
         } else {
             None
         };
@@ -177,16 +193,20 @@ pub(super) fn rewrite_scripts_from_bytes(
         let mut langsystems: Vec<([u8; 4], RewrittenLangSys)> = Vec::new();
         for j in 0..langsys_count {
             let lr = langsys_records_off + j * 6;
-            let ls_tag = [
-                script_body[lr],
-                script_body[lr + 1],
-                script_body[lr + 2],
-                script_body[lr + 3],
-            ];
-            let ls_off = u16::from_be_bytes([script_body[lr + 4], script_body[lr + 5]]) as usize;
-            if let Some(rls) = read_langsys(script_body, lr + 4, ls_off, feature_renumber, diag) {
+            let (Some(ls_tag), Some(ls_off)) =
+                (read_tag(script_body, lr), read_u16(script_body, lr + 4))
+            else {
+                continue;
+            };
+            let ls_off = usize::from(ls_off);
+            if let Some(rls) =
+                read_langsys(script_body, lr + 4, ls_off, feature_renumber, diag, map)
+            {
                 langsystems.push((ls_tag, rls));
             }
+        }
+        if map.budget_spent() {
+            return Ok(None);
         }
 
         if default.is_some() || !langsystems.is_empty() {
@@ -291,9 +311,12 @@ fn rewrite_langsys_from_bytes(
         }
     };
     let mut new_indices: Vec<u16> = Vec::with_capacity(count);
-    for i in 0..count {
-        let off = 6 + i * 2;
-        let fi = u16::from_be_bytes([bytes[off], bytes[off + 1]]);
+    for fi in bytes
+        .get(6..need)
+        .unwrap_or_default()
+        .chunks_exact(2)
+        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+    {
         if let Some(Some(new)) = feature_renumber.get(fi as usize) {
             new_indices.push(*new);
         }
@@ -309,13 +332,15 @@ fn rewrite_langsys_from_bytes(
 
 /// Rewrites the LangSys at `off` inside `script`, whose Offset16 sits
 /// at byte `slot` of `script`. A LangSys that cannot be read is dropped
-/// and reported through `diag`.
+/// and reported through `diag`. Its feature indices are charged to the
+/// work budget in `map`, and nothing is read once it runs out.
 fn read_langsys(
     script: &[u8],
     slot: usize,
     off: usize,
     feature_renumber: &[Option<u16>],
     diag: &Diag<'_>,
+    map: &GidMap,
 ) -> Option<RewrittenLangSys> {
     let Some(body) = script.get(off..) else {
         diag.in_part(
@@ -326,6 +351,10 @@ fn read_langsys(
         );
         return None;
     };
+    let count = read_u16(body, 4).map_or(0, usize::from);
+    if !map.spend(1 + count) {
+        return None;
+    }
     match rewrite_langsys_from_bytes(body, feature_renumber) {
         Ok(langsys) => langsys,
         Err(e) => {

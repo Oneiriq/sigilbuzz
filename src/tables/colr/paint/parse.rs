@@ -16,7 +16,6 @@ impl<'a> ColrPaint<'a> {
     // The paint tree spans 32 distinct formats so the match is
     // necessarily long. Splitting per-format would hurt locality more
     // than it would help readability, so keep the big `match` intact.
-    #[allow(clippy::too_many_lines, clippy::similar_names)]
     pub fn parse(data: &'a [u8], offset: usize) -> Result<Self> {
         if offset >= data.len() {
             return Err(Error::Truncated {

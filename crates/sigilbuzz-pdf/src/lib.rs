@@ -69,9 +69,10 @@
 //!
 //! # No-std
 //!
-//! `sigilbuzz-pdf` builds with `--no-default-features`. It uses
-//! `alloc::vec::Vec` and `alloc::string::String`; the emitter never
-//! requires `std`.
+//! The emitter needs only `alloc::vec::Vec` and
+//! `alloc::string::String`. The crate still depends on `sigilbuzz`
+//! with its default `std` feature, so even with
+//! `--no-default-features` it needs a target with `std`.
 //!
 //! [`PathOp`]: sigilbuzz::tables::PathOp
 
@@ -162,12 +163,8 @@ pub fn emit_type3_font(face: &Face<'_>, gids: &[GlyphId]) -> Type3Font {
     let mut widths = Vec::with_capacity(gids.len().min(255));
     let mut font_bbox = Bbox::empty();
 
-    for (idx, &gid) in (1_u16..).zip(gids.iter()) {
-        if idx > 255 {
-            break;
-        }
-        let code = idx as u8;
-
+    // Char codes run 1 to 255. `zip` stops at whichever side ends first.
+    for (code, &gid) in (1_u8..=255).zip(gids) {
         let name = format!("g{gid}");
         let advance = hmtx
             .as_ref()

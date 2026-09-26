@@ -4,7 +4,7 @@
 //! `sigilbuzz::ot` and `sigilbuzz::unicode` graduated in 0.20.0 is
 //! reachable through crate-root paths *without* going through the
 //! `#[doc(hidden)]` parent modules. This is the contract: downstream
-//! consumers (oniq, pixel-stroke, future shapers) are free to write
+//! consumers (text renderers, rasterizers, future shapers) are free to write
 //! `use sigilbuzz::{UnicodeScript, BidiInfo, JoiningType, JoiningForm,
 //! feature, BidiClass, bidi_class, script_of, is_hangul_jamo}` and
 //! pin against those names. The deep paths stay internal.

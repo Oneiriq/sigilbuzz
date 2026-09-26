@@ -173,59 +173,168 @@ pub(crate) fn walk_dict(bytes: &[u8]) -> Result<Vec<DictEntry>, SubsetError> {
     Ok(out)
 }
 
+/// Returns the `(size, offset)` operands of a Private (op 18) DICT
+/// entry, or `None` when they are missing, non-integer, or negative.
+pub(crate) fn private_operands(entry: &DictEntry) -> Option<(u32, u32)> {
+    let [.., size, off] = entry.operands.as_slice() else {
+        return None;
+    };
+    let size = u32::try_from(size.int_value?).ok()?;
+    let off = u32::try_from(off.int_value?).ok()?;
+    Some((size, off))
+}
+
+/// INDEX reader for one table flavor ([`read_index`] or
+/// [`read_index_cff2`]).
+pub(crate) type IndexReader =
+    for<'b> fn(&'b [u8], usize) -> Result<(Vec<&'b [u8]>, usize), SubsetError>;
+
+/// Slices the Private DICT at `data[off..off + size]` and reads the
+/// local Subrs INDEX its op 19 points at (relative to the Private DICT
+/// start). Returns an empty Subrs list when op 19 is absent.
+pub(crate) fn read_private_dict<'a>(
+    data: &'a [u8],
+    size: u32,
+    off: u32,
+    read_subrs: IndexReader,
+    past_end: &'static str,
+) -> Result<(&'a [u8], Vec<&'a [u8]>), SubsetError> {
+    let start = off as usize;
+    let priv_bytes = start
+        .checked_add(size as usize)
+        .and_then(|end| data.get(start..end))
+        .ok_or(SubsetError::Unsupported(past_end))?;
+    // Walk the Private DICT for op 19. The last well-formed one wins.
+    let mut subrs_rel: Option<u32> = None;
+    for e in &walk_dict(priv_bytes)? {
+        if e.op == OP_SUBRS {
+            if let Some(v) = e.operands.last().and_then(|o| o.int_value) {
+                if let Ok(v) = u32::try_from(v) {
+                    subrs_rel = Some(v);
+                }
+            }
+        }
+    }
+    let locals = match subrs_rel {
+        Some(rel) => {
+            let abs = start
+                .checked_add(rel as usize)
+                .ok_or(SubsetError::Unsupported(past_end))?;
+            read_subrs(data, abs)?.0
+        }
+        None => Vec::new(),
+    };
+    Ok((priv_bytes, locals))
+}
+
+/// Error messages for one INDEX flavor. CFF1 and CFF2 INDEXes share a
+/// layout but report malformations under their own names.
+struct IndexErrors {
+    header_truncated: &'static str,
+    off_size_missing: &'static str,
+    off_size_out_of_range: &'static str,
+    offsets_truncated: &'static str,
+    final_offset_zero: &'static str,
+    data_past_end: &'static str,
+    offsets_non_monotone: &'static str,
+}
+
+const CFF1_INDEX_ERRORS: IndexErrors = IndexErrors {
+    header_truncated: "CFF INDEX header truncated",
+    off_size_missing: "CFF INDEX offSize missing",
+    off_size_out_of_range: "CFF INDEX offSize out of range",
+    offsets_truncated: "CFF INDEX offsets truncated",
+    final_offset_zero: "CFF INDEX final offset zero",
+    data_past_end: "CFF INDEX data past end",
+    offsets_non_monotone: "CFF INDEX offsets non-monotone",
+};
+
+const CFF2_INDEX_ERRORS: IndexErrors = IndexErrors {
+    header_truncated: "CFF2 INDEX header truncated",
+    off_size_missing: "CFF2 INDEX offSize missing",
+    off_size_out_of_range: "CFF2 INDEX offSize out of range",
+    offsets_truncated: "CFF2 INDEX offsets truncated",
+    final_offset_zero: "CFF2 INDEX final offset zero",
+    data_past_end: "CFF2 INDEX data past end",
+    offsets_non_monotone: "CFF2 INDEX offsets non-monotone",
+};
+
+/// Decodes a big-endian unsigned integer of 1..=4 bytes.
+fn read_be_uint(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .fold(0usize, |acc, &b| (acc << 8) | usize::from(b))
+}
+
+/// Shared INDEX reader. `count_len` is the width of the count field
+/// (2 for CFF1, 4 for CFF2). Every offset is checked against the data
+/// region before it is used, so a hostile offset array yields an error
+/// instead of an out-of-range slice.
+fn read_index_with<'a>(
+    bytes: &'a [u8],
+    pos: usize,
+    count_len: usize,
+    errs: &IndexErrors,
+) -> Result<(Vec<&'a [u8]>, usize), SubsetError> {
+    let count_bytes = bytes
+        .get(pos..)
+        .and_then(|b| b.get(..count_len))
+        .ok_or(SubsetError::Unsupported(errs.header_truncated))?;
+    let count = read_be_uint(count_bytes);
+    if count == 0 {
+        // Empty INDEX: just the count field, no offSize / offsets.
+        return Ok((Vec::new(), count_len));
+    }
+    // `pos + count_len` is in bounds: the count bytes were read above.
+    let off_size_pos = pos + count_len;
+    let off_size = usize::from(
+        *bytes
+            .get(off_size_pos)
+            .ok_or(SubsetError::Unsupported(errs.off_size_missing))?,
+    );
+    if !(1..=4).contains(&off_size) {
+        return Err(SubsetError::Unsupported(errs.off_size_out_of_range));
+    }
+    let off_table_start = off_size_pos + 1;
+    let off_table = count
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(off_size))
+        .and_then(|len| bytes.get(off_table_start..)?.get(..len))
+        .ok_or(SubsetError::Unsupported(errs.offsets_truncated))?;
+    let data_start = off_table_start + off_table.len();
+    let offsets: Vec<usize> = off_table.chunks_exact(off_size).map(read_be_uint).collect();
+    let last = offsets.last().copied().unwrap_or(0);
+    if last == 0 {
+        return Err(SubsetError::Unsupported(errs.final_offset_zero));
+    }
+    let data_len = last - 1;
+    let data = bytes
+        .get(data_start..)
+        .and_then(|b| b.get(..data_len))
+        .ok_or(SubsetError::Unsupported(errs.data_past_end))?;
+    let mut entries = Vec::with_capacity(count);
+    for w in offsets.windows(2) {
+        let &[a, b] = w else {
+            continue;
+        };
+        if a == 0 || b < a {
+            return Err(SubsetError::Unsupported(errs.offsets_non_monotone));
+        }
+        // An offset past the final one would slice beyond the data
+        // region. It also breaks monotonicity with the final offset.
+        let entry = data
+            .get(a - 1..b - 1)
+            .ok_or(SubsetError::Unsupported(errs.offsets_non_monotone))?;
+        entries.push(entry);
+    }
+    Ok((entries, data_start + data_len - pos))
+}
+
 /// Reads a CFF INDEX at `bytes[pos..]`, returning the entry slices
 /// (zero-copy into the input) plus the byte-length of the entire INDEX
 /// structure (so the caller can advance past it).
 pub(crate) fn read_index(bytes: &[u8], pos: usize) -> Result<(Vec<&[u8]>, usize), SubsetError> {
-    if pos + 2 > bytes.len() {
-        return Err(SubsetError::Unsupported("CFF INDEX header truncated"));
-    }
-    let count = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
-    if count == 0 {
-        return Ok((Vec::new(), 2));
-    }
-    if pos + 3 > bytes.len() {
-        return Err(SubsetError::Unsupported("CFF INDEX offSize missing"));
-    }
-    let off_size = bytes[pos + 2] as usize;
-    if !(1..=4).contains(&off_size) {
-        return Err(SubsetError::Unsupported("CFF INDEX offSize out of range"));
-    }
-    let off_table_start = pos + 3;
-    let off_table_end = off_table_start + (count + 1) * off_size;
-    if off_table_end > bytes.len() {
-        return Err(SubsetError::Unsupported("CFF INDEX offsets truncated"));
-    }
-    let mut offsets = Vec::with_capacity(count + 1);
-    for i in 0..=count {
-        let s = off_table_start + i * off_size;
-        let mut v = 0u32;
-        for &b in &bytes[s..s + off_size] {
-            v = (v << 8) | u32::from(b);
-        }
-        offsets.push(v as usize);
-    }
-    let data_start = off_table_end;
-    let last = *offsets.last().unwrap();
-    if last == 0 {
-        return Err(SubsetError::Unsupported("CFF INDEX final offset zero"));
-    }
-    let data_end = data_start + last - 1;
-    if data_end > bytes.len() {
-        return Err(SubsetError::Unsupported("CFF INDEX data past end"));
-    }
-    let mut entries = Vec::with_capacity(count);
-    for w in offsets.windows(2) {
-        let a = w[0];
-        let b = w[1];
-        if a == 0 || b < a {
-            return Err(SubsetError::Unsupported("CFF INDEX offsets non-monotone"));
-        }
-        let s = data_start + a - 1;
-        let e = data_start + b - 1;
-        entries.push(&bytes[s..e]);
-    }
-    Ok((entries, data_end - pos))
+    read_index_with(bytes, pos, 2, &CFF1_INDEX_ERRORS)
 }
 
 /// CFF2 INDEX reader. CFF2 widens the count field to u32 (CFF1 used
@@ -235,57 +344,7 @@ pub(crate) fn read_index_cff2(
     bytes: &[u8],
     pos: usize,
 ) -> Result<(Vec<&[u8]>, usize), SubsetError> {
-    if pos + 4 > bytes.len() {
-        return Err(SubsetError::Unsupported("CFF2 INDEX header truncated"));
-    }
-    let count =
-        u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as usize;
-    if count == 0 {
-        // CFF2 empty INDEX: just the 4-byte count, no offSize / offsets.
-        return Ok((Vec::new(), 4));
-    }
-    if pos + 5 > bytes.len() {
-        return Err(SubsetError::Unsupported("CFF2 INDEX offSize missing"));
-    }
-    let off_size = bytes[pos + 4] as usize;
-    if !(1..=4).contains(&off_size) {
-        return Err(SubsetError::Unsupported("CFF2 INDEX offSize out of range"));
-    }
-    let off_table_start = pos + 5;
-    let off_table_end = off_table_start + (count + 1) * off_size;
-    if off_table_end > bytes.len() {
-        return Err(SubsetError::Unsupported("CFF2 INDEX offsets truncated"));
-    }
-    let mut offsets = Vec::with_capacity(count + 1);
-    for i in 0..=count {
-        let s = off_table_start + i * off_size;
-        let mut v = 0u32;
-        for &b in &bytes[s..s + off_size] {
-            v = (v << 8) | u32::from(b);
-        }
-        offsets.push(v as usize);
-    }
-    let data_start = off_table_end;
-    let last = *offsets.last().unwrap();
-    if last == 0 {
-        return Err(SubsetError::Unsupported("CFF2 INDEX final offset zero"));
-    }
-    let data_end = data_start + last - 1;
-    if data_end > bytes.len() {
-        return Err(SubsetError::Unsupported("CFF2 INDEX data past end"));
-    }
-    let mut entries = Vec::with_capacity(count);
-    for w in offsets.windows(2) {
-        let a = w[0];
-        let b = w[1];
-        if a == 0 || b < a {
-            return Err(SubsetError::Unsupported("CFF2 INDEX offsets non-monotone"));
-        }
-        let s = data_start + a - 1;
-        let e = data_start + b - 1;
-        entries.push(&bytes[s..e]);
-    }
-    Ok((entries, data_end - pos))
+    read_index_with(bytes, pos, 4, &CFF2_INDEX_ERRORS)
 }
 
 /// Encodes a CFF2 INDEX (count is u32, layout otherwise identical to
@@ -381,27 +440,29 @@ pub(super) struct ParsedCff1<'a> {
 
 /// Walks the source CFF1 table and captures every span the rewriter
 /// needs. CID-keyed fonts are detected (op `0x0C24` / `0x0C25` /
-/// `0x0C1E` present) and surfaced via `is_cid`; the orchestration
-/// declines to subset them in this release.
+/// `0x0C1E` present) and surfaced via `is_cid` so the orchestration
+/// can route them through `subset_cid_keyed`.
 pub(super) fn parse_cff1(data: &[u8]) -> Result<ParsedCff1<'_>, SubsetError> {
-    if data.len() < 4 {
+    let Some(header) = data.first_chunk::<4>() else {
         return Err(SubsetError::Unsupported("CFF1 header truncated"));
-    }
-    let major = data[0];
-    let hdr_size = data[2] as usize;
+    };
+    let &[major, _, hdr_size, _] = header;
+    let header = header.as_slice();
+    let hdr_size = usize::from(hdr_size);
     if major != 1 {
         return Err(SubsetError::Unsupported("CFF1 major version != 1"));
     }
     if hdr_size < 4 || hdr_size > data.len() {
         return Err(SubsetError::Unsupported("CFF1 hdrSize invalid"));
     }
-    let header = &data[..4];
 
-    // Name INDEX.
-    let (name_entries, name_len) = read_index(data, hdr_size)?;
-    let name_index = &data[hdr_size..hdr_size + name_len];
-    let _ = name_entries;
+    // Name INDEX. `read_index` only returns lengths that stay inside
+    // `data`, so the spans below are always present.
+    let (_, name_len) = read_index(data, hdr_size)?;
     let mut pos = hdr_size + name_len;
+    let name_index = data
+        .get(hdr_size..pos)
+        .ok_or(SubsetError::Unsupported("CFF1 Name INDEX past end"))?;
 
     // Top DICT INDEX: first entry only.
     let (top_entries, top_index_len) = read_index(data, pos)?;
@@ -413,7 +474,9 @@ pub(super) fn parse_cff1(data: &[u8]) -> Result<ParsedCff1<'_>, SubsetError> {
 
     // String INDEX.
     let (_, string_len) = read_index(data, pos)?;
-    let string_index = &data[pos..pos + string_len];
+    let string_index = data
+        .get(pos..pos + string_len)
+        .ok_or(SubsetError::Unsupported("CFF1 String INDEX past end"))?;
     pos += string_len;
 
     // Global Subr INDEX.
@@ -451,13 +514,9 @@ pub(super) fn parse_cff1(data: &[u8]) -> Result<ParsedCff1<'_>, SubsetError> {
                     }
                 }
             }
-            OP_PRIVATE if e.operands.len() >= 2 => {
-                let s = e.operands[e.operands.len() - 2].int_value;
-                let o = e.operands[e.operands.len() - 1].int_value;
-                if let (Some(sv), Some(ov)) = (s, o) {
-                    if sv >= 0 && ov >= 0 {
-                        private = Some((sv as u32, ov as u32));
-                    }
+            OP_PRIVATE => {
+                if let Some(pair) = private_operands(e) {
+                    private = Some(pair);
                 }
             }
             OP_FD_ARRAY => {
@@ -487,37 +546,12 @@ pub(super) fn parse_cff1(data: &[u8]) -> Result<ParsedCff1<'_>, SubsetError> {
     let (char_strings, _) = read_index(data, cs_off)?;
 
     // Private DICT + Local Subr INDEX.
-    let (private_dict, local_subrs): (&[u8], Vec<&[u8]>) = if let Some((size, off)) = private {
-        let off = off as usize;
-        let size = size as usize;
-        if off + size > data.len() {
-            return Err(SubsetError::Unsupported("CFF1 Private DICT past end"));
+    let (private_dict, local_subrs): (&[u8], Vec<&[u8]>) = match private {
+        Some((size, off)) => {
+            read_private_dict(data, size, off, read_index, "CFF1 Private DICT past end")?
         }
-        let priv_bytes = &data[off..off + size];
-        // Walk Private DICT for op 19 (Subrs offset, relative to Private).
-        let priv_entries = walk_dict(priv_bytes)?;
-        let mut subrs_rel_off: Option<u32> = None;
-        for e in &priv_entries {
-            if e.op == OP_SUBRS {
-                if let Some(v) = e.operands.last().and_then(|o| o.int_value) {
-                    if v >= 0 {
-                        subrs_rel_off = Some(v as u32);
-                    }
-                }
-            }
-        }
-        if let Some(rel) = subrs_rel_off {
-            let abs = off + rel as usize;
-            let (locals, _) = read_index(data, abs)?;
-            (priv_bytes, locals)
-        } else {
-            (priv_bytes, Vec::new())
-        }
-    } else {
-        (&[][..], Vec::new())
+        None => (&[][..], Vec::new()),
     };
-
-    let _ = encoding_off; // Used after parsing; suppress unused lint.
 
     Ok(ParsedCff1 {
         header,

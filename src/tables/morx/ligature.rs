@@ -3,8 +3,8 @@
 use alloc::vec::Vec;
 
 use super::{
-    class_for, FLAG_DONT_ADVANCE, FLAG_LIG_PERFORM_ACTION, FLAG_LIG_SET_COMPONENT, LIG_ACTION_LAST,
-    LIG_ACTION_OFFSET_MASK, LIG_ACTION_OFFSET_SIGN, LIG_ACTION_STORE,
+    class_for, max_steps, FLAG_DONT_ADVANCE, FLAG_LIG_PERFORM_ACTION, FLAG_LIG_SET_COMPONENT,
+    LIG_ACTION_LAST, LIG_ACTION_OFFSET_MASK, LIG_ACTION_OFFSET_SIGN, LIG_ACTION_STORE,
 };
 use crate::tables::layout::state_table::{StateTableHeader, CLASS_OUT_OF_BOUNDS};
 
@@ -22,7 +22,15 @@ pub(super) fn apply_ligature(
     let mut cur_state: u16 = 0;
     let mut component_stack: Vec<usize> = Vec::new();
     let mut i = 0;
+    // The step cap also bounds the component stack, since each step
+    // pushes at most one entry.
+    let max_iters = max_steps(glyphs.len());
+    let mut iters = 0usize;
     while i <= glyphs.len() {
+        iters += 1;
+        if iters > max_iters {
+            return;
+        }
         let class = class_for(state, glyphs.get(i).copied()).unwrap_or(CLASS_OUT_OF_BOUNDS);
         let Ok(entry_idx) = state.entry_index(cur_state, class) else {
             return;
@@ -77,67 +85,72 @@ fn perform_ligature_action(
     let mut action_pos = action_idx as usize;
     let mut consumed: Vec<usize> = Vec::new();
     loop {
-        if stack.is_empty() {
+        let Some(stack_top) = stack.pop() else {
             return;
-        }
-        let stack_top = stack.pop().unwrap();
+        };
         consumed.push(stack_top);
 
-        let action_off = action_pos * 4;
-        let Some(action_bytes) = lig_actions.get(action_off..action_off + 4) else {
+        let Some(action) = u32_at(lig_actions, action_pos) else {
             return;
         };
-        let action = u32::from_be_bytes([
-            action_bytes[0],
-            action_bytes[1],
-            action_bytes[2],
-            action_bytes[3],
-        ]);
 
         let raw_off = action & LIG_ACTION_OFFSET_MASK;
-        // Sign-extend from the 30-bit signed offset field to i32. Do
-        // the arithmetic with two's-complement-safe casts so clippy's
-        // cast_possible_wrap stays happy. We actively want the wrap,
-        // that is the point of the conversion.
+        // Sign-extend from the 30-bit signed offset field to i32. The
+        // `as` casts wrap on purpose: that is the conversion.
         let signed_off: i32 = if action & LIG_ACTION_OFFSET_SIGN != 0 {
-            #[allow(clippy::cast_possible_wrap)]
-            {
-                (raw_off | 0xC000_0000) as i32
-            }
+            (raw_off | 0xC000_0000) as i32
         } else {
-            #[allow(clippy::cast_possible_wrap)]
-            {
-                raw_off as i32
-            }
+            raw_off as i32
         };
-        let glyph_id = i32::from(glyphs[stack_top]);
-        let comp_idx = glyph_id + signed_off;
-        let comp_byte_off = (comp_idx as usize).saturating_mul(2);
-        let Some(comp_bytes) = components.get(comp_byte_off..comp_byte_off + 2) else {
+        // An earlier ligature in this walk removes glyphs but leaves
+        // the stack as is, so a stack entry can point past the run.
+        // Stop the action instead of reading out of bounds.
+        let Some(&glyph) = glyphs.get(stack_top) else {
             return;
         };
-        let comp_val = i32::from(u16::from_be_bytes([comp_bytes[0], comp_bytes[1]]));
-        offset = offset.wrapping_add(comp_val);
+        // Cannot overflow: the glyph is at most 0xFFFF and the offset
+        // is a 30-bit signed value.
+        let comp_idx = i32::from(glyph) + signed_off;
+        // A negative index points before the component table. Treat
+        // it like any other out-of-range read.
+        let Some(comp_val) = usize::try_from(comp_idx)
+            .ok()
+            .and_then(|idx| u16_at(components, idx))
+        else {
+            return;
+        };
+        offset = offset.wrapping_add(i32::from(comp_val));
 
         if action & LIG_ACTION_LAST != 0 {
             if action & LIG_ACTION_STORE != 0 {
-                let lig_byte_off = (offset as usize).saturating_mul(2);
-                if let Some(lig_bytes) = ligatures.get(lig_byte_off..lig_byte_off + 2) {
-                    let lig_glyph = u16::from_be_bytes([lig_bytes[0], lig_bytes[1]]);
+                let lig_glyph = usize::try_from(offset)
+                    .ok()
+                    .and_then(|idx| u16_at(ligatures, idx));
+                if let Some(lig_glyph) = lig_glyph {
                     // Replace the earliest consumed slot with the
                     // ligature, drop the later slots. Sort in
                     // ascending order so the earliest index lands
                     // first. Stack was LIFO so the natural order is
                     // reversed.
                     consumed.sort_unstable();
-                    let keep = consumed[0];
-                    glyphs[keep] = lig_glyph;
+                    let Some((&keep, rest)) = consumed.split_first() else {
+                        return;
+                    };
+                    if let Some(slot) = glyphs.get_mut(keep) {
+                        *slot = lig_glyph;
+                    }
                     // origins[keep] keeps the smallest originating
                     // input index so cluster merging finds the
                     // correct grapheme root.
                     // Remove every other consumed slot, highest index
-                    // first so earlier indices stay valid.
-                    for &idx in consumed.iter().skip(1).rev() {
+                    // first so earlier indices stay valid. A glyph
+                    // pushed twice shows up twice here, so an earlier
+                    // removal can shorten the run past a later index.
+                    // Skip those.
+                    for &idx in rest.iter().rev() {
+                        if idx >= glyphs.len().min(origins.len()) {
+                            continue;
+                        }
                         glyphs.remove(idx);
                         origins.remove(idx);
                         if idx < *cursor {
@@ -150,4 +163,18 @@ fn perform_ligature_action(
         }
         action_pos += 1;
     }
+}
+
+/// Reads element `index` of a big-endian u16 array stored in `data`.
+fn u16_at(data: &[u8], index: usize) -> Option<u16> {
+    let start = index.checked_mul(2)?;
+    let bytes = data.get(start..)?.first_chunk::<2>()?;
+    Some(u16::from_be_bytes(*bytes))
+}
+
+/// Reads element `index` of a big-endian u32 array stored in `data`.
+fn u32_at(data: &[u8], index: usize) -> Option<u32> {
+    let start = index.checked_mul(4)?;
+    let bytes = data.get(start..)?.first_chunk::<4>()?;
+    Some(u32::from_be_bytes(*bytes))
 }

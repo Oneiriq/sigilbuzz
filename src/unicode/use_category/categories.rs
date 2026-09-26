@@ -21,12 +21,10 @@ use super::UseCategory;
 /// (U+1100..U+11FF, U+A960..U+A97F, U+D7B0..U+D7FF) are covered. Format
 /// characters and variation selectors carry their shared USE categories.
 ///
-/// Arms are grouped by script / Unicode block. `match_same_arms` is
-/// silenced so the table reads top-to-bottom against the block layout
-/// and a reviewer can check each script slice in isolation.
+/// Arms are grouped by script / Unicode block so the table reads
+/// top-to-bottom against the block layout and a reviewer can check
+/// each script slice in isolation.
 #[must_use]
-#[allow(clippy::match_same_arms)]
-#[allow(clippy::too_many_lines)]
 pub const fn use_category(ch: char) -> UseCategory {
     let cp = ch as u32;
     match cp {

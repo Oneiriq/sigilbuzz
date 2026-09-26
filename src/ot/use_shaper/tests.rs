@@ -1,7 +1,7 @@
 //! Tests for the USE shaper: syllable segmentation, pre-base
 //! reordering, cluster merging, and the Khmer feature tables.
 
-use super::reorder::initial_reorder;
+use super::reorder::{cluster_byte_offsets, initial_reorder};
 use super::*;
 use alloc::vec;
 
@@ -242,4 +242,61 @@ fn cluster_merge_collapses_syllable_to_head_offset() {
     // now it is first).
     assert_eq!(glyphs[0].glyph_id, 20);
     assert_eq!(glyphs[1].glyph_id, 10);
+}
+
+#[test]
+fn long_run_of_pre_base_signs_reorders_in_linear_time() {
+    // Khmer ka followed by 200000 sign-e is one consonant syllable
+    // whose pre-base signs all move. Checking each glyph against a
+    // list of moved indices cost about 4e10 comparisons.
+    const N: usize = 200_000;
+    let mut cp = vec!['\u{1780}'];
+    cp.extend(core::iter::repeat('\u{17C1}').take(N));
+    let mut glyphs = fake_glyphs(cp.len());
+    shape_khmer(None, None, &cp, &mut glyphs);
+    // The signs move to the front in order, then the base.
+    assert_eq!(glyphs.len(), N + 1);
+    assert_eq!(glyphs[0].glyph_id, 2);
+    assert_eq!(glyphs[N - 1].glyph_id, N as u32 + 1);
+    assert_eq!(glyphs[N].glyph_id, 1);
+}
+
+#[test]
+fn many_syllables_merge_clusters_in_linear_time() {
+    // 200000 Khmer digits are 200000 one-wide syllables. Visiting
+    // every glyph once per syllable cost about 4e10 comparisons.
+    const N: usize = 200_000;
+    let cp = vec!['\u{17E0}'; N];
+    let mut glyphs: Vec<Glyph> = (0..N).map(|i| Glyph::new(1, (i * 3) as u32)).collect();
+    shape_khmer(None, None, &cp, &mut glyphs);
+    assert_eq!(glyphs[N - 1].cluster, ((N - 1) * 3) as u32);
+}
+
+#[test]
+fn merge_syllable_clusters_matches_per_syllable_scan() {
+    // Reference: the per-syllable scan the binary search replaces.
+    fn merge_by_scan(glyphs: &mut [Glyph], syllables: &[Syllable], byte_offsets: &[u32]) {
+        for syl in syllables {
+            let (start, end) = (byte_offsets[syl.start], byte_offsets[syl.end]);
+            for g in glyphs.iter_mut() {
+                if g.cluster >= start && g.cluster < end {
+                    g.cluster = start;
+                }
+            }
+        }
+    }
+    let text = "\u{1780}\u{17C1}\u{17E0}\u{179F}\u{17D2}\u{178F}\u{17B8} \u{1780}";
+    let cp = cps(text);
+    let syllables = segment_syllables(&cp);
+    let byte_offsets = cluster_byte_offsets(&cp);
+    let total = byte_offsets[cp.len()];
+    for shift in 0..4u32 {
+        let clusters: Vec<u32> = (0..total + 3).rev().map(|c| c ^ shift).collect();
+        let glyphs: Vec<Glyph> = clusters.iter().map(|&c| Glyph::new(0, c)).collect();
+        let mut expected = glyphs.clone();
+        merge_by_scan(&mut expected, &syllables, &byte_offsets);
+        let mut got = glyphs;
+        merge_syllable_clusters(&mut got, &syllables, &byte_offsets);
+        assert_eq!(got, expected);
+    }
 }

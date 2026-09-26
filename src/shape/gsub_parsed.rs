@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use super::gsub::{
     apply_gsub_chain_context_at, apply_gsub_context_at, expand_glyph_in_place, substitute_glyph,
 };
-use super::{lig, resolve_extension};
+use super::{lig, resolve_extension, LookupBudget};
 use crate::buffer::Glyph;
 use crate::tables::gdef::Gdef;
 use crate::tables::gsub::{
@@ -177,6 +177,7 @@ pub(super) fn apply_parsed_lookup_at(
     at: usize,
     depth: u8,
     alternate_index: u16,
+    budget: &mut LookupBudget,
 ) -> usize {
     if at >= glyphs.len() {
         return 0;
@@ -200,7 +201,7 @@ pub(super) fn apply_parsed_lookup_at(
                     continue;
                 }
                 if let Some(seq) = m.apply(id) {
-                    if let Some(n) = expand_glyph_in_place(glyphs, at, &seq) {
+                    if let Some(n) = expand_glyph_in_place(glyphs, at, &seq, budget) {
                         ids.resync(glyphs);
                         return n;
                     }
@@ -218,9 +219,8 @@ pub(super) fn apply_parsed_lookup_at(
                 }
             }
             ParsedGsubSubtable::Ligature(ligature) => {
-                if let Some((out, positions)) =
-                    ligature.apply_filtered(&ids.as_slice()[at..], filter)
-                {
+                let window = ids.as_slice().get(at..).unwrap_or_default();
+                if let Some((out, positions)) = ligature.apply_filtered(window, filter) {
                     lig::ligate(glyphs, at, &positions, out, gdef, substitute_glyph);
                     ids.resync(glyphs);
                     // Ligature emits 1 glyph from N matched components.
@@ -244,8 +244,17 @@ pub(super) fn apply_parsed_lookup_at(
                 }
             }
             ParsedGsubSubtable::Context(ctx) => {
-                let ran =
-                    apply_gsub_context_at(gsub, ctx, glyphs, ids, gdef, filter, at, depth + 1);
+                let ran = apply_gsub_context_at(
+                    gsub,
+                    ctx,
+                    glyphs,
+                    ids,
+                    gdef,
+                    filter,
+                    at,
+                    depth + 1,
+                    budget,
+                );
                 if ran > 0 {
                     return ran;
                 }
@@ -260,6 +269,7 @@ pub(super) fn apply_parsed_lookup_at(
                     filter,
                     at,
                     depth + 1,
+                    budget,
                 );
                 if ran > 0 {
                     return ran;

@@ -123,3 +123,40 @@ pub(super) const fn is_common_for_segmentation(ch: char) -> bool {
         | 0xFE20..=0xFE2F
     )
 }
+
+/// Rebuilds the post-GSUB segment ranges after `morx` changed the
+/// glyph count. `origins[k]` is the pre-morx index output glyph `k`
+/// came from, or an out-of-range value for a glyph `morx` inserted.
+/// Each output glyph joins the segment of its origin (an inserted
+/// glyph joins its left neighbor's), and consecutive glyphs of the
+/// same segment form one range.
+pub(super) fn remap_segments(
+    segments: &[ProcessedSegment],
+    origins: &[usize],
+) -> Vec<ProcessedSegment> {
+    let segment_of = |origin: usize| {
+        let idx = segments.partition_point(|s| s.range.end <= origin);
+        segments
+            .get(idx)
+            .filter(|s| s.range.contains(&origin))
+            .map(|_| idx)
+    };
+    let mut out: Vec<ProcessedSegment> = Vec::new();
+    let mut current: Option<usize> = None;
+    for (k, &origin) in origins.iter().enumerate() {
+        let seg = segment_of(origin).or(current).unwrap_or(0);
+        let Some(priority) = segments.get(seg).map(|s| s.script_priority) else {
+            // No segments at all: nothing to attach the glyph to.
+            continue;
+        };
+        match out.last_mut() {
+            Some(last) if current == Some(seg) && last.range.end == k => last.range.end = k + 1,
+            _ => out.push(ProcessedSegment {
+                range: k..k + 1,
+                script_priority: priority,
+            }),
+        }
+        current = Some(seg);
+    }
+    out
+}

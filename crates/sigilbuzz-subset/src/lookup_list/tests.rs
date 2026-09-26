@@ -140,3 +140,12 @@ fn emit_is_deterministic() {
         .collect();
     assert_eq!(emit(&lookups, 9), emit(&lookups, 9));
 }
+
+/// A lookup split into more subtables than a 16-bit count holds cannot
+/// be written: its count would wrap.
+#[test]
+fn a_subtable_count_past_16_bits_is_refused() {
+    let subs: Vec<Vec<u8>> = (0..=usize::from(u16::MAX)).map(|_| Vec::new()).collect();
+    let lookups = [lookup(1, 0, None, &subs)];
+    assert!(emit(&lookups, 7).is_none());
+}

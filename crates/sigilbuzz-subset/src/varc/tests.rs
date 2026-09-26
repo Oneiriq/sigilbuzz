@@ -68,7 +68,6 @@ fn build_varc(coverage_gids: &[u16], glyph_records: &[&[u8]]) -> Vec<u8> {
 fn build_translate_record(gid: u16, tx: i16, ty: i16) -> Vec<u8> {
     let flags = VC_HAVE_TRANSLATE_X | VC_HAVE_TRANSLATE_Y;
     let mut record = Vec::new();
-    #[allow(clippy::cast_possible_truncation)]
     record.push(flags as u8);
     record.extend_from_slice(&gid.to_be_bytes());
     record.extend_from_slice(&tx.to_be_bytes());
@@ -281,10 +280,9 @@ fn subset_drops_table_when_no_covered_gid_kept() {
     // Coverage covers gid 5 only; kept set has only gid 2 -> drop.
     let rec = build_translate_record(7, 0, 0);
     let bytes = build_varc(&[5], &[&rec]);
-    let varc = sigilbuzz::tables::Varc::parse(&bytes).unwrap();
     let map = |g: u16| Some(g);
     let kept = vec![2u16];
-    let out = subset_varc(&varc, &bytes, &kept, &map).unwrap();
+    let out = subset_varc(&bytes, &kept, &map).unwrap();
     assert!(out.is_none());
 }
 
@@ -292,7 +290,6 @@ fn subset_drops_table_when_no_covered_gid_kept() {
 fn subset_keeps_table_with_renumbered_coverage() {
     let rec = build_translate_record(7, 10, 20);
     let bytes = build_varc(&[5], &[&rec]);
-    let varc = sigilbuzz::tables::Varc::parse(&bytes).unwrap();
     // Map old gid 5 -> new gid 1, old gid 7 (component) -> new gid 2.
     let map = |g: u16| match g {
         5 => Some(1),
@@ -300,7 +297,7 @@ fn subset_keeps_table_with_renumbered_coverage() {
         _ => None,
     };
     let kept = vec![5u16, 7];
-    let out = subset_varc(&varc, &bytes, &kept, &map).unwrap().unwrap();
+    let out = subset_varc(&bytes, &kept, &map).unwrap().unwrap();
     // Re-parse the output and verify it still passes the parser.
     let new_varc = sigilbuzz::tables::Varc::parse(&out).unwrap();
     assert!(new_varc.covers(1));
@@ -406,4 +403,70 @@ fn build_region_list_bytes_handles_zero_regions() {
     // Just a u16 region count of 0; no offset table, no payloads.
     assert_eq!(bytes.len(), 2);
     assert_eq!(&bytes[..2], &0u16.to_be_bytes());
+}
+
+/// Builds a coverage format-2 table from `(start, end, start_cov)`
+/// range records.
+fn build_coverage_format2(ranges: &[(u16, u16, u16)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&2u16.to_be_bytes());
+    out.extend_from_slice(&(ranges.len() as u16).to_be_bytes());
+    for (start, end, cov) in ranges {
+        out.extend_from_slice(&start.to_be_bytes());
+        out.extend_from_slice(&end.to_be_bytes());
+        out.extend_from_slice(&cov.to_be_bytes());
+    }
+    out
+}
+
+#[test]
+fn coverage_iter_stops_after_a_full_glyph_range() {
+    // A range covering every glyph used to overflow the u16 range
+    // offset after gid 0xFFFF: a panic in debug builds and an
+    // endless iterator in release builds.
+    let cov = build_coverage_format2(&[(0, 0xFFFF, 0)]);
+    let mut count = 0usize;
+    let mut last = None;
+    for entry in CoverageIter::new(&cov) {
+        count += 1;
+        last = Some(entry);
+    }
+    assert_eq!(count, 1 << 16);
+    assert_eq!(last, Some((0xFFFF, 0xFFFF)));
+}
+
+#[test]
+fn coverage_iter_caps_overlapping_ranges() {
+    // Repeated full ranges would otherwise yield 65536 entries each.
+    let cov = build_coverage_format2(&[(0, 0xFFFF, 0); 64]);
+    assert_eq!(CoverageIter::new(&cov).count(), MAX_COVERAGE_ENTRIES);
+}
+
+#[test]
+fn subset_keeps_one_record_per_gid_and_record_index() {
+    // Coverage lists gid 5 twice (both at record 0) and sends gid 6
+    // to record 0 as well. Only the first entry survives, so the output
+    // carries one record instead of copying record 0 three times.
+    let rec = build_translate_record(7, 1, 2);
+    let mut bytes = build_varc(&[5], &[&rec]);
+    let cov = build_coverage_format2(&[(5, 5, 0), (5, 5, 0), (6, 6, 0)]);
+    let cov_off = bytes.len() as u32;
+    bytes[4..8].copy_from_slice(&cov_off.to_be_bytes());
+    bytes.extend_from_slice(&cov);
+    let map = |g: u16| Some(g);
+    let out = subset_varc(&bytes, &[5, 6, 7], &map).unwrap().unwrap();
+    let new_varc = sigilbuzz::tables::Varc::parse(&out).unwrap();
+    assert_eq!(new_varc.glyph_record_count(), 1);
+    assert!(new_varc.covers(5));
+}
+
+#[test]
+fn parse_cff2_index_rejects_counts_past_the_block() {
+    // A count near u32::MAX must be rejected by the length check,
+    // not by an allocation or an overflowing size computation.
+    let mut block = Vec::new();
+    block.extend_from_slice(&u32::MAX.to_be_bytes());
+    block.push(4);
+    block.extend_from_slice(&[0u8; 16]);
+    assert!(parse_cff2_index(&block).is_err());
 }

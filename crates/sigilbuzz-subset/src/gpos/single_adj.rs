@@ -4,7 +4,7 @@
 use alloc::vec::Vec;
 
 use crate::coverage::emit_coverage_from_pairs;
-use crate::layout::{parse_coverage_glyphs, RewriterCtx, RewrittenSubtable};
+use crate::layout::{RewriterCtx, RewrittenSubtable};
 
 // ---------------------------------------------------------------------------
 // Type 1: Single Adjustment
@@ -43,9 +43,9 @@ pub(super) fn rewrite_single_adj(ctx: &RewriterCtx, sub: &[u8]) -> Option<Rewrit
     let cov_off = u16::from_be_bytes([sub[2], sub[3]]) as usize;
     let value_format = u16::from_be_bytes([sub[4], sub[5]]);
     let cov_bytes = sub.get(cov_off..)?;
-    let covered = parse_coverage_glyphs(cov_bytes);
-    let stride = value_record_size(value_format);
     let map = ctx.gid_map;
+    let covered = map.coverage_glyphs(cov_bytes)?;
+    let stride = value_record_size(value_format);
 
     match format {
         1 => {

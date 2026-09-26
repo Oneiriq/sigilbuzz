@@ -213,7 +213,7 @@ fn circle_of_cubics_dash_count_uses_true_arc_length() {
             .sum()
     };
     // Sanity: arc-length is *longer* than the chord polyline,
-    // matching the brief's analytic prediction.
+    // matching the analytic prediction.
     assert!(
         true_arc_total > chord_total,
         "arc-length {true_arc_total} must exceed chord total {chord_total}"

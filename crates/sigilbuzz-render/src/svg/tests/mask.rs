@@ -58,7 +58,7 @@ fn mask_does_not_emit_a_top_level_fill() {
 
 #[test]
 fn mask_of_mask_is_dropped() {
-    // The brief defers nested masks: a mask whose body references
+    // Nested masks are unsupported: a mask whose body references
     // another mask must drop the inner reference at resolve time.
     let xml = r##"<svg viewBox="0 0 100 100">
         <defs>

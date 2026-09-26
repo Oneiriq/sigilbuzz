@@ -1,20 +1,18 @@
 //! UAX #9 Unicode Bidirectional Algorithm.
 //!
-//! 0.1.0 shipped only the paragraph-direction first-strong rule (P2 /
-//! P3). 0.10.0 fills in the rest:
-//!
-//! - **P1-P3**: paragraph-direction (already shipped, kept).
+//! - **P1-P3**: paragraph direction.
 //! - **X1-X10**: explicit-embedding / override / isolate stack.
 //! - **W1-W7**: weak-type resolution.
-//! - **N1-N2**: neutral resolution. (N0 paired-bracket handling
-//!   is intentionally deferred. See module note below.)
+//! - **N0-N2**: paired-bracket and neutral resolution.
 //! - **I1-I2**: implicit-level resolution.
 //! - **L1-L4**: post-resolve normalization + reorder (rule L2).
 //!
 //! The algorithm is implemented as a sequence of array-mutation
 //! passes against a single working buffer of (`BidiClass`, `level`)
 //! pairs, mirroring the reference implementation. Output is exposed
-//! through [`BidiInfo`].
+//! through [`BidiInfo`]. Every pass is linear in the text length (L2
+//! is linear per embedding level), so hostile input such as a long
+//! digit run or a deep stack of isolates stays cheap.
 //!
 //! ## N0 paired-bracket handling
 //!
@@ -27,8 +25,7 @@
 //!
 //! Brackets that don't pair (unbalanced opener / closer, opener
 //! without a matching closer) fall through unchanged and N1's
-//! surrounding-strong fallback handles them, exactly the behavior
-//! shipped before N0 landed.
+//! surrounding-strong fallback handles them.
 //!
 //! ## Public API
 //!
@@ -43,9 +40,8 @@
 //!
 //! Buffer integration uses [`crate::buffer::Buffer::set_text_bidi`],
 //! which auto-runs the bidi pipeline before shaping. The plain
-//! [`crate::buffer::Buffer::set_text`] is left untouched for backward
-//! compat with 0.1.0 consumers (oniq, demos) that handle direction
-//! themselves.
+//! [`crate::buffer::Buffer::set_text`] does not reorder, for callers
+//! that handle direction themselves.
 
 mod explicit;
 mod neutral;
@@ -64,8 +60,6 @@ pub use crate::unicode::bidi_class::{bidi_class, BidiClass};
 /// Applies UAX #9 rules P2 and P3 to `text` and returns the
 /// paragraph-level direction. LTR when no strong character exists
 /// in the run (whitespace-only, symbol-only, empty input).
-///
-/// Kept on the public surface so 0.1.0 callers don't break.
 #[must_use]
 pub fn paragraph_direction(text: &str) -> Direction {
     paragraph_direction_with_isolates(text)
@@ -159,12 +153,12 @@ impl BidiInfo {
         // then run W1-W7 + N0 + N1-N2 + I1-I2 per sequence.
         let isolating_sequences = build_isolating_sequences(&cells, para_level);
         for seq in isolating_sequences {
-            resolve_sequence(&mut cells, &chars, &seq, para_level);
+            resolve_sequence(&mut cells, &chars, &seq);
         }
 
         // L1: reset trailing whitespace, segment separators, and
         // paragraph separators back to the paragraph level.
-        apply_l1(&mut cells, para_level, text);
+        apply_l1(&mut cells, para_level);
 
         let levels: Vec<u8> = cells.iter().map(|c| c.level).collect();
         BidiInfo {

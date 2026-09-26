@@ -43,8 +43,8 @@
 //!
 //! # Scope
 //!
-//! Reading only: encoding and subsetting are out of scope and live in
-//! their own follow-up tickets. ConditionList parsing is stubbed (we
+//! This module only reads VARC. Subsetting lives in the
+//! `sigilbuzz-subset` crate. ConditionList parsing is stubbed (we
 //! advance past it but never gate on conditions); in-the-wild VARC
 //! fonts shipped to date do not exercise conditions either.
 
@@ -80,8 +80,9 @@ pub struct VarcComponent {
     /// `(x', y') = (xx*x + xy*y + tx, yx*x + yy*y + ty)`.
     pub transform: [f32; 6],
     /// Effective normalized axis coords for the child outline, in
-    /// `fvar` axis order. Empty when the child reuses the parent's
-    /// coord vector (RESET_UNSPECIFIED_AXES clear and HAVE_AXES clear).
+    /// `fvar` axis order: the parent's coord vector with any HAVE_AXES
+    /// values written over the listed axes. The vector grows to cover
+    /// the highest listed axis when the parent's is shorter.
     pub coords: Vec<f32>,
 }
 
@@ -92,8 +93,9 @@ pub struct VarcComposite {
     pub components: Vec<VarcComponent>,
 }
 
-// Variable-component flag bits (per boring-expansion-spec).
-const VC_RESET_UNSPECIFIED_AXES: u32 = 1 << 0;
+// Variable-component flag bits (per boring-expansion-spec). Bit 0,
+// RESET_UNSPECIFIED_AXES, is not honored: axes a component does not
+// list always keep the parent's value.
 const VC_HAVE_AXES: u32 = 1 << 1;
 const VC_AXIS_VALUES_HAVE_VARIATION: u32 = 1 << 2;
 const VC_TRANSFORM_HAS_VARIATION: u32 = 1 << 3;
@@ -109,6 +111,13 @@ const VC_GID_IS_24BIT: u32 = 1 << 12;
 const VC_HAVE_SKEW_X: u32 = 1 << 13;
 const VC_HAVE_SKEW_Y: u32 = 1 << 14;
 const VC_RESERVED_MASK: u32 = !((1u32 << 15) - 1);
+
+/// Upper bound on the coordinate values one composite carries across
+/// all its components. Each component copies a coord vector, widened
+/// to the highest axis index it lists, so a few record bytes can ask
+/// for up to 65536 values. The cap keeps a long record of such
+/// components from turning into a huge allocation.
+const MAX_COMPOSITE_COORDS: usize = 1 << 20;
 
 impl<'a> Varc<'a> {
     /// Parses a `VARC` table.
@@ -200,28 +209,36 @@ impl<'a> Varc<'a> {
 
     /// Resolves the component list for `gid` at the given normalized
     /// axis coords. Returns `None` for uncovered gids.
+    ///
+    /// A malformed component ends the list early. So does a component
+    /// that would push the total length of all component coord vectors
+    /// past 2^20 values.
     #[must_use]
     pub fn composite(&self, gid: u16, coords: &[f32]) -> Option<VarcComposite> {
         let idx = self.coverage.index_of(gid)? as usize;
         let raw = *self.glyph_records.get(idx)?;
         let mut composite = VarcComposite::default();
         let mut r = Reader::new(raw);
+        let mut total_coords = 0usize;
         while !r.is_empty() {
             // A VarComponent stops when bytes run out. Reaching the
             // end mid-record means the font is malformed; we skip the
             // rest rather than error so a single bad glyph doesn't
             // tank the rest of the document.
-            match self.resolve_component(&mut r, coords) {
-                Ok(c) => composite.components.push(c),
-                Err(_) => break,
+            let Ok(c) = self.resolve_component(&mut r, coords) else {
+                break;
+            };
+            total_coords = total_coords.saturating_add(c.coords.len());
+            if total_coords > MAX_COMPOSITE_COORDS {
+                break;
             }
+            composite.components.push(c);
         }
         Some(composite)
     }
 
     /// Decodes one component record at the reader's current position
     /// and resolves it against `coords`.
-    #[allow(clippy::too_many_lines, clippy::similar_names)]
     fn resolve_component(&self, r: &mut Reader<'_>, coords: &[f32]) -> Result<VarcComponent> {
         let flags = read_uint32var(r)?;
         if flags & VC_RESERVED_MASK != 0 {
@@ -244,28 +261,19 @@ impl<'a> Varc<'a> {
             let _ = read_uint32var(r)?;
         }
 
-        let mut effective_coords: Vec<f32> = if flags & VC_RESET_UNSPECIFIED_AXES != 0 {
-            // Start from the parent's coord vector; HAVE_AXES values
-            // override per-axis. (Inherited axes outside HAVE_AXES are
-            // taken from the parent.)
-            coords.to_vec()
-        } else {
-            // No reset: the child operates in the same coord vector
-            // as the parent, with HAVE_AXES values *replacing* the
-            // listed axes.
-            coords.to_vec()
-        };
+        // The child starts from the parent's coord vector, and
+        // HAVE_AXES values replace the listed axes.
+        let mut effective_coords: Vec<f32> = coords.to_vec();
 
         if flags & VC_HAVE_AXES != 0 {
             let axis_indices_index = read_uint32var(r)? as usize;
-            let axis_indices = self
-                .axis_indices_lists
-                .get(axis_indices_index)
-                .ok_or(Error::Malformed {
-                    offset: r.position(),
-                    context: "VARC component axisIndicesIndex out of range",
-                })?
-                .clone();
+            let axis_indices =
+                self.axis_indices_lists
+                    .get(axis_indices_index)
+                    .ok_or(Error::Malformed {
+                        offset: r.position(),
+                        context: "VARC component axisIndicesIndex out of range",
+                    })?;
             let n = axis_indices.len();
             // The TupleValues stream packs `n` F2DOT14 values, but
             // sigilbuzz's decode_tuple_values yields i32; we treat
@@ -274,14 +282,8 @@ impl<'a> Varc<'a> {
                 offset: r.position(),
                 context: "VARC component axisValues TupleValues truncated",
             })?;
-            let mut axis_values: Vec<f32> = raw_values
-                .into_iter()
-                .map(|v| {
-                    #[allow(clippy::cast_precision_loss)]
-                    let f = v as f32 / 16384.0;
-                    f
-                })
-                .collect();
+            let mut axis_values: Vec<f32> =
+                raw_values.into_iter().map(|v| v as f32 / 16384.0).collect();
 
             // Optional per-value variation deltas.
             if flags & VC_AXIS_VALUES_HAVE_VARIATION != 0 {
@@ -290,8 +292,8 @@ impl<'a> Varc<'a> {
                     let outer = (var_idx >> 16) as u16;
                     let inner = var_idx & 0xFFFF;
                     if let Some(deltas) = store.resolve_deltas(outer, inner, n, coords) {
-                        for (i, d) in deltas.iter().enumerate() {
-                            axis_values[i] += d / 16384.0;
+                        for (value, d) in axis_values.iter_mut().zip(&deltas) {
+                            *value += d / 16384.0;
                         }
                     }
                 }
@@ -401,16 +403,6 @@ impl<'a> Varc<'a> {
         //   T(-tcx, -tcy)
         let transform = compose_affine(tx, ty, rotation, sx, sy, skew_x, skew_y, tcx, tcy);
 
-        // Discard any reserved trailing uint32var per remaining flag
-        // bit. boring-expansion-spec says the high 17 bits are a
-        // reserved-mask; we already errored on those above, so this
-        // loop is a no-op in practice. Kept for forward-compat.
-        let mut bits = flags & VC_RESERVED_MASK;
-        while bits != 0 {
-            let _ = read_uint32var(r)?;
-            bits &= bits - 1;
-        }
-
         Ok(VarcComponent {
             gid,
             transform,
@@ -478,7 +470,9 @@ fn decode_tuple_values_in_reader(r: &mut Reader<'_>, count: usize) -> Option<Vec
     let start = r.position();
     let remaining = r.remaining();
     let buf = r.peek_bytes(remaining).ok()?;
-    let mut out: Vec<i32> = Vec::with_capacity(count);
+    // One control byte yields at most 64 values, so reserve no more
+    // than the remaining bytes can encode.
+    let mut out: Vec<i32> = Vec::with_capacity(count.min(buf.len().saturating_mul(64)));
     let mut i = 0usize;
     while out.len() < count {
         if i >= buf.len() {
@@ -515,7 +509,6 @@ fn decode_tuple_values_in_reader(r: &mut Reader<'_>, count: usize) -> Option<Vec
                     if i >= buf.len() {
                         return None;
                     }
-                    #[allow(clippy::cast_possible_wrap)]
                     let v = buf[i] as i8;
                     i += 1;
                     i32::from(v)
@@ -580,13 +573,11 @@ fn decode_axis_indices(data: &[u8]) -> Result<Vec<u16>> {
                             context: "VARC axisIndices i8 entry truncated",
                         });
                     }
-                    #[allow(clippy::cast_possible_wrap)]
                     let v = data[i] as i8;
                     i += 1;
                     i32::from(v)
                 }
             };
-            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
             out.push(v as u16);
         }
     }
@@ -597,14 +588,12 @@ fn decode_axis_indices(data: &[u8]) -> Result<Vec<u16>> {
 /// this for rotation, skew (each multiplied by π in radians).
 fn read_f4dot12(r: &mut Reader<'_>) -> Result<f32> {
     let raw = r.read_i16()?;
-    #[allow(clippy::cast_precision_loss)]
     Ok(f32::from(raw) / 4096.0)
 }
 
 /// Reads an F6.10 fixed-point as `f32`. Used for scale fields.
 fn read_f6dot10(r: &mut Reader<'_>) -> Result<f32> {
     let raw = r.read_i16()?;
-    #[allow(clippy::cast_precision_loss)]
     Ok(f32::from(raw) / 1024.0)
 }
 
@@ -617,11 +606,7 @@ fn read_f6dot10(r: &mut Reader<'_>) -> Result<f32> {
 /// ```
 ///
 /// Returned in `[xx, xy, yx, yy, tx_eff, ty_eff]` row-major form.
-#[allow(
-    clippy::many_single_char_names,
-    clippy::too_many_arguments,
-    clippy::similar_names
-)]
+#[allow(clippy::too_many_arguments)]
 fn compose_affine(
     tx: f32,
     ty: f32,
@@ -633,13 +618,8 @@ fn compose_affine(
     tcx: f32,
     tcy: f32,
 ) -> [f32; 6] {
-    // sigilbuzz is no_std; avoid libm by sticking to small-angle exact
-    // values for the trig-free identity case (rotation == skew == 0).
-    // For non-zero angles fall back to the polynomial approximations
-    // already used by the rest of the crate. No, we just use libm-free
-    // f32::sin / f32::cos when std is on, and a Taylor expansion when
-    // it isn't. Wait: core::f32 has no sin/cos in no_std. Use a
-    // ChebyshevPad approximation good to ~5e-7 over [-π, π].
+    // core has no sin or cos without std, so `sincos_pi` evaluates a
+    // Taylor polynomial instead of calling libm.
     let (cos_r, sin_r) = sincos_pi(rotation);
     let (cos_skx, sin_skx) = sincos_pi(-skew_x);
     let (cos_sky, sin_sky) = sincos_pi(skew_y);
@@ -679,14 +659,25 @@ fn compose_affine(
     [r_xx, r_xy, r_yx, r_yy, tx_eff, ty_eff]
 }
 
-/// `sin(x*π)` and `cos(x*π)` for `x` in `[-2, 2]`. Tight enough for
-/// glyph composites. VARC's F4.12 rotation field clamps at ±2π
-/// regardless and font designers stay well inside ±π. Implemented
-/// via a Taylor series for `no_std`-friendliness.
-#[allow(clippy::many_single_char_names)]
+/// `sin(x*π)` and `cos(x*π)`. Tight enough for glyph composites.
+/// VARC's F4.12 fields stay within `[-8, 8)`, but variation deltas can
+/// push an angle anywhere, including infinity. Implemented via a
+/// Taylor series for `no_std`-friendliness.
 fn sincos_pi(x: f32) -> (f32, f32) {
     // Reduce to [-1, 1] (i.e. [-π, π]).
     let mut t = x;
+    // For large or infinite angles the loops below would run for a
+    // long time or forever, so take the remainder first. `%` is exact
+    // and so is each loop step below 2^25, so both paths give the same
+    // angle wherever the loops finish. Clearing the sign of a zero
+    // remainder matches what the loops produce.
+    // A range check instead of `abs`, which core lacks before Rust 1.85.
+    if !(-16.0..=16.0).contains(&t) {
+        t %= 2.0;
+        if t == 0.0 {
+            t = 0.0;
+        }
+    }
     while t > 1.0 {
         t -= 2.0;
     }
@@ -703,262 +694,4 @@ fn sincos_pi(x: f32) -> (f32, f32) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use alloc::vec;
-
-    /// Builds a coverage format-1 table with the listed gids in order.
-    fn build_coverage(gids: &[u16]) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&1u16.to_be_bytes()); // format
-        out.extend_from_slice(&(gids.len() as u16).to_be_bytes());
-        for g in gids {
-            out.extend_from_slice(&g.to_be_bytes());
-        }
-        out
-    }
-
-    /// Builds a CFF2 INDEX with 1-byte offsets.
-    fn build_cff2_index(entries: &[&[u8]]) -> Vec<u8> {
-        let count = entries.len() as u32;
-        let mut out = Vec::new();
-        out.extend_from_slice(&count.to_be_bytes());
-        if entries.is_empty() {
-            return out;
-        }
-        out.push(1); // off_size = 1
-        let mut cursor: u32 = 1;
-        out.push(cursor as u8);
-        for e in entries {
-            cursor += e.len() as u32;
-            out.push(cursor as u8);
-        }
-        for e in entries {
-            out.extend_from_slice(e);
-        }
-        out
-    }
-
-    /// Builds a minimal VARC table with the given coverage gids and
-    /// raw glyph record bytes. `var_store` and `axis_indices` are
-    /// optional; passing `None` leaves their offsets at zero.
-    fn build_varc(
-        coverage_gids: &[u16],
-        glyph_records: &[&[u8]],
-        var_store: Option<&[u8]>,
-        axis_indices: Option<&[&[u8]]>,
-    ) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&1u16.to_be_bytes()); // major
-        out.extend_from_slice(&0u16.to_be_bytes()); // minor
-        let cov_off_slot = out.len();
-        out.extend_from_slice(&0u32.to_be_bytes()); // coverage
-        let vs_off_slot = out.len();
-        out.extend_from_slice(&0u32.to_be_bytes()); // varStore
-        out.extend_from_slice(&0u32.to_be_bytes()); // conditionList
-        let ail_off_slot = out.len();
-        out.extend_from_slice(&0u32.to_be_bytes()); // axisIndicesList
-        let gr_off_slot = out.len();
-        out.extend_from_slice(&0u32.to_be_bytes()); // glyphRecords
-
-        let cov_start = out.len() as u32;
-        out[cov_off_slot..cov_off_slot + 4].copy_from_slice(&cov_start.to_be_bytes());
-        out.extend_from_slice(&build_coverage(coverage_gids));
-
-        if let Some(vs) = var_store {
-            let vs_start = out.len() as u32;
-            out[vs_off_slot..vs_off_slot + 4].copy_from_slice(&vs_start.to_be_bytes());
-            out.extend_from_slice(vs);
-        }
-        if let Some(ail) = axis_indices {
-            let ail_start = out.len() as u32;
-            out[ail_off_slot..ail_off_slot + 4].copy_from_slice(&ail_start.to_be_bytes());
-            out.extend_from_slice(&build_cff2_index(ail));
-        }
-        let gr_start = out.len() as u32;
-        out[gr_off_slot..gr_off_slot + 4].copy_from_slice(&gr_start.to_be_bytes());
-        out.extend_from_slice(&build_cff2_index(glyph_records));
-        out
-    }
-
-    #[test]
-    fn parses_minimal_header_and_coverage() {
-        let bytes = build_varc(&[42, 100], &[b"\x00\x00\x05", b"\x00\x00\x06"], None, None);
-        let varc = Varc::parse(&bytes).unwrap();
-        assert!(varc.covers(42));
-        assert!(varc.covers(100));
-        assert!(!varc.covers(99));
-        assert_eq!(varc.glyph_record_count(), 2);
-    }
-
-    #[test]
-    fn rejects_wrong_major_version() {
-        let mut bytes = build_varc(&[1], &[b"\x00\x00\x01"], None, None);
-        bytes[0] = 0;
-        bytes[1] = 2; // major = 2
-        assert!(matches!(Varc::parse(&bytes), Err(Error::Malformed { .. })));
-    }
-
-    #[test]
-    fn uint32var_roundtrip() {
-        // 0x42 = single byte
-        let mut r = Reader::new(&[0x42]);
-        assert_eq!(read_uint32var(&mut r).unwrap(), 0x42);
-        // 0x80 0x42 = (0 << 8) | 0x42
-        let mut r = Reader::new(&[0x80, 0x42]);
-        assert_eq!(read_uint32var(&mut r).unwrap(), 0x42);
-        // 0xC1 0x02 0x03 = (1 << 16) | (2 << 8) | 3
-        let mut r = Reader::new(&[0xC1, 0x02, 0x03]);
-        assert_eq!(read_uint32var(&mut r).unwrap(), 0x10203);
-        // 0xE0 0x01 0x02 0x03 = (0 << 24) | ...
-        let mut r = Reader::new(&[0xE0, 0x01, 0x02, 0x03]);
-        assert_eq!(read_uint32var(&mut r).unwrap(), 0x01_0203);
-        // 0xF0 + u32
-        let mut r = Reader::new(&[0xF0, 0xAB, 0xCD, 0xEF, 0x01]);
-        assert_eq!(read_uint32var(&mut r).unwrap(), 0xABCD_EF01);
-    }
-
-    #[test]
-    fn resolves_translation_only_component() {
-        // One component: flags = HAVE_TRANSLATE_X | HAVE_TRANSLATE_Y,
-        // gid = 5, tx = 100, ty = -50.
-        let flags = VC_HAVE_TRANSLATE_X | VC_HAVE_TRANSLATE_Y;
-        // uint32var encoding for `flags`. flags = 0x30 (HAVE_TRANSLATE_X = 1<<4 = 0x10,
-        // HAVE_TRANSLATE_Y = 1<<5 = 0x20). 0x30 < 0x80, so single byte.
-        assert!(flags < 0x80);
-        let mut record = Vec::new();
-        record.push(flags as u8);
-        record.extend_from_slice(&5u16.to_be_bytes()); // gid
-        record.extend_from_slice(&100i16.to_be_bytes()); // tx
-        record.extend_from_slice(&(-50i16).to_be_bytes()); // ty
-
-        let bytes = build_varc(&[42], &[&record], None, None);
-        let varc = Varc::parse(&bytes).unwrap();
-        let comp = varc.composite(42, &[]).unwrap();
-        assert_eq!(comp.components.len(), 1);
-        assert_eq!(comp.components[0].gid, 5);
-        // Identity matrix + translation.
-        let t = comp.components[0].transform;
-        assert!((t[0] - 1.0).abs() < 1e-5);
-        assert!(t[1].abs() < 1e-5);
-        assert!(t[2].abs() < 1e-5);
-        assert!((t[3] - 1.0).abs() < 1e-5);
-        assert!((t[4] - 100.0).abs() < 1e-3);
-        assert!((t[5] - -50.0).abs() < 1e-3);
-    }
-
-    #[test]
-    fn resolves_scale_only_component() {
-        // flags = VC_HAVE_SCALE_X | VC_HAVE_SCALE_Y = 0x300.
-        // Two-byte uint32var: 0x80|0x03, 0x00.
-        let mut record = Vec::new();
-        record.push(0x80 | 0x03);
-        record.push(0x00);
-        record.extend_from_slice(&7u16.to_be_bytes());
-        // Scale 2.0 in F6.10 = 2.0 * 1024 = 2048
-        record.extend_from_slice(&2048i16.to_be_bytes());
-        record.extend_from_slice(&512i16.to_be_bytes()); // 0.5
-        let bytes = build_varc(&[1], &[&record], None, None);
-        let varc = Varc::parse(&bytes).unwrap();
-        let comp = varc.composite(1, &[]).unwrap();
-        let t = comp.components[0].transform;
-        assert!((t[0] - 2.0).abs() < 1e-3, "xx={}", t[0]);
-        assert!((t[3] - 0.5).abs() < 1e-3, "yy={}", t[3]);
-    }
-
-    #[test]
-    fn gid_24bit_flag_reads_three_byte_glyph_id() {
-        // flags = VC_GID_IS_24BIT = 0x1000.
-        // Two-byte uint32var: 0x80|0x10 = 0x90, 0x00.
-        let mut record = Vec::new();
-        record.push(0x90);
-        record.push(0x00);
-        // 24-bit gid 0x010203, but u16 truncation in the API means
-        // we should pick a value that fits in u16.
-        record.extend_from_slice(&[0x00, 0x12, 0x34]);
-        let bytes = build_varc(&[1], &[&record], None, None);
-        let varc = Varc::parse(&bytes).unwrap();
-        let comp = varc.composite(1, &[]).unwrap();
-        assert_eq!(comp.components[0].gid, 0x1234);
-    }
-
-    #[test]
-    fn uncovered_gid_returns_none() {
-        let bytes = build_varc(&[1], &[b"\x00\x00\x05"], None, None);
-        let varc = Varc::parse(&bytes).unwrap();
-        assert!(varc.composite(99, &[]).is_none());
-    }
-
-    #[test]
-    fn multiple_components_in_one_record() {
-        let flags = VC_HAVE_TRANSLATE_X;
-        let mut record = Vec::new();
-        // Component 1: gid 5, tx 10
-        record.push(flags as u8);
-        record.extend_from_slice(&5u16.to_be_bytes());
-        record.extend_from_slice(&10i16.to_be_bytes());
-        // Component 2: gid 7, tx 20
-        record.push(flags as u8);
-        record.extend_from_slice(&7u16.to_be_bytes());
-        record.extend_from_slice(&20i16.to_be_bytes());
-        let bytes = build_varc(&[1], &[&record], None, None);
-        let varc = Varc::parse(&bytes).unwrap();
-        let comp = varc.composite(1, &[]).unwrap();
-        assert_eq!(comp.components.len(), 2);
-        assert_eq!(comp.components[0].gid, 5);
-        assert_eq!(comp.components[1].gid, 7);
-        assert!((comp.components[0].transform[4] - 10.0).abs() < 1e-3);
-        assert!((comp.components[1].transform[4] - 20.0).abs() < 1e-3);
-    }
-
-    #[test]
-    fn have_axes_overrides_coord_at_axis_index() {
-        // axisIndices = [1] (one axis index, axis 1).
-        // axisValues = [F2DOT14(0.5)] = 8192. Encode as 0x40 | 0x00 = 0x40
-        // (run of 1 i16), then 8192 BE = 0x20 0x00.
-        let axis_indices_payload = vec![0x00_u8, 0x01]; // run of 1 i8: index 1
-        let bytes_axis_indices = build_cff2_index(&[&axis_indices_payload]);
-        // Place the axis_indices at the right offset by building VARC
-        // with axis_indices block.
-        let flags = VC_HAVE_AXES;
-        // 0x02 < 0x80 -> single byte uint32var.
-        let mut record = Vec::new();
-        record.push(flags as u8);
-        record.extend_from_slice(&3u16.to_be_bytes()); // gid 3
-        record.push(0x00); // axisIndicesIndex = 0
-                           // axisValues: 1 value, F2DOT14 = 0.5 = 8192. Word run.
-        record.push(0x40); // ctrl: words, run_len 1
-        record.extend_from_slice(&8192i16.to_be_bytes());
-
-        // Build VARC with the axis_indices block. We need to use the
-        // separate axis_indices arg.
-        let _ = bytes_axis_indices; // (we let build_varc rebuild it)
-        let bytes = build_varc(&[1], &[&record], None, Some(&[&axis_indices_payload]));
-        let varc = Varc::parse(&bytes).unwrap();
-        let comp = varc.composite(1, &[0.0, 0.0]).unwrap();
-        let coords = &comp.components[0].coords;
-        // axis 0 untouched, axis 1 set to 0.5.
-        assert!(coords.len() >= 2);
-        assert!((coords[1] - 0.5).abs() < 1e-3);
-    }
-
-    #[test]
-    fn rotation_rotates_unit_vector() {
-        // rotation = 0.5 (= 90° = 0.5 * π). F4DOT12 raw = 0.5 * 4096 = 2048.
-        let flags = VC_HAVE_ROTATION;
-        // 0x40 = 64 < 0x80 -> single byte.
-        let mut record = Vec::new();
-        record.push(flags as u8);
-        record.extend_from_slice(&5u16.to_be_bytes());
-        record.extend_from_slice(&2048i16.to_be_bytes());
-        let bytes = build_varc(&[1], &[&record], None, None);
-        let varc = Varc::parse(&bytes).unwrap();
-        let comp = varc.composite(1, &[]).unwrap();
-        let t = comp.components[0].transform;
-        // Apply transform to (1, 0). Should land near (0, 1).
-        let x_out = t[0] * 1.0 + t[1] * 0.0 + t[4];
-        let y_out = t[2] * 1.0 + t[3] * 0.0 + t[5];
-        assert!(x_out.abs() < 1e-3, "expected 0, got {x_out}");
-        assert!((y_out - 1.0).abs() < 1e-3, "expected 1, got {y_out}");
-    }
-}
+mod tests;

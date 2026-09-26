@@ -27,7 +27,7 @@ Added:
   Arabic, N'Ko and Mongolian letters at the buffer edges join across it.
 - `Language`, a BCP 47 tag that maps to OpenType language system tags (at most three,
   as in HarfBuzz). The table is generated from the OpenType language tag registry and
-  SIL's ISO 639 data; `cargo test --test language_table_gen -- --ignored` regenerates
+  SIL's ISO 639 data. `cargo test --test language_table_gen -- --ignored` regenerates
   it.
 - `Buffer::unset_direction`, `Buffer::has_explicit_direction`, and
   `Buffer::set_insert_dotted_circle`. Broken Indic, Khmer, Myanmar and USE syllables now
@@ -35,8 +35,11 @@ Added:
 - `UnicodeScript::{iso15924_tag, from_iso15924_tag, horizontal_direction}` and
   `Direction::horizontal_for_script`.
 - `ShapedRun` is re-exported from the crate root.
-- GPOS cursive attachment (lookup type 3). `curs` runs by default on horizontal runs;
-  it never ran before.
+- GPOS cursive attachment (lookup type 3). `curs` runs by default on horizontal runs.
+  It never ran before.
+- `PairPos::lookup_with_device_base`, which also returns the bytes the records' Device
+  and VariationIndex offsets are measured from (the PairSet in format 1, the subtable in
+  format 2), and `PairPos::value_format2`.
 - `sigilbuzz-capi`: `hb_buffer_add_utf32`, `hb_buffer_add_codepoints`,
   `hb_buffer_add_latin1`, `hb_subset_input_reference`, `hb_subset_input_create_or_fail`,
   `hb_paint_funcs_reference`, `hb_paint_funcs_make_immutable` and `_is_immutable`, the
@@ -53,8 +56,10 @@ Added:
 - `sigilbuzz-subset` 0.12.0: `SubsetWarning`, returned in `SubsetOutput::warnings` and
   `InstancedOutput::warnings`. Every malformed layout or variation structure the
   subsetter leaves out, instead of failing the run, is reported with its table, byte
-  offset and reason. The new fields break struct literals.
+  offset and reason, up to 65,536 warnings. The new fields break struct literals.
 - `ClassDef::empty` and `ClassDef::parse_at`.
+- `fuzz/`: cargo-fuzz targets for every part of the workspace that reads untrusted
+  input. See [fuzz/README.md](fuzz/README.md).
 
 Changed:
 
@@ -73,7 +78,9 @@ Changed:
 - Bottom-to-top runs report a negative `y_advance`, like top-to-bottom ones.
 - GSUB and GPOS take every feature from one script and one language system, as
   HarfBuzz does, and a language system's required feature always applies. Latin,
-  Cyrillic, Greek, Han and kana runs try their own script tag before `DFLT`.
+  Greek, Cyrillic, Han and kana runs try their own script tag (`latn`, `grek`, `cyrl`,
+  `hani`, `kana`) before `DFLT`, so fonts that keep their kerning or ligatures under the
+  script tag get them now. Rubik VF, for example, had no Latin kerning before.
 - GPOS runs as one stage in lookup order: `abvm` and `blwm` run by default, a lookup
   shared by several features runs once, the first matching subtable wins, and `kern`,
   `dist` and `curs` run by default only on horizontal runs.
@@ -94,7 +101,7 @@ Changed:
 - Leading digits and punctuation join the script run that follows them, and text with
   no script shapes under `DFLT` (this changes `Buffer::script_runs`).
 - `Buffer::clear` also resets script, language, context and the explicit direction.
-- `tables::Anchor` has new public fields for its device offsets; building one with a
+- `tables::Anchor` has new public fields for its device offsets. Building one with a
   struct literal needs `..Anchor::default()`.
 - `sigilbuzz-capi` 0.3.0 follows HarfBuzz's object rules, which breaks C code written
   against the old ones:
@@ -111,6 +118,8 @@ Changed:
     `hb_buffer_set_direction(HB_DIRECTION_INVALID)` unsets the direction.
   - `hb_buffer_guess_segment_properties` guesses the script from the Unicode Script
     property and takes the direction from it.
+- `hb_font_set_ppem` is documented as a no-op. sigilbuzz does not hint, so nothing read
+  the value.
 - `sigilbuzz-paint` 0.2.0 keeps the COLR foreground color apart instead of painting it
   white: `PaintSource::Solid` is `Solid { color, is_foreground }` and `ColorStop` has an
   `is_foreground` field. The default foreground is opaque black, and a palette or entry
@@ -119,7 +128,7 @@ Changed:
   white), the same as COLRv0.
 - `sigilbuzz-svg` 0.2.0 writes foreground paints as `currentColor`.
 - COLRv1 glyphs are clipped to their ClipList box, or to bounds computed from the paint
-  tree, as in HarfBuzz; a glyph with unbounded paint renders empty. This holds in
+  tree, as in HarfBuzz. A glyph with unbounded paint renders empty. This holds in
   `sigilbuzz-render` (pixmaps are sized to the clip box), `sigilbuzz-svg` and
   `hb_font_paint_glyph`, which also emits HarfBuzz's root clip rectangle and offers
   referenced glyphs to `color_glyph`.
@@ -131,22 +140,89 @@ Changed:
   foreground color instead of returning `NoCpal` or `BadPaletteIndex`, and SVG-in-OT
   `currentColor` follows `Rasterizer::with_foreground`.
 - The CLI's `--script` and `--language` flags take effect.
-
+- The companion crate READMEs no longer claim `no_std`. Every companion crate enables the
+  core crate's `std` feature.
 - The minimum supported Rust version is now 1.81. The core crate already needed 1.81
   for `core::error::Error`, so the old `rust-version = "1.75"` was wrong.
 - `sigilbuzz-woff` 0.3.1 and `sigilbuzz-render` 0.9.0 move to `miniz_oxide` 0.9.
+  `sigilbuzz-woff` 0.3.1 also moves to `brotli` 9.
 - `sigilbuzz-capi` 0.3.0 installs with `cargo cinstall` from cargo-c. That puts
   `libsigilbuzz`, the header (`include/sigilbuzz/hb.h`), a generated `sigilbuzz.pc`, and
   a CMake package in place in one step. The old pkg-config and CMake templates had to be
   filled in by hand and looked for a `libsigilbuzz` that `cargo build` never produced
   (it builds `libsigilbuzz_capi`). They are gone.
-- The companion crate benchmarks moved to Criterion 0.8.
+- All benchmarks moved to Criterion 0.8.
 - A full `LICENSE` file now sits at the repo root, and `NOTICE` spells out the
   attribution terms. The license is still Apache-2.0.
 - The documentation was rewritten, and the release history moved out of
   `docs/ROADMAP.md` into this file.
+- CI and the pre-push hook lint and test the whole workspace. They used to cover only
+  the root crate. CI also checks the minimum Rust version, including every `no_std`
+  build.
+- Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
+  `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
+  the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,
+  `sigilbuzz-text-layout` 0.1.1, `sigilbuzz-hyphen` 0.1.1, and `sigilbuzz-cli` 0.1.1 are
+  patch releases for the fixes below.
 
 Fixed:
+
+A hardening pass for hostile input. Fonts, images, and text can come from anywhere,
+and a malformed one must not crash, hang, or exhaust memory. Shipped code no longer
+contains `unwrap`, `expect`, or panic macros, and every fix has a regression test.
+Fuzzing found the first bugs, and a review of every crate found the rest. Output for
+valid input is unchanged except where noted.
+
+- Panics on malformed fonts in CFF (INDEX offsets, charstring operands, subroutine
+  indexes), AAT `morx`, the GSUB and GPOS skip iterator, the JPEG decoder, and WOFF2
+  wrapping. One panic was reachable with an ordinary font and ordinary text: an Arabic
+  letter after a decomposed Thai vowel crashed the Arabic joining step (in `shape()` and
+  `hb_shape`), and on longer text it misaligned the joining forms.
+- Allocations sized from counts in the file without checking the data behind them: up
+  to 17 GB in CFF2, 200 GB in `morx`, 32 GB in `MultiItemVariationStore`, 25 GB in
+  contextual rule sets, 8.6 GB in `gvar` subsetting, and 30 GB in the rasterizer.
+  Decompression in WOFF1, WOFF2, PNG, JPEG, and TIFF is now capped by what the input
+  can plausibly hold.
+- Hangs and runaway work: CFF subroutine bombs, composite glyphs that fan out (`glyf`,
+  VARC, EBDT), cyclic `morx` chains, nested GSUB and GPOS lookups (now bounded per
+  `shape()` call, like HarfBuzz), unbounded buffer growth from multiple substitution and
+  `morx` insertion, SVG `<use>` fan-out, COLR paint graphs, and quadratic passes in
+  bidi resolution, Indic and USE reordering, mark attachment, line wrapping, and
+  subsetting. Hyphenation checked all 4,938 US English patterns at every letter. It now
+  checks only the patterns that start with that letter, about 10 times faster with the
+  same result.
+- `BASE` offsets past 64 KB were truncated, so baseline tags were read from the wrong
+  place.
+- The `no_std` builds did not compile on Rust 1.81, the declared minimum.
+- `sigilbuzz-capi`: `hb_font_paint_glyph` truncated glyph ids above 65535, and a
+  language string with an embedded NUL leaked memory on every call. Every `unsafe`
+  block now says why it is sound.
+- `sigilbuzz-cli`: writing to a closed pipe panicked. It now reports an error.
+- `sigilbuzz-woff`: the `woff2` feature did not build without the default features.
+
+The new limits only affect fonts far beyond anything real, for example a glyph with
+more than 65,536 points, or a `shape()` call that needs more than 64 lookup
+applications per glyph (never fewer than 16,384 in total).
+
+Settings and table data that were read and then ignored:
+
+- Subsetting with `retain_hints` dropped `cvt `, `fpgm`, and `prep`. CFF and CFF2 fonts
+  ignored `retain_layout`, `retain_variations`, and `drop_unhandled`, so OTF subsets
+  lost GSUB, GPOS, `fvar`, and `HVAR`.
+- `sigilbuzz-capi`: `hb_font_set_scale` did not change the output, `hb_blob_create`
+  ignored its memory mode and dropped the destroy callback for empty blobs, and
+  `hb_shape_full` ignored the shaper list.
+- `sigilbuzz-woff`: WOFF1 wrapping wrote the input length as `totalSfntSize` instead of
+  the padded size.
+- `sigilbuzz-text-layout`: `break_at_word_boundaries = false` did nothing, mandatory
+  breaks ignored `max_width`, newline characters counted toward the line width, and a
+  lone CR produced no mandatory line break.
+- `sigilbuzz-render` SVG glyphs: `stop-opacity` inside a `style` attribute was ignored,
+  a trailing `;` in `style` dropped the whole gradient stop, and
+  `stroke-linejoin="bevel"` left a notch at every outer corner instead of drawing the
+  bevel.
+
+Output that differed from HarfBuzz:
 
 - Mark positioning ignored AnchorFormat3 device tables, so marks in variable fonts stayed
   at the default instance. VariationIndex deltas now apply to mark, mark-to-mark,
@@ -156,14 +232,12 @@ Fixed:
   rebuilt spec-correct by a Rust builder.
 - Default ignorables were hidden by matching cluster values, so a visible glyph that
   shared a cluster with one lost its advance. `Glyph::unicode_props` was written but
-  never read; it now carries the per-glyph flag, and a GSUB substitution un-hides the
+  never read. It now carries the per-glyph flag, and a GSUB substitution un-hides the
   glyph, as in HarfBuzz.
-- A panic in `hb_shape` for Arabic buffers that also contain Thai, Lao, Khmer or Tamil
-  split vowels.
 - Indic and USE shaping of runs that do not start the text.
 - The bidi pairs for the tick square brackets (U+298D to U+2990).
 - Vertical runs now start each glyph from its vertical origin.
-- `sigilbuzz-capi`: `hb_buffer_set_script` and `hb_buffer_set_language` did nothing;
+- `sigilbuzz-capi`: `hb_buffer_set_script` and `hb_buffer_set_language` did nothing.
   `hb_buffer_add_utf8` and `hb_buffer_add_utf16` reported clusters in the wrong units,
   ignored the text around the item, and dropped a whole call on malformed input instead
   of replacing bad code units with U+FFFD.
@@ -188,30 +262,32 @@ Fixed:
   approximated.
 - `sigilbuzz-subset`: the subsetter dropped GDEF `MarkGlyphSetsDef`, `AttachList`,
   `LigCaretList` and the ItemVariationStore. Dropping the mark glyph sets broke every
-  lookup that uses a mark filtering set.
+  lookup that uses a mark filtering set, and dropping the store left subset variable
+  fonts without their kerning deltas.
 - `sigilbuzz-subset`: the instancer resolved AnchorFormat3 and PairSet device offsets
   against the wrong table, so instanced fonts kept default-instance anchors and kerning,
   and it now folds ligature caret variations too.
 - `sigilbuzz-subset`: GPOS Device and VariationIndex tables were not copied into
-  subsets, leaving dangling offsets; static subsets now leave VariationIndex tables out.
-- `sigilbuzz-subset`: rebuilt GSUB and GPOS tables over 64 KiB silently corrupted their
-  lookups and subtables. Lookups are promoted to Extension lookups, oversized mark and
-  PairPos format 1 subtables are split the way HarfBuzz splits them, and any other
-  overflow is reported as an error.
+  subsets, leaving dangling offsets. Static subsets now leave VariationIndex tables out.
+- `sigilbuzz-subset`: rebuilt GSUB and GPOS tables over 64 KiB wrapped their 16-bit
+  offsets and silently corrupted their lookups and subtables. Lookups are promoted to
+  Extension lookups, oversized mark and PairPos format 1 subtables are split the way
+  HarfBuzz splits them, and any other overflow is reported as an error.
 - `sigilbuzz-subset`: context rules with no lookup records (`ignore sub`,
   `ignore pos`) were dropped, so guarded rules such as Amiri's Allah ligature shaped
   differently after subsetting.
 - `sigilbuzz-subset`: a malformed GDEF piece is left out instead of failing the whole
-  subset; no more panics on truncated mark arrays or SinglePos headers, or on 32-bit
-  targets from crafted GDEF offsets; full and partial instancing rebuild GDEF instead
-  of truncating it at the store, and partial instancing renumbers VariationIndex rows.
+  subset. There are no more panics on truncated mark arrays or SinglePos headers, or on
+  32-bit targets from crafted GDEF offsets. Full and partial instancing rebuild GDEF
+  instead of truncating it at the store, and partial instancing renumbers
+  VariationIndex rows.
 - `sigilbuzz-subset`: subsets and instances of variable fonts keep GSUB and GPOS
   FeatureVariations. Subsets remap their indices, full instances apply the record that
   matches their coordinates, and partial instances settle pinned-axis conditions and
   renumber the kept axes. They used to be written as version 1.0 and lose them.
 - `sigilbuzz-subset`: the closure keeps GSUB reverse chaining (type 8) substitutes.
 - `sigilbuzz-subset`: partial instancing checks every ItemVariationStore, HVAR, VVAR
-  and MVAR offset and size (no wraparound on 32-bit targets); a table it cannot rebuild
+  and MVAR offset and size (no wraparound on 32-bit targets). A table it cannot rebuild
   is dropped and reported instead of carried through with stale axes, and MVAR records
   past 64 KiB are an error.
 - A null ClassDef offset is read as every glyph in class 0, as in HarfBuzz. The shaper
@@ -219,7 +295,6 @@ Fixed:
   subtables with a null backtrack ClassDef (as fontmake writes them) failed to parse or
   matched invented classes. PairPos format 2 and the subsetter's class-based rewriters
   had the same bug.
-- `sigilbuzz-text-layout`: a lone CR produced no mandatory line break.
 
 Removed:
 
@@ -307,7 +382,7 @@ Fixed:
 
 ## 0.16.0 (2026-04-25)
 
-Three gaps found while moving oniq's MSDF glyph generator onto sigilbuzz.
+Three gaps found while moving an MSDF glyph generator onto sigilbuzz.
 
 - `flatten()`, `Segment`, and `DEFAULT_TOLERANCE` are public in `sigilbuzz-render`
   (#208, #211).

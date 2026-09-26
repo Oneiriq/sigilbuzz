@@ -2,18 +2,15 @@
 //!
 //! This module owns the VARC subset path: closure expansion (walking
 //! every kept VARC-covered gid for its referenced component gids) and
-//! the eventual table re-emit (Coverage / VarCompositeGlyph rewrite +
-//! MultiVarStore pass-through). The first commit only ships the
-//! closure walker; the table-rewrite emit lands alongside the driver
-//! wire-up in a follow-up commit.
+//! the table re-emit (Coverage / VarCompositeGlyph rewrite plus a
+//! pruned MultiVarStore).
 //!
-//! # Closure phase
+//! # Closure walk
 //!
 //! For every VARC-covered gid in the kept set, walk the component
-//! records and pull each referenced gid into the kept set. Iterate to
-//! a fixed point: pulled-in gids may themselves be VARC-covered, and
-//! so on. The walk caps recursion at 64 levels (the same hard cap the
-//! parser uses against malicious cycles).
+//! records and pull each referenced gid into the kept set. A worklist
+//! visits each newly kept gid once, so pulled-in gids that are
+//! themselves VARC-covered cascade, and component cycles terminate.
 //!
 //! # Component record layout (recap)
 //!
@@ -34,9 +31,9 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::tag;
-use sigilbuzz::tables::Varc;
 use sigilbuzz::Face;
 
+use crate::util::WorkBudget;
 use crate::{GlyphId, SubsetError};
 
 mod component;
@@ -44,7 +41,9 @@ mod coverage;
 mod mvs;
 
 use component::{rewrite_component_record, walk_component_gids, walk_component_var_idxs};
-use coverage::{build_coverage_format1, coverage_index_of, CoverageIter};
+#[cfg(test)]
+use coverage::coverage_index_of;
+use coverage::{build_coverage_format1, CoverageIter};
 use mvs::{prune_multi_var_store, MvsRemap};
 
 // Variable-component flag bits (mirrors the parser's set, kept private
@@ -67,22 +66,18 @@ const VC_GID_IS_24BIT: u32 = 1 << 12;
 const VC_HAVE_SKEW_X: u32 = 1 << 13;
 const VC_HAVE_SKEW_Y: u32 = 1 << 14;
 
-/// Maximum nesting depth for the closure walk. Matches the parser's
-/// `MAX_VARC_DEPTH` cap on `Face::glyph_outline_at_coords`.
-const MAX_VARC_DEPTH: usize = 64;
+/// A valid Coverage lists each glyph at most once, so it never has more
+/// than this many entries. [`CoverageIter`] stops there.
+const MAX_COVERAGE_ENTRIES: usize = 1 << 16;
 
-/// Expand `kept` to include every gid referenced (transitively) by a
-/// VARC-covered gid already in the set. Iterates to a fixed point so
-/// references to other VARC-covered gids cascade.
+/// Expand `keep` to include every gid referenced (transitively) by a
+/// VARC-covered gid already in the set. References to other
+/// VARC-covered gids cascade.
 ///
 /// Tolerates malformed records silently. A single bad component record
-/// should not stop the closure walk.
-///
-/// `BTreeSet` flavor: used by callers that already model the kept set
-/// as a sorted set; the closure driver uses [`varc_closure_bitset`] for
-/// the existing `Vec<bool>` representation.
-#[allow(dead_code)] // public API surface. The in-tree driver uses the bitset variant
-pub(crate) fn varc_closure(face: &Face<'_>, kept: &mut BTreeSet<GlyphId>) {
+/// should not stop the closure walk. Stops early once `budget` is
+/// spent.
+pub(crate) fn varc_closure_bitset(face: &Face<'_>, keep: &mut [bool], budget: &WorkBudget) {
     let Ok(Some(varc)) = face.varc() else {
         return;
     };
@@ -93,68 +88,44 @@ pub(crate) fn varc_closure(face: &Face<'_>, kept: &mut BTreeSet<GlyphId>) {
         return;
     };
 
-    for _ in 0..MAX_VARC_DEPTH {
-        let before = kept.len();
-        let snapshot: Vec<GlyphId> = kept.iter().copied().collect();
-        for g in snapshot {
-            if !varc.covers(g) {
-                continue;
-            }
-            let Some(idx) = parsed.coverage_index_of(g) else {
-                continue;
-            };
-            let Some(record) = parsed.glyph_record(idx) else {
-                continue;
-            };
-            for child in walk_component_gids(record) {
-                kept.insert(child);
-            }
-        }
-        if kept.len() == before {
-            break;
+    // Coverage index for every gid in the font, first match wins like a
+    // linear scan of the table. Built once so each lookup is O(1).
+    let mut index_of: Vec<Option<usize>> = alloc::vec![None; keep.len()];
+    let mut entries = 0usize;
+    for (gid, idx) in parsed.coverage_iter() {
+        entries += 1;
+        if let Some(slot @ None) = index_of.get_mut(gid as usize) {
+            *slot = Some(idx);
         }
     }
-}
+    if !budget.spend(entries + keep.len()) {
+        return;
+    }
 
-/// `Vec<bool>` flavor of the closure walk. Wires into the existing
-/// closure driver in [`crate::closure`] which uses a bitset keyed by
-/// gid. Same fixed-point iteration as [`varc_closure`].
-pub(crate) fn varc_closure_bitset(face: &Face<'_>, keep: &mut [bool]) {
-    let Ok(Some(varc)) = face.varc() else {
-        return;
-    };
-    let Ok(varc_bytes) = face.table_bytes(tag::VARC) else {
-        return;
-    };
-    let Ok(parsed) = ParsedVarc::parse(varc_bytes) else {
-        return;
-    };
-
-    for _ in 0..MAX_VARC_DEPTH {
-        let before = keep.iter().filter(|k| **k).count();
-        let snapshot: Vec<GlyphId> = (0..keep.len())
-            .filter(|i| keep[*i])
-            .map(|i| i as GlyphId)
-            .collect();
-        for g in snapshot {
-            if !varc.covers(g) {
-                continue;
-            }
-            let Some(idx) = parsed.coverage_index_of(g) else {
-                continue;
-            };
-            let Some(record) = parsed.glyph_record(idx) else {
-                continue;
-            };
-            for child in walk_component_gids(record) {
-                if (child as usize) < keep.len() {
-                    keep[child as usize] = true;
-                }
-            }
+    let mut stack: Vec<GlyphId> = keep
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &k)| if k { Some(i as GlyphId) } else { None })
+        .collect();
+    while let Some(g) = stack.pop() {
+        if !varc.covers(g) {
+            continue;
         }
-        let after = keep.iter().filter(|k| **k).count();
-        if after == before {
-            break;
+        let Some(idx) = index_of.get(g as usize).copied().flatten() else {
+            continue;
+        };
+        let Some(record) = parsed.glyph_record(idx) else {
+            continue;
+        };
+        let children = walk_component_gids(record);
+        if !budget.spend(1 + children.len()) {
+            return;
+        }
+        for child in children {
+            if let Some(slot @ false) = keep.get_mut(child as usize) {
+                *slot = true;
+                stack.push(child);
+            }
         }
     }
 }
@@ -172,24 +143,27 @@ pub(crate) fn varc_closure_bitset(face: &Face<'_>, keep: &mut [bool]) {
 /// unreferenced delta-set entry (and collapses subtables that become
 /// empty), re-emits the MVS, and rewrites the surviving records'
 /// `MultiVarIdx` slots through the remap. ConditionList and
-/// AxisIndicesList are still preserved verbatim. Pruning those is a
-/// future follow-up.
+/// AxisIndicesList are preserved verbatim.
+///
+/// A malformed coverage can list a glyph twice or send two glyphs to
+/// the same record. Only the first such entry survives, so the output
+/// never holds more records than the source.
 pub(crate) fn subset_varc(
-    src_varc: &Varc<'_>,
     src_bytes: &[u8],
     kept_gids: &[GlyphId],
     new_gid_for: &dyn Fn(GlyphId) -> Option<GlyphId>,
 ) -> Result<Option<Vec<u8>>, SubsetError> {
-    let _ = src_varc; // signature compatibility: we re-parse the raw bytes
     let parsed = ParsedVarc::parse(src_bytes)
         .map_err(|_| SubsetError::Unsupported("VARC malformed during subset"))?;
 
     // Determine which coverage entries survive. Walk in source coverage
     // order so we can pull the right glyph record per entry.
     let kept_set: BTreeSet<GlyphId> = kept_gids.iter().copied().collect();
+    let mut seen_gids: BTreeSet<GlyphId> = BTreeSet::new();
+    let mut seen_records: BTreeSet<usize> = BTreeSet::new();
     let mut surviving: Vec<(GlyphId, usize)> = Vec::new();
     for (gid, idx) in parsed.coverage_iter() {
-        if kept_set.contains(&gid) {
+        if kept_set.contains(&gid) && seen_gids.insert(gid) && seen_records.insert(idx) {
             surviving.push((gid, idx));
         }
     }
@@ -251,7 +225,8 @@ pub(crate) fn subset_varc(
     let new_coverage = build_coverage_format1(renumbered.iter().map(|(g, _)| *g));
 
     // glyphRecords CFF2 INDEX over the rewritten records.
-    let new_glyph_records = build_cff2_index(&new_records);
+    let new_glyph_records = try_build_cff2_index(&new_records)
+        .ok_or(SubsetError::Unsupported("VARC glyph records exceed 4 GiB"))?;
 
     // Pass-throughs (MVS now handled separately by `new_var_store`).
     let condition_list_bytes = parsed.condition_list_bytes();
@@ -275,64 +250,63 @@ pub(crate) fn subset_varc(
     let gr_off_slot = out.len();
     out.extend_from_slice(&0u32.to_be_bytes());
 
-    // coverage
-    let cov_start = out.len() as u32;
-    out[cov_off_slot..cov_off_slot + 4].copy_from_slice(&cov_start.to_be_bytes());
-    out.extend_from_slice(&new_coverage);
-    while out.len() % 4 != 0 {
-        out.push(0);
-    }
-
-    // varStore (rewritten with only the kept entries)
-    if let Some(vs) = &new_var_store {
-        let vs_start = out.len() as u32;
-        out[vs_off_slot..vs_off_slot + 4].copy_from_slice(&vs_start.to_be_bytes());
-        out.extend_from_slice(vs);
-        while out.len() % 4 != 0 {
-            out.push(0);
-        }
-    }
-
-    // conditionList
-    if let Some(cl) = condition_list_bytes {
-        let cl_start = out.len() as u32;
-        out[cl_off_slot..cl_off_slot + 4].copy_from_slice(&cl_start.to_be_bytes());
-        out.extend_from_slice(cl);
-        while out.len() % 4 != 0 {
-            out.push(0);
-        }
-    }
-
-    // axisIndicesList
-    if let Some(ail) = axis_indices_bytes {
-        let ail_start = out.len() as u32;
-        out[ail_off_slot..ail_off_slot + 4].copy_from_slice(&ail_start.to_be_bytes());
-        out.extend_from_slice(ail);
+    // Blocks in source order: coverage, varStore (rewritten with only
+    // the kept entries), conditionList, axisIndicesList. Each one is
+    // followed by 4-byte alignment padding.
+    let blocks = [
+        (cov_off_slot, Some(new_coverage.as_slice())),
+        (vs_off_slot, new_var_store.as_deref()),
+        (cl_off_slot, condition_list_bytes),
+        (ail_off_slot, axis_indices_bytes),
+    ];
+    for (slot, block) in blocks {
+        let Some(block) = block else {
+            continue;
+        };
+        patch_offset32(&mut out, slot)?;
+        out.extend_from_slice(block);
         while out.len() % 4 != 0 {
             out.push(0);
         }
     }
 
     // glyphRecords
-    let gr_start = out.len() as u32;
-    out[gr_off_slot..gr_off_slot + 4].copy_from_slice(&gr_start.to_be_bytes());
+    patch_offset32(&mut out, gr_off_slot)?;
     out.extend_from_slice(&new_glyph_records);
 
     Ok(Some(out))
 }
 
+/// Points the Offset32 at `slot` to the current end of `out`.
+fn patch_offset32(out: &mut [u8], slot: usize) -> Result<(), SubsetError> {
+    let pos = u32::try_from(out.len())
+        .map_err(|_| SubsetError::Unsupported("VARC output exceeds 4 GiB"))?;
+    out.get_mut(slot..slot + 4)
+        .ok_or(SubsetError::Unsupported("VARC offset slot out of range"))?
+        .copy_from_slice(&pos.to_be_bytes());
+    Ok(())
+}
+
 /// Builds a CFF2 INDEX over the given entries, picking the smallest
 /// off_size that fits. Determinism: identical inputs always produce
 /// identical output bytes.
+#[cfg(test)]
 fn build_cff2_index(entries: &[Vec<u8>]) -> Vec<u8> {
-    let count = entries.len() as u32;
+    try_build_cff2_index(entries).unwrap_or_default()
+}
+
+/// Builds a CFF2 INDEX over the given entries, picking the smallest
+/// off_size that fits. Returns `None` when the entries do not fit the
+/// INDEX's 32-bit counts and offsets.
+fn try_build_cff2_index(entries: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let count = u32::try_from(entries.len()).ok()?;
     let mut out = Vec::new();
     out.extend_from_slice(&count.to_be_bytes());
     if entries.is_empty() {
-        return out;
+        return Some(out);
     }
-    let total: u32 = entries.iter().map(|e| e.len() as u32).sum();
-    let max_off = total + 1;
+    let total: usize = entries.iter().map(Vec::len).sum();
+    let max_off = u32::try_from(total).ok()?.checked_add(1)?;
     let off_size: u8 = if max_off <= 0xFF {
         1
     } else if max_off <= 0xFFFF {
@@ -343,32 +317,22 @@ fn build_cff2_index(entries: &[Vec<u8>]) -> Vec<u8> {
         4
     };
     out.push(off_size);
-    let write_off = |out: &mut Vec<u8>, v: u32| match off_size {
-        1 => {
-            #[allow(clippy::cast_possible_truncation)]
-            out.push(v as u8);
-        }
-        2 => {
-            #[allow(clippy::cast_possible_truncation)]
-            out.extend_from_slice(&(v as u16).to_be_bytes());
-        }
-        3 => {
-            out.push(((v >> 16) & 0xFF) as u8);
-            out.push(((v >> 8) & 0xFF) as u8);
-            out.push((v & 0xFF) as u8);
-        }
-        _ => out.extend_from_slice(&v.to_be_bytes()),
+    // Offsets are at most `max_off`, which fits `off_size` bytes.
+    let write_off = |out: &mut Vec<u8>, v: u32| {
+        let bytes = v.to_be_bytes();
+        out.extend_from_slice(&bytes[4 - usize::from(off_size)..]);
     };
     let mut cursor: u32 = 1;
     write_off(&mut out, cursor);
     for e in entries {
+        // Each step stays at or below `max_off`.
         cursor += e.len() as u32;
         write_off(&mut out, cursor);
     }
     for e in entries {
         out.extend_from_slice(e);
     }
-    out
+    Some(out)
 }
 
 /// Internal lightweight parse of a VARC table: enumerates coverage
@@ -417,10 +381,7 @@ impl<'a> ParsedVarc<'a> {
         markers.sort_unstable();
         markers.dedup();
 
-        let block_end = |start: usize| -> usize {
-            let next = markers.iter().copied().find(|m| *m > start);
-            next.unwrap_or(data.len())
-        };
+        let block_end = |start: usize| -> usize { next_marker(&markers, start, data.len()) };
 
         let var_store = if var_store_off == 0 {
             None
@@ -480,6 +441,7 @@ impl<'a> ParsedVarc<'a> {
     }
 
     /// Parses the coverage table to find the index of `gid`.
+    #[cfg(test)]
     fn coverage_index_of(&self, gid: GlyphId) -> Option<usize> {
         coverage_index_of(self.coverage_bytes, gid)
     }
@@ -492,46 +454,51 @@ impl<'a> ParsedVarc<'a> {
     }
 }
 
+/// Returns the smallest entry of the sorted `markers` that is greater
+/// than `start`, or `fallback` when there is none.
+fn next_marker(markers: &[usize], start: usize, fallback: usize) -> usize {
+    let i = markers.partition_point(|&m| m <= start);
+    markers.get(i).copied().unwrap_or(fallback)
+}
+
 /// Reads u32 BE at `off`, bounds-checked.
 fn read_u32(data: &[u8], off: usize) -> Result<u32, &'static str> {
-    let bytes = data.get(off..off + 4).ok_or("u32 OOB")?;
-    Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    let bytes = data
+        .get(off..)
+        .and_then(<[u8]>::first_chunk::<4>)
+        .ok_or("u32 OOB")?;
+    Ok(u32::from_be_bytes(*bytes))
 }
 
 /// Parses a CFF2 INDEX (u32 count + u8 offSize + offsets + data),
 /// returning one byte slice per entry. Mirrors the layout the parser
 /// uses for `glyphRecords`.
 fn parse_cff2_index(block: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
-    if block.len() < 4 {
-        return Err("CFF2 INDEX truncated header");
-    }
-    let count = u32::from_be_bytes([block[0], block[1], block[2], block[3]]) as usize;
+    let count = read_u32(block, 0).map_err(|_| "CFF2 INDEX truncated header")? as usize;
     if count == 0 {
         return Ok(Vec::new());
     }
-    if block.len() < 5 {
-        return Err("CFF2 INDEX truncated offSize");
-    }
-    let off_size = block[4] as usize;
+    let off_size = usize::from(*block.get(4).ok_or("CFF2 INDEX truncated offSize")?);
     if !(1..=4).contains(&off_size) {
         return Err("CFF2 INDEX offSize out of range");
     }
     let offsets_start = 5;
-    let offsets_bytes = (count + 1) * off_size;
-    if block.len() < offsets_start + offsets_bytes {
-        return Err("CFF2 INDEX offsets truncated");
-    }
-    let mut offsets: Vec<usize> = Vec::with_capacity(count + 1);
-    for i in 0..=count {
-        let off = offsets_start + i * off_size;
-        let mut v = 0u32;
-        for k in 0..off_size {
-            v = (v << 8) | u32::from(block[off + k]);
-        }
-        offsets.push(v as usize);
-    }
+    let offsets_bytes = count
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(off_size))
+        .ok_or("CFF2 INDEX offsets truncated")?;
     let data_start = offsets_start + offsets_bytes;
-    let total = *offsets.last().unwrap();
+    let offset_table = block
+        .get(offsets_start..data_start)
+        .ok_or("CFF2 INDEX offsets truncated")?;
+    // The offset table fits in `block`, which bounds this allocation.
+    let offsets: Vec<usize> = offset_table
+        .chunks_exact(off_size)
+        .map(|c| c.iter().fold(0usize, |v, &b| (v << 8) | usize::from(b)))
+        .collect();
+    let Some(&total) = offsets.last() else {
+        return Err("CFF2 INDEX offsets truncated");
+    };
     if total == 0 {
         return Err("CFF2 INDEX total length zero");
     }
@@ -541,17 +508,14 @@ fn parse_cff2_index(block: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
     }
     let mut out: Vec<&[u8]> = Vec::with_capacity(count);
     for w in offsets.windows(2) {
-        let a = w[0];
-        let b = w[1];
+        let (a, b) = (w[0], w[1]);
         if a == 0 || b < a {
             return Err("CFF2 INDEX offsets non-monotone");
         }
-        let s = data_start + a - 1;
-        let e = data_start + b - 1;
-        if e > block.len() {
-            return Err("CFF2 INDEX entry past end");
-        }
-        out.push(&block[s..e]);
+        let entry = block
+            .get(data_start + a - 1..data_start + b - 1)
+            .ok_or("CFF2 INDEX entry past end")?;
+        out.push(entry);
     }
     Ok(out)
 }

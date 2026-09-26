@@ -117,23 +117,23 @@ impl<'a> DeltaSetIndexMap<'a> {
     /// `None` for an unknown format or a map that does not fit, which
     /// leaves indices unmapped, as in HarfBuzz.
     fn parse(data: &'a [u8], start: usize) -> Option<Self> {
-        let format = *data.get(start)?;
-        let entry_format = *data.get(start + 1)?;
-        let (map_count, entries_at) = match format {
+        let header = data.get(start..)?;
+        let (&[format, entry_format], rest) = header.split_first_chunk::<2>()?;
+        let (map_count, rest) = match format {
             0 => {
-                let b = data.get(start + 2..start + 4)?;
-                (u32::from(u16::from_be_bytes([b[0], b[1]])), start + 4)
+                let (count, rest) = rest.split_first_chunk::<2>()?;
+                (u32::from(u16::from_be_bytes(*count)), rest)
             }
             1 => {
-                let b = data.get(start + 2..start + 6)?;
-                (u32::from_be_bytes([b[0], b[1], b[2], b[3]]), start + 6)
+                let (count, rest) = rest.split_first_chunk::<4>()?;
+                (u32::from_be_bytes(*count), rest)
             }
             _ => return None,
         };
         let entry_bytes = usize::from((entry_format >> 4) & 0x03) + 1;
         let inner_bits = u32::from(entry_format & 0x0F) + 1;
-        let len = (map_count as usize).checked_mul(entry_bytes)?;
-        let entries = data.get(entries_at..entries_at.checked_add(len)?)?;
+        let len = usize::try_from(map_count).ok()?.checked_mul(entry_bytes)?;
+        let entries = rest.get(..len)?;
         Some(Self {
             entries,
             entry_bytes,
@@ -148,11 +148,16 @@ impl<'a> DeltaSetIndexMap<'a> {
         if self.map_count == 0 {
             return index;
         }
-        let index = index.min(self.map_count - 1) as usize;
-        let at = index * self.entry_bytes;
-        let raw = self.entries[at..at + self.entry_bytes]
-            .iter()
-            .fold(0u32, |acc, b| (acc << 8) | u32::from(*b));
+        let last = usize::try_from(index.min(self.map_count - 1)).ok();
+        // `parse` sized `entries` for `map_count` entries, so the lookup
+        // only fails on a broken invariant. The index then stays unmapped.
+        let Some(entry) = last.and_then(|i| {
+            let at = i.checked_mul(self.entry_bytes)?;
+            self.entries.get(at..at.checked_add(self.entry_bytes)?)
+        }) else {
+            return index;
+        };
+        let raw = entry.iter().fold(0u32, |acc, b| (acc << 8) | u32::from(*b));
         let outer = raw >> self.inner_bits;
         let inner = raw & ((1u32 << self.inner_bits) - 1);
         (outer << 16) | inner

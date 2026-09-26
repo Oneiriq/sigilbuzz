@@ -6,6 +6,7 @@
 use alloc::vec::Vec;
 
 use super::{read_u16, DeviceSlot, SlotVisitor};
+use crate::util::WorkBudget;
 
 // ---------------------------------------------------------------------------
 // Anchor walk (Mark*/Cursive)
@@ -61,7 +62,12 @@ pub(super) fn visit_anchor(buf: &mut [u8], anchor_off: usize, visit: &mut SlotVi
 ///     u16 entryAnchorOffset   (relative to the subtable)
 ///     u16 exitAnchorOffset    (relative to the subtable)
 /// ```
-pub(super) fn walk_cursive_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisitor<'_>) {
+pub(super) fn walk_cursive_pos(
+    gpos_buf: &mut [u8],
+    sub_off: usize,
+    visit: &mut SlotVisitor<'_>,
+    budget: &WorkBudget,
+) {
     let Some(sub) = gpos_buf.get_mut(sub_off..) else {
         return;
     };
@@ -72,7 +78,7 @@ pub(super) fn walk_cursive_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut 
         return;
     };
     let records_off = 6usize;
-    if sub.len() < records_off + entry_exit_count * 4 {
+    if sub.len() < records_off + entry_exit_count * 4 || !budget.spend(entry_exit_count) {
         return;
     }
     // Collect anchor offsets first so the visitor may mutate freely.
@@ -94,12 +100,17 @@ pub(super) fn walk_cursive_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut 
 ///     u16 class
 ///     u16 markAnchorOffset (relative to MarkArray start)
 /// ```
-fn walk_mark_array(sub: &mut [u8], mark_array_off: usize, visit: &mut SlotVisitor<'_>) {
+fn walk_mark_array(
+    sub: &mut [u8],
+    mark_array_off: usize,
+    visit: &mut SlotVisitor<'_>,
+    budget: &WorkBudget,
+) {
     let Some(mark_count) = read_u16(sub, mark_array_off).map(usize::from) else {
         return;
     };
     let records_off = mark_array_off + 2;
-    if records_off + mark_count * 4 > sub.len() {
+    if records_off + mark_count * 4 > sub.len() || !budget.spend(mark_count) {
         return;
     }
     let anchor_offs: Vec<usize> = (0..mark_count)
@@ -125,13 +136,22 @@ fn walk_base_or_mark2_array(
     base_array_off: usize,
     mark_class_count: usize,
     visit: &mut SlotVisitor<'_>,
+    budget: &WorkBudget,
 ) {
     let Some(base_count) = read_u16(sub, base_array_off).map(usize::from) else {
         return;
     };
     let records_off = base_array_off + 2;
-    let total = base_count * mark_class_count;
-    if records_off + total * 2 > sub.len() {
+    // Both counts are 16-bit, so the product needs checked math on
+    // 32-bit targets.
+    let Some(total) = base_count.checked_mul(mark_class_count) else {
+        return;
+    };
+    let fits = total
+        .checked_mul(2)
+        .and_then(|len| records_off.checked_add(len))
+        .is_some_and(|end| end <= sub.len());
+    if !fits || !budget.spend(total) {
         return;
     }
     let anchor_offs: Vec<usize> = (0..total)
@@ -159,6 +179,7 @@ pub(super) fn walk_mark_base_or_mark_pos(
     gpos_buf: &mut [u8],
     sub_off: usize,
     visit: &mut SlotVisitor<'_>,
+    budget: &WorkBudget,
 ) {
     let Some(sub) = gpos_buf.get_mut(sub_off..) else {
         return;
@@ -171,8 +192,8 @@ pub(super) fn walk_mark_base_or_mark_pos(
     else {
         return;
     };
-    walk_mark_array(sub, mark_array_off as usize, visit);
-    walk_base_or_mark2_array(sub, base_array_off as usize, mcc as usize, visit);
+    walk_mark_array(sub, mark_array_off as usize, visit, budget);
+    walk_base_or_mark2_array(sub, base_array_off as usize, mcc as usize, visit, budget);
 }
 
 /// Walks every Anchor in a MarkLigPos subtable starting at `sub_off`.
@@ -195,7 +216,12 @@ pub(super) fn walk_mark_base_or_mark_pos(
 ///     ComponentRecord[componentCount]:
 ///       o16 ligatureAnchorOffsets[markClassCount]  (relative to LigatureAttach)
 /// ```
-pub(super) fn walk_mark_lig_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisitor<'_>) {
+pub(super) fn walk_mark_lig_pos(
+    gpos_buf: &mut [u8],
+    sub_off: usize,
+    visit: &mut SlotVisitor<'_>,
+    budget: &WorkBudget,
+) {
     let Some(sub) = gpos_buf.get_mut(sub_off..) else {
         return;
     };
@@ -211,7 +237,7 @@ pub(super) fn walk_mark_lig_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut
     let lig_array_off = lig_array_off as usize;
 
     // MarkArray walks like the other Mark* lookups.
-    walk_mark_array(sub, mark_array_off as usize, visit);
+    walk_mark_array(sub, mark_array_off as usize, visit, budget);
 
     // LigatureArray: collect every ComponentRecord's anchor offsets,
     // then visit them in one pass to keep the borrows simple.
@@ -219,7 +245,7 @@ pub(super) fn walk_mark_lig_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut
         return;
     };
     let lig_attach_offs_start = lig_array_off + 2;
-    if lig_attach_offs_start + lig_count * 2 > sub.len() {
+    if lig_attach_offs_start + lig_count * 2 > sub.len() || !budget.spend(lig_count) {
         return;
     }
     let mut anchor_abs: Vec<usize> = Vec::new();
@@ -233,10 +259,22 @@ pub(super) fn walk_mark_lig_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut
             continue;
         };
         let comps_off = la_off + 2;
-        if comps_off + comp_count * mark_class_count * 2 > sub.len() {
+        // Checked for 32-bit targets: both factors come from 16-bit
+        // counts.
+        let Some(anchors) = comp_count.checked_mul(mark_class_count) else {
+            continue;
+        };
+        let fits = anchors
+            .checked_mul(2)
+            .and_then(|len| comps_off.checked_add(len))
+            .is_some_and(|end| end <= sub.len());
+        if !fits {
             continue;
         }
-        for k in 0..comp_count * mark_class_count {
+        if !budget.spend(anchors) {
+            return;
+        }
+        for k in 0..anchors {
             let rel = read_u16(sub, comps_off + k * 2).unwrap_or(0) as usize;
             if rel != 0 {
                 // ligatureAnchorOffsets are relative to LigatureAttach.

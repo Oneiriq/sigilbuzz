@@ -319,8 +319,11 @@ pub(super) fn parse_path_d(s: &str) -> Result<Vec<PathOp>, RenderError> {
             match last_cmd {
                 Some(b'M') => b'L',
                 Some(b'm') => b'l',
+                // Closepath takes no arguments, so a number after it is
+                // an error. Repeating it would consume nothing and loop
+                // forever.
+                Some(b'Z' | b'z') | None => return Err(RenderError::Parse("svg path d")),
                 Some(prev) => prev,
-                None => return Err(RenderError::Parse("svg path d")),
             }
         };
         match cmd {

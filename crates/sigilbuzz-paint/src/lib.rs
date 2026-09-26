@@ -25,8 +25,9 @@
 //!   references with a visited-set so cyclic DAGs terminate.
 //!
 //! The walker never panics on malformed input. A bad sub-offset, an
-//! unknown paint format, or a cycle truncates the [`DrawCmd`] stream;
-//! it never produces a partially-constructed paint.
+//! unknown paint format, a cycle, or a paint graph that expands past a
+//! fixed work budget truncates the [`DrawCmd`] stream. It never
+//! produces a partially-constructed paint.
 //!
 //! ```no_run
 //! use sigilbuzz::Face;

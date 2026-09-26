@@ -5,6 +5,8 @@
 use super::*;
 use crate::buffer::{unicode_prop, Glyph};
 use crate::shape::gsub::{expand_glyph_in_place, substitute_glyph};
+use crate::shape::segment::remap_segments;
+use crate::tables::gsub::ChainContextAny;
 
 // ---------------------------------------------------------------
 // End-to-end fixtures for the contextual GSUB lookups. The font
@@ -287,7 +289,10 @@ fn multiple_substitution_marks_every_output_glyph_substituted() {
     let mut g = Glyph::new(0, 2);
     g.unicode_props = unicode_prop::DEFAULT_IGNORABLE | unicode_prop::NON_JOINER;
     let mut glyphs = alloc::vec![Glyph::new(1, 0), g];
-    assert_eq!(expand_glyph_in_place(&mut glyphs, 1, &[5, 6]), Some(2));
+    assert_eq!(
+        expand_glyph_in_place(&mut glyphs, 1, &[5, 6], &mut LookupBudget::for_run(&[])),
+        Some(2)
+    );
     assert_eq!(glyphs.len(), 3);
     for (i, out) in glyphs[1..].iter().enumerate() {
         // The low bits are the Unicode properties; the ligature
@@ -559,3 +564,139 @@ fn gsub_chain_context_depth_guard_bottoms_out() {
     assert_eq!(out.glyphs[0].glyph_id, 1);
     assert_eq!(out.glyphs[1].glyph_id, 2);
 }
+
+#[test]
+fn gsub_nested_fan_out_is_bounded() {
+    // Chain context whose one rule fires lookup 0 (itself) eight
+    // times at the same position. The depth guard alone allows
+    // 8^16 nested calls, which never finishes. The nested budget
+    // stops the walk after a few thousand.
+    let mut chain = Vec::new();
+    chain.extend_from_slice(&3u16.to_be_bytes()); // format
+    chain.extend_from_slice(&0u16.to_be_bytes()); // backtrack count
+    chain.extend_from_slice(&1u16.to_be_bytes()); // input count
+    chain.extend_from_slice(&0u16.to_be_bytes()); // input cov slot
+    chain.extend_from_slice(&0u16.to_be_bytes()); // lookahead count
+    chain.extend_from_slice(&8u16.to_be_bytes()); // lookup count
+    for _ in 0..8 {
+        chain.extend_from_slice(&0u16.to_be_bytes()); // seq
+        chain.extend_from_slice(&0u16.to_be_bytes()); // lookup 0 = self
+    }
+    let cov_off = chain.len();
+    chain.extend_from_slice(&build_cov_fmt1(&[1, 2, 3, 4, 5, 6]));
+    chain[6..8].copy_from_slice(&(cov_off as u16).to_be_bytes());
+    assert!(ChainContextAny::parse(&chain).is_ok());
+
+    let data = build_shapeable_font_with_gsub(&[(6, chain)], &[0]);
+    let blob = Blob::new(&data);
+    let face = Face::parse(&blob, 0).unwrap();
+    let font = Font::new(face, 16.0);
+    let features = [Feature {
+        tag: *b"test",
+        value: 1,
+    }];
+    let mut buf = Buffer::new();
+    buf.push_str("AB");
+    let out = shape(&font, &buf, &features).unwrap();
+    assert_eq!(out.glyphs.len(), 2);
+    assert_eq!(out.glyphs[0].glyph_id, 1);
+    assert_eq!(out.glyphs[1].glyph_id, 2);
+}
+
+#[test]
+fn gsub_multiple_substitution_growth_is_capped() {
+    // Two lookups that each turn glyph A into 256 copies. Without
+    // a cap one character becomes 65 536 glyphs, and one more
+    // lookup exhausts memory. One shape() call may grow the run to
+    // max(64 x input glyphs, 16 384) glyphs and no further.
+    let lookups: Vec<(u16, Vec<u8>)> = (0..2).map(|_| (2, repeat_a_subtable(256))).collect();
+    let data = build_shapeable_font_with_gsub(&lookups, &[0, 1]);
+    let blob = Blob::new(&data);
+    let face = Face::parse(&blob, 0).unwrap();
+    let font = Font::new(face, 16.0);
+    let features = [Feature {
+        tag: *b"test",
+        value: 1,
+    }];
+
+    let mut buf = Buffer::new();
+    buf.push_str("A");
+    let out = shape(&font, &buf, &features).unwrap();
+    assert!(out.glyphs.len() > 256);
+    assert!(out.glyphs.len() <= MAX_LEN_MIN);
+    assert!(out.glyphs.iter().all(|g| g.glyph_id == 1 && g.cluster == 0));
+
+    // One lookup stays inside the cap and applies in full.
+    let data = build_shapeable_font_with_gsub(&lookups[..1], &[0]);
+    let blob = Blob::new(&data);
+    let face = Face::parse(&blob, 0).unwrap();
+    let font = Font::new(face, 16.0);
+    let out = shape(&font, &buf, &features).unwrap();
+    assert_eq!(out.glyphs.len(), 256);
+}
+
+#[test]
+fn standalone_feature_growth_is_capped_per_source_byte() {
+    // The `ot` pre-shapers apply features one call at a time, so
+    // each call gets a fresh budget. The cap on those calls follows
+    // the cluster span and cannot compound: twelve doubling lookups
+    // leave one character at 64 glyphs, not 4096.
+    let lookups: Vec<(u16, Vec<u8>)> = (0..12).map(|_| (2, repeat_a_subtable(2))).collect();
+    let feature_indices: Vec<u16> = (0..12).collect();
+    let data = build_shapeable_font_with_gsub(&lookups, &feature_indices);
+    let blob = Blob::new(&data);
+    let face = Face::parse(&blob, 0).unwrap();
+    let gsub = face.gsub().unwrap().expect("GSUB");
+
+    let mut glyphs = alloc::vec![Glyph::new(1, 0)];
+    apply_gsub_feature_in_scripts(&gsub, &mut glyphs, None, *b"test", 0, &[*b"DFLT"]);
+    assert_eq!(glyphs.len(), MAX_LEN_FACTOR);
+    for _ in 0..2 {
+        apply_gsub_feature_in_scripts(&gsub, &mut glyphs, None, *b"test", 0, &[*b"DFLT"]);
+    }
+    assert_eq!(glyphs.len(), MAX_LEN_FACTOR);
+}
+
+/// Multiple substitution format 1 that maps glyph 1 to `count`
+/// copies of itself.
+fn repeat_a_subtable(count: u16) -> Vec<u8> {
+    let mut mult = Vec::new();
+    mult.extend_from_slice(&1u16.to_be_bytes()); // format
+    let cov_off = 8 + 2 + 2 * count;
+    mult.extend_from_slice(&cov_off.to_be_bytes()); // coverage offset
+    mult.extend_from_slice(&1u16.to_be_bytes()); // sequence count
+    mult.extend_from_slice(&8u16.to_be_bytes()); // sequence offset
+    mult.extend_from_slice(&count.to_be_bytes()); // glyph count
+    for _ in 0..count {
+        mult.extend_from_slice(&1u16.to_be_bytes());
+    }
+    mult.extend_from_slice(&build_cov_fmt1(&[1]));
+    mult
+}
+
+#[test]
+fn remap_segments_follows_morx_origins() {
+    let segments = [
+        ProcessedSegment {
+            range: 0..2,
+            script_priority: DFLT_TEST,
+        },
+        ProcessedSegment {
+            range: 2..3,
+            script_priority: ARAB_TEST,
+        },
+    ];
+    // Glyphs 0 and 1 ligate. An inserted glyph follows the
+    // Arabic one.
+    let remapped = remap_segments(&segments, &[0, 2, usize::MAX]);
+    assert_eq!(remapped.len(), 2);
+    assert_eq!(remapped[0].range, 0..1);
+    assert_eq!(remapped[0].script_priority, DFLT_TEST);
+    assert_eq!(remapped[1].range, 1..3);
+    assert_eq!(remapped[1].script_priority, ARAB_TEST);
+
+    assert!(remap_segments(&[], &[0, 1]).is_empty());
+}
+
+const DFLT_TEST: &[[u8; 4]] = &[*b"DFLT"];
+const ARAB_TEST: &[[u8; 4]] = &[*b"arab", *b"DFLT"];

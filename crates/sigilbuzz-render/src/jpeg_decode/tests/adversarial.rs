@@ -1,11 +1,13 @@
 //! Adversarial inputs that must surface as structured `BadJpeg`
 //! errors rather than panics.
 
+use super::progressive::build_progressive_grayscale_jpeg;
 use super::*;
+use crate::jpeg_decode::idct::{idct_cos_table, idct_with_table};
 
 // ---------------------------------------------------------------
-// Wave-21 adversarial pass. SOF2 progressive *is* now supported
-// (sibling PR #241), but the surrounding non-baseline rejection
+// Adversarial marker coverage. SOF2 progressive *is* supported
+// (#241), but the surrounding non-baseline rejection
 // surface still has bite:
 //
 //   - Baseline (SOF0) still decodes (covered above).
@@ -138,4 +140,196 @@ fn marker_walker_handles_ff_padding_then_eof() {
     let err = decode_jpeg(&bytes).unwrap_err();
     // Acceptable: any structured BadJpeg. The point is no panic.
     assert!(matches!(err, RenderError::BadJpeg(_)), "got {err:?}");
+}
+
+/// Index of the marker code byte that follows the first `0xFF m`.
+fn marker_pos(bytes: &[u8], m: u8) -> usize {
+    bytes
+        .windows(2)
+        .position(|w| w == [0xFF, m])
+        .map(|p| p + 1)
+        .expect("marker present")
+}
+
+#[test]
+fn sos_dc_table_selector_past_the_table_slots_is_an_error() {
+    // Mirrors a fuzzer crash: the third SOS component names DC table
+    // 9, but only slots 0..=3 exist. This used to index out of
+    // bounds. SOS layout after the marker: length (2), count, then
+    // (id, Td/Ta) pairs.
+    let mut bytes = build_constant_jpeg(0, 0, 0);
+    let sos = marker_pos(&bytes, MARKER_SOS);
+    bytes[sos + 9] = 0x91;
+    assert_eq!(
+        decode_jpeg(&bytes).unwrap_err(),
+        RenderError::BadJpeg("missing DC Huffman table")
+    );
+}
+
+#[test]
+fn sos_ac_table_selector_past_the_table_slots_is_an_error() {
+    let mut bytes = build_constant_jpeg(0, 0, 0);
+    let sos = marker_pos(&bytes, MARKER_SOS);
+    bytes[sos + 5] = 0x0C;
+    assert_eq!(
+        decode_jpeg(&bytes).unwrap_err(),
+        RenderError::BadJpeg("missing AC Huffman table")
+    );
+}
+
+#[test]
+fn progressive_dc_table_selector_past_the_table_slots_is_an_error() {
+    let mut bytes = build_progressive_grayscale_jpeg(0);
+    let sos = marker_pos(&bytes, MARKER_SOS);
+    bytes[sos + 5] = 0xF0;
+    assert_eq!(
+        decode_jpeg(&bytes).unwrap_err(),
+        RenderError::BadJpeg("missing DC Huffman table")
+    );
+}
+
+#[test]
+fn sos_before_sof_is_an_error() {
+    // A zero-component scan with no frame header used to reach the
+    // YCbCr composer with no components and index out of bounds.
+    let bytes = [
+        0xFF, MARKER_SOI, 0xFF, MARKER_SOS, 0x00, 0x06, 0x00, 0x00, 0x3F, 0x00, 0xFF, MARKER_EOI,
+    ];
+    assert_eq!(
+        decode_jpeg(&bytes).unwrap_err(),
+        RenderError::BadJpeg("SOS before SOF")
+    );
+}
+
+/// Baseline grayscale stream of `blocks` 8x8 blocks in one row.
+/// Every block carries the largest DC difference (+32767) and an
+/// EOB, and the quantizer is 255, so the running DC predictor
+/// times the quantizer leaves `i32` range after 258 blocks.
+fn build_growing_dc_jpeg(blocks: u16) -> Vec<u8> {
+    let mut out = vec![0xFF, MARKER_SOI];
+    out.extend_from_slice(&[0xFF, MARKER_DQT, 0x00, 67, 0x00]);
+    out.extend_from_slice(&[255u8; 64]);
+    out.extend_from_slice(&[0xFF, MARKER_SOF0, 0x00, 11, 8]);
+    out.extend_from_slice(&8u16.to_be_bytes());
+    out.extend_from_slice(&(blocks * 8).to_be_bytes());
+    out.extend_from_slice(&[1, 1, 0x11, 0]);
+    // DC table 0: one 1-bit code for magnitude 15. AC table 0: one
+    // 1-bit code for EOB.
+    for (class, symbol) in [(0x00u8, 15u8), (0x10, 0x00)] {
+        out.extend_from_slice(&[0xFF, MARKER_DHT, 0x00, 20, class, 1]);
+        out.extend_from_slice(&[0u8; 15]);
+        out.push(symbol);
+    }
+    out.extend_from_slice(&[0xFF, MARKER_SOS, 0x00, 8, 1, 1, 0x00, 0, 63, 0]);
+    let mut bw = BitWriter::default();
+    for _ in 0..blocks {
+        bw.write_bits(0, 1); // DC code: magnitude 15
+        bw.write_bits(0x7FFF, 15); // +32767
+        bw.write_bits(0, 1); // EOB
+    }
+    bw.flush();
+    out.extend_from_slice(&bw.bytes);
+    out.extend_from_slice(&[0xFF, MARKER_EOI]);
+    out
+}
+
+#[test]
+fn growing_dc_predictor_wraps_instead_of_overflowing() {
+    // Used to panic in debug builds with "attempt to multiply with
+    // overflow" once the predictor passed 2^31 / 255.
+    let pix = decode_jpeg(&build_growing_dc_jpeg(300)).expect("decodes");
+    assert_eq!((pix.width, pix.height), (2400, 8));
+}
+
+/// SOI, one 8-bit quantization table, and a frame header of the
+/// given size and marker, followed by `tail`.
+fn frame_only(marker: u8, width: u16, height: u16, tail: &[u8]) -> Vec<u8> {
+    let mut out = vec![0xFF, MARKER_SOI];
+    out.extend_from_slice(&[0xFF, MARKER_DQT, 0x00, 67, 0x00]);
+    out.extend_from_slice(&[1u8; 64]);
+    out.extend_from_slice(&[0xFF, marker, 0x00, 11, 8]);
+    out.extend_from_slice(&height.to_be_bytes());
+    out.extend_from_slice(&width.to_be_bytes());
+    out.extend_from_slice(&[1, 1, 0x11, 0]);
+    out.extend_from_slice(tail);
+    out
+}
+
+#[test]
+fn frame_larger_than_entropy_data_is_rejected_before_allocating() {
+    // Mirrors a fuzzer timeout: a 9731x4103 frame backed by a few
+    // hundred bytes used to allocate the full planes and decode
+    // zero-padded blocks for seconds.
+    let tail = [0u8; 400];
+    for marker in [MARKER_SOF0, MARKER_SOF2] {
+        for (w, h) in [(9731, 4103), (16384, 16384)] {
+            assert_eq!(
+                decode_jpeg(&frame_only(marker, w, h, &tail)).unwrap_err(),
+                RenderError::BadJpeg("frame larger than entropy data"),
+            );
+        }
+    }
+}
+
+#[test]
+fn idct_cos_table_matches_inline_cosines() {
+    // The table must reproduce the inline `theta.cos()` evaluation
+    // bit for bit, so decoded samples do not change.
+    fn idct_inline(coeffs: &[i32; 64], out: &mut [u8; 64]) {
+        let mut tmp = [0.0f32; 64];
+        for i in 0..64 {
+            tmp[i] = coeffs[i] as f32;
+        }
+        let mut work = [0.0f32; 64];
+        for row in 0..8 {
+            let base = row * 8;
+            for x in 0..8 {
+                let mut acc = 0.0f32;
+                for u in 0..8 {
+                    let cu = if u == 0 {
+                        core::f32::consts::FRAC_1_SQRT_2
+                    } else {
+                        1.0
+                    };
+                    let theta = ((2 * x + 1) as f32) * (u as f32) * core::f32::consts::PI / 16.0;
+                    acc += cu * tmp[base + u] * theta.cos();
+                }
+                work[base + x] = acc * 0.5;
+            }
+        }
+        for col in 0..8 {
+            for y in 0..8 {
+                let mut acc = 0.0f32;
+                for v in 0..8 {
+                    let cv = if v == 0 {
+                        core::f32::consts::FRAC_1_SQRT_2
+                    } else {
+                        1.0
+                    };
+                    let theta = ((2 * y + 1) as f32) * (v as f32) * core::f32::consts::PI / 16.0;
+                    acc += cv * work[v * 8 + col] * theta.cos();
+                }
+                tmp[y * 8 + col] = acc * 0.5;
+            }
+        }
+        for i in 0..64 {
+            let v = (tmp[i] + 128.0).round() as i32;
+            out[i] = v.clamp(0, 255) as u8;
+        }
+    }
+    let table = idct_cos_table();
+    let mut state = 0x2545_F491_u32;
+    for _ in 0..2000 {
+        let mut coeffs = [0i32; 64];
+        for c in &mut coeffs {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *c = (state % 2048) as i32 - 1024;
+        }
+        let (mut a, mut b) = ([0u8; 64], [0u8; 64]);
+        idct_inline(&coeffs, &mut a);
+        idct_with_table(&coeffs, &mut b, &table);
+        assert_eq!(a, b);
+    }
 }

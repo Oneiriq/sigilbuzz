@@ -9,7 +9,7 @@
 //!
 //! # Per-lookup-type coverage
 //!
-//! As of this commit the rewriter ships byte-level support for:
+//! The rewriter supports:
 //!
 //! - **Type 1 (single-adj)**: formats 1 (uniform ValueRecord) and 2
 //!   (per-glyph ValueRecord array). Filters Coverage; for fmt 2 drops
@@ -45,15 +45,19 @@
 //!   subtable. Falls back to a lookup drop when the inner type has no
 //!   rewriter.
 //!
-//! - **Type 7 (context positioning)**: formats 1 / 2 / 3, mirroring
-//!   the GSUB type-5 byte-level rewriter. Nested `PosLookupRecord`s
-//!   are renumbered through the GPOS lookup-list renumber map driven
-//!   by the two-pass build in [`crate::layout::build_gpos`]. Rules
-//!   left without records (`ignore pos`) are kept, since they stop
-//!   the later rules of their lookup from matching.
-//! - **Type 8 (chained context positioning)**: formats 1 / 2 / 3,
-//!   mirroring the GSUB type-6 byte-level rewriter. Same driver hook
-//!   as type 7 for the lookup-renumber pass.
+//! - **Type 7 (context positioning)** and **type 8 (chained context
+//!   positioning)**: formats 1 / 2 / 3. Their byte layout matches GSUB
+//!   types 5 / 6, so they share the GSUB rewriters. Nested
+//!   `PosLookupRecord`s are renumbered through the GPOS lookup-list
+//!   renumber map driven by the two-pass build in
+//!   [`crate::layout::build_gpos`]. Rules left without records
+//!   (`ignore pos`) are kept, since they stop the later rules of their
+//!   lookup from matching.
+//!
+//! Every rewriter charges the [`GidMap`] work budget for the records it
+//! walks.
+//!
+//! [`GidMap`]: crate::layout::GidMap
 //!
 //! # Device and VariationIndex tables
 //!
@@ -70,7 +74,7 @@ use alloc::vec::Vec;
 
 use sigilbuzz::tables::gpos::lookup_type as gpos_type;
 
-use crate::layout::{extension_target, RewriterCtx, RewrittenLookup, RewrittenSubtable};
+use crate::layout::{extension_target, read_u16, RewriterCtx, RewrittenLookup, RewrittenSubtable};
 use crate::warnings::error_context;
 use crate::SubsetError;
 use mark_attach::{rewrite_mark_attach, MarkAttachKind};
@@ -102,10 +106,21 @@ pub(crate) fn rewrite_lookup(
     let mut rewritten_subs: Vec<RewrittenSubtable> = Vec::new();
 
     for &sub_bytes in subtable_bodies {
+        if !ctx.gid_map.spend(1) {
+            return Ok(None);
+        }
         let rewritten = rewrite_subtable(ctx, lookup_type, sub_bytes);
         ctx.offsets
             .check(overflow_context(lookup_type, sub_bytes))?;
-        if rewritten.is_empty() {
+        // Charge the output too, so shared offsets cannot multiply the
+        // rewritten table past the budget.
+        if !ctx
+            .gid_map
+            .spend(rewritten.iter().map(|rs| rs.bytes.len()).sum())
+        {
+            return Ok(None);
+        }
+        if rewritten.is_empty() && !ctx.gid_map.budget_spent() {
             report_unreadable(ctx, lookup_type, sub_bytes);
         }
         rewritten_subs.extend(rewritten);
@@ -226,13 +241,10 @@ fn unwrap_extension_lookup_type(lookup: &sigilbuzz::tables::layout::Lookup<'_>) 
     if lookup.lookup_type() != gpos_type::EXTENSION {
         return lookup.lookup_type();
     }
-    let Some(sub) = lookup.subtable_bytes(0) else {
-        return lookup.lookup_type();
-    };
-    if sub.len() < 4 {
-        return lookup.lookup_type();
-    }
-    u16::from_be_bytes([sub[2], sub[3]])
+    lookup
+        .subtable_bytes(0)
+        .and_then(|sub| read_u16(sub, 2))
+        .unwrap_or(lookup.lookup_type())
 }
 
 // ---------------------------------------------------------------------------

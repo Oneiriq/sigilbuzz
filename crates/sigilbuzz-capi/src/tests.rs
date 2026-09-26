@@ -16,6 +16,8 @@ const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regula
 #[test]
 fn shape_hello_matches_rust_api() {
     // C surface.
+    // SAFETY: every pointer passed here is null or a live handle
+    // created in this test, and each handle is destroyed once.
     unsafe {
         let blob = hb_blob_create(
             OPEN_SANS.as_ptr().cast::<c_char>(),
@@ -80,6 +82,8 @@ fn shape_hello_matches_rust_api() {
 
 #[test]
 fn refcount_keeps_face_alive_after_blob_destroy() {
+    // SAFETY: every pointer passed here is null or a live handle
+    // created in this test, and each handle is destroyed once.
     unsafe {
         let blob = hb_blob_create(
             OPEN_SANS.as_ptr().cast::<c_char>(),
@@ -99,6 +103,8 @@ fn refcount_keeps_face_alive_after_blob_destroy() {
 
 #[test]
 fn null_destroy_is_a_noop() {
+    // SAFETY: every pointer passed here is null or a live handle
+    // created in this test, and each handle is destroyed once.
     unsafe {
         hb_blob_destroy(ptr::null_mut());
         hb_face_destroy(ptr::null_mut());
@@ -109,6 +115,8 @@ fn null_destroy_is_a_noop() {
 
 #[test]
 fn tag_round_trips() {
+    // SAFETY: every pointer passed here is null or a live handle
+    // created in this test, and each handle is destroyed once.
     unsafe {
         let t = hb_tag_from_string(c"Latn".as_ptr(), -1);
         assert_eq!(t, HB_SCRIPT_LATIN);
@@ -152,6 +160,8 @@ fn version_advertises_hb_compat_eight_two() {
     let mut major: c_uint = 0;
     let mut minor: c_uint = 0;
     let mut micro: c_uint = 0;
+    // SAFETY: every pointer passed here is null or a live handle
+    // created in this test, and each handle is destroyed once.
     unsafe { hb_version(&mut major, &mut minor, &mut micro) };
     assert_eq!(major, 8);
     assert_eq!(minor, 2);
@@ -160,6 +170,8 @@ fn version_advertises_hb_compat_eight_two() {
 
 #[test]
 fn buffer_guess_segment_properties_seeds_latin_for_ascii() {
+    // SAFETY: every pointer passed here is null or a live handle
+    // created in this test, and each handle is destroyed once.
     unsafe {
         let buffer = hb_buffer_create();
         hb_buffer_add_utf8(buffer, c"Hello".as_ptr(), -1, 0, -1);
@@ -177,6 +189,8 @@ fn buffer_guess_segment_properties_seeds_latin_for_ascii() {
 
 #[test]
 fn utf16_input_matches_utf8() {
+    // SAFETY: every pointer passed here is null or a live handle
+    // created in this test, and each handle is destroyed once.
     unsafe {
         // "Hi" in UTF-16.
         let utf16: [u16; 2] = [b'H' as u16, b'i' as u16];

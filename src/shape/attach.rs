@@ -69,12 +69,48 @@ pub(super) struct Slot {
     chain: i32,
 }
 
-/// Attachment scratch for one glyph slice: one [`Slot`] per glyph plus
-/// the effective run direction (cursive attachment needs it while the
-/// lookups run).
+/// Attachment scratch for one glyph slice: one [`Slot`] per glyph, the
+/// effective run direction (cursive attachment needs it while the
+/// lookups run), and the mark base search cache.
 pub(super) struct Attach<'s> {
     pub(super) direction: Direction,
     pub(super) slots: &'s mut [Slot],
+    base_cache: BaseCache,
+}
+
+impl<'s> Attach<'s> {
+    /// Scratch for a run in `direction` with one slot per glyph.
+    pub(super) fn new(direction: Direction, slots: &'s mut [Slot]) -> Self {
+        Self {
+            direction,
+            slots,
+            base_cache: BaseCache::default(),
+        }
+    }
+
+    /// Forgets the remembered mark base. The GPOS stage calls this at
+    /// the start of every lookup.
+    pub(super) fn reset_base_cache(&mut self) {
+        self.base_cache = BaseCache::default();
+    }
+}
+
+/// HarfBuzz's `last_base` / `last_base_until` pair for mark-to-base and
+/// mark-to-ligature: the base the last search found and the position
+/// that search started from. The base is the nearest glyph before
+/// `until` that the search accepts, or `None` when there is none, so a
+/// later search only has to look at the glyphs from `until` on. A run
+/// of marks after one base then costs one step per mark instead of a
+/// walk back to the base for every mark, which a long mark run would
+/// turn into quadratic work.
+#[derive(Debug, Clone, Copy, Default)]
+struct BaseCache {
+    base: Option<usize>,
+    until: usize,
+    /// The lookup that filled the cache. A nested lookup with a
+    /// different index starts over, since its flags and coverage can
+    /// accept other glyphs.
+    lookup: Option<u16>,
 }
 
 /// Lookup-level inputs shared by every attachment subtable of one
@@ -90,6 +126,9 @@ pub(super) struct LookupCx<'c> {
     /// Whether iteration passes over ZWJ (HarfBuzz's `auto_zwj`).
     pub(super) ignore_zwj: bool,
     pub(super) var: &'c VarCtx<'c>,
+    /// The lookup's index in the LookupList, which keys the mark base
+    /// search cache.
+    pub(super) lookup_index: u16,
 }
 
 /// One parsed attachment subtable plus the bytes its anchors resolve
@@ -177,7 +216,7 @@ pub(super) fn apply_at(
             // HarfBuzz issue 4124: a glyph the multiple-substitution
             // rule rejects still serves as the base when the subtable
             // covers it.
-            let Some(base) = find_base(glyphs, at, cx, |j| {
+            let Some(base) = find_base(glyphs, at, cx, &mut att.base_cache, |j| {
                 accepts_as_base(glyphs, j, cx.gdef) || mbp.covers_base(glyphs[j].glyph_id as u16)
             }) else {
                 return false;
@@ -192,7 +231,7 @@ pub(super) fn apply_at(
             if !mlp.covers_mark(mark_gid) {
                 return false;
             }
-            let Some(lig) = find_base(glyphs, at, cx, |_| true) else {
+            let Some(lig) = find_base(glyphs, at, cx, &mut att.base_cache, |_| true) else {
                 return false;
             };
             let lig_gid = glyphs[lig].glyph_id as u16;
@@ -253,17 +292,46 @@ fn is_mark(g: &Glyph, gdef: Option<&Gdef<'_>>) -> bool {
 /// GPOS iteration, default-ignorable characters), whatever the
 /// lookup's own flags say. `accept` can turn a candidate down, which
 /// passes over it like a mark.
+///
+/// `cache` carries the previous search of the same lookup forward, as
+/// HarfBuzz's `last_base` does, so only the glyphs after the previous
+/// start are examined.
 fn find_base(
     glyphs: &[Glyph],
     at: usize,
     cx: &LookupCx<'_>,
+    cache: &mut BaseCache,
     accept: impl Fn(usize) -> bool,
 ) -> Option<usize> {
+    if cache.lookup != Some(cx.lookup_index) {
+        *cache = BaseCache {
+            lookup: Some(cx.lookup_index),
+            ..BaseCache::default()
+        };
+    }
+    if at < cache.until {
+        // Nothing between the cached base and `until` is accepted, so
+        // the cached answer holds for `at` too unless `at` is at or
+        // before that base.
+        match cache.base {
+            Some(base) if base >= at => {
+                cache.base = None;
+                cache.until = 0;
+            }
+            base => return base,
+        }
+    }
     let filter = MatchFilter::for_lookup(LOOKUP_FLAG_IGNORE_MARKS, cx.gdef, None);
     let skipper = Skipper::new(&filter, cx.ignore_zwj);
-    (0..at)
+    let end = at.min(glyphs.len());
+    if let Some(found) = (cache.until..end)
         .rev()
         .find(|&j| !skipper.skips(&glyphs[j]) && accept(j))
+    {
+        cache.base = Some(found);
+    }
+    cache.until = at;
+    cache.base
 }
 
 /// HarfBuzz's mark-to-base `accept`: of the glyphs a multiple
@@ -479,6 +547,10 @@ fn linked_index(index: usize, chain: i32, len: usize) -> Option<usize> {
 /// so malformed cycles terminate.
 pub(super) fn resolve_attachments(glyphs: &mut [Glyph], slots: &mut [Slot], direction: Direction) {
     let len = glyphs.len().min(slots.len());
+    // Running advance sums, so the compensation for the glyphs between
+    // a mark and its parent costs one subtraction instead of a walk
+    // over them. Advances do not change while attachments resolve.
+    let advances = AdvanceSums::new(glyphs.get(..len).unwrap_or_default());
     let mut path: Vec<(usize, usize, AttachKind)> = Vec::new();
     for start in 0..len {
         if slots[start].chain == 0 {
@@ -499,24 +571,73 @@ pub(super) fn resolve_attachments(glyphs: &mut [Glyph], slots: &mut [Slot], dire
             cur = parent;
         }
         for &(child, parent, kind) in path.iter().rev() {
-            propagate(glyphs, child, parent, kind, direction);
+            propagate(glyphs, &advances, child, parent, kind, direction);
         }
     }
+}
+
+/// Prefix sums of the x and y advances of a run: `x[k]` is the sum of
+/// the x advances of glyphs `0..k`. Kept in `i64` so no partial sum
+/// can overflow.
+struct AdvanceSums {
+    x: Vec<i64>,
+    y: Vec<i64>,
+}
+
+impl AdvanceSums {
+    fn new(glyphs: &[Glyph]) -> Self {
+        let mut x = Vec::with_capacity(glyphs.len() + 1);
+        let mut y = Vec::with_capacity(glyphs.len() + 1);
+        let (mut sx, mut sy) = (0i64, 0i64);
+        x.push(0);
+        y.push(0);
+        for g in glyphs {
+            sx += i64::from(g.x_advance);
+            sy += i64::from(g.y_advance);
+            x.push(sx);
+            y.push(sy);
+        }
+        Self { x, y }
+    }
+
+    /// Sum of the advances of glyphs `start..end`, or zero when the
+    /// range is empty or out of bounds.
+    fn between(&self, start: usize, end: usize) -> (i64, i64) {
+        match (
+            self.x.get(start),
+            self.x.get(end),
+            self.y.get(start),
+            self.y.get(end),
+        ) {
+            (Some(x0), Some(x1), Some(y0), Some(y1)) if start <= end => (x1 - x0, y1 - y0),
+            _ => (0, 0),
+        }
+    }
+}
+
+/// Clamps an `i64` position into the `i32` range.
+fn clamp_i32(v: i64) -> i32 {
+    v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
 /// Folds the resolved position of `parent` into `child`.
 fn propagate(
     glyphs: &mut [Glyph],
+    advances: &AdvanceSums,
     child: usize,
     parent: usize,
     kind: AttachKind,
     direction: Direction,
 ) {
-    let (px, py) = (glyphs[parent].x_offset, glyphs[parent].y_offset);
+    let Some((px, py)) = glyphs.get(parent).map(|g| (g.x_offset, g.y_offset)) else {
+        return;
+    };
+    let Some(g) = glyphs.get_mut(child) else {
+        return;
+    };
     match kind {
         AttachKind::None => {}
         AttachKind::Cursive => {
-            let g = &mut glyphs[child];
             if direction.is_horizontal() {
                 g.y_offset = g.y_offset.saturating_add(py);
             } else {
@@ -524,29 +645,26 @@ fn propagate(
             }
         }
         AttachKind::Mark => {
-            let (mut dx, mut dy) = (px, py);
+            let (mut dx, mut dy) = (i64::from(px), i64::from(py));
             // Marks only ever attach backwards in logical order.
             if parent < child {
                 if direction.is_forward() {
                     // The pen reaches the mark after passing the
                     // parent and everything up to the mark.
-                    for g in &glyphs[parent..child] {
-                        dx = dx.saturating_sub(g.x_advance);
-                        dy = dy.saturating_sub(g.y_advance);
-                    }
+                    let (ax, ay) = advances.between(parent, child);
+                    dx -= ax;
+                    dy -= ay;
                 } else {
                     // After the final reversal the mark precedes the
                     // parent: the pen reaches the parent after the
                     // mark and everything between the two.
-                    for g in &glyphs[parent + 1..=child] {
-                        dx = dx.saturating_add(g.x_advance);
-                        dy = dy.saturating_add(g.y_advance);
-                    }
+                    let (ax, ay) = advances.between(parent + 1, child + 1);
+                    dx += ax;
+                    dy += ay;
                 }
             }
-            let g = &mut glyphs[child];
-            g.x_offset = g.x_offset.saturating_add(dx);
-            g.y_offset = g.y_offset.saturating_add(dy);
+            g.x_offset = clamp_i32(i64::from(g.x_offset) + dx);
+            g.y_offset = clamp_i32(i64::from(g.y_offset) + dy);
         }
     }
 }

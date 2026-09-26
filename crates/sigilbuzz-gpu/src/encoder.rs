@@ -18,12 +18,26 @@ use sigilbuzz::Face;
 use crate::flatten::cubic_to_quads;
 use crate::types::{Band, Bbox, QuadSegment, SlugGlyph, Vec2};
 
+/// Largest band count the encoder builds. A larger
+/// [`SlugOptions::band_count`] override is clamped to this value, so a
+/// bad override cannot size the per-band tables past about a megabyte.
+const MAX_BAND_COUNT: u32 = 1 << 16;
+
+/// Largest number of quadratic segments the encoder emits, counted
+/// both before banding and in the banded pool. Cubic flattening can
+/// turn one cubic with huge coordinates into up to 2^18 quadratics, and
+/// banding copies a segment into every band it crosses. Past this
+/// limit the glyph is rejected instead of allocating without bound.
+/// Real glyphs stay far below it.
+const MAX_SEGMENTS: usize = 1 << 22;
+
 /// Encoder configuration.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SlugOptions {
     /// Override the auto-computed band count. `None` (the default)
     /// asks the encoder to pick a band count proportional to glyph
-    /// height in em-units.
+    /// height in design units. Zero is raised to 1, and values above
+    /// 65536 are clamped to 65536.
     pub band_count: Option<u32>,
     /// Maximum allowed geometric error (design units) when flattening
     /// cubic Beziers into quadratics. Defaults to 1 design unit,
@@ -58,7 +72,8 @@ impl Default for SlugOptions {
 /// Encodes the static outline of `glyph_id` from `face` using `opts`.
 ///
 /// Returns `None` when the glyph has no outline (whitespace, missing
-/// glyph id) or when the outline has zero rasterizable extent. Errors
+/// glyph id), when the outline has zero rasterizable extent, or when
+/// the encoding would exceed 4,194,304 segments. Errors
 /// from outline extraction are swallowed into `None`; callers who
 /// need to distinguish the two cases can call
 /// [`Face::glyph_outline`] directly first.
@@ -81,8 +96,8 @@ pub fn encode_glyph_at_coords(
     encode_outline_ops(outline.ops(), opts)
 }
 
-/// Lower-level entry point: encode an arbitrary [`PathOp`] stream.
-/// Mostly useful for tests with hand-crafted paths.
+/// Encodes an arbitrary [`PathOp`] stream. [`encode_glyph_at_coords`]
+/// feeds it one glyph outline, and the tests feed it hand-made paths.
 #[must_use]
 pub(crate) fn encode_outline_ops(ops: &[PathOp], opts: &SlugOptions) -> Option<SlugGlyph> {
     // Reject paths with non-finite coordinates before we spend work
@@ -103,7 +118,7 @@ pub(crate) fn encode_outline_ops(ops: &[PathOp], opts: &SlugOptions) -> Option<S
         SlugOptions::MIN_CUBIC_TOLERANCE
     };
     let segments = flatten_to_quads(ops, tolerance);
-    if segments.is_empty() {
+    if segments.is_empty() || segments.len() > MAX_SEGMENTS {
         return None;
     }
 
@@ -117,9 +132,13 @@ pub(crate) fn encode_outline_ops(ops: &[PathOp], opts: &SlugOptions) -> Option<S
     }
 
     let band_count = opts.band_count.unwrap_or_else(|| auto_band_count(&bbox));
-    let band_count = band_count.max(1);
+    let band_count = band_count.clamp(1, MAX_BAND_COUNT);
 
     let (bands, banded_segments) = decompose_into_bands(&segments, &bbox, band_count);
+    if bands.is_empty() {
+        // The banded pool would exceed MAX_SEGMENTS.
+        return None;
+    }
 
     Some(SlugGlyph {
         bbox,
@@ -160,6 +179,9 @@ fn ops_are_finite(ops: &[PathOp]) -> bool {
 /// Lines become degenerate quadratics with the control point at the
 /// segment midpoint. Cubics are subdivided per
 /// [`crate::flatten::cubic_to_quads`].
+///
+/// Flattening stops early once the list holds more than
+/// [`MAX_SEGMENTS`] segments. The caller rejects such a list.
 fn flatten_to_quads(ops: &[PathOp], tolerance: f32) -> Vec<QuadSegment> {
     let mut out: Vec<QuadSegment> = Vec::with_capacity(ops.len());
     let mut start = Vec2::default();
@@ -168,6 +190,9 @@ fn flatten_to_quads(ops: &[PathOp], tolerance: f32) -> Vec<QuadSegment> {
     let mut tmp_quads: Vec<(Vec2, Vec2)> = Vec::with_capacity(8);
 
     for op in ops {
+        if out.len() > MAX_SEGMENTS {
+            break;
+        }
         match *op {
             PathOp::MoveTo { x, y } => {
                 start = Vec2::new(x, y);
@@ -262,10 +287,11 @@ fn segment_pool_bbox(segments: &[QuadSegment]) -> Bbox {
     bbox
 }
 
-/// Heuristic for the auto band count: 16 bands per em-equivalent of
-/// height. The Slug paper shows diminishing returns above ~32 bands
-/// per typical glyph; we tune for 16 to keep band metadata small.
-/// The caller can override via [`SlugOptions::band_count`].
+/// Heuristic for the auto band count: one band per 64 design units of
+/// height, clamped to `4..=64`. The Slug paper shows diminishing
+/// returns above about 32 bands per typical glyph, so the cap keeps
+/// band metadata small. The caller can override via
+/// [`SlugOptions::band_count`].
 fn auto_band_count(bbox: &Bbox) -> u32 {
     // Without the upem we can't compute "bands per em" exactly. Use
     // the practical heuristic: 1 band per ~64 design units, capped.
@@ -282,6 +308,9 @@ fn auto_band_count(bbox: &Bbox) -> u32 {
 /// lands in every band whose y-range overlaps the segment's y-extent
 /// (computed as the y-range of `[p0, p1, p2]` since the curve is
 /// contained in the control hull).
+///
+/// Returns two empty vectors when the pool would hold more than
+/// [`MAX_SEGMENTS`] entries.
 fn decompose_into_bands(
     segments: &[QuadSegment],
     bbox: &Bbox,
@@ -291,17 +320,28 @@ fn decompose_into_bands(
     let h = bbox.height().max(f32::EPSILON);
     let band_h = h / band_count as f32;
 
-    // First pass: count segments per band so we can build a flat
-    // pool. Avoids resizing per-band intermediate vectors and keeps
-    // cache locality good.
-    let mut counts: Vec<u32> = alloc::vec![0_u32; band_count];
+    // First pass: find the band range of every segment and the pool
+    // size, so an oversized pool is rejected before anything sized by
+    // `band_count` is allocated.
     let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(segments.len());
-
+    let mut total: usize = 0;
     for s in segments {
         let y_lo = s.p0.y.min(s.p1.y).min(s.p2.y);
         let y_hi = s.p0.y.max(s.p1.y).max(s.p2.y);
         let (lo, hi) = band_indices_for(y_lo, y_hi, bbox.ymin, band_h, band_count);
         ranges.push((lo, hi));
+        total = total.saturating_add(hi.saturating_sub(lo));
+        if total > MAX_SEGMENTS {
+            return (Vec::new(), Vec::new());
+        }
+    }
+
+    // Count segments per band so we can build a flat pool. Avoids
+    // resizing per-band intermediate vectors and keeps cache locality
+    // good. Every count and prefix sum is at most `total`, which fits
+    // in `u32` because it is at most MAX_SEGMENTS.
+    let mut counts: Vec<u32> = alloc::vec![0_u32; band_count];
+    for &(lo, hi) in &ranges {
         for c in counts.iter_mut().take(hi).skip(lo) {
             *c += 1;
         }
@@ -315,19 +355,19 @@ fn decompose_into_bands(
             segment_offset: acc,
             segment_count: c,
         });
-        acc = acc.saturating_add(c);
+        acc += c;
     }
 
     // Second pass: scatter segments into the pool. We track a
     // running "next index" per band by reusing a copy of the offsets.
-    let total = acc as usize;
     let mut pool: Vec<QuadSegment> = alloc::vec![QuadSegment::default(); total];
     let mut cursors: Vec<u32> = bands.iter().map(|b| b.segment_offset).collect();
 
     for (seg, &(lo, hi)) in segments.iter().zip(ranges.iter()) {
         for cursor in cursors.iter_mut().take(hi).skip(lo) {
-            let dst = *cursor as usize;
-            pool[dst] = *seg;
+            if let Some(slot) = pool.get_mut(*cursor as usize) {
+                *slot = *seg;
+            }
             *cursor += 1;
         }
     }
@@ -645,5 +685,83 @@ mod tests {
         let a = encode_outline_ops(&ops, &SlugOptions::default()).unwrap();
         let b = encode_outline_ops(&ops, &SlugOptions::default()).unwrap();
         assert_eq!(a, b);
+    }
+
+    fn triangle() -> [PathOp; 4] {
+        [
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::LineTo { x: 100.0, y: 0.0 },
+            PathOp::LineTo { x: 50.0, y: 100.0 },
+            PathOp::Close,
+        ]
+    }
+
+    #[test]
+    fn huge_band_count_override_is_clamped() {
+        // A band count of u32::MAX used to size a 16 GB count table
+        // before any segment was placed.
+        let opts = SlugOptions {
+            band_count: Some(u32::MAX),
+            ..SlugOptions::default()
+        };
+        let g = encode_outline_ops(&triangle(), &opts).unwrap();
+        assert_eq!(g.bands.len(), MAX_BAND_COUNT as usize);
+        let sum: usize = g.bands.iter().map(|b| b.segment_count as usize).sum();
+        assert_eq!(sum, g.segments.len());
+    }
+
+    #[test]
+    fn band_count_at_limit_is_kept() {
+        let opts = SlugOptions {
+            band_count: Some(MAX_BAND_COUNT),
+            ..SlugOptions::default()
+        };
+        let g = encode_outline_ops(&triangle(), &opts).unwrap();
+        assert_eq!(g.bands.len(), MAX_BAND_COUNT as usize);
+    }
+
+    #[test]
+    fn oversized_flattening_is_rejected() {
+        // A cubic with coordinates near 1e30 fails the tolerance test
+        // until float rounding cancels the error term, which takes
+        // tens of thousands of quadratics. Two hundred such cubics pass
+        // MAX_SEGMENTS, so the encoder must give up instead of growing
+        // the segment list without bound.
+        let mut ops = alloc::vec![PathOp::MoveTo { x: 0.0, y: 0.0 }];
+        for _ in 0..200 {
+            ops.push(PathOp::CubicTo {
+                c1x: 1.0e30,
+                c1y: 1.0e30,
+                c2x: -1.0e30,
+                c2y: -1.0e30,
+                x: 0.0,
+                y: 0.0,
+            });
+        }
+        ops.push(PathOp::Close);
+        assert!(encode_outline_ops(&ops, &SlugOptions::default()).is_none());
+    }
+
+    #[test]
+    fn oversized_band_pool_is_rejected() {
+        // Every full-height segment is copied into every band. With
+        // 65536 bands, 70 such segments pass MAX_SEGMENTS.
+        let mut ops = alloc::vec![PathOp::MoveTo { x: 0.0, y: 0.0 }];
+        for i in 0..35 {
+            let x = i as f32;
+            ops.push(PathOp::LineTo { x, y: 1000.0 });
+            ops.push(PathOp::LineTo { x: x + 0.5, y: 0.0 });
+        }
+        ops.push(PathOp::Close);
+        let opts = SlugOptions {
+            band_count: Some(MAX_BAND_COUNT),
+            ..SlugOptions::default()
+        };
+        assert!(encode_outline_ops(&ops, &opts).is_none());
+
+        // The same outline with the auto band count still encodes.
+        let g = encode_outline_ops(&ops, &SlugOptions::default()).unwrap();
+        let sum: usize = g.bands.iter().map(|b| b.segment_count as usize).sum();
+        assert_eq!(sum, g.segments.len());
     }
 }

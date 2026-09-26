@@ -12,6 +12,7 @@
 use sigilbuzz::tables::variation_store::ItemVariationStore;
 
 use crate::gpos_var::{fold_one_field, DeviceSlot};
+use crate::util::{WorkBudget, WORK_LIMIT};
 
 fn read_u16(buf: &[u8], pos: usize) -> Option<usize> {
     let bytes = buf.get(pos..pos.checked_add(2)?)?;
@@ -23,7 +24,9 @@ fn read_u16(buf: &[u8], pos: usize) -> Option<usize> {
 /// Like the GPOS bake, the walk is lenient: offsets that run past the
 /// table, or structures too short to hold what they claim, are skipped
 /// and left as they are. A caret shared by several ligatures is folded
-/// once; its cleared offset makes later visits no-ops.
+/// once, and its cleared offset makes later visits no-ops. Many
+/// ligatures can share one LigGlyph, so the walk charges a
+/// [`WorkBudget`] for every caret it visits and stops once it runs out.
 pub(crate) fn fold_caret_variations(
     gdef: &mut [u8],
     store: Option<&ItemVariationStore<'_>>,
@@ -35,6 +38,7 @@ pub(crate) fn fold_caret_variations(
     let Some(count) = read_u16(gdef, list + 2) else {
         return;
     };
+    let budget = WorkBudget::new(WORK_LIMIT);
     for i in 0..count {
         let Some(lig) = read_u16(gdef, list + 4 + i * 2).filter(|&r| r != 0) else {
             continue;
@@ -43,6 +47,9 @@ pub(crate) fn fold_caret_variations(
         let Some(carets) = read_u16(gdef, lig) else {
             continue;
         };
+        if !budget.spend(1 + carets) {
+            return;
+        }
         for k in 0..carets {
             let Some(rel) = read_u16(gdef, lig + 2 + k * 2).filter(|&r| r != 0) else {
                 continue;

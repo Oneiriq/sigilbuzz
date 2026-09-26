@@ -149,16 +149,11 @@ fn scan_consonant_syllable(cps: &[char], start: usize, config: &IndicConfig) -> 
     let ra_halant_prefix = implicit_ra_halant || explicit_ra_halant_zwj || logrepha_prefix;
 
     // Advance past a LogRepha head so the syllable machine picks up
-    // the following base consonant as the syllable's base. For
-    // Explicit the ZWJ sits between the halant and the base; the
-    // existing (C H)+ loop below treats ZWJ as non-consonant and
-    // stops, so we walk it manually here.
+    // the following base consonant as the syllable's base. An
+    // Explicit `ra + halant + ZWJ` head needs no special step: the
+    // (C H)+ loop below consumes the ZWJ that follows a halant.
     if logrepha_prefix {
         i += 1;
-    } else if explicit_ra_halant_zwj {
-        // Skip the ZWJ after ra+halant; the head now points at the
-        // base consonant. The ra+halant pair will be swallowed by
-        // the (C H)+ loop below as normal.
     }
 
     let mut base_index: Option<usize> = None;

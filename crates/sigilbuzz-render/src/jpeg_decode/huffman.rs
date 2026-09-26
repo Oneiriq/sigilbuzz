@@ -211,7 +211,10 @@ pub(super) fn decode_block(
     let raw = br.read_bits(t);
     let diff = extend(raw, t);
     *prev_dc = prev_dc.wrapping_add(diff);
-    out[0] = *prev_dc * qt[0];
+    // The running DC predictor is unbounded across blocks, so the
+    // product can leave i32 range on hostile streams. Wrap the way a
+    // release build always has.
+    out[0] = prev_dc.wrapping_mul(qt[0]);
 
     // AC coefficients.
     let mut k = 1;

@@ -2,21 +2,10 @@
 //! walker: Coverage and ClassDef enumeration (a null ClassDef offset reads
 //! as the empty ClassDef) and Extension unwrapping.
 
+use super::MAX_GLYPH_ENTRIES;
 use alloc::vec::Vec;
 
 // === Byte-level helpers used by the rewriters and the closure walker. ===
-
-/// The `(gid, class)` pairs of the ClassDef that `offset` points at
-/// inside `sub`, class 0 left out. A null offset is the spec's empty
-/// ClassDef (every glyph in class 0; fontmake leaves the backtrack
-/// ClassDef of chained context format 2 null this way), so it yields
-/// no pairs. An offset past the end of `sub` yields `None`.
-pub(crate) fn classdef_pairs_at(sub: &[u8], offset: usize) -> Option<Vec<(u16, u16)>> {
-    if offset == 0 {
-        return Some(Vec::new());
-    }
-    sub.get(offset..).map(parse_classdef_pairs_from_bytes)
-}
 
 /// The lookup type and subtable an Extension subtable (GSUB type 7,
 /// GPOS type 9) wraps:
@@ -53,42 +42,57 @@ pub(crate) fn extension_target(sub: &[u8]) -> Result<(u16, &[u8]), sigilbuzz::Er
     Ok((inner_type, inner))
 }
 
+/// Reads a big-endian `u16` at `off`, or `None` past the end.
+pub(crate) fn read_u16(bytes: &[u8], off: usize) -> Option<u16> {
+    let chunk = bytes.get(off..)?.first_chunk::<2>()?;
+    Some(u16::from_be_bytes(*chunk))
+}
+
+/// Reads a 4-byte tag at `off`, or `None` past the end.
+pub(super) fn read_tag(bytes: &[u8], off: usize) -> Option<[u8; 4]> {
+    bytes.get(off..)?.first_chunk::<4>().copied()
+}
+
 /// Best-effort enumeration of the glyphs covered by a Coverage table
 /// given its raw bytes. Returns an empty vec on any parse failure.
 ///
-/// Mirrors the helper in [`crate::closure`], exposed here so the
-/// per-lookup-type rewriters in [`crate::gsub`] / [`crate::gpos`] can
-/// share it without re-deriving the byte layout.
+/// Glyphs come back in table order, so position `i` in the result is
+/// the coverage index a valid table assigns. The walk stops after
+/// [`MAX_GLYPH_ENTRIES`] glyphs: a valid table never lists more, and
+/// overlapping ranges in a malformed one could otherwise expand into
+/// billions of entries.
+///
+/// Shared by the per-lookup-type rewriters in [`crate::gsub`] /
+/// [`crate::gpos`] and the closure walker in [`crate::closure`].
 pub(crate) fn parse_coverage_glyphs(bytes: &[u8]) -> Vec<u16> {
     let mut out = Vec::new();
-    if bytes.len() < 4 {
+    let (Some(format), Some(count)) = (read_u16(bytes, 0), read_u16(bytes, 2)) else {
         return out;
-    }
-    let format = u16::from_be_bytes([bytes[0], bytes[1]]);
-    let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+    };
+    let count = usize::from(count);
     match format {
         1 => {
-            let need = 4 + count * 2;
-            if bytes.len() < need {
+            let Some(glyphs) = bytes.get(4..4 + count * 2) else {
                 return out;
-            }
-            for i in 0..count {
-                let off = 4 + i * 2;
-                out.push(u16::from_be_bytes([bytes[off], bytes[off + 1]]));
-            }
+            };
+            out.extend(
+                glyphs
+                    .chunks_exact(2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]])),
+            );
         }
         2 => {
-            let need = 4 + count * 6;
-            if bytes.len() < need {
+            let Some(records) = bytes.get(4..4 + count * 6) else {
                 return out;
-            }
-            for i in 0..count {
-                let off = 4 + i * 6;
-                let start = u16::from_be_bytes([bytes[off], bytes[off + 1]]);
-                let end = u16::from_be_bytes([bytes[off + 2], bytes[off + 3]]);
-                for g in start..=end {
-                    out.push(g);
+            };
+            for rec in records.chunks_exact(6) {
+                let start = u16::from_be_bytes([rec[0], rec[1]]);
+                let end = u16::from_be_bytes([rec[2], rec[3]]);
+                let room = MAX_GLYPH_ENTRIES.saturating_sub(out.len());
+                if room == 0 {
+                    break;
                 }
+                out.extend((start..=end).take(room));
             }
         }
         _ => {}
@@ -98,55 +102,55 @@ pub(crate) fn parse_coverage_glyphs(bytes: &[u8]) -> Vec<u16> {
 
 /// Walks a ClassDef's raw bytes to enumerate every `(gid, class)`
 /// pair, skipping class-0 entries.
+///
+/// Pairs come back in table order. The walk stops after
+/// [`MAX_GLYPH_ENTRIES`] pairs: a valid table never lists more, and
+/// overlapping ranges in a malformed one could otherwise expand into
+/// billions of entries.
 pub(crate) fn parse_classdef_pairs_from_bytes(bytes: &[u8]) -> Vec<(u16, u16)> {
     let mut out = Vec::new();
-    if bytes.len() < 2 {
+    let Some(format) = read_u16(bytes, 0) else {
         return out;
-    }
-    let format = u16::from_be_bytes([bytes[0], bytes[1]]);
+    };
     match format {
         1 => {
             // Format 1: u16 format, u16 startGlyphID, u16 glyphCount, u16 values[count].
-            if bytes.len() < 6 {
+            let (Some(start), Some(count)) = (read_u16(bytes, 2), read_u16(bytes, 4)) else {
                 return out;
-            }
-            let start = u16::from_be_bytes([bytes[2], bytes[3]]);
-            let count = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
-            let need = 6 + count * 2;
-            if bytes.len() < need {
+            };
+            let Some(values) = bytes.get(6..6 + usize::from(count) * 2) else {
                 return out;
-            }
-            for i in 0..count {
-                let off = 6 + i * 2;
-                let class = u16::from_be_bytes([bytes[off], bytes[off + 1]]);
+            };
+            for (i, c) in values.chunks_exact(2).enumerate() {
+                let class = u16::from_be_bytes([c[0], c[1]]);
                 if class == 0 {
                     continue;
                 }
-                let gid = start.saturating_add(i as u16);
-                out.push((gid, class));
+                // `i < glyphCount <= u16::MAX`. A valid table never runs
+                // past glyph 0xFFFF. A malformed one repeats that glyph.
+                out.push((start.saturating_add(i as u16), class));
             }
         }
         2 => {
             // Format 2: u16 format, u16 rangeCount, RangeRecord[count]: u16 start, u16 end, u16 class.
-            if bytes.len() < 4 {
+            let Some(count) = read_u16(bytes, 2) else {
                 return out;
-            }
-            let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
-            let need = 4 + count * 6;
-            if bytes.len() < need {
+            };
+            let Some(records) = bytes.get(4..4 + usize::from(count) * 6) else {
                 return out;
-            }
-            for i in 0..count {
-                let off = 4 + i * 6;
-                let start = u16::from_be_bytes([bytes[off], bytes[off + 1]]);
-                let end = u16::from_be_bytes([bytes[off + 2], bytes[off + 3]]);
-                let class = u16::from_be_bytes([bytes[off + 4], bytes[off + 5]]);
+            };
+            for r in records.chunks_exact(6) {
+                let start = u16::from_be_bytes([r[0], r[1]]);
+                let end = u16::from_be_bytes([r[2], r[3]]);
+                let class = u16::from_be_bytes([r[4], r[5]]);
                 if class == 0 {
                     continue;
                 }
-                for g in start..=end {
-                    out.push((g, class));
+                let room = MAX_GLYPH_ENTRIES.saturating_sub(out.len());
+                if room == 0 {
+                    break;
                 }
+                out.extend((start..=end).take(room).map(|g| (g, class)));
             }
         }
         _ => {}

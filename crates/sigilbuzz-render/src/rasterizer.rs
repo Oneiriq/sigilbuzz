@@ -18,9 +18,9 @@ use crate::affine::Affine;
 use crate::bitmaps;
 use crate::colrv1::rasterize_colrv1;
 use crate::error::RenderError;
-use crate::flatten::flatten;
+use crate::flatten::{flatten, flatten_limited, Segment, MAX_SEGMENTS};
 use crate::pixmap::{ColorPixmap, Pixmap};
-use crate::raster::{rasterize as raster, Render};
+use crate::raster::{raster_bounds, rasterize as raster, RasterBounds, MAX_RASTER_DIM};
 
 /// Configuration for the rasterizer.
 ///
@@ -116,7 +116,8 @@ impl Rasterizer {
     /// # Errors
     /// Returns [`RenderError::NoOutline`] when the glyph is invisible
     /// (whitespace) or out of range; [`RenderError::BadSize`] when
-    /// `size_pt` is non-finite or non-positive; [`RenderError::BadUpem`]
+    /// `size_pt` is non-finite or non-positive, or when the rendered
+    /// glyph would exceed 16384 pixels on a side; [`RenderError::BadUpem`]
     /// when the font has zero units-per-em; [`RenderError::Parse`]
     /// when the underlying parser refuses the glyph data.
     pub fn rasterize_glyph(
@@ -155,6 +156,11 @@ impl Rasterizer {
         };
 
         let segs = flatten(outline.ops().iter().copied(), &xform, self.tolerance);
+        if let Some(b) = raster_bounds(&segs) {
+            if b.width > MAX_RASTER_DIM || b.height > MAX_RASTER_DIM {
+                return Err(RenderError::BadSize(size_pt));
+            }
+        }
         let r = raster(&segs);
         Ok(r.pixmap)
     }
@@ -177,6 +183,9 @@ impl Rasterizer {
     ///
     /// # Errors
     /// - [`RenderError::NoColrV0`] when the glyph has no v0 layer record.
+    /// - [`RenderError::BadSize`] when `size_pt` is non-finite or
+    ///   non-positive, or when the composed glyph would exceed 16384
+    ///   pixels on a side.
     /// - [`RenderError::Parse`] for any underlying parser failure.
     pub fn rasterize_colrv0_glyph(
         &self,
@@ -211,15 +220,24 @@ impl Rasterizer {
             dy: 0.0,
         };
 
-        // First pass: rasterize every layer into its own offset pixmap
-        // so we can establish the union bounding box before allocating
-        // the destination.
-        struct LayerMask {
-            r: Render,
+        // First pass: flatten every layer and find where its mask will
+        // land, so we can establish the union bounding box before
+        // allocating the destination. Masks are rasterized one at a
+        // time in the second pass, which keeps memory at one mask no
+        // matter how many layers the record lists.
+        struct LayerEdges {
+            segs: Vec<Segment>,
+            bounds: Option<RasterBounds>,
             color: [u8; 4],
         }
-        let mut masks: Vec<LayerMask> = Vec::new();
+        let mut edges: Vec<LayerEdges> = Vec::new();
+        // All layers share one segment budget, so a record that lists
+        // the same heavy outline thousands of times stays bounded.
+        let mut budget = MAX_SEGMENTS;
         for layer in layers.iter() {
+            if budget == 0 {
+                break;
+            }
             let outline = face
                 .glyph_outline_at_coords(layer.glyph_id, coords)
                 .map_err(|_| RenderError::Parse("glyph_outline"))?;
@@ -229,11 +247,17 @@ impl Rasterizer {
             if outline.is_empty() {
                 continue;
             }
-            let segs = flatten(outline.ops().iter().copied(), &xform, self.tolerance);
+            let segs = flatten_limited(
+                outline.ops().iter().copied(),
+                &xform,
+                self.tolerance,
+                budget,
+            );
+            budget = budget.saturating_sub(segs.len());
             if segs.is_empty() {
                 continue;
             }
-            let mask = raster(&segs);
+            let bounds = raster_bounds(&segs);
 
             // HarfBuzz's paint context: entry 0xFFFF is the foreground,
             // and so is any entry the font cannot supply.
@@ -242,10 +266,14 @@ impl Rasterizer {
                 .filter(|_| layer.palette_index != 0xFFFF)
                 .and_then(|cpal| cpal.color(palette_index, layer.palette_index))
                 .map_or(self.foreground, |c| [c.r, c.g, c.b, c.a]);
-            masks.push(LayerMask { r: mask, color });
+            edges.push(LayerEdges {
+                segs,
+                bounds,
+                color,
+            });
         }
 
-        if masks.is_empty() {
+        if edges.is_empty() {
             return Ok(ColorPixmap::new(0, 0));
         }
 
@@ -253,29 +281,35 @@ impl Rasterizer {
         let mut min_y = i32::MAX;
         let mut max_x = i32::MIN;
         let mut max_y = i32::MIN;
-        for m in &masks {
-            if m.r.pixmap.is_empty() {
-                continue;
-            }
-            min_x = min_x.min(m.r.origin_x);
-            min_y = min_y.min(m.r.origin_y);
-            max_x = max_x.max(m.r.origin_x + m.r.pixmap.width as i32);
-            max_y = max_y.max(m.r.origin_y + m.r.pixmap.height as i32);
+        for b in edges.iter().filter_map(|e| e.bounds) {
+            min_x = min_x.min(b.origin_x);
+            min_y = min_y.min(b.origin_y);
+            max_x = max_x.max(b.origin_x + b.width as i32);
+            max_y = max_y.max(b.origin_y + b.height as i32);
         }
         if max_x <= min_x || max_y <= min_y {
             return Ok(ColorPixmap::new(0, 0));
         }
         let width = (max_x - min_x) as u32;
         let height = (max_y - min_y) as u32;
+        // The union contains every layer, so this also covers a single
+        // layer that is too large to rasterize.
+        if width > MAX_RASTER_DIM || height > MAX_RASTER_DIM {
+            return Err(RenderError::BadSize(size_pt));
+        }
         let mut out = ColorPixmap::new(width, height);
 
-        for m in &masks {
-            if m.r.pixmap.is_empty() {
+        for e in &edges {
+            if e.bounds.is_none() {
                 continue;
             }
-            let dx = (m.r.origin_x - min_x) as u32;
-            let dy = (m.r.origin_y - min_y) as u32;
-            blit_layer(&mut out, &m.r.pixmap, dx, dy, m.color);
+            let r = raster(&e.segs);
+            if r.pixmap.is_empty() {
+                continue;
+            }
+            let dx = (r.origin_x - min_x) as u32;
+            let dy = (r.origin_y - min_y) as u32;
+            blit_layer(&mut out, &r.pixmap, dx, dy, e.color);
         }
         Ok(out)
     }
@@ -307,8 +341,10 @@ impl Rasterizer {
     /// - [`RenderError::ColrV1NotFound`] when the font has no v1
     ///   paint record for `gid`.
     /// - [`RenderError::BadSize`] when `size_pt` is non-finite or
-    ///   non-positive, or the clip box would exceed 16384 pixels on a
-    ///   side.
+    ///   non-positive, when the clip box would exceed 16384 pixels on a
+    ///   side, when nested clips and composite layers would need more
+    ///   than 4 GiB of storage at once, or when drawing the paint graph
+    ///   would take more than 2^34 pixel updates.
     /// - [`RenderError::BadUpem`] when the font has zero `units_per_em`.
     /// - [`RenderError::Parse`] when the underlying parser refuses
     ///   one of the tables we need.

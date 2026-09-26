@@ -80,6 +80,8 @@ fn fired(counter: &AtomicUsize) -> usize {
 fn blob_reference_is_identity_and_double_destroy_frees_once() {
     let counter = AtomicUsize::new(0);
     let blob = open_sans_blob(&counter);
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or data that outlives the call.
     unsafe {
         let weak = observe(blob);
         assert_eq!(weak.strong_count(), 1);
@@ -101,6 +103,8 @@ fn blob_reference_is_identity_and_double_destroy_frees_once() {
 #[test]
 fn blob_destroy_callback_timing_follows_harfbuzz() {
     let bytes = [1u8, 2, 3, 4];
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or data that outlives the call.
     unsafe {
         // Zero length: nothing to keep, callback fires right away.
         let c0 = AtomicUsize::new(0);
@@ -171,6 +175,8 @@ fn blob_destroy_callback_timing_follows_harfbuzz() {
 fn face_references_its_blob_and_frees_everything() {
     let counter = AtomicUsize::new(0);
     let blob = open_sans_blob(&counter);
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or data that outlives the call.
     unsafe {
         let blob_weak = observe(blob);
         let face = hb_face_create(blob, 0);
@@ -196,6 +202,8 @@ fn face_references_its_blob_and_frees_everything() {
 fn font_references_its_face_and_frees_everything() {
     let counter = AtomicUsize::new(0);
     let blob = open_sans_blob(&counter);
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or data that outlives the call.
     unsafe {
         let face = hb_face_create(blob, 0);
         hb_blob_destroy(blob);
@@ -232,6 +240,8 @@ fn font_references_its_face_and_frees_everything() {
 
 #[test]
 fn empty_objects_from_null_inputs_are_ordinary_references() {
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or data that outlives the call.
     unsafe {
         let face = hb_face_create(ptr::null_mut(), 0);
         assert!(!face.is_null());
@@ -271,6 +281,8 @@ fn empty_objects_from_null_inputs_are_ordinary_references() {
 
 #[test]
 fn buffer_reference_is_identity() {
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or data that outlives the call.
     unsafe {
         let buffer = hb_buffer_create();
         let weak = observe(buffer);
@@ -286,6 +298,8 @@ fn buffer_reference_is_identity() {
 
 #[test]
 fn set_reference_is_identity() {
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or data that outlives the call.
     unsafe {
         let set = hb_set_create();
         let weak = observe(set);
@@ -331,6 +345,8 @@ fn references_can_be_released_from_other_threads() {
 
 #[test]
 fn null_handles_match_harfbuzz() {
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or data that outlives the call.
     unsafe {
         assert!(hb_blob_reference(ptr::null_mut()).is_null());
         assert!(hb_face_reference(ptr::null_mut()).is_null());
@@ -360,6 +376,8 @@ mod subset {
 
     #[test]
     fn input_reference_is_identity() {
+        // SAFETY: every pointer passed here is null, a live handle created
+        // in this test, or data that outlives the call.
         unsafe {
             let input = hb_subset_input_create();
             let weak = observe(input);
@@ -373,6 +391,8 @@ mod subset {
 
     #[test]
     fn accessor_sets_are_owned_by_the_input() {
+        // SAFETY: every pointer passed here is null, a live handle created
+        // in this test, or data that outlives the call.
         unsafe {
             let input = hb_subset_input_create();
             let unicode = hb_subset_input_unicode_set(input);
@@ -397,6 +417,8 @@ mod subset {
 
     #[test]
     fn referenced_set_outlives_the_input() {
+        // SAFETY: every pointer passed here is null, a live handle created
+        // in this test, or data that outlives the call.
         unsafe {
             let input = hb_subset_input_create();
             let unicode = hb_set_reference(hb_subset_input_unicode_set(input));
@@ -414,6 +436,8 @@ mod subset {
     fn harfbuzz_style_subset_sequence_does_not_leak() {
         let counter = AtomicUsize::new(0);
         let blob = open_sans_blob(&counter);
+        // SAFETY: every pointer passed here is null, a live handle created
+        // in this test, or data that outlives the call.
         unsafe {
             let face = hb_face_create(blob, 0);
             hb_blob_destroy(blob);
@@ -441,6 +465,8 @@ mod subset {
 
     #[test]
     fn null_subset_handles_match_harfbuzz() {
+        // SAFETY: every pointer passed here is null, a live handle created
+        // in this test, or data that outlives the call.
         unsafe {
             assert!(hb_subset_input_reference(ptr::null_mut()).is_null());
             hb_subset_input_destroy(ptr::null_mut());
@@ -461,6 +487,8 @@ mod paint {
 
     #[test]
     fn paint_funcs_reference_is_identity() {
+        // SAFETY: every pointer passed here is null, a live handle created
+        // in this test, or data that outlives the call.
         unsafe {
             let funcs = hb_paint_funcs_create();
             let weak = observe(funcs);

@@ -34,7 +34,7 @@
 //!
 //! Subtables run sequentially, each one reading (and possibly
 //! mutating) the glyph stream produced by the previous subtable.
-//! sigilbuzz implements the three most common types:
+//! sigilbuzz implements five subtable types:
 //!
 //! - **Type 0**: Rearrangement. Stateless over classes but stateful
 //!   over a pending "marked glyph range"; used for Indic vowel
@@ -90,6 +90,27 @@ const TYPE_LIGATURE: u8 = 2;
 const TYPE_NON_CONTEXTUAL: u8 = 4;
 const TYPE_INSERTION: u8 = 5;
 
+/// Chain header: defaultFlags, chainLength, featureCount, subtableCount.
+const CHAIN_HEADER_LEN: usize = 16;
+/// Subtable header: length, coverage, subFeatureFlags.
+const SUBTABLE_HEADER_LEN: usize = 12;
+
+/// Insertion subtables stop inserting once the run would grow past
+/// this multiple of the input length. Each insertion subtable can
+/// multiply the run length, so without a cap a chain of them grows
+/// the run exponentially.
+const MAX_LEN_FACTOR: usize = 8;
+/// Floor for the run-length cap, so short runs can still take
+/// several full-size insertions.
+const MAX_LEN_MIN: usize = 1024;
+
+/// Upper bound on state-machine steps for a run of `len` glyphs.
+/// DontAdvance entries revisit a glyph, and a malformed table can
+/// keep doing that forever.
+fn max_steps(len: usize) -> usize {
+    len.saturating_mul(8).saturating_add(16)
+}
+
 /// Parsed `morx` table: owns pointers into the source bytes.
 #[derive(Debug, Clone)]
 pub struct Morx<'a> {
@@ -111,9 +132,8 @@ pub struct Subtable<'a> {
     /// Subtable `subFeatureFlags`. A subtable participates when
     /// `subFeatureFlags & chain.defaultFlags != 0`.
     sub_feature_flags: u32,
-    /// Parsed body, or `None` for subtable types we recognize but do
-    /// not yet implement (e.g. type 4 non-contextual, type 5
-    /// insertion). The `morx` iterator skips those silently.
+    /// Parsed body, or `None` for subtable types sigilbuzz does not
+    /// implement. [`Morx::apply`] skips those silently.
     body: Option<SubtableBody<'a>>,
 }
 
@@ -217,10 +237,13 @@ impl<'a> Morx<'a> {
         let _pad = r.read_u16()?;
         let n_chains = r.read_u32()?;
 
-        let mut chains = Vec::with_capacity(n_chains as usize);
+        // Every chain needs at least its header, so the remaining bytes
+        // bound how many chains can exist. Reserve no more than that.
+        let mut chains =
+            Vec::with_capacity((n_chains as usize).min(r.remaining() / CHAIN_HEADER_LEN));
         for _ in 0..n_chains {
             let chain_start = r.position();
-            if chain_start + 16 > data.len() {
+            if chain_start + CHAIN_HEADER_LEN > data.len() {
                 return Err(Error::Truncated {
                     offset: chain_start,
                     context: "morx chain header",
@@ -245,12 +268,14 @@ impl<'a> Morx<'a> {
             }
             // Skip feature array: 12 bytes per feature (u16 featureType,
             // u16 featureSetting, u32 enableFlags, u32 disableFlags).
-            r.skip(feature_count as usize * 12)?;
+            r.skip((feature_count as usize).saturating_mul(12))?;
 
-            let mut subtables = Vec::with_capacity(subtable_count as usize);
+            // Same bound as for chains: each subtable needs its header.
+            let room = chain_end.saturating_sub(r.position()) / SUBTABLE_HEADER_LEN;
+            let mut subtables = Vec::with_capacity((subtable_count as usize).min(room));
             for _ in 0..subtable_count {
                 let sub_start = r.position();
-                if sub_start + 12 > chain_end {
+                if sub_start + SUBTABLE_HEADER_LEN > chain_end {
                     return Err(Error::Truncated {
                         offset: sub_start,
                         context: "morx subtable header",
@@ -271,8 +296,14 @@ impl<'a> Morx<'a> {
                     });
                 }
                 // Subtable body starts right after the 12-byte header.
-                let body_off = sub_start + 12;
-                let body_bytes = &data[body_off..sub_end];
+                let body_off = sub_start + SUBTABLE_HEADER_LEN;
+                // A declared length shorter than the header leaves no
+                // body. Drop the subtable and continue after its header,
+                // so the cursor always moves forward.
+                let Some(body_bytes) = data.get(body_off..sub_end) else {
+                    r.seek(body_off)?;
+                    continue;
+                };
                 let sub_type = (coverage & 0xFF) as u8;
                 let body = parse_subtable_body(sub_type, body_bytes)?;
                 subtables.push(Subtable {
@@ -285,7 +316,10 @@ impl<'a> Morx<'a> {
                 default_flags,
                 subtables,
             });
-            r.seek(chain_end)?;
+            // A chain length shorter than the header would send the
+            // cursor back to this chain's start and read it again.
+            // Continue after the header instead.
+            r.seek(chain_end.max(chain_start + CHAIN_HEADER_LEN))?;
         }
 
         Ok(Self { version, chains })
@@ -316,10 +350,15 @@ impl<'a> Morx<'a> {
     ///
     /// The returned vector is the new glyph id stream; it is always
     /// the same length as the mapping vector.
+    ///
+    /// Insertion subtables stop inserting once the run would exceed
+    /// eight times the input length (at least 1024 glyphs), and each
+    /// subtable walk stops after eight state-machine steps per glyph.
     #[must_use]
     pub fn apply(&self, input: &[u16]) -> (Vec<u16>, Vec<usize>) {
         let mut glyphs: Vec<u16> = input.to_vec();
         let mut origins: Vec<usize> = (0..input.len()).collect();
+        let max_len = input.len().saturating_mul(MAX_LEN_FACTOR).max(MAX_LEN_MIN);
         for chain in &self.chains {
             for subtable in &chain.subtables {
                 if subtable.sub_feature_flags & chain.default_flags == 0 {
@@ -328,7 +367,7 @@ impl<'a> Morx<'a> {
                 let Some(ref body) = subtable.body else {
                     continue;
                 };
-                apply_subtable(body, &mut glyphs, &mut origins);
+                apply_subtable(body, &mut glyphs, &mut origins, max_len);
             }
         }
         (glyphs, origins)
@@ -370,7 +409,7 @@ fn parse_subtable_body(sub_type: u8, bytes: &[u8]) -> Result<Option<SubtableBody
         TYPE_NON_CONTEXTUAL => {
             // The whole body IS the AAT lookup table: no extra
             // header, no offsets. We hand the slice straight to
-            // [`lookup_via_state_table`] at apply time.
+            // [`lookup_value`] at apply time.
             Ok(Some(SubtableBody::NonContextual { lookup: bytes }))
         }
         TYPE_INSERTION => {
@@ -398,7 +437,7 @@ fn parse_subtable_body(sub_type: u8, bytes: &[u8]) -> Result<Option<SubtableBody
                 insertion_table,
             }))
         }
-        // Types 6+ remain deferred for now.
+        // Other subtable types are not implemented and are skipped.
         _ => Ok(None),
     }
 }
@@ -451,7 +490,12 @@ fn parse_ligature_body(bytes: &[u8]) -> Result<Option<SubtableBody<'_>>> {
     }))
 }
 
-fn apply_subtable(body: &SubtableBody<'_>, glyphs: &mut Vec<u16>, origins: &mut Vec<usize>) {
+fn apply_subtable(
+    body: &SubtableBody<'_>,
+    glyphs: &mut Vec<u16>,
+    origins: &mut Vec<usize>,
+    max_len: usize,
+) {
     match body {
         SubtableBody::Rearrangement(state) => apply_rearrangement(state, glyphs, origins),
         SubtableBody::Contextual {
@@ -468,7 +512,7 @@ fn apply_subtable(body: &SubtableBody<'_>, glyphs: &mut Vec<u16>, origins: &mut 
         SubtableBody::Insertion {
             state,
             insertion_table,
-        } => apply_insertion(state, insertion_table, glyphs, origins),
+        } => apply_insertion(state, insertion_table, glyphs, origins, max_len),
     }
 }
 

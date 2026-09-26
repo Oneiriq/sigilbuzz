@@ -428,3 +428,234 @@ fn morx_skips_subtable_with_disabled_feature() {
     let (out, _) = m.apply(&[10, 20]);
     assert_eq!(out, &[10, 20]);
 }
+
+// -----------------------------------------------------------------
+// Malformed input.
+// -----------------------------------------------------------------
+
+/// Wraps pre-built subtables (each with its 12-byte header) in a
+/// version-2 morx table with one chain whose default flags are 1.
+fn wrap_in_chain(subtables: &[&[u8]]) -> Vec<u8> {
+    let body_len: usize = subtables.iter().map(|s| s.len()).sum();
+    let mut table: Vec<u8> = Vec::new();
+    table.extend_from_slice(&2u16.to_be_bytes()); // version
+    table.extend_from_slice(&0u16.to_be_bytes()); // pad
+    table.extend_from_slice(&1u32.to_be_bytes()); // nChains
+    table.extend_from_slice(&1u32.to_be_bytes()); // defaultFlags
+    table.extend_from_slice(&((16 + body_len) as u32).to_be_bytes());
+    table.extend_from_slice(&0u32.to_be_bytes()); // featureCount
+    table.extend_from_slice(&(subtables.len() as u32).to_be_bytes());
+    for s in subtables {
+        table.extend_from_slice(s);
+    }
+    table
+}
+
+/// Prefixes `body` with a subtable header of type `sub_type` and
+/// subFeatureFlags 1.
+fn subtable(sub_type: u8, body: &[u8]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    out.extend_from_slice(&((12 + body.len()) as u32).to_be_bytes());
+    out.extend_from_slice(&u32::from(sub_type).to_be_bytes());
+    out.extend_from_slice(&1u32.to_be_bytes());
+    out.extend_from_slice(body);
+    out
+}
+
+/// Builds a state-table subtable body with four classes, where
+/// every glyph falls in class 1 (out of bounds). `ext_words` is the
+/// number of type-specific u32 offsets after the 16-byte header.
+/// Offset `k` points at `tail[k]`. The rest stay zero.
+fn state_body(ext_words: usize, states: &[[u16; 4]], entries: &[&[u8]], tail: &[&[u8]]) -> Vec<u8> {
+    let class_off = 16 + 4 * ext_words;
+    // Format-6 lookup with no records: every glyph is out of bounds.
+    let lookup = build_lookup_format6(&[]);
+    let state_off = class_off + lookup.len();
+    let entry_off = state_off + states.len() * 8;
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(&4u32.to_be_bytes()); // nClasses
+    body.extend_from_slice(&(class_off as u32).to_be_bytes());
+    body.extend_from_slice(&(state_off as u32).to_be_bytes());
+    body.extend_from_slice(&(entry_off as u32).to_be_bytes());
+    let ext_start = body.len();
+    body.resize(ext_start + 4 * ext_words, 0);
+    body.extend_from_slice(&lookup);
+    for row in states {
+        for v in row {
+            body.extend_from_slice(&v.to_be_bytes());
+        }
+    }
+    for e in entries {
+        body.extend_from_slice(e);
+    }
+    for (k, part) in tail.iter().enumerate() {
+        let off = body.len() as u32;
+        body[ext_start + 4 * k..ext_start + 4 * k + 4].copy_from_slice(&off.to_be_bytes());
+        body.extend_from_slice(part);
+    }
+    body
+}
+
+#[test]
+fn morx_huge_chain_count_does_not_reserve_memory() {
+    // nChains = u32::MAX with no chain data. The parser used to
+    // reserve room for four billion chains up front.
+    let mut bytes: Vec<u8> = Vec::new();
+    bytes.extend_from_slice(&2u16.to_be_bytes());
+    bytes.extend_from_slice(&0u16.to_be_bytes());
+    bytes.extend_from_slice(&u32::MAX.to_be_bytes());
+    assert!(Morx::parse(&bytes).is_err());
+}
+
+#[test]
+fn morx_huge_subtable_count_does_not_reserve_memory() {
+    // One chain claims u32::MAX subtables but carries none.
+    let mut bytes = wrap_in_chain(&[]);
+    bytes[20..24].copy_from_slice(&u32::MAX.to_be_bytes());
+    assert!(Morx::parse(&bytes).is_err());
+}
+
+#[test]
+fn morx_zero_length_chain_does_not_reread_itself() {
+    // A chain whose chainLength is 0 used to send the cursor back
+    // to its own start, so every one of the u32::MAX declared
+    // chains re-read the same header.
+    let mut bytes = wrap_in_chain(&[]);
+    bytes[4..8].copy_from_slice(&u32::MAX.to_be_bytes()); // nChains
+    bytes[12..16].copy_from_slice(&0u32.to_be_bytes()); // chainLength
+    assert!(Morx::parse(&bytes).is_err());
+}
+
+#[test]
+fn morx_subtable_shorter_than_header_is_skipped() {
+    // First subtable declares length 0, which used to panic on a
+    // reversed slice range. It is dropped and the next one still
+    // applies.
+    let mut short = subtable(TYPE_NON_CONTEXTUAL, &[]);
+    short[0..4].copy_from_slice(&0u32.to_be_bytes());
+    let good = subtable(TYPE_NON_CONTEXTUAL, &build_lookup_format6(&[(5, 50)]));
+    let bytes = wrap_in_chain(&[&short, &good]);
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, _) = m.apply(&[5, 6]);
+    assert_eq!(out, &[50, 6]);
+}
+
+/// Entry that keeps the state machine on the same glyph forever.
+const STAY: u16 = FLAG_DONT_ADVANCE;
+
+#[test]
+fn morx_rearrangement_dont_advance_loop_terminates() {
+    let entry = [0u16.to_be_bytes(), STAY.to_be_bytes()].concat();
+    let body = state_body(0, &[[0, 0, 0, 0]], &[&entry], &[]);
+    let bytes = wrap_in_chain(&[&subtable(TYPE_REARRANGEMENT, &body)]);
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, _) = m.apply(&[1, 2, 3]);
+    assert_eq!(out, &[1, 2, 3]);
+}
+
+#[test]
+fn morx_contextual_dont_advance_loop_terminates() {
+    let entry = [
+        0u16.to_be_bytes(),
+        STAY.to_be_bytes(),
+        0xFFFFu16.to_be_bytes(),
+        0xFFFFu16.to_be_bytes(),
+    ]
+    .concat();
+    let body = state_body(1, &[[0, 0, 0, 0]], &[&entry], &[]);
+    let bytes = wrap_in_chain(&[&subtable(TYPE_CONTEXTUAL, &body)]);
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, _) = m.apply(&[1, 2, 3]);
+    assert_eq!(out, &[1, 2, 3]);
+}
+
+#[test]
+fn morx_ligature_dont_advance_loop_terminates() {
+    // Each step also pushes a component, so the old unbounded walk
+    // grew the component stack without limit.
+    let flags = STAY | FLAG_LIG_SET_COMPONENT;
+    let entry = [0u16.to_be_bytes(), flags.to_be_bytes(), 0u16.to_be_bytes()].concat();
+    let body = state_body(3, &[[0, 0, 0, 0]], &[&entry], &[]);
+    let bytes = wrap_in_chain(&[&subtable(TYPE_LIGATURE, &body)]);
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, _) = m.apply(&[1, 2, 3]);
+    assert_eq!(out, &[1, 2, 3]);
+}
+
+/// Ligature entry: `(newState, flags, actionIndex = 0)`.
+fn lig_entry(new_state: u16, flags: u16) -> Vec<u8> {
+    [
+        new_state.to_be_bytes(),
+        flags.to_be_bytes(),
+        0u16.to_be_bytes(),
+    ]
+    .concat()
+}
+
+#[test]
+fn morx_ligature_duplicate_components_do_not_panic() {
+    // The glyph at index 1 is pushed three times (DontAdvance),
+    // then one action consumes all three pushes. Removing the
+    // duplicate slots used to call `Vec::remove` past the end.
+    let push_stay = FLAG_LIG_SET_COMPONENT | STAY;
+    let push_act = FLAG_LIG_SET_COMPONENT | FLAG_LIG_PERFORM_ACTION;
+    let entries = [
+        lig_entry(0, 0),
+        lig_entry(1, 0),
+        lig_entry(2, push_stay),
+        lig_entry(3, push_stay),
+        lig_entry(0, push_act),
+    ];
+    let entry_refs: Vec<&[u8]> = entries.iter().map(Vec::as_slice).collect();
+    let states = [[0, 1, 0, 0], [0, 2, 0, 0], [0, 3, 0, 0], [0, 4, 0, 0]];
+    let actions = [0u32, 0, LIG_ACTION_LAST | LIG_ACTION_STORE]
+        .iter()
+        .flat_map(|a| a.to_be_bytes())
+        .collect::<Vec<u8>>();
+    let components = [0u8; 12];
+    let ligatures = 99u16.to_be_bytes();
+    let body = state_body(
+        3,
+        &states,
+        &entry_refs,
+        &[&actions, &components, &ligatures],
+    );
+    let bytes = wrap_in_chain(&[&subtable(TYPE_LIGATURE, &body)]);
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, origins) = m.apply(&[5, 5]);
+    assert_eq!(out.len(), origins.len());
+    assert!(out.len() <= 2);
+}
+
+#[test]
+fn morx_ligature_negative_component_index_is_ignored() {
+    // The action offset is -10, so glyph 5 maps to component -5.
+    // Turning that into a byte offset used to overflow.
+    let minus_ten = 0u32.wrapping_sub(10);
+    let action = LIG_ACTION_LAST | LIG_ACTION_STORE | (minus_ten & LIG_ACTION_OFFSET_MASK);
+    let entry = lig_entry(0, FLAG_LIG_SET_COMPONENT | FLAG_LIG_PERFORM_ACTION);
+    let body = state_body(
+        3,
+        &[[0, 0, 0, 0]],
+        &[&entry],
+        &[&action.to_be_bytes(), &[0u8; 12], &99u16.to_be_bytes()],
+    );
+    let bytes = wrap_in_chain(&[&subtable(TYPE_LIGATURE, &body)]);
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, _) = m.apply(&[5]);
+    assert_eq!(out, &[5]);
+}
+
+#[test]
+fn morx_chained_insertions_stay_bounded() {
+    // Every subtable inserts glyph 7 after each glyph 7, so each
+    // one multiplied the run length by about nine. Eight of them
+    // grew one glyph into tens of millions.
+    let one = build_insertion_morx_after_trigger(7, 7);
+    let sub = &one[24..];
+    let bytes = wrap_in_chain(&[sub; 8]);
+    let m = Morx::parse(&bytes).unwrap();
+    let (out, origins) = m.apply(&[7]);
+    assert_eq!(out.len(), origins.len());
+    assert!(out.len() <= MAX_LEN_MIN, "run grew to {}", out.len());
+}

@@ -39,41 +39,57 @@ fn read_index_body<'a>(r: &mut Reader<'a>, count: u32) -> Result<Vec<&'a [u8]>> 
             context: "CFF INDEX offSize out of range",
         });
     }
-    let mut offsets = Vec::with_capacity(count as usize + 1);
-    for _ in 0..=count {
+    // The offset array alone takes (count + 1) * offSize bytes. Check
+    // that before allocating, so a huge count in a short table cannot
+    // request gigabytes of memory.
+    let n_offsets = (count as usize).saturating_add(1);
+    if n_offsets.saturating_mul(off_size) > r.remaining() {
+        return Err(Error::Truncated {
+            offset: r.position(),
+            context: "CFF INDEX offset array",
+        });
+    }
+    let mut offsets = Vec::with_capacity(n_offsets);
+    for _ in 0..n_offsets {
         offsets.push(read_offset(r, off_size)?);
     }
-    // Data region begins after the final offset field.
+    // Data region begins after the final offset field. CFF offsets
+    // are 1-based, so the last offset minus one is the data length.
     let data_start = r.position();
+    let data_len = offsets
+        .last()
+        .and_then(|&last| (last as usize).checked_sub(1))
+        .ok_or(Error::Malformed {
+            offset: data_start,
+            context: "CFF INDEX offsets non-monotone",
+        })?;
+    let rest = r.peek_bytes(r.remaining())?;
     let mut out = Vec::with_capacity(count as usize);
     for w in offsets.windows(2) {
         let a = w[0] as usize;
         let b = w[1] as usize;
         if a == 0 || b < a {
             return Err(Error::Malformed {
-                offset: r.position(),
+                offset: data_start,
                 context: "CFF INDEX offsets non-monotone",
             });
         }
-        // CFF offsets are 1-based.
-        let start = data_start + a - 1;
-        let end = data_start + b - 1;
-        if end > data_start + offsets[offsets.len() - 1] as usize - 1 + 1 {
-            // soft sanity check; the strict bound is data length.
-        }
-        if end > data_start + (*offsets.last().unwrap() as usize - 1) {
+        let start = a - 1;
+        let end = b - 1;
+        if end > data_len {
             return Err(Error::Malformed {
-                offset: end,
+                offset: data_start.saturating_add(end),
                 context: "CFF INDEX entry past end",
             });
         }
-        // Build slice manually via reader's underlying data.
-        let slice = reader_slice(r, start, end)?;
-        out.push(slice);
+        let entry = rest.get(start..end).ok_or(Error::Truncated {
+            offset: data_start.saturating_add(start),
+            context: "CFF INDEX entry past end of data",
+        })?;
+        out.push(entry);
     }
     // Advance the reader past the last entry.
-    let total = *offsets.last().unwrap_or(&1) as usize - 1;
-    r.seek(data_start + total)?;
+    r.skip(data_len)?;
     Ok(out)
 }
 
@@ -84,16 +100,6 @@ fn read_offset(r: &mut Reader<'_>, off_size: usize) -> Result<u32> {
         v = (v << 8) | u32::from(byte);
     }
     Ok(v)
-}
-
-/// Hack helper: slices out of the Reader's underlying buffer by
-/// absolute offsets. Exposed via `Reader::peek_bytes` after a `seek`
-/// round-trip. Used only during INDEX parsing above.
-fn reader_slice<'a>(r: &Reader<'a>, start: usize, end: usize) -> Result<&'a [u8]> {
-    let mut tmp = *r;
-    tmp.seek(start)?;
-    let n = end - start;
-    tmp.peek_bytes(n)
 }
 
 pub(super) fn slice_at(data: &[u8], off: usize, len: usize) -> Result<&[u8]> {

@@ -74,7 +74,7 @@ pub use charstring::{
     compute_kept_subrs, encode_int_operand, renumber_charstring, renumber_subr_call,
     scan_subr_calls, subr_bias, SubrCall, SubrKind,
 };
-pub(crate) use cid::serialise_font_dict;
+pub(crate) use cid::{kept_fd_positions, serialise_font_dict};
 pub use emit::{
     emit_charset_auto, emit_charset_format0, emit_charset_format2, emit_encoding_auto,
     emit_encoding_format0, emit_encoding_format1, emit_fd_select_auto, emit_fd_select_format0,
@@ -83,8 +83,8 @@ pub use emit::{
 };
 pub use reader::encode_index_cff2;
 pub(crate) use reader::{
-    read_index_cff2, walk_dict, DictEntry, OP_CHARSTRINGS, OP_FD_ARRAY, OP_FD_SELECT, OP_PRIVATE,
-    OP_SUBRS, OP_VSTORE,
+    private_operands, read_index_cff2, read_private_dict, walk_dict, DictEntry, OP_CHARSTRINGS,
+    OP_FD_ARRAY, OP_FD_SELECT, OP_PRIVATE, OP_SUBRS, OP_VSTORE,
 };
 
 use charset::{extract_kept_charset_sids, extract_kept_encoding_codes};
@@ -126,38 +126,33 @@ fn serialise_top_dict(
     let mut out = Vec::new();
     let mut slots = TopDictSlots::default();
     for e in entries {
-        let target = matches!(e.op, OP_CHARSTRINGS | OP_PRIVATE)
-            || (rebuild_charset && e.op == OP_CHARSET)
-            || (rebuild_encoding && e.op == OP_ENCODING);
-        if target {
-            // Drop the original operands; emit placeholders for the
-            // operands this op needs.
-            match e.op {
-                OP_CHARSET => {
-                    slots.charset_slot = Some(out.len());
-                    out.extend_from_slice(&encode_dict_offset_placeholder());
-                }
-                OP_ENCODING => {
-                    slots.encoding_slot = Some(out.len());
-                    out.extend_from_slice(&encode_dict_offset_placeholder());
-                }
-                OP_CHARSTRINGS => {
-                    slots.char_strings_slot = Some(out.len());
-                    out.extend_from_slice(&encode_dict_offset_placeholder());
-                }
-                OP_PRIVATE => {
-                    let size_slot = out.len();
-                    out.extend_from_slice(&encode_dict_offset_placeholder());
-                    let off_slot = out.len();
-                    out.extend_from_slice(&encode_dict_offset_placeholder());
-                    slots.private_slot = Some((size_slot, off_slot));
-                }
-                _ => unreachable!(),
+        // Targeted operators drop their original operands and get
+        // placeholders instead. Every other operator keeps its
+        // operands verbatim.
+        match e.op {
+            OP_CHARSET if rebuild_charset => {
+                slots.charset_slot = Some(out.len());
+                out.extend_from_slice(&encode_dict_offset_placeholder());
             }
-        } else {
-            // Preserve operands verbatim.
-            for o in &e.operands {
-                out.extend_from_slice(&o.raw);
+            OP_ENCODING if rebuild_encoding => {
+                slots.encoding_slot = Some(out.len());
+                out.extend_from_slice(&encode_dict_offset_placeholder());
+            }
+            OP_CHARSTRINGS => {
+                slots.char_strings_slot = Some(out.len());
+                out.extend_from_slice(&encode_dict_offset_placeholder());
+            }
+            OP_PRIVATE => {
+                let size_slot = out.len();
+                out.extend_from_slice(&encode_dict_offset_placeholder());
+                let off_slot = out.len();
+                out.extend_from_slice(&encode_dict_offset_placeholder());
+                slots.private_slot = Some((size_slot, off_slot));
+            }
+            _ => {
+                for o in &e.operands {
+                    out.extend_from_slice(&o.raw);
+                }
             }
         }
         // Emit operator bytes.
@@ -236,17 +231,17 @@ pub(crate) fn serialise_private_dict(
 /// (non-predefined) table; predefined-charset sources get an explicit
 /// rebuild to preserve the kept-gid SID mapping.
 ///
-/// CID-keyed sources (FDArray / FDSelect present) are declined. That
-/// flow needs a separate FDArray INDEX rebuild + FDSelect rewrite that
-/// belongs in a follow-up. Sources with predefined Expert /
-/// ExpertSubset charsets are likewise declined.
+/// CID-keyed sources (FDArray / FDSelect present) route through
+/// `subset_cid_keyed`, which also rebuilds the FDArray INDEX and
+/// rewrites FDSelect. Sources with predefined Expert / ExpertSubset
+/// charsets are declined.
 ///
 /// `kept_gids` must be sorted ascending and contain gid 0.
 ///
 /// # Errors
 ///
-/// Returns [`SubsetError::Unsupported`] for CID-keyed fonts or when
-/// the source uses a feature the orchestration doesn't yet rewrite.
+/// Returns [`SubsetError::Unsupported`] when the source is malformed or
+/// uses a feature the orchestration does not rewrite.
 pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8>, SubsetError> {
     let parsed = parse_cff1(cff_bytes)?;
     if parsed.is_cid {
@@ -481,5 +476,4 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
 }
 
 #[cfg(test)]
-#[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
 mod tests;

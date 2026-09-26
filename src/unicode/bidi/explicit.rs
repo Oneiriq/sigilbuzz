@@ -30,43 +30,51 @@ enum Override {
     Rtl,
 }
 
-/// Resolves an FSI initiator at `start` to either [`BidiClass::Lri`] or
-/// [`BidiClass::Rli`] per UAX 9 §X5c: scan the matched isolated
-/// subsequence for the first strong character (R / AL -> RLI, L -> LRI),
+/// Resolves every FSI initiator to either [`BidiClass::Lri`] or
+/// [`BidiClass::Rli`] per UAX 9 §X5c: the first strong character of
+/// the FSI's isolated subsequence decides (R / AL -> RLI, L -> LRI),
 /// skipping any nested isolates per BD9. Default is LRI when the
-/// scan finds no strong type or the FSI has no matching PDI, mirroring
-/// the P3 LTR fallback.
-fn fsi_resolves_to(cells: &[BidiCell], start: usize) -> BidiClass {
-    debug_assert!(matches!(
-        cells.get(start).map(|c| c.cls),
-        Some(BidiClass::Fsi)
-    ));
-    let mut depth: u32 = 0;
-    for cell in cells.iter().skip(start + 1) {
-        let cls = cell.cls;
+/// subsequence has no strong type or the FSI has no matching PDI,
+/// mirroring the P3 LTR fallback.
+///
+/// One pass with a stack of open isolate initiators: a strong
+/// character can only decide the innermost open FSI, and a PDI closes
+/// the innermost open initiator. Scanning forward from every FSI
+/// instead is quadratic on a long run of FSIs.
+fn resolve_fsis(cells: &mut [BidiCell]) {
+    // Open isolate initiators, innermost last: (index, FSI still
+    // waiting for its first strong character).
+    let mut open: Vec<(usize, bool)> = Vec::new();
+    for j in 0..cells.len() {
+        let cls = cells[j].cls;
         if cls.is_isolate_initiator() {
-            depth = depth.saturating_add(1);
-            continue;
-        }
-        if cls == BidiClass::Pdi {
-            if depth == 0 {
-                // End of this FSI's isolated subsequence reached
-                // without a strong type. Default to LRI.
-                return BidiClass::Lri;
+            open.push((j, cls == BidiClass::Fsi));
+        } else if cls == BidiClass::Pdi {
+            // End of the innermost isolated subsequence. An FSI that
+            // saw no strong type defaults to LRI.
+            if let Some((idx, true)) = open.pop() {
+                cells[idx].cls = BidiClass::Lri;
             }
-            depth -= 1;
-            continue;
-        }
-        if depth == 0 {
-            match cls {
-                BidiClass::L => return BidiClass::Lri,
-                BidiClass::R | BidiClass::Al => return BidiClass::Rli,
-                _ => {}
+        } else if let Some((idx, pending)) = open.last_mut() {
+            if *pending {
+                let resolved = match cls {
+                    BidiClass::L => Some(BidiClass::Lri),
+                    BidiClass::R | BidiClass::Al => Some(BidiClass::Rli),
+                    _ => None,
+                };
+                if let Some(r) = resolved {
+                    cells[*idx].cls = r;
+                    *pending = false;
+                }
             }
         }
     }
-    // No matching PDI / no strong type seen: default LTR.
-    BidiClass::Lri
+    // No matching PDI and no strong type seen: default LTR.
+    for (idx, pending) in open {
+        if pending {
+            cells[idx].cls = BidiClass::Lri;
+        }
+    }
 }
 
 /// Implements X1-X10. Sets `cells[i].level` to the embedding level
@@ -76,7 +84,6 @@ fn fsi_resolves_to(cells: &[BidiCell], start: usize) -> BidiClass {
 /// LRE/RLE/LRO/RLO/PDF/BN keep their original class for the X9 filter
 /// later. The convention used here is to mark them with their
 /// explicit-format class so `is_explicit()` can drop them.
-#[allow(clippy::too_many_lines)]
 pub(super) fn explicit_levels(cells: &mut [BidiCell], para_level: u8) {
     let mut stack: Vec<StackEntry> = Vec::with_capacity(8);
     stack.push(StackEntry {
@@ -89,16 +96,12 @@ pub(super) fn explicit_levels(cells: &mut [BidiCell], para_level: u8) {
     let mut overflow_embedding: u32 = 0;
     let mut valid_isolate_count: u32 = 0;
 
-    for i in 0..cells.len() {
-        // Resolve FSI to LRI or RLI before processing per UAX 9 §X5c
-        // by scanning the matched isolated subsequence for its first
-        // strong character. Skip nested isolates (BD9). When the
-        // first strong is R or AL, FSI behaves as RLI; otherwise as
-        // LRI (default LTR per the spec, matching the P3 fallback).
-        if cells[i].cls == BidiClass::Fsi {
-            cells[i].cls = fsi_resolves_to(cells, i);
-        }
-        let cell = &mut cells[i];
+    // Resolve FSI to LRI or RLI before processing per UAX 9 §X5c.
+    // The resolution reads only the original classes, so doing it for
+    // every FSI up front matches doing it as the loop reaches each one.
+    resolve_fsis(cells);
+
+    for cell in cells.iter_mut() {
         match cell.cls {
             // X2-X5: explicit embedding / override.
             BidiClass::Rle | BidiClass::Lre | BidiClass::Rlo | BidiClass::Lro => {
@@ -143,7 +146,7 @@ pub(super) fn explicit_levels(cells: &mut [BidiCell], para_level: u8) {
                     Override::Rtl => cell.cls = BidiClass::R,
                     Override::None => {}
                 }
-                // FSI was resolved to LRI / RLI at the loop entry, so
+                // FSI was resolved to LRI / RLI before the loop, so
                 // only Rli is RTL here.
                 let is_rtl = cell.cls == BidiClass::Rli;
                 let new_level = if is_rtl {
@@ -310,7 +313,6 @@ fn build_level_runs(cells: &[BidiCell]) -> Vec<LevelRun> {
 /// Joins level runs into BD13 isolating-run sequences. Each isolate
 /// initiator (LRI / RLI / FSI) hands off to the level run starting
 /// inside the isolate; the matching PDI rejoins.
-#[allow(clippy::too_many_lines)]
 pub(super) fn build_isolating_sequences(
     cells: &[BidiCell],
     para_level: u8,
@@ -344,10 +346,10 @@ pub(super) fn build_isolating_sequences(
         }
         let mut seq_runs: Vec<usize> = vec![ri];
         used[ri] = true;
-        // Follow isolate-initiator chains.
+        // Follow isolate-initiator chains. Level runs are never empty,
+        // so `last()` always yields a cell.
         let mut cursor = ri;
-        loop {
-            let last_idx = *runs[cursor].indices.last().unwrap();
+        while let Some(&last_idx) = runs[cursor].indices.last() {
             let last_cls = cells[last_idx].cls;
             if !last_cls.is_isolate_initiator() {
                 break;
@@ -381,8 +383,11 @@ pub(super) fn build_isolating_sequences(
             level = runs[ri].level;
             indices.extend_from_slice(&runs[ri].indices);
         }
+        // Every sequence holds at least one non-empty run.
+        let (Some(&first_idx), Some(&last_idx)) = (indices.first(), indices.last()) else {
+            continue;
+        };
         // sos / eos per BD13.
-        let first_idx = indices[0];
         let sos_level = if first_idx == 0 {
             para_level
         } else {
@@ -399,7 +404,6 @@ pub(super) fn build_isolating_sequences(
                 }
             }
         };
-        let last_idx = *indices.last().unwrap();
         // For eos: if the sequence ends in an isolate initiator that
         // had no matching PDI, eos is max(level, paragraph). Else
         // it's the level of the next cell beyond the sequence.

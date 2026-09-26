@@ -13,9 +13,12 @@ pub(crate) struct SpinMutex<T> {
     inner: UnsafeCell<T>,
 }
 
-// SAFETY: SpinMutex serializes access to `inner`; the AtomicBool
-// is the only cross-thread observable.
+// SAFETY: SpinMutex owns its `T`, so moving it to another thread
+// moves the `T`, which is fine for `T: Send`.
 unsafe impl<T: Send> Send for SpinMutex<T> {}
+// SAFETY: SpinMutex serializes access to `inner`. The AtomicBool
+// is the only cross-thread observable. As with `std::sync::Mutex`,
+// handing out `&mut T` on another thread only needs `T: Send`.
 unsafe impl<T: Send> Sync for SpinMutex<T> {}
 
 impl<T> SpinMutex<T> {
@@ -45,14 +48,17 @@ pub(crate) struct SpinGuard<'a, T> {
 impl<T> Deref for SpinGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
-        // SAFETY: lock() is held for the lifetime of the guard.
+        // SAFETY: the guard exists only while `locked` is true and
+        // this guard set it, so no other reference to `inner` is
+        // live. The returned borrow cannot outlive the guard.
         unsafe { &*self.mutex.inner.get() }
     }
 }
 
 impl<T> DerefMut for SpinGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: lock() is held for the lifetime of the guard.
+        // SAFETY: as in `deref`. `&mut self` also rules out a
+        // second borrow through this same guard.
         unsafe { &mut *self.mutex.inner.get() }
     }
 }

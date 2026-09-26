@@ -12,13 +12,7 @@ use super::{BidiCell, BidiClass};
 // W1-W7 + N0-N2 + I1-I2 against one isolating-run sequence.
 // ---------------------------------------------------------------------
 
-#[allow(clippy::too_many_lines)]
-pub(super) fn resolve_sequence(
-    cells: &mut [BidiCell],
-    chars: &[char],
-    seq: &IsolatingSequence,
-    _para_level: u8,
-) {
+pub(super) fn resolve_sequence(cells: &mut [BidiCell], chars: &[char], seq: &IsolatingSequence) {
     let n = seq.indices.len();
     if n == 0 {
         return;
@@ -39,22 +33,16 @@ pub(super) fn resolve_sequence(
     }
 
     // ---- W2: EN preceded by AL (skipping non-strong) -> AN. ----
-    for i in 0..n {
-        if classes[i] == BidiClass::En {
-            // Walk backward through non-strong classes.
-            let mut k = i;
-            let prev = loop {
-                if k == 0 {
-                    break seq.sos;
-                }
-                k -= 1;
-                if classes[k].is_strong() {
-                    break classes[k];
-                }
-            };
-            if prev == BidiClass::Al {
-                classes[i] = BidiClass::An;
-            }
+    // Carry the last strong class forward instead of walking back
+    // from every EN, which is quadratic on a long digit run. W2 only
+    // writes AN, which is not strong, so the carried value matches
+    // the backward walk.
+    let mut last_strong = seq.sos;
+    for c in &mut classes {
+        if c.is_strong() {
+            last_strong = *c;
+        } else if *c == BidiClass::En && last_strong == BidiClass::Al {
+            *c = BidiClass::An;
         }
     }
 
@@ -112,21 +100,16 @@ pub(super) fn resolve_sequence(
     }
 
     // ---- W7: EN preceded by L (skipping non-strong) -> L. ----
-    for i in 0..n {
-        if classes[i] == BidiClass::En {
-            let mut k = i;
-            let prev = loop {
-                if k == 0 {
-                    break seq.sos;
-                }
-                k -= 1;
-                if classes[k].is_strong() || classes[k] == BidiClass::R {
-                    break classes[k];
-                }
-            };
-            if prev == BidiClass::L {
-                classes[i] = BidiClass::L;
-            }
+    // Same forward carry as W2. An EN that becomes L is itself the
+    // nearest strong type for the ENs after it, exactly as a
+    // backward walk would find it.
+    let mut last_strong = seq.sos;
+    for c in &mut classes {
+        if *c == BidiClass::En && last_strong == BidiClass::L {
+            *c = BidiClass::L;
+        }
+        if c.is_strong() {
+            last_strong = *c;
         }
     }
 

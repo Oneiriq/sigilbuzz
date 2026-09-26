@@ -36,8 +36,12 @@ fn read_u16(buf: &[u8], pos: usize) -> Option<u16> {
     Some(u16::from_be_bytes([bytes[0], bytes[1]]))
 }
 
+/// Writes `value` at `pos`. A slot past the end of `buf` is left alone:
+/// callers only write slots they have just read.
 fn write_u16(buf: &mut [u8], pos: usize, value: u16) {
-    buf[pos..pos + 2].copy_from_slice(&value.to_be_bytes());
+    if let Some(slot) = pos.checked_add(2).and_then(|end| buf.get_mut(pos..end)) {
+        slot.copy_from_slice(&value.to_be_bytes());
+    }
 }
 
 /// The exact bytes of the `Device` or `VariationIndex` table at
@@ -159,7 +163,7 @@ fn relocate_slot(
         })
         .filter(|t| keep_variations || read_u16(t, 4) != Some(VARIATION_INDEX_FORMAT));
     let (new_off, fits) = match table {
-        Some(table) => match u16::try_from(pool.place(out, table) - out_base) {
+        Some(table) => match u16::try_from(pool.place(out, table).saturating_sub(out_base)) {
             Ok(rel) => (rel, true),
             Err(_) => (0, false),
         },

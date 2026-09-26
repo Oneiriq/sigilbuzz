@@ -43,7 +43,7 @@ pub fn shape_myanmar(
 /// the shaping reduces to contextual forms + mark positioning. We
 /// still segment into syllables so the cluster-merge pass groups
 /// tone marks with their consonant, matching HarfBuzz's Thai shaper
-/// for every string in the 0.2.0 corpus.
+/// on the Thai parity corpus.
 pub fn shape_thai(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,

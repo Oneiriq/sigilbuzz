@@ -25,8 +25,9 @@
 //!
 //! SVG 1.1 has no native sweep / conic gradient. The COLRv1 walk
 //! still reports one for `PaintSweepGradient`, so this crate degrades
-//! it to an SVG `<linearGradient>` running across the gradient's
-//! bounding box, with a comment in the output noting the substitution.
+//! it to an SVG `<linearGradient>` running through the sweep center
+//! along the bisector of the start and end angles, with a comment in
+//! the output noting the substitution.
 //! That keeps the SVG well-formed in every viewer; consumers that
 //! require true sweep rendering should drive `sigilbuzz-paint`
 //! directly into a renderer that supports it.
@@ -148,18 +149,14 @@ pub fn path_data(ops: &[PathOp]) -> String {
     out
 }
 
+/// Appends `cmd` followed by each coordinate, one space before each.
+/// SVG also accepts no space between the command letter and the first
+/// coordinate. The space is kept for readability.
 fn append_cmd(out: &mut String, cmd: char, coords: &[f32]) {
     out.push(cmd);
-    for (i, c) in coords.iter().enumerate() {
-        if i > 0 {
-            out.push(' ');
-        } else {
-            // Tighter glyph-pen pairs read better with no leading
-            // space between the command letter and the first coord.
-            // SVG accepts both forms; we keep one space for clarity.
-            out.push(' ');
-        }
-        push_num(out, *c);
+    for &c in coords {
+        out.push(' ');
+        push_num(out, c);
     }
 }
 
@@ -168,13 +165,14 @@ fn append_cmd(out: &mut String, cmd: char, coords: &[f32]) {
 /// value is integral. Determinism: a fixed precision plus the same
 /// trim policy means the same input always produces the same bytes.
 ///
-/// Non-finite inputs (NaN, ±∞) are coerced to `0` so the emitted SVG
-/// stays well-formed: `format!("{NaN:.3}")` round-trips to the
-/// literal string `"NaN"` and `format!("{inf:.3}")` to `"inf"`,
-/// neither of which is a valid SVG numeric token. A pathological
-/// glyph outline (e.g. a CFF charstring whose blend evaluation
-/// overflows under extreme variation coords) would otherwise leak
-/// those tokens into the document and corrupt downstream parsers.
+/// Non-finite inputs (NaN and the infinities) are coerced to `0` so
+/// the emitted SVG stays well-formed: `format!("{NaN:.3}")`
+/// round-trips to the literal string `"NaN"` and `format!("{inf:.3}")`
+/// to `"inf"`, neither of which is a valid SVG numeric token. A
+/// pathological glyph outline (e.g. a CFF charstring whose blend
+/// evaluation overflows under extreme variation coords) would
+/// otherwise leak those tokens into the document and corrupt
+/// downstream parsers.
 pub(crate) fn push_num(out: &mut String, v: f32) {
     if !v.is_finite() {
         out.push('0');
@@ -186,7 +184,14 @@ pub(crate) fn push_num(out: &mut String, v: f32) {
     // `-0` to `0` here so signed zero arithmetic doesn't bleed into
     // the deterministic output.
     let scale = 10_f32.powi(PRECISION as i32);
-    let mut rounded = (v * scale).round() / scale;
+    let scaled = v * scale;
+    // Above about 3.4e35 the scaled value overflows to infinity. An
+    // f32 that large is an integer already, so it needs no rounding.
+    let mut rounded = if scaled.is_finite() {
+        scaled.round() / scale
+    } else {
+        v
+    };
     if rounded == 0.0 {
         rounded = 0.0;
     }
@@ -396,7 +401,7 @@ mod tests {
     fn push_num_coerces_non_finite_to_zero() {
         // Issue #216: a pathological glyph outline (e.g. CFF charstring
         // whose blend evaluation overflows under extreme variation
-        // coords) could leak NaN / ±inf into the float formatter, which
+        // coords) could leak NaN or infinity into the float formatter, which
         // round-trips them as the literal strings "NaN" / "inf" / "-inf"
         // (none of which is a valid SVG numeric token). The emitter
         // must coerce non-finite values to 0 so the document stays
@@ -405,6 +410,23 @@ mod tests {
             let mut s = String::new();
             push_num(&mut s, bad);
             assert_eq!(s, "0", "non-finite {bad} leaked: {s:?}");
+        }
+    }
+
+    #[test]
+    fn push_num_keeps_huge_finite_values_finite() {
+        // Scaling by 10^PRECISION overflows to infinity for values
+        // above about 3.4e35. That used to leak "inf" into the output.
+        // A COLRv1 glyph with nested PaintScale or PaintTransform
+        // records reaches such values in its transform matrix.
+        for v in [f32::MAX, -f32::MAX, 1.0e36] {
+            let mut s = String::new();
+            push_num(&mut s, v);
+            assert!(!s.contains("inf"), "inf leaked for {v}: {s:?}");
+            assert!(
+                s.parse::<f32>().is_ok_and(|p| p == v),
+                "{v} did not round-trip: {s:?}"
+            );
         }
     }
 

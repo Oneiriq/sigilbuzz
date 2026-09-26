@@ -4,8 +4,8 @@
 use alloc::vec::Vec;
 
 use super::{
-    Contour, FlatGlyph, FlatPoint, Transform, FLAG_ON_CURVE, FLAG_REPEAT, FLAG_X_SAME_OR_POS,
-    FLAG_X_SHORT, FLAG_Y_SAME_OR_POS, FLAG_Y_SHORT,
+    Contour, FlatGlyph, FlatPoint, FlattenBudget, Transform, FLAG_ON_CURVE, FLAG_REPEAT,
+    FLAG_X_SAME_OR_POS, FLAG_X_SHORT, FLAG_Y_SAME_OR_POS, FLAG_Y_SHORT,
 };
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
@@ -16,6 +16,7 @@ pub(super) fn flatten_simple_glyph(
     deltas: Option<&[(f32, f32)]>,
     tf: &Transform,
     out: &mut FlatGlyph,
+    budget: &mut FlattenBudget,
 ) -> Result<()> {
     if num_contours == 0 {
         return Ok(());
@@ -25,11 +26,8 @@ pub(super) fn flatten_simple_glyph(
     for _ in 0..num_contours {
         end_pts.push(r.read_u16()?);
     }
-    let total_points = end_pts
-        .last()
-        .copied()
-        .map(|e| e.saturating_add(1))
-        .unwrap_or(0);
+    let total_points = end_pts.last().map_or(0, |e| e.saturating_add(1));
+    budget.take_points(usize::from(total_points))?;
 
     // instructions: skip.
     let instr_len = r.read_u16()? as usize;

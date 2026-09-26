@@ -1,37 +1,111 @@
 //! Render-time blit: rasterizes each fill and composites its solid or
 //! gradient paint into the output pixmap.
 
+use alloc::vec::Vec;
+
+use sigilbuzz::tables::PathOp;
+
 use crate::affine::Affine;
 use crate::colrv1::{apply_extend, project_linear, project_radial, sample_stops, to_premul};
-use crate::flatten::flatten;
+use crate::flatten::{flatten_limited, Segment, MAX_SEGMENTS};
 use crate::pixmap::{ColorPixmap, Pixmap};
-use crate::raster::rasterize as raster;
+use crate::raster::{raster_bounds, rasterize_in, Window};
 
-use super::clip_mask::apply_mask;
+use super::clip_mask::apply_mask_budgeted;
 use super::filter::{apply_filter, composite_over};
-use super::model::{Fill, GradKind, GradientPaint, Paint};
+use super::model::{Fill, GradKind, GradientPaint, Paint, SvgDoc};
+use super::MAX_RENDER_PASSES;
 
 // =========================================================================
 // Render-time blit
 // =========================================================================
 
-pub(super) fn render_fill(out: &mut ColorPixmap, fill: &Fill, world: &Affine, tol: f32) {
+/// Canvas-pass and segment budgets for rendering one document,
+/// shared by every fill and by the children of every mask.
+pub(super) struct RenderBudget {
+    /// Canvas-sized passes left, see [`MAX_RENDER_PASSES`].
+    pub(super) passes_left: u32,
+    /// Flattened segments left, see [`MAX_SEGMENTS`].
+    segments_left: usize,
+}
+
+impl RenderBudget {
+    pub(super) fn new() -> Self {
+        Self {
+            passes_left: MAX_RENDER_PASSES,
+            segments_left: MAX_SEGMENTS,
+        }
+    }
+
+    /// Spends `n` passes. Returns `false`, spending nothing, when
+    /// fewer than `n` remain.
+    fn take_passes(&mut self, n: u32) -> bool {
+        match self.passes_left.checked_sub(n) {
+            Some(rest) => {
+                self.passes_left = rest;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Flattens `ops` within the remaining segment budget and charges
+    /// the segments it produced.
+    fn flatten(&mut self, ops: &[PathOp], xform: &Affine, tol: f32) -> Vec<Segment> {
+        let segs = flatten_limited(ops.iter().copied(), xform, tol, self.segments_left);
+        self.segments_left = self.segments_left.saturating_sub(segs.len());
+        segs
+    }
+}
+
+/// Renders every fill of `doc` onto `out`.
+pub(super) fn render_doc(out: &mut ColorPixmap, doc: &SvgDoc, world: &Affine, tol: f32) {
+    let mut budget = RenderBudget::new();
+    for fill in &doc.fills {
+        render_fill(out, fill, world, tol, &mut budget);
+    }
+}
+
+/// Renders one fill onto `out`. Fills that no longer fit the render
+/// budget are skipped.
+///
+/// Masks are rasterized only inside the canvas. Pixels there get the
+/// same coverage as a full rasterization, and a shape far larger than
+/// the canvas costs no more than the canvas.
+pub(super) fn render_fill(
+    out: &mut ColorPixmap,
+    fill: &Fill,
+    world: &Affine,
+    tol: f32,
+    budget: &mut RenderBudget,
+) {
+    if budget.segments_left == 0 || !budget.take_passes(fill.render_passes()) {
+        return;
+    }
+    let canvas = Window {
+        x0: 0,
+        y0: 0,
+        x1: out.width as i32,
+        y1: out.height as i32,
+    };
     let xf = world.compose(&fill.xform);
-    let segs = flatten(fill.ops.iter().copied(), &xf, tol);
-    if segs.is_empty() {
+    let segs = budget.flatten(&fill.ops, &xf, tol);
+    // `raster_bounds` is `None` exactly when the full rasterization
+    // would be empty, which is when there is nothing to paint.
+    if segs.is_empty() || raster_bounds(&segs).is_none() {
         return;
     }
-    let mask = raster(&segs);
-    if mask.pixmap.is_empty() {
-        return;
-    }
+    // Clipped to the canvas this can be empty while the full raster is
+    // not. That still paints nothing, but filters such as `feFlood`
+    // must run as before, so keep going.
+    let mask = rasterize_in(&segs, Some(canvas));
     // If a clip-path is set, rasterize it once, then multiply mask
     // alpha by the clip alpha at sample time. The clip lives in
     // document space; compose the world transform on top.
     let clip_mask = fill.clip.as_ref().map(|cs| {
         let cxf = world.compose(&cs.xform);
-        let csegs = flatten(cs.ops.iter().copied(), &cxf, tol);
-        raster(&csegs)
+        let csegs = budget.flatten(&cs.ops, &cxf, tol);
+        rasterize_in(&csegs, Some(canvas))
     });
 
     // Filtered or masked shapes route through a same-size scratch
@@ -50,7 +124,7 @@ pub(super) fn render_fill(out: &mut ColorPixmap, fill: &Fill, world: &Affine, to
             src
         };
         if let Some(m) = &fill.mask {
-            apply_mask(&mut result, m, world, tol);
+            apply_mask_budgeted(&mut result, m, world, tol, budget);
         }
         composite_over(out, &result);
         return;

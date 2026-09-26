@@ -4,10 +4,10 @@
 //! every SE-Asian, SE-Indic and archaic-South-Asian script that does
 //! not fit Arabic or Indic2 runs through. Khmer, Myanmar, Tai Tham,
 //! Buginese, New Tai Lue, Cham, Old Hangul, Hanifi Rohingya are all
-//! USE clients. 0.2.0 wires up Khmer as the pilot; the other scripts
-//! add incrementally by extending the per-codepoint tables in
-//! [`crate::unicode::use_category`] and registering their script tag
-//! in this module's script priority table.
+//! USE clients. Each script gets an entry point below that pairs its
+//! script-tag priority with a feature chain. A new script needs its
+//! codepoints in the per-codepoint tables of
+//! [`crate::unicode::use_category`] and an entry point here.
 //!
 //! # Pipeline
 //!
@@ -255,6 +255,7 @@ pub fn shape_khmer(
 /// logically typed *before* the base consonant already, so the
 /// reorder pass would be a no-op at best and break clustering at
 /// worst. Passing `false` skips it.
+// The parameter list is public API, so it stays as is.
 ///
 /// [`UseCategory`]: crate::unicode::use_category::UseCategory
 /// [`UsePosition`]: crate::unicode::use_category::UsePosition
@@ -305,10 +306,10 @@ pub fn shape_use(
             apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"pref", 0, script_priority);
             // The pref pass on the fonts we care about is a single-subst
             // (length-preserving), so the snapshot length still aligns.
-            // If a future font ships a pref ligature that changes glyph
-            // count, the lengths diverge and we skip the reorder. The
-            // shaper still produces the post-pref output, just without
-            // the pre-base move (matching the pre-fix behavior).
+            // If a font ships a pref ligature that changes glyph count,
+            // the lengths diverge and we skip the reorder. The shaper
+            // still produces the post-pref output, just without the
+            // pre-base move.
             if pre_ids.len() == glyphs.len() {
                 for syl in &syllables {
                     pref_reorder(codepoints, glyphs, syl, &pre_ids);

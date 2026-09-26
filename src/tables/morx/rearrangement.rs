@@ -1,7 +1,8 @@
 //! `morx` type 0: rearrangement subtables.
 
 use super::{
-    class_for, FLAG_DONT_ADVANCE, FLAG_MARK_FIRST, FLAG_MARK_LAST, FLAG_REARRANGE_VERB_MASK,
+    class_for, max_steps, FLAG_DONT_ADVANCE, FLAG_MARK_FIRST, FLAG_MARK_LAST,
+    FLAG_REARRANGE_VERB_MASK,
 };
 use crate::tables::layout::state_table::{StateTableHeader, CLASS_OUT_OF_BOUNDS};
 
@@ -16,9 +17,15 @@ pub(super) fn apply_rearrangement(
     let mut i = 0;
     let mut first: Option<usize> = None;
     let mut last: Option<usize> = None;
+    let max_iters = max_steps(glyphs.len());
+    let mut iters = 0usize;
     // Iterate through the run, with an extra end-of-text step so a
     // state carrying a pending mark gets one more chance to fire.
     while i <= glyphs.len() {
+        iters += 1;
+        if iters > max_iters {
+            return;
+        }
         let class = class_for(state, glyphs.get(i).copied()).unwrap_or(CLASS_OUT_OF_BOUNDS);
         let Ok(entry_idx) = state.entry_index(cur_state, class) else {
             return;
@@ -66,7 +73,6 @@ fn rearrange(verb: u16, glyphs: &mut [u16], origins: &mut [usize], first: usize,
     // 5-element windows and stay no-op until a real font needs them,
     // because producing a wrong permutation would corrupt the glyph
     // stream worse than leaving it alone.
-    let _ = len;
     if let 1..=3 = verb {
         glyphs.swap(first, last);
         origins.swap(first, last);

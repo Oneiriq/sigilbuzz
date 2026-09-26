@@ -3,7 +3,7 @@
 //! Pair adjustment is the mechanism that delivers kerning. Given two
 //! adjacent glyphs `(first, second)`, the lookup returns a pair of
 //! [`ValueRecord`]s whose `x_advance` on the first record is what
-//! oniq and every other text renderer adds to `first`'s advance to
+//! every text renderer adds to `first`'s advance to
 //! tighten or loosen the pair.
 //!
 //! Two subtable formats exist:
@@ -143,17 +143,19 @@ impl<'a> PairPosFormat1<'a> {
         })
     }
 
-    fn pair_set_offset(&self, i: u16) -> u16 {
+    fn pair_set_offset(&self, i: u16) -> Option<u16> {
         let off = self.pair_set_offsets_off + i as usize * 2;
-        u16::from_be_bytes([self.data[off], self.data[off + 1]])
+        Reader::at(self.data, off).ok()?.read_u16().ok()
     }
 
+    /// Returns the pair's records and the PairSet bytes their Device
+    /// offsets are measured from.
     fn lookup(&self, first: u16, second: u16) -> Option<(ValueRecord, ValueRecord, &'a [u8])> {
         let cov = self.coverage.index_of(first)?;
         if cov >= self.pair_set_count {
             return None;
         }
-        let set_off = self.pair_set_offset(cov) as usize;
+        let set_off = self.pair_set_offset(cov)? as usize;
         let set_bytes = self.data.get(set_off..)?;
 
         let mut r = Reader::new(set_bytes);
@@ -230,11 +232,13 @@ impl<'a> PairPosFormat2<'a> {
         let class1_records_off = r.position();
 
         let value_record_pair = ValueRecord::size(value_format1) + ValueRecord::size(value_format2);
-        let class2_record_stride = value_record_pair;
-        let class1_record_stride = class2_count as usize * class2_record_stride;
-
-        let need = class1_records_off + class1_count as usize * class1_record_stride;
-        if data.len() < need {
+        // class1Count * class2Count * 32 bytes can overflow a 32-bit
+        // usize, so every step is checked.
+        let need = usize::from(class1_count)
+            .checked_mul(usize::from(class2_count))
+            .and_then(|cells| cells.checked_mul(value_record_pair))
+            .and_then(|len| class1_records_off.checked_add(len));
+        if !need.is_some_and(|need| need <= data.len()) {
             return Err(Error::Truncated {
                 offset: class1_records_off,
                 context: "pairPos format2 class records shorter than declared",
@@ -408,6 +412,19 @@ mod tests {
         assert!(pp.lookup(10, 16).is_none());
     }
 
+    #[test]
+    fn format1_device_base_is_the_pair_set() {
+        // Device offsets in format 1 are measured from the PairSet,
+        // so the base must start at the second PairSet's count word.
+        let bytes =
+            build_pair_pos_format1(&[10, 20], &[&[(15, -30, 0), (25, 5, 0)], &[(5, -50, 0)]]);
+        let pp = PairPos::parse(&bytes).unwrap();
+        let (_, _, base) = pp.lookup_with_device_base(20, 5).unwrap();
+        let set_off = usize::from(u16::from_be_bytes([bytes[12], bytes[13]]));
+        assert_eq!(base, &bytes[set_off..]);
+        assert_eq!(&base[..2], &1u16.to_be_bytes(), "pairValueCount of set 1");
+    }
+
     /// Builds a Pair Adjustment format 2 subtable with a single
     /// X_ADVANCE value field on valueFormat1 and no value on
     /// valueFormat2. `matrix[c1][c2]` is the x_advance for the
@@ -476,6 +493,9 @@ mod tests {
         // Pair (11, 22) -> class1=1, class2=2 -> -15.
         let (v1b, _) = pp.lookup(11, 22).unwrap();
         assert_eq!(v1b.x_advance, -15);
+        // Format 2 measures Device offsets from the subtable itself.
+        let (_, _, base) = pp.lookup_with_device_base(11, 22).unwrap();
+        assert_eq!(base, &bytes[..]);
     }
 
     #[test]

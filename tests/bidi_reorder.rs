@@ -55,7 +55,7 @@ fn buffer_set_text_bidi_matches_reorder_output() {
 #[test]
 fn buffer_set_text_unchanged_for_backward_compat() {
     // Critical: the plain set_text path must NOT bidi-reorder. 0.1.0
-    // consumers (oniq, demos) own direction handling themselves.
+    // consumers (applications and demos) own direction handling themselves.
     let text = "Hello \u{05E2}\u{05D1}\u{05E8}\u{05D9}\u{05EA}";
     let mut buf = Buffer::new();
     buf.set_text(text);

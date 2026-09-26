@@ -63,7 +63,7 @@ use core::ops::Range;
 
 use crate::coverage::emit_coverage_from_glyphs;
 use crate::device::{copy_anchor, Dedup};
-use crate::layout::{parse_coverage_glyphs, RewriterCtx, RewrittenSubtable};
+use crate::layout::{RewriterCtx, RewrittenSubtable};
 
 /// Distinguishes the base-side array. Types 4 and 6 use a fixed
 /// `markClassCount` row of anchor offsets per Coverage entry; type 5
@@ -104,7 +104,9 @@ enum Piece {
 /// Rewrites a mark attachment subtable, split into several when one
 /// cannot hold it (see the module docs). Empty when nothing survives.
 /// A single class and base that cannot fit even alone are recorded in
-/// [`RewriterCtx::offsets`].
+/// [`RewriterCtx::offsets`]. Every piece laid out while searching for a
+/// split is charged to the work budget, and the subtable drops once the
+/// budget runs out.
 pub(super) fn rewrite_mark_attach(
     ctx: &RewriterCtx,
     sub: &[u8],
@@ -118,11 +120,22 @@ pub(super) fn rewrite_mark_attach(
         Piece::Empty => return Vec::new(),
         Piece::TooBig => {}
     }
+    let map = ctx.gid_map;
+    let charged = |kind: MarkAttachKind, classes: Range<u16>, bases: &[Base]| {
+        if map.spend(marks.len() + bases.len()) {
+            lay_out(kind, classes, &marks, bases, true)
+        } else {
+            Piece::TooBig
+        }
+    };
     let mut pieces = Vec::new();
     let mut lo = 0;
     while lo < class_count {
+        if map.budget_spent() {
+            return Vec::new();
+        }
         let by_class = longest_fit(usize::from(lo), usize::from(class_count), |a, b| {
-            lay_out(kind, a as u16..b as u16, &marks, &bases, true)
+            charged(kind, a as u16..b as u16, &bases)
         });
         if let Some((hi, piece)) = by_class {
             pieces.extend(piece.map(|bytes| RewrittenSubtable { bytes }));
@@ -133,8 +146,11 @@ pub(super) fn rewrite_mark_attach(
         let mut first = 0;
         while first < bases.len() {
             let by_base = longest_fit(first, bases.len(), |a, b| {
-                lay_out(kind, lo..lo + 1, &marks, &bases[a..b], true)
+                charged(kind, lo..lo + 1, bases.get(a..b).unwrap_or_default())
             });
+            if map.budget_spent() {
+                return Vec::new();
+            }
             let Some((next, piece)) = by_base else {
                 ctx.offsets.record();
                 return Vec::new();
@@ -199,16 +215,16 @@ fn read(
     }
     let class_count = u16::try_from(at(6)?).ok()?;
     let mcc = usize::from(class_count);
-    let mark_glyphs = parse_coverage_glyphs(sub.get(at(2)?..)?);
-    let base_glyphs = parse_coverage_glyphs(sub.get(at(4)?..)?);
     let map = ctx.gid_map;
+    let mark_glyphs = map.coverage_glyphs(sub.get(at(2)?..)?)?;
+    let base_glyphs = map.coverage_glyphs(sub.get(at(4)?..)?)?;
 
     let mark_array = sub.get(at(8)?..)?;
     let mark_count = usize::from(u16::from_be_bytes([
         *mark_array.first()?,
         *mark_array.get(1)?,
     ]));
-    if mark_array.len() < 2 + mark_count * 4 {
+    if mark_array.len() < 2 + mark_count * 4 || !map.spend(mark_count) {
         return None;
     }
     let mut marks = Vec::new();
@@ -250,6 +266,12 @@ fn read(
         let Some(gid) = map.map(old) else {
             continue;
         };
+        // Every row copies `markClassCount` anchors, and many entries may
+        // share one LigatureAttach, so the rows are charged as they are
+        // read.
+        if !map.spend(mcc) {
+            return None;
+        }
         let rows = match kind {
             MarkAttachKind::FixedClassRow => vec![row(array, 2 + i * mcc * 2)],
             MarkAttachKind::LigatureAttach => {
@@ -264,6 +286,9 @@ fn read(
                 let components = usize::from(u16::from_be_bytes([attach[0], attach[1]]));
                 if !rows_fit(attach, components) {
                     continue;
+                }
+                if !map.spend(components.saturating_mul(mcc)) {
+                    return None;
                 }
                 (0..components)
                     .map(|k| row(attach, 2 + k * mcc * 2))

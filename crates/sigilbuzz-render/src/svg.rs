@@ -27,7 +27,7 @@
 //!   pointing at a `<linearGradient>` / `<radialGradient>`.
 //! - Stroking: `stroke`, `stroke-width`, `stroke-linecap` (butt
 //!   minimum, round / square as best-effort), `stroke-linejoin` (miter
-//!   minimum, round / bevel as best-effort).
+//!   and bevel, round as best-effort).
 //! - `<linearGradient>` / `<radialGradient>` with `<stop>` children;
 //!   ramp evaluation reuses the COLRv1 implementation in
 //!   [`crate::colrv1`].
@@ -44,8 +44,8 @@
 //!   mask buffer's alpha channel directly. `maskUnits="userSpaceOnUse"`
 //!   (default) and `maskUnits="objectBoundingBox"` (mask region rect
 //!   re-interpreted in `[0, 1]²` of the masked element's bbox) are
-//!   both supported. Nested mask references inside the mask body
-//!   remain deferred.
+//!   both supported. Nested mask references inside the mask body are
+//!   not supported and are dropped.
 //!
 //! - `stroke-dasharray` + `stroke-dashoffset` on stroked geometry,
 //!   applied to the post-flattening polyline. Curves become chords
@@ -68,9 +68,14 @@
 //!   gid and a user-space x-advance), and the renderer walks the
 //!   referenced path's arc length, fetching each glyph's outline from
 //!   the same [`Face`] and translating it to the cumulative-advance
-//!   position. Glyphs are placed axis-aligned only. Tangent rotation
-//!   is deferred to a follow-up. `side="right"` and path cycling
-//!   (`startOffset` past path end) are also deferred.
+//!   position. Glyphs are placed axis-aligned only: tangent rotation,
+//!   `side="right"`, and path cycling (`startOffset` past path end)
+//!   are not supported.
+//!
+//! - Work limits. Parsing, stored geometry, and rendering each run
+//!   against a fixed per-document budget, far above what real fonts
+//!   need. A document that exceeds one stops early instead of taking
+//!   unbounded time or memory.
 //!
 //! Anything outside this list, filter primitives beyond the set above
 //! (`feTurbulence`, `feImage`, `feMorphology`, `feConvolveMatrix`,
@@ -126,8 +131,8 @@ use crate::error::RenderError;
 use crate::pixmap::ColorPixmap;
 use crate::rasterizer::Rasterizer;
 
-use document::{collect_defs, parse_document_with, Defs};
-use render::render_fill;
+use document::{build_defs, parse_document_with};
+use render::render_doc;
 use text_path::append_text_path_fills;
 use xml::parse_xml;
 
@@ -145,6 +150,13 @@ const MAX_FILLS: usize = 4096;
 /// engines; we match.
 const MAX_USE_DEPTH: u32 = 16;
 
+/// Maximum element nesting along one walk, counting the levels that
+/// `<use>` expansion adds. `<use>` restarts the group depth count, so
+/// without this the walk could recurse `MAX_USE_DEPTH` times
+/// `MAX_GROUP_DEPTH` deep (over 500 frames), which overflows a 1 MiB
+/// stack in debug builds. Real documents nest well under 20.
+const MAX_WALK_NESTING: u16 = 64;
+
 /// Miter cut-off ratio per SVG: when the miter would extend more than
 /// `4 * stroke-width` past the join, fall back to a bevel join.
 const MITER_LIMIT: f32 = 4.0;
@@ -156,6 +168,52 @@ const MITER_LIMIT: f32 = 4.0;
 /// can otherwise multiply up to a `u32::MAX * u32::MAX * 4` allocation
 /// that panics in the `Vec` macro before any rasterization runs.
 const MAX_RENDER_DIM: f32 = 16384.0;
+
+/// Parse work allowed for one document, in abstract units. Visiting an
+/// element costs [`WALK_VISIT_COST`] plus the bytes of its attributes
+/// and of the inherited state it copies, and resolving a reference
+/// costs the bytes it parses. `<use>` expansion can revisit a subtree
+/// many times, so without this a small document can demand exponential
+/// work. Real documents use a small fraction of it.
+const MAX_PARSE_WORK: usize = 1 << 24;
+
+/// Fixed parse-work cost of visiting one element.
+const WALK_VISIT_COST: usize = 64;
+
+/// Path operations a document may store across all of its fills,
+/// counting the copies attached through clip paths, masks, filters,
+/// and gradient stops. Bounds memory when many fills share one large
+/// referenced definition.
+const MAX_DOC_OPS: usize = 1 << 21;
+
+/// Maximum primitives kept per `<filter>`. Each named result holds a
+/// canvas-sized pixmap. Real filters use a handful.
+const MAX_FILTER_PRIMITIVES: usize = 64;
+
+/// Canvas-sized passes allowed while rendering one document. A fill
+/// costs one pass, plus one per filter primitive and merge input, plus
+/// one for a mask buffer. Mask children and filters otherwise multiply
+/// the per-fill cost without limit.
+const MAX_RENDER_PASSES: u32 = 1 << 15;
+
+/// Maximum points one [`flatten_to_polylines`] call produces. Once
+/// reached, curves stop subdividing and contribute only their end
+/// point.
+const MAX_POLYLINE_POINTS: usize = 1 << 20;
+
+/// Maximum path operations one [`stroke_to_fill`] call emits. Dashes
+/// and joins multiply the input, so this bounds the ribbon size.
+const MAX_STROKE_OPS: usize = 1 << 21;
+
+/// Maximum dash boundaries walked while stroking one path, see
+/// [`dash_polyline_limited`]. A tiny dash length on a long path would
+/// otherwise split it billions of times.
+const MAX_DASH_SPLITS: usize = 1 << 20;
+
+/// Largest box-blur radius. The window sums stay within `u32` up to
+/// `(2 * r + 1) * 255`, and no canvas is wide enough for a larger
+/// radius to matter.
+const MAX_BLUR_RADIUS: i32 = 1 << 22;
 
 // =========================================================================
 // Public entry
@@ -187,9 +245,12 @@ impl Rasterizer {
     ///   (sigilbuzz-render does not ship a gzip dep; consumers should
     ///   decompress and feed back via a future bytes-based entry point).
     /// - [`RenderError::Parse`] for unrecoverable XML / path-data
-    ///   errors.
+    ///   errors, and for documents that exceed the fill cap or the
+    ///   parse work budget (for example through runaway `<use>`
+    ///   expansion).
     /// - [`RenderError::BadSize`] when `size_pt` is non-finite or
-    ///   non-positive.
+    ///   non-positive, or when the canvas would exceed 16384 pixels on
+    ///   a side.
     pub fn rasterize_svg_glyph(
         &self,
         face: &Face<'_>,
@@ -241,16 +302,11 @@ impl Rasterizer {
         {
             return Err(RenderError::BadSize(size_pt));
         }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let width = width_f as u32;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let height = height_f as u32;
         let mut out = ColorPixmap::new(width, height);
 
-        let tol = self.flattening_tolerance();
-        for fill in &doc.fills {
-            render_fill(&mut out, fill, &world, tol);
-        }
+        render_doc(&mut out, &doc, &world, self.flattening_tolerance());
         Ok(out)
     }
 
@@ -277,11 +333,10 @@ impl Rasterizer {
     ///    enclosing `<textPath>` (or fallback solid black if none).
     ///
     /// **Axis-aligned only.** Glyphs do not rotate to follow the path
-    /// tangent; this is a known PoC limitation flagged by PR #236's
-    /// defer-note and tracked for the next minor. `side="right"` and
-    /// path cycling beyond a single cumulative-advance walk are also
-    /// deferred. Extra glyphs whose advance overruns the path's total
-    /// length are silently dropped.
+    /// tangent. `side="right"` and path cycling beyond a single
+    /// cumulative-advance walk are not supported either. Extra glyphs
+    /// whose advance overruns the path's total length are silently
+    /// dropped.
     ///
     /// `coords` flows through to glyph outline lookups so variable
     /// fonts produce the right outlines for the supplied axis position;
@@ -333,8 +388,7 @@ impl Rasterizer {
                 return Err(RenderError::BadUpem);
             }
             let root = parse_xml(xml)?;
-            let mut defs = Defs::default();
-            collect_defs(&root, &mut defs);
+            let defs = build_defs(&root);
             append_text_path_fills(
                 &mut doc,
                 &root,
@@ -365,16 +419,11 @@ impl Rasterizer {
         {
             return Err(RenderError::BadSize(size_pt));
         }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let width = width_f as u32;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let height = height_f as u32;
         let mut out = ColorPixmap::new(width, height);
 
-        let tol = self.flattening_tolerance();
-        for fill in &doc.fills {
-            render_fill(&mut out, fill, &world, tol);
-        }
+        render_doc(&mut out, &doc, &world, self.flattening_tolerance());
         Ok(out)
     }
 }
@@ -406,8 +455,8 @@ impl Rasterizer {
 ///
 /// `glyph_runs` is consumed in order. Cumulative `x_advance` walks the
 /// path; glyphs whose run-start position lands past the path's total
-/// arc length are silently dropped (path cycling is deferred, see the
-/// module-level docs).
+/// arc length are silently dropped (path cycling is not supported, see
+/// the module-level docs).
 #[derive(Debug, Clone)]
 pub struct TextPathInput<'a> {
     /// The `<path>` id this run targets. Matches the

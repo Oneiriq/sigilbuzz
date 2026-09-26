@@ -5,6 +5,7 @@
 use alloc::vec::Vec;
 
 use super::{read_u16, DeviceSlot, SlotVisitor};
+use crate::util::WorkBudget;
 
 /// Defined ValueRecord format bits: bits 0x0001..=0x0080. Mirrors the
 /// `DEFINED_BITS` constant in `sigilbuzz::tables::gpos::value_record`.
@@ -55,7 +56,7 @@ pub(super) const fn value_record_size(format: u16) -> usize {
 /// `0x0004`, and `0x0080` with `0x0008`. When a device-offset bit is
 /// set but the paired static field bit is not, the slot is reported
 /// with `field: None`.
-fn visit_value_record(
+pub(super) fn visit_value_record(
     buf: &mut [u8],
     base: usize,
     vr_pos: usize,
@@ -103,7 +104,12 @@ fn visit_value_record(
 /// Walks every ValueRecord device slot in a SinglePos subtable
 /// starting at `sub_off` within `gpos_buf`. Device offsets are
 /// relative to the subtable.
-pub(super) fn walk_single_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisitor<'_>) {
+pub(super) fn walk_single_pos(
+    gpos_buf: &mut [u8],
+    sub_off: usize,
+    visit: &mut SlotVisitor<'_>,
+    budget: &WorkBudget,
+) {
     let Some(sub) = gpos_buf.get_mut(sub_off..) else {
         return;
     };
@@ -125,7 +131,7 @@ pub(super) fn walk_single_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut S
         },
         _ => return,
     };
-    if sub.len() < first + count * stride {
+    if sub.len() < first + count * stride || !budget.spend(count) {
         return;
     }
     for i in 0..count {
@@ -135,20 +141,25 @@ pub(super) fn walk_single_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut S
 
 /// Walks every ValueRecord device slot in a PairPos subtable starting
 /// at `sub_off` within `gpos_buf`.
-pub(super) fn walk_pair_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisitor<'_>) {
+pub(super) fn walk_pair_pos(
+    gpos_buf: &mut [u8],
+    sub_off: usize,
+    visit: &mut SlotVisitor<'_>,
+    budget: &WorkBudget,
+) {
     let Some(sub) = gpos_buf.get_mut(sub_off..) else {
         return;
     };
     match read_u16(sub, 0) {
-        Some(1) => walk_pair_pos_format1(sub, visit),
-        Some(2) => walk_pair_pos_format2(sub, visit),
+        Some(1) => walk_pair_pos_format1(sub, visit, budget),
+        Some(2) => walk_pair_pos_format2(sub, visit, budget),
         _ => {}
     }
 }
 
 /// PairPos format 1. The ValueRecords live inside PairSet tables and
 /// their device offsets are relative to the PairSet, not the subtable.
-fn walk_pair_pos_format1(sub: &mut [u8], visit: &mut SlotVisitor<'_>) {
+fn walk_pair_pos_format1(sub: &mut [u8], visit: &mut SlotVisitor<'_>, budget: &WorkBudget) {
     if sub.len() < 10 {
         return;
     }
@@ -163,7 +174,9 @@ fn walk_pair_pos_format1(sub: &mut [u8], visit: &mut SlotVisitor<'_>) {
     let v1_size = value_record_size(vf1);
     let pvr_size = 2 + v1_size + value_record_size(vf2);
     let set_offsets_off = 10usize;
-    if sub.len() < set_offsets_off + pair_set_count as usize * 2 {
+    if sub.len() < set_offsets_off + pair_set_count as usize * 2
+        || !budget.spend(usize::from(pair_set_count))
+    {
         return;
     }
     let set_offs: Vec<usize> = (0..pair_set_count as usize)
@@ -176,6 +189,9 @@ fn walk_pair_pos_format1(sub: &mut [u8], visit: &mut SlotVisitor<'_>) {
         if set_off + 2 + pair_value_count * pvr_size > sub.len() {
             continue;
         }
+        if !budget.spend(pair_value_count) {
+            return;
+        }
         for j in 0..pair_value_count {
             // ValueRecord1 starts after the 2-byte secondGlyph.
             let vr1_pos = set_off + 2 + j * pvr_size + 2;
@@ -187,7 +203,7 @@ fn walk_pair_pos_format1(sub: &mut [u8], visit: &mut SlotVisitor<'_>) {
 
 /// PairPos format 2. The class matrix sits inline in the subtable and
 /// its device offsets are relative to the subtable.
-fn walk_pair_pos_format2(sub: &mut [u8], visit: &mut SlotVisitor<'_>) {
+fn walk_pair_pos_format2(sub: &mut [u8], visit: &mut SlotVisitor<'_>, budget: &WorkBudget) {
     if sub.len() < 16 {
         return;
     }
@@ -204,9 +220,14 @@ fn walk_pair_pos_format2(sub: &mut [u8], visit: &mut SlotVisitor<'_>) {
     }
     let v1_size = value_record_size(vf1);
     let cell_size = v1_size + value_record_size(vf2);
-    let cells = class1_count as usize * class2_count as usize;
+    let cells = usize::from(class1_count) * usize::from(class2_count);
     let records_off = 16usize;
-    if sub.len() < records_off + cells * cell_size {
+    // The matrix size can exceed a 32-bit `usize`, so it is checked.
+    let fits = cells
+        .checked_mul(cell_size)
+        .and_then(|len| records_off.checked_add(len))
+        .is_some_and(|end| end <= sub.len());
+    if !fits || !budget.spend(cells) {
         return;
     }
     for k in 0..cells {

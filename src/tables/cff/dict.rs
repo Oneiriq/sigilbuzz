@@ -28,6 +28,9 @@ pub(crate) struct TopDict {
 }
 
 impl TopDict {
+    // Each operator keeps one arm with its operand-count check inside,
+    // so the dispatch reads like the spec's operator table.
+    #[allow(clippy::collapsible_match)]
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
         let mut out = Self {
             charstring_type: 2,
@@ -87,7 +90,6 @@ impl DictOperand {
     fn as_u32(&self) -> Option<u32> {
         match *self {
             Self::Integer(i) if i >= 0 => Some(i as u32),
-            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
             Self::Real(f) if f >= 0.0 => Some(f as u32),
             _ => None,
         }
@@ -99,7 +101,6 @@ pub(super) fn read_dict_operand(r: &mut Reader<'_>) -> Result<DictOperand> {
     if b0 == 28 {
         let hi = r.read_u8()?;
         let lo = r.read_u8()?;
-        #[allow(clippy::cast_possible_wrap)]
         let v = i16::from_be_bytes([hi, lo]) as i32;
         Ok(DictOperand::Integer(v))
     } else if b0 == 29 {
@@ -151,7 +152,10 @@ pub(super) fn read_local_subrs<'a>(
     let Some(off) = priv_dict.local_subrs_off else {
         return Ok(Vec::new());
     };
-    let subr_off = priv_off + off as usize;
+    let subr_off = priv_off.checked_add(off as usize).ok_or(Error::Malformed {
+        offset: priv_off,
+        context: "CFF Local Subrs offset overflow",
+    })?;
     let mut r = Reader::at(data, subr_off)?;
     read_index(&mut r)
 }
@@ -173,30 +177,38 @@ pub(super) fn parse_fd_select(data: &[u8], off: usize, n_glyphs: usize) -> Resul
         }
         3 => {
             let n_ranges = r.read_u16()? as usize;
-            let mut out = alloc::vec![0u8; n_glyphs];
             let mut ranges = Vec::with_capacity(n_ranges);
             for _ in 0..n_ranges {
-                let first = r.read_u16()?;
+                let first = r.read_u16()? as usize;
                 let fd = r.read_u8()?;
                 ranges.push((first, fd));
             }
-            let sentinel = r.read_u16()?;
-            for i in 0..n_ranges {
-                let start = ranges[i].0 as usize;
-                let end = if i + 1 < n_ranges {
-                    ranges[i + 1].0 as usize
-                } else {
-                    sentinel as usize
-                };
-                let fd = ranges[i].1;
-                for g in start..end.min(n_glyphs) {
-                    out[g] = fd;
-                }
-            }
-            Ok(out)
+            let sentinel = r.read_u16()? as usize;
+            Ok(fill_fd_ranges(&ranges, sentinel, n_glyphs))
         }
         _ => Err(Error::Unsupported {
             context: "CFF FDSelect format != 0/3",
         }),
     }
+}
+
+/// Expands FDSelect `(first_glyph, fd)` ranges into one entry per
+/// glyph. Range `i` covers glyphs up to the next range's first glyph,
+/// and the last range ends at `sentinel`. Shared with CFF2.
+///
+/// Ranges must ascend. `filled` skips glyphs an earlier range already
+/// wrote, so unsorted ranges cannot make the fill quadratic. For
+/// sorted ranges it changes nothing.
+pub(crate) fn fill_fd_ranges(ranges: &[(usize, u8)], sentinel: usize, n_glyphs: usize) -> Vec<u8> {
+    let mut out = alloc::vec![0u8; n_glyphs];
+    let mut filled = 0usize;
+    for (i, &(first, fd)) in ranges.iter().enumerate() {
+        let end = ranges.get(i + 1).map_or(sentinel, |next| next.0);
+        let end = end.min(n_glyphs);
+        for slot in out.get_mut(first.max(filled)..end).into_iter().flatten() {
+            *slot = fd;
+        }
+        filled = filled.max(end);
+    }
+    out
 }

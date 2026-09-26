@@ -3,6 +3,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use sigilbuzz::tables::PathOp;
 
@@ -21,7 +22,10 @@ use super::path::{
 use super::stroke::stroke_to_fill;
 use super::style::{inherit_attrs, parse_length, parse_viewbox};
 use super::xml::{attr_matches, name_eq, parse_xml, Node};
-use super::{MAX_FILLS, MAX_GROUP_DEPTH, MAX_USE_DEPTH};
+use super::{
+    MAX_DOC_OPS, MAX_FILLS, MAX_GROUP_DEPTH, MAX_PARSE_WORK, MAX_USE_DEPTH, MAX_WALK_NESTING,
+    WALK_VISIT_COST,
+};
 
 // =========================================================================
 // Top-level parse
@@ -72,8 +76,7 @@ pub(super) fn parse_document_with(xml: &str, foreground: [u8; 4]) -> Result<SvgD
     // First pass: collect every element that carries `id=` so `<use>`
     // and `fill="url(#...)"` can resolve forward references. We just
     // index by id; the renderer walks the tree itself.
-    let mut defs = Defs::default();
-    collect_defs(&root, &mut defs);
+    let defs = build_defs(&root);
 
     // Second pass: walk the tree, emitting fills.
     let ctx = ElemCtx {
@@ -85,20 +88,85 @@ pub(super) fn parse_document_with(xml: &str, foreground: [u8; 4]) -> Result<SvgD
     Ok(doc)
 }
 
-#[derive(Default)]
+/// Id index plus the per-document work budgets. Every parse-time
+/// helper already receives the `Defs`, so the budgets live here as
+/// cells shared by the document walk and by mask resolution.
 pub(super) struct Defs<'a> {
+    /// Elements that carry `id=`, sorted by id. Elements sharing an id
+    /// stay in document order, so a lookup returns the first one.
     by_id: Vec<(&'a str, &'a Node)>,
+    /// Parse work left, see [`MAX_PARSE_WORK`].
+    work_left: Cell<usize>,
+    /// Stored path operations left, see [`MAX_DOC_OPS`].
+    ops_left: Cell<usize>,
+}
+
+impl Default for Defs<'_> {
+    fn default() -> Self {
+        Self {
+            by_id: Vec::new(),
+            work_left: Cell::new(MAX_PARSE_WORK),
+            ops_left: Cell::new(MAX_DOC_OPS),
+        }
+    }
 }
 
 impl<'a> Defs<'a> {
     pub(super) fn lookup(&self, id: &str) -> Option<&'a Node> {
-        for (k, v) in &self.by_id {
-            if *k == id {
-                return Some(*v);
-            }
+        let first = self.by_id.partition_point(|(k, _)| *k < id);
+        match self.by_id.get(first) {
+            Some(&(k, node)) if k == id => Some(node),
+            _ => None,
         }
-        None
     }
+
+    /// Spends `n` units of parse work. Returns `false`, and leaves the
+    /// budget empty, when fewer than `n` remain.
+    pub(super) fn charge_work(&self, n: usize) -> bool {
+        charge(&self.work_left, n)
+    }
+
+    /// Reserves room for `n` stored path operations. Returns `false`,
+    /// and leaves the budget empty, when fewer than `n` remain.
+    fn charge_ops(&self, n: usize) -> bool {
+        charge(&self.ops_left, n)
+    }
+
+    /// True once the stored-operation budget is spent.
+    fn ops_exhausted(&self) -> bool {
+        self.ops_left.get() == 0
+    }
+
+    /// True once the parse work budget is spent. A reference resolved
+    /// after that point may be incomplete, so callers drop the fill.
+    fn work_exhausted(&self) -> bool {
+        self.work_left.get() == 0
+    }
+}
+
+fn charge(left: &Cell<usize>, n: usize) -> bool {
+    if let Some(rest) = left.get().checked_sub(n) {
+        left.set(rest);
+        true
+    } else {
+        left.set(0);
+        false
+    }
+}
+
+/// True when `doc` must not take more fills: either the fill count cap
+/// or the stored-operation budget is reached.
+pub(super) fn doc_full(doc: &SvgDoc, defs: &Defs<'_>) -> bool {
+    doc.fills.len() >= MAX_FILLS || defs.ops_exhausted()
+}
+
+/// Builds the id index for the tree rooted at `root`.
+pub(super) fn build_defs(root: &Node) -> Defs<'_> {
+    let mut defs = Defs::default();
+    collect_defs(root, &mut defs);
+    // `sort_by` is stable, so equal ids keep document order.
+    defs.by_id.sort_by(|a, b| a.0.cmp(b.0));
+    defs
 }
 
 pub(super) fn collect_defs<'a>(node: &'a Node, defs: &mut Defs<'a>) {
@@ -108,6 +176,22 @@ pub(super) fn collect_defs<'a>(node: &'a Node, defs: &mut Defs<'a>) {
     for c in &node.children {
         collect_defs(c, defs);
     }
+}
+
+/// Parse-work cost of reading `node`: the fixed visit cost plus the
+/// attribute bytes that get scanned.
+pub(super) fn node_cost(node: &Node) -> usize {
+    node.attrs
+        .iter()
+        .map(|(k, v)| k.len().saturating_add(v.len()))
+        .fold(WALK_VISIT_COST, usize::saturating_add)
+}
+
+/// Parse-work cost of visiting `node` with inherited state `ctx`:
+/// [`node_cost`] plus the heap bytes of the inherited state that gets
+/// cloned.
+pub(super) fn visit_cost(node: &Node, ctx: &ElemCtx) -> usize {
+    node_cost(node).saturating_add(ctx.heap_bytes())
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +243,9 @@ pub(super) struct ElemCtx {
     /// into the resolver. Keeps the stack bounded at the documented
     /// "mask-of-mask is unsupported" semantics.
     pub(super) mask_depth: u8,
+    /// Elements between the walk root and this context, including the
+    /// levels `<use>` expansion adds. See [`MAX_WALK_NESTING`].
+    pub(super) nesting: u16,
 }
 
 impl Default for ElemCtx {
@@ -181,7 +268,20 @@ impl Default for ElemCtx {
             filter_href: None,
             mask_href: None,
             mask_depth: 0,
+            nesting: 0,
         }
+    }
+}
+
+impl ElemCtx {
+    /// Heap bytes a clone of this context copies.
+    fn heap_bytes(&self) -> usize {
+        let href = |h: &Option<String>| h.as_ref().map_or(0, String::len);
+        (self.stroke_dasharray.len() * core::mem::size_of::<f32>())
+            .saturating_add(href(&self.fill_grad_href))
+            .saturating_add(href(&self.clip_href))
+            .saturating_add(href(&self.filter_href))
+            .saturating_add(href(&self.mask_href))
     }
 }
 
@@ -207,11 +307,14 @@ pub(super) fn walk(
     depth: u32,
     use_depth: u32,
 ) -> Result<(), RenderError> {
-    if depth > MAX_GROUP_DEPTH {
+    if depth > MAX_GROUP_DEPTH || parent.nesting >= MAX_WALK_NESTING {
         return Err(RenderError::Parse("svg nesting"));
     }
-    if doc.fills.len() >= MAX_FILLS {
+    if doc_full(doc, defs) {
         return Err(RenderError::Parse("svg fill cap"));
+    }
+    if !defs.charge_work(visit_cost(node, parent)) {
+        return Err(RenderError::Parse("svg work cap"));
     }
 
     // Skip elements that contribute no rendering: <defs>, <linearGradient>,
@@ -237,7 +340,7 @@ pub(super) fn walk(
     if name_eq(&node.name, "svg") || name_eq(&node.name, "g") {
         for child in &node.children {
             walk(child, doc, defs, &ctx, depth + 1, use_depth)?;
-            if doc.fills.len() >= MAX_FILLS {
+            if doc_full(doc, defs) {
                 break;
             }
         }
@@ -307,7 +410,7 @@ pub(super) fn walk(
         // / <symbol> don't swallow visible content.
         for child in &node.children {
             walk(child, doc, defs, &ctx, depth + 1, use_depth)?;
-            if doc.fills.len() >= MAX_FILLS {
+            if doc_full(doc, defs) {
                 break;
             }
         }
@@ -336,6 +439,38 @@ pub(super) fn parse_url_ref(s: &str) -> Option<String> {
 
 /// Pushes one or more fills (and stroke fills) for `ops` under `ctx`.
 fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) {
+    if defs.ops_exhausted() {
+        return;
+    }
+    // Work out what this element paints before resolving any
+    // reference, so an element that paints nothing costs nothing.
+    let fill_paint = resolve_fill_paint(defs, ctx).filter(|p| !is_fully_transparent(p));
+    let stroke = ctx.stroke_color.and_then(|scol| {
+        if ctx.stroke_width <= 0.0 {
+            return None;
+        }
+        let alpha = (scol[3] as f32 / 255.0) * ctx.stroke_opacity * ctx.opacity;
+        let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+        if a == 0 {
+            return None;
+        }
+        let (stroke_ops, work) = stroke_to_fill(
+            ops,
+            ctx.stroke_width,
+            ctx.stroke_linecap,
+            ctx.stroke_linejoin,
+            &ctx.stroke_dasharray,
+            ctx.stroke_dashoffset,
+        );
+        if stroke_ops.is_empty() || !defs.charge_work(work) {
+            return None;
+        }
+        Some((stroke_ops, [scol[0], scol[1], scol[2], a]))
+    });
+    if fill_paint.is_none() && stroke.is_none() {
+        return;
+    }
+
     // Resolve the clip shape once per emission.
     let clip = ctx
         .clip_href
@@ -359,7 +494,7 @@ fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) 
     // reference so a `<mask id=a>...<rect mask=url(#b)>...<mask
     // id=b>...<rect mask=url(#a)>` document can't recurse the
     // resolver into a stack overflow. mask-of-mask is documented as
-    // deferred; this enforces it.
+    // unsupported, and this enforces it.
     let mask = if ctx.mask_depth == 0 {
         ctx.mask_href
             .as_deref()
@@ -369,48 +504,51 @@ fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) 
     };
 
     // Fill pass.
-    let fill_paint = resolve_fill_paint(defs, ctx);
     if let Some(p) = fill_paint {
-        if !is_fully_transparent(&p) {
-            doc.fills.push(Fill {
+        push_fill(
+            doc,
+            defs,
+            Fill {
                 ops: ops.to_vec(),
                 paint: p,
                 xform: ctx.xform,
                 clip: clip.clone(),
+                #[cfg(test)]
                 is_stroke: false,
                 filter: filter.clone(),
                 mask: mask.clone(),
-            });
-        }
+            },
+        );
     }
 
     // Stroke pass.
-    if let Some(scol) = ctx.stroke_color {
-        if ctx.stroke_width > 0.0 {
-            let alpha = (scol[3] as f32 / 255.0) * ctx.stroke_opacity * ctx.opacity;
-            let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-            if a > 0 {
-                let rgba = [scol[0], scol[1], scol[2], a];
-                let stroke_ops = stroke_to_fill(
-                    ops,
-                    ctx.stroke_width,
-                    ctx.stroke_linecap,
-                    ctx.stroke_linejoin,
-                    &ctx.stroke_dasharray,
-                    ctx.stroke_dashoffset,
-                );
-                if !stroke_ops.is_empty() && doc.fills.len() < MAX_FILLS {
-                    doc.fills.push(Fill {
-                        ops: stroke_ops,
-                        paint: Paint::Solid(rgba),
-                        xform: ctx.xform,
-                        clip: clip.clone(),
-                        is_stroke: true,
-                        filter: filter.clone(),
-                        mask: mask.clone(),
-                    });
-                }
-            }
+    if let Some((stroke_ops, rgba)) = stroke {
+        if doc.fills.len() < MAX_FILLS {
+            push_fill(
+                doc,
+                defs,
+                Fill {
+                    ops: stroke_ops,
+                    paint: Paint::Solid(rgba),
+                    xform: ctx.xform,
+                    clip,
+                    #[cfg(test)]
+                    is_stroke: true,
+                    filter,
+                    mask,
+                },
+            );
         }
+    }
+}
+
+/// Appends `fill` if the document's stored-operation budget can hold
+/// it. A fill that does not fit is dropped and the budget is marked
+/// spent, which stops the walk the same way the fill cap does. A fill
+/// built after the parse work budget ran out is dropped too, since its
+/// clip, mask, or filter may have been cut short.
+pub(super) fn push_fill(doc: &mut SvgDoc, defs: &Defs<'_>, fill: Fill) {
+    if !defs.work_exhausted() && defs.charge_ops(fill.weight()) {
+        doc.fills.push(fill);
     }
 }

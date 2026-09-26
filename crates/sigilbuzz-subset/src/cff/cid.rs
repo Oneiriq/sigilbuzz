@@ -5,16 +5,16 @@ use alloc::vec::Vec;
 
 use super::charset::extract_kept_charset_sids;
 use super::charstring::{
-    compute_cross_fd_globals, compute_kept_subrs, renumber_charstring_with_cross_fd,
-    scan_subr_calls, SubrKind,
+    compute_cross_fd_globals, compute_kept_subrs, renumber_charstring_impl, scan_subr_calls,
+    SubrKind,
 };
 use super::emit::{
     emit_charset_auto, emit_fd_select_auto, encode_dict_int, encode_dict_offset_placeholder,
     encode_index, parse_fd_select, patch_dict_offset,
 };
 use super::reader::{
-    read_index, walk_dict, DictEntry, ParsedCff1, OP_CHARSET, OP_CHARSTRINGS, OP_ENCODING,
-    OP_FD_ARRAY, OP_FD_SELECT, OP_PRIVATE, OP_SUBRS,
+    private_operands, read_index, read_private_dict, walk_dict, DictEntry, ParsedCff1, OP_CHARSET,
+    OP_CHARSTRINGS, OP_ENCODING, OP_FD_ARRAY, OP_FD_SELECT, OP_PRIVATE,
 };
 use super::serialise_private_dict;
 use crate::SubsetError;
@@ -181,6 +181,26 @@ pub(crate) fn serialise_font_dict(entries: &[DictEntry]) -> (Vec<u8>, Option<(us
     (out, private_slot)
 }
 
+/// Maps each source FD index to its position in `kept_fds_sorted`, which
+/// is also its new FD index. FD indexes are `u8`, so the table covers
+/// every possible index. Entries for dropped FDs stay 0 and are never
+/// read.
+pub(crate) fn kept_fd_positions(kept_fds_sorted: &[u8]) -> [usize; 256] {
+    let mut positions = [0usize; 256];
+    for (pos, &old_fd) in kept_fds_sorted.iter().enumerate() {
+        positions[usize::from(old_fd)] = pos;
+    }
+    positions
+}
+
+/// Looks up the FD-specific duplicate slot for source global `old_g` in
+/// a sorted `(old_g, new_slot)` table.
+fn override_slot(table: &[(u32, u32)], old_g: usize) -> Option<u32> {
+    let old_g = u32::try_from(old_g).ok()?;
+    let k = table.binary_search_by_key(&old_g, |&(g, _)| g).ok()?;
+    table.get(k).map(|&(_, slot)| slot)
+}
+
 /// CID-keyed CFF1 subset orchestration. See module-level header comment
 /// above for the high-level walk.
 pub(super) fn subset_cid_keyed(
@@ -233,46 +253,21 @@ pub(super) fn subset_cid_keyed(
     let mut fd_infos: Vec<FdInfo<'_>> = Vec::with_capacity(fd_array_entries.len());
     for fd_bytes in &fd_array_entries {
         let entries = walk_dict(fd_bytes)?;
-        let mut priv_info: Option<(u32, u32)> = None;
-        for e in &entries {
-            if e.op == OP_PRIVATE && e.operands.len() >= 2 {
-                let s = e.operands[e.operands.len() - 2].int_value;
-                let o = e.operands[e.operands.len() - 1].int_value;
-                if let (Some(sv), Some(ov)) = (s, o) {
-                    if sv >= 0 && ov >= 0 {
-                        priv_info = Some((sv as u32, ov as u32));
-                    }
-                }
-            }
-        }
-        let (private_dict, local_subrs): (&[u8], Vec<&[u8]>) = if let Some((size, off)) = priv_info
-        {
-            let off_u = off as usize;
-            let size_u = size as usize;
-            if off_u + size_u > cff_bytes.len() {
-                return Err(SubsetError::Unsupported("CFF1 CID Private DICT past end"));
-            }
-            let priv_bytes = &cff_bytes[off_u..off_u + size_u];
-            let priv_entries = walk_dict(priv_bytes)?;
-            let mut subrs_rel: Option<u32> = None;
-            for e in &priv_entries {
-                if e.op == OP_SUBRS {
-                    if let Some(v) = e.operands.last().and_then(|o| o.int_value) {
-                        if v >= 0 {
-                            subrs_rel = Some(v as u32);
-                        }
-                    }
-                }
-            }
-            if let Some(rel) = subrs_rel {
-                let abs = off_u + rel as usize;
-                let (locals, _) = read_index(cff_bytes, abs)?;
-                (priv_bytes, locals)
-            } else {
-                (priv_bytes, Vec::new())
-            }
-        } else {
-            (&[][..], Vec::new())
+        // The last well-formed Private operator wins.
+        let priv_info = entries
+            .iter()
+            .rev()
+            .filter(|e| e.op == OP_PRIVATE)
+            .find_map(private_operands);
+        let (private_dict, local_subrs): (&[u8], Vec<&[u8]>) = match priv_info {
+            Some((size, off)) => read_private_dict(
+                cff_bytes,
+                size,
+                off,
+                read_index,
+                "CFF1 CID Private DICT past end",
+            )?,
+            None => (&[][..], Vec::new()),
         };
         fd_infos.push(FdInfo {
             font_dict_entries: entries,
@@ -301,15 +296,13 @@ pub(super) fn subset_cid_keyed(
     kept_fds_sorted.sort_unstable();
     kept_fds_sorted.dedup();
 
-    // FD renumber map: old_fd -> new_fd, or None when dropped.
-    let mut fd_renumber: Vec<Option<u8>> = alloc::vec![None; fd_infos.len()];
-    for (new_i, &old_i) in kept_fds_sorted.iter().enumerate() {
-        fd_renumber[old_i as usize] = Some(new_i as u8);
-    }
+    // FD renumber map: old_fd -> position in `kept_fds_sorted`, which is
+    // also the new FD index. Only kept FDs are ever looked up.
+    let fd_pos_of = kept_fd_positions(&kept_fds_sorted);
     // Per-kept-gid: new FD index.
     let new_fd_select: Vec<u8> = kept_fd_old
         .iter()
-        .map(|&old| fd_renumber[old as usize].unwrap())
+        .map(|&old| fd_pos_of[usize::from(old)] as u8)
         .collect();
 
     // Step 3: per-kept-FD subroutine keep-set.
@@ -374,9 +367,20 @@ pub(super) fn subset_cid_keyed(
     // Reachability: walk every kept charstring and every kept local
     // subr in FD f; collect the set of globals they reach via the
     // global-call graph. Intersect with cross_fd_mask to get the
-    // duplicates needed for FD f.
-    let mut per_fd_cross_fd_targets: Vec<alloc::vec::Vec<bool>> =
-        alloc::vec![alloc::vec![false; old_global_count]; kept_fds_sorted.len()];
+    // duplicates needed for FD f. Each FD's target list is sorted by
+    // source global index.
+    //
+    // The rebuilt Global Subr INDEX holds the kept non-cross-FD globals
+    // plus one duplicate per (cross-FD global, FD) pair. Its count is a
+    // u16, so a layout past 65535 entries cannot be encoded. The check
+    // runs while the targets are collected, which also bounds the
+    // memory a hostile FDArray can make this step use.
+    let n_non_cross = kept_global_idx
+        .iter()
+        .filter(|&&g| !cross_fd_mask.get(g as usize).copied().unwrap_or(false))
+        .count();
+    let mut layout_len = n_non_cross;
+    let mut per_fd_cross_fd_targets: Vec<Vec<u32>> = Vec::with_capacity(kept_fds_sorted.len());
     for (fd_pos, &old_fd) in kept_fds_sorted.iter().enumerate() {
         // Bodies that originate calls in this FD: kept charstrings
         // belonging to old_fd plus all kept locals in old_fd.
@@ -424,11 +428,24 @@ pub(super) fn subset_cid_keyed(
                 }
             }
         }
-        for (g, hit) in reached.iter().enumerate() {
-            if *hit && cross_fd_mask[g] {
-                per_fd_cross_fd_targets[fd_pos][g] = true;
+        let mut targets: Vec<u32> = Vec::new();
+        for (g, ((&hit, &cross), &kept)) in reached
+            .iter()
+            .zip(&cross_fd_mask)
+            .zip(&kept_global_set)
+            .enumerate()
+        {
+            if hit && cross && kept {
+                layout_len += 1;
+                if layout_len > usize::from(u16::MAX) {
+                    return Err(SubsetError::Unsupported(
+                        "CFF1 CID rebuilt Global Subr INDEX exceeds 65535 entries",
+                    ));
+                }
+                targets.push(g as u32);
             }
         }
+        per_fd_cross_fd_targets.push(targets);
     }
 
     // Build the new global INDEX layout:
@@ -440,29 +457,30 @@ pub(super) fn subset_cid_keyed(
     // `global_renumber[i]` is the new slot for the canonical (non-cross-FD)
     // copy of source global `i`: `Some(slot)` only when global `i` is
     // *kept and not cross-FD*. Cross-FD globals route through
-    // `cross_fd_override_per_fd` instead.
+    // `per_fd_cross_fd_override` instead.
     let mut global_renumber: Vec<Option<u32>> = alloc::vec![None; old_global_count];
-    let mut new_global_layout: Vec<(u32, Option<u8>)> = Vec::new();
+    let mut new_global_layout: Vec<(u32, Option<u8>)> = Vec::with_capacity(layout_len);
     for &old_i in &kept_global_idx {
-        if !cross_fd_mask[old_i as usize] {
+        if !cross_fd_mask.get(old_i as usize).copied().unwrap_or(false) {
             let new_slot = new_global_layout.len() as u32;
-            global_renumber[old_i as usize] = Some(new_slot);
+            if let Some(slot) = global_renumber.get_mut(old_i as usize) {
+                *slot = Some(new_slot);
+            }
             new_global_layout.push((old_i, None));
         }
     }
-    // Per-FD override tables: per_fd_cross_fd_override[fd_pos][old_g] =
-    // Some(new_slot) when FD fd_pos calls cross-FD global old_g.
-    let mut per_fd_cross_fd_override: Vec<Vec<Option<u32>>> = (0..kept_fds_sorted.len())
-        .map(|_| alloc::vec![None; old_global_count])
-        .collect();
-    for (fd_pos, &old_fd) in kept_fds_sorted.iter().enumerate() {
-        for (old_g, &needs) in per_fd_cross_fd_targets[fd_pos].iter().enumerate() {
-            if needs && kept_global_set[old_g] {
-                let new_slot = new_global_layout.len() as u32;
-                per_fd_cross_fd_override[fd_pos][old_g] = Some(new_slot);
-                new_global_layout.push((old_g as u32, Some(old_fd)));
-            }
+    // Per-FD override tables: `(old_g, new_slot)` pairs sorted by
+    // `old_g`, one entry per cross-FD global the FD calls.
+    let mut per_fd_cross_fd_override: Vec<Vec<(u32, u32)>> =
+        Vec::with_capacity(kept_fds_sorted.len());
+    for (&old_fd, targets) in kept_fds_sorted.iter().zip(&per_fd_cross_fd_targets) {
+        let mut table: Vec<(u32, u32)> = Vec::with_capacity(targets.len());
+        for &old_g in targets {
+            let new_slot = new_global_layout.len() as u32;
+            table.push((old_g, new_slot));
+            new_global_layout.push((old_g, Some(old_fd)));
         }
+        per_fd_cross_fd_override.push(table);
     }
     let new_global_count = new_global_layout.len();
 
@@ -472,12 +490,13 @@ pub(super) fn subset_cid_keyed(
     let mut new_charstrings: Vec<Vec<u8>> = Vec::with_capacity(kept_gids.len());
     for (i, &gid) in kept_gids.iter().enumerate() {
         let old_fd = kept_fd_old[i];
-        let new_fd_pos = kept_fds_sorted.iter().position(|&f| f == old_fd).unwrap();
+        let new_fd_pos = fd_pos_of[usize::from(old_fd)];
         let fd_local_subrs_old = &fd_infos[old_fd as usize].local_subrs;
         let fd_local_renumber = &per_fd_local_renumber[new_fd_pos];
         let new_local_count = per_fd_kept_local[new_fd_pos].len();
+        let overrides = &per_fd_cross_fd_override[new_fd_pos];
         let mut cs = parsed.char_strings[gid as usize].to_vec();
-        renumber_charstring_with_cross_fd(
+        renumber_charstring_impl(
             &mut cs,
             fd_local_subrs_old.len(),
             old_global_count,
@@ -485,7 +504,7 @@ pub(super) fn subset_cid_keyed(
             new_global_count,
             fd_local_renumber,
             &global_renumber,
-            &per_fd_cross_fd_override[new_fd_pos],
+            |old_g| override_slot(overrides, old_g),
         )?;
         new_charstrings.push(cs);
     }
@@ -502,8 +521,9 @@ pub(super) fn subset_cid_keyed(
             .iter()
             .map(|&idx| fd_local_subrs_old[idx as usize].to_vec())
             .collect();
+        let overrides = &per_fd_cross_fd_override[i];
         for sub in &mut new_locals {
-            renumber_charstring_with_cross_fd(
+            renumber_charstring_impl(
                 sub,
                 fd_local_subrs_old.len(),
                 old_global_count,
@@ -511,7 +531,7 @@ pub(super) fn subset_cid_keyed(
                 new_global_count,
                 fd_local_renumber,
                 &global_renumber,
-                &per_fd_cross_fd_override[i],
+                |old_g| override_slot(overrides, old_g),
             )?;
         }
         new_per_fd_local_subrs.push(new_locals);
@@ -538,10 +558,11 @@ pub(super) fn subset_cid_keyed(
     for &(old_g, dup_for_fd) in &new_global_layout {
         let mut body = parsed.global_subrs[old_g as usize].to_vec();
         if let Some(old_fd) = dup_for_fd {
-            let fd_pos = kept_fds_sorted.iter().position(|&f| f == old_fd).unwrap();
+            let fd_pos = fd_pos_of[usize::from(old_fd)];
             let fd_local_subrs_old = &fd_infos[old_fd as usize].local_subrs;
             let new_local_count = per_fd_kept_local[fd_pos].len();
-            renumber_charstring_with_cross_fd(
+            let overrides = &per_fd_cross_fd_override[fd_pos];
+            renumber_charstring_impl(
                 &mut body,
                 fd_local_subrs_old.len(),
                 old_global_count,
@@ -549,23 +570,21 @@ pub(super) fn subset_cid_keyed(
                 new_global_count,
                 &per_fd_local_renumber[fd_pos],
                 &global_renumber,
-                &per_fd_cross_fd_override[fd_pos],
+                |old_g| override_slot(overrides, old_g),
             )?;
         } else {
             // Non-cross-FD: zero-sized local pool because the body
             // never issues a `callsubr`. If it did, the empty local
             // renumber table would surface a hard error.
-            let empty_local: Vec<Option<u32>> = Vec::new();
-            let empty_override: Vec<Option<u32>> = Vec::new();
-            renumber_charstring_with_cross_fd(
+            renumber_charstring_impl(
                 &mut body,
                 0,
                 old_global_count,
                 0,
                 new_global_count,
-                &empty_local,
+                &[],
                 &global_renumber,
-                &empty_override,
+                |_| None,
             )?;
         }
         new_global_subrs.push(body);

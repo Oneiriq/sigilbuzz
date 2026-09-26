@@ -65,8 +65,7 @@ pub fn break_opportunities_with_hyphens(
 
     // 2. For each contiguous run of ASCII letters, hyphenate it and
     //    convert the byte offsets back into absolute offsets in
-    //    `text`. Skip runs whose neighboring breaks already make the
-    //    run trivially small.
+    //    `text`. Runs shorter than `left_min + right_min` are skipped.
     let bytes = text.as_bytes();
     let mut start: Option<usize> = None;
     let mut i = 0;
@@ -105,8 +104,12 @@ fn hyphenate_run(
     patterns: &Patterns,
     out: &mut Vec<(usize, HyphenatedBreak)>,
 ) {
-    let word = &text[start..end];
-    if word.len() < patterns.left_min + patterns.right_min {
+    // `start` and `end` sit next to ASCII bytes, so they are char
+    // boundaries and `get` always succeeds.
+    let Some(word) = text.get(start..end) else {
+        return;
+    };
+    if word.len() < patterns.left_min.saturating_add(patterns.right_min) {
         return;
     }
     for off in hyphenate(word, patterns) {

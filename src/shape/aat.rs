@@ -16,31 +16,39 @@ use crate::tables::{Kerx, Morx};
 /// so clusters survive ligation: the surviving glyph inherits the
 /// first component's cluster, matching HarfBuzz's "merge clusters
 /// to earliest" policy.
-pub(super) fn apply_morx(morx: &Morx<'_>, glyphs: &mut Vec<Glyph>) {
+///
+/// Returns `None` when the stream did not change. Otherwise returns
+/// one origin per output glyph (`usize::MAX` for a glyph with no
+/// single origin) so the caller can remap its segment ranges.
+pub(super) fn apply_morx(morx: &Morx<'_>, glyphs: &mut Vec<Glyph>) -> Option<Vec<usize>> {
     if glyphs.is_empty() {
-        return;
+        return None;
     }
     let input_ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
     let (out_ids, origins) = morx.apply(&input_ids);
     if out_ids.len() == glyphs.len() && out_ids == input_ids {
-        return; // no change: avoid needless allocation
+        return None; // no change: avoid needless allocation
     }
     let mut rebuilt: Vec<Glyph> = Vec::with_capacity(out_ids.len());
+    let mut out_origins: Vec<usize> = Vec::with_capacity(out_ids.len());
     for (out_idx, &gid) in out_ids.iter().enumerate() {
         let origin = origins.get(out_idx).copied().unwrap_or(usize::MAX);
-        if origin < glyphs.len() {
-            let mut g = glyphs[origin];
+        if let Some(src) = glyphs.get(origin) {
+            let mut g = *src;
             g.glyph_id = u32::from(gid);
             rebuilt.push(g);
+            out_origins.push(origin);
         } else {
             // Synthesized output with no single origin: rare; fall
             // back to the lowest available cluster so layout does
             // not confuse renderer-side grapheme tracking.
             let cluster = glyphs.first().map_or(0, |g| g.cluster);
             rebuilt.push(Glyph::new(u32::from(gid), cluster));
+            out_origins.push(usize::MAX);
         }
     }
     *glyphs = rebuilt;
+    Some(out_origins)
 }
 
 /// Resolves every fmt-4 event the state machine emits across `glyphs`
@@ -86,8 +94,8 @@ pub(super) fn apply_kerx_format4(
             continue;
         };
         if let Some(g) = glyphs.get_mut(current_index) {
-            g.x_offset += dx;
-            g.y_offset += dy;
+            g.x_offset = g.x_offset.saturating_add(dx);
+            g.y_offset = g.y_offset.saturating_add(dy);
         }
     }
     Ok(())

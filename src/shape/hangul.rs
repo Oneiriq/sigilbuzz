@@ -1,12 +1,5 @@
 //! Hangul jamo composition, run over the text before the cmap lookup.
 
-/// Shapes `buffer` against `font` with optional feature overrides.
-///
-/// Feature tags with `value: 0` disable the corresponding feature
-/// for this call. Non-zero values enable a feature if the font
-/// supports it; unknown tags are accepted and ignored rather than
-/// returning an error.
-///
 /// Pre-iterates `text` and applies Hangul NFC jamo composition in a
 /// single pass: a Leading jamo (L) followed by a Vowel jamo (V) and
 /// optionally a Trailing jamo (T) collapses into the matching

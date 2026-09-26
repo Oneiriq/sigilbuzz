@@ -38,22 +38,30 @@ fn kern_pairs(
     let skipper = Skipper::new(&filter, true);
     let mut i = 0;
     while i < glyphs.len() {
+        // No glyph after `i` stops the iterator, so none after any
+        // later start does either: the pass is over. Scanning again
+        // from every later glyph would make a long run of marks
+        // quadratic.
         let Some(j) = skipper.next(glyphs, i + 1) else {
-            i += 1;
-            continue;
+            break;
         };
-        let value = kern(glyphs[i].glyph_id as u16, glyphs[j].glyph_id as u16);
+        let (left, right) = glyphs.split_at_mut(j);
+        let (Some(first_glyph), Some(second_glyph)) = (left.get_mut(i), right.first_mut()) else {
+            break;
+        };
+        let value = kern(first_glyph.glyph_id as u16, second_glyph.glyph_id as u16);
         if value != 0 {
+            // The sums saturate, like every other positioning pass.
             let first = value >> 1;
             let second = value - first;
             if horizontal {
-                glyphs[i].x_advance += first;
-                glyphs[j].x_advance += second;
-                glyphs[j].x_offset += second;
+                first_glyph.x_advance = first_glyph.x_advance.saturating_add(first);
+                second_glyph.x_advance = second_glyph.x_advance.saturating_add(second);
+                second_glyph.x_offset = second_glyph.x_offset.saturating_add(second);
             } else {
-                glyphs[i].y_advance += first;
-                glyphs[j].y_advance += second;
-                glyphs[j].y_offset += second;
+                first_glyph.y_advance = first_glyph.y_advance.saturating_add(first);
+                second_glyph.y_advance = second_glyph.y_advance.saturating_add(second);
+                second_glyph.y_offset = second_glyph.y_offset.saturating_add(second);
             }
         }
         i = j;
@@ -122,8 +130,8 @@ pub(super) fn apply_kerx_table(
             let ids: alloc::vec::Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
             kerx.apply_state_machines(&ids, |idx, delta| {
                 if let Some(g) = glyphs.get_mut(idx) {
-                    g.x_advance += i32::from(delta);
-                    g.x_offset += i32::from(delta);
+                    g.x_advance = g.x_advance.saturating_add(i32::from(delta));
+                    g.x_offset = g.x_offset.saturating_add(i32::from(delta));
                 }
             });
         }

@@ -72,6 +72,9 @@ impl<'a> FeatureList<'a> {
     }
 
     /// Iterates `(tag, Feature)` pairs in record order.
+    // The iterator yields owned `(tag, Feature)` values and the list is
+    // `Copy`, so an `IntoIterator for &FeatureList` impl would add API
+    // surface without any benefit.
     #[allow(clippy::iter_without_into_iter)]
     pub fn iter(&self) -> FeatureIter<'a> {
         FeatureIter {

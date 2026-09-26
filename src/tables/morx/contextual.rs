@@ -1,10 +1,8 @@
 //! `morx` type 1: contextual glyph substitution subtables.
 
-use alloc::vec::Vec;
-
-use super::{class_for, FLAG_CTX_SET_MARK, FLAG_DONT_ADVANCE};
+use super::{class_for, max_steps, FLAG_CTX_SET_MARK, FLAG_DONT_ADVANCE};
 use crate::error::Result;
-use crate::tables::layout::state_table::{StateTableHeader, CLASS_OUT_OF_BOUNDS};
+use crate::tables::layout::state_table::{lookup_class, StateTableHeader, CLASS_OUT_OF_BOUNDS};
 
 // --- Type 1: Contextual glyph substitution ---
 
@@ -17,7 +15,13 @@ pub(super) fn apply_contextual(
     let mut cur_state: u16 = 0;
     let mut mark: Option<usize> = None;
     let mut i = 0;
+    let max_iters = max_steps(glyphs.len());
+    let mut iters = 0usize;
     while i <= glyphs.len() {
+        iters += 1;
+        if iters > max_iters {
+            return;
+        }
         let class = class_for(state, glyphs.get(i).copied()).unwrap_or(CLASS_OUT_OF_BOUNDS);
         let Ok(entry_idx) = state.entry_index(cur_state, class) else {
             return;
@@ -33,17 +37,17 @@ pub(super) fn apply_contextual(
             .unwrap_or(0xFFFF);
 
         if mark_idx != 0xFFFF {
-            if let Some(m) = mark {
-                if m < glyphs.len() {
-                    if let Some(replacement) = sub_lookup(substitutions, mark_idx, glyphs[m]) {
-                        glyphs[m] = replacement;
-                    }
+            if let Some(slot) = mark.and_then(|m| glyphs.get_mut(m)) {
+                if let Some(replacement) = sub_lookup(substitutions, mark_idx, *slot) {
+                    *slot = replacement;
                 }
             }
         }
-        if cur_idx != 0xFFFF && i < glyphs.len() {
-            if let Some(replacement) = sub_lookup(substitutions, cur_idx, glyphs[i]) {
-                glyphs[i] = replacement;
+        if cur_idx != 0xFFFF {
+            if let Some(slot) = glyphs.get_mut(i) {
+                if let Some(replacement) = sub_lookup(substitutions, cur_idx, *slot) {
+                    *slot = replacement;
+                }
             }
         }
 
@@ -66,8 +70,8 @@ pub(super) fn apply_contextual(
 // Layout: u16 lookupCount, then u32 offsets[lookupCount] pointing at
 // the individual lookups relative to the substitutions blob.
 //
-// We wrap each lookup in the StateTableHeader's class-lookup helper
-// by mapping glyph -> replacement-glyph-id directly.
+// Each lookup maps a glyph to its replacement glyph id directly
+// through the shared AAT lookup reader.
 fn sub_lookup(substitutions: &[u8], idx: u16, glyph: u16) -> Option<u16> {
     // The substitutions table is laid out as in the type-1 spec:
     // u16 nTables, u32 offsets[nTables] (relative to substitutions
@@ -93,7 +97,7 @@ fn sub_lookup(substitutions: &[u8], idx: u16, glyph: u16) -> Option<u16> {
     // Reuse the class-lookup machinery: class value == replacement
     // glyph id; out-of-bounds yields the reserved class, which we
     // map back to None so the caller knows not to substitute.
-    let Ok(replacement) = lookup_via_state_table(lookup, glyph) else {
+    let Ok(replacement) = lookup_value(lookup, glyph) else {
         return None;
     };
     if replacement == CLASS_OUT_OF_BOUNDS {
@@ -103,20 +107,11 @@ fn sub_lookup(substitutions: &[u8], idx: u16, glyph: u16) -> Option<u16> {
     }
 }
 
-/// Calls the format-2/6 AAT lookup parser without constructing a
-/// whole `StateTableHeader`. Not exposed outside this module.
-pub(super) fn lookup_via_state_table(data: &[u8], glyph: u16) -> Result<u16> {
-    // Cheap trampoline via a throwaway header that only uses its
-    // class resolver. Build a synthetic 16-byte prefix that points
-    // class_table_off back at offset 16 so we can bolt the real
-    // lookup on. This avoids duplicating the format parser while
-    // keeping the call simple.
-    let mut synthetic = Vec::with_capacity(16 + data.len());
-    synthetic.extend_from_slice(&0u32.to_be_bytes()); // nClasses (unused)
-    synthetic.extend_from_slice(&16u32.to_be_bytes()); // class off = 16
-    synthetic.extend_from_slice(&0u32.to_be_bytes()); // state off (unused)
-    synthetic.extend_from_slice(&0u32.to_be_bytes()); // entry off (unused)
-    synthetic.extend_from_slice(data);
-    let hdr = StateTableHeader::parse(&synthetic)?;
-    hdr.class_of(glyph)
+/// Resolves `glyph` through the AAT lookup table at the start of
+/// `data`. Passes a glyph count of zero, so a format-0 lookup covers
+/// as many glyphs as the slice holds, the same rule
+/// [`StateTableHeader::class_of`] uses. Reads the lookup in place,
+/// without copying it.
+pub(super) fn lookup_value(data: &[u8], glyph: u16) -> Result<u16> {
+    lookup_class(data, glyph, 0)
 }

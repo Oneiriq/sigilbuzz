@@ -2,9 +2,8 @@
 
 use alloc::vec::Vec;
 
-use crate::coverage::emit_coverage_from_pairs;
-use crate::device::Dedup;
-use crate::layout::{parse_coverage_glyphs, RewriterCtx, RewrittenSubtable};
+use super::single::emit_offset_array_subtable;
+use crate::layout::{RewriterCtx, RewrittenSubtable};
 
 /// Rewrites a GSUB type 4 (Ligature Substitution) subtable.
 ///
@@ -56,7 +55,7 @@ pub(super) fn rewrite_type4(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
         return None;
     }
     let cov_bytes = sub.get(cov_off..)?;
-    let first_components = parse_coverage_glyphs(cov_bytes);
+    let first_components = ctx.gid_map.coverage_glyphs(cov_bytes)?;
     // Spec requires Coverage entry count == ligatureSetCount; tolerate
     // a malformed source by capping at the smaller of the two.
     let pair_count = first_components.len().min(set_count);
@@ -97,7 +96,7 @@ pub(super) fn rewrite_type4(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSu
         return None;
     }
 
-    Some(emit_type4_subtable(ctx, &surviving_sets))
+    Some(emit_offset_array_subtable(ctx, &surviving_sets))
 }
 
 /// Rewrites a single LigatureSet. Returns `None` when every ligature in
@@ -108,7 +107,7 @@ fn rewrite_ligature_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>> 
         return None;
     }
     let lig_count = u16::from_be_bytes([set_bytes[0], set_bytes[1]]) as usize;
-    if set_bytes.len() < 2 + lig_count * 2 {
+    if set_bytes.len() < 2 + lig_count * 2 || !map.spend(lig_count) {
         return None;
     }
     // Each surviving ligature: (new ligatureGlyph, new componentCount,
@@ -133,6 +132,9 @@ fn rewrite_ligature_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>> 
         let need = 4 + tail * 2;
         if lig_bytes.len() < need {
             continue;
+        }
+        if !map.spend(tail) {
+            return None;
         }
         // Result gid must survive. Otherwise the substitution has
         // nowhere to go.
@@ -169,7 +171,7 @@ fn rewrite_ligature_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>> 
     //   Offset16 ligatureOffsets[ligatureCount]
     //   Ligature[] bodies (tightly packed in the same order)
     let mut out = Vec::new();
-    out.extend_from_slice(&(survivors.len() as u16).to_be_bytes());
+    out.extend_from_slice(&ctx.count16(survivors.len()).to_be_bytes());
     let offsets_start = out.len();
     for _ in 0..survivors.len() {
         out.extend_from_slice(&[0u8; 2]); // placeholder
@@ -185,48 +187,4 @@ fn rewrite_ligature_set(set_bytes: &[u8], ctx: &RewriterCtx) -> Option<Vec<u8>> 
         out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
     }
     Some(out)
-}
-
-/// Encodes a complete LigatureSubst format-1 subtable around the
-/// already-rewritten `(first_gid_new, ligature_set_bytes)` pairs.
-///
-/// Layout we emit:
-///   - 6-byte header (format, coverageOffset placeholder, setCount)
-///   - LigatureSet offsets array (one Offset16 per surviving entry)
-///   - LigatureSet bodies tightly packed in input order
-///   - Coverage table appended last, its offset patched into the header
-fn emit_type4_subtable(ctx: &RewriterCtx, surviving: &[(u16, Vec<u8>)]) -> RewrittenSubtable {
-    let mut out = Vec::new();
-    out.extend_from_slice(&1u16.to_be_bytes()); // substFormat
-    let cov_off_slot = out.len();
-    out.extend_from_slice(&0u16.to_be_bytes()); // coverageOffset placeholder
-    out.extend_from_slice(&(surviving.len() as u16).to_be_bytes()); // ligatureSetCount
-    let set_offsets_start = out.len();
-    for _ in 0..surviving.len() {
-        out.extend_from_slice(&[0u8; 2]); // ligatureSetOffset placeholder
-    }
-
-    // LigatureSet bodies, in iteration order so Coverage indices match.
-    let mut bodies = Dedup::default();
-    for (i, (_first_gid, set_body)) in surviving.iter().enumerate() {
-        let body_start = bodies.place(&mut out, set_body);
-        let slot = set_offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&ctx.off16(body_start).to_be_bytes());
-    }
-
-    // Coverage. Pair every kept first-gid with its index in the
-    // ligatureSetOffsets array: emit_coverage_from_pairs sorts by gid
-    // and falls back to format 2 when those indices aren't a 0..N
-    // sequence after sorting.
-    let pairs: Vec<(u16, u16)> = surviving
-        .iter()
-        .enumerate()
-        .map(|(i, (g, _))| (*g, i as u16))
-        .collect();
-    let cov_bytes = emit_coverage_from_pairs(&pairs);
-    let cov_off = ctx.off16(out.len());
-    out.extend_from_slice(&cov_bytes);
-    out[cov_off_slot..cov_off_slot + 2].copy_from_slice(&cov_off.to_be_bytes());
-
-    RewrittenSubtable { bytes: out }
 }

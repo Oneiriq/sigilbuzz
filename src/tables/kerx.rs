@@ -41,13 +41,11 @@
 //!
 //! - **Type 0** (control points): pairs of glyf-point indices. The
 //!   apply pass needs to read the (x, y) of point N on each glyph.
-//!   sigilbuzz emits a [`Kerx4Action::ControlPoints`] event so the
-//!   caller can resolve the points; the shaper integration drops
-//!   these events until [`crate::Face`] grows a public glyph-point
-//!   accessor (follow-up).
+//!   sigilbuzz emits a [`Kerx4Action::ControlPoints`] event and the
+//!   shaper resolves the points through the glyph outlines.
 //! - **Type 1** (anchor points): pairs of `ankr` table indices.
-//!   sigilbuzz emits the event but the shaper drops it; `ankr`
-//!   support is on a separate track.
+//!   sigilbuzz emits a [`Kerx4Action::AnchorPoints`] event and the
+//!   shaper resolves the anchors through `ankr`.
 //! - **Type 2** (coordinates): four i16 in FUnits per record. The
 //!   shaper applies `(mark_x - current_x, mark_y - current_y)` as
 //!   x/y offsets directly. No glyf / ankr reads needed.
@@ -196,9 +194,11 @@ pub enum Kerx4Action {
         /// Point id on the current glyph.
         current_point: u16,
     },
-    /// Action type 1: anchor points (`ankr` table). sigilbuzz does
-    /// not yet parse `ankr`; the consumer should treat this as a
-    /// no-op until `ankr` lands.
+    /// Action type 1: anchor points (`ankr` table). Look up anchor
+    /// `mark_anchor` of the glyph at `mark_index` and anchor
+    /// `current_anchor` of the glyph at `current_index` in `ankr`, and
+    /// apply the FUnit delta `mark - current` as an offset to the
+    /// current glyph.
     AnchorPoints {
         /// Index into the run of the previously-marked glyph.
         mark_index: usize,
@@ -296,15 +296,14 @@ impl<'a> Kerx<'a> {
             // machine for contextual kerning. Format 2 (compound-class
             // kerning) covers Latin / CJK fonts that ship a dense
             // pair matrix. Format 6 is the n x m simple grid. Format 4
-            // (control-point anchors) is parsed for structure but its
-            // apply path is a stub. See [`Format4`] for details.
+            // (control-point anchors) emits events through
+            // [`Kerx::apply_format4`]. See [`Format4`] for details.
             //
             // Per-subtable parse failures (declared length shorter
             // than the body, internal offsets out of range) are
             // swallowed: a malformed subtable drops out cleanly while
-            // its peers in the same kerx still load. The error path
-            // used to propagate, which meant one truncated subtable
-            // poisoned the whole table.
+            // its peers in the same kerx still load, so one truncated
+            // subtable does not poison the whole table.
             if length >= 12 {
                 match format {
                     0 => {
@@ -353,10 +352,11 @@ impl<'a> Kerx<'a> {
     }
 
     /// Sum of pair-kerning deltas across every parsed *pair-lookup*
-    /// subtable (formats 0 and 2) for the pair `(left, right)`. Zero
-    /// when no pair matches. Format 1 (state machine) is stateful and
-    /// is not consulted here. Callers wanting full kerx coverage
-    /// must also call [`Kerx::apply_state_machines`].
+    /// subtable (formats 0, 2, and 6) for the pair `(left, right)`,
+    /// clamped to the i16 range. Zero when no pair matches. Formats 1
+    /// and 4 are stateful and are not consulted here. Callers wanting
+    /// full kerx coverage must also call
+    /// [`Kerx::apply_state_machines`] and [`Kerx::apply_format4`].
     #[must_use]
     pub fn kern(&self, left: u16, right: u16) -> i16 {
         let key = (u32::from(left) << 16) | u32::from(right);
@@ -366,13 +366,14 @@ impl<'a> Kerx<'a> {
                 Subtable::Format0(f0) => f0.find(key),
                 Subtable::Format2(f2) => f2.find(left, right, self.num_glyphs),
                 Subtable::Format6(f6) => f6.find(left, right, self.num_glyphs),
-                // Format 1 is the state machine, applied separately.
-                // Format 4 has no pair-lookup semantics; its apply
-                // path needs glyf / ankr coordinates and is deferred.
+                // Formats 1 and 4 are state machines with their own
+                // apply walks.
                 Subtable::Format1(_) | Subtable::Format4(_) => continue,
             };
             if let Some(v) = v {
-                total += i32::from(v);
+                // The subtable count is bounded only by the table
+                // size, so the sum can pass the i32 range.
+                total = total.saturating_add(i32::from(v));
             }
         }
         total.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16

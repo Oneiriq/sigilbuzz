@@ -150,7 +150,7 @@ fn bake_metrics_var_partial(
     let (new_ivs, remap) =
         project_ivs(&table[ivs_off..], coords, pins).map_err(|e| shifted(e, ivs_off))?;
     // The subtable count of the store just emitted.
-    let new_subtable_count = u16::from_be_bytes([new_ivs[6], new_ivs[7]]);
+    let new_subtable_count = read::u16_at(&new_ivs, 6, "ItemVariationStore truncated")?;
 
     // Rewrite each non-zero map.
     let mut new_maps: Vec<Option<Vec<u8>>> = Vec::new();
@@ -285,7 +285,7 @@ pub(super) fn bake_mvar_partial(
         .into());
     };
     let (new_ivs, remap) = project_ivs(store, coords, pins).map_err(|e| shifted(e, store_off))?;
-    let new_subtable_count = u16::from_be_bytes([new_ivs[6], new_ivs[7]]);
+    let new_subtable_count = read::u16_at(&new_ivs, 6, "ItemVariationStore truncated")?;
 
     // Layout: 12-byte header + records + IVS. Preserve record_size.
     let records = read::array_at(mvar_bytes, 12, record_count, record_size, CTX)?;

@@ -116,7 +116,6 @@ impl<'a> Face<'a> {
         if !x_lo.is_finite() {
             return Ok(Some(base));
         }
-        #[allow(clippy::cast_possible_truncation)]
         let adjusted = GlyphBounds {
             x_min: base.x_min.saturating_add(round_f32_to_i16(x_lo)),
             y_min: base.y_min.saturating_add(round_f32_to_i16(y_lo)),
@@ -163,17 +162,24 @@ impl<'a> Face<'a> {
         glyph_id: u16,
         coords: &[f32],
     ) -> Result<Option<Outline>> {
-        self.glyph_outline_at_coords_inner(glyph_id, coords, 0)
+        let mut budget = VarcBudget {
+            components_left: MAX_VARC_COMPONENTS,
+            ops_left: MAX_VARC_OPS,
+        };
+        self.glyph_outline_at_coords_inner(glyph_id, coords, 0, &mut budget)
     }
 
     /// Recursive entry point used by VARC composite resolution.
     /// `depth` caps recursion through nested VARC composites the
-    /// same way [`Glyf::flatten`] caps `glyf` composites.
+    /// same way [`Glyf::flatten`] caps `glyf` composites. `budget`
+    /// caps the total work: depth alone still lets a glyph whose
+    /// components share children expand exponentially.
     fn glyph_outline_at_coords_inner(
         &self,
         glyph_id: u16,
         coords: &[f32],
         depth: u8,
+        budget: &mut VarcBudget,
     ) -> Result<Option<Outline>> {
         const MAX_VARC_DEPTH: u8 = 64;
         if depth > MAX_VARC_DEPTH {
@@ -193,9 +199,28 @@ impl<'a> Face<'a> {
                 if let Some(composite) = varc.composite(glyph_id, coords) {
                     let mut out = Outline::new();
                     for comp in &composite.components {
-                        let child =
-                            self.glyph_outline_at_coords_inner(comp.gid, &comp.coords, depth + 1)?;
+                        budget.components_left =
+                            budget
+                                .components_left
+                                .checked_sub(1)
+                                .ok_or(Error::Malformed {
+                                    offset: 0,
+                                    context: "VARC composite exceeds component budget",
+                                })?;
+                        let child = self.glyph_outline_at_coords_inner(
+                            comp.gid,
+                            &comp.coords,
+                            depth + 1,
+                            budget,
+                        )?;
                         if let Some(child) = child {
+                            budget.ops_left = budget
+                                .ops_left
+                                .checked_sub(child.ops().len())
+                                .ok_or(Error::Malformed {
+                                    offset: 0,
+                                    context: "VARC composite exceeds outline budget",
+                                })?;
                             for op in child.ops() {
                                 out.push(transform_path_op(*op, comp.transform));
                             }
@@ -207,9 +232,9 @@ impl<'a> Face<'a> {
         }
 
         // CFF / CFF2 path: presence of `CFF2` wins over `CFF ` since
-        // variable fonts ship only CFF2. TODO: CFF parsers land in a
-        // later commit; for now fall through to glyf if either is
-        // present alongside glyf, and error on CFF-only fonts.
+        // variable fonts ship only CFF2. `CFF ` is used only when the
+        // font has no `glyf`. A font carrying both takes the TrueType
+        // path below.
         if self.record(tag::CFF2).is_some() {
             let cff2 = self.cff2()?;
             let mut out = Outline::new();
@@ -269,6 +294,24 @@ impl<'a> Face<'a> {
         let drew = glyf.outline(&loca, glyph_id, None, Some(&metrics), &mut out)?;
         Ok(drew.then_some(out))
     }
+}
+
+/// Most VARC components one outline request may resolve, summed over
+/// every nesting level. Mirrors HarfBuzz's graph edge cap. Real VARC
+/// glyphs use a few dozen.
+const MAX_VARC_COMPONENTS: usize = 2048;
+
+/// Most path ops VARC composition may copy into composite outlines
+/// for one outline request, summed over every nesting level.
+const MAX_VARC_OPS: usize = 1 << 20;
+
+/// Remaining work for one [`Face::glyph_outline_at_coords`] call.
+/// Components that share children can make the resolved outline
+/// grow exponentially with depth, so the whole request shares one
+/// budget and fails with `Malformed` when it runs out.
+struct VarcBudget {
+    components_left: usize,
+    ops_left: usize,
 }
 
 /// Applies a row-major `[xx, xy, yx, yy, tx, ty]` affine to a single

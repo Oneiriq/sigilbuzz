@@ -8,7 +8,7 @@ use super::gsub_parsed::{
     apply_parsed_lookup_at, cursor_in_digest, filter_for_lookup, lookup_might_apply,
     parse_lookup_subtables, parsed_has_full_digest, GlyphIds,
 };
-use super::{lig, resolve_extension, MAX_NESTED_DEPTH};
+use super::{lig, resolve_extension, LookupBudget, MAX_NESTED_DEPTH};
 use crate::buffer::{unicode_prop, Glyph};
 use crate::tables::gdef::Gdef;
 use crate::tables::gsub::{
@@ -37,6 +37,7 @@ pub(super) fn apply_gsub_lookup_masked(
     glyphs: &mut Vec<Glyph>,
     gdef: Option<&Gdef<'_>>,
     mask: &[bool],
+    budget: &mut LookupBudget,
 ) {
     let lookup_list = gsub.lookup_list();
     let Some(lookup) = lookup_list.get(lookup_idx) else {
@@ -58,7 +59,7 @@ pub(super) fn apply_gsub_lookup_masked(
     // the unmasked driver so the cursor walk + first-subtable-wins
     // semantics still apply.
     if effective_lt == gsub_lt::CHAINED_CONTEXT || effective_lt == gsub_lt::CONTEXT {
-        apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, 0);
+        apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, 0, budget);
         return;
     }
 
@@ -74,8 +75,9 @@ pub(super) fn apply_gsub_lookup_masked(
             i += 1;
             continue;
         }
-        let consumed =
-            apply_parsed_lookup_at(gsub, &parsed, &filter, glyphs, &mut ids, gdef, i, 0, 0);
+        let consumed = apply_parsed_lookup_at(
+            gsub, &parsed, &filter, glyphs, &mut ids, gdef, i, 0, 0, budget,
+        );
         if consumed > 0 {
             i += consumed;
         } else {
@@ -106,6 +108,7 @@ pub(super) fn apply_gsub_lookup(
     glyphs: &mut Vec<Glyph>,
     gdef: Option<&Gdef<'_>>,
     alternate_index: u16,
+    budget: &mut LookupBudget,
 ) {
     let lookup_list = gsub.lookup_list();
     let Some(lookup) = lookup_list.get(lookup_idx) else {
@@ -190,7 +193,10 @@ pub(super) fn apply_gsub_lookup(
     let mut i = 0;
     while i < glyphs.len() {
         if use_digest {
-            let id = ids.as_slice()[i];
+            // `ids` mirrors `glyphs`, so `i` is in range.
+            let Some(&id) = ids.as_slice().get(i) else {
+                break;
+            };
             if !cursor_in_digest(&parsed, id) {
                 i += 1;
                 continue;
@@ -206,6 +212,7 @@ pub(super) fn apply_gsub_lookup(
             i,
             0,
             alternate_index,
+            budget,
         );
         if consumed > 0 {
             i += consumed;
@@ -224,8 +231,9 @@ pub(super) fn apply_gsub_lookup(
 /// `depth` is the recursion depth: the caller passes `0` for its
 /// first invocation and each recursive edge increments by one; we
 /// bail out at [`MAX_NESTED_DEPTH`] so a pathological font loop
-/// cannot overflow the stack.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+/// cannot overflow the stack. Every call also spends one unit of
+/// `budget` and does nothing once the budget is gone.
+#[allow(clippy::too_many_arguments)]
 fn apply_gsub_lookup_at(
     gsub: &Gsub<'_>,
     lookup_idx: u16,
@@ -235,11 +243,15 @@ fn apply_gsub_lookup_at(
     at: usize,
     depth: u8,
     alternate_index: u16,
+    budget: &mut LookupBudget,
 ) -> usize {
     if depth >= MAX_NESTED_DEPTH {
         return 0;
     }
     if at >= glyphs.len() {
+        return 0;
+    }
+    if !budget.take_nested_op() {
         return 0;
     }
     let lookup_list = gsub.lookup_list();
@@ -285,7 +297,7 @@ fn apply_gsub_lookup_at(
                     continue;
                 }
                 if let Some(seq) = m.apply(id) {
-                    if let Some(n) = expand_glyph_in_place(glyphs, at, &seq) {
+                    if let Some(n) = expand_glyph_in_place(glyphs, at, &seq, budget) {
                         ids.resync(glyphs);
                         return n;
                     }
@@ -309,9 +321,8 @@ fn apply_gsub_lookup_at(
                 let Ok(ligature) = Ligature::parse(inner_bytes) else {
                     continue;
                 };
-                if let Some((out, positions)) =
-                    ligature.apply_filtered(&ids.as_slice()[at..], &filter)
-                {
+                let window = ids.as_slice().get(at..).unwrap_or_default();
+                if let Some((out, positions)) = ligature.apply_filtered(window, &filter) {
                     lig::ligate(glyphs, at, &positions, out, gdef, substitute_glyph);
                     let span = positions.last().copied().map_or(0, |p| p + 1);
                     ids.resync(glyphs);
@@ -322,8 +333,17 @@ fn apply_gsub_lookup_at(
                 let Ok(ctx) = GsubContext::parse(inner_bytes) else {
                     continue;
                 };
-                let ran =
-                    apply_gsub_context_at(gsub, &ctx, glyphs, ids, gdef, &filter, at, depth + 1);
+                let ran = apply_gsub_context_at(
+                    gsub,
+                    &ctx,
+                    glyphs,
+                    ids,
+                    gdef,
+                    &filter,
+                    at,
+                    depth + 1,
+                    budget,
+                );
                 if ran > 0 {
                     return ran;
                 }
@@ -341,6 +361,7 @@ fn apply_gsub_lookup_at(
                     &filter,
                     at,
                     depth + 1,
+                    budget,
                 );
                 if ran > 0 {
                     return ran;
@@ -400,6 +421,7 @@ pub(super) fn apply_gsub_context_at(
     filter: &MatchFilter<'_>,
     at: usize,
     depth: u8,
+    budget: &mut LookupBudget,
 ) -> usize {
     // Match against the shadow `ids` slice: no per-cursor allocation.
     // Records that need to outlive the match call get cloned into a
@@ -429,7 +451,7 @@ pub(super) fn apply_gsub_context_at(
             }
         }
     };
-    apply_nested_gsub_lookups(gsub, glyphs, ids, gdef, filter, at, depth, &lookups);
+    apply_nested_gsub_lookups(gsub, glyphs, ids, gdef, filter, at, depth, &lookups, budget);
     input_len.max(1)
 }
 
@@ -445,6 +467,7 @@ pub(super) fn apply_gsub_chain_context_at(
     filter: &MatchFilter<'_>,
     at: usize,
     depth: u8,
+    budget: &mut LookupBudget,
 ) -> usize {
     let (input_len, lookups): (usize, Vec<SequenceLookupRecord>) = {
         let id_slice = ids.as_slice();
@@ -477,7 +500,7 @@ pub(super) fn apply_gsub_chain_context_at(
             }
         }
     };
-    apply_nested_gsub_lookups(gsub, glyphs, ids, gdef, filter, at, depth, &lookups);
+    apply_nested_gsub_lookups(gsub, glyphs, ids, gdef, filter, at, depth, &lookups, budget);
     input_len.max(1)
 }
 
@@ -498,8 +521,12 @@ fn apply_nested_gsub_lookups(
     at: usize,
     depth: u8,
     lookups: &[SequenceLookupRecord],
+    budget: &mut LookupBudget,
 ) {
     for rec in lookups {
+        if budget.exhausted() {
+            return;
+        }
         let seq = rec.sequence_index as usize;
         let pos = if seq == 0 {
             at
@@ -538,6 +565,7 @@ fn apply_nested_gsub_lookups(
             pos,
             depth,
             0,
+            budget,
         );
     }
 }
@@ -547,27 +575,34 @@ fn apply_nested_gsub_lookups(
 /// still points back to its source codepoint. Returns the output
 /// length when `seq` is non-empty, `None` on a zero-length sequence
 /// (which the spec forbids but we treat as a safe no-op).
+///
+/// Also returns `None`, leaving the run untouched, when `budget` has
+/// no room for the extra glyphs (see [`LookupBudget`]).
 pub(super) fn expand_glyph_in_place(
     glyphs: &mut Vec<Glyph>,
     at: usize,
     seq: &[u16],
+    budget: &mut LookupBudget,
 ) -> Option<usize> {
-    if seq.is_empty() {
+    let (&first, rest) = seq.split_first()?;
+    if at >= glyphs.len() || !budget.take_growth(rest.len()) {
         return None;
     }
-    let source_cluster = glyphs[at].cluster;
+    let source = glyphs.get_mut(at)?;
     // Inherit the source glyph's shaper-internal state so Indic
     // `indic_position` and unicode-property bits survive a
     // multiple-sub split. Rustybuzz does the same via its info mask.
-    let source_pos = glyphs[at].indic_position;
-    substitute_glyph(&mut glyphs[at], seq[0]);
-    let source_props = glyphs[at].unicode_props;
-    for (i, &out_gid) in seq.iter().enumerate().skip(1) {
-        let mut g = Glyph::new(u32::from(out_gid), source_cluster);
-        g.unicode_props = source_props;
+    let source_pos = source.indic_position;
+    substitute_glyph(source, first);
+    let source = *source;
+    let inserted = rest.iter().map(|&out_gid| {
+        let mut g = Glyph::new(u32::from(out_gid), source.cluster);
+        g.unicode_props = source.unicode_props;
         g.indic_position = source_pos;
-        glyphs.insert(at + i, g);
-    }
+        g
+    });
+    let after = at + 1;
+    glyphs.splice(after..after, inserted);
     // Component numbering for GPOS mark attachment (see `lig`).
     lig::record_multiple(glyphs, at, seq.len());
     Some(seq.len())

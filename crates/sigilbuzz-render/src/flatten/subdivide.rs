@@ -3,7 +3,15 @@
 
 use alloc::vec::Vec;
 
-use super::{Segment, MAX_DEPTH};
+use super::{push_segment, Segment, MAX_DEPTH};
+
+/// True when subdividing further cannot help: the depth cap or the
+/// segment budget is reached, or a control point is NaN or infinite.
+/// Midpoints of non-finite points stay non-finite, so splitting them
+/// would only emit `2^MAX_DEPTH` unusable segments.
+fn stop_subdividing(depth: u32, budget: usize, points: &[f32]) -> bool {
+    depth >= MAX_DEPTH || budget == 0 || !points.iter().all(|v| v.is_finite())
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn flatten_quad(
@@ -15,6 +23,7 @@ pub(super) fn flatten_quad(
     y2: f32,
     tol_sq: f32,
     out: &mut Vec<Segment>,
+    budget: &mut usize,
     depth: u32,
 ) {
     // Squared perpendicular distance from the control point to the
@@ -31,13 +40,17 @@ pub(super) fn flatten_quad(
         let ey = y1 - y0;
         ex * ex + ey * ey
     };
-    if depth >= MAX_DEPTH || dist_sq <= 4.0 * tol_sq {
-        out.push(Segment {
-            x0,
-            y0,
-            x1: x2,
-            y1: y2,
-        });
+    if stop_subdividing(depth, *budget, &[x0, y0, x1, y1, x2, y2]) || dist_sq <= 4.0 * tol_sq {
+        push_segment(
+            out,
+            budget,
+            Segment {
+                x0,
+                y0,
+                x1: x2,
+                y1: y2,
+            },
+        );
         return;
     }
     // Midpoint subdivide via de Casteljau.
@@ -47,8 +60,8 @@ pub(super) fn flatten_quad(
     let m12y = 0.5 * (y1 + y2);
     let mx = 0.5 * (m01x + m12x);
     let my = 0.5 * (m01y + m12y);
-    flatten_quad(x0, y0, m01x, m01y, mx, my, tol_sq, out, depth + 1);
-    flatten_quad(mx, my, m12x, m12y, x2, y2, tol_sq, out, depth + 1);
+    flatten_quad(x0, y0, m01x, m01y, mx, my, tol_sq, out, budget, depth + 1);
+    flatten_quad(mx, my, m12x, m12y, x2, y2, tol_sq, out, budget, depth + 1);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -63,6 +76,7 @@ pub(super) fn flatten_cubic(
     y3: f32,
     tol_sq: f32,
     out: &mut Vec<Segment>,
+    budget: &mut usize,
     depth: u32,
 ) {
     // Wang's bound for cubic flatness: sample the perpendicular
@@ -82,13 +96,19 @@ pub(super) fn flatten_cubic(
         let e2y = y2 - y0;
         (e1x * e1x + e1y * e1y, e2x * e2x + e2y * e2y)
     };
-    if depth >= MAX_DEPTH || (d1_sq <= tol_sq && d2_sq <= tol_sq) {
-        out.push(Segment {
-            x0,
-            y0,
-            x1: x3,
-            y1: y3,
-        });
+    if stop_subdividing(depth, *budget, &[x0, y0, x1, y1, x2, y2, x3, y3])
+        || (d1_sq <= tol_sq && d2_sq <= tol_sq)
+    {
+        push_segment(
+            out,
+            budget,
+            Segment {
+                x0,
+                y0,
+                x1: x3,
+                y1: y3,
+            },
+        );
         return;
     }
     // de Casteljau subdivide at t=0.5.
@@ -115,6 +135,7 @@ pub(super) fn flatten_cubic(
         my,
         tol_sq,
         out,
+        budget,
         depth + 1,
     );
     flatten_cubic(
@@ -128,6 +149,7 @@ pub(super) fn flatten_cubic(
         y3,
         tol_sq,
         out,
+        budget,
         depth + 1,
     );
 }

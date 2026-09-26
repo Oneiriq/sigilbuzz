@@ -1,6 +1,6 @@
 //! `morx` type 4: non-contextual glyph substitution subtables.
 
-use super::contextual::lookup_via_state_table;
+use super::contextual::lookup_value;
 use crate::tables::layout::state_table::CLASS_OUT_OF_BOUNDS;
 
 // --- Type 4: Non-Contextual Substitution ---
@@ -12,7 +12,7 @@ use crate::tables::layout::state_table::CLASS_OUT_OF_BOUNDS;
 /// glyph", so a partly-broken subtable can't blank out the run.
 pub(super) fn apply_non_contextual(lookup: &[u8], glyphs: &mut [u16]) {
     for slot in glyphs.iter_mut() {
-        if let Ok(replacement) = lookup_via_state_table(lookup, *slot) {
+        if let Ok(replacement) = lookup_value(lookup, *slot) {
             if replacement != CLASS_OUT_OF_BOUNDS {
                 *slot = replacement;
             }

@@ -375,3 +375,52 @@ fn arc_length_cubic_solve_t_pathological_cusp_does_not_panic() {
     );
     assert!(t.is_finite() && (0.0..=1.0).contains(&t), "got {t}");
 }
+
+#[test]
+fn non_finite_curves_emit_a_single_chord() {
+    // NaN or infinite control points used to subdivide to
+    // MAX_DEPTH and emit 2^16 segments per curve.
+    let ops = [
+        PathOp::MoveTo { x: 0.0, y: 0.0 },
+        PathOp::QuadTo {
+            cx: f32::NAN,
+            cy: 0.0,
+            x: 10.0,
+            y: 0.0,
+        },
+        PathOp::CubicTo {
+            c1x: 0.0,
+            c1y: f32::INFINITY,
+            c2x: 0.0,
+            c2y: 0.0,
+            x: 20.0,
+            y: 5.0,
+        },
+    ];
+    assert_eq!(flatten(ops, &Affine::identity(), 0.25).len(), 2);
+    let grouped = flatten_grouped(ops, &Affine::identity(), 0.25);
+    assert_eq!(grouped.len(), 2);
+    assert!(grouped.iter().all(|c| match c {
+        FlattenedCurve::Quad(s) | FlattenedCurve::Cubic(s) => s.len() == 1,
+        FlattenedCurve::Line(_) => false,
+    }));
+}
+
+#[test]
+fn subdivision_stops_at_the_segment_budget() {
+    // Finite but huge control points still subdivide 16 levels
+    // deep. 64 such curves used to produce four million segments.
+    let mut ops = alloc::vec![PathOp::MoveTo { x: 0.0, y: 0.0 }];
+    for _ in 0..64 {
+        ops.push(PathOp::QuadTo {
+            cx: 0.0,
+            cy: 1e30,
+            x: 1.0,
+            y: 0.0,
+        });
+    }
+    let segs = flatten(ops.iter().copied(), &Affine::identity(), 0.25);
+    assert!(segs.len() <= MAX_SEGMENTS + ops.len(), "{}", segs.len());
+    let grouped = flatten_grouped(ops.iter().copied(), &Affine::identity(), 0.25);
+    assert_eq!(ungroup(&grouped), segs);
+}

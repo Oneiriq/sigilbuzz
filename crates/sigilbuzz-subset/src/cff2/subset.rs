@@ -5,8 +5,8 @@ use alloc::vec::Vec;
 
 use super::{parse_cff2, serialise_cff2_top_dict, ParsedCff2};
 use crate::cff::{
-    compute_kept_subrs, emit_fd_select_auto, encode_index_cff2, patch_dict_offset,
-    renumber_charstring, serialise_font_dict, serialise_private_dict, walk_dict,
+    compute_kept_subrs, emit_fd_select_auto, encode_index_cff2, kept_fd_positions,
+    patch_dict_offset, renumber_charstring, serialise_font_dict, serialise_private_dict, walk_dict,
 };
 use crate::SubsetError;
 
@@ -82,13 +82,10 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
     kept_fds_sorted.sort_unstable();
     kept_fds_sorted.dedup();
 
-    let mut fd_renumber: Vec<Option<u8>> = alloc::vec![None; parsed.fd_array.len()];
-    for (new_i, &old_i) in kept_fds_sorted.iter().enumerate() {
-        fd_renumber[old_i as usize] = Some(new_i as u8);
-    }
+    let fd_pos_of = kept_fd_positions(&kept_fds_sorted);
     let new_fd_select: Vec<u8> = kept_fd_old
         .iter()
-        .map(|&old| fd_renumber[old as usize].unwrap())
+        .map(|&old| fd_pos_of[usize::from(old)] as u8)
         .collect();
 
     // Step 3: per-kept-FD subroutine keep-set. Each kept FD runs its
@@ -166,7 +163,7 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn emit_with_keep_set(
     cff_bytes: &[u8],
     parsed: &ParsedCff2<'_>,
@@ -196,10 +193,11 @@ fn emit_with_keep_set(
     }
 
     // Step 5: rewrite each kept charstring.
+    let fd_pos_of = kept_fd_positions(kept_fds_sorted);
     let mut new_charstrings: Vec<Vec<u8>> = Vec::with_capacity(kept_gids.len());
     for (i, &gid) in kept_gids.iter().enumerate() {
         let old_fd = kept_fd_old[i];
-        let new_fd_pos = kept_fds_sorted.iter().position(|&f| f == old_fd).unwrap();
+        let new_fd_pos = fd_pos_of[usize::from(old_fd)];
         let fd_local_subrs_old = &parsed.per_fd_local_subrs[old_fd as usize];
         let fd_local_renumber = &per_fd_local_renumber[new_fd_pos];
         let new_local_count = per_fd_kept_local[new_fd_pos].len();

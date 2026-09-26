@@ -3,8 +3,7 @@
 //! Rewrites the glyph stream before positioning: ligature
 //! substitution replaces `(f, i)` with `ﬁ`, contextual alternates
 //! pick different glyph shapes based on neighbors, and so on.
-//! sigilbuzz at M2 ships lookup type 4 (ligature substitution)
-//! only. The scaffolding for more types lives here.
+//! Every GSUB lookup type has a subtable parser in this module.
 //!
 //! The table header is identical to GPOS's: version + offsets to
 //! `ScriptList`, `FeatureList`, and `LookupList`. Each lookup's
@@ -30,30 +29,32 @@ pub use multiple::Multiple;
 pub use reverse_chain::ReverseChain;
 pub use single::Single;
 
-/// GSUB lookup type numbers. Entries land here as sigilbuzz acquires
-/// the corresponding lookup parsers.
+/// GSUB lookup type numbers.
 pub mod lookup_type {
-    /// Single substitution. Deferred.
+    /// Single substitution (one to one). See [`super::Single`].
     pub const SINGLE: u16 = 1;
-    /// Multiple substitution (one -> many). Deferred.
+    /// Multiple substitution (one to many). See [`super::Multiple`].
     pub const MULTIPLE: u16 = 2;
-    /// Alternate substitution (one -> choice of alternates). Deferred.
+    /// Alternate substitution (one to a choice of alternates). See
+    /// [`super::Alternate`].
     pub const ALTERNATE: u16 = 3;
-    /// Ligature substitution (many -> one). Implemented.
+    /// Ligature substitution (many to one). See [`super::Ligature`].
     pub const LIGATURE: u16 = 4;
-    /// Contextual substitution. Implemented for formats 1, 2, 3.
+    /// Contextual substitution, formats 1, 2 and 3. See
+    /// [`super::Context`].
     pub const CONTEXT: u16 = 5;
-    /// Chained contextual substitution. Implemented for formats 1, 2, 3.
+    /// Chained contextual substitution, formats 1, 2 and 3. See
+    /// [`super::ChainContextAny`].
     pub const CHAINED_CONTEXT: u16 = 6;
     /// Extension substitution: forwards to another lookup type.
     pub const EXTENSION: u16 = 7;
-    /// Reverse chained contextual single substitution. Implemented.
+    /// Reverse chained contextual single substitution. See
+    /// [`super::ReverseChain`].
     pub const REVERSE_CHAINED: u16 = 8;
 }
 
 /// Parsed `GSUB`.
 #[derive(Debug, Clone, Copy)]
-#[allow(clippy::struct_field_names)]
 pub struct Gsub<'a> {
     script_list: ScriptList<'a>,
     feature_list: FeatureList<'a>,

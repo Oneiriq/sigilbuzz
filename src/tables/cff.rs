@@ -1,26 +1,3 @@
-// CFF parsing is a dense index-driven walk of the spec; pedantic
-// range-loop / elidable-lifetime / bool-to-int lints fire on every
-// op and obscure the table layout, so they're relaxed at file scope.
-#![allow(
-    clippy::bool_to_int_with_if,
-    clippy::elidable_lifetime_names,
-    clippy::map_unwrap_or,
-    clippy::manual_div_ceil,
-    clippy::needless_range_loop,
-    clippy::too_many_lines,
-    clippy::struct_excessive_bools,
-    clippy::trivially_copy_pass_by_ref,
-    clippy::similar_names,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_truncation,
-    clippy::unnecessary_wraps,
-    clippy::collapsible_if,
-    clippy::collapsible_match,
-    clippy::let_unit_value,
-    clippy::unit_arg,
-    clippy::needless_bool
-)]
-
 //! `CFF `: Compact Font Format, version 1.
 //!
 //! Adobe's Type 2 charstring container, wrapped in a CFF header and a
@@ -55,6 +32,7 @@ use crate::tables::outline::OutlineSink;
 use crate::tables::parse::Reader;
 
 pub(crate) use charstring::{BlendContext, Interp2};
+pub(crate) use dict::fill_fd_ranges;
 pub(crate) use index::{read_index, read_index2};
 
 use charstring::Interp;
@@ -241,9 +219,5 @@ pub(crate) mod op_code {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::vec_init_then_push,
-    clippy::cast_possible_wrap,
-    clippy::same_item_push
-)]
+#[allow(clippy::vec_init_then_push, clippy::same_item_push)]
 mod tests;

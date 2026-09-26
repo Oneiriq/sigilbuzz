@@ -86,14 +86,13 @@ impl<'a> Math<'a> {
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(data);
         let major = r.read_u16()?;
-        let minor = r.read_u16()?;
+        let _minor = r.read_u16()?;
         if major != 1 {
             return Err(Error::Malformed {
                 offset: 0,
                 context: "unsupported MATH major version",
             });
         }
-        let _ = minor;
         let constants_off = r.read_u16()?;
         let glyph_info_off = r.read_u16()?;
         let variants_off = r.read_u16()?;

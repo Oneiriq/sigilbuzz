@@ -105,7 +105,8 @@ pub unsafe extern "C" fn hb_subset_input_unicode_set(
     if input.is_null() {
         return ptr::null_mut();
     }
-    // SAFETY: caller asserts `input` is live.
+    // SAFETY: `input` is non-null and the caller guarantees it points
+    // to a live `hb_subset_input_t`.
     let input = unsafe { &*input };
     Arc::as_ptr(&input.unicode_set).cast_mut()
 }
@@ -122,7 +123,8 @@ pub unsafe extern "C" fn hb_subset_input_glyph_set(input: *mut hb_subset_input_t
     if input.is_null() {
         return ptr::null_mut();
     }
-    // SAFETY: caller asserts `input` is live.
+    // SAFETY: `input` is non-null and the caller guarantees it points
+    // to a live `hb_subset_input_t`.
     let input = unsafe { &*input };
     Arc::as_ptr(&input.glyph_set).cast_mut()
 }
@@ -149,9 +151,11 @@ pub unsafe extern "C" fn hb_subset_or_fail(
     if face.is_null() || input.is_null() {
         return ptr::null_mut();
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `face` is non-null and the caller guarantees it points
+    // to a live `hb_face_t`.
     let face_inner: &FaceInner = unsafe { &(*face).inner };
-    // SAFETY: caller asserts validity.
+    // SAFETY: `input` is non-null and the caller guarantees it points
+    // to a live `hb_subset_input_t`.
     let input = unsafe { &*input };
 
     // Step 1: union gid set.
@@ -170,10 +174,10 @@ pub unsafe extern "C" fn hb_subset_or_fail(
         });
     }
 
-    // Add raw gids the caller pushed into the glyph set, clamped to
-    // u16. sigilbuzz_subset::SubsetInput rejects out-of-range gids;
-    // we silently skip the few that wouldn't fit so the FFI surface
-    // doesn't expose internal validation errors.
+    // Add raw gids the caller pushed into the glyph set.
+    // sigilbuzz_subset::SubsetInput rejects out-of-range gids. We
+    // silently skip the ones that do not fit in u16 so the FFI
+    // surface doesn't expose internal validation errors.
     input.glyph_set.with_inner(|glyph_set| {
         gids.extend(glyph_set.iter().filter_map(|&g| u16::try_from(g).ok()));
     });
@@ -234,6 +238,8 @@ mod tests {
 
     #[test]
     fn subset_open_sans_to_abc_via_unicode_set() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each reference is released once.
         unsafe {
             let face = open_sans_face();
             assert!(!face.is_null());
@@ -266,6 +272,8 @@ mod tests {
 
     #[test]
     fn subset_input_sets_are_stable_and_shared() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each reference is released once.
         unsafe {
             let input = hb_subset_input_create();
             let a = hb_subset_input_unicode_set(input);
@@ -284,6 +292,8 @@ mod tests {
 
     #[test]
     fn glyph_set_mutations_reach_subset() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each reference is released once.
         unsafe {
             let face = open_sans_face();
             let input = hb_subset_input_create();
@@ -304,6 +314,8 @@ mod tests {
 
     #[test]
     fn null_inputs() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each reference is released once.
         unsafe {
             assert!(hb_subset_or_fail(ptr::null_mut(), ptr::null_mut()).is_null());
             assert!(hb_subset_input_unicode_set(ptr::null_mut()).is_null());
@@ -315,6 +327,8 @@ mod tests {
 
     #[test]
     fn create_or_fail_is_an_ordinary_input() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each reference is released once.
         unsafe {
             let input = hb_subset_input_create_or_fail();
             assert!(!input.is_null());

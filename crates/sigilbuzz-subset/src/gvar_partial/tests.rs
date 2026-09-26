@@ -261,3 +261,119 @@ fn build_minimal_gvar() -> Vec<u8> {
 
     out
 }
+
+/// Builds a gvar table with long offsets. `offsets` has one entry
+/// per glyph plus one. `data` is the glyph variation data array.
+fn gvar_with_offsets(
+    axis_count: u16,
+    shared_tuples: &[u8],
+    offsets: &[u32],
+    data: &[u8],
+) -> Vec<u8> {
+    let glyph_count = (offsets.len() - 1) as u16;
+    let shared_tuple_count = if axis_count == 0 {
+        0
+    } else {
+        (shared_tuples.len() / (usize::from(axis_count) * 2)) as u16
+    };
+    let shared_off = (20 + offsets.len() * 4) as u32;
+    let data_off = shared_off + shared_tuples.len() as u32;
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes()); // major
+    out.extend_from_slice(&0u16.to_be_bytes()); // minor
+    out.extend_from_slice(&axis_count.to_be_bytes());
+    out.extend_from_slice(&shared_tuple_count.to_be_bytes());
+    out.extend_from_slice(&shared_off.to_be_bytes());
+    out.extend_from_slice(&glyph_count.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes()); // long offsets
+    out.extend_from_slice(&data_off.to_be_bytes());
+    for off in offsets {
+        out.extend_from_slice(&off.to_be_bytes());
+    }
+    out.extend_from_slice(shared_tuples);
+    out.extend_from_slice(data);
+    out
+}
+
+/// Glyph variation data with `tuple_count` tuples that all point
+/// at shared tuple 0 and carry `tuple_data` each.
+fn body_of_shared_tuples(tuple_count: u16, tuple_data: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&tuple_count.to_be_bytes());
+    body.extend_from_slice(&(4 + 4 * tuple_count).to_be_bytes()); // dataOffset
+    for _ in 0..tuple_count {
+        body.extend_from_slice(&(tuple_data.len() as u16).to_be_bytes());
+        body.extend_from_slice(&0u16.to_be_bytes()); // shared tuple 0
+    }
+    for _ in 0..tuple_count {
+        body.extend_from_slice(tuple_data);
+    }
+    body
+}
+
+#[test]
+fn shared_tuple_projection_is_not_repeated_per_tuple() {
+    // 20000 axes, one all-zero shared tuple, and ten glyphs of 4095
+    // tuples that each point at it. Projecting the 20000-axis
+    // region again for every tuple cost billions of steps.
+    const AXES: usize = 20_000;
+    let shared = alloc::vec![0u8; AXES * 2];
+    let body = body_of_shared_tuples(0x0FFF, &[]);
+    let offsets: Vec<u32> = (0..=10).map(|i| i * body.len() as u32).collect();
+    let gvar = gvar_with_offsets(AXES as u16, &shared, &offsets, &body.repeat(10));
+    let mut pins = alloc::vec![AxisPin::Pin; AXES];
+    pins[0] = AxisPin::Keep;
+    let coords = alloc::vec![0.0f32; AXES];
+    let out = bake_gvar_partial(&gvar, &coords, &pins, 1).expect("partial bake");
+    // Every tuple has an all-zero Keep peak and drops.
+    let parsed = ParsedGvar::parse(&out).expect("parses");
+    assert_eq!(parsed.axis_count(), 1);
+}
+
+#[test]
+fn tuple_headers_past_the_u16_data_offset_are_rejected() {
+    // 4095 tuples point at one shared tuple, so their headers take
+    // 16 KB. Each survives with 16 Keep axes, and the rewrite embeds
+    // its peak, which needs 147 KB of headers: past what the u16
+    // dataOffset can address. The offset used to be truncated,
+    // which corrupted the glyph.
+    const AXES: usize = 17;
+    let shared: Vec<u8> = 0x4000i16.to_be_bytes().repeat(AXES); // every peak 1.0
+                                                                // All-points deltas: one zero for x, one for y.
+    let body = body_of_shared_tuples(0x0FFF, &[DELTA_ALL_ZERO, DELTA_ALL_ZERO]);
+    let gvar = gvar_with_offsets(AXES as u16, &shared, &[0, body.len() as u32], &body);
+    let mut pins = alloc::vec![AxisPin::Keep; AXES];
+    pins[0] = AxisPin::Pin;
+    let mut coords = alloc::vec![0.0f32; AXES];
+    coords[0] = 1.0;
+    let r = bake_gvar_partial(&gvar, &coords, &pins, (AXES - 1) as u16);
+    assert!(matches!(r, Err(SubsetError::Unsupported(_))), "{r:?}");
+}
+
+#[test]
+fn glyphs_sharing_one_data_range_are_rejected() {
+    // One 65 KB glyph body (a tuple with 32000 x and y deltas) and
+    // 2000 glyphs whose offsets alternate 0, len, 0, ... so every
+    // other glyph rewrites the same body. The output used to hold
+    // a thousand rewritten copies.
+    let mut deltas = Vec::new();
+    for _ in 0..1000 {
+        deltas.push(DELTA_COUNT_MASK); // i8 run of 64
+        deltas.extend_from_slice(&[5u8; 64]);
+    }
+    let mut body = Vec::new();
+    body.extend_from_slice(&1u16.to_be_bytes()); // one tuple
+    body.extend_from_slice(&12u16.to_be_bytes()); // dataOffset
+    body.extend_from_slice(&(deltas.len() as u16).to_be_bytes());
+    body.extend_from_slice(&FLAG_EMBEDDED_PEAK.to_be_bytes());
+    body.extend_from_slice(&0x4000i16.to_be_bytes());
+    body.extend_from_slice(&0x4000i16.to_be_bytes());
+    body.extend_from_slice(&deltas);
+    let offsets: Vec<u32> = (0..=2000u32)
+        .map(|i| if i % 2 == 0 { 0 } else { body.len() as u32 })
+        .collect();
+    let gvar = gvar_with_offsets(2, &[], &offsets, &body);
+    let pins = [AxisPin::Pin, AxisPin::Keep];
+    let r = bake_gvar_partial(&gvar, &[1.0, 0.0], &pins, 1);
+    assert!(matches!(r, Err(SubsetError::Unsupported(_))), "{r:?}");
+}

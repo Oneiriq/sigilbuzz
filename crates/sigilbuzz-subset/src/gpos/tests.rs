@@ -166,3 +166,13 @@ fn rewrite_lookup_drops_malformed_context() {
         .unwrap()
         .is_none());
 }
+
+#[test]
+fn rewrite_single_adj_format2_without_value_count_returns_none() {
+    // posFormat 2 needs a valueCount at bytes 6..8. A subtable that
+    // ends after the 6-byte shared prefix used to index past the end.
+    let bytes = [0u8, 2, 0, 6, 0, 1];
+    let map = map_from_pairs(&[(0, 0)]);
+    let ctx = RewriterCtx::new(&map, None);
+    assert!(rewrite_single_adj(&ctx, &bytes).is_none());
+}

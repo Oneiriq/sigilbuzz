@@ -72,7 +72,7 @@ fn insertion_points(script: Script, cps: &[char]) -> Vec<usize> {
             .iter()
             .map(|s| {
                 let broken = matches!(s.kind, Indic::Broken | Indic::Standalone)
-                    && indic_orphan(cps[s.start]);
+                    && cps.get(s.start).is_some_and(|&c| indic_orphan(c));
                 (s.start, s.end, broken)
             })
             .collect()
@@ -96,7 +96,9 @@ fn insertion_points(script: Script, cps: &[char]) -> Vec<usize> {
         use_syllables(cps)
             .iter()
             .map(|s| {
-                let repha = use_category(cps[s.start]) == UseCategory::R;
+                let repha = cps
+                    .get(s.start)
+                    .is_some_and(|&c| use_category(c) == UseCategory::R);
                 let first = if repha { s.start + 1 } else { s.start };
                 let broken =
                     s.kind == Use::Broken && cps.get(first).is_some_and(|&c| use_orphan(c));

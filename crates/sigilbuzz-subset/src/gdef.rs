@@ -187,7 +187,7 @@ pub(crate) fn rebuild_gdef(
             let len = item_var_store::store_len(bytes, off)
                 .map_err(|e| diag.error(&e, "the ItemVariationStore"))
                 .ok()?;
-            Some(&bytes[off..off + len])
+            bytes.get(off..off + len)
         }),
         StorePlan::Drop => None,
         StorePlan::Replace { store, .. } => Some(store),
@@ -299,6 +299,16 @@ fn present(off: usize) -> Option<usize> {
     (off != 0).then_some(off)
 }
 
+/// The error a GDEF reader returns once the work budget in the
+/// [`GidMap`] runs out. The piece being read is left out and reported,
+/// like any other piece that cannot be read.
+fn out_of_budget(offset: usize) -> Error {
+    Error::Malformed {
+        offset,
+        context: "GDEF rewrite needs more work than the subsetter allows",
+    }
+}
+
 /// Narrows a position to an Offset16, or reports that the rebuilt
 /// table outgrew what 16-bit offsets can address.
 fn offset16(pos: usize) -> Result<u16, SubsetError> {
@@ -336,8 +346,12 @@ fn kept_entries(
         });
     }
     let count = u16_at(table, list_off + 2, context)?;
+    let covered = read::coverage(table, list_off + coverage_rel)?;
+    if !map.spend(1 + covered.len()) {
+        return Err(out_of_budget(list_off));
+    }
     let mut out = Vec::new();
-    for (gid, index) in read::coverage(table, list_off + coverage_rel)? {
+    for (gid, index) in covered {
         let Some(new_gid) = map.map(gid) else {
             continue;
         };
@@ -392,6 +406,13 @@ fn rewrite_classdef_subtable(
     dropped: &'static str,
 ) -> Option<Vec<u8>> {
     let pairs = read::class_def(bytes, offset)
+        .and_then(|pairs| {
+            if map.spend(1 + pairs.len()) {
+                Ok(pairs)
+            } else {
+                Err(out_of_budget(offset))
+            }
+        })
         .map_err(|e| diag.error(&e, dropped))
         .ok()?;
     let mut new_pairs: Vec<(u16, u16)> = Vec::with_capacity(pairs.len());

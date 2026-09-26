@@ -2,16 +2,18 @@
 //! and anchor-mode point matching.
 
 use super::{
-    Contour, FlatGlyph, Glyf, PhantomMetrics, Transform, COMP_ARGS_ARE_XY_VALUES,
-    COMP_ARG_1_AND_2_ARE_WORDS, COMP_MORE_COMPONENTS, COMP_ROUND_XY_TO_GRID,
-    COMP_SCALED_COMPONENT_OFFSET, COMP_UNSCALED_COMPONENT_OFFSET, COMP_USE_MY_METRICS,
-    COMP_WE_HAVE_AN_X_AND_Y_SCALE, COMP_WE_HAVE_A_SCALE, COMP_WE_HAVE_A_TWO_BY_TWO,
+    Contour, FlatGlyph, FlattenBudget, Glyf, PhantomMetrics, Transform, COMP_ARGS_ARE_XY_VALUES,
+    COMP_ARG_1_AND_2_ARE_WORDS, COMP_MORE_COMPONENTS, COMP_SCALED_COMPONENT_OFFSET,
+    COMP_UNSCALED_COMPONENT_OFFSET, COMP_WE_HAVE_AN_X_AND_Y_SCALE, COMP_WE_HAVE_A_SCALE,
+    COMP_WE_HAVE_A_TWO_BY_TWO,
 };
 use crate::error::Result;
 use crate::tables::loca::Loca;
 use crate::tables::parse::Reader;
 
-impl<'a> Glyf<'a> {
+impl Glyf<'_> {
+    // Same parameter set as `flatten`, plus the component reader.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn flatten_composite(
         &self,
         r: &mut Reader<'_>,
@@ -21,6 +23,7 @@ impl<'a> Glyf<'a> {
         parent_tf: &Transform,
         out: &mut FlatGlyph,
         depth: u8,
+        budget: &mut FlattenBudget,
     ) -> Result<()> {
         loop {
             let flags = r.read_u16()?;
@@ -102,6 +105,7 @@ impl<'a> Glyf<'a> {
                 &child_combined,
                 &mut child_flat,
                 depth + 1,
+                budget,
             )?;
 
             // Resolve the translation. Anchor-mode (ARGS_ARE_XY_VALUES
@@ -196,7 +200,6 @@ impl<'a> Glyf<'a> {
             if flags & COMP_MORE_COMPONENTS == 0 {
                 break;
             }
-            let _ = (COMP_ROUND_XY_TO_GRID, COMP_USE_MY_METRICS); // silence unused constants
         }
         // If WE_HAVE_INSTRUCTIONS is set the composite ends with a
         // u16 instruction count + that many bytes. We don't execute

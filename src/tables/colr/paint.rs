@@ -141,37 +141,77 @@ impl ColorLine<'_> {
 }
 
 /// Composite mode for `PaintComposite`. Values match the COLR spec.
+/// Modes 0 to 12 are the Porter-Duff operators. Modes 13 to 27 are
+/// the separable and non-separable blend modes from the W3C
+/// Compositing and Blending spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(missing_docs)]
 #[repr(u8)]
 pub enum CompositeMode {
+    /// Porter-Duff clear: the result is fully transparent.
     Clear = 0,
+    /// Porter-Duff source: keep the source only.
     Src = 1,
+    /// Porter-Duff destination: keep the backdrop only.
     Dest = 2,
+    /// Porter-Duff source over: source drawn on top of the backdrop.
     SrcOver = 3,
+    /// Porter-Duff destination over: backdrop drawn on top of the
+    /// source.
     DestOver = 4,
+    /// Porter-Duff source in: source where the backdrop is opaque.
     SrcIn = 5,
+    /// Porter-Duff destination in: backdrop where the source is
+    /// opaque.
     DestIn = 6,
+    /// Porter-Duff source out: source where the backdrop is
+    /// transparent.
     SrcOut = 7,
+    /// Porter-Duff destination out: backdrop where the source is
+    /// transparent.
     DestOut = 8,
+    /// Porter-Duff source atop: source over the backdrop, clipped to
+    /// the backdrop.
     SrcAtop = 9,
+    /// Porter-Duff destination atop: backdrop over the source, clipped
+    /// to the source.
     DestAtop = 10,
+    /// Porter-Duff XOR: each shape only where the other is absent.
     Xor = 11,
+    /// Porter-Duff plus: source and backdrop added and clamped.
     Plus = 12,
+    /// Screen blend: inverted multiply, always at least as light.
     Screen = 13,
+    /// Overlay blend: multiply or screen, chosen by the backdrop.
     Overlay = 14,
+    /// Darken blend: the darker of source and backdrop per channel.
     Darken = 15,
+    /// Lighten blend: the lighter of source and backdrop per channel.
     Lighten = 16,
+    /// Color dodge blend: brightens the backdrop by the source.
     ColorDodge = 17,
+    /// Color burn blend: darkens the backdrop by the source.
     ColorBurn = 18,
+    /// Hard light blend: multiply or screen, chosen by the source.
     HardLight = 19,
+    /// Soft light blend: a softer version of hard light.
     SoftLight = 20,
+    /// Difference blend: absolute difference of the channels.
     Difference = 21,
+    /// Exclusion blend: like difference with lower contrast.
     Exclusion = 22,
+    /// Multiply blend: product of the channels, always at least as
+    /// dark.
     Multiply = 23,
+    /// Hue blend: source hue with backdrop saturation and luminosity.
     HslHue = 24,
+    /// Saturation blend: source saturation with backdrop hue and
+    /// luminosity.
     HslSaturation = 25,
+    /// Color blend: source hue and saturation with backdrop
+    /// luminosity.
     HslColor = 26,
+    /// Luminosity blend: source luminosity with backdrop hue and
+    /// saturation.
     HslLuminosity = 27,
 }
 

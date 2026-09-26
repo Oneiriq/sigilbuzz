@@ -5,7 +5,7 @@
 use alloc::vec::Vec;
 
 use super::gsub::{apply_gsub_lookup, apply_gsub_lookup_masked};
-use super::{feature_disabled, Feature};
+use super::{feature_disabled, Feature, LookupBudget};
 use crate::buffer::Glyph;
 use crate::ot::arabic::JoiningForm;
 use crate::tables::gdef::Gdef;
@@ -34,36 +34,39 @@ pub(super) fn run_default_gsub(
     is_vertical: bool,
     script_priority: &[[u8; 4]],
     early_features: &[[u8; 4]],
+    budget: &mut LookupBudget,
 ) {
-    apply_gsub_features_merged(
+    apply_gsub_features_merged_budgeted(
         gsub,
         glyphs,
         gdef,
         features,
         early_features,
         script_priority,
+        budget,
     );
     if !feature_disabled(features, *b"rlig") {
-        apply_gsub_feature(gsub, glyphs, gdef, *b"rlig", 0, script_priority);
+        apply_gsub_feature_budgeted(gsub, glyphs, gdef, *b"rlig", 0, script_priority, budget);
     }
     if want_liga {
-        apply_gsub_feature(gsub, glyphs, gdef, *b"liga", 0, script_priority);
+        apply_gsub_feature_budgeted(gsub, glyphs, gdef, *b"liga", 0, script_priority, budget);
     }
     if !feature_disabled(features, *b"clig") {
-        apply_gsub_feature(gsub, glyphs, gdef, *b"clig", 0, script_priority);
+        apply_gsub_feature_budgeted(gsub, glyphs, gdef, *b"clig", 0, script_priority, budget);
     }
     // `calt` and `rclt` together: HarfBuzz's default horizontal
     // feature list enables both, and Mongolian fonts in particular
     // ship the same lookup set under both tags (calt for legacy,
     // rclt for required-contextual). Naively running each tag's
     // lookups in turn double-applies on those fonts.
-    apply_gsub_features_merged(
+    apply_gsub_features_merged_budgeted(
         gsub,
         glyphs,
         gdef,
         features,
         &[*b"calt", *b"rclt"],
         script_priority,
+        budget,
     );
     // Vertical writing: HarfBuzz auto-enables `vrt2` when the font
     // carries it, otherwise falls back to `vert`. The two tags
@@ -72,9 +75,9 @@ pub(super) fn run_default_gsub(
     if is_vertical {
         let has_vrt2 = feature_present(gsub, *b"vrt2");
         if has_vrt2 && !feature_disabled(features, *b"vrt2") {
-            apply_gsub_feature(gsub, glyphs, gdef, *b"vrt2", 0, script_priority);
+            apply_gsub_feature_budgeted(gsub, glyphs, gdef, *b"vrt2", 0, script_priority, budget);
         } else if !feature_disabled(features, *b"vert") {
-            apply_gsub_feature(gsub, glyphs, gdef, *b"vert", 0, script_priority);
+            apply_gsub_feature_budgeted(gsub, glyphs, gdef, *b"vert", 0, script_priority, budget);
         }
     }
     for feat in features {
@@ -85,7 +88,15 @@ pub(super) fn run_default_gsub(
             continue;
         }
         let alternate_idx = (feat.value.saturating_sub(1)).min(u32::from(u16::MAX)) as u16;
-        apply_gsub_feature(gsub, glyphs, gdef, feat.tag, alternate_idx, script_priority);
+        apply_gsub_feature_budgeted(
+            gsub,
+            glyphs,
+            gdef,
+            feat.tag,
+            alternate_idx,
+            script_priority,
+            budget,
+        );
     }
 }
 
@@ -96,6 +107,8 @@ pub(super) fn run_default_gsub(
 /// for one feature must interleave with another's keeps its intended
 /// order. Tags the caller disabled with a zero-valued [`Feature`] are
 /// skipped.
+///
+/// Runs under a fresh [`LookupBudget`] for this one pass.
 pub(crate) fn apply_gsub_features_merged(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
@@ -103,6 +116,29 @@ pub(crate) fn apply_gsub_features_merged(
     features: &[Feature],
     tags: &[[u8; 4]],
     script_priority: &[[u8; 4]],
+) {
+    let mut budget = LookupBudget::for_run(glyphs);
+    apply_gsub_features_merged_budgeted(
+        gsub,
+        glyphs,
+        gdef,
+        features,
+        tags,
+        script_priority,
+        &mut budget,
+    );
+}
+
+/// [`apply_gsub_features_merged`] under a caller-owned budget, so
+/// [`shape`] can share one budget across every lookup it applies.
+pub(super) fn apply_gsub_features_merged_budgeted(
+    gsub: &Gsub<'_>,
+    glyphs: &mut Vec<Glyph>,
+    gdef: Option<&Gdef<'_>>,
+    features: &[Feature],
+    tags: &[[u8; 4]],
+    script_priority: &[[u8; 4]],
+    budget: &mut LookupBudget,
 ) {
     let mut indices: Vec<u16> = tags
         .iter()
@@ -113,7 +149,7 @@ pub(crate) fn apply_gsub_features_merged(
     indices.sort_unstable();
     indices.dedup();
     for lookup_idx in indices {
-        apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, 0);
+        apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, 0, budget);
     }
 }
 
@@ -212,14 +248,23 @@ fn is_handled_gsub_tag(tag: [u8; 4]) -> bool {
 /// between `vrt2` (preferred if present) and `vert` (fallback).
 fn feature_present(gsub: &Gsub<'_>, tag: [u8; 4]) -> bool {
     // Vertical-writing probe runs before we know the script. Use the
-    // Latin-style script order (DFLT -> first) to match the previous
-    // behavior. Arabic fonts do not ship vert/vrt2, so this choice is
-    // not observable in practice.
+    // DFLT -> first script order to match the previous behavior.
+    // Arabic fonts do not ship vert/vrt2, so this choice is not
+    // observable in practice.
     lookup_indices_for_feature_in_scripts(gsub, tag, &[*b"DFLT"]).is_some_and(|v| !v.is_empty())
 }
 
 /// Applies every GSUB lookup reachable via the named feature tag
-/// to the glyph run in place. Supports lookup types:
+/// to the glyph run in place, walking the supplied script-tag
+/// priority list (`arab > DFLT` for Arabic, `dev2 > deva > DFLT` for
+/// Devanagari, plain `DFLT` otherwise). The Indic shaper needs the
+/// list because Devanagari fonts expose their reordering features
+/// under `deva`/`dev2` and leave DFLT with only the "universal"
+/// subset. The table picks the first of those tags it lists, then
+/// `DFLT`, `dflt` or `latn`, and takes the feature from that script's
+/// language system alone (see [`crate::ot::layout_select`]).
+///
+/// Supports every GSUB lookup type:
 ///
 /// - 1: Single substitution (`smcp`, `vert`, `salt`, `ss01`...)
 /// - 2: Multiple substitution (`ccmp` decomposition, some scripts)
@@ -227,37 +272,16 @@ fn feature_present(gsub: &Gsub<'_>, tag: [u8; 4]) -> bool {
 ///   alternate index comes from the feature `value` (1-indexed,
 ///   clamped into the alternate set)
 /// - 4: Ligature substitution (`liga`, `dlig`, `rlig`)
-/// - 6: Chained context substitution (`calt`, `clig`, `init`,
-///   `medi`, `fina`, `isol`) with recursive nested lookups
+/// - 5, 6: Context and chained context substitution (`calt`,
+///   `clig`, `init`, `medi`, `fina`, `isol`) with recursive nested
+///   lookups
+/// - 8: Reverse chained single substitution
 ///
 /// Extension (type 7) wrappers are unwrapped to the inner type.
 /// Unknown lookup types are silently skipped so callers can enable
 /// forward-compatible features without the run erroring out.
-pub(crate) fn apply_gsub_feature(
-    gsub: &Gsub<'_>,
-    glyphs: &mut Vec<Glyph>,
-    gdef: Option<&Gdef<'_>>,
-    tag: [u8; 4],
-    alternate_index: u16,
-    script_priority: &[[u8; 4]],
-) {
-    // Callers resolve the priority from run analysis: `arab > DFLT`
-    // for Arabic, `hebr > DFLT` for Hebrew, `dev2 > deva > DFLT` for
-    // Devanagari, plain `DFLT` otherwise. The script-priority walker
-    // inside `apply_gsub_feature_in_scripts` falls back when the
-    // preferred script does not carry the feature, so mixed-script
-    // runs still find the lookup under DFLT.
-    apply_gsub_feature_in_scripts(gsub, glyphs, gdef, tag, alternate_index, script_priority);
-}
-
-/// Same as [`apply_gsub_feature`] but walks the supplied script-tag
-/// priority list instead of just DFLT. The Indic shaper needs this
-/// because Devanagari fonts expose their reordering features under
-/// `deva`/`dev2` and leave DFLT with only the "universal" subset.
 ///
-/// Falls back to the first script in the list if none of the
-/// requested tags are present, matching the prior DFLT-fallback
-/// behavior.
+/// Runs under a fresh [`LookupBudget`] for this one feature.
 pub(crate) fn apply_gsub_feature_in_scripts(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
@@ -265,6 +289,29 @@ pub(crate) fn apply_gsub_feature_in_scripts(
     tag: [u8; 4],
     alternate_index: u16,
     script_priority: &[[u8; 4]],
+) {
+    let mut budget = LookupBudget::for_run(glyphs);
+    apply_gsub_feature_budgeted(
+        gsub,
+        glyphs,
+        gdef,
+        tag,
+        alternate_index,
+        script_priority,
+        &mut budget,
+    );
+}
+
+/// [`apply_gsub_feature_in_scripts`] under a caller-owned budget, so
+/// [`shape`] can share one budget across every lookup it applies.
+fn apply_gsub_feature_budgeted(
+    gsub: &Gsub<'_>,
+    glyphs: &mut Vec<Glyph>,
+    gdef: Option<&Gdef<'_>>,
+    tag: [u8; 4],
+    alternate_index: u16,
+    script_priority: &[[u8; 4]],
+    budget: &mut LookupBudget,
 ) {
     if glyphs.is_empty() {
         return;
@@ -279,7 +326,7 @@ pub(crate) fn apply_gsub_feature_in_scripts(
     }
 
     for lookup_idx in lookup_indices {
-        apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, alternate_index);
+        apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, alternate_index, budget);
     }
 }
 
@@ -293,7 +340,8 @@ pub(crate) fn apply_gsub_feature_in_scripts(
 /// positional features; lookups that don't understand the mask
 /// (chaining-context interior) fall through to the unmasked
 /// dispatcher, matching the behavior documented on
-/// [`apply_gsub_lookup_masked`].
+/// [`apply_gsub_lookup_masked`]. Runs under a fresh [`LookupBudget`]
+/// for this one feature.
 pub(crate) fn apply_gsub_feature_masked(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
@@ -312,8 +360,9 @@ pub(crate) fn apply_gsub_feature_masked(
     if lookup_indices.is_empty() {
         return;
     }
+    let mut budget = LookupBudget::for_run(glyphs);
     for lookup_idx in lookup_indices {
-        apply_gsub_lookup_masked(gsub, lookup_idx, glyphs, gdef, mask);
+        apply_gsub_lookup_masked(gsub, lookup_idx, glyphs, gdef, mask, &mut budget);
     }
 }
 
@@ -328,6 +377,7 @@ pub(super) fn apply_arabic_positional_features(
     glyphs: &mut Vec<Glyph>,
     gdef: Option<&Gdef<'_>>,
     forms: &[JoiningForm],
+    budget: &mut LookupBudget,
 ) {
     for (form, tag) in [
         (JoiningForm::Isol, *b"isol"),
@@ -345,27 +395,17 @@ pub(super) fn apply_arabic_positional_features(
         }
         let mask: Vec<bool> = forms.iter().map(|&f| f == form).collect();
         for lookup_idx in lookup_indices {
-            apply_gsub_lookup_masked(gsub, lookup_idx, glyphs, gdef, &mask);
+            apply_gsub_lookup_masked(gsub, lookup_idx, glyphs, gdef, &mask, budget);
         }
     }
 }
 
-/// Walks the default LangSys (DFLT -> first script) and returns the
-/// sorted set of lookup indices that the feature `tag` selects. A
-/// return value of `None` means no usable script, `Some(empty)`
-/// means the LangSys does not carry this feature.
-#[allow(dead_code)]
-fn lookup_indices_for_feature(gsub: &Gsub<'_>, tag: [u8; 4]) -> Option<Vec<u16>> {
-    lookup_indices_for_feature_in_scripts(gsub, tag, &[*b"DFLT"])
-}
-
-/// Script-priority variant of [`lookup_indices_for_feature`]. Walks
-/// the `script_priority` tags in order and returns lookup indices
-/// for the first script whose language system carries the requested
-/// feature tag, falling back to DFLT then the first script in the
-/// table. The language system comes from the view's language tags
-/// (see [`Gsub::with_language_tags`]); the walk itself lives in
-/// [`crate::ot::layout_select`], shared with GPOS.
+/// Sorted lookup indices GSUB feature `tag` selects for a run whose
+/// candidate script tags are `script_priority`. The table picks one
+/// script and one language system, the language system from the
+/// view's language tags (see [`Gsub::with_language_tags`]), as
+/// HarfBuzz does. The walk lives in [`crate::ot::layout_select`],
+/// shared with GPOS.
 fn lookup_indices_for_feature_in_scripts(
     gsub: &Gsub<'_>,
     tag: [u8; 4],

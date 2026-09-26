@@ -30,12 +30,13 @@ pub(crate) fn empty_blob_arc() -> Arc<hb_blob_t> {
 
 /// Creates a blob holding a copy of `length` bytes at `data`.
 ///
-/// sigilbuzz always copies, whatever `mode` says. `destroy` follows
-/// HarfBuzz's timing: it runs right away when there is nothing to
-/// keep (zero length or null data, which both yield an empty blob) and
-/// for `HB_MEMORY_MODE_DUPLICATE`, where HarfBuzz also copies up
-/// front; for every other mode it runs once, when the last reference
-/// to the blob (including the ones faces built on it hold) goes away.
+/// sigilbuzz always copies, whatever `mode` says. `destroy`, when
+/// non-null, is called exactly once with `user_data`. As in HarfBuzz,
+/// that happens before this function returns when `mode` is
+/// `HB_MEMORY_MODE_DUPLICATE` or when there are no bytes to hold
+/// (`length == 0` or a null `data`, which both yield an empty blob).
+/// Otherwise it happens when the blob's last reference is released,
+/// counting the references that faces built on the blob hold.
 ///
 /// # Safety
 /// `data` must point to `length` bytes (or be null with `length == 0`).
@@ -50,18 +51,24 @@ pub unsafe extern "C" fn hb_blob_create(
 ) -> *mut hb_blob_t {
     if length == 0 || data.is_null() {
         if let Some(destroy) = destroy {
-            // SAFETY: caller-supplied callback that accepts `user_data`.
+            // SAFETY: caller-supplied function pointer. The contract
+            // is that it accepts `user_data`. The empty blob does not
+            // keep `user_data`, so this is its only call.
             unsafe { destroy(user_data) };
         }
         return empty_blob();
     }
-    // SAFETY: caller asserts (data, length) is a valid byte range.
+    // SAFETY: `data` is non-null and the caller guarantees it points
+    // to `length` readable bytes that stay valid for this call. The
+    // bytes are copied before returning.
     let bytes = unsafe { slice::from_raw_parts(data.cast::<u8>(), length as usize) };
     let mut inner = BlobInner::from_data(bytes.to_vec());
     if mode == HB_MEMORY_MODE_DUPLICATE {
         if let Some(destroy) = destroy {
-            // SAFETY: caller-supplied callback that accepts `user_data`;
-            // the bytes are already copied, so the caller may free them.
+            // SAFETY: caller-supplied function pointer. The contract
+            // is that it accepts `user_data`. The blob holds its own
+            // copy of the bytes and does not keep `user_data`, so this
+            // is its only call.
             unsafe { destroy(user_data) };
         }
     } else {
@@ -79,7 +86,8 @@ pub unsafe extern "C" fn hb_blob_create_from_file(file_name: *const c_char) -> *
     if file_name.is_null() {
         return empty_blob();
     }
-    // SAFETY: caller asserts NUL-terminated.
+    // SAFETY: `file_name` is non-null and the caller guarantees it
+    // points to a NUL-terminated string.
     let path_cstr = unsafe { core::ffi::CStr::from_ptr(file_name) };
     let Ok(path_str) = path_cstr.to_str() else {
         return empty_blob();
@@ -87,6 +95,12 @@ pub unsafe extern "C" fn hb_blob_create_from_file(file_name: *const c_char) -> *
     let Ok(bytes) = std::fs::read(path_str) else {
         return empty_blob();
     };
+    // Blob lengths cross the C boundary as `unsigned int`. Refuse a
+    // file whose length would not fit rather than report a truncated
+    // length.
+    if c_uint::try_from(bytes.len()).is_err() {
+        return empty_blob();
+    }
     handle::into_raw(hb_blob_t {
         inner: BlobInner::from_data(bytes),
     })
@@ -115,7 +129,7 @@ pub unsafe extern "C" fn hb_blob_reference(blob: *mut hb_blob_t) -> *mut hb_blob
 }
 
 /// # Safety
-/// `blob` must be valid; `length` may be null.
+/// `blob` must be null or valid. `length` may be null.
 #[no_mangle]
 pub unsafe extern "C" fn hb_blob_get_data(
     blob: *mut hb_blob_t,
@@ -123,29 +137,33 @@ pub unsafe extern "C" fn hb_blob_get_data(
 ) -> *const c_char {
     if blob.is_null() {
         if !length.is_null() {
-            // SAFETY: caller asserts length is writeable.
+            // SAFETY: `length` is non-null and the caller guarantees
+            // it points to a writable `unsigned int`.
             unsafe { *length = 0 };
         }
         return ptr::null();
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `blob` is non-null and the caller guarantees it points
+    // to a live `hb_blob_t`.
     let inner: &BlobInner = unsafe { &(*blob).inner };
     let bytes: &[u8] = inner.data.as_slice();
     if !length.is_null() {
-        // SAFETY: caller asserts length is writeable.
+        // SAFETY: `length` is non-null and the caller guarantees it
+        // points to a writable `unsigned int`.
         unsafe { *length = bytes.len() as c_uint };
     }
     bytes.as_ptr().cast::<c_char>()
 }
 
 /// # Safety
-/// `blob` must be valid.
+/// `blob` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_blob_get_length(blob: *mut hb_blob_t) -> c_uint {
     if blob.is_null() {
         return 0;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `blob` is non-null and the caller guarantees it points
+    // to a live `hb_blob_t`.
     let inner: &BlobInner = unsafe { &(*blob).inner };
     inner.data.len() as c_uint
 }

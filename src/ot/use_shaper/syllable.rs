@@ -26,12 +26,7 @@ pub(crate) enum SyllableKind {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Syllable {
     pub kind: SyllableKind,
-    /// Start codepoint/glyph index (inclusive). Kept for debugging
-    /// and test assertions even when the reorder pass only needs
-    /// `end` and `base_index`. Tagging a syllable by its left edge
-    /// is the cheapest way to cross-reference against the original
-    /// codepoint slice.
-    #[allow(dead_code)]
+    /// Start codepoint/glyph index (inclusive).
     pub start: usize,
     /// End codepoint/glyph index (exclusive).
     pub end: usize,
@@ -69,10 +64,10 @@ pub(crate) fn segment_syllables(codepoints: &[char]) -> Vec<Syllable> {
     out
 }
 
-/// Parses a single syllable starting at `start`. Always makes
-/// progress: `end > start` on return.
+/// Parses a single syllable starting at `start`, which must be below
+/// `cps.len()`. Always makes progress and stays in bounds:
+/// `start < end <= cps.len()` on return.
 fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
-    let len = cps.len();
     let first = use_category(cps[start]);
 
     match first {
@@ -106,7 +101,6 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
             // its own cluster id after the merge pass, matching
             // rustybuzz, where e.g. the three Khmer digits ០១២
             // emit clusters 0/3/6 rather than a single merged 0.
-            let _ = len;
             Syllable {
                 kind: SyllableKind::Symbol,
                 start,
@@ -116,13 +110,14 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
                 kinzi_index: None,
             }
         }
-        UseCategory::R => {
+        UseCategory::R if start + 1 < cps.len() => {
             // Repha prefix, followed by a consonant syllable. The
             // Myanmar kinzi case is handled inline in
             // `scan_consonant_syllable` because kinzi's codepoints
-            // (Nga / Asat / Virama) are categorized as B/H/H, not R;
-            // this arm stays for potential future R-category repha
-            // in other USE scripts.
+            // (Nga / Asat / Virama) are categorized as B/H/H, not R.
+            // No codepoint maps to R today. A repha at the very end
+            // of the run falls through to the one-wide Broken arm so
+            // the syllable never runs past `cps.len()`.
             let syl = scan_consonant_syllable(cps, start + 1);
             Syllable {
                 kind: syl.kind,
