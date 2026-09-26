@@ -69,10 +69,28 @@ are on by default. For a smaller library, build with
 
 Enum values (`HB_DIRECTION_LTR == 4`, `HB_SCRIPT_LATIN == HB_TAG('L','a','t','n')`, and
 the rest) and struct layouts match HarfBuzz, so a binary compiled against the real
-`hb.h` links and runs against this library without recompiling. The opaque types
-(`hb_blob_t`, `hb_face_t`, `hb_font_t`, `hb_buffer_t`) are reference-counted with
-Rust's `Arc`. `hb_*_destroy` drops a reference and `hb_*_reference` adds one, the same
-manual refcounting HarfBuzz uses.
+`hb.h` links and runs against this library without recompiling.
+
+## Ownership
+
+Reference counting follows HarfBuzz exactly, so code written for HarfBuzz neither
+leaks nor double-frees here:
+
+- The pointer is the object. `hb_*_reference(p)` adds a reference and returns `p`
+  itself; `hb_*_destroy(p)` drops one and frees the object when the last one goes.
+  This holds for `hb_blob_t`, `hb_face_t`, `hb_font_t`, `hb_buffer_t`, `hb_set_t`,
+  and `hb_paint_funcs_t`.
+- Every `*_create` result and every `*_reference` call is one reference to destroy.
+- A face references its blob and a font references its face, so you may destroy the
+  blob or face right after building on it.
+- Referencing `NULL` returns `NULL`, and destroying `NULL` does nothing.
+- Where HarfBuzz returns its inert empty object (for example from a zero-length
+  `hb_blob_create`), sigilbuzz returns a fresh empty object. Destroy it as usual. The
+  same code is correct with HarfBuzz, where destroying the inert object does nothing.
+
+Earlier releases returned a new handle from every `hb_*_reference`. Each reference
+still needs exactly one destroy, so balanced code keeps working; only the returned
+pointer changed.
 
 ## Versioning
 

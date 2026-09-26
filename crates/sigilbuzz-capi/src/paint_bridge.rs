@@ -33,10 +33,9 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use core::ffi::c_void;
 
-use crate::{hb_bool_t, hb_font_t};
+use crate::{handle, hb_bool_t, hb_font_t};
 use sigilbuzz_paint::{evaluate, Color, DrawCmd, Extend, GradientKind, PaintSource, Transform2D};
 
 /// HarfBuzz's packed BGRA color. Layout: byte 0 = blue, byte 1 = green,
@@ -184,25 +183,37 @@ impl hb_paint_funcs_t {
     }
 }
 
-/// Allocates a fresh empty paint-funcs table. All callbacks start as
-/// `None`. The consumer must `hb_paint_funcs_set_*` to wire them up.
+/// Allocates a fresh empty paint-funcs table with refcount 1. All
+/// callbacks start as `None`. The consumer must `hb_paint_funcs_set_*`
+/// to wire them up.
 #[no_mangle]
 pub extern "C" fn hb_paint_funcs_create() -> *mut hb_paint_funcs_t {
-    Box::into_raw(Box::new(hb_paint_funcs_t::empty()))
+    handle::into_raw(hb_paint_funcs_t::empty())
 }
 
-/// Releases a paint-funcs table.
+/// Adds one reference to `funcs` and returns `funcs` itself. Null in,
+/// null out.
 ///
 /// # Safety
-/// `funcs` must be null or a pointer originally returned by
-/// `hb_paint_funcs_create`.
+/// `funcs` must be null or a live paint-funcs table.
+#[no_mangle]
+pub unsafe extern "C" fn hb_paint_funcs_reference(
+    funcs: *mut hb_paint_funcs_t,
+) -> *mut hb_paint_funcs_t {
+    // SAFETY: caller guarantees `funcs` is null or a live handle.
+    unsafe { handle::reference(funcs) }
+}
+
+/// Releases one reference to a paint-funcs table. Null is a no-op.
+///
+/// # Safety
+/// `funcs` must be null or a live paint-funcs table the caller holds a
+/// reference to.
 #[no_mangle]
 pub unsafe extern "C" fn hb_paint_funcs_destroy(funcs: *mut hb_paint_funcs_t) {
-    if funcs.is_null() {
-        return;
-    }
-    // SAFETY: caller-asserted.
-    drop(unsafe { Box::from_raw(funcs) });
+    // SAFETY: caller guarantees `funcs` is null or a live handle it
+    // owns a reference to.
+    unsafe { handle::destroy(funcs) };
 }
 
 // Setter macros, one per callback. Each setter overwrites the slot,
@@ -364,13 +375,13 @@ pub unsafe extern "C" fn hb_font_paint_glyph(
     }
     // SAFETY: caller asserts validity.
     let font_inner = unsafe { &(*font).inner };
-    // The face lives in the `Arc<FaceInner>` we hold for the duration
+    // The face lives in the face handle the font holds for the duration
     // of this call. Borrow directly: paint evaluation only reads from
     // the face, never from FontState's mutated coords (the variable-
     // color-fonts story routes coords through `evaluate_at_coords`
     // which is exposed in a follow-up). For now, evaluate at the
     // default instance.
-    let face: &sigilbuzz::Face<'static> = &font_inner._face.face;
+    let face: &sigilbuzz::Face<'static> = &font_inner._face.inner.face;
 
     let cmds = evaluate(face, gid as u16);
     let _ = foreground_color; // future hook for is_foreground=true
@@ -523,9 +534,12 @@ mod tests {
         unsafe {
             let f = hb_paint_funcs_create();
             assert!(!f.is_null());
+            assert_eq!(hb_paint_funcs_reference(f), f, "reference returns f");
+            hb_paint_funcs_destroy(f);
             hb_paint_funcs_destroy(f);
             // null is a no-op
             hb_paint_funcs_destroy(ptr::null_mut());
+            assert!(hb_paint_funcs_reference(ptr::null_mut()).is_null());
         }
     }
 

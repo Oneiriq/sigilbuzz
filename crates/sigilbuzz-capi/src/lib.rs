@@ -6,16 +6,23 @@
 //! a source-level change. The header at `include/hb.h` declares the
 //! exact subset of HarfBuzz's public API the crate implements.
 //!
-//! # Refcounting
+//! # Refcounting and ownership
 //!
-//! Every opaque type (`hb_blob_t`, `hb_face_t`, `hb_font_t`,
-//! `hb_buffer_t`) is a thin `#[repr(C)]` wrapper around an
-//! `alloc::sync::Arc<Inner>`. `hb_*_destroy` drops the wrapper:
-//! the Arc destructor handles refcount decrement and resource
-//! release. `hb_*_reference` allocates a fresh wrapper backed by a
-//! cloned Arc handle. Cloning a wrapper without going through
-//! `hb_*_reference` is undefined behavior, just as in HarfBuzz
-//! itself.
+//! Handles have HarfBuzz identity semantics: the pointer is the
+//! object. Every refcounted type (`hb_blob_t`, `hb_face_t`,
+//! `hb_font_t`, `hb_buffer_t`, `hb_set_t`, `hb_subset_input_t`,
+//! `hb_paint_funcs_t`) lives inside an `alloc::sync::Arc` whose raw
+//! pointer is what C holds. `hb_*_reference(p)` adds a reference and
+//! returns `p`; `hb_*_destroy(p)` drops one and frees the object at
+//! zero. Both accept null (reference returns null, destroy does
+//! nothing). See the `handle` module for the details.
+//!
+//! The ownership rules are HarfBuzz's:
+//!
+//! - Every `*_create` result and every `*_reference` call is one
+//!   reference the caller must release with the matching `*_destroy`.
+//! - A face references its blob and a font references its face, so
+//!   destroying the blob (or face) right after building on it is fine.
 //!
 //! # Lifetime erasure
 //!
@@ -23,10 +30,10 @@
 //! byte slice. The C surface needs to expose those without the
 //! lifetime parameter. We achieve that by:
 //!
-//! 1. `BlobInner` owns the bytes in an `Arc<Vec<u8>>`.
-//! 2. `FaceInner` holds a clone of that Arc *and* a `Face<'static>`
+//! 1. `BlobInner` owns the bytes in a `Vec<u8>` that is never resized.
+//! 2. `FaceInner` holds a reference to its blob *and* a `Face<'static>`
 //!    constructed via [`core::mem::transmute`]. The transmute is
-//!    sound because the Arc clone keeps the underlying bytes alive
+//!    sound because the blob reference keeps the underlying bytes alive
 //!    for the lifetime of the FaceInner; the `'static` lifetime is
 //!    a fiction the borrow checker accepts because the actual
 //!    backing storage outlives every consumer.
@@ -48,6 +55,7 @@
 
 extern crate alloc;
 
+#[cfg(feature = "std")]
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -58,6 +66,9 @@ use core::slice;
 
 use sigilbuzz::{shape, Buffer, Direction, Face, Feature, Font};
 
+// `handle` holds the shared reference/destroy plumbing every opaque
+// type goes through.
+mod handle;
 // `hb_set_t` lives in its own module, the opaque integer-set type
 // the subset and introspection bridges need. It has no dependency on
 // the rest of the crate, so it ships unconditionally. `introspect`
@@ -80,12 +91,12 @@ pub mod subset_bridge;
 
 /// Owned font bytes plus the user-data destroy callback HarfBuzz
 /// callers can hang off a blob. The destroy callback fires when
-/// the Arc's refcount hits zero.
+/// the last reference to the blob goes away.
 pub(crate) struct BlobInner {
-    /// The actual font bytes. `Arc<Vec<u8>>` so a `FaceInner` can
-    /// extend the same backing storage past the original blob's
-    /// lifetime.
-    pub(crate) data: Arc<Vec<u8>>,
+    /// The actual font bytes. Never resized after construction, so
+    /// faces built on the blob can borrow the heap buffer for as long
+    /// as they hold a reference to the blob.
+    pub(crate) data: Vec<u8>,
     /// Optional caller-supplied destroy callback: fires once, when
     /// the BlobInner is dropped. HarfBuzz's `hb_blob_create` accepts
     /// `mode`, `user_data`, and `destroy` so callers passing
@@ -98,13 +109,9 @@ pub(crate) struct BlobInner {
 }
 
 impl BlobInner {
-    /// Internal: build a `BlobInner` around bytes the bridge layer
-    /// already has in an `Arc`. No destroy callback: the bridge
-    /// owns the bytes outright. Only the `subset` cargo feature
-    /// references this helper today; gate to silence dead-code
-    /// warnings when the feature is off.
-    #[cfg(feature = "subset")]
-    pub(crate) fn from_data(data: Arc<Vec<u8>>) -> Self {
+    /// Internal: build a `BlobInner` around bytes the crate produced
+    /// itself. No destroy callback: the blob owns the bytes outright.
+    pub(crate) fn from_data(data: Vec<u8>) -> Self {
         Self {
             data,
             user_destroy: None,
@@ -132,64 +139,48 @@ impl Drop for BlobInner {
     }
 }
 
+/// Refcounted blob. C holds the `Arc` pointer to this struct; see the
+/// `handle` module.
 #[repr(C)]
 pub struct hb_blob_t {
-    pub(crate) inner: Arc<BlobInner>,
+    pub(crate) inner: BlobInner,
 }
 
-impl hb_blob_t {
-    /// Internal: build the public wrapper around an existing
-    /// `BlobInner` Arc. Only the `subset` cargo feature uses this
-    /// helper today.
-    #[cfg(feature = "subset")]
-    pub(crate) fn from_inner(inner: Arc<BlobInner>) -> Self {
-        Self { inner }
-    }
-}
-
-/// The face is a parsed SFNT directory plus the bytes it borrows
+/// The face is a parsed SFNT directory plus the blob it borrows
 /// from. The `Face<'static>` is a lie: its borrow is actually
-/// rooted in `_data`'s payload, which lives at least as long as the
+/// rooted in `_blob`'s bytes, which live at least as long as the
 /// FaceInner. See the module-level lifetime erasure note.
 pub(crate) struct FaceInner {
-    _data: Arc<Vec<u8>>,
+    /// The blob the face was built from. HarfBuzz faces reference
+    /// their blob too, so the blob's destroy callback fires only once
+    /// every face (and font) built on it is gone.
+    _blob: Arc<hb_blob_t>,
     pub(crate) face: Face<'static>,
 }
 
 impl FaceInner {
-    /// Internal: build a FaceInner from an Arc'd byte buffer plus a
-    /// lifetime-erased `Face<'static>` already constructed against
-    /// the same bytes. Callers (the subset bridge) do the
-    /// `transmute::<Face<'_>, Face<'static>>` themselves so this
-    /// helper stays unsafe-free. Only the `subset` cargo feature
-    /// uses this constructor today.
-    #[cfg(feature = "subset")]
-    pub(crate) fn from_arc(data: Arc<Vec<u8>>, face: Face<'static>) -> Self {
-        Self { _data: data, face }
+    /// Internal: build a FaceInner from a blob plus a lifetime-erased
+    /// `Face<'static>` already constructed against the blob's bytes.
+    /// Callers do the `transmute::<Face<'_>, Face<'static>>`
+    /// themselves so this helper stays unsafe-free.
+    pub(crate) fn from_blob(blob: Arc<hb_blob_t>, face: Face<'static>) -> Self {
+        Self { _blob: blob, face }
     }
 }
 
 // SAFETY: Face<'_> is Clone + Send + Sync (it holds &[u8] + Vec<TableRecord>).
 // The 'static lifetime is fictitious; the actual backing storage is
-// `_data`, which is itself Send + Sync via Arc<Vec<u8>>. As long as
-// no thread observes the face after `_data` drops (which can't
+// `_blob`'s byte buffer, which is Send + Sync behind its Arc. As long
+// as no thread observes the face after `_blob` drops (which can't
 // happen because they're held in the same struct), the bound holds.
 unsafe impl Send for FaceInner {}
 unsafe impl Sync for FaceInner {}
 
+/// Refcounted face. C holds the `Arc` pointer to this struct; see the
+/// `handle` module.
 #[repr(C)]
 pub struct hb_face_t {
-    pub(crate) inner: Arc<FaceInner>,
-}
-
-impl hb_face_t {
-    /// Internal: build the public wrapper around an existing
-    /// `FaceInner` Arc. Used by the subset bridge to ship the result
-    /// of `sigilbuzz_subset::subset()` back as an `hb_face_t*`.
-    #[cfg(feature = "subset")]
-    pub(crate) fn from_inner(inner: Arc<FaceInner>) -> Self {
-        Self { inner }
-    }
+    pub(crate) inner: FaceInner,
 }
 
 /// Font binds a face to a render size and (optionally) variation
@@ -200,11 +191,13 @@ impl hb_face_t {
 /// before shaping, so contention is negligible.
 pub(crate) struct FontInner {
     // `_face` is the lifetime root for `state.font` (which holds a
-    // `Font<'static>` borrowed from this Arc, see SAFETY note below).
+    // `Font<'static>` borrowed from this face, see SAFETY note below).
+    // It is a reference to the same face object C sees, so a font keeps
+    // its face alive the way HarfBuzz fonts do.
     // The leading underscore signals "not for direct access" but a
     // few internal call sites still need to read it; those are
     // covered by the module-level `used_underscore_binding` allow.
-    pub(crate) _face: Arc<FaceInner>,
+    pub(crate) _face: Arc<hb_face_t>,
     pub(crate) state: spin_mutex::SpinMutex<FontState>,
 }
 
@@ -222,13 +215,16 @@ struct FontState {
 }
 
 // SAFETY: Font<'_> is Clone + Send + Sync; the lifetime erasure is
-// rooted in `_face._data`. See FaceInner SAFETY note.
+// rooted in `_face`, which keeps the face (and its blob) alive. See
+// the FaceInner SAFETY note.
 unsafe impl Send for FontInner {}
 unsafe impl Sync for FontInner {}
 
+/// Refcounted font. C holds the `Arc` pointer to this struct; see the
+/// `handle` module.
 #[repr(C)]
 pub struct hb_font_t {
-    pub(crate) inner: Arc<FontInner>,
+    pub(crate) inner: FontInner,
 }
 
 /// The shaping buffer: text in, glyphs out. HarfBuzz makes
@@ -255,9 +251,11 @@ struct BufferState {
     props_set: bool,
 }
 
+/// Refcounted buffer. C holds the `Arc` pointer to this struct; see
+/// the `handle` module.
 #[repr(C)]
 pub struct hb_buffer_t {
-    inner: Arc<BufferInner>,
+    inner: BufferInner,
 }
 
 // SAFETY: `BufferState` carries a `*const c_char` (`language`) that
@@ -455,42 +453,60 @@ pub struct hb_variation_t {
 // Blob
 // ---------------------------------------------------------------------------
 
-/// Empty / null sentinel returned in error paths. Matches HarfBuzz's
-/// "always return a valid pointer; callers may pass a null in to
-/// destroy and it's a no-op" contract.
+/// Fresh empty blob, used in error paths. HarfBuzz returns its inert
+/// empty blob there; sigilbuzz returns an ordinary empty blob that the
+/// caller destroys as usual (see the `handle` module).
 fn empty_blob() -> *mut hb_blob_t {
-    let inner = Arc::new(BlobInner {
-        data: Arc::new(Vec::new()),
-        user_destroy: None,
-        user_data: ptr::null_mut(),
-    });
-    Box::into_raw(Box::new(hb_blob_t { inner }))
+    handle::arc_into_raw(empty_blob_arc())
 }
 
+fn empty_blob_arc() -> Arc<hb_blob_t> {
+    Arc::new(hb_blob_t {
+        inner: BlobInner::from_data(Vec::new()),
+    })
+}
+
+/// Creates a blob holding a copy of `length` bytes at `data`.
+///
+/// sigilbuzz always copies, whatever `mode` says. `destroy` follows
+/// HarfBuzz's timing: it runs right away when there is nothing to
+/// keep (zero length or null data, which both yield an empty blob) and
+/// for `HB_MEMORY_MODE_DUPLICATE`, where HarfBuzz also copies up
+/// front; for every other mode it runs once, when the last reference
+/// to the blob (including the ones faces built on it hold) goes away.
+///
 /// # Safety
 /// `data` must point to `length` bytes (or be null with `length == 0`).
-/// `destroy`, when non-null, is called exactly once with `user_data`
-/// when the blob's refcount reaches zero.
+/// `destroy`, when non-null, must accept `user_data`.
 #[no_mangle]
 pub unsafe extern "C" fn hb_blob_create(
     data: *const c_char,
     length: c_uint,
-    _mode: hb_memory_mode_t,
+    mode: hb_memory_mode_t,
     user_data: *mut c_void,
     destroy: Option<hb_destroy_func_t>,
 ) -> *mut hb_blob_t {
     if length == 0 || data.is_null() {
+        if let Some(destroy) = destroy {
+            // SAFETY: caller-supplied callback that accepts `user_data`.
+            unsafe { destroy(user_data) };
+        }
         return empty_blob();
     }
     // SAFETY: caller asserts (data, length) is a valid byte range.
     let bytes = unsafe { slice::from_raw_parts(data.cast::<u8>(), length as usize) };
-    let owned = bytes.to_vec();
-    let inner = Arc::new(BlobInner {
-        data: Arc::new(owned),
-        user_destroy: destroy,
-        user_data,
-    });
-    Box::into_raw(Box::new(hb_blob_t { inner }))
+    let mut inner = BlobInner::from_data(bytes.to_vec());
+    if mode == HB_MEMORY_MODE_DUPLICATE {
+        if let Some(destroy) = destroy {
+            // SAFETY: caller-supplied callback that accepts `user_data`;
+            // the bytes are already copied, so the caller may free them.
+            unsafe { destroy(user_data) };
+        }
+    } else {
+        inner.user_destroy = destroy;
+        inner.user_data = user_data;
+    }
+    handle::into_raw(hb_blob_t { inner })
 }
 
 /// # Safety
@@ -509,37 +525,31 @@ pub unsafe extern "C" fn hb_blob_create_from_file(file_name: *const c_char) -> *
     let Ok(bytes) = std::fs::read(path_str) else {
         return empty_blob();
     };
-    let inner = Arc::new(BlobInner {
-        data: Arc::new(bytes),
-        user_destroy: None,
-        user_data: ptr::null_mut(),
-    });
-    Box::into_raw(Box::new(hb_blob_t { inner }))
+    handle::into_raw(hb_blob_t {
+        inner: BlobInner::from_data(bytes),
+    })
 }
 
+/// Releases one reference to `blob`. Null is a no-op.
+///
 /// # Safety
-/// `blob` must be null or a pointer previously returned by an
-/// `hb_blob_*` constructor.
+/// `blob` must be null or a live blob the caller holds a reference to.
 #[no_mangle]
 pub unsafe extern "C" fn hb_blob_destroy(blob: *mut hb_blob_t) {
-    if blob.is_null() {
-        return;
-    }
-    // SAFETY: caller-asserted non-null pointer originally from
-    // Box::into_raw. Reclaim and drop.
-    drop(unsafe { Box::from_raw(blob) });
+    // SAFETY: caller guarantees `blob` is null or a live handle it owns
+    // a reference to.
+    unsafe { handle::destroy(blob) };
 }
 
+/// Adds one reference to `blob` and returns `blob` itself. Null in,
+/// null out.
+///
 /// # Safety
-/// `blob` must be a valid `hb_blob_t*`.
+/// `blob` must be null or a live blob.
 #[no_mangle]
 pub unsafe extern "C" fn hb_blob_reference(blob: *mut hb_blob_t) -> *mut hb_blob_t {
-    if blob.is_null() {
-        return empty_blob();
-    }
-    // SAFETY: caller asserts validity.
-    let inner = unsafe { (*blob).inner.clone() };
-    Box::into_raw(Box::new(hb_blob_t { inner }))
+    // SAFETY: caller guarantees `blob` is null or a live handle.
+    unsafe { handle::reference(blob) }
 }
 
 /// # Safety
@@ -557,7 +567,7 @@ pub unsafe extern "C" fn hb_blob_get_data(
         return ptr::null();
     }
     // SAFETY: caller asserts validity.
-    let inner: &Arc<BlobInner> = unsafe { &(*blob).inner };
+    let inner: &BlobInner = unsafe { &(*blob).inner };
     let bytes: &[u8] = inner.data.as_slice();
     if !length.is_null() {
         // SAFETY: caller asserts length is writeable.
@@ -574,7 +584,7 @@ pub unsafe extern "C" fn hb_blob_get_length(blob: *mut hb_blob_t) -> c_uint {
         return 0;
     }
     // SAFETY: caller asserts validity.
-    let inner: &Arc<BlobInner> = unsafe { &(*blob).inner };
+    let inner: &BlobInner = unsafe { &(*blob).inner };
     inner.data.len() as c_uint
 }
 
@@ -582,8 +592,13 @@ pub unsafe extern "C" fn hb_blob_get_length(blob: *mut hb_blob_t) -> c_uint {
 // Face
 // ---------------------------------------------------------------------------
 
+/// Fresh empty face, used in error paths. Like [`empty_blob`], an
+/// ordinary object the caller destroys as usual.
 fn empty_face() -> *mut hb_face_t {
-    let data = Arc::new(Vec::new());
+    handle::arc_into_raw(empty_face_arc())
+}
+
+fn empty_face_arc() -> Arc<hb_face_t> {
     // An empty face cannot be constructed via `Face::parse_bytes`.
     // Forge one by parsing a four-byte zero header and accepting
     // the error; emit a placeholder FaceInner whose face is a
@@ -605,61 +620,66 @@ fn empty_face() -> *mut hb_face_t {
     // Lifetime-erase: the synthetic header is `'static`, so the
     // transmute is a no-op (it's already 'static).
     let face: Face<'static> = face;
-    let inner = Arc::new(FaceInner { _data: data, face });
-    Box::into_raw(Box::new(hb_face_t { inner }))
+    Arc::new(hb_face_t {
+        inner: FaceInner::from_blob(empty_blob_arc(), face),
+    })
 }
 
-/// Constructs a face from the bytes in `blob` at index `index`.
+/// Builds a face that references `blob` and borrows its bytes.
+/// Returns `None` when the bytes do not parse at `index`.
+pub(crate) fn face_from_blob(blob: Arc<hb_blob_t>, index: c_uint) -> Option<Arc<hb_face_t>> {
+    let parsed = Face::parse_bytes(blob.inner.data.as_slice(), index).ok()?;
+    // SAFETY: `parsed` borrows `blob.inner.data`, a heap buffer that is
+    // never resized and lives as long as the blob. The FaceInner built
+    // below holds a reference to that blob for its whole life, so the
+    // erased `'static` borrow never outlives the bytes.
+    let face_static: Face<'static> =
+        unsafe { core::mem::transmute::<Face<'_>, Face<'static>>(parsed) };
+    Some(Arc::new(hb_face_t {
+        inner: FaceInner::from_blob(blob, face_static),
+    }))
+}
+
+/// Constructs a face from the bytes in `blob` at index `index`. The
+/// face holds a reference to `blob`, so the caller may destroy its own
+/// blob reference right away. Bytes that do not parse yield an empty
+/// face (still a new reference the caller must destroy).
 ///
 /// # Safety
-/// `blob` must be valid.
+/// `blob` must be null or a live blob.
 #[no_mangle]
 pub unsafe extern "C" fn hb_face_create(blob: *mut hb_blob_t, index: c_uint) -> *mut hb_face_t {
     if blob.is_null() {
         return empty_face();
     }
-    // SAFETY: caller asserts validity.
-    let blob_inner = unsafe { (*blob).inner.clone() };
-    let bytes_arc: Arc<Vec<u8>> = blob_inner.data.clone();
-    let bytes_slice: &[u8] = bytes_arc.as_slice();
-    // Parse with the slice's natural lifetime, then transmute to
-    // 'static. SAFETY: the Arc clone we hold in FaceInner pins the
-    // bytes for the lifetime of the FaceInner; the transmute only
-    // erases a borrow that is in fact rooted in heap-stable storage.
-    let face = match Face::parse_bytes(bytes_slice, index) {
-        Ok(f) => f,
-        Err(_) => return empty_face(),
-    };
-    let face_static: Face<'static> =
-        unsafe { core::mem::transmute::<Face<'_>, Face<'static>>(face) };
-    let inner = Arc::new(FaceInner {
-        _data: bytes_arc,
-        face: face_static,
-    });
-    Box::into_raw(Box::new(hb_face_t { inner }))
+    // SAFETY: caller asserts `blob` is a live handle.
+    let blob = unsafe { handle::retain(blob.cast_const()) };
+    match face_from_blob(blob, index) {
+        Some(face) => handle::arc_into_raw(face),
+        None => empty_face(),
+    }
 }
 
+/// Releases one reference to `face`. Null is a no-op.
+///
 /// # Safety
-/// `face` must be null or valid.
+/// `face` must be null or a live face the caller holds a reference to.
 #[no_mangle]
 pub unsafe extern "C" fn hb_face_destroy(face: *mut hb_face_t) {
-    if face.is_null() {
-        return;
-    }
-    // SAFETY: caller-asserted.
-    drop(unsafe { Box::from_raw(face) });
+    // SAFETY: caller guarantees `face` is null or a live handle it owns
+    // a reference to.
+    unsafe { handle::destroy(face) };
 }
 
+/// Adds one reference to `face` and returns `face` itself. Null in,
+/// null out.
+///
 /// # Safety
-/// `face` must be valid.
+/// `face` must be null or a live face.
 #[no_mangle]
 pub unsafe extern "C" fn hb_face_reference(face: *mut hb_face_t) -> *mut hb_face_t {
-    if face.is_null() {
-        return empty_face();
-    }
-    // SAFETY: caller asserts validity.
-    let inner = unsafe { (*face).inner.clone() };
-    Box::into_raw(Box::new(hb_face_t { inner }))
+    // SAFETY: caller guarantees `face` is null or a live handle.
+    unsafe { handle::reference(face) }
 }
 
 /// # Safety
@@ -670,7 +690,7 @@ pub unsafe extern "C" fn hb_face_get_glyph_count(face: *mut hb_face_t) -> c_uint
         return 0;
     }
     // SAFETY: caller asserts validity.
-    let inner: &Arc<FaceInner> = unsafe { &(*face).inner };
+    let inner: &FaceInner = unsafe { &(*face).inner };
     inner
         .face
         .maxp()
@@ -686,7 +706,7 @@ pub unsafe extern "C" fn hb_face_get_upem(face: *mut hb_face_t) -> c_uint {
         return 0;
     }
     // SAFETY: caller asserts validity.
-    let inner: &Arc<FaceInner> = unsafe { &(*face).inner };
+    let inner: &FaceInner = unsafe { &(*face).inner };
     inner
         .face
         .head()
@@ -700,7 +720,7 @@ pub unsafe extern "C" fn hb_face_get_upem(face: *mut hb_face_t) -> c_uint {
 
 /// Internal: build the FontState's Font from coords and size.
 fn build_font(
-    face_inner: &Arc<FaceInner>,
+    face_inner: &FaceInner,
     x_scale: i32,
     _y_scale: i32,
     coords: &[f32],
@@ -722,50 +742,33 @@ fn build_font(
     }
 }
 
+/// Creates a font on `face`. The font holds a reference to `face`, so
+/// the caller may destroy its own face reference right away. A null
+/// face yields a font on a fresh empty face, as in HarfBuzz.
+///
 /// # Safety
-/// `face` must be valid.
+/// `face` must be null or a live face.
 #[no_mangle]
 pub unsafe extern "C" fn hb_font_create(face: *mut hb_face_t) -> *mut hb_font_t {
-    if face.is_null() {
-        // Build an empty font around the empty face. Callers that
-        // shape against this get an empty buffer back.
-        let face_ptr = empty_face();
-        // SAFETY: face_ptr was just constructed.
-        let face_inner = unsafe { (*face_ptr).inner.clone() };
-        // SAFETY: face_ptr was just Box::into_raw'd.
-        unsafe { hb_face_destroy(face_ptr) };
-        // upem fallback for empty face is 0; default to 1000.
-        let x_scale = 1000;
-        let y_scale = 1000;
-        let coords: Vec<f32> = Vec::new();
-        let font = build_font(&face_inner, x_scale, y_scale, &coords);
-        let state = FontState {
-            x_scale,
-            y_scale,
-            x_ppem: 0,
-            y_ppem: 0,
-            coords,
-            font,
-        };
-        let inner = Arc::new(FontInner {
-            _face: face_inner,
-            state: spin_mutex::SpinMutex::new(state),
-        });
-        return Box::into_raw(Box::new(hb_font_t { inner }));
-    }
-    // SAFETY: caller asserts validity.
-    let face_inner = unsafe { (*face).inner.clone() };
+    let face_ref: Arc<hb_face_t> = if face.is_null() {
+        empty_face_arc()
+    } else {
+        // SAFETY: caller asserts `face` is a live handle.
+        unsafe { handle::retain(face.cast_const()) }
+    };
     // Default x_scale / y_scale follow HarfBuzz: they default to
-    // upem so an unscaled font produces design-unit output.
+    // upem so an unscaled font produces design-unit output. A face
+    // without a usable `head` (including the empty face) uses 1000.
     let upem_signed = i32::from(
-        face_inner
+        face_ref
+            .inner
             .face
             .head()
             .map(|h| h.units_per_em)
             .unwrap_or(1000),
     );
     let coords: Vec<f32> = Vec::new();
-    let font = build_font(&face_inner, upem_signed, upem_signed, &coords);
+    let font = build_font(&face_ref.inner, upem_signed, upem_signed, &coords);
     let state = FontState {
         x_scale: upem_signed,
         y_scale: upem_signed,
@@ -774,34 +777,34 @@ pub unsafe extern "C" fn hb_font_create(face: *mut hb_face_t) -> *mut hb_font_t 
         coords,
         font,
     };
-    let inner = Arc::new(FontInner {
-        _face: face_inner,
-        state: spin_mutex::SpinMutex::new(state),
-    });
-    Box::into_raw(Box::new(hb_font_t { inner }))
+    handle::into_raw(hb_font_t {
+        inner: FontInner {
+            _face: face_ref,
+            state: spin_mutex::SpinMutex::new(state),
+        },
+    })
 }
 
+/// Releases one reference to `font`. Null is a no-op.
+///
 /// # Safety
-/// `font` must be null or valid.
+/// `font` must be null or a live font the caller holds a reference to.
 #[no_mangle]
 pub unsafe extern "C" fn hb_font_destroy(font: *mut hb_font_t) {
-    if font.is_null() {
-        return;
-    }
-    // SAFETY: caller-asserted.
-    drop(unsafe { Box::from_raw(font) });
+    // SAFETY: caller guarantees `font` is null or a live handle it owns
+    // a reference to.
+    unsafe { handle::destroy(font) };
 }
 
+/// Adds one reference to `font` and returns `font` itself. Null in,
+/// null out.
+///
 /// # Safety
-/// `font` must be valid.
+/// `font` must be null or a live font.
 #[no_mangle]
 pub unsafe extern "C" fn hb_font_reference(font: *mut hb_font_t) -> *mut hb_font_t {
-    if font.is_null() {
-        return ptr::null_mut();
-    }
-    // SAFETY: caller asserts validity.
-    let inner = unsafe { (*font).inner.clone() };
-    Box::into_raw(Box::new(hb_font_t { inner }))
+    // SAFETY: caller guarantees `font` is null or a live handle.
+    unsafe { handle::reference(font) }
 }
 
 /// # Safety
@@ -823,7 +826,7 @@ pub unsafe extern "C" fn hb_font_set_scale(font: *mut hb_font_t, x_scale: c_int,
     // lock; the raw pointer is solely used to bypass Rust's
     // partial-borrow check on disjoint fields.
     let coords_ref: &[f32] = unsafe { &*coords_ptr };
-    state.font = build_font(&inner._face, x_scale, y_scale, coords_ref);
+    state.font = build_font(&inner._face.inner, x_scale, y_scale, coords_ref);
 }
 
 /// # Safety
@@ -887,7 +890,7 @@ pub unsafe extern "C" fn hb_font_set_variations(
     };
     // Resolve user-space axis values through fvar / avar to
     // normalized coords, the format Font expects.
-    let face = &inner._face.face;
+    let face = &inner._face.inner.face;
     let coords = match (face.fvar(), face.avar()) {
         (Ok(Some(fvar)), avar_res) => {
             // Build a user-space vector: one entry per fvar axis,
@@ -926,7 +929,7 @@ pub unsafe extern "C" fn hb_font_set_variations(
     // `&state.coords` and `&mut state.font` simultaneously even
     // though the two fields don't overlap.
     let coords_ref: &[f32] = unsafe { &*coords_ptr };
-    state.font = build_font(&inner._face, state.x_scale, state.y_scale, coords_ref);
+    state.font = build_font(&inner._face.inner, state.x_scale, state.y_scale, coords_ref);
 }
 
 // ---------------------------------------------------------------------------
@@ -944,33 +947,34 @@ pub extern "C" fn hb_buffer_create() -> *mut hb_buffer_t {
         glyph_positions: Vec::new(),
         props_set: false,
     };
-    let inner = Arc::new(BufferInner {
-        state: spin_mutex::SpinMutex::new(state),
-    });
-    Box::into_raw(Box::new(hb_buffer_t { inner }))
+    handle::into_raw(hb_buffer_t {
+        inner: BufferInner {
+            state: spin_mutex::SpinMutex::new(state),
+        },
+    })
 }
 
+/// Releases one reference to `buffer`. Null is a no-op.
+///
 /// # Safety
-/// `buffer` must be null or valid.
+/// `buffer` must be null or a live buffer the caller holds a reference
+/// to.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_destroy(buffer: *mut hb_buffer_t) {
-    if buffer.is_null() {
-        return;
-    }
-    // SAFETY: caller-asserted.
-    drop(unsafe { Box::from_raw(buffer) });
+    // SAFETY: caller guarantees `buffer` is null or a live handle it
+    // owns a reference to.
+    unsafe { handle::destroy(buffer) };
 }
 
+/// Adds one reference to `buffer` and returns `buffer` itself. Null
+/// in, null out.
+///
 /// # Safety
-/// `buffer` must be valid.
+/// `buffer` must be null or a live buffer.
 #[no_mangle]
 pub unsafe extern "C" fn hb_buffer_reference(buffer: *mut hb_buffer_t) -> *mut hb_buffer_t {
-    if buffer.is_null() {
-        return ptr::null_mut();
-    }
-    // SAFETY: caller asserts validity.
-    let inner = unsafe { (*buffer).inner.clone() };
-    Box::into_raw(Box::new(hb_buffer_t { inner }))
+    // SAFETY: caller guarantees `buffer` is null or a live handle.
+    unsafe { handle::reference(buffer) }
 }
 
 /// # Safety

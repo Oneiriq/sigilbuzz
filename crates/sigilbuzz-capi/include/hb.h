@@ -83,7 +83,25 @@ typedef hb_tag_t hb_script_t;
 
 typedef const char *hb_language_t;
 
-/* ---------- Opaque handles ---------- */
+/* ---------- Opaque handles ----------
+ *
+ * Ownership follows HarfBuzz exactly: the pointer is the object.
+ *
+ *   - Every *_create call and every *_reference call gives the caller
+ *     one reference, which it releases with the matching *_destroy.
+ *   - hb_x_reference(p) returns p itself (not a copy), so
+ *     `hb_blob_reference(b); ... hb_blob_destroy(b); hb_blob_destroy(b);`
+ *     is balanced.
+ *   - Referencing NULL returns NULL; destroying NULL does nothing.
+ *   - A face references its blob and a font references its face, so the
+ *     caller may destroy a blob right after hb_face_create() and a face
+ *     right after hb_font_create().
+ *   - Where HarfBuzz would return its inert "empty" object (for example
+ *     from hb_blob_create() with length 0), sigilbuzz returns a fresh
+ *     empty object. Destroy it as usual; the same code is correct with
+ *     HarfBuzz, where destroying the inert object is a no-op.
+ *
+ * References may be taken and released from any thread. */
 
 typedef struct hb_blob_t   hb_blob_t;
 typedef struct hb_face_t   hb_face_t;
@@ -124,6 +142,10 @@ typedef struct hb_variation_t {
 
 /* ---------- Blob ---------- */
 
+/* sigilbuzz always copies `data`. `destroy` runs immediately when the
+ * blob ends up empty (length 0 or NULL data) or for
+ * HB_MEMORY_MODE_DUPLICATE, and otherwise once the last reference to
+ * the blob (including those held by faces) is gone, as in HarfBuzz. */
 hb_blob_t *hb_blob_create(const char       *data,
                           unsigned int      length,
                           hb_memory_mode_t  mode,
@@ -235,6 +257,8 @@ typedef struct hb_subset_input_t hb_subset_input_t;
 
 hb_subset_input_t *hb_subset_input_create(void);
 void               hb_subset_input_destroy(hb_subset_input_t *input);
+/* Each call returns a new reference to the input's set (the same set
+ * every time); the caller destroys it. Mutating it mutates the input. */
 hb_set_t          *hb_subset_input_unicode_set(hb_subset_input_t *input);
 hb_set_t          *hb_subset_input_glyph_set(hb_subset_input_t *input);
 hb_face_t         *hb_subset_or_fail(hb_face_t *face, hb_subset_input_t *input);
@@ -291,6 +315,7 @@ typedef void (*hb_paint_sweep_gradient_func_t)(hb_paint_funcs_t *funcs,
                                                float end_angle);
 
 hb_paint_funcs_t *hb_paint_funcs_create(void);
+hb_paint_funcs_t *hb_paint_funcs_reference(hb_paint_funcs_t *funcs);
 void              hb_paint_funcs_destroy(hb_paint_funcs_t *funcs);
 void              hb_paint_funcs_set_push_transform_func(hb_paint_funcs_t *funcs, hb_paint_push_transform_func_t cb);
 void              hb_paint_funcs_set_pop_transform_func(hb_paint_funcs_t *funcs, hb_paint_pop_transform_func_t cb);
