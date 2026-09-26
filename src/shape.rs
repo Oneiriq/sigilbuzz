@@ -89,6 +89,7 @@ mod dotted_circle;
 mod gpos;
 mod ignorables;
 mod kern;
+mod lig;
 mod native_direction;
 mod required;
 mod rotate;
@@ -383,10 +384,11 @@ fn apply_parsed_lookup_at(
                     return 1;
                 }
             }
-            ParsedGsubSubtable::Ligature(lig) => {
-                if let Some((out, positions)) = lig.apply_filtered(&ids.as_slice()[at..], filter) {
-                    substitute_glyph(&mut glyphs[at], out);
-                    drain_ligature_components(glyphs, at, &positions);
+            ParsedGsubSubtable::Ligature(ligature) => {
+                if let Some((out, positions)) =
+                    ligature.apply_filtered(&ids.as_slice()[at..], filter)
+                {
+                    lig::ligate(glyphs, at, &positions, out, gdef, substitute_glyph);
                     ids.resync(glyphs);
                     // Ligature emits 1 glyph from N matched components.
                     // The cursor must advance past the ligature output
@@ -2296,12 +2298,13 @@ fn apply_gsub_lookup_at(
                 }
             }
             gsub_lt::LIGATURE => {
-                let Ok(lig) = Ligature::parse(inner_bytes) else {
+                let Ok(ligature) = Ligature::parse(inner_bytes) else {
                     continue;
                 };
-                if let Some((out, positions)) = lig.apply_filtered(&ids.as_slice()[at..], &filter) {
-                    substitute_glyph(&mut glyphs[at], out);
-                    drain_ligature_components(glyphs, at, &positions);
+                if let Some((out, positions)) =
+                    ligature.apply_filtered(&ids.as_slice()[at..], &filter)
+                {
+                    lig::ligate(glyphs, at, &positions, out, gdef, substitute_glyph);
                     let span = positions.last().copied().map_or(0, |p| p + 1);
                     ids.resync(glyphs);
                     return span;
@@ -2349,35 +2352,6 @@ fn apply_gsub_lookup_at(
         }
     }
     0
-}
-
-/// Collapses a successful ligature match spanning `at..=at+span-1`
-/// into a single glyph at `at`, preserving the skipped glyphs
-/// (typically marks) that sat between the matched components. The
-/// ligature glyph id is assumed to be already written to
-/// `glyphs[at]`; this helper only performs the drain.
-///
-/// `positions` is the relative-offset list returned by
-/// [`Ligature::apply_filtered`]: `positions[0] == 0` (the
-/// already-consumed first component), and every subsequent entry is
-/// the index of a matched component inside `glyphs[at..]`. Any
-/// index strictly inside the span that is *not* listed is a skipped
-/// glyph and stays in place.
-fn drain_ligature_components(glyphs: &mut Vec<Glyph>, at: usize, positions: &[usize]) {
-    if positions.len() <= 1 {
-        return;
-    }
-    // The matched span shares one cluster, the smallest in it, as in
-    // HarfBuzz's merge_clusters (ligate_input). The first component is
-    // not always the smallest: text shaped in reversed grapheme order
-    // (see `native_direction`) runs its clusters downward.
-    let end = (at + positions.last().map_or(1, |p| p + 1)).min(glyphs.len());
-    merge_clusters(glyphs, at, end);
-    // Iterate high-to-low so earlier indices stay valid while we
-    // remove later ones.
-    for rel in positions.iter().skip(1).rev() {
-        glyphs.remove(at + rel);
-    }
 }
 
 /// HarfBuzz's `hb_buffer_t::merge_clusters` for `glyphs[start..end]`:
@@ -2582,6 +2556,8 @@ fn expand_glyph_in_place(glyphs: &mut Vec<Glyph>, at: usize, seq: &[u16]) -> Opt
         g.indic_position = source_pos;
         glyphs.insert(at + i, g);
     }
+    // Component numbering for GPOS mark attachment (see `lig`).
+    lig::record_multiple(glyphs, at, seq.len());
     Some(seq.len())
 }
 
@@ -2829,6 +2805,10 @@ fn apply_gpos_feature_in_scripts_with_var(
                 gdef,
                 filter: &filter,
                 lookup_flag: lookup.flag(),
+                mark_filtering_set: lookup.mark_filtering_set(),
+                // HarfBuzz registers `mark` and `mkmk` with manual
+                // joiners: their iteration does not pass over ZWJ.
+                ignore_zwj: !matches!(&tag, b"mark" | b"mkmk"),
                 var,
             };
             attach::apply_lookup(&attach_subtables, glyphs, att, &cx);
@@ -2936,6 +2916,8 @@ fn apply_gpos_lookup_at(
                     gdef,
                     filter: &filter,
                     lookup_flag: lookup.flag(),
+                    mark_filtering_set: lookup.mark_filtering_set(),
+                    ignore_zwj: true,
                     var,
                 };
                 if attach::apply_at(&sub, glyphs, att, &cx, at) {
@@ -4014,8 +3996,12 @@ mod tests {
         let mut glyphs = alloc::vec![Glyph::new(1, 0), g];
         assert_eq!(expand_glyph_in_place(&mut glyphs, 1, &[5, 6]), Some(2));
         assert_eq!(glyphs.len(), 3);
-        for out in &glyphs[1..] {
-            assert_eq!(out.unicode_props, unicode_prop::NON_JOINER);
+        for (i, out) in glyphs[1..].iter().enumerate() {
+            // The low bits are the Unicode properties; the ligature
+            // bookkeeping above them numbers the outputs.
+            assert_eq!(out.unicode_props & 0x7F, unicode_prop::NON_JOINER);
+            assert!(lig::is_multiplied(out));
+            assert_eq!(usize::from(lig::lig_comp(out)), i);
             assert_eq!(out.cluster, 2);
         }
     }

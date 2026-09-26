@@ -22,7 +22,7 @@ impl<'f> Skipper<'f> {
     }
 
     /// True when iteration passes over `g`.
-    fn skips(&self, g: &Glyph) -> bool {
+    pub(super) fn skips(&self, g: &Glyph) -> bool {
         if self.filter.is_skipped(g.glyph_id as u16) {
             return true;
         }
@@ -34,5 +34,12 @@ impl<'f> Skipper<'f> {
     /// First glyph at or after `from` that iteration stops at.
     pub(super) fn next(&self, glyphs: &[Glyph], from: usize) -> Option<usize> {
         (from..glyphs.len()).find(|&k| !self.skips(&glyphs[k]))
+    }
+
+    /// Nearest glyph before `before` that iteration stops at.
+    pub(super) fn prev(&self, glyphs: &[Glyph], before: usize) -> Option<usize> {
+        (0..before.min(glyphs.len()))
+            .rev()
+            .find(|&k| !self.skips(&glyphs[k]))
     }
 }

@@ -33,13 +33,17 @@
 
 use alloc::vec::Vec;
 
-use super::VarCtx;
+use super::gpos::Skipper;
+use super::{lig, VarCtx};
 use crate::buffer::{Direction, Glyph};
 use crate::tables::gdef::{Gdef, GlyphClass};
 use crate::tables::gpos::{
     lookup_type as gpos_lt, CursivePos, MarkAttachment, MarkBasePos, MarkLigaPos, MarkMarkPos,
 };
-use crate::tables::layout::{MatchFilter, LOOKUP_FLAG_RIGHT_TO_LEFT};
+use crate::tables::layout::{
+    MatchFilter, LOOKUP_FLAG_IGNORE_BASE_GLYPHS, LOOKUP_FLAG_IGNORE_LIGATURES,
+    LOOKUP_FLAG_IGNORE_MARKS, LOOKUP_FLAG_RIGHT_TO_LEFT,
+};
 
 /// How a glyph hangs from its parent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -78,8 +82,13 @@ pub(super) struct Attach<'s> {
 pub(super) struct LookupCx<'c> {
     pub(super) gdef: Option<&'c Gdef<'c>>,
     pub(super) filter: &'c MatchFilter<'c>,
-    /// Raw `LookupFlag`; cursive attachment reads the RightToLeft bit.
+    /// Raw `LookupFlag`; cursive attachment reads the RightToLeft bit
+    /// and mark-to-mark keeps its mark-filtering part.
     pub(super) lookup_flag: u16,
+    /// The lookup's mark filtering set index, when it has one.
+    pub(super) mark_filtering_set: Option<u16>,
+    /// Whether iteration passes over ZWJ (HarfBuzz's `auto_zwj`).
+    pub(super) ignore_zwj: bool,
     pub(super) var: &'c VarCtx<'c>,
 }
 
@@ -154,6 +163,9 @@ pub(super) fn apply_lookup(
 
 /// Tries one attachment subtable on the glyph at `at`. Returns `true`
 /// when it attached, so the caller stops trying later subtables.
+///
+/// As in HarfBuzz, the glyph at `at` only has to be in the subtable's
+/// mark (or cursive) coverage; its GDEF class is not checked.
 pub(super) fn apply_at(
     sub: &AttachSubtable<'_>,
     glyphs: &mut [Glyph],
@@ -164,17 +176,19 @@ pub(super) fn apply_at(
     if at >= glyphs.len() || at >= att.slots.len() {
         return false;
     }
+    let mark_gid = glyphs[at].glyph_id as u16;
     match sub {
         AttachSubtable::Cursive(cp) => apply_cursive(cp, glyphs, att, cx, at),
         AttachSubtable::MarkBase(mbp, bytes) => {
-            let Some(gdef) = cx.gdef else {
-                return false;
-            };
-            let mark_gid = glyphs[at].glyph_id as u16;
-            if !gdef.glyph_class(mark_gid).is_mark() {
+            if !mbp.covers_mark(mark_gid) {
                 return false;
             }
-            let Some(base) = preceding_non_mark(gdef, glyphs, at) else {
+            // HarfBuzz issue 4124: a glyph the multiple-substitution
+            // rule rejects still serves as the base when the subtable
+            // covers it.
+            let Some(base) = find_base(glyphs, at, cx, |j| {
+                accepts_as_base(glyphs, j, cx.gdef) || mbp.covers_base(glyphs[j].glyph_id as u16)
+            }) else {
                 return false;
             };
             let Some(pair) = mbp.attach(mark_gid, glyphs[base].glyph_id as u16) else {
@@ -184,65 +198,110 @@ pub(super) fn apply_at(
             true
         }
         AttachSubtable::MarkLiga(mlp, bytes) => {
-            let Some(gdef) = cx.gdef else {
-                return false;
-            };
-            let mark_gid = glyphs[at].glyph_id as u16;
-            if !gdef.glyph_class(mark_gid).is_mark() {
+            if !mlp.covers_mark(mark_gid) {
                 return false;
             }
-            let Some(lig) = preceding_non_mark(gdef, glyphs, at) else {
+            let Some(lig) = find_base(glyphs, at, cx, |_| true) else {
                 return false;
             };
             let lig_gid = glyphs[lig].glyph_id as u16;
-            // Component choice: how many input codepoints after the
-            // ligature's first cluster the mark belongs to. Falls back
-            // to component 0 when the subtable has no anchor there.
-            let delta = glyphs[at].cluster.saturating_sub(glyphs[lig].cluster);
-            let component = delta.min(u32::from(u16::MAX)) as u16;
-            let Some(pair) = mlp
-                .attach(mark_gid, lig_gid, component)
-                .or_else(|| mlp.attach(mark_gid, lig_gid, 0))
-            else {
+            let Some(comp_count) = mlp.component_count(lig_gid).filter(|&n| n > 0) else {
+                return false;
+            };
+            // A mark that was inside this ligature when it formed
+            // carries the ligature's id and the component it followed;
+            // any other mark goes on the last component.
+            let lig_id = lig::lig_id(&glyphs[lig]);
+            let mark_comp = u16::from(lig::lig_comp(&glyphs[at]));
+            let same_ligature = lig_id != 0 && lig_id == lig::lig_id(&glyphs[at]) && mark_comp > 0;
+            let component = if same_ligature {
+                mark_comp.min(comp_count)
+            } else {
+                comp_count
+            } - 1;
+            let Some(pair) = mlp.attach(mark_gid, lig_gid, component) else {
                 return false;
             };
             attach_mark(glyphs, att, at, lig, &pair, bytes, cx.var);
             true
         }
         AttachSubtable::MarkMark(mmp, bytes) => {
-            let Some(gdef) = cx.gdef else {
+            if !mmp.covers_mark1(mark_gid) {
+                return false;
+            }
+            // The previous glyph the lookup's mark filtering keeps,
+            // with the ignore-base / -ligature / -mark flags dropped:
+            // it must be a mark, or there is nothing to stack on.
+            let flag = cx.lookup_flag
+                & !(LOOKUP_FLAG_IGNORE_BASE_GLYPHS
+                    | LOOKUP_FLAG_IGNORE_LIGATURES
+                    | LOOKUP_FLAG_IGNORE_MARKS);
+            let filter = MatchFilter::for_lookup(flag, cx.gdef, cx.mark_filtering_set);
+            let Some(prev) = Skipper::new(&filter, cx.ignore_zwj).prev(glyphs, at) else {
                 return false;
             };
-            if at == 0 {
+            if !is_mark(&glyphs[prev], cx.gdef) || !marks_share_a_component(glyphs, at, prev) {
                 return false;
             }
-            let mark1_gid = glyphs[at].glyph_id as u16;
-            if !gdef.glyph_class(mark1_gid).is_mark() {
-                return false;
-            }
-            // The mark stacks onto the glyph right before it, which
-            // must itself be a mark.
-            let mark2 = at - 1;
-            let mark2_gid = glyphs[mark2].glyph_id as u16;
-            if !gdef.glyph_class(mark2_gid).is_mark() {
-                return false;
-            }
-            let Some(pair) = mmp.attach(mark1_gid, mark2_gid) else {
+            let Some(pair) = mmp.attach(mark_gid, glyphs[prev].glyph_id as u16) else {
                 return false;
             };
-            attach_mark(glyphs, att, at, mark2, &pair, bytes, cx.var);
+            attach_mark(glyphs, att, at, prev, &pair, bytes, cx.var);
             true
         }
     }
 }
 
-/// Nearest glyph before `at` that GDEF does not class as a mark: the
-/// base (or ligature) a mark attaches to. Unclassified glyphs count as
-/// bases so fonts with sparse GDEF classes still attach.
-fn preceding_non_mark(gdef: &Gdef<'_>, glyphs: &[Glyph], at: usize) -> Option<usize> {
+/// True when GDEF classes the glyph as a mark.
+fn is_mark(g: &Glyph, gdef: Option<&Gdef<'_>>) -> bool {
+    gdef.is_some_and(|d| d.glyph_class(g.glyph_id as u16) == GlyphClass::Mark)
+}
+
+/// The glyph a mark at `at` attaches to: the nearest earlier glyph the
+/// skipping iterator stops at when it ignores marks (and, like every
+/// GPOS iteration, default-ignorable characters), whatever the
+/// lookup's own flags say. `accept` can turn a candidate down, which
+/// passes over it like a mark.
+fn find_base(
+    glyphs: &[Glyph],
+    at: usize,
+    cx: &LookupCx<'_>,
+    accept: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    let filter = MatchFilter::for_lookup(LOOKUP_FLAG_IGNORE_MARKS, cx.gdef, None);
+    let skipper = Skipper::new(&filter, cx.ignore_zwj);
     (0..at)
         .rev()
-        .find(|&j| gdef.glyph_class(glyphs[j].glyph_id as u16) != GlyphClass::Mark)
+        .find(|&j| !skipper.skips(&glyphs[j]) && accept(j))
+}
+
+/// HarfBuzz's mark-to-base `accept`: of the glyphs a multiple
+/// substitution produced, a mark only attaches to the first one
+/// (issue 740), unless a mark separates it from its predecessor
+/// (issue 1020).
+fn accepts_as_base(glyphs: &[Glyph], j: usize, gdef: Option<&Gdef<'_>>) -> bool {
+    let g = &glyphs[j];
+    if !lig::is_multiplied(g) || lig::lig_comp(g) == 0 || j == 0 {
+        return true;
+    }
+    let prev = &glyphs[j - 1];
+    is_mark(prev, gdef)
+        || !lig::is_multiplied(prev)
+        || lig::lig_id(g) != lig::lig_id(prev)
+        || lig::lig_comp(g) != lig::lig_comp(prev) + 1
+}
+
+/// HarfBuzz's mark-to-mark ligature check: two marks stack when they
+/// belong to the same base, or to the same component of the same
+/// ligature, or when one of them is itself a ligature of marks.
+fn marks_share_a_component(glyphs: &[Glyph], mark1: usize, mark2: usize) -> bool {
+    let (id1, id2) = (lig::lig_id(&glyphs[mark1]), lig::lig_id(&glyphs[mark2]));
+    let (comp1, comp2) = (lig::lig_comp(&glyphs[mark1]), lig::lig_comp(&glyphs[mark2]));
+    if id1 == id2 {
+        id1 == 0 || comp1 == comp2
+    } else {
+        (id1 > 0 && comp1 == 0) || (id2 > 0 && comp2 == 0)
+    }
 }
 
 /// Records a mark attachment of `mark` onto `parent`: the mark's offset
@@ -285,10 +344,7 @@ fn apply_cursive(
     let Some(entry) = cp.entry(glyphs[j].glyph_id as u16) else {
         return false;
     };
-    let Some(i) = (0..j)
-        .rev()
-        .find(|&k| !cx.filter.is_skipped(glyphs[k].glyph_id as u16))
-    else {
+    let Some(i) = Skipper::new(cx.filter, cx.ignore_zwj).prev(glyphs, j) else {
         return false;
     };
     let Some(exit) = cp.exit(glyphs[i].glyph_id as u16) else {

@@ -179,6 +179,27 @@ fn pure_arabic_corpus_matches_rustybuzz_glyph_for_glyph() {
     }
 }
 
+/// Marks around lam-alef and stacked marks. Amiri draws lam-alef as two
+/// joined glyphs, so a fatha before or after the alef attaches to the
+/// lam or the alef as a base; shadda + fatha exercises mark-to-mark
+/// stacking, whose backward search and component check follow
+/// HarfBuzz's MarkMarkPos.
+const STACKED_MARK_CORPUS: &[&str] = &[
+    "\u{0644}\u{064E}\u{0627}",                         // lam fatha alef
+    "\u{0644}\u{0627}\u{064E}",                         // lam alef fatha
+    "\u{0644}\u{064E}\u{0627}\u{064B}",                 // one mark on each component
+    "\u{0644}\u{0651}\u{064E}\u{0627}",                 // shadda + fatha stacked on lam
+    "\u{0628}\u{0644}\u{064E}\u{0627}\u{064E}",         // beh, then lam-alef with two marks
+    "\u{0627}\u{0644}\u{0644}\u{0651}\u{064E}\u{0647}", // allah with shadda and fatha
+];
+
+#[test]
+fn marks_around_lam_alef_and_stacked_marks_match_rustybuzz() {
+    for &text in STACKED_MARK_CORPUS {
+        assert_parity_on(text);
+    }
+}
+
 #[test]
 fn zwj_and_zwnj_corpus_matches_rustybuzz() {
     for &text in ZWJ_CORPUS {

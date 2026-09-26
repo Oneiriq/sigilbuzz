@@ -225,12 +225,27 @@ fn run_lookup(
     direction: Direction,
     var: &VarCtx<'_>,
 ) -> Vec<Slot> {
+    run_lookup_zwj(subs, glyphs, gdef, lookup_flag, direction, var, true)
+}
+
+/// [`run_lookup`] with the lookup's `auto_zwj` setting spelled out.
+fn run_lookup_zwj(
+    subs: &[AttachSubtable<'_>],
+    glyphs: &mut [Glyph],
+    gdef: Option<&Gdef<'_>>,
+    lookup_flag: u16,
+    direction: Direction,
+    var: &VarCtx<'_>,
+    ignore_zwj: bool,
+) -> Vec<Slot> {
     let mut slots = new_slots(glyphs.len());
     let filter = MatchFilter::for_lookup(lookup_flag, gdef, None);
     let cx = LookupCx {
         gdef,
         filter: &filter,
         lookup_flag,
+        mark_filtering_set: None,
+        ignore_zwj,
         var,
     };
     let mut att = Attach {
@@ -491,12 +506,10 @@ fn first_matching_subtable_wins() {
 }
 
 #[test]
-fn mark_lookups_need_gdef_and_respect_the_lookup_filter() {
+fn mark_lookups_respect_the_lookup_filter() {
     let bytes = mark_attach_subtable(2, &anchor1(0, 0), 1, &anchor1(100, 0));
     let subs = [AttachSubtable::parse(gpos_lt::MARK_TO_BASE, &bytes).unwrap()];
     let mut glyphs = vec![glyph(1, 600), glyph(2, 0)];
-    let slots = run_lookup(&subs, &mut glyphs, None, 0, Direction::Ltr, &VarCtx::none());
-    assert_eq!(slots[1], Slot::default(), "no GDEF, no mark classes");
 
     // IgnoreMarks on the lookup skips the mark itself.
     let gdef_raw = gdef_bytes(&[2], &[]);
@@ -526,6 +539,8 @@ fn mark_mark_stacks_onto_the_previous_mark() {
         gdef: Some(&gdef),
         filter: &filter,
         lookup_flag: 0,
+        mark_filtering_set: None,
+        ignore_zwj: true,
         var: &var,
     };
     let mut att = Attach {
@@ -540,36 +555,6 @@ fn mark_mark_stacks_onto_the_previous_mark() {
     resolve_attachments(&mut glyphs, &mut slots, Direction::Ltr);
     // m1: 100 - 600; m2: 10 + m1 - adv(m1).
     assert_eq!(offsets(&glyphs), vec![(0, 0), (-500, 500), (-490, 800)]);
-}
-
-#[test]
-fn mark_to_ligature_picks_the_component_by_cluster() {
-    let bytes = mark_liga_subtable(2, 1, &[100, 400]);
-    let subs = [AttachSubtable::parse(gpos_lt::MARK_TO_LIGATURE, &bytes).unwrap()];
-    let gdef_raw = gdef_bytes(&[2], &[1]);
-    let gdef = Gdef::parse(&gdef_raw).unwrap();
-    // Ligature from clusters 0..1, mark from cluster 1: component 1.
-    let mut glyphs = vec![glyph(1, 800), Glyph::new(2, 1)];
-    run_lookup(
-        &subs,
-        &mut glyphs,
-        Some(&gdef),
-        0,
-        Direction::Ltr,
-        &VarCtx::none(),
-    );
-    assert_eq!(glyphs[1].x_offset, 400);
-    // Out-of-range component falls back to component 0.
-    let mut glyphs = vec![glyph(1, 800), Glyph::new(2, 9)];
-    run_lookup(
-        &subs,
-        &mut glyphs,
-        Some(&gdef),
-        0,
-        Direction::Ltr,
-        &VarCtx::none(),
-    );
-    assert_eq!(glyphs[1].x_offset, 100);
 }
 
 #[test]
@@ -737,6 +722,8 @@ fn cursive_reattachment_reverses_the_old_chain() {
         gdef: None,
         filter: &filter,
         lookup_flag: 0,
+        mark_filtering_set: None,
+        ignore_zwj: true,
         var: &var,
     };
     apply_lookup(&ltr_flagless, &mut glyphs, &mut att, &cx);
@@ -748,6 +735,8 @@ fn cursive_reattachment_reverses_the_old_chain() {
         gdef: None,
         filter: &filter,
         lookup_flag: LOOKUP_FLAG_RIGHT_TO_LEFT,
+        mark_filtering_set: None,
+        ignore_zwj: true,
         var: &var,
     };
     apply_lookup(&rtl_flagged, &mut glyphs, &mut att, &cx);
@@ -779,6 +768,8 @@ fn cursive_separates_a_parent_attached_to_its_new_child() {
             gdef: None,
             filter: &filter,
             lookup_flag: flag,
+            mark_filtering_set: None,
+            ignore_zwj: true,
             var: &var,
         };
         apply_lookup(&subs, &mut glyphs, &mut att, &cx);
@@ -801,6 +792,8 @@ fn apply_at_ignores_positions_past_the_end() {
         gdef: None,
         filter: &filter,
         lookup_flag: 0,
+        mark_filtering_set: None,
+        ignore_zwj: true,
         var: &var,
     };
     let mut att = Attach {
@@ -816,7 +809,6 @@ fn parse_only_accepts_attachment_lookup_types() {
     let bytes = simple_cursive();
     assert!(AttachSubtable::parse(gpos_lt::PAIR_ADJUSTMENT, &bytes).is_none());
     assert!(AttachSubtable::parse(gpos_lt::MARK_TO_BASE, &[0, 1]).is_none());
-    assert!(AttachSubtable::handles(gpos_lt::CURSIVE_ATTACHMENT));
-    assert!(AttachSubtable::handles(gpos_lt::MARK_TO_MARK));
-    assert!(!AttachSubtable::handles(gpos_lt::SINGLE_ADJUSTMENT));
 }
+
+mod rules;

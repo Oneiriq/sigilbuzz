@@ -90,6 +90,12 @@ impl<'a> MarkMarkPos<'a> {
         })
     }
 
+    /// True when `glyph_id` is in the mark1 (attaching mark) coverage.
+    #[must_use]
+    pub fn covers_mark1(&self, glyph_id: u16) -> bool {
+        self.mark1_coverage.contains(glyph_id)
+    }
+
     /// Tries to attach the upper mark `mark1_gid` onto the lower mark
     /// `mark2_gid`. Returns the anchor pair when both are covered and
     /// `mark2` has an anchor for `mark1`'s class; `None` otherwise.
@@ -327,6 +333,7 @@ mod tests {
         );
         let mmp = MarkMarkPos::parse(&bytes).unwrap();
         let attach = mmp.attach(30, 20).unwrap();
+        assert!(mmp.covers_mark1(30) && !mmp.covers_mark1(20));
         assert_eq!((attach.mark_anchor.x, attach.mark_anchor.y), (5, 0));
         assert_eq!((attach.base_anchor.x, attach.base_anchor.y), (5, 800));
     }

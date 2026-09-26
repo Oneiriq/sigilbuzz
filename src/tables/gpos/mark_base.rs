@@ -111,6 +111,19 @@ impl<'a> MarkBasePos<'a> {
         })
     }
 
+    /// True when `glyph_id` is in the mark coverage: the subtable can
+    /// attach this glyph as a mark.
+    #[must_use]
+    pub fn covers_mark(&self, glyph_id: u16) -> bool {
+        self.mark_coverage.contains(glyph_id)
+    }
+
+    /// True when `glyph_id` is in the base coverage.
+    #[must_use]
+    pub fn covers_base(&self, glyph_id: u16) -> bool {
+        self.base_coverage.contains(glyph_id)
+    }
+
     /// Tries to attach `mark_gid` onto `base_gid`. Returns the pair
     /// of anchors when both glyphs are covered and the base has an
     /// anchor for the mark's class; `None` otherwise (including
@@ -384,6 +397,8 @@ mod tests {
             build_mark_base_pos(&[20], &[5], 1, &[(0, (0, 0))], &[alloc::vec![Some((0, 0))]]);
         let mbp = MarkBasePos::parse(&bytes).unwrap();
         assert!(mbp.attach(21, 5).is_none());
+        assert!(mbp.covers_mark(20) && !mbp.covers_mark(5));
+        assert!(mbp.covers_base(5) && !mbp.covers_base(20));
     }
 
     #[test]
