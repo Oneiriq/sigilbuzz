@@ -43,9 +43,11 @@
 //!   class-collapse fmt-1 fallback), 3 (cursive), 4 / 5 / 6 (mark
 //!   attachment), 7 (context), 8 (chained context), 9 (extension)**:
 //!   full byte-level rewriters. See [`crate::gpos`].
-//! - **GDEF GlyphClassDef + MarkAttachClassDef**: full ClassDef
-//!   rewriter via [`crate::classdef`]. AttachList, LigCaretList,
-//!   MarkGlyphSetsDef, ItemVariationStore drop.
+//! - **GDEF**: GlyphClassDef and MarkAttachClassDef through the
+//!   ClassDef rewriter, AttachList and LigCaretList remapped through
+//!   their Coverage, MarkGlyphSetsDef remapped set by set with stable
+//!   indices, and the ItemVariationStore carried verbatim when
+//!   variations are retained. See [`crate::gdef`].
 //!
 //! Per-type rewriters slot in here one at a time; the per-type module
 //! call sites are stable, so adding a new lookup-type rewriter does
@@ -245,7 +247,7 @@ pub(crate) fn decide(
         Decision::Drop
     };
     let gdef = if has_gdef {
-        match gdef::rewrite_gdef(face, &map) {
+        match gdef::rewrite_gdef(face, &map, input.retain_variations)? {
             Some(b) => Decision::Rewrite(b),
             None => Decision::Drop,
         }

@@ -1,106 +1,260 @@
 //! GDEF byte-level rewriter.
 //!
-//! Walks the source `GDEF` and produces a new one whose gid-keyed
-//! subtables (`GlyphClassDef`, `MarkAttachClassDef`) are remapped
-//! through the caller's [`GidMap`].
+//! Walks the source `GDEF` and produces a new one whose glyph-keyed
+//! subtables are remapped through the caller's [`GidMap`].
 //!
 //! # Per-subtable coverage
 //!
-//! As of this commit the rewriter ships byte-level support for:
+//! - **GlyphClassDef** and **MarkAttachClassDef**: ClassDef remap
+//!   (dropped glyphs filtered out, kept glyphs renumbered, format
+//!   picked by the emitter).
+//! - **AttachList**: Coverage remap; each kept glyph's AttachPoint is
+//!   copied in the new Coverage order. See [`attach_list`].
+//! - **LigCaretList**: Coverage remap; each kept ligature's LigGlyph is
+//!   rebuilt from copies of its CaretValues (formats 1, 2 and 3, the
+//!   last with its Device / VariationIndex table). See [`lig_caret`].
+//! - **MarkGlyphSetsDef**: every set's Coverage is remapped, and set
+//!   indices stay stable (a set that loses all its glyphs becomes an
+//!   empty Coverage) because lookups name sets by index. See
+//!   [`mark_glyph_sets`].
+//! - **ItemVariationStore**: copied verbatim when the caller keeps
+//!   variations. It is not keyed by glyph id, and the GPOS and caret
+//!   VariationIndex tables that reach into it keep their `(outer,
+//!   inner)` indices. A static subset drops it, and the GPOS and caret
+//!   rewriters clear every VariationIndex so nothing points into it.
 //!
-//! - **GlyphClassDef**: ClassDef remap (filter dropped gids out, then
-//!   remap to new gids; auto-format-pick via the existing emitter).
-//! - **MarkAttachClassDef**: ClassDef remap, same shape as
-//!   GlyphClassDef.
+//! The output header carries the lowest version that can hold what
+//! survived: 1.3 with an ItemVariationStore, else 1.2 with a
+//! MarkGlyphSetsDef, else 1.0. The whole table is dropped only when no
+//! subtable has anything left.
 //!
-//! Other GDEF subtables (`AttachList`, `LigCaretList`,
-//! `MarkGlyphSetsDef`, `ItemVariationStore`) are dropped from the
-//! rewritten output. Most callers that disable layout-aware shaping
-//! for a heavy subset don't notice because GPOS drops too (see
-//! [`crate::gpos`]) and these ancillary tables are only consulted
-//! during shaping.
-//!
-//! Issue tracking the remaining GDEF subtables: see the sibling issue
-//! filed alongside this module.
+//! Structural errors in the subtables (truncation, unknown formats)
+//! surface as [`SubsetError::Parse`] with the byte offset from the
+//! start of the GDEF table.
+
+mod attach_list;
+mod item_var_store;
+mod lig_caret;
+mod mark_glyph_sets;
+mod read;
 
 use alloc::vec::Vec;
 
+use sigilbuzz::Error;
+
 use crate::classdef::emit_classdef;
+use crate::coverage::emit_coverage_from_glyphs;
+use crate::device::Dedup;
 use crate::layout::{parse_classdef_pairs_from_bytes, GidMap};
+use crate::SubsetError;
+use read::{u16_at, u32_at};
 
-/// Rewrites a `GDEF` table. Returns `None` if every contained
-/// subtable drops to nothing.
-pub(crate) fn rewrite_gdef(face: &sigilbuzz::Face<'_>, map: &GidMap) -> Option<Vec<u8>> {
-    let bytes = face.table_bytes(sigilbuzz::tables::tag::GDEF).ok()?;
-    if bytes.len() < 12 {
-        return None;
-    }
-
-    // GDEF header (v1.0):
-    //   u16 majorVersion
-    //   u16 minorVersion
-    //   Offset16 glyphClassDefOffset
-    //   Offset16 attachListOffset
-    //   Offset16 ligCaretListOffset
-    //   Offset16 markAttachClassDefOffset
-    //   (v1.2+) Offset16 markGlyphSetsDefOffset
-    //   (v1.3+) Offset32 itemVarStoreOffset
-    let major = u16::from_be_bytes([bytes[0], bytes[1]]);
-    let minor = u16::from_be_bytes([bytes[2], bytes[3]]);
-    if major != 1 {
-        return None;
-    }
-    let glyph_class_off = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
-    let _attach_list_off = u16::from_be_bytes([bytes[6], bytes[7]]) as usize;
-    let _lig_caret_off = u16::from_be_bytes([bytes[8], bytes[9]]) as usize;
-    let mark_attach_off = u16::from_be_bytes([bytes[10], bytes[11]]) as usize;
-
-    // Rewrite GlyphClassDef.
-    let new_glyph_class = if glyph_class_off != 0 {
-        rewrite_classdef_subtable(bytes, glyph_class_off, map)
-    } else {
-        None
+/// Rewrites the face's `GDEF` table. Returns `Ok(None)` when the face
+/// has no GDEF or when every subtable drops to nothing.
+///
+/// `keep_variations` mirrors `SubsetInput::retain_variations`: it
+/// decides whether the ItemVariationStore (and the caret
+/// VariationIndex tables pointing into it) survive.
+pub(crate) fn rewrite_gdef(
+    face: &sigilbuzz::Face<'_>,
+    map: &GidMap,
+    keep_variations: bool,
+) -> Result<Option<Vec<u8>>, SubsetError> {
+    let Ok(bytes) = face.table_bytes(sigilbuzz::tables::tag::GDEF) else {
+        return Ok(None);
     };
-    // Rewrite MarkAttachClassDef.
-    let new_mark_attach = if mark_attach_off != 0 {
-        rewrite_classdef_subtable(bytes, mark_attach_off, map)
+    rewrite_gdef_bytes(bytes, map, keep_variations)
+}
+
+/// [`rewrite_gdef`] on raw table bytes.
+///
+/// GDEF header (all offsets from the start of the table, 0 = absent):
+///
+/// ```text
+///   u16      majorVersion = 1
+///   u16      minorVersion
+///   Offset16 glyphClassDefOffset
+///   Offset16 attachListOffset
+///   Offset16 ligCaretListOffset
+///   Offset16 markAttachClassDefOffset
+///   Offset16 markGlyphSetsDefOffset      (1.2+)
+///   Offset32 itemVarStoreOffset          (1.3+)
+/// ```
+fn rewrite_gdef_bytes(
+    bytes: &[u8],
+    map: &GidMap,
+    keep_variations: bool,
+) -> Result<Option<Vec<u8>>, SubsetError> {
+    const CTX: &str = "GDEF header truncated";
+    if u16_at(bytes, 0, CTX)? != 1 {
+        return Err(Error::Malformed {
+            offset: 0,
+            context: "unsupported GDEF major version",
+        }
+        .into());
+    }
+    let minor = u16_at(bytes, 2, CTX)?;
+    let offset_at = |pos: usize| u16_at(bytes, pos, CTX).map(usize::from);
+    let glyph_class_off = offset_at(4)?;
+    let attach_list_off = offset_at(6)?;
+    let lig_caret_off = offset_at(8)?;
+    let mark_attach_off = offset_at(10)?;
+    let mark_sets_off = if minor >= 2 { offset_at(12)? } else { 0 };
+    let ivs_off = if minor >= 3 {
+        u32_at(bytes, 14, CTX)? as usize
     } else {
-        None
+        0
     };
 
-    // If both classdefs drop and we don't carry anything else, the
-    // whole GDEF is empty. The caller drops it.
-    if new_glyph_class.is_none() && new_mark_attach.is_none() {
-        return None;
+    let glyph_class =
+        present(glyph_class_off).and_then(|off| rewrite_classdef_subtable(bytes, off, map));
+    let attach_list = match present(attach_list_off) {
+        Some(off) => attach_list::rewrite(bytes, off, map)?,
+        None => None,
+    };
+    let lig_carets = match present(lig_caret_off) {
+        Some(off) => lig_caret::rewrite(bytes, off, map, keep_variations)?,
+        None => None,
+    };
+    let mark_attach =
+        present(mark_attach_off).and_then(|off| rewrite_classdef_subtable(bytes, off, map));
+    let mark_sets = match present(mark_sets_off) {
+        Some(off) => Some(mark_glyph_sets::rewrite(bytes, off, map)?),
+        None => None,
+    };
+    let ivs = match present(ivs_off).filter(|_| keep_variations) {
+        Some(off) => {
+            let len = item_var_store::store_len(bytes, off)?;
+            Some(&bytes[off..off + len])
+        }
+        None => None,
+    };
+
+    let anything_left = glyph_class.is_some()
+        || attach_list.is_some()
+        || lig_carets.is_some()
+        || mark_attach.is_some()
+        || mark_sets.as_ref().is_some_and(|s| s.any_glyphs)
+        || ivs.is_some();
+    if !anything_left {
+        return Ok(None);
     }
 
-    // Re-emit a v1.0 GDEF with only the subtables we know how to
-    // rewrite. Other subtable offsets are zeroed.
+    let (minor, header_len) = if ivs.is_some() {
+        (3u16, 18)
+    } else if mark_sets.is_some() {
+        (2, 14)
+    } else {
+        (0, 12)
+    };
     let mut out = Vec::new();
-    out.extend_from_slice(&1u16.to_be_bytes()); // major
-    out.extend_from_slice(&0u16.to_be_bytes()); // minor: drop to v1.0; we don't carry mark glyph sets / IVS yet.
-    let _ = minor;
-
-    // Header offsets get patched once we know the subtable positions.
-    let glyph_class_slot = out.len();
-    out.extend_from_slice(&0u16.to_be_bytes()); // glyphClassDef offset
-    out.extend_from_slice(&0u16.to_be_bytes()); // attachList offset (dropped)
-    out.extend_from_slice(&0u16.to_be_bytes()); // ligCaretList offset (dropped)
-    let mark_attach_slot = out.len();
-    out.extend_from_slice(&0u16.to_be_bytes()); // markAttachClassDef offset
-
-    if let Some(gc) = new_glyph_class.as_deref() {
-        let pos = out.len() as u16;
-        out.extend_from_slice(gc);
-        out[glyph_class_slot..glyph_class_slot + 2].copy_from_slice(&pos.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&minor.to_be_bytes());
+    out.resize(header_len, 0);
+    // Offset16 subtables in header order, then the Offset32 store last
+    // so the 16-bit offsets stay as small as possible.
+    let offset16_subtables = [
+        (4, glyph_class.as_deref()),
+        (6, attach_list.as_deref()),
+        (8, lig_carets.as_deref()),
+        (10, mark_attach.as_deref()),
+        (12, mark_sets.as_ref().map(|s| s.bytes.as_slice())),
+    ];
+    for (slot, body) in offset16_subtables {
+        if let Some(body) = body {
+            let at = offset16(out.len())?;
+            out[slot..slot + 2].copy_from_slice(&at.to_be_bytes());
+            out.extend_from_slice(body);
+        }
     }
-    if let Some(ma) = new_mark_attach.as_deref() {
-        let pos = out.len() as u16;
-        out.extend_from_slice(ma);
-        out[mark_attach_slot..mark_attach_slot + 2].copy_from_slice(&pos.to_be_bytes());
+    if let Some(store) = ivs {
+        let at = u32::try_from(out.len())
+            .map_err(|_| SubsetError::Unsupported("GDEF rewrite: table exceeds 4 GiB"))?;
+        out[14..18].copy_from_slice(&at.to_be_bytes());
+        out.extend_from_slice(store);
     }
+    Ok(Some(out))
+}
 
-    Some(out)
+/// Maps the spec's "0 means absent" offset convention onto `Option`.
+fn present(off: usize) -> Option<usize> {
+    (off != 0).then_some(off)
+}
+
+/// Narrows a position to an Offset16, or reports that the rebuilt
+/// table outgrew what 16-bit offsets can address.
+fn offset16(pos: usize) -> Result<u16, SubsetError> {
+    u16::try_from(pos)
+        .map_err(|_| SubsetError::Unsupported("GDEF rewrite: subtable offset exceeds 64 KiB"))
+}
+
+/// Walks the coverage-indexed offset array shared by AttachList and
+/// LigCaretList:
+///
+/// ```text
+///   Offset16 coverageOffset          (from the list)
+///   u16      count
+///   Offset16 offsets[count]          (from the list)
+/// ```
+///
+/// Returns `(new glyph id, absolute position of the table the entry
+/// names)` for every covered glyph the map keeps, sorted by new glyph
+/// id. Coverage entries past `count` have no table and are skipped.
+fn kept_entries(
+    table: &[u8],
+    list_off: usize,
+    map: &GidMap,
+    context: &'static str,
+) -> Result<Vec<(u16, usize)>, Error> {
+    let coverage_rel = usize::from(u16_at(table, list_off, context)?);
+    if coverage_rel == 0 {
+        return Err(Error::Malformed {
+            offset: list_off,
+            context: "GDEF list has a null Coverage offset",
+        });
+    }
+    let count = u16_at(table, list_off + 2, context)?;
+    let mut out = Vec::new();
+    for (gid, index) in read::coverage(table, list_off + coverage_rel)? {
+        let Some(new_gid) = map.map(gid) else {
+            continue;
+        };
+        if index >= count {
+            continue;
+        }
+        let slot = list_off + 4 + usize::from(index) * 2;
+        let rel = usize::from(u16_at(table, slot, context)?);
+        if rel == 0 {
+            return Err(Error::Malformed {
+                offset: slot,
+                context: "GDEF list entry has a null offset",
+            });
+        }
+        out.push((new_gid, list_off + rel));
+    }
+    out.sort_unstable_by_key(|&(gid, _)| gid);
+    out.dedup_by_key(|&mut (gid, _)| gid);
+    Ok(out)
+}
+
+/// Emits the list shape [`kept_entries`] reads: the offset array, one
+/// body per entry (identical bodies share one copy), then the
+/// Coverage. `entries` must be sorted by glyph id.
+fn emit_covered_list(entries: &[(u16, Vec<u8>)]) -> Result<Vec<u8>, SubsetError> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&(entries.len() as u16).to_be_bytes());
+    out.resize(4 + entries.len() * 2, 0);
+    let mut bodies = Dedup::default();
+    for (i, (_, body)) in entries.iter().enumerate() {
+        let at = offset16(bodies.place(&mut out, body))?;
+        out[4 + i * 2..6 + i * 2].copy_from_slice(&at.to_be_bytes());
+    }
+    let coverage_at = offset16(out.len())?;
+    out[0..2].copy_from_slice(&coverage_at.to_be_bytes());
+    let glyphs: Vec<u16> = entries.iter().map(|&(gid, _)| gid).collect();
+    out.extend_from_slice(&emit_coverage_from_glyphs(&glyphs));
+    Ok(out)
 }
 
 fn rewrite_classdef_subtable(bytes: &[u8], offset: usize, map: &GidMap) -> Option<Vec<u8>> {
@@ -120,34 +274,4 @@ fn rewrite_classdef_subtable(bytes: &[u8], offset: usize, map: &GidMap) -> Optio
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use alloc::{vec, vec::Vec};
-    use sigilbuzz::tables::layout::ClassDef;
-
-    #[test]
-    fn rewrite_classdef_filters_dropped_gids() {
-        // Build a tiny ClassDef format 2 inline for the helper.
-        // Class assignments: gid 5->1, gid 6->2, gid 10->3.
-        let mut cd_bytes = Vec::new();
-        cd_bytes.extend_from_slice(&2u16.to_be_bytes()); // format
-        cd_bytes.extend_from_slice(&3u16.to_be_bytes()); // rangeCount
-        for (start, end, class) in [(5u16, 5u16, 1u16), (6, 6, 2), (10, 10, 3)] {
-            cd_bytes.extend_from_slice(&start.to_be_bytes());
-            cd_bytes.extend_from_slice(&end.to_be_bytes());
-            cd_bytes.extend_from_slice(&class.to_be_bytes());
-        }
-        // GidMap: 5->1 (kept), 6 dropped, 10->3 (kept). Rebuild to length 11.
-        let mut table = vec![None; 11];
-        table[0] = Some(0);
-        table[5] = Some(1);
-        table[10] = Some(3);
-        let map = GidMap::from_table(table);
-
-        let new_cd = rewrite_classdef_subtable(&cd_bytes, 0, &map).unwrap();
-        let parsed = ClassDef::parse(&new_cd).unwrap();
-        assert_eq!(parsed.class_of(1), 1, "gid 5->1 keeps class 1");
-        assert_eq!(parsed.class_of(3), 3, "gid 10->3 keeps class 3");
-        assert_eq!(parsed.class_of(2), 0, "gid 6 dropped -> unlisted = class 0");
-    }
-}
+mod tests;

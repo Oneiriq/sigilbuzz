@@ -41,8 +41,10 @@
 //! - Variations: `fvar` and `avar` pass through. `gvar` is rebuilt with one
 //!   entry per kept glyph, `HVAR` around a fresh `DeltaSetIndexMap` and a
 //!   deduplicated `ItemVariationStore`, and `VARC` around the kept
-//!   composites. Set [`SubsetInput::retain_variations`] to `false` to drop
-//!   them and get a static subset at the default instance.
+//!   composites. The GDEF `ItemVariationStore` that GPOS kerning, anchors,
+//!   and ligature carets vary through is carried verbatim. Set
+//!   [`SubsetInput::retain_variations`] to `false` to drop them and get a
+//!   static subset at the default instance.
 //! - Dropped when [`SubsetInput::drop_unhandled`] is true (the default):
 //!   `kern`, `vhea`, `vmtx`, `VORG`, `COLR`, `CPAL`, `morx`, and `kerx`.
 //!   With the flag off, any of these returns [`SubsetError::Unsupported`].
