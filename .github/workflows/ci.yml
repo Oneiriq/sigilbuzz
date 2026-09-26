@@ -59,7 +59,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install Rust 1.81
-        uses: dtolnay/rust-toolchain@1.81
+        uses: dtolnay/rust-toolchain@1.120
 
       # Newer releases of some dependencies (clap, for one) need a newer Rust.
       # Resolve the versions that still support 1.81, the way a 1.81 user's
