@@ -15,16 +15,29 @@
 //!   (Mn, Mc, Me), and decimal number (Nd) ranges of
 //!   `General_Category`, the nonspacing mark (Mn) ranges on their own,
 //!   and `Extended_Pictographic` from `emoji-data.txt`, for HarfBuzz's
-//!   grapheme and native-direction rules and its synthesized glyph
-//!   classes.
+//!   grapheme and native-direction rules, its synthesized glyph
+//!   classes, and its fallback mark positioning.
+//! - `src/unicode/normalize/decompose_table.rs`: the canonical
+//!   `Decomposition_Mapping` of every character, from
+//!   `UnicodeData.txt`.
+//! - `src/unicode/normalize/compose_table.rs`: the primary composites,
+//!   every two-character canonical decomposition that is not a full
+//!   composition exclusion: not listed in `CompositionExclusions.txt`,
+//!   and neither the composite nor the first character of its full
+//!   decomposition has a nonzero `Canonical_Combining_Class` (UAX #15
+//!   "non-starter decompositions"; singletons never compose).
+//! - `src/unicode/normalize/combining_class_table.rs`: the nonzero
+//!   `Canonical_Combining_Class` ranges, from
+//!   `DerivedCombiningClass.txt`.
 //!
 //! # Sources
 //!
 //! The committed snapshots under `tests/tools/ucd/` are the only
 //! inputs. Each starts with `#` lines naming its source URL, the
-//! retrieval date, and the version lines of the original file, and
-//! keeps only the data the generator reads, with trailing comments
-//! removed:
+//! retrieval date, and the version lines of the original file (a
+//! synthesized version line for `UnicodeData.txt`, which has none),
+//! and keeps only the data the generator reads, with trailing
+//! comments removed:
 //!
 //! - `ArabicShaping.txt`: every data line.
 //! - `DerivedGeneralCategory.txt`: the Lu, Ll, Lt, Lm, Lo, Mn, Mc, Me,
@@ -34,6 +47,10 @@
 //! - `Scripts.txt`: every data line.
 //! - `PropertyValueAliases.txt`: the `sc` (Script) lines.
 //! - `emoji-data.txt`: the `Extended_Pictographic` lines.
+//! - `UnicodeData.txt`: `code point;Decomposition_Mapping` for every
+//!   character with a canonical (untagged) decomposition.
+//! - `DerivedCombiningClass.txt`: the lines with a nonzero class.
+//! - `CompositionExclusions.txt`: every data line.
 //!
 //! # Commands
 //!
@@ -44,16 +61,17 @@
 //! ```
 //!
 //! Refresh the snapshots first by pointing `SIGILBUZZ_UCD_DIR` at a
-//! directory holding the six files as downloaded from
+//! directory holding the nine files as downloaded from
 //! `https://www.unicode.org/Public/<version>/ucd/`
-//! (`DerivedGeneralCategory.txt` is under `extracted/` there and
-//! `emoji-data.txt` under `emoji/`), with `SIGILBUZZ_UCD_VERSION` (for
-//! example `17.0.0`) and `SIGILBUZZ_UCD_RETRIEVED=YYYY-MM-DD` set.
+//! (`DerivedGeneralCategory.txt` and `DerivedCombiningClass.txt` are
+//! under `extracted/` there and `emoji-data.txt` under `emoji/`), with
+//! `SIGILBUZZ_UCD_VERSION` (for example `17.0.0`) and
+//! `SIGILBUZZ_UCD_RETRIEVED=YYYY-MM-DD` set.
 //!
 //! The non-ignored test in this file regenerates every table in memory
 //! and fails when a committed file has drifted from the snapshots.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -63,11 +81,17 @@ const BIDI_MIRRORING: &str = "BidiMirroring.txt";
 const SCRIPTS: &str = "Scripts.txt";
 const ALIASES: &str = "PropertyValueAliases.txt";
 const EMOJI_DATA: &str = "emoji-data.txt";
+const UNICODE_DATA: &str = "UnicodeData.txt";
+const COMBINING_CLASS: &str = "DerivedCombiningClass.txt";
+const COMPOSITION_EXCLUSIONS: &str = "CompositionExclusions.txt";
 
 const JOINING_RS: &str = "src/unicode/joining_table.rs";
 const MIRRORING_RS: &str = "src/unicode/mirroring_table.rs";
 const SCRIPT_RS: &str = "crates/sigilbuzz-capi/src/script_table.rs";
 const CATEGORY_RS: &str = "src/unicode/general_category_table.rs";
+const DECOMPOSE_RS: &str = "src/unicode/normalize/decompose_table.rs";
+const COMPOSE_RS: &str = "src/unicode/normalize/compose_table.rs";
+const COMBINING_CLASS_RS: &str = "src/unicode/normalize/combining_class_table.rs";
 
 /// The General_Category values the snapshot keeps.
 const KEPT_CATEGORIES: &[&str] = &["Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Cf"];
@@ -374,15 +398,150 @@ fn generate_categories() -> String {
     out
 }
 
+// --- Canonical normalization -------------------------------------------------------
+
+fn parse_hex(field: &str) -> u32 {
+    u32::from_str_radix(field, 16).unwrap_or_else(|e| panic!("{field:?}: {e}"))
+}
+
+/// Every canonical `Decomposition_Mapping`: code point to its one or
+/// two characters.
+fn decompositions() -> BTreeMap<u32, Vec<u32>> {
+    load(UNICODE_DATA)
+        .rows
+        .iter()
+        .map(|row| {
+            let mapping: Vec<u32> = row[1].split_whitespace().map(parse_hex).collect();
+            assert!(matches!(mapping.len(), 1 | 2), "{row:?}");
+            (parse_hex(&row[0]), mapping)
+        })
+        .collect()
+}
+
+/// `Canonical_Combining_Class` of every code point.
+fn combining_classes() -> Vec<u8> {
+    let mut classes = vec![0u8; CODE_SPACE];
+    for row in &load(COMBINING_CLASS).rows {
+        let (start, end) = parse_range(&row[0]);
+        let class: u8 = row[1].parse().unwrap_or_else(|e| panic!("{row:?}: {e}"));
+        assert_ne!(class, 0, "{row:?}");
+        for cp in start..=end {
+            classes[cp as usize] = class;
+        }
+    }
+    classes
+}
+
+/// The primary composites: `(first, second, composite)` for every
+/// two-character canonical decomposition that is not a full
+/// composition exclusion. Sorted by the pair.
+fn primary_composites() -> Vec<(u32, u32, u32)> {
+    let map = decompositions();
+    let classes = combining_classes();
+    let mut excluded = BTreeSet::new();
+    for row in &load(COMPOSITION_EXCLUSIONS).rows {
+        let (start, end) = parse_range(&row[0]);
+        excluded.extend(start..=end);
+    }
+    // The first character of a full (recursive) decomposition.
+    let first = |mut cp: u32| {
+        while let Some(mapping) = map.get(&cp) {
+            cp = mapping[0];
+        }
+        cp
+    };
+    let mut pairs: Vec<(u32, u32, u32)> = map
+        .iter()
+        .filter(|(cp, m)| {
+            m.len() == 2
+                && !excluded.contains(*cp)
+                && classes[**cp as usize] == 0
+                && classes[first(m[0]) as usize] == 0
+        })
+        .map(|(cp, m)| (m[0], m[1], *cp))
+        .collect();
+    pairs.sort_unstable();
+    pairs
+}
+
+fn generate_decompositions() -> String {
+    let data = load(UNICODE_DATA);
+    let mut out = String::new();
+    file_header(&mut out, &[&data]);
+    out.push_str("// Code points read best in hex without digit separators.\n");
+    out.push_str("#![allow(clippy::unreadable_literal)]\n\n");
+    out.push_str("/// `(code point, first, second)` for every canonical\n");
+    out.push_str("/// `Decomposition_Mapping`, `second` zero for a singleton. Hangul\n");
+    out.push_str("/// syllables decompose algorithmically and are not listed. Sorted.\n");
+    out.push_str("pub(super) static DECOMPOSITIONS: &[(u32, u32, u32)] = &[\n");
+    let items: Vec<String> = decompositions()
+        .iter()
+        .map(|(cp, m)| {
+            let second = m.get(1).copied().unwrap_or(0);
+            format!("(0x{cp:04X}, 0x{:04X}, 0x{second:04X})", m[0])
+        })
+        .collect();
+    emit_wrapped(&mut out, &items);
+    out.push_str("];\n");
+    out
+}
+
+fn generate_compositions() -> String {
+    let data = load(UNICODE_DATA);
+    let classes = load(COMBINING_CLASS);
+    let exclusions = load(COMPOSITION_EXCLUSIONS);
+    let mut out = String::new();
+    file_header(&mut out, &[&data, &classes, &exclusions]);
+    out.push_str("// Code points read best in hex without digit separators.\n");
+    out.push_str("#![allow(clippy::unreadable_literal)]\n\n");
+    out.push_str("/// `(first, second, composite)` for every primary composite: a\n");
+    out.push_str("/// two-character canonical decomposition that is not a full\n");
+    out.push_str("/// composition exclusion. Hangul syllables compose algorithmically\n");
+    out.push_str("/// and are not listed. Sorted by `(first, second)`.\n");
+    out.push_str("pub(super) static COMPOSITIONS: &[(u32, u32, u32)] = &[\n");
+    let items: Vec<String> = primary_composites()
+        .iter()
+        .map(|(a, b, c)| format!("(0x{a:04X}, 0x{b:04X}, 0x{c:04X})"))
+        .collect();
+    emit_wrapped(&mut out, &items);
+    out.push_str("];\n");
+    out
+}
+
+fn generate_combining_classes() -> String {
+    let snapshot = load(COMBINING_CLASS);
+    let mut out = String::new();
+    file_header(&mut out, &[&snapshot]);
+    out.push_str("// Code point ranges read best in hex without digit separators.\n");
+    out.push_str("#![allow(clippy::unreadable_literal)]\n\n");
+    out.push_str("/// `(first, last, class)` for every code point whose\n");
+    out.push_str("/// `Canonical_Combining_Class` is not zero. Sorted, non-overlapping,\n");
+    out.push_str("/// inclusive.\n");
+    out.push_str("pub(super) static COMBINING_CLASSES: &[(u32, u32, u8)] = &[\n");
+    let items: Vec<String> = runs(&combining_classes(), 0)
+        .iter()
+        .map(|(s, e, c)| format!("(0x{s:04X}, 0x{e:04X}, {c})"))
+        .collect();
+    emit_wrapped(&mut out, &items);
+    out.push_str("];\n");
+    out
+}
+
 // --- Snapshot refresh ------------------------------------------------------------
 
 /// Reduces a downloaded UCD file to a snapshot: the provenance lines,
-/// then the data lines `keep` accepts, trailing comments removed.
-fn reduce(raw: &str, url: &str, retrieved: &str, keep: impl Fn(&[&str]) -> bool) -> String {
+/// then what `keep` keeps of each data line, trailing comments
+/// removed. A file without version lines (`UnicodeData.txt`) gets
+/// `version_line` instead.
+fn reduce(raw: &str, url: &str, retrieved: &str, version_line: &str, keep: Keep) -> String {
     let mut out = format!("# Source: {url}\n# Retrieved: {retrieved}\n");
-    for line in raw.lines().take(2) {
-        out.push_str(line.trim_end());
-        out.push('\n');
+    if raw.starts_with('#') {
+        for line in raw.lines().take(2) {
+            out.push_str(line.trim_end());
+            out.push('\n');
+        }
+    } else {
+        let _ = writeln!(out, "# {version_line}");
     }
     for line in raw.lines() {
         let data = line.split('#').next().unwrap_or("").trim();
@@ -390,16 +549,21 @@ fn reduce(raw: &str, url: &str, retrieved: &str, keep: impl Fn(&[&str]) -> bool)
             continue;
         }
         let fields: Vec<&str> = data.split(';').map(str::trim).collect();
-        if keep(&fields) {
-            out.push_str(data);
+        if let Some(kept) = keep(data, &fields) {
+            out.push_str(&kept);
             out.push('\n');
         }
     }
     out
 }
 
-/// Which data lines of a downloaded file a snapshot keeps, by field.
-type Keep = fn(&[&str]) -> bool;
+/// What a snapshot keeps of one data line of a downloaded file, given
+/// the line and its fields.
+type Keep = fn(&str, &[&str]) -> Option<String>;
+
+fn keep_all(data: &str, _: &[&str]) -> Option<String> {
+    Some(data.to_owned())
+}
 
 fn refresh_snapshots() {
     let Ok(dir) = std::env::var("SIGILBUZZ_UCD_DIR") else {
@@ -409,36 +573,59 @@ fn refresh_snapshots() {
     let retrieved =
         std::env::var("SIGILBUZZ_UCD_RETRIEVED").expect("set SIGILBUZZ_UCD_RETRIEVED=YYYY-MM-DD");
     let base = format!("https://www.unicode.org/Public/{version}/ucd");
-    let jobs: [(&str, String, Keep); 6] = [
-        (ARABIC_SHAPING, format!("{base}/{ARABIC_SHAPING}"), |_| true),
+    let jobs: [(&str, String, Keep); 9] = [
+        (ARABIC_SHAPING, format!("{base}/{ARABIC_SHAPING}"), keep_all),
         (
             GENERAL_CATEGORY,
             format!("{base}/extracted/{GENERAL_CATEGORY}"),
-            |f| f.get(1).is_some_and(|gc| KEPT_CATEGORIES.contains(gc)),
+            |d, f| {
+                f.get(1)
+                    .is_some_and(|gc| KEPT_CATEGORIES.contains(gc))
+                    .then(|| d.to_owned())
+            },
         ),
-        (BIDI_MIRRORING, format!("{base}/{BIDI_MIRRORING}"), |_| true),
-        (SCRIPTS, format!("{base}/{SCRIPTS}"), |_| true),
-        (ALIASES, format!("{base}/{ALIASES}"), |f| {
-            f.first() == Some(&"sc")
+        (BIDI_MIRRORING, format!("{base}/{BIDI_MIRRORING}"), keep_all),
+        (SCRIPTS, format!("{base}/{SCRIPTS}"), keep_all),
+        (ALIASES, format!("{base}/{ALIASES}"), |d, f| {
+            (f.first() == Some(&"sc")).then(|| d.to_owned())
         }),
-        (EMOJI_DATA, format!("{base}/emoji/{EMOJI_DATA}"), |f| {
-            f.get(1) == Some(&"Extended_Pictographic")
+        (EMOJI_DATA, format!("{base}/emoji/{EMOJI_DATA}"), |d, f| {
+            (f.get(1) == Some(&"Extended_Pictographic")).then(|| d.to_owned())
         }),
+        (UNICODE_DATA, format!("{base}/{UNICODE_DATA}"), |_, f| {
+            let mapping = f.get(5)?;
+            (!mapping.is_empty() && !mapping.starts_with('<'))
+                .then(|| format!("{};{mapping}", f[0]))
+        }),
+        (
+            COMBINING_CLASS,
+            format!("{base}/extracted/{COMBINING_CLASS}"),
+            |d, f| (f.get(1) != Some(&"0")).then(|| d.to_owned()),
+        ),
+        (
+            COMPOSITION_EXCLUSIONS,
+            format!("{base}/{COMPOSITION_EXCLUSIONS}"),
+            keep_all,
+        ),
     ];
+    let version_line = format!("{UNICODE_DATA}, Unicode {version}");
     std::fs::create_dir_all(snapshot_dir()).expect("create snapshot dir");
     for (file, url, keep) in jobs {
         let raw = read(&Path::new(&dir).join(file));
-        let snapshot = reduce(&raw, &url, &retrieved, keep);
+        let snapshot = reduce(&raw, &url, &retrieved, &version_line, keep);
         std::fs::write(snapshot_dir().join(file), snapshot).expect("write snapshot");
     }
 }
 
-fn outputs() -> [(&'static str, String); 4] {
+fn outputs() -> [(&'static str, String); 7] {
     [
         (JOINING_RS, generate_joining()),
         (MIRRORING_RS, generate_mirroring()),
         (SCRIPT_RS, generate_scripts()),
         (CATEGORY_RS, generate_categories()),
+        (DECOMPOSE_RS, generate_decompositions()),
+        (COMPOSE_RS, generate_compositions()),
+        (COMBINING_CLASS_RS, generate_combining_classes()),
     ]
 }
 
@@ -477,4 +664,32 @@ fn snapshots_parse_known_rows() {
         .rows
         .iter()
         .any(|r| r[1] == "Arab" && r[2] == "Arabic"));
+}
+
+#[test]
+fn normalization_snapshots_derive_known_mappings() {
+    let map = decompositions();
+    // LATIN CAPITAL LETTER A WITH GRAVE, ANGSTROM SIGN (a singleton).
+    assert_eq!(map[&0x00C0], [0x0041, 0x0300]);
+    assert_eq!(map[&0x212B], [0x00C5]);
+    let classes = combining_classes();
+    assert_eq!(classes[0x0301], 230);
+    assert_eq!(classes[0x05B0], 10);
+    assert_eq!(classes[0x0041], 0);
+    let composites = primary_composites();
+    let composes = |a: u32, b: u32| {
+        composites
+            .binary_search_by_key(&(a, b), |&(x, y, _)| (x, y))
+            .ok()
+            .map(|i| composites[i].2)
+    };
+    assert_eq!(composes(0x0065, 0x0301), Some(0x00E9));
+    // DEVANAGARI LETTER QA is a composition exclusion; COMBINING GREEK
+    // DIALYTIKA TONOS and TIBETAN VOWEL SIGN II decompose to a
+    // non-starter first.
+    assert_eq!(composes(0x0915, 0x093C), None);
+    assert_eq!(composes(0x0308, 0x0301), None);
+    assert_eq!(composes(0x0F71, 0x0F72), None);
+    // Singletons never compose.
+    assert!(composites.iter().all(|&(_, _, c)| c != 0x212B));
 }
