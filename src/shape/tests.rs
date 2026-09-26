@@ -25,6 +25,21 @@ fn kana_led_segments_use_the_kana_script_tag() {
     assert_eq!(priority("12 \u{30AB}")[0], *b"kana");
 }
 
+#[test]
+fn default_ignorables_stay_in_their_neighbors_segment() {
+    let segments = |text: &str| {
+        let cps: Vec<char> = text.chars().collect();
+        build_segments(&cps).len()
+    };
+    // ZWSP, word joiner, a variation selector, a tag character.
+    for text in ["f\u{200B}i", "f\u{2060}i", "f\u{FE0F}i", "f\u{E0041}i"] {
+        assert_eq!(segments(text), 1, "{text:?}");
+    }
+    assert_eq!(segments("\u{0628}\u{200B}\u{0633}"), 1);
+    // A real script change still splits.
+    assert_eq!(segments("a\u{200B}\u{05D0}"), 2);
+}
+
 /// Minimal font with head / maxp / hhea / hmtx / cmap sufficient
 /// for `shape()` to run against real ASCII text. Glyph 0 is
 /// `.notdef` (advance 0); glyph 1 is 'A' (advance 500); glyph 2

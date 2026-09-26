@@ -100,10 +100,17 @@ pub(super) fn build_segments(codepoints: &[char]) -> Vec<Segment> {
     segments
 }
 
-/// Shape-time COMMON / INHERITED predicate: stays in lockstep with
-/// the buffer-level `is_common_or_inherited` in `buffer.rs`. Kept
-/// inside `shape.rs` so the Khmer-split synthetic codepoints (which
-/// never land in the buffer's text) still segment correctly.
+/// Shape-time COMMON / INHERITED predicate: the buffer-level
+/// `is_common_or_inherited` in `buffer.rs`, plus the default
+/// ignorables of those scripts. Kept inside `shape.rs` so the
+/// Khmer-split synthetic codepoints (which never land in the buffer's
+/// text) still segment correctly.
+///
+/// A default ignorable (ZWSP, word joiner, variation selectors, tag
+/// characters, ...) has to stay in its neighbors' segment: GSUB and
+/// GPOS match across it (see the `skip_iter` module), which they
+/// cannot do when it splits the run. The Khmer and Mongolian ones
+/// have their own script and segment with it anyway.
 pub(super) const fn is_common_for_segmentation(ch: char) -> bool {
     let cp = ch as u32;
     matches!(
@@ -124,5 +131,6 @@ pub(super) const fn is_common_for_segmentation(ch: char) -> bool {
         | 0x1DC0..=0x1DFF
         | 0x20D0..=0x20FF
         | 0xFE20..=0xFE2F
-    )
+    ) || (super::ignorables::is_default_ignorable(ch)
+        && !matches!(cp, 0x17B4..=0x17B5 | 0x180B..=0x180D | 0x180F))
 }
