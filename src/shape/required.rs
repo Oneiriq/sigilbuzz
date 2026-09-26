@@ -54,6 +54,9 @@ pub(super) struct SegmentPlan<'a> {
     pub(super) arabic: bool,
     /// True for vertical layout.
     pub(super) vertical: bool,
+    /// True for backward (right-to-left or bottom-to-top) runs, which
+    /// apply `rtlm`.
+    pub(super) backward: bool,
     /// The caller's feature overrides.
     pub(super) features: &'a [Feature],
 }
@@ -102,8 +105,9 @@ impl SegmentPlan<'_> {
 
     /// True when some pass of the segment's pipeline applies `tag`.
     fn applies(&self, tag: [u8; 4]) -> bool {
-        let default =
-            DEFAULT_CHAIN.contains(&tag) || (self.vertical && VERTICAL_CHAIN.contains(&tag));
+        let default = DEFAULT_CHAIN.contains(&tag)
+            || (self.vertical && VERTICAL_CHAIN.contains(&tag))
+            || (self.backward && tag == *b"rtlm");
         if default && !feature_disabled(self.features, tag) {
             return true;
         }
@@ -156,6 +160,7 @@ mod tests {
             codepoints: cps,
             arabic: script == Script::Arabic,
             vertical: false,
+            backward: false,
             features,
         }
     }

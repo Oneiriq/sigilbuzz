@@ -73,12 +73,13 @@
 //! - Automatic direction detection: an unset direction shapes as LTR
 //!   even for Arabic or Hebrew text. Set [`crate::Direction::Rtl`]
 //!   explicitly to get HarfBuzz's RTL behavior and visual order.
-//! - Bidi mirroring of paired punctuation in RTL runs, and the
-//!   fallback mark positioner HarfBuzz uses for fonts without GPOS.
+//! - The fallback mark positioner HarfBuzz uses for fonts without
+//!   GPOS.
 
 mod attach;
 mod ignorables;
 mod required;
+mod rotate;
 
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
@@ -708,6 +709,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // the first codepoint of the composed cluster, so cluster
     // tracking stays aligned with the original UTF-8 stream.
     let composed_chars: Vec<(u32, char)> = hangul_compose(text, &cmap);
+    // Backward runs mirror paired punctuation (see `rotate`); these
+    // are the indices in `codepoints` that were replaced.
+    let backward = !direction.is_forward();
+    let mut mirrored: Vec<usize> = Vec::new();
     for (cluster, ch) in composed_chars.iter().copied() {
         let cluster = cluster as usize;
         // Khmer split-vowel decomposition. HarfBuzz's USE
@@ -777,6 +782,15 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             // they come from the same Unicode block.
             continue;
         }
+        let ch = if backward {
+            let (m, replaced) = rotate::mirror(ch, &cmap);
+            if replaced {
+                mirrored.push(codepoints.len());
+            }
+            m
+        } else {
+            ch
+        };
         let glyph_id = u32::from(cmap.glyph_id(ch).unwrap_or(0));
         // `unicode_props` is set once here and follows the glyph
         // through ligation, multiple substitution and final reorder.
@@ -902,7 +916,8 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         let mut seg_glyphs = seg_glyphs_src;
 
         // A required feature whose tag no later pass applies runs
-        // first, as HarfBuzz runs it in GSUB stage 0.
+        // first, as HarfBuzz runs it in GSUB stage 0; `rtlm` follows
+        // on backward runs.
         if let Some(ref gsub) = gsub {
             let plan = required::SegmentPlan {
                 script: seg.script,
@@ -910,10 +925,24 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 codepoints: seg_cps,
                 arabic: seg.script == Script::Arabic && !arabic_forms.is_empty(),
                 vertical: is_vertical,
+                backward,
                 features,
             };
             let priority = seg.script_priority;
             required::apply_unscheduled(gsub, &mut seg_glyphs, gdef.as_ref(), priority, &plan);
+            if backward {
+                let range = seg.cp_range.clone();
+                let gdef = gdef.as_ref();
+                rotate::apply_rtlm(
+                    gsub,
+                    &mut seg_glyphs,
+                    gdef,
+                    priority,
+                    features,
+                    range,
+                    &mirrored,
+                );
+            }
         }
 
         // Per-script pre-shapers. Each is gated on the segment's

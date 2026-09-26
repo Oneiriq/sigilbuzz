@@ -14,6 +14,9 @@ pub mod indic_category;
 pub mod joining;
 #[rustfmt::skip]
 mod joining_table;
+pub mod mirroring;
+#[rustfmt::skip]
+mod mirroring_table;
 pub mod normalize;
 mod script_tags;
 pub mod use_category;
