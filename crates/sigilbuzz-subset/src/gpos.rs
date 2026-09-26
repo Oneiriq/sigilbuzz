@@ -234,7 +234,7 @@ fn rewrite_single_adj(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable
         }
         2 => {
             // Per-glyph ValueRecord array right after the header.
-            let value_count = u16::from_be_bytes([sub[6], sub[7]]) as usize;
+            let value_count = u16::from_be_bytes([*sub.get(6)?, *sub.get(7)?]) as usize;
             let values_off = 8usize;
             let need = values_off + value_count * stride;
             if sub.len() < need {
@@ -1153,7 +1153,11 @@ fn rewrite_mark_attach(
         // Per-base array of class-anchored anchors. We collect for
         // each surviving entry its (new_gid, marker_for_type4, anchor
         // body slots): the marker is empty Vec, the anchor slots are
-        // a list of mcc anchor-byte vectors (empty = null).
+        // a list of mcc anchor-byte vectors (empty = null). A
+        // BaseArray too short for its records drops the subtable.
+        if base_array_bytes.len() < 2 + base_pair * mcc * 2 {
+            return None;
+        }
         let mut out: Vec<SurvivingBase> = Vec::new();
         for (i, &g_old) in base_glyphs.iter().enumerate().take(base_pair) {
             let Some(g_new) = map.map(g_old) else {

@@ -905,6 +905,9 @@ pub(crate) fn parse_classdef_pairs_from_bytes(bytes: &[u8]) -> Vec<(u16, u16)> {
 }
 
 #[cfg(test)]
+mod truncation_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use alloc::{vec, vec::Vec};

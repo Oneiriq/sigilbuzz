@@ -127,6 +127,8 @@ fn rewrite_gdef_bytes(
     };
     let ivs = match present(ivs_off).filter(|_| keep_variations) {
         Some(off) => {
+            // `store_len` has checked that `off + len` stays inside
+            // the table, so the sum cannot wrap.
             let len = item_var_store::store_len(bytes, off)?;
             Some(&bytes[off..off + len])
         }

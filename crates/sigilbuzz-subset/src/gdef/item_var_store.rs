@@ -36,6 +36,11 @@ const CTX: &str = "GDEF ItemVariationStore truncated";
 /// Returns the length in bytes of the ItemVariationStore at `off` (from
 /// the GDEF start): the furthest byte its header, region list, or any
 /// ItemVariationData reaches. All of it must lie inside `table`.
+///
+/// The Offset32s and the sizes derived from them are summed in `u64`,
+/// where they cannot overflow, and only a sum proven to lie inside
+/// `table` is turned back into a position. On a 32-bit target a
+/// crafted offset would otherwise wrap `usize`.
 pub(super) fn store_len(table: &[u8], off: usize) -> Result<usize, Error> {
     if u16_at(table, off, CTX)? != 1 {
         return Err(Error::Malformed {
@@ -43,25 +48,25 @@ pub(super) fn store_len(table: &[u8], off: usize) -> Result<usize, Error> {
             context: "unsupported GDEF ItemVariationStore format",
         });
     }
-    let region_list = u32_at(table, off + 2, CTX)? as usize;
-    let data_count = usize::from(u16_at(table, off + 6, CTX)?);
-    let mut end = 8 + data_count * 4;
+    let region_list = u64::from(u32_at(table, off + 2, CTX)?);
+    let data_count = u16_at(table, off + 6, CTX)?;
+    let mut end = 8 + u64::from(data_count) * 4;
     if region_list != 0 {
-        let at = off + region_list;
-        let axes = usize::from(u16_at(table, at, CTX)?);
-        let regions = usize::from(u16_at(table, at + 2, CTX)?);
+        let at = position(table, off, region_list)?;
+        let axes = u64::from(u16_at(table, at, CTX)?);
+        let regions = u64::from(u16_at(table, at + 2, CTX)?);
         end = end.max(region_list + 4 + axes * regions * 6);
     }
-    for i in 0..data_count {
-        let data = u32_at(table, off + 8 + i * 4, CTX)? as usize;
+    for i in 0..usize::from(data_count) {
+        let data = u64::from(u32_at(table, off + 8 + i * 4, CTX)?);
         if data == 0 {
             continue;
         }
-        let at = off + data;
-        let items = usize::from(u16_at(table, at, CTX)?);
+        let at = position(table, off, data)?;
+        let items = u64::from(u16_at(table, at, CTX)?);
         let word_delta_count = u16_at(table, at + 2, CTX)?;
-        let region_indexes = usize::from(u16_at(table, at + 4, CTX)?);
-        let words = usize::from(word_delta_count & 0x7FFF);
+        let region_indexes = u64::from(u16_at(table, at + 4, CTX)?);
+        let words = u64::from(word_delta_count & 0x7FFF);
         if words > region_indexes {
             return Err(Error::Malformed {
                 offset: at + 2,
@@ -76,11 +81,24 @@ pub(super) fn store_len(table: &[u8], off: usize) -> Result<usize, Error> {
         let row = words * wide + (region_indexes - words) * narrow;
         end = end.max(data + 6 + region_indexes * 2 + items * row);
     }
-    if off + end > table.len() {
-        return Err(Error::Truncated {
+    match usize::try_from(end) {
+        Ok(len) if off.checked_add(len).is_some_and(|stop| stop <= table.len()) => Ok(len),
+        _ => Err(Error::Truncated {
             offset: table.len(),
             context: CTX,
-        });
+        }),
     }
-    Ok(end)
+}
+
+/// Resolves the Offset32 `rel`, measured from the store at `off`, to a
+/// position inside `table`.
+fn position(table: &[u8], off: usize, rel: u64) -> Result<usize, Error> {
+    usize::try_from(rel)
+        .ok()
+        .and_then(|rel| off.checked_add(rel))
+        .filter(|&at| at < table.len())
+        .ok_or(Error::Truncated {
+            offset: table.len(),
+            context: CTX,
+        })
 }

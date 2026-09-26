@@ -630,6 +630,49 @@ fn truncated_item_variation_store_is_an_error() {
     );
 }
 
+/// Offset32s near `u32::MAX` must be caught as running past the table.
+/// Added to a table position they would wrap a 32-bit `usize`, so the
+/// rewriter sums them in wider or checked arithmetic.
+#[test]
+fn offset32s_near_the_top_of_the_range_are_reported() {
+    // regionListOffset, then itemVariationDataOffsets[0].
+    for field in [2, 8] {
+        let mut store = ivs(&[1]);
+        store[field..field + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        let gdef = build_gdef(&Parts {
+            minor: 3,
+            ivs: Some(store),
+            ..Parts::default()
+        });
+        let err = parse_error(&gdef, &keep(&[]));
+        assert!(matches!(err, Error::Truncated { .. }), "{err:?}");
+    }
+    // The largest counts every u16 allows still size without wrapping:
+    // axisCount, regionCount, itemCount, wordDeltaCount (LONG_WORDS),
+    // regionIndexCount.
+    let mut store = ivs(&[1]);
+    for field in [12, 14, 22, 24, 26] {
+        put_u16(&mut store, field, u16::MAX);
+    }
+    let gdef = build_gdef(&Parts {
+        minor: 3,
+        ivs: Some(store),
+        ..Parts::default()
+    });
+    let err = parse_error(&gdef, &keep(&[]));
+    assert!(matches!(err, Error::Truncated { .. }), "{err:?}");
+    // A MarkGlyphSetsDef Coverage offset.
+    let mut sets = mark_sets(&[Some(emit_coverage_from_glyphs(&[4]))]);
+    sets[4..8].copy_from_slice(&(u32::MAX - 1).to_be_bytes());
+    let gdef = build_gdef(&Parts {
+        minor: 2,
+        mark_sets: Some(sets),
+        ..Parts::default()
+    });
+    let err = parse_error(&gdef, &keep(&[(4, 1)]));
+    assert!(matches!(err, Error::Truncated { .. }), "{err:?}");
+}
+
 /// The item store is sized, not copied to the end of the table: with
 /// the store first and a class def after it, the copy stops at the
 /// store's last byte.

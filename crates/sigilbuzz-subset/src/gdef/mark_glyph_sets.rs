@@ -48,12 +48,18 @@ pub(super) fn rewrite(table: &[u8], off: usize, map: &GidMap) -> Result<MarkGlyp
     let mut coverages = Dedup::default();
     let mut any_glyphs = false;
     for i in 0..count {
-        let rel = u32_at(table, off + 4 + i * 4, CTX)? as usize;
+        let slot = off + 4 + i * 4;
+        let rel = u32_at(table, slot, CTX)? as usize;
         // A null slot is an empty set, the reading the shaper uses.
         let glyphs: Vec<u16> = if rel == 0 {
             Vec::new()
         } else {
-            coverage(table, off + rel)?
+            // An Offset32 can wrap a 32-bit `usize`: check the sum.
+            let at = off.checked_add(rel).ok_or(Error::Truncated {
+                offset: slot,
+                context: CTX,
+            })?;
+            coverage(table, at)?
                 .into_iter()
                 .filter_map(|(gid, _)| map.map(gid))
                 .collect()
