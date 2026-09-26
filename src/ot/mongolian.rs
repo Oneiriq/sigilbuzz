@@ -26,13 +26,13 @@
 //!   first word is final, the first letter of the second word is
 //!   initial" behavior.
 //! - **Vertical default**. Mongolian is written top-to-bottom by
-//!   default. The shaper sets a vertical hint via the dispatcher
-//!   in [`crate::shape`] so a buffer with the default LTR
-//!   direction picks vertical metrics and the `vert`/`vrt2` GSUB
-//!   features when the run is dominantly Mongolian. Consumers who
-//!   want horizontal Mongolian set the buffer's direction to LTR /
-//!   RTL explicitly via a future `set_horizontal()` flag, or use
-//!   the existing [`crate::buffer::Buffer::set_direction`] API.
+//!   default. While the caller has not chosen a direction, the
+//!   dispatcher in [`crate::shape`] lays a dominantly Mongolian run
+//!   out top to bottom: vertical metrics and the `vert`/`vrt2` GSUB
+//!   features. Consumers who want horizontal Mongolian set a
+//!   direction explicitly with
+//!   [`crate::buffer::Buffer::set_direction`]: LTR keeps logical
+//!   order, RTL returns the run reversed like any RTL run.
 //!
 //! # Feature order
 //!

@@ -1,6 +1,7 @@
 //! End-to-end check that vertical shaping pulls advances from
 //! `vmtx` rather than `hmtx`, drives `y_advance` instead of
-//! `x_advance`, and flips sign for top-to-bottom flow. The fixture
+//! `x_advance`, and negates it for both vertical directions (BTT
+//! additionally comes back reversed, like HarfBuzz). The fixture
 //! is a synthetic font built inline because bundling a real CJK
 //! font would balloon the repo; the spec path this exercises is
 //! identical to what HarfBuzz does for e.g. Noto Sans CJK.
@@ -205,21 +206,77 @@ fn vertical_top_to_bottom_pulls_from_vmtx_and_negates_y() {
 }
 
 #[test]
-fn vertical_bottom_to_top_preserves_positive_advance() {
+fn vertical_bottom_to_top_negates_advance_and_reverses() {
     let data = build_vertical_font();
     let blob = Blob::new(&data);
     let face = Face::parse(&blob, 0).unwrap();
     let font = Font::new(face, 16.0);
     let mut buffer = Buffer::new();
     buffer.set_direction(Direction::Btt);
-    buffer.push_str("C");
+    buffer.push_str("ABC");
 
     let run = shape(&font, &buffer, &[]).unwrap();
-    assert_eq!(run.len(), 1);
-    // BTT is a reverse vertical flow. The advance stays positive so
-    // the pen walks upward.
-    assert_eq!(run.glyphs[0].y_advance, 1200);
-    assert_eq!(run.glyphs[0].x_advance, 0);
+    assert_eq!(run.len(), 3);
+    // HarfBuzz convention: BTT advances are negative like TTB (the pen
+    // moves down) and the run comes back reversed, so the logically
+    // last glyph is on top.
+    let ids: Vec<u32> = run.glyphs.iter().map(|g| g.glyph_id).collect();
+    let clusters: Vec<u32> = run.glyphs.iter().map(|g| g.cluster).collect();
+    let advances: Vec<i32> = run.glyphs.iter().map(|g| g.y_advance).collect();
+    assert_eq!(ids, [3, 2, 1]);
+    assert_eq!(clusters, [2, 1, 0]);
+    assert_eq!(advances, [-1200, -1100, -1000]);
+    assert!(run.glyphs.iter().all(|g| g.x_advance == 0));
+}
+
+/// `(glyph_id, cluster, x_advance, y_advance)` per output glyph.
+type VPos = (u32, u32, i32, i32);
+
+fn sigilbuzz_vertical(data: &[u8], text: &str, direction: Direction) -> Vec<VPos> {
+    let blob = Blob::new(data);
+    let face = Face::parse(&blob, 0).unwrap();
+    let font = Font::new(face, 1000.0);
+    let mut buffer = Buffer::new();
+    buffer.set_direction(direction);
+    buffer.push_str(text);
+    let run = shape(&font, &buffer, &[]).unwrap();
+    run.glyphs
+        .iter()
+        .map(|g| (g.glyph_id, g.cluster, g.x_advance, g.y_advance))
+        .collect()
+}
+
+fn rustybuzz_vertical(data: &[u8], text: &str, direction: rustybuzz::Direction) -> Vec<VPos> {
+    let face = rustybuzz::Face::from_slice(data, 0).unwrap();
+    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    buffer.push_str(text);
+    buffer.set_direction(direction);
+    let out = rustybuzz::shape(&face, &[], buffer);
+    out.glyph_infos()
+        .iter()
+        .zip(out.glyph_positions())
+        .map(|(i, p)| (i.glyph_id, i.cluster, p.x_advance, p.y_advance))
+        .collect()
+}
+
+#[test]
+fn vertical_order_and_advances_match_rustybuzz() {
+    // Offsets are left out: rustybuzz moves every vertical glyph by
+    // its vertical origin, which sigilbuzz does not apply yet. Order,
+    // clusters, and advance signs are the direction contract.
+    let data = build_vertical_font();
+    for text in ["A", "ABC", "CAB"] {
+        assert_eq!(
+            sigilbuzz_vertical(&data, text, Direction::Ttb),
+            rustybuzz_vertical(&data, text, rustybuzz::Direction::TopToBottom),
+            "TTB {text:?}"
+        );
+        assert_eq!(
+            sigilbuzz_vertical(&data, text, Direction::Btt),
+            rustybuzz_vertical(&data, text, rustybuzz::Direction::BottomToTop),
+            "BTT {text:?}"
+        );
+    }
 }
 
 #[test]

@@ -181,6 +181,11 @@ pub struct Buffer {
     pub(crate) text: String,
     /// Writing direction. Defaults to [`Direction::Ltr`].
     pub(crate) direction: Direction,
+    /// `true` once a caller picked the direction ([`Buffer::set_direction`]
+    /// or [`Buffer::set_text_bidi`]). While `false`, `direction` is only
+    /// the LTR default and `shape()` may choose vertical layout for
+    /// Mongolian-dominant text. [`Buffer::clear`] resets it.
+    pub(crate) direction_explicit: bool,
     /// When `true`, `shape()` composes the input text via
     /// [`crate::unicode::normalize::compose_str`] before glyph
     /// lookup. Matches HarfBuzz's implicit NFC pass for the
@@ -216,15 +221,22 @@ impl Buffer {
 
     /// Replaces the buffer contents with `text`, but additionally
     /// runs the UAX #9 bidirectional algorithm and reorders the
-    /// stored text into visual order before shaping. Also updates
-    /// the buffer's [`Direction`] to match the resolved paragraph
-    /// direction.
+    /// stored text into visual order before shaping.
+    ///
+    /// Because the stored text is already in visual order, this also
+    /// sets the shaping direction to an explicit [`Direction::Ltr`]:
+    /// [`crate::shape`] then walks the text left to right and returns
+    /// the glyphs in that same (visual) order. Setting
+    /// [`Direction::Rtl`] afterwards would reverse the run a second
+    /// time. The paragraph direction UAX #9 resolved stays available
+    /// through [`Self::bidi_map`] (`BidiMap::paragraph_direction`).
     ///
     /// Use this when you have mixed-direction input (Latin + Hebrew,
     /// Arabic + ASCII digits, etc.) and want the shaper to receive
-    /// the run already partitioned into visual order, matching
-    /// HarfBuzz's `hb_buffer_guess_segment_properties` + bidi
-    /// reorder behavior.
+    /// the run already partitioned into visual order. For best
+    /// results with HarfBuzz-grade shaping (mark attachment, cursive
+    /// joining), shape each directional run separately in logical
+    /// order with its own direction instead.
     ///
     /// The plain [`Self::set_text`] is left untouched: existing
     /// 0.1.0 consumers (oniq, demos) that handle direction
@@ -236,7 +248,8 @@ impl Buffer {
     /// offsets in the original `text`.
     pub fn set_text_bidi(&mut self, text: &str) {
         let info = crate::unicode::bidi::BidiInfo::new(text, None);
-        self.direction = info.paragraph_direction();
+        self.direction = Direction::Ltr;
+        self.direction_explicit = true;
         let order = info.reorder();
         self.text.clear();
         self.text.reserve(text.len());
@@ -271,15 +284,48 @@ impl Buffer {
         self.bidi_map.as_ref()
     }
 
-    /// Current writing direction.
+    /// Current writing direction: [`Direction::Ltr`] until one is set
+    /// (see [`Self::has_explicit_direction`]).
     #[must_use]
     pub const fn direction(&self) -> Direction {
         self.direction
     }
 
     /// Sets the writing direction for the next shaping call.
+    ///
+    /// The direction decides the output order of [`crate::shape`]:
+    /// forward directions ([`Direction::Ltr`], [`Direction::Ttb`])
+    /// return glyphs in logical order, backward ones
+    /// ([`Direction::Rtl`], [`Direction::Btt`]) in reversed (visual)
+    /// order, exactly like HarfBuzz. Calling this marks the direction
+    /// as explicit (see [`Self::has_explicit_direction`]), even when
+    /// `direction` is the LTR default.
     pub fn set_direction(&mut self, direction: Direction) {
         self.direction = direction;
+        self.direction_explicit = true;
+    }
+
+    /// True when the direction was chosen by the caller through
+    /// [`Self::set_direction`] or [`Self::set_text_bidi`], false while
+    /// [`Self::direction`] only reports the LTR default.
+    ///
+    /// [`crate::shape`] lays out Mongolian-dominant text vertically
+    /// (top to bottom) only while no direction is explicit; an
+    /// explicit [`Direction::Ltr`] keeps it horizontal.
+    ///
+    /// ```
+    /// use sigilbuzz::{Buffer, Direction};
+    ///
+    /// let mut buffer = Buffer::new();
+    /// assert!(!buffer.has_explicit_direction());
+    /// buffer.set_direction(Direction::Ltr);
+    /// assert!(buffer.has_explicit_direction());
+    /// buffer.clear();
+    /// assert!(!buffer.has_explicit_direction());
+    /// ```
+    #[must_use]
+    pub const fn has_explicit_direction(&self) -> bool {
+        self.direction_explicit
     }
 
     /// True when [`Buffer::set_normalize_nfc`] has been enabled.
@@ -296,11 +342,13 @@ impl Buffer {
         self.normalize_nfc = enabled;
     }
 
-    /// Clears the text and resets direction to LTR. Other future
-    /// state (script, language, user data) will reset here too.
+    /// Clears the text and resets direction to the unset LTR default.
+    /// Other future state (script, language, user data) will reset
+    /// here too.
     pub fn clear(&mut self) {
         self.text.clear();
         self.direction = Direction::Ltr;
+        self.direction_explicit = false;
         self.normalize_nfc = false;
         self.bidi_map = None;
     }
@@ -519,6 +567,32 @@ const fn is_common_or_inherited(ch: char) -> bool {
 }
 
 /// The result of a shaping call: the glyphs, in visual order.
+///
+/// The order follows the buffer's [`Direction`], the same contract as
+/// HarfBuzz's `hb_shape`:
+///
+/// - [`Direction::Ltr`] and [`Direction::Ttb`] (forward): glyphs come
+///   out in logical order, which is also their visual order along the
+///   pen's direction of travel.
+/// - [`Direction::Rtl`] and [`Direction::Btt`] (backward): shaping runs
+///   in logical order, then the glyph vector is reversed. For RTL,
+///   `glyphs[0]` is the leftmost glyph (the logically last one) and
+///   the pen moves left to right. For BTT, `glyphs[0]` is the topmost
+///   glyph and the pen moves down, as in TTB. Clusters keep their
+///   logical byte offsets, so they decrease along a backward run.
+///
+/// In every direction a renderer draws `glyphs` in vector order,
+/// placing each glyph at the current pen position plus its
+/// `(x_offset, y_offset)` and then adding `(x_advance, y_advance)` to
+/// the pen. Vertical runs report negative `y_advance` values (the pen
+/// moves down) for both TTB and BTT.
+///
+/// One known difference remains: when the requested horizontal
+/// direction is not the script's native one (LTR Hebrew, RTL Latin),
+/// or for BTT, HarfBuzz reverses the grapheme clusters before shaping
+/// and shapes in the opposite direction. sigilbuzz shapes those runs
+/// in logical order as asked, so marks inside a cluster and
+/// contextual lookups can come out differently there.
 #[derive(Debug, Default, Clone)]
 pub struct ShapedRun {
     /// Positioned glyphs, ready to draw.
@@ -585,9 +659,63 @@ mod tests {
         // \u{05E9}\u{05DC}\u{05D5}\u{05DD} = "שלום" (shalom).
         b.set_text_bidi("\u{05E9}\u{05DC}\u{05D5}\u{05DD}");
         // After visual reorder the chars are in reverse logical
-        // order, what the shaper expects for an RTL run.
+        // order. The stored text is visual, so the shaping direction
+        // is an explicit LTR (shaping it RTL would reverse it again);
+        // the RTL paragraph direction lives on the bidi map.
         assert_eq!(b.text(), "\u{05DD}\u{05D5}\u{05DC}\u{05E9}");
+        assert_eq!(b.direction(), Direction::Ltr);
+        assert!(b.has_explicit_direction());
+        assert_eq!(
+            b.bidi_map()
+                .map(crate::bidi_map::BidiMap::paragraph_direction),
+            Some(Direction::Rtl)
+        );
+    }
+
+    #[test]
+    fn direction_starts_implicit_and_set_direction_makes_it_explicit() {
+        let mut b = Buffer::new();
+        assert!(!b.has_explicit_direction());
+        assert_eq!(b.direction(), Direction::Ltr);
+        // Setting the default value still counts as a caller choice.
+        b.set_direction(Direction::Ltr);
+        assert!(b.has_explicit_direction());
+        b.set_direction(Direction::Btt);
+        assert!(b.has_explicit_direction());
+        assert_eq!(b.direction(), Direction::Btt);
+    }
+
+    #[test]
+    fn text_mutations_keep_the_explicit_direction() {
+        let mut b = Buffer::new();
+        b.set_direction(Direction::Rtl);
+        b.push_str("abc");
+        b.set_text("def");
+        assert!(b.has_explicit_direction());
         assert_eq!(b.direction(), Direction::Rtl);
+    }
+
+    #[test]
+    fn clear_resets_the_explicit_direction_flag() {
+        let mut b = Buffer::new();
+        b.set_direction(Direction::Rtl);
+        b.clear();
+        assert!(!b.has_explicit_direction());
+        assert_eq!(b.direction(), Direction::Ltr);
+
+        b.set_text_bidi("\u{05D0}");
+        assert!(b.has_explicit_direction());
+        b.clear();
+        assert!(!b.has_explicit_direction());
+    }
+
+    #[test]
+    fn set_text_bidi_overrides_an_earlier_rtl_direction() {
+        let mut b = Buffer::new();
+        b.set_direction(Direction::Rtl);
+        b.set_text_bidi("abc \u{05D0}\u{05D1}");
+        assert_eq!(b.direction(), Direction::Ltr);
+        assert!(b.has_explicit_direction());
     }
 
     #[test]

@@ -29,7 +29,8 @@ pub struct Args {
     /// Comma-separated feature overrides (e.g. `liga,-kern,smcp=1`).
     #[arg(long)]
     pub features: Option<String>,
-    /// Writing direction (`ltr`, `rtl`, `ttb`, `btt`).
+    /// Writing direction (`ltr`, `rtl`, `ttb`, `btt`). `rtl` and `btt`
+    /// print the glyphs in visual order (reversed), like `hb-shape`.
     #[arg(long)]
     pub direction: Option<String>,
     /// Script tag (informational; sigilbuzz auto-detects internally).

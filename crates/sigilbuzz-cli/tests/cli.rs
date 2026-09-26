@@ -88,6 +88,40 @@ fn shape_json_emits_valid_array() {
 }
 
 #[test]
+fn shape_rtl_prints_visual_order() {
+    // hb-shape parity: an RTL run comes out reversed, so the cluster
+    // values count down.
+    let font = open_sans_path();
+    let shape_with = |direction: &str| {
+        let (stdout, stderr, ok) = run_cli([
+            "shape".as_ref(),
+            font.as_os_str(),
+            "Hi".as_ref(),
+            "--direction".as_ref(),
+            direction.as_ref(),
+        ]);
+        assert!(ok, "binary failed: stderr={stderr}");
+        stdout
+            .lines()
+            .map(|l| {
+                (
+                    parse_field(l, "gid=").to_owned(),
+                    parse_field(l, "cluster=").to_owned(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let ltr = shape_with("ltr");
+    let rtl = shape_with("rtl");
+    assert_eq!(ltr.len(), 2);
+    assert_eq!(ltr[0].1, "0");
+    assert_eq!(rtl[0].1, "1", "RTL output starts with the last cluster");
+    let mut reversed = rtl.clone();
+    reversed.reverse();
+    assert_eq!(ltr, reversed);
+}
+
+#[test]
 fn shape_rejects_missing_font() {
     let (_stdout, stderr, ok) = run_cli([
         "shape".as_ref(),

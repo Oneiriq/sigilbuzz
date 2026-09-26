@@ -14,14 +14,12 @@
 //!   * Free Variation Selector after a letter (FVS1 inherits form)
 //!   * mixed Mongolian + Latin
 //!
-//! Both engines are forced to a horizontal direction. sigilbuzz's
-//! buffer is set to RTL. That reads as "explicit horizontal", so
-//! the auto-vertical default for Mongolian does not kick in.
-//! rustybuzz's buffer is set to LTR; sigilbuzz processes glyphs in
-//! logical order regardless of buffer direction (it does not reverse
-//! the run for RTL), so comparing sigilbuzz-RTL against rustybuzz-LTR
-//! aligns logical-order outputs glyph-for-glyph. A separate test
-//! exercises the auto-vertical path.
+//! Both engines are forced to horizontal LTR. On the sigilbuzz side
+//! the explicit `set_direction(Direction::Ltr)` is what keeps the
+//! auto-vertical default for Mongolian from kicking in (it only
+//! applies while no direction was set), so both engines return the
+//! same logical-order glyph stream. Separate tests exercise the
+//! auto-vertical path and explicit RTL.
 //!
 //! A failure here is a parity drift against rustybuzz; fix in
 //! `src/ot/mongolian.rs`, `src/unicode/joining.rs` (Mongolian
@@ -120,11 +118,11 @@ fn mongolian_corpus_matches_rustybuzz() {
 
     for case in CORPUS {
         let mut buffer = Buffer::new();
-        // Force horizontal explicit direction so the Mongolian
-        // auto-vertical default does not flip metrics. sigilbuzz
-        // does not reverse the run for RTL, so logical-order glyphs
-        // line up with rustybuzz's LTR output directly.
-        buffer.set_direction(Direction::Rtl);
+        // An explicit LTR keeps the run horizontal: the Mongolian
+        // auto-vertical default only applies while no direction was
+        // set. Logical-order glyphs line up with rustybuzz's LTR
+        // output directly.
+        buffer.set_direction(Direction::Ltr);
         buffer.push_str(case.text);
         let sig = shape(&font, &buffer, &[]).expect("sigilbuzz shape");
 
@@ -179,7 +177,7 @@ fn multiletter_chains_match_rustybuzz() {
 
     for case in MULTILETTER_CHAINS {
         let mut buffer = Buffer::new();
-        buffer.set_direction(Direction::Rtl);
+        buffer.set_direction(Direction::Ltr);
         buffer.push_str(case.text);
         let sig = shape(&font, &buffer, &[]).expect("sigilbuzz shape");
 
@@ -245,18 +243,70 @@ fn auto_vertical_default_engages_for_mongolian_dominant_run() {
 
 #[test]
 fn explicit_horizontal_overrides_mongolian_default() {
-    // Setting RTL explicitly opts into horizontal layout: y_advance
-    // stays zero, x_advance carries the hmtx value.
+    // Setting LTR explicitly opts into horizontal layout: y_advance
+    // stays zero, x_advance carries the hmtx value. LTR is also the
+    // buffer default, so this pins that the explicit flag, not the
+    // value, is what disables auto-vertical.
     let blob = Blob::new(NOTO_MONGOLIAN);
     let face = Face::parse(&blob, 0).expect("parse face");
     let font = Font::new(face, 1000.0);
 
     let mut buffer = Buffer::new();
-    buffer.set_direction(Direction::Rtl);
+    buffer.set_direction(Direction::Ltr);
     buffer.push_str("\u{1820}");
-    let shaped = shape(&font, &buffer, &[]).expect("shape Mongolian RTL");
+    let shaped = shape(&font, &buffer, &[]).expect("shape Mongolian LTR");
 
     assert_eq!(shaped.len(), 1);
     assert_eq!(shaped.glyphs[0].y_advance, 0);
     assert_ne!(shaped.glyphs[0].x_advance, 0);
+}
+
+#[test]
+fn explicit_rtl_mongolian_is_horizontal_and_reversed() {
+    // RTL is an explicit horizontal direction too, and like every
+    // backward direction it returns the run reversed (visual order).
+    let blob = Blob::new(NOTO_MONGOLIAN);
+    let face = Face::parse(&blob, 0).expect("parse face");
+    let font = Font::new(face, 1000.0);
+    let text = "\u{1820}\u{1821}";
+
+    let mut ltr = Buffer::new();
+    ltr.set_direction(Direction::Ltr);
+    ltr.push_str(text);
+    let ltr = shape(&font, &ltr, &[]).expect("shape LTR");
+
+    let mut rtl = Buffer::new();
+    rtl.set_direction(Direction::Rtl);
+    rtl.push_str(text);
+    let rtl = shape(&font, &rtl, &[]).expect("shape RTL");
+
+    assert!(rtl
+        .glyphs
+        .iter()
+        .all(|g| g.y_advance == 0 && g.x_advance != 0));
+    let mut reversed = rtl.glyphs.clone();
+    reversed.reverse();
+    assert_eq!(ltr.glyphs, reversed);
+}
+
+#[test]
+fn clear_brings_back_the_auto_vertical_default() {
+    let blob = Blob::new(NOTO_MONGOLIAN);
+    let face = Face::parse(&blob, 0).expect("parse face");
+    let font = Font::new(face, 1000.0);
+
+    let mut buffer = Buffer::new();
+    buffer.set_direction(Direction::Ltr);
+    buffer.push_str("\u{1820}");
+    let horizontal = shape(&font, &buffer, &[]).expect("shape explicit LTR");
+    assert_eq!(horizontal.glyphs[0].y_advance, 0);
+
+    buffer.clear();
+    buffer.push_str("\u{1820}");
+    let vertical = shape(&font, &buffer, &[]).expect("shape after clear");
+    assert_eq!(vertical.glyphs[0].x_advance, 0);
+    assert!(
+        vertical.glyphs[0].y_advance < 0,
+        "TTB advances are negative"
+    );
 }

@@ -5,7 +5,8 @@
 //! Stresses the GPOS mark-to-base / mark-to-mark anchor pipeline.
 //! Hebrew is non-cursive, so no joining state machine fires; the
 //! interesting cost is anchor lookup, niqqud / cantillation
-//! stacking, and RTL iteration.
+//! stacking, and RTL iteration. Both engines shape RTL and return
+//! visual order, so each side pays for the final reversal.
 //!
 //! Throughput is reported in codepoints per second.
 

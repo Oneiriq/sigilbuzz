@@ -26,17 +26,38 @@
 //!   window (the first recursive layer sigilbuzz supports).
 //! - hmtx advance lookup, post-substitution so ligature glyphs get
 //!   their own advance rather than the sum of their components.
-//! - GPOS (lookup types 1, 2, 4, 5, 6, plus Extension type 9
+//! - GPOS (lookup types 1 through 8, plus Extension type 9
 //!   unwrapping): `kern` runs by default for pair adjustment,
-//!   `mark` runs by default for mark-to-base attachment, `mkmk`
-//!   for mark-to-mark stacking, and mark-to-ligature is dispatched
-//!   via the same `mark` feature when the subtable is present.
-//!   User-enabled GPOS tags flow through the same dispatcher.
+//!   `curs` (horizontal runs) for cursive attachment, `mark` for
+//!   mark-to-base and mark-to-ligature attachment, and `mkmk` for
+//!   mark-to-mark stacking. User-enabled GPOS tags flow through the
+//!   same dispatcher. Attachments are recorded while the lookups run
+//!   and resolved into final offsets in one direction-aware pass
+//!   after all positioning (see the `attach` submodule).
 //! - Legacy `kern` table as a fallback for fonts whose GPOS has no
 //!   `kern` feature. Open Sans is the canonical example.
 //!
 //! Any default-on feature can be suppressed by a `Feature { tag,
 //! value: 0 }` entry.
+//!
+//! # Direction and output order
+//!
+//! The contract matches HarfBuzz's `hb_shape`. Every pass (GSUB,
+//! GPOS, kerning) runs over the glyphs in logical order. For the
+//! backward directions ([`crate::Direction::Rtl`] and
+//! [`crate::Direction::Btt`]) the glyph vector is reversed as the very
+//! last step, so the returned `ShapedRun` always holds visual order and
+//! the offsets are relative to that order: an RTL run comes out
+//! leftmost glyph first, byte-for-byte what HarfBuzz and rustybuzz
+//! return. Forward directions ([`crate::Direction::Ltr`],
+//! [`crate::Direction::Ttb`]) come out in logical order. Vertical runs
+//! report negative `y_advance` values in both TTB and BTT.
+//!
+//! When the caller never set a direction
+//! ([`crate::Buffer::has_explicit_direction`] is false) the buffer
+//! shapes as LTR, except that a Mongolian-dominant run switches to
+//! vertical top-to-bottom layout. An explicit
+//! [`crate::Direction::Ltr`] keeps Mongolian horizontal.
 //!
 //! # What is not here yet
 //!
@@ -49,22 +70,26 @@
 //! - GSUB contextual non-chained (type 5), multiple substitution
 //!   (type 2), alternate (type 3), reverse chained (type 8),
 //!   and the format 1/2 variants of type 6.
-//! - GPOS cursive attachment (type 3) and contextual (types 7, 8).
-//! - Right-to-left reordering: `buffer.direction()` is consulted
-//!   but the output order is always logical = visual for now.
+//! - Automatic direction detection: an unset direction shapes as LTR
+//!   even for Arabic or Hebrew text. Set [`crate::Direction::Rtl`]
+//!   explicitly to get HarfBuzz's RTL behavior and visual order.
+//! - Bidi mirroring of paired punctuation in RTL runs, and the
+//!   fallback mark positioner HarfBuzz uses for fonts without GPOS.
+
+mod attach;
 
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
-use crate::buffer::{script_priority_for, unicode_prop, Buffer, Glyph, ShapedRun};
+use crate::buffer::{script_priority_for, unicode_prop, Buffer, Direction, Glyph, ShapedRun};
 use crate::error::Result;
 use crate::face::Face;
 use crate::font::Font;
 use crate::ot::arabic::{assign_joining_forms, JoiningForm};
-use crate::tables::gdef::{Gdef, GlyphClass};
+use crate::tables::gdef::Gdef;
 use crate::tables::gpos::{
-    lookup_type as gpos_lt, resolve_variation_delta, ChainContextPos, ContextPos, MarkBasePos,
-    MarkLigaPos, MarkMarkPos, PairPos, SinglePos, ValueRecord,
+    lookup_type as gpos_lt, resolve_variation_delta, ChainContextPos, ContextPos, PairPos,
+    SinglePos, ValueRecord,
 };
 use crate::tables::gsub::{
     lookup_type as gsub_lt, Alternate, ChainContextAny, Context as GsubContext, Ligature, Multiple,
@@ -587,6 +612,12 @@ fn hangul_compose(
     out
 }
 
+/// # Output order
+///
+/// Glyphs come back in visual order, like HarfBuzz: logical order for
+/// LTR and TTB, reversed after positioning for RTL and BTT. See the
+/// `ShapedRun` docs for the exact contract.
+///
 /// # Errors
 ///
 /// Returns an error if the font is missing any of the tables required
@@ -601,11 +632,11 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let want_liga = !feature_disabled(features, *b"liga");
     // Vertical layout: explicit when the buffer direction is TTB/BTT,
     // *implicit* when the run is dominantly Mongolian and the caller
-    // left the direction at the default LTR. Mongolian's traditional
-    // writing axis is top-to-bottom; auto-vertical here lets simple
-    // callers shape Mongolian without having to know the default.
-    // Consumers who want horizontal Mongolian must set the direction
-    // to RTL (vertical-rotated) or pass a non-Mongolian-dominant run.
+    // never chose a direction. Mongolian's traditional writing axis is
+    // top-to-bottom; auto-vertical here lets simple callers shape
+    // Mongolian without having to know the default. An explicit
+    // direction always wins, so `set_direction(Direction::Ltr)` gives
+    // horizontal Mongolian.
     let mongolian_dominant = buffer
         .text()
         .chars()
@@ -615,11 +646,14 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             .chars()
             .find(|c| !matches!(crate::unicode::script_of(*c), crate::unicode::Script::Other))
             .is_some_and(|c| crate::unicode::script_of(c) == crate::unicode::Script::Mongolian);
-    let is_vertical = if buffer.direction() == crate::buffer::Direction::Ltr && mongolian_dominant {
-        true
+    // The direction every later pass works with: the buffer's, or TTB
+    // for implicit vertical Mongolian.
+    let direction = if !buffer.has_explicit_direction() && mongolian_dominant {
+        Direction::Ttb
     } else {
-        !buffer.direction().is_horizontal()
+        buffer.direction()
     };
+    let is_vertical = !direction.is_horizontal();
 
     let face = font.face();
     let cmap = face.cmap()?;
@@ -1128,7 +1162,8 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 }
                 let id = glyph.glyph_id as u16;
                 // HarfBuzz convention: vertical y_advance is negative
-                // for top-to-bottom flow, so the pen moves downward.
+                // in both TTB and BTT, so the pen moves downward; BTT
+                // only differs by the final reversal.
                 let mut raw = i32::from(vmtx.advance(id).unwrap_or(0));
                 if let Some(ref vvar) = vvar {
                     let delta = vvar.advance_height_delta(id, coords);
@@ -1139,11 +1174,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                     };
                     raw = raw.saturating_add(rounded);
                 }
-                glyph.y_advance = if buffer.direction().is_forward() {
-                    -raw
-                } else {
-                    raw
-                };
+                glyph.y_advance = -raw;
                 glyph.x_advance = 0;
             }
         } else {
@@ -1156,11 +1187,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 if is_hidden_ignorable(glyph) {
                     continue;
                 }
-                glyph.y_advance = if buffer.direction().is_forward() {
-                    -fallback
-                } else {
-                    fallback
-                };
+                glyph.y_advance = -fallback;
                 glyph.x_advance = 0;
             }
         }
@@ -1226,11 +1253,12 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     }
 
     // Step 4: GPOS passes, per segment, so each segment dispatches
-    // under its own script-tag priority. Kern first, then `dist`
-    // (pre-mark), mark, mkmk, then user-enabled GPOS features. A GPOS
-    // kern hit on *any* segment inhibits the legacy-kern fallback, which
-    // matches the spec: the modern table wins whenever it carries any
-    // usable data for the run.
+    // under its own script-tag priority. Kern first, then `curs`
+    // (horizontal runs only, like HarfBuzz), `dist` (pre-mark), mark,
+    // mkmk, then user-enabled GPOS features. A GPOS kern hit on *any*
+    // segment inhibits the legacy-kern fallback, which matches the
+    // spec: the modern table wins whenever it carries any usable data
+    // for the run.
     let gpos = face.gpos()?;
     // Build the variable-font resolution context once. Passing this
     // through every GPOS apply site is what lets VariationIndex
@@ -1241,6 +1269,20 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         coords: font.coords(),
         store: gdef.as_ref().and_then(|g| g.item_variation_store()),
     };
+    // Attachment records (one slot per glyph), filled by the cursive
+    // and mark lookups and resolved after all positioning below.
+    let mut attach_slots = if gpos.is_some() {
+        attach::new_slots(glyphs.len())
+    } else {
+        Vec::new()
+    };
+    // `curs` is a horizontal default; vertical runs only get it when
+    // the caller asks for it.
+    let want_curs = if is_vertical {
+        features.iter().any(|f| f.tag == *b"curs" && f.value != 0)
+    } else {
+        !feature_disabled(features, *b"curs")
+    };
     let mut gpos_kerned = false;
     if let Some(ref gpos) = gpos {
         for seg_out in &seg_glyph_ranges {
@@ -1249,12 +1291,19 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             }
             let priority = seg_out.script_priority;
             let seg_slice = &mut glyphs[seg_out.range.clone()];
+            let att = &mut attach::Attach {
+                direction,
+                slots: &mut attach_slots[seg_out.range.clone()],
+            };
+            let gdef = gdef.as_ref();
             if want_kern {
-                let ran =
-                    apply_gpos_feature(gpos, seg_slice, gdef.as_ref(), *b"kern", priority, &var);
+                let ran = apply_gpos_feature(gpos, seg_slice, att, gdef, *b"kern", priority, &var);
                 if ran {
                     gpos_kerned = true;
                 }
+            }
+            if want_curs {
+                apply_gpos_feature(gpos, seg_slice, att, gdef, *b"curs", priority, &var);
             }
             // `dist`: distance adjustments the Indic / USE shapers
             // rely on for conjunct forms. Keyed on the segment's
@@ -1262,20 +1311,13 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             // Khmer -> khmr/khm2/DFLT, etc.), and skipped for scripts
             // that never ship a `dist` feature.
             if !feature_disabled(features, *b"dist") {
-                apply_gpos_feature_in_scripts_with_var(
-                    gpos,
-                    seg_slice,
-                    gdef.as_ref(),
-                    *b"dist",
-                    priority,
-                    &var,
-                );
+                apply_gpos_feature(gpos, seg_slice, att, gdef, *b"dist", priority, &var);
             }
             if !feature_disabled(features, *b"mark") {
-                apply_gpos_feature(gpos, seg_slice, gdef.as_ref(), *b"mark", priority, &var);
+                apply_gpos_feature(gpos, seg_slice, att, gdef, *b"mark", priority, &var);
             }
             if !feature_disabled(features, *b"mkmk") {
-                apply_gpos_feature(gpos, seg_slice, gdef.as_ref(), *b"mkmk", priority, &var);
+                apply_gpos_feature(gpos, seg_slice, att, gdef, *b"mkmk", priority, &var);
             }
             // User-enabled features beyond the defaults flow through
             // the same dispatch. Skip tags already handled above so
@@ -1284,10 +1326,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 if feat.value == 0 {
                     continue;
                 }
-                if matches!(&feat.tag, b"kern" | b"mark" | b"mkmk" | b"liga") {
+                if matches!(&feat.tag, b"kern" | b"curs" | b"mark" | b"mkmk" | b"liga") {
                     continue;
                 }
-                apply_gpos_feature(gpos, seg_slice, gdef.as_ref(), feat.tag, priority, &var);
+                apply_gpos_feature(gpos, seg_slice, att, gdef, feat.tag, priority, &var);
             }
         }
     }
@@ -1326,7 +1368,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // ship `HB_OT_SHAPE_ZERO_WIDTH_MARKS_NONE`, so post-base matras
     // keep their hmtx advance through the entire pipeline (they are
     // bases dressed up as marks for OpenType GDEF reasons).
-    let dominant_zeroes_late = dominant_script.is_some_and(zeroes_marks_late);
+    // A run with no script-bearing codepoint (digits, punctuation,
+    // combining marks) is COMMON to HarfBuzz and takes the default
+    // shaper, so it zeroes late too.
+    let dominant_zeroes_late = dominant_script.map_or(true, zeroes_marks_late);
     if dominant_zeroes_late {
         if let Some(ref gdef) = gdef {
             for seg_out in &seg_glyph_ranges {
@@ -1337,6 +1382,17 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 }
             }
         }
+    }
+
+    // Attachment offsets are resolved only now, against the final
+    // advances (kerning and mark zeroing included), with the
+    // direction-specific advance compensation.
+    attach::resolve_attachments(&mut glyphs, &mut attach_slots, direction);
+
+    // Backward directions shaped in logical order; hand them back in
+    // visual order, as HarfBuzz does at the end of positioning.
+    if !direction.is_forward() {
+        glyphs.reverse();
     }
 
     Ok(ShapedRun { glyphs })
@@ -1389,9 +1445,12 @@ fn zeroes_marks_late(script: Script) -> bool {
             // Thai/Lao shapers ship LATE explicitly.
             | Script::Thai
             | Script::Lao
-            // Latin / common / "Other" all reach the default shaper,
-            // which is LATE.
+            // Latin / Greek / Cyrillic / Han / common / "Other" all
+            // reach the default shaper, which is LATE.
             | Script::Latin
+            | Script::Greek
+            | Script::Cyrillic
+            | Script::Han
             | Script::Other
     )
 }
@@ -2475,10 +2534,15 @@ pub(crate) fn feature_would_substitute(
 ///
 /// - 1: Single adjustment (uniform or per-glyph ValueRecord)
 /// - 2: Pair adjustment (kern)
+/// - 3: Cursive attachment (curs)
 /// - 4: Mark-to-base attachment (mark)
 /// - 5: Mark-to-ligature attachment (mark on ligature components)
 /// - 6: Mark-to-mark attachment (mkmk stacking)
+/// - 7, 8: Contextual and chained-context positioning
 /// - 9: Extension (unwraps, re-dispatches)
+///
+/// Attachment lookups (3 to 6) only record their links in `att`;
+/// the final offsets come from [`attach::resolve_attachments`].
 ///
 /// Returns `true` when at least one subtable of a supported type
 /// actually ran. Callers use this to decide whether to fall back
@@ -2486,47 +2550,26 @@ pub(crate) fn feature_would_substitute(
 fn apply_gpos_feature(
     gpos: &Gpos<'_>,
     glyphs: &mut [Glyph],
+    att: &mut attach::Attach<'_>,
     gdef: Option<&Gdef<'_>>,
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
     var: &VarCtx<'_>,
 ) -> bool {
-    apply_gpos_feature_in_scripts_with_var(gpos, glyphs, gdef, tag, script_priority, var)
+    apply_gpos_feature_in_scripts_with_var(gpos, glyphs, att, gdef, tag, script_priority, var)
 }
 
-/// Script-priority variant of [`apply_gpos_feature`]. Matches the
-/// GSUB equivalent: walks `script_priority` in order, stops at the
-/// first script that carries the feature tag, and falls back to
-/// DFLT / first script when none match.
-///
-/// Back-compat entry point for callers outside [`shape`] that do
-/// not yet thread a variable-font context; equivalent to calling
-/// the `_with_var` form with [`VarCtx::none`].
-#[allow(dead_code)]
-pub(crate) fn apply_gpos_feature_in_scripts(
-    gpos: &Gpos<'_>,
-    glyphs: &mut [Glyph],
-    gdef: Option<&Gdef<'_>>,
-    tag: [u8; 4],
-    script_priority: &[[u8; 4]],
-) -> bool {
-    apply_gpos_feature_in_scripts_with_var(
-        gpos,
-        glyphs,
-        gdef,
-        tag,
-        script_priority,
-        &VarCtx::none(),
-    )
-}
-
-/// Variable-font aware variant of
-/// [`apply_gpos_feature_in_scripts`]. Every ValueRecord delta
-/// passes through the `var` context so VariationIndex-backed kern
-/// pairs scale with the active coords.
+/// Script-priority, variable-font aware body of
+/// [`apply_gpos_feature`]. Matches the GSUB equivalent: walks
+/// `script_priority` in order, stops at the first script that
+/// carries the feature tag, and falls back to DFLT / first script
+/// when none match. Every ValueRecord and Anchor delta passes
+/// through the `var` context so VariationIndex-backed values scale
+/// with the active coords.
 fn apply_gpos_feature_in_scripts_with_var(
     gpos: &Gpos<'_>,
     glyphs: &mut [Glyph],
+    att: &mut attach::Attach<'_>,
     gdef: Option<&Gdef<'_>>,
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
@@ -2547,12 +2590,14 @@ fn apply_gpos_feature_in_scripts_with_var(
 
     let lookup_list = gpos.lookup_list();
     let mut ran_any = false;
+    let mut attach_subtables: Vec<attach::AttachSubtable<'_>> = Vec::new();
     for lookup_idx in lookup_indices {
         let Some(lookup) = lookup_list.get(lookup_idx) else {
             continue;
         };
         let filter = filter_for_lookup(&lookup, gdef);
         let raw_lt = lookup.lookup_type();
+        attach_subtables.clear();
         for sub_idx in 0..lookup.subtable_count() {
             let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
                 continue;
@@ -2581,43 +2626,43 @@ fn apply_gpos_feature_in_scripts_with_var(
                     apply_pair_pos(&pp, glyphs, &filter, inner_bytes, var);
                     ran_any = true;
                 }
-                gpos_lt::MARK_TO_BASE => {
-                    let Ok(mbp) = MarkBasePos::parse(inner_bytes) else {
+                // Attachment subtables are collected and applied
+                // together below: at each position the first subtable
+                // that attaches wins, as in HarfBuzz.
+                lt if attach::AttachSubtable::handles(lt) => {
+                    let Some(sub) = attach::AttachSubtable::parse(lt, inner_bytes) else {
                         continue;
                     };
-                    apply_mark_base(&mbp, glyphs, gdef, &filter);
-                    ran_any = true;
-                }
-                gpos_lt::MARK_TO_LIGATURE => {
-                    let Ok(mlp) = MarkLigaPos::parse(inner_bytes) else {
-                        continue;
-                    };
-                    apply_mark_liga(&mlp, glyphs, gdef, &filter);
-                    ran_any = true;
-                }
-                gpos_lt::MARK_TO_MARK => {
-                    let Ok(mmp) = MarkMarkPos::parse(inner_bytes) else {
-                        continue;
-                    };
-                    apply_mark_mark(&mmp, glyphs, gdef, &filter);
+                    attach_subtables.push(sub);
                     ran_any = true;
                 }
                 gpos_lt::CONTEXT => {
                     let Ok(ctx) = ContextPos::parse(inner_bytes) else {
                         continue;
                     };
-                    apply_gpos_context_subtable(gpos, &ctx, glyphs, gdef, &filter, var);
+                    apply_gpos_context_subtable(gpos, &ctx, glyphs, att, gdef, &filter, var);
                     ran_any = true;
                 }
                 gpos_lt::CHAINED_CONTEXT => {
                     let Ok(chain) = ChainContextPos::parse(inner_bytes) else {
                         continue;
                     };
-                    apply_gpos_chain_context_subtable(gpos, &chain, glyphs, gdef, &filter, var);
+                    apply_gpos_chain_context_subtable(
+                        gpos, &chain, glyphs, att, gdef, &filter, var,
+                    );
                     ran_any = true;
                 }
                 _ => {}
             }
+        }
+        if !attach_subtables.is_empty() {
+            let cx = attach::LookupCx {
+                gdef,
+                filter: &filter,
+                lookup_flag: lookup.flag(),
+                var,
+            };
+            attach::apply_lookup(&attach_subtables, glyphs, att, &cx);
         }
     }
     ran_any
@@ -2633,10 +2678,14 @@ fn apply_gpos_feature_in_scripts_with_var(
 /// `depth` guards against runaway recursion the same way the GSUB
 /// side does; bail out silently once we hit [`MAX_NESTED_DEPTH`].
 #[allow(clippy::too_many_lines)]
+// One argument per piece of shared GPOS state, like the context
+// helpers below; bundling them would only move the list elsewhere.
+#[allow(clippy::too_many_arguments)]
 fn apply_gpos_lookup_at(
     gpos: &Gpos<'_>,
     lookup_idx: u16,
     glyphs: &mut [Glyph],
+    att: &mut attach::Attach<'_>,
     gdef: Option<&Gdef<'_>>,
     at: usize,
     depth: u8,
@@ -2704,37 +2753,43 @@ fn apply_gpos_lookup_at(
                     return;
                 }
             }
-            gpos_lt::MARK_TO_BASE => {
-                let Ok(mbp) = MarkBasePos::parse(inner_bytes) else {
+            // Attachment lookups fire at `at` only (the surrounding run
+            // is still visible to find the base / previous glyph); the
+            // first subtable that attaches wins.
+            lt if attach::AttachSubtable::handles(lt) => {
+                let Some(sub) = attach::AttachSubtable::parse(lt, inner_bytes) else {
                     continue;
                 };
-                // Mark-to-base needs the surrounding run; delegate to
-                // the subtable driver on a single-position slice.
-                // We pass the whole glyph slice so the driver can
-                // walk back to the actual base.
-                apply_mark_base(&mbp, glyphs, gdef, &filter);
-                return;
-            }
-            gpos_lt::MARK_TO_LIGATURE => {
-                let Ok(mlp) = MarkLigaPos::parse(inner_bytes) else {
+                if filter.is_skipped(glyphs[at].glyph_id as u16) {
                     continue;
+                }
+                let cx = attach::LookupCx {
+                    gdef,
+                    filter: &filter,
+                    lookup_flag: lookup.flag(),
+                    var,
                 };
-                apply_mark_liga(&mlp, glyphs, gdef, &filter);
-                return;
-            }
-            gpos_lt::MARK_TO_MARK => {
-                let Ok(mmp) = MarkMarkPos::parse(inner_bytes) else {
-                    continue;
-                };
-                apply_mark_mark(&mmp, glyphs, gdef, &filter);
-                return;
+                if attach::apply_at(&sub, glyphs, att, &cx, at) {
+                    return;
+                }
             }
             gpos_lt::CONTEXT => {
                 let Ok(ctx) = ContextPos::parse(inner_bytes) else {
                     continue;
                 };
                 let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
-                apply_gpos_context_at(gpos, &ctx, glyphs, &ids, gdef, &filter, at, depth + 1, var);
+                apply_gpos_context_at(
+                    gpos,
+                    &ctx,
+                    glyphs,
+                    att,
+                    &ids,
+                    gdef,
+                    &filter,
+                    at,
+                    depth + 1,
+                    var,
+                );
                 return;
             }
             gpos_lt::CHAINED_CONTEXT => {
@@ -2746,6 +2801,7 @@ fn apply_gpos_lookup_at(
                     gpos,
                     &chain,
                     glyphs,
+                    att,
                     &ids,
                     gdef,
                     &filter,
@@ -2768,6 +2824,7 @@ fn apply_gpos_context_subtable(
     gpos: &Gpos<'_>,
     ctx: &ContextPos<'_>,
     glyphs: &mut [Glyph],
+    att: &mut attach::Attach<'_>,
     gdef: Option<&Gdef<'_>>,
     filter: &MatchFilter<'_>,
     var: &VarCtx<'_>,
@@ -2775,7 +2832,7 @@ fn apply_gpos_context_subtable(
     let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
     let mut i = 0;
     while i < glyphs.len() {
-        let consumed = apply_gpos_context_at(gpos, ctx, glyphs, &ids, gdef, filter, i, 0, var);
+        let consumed = apply_gpos_context_at(gpos, ctx, glyphs, att, &ids, gdef, filter, i, 0, var);
         if consumed > 0 {
             i += consumed;
         } else {
@@ -2790,6 +2847,7 @@ fn apply_gpos_chain_context_subtable(
     gpos: &Gpos<'_>,
     chain: &ChainContextPos<'_>,
     glyphs: &mut [Glyph],
+    att: &mut attach::Attach<'_>,
     gdef: Option<&Gdef<'_>>,
     filter: &MatchFilter<'_>,
     var: &VarCtx<'_>,
@@ -2798,7 +2856,7 @@ fn apply_gpos_chain_context_subtable(
     let mut i = 0;
     while i < glyphs.len() {
         let consumed =
-            apply_gpos_chain_context_at(gpos, chain, glyphs, &ids, gdef, filter, i, 0, var);
+            apply_gpos_chain_context_at(gpos, chain, glyphs, att, &ids, gdef, filter, i, 0, var);
         if consumed > 0 {
             i += consumed;
         } else {
@@ -2812,6 +2870,7 @@ fn apply_gpos_context_at(
     gpos: &Gpos<'_>,
     ctx: &ContextPos<'_>,
     glyphs: &mut [Glyph],
+    att: &mut attach::Attach<'_>,
     ids: &[u16],
     gdef: Option<&Gdef<'_>>,
     filter: &MatchFilter<'_>,
@@ -2839,7 +2898,9 @@ fn apply_gpos_context_at(
             (n, c.lookups().to_vec())
         }
     };
-    apply_nested_gpos_lookups(gpos, glyphs, gdef, filter, ids, at, depth, &lookups, var);
+    apply_nested_gpos_lookups(
+        gpos, glyphs, att, gdef, filter, ids, at, depth, &lookups, var,
+    );
     input_len.max(1)
 }
 
@@ -2848,6 +2909,7 @@ fn apply_gpos_chain_context_at(
     gpos: &Gpos<'_>,
     chain: &ChainContextPos<'_>,
     glyphs: &mut [Glyph],
+    att: &mut attach::Attach<'_>,
     ids: &[u16],
     gdef: Option<&Gdef<'_>>,
     filter: &MatchFilter<'_>,
@@ -2875,7 +2937,9 @@ fn apply_gpos_chain_context_at(
             (n, c.lookups().to_vec())
         }
     };
-    apply_nested_gpos_lookups(gpos, glyphs, gdef, filter, ids, at, depth, &lookups, var);
+    apply_nested_gpos_lookups(
+        gpos, glyphs, att, gdef, filter, ids, at, depth, &lookups, var,
+    );
     input_len.max(1)
 }
 
@@ -2884,6 +2948,7 @@ fn apply_gpos_chain_context_at(
 fn apply_nested_gpos_lookups(
     gpos: &Gpos<'_>,
     glyphs: &mut [Glyph],
+    att: &mut attach::Attach<'_>,
     gdef: Option<&Gdef<'_>>,
     filter: &MatchFilter<'_>,
     ids: &[u16],
@@ -2910,7 +2975,16 @@ fn apply_nested_gpos_lookups(
             }
             pos
         };
-        apply_gpos_lookup_at(gpos, rec.lookup_list_index, glyphs, gdef, pos, depth, var);
+        apply_gpos_lookup_at(
+            gpos,
+            rec.lookup_list_index,
+            glyphs,
+            att,
+            gdef,
+            pos,
+            depth,
+            var,
+        );
     }
 }
 
@@ -3007,175 +3081,6 @@ fn apply_single_pos(
         if let Some(v) = sp.adjustment(id) {
             apply_value_record(glyph, &v, subtable, var);
         }
-    }
-}
-
-/// Walks the run and, for each mark glyph (per GDEF), finds the
-/// nearest preceding base and attaches via the subtable's anchor
-/// tables. Without GDEF we cannot distinguish marks from bases and
-/// the pass is a no-op. That matches HarfBuzz's behavior.
-///
-/// The lookup's `LookupFlag` gates which marks participate. A lookup
-/// that carries a `UseMarkFilteringSet` or `MarkAttachmentType`
-/// restriction skips marks that fall outside the active subset; the
-/// shaper walks the same stream, only the "is this a candidate
-/// mark?" predicate changes.
-fn apply_mark_base(
-    mbp: &MarkBasePos<'_>,
-    glyphs: &mut [Glyph],
-    gdef: Option<&Gdef<'_>>,
-    filter: &MatchFilter<'_>,
-) {
-    let Some(gdef) = gdef else {
-        return;
-    };
-
-    for i in 0..glyphs.len() {
-        let mark_gid = glyphs[i].glyph_id as u16;
-        if !gdef.glyph_class(mark_gid).is_mark() {
-            continue;
-        }
-        // LookupFlag gating: skip marks the filter tells us to ignore.
-        if filter.is_skipped(mark_gid) {
-            continue;
-        }
-        // Walk back to the nearest base. The immediate preceding
-        // glyph might be another mark (diacritic stacking); skip
-        // marks looking for the real base. Treat "class Other" as
-        // base-ish so exotic fonts do not silently drop marks.
-        let Some(base_i) = (0..i).rev().find(|&j| {
-            let cls = gdef.glyph_class(glyphs[j].glyph_id as u16);
-            cls != GlyphClass::Mark
-        }) else {
-            continue;
-        };
-        let base_gid = glyphs[base_i].glyph_id as u16;
-        let Some(attach) = mbp.attach(mark_gid, base_gid) else {
-            continue;
-        };
-
-        // Accumulate the advance between the base and the mark so
-        // the delta accounts for any glyphs (e.g. stacked marks)
-        // that sat in between.
-        let mut walked_advance: i32 = 0;
-        for glyph in &glyphs[base_i..i] {
-            walked_advance += glyph.x_advance;
-        }
-
-        let dx = i32::from(attach.base_anchor.x) - i32::from(attach.mark_anchor.x) - walked_advance;
-        let dy = i32::from(attach.base_anchor.y) - i32::from(attach.mark_anchor.y);
-        glyphs[i].x_offset += dx;
-        glyphs[i].y_offset += dy;
-        // Marks do not advance the pen. Replace whatever hmtx
-        // reported with zero so successive text lines up.
-        glyphs[i].x_advance = 0;
-    }
-}
-
-/// Walks the run and, for each mark glyph, attaches it to the
-/// nearest preceding *ligature* base. Component selection uses a
-/// cluster-delta heuristic (how many input codepoints after the
-/// ligature's first cluster the mark belongs to); this is accurate
-/// for the common case where each codepoint after the base owns
-/// exactly one component, and degrades gracefully (falls through
-/// to a base-component anchor) when the subtable only carries
-/// anchors for lower component indices.
-fn apply_mark_liga(
-    mlp: &MarkLigaPos<'_>,
-    glyphs: &mut [Glyph],
-    gdef: Option<&Gdef<'_>>,
-    filter: &MatchFilter<'_>,
-) {
-    let Some(gdef) = gdef else {
-        return;
-    };
-
-    for i in 0..glyphs.len() {
-        let mark_gid = glyphs[i].glyph_id as u16;
-        if !gdef.glyph_class(mark_gid).is_mark() {
-            continue;
-        }
-        if filter.is_skipped(mark_gid) {
-            continue;
-        }
-        let Some(base_i) = (0..i).rev().find(|&j| {
-            let cls = gdef.glyph_class(glyphs[j].glyph_id as u16);
-            cls != GlyphClass::Mark
-        }) else {
-            continue;
-        };
-        let base_gid = glyphs[base_i].glyph_id as u16;
-
-        // Derive a component index from the difference in cluster
-        // values. A single-component ligature collapses to 0.
-        let cluster_delta = glyphs[i].cluster.saturating_sub(glyphs[base_i].cluster);
-        let component_index = cluster_delta.min(u32::from(u16::MAX)) as u16;
-
-        // Try the computed component first; fall back to 0 so marks
-        // on fonts that only anchor component 0 still land somewhere
-        // sane instead of being dropped silently.
-        let attach = mlp
-            .attach(mark_gid, base_gid, component_index)
-            .or_else(|| mlp.attach(mark_gid, base_gid, 0));
-        let Some(attach) = attach else {
-            continue;
-        };
-
-        let mut walked_advance: i32 = 0;
-        for glyph in &glyphs[base_i..i] {
-            walked_advance += glyph.x_advance;
-        }
-        let dx = i32::from(attach.base_anchor.x) - i32::from(attach.mark_anchor.x) - walked_advance;
-        let dy = i32::from(attach.base_anchor.y) - i32::from(attach.mark_anchor.y);
-        glyphs[i].x_offset += dx;
-        glyphs[i].y_offset += dy;
-        glyphs[i].x_advance = 0;
-    }
-}
-
-/// Walks the run and stacks each mark glyph onto the immediately
-/// preceding mark glyph, using the subtable's mark1/mark2 anchor
-/// pair. The previous glyph must itself be a mark (per GDEF) for
-/// this lookup to fire; otherwise mark-to-base handles the case.
-fn apply_mark_mark(
-    mmp: &MarkMarkPos<'_>,
-    glyphs: &mut [Glyph],
-    gdef: Option<&Gdef<'_>>,
-    filter: &MatchFilter<'_>,
-) {
-    let Some(gdef) = gdef else {
-        return;
-    };
-
-    for i in 1..glyphs.len() {
-        let mark1_gid = glyphs[i].glyph_id as u16;
-        if !gdef.glyph_class(mark1_gid).is_mark() {
-            continue;
-        }
-        if filter.is_skipped(mark1_gid) {
-            continue;
-        }
-        let mark2_gid = glyphs[i - 1].glyph_id as u16;
-        if !gdef.glyph_class(mark2_gid).is_mark() {
-            continue;
-        }
-        let Some(attach) = mmp.attach(mark1_gid, mark2_gid) else {
-            continue;
-        };
-
-        // The lower mark has already been placed (by mark-to-base or
-        // a prior mark-to-mark). Its x_offset/y_offset encode where
-        // it sits relative to its own origin, so we stack the upper
-        // mark relative to that position. The lower mark's advance
-        // is zero (marks do not advance), so we only need to add its
-        // own offsets to the attachment delta.
-        let lower_mark_x = glyphs[i - 1].x_offset;
-        let lower_mark_y = glyphs[i - 1].y_offset;
-        let dx = i32::from(attach.base_anchor.x) - i32::from(attach.mark_anchor.x) + lower_mark_x;
-        let dy = i32::from(attach.base_anchor.y) - i32::from(attach.mark_anchor.y) + lower_mark_y;
-        glyphs[i].x_offset += dx;
-        glyphs[i].y_offset += dy;
-        glyphs[i].x_advance = 0;
     }
 }
 

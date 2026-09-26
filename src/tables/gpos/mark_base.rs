@@ -49,9 +49,15 @@
 //!         = (base_anchor.x - mark_anchor.x - a, base_anchor.y - mark_anchor.y)
 //! ```
 //!
-//! Callers add `delta` to the mark's `(x_offset, y_offset)` and
-//! typically zero the mark's `x_advance` so the pen does not step
-//! forward after the mark.
+//! That is the left-to-right picture. The shaper follows HarfBuzz:
+//! it stores `base_anchor - mark_anchor` on the mark, links the mark
+//! to its base, and only after all positioning resolves the link,
+//! subtracting the advances from the base up to the mark for forward
+//! runs, or adding the advances after the base through the mark for
+//! backward (RTL, BTT) runs, which are reversed afterwards. Mark
+//! advances are zeroed by the shaper's mark-width pass, not here.
+//! Format 3 anchors can carry variation deltas; see
+//! [`Anchor::resolve`].
 
 use crate::error::{Error, Result};
 use crate::tables::gpos::anchor::Anchor;
