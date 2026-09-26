@@ -462,20 +462,46 @@ fn direction_out(direction: Direction) -> hb_direction_t {
     }
 }
 
+/// The Unicode Script property of `ch` as an ISO 15924 code (`Zyyy`
+/// for Common, `Zinh` for Inherited, `Zzzz` for Unknown), what
+/// HarfBuzz's `hb_unicode_funcs_t::script` returns.
+pub(crate) fn unicode_script(ch: char) -> [u8; 4] {
+    use crate::script_table::{SCRIPT_RANGES, SCRIPT_TAGS, UNKNOWN};
+    let cp = u32::from(ch);
+    let index = SCRIPT_RANGES
+        .binary_search_by(|&(start, end, _)| {
+            if end < cp {
+                core::cmp::Ordering::Less
+            } else if start > cp {
+                core::cmp::Ordering::Greater
+            } else {
+                core::cmp::Ordering::Equal
+            }
+        })
+        .map_or(UNKNOWN, |i| SCRIPT_RANGES[i].2);
+    SCRIPT_TAGS[usize::from(index)]
+}
+
 /// `hb_buffer_guess_segment_properties`, in HarfBuzz's order: the
-/// script from the first character that has one, then the direction
-/// from the script (right to left for Arabic, Hebrew, and the other
-/// RTL scripts, left to right when the script has no preference),
-/// then the language.
+/// script of the first character whose Script is not Common,
+/// Inherited, or Unknown, then the direction from the script (right to
+/// left for Arabic, Hebrew, Syriac, Thaana, and the other RTL scripts,
+/// left to right when the script has no preference), then the
+/// language.
 pub(crate) fn guess_segment_properties(state: &mut BufferState) {
     if state.script == HB_SCRIPT_INVALID {
-        // script_runs() folds leading digits and punctuation into the
-        // first real script, so its first run is HarfBuzz's guess.
         // Text with no script-bearing character keeps an invalid
         // script, as in HarfBuzz.
-        let first = state.buffer.script_runs().first().map(|run| run.script);
-        if let Some(tag) = first.and_then(UnicodeScript::iso15924_tag) {
+        let first = state
+            .buffer
+            .text()
+            .chars()
+            .map(unicode_script)
+            .find(|tag| !matches!(tag, b"Zyyy" | b"Zinh" | b"Zzzz"));
+        if let Some(tag) = first {
             state.script = u32::from_be_bytes(tag);
+            // A script sigilbuzz has no shaper for still sets the
+            // direction below; the core keeps splitting the text.
             state.buffer.set_script(core_script(state.script));
         }
     }

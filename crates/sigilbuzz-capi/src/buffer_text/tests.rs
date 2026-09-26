@@ -740,6 +740,54 @@ fn guess_takes_direction_from_the_script() {
 }
 
 #[test]
+fn unicode_script_reads_the_script_property() {
+    assert_eq!(&unicode_script('a'), b"Latn");
+    assert_eq!(&unicode_script('\u{0627}'), b"Arab");
+    assert_eq!(&unicode_script('0'), b"Zyyy");
+    assert_eq!(&unicode_script('\u{2014}'), b"Zyyy");
+    assert_eq!(&unicode_script('\u{0301}'), b"Zinh");
+    assert_eq!(&unicode_script('\u{0378}'), b"Zzzz");
+    assert_eq!(&unicode_script('\u{10FFFF}'), b"Zzzz");
+    assert_eq!(&unicode_script('\u{3042}'), b"Hira");
+    assert_eq!(&unicode_script('\u{30A2}'), b"Kana");
+    assert_eq!(&unicode_script('\u{0710}'), b"Syrc");
+    assert_eq!(&unicode_script('\u{1E900}'), b"Adlm");
+}
+
+#[test]
+fn guess_uses_the_full_script_property() {
+    use crate::HB_DIRECTION_LTR;
+    let tag = |t: &[u8; 4]| u32::from_be_bytes(*t);
+    // Scripts sigilbuzz has no shaping bucket for still get their
+    // script and their right-to-left direction.
+    for (text, script) in [
+        ("\u{0710}\u{0712}", b"Syrc"),
+        ("\u{0780}\u{0781}", b"Thaa"),
+        ("\u{1E900}\u{1E901}", b"Adlm"),
+        ("\u{0800}\u{0801}", b"Samr"),
+        ("\u{0840}\u{0841}", b"Mand"),
+        ("\u{10D00}\u{10D01}", b"Rohg"),
+    ] {
+        assert_eq!(
+            guessed(text, None),
+            (tag(script), HB_DIRECTION_RTL),
+            "{text:?}"
+        );
+    }
+    // Leading Common punctuation outside ASCII and Latin-1, and
+    // Inherited marks, are skipped as in HarfBuzz.
+    assert_eq!(
+        guessed("\u{2014}\u{201C}\u{05D0}", None),
+        (HB_SCRIPT_HEBREW, HB_DIRECTION_RTL)
+    );
+    assert_eq!(
+        guessed("\u{0301}\u{0627}", None),
+        (HB_SCRIPT_ARABIC, HB_DIRECTION_RTL)
+    );
+    assert_eq!(guessed("\u{3042}", None), (tag(b"Hira"), HB_DIRECTION_LTR));
+}
+
+#[test]
 fn guess_keeps_explicit_direction_and_sets_core_state() {
     let buffer = hb_buffer_create();
     add_utf8(buffer, "\u{0628}\u{0628}".as_bytes(), 0, -1);
