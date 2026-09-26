@@ -96,6 +96,8 @@ typedef const char *hb_language_t;
  *   - A face references its blob and a font references its face, so the
  *     caller may destroy a blob right after hb_face_create() and a face
  *     right after hb_font_create().
+ *   - hb_subset_input_unicode_set() / hb_subset_input_glyph_set() return
+ *     a set owned by the input: never destroy it (see below).
  *   - Where HarfBuzz would return its inert "empty" object (for example
  *     from hb_blob_create() with length 0), sigilbuzz returns a fresh
  *     empty object. Destroy it as usual; the same code is correct with
@@ -256,11 +258,20 @@ hb_bool_t    hb_set_next(const hb_set_t *set, hb_codepoint_t *codepoint);
 typedef struct hb_subset_input_t hb_subset_input_t;
 
 hb_subset_input_t *hb_subset_input_create(void);
+/* HarfBuzz's name. Never returns NULL in sigilbuzz. */
+hb_subset_input_t *hb_subset_input_create_or_fail(void);
+hb_subset_input_t *hb_subset_input_reference(hb_subset_input_t *input);
 void               hb_subset_input_destroy(hb_subset_input_t *input);
-/* Each call returns a new reference to the input's set (the same set
- * every time); the caller destroys it. Mutating it mutates the input. */
+
+/* The returned sets are owned by the input ("transfer none"): every call
+ * returns the same pointer, valid until the input is destroyed. Do NOT
+ * call hb_set_destroy() on them. Adding to or removing from them changes
+ * what hb_subset_or_fail() keeps. Call hb_set_reference() to keep one
+ * past the input's lifetime. Return NULL for a NULL input. */
 hb_set_t          *hb_subset_input_unicode_set(hb_subset_input_t *input);
 hb_set_t          *hb_subset_input_glyph_set(hb_subset_input_t *input);
+
+/* Returns a new face reference (destroy it), or NULL on failure. */
 hb_face_t         *hb_subset_or_fail(hb_face_t *face, hb_subset_input_t *input);
 
 /* ---------- Paint (gated on the `paint` cargo feature) ---------- */

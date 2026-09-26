@@ -79,10 +79,13 @@ leaks nor double-frees here:
 - The pointer is the object. `hb_*_reference(p)` adds a reference and returns `p`
   itself; `hb_*_destroy(p)` drops one and frees the object when the last one goes.
   This holds for `hb_blob_t`, `hb_face_t`, `hb_font_t`, `hb_buffer_t`, `hb_set_t`,
-  and `hb_paint_funcs_t`.
+  `hb_subset_input_t`, and `hb_paint_funcs_t`.
 - Every `*_create` result and every `*_reference` call is one reference to destroy.
 - A face references its blob and a font references its face, so you may destroy the
   blob or face right after building on it.
+- `hb_subset_input_unicode_set` and `hb_subset_input_glyph_set` return a set owned by
+  the input. The same pointer comes back on every call and stays valid until the input
+  is destroyed. Never destroy it; take `hb_set_reference` if you need it longer.
 - Referencing `NULL` returns `NULL`, and destroying `NULL` does nothing.
 - Where HarfBuzz returns its inert empty object (for example from a zero-length
   `hb_blob_create`), sigilbuzz returns a fresh empty object. Destroy it as usual. The
@@ -90,7 +93,9 @@ leaks nor double-frees here:
 
 Earlier releases returned a new handle from every `hb_*_reference`. Each reference
 still needs exactly one destroy, so balanced code keeps working; only the returned
-pointer changed.
+pointer changed. Earlier releases also made the caller destroy the set a subset
+accessor returned. Code written that way double-frees now, as it would under
+HarfBuzz: drop those `hb_set_destroy` calls.
 
 ## Versioning
 

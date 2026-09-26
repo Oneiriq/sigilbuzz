@@ -139,8 +139,8 @@ static int check_blob_callback_timing(void) {
 static int check_set_and_subset_input(void) {
     hb_set_t *set = hb_set_create();
     hb_subset_input_t *input;
-    hb_set_t *first;
-    hb_set_t *second;
+    hb_set_t *unicodes;
+    hb_set_t *kept;
 
     CHECK(hb_set_reference(set) == set, 40, "hb_set_reference must return its argument");
     hb_set_add(set, 7);
@@ -148,14 +148,29 @@ static int check_set_and_subset_input(void) {
     CHECK(hb_set_has(set, 7) == 1, 41, "set unusable after one destroy");
     hb_set_destroy(set);
 
-    /* Each accessor call is a new reference to the same set. */
-    input = hb_subset_input_create();
-    first = hb_subset_input_unicode_set(input);
-    second = hb_subset_input_unicode_set(input);
-    CHECK(first == second, 45, "unicode set pointer changed");
-    hb_set_destroy(first);
-    hb_set_destroy(second);
+    input = hb_subset_input_create_or_fail();
+    CHECK(input != NULL, 42, "hb_subset_input_create_or_fail returned NULL");
+    CHECK(hb_subset_input_reference(input) == input, 43,
+          "hb_subset_input_reference must return its argument");
     hb_subset_input_destroy(input);
+
+    /* Input-owned sets: same pointer every call, never destroyed by us. */
+    unicodes = hb_subset_input_unicode_set(input);
+    CHECK(unicodes != NULL, 44, "unicode set is NULL");
+    CHECK(hb_subset_input_unicode_set(input) == unicodes, 45, "unicode set pointer changed");
+    CHECK(hb_subset_input_glyph_set(input) == hb_subset_input_glyph_set(input), 46,
+          "glyph set pointer changed");
+    CHECK(hb_subset_input_glyph_set(input) != unicodes, 47, "glyph and unicode sets alias");
+    hb_set_add(unicodes, 0x41);
+    CHECK(hb_set_get_population(hb_subset_input_unicode_set(input)) == 1, 48,
+          "mutation through the accessor did not reach the input");
+
+    /* A reference we take ourselves outlives the input. */
+    kept = hb_set_reference(unicodes);
+    CHECK(kept == unicodes, 49, "hb_set_reference must return its argument");
+    hb_subset_input_destroy(input);
+    CHECK(hb_set_has(kept, 0x41) == 1, 50, "referenced set did not survive the input");
+    hb_set_destroy(kept);
     return 0;
 }
 
@@ -175,6 +190,7 @@ static int check_null_handles(void) {
     CHECK(hb_font_reference(NULL) == NULL, 72, "hb_font_reference(NULL)");
     CHECK(hb_buffer_reference(NULL) == NULL, 73, "hb_buffer_reference(NULL)");
     CHECK(hb_set_reference(NULL) == NULL, 74, "hb_set_reference(NULL)");
+    CHECK(hb_subset_input_reference(NULL) == NULL, 75, "hb_subset_input_reference(NULL)");
     CHECK(hb_paint_funcs_reference(NULL) == NULL, 76, "hb_paint_funcs_reference(NULL)");
     hb_blob_destroy(NULL);
     hb_face_destroy(NULL);

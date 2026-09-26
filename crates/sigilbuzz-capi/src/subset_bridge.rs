@@ -9,13 +9,21 @@
 //! translate the unicode set through cmap to gids before calling
 //! through.
 //!
-//! Refcount semantics match HarfBuzz: `hb_subset_input_create` -> 1,
-//! `hb_subset_input_destroy` decrements.
+//! # Ownership
 //!
-//! `hb_subset_input_unicode_set` / `hb_subset_input_glyph_set` return
-//! a new reference to the input's internal set (the same set on every
-//! call), and the C caller then owns that reference and must destroy
-//! it. Mutating the set mutates the input.
+//! The rules are HarfBuzz's:
+//!
+//! - `hb_subset_input_create` / `hb_subset_input_create_or_fail`
+//!   return one reference; `hb_subset_input_reference` adds one and
+//!   returns the same pointer; `hb_subset_input_destroy` drops one.
+//! - `hb_subset_input_unicode_set` / `hb_subset_input_glyph_set` return
+//!   a set *owned by the input*. Every call returns the same pointer,
+//!   valid until the input is destroyed. The caller must not destroy
+//!   it. Adding to or removing from it changes what `hb_subset_or_fail`
+//!   keeps. To keep the set past the input's lifetime, take a reference
+//!   with `hb_set_reference` (and destroy that reference later).
+//! - `hb_subset_or_fail` returns a new face reference (or null), which
+//!   the caller destroys.
 
 extern crate alloc;
 
@@ -46,6 +54,27 @@ pub extern "C" fn hb_subset_input_create() -> *mut hb_subset_input_t {
     })
 }
 
+/// HarfBuzz's name for [`hb_subset_input_create`]. HarfBuzz returns
+/// null when allocation fails; sigilbuzz aborts on allocation failure
+/// like the rest of Rust, so this never returns null.
+#[no_mangle]
+pub extern "C" fn hb_subset_input_create_or_fail() -> *mut hb_subset_input_t {
+    hb_subset_input_create()
+}
+
+/// Adds one reference to `input` and returns `input` itself. Null in,
+/// null out.
+///
+/// # Safety
+/// `input` must be null or a live subset input.
+#[no_mangle]
+pub unsafe extern "C" fn hb_subset_input_reference(
+    input: *mut hb_subset_input_t,
+) -> *mut hb_subset_input_t {
+    // SAFETY: caller guarantees `input` is null or a live handle.
+    unsafe { handle::reference(input) }
+}
+
 /// Releases one reference to the subset input. The last release also
 /// releases the input's references to its unicode and glyph sets.
 /// Null is a no-op.
@@ -60,9 +89,12 @@ pub unsafe extern "C" fn hb_subset_input_destroy(input: *mut hb_subset_input_t) 
     unsafe { handle::destroy(input) };
 }
 
-/// Returns a new reference to the input's unicode set. The caller owns
-/// the returned reference and must destroy it. Mutating the returned
-/// set mutates the input.
+/// Returns the input's unicode set: the codepoints to keep.
+///
+/// The set is owned by the input (HarfBuzz's "transfer none"): every
+/// call returns the same pointer, valid until the input is destroyed,
+/// and the caller must not destroy it. Mutating it mutates the input.
+/// Returns null for a null input (HarfBuzz does not check).
 ///
 /// # Safety
 /// `input` must be null or a live subset input.
@@ -75,12 +107,13 @@ pub unsafe extern "C" fn hb_subset_input_unicode_set(
     }
     // SAFETY: caller asserts `input` is live.
     let input = unsafe { &*input };
-    handle::arc_into_raw(Arc::clone(&input.unicode_set))
+    Arc::as_ptr(&input.unicode_set).cast_mut()
 }
 
-/// Returns a new reference to the input's glyph set. The caller owns
-/// the returned reference and must destroy it. Mutating the returned
-/// set mutates the input.
+/// Returns the input's glyph set: raw glyph ids to keep.
+///
+/// Same ownership as [`hb_subset_input_unicode_set`]: owned by the
+/// input, same pointer every call, never destroyed by the caller.
 ///
 /// # Safety
 /// `input` must be null or a live subset input.
@@ -91,7 +124,7 @@ pub unsafe extern "C" fn hb_subset_input_glyph_set(input: *mut hb_subset_input_t
     }
     // SAFETY: caller asserts `input` is live.
     let input = unsafe { &*input };
-    handle::arc_into_raw(Arc::clone(&input.glyph_set))
+    Arc::as_ptr(&input.glyph_set).cast_mut()
 }
 
 /// Subsets `face` according to `input`. Returns a fresh `hb_face_t`
@@ -170,7 +203,7 @@ pub unsafe extern "C" fn hb_subset_or_fail(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::set::{hb_set_add, hb_set_destroy, hb_set_has};
+    use crate::set::{hb_set_add, hb_set_get_population, hb_set_has};
     use crate::{
         hb_blob_create, hb_blob_destroy, hb_face_create, hb_face_destroy, hb_face_get_glyph_count,
         HB_MEMORY_MODE_READONLY,
@@ -212,7 +245,7 @@ mod tests {
             hb_set_add(unicode, b'A' as u32);
             hb_set_add(unicode, b'B' as u32);
             hb_set_add(unicode, b'C' as u32);
-            hb_set_destroy(unicode);
+            // The set belongs to the input: no hb_set_destroy here.
 
             let subset_face = hb_subset_or_fail(face, input);
             assert!(!subset_face.is_null(), "subset failed");
@@ -232,16 +265,19 @@ mod tests {
     }
 
     #[test]
-    fn subset_input_unicode_set_is_shared() {
+    fn subset_input_sets_are_stable_and_shared() {
         unsafe {
             let input = hb_subset_input_create();
             let a = hb_subset_input_unicode_set(input);
             let b = hb_subset_input_unicode_set(input);
-            assert_eq!(a, b, "both calls reference the same set");
+            assert_eq!(a, b, "same set on every call");
             hb_set_add(a, 65);
             assert_eq!(hb_set_has(b, 65), 1);
-            hb_set_destroy(a);
-            hb_set_destroy(b);
+            let g1 = hb_subset_input_glyph_set(input);
+            let g2 = hb_subset_input_glyph_set(input);
+            assert_eq!(g1, g2);
+            assert_ne!(a, g1, "unicode and glyph sets are distinct");
+            assert_eq!(hb_set_get_population(g1), 0);
             hb_subset_input_destroy(input);
         }
     }
@@ -257,7 +293,6 @@ mod tests {
             for g in [1, 2, 3, 70_000] {
                 hb_set_add(glyphs, g);
             }
-            hb_set_destroy(glyphs);
             let subset_face = hb_subset_or_fail(face, input);
             assert!(!subset_face.is_null());
             assert_eq!(hb_face_get_glyph_count(subset_face), 4);
@@ -268,12 +303,23 @@ mod tests {
     }
 
     #[test]
-    fn subset_or_fail_null_inputs_return_null() {
+    fn null_inputs() {
         unsafe {
             assert!(hb_subset_or_fail(ptr::null_mut(), ptr::null_mut()).is_null());
             assert!(hb_subset_input_unicode_set(ptr::null_mut()).is_null());
             assert!(hb_subset_input_glyph_set(ptr::null_mut()).is_null());
+            assert!(hb_subset_input_reference(ptr::null_mut()).is_null());
             hb_subset_input_destroy(ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn create_or_fail_is_an_ordinary_input() {
+        unsafe {
+            let input = hb_subset_input_create_or_fail();
+            assert!(!input.is_null());
+            assert!(!hb_subset_input_unicode_set(input).is_null());
+            hb_subset_input_destroy(input);
         }
     }
 }

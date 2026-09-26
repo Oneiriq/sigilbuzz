@@ -346,6 +346,109 @@ fn null_handles_match_harfbuzz() {
 }
 
 // ---------------------------------------------------------------------------
+// Subset input
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "subset")]
+mod subset {
+    use super::*;
+    use crate::set::hb_set_get_population;
+    use crate::subset_bridge::{
+        hb_subset_input_create, hb_subset_input_destroy, hb_subset_input_glyph_set,
+        hb_subset_input_reference, hb_subset_input_unicode_set, hb_subset_or_fail,
+    };
+
+    #[test]
+    fn input_reference_is_identity() {
+        unsafe {
+            let input = hb_subset_input_create();
+            let weak = observe(input);
+            assert_eq!(hb_subset_input_reference(input), input);
+            assert_eq!(weak.strong_count(), 2);
+            hb_subset_input_destroy(input);
+            hb_subset_input_destroy(input);
+            assert_eq!(weak.strong_count(), 0);
+        }
+    }
+
+    #[test]
+    fn accessor_sets_are_owned_by_the_input() {
+        unsafe {
+            let input = hb_subset_input_create();
+            let unicode = hb_subset_input_unicode_set(input);
+            let glyphs = hb_subset_input_glyph_set(input);
+            let unicode_weak = observe(unicode);
+            let glyphs_weak = observe(glyphs);
+            for _ in 0..4 {
+                assert_eq!(hb_subset_input_unicode_set(input), unicode);
+                assert_eq!(hb_subset_input_glyph_set(input), glyphs);
+            }
+            // Asking for the sets hands out no references.
+            assert_eq!(unicode_weak.strong_count(), 1);
+            assert_eq!(glyphs_weak.strong_count(), 1);
+            hb_set_add(unicode, 0x41);
+            assert_eq!(hb_set_get_population(hb_subset_input_unicode_set(input)), 1);
+            // Destroying the input releases both sets.
+            hb_subset_input_destroy(input);
+            assert_eq!(unicode_weak.strong_count(), 0);
+            assert_eq!(glyphs_weak.strong_count(), 0);
+        }
+    }
+
+    #[test]
+    fn referenced_set_outlives_the_input() {
+        unsafe {
+            let input = hb_subset_input_create();
+            let unicode = hb_set_reference(hb_subset_input_unicode_set(input));
+            let weak = observe(unicode);
+            hb_set_add(unicode, 7);
+            hb_subset_input_destroy(input);
+            assert_eq!(weak.strong_count(), 1, "our reference keeps it");
+            assert_eq!(hb_set_has(unicode, 7), 1);
+            hb_set_destroy(unicode);
+            assert_eq!(weak.strong_count(), 0);
+        }
+    }
+
+    #[test]
+    fn harfbuzz_style_subset_sequence_does_not_leak() {
+        let counter = AtomicUsize::new(0);
+        let blob = open_sans_blob(&counter);
+        unsafe {
+            let face = hb_face_create(blob, 0);
+            hb_blob_destroy(blob);
+            let input = hb_subset_input_create();
+            let input_weak = observe(input);
+            let unicode = hb_subset_input_unicode_set(input);
+            let set_weak = observe(unicode);
+            for cp in [0x41, 0x42, 0x43] {
+                hb_set_add(hb_subset_input_unicode_set(input), cp);
+            }
+            let subset_face = hb_subset_or_fail(face, input);
+            assert!(!subset_face.is_null());
+            assert_eq!(hb_face_get_glyph_count(subset_face), 4);
+            let subset_weak = observe(subset_face);
+
+            hb_subset_input_destroy(input);
+            hb_face_destroy(subset_face);
+            hb_face_destroy(face);
+            assert_eq!(input_weak.strong_count(), 0, "input freed");
+            assert_eq!(set_weak.strong_count(), 0, "its set freed");
+            assert_eq!(subset_weak.strong_count(), 0, "subset face freed");
+            assert_eq!(fired(&counter), 1, "source blob freed");
+        }
+    }
+
+    #[test]
+    fn null_subset_handles_match_harfbuzz() {
+        unsafe {
+            assert!(hb_subset_input_reference(ptr::null_mut()).is_null());
+            hb_subset_input_destroy(ptr::null_mut());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Paint funcs
 // ---------------------------------------------------------------------------
 

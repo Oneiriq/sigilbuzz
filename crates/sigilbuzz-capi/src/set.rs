@@ -21,6 +21,9 @@
 //! - `hb_set_reference(set)` -> refcount + 1, returns `set` itself.
 //! - `hb_set_destroy(set)` -> refcount - 1, frees the set when it hits
 //!   zero.
+//! - A set returned by `hb_subset_input_unicode_set` /
+//!   `hb_subset_input_glyph_set` belongs to the input: do not destroy
+//!   it. Reference it if it must outlive the input.
 
 extern crate alloc;
 
@@ -75,6 +78,9 @@ pub extern "C" fn hb_set_create() -> *mut hb_set_t {
 ///
 /// # Safety
 /// `set` must be null or a live set the caller holds a reference to.
+/// A set returned by `hb_subset_input_unicode_set` /
+/// `hb_subset_input_glyph_set` is owned by the input and must not be
+/// passed here unless the caller took its own reference first.
 #[no_mangle]
 pub unsafe extern "C" fn hb_set_destroy(set: *mut hb_set_t) {
     // SAFETY: caller guarantees `set` is null or a live handle it owns

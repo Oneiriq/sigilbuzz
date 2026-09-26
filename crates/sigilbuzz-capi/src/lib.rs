@@ -23,6 +23,9 @@
 //!   reference the caller must release with the matching `*_destroy`.
 //! - A face references its blob and a font references its face, so
 //!   destroying the blob (or face) right after building on it is fine.
+//! - `hb_subset_input_unicode_set` / `hb_subset_input_glyph_set` return
+//!   a set owned by the input. The caller must not destroy it; it stays
+//!   valid until the input is destroyed.
 //!
 //! # Lifetime erasure
 //!
