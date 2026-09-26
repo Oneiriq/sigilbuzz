@@ -30,6 +30,11 @@ them down to fewer glyphs, its layout and variation tables are dropped for now.
 `instance` handles variable fonts. It bakes a set of axis coordinates into a static
 font, or pins some axes and leaves the rest variable.
 
+A malformed piece of a layout table (a GDEF list, a GSUB or GPOS lookup or subtable,
+a Device table, an anchor) is left out instead of failing the whole run, the way
+HarfBuzz handles it. Every piece left out is reported in `SubsetOutput::warnings` (or
+`InstancedOutput::warnings`) with its table, byte offset, and reason.
+
 The output is deterministic: the same face and glyph set always give the same bytes.
 
 ## Quick start

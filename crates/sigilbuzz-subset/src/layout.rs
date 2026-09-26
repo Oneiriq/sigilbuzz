@@ -55,10 +55,12 @@
 
 use alloc::vec::Vec;
 
+use sigilbuzz::tables::layout::{FeatureList, Lookup, LookupList};
 use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
 use crate::offset16::Offset16Guard;
+use crate::warnings::{error_context, Diag, Warnings};
 use crate::{gdef, gpos, gsub, GlyphId, SubsetError, SubsetInput};
 
 /// A new-namespace gid translator. `map(old) -> Some(new)` when the
@@ -140,6 +142,9 @@ pub(crate) struct RewriterCtx<'a> {
     /// Offset16s of the rebuilt subtables that could not reach their
     /// targets. The lookup rewriters check it after every subtable.
     pub offsets: Offset16Guard,
+    /// Where malformed pieces of the source table are reported. The
+    /// table drivers point it at the table they rewrite.
+    pub diag: Diag<'a>,
 }
 
 impl<'a> RewriterCtx<'a> {
@@ -149,6 +154,7 @@ impl<'a> RewriterCtx<'a> {
             lookup_renumber,
             keep_variations: true,
             offsets: Offset16Guard::default(),
+            diag: Diag::NONE,
         }
     }
 
@@ -190,10 +196,12 @@ pub(crate) struct LayoutPlan {
 }
 
 /// Decides what to do with each layout table given the kept-gid set.
+/// Malformed pieces the rewriters leave out are reported to `warnings`.
 pub(crate) fn decide(
     face: &Face<'_>,
     kept: &[GlyphId],
     input: &SubsetInput,
+    warnings: &Warnings,
 ) -> Result<LayoutPlan, SubsetError> {
     let has_gsub = face.record(tag::GSUB).is_some();
     let has_gpos = face.record(tag::GPOS).is_some();
@@ -244,7 +252,7 @@ pub(crate) fn decide(
         let gdef = if !has_gdef {
             Decision::Drop
         } else if statics && gdef_store {
-            match gdef::rewrite_gdef(face, &GidMap::from_kept(kept), false)? {
+            match gdef::rewrite_gdef(face, &GidMap::from_kept(kept), false, warnings)? {
                 Some(b) => Decision::Rewrite(b),
                 None => Decision::Drop,
             }
@@ -269,6 +277,7 @@ pub(crate) fn decide(
     let map = GidMap::from_kept(kept);
     let ctx = RewriterCtx {
         keep_variations: input.retain_variations,
+        diag: Diag::new(warnings),
         ..RewriterCtx::new(&map, None)
     };
 
@@ -289,7 +298,7 @@ pub(crate) fn decide(
         Decision::Drop
     };
     let gdef = if has_gdef {
-        match gdef::rewrite_gdef(face, &map, input.retain_variations)? {
+        match gdef::rewrite_gdef(face, &map, input.retain_variations, warnings)? {
             Some(b) => Decision::Rewrite(b),
             None => Decision::Drop,
         }
@@ -300,227 +309,168 @@ pub(crate) fn decide(
     Ok(LayoutPlan { gsub, gpos, gdef })
 }
 
-/// Drives the GSUB rewrite. Walks every lookup, runs the per-type
-/// rewriter, then runs the drop cascade and renumbers surviving
-/// lookups. Returns the new GSUB bytes or `None` when the table
-/// drops entirely.
+/// Signature of the per-lookup rewriters in [`crate::gsub`] and
+/// [`crate::gpos`].
+type LookupRewriter = fn(
+    &RewriterCtx,
+    u16,
+    u16,
+    Option<u16>,
+    &[&[u8]],
+) -> Result<Option<RewrittenLookup>, SubsetError>;
+
+/// What differs between the GSUB and the GPOS driver.
+struct LayoutKind {
+    tag: [u8; 4],
+    /// The Extension lookup type: 7 in GSUB, 9 in GPOS.
+    extension_type: u16,
+    /// Reads the LookupList and FeatureList with the shaper's parser.
+    parse: fn(&[u8]) -> sigilbuzz::Result<(LookupList<'_>, FeatureList<'_>)>,
+    rewrite_lookup: LookupRewriter,
+    /// Picks out the lookups whose nested lookup records the second
+    /// pass renumbers.
+    context_lookup_type: fn(&Lookup<'_>) -> Option<u16>,
+}
+
+const GSUB_KIND: LayoutKind = LayoutKind {
+    tag: tag::GSUB,
+    extension_type: sigilbuzz::tables::gsub::lookup_type::EXTENSION,
+    parse: parse_gsub_lists,
+    rewrite_lookup: gsub::rewrite_lookup,
+    context_lookup_type: gsub::context_lookup_type,
+};
+
+const GPOS_KIND: LayoutKind = LayoutKind {
+    tag: tag::GPOS,
+    extension_type: sigilbuzz::tables::gpos::lookup_type::EXTENSION,
+    parse: parse_gpos_lists,
+    rewrite_lookup: gpos::rewrite_lookup,
+    context_lookup_type: gpos::context_lookup_type,
+};
+
+fn parse_gsub_lists(bytes: &[u8]) -> sigilbuzz::Result<(LookupList<'_>, FeatureList<'_>)> {
+    let table = sigilbuzz::tables::gsub::Gsub::parse(bytes)?;
+    Ok((*table.lookup_list(), *table.feature_list()))
+}
+
+fn parse_gpos_lists(bytes: &[u8]) -> sigilbuzz::Result<(LookupList<'_>, FeatureList<'_>)> {
+    let table = sigilbuzz::tables::gpos::Gpos::parse(bytes)?;
+    Ok((*table.lookup_list(), *table.feature_list()))
+}
+
+/// Drives the GSUB rewrite; see [`build_layout`]. Returns the new GSUB
+/// bytes or `None` when the table drops entirely.
 pub(crate) fn build_gsub(
     face: &Face<'_>,
     ctx: &RewriterCtx,
 ) -> Result<Option<Vec<u8>>, SubsetError> {
-    let Ok(Some(gsub_table)) = face.gsub() else {
-        return Ok(None);
-    };
-    let lookups = gsub_table.lookup_list();
-
-    // First pass: per-lookup rewrite. Context-style lookups (types
-    // 5 / 6) carry nested `SubstLookupRecord` entries that point at
-    // sibling lookups by index; on this pass we don't yet know
-    // which sibling lookups survive, so the rewriters preserve the
-    // source's lookup-list indices verbatim and we patch them in
-    // the second pass once the renumber map is known.
-    let mut rewritten: Vec<Option<RewrittenLookup>> = Vec::with_capacity(lookups.len() as usize);
-    for li in 0..lookups.len() {
-        let Some(lookup) = lookups.get(li) else {
-            rewritten.push(None);
-            continue;
-        };
-        let mut subtable_bodies: Vec<&[u8]> = Vec::new();
-        for si in 0..lookup.subtable_count() {
-            if let Some(b) = lookup.subtable_bytes(si) {
-                subtable_bodies.push(b);
-            }
-        }
-        let rewritten_lookup = gsub::rewrite_lookup(
-            ctx,
-            lookup.lookup_type(),
-            lookup.flag(),
-            lookup.mark_filtering_set(),
-            &subtable_bodies,
-        )?;
-        rewritten.push(rewritten_lookup);
-    }
-
-    // Second pass: re-rewrite every context-style lookup with the renumber
-    // map so its `SubstLookupRecord`s name the new lookup indices and
-    // records aiming at dropped lookups go. Rules left without records
-    // stay (they act as `ignore sub` rules), so a context lookup only
-    // drops when its glyph coverage empties, which the first pass already
-    // saw. The loop is a guard: should a lookup still drop here, the
-    // renumber map is rebuilt and the pass repeats. Bounded by
-    // `lookups.len()` since each iteration only ever drops more
-    // lookups (or stabilizes).
-    let mut renumber = build_renumber(&rewritten);
-    for _ in 0..lookups.len() {
-        let mut changed = false;
-        let inner_ctx = RewriterCtx {
-            keep_variations: ctx.keep_variations,
-            ..RewriterCtx::new(ctx.gid_map, Some(&renumber))
-        };
-        for li in 0..lookups.len() {
-            // Only re-rewrite slots that survived the first pass; nothing to
-            // resurrect here.
-            if rewritten
-                .get(li as usize)
-                .and_then(|s| s.as_ref())
-                .is_none()
-            {
-                continue;
-            }
-            let Some(lookup) = lookups.get(li) else {
-                continue;
-            };
-            // Skip non-context lookup types. Their rewrite output is
-            // independent of the renumber map.
-            let lt = gsub::context_lookup_type(&lookup);
-            let Some(_lt) = lt else { continue };
-            let mut subtable_bodies: Vec<&[u8]> = Vec::new();
-            for si in 0..lookup.subtable_count() {
-                if let Some(b) = lookup.subtable_bytes(si) {
-                    subtable_bodies.push(b);
-                }
-            }
-            let new_lookup = gsub::rewrite_lookup(
-                &inner_ctx,
-                lookup.lookup_type(),
-                lookup.flag(),
-                lookup.mark_filtering_set(),
-                &subtable_bodies,
-            )?;
-            // Not expected (see above), but a lookup that drops here
-            // is marked dropped and triggers another pass.
-            if new_lookup.is_none() {
-                if rewritten[li as usize].is_some() {
-                    rewritten[li as usize] = None;
-                    changed = true;
-                }
-            } else {
-                rewritten[li as usize] = new_lookup;
-            }
-        }
-        if !changed {
-            break;
-        }
-        renumber = build_renumber(&rewritten);
-    }
-
-    // Last: rewrite features and scripts. ScriptList walks raw
-    // bytes because the parser doesn't expose enumeration of named
-    // LangSys records.
-    let feature_list = gsub_table.feature_list();
-    let new_features = rewrite_features(*feature_list, &renumber)?;
-
-    let Ok(gsub_bytes) = face.table_bytes(tag::GSUB) else {
-        return Ok(None);
-    };
-    let script_list_off = u16::from_be_bytes([gsub_bytes[4], gsub_bytes[5]]) as usize;
-    let Some(script_list_bytes) = gsub_bytes.get(script_list_off..) else {
-        return Ok(None);
-    };
-    let Some(new_scripts) =
-        rewrite_scripts_from_bytes(script_list_bytes, &new_features.feature_renumber)?
-    else {
-        return Ok(None);
-    };
-
-    let new_lookups: Vec<RewrittenLookup> = rewritten.into_iter().flatten().collect();
-    if new_lookups.is_empty() {
-        return Ok(None);
-    }
-
-    assemble_layout_table(
-        &new_scripts,
-        &new_features.bytes,
-        &new_lookups,
-        sigilbuzz::tables::gsub::lookup_type::EXTENSION,
-    )
-    .map(Some)
+    build_layout(face, ctx, &GSUB_KIND)
 }
 
-/// Drives the GPOS rewrite, same two-pass shape as [`build_gsub`].
-/// The per-type rewriters cover every GPOS lookup type (1-9). Context
-/// lookups (types 7 / 8) carry nested `PosLookupRecord`s pointing at
-/// sibling lookups by index; the first pass keeps the source indices,
-/// the second pass rewrites them through the renumber map iterated to a fixed
-/// point.
+/// Drives the GPOS rewrite; see [`build_layout`]. The per-type
+/// rewriters cover every GPOS lookup type (1-9).
 pub(crate) fn build_gpos(
     face: &Face<'_>,
     ctx: &RewriterCtx,
 ) -> Result<Option<Vec<u8>>, SubsetError> {
-    let Ok(Some(gpos_table)) = face.gpos() else {
-        return Ok(None);
-    };
-    let lookups = gpos_table.lookup_list();
+    build_layout(face, ctx, &GPOS_KIND)
+}
 
-    // First pass: per-lookup rewrite. Context-style lookups
-    // (types 7 / 8) preserve the source's lookup-list indices so we
-    // can decide what survives before patching.
-    let mut rewritten: Vec<Option<RewrittenLookup>> = Vec::with_capacity(lookups.len() as usize);
-    for li in 0..lookups.len() {
-        let Some(lookup) = lookups.get(li) else {
-            rewritten.push(None);
-            continue;
-        };
-        let mut subtable_bodies: Vec<&[u8]> = Vec::new();
-        for si in 0..lookup.subtable_count() {
-            if let Some(b) = lookup.subtable_bytes(si) {
-                subtable_bodies.push(b);
-            }
+/// Drives a GSUB or GPOS rewrite. Walks every lookup, runs the per-type
+/// rewriter, then runs the drop cascade and renumbers surviving
+/// lookups. Returns the new table bytes or `None` when the table drops
+/// entirely.
+///
+/// Context lookups (GSUB types 5 / 6 / 8, GPOS types 7 / 8) carry
+/// nested lookup records that name sibling lookups by index. The first
+/// pass keeps the source indices, because it does not yet know which
+/// siblings survive; the second pass rewrites them through the
+/// renumber map and drops records aiming at dropped lookups. Rules
+/// left without records stay (they act as `ignore sub` / `ignore pos`
+/// rules), so a context lookup only drops when its glyph coverage
+/// empties, which the first pass already saw. The second pass is still
+/// a loop: should a lookup drop there, the renumber map is rebuilt and
+/// the pass repeats, bounded by the lookup count since each round only
+/// drops more lookups.
+///
+/// A table the parser rejects, a lookup or subtable that cannot be
+/// reached, and a feature, script or language system that cannot be
+/// read are left out and reported through `ctx.diag`.
+fn build_layout(
+    face: &Face<'_>,
+    ctx: &RewriterCtx,
+    kind: &LayoutKind,
+) -> Result<Option<Vec<u8>>, SubsetError> {
+    let bytes = match face.table_bytes(kind.tag) {
+        Ok(bytes) => bytes,
+        Err(sigilbuzz::Error::MissingTable { .. }) => return Ok(None),
+        Err(e) => {
+            let diag = ctx.diag.for_table(kind.tag, &[]);
+            diag.at(0, error_context(&e), "the whole table");
+            return Ok(None);
         }
-        let rewritten_lookup = gpos::rewrite_lookup(
+    };
+    let diag = ctx.diag.for_table(kind.tag, bytes);
+    let (lookups, feature_list) = match (kind.parse)(bytes) {
+        Ok(lists) => lists,
+        Err(e) => {
+            // The parser measures nested errors from the nested list,
+            // so only the table itself can be located reliably.
+            diag.at(0, error_context(&e), "the whole table");
+            return Ok(None);
+        }
+    };
+
+    // Read every lookup once; both passes rewrite from these.
+    let lookup_list_at = header_offset(bytes, 8);
+    let sources: Vec<Option<LookupSource<'_>>> = (0..lookups.len())
+        .map(|li| read_lookup(bytes, &lookups, lookup_list_at, li, &diag))
+        .collect();
+    let rewrite = |ctx: &RewriterCtx, source: &LookupSource<'_>| {
+        (kind.rewrite_lookup)(
             ctx,
-            lookup.lookup_type(),
-            lookup.flag(),
-            lookup.mark_filtering_set(),
-            &subtable_bodies,
-        )?;
-        rewritten.push(rewritten_lookup);
+            source.lookup.lookup_type(),
+            source.lookup.flag(),
+            source.lookup.mark_filtering_set(),
+            &source.subtables,
+        )
+    };
+
+    // First pass: every lookup, nested lookup indices left as they are.
+    let first = RewriterCtx {
+        keep_variations: ctx.keep_variations,
+        diag,
+        ..RewriterCtx::new(ctx.gid_map, None)
+    };
+    let mut rewritten: Vec<Option<RewrittenLookup>> = Vec::with_capacity(sources.len());
+    for source in &sources {
+        rewritten.push(match source {
+            Some(source) => rewrite(&first, source)?,
+            None => None,
+        });
     }
 
-    // Second pass: patch the `PosLookupRecord`s of every context-style
-    // lookup through the renumber map. Mirrors the GSUB driver,
-    // including keeping rules left without records (`ignore pos`).
+    // Second pass: context lookups again, with the renumber map.
     let mut renumber = build_renumber(&rewritten);
-    for _ in 0..lookups.len() {
+    for _ in 0..sources.len() {
         let mut changed = false;
-        let inner_ctx = RewriterCtx {
+        let inner = RewriterCtx {
             keep_variations: ctx.keep_variations,
+            diag,
             ..RewriterCtx::new(ctx.gid_map, Some(&renumber))
         };
-        for li in 0..lookups.len() {
-            if rewritten
-                .get(li as usize)
-                .and_then(|s| s.as_ref())
-                .is_none()
-            {
-                continue;
-            }
-            let Some(lookup) = lookups.get(li) else {
+        for (li, source) in sources.iter().enumerate() {
+            let Some(source) = source else {
                 continue;
             };
-            let lt = gpos::context_lookup_type(&lookup);
-            let Some(_lt) = lt else { continue };
-            let mut subtable_bodies: Vec<&[u8]> = Vec::new();
-            for si in 0..lookup.subtable_count() {
-                if let Some(b) = lookup.subtable_bytes(si) {
-                    subtable_bodies.push(b);
-                }
+            // Only lookups that survived the first pass, and only
+            // context ones: the others do not depend on the map.
+            if rewritten[li].is_none() || (kind.context_lookup_type)(&source.lookup).is_none() {
+                continue;
             }
-            let new_lookup = gpos::rewrite_lookup(
-                &inner_ctx,
-                lookup.lookup_type(),
-                lookup.flag(),
-                lookup.mark_filtering_set(),
-                &subtable_bodies,
-            )?;
-            if new_lookup.is_none() {
-                if rewritten[li as usize].is_some() {
-                    rewritten[li as usize] = None;
-                    changed = true;
-                }
-            } else {
-                rewritten[li as usize] = new_lookup;
-            }
+            let new_lookup = rewrite(&inner, source)?;
+            changed |= new_lookup.is_none();
+            rewritten[li] = new_lookup;
         }
         if !changed {
             break;
@@ -528,18 +478,12 @@ pub(crate) fn build_gpos(
         renumber = build_renumber(&rewritten);
     }
 
-    let feature_list = gpos_table.feature_list();
-    let new_features = rewrite_features(*feature_list, &renumber)?;
-
-    let Ok(gpos_bytes) = face.table_bytes(tag::GPOS) else {
-        return Ok(None);
-    };
-    let script_list_off = u16::from_be_bytes([gpos_bytes[4], gpos_bytes[5]]) as usize;
-    let Some(script_list_bytes) = gpos_bytes.get(script_list_off..) else {
-        return Ok(None);
-    };
+    // Last: features and scripts. The ScriptList is walked as raw
+    // bytes because the parser only looks LangSys records up by tag.
+    let new_features = rewrite_features(feature_list, &renumber, &diag, header_offset(bytes, 6))?;
+    let script_list = bytes.get(header_offset(bytes, 4)..).unwrap_or_default();
     let Some(new_scripts) =
-        rewrite_scripts_from_bytes(script_list_bytes, &new_features.feature_renumber)?
+        rewrite_scripts_from_bytes(script_list, &new_features.feature_renumber, &diag)?
     else {
         return Ok(None);
     };
@@ -553,9 +497,57 @@ pub(crate) fn build_gpos(
         &new_scripts,
         &new_features.bytes,
         &new_lookups,
-        sigilbuzz::tables::gpos::lookup_type::EXTENSION,
+        kind.extension_type,
     )
     .map(Some)
+}
+
+/// The Offset16 at `pos` of a GSUB or GPOS header, which the parser
+/// has already read, so it is in bounds.
+fn header_offset(table: &[u8], pos: usize) -> usize {
+    table
+        .get(pos..pos + 2)
+        .map_or(0, |b| usize::from(u16::from_be_bytes([b[0], b[1]])))
+}
+
+/// A lookup the driver could read, with the subtables it could reach.
+struct LookupSource<'a> {
+    lookup: Lookup<'a>,
+    subtables: Vec<&'a [u8]>,
+}
+
+/// Reads lookup `li` of the LookupList at `list_at`. A lookup whose
+/// header cannot be read is left out, and so is a subtable whose offset
+/// points past the table; both are reported through `diag`.
+fn read_lookup<'a>(
+    table: &'a [u8],
+    lookups: &LookupList<'a>,
+    list_at: usize,
+    li: u16,
+    diag: &Diag<'_>,
+) -> Option<LookupSource<'a>> {
+    let slot = list_at + 2 + usize::from(li) * 2;
+    let Some(lookup) = lookups.get(li) else {
+        diag.at(
+            slot,
+            "lookup offset past the end, or lookup header truncated",
+            "a lookup",
+        );
+        return None;
+    };
+    let lookup_at = list_at + header_offset(table, slot);
+    let mut subtables = Vec::with_capacity(usize::from(lookup.subtable_count()));
+    for si in 0..lookup.subtable_count() {
+        match lookup.subtable_bytes(si) {
+            Some(body) => subtables.push(body),
+            None => diag.at(
+                lookup_at + 6 + usize::from(si) * 2,
+                "lookup subtable offset past the end of the table",
+                "a lookup subtable",
+            ),
+        }
+    }
+    Some(LookupSource { lookup, subtables })
 }
 
 /// Builds an `Option<u16>` array indexed by old lookup index. `Some(n)`
@@ -584,15 +576,26 @@ struct RewrittenFeatures {
 /// Rewrites the FeatureList. Drops any feature whose lookup-index list
 /// becomes empty after the lookup renumber. Returns the new bytes plus
 /// a feature-index renumber map.
+///
+/// A feature whose table cannot be read is dropped and reported
+/// through `diag` at its FeatureRecord; `list_at` is where the
+/// FeatureList starts in the table.
 fn rewrite_features(
-    feature_list: sigilbuzz::tables::layout::FeatureList<'_>,
+    feature_list: FeatureList<'_>,
     lookup_renumber: &[Option<u16>],
+    diag: &Diag<'_>,
+    list_at: usize,
 ) -> Result<RewrittenFeatures, SubsetError> {
     let offsets = Offset16Guard::default();
     let mut surviving: Vec<([u8; 4], Vec<u16>)> = Vec::new();
     let mut feature_renumber: Vec<Option<u16>> = Vec::with_capacity(feature_list.len() as usize);
     for fi in 0..feature_list.len() {
         let Some((tag, feature)) = feature_list.get(fi) else {
+            diag.at(
+                list_at + 2 + usize::from(fi) * 6,
+                "feature offset past the end, or feature table truncated",
+                "a feature",
+            );
             feature_renumber.push(None);
             continue;
         };
@@ -644,18 +647,32 @@ fn rewrite_features(
 /// dropped, drops any Script with no surviving default LangSys + no
 /// surviving named LangSys, and returns the new bytes when at least
 /// one script survives.
+///
+/// A script or language system that cannot be read is dropped and
+/// reported through `diag`; `bytes` is the ScriptList, a sub-slice of
+/// the table `diag` reports against.
 fn rewrite_scripts_from_bytes(
     bytes: &[u8],
     feature_renumber: &[Option<u16>],
+    diag: &Diag<'_>,
 ) -> Result<Option<Vec<u8>>, SubsetError> {
     // ScriptList:
     //   u16 scriptCount
     //   ScriptRecord records[scriptCount]: { tag(4) + Offset16 (relative to ScriptList start) }
-    if bytes.len() < 2 {
-        return Ok(None);
-    }
-    let script_count = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
+    let script_count = match bytes.get(0..2) {
+        Some(b) => usize::from(u16::from_be_bytes([b[0], b[1]])),
+        None => {
+            diag.in_part(bytes, 0, "ScriptList truncated", "the whole table");
+            return Ok(None);
+        }
+    };
     if bytes.len() < 2 + script_count * 6 {
+        diag.in_part(
+            bytes,
+            2,
+            "ScriptList records shorter than scriptCount",
+            "the whole table",
+        );
         return Ok(None);
     }
 
@@ -675,12 +692,15 @@ fn rewrite_scripts_from_bytes(
             bytes[rec_off + 3],
         ];
         let script_off = u16::from_be_bytes([bytes[rec_off + 4], bytes[rec_off + 5]]) as usize;
-        let Some(script_body) = bytes.get(script_off..) else {
+        let Some(script_body) = bytes.get(script_off..).filter(|b| b.len() >= 4) else {
+            diag.in_part(
+                bytes,
+                rec_off + 4,
+                "script offset past the end, or script table truncated",
+                "a script",
+            );
             continue;
         };
-        if script_body.len() < 4 {
-            continue;
-        }
         // Script:
         //   Offset16 defaultLangSysOffset (Script-relative; 0 means none)
         //   u16      langSysCount
@@ -690,13 +710,17 @@ fn rewrite_scripts_from_bytes(
         let langsys_records_off = 4;
         let langsys_records_end = langsys_records_off + langsys_count * 6;
         if script_body.len() < langsys_records_end {
+            diag.in_part(
+                script_body,
+                2,
+                "LangSysRecords shorter than langSysCount",
+                "a script",
+            );
             continue;
         }
 
         let default = if default_off != 0 {
-            script_body
-                .get(default_off..)
-                .and_then(|b| rewrite_langsys_from_bytes(b, feature_renumber))
+            read_langsys(script_body, 0, default_off, feature_renumber, diag)
         } else {
             None
         };
@@ -711,10 +735,7 @@ fn rewrite_scripts_from_bytes(
                 script_body[lr + 3],
             ];
             let ls_off = u16::from_be_bytes([script_body[lr + 4], script_body[lr + 5]]) as usize;
-            let Some(ls_body) = script_body.get(ls_off..) else {
-                continue;
-            };
-            if let Some(rls) = rewrite_langsys_from_bytes(ls_body, feature_renumber) {
+            if let Some(rls) = read_langsys(script_body, lr + 4, ls_off, feature_renumber, diag) {
                 langsystems.push((ls_tag, rls));
             }
         }
@@ -789,19 +810,28 @@ struct RewrittenLangSys {
 ///   u16 featureIndexCount
 ///   u16 featureIndices[featureIndexCount]
 /// ```
+///
+/// Returns `Ok(None)` when no feature survives, and an error, measured
+/// from the start of `bytes`, when the LangSys is truncated.
 fn rewrite_langsys_from_bytes(
     bytes: &[u8],
     feature_renumber: &[Option<u16>],
-) -> Option<RewrittenLangSys> {
+) -> Result<Option<RewrittenLangSys>, sigilbuzz::Error> {
     if bytes.len() < 6 {
-        return None;
+        return Err(sigilbuzz::Error::Truncated {
+            offset: 0,
+            context: "LangSys header truncated",
+        });
     }
     let _lookup_order = u16::from_be_bytes([bytes[0], bytes[1]]);
     let required = u16::from_be_bytes([bytes[2], bytes[3]]);
     let count = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
     let need = 6 + count * 2;
     if bytes.len() < need {
-        return None;
+        return Err(sigilbuzz::Error::Truncated {
+            offset: 6,
+            context: "LangSys featureIndices shorter than featureIndexCount",
+        });
     }
     let new_required = if required == 0xFFFF {
         0xFFFF
@@ -820,12 +850,40 @@ fn rewrite_langsys_from_bytes(
         }
     }
     if new_required == 0xFFFF && new_indices.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(RewrittenLangSys {
+    Ok(Some(RewrittenLangSys {
         required_feature_index: new_required,
         feature_indices: new_indices,
-    })
+    }))
+}
+
+/// Rewrites the LangSys at `off` inside `script`, whose Offset16 sits
+/// at byte `slot` of `script`. A LangSys that cannot be read is dropped
+/// and reported through `diag`.
+fn read_langsys(
+    script: &[u8],
+    slot: usize,
+    off: usize,
+    feature_renumber: &[Option<u16>],
+    diag: &Diag<'_>,
+) -> Option<RewrittenLangSys> {
+    let Some(body) = script.get(off..) else {
+        diag.in_part(
+            script,
+            slot,
+            "LangSys offset past the end of the table",
+            "a language system",
+        );
+        return None;
+    };
+    match rewrite_langsys_from_bytes(body, feature_renumber) {
+        Ok(langsys) => langsys,
+        Err(e) => {
+            diag.part_error(body, &e, "a language system");
+            None
+        }
+    }
 }
 
 fn encode_langsys(ls: &RewrittenLangSys) -> Vec<u8> {
@@ -885,6 +943,55 @@ fn assemble_layout_table(
 }
 
 // === Byte-level helpers used by the rewriters and the closure walker. ===
+
+/// True for a format 2 (class based) context or chained context
+/// subtable with a null ClassDef offset. The spec lets the offset be
+/// null, which puts every glyph in class 0, and fonts built by fontmake
+/// leave the backtrack ClassDef null that way; the shaper's parser
+/// instead reads the subtable itself as the ClassDef. The subtable
+/// checks skip such subtables rather than report them as malformed.
+pub(crate) fn has_null_class_def(sub: &[u8], chained: bool) -> bool {
+    let slots: &[usize] = if chained { &[4, 6, 8] } else { &[4] };
+    sub.get(0..2) == Some(&[0u8, 2][..])
+        && slots
+            .iter()
+            .any(|&at| sub.get(at..at + 2) == Some(&[0u8, 0][..]))
+}
+
+/// The lookup type and subtable an Extension subtable (GSUB type 7,
+/// GPOS type 9) wraps:
+///
+/// ```text
+///   u16      format = 1
+///   u16      extensionLookupType
+///   Offset32 extensionOffset        (from the Extension subtable)
+/// ```
+///
+/// Errors are measured from the start of `sub`.
+pub(crate) fn extension_target(sub: &[u8]) -> Result<(u16, &[u8]), sigilbuzz::Error> {
+    let Some(header) = sub.get(..8) else {
+        return Err(sigilbuzz::Error::Truncated {
+            offset: 0,
+            context: "Extension subtable truncated",
+        });
+    };
+    if header[0..2] != [0, 1] {
+        return Err(sigilbuzz::Error::Malformed {
+            offset: 0,
+            context: "unsupported Extension subtable format",
+        });
+    }
+    let inner_type = u16::from_be_bytes([header[2], header[3]]);
+    let inner_off = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+    let inner = usize::try_from(inner_off)
+        .ok()
+        .and_then(|off| sub.get(off..))
+        .ok_or(sigilbuzz::Error::Malformed {
+            offset: 4,
+            context: "Extension offset past the end of the table",
+        })?;
+    Ok((inner_type, inner))
+}
 
 /// Best-effort enumeration of the glyphs covered by a Coverage table
 /// given its raw bytes. Returns an empty vec on any parse failure.
@@ -994,6 +1101,9 @@ mod static_tests;
 mod truncation_tests;
 
 #[cfg(test)]
+mod warning_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use alloc::{vec, vec::Vec};
@@ -1012,7 +1122,7 @@ mod tests {
             retain_layout: false,
             ..Default::default()
         };
-        let plan = decide(&face, &kept, &input).unwrap();
+        let plan = decide(&face, &kept, &input, &Warnings::default()).unwrap();
         assert!(matches!(plan.gsub, Decision::Drop));
         assert!(matches!(plan.gpos, Decision::Drop));
         assert!(matches!(plan.gdef, Decision::Drop));
@@ -1026,7 +1136,7 @@ mod tests {
             retain_layout: true,
             ..Default::default()
         };
-        let plan = decide(&face, &kept, &input).unwrap();
+        let plan = decide(&face, &kept, &input, &Warnings::default()).unwrap();
         assert!(matches!(plan.gsub, Decision::Preserve));
         assert!(matches!(plan.gpos, Decision::Preserve));
         assert!(matches!(plan.gdef, Decision::Preserve));
@@ -1047,7 +1157,7 @@ mod tests {
             retain_layout: true,
             ..Default::default()
         };
-        let plan = decide(&face, &kept, &input).unwrap();
+        let plan = decide(&face, &kept, &input, &Warnings::default()).unwrap();
         assert!(!matches!(plan.gsub, Decision::Preserve));
         assert!(!matches!(plan.gpos, Decision::Preserve));
         assert!(!matches!(plan.gdef, Decision::Preserve));

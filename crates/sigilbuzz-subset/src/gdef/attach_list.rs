@@ -21,20 +21,24 @@ use sigilbuzz::Error;
 use super::read::{slice_at, u16_at};
 use super::{emit_covered_list, kept_entries};
 use crate::layout::GidMap;
+use crate::warnings::Diag;
 use crate::SubsetError;
 
 /// Rewrites the AttachList at `off` (from the GDEF start). Returns
 /// `None` when no covered glyph survives. A glyph whose AttachPoint is
-/// truncated loses its entry; the others stay.
+/// truncated loses its entry, reported through `diag`; the others
+/// stay.
 pub(super) fn rewrite(
     table: &[u8],
     off: usize,
     map: &GidMap,
+    diag: &Diag<'_>,
 ) -> Result<Option<Vec<u8>>, SubsetError> {
     let mut entries = Vec::new();
-    for (new_gid, point_off) in kept_entries(table, off, map, "GDEF AttachList")? {
-        if let Ok(body) = attach_point(table, point_off) {
-            entries.push((new_gid, body.to_vec()));
+    for (new_gid, point_off) in kept_entries(table, off, map, "GDEF AttachList", diag)? {
+        match attach_point(table, point_off) {
+            Ok(body) => entries.push((new_gid, body.to_vec())),
+            Err(e) => diag.error(&e, "one glyph's AttachPoint"),
         }
     }
     if entries.is_empty() {

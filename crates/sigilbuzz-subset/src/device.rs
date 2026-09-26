@@ -17,10 +17,16 @@
 //! here copy the referenced tables along with their parent and re-point
 //! the offsets at the copies. A slot whose table is missing or
 //! malformed is cleared instead: the spec asks consumers to ignore an
-//! unusable Device table, and a cleared slot cannot be misread.
+//! unusable Device table, and a cleared slot cannot be misread. A
+//! malformed table, or a malformed anchor left out, is reported through
+//! the rewriter's [`Diag`].
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+
+use sigilbuzz::Error;
+
+use crate::warnings::Diag;
 
 /// `deltaFormat` that marks a `VariationIndex` table.
 pub(crate) const VARIATION_INDEX_FORMAT: u16 = 0x8000;
@@ -34,6 +40,14 @@ fn write_u16(buf: &mut [u8], pos: usize, value: u16) {
     buf[pos..pos + 2].copy_from_slice(&value.to_be_bytes());
 }
 
+/// The exact bytes of the `Device` or `VariationIndex` table at
+/// `offset` inside `parent`, or `None` where [`read_device`] finds none
+/// or an unusable one. The tests read the tables they check with it.
+#[cfg(test)]
+pub(crate) fn device_table(parent: &[u8], offset: usize) -> Option<&[u8]> {
+    read_device(parent, offset).ok().flatten()
+}
+
 /// Returns the exact bytes of the `Device` or `VariationIndex` table at
 /// `offset` inside `parent`.
 ///
@@ -45,32 +59,52 @@ fn write_u16(buf: &mut [u8], pos: usize, value: u16) {
 ///   VariationIndex:  u16 outer, u16 inner, u16 deltaFormat = 0x8000
 /// ```
 ///
-/// `bits` is 2, 4, or 8 for delta formats 1, 2, and 3. Returns `None`
-/// for a null offset, an offset past the end, a truncated table, an
+/// `bits` is 2, 4, or 8 for delta formats 1, 2, and 3. Returns
+/// `Ok(None)` for a null offset, and an error measured from the start
+/// of `parent` for an offset past the end, a truncated table, an
 /// inverted ppem range, or a delta format the spec does not define.
-pub(crate) fn device_table(parent: &[u8], offset: usize) -> Option<&[u8]> {
+pub(crate) fn read_device(parent: &[u8], offset: usize) -> Result<Option<&[u8]>, Error> {
+    const TRUNCATED: &str = "Device or VariationIndex table truncated";
     if offset == 0 {
-        return None;
+        return Ok(None);
     }
-    let table = parent.get(offset..)?;
-    let (start, end, format) = (
-        read_u16(table, 0)?,
-        read_u16(table, 2)?,
-        read_u16(table, 4)?,
-    );
+    let Some(table) = parent.get(offset..) else {
+        return Err(Error::Malformed {
+            offset,
+            context: "Device or VariationIndex offset past the end of its parent",
+        });
+    };
+    let field = |pos: usize| {
+        read_u16(table, pos).ok_or(Error::Truncated {
+            offset: offset + pos,
+            context: TRUNCATED,
+        })
+    };
+    let (start, end, format) = (field(0)?, field(2)?, field(4)?);
     let len = match format {
         VARIATION_INDEX_FORMAT => 6,
         1..=3 => {
             if end < start {
-                return None;
+                return Err(Error::Malformed {
+                    offset: offset + 2,
+                    context: "Device table endSize is below its startSize",
+                });
             }
             let count = usize::from(end - start) + 1;
             let per_word = 8usize >> (format - 1);
             6 + count.div_ceil(per_word) * 2
         }
-        _ => return None,
+        _ => {
+            return Err(Error::Malformed {
+                offset: offset + 4,
+                context: "unknown Device deltaFormat",
+            })
+        }
     };
-    table.get(..len)
+    table.get(..len).map(Some).ok_or(Error::Truncated {
+        offset: offset + 6,
+        context: TRUNCATED,
+    })
 }
 
 /// Places byte blobs into an output buffer, sharing one copy between
@@ -100,11 +134,12 @@ impl Dedup {
 /// from `src_parent`. The copy lands at the end of `out` (shared with
 /// any identical table already placed through `pool`) and the slot is
 /// rewritten relative to `out_base`. An unresolvable table clears the
-/// slot, and so does a VariationIndex when `keep_variations` is off: a
-/// static subset has no ItemVariationStore for it to name, and leaving
-/// it out keeps it from taking offset space. A copy whose offset would
-/// not fit in 16 bits clears the slot too and returns `false`, so the
-/// caller can report the overflow.
+/// slot (and is reported through `diag`), and so does a VariationIndex
+/// when `keep_variations` is off: a static subset has no
+/// ItemVariationStore for it to name, and leaving it out keeps it from
+/// taking offset space. A copy whose offset would not fit in 16 bits
+/// clears the slot too and returns `false`, so the caller can report
+/// the overflow.
 fn relocate_slot(
     out: &mut Vec<u8>,
     slot: usize,
@@ -112,11 +147,16 @@ fn relocate_slot(
     src_parent: &[u8],
     pool: &mut Dedup,
     keep_variations: bool,
+    diag: &Diag<'_>,
 ) -> bool {
     let Some(src_off) = read_u16(out, slot) else {
         return true;
     };
-    let table = device_table(src_parent, usize::from(src_off))
+    let table = read_device(src_parent, usize::from(src_off))
+        .unwrap_or_else(|e| {
+            diag.part_error(src_parent, &e, "a Device or VariationIndex table");
+            None
+        })
         .filter(|t| keep_variations || read_u16(t, 4) != Some(VARIATION_INDEX_FORMAT));
     let (new_off, fits) = match table {
         Some(table) => match u16::try_from(pool.place(out, table) - out_base) {
@@ -144,21 +184,33 @@ fn relocate_slot(
 /// blob can then sit anywhere in the rebuilt subtable. Without
 /// `keep_variations`, VariationIndex tables are left out and their
 /// offsets cleared. Returns an empty Vec for a null offset or a
-/// malformed anchor, which callers treat as "no anchor".
-pub(crate) fn copy_anchor(parent: &[u8], offset: usize, keep_variations: bool) -> Vec<u8> {
+/// malformed anchor, which callers treat as "no anchor"; a malformed
+/// anchor is reported through `diag`.
+pub(crate) fn copy_anchor(
+    parent: &[u8],
+    offset: usize,
+    keep_variations: bool,
+    diag: &Diag<'_>,
+) -> Vec<u8> {
     if offset == 0 {
         return Vec::new();
     }
     let Some(anchor) = parent.get(offset..) else {
+        diag.in_part(parent, offset, "Anchor offset past the end", "an anchor");
         return Vec::new();
     };
     let len = match read_u16(anchor, 0) {
         Some(1) => 6,
         Some(2) => 8,
         Some(3) => 10,
-        _ => return Vec::new(),
+        Some(_) => {
+            diag.in_part(anchor, 0, "unknown Anchor format", "an anchor");
+            return Vec::new();
+        }
+        None => 2,
     };
     let Some(header) = anchor.get(..len) else {
+        diag.in_part(anchor, 0, "Anchor table truncated", "an anchor");
         return Vec::new();
     };
     let mut out = header.to_vec();
@@ -166,7 +218,7 @@ pub(crate) fn copy_anchor(parent: &[u8], offset: usize, keep_variations: bool) -
         let mut pool = Dedup::default();
         for slot in [6, 8] {
             // Right behind the 10-byte header, the copies always fit.
-            relocate_slot(&mut out, slot, 0, anchor, &mut pool, keep_variations);
+            relocate_slot(&mut out, slot, 0, anchor, &mut pool, keep_variations, diag);
         }
     }
     out
@@ -198,12 +250,14 @@ pub(crate) struct RecordRun<'a> {
 /// table is appended to `out`, identical tables sharing one copy, and
 /// each slot is rewritten relative to `out_base`, the start of the
 /// rebuilt parent inside `out`. Returns `false` when a copy landed out
-/// of 16-bit reach of the parent (its slot is cleared).
+/// of 16-bit reach of the parent (its slot is cleared). A table that
+/// cannot be read is reported through `diag` and its slot cleared.
 pub(crate) fn relocate_value_records(
     out: &mut Vec<u8>,
     out_base: usize,
     src_parent: &[u8],
     run: &RecordRun<'_>,
+    diag: &Diag<'_>,
 ) -> bool {
     let mut pool = Dedup::default();
     let mut fits = true;
@@ -221,6 +275,7 @@ pub(crate) fn relocate_value_records(
                         src_parent,
                         &mut pool,
                         run.keep_variations,
+                        diag,
                     );
                     slot += 2;
                 }

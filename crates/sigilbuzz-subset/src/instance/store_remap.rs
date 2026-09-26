@@ -27,6 +27,7 @@ use super::{bake_ivs_partial, AxisPin, RegionRemap};
 use crate::gdef::StorePlan;
 use crate::gpos_var::{walk_gpos_device_slots, VARIATION_INDEX_DELTA_FORMAT};
 use crate::layout::GidMap;
+use crate::warnings::Warnings;
 use crate::SubsetError;
 
 /// How the source store's rows map into the partially instanced one.
@@ -53,15 +54,17 @@ impl StoreRemap {
 /// over the `Pin` axes of `pins` and rebuilds the GDEF around it, with
 /// its caret VariationIndex rows renumbered. Also returns the remap
 /// the GPOS VariationIndex tables need; `None` when there is no store.
+/// Malformed pieces left out are reported to `warnings`.
 pub(super) fn bake_gdef_store_partial(
     face: &Face<'_>,
     coords: &[f32],
     pins: &[AxisPin],
+    warnings: &Warnings,
 ) -> Result<(GdefBake, Option<StoreRemap>), SubsetError> {
     let Ok(bytes) = face.table_bytes(tag::GDEF) else {
         return Ok((GdefBake::Unchanged, None));
     };
-    bake_gdef_bytes_partial(bytes, &identity_map(face)?, coords, pins)
+    bake_gdef_bytes_partial(bytes, &identity_map(face)?, coords, pins, warnings)
 }
 
 /// [`bake_gdef_store_partial`] on raw GDEF bytes, glyphs kept per `map`.
@@ -70,6 +73,7 @@ pub(super) fn bake_gdef_bytes_partial(
     map: &GidMap,
     coords: &[f32],
     pins: &[AxisPin],
+    warnings: &Warnings,
 ) -> Result<(GdefBake, Option<StoreRemap>), SubsetError> {
     if !has_store(bytes) {
         return Ok((GdefBake::Unchanged, None));
@@ -78,6 +82,14 @@ pub(super) fn bake_gdef_bytes_partial(
     let projected = bytes
         .get(store_off..)
         .and_then(|store| bake_ivs_partial(store, coords, pins));
+    if projected.is_none() {
+        warnings.push(
+            tag::GDEF,
+            store_off,
+            "GDEF ItemVariationStore could not be read",
+            "the ItemVariationStore",
+        );
+    }
     let (rebuilt, remap) = match projected {
         Some((store, rows)) => {
             let remap = StoreRemap::Rows(rows);
@@ -86,10 +98,13 @@ pub(super) fn bake_gdef_bytes_partial(
                 store: &store,
                 remap: &rows,
             };
-            (crate::gdef::rebuild_gdef(bytes, map, plan)?, remap)
+            (
+                crate::gdef::rebuild_gdef(bytes, map, plan, warnings)?,
+                remap,
+            )
         }
         None => (
-            crate::gdef::rebuild_gdef(bytes, map, StorePlan::Drop)?,
+            crate::gdef::rebuild_gdef(bytes, map, StorePlan::Drop, warnings)?,
             StoreRemap::Cleared,
         ),
     };

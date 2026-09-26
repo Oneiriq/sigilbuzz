@@ -25,8 +25,17 @@
 //!   SFNT rebuild     -- new directory, table checksums,
 //!        |              head.checkSumAdjustment
 //!        v
-//!   SubsetOutput { bytes, gid_map }
+//!   SubsetOutput { bytes, gid_map, warnings }
 //! ```
+//!
+//! # Malformed data
+//!
+//! A malformed layout structure (a GDEF list or entry, a GSUB or GPOS
+//! lookup or subtable, a Device table, an anchor) is left out of the
+//! output, the way HarfBuzz's sanitizer neuters it, instead of failing
+//! the subset. Every piece left out this way is reported in
+//! [`SubsetOutput::warnings`] with its table, byte offset and reason;
+//! [`InstancedOutput::warnings`] does the same for [`instance()`].
 //!
 //! # What happens to each table
 //!
@@ -130,6 +139,7 @@ mod sfnt;
 mod util;
 mod varc;
 mod variation_store;
+mod warnings;
 
 pub use cff::subset_non_identity as subset_cff1_non_identity;
 pub use cff::{
@@ -145,6 +155,9 @@ pub use classdef::emit_classdef;
 pub use closure::compute_closure;
 pub use coverage::{emit_coverage_from_glyphs, emit_coverage_from_pairs};
 pub use instance::{instance, AxisPin, F2Dot14, InstanceInput, InstancedOutput};
+pub use warnings::SubsetWarning;
+
+use warnings::Warnings;
 
 /// Crate version, matching `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -207,6 +220,10 @@ pub struct SubsetOutput {
     /// Mapping from old gid to new gid for every kept glyph, sorted
     /// by old gid. Glyph 0 always maps to glyph 0.
     pub gid_map: Vec<(GlyphId, GlyphId)>,
+    /// Pieces of the source font left out of the subset because they
+    /// could not be read, sorted by table and offset. Empty for a well
+    /// formed font. See [`SubsetWarning`].
+    pub warnings: Vec<SubsetWarning>,
 }
 
 /// Errors that can stop a subset.
@@ -416,7 +433,8 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
     // rewriters in `crate::gsub` / `crate::gpos` / `crate::gdef`
     // produce fresh bytes; lookup types without a rewriter drop and
     // the drop cascade propagates the loss up. See `layout::decide`.
-    let plan = layout::decide(face, &kept, input)?;
+    let warnings = Warnings::default();
+    let plan = layout::decide(face, &kept, input, &warnings)?;
     match plan.gdef {
         layout::Decision::Preserve => {
             let bytes = face.table_bytes(tag::GDEF).map_err(SubsetError::from)?;
@@ -518,6 +536,7 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
     Ok(SubsetOutput {
         bytes,
         gid_map: gid_map.into_iter().collect(),
+        warnings: warnings.into_sorted(),
     })
 }
 
@@ -588,6 +607,7 @@ fn cff_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, S
     Ok(SubsetOutput {
         bytes,
         gid_map: gid_map.into_iter().collect(),
+        warnings: Vec::new(),
     })
 }
 
@@ -652,6 +672,7 @@ fn cff2_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, 
     Ok(SubsetOutput {
         bytes,
         gid_map: gid_map.into_iter().collect(),
+        warnings: Vec::new(),
     })
 }
 
@@ -692,7 +713,11 @@ fn cff_passthrough(
     }
     let bytes = sfnt::build(face.sfnt_version(), &tables);
     let gid_map: Vec<(GlyphId, GlyphId)> = kept.iter().map(|&g| (g, g)).collect();
-    Ok(SubsetOutput { bytes, gid_map })
+    Ok(SubsetOutput {
+        bytes,
+        gid_map,
+        warnings: Vec::new(),
+    })
 }
 
 #[cfg(test)]

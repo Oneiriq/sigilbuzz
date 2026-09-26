@@ -112,7 +112,8 @@ mod store_remap;
 
 use crate::sfnt;
 use crate::util;
-use crate::{GlyphId, SubsetError};
+use crate::warnings::Warnings;
+use crate::{GlyphId, SubsetError, SubsetWarning};
 use gdef_store::{prune_gdef_store, GdefBake};
 use store_remap::{bake_gdef_store_partial, remap_gpos_variation_indices};
 
@@ -204,6 +205,10 @@ impl Default for InstanceInput {
 pub struct InstancedOutput {
     /// New font binary (a complete SFNT).
     pub bytes: Vec<u8>,
+    /// Pieces of the source font left out of the instance because they
+    /// could not be read, sorted by table and offset. Empty for a well
+    /// formed font. See [`SubsetWarning`].
+    pub warnings: Vec<SubsetWarning>,
 }
 
 /// Instances `face` at `input.coords`. Returns the new font bytes.
@@ -265,6 +270,8 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
 
     let maxp = face.maxp()?;
     let num_glyphs = maxp.num_glyphs;
+
+    let warnings = Warnings::default();
 
     // glyf + loca bake.
     let glyf_loca = bake_glyf_loca(face, &coords, num_glyphs)?;
@@ -359,7 +366,7 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     // caller wants the static "ship as static" output, prune it. See
     // module header for the GPOS-bake-then-IVS-prune ordering.
     let gdef_bake = if input.drop_var_tables {
-        prune_gdef_store(face, &coords)?
+        prune_gdef_store(face, &coords, &warnings)?
     } else {
         GdefBake::Unchanged
     };
@@ -396,7 +403,10 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     }
 
     let bytes = sfnt::build(face.sfnt_version(), &tables);
-    Ok(InstancedOutput { bytes })
+    Ok(InstancedOutput {
+        bytes,
+        warnings: warnings.into_sorted(),
+    })
 }
 
 /// CFF2 path: rebuild the CFF2 table with `blend` resolved at `coords`,
@@ -410,6 +420,7 @@ fn cff2_bake(
     let maxp = face.maxp()?;
     let num_glyphs = maxp.num_glyphs;
 
+    let warnings = Warnings::default();
     let cff2_bytes = face.table_bytes(tag::CFF2).map_err(SubsetError::from)?;
     let new_cff2 = crate::cff2::bake_at_coords(cff2_bytes, coords)?;
 
@@ -474,7 +485,7 @@ fn cff2_bake(
     }
 
     let gdef_bake = if input.drop_var_tables {
-        prune_gdef_store(face, coords)?
+        prune_gdef_store(face, coords, &warnings)?
     } else {
         GdefBake::Unchanged
     };
@@ -505,7 +516,10 @@ fn cff2_bake(
     }
 
     let bytes = sfnt::build(face.sfnt_version(), &tables);
-    Ok(InstancedOutput { bytes })
+    Ok(InstancedOutput {
+        bytes,
+        warnings: warnings.into_sorted(),
+    })
 }
 
 /// Partial-instance bake: produces a reduced-axis variable font.
@@ -552,6 +566,7 @@ fn partial_instance(
         None => coords.clone(),
     };
 
+    let warnings = Warnings::default();
     let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::new();
 
     // fvar trim.
@@ -589,7 +604,8 @@ fn partial_instance(
     // GDEF.IVS rewrite (optional). The projection can renumber the
     // store's rows, so the GDEF carets follow the new numbering and so
     // do the GPOS VariationIndex tables below.
-    let (gdef_bake, store_remap) = bake_gdef_store_partial(face, &post_avar_coords, pins)?;
+    let (gdef_bake, store_remap) =
+        bake_gdef_store_partial(face, &post_avar_coords, pins, &warnings)?;
     if let GdefBake::Rebuilt(b) = &gdef_bake {
         tables.push((tag::GDEF, b.clone()));
     }
@@ -638,7 +654,10 @@ fn partial_instance(
     }
 
     let bytes = sfnt::build(face.sfnt_version(), &tables);
-    Ok(InstancedOutput { bytes })
+    Ok(InstancedOutput {
+        bytes,
+        warnings: warnings.into_sorted(),
+    })
 }
 
 /// CFF1 (non-variable) instance pass: nothing to bake; rebuild the SFNT
@@ -659,7 +678,10 @@ fn cff1_passthrough(
         tables.push((rec.tag, bytes.to_vec()));
     }
     let bytes = sfnt::build(face.sfnt_version(), &tables);
-    Ok(InstancedOutput { bytes })
+    Ok(InstancedOutput {
+        bytes,
+        warnings: Vec::new(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -4450,8 +4472,14 @@ mod partial_instancing_tests {
         let gdef = build_gdef_v13_ivs_only(&ivs);
         let map = crate::layout::GidMap::from_kept(&[0]);
         let pins = [AxisPin::Pin, AxisPin::Keep];
-        let (bake, _) =
-            super::store_remap::bake_gdef_bytes_partial(&gdef, &map, &[1.0, 0.0], &pins).unwrap();
+        let (bake, _) = super::store_remap::bake_gdef_bytes_partial(
+            &gdef,
+            &map,
+            &[1.0, 0.0],
+            &pins,
+            &Warnings::default(),
+        )
+        .unwrap();
         let GdefBake::Rebuilt(new_gdef) = bake else {
             panic!("expected a rebuilt GDEF");
         };

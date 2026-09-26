@@ -18,6 +18,7 @@ use super::super::AxisPin;
 use super::{bake_gdef_bytes_partial, remap_gpos_variation_indices, StoreRemap};
 use crate::gpos_var::{walk_gpos_device_slots, VARIATION_INDEX_DELTA_FORMAT};
 use crate::layout::GidMap;
+use crate::warnings::Warnings;
 use crate::{instance, InstanceInput};
 
 const RUBIK: &[u8] = include_bytes!("../../../../../tests/fixtures/rubik_vf.ttf");
@@ -99,7 +100,8 @@ fn caret_rows_follow_the_projected_store() {
     let gdef = gdef_with_varied_carets();
     let map = GidMap::from_kept(&[0, 1, 2, 3, 4, 5]);
     let pins = [AxisPin::Pin, AxisPin::Keep];
-    let (bake, remap) = bake_gdef_bytes_partial(&gdef, &map, &[0.0, 0.0], &pins).unwrap();
+    let (bake, remap) =
+        bake_gdef_bytes_partial(&gdef, &map, &[0.0, 0.0], &pins, &Warnings::default()).unwrap();
     let GdefBake::Rebuilt(out) = bake else {
         panic!("expected a rebuilt GDEF");
     };
@@ -166,7 +168,8 @@ fn gpos_rows_are_renumbered_once_and_gone_rows_cleared() {
         let gdef = gdef_with_varied_carets();
         let map = GidMap::from_kept(&[0]);
         let pins = [AxisPin::Pin, AxisPin::Keep];
-        let (_, remap) = bake_gdef_bytes_partial(&gdef, &map, &[0.0, 0.0], &pins).unwrap();
+        let (_, remap) =
+            bake_gdef_bytes_partial(&gdef, &map, &[0.0, 0.0], &pins, &Warnings::default()).unwrap();
         let mut gpos = gpos_with_rows(rows);
         remap_gpos_variation_indices(&mut gpos, &remap.unwrap());
         gpos_rows(&gpos)
@@ -201,8 +204,14 @@ fn gpos_sharing_a_table_between_subtables() -> Vec<u8> {
 fn a_table_shared_between_subtables_is_renumbered_once() {
     let gdef = gdef_with_varied_carets();
     let pins = [AxisPin::Pin, AxisPin::Keep];
-    let (_, remap) =
-        bake_gdef_bytes_partial(&gdef, &GidMap::from_kept(&[0]), &[0.0, 0.0], &pins).unwrap();
+    let (_, remap) = bake_gdef_bytes_partial(
+        &gdef,
+        &GidMap::from_kept(&[0]),
+        &[0.0, 0.0],
+        &pins,
+        &Warnings::default(),
+    )
+    .unwrap();
     let mut gpos = gpos_sharing_a_table_between_subtables();
     assert_eq!(gpos_rows(&gpos), vec![Some((1, 1)), Some((1, 1))]);
     remap_gpos_variation_indices(&mut gpos, &remap.unwrap());

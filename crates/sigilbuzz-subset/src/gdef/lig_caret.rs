@@ -25,8 +25,9 @@ use sigilbuzz::Error;
 
 use super::read::{slice_at, u16_at};
 use super::{emit_covered_list, kept_entries, offset16, StorePlan};
-use crate::device::{device_table, Dedup, VARIATION_INDEX_FORMAT};
+use crate::device::{read_device, Dedup, VARIATION_INDEX_FORMAT};
 use crate::layout::GidMap;
+use crate::warnings::Diag;
 use crate::SubsetError;
 
 const CTX: &str = "GDEF LigGlyph or CaretValue truncated";
@@ -34,18 +35,21 @@ const CTX: &str = "GDEF LigGlyph or CaretValue truncated";
 /// Rewrites the LigCaretList at `off` (from the GDEF start). Returns
 /// `None` when no covered ligature survives. Format 3 carets handle
 /// their VariationIndex tables per `plan` (see [`StorePlan`]); hinting
-/// Device tables always stay.
+/// Device tables always stay. A ligature whose LigGlyph cannot be read
+/// loses its carets, and a caret Device table that cannot be read is
+/// cleared; both are reported through `diag`.
 pub(super) fn rewrite(
     table: &[u8],
     off: usize,
     map: &GidMap,
     plan: StorePlan<'_>,
+    diag: &Diag<'_>,
 ) -> Result<Option<Vec<u8>>, SubsetError> {
     let mut entries = Vec::new();
-    for (new_gid, lig_glyph) in kept_entries(table, off, map, "GDEF LigCaretList")? {
-        match rewrite_lig_glyph(table, lig_glyph, plan) {
+    for (new_gid, lig_glyph) in kept_entries(table, off, map, "GDEF LigCaretList", diag)? {
+        match rewrite_lig_glyph(table, lig_glyph, plan, diag) {
             Ok(body) => entries.push((new_gid, body)),
-            Err(SubsetError::Parse(_)) => {}
+            Err(SubsetError::Parse(e)) => diag.error(&e, "one ligature's carets"),
             Err(overflow) => return Err(overflow),
         }
     }
@@ -61,6 +65,7 @@ pub(super) fn rewrite_lig_glyph(
     table: &[u8],
     pos: usize,
     plan: StorePlan<'_>,
+    diag: &Diag<'_>,
 ) -> Result<Vec<u8>, SubsetError> {
     let count = usize::from(u16_at(table, pos, CTX)?);
     let mut out = Vec::with_capacity(2 + count * 6);
@@ -77,7 +82,7 @@ pub(super) fn rewrite_lig_glyph(
             }
             .into());
         }
-        let caret = copy_caret_value(table, pos + rel, plan)?;
+        let caret = copy_caret_value(table, pos + rel, plan, diag)?;
         let at = offset16(carets.place(&mut out, &caret))?;
         out[2 + i * 2..4 + i * 2].copy_from_slice(&at.to_be_bytes());
     }
@@ -86,15 +91,25 @@ pub(super) fn rewrite_lig_glyph(
 
 /// Copies the CaretValue at `pos` into a standalone blob. Format 3
 /// brings its device table along at blob offset 6, a VariationIndex
-/// one handled per `plan`; a device table that is missing, malformed,
-/// or a VariationIndex the plan drops clears the offset instead.
-fn copy_caret_value(table: &[u8], pos: usize, plan: StorePlan<'_>) -> Result<Vec<u8>, Error> {
+/// one handled per `plan`; a device table that is missing, malformed
+/// (reported through `diag`), or a VariationIndex the plan drops
+/// clears the offset instead.
+fn copy_caret_value(
+    table: &[u8],
+    pos: usize,
+    plan: StorePlan<'_>,
+    diag: &Diag<'_>,
+) -> Result<Vec<u8>, Error> {
     match u16_at(table, pos, CTX)? {
         1 | 2 => Ok(slice_at(table, pos, 4, CTX)?.to_vec()),
         3 => {
             let mut out = slice_at(table, pos, 6, CTX)?.to_vec();
             let rel = usize::from(u16_at(table, pos + 4, CTX)?);
-            let device = device_table(table, if rel == 0 { 0 } else { pos + rel })
+            let device = read_device(table, if rel == 0 { 0 } else { pos + rel })
+                .unwrap_or_else(|e| {
+                    diag.error(&e, "a caret's Device table");
+                    None
+                })
                 .and_then(|t| variation_index_per_plan(t, plan));
             match device {
                 Some(t) => {

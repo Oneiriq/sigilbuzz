@@ -30,11 +30,15 @@
 //!
 //! A malformed piece is left out rather than failing the subset, the
 //! way HarfBuzz's sanitizer neuters it: a header that cannot be read
-//! drops the whole table, a list, MarkGlyphSetsDef or store whose own
-//! structure is broken drops that subtable, and a broken AttachPoint
-//! or LigGlyph drops that glyph's entry. The readers still locate each
-//! problem by byte offset from the start of the GDEF table (see
-//! [`read`]); only running out of 16-bit offsets is an error.
+//! drops the whole table, a ClassDef, list, MarkGlyphSetsDef or store
+//! whose own structure is broken drops that subtable, a broken
+//! AttachPoint or LigGlyph drops that glyph's entry, a broken caret
+//! Device table is cleared, and a mark glyph set whose Coverage cannot
+//! be read becomes an empty set. The readers locate each problem by
+//! byte offset from the start of the GDEF table (see [`read`]), and
+//! every piece left out is reported with that offset as a
+//! [`crate::SubsetWarning`]. Only running out of 16-bit offsets is an
+//! error.
 
 mod attach_list;
 mod caret_fold;
@@ -45,12 +49,14 @@ mod read;
 
 use alloc::vec::Vec;
 
+use sigilbuzz::tables::tag;
 use sigilbuzz::Error;
 
 use crate::classdef::emit_classdef;
 use crate::coverage::emit_coverage_from_glyphs;
 use crate::device::Dedup;
-use crate::layout::{parse_classdef_pairs_from_bytes, GidMap};
+use crate::layout::GidMap;
+use crate::warnings::{Diag, Warnings};
 use crate::SubsetError;
 use read::{u16_at, u32_at};
 
@@ -61,16 +67,24 @@ pub(crate) use caret_fold::fold_caret_variations;
 ///
 /// `keep_variations` mirrors `SubsetInput::retain_variations`: it
 /// decides whether the ItemVariationStore (and the caret
-/// VariationIndex tables pointing into it) survive.
+/// VariationIndex tables pointing into it) survive. Malformed pieces
+/// left out are reported to `warnings`.
 pub(crate) fn rewrite_gdef(
     face: &sigilbuzz::Face<'_>,
     map: &GidMap,
     keep_variations: bool,
+    warnings: &Warnings,
 ) -> Result<Option<Vec<u8>>, SubsetError> {
-    let Ok(bytes) = face.table_bytes(sigilbuzz::tables::tag::GDEF) else {
-        return Ok(None);
+    let bytes = match face.table_bytes(tag::GDEF) {
+        Ok(bytes) => bytes,
+        Err(Error::MissingTable { .. }) => return Ok(None),
+        Err(e) => {
+            let context = crate::warnings::error_context(&e);
+            warnings.push(tag::GDEF, 0, context, "the whole table");
+            return Ok(None);
+        }
     };
-    rewrite_gdef_bytes(bytes, map, keep_variations)
+    rewrite_gdef_bytes(bytes, map, keep_variations, warnings)
 }
 
 /// [`rewrite_gdef`] on raw table bytes.
@@ -78,13 +92,14 @@ pub(crate) fn rewrite_gdef_bytes(
     bytes: &[u8],
     map: &GidMap,
     keep_variations: bool,
+    warnings: &Warnings,
 ) -> Result<Option<Vec<u8>>, SubsetError> {
     let plan = if keep_variations {
         StorePlan::Keep
     } else {
         StorePlan::Drop
     };
-    rebuild_gdef(bytes, map, plan)
+    rebuild_gdef(bytes, map, plan, warnings)
 }
 
 /// What a rebuilt GDEF does with the ItemVariationStore and with the
@@ -122,34 +137,56 @@ pub(crate) enum StorePlan<'a> {
 ///   Offset16 markGlyphSetsDefOffset      (1.2+)
 ///   Offset32 itemVarStoreOffset          (1.3+)
 /// ```
+///
+/// Every malformed piece left out is reported to `warnings`.
 pub(crate) fn rebuild_gdef(
     bytes: &[u8],
     map: &GidMap,
     plan: StorePlan<'_>,
+    warnings: &Warnings,
 ) -> Result<Option<Vec<u8>>, SubsetError> {
+    let diag = Diag::new(warnings).for_table(tag::GDEF, bytes);
     // Without a readable header nothing in the table can be trusted.
-    let Ok(header) = Header::read(bytes) else {
-        return Ok(None);
+    let header = match Header::read(bytes) {
+        Ok(header) => header,
+        Err(e) => {
+            diag.error(&e, "the whole table");
+            return Ok(None);
+        }
     };
-    let glyph_class =
-        present(header.glyph_class).and_then(|off| rewrite_classdef_subtable(bytes, off, map));
+    let glyph_class = present(header.glyph_class)
+        .and_then(|off| rewrite_classdef_subtable(bytes, off, map, &diag, "the GlyphClassDef"));
     let attach_list = match present(header.attach_list) {
-        Some(off) => lenient(attach_list::rewrite(bytes, off, map))?,
+        Some(off) => lenient(
+            attach_list::rewrite(bytes, off, map, &diag),
+            &diag,
+            "the AttachList",
+        )?,
         None => None,
     };
     let lig_carets = match present(header.lig_carets) {
-        Some(off) => lenient(lig_caret::rewrite(bytes, off, map, plan))?,
+        Some(off) => lenient(
+            lig_caret::rewrite(bytes, off, map, plan, &diag),
+            &diag,
+            "the LigCaretList",
+        )?,
         None => None,
     };
-    let mark_attach =
-        present(header.mark_attach).and_then(|off| rewrite_classdef_subtable(bytes, off, map));
-    let mark_sets =
-        present(header.mark_sets).and_then(|off| mark_glyph_sets::rewrite(bytes, off, map).ok());
+    let mark_attach = present(header.mark_attach).and_then(|off| {
+        rewrite_classdef_subtable(bytes, off, map, &diag, "the MarkAttachClassDef")
+    });
+    let mark_sets = present(header.mark_sets).and_then(|off| {
+        mark_glyph_sets::rewrite(bytes, off, map, &diag)
+            .map_err(|e| diag.error(&e, "the MarkGlyphSetsDef"))
+            .ok()
+    });
     let ivs = match plan {
         StorePlan::Keep => present(header.store).and_then(|off| {
             // `store_len` has checked that `off + len` stays inside
             // the table, so the sum cannot wrap.
-            let len = item_var_store::store_len(bytes, off).ok()?;
+            let len = item_var_store::store_len(bytes, off)
+                .map_err(|e| diag.error(&e, "the ItemVariationStore"))
+                .ok()?;
             Some(&bytes[off..off + len])
         }),
         StorePlan::Drop => None,
@@ -240,11 +277,19 @@ impl Header {
 }
 
 /// Leaves out a sub-structure whose bytes do not parse: its parse
-/// error becomes "nothing survived". Running out of 16-bit offsets in
-/// the rebuilt table is still an error.
-fn lenient<T>(rewritten: Result<Option<T>, SubsetError>) -> Result<Option<T>, SubsetError> {
+/// error is reported through `diag` as `dropped` and becomes "nothing
+/// survived". Running out of 16-bit offsets in the rebuilt table is
+/// still an error.
+fn lenient<T>(
+    rewritten: Result<Option<T>, SubsetError>,
+    diag: &Diag<'_>,
+    dropped: &'static str,
+) -> Result<Option<T>, SubsetError> {
     match rewritten {
-        Err(SubsetError::Parse(_)) => Ok(None),
+        Err(SubsetError::Parse(e)) => {
+            diag.error(&e, dropped);
+            Ok(None)
+        }
         other => other,
     }
 }
@@ -272,14 +317,16 @@ fn offset16(pos: usize) -> Result<u16, SubsetError> {
 ///
 /// Returns `(new glyph id, absolute position of the table the entry
 /// names)` for every covered glyph the map keeps, sorted by new glyph
-/// id. Coverage entries past `count` have no table and are skipped, and
-/// so are null entries: that glyph simply has no table. A list whose
-/// Coverage or offset array cannot be read is an error.
+/// id. Coverage entries past `count` have no table and are skipped (and
+/// reported through `diag`), and so are null entries: that glyph simply
+/// has no table. A list whose Coverage or offset array cannot be read
+/// is an error.
 fn kept_entries(
     table: &[u8],
     list_off: usize,
     map: &GidMap,
     context: &'static str,
+    diag: &Diag<'_>,
 ) -> Result<Vec<(u16, usize)>, Error> {
     let coverage_rel = usize::from(u16_at(table, list_off, context)?);
     if coverage_rel == 0 {
@@ -295,6 +342,11 @@ fn kept_entries(
             continue;
         };
         if index >= count {
+            diag.at(
+                list_off + 2,
+                "GDEF list Coverage names more glyphs than the list has entries",
+                "the entries of the extra glyphs",
+            );
             continue;
         }
         let slot = list_off + 4 + usize::from(index) * 2;
@@ -329,9 +381,19 @@ fn emit_covered_list(entries: &[(u16, Vec<u8>)]) -> Result<Vec<u8>, SubsetError>
     Ok(out)
 }
 
-fn rewrite_classdef_subtable(bytes: &[u8], offset: usize, map: &GidMap) -> Option<Vec<u8>> {
-    let body = bytes.get(offset..)?;
-    let pairs = parse_classdef_pairs_from_bytes(body);
+/// Remaps the ClassDef at `offset` through `map`. `None` when no glyph
+/// with a class survives, or when the ClassDef cannot be read, which is
+/// reported through `diag` as `dropped`.
+fn rewrite_classdef_subtable(
+    bytes: &[u8],
+    offset: usize,
+    map: &GidMap,
+    diag: &Diag<'_>,
+    dropped: &'static str,
+) -> Option<Vec<u8>> {
+    let pairs = read::class_def(bytes, offset)
+        .map_err(|e| diag.error(&e, dropped))
+        .ok()?;
     let mut new_pairs: Vec<(u16, u16)> = Vec::with_capacity(pairs.len());
     for (gid, class) in pairs {
         let Some(new_gid) = map.map(gid) else {

@@ -111,6 +111,9 @@ signatures only change in a major version.
 
 - `subset`, `SubsetInput`, `SubsetOutput`
 - `instance`, `AxisPin`, `F2Dot14`, `InstanceInput`, `InstancedOutput`
+- `SubsetWarning`: a malformed piece of the source font that a subset or instance left
+  out instead of failing, returned in `SubsetOutput::warnings` and
+  `InstancedOutput::warnings`
 - `compute_closure`, `subset_cff1_non_identity`, `subset_cff2_non_identity`,
   `emit_classdef`, `emit_coverage_from_glyphs`, `emit_coverage_from_pairs`
 

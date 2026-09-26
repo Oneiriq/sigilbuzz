@@ -21,7 +21,8 @@ use super::read::coverage;
 use super::{mark_glyph_sets, rewrite_classdef_subtable, rewrite_gdef_bytes, Header, StorePlan};
 use crate::coverage::emit_coverage_from_glyphs;
 use crate::layout::GidMap;
-use crate::SubsetError;
+use crate::warnings::{Diag, Warnings};
+use crate::{SubsetError, SubsetWarning};
 
 fn u16_at(buf: &[u8], pos: usize) -> u16 {
     u16::from_be_bytes([buf[pos], buf[pos + 1]])
@@ -289,9 +290,26 @@ fn lig_carets(gdef: &[u8], gid: u16) -> Option<Vec<Caret>> {
 }
 
 fn rewrite(gdef: &[u8], map: &GidMap, keep_variations: bool) -> Vec<u8> {
-    rewrite_gdef_bytes(gdef, map, keep_variations)
-        .unwrap()
+    rewrite_warned(gdef, map, keep_variations)
+        .0
         .expect("GDEF survives")
+}
+
+/// The rewritten table, if any, and the warnings the rewrite raised.
+fn rewrite_warned(
+    gdef: &[u8],
+    map: &GidMap,
+    keep_variations: bool,
+) -> (Option<Vec<u8>>, Vec<SubsetWarning>) {
+    let warnings = Warnings::default();
+    let out = rewrite_gdef_bytes(gdef, map, keep_variations, &warnings).unwrap();
+    (out, warnings.into_sorted())
+}
+
+/// `(offset, dropped)` of each warning, all of which must be on GDEF.
+fn warned(warnings: &[SubsetWarning]) -> Vec<(usize, &'static str)> {
+    assert!(warnings.iter().all(|w| w.table == *b"GDEF"), "{warnings:?}");
+    warnings.iter().map(|w| (w.offset, w.dropped)).collect()
 }
 
 #[test]
@@ -299,7 +317,7 @@ fn rewrite_classdef_filters_dropped_gids() {
     // Class assignments: gid 5->1, gid 6->2, gid 10->3.
     let cd_bytes = class_def(&[(5, 1), (6, 2), (10, 3)]);
     let map = keep(&[(5, 1), (10, 3)]);
-    let new_cd = rewrite_classdef_subtable(&cd_bytes, 0, &map).unwrap();
+    let new_cd = rewrite_classdef_subtable(&cd_bytes, 0, &map, &Diag::NONE, "").unwrap();
     let parsed = ClassDef::parse(&new_cd).unwrap();
     assert_eq!(parsed.class_of(1), 1, "gid 5->1 keeps class 1");
     assert_eq!(parsed.class_of(3), 3, "gid 10->3 keeps class 3");
@@ -356,7 +374,7 @@ fn empty_mark_glyph_sets_alone_do_not_keep_gdef() {
         ..Parts::default()
     });
     let map = keep(&[(5, 1)]);
-    assert!(rewrite_gdef_bytes(&alone, &map, true).unwrap().is_none());
+    assert!(rewrite_warned(&alone, &map, true).0.is_none());
 
     let with_classes = build_gdef(&Parts {
         minor: 2,
@@ -508,9 +526,9 @@ fn gdef_drops_only_when_nothing_survives() {
         mark_attach: Some(class_def(&[(8, 1)])),
         ..Parts::default()
     });
-    assert!(rewrite_gdef_bytes(&gdef, &keep(&[(9, 1)]), true)
-        .unwrap()
-        .is_none());
+    let (out, warnings) = rewrite_warned(&gdef, &keep(&[(9, 1)]), true);
+    assert!(out.is_none());
+    assert!(warnings.is_empty(), "nothing malformed: {warnings:?}");
     // Keeping just the ligature keeps the table, with only the
     // LigCaretList in it.
     let out = rewrite(&gdef, &keep(&[(7, 1)]), true);
@@ -527,12 +545,14 @@ fn unreadable_headers_drop_gdef() {
         ..Parts::default()
     });
     let map = keep(&[(5, 1)]);
-    assert!(rewrite_gdef_bytes(&gdef[..9], &map, true)
-        .unwrap()
-        .is_none());
+    let (out, warnings) = rewrite_warned(&gdef[..9], &map, true);
+    assert!(out.is_none());
+    assert_eq!(warned(&warnings), [(8, "the whole table")]);
     let mut major2 = gdef.clone();
     put_u16(&mut major2, 0, 2);
-    assert!(rewrite_gdef_bytes(&major2, &map, true).unwrap().is_none());
+    let (out, warnings) = rewrite_warned(&major2, &map, true);
+    assert!(out.is_none());
+    assert_eq!(warned(&warnings), [(0, "the whole table")]);
     let err = Header::read(&gdef[..9]).err().unwrap();
     assert!(matches!(err, Error::Truncated { offset: 8, .. }), "{err:?}");
     let err = Header::read(&major2).err().unwrap();
@@ -556,9 +576,11 @@ fn truncated_attach_point_drops_its_entry() {
         matches!(err, Error::Truncated { offset, .. } if offset == point),
         "{err:?}"
     );
-    let out = rewrite(&bad, &keep(&[(5, 1), (6, 2)]), true);
+    let (out, warnings) = rewrite_warned(&bad, &keep(&[(5, 1), (6, 2)]), true);
+    let out = out.expect("GDEF survives");
     assert_eq!(attach_points(&out, 1), None);
     assert_eq!(attach_points(&out, 2), Some(vec![4]));
+    assert_eq!(warned(&warnings), [(point, "one glyph's AttachPoint")]);
 }
 
 /// A list whose Coverage cannot be read is dropped; the rest of GDEF
@@ -579,8 +601,10 @@ fn unreadable_coverage_drops_its_list() {
         matches!(err, Error::Malformed { offset, .. } if offset == cov),
         "{err:?}"
     );
-    let out = rewrite(&bad, &keep(&[(5, 1)]), true);
+    let (out, warnings) = rewrite_warned(&bad, &keep(&[(5, 1)]), true);
+    let out = out.expect("GDEF survives");
     assert_eq!(subtable(&out, 6), 0, "AttachList dropped");
+    assert_eq!(warned(&warnings), [(cov, "the AttachList")]);
     assert_eq!(
         ClassDef::parse(&out[subtable(&out, 4)..])
             .unwrap()
@@ -588,10 +612,9 @@ fn unreadable_coverage_drops_its_list() {
         1
     );
     // Cut inside the Coverage: same outcome.
-    let cut = rewrite_gdef_bytes(&gdef[..cov + 5], &keep(&[(5, 1)]), true)
-        .unwrap()
-        .expect("GDEF survives");
-    assert_eq!(subtable(&cut, 6), 0);
+    let (cut, warnings) = rewrite_warned(&gdef[..cov + 5], &keep(&[(5, 1)]), true);
+    assert_eq!(subtable(&cut.expect("GDEF survives"), 6), 0);
+    assert_eq!(warned(&warnings), [(cov + 4, "the AttachList")]);
 }
 
 /// A LigGlyph with an unknown caret format or a null caret offset
@@ -615,13 +638,15 @@ fn malformed_caret_values_drop_their_ligature() {
     let mut null_caret = gdef.clone();
     put_u16(&mut null_caret, lig + 2, 0);
     for (bad, at) in [(&bad_format, caret), (&null_caret, lig + 2)] {
-        match rewrite_lig_glyph(bad, lig, StorePlan::Keep) {
+        match rewrite_lig_glyph(bad, lig, StorePlan::Keep, &Diag::NONE) {
             Err(SubsetError::Parse(Error::Malformed { offset, .. })) => assert_eq!(offset, at),
             other => panic!("expected a parse error, got {other:?}"),
         }
-        let out = rewrite(bad, &map, true);
+        let (out, warnings) = rewrite_warned(bad, &map, true);
+        let out = out.expect("GDEF survives");
         assert_eq!(lig_carets(&out, 1), None);
         assert_eq!(lig_carets(&out, 2), Some(vec![Caret::Coord(9)]));
+        assert_eq!(warned(&warnings), [(at, "one ligature's carets")]);
     }
 }
 
@@ -643,18 +668,21 @@ fn malformed_mark_glyph_sets_are_dropped_or_emptied() {
     let map = keep(&[(4, 1)]);
     let mut bad = gdef.clone();
     put_u16(&mut bad, sets, 2);
-    let err = mark_glyph_sets::rewrite(&bad, sets, &map).err().unwrap();
+    let err = mark_glyph_sets::rewrite(&bad, sets, &map, &Diag::NONE)
+        .err()
+        .unwrap();
     assert!(
         matches!(err, Error::Malformed { offset, .. } if offset == sets),
         "{err:?}"
     );
-    let out = rewrite(&bad, &map, true);
-    assert_eq!(u16_at(&out, 2), 0, "GDEF 1.0: the sets are gone");
+    let (out, warnings) = rewrite_warned(&bad, &map, true);
+    assert_eq!(u16_at(&out.unwrap(), 2), 0, "GDEF 1.0: the sets are gone");
+    assert_eq!(warned(&warnings), [(sets, "the MarkGlyphSetsDef")]);
 
     let mut long = gdef.clone();
     put_u16(&mut long, sets + 2, 50);
     assert!(matches!(
-        mark_glyph_sets::rewrite(&long, sets, &map),
+        mark_glyph_sets::rewrite(&long, sets, &map, &Diag::NONE),
         Err(Error::Truncated { .. })
     ));
     assert_eq!(u16_at(&rewrite(&long, &map, true), 2), 0);
@@ -671,10 +699,17 @@ fn malformed_mark_glyph_sets_are_dropped_or_emptied() {
         ]) as usize;
     put_u16(&mut sick, cov, 9);
     sick[sets + 8..sets + 12].copy_from_slice(&(u32::MAX - 1).to_be_bytes());
-    let out = rewrite(&sick, &map, true);
-    let parsed = Gdef::parse(&out).unwrap();
+    let (out, warnings) = rewrite_warned(&sick, &map, true);
+    let parsed = Gdef::parse(out.as_deref().unwrap()).unwrap();
     assert!(parsed.mark_filtering_set(0).unwrap().is_empty());
     assert!(parsed.mark_filtering_set(1).unwrap().is_empty());
+    assert_eq!(
+        warned(&warnings),
+        [
+            (sets + 8, "the glyphs of one mark glyph set"),
+            (cov, "the glyphs of one mark glyph set")
+        ]
+    );
 }
 
 /// A malformed store is dropped; everything else survives.
@@ -690,8 +725,20 @@ fn malformed_item_variation_store_is_dropped() {
     let err = store_len(&gdef[..gdef.len() - 1], store).err().unwrap();
     assert!(matches!(err, Error::Truncated { .. }), "{err:?}");
     for keep_variations in [true, false] {
-        let out = rewrite(&gdef[..gdef.len() - 1], &keep(&[(5, 1)]), keep_variations);
+        let (out, warnings) =
+            rewrite_warned(&gdef[..gdef.len() - 1], &keep(&[(5, 1)]), keep_variations);
+        let out = out.expect("GDEF survives");
         assert_eq!(u16_at(&out, 2), 0, "GDEF 1.0 without the store");
+        // A static rewrite never reads the store, so only a rewrite
+        // that keeps it notices the damage.
+        if keep_variations {
+            assert_eq!(
+                warned(&warnings),
+                [(gdef.len() - 1, "the ItemVariationStore")]
+            );
+        } else {
+            assert!(warnings.is_empty(), "{warnings:?}");
+        }
         assert_eq!(
             ClassDef::parse(&out[subtable(&out, 4)..])
                 .unwrap()
@@ -791,6 +838,16 @@ fn a_malformed_gdef_piece_does_not_fail_the_subset() {
     let result = sigilbuzz::Face::parse_bytes(&out.bytes, 0).unwrap();
     let bytes = result.table_bytes(*b"GDEF").unwrap();
     assert_eq!(u16_at(bytes, 8), 0, "no LigCaretList");
+    let dropped: Vec<(&[u8; 4], usize, &str)> = out
+        .warnings
+        .iter()
+        .map(|w| (&w.table, w.offset, w.dropped))
+        .collect();
+    assert_eq!(
+        dropped,
+        [(b"GDEF", caret, "one ligature's carets")],
+        "the subset reports what it left out"
+    );
     let classes = ClassDef::parse(&bytes[subtable(bytes, 4)..]).unwrap();
     assert_eq!(classes.class_of(new(36)), 1);
     assert_eq!(classes.class_of(new(38)), 3);

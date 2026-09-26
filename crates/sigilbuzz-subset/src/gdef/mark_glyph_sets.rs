@@ -21,6 +21,7 @@ use super::read::{coverage, u16_at, u32_at};
 use crate::coverage::emit_coverage_from_glyphs;
 use crate::device::Dedup;
 use crate::layout::GidMap;
+use crate::warnings::Diag;
 
 /// A rewritten MarkGlyphSetsDef.
 pub(super) struct MarkGlyphSets {
@@ -30,8 +31,15 @@ pub(super) struct MarkGlyphSets {
     pub any_glyphs: bool,
 }
 
-/// Rewrites the MarkGlyphSetsDef at `off` (from the GDEF start).
-pub(super) fn rewrite(table: &[u8], off: usize, map: &GidMap) -> Result<MarkGlyphSets, Error> {
+/// Rewrites the MarkGlyphSetsDef at `off` (from the GDEF start). A set
+/// whose Coverage cannot be read is kept empty and reported through
+/// `diag`.
+pub(super) fn rewrite(
+    table: &[u8],
+    off: usize,
+    map: &GidMap,
+    diag: &Diag<'_>,
+) -> Result<MarkGlyphSets, Error> {
     const CTX: &str = "GDEF MarkGlyphSetsDef truncated";
     let format = u16_at(table, off, CTX)?;
     if format != 1 {
@@ -52,14 +60,26 @@ pub(super) fn rewrite(table: &[u8], off: usize, map: &GidMap) -> Result<MarkGlyp
         let rel = u32_at(table, slot, CTX)? as usize;
         // A null slot is an empty set, the reading the shaper uses, and
         // so is a Coverage that cannot be read. The sum is checked: an
-        // Offset32 can wrap a 32-bit `usize`.
-        let glyphs: Vec<u16> = match off.checked_add(rel).filter(|_| rel != 0) {
-            Some(at) => coverage(table, at)
-                .unwrap_or_default()
+        // Offset32 can wrap a 32-bit `usize`, and a target past the
+        // table is reported at the slot on every target alike.
+        let glyphs: Vec<u16> = if rel == 0 {
+            Vec::new()
+        } else if let Some(at) = off.checked_add(rel).filter(|&at| at < table.len()) {
+            coverage(table, at)
+                .unwrap_or_else(|e| {
+                    diag.error(&e, "the glyphs of one mark glyph set");
+                    Vec::new()
+                })
                 .into_iter()
                 .filter_map(|(gid, _)| map.map(gid))
-                .collect(),
-            None => Vec::new(),
+                .collect()
+        } else {
+            diag.at(
+                slot,
+                "GDEF mark glyph set Coverage offset past the end",
+                "the glyphs of one mark glyph set",
+            );
+            Vec::new()
         };
         any_glyphs |= !glyphs.is_empty();
         let at = coverages.place(&mut out, &emit_coverage_from_glyphs(&glyphs)) as u32;

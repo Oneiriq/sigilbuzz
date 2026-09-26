@@ -73,9 +73,10 @@ use sigilbuzz::tables::gpos::lookup_type as gpos_type;
 use crate::coverage::emit_coverage_from_pairs;
 use crate::device::{copy_anchor, Dedup};
 use crate::layout::{
-    parse_classdef_pairs_from_bytes, parse_coverage_glyphs, RewriterCtx, RewrittenLookup,
-    RewrittenSubtable,
+    extension_target, has_null_class_def, parse_classdef_pairs_from_bytes, parse_coverage_glyphs,
+    RewriterCtx, RewrittenLookup, RewrittenSubtable,
 };
+use crate::warnings::error_context;
 use crate::SubsetError;
 use mark_attach::{rewrite_mark_attach, MarkAttachKind};
 use pair_sets::{emit_pair_sets, PairSets};
@@ -83,7 +84,8 @@ use pair_sets::{emit_pair_sets, PairSets};
 /// Rewrites a single GPOS lookup. Returns `None` if the lookup has no
 /// surviving subtables after rewriting (drop cascade will remove the
 /// lookup), and an error when a rebuilt subtable outgrows its 16-bit
-/// offsets even after splitting (see [`crate::offset16`]).
+/// offsets even after splitting (see [`crate::offset16`]). A subtable
+/// left out because it cannot be read is reported through `ctx.diag`.
 pub(crate) fn rewrite_lookup(
     ctx: &RewriterCtx,
     lookup_type: u16,
@@ -97,6 +99,9 @@ pub(crate) fn rewrite_lookup(
         let rewritten = rewrite_subtable(ctx, lookup_type, sub_bytes);
         ctx.offsets
             .check(overflow_context(lookup_type, sub_bytes))?;
+        if rewritten.is_empty() {
+            report_unreadable(ctx, lookup_type, sub_bytes);
+        }
         rewritten_subs.extend(rewritten);
     }
 
@@ -110,6 +115,50 @@ pub(crate) fn rewrite_lookup(
         mark_filtering_set,
         subtables: rewritten_subs,
     }))
+}
+
+/// Reports a subtable the rewrite left out when the shaper's own parser
+/// rejects it as well: it went for being malformed, or for a lookup
+/// type no shaper applies, not for losing every glyph. The parser
+/// measures nested errors from the nested table, so the warning sits
+/// at the start of the subtable, with the parser's reason.
+fn report_unreadable(ctx: &RewriterCtx, lookup_type: u16, sub: &[u8]) {
+    if let Err(e) = parse_subtable(lookup_type, sub) {
+        ctx.diag
+            .in_part(sub, 0, error_context(&e), "a lookup subtable");
+    }
+}
+
+/// Parses `sub`, a subtable of a lookup of `lookup_type`, with the
+/// shaper's parser, looking through an Extension wrapper.
+fn parse_subtable(lookup_type: u16, sub: &[u8]) -> Result<(), sigilbuzz::Error> {
+    use sigilbuzz::tables::gpos as parser;
+    match lookup_type {
+        gpos_type::CONTEXT | gpos_type::CHAINED_CONTEXT
+            if has_null_class_def(sub, lookup_type == gpos_type::CHAINED_CONTEXT) =>
+        {
+            Ok(())
+        }
+        gpos_type::SINGLE_ADJUSTMENT => parser::SinglePos::parse(sub).map(drop),
+        gpos_type::PAIR_ADJUSTMENT => parser::PairPos::parse(sub).map(drop),
+        gpos_type::CURSIVE_ATTACHMENT => parser::CursivePos::parse(sub).map(drop),
+        gpos_type::MARK_TO_BASE => parser::MarkBasePos::parse(sub).map(drop),
+        gpos_type::MARK_TO_LIGATURE => parser::MarkLigaPos::parse(sub).map(drop),
+        gpos_type::MARK_TO_MARK => parser::MarkMarkPos::parse(sub).map(drop),
+        gpos_type::CONTEXT => parser::ContextPos::parse(sub).map(drop),
+        gpos_type::CHAINED_CONTEXT => parser::ChainContextPos::parse(sub).map(drop),
+        gpos_type::EXTENSION => match extension_target(sub)? {
+            (gpos_type::EXTENSION, _) => Err(sigilbuzz::Error::Malformed {
+                offset: 2,
+                context: "Extension subtable wraps another Extension",
+            }),
+            (inner_type, inner) => parse_subtable(inner_type, inner),
+        },
+        _ => Err(sigilbuzz::Error::Malformed {
+            offset: 0,
+            context: "unknown GPOS lookup type",
+        }),
+    }
 }
 
 /// Names the subtable type an Offset16 overflow is reported against,
@@ -260,6 +309,14 @@ fn rewrite_single_adj(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable
             // Spec requires Coverage entry count == valueCount; if the
             // source is malformed we cap.
             let pair_count = covered.len().min(value_count);
+            if covered.len() > value_count {
+                ctx.diag.in_part(
+                    sub,
+                    6,
+                    "SinglePos format 2 Coverage lists more glyphs than valueCount",
+                    "the adjustments of the extra glyphs",
+                );
+            }
 
             let mut surviving: Vec<(u16, Vec<u8>)> = Vec::new();
             for (i, &g_old) in covered.iter().enumerate().take(pair_count) {
@@ -314,7 +371,7 @@ fn carry_devices(
         records,
         keep_variations: ctx.keep_variations,
     };
-    if !crate::device::relocate_value_records(out, 0, src_parent, &run) {
+    if !crate::device::relocate_value_records(out, 0, src_parent, &run, &ctx.diag) {
         ctx.offsets.record();
     }
 }
@@ -988,8 +1045,8 @@ fn rewrite_cursive(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         let rec_off = records_off + i * 4;
         let entry_off = u16::from_be_bytes([sub[rec_off], sub[rec_off + 1]]) as usize;
         let exit_off = u16::from_be_bytes([sub[rec_off + 2], sub[rec_off + 3]]) as usize;
-        let entry_bytes = copy_anchor(sub, entry_off, ctx.keep_variations);
-        let exit_bytes = copy_anchor(sub, exit_off, ctx.keep_variations);
+        let entry_bytes = copy_anchor(sub, entry_off, ctx.keep_variations, &ctx.diag);
+        let exit_bytes = copy_anchor(sub, exit_off, ctx.keep_variations, &ctx.diag);
         surviving.push((g_new, entry_bytes, exit_bytes));
     }
     if surviving.is_empty() {

@@ -18,6 +18,7 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
 use crate::layout::GidMap;
+use crate::warnings::Warnings;
 use crate::SubsetError;
 
 /// What becomes of the source GDEF in an instanced font.
@@ -47,7 +48,12 @@ pub(super) fn identity_map(face: &Face<'_>) -> Result<GidMap, SubsetError> {
 
 /// Folds the ligature caret variations at `coords` into the carets,
 /// then rebuilds the face's GDEF without its ItemVariationStore.
-pub(super) fn prune_gdef_store(face: &Face<'_>, coords: &[f32]) -> Result<GdefBake, SubsetError> {
+/// Malformed pieces the rebuild leaves out are reported to `warnings`.
+pub(super) fn prune_gdef_store(
+    face: &Face<'_>,
+    coords: &[f32],
+    warnings: &Warnings,
+) -> Result<GdefBake, SubsetError> {
     let Ok(bytes) = face.table_bytes(tag::GDEF) else {
         return Ok(GdefBake::Unchanged);
     };
@@ -58,7 +64,7 @@ pub(super) fn prune_gdef_store(face: &Face<'_>, coords: &[f32]) -> Result<GdefBa
     let gdef = face.gdef()?;
     let store = gdef.as_ref().and_then(|g| g.item_variation_store());
     crate::gdef::fold_caret_variations(&mut folded, store, coords);
-    let rebuilt = crate::gdef::rewrite_gdef_bytes(&folded, &identity_map(face)?, false)?;
+    let rebuilt = crate::gdef::rewrite_gdef_bytes(&folded, &identity_map(face)?, false, warnings)?;
     Ok(match rebuilt {
         Some(bytes) => GdefBake::Rebuilt(bytes),
         None => GdefBake::Dropped,

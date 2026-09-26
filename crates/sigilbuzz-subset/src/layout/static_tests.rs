@@ -20,7 +20,7 @@ fn plan(face: &Face<'_>, kept: &[u16], retain_variations: bool) -> LayoutPlan {
         retain_variations,
         ..SubsetInput::default()
     };
-    decide(face, kept, &input).unwrap()
+    decide(face, kept, &input, &crate::warnings::Warnings::default()).unwrap()
 }
 
 fn rewritten(decision: Decision) -> Vec<u8> {

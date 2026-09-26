@@ -112,7 +112,7 @@ fn a_gdef_without_a_store_rides_through() {
     // Open Sans carries GDEF 1.0.
     let face = Face::parse_bytes(OPEN_SANS, 0).unwrap();
     assert!(matches!(
-        prune_gdef_store(&face, &[]).unwrap(),
+        prune_gdef_store(&face, &[], &crate::warnings::Warnings::default()).unwrap(),
         GdefBake::Unchanged
     ));
 }
@@ -139,6 +139,31 @@ fn tables_nested_after_the_store_survive_the_prune() {
     assert_eq!(u16_at(gdef, lig), 1);
     let caret = lig + u16_at(gdef, lig + 2);
     assert_eq!(u16_at(gdef, caret + 2), 140);
+}
+
+#[test]
+fn malformed_pieces_the_prune_leaves_out_are_reported() {
+    // The ligature caret gets an unknown CaretValue format: the rebuilt
+    // GDEF loses that ligature's carets, and the instance says so.
+    let mut source = gdef_with_tables_after_the_store();
+    let list = u16_at(&source, 8);
+    let lig = list + u16_at(&source, list + 4);
+    let caret = lig + u16_at(&source, lig + 2);
+    put(&mut source, caret, 9);
+    let face_bytes = rubik_with_gdef(Some(&source));
+    let face = Face::parse_bytes(&face_bytes, 0).unwrap();
+    let input = InstanceInput {
+        coords: vec![1.0],
+        drop_var_tables: true,
+        axis_pins: Vec::new(),
+    };
+    let out = instance(&face, &input).unwrap();
+    let found: Vec<([u8; 4], usize, &str)> = out
+        .warnings
+        .iter()
+        .map(|w| (w.table, w.offset, w.dropped))
+        .collect();
+    assert_eq!(found, [(tag::GDEF, caret, "one ligature's carets")]);
 }
 
 #[test]

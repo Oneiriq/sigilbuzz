@@ -1,7 +1,10 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{copy_anchor, device_table, relocate_value_records, Dedup, RecordRun};
+use sigilbuzz::Error;
+
+use super::{copy_anchor, device_table, read_device, relocate_value_records, Dedup, RecordRun};
+use crate::warnings::{Diag, Warnings};
 
 fn u16_at(buf: &[u8], pos: usize) -> u16 {
     u16::from_be_bytes([buf[pos], buf[pos + 1]])
@@ -94,7 +97,7 @@ fn copy_anchor_formats_1_and_2_are_verbatim() {
     let fmt2 = [0u8, 2, 0, 10, 0, 20, 0, 7];
     for anchor in [&fmt1[..], &fmt2[..]] {
         let parent = at_offset(6, anchor);
-        assert_eq!(copy_anchor(&parent, 6, true), anchor);
+        assert_eq!(copy_anchor(&parent, 6, true, &Diag::NONE), anchor);
     }
 }
 
@@ -110,7 +113,7 @@ fn copy_anchor_format3_brings_its_devices_along() {
     anchor.extend_from_slice(&device(12, 13, 1, 1));
     let parent = at_offset(8, &anchor);
 
-    let copy = copy_anchor(&parent, 8, true);
+    let copy = copy_anchor(&parent, 8, true, &Diag::NONE);
     assert_eq!(&copy[..6], &anchor[..6]);
     assert_eq!(u16_at(&copy, 6), 10);
     assert_eq!(u16_at(&copy, 8), 16);
@@ -129,7 +132,7 @@ fn static_copies_leave_variation_indices_out() {
     anchor.resize(24, 0);
     anchor.extend_from_slice(&device(12, 13, 1, 1));
     let parent = at_offset(8, &anchor);
-    let copy = copy_anchor(&parent, 8, false);
+    let copy = copy_anchor(&parent, 8, false, &Diag::NONE);
     assert_eq!(u16_at(&copy, 6), 0, "x VariationIndex left out");
     assert_eq!(u16_at(&copy, 8), 10, "y Device kept");
     assert_eq!(&copy[10..], &device(12, 13, 1, 1)[..]);
@@ -151,6 +154,7 @@ fn static_copies_leave_variation_indices_out() {
             records: &[(0, 0x00C0)],
             keep_variations: false,
         },
+        &Diag::NONE,
     );
     assert!(fits);
     assert_eq!(u16_at(&out, 0), 0);
@@ -163,7 +167,7 @@ fn copy_anchor_format3_shares_one_copy_of_a_shared_device() {
     let mut anchor = anchor3(10, 10);
     anchor.extend_from_slice(&variation_index(2, 3));
     let parent = at_offset(4, &anchor);
-    let copy = copy_anchor(&parent, 4, true);
+    let copy = copy_anchor(&parent, 4, true, &Diag::NONE);
     assert_eq!(copy.len(), 16);
     assert_eq!(u16_at(&copy, 6), 10);
     assert_eq!(u16_at(&copy, 8), 10);
@@ -175,7 +179,7 @@ fn copy_anchor_format3_clears_null_and_unusable_devices() {
     let mut anchor = anchor3(0, 10);
     anchor.extend_from_slice(&device(1, 1, 7, 1));
     let parent = at_offset(2, &anchor);
-    let copy = copy_anchor(&parent, 2, true);
+    let copy = copy_anchor(&parent, 2, true, &Diag::NONE);
     assert_eq!(copy.len(), 10);
     assert_eq!(u16_at(&copy, 6), 0);
     assert_eq!(u16_at(&copy, 8), 0);
@@ -185,14 +189,14 @@ fn copy_anchor_format3_clears_null_and_unusable_devices() {
 fn copy_anchor_rejects_null_truncated_and_unknown_anchors() {
     let anchor = anchor3(0, 0);
     let parent = at_offset(2, &anchor);
-    assert!(copy_anchor(&parent, 0, true).is_empty());
-    assert!(copy_anchor(&parent, 100, true).is_empty());
+    assert!(copy_anchor(&parent, 0, true, &Diag::NONE).is_empty());
+    assert!(copy_anchor(&parent, 100, true, &Diag::NONE).is_empty());
     assert!(
-        copy_anchor(&parent[..10], 2, true).is_empty(),
+        copy_anchor(&parent[..10], 2, true, &Diag::NONE).is_empty(),
         "format 3 cut short"
     );
     let unknown = at_offset(2, &[0, 9, 0, 1, 0, 1]);
-    assert!(copy_anchor(&unknown, 2, true).is_empty());
+    assert!(copy_anchor(&unknown, 2, true, &Diag::NONE).is_empty());
 }
 
 #[test]
@@ -240,6 +244,7 @@ fn relocate_value_records_copies_and_repoints_devices() {
             records: &[(0, format)],
             keep_variations: true,
         },
+        &Diag::NONE,
     );
     // Copies land at 18 (inner 1) and 24 (inner 2); offsets from 4.
     assert_eq!(out.len(), 30);
@@ -275,6 +280,7 @@ fn relocate_value_records_walks_every_record_of_a_group() {
             records: &[(0, vf1), (4, vf2)],
             keep_variations: true,
         },
+        &Diag::NONE,
     );
     assert_eq!(u16_at(&out, 4), 8);
     assert_eq!(u16_at(&out, 6), 14);
@@ -299,6 +305,7 @@ fn relocate_value_records_clears_unusable_and_overflowing_slots() {
             records: &[(0, format)],
             keep_variations: true,
         },
+        &Diag::NONE,
     );
     assert_eq!(u16_at(&out, 0), 4);
     assert_eq!(u16_at(&out, 2), 0);
@@ -318,7 +325,102 @@ fn relocate_value_records_clears_unusable_and_overflowing_slots() {
             records: &[(0, format)],
             keep_variations: true,
         },
+        &Diag::NONE,
     );
     assert_eq!(u16_at(&far, 0), 0);
     assert!(!fits, "the overflow is reported");
+}
+
+/// `(offset, context)` of every warning `run` raises against `parent`.
+fn warned(parent: &[u8], run: impl FnOnce(&Diag<'_>)) -> Vec<(usize, &'static str)> {
+    let sink = Warnings::default();
+    run(&Diag::new(&sink).for_table(*b"GPOS", parent));
+    sink.into_sorted()
+        .iter()
+        .map(|w| (w.offset, w.context))
+        .collect()
+}
+
+#[test]
+fn read_device_locates_each_fault_from_the_parent() {
+    let offset_of = |parent: &[u8], at: usize| match read_device(parent, at) {
+        Err(Error::Truncated { offset, .. } | Error::Malformed { offset, .. }) => offset,
+        other => panic!("expected an error, got {other:?}"),
+    };
+    let vi = at_offset(2, &variation_index(0, 0));
+    assert_eq!(read_device(&vi, 0), Ok(None), "a null offset is no table");
+    assert_eq!(offset_of(&vi, 64), 64, "past the end");
+    assert_eq!(offset_of(&vi[..6], 2), 6, "header cut short");
+    let parent = at_offset(2, &device(9, 9, 7, 1));
+    assert_eq!(offset_of(&parent, 2), 6, "undefined deltaFormat");
+    let parent = at_offset(2, &device(12, 9, 1, 1));
+    assert_eq!(offset_of(&parent, 2), 4, "endSize below startSize");
+    let parent = at_offset(2, &device(1, 9, 1, 1));
+    assert_eq!(offset_of(&parent, 2), 8, "deltaValues cut short");
+}
+
+#[test]
+fn unusable_devices_and_anchors_are_reported() {
+    // An anchor whose y device has an undefined delta format: the slot
+    // is cleared and the table reported where its format sits.
+    let mut anchor = anchor3(0, 10);
+    anchor.extend_from_slice(&device(1, 1, 7, 1));
+    let parent = at_offset(2, &anchor);
+    let found = warned(&parent, |diag| {
+        assert_eq!(u16_at(&copy_anchor(&parent, 2, true, diag), 8), 0);
+    });
+    assert_eq!(found, [(16, "unknown Device deltaFormat")]);
+
+    // Anchors that cannot be copied at all.
+    let unknown = at_offset(2, &[0, 9, 0, 1, 0, 1]);
+    let found = warned(&unknown, |diag| {
+        assert!(copy_anchor(&unknown, 2, true, diag).is_empty());
+    });
+    assert_eq!(found, [(2, "unknown Anchor format")]);
+    let cut = at_offset(2, &anchor3(0, 0)[..7]);
+    let found = warned(&cut, |diag| {
+        assert!(copy_anchor(&cut, 2, true, diag).is_empty());
+        assert!(copy_anchor(&cut, 40, true, diag).is_empty());
+    });
+    assert_eq!(
+        found,
+        [
+            (2, "Anchor table truncated"),
+            (40, "Anchor offset past the end")
+        ]
+    );
+}
+
+#[test]
+fn unusable_value_record_devices_are_reported() {
+    // One record (xAdvance + xAdvDevice) whose device offset runs past
+    // the source parent.
+    let mut src = Vec::new();
+    for v in [0u16, 40] {
+        src.extend_from_slice(&v.to_be_bytes());
+    }
+    let mut out = src.clone();
+    let found = warned(&src, |diag| {
+        relocate_value_records(
+            &mut out,
+            0,
+            &src,
+            &RecordRun {
+                first: 0,
+                count: 1,
+                stride: 4,
+                records: &[(0, 0x0044)],
+                keep_variations: true,
+            },
+            diag,
+        );
+    });
+    assert_eq!(u16_at(&out, 2), 0, "the slot is cleared");
+    assert_eq!(
+        found,
+        [(
+            40,
+            "Device or VariationIndex offset past the end of its parent"
+        )]
+    );
 }

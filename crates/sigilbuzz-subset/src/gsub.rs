@@ -62,13 +62,18 @@ use sigilbuzz::tables::gsub::lookup_type as gsub_type;
 
 use crate::coverage::emit_coverage_from_pairs;
 use crate::device::Dedup;
-use crate::layout::{parse_coverage_glyphs, RewriterCtx, RewrittenLookup, RewrittenSubtable};
+use crate::layout::{
+    extension_target, has_null_class_def, parse_coverage_glyphs, RewriterCtx, RewrittenLookup,
+    RewrittenSubtable,
+};
+use crate::warnings::error_context;
 use crate::SubsetError;
 
 /// Rewrites a single GSUB lookup. Returns `None` if the lookup has no
 /// surviving subtables after rewriting (drop cascade will remove the
 /// lookup), and an error when a rebuilt subtable outgrows its 16-bit
-/// offsets (see [`crate::offset16`]).
+/// offsets (see [`crate::offset16`]). A subtable left out because it
+/// cannot be read is reported through `ctx.diag`.
 pub(crate) fn rewrite_lookup(
     ctx: &RewriterCtx,
     lookup_type: u16,
@@ -82,6 +87,9 @@ pub(crate) fn rewrite_lookup(
         let rewritten = rewrite_subtable(ctx, lookup_type, sub_bytes);
         ctx.offsets
             .check(overflow_context(lookup_type, sub_bytes))?;
+        if rewritten.is_none() {
+            report_unreadable(ctx, lookup_type, sub_bytes);
+        }
         rewritten_subs.extend(rewritten);
     }
 
@@ -95,6 +103,49 @@ pub(crate) fn rewrite_lookup(
         mark_filtering_set,
         subtables: rewritten_subs,
     }))
+}
+
+/// Reports a subtable the rewrite left out when the shaper's own parser
+/// rejects it as well: it went for being malformed, or for a lookup
+/// type no shaper applies, not for losing every glyph. The parser
+/// measures nested errors from the nested table, so the warning sits
+/// at the start of the subtable, with the parser's reason.
+fn report_unreadable(ctx: &RewriterCtx, lookup_type: u16, sub: &[u8]) {
+    if let Err(e) = parse_subtable(lookup_type, sub) {
+        ctx.diag
+            .in_part(sub, 0, error_context(&e), "a lookup subtable");
+    }
+}
+
+/// Parses `sub`, a subtable of a lookup of `lookup_type`, with the
+/// shaper's parser, looking through an Extension wrapper.
+fn parse_subtable(lookup_type: u16, sub: &[u8]) -> Result<(), sigilbuzz::Error> {
+    use sigilbuzz::tables::gsub as parser;
+    match lookup_type {
+        gsub_type::CONTEXT | gsub_type::CHAINED_CONTEXT
+            if has_null_class_def(sub, lookup_type == gsub_type::CHAINED_CONTEXT) =>
+        {
+            Ok(())
+        }
+        gsub_type::SINGLE => parser::Single::parse(sub).map(drop),
+        gsub_type::MULTIPLE => parser::Multiple::parse(sub).map(drop),
+        gsub_type::ALTERNATE => parser::Alternate::parse(sub).map(drop),
+        gsub_type::LIGATURE => parser::Ligature::parse(sub).map(drop),
+        gsub_type::CONTEXT => parser::Context::parse(sub).map(drop),
+        gsub_type::CHAINED_CONTEXT => parser::ChainContextAny::parse(sub).map(drop),
+        gsub_type::REVERSE_CHAINED => parser::ReverseChain::parse(sub).map(drop),
+        gsub_type::EXTENSION => match extension_target(sub)? {
+            (gsub_type::EXTENSION, _) => Err(sigilbuzz::Error::Malformed {
+                offset: 2,
+                context: "Extension subtable wraps another Extension",
+            }),
+            (inner_type, inner) => parse_subtable(inner_type, inner),
+        },
+        _ => Err(sigilbuzz::Error::Malformed {
+            offset: 0,
+            context: "unknown GSUB lookup type",
+        }),
+    }
 }
 
 /// Names the subtable type an Offset16 overflow is reported against,
@@ -182,6 +233,12 @@ fn rewrite_single(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
             let count = u16::from_be_bytes([sub[4], sub[5]]) as usize;
             if count != covered.len() {
                 // Malformed: spec requires they match. Skip.
+                ctx.diag.in_part(
+                    sub,
+                    4,
+                    "SingleSubst format 2 glyphCount differs from its Coverage",
+                    "a lookup subtable",
+                );
                 return None;
             }
             let need = 6 + count * 2;
@@ -586,6 +643,14 @@ fn rewrite_type4(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     // Spec requires Coverage entry count == ligatureSetCount; tolerate
     // a malformed source by capping at the smaller of the two.
     let pair_count = first_components.len().min(set_count);
+    if first_components.len() > set_count {
+        ctx.diag.in_part(
+            sub,
+            4,
+            "LigatureSubst Coverage lists more glyphs than ligatureSetCount",
+            "the ligatures of the extra glyphs",
+        );
+    }
 
     let map = ctx.gid_map;
     // (new_first_gid, encoded_ligature_set_bytes) for every surviving
@@ -1994,6 +2059,12 @@ fn rewrite_type8(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     if covered.len() != glyph_count {
         // Spec requires they match; tolerate mismatch by capping at the
         // smaller of the two on read but treat as malformed for emission.
+        ctx.diag.in_part(
+            sub,
+            p - 2,
+            "ReverseChainSingleSubst glyphCount differs from its Coverage",
+            "a lookup subtable",
+        );
         return None;
     }
 
