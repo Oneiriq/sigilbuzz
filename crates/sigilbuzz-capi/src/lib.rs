@@ -762,8 +762,34 @@ pub unsafe extern "C" fn hb_face_get_upem(face: *mut hb_face_t) -> c_uint {
 // Font
 // ---------------------------------------------------------------------------
 
+/// The face's units per em, or 1000 when the face has no readable
+/// `head` table (the empty face, for one). HarfBuzz falls back to the
+/// same value.
+fn face_upem(face_inner: &FaceInner) -> i32 {
+    face_inner
+        .face
+        .head()
+        .map_or(1000, |h| i32::from(h.units_per_em))
+}
+
+/// HarfBuzz's 16.16 multiplier from design units to a font scale:
+/// `scale * 65536 / upem`, truncated toward zero.
+fn em_mult(scale: i32, upem: i32) -> i64 {
+    i64::from(scale) * 65536 / i64::from(upem.max(1))
+}
+
+/// Scales a design-unit value by a multiplier from [`em_mult`] and
+/// rounds half up, the same arithmetic as HarfBuzz's `em_mult`. The
+/// result saturates at the `hb_position_t` range.
+fn em_scale(v: i32, mult: i64) -> hb_position_t {
+    let scaled = (i128::from(v) * i128::from(mult) + 32768) >> 16;
+    scaled.clamp(i128::from(i32::MIN), i128::from(i32::MAX)) as hb_position_t
+}
+
 /// Internal: build the FontState's Font from coords and size.
 /// sigilbuzz's `Font` carries a single size, so `x_scale` feeds it.
+/// The shaper emits design units whatever the size, so `hb_shape_full`
+/// applies the scale to its output.
 ///
 /// # Safety
 /// `coords` must stay alive and in place for as long as the returned
@@ -800,16 +826,8 @@ pub unsafe extern "C" fn hb_font_create(face: *mut hb_face_t) -> *mut hb_font_t 
         unsafe { (*face).inner.clone() }
     };
     // Default x_scale / y_scale follow HarfBuzz: they default to
-    // upem so an unscaled font produces design-unit output. A face
-    // without a readable `head` table, such as the empty face, gets
-    // 1000.
-    let upem_signed = i32::from(
-        face_inner
-            .face
-            .head()
-            .map(|h| h.units_per_em)
-            .unwrap_or(1000),
-    );
+    // upem so an unscaled font produces design-unit output.
+    let upem_signed = face_upem(&face_inner);
     // SAFETY: an empty coords slice is never borrowed by the font.
     let font = unsafe { build_font(&face_inner, upem_signed, &[]) };
     let state = FontState {
@@ -853,6 +871,16 @@ pub unsafe extern "C" fn hb_font_reference(font: *mut hb_font_t) -> *mut hb_font
     Box::into_raw(Box::new(hb_font_t { inner }))
 }
 
+/// Sets the scale `hb_shape` reports positions in. A value of `upem`
+/// (the default) gives design units. `x_scale` scales horizontal
+/// advances and offsets, and `y_scale` scales vertical ones, as in
+/// HarfBuzz.
+///
+/// HarfBuzz scales each advance and each positioning adjustment
+/// before it adds them. sigilbuzz shapes in design units and scales
+/// the sums, so at a scale that is not a whole multiple of the upem a
+/// position can differ from HarfBuzz's by rounding.
+///
 /// # Safety
 /// `font` must be null or valid.
 #[no_mangle]
@@ -1381,6 +1409,12 @@ pub unsafe extern "C" fn hb_shape_full(
         }
     };
 
+    // The shaper works in design units. Scale to the font's
+    // `hb_font_set_scale` values, as HarfBuzz reports positions.
+    let upem = face_upem(&font_inner.face);
+    let x_mult = em_mult(font_state.x_scale, upem);
+    let y_mult = em_mult(font_state.y_scale, upem);
+
     // Project sigilbuzz Glyph stream into HarfBuzz's
     // (info, position) split.
     let mut infos = Vec::with_capacity(shaped.glyphs.len());
@@ -1394,10 +1428,10 @@ pub unsafe extern "C" fn hb_shape_full(
             var2: 0,
         });
         positions.push(hb_glyph_position_t {
-            x_advance: g.x_advance,
-            y_advance: g.y_advance,
-            x_offset: g.x_offset,
-            y_offset: g.y_offset,
+            x_advance: em_scale(g.x_advance, x_mult),
+            y_advance: em_scale(g.y_advance, y_mult),
+            x_offset: em_scale(g.x_offset, x_mult),
+            y_offset: em_scale(g.y_offset, y_mult),
             var: 0,
         });
     }
