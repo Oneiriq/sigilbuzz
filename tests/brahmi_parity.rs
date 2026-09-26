@@ -80,6 +80,12 @@ const CORPUS: &[Case] = &[
     },
 ];
 
+/// Cases whose y advances and offsets are not compared: sigilbuzz
+/// shapes a mixed run's Brahmi segment under `brah` and attaches the
+/// sign there, while HarfBuzz shapes the whole buffer under the Latin
+/// script, whose lookups leave it unattached.
+const GLYPHS_AND_ADVANCES_ONLY: &[&str] = &["mixed latin + brahmi"];
+
 #[test]
 fn brahmi_corpus_matches_rustybuzz() {
     let blob = Blob::new(NOTO_BRAHMI);
@@ -128,6 +134,16 @@ fn brahmi_corpus_matches_rustybuzz() {
                 sig_g.x_advance, rb_pos.x_advance,
                 "x_advance mismatch at position {i} of {} ({:?}): sigilbuzz={} rustybuzz={}",
                 case.note, case.text, sig_g.x_advance, rb_pos.x_advance
+            );
+            if GLYPHS_AND_ADVANCES_ONLY.contains(&case.note) {
+                continue;
+            }
+            assert_eq!(
+                (sig_g.y_advance, sig_g.x_offset, sig_g.y_offset),
+                (rb_pos.y_advance, rb_pos.x_offset, rb_pos.y_offset),
+                "(y_advance, x_offset, y_offset) mismatch at position {i} of {} ({:?})",
+                case.note,
+                case.text
             );
         }
     }

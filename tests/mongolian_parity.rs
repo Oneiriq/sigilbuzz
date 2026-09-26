@@ -159,6 +159,13 @@ fn mongolian_corpus_matches_rustybuzz() {
                 "x_advance mismatch at position {i} of {} ({:?}): sigilbuzz={} rustybuzz={}",
                 case.note, case.text, sig_g.x_advance, rb_pos.x_advance
             );
+            assert_eq!(
+                (sig_g.y_advance, sig_g.x_offset, sig_g.y_offset),
+                (rb_pos.y_advance, rb_pos.x_offset, rb_pos.y_offset),
+                "(y_advance, x_offset, y_offset) mismatch at position {i} of {} ({:?})",
+                case.note,
+                case.text
+            );
         }
     }
 }
@@ -212,6 +219,13 @@ fn multiletter_chains_match_rustybuzz() {
                 sig_g.x_advance, rb_pos.x_advance,
                 "x_advance mismatch at position {i} of {} ({:?}): sigilbuzz={} rustybuzz={}",
                 case.note, case.text, sig_g.x_advance, rb_pos.x_advance
+            );
+            assert_eq!(
+                (sig_g.y_advance, sig_g.x_offset, sig_g.y_offset),
+                (rb_pos.y_advance, rb_pos.x_offset, rb_pos.y_offset),
+                "(y_advance, x_offset, y_offset) mismatch at position {i} of {} ({:?})",
+                case.note,
+                case.text
             );
         }
     }

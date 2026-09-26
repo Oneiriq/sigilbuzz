@@ -121,17 +121,6 @@ impl<'a> AttachSubtable<'a> {
             _ => None,
         }
     }
-
-    /// True for the lookup types this module handles.
-    pub(super) const fn handles(lookup_type: u16) -> bool {
-        matches!(
-            lookup_type,
-            gpos_lt::CURSIVE_ATTACHMENT
-                | gpos_lt::MARK_TO_BASE
-                | gpos_lt::MARK_TO_LIGATURE
-                | gpos_lt::MARK_TO_MARK
-        )
-    }
 }
 
 /// Fresh attachment slots for a run of `len` glyphs.
@@ -142,7 +131,9 @@ pub(super) fn new_slots(len: usize) -> Vec<Slot> {
 /// Applies one attachment lookup across `glyphs`, HarfBuzz style: the
 /// run is walked position by position, and at each position the
 /// lookup's subtables are tried in order until one attaches. Glyphs
-/// the lookup flags skip are left alone.
+/// the lookup flags skip are left alone. The shaper walks lookups in
+/// `gpos`; this standalone walker drives the unit tests.
+#[cfg(test)]
 pub(super) fn apply_lookup(
     subtables: &[AttachSubtable<'_>],
     glyphs: &mut [Glyph],

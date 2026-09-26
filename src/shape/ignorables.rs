@@ -62,7 +62,9 @@ fn is_hidden(glyph: &Glyph) -> bool {
 
 /// `hb_ot_zero_width_default_ignorables`: zeroes the advances of every
 /// hidden glyph, and its offset along the line. Runs after all
-/// positioning and before attachment offsets are resolved.
+/// positioning and before attachment offsets are resolved. (Current
+/// HarfBuzz keeps the cross-stream offset; the older rustybuzz 0.20
+/// port still zeroes it.)
 pub(super) fn zero_width(glyphs: &mut [Glyph], vertical: bool) {
     for glyph in glyphs.iter_mut().filter(|g| is_hidden(g)) {
         glyph.x_advance = 0;
