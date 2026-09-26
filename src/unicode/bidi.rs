@@ -1,24 +1,34 @@
 //! UAX #9 Unicode Bidirectional Algorithm.
 //!
-//! 0.1.0 shipped only the paragraph-direction first-strong rule (P2 /
-//! P3). 0.10.0 fills in the rest:
-//!
-//! - **P1-P3**: paragraph-direction (already shipped, kept).
+//! - **P2-P3**: paragraph direction from the first strong character,
+//!   skipping isolates.
 //! - **X1-X10**: explicit-embedding / override / isolate stack.
 //! - **W1-W7**: weak-type resolution.
-//! - **N1-N2**: neutral resolution. (N0 paired-bracket handling
-//!   is intentionally deferred. See module note below.)
+//! - **N0-N2**: paired brackets, then neutral resolution.
 //! - **I1-I2**: implicit-level resolution.
-//! - **L1-L4**: post-resolve normalization + reorder (rule L2).
+//! - **L1**: whitespace and separator levels, with the whole text as
+//!   one line.
+//! - **L2**: [`BidiInfo::reorder`].
 //!
 //! The algorithm is implemented as a sequence of array-mutation
 //! passes against a single working buffer of (`BidiClass`, `level`)
 //! pairs, mirroring the reference implementation. Output is exposed
 //! through [`BidiInfo`].
 //!
+//! The text is one paragraph: rule P1 (splitting at paragraph
+//! separators) is left to the caller.
+//!
+//! ## Characters X9 removes
+//!
+//! UAX #9 section 5.2 keeps the characters rule X9 removes (the
+//! embedding and override controls and the boundary neutrals, which
+//! include ZWJ and ZWNJ) instead of deleting them. The algorithm skips
+//! them, then gives each one the level of the character before it, so a
+//! ZWNJ inside a Persian word stays in that word's run.
+//!
 //! ## N0 paired-bracket handling
 //!
-//! UAX #9 §3.3.5: paired-bracket pass. After W1-W7 resolve the weak
+//! UAX #9 section 3.3.5: paired-bracket pass. After W1-W7 resolve the weak
 //! types but before N1 / N2 sweep neutrals, brackets that pair across
 //! the isolating-run sequence get a strong type assigned according to
 //! the surrounding embedding context. The pair codepoint table lives
@@ -36,16 +46,9 @@
 //! exposes:
 //!
 //! - [`BidiInfo::paragraph_direction`]: resolved paragraph direction.
-//! - [`BidiInfo::levels`]: per-character embedding level (L1-L4
-//!   normalized).
+//! - [`BidiInfo::levels`]: per-character embedding level (after L1).
 //! - [`BidiInfo::reorder`]: visual-order character-index permutation
 //!   (rule L2).
-//!
-//! Buffer integration uses [`crate::buffer::Buffer::set_text_bidi`],
-//! which auto-runs the bidi pipeline before shaping. The plain
-//! [`crate::buffer::Buffer::set_text`] is left untouched for backward
-//! compat with 0.1.0 consumers (oniq, demos) that handle direction
-//! themselves.
 
 mod explicit;
 mod neutral;
@@ -55,7 +58,7 @@ mod weak;
 use alloc::vec::Vec;
 
 use explicit::{build_isolating_sequences, explicit_levels};
-use reorder::apply_l1;
+use reorder::{apply_l1, assign_removed_levels, reorder_visual};
 use weak::resolve_sequence;
 
 use crate::buffer::Direction;
@@ -151,6 +154,9 @@ impl BidiInfo {
             Direction::Rtl => 1,
             _ => 0,
         };
+        // L1 and the removed-character pass read the classes before
+        // X1-X10 and W1-W7 rewrite them.
+        let original: Vec<BidiClass> = cells.iter().map(|c| c.cls).collect();
 
         // X1-X10: explicit-level resolution.
         explicit_levels(&mut cells, para_level);
@@ -162,9 +168,12 @@ impl BidiInfo {
             resolve_sequence(&mut cells, &chars, &seq, para_level);
         }
 
+        // The characters X9 removed follow the character before them.
+        assign_removed_levels(&mut cells, &original, para_level);
+
         // L1: reset trailing whitespace, segment separators, and
         // paragraph separators back to the paragraph level.
-        apply_l1(&mut cells, para_level, text);
+        apply_l1(&mut cells, &original, para_level);
 
         let levels: Vec<u8> = cells.iter().map(|c| c.level).collect();
         BidiInfo {
@@ -196,47 +205,11 @@ impl BidiInfo {
     /// L2). Indices are into the original character sequence
     /// (`text.chars().nth(i)`); the returned `Vec` always has
     /// length [`Self::char_count`].
+    ///
+    /// The whole text is treated as one line.
     #[must_use]
     pub fn reorder(&self) -> Vec<usize> {
-        let n = self.char_count;
-        let mut order: Vec<usize> = (0..n).collect();
-        if n <= 1 {
-            return order;
-        }
-        // L2: from the highest level down to the lowest odd level,
-        // reverse the contiguous span at or above that level.
-        let max_level = self.levels.iter().copied().max().unwrap_or(0);
-        let min_level = self.levels.iter().copied().min().unwrap_or(0);
-        // Lowest odd level: anything below it is purely-LTR and
-        // never gets reversed.
-        let lowest_odd = if min_level % 2 == 1 {
-            min_level
-        } else {
-            min_level + 1
-        };
-        let mut level = max_level;
-        while level >= lowest_odd {
-            // Walk through and reverse every contiguous run whose
-            // level is >= `level`.
-            let mut i = 0;
-            while i < n {
-                if self.levels[i] >= level {
-                    let mut j = i;
-                    while j < n && self.levels[j] >= level {
-                        j += 1;
-                    }
-                    order[i..j].reverse();
-                    i = j;
-                } else {
-                    i += 1;
-                }
-            }
-            if level == 0 {
-                break;
-            }
-            level -= 1;
-        }
-        order
+        reorder_visual(&self.levels)
     }
 }
 

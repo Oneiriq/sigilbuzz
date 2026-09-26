@@ -5,6 +5,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use super::reorder::is_x9_removed;
 use super::{BidiCell, BidiClass};
 
 /// Maximum embedding depth permitted by UAX #9 (BD2).
@@ -265,20 +266,6 @@ pub(super) struct IsolatingSequence {
     pub(super) sos: BidiClass,
     /// `eos` (end-of-sequence) directional class: L or R.
     pub(super) eos: BidiClass,
-}
-
-/// Returns true when `cls` is one of the categories that X9 removes
-/// (RLE / LRE / RLO / LRO / PDF / BN).
-fn is_x9_removed(cls: BidiClass) -> bool {
-    matches!(
-        cls,
-        BidiClass::Rle
-            | BidiClass::Lre
-            | BidiClass::Rlo
-            | BidiClass::Lro
-            | BidiClass::Pdf
-            | BidiClass::Bn
-    )
 }
 
 fn build_level_runs(cells: &[BidiCell]) -> Vec<LevelRun> {
