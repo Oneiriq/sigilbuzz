@@ -292,6 +292,10 @@ pub fn wrap_woff1_with_options(sfnt_bytes: &[u8], opts: WrapWoff1Options) -> Res
     // exceed the input size.
     let mut raw_tables = Vec::with_capacity(num_tables);
     let mut padded_total = header_size as u64;
+    // totalSfntSize: the SFNT header and directory plus every table
+    // padded to four bytes, the size of the font this file unwraps
+    // to. It is below `padded_total`, so it fits u32 once that does.
+    let mut sfnt_total: u64 = 12 + 16 * num_tables as u64;
     for _ in 0..num_tables {
         let record_offset = r.position();
         let tag = r.read_tag("SFNT table tag")?;
@@ -312,6 +316,7 @@ pub fn wrap_woff1_with_options(sfnt_bytes: &[u8], opts: WrapWoff1Options) -> Res
                 context: "SFNT table extends past end of input",
             })?;
         padded_total += pad4_u64(u64::from(length));
+        sfnt_total += pad4_u64(u64::from(length));
         if padded_total > u64::from(u32::MAX) {
             return Err(WoffError::Malformed {
                 offset: record_offset,
@@ -362,8 +367,7 @@ pub fn wrap_woff1_with_options(sfnt_bytes: &[u8], opts: WrapWoff1Options) -> Res
         return Err(too_large);
     };
 
-    // totalSfntSize is approximated by the input length.
-    let total_sfnt_size = u32::try_from(sfnt_bytes.len()).unwrap_or(u32::MAX);
+    let total_sfnt_size = u32::try_from(sfnt_total).unwrap_or(u32::MAX);
 
     let mut woff = Vec::with_capacity(total_length);
     woff.extend_from_slice(&WOFF1_SIGNATURE.to_be_bytes());
