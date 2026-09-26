@@ -501,14 +501,16 @@ fn push_layout_and_variation_tables(
     // VARC: re-emit when the source carries the table. Coverage
     // entries renumber per the new gid map and component records
     // are rewritten to point at the new gid namespace; the
-    // MultiVarStore is pruned to the entries the kept records use.
-    if let Some(varc) = face.varc()? {
+    // MultiVarStore is pruned to the entries the kept records use. The
+    // core parse only validates the table: `subset_varc` walks the raw
+    // bytes itself.
+    if face.varc()?.is_some() {
         let varc_bytes = face.table_bytes(tag::VARC).map_err(SubsetError::from)?;
         let lookup = |old: GlyphId| -> Option<GlyphId> {
             let i = gid_map.binary_search_by_key(&old, |(o, _)| *o).ok()?;
             gid_map.get(i).map(|&(_, new)| new)
         };
-        if let Some(b) = varc::subset_varc(&varc, varc_bytes, kept, &lookup)? {
+        if let Some(b) = varc::subset_varc(varc_bytes, kept, &lookup)? {
             tables.push((tag::VARC, b));
         }
     }

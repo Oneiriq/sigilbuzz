@@ -31,7 +31,6 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::tag;
-use sigilbuzz::tables::Varc;
 use sigilbuzz::Face;
 
 use crate::util::{WorkBudget, WORK_LIMIT};
@@ -140,12 +139,10 @@ pub(crate) fn varc_closure_bitset(face: &Face<'_>, keep: &mut [bool], budget: &W
 /// the same record. Only the first such entry survives, so the output
 /// never holds more records than the source.
 pub(crate) fn subset_varc(
-    src_varc: &Varc<'_>,
     src_bytes: &[u8],
     kept_gids: &[GlyphId],
     new_gid_for: &dyn Fn(GlyphId) -> Option<GlyphId>,
 ) -> Result<Option<Vec<u8>>, SubsetError> {
-    let _ = src_varc; // signature compatibility: we re-parse the raw bytes
     let parsed = ParsedVarc::parse(src_bytes)
         .map_err(|_| SubsetError::Unsupported("VARC malformed during subset"))?;
 
@@ -1724,10 +1721,9 @@ mod tests {
         // Coverage covers gid 5 only; kept set has only gid 2 -> drop.
         let rec = build_translate_record(7, 0, 0);
         let bytes = build_varc(&[5], &[&rec]);
-        let varc = sigilbuzz::tables::Varc::parse(&bytes).unwrap();
         let map = |g: u16| Some(g);
         let kept = vec![2u16];
-        let out = subset_varc(&varc, &bytes, &kept, &map).unwrap();
+        let out = subset_varc(&bytes, &kept, &map).unwrap();
         assert!(out.is_none());
     }
 
@@ -1735,7 +1731,6 @@ mod tests {
     fn subset_keeps_table_with_renumbered_coverage() {
         let rec = build_translate_record(7, 10, 20);
         let bytes = build_varc(&[5], &[&rec]);
-        let varc = sigilbuzz::tables::Varc::parse(&bytes).unwrap();
         // Map old gid 5 -> new gid 1, old gid 7 (component) -> new gid 2.
         let map = |g: u16| match g {
             5 => Some(1),
@@ -1743,7 +1738,7 @@ mod tests {
             _ => None,
         };
         let kept = vec![5u16, 7];
-        let out = subset_varc(&varc, &bytes, &kept, &map).unwrap().unwrap();
+        let out = subset_varc(&bytes, &kept, &map).unwrap().unwrap();
         // Re-parse the output and verify it still passes the parser.
         let new_varc = sigilbuzz::tables::Varc::parse(&out).unwrap();
         assert!(new_varc.covers(1));
@@ -1899,11 +1894,8 @@ mod tests {
         let cov_off = bytes.len() as u32;
         bytes[4..8].copy_from_slice(&cov_off.to_be_bytes());
         bytes.extend_from_slice(&cov);
-        let varc = sigilbuzz::tables::Varc::parse(&bytes).unwrap();
         let map = |g: u16| Some(g);
-        let out = subset_varc(&varc, &bytes, &[5, 6, 7], &map)
-            .unwrap()
-            .unwrap();
+        let out = subset_varc(&bytes, &[5, 6, 7], &map).unwrap().unwrap();
         let new_varc = sigilbuzz::tables::Varc::parse(&out).unwrap();
         assert_eq!(new_varc.glyph_record_count(), 1);
         assert!(new_varc.covers(5));
