@@ -130,8 +130,8 @@ pub use fvar::{Fvar, VariationAxis};
 pub use gdef::{Gdef, GlyphClass};
 pub use glyf::{Glyf, GlyphBounds};
 pub use gpos::{
-    Anchor, Gpos, MarkAttachment, MarkBasePos, MarkLigaPos, MarkMarkPos, PairPos, SinglePos,
-    ValueRecord,
+    Anchor, CursivePos, Gpos, MarkAttachment, MarkBasePos, MarkLigaPos, MarkMarkPos, PairPos,
+    SinglePos, ValueRecord,
 };
 pub use gsub::{Alternate, ChainContext, Gsub, Ligature, Multiple, Single};
 pub use gvar::{Gvar, PointDelta};

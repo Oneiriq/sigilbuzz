@@ -327,8 +327,8 @@ mod tests {
         );
         let mmp = MarkMarkPos::parse(&bytes).unwrap();
         let attach = mmp.attach(30, 20).unwrap();
-        assert_eq!(attach.mark_anchor, Anchor { x: 5, y: 0 });
-        assert_eq!(attach.base_anchor, Anchor { x: 5, y: 800 });
+        assert_eq!((attach.mark_anchor.x, attach.mark_anchor.y), (5, 0));
+        assert_eq!((attach.base_anchor.x, attach.base_anchor.y), (5, 800));
     }
 
     #[test]

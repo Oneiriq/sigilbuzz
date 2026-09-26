@@ -368,8 +368,8 @@ mod tests {
         );
         let mbp = MarkBasePos::parse(&bytes).unwrap();
         let attach = mbp.attach(20, 5).unwrap();
-        assert_eq!(attach.mark_anchor, Anchor { x: 10, y: 0 });
-        assert_eq!(attach.base_anchor, Anchor { x: 250, y: 500 });
+        assert_eq!((attach.mark_anchor.x, attach.mark_anchor.y), (10, 0));
+        assert_eq!((attach.base_anchor.x, attach.base_anchor.y), (250, 500));
     }
 
     #[test]

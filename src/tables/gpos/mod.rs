@@ -19,6 +19,7 @@ use crate::tables::parse::Reader;
 pub mod anchor;
 pub mod chain_context;
 pub mod context;
+pub mod cursive;
 pub mod mark_base;
 pub mod mark_liga;
 pub mod mark_mark;
@@ -29,6 +30,7 @@ pub mod value_record;
 pub use anchor::Anchor;
 pub use chain_context::ChainContextPos;
 pub use context::ContextPos;
+pub use cursive::CursivePos;
 pub use mark_base::{MarkAttachment, MarkBasePos};
 pub use mark_liga::MarkLigaPos;
 pub use mark_mark::MarkMarkPos;
@@ -43,7 +45,7 @@ pub mod lookup_type {
     pub const SINGLE_ADJUSTMENT: u16 = 1;
     /// Pair adjustment: the one sigilbuzz currently implements.
     pub const PAIR_ADJUSTMENT: u16 = 2;
-    /// Cursive attachment. Deferred.
+    /// Cursive attachment: entry/exit anchors joining adjacent glyphs.
     pub const CURSIVE_ATTACHMENT: u16 = 3;
     /// Mark-to-base attachment. Deferred.
     pub const MARK_TO_BASE: u16 = 4;

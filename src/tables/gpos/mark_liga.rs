@@ -383,8 +383,8 @@ mod tests {
         let mlp = MarkLigaPos::parse(&bytes).unwrap();
         let a0 = mlp.attach(30, 50, 0).unwrap();
         let a1 = mlp.attach(30, 50, 1).unwrap();
-        assert_eq!(a0.base_anchor, Anchor { x: 100, y: 600 });
-        assert_eq!(a1.base_anchor, Anchor { x: 400, y: 600 });
+        assert_eq!((a0.base_anchor.x, a0.base_anchor.y), (100, 600));
+        assert_eq!((a1.base_anchor.x, a1.base_anchor.y), (400, 600));
     }
 
     #[test]
