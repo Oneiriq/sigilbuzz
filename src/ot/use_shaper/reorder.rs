@@ -1,11 +1,14 @@
-//! Syllable reordering: the initial pre-base moves and the post-`pref`
-//! medial move, with the cluster merges each move makes.
+//! Syllable reordering: the moves Khmer and Myanmar make before their
+//! features and the pre-base moves the Universal Shaping Engine makes
+//! after its basic features, with the cluster merges each move makes.
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use super::{Syllable, SyllableKind};
-use crate::buffer::{ClusterLevel, Glyph};
+use crate::buffer::{ClusterLevel, Glyph, IndicPosition};
 use crate::shape::merge_clusters;
+use crate::tables::layout::skip_iter::MatchGlyph;
 use crate::unicode::use_category::{use_category, use_position, UseCategory, UsePosition};
 
 /// Initial reorder for one syllable. Moves every pre-base vowel sign
@@ -164,72 +167,105 @@ pub(super) fn initial_reorder(
     glyphs[syl_start..syl_end].copy_from_slice(&rebuilt);
 }
 
-/// Post-`pref` reorder. Walks one syllable and, for any position whose
-/// glyph id changed under the `pref` feature AND whose original
-/// codepoint was a [`UseCategory::CM`] sitting at
-/// [`UsePosition::BelowBase`] (the textbook medial-ra), moves the
-/// substituted glyph to the front of the syllable so it visually sits
-/// before the base. Mirrors rustybuzz's `record_pref` ->
-/// `reorder_syllable_use` pair, but only for the medial-ra case the
-/// 0.8.0 corpus exercises (Cham). Length-preserving.
-pub(super) fn pref_reorder(
-    codepoints: &[char],
+/// Reorder category tag: a halant (`H`).
+const TAG_HALANT: u8 = 1;
+/// Reorder category tag: a pre-base vowel sign or modifier (`VPre`,
+/// `VMPre`), or the glyph `pref` substituted.
+const TAG_PRE_BASE: u8 = 2;
+/// Mask of the reorder category in the tag byte.
+const TAG_CATEGORY: u8 = 0x0F;
+/// Shift of the syllable serial in the tag byte.
+const TAG_SERIAL_SHIFT: u32 = 4;
+
+/// Tags each glyph with its syllable and reorder category, which the
+/// Universal Shaping Engine reads after its basic features. HarfBuzz
+/// keeps both in the glyph info (`syllable()`, `use_category()`), where
+/// a ligature keeps its first component's and a multiple
+/// substitution's outputs their source's; sigilbuzz keeps them in
+/// [`Glyph::indic_position`], which GSUB carries the same way: the
+/// syllable serial (1 to 15, then 1 again, so neighbors always differ)
+/// in the high nibble, the category in the low one. Returns `false`,
+/// tagging nothing, unless glyphs and code points are one to one.
+pub(super) fn tag_syllables(
     glyphs: &mut [Glyph],
-    syllable: &Syllable,
-    pre_ids: &[u32],
-    level: ClusterLevel,
-) {
-    if !matches!(syllable.kind, SyllableKind::Consonant) {
-        return;
+    codepoints: &[char],
+    syllables: &[Syllable],
+) -> bool {
+    if glyphs.len() != codepoints.len() {
+        return false;
     }
-    let Some(base) = syllable.base_index else {
-        return;
-    };
-    if syllable.end > glyphs.len() || syllable.end > codepoints.len() {
-        return;
+    let mut serial = 1u8;
+    for syl in syllables {
+        for i in syl.start..syl.end.min(glyphs.len()) {
+            let ch = codepoints[i];
+            let category = if use_category(ch) == UseCategory::H {
+                TAG_HALANT
+            } else if use_category(ch) == UseCategory::VPre
+                || use_position(ch) == UsePosition::PreBase
+            {
+                TAG_PRE_BASE
+            } else {
+                0
+            };
+            glyphs[i].indic_position = (serial << TAG_SERIAL_SHIFT) | category;
+        }
+        serial = serial % 15 + 1;
     }
+    true
+}
 
-    // Find positions in (base, end) whose glyph id changed under
-    // `pref` and whose original codepoint was a below-base CM.
-    let mut to_move: Vec<usize> = Vec::new();
-    for idx in (base + 1)..syllable.end {
-        if glyphs[idx].glyph_id == pre_ids[idx] {
-            continue;
+/// The glyph range of each syllable: the runs of glyphs sharing a
+/// serial (HarfBuzz's `foreach_syllable`).
+fn syllable_ranges(glyphs: &[Glyph]) -> Vec<Range<usize>> {
+    let serial = |g: &Glyph| g.indic_position >> TAG_SERIAL_SHIFT;
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for i in 1..=glyphs.len() {
+        if i == glyphs.len() || serial(&glyphs[i]) != serial(&glyphs[start]) {
+            ranges.push(start..i);
+            start = i;
         }
-        let ch = codepoints[idx];
-        if use_category(ch) != UseCategory::CM {
-            continue;
-        }
-        if use_position(ch) != UsePosition::BelowBase {
-            continue;
-        }
-        to_move.push(idx);
     }
-    if to_move.is_empty() {
+    ranges
+}
+
+/// HarfBuzz's `record_pref_use`: in each syllable, the first glyph
+/// `pref` substituted becomes a pre-base glyph, given the glyph ids
+/// from before `pref`. Does nothing when `pref` changed the glyph
+/// count, which this comparison cannot follow.
+pub(super) fn record_pref(before: &[u32], glyphs: &mut [Glyph]) {
+    if before.len() != glyphs.len() {
         return;
     }
-
-    let syl_start = syllable.start;
-    let syl_end = syllable.end;
-    // The moved forms share one cluster with what they pass over (at
-    // the monotone levels), as in HarfBuzz's `reorder_syllable_use`.
-    if let Some(&last) = to_move.last() {
-        merge_clusters(glyphs, syl_start, last + 1, level);
-    }
-    let original: Vec<Glyph> = glyphs[syl_start..syl_end].to_vec();
-    let mut rebuilt: Vec<Glyph> = Vec::with_capacity(syl_end - syl_start);
-
-    // 1. Substituted pre-base forms in logical order.
-    for &idx in &to_move {
-        rebuilt.push(original[idx - syl_start]);
-    }
-    // 2. Everything else, in original order.
-    for idx in syl_start..syl_end {
-        if to_move.contains(&idx) {
-            continue;
+    for range in syllable_ranges(glyphs) {
+        if let Some(i) = range.into_iter().find(|&i| glyphs[i].glyph_id != before[i]) {
+            let g = &mut glyphs[i];
+            g.indic_position = (g.indic_position & !TAG_CATEGORY) | TAG_PRE_BASE;
         }
-        rebuilt.push(original[idx - syl_start]);
     }
-    debug_assert_eq!(rebuilt.len(), syl_end - syl_start);
-    glyphs[syl_start..syl_end].copy_from_slice(&rebuilt);
+}
+
+/// The pre-base moves of HarfBuzz's `reorder_syllable_use`, run after
+/// the basic features on glyphs [`tag_syllables`] tagged: in each
+/// syllable, a pre-base glyph moves back to the start of the syllable,
+/// or to just after the last halant before it that did not ligate,
+/// merging the clusters it passes at the monotone `level`s. Only the
+/// first glyph of a multiple substitution moves. Clears the tags.
+pub(super) fn reorder_pre_base(glyphs: &mut [Glyph], level: ClusterLevel) {
+    for range in syllable_ranges(glyphs) {
+        let mut j = range.start;
+        for i in range {
+            let m = MatchGlyph::from(&glyphs[i]);
+            let category = glyphs[i].indic_position & TAG_CATEGORY;
+            if category == TAG_HALANT && !m.is_ligated() {
+                j = i + 1;
+            } else if category == TAG_PRE_BASE && m.lig_comp() == 0 && j < i {
+                merge_clusters(glyphs, j, i + 1, level);
+                glyphs[j..=i].rotate_right(1);
+            }
+        }
+    }
+    for g in glyphs {
+        g.indic_position = IndicPosition::Start as u8;
+    }
 }

@@ -218,7 +218,7 @@ fn feature_lists_are_deterministic() {
         USE_BASIC_FEATURES,
         &[
             b"locl", b"ccmp", b"nukt", b"akhn", b"rphf", b"pref", b"rkrf", b"abvf", b"blwf",
-            b"half", b"pstf", b"vatu", b"cjct", b"isol",
+            b"half", b"pstf", b"vatu", b"cjct",
         ]
     );
     assert_eq!(
@@ -275,4 +275,67 @@ fn every_move_merges_the_span_it_crosses() {
     }
     let got: Vec<u32> = glyphs.iter().map(|g| g.cluster).collect();
     assert_eq!(got, [0, 0, 0, 3]);
+}
+
+fn tagged(text: &str) -> Vec<Glyph> {
+    let cp = cps(text);
+    let mut glyphs = fake_glyphs(cp.len());
+    assert!(reorder::tag_syllables(
+        &mut glyphs,
+        &cp,
+        &segment_syllables(&cp)
+    ));
+    glyphs
+}
+
+fn ids_and_clusters(glyphs: &[Glyph]) -> (Vec<u32>, Vec<u32>) {
+    (
+        glyphs.iter().map(|g| g.glyph_id).collect(),
+        glyphs.iter().map(|g| g.cluster).collect(),
+    )
+}
+
+#[test]
+fn use_reorder_moves_pre_base_signs_by_cluster_level() {
+    // Balinese ka, taling: the vowel sign moves in front of the base,
+    // merging clusters only at the monotone levels.
+    for (level, clusters) in [
+        (ClusterLevel::MonotoneGraphemes, [0, 0]),
+        (ClusterLevel::MonotoneCharacters, [0, 0]),
+        (ClusterLevel::Characters, [1, 0]),
+        (ClusterLevel::Graphemes, [1, 0]),
+    ] {
+        let mut glyphs = tagged("\u{1B13}\u{1B3E}");
+        reorder::reorder_pre_base(&mut glyphs, level);
+        let expected = (vec![2, 1], clusters.to_vec());
+        assert_eq!(ids_and_clusters(&glyphs), expected, "{level:?}");
+        assert!(glyphs.iter().all(|g| g.indic_position == 0));
+    }
+}
+
+#[test]
+fn use_reorder_stops_after_the_last_unligated_halant() {
+    // ka, adeg adeg, ta, taling: the sign moves back only to the halant.
+    let mut glyphs = tagged("\u{1B13}\u{1B44}\u{1B22}\u{1B3E}");
+    reorder::reorder_pre_base(&mut glyphs, ClusterLevel::MonotoneCharacters);
+    let expected = (vec![1, 2, 4, 3], vec![0, 1, 2, 2]);
+    assert_eq!(ids_and_clusters(&glyphs), expected);
+    // A halant that ligated no longer stops it.
+    let mut glyphs = tagged("\u{1B13}\u{1B44}\u{1B22}\u{1B3E}");
+    glyphs[1].unicode_props |= crate::tables::layout::skip_iter::match_prop::LIGATED;
+    reorder::reorder_pre_base(&mut glyphs, ClusterLevel::MonotoneCharacters);
+    let expected = (vec![4, 1, 2, 3], vec![0, 0, 0, 0]);
+    assert_eq!(ids_and_clusters(&glyphs), expected);
+}
+
+#[test]
+fn use_reorder_moves_the_glyph_pref_substituted() {
+    // Cham ka, medial ra: pref substitutes the medial, which then moves
+    // like a pre-base vowel sign (`record_pref_use`).
+    let mut glyphs = tagged("\u{AA06}\u{AA34}");
+    let before: Vec<u32> = glyphs.iter().map(|g| g.glyph_id).collect();
+    glyphs[1].glyph_id = 20;
+    reorder::record_pref(&before, &mut glyphs);
+    reorder::reorder_pre_base(&mut glyphs, ClusterLevel::MonotoneCharacters);
+    assert_eq!(ids_and_clusters(&glyphs), (vec![20, 1], vec![0, 0]));
 }

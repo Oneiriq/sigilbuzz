@@ -271,6 +271,33 @@ fn thai_lao_and_hangul_run_each_default_feature_once() {
 }
 
 #[test]
+fn use_moves_pre_base_vowels_after_the_basic_features() {
+    // HarfBuzz's USE shaper runs the basic features on the logical
+    // order and moves pre-base vowel signs in front of their base only
+    // afterwards. A rule for "ka followed by taling" (Balinese vowel
+    // sign taling is pre-base) only matches before that move.
+    const NOTO_BALINESE: &[u8] = include_bytes!("fonts/NotoSansBalinese-Regular.ttf");
+    let ka = glyph(NOTO_BALINESE, '\u{1B13}');
+    let taling = glyph(NOTO_BALINESE, '\u{1B3E}');
+    for feature in [*b"abvf", *b"blwf", *b"cjct"] {
+        let lookups = [
+            Lookup::Chain {
+                input: ka,
+                lookahead: taling,
+                nested: 1,
+            },
+            Lookup::Single(vec![(ka, ka + 1)]),
+        ];
+        let table = gsub(&[*b"DFLT", *b"bali"], &[(feature, vec![0])], &lookups);
+        let patched = with_table(NOTO_BALINESE, *b"GSUB", &table);
+        let rows = assert_parity(&patched, "\u{1B13}\u{1B3E}", Direction::Ltr);
+        // The vowel sign still ends up in front.
+        assert_eq!(rows[0].0, u32::from(taling), "{feature:?}");
+        assert_eq!(rows[1].0, u32::from(ka) + 1, "{feature:?}");
+    }
+}
+
+#[test]
 fn direction_features_follow_the_requested_direction() {
     // HarfBuzz enables ltra and ltrm for a left-to-right plan and rtla
     // for a right-to-left one, whatever direction the text then shapes

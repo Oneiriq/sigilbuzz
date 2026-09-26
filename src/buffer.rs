@@ -88,10 +88,12 @@ pub struct Glyph {
     /// "was this glyph's source a joiner / default-ignorable / ...?"
     /// without re-deriving from the cluster. See `unicode_prop`.
     pub unicode_props: u16,
-    /// Shaper-internal Indic positional role, set during Indic
-    /// syllable segmentation and consulted by the final-reorder
-    /// pass. Zero (`IndicPosition::Start`) for non-Indic glyphs and
-    /// for Indic glyphs whose role has not been resolved yet.
+    /// Shaper-internal byte of the complex shapers, which share it the
+    /// way HarfBuzz's shapers share their glyph variables: the Indic
+    /// positional role, set during Indic syllable segmentation and
+    /// consulted by the final-reorder pass, or the syllable and reorder
+    /// category the Universal Shaping Engine keeps from its basic
+    /// features to its reorder. Zero (`IndicPosition::Start`) otherwise.
     pub indic_position: u8,
     /// Shaper-internal `char_class` bits of the glyph's source
     /// character, set by normalization and carried through GSUB like
