@@ -77,6 +77,7 @@
 //!   GPOS.
 
 mod attach;
+mod dotted_circle;
 mod ignorables;
 mod required;
 mod rotate;
@@ -944,6 +945,13 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 );
             }
         }
+
+        // Broken syllables get a dotted circle to sit on.
+        let circled = cmap
+            .glyph_id('\u{25CC}')
+            .filter(|_| buffer.insert_dotted_circle())
+            .and_then(|circle| dotted_circle::insert(seg.script, seg_cps, &mut seg_glyphs, circle));
+        let seg_cps = circled.as_deref().unwrap_or(seg_cps);
 
         // Per-script pre-shapers. Each is gated on the segment's
         // resolved script so a Hebrew segment never runs the Indic

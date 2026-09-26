@@ -302,6 +302,28 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
     match first {
         UseCategory::B => scan_consonant_syllable(cps, start),
         UseCategory::IV => scan_vowel_syllable(cps, start),
+        // A generic base that marks attach to (U+25CC DOTTED CIRCLE,
+        // typed or inserted for a broken syllable) anchors a syllable
+        // like a consonant does, as in HarfBuzz's USE grammar.
+        UseCategory::GB
+            if cps
+                .get(start + 1)
+                .is_some_and(|&c| !matches!(use_category(c), UseCategory::B | UseCategory::GB)) =>
+        {
+            let syl = scan_consonant_syllable(cps, start);
+            if syl.end > start + 1 {
+                syl
+            } else {
+                Syllable {
+                    kind: SyllableKind::Symbol,
+                    start,
+                    end: start + 1,
+                    base_index: None,
+                    pre_base_cons_index: None,
+                    kinzi_index: None,
+                }
+            }
+        }
         UseCategory::GB | UseCategory::N | UseCategory::S => {
             // One-wide Symbol syllable. Runs of digits or generic
             // bases are kept as separate syllables so each keeps
