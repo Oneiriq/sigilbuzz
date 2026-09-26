@@ -253,9 +253,7 @@ unsafe fn add_from_c<E: Encoding>(
     if buffer.is_null() || text.is_null() {
         return;
     }
-    let Some(item_length) = ItemLength::from_c(item_length) else {
-        return;
-    };
+    let item_length = ItemLength::from_c(item_length);
     // SAFETY: the caller's contract for `text` and `text_length`.
     let text = unsafe { units(text, text_length) };
     // SAFETY: the caller guarantees `buffer` is live.
@@ -335,13 +333,15 @@ pub(crate) enum ItemLength {
 }
 
 impl ItemLength {
-    /// Interprets the C argument. Negative values other than `-1` are
-    /// rejected (`None`), as in HarfBuzz.
-    pub(crate) fn from_c(raw: core::ffi::c_int) -> Option<Self> {
+    /// Interprets the C argument. HarfBuzz clamps a negative length
+    /// other than `-1` to zero (`hb_clamp (item_length, 0, ...)` in
+    /// `hb_buffer_add_utf`), so such an item adds no text but still
+    /// installs the context around it.
+    pub(crate) fn from_c(raw: core::ffi::c_int) -> Self {
         if raw == -1 {
-            Some(Self::ToEnd)
+            Self::ToEnd
         } else {
-            usize::try_from(raw).ok().map(Self::Units)
+            Self::Units(usize::try_from(raw).unwrap_or(0))
         }
     }
 }
@@ -355,18 +355,16 @@ impl ItemLength {
 /// - The (up to five) characters after the item become the
 ///   post-context, replacing any earlier one.
 ///
-/// An item that starts past the end of `text` adds nothing; one that
-/// runs past it is clamped.
+/// Like HarfBuzz, an item that starts past the end of `text` starts at
+/// its end instead, and one that runs past the end is cut there: such
+/// an item adds no text (or less), but the context is still set.
 pub(crate) fn add<E: Encoding>(
     state: &mut BufferState,
     text: &[E::Unit],
     item_offset: usize,
     item_length: ItemLength,
 ) {
-    let start = item_offset;
-    if start > text.len() {
-        return;
-    }
+    let start = item_offset.min(text.len());
     let end = match item_length {
         ItemLength::ToEnd => text.len(),
         ItemLength::Units(len) => start.saturating_add(len).min(text.len()),

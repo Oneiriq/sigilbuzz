@@ -133,9 +133,7 @@ pub unsafe extern "C" fn hb_buffer_add_utf8(
     // Clusters are byte offsets into `text`, context comes from the
     // bytes around the item, and malformed UTF-8 becomes U+FFFD, all
     // as in HarfBuzz.
-    let Some(item_length) = buffer_text::ItemLength::from_c(item_length) else {
-        return;
-    };
+    let item_length = buffer_text::ItemLength::from_c(item_length);
     buffer_text::add::<buffer_text::Utf8>(
         &mut state,
         total_bytes,
@@ -176,9 +174,7 @@ pub unsafe extern "C" fn hb_buffer_add_utf16(
     let mut state = inner.state.lock();
     // Clusters are UTF-16 code-unit offsets into `text`; lone
     // surrogates become U+FFFD, as in HarfBuzz.
-    let Some(item_length) = buffer_text::ItemLength::from_c(item_length) else {
-        return;
-    };
+    let item_length = buffer_text::ItemLength::from_c(item_length);
     buffer_text::add::<buffer_text::Utf16>(
         &mut state,
         total_units,

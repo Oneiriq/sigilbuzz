@@ -242,7 +242,10 @@ void                      hb_buffer_set_cluster_level(hb_buffer_t               
 hb_buffer_cluster_level_t hb_buffer_get_cluster_level(const hb_buffer_t *buffer);
 
 /* Adds text[item_offset, item_offset + item_length) (item_length -1
- * means to the end). As in HarfBuzz: glyph clusters are offsets into
+ * means to the end; like HarfBuzz, an offset past the end is clamped
+ * to it and any other negative length counts as 0, so such an item
+ * adds no text but still sets the context). As in HarfBuzz: glyph
+ * clusters are offsets into
  * `text` in its own code units (bytes for UTF-8 and Latin-1, 16-bit
  * units for UTF-16, 32-bit units for UTF-32 and code points), up to
  * five characters before the item become the pre-context when the
