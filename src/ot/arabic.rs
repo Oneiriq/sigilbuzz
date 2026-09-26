@@ -82,6 +82,80 @@ impl JoiningForm {
     }
 }
 
+/// The joining types just outside a run: the nearest non-transparent
+/// character before it and after it. HarfBuzz's `arabic_joining`
+/// reads these from the buffer's pre- and post-context so a run that
+/// starts or ends mid-word still gets connected forms. `None` on a
+/// side means nothing is known there, which joins like a non-joining
+/// neighbor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JoiningContext {
+    /// Joining type of the nearest non-transparent character before
+    /// the run.
+    pub before: Option<JoiningType>,
+    /// Joining type of the nearest non-transparent character after
+    /// the run.
+    pub after: Option<JoiningType>,
+}
+
+impl JoiningContext {
+    /// No context on either side.
+    pub const NONE: Self = Self {
+        before: None,
+        after: None,
+    };
+
+    /// Resolves the context from the characters around a run.
+    /// `before` yields the characters preceding the run nearest first
+    /// (that is, in reverse order), `after` the characters following
+    /// it in order. Transparent characters are skipped.
+    pub fn from_chars(
+        before: impl IntoIterator<Item = char>,
+        after: impl IntoIterator<Item = char>,
+    ) -> Self {
+        let first_solid = |chars: &mut dyn Iterator<Item = char>| {
+            chars.map(joining_type).find(|t| *t != JoiningType::T)
+        };
+        Self {
+            before: first_solid(&mut before.into_iter()),
+            after: first_solid(&mut after.into_iter()),
+        }
+    }
+
+    /// Resolves the context from a buffer's pre-context (text before
+    /// the run, in logical order) and post-context (text after it).
+    #[must_use]
+    pub fn from_context(pre_context: &str, post_context: &str) -> Self {
+        Self::from_chars(pre_context.chars().rev(), post_context.chars())
+    }
+
+    /// Resolves the context of `codepoints[range]`: its neighbors
+    /// inside `codepoints` first, then the buffer's pre- and
+    /// post-context beyond the ends of `codepoints`.
+    #[must_use]
+    pub fn around(
+        codepoints: &[char],
+        range: core::ops::Range<usize>,
+        pre_context: &str,
+        post_context: &str,
+    ) -> Self {
+        let before = codepoints
+            .get(..range.start)
+            .unwrap_or(&[])
+            .iter()
+            .rev()
+            .copied()
+            .chain(pre_context.chars().rev());
+        let after = codepoints
+            .get(range.end..)
+            .unwrap_or(&[])
+            .iter()
+            .copied()
+            .chain(post_context.chars());
+        Self::from_chars(before, after)
+    }
+}
+
 /// Assigns a [`JoiningForm`] to every code point in `text`, in
 /// logical (memory) order. The returned vector has one entry per
 /// `char` in `text`, matching the iteration order of `text.chars()`.
@@ -93,9 +167,31 @@ impl JoiningForm {
 /// form, which matches the way OpenType shapers handle mixed runs.
 #[must_use]
 pub fn assign_joining_forms(text: &str) -> Vec<JoiningForm> {
-    let chars: Vec<char> = text.chars().collect();
-    let types: Vec<JoiningType> = chars.iter().map(|&c| joining_type(c)).collect();
-    assign_from_types(&types)
+    assign_joining_forms_in_context(text, JoiningContext::NONE)
+}
+
+/// [`assign_joining_forms`] for a run with known surroundings: the
+/// first and last letters join toward `context` the way they would
+/// join toward a neighbor inside the run.
+///
+/// # Examples
+///
+/// ```
+/// use sigilbuzz::ot::arabic::{assign_joining_forms_in_context, JoiningContext};
+/// use sigilbuzz::JoiningForm;
+///
+/// // A beh preceded by a beh in the source text takes its final form.
+/// let context = JoiningContext::from_context("\u{0628}", "");
+/// assert_eq!(assign_joining_forms_in_context("\u{0628}", context), [JoiningForm::Fina]);
+/// assert_eq!(
+///     assign_joining_forms_in_context("\u{0628}", JoiningContext::NONE),
+///     [JoiningForm::Isol]
+/// );
+/// ```
+#[must_use]
+pub fn assign_joining_forms_in_context(text: &str, context: JoiningContext) -> Vec<JoiningForm> {
+    let types: Vec<JoiningType> = text.chars().map(joining_type).collect();
+    assign_from_types_in_context(&types, context)
 }
 
 /// Core of [`assign_joining_forms`]. Split out so the state machine
@@ -103,17 +199,24 @@ pub fn assign_joining_forms(text: &str) -> Vec<JoiningForm> {
 /// relying on the lookup table.
 #[must_use]
 pub fn assign_from_types(types: &[JoiningType]) -> Vec<JoiningForm> {
-    let mut out = Vec::with_capacity(types.len());
-    for i in 0..types.len() {
-        out.push(form_at(types, i));
-    }
-    out
+    assign_from_types_in_context(types, JoiningContext::NONE)
+}
+
+/// [`assign_from_types`] with the joining types just outside the run.
+#[must_use]
+pub fn assign_from_types_in_context(
+    types: &[JoiningType],
+    context: JoiningContext,
+) -> Vec<JoiningForm> {
+    (0..types.len())
+        .map(|i| form_at(types, i, context))
+        .collect()
 }
 
 /// Computes the joining form at position `i`. Transparent positions
 /// return [`JoiningForm::None`]: the caller's glyph at that cluster
 /// is a combining mark that rides along with its base.
-fn form_at(types: &[JoiningType], i: usize) -> JoiningForm {
+fn form_at(types: &[JoiningType], i: usize, context: JoiningContext) -> JoiningForm {
     let current = types[i];
     match current {
         JoiningType::T => JoiningForm::None,
@@ -127,7 +230,7 @@ fn form_at(types: &[JoiningType], i: usize) -> JoiningForm {
             // the *preceding* letter only. So the only question is
             // whether `prev` is a joiner on the right side: if yes,
             // this letter takes its final form; otherwise isolated.
-            if prev_joins_toward_us(types, i) {
+            if prev_joins_toward_us(types, i, context.before) {
                 JoiningForm::Fina
             } else {
                 JoiningForm::Isol
@@ -136,8 +239,8 @@ fn form_at(types: &[JoiningType], i: usize) -> JoiningForm {
         JoiningType::D | JoiningType::C => {
             // Dual / join-causing connect on both sides. Four-way
             // decision based on both neighbors.
-            let prev_joins = prev_joins_toward_us(types, i);
-            let next_joins = next_joins_toward_us(types, i);
+            let prev_joins = prev_joins_toward_us(types, i, context.before);
+            let next_joins = next_joins_toward_us(types, i, context.after);
             match (prev_joins, next_joins) {
                 (false, false) => JoiningForm::Isol,
                 (false, true) => JoiningForm::Init,
@@ -149,7 +252,7 @@ fn form_at(types: &[JoiningType], i: usize) -> JoiningForm {
             // Mirror of R: connects only on the trailing side. No
             // Unicode 15.1 characters map here, but the state machine
             // stays symmetric so the table is future-proof.
-            if next_joins_toward_us(types, i) {
+            if next_joins_toward_us(types, i, context.after) {
                 JoiningForm::Init
             } else {
                 JoiningForm::Isol
@@ -162,33 +265,31 @@ fn form_at(types: &[JoiningType], i: usize) -> JoiningForm {
 /// connects on *its* trailing side, i.e. it is dual-joining
 /// (`D`), join-causing (`C`), or left-joining (`L`). That is the
 /// full set of types that draw a connector into the letter at
-/// position `i`.
-fn prev_joins_toward_us(types: &[JoiningType], i: usize) -> bool {
-    let mut j = i;
-    while j > 0 {
-        j -= 1;
-        match types[j] {
-            JoiningType::T => {}
-            JoiningType::D | JoiningType::C | JoiningType::L => return true,
-            JoiningType::R | JoiningType::U => return false,
-        }
-    }
-    false
+/// position `i`. Past the start of the run, `before` (the
+/// pre-context) answers instead.
+fn prev_joins_toward_us(types: &[JoiningType], i: usize, before: Option<JoiningType>) -> bool {
+    let joins = |t: JoiningType| matches!(t, JoiningType::D | JoiningType::C | JoiningType::L);
+    types[..i]
+        .iter()
+        .rev()
+        .copied()
+        .chain(before)
+        .find(|t| *t != JoiningType::T)
+        .is_some_and(joins)
 }
 
 /// True when the nearest non-transparent code point *after* `i`
 /// connects on *its* leading side, i.e. it is dual-joining (`D`),
-/// join-causing (`C`), or right-joining (`R`).
-fn next_joins_toward_us(types: &[JoiningType], i: usize) -> bool {
-    let mut j = i + 1;
-    while j < types.len() {
-        match types[j] {
-            JoiningType::T => j += 1,
-            JoiningType::D | JoiningType::C | JoiningType::R => return true,
-            JoiningType::L | JoiningType::U => return false,
-        }
-    }
-    false
+/// join-causing (`C`), or right-joining (`R`). Past the end of the
+/// run, `after` (the post-context) answers instead.
+fn next_joins_toward_us(types: &[JoiningType], i: usize, after: Option<JoiningType>) -> bool {
+    let joins = |t: JoiningType| matches!(t, JoiningType::D | JoiningType::C | JoiningType::R);
+    types[i + 1..]
+        .iter()
+        .copied()
+        .chain(after)
+        .find(|t| *t != JoiningType::T)
+        .is_some_and(joins)
 }
 
 #[cfg(test)]
@@ -378,6 +479,85 @@ mod tests {
             got,
             alloc::vec![JoiningForm::Isol, JoiningForm::Isol, JoiningForm::Isol]
         );
+    }
+
+    fn in_context(pre: &str, text: &str, post: &str) -> Vec<JoiningForm> {
+        assign_joining_forms_in_context(text, JoiningContext::from_context(pre, post))
+    }
+
+    #[test]
+    fn pre_context_joiner_makes_first_letter_final() {
+        use JoiningForm::{Fina, Isol, Medi};
+        assert_eq!(in_context("\u{0628}", "\u{0628}", ""), alloc::vec![Fina]);
+        assert_eq!(in_context("\u{0628}", "\u{0627}", ""), alloc::vec![Fina]);
+        assert_eq!(
+            in_context("\u{0628}", "\u{0628}", "\u{0628}"),
+            alloc::vec![Medi]
+        );
+        // Alef joins only backward, so it does not feed the run.
+        assert_eq!(in_context("\u{0627}", "\u{0628}", ""), alloc::vec![Isol]);
+        // A non-joining neighbor behaves like no context.
+        assert_eq!(in_context("a", "\u{0628}", "b"), alloc::vec![Isol]);
+    }
+
+    #[test]
+    fn post_context_joiner_makes_last_letter_initial() {
+        use JoiningForm::{Fina, Init, Isol};
+        assert_eq!(in_context("", "\u{0628}", "\u{0627}"), alloc::vec![Init]);
+        assert_eq!(
+            in_context("", "\u{0628}\u{0628}", "\u{0628}"),
+            alloc::vec![Init, JoiningForm::Medi]
+        );
+        // Right-joining letters never look forward.
+        assert_eq!(
+            in_context("\u{0628}", "\u{0627}", "\u{0628}"),
+            alloc::vec![Fina]
+        );
+        assert_eq!(in_context("", "\u{0627}", "\u{0628}"), alloc::vec![Isol]);
+    }
+
+    #[test]
+    fn context_skips_transparent_marks() {
+        use JoiningForm::{Fina, Init};
+        // Beh + fatha before the run, fatha + beh after it.
+        assert_eq!(
+            in_context("\u{0628}\u{064E}", "\u{0628}", ""),
+            alloc::vec![Fina]
+        );
+        assert_eq!(
+            in_context("", "\u{0628}", "\u{064E}\u{0628}"),
+            alloc::vec![Init]
+        );
+        // A transparent-only context is no context.
+        assert_eq!(
+            JoiningContext::from_context("\u{064E}\u{0651}", "\u{064E}"),
+            JoiningContext::NONE
+        );
+    }
+
+    #[test]
+    fn context_only_affects_the_run_edges() {
+        use JoiningForm::{Fina, Init, Isol};
+        // "b a b": the alef resets the chain, so the context only
+        // reaches the outer letters.
+        let got = in_context("\u{0628}", "\u{0628}\u{0627}\u{0628}", "\u{0628}");
+        assert_eq!(got, alloc::vec![JoiningForm::Medi, Fina, Init]);
+        let got = in_context("", "\u{0628}\u{0627}\u{0628}", "");
+        assert_eq!(got, alloc::vec![Init, Fina, Isol]);
+    }
+
+    #[test]
+    fn around_reads_neighbors_before_buffer_context() {
+        let cps: Vec<char> = "a\u{0628}\u{0628}c".chars().collect();
+        // The run is the two behs; its neighbors inside the text are
+        // non-joining, so the buffer context is never consulted.
+        let ctx = JoiningContext::around(&cps, 1..3, "\u{0628}", "\u{0628}");
+        assert_eq!(ctx.before, Some(JoiningType::U));
+        assert_eq!(ctx.after, Some(JoiningType::U));
+        // A run at the edges falls through to the buffer context.
+        let ctx = JoiningContext::around(&cps[1..3], 0..2, "\u{0628}", "\u{0627}");
+        assert_eq!(ctx.before, Some(JoiningType::D));
+        assert_eq!(ctx.after, Some(JoiningType::R));
     }
 
     #[test]

@@ -171,3 +171,64 @@ fn deep_transform_chain_emits_only_finite_tokens() {
     assert!(svg.contains("transform=\"matrix("), "no transform: {svg}");
     assert_only_finite_tokens(&svg);
 }
+
+/// COLRv1 table whose base glyph `gid` fans out into many composites
+/// that each fill `gid`. The root is a PaintColrLayers over all 255
+/// LayerList entries. Entries 0 to 126 are a SrcOver PaintComposite
+/// whose source and backdrop both paint `gid` in palette color 0, and
+/// entries 127 to 254 are the root PaintColrLayers again.
+#[cfg(feature = "color")]
+fn composite_fan_out_colr(gid: u16) -> Vec<u8> {
+    let header_len: u32 = 34;
+    let base_glyph_list = 34u32;
+    let layer_list = base_glyph_list + 10;
+    let layers_paint = layer_list + 4 + 255 * 4;
+    let composite = layers_paint + 6;
+    let mut colr = Vec::new();
+    colr.extend_from_slice(&1u16.to_be_bytes()); // version
+    colr.extend_from_slice(&0u16.to_be_bytes()); // numBaseGlyphRecords
+    colr.extend_from_slice(&header_len.to_be_bytes()); // baseGlyphRecordsOffset
+    colr.extend_from_slice(&header_len.to_be_bytes()); // layerRecordsOffset
+    colr.extend_from_slice(&0u16.to_be_bytes()); // numLayerRecords
+    colr.extend_from_slice(&base_glyph_list.to_be_bytes());
+    colr.extend_from_slice(&layer_list.to_be_bytes());
+    colr.extend_from_slice(&[0; 12]); // clip list, index map, store
+    colr.extend_from_slice(&1u32.to_be_bytes());
+    colr.extend_from_slice(&gid.to_be_bytes());
+    colr.extend_from_slice(&(layers_paint - base_glyph_list).to_be_bytes());
+    colr.extend_from_slice(&255u32.to_be_bytes());
+    for i in 0..255 {
+        let target = if i < 127 { composite } else { layers_paint };
+        colr.extend_from_slice(&(target - layer_list).to_be_bytes());
+    }
+    assert_eq!(colr.len(), layers_paint as usize);
+    colr.extend_from_slice(&[1, 255, 0, 0, 0, 0]); // PaintColrLayers
+                                                   // PaintComposite: source and backdrop are the PaintGlyph after it.
+    colr.extend_from_slice(&[32, 0, 0, 8, 3, 0, 0, 8]);
+    // PaintGlyph with a PaintSolid child.
+    colr.extend_from_slice(&[10, 0, 0, 6]);
+    colr.extend_from_slice(&gid.to_be_bytes());
+    colr.extend_from_slice(&[2, 0, 0, 0x40, 0x00]);
+    colr
+}
+
+#[cfg(feature = "color")]
+#[test]
+fn composite_fan_out_svg_stays_balanced() {
+    use sigilbuzz_svg::glyph_to_svg_color;
+
+    let plain = Face::parse_bytes(OPEN_SANS, 0).expect("Open Sans parses");
+    let gid = plain.cmap().expect("cmap").glyph_id('A').expect("'A'");
+    let colr = composite_fan_out_colr(gid);
+    let bytes = append_tables(OPEN_SANS, &[(*b"COLR", colr), (*b"CPAL", one_color_cpal())]);
+    let face = Face::parse_bytes(&bytes, 0).expect("patched face parses");
+
+    // The walk opens thousands of groups, each followed by filled
+    // outlines, before its paint budget stops it. Every group still
+    // closes, and each one gets its style.
+    let svg = glyph_to_svg_color(&face, gid).expect("color glyph renders");
+    let opened = svg.matches("<g").count();
+    assert!(opened > 1000, "only {opened} groups");
+    assert_eq!(opened, svg.matches("</g>").count());
+    assert!(svg.contains(r#"<g style="isolation:isolate">"#));
+}

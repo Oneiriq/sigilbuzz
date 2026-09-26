@@ -16,9 +16,22 @@ use std::path::PathBuf;
 
 use clap::Args as ClapArgs;
 
-use sigilbuzz::{shape, Blob, Buffer, Face, Font, Glyph};
+use sigilbuzz::{shape, Blob, Buffer, Face, Font, Glyph, Language, UnicodeScript};
 
 use super::util::{parse_direction, parse_feature_list, read_font, with_stdout, CliResult};
+
+/// Parses a four-letter ISO 15924 code, case-insensitively. A code
+/// sigilbuzz has no shaper bucket for (including `Zyyy`, `Zinh`) gives
+/// `None`, which keeps per-run script segmentation.
+fn parse_script(s: &str) -> CliResult<Option<UnicodeScript>> {
+    let tag: [u8; 4] = s
+        .as_bytes()
+        .try_into()
+        .ok()
+        .filter(|t: &[u8; 4]| t.iter().all(u8::is_ascii_alphabetic))
+        .ok_or_else(|| format!("invalid script '{s}' (expected a 4-letter ISO 15924 code)"))?;
+    Ok(UnicodeScript::from_iso15924_tag(tag))
+}
 
 /// Arguments for `sigilbuzz shape`.
 #[derive(Debug, ClapArgs)]
@@ -30,15 +43,17 @@ pub struct Args {
     /// Comma-separated feature overrides (e.g. `liga,-kern,smcp=1`).
     #[arg(long)]
     pub features: Option<String>,
-    /// Writing direction (`ltr`, `rtl`, `ttb`, `btt`).
+    /// Writing direction (`ltr`, `rtl`, `ttb`, `btt`). `rtl` and `btt`
+    /// print the glyphs in visual order (reversed), like `hb-shape`.
     #[arg(long)]
     pub direction: Option<String>,
-    /// Script tag. Accepted for hb-shape compatibility and has no
-    /// effect: sigilbuzz takes the script from the text.
+    /// ISO 15924 script code (e.g. `Arab`, `deva`) to shape the whole
+    /// text as, like `hb-shape --script`. Without it, or for a script
+    /// sigilbuzz has no shaper for, the text is split into script runs.
     #[arg(long)]
     pub script: Option<String>,
-    /// Language tag. Accepted for hb-shape compatibility and has no
-    /// effect: sigilbuzz shapes with the default language system.
+    /// BCP 47 language tag (e.g. `tr`, `sr-Cyrl`) that selects the
+    /// font's OpenType language system, like `hb-shape --language`.
     #[arg(long)]
     pub language: Option<String>,
     /// Emit JSON instead of one-line-per-glyph text.
@@ -58,11 +73,13 @@ pub fn run(args: Args) -> CliResult {
     if let Some(d) = &args.direction {
         buffer.set_direction(parse_direction(d)?);
     }
-    // `--script` and `--language` are accepted so hb-shape command
-    // lines work, and they change nothing. The core Buffer has no
-    // setter for either: the shaper takes the script of each run from
-    // the text and always uses the default language system.
-    let _ = (&args.script, &args.language);
+    if let Some(s) = &args.script {
+        buffer.set_script(parse_script(s)?);
+    }
+    if let Some(l) = &args.language {
+        let language = Language::new(l).ok_or_else(|| format!("invalid language tag '{l}'"))?;
+        buffer.set_language(Some(language));
+    }
 
     let features = match args.features.as_deref() {
         Some(s) => parse_feature_list(s)?,

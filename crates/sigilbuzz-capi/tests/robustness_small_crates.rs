@@ -194,7 +194,8 @@ fn out_of_range_item_offsets_are_ignored() {
         hb_buffer_add_utf8(buffer, p, 3, 3, c_int::MAX);
         hb_buffer_add_utf8(buffer, p, 3, 1, c_int::MAX);
         hb_buffer_add_utf8(buffer, p, 3, 0, c_int::MIN);
-        // Invalid UTF-8 and a split multi-byte sequence are dropped.
+        // Invalid UTF-8 and a split multi-byte sequence become U+FFFD,
+        // as in HarfBuzz.
         let bad = [0xE2u8, 0x82, 0xAC, 0xFF];
         hb_buffer_add_utf8(buffer, bad.as_ptr().cast::<c_char>(), 4, 0, -1);
         hb_buffer_add_utf8(buffer, bad.as_ptr().cast::<c_char>(), 3, 1, -1);
@@ -431,26 +432,65 @@ mod paint {
         out
     }
 
-    extern "C" fn count_color(
+    /// What the paint callbacks saw: every `push_clip_glyph` glyph id
+    /// and every `color` call as `(is_foreground, color)`.
+    #[derive(Default)]
+    struct Seen {
+        clips: std::sync::Mutex<Vec<u32>>,
+        colors: std::sync::Mutex<Vec<(i32, hb_color_t)>>,
+    }
+
+    unsafe extern "C" fn record_color(
+        _funcs: *mut hb_paint_funcs_t,
+        data: *mut c_void,
+        is_foreground: i32,
+        color: hb_color_t,
+        _user_data: *mut c_void,
+    ) {
+        // SAFETY: the test passes a pointer to a live `Seen`.
+        let seen = unsafe { &*data.cast::<Seen>() };
+        if let Ok(mut colors) = seen.colors.lock() {
+            colors.push((is_foreground, color));
+        }
+    }
+
+    unsafe extern "C" fn record_clip(
+        _funcs: *mut hb_paint_funcs_t,
+        data: *mut c_void,
+        gid: u32,
+        _font: *mut sigilbuzz_capi::hb_font_t,
+        _user_data: *mut c_void,
+    ) {
+        // SAFETY: the test passes a pointer to a live `Seen`.
+        let seen = unsafe { &*data.cast::<Seen>() };
+        if let Ok(mut clips) = seen.clips.lock() {
+            clips.push(gid);
+        }
+    }
+
+    unsafe extern "C" fn count_color(
         _funcs: *mut hb_paint_funcs_t,
         data: *mut c_void,
         _is_foreground: i32,
         _color: hb_color_t,
+        _user_data: *mut c_void,
     ) {
         // SAFETY: the test passes a pointer to a live AtomicU32.
         let counter = unsafe { &*data.cast::<AtomicU32>() };
         counter.fetch_add(1, Ordering::SeqCst);
     }
 
-    extern "C" fn count_clip(_funcs: *mut hb_paint_funcs_t, data: *mut c_void, _gid: u32) {
-        // SAFETY: the test passes a pointer to a live AtomicU32.
-        let counter = unsafe { &*data.cast::<AtomicU32>() };
-        counter.fetch_add(1, Ordering::SeqCst);
-    }
+    /// Foreground color the fixture paints with.
+    const FG: hb_color_t = 0x1020_30FF;
 
-    fn callbacks_for(gid: u32) -> u32 {
+    /// HarfBuzz's `HB_COLOR(0, 0, 255, 255)`: the fixture's red.
+    const RED: hb_color_t = 0x0000_FFFF;
+
+    /// Paints `gid` from the fixture font with foreground [`FG`] and
+    /// returns what the callbacks saw.
+    fn paint(gid: u32) -> (Vec<u32>, Vec<(i32, hb_color_t)>) {
         let bytes = build_face_bytes(&build_colr(7), &build_cpal_red());
-        let counter = AtomicU32::new(0);
+        let seen = Seen::default();
         // SAFETY: every pointer passed here is null, a live handle
         // created in this test, or a slice that outlives the call.
         unsafe {
@@ -458,33 +498,45 @@ mod paint {
             let face = hb_face_create(blob, 0);
             let font = hb_font_create(face);
             let funcs = hb_paint_funcs_create();
-            hb_paint_funcs_set_color_func(funcs, Some(count_color));
-            hb_paint_funcs_set_push_clip_glyph_func(funcs, Some(count_clip));
-            let data = core::ptr::from_ref(&counter).cast_mut().cast::<c_void>();
-            hb_font_paint_glyph(font, gid, funcs, data, 0, 0);
+            hb_paint_funcs_set_color_func(funcs, Some(record_color), ptr::null_mut(), None);
+            hb_paint_funcs_set_push_clip_glyph_func(
+                funcs,
+                Some(record_clip),
+                ptr::null_mut(),
+                None,
+            );
+            let data = core::ptr::from_ref(&seen).cast_mut().cast::<c_void>();
+            hb_font_paint_glyph(font, gid, funcs, data, 0, FG);
             hb_paint_funcs_destroy(funcs);
             hb_font_destroy(font);
             hb_face_destroy(face);
             hb_blob_destroy(blob);
         }
-        counter.load(Ordering::SeqCst)
+        let clips = seen.clips.into_inner().unwrap_or_default();
+        let colors = seen.colors.into_inner().unwrap_or_default();
+        (clips, colors)
     }
 
-    /// The fixture paints glyph 7. Asking for 7 + 65536 used to be
-    /// truncated to 7 and painted it. Glyph ids above 65535 do not
-    /// exist, so nothing may be painted.
+    /// The fixture paints glyph 7 through its COLR paint: a clip to
+    /// glyph 42 filled with palette red. Asking for 7 + 65536 used to
+    /// be truncated to 7 and painted that COLR glyph. Glyph ids above
+    /// 65535 have no color data, so HarfBuzz paints them like any
+    /// other plain glyph: a clip to the requested id, untruncated,
+    /// filled with the foreground.
     #[test]
-    fn paint_glyph_above_u16_range_paints_nothing() {
-        assert_eq!(callbacks_for(7), 2, "the fixture itself must paint");
-        assert_eq!(callbacks_for(7 + 0x1_0000), 0);
-        assert_eq!(callbacks_for(u32::MAX), 0);
+    fn paint_glyph_above_u16_range_is_not_truncated() {
+        assert_eq!(paint(7), (vec![42], vec![(0, RED)]), "the COLR glyph");
+        for gid in [7 + 0x1_0000, u32::MAX] {
+            assert_eq!(paint(gid), (vec![gid], vec![(1, FG)]), "glyph {gid}");
+        }
     }
 
     /// A glyph with no COLR record and a font built from junk paint
-    /// nothing.
+    /// only the plain-glyph fallback: a clip to the glyph filled with
+    /// the foreground, as in HarfBuzz.
     #[test]
     fn paint_glyph_on_hostile_faces_is_quiet() {
-        assert_eq!(callbacks_for(8), 0);
+        assert_eq!(paint(8), (vec![8], vec![(1, FG)]));
         let counter = AtomicU32::new(0);
         // SAFETY: every pointer passed here is null, a live handle
         // created in this test, or a slice that outlives the call.
@@ -493,7 +545,7 @@ mod paint {
             let face = hb_face_create(blob, 0);
             let font = hb_font_create(face);
             let funcs = hb_paint_funcs_create();
-            hb_paint_funcs_set_color_func(funcs, Some(count_color));
+            hb_paint_funcs_set_color_func(funcs, Some(count_color), ptr::null_mut(), None);
             let data = core::ptr::from_ref(&counter).cast_mut().cast::<c_void>();
             hb_font_paint_glyph(font, 0, funcs, data, 0, 0);
             hb_font_paint_glyph(ptr::null_mut(), 0, funcs, data, 0, 0);
@@ -503,7 +555,9 @@ mod paint {
             hb_face_destroy(face);
             hb_blob_destroy(blob);
         }
-        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        // Only the first call has both a font and funcs. It paints the
+        // plain-glyph fallback once.
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 }
 
@@ -528,12 +582,12 @@ mod subset {
             let glyphs = hb_subset_input_glyph_set(input);
             hb_set_add(glyphs, 0x1_0000);
             hb_set_add(glyphs, u32::MAX);
-            hb_set_destroy(glyphs);
+            // Both sets belong to the input, as in HarfBuzz, so they
+            // are not destroyed here.
             let unicodes = hb_subset_input_unicode_set(input);
             hb_set_add(unicodes, 0xD800);
             hb_set_add(unicodes, 0x11_0000);
             hb_set_add(unicodes, u32::from(b'A'));
-            hb_set_destroy(unicodes);
             let out = hb_subset_or_fail(face, input);
             assert!(!out.is_null());
             // .notdef + A.

@@ -93,9 +93,18 @@ pub struct Glyph {
 
 /// Bits packed into [`Glyph::unicode_props`]. Laid out to leave room
 /// for future expansion without shifting existing meanings.
+///
+/// Bits 7 to 15 are reserved for the shaper's ligature bookkeeping
+/// (the ligature id and component index GSUB records for GPOS mark
+/// attachment, HarfBuzz's `lig_props`); callers building glyphs by
+/// hand should leave them zero.
 pub mod unicode_prop {
-    /// The glyph's source codepoint is a Unicode default-ignorable
-    /// format character (ZWJ, ZWNJ, LRM, RLM, ...).
+    /// The glyph's source codepoint is default ignorable in HarfBuzz's
+    /// sense (ZWJ, ZWNJ, bidi controls, variation selectors, soft
+    /// hyphen, ...) and GSUB has not substituted it. After positioning,
+    /// shaping gives glyphs that still carry this bit a zero advance
+    /// and swaps in the space glyph; any GSUB substitution clears it,
+    /// as in HarfBuzz.
     pub const DEFAULT_IGNORABLE: u16 = 1 << 0;
     /// The glyph's source codepoint is a joiner (ZWJ).
     pub const JOINER: u16 = 1 << 1;
@@ -157,6 +166,11 @@ pub struct Buffer {
     pub(crate) text: String,
     /// Writing direction. Defaults to [`Direction::Ltr`].
     pub(crate) direction: Direction,
+    /// `true` once a caller picked the direction ([`Buffer::set_direction`]
+    /// or [`Buffer::set_text_bidi`]). While `false`, `direction` is only
+    /// the LTR default and `shape()` may choose vertical layout for
+    /// Mongolian-dominant text. [`Buffer::clear`] resets it.
+    pub(crate) direction_explicit: bool,
     /// When `true`, `shape()` composes the input text via
     /// [`crate::unicode::normalize::compose_str`] before glyph
     /// lookup. Matches HarfBuzz's implicit NFC pass for the
@@ -168,6 +182,23 @@ pub struct Buffer {
     /// text was set without bidi reordering, and invalidated by any
     /// other text mutation.
     pub(crate) bidi_map: Option<crate::bidi_map::BidiMap>,
+    /// Script the whole buffer shapes as, set by
+    /// [`Buffer::set_script`]. `None` segments the text into script
+    /// runs. Accessors live in `buffer_props.rs`.
+    pub(crate) script: Option<Script>,
+    /// BCP 47 language selecting the OpenType language system, set by
+    /// [`Buffer::set_language`].
+    pub(crate) language: Option<crate::language::Language>,
+    /// Up to [`Buffer::CONTEXT_LENGTH`] characters that precede the
+    /// text in the source, set by [`Buffer::set_pre_context`].
+    pub(crate) pre_context: String,
+    /// Up to [`Buffer::CONTEXT_LENGTH`] characters that follow the
+    /// text in the source, set by [`Buffer::set_post_context`].
+    pub(crate) post_context: String,
+    /// `true` after [`Buffer::set_insert_dotted_circle`]`(false)`, like
+    /// HarfBuzz's `HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE`. Stored
+    /// negated so the default is HarfBuzz's.
+    pub(crate) no_dotted_circle: bool,
 }
 
 impl Buffer {
@@ -192,15 +223,22 @@ impl Buffer {
 
     /// Replaces the buffer contents with `text`, but additionally
     /// runs the UAX #9 bidirectional algorithm and reorders the
-    /// stored text into visual order before shaping. Also updates
-    /// the buffer's [`Direction`] to match the resolved paragraph
-    /// direction.
+    /// stored text into visual order before shaping.
+    ///
+    /// Because the stored text is already in visual order, this also
+    /// sets the shaping direction to an explicit [`Direction::Ltr`]:
+    /// [`crate::shape`] then walks the text left to right and returns
+    /// the glyphs in that same (visual) order. Setting
+    /// [`Direction::Rtl`] afterwards would reverse the run a second
+    /// time. The paragraph direction UAX #9 resolved stays available
+    /// through [`Self::bidi_map`] (`BidiMap::paragraph_direction`).
     ///
     /// Use this when you have mixed-direction input (Latin + Hebrew,
     /// Arabic + ASCII digits, etc.) and want the shaper to receive
-    /// the run already partitioned into visual order, matching
-    /// HarfBuzz's `hb_buffer_guess_segment_properties` + bidi
-    /// reorder behavior.
+    /// the run already partitioned into visual order. For best
+    /// results with HarfBuzz-grade shaping (mark attachment, cursive
+    /// joining), shape each directional run separately in logical
+    /// order with its own direction instead.
     ///
     /// The plain [`Self::set_text`] does not reorder or change the
     /// direction, for callers that handle direction themselves.
@@ -211,7 +249,8 @@ impl Buffer {
     /// offsets in the original `text`.
     pub fn set_text_bidi(&mut self, text: &str) {
         let info = crate::unicode::bidi::BidiInfo::new(text, None);
-        self.direction = info.paragraph_direction();
+        self.direction = Direction::Ltr;
+        self.direction_explicit = true;
         let order = info.reorder();
         self.text.clear();
         self.text.reserve(text.len());
@@ -246,15 +285,73 @@ impl Buffer {
         self.bidi_map.as_ref()
     }
 
-    /// Current writing direction.
+    /// Current writing direction: [`Direction::Ltr`] until one is set
+    /// (see [`Self::has_explicit_direction`]).
     #[must_use]
     pub const fn direction(&self) -> Direction {
         self.direction
     }
 
     /// Sets the writing direction for the next shaping call.
+    ///
+    /// The direction decides the output order of [`crate::shape`]:
+    /// forward directions ([`Direction::Ltr`], [`Direction::Ttb`])
+    /// return glyphs in logical order, backward ones
+    /// ([`Direction::Rtl`], [`Direction::Btt`]) in reversed (visual)
+    /// order, exactly like HarfBuzz. Calling this marks the direction
+    /// as explicit (see [`Self::has_explicit_direction`]), even when
+    /// `direction` is the LTR default.
     pub fn set_direction(&mut self, direction: Direction) {
         self.direction = direction;
+        self.direction_explicit = true;
+    }
+
+    /// Forgets the direction the caller chose, the way HarfBuzz's
+    /// `hb_buffer_set_direction(buffer, HB_DIRECTION_INVALID)` does.
+    ///
+    /// [`Self::direction`] goes back to the [`Direction::Ltr`] default
+    /// and [`Self::has_explicit_direction`] to `false`, so
+    /// [`crate::shape`] once again picks the layout itself (vertical for
+    /// Mongolian-dominant text). The text, script, language, and
+    /// context are kept.
+    ///
+    /// ```
+    /// use sigilbuzz::{Buffer, Direction};
+    ///
+    /// let mut buffer = Buffer::new();
+    /// buffer.push_str("abc");
+    /// buffer.set_direction(Direction::Rtl);
+    /// buffer.unset_direction();
+    /// assert_eq!(buffer.direction(), Direction::Ltr);
+    /// assert!(!buffer.has_explicit_direction());
+    /// assert_eq!(buffer.text(), "abc");
+    /// ```
+    pub fn unset_direction(&mut self) {
+        self.direction = Direction::Ltr;
+        self.direction_explicit = false;
+    }
+
+    /// True when the direction was chosen by the caller through
+    /// [`Self::set_direction`] or [`Self::set_text_bidi`], false while
+    /// [`Self::direction`] only reports the LTR default.
+    ///
+    /// [`crate::shape`] lays out Mongolian-dominant text vertically
+    /// (top to bottom) only while no direction is explicit; an
+    /// explicit [`Direction::Ltr`] keeps it horizontal.
+    ///
+    /// ```
+    /// use sigilbuzz::{Buffer, Direction};
+    ///
+    /// let mut buffer = Buffer::new();
+    /// assert!(!buffer.has_explicit_direction());
+    /// buffer.set_direction(Direction::Ltr);
+    /// assert!(buffer.has_explicit_direction());
+    /// buffer.clear();
+    /// assert!(!buffer.has_explicit_direction());
+    /// ```
+    #[must_use]
+    pub const fn has_explicit_direction(&self) -> bool {
+        self.direction_explicit
     }
 
     /// True when [`Buffer::set_normalize_nfc`] has been enabled.
@@ -271,13 +368,20 @@ impl Buffer {
         self.normalize_nfc = enabled;
     }
 
-    /// Clears the text, resets the direction to LTR, turns the NFC
-    /// pass off, and drops the bidi map.
+    /// Clears the text, resets the direction to the unset LTR default,
+    /// turns the NFC pass off, and drops the bidi map. Like HarfBuzz's
+    /// `hb_buffer_clear_contents`, this also forgets the script,
+    /// language, and pre- and post-context.
     pub fn clear(&mut self) {
         self.text.clear();
         self.direction = Direction::Ltr;
+        self.direction_explicit = false;
         self.normalize_nfc = false;
         self.bidi_map = None;
+        self.script = None;
+        self.language = None;
+        self.pre_context.clear();
+        self.post_context.clear();
     }
 
     /// True when no text has been pushed.
@@ -295,12 +399,11 @@ impl Buffer {
     /// `select_shaper_for_script` segmentation.
     ///
     /// A leading `COMMON`/`INHERITED` span before the first real
-    /// script codepoint takes the raw script of its first codepoint:
-    /// `Script::Latin` for ASCII digits and punctuation (the ASCII
-    /// table lands there), `Script::Other` for format characters and
-    /// combining marks.
-    /// Both map to the default `DFLT` priority, the same treatment
-    /// HarfBuzz gives a pure-digits or pure-punctuation run.
+    /// script codepoint joins that script's run, the way HarfBuzz
+    /// gives a buffer the script of its first non-`COMMON` character.
+    /// Text with no real script at all is one `Script::Other` run
+    /// with the default `DFLT` priority, same treatment HarfBuzz gives
+    /// a pure-digits or pure-punctuation run.
     ///
     /// The returned vector is empty for an empty buffer. Callers walk
     /// it left-to-right: segment boundaries are deterministic, so the
@@ -311,6 +414,11 @@ impl Buffer {
         if self.text.is_empty() {
             return runs;
         }
+        let leading = self
+            .text
+            .chars()
+            .find(|&c| !is_common_or_inherited(c))
+            .map_or(Script::Other, script_of);
         let mut current: Option<(Script, usize)> = None;
         for (byte, ch) in self.text.char_indices() {
             let raw = script_of(ch);
@@ -326,7 +434,7 @@ impl Buffer {
             // real script bucket attaches normally through the
             // script-equality test below.
             let resolved = if is_common_or_inherited(ch) {
-                current.map_or(raw, |(s, _)| s)
+                current.map_or(leading, |(s, _)| s)
             } else {
                 raw
             };
@@ -379,18 +487,21 @@ pub struct ScriptRun {
 /// Interned as a static so `script_priority_for` can return a
 /// `'static` reference.
 const DFLT_ONLY: &[[u8; 4]] = &[*b"DFLT"];
-/// Latin script-tag priority: `latn` then DFLT fallback.
-const LATN_PRIORITY: &[[u8; 4]] = &[*b"latn", *b"DFLT"];
-/// Greek script-tag priority: `grek` then DFLT fallback.
-const GREK_PRIORITY: &[[u8; 4]] = &[*b"grek", *b"DFLT"];
-/// Cyrillic script-tag priority: `cyrl` then DFLT fallback.
-const CYRL_PRIORITY: &[[u8; 4]] = &[*b"cyrl", *b"DFLT"];
-/// Han script-tag priority: `hani` then DFLT fallback.
-const HANI_PRIORITY: &[[u8; 4]] = &[*b"hani", *b"DFLT"];
 /// Arabic script-tag priority: `arab` then DFLT fallback.
 const ARAB_PRIORITY: &[[u8; 4]] = &[*b"arab", *b"DFLT"];
 /// Hebrew script-tag priority: `hebr` then DFLT fallback.
 const HEBR_PRIORITY: &[[u8; 4]] = &[*b"hebr", *b"DFLT"];
+/// Latin script-tag priority. Language systems (Turkish, Romanian,
+/// ...) live under `latn`, so it must come before DFLT for
+/// [`Buffer::set_language`] to reach them.
+const LATN_PRIORITY: &[[u8; 4]] = &[*b"latn", *b"DFLT"];
+/// Cyrillic script-tag priority (`cyrl` holds SRB / MKD / BGR).
+const CYRL_PRIORITY: &[[u8; 4]] = &[*b"cyrl", *b"DFLT"];
+/// Greek script-tag priority.
+const GREK_PRIORITY: &[[u8; 4]] = &[*b"grek", *b"DFLT"];
+/// Han script-tag priority (`hani` holds the ZHS / ZHT / JAN / KOR
+/// language systems).
+const HANI_PRIORITY: &[[u8; 4]] = &[*b"hani", *b"DFLT"];
 
 /// Returns the GSUB/GPOS script-tag priority list for a coarse
 /// [`Script`]. Mirrors what `shape()` used to compute inline and what
@@ -416,11 +527,6 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
         THAI_SCRIPT_PRIORITY, TIRHUTA_SCRIPT_PRIORITY,
     };
     match script {
-        // HarfBuzz looks up a script's own OpenType tag before DFLT.
-        Script::Latin => LATN_PRIORITY,
-        Script::Greek => GREK_PRIORITY,
-        Script::Cyrillic => CYRL_PRIORITY,
-        Script::Han => HANI_PRIORITY,
         Script::Arabic => ARAB_PRIORITY,
         Script::Hebrew => HEBR_PRIORITY,
         Script::Devanagari => DEVA_SCRIPT_PRIORITY,
@@ -453,7 +559,11 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
         Script::Khojki => KHOJKI_SCRIPT_PRIORITY,
         Script::Tirhuta => TIRHUTA_SCRIPT_PRIORITY,
         Script::Modi => MODI_SCRIPT_PRIORITY,
-        // Text with no recognized script falls back to DFLT.
+        Script::Latin => LATN_PRIORITY,
+        Script::Cyrillic => CYRL_PRIORITY,
+        Script::Greek => GREK_PRIORITY,
+        Script::Han => HANI_PRIORITY,
+        // Scripts sigilbuzz has no bucket for fall back to DFLT.
         Script::Other => DFLT_ONLY,
     }
 }
@@ -506,6 +616,36 @@ const fn is_common_or_inherited(ch: char) -> bool {
 }
 
 /// The result of a shaping call: the glyphs, in visual order.
+///
+/// The order follows the buffer's [`Direction`], the same contract as
+/// HarfBuzz's `hb_shape`:
+///
+/// - [`Direction::Ltr`] and [`Direction::Ttb`] (forward): glyphs come
+///   out in logical order, which is also their visual order along the
+///   pen's direction of travel.
+/// - [`Direction::Rtl`] and [`Direction::Btt`] (backward): shaping runs
+///   in logical order, then the glyph vector is reversed. For RTL,
+///   `glyphs[0]` is the leftmost glyph (the logically last one) and
+///   the pen moves left to right. For BTT, `glyphs[0]` is the topmost
+///   glyph and the pen moves down, as in TTB. Clusters keep their
+///   logical byte offsets, so they decrease along a backward run.
+///
+/// In every direction a renderer draws `glyphs` in vector order,
+/// placing each glyph at the current pen position plus its
+/// `(x_offset, y_offset)` and then adding `(x_advance, y_advance)` to
+/// the pen. Vertical runs report negative `y_advance` values (the pen
+/// moves down) for both TTB and BTT, and their offsets place each
+/// glyph's horizontal origin: like HarfBuzz, shaping moves every
+/// glyph from its vertical origin (centered horizontally, at the
+/// `VORG` height or the top of its box plus the `vmtx` top side
+/// bearing) to its horizontal one.
+///
+/// One known difference remains: when the requested horizontal
+/// direction is not the script's native one (LTR Hebrew, RTL Latin),
+/// or for BTT, HarfBuzz reverses the grapheme clusters before shaping
+/// and shapes in the opposite direction. sigilbuzz shapes those runs
+/// in logical order as asked, so marks inside a cluster and
+/// contextual lookups can come out differently there.
 #[derive(Debug, Default, Clone)]
 pub struct ShapedRun {
     /// Positioned glyphs, ready to draw.
@@ -572,9 +712,78 @@ mod tests {
         // \u{05E9}\u{05DC}\u{05D5}\u{05DD} = "שלום" (shalom).
         b.set_text_bidi("\u{05E9}\u{05DC}\u{05D5}\u{05DD}");
         // After visual reorder the chars are in reverse logical
-        // order, what the shaper expects for an RTL run.
+        // order. The stored text is visual, so the shaping direction
+        // is an explicit LTR (shaping it RTL would reverse it again);
+        // the RTL paragraph direction lives on the bidi map.
         assert_eq!(b.text(), "\u{05DD}\u{05D5}\u{05DC}\u{05E9}");
+        assert_eq!(b.direction(), Direction::Ltr);
+        assert!(b.has_explicit_direction());
+        assert_eq!(
+            b.bidi_map()
+                .map(crate::bidi_map::BidiMap::paragraph_direction),
+            Some(Direction::Rtl)
+        );
+    }
+
+    #[test]
+    fn direction_starts_implicit_and_set_direction_makes_it_explicit() {
+        let mut b = Buffer::new();
+        assert!(!b.has_explicit_direction());
+        assert_eq!(b.direction(), Direction::Ltr);
+        // Setting the default value still counts as a caller choice.
+        b.set_direction(Direction::Ltr);
+        assert!(b.has_explicit_direction());
+        b.set_direction(Direction::Btt);
+        assert!(b.has_explicit_direction());
+        assert_eq!(b.direction(), Direction::Btt);
+    }
+
+    #[test]
+    fn unset_direction_returns_to_the_implicit_default() {
+        let mut b = Buffer::new();
+        b.push_str("abc");
+        b.set_direction(Direction::Ttb);
+        b.unset_direction();
+        assert!(!b.has_explicit_direction());
+        assert_eq!(b.direction(), Direction::Ltr);
+        assert_eq!(b.text(), "abc");
+        // An explicit LTR is also forgotten.
+        b.set_direction(Direction::Ltr);
+        b.unset_direction();
+        assert!(!b.has_explicit_direction());
+    }
+
+    #[test]
+    fn text_mutations_keep_the_explicit_direction() {
+        let mut b = Buffer::new();
+        b.set_direction(Direction::Rtl);
+        b.push_str("abc");
+        b.set_text("def");
+        assert!(b.has_explicit_direction());
         assert_eq!(b.direction(), Direction::Rtl);
+    }
+
+    #[test]
+    fn clear_resets_the_explicit_direction_flag() {
+        let mut b = Buffer::new();
+        b.set_direction(Direction::Rtl);
+        b.clear();
+        assert!(!b.has_explicit_direction());
+        assert_eq!(b.direction(), Direction::Ltr);
+
+        b.set_text_bidi("\u{05D0}");
+        assert!(b.has_explicit_direction());
+        b.clear();
+        assert!(!b.has_explicit_direction());
+    }
+
+    #[test]
+    fn set_text_bidi_overrides_an_earlier_rtl_direction() {
+        let mut b = Buffer::new();
+        b.set_direction(Direction::Rtl);
+        b.set_text_bidi("abc \u{05D0}\u{05D1}");
+        assert_eq!(b.direction(), Direction::Ltr);
+        assert!(b.has_explicit_direction());
     }
 
     #[test]
@@ -727,6 +936,23 @@ mod tests {
         assert_eq!(runs.len(), 1, "combining mark must extend its base");
         assert_eq!(runs[0].script, Script::Latin);
         assert_eq!(runs[0].byte_range, 0..3);
+    }
+
+    #[test]
+    fn script_runs_leading_punctuation_joins_the_first_script() {
+        // "(123 " before Hebrew belongs to the Hebrew run.
+        let mut b = Buffer::new();
+        b.push_str("(123 \u{05E9}\u{05DC}\u{05D5}\u{05DD})");
+        let runs = b.script_runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].script, Script::Hebrew);
+        // No script-bearing character at all: one DFLT run.
+        let mut b = Buffer::new();
+        b.push_str("12:30!");
+        let runs = b.script_runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].script, Script::Other);
+        assert_eq!(runs[0].script_priority, &[*b"DFLT"]);
     }
 
     #[test]

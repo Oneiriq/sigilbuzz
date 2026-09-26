@@ -9,9 +9,14 @@ glyphs into pixels on the CPU, for every kind of glyph a modern font can carry.
   rasterizer is a non-zero-winding trapezoid scanline algorithm with 256-level
   anti-aliasing.
 - COLRv0 and COLRv1 color glyphs render into premultiplied RGBA pixmaps, including
-  gradients, compositing, clipping, and variations.
+  gradients, compositing, clipping, and variations. COLRv1 glyphs follow HarfBuzz's
+  paint model: each glyph is clipped to its ClipList box (or its computed bounds),
+  composites blend isolated groups, and gradients stay exact under any transform. Layers
+  drawn in the text color (palette entry `0xFFFF`) use `Rasterizer::with_foreground`,
+  opaque black by default, as do palette entries the font cannot supply.
 - SVG-in-OT glyphs render too: paths, shapes, strokes and dashes, gradients, `<use>`,
-  clip paths, masks, a set of filter primitives, and `<textPath>`.
+  clip paths, masks, a set of filter primitives, and `<textPath>`. `currentColor` is the
+  `with_foreground` color.
 - Embedded bitmaps from CBDT, sbix, and EBDT tables are decoded and scaled. PNG, JPEG
   (baseline and progressive), and TIFF images are supported.
 - Every entry point takes normalized axis coordinates, so variable fonts work

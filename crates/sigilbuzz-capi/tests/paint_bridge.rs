@@ -1,315 +1,446 @@
-//! Integration test for the `hb_paint_*` bridge.
+//! `hb_font_paint_glyph` fires HarfBuzz's callbacks in HarfBuzz's
+//! order, with HarfBuzz's arguments.
 //!
-//! Builds a synthetic SFNT carrying a tiny COLR+CPAL pair, drives the
-//! C-style `hb_font_paint_glyph` against it, and asserts the
-//! callbacks fire in the documented order. Mirrors the fixture style
-//! used by `crates/sigilbuzz-paint/tests/evaluator.rs` so additions
-//! stay in sync with the underlying parser tests.
+//! Every test runs against a hand-built COLR + CPAL font through the C
+//! entry points, with every callback installed under its own
+//! `user_data` tag (see `common`), so each test also checks that
+//! callbacks receive their own `user_data` and that `push_clip_glyph`
+//! receives the font being painted.
 
 #![cfg(feature = "paint")]
 
-use core::ffi::{c_char, c_uint, c_void};
+mod common;
+
+use core::f32::consts::PI;
+use core::ffi::c_void;
 use core::ptr;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
+use common::*;
+use sigilbuzz_capi::hb_font_set_scale;
 use sigilbuzz_capi::paint_bridge::{
-    hb_color_t, hb_font_paint_glyph, hb_paint_funcs_create, hb_paint_funcs_destroy,
-    hb_paint_funcs_set_color_func, hb_paint_funcs_set_pop_clip_func,
-    hb_paint_funcs_set_push_clip_glyph_func, hb_paint_funcs_t,
-};
-use sigilbuzz_capi::{
-    hb_blob_create, hb_blob_destroy, hb_face_create, hb_face_destroy, hb_font_create,
-    hb_font_destroy, hb_font_set_variations, hb_variation_t, HB_MEMORY_MODE_READONLY,
+    hb_color_stop_t, hb_font_paint_glyph, hb_paint_funcs_create, hb_paint_funcs_destroy,
+    hb_paint_funcs_set_color_func, hb_paint_funcs_set_color_glyph_func,
+    hb_paint_funcs_set_pop_clip_func, hb_paint_funcs_t, HB_PAINT_COMPOSITE_MODE_DEST_IN,
+    HB_PAINT_COMPOSITE_MODE_SRC_OVER, HB_PAINT_EXTEND_PAD, HB_PAINT_EXTEND_REFLECT,
+    HB_PAINT_EXTEND_REPEAT,
 };
 
-// =========================================================================
-// Fixture builders, mirrored from sigilbuzz-paint's evaluator tests
-// so the FFI bridge is exercised against the same canonical layout.
-// =========================================================================
+const RED: (u8, u8, u8, u8) = (255, 0, 0, 255);
+const GREEN: (u8, u8, u8, u8) = (0, 255, 0, 255);
+const HB_RED: u32 = hb_color(0, 0, 255, 255);
+const HB_GREEN: u32 = hb_color(0, 255, 0, 255);
+const FG: u32 = hb_color(0x10, 0x20, 0x30, 0xFF);
 
-fn build_face_bytes(colr: &[u8], cpal: &[u8]) -> Vec<u8> {
-    let dir_len = 12 + 2 * 16;
-    let cpal_off = dir_len;
-    let colr_off = cpal_off + cpal.len();
-
-    let mut out = Vec::new();
-    out.extend_from_slice(&0x00010000u32.to_be_bytes());
-    out.extend_from_slice(&2u16.to_be_bytes());
-    out.extend_from_slice(&0u16.to_be_bytes());
-    out.extend_from_slice(&0u16.to_be_bytes());
-    out.extend_from_slice(&0u16.to_be_bytes());
-
-    out.extend_from_slice(b"COLR");
-    out.extend_from_slice(&0u32.to_be_bytes());
-    out.extend_from_slice(&(colr_off as u32).to_be_bytes());
-    out.extend_from_slice(&(colr.len() as u32).to_be_bytes());
-
-    out.extend_from_slice(b"CPAL");
-    out.extend_from_slice(&0u32.to_be_bytes());
-    out.extend_from_slice(&(cpal_off as u32).to_be_bytes());
-    out.extend_from_slice(&(cpal.len() as u32).to_be_bytes());
-
-    out.extend_from_slice(cpal);
-    out.extend_from_slice(colr);
-    out
+/// Glyphs:
+/// 1 = PaintGlyph(42) -> PaintTransform(2x, +5) -> linear gradient
+/// 2 = composite: PaintGlyph(3, green) DEST_IN PaintGlyph(4, red)
+/// 3 = PaintScaleUniformAroundCenter(0.5 around (10, 20)) -> red solid
+/// 4 = sweep, stored angles -1 .. 0.5 (0 .. 1.5 pi)
+/// 5 = radial gradient
+/// 6 = COLRv0: layers (20, red) and (21, foreground)
+fn font_bytes() -> Vec<u8> {
+    let grad = linear(&[(0.0, 0, 1.0), (1.0, FOREGROUND, 1.0)]);
+    let v1 = [
+        (
+            1,
+            glyph(42, &transform([2.0, 0.0, 0.0, 2.0, 5.0, 0.0], &grad)),
+        ),
+        (
+            2,
+            composite(&glyph(3, &solid(1, 1.0)), 6, &glyph(4, &solid(0, 1.0))),
+        ),
+        (3, scale_around(0.5, 10, 20, &solid(0, 1.0))),
+        (4, sweep(-1.0, 0.5, &[(0.0, 0, 1.0), (1.0, 1, 1.0)])),
+        (5, radial(&[(0.25, 1, 1.0)])),
+    ];
+    let layers: &[(u16, u16)] = &[(20, 0), (21, FOREGROUND)];
+    let colr = colr(&[(6, layers)], &v1, &[]);
+    let cpal = cpal(&[&[RED, GREEN]]);
+    sfnt(&[(b"COLR", &colr), (b"CPAL", &cpal)])
 }
 
-fn build_cpal_v0(colors: &[(u8, u8, u8, u8)]) -> Vec<u8> {
-    let num_palettes: u16 = 1;
-    let entries = colors.len() as u16;
-    let mut out = Vec::new();
-    out.extend_from_slice(&0u16.to_be_bytes());
-    out.extend_from_slice(&entries.to_be_bytes());
-    out.extend_from_slice(&num_palettes.to_be_bytes());
-    out.extend_from_slice(&entries.to_be_bytes());
-    let header_plus_indices = 12 + num_palettes as usize * 2;
-    out.extend_from_slice(&(header_plus_indices as u32).to_be_bytes());
-    out.extend_from_slice(&0u16.to_be_bytes());
-    for (r, g, b, a) in colors {
-        out.push(*b);
-        out.push(*g);
-        out.push(*r);
-        out.push(*a);
+fn stop(offset: f32, is_foreground: i32, color: u32) -> hb_color_stop_t {
+    hb_color_stop_t {
+        offset,
+        is_foreground,
+        color,
     }
-    out
-}
-
-fn build_v1_header(glyph_id: u16) -> Vec<u8> {
-    let header_len: usize = 34;
-    let mut out = Vec::new();
-    out.extend_from_slice(&1u16.to_be_bytes());
-    out.extend_from_slice(&0u16.to_be_bytes());
-    out.extend_from_slice(&(header_len as u32).to_be_bytes());
-    out.extend_from_slice(&(header_len as u32).to_be_bytes());
-    out.extend_from_slice(&0u16.to_be_bytes());
-    out.extend_from_slice(&(header_len as u32).to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes()); // layerListOffset
-    out.extend_from_slice(&0u32.to_be_bytes()); // clipListOffset
-    out.extend_from_slice(&0u32.to_be_bytes()); // varIndexMapOffset
-    out.extend_from_slice(&0u32.to_be_bytes()); // itemVariationStoreOffset
-    out.extend_from_slice(&1u32.to_be_bytes());
-    out.extend_from_slice(&glyph_id.to_be_bytes());
-    out.extend_from_slice(&10u32.to_be_bytes());
-    out
-}
-
-fn f2dot14(v: f32) -> [u8; 2] {
-    let raw = (v * 16384.0).round() as i16;
-    raw.to_be_bytes()
-}
-
-// =========================================================================
-// Callback fixtures
-// =========================================================================
-
-static COLOR_CALLS: AtomicU32 = AtomicU32::new(0);
-static PUSH_CLIP_GLYPH_CALLS: AtomicU32 = AtomicU32::new(0);
-static POP_CLIP_CALLS: AtomicU32 = AtomicU32::new(0);
-static LAST_GID: AtomicU32 = AtomicU32::new(0);
-static LAST_COLOR: AtomicU32 = AtomicU32::new(0);
-
-extern "C" fn cb_color(
-    _funcs: *mut hb_paint_funcs_t,
-    _data: *mut c_void,
-    _is_foreground: i32,
-    color: hb_color_t,
-) {
-    COLOR_CALLS.fetch_add(1, Ordering::SeqCst);
-    LAST_COLOR.store(color, Ordering::SeqCst);
-}
-
-extern "C" fn cb_push_clip_glyph(_funcs: *mut hb_paint_funcs_t, _data: *mut c_void, gid: u32) {
-    PUSH_CLIP_GLYPH_CALLS.fetch_add(1, Ordering::SeqCst);
-    LAST_GID.store(gid, Ordering::SeqCst);
-}
-
-extern "C" fn cb_pop_clip(_funcs: *mut hb_paint_funcs_t, _data: *mut c_void) {
-    POP_CLIP_CALLS.fetch_add(1, Ordering::SeqCst);
 }
 
 #[test]
-fn paint_glyph_against_solid_colr_fires_color_and_clip_callbacks() {
-    // Reset shared counters in case test ordering ever changes.
-    COLOR_CALLS.store(0, Ordering::SeqCst);
-    PUSH_CLIP_GLYPH_CALLS.store(0, Ordering::SeqCst);
-    POP_CLIP_CALLS.store(0, Ordering::SeqCst);
-    LAST_GID.store(0, Ordering::SeqCst);
-    LAST_COLOR.store(0, Ordering::SeqCst);
+fn glyph_clip_is_not_transformed_by_the_paint_below_it() {
+    let s = Setup::new(&font_bytes());
+    let gradient = Ev::Linear(
+        vec![stop(0.0, 0, HB_RED), stop(1.0, 1, FG)],
+        HB_PAINT_EXTEND_PAD,
+        [0.0, 0.0, 100.0, 0.0, 0.0, 100.0],
+    );
+    let inner = vec![
+        Ev::PushTransform([2.0, 0.0, 0.0, 2.0, 5.0, 0.0]),
+        gradient,
+        Ev::PopTransform,
+    ];
+    assert_eq!(s.paint(1, 0, FG), rooted(clipped(42, inner)));
+}
 
-    // Build a tiny COLR with a single base-glyph PaintGlyph(outline=42)
-    // -> PaintSolid(palette=0, alpha=1.0). The COLR base glyph is 7.
-    let mut colr = build_v1_header(7);
-    let pglyph_start = colr.len();
-    colr.push(10); // PaintGlyph
-    colr.extend_from_slice(&[0, 0, 0]); // Offset24 placeholder
-    colr.extend_from_slice(&42u16.to_be_bytes()); // outline glyph id
+#[test]
+fn composite_uses_two_groups_and_reports_the_mode_on_pop() {
+    let s = Setup::new(&font_bytes());
+    let mut want = vec![Ev::PushGroup];
+    want.extend(clipped(4, vec![Ev::Color(0, HB_RED)]));
+    want.push(Ev::PushGroup);
+    want.extend(clipped(3, vec![Ev::Color(0, HB_GREEN)]));
+    want.extend([
+        Ev::PopGroup(HB_PAINT_COMPOSITE_MODE_DEST_IN),
+        Ev::PopGroup(HB_PAINT_COMPOSITE_MODE_SRC_OVER),
+    ]);
+    assert_eq!(s.paint(2, 0, FG), rooted(want));
+}
 
-    let solid_start = colr.len();
-    let rel = (solid_start - pglyph_start) as u32;
-    colr[pglyph_start + 1] = ((rel >> 16) & 0xff) as u8;
-    colr[pglyph_start + 2] = ((rel >> 8) & 0xff) as u8;
-    colr[pglyph_start + 3] = (rel & 0xff) as u8;
+#[test]
+fn around_center_transforms_nest_translate_scale_translate() {
+    let s = Setup::new(&font_bytes());
+    let want = vec![
+        Ev::PushTransform([1.0, 0.0, 0.0, 1.0, 10.0, 20.0]),
+        Ev::PushTransform([0.5, 0.0, 0.0, 0.5, 0.0, 0.0]),
+        Ev::PushTransform([1.0, 0.0, 0.0, 1.0, -10.0, -20.0]),
+        Ev::Color(0, HB_RED),
+        Ev::PopTransform,
+        Ev::PopTransform,
+        Ev::PopTransform,
+    ];
+    assert_eq!(s.paint(3, 0, FG), rooted(want));
+}
 
-    colr.push(2); // PaintSolid
-    colr.extend_from_slice(&0u16.to_be_bytes()); // palette index 0
-    colr.extend_from_slice(&f2dot14(1.0)); // alpha 1.0
+#[test]
+fn sweep_angles_are_biased_radians() {
+    let s = Setup::new(&font_bytes());
+    let want = Ev::Sweep(
+        vec![stop(0.0, 0, HB_RED), stop(1.0, 0, HB_GREEN)],
+        HB_PAINT_EXTEND_REPEAT,
+        [50.0, 60.0, 0.0, 1.5 * PI],
+    );
+    assert_eq!(s.paint(4, 0, FG), rooted(vec![want]));
+}
 
-    // Palette 0 = pure red. The bridge converts to BGRA: alpha 0xFF,
-    // red 0xFF, green 0x00, blue 0x00 -> 0xFF_FF_00_00.
-    let cpal = build_cpal_v0(&[(255, 0, 0, 255)]);
-    let bytes = build_face_bytes(&colr, &cpal);
+#[test]
+fn radial_gradient_passes_both_circles() {
+    let s = Setup::new(&font_bytes());
+    let want = Ev::Radial(
+        vec![stop(0.25, 0, HB_GREEN)],
+        HB_PAINT_EXTEND_REFLECT,
+        [10.0, 20.0, 5.0, 30.0, 40.0, 50.0],
+    );
+    assert_eq!(s.paint(5, 0, FG), rooted(vec![want]));
+}
 
-    // SAFETY: every pointer passed here is null, a live handle created
-    // in this test, or a slice that outlives the call.
-    unsafe {
-        let blob = hb_blob_create(
-            bytes.as_ptr().cast::<c_char>(),
-            bytes.len() as c_uint,
-            HB_MEMORY_MODE_READONLY,
-            ptr::null_mut(),
-            None,
+#[test]
+fn colr_v0_layers_paint_clip_color_pop_per_layer() {
+    let s = Setup::new(&font_bytes());
+    assert_eq!(
+        s.paint(6, 0, FG),
+        vec![
+            Ev::PushClipGlyph(20),
+            Ev::Color(0, HB_RED),
+            Ev::PopClip,
+            Ev::PushClipGlyph(21),
+            Ev::Color(1, FG),
+            Ev::PopClip,
+        ]
+    );
+}
+
+#[test]
+fn glyphs_without_color_data_paint_their_outline_in_the_foreground() {
+    let s = Setup::new(&font_bytes());
+    for gid in [9, 0x1_0005] {
+        assert_eq!(
+            s.paint(gid, 0, FG),
+            vec![Ev::PushClipGlyph(gid), Ev::Color(1, FG), Ev::PopClip],
+            "gid {gid:#x}"
         );
-        let face = hb_face_create(blob, 0);
-        let font = hb_font_create(face);
-
-        let funcs = hb_paint_funcs_create();
-        hb_paint_funcs_set_color_func(funcs, Some(cb_color));
-        hb_paint_funcs_set_push_clip_glyph_func(funcs, Some(cb_push_clip_glyph));
-        hb_paint_funcs_set_pop_clip_func(funcs, Some(cb_pop_clip));
-
-        // Drive the bridge against the base glyph (7).
-        hb_font_paint_glyph(font, 7, funcs, ptr::null_mut(), 0, 0xFF000000);
-
-        // The DrawCmd stream for this fixture is one FillGlyph with
-        // gid=42, transform=identity, paint=Solid(red). The bridge
-        // therefore emits push_clip_glyph(42) -> color(red) -> pop_clip.
-        // No transform should be pushed because the accumulated
-        // transform is identity.
-        assert_eq!(PUSH_CLIP_GLYPH_CALLS.load(Ordering::SeqCst), 1);
-        assert_eq!(POP_CLIP_CALLS.load(Ordering::SeqCst), 1);
-        assert_eq!(COLOR_CALLS.load(Ordering::SeqCst), 1);
-        assert_eq!(LAST_GID.load(Ordering::SeqCst), 42);
-
-        let color = LAST_COLOR.load(Ordering::SeqCst);
-        // alpha byte: 0xFF, red byte: 0xFF, blue/green: 0.
-        assert_eq!(color >> 24, 0xFF, "alpha byte");
-        assert_eq!((color >> 16) & 0xFF, 0xFF, "red byte");
-        assert_eq!((color >> 8) & 0xFF, 0x00, "green byte");
-        assert_eq!(color & 0xFF, 0x00, "blue byte");
-
-        hb_paint_funcs_destroy(funcs);
-        hb_font_destroy(font);
-        hb_face_destroy(face);
-        hb_blob_destroy(blob);
     }
+    // The fallback color is the foreground exactly, alpha included.
+    let translucent = hb_color(1, 2, 3, 0x40);
+    assert_eq!(s.paint(9, 0, translucent)[1], Ev::Color(1, translucent));
+}
+
+#[test]
+fn root_transform_follows_the_font_scale() {
+    let s = Setup::new(&font_bytes());
+    // The fixture has no head table, so upem is 1000.
+    // SAFETY: the font is live.
+    unsafe { hb_font_set_scale(s.font, 2000, 4000) };
+    let root = [2.0, 0.0, 0.0, 4.0, 0.0, 0.0];
+    let inverse = [0.5, 0.0, -0.0, 0.25, 0.0, 0.0];
+    // The ClipBox (0, 0, 1000, 1000) scales with the font, outside the
+    // root transform.
+    let clip = Ev::PushClipRect([0.0, 0.0, 2000.0, 4000.0]);
+    let events = s.paint(3, 0, FG);
+    assert_eq!(events[..2], [clip.clone(), Ev::PushTransform(root)]);
+    assert_eq!(events[events.len() - 2..], [Ev::PopTransform, Ev::PopClip]);
+    let events = s.paint(2, 0, FG);
+    assert_eq!(
+        events[..6],
+        [
+            clip,
+            Ev::PushTransform(root),
+            Ev::PushGroup,
+            Ev::PushTransform(inverse),
+            Ev::PushClipGlyph(4),
+            Ev::PushTransform(root),
+        ]
+    );
+}
+
+#[test]
+fn inverse_root_transform_has_harfbuzzs_negative_zero() {
+    // HarfBuzz prints the inverse root transform as "1 0 -0 1 0 0".
+    let s = Setup::new(&font_bytes());
+    let events = s.paint(1, 0, FG);
+    let Ev::PushTransform(inverse) = events[2] else {
+        panic!("expected the inverse root transform: {events:?}");
+    };
+    assert_eq!(inverse, INVERSE_IDENTITY);
+    assert!(inverse[2].is_sign_negative(), "{inverse:?}");
+    let Ev::PushTransform(root) = events[1] else {
+        panic!("expected the root transform: {events:?}");
+    };
+    assert!(root[2].is_sign_positive(), "{root:?}");
+}
+
+#[test]
+fn clip_boxes_round_to_font_units() {
+    // 1000 upem at 3 units per em: the 16.16 multiplier truncates to
+    // 196 / 65536, so 1000 scales to 3 and the box is (0, 0, 3, 3).
+    let s = Setup::new(&font_bytes());
+    // SAFETY: the font is live.
+    unsafe { hb_font_set_scale(s.font, 3, 3) };
+    assert_eq!(s.paint(3, 0, FG)[0], Ev::PushClipRect([0.0, 0.0, 3.0, 3.0]));
+}
+
+/// Glyphs without a ClipList: 1 = PaintColrGlyph(2), 2 = a bare solid
+/// (unbounded), 3 = PaintColrGlyph(4), whose ClipBox bounds it.
+fn unclipped_font() -> Vec<u8> {
+    let v1 = [
+        (1, colr_glyph(2)),
+        (2, solid(0, 1.0)),
+        (3, colr_glyph(4)),
+        (4, solid(1, 0.5)),
+    ];
+    let colr = colr_with_clips(&[], &v1, &[], &[(4, 4, [10, 20, 30, 40])]);
+    let cpal = cpal(&[&[RED, GREEN]]);
+    sfnt(&[(b"COLR", &colr), (b"CPAL", &cpal)])
+}
+
+#[test]
+fn unbounded_glyphs_clip_to_their_computed_extents_and_paint_nothing() {
+    let s = Setup::new(&unclipped_font());
+    for gid in [1, 2] {
+        let events = s.paint(gid, 0, FG);
+        assert!(
+            matches!(events[0], Ev::PushClipRect(_)),
+            "gid {gid}: {events:?}"
+        );
+        assert_eq!(
+            events[1..],
+            [Ev::PushTransform(IDENTITY), Ev::PopTransform, Ev::PopClip],
+            "gid {gid}"
+        );
+    }
+}
+
+#[test]
+fn colr_glyph_references_are_offered_then_clipped_to_their_box() {
+    let s = Setup::new(&unclipped_font());
+    let want = vec![
+        // Bounds computed from glyph 4's ClipBox.
+        Ev::PushClipRect([10.0, 20.0, 30.0, 40.0]),
+        Ev::PushTransform(IDENTITY),
+        // The color_glyph offer, declined: no callback is installed.
+        Ev::PushTransform(INVERSE_IDENTITY),
+        Ev::PopTransform,
+        // Glyph 4's ClipBox, in design units inside the root transform.
+        Ev::PushClipRect([10.0, 20.0, 30.0, 40.0]),
+        Ev::Color(0, hb_color(0, 255, 0, 127)),
+        Ev::PopClip,
+        Ev::PopTransform,
+        Ev::PopClip,
+    ];
+    assert_eq!(s.paint(3, 0, FG), want);
+}
+
+#[test]
+fn a_color_glyph_callback_that_paints_skips_the_reference() {
+    unsafe extern "C" fn paint_it(
+        _funcs: *mut hb_paint_funcs_t,
+        data: *mut c_void,
+        glyph: u32,
+        _font: *mut sigilbuzz_capi::hb_font_t,
+        user_data: *mut c_void,
+    ) -> i32 {
+        assert_eq!(user_data as usize, 0x2A, "own user_data");
+        // SAFETY: every test passes a live `Log` as paint_data.
+        unsafe { log(data) }
+            .events
+            .borrow_mut()
+            .push(Ev::CustomPalette(glyph));
+        1
+    }
+    let s = Setup::new(&unclipped_font());
+    // SAFETY: the table is live; the tag is never dereferenced.
+    unsafe {
+        hb_paint_funcs_set_color_glyph_func(s.funcs, Some(paint_it), 0x2A as *mut c_void, None);
+    }
+    let events = s.paint(3, 0, FG);
+    assert_eq!(
+        events[2..],
+        [
+            Ev::PushTransform(INVERSE_IDENTITY),
+            Ev::CustomPalette(4),
+            Ev::PopTransform,
+            Ev::PopTransform,
+            Ev::PopClip,
+        ]
+    );
+}
+
+#[test]
+fn unset_callbacks_are_skipped() {
+    let bytes = font_bytes();
+    let s = Setup::new(&bytes);
+    let only_color = hb_paint_funcs_create();
+    unsafe extern "C" fn count(
+        _f: *mut hb_paint_funcs_t,
+        data: *mut c_void,
+        _is_fg: i32,
+        _color: u32,
+        _user_data: *mut c_void,
+    ) {
+        // SAFETY: the test passes a live counter as paint_data.
+        unsafe { &*data.cast::<AtomicUsize>() }.fetch_add(1, Ordering::SeqCst);
+    }
+    let calls = AtomicUsize::new(0);
+    // SAFETY: the table and font are live; `calls` outlives the paint.
+    unsafe {
+        hb_paint_funcs_set_color_func(only_color, Some(count), ptr::null_mut(), None);
+        let data = ptr::from_ref(&calls).cast_mut().cast::<c_void>();
+        hb_font_paint_glyph(s.font, 2, only_color, data, 0, FG);
+        hb_paint_funcs_destroy(only_color);
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "two solid fills in glyph 2"
+    );
+}
+
+#[test]
+fn a_callback_may_replace_callbacks_while_painting() {
+    // The first pop_clip swaps color for a no-op; later colors vanish.
+    unsafe extern "C" fn pop_clip_then_mute(
+        funcs: *mut hb_paint_funcs_t,
+        data: *mut c_void,
+        _user_data: *mut c_void,
+    ) {
+        // SAFETY: `funcs` is the live table being painted with.
+        unsafe { hb_paint_funcs_set_color_func(funcs, None, ptr::null_mut(), None) };
+        // SAFETY: every test passes a live `Log` as paint_data.
+        unsafe { log(data) }.events.borrow_mut().push(Ev::PopClip);
+    }
+    let s = Setup::new(&font_bytes());
+    // SAFETY: the table is live.
+    unsafe {
+        hb_paint_funcs_set_pop_clip_func(s.funcs, Some(pop_clip_then_mute), ptr::null_mut(), None);
+    }
+    let events = s.paint_log(6, 0, FG).events.into_inner();
+    assert_eq!(
+        events,
+        vec![
+            Ev::PushClipGlyph(20),
+            Ev::Color(0, HB_RED),
+            Ev::PopClip,
+            Ev::PushClipGlyph(21),
+            Ev::PopClip,
+        ]
+    );
+}
+
+#[test]
+fn a_callback_may_drop_the_callers_last_references() {
+    // pop_clip destroys the funcs table and font the caller passed in;
+    // the paint call keeps its own references until it returns.
+    struct Owned {
+        funcs: *mut hb_paint_funcs_t,
+        font: *mut sigilbuzz_capi::hb_font_t,
+        pops: AtomicUsize,
+    }
+    unsafe extern "C" fn release_on_first_pop(
+        _funcs: *mut hb_paint_funcs_t,
+        data: *mut c_void,
+        _user_data: *mut c_void,
+    ) {
+        // SAFETY: the test passes a live `Owned` as paint_data.
+        let owned = unsafe { &*data.cast::<Owned>() };
+        if owned.pops.fetch_add(1, Ordering::SeqCst) == 0 {
+            // SAFETY: these are the test's only references.
+            unsafe {
+                hb_paint_funcs_destroy(owned.funcs);
+                sigilbuzz_capi::hb_font_destroy(owned.font);
+            }
+        }
+    }
+    let s = Setup::new(&font_bytes());
+    let funcs = hb_paint_funcs_create();
+    // The callback releases `funcs` (its only reference) and an extra
+    // font reference, both while they are being painted with.
+    // SAFETY: both handles are live.
+    let owned = unsafe {
+        hb_paint_funcs_set_pop_clip_func(funcs, Some(release_on_first_pop), ptr::null_mut(), None);
+        Owned {
+            funcs,
+            font: sigilbuzz_capi::hb_font_reference(s.font),
+            pops: AtomicUsize::new(0),
+        }
+    };
+    // SAFETY: the handles are live at the call; `owned` outlives it.
+    unsafe {
+        let data = ptr::from_ref(&owned).cast_mut().cast::<c_void>();
+        hb_font_paint_glyph(owned.font, 6, owned.funcs, data, 0, FG);
+    }
+    assert_eq!(
+        owned.pops.load(Ordering::SeqCst),
+        2,
+        "second layer still painted"
+    );
+}
+
+#[test]
+fn null_font_or_funcs_is_a_no_op() {
+    let s = Setup::new(&font_bytes());
+    let log = Log::default();
+    let data = ptr::from_ref(&log).cast_mut().cast::<c_void>();
+    // SAFETY: null handles are accepted and ignored.
+    unsafe {
+        hb_font_paint_glyph(ptr::null_mut(), 1, s.funcs, data, 0, FG);
+        hb_font_paint_glyph(s.font, 1, ptr::null_mut(), data, 0, FG);
+    }
+    assert!(log.events.borrow().is_empty());
 }
 
 // =========================================================================
-// Variation coordinates
+// Palette and variation coordinates
 // =========================================================================
 
-/// Builds an SFNT from `(tag, data)` pairs, which must be sorted by
-/// tag.
-fn build_sfnt(tables: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
-    let mut offset = 12 + tables.len() * 16;
-    let mut out = Vec::new();
-    out.extend_from_slice(&0x00010000u32.to_be_bytes());
-    out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
-    out.extend_from_slice(&[0; 6]);
-    for (tag, data) in tables {
-        out.extend_from_slice(*tag);
-        out.extend_from_slice(&0u32.to_be_bytes());
-        out.extend_from_slice(&(offset as u32).to_be_bytes());
-        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
-        offset += data.len();
-    }
-    for (_, data) in tables {
-        out.extend_from_slice(data);
-    }
-    out
-}
-
-/// An `fvar` table with one `wght` axis: min 100, default 400, max 900.
-fn build_fvar_wght() -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&1u16.to_be_bytes()); // majorVersion
-    out.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
-    out.extend_from_slice(&16u16.to_be_bytes()); // axesArrayOffset
-    out.extend_from_slice(&2u16.to_be_bytes()); // reserved
-    out.extend_from_slice(&1u16.to_be_bytes()); // axisCount
-    out.extend_from_slice(&20u16.to_be_bytes()); // axisSize
-    out.extend_from_slice(&0u16.to_be_bytes()); // instanceCount
-    out.extend_from_slice(&8u16.to_be_bytes()); // instanceSize
-    out.extend_from_slice(b"wght");
-    for value in [100i32, 400, 900] {
-        out.extend_from_slice(&(value << 16).to_be_bytes());
-    }
-    out.extend_from_slice(&0u16.to_be_bytes()); // flags
-    out.extend_from_slice(&256u16.to_be_bytes()); // axisNameID
-    out
-}
-
-/// A COLRv1 table whose base glyph 7 is a PaintVarSolid (palette 0,
-/// alpha 1.0). One ItemVariationStore row lowers the alpha by 0.5 at
-/// the axis maximum. The header layout and the store placement follow
-/// the fixtures in `sigilbuzz-paint/tests/evaluator.rs`.
-fn build_var_solid_colr() -> Vec<u8> {
-    let header_len: u32 = 34;
-    let mut colr = Vec::new();
-    colr.extend_from_slice(&1u16.to_be_bytes()); // version
-    colr.extend_from_slice(&0u16.to_be_bytes()); // numBaseGlyphRecords
-    colr.extend_from_slice(&header_len.to_be_bytes());
-    colr.extend_from_slice(&header_len.to_be_bytes());
-    colr.extend_from_slice(&0u16.to_be_bytes()); // numLayerRecords
-    colr.extend_from_slice(&header_len.to_be_bytes()); // baseGlyphList
-    colr.extend_from_slice(&0u32.to_be_bytes()); // layerList
-    colr.extend_from_slice(&0u32.to_be_bytes()); // clipList
-    colr.extend_from_slice(&0u32.to_be_bytes()); // varIndexMap
-    let var_store_slot = colr.len();
-    colr.extend_from_slice(&0u32.to_be_bytes()); // variation store
-                                                 // BaseGlyphList with one record: glyph 7, paint right after it.
-    colr.extend_from_slice(&1u32.to_be_bytes());
-    colr.extend_from_slice(&7u16.to_be_bytes());
-    colr.extend_from_slice(&10u32.to_be_bytes());
-    // PaintVarSolid: format 3, palette 0, alpha 1.0, varIndexBase 0.
-    colr.push(3);
-    colr.extend_from_slice(&0u16.to_be_bytes());
-    colr.extend_from_slice(&f2dot14(1.0));
-    colr.extend_from_slice(&0u32.to_be_bytes());
-
-    let var_store_off = colr.len() as u32;
-    colr[var_store_slot..var_store_slot + 4].copy_from_slice(&var_store_off.to_be_bytes());
-    // ItemVariationStore: format 1, region list at 12, one subtable.
-    colr.extend_from_slice(&1u16.to_be_bytes());
-    colr.extend_from_slice(&12u32.to_be_bytes());
-    colr.extend_from_slice(&1u16.to_be_bytes());
-    colr.extend_from_slice(&22u32.to_be_bytes());
-    // Region list: one axis, one region peaking at the axis maximum.
-    colr.extend_from_slice(&1u16.to_be_bytes());
-    colr.extend_from_slice(&1u16.to_be_bytes());
-    colr.extend_from_slice(&f2dot14(0.0));
-    colr.extend_from_slice(&f2dot14(1.0));
-    colr.extend_from_slice(&f2dot14(1.0));
-    // Subtable: one item, one word delta, one region.
-    colr.extend_from_slice(&1u16.to_be_bytes());
-    colr.extend_from_slice(&1u16.to_be_bytes());
-    colr.extend_from_slice(&1u16.to_be_bytes());
-    colr.extend_from_slice(&0u16.to_be_bytes());
-    colr.extend_from_slice(&(-8192i16).to_be_bytes()); // alpha -0.5
-    colr
-}
-
-/// Records the last color a paint callback reported into the `u32`
-/// that `paint_data` points at.
-extern "C" fn cb_record_color(
-    _funcs: *mut hb_paint_funcs_t,
-    data: *mut c_void,
-    _is_foreground: i32,
-    color: hb_color_t,
-) {
-    // SAFETY: the test passes a pointer to a live `AtomicU32` as
-    // `paint_data`.
-    unsafe { (*data.cast::<AtomicU32>()).store(color, Ordering::SeqCst) };
+/// Sets the font's `wght` axis.
+fn set_wght(s: &Setup, value: f32) {
+    let v = sigilbuzz_capi::hb_variation_t {
+        tag: u32::from_be_bytes(*b"wght"),
+        value,
+    };
+    // SAFETY: the font is live and `v` is one valid variation.
+    unsafe { sigilbuzz_capi::hb_font_set_variations(s.font, &v, 1) };
 }
 
 /// HarfBuzz paints with the variation coordinates set on the font.
@@ -317,100 +448,41 @@ extern "C" fn cb_record_color(
 /// variations were.
 #[test]
 fn paint_glyph_applies_font_variations() {
-    let fvar = build_fvar_wght();
-    let colr = build_var_solid_colr();
-    let cpal = build_cpal_v0(&[(255, 0, 0, 255)]);
-    let bytes = build_sfnt(&[(b"COLR", &colr), (b"CPAL", &cpal), (b"fvar", &fvar)]);
-
-    // SAFETY: every pointer passed here is null, a live handle created
-    // in this test, or a slice that outlives the call.
-    unsafe {
-        let blob = hb_blob_create(
-            bytes.as_ptr().cast::<c_char>(),
-            bytes.len() as c_uint,
-            HB_MEMORY_MODE_READONLY,
-            ptr::null_mut(),
-            None,
-        );
-        let face = hb_face_create(blob, 0);
-        let font = hb_font_create(face);
-        let funcs = hb_paint_funcs_create();
-        hb_paint_funcs_set_color_func(funcs, Some(cb_record_color));
-        let color = AtomicU32::new(0);
-        let data = ptr::from_ref(&color).cast_mut().cast::<c_void>();
-
-        hb_font_paint_glyph(font, 7, funcs, data, 0, 0);
-        assert_eq!(color.load(Ordering::SeqCst) >> 24, 0xFF, "default alpha");
-
-        let heavy = hb_variation_t {
-            tag: u32::from_be_bytes(*b"wght"),
-            value: 900.0,
-        };
-        hb_font_set_variations(font, &heavy, 1);
-        hb_font_paint_glyph(font, 7, funcs, data, 0, 0);
-        // Alpha 1.0 - 0.5 = 0.5, packed as round(0.5 * 255) = 128.
-        assert_eq!(color.load(Ordering::SeqCst) >> 24, 128, "alpha at wght 900");
-
-        hb_paint_funcs_destroy(funcs);
-        hb_font_destroy(font);
-        hb_face_destroy(face);
-        hb_blob_destroy(blob);
-    }
+    // Glyph 7: PaintVarSolid on palette entry 0 whose alpha drops by
+    // 0.5 at the wght maximum.
+    let colr = colr(&[], &[(7, var_solid(0, 1.0, 0))], &ivs(&[-8192]));
+    let cpal = cpal(&[&[RED]]);
+    let s = Setup::new(&sfnt(&[
+        (b"COLR", &colr),
+        (b"CPAL", &cpal),
+        (b"fvar", &fvar()),
+    ]));
+    assert_eq!(unrooted(&s.paint(7, 0, FG)), [Ev::Color(0, HB_RED)]);
+    set_wght(&s, 900.0);
+    // Alpha 1.0 - 0.5 = 0.5. HarfBuzz multiplies the alpha byte and
+    // truncates: 0xFF * 0.5 = 127.5 becomes 0x7F.
+    assert_eq!(
+        unrooted(&s.paint(7, 0, FG)),
+        [Ev::Color(0, hb_color(0, 0, 255, 0x7F))]
+    );
 }
 
 /// HarfBuzz resolves colors in the palette the caller passes.
 #[test]
 fn paint_glyph_uses_the_requested_palette() {
-    // PaintSolid on glyph 7 using palette entry 0.
-    let mut colr = build_v1_header(7);
-    colr.push(2); // PaintSolid
-    colr.extend_from_slice(&0u16.to_be_bytes()); // palette entry 0
-    colr.extend_from_slice(&f2dot14(1.0)); // alpha 1.0
-                                           // CPAL with two one-entry palettes: red, then blue.
-    let mut cpal = Vec::new();
-    for word in [0u16, 1, 2, 2] {
-        cpal.extend_from_slice(&word.to_be_bytes()); // version, entries, palettes, records
-    }
-    cpal.extend_from_slice(&16u32.to_be_bytes()); // colorRecordsArrayOffset
-    cpal.extend_from_slice(&0u16.to_be_bytes()); // palette 0 starts at record 0
-    cpal.extend_from_slice(&1u16.to_be_bytes()); // palette 1 starts at record 1
-    cpal.extend_from_slice(&[0, 0, 255, 255]); // BGRA red
-    cpal.extend_from_slice(&[255, 0, 0, 255]); // BGRA blue
-    let bytes = build_face_bytes(&colr, &cpal);
-
-    // SAFETY: every pointer passed here is null, a live handle created
-    // in this test, or a slice that outlives the call.
-    unsafe {
-        let blob = hb_blob_create(
-            bytes.as_ptr().cast::<c_char>(),
-            bytes.len() as c_uint,
-            HB_MEMORY_MODE_READONLY,
-            ptr::null_mut(),
-            None,
-        );
-        let face = hb_face_create(blob, 0);
-        let font = hb_font_create(face);
-        let funcs = hb_paint_funcs_create();
-        hb_paint_funcs_set_color_func(funcs, Some(cb_record_color));
-        let color = AtomicU32::new(0);
-        let data = ptr::from_ref(&color).cast_mut().cast::<c_void>();
-
-        hb_font_paint_glyph(font, 7, funcs, data, 0, 0);
-        assert_eq!(
-            color.load(Ordering::SeqCst),
-            0xFFFF_0000,
-            "palette 0 is red"
-        );
-        hb_font_paint_glyph(font, 7, funcs, data, 1, 0);
-        assert_eq!(
-            color.load(Ordering::SeqCst),
-            0xFF00_00FF,
-            "palette 1 is blue"
-        );
-
-        hb_paint_funcs_destroy(funcs);
-        hb_font_destroy(font);
-        hb_face_destroy(face);
-        hb_blob_destroy(blob);
-    }
+    // Glyph 7: PaintSolid on palette entry 0. Palette 0 holds red and
+    // palette 1 holds blue.
+    let colr = colr(&[], &[(7, solid(0, 1.0))], &[]);
+    let cpal = cpal(&[&[RED], &[(0, 0, 255, 255)]]);
+    let s = Setup::new(&sfnt(&[(b"COLR", &colr), (b"CPAL", &cpal)]));
+    assert_eq!(
+        unrooted(&s.paint(7, 0, FG)),
+        [Ev::Color(0, HB_RED)],
+        "palette 0 is red"
+    );
+    assert_eq!(
+        unrooted(&s.paint(7, 1, FG)),
+        [Ev::Color(0, hb_color(255, 0, 0, 255))],
+        "palette 1 is blue"
+    );
 }

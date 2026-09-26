@@ -3,10 +3,10 @@
 //! sigilbuzz exposes the COLRv1 color line as palette indices + raw
 //! coordinates. The evaluator turns those into the float-channel
 //! gradients consumers actually want: palette entries already
-//! resolved and alpha already multiplied. Geometry stays in the
-//! paint's own design-unit frame. The matching `Transform2D` ships in
-//! the surrounding `DrawCmd`, so consumers can apply it on the CPU or
-//! defer it to a hardware pipeline.
+//! resolved and alpha already multiplied. Geometry is in the design
+//! units of the outline the gradient fills. The matching `Transform2D`
+//! ships in the surrounding `DrawCmd`, so consumers can apply it on the
+//! CPU or defer it to a hardware pipeline.
 
 use alloc::vec::Vec;
 
@@ -20,8 +20,36 @@ pub struct ColorStop {
     /// but the spec allows out-of-range values for `Repeat` / `Reflect`
     /// extends.
     pub offset: f32,
-    /// Resolved color with the per-stop alpha already folded in.
+    /// Resolved color with the per-stop alpha already folded in. For a
+    /// foreground stop this is the evaluation's foreground color (see
+    /// [`crate::EvalOptions::with_foreground`]) with the stop alpha
+    /// applied.
     pub color: Color,
+    /// True when the stop used COLR palette entry `0xFFFF`, the
+    /// foreground (text) color. A renderer with its own text color can
+    /// substitute it here, keeping `color.a` relative to the evaluation
+    /// foreground's alpha.
+    pub is_foreground: bool,
+}
+
+impl ColorStop {
+    /// A stop with an ordinary (non-foreground) color.
+    ///
+    /// ```
+    /// use sigilbuzz_paint::{Color, ColorStop};
+    ///
+    /// let stop = ColorStop::new(0.5, Color::new(1.0, 0.0, 0.0, 1.0));
+    /// assert_eq!(stop.offset, 0.5);
+    /// assert!(!stop.is_foreground);
+    /// ```
+    #[must_use]
+    pub const fn new(offset: f32, color: Color) -> Self {
+        Self {
+            offset,
+            color,
+            is_foreground: false,
+        }
+    }
 }
 
 /// Extend-mode mirrors [`sigilbuzz::tables::colr::Extend`] but lives
@@ -55,16 +83,16 @@ impl From<sigilbuzz::tables::colr::Extend> for Extend {
 pub enum GradientKind {
     /// Linear gradient between two endpoints. The third point in the
     /// COLRv1 record (`p2`) sets the rotation of the gradient's color
-    /// bands. The evaluator passes all three points through unchanged.
+    /// bands, which run parallel to the line from `p0` to `p2`.
     Linear {
         /// Start point.
         p0: (f32, f32),
         /// End point.
         p1: (f32, f32),
-        /// Rotation anchor. The spec's effective end point is `p1`
-        /// projected onto the line through `p0` that is perpendicular
-        /// to the line from `p0` to `p2`. [`linear_gradient_end`]
-        /// computes it.
+        /// Rotation anchor. A renderer draws the gradient from `p0` to
+        /// `p1` projected onto the normal of the line from `p0` to
+        /// `p2`, as HarfBuzz's `hb_paint_reduce_linear_anchors` does.
+        /// With `p2` on `p0` the gradient runs from `p0` to `p1`.
         p2: (f32, f32),
     },
     /// Two-circle radial gradient. `t = 0` rides the inner circle,
@@ -80,7 +108,10 @@ pub enum GradientKind {
         r1: f32,
     },
     /// Sweep (conic) gradient around `center`. Angles in radians; `0`
-    /// is the +x axis, increasing counter-clockwise.
+    /// is the +x axis, increasing counter-clockwise (y up, in design
+    /// units). The font stores each angle with a half-turn bias; the
+    /// evaluator has already removed it, so a stored `a` arrives as
+    /// `(a + 1) * pi`.
     Sweep {
         /// Center of the sweep.
         center: (f32, f32),
@@ -89,34 +120,6 @@ pub enum GradientKind {
         /// End angle in radians.
         end_angle: f32,
     },
-}
-
-/// Returns the effective end point of a COLRv1 linear gradient: `p1`
-/// moved along the direction from `p0` to `p2` until the line from
-/// `p0` to it is perpendicular to that direction. The color bands run
-/// parallel to the line from `p0` to `p2`, so a plain two-point
-/// gradient from `p0` to the returned point paints the same colors in
-/// the gradient's own coordinate space. When `p2` equals `p0` the
-/// direction is undefined and `p1` comes back unchanged, as in
-/// HarfBuzz.
-///
-/// ```
-/// use sigilbuzz_paint::linear_gradient_end;
-///
-/// // Bands along the diagonal pull the end point onto the other one.
-/// let end = linear_gradient_end((0.0, 0.0), (100.0, 0.0), (100.0, 100.0));
-/// assert_eq!(end, (50.0, -50.0));
-/// ```
-#[must_use]
-pub fn linear_gradient_end(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32)) -> (f32, f32) {
-    let (q1x, q1y) = (p1.0 - p0.0, p1.1 - p0.1);
-    let (q2x, q2y) = (p2.0 - p0.0, p2.1 - p0.1);
-    let len_sq = q2x * q2x + q2y * q2y;
-    if len_sq <= f32::EPSILON {
-        return p1;
-    }
-    let k = (q1x * q2x + q1y * q2y) / len_sq;
-    (p1.0 - k * q2x, p1.1 - k * q2y)
 }
 
 /// Resolved gradient: shape + stops + extend mode.

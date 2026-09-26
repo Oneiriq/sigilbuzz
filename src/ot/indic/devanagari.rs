@@ -58,7 +58,8 @@ use alloc::vec::Vec;
 use super::{IndicConfig, RephMode, RephPosition};
 use crate::buffer::{Glyph, IndicPosition};
 use crate::shape::{
-    apply_gsub_feature_in_scripts, apply_gsub_feature_masked, feature_would_substitute,
+    apply_gsub_feature_in_scripts, apply_gsub_feature_masked, apply_locl_ccmp_if_length_preserving,
+    feature_would_substitute,
 };
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
@@ -92,6 +93,9 @@ pub fn shape_indic(
     // codepoint indices it covers (start, end exclusive) so the
     // reorder phase can index into `glyphs` without re-scanning.
     let syllables = segment_syllables(codepoints, config);
+    // The cluster each code point starts, for final reordering, read
+    // while glyphs are still one per code point.
+    let byte_offsets = code_point_clusters(codepoints, glyphs);
 
     // Tag per-glyph Indic positions BEFORE we reorder or apply
     // features. The `rphf` ligature will drop the halant and leave
@@ -103,6 +107,14 @@ pub fn shape_indic(
     for syllable in &syllables {
         tag_positions(codepoints, glyphs, syllable);
     }
+
+    // HarfBuzz runs `locl` and `ccmp` as one stage before initial
+    // reordering. Everything below indexes glyphs by code point, so a
+    // font whose `ccmp` changes the glyph count gets `locl` as the
+    // first basic feature and `ccmp` last instead.
+    let early = gsub.is_some_and(|gsub| {
+        apply_locl_ccmp_if_length_preserving(gsub, glyphs, gdef, config.script_priority)
+    });
 
     // Initial reordering is per-syllable and mutates `glyphs` in
     // place. Indic reorder is length-preserving (same glyph count
@@ -128,6 +140,9 @@ pub fn shape_indic(
     // `consonant_position_from_face` in rustybuzz's ot_shaper_indic.
     if let Some(gsub) = gsub {
         let half_mask = compute_half_mask(gsub, gdef, codepoints, glyphs, config, &syllables);
+        if !early {
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"locl", 0, config.script_priority);
+        }
         for tag in INDIC_BASIC_FEATURES {
             if *tag == b"half" {
                 apply_gsub_feature_masked(
@@ -149,13 +164,15 @@ pub fn shape_indic(
     // reph glyph via `rphf`; we locate it by the
     // `RaToBecomeReph` tag we set above, which the ligature path
     // preserved on the surviving glyph.
-    let byte_offsets = cluster_byte_offsets(codepoints);
     final_reorder_all(glyphs, &syllables, &byte_offsets, config);
 
     // Presentation features.
     if let Some(gsub) = gsub {
         for tag in INDIC_PRESENTATION_FEATURES {
             apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, config.script_priority);
+        }
+        if !early {
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"ccmp", 0, config.script_priority);
         }
     }
 }
@@ -177,7 +194,10 @@ pub fn shape_devanagari(
     shape_indic(gsub, gdef, codepoints, glyphs, &config);
 }
 
-/// Default Indic2 basic features, in application order.
+/// Default Indic2 basic features, in application order. `locl` and
+/// `ccmp` run before them, ahead of initial reordering as in HarfBuzz,
+/// so language-specific forms (Marathi, Nepali) are in place before
+/// conjunct formation.
 pub(crate) const INDIC_BASIC_FEATURES: &[&[u8; 4]] = &[
     b"nukt", b"akhn", b"rphf", b"rkrf", b"blwf", b"half", b"pstf", b"vatu", b"cjct",
 ];
@@ -746,6 +766,23 @@ fn is_consonant(ch: char) -> bool {
         syllabic_category(ch),
         IndicSyllabicCategory::Consonant | IndicSyllabicCategory::ConsonantPlaceholder
     )
+}
+
+/// Returns a length-`codepoints.len() + 1` array mapping each code
+/// point to the cluster its glyph carries, with an open end. The
+/// clusters are the run's real UTF-8 offsets, so they hold for a
+/// segment that does not start the text and for code points that
+/// share a cluster (split matras). Falls back to offsets counted from
+/// the code points when the glyphs are no longer one per code point.
+fn code_point_clusters(codepoints: &[char], glyphs: &[Glyph]) -> Vec<u32> {
+    if glyphs.len() != codepoints.len() {
+        return cluster_byte_offsets(codepoints);
+    }
+    glyphs
+        .iter()
+        .map(|g| g.cluster)
+        .chain(core::iter::once(u32::MAX))
+        .collect()
 }
 
 /// Returns a length-`codepoints.len() + 1` array mapping codepoint

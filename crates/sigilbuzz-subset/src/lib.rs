@@ -4,7 +4,7 @@
 //! smaller font containing only those glyphs, plus any glyphs they pull
 //! in through composites and ligatures. Every table that survives is
 //! rewritten so glyph references point at the new, compacted glyph order.
-//! [`instance`] bakes variable-font axis coordinates into a static font or
+//! [`instance()`] bakes variable-font axis coordinates into a static font or
 //! pins some axes and keeps the rest.
 //!
 //! # Pipeline
@@ -25,8 +25,17 @@
 //!   SFNT rebuild     -- new directory, table checksums,
 //!        |              head.checkSumAdjustment
 //!        v
-//!   SubsetOutput { bytes, gid_map }
+//!   SubsetOutput { bytes, gid_map, warnings }
 //! ```
+//!
+//! # Malformed data
+//!
+//! A malformed layout structure (a GDEF list or entry, a GSUB or GPOS
+//! lookup or subtable, a Device table, an anchor) is left out of the
+//! output, the way HarfBuzz's sanitizer neuters it, instead of failing
+//! the subset. Every piece left out this way is reported in
+//! [`SubsetOutput::warnings`] with its table, byte offset and reason;
+//! [`InstancedOutput::warnings`] does the same for [`instance()`].
 //!
 //! # What happens to each table
 //!
@@ -37,12 +46,20 @@
 //! - Passed through: `name` and `OS/2`.
 //! - Layout (`GSUB`, `GPOS`, `GDEF`): kept verbatim when every glyph
 //!   survives, rewritten at the byte level when glyph IDs change. Set
-//!   [`SubsetInput::retain_layout`] to `false` to drop them.
+//!   [`SubsetInput::retain_layout`] to `false` to drop them. A rebuilt
+//!   mark attachment or PairPos format 1 subtable that outgrows its
+//!   16-bit offsets is split into several; any other subtable that
+//!   does fails the subset with [`SubsetError::Unsupported`] rather
+//!   than wrap an offset.
+//!   FeatureVariations (GSUB and GPOS 1.1) are kept, their feature and
+//!   lookup indices remapped with the rest.
 //! - Variations: `fvar` and `avar` pass through. `gvar` is rebuilt with one
 //!   entry per kept glyph, `HVAR` around a fresh `DeltaSetIndexMap` and a
 //!   deduplicated `ItemVariationStore`, and `VARC` around the kept
-//!   composites. Set [`SubsetInput::retain_variations`] to `false` to drop
-//!   them and get a static subset at the default instance.
+//!   composites. The GDEF `ItemVariationStore` that GPOS kerning, anchors,
+//!   and ligature carets vary through is carried verbatim. Set
+//!   [`SubsetInput::retain_variations`] to `false` to drop them and get a
+//!   static subset at the default instance.
 //! - Dropped when [`SubsetInput::drop_unhandled`] is true (the default):
 //!   `kern`, `vhea`, `vmtx`, `VORG`, `COLR`, `CPAL`, `morx`, and `kerx`.
 //!   With the flag off, any of these returns [`SubsetError::Unsupported`].
@@ -55,7 +72,8 @@
 //!   That covers non-CID and CID-keyed CFF (FDArray and FDSelect) as well
 //!   as CFF2, with subroutines renumbered and unused ones dropped. `cmap`,
 //!   `hmtx`, `hhea`, `maxp`, and `post` are rebuilt too. Layout and
-//!   variation tables are dropped on this path for now.
+//!   variation tables follow the same rules as for `glyf` fonts. A
+//!   `CFF2` table keeps its own variation data.
 //!
 //! The byte-level building blocks ([`encode_index`], [`encode_dict_int`],
 //! [`emit_charset_auto`], [`emit_encoding_auto`], [`emit_fd_select_auto`],
@@ -106,6 +124,7 @@ mod closure;
 mod cmap;
 mod coverage;
 mod device;
+mod feature_variations;
 mod fvar;
 mod gdef;
 mod glyf;
@@ -118,10 +137,14 @@ mod hmtx;
 mod hvar;
 mod instance;
 mod layout;
+mod lookup_list;
+mod offset16;
+mod read;
 mod sfnt;
 mod util;
 mod varc;
 mod variation_store;
+mod warnings;
 
 pub use cff::subset_non_identity as subset_cff1_non_identity;
 pub use cff::{
@@ -137,6 +160,9 @@ pub use classdef::emit_classdef;
 pub use closure::compute_closure;
 pub use coverage::{emit_coverage_from_glyphs, emit_coverage_from_pairs};
 pub use instance::{instance, AxisPin, F2Dot14, InstanceInput, InstancedOutput};
+pub use warnings::SubsetWarning;
+
+use warnings::Warnings;
 
 /// Crate version, matching `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -213,6 +239,10 @@ pub struct SubsetOutput {
     /// Mapping from old gid to new gid for every kept glyph, sorted
     /// by old gid. Glyph 0 always maps to glyph 0.
     pub gid_map: Vec<(GlyphId, GlyphId)>,
+    /// Pieces of the source font left out of the subset because they
+    /// could not be read, sorted by table and offset. Empty for a well
+    /// formed font. At most 65,536 are kept. See [`SubsetWarning`].
+    pub warnings: Vec<SubsetWarning>,
 }
 
 /// Errors that can stop a subset.
@@ -422,7 +452,8 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         tables.push((*b"OS/2", os2));
     }
 
-    push_layout_and_variation_tables(face, &kept, &gid_map, input, &mut tables)?;
+    let warnings = Warnings::default();
+    push_layout_and_variation_tables(face, &kept, &gid_map, input, &warnings, &mut tables)?;
 
     // TrueType hinting tables. Kept glyph instructions call functions
     // from `fpgm`, run after `prep`, and read `cvt `. None of the three
@@ -445,18 +476,21 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
     Ok(SubsetOutput {
         bytes,
         gid_map: gid_map.into_iter().collect(),
+        warnings: warnings.into_sorted(),
     })
 }
 
 /// Appends the layout and variable-font tables the subset keeps, as
 /// [`SubsetInput::retain_layout`] and [`SubsetInput::retain_variations`]
 /// ask. Shared by the `glyf`, CFF, and CFF2 paths: every table here is
-/// keyed by glyph id, not by outline format.
+/// keyed by glyph id, not by outline format. Malformed layout pieces
+/// left out of the rewrite are recorded in `warnings`.
 fn push_layout_and_variation_tables(
     face: &Face<'_>,
     kept: &[GlyphId],
     gid_map: &[(GlyphId, GlyphId)],
     input: &SubsetInput,
+    warnings: &Warnings,
     tables: &mut Vec<([u8; 4], Vec<u8>)>,
 ) -> Result<(), SubsetError> {
     // Layout tables (GSUB / GPOS / GDEF). Identity gid map: pass the
@@ -464,7 +498,7 @@ fn push_layout_and_variation_tables(
     // rewriters in `crate::gsub` / `crate::gpos` / `crate::gdef`
     // produce fresh bytes; lookup types without a rewriter drop and
     // the drop cascade propagates the loss up. See `layout::decide`.
-    let plan = layout::decide(face, kept, input)?;
+    let plan = layout::decide(face, kept, input, warnings)?;
     for (t, decision) in [
         (tag::GDEF, plan.gdef),
         (tag::GSUB, plan.gsub),
@@ -618,13 +652,15 @@ fn cff_non_identity(
         tables.push((*b"OS/2", os2));
     }
 
-    push_layout_and_variation_tables(face, kept, &gid_map, input, &mut tables)?;
+    let warnings = Warnings::default();
+    push_layout_and_variation_tables(face, kept, &gid_map, input, &warnings, &mut tables)?;
     check_unhandled_tables(face, &tables, input)?;
 
     let bytes = sfnt::build(face.sfnt_version(), &tables);
     Ok(SubsetOutput {
         bytes,
         gid_map: gid_map.into_iter().collect(),
+        warnings: warnings.into_sorted(),
     })
 }
 
@@ -670,7 +706,11 @@ fn cff_passthrough(
     check_unhandled_tables(face, &tables, input)?;
     let bytes = sfnt::build(face.sfnt_version(), &tables);
     let gid_map: Vec<(GlyphId, GlyphId)> = kept.iter().map(|&g| (g, g)).collect();
-    Ok(SubsetOutput { bytes, gid_map })
+    Ok(SubsetOutput {
+        bytes,
+        gid_map,
+        warnings: Vec::new(),
+    })
 }
 
 #[cfg(test)]

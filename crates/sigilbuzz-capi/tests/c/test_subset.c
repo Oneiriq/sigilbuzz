@@ -46,8 +46,12 @@ int main(int argc, char **argv) {
                 hb_set_get_population(unicode_set));
         return 7;
     }
-    /* Caller owns the returned reference; release it before driving subset. */
-    hb_set_destroy(unicode_set);
+    /* The set belongs to the input (HarfBuzz "transfer none"): the same
+     * pointer comes back every time and the caller never destroys it. */
+    if (hb_subset_input_unicode_set(input) != unicode_set) {
+        fprintf(stderr, "hb_subset_input_unicode_set returned a different pointer\n");
+        return 11;
+    }
 
     hb_face_t *subset_face = hb_subset_or_fail(face, input);
     if (!subset_face) {

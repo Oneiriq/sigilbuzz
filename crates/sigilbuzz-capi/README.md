@@ -65,18 +65,79 @@ The subset and paint functions sit behind the `subset` and `paint` cargo feature
 are on by default. For a smaller library, build with
 `--no-default-features --features std`.
 
+## Painting color glyphs
+
+The paint API matches HarfBuzz 8.0's `hb-paint.h`, plus the `color_glyph` callback
+HarfBuzz added in 8.2:
+
+- Setters are `hb_paint_funcs_set_X_func(funcs, func, user_data, destroy)` for
+  `push_transform`, `pop_transform`, `color_glyph`, `push_clip_glyph`,
+  `push_clip_rectangle`, `pop_clip`, `color`, `image`, `linear_gradient`,
+  `radial_gradient`, `sweep_gradient`, `push_group`, `pop_group`, and
+  `custom_palette_color`. Every
+  callback gets its own `user_data` as its last argument. `destroy` runs when the
+  callback is replaced, when the funcs object is freed, or right away for a NULL
+  `func` or after `hb_paint_funcs_make_immutable`.
+- `hb_color_t` packs blue in the high byte and alpha in the low byte (`HB_COLOR(b, g,
+  r, a)`), and `hb_color_line_t` is HarfBuzz's public struct, so C code may call its
+  function pointers directly.
+- `hb_font_paint_glyph` fires callbacks in HarfBuzz 11's order: a clip rectangle at
+  font scale (the glyph's ClipList box, or the bounds of its paint tree) and a root
+  transform to font scale around COLRv1 glyphs, inverse-root / clip / root around each
+  `PaintGlyph`, the `color_glyph` offer and then the ClipList box of every glyph a
+  `PaintColrGlyph` references, one transform per transform paint, two groups per
+  composite with the mode on `pop_group`, and sweep angles in radians as
+  `(stored angle + 1) * pi`. A COLRv1 glyph whose paint no clip bounds paints nothing
+  inside its root transform. COLRv0 layers and plain glyphs paint as
+  `push_clip_glyph`, `color`, `pop_clip`.
+- Colors resolve as in HarfBuzz: entry `0xFFFF` is the foreground (`is_foreground =
+  1`), other entries try `custom_palette_color`, then the CPAL palette, then fall back
+  to the foreground (`is_foreground = 0`). The paint alpha multiplies the alpha byte
+  and is truncated.
+
+Differences from HarfBuzz: there is no `hb_paint_funcs_get_empty`,
+`hb_paint_funcs_set_user_data`, or `hb_paint_*` emitter functions, and the `image`
+callback for SVG and bitmap glyphs is never fired.
+`push_clip_glyph` expects the outline at font scale, as `hb_font_draw_glyph` would draw
+it, but sigilbuzz does not export `hb_font_draw_glyph`, so callers bring their own
+outlines.
+
 ## ABI
 
 Enum values (`HB_DIRECTION_LTR == 4`, `HB_SCRIPT_LATIN == HB_TAG('L','a','t','n')`, and
 the rest) and struct layouts match HarfBuzz, so a binary compiled against the real
-`hb.h` links and runs against this library without recompiling. The opaque types
-(`hb_blob_t`, `hb_face_t`, `hb_font_t`, `hb_buffer_t`) are reference-counted with
-Rust's `Arc`. `hb_*_destroy` drops a reference and `hb_*_reference` adds one, the same
-manual refcounting HarfBuzz uses.
+`hb.h` links and runs against this library without recompiling.
+
+## Ownership
+
+Reference counting follows HarfBuzz exactly, so code written for HarfBuzz neither
+leaks nor double-frees here:
+
+- The pointer is the object. `hb_*_reference(p)` adds a reference and returns `p`
+  itself; `hb_*_destroy(p)` drops one and frees the object when the last one goes.
+  This holds for `hb_blob_t`, `hb_face_t`, `hb_font_t`, `hb_buffer_t`, `hb_set_t`,
+  `hb_subset_input_t`, and `hb_paint_funcs_t`.
+- Every `*_create` result and every `*_reference` call is one reference to destroy.
+- A face references its blob and a font references its face, so you may destroy the
+  blob or face right after building on it.
+- `hb_subset_input_unicode_set` and `hb_subset_input_glyph_set` return a set owned by
+  the input. The same pointer comes back on every call and stays valid until the input
+  is destroyed. Never destroy it; take `hb_set_reference` if you need it longer.
+- Referencing `NULL` returns `NULL`, and destroying `NULL` does nothing.
+- Where HarfBuzz returns its inert empty object (for example from a zero-length
+  `hb_blob_create`), sigilbuzz returns a fresh empty object. Destroy it as usual. The
+  same code is correct with HarfBuzz, where destroying the inert object does nothing.
+
+Earlier releases returned a new handle from every `hb_*_reference`. Each reference
+still needs exactly one destroy, so balanced code keeps working; only the returned
+pointer changed. Earlier releases also made the caller destroy the set a subset
+accessor returned. Code written that way double-frees now, as it would under
+HarfBuzz: drop those `hb_set_destroy` calls.
 
 ## Versioning
 
-`hb_version()` returns `(8, 0, 0)` to signal compatibility with the HarfBuzz 8.x ABI.
+`hb_version()` returns `(8, 2, 0)`, the HarfBuzz release whose API this crate covers (8.2 added
+the `color_glyph` paint callback).
 `hb_version_string()` returns `"sigilbuzz X.Y.Z (hb-compatible)"`, so logs and bug
 reports show which library is actually running.
 

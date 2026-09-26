@@ -94,6 +94,21 @@ impl<'a> MarkLigaPos<'a> {
         })
     }
 
+    /// True when `glyph_id` is in the mark coverage.
+    #[must_use]
+    pub fn covers_mark(&self, glyph_id: u16) -> bool {
+        self.mark_coverage.contains(glyph_id)
+    }
+
+    /// Number of components the subtable records for ligature glyph
+    /// `liga_gid`, or `None` when the glyph is not in the ligature
+    /// coverage (or its attach record is unreadable).
+    #[must_use]
+    pub fn component_count(&self, liga_gid: u16) -> Option<u16> {
+        let liga_idx = self.liga_coverage.index_of(liga_gid)?;
+        self.ligature_array.component_count(liga_idx)
+    }
+
     /// Tries to attach `mark_gid` onto the given `component_index`
     /// of ligature glyph `liga_gid`. Returns the anchor pair when
     /// both glyphs are covered, the component exists, and the
@@ -212,6 +227,16 @@ impl<'a> LigatureArray<'a> {
             ligature_count,
             mark_class_count,
         })
+    }
+
+    fn component_count(&self, liga_idx: u16) -> Option<u16> {
+        if liga_idx >= self.ligature_count {
+            return None;
+        }
+        let off_slot = self.attach_offsets_off + liga_idx as usize * 2;
+        let attach_off_rel = Reader::at(self.data, off_slot).ok()?.read_u16().ok()? as usize;
+        let mut r = Reader::at(self.data, self.base.checked_add(attach_off_rel)?).ok()?;
+        r.read_u16().ok()
     }
 
     fn anchor(&self, liga_idx: u16, component_index: u16, mark_class: u16) -> Option<Anchor> {
@@ -383,8 +408,8 @@ mod tests {
         let mlp = MarkLigaPos::parse(&bytes).unwrap();
         let a0 = mlp.attach(30, 50, 0).unwrap();
         let a1 = mlp.attach(30, 50, 1).unwrap();
-        assert_eq!(a0.base_anchor, Anchor { x: 100, y: 600 });
-        assert_eq!(a1.base_anchor, Anchor { x: 400, y: 600 });
+        assert_eq!((a0.base_anchor.x, a0.base_anchor.y), (100, 600));
+        assert_eq!((a1.base_anchor.x, a1.base_anchor.y), (400, 600));
     }
 
     #[test]
@@ -415,6 +440,45 @@ mod tests {
         );
         let mlp = MarkLigaPos::parse(&bytes).unwrap();
         assert!(mlp.attach(30, 50, 5).is_none());
+    }
+
+    #[test]
+    fn component_count_of_an_attach_offset_past_the_end_is_none() {
+        let mut bytes = build_mark_liga_pos(
+            &[30],
+            &[50],
+            1,
+            &[(0, (0, 0))],
+            &alloc::vec![alloc::vec![alloc::vec![Some((100, 600))]]],
+        );
+        let mlp = MarkLigaPos::parse(&bytes).unwrap();
+        assert_eq!(mlp.component_count(50), Some(1));
+        // Point the LigatureAttach offset of ligature 0 past the end.
+        let array_off = usize::from(u16::from_be_bytes([bytes[10], bytes[11]]));
+        let slot = array_off + 2;
+        bytes[slot..slot + 2].copy_from_slice(&0xFFF0u16.to_be_bytes());
+        let mlp = MarkLigaPos::parse(&bytes).unwrap();
+        assert_eq!(mlp.component_count(50), None);
+        assert!(mlp.attach(30, 50, 0).is_none());
+    }
+
+    #[test]
+    fn coverage_and_component_count_accessors() {
+        let bytes = build_mark_liga_pos(
+            &[30],
+            &[50],
+            1,
+            &[(0, (0, 0))],
+            &alloc::vec![alloc::vec![
+                alloc::vec![Some((100, 600))],
+                alloc::vec![Some((300, 600))],
+            ]],
+        );
+        let mlp = MarkLigaPos::parse(&bytes).unwrap();
+        assert!(mlp.covers_mark(30));
+        assert!(!mlp.covers_mark(50));
+        assert_eq!(mlp.component_count(50), Some(2));
+        assert_eq!(mlp.component_count(30), None);
     }
 
     #[test]

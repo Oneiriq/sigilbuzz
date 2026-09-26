@@ -234,6 +234,7 @@ pub fn shape_khmer(
     // 1. Segment. One pass over the codepoints, emitting Syllable
     //    records that the reorder pass can consume directly.
     let syllables = segment_syllables(codepoints);
+    let byte_offsets = code_point_clusters(codepoints, glyphs);
 
     // 2. Initial reordering: pre-base vowel signs move before the
     //    base. Done BEFORE GSUB so features see the logical order
@@ -265,7 +266,6 @@ pub fn shape_khmer(
     //    first codepoint, matching HarfBuzz / rustybuzz so the
     //    parity tests see identical cluster ids even after GSUB
     //    has collapsed parts of the syllable.
-    let byte_offsets = cluster_byte_offsets(codepoints);
     merge_syllable_clusters(glyphs, &syllables, &byte_offsets);
 
     // Final GPOS (kern, mark, mkmk, dist) runs in the caller, see
@@ -297,6 +297,28 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
     match first {
         UseCategory::B => scan_consonant_syllable(cps, start),
         UseCategory::IV => scan_vowel_syllable(cps, start),
+        // A generic base that marks attach to (U+25CC DOTTED CIRCLE,
+        // typed or inserted for a broken syllable) anchors a syllable
+        // like a consonant does, as in HarfBuzz's USE grammar.
+        UseCategory::GB
+            if cps
+                .get(start + 1)
+                .is_some_and(|&c| !matches!(use_category(c), UseCategory::B | UseCategory::GB)) =>
+        {
+            let syl = scan_consonant_syllable(cps, start);
+            if syl.end > start + 1 {
+                syl
+            } else {
+                Syllable {
+                    kind: SyllableKind::Symbol,
+                    start,
+                    end: start + 1,
+                    base_index: None,
+                    pre_base_cons_index: None,
+                    kinzi_index: None,
+                }
+            }
+        }
         UseCategory::GB | UseCategory::N | UseCategory::S => {
             // One-wide Symbol syllable. Runs of digits or generic
             // bases are kept as separate syllables so each keeps
@@ -625,6 +647,24 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
     }
 }
 
+/// Returns a length-`codepoints.len() + 1` array mapping each code
+/// point to the cluster its glyph carries, with an open end. Read
+/// before any reordering or GSUB, while glyphs are one per code point,
+/// these are the run's real UTF-8 offsets, right for a segment that
+/// does not start the text and for decomposed vowels whose parts share
+/// a cluster. Falls back to offsets counted from the code points when
+/// the glyphs are not one per code point.
+fn code_point_clusters(codepoints: &[char], glyphs: &[Glyph]) -> Vec<u32> {
+    if glyphs.len() != codepoints.len() {
+        return cluster_byte_offsets(codepoints);
+    }
+    glyphs
+        .iter()
+        .map(|g| g.cluster)
+        .chain(core::iter::once(u32::MAX))
+        .collect()
+}
+
 /// Returns a length-`codepoints.len() + 1` array mapping codepoint
 /// index to UTF-8 byte offset. `out[i]` is the byte offset of the
 /// i'th codepoint; `out[len]` is the total byte length.
@@ -698,6 +738,7 @@ pub fn shape_use(
 
     // 1. Segment.
     let syllables = segment_syllables(codepoints);
+    let byte_offsets = code_point_clusters(codepoints, glyphs);
 
     // 2. Initial reordering. Some scripts (Thai, Lao) type pre-base
     //    vowels before the base already, so the reorder would break
@@ -757,7 +798,6 @@ pub fn shape_use(
     }
 
     // 5. Cluster merge.
-    let byte_offsets = cluster_byte_offsets(codepoints);
     merge_syllable_clusters(glyphs, &syllables, &byte_offsets);
 }
 
@@ -919,8 +959,9 @@ pub fn shape_hangul(
 /// shared joining state machine in [`crate::unicode::joining`]. The
 /// shaper:
 ///
-/// 1. Runs `ccmp` so any precomposed N'Ko diphthongs in the font's
-///    composition lookup decompose.
+/// 1. Runs `locl` and `ccmp` as one stage, so localized forms and
+///    any precomposed N'Ko diphthongs in the font's composition lookup
+///    settle before the positional pass (HarfBuzz's USE order).
 /// 2. Computes a per-codepoint joining-form vector via the shared
 ///    Arabic state machine. N'Ko's joining types live in the same
 ///    [`JoiningType`](crate::unicode::joining::JoiningType) table.
@@ -938,6 +979,20 @@ pub fn shape_nko(
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
 ) {
+    let context = crate::ot::arabic::JoiningContext::NONE;
+    shape_nko_in_context(gsub, gdef, codepoints, glyphs, context);
+}
+
+/// [`shape_nko`] for a run whose surroundings are known: the first and
+/// last letters join toward `context` (the buffer's pre- and
+/// post-context, as in HarfBuzz's Arabic-family joining).
+pub fn shape_nko_in_context(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+    context: crate::ot::arabic::JoiningContext,
+) {
     if codepoints.is_empty() || glyphs.is_empty() {
         return;
     }
@@ -945,14 +1000,15 @@ pub fn shape_nko(
         return;
     };
 
-    // 1. ccmp first: handles any compositional rewrites the font
-    //    registers before the positional pass sees the glyph stream.
-    crate::shape::apply_gsub_feature_in_scripts(
+    // 1. locl + ccmp first, as one stage: HarfBuzz shapes N'Ko with
+    //    its USE shaper, whose first stage runs both before the
+    //    positional features see the glyph stream.
+    crate::shape::apply_gsub_features_merged(
         gsub,
         glyphs,
         gdef,
-        *b"ccmp",
-        0,
+        &[],
+        &[*b"locl", *b"ccmp"],
         NKO_SCRIPT_PRIORITY,
     );
 
@@ -965,7 +1021,7 @@ pub fn shape_nko(
         .iter()
         .map(|&c| crate::unicode::joining::joining_type(c))
         .collect();
-    let forms = crate::ot::arabic::assign_from_types(&types);
+    let forms = crate::ot::arabic::assign_from_types_in_context(&types, context);
 
     if glyphs.len() == forms.len() {
         for (form, tag) in [

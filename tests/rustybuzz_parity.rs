@@ -11,7 +11,7 @@
 //! in Cargo.toml to make the latter unambiguous.
 
 use rustybuzz::Feature;
-use sigilbuzz::{shape, Blob, Buffer, Face, Feature as SigilFeature, Font};
+use sigilbuzz::{shape, Blob, Buffer, Direction, Face, Feature as SigilFeature, Font};
 
 const OPEN_SANS: &[u8] = include_bytes!("fixtures/opensans_regular.ttf");
 
@@ -100,7 +100,61 @@ fn every_corpus_entry_matches_rustybuzz_glyph_for_glyph() {
                  (glyph {}): sigilbuzz={} rustybuzz={}",
                 sig_g.glyph_id, sig_g.x_advance, rb_pos.x_advance
             );
+            // Open Sans kerns through its legacy `kern` table, where
+            // HarfBuzz moves the second glyph of a pair by half the
+            // value as well as adjusting both advances.
+            assert_eq!(
+                (sig_g.y_advance, sig_g.x_offset, sig_g.y_offset),
+                (rb_pos.y_advance, rb_pos.x_offset, rb_pos.y_offset),
+                "(y_advance, x_offset, y_offset) mismatch at position {i} of {text:?}"
+            );
         }
+    }
+}
+
+/// Legacy `kern` table splitting, per hb-kern.hh: `kern >> 1` on the
+/// first glyph's advance, the rest on the second glyph's advance and
+/// offset. "AV" is a strongly kerned Open Sans pair; the RTL run
+/// kerns the visual pair, and the pair search passes over a ZWNJ.
+#[test]
+fn legacy_kern_splits_like_harfbuzz_in_both_directions() {
+    let blob = Blob::new(OPEN_SANS);
+    let face = Face::parse(&blob, 0).expect("parse sigilbuzz face");
+    let font = Font::new(face, 1000.0);
+    let rb_face = rustybuzz::Face::from_slice(OPEN_SANS, 0).expect("parse rustybuzz face");
+    for (text, dir, rb_dir) in [
+        ("AVATAR", Direction::Ltr, rustybuzz::Direction::LeftToRight),
+        ("AVATAR", Direction::Rtl, rustybuzz::Direction::RightToLeft),
+        (
+            "A\u{200C}VA",
+            Direction::Ltr,
+            rustybuzz::Direction::LeftToRight,
+        ),
+    ] {
+        let mut buffer = Buffer::new();
+        buffer.set_direction(dir);
+        buffer.push_str(text);
+        let sig: Vec<_> = shape(&font, &buffer, &[])
+            .expect("sigilbuzz shape")
+            .glyphs
+            .iter()
+            .map(|g| (g.glyph_id, g.x_advance, g.y_advance, g.x_offset, g.y_offset))
+            .collect();
+        let mut rb_buf = rustybuzz::UnicodeBuffer::new();
+        rb_buf.push_str(text);
+        rb_buf.set_direction(rb_dir);
+        let rb_out = rustybuzz::shape(&rb_face, &[], rb_buf);
+        let rb: Vec<_> = rb_out
+            .glyph_infos()
+            .iter()
+            .zip(rb_out.glyph_positions())
+            .map(|(i, p)| (i.glyph_id, p.x_advance, p.y_advance, p.x_offset, p.y_offset))
+            .collect();
+        assert_eq!(sig, rb, "{text:?} {dir:?}");
+        assert!(
+            sig.iter().any(|g| g.3 != 0),
+            "{text:?} {dir:?}: some pair should move its second glyph"
+        );
     }
 }
 

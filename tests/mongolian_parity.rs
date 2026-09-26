@@ -14,14 +14,12 @@
 //!   * Free Variation Selector after a letter (FVS1 inherits form)
 //!   * mixed Mongolian + Latin
 //!
-//! Both engines are forced to a horizontal direction. sigilbuzz's
-//! buffer is set to RTL. That reads as "explicit horizontal", so
-//! the auto-vertical default for Mongolian does not kick in.
-//! rustybuzz's buffer is set to LTR; sigilbuzz processes glyphs in
-//! logical order regardless of buffer direction (it does not reverse
-//! the run for RTL), so comparing sigilbuzz-RTL against rustybuzz-LTR
-//! aligns logical-order outputs glyph-for-glyph. A separate test
-//! exercises the auto-vertical path.
+//! Both engines are forced to horizontal LTR. On the sigilbuzz side
+//! the explicit `set_direction(Direction::Ltr)` is what keeps the
+//! auto-vertical default for Mongolian from kicking in (it only
+//! applies while no direction was set), so both engines return the
+//! same logical-order glyph stream. Separate tests exercise the
+//! auto-vertical path and explicit RTL.
 //!
 //! A failure here is a parity drift against rustybuzz; fix in
 //! `src/ot/mongolian.rs`, `src/unicode/joining.rs` (Mongolian
@@ -120,11 +118,11 @@ fn mongolian_corpus_matches_rustybuzz() {
 
     for case in CORPUS {
         let mut buffer = Buffer::new();
-        // Force horizontal explicit direction so the Mongolian
-        // auto-vertical default does not flip metrics. sigilbuzz
-        // does not reverse the run for RTL, so logical-order glyphs
-        // line up with rustybuzz's LTR output directly.
-        buffer.set_direction(Direction::Rtl);
+        // An explicit LTR keeps the run horizontal: the Mongolian
+        // auto-vertical default only applies while no direction was
+        // set. Logical-order glyphs line up with rustybuzz's LTR
+        // output directly.
+        buffer.set_direction(Direction::Ltr);
         buffer.push_str(case.text);
         let sig = shape(&font, &buffer, &[]).expect("sigilbuzz shape");
 
@@ -160,6 +158,13 @@ fn mongolian_corpus_matches_rustybuzz() {
                 sig_g.x_advance, rb_pos.x_advance,
                 "x_advance mismatch at position {i} of {} ({:?}): sigilbuzz={} rustybuzz={}",
                 case.note, case.text, sig_g.x_advance, rb_pos.x_advance
+            );
+            assert_eq!(
+                (sig_g.y_advance, sig_g.x_offset, sig_g.y_offset),
+                (rb_pos.y_advance, rb_pos.x_offset, rb_pos.y_offset),
+                "(y_advance, x_offset, y_offset) mismatch at position {i} of {} ({:?})",
+                case.note,
+                case.text
             );
         }
     }
@@ -179,7 +184,7 @@ fn multiletter_chains_match_rustybuzz() {
 
     for case in MULTILETTER_CHAINS {
         let mut buffer = Buffer::new();
-        buffer.set_direction(Direction::Rtl);
+        buffer.set_direction(Direction::Ltr);
         buffer.push_str(case.text);
         let sig = shape(&font, &buffer, &[]).expect("sigilbuzz shape");
 
@@ -214,6 +219,13 @@ fn multiletter_chains_match_rustybuzz() {
                 sig_g.x_advance, rb_pos.x_advance,
                 "x_advance mismatch at position {i} of {} ({:?}): sigilbuzz={} rustybuzz={}",
                 case.note, case.text, sig_g.x_advance, rb_pos.x_advance
+            );
+            assert_eq!(
+                (sig_g.y_advance, sig_g.x_offset, sig_g.y_offset),
+                (rb_pos.y_advance, rb_pos.x_offset, rb_pos.y_offset),
+                "(y_advance, x_offset, y_offset) mismatch at position {i} of {} ({:?})",
+                case.note,
+                case.text
             );
         }
     }
@@ -245,18 +257,148 @@ fn auto_vertical_default_engages_for_mongolian_dominant_run() {
 
 #[test]
 fn explicit_horizontal_overrides_mongolian_default() {
-    // Setting RTL explicitly opts into horizontal layout: y_advance
-    // stays zero, x_advance carries the hmtx value.
+    // Setting LTR explicitly opts into horizontal layout: y_advance
+    // stays zero, x_advance carries the hmtx value. LTR is also the
+    // buffer default, so this pins that the explicit flag, not the
+    // value, is what disables auto-vertical.
     let blob = Blob::new(NOTO_MONGOLIAN);
     let face = Face::parse(&blob, 0).expect("parse face");
     let font = Font::new(face, 1000.0);
 
     let mut buffer = Buffer::new();
-    buffer.set_direction(Direction::Rtl);
+    buffer.set_direction(Direction::Ltr);
     buffer.push_str("\u{1820}");
-    let shaped = shape(&font, &buffer, &[]).expect("shape Mongolian RTL");
+    let shaped = shape(&font, &buffer, &[]).expect("shape Mongolian LTR");
 
     assert_eq!(shaped.len(), 1);
     assert_eq!(shaped.glyphs[0].y_advance, 0);
     assert_ne!(shaped.glyphs[0].x_advance, 0);
+}
+
+#[test]
+fn explicit_rtl_mongolian_is_horizontal_and_read_as_visual_order() {
+    // RTL is an explicit horizontal direction too. Mongolian is not a
+    // right-to-left script, so, as in HarfBuzz, an RTL buffer holds the
+    // letters in visual order: sigilbuzz shapes the reversed text in
+    // Mongolian's native direction, and the joining forms follow that
+    // reading (hb_ensure_native_direction). Bottom-to-top likewise
+    // shapes the reversed text top to bottom.
+    let blob = Blob::new(NOTO_MONGOLIAN);
+    let face = Face::parse(&blob, 0).expect("parse face");
+    let font = Font::new(face, 1000.0);
+    let rb_face = rustybuzz::Face::from_slice(NOTO_MONGOLIAN, 0).expect("parse rustybuzz face");
+    let text = "\u{1820}\u{1821}\u{1822}";
+
+    for (direction, rb_direction) in [
+        (Direction::Rtl, rustybuzz::Direction::RightToLeft),
+        (Direction::Btt, rustybuzz::Direction::BottomToTop),
+    ] {
+        let mut buffer = Buffer::new();
+        buffer.set_direction(direction);
+        buffer.push_str(text);
+        let ours: Vec<(u32, u32)> = shape(&font, &buffer, &[])
+            .expect("shape")
+            .glyphs
+            .iter()
+            .map(|g| (g.glyph_id, g.cluster))
+            .collect();
+        let mut rb_buf = rustybuzz::UnicodeBuffer::new();
+        rb_buf.set_direction(rb_direction);
+        rb_buf.push_str(text);
+        let theirs: Vec<(u32, u32)> = rustybuzz::shape(&rb_face, &[], rb_buf)
+            .glyph_infos()
+            .iter()
+            .map(|i| (i.glyph_id, i.cluster))
+            .collect();
+        assert_eq!(ours, theirs, "{direction:?}");
+    }
+
+    let mut rtl = Buffer::new();
+    rtl.set_direction(Direction::Rtl);
+    rtl.push_str(text);
+    let rtl = shape(&font, &rtl, &[]).expect("shape RTL");
+    assert!(rtl
+        .glyphs
+        .iter()
+        .all(|g| g.y_advance == 0 && g.x_advance != 0));
+}
+
+#[test]
+fn clear_brings_back_the_auto_vertical_default() {
+    let blob = Blob::new(NOTO_MONGOLIAN);
+    let face = Face::parse(&blob, 0).expect("parse face");
+    let font = Font::new(face, 1000.0);
+
+    let mut buffer = Buffer::new();
+    buffer.set_direction(Direction::Ltr);
+    buffer.push_str("\u{1820}");
+    let horizontal = shape(&font, &buffer, &[]).expect("shape explicit LTR");
+    assert_eq!(horizontal.glyphs[0].y_advance, 0);
+
+    buffer.clear();
+    buffer.push_str("\u{1820}");
+    let vertical = shape(&font, &buffer, &[]).expect("shape after clear");
+    assert_eq!(vertical.glyphs[0].x_advance, 0);
+    assert!(
+        vertical.glyphs[0].y_advance < 0,
+        "TTB advances are negative"
+    );
+}
+
+#[test]
+fn unset_direction_brings_back_the_auto_vertical_default() {
+    let blob = Blob::new(NOTO_MONGOLIAN);
+    let face = Face::parse(&blob, 0).expect("parse face");
+    let font = Font::new(face, 1000.0);
+
+    let mut buffer = Buffer::new();
+    buffer.push_str("\u{1820}");
+    buffer.set_direction(Direction::Ltr);
+    let horizontal = shape(&font, &buffer, &[]).expect("shape explicit LTR");
+    assert_eq!(horizontal.glyphs[0].y_advance, 0);
+
+    // Unlike clear(), unset_direction() keeps the text.
+    buffer.unset_direction();
+    let vertical = shape(&font, &buffer, &[]).expect("shape after unset_direction");
+    assert_eq!(vertical.glyphs[0].x_advance, 0);
+    assert!(
+        vertical.glyphs[0].y_advance < 0,
+        "TTB advances are negative"
+    );
+}
+
+#[test]
+fn vertical_mark_advances_are_zeroed_in_both_axes() {
+    // U+1885 (a GDEF mark) after a letter, shaped top to bottom. The
+    // USE shaper HarfBuzz runs for Mongolian zeroes a mark's x and y
+    // advances before GPOS; zeroing only x would leave the mark's
+    // vertical advance moving the pen a full em.
+    let text = "\u{1820}\u{1885}";
+    let blob = Blob::new(NOTO_MONGOLIAN);
+    let face = Face::parse(&blob, 0).expect("parse face");
+    let font = Font::new(face, 1000.0);
+    let mut buffer = Buffer::new();
+    buffer.set_direction(Direction::Ttb);
+    buffer.push_str(text);
+    let sig: Vec<(u32, i32, i32)> = shape(&font, &buffer, &[])
+        .expect("shape TTB")
+        .glyphs
+        .iter()
+        .map(|g| (g.glyph_id, g.x_advance, g.y_advance))
+        .collect();
+
+    let rb_face = rustybuzz::Face::from_slice(NOTO_MONGOLIAN, 0).expect("parse rustybuzz face");
+    let mut rb_buf = rustybuzz::UnicodeBuffer::new();
+    rb_buf.push_str(text);
+    rb_buf.set_direction(rustybuzz::Direction::TopToBottom);
+    let rb_out = rustybuzz::shape(&rb_face, &[], rb_buf);
+    let rb: Vec<(u32, i32, i32)> = rb_out
+        .glyph_infos()
+        .iter()
+        .zip(rb_out.glyph_positions())
+        .map(|(i, p)| (i.glyph_id, p.x_advance, p.y_advance))
+        .collect();
+
+    assert_eq!(sig, rb);
+    assert_eq!((sig[1].1, sig[1].2), (0, 0), "the mark has no advance");
 }

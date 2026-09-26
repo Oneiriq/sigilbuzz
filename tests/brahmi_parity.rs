@@ -64,6 +64,14 @@ const CORPUS: &[Case] = &[
         note: "digit zero",
         compare_rustybuzz: true,
     },
+    // ka + anusvara: a GDEF mark with a nonzero hmtx advance. The
+    // USE shaper HarfBuzz runs for Brahmi zeroes mark advances before
+    // GPOS.
+    Case {
+        text: "\u{11015}\u{11001}",
+        note: "ka + anusvara (mark advance zeroed)",
+        compare_rustybuzz: true,
+    },
     // Mixed Latin + Brahmi.
     Case {
         text: "Hi \u{11015}\u{11038}",
@@ -71,6 +79,12 @@ const CORPUS: &[Case] = &[
         compare_rustybuzz: true,
     },
 ];
+
+/// Cases whose y advances and offsets are not compared: sigilbuzz
+/// shapes a mixed run's Brahmi segment under `brah` and attaches the
+/// sign there, while HarfBuzz shapes the whole buffer under the Latin
+/// script, whose lookups leave it unattached.
+const GLYPHS_AND_ADVANCES_ONLY: &[&str] = &["mixed latin + brahmi"];
 
 #[test]
 fn brahmi_corpus_matches_rustybuzz() {
@@ -120,6 +134,16 @@ fn brahmi_corpus_matches_rustybuzz() {
                 sig_g.x_advance, rb_pos.x_advance,
                 "x_advance mismatch at position {i} of {} ({:?}): sigilbuzz={} rustybuzz={}",
                 case.note, case.text, sig_g.x_advance, rb_pos.x_advance
+            );
+            if GLYPHS_AND_ADVANCES_ONLY.contains(&case.note) {
+                continue;
+            }
+            assert_eq!(
+                (sig_g.y_advance, sig_g.x_offset, sig_g.y_offset),
+                (rb_pos.y_advance, rb_pos.x_offset, rb_pos.y_offset),
+                "(y_advance, x_offset, y_offset) mismatch at position {i} of {} ({:?})",
+                case.note,
+                case.text
             );
         }
     }

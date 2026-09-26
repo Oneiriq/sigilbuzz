@@ -59,6 +59,7 @@ use crate::tables::parse::Reader;
 
 const COVERAGE_HORIZONTAL: u16 = 0x0001;
 const COVERAGE_MINIMUM: u16 = 0x0002;
+const COVERAGE_CROSS_STREAM: u16 = 0x0004;
 const COVERAGE_FORMAT_MASK: u16 = 0xFF00;
 const COVERAGE_FORMAT_SHIFT: u32 = 8;
 
@@ -67,6 +68,8 @@ const COVERAGE_FORMAT_SHIFT: u32 = 8;
 #[derive(Debug, Clone)]
 pub struct KernTable<'a> {
     subtables: Vec<Format0<'a>>,
+    has_state_machine: bool,
+    has_cross_stream: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -93,6 +96,8 @@ impl<'a> KernTable<'a> {
         let n_tables = r.read_u16()?;
 
         let mut subtables = Vec::new();
+        let mut has_state_machine = false;
+        let mut has_cross_stream = false;
         for _ in 0..n_tables {
             let subtable_start = r.position();
             if subtable_start + 6 > data.len() {
@@ -121,11 +126,16 @@ impl<'a> KernTable<'a> {
             let format = ((coverage & COVERAGE_FORMAT_MASK) >> COVERAGE_FORMAT_SHIFT) as u8;
             let horizontal = coverage & COVERAGE_HORIZONTAL != 0;
             let minimum = coverage & COVERAGE_MINIMUM != 0;
+            let cross_stream = coverage & COVERAGE_CROSS_STREAM != 0;
+            has_state_machine |= format == 1;
+            has_cross_stream |= cross_stream;
 
             // Skip subtables we do not understand, but consume
             // their bytes so the next iteration is positioned
-            // correctly.
-            if sub_version != 0 || format != 0 || !horizontal || minimum {
+            // correctly. A cross-stream subtable moves glyphs across
+            // the line rather than along it, so reading it as plain
+            // kerning would be wrong.
+            if sub_version != 0 || format != 0 || !horizontal || minimum || cross_stream {
                 r.seek(subtable_end)?;
                 continue;
             }
@@ -165,7 +175,11 @@ impl<'a> KernTable<'a> {
             r.seek(effective_end)?;
         }
 
-        Ok(Self { subtables })
+        Ok(Self {
+            subtables,
+            has_state_machine,
+            has_cross_stream,
+        })
     }
 
     /// Sum of kerning deltas for the pair `(left, right)` across
@@ -184,6 +198,37 @@ impl<'a> KernTable<'a> {
         }
         // Saturating so fonts with pathological kerning cannot panic.
         total.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+    }
+
+    /// Kerning delta for the pair `(left, right)` in the `index`-th
+    /// usable subtable (see [`KernTable::subtable_count`]), zero when
+    /// that subtable has no such pair. HarfBuzz kerns with one subtable
+    /// at a time, splitting each subtable's value across the pair on
+    /// its own, so the shaper walks subtables rather than summing them
+    /// first.
+    #[must_use]
+    pub fn subtable_kern(&self, index: usize, left: u16, right: u16) -> i16 {
+        let key = (u32::from(left) << 16) | u32::from(right);
+        self.subtables
+            .get(index)
+            .and_then(|sub| sub.find(key))
+            .unwrap_or(0)
+    }
+
+    /// True when the table has a state-machine (format 1) subtable,
+    /// which sigilbuzz skips. HarfBuzz keeps mark widths when such a
+    /// table does the kerning.
+    #[must_use]
+    pub fn has_state_machine(&self) -> bool {
+        self.has_state_machine
+    }
+
+    /// True when the table has a cross-stream subtable, which
+    /// sigilbuzz skips. HarfBuzz no longer moves zeroed marks back
+    /// over their base when such a table does the kerning.
+    #[must_use]
+    pub fn has_cross_stream(&self) -> bool {
+        self.has_cross_stream
     }
 
     /// Number of format-0 horizontal-kerning subtables that actually
@@ -341,6 +386,34 @@ mod tests {
         }
         let k = KernTable::parse(&bytes).unwrap();
         assert_eq!(k.kern(10, 20), -15);
+        // Per subtable, as the shaper applies them.
+        assert_eq!(k.subtable_kern(0, 10, 20), -10);
+        assert_eq!(k.subtable_kern(1, 10, 20), -5);
+        assert_eq!(k.subtable_kern(1, 10, 21), 0);
+        assert_eq!(k.subtable_kern(2, 10, 20), 0);
+        assert!(!k.has_state_machine());
+        assert!(!k.has_cross_stream());
+    }
+
+    #[test]
+    fn skipped_state_machine_and_cross_stream_subtables_are_reported() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&2u16.to_be_bytes());
+        // Format 1 (state machine), horizontal: skipped but reported.
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&6u16.to_be_bytes());
+        bytes.extend_from_slice(&(0x0100 | COVERAGE_HORIZONTAL).to_be_bytes());
+        // Format 0, horizontal cross-stream: skipped but reported.
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&14u16.to_be_bytes());
+        bytes.extend_from_slice(&(COVERAGE_HORIZONTAL | COVERAGE_CROSS_STREAM).to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 6]);
+        let k = KernTable::parse(&bytes).unwrap();
+        assert_eq!(k.subtable_count(), 0);
+        assert!(k.has_state_machine());
+        assert!(k.has_cross_stream());
     }
 
     #[test]

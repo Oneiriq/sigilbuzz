@@ -141,6 +141,34 @@ impl Transform2D {
             self.yx * x + self.yy * y + self.dy,
         )
     }
+
+    /// The inverse transform, or `None` when this one is singular (its
+    /// determinant is zero or not finite).
+    ///
+    /// ```
+    /// use sigilbuzz_paint::Transform2D;
+    ///
+    /// let m = Transform2D::scale(2.0, 4.0).then(Transform2D::translate(1.0, 1.0));
+    /// let inverse = m.inverse().unwrap();
+    /// assert_eq!(inverse.apply(3.0, 5.0), (1.0, 1.0));
+    /// assert!(Transform2D::scale(0.0, 1.0).inverse().is_none());
+    /// ```
+    #[must_use]
+    pub fn inverse(self) -> Option<Self> {
+        let det = self.xx * self.yy - self.xy * self.yx;
+        if det == 0.0 || !det.is_finite() {
+            return None;
+        }
+        let (xx, xy, yx, yy) = (self.yy / det, -self.xy / det, -self.yx / det, self.xx / det);
+        Some(Self {
+            xx,
+            yx,
+            xy,
+            yy,
+            dx: -(xx * self.dx + xy * self.dy),
+            dy: -(yx * self.dx + yy * self.dy),
+        })
+    }
 }
 
 impl Default for Transform2D {
@@ -149,15 +177,16 @@ impl Default for Transform2D {
     }
 }
 
-/// Converts a COLRv1 F2DOT14 angle into radians.
+/// Converts a `PaintSweepGradient` start or end angle into radians.
 ///
-/// COLRv1 stores angles as F2DOT14 multiples of 180 degrees, i.e. an
-/// on-disk value of 1.0 means a half-turn. sigilbuzz already converts
-/// the F2DOT14 to a fraction; this helper finishes the trip into
-/// radians by multiplying by `pi`.
+/// Sweep angles carry a bias of one half-turn: the stored F2DOT14
+/// value plus 1.0 is the angle in multiples of 180 degrees, so the
+/// `[-2, 2)` F2DOT14 range covers -180 to 540 degrees and a full turn
+/// can be encoded. fontTools reads these fields as `BiasedAngle`, and
+/// HarfBuzz hands `(angle + 1) * pi` to its sweep-gradient callback.
 #[must_use]
-pub(crate) fn angle_to_radians(f2dot14_angle: f32) -> f32 {
-    f2dot14_angle * PI
+pub(crate) fn sweep_angle_to_radians(f2dot14_angle: f32) -> f32 {
+    (f2dot14_angle + 1.0) * PI
 }
 
 #[cfg(test)]
@@ -219,9 +248,12 @@ mod tests {
     }
 
     #[test]
-    fn angle_conversion_matches_spec() {
-        // F2DOT14 angle of 1.0 means pi radians per the COLRv1 spec.
-        assert!((angle_to_radians(1.0) - PI).abs() < 1e-6);
-        assert!((angle_to_radians(0.5) - PI / 2.0).abs() < 1e-6);
+    fn sweep_angles_carry_a_half_turn_bias() {
+        // Stored -1.0 is 0 degrees, 0.0 is 180, 1.0 is a full turn.
+        assert_eq!(sweep_angle_to_radians(-1.0), 0.0);
+        assert_eq!(sweep_angle_to_radians(0.0), PI);
+        assert_eq!(sweep_angle_to_radians(1.0), 2.0 * PI);
+        // Same float product HarfBuzz computes: (a + 1) * pi.
+        assert_eq!(sweep_angle_to_radians(0.25), (0.25_f32 + 1.0) * PI);
     }
 }

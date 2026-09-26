@@ -195,6 +195,13 @@ fn khmer_corpus_matches_rustybuzz() {
                 "x_advance mismatch at position {i} of {} ({:?}): sigilbuzz={} rustybuzz={}",
                 case.note, case.text, sig_g.x_advance, rb_pos.x_advance
             );
+            assert_eq!(
+                (sig_g.y_advance, sig_g.x_offset, sig_g.y_offset),
+                (rb_pos.y_advance, rb_pos.x_offset, rb_pos.y_offset),
+                "(y_advance, x_offset, y_offset) mismatch at position {i} of {} ({:?})",
+                case.note,
+                case.text
+            );
         }
     }
 }
@@ -244,4 +251,31 @@ fn khmer_digits_pass_through_unchanged() {
     assert_eq!(shaped.glyphs[0].cluster, 0);
     assert_eq!(shaped.glyphs[1].cluster, 3);
     assert_eq!(shaped.glyphs[2].cluster, 6);
+}
+
+/// `(glyph id, cluster)` pairs for `text`, keeping clusters at or
+/// past `from`.
+fn glyphs_from(text: &str, from: u32) -> Vec<(u32, u32)> {
+    let blob = Blob::new(NOTO_KHMER);
+    let face = Face::parse(&blob, 0).expect("parse face");
+    let font = Font::new(face, 1000.0);
+    let mut buffer = Buffer::new();
+    buffer.push_str(text);
+    shape(&font, &buffer, &[])
+        .expect("shape")
+        .glyphs
+        .iter()
+        .filter(|g| g.cluster >= from)
+        .map(|g| (g.glyph_id, g.cluster - from))
+        .collect()
+}
+
+#[test]
+fn khmer_after_other_text_keeps_its_syllable_clusters() {
+    // Syllable clusters come from the glyphs' real offsets, so a Khmer
+    // run that does not start the text merges them the same way.
+    let khmer = "\u{1780}\u{17C1}\u{1781}\u{17D2}\u{1780}\u{17B6}";
+    let alone = glyphs_from(khmer, 0);
+    assert_eq!(glyphs_from(&format!("ab {khmer}"), 3), alone);
+    assert_eq!(glyphs_from(&format!("\u{0E01} {khmer}"), 4), alone);
 }

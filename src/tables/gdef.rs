@@ -172,6 +172,22 @@ impl<'a> Gdef<'a> {
         }
     }
 
+    /// Raw `GlyphClassDef` value for `glyph_id`: 0 for a glyph the
+    /// table does not list, otherwise the class number the font
+    /// stores (1 base, 2 ligature, 3 mark, 4 component). `None` when
+    /// the font has no `GlyphClassDef` at all.
+    ///
+    /// [`Gdef::glyph_class`] folds 0 into [`GlyphClass::Base`]; the
+    /// raw value keeps "unclassified" apart from "base", which the
+    /// shaper's ligature bookkeeping needs (HarfBuzz gives an
+    /// unclassified glyph no base property).
+    #[must_use]
+    pub fn raw_glyph_class(&self, glyph_id: u16) -> Option<u16> {
+        self.glyph_class_def
+            .as_ref()
+            .map(|cd| cd.class_of(glyph_id))
+    }
+
     /// Mark-attachment class for `glyph_id`. Returns 0 when the font
     /// carries no `MarkAttachClassDef` or the glyph is unlisted.
     /// `LookupFlag`'s high byte is compared against this number; a
@@ -421,6 +437,19 @@ mod tests {
         let gdef = Gdef::parse(&bytes).unwrap();
         assert_eq!(gdef.glyph_class(0), GlyphClass::Base);
         assert_eq!(gdef.glyph_class(50000), GlyphClass::Base);
+        assert_eq!(gdef.raw_glyph_class(0), None);
+    }
+
+    #[test]
+    fn raw_glyph_class_keeps_unclassified_apart_from_base() {
+        let class_def = build_class_def_format1(10, &[1, 3]);
+        let bytes = build_gdef_with_class_def(&class_def);
+        let gdef = Gdef::parse(&bytes).unwrap();
+        assert_eq!(gdef.raw_glyph_class(10), Some(1));
+        assert_eq!(gdef.raw_glyph_class(11), Some(3));
+        // Unlisted: raw 0, although `glyph_class` reports Base.
+        assert_eq!(gdef.raw_glyph_class(99), Some(0));
+        assert_eq!(gdef.glyph_class(99), GlyphClass::Base);
     }
 
     #[test]

@@ -69,10 +69,8 @@ fn build_v1_header(glyph_id: u16) -> Vec<u8> {
     out.extend_from_slice(&(header_len as u32).to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes());
     out.extend_from_slice(&(header_len as u32).to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes()); // layerListOffset
-    out.extend_from_slice(&0u32.to_be_bytes()); // clipListOffset
-    out.extend_from_slice(&0u32.to_be_bytes()); // varIndexMapOffset
-    out.extend_from_slice(&0u32.to_be_bytes()); // itemVariationStoreOffset
+    // Layer list, clip list, index map, variation store: none.
+    out.extend_from_slice(&[0; 16]);
     out.extend_from_slice(&1u32.to_be_bytes());
     out.extend_from_slice(&glyph_id.to_be_bytes());
     out.extend_from_slice(&10u32.to_be_bytes());

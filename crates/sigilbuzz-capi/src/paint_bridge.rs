@@ -1,602 +1,381 @@
-//! `hb_paint_*`: bridge from HarfBuzz's paint-funcs API to
-//! `sigilbuzz_paint::evaluate_at_coords()`.
+//! `hb_paint_*`: HarfBuzz's paint-funcs API over sigilbuzz's COLR
+//! walker.
 //!
-//! HarfBuzz's COLRv1 surface is callback-based: the consumer
-//! populates an `hb_paint_funcs_t` table with function pointers, hands
-//! it to `hb_font_paint_glyph`, and the library walks the paint tree
-//! firing those callbacks. sigilbuzz-paint produces a flat `DrawCmd`
-//! stream. Translating the stream to HarfBuzz's
-//! push_transform / push_clip_glyph / color / linear_gradient /
-//! radial_gradient / sweep_gradient / push_layer / pop_layer
-//! sequence is the bridge's job.
+//! HarfBuzz's color-glyph surface is callback based: the caller fills
+//! an `hb_paint_funcs_t` (see the `funcs` submodule) and hands it to
+//! `hb_font_paint_glyph`, which walks the glyph and fires callbacks.
+//! The walk itself is `sigilbuzz_paint::walk::paint_glyph`, which
+//! reports steps in HarfBuzz 11's order; this module turns each step
+//! into the matching callback:
 //!
-//! The translation is straightforward:
+//! - A COLRv1 glyph: `push_clip_rectangle` with the glyph's bounds,
+//!   `push_transform(root)`, the paint tree, `pop_transform`,
+//!   `pop_clip`. The bounds are its ClipList box scaled to font units
+//!   (see the `clip` submodule), or the bounds of its paint tree; a
+//!   glyph whose paint escapes every clip paints nothing inside the
+//!   root transform. The root transform maps design units to font
+//!   scale: `(x_scale / upem, 0, 0, y_scale / upem, 0, 0)`.
+//! - `PaintGlyph`: `push_transform(inverse root)`,
+//!   `push_clip_glyph(gid, font)`, `push_transform(root)`, the child,
+//!   then `pop_transform`, `pop_clip`, `pop_transform`. The clip outline
+//!   is what `hb_font_draw_glyph` would draw at font scale. The inverse
+//!   root transform's `xy` is `-0.0`, as HarfBuzz computes it.
+//! - `PaintColrGlyph`: `push_transform(inverse root)`,
+//!   `color_glyph(gid, font)`, `pop_transform`; unless the callback
+//!   painted the glyph, its ClipList box (if any) as
+//!   `push_clip_rectangle` in design units, its paint tree, `pop_clip`.
+//! - Transform paints: one `push_transform` / `pop_transform` pair
+//!   each, skipped for identity translate, scale, rotate, and skew.
+//! - `PaintComposite`: `push_group`, backdrop, `push_group`, source,
+//!   `pop_group(mode)`, `pop_group(SRC_OVER)`.
+//! - Gradients: coordinates in design units, sweep angles as
+//!   `(angle + 1) * pi` radians, stops read back through the
+//!   `hb_color_line_t` (see the `color_line` submodule).
+//! - A COLRv0 glyph: `push_clip_glyph(layer, font)`, `color`,
+//!   `pop_clip` per layer.
+//! - Any other glyph: `push_clip_glyph(gid, font)`,
+//!   `color(1, foreground)`, `pop_clip`.
 //!
-//! | DrawCmd                                  | callback sequence emitted                            |
-//! |------------------------------------------|------------------------------------------------------|
-//! | `FillGlyph { gid, transform, paint }`    | `push_transform`* `push_clip_glyph` paint `pop_clip` `pop_transform`* |
-//! | `PushLayer { composite_mode }`           | `push_layer(mode)`                                   |
-//! | `PopLayer`                               | `pop_layer()`                                        |
+//! Colors resolve like HarfBuzz's paint context: palette entry `0xFFFF`
+//! is `foreground` with `is_foreground = 1`; any other entry asks
+//! `custom_palette_color` first, then CPAL palette `palette_index`, and
+//! falls back to `foreground` (with `is_foreground = 0`) when the font
+//! has no such palette or entry. The paint alpha multiplies the color's
+//! alpha byte and the product is truncated.
 //!
-//! `push_transform` / `pop_transform` are emitted only when the
-//! accumulated transform is not the identity. HarfBuzz callers
-//! routinely skip the no-op transform path for performance.
-//!
-//! Color conversion: sigilbuzz-paint hands back f32 RGBA in `[0, 1]`;
-//! HarfBuzz's `hb_color_t` is a packed `u32` BGRA byte tuple. The
-//! conversion is a clamp + cast.
+//! Not emitted yet: the `image` callback for SVG and bitmap glyphs.
 
 extern crate alloc;
 
-use alloc::boxed::Box;
-use core::ffi::c_void;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::ffi::{c_uint, c_void};
 
-use crate::{hb_bool_t, hb_font_t};
-use sigilbuzz_paint::{
-    evaluate_with_palette, Color, DrawCmd, GradientKind, PaintSource, Transform2D,
+use sigilbuzz::tables::cpal::Cpal;
+use sigilbuzz::Face;
+use sigilbuzz_paint::walk::{self, ColorLineRef, ColorRef, PaintSink, Painted, RootClip};
+use sigilbuzz_paint::{CompositeMode, Transform2D};
+
+use crate::{handle, hb_bool_t, hb_codepoint_t, hb_face_t, hb_font_t};
+
+mod clip;
+mod color;
+mod color_line;
+mod funcs;
+
+pub use color::{
+    hb_color, hb_color_get_alpha, hb_color_get_blue, hb_color_get_green, hb_color_get_red,
+    hb_color_t, hb_paint_composite_mode_t, HB_PAINT_COMPOSITE_MODE_CLEAR,
+    HB_PAINT_COMPOSITE_MODE_COLOR_BURN, HB_PAINT_COMPOSITE_MODE_COLOR_DODGE,
+    HB_PAINT_COMPOSITE_MODE_DARKEN, HB_PAINT_COMPOSITE_MODE_DEST,
+    HB_PAINT_COMPOSITE_MODE_DEST_ATOP, HB_PAINT_COMPOSITE_MODE_DEST_IN,
+    HB_PAINT_COMPOSITE_MODE_DEST_OUT, HB_PAINT_COMPOSITE_MODE_DEST_OVER,
+    HB_PAINT_COMPOSITE_MODE_DIFFERENCE, HB_PAINT_COMPOSITE_MODE_EXCLUSION,
+    HB_PAINT_COMPOSITE_MODE_HARD_LIGHT, HB_PAINT_COMPOSITE_MODE_HSL_COLOR,
+    HB_PAINT_COMPOSITE_MODE_HSL_HUE, HB_PAINT_COMPOSITE_MODE_HSL_LUMINOSITY,
+    HB_PAINT_COMPOSITE_MODE_HSL_SATURATION, HB_PAINT_COMPOSITE_MODE_LIGHTEN,
+    HB_PAINT_COMPOSITE_MODE_MULTIPLY, HB_PAINT_COMPOSITE_MODE_OVERLAY,
+    HB_PAINT_COMPOSITE_MODE_PLUS, HB_PAINT_COMPOSITE_MODE_SCREEN,
+    HB_PAINT_COMPOSITE_MODE_SOFT_LIGHT, HB_PAINT_COMPOSITE_MODE_SRC,
+    HB_PAINT_COMPOSITE_MODE_SRC_ATOP, HB_PAINT_COMPOSITE_MODE_SRC_IN,
+    HB_PAINT_COMPOSITE_MODE_SRC_OUT, HB_PAINT_COMPOSITE_MODE_SRC_OVER, HB_PAINT_COMPOSITE_MODE_XOR,
+};
+pub use color_line::{
+    hb_color_line_get_color_stops, hb_color_line_get_color_stops_func_t, hb_color_line_get_extend,
+    hb_color_line_get_extend_func_t, hb_color_line_t, hb_color_stop_t, hb_paint_extend_t,
+    HB_PAINT_EXTEND_PAD, HB_PAINT_EXTEND_REFLECT, HB_PAINT_EXTEND_REPEAT,
+};
+pub use funcs::{
+    hb_glyph_extents_t, hb_paint_color_func_t, hb_paint_color_glyph_func_t,
+    hb_paint_custom_palette_color_func_t, hb_paint_funcs_create, hb_paint_funcs_destroy,
+    hb_paint_funcs_is_immutable, hb_paint_funcs_make_immutable, hb_paint_funcs_reference,
+    hb_paint_funcs_set_color_func, hb_paint_funcs_set_color_glyph_func,
+    hb_paint_funcs_set_custom_palette_color_func, hb_paint_funcs_set_image_func,
+    hb_paint_funcs_set_linear_gradient_func, hb_paint_funcs_set_pop_clip_func,
+    hb_paint_funcs_set_pop_group_func, hb_paint_funcs_set_pop_transform_func,
+    hb_paint_funcs_set_push_clip_glyph_func, hb_paint_funcs_set_push_clip_rectangle_func,
+    hb_paint_funcs_set_push_group_func, hb_paint_funcs_set_push_transform_func,
+    hb_paint_funcs_set_radial_gradient_func, hb_paint_funcs_set_sweep_gradient_func,
+    hb_paint_funcs_t, hb_paint_image_func_t, hb_paint_linear_gradient_func_t,
+    hb_paint_pop_clip_func_t, hb_paint_pop_group_func_t, hb_paint_pop_transform_func_t,
+    hb_paint_push_clip_glyph_func_t, hb_paint_push_clip_rectangle_func_t,
+    hb_paint_push_group_func_t, hb_paint_push_transform_func_t, hb_paint_radial_gradient_func_t,
+    hb_paint_sweep_gradient_func_t,
 };
 
-/// HarfBuzz's packed BGRA color. Layout: byte 0 = blue, byte 1 = green,
-/// byte 2 = red, byte 3 = alpha. Matches the `HB_COLOR(b, g, r, a)`
-/// macro upstream.
-pub type hb_color_t = u32;
+use funcs::Dispatch;
 
-/// Opaque color-line handle passed to the gradient callbacks.
-/// HarfBuzz lets the callee read the stops back through
-/// `hb_color_line_get_color_stops` / `hb_color_line_get_extend`. This
-/// crate does not export those accessors yet (#103), so the pointer
-/// is only an opaque, non-null token that is valid for the duration
-/// of the callback.
-#[repr(C)]
-pub struct hb_color_line_t {
-    /// Opaque payload. The C surface treats this pointer as a black
-    /// box and never reads through it.
-    _opaque: [u8; 0],
-}
+/// COLR palette entry that means "the foreground color".
+const FOREGROUND_ENTRY: u16 = 0xFFFF;
 
-// ---------------------------------------------------------------------------
-// hb_paint_funcs_t
-// ---------------------------------------------------------------------------
-
-/// HarfBuzz paint-funcs table. Each callback is optional; the bridge
-/// silently skips any callback that is `None`.
-#[repr(C)]
-pub struct hb_paint_funcs_t {
-    /// Called when an affine transform should be pushed onto the
-    /// callee's transform stack. `(xx, yx, xy, yy, dx, dy)` matches
-    /// the COLRv1 / SVG / CoreGraphics convention.
-    pub push_transform: Option<
-        extern "C" fn(
-            funcs: *mut hb_paint_funcs_t,
-            paint_data: *mut c_void,
-            xx: f32,
-            yx: f32,
-            xy: f32,
-            yy: f32,
-            dx: f32,
-            dy: f32,
-        ),
-    >,
-    /// Called when the most recent `push_transform` should be undone.
-    pub pop_transform: Option<extern "C" fn(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void)>,
-    /// Called when the next paints should be clipped to the outline of
-    /// glyph `gid`.
-    pub push_clip_glyph:
-        Option<extern "C" fn(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void, gid: u32)>,
-    /// Called when the most recent clip should be undone.
-    pub pop_clip: Option<extern "C" fn(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void)>,
-    /// Called when a new layer should be pushed; `composite_mode` is
-    /// the COLRv1 `CompositeMode` byte cast to `u32`.
-    pub push_layer: Option<
-        extern "C" fn(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void, composite_mode: u32),
-    >,
-    /// Called when the most recent `push_layer` should be popped and
-    /// composited.
-    pub pop_layer: Option<extern "C" fn(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void)>,
-    /// Called for a solid-color paint. `is_foreground` matches
-    /// HarfBuzz: nonzero when the paint should pick up the renderer's
-    /// foreground color instead of `color`.
-    pub color: Option<
-        extern "C" fn(
-            funcs: *mut hb_paint_funcs_t,
-            paint_data: *mut c_void,
-            is_foreground: hb_bool_t,
-            color: hb_color_t,
-        ),
-    >,
-    /// Called for a linear gradient.
-    pub linear_gradient: Option<
-        extern "C" fn(
-            funcs: *mut hb_paint_funcs_t,
-            paint_data: *mut c_void,
-            color_line: *const hb_color_line_t,
-            x0: f32,
-            y0: f32,
-            x1: f32,
-            y1: f32,
-            x2: f32,
-            y2: f32,
-        ),
-    >,
-    /// Called for a radial gradient.
-    pub radial_gradient: Option<
-        extern "C" fn(
-            funcs: *mut hb_paint_funcs_t,
-            paint_data: *mut c_void,
-            color_line: *const hb_color_line_t,
-            x0: f32,
-            y0: f32,
-            r0: f32,
-            x1: f32,
-            y1: f32,
-            r1: f32,
-        ),
-    >,
-    /// Called for a sweep gradient.
-    pub sweep_gradient: Option<
-        extern "C" fn(
-            funcs: *mut hb_paint_funcs_t,
-            paint_data: *mut c_void,
-            color_line: *const hb_color_line_t,
-            x0: f32,
-            y0: f32,
-            start_angle: f32,
-            end_angle: f32,
-        ),
-    >,
-}
-
-impl hb_paint_funcs_t {
-    /// Internal: empty table. All callbacks default to `None`.
-    fn empty() -> Self {
-        Self {
-            push_transform: None,
-            pop_transform: None,
-            push_clip_glyph: None,
-            pop_clip: None,
-            push_layer: None,
-            pop_layer: None,
-            color: None,
-            linear_gradient: None,
-            radial_gradient: None,
-            sweep_gradient: None,
-        }
-    }
-}
-
-/// Allocates a fresh empty paint-funcs table. All callbacks start as
-/// `None`. The consumer must `hb_paint_funcs_set_*` to wire them up.
-#[no_mangle]
-pub extern "C" fn hb_paint_funcs_create() -> *mut hb_paint_funcs_t {
-    Box::into_raw(Box::new(hb_paint_funcs_t::empty()))
-}
-
-/// Releases a paint-funcs table.
+/// Paints `glyph` of `font` through the callbacks in `pfuncs`, passing
+/// `paint_data` to every callback. See the module docs for the
+/// callback sequence.
+///
+/// `palette_index` selects the CPAL palette. Palette entries the font
+/// cannot supply (no such palette, no such entry, no CPAL) paint in
+/// `foreground`, as in HarfBuzz. Paints on the COLR foreground entry
+/// report `is_foreground = 1` and `foreground` with the paint alpha
+/// applied. The walk runs at the font's current variation coordinates
+/// and scale.
 ///
 /// # Safety
-/// `funcs` must be null or a pointer originally returned by
-/// `hb_paint_funcs_create`.
-#[no_mangle]
-pub unsafe extern "C" fn hb_paint_funcs_destroy(funcs: *mut hb_paint_funcs_t) {
-    if funcs.is_null() {
-        return;
-    }
-    // SAFETY: `funcs` is non-null and the caller guarantees it came
-    // from `Box::into_raw` in `hb_paint_funcs_create` and has not been
-    // destroyed yet.
-    drop(unsafe { Box::from_raw(funcs) });
-}
-
-// Setter macros, one per callback. Each setter overwrites the slot,
-// matching HarfBuzz's "last set wins" semantics. Callbacks may be
-// `None` to clear.
-
-macro_rules! impl_setter {
-    ($name:ident, $field:ident, $cb_ty:ty) => {
-        /// Installs the callback in slot `$field`. Pass `None` to
-        /// clear.
-        ///
-        /// # Safety
-        /// `funcs` must be null or valid.
-        #[no_mangle]
-        pub unsafe extern "C" fn $name(funcs: *mut hb_paint_funcs_t, callback: $cb_ty) {
-            if funcs.is_null() {
-                return;
-            }
-            // SAFETY: `funcs` is non-null and the caller guarantees it
-            // points to a live `hb_paint_funcs_t` that nothing else is
-            // using during this call.
-            unsafe {
-                (*funcs).$field = callback;
-            }
-        }
-    };
-}
-
-impl_setter!(
-    hb_paint_funcs_set_push_transform_func,
-    push_transform,
-    Option<
-        extern "C" fn(
-            funcs: *mut hb_paint_funcs_t,
-            paint_data: *mut c_void,
-            xx: f32,
-            yx: f32,
-            xy: f32,
-            yy: f32,
-            dx: f32,
-            dy: f32,
-        ),
-    >
-);
-impl_setter!(
-    hb_paint_funcs_set_pop_transform_func,
-    pop_transform,
-    Option<extern "C" fn(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void)>
-);
-impl_setter!(
-    hb_paint_funcs_set_push_clip_glyph_func,
-    push_clip_glyph,
-    Option<extern "C" fn(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void, gid: u32)>
-);
-impl_setter!(
-    hb_paint_funcs_set_pop_clip_func,
-    pop_clip,
-    Option<extern "C" fn(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void)>
-);
-impl_setter!(
-    hb_paint_funcs_set_push_layer_func,
-    push_layer,
-    Option<
-        extern "C" fn(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void, composite_mode: u32),
-    >
-);
-impl_setter!(
-    hb_paint_funcs_set_pop_layer_func,
-    pop_layer,
-    Option<extern "C" fn(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void)>
-);
-impl_setter!(
-    hb_paint_funcs_set_color_func,
-    color,
-    Option<
-        extern "C" fn(
-            funcs: *mut hb_paint_funcs_t,
-            paint_data: *mut c_void,
-            is_foreground: hb_bool_t,
-            color: hb_color_t,
-        ),
-    >
-);
-impl_setter!(
-    hb_paint_funcs_set_linear_gradient_func,
-    linear_gradient,
-    Option<
-        extern "C" fn(
-            funcs: *mut hb_paint_funcs_t,
-            paint_data: *mut c_void,
-            color_line: *const hb_color_line_t,
-            x0: f32,
-            y0: f32,
-            x1: f32,
-            y1: f32,
-            x2: f32,
-            y2: f32,
-        ),
-    >
-);
-impl_setter!(
-    hb_paint_funcs_set_radial_gradient_func,
-    radial_gradient,
-    Option<
-        extern "C" fn(
-            funcs: *mut hb_paint_funcs_t,
-            paint_data: *mut c_void,
-            color_line: *const hb_color_line_t,
-            x0: f32,
-            y0: f32,
-            r0: f32,
-            x1: f32,
-            y1: f32,
-            r1: f32,
-        ),
-    >
-);
-impl_setter!(
-    hb_paint_funcs_set_sweep_gradient_func,
-    sweep_gradient,
-    Option<
-        extern "C" fn(
-            funcs: *mut hb_paint_funcs_t,
-            paint_data: *mut c_void,
-            color_line: *const hb_color_line_t,
-            x0: f32,
-            y0: f32,
-            start_angle: f32,
-            end_angle: f32,
-        ),
-    >
-);
-
-// ---------------------------------------------------------------------------
-// hb_font_paint_glyph
-// ---------------------------------------------------------------------------
-
-/// Walks the COLRv1 paint tree for `gid` against `font`'s face, firing
-/// callbacks on `funcs` for each draw operation. `paint_data` is
-/// threaded through to every callback. `palette_index` picks the CPAL
-/// palette colors resolve in, as in HarfBuzz. A color in a palette the
-/// font does not have comes out transparent, where HarfBuzz reports
-/// the foreground color. `_foreground_color` is accepted for HarfBuzz
-/// signature parity only: solid colors are always reported with
-/// `is_foreground` set to 0.
-///
-/// Paint evaluation applies the variation coordinates set on `font`
-/// with `hb_font_set_variations`, as HarfBuzz does. A `gid` above
-/// 65535 is not a valid glyph id and paints nothing.
-///
-/// # Safety
-/// `font` and `funcs` must each be null or valid. `paint_data` may be
-/// any pointer (it is threaded back to the consumer's callbacks
-/// unchanged).
+/// `font` and `pfuncs` must be null or live objects; `paint_data` may
+/// be any pointer (it is threaded back to the callbacks unchanged).
 #[no_mangle]
 pub unsafe extern "C" fn hb_font_paint_glyph(
     font: *mut hb_font_t,
-    gid: u32,
-    funcs: *mut hb_paint_funcs_t,
+    glyph: hb_codepoint_t,
+    pfuncs: *mut hb_paint_funcs_t,
     paint_data: *mut c_void,
-    palette_index: u32,
-    _foreground_color: hb_color_t,
+    palette_index: c_uint,
+    foreground: hb_color_t,
 ) {
-    if font.is_null() || funcs.is_null() {
+    if font.is_null() || pfuncs.is_null() {
         return;
     }
-    // Glyph ids are 16-bit. Truncating would paint an unrelated glyph.
-    let Ok(gid) = u16::try_from(gid) else {
-        return;
+    // Keep our own references for the whole walk, so a callback that
+    // destroys the caller's font or funcs cannot free them under us.
+    // SAFETY: `font` is non-null and the caller guarantees it is a live
+    // handle, so taking a new reference to it is sound.
+    let font_ref: Arc<hb_font_t> = unsafe { handle::retain(font.cast_const()) };
+    // SAFETY: `pfuncs` is non-null and the caller guarantees it is a
+    // live handle, so taking a new reference to it is sound.
+    let funcs_ref: Arc<hb_paint_funcs_t> = unsafe { handle::retain(pfuncs.cast_const()) };
+
+    // Copy the font state before any callback runs, so the font lock is
+    // not held while user code runs and a callback that changes the
+    // font does not affect this walk.
+    let face: Arc<hb_face_t> = Arc::clone(&font_ref.inner.face);
+    let (coords, x_scale, y_scale): (Vec<f32>, i32, i32) = {
+        let state = font_ref.inner.state.lock();
+        (state.coords.clone(), state.x_scale, state.y_scale)
     };
-    // SAFETY: `font` is non-null and the caller guarantees it points
-    // to a live `hb_font_t`.
-    let font_inner = unsafe { &(*font).inner };
-    // The face lives in the `Arc<FaceInner>` we hold for the duration
-    // of this call. Paint evaluation only reads from the face.
-    let face: &sigilbuzz::Face<'static> = &font_inner.face.face;
-    // Copy the coords out so the font lock is not held while the
-    // callbacks run. A callback may call back into the font.
-    let coords = font_inner.state.lock().coords.clone();
+    let face = &face.inner.face;
 
-    // CPAL palette indices are 16-bit, so a larger index names no
-    // palette.
-    let palette = u16::try_from(palette_index).unwrap_or(u16::MAX);
-    let cmds = evaluate_with_palette(face, gid, &coords, palette);
-
-    // Walk the DrawCmd stream and dispatch. Each callback slot is
-    // read again right before use because a callback may replace the
-    // slots through the `funcs` pointer it receives.
-    for cmd in &cmds {
-        match cmd {
-            DrawCmd::PushLayer { composite_mode } => {
-                // SAFETY: `funcs` is non-null and the caller guarantees
-                // it points to a live `hb_paint_funcs_t`.
-                if let Some(cb) = unsafe { (*funcs).push_layer } {
-                    cb(funcs, paint_data, *composite_mode as u32);
-                }
-            }
-            DrawCmd::PopLayer => {
-                // SAFETY: as above.
-                if let Some(cb) = unsafe { (*funcs).pop_layer } {
-                    cb(funcs, paint_data);
-                }
-            }
-            DrawCmd::FillGlyph {
-                gid: leaf_gid,
-                transform,
-                paint,
-            } => {
-                let pushed_transform = !is_identity(transform);
-                if pushed_transform {
-                    // SAFETY: as above.
-                    if let Some(cb) = unsafe { (*funcs).push_transform } {
-                        cb(
-                            funcs,
-                            paint_data,
-                            transform.xx,
-                            transform.yx,
-                            transform.xy,
-                            transform.yy,
-                            transform.dx,
-                            transform.dy,
-                        );
-                    }
-                }
-                // SAFETY: as above.
-                if let Some(cb) = unsafe { (*funcs).push_clip_glyph } {
-                    cb(funcs, paint_data, u32::from(*leaf_gid));
-                }
-                // SAFETY: `funcs` is non-null and points to a live
-                // `hb_paint_funcs_t`, as checked and guaranteed above.
-                unsafe { emit_paint_source(funcs, paint_data, paint) };
-                // SAFETY: as above.
-                if let Some(cb) = unsafe { (*funcs).pop_clip } {
-                    cb(funcs, paint_data);
-                }
-                if pushed_transform {
-                    // SAFETY: as above.
-                    if let Some(cb) = unsafe { (*funcs).pop_transform } {
-                        cb(funcs, paint_data);
-                    }
-                }
-            }
-        }
+    let dispatch = Dispatch::new(&funcs_ref, pfuncs, paint_data);
+    let cpal = face.cpal().ok().flatten();
+    let colors = Colors {
+        dispatch: &dispatch,
+        cpal: cpal.as_ref(),
+        palette_index,
+        foreground,
+    };
+    let upem = upem(face);
+    let (root, inverse_root) = root_transforms(f32::from(upem), x_scale, y_scale);
+    let mut bridge = Bridge {
+        colors: &colors,
+        font,
+        root,
+        inverse_root,
+        scale: clip::Scale {
+            upem,
+            x_scale,
+            y_scale,
+        },
+    };
+    let painted = match u16::try_from(glyph) {
+        Ok(gid) => walk::paint_glyph(face, gid, &coords, &mut bridge),
+        // COLR glyph ids are 16-bit; larger ones have no color data.
+        Err(_) => Painted::Nothing,
+    };
+    if painted == Painted::Nothing {
+        dispatch.push_clip_glyph(glyph, font);
+        dispatch.color(1, foreground);
+        dispatch.pop_clip();
     }
 }
 
-/// Dispatches the matching callback for a [`PaintSource`].
-///
-/// # Safety
-/// `funcs` must be non-null and point to a live `hb_paint_funcs_t`.
-unsafe fn emit_paint_source(
-    funcs: *mut hb_paint_funcs_t,
-    paint_data: *mut c_void,
-    paint: &PaintSource,
-) {
-    match paint {
-        PaintSource::Solid(color) => {
-            // SAFETY: this function's contract guarantees `funcs` is
-            // non-null and live.
-            if let Some(cb) = unsafe { (*funcs).color } {
-                cb(funcs, paint_data, 0, color_to_hb(*color));
-            }
-        }
-        PaintSource::Gradient(gradient) => {
-            // The color line handle is opaque to C (see
-            // `hb_color_line_t`). Point it at the gradient, which
-            // outlives every callback below.
-            let line_ptr: *const hb_color_line_t =
-                core::ptr::from_ref(gradient).cast::<hb_color_line_t>();
-            match gradient.kind {
-                GradientKind::Linear { p0, p1, p2 } => {
-                    // SAFETY: as for the solid case.
-                    if let Some(cb) = unsafe { (*funcs).linear_gradient } {
-                        cb(
-                            funcs, paint_data, line_ptr, p0.0, p0.1, p1.0, p1.1, p2.0, p2.1,
-                        );
-                    }
-                }
-                GradientKind::Radial { c0, r0, c1, r1 } => {
-                    // SAFETY: as for the solid case.
-                    if let Some(cb) = unsafe { (*funcs).radial_gradient } {
-                        cb(funcs, paint_data, line_ptr, c0.0, c0.1, r0, c1.0, c1.1, r1);
-                    }
-                }
-                GradientKind::Sweep {
-                    center,
-                    start_angle,
-                    end_angle,
-                } => {
-                    // SAFETY: as for the solid case.
-                    if let Some(cb) = unsafe { (*funcs).sweep_gradient } {
-                        cb(
-                            funcs,
-                            paint_data,
-                            line_ptr,
-                            center.0,
-                            center.1,
-                            start_angle,
-                            end_angle,
-                        );
-                    }
+/// The face's units per em as HarfBuzz reads them: `head.unitsPerEm`
+/// when it is in 16..=16384, else 1000.
+fn upem(face: &Face<'_>) -> u16 {
+    face.head()
+        .ok()
+        .map(|h| h.units_per_em)
+        .filter(|u| (16..=16384).contains(u))
+        .unwrap_or(1000)
+}
+
+/// The root transform (design units to font scale) and its inverse, as
+/// HarfBuzz builds them. HarfBuzz folds its synthetic slant into the
+/// `xy` terms; sigilbuzz fonts have none, so the root's `xy` is `0.0`
+/// and the inverse's is `-0.0` (HarfBuzz computes `-slant * ...`). A
+/// zero scale inverts as if it were `upem`, as in HarfBuzz.
+fn root_transforms(upem: f32, x_scale: i32, y_scale: i32) -> (Transform2D, Transform2D) {
+    let (xs, ys) = (x_scale as f32, y_scale as f32);
+    let root = Transform2D::scale(xs / upem, ys / upem);
+    let inv_x = if x_scale == 0 { upem } else { xs };
+    let inv_y = if y_scale == 0 { upem } else { ys };
+    let inverse = Transform2D {
+        xy: -0.0,
+        ..Transform2D::scale(upem / inv_x, upem / inv_y)
+    };
+    (root, inverse)
+}
+
+/// Palette state for one paint call: HarfBuzz's color resolution.
+pub(crate) struct Colors<'c> {
+    dispatch: &'c Dispatch<'c>,
+    cpal: Option<&'c Cpal<'c>>,
+    palette_index: c_uint,
+    foreground: hb_color_t,
+}
+
+impl Colors<'_> {
+    /// Resolves a color reference to `(is_foreground, color)`.
+    pub(crate) fn get_color(&self, color: ColorRef) -> (hb_bool_t, hb_color_t) {
+        let mut packed = self.foreground;
+        let mut is_foreground = 1;
+        if color.palette_entry != FOREGROUND_ENTRY {
+            let entry = color.palette_entry;
+            if !self
+                .dispatch
+                .custom_palette_color(c_uint::from(entry), &mut packed)
+            {
+                if let Some(c) = self.cpal_color(entry) {
+                    packed = c;
                 }
             }
+            is_foreground = 0;
         }
+        (is_foreground, color::with_alpha(packed, color.alpha))
+    }
+
+    fn cpal_color(&self, entry: u16) -> Option<hb_color_t> {
+        let palette = u16::try_from(self.palette_index).ok()?;
+        let c = self.cpal?.color(palette, entry)?;
+        Some(hb_color(c.b, c.g, c.r, c.a))
     }
 }
 
-/// Pack an f32 RGBA color into HarfBuzz's BGRA u32. Channels are
-/// clamped to `[0, 1]` then scaled to 8-bit.
-fn color_to_hb(c: Color) -> hb_color_t {
-    let to_byte = |v: f32| -> u32 { ((v.clamp(0.0, 1.0) * 255.0) + 0.5) as u32 };
-    let b = to_byte(c.b);
-    let g = to_byte(c.g);
-    let r = to_byte(c.r);
-    let a = to_byte(c.a);
-    b | (g << 8) | (r << 16) | (a << 24)
+/// Turns walk steps into callbacks.
+struct Bridge<'b> {
+    colors: &'b Colors<'b>,
+    font: *mut hb_font_t,
+    root: Transform2D,
+    inverse_root: Transform2D,
+    /// Font scale for the root clip rectangle.
+    scale: clip::Scale,
 }
 
-/// Returns true if `t` is the 2x3 identity. Strict equality is fine
-/// here: sigilbuzz_paint emits the literal `Transform2D::IDENTITY`
-/// constant for "no transform"; rounding never enters.
-fn is_identity(t: &Transform2D) -> bool {
-    t.xx == 1.0 && t.yy == 1.0 && t.xy == 0.0 && t.yx == 0.0 && t.dx == 0.0 && t.dy == 0.0
+impl Bridge<'_> {
+    fn dispatch(&self) -> &Dispatch<'_> {
+        self.colors.dispatch
+    }
+}
+
+impl PaintSink for Bridge<'_> {
+    fn push_transform(&mut self, transform: Transform2D) {
+        self.dispatch().push_transform(transform);
+    }
+
+    fn push_root_transform(&mut self) {
+        self.dispatch().push_transform(self.root);
+    }
+
+    fn push_inverse_root_transform(&mut self) {
+        self.dispatch().push_transform(self.inverse_root);
+    }
+
+    fn pop_transform(&mut self) {
+        self.dispatch().pop_transform();
+    }
+
+    fn push_clip_glyph(&mut self, glyph: u16) {
+        self.dispatch()
+            .push_clip_glyph(hb_codepoint_t::from(glyph), self.font);
+    }
+
+    fn push_clip_rectangle(&mut self, x_min: f32, y_min: f32, x_max: f32, y_max: f32) {
+        self.dispatch()
+            .push_clip_rectangle([x_min, y_min, x_max, y_max]);
+    }
+
+    fn push_root_clip(&mut self, clip: RootClip) {
+        self.dispatch().push_clip_rectangle(self.scale.rect(clip));
+    }
+
+    fn color_glyph(&mut self, glyph: u16) -> bool {
+        self.dispatch()
+            .color_glyph(hb_codepoint_t::from(glyph), self.font)
+    }
+
+    fn pop_clip(&mut self) {
+        self.dispatch().pop_clip();
+    }
+
+    fn push_group(&mut self) {
+        self.dispatch().push_group();
+    }
+
+    fn pop_group(&mut self, mode: CompositeMode) {
+        self.dispatch().pop_group(color::composite_mode_to_hb(mode));
+    }
+
+    fn color(&mut self, color: ColorRef) {
+        let (is_foreground, packed) = self.colors.get_color(color);
+        self.dispatch().color(is_foreground, packed);
+    }
+
+    fn linear_gradient(
+        &mut self,
+        line: ColorLineRef<'_>,
+        p0: (f32, f32),
+        p1: (f32, f32),
+        p2: (f32, f32),
+    ) {
+        let points = [p0.0, p0.1, p1.0, p1.1, p2.0, p2.1];
+        color_line::with_color_line(line, self.colors, |cl| {
+            self.dispatch().linear_gradient(cl, points);
+        });
+    }
+
+    fn radial_gradient(
+        &mut self,
+        line: ColorLineRef<'_>,
+        c0: (f32, f32),
+        r0: f32,
+        c1: (f32, f32),
+        r1: f32,
+    ) {
+        let circles = [c0.0, c0.1, r0, c1.0, c1.1, r1];
+        color_line::with_color_line(line, self.colors, |cl| {
+            self.dispatch().radial_gradient(cl, circles);
+        });
+    }
+
+    fn sweep_gradient(
+        &mut self,
+        line: ColorLineRef<'_>,
+        center: (f32, f32),
+        start_angle: f32,
+        end_angle: f32,
+    ) {
+        let args = [center.0, center.1, start_angle, end_angle];
+        color_line::with_color_line(line, self.colors, |cl| {
+            self.dispatch().sweep_gradient(cl, args);
+        });
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::ptr;
-    use core::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn create_destroy_round_trips() {
-        // SAFETY: every pointer passed here is null or a live handle
-        // created in this test, and each handle is destroyed once.
-        unsafe {
-            let f = hb_paint_funcs_create();
-            assert!(!f.is_null());
-            hb_paint_funcs_destroy(f);
-            // null is a no-op
-            hb_paint_funcs_destroy(ptr::null_mut());
-        }
-    }
-
-    #[test]
-    fn color_to_hb_packs_bgra() {
-        let c = Color::new(1.0, 0.5, 0.25, 1.0);
-        let hb = color_to_hb(c);
-        // alpha = 0xFF, red ~ 0xFF, green ~ 0x80, blue ~ 0x40.
-        assert_eq!(hb >> 24, 0xFF);
-        assert_eq!((hb >> 16) & 0xFF, 0xFF);
-        let g = (hb >> 8) & 0xFF;
-        assert!((0x7F..=0x80).contains(&g));
-        let b = hb & 0xFF;
-        assert!((0x3F..=0x41).contains(&b));
-    }
-
-    #[test]
-    fn identity_transform_round_trip() {
-        assert!(is_identity(&Transform2D::IDENTITY));
-        assert!(!is_identity(&Transform2D::translate(1.0, 0.0)));
-    }
-
-    // Counter shared across the C-callback fixtures below. Each test
-    // uses its own slice of u32 indices to avoid collisions.
-    static COUNTERS: [AtomicU32; 6] = [
-        AtomicU32::new(0),
-        AtomicU32::new(0),
-        AtomicU32::new(0),
-        AtomicU32::new(0),
-        AtomicU32::new(0),
-        AtomicU32::new(0),
-    ];
-
-    extern "C" fn count_push_layer(_f: *mut hb_paint_funcs_t, _d: *mut c_void, _mode: u32) {
-        COUNTERS[0].fetch_add(1, Ordering::SeqCst);
-    }
-    extern "C" fn count_pop_layer(_f: *mut hb_paint_funcs_t, _d: *mut c_void) {
-        COUNTERS[1].fetch_add(1, Ordering::SeqCst);
-    }
-
-    #[test]
-    fn dispatch_translates_drawcmd_layers_into_callbacks() {
-        // We exercise the dispatcher in isolation by feeding it
-        // synthetic DrawCmds. `hb_font_paint_glyph` itself needs a
-        // face with a COLR table; the equivalence test
-        // (`paint_evaluator` Rust integration) covers that path.
-        let funcs = hb_paint_funcs_create();
-        // SAFETY: every pointer passed here is null or a live handle
-        // created in this test, and each handle is destroyed once.
-        unsafe {
-            (*funcs).push_layer = Some(count_push_layer);
-            (*funcs).pop_layer = Some(count_pop_layer);
-        }
-        // Reset counters in case other tests touched them.
-        COUNTERS[0].store(0, Ordering::SeqCst);
-        COUNTERS[1].store(0, Ordering::SeqCst);
-
-        // Direct invocation matches what the dispatcher does for a
-        // PushLayer / PopLayer pair.
-        // SAFETY: every pointer passed here is null or a live handle
-        // created in this test, and each handle is destroyed once.
-        unsafe {
-            ((*funcs).push_layer.unwrap())(funcs, ptr::null_mut(), 3);
-            ((*funcs).pop_layer.unwrap())(funcs, ptr::null_mut());
-        }
-
-        assert_eq!(COUNTERS[0].load(Ordering::SeqCst), 1);
-        assert_eq!(COUNTERS[1].load(Ordering::SeqCst), 1);
-
-        // SAFETY: every pointer passed here is null or a live handle
-        // created in this test, and each handle is destroyed once.
-        unsafe { hb_paint_funcs_destroy(funcs) };
+    fn root_transform_scales_design_units_to_font_scale() {
+        let (root, inverse) = root_transforms(1000.0, 2000, 500);
+        assert_eq!(root, Transform2D::scale(2.0, 0.5));
+        assert_eq!(inverse, Transform2D::scale(0.5, 2.0));
+        // HarfBuzz's `-slant * upem / x_scale` with no slant.
+        assert!(inverse.xy.is_sign_negative() && root.xy.is_sign_positive());
+        // Default scale (upem) is the identity matrix.
+        let (root, inverse) = root_transforms(2048.0, 2048, 2048);
+        assert_eq!(root, Transform2D::IDENTITY);
+        assert_eq!(inverse, Transform2D::IDENTITY);
+        // A zero scale inverts as upem.
+        let (root, inverse) = root_transforms(1000.0, 0, 1000);
+        assert_eq!(root, Transform2D::scale(0.0, 1.0));
+        assert_eq!(inverse, Transform2D::IDENTITY);
     }
 }

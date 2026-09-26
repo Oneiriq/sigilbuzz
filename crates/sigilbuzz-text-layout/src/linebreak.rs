@@ -44,10 +44,6 @@ pub struct LineBreakIter<'a> {
     /// Class of the most recently consumed character. `None` until the
     /// first character is seen.
     prev_class: Option<LineBreakClass>,
-    /// True when the last consumed pair was a CR followed by LF. The
-    /// CR already emitted a Mandatory break, so we suppress one for
-    /// the LF.
-    suppress_next_mandatory: bool,
     /// True once we've emitted the trailing-position sentinel.
     finished: bool,
 }
@@ -58,7 +54,6 @@ impl<'a> LineBreakIter<'a> {
             text,
             pos: 0,
             prev_class: None,
-            suppress_next_mandatory: false,
             finished: false,
         }
     }
@@ -93,20 +88,20 @@ impl Iterator for LineBreakIter<'_> {
 
             // LB4 / LB5: mandatory breaks after BK / CR / LF / NL.
             // We emit the break *after* consuming the controlling
-            // character so the offset lands past it.
+            // character so the offset lands past it. CR x LF keeps the
+            // pair together without extra state: a CR followed by LF is
+            // not a trigger, and the LF then triggers the single break.
             let was_mandatory_trigger = matches!(
                 self.prev_class,
                 Some(LineBreakClass::BK | LineBreakClass::LF | LineBreakClass::NL)
             ) || (self.prev_class == Some(LineBreakClass::CR)
                 && curr != LineBreakClass::LF);
 
-            if was_mandatory_trigger && !self.suppress_next_mandatory {
-                self.suppress_next_mandatory = false;
+            if was_mandatory_trigger {
                 self.prev_class = Some(curr);
                 self.pos = next_pos;
                 return Some((self.pos - ch_len, BreakOpportunity::Mandatory));
             }
-            self.suppress_next_mandatory = false;
 
             // Pair-table action between prev_class and curr.
             let action = match self.prev_class {
@@ -116,12 +111,6 @@ impl Iterator for LineBreakIter<'_> {
 
             self.prev_class = Some(curr);
             self.pos = next_pos;
-
-            // Skip over CR-LF: the LF after a CR is treated as part
-            // of the same mandatory break.
-            if matches!(curr, LineBreakClass::CR) {
-                self.suppress_next_mandatory = true;
-            }
 
             if matches!(
                 action,
@@ -333,6 +322,47 @@ mod tests {
             .count();
         // One for the CR-LF pair, one end sentinel.
         assert_eq!(mandatory_count, 2);
+    }
+
+    fn mandatory_offsets(text: &str) -> Vec<usize> {
+        opportunities(text)
+            .into_iter()
+            .filter(|(_, o)| matches!(o, BreakOpportunity::Mandatory))
+            .map(|(p, _)| p)
+            .collect()
+    }
+
+    #[test]
+    fn crlf_breaks_once_after_the_lf() {
+        assert_eq!(mandatory_offsets("a\r\nb"), vec![3, 4]);
+    }
+
+    #[test]
+    fn lone_cr_emits_mandatory_break() {
+        // UAX #14 LB5: CR ! when the CR is not followed by LF.
+        assert_eq!(mandatory_offsets("a\rb"), vec![2, 3]);
+    }
+
+    #[test]
+    fn consecutive_crs_break_after_each() {
+        assert_eq!(mandatory_offsets("a\r\rb"), vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn cr_before_crlf_breaks_twice() {
+        assert_eq!(mandatory_offsets("a\r\r\nb"), vec![2, 4, 5]);
+    }
+
+    #[test]
+    fn trailing_cr_folds_into_end_sentinel() {
+        assert_eq!(mandatory_offsets("a\r"), vec![2]);
+    }
+
+    #[test]
+    fn nel_and_line_separator_emit_mandatory_breaks() {
+        // U+0085 NEL (class NL) and U+2028 LINE SEPARATOR (class BK).
+        assert_eq!(mandatory_offsets("a\u{0085}b"), vec![3, 4]);
+        assert_eq!(mandatory_offsets("a\u{2028}b"), vec![4, 5]);
     }
 
     #[test]

@@ -442,6 +442,23 @@ impl<'a> Kerx<'a> {
         total.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
     }
 
+    /// Pair-kerning delta for `(left, right)` in the `index`-th parsed
+    /// subtable: `Some(delta)` (zero when the pair is absent) for a
+    /// pair subtable (format 0, 2 or 6), `None` for a state-machine or
+    /// control-point subtable or an index past the end. HarfBuzz runs
+    /// its pair kerning one subtable at a time, splitting each value
+    /// across the pair separately, which is what this supports.
+    #[must_use]
+    pub fn subtable_pair_kern(&self, index: usize, left: u16, right: u16) -> Option<i16> {
+        let v = match self.subtables.get(index)? {
+            Subtable::Format0(f0) => f0.find((u32::from(left) << 16) | u32::from(right)),
+            Subtable::Format2(f2) => f2.find(left, right, self.num_glyphs),
+            Subtable::Format6(f6) => f6.find(left, right, self.num_glyphs),
+            Subtable::Format1(_) | Subtable::Format4(_) => return None,
+        };
+        Some(v.unwrap_or(0))
+    }
+
     /// Walks every format-1 (state-machine) subtable across the run,
     /// applying each value-list pop directly to the targeted glyph's
     /// `x_advance`. Formats 0 / 2 are pair-only and are handled by
@@ -1256,6 +1273,9 @@ mod tests {
         assert_eq!(k.kern(10, 20), -30);
         assert_eq!(k.kern(40, 5), 7);
         assert_eq!(k.kern(99, 99), 0);
+        assert_eq!(k.subtable_pair_kern(0, 10, 20), Some(-30));
+        assert_eq!(k.subtable_pair_kern(0, 99, 99), Some(0));
+        assert_eq!(k.subtable_pair_kern(1, 10, 20), None);
     }
 
     #[test]
@@ -1585,6 +1605,7 @@ mod tests {
         // No pair-list subtable: the legacy kern() lookup must
         // return zero so the apply path doesn't double-count.
         assert_eq!(k.kern(1, 2), 0);
+        assert_eq!(k.subtable_pair_kern(0, 1, 2), None);
     }
 
     #[test]

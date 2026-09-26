@@ -26,21 +26,26 @@
 //!   first word is final, the first letter of the second word is
 //!   initial" behavior.
 //! - **Vertical default**. Mongolian is written top-to-bottom by
-//!   default. The shaper sets a vertical hint via the dispatcher
-//!   in [`crate::shape`] so a buffer with the default LTR
-//!   direction picks vertical metrics and the `vert`/`vrt2` GSUB
-//!   features when the run is dominantly Mongolian. Consumers who
-//!   want horizontal Mongolian set the buffer's direction to RTL
-//!   with [`crate::buffer::Buffer::set_direction`], or shape a run
-//!   that is not dominantly Mongolian.
+//!   default. While the caller has not chosen a direction, the
+//!   dispatcher in [`crate::shape`] lays a dominantly Mongolian run
+//!   out top to bottom: vertical metrics and the `vert`/`vrt2` GSUB
+//!   features. Consumers who want horizontal Mongolian set a
+//!   direction explicitly with
+//!   [`crate::buffer::Buffer::set_direction`]: LTR keeps logical
+//!   order, RTL returns the run reversed like any RTL run.
 //!
 //! # Feature order
 //!
-//! The Mongolian feature chain mirrors Arabic:
+//! HarfBuzz shapes Mongolian with its USE shaper, whose first stage
+//! runs `locl` and `ccmp` together:
 //!
 //! ```text
-//!   ccmp -> isol/init/medi/fina (positional pass) -> calt -> liga
+//!   locl + ccmp -> isol/init/medi/fina (positional pass) -> calt -> liga
 //! ```
+//!
+//! A font whose `ccmp` changes the glyph count gets `locl` + `ccmp`
+//! after the positional pass instead, because the joining forms are
+//! assigned per code point.
 //!
 //! `rlig` is omitted. Noto Sans Mongolian ships its required
 //! ligatures under the positional features themselves.
@@ -48,8 +53,10 @@
 use alloc::vec::Vec;
 
 use crate::buffer::Glyph;
-use crate::ot::arabic::{assign_from_types, JoiningForm};
-use crate::shape::apply_gsub_feature_masked;
+use crate::ot::arabic::{assign_from_types_in_context, JoiningContext, JoiningForm};
+use crate::shape::{
+    apply_gsub_feature_masked, apply_gsub_features_merged, apply_locl_ccmp_if_length_preserving,
+};
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 use crate::unicode::joining::{joining_type, JoiningType};
@@ -64,12 +71,10 @@ pub const MONG_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"mong", *b"DFLT"];
 /// Features the Mongolian shaper runs before the positional pass.
 /// Always empty.
 ///
-/// The shaper drives only the four positional features
-/// (`isol`/`init`/`medi`/`fina`), masked by joining form. `ccmp`,
-/// `calt` and `liga` run in the generic default GSUB pass after this
-/// shaper returns. HarfBuzz runs `ccmp` before the positional
-/// features. The Mongolian fonts in the test corpus ship `ccmp` as
-/// single substitutions, so the order does not change their output.
+/// The shaper drives `locl` + `ccmp` and the four positional features
+/// (`isol`/`init`/`medi`/`fina`), masked by joining form. `calt` and
+/// `liga` run in the generic default GSUB pass after this shaper
+/// returns.
 pub const MONG_FEATURES_PRE: &[&[u8; 4]] = &[];
 
 /// True for every codepoint that is part of the Mongolian block.
@@ -98,8 +103,19 @@ pub const fn is_mongolian_fvs(ch: char) -> bool {
 /// Mongolian fonts target.
 #[must_use]
 pub fn assign_mongolian_forms(codepoints: &[char]) -> Vec<JoiningForm> {
+    assign_mongolian_forms_in_context(codepoints, JoiningContext::NONE)
+}
+
+/// [`assign_mongolian_forms`] for a run with known surroundings (the
+/// buffer's pre- and post-context), so a run that starts or ends
+/// mid-word keeps its connected forms.
+#[must_use]
+pub fn assign_mongolian_forms_in_context(
+    codepoints: &[char],
+    context: JoiningContext,
+) -> Vec<JoiningForm> {
     let types: Vec<JoiningType> = codepoints.iter().map(|&c| joining_type(c)).collect();
-    let mut forms = assign_from_types(&types);
+    let mut forms = assign_from_types_in_context(&types, context);
     // FVS inherits the previous letter's form. Walk left-to-right
     // and propagate the most recent non-None form through any FVS
     // positions; this matches rustybuzz's
@@ -120,15 +136,28 @@ pub fn assign_mongolian_forms(codepoints: &[char]) -> Vec<JoiningForm> {
 /// Entry point: shapes one Mongolian run.
 ///
 /// `codepoints` and `glyphs` start 1:1 (a glyph per codepoint, post
-/// cmap). The shaper runs the four positional features gated on the
-/// joining-form vector. The generic GSUB pass runs `ccmp`, `calt`
-/// and `liga`. After the call `glyphs` may have shrunk through
+/// cmap). The shaper runs `locl` + `ccmp`, then the four positional
+/// features gated on the joining-form vector; `calt`/`liga` follow in
+/// the default pass. After the call `glyphs` may have shrunk through
 /// ligature collapse.
 pub fn shape_mongolian(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+) {
+    shape_mongolian_in_context(gsub, gdef, codepoints, glyphs, JoiningContext::NONE);
+}
+
+/// [`shape_mongolian`] for a run whose surroundings are known: the
+/// first and last letters join toward `context` (see
+/// [`JoiningContext::around`]).
+pub fn shape_mongolian_in_context(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+    context: JoiningContext,
 ) {
     if codepoints.is_empty() || glyphs.is_empty() {
         return;
@@ -137,15 +166,15 @@ pub fn shape_mongolian(
         return;
     };
 
+    // HarfBuzz shapes Mongolian with the USE shaper, whose first stage
+    // runs `locl` and `ccmp` together, ahead of the positional
+    // features. The joining forms below index glyphs by code point, so
+    // a `ccmp` that changes the glyph count waits until after them.
+    let early = apply_locl_ccmp_if_length_preserving(gsub, glyphs, gdef, MONG_SCRIPT_PRIORITY);
+
     // Positional pass: `isol`/`init`/`medi`/`fina` each apply only
     // at positions whose computed JoiningForm matches.
-    let forms = assign_mongolian_forms(codepoints);
-    // The forms vector is aligned with `codepoints`. ccmp may have
-    // rewritten glyph ids but it does not change run length on the
-    // Mongolian fonts we test against (Noto Sans Mongolian's ccmp
-    // lookups are SINGLE_SUBST), so the cps<->glyph count is still
-    // the same here. If a future font ships a length-changing ccmp
-    // lookup the parity test will catch it.
+    let forms = assign_mongolian_forms_in_context(codepoints, context);
     if glyphs.len() == forms.len() {
         for (form, tag) in [
             (JoiningForm::Isol, *b"isol"),
@@ -156,6 +185,10 @@ pub fn shape_mongolian(
             let mask: Vec<bool> = forms.iter().map(|&f| f == form).collect();
             apply_gsub_feature_masked(gsub, glyphs, gdef, tag, MONG_SCRIPT_PRIORITY, &mask);
         }
+    }
+    if !early {
+        let locl_ccmp = [*b"locl", *b"ccmp"];
+        apply_gsub_features_merged(gsub, glyphs, gdef, &[], &locl_ccmp, MONG_SCRIPT_PRIORITY);
     }
 
     // calt / liga are applied by the generic default-GSUB pass

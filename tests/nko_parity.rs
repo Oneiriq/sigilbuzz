@@ -13,14 +13,17 @@
 //!   * the dantayalan low-tone mark (U+07FD)
 //!   * N'Ko digits (Symbol pass-through)
 //!   * mixed N'Ko + Latin (BiDi reordering not exercised here:
-//!     the parity test compares raw glyph order, so the strings
-//!     are kept logical-only).
+//!     the strings are kept logical-only).
+//!
+//! Both engines shape RTL and return visual order, so glyph ids,
+//! advances, and offsets are compared position by position with no
+//! reversal.
 //!
 //! A failure here is a parity drift against rustybuzz; fix in
 //! `src/ot/use_shaper` or `src/unicode/use_category`.
 
 use rustybuzz::Direction as RbDirection;
-use sigilbuzz::{shape, Blob, Buffer, Face, Font};
+use sigilbuzz::{shape, Blob, Buffer, Direction, Face, Font};
 
 const NOTO_NKO: &[u8] = include_bytes!("fonts/NotoSansNKo-Regular.ttf");
 
@@ -101,6 +104,9 @@ fn nko_corpus_matches_rustybuzz() {
 
     for case in CORPUS {
         let mut buffer = Buffer::new();
+        // N'Ko is RTL: both engines get the direction explicitly and
+        // both return visual order.
+        buffer.set_direction(Direction::Rtl);
         buffer.push_str(case.text);
         let sig = shape(&font, &buffer, &[]).expect("sigilbuzz shape");
 
@@ -110,49 +116,35 @@ fn nko_corpus_matches_rustybuzz() {
 
         let mut rb_buf = rustybuzz::UnicodeBuffer::new();
         rb_buf.push_str(case.text);
-        // N'Ko is RTL. Set direction explicitly so rustybuzz emits
-        // visual order; reverse it before zipping against sigilbuzz's
-        // logical-order output.
         rb_buf.set_direction(RbDirection::RightToLeft);
         let rb_out = rustybuzz::shape(&rb_face, &[], rb_buf);
-        let rb_gids: Vec<u32> = rb_out
+        let rb: Vec<(u32, i32, i32, i32)> = rb_out
             .glyph_infos()
             .iter()
-            .rev()
-            .map(|g| g.glyph_id)
+            .zip(rb_out.glyph_positions())
+            .map(|(g, p)| (g.glyph_id, p.x_advance, p.x_offset, p.y_offset))
             .collect();
-        let rb_xadvs: Vec<i32> = rb_out
-            .glyph_positions()
+        let sig: Vec<(u32, i32, i32, i32)> = sig
+            .glyphs
             .iter()
-            .rev()
-            .map(|p| p.x_advance)
+            .map(|g| (g.glyph_id, g.x_advance, g.x_offset, g.y_offset))
             .collect();
 
         assert_eq!(
             sig.len(),
-            rb_gids.len(),
+            rb.len(),
             "glyph count diverged for {} ({:?}): sigilbuzz={} rustybuzz={}",
             case.note,
             case.text,
             sig.len(),
-            rb_gids.len()
+            rb.len()
         );
 
-        for (i, (sig_g, (rb_gid, rb_xadv))) in sig
-            .glyphs
-            .iter()
-            .zip(rb_gids.iter().zip(rb_xadvs.iter()))
-            .enumerate()
-        {
+        for (i, (s, r)) in sig.iter().zip(&rb).enumerate() {
             assert_eq!(
-                sig_g.glyph_id, *rb_gid,
-                "glyph id mismatch at position {i} of {} ({:?}): sigilbuzz={} rustybuzz={}",
-                case.note, case.text, sig_g.glyph_id, rb_gid
-            );
-            assert_eq!(
-                sig_g.x_advance, *rb_xadv,
-                "x_advance mismatch at position {i} of {} ({:?}): sigilbuzz={} rustybuzz={}",
-                case.note, case.text, sig_g.x_advance, rb_xadv
+                s, r,
+                "(gid, x_adv, x_off, y_off) mismatch at visual position {i} of {} ({:?})",
+                case.note, case.text
             );
         }
     }

@@ -103,6 +103,7 @@ extern crate alloc;
 
 mod affine;
 mod bitmaps;
+mod canvas;
 mod colrv1;
 mod error;
 mod flatten;

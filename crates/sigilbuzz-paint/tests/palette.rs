@@ -1,8 +1,16 @@
-//! Palette selection: `evaluate_with_palette` resolves colors in the
-//! CPAL palette the caller picks.
+//! Palette selection: `evaluate_with` resolves colors in the CPAL
+//! palette that `EvalOptions::with_palette_index` picks.
 
 use sigilbuzz::Face;
-use sigilbuzz_paint::{evaluate_at_coords, evaluate_with_palette, Color, DrawCmd, PaintSource};
+use sigilbuzz_paint::{
+    evaluate_at_coords, evaluate_with, Color, DrawCmd, EvalOptions, PaintSource,
+};
+
+/// Evaluates glyph `gid` at the default instance in CPAL palette
+/// `palette`.
+fn evaluate_in_palette(face: &Face<'_>, gid: u16, palette: u16) -> Vec<DrawCmd> {
+    evaluate_with(face, gid, &EvalOptions::new().with_palette_index(palette))
+}
 
 /// Minimal SFNT holding only `COLR` and `CPAL`.
 fn build_face_bytes(colr: &[u8], cpal: &[u8]) -> Vec<u8> {
@@ -65,9 +73,9 @@ fn build_two_palette_cpal() -> Vec<u8> {
 fn solid_color(cmds: &[DrawCmd]) -> Color {
     match cmds {
         [DrawCmd::FillGlyph {
-            paint: PaintSource::Solid(c),
+            paint: PaintSource::Solid { color, .. },
             ..
-        }] => *c,
+        }] => *color,
         other => panic!("expected one solid fill, got {other:?}"),
     }
 }
@@ -77,9 +85,9 @@ fn palette_selects_the_cpal_palette() {
     let bytes = build_face_bytes(&build_solid_colr(), &build_two_palette_cpal());
     let face = Face::parse_bytes(&bytes, 0).unwrap();
 
-    let red = solid_color(&evaluate_with_palette(&face, 7, &[], 0));
+    let red = solid_color(&evaluate_in_palette(&face, 7, 0));
     assert!((red.r - 1.0).abs() < 1e-6 && red.b.abs() < 1e-6, "{red:?}");
-    let blue = solid_color(&evaluate_with_palette(&face, 7, &[], 1));
+    let blue = solid_color(&evaluate_in_palette(&face, 7, 1));
     assert!(
         (blue.b - 1.0).abs() < 1e-6 && blue.r.abs() < 1e-6,
         "{blue:?}"
@@ -91,9 +99,13 @@ fn palette_selects_the_cpal_palette() {
 }
 
 #[test]
-fn missing_palette_resolves_to_transparent() {
+fn missing_palette_resolves_to_the_foreground() {
+    // HarfBuzz starts every paint color at the foreground and keeps it
+    // when the palette lookup fails, so a palette the font lacks paints
+    // the foreground color (opaque black by default).
     let bytes = build_face_bytes(&build_solid_colr(), &build_two_palette_cpal());
     let face = Face::parse_bytes(&bytes, 0).unwrap();
-    let color = solid_color(&evaluate_with_palette(&face, 7, &[], 5));
-    assert_eq!(color, Color::TRANSPARENT);
+    let color = solid_color(&evaluate_in_palette(&face, 7, 5));
+    assert_eq!(color, EvalOptions::DEFAULT_FOREGROUND);
+    assert_ne!(color, Color::TRANSPARENT);
 }

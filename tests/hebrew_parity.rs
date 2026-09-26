@@ -26,14 +26,16 @@
 //!
 //! # Direction
 //!
-//! Sigilbuzz emits logical order; rustybuzz emits visual order with
-//! direction set to RTL. Following the Arabic parity convention we
-//! reverse the rustybuzz side before zipping.
+//! Both engines shape with the direction set to RTL and both return
+//! visual order (leftmost glyph first), so the outputs are compared
+//! position by position with no reversal. Mark offsets use the RTL
+//! attachment convention in both engines.
 //!
-//! Byte-identical glyph-id and x_advance agreement is the bar.
+//! Byte-identical glyph id, advance, and x/y offset agreement is the
+//! bar.
 
 use rustybuzz::Direction as RbDirection;
-use sigilbuzz::{shape, Blob, Buffer, Face, Font};
+use sigilbuzz::{shape, Blob, Buffer, Direction, Face, Font};
 
 const NOTO_HEBREW: &[u8] = include_bytes!("fonts/NotoSansHebrew-Regular.ttf");
 
@@ -43,27 +45,58 @@ const NOTO_HEBREW: &[u8] = include_bytes!("fonts/NotoSansHebrew-Regular.ttf");
 /// down; it still round-trips through the shaper to guard against
 /// panics.
 ///
-/// `mixed_script_segments` lists per-segment `(text, direction,
-/// script)` triples for mixed-script inputs. `assert_parity_on`
-/// compares sigilbuzz's concatenated output against the concatenation
-/// of rustybuzz shapes of each segment, matching how a correct
-/// client calls HarfBuzz for mixed runs. Pure-script cases use a
-/// single whole-buffer rustybuzz call via an empty slice.
+/// `mixed_script_segments` lists per-segment `(text, script)` pairs
+/// for mixed-script inputs. `assert_parity_on` compares sigilbuzz's
+/// output against rustybuzz shapes of each segment, matching how a
+/// correct client calls HarfBuzz for mixed runs. Pure-script cases
+/// use a single whole-buffer rustybuzz call via an empty slice.
 struct Case {
     text: &'static str,
     compare_rustybuzz: bool,
     note: &'static str,
     /// Empty for single-script runs; one entry per script segment
-    /// otherwise. Each segment's slice of `text` is shaped under the
-    /// named script/direction on the rustybuzz side so the
-    /// concatenated output matches sigilbuzz's per-segment dispatch.
+    /// otherwise, in logical order. Each segment's slice of `text` is
+    /// shaped RTL under the named script on the rustybuzz side, so the
+    /// segments' visual outputs, concatenated last segment first,
+    /// match sigilbuzz's per-segment dispatch of one RTL buffer.
     mixed_script_segments: &'static [MixedSeg],
 }
 
 struct MixedSeg {
     text: &'static str,
-    rtl: bool,
     script: rustybuzz::Script,
+}
+
+/// One shaped glyph reduced to the fields both engines report:
+/// `(glyph_id, x_advance, y_advance, x_offset, y_offset)`.
+type Pos = (u32, i32, i32, i32, i32);
+
+fn sigilbuzz_positions(text: &str, direction: Direction) -> Vec<Pos> {
+    let blob = Blob::new(NOTO_HEBREW);
+    let face = Face::parse(&blob, 0).expect("parse sigilbuzz face");
+    let font = Font::new(face, 1000.0);
+    let mut buffer = Buffer::new();
+    buffer.set_direction(direction);
+    buffer.push_str(text);
+    let run = shape(&font, &buffer, &[]).expect("sigilbuzz shape");
+    run.glyphs
+        .iter()
+        .map(|g| (g.glyph_id, g.x_advance, g.y_advance, g.x_offset, g.y_offset))
+        .collect()
+}
+
+fn rustybuzz_positions(text: &str, direction: RbDirection, script: rustybuzz::Script) -> Vec<Pos> {
+    let rb_face = rustybuzz::Face::from_slice(NOTO_HEBREW, 0).expect("parse rustybuzz face");
+    let mut rb_buf = rustybuzz::UnicodeBuffer::new();
+    rb_buf.push_str(text);
+    rb_buf.set_direction(direction);
+    rb_buf.set_script(script);
+    let out = rustybuzz::shape(&rb_face, &[], rb_buf);
+    out.glyph_infos()
+        .iter()
+        .zip(out.glyph_positions())
+        .map(|(i, p)| (i.glyph_id, p.x_advance, p.y_advance, p.x_offset, p.y_offset))
+        .collect()
 }
 
 /// Pure Hebrew and mixed-script inputs. Every entry cross-checks
@@ -174,12 +207,13 @@ const CORPUS: &[Case] = &[
     // buffer and dispatches each segment under its own script-tag
     // priority (`hebr` for the Hebrew half, DFLT for the Latin
     // half). The parity side shapes each segment independently with
-    // rustybuzz (LTR+Latin then RTL+Hebrew) and concatenates,
-    // because rustybuzz by itself does not auto-segment a
-    // pre-existing buffer: the client is expected to segment
-    // upstream. sigilbuzz now does that upstream step inside
+    // rustybuzz (RTL, Latin then Hebrew) and concatenates the visual
+    // outputs last segment first, because rustybuzz by itself does
+    // not auto-segment a pre-existing buffer: the client is expected
+    // to segment upstream. sigilbuzz does that upstream step inside
     // `shape()`, so matching rustybuzz's per-segment call chain
-    // proves the new segmenter routes each half correctly.
+    // proves the segmenter routes each half correctly, and that the
+    // final reversal covers the whole run.
     Case {
         text: "Hi \u{05E9}\u{05DC}\u{05D5}\u{05DD}",
         compare_rustybuzz: true,
@@ -187,12 +221,10 @@ const CORPUS: &[Case] = &[
         mixed_script_segments: &[
             MixedSeg {
                 text: "Hi ",
-                rtl: false,
                 script: rustybuzz::script::LATIN,
             },
             MixedSeg {
                 text: "\u{05E9}\u{05DC}\u{05D5}\u{05DD}",
-                rtl: true,
                 script: rustybuzz::script::HEBREW,
             },
         ],
@@ -207,120 +239,58 @@ const CORPUS: &[Case] = &[
         mixed_script_segments: &[
             MixedSeg {
                 text: "Price: \u{20AA}100 ",
-                rtl: false,
                 script: rustybuzz::script::LATIN,
             },
             MixedSeg {
                 text: "\u{05E9}\u{05DC}\u{05D5}\u{05DD}",
-                rtl: true,
                 script: rustybuzz::script::HEBREW,
             },
         ],
     },
 ];
 
-/// Shape `case.text` with both engines and assert byte-identical
-/// output. For mixed-script cases we shape each declared segment
-/// independently on the rustybuzz side and concatenate. That mirrors
-/// how sigilbuzz's `shape()` now dispatches per segment, and matches
-/// the "correct client" call pattern HarfBuzz documents.
+/// Shape `case.text` with both engines in RTL and assert byte-identical
+/// visual output: glyph ids, advances, and offsets. For mixed-script
+/// cases we shape each declared segment independently on the
+/// rustybuzz side and concatenate the visual outputs last segment
+/// first. That mirrors how sigilbuzz's `shape()` dispatches per
+/// segment, and matches the "correct client" call pattern HarfBuzz
+/// documents.
 fn assert_parity_on(case: &Case) {
-    let blob = Blob::new(NOTO_HEBREW);
-    let face = Face::parse(&blob, 0).expect("parse sigilbuzz face");
-    let font = Font::new(face, 1000.0);
-
-    let rb_face = rustybuzz::Face::from_slice(NOTO_HEBREW, 0).expect("parse rustybuzz face");
-
-    let mut buffer = Buffer::new();
-    buffer.push_str(case.text);
-    let sig = shape(&font, &buffer, &[]).expect("sigilbuzz shape");
-
-    // Build the rustybuzz comparison sequence. Pure-script cases hit
-    // the simple single-buffer path; mixed cases shape each declared
-    // segment with its own direction/script and concatenate in
-    // logical order.
-    let (rb_gids, rb_xadvs): (Vec<u32>, Vec<i32>) = if case.mixed_script_segments.is_empty() {
+    let sig = sigilbuzz_positions(case.text, Direction::Rtl);
+    let rb: Vec<Pos> = if case.mixed_script_segments.is_empty() {
         let mut rb_buf = rustybuzz::UnicodeBuffer::new();
         rb_buf.push_str(case.text);
         rb_buf.set_direction(RbDirection::RightToLeft);
-        let rb_out = rustybuzz::shape(&rb_face, &[], rb_buf);
-        let gids: Vec<u32> = rb_out
-            .glyph_infos()
+        let rb_face = rustybuzz::Face::from_slice(NOTO_HEBREW, 0).expect("parse rustybuzz face");
+        let out = rustybuzz::shape(&rb_face, &[], rb_buf);
+        out.glyph_infos()
             .iter()
-            .rev()
-            .map(|g| g.glyph_id)
-            .collect();
-        let xadvs: Vec<i32> = rb_out
-            .glyph_positions()
-            .iter()
-            .rev()
-            .map(|p| p.x_advance)
-            .collect();
-        (gids, xadvs)
+            .zip(out.glyph_positions())
+            .map(|(i, p)| (i.glyph_id, p.x_advance, p.y_advance, p.x_offset, p.y_offset))
+            .collect()
     } else {
-        let mut gids = Vec::new();
-        let mut xadvs = Vec::new();
-        for seg in case.mixed_script_segments {
-            let mut rb_buf = rustybuzz::UnicodeBuffer::new();
-            rb_buf.push_str(seg.text);
-            rb_buf.set_direction(if seg.rtl {
-                RbDirection::RightToLeft
-            } else {
-                RbDirection::LeftToRight
-            });
-            rb_buf.set_script(seg.script);
-            let rb_out = rustybuzz::shape(&rb_face, &[], rb_buf);
-            let mut seg_gids: Vec<u32> = rb_out.glyph_infos().iter().map(|g| g.glyph_id).collect();
-            let mut seg_xadvs: Vec<i32> = rb_out
-                .glyph_positions()
-                .iter()
-                .map(|p| p.x_advance)
-                .collect();
-            if seg.rtl {
-                seg_gids.reverse();
-                seg_xadvs.reverse();
-            }
-            gids.extend(seg_gids);
-            xadvs.extend(seg_xadvs);
-        }
-        (gids, xadvs)
+        case.mixed_script_segments
+            .iter()
+            .rev()
+            .flat_map(|seg| rustybuzz_positions(seg.text, RbDirection::RightToLeft, seg.script))
+            .collect()
     };
 
     let text = case.text;
     let note = case.note;
     assert_eq!(
         sig.len(),
-        rb_gids.len(),
+        rb.len(),
         "glyph count diverged for {note} ({text:?}): sigilbuzz={} rustybuzz={}",
         sig.len(),
-        rb_gids.len()
+        rb.len()
     );
-
-    // Glyph IDs and advances are the parity contract. Offsets
-    // carry an RTL convention difference (HarfBuzz subtracts the
-    // base-advance from the mark offset during RTL finalization and
-    // relies on the caller to reverse the visual run; sigilbuzz
-    // emits logical order with unmodified anchor deltas so the
-    // renderer sees the same absolute position once it walks the
-    // pen). We pin the offsets with a dedicated check further down
-    // rather than demand engine-for-engine equality here.
-    for (i, (sig_g, (rb_gid, rb_xadv))) in sig
-        .glyphs
-        .iter()
-        .zip(rb_gids.iter().zip(rb_xadvs.iter()))
-        .enumerate()
-    {
+    for (i, (s, r)) in sig.iter().zip(&rb).enumerate() {
         assert_eq!(
-            sig_g.glyph_id, *rb_gid,
-            "glyph id mismatch at position {i} of {note} ({text:?}): \
-             sigilbuzz={} rustybuzz={}",
-            sig_g.glyph_id, rb_gid
-        );
-        assert_eq!(
-            sig_g.x_advance, *rb_xadv,
-            "x_advance mismatch at position {i} of {note} ({text:?}) \
-             (glyph {}): sigilbuzz={} rustybuzz={}",
-            sig_g.glyph_id, sig_g.x_advance, rb_xadv
+            s, r,
+            "(gid, x_adv, y_adv, x_off, y_off) mismatch at visual position {i} of \
+             {note} ({text:?}): sigilbuzz={s:?} rustybuzz={r:?}"
         );
     }
 }
@@ -344,44 +314,74 @@ fn hebrew_corpus_matches_rustybuzz_glyph_for_glyph() {
 }
 
 #[test]
-fn niqqud_anchors_below_base_via_gpos_mark() {
-    // Sanity check independent of rustybuzz: shape a base+niqqud
-    // pair and verify the mark glyph received a non-zero y_offset
-    // from the GPOS mark-to-base lookup. If the Hebrew script tag
-    // were not routed to GPOS, the mark would sit at its advance
-    // origin with zero offset.
-    //
-    // bet (U+05D1) + kamatz (U+05B8). Noto Sans Hebrew anchors
-    // kamatz below the bet. The resulting y_offset is non-zero
-    // and typically negative (below the baseline) in HarfBuzz
-    // design-unit convention.
-    let blob = Blob::new(NOTO_HEBREW);
-    let face = Face::parse(&blob, 0).expect("parse face");
-    let font = Font::new(face, 1000.0);
+fn kamatz_on_bet_offsets_match_rustybuzz_in_both_directions() {
+    // bet (U+05D1) + kamatz (U+05B8). Noto Sans Hebrew anchors the
+    // kamatz below the bet through GPOS mark-to-base.
+    let text = "\u{05D1}\u{05B8}";
 
-    let mut buffer = Buffer::new();
-    buffer.push_str("\u{05D1}\u{05B8}");
-    let shaped = shape(&font, &buffer, &[]).expect("shape bet+kamatz");
+    // RTL: visual order puts the mark first. HarfBuzz's backward
+    // attachment convention adds the advances after the base (only the
+    // mark's own, zero) instead of subtracting the base advance.
+    let rtl = sigilbuzz_positions(text, Direction::Rtl);
+    let rb_rtl = rustybuzz_positions(text, RbDirection::RightToLeft, rustybuzz::script::HEBREW);
+    assert_eq!(rtl, rb_rtl, "RTL bet + kamatz");
+    assert_eq!(rtl.len(), 2, "no ligation");
+    let (mark_rtl, base_rtl) = (rtl[0], rtl[1]);
+    assert_eq!(mark_rtl.1, 0, "marks do not advance the pen");
+    assert!(base_rtl.1 > 0);
+    // Noto Sans Hebrew draws the kamatz below the baseline already, so
+    // the anchor only moves it horizontally under the bet.
+    assert_ne!(mark_rtl.3, 0, "mark-to-base must move the kamatz");
 
+    // Asked for LTR, HarfBuzz reads Hebrew as text already in visual
+    // order: it reverses the graphemes (the bet keeps its kamatz),
+    // shapes RTL, and reverses the output back. One grapheme reverses
+    // to itself, so the result is the RTL one.
+    let ltr = sigilbuzz_positions(text, Direction::Ltr);
+    let rb_ltr = rustybuzz_positions(text, RbDirection::LeftToRight, rustybuzz::script::HEBREW);
+    assert_eq!(ltr, rb_ltr, "LTR bet + kamatz");
+    assert_eq!(ltr, rtl);
+}
+
+#[test]
+fn stacked_niqqud_offsets_match_rustybuzz_in_rtl() {
+    // Several marks on one base (shin + shin-dot + kamatz, bet +
+    // dagesh + sheva): each mark hangs from the base, so the RTL
+    // compensation adds the advances of every mark between the base
+    // and itself (all zero after late zeroing).
+    for text in [
+        "\u{05E9}\u{05C1}\u{05B8}",
+        "\u{05D1}\u{05BC}\u{05B0}",
+        "\u{05D4}\u{05BC}\u{05B8}\u{05D4}\u{05B7}",
+    ] {
+        let sig = sigilbuzz_positions(text, Direction::Rtl);
+        let rb = rustybuzz_positions(text, RbDirection::RightToLeft, rustybuzz::script::HEBREW);
+        assert_eq!(sig, rb, "RTL {text:?}");
+        assert!(
+            sig.iter().any(|p| p.3 != 0 || p.4 != 0),
+            "{text:?}: at least one mark must be offset"
+        );
+    }
+}
+
+#[test]
+fn ltr_hebrew_is_read_as_visual_order() {
+    // HarfBuzz's hb_ensure_native_direction: an LTR buffer of Hebrew
+    // holds the letters as drawn, so shaping it is shaping the
+    // reversed text RTL.
+    for text in [
+        "\u{05E9}\u{05DC}\u{05D5}\u{05DD}",
+        "\u{05E9}\u{05C1}\u{05B8}\u{05DC}\u{05D5}\u{05B9}\u{05DD}",
+    ] {
+        let ltr = sigilbuzz_positions(text, Direction::Ltr);
+        let rb = rustybuzz_positions(text, RbDirection::LeftToRight, rustybuzz::script::HEBREW);
+        assert_eq!(ltr, rb, "LTR {text:?}");
+    }
+    let text = "\u{05E9}\u{05DC}\u{05D5}\u{05DD}";
+    let reversed: String = text.chars().rev().collect();
     assert_eq!(
-        shaped.len(),
-        2,
-        "bet + kamatz should remain two glyphs (no ligation)"
-    );
-    // Second glyph is the mark. Having a non-zero offset on either
-    // axis proves GPOS mark-to-base fired.
-    let mark = shaped.glyphs[1];
-    assert!(
-        mark.x_offset != 0 || mark.y_offset != 0,
-        "GPOS mark attachment should produce a non-zero offset on \
-         the kamatz (x_offset={}, y_offset={})",
-        mark.x_offset,
-        mark.y_offset
-    );
-    // Mark advance is zero: marks do not advance the pen.
-    assert_eq!(
-        mark.x_advance, 0,
-        "a combining mark should have zero advance after GPOS"
+        sigilbuzz_positions(text, Direction::Ltr),
+        sigilbuzz_positions(&reversed, Direction::Rtl)
     );
 }
 

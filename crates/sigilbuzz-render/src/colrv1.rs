@@ -1,62 +1,45 @@
 //! COLRv1 paint-tree rasterization.
 //!
-//! [`rasterize_colrv1`] consumes a flat [`DrawCmd`] stream emitted by
-//! [`sigilbuzz_paint::evaluate_with_palette`] and turns it into a single
-//! premultiplied RGBA [`ColorPixmap`]. The flow is:
+//! [`rasterize_colrv1`] walks the glyph with `sigilbuzz_paint::walk`,
+//! which reports it in HarfBuzz's callback order, and draws it with the
+//! [`RasterSink`](crate::canvas::RasterSink): clips as coverage masks,
+//! composites as isolated layers, and fills sampled in paint space.
+//! This module holds the entry point and the pixel math shared with the
+//! SVG-in-OT renderer: gradient sampling, extend modes, premultiplied
+//! color, and Porter-Duff compositing.
 //!
-//! 1. Walk the `DrawCmd` stream linearly. Maintain a *layer stack* of
-//!    `ColorPixmap`s. The bottom of the stack is the final surface.
-//! 2. `FillGlyph` rasterizes the inner outline glyph as an alpha mask,
-//!    converts the [`PaintSource`] (solid or gradient) into a premul
-//!    RGBA pixel grid, masks it by the glyph alpha, and `over`-composes
-//!    the result onto the top of the layer stack.
-//! 3. `PushLayer { mode }` allocates a fresh transparent pixmap of the
-//!    same size as the surface and pushes it; subsequent fills land on
-//!    that fresh pixmap.
-//! 4. `PopLayer` blends the top pixmap into the one below it using the
-//!    composite mode recorded at push time, per Porter-Duff.
-//!
-//! The implementation avoids any external math crates:
-//! gradients, transforms, and Porter-Duff are all inline. The crate's
-//! single dep is `sigilbuzz-paint`, which itself only depends on
-//! `sigilbuzz`.
+//! The implementation avoids any external math crates: gradients,
+//! transforms, and Porter-Duff are all inline.
 //!
 //! ## Coordinate space
 //!
-//! `sigilbuzz-paint` ships transforms in *design-unit* space. The
-//! caller (`Rasterizer::rasterize_colrv1_glyph`) bakes the
-//! design-units-to-pixels matrix into the outermost transform before
-//! every leaf is hit, so by the time we get a `Transform2D` it already
-//! maps design units straight to (Y-flipped) pixel space.
+//! The walk reports design units. The sink maps them to pixels with
+//! `size_pt / units_per_em`, flipping y so rows run down, and places
+//! the glyph's clip box (its ClipList box or its computed bounds, as in
+//! HarfBuzz) plus a one-pixel margin at the top-left of the output.
 //!
 //! ## Composite modes
 //!
-//! The five Porter-Duff modes the driver implements pixel-perfectly:
-//! `SrcOver`, `DestIn`, `DestOut`, `SrcIn`, `SrcOut`. Other modes
-//! (`Plus`, the HSL family, etc.) fall back to `SrcOver` so color
-//! glyphs that use them at least show *something*. The caller can
-//! upgrade individual modes later without breaking the API.
-
-use alloc::vec::Vec;
+//! Every Porter-Duff mode is exact: `Clear`, `Src`, `Dest`, `SrcOver`,
+//! `DestOver`, `SrcIn`, `DestIn`, `SrcOut`, `DestOut`, `SrcAtop`,
+//! `DestAtop`, `Xor`, and `Plus`. The separable and HSL blend modes
+//! (`Screen`, `Multiply`, `HslHue`, and so on) fall back to `SrcOver`
+//! so glyphs that use them at least show *something*.
 
 use sigilbuzz::Face;
-use sigilbuzz_paint::{
-    evaluate_with_palette, linear_gradient_end, Color, CompositeMode, DrawCmd, Extend, Gradient,
-    GradientKind, PaintSource, Transform2D,
-};
+use sigilbuzz_paint::walk::{paint_glyph, Resolver};
+use sigilbuzz_paint::{Color, ColorStop, CompositeMode, EvalOptions, Extend, GradientKind};
 
-use crate::affine::Affine;
+use crate::canvas::RasterSink;
 use crate::error::RenderError;
-use crate::flatten::{flatten_limited, Segment, MAX_SEGMENTS};
-use crate::pixmap::{ColorPixmap, Pixmap};
-use crate::raster::{raster_bounds, rasterize as raster, RasterBounds, MAX_RASTER_DIM};
+use crate::pixmap::ColorPixmap;
 
-/// Public entry: walks the `DrawCmd` stream `sigilbuzz-paint` would
-/// produce for `gid` and renders it to a premultiplied RGBA pixmap.
+/// Public entry: walks `gid`'s COLRv1 paint tree and renders it to a
+/// premultiplied RGBA pixmap.
 ///
-/// `palette_index` picks the CPAL palette every color resolves
-/// against. Palette 0 is always accepted. Any other index must name a
-/// palette the font has.
+/// `palette_index` selects the CPAL palette palette entries resolve
+/// against. Foreground (`0xFFFF`) entries, and entries the font cannot
+/// supply, render in `foreground` (straight-alpha RGBA).
 ///
 /// `tolerance` is the per-glyph curve flattening tolerance in pixel
 /// units (same semantics as [`crate::Rasterizer`]'s field).
@@ -67,6 +50,7 @@ pub(crate) fn rasterize_colrv1(
     size_pt: f32,
     coords: &[f32],
     tolerance: f32,
+    foreground: [u8; 4],
 ) -> Result<ColorPixmap, RenderError> {
     if !size_pt.is_finite() || size_pt <= 0.0 {
         return Err(RenderError::BadSize(size_pt));
@@ -79,306 +63,31 @@ pub(crate) fn rasterize_colrv1(
 
     // Bail early when the font has no v1 paint for this gid. Returning
     // the dedicated error lets callers fall back to v0 / outline.
-    {
-        let Some(colr) = face.colr().map_err(|_| RenderError::Parse("colr"))? else {
-            return Err(RenderError::ColrV1NotFound(gid));
-        };
-        if colr.paint(gid).is_none() {
-            return Err(RenderError::ColrV1NotFound(gid));
-        }
-    }
-
-    // Palette 0 stays valid without a CPAL table, as before. Any other
-    // palette must exist, the same rule the COLRv0 path applies.
-    if palette_index != 0 {
-        let num_palettes = face
-            .cpal()
-            .map_err(|_| RenderError::Parse("cpal"))?
-            .map_or(0, |cpal| cpal.num_palettes());
-        if palette_index >= num_palettes {
-            return Err(RenderError::BadPaletteIndex {
-                palette: palette_index,
-                entry: 0xFFFF,
-            });
-        }
-    }
-
-    let cmds = evaluate_with_palette(face, gid, coords, palette_index);
-    if cmds.is_empty() {
-        return Ok(ColorPixmap::new(0, 0));
-    }
-
-    // Design units to pixel space. Y flips so output rows go down.
-    let s = size_pt / upem;
-    let to_pixels = Transform2D {
-        xx: s,
-        yx: 0.0,
-        xy: 0.0,
-        yy: -s,
-        dx: 0.0,
-        dy: 0.0,
+    let Some(colr) = face.colr().map_err(|_| RenderError::Parse("colr"))? else {
+        return Err(RenderError::ColrV1NotFound(gid));
     };
-
-    // First pass: flatten every FillGlyph leaf and find where its mask
-    // will land, to discover the overall bounding box. This matches
-    // the strategy used by the COLRv0 path: no surface allocation
-    // until we know the union. Masks are rasterized one at a time in
-    // the second pass, so memory holds one mask however many leaves
-    // the paint graph produces.
-    let mut leaves: Vec<Leaf> = Vec::new();
-    // All leaves share one segment budget, so a paint graph that
-    // repeats a heavy outline thousands of times stays bounded. Leaves
-    // past the budget are skipped.
-    let mut budget = MAX_SEGMENTS;
-    for cmd in &cmds {
-        if let DrawCmd::FillGlyph {
-            gid: fill_gid,
-            transform,
-            paint,
-        } = cmd
-        {
-            if budget == 0 {
-                leaves.push(Leaf::Empty);
-                continue;
-            }
-            let xform = transform.then(to_pixels);
-            let affine = transform_to_affine(xform);
-            let outline = face
-                .glyph_outline_at_coords(*fill_gid, coords)
-                .map_err(|_| RenderError::Parse("glyph_outline"))?;
-            let Some(outline) = outline else {
-                leaves.push(Leaf::Empty);
-                continue;
-            };
-            if outline.is_empty() {
-                leaves.push(Leaf::Empty);
-                continue;
-            }
-            let segs = flatten_limited(outline.ops().iter().copied(), &affine, tolerance, budget);
-            budget = budget.saturating_sub(segs.len());
-            if segs.is_empty() {
-                leaves.push(Leaf::Empty);
-                continue;
-            }
-            let Some(bounds) = raster_bounds(&segs) else {
-                leaves.push(Leaf::Empty);
-                continue;
-            };
-            leaves.push(Leaf::Glyph {
-                segs,
-                bounds,
-                paint: paint.clone(),
-                paint_xform: xform,
-            });
-        }
+    if colr.paint(gid).is_none() {
+        return Err(RenderError::ColrV1NotFound(gid));
     }
 
-    // Compute the union bbox of every non-empty leaf so the driver can
-    // allocate a single canvas big enough for every push/pop layer.
-    let mut min_x = i32::MAX;
-    let mut min_y = i32::MAX;
-    let mut max_x = i32::MIN;
-    let mut max_y = i32::MIN;
-    let mut any = false;
-    for leaf in &leaves {
-        if let Leaf::Glyph { bounds, .. } = leaf {
-            any = true;
-            min_x = min_x.min(bounds.origin_x);
-            min_y = min_y.min(bounds.origin_y);
-            max_x = max_x.max(bounds.origin_x + bounds.width as i32);
-            max_y = max_y.max(bounds.origin_y + bounds.height as i32);
-        }
-    }
-    if !any || max_x <= min_x || max_y <= min_y {
-        return Ok(ColorPixmap::new(0, 0));
-    }
-    let width = (max_x - min_x) as u32;
-    let height = (max_y - min_y) as u32;
-    // The union contains every leaf, so this also covers a single leaf
-    // that is too large to rasterize.
-    if width > MAX_RASTER_DIM || height > MAX_RASTER_DIM {
-        return Err(RenderError::BadSize(size_pt));
-    }
-    // Every pushed layer is a full canvas. Bound how many can be alive
-    // at once by their combined pixel count.
-    let canvas_pixels = u64::from(width) * u64::from(height);
-    let max_live_layers = (MAX_LAYER_STACK_PIXELS / canvas_pixels).max(1);
-
-    // Layer stack. `base` is the destination. PushLayer adds a fresh
-    // transparent surface on top of it.
-    let mut base = ColorPixmap::new(width, height);
-    let mut pushed: Vec<Layer> = Vec::new();
-
-    let mut leaf_iter = leaves.into_iter();
-    for cmd in cmds {
-        match cmd {
-            DrawCmd::FillGlyph { .. } => {
-                // `leaves` holds one entry per FillGlyph in `cmds`, so
-                // this never runs dry. Skipping is a harmless fallback.
-                let Some(leaf) = leaf_iter.next() else {
-                    continue;
-                };
-                let Leaf::Glyph {
-                    segs,
-                    paint,
-                    paint_xform,
-                    ..
-                } = leaf
-                else {
-                    continue;
-                };
-                let r = raster(&segs);
-                let dx = r.origin_x - min_x;
-                let dy = r.origin_y - min_y;
-                // Translate paint coords from union-bbox space into
-                // mask-local space when sampling the gradient.
-                let bbox_origin = (min_x, min_y);
-                let top = pushed.last_mut().map_or(&mut base, |l| &mut l.pixmap);
-                paint_glyph_into_layer(top, &r.pixmap, dx, dy, &paint, paint_xform, bbox_origin);
-            }
-            DrawCmd::PushLayer { composite_mode } => {
-                if pushed.len() as u64 + 1 >= max_live_layers {
-                    return Err(RenderError::BadSize(size_pt));
-                }
-                pushed.push(Layer {
-                    pixmap: ColorPixmap::new(width, height),
-                    mode: composite_mode,
-                });
-            }
-            DrawCmd::PopLayer => {
-                // A pop with nothing pushed is ignored: the evaluator
-                // guarantees pairing but we stay defensive against
-                // future cmd-stream changes.
-                let Some(top) = pushed.pop() else {
-                    continue;
-                };
-                let parent = pushed.last_mut().map_or(&mut base, |l| &mut l.pixmap);
-                composite_layer(parent, &top.pixmap, top.mode);
-            }
-        }
-    }
-
-    Ok(base)
-}
-
-/// Combined pixel count of the COLRv1 layer stack (the base canvas
-/// plus every pushed layer that is alive at once). Pushing past it
-/// fails with [`RenderError::BadSize`]. At 4 bytes per pixel this is
-/// 4 GiB, reached only by huge canvases or very deep composite nesting.
-const MAX_LAYER_STACK_PIXELS: u64 = 1 << 30;
-
-/// Per-leaf data captured during the first pass.
-enum Leaf {
-    /// Flattened outline + the paint that fills it.
-    Glyph {
-        /// Outline edges in pixel space.
-        segs: Vec<Segment>,
-        /// Where the rasterized mask lands.
-        bounds: RasterBounds,
-        paint: PaintSource,
-        /// Design-units-to-pixel transform that was used to flatten
-        /// the outline. The same transform takes paint coordinates
-        /// (also given in design units) into pixel space.
-        paint_xform: Transform2D,
-    },
-    /// Skipped leaf (no outline / empty / out-of-range / over budget).
-    Empty,
-}
-
-/// Layer-stack entry.
-struct Layer {
-    pixmap: ColorPixmap,
-    /// Composite mode to use when this layer is `pop`ped against the
-    /// surface below.
-    mode: CompositeMode,
-}
-
-/// Converts a paint-crate `Transform2D` to a render-crate `Affine`.
-/// The two structs share a layout (xx, yx, xy, yy, dx, dy) but live in
-/// different crates so we keep this micro-conversion explicit.
-const fn transform_to_affine(t: Transform2D) -> Affine {
-    Affine {
-        xx: t.xx,
-        yx: t.yx,
-        xy: t.xy,
-        yy: t.yy,
-        dx: t.dx,
-        dy: t.dy,
-    }
-}
-
-// =========================================================================
-// Per-leaf compositing
-// =========================================================================
-
-/// Composites a single FillGlyph onto the destination layer.
-///
-/// `mask` is the alpha pixmap for the outline. `(dx, dy)` is the
-/// mask's offset within `dst`'s space. `paint` is the color source.
-/// `paint_xform` is the transform that mapped paint design-unit
-/// coordinates into pixel space (we need it to sample gradients in
-/// pixel space). `bbox_origin` is the destination layer's `(min_x,
-/// min_y)` in pixel space, i.e. the offset that turns a pixel index
-/// `(px, py)` inside `dst` into absolute pixel-space coordinates.
-fn paint_glyph_into_layer(
-    dst: &mut ColorPixmap,
-    mask: &Pixmap,
-    dx: i32,
-    dy: i32,
-    paint: &PaintSource,
-    paint_xform: Transform2D,
-    bbox_origin: (i32, i32),
-) {
-    if dst.is_empty() || mask.is_empty() {
-        return;
-    }
-    let dw = dst.width as i32;
-    let dh = dst.height as i32;
-    for my in 0..mask.height {
-        let py = dy + my as i32;
-        if py < 0 || py >= dh {
-            continue;
-        }
-        for mx in 0..mask.width {
-            let px = dx + mx as i32;
-            if px < 0 || px >= dw {
-                continue;
-            }
-            let m = mask.get(mx, my);
-            if m == 0 {
-                continue;
-            }
-            // The pixel's center in pixel space (= the gradient
-            // domain after `paint_xform` was already folded in by the
-            // caller via `transform.then(to_pixels)`).
-            let abs_x = (bbox_origin.0 + px) as f32 + 0.5;
-            let abs_y = (bbox_origin.1 + py) as f32 + 0.5;
-            let rgba = evaluate_paint(paint, paint_xform, abs_x, abs_y);
-            let src = mul_alpha(rgba, m);
-            blend_src_over(dst, px as u32, py as u32, src);
-        }
-    }
-}
-
-/// Resolves the color at pixel `(x, y)` for a paint source.
-fn evaluate_paint(paint: &PaintSource, paint_xform: Transform2D, x: f32, y: f32) -> [u8; 4] {
-    match paint {
-        PaintSource::Solid(c) => to_premul(*c),
-        PaintSource::Gradient(g) => sample_gradient(g, paint_xform, x, y),
-    }
+    let [r, g, b, a] = foreground.map(|c| f32::from(c) / 255.0);
+    let options = EvalOptions::new()
+        .with_coords(coords)
+        .with_palette_index(palette_index)
+        .with_foreground(Color::new(r, g, b, a));
+    let cpal = face.cpal().ok().flatten();
+    let resolver = Resolver::new(cpal.as_ref(), &options);
+    let mut sink = RasterSink::new(face, coords, resolver, size_pt / upem, tolerance);
+    paint_glyph(face, gid, coords, &mut sink);
+    sink.finish().ok_or(RenderError::BadSize(size_pt))
 }
 
 /// Multiplies a premul RGBA pixel by an extra mask coverage `m`
 /// (0..=255). All channels, including alpha, scale together so the
 /// result stays premultiplied.
-fn mul_alpha(rgba: [u8; 4], m: u8) -> [u8; 4] {
+pub(crate) fn mul_alpha(rgba: [u8; 4], m: u8) -> [u8; 4] {
     let m = m as u32;
-    [
-        ((rgba[0] as u32 * m + 127) / 255) as u8,
-        ((rgba[1] as u32 * m + 127) / 255) as u8,
-        ((rgba[2] as u32 * m + 127) / 255) as u8,
-        ((rgba[3] as u32 * m + 127) / 255) as u8,
-    ]
+    rgba.map(|c| ((c as u32 * m + 127) / 255) as u8)
 }
 
 /// Converts a paint-crate float `Color` to a premultiplied 8-bit RGBA
@@ -399,96 +108,69 @@ pub(crate) fn to_premul(c: Color) -> [u8; 4] {
     ]
 }
 
-/// `dst[px, py] = src OVER dst[px, py]` (Porter-Duff source-over with
-/// premultiplied operands).
-fn blend_src_over(dst: &mut ColorPixmap, px: u32, py: u32, src: [u8; 4]) {
-    if src[3] == 0 {
-        return;
-    }
-    let idx = (py as usize * dst.width as usize + px as usize) * 4;
-    let dr = dst.data[idx] as u32;
-    let dg = dst.data[idx + 1] as u32;
-    let db = dst.data[idx + 2] as u32;
-    let da = dst.data[idx + 3] as u32;
-    let inv = 255 - src[3] as u32;
-    dst.data[idx] = (src[0] as u32 + (dr * inv + 127) / 255) as u8;
-    dst.data[idx + 1] = (src[1] as u32 + (dg * inv + 127) / 255) as u8;
-    dst.data[idx + 2] = (src[2] as u32 + (db * inv + 127) / 255) as u8;
-    dst.data[idx + 3] = (src[3] as u32 + (da * inv + 127) / 255) as u8;
-}
-
 // =========================================================================
 // Gradient sampling
 // =========================================================================
 
-/// Samples a gradient at pixel-space `(x, y)`. Returns a premultiplied
-/// 8-bit RGBA. Gradient geometry arrives in *design-unit* space; we
-/// transform it through `paint_xform` so the sample point can stay in
-/// pixel space.
-fn sample_gradient(g: &Gradient, paint_xform: Transform2D, x: f32, y: f32) -> [u8; 4] {
-    if g.stops.is_empty() {
+/// Samples a gradient at the paint-space point `p`, returning a
+/// premultiplied 8-bit RGBA. Sampling in paint space keeps every
+/// gradient exact under any transform: a radial gradient under a
+/// non-uniform scale is an exact ellipse, and a sweep keeps its angles
+/// under a skew.
+pub(crate) fn sample_gradient(
+    kind: GradientKind,
+    stops: &[ColorStop],
+    extend: Extend,
+    p: (f32, f32),
+) -> [u8; 4] {
+    if stops.is_empty() {
         return [0, 0, 0, 0];
     }
-    let t = match g.kind {
+    let t = match kind {
         GradientKind::Linear { p0, p1, p2 } => {
-            // Color bands run parallel to p0 -> p2, or perpendicular to
-            // p0 -> p1 when p2 equals p0. Mapping a point on that line
-            // through the transform keeps the bands right under skew.
-            let end = linear_gradient_end(p0, p1, p2);
-            let (q2x, q2y) = (p2.0 - p0.0, p2.1 - p0.1);
-            let band = if q2x * q2x + q2y * q2y <= f32::EPSILON {
-                (p0.0 - (p1.1 - p0.1), p0.1 + (p1.0 - p0.0))
-            } else {
-                p2
-            };
-            let (a, b) = transformed_pair(paint_xform, p0, end);
-            let c = paint_xform.apply(band.0, band.1);
-            project_linear_banded(a, b, c, (x, y))
+            let (a, b) = reduce_linear_anchors(p0, p1, p2);
+            project_linear(a, b, p)
         }
-        GradientKind::Radial { c0, r0, c1, r1 } => {
-            let (a, b) = transformed_pair(paint_xform, c0, c1);
-            // Radii scale by the matrix's average linear scale, a
-            // rough but robust approximation that handles uniform
-            // scale exactly and stays sensible under skew.
-            let sa = matrix_scale(paint_xform);
-            project_radial(a, r0 * sa, b, r1 * sa, (x, y))
-        }
+        GradientKind::Radial { c0, r0, c1, r1 } => project_radial(c0, r0, c1, r1, p),
         GradientKind::Sweep {
             center,
             start_angle,
             end_angle,
-        } => {
-            let (cx, cy) = paint_xform.apply(center.0, center.1);
-            project_sweep((cx, cy), start_angle, end_angle, (x, y))
-        }
+        } => project_sweep(center, start_angle, end_angle, p),
     };
-    let t = match t {
-        Some(t) => apply_extend(t, g.extend),
-        None => return [0, 0, 0, 0],
-    };
-    let c = sample_stops(&g.stops, t);
-    to_premul(c)
+    match t {
+        Some(t) => to_premul(sample_stops(stops, apply_extend(t, extend))),
+        None => [0, 0, 0, 0],
+    }
 }
 
-fn transformed_pair(m: Transform2D, p0: (f32, f32), p1: (f32, f32)) -> ((f32, f32), (f32, f32)) {
-    (m.apply(p0.0, p0.1), m.apply(p1.0, p1.1))
-}
-
-/// Approximate uniform-scale factor for a 2x3 affine: geometric mean
-/// of the column lengths. Exact for uniform scale, reasonable under
-/// rotation and skew.
-fn matrix_scale(m: Transform2D) -> f32 {
-    let lx = (m.xx * m.xx + m.yx * m.yx).sqrt();
-    let ly = (m.xy * m.xy + m.yy * m.yy).sqrt();
-    (lx * ly).sqrt()
+/// Folds a COLRv1 linear gradient's rotation point `p2` into its end
+/// point: the gradient runs from `p0` toward `p1` projected onto the
+/// normal of the line from `p0` to `p2`, so its color lines run
+/// parallel to `p0 p2`. With `p2` on `p0` the gradient is plain
+/// `p0 -> p1`. This is the reduction HarfBuzz's renderers apply
+/// (`hb_paint_reduce_linear_anchors`).
+pub(crate) fn reduce_linear_anchors(
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+) -> ((f32, f32), (f32, f32)) {
+    let (q1x, q1y) = (p1.0 - p0.0, p1.1 - p0.1);
+    let (q2x, q2y) = (p2.0 - p0.0, p2.1 - p0.1);
+    let s = q2x * q2x + q2y * q2y;
+    if s < 0.000_001 {
+        return (p0, p1);
+    }
+    let k = (q2x * q1x + q2y * q1y) / s;
+    (p0, (p1.0 - k * q2x, p1.1 - k * q2y))
 }
 
 /// Projects `p` onto the line from `a` to `b`, returning the
 /// normalized parameter `t` such that `a + t * (b - a)` is the
 /// closest point on the line. Returns `None` when `a == b`.
 ///
-/// `pub(crate)` so the SVG path can reuse the same
-/// projection logic for `<linearGradient>`.
+/// `pub(crate)` so the SVG path can reuse the same projection logic
+/// for `<linearGradient>`.
 pub(crate) fn project_linear(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> Option<f32> {
     let dx = b.0 - a.0;
     let dy = b.1 - a.1;
@@ -497,25 +179,6 @@ pub(crate) fn project_linear(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> Opt
         return None;
     }
     Some(((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len_sq)
-}
-
-/// Linear gradient parameter at `p` for a gradient from `a` to `b`
-/// whose color bands run parallel to the line from `a` to `c`.
-/// Returns `None` when the bands are parallel to `a -> b`, which
-/// leaves `t` undefined.
-fn project_linear_banded(
-    a: (f32, f32),
-    b: (f32, f32),
-    c: (f32, f32),
-    p: (f32, f32),
-) -> Option<f32> {
-    // `n` is normal to the bands, so `t` grows only across them.
-    let n = (a.1 - c.1, c.0 - a.0);
-    let denom = n.0 * (b.0 - a.0) + n.1 * (b.1 - a.1);
-    if denom.abs() <= f32::EPSILON {
-        return None;
-    }
-    Some((n.0 * (p.0 - a.0) + n.1 * (p.1 - a.1)) / denom)
 }
 
 /// Two-circle radial gradient projection. Solves the standard
@@ -635,15 +298,13 @@ pub(crate) fn apply_extend(t: f32, extend: Extend) -> f32 {
 ///
 /// `pub(crate)` so the SVG path can reuse the same ramp interpolation
 /// for `<linearGradient>` / `<radialGradient>` stops.
-pub(crate) fn sample_stops(stops: &[sigilbuzz_paint::ColorStop], t: f32) -> Color {
-    if stops.is_empty() {
+pub(crate) fn sample_stops(stops: &[ColorStop], t: f32) -> Color {
+    let (Some(&first), Some(&last)) = (stops.first(), stops.last()) else {
         return Color::TRANSPARENT;
-    }
+    };
     if stops.len() == 1 {
-        return stops[0].color;
+        return first.color;
     }
-    let first = stops[0];
-    let last = stops[stops.len() - 1];
     if t <= first.offset {
         return first.color;
     }
@@ -675,111 +336,54 @@ pub(crate) fn sample_stops(stops: &[sigilbuzz_paint::ColorStop], t: f32) -> Colo
 // =========================================================================
 
 /// Composites layer `top` into `parent` per `mode`. Both are assumed
-/// to be the same width / height; the COLRv1 driver maintains that
-/// invariant by allocating every layer at the union-bbox size.
-fn composite_layer(parent: &mut ColorPixmap, top: &ColorPixmap, mode: CompositeMode) {
+/// to be the same width / height; the COLRv1 sink maintains that
+/// invariant by allocating every layer at the canvas size.
+pub(crate) fn composite_layer(parent: &mut ColorPixmap, top: &ColorPixmap, mode: CompositeMode) {
     debug_assert_eq!(parent.width, top.width);
     debug_assert_eq!(parent.height, top.height);
-    if parent.is_empty() {
-        return;
-    }
-    let n = (parent.width as usize) * (parent.height as usize);
-    for i in 0..n {
-        let idx = i * 4;
-        let dr = parent.data[idx] as u32;
-        let dg = parent.data[idx + 1] as u32;
-        let db = parent.data[idx + 2] as u32;
-        let da = parent.data[idx + 3] as u32;
-        let sr = top.data[idx] as u32;
-        let sg = top.data[idx + 1] as u32;
-        let sb = top.data[idx + 2] as u32;
-        let sa = top.data[idx + 3] as u32;
-        let (rr, rg, rb, ra) = porter_duff(mode, sr, sg, sb, sa, dr, dg, db, da);
-        parent.data[idx] = rr;
-        parent.data[idx + 1] = rg;
-        parent.data[idx + 2] = rb;
-        parent.data[idx + 3] = ra;
+    for (d, s) in parent
+        .data
+        .chunks_exact_mut(4)
+        .zip(top.data.chunks_exact(4))
+    {
+        let src = [s[0], s[1], s[2], s[3]];
+        let dst = [d[0], d[1], d[2], d[3]];
+        d.copy_from_slice(&porter_duff(mode, src, dst));
     }
 }
 
-/// Porter-Duff blend table. All operands are 8-bit premultiplied. The
-/// formulas are the canonical ones: `Sa` and `Da` are the source /
-/// destination alpha channels, `inv = 255 - alpha`. Modes outside the
-/// supported set fall through to `SrcOver` so a color glyph at least
-/// renders something instead of vanishing.
-#[allow(clippy::too_many_arguments)]
-fn porter_duff(
-    mode: CompositeMode,
-    sr: u32,
-    sg: u32,
-    sb: u32,
-    sa: u32,
-    dr: u32,
-    dg: u32,
-    db: u32,
-    da: u32,
-) -> (u8, u8, u8, u8) {
-    match mode {
-        CompositeMode::SrcOver => {
-            let inv = 255 - sa;
-            (
-                (sr + (dr * inv + 127) / 255) as u8,
-                (sg + (dg * inv + 127) / 255) as u8,
-                (sb + (db * inv + 127) / 255) as u8,
-                (sa + (da * inv + 127) / 255) as u8,
-            )
-        }
-        CompositeMode::DestIn => {
-            // dst stays where src has alpha. Multiply dst by src.a.
-            (
-                ((dr * sa + 127) / 255) as u8,
-                ((dg * sa + 127) / 255) as u8,
-                ((db * sa + 127) / 255) as u8,
-                ((da * sa + 127) / 255) as u8,
-            )
-        }
-        CompositeMode::DestOut => {
-            // dst stays where src is transparent. Multiply dst by (1 - src.a).
-            let inv = 255 - sa;
-            (
-                ((dr * inv + 127) / 255) as u8,
-                ((dg * inv + 127) / 255) as u8,
-                ((db * inv + 127) / 255) as u8,
-                ((da * inv + 127) / 255) as u8,
-            )
-        }
-        CompositeMode::SrcIn => {
-            // src masked by dst.a.
-            (
-                ((sr * da + 127) / 255) as u8,
-                ((sg * da + 127) / 255) as u8,
-                ((sb * da + 127) / 255) as u8,
-                ((sa * da + 127) / 255) as u8,
-            )
-        }
-        CompositeMode::SrcOut => {
-            // src masked by (1 - dst.a).
-            let inv = 255 - da;
-            (
-                ((sr * inv + 127) / 255) as u8,
-                ((sg * inv + 127) / 255) as u8,
-                ((sb * inv + 127) / 255) as u8,
-                ((sa * inv + 127) / 255) as u8,
-            )
-        }
-        // Unsupported / future modes: fall back to source-over so
-        // the glyph still appears. A more advanced renderer can grow
-        // this table in place.
-        _ => {
-            let inv = 255 - sa;
-            (
-                (sr + (dr * inv + 127) / 255) as u8,
-                (sg + (dg * inv + 127) / 255) as u8,
-                (sb + (db * inv + 127) / 255) as u8,
-                (sa + (da * inv + 127) / 255) as u8,
-            )
-        }
-    }
+/// Porter-Duff composition of premultiplied `src` onto premultiplied
+/// `dst`: every channel is `src * Fa + dst * Fb` with the mode's
+/// factors. Blend modes outside the Porter-Duff set fall through to
+/// `SrcOver` so a color glyph at least renders something instead of
+/// vanishing.
+fn porter_duff(mode: CompositeMode, src: [u8; 4], dst: [u8; 4]) -> [u8; 4] {
+    let (sa, da) = (u32::from(src[3]), u32::from(dst[3]));
+    let (fa, fb) = match mode {
+        CompositeMode::Clear => (0, 0),
+        CompositeMode::Src => (255, 0),
+        CompositeMode::Dest => (0, 255),
+        CompositeMode::DestOver => (255 - da, 255),
+        CompositeMode::SrcIn => (da, 0),
+        CompositeMode::DestIn => (0, sa),
+        CompositeMode::SrcOut => (255 - da, 0),
+        CompositeMode::DestOut => (0, 255 - sa),
+        CompositeMode::SrcAtop => (da, 255 - sa),
+        CompositeMode::DestAtop => (255 - da, sa),
+        CompositeMode::Xor => (255 - da, 255 - sa),
+        CompositeMode::Plus => (255, 255),
+        _ => (255, 255 - sa),
+    };
+    let mix = |s: u8, d: u8| {
+        let v = (u32::from(s) * fa + u32::from(d) * fb + 127) / 255;
+        v.min(255) as u8
+    };
+    [
+        mix(src[0], dst[0]),
+        mix(src[1], dst[1]),
+        mix(src[2], dst[2]),
+        mix(src[3], dst[3]),
+    ]
 }
 
 #[cfg(test)]

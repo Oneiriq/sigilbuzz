@@ -18,10 +18,10 @@ path = "src/main.rs"
 
 [dependencies]
 sigilbuzz = { workspace = true }
-sigilbuzz-subset = { path = "../sigilbuzz-subset", version = "0.11.0" }
-sigilbuzz-paint = { path = "../sigilbuzz-paint", version = "0.1.0" }
+sigilbuzz-subset = { path = "../sigilbuzz-subset", version = "0.12.0" }
+sigilbuzz-paint = { path = "../sigilbuzz-paint", version = "0.2.0" }
 sigilbuzz-gpu = { path = "../sigilbuzz-gpu", version = "0.1.0" }
-sigilbuzz-svg = { path = "../sigilbuzz-svg", version = "0.1.0", features = ["color"] }
+sigilbuzz-svg = { path = "../sigilbuzz-svg", version = "0.2.0", features = ["color"] }
 sigilbuzz-pdf = { path = "../sigilbuzz-pdf", version = "0.2.0" }
 sigilbuzz-woff = { path = "../sigilbuzz-woff", version = "0.3.0" }
 clap = { version = "4", features = ["derive"] }

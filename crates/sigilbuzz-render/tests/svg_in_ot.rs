@@ -1785,3 +1785,37 @@ fn svg_filter_with_unknown_named_input_does_not_panic() {
         .expect("unknown filter input should fall back, not panic");
     assert!(pix.width > 0 && pix.height > 0);
 }
+
+/// `currentColor` is the rasterizer's foreground: the text color the
+/// OpenType SVG spec hands a glyph document. A `color` attribute
+/// changes it for its subtree, and gradient stops read it too.
+#[test]
+fn svg_current_color_is_the_rasterizer_foreground() {
+    let payload = b"<svg viewBox=\"0 0 30 10\">\
+                    <defs><linearGradient id=\"g\">\
+                      <stop offset=\"0\" stop-color=\"currentColor\"/>\
+                      <stop offset=\"1\" stop-color=\"currentColor\"/>\
+                    </linearGradient></defs>\
+                    <rect x=\"0\" y=\"0\" width=\"10\" height=\"10\" fill=\"currentColor\"/>\
+                    <g color=\"#00FF00\">\
+                      <rect x=\"10\" y=\"0\" width=\"10\" height=\"10\" fill=\"currentColor\"/>\
+                    </g>\
+                    <rect x=\"20\" y=\"0\" width=\"10\" height=\"10\" fill=\"url(#g)\"/>\
+                    </svg>";
+    let bytes = build_svg_font(payload);
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+
+    let blue = Rasterizer::new().with_foreground([0, 0, 255, 255]);
+    let pix = blue.rasterize_svg_glyph(&face, 1, 30.0, &[]).unwrap();
+    assert_eq!((pix.width, pix.height), (30, 10));
+    assert_eq!(pix.get(5, 5), [0, 0, 255, 255], "foreground fill");
+    assert_eq!(pix.get(15, 5), [0, 255, 0, 255], "color attribute");
+    assert_eq!(pix.get(25, 5), [0, 0, 255, 255], "gradient stops");
+
+    // The default foreground is opaque black.
+    let pix = Rasterizer::new()
+        .rasterize_svg_glyph(&face, 1, 30.0, &[])
+        .unwrap();
+    assert_eq!(pix.get(5, 5), [0, 0, 0, 255]);
+}

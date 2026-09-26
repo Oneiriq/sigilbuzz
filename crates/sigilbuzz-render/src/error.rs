@@ -16,9 +16,17 @@ pub enum RenderError {
     ColrV1NotFound(u16),
     /// The font carried no CPAL table, so palette resolution is
     /// impossible.
+    ///
+    /// The COLR rasterizers no longer return it: palette entries a font
+    /// without CPAL cannot supply paint in the foreground color, as in
+    /// HarfBuzz. The variant stays so code matching on it compiles.
     NoCpal,
     /// The requested palette index sits outside the CPAL palette
     /// count, or a layer's palette entry is out of range.
+    ///
+    /// The COLR rasterizers no longer return it: such entries paint in
+    /// the foreground color, as in HarfBuzz. The variant stays so code
+    /// matching on it compiles.
     BadPaletteIndex {
         /// Active palette index requested.
         palette: u16,

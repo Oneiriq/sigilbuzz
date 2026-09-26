@@ -18,6 +18,7 @@ use crate::tables::parse::Reader;
 pub mod anchor;
 pub mod chain_context;
 pub mod context;
+pub mod cursive;
 pub mod mark_base;
 pub mod mark_liga;
 pub mod mark_mark;
@@ -28,6 +29,7 @@ pub mod value_record;
 pub use anchor::Anchor;
 pub use chain_context::ChainContextPos;
 pub use context::ContextPos;
+pub use cursive::CursivePos;
 pub use mark_base::{MarkAttachment, MarkBasePos};
 pub use mark_liga::MarkLigaPos;
 pub use mark_mark::MarkMarkPos;
@@ -41,7 +43,7 @@ pub mod lookup_type {
     pub const SINGLE_ADJUSTMENT: u16 = 1;
     /// Pair adjustment (kerning). See [`super::PairPos`].
     pub const PAIR_ADJUSTMENT: u16 = 2;
-    /// Cursive attachment. No parser in this module.
+    /// Cursive attachment: entry/exit anchors joining adjacent glyphs.
     pub const CURSIVE_ATTACHMENT: u16 = 3;
     /// Mark-to-base attachment. See [`super::MarkBasePos`].
     pub const MARK_TO_BASE: u16 = 4;
@@ -65,6 +67,10 @@ pub struct Gpos<'a> {
     script_list: ScriptList<'a>,
     feature_list: FeatureList<'a>,
     lookup_list: LookupList<'a>,
+    /// Language system tags the shaper tries, in order, when it
+    /// resolves a feature through this view. Empty selects each
+    /// script's default language system.
+    language_tags: &'a [[u8; 4]],
 }
 
 impl<'a> Gpos<'a> {
@@ -103,7 +109,40 @@ impl<'a> Gpos<'a> {
             script_list,
             feature_list,
             lookup_list,
+            language_tags: &[],
         })
+    }
+
+    /// Returns this view with a language system preference: the
+    /// shaper resolves features under each script's language system
+    /// for the first of `tags` the font has (see
+    /// [`crate::tables::layout::Script::select_lang_sys`]) instead of
+    /// the default one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::{Face, Language};
+    ///
+    /// let data = include_bytes!("../../../tests/fixtures/amiri_regular.ttf");
+    /// let face = Face::parse_bytes(data, 0)?;
+    /// let urdu = Language::new("ur").expect("non-empty tag");
+    /// let gpos = face.gpos()?.expect("Amiri has GPOS");
+    /// let gpos = gpos.with_language_tags(urdu.ot_language_tags());
+    /// assert_eq!(gpos.language_tags(), &[*b"URD "]);
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
+    #[must_use]
+    pub const fn with_language_tags(mut self, tags: &'a [[u8; 4]]) -> Self {
+        self.language_tags = tags;
+        self
+    }
+
+    /// The language system preference set by
+    /// [`Self::with_language_tags`]. Empty for a freshly parsed table.
+    #[must_use]
+    pub const fn language_tags(&self) -> &'a [[u8; 4]] {
+        self.language_tags
     }
 
     /// Returns the parsed `ScriptList`.

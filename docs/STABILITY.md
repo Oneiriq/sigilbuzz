@@ -9,7 +9,7 @@ Every crate in the workspace is below 1.0, so a minor release may break the API.
 crates are released together. Each release bumps the crates that changed, and one git
 tag covers the whole set. Companion crates keep their own version numbers, so pin
 versions that came out of the same release. For 0.22.0 that means `sigilbuzz = "0.22"`
-with, for example, `sigilbuzz-render = "0.8"` and `sigilbuzz-paint = "0.1"`.
+with, for example, `sigilbuzz-render = "0.9"` and `sigilbuzz-paint = "0.2"`.
 [RELEASING.md](RELEASING.md) has the release checklist.
 
 The target is 1.0 in 2026, with a stable shaping API and a documented path for
@@ -26,6 +26,7 @@ signatures only change in a major version.
 `sigilbuzz` (root crate):
 
 - `Blob`, `Face`, `Font`, `Buffer`, `Glyph`, `Direction`, `Feature`
+- `ShapedRun`: the positioned glyph run `shape` returns (`glyphs`, `len`, `is_empty`)
 - `OwnedFace`: a face that owns its bytes, for caching and sharing across threads
 - `BidiMap`: the logical/visual byte map kept by `Buffer::set_text_bidi`
   (`Buffer::bidi_map`, `BidiMap::{new, from_order, visual_to_logical,
@@ -58,6 +59,23 @@ signatures only change in a major version.
 
   The deep `ot::*` and `unicode::*` paths stay hidden (Tier 2). Only the names above
   are stable.
+- Added in 0.22.0, so that a buffer's script, language, and surrounding text reach
+  shaping:
+  - `Language`: a normalized BCP 47 tag (`Language::{new, as_str,
+    ot_language_tags}`), mapped to OpenType language system tags by a table generated
+    from the OpenType language tag registry
+  - `Buffer::{set_script, script}`: shape the whole buffer as one script
+  - `Buffer::{set_language, language}`: select the OpenType language system
+  - `Buffer::{set_pre_context, pre_context, set_post_context, post_context}` and
+    `Buffer::CONTEXT_LENGTH`: text around the run that cursive joining consults
+  - `UnicodeScript::{iso15924_tag, from_iso15924_tag, horizontal_direction}` and
+    `Direction::horizontal_for_script`: ISO 15924 codes and each script's horizontal
+    direction
+  - `Buffer::unset_direction`: forget the caller's direction, like HarfBuzz's
+    `hb_buffer_set_direction(buffer, HB_DIRECTION_INVALID)`
+  - `Buffer::{set_insert_dotted_circle, insert_dotted_circle}`: whether broken Indic,
+    Khmer, Myanmar, and USE syllables get a U+25CC dotted circle (off is HarfBuzz's
+    `HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE`)
 
 `sigilbuzz-render`:
 
@@ -69,7 +87,8 @@ signatures only change in a major version.
 
 `sigilbuzz-paint`:
 
-- `evaluate`, `evaluate_at_coords`, `DrawCmd`, `GlyphId`, `PaintSource`
+- `evaluate`, `evaluate_at_coords`, `evaluate_with`, `EvalOptions`, `DrawCmd`, `GlyphId`,
+  `PaintSource`
 - `Color`, `Gradient`, `GradientKind`, `ColorStop`, `Extend`, `Transform2D`,
   `CompositeMode`
 
@@ -92,6 +111,9 @@ signatures only change in a major version.
 
 - `subset`, `SubsetInput`, `SubsetOutput`
 - `instance`, `AxisPin`, `F2Dot14`, `InstanceInput`, `InstancedOutput`
+- `SubsetWarning`: a malformed piece of the source font that a subset or instance left
+  out instead of failing, returned in `SubsetOutput::warnings` and
+  `InstancedOutput::warnings`
 - `compute_closure`, `subset_cff1_non_identity`, `subset_cff2_non_identity`,
   `emit_classdef`, `emit_coverage_from_glyphs`, `emit_coverage_from_pairs`
 
@@ -142,6 +164,11 @@ release.
   types are exported from `tables::` and are stable. Helper types you can only reach
   through the module path (for example `tables::layout::FeatureList` or
   `tables::gpos::ChainContextPos`) are not.
+- `sigilbuzz_paint::walk`: the paint-tree walk in HarfBuzz's callback order
+  (`paint_glyph`, `paint_glyph_unclipped`, `PaintSink`, `RootClip`, `Resolver`,
+  `ColorRef`, `StopRef`, `ColorLineRef`, `Painted`). sigilbuzz-capi drives its
+  `hb_paint_funcs_t` bridge from it, and sigilbuzz-render and sigilbuzz-svg draw from
+  it. Other renderers should use `evaluate_with`.
 
 ### Tier 3: internal
 

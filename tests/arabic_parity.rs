@@ -45,10 +45,14 @@
 //! subtables with `SubstCount = 0` intentionally block later
 //! subtables at the same cursor (see `allah_matches_rustybuzz`).
 //!
-//! Byte-identical glyph-id and x_advance agreement is the bar.
+//! Both engines shape RTL and return visual order, so the outputs are
+//! compared position by position with no reversal. Byte-identical
+//! glyph id, advance, and x/y offset agreement is the bar: the offsets
+//! cover mark attachment (harakat) in HarfBuzz's RTL convention and
+//! Amiri's `curs` cursive attachment.
 
 use rustybuzz::{Direction as RbDirection, Feature};
-use sigilbuzz::{shape, Blob, Buffer, Face, Font};
+use sigilbuzz::{shape, Blob, Buffer, Direction, Face, Font};
 
 const AMIRI: &[u8] = include_bytes!("fixtures/amiri_regular.ttf");
 
@@ -105,11 +109,11 @@ fn disabled_features() -> [Feature; 0] {
 
 /// Shape `text` with both engines and assert byte-identical output.
 ///
-/// Rustybuzz is forced into RTL mode so it runs its Arabic shaper
-/// deterministically; auto-detection would do the same but being
-/// explicit removes a dependency on rustybuzz's internal heuristics.
-/// Rustybuzz emits visual order for RTL; sigilbuzz emits logical
-/// order. The test reverses the rustybuzz side before zipping.
+/// Both engines are forced into RTL mode: rustybuzz so it runs its
+/// Arabic shaper deterministically (auto-detection would do the same
+/// but being explicit removes a dependency on rustybuzz's internal
+/// heuristics), sigilbuzz because an unset direction shapes LTR. Both
+/// return visual order, compared position by position.
 fn assert_parity_on(text: &str) {
     let blob = Blob::new(AMIRI);
     let face = Face::parse(&blob, 0).expect("parse sigilbuzz face");
@@ -119,6 +123,7 @@ fn assert_parity_on(text: &str) {
     let features = disabled_features();
 
     let mut buffer = Buffer::new();
+    buffer.set_direction(Direction::Rtl);
     buffer.push_str(text);
     let sig = shape(&font, &buffer, &[]).expect("sigilbuzz shape");
 
@@ -126,8 +131,8 @@ fn assert_parity_on(text: &str) {
     rb_buf.push_str(text);
     rb_buf.set_direction(RbDirection::RightToLeft);
     let rb_out = rustybuzz::shape(&rb_face, &features, rb_buf);
-    let rb_infos: Vec<_> = rb_out.glyph_infos().iter().rev().copied().collect();
-    let rb_positions: Vec<_> = rb_out.glyph_positions().iter().rev().copied().collect();
+    let rb_infos = rb_out.glyph_infos();
+    let rb_positions = rb_out.glyph_positions();
 
     assert_eq!(
         sig.len(),
@@ -145,15 +150,24 @@ fn assert_parity_on(text: &str) {
     {
         assert_eq!(
             sig_g.glyph_id, rb_info.glyph_id,
-            "glyph id mismatch at position {i} of {text:?}: \
+            "glyph id mismatch at visual position {i} of {text:?}: \
              sigilbuzz={} rustybuzz={}",
             sig_g.glyph_id, rb_info.glyph_id
         );
+        // Clusters are not compared: HarfBuzz merges a mark's cluster
+        // into its base's (and a ZWJ's into its neighbor's), which
+        // sigilbuzz does not do yet. Order is still pinned by the ids.
         assert_eq!(
-            sig_g.x_advance, rb_pos.x_advance,
-            "x_advance mismatch at position {i} of {text:?} \
-             (glyph {}): sigilbuzz={} rustybuzz={}",
-            sig_g.glyph_id, sig_g.x_advance, rb_pos.x_advance
+            (sig_g.x_advance, sig_g.y_advance),
+            (rb_pos.x_advance, rb_pos.y_advance),
+            "advance mismatch at visual position {i} of {text:?} (glyph {})",
+            sig_g.glyph_id
+        );
+        assert_eq!(
+            (sig_g.x_offset, sig_g.y_offset),
+            (rb_pos.x_offset, rb_pos.y_offset),
+            "offset mismatch at visual position {i} of {text:?} (glyph {})",
+            sig_g.glyph_id
         );
     }
 }
@@ -165,9 +179,47 @@ fn pure_arabic_corpus_matches_rustybuzz_glyph_for_glyph() {
     }
 }
 
+/// Marks around lam-alef and stacked marks. Amiri draws lam-alef as two
+/// joined glyphs, so a fatha before or after the alef attaches to the
+/// lam or the alef as a base; shadda + fatha exercises mark-to-mark
+/// stacking, whose backward search and component check follow
+/// HarfBuzz's MarkMarkPos.
+const STACKED_MARK_CORPUS: &[&str] = &[
+    "\u{0644}\u{064E}\u{0627}",                         // lam fatha alef
+    "\u{0644}\u{0627}\u{064E}",                         // lam alef fatha
+    "\u{0644}\u{064E}\u{0627}\u{064B}",                 // one mark on each component
+    "\u{0644}\u{0651}\u{064E}\u{0627}",                 // shadda + fatha stacked on lam
+    "\u{0628}\u{0644}\u{064E}\u{0627}\u{064E}",         // beh, then lam-alef with two marks
+    "\u{0627}\u{0644}\u{0644}\u{0651}\u{064E}\u{0647}", // allah with shadda and fatha
+];
+
+#[test]
+fn marks_around_lam_alef_and_stacked_marks_match_rustybuzz() {
+    for &text in STACKED_MARK_CORPUS {
+        assert_parity_on(text);
+    }
+}
+
 #[test]
 fn zwj_and_zwnj_corpus_matches_rustybuzz() {
     for &text in ZWJ_CORPUS {
+        assert_parity_on(text);
+    }
+}
+
+/// Joining types HarfBuzz derives from ArabicShaping.txt and the
+/// General_Category fallback: marks and format characters from
+/// outside the Arabic blocks are transparent, so the behs around them
+/// still join; ALEF MAKSURA is dual-joining.
+#[test]
+fn joining_types_follow_arabic_shaping_and_general_category() {
+    for text in [
+        "\u{0628}\u{0301}\u{0628}",         // Mn from Combining Diacritics
+        "\u{0628}\u{20DD}\u{0628}",         // Me, enclosing circle
+        "\u{0628}\u{0649}\u{0628}",         // alef maksura is D
+        "\u{0649}\u{0622}",                 // D before R
+        "\u{0628}\u{0640}\u{0640}\u{0628}", // tatweel chain
+    ] {
         assert_parity_on(text);
     }
 }
@@ -219,6 +271,7 @@ fn compare_shape(text: &str) -> (Vec<u32>, Vec<u32>, Vec<i32>, Vec<i32>) {
     let rb_face = rustybuzz::Face::from_slice(AMIRI, 0).expect("rb parse");
 
     let mut buffer = Buffer::new();
+    buffer.set_direction(Direction::Rtl);
     buffer.push_str(text);
     let sig = shape(&font, &buffer, &[]).expect("sig shape");
 
@@ -226,21 +279,74 @@ fn compare_shape(text: &str) -> (Vec<u32>, Vec<u32>, Vec<i32>, Vec<i32>) {
     rb_buf.push_str(text);
     rb_buf.set_direction(RbDirection::RightToLeft);
     let rb_out = rustybuzz::shape(&rb_face, &[], rb_buf);
-    let rb_ids: Vec<_> = rb_out
-        .glyph_infos()
-        .iter()
-        .rev()
-        .map(|g| g.glyph_id)
-        .collect();
+    let rb_ids: Vec<_> = rb_out.glyph_infos().iter().map(|g| g.glyph_id).collect();
     let rb_adv: Vec<_> = rb_out
         .glyph_positions()
         .iter()
-        .rev()
         .map(|p| p.x_advance)
         .collect();
     let sig_ids: Vec<_> = sig.glyphs.iter().map(|g| g.glyph_id).collect();
     let sig_adv: Vec<_> = sig.glyphs.iter().map(|g| g.x_advance).collect();
     (sig_ids, rb_ids, sig_adv, rb_adv)
+}
+
+/// Shapes `text` RTL with sigilbuzz and returns
+/// `(glyph_id, x_advance, x_offset, y_offset)` per visual glyph.
+fn sigilbuzz_rtl(text: &str, features: &[sigilbuzz::Feature]) -> Vec<(u32, i32, i32, i32)> {
+    let blob = Blob::new(AMIRI);
+    let face = Face::parse(&blob, 0).expect("parse");
+    let font = Font::new(face, 1000.0);
+    let mut buffer = Buffer::new();
+    buffer.set_direction(Direction::Rtl);
+    buffer.push_str(text);
+    let run = shape(&font, &buffer, features).expect("shape");
+    run.glyphs
+        .iter()
+        .map(|g| (g.glyph_id, g.x_advance, g.x_offset, g.y_offset))
+        .collect()
+}
+
+/// Harakat (fatha, kasra, shadda, sukun, tanwin) attach through GPOS
+/// mark-to-base and, for shadda + vowel, mark-to-mark. In RTL the
+/// mark precedes its base in the output and its x offset uses the
+/// backward convention; both have to match rustybuzz exactly.
+#[test]
+fn harakat_offsets_match_rustybuzz_in_rtl() {
+    for text in [
+        "\u{0628}\u{064E}",         // beh + fatha
+        "\u{0628}\u{0650}",         // beh + kasra
+        "\u{0628}\u{0651}\u{064E}", // beh + shadda + fatha (mkmk)
+        "\u{0633}\u{0652}",         // seen + sukun
+        "\u{0628}\u{064B}\u{0627}", // beh + fathatan + alef
+        "\u{0628}\u{0650}\u{0633}\u{0652}\u{0645}\u{0650}",
+    ] {
+        assert_parity_on(text);
+        let run = sigilbuzz_rtl(text, &[]);
+        assert!(
+            run.iter().any(|g| g.2 != 0 || g.3 != 0),
+            "{text:?}: some haraka must carry an attachment offset: {run:?}"
+        );
+    }
+}
+
+/// "Sihr" (`\u{0633}\u{062D}\u{0631}`): Amiri's `curs` lookup (with
+/// the RightToLeft lookup flag) lifts the initial seen onto the hah's
+/// entry point. Proves cursive attachment runs by default and that its
+/// RTL advance/offset handling matches rustybuzz.
+#[test]
+fn cursive_attachment_matches_rustybuzz() {
+    let text = "\u{0633}\u{062D}\u{0631}";
+    assert_parity_on(text);
+    let with = sigilbuzz_rtl(text, &[]);
+    let without = sigilbuzz_rtl(
+        text,
+        &[sigilbuzz::Feature {
+            tag: *b"curs",
+            value: 0,
+        }],
+    );
+    assert_ne!(with, without, "curs must change the run");
+    assert!(with.iter().any(|g| g.3 != 0), "cross-stream y offset");
 }
 
 /// "Al-salaam" (peace). Alef-lam + sin-lam-alef-mim. The sin's
@@ -378,4 +484,47 @@ fn mixed_arabic_and_latin_runs_shape_each_half_correctly() {
             "Latin glyph {i} advance diverged in mixed run"
         );
     }
+}
+
+/// Glyph ids from shaping `text` left to right with Amiri, keeping
+/// the glyphs whose cluster is at or past byte `from`.
+fn glyphs_from(text: &str, from: u32, script: Option<sigilbuzz::UnicodeScript>) -> Vec<u32> {
+    let blob = Blob::new(AMIRI);
+    let face = Face::parse(&blob, 0).expect("parse face");
+    let font = Font::new(face, 1000.0);
+    let mut buf = Buffer::new();
+    buf.push_str(text);
+    buf.set_direction(Direction::Ltr);
+    buf.set_script(script);
+    let shaped = shape(&font, &buf, &[]).expect("shape");
+    shaped
+        .glyphs
+        .iter()
+        .filter(|g| g.cluster >= from)
+        .map(|g| g.glyph_id)
+        .collect()
+}
+
+#[test]
+fn split_vowels_before_arabic_do_not_shift_joining_forms() {
+    // Thai sara am (U+0E33) decomposes into two code points before
+    // shaping. The Arabic forms must still line up with the behs:
+    // the pair gets the same init + fina forms as after sara aa
+    // (U+0E32), which does not decompose.
+    let beh_pair = " \u{0628}\u{0628}";
+    let decomposed = glyphs_from(&format!("\u{0E33}{beh_pair}"), 3, None);
+    let plain = glyphs_from(&format!("\u{0E32}{beh_pair}"), 3, None);
+    assert_eq!(decomposed, plain);
+    assert_eq!(decomposed.len(), 3);
+}
+
+#[test]
+fn script_override_spanning_split_vowels_shapes_without_panicking() {
+    // With the whole buffer shaped as Arabic, one segment covers the
+    // decomposed code points, which outnumber the characters.
+    let text = "\u{0645}\u{0631}\u{062D}\u{0628}\u{0627} \u{0E2A}\u{0E33}\u{17C4}";
+    let arabic = Some(sigilbuzz::UnicodeScript::Arabic);
+    let with_tail = glyphs_from(text, 0, arabic);
+    let alone = glyphs_from("\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}", 0, arabic);
+    assert_eq!(with_tail[..alone.len()], alone[..]);
 }

@@ -5,7 +5,9 @@
 //! Stresses the GSUB cursor walker and the LookupFlag skip iterators
 //! (the heaviest path in 0.4.0). Amiri's `rlig` feature carries
 //! ~40 chained-context lookups whose IgnoreMarks bits drive the
-//! mark-skip iterator on every input cursor advance.
+//! mark-skip iterator on every input cursor advance. Both engines
+//! shape RTL (including Amiri's `curs` cursive attachment) and return
+//! visual order.
 //!
 //! Throughput is reported in codepoints per second.
 

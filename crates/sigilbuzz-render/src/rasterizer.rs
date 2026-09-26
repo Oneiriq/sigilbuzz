@@ -26,11 +26,13 @@ use crate::raster::{raster_bounds, rasterize as raster, RasterBounds, MAX_RASTER
 ///
 /// Construction is cheap. The default config picks a `0.25`-pixel
 /// curve flattening tolerance, which matches FreeType's smooth
-/// rasterizer perceptually.
+/// rasterizer perceptually, and an opaque black foreground color.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rasterizer {
     /// Curve flattening tolerance in pixels.
     tolerance: f32,
+    /// Straight-alpha RGBA used for COLR palette entry `0xFFFF`.
+    foreground: [u8; 4],
 }
 
 impl Default for Rasterizer {
@@ -40,10 +42,17 @@ impl Default for Rasterizer {
 }
 
 impl Rasterizer {
+    /// Foreground color used unless [`Rasterizer::with_foreground`]
+    /// picks another: opaque black, the default ink of a text renderer.
+    pub const DEFAULT_FOREGROUND: [u8; 4] = [0, 0, 0, 255];
+
     /// New rasterizer with default settings.
     #[must_use]
     pub const fn new() -> Self {
-        Self { tolerance: 0.25 }
+        Self {
+            tolerance: 0.25,
+            foreground: Self::DEFAULT_FOREGROUND,
+        }
     }
 
     /// Override the curve flattening tolerance (pixel units). Smaller
@@ -52,6 +61,38 @@ impl Rasterizer {
     pub const fn with_tolerance(mut self, tol: f32) -> Self {
         self.tolerance = tol;
         self
+    }
+
+    /// Paints color-glyph layers that use COLR palette entry `0xFFFF`
+    /// (the text color) in `rgba`, straight (not premultiplied) alpha.
+    /// Applies to [`Rasterizer::rasterize_colrv0_glyph`] and
+    /// [`Rasterizer::rasterize_colrv1_glyph`], where the paint's own
+    /// alpha multiplies `rgba[3]`, and to `currentColor` in the documents
+    /// [`Rasterizer::rasterize_svg_glyph`] draws.
+    ///
+    /// ```
+    /// use sigilbuzz_render::Rasterizer;
+    ///
+    /// assert_eq!(Rasterizer::new().foreground(), [0, 0, 0, 255]);
+    /// let white = Rasterizer::new().with_foreground([255, 255, 255, 255]);
+    /// assert_eq!(white.foreground(), [255, 255, 255, 255]);
+    /// ```
+    #[must_use]
+    pub const fn with_foreground(mut self, rgba: [u8; 4]) -> Self {
+        self.foreground = rgba;
+        self
+    }
+
+    /// The foreground color, straight-alpha RGBA.
+    ///
+    /// ```
+    /// use sigilbuzz_render::Rasterizer;
+    ///
+    /// assert_eq!(Rasterizer::new().foreground(), Rasterizer::DEFAULT_FOREGROUND);
+    /// ```
+    #[must_use]
+    pub const fn foreground(&self) -> [u8; 4] {
+        self.foreground
     }
 
     /// Returns the configured curve flattening tolerance. Used by
@@ -131,15 +172,17 @@ impl Rasterizer {
     /// is rasterized at the same size as the base glyph; the resulting
     /// alpha mask is multiplied by the palette color for that layer
     /// and then `over`-composited on top of the running pixmap. The
-    /// special palette index `0xFFFF` falls back to opaque black,
-    /// rasterizers in real apps would substitute the foreground text
-    /// color here, but at this layer we have no app-level context.
+    /// special palette index `0xFFFF` paints in the foreground color
+    /// (see [`Rasterizer::with_foreground`]), opaque black by default.
+    ///
+    /// Palette entries resolve the way
+    /// [`Rasterizer::rasterize_colrv1_glyph`] resolves them, as in
+    /// HarfBuzz: a palette index the font does not have, an entry past
+    /// the end of the palette, and a font without `CPAL` all paint in
+    /// the foreground color instead of failing.
     ///
     /// # Errors
     /// - [`RenderError::NoColrV0`] when the glyph has no v0 layer record.
-    /// - [`RenderError::NoCpal`] when the font lacks `CPAL`.
-    /// - [`RenderError::BadPaletteIndex`] when a layer's palette entry
-    ///   is out of range.
     /// - [`RenderError::BadSize`] when `size_pt` is non-finite or
     ///   non-positive, or when the composed glyph would exceed 16384
     ///   pixels on a side.
@@ -165,23 +208,7 @@ impl Rasterizer {
             .map_err(|_| RenderError::Parse("colr"))?
             .ok_or(RenderError::NoColrV0(gid))?;
         let layers = colr.v0_layers(gid).ok_or(RenderError::NoColrV0(gid))?;
-        let cpal = face
-            .cpal()
-            .map_err(|_| RenderError::Parse("cpal"))?
-            .ok_or(RenderError::NoCpal)?;
-
-        // Validate the user-supplied palette index against the CPAL
-        // up front. The per-layer `cpal.color()` lookup below would
-        // also catch this, but only for layers whose palette entry
-        // is not the foreground sentinel `0xFFFF`. A glyph composed
-        // entirely of foreground layers would otherwise silently
-        // accept an out-of-range palette. (issue #203)
-        if palette_index >= cpal.num_palettes() {
-            return Err(RenderError::BadPaletteIndex {
-                palette: palette_index,
-                entry: 0xFFFF,
-            });
-        }
+        let cpal = face.cpal().map_err(|_| RenderError::Parse("cpal"))?;
 
         let s = size_pt / upem;
         let xform = Affine {
@@ -232,20 +259,13 @@ impl Rasterizer {
             }
             let bounds = raster_bounds(&segs);
 
-            let color = if layer.palette_index == 0xFFFF {
-                // Foreground fallback. The renderer has no app context
-                // here, so emit opaque black; a downstream caller can
-                // remap this layer if it cares.
-                [0, 0, 0, 255]
-            } else {
-                let c = cpal.color(palette_index, layer.palette_index).ok_or(
-                    RenderError::BadPaletteIndex {
-                        palette: palette_index,
-                        entry: layer.palette_index,
-                    },
-                )?;
-                [c.r, c.g, c.b, c.a]
-            };
+            // HarfBuzz's paint context: entry 0xFFFF is the foreground,
+            // and so is any entry the font cannot supply.
+            let color = cpal
+                .as_ref()
+                .filter(|_| layer.palette_index != 0xFFFF)
+                .and_then(|cpal| cpal.color(palette_index, layer.palette_index))
+                .map_or(self.foreground, |c| [c.r, c.g, c.b, c.a]);
             edges.push(LayerEdges {
                 segs,
                 bounds,
@@ -297,24 +317,34 @@ impl Rasterizer {
     /// Rasterizes a COLRv1 paint-tree color glyph into a premultiplied
     /// RGBA [`ColorPixmap`].
     ///
-    /// Walks the paint tree via `sigilbuzz-paint`'s evaluator, then
-    /// composites every leaf paint (solid / linear / radial / sweep
-    /// gradient), clipped through any enclosing `PaintGlyph` outline
-    /// and blended through any `PaintComposite` mode, into a single
-    /// surface sized to the union bounding box of every fill.
+    /// Walks the paint tree the way HarfBuzz's `hb_font_paint_glyph`
+    /// does and draws every fill (solid / linear / radial / sweep
+    /// gradient) inside its enclosing clips, with each `PaintComposite`
+    /// blending isolated source and backdrop layers. A transform below a
+    /// `PaintGlyph` moves the fill, not the outline that clips it, and
+    /// gradients stay exact under any transform.
     ///
-    /// `palette_index` picks the CPAL palette that solid and gradient
-    /// stop colors resolve against. Palette 0 is the font's default.
+    /// The surface is the glyph's clip box, as in HarfBuzz: its ClipList
+    /// box when it has one, else the bounds of its paint tree, rounded
+    /// out to whole pixels plus a one-pixel transparent margin. Paint
+    /// outside the box is clipped. A glyph whose paint is not bounded by
+    /// any clip renders as an empty pixmap.
+    ///
+    /// `palette_index` selects the CPAL palette that solid fills and
+    /// gradient stops resolve against. An index the font does not have
+    /// is not an error: as in HarfBuzz, every palette entry then paints
+    /// in the foreground color, as does an entry the palette lacks.
+    /// Foreground (`0xFFFF`) entries paint in the foreground color (see
+    /// [`Rasterizer::with_foreground`]), opaque black by default.
     ///
     /// # Errors
     /// - [`RenderError::ColrV1NotFound`] when the font has no v1
     ///   paint record for `gid`.
-    /// - [`RenderError::BadPaletteIndex`] when `palette_index` is not
-    ///   0 and the font's `CPAL` has no such palette.
     /// - [`RenderError::BadSize`] when `size_pt` is non-finite or
-    ///   non-positive, when the composed glyph would exceed 16384
-    ///   pixels on a side, or when nested composite layers would need
-    ///   more than 2^30 pixels of layer storage at once.
+    ///   non-positive, when the clip box would exceed 16384 pixels on a
+    ///   side, when nested clips and composite layers would need more
+    ///   than 4 GiB of storage at once, or when drawing the paint graph
+    ///   would take more than 2^34 pixel updates.
     /// - [`RenderError::BadUpem`] when the font has zero `units_per_em`.
     /// - [`RenderError::Parse`] when the underlying parser refuses
     ///   one of the tables we need.
@@ -326,7 +356,15 @@ impl Rasterizer {
         size_pt: f32,
         coords: &[f32],
     ) -> Result<ColorPixmap, RenderError> {
-        rasterize_colrv1(face, gid, palette_index, size_pt, coords, self.tolerance)
+        rasterize_colrv1(
+            face,
+            gid,
+            palette_index,
+            size_pt,
+            coords,
+            self.tolerance,
+            self.foreground,
+        )
     }
 
     /// Rasterizes an embedded bitmap glyph (CBDT/CBLC or sbix PNG)

@@ -1,6 +1,6 @@
 [package]
 name = "sigilbuzz-paint"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -22,6 +22,9 @@ sigilbuzz = { workspace = true }
 [dev-dependencies]
 # Criterion drives the COLRv1 evaluator bench. Dev-dep only.
 criterion = "0.8"
+# ttf-parser paints variable COLRv1 glyphs itself; the parity test
+# checks our variation deltas against it. Dev-dep only.
+ttf-parser = "0.25"
 
 [[bench]]
 name = "evaluate"

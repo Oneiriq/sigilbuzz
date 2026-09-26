@@ -242,23 +242,25 @@ pub const fn bracket_of(cp: u32) -> Option<BracketEntry> {
             kind: BracketType::Close,
             pair: 0x298B,
         }),
-        // ⦍⦎ U+298D/U+298E: square bracket with tick (top corner).
+        // Square brackets with ticks. BidiBrackets.txt pairs them
+        // crosswise: U+298D (left, tick in top corner) with U+2990
+        // (right, tick in top corner), and U+298F (left, tick in
+        // bottom corner) with U+298E (right, tick in bottom corner).
         0x298D => Some(BracketEntry {
-            kind: BracketType::Open,
-            pair: 0x298E,
-        }),
-        0x298E => Some(BracketEntry {
-            kind: BracketType::Close,
-            pair: 0x298D,
-        }),
-        // ⦏⦐ U+298F/U+2990: square bracket with tick (bottom corner).
-        0x298F => Some(BracketEntry {
             kind: BracketType::Open,
             pair: 0x2990,
         }),
-        0x2990 => Some(BracketEntry {
+        0x298E => Some(BracketEntry {
             kind: BracketType::Close,
             pair: 0x298F,
+        }),
+        0x298F => Some(BracketEntry {
+            kind: BracketType::Open,
+            pair: 0x298E,
+        }),
+        0x2990 => Some(BracketEntry {
+            kind: BracketType::Close,
+            pair: 0x298D,
         }),
         // ⦑⦒ U+2991/U+2992: angle bracket with dot.
         0x2991 => Some(BracketEntry {
@@ -607,5 +609,14 @@ mod tests {
             assert_eq!(close.kind, BracketType::Close);
             assert_eq!(close.pair, cp, "round-trip pair lookup");
         }
+    }
+
+    #[test]
+    fn tick_brackets_pair_crosswise_as_in_bidi_brackets_txt() {
+        let pair = |cp| bracket_of(cp).map(|e| (e.kind, e.pair));
+        assert_eq!(pair(0x298D), Some((BracketType::Open, 0x2990)));
+        assert_eq!(pair(0x2990), Some((BracketType::Close, 0x298D)));
+        assert_eq!(pair(0x298F), Some((BracketType::Open, 0x298E)));
+        assert_eq!(pair(0x298E), Some((BracketType::Close, 0x298F)));
     }
 }

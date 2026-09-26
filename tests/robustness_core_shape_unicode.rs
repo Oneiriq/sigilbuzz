@@ -315,11 +315,17 @@ fn gpos_with_huge_single_adjustments(lookup_count: usize) -> Vec<u8> {
 }
 
 #[test]
-fn repeated_single_adjustments_saturate_instead_of_overflowing() {
-    // 8 features x 16 000 lookups x 32 767 units overflows i32. Debug
-    // builds used to panic on the addition.
+fn repeated_single_adjustments_apply_each_shared_lookup_once() {
+    // Eight features share one list of 16 000 lookups that each add
+    // 32 767 units. Applying every feature's lookups separately gave
+    // 8 x 16 000 x 32 767, which overflows i32, and debug builds
+    // panicked on the addition. HarfBuzz runs each GPOS lookup of the
+    // stage once however many features list it, so the adjustment
+    // lands once. The saturating sums are covered by the unit test
+    // `value_records_saturate_at_the_i32_bounds`.
     let gpos = gpos_with_huge_single_adjustments(16_000);
     let font = with_tables(OPEN_SANS, &[(*b"GPOS", gpos)]);
+    let plain = shape_glyphs(OPEN_SANS, "A", &[]);
     let features: Vec<Feature> = [b"tst1", b"tst2", b"tst3", b"tst4"]
         .iter()
         .map(|tag| Feature {
@@ -329,8 +335,9 @@ fn repeated_single_adjustments_saturate_instead_of_overflowing() {
         .collect();
     let glyphs = shape_glyphs(&font, "A", &features);
     assert_eq!(glyphs.len(), 1);
-    assert_eq!(glyphs[0].x_advance, i32::MAX);
-    assert_eq!(glyphs[0].x_offset, i32::MAX);
+    let once = 16_000 * 32_767;
+    assert_eq!(glyphs[0].x_advance, plain[0].x_advance + once);
+    assert_eq!(glyphs[0].x_offset, once);
 }
 
 /// GPOS with one DFLT feature `kern` that runs lookup 0, a single

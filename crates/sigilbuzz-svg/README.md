@@ -7,13 +7,18 @@ COLRv1 color glyphs.
 
 It turns sigilbuzz's `PathOp` outline stream into a complete `<svg>` element you can
 drop into a document, a preview tool, or a font debugging page. With the `color`
-feature it does the same for COLRv1 glyphs, using the `DrawCmd` list from
-`sigilbuzz-paint`.
+feature it does the same for COLRv1 glyphs, walking the paint tree with
+`sigilbuzz-paint` the way HarfBuzz does: glyph outlines and ClipList boxes become clip
+paths, a transform below a glyph clip stays on the paint (as a `gradientTransform`),
+and each composite is an isolated group.
 
 The output is plain text written with `core::fmt`, using one fixed number precision, so
 the same input always gives the same bytes. SVG 1.1 has no sweep (conic) gradient, so a
 COLRv1 sweep gradient becomes a `<linearGradient>` across the gradient's bounding box,
 with a comment in the output noting the substitution.
+
+Color glyph layers drawn in the text color (COLR palette entry `0xFFFF`) are filled with
+`currentColor`, so an inline SVG glyph takes the CSS `color` of the text around it.
 
 ## Quick start
 

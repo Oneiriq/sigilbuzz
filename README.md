@@ -84,10 +84,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 A few things you will likely need next:
 
-- Right-to-left text: call `buffer.set_direction(Direction::Rtl)`.
+- Right-to-left text: call `buffer.set_direction(Direction::Rtl)`. As in HarfBuzz, the
+  glyphs come back in visual order (leftmost glyph first), ready to draw left to right.
 - Mixed-direction text: use `buffer.set_text_bidi(text)` in place of `push_str`. It runs
-  the Unicode bidi algorithm and reorders the text before shaping. `buffer.bidi_map()`
-  maps between logical and visual byte offsets afterward.
+  the Unicode bidi algorithm, reorders the text into visual order, and shapes it left to
+  right. `buffer.bidi_map()` maps between logical and visual byte offsets afterward.
 - Variable fonts: `font.with_coords(&coords)` shapes at a given set of normalized axis
   coordinates.
 - Font collections: pass the member index to `Face::parse`. `fonts_in_collection` tells

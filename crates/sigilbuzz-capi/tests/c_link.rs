@@ -77,6 +77,11 @@ fn c_program_links_introspect_helpers() {
     run_c_test("test_introspect.c", "test_introspect");
 }
 
+#[test]
+fn c_program_follows_harfbuzz_ownership_rules() {
+    run_c_test("test_refcount.c", "test_refcount");
+}
+
 /// Compiles `tests/c/<source>` against the sigilbuzz cdylib and runs
 /// the resulting executable, asserting exit 0. Shared by every C-side
 /// integration test in this file.

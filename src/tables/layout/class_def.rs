@@ -64,6 +64,34 @@ enum Inner<'a> {
 }
 
 impl<'a> ClassDef<'a> {
+    /// The class definition a null `ClassDef` offset stands for: every
+    /// glyph is class 0. HarfBuzz reads a null offset the same way (its
+    /// `Null (ClassDef)`), and compilers such as fontmake emit null
+    /// backtrack and lookahead ClassDefs in chained context format 2.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            inner: Inner::Format2 {
+                data: &[],
+                range_count: 0,
+                ranges_off: 0,
+            },
+        }
+    }
+
+    /// Parses the `ClassDef` that `offset` points at inside `data`,
+    /// reading a null (zero) offset as [`Self::empty`]. `context`
+    /// labels the error when a non-null offset runs past the end.
+    pub fn parse_at(data: &'a [u8], offset: usize, context: &'static str) -> Result<Self> {
+        if offset == 0 {
+            return Ok(Self::empty());
+        }
+        let bytes = data
+            .get(offset..)
+            .ok_or(Error::Malformed { offset, context })?;
+        Self::parse(bytes)
+    }
+
     /// Parses a `ClassDef` table from its raw bytes.
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(data);
@@ -241,6 +269,37 @@ mod tests {
         let cd = ClassDef::parse(&bytes).unwrap();
         assert_eq!(cd.class_of(0), 0);
         assert_eq!(cd.class_of(1000), 0);
+    }
+
+    #[test]
+    fn empty_puts_every_glyph_in_class_zero() {
+        let cd = ClassDef::empty();
+        assert_eq!(cd.class_of(0), 0);
+        assert_eq!(cd.class_of(u16::MAX), 0);
+    }
+
+    #[test]
+    fn parse_at_reads_a_null_offset_as_empty() {
+        // The bytes at offset 0 would parse as a ClassDef with a class
+        // for glyph 7; a null offset must not read them.
+        let bytes = build_format2(&[(7, 7, 3)]);
+        let cd = ClassDef::parse_at(&bytes, 0, "test").unwrap();
+        assert_eq!(cd.class_of(7), 0);
+    }
+
+    #[test]
+    fn parse_at_reads_a_non_null_offset() {
+        let mut bytes = alloc::vec![0u8; 4];
+        bytes.extend_from_slice(&build_format2(&[(7, 7, 3)]));
+        let cd = ClassDef::parse_at(&bytes, 4, "test").unwrap();
+        assert_eq!(cd.class_of(7), 3);
+        assert!(matches!(
+            ClassDef::parse_at(&bytes, bytes.len() + 1, "past end"),
+            Err(Error::Malformed {
+                context: "past end",
+                ..
+            })
+        ));
     }
 
     #[test]

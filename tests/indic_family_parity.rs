@@ -95,6 +95,12 @@ fn run_corpus(script_name: &str, font_bytes: &[u8], corpus: &[Case]) {
                 "[{script_name}/{}] x_advance mismatch at position {i} ({:?}): sigilbuzz={} rustybuzz={}",
                 case.note, case.text, sig_g.x_advance, rb_pos.x_advance
             );
+            assert_eq!(
+                (sig_g.y_advance, sig_g.x_offset, sig_g.y_offset),
+                (rb_pos.y_advance, rb_pos.x_offset, rb_pos.y_offset),
+                "[{script_name}/{}] (y_advance, x_offset, y_offset) mismatch at position {i} ({:?})",
+                case.note, case.text
+            );
         }
     }
 }

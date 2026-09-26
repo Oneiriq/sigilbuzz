@@ -75,41 +75,23 @@ fn build_cpal_v0(colors: &[(u8, u8, u8, u8)]) -> Vec<u8> {
     out
 }
 
-/// Size of a COLR v1 header: the 14-byte v0 header plus five Offset32
-/// fields (baseGlyphList, layerList, clipList, varIndexMap, and
-/// itemVariationStore).
-const V1_HEADER_LEN: u32 = 14 + 5 * 4;
-
-/// Byte offset of the `varIndexMapOffset` field in a v1 header.
-const VAR_INDEX_MAP_SLOT: usize = 26;
-
-/// Byte offset of the `itemVariationStoreOffset` field in a v1 header.
-const VAR_STORE_SLOT: usize = 30;
-
-/// Writes a v1 COLR header with empty v0 arrays and the BaseGlyphList
-/// right after the header. Every other v1 offset is zero. The caller
-/// appends the BaseGlyphList.
-fn v1_table_header() -> Vec<u8> {
+/// Header for a v1 COLR with one base-glyph paint record. `num_base`
+/// must be 1; the paint body sits at the end of the table starting at
+/// offset 10 (relative to the BaseGlyphList start) and the caller
+/// appends its bytes after this header returns.
+fn build_v1_header(glyph_id: u16) -> Vec<u8> {
+    let header_len = 34; // v0 (14) + v1 appendix (20)
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // version
     out.extend_from_slice(&0u16.to_be_bytes()); // numBaseGlyphRecords (v0)
-    out.extend_from_slice(&V1_HEADER_LEN.to_be_bytes()); // baseGlyphRecordsOffset
-    out.extend_from_slice(&V1_HEADER_LEN.to_be_bytes()); // layerRecordsOffset
+    out.extend_from_slice(&(header_len as u32).to_be_bytes()); // baseGlyphRecordsOffset
+    out.extend_from_slice(&(header_len as u32).to_be_bytes()); // layerRecordsOffset
     out.extend_from_slice(&0u16.to_be_bytes()); // numLayerRecords
-    out.extend_from_slice(&V1_HEADER_LEN.to_be_bytes()); // baseGlyphListOffset
+    out.extend_from_slice(&(header_len as u32).to_be_bytes()); // baseGlyphListOffset
     out.extend_from_slice(&0u32.to_be_bytes()); // layerListOffset
     out.extend_from_slice(&0u32.to_be_bytes()); // clipListOffset
     out.extend_from_slice(&0u32.to_be_bytes()); // varIndexMapOffset
-    out.extend_from_slice(&0u32.to_be_bytes()); // itemVariationStoreOffset
-    out
-}
-
-/// Header for a v1 COLR with one base-glyph paint record. The paint
-/// body sits at the end of the table starting at offset 10 (relative
-/// to the BaseGlyphList start) and the caller appends its bytes after
-/// this header returns.
-fn build_v1_header(glyph_id: u16) -> Vec<u8> {
-    let mut out = v1_table_header();
+    out.extend_from_slice(&0u32.to_be_bytes()); // varStoreOffset
 
     // BaseGlyphList: numRecords = 1, then the record { glyphID,
     // paintOffset = 10 }. The body that follows must start at offset
@@ -144,7 +126,7 @@ fn solid_paint_emits_single_fill_with_palette_color() {
     assert_eq!(cmds.len(), 1, "expected exactly one FillGlyph");
     match &cmds[0] {
         DrawCmd::FillGlyph { paint, .. } => match paint {
-            PaintSource::Solid(c) => {
+            PaintSource::Solid { color: c, .. } => {
                 assert!((c.r).abs() < 1e-6);
                 assert!((c.g - 1.0).abs() < 1e-6);
                 assert!((c.b).abs() < 1e-6);
@@ -168,7 +150,7 @@ fn solid_paint_alpha_multiplies_palette_alpha() {
     let cmds = evaluate(&face, 7);
     match &cmds[0] {
         DrawCmd::FillGlyph {
-            paint: PaintSource::Solid(c),
+            paint: PaintSource::Solid { color: c, .. },
             ..
         } => {
             assert!((c.a - 0.5).abs() < 1e-3, "alpha was {}", c.a);
@@ -207,7 +189,7 @@ fn paint_glyph_overrides_fill_gid() {
     match &cmds[0] {
         DrawCmd::FillGlyph { gid, paint, .. } => {
             assert_eq!(*gid, 201, "PaintGlyph should rewrite the fill gid");
-            assert!(matches!(paint, PaintSource::Solid(_)));
+            assert!(matches!(paint, PaintSource::Solid { .. }));
         }
         other => panic!("unexpected {other:?}"),
     }
@@ -282,7 +264,15 @@ fn paint_colr_glyph_cycle_truncates() {
     // and glyph 2. Glyph 1's paint is a `PaintColrGlyph(2)`; glyph 2's
     // is a `PaintColrGlyph(1)`. The walker must bail when it sees gid 1
     // again on the visited stack rather than recursing forever.
-    let mut colr = v1_table_header();
+    let header_len = 34;
+    let mut colr = Vec::new();
+    colr.extend_from_slice(&1u16.to_be_bytes());
+    colr.extend_from_slice(&0u16.to_be_bytes());
+    colr.extend_from_slice(&(header_len as u32).to_be_bytes());
+    colr.extend_from_slice(&(header_len as u32).to_be_bytes());
+    colr.extend_from_slice(&0u16.to_be_bytes());
+    colr.extend_from_slice(&(header_len as u32).to_be_bytes()); // baseGlyphListOffset
+    colr.extend_from_slice(&[0; 16]); // layer list, clip list, index map, store
 
     // BaseGlyphList: 2 records.
     let bgl_start = colr.len();
@@ -348,15 +338,112 @@ fn composite_wraps_source_with_push_pop() {
     let bytes = build_face_bytes(&colr, &cpal);
     let face = Face::parse_bytes(&bytes, 0).unwrap();
     let cmds = evaluate(&face, 7);
-    // Expected: backdrop fill, PushLayer, source fill, PopLayer.
-    assert_eq!(cmds.len(), 4, "{cmds:?}");
-    assert!(matches!(cmds[0], DrawCmd::FillGlyph { .. }));
-    match cmds[1] {
-        DrawCmd::PushLayer { composite_mode } => assert_eq!(composite_mode, CompositeMode::Screen),
-        ref other => panic!("expected PushLayer, got {other:?}"),
+    // Expected: an isolating SrcOver layer holding the backdrop fill
+    // and a Screen layer holding the source fill.
+    assert_eq!(cmds.len(), 6, "{cmds:?}");
+    let layer_mode = |cmd: &DrawCmd| match cmd {
+        DrawCmd::PushLayer { composite_mode } => *composite_mode,
+        other => panic!("expected PushLayer, got {other:?}"),
+    };
+    assert_eq!(layer_mode(&cmds[0]), CompositeMode::SrcOver);
+    assert!(matches!(cmds[1], DrawCmd::FillGlyph { .. }));
+    assert_eq!(layer_mode(&cmds[2]), CompositeMode::Screen);
+    assert!(matches!(cmds[3], DrawCmd::FillGlyph { .. }));
+    assert!(matches!(cmds[4], DrawCmd::PopLayer));
+    assert!(matches!(cmds[5], DrawCmd::PopLayer));
+}
+
+// =========================================================================
+// 5b. A transform below a PaintGlyph moves the paint, not the outline;
+//     one above it moves both.
+// =========================================================================
+
+/// PaintGlyph(`gid`) whose child starts right after its 6 bytes.
+fn paint_glyph_head(gid: u16) -> Vec<u8> {
+    let mut p = vec![10u8, 0, 0, 6];
+    p.extend_from_slice(&gid.to_be_bytes());
+    p
+}
+
+/// PaintTransform (scale 2, translate (10, 0)) whose child follows its
+/// 7-byte record and 24-byte Affine2x3.
+fn scale_two_head() -> Vec<u8> {
+    let mut p = vec![12u8, 0, 0, 31, 0, 0, 7];
+    for v in [2i32, 0, 0, 2, 10, 0] {
+        p.extend_from_slice(&(v << 16).to_be_bytes());
     }
-    assert!(matches!(cmds[2], DrawCmd::FillGlyph { .. }));
-    assert!(matches!(cmds[3], DrawCmd::PopLayer));
+    p
+}
+
+/// Linear gradient from (0, 0) to (100, 0), rotation point (0, 100).
+fn linear_red_blue() -> Vec<u8> {
+    let mut p = vec![4u8, 0, 0, 16];
+    for v in [0i16, 0, 100, 0, 0, 100] {
+        p.extend_from_slice(&v.to_be_bytes());
+    }
+    p.push(0);
+    p.extend_from_slice(&2u16.to_be_bytes());
+    for (offset, entry) in [(0.0, 0u16), (1.0, 1)] {
+        p.extend_from_slice(&f2dot14(offset));
+        p.extend_from_slice(&entry.to_be_bytes());
+        p.extend_from_slice(&f2dot14(1.0));
+    }
+    p
+}
+
+fn only_fill(cmds: &[DrawCmd]) -> (u16, sigilbuzz_paint::Transform2D, GradientKind) {
+    match cmds {
+        [DrawCmd::FillGlyph {
+            gid,
+            transform,
+            paint: PaintSource::Gradient(g),
+        }] => (*gid, *transform, g.kind),
+        other => panic!("expected one gradient fill, got {other:?}"),
+    }
+}
+
+#[test]
+fn transform_below_paint_glyph_moves_only_the_gradient() {
+    let cpal = build_cpal_v0(&[(255, 0, 0, 255), (0, 0, 255, 255)]);
+
+    // PaintGlyph(5) -> PaintTransform -> gradient.
+    let mut below = build_v1_header(7);
+    below.extend_from_slice(&paint_glyph_head(5));
+    below.extend_from_slice(&scale_two_head());
+    below.extend_from_slice(&linear_red_blue());
+    let bytes = build_face_bytes(&below, &cpal);
+    let face = Face::parse_bytes(&bytes, 0).unwrap();
+    let (gid, transform, kind) = only_fill(&evaluate(&face, 7));
+    assert_eq!(gid, 5);
+    assert_eq!(transform, sigilbuzz_paint::Transform2D::IDENTITY);
+    assert_eq!(
+        kind,
+        GradientKind::Linear {
+            p0: (10.0, 0.0),
+            p1: (210.0, 0.0),
+            p2: (10.0, 200.0),
+        }
+    );
+
+    // PaintTransform -> PaintGlyph(5) -> gradient: outline and paint
+    // move together, and the gradient keeps its own coordinates.
+    let mut above = build_v1_header(7);
+    above.extend_from_slice(&scale_two_head());
+    above.extend_from_slice(&paint_glyph_head(5));
+    above.extend_from_slice(&linear_red_blue());
+    let bytes = build_face_bytes(&above, &cpal);
+    let face = Face::parse_bytes(&bytes, 0).unwrap();
+    let (gid, transform, kind) = only_fill(&evaluate(&face, 7));
+    assert_eq!(gid, 5);
+    assert_eq!(transform.apply(1.0, 1.0), (12.0, 2.0));
+    assert_eq!(
+        kind,
+        GradientKind::Linear {
+            p0: (0.0, 0.0),
+            p1: (100.0, 0.0),
+            p2: (0.0, 100.0),
+        }
+    );
 }
 
 // =========================================================================
@@ -440,7 +527,7 @@ fn var_solid_with_empty_coords_is_identity() {
     assert_eq!(cmds.len(), 1);
     match &cmds[0] {
         DrawCmd::FillGlyph {
-            paint: PaintSource::Solid(c),
+            paint: PaintSource::Solid { color: c, .. },
             ..
         } => {
             assert!((c.r - 64.0 / 255.0).abs() < 1e-6);
@@ -476,12 +563,12 @@ fn determinism_of_repeated_evaluate() {
             (
                 DrawCmd::FillGlyph {
                     gid: g1,
-                    paint: PaintSource::Solid(c1),
+                    paint: PaintSource::Solid { color: c1, .. },
                     ..
                 },
                 DrawCmd::FillGlyph {
                     gid: g2,
-                    paint: PaintSource::Solid(c2),
+                    paint: PaintSource::Solid { color: c2, .. },
                     ..
                 },
             ) => {
@@ -592,16 +679,17 @@ fn radial_gradient_resolves_two_circle_geometry_and_stops() {
 fn sweep_gradient_resolves_centre_angles_and_three_stops() {
     // PaintSweepGradient layout: u8 fmt=8, Offset24 colorLine, i16 cx,
     // i16 cy, F2Dot14 startAngle, F2Dot14 endAngle, 11 bytes after
-    // the header. COLRv1 stores angles as F2Dot14 multiples of 180°,
-    // so endAngle = π radians == on-disk 1.0.
+    // the header. COLRv1 stores sweep angles as F2Dot14 multiples of
+    // 180 degrees with a bias of 1.0, so on-disk -1.0 is 0 radians and
+    // on-disk 0.0 is pi.
     let mut colr = build_v1_header(60);
     let paint_start = colr.len();
     colr.push(8); // PaintSweepGradient
     colr.extend_from_slice(&[0, 0, 0]); // Offset24 colorLine placeholder
     colr.extend_from_slice(&50i16.to_be_bytes()); // cx
     colr.extend_from_slice(&50i16.to_be_bytes()); // cy
-    colr.extend_from_slice(&f2dot14(0.0)); // startAngle = 0
-    colr.extend_from_slice(&f2dot14(1.0)); // endAngle = 1.0 -> π rad
+    colr.extend_from_slice(&f2dot14(-1.0)); // startAngle -> 0 rad
+    colr.extend_from_slice(&f2dot14(0.0)); // endAngle -> pi rad
 
     let cl_start = colr.len();
     let cl_rel = (cl_start - paint_start) as u32;
@@ -640,13 +728,10 @@ fn sweep_gradient_resolves_centre_angles_and_three_stops() {
                     end_angle,
                 } => {
                     assert_eq!(center, (50.0, 50.0));
-                    assert!(start_angle.abs() < 1e-6, "start_angle = {start_angle}");
-                    // F2Dot14 1.0 corresponds to π radians.
+                    assert_eq!(start_angle, 0.0, "start_angle = {start_angle}");
+                    // Biased F2Dot14 0.0 corresponds to pi radians.
                     let pi = core::f32::consts::PI;
-                    assert!(
-                        (end_angle - pi).abs() < 1e-4,
-                        "end_angle was {end_angle}, expected π"
-                    );
+                    assert_eq!(end_angle, pi, "end_angle was {end_angle}, expected pi");
                 }
                 ref other => panic!("expected sweep gradient, got {other:?}"),
             }
@@ -675,7 +760,7 @@ extern crate alloc;
 /// regions, and a *single* outer subtable carrying `delta_sets`. Each
 /// inner row is `regions.len()` deltas wide, packed as int16 (no
 /// LONG_WORDS). Returns the full IVS byte blob. The caller embeds it
-/// at the COLR `itemVariationStoreOffset` it picks.
+/// at the COLR `varStoreOffset` it picks (or in GDEF's `itemVarStore`).
 fn build_ivs(
     axis_count: u16,
     regions: &[Vec<(f32, f32, f32)>],
@@ -730,11 +815,33 @@ fn build_ivs(
 /// the raw bytes of one paint subtree; the helper places them
 /// contiguously after the BaseGlyphList and patches the
 /// `BaseGlyphPaintRecord` offsets. `var_store` and `index_map` are
-/// appended to the COLR data when non-empty, and their absolute
-/// offsets are recorded as `itemVariationStoreOffset` and
-/// `varIndexMapOffset` in the v1 header.
-fn build_v1_multi_colr(paints: &[(u16, Vec<u8>)], var_store: &[u8], index_map: &[u8]) -> Vec<u8> {
-    let mut out = v1_table_header();
+/// appended to the COLR data when non-empty and their absolute offsets
+/// recorded as `itemVariationStoreOffset` and `varIndexMapOffset` in
+/// the v1 header.
+fn build_v1_multi_colr(paints: &[(u16, Vec<u8>)], var_store: &[u8]) -> Vec<u8> {
+    build_v1_multi_colr_with_map(paints, var_store, &[])
+}
+
+fn build_v1_multi_colr_with_map(
+    paints: &[(u16, Vec<u8>)],
+    var_store: &[u8],
+    index_map: &[u8],
+) -> Vec<u8> {
+    let header_len: u32 = 34; // 14 (v0) + 20 (v1 appendix, 5 u32)
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes()); // version
+    out.extend_from_slice(&0u16.to_be_bytes()); // v0 numBase
+    out.extend_from_slice(&header_len.to_be_bytes()); // baseGlyphRecordsOff
+    out.extend_from_slice(&header_len.to_be_bytes()); // layerRecordsOff
+    out.extend_from_slice(&0u16.to_be_bytes()); // numLayer
+    out.extend_from_slice(&header_len.to_be_bytes()); // baseGlyphListOff
+    out.extend_from_slice(&0u32.to_be_bytes()); // layerListOff
+    out.extend_from_slice(&0u32.to_be_bytes()); // clipListOff
+    let index_map_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes()); // varIndexMapOff (filled in below)
+    let var_store_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes()); // varStoreOff (filled in below)
 
     // BaseGlyphList header.
     out.extend_from_slice(&(paints.len() as u32).to_be_bytes());
@@ -745,25 +852,28 @@ fn build_v1_multi_colr(paints: &[(u16, Vec<u8>)], var_store: &[u8], index_map: &
     }
 
     for (i, (_, bytes)) in paints.iter().enumerate() {
-        let rel = (out.len() as u32) - V1_HEADER_LEN;
+        let rel = (out.len() as u32) - header_len;
         let slot = record_slots + i * 6 + 2;
         out[slot..slot + 4].copy_from_slice(&rel.to_be_bytes());
         out.extend_from_slice(bytes);
     }
 
-    for (slot, blob) in [(VAR_STORE_SLOT, var_store), (VAR_INDEX_MAP_SLOT, index_map)] {
-        if !blob.is_empty() {
-            let off = out.len() as u32;
-            out[slot..slot + 4].copy_from_slice(&off.to_be_bytes());
-            out.extend_from_slice(blob);
-        }
+    if !var_store.is_empty() {
+        let off = out.len() as u32;
+        out[var_store_slot..var_store_slot + 4].copy_from_slice(&off.to_be_bytes());
+        out.extend_from_slice(var_store);
+    }
+    if !index_map.is_empty() {
+        let off = out.len() as u32;
+        out[index_map_slot..index_map_slot + 4].copy_from_slice(&off.to_be_bytes());
+        out.extend_from_slice(index_map);
     }
     out
 }
 
 // =========================================================================
 // 12. ItemVariationStore: full delta-application path. Synthesizes an
-//     IVS embedded at COLR's itemVariationStoreOffset and asserts the three
+//     IVS embedded at COLR's varStoreOffset and asserts the three
 //     PaintVar* nodes we care about (Solid alpha, LinearGradient stop
 //     offset, Translate dx/dy) interpolate linearly across the axis.
 // =========================================================================
@@ -866,7 +976,7 @@ fn build_ivs_test_store() -> Vec<u8> {
 fn evaluate_ivs_at(coord_input: &[f32]) -> (f32, f32, (f32, f32)) {
     let var_store = build_ivs_test_store();
     let paints = build_ivs_test_paints();
-    let colr = build_v1_multi_colr(&paints, &var_store, &[]);
+    let colr = build_v1_multi_colr(&paints, &var_store);
     let cpal = build_cpal_v0(&[(255, 255, 255, 255), (255, 0, 0, 255), (0, 255, 0, 255)]);
     let bytes = build_face_bytes(&colr, &cpal);
     let face = Face::parse_bytes(&bytes, 0).expect("face parses");
@@ -874,7 +984,7 @@ fn evaluate_ivs_at(coord_input: &[f32]) -> (f32, f32, (f32, f32)) {
     let solid_cmds = evaluate_at_coords(&face, 1, coord_input);
     let solid_alpha = match solid_cmds.as_slice() {
         [DrawCmd::FillGlyph {
-            paint: PaintSource::Solid(c),
+            paint: PaintSource::Solid { color: c, .. },
             ..
         }] => c.a,
         other => panic!("solid: unexpected {other:?}"),
@@ -940,13 +1050,15 @@ fn ivs_at_half_axis_interpolates_linearly() {
 // =========================================================================
 // 13. DeltaSetIndexMap indirection. Builds the same paint set as the
 //     IVS test but moves every paint's `var_index_base` to a flat
-//     index that resolves through a DeltaSetIndexMap stored at the
-//     COLR `varIndexMapOffset`. The map permutes the IVS rows so that
-//     asserting on the output values proves the indirection fired.
+//     index that resolves through the COLR header's DeltaSetIndexMap.
+//     The map permutes the IVS rows so that asserting on the output
+//     values proves the indirection actually fired.
 // =========================================================================
 
-/// Builds a v1.3 GDEF whose only populated subtable is the IVS.
-fn build_gdef_v13(ivs: &[u8]) -> Vec<u8> {
+/// Builds a v1.3 GDEF whose only populated subtable is `ivs`, and
+/// whose header is followed by `trailer` (bytes a lenient reader
+/// might take for more header fields).
+fn build_gdef_v13(ivs: &[u8], trailer: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // major
     out.extend_from_slice(&3u16.to_be_bytes()); // minor
@@ -955,8 +1067,11 @@ fn build_gdef_v13(ivs: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&0u16.to_be_bytes()); // ligCaretListOff
     out.extend_from_slice(&0u16.to_be_bytes()); // markAttachClassDefOff
     out.extend_from_slice(&0u16.to_be_bytes()); // markGlyphSetsDefOff
-    let ivs_off = out.len() as u32 + 4;
-    out.extend_from_slice(&ivs_off.to_be_bytes()); // itemVarStoreOff
+    let ivs_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes()); // itemVarStoreOff (patched)
+    out.extend_from_slice(trailer);
+    let ivs_off = out.len() as u32;
+    out[ivs_slot..ivs_slot + 4].copy_from_slice(&ivs_off.to_be_bytes());
     out.extend_from_slice(ivs);
     out
 }
@@ -1087,57 +1202,63 @@ fn build_indirection_index_map() -> Vec<u8> {
     out
 }
 
-#[test]
-fn delta_set_index_map_redirects_var_index_base_through_colr() {
-    // Same IVS rows as the IVS test, but every variable field's
-    // `var_index_base` is now a flat index that *only* resolves
-    // through the DeltaSetIndexMap. Without the indirection the
-    // evaluator either returns a zero delta (the raw flat index splits
-    // into outer 0 and inner = flat % 65536, which has no IVS row) or
-    // pulls the wrong row. Either way the assertions below fail.
-    let var_store = build_ivs_test_store();
-    let paints = build_indirection_test_paints();
-    let index_map = build_indirection_index_map();
-    let colr = build_v1_multi_colr(&paints, &var_store, &index_map);
-    let cpal = build_cpal_v0(&[(255, 255, 255, 255), (255, 0, 0, 255), (0, 255, 0, 255)]);
-    let bytes = build_face_bytes(&colr, &cpal);
-    let face = Face::parse_bytes(&bytes, 0).expect("face parses");
-
-    let coords = [1.0_f32];
-
-    let solid_cmds = evaluate_at_coords(&face, 1, &coords);
-    let solid_alpha = match solid_cmds.as_slice() {
+/// Reads the three indirection-test values at `coords`: the solid's
+/// alpha, stop 1's offset, and the translated origin.
+fn indirection_values(face: &Face<'_>, coords: &[f32]) -> (f32, f32, (f32, f32)) {
+    let solid_alpha = match evaluate_at_coords(face, 1, coords).as_slice() {
         [DrawCmd::FillGlyph {
-            paint: PaintSource::Solid(c),
+            paint: PaintSource::Solid { color: c, .. },
             ..
         }] => c.a,
         other => panic!("solid: unexpected {other:?}"),
     };
-    assert!(
-        (solid_alpha - 0.5).abs() < 1e-3,
-        "expected indirection to land on alpha 0.5, got {solid_alpha}"
-    );
-
-    let lin_cmds = evaluate_at_coords(&face, 2, &coords);
-    let stop1_offset = match lin_cmds.as_slice() {
+    let stop1_offset = match evaluate_at_coords(face, 2, coords).as_slice() {
         [DrawCmd::FillGlyph {
             paint: PaintSource::Gradient(g),
             ..
         }] => g.stops[1].offset,
         other => panic!("lin: unexpected {other:?}"),
     };
-    assert!(
-        (stop1_offset - 1.25).abs() < 1e-3,
-        "expected stop offset 1.25 after indirection, got {stop1_offset}"
-    );
-
-    let tr_cmds = evaluate_at_coords(&face, 3, &coords);
-    let (dx, dy) = match tr_cmds.as_slice() {
+    let origin = match evaluate_at_coords(face, 3, coords).as_slice() {
         [DrawCmd::FillGlyph { transform, .. }] => transform.apply(0.0, 0.0),
         other => panic!("tr: unexpected {other:?}"),
     };
+    (solid_alpha, stop1_offset, origin)
+}
+
+#[test]
+fn delta_set_index_map_redirects_var_index_base_through_colr() {
+    // Same IVS rows as the IVS test, but every variable field's
+    // `var_index_base` is now a flat index that *only* resolves
+    // through the COLR DeltaSetIndexMap. Without the indirection the
+    // evaluator either returns a zero delta (raw flat index >>16 is
+    // outer 0, inner = flat % 65536, which has no IVS row) or pulls
+    // the wrong row entirely. Either way the assertions below fail.
+    let var_store = build_ivs_test_store();
+    let paints = build_indirection_test_paints();
+    let index_map = build_indirection_index_map();
+    let colr = build_v1_multi_colr_with_map(&paints, &var_store, &index_map);
+    let cpal = build_cpal_v0(&[(255, 255, 255, 255), (255, 0, 0, 255), (0, 255, 0, 255)]);
+    let bytes = build_face_bytes(&colr, &cpal);
+    let face = Face::parse_bytes(&bytes, 0).expect("face parses");
+
+    let (alpha, offset, (dx, dy)) = indirection_values(&face, &[1.0]);
+    assert!(
+        (alpha - 0.5).abs() < 1e-3,
+        "expected indirection to land on alpha 0.5, got {alpha}"
+    );
+    assert!(
+        (offset - 1.25).abs() < 1e-3,
+        "expected stop offset 1.25 after indirection, got {offset}"
+    );
     assert!((dx - 15.0).abs() < 1e-3, "indirected dx was {dx}");
     assert!((dy - 17.0).abs() < 1e-3, "indirected dy was {dy}");
+
+    // Half way along the axis every delta halves.
+    let (alpha, offset, (dx, dy)) = indirection_values(&face, &[0.5]);
+    assert!((alpha - 0.75).abs() < 1e-3, "alpha was {alpha}");
+    assert!((offset - 1.125).abs() < 1e-3, "offset was {offset}");
+    assert!((dx - 12.5).abs() < 1e-3 && (dy - 18.5).abs() < 1e-3);
 }
 
 #[test]
@@ -1145,17 +1266,52 @@ fn gdef_variation_store_does_not_feed_colr_paints() {
     // COLRv1 variation indices refer to the store in the COLR header.
     // HarfBuzz never reads GDEF's store for COLR, so a COLR without a
     // store of its own stays static even when GDEF carries one.
-    let colr = build_v1_multi_colr(&build_ivs_test_paints(), &[], &[]);
+    let colr = build_v1_multi_colr(&build_ivs_test_paints(), &[]);
     let cpal = build_cpal_v0(&[(255, 255, 255, 255), (255, 0, 0, 255), (0, 255, 0, 255)]);
-    let gdef = build_gdef_v13(&build_ivs_test_store());
+    let gdef = build_gdef_v13(&build_ivs_test_store(), &[]);
     let bytes = build_face_bytes_with_gdef(&colr, &cpal, &gdef);
     let face = Face::parse_bytes(&bytes, 0).expect("face parses");
 
     match evaluate_at_coords(&face, 1, &[1.0]).as_slice() {
         [DrawCmd::FillGlyph {
-            paint: PaintSource::Solid(c),
+            paint: PaintSource::Solid { color: c, .. },
             ..
         }] => assert!((c.a - 1.0).abs() < 1e-4, "alpha was {}", c.a),
         other => panic!("solid: unexpected {other:?}"),
     }
+}
+
+#[test]
+fn gdef_variation_data_is_never_read_for_colr() {
+    // COLR without a variation store of its own, next to a GDEF that
+    // carries the IVS and, right after its header, what an old
+    // paint-crate convention read as a DeltaSetIndexMap offset. HarfBuzz
+    // reads COLR deltas only from COLR, so nothing varies.
+    let var_store = build_ivs_test_store();
+    let cpal = build_cpal_v0(&[(255, 255, 255, 255), (255, 0, 0, 255), (0, 255, 0, 255)]);
+    let colr = build_v1_multi_colr(&build_indirection_test_paints(), &[]);
+    // The trailer holds an offset to the map, which follows the IVS.
+    let map_off = (18 + 4 + var_store.len()) as u32;
+    let mut gdef = build_gdef_v13(&var_store, &map_off.to_be_bytes());
+    gdef.extend_from_slice(&build_indirection_index_map());
+    let bytes = build_face_bytes_with_gdef(&colr, &cpal, &gdef);
+    let face = Face::parse_bytes(&bytes, 0).expect("face parses");
+    assert_eq!(
+        face.table_bytes(*b"GDEF").map(<[u8]>::len).ok(),
+        Some(gdef.len())
+    );
+    let (alpha, offset, (dx, dy)) = indirection_values(&face, &[1.0]);
+    assert!((alpha - 1.0).abs() < 1e-6, "alpha was {alpha}");
+    assert!((offset - 1.0).abs() < 1e-6, "offset was {offset}");
+    assert!((dx - 10.0).abs() < 1e-6 && (dy - 20.0).abs() < 1e-6);
+
+    // The plain IVS paints, whose indices need no map, stay static too.
+    let colr = build_v1_multi_colr(&build_ivs_test_paints(), &[]);
+    let gdef = build_gdef_v13(&var_store, &[]);
+    let bytes = build_face_bytes_with_gdef(&colr, &cpal, &gdef);
+    let face = Face::parse_bytes(&bytes, 0).expect("face parses");
+    let (alpha, offset, (dx, dy)) = indirection_values(&face, &[1.0]);
+    assert!((alpha - 1.0).abs() < 1e-6, "alpha was {alpha}");
+    assert!((offset - 1.0).abs() < 1e-6, "offset was {offset}");
+    assert!((dx - 10.0).abs() < 1e-6 && (dy - 20.0).abs() < 1e-6);
 }

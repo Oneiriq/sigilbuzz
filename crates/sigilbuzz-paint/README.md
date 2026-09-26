@@ -8,10 +8,16 @@ sigilbuzz parses a COLRv1 paint tree into a borrowed enum
 (`sigilbuzz::tables::colr::ColrPaint`). This crate walks that tree and emits a flat
 list of `DrawCmd`s that a renderer can turn into pixels. Along the way it:
 
-- Combines nested transforms into one 2x3 matrix per leaf.
-- Resolves `ColorLine` stops against the active CPAL palette, including per-stop alpha.
-- Wraps `PaintComposite` children in `PushLayer` / `PopLayer` so the renderer can
-  blend them.
+- Combines nested transforms into one 2x3 matrix per leaf. A transform below a
+  `PaintGlyph` moves only the paint: the fill keeps the glyph's outline in place and
+  carries the gradient geometry into the outline's space.
+- Resolves `ColorLine` stops against the selected CPAL palette, including per-stop alpha.
+- Applies variation deltas from the COLR table's own item variation store, through its
+  DeltaSetIndexMap when it has one, as HarfBuzz does.
+- Keeps the foreground color apart. Solid fills and gradient stops that use COLR palette
+  entry `0xFFFF` (the text color) carry `is_foreground == true`.
+- Wraps each `PaintComposite` in an isolating `PushLayer` / `PopLayer` pair holding the
+  backdrop and a nested pair, with the composite mode, holding the source.
 - Follows `ColrGlyph` references and stops on cycles.
 
 Malformed fonts never cause a panic. A bad offset or an unknown paint format ends the
@@ -36,7 +42,31 @@ for cmd in &cmds {
 ```
 
 For variable fonts, `evaluate_at_coords` takes normalized axis coordinates.
-`evaluate_with_palette` also takes the index of the CPAL palette to resolve colors in.
+
+`evaluate_with` takes an `EvalOptions` that picks the variation coordinates, the CPAL
+palette, and the foreground color used for palette entry `0xFFFF` (opaque black unless
+you set one):
+
+```rust,no_run
+use sigilbuzz::Face;
+use sigilbuzz_paint::{evaluate_with, Color, EvalOptions};
+
+# fn demo(face: &Face<'_>, coords: &[f32]) {
+let options = EvalOptions::new()
+    .with_coords(coords)
+    .with_palette_index(1)
+    .with_foreground(Color::new(1.0, 1.0, 1.0, 1.0));
+let cmds = evaluate_with(face, 42, &options);
+# let _ = cmds;
+# }
+```
+
+Palette lookups that fail follow HarfBuzz: when the font lacks the requested palette,
+lacks the palette entry, or has no `CPAL` table, the fill uses the foreground color. Such
+fills keep `is_foreground == false`, since they did not ask for the text color.
+
+Sweep gradient angles come out in radians. COLRv1 stores them with a half-turn bias, so
+a stored angle `a` is `(a + 1) * pi` radians, the value HarfBuzz reports too.
 
 ## Cargo features
 

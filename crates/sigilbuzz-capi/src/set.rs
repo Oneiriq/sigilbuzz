@@ -5,117 +5,94 @@
 //! 32-bit integers. The subset surface uses it for "unicode set" /
 //! "glyph set" inputs, and the introspection helpers
 //! (`hb_face_collect_unicodes` / `hb_ot_layout_collect_features`)
-//! hand back populated sets. We back it with an
-//! `Arc<SpinMutex<BTreeSet<u32>>>`. `BTreeSet` keeps iteration in
-//! ascending order (the contract `hb_set_next` advertises), and the
-//! `Arc` lets the same set be observed through multiple refcount
-//! handles, mirroring HarfBuzz's "an `hb_subset_input_t` returns a
-//! handle to its internal set" idiom.
+//! hand back populated sets. We back it with a `BTreeSet<u32>` behind
+//! the crate's spin lock. `BTreeSet` keeps iteration in ascending
+//! order (the contract `hb_set_next` advertises).
 //!
-//! The spin lock makes every access safe from any thread, the same
-//! way the buffer and font handles work. No lock is held across a
-//! call back into C, so a set cannot deadlock on itself.
+//! The lock is what makes sharing sound. HarfBuzz lets several threads
+//! read one set at once (two `hb_subset_or_fail` calls on the same
+//! input, say), and a `RefCell` would race on its non-atomic borrow
+//! counter there. No access holds the lock across a call back into C
+//! or into another access of the same set, so it cannot deadlock.
 //!
 //! # Refcount contract
 //!
+//! Sets have HarfBuzz identity semantics (see the crate-level
+//! "Refcounting and ownership" notes):
+//!
 //! - `hb_set_create` -> refcount 1.
-//! - `hb_set_reference(set)` -> refcount + 1, returns a fresh handle.
-//! - `hb_set_destroy(set)` -> refcount - 1, frees the BTreeSet when it
-//!   hits zero.
+//! - `hb_set_reference(set)` -> refcount + 1, returns `set` itself.
+//! - `hb_set_destroy(set)` -> refcount - 1, frees the set when it hits
+//!   zero.
+//! - A set returned by `hb_subset_input_unicode_set` /
+//!   `hb_subset_input_glyph_set` belongs to the input: do not destroy
+//!   it. Reference it if it must outlive the input.
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
-use alloc::sync::Arc;
-use core::ptr;
 
-use crate::hb_bool_t;
 use crate::spin_mutex::SpinMutex;
+use crate::{handle, hb_bool_t};
 
-/// Shared payload behind an `hb_set_t` handle.
-pub(crate) type SharedSet = Arc<SpinMutex<BTreeSet<u32>>>;
-
-/// Opaque integer set. The struct itself is a thin handle; the
-/// shared payload lives behind the inner `Arc`.
+/// Opaque integer set. C holds the `Arc` pointer to this struct; see
+/// the `handle` module. `Send + Sync` follow from the lock.
 #[repr(C)]
 pub struct hb_set_t {
-    inner: SharedSet,
+    inner: SpinMutex<BTreeSet<u32>>,
 }
 
 impl hb_set_t {
     /// Internal constructor.
     pub(crate) fn new() -> Self {
         Self {
-            inner: Arc::new(SpinMutex::new(BTreeSet::new())),
+            inner: SpinMutex::new(BTreeSet::new()),
         }
     }
 
-    /// Internal: wrap a pre-existing shared BTreeSet so a sibling
-    /// crate (e.g. `hb_subset_input_t`'s sets) can hand out an
-    /// `hb_set_t` handle that observes the same payload. Only the
-    /// `subset` cargo feature uses this helper today.
-    #[cfg(feature = "subset")]
-    pub(crate) fn from_arc(inner: SharedSet) -> Self {
-        Self { inner }
-    }
-
-    /// Internal: borrow the underlying BTreeSet for read.
+    /// Internal: lock the underlying BTreeSet for read. `f` must not
+    /// touch this set again.
     pub(crate) fn with_inner<R>(&self, f: impl FnOnce(&BTreeSet<u32>) -> R) -> R {
         f(&self.inner.lock())
     }
 
-    /// Internal: borrow the underlying BTreeSet for write.
+    /// Internal: lock the underlying BTreeSet for write. `f` must not
+    /// touch this set again.
     pub(crate) fn with_inner_mut<R>(&self, f: impl FnOnce(&mut BTreeSet<u32>) -> R) -> R {
         f(&mut self.inner.lock())
-    }
-
-    /// Internal: clone the Arc so a sibling handle observes the same
-    /// payload.
-    pub(crate) fn share(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
     }
 }
 
 /// Allocates a fresh empty set with refcount 1.
 #[no_mangle]
 pub extern "C" fn hb_set_create() -> *mut hb_set_t {
-    Box::into_raw(Box::new(hb_set_t::new()))
+    handle::into_raw(hb_set_t::new())
 }
 
-/// Releases one reference. Frees the underlying BTreeSet when the
-/// last reference drops.
+/// Releases one reference. Frees the set when the last reference
+/// drops. Null is a no-op.
 ///
 /// # Safety
-/// `set` must be null or a pointer previously returned by
-/// `hb_set_create` / `hb_set_reference`.
+/// `set` must be null or a live set the caller holds a reference to.
+/// A set returned by `hb_subset_input_unicode_set` /
+/// `hb_subset_input_glyph_set` is owned by the input and must not be
+/// passed here unless the caller took its own reference first.
 #[no_mangle]
 pub unsafe extern "C" fn hb_set_destroy(set: *mut hb_set_t) {
-    if set.is_null() {
-        return;
-    }
-    // SAFETY: `set` is non-null and the caller guarantees it came
-    // from `Box::into_raw` in `hb_set_create` or `hb_set_reference`
-    // and has not been destroyed yet. Dropping the box decrements
-    // the inner Arc.
-    drop(unsafe { Box::from_raw(set) });
+    // SAFETY: caller guarantees `set` is null or a live handle it owns
+    // a reference to.
+    unsafe { handle::destroy(set) };
 }
 
-/// Allocates a fresh handle that observes the same payload.
+/// Adds one reference to `set` and returns `set` itself. Null in, null
+/// out.
 ///
 /// # Safety
-/// `set` must be null or valid.
+/// `set` must be null or a live set.
 #[no_mangle]
 pub unsafe extern "C" fn hb_set_reference(set: *mut hb_set_t) -> *mut hb_set_t {
-    if set.is_null() {
-        return ptr::null_mut();
-    }
-    // SAFETY: `set` is non-null and the caller guarantees it points
-    // to a live `hb_set_t`.
-    let shared = unsafe { (*set).share() };
-    Box::into_raw(Box::new(shared))
+    // SAFETY: caller guarantees `set` is null or a live handle.
+    unsafe { handle::reference(set) }
 }
 
 /// Adds `codepoint` to the set. No-op if already present.
@@ -232,12 +209,15 @@ pub unsafe extern "C" fn hb_set_next(set: *const hb_set_t, codepoint: *mut u32) 
 mod tests {
     use super::*;
 
+    use core::ptr;
+
     #[test]
     fn create_destroy_null_safe() {
         // SAFETY: every pointer passed here is null or a live handle
         // created in this test, and each handle is destroyed once.
         unsafe {
             hb_set_destroy(ptr::null_mut());
+            assert!(hb_set_reference(ptr::null_mut()).is_null());
         }
     }
 
@@ -286,12 +266,14 @@ mod tests {
 
     #[test]
     fn reference_shares_payload() {
-        // SAFETY: every pointer passed here is null or a live handle
-        // created in this test, and each handle is destroyed once.
+        // SAFETY: every pointer passed here is a live handle created in
+        // this test, and each reference is released once.
         unsafe {
             let a = hb_set_create();
             hb_set_add(a, 7);
             let b = hb_set_reference(a);
+            // HarfBuzz identity: referencing hands back the same object.
+            assert_eq!(a, b);
             // Mutating through `a` must be observable through `b`.
             hb_set_add(a, 9);
             assert_eq!(hb_set_has(b, 7), 1);

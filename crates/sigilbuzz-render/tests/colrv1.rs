@@ -279,6 +279,78 @@ fn build_glyph_solid_font_with_cpal(cpal: &[u8]) -> Vec<u8> {
     emit_sfnt(tables)
 }
 
+/// CPAL v0 with two one-entry palettes.
+fn build_cpal_two_palettes(p0: (u8, u8, u8, u8), p1: (u8, u8, u8, u8)) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&0u16.to_be_bytes()); // version
+    out.extend_from_slice(&1u16.to_be_bytes()); // numPaletteEntries
+    out.extend_from_slice(&2u16.to_be_bytes()); // numPalettes
+    out.extend_from_slice(&2u16.to_be_bytes()); // numColorRecords
+    out.extend_from_slice(&16u32.to_be_bytes()); // colorRecordsArrayOffset
+    out.extend_from_slice(&0u16.to_be_bytes()); // palette 0 -> record 0
+    out.extend_from_slice(&1u16.to_be_bytes()); // palette 1 -> record 1
+    for (r, g, b, a) in [p0, p1] {
+        out.extend_from_slice(&[b, g, r, a]);
+    }
+    align4(&mut out);
+    out
+}
+
+/// Counts pixels that are mostly `channel` (0 = red, 2 = blue).
+fn count_dominant(pix: &sigilbuzz_render::ColorPixmap, channel: usize) -> usize {
+    let mut n = 0;
+    for y in 0..pix.height {
+        for x in 0..pix.width {
+            let p = pix.get(x, y);
+            let others = (0..3).filter(|&c| c != channel).all(|c| p[c] < 30);
+            if p[3] > 0 && p[channel] > 200 && others {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+#[test]
+fn colrv1_palette_index_selects_cpal_palette() {
+    let cpal = build_cpal_two_palettes((255, 0, 0, 255), (0, 0, 255, 255));
+    let bytes = build_glyph_solid_font_with_cpal(&cpal);
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    let rast = Rasterizer::new();
+
+    let light = rast
+        .rasterize_colrv1_glyph(&face, 1, 0, 100.0, &[])
+        .expect("palette 0 renders");
+    assert!(count_dominant(&light, 0) > 0, "palette 0 paints red");
+    assert_eq!(count_dominant(&light, 2), 0, "palette 0 has no blue");
+
+    let dark = rast
+        .rasterize_colrv1_glyph(&face, 1, 1, 100.0, &[])
+        .expect("palette 1 renders");
+    assert!(count_dominant(&dark, 2) > 0, "palette 1 paints blue");
+    assert_eq!(count_dominant(&dark, 0), 0, "palette 1 has no red");
+
+    // A palette the font does not have paints every palette entry in
+    // the foreground color, opaque black by default, as HarfBuzz does.
+    let fallback = rast
+        .rasterize_colrv1_glyph(&face, 1, 9, 100.0, &[])
+        .expect("out-of-range palette still renders");
+    assert_eq!(
+        (fallback.width, fallback.height),
+        (light.width, light.height)
+    );
+    assert_eq!(count_dominant(&fallback, 0), 0, "no palette red");
+    let opaque: Vec<[u8; 4]> = fallback
+        .data
+        .chunks_exact(4)
+        .filter(|p| p[3] == 255)
+        .map(|p| [p[0], p[1], p[2], p[3]])
+        .collect();
+    assert!(!opaque.is_empty(), "the glyph still paints");
+    assert!(opaque.iter().all(|p| *p == [0, 0, 0, 255]), "all black");
+}
+
 #[test]
 fn colrv1_paint_glyph_solid_fills_inside_outline() {
     let bytes = build_glyph_solid_font();
@@ -338,12 +410,12 @@ fn colrv1_resolves_colors_in_the_requested_palette() {
         "palette 1 is blue"
     );
 
-    let err = rast
-        .rasterize_colrv1_glyph(&face, 1, 2, 100.0, &[])
-        .unwrap_err();
+    // A palette the font lacks paints in the foreground color, opaque
+    // black by default, as in HarfBuzz.
+    let black = |p: &[u8; 4]| p[3] == 255 && p[0] < 30 && p[1] < 30 && p[2] < 30;
     assert!(
-        matches!(err, RenderError::BadPaletteIndex { palette: 2, .. }),
-        "got {err:?}"
+        count(2, black) > 0 && count(2, red) == 0 && count(2, blue) == 0,
+        "palette 2 paints the foreground"
     );
 }
 
@@ -476,6 +548,71 @@ fn colrv1_paint_glyph_linear_gradient_varies_across_outline() {
     }
     assert!(red_left, "expected red on the left");
     assert!(blue_right, "expected blue on the right");
+}
+
+// =========================================================================
+// Test 2b: PaintGlyph wrapping a PaintSweepGradient centered on the
+// square, sweeping counter-clockwise from 0 to pi (stored, with the
+// half-turn bias, as -1.0 and 0.0). Red at 0, blue at 1, pad.
+// =========================================================================
+
+fn build_glyph_sweep_gradient_font() -> Vec<u8> {
+    let head = build_head();
+    let maxp = build_maxp(2);
+    let hhea = build_hhea(2);
+    let hmtx = build_hmtx(2);
+    let (glyf, loca) = standard_glyf_loca();
+    let cpal = build_cpal_v0(&[(255, 0, 0, 255), (0, 0, 255, 255)]);
+
+    let mut colr = build_v1_header(1);
+    // PaintGlyph(1), child right after its 6 bytes.
+    colr.extend_from_slice(&[10, 0, 0, 6]);
+    colr.extend_from_slice(&1u16.to_be_bytes());
+    // PaintSweepGradient: color line right after its 12 bytes.
+    colr.extend_from_slice(&[8, 0, 0, 12]);
+    colr.extend_from_slice(&100i16.to_be_bytes()); // centerX
+    colr.extend_from_slice(&100i16.to_be_bytes()); // centerY
+    colr.extend_from_slice(&f2dot14(-1.0)); // startAngle: 0 rad
+    colr.extend_from_slice(&f2dot14(0.0)); // endAngle: pi rad
+    colr.push(0); // extend = Pad
+    colr.extend_from_slice(&2u16.to_be_bytes());
+    for (offset, entry) in [(0.0, 0u16), (1.0, 1)] {
+        colr.extend_from_slice(&f2dot14(offset));
+        colr.extend_from_slice(&entry.to_be_bytes());
+        colr.extend_from_slice(&f2dot14(1.0));
+    }
+    align4(&mut colr);
+
+    let tables: &[([u8; 4], &[u8])] = &[
+        (*b"COLR", colr.as_slice()),
+        (*b"CPAL", cpal.as_slice()),
+        (*b"glyf", glyf.as_slice()),
+        (*b"head", head.as_slice()),
+        (*b"hhea", hhea.as_slice()),
+        (*b"hmtx", hmtx.as_slice()),
+        (*b"loca", loca.as_slice()),
+        (*b"maxp", maxp.as_slice()),
+    ];
+    emit_sfnt(tables)
+}
+
+#[test]
+fn colrv1_sweep_gradient_runs_counter_clockwise_in_design_space() {
+    let bytes = build_glyph_sweep_gradient_font();
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    let pix = Rasterizer::new()
+        .rasterize_colrv1_glyph(&face, 1, 0, 100.0, &[])
+        .expect("rasterize succeeds");
+    assert!(pix.width > 4 && pix.height > 4);
+    // Pixel rows run downward, so the top half is design y above the
+    // center: angles in (0, pi), early in the sweep, mostly red. The
+    // bottom half is past the end angle and pads to blue.
+    let x = pix.width - 2;
+    let upper = pix.get(x, pix.height / 4);
+    let lower = pix.get(x, 3 * pix.height / 4);
+    assert!(upper[0] > upper[2], "upper right should be red: {upper:?}");
+    assert!(lower[2] > lower[0], "lower right should be blue: {lower:?}");
 }
 
 // =========================================================================

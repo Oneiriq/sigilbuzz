@@ -11,8 +11,8 @@ use sigilbuzz_paint::{evaluate, DrawCmd, PaintSource};
 /// Glyph id that owns the root paint in every fixture.
 const ROOT_GID: u16 = 7;
 
-/// Work budget of the evaluator, counted as paint nodes plus color
-/// stops. Mirrors the private `MAX_WORK` constant in `eval.rs`.
+/// Upper bound on the evaluator's work. The walker in `walk.rs` visits
+/// at most 65536 paints and resolves at most `1 << 18` color stops.
 const MAX_WORK: usize = 1 << 18;
 
 /// Builds a minimal SFNT holding the COLR table and a one-entry CPAL.

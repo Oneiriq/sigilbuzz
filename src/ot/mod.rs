@@ -14,6 +14,7 @@
 
 pub mod arabic;
 pub mod indic;
+pub(crate) mod layout_select;
 pub mod mongolian;
 pub mod tibetan;
 pub mod use_shaper;

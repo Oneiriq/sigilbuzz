@@ -67,7 +67,7 @@ sigilbuzz paint FONT.ttf 42
 Output:
 
 ```text
-FillGlyph gid=42 transform=Transform2D { ... } paint=Solid(...)
+FillGlyph gid=42 transform=Transform2D { ... } paint=Solid { color: ..., is_foreground: false }
 PushLayer mode=SrcOver
 FillGlyph gid=43 transform=...
 PopLayer

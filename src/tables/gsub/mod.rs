@@ -59,6 +59,10 @@ pub struct Gsub<'a> {
     script_list: ScriptList<'a>,
     feature_list: FeatureList<'a>,
     lookup_list: LookupList<'a>,
+    /// Language system tags the shaper tries, in order, when it
+    /// resolves a feature through this view. Empty selects each
+    /// script's default language system.
+    language_tags: &'a [[u8; 4]],
 }
 
 impl<'a> Gsub<'a> {
@@ -97,7 +101,40 @@ impl<'a> Gsub<'a> {
             script_list,
             feature_list,
             lookup_list,
+            language_tags: &[],
         })
+    }
+
+    /// Returns this view with a language system preference: the
+    /// shaper resolves features under each script's language system
+    /// for the first of `tags` the font has (see
+    /// [`crate::tables::layout::Script::select_lang_sys`]) instead of
+    /// the default one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::{Face, Language};
+    ///
+    /// let data = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
+    /// let face = Face::parse_bytes(data, 0)?;
+    /// let romanian = Language::new("ro").expect("non-empty tag");
+    /// let gsub = face.gsub()?.expect("Open Sans has GSUB");
+    /// let gsub = gsub.with_language_tags(romanian.ot_language_tags());
+    /// assert_eq!(gsub.language_tags(), &[*b"ROM "]);
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
+    #[must_use]
+    pub const fn with_language_tags(mut self, tags: &'a [[u8; 4]]) -> Self {
+        self.language_tags = tags;
+        self
+    }
+
+    /// The language system preference set by
+    /// [`Self::with_language_tags`]. Empty for a freshly parsed table.
+    #[must_use]
+    pub const fn language_tags(&self) -> &'a [[u8; 4]] {
+        self.language_tags
     }
 
     /// Returns the parsed `ScriptList`.
