@@ -3,7 +3,7 @@
 //! Pair adjustment is the mechanism that delivers kerning. Given two
 //! adjacent glyphs `(first, second)`, the lookup returns a pair of
 //! [`ValueRecord`]s whose `x_advance` on the first record is what
-//! oniq and every other text renderer adds to `first`'s advance to
+//! every text renderer adds to `first`'s advance to
 //! tighten or loosen the pair.
 //!
 //! Two subtable formats exist:

@@ -4,7 +4,7 @@
 //! produces a new font where the variable-font deltas have been folded
 //! into the underlying glyph outlines and metrics. The result is a
 //! static font that consumers without VF awareness (older PDF renderers,
-//! legacy print pipelines, sigilbuzz's own oniq-test feed) can use as
+//! legacy print pipelines, test feeds that expect static fonts) can use as
 //! though the source had been designed at the chosen instance.
 //!
 //! # What lands on the static side
