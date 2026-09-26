@@ -53,14 +53,14 @@ fonts, so they are left for a release that can call that out.
 
 ## How work gets picked
 
-sigilbuzz is tested by using it inside oniq. oniq has a sigilbuzz text backend next to
-its HarfBuzz backend. Its integration tests run against both, and any difference in
-glyph IDs or advances counts as a sigilbuzz bug. Demos move to sigilbuzz one at a time,
-and none of them may look worse after the switch. The end goal is to drop rustybuzz
-from oniq entirely.
+sigilbuzz is tested inside a real text rendering application. That application has a
+sigilbuzz text backend next to its HarfBuzz backend. Its integration tests run against
+both, and any difference in glyph IDs or advances counts as a sigilbuzz bug. Demos move
+to sigilbuzz one at a time, and none of them may look worse after the switch. The end
+goal is to drop rustybuzz from that application entirely.
 
-When I'm deciding what to build next, the first question is whether oniq needs it.
-Gaps that HarfBuzz covers and sigilbuzz doesn't come after that.
+When I'm deciding what to build next, the first question is whether real text rendering
+workloads need it. Gaps that HarfBuzz covers and sigilbuzz doesn't come after that.
 
 Each release has a GitHub milestone. Follow-up work is filed as issues against it.
 

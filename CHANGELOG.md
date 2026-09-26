@@ -171,7 +171,7 @@ Fixed:
 
 ## 0.16.0 (2026-04-25)
 
-Three gaps found while moving oniq's MSDF glyph generator onto sigilbuzz.
+Three gaps found while moving an MSDF glyph generator onto sigilbuzz.
 
 - `flatten()`, `Segment`, and `DEFAULT_TOLERANCE` are public in `sigilbuzz-render`
   (#208, #211).

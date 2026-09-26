@@ -121,12 +121,12 @@ A few things you will likely need next:
 
 ## Why I built it
 
-I needed a shaper for oniq, another Oneiriq project, and the Rust options had stalled.
+I needed a text shaper for a Rust rendering project, and the Rust options had stalled.
 When I started in early 2026, rustybuzz had not published a release since November 2024.
 harfbuzz-rs had barely changed since 2021 and still targeted HarfBuzz 2.x. The 2026
 HarfBuzz release added a GPU rasterizer, COLR paint, and PDF and SVG output, and none of
-it was reachable from Rust. So I wrote a shaper that covers it. I test sigilbuzz by
-using it inside oniq. Real workloads there decide what gets built next.
+it was reachable from Rust. So I wrote a shaper that covers it. I test sigilbuzz against
+real text rendering workloads, and those workloads decide what gets built next.
 
 ## Documentation
 
