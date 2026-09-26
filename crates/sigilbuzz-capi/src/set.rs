@@ -5,12 +5,15 @@
 //! 32-bit integers. The subset surface uses it for "unicode set" /
 //! "glyph set" inputs, and the introspection helpers
 //! (`hb_face_collect_unicodes` / `hb_ot_layout_collect_features`)
-//! hand back populated sets. We back it with a
-//! `RefCell<BTreeSet<u32>>`. `BTreeSet` keeps iteration in
-//! ascending order (the contract `hb_set_next` advertises).
+//! hand back populated sets. We back it with a `BTreeSet<u32>` behind
+//! the crate's spin lock. `BTreeSet` keeps iteration in ascending
+//! order (the contract `hb_set_next` advertises).
 //!
-//! `RefCell` is sound here because every mutator routes through a
-//! C-side pointer; the C ABI never observes a held borrow.
+//! The lock is what makes sharing sound. HarfBuzz lets several threads
+//! read one set at once (two `hb_subset_or_fail` calls on the same
+//! input, say), and a `RefCell` would race on its non-atomic borrow
+//! counter there. No access holds the lock across a call back into C
+//! or into another access of the same set, so it cannot deadlock.
 //!
 //! # Refcount contract
 //!
@@ -28,42 +31,35 @@
 extern crate alloc;
 
 use alloc::collections::BTreeSet;
-use core::cell::RefCell;
 
+use crate::spin_mutex::SpinMutex;
 use crate::{handle, hb_bool_t};
 
 /// Opaque integer set. C holds the `Arc` pointer to this struct; see
-/// the `handle` module.
+/// the `handle` module. `Send + Sync` follow from the lock.
 #[repr(C)]
 pub struct hb_set_t {
-    inner: RefCell<BTreeSet<u32>>,
+    inner: SpinMutex<BTreeSet<u32>>,
 }
-
-// SAFETY: `RefCell` is `!Sync`, but every access is gated by the C
-// ABI surface: the C caller never holds a `&` to the underlying
-// BTreeSet across a callback boundary. The Send/Sync claims here
-// match the contract HarfBuzz itself documents: an `hb_set_t` is
-// safe to share between threads as long as accesses are serialized
-// externally. See the module-level note on the safety story.
-unsafe impl Send for hb_set_t {}
-unsafe impl Sync for hb_set_t {}
 
 impl hb_set_t {
     /// Internal constructor.
     pub(crate) fn new() -> Self {
         Self {
-            inner: RefCell::new(BTreeSet::new()),
+            inner: SpinMutex::new(BTreeSet::new()),
         }
     }
 
-    /// Internal: borrow the underlying BTreeSet for read.
+    /// Internal: lock the underlying BTreeSet for read. `f` must not
+    /// touch this set again.
     pub(crate) fn with_inner<R>(&self, f: impl FnOnce(&BTreeSet<u32>) -> R) -> R {
-        f(&self.inner.borrow())
+        f(&self.inner.lock())
     }
 
-    /// Internal: borrow the underlying BTreeSet for write.
+    /// Internal: lock the underlying BTreeSet for write. `f` must not
+    /// touch this set again.
     pub(crate) fn with_inner_mut<R>(&self, f: impl FnOnce(&mut BTreeSet<u32>) -> R) -> R {
-        f(&mut self.inner.borrow_mut())
+        f(&mut self.inner.lock())
     }
 }
 
