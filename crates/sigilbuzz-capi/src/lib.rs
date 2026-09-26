@@ -79,6 +79,9 @@ mod handle;
 // paint evaluator, just walks tables sigilbuzz already parses.
 pub mod introspect;
 pub mod set;
+// Text ingest (`hb_buffer_add_*`), cluster mapping, and segment
+// property handling for `hb_buffer_t`.
+mod buffer_text;
 // `subset_bridge` is gated on the `subset` cargo feature so a
 // `--no-default-features` build of this crate still compiles cleanly
 // without pulling in the companion subsetter crate. `paint_bridge`
@@ -252,6 +255,9 @@ struct BufferState {
     /// have populated direction/script/language. Until then
     /// guess_segment_properties has work to do.
     props_set: bool,
+    /// Caller-unit cluster for every character added so far; see
+    /// `buffer_text`.
+    clusters: buffer_text::ClusterTable,
 }
 
 /// Refcounted buffer. C holds the `Arc` pointer to this struct; see
@@ -949,6 +955,7 @@ pub extern "C" fn hb_buffer_create() -> *mut hb_buffer_t {
         glyph_infos: Vec::new(),
         glyph_positions: Vec::new(),
         props_set: false,
+        clusters: buffer_text::ClusterTable::default(),
     };
     handle::into_raw(hb_buffer_t {
         inner: BufferInner {
@@ -1009,11 +1016,9 @@ pub unsafe extern "C" fn hb_buffer_clear_contents(buffer: *mut hb_buffer_t) {
     // SAFETY: caller asserts validity.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
-    state.buffer.set_text("");
-    state.glyph_infos.clear();
-    state.glyph_positions.clear();
-    // direction/script/language survive a clear_contents: only
-    // hb_buffer_reset wipes them.
+    // Like HarfBuzz, this also resets direction, script, language, and
+    // the pre- and post-context.
+    buffer_text::clear_contents(&mut state);
 }
 
 /// # Safety
@@ -1040,23 +1045,21 @@ pub unsafe extern "C" fn hb_buffer_add_utf8(
         // SAFETY: caller asserts (text, text_length) is valid.
         unsafe { slice::from_raw_parts(text.cast::<u8>(), text_length as usize) }
     };
-    let start = item_offset as usize;
-    if start > total_bytes.len() {
-        return;
-    }
-    let end = if item_length < 0 {
-        total_bytes.len()
-    } else {
-        (start + item_length as usize).min(total_bytes.len())
-    };
-    let slice = &total_bytes[start..end];
-    let Ok(s) = core::str::from_utf8(slice) else {
-        return;
-    };
     // SAFETY: caller asserts buffer validity.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
-    state.buffer.push_str(s);
+    // Clusters are byte offsets into `text`, context comes from the
+    // bytes around the item, and malformed UTF-8 becomes U+FFFD, all
+    // as in HarfBuzz.
+    let Some(item_length) = buffer_text::ItemLength::from_c(item_length) else {
+        return;
+    };
+    buffer_text::add::<buffer_text::Utf8>(
+        &mut state,
+        total_bytes,
+        item_offset as usize,
+        item_length,
+    );
 }
 
 /// # Safety
@@ -1086,23 +1089,20 @@ pub unsafe extern "C" fn hb_buffer_add_utf16(
         // SAFETY: caller asserts (text, text_length) is valid.
         unsafe { slice::from_raw_parts(text, text_length as usize) }
     };
-    let start = item_offset as usize;
-    if start > total_units.len() {
-        return;
-    }
-    let end = if item_length < 0 {
-        total_units.len()
-    } else {
-        (start + item_length as usize).min(total_units.len())
-    };
-    let units = &total_units[start..end];
-    let Ok(s) = String::from_utf16(units) else {
-        return;
-    };
     // SAFETY: caller asserts buffer validity.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
-    state.buffer.push_str(&s);
+    // Clusters are UTF-16 code-unit offsets into `text`; lone
+    // surrogates become U+FFFD, as in HarfBuzz.
+    let Some(item_length) = buffer_text::ItemLength::from_c(item_length) else {
+        return;
+    };
+    buffer_text::add::<buffer_text::Utf16>(
+        &mut state,
+        total_units,
+        item_offset as usize,
+        item_length,
+    );
 }
 
 /// # Safety
@@ -1134,6 +1134,9 @@ pub unsafe extern "C" fn hb_buffer_set_script(buffer: *mut hb_buffer_t, script: 
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     state.script = script;
+    // A script sigilbuzz has a bucket for shapes the whole buffer;
+    // anything else leaves per-run script segmentation in place.
+    state.buffer.set_script(buffer_text::core_script(script));
     state.props_set = true;
 }
 
@@ -1148,6 +1151,11 @@ pub unsafe extern "C" fn hb_buffer_set_language(buffer: *mut hb_buffer_t, langua
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
     state.language = language;
+    // SAFETY: HarfBuzz's contract makes `language` null or a
+    // NUL-terminated tag string from hb_language_from_string.
+    state
+        .buffer
+        .set_language(unsafe { buffer_text::core_language(language) });
     state.props_set = true;
 }
 
@@ -1161,26 +1169,9 @@ pub unsafe extern "C" fn hb_buffer_guess_segment_properties(buffer: *mut hb_buff
     // SAFETY: caller asserts validity.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
-    if state.direction == HB_DIRECTION_INVALID {
-        // Default to LTR; sigilbuzz's Buffer also defaults to LTR.
-        state.direction = HB_DIRECTION_LTR;
-        state.buffer.set_direction(Direction::Ltr);
-    }
-    if state.script == HB_SCRIPT_INVALID {
-        // Use the first script-bearing codepoint to seed the script
-        // tag, matching HarfBuzz's behavior. sigilbuzz's
-        // `script_runs()` does the heavy lifting; we project its
-        // first run's script into the matching ISO 15924 tag.
-        let runs = state.buffer.script_runs();
-        let chosen = runs.first().map(|r| r.script);
-        state.script = chosen.map(script_to_iso15924).unwrap_or(HB_SCRIPT_COMMON);
-    }
-    if state.language.is_null() {
-        // HarfBuzz uses the host locale here; pick "und" as a safe
-        // default that lookups always have to fall back through.
-        state.language = lang_und();
-    }
-    state.props_set = true;
+    // Script first, then the direction from the script (RTL for
+    // Arabic, Hebrew, ...), then the language, as in HarfBuzz.
+    buffer_text::guess_segment_properties(&mut state);
 }
 
 /// # Safety
@@ -1320,11 +1311,14 @@ pub unsafe extern "C" fn hb_shape_full(
     // (info, position) split.
     let mut infos = Vec::with_capacity(shaped.glyphs.len());
     let mut positions = Vec::with_capacity(shaped.glyphs.len());
+    let text_len = buffer_state.buffer.text().len();
     for g in &shaped.glyphs {
         infos.push(hb_glyph_info_t {
             codepoint: g.glyph_id,
             mask: 0,
-            cluster: g.cluster,
+            // Core clusters are UTF-8 offsets into the buffer text;
+            // report them in the units of the caller's add call.
+            cluster: buffer_state.clusters.map(g.cluster, text_len),
             var1: 0,
             var2: 0,
         });
@@ -1506,26 +1500,6 @@ fn map_direction_in(d: hb_direction_t) -> Direction {
         HB_DIRECTION_TTB => Direction::Ttb,
         HB_DIRECTION_BTT => Direction::Btt,
         _ => Direction::Ltr,
-    }
-}
-
-fn script_to_iso15924(s: sigilbuzz::unicode::Script) -> hb_script_t {
-    use sigilbuzz::unicode::Script;
-    match s {
-        Script::Latin => HB_SCRIPT_LATIN,
-        Script::Han => HB_SCRIPT_HAN,
-        Script::Arabic => HB_SCRIPT_ARABIC,
-        Script::Hebrew => HB_SCRIPT_HEBREW,
-        Script::Cyrillic => HB_SCRIPT_CYRILLIC,
-        Script::Greek => HB_SCRIPT_GREEK,
-        Script::Devanagari => HB_SCRIPT_DEVANAGARI,
-        Script::Bengali => HB_SCRIPT_BENGALI,
-        Script::Hangul => HB_SCRIPT_HANGUL,
-        Script::Khmer => HB_SCRIPT_KHMER,
-        Script::Myanmar => HB_SCRIPT_MYANMAR,
-        Script::Thai => HB_SCRIPT_THAI,
-        Script::Lao => HB_SCRIPT_LAO,
-        _ => HB_SCRIPT_COMMON,
     }
 }
 

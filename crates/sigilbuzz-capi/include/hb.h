@@ -187,8 +187,16 @@ hb_buffer_t *hb_buffer_create(void);
 void         hb_buffer_destroy(hb_buffer_t *buffer);
 hb_buffer_t *hb_buffer_reference(hb_buffer_t *buffer);
 void         hb_buffer_reset(hb_buffer_t *buffer);
+/* Drops the text and output and, as in HarfBuzz, resets direction,
+ * script, language, and the pre- and post-context. */
 void         hb_buffer_clear_contents(hb_buffer_t *buffer);
 
+/* Adds text[item_offset, item_offset + item_length) (item_length -1
+ * means to the end). As in HarfBuzz: glyph clusters are offsets into
+ * `text` in its own code units (bytes for UTF-8, 16-bit units for
+ * UTF-16), up to five characters before the item become the
+ * pre-context when the buffer is empty, up to five after it become the
+ * post-context, and malformed sequences become U+FFFD. */
 void         hb_buffer_add_utf8(hb_buffer_t *buffer,
                                 const char  *text,
                                 int          text_length,
@@ -202,8 +210,15 @@ void         hb_buffer_add_utf16(hb_buffer_t    *buffer,
                                  int             item_length);
 
 void         hb_buffer_set_direction(hb_buffer_t *buffer, hb_direction_t direction);
+/* The whole buffer shapes as `script`. Scripts sigilbuzz has no shaper
+ * for (and Common, Inherited, Unknown) leave the text split into
+ * per-script runs instead. */
 void         hb_buffer_set_script(hb_buffer_t *buffer, hb_script_t script);
+/* Selects the OpenType language system (a font's `locl` forms, ...). */
 void         hb_buffer_set_language(hb_buffer_t *buffer, hb_language_t language);
+/* Fills unset properties in HarfBuzz's order: the script of the first
+ * character that has one, the direction from that script (right to
+ * left for Arabic, Hebrew, ...), and "und" for the language. */
 void         hb_buffer_guess_segment_properties(hb_buffer_t *buffer);
 
 hb_glyph_info_t     *hb_buffer_get_glyph_infos(hb_buffer_t *buffer, unsigned int *length);
