@@ -5,8 +5,8 @@
 use alloc::vec::Vec;
 
 use super::{IndicConfig, RephMode, RephPosition, Syllable, SyllableKind};
-use crate::buffer::{Glyph, IndicPosition};
-use crate::shape::feature_would_substitute;
+use crate::buffer::{ClusterLevel, Glyph, IndicPosition};
+use crate::shape::{feature_would_substitute, merge_clusters};
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 use crate::unicode::indic_category::{
@@ -73,7 +73,17 @@ pub(super) fn tag_positions(codepoints: &[char], glyphs: &mut [Glyph], syllable:
 /// category `Left`) from after the base consonant to immediately
 /// before it. That puts the glyph run into the logical order the
 /// GSUB basic features and the final reordering step expect.
-pub(super) fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllable) {
+///
+/// Glyphs from the base on that the moves displaced then share
+/// clusters at the monotone cluster `level`s, HarfBuzz's
+/// `merge_clusters` over each permutation cycle past the base; what
+/// ends up before the base merges in final reordering instead.
+pub(super) fn initial_reorder(
+    codepoints: &[char],
+    glyphs: &mut [Glyph],
+    syllable: &Syllable,
+    level: ClusterLevel,
+) {
     if !matches!(syllable.kind, SyllableKind::Consonant) {
         return;
     }
@@ -104,14 +114,60 @@ pub(super) fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllabl
     // halant, i.e. before the base still.
     let insertion_point = base;
 
+    // `order[k]` is the index the glyph now at `syllable.start + k`
+    // came from; it follows the glyphs through the moves.
+    let mut order: Vec<usize> = (syllable.start..syllable.end).collect();
+    let rel = |i: usize| i - syllable.start;
     // Move in reverse so later indices remain valid while we drain.
     for &idx in to_move.iter().rev() {
         let glyph = glyphs[idx];
+        let from = order[rel(idx)];
         // Shift glyphs[insertion_point..idx] right by one.
         for j in (insertion_point..idx).rev() {
             glyphs[j + 1] = glyphs[j];
+            order[rel(j + 1)] = order[rel(j)];
         }
         glyphs[insertion_point] = glyph;
+        order[rel(insertion_point)] = from;
+    }
+    if let Some(new_base) = order.iter().position(|&from| from == base) {
+        let new_base = syllable.start + new_base;
+        merge_displaced_after_base(glyphs, &order, syllable.start, new_base, level);
+    }
+}
+
+/// HarfBuzz's cluster merge at the end of Indic initial reordering:
+/// for every permutation cycle that reaches a slot at or after the
+/// base (`base`, after the moves), the slots from the base (or the
+/// cycle's first slot, if later) through the cycle's last slot merge.
+/// `order[k]` is the index the glyph now at `start + k` came from.
+/// A syllable longer than 127 merges everything from the base on.
+fn merge_displaced_after_base(
+    glyphs: &mut [Glyph],
+    order: &[usize],
+    start: usize,
+    base: usize,
+    level: ClusterLevel,
+) {
+    let end = start + order.len();
+    if order.len() > 127 {
+        merge_clusters(glyphs, base, end, level);
+        return;
+    }
+    let mut visited = alloc::vec![false; order.len()];
+    for i in base..end {
+        if visited[i - start] {
+            continue;
+        }
+        let (mut min, mut max) = (i, i);
+        let mut j = order[i - start];
+        while j != i {
+            min = min.min(j);
+            max = max.max(j);
+            visited[j - start] = true;
+            j = order[j - start];
+        }
+        merge_clusters(glyphs, base.max(min), max + 1, level);
     }
 }
 
@@ -302,9 +358,10 @@ pub(super) fn cluster_byte_offsets(codepoints: &[char]) -> Vec<u32> {
 /// reph glyph to move. We detect this by comparing the post-feature
 /// glyph count to the original.
 ///
-/// Cluster metadata on the moved reph is rewritten to the
-/// syllable's base cluster so byte offsets attributed to the reph
-/// match HarfBuzz's behavior (`merge_clusters` in rustybuzz).
+/// Before the reph moves, it and the glyphs it passes over share one
+/// cluster at the monotone cluster `level`s, HarfBuzz's
+/// `merge_clusters (start, new_reph_pos + 1)`; the other levels move
+/// it with its own cluster.
 pub(super) fn final_reorder(
     glyphs: &mut [Glyph],
     byte_start: u32,
@@ -312,6 +369,7 @@ pub(super) fn final_reorder(
     original_glyph_count: usize,
     reph_pos: RephPosition,
     reph_mode: RephMode,
+    level: ClusterLevel,
 ) {
     // Collect glyph indices that belong to this syllable.
     let syllable_glyphs: Vec<usize> = glyphs
@@ -387,17 +445,43 @@ pub(super) fn final_reorder(
     }
 
     // Move `glyphs[reph_idx]` to `target` by shifting the slots
-    // between them left by one. HarfBuzz's `merge_clusters(start,
-    // new_reph_pos + 1)` collapses the range the reph passes over
-    // into the minimum cluster; for a reph syllable the first
-    // surviving glyph's cluster is that minimum, so we overwrite
-    // every cluster in the range with it.
-    let base_cluster = glyphs[first_in_syllable].cluster;
-    let mut reph = glyphs[reph_idx];
-    reph.cluster = base_cluster;
-    for i in reph_idx..target {
-        glyphs[i] = glyphs[i + 1];
-        glyphs[i].cluster = base_cluster;
+    // between them left by one, after merging the range the reph
+    // passes over as HarfBuzz does.
+    merge_clusters(glyphs, reph_idx, target + 1, level);
+    glyphs[reph_idx..=target].rotate_left(1);
+}
+
+/// HarfBuzz's final-reordering merge for pre-base matras: when a
+/// matra sits before the base consonant of the syllable whose clusters
+/// lie in `[byte_start, byte_end)`, the glyphs from the first such
+/// matra through the base share one cluster at the monotone cluster
+/// `level`s (`merge_clusters (i, hb_min (end, base + 1))`). Without a
+/// tagged base glyph left, the merge runs to the syllable's end, as
+/// HarfBuzz's does when it loses track of the base.
+pub(super) fn merge_pre_base_matras(
+    glyphs: &mut [Glyph],
+    byte_start: u32,
+    byte_end: u32,
+    level: ClusterLevel,
+) {
+    let in_syllable = |g: &Glyph| g.cluster >= byte_start && g.cluster < byte_end;
+    let Some(start) = glyphs.iter().position(in_syllable) else {
+        return;
+    };
+    let end = start
+        + glyphs[start..]
+            .iter()
+            .take_while(|g| in_syllable(g))
+            .count();
+    let syllable = &glyphs[start..end];
+    let base = syllable
+        .iter()
+        .position(|g| g.indic_position == IndicPosition::BaseC as u8)
+        .map_or(syllable.len(), |b| b + 1);
+    if let Some(matra) = syllable[..base.min(syllable.len())]
+        .iter()
+        .position(|g| g.indic_position == IndicPosition::PreM as u8)
+    {
+        merge_clusters(glyphs, start + matra, start + base, level);
     }
-    glyphs[target] = reph;
 }

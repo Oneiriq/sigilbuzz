@@ -29,7 +29,7 @@
 //! holds more than seven live ligatures, where HarfBuzz's wrapped ids
 //! can collide and these cannot (as long as a free id exists).
 
-use crate::buffer::Glyph;
+use crate::buffer::{ClusterLevel, Glyph};
 use crate::tables::gdef::{Gdef, GlyphClass};
 
 /// Bit 7 of `unicode_props`: the glyph came out of a multiple
@@ -147,6 +147,11 @@ fn alloc_lig_id(glyphs: &[Glyph], at: usize) -> u8 {
 /// - Marks right after the last component that belonged to an
 ///   earlier ligature are renumbered into this one.
 ///
+/// At the monotone cluster `level`s the matched span shares one
+/// cluster, the smallest in it (`ligate_input` calls its buffer's
+/// `merge_clusters`); at the others the ligature keeps its first
+/// component's cluster and the glyphs between keep theirs.
+///
 /// `substitute` writes the new glyph id; the caller passes its own
 /// helper so the GSUB bookkeeping it already does (default-ignorable
 /// flags) stays in one place.
@@ -157,6 +162,7 @@ pub(super) fn ligate(
     lig_gid: u16,
     gdef: Option<&Gdef<'_>>,
     substitute: fn(&mut Glyph, u16),
+    level: ClusterLevel,
 ) {
     let Some(&last_rel) = positions.last() else {
         return;
@@ -164,11 +170,10 @@ pub(super) fn ligate(
     if at + last_rel >= glyphs.len() {
         return;
     }
-    // The matched span shares one cluster, the smallest in it, as in
-    // HarfBuzz's ligate_input. The first component is not always the
-    // smallest: text shaped in reversed grapheme order (see
-    // `native_direction`) runs its clusters downward.
-    super::merge_clusters(glyphs, at, at + last_rel + 1);
+    // The first component is not always the smallest cluster: text
+    // shaped in reversed grapheme order (see `native_direction`) runs
+    // its clusters downward.
+    super::cluster::merge_clusters(glyphs, at, at + last_rel + 1, level);
     let first = glyphs[at];
     let mut is_mark_ligature = is_mark(&first, gdef);
     let mut is_base_ligature = is_base_glyph(&first, gdef);
@@ -262,6 +267,8 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
+    const MC: ClusterLevel = ClusterLevel::MonotoneCharacters;
+
     /// GDEF v1.0 whose class def lists glyphs 1..=9: 1-4 bases,
     /// 5-7 marks, 8-9 ligatures.
     fn gdef_bytes() -> Vec<u8> {
@@ -301,7 +308,7 @@ mod tests {
         // base(1) mark(5) base(2) mark(6) base(3) mark(7): ligate the
         // three bases, skipping the marks between them.
         let mut glyphs = run(&[1, 5, 2, 6, 3, 7]);
-        ligate(&mut glyphs, 0, &[0, 2, 4], 8, Some(&gdef), plain);
+        ligate(&mut glyphs, 0, &[0, 2, 4], 8, Some(&gdef), plain, MC);
         assert_eq!(
             props(&glyphs),
             [(8, 1, 0), (5, 1, 1), (6, 1, 2), (7, 0, 0)],
@@ -315,7 +322,7 @@ mod tests {
         let bytes = gdef_bytes();
         let gdef = Gdef::parse(&bytes).unwrap();
         let mut glyphs = run(&[1, 5, 6]);
-        ligate(&mut glyphs, 0, &[0, 1, 2], 4, Some(&gdef), plain);
+        ligate(&mut glyphs, 0, &[0, 1, 2], 4, Some(&gdef), plain, MC);
         assert_eq!(props(&glyphs), [(4, 0, 0)]);
         assert_eq!(num_comps(&glyphs[0], Some(&gdef)), 1);
     }
@@ -325,7 +332,7 @@ mod tests {
         let bytes = gdef_bytes();
         let gdef = Gdef::parse(&bytes).unwrap();
         let mut glyphs = run(&[1, 2, 5]);
-        ligate(&mut glyphs, 0, &[0, 1], 8, Some(&gdef), plain);
+        ligate(&mut glyphs, 0, &[0, 1], 8, Some(&gdef), plain, MC);
         assert_eq!(props(&glyphs), [(8, 1, 0), (5, 0, 0)]);
     }
 
@@ -338,9 +345,9 @@ mod tests {
         // two-component ligature, which is component 2 of the new
         // three-component one.
         let mut glyphs = run(&[3, 1, 5, 2]);
-        ligate(&mut glyphs, 1, &[0, 2], 8, Some(&gdef), plain);
+        ligate(&mut glyphs, 1, &[0, 2], 8, Some(&gdef), plain, MC);
         assert_eq!(props(&glyphs), [(3, 0, 0), (8, 1, 0), (5, 1, 1)]);
-        ligate(&mut glyphs, 0, &[0, 1], 9, Some(&gdef), plain);
+        ligate(&mut glyphs, 0, &[0, 1], 9, Some(&gdef), plain, MC);
         assert_eq!(props(&glyphs), [(9, 2, 0), (5, 2, 2)]);
         assert_eq!(num_comps(&glyphs[0], Some(&gdef)), 3);
     }
@@ -350,8 +357,8 @@ mod tests {
         let bytes = gdef_bytes();
         let gdef = Gdef::parse(&bytes).unwrap();
         let mut glyphs = run(&[1, 5, 2, 3]);
-        ligate(&mut glyphs, 0, &[0, 2], 8, Some(&gdef), plain);
-        ligate(&mut glyphs, 0, &[0, 2], 9, Some(&gdef), plain);
+        ligate(&mut glyphs, 0, &[0, 2], 8, Some(&gdef), plain, MC);
+        ligate(&mut glyphs, 0, &[0, 2], 9, Some(&gdef), plain, MC);
         assert_eq!(props(&glyphs), [(9, 2, 0), (5, 2, 1)]);
         assert_eq!(num_comps(&glyphs[0], Some(&gdef)), 3);
     }
@@ -361,8 +368,8 @@ mod tests {
         let bytes = gdef_bytes();
         let gdef = Gdef::parse(&bytes).unwrap();
         let mut glyphs = run(&[1, 2, 3, 4]);
-        ligate(&mut glyphs, 0, &[0, 1], 8, Some(&gdef), plain);
-        ligate(&mut glyphs, 1, &[0, 1], 9, Some(&gdef), plain);
+        ligate(&mut glyphs, 0, &[0, 1], 8, Some(&gdef), plain, MC);
+        ligate(&mut glyphs, 1, &[0, 1], 9, Some(&gdef), plain, MC);
         assert_eq!(props(&glyphs), [(8, 1, 0), (9, 2, 0)]);
     }
 
@@ -376,9 +383,48 @@ mod tests {
         // multiplied any more.
         let bytes = gdef_bytes();
         let gdef = Gdef::parse(&bytes).unwrap();
-        ligate(&mut glyphs, 0, &[0, 1], 8, Some(&gdef), plain);
+        ligate(&mut glyphs, 0, &[0, 1], 8, Some(&gdef), plain, MC);
         assert!(!is_multiplied(&glyphs[0]));
         assert!(is_multiplied(&glyphs[1]));
+    }
+
+    #[test]
+    fn ligature_clusters_merge_at_monotone_levels_only() {
+        let bytes = gdef_bytes();
+        let gdef = Gdef::parse(&bytes).unwrap();
+        // base(1)@0 mark(5)@1 base(2)@2, ligating the two bases around
+        // the mark.
+        for (level, clusters) in [
+            (ClusterLevel::MonotoneGraphemes, [0, 0]),
+            (ClusterLevel::MonotoneCharacters, [0, 0]),
+            (ClusterLevel::Characters, [0, 1]),
+            (ClusterLevel::Graphemes, [0, 1]),
+        ] {
+            let mut glyphs = run(&[1, 5, 2]);
+            ligate(&mut glyphs, 0, &[0, 2], 8, Some(&gdef), plain, level);
+            let got: Vec<u32> = glyphs.iter().map(|g| g.cluster).collect();
+            assert_eq!(got, clusters, "{level:?}");
+        }
+        // Text in reversed grapheme order: the ligature takes the
+        // smallest cluster at a monotone level, its first component's
+        // otherwise.
+        let mut glyphs: Vec<Glyph> = [(1, 4), (2, 2)]
+            .iter()
+            .map(|&(id, c)| Glyph::new(id, c))
+            .collect();
+        let mut chars = glyphs.clone();
+        ligate(&mut glyphs, 0, &[0, 1], 8, Some(&gdef), plain, MC);
+        assert_eq!(glyphs[0].cluster, 2);
+        ligate(
+            &mut chars,
+            0,
+            &[0, 1],
+            8,
+            Some(&gdef),
+            plain,
+            ClusterLevel::Characters,
+        );
+        assert_eq!(chars[0].cluster, 4);
     }
 
     #[test]

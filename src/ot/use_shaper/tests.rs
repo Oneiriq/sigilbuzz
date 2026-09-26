@@ -55,7 +55,7 @@ fn pre_base_vowel_moves_before_base() {
     let original = glyphs.clone();
     let syls = segment_syllables(&cp);
     for s in &syls {
-        initial_reorder(&cp, &mut glyphs, s);
+        initial_reorder(&cp, &mut glyphs, s, ClusterLevel::Characters);
     }
     assert_eq!(glyphs[0], original[1], "sign-e should sit first visually");
     assert_eq!(glyphs[1], original[0], "ka should sit second");
@@ -69,7 +69,7 @@ fn post_base_vowel_stays_put() {
     let before = glyphs.clone();
     let syls = segment_syllables(&cp);
     for s in &syls {
-        initial_reorder(&cp, &mut glyphs, s);
+        initial_reorder(&cp, &mut glyphs, s, ClusterLevel::Characters);
     }
     assert_eq!(glyphs, before);
 }
@@ -121,7 +121,7 @@ fn empty_input_produces_no_syllables() {
 #[test]
 fn shape_khmer_without_gsub_only_reorders() {
     // កេ: reorder, no GSUB. After reorder the sign-e sits
-    // first; after the cluster-merge pass both glyphs share the
+    // first, and at a monotone level both glyphs share the
     // syllable's head byte offset (0 for `fake_glyphs` which
     // mirrors a UTF-8 buffer where ka starts at byte 0). We
     // verify the glyph IDs moved (1 -> 0 by original mapping) so
@@ -129,7 +129,13 @@ fn shape_khmer_without_gsub_only_reorders() {
     let cp = cps("\u{1780}\u{17C1}");
     let mut glyphs = fake_glyphs(2);
     let original = glyphs.clone();
-    shape_khmer(None, None, &cp, &mut glyphs);
+    shape_khmer(
+        None,
+        None,
+        &cp,
+        &mut glyphs,
+        ClusterLevel::MonotoneCharacters,
+    );
     assert_eq!(glyphs[0].glyph_id, original[1].glyph_id);
     assert_eq!(glyphs[1].glyph_id, original[0].glyph_id);
     // Cluster merge: both glyphs carry cluster 0 (syllable
@@ -157,7 +163,7 @@ fn pre_base_with_coeng_moves_matra_to_syllable_head() {
     assert_eq!(syls.len(), 1);
     assert_eq!(syls[0].base_index, Some(2));
     for s in &syls {
-        initial_reorder(&cp, &mut glyphs, s);
+        initial_reorder(&cp, &mut glyphs, s, ClusterLevel::Characters);
     }
     assert_eq!(glyphs[0].cluster, 3); // sign-e
     assert_eq!(glyphs[1].cluster, 0); // sa
@@ -193,7 +199,7 @@ fn multiple_pre_base_matras_all_move() {
     let mut glyphs = fake_glyphs(4);
     let syls = segment_syllables(&cp);
     for s in &syls {
-        initial_reorder(&cp, &mut glyphs, s);
+        initial_reorder(&cp, &mut glyphs, s, ClusterLevel::Characters);
     }
     // After reorder: VPre, VPre, ka, aa.
     assert_eq!(glyphs[0].cluster, 1);
@@ -227,19 +233,46 @@ fn script_priority_starts_with_khmr() {
 }
 
 #[test]
-fn cluster_merge_collapses_syllable_to_head_offset() {
-    // កេ: pre-base reorder followed by the cluster-merge pass
-    // leaves every glyph in the syllable carrying the head
-    // byte offset (0 here: ka is first in the UTF-8 stream).
-    // Matches HarfBuzz / rustybuzz behavior so callers see one
-    // cluster id per syllable.
+fn reordered_vowel_merges_clusters_at_monotone_levels_only() {
+    // កេ: the pre-base sign-e moves in front of ka. HarfBuzz's Khmer
+    // shaper merges the clusters it moves across first, so at the
+    // monotone levels both glyphs carry ka's offset; at the others the
+    // sign-e keeps its own (out-of-order) cluster.
     let cp = cps("\u{1780}\u{17C1}");
-    let mut glyphs = vec![Glyph::new(10, 0), Glyph::new(20, 3)];
-    shape_khmer(None, None, &cp, &mut glyphs);
-    assert_eq!(glyphs[0].cluster, 0);
-    assert_eq!(glyphs[1].cluster, 0);
-    // Glyph IDs confirm reorder happened (20 was at cluster 3,
-    // now it is first).
-    assert_eq!(glyphs[0].glyph_id, 20);
-    assert_eq!(glyphs[1].glyph_id, 10);
+    for (level, clusters) in [
+        (ClusterLevel::MonotoneCharacters, [0, 0]),
+        (ClusterLevel::MonotoneGraphemes, [0, 0]),
+        (ClusterLevel::Characters, [3, 0]),
+        (ClusterLevel::Graphemes, [3, 0]),
+    ] {
+        let mut glyphs = vec![Glyph::new(10, 0), Glyph::new(20, 3)];
+        shape_khmer(None, None, &cp, &mut glyphs, level);
+        let got: Vec<u32> = glyphs.iter().map(|g| g.cluster).collect();
+        assert_eq!(got, clusters, "{level:?}");
+        // Glyph IDs confirm the reorder happened (20 was at cluster
+        // 3, now it is first).
+        assert_eq!(glyphs[0].glyph_id, 20);
+        assert_eq!(glyphs[1].glyph_id, 10);
+    }
+}
+
+#[test]
+fn every_move_merges_the_span_it_crosses() {
+    // ស្តេ: sa, coeng, ta, sign-e. The sign-e moves to the syllable
+    // head across all three, so all four share a cluster.
+    let cp = cps("\u{179F}\u{17D2}\u{178F}\u{17C1}");
+    let mut glyphs = fake_glyphs(4);
+    for s in &segment_syllables(&cp) {
+        initial_reorder(&cp, &mut glyphs, s, ClusterLevel::MonotoneCharacters);
+    }
+    let got: Vec<u32> = glyphs.iter().map(|g| g.cluster).collect();
+    assert_eq!(got, [0, 0, 0, 0]);
+    // Two pre-base signs before a trailing aa: the aa is not crossed.
+    let cp = cps("\u{1780}\u{17C1}\u{17C2}\u{17B6}");
+    let mut glyphs = fake_glyphs(4);
+    for s in &segment_syllables(&cp) {
+        initial_reorder(&cp, &mut glyphs, s, ClusterLevel::MonotoneCharacters);
+    }
+    let got: Vec<u32> = glyphs.iter().map(|g| g.cluster).collect();
+    assert_eq!(got, [0, 0, 0, 3]);
 }

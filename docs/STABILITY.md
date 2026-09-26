@@ -80,6 +80,9 @@ signatures only change in a major version.
     HarfBuzz's values (`EOT`, `DO_NOT_INSERT_DOTTED_CIRCLE`). They replace the
     `Buffer::{set_insert_dotted_circle, insert_dotted_circle}` pair that 0.22.0
     development builds had, and survive `Buffer::clear`.
+  - `ClusterLevel` and `Buffer::{set_cluster_level, cluster_level}`: HarfBuzz's four
+    cluster levels. A Rust `Buffer` defaults to `MonotoneCharacters`; the C API
+    defaults to HarfBuzz's `MONOTONE_GRAPHEMES`. The level survives `Buffer::clear`.
 
 `sigilbuzz-render`:
 

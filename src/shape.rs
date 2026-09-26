@@ -72,6 +72,17 @@
 //! vertical top-to-bottom layout. An explicit
 //! [`crate::Direction::Ltr`] keeps Mongolian horizontal.
 //!
+//! # Clusters
+//!
+//! Every glyph starts with the UTF-8 offset of its character as its
+//! cluster. The buffer's [`crate::ClusterLevel`] then decides, at each
+//! place HarfBuzz forms or merges clusters, whether that happens:
+//! grapheme forming before shaping, the merge of each reversed
+//! grapheme in a non-native direction, ligatures, the Indic, Khmer,
+//! Myanmar, and USE reorderings, Thai and Lao SARA AM, Old Hangul jamo
+//! sequences, and deleted default ignorables (see the `cluster`
+//! submodule).
+//!
 //! # What is not here yet
 //!
 //! - Full Unicode NFC normalization. sigilbuzz ships the
@@ -91,6 +102,7 @@
 
 mod aat;
 mod attach;
+mod cluster;
 mod dotted_circle;
 mod features;
 mod gpos;
@@ -106,13 +118,15 @@ mod position;
 mod required;
 mod rotate;
 mod segment;
+mod thai;
 
 use aat::apply_kerx_format4;
+pub(crate) use cluster::{merge_clusters, merge_grapheme_clusters};
 pub(crate) use features::{
     apply_gsub_feature_in_scripts, apply_gsub_feature_masked, apply_gsub_features_merged,
     apply_locl_ccmp_if_length_preserving, feature_would_substitute,
 };
-use gsub::{apply_gsub_lookup, merge_clusters};
+use gsub::apply_gsub_lookup;
 use gsub_parsed::filter_for_lookup;
 pub use pipeline::shape;
 use segment::ProcessedSegment;

@@ -64,12 +64,13 @@ mod syllable;
 use alloc::vec::Vec;
 
 use reorder::{
-    code_point_clusters, compute_half_mask, final_reorder, initial_reorder, tag_positions,
+    code_point_clusters, compute_half_mask, final_reorder, initial_reorder, merge_pre_base_matras,
+    tag_positions,
 };
 pub(crate) use syllable::{segment_syllables, Syllable, SyllableKind};
 
 use super::{IndicConfig, RephMode, RephPosition};
-use crate::buffer::Glyph;
+use crate::buffer::{ClusterLevel, Glyph};
 use crate::shape::{
     apply_gsub_feature_in_scripts, apply_gsub_feature_masked, apply_locl_ccmp_if_length_preserving,
 };
@@ -93,6 +94,7 @@ pub fn shape_indic(
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
     config: &IndicConfig,
+    level: ClusterLevel,
 ) {
     if codepoints.is_empty() || glyphs.is_empty() {
         return;
@@ -130,7 +132,7 @@ pub fn shape_indic(
     // in, same out) because decomposition runs separately, so
     // forward iteration is safe here.
     for syllable in &syllables {
-        initial_reorder(codepoints, glyphs, syllable);
+        initial_reorder(codepoints, glyphs, syllable, level);
     }
 
     // Basic features. Order matters: rphf must run before blwf
@@ -177,6 +179,7 @@ pub fn shape_indic(
         let byte_start = byte_offsets[syllable.start];
         let byte_end = byte_offsets[syllable.end];
         let original_glyph_count = syllable.end - syllable.start;
+        merge_pre_base_matras(glyphs, byte_start, byte_end, level);
         final_reorder(
             glyphs,
             byte_start,
@@ -184,6 +187,7 @@ pub fn shape_indic(
             original_glyph_count,
             config.reph_pos,
             config.reph_mode,
+            level,
         );
     }
 
@@ -206,10 +210,11 @@ pub fn shape_devanagari(
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
     let config =
         super::indic_config_for(Script::Devanagari).expect("Devanagari always has an Indic config");
-    shape_indic(gsub, gdef, codepoints, glyphs, &config);
+    shape_indic(gsub, gdef, codepoints, glyphs, &config, level);
 }
 
 /// Default Indic2 basic features, in application order. `locl` and

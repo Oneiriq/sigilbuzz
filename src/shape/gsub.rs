@@ -312,7 +312,8 @@ fn apply_gsub_lookup_at(
                 if let Some((out, positions)) =
                     ligature.apply_filtered(&ids.as_slice()[at..], &filter)
                 {
-                    lig::ligate(glyphs, at, &positions, out, gdef, substitute_glyph);
+                    let level = gsub.cluster_level();
+                    lig::ligate(glyphs, at, &positions, out, gdef, substitute_glyph, level);
                     let span = positions.last().copied().map_or(0, |p| p + 1);
                     ids.resync(glyphs);
                     return span;
@@ -360,31 +361,6 @@ fn apply_gsub_lookup_at(
         }
     }
     0
-}
-
-/// HarfBuzz's `hb_buffer_t::merge_clusters` for `glyphs[start..end]`:
-/// the range takes its smallest cluster, extended over neighbors that
-/// shared a cluster with its ends.
-pub(super) fn merge_clusters(glyphs: &mut [Glyph], mut start: usize, mut end: usize) {
-    if end <= start + 1 {
-        return;
-    }
-    let Some(cluster) = glyphs[start..end].iter().map(|g| g.cluster).min() else {
-        return;
-    };
-    if cluster != glyphs[end - 1].cluster {
-        while end < glyphs.len() && glyphs[end - 1].cluster == glyphs[end].cluster {
-            end += 1;
-        }
-    }
-    if cluster != glyphs[start].cluster {
-        while start > 0 && glyphs[start - 1].cluster == glyphs[start].cluster {
-            start -= 1;
-        }
-    }
-    for g in &mut glyphs[start..end] {
-        g.cluster = cluster;
-    }
 }
 
 /// Nested dispatch for a GSUB contextual subtable at position `at`.

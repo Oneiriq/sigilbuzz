@@ -1,6 +1,7 @@
-//! Buffer flags, HarfBuzz's `hb_buffer_flags_t`.
+//! Buffer flags and cluster levels, HarfBuzz's `hb_buffer_flags_t`
+//! and `hb_buffer_cluster_level_t`.
 //!
-//! Flags are a buffer setting rather than content: like HarfBuzz's
+//! Both are buffer settings rather than content: like HarfBuzz's
 //! `hb_buffer_clear_contents`, [`Buffer::clear`] keeps them.
 
 use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
@@ -202,6 +203,84 @@ impl SubAssign for BufferFlags {
     }
 }
 
+/// How shaping groups the input characters into clusters,
+/// HarfBuzz's `hb_buffer_cluster_level_t`.
+///
+/// Every glyph's [`crate::Glyph::cluster`] is the offset of an input
+/// character. The level decides which characters share one:
+///
+/// - Grapheme levels ([`Self::MonotoneGraphemes`], [`Self::Graphemes`])
+///   first merge every character into the cluster of the base it
+///   continues: combining marks, ZWJ and an emoji after it, emoji
+///   modifiers, the second regional indicator of a flag, tag
+///   characters, the halfwidth katakana sound marks.
+/// - Monotone levels ([`Self::MonotoneGraphemes`],
+///   [`Self::MonotoneCharacters`]) merge clusters whenever shaping
+///   would otherwise take them out of order: a ligature takes its
+///   components' smallest cluster, a reordered vowel sign shares the
+///   cluster of the consonants it moved across, a deleted glyph's
+///   cluster goes to its neighbor, and so on.
+/// - [`Self::Characters`] does neither: characters keep their own
+///   clusters and a reordered glyph keeps its own offset, so clusters
+///   can come out of order.
+///
+/// HarfBuzz defaults to [`Self::MonotoneGraphemes`] (the C API does
+/// too). A Rust [`Buffer`] defaults to [`Self::MonotoneCharacters`],
+/// the level closest to what sigilbuzz produced before it supported
+/// cluster levels.
+///
+/// # Examples
+///
+/// ```
+/// use sigilbuzz::{Buffer, ClusterLevel};
+///
+/// let mut buffer = Buffer::new();
+/// assert_eq!(buffer.cluster_level(), ClusterLevel::MonotoneCharacters);
+/// buffer.set_cluster_level(ClusterLevel::MonotoneGraphemes);
+/// assert!(buffer.cluster_level().is_monotone());
+/// assert!(buffer.cluster_level().is_graphemes());
+/// ```
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ClusterLevel {
+    /// Characters merge into their grapheme, and clusters stay in
+    /// order (`HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES`, HarfBuzz's
+    /// default).
+    MonotoneGraphemes,
+    /// Every character starts with its own cluster, and clusters stay
+    /// in order (`HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS`).
+    #[default]
+    MonotoneCharacters,
+    /// Every character keeps its own cluster, in whatever order
+    /// shaping leaves them (`HB_BUFFER_CLUSTER_LEVEL_CHARACTERS`).
+    Characters,
+    /// Characters merge into their grapheme, without forcing clusters
+    /// into order (`HB_BUFFER_CLUSTER_LEVEL_GRAPHEMES`).
+    Graphemes,
+}
+
+impl ClusterLevel {
+    /// True when clusters are merged to stay in order,
+    /// HarfBuzz's `HB_BUFFER_CLUSTER_LEVEL_IS_MONOTONE`.
+    #[must_use]
+    pub const fn is_monotone(self) -> bool {
+        matches!(self, Self::MonotoneGraphemes | Self::MonotoneCharacters)
+    }
+
+    /// True when characters merge into their grapheme,
+    /// HarfBuzz's `HB_BUFFER_CLUSTER_LEVEL_IS_GRAPHEMES`.
+    #[must_use]
+    pub const fn is_graphemes(self) -> bool {
+        matches!(self, Self::MonotoneGraphemes | Self::Graphemes)
+    }
+
+    /// True when characters keep their own clusters,
+    /// HarfBuzz's `HB_BUFFER_CLUSTER_LEVEL_IS_CHARACTERS`.
+    #[must_use]
+    pub const fn is_characters(self) -> bool {
+        matches!(self, Self::MonotoneCharacters | Self::Characters)
+    }
+}
+
 impl Buffer {
     /// The shaping flags set with [`Self::set_flags`];
     /// [`BufferFlags::DEFAULT`] until then.
@@ -228,6 +307,42 @@ impl Buffer {
     /// ```
     pub fn set_flags(&mut self, flags: BufferFlags) {
         self.flags = flags;
+    }
+
+    /// The cluster level set with [`Self::set_cluster_level`];
+    /// [`ClusterLevel::MonotoneCharacters`] until then.
+    #[must_use]
+    pub const fn cluster_level(&self) -> ClusterLevel {
+        self.cluster_level
+    }
+
+    /// Sets how shaping forms and merges clusters, HarfBuzz's
+    /// `hb_buffer_set_cluster_level`; see [`ClusterLevel`]. Like the
+    /// flags, the level survives [`Self::clear`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::{shape, Blob, Buffer, ClusterLevel, Face, Font};
+    ///
+    /// # let data = include_bytes!("../../tests/fixtures/opensans_regular.ttf");
+    /// let blob = Blob::new(data);
+    /// let font = Font::new(Face::parse(&blob, 0)?, 1000.0);
+    /// let mut buffer = Buffer::new();
+    /// buffer.push_str("x\u{0301}");
+    ///
+    /// // The combining acute keeps its own cluster ...
+    /// let clusters = |b: &Buffer| -> Vec<u32> {
+    ///     shape(&font, b, &[]).unwrap().glyphs.iter().map(|g| g.cluster).collect()
+    /// };
+    /// assert_eq!(clusters(&buffer), [0, 1]);
+    /// // ... until the grapheme levels merge it into its base.
+    /// buffer.set_cluster_level(ClusterLevel::MonotoneGraphemes);
+    /// assert_eq!(clusters(&buffer), [0, 0]);
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
+    pub fn set_cluster_level(&mut self, level: ClusterLevel) {
+        self.cluster_level = level;
     }
 }
 
@@ -264,15 +379,34 @@ mod tests {
     }
 
     #[test]
-    fn flags_survive_clear() {
+    fn cluster_level_predicates_match_harfbuzz_macros() {
+        use ClusterLevel::*;
+        let rows = [
+            (MonotoneGraphemes, true, true, false),
+            (MonotoneCharacters, true, false, true),
+            (Characters, false, false, true),
+            (Graphemes, false, true, false),
+        ];
+        for (level, monotone, graphemes, characters) in rows {
+            assert_eq!(level.is_monotone(), monotone, "{level:?}");
+            assert_eq!(level.is_graphemes(), graphemes, "{level:?}");
+            assert_eq!(level.is_characters(), characters, "{level:?}");
+        }
+    }
+
+    #[test]
+    fn flags_and_level_survive_clear() {
         let mut b = Buffer::new();
         assert_eq!(b.flags(), BufferFlags::DEFAULT);
+        assert_eq!(b.cluster_level(), ClusterLevel::MonotoneCharacters);
         b.set_flags(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE | BufferFlags::EOT);
+        b.set_cluster_level(ClusterLevel::Characters);
         b.push_str("abc");
         b.clear();
         assert_eq!(
             b.flags(),
             BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE | BufferFlags::EOT
         );
+        assert_eq!(b.cluster_level(), ClusterLevel::Characters);
     }
 }

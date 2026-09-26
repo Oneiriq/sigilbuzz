@@ -12,10 +12,10 @@
 //! to U+1BCA3.
 //!
 //! Every case is compared with rustybuzz 0.20 (a port of HarfBuzz)
-//! on glyph id, advance, and offset. Clusters are left out: HarfBuzz
-//! merges a grapheme's clusters (`hb_form_clusters`, which makes marks,
-//! ZWJ, variation selectors, and tag characters continuations of the
-//! character before them), and sigilbuzz does not do that yet.
+//! on glyph id, advance, and offset. Clusters are left out: these
+//! buffers keep sigilbuzz's default cluster level, MONOTONE_CHARACTERS,
+//! while rustybuzz defaults to MONOTONE_GRAPHEMES, which merges a
+//! grapheme's clusters (`hb_form_clusters`).
 //!
 //! Known gaps, not covered here: HarfBuzz's lookup matcher also skips
 //! default-ignorable glyphs inside a match (ZWJ within `liga` input, any

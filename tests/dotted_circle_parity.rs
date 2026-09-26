@@ -1,16 +1,16 @@
-//! Dotted-circle insertion parity: a dependent mark that starts a
-//! syllable in an Indic, Khmer, Myanmar, or USE script gets U+25CC
-//! DOTTED CIRCLE inserted in front of it, as HarfBuzz's
-//! `hb_syllabic_insert_dotted_circles` does, unless the buffer turns
-//! it off (`HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE`) or the font
-//! has no dotted circle glyph.
+//! Dotted-circle insertion parity.
 //!
-//! Glyph ids, advances, and offsets are compared with rustybuzz 0.20.
-//! Clusters are left out: the Indic shaper does not merge a syllable's
-//! clusters the way HarfBuzz does yet.
+//! A dependent mark that starts a syllable in an Indic, Khmer,
+//! Myanmar, or USE script gets U+25CC DOTTED CIRCLE inserted in front
+//! of it, as HarfBuzz's `hb_syllabic_insert_dotted_circles` does.
+//! `BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE` turns that off, and a
+//! font with no dotted circle glyph gets none.
+//!
+//! Glyph ids, clusters, advances, and offsets are compared with
+//! rustybuzz 0.20 at its default cluster level, MONOTONE_GRAPHEMES.
 
-use rustybuzz::{BufferFlags, Direction as RbDirection};
-use sigilbuzz::{shape, Blob, Buffer, BufferFlags as Flags, Direction, Face, Font};
+use rustybuzz::Direction as RbDirection;
+use sigilbuzz::{shape, Blob, Buffer, BufferFlags, ClusterLevel, Direction, Face, Font};
 
 const DEVANAGARI: &[u8] = include_bytes!("fonts/NotoSansDevanagari-Regular.ttf");
 const BENGALI: &[u8] = include_bytes!("fonts/NotoSansBengali-Regular.ttf");
@@ -19,55 +19,65 @@ const MYANMAR: &[u8] = include_bytes!("fonts/NotoSansMyanmar-Regular.ttf");
 const BALINESE: &[u8] = include_bytes!("fonts/NotoSansBalinese-Regular.ttf");
 const OPEN_SANS: &[u8] = include_bytes!("fixtures/opensans_regular.ttf");
 
-type Row = (u32, i32, i32, i32);
+type Row = (u32, u32, i32, i32, i32);
 
-fn sigilbuzz_rows(data: &[u8], text: &str, circles: bool) -> Vec<Row> {
+/// Flags for a run with syllabic circles on (`true`) or off.
+fn circles(on: bool) -> BufferFlags {
+    if on {
+        BufferFlags::DEFAULT
+    } else {
+        BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE
+    }
+}
+
+fn sigilbuzz_rows(data: &[u8], text: &str, flags: BufferFlags, pre: &str) -> Vec<Row> {
     let blob = Blob::new(data);
     let face = Face::parse(&blob, 0).expect("parse sigilbuzz face");
     let font = Font::new(face, 1000.0);
     let mut buffer = Buffer::new();
     buffer.push_str(text);
     buffer.set_direction(Direction::Ltr);
-    buffer.set_flags(if circles {
-        Flags::DEFAULT
-    } else {
-        Flags::DO_NOT_INSERT_DOTTED_CIRCLE
-    });
+    buffer.set_flags(flags);
+    buffer.set_cluster_level(ClusterLevel::MonotoneGraphemes);
+    buffer.set_pre_context(pre);
     shape(&font, &buffer, &[])
         .expect("sigilbuzz shape")
         .glyphs
         .iter()
-        .map(|g| (g.glyph_id, g.x_advance, g.x_offset, g.y_offset))
+        .map(|g| (g.glyph_id, g.cluster, g.x_advance, g.x_offset, g.y_offset))
         .collect()
 }
 
-fn rustybuzz_rows(data: &[u8], text: &str, circles: bool) -> Vec<Row> {
+fn rustybuzz_rows(data: &[u8], text: &str, flags: BufferFlags, pre: &str) -> Vec<Row> {
     let face = rustybuzz::Face::from_slice(data, 0).expect("parse rustybuzz face");
     let mut buffer = rustybuzz::UnicodeBuffer::new();
     buffer.push_str(text);
     buffer.set_direction(RbDirection::LeftToRight);
-    if !circles {
-        buffer.set_flags(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE);
-    }
+    buffer.set_flags(rustybuzz::BufferFlags::from_bits_truncate(flags.bits()));
+    buffer.set_pre_context(pre);
     let out = rustybuzz::shape(&face, &[], buffer);
     out.glyph_infos()
         .iter()
         .zip(out.glyph_positions())
-        .map(|(i, p)| (i.glyph_id, p.x_advance, p.x_offset, p.y_offset))
+        .map(|(i, p)| (i.glyph_id, i.cluster, p.x_advance, p.x_offset, p.y_offset))
         .collect()
 }
 
-fn assert_parity(data: &[u8], texts: &[&str], circles: bool) {
+fn assert_parity_with(data: &[u8], texts: &[&str], flags: BufferFlags, pre: &str) {
     let failures: Vec<String> = texts
         .iter()
         .filter_map(|text| {
-            let ours = sigilbuzz_rows(data, text, circles);
-            let theirs = rustybuzz_rows(data, text, circles);
+            let ours = sigilbuzz_rows(data, text, flags, pre);
+            let theirs = rustybuzz_rows(data, text, flags, pre);
             (ours != theirs)
                 .then(|| format!("{text:?}\n  sigilbuzz: {ours:?}\n  rustybuzz: {theirs:?}"))
         })
         .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+fn assert_parity(data: &[u8], texts: &[&str], on: bool) {
+    assert_parity_with(data, texts, circles(on), "");
 }
 
 const DEVANAGARI_BROKEN: &[&str] = &[
@@ -82,8 +92,8 @@ const DEVANAGARI_BROKEN: &[&str] = &[
 #[test]
 fn devanagari_orphan_marks_sit_on_a_dotted_circle() {
     assert_parity(DEVANAGARI, DEVANAGARI_BROKEN, true);
-    let circle = sigilbuzz_rows(DEVANAGARI, "\u{25CC}", true)[0].0;
-    let lone_i = sigilbuzz_rows(DEVANAGARI, "\u{093F}", true);
+    let circle = sigilbuzz_rows(DEVANAGARI, "\u{25CC}", circles(true), "")[0].0;
+    let lone_i = sigilbuzz_rows(DEVANAGARI, "\u{093F}", circles(true), "");
     assert_eq!(lone_i.len(), 2);
     assert!(lone_i.iter().any(|row| row.0 == circle));
 }
@@ -108,7 +118,10 @@ fn khmer_myanmar_and_use_orphans_sit_on_a_dotted_circle() {
 fn the_flag_turns_insertion_off() {
     assert_parity(DEVANAGARI, DEVANAGARI_BROKEN, false);
     assert_parity(KHMER, &["\u{17C1}\u{1780}", "\u{17B6}"], false);
-    assert_eq!(sigilbuzz_rows(DEVANAGARI, "\u{093F}", false).len(), 1);
+    assert_eq!(
+        sigilbuzz_rows(DEVANAGARI, "\u{093F}", circles(false), "").len(),
+        1
+    );
 }
 
 #[test]

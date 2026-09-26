@@ -1,10 +1,11 @@
-//! Syllable reordering, the initial pre-base moves and the post-`pref`
-//! medial move, and the cluster bookkeeping around it.
+//! Syllable reordering: the initial pre-base moves and the post-`pref`
+//! medial move, with the cluster merges each move makes.
 
 use alloc::vec::Vec;
 
 use super::{Syllable, SyllableKind};
-use crate::buffer::Glyph;
+use crate::buffer::{ClusterLevel, Glyph};
+use crate::shape::merge_clusters;
 use crate::unicode::use_category::{use_category, use_position, UseCategory, UsePosition};
 
 /// Initial reorder for one syllable. Moves every pre-base vowel sign
@@ -13,7 +14,18 @@ use crate::unicode::use_category::{use_category, use_position, UseCategory, UseP
 /// syllable head so the `pref` GSUB feature sees them adjacent AND
 /// their output glyph naturally sits before the base.
 /// Length-preserving: glyph count and codepoint count stay aligned.
-pub(super) fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllable) {
+///
+/// Every move spans the glyphs between the moved one's old and new
+/// slots; at the monotone cluster `level`s those glyphs share one
+/// cluster, as HarfBuzz's `merge_clusters` before each Khmer move
+/// (`reorder_consonant_syllable`) and each Myanmar sort step leaves
+/// them.
+pub(super) fn initial_reorder(
+    codepoints: &[char],
+    glyphs: &mut [Glyph],
+    syllable: &Syllable,
+    level: ClusterLevel,
+) {
     if !matches!(syllable.kind, SyllableKind::Consonant) {
         return;
     }
@@ -81,6 +93,21 @@ pub(super) fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllabl
     // POS_AFTER_MAIN semantics.
     let syl_start = syllable.start;
     let syl_end = syllable.end;
+    // The glyphs the moves below pass over: pre-base matras and the
+    // coeng pair travel to the syllable start, the kinzi triple to
+    // just after the base.
+    let pair = pre_cons_idx.filter(|&pc| pc >= syl_start && pc + 1 < syl_end);
+    let kinzi = kinzi_idx.filter(|&kz| kz + 2 < syl_end);
+    let mut span = to_move.last().map(|&last| syl_start..last + 1);
+    if let Some(pc) = pair {
+        span = Some(syl_start..span.map_or(pc + 2, |s| s.end.max(pc + 2)));
+    }
+    if let Some(kz) = kinzi {
+        span = Some(span.map_or(kz..base + 1, |s| s.start.min(kz)..s.end.max(base + 1)));
+    }
+    if let Some(span) = span {
+        merge_clusters(glyphs, span.start, span.end, level);
+    }
     let original: Vec<Glyph> = glyphs[syl_start..syl_end].to_vec();
     let mut rebuilt: Vec<Glyph> = Vec::with_capacity(syl_end - syl_start);
 
@@ -137,62 +164,6 @@ pub(super) fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllabl
     glyphs[syl_start..syl_end].copy_from_slice(&rebuilt);
 }
 
-/// Returns a length-`codepoints.len() + 1` array mapping each code
-/// point to the cluster its glyph carries, with an open end. Read
-/// before any reordering or GSUB, while glyphs are one per code point,
-/// these are the run's real UTF-8 offsets, right for a segment that
-/// does not start the text and for decomposed vowels whose parts share
-/// a cluster. Falls back to offsets counted from the code points when
-/// the glyphs are not one per code point.
-pub(super) fn code_point_clusters(codepoints: &[char], glyphs: &[Glyph]) -> Vec<u32> {
-    if glyphs.len() != codepoints.len() {
-        return cluster_byte_offsets(codepoints);
-    }
-    glyphs
-        .iter()
-        .map(|g| g.cluster)
-        .chain(core::iter::once(u32::MAX))
-        .collect()
-}
-
-/// Returns a length-`codepoints.len() + 1` array mapping codepoint
-/// index to UTF-8 byte offset. `out[i]` is the byte offset of the
-/// i'th codepoint; `out[len]` is the total byte length.
-fn cluster_byte_offsets(codepoints: &[char]) -> Vec<u32> {
-    let mut out = Vec::with_capacity(codepoints.len() + 1);
-    let mut byte = 0u32;
-    for &c in codepoints {
-        out.push(byte);
-        byte = byte.saturating_add(c.len_utf8() as u32);
-    }
-    out.push(byte);
-    out
-}
-
-/// Merges all cluster byte offsets that belong to a syllable to the
-/// minimum offset in that syllable's byte range. Matches HarfBuzz /
-/// rustybuzz behavior. Downstream callers see one cluster id per
-/// syllable (the byte offset of the first codepoint) even when GSUB
-/// substitutions have collapsed glyphs inside the syllable.
-pub(super) fn merge_syllable_clusters(
-    glyphs: &mut [Glyph],
-    syllables: &[Syllable],
-    byte_offsets: &[u32],
-) {
-    for syl in syllables {
-        if syl.end == syl.start {
-            continue;
-        }
-        let byte_start = byte_offsets[syl.start];
-        let byte_end = byte_offsets[syl.end];
-        for g in glyphs.iter_mut() {
-            if g.cluster >= byte_start && g.cluster < byte_end {
-                g.cluster = byte_start;
-            }
-        }
-    }
-}
-
 /// Post-`pref` reorder. Walks one syllable and, for any position whose
 /// glyph id changed under the `pref` feature AND whose original
 /// codepoint was a [`UseCategory::CM`] sitting at
@@ -206,6 +177,7 @@ pub(super) fn pref_reorder(
     glyphs: &mut [Glyph],
     syllable: &Syllable,
     pre_ids: &[u32],
+    level: ClusterLevel,
 ) {
     if !matches!(syllable.kind, SyllableKind::Consonant) {
         return;
@@ -239,6 +211,11 @@ pub(super) fn pref_reorder(
 
     let syl_start = syllable.start;
     let syl_end = syllable.end;
+    // The moved forms share one cluster with what they pass over (at
+    // the monotone levels), as in HarfBuzz's `reorder_syllable_use`.
+    if let Some(&last) = to_move.last() {
+        merge_clusters(glyphs, syl_start, last + 1, level);
+    }
     let original: Vec<Glyph> = glyphs[syl_start..syl_end].to_vec();
     let mut rebuilt: Vec<Glyph> = Vec::with_capacity(syl_end - syl_start);
 

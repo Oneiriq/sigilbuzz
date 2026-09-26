@@ -23,9 +23,10 @@ const TELUGU: &[u8] = include_bytes!("fonts/NotoSansTelugu-Regular.ttf");
 const DEVANAGARI: &[u8] = include_bytes!("fonts/NotoSansDevanagari-Regular.ttf");
 const OLD_HANGUL: &[u8] = include_bytes!("fonts/NotoSansOldHangul-Subset.ttf");
 
-// Clusters are left out: the Indic shaper does not merge syllable
-// clusters the way HarfBuzz does yet, which is unrelated to feature
-// selection.
+// Clusters are left out, being unrelated to feature selection: these
+// buffers keep sigilbuzz's default cluster level, MONOTONE_CHARACTERS,
+// while rustybuzz defaults to MONOTONE_GRAPHEMES
+// (cluster_level_parity.rs compares clusters level by level).
 type Row = (u32, i32, i32, i32);
 
 fn sigilbuzz_rows(data: &[u8], text: &str, direction: Direction, lang: Option<&str>) -> Vec<Row> {

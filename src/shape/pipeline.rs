@@ -13,8 +13,8 @@ use super::features::{
 use super::hangul::hangul_compose;
 use super::segment::{build_segments, is_common_for_segmentation, ProcessedSegment, Segment};
 use super::{
-    dotted_circle, feature_disabled, ignorables, native_direction, position, required, rotate,
-    Feature, VarCtx,
+    cluster, dotted_circle, feature_disabled, ignorables, native_direction, position, required,
+    rotate, thai, Feature, VarCtx,
 };
 use crate::buffer::{script_priority_for, Buffer, BufferFlags, Direction, Glyph, ShapedRun};
 use crate::error::Result;
@@ -115,79 +115,31 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // the first codepoint of the composed cluster, so cluster
     // tracking stays aligned with the original UTF-8 stream.
     let composed_chars: Vec<(u32, char)> = hangul_compose(text, &cmap);
+    // Which characters continue the grapheme before them, read off the
+    // text before any character is split below (HarfBuzz sets the bit
+    // in `hb_set_unicode_props`, ahead of its own splits). `cont` has
+    // one entry per code point; the later parts of a split character
+    // continue its first part.
+    let typed: Vec<char> = composed_chars.iter().map(|&(_, c)| c).collect();
+    let typed_cont = cluster::continuations(&typed);
+    let mut cont: Vec<bool> = Vec::with_capacity(text.len());
+    let flags = buffer.flags();
+    let level = buffer.cluster_level();
     // Backward runs mirror paired punctuation (see `rotate`); these
     // are the indices in `codepoints` that were replaced.
     let backward = !direction.is_forward();
     let mut mirrored: Vec<usize> = Vec::new();
-    for (cluster, ch) in composed_chars.iter().copied() {
-        let cluster = cluster as usize;
-        // Khmer split-vowel decomposition. HarfBuzz's USE
-        // preprocessing hook splits U+17C4 / U+17C5 into a
-        // pre-base component (sign-e) and a post-base component
-        // (sign-aa / sign-au) so the syllable machine can see the
-        // pre-base part directly. sigilbuzz does it at codepoint
-        // push time, before the cmap lookup, so the rest of the
-        // pipeline never sees the composed form.
-        if matches!(ch, '\u{17C4}' | '\u{17C5}') {
-            let (pre, post) = if ch == '\u{17C4}' {
-                ('\u{17C1}', '\u{17B6}')
-            } else {
-                ('\u{17C1}', '\u{17B7}')
-            };
-            for &component in &[pre, post] {
+    for (k, (cluster, ch)) in composed_chars.iter().copied().enumerate() {
+        if let Some(parts) = split_before_cmap(ch) {
+            for (n, &component) in parts.iter().enumerate() {
                 let gid = u32::from(cmap.glyph_id(component).unwrap_or(0));
-                let glyph = Glyph::new(gid, cluster as u32);
-                glyphs.push(glyph);
+                glyphs.push(Glyph::new(gid, cluster));
                 codepoints.push(component);
+                cont.push(n > 0 || typed_cont[k]);
             }
             continue;
         }
-        // Thai sara am (U+0E33) and Lao lao am (U+0EB3). HarfBuzz
-        // decomposes these composed vowels into
-        // `nikkhahit / niggahita + sara aa` at buffer-prep time,
-        // before shape enters the state machine: the font's
-        // mark-positioning tables target the decomposed pair, not
-        // the composed codepoint. We do the same here so the cmap
-        // lookup lands on the two components and every downstream
-        // pass (GSUB, GPOS, cluster merge) sees the decomposed form
-        // rustybuzz does.
-        if matches!(ch, '\u{0E33}' | '\u{0EB3}') {
-            let (pre, post) = if ch == '\u{0E33}' {
-                // Thai sara am -> nikkhahit (U+0E4D) + sara aa (U+0E32).
-                ('\u{0E4D}', '\u{0E32}')
-            } else {
-                // Lao lao am -> niggahita (U+0ECD) + sara aa (U+0EB2).
-                ('\u{0ECD}', '\u{0EB2}')
-            };
-            for &component in &[pre, post] {
-                let gid = u32::from(cmap.glyph_id(component).unwrap_or(0));
-                let glyph = Glyph::new(gid, cluster as u32);
-                glyphs.push(glyph);
-                codepoints.push(component);
-            }
-            continue;
-        }
-        // Tamil and Sinhala split-matra decomposition. These matras
-        // decompose into a pre-base + post-base (occasionally
-        // three-part) sequence. HarfBuzz's Indic shaper runs this
-        // before syllable reordering so the pre-base half can be
-        // picked up by the positional-category reorder. sigilbuzz
-        // does it at codepoint push time (same entry point as Khmer)
-        // so downstream passes never see the composed form.
-        if let Some(parts) = crate::ot::indic::split_matra_decompose(ch) {
-            for &component in parts {
-                let gid = u32::from(cmap.glyph_id(component).unwrap_or(0));
-                let glyph = Glyph::new(gid, cluster as u32);
-                glyphs.push(glyph);
-                codepoints.push(component);
-            }
-            // Script detection for the segmenter below runs off the
-            // `codepoints` vec (not the original text), so pushing
-            // the decomposed components is all we need. The components
-            // keep their parent's script (Tamil / Sinhala) because
-            // they come from the same Unicode block.
-            continue;
-        }
+        cont.push(typed_cont[k]);
         let ch = if backward {
             let (m, replaced) = rotate::mirror(ch, &cmap);
             if replaced {
@@ -203,11 +155,14 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         // The passes after positioning read the DEFAULT_IGNORABLE bit;
         // GSUB clears it on any glyph it substitutes
         // (`substitute_glyph`), matching HarfBuzz.
-        let mut glyph = Glyph::new(glyph_id, cluster as u32);
+        let mut glyph = Glyph::new(glyph_id, cluster);
         glyph.unicode_props = ignorables::unicode_props(ch);
         glyphs.push(glyph);
         codepoints.push(ch);
     }
+    // `hb_form_clusters`: at the grapheme levels each grapheme takes
+    // one cluster.
+    cluster::form_clusters(&mut glyphs, &cont, level);
 
     // Step 1.5: Segment the run into maximal same-script spans. Each
     // segment carries its own script priority (e.g. Arabic `arab` ->
@@ -252,12 +207,20 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let direction = if buffer.has_explicit_direction() && one_run {
         let native = native_direction::resolve(direction, buffer_script, &codepoints);
         if native != direction {
-            native_direction::reverse_graphemes(&mut codepoints, &mut glyphs, &mut mirrored_mask);
+            let run = native_direction::Run {
+                cps: &mut codepoints,
+                glyphs: &mut glyphs,
+                mirrored: &mut mirrored_mask,
+            };
+            native_direction::reverse_graphemes(run, &cont, level);
         }
         native
     } else {
         direction
     };
+    // The rest of HarfBuzz's SARA AM handling, which (like its Thai
+    // shaper) runs once the text is in the direction it shapes in.
+    thai::preprocess(&mut codepoints, &mut glyphs, &mut mirrored_mask, level);
     let segments = match buffer.script() {
         Some(script) => alloc::vec![Segment {
             cp_range: 0..codepoints.len(),
@@ -289,7 +252,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let language_tags: &[[u8; 4]] = buffer
         .language()
         .map_or(&[], crate::Language::ot_language_tags);
-    let gsub = face.gsub()?.map(|g| g.with_language_tags(language_tags));
+    let gsub = face.gsub()?.map(|g| {
+        g.with_language_tags(language_tags)
+            .with_cluster_level(level)
+    });
     // GDEF is consulted up-front so the LookupFlag skip-iterator has
     // it available for every GSUB context match. GPOS reuses the same
     // handle further down.
@@ -370,11 +336,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         // Broken syllables get a dotted circle to sit on.
         let circled = cmap
             .glyph_id('\u{25CC}')
-            .filter(|_| {
-                !buffer
-                    .flags()
-                    .contains(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE)
-            })
+            .filter(|_| !flags.contains(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE))
             .and_then(|circle| dotted_circle::insert(seg.script, seg_cps, &mut seg_glyphs, circle));
         let seg_cps = circled.as_deref().unwrap_or(seg_cps);
 
@@ -388,6 +350,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 seg_cps,
                 &mut seg_glyphs,
                 &config,
+                level,
             );
         }
         if seg.script == Script::Khmer {
@@ -396,6 +359,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
         if seg.script == Script::Tibetan && dominant_script == Some(Script::Tibetan) {
@@ -421,6 +385,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
         if seg.script == Script::Thai {
@@ -429,6 +394,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
         if seg.script == Script::Lao {
@@ -437,6 +403,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
         if seg.script == Script::NKo {
@@ -454,6 +421,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
         if seg.script == Script::TaiTham {
@@ -462,6 +430,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
         if seg.script == Script::Balinese {
@@ -470,6 +439,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
         if seg.script == Script::Sundanese {
@@ -478,6 +448,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
         if seg.script == Script::Lepcha {
@@ -486,6 +457,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
         if seg.script == Script::Limbu {
@@ -494,6 +466,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
         if seg.script == Script::Cham {
@@ -502,6 +475,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
         if seg.script == Script::Brahmi {
@@ -510,6 +484,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
         if seg.script == Script::Sharada {
@@ -518,6 +493,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
         if seg.script == Script::Khojki {
@@ -526,6 +502,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
         if seg.script == Script::Tirhuta {
@@ -534,6 +511,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
         if seg.script == Script::Modi {
@@ -542,6 +520,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
         // Hangul routes through USE only for Jamo-decomposed text.
@@ -563,6 +542,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                level,
             );
         }
 
@@ -746,7 +726,33 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     }
 
     // Then the ignorables become the invisible space glyph.
-    ignorables::hide(&mut glyphs, cmap.glyph_id(' ').map(u32::from));
+    let space = cmap.glyph_id(' ').map(u32::from);
+    ignorables::hide(&mut glyphs, space, level);
 
     Ok(ShapedRun { glyphs })
+}
+
+/// The parts `ch` is split into before the cmap lookup, each keeping
+/// its cluster, or `None` for a character that maps as it is.
+///
+/// - Khmer U+17C4 / U+17C5 become the pre-base sign-e plus sign-aa /
+///   sign-au, so the syllable machine sees the pre-base part.
+///   (HarfBuzz's Khmer `decompose` hook keeps U+17C4 / U+17C5 itself
+///   as the second part, and also splits U+17BE..U+17C0.)
+/// - Thai SARA AM (U+0E33) and Lao AM (U+0EB3) become NIKHAHIT plus
+///   SARA AA, as HarfBuzz's Thai shaper does before GSUB: the font's
+///   mark positioning targets the pair (see the `thai` module for the
+///   rest of that step).
+/// - Tamil and Sinhala split matras become their pre-base and
+///   post-base parts, HarfBuzz's Indic decomposition, so the pre-base
+///   half takes part in syllable reordering. The parts keep their
+///   parent's script, so segmentation is unchanged.
+fn split_before_cmap(ch: char) -> Option<&'static [char]> {
+    match ch {
+        '\u{17C4}' => Some(&['\u{17C1}', '\u{17B6}']),
+        '\u{17C5}' => Some(&['\u{17C1}', '\u{17B7}']),
+        '\u{0E33}' => Some(&['\u{0E4D}', '\u{0E32}']),
+        '\u{0EB3}' => Some(&['\u{0ECD}', '\u{0EB2}']),
+        _ => crate::ot::indic::split_matra_decompose(ch),
+    }
 }

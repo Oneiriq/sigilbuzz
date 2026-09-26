@@ -17,7 +17,7 @@ use core::ops::Range;
 use crate::unicode::{script_of, Script};
 
 mod flags;
-pub use flags::BufferFlags;
+pub use flags::{BufferFlags, ClusterLevel};
 
 /// Writing direction of a text run.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -71,8 +71,8 @@ pub struct Glyph {
     /// in the SFNT glyph table, *not* a Unicode codepoint.
     pub glyph_id: u32,
     /// Cluster tag linking this glyph back to the input codepoints.
-    /// Multiple glyphs with the same cluster came from the same input
-    /// grapheme (e.g. a ligature, or a base + combining mark).
+    /// Glyphs sharing a cluster came from characters the buffer's
+    /// [`ClusterLevel`] groups (a ligature, a base and its marks, ...).
     pub cluster: u32,
     /// Horizontal advance applied after drawing this glyph.
     pub x_advance: i32,
@@ -216,6 +216,8 @@ pub struct Buffer {
     pub(crate) post_context: String,
     /// HarfBuzz's buffer flags, set by [`Buffer::set_flags`].
     pub(crate) flags: BufferFlags,
+    /// How clusters form and merge, set by [`Buffer::set_cluster_level`].
+    pub(crate) cluster_level: ClusterLevel,
 }
 
 impl Buffer {

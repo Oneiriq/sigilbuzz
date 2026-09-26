@@ -5,8 +5,10 @@
 //! mark-to-mark stacks only marks of the same component.
 
 use super::*;
-use crate::buffer::unicode_prop;
+use crate::buffer::{unicode_prop, ClusterLevel};
 use crate::tables::layout::LOOKUP_FLAG_IGNORE_BASE_GLYPHS;
+
+const MC: ClusterLevel = ClusterLevel::MonotoneCharacters;
 
 /// A GSUB substitution callback that only swaps the glyph id.
 fn swap_id(g: &mut Glyph, gid: u16) {
@@ -55,7 +57,7 @@ fn mark_to_ligature_uses_the_component_recorded_at_ligation() {
     // on component 1 (index 0); a mark that follows the ligature
     // without having been inside it goes on the last component.
     let mut glyphs = vec![glyph(4, 0), glyph(2, 0), glyph(5, 0), glyph(2, 0)];
-    lig::ligate(&mut glyphs, 0, &[0, 2], 1, Some(&gdef), swap_id);
+    lig::ligate(&mut glyphs, 0, &[0, 2], 1, Some(&gdef), swap_id, MC);
     assert_eq!(glyphs.len(), 3);
     glyphs[0].x_advance = 800;
     let slots = run_lookup(
@@ -132,7 +134,7 @@ fn mark_to_mark_stacks_only_marks_of_one_component() {
     // 4 m2 5 m3 with 4 and 5 ligated: m2 sits on component 1 and m3
     // on component 2, so m3 does not stack on m2.
     let mut glyphs = vec![glyph(4, 0), glyph(2, 0), glyph(5, 0), glyph(3, 0)];
-    lig::ligate(&mut glyphs, 0, &[0, 2], 1, Some(&gdef), swap_id);
+    lig::ligate(&mut glyphs, 0, &[0, 2], 1, Some(&gdef), swap_id, MC);
     let slots = run_lookup(
         &subs,
         &mut glyphs,

@@ -14,7 +14,8 @@
 
 use alloc::vec::Vec;
 
-use crate::buffer::{unicode_prop, Glyph};
+use super::cluster::merge_clusters;
+use crate::buffer::{unicode_prop, ClusterLevel, Glyph};
 
 /// HarfBuzz's `hb_unicode_funcs_t::is_default_ignorable` (in
 /// `hb-unicode.hh`): Default_Ignorable_Code_Point, except the Hangul
@@ -80,8 +81,10 @@ pub(super) fn zero_width(glyphs: &mut [Glyph], vertical: bool) {
 /// `hb_ot_hide_default_ignorables`: swaps every hidden glyph for the
 /// font's space glyph, or, when the font has none, deletes it and
 /// merges its cluster into a neighbor the way HarfBuzz's
-/// `delete_glyphs_inplace` does. `glyphs` is in output order.
-pub(super) fn hide(glyphs: &mut Vec<Glyph>, space: Option<u32>) {
+/// `delete_glyphs_inplace` does: backward at every cluster `level`,
+/// forward (into the next glyph) only at the monotone ones. `glyphs`
+/// is in output order.
+pub(super) fn hide(glyphs: &mut Vec<Glyph>, space: Option<u32>, level: ClusterLevel) {
     if let Some(space) = space {
         for glyph in glyphs.iter_mut().filter(|g| is_hidden(g)) {
             glyph.glyph_id = space;
@@ -117,13 +120,10 @@ pub(super) fn hide(glyphs: &mut Vec<Glyph>, space: Option<u32>) {
             }
             continue;
         }
-        // Merge forward into the next glyph's cluster.
-        if let Some(old) = glyphs.get(i + 1).map(|next| next.cluster) {
-            let merged = old.min(cluster);
-            for g in glyphs[i + 1..].iter_mut().take_while(|g| g.cluster == old) {
-                g.cluster = merged;
-            }
-        }
+        // Merge forward into the next glyph's cluster (a no-op below
+        // the monotone levels). Everything before `i` was deleted, so
+        // the merge only changes glyphs still to come.
+        merge_clusters(glyphs, i, i + 2, level);
     }
     *glyphs = kept;
 }
@@ -131,6 +131,8 @@ pub(super) fn hide(glyphs: &mut Vec<Glyph>, space: Option<u32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MC: ClusterLevel = ClusterLevel::MonotoneCharacters;
 
     fn glyph(id: u32, cluster: u32, ignorable: bool) -> Glyph {
         let mut g = Glyph::new(id, cluster);
@@ -223,7 +225,7 @@ mod tests {
     #[test]
     fn hide_swaps_in_the_space_glyph() {
         let mut glyphs = alloc::vec![glyph(1, 0, false), glyph(9, 1, true)];
-        hide(&mut glyphs, Some(3));
+        hide(&mut glyphs, Some(3), MC);
         let ids: Vec<u32> = glyphs.iter().map(|g| g.glyph_id).collect();
         assert_eq!(ids, [1, 3]);
     }
@@ -232,19 +234,43 @@ mod tests {
     fn hide_without_a_space_glyph_deletes_and_merges_clusters() {
         // Leading ignorable: merged forward.
         let mut glyphs = alloc::vec![glyph(9, 0, true), glyph(1, 3, false)];
-        hide(&mut glyphs, None);
+        hide(&mut glyphs, None, MC);
         let got: Vec<(u32, u32)> = glyphs.iter().map(|g| (g.glyph_id, g.cluster)).collect();
         assert_eq!(got, [(1, 0)]);
         // Ignorable after a glyph: its larger cluster just goes away.
         let mut glyphs = alloc::vec![glyph(1, 0, false), glyph(9, 1, true), glyph(2, 4, false)];
-        hide(&mut glyphs, None);
+        hide(&mut glyphs, None, MC);
         let got: Vec<(u32, u32)> = glyphs.iter().map(|g| (g.glyph_id, g.cluster)).collect();
         assert_eq!(got, [(1, 0), (2, 4)]);
         // Right-to-left output: the ignorable's smaller cluster merges
         // backward into the glyphs before it.
         let mut glyphs = alloc::vec![glyph(2, 4, false), glyph(5, 4, false), glyph(9, 1, true)];
-        hide(&mut glyphs, None);
+        hide(&mut glyphs, None, MC);
         let got: Vec<(u32, u32)> = glyphs.iter().map(|g| (g.glyph_id, g.cluster)).collect();
         assert_eq!(got, [(2, 1), (5, 1)]);
+    }
+
+    fn ids_and_clusters(glyphs: &[Glyph]) -> Vec<(u32, u32)> {
+        glyphs.iter().map(|g| (g.glyph_id, g.cluster)).collect()
+    }
+
+    #[test]
+    fn forward_merge_needs_a_monotone_level_but_backward_does_not() {
+        // HarfBuzz's delete_glyphs_inplace merges a leading deleted
+        // cluster forward with merge_clusters (monotone levels only),
+        // but merges backward unconditionally.
+        for (level, forward) in [
+            (ClusterLevel::MonotoneGraphemes, (1, 0)),
+            (ClusterLevel::MonotoneCharacters, (1, 0)),
+            (ClusterLevel::Characters, (1, 3)),
+            (ClusterLevel::Graphemes, (1, 3)),
+        ] {
+            let mut glyphs = alloc::vec![glyph(9, 0, true), glyph(1, 3, false)];
+            hide(&mut glyphs, None, level);
+            assert_eq!(ids_and_clusters(&glyphs), [forward], "{level:?}");
+            let mut glyphs = alloc::vec![glyph(2, 4, false), glyph(9, 1, true)];
+            hide(&mut glyphs, None, level);
+            assert_eq!(ids_and_clusters(&glyphs), [(2, 1)], "{level:?}");
+        }
     }
 }

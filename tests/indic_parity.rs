@@ -10,7 +10,7 @@
 //! skip with a `// rustybuzz: ...` comment explaining why, and a
 //! TODO to remove once the gap closes.
 
-use sigilbuzz::{shape, Blob, Buffer, Face, Font};
+use sigilbuzz::{shape, Blob, Buffer, ClusterLevel, Face, Font};
 
 const NOTO_DEVA: &[u8] = include_bytes!("fonts/NotoSansDevanagari-Regular.ttf");
 
@@ -225,6 +225,9 @@ fn pre_base_matra_glyphs_end_up_before_their_consonant() {
 
     let mut buffer = Buffer::new();
     buffer.push_str("\u{0915}\u{093F}");
+    // CHARACTERS keeps each character's own cluster, so the reorder
+    // shows in the clusters.
+    buffer.set_cluster_level(ClusterLevel::Characters);
     let shaped = shape(&font, &buffer, &[]).expect("shape ki");
 
     // The ka codepoint is at cluster 0 (byte offset); the matra at
@@ -238,6 +241,13 @@ fn pre_base_matra_glyphs_end_up_before_their_consonant() {
         shaped.glyphs[1].cluster, 0,
         "base consonant (cluster 0) should appear second"
     );
+    // The monotone levels (the default among them) merge the matra
+    // into the consonant's cluster, as HarfBuzz's final reordering does.
+    buffer.set_cluster_level(ClusterLevel::MonotoneCharacters);
+    let merged = shape(&font, &buffer, &[]).expect("shape ki");
+    let clusters: Vec<u32> = merged.glyphs.iter().map(|g| g.cluster).collect();
+    assert_eq!(clusters, [0, 0]);
+    assert_eq!(merged.glyphs[0].glyph_id, shaped.glyphs[0].glyph_id);
 }
 
 /// `(glyph id, cluster)` pairs for `text`, keeping clusters at or

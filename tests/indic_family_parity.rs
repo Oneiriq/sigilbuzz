@@ -13,7 +13,7 @@
 //! cluster-integrity regressions; they just do not cross-check the
 //! output against rustybuzz.
 
-use sigilbuzz::{shape, Blob, Buffer, Face, Font};
+use sigilbuzz::{shape, Blob, Buffer, ClusterLevel, Face, Font};
 
 const NOTO_BENGALI: &[u8] = include_bytes!("fonts/NotoSansBengali-Regular.ttf");
 const NOTO_GURMUKHI: &[u8] = include_bytes!("fonts/NotoSansGurmukhi-Regular.ttf");
@@ -649,7 +649,9 @@ fn sinhala_corpus_matches_rustybuzz() {
 // Cross-cutting: pre-base matra ordering across the family. For the
 // scripts where the pre-base matra is a single Left-positioned vowel
 // sign, the shaped output should start with the matra's cluster
-// (byte offset of the matra codepoint) rather than the consonant's.
+// (byte offset of the matra codepoint) rather than the consonant's at
+// the CHARACTERS cluster level; the monotone levels merge the two, as
+// HarfBuzz's final reordering does.
 // -----------------------------------------------------------------
 #[test]
 fn pre_base_matras_move_before_base_for_every_script() {
@@ -668,6 +670,7 @@ fn pre_base_matras_move_before_base_for_every_script() {
         let text = format!("{consonant}{matra}");
         let mut buffer = Buffer::new();
         buffer.push_str(&text);
+        buffer.set_cluster_level(ClusterLevel::Characters);
         let shaped = shape(&font, &buffer, &[]).expect("shape");
         // The consonant comes first in the input (cluster 0). The
         // pre-base matra's bytes follow, cluster == consonant.len_utf8().
@@ -681,5 +684,9 @@ fn pre_base_matras_move_before_base_for_every_script() {
             shaped.glyphs[1].cluster, 0,
             "{name}: base consonant cluster should appear second"
         );
+        buffer.set_cluster_level(ClusterLevel::MonotoneCharacters);
+        let merged = shape(&font, &buffer, &[]).expect("shape");
+        let clusters: Vec<u32> = merged.glyphs.iter().map(|g| g.cluster).collect();
+        assert_eq!(clusters, [0, 0], "{name}: monotone clusters");
     }
 }

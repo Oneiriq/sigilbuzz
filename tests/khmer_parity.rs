@@ -221,8 +221,9 @@ fn pre_base_vowel_sign_e_renders_before_ka() {
 
     assert_eq!(shaped.len(), 2, "ke should be two glyphs after shaping");
     // Glyph at index 0 is the sign-e glyph; glyph at index 1 is
-    // the ka glyph. After the USE cluster-merge pass both carry
-    // the syllable's head cluster (0). Matches rustybuzz. The
+    // the ka glyph. Moving the sign-e across ka merges their clusters
+    // at the default (monotone) cluster level, so both carry the
+    // syllable's head cluster (0), as in HarfBuzz. The
     // reorder itself is verified by the glyph ids differing
     // (sign-e is narrower than ka, so its glyph id sorts earlier
     // in the cmap in this font) and by the Khmer parity corpus.

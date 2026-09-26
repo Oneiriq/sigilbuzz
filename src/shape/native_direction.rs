@@ -20,19 +20,19 @@
 //! scripts (Old Hungarian, Old Italic, Runic, Tifinagh); those show up
 //! here as left to right.
 //!
-//! A grapheme is a character and the continuation characters after it,
-//! following `hb_set_unicode_props`: marks, ZWJ and an
-//! Extended_Pictographic character right after one, emoji modifiers,
-//! the second of a regional indicator pair, the halfwidth katakana
-//! voiced sound marks, and tag characters.
+//! A grapheme is a character and the continuation characters after it
+//! (see `cluster::continuations`). At
+//! [`ClusterLevel::MonotoneCharacters`] each reversed grapheme's
+//! clusters merge, as HarfBuzz's `_hb_ot_layout_reverse_graphemes`
+//! does; the grapheme levels merged them already, and
+//! [`ClusterLevel::Characters`] keeps them apart.
 
 use alloc::vec::Vec;
 
-use crate::buffer::{Direction, Glyph};
+use super::cluster;
+use crate::buffer::{ClusterLevel, Direction, Glyph};
 use crate::unicode::bidi_class::{bidi_class, BidiClass};
-use crate::unicode::general_category::{
-    general_category_class, is_extended_pictographic, GeneralCategoryClass,
-};
+use crate::unicode::general_category::{general_category_class, GeneralCategoryClass};
 use crate::unicode::Script;
 
 const fn is_regional_indicator(ch: char) -> bool {
@@ -85,62 +85,38 @@ pub(super) fn resolve(direction: Direction, script: Option<Script>, cps: &[char]
     native
 }
 
-/// True at each index of `cps` that continues the grapheme before it.
-fn continuations(cps: &[char]) -> Vec<bool> {
-    let mut cont = alloc::vec![false; cps.len()];
-    let mut i = 0;
-    while i < cps.len() {
-        let c = cps[i];
-        let cp = c as u32;
-        if cp >= 0x80 && general_category_class(c) == Some(GeneralCategoryClass::Mark) {
-            cont[i] = true;
-        } else if (0x1F3FB..=0x1F3FF).contains(&cp) {
-            // Emoji modifiers.
-            cont[i] = true;
-        } else if is_regional_indicator(c) {
-            if i > 0 && is_regional_indicator(cps[i - 1]) && !cont[i - 1] {
-                cont[i] = true;
-            }
-        } else if c == '\u{200D}' {
-            cont[i] = true;
-            if cps.get(i + 1).is_some_and(|&n| is_extended_pictographic(n)) {
-                i += 1;
-                cont[i] = true;
-            }
-        } else if matches!(cp, 0xFF9E..=0xFF9F | 0xE0020..=0xE007F) {
-            cont[i] = true;
-        }
-        i += 1;
-    }
-    cont
+/// The per-code-point state that moves with the glyphs when the
+/// graphemes reverse: the code points themselves, the glyphs, and
+/// which code points were mirrored.
+pub(super) struct Run<'a> {
+    pub(super) cps: &'a mut [char],
+    pub(super) glyphs: &'a mut [Glyph],
+    pub(super) mirrored: &'a mut [bool],
 }
 
-/// Reverses the order of the graphemes of `cps`, keeping each
-/// grapheme's own order, and moves `glyphs` and `mirrored` (one entry
-/// per code point) along.
-pub(super) fn reverse_graphemes(cps: &mut [char], glyphs: &mut [Glyph], mirrored: &mut [bool]) {
-    if glyphs.len() != cps.len() || mirrored.len() != cps.len() {
+/// Reverses the order of the graphemes of `run`, keeping each
+/// grapheme's own order. `cont` holds the continuation bits of the
+/// code points before the reversal. Follows HarfBuzz's
+/// `reverse_groups`: each grapheme is merged (at
+/// [`ClusterLevel::MonotoneCharacters`] only) and reversed in place,
+/// then the whole run is reversed.
+pub(super) fn reverse_graphemes(run: Run<'_>, cont: &[bool], level: ClusterLevel) {
+    let len = run.cps.len();
+    if run.glyphs.len() != len || run.mirrored.len() != len || cont.len() != len {
         return;
     }
-    let cont = continuations(cps);
-    // Reverse everything, then put each grapheme back in order.
-    cps.reverse();
-    glyphs.reverse();
-    mirrored.reverse();
-    let len = cps.len();
-    let mut end = 0;
-    while end < len {
-        // In reversed order a grapheme is its continuations followed
-        // by the character that starts it.
-        let start = end;
-        while end < len && cont[len - 1 - end] {
-            end += 1;
+    let ranges: Vec<_> = cluster::graphemes(cont).collect();
+    for range in ranges {
+        if level == ClusterLevel::MonotoneCharacters {
+            cluster::merge_clusters(run.glyphs, range.start, range.end, level);
         }
-        end = (end + 1).min(len);
-        cps[start..end].reverse();
-        glyphs[start..end].reverse();
-        mirrored[start..end].reverse();
+        run.cps[range.clone()].reverse();
+        run.glyphs[range.clone()].reverse();
+        run.mirrored[range].reverse();
     }
+    run.cps.reverse();
+    run.glyphs.reverse();
+    run.mirrored.reverse();
 }
 
 #[cfg(test)]
@@ -193,24 +169,49 @@ mod tests {
         assert_eq!(resolve(Direction::Rtl, None, &digits), Direction::Ltr);
     }
 
-    #[test]
-    fn graphemes_reverse_as_units() {
-        let mut cps: Vec<char> = "ab\u{0301}\u{0302}c\u{200D}\u{1F600}".chars().collect();
+    /// Reverses `text` (glyph ids and clusters are the code point
+    /// indices) and returns the code points, ids, clusters, and
+    /// mirrored flags after.
+    fn reversed(text: &str, level: ClusterLevel) -> (String, Vec<u32>, Vec<u32>, Vec<bool>) {
+        let mut cps: Vec<char> = text.chars().collect();
+        let cont = cluster::continuations(&cps);
         let mut glyphs: Vec<Glyph> = (0..cps.len() as u32).map(|i| Glyph::new(i, i)).collect();
         let mut mirrored = alloc::vec![false; cps.len()];
         mirrored[0] = true;
-        reverse_graphemes(&mut cps, &mut glyphs, &mut mirrored);
-        let expected: Vec<char> = "c\u{200D}\u{1F600}b\u{0301}\u{0302}a".chars().collect();
-        assert_eq!(cps, expected);
-        let ids: Vec<u32> = glyphs.iter().map(|g| g.glyph_id).collect();
+        let run = Run {
+            cps: &mut cps,
+            glyphs: &mut glyphs,
+            mirrored: &mut mirrored,
+        };
+        reverse_graphemes(run, &cont, level);
+        (
+            cps.into_iter().collect(),
+            glyphs.iter().map(|g| g.glyph_id).collect(),
+            glyphs.iter().map(|g| g.cluster).collect(),
+            mirrored,
+        )
+    }
+
+    #[test]
+    fn graphemes_reverse_as_units() {
+        let text = "ab\u{0301}\u{0302}c\u{200D}\u{1F600}";
+        let (cps, ids, clusters, mirrored) = reversed(text, ClusterLevel::Characters);
+        assert_eq!(cps, "c\u{200D}\u{1F600}b\u{0301}\u{0302}a");
         assert_eq!(ids, [4, 5, 6, 1, 2, 3, 0]);
+        assert_eq!(clusters, [4, 5, 6, 1, 2, 3, 0]);
         assert_eq!(mirrored.last(), Some(&true));
     }
 
     #[test]
-    fn regional_indicators_pair_up() {
-        let flags = "\u{1F1EB}\u{1F1F7}\u{1F1E9}\u{1F1EA}\u{1F1EF}";
-        let cont = continuations(&flags.chars().collect::<Vec<_>>());
-        assert_eq!(cont, [false, true, false, true, false]);
+    fn monotone_characters_merges_each_reversed_grapheme() {
+        let text = "ab\u{0301}\u{0302}c\u{200D}\u{1F600}";
+        let (_, ids, clusters, _) = reversed(text, ClusterLevel::MonotoneCharacters);
+        assert_eq!(ids, [4, 5, 6, 1, 2, 3, 0]);
+        assert_eq!(clusters, [4, 4, 4, 1, 1, 1, 0]);
+        // The grapheme levels merge before the reversal, not here.
+        for level in [ClusterLevel::MonotoneGraphemes, ClusterLevel::Graphemes] {
+            let (_, _, clusters, _) = reversed(text, level);
+            assert_eq!(clusters, [4, 5, 6, 1, 2, 3, 0], "{level:?}");
+        }
     }
 }

@@ -221,7 +221,8 @@ pub(super) fn apply_parsed_lookup_at(
                 if let Some((out, positions)) =
                     ligature.apply_filtered(&ids.as_slice()[at..], filter)
                 {
-                    lig::ligate(glyphs, at, &positions, out, gdef, substitute_glyph);
+                    let level = gsub.cluster_level();
+                    lig::ligate(glyphs, at, &positions, out, gdef, substitute_glyph, level);
                     ids.resync(glyphs);
                     // Ligature emits 1 glyph from N matched components.
                     // The cursor must advance past the ligature output

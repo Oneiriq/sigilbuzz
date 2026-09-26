@@ -47,14 +47,15 @@
 //!    standard kern/mark/mkmk plus the Khmer `dist` feature. This
 //!    module returns control to it after topographical GSUB.
 //!
-//! # Cluster integrity
+//! # Clusters
 //!
-//! Every reorder preserves cluster byte offsets: pre-base matra
-//! movement copies the source glyph (cluster and all), shifts the
-//! intervening glyphs right by one, and drops the matra in. The
-//! generic GSUB dispatcher already merges clusters when a ligature
-//! collapses components, so the surviving glyph carries the minimum
-//! byte offset of its source run.
+//! Every reorder moves glyphs with their clusters. At the monotone
+//! cluster levels a moved glyph and the glyphs it moved across then
+//! share their smallest cluster, the `merge_clusters` calls of
+//! HarfBuzz's Khmer, Myanmar, and USE reorderings; the other levels
+//! leave the clusters out of order. Ligatures merge in the GSUB
+//! dispatcher and graphemes before shaping starts, both by the same
+//! level, so no syllable-wide merge happens here.
 
 mod reorder;
 mod scripts;
@@ -62,7 +63,7 @@ mod syllable;
 
 use alloc::vec::Vec;
 
-use reorder::{code_point_clusters, initial_reorder, merge_syllable_clusters, pref_reorder};
+use reorder::{initial_reorder, pref_reorder};
 pub use scripts::{
     shape_balinese, shape_brahmi, shape_buginese, shape_cham, shape_hangul, shape_khojki,
     shape_lao, shape_lepcha, shape_limbu, shape_modi, shape_myanmar, shape_nko,
@@ -71,7 +72,7 @@ pub use scripts::{
 };
 pub(crate) use syllable::{segment_syllables, Syllable, SyllableKind};
 
-use crate::buffer::Glyph;
+use crate::buffer::{ClusterLevel, Glyph};
 use crate::shape::apply_gsub_feature_in_scripts;
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
@@ -189,12 +190,15 @@ pub const HANGUL_FEATURES: &[&[u8; 4]] = &[b"ccmp", b"ljmo", b"vjmo", b"tjmo", b
 /// one-to-one correspondence with `glyphs` on entry; after the call
 /// `glyphs` may be shorter (GSUB collapses) and reordered. Clusters
 /// track back to original byte offsets so the caller can map glyphs
-/// to input.
+/// to input. A reordered glyph shares one cluster with the glyphs it
+/// moved across at the monotone cluster `level`s, as in HarfBuzz's
+/// Khmer shaper.
 pub fn shape_khmer(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
     if codepoints.is_empty() || glyphs.is_empty() {
         return;
@@ -203,14 +207,13 @@ pub fn shape_khmer(
     // 1. Segment. One pass over the codepoints, emitting Syllable
     //    records that the reorder pass can consume directly.
     let syllables = segment_syllables(codepoints);
-    let byte_offsets = code_point_clusters(codepoints, glyphs);
 
     // 2. Initial reordering: pre-base vowel signs move before the
     //    base. Done BEFORE GSUB so features see the logical order
     //    fonts expect. Reordering is length-preserving, so glyph
     //    indices stay aligned with codepoints across this pass.
     for syllable in &syllables {
-        initial_reorder(codepoints, glyphs, syllable);
+        initial_reorder(codepoints, glyphs, syllable, level);
     }
 
     // 3. Basic features. The generic dispatcher in `shape.rs`
@@ -230,13 +233,6 @@ pub fn shape_khmer(
         }
     }
 
-    // 5. Cluster merge. Every glyph belonging to a syllable gets
-    //    its cluster rewritten to the byte offset of the syllable's
-    //    first codepoint, matching HarfBuzz / rustybuzz so the
-    //    parity tests see identical cluster ids even after GSUB
-    //    has collapsed parts of the syllable.
-    merge_syllable_clusters(glyphs, &syllables, &byte_offsets);
-
     // Final GPOS (kern, mark, mkmk, dist) runs in the caller, see
     // shape.rs. That lets the generic mark-attachment machinery
     // handle Khmer's tone marks without a script-specific branch.
@@ -254,7 +250,8 @@ pub fn shape_khmer(
 /// runs. Thai and Lao pre-base vowels (sara e and friends) are
 /// logically typed *before* the base consonant already, so the
 /// reorder pass would be a no-op at best and break clustering at
-/// worst. Passing `false` skips it.
+/// worst. Passing `false` skips it. `level` is the buffer's cluster
+/// level, which decides whether reordered glyphs merge clusters.
 ///
 /// [`UseCategory`]: crate::unicode::use_category::UseCategory
 /// [`UsePosition`]: crate::unicode::use_category::UsePosition
@@ -268,6 +265,7 @@ pub fn shape_use(
     basic_features: &[&[u8; 4]],
     topographical_features: &[&[u8; 4]],
     reorder_prebase: bool,
+    level: ClusterLevel,
 ) {
     if codepoints.is_empty() || glyphs.is_empty() {
         return;
@@ -275,14 +273,13 @@ pub fn shape_use(
 
     // 1. Segment.
     let syllables = segment_syllables(codepoints);
-    let byte_offsets = code_point_clusters(codepoints, glyphs);
 
     // 2. Initial reordering. Some scripts (Thai, Lao) type pre-base
     //    vowels before the base already, so the reorder would break
     //    cluster alignment. Skip it in that case.
     if reorder_prebase {
         for syllable in &syllables {
-            initial_reorder(codepoints, glyphs, syllable);
+            initial_reorder(codepoints, glyphs, syllable, level);
         }
     }
 
@@ -311,7 +308,7 @@ pub fn shape_use(
             // the pre-base move (matching the pre-fix behavior).
             if pre_ids.len() == glyphs.len() {
                 for syl in &syllables {
-                    pref_reorder(codepoints, glyphs, syl, &pre_ids);
+                    pref_reorder(codepoints, glyphs, syl, &pre_ids, level);
                 }
             }
             for tag in basic_features {
@@ -333,9 +330,6 @@ pub fn shape_use(
             apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority);
         }
     }
-
-    // 5. Cluster merge.
-    merge_syllable_clusters(glyphs, &syllables, &byte_offsets);
 }
 
 #[cfg(test)]

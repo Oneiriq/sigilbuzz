@@ -2,7 +2,9 @@
 //! tagging, initial and final reordering, and split-matra handling.
 
 use super::super::indic_config_for;
-use super::reorder::{cluster_byte_offsets, final_reorder, initial_reorder, tag_positions};
+use super::reorder::{
+    cluster_byte_offsets, final_reorder, initial_reorder, merge_pre_base_matras, tag_positions,
+};
 use super::*;
 use crate::buffer::IndicPosition;
 use alloc::vec;
@@ -80,7 +82,7 @@ fn pre_base_matra_moves_before_base() {
     let original = glyphs.clone();
     let syllables = segment_syllables(&cp, &deva_config());
     for s in &syllables {
-        initial_reorder(&cp, &mut glyphs, s);
+        initial_reorder(&cp, &mut glyphs, s, ClusterLevel::Characters);
     }
     assert_eq!(glyphs[0], original[1]); // matra first
     assert_eq!(glyphs[1], original[0]); // ka second
@@ -94,7 +96,7 @@ fn post_base_matra_stays_put() {
     let before = glyphs.clone();
     let syllables = segment_syllables(&cp, &deva_config());
     for s in &syllables {
-        initial_reorder(&cp, &mut glyphs, s);
+        initial_reorder(&cp, &mut glyphs, s, ClusterLevel::Characters);
     }
     assert_eq!(glyphs, before);
 }
@@ -127,7 +129,7 @@ fn three_pre_base_matras_each_move_before_their_base() {
     let syls = segment_syllables(&cp, &deva_config());
     assert_eq!(syls.len(), 3);
     for s in &syls {
-        initial_reorder(&cp, &mut glyphs, s);
+        initial_reorder(&cp, &mut glyphs, s, ClusterLevel::Characters);
     }
     assert_eq!(glyphs[0].cluster, 1);
     assert_eq!(glyphs[1].cluster, 0);
@@ -141,9 +143,20 @@ fn three_pre_base_matras_each_move_before_their_base() {
 fn shape_devanagari_without_gsub_only_reorders() {
     let cp = cps("\u{0915}\u{093F}");
     let mut glyphs = fake_glyphs(2);
-    shape_devanagari(None, None, &cp, &mut glyphs);
+    shape_devanagari(None, None, &cp, &mut glyphs, ClusterLevel::Characters);
     assert_eq!(glyphs[0].cluster, 1);
     assert_eq!(glyphs[1].cluster, 0);
+    // At a monotone level the matra and the base it moved before
+    // share a cluster, as after HarfBuzz's final reordering.
+    let mut glyphs = fake_glyphs(2);
+    shape_devanagari(
+        None,
+        None,
+        &cp,
+        &mut glyphs,
+        ClusterLevel::MonotoneCharacters,
+    );
+    assert_eq!((glyphs[0].cluster, glyphs[1].cluster), (0, 0));
 }
 
 #[test]
@@ -196,6 +209,7 @@ fn final_reorder_moves_reph_to_syllable_end() {
         3,
         RephPosition::BeforePost,
         RephMode::Implicit,
+        ClusterLevel::MonotoneCharacters,
     );
     assert_eq!(g[0].indic_position, IndicPosition::BaseC as u8);
     assert_eq!(g[1].indic_position, IndicPosition::RaToBecomeReph as u8);
@@ -217,6 +231,7 @@ fn final_reorder_noop_when_rphf_did_not_fire() {
         3,
         RephPosition::BeforePost,
         RephMode::Implicit,
+        ClusterLevel::MonotoneCharacters,
     );
     assert_eq!(g, before, "no collapse -> no move");
 }
@@ -287,7 +302,7 @@ fn sinhala_pre_base_matra_moves() {
     let original = glyphs.clone();
     let config = indic_config_for(Script::Sinhala).unwrap();
     for s in &segment_syllables(&cp, &config) {
-        initial_reorder(&cp, &mut glyphs, s);
+        initial_reorder(&cp, &mut glyphs, s, ClusterLevel::Characters);
     }
     assert_eq!(glyphs[0], original[1]);
     assert_eq!(glyphs[1], original[0]);
@@ -311,6 +326,7 @@ fn after_main_reph_target_is_right_after_base() {
         4,
         RephPosition::AfterMain,
         RephMode::Implicit,
+        ClusterLevel::MonotoneCharacters,
     );
     // After move: base @ 0, reph @ 1, trailing @ 2.
     assert_eq!(g[0].indic_position, IndicPosition::BaseC as u8);
@@ -361,7 +377,15 @@ fn logrepha_reorder_moves_reph_past_base() {
     // Original glyph count 2, no shrinkage. LogRepha mode must
     // still relocate because the repha is a standalone glyph
     // rather than an `rphf` ligature product.
-    final_reorder(&mut g, 0, 6, 2, RephPosition::AfterMain, RephMode::LogRepha);
+    final_reorder(
+        &mut g,
+        0,
+        6,
+        2,
+        RephPosition::AfterMain,
+        RephMode::LogRepha,
+        ClusterLevel::MonotoneCharacters,
+    );
     assert_eq!(g[0].indic_position, IndicPosition::BaseC as u8);
     assert_eq!(g[1].indic_position, IndicPosition::RaToBecomeReph as u8);
 }
@@ -384,4 +408,84 @@ fn sinhala_three_part_matra_decomposes() {
 fn non_split_matra_returns_none() {
     assert!(super::super::split_matra_decompose('\u{0BBE}').is_none());
     assert!(super::super::split_matra_decompose('\u{0D15}').is_none());
+}
+
+/// Glyphs with the given `(indic position, cluster)` pairs.
+fn tagged(rows: &[(IndicPosition, u32)]) -> Vec<Glyph> {
+    rows.iter()
+        .enumerate()
+        .map(|(i, &(pos, cluster))| {
+            let mut g = Glyph::new(i as u32 + 1, cluster);
+            g.indic_position = pos as u8;
+            g
+        })
+        .collect()
+}
+
+fn clusters_of(glyphs: &[Glyph]) -> Vec<u32> {
+    glyphs.iter().map(|g| g.cluster).collect()
+}
+
+#[test]
+fn reph_move_merges_clusters_at_monotone_levels_only() {
+    use IndicPosition::{BaseC, RaToBecomeReph, Start};
+    for (level, clusters) in [
+        (ClusterLevel::MonotoneCharacters, [0, 0, 0]),
+        (ClusterLevel::MonotoneGraphemes, [0, 0, 0]),
+        (ClusterLevel::Characters, [6, 9, 0]),
+        (ClusterLevel::Graphemes, [6, 9, 0]),
+    ] {
+        // reph (ra + halant ligated), base, trailing matra: the
+        // original four code points shrank to three glyphs.
+        let mut g = tagged(&[(RaToBecomeReph, 0), (BaseC, 6), (Start, 9)]);
+        final_reorder(
+            &mut g,
+            0,
+            12,
+            4,
+            RephPosition::BeforePost,
+            RephMode::Implicit,
+            level,
+        );
+        assert_eq!(g[2].indic_position, RaToBecomeReph as u8, "{level:?}");
+        assert_eq!(clusters_of(&g), clusters, "{level:?}");
+    }
+}
+
+#[test]
+fn pre_base_matra_merges_through_the_base() {
+    use IndicPosition::{BaseC, PreM, Start};
+    let rows = [(PreM, 9), (Start, 0), (BaseC, 6), (Start, 12)];
+    let mut g = tagged(&rows);
+    merge_pre_base_matras(&mut g, 0, 15, ClusterLevel::MonotoneCharacters);
+    assert_eq!(clusters_of(&g), [0, 0, 0, 12]);
+    let mut g = tagged(&rows);
+    merge_pre_base_matras(&mut g, 0, 15, ClusterLevel::Characters);
+    assert_eq!(clusters_of(&g), [9, 0, 6, 12]);
+    // Without a base glyph left, the merge runs to the syllable end.
+    let mut g = tagged(&[(PreM, 6), (Start, 0), (Start, 3)]);
+    merge_pre_base_matras(&mut g, 0, 9, ClusterLevel::MonotoneCharacters);
+    assert_eq!(clusters_of(&g), [0, 0, 0]);
+    // Glyphs of other syllables are left alone.
+    let mut g = tagged(&[(Start, 20), (PreM, 9), (BaseC, 6)]);
+    merge_pre_base_matras(&mut g, 6, 12, ClusterLevel::MonotoneCharacters);
+    assert_eq!(clusters_of(&g), [20, 6, 6]);
+}
+
+#[test]
+fn initial_reorder_merges_glyphs_displaced_past_the_base() {
+    // ka ZWJ i-matra: the matra moves before ka, which shifts ka and
+    // the ZWJ right; HarfBuzz merges the displaced glyphs from the
+    // base on, and leaves the matra to final reordering.
+    let cp = cps("\u{0915}\u{200D}\u{093F}");
+    for (level, clusters) in [
+        (ClusterLevel::MonotoneCharacters, [6, 0, 0]),
+        (ClusterLevel::Characters, [6, 0, 3]),
+    ] {
+        let mut glyphs: Vec<Glyph> = [0, 3, 6].iter().map(|&c| Glyph::new(c + 1, c)).collect();
+        for s in &segment_syllables(&cp, &deva_config()) {
+            initial_reorder(&cp, &mut glyphs, s, level);
+        }
+        assert_eq!(clusters_of(&glyphs), clusters, "{level:?}");
+    }
 }
