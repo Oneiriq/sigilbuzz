@@ -554,6 +554,31 @@ fn script_override_through_the_c_api_matches_core() {
     unsafe { hb_buffer_destroy(buffer) };
 }
 
+#[test]
+fn arabic_script_over_decomposed_vowels_shapes() {
+    // Thai sara am and Khmer U+17C4 decompose into two code points
+    // each; a whole-buffer Arabic script used to index the joining
+    // forms past their end and abort inside hb_shape.
+    let font = TestFont::new(AMIRI);
+    let text = "\u{0645}\u{0631}\u{062D}\u{0628}\u{0627} \u{0E2A}\u{0E33}\u{17C4}";
+    for guess in [false, true] {
+        let buffer = hb_buffer_create();
+        add_utf8(buffer, text.as_bytes(), 0, -1);
+        // SAFETY: created above.
+        unsafe {
+            if guess {
+                hb_buffer_guess_segment_properties(buffer);
+            } else {
+                hb_buffer_set_script(buffer, HB_SCRIPT_ARABIC);
+            }
+        }
+        let shaped = font.shape(buffer);
+        assert!(shaped.len() >= 9, "{shaped:?}");
+        // SAFETY: created above.
+        unsafe { hb_buffer_destroy(buffer) };
+    }
+}
+
 #[cfg(feature = "std")]
 #[test]
 fn set_language_reaches_the_core_buffer_and_shaping() {

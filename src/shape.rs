@@ -85,7 +85,7 @@ use crate::buffer::{script_priority_for, unicode_prop, Buffer, Direction, Glyph,
 use crate::error::Result;
 use crate::face::Face;
 use crate::font::Font;
-use crate::ot::arabic::{assign_joining_forms_in_context, JoiningContext, JoiningForm};
+use crate::ot::arabic::{assign_from_types_in_context, JoiningContext, JoiningForm};
 use crate::tables::gdef::Gdef;
 use crate::tables::gpos::{
     lookup_type as gpos_lt, resolve_variation_delta, ChainContextPos, ContextPos, PairPos,
@@ -98,6 +98,7 @@ use crate::tables::gsub::{
 use crate::tables::layout::{Lookup, MatchFilter, SequenceLookupRecord};
 use crate::tables::variation_store::ItemVariationStore;
 use crate::tables::{Gpos, Gsub, KernTable, Kerx, Morx};
+use crate::unicode::joining::{joining_type, JoiningType};
 use crate::unicode::{script_of, Script};
 
 /// Variable-font context threaded through every GPOS apply site.
@@ -865,7 +866,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // handle further down.
     let gdef = face.gdef()?;
 
-    // Arabic joining forms are computed once, from the full text,
+    // Arabic joining forms are computed once, over the whole run,
     // because the state machine depends on surrounding letters (the
     // previous/next Arabic joining-type). A segment-local view would
     // lose the cross-boundary context, but in sigilbuzz every Arabic
@@ -873,11 +874,16 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // computation is both correct and cheaper than recomputing per
     // segment. The buffer's pre- and post-context stand in for the
     // letters beyond the text's ends, as in HarfBuzz's arabic_joining.
+    //
+    // The forms index `codepoints`, not the text: the split-vowel
+    // decompositions above make `codepoints` longer than the text,
+    // and segments slice the forms by their `cp_range`.
     let has_arabic = buffer.script() == Some(Script::Arabic)
         || codepoints.iter().any(|&c| script_of(c) == Script::Arabic);
     let arabic_forms: Vec<JoiningForm> = if has_arabic {
         let context = JoiningContext::from_context(buffer.pre_context(), buffer.post_context());
-        assign_joining_forms_in_context(text, context)
+        let types: Vec<JoiningType> = codepoints.iter().map(|&c| joining_type(c)).collect();
+        assign_from_types_in_context(&types, context)
     } else {
         Vec::new()
     };
@@ -1118,7 +1124,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 // slice of the forms vector: cps/glyphs are 1:1 at
                 // this point (ccmp can rewrite ids but not lengths in
                 // practice for Arabic), so the slice aligns.
-                let forms_slice = &arabic_forms[seg.cp_range.clone()];
+                let forms_slice = arabic_forms.get(seg.cp_range.clone()).unwrap_or(&[]);
                 apply_arabic_positional_features(gsub, &mut seg_glyphs, gdef.as_ref(), forms_slice);
             }
             run_default_gsub(

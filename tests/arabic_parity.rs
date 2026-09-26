@@ -447,3 +447,46 @@ fn mixed_arabic_and_latin_runs_shape_each_half_correctly() {
         );
     }
 }
+
+/// Glyph ids from shaping `text` left to right with Amiri, keeping
+/// the glyphs whose cluster is at or past byte `from`.
+fn glyphs_from(text: &str, from: u32, script: Option<sigilbuzz::UnicodeScript>) -> Vec<u32> {
+    let blob = Blob::new(AMIRI);
+    let face = Face::parse(&blob, 0).expect("parse face");
+    let font = Font::new(face, 1000.0);
+    let mut buf = Buffer::new();
+    buf.push_str(text);
+    buf.set_direction(Direction::Ltr);
+    buf.set_script(script);
+    let shaped = shape(&font, &buf, &[]).expect("shape");
+    shaped
+        .glyphs
+        .iter()
+        .filter(|g| g.cluster >= from)
+        .map(|g| g.glyph_id)
+        .collect()
+}
+
+#[test]
+fn split_vowels_before_arabic_do_not_shift_joining_forms() {
+    // Thai sara am (U+0E33) decomposes into two code points before
+    // shaping. The Arabic forms must still line up with the behs:
+    // the pair gets the same init + fina forms as after sara aa
+    // (U+0E32), which does not decompose.
+    let beh_pair = " \u{0628}\u{0628}";
+    let decomposed = glyphs_from(&format!("\u{0E33}{beh_pair}"), 3, None);
+    let plain = glyphs_from(&format!("\u{0E32}{beh_pair}"), 3, None);
+    assert_eq!(decomposed, plain);
+    assert_eq!(decomposed.len(), 3);
+}
+
+#[test]
+fn script_override_spanning_split_vowels_shapes_without_panicking() {
+    // With the whole buffer shaped as Arabic, one segment covers the
+    // decomposed code points, which outnumber the characters.
+    let text = "\u{0645}\u{0631}\u{062D}\u{0628}\u{0627} \u{0E2A}\u{0E33}\u{17C4}";
+    let arabic = Some(sigilbuzz::UnicodeScript::Arabic);
+    let with_tail = glyphs_from(text, 0, arabic);
+    let alone = glyphs_from("\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}", 0, arabic);
+    assert_eq!(with_tail[..alone.len()], alone[..]);
+}
