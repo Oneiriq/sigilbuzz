@@ -26,6 +26,7 @@ use crate::buffer::{Direction, Glyph};
 use crate::error::Result;
 use crate::face::Face;
 use crate::tables::gdef::Gdef;
+use crate::tables::layout::{GlyphClasses, MatchGlyph};
 use crate::tables::{tag, Gpos};
 use crate::unicode::Script;
 
@@ -306,15 +307,15 @@ fn lookups_for(gpos: &Gpos<'_>, tag: [u8; 4], script_priority: &[[u8; 4]]) -> Ve
     .unwrap_or_default()
 }
 
-/// HarfBuzz's `zero_mark_widths_by_gdef`: every GDEF mark loses both
-/// advances. With `adjust_offsets` the mark first moves back by the
-/// advance it loses, so it still sits over the preceding glyph.
+/// HarfBuzz's `zero_mark_widths_by_gdef`: every mark loses both
+/// advances. Marks are GDEF's, or for a font without GDEF glyph
+/// classes the synthesized ones. With `adjust_offsets` the mark first
+/// moves back by the advance it loses, so it still sits over the
+/// preceding glyph.
 fn zero_mark_widths(glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>, adjust_offsets: bool) {
-    let Some(gdef) = gdef else {
-        return;
-    };
+    let classes = GlyphClasses::new(gdef);
     for g in glyphs {
-        if gdef.glyph_class(g.glyph_id as u16).is_mark() {
+        if classes.is_mark(MatchGlyph::from(&*g)) {
             if adjust_offsets {
                 g.x_offset -= g.x_advance;
                 g.y_offset -= g.y_advance;

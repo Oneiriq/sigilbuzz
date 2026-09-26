@@ -13,8 +13,8 @@ use super::features::{
 use super::hangul::hangul_compose;
 use super::segment::{build_segments, is_common_for_segmentation, ProcessedSegment, Segment};
 use super::{
-    cluster, dotted_circle, feature_disabled, ignorables, native_direction, position, required,
-    rotate, thai, Feature, VarCtx,
+    cluster, dotted_circle, feature_disabled, glyph_props, ignorables, native_direction, position,
+    required, rotate, thai, Feature, JoinerTable, VarCtx,
 };
 use crate::buffer::{script_priority_for, Buffer, BufferFlags, Direction, Glyph, ShapedRun};
 use crate::error::Result;
@@ -179,6 +179,12 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // `hb_form_clusters`: at the grapheme levels each grapheme takes
     // one cluster.
     cluster::form_clusters(&mut glyphs, &cont, level);
+    // The matching props (hidden ignorables, synthesized glyph
+    // classes) come from each glyph's own character, decomposed
+    // pieces included; glyphs and code points are still one to one.
+    for (glyph, &ch) in glyphs.iter_mut().zip(&codepoints) {
+        glyph.unicode_props |= glyph_props::initial(ch);
+    }
 
     // Step 1.5: Segment the run into maximal same-script spans. Each
     // segment carries its own script priority (e.g. Arabic `arab` ->
@@ -565,6 +571,8 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         if let Some(ref gsub) = gsub {
             // Arabic positional + default GSUB for this segment.
             let seg_arabic_active = seg.script == Script::Arabic && !arabic_forms.is_empty();
+            let joiner_table =
+                JoinerTable::for_segment(seg.script, seg_arabic_active, dominant_script);
             if seg_arabic_active {
                 // ccmp and locl must run before positional features so
                 // any composition/decomposition and localized forms
@@ -577,6 +585,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                     features,
                     &[*b"ccmp", *b"locl"],
                     seg.script_priority,
+                    joiner_table,
                 );
                 // Arabic positional pass consumes only the segment's
                 // slice of the forms vector: cps/glyphs are 1:1 at
@@ -594,6 +603,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 is_vertical,
                 seg.script_priority,
                 early_default_features(seg_arabic_active, seg.script, dominant_script),
+                joiner_table,
             );
         }
 

@@ -24,6 +24,7 @@ use crate::ot::use_shaper::{
     USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES,
 };
 use crate::tables::gdef::Gdef;
+use crate::tables::layout::Joiners;
 use crate::tables::Gsub;
 use crate::unicode::Script;
 
@@ -145,7 +146,7 @@ pub(super) fn apply_unscheduled(
         return;
     }
     for lookup in lookups {
-        apply_gsub_lookup(gsub, lookup, glyphs, gdef, 0);
+        apply_gsub_lookup(gsub, lookup, glyphs, gdef, 0, Joiners::AUTO);
     }
 }
 

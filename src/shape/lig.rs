@@ -19,7 +19,13 @@
 //! without a parallel array. Bits 8 to 15 hold HarfBuzz's `lig_props`
 //! byte verbatim (ligature id in the top three bits, the "is the
 //! ligature glyph" flag in bit 4, the component in the low four) and
-//! bit 7 holds the "multiplied" glyph property.
+//! bit 7 holds the "multiplied" glyph property; see
+//! [`match_prop`], which the matching rules read the same bits through.
+//!
+//! Ligation also updates the synthesized glyph class fonts without a
+//! GDEF `GlyphClassDef` match against (HarfBuzz's `_set_glyph_class`
+//! with a class guess): a real ligature becomes a ligature glyph, while
+//! a base or mark that swallowed only marks keeps its class.
 //!
 //! One deliberate difference: HarfBuzz numbers ligature ids from a
 //! buffer-wide serial (1 to 7, then wrapping). The GSUB drivers here
@@ -30,84 +36,59 @@
 //! can collide and these cannot (as long as a free id exists).
 
 use crate::buffer::{ClusterLevel, Glyph};
-use crate::tables::gdef::{Gdef, GlyphClass};
-
-/// Bit 7 of `unicode_props`: the glyph came out of a multiple
-/// substitution (HarfBuzz's `HB_OT_LAYOUT_GLYPH_PROPS_MULTIPLIED`).
-const MULTIPLIED: u16 = 1 << 7;
-/// Shift of the `lig_props` byte inside `unicode_props`.
-const LIG_PROPS_SHIFT: u32 = 8;
-/// `lig_props` flag: this glyph is the ligature itself, and the low
-/// four bits count its components.
-const IS_LIG_BASE: u8 = 0x10;
-
-fn lig_props(g: &Glyph) -> u8 {
-    (g.unicode_props >> LIG_PROPS_SHIFT) as u8
-}
+use crate::tables::layout::skip_iter::{match_prop, GlyphClasses, GlyphKind, MatchGlyph};
 
 fn set_lig_props(g: &mut Glyph, props: u8) {
-    g.unicode_props = (g.unicode_props & 0x00FF) | (u16::from(props) << LIG_PROPS_SHIFT);
+    g.unicode_props =
+        (g.unicode_props & 0x00FF) | (u16::from(props) << match_prop::LIG_PROPS_SHIFT);
 }
 
 /// Ligature id: nonzero for a ligature glyph and for the marks that
 /// were inside it when it formed.
 pub(super) fn lig_id(g: &Glyph) -> u8 {
-    lig_props(g) >> 5
+    MatchGlyph::from(g).lig_id()
 }
 
 /// True for the glyph a ligature substitution produced.
 fn is_lig_base(g: &Glyph) -> bool {
-    lig_props(g) & IS_LIG_BASE != 0
+    MatchGlyph::from(g).is_lig_base()
 }
 
 /// Component index: 1-based position of the ligature component a mark
 /// belongs to, or a multiple substitution's 0-based output index. Zero
 /// for the ligature glyph itself.
 pub(super) fn lig_comp(g: &Glyph) -> u8 {
-    if is_lig_base(g) {
-        0
-    } else {
-        lig_props(g) & 0x0F
-    }
+    MatchGlyph::from(g).lig_comp()
 }
 
 /// True when the glyph came out of a multiple substitution.
 pub(super) fn is_multiplied(g: &Glyph) -> bool {
-    g.unicode_props & MULTIPLIED != 0
+    MatchGlyph::from(g).is_multiplied()
 }
 
 fn set_for_ligature(g: &mut Glyph, lig_id: u8, num_comps: u8) {
-    set_lig_props(g, (lig_id << 5) | IS_LIG_BASE | (num_comps & 0x0F));
+    set_lig_props(
+        g,
+        (lig_id << 5) | match_prop::IS_LIG_BASE | (num_comps & 0x0F),
+    );
 }
 
 fn set_for_mark(g: &mut Glyph, lig_id: u8, comp: u8) {
     set_lig_props(g, (lig_id << 5) | (comp & 0x0F));
 }
 
-fn is_mark(g: &Glyph, gdef: Option<&Gdef<'_>>) -> bool {
-    gdef.is_some_and(|d| d.glyph_class(g.glyph_id as u16) == GlyphClass::Mark)
+/// Sets the synthesized glyph class bits (`match_prop::SYNTHESIZED_*`).
+fn set_synthesized_class(g: &mut Glyph, class: u16) {
+    g.unicode_props = (g.unicode_props & !match_prop::SYNTHESIZED_CLASS) | class;
 }
 
-/// HarfBuzz's base-glyph property: GDEF class 1 exactly (unlisted
-/// glyphs are not bases), or any non-mark when the font has no class
-/// definitions to consult.
-fn is_base_glyph(g: &Glyph, gdef: Option<&Gdef<'_>>) -> bool {
-    match gdef.and_then(|d| d.raw_glyph_class(g.glyph_id as u16)) {
-        Some(class) => class == 1,
-        None => true,
-    }
-}
-
-/// Number of components a glyph stands for: its recorded count when
-/// it is a ligature glyph (GDEF class ligature, or no class data at
-/// all), else one.
-fn num_comps(g: &Glyph, gdef: Option<&Gdef<'_>>) -> u8 {
-    let ligature_class = match gdef.and_then(|d| d.raw_glyph_class(g.glyph_id as u16)) {
-        Some(class) => class == 2,
-        None => true,
-    };
-    if ligature_class && is_lig_base(g) {
-        lig_props(g) & 0x0F
+/// Number of components a glyph stands for, HarfBuzz's
+/// `_hb_glyph_info_get_lig_num_comps`: its recorded count when it is
+/// a ligature glyph by class and was formed as one, else one.
+fn num_comps(g: &Glyph, classes: &GlyphClasses<'_>) -> u8 {
+    let m = MatchGlyph::from(g);
+    if classes.kind(m) == GlyphKind::Ligature && m.is_lig_base() {
+        m.lig_props() & 0x0F
     } else {
         1
     }
@@ -130,10 +111,10 @@ fn alloc_lig_id(glyphs: &[Glyph], at: usize) -> u8 {
         .map_or(1, lig_id)
 }
 
-/// Records a ligature substitution and performs it: `glyphs[at]`
-/// becomes `lig_gid` and the other matched components (at
-/// `at + positions[1..]`, `positions[0]` being 0) are removed, while
-/// the glyphs between them stay. Mirrors HarfBuzz's `ligate_input`:
+/// Records a ligature substitution and performs it: the first matched
+/// component (`glyphs[positions[0]]`) becomes `lig_gid` and the other
+/// components (`positions[1..]`, ascending) are removed, while the
+/// glyphs between them stay. Mirrors HarfBuzz's `ligate_input`:
 ///
 /// - A ligature whose later components are all marks does not count
 ///   as a ligature for component tracking: a base plus marks keeps
@@ -143,7 +124,7 @@ fn alloc_lig_id(glyphs: &[Glyph], at: usize) -> u8 {
 ///   count, and every glyph between the components (the marks the
 ///   lookup skipped) gets that id and the index of the component it
 ///   followed, counted across components that were ligatures
-///   themselves.
+///   themselves. Its synthesized class becomes ligature.
 /// - Marks right after the last component that belonged to an
 ///   earlier ligature are renumbered into this one.
 ///
@@ -152,34 +133,35 @@ fn alloc_lig_id(glyphs: &[Glyph], at: usize) -> u8 {
 /// `merge_clusters`); at the others the ligature keeps its first
 /// component's cluster and the glyphs between keep theirs.
 ///
-/// `substitute` writes the new glyph id; the caller passes its own
-/// helper so the GSUB bookkeeping it already does (default-ignorable
-/// flags) stays in one place.
+/// `classes` says what counts as a base glyph and a mark. `substitute`
+/// writes the new glyph id; the caller passes its own helper so the
+/// GSUB bookkeeping it already does (default-ignorable flags) stays in
+/// one place.
 pub(super) fn ligate(
     glyphs: &mut alloc::vec::Vec<Glyph>,
-    at: usize,
     positions: &[usize],
     lig_gid: u16,
-    gdef: Option<&Gdef<'_>>,
+    classes: &GlyphClasses<'_>,
     substitute: fn(&mut Glyph, u16),
     level: ClusterLevel,
 ) {
-    let Some(&last_rel) = positions.last() else {
+    let (Some(&at), Some(&last)) = (positions.first(), positions.last()) else {
         return;
     };
-    if at + last_rel >= glyphs.len() {
+    if last >= glyphs.len() {
         return;
     }
     // The first component is not always the smallest cluster: text
     // shaped in reversed grapheme order (see `native_direction`) runs
     // its clusters downward.
-    super::cluster::merge_clusters(glyphs, at, at + last_rel + 1, level);
+    super::cluster::merge_clusters(glyphs, at, last + 1, level);
     let first = glyphs[at];
-    let mut is_mark_ligature = is_mark(&first, gdef);
-    let mut is_base_ligature = is_base_glyph(&first, gdef);
+    let kind = |g: &Glyph| classes.kind(MatchGlyph::from(g));
+    let mut is_mark_ligature = kind(&first) == GlyphKind::Mark;
+    let mut is_base_ligature = kind(&first) == GlyphKind::Base;
     if positions[1..]
         .iter()
-        .any(|&rel| !is_mark(&glyphs[at + rel], gdef))
+        .any(|&p| kind(&glyphs[p]) != GlyphKind::Mark)
     {
         is_mark_ligature = false;
         is_base_ligature = false;
@@ -187,7 +169,7 @@ pub(super) fn ligate(
     let is_ligature = !is_base_ligature && !is_mark_ligature;
     let total_comps: u32 = positions
         .iter()
-        .map(|&rel| u32::from(num_comps(&glyphs[at + rel], gdef)))
+        .map(|&p| u32::from(num_comps(&glyphs[p], classes)))
         .sum();
     let new_id = if is_ligature {
         alloc_lig_id(glyphs, at)
@@ -196,7 +178,7 @@ pub(super) fn ligate(
     };
 
     let mut last_lig_id = lig_id(&first);
-    let mut last_num_comps = u32::from(num_comps(&first, gdef));
+    let mut last_num_comps = u32::from(num_comps(&first, classes));
     let mut comps_so_far = last_num_comps;
     // Renumbers a mark that follows a component: its own component
     // index (or the component's last one) shifted past the components
@@ -210,18 +192,18 @@ pub(super) fn ligate(
     };
     for pair in positions.windows(2) {
         if is_ligature {
-            for rel in pair[0] + 1..pair[1] {
-                let comp = renumber(&glyphs[at + rel], comps_so_far, last_num_comps);
-                set_for_mark(&mut glyphs[at + rel], new_id, comp);
+            for g in &mut glyphs[pair[0] + 1..pair[1]] {
+                let comp = renumber(g, comps_so_far, last_num_comps);
+                set_for_mark(g, new_id, comp);
             }
         }
-        let component = &glyphs[at + pair[1]];
+        let component = &glyphs[pair[1]];
         last_lig_id = lig_id(component);
-        last_num_comps = u32::from(num_comps(component, gdef));
+        last_num_comps = u32::from(num_comps(component, classes));
         comps_so_far += last_num_comps;
     }
     if !is_mark_ligature && last_lig_id != 0 {
-        for g in &mut glyphs[at + last_rel + 1..] {
+        for g in &mut glyphs[last + 1..] {
             if lig_id(g) != last_lig_id || lig_comp(g) == 0 {
                 break;
             }
@@ -232,13 +214,14 @@ pub(super) fn ligate(
 
     let lig = &mut glyphs[at];
     substitute(lig, lig_gid);
-    lig.unicode_props &= !MULTIPLIED;
+    lig.unicode_props &= !match_prop::MULTIPLIED;
     if is_ligature {
         set_for_ligature(lig, new_id, total_comps.min(15) as u8);
+        set_synthesized_class(lig, match_prop::SYNTHESIZED_LIGATURE);
     }
     // Remove the components back to front so earlier indices hold.
-    for &rel in positions[1..].iter().rev() {
-        glyphs.remove(at + rel);
+    for &p in positions[1..].iter().rev() {
+        glyphs.remove(p);
     }
 }
 
@@ -246,17 +229,22 @@ pub(super) fn ligate(
 /// `outputs` glyphs now sitting at `glyphs[at..at + outputs]`, as
 /// HarfBuzz's `MultipleSubst` does: each output is flagged multiplied
 /// and, unless the source belonged to a ligature, numbered as
-/// component 0, 1, 2, ... A one-glyph sequence is a plain
+/// component 0, 1, 2, ... The outputs of a synthesized ligature glyph
+/// are synthesized as base glyphs. A one-glyph sequence is a plain
 /// substitution and records nothing.
 pub(super) fn record_multiple(glyphs: &mut [Glyph], at: usize, outputs: usize) {
     if outputs < 2 || at + outputs > glyphs.len() {
         return;
     }
     let keep_ligature = lig_id(&glyphs[at]) != 0;
+    let was_ligature = MatchGlyph::from(&glyphs[at]).synthesized_kind() == GlyphKind::Ligature;
     for (i, g) in glyphs[at..at + outputs].iter_mut().enumerate() {
-        g.unicode_props |= MULTIPLIED;
+        g.unicode_props |= match_prop::MULTIPLIED;
         if !keep_ligature {
             set_for_mark(g, 0, i as u8);
+        }
+        if was_ligature {
+            set_synthesized_class(g, 0);
         }
     }
 }
@@ -264,10 +252,33 @@ pub(super) fn record_multiple(glyphs: &mut [Glyph], at: usize, outputs: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tables::gdef::Gdef;
     use alloc::vec;
     use alloc::vec::Vec;
 
-    const MC: ClusterLevel = ClusterLevel::MonotoneCharacters;
+    #[test]
+    fn without_gdef_classes_ligation_updates_the_synthesized_class() {
+        let classes = GlyphClasses::synthesized();
+        let synthesized = |g: &Glyph| MatchGlyph::from(g).synthesized_kind();
+        // Two bases form a real ligature.
+        let mut glyphs = run(&[1, 2]);
+        ligate(&mut glyphs, &[0, 1], 8, &classes, plain, MC);
+        assert_eq!(synthesized(&glyphs[0]), GlyphKind::Ligature);
+        assert_eq!(lig_id(&glyphs[0]), 1);
+        // A base plus a (synthesized) mark stays a base.
+        let mut glyphs = run(&[1, 5]);
+        glyphs[1].unicode_props = match_prop::SYNTHESIZED_MARK;
+        ligate(&mut glyphs, &[0, 1], 9, &classes, plain, MC);
+        assert_eq!(synthesized(&glyphs[0]), GlyphKind::Base);
+        assert_eq!(lig_id(&glyphs[0]), 0);
+        // Splitting a ligature glyph again yields base glyphs.
+        let mut glyphs = run(&[8, 8]);
+        for g in &mut glyphs {
+            g.unicode_props = match_prop::SYNTHESIZED_LIGATURE;
+        }
+        record_multiple(&mut glyphs, 0, 2);
+        assert!(glyphs.iter().all(|g| synthesized(g) == GlyphKind::Base));
+    }
 
     /// GDEF v1.0 whose class def lists glyphs 1..=9: 1-4 bases,
     /// 5-7 marks, 8-9 ligatures.
@@ -294,6 +305,54 @@ mod tests {
         g.glyph_id = u32::from(gid);
     }
 
+    const MC: ClusterLevel = ClusterLevel::MonotoneCharacters;
+
+    /// Ligates `positions` into `lig_gid` with `gdef`'s classes at the
+    /// default cluster level.
+    fn ligate_mc(glyphs: &mut Vec<Glyph>, positions: &[usize], lig_gid: u16, gdef: &Gdef<'_>) {
+        ligate(
+            glyphs,
+            positions,
+            lig_gid,
+            &GlyphClasses::new(Some(gdef)),
+            plain,
+            MC,
+        );
+    }
+
+    #[test]
+    fn ligature_clusters_merge_at_monotone_levels_only() {
+        let bytes = gdef_bytes();
+        let gdef = Gdef::parse(&bytes).unwrap();
+        let classes = GlyphClasses::new(Some(&gdef));
+        // base(1)@0 mark(5)@1 base(2)@2, ligating the two bases around
+        // the mark.
+        for (level, clusters) in [
+            (ClusterLevel::MonotoneGraphemes, [0, 0]),
+            (ClusterLevel::MonotoneCharacters, [0, 0]),
+            (ClusterLevel::Characters, [0, 1]),
+            (ClusterLevel::Graphemes, [0, 1]),
+        ] {
+            let mut glyphs = run(&[1, 5, 2]);
+            ligate(&mut glyphs, &[0, 2], 8, &classes, plain, level);
+            let got: Vec<u32> = glyphs.iter().map(|g| g.cluster).collect();
+            assert_eq!(got, clusters, "{level:?}");
+        }
+        // Text in reversed grapheme order: the ligature takes the
+        // smallest cluster at a monotone level, its first component's
+        // otherwise.
+        let mut glyphs: Vec<Glyph> = [(1, 4), (2, 2)]
+            .iter()
+            .map(|&(id, c)| Glyph::new(id, c))
+            .collect();
+        let mut chars = glyphs.clone();
+        ligate(&mut glyphs, &[0, 1], 8, &classes, plain, MC);
+        assert_eq!(glyphs[0].cluster, 2);
+        let level = ClusterLevel::Characters;
+        ligate(&mut chars, &[0, 1], 8, &classes, plain, level);
+        assert_eq!(chars[0].cluster, 4);
+    }
+
     fn props(glyphs: &[Glyph]) -> Vec<(u32, u8, u8)> {
         glyphs
             .iter()
@@ -308,13 +367,13 @@ mod tests {
         // base(1) mark(5) base(2) mark(6) base(3) mark(7): ligate the
         // three bases, skipping the marks between them.
         let mut glyphs = run(&[1, 5, 2, 6, 3, 7]);
-        ligate(&mut glyphs, 0, &[0, 2, 4], 8, Some(&gdef), plain, MC);
+        ligate_mc(&mut glyphs, &[0, 2, 4], 8, &gdef);
         assert_eq!(
             props(&glyphs),
             [(8, 1, 0), (5, 1, 1), (6, 1, 2), (7, 0, 0)],
             "the trailing mark never joined a ligature, so it keeps id 0"
         );
-        assert_eq!(num_comps(&glyphs[0], Some(&gdef)), 3);
+        assert_eq!(num_comps(&glyphs[0], &GlyphClasses::new(Some(&gdef))), 3);
     }
 
     #[test]
@@ -322,9 +381,9 @@ mod tests {
         let bytes = gdef_bytes();
         let gdef = Gdef::parse(&bytes).unwrap();
         let mut glyphs = run(&[1, 5, 6]);
-        ligate(&mut glyphs, 0, &[0, 1, 2], 4, Some(&gdef), plain, MC);
+        ligate_mc(&mut glyphs, &[0, 1, 2], 4, &gdef);
         assert_eq!(props(&glyphs), [(4, 0, 0)]);
-        assert_eq!(num_comps(&glyphs[0], Some(&gdef)), 1);
+        assert_eq!(num_comps(&glyphs[0], &GlyphClasses::new(Some(&gdef))), 1);
     }
 
     #[test]
@@ -332,7 +391,7 @@ mod tests {
         let bytes = gdef_bytes();
         let gdef = Gdef::parse(&bytes).unwrap();
         let mut glyphs = run(&[1, 2, 5]);
-        ligate(&mut glyphs, 0, &[0, 1], 8, Some(&gdef), plain, MC);
+        ligate_mc(&mut glyphs, &[0, 1], 8, &gdef);
         assert_eq!(props(&glyphs), [(8, 1, 0), (5, 0, 0)]);
     }
 
@@ -345,11 +404,11 @@ mod tests {
         // two-component ligature, which is component 2 of the new
         // three-component one.
         let mut glyphs = run(&[3, 1, 5, 2]);
-        ligate(&mut glyphs, 1, &[0, 2], 8, Some(&gdef), plain, MC);
+        ligate_mc(&mut glyphs, &[1, 3], 8, &gdef);
         assert_eq!(props(&glyphs), [(3, 0, 0), (8, 1, 0), (5, 1, 1)]);
-        ligate(&mut glyphs, 0, &[0, 1], 9, Some(&gdef), plain, MC);
+        ligate_mc(&mut glyphs, &[0, 1], 9, &gdef);
         assert_eq!(props(&glyphs), [(9, 2, 0), (5, 2, 2)]);
-        assert_eq!(num_comps(&glyphs[0], Some(&gdef)), 3);
+        assert_eq!(num_comps(&glyphs[0], &GlyphClasses::new(Some(&gdef))), 3);
     }
 
     #[test]
@@ -357,10 +416,10 @@ mod tests {
         let bytes = gdef_bytes();
         let gdef = Gdef::parse(&bytes).unwrap();
         let mut glyphs = run(&[1, 5, 2, 3]);
-        ligate(&mut glyphs, 0, &[0, 2], 8, Some(&gdef), plain, MC);
-        ligate(&mut glyphs, 0, &[0, 2], 9, Some(&gdef), plain, MC);
+        ligate_mc(&mut glyphs, &[0, 2], 8, &gdef);
+        ligate_mc(&mut glyphs, &[0, 2], 9, &gdef);
         assert_eq!(props(&glyphs), [(9, 2, 0), (5, 2, 1)]);
-        assert_eq!(num_comps(&glyphs[0], Some(&gdef)), 3);
+        assert_eq!(num_comps(&glyphs[0], &GlyphClasses::new(Some(&gdef))), 3);
     }
 
     #[test]
@@ -368,8 +427,8 @@ mod tests {
         let bytes = gdef_bytes();
         let gdef = Gdef::parse(&bytes).unwrap();
         let mut glyphs = run(&[1, 2, 3, 4]);
-        ligate(&mut glyphs, 0, &[0, 1], 8, Some(&gdef), plain, MC);
-        ligate(&mut glyphs, 1, &[0, 1], 9, Some(&gdef), plain, MC);
+        ligate_mc(&mut glyphs, &[0, 1], 8, &gdef);
+        ligate_mc(&mut glyphs, &[1, 2], 9, &gdef);
         assert_eq!(props(&glyphs), [(8, 1, 0), (9, 2, 0)]);
     }
 
@@ -383,48 +442,9 @@ mod tests {
         // multiplied any more.
         let bytes = gdef_bytes();
         let gdef = Gdef::parse(&bytes).unwrap();
-        ligate(&mut glyphs, 0, &[0, 1], 8, Some(&gdef), plain, MC);
+        ligate_mc(&mut glyphs, &[0, 1], 8, &gdef);
         assert!(!is_multiplied(&glyphs[0]));
         assert!(is_multiplied(&glyphs[1]));
-    }
-
-    #[test]
-    fn ligature_clusters_merge_at_monotone_levels_only() {
-        let bytes = gdef_bytes();
-        let gdef = Gdef::parse(&bytes).unwrap();
-        // base(1)@0 mark(5)@1 base(2)@2, ligating the two bases around
-        // the mark.
-        for (level, clusters) in [
-            (ClusterLevel::MonotoneGraphemes, [0, 0]),
-            (ClusterLevel::MonotoneCharacters, [0, 0]),
-            (ClusterLevel::Characters, [0, 1]),
-            (ClusterLevel::Graphemes, [0, 1]),
-        ] {
-            let mut glyphs = run(&[1, 5, 2]);
-            ligate(&mut glyphs, 0, &[0, 2], 8, Some(&gdef), plain, level);
-            let got: Vec<u32> = glyphs.iter().map(|g| g.cluster).collect();
-            assert_eq!(got, clusters, "{level:?}");
-        }
-        // Text in reversed grapheme order: the ligature takes the
-        // smallest cluster at a monotone level, its first component's
-        // otherwise.
-        let mut glyphs: Vec<Glyph> = [(1, 4), (2, 2)]
-            .iter()
-            .map(|&(id, c)| Glyph::new(id, c))
-            .collect();
-        let mut chars = glyphs.clone();
-        ligate(&mut glyphs, 0, &[0, 1], 8, Some(&gdef), plain, MC);
-        assert_eq!(glyphs[0].cluster, 2);
-        ligate(
-            &mut chars,
-            0,
-            &[0, 1],
-            8,
-            Some(&gdef),
-            plain,
-            ClusterLevel::Characters,
-        );
-        assert_eq!(chars[0].cluster, 4);
     }
 
     #[test]

@@ -8,6 +8,7 @@ use super::{IndicConfig, RephMode, RephPosition, Syllable, SyllableKind};
 use crate::buffer::{ClusterLevel, Glyph, IndicPosition};
 use crate::shape::{feature_would_substitute, merge_clusters};
 use crate::tables::gdef::Gdef;
+use crate::tables::layout::Joiners;
 use crate::tables::Gsub;
 use crate::unicode::indic_category::{
     positional_category, syllabic_category, IndicPositionalCategory, IndicSyllabicCategory,
@@ -221,20 +222,18 @@ pub(super) fn compute_half_mask(
         if let Some(&(_, hit)) = cache.iter().find(|(k, _)| *k == key) {
             return hit;
         }
-        let hit = [*b"blwf", *b"pstf", *b"abvf"].iter().any(|tag| {
-            feature_would_substitute(
-                gsub,
-                gdef,
-                *tag,
-                config.script_priority,
-                &[halant_glyph, c2_glyph],
-            ) || feature_would_substitute(
-                gsub,
-                gdef,
-                *tag,
-                config.script_priority,
-                &[c2_glyph, halant_glyph],
-            )
+        let hit = [*b"blwf", *b"pstf", *b"abvf"].iter().any(|&tag| {
+            let prio = config.script_priority;
+            let joiners = Joiners::MANUAL;
+            feature_would_substitute(gsub, gdef, tag, prio, &[halant_glyph, c2_glyph], joiners)
+                || feature_would_substitute(
+                    gsub,
+                    gdef,
+                    tag,
+                    prio,
+                    &[c2_glyph, halant_glyph],
+                    joiners,
+                )
         });
         cache.push((key, hit));
         hit

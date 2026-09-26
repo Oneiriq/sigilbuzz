@@ -56,6 +56,7 @@ use crate::buffer::Glyph;
 use crate::ot::arabic::{assign_from_types_in_context, JoiningContext, JoiningForm};
 use crate::shape::{
     apply_gsub_feature_masked, apply_gsub_features_merged, apply_locl_ccmp_if_length_preserving,
+    JoinerTable,
 };
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
@@ -169,7 +170,9 @@ pub fn shape_mongolian_in_context(
     // runs `locl` and `ccmp` together, ahead of the positional
     // features. The joining forms below index glyphs by code point, so
     // a `ccmp` that changes the glyph count waits until after them.
-    let early = apply_locl_ccmp_if_length_preserving(gsub, glyphs, gdef, MONG_SCRIPT_PRIORITY);
+    let table = JoinerTable::Use;
+    let early =
+        apply_locl_ccmp_if_length_preserving(gsub, glyphs, gdef, MONG_SCRIPT_PRIORITY, table);
 
     // Positional pass: `isol`/`init`/`medi`/`fina` each apply only
     // at positions whose computed JoiningForm matches.
@@ -182,12 +185,22 @@ pub fn shape_mongolian_in_context(
             (JoiningForm::Fina, *b"fina"),
         ] {
             let mask: Vec<bool> = forms.iter().map(|&f| f == form).collect();
-            apply_gsub_feature_masked(gsub, glyphs, gdef, tag, MONG_SCRIPT_PRIORITY, &mask);
+            let joiners = table.joiners(tag);
+            apply_gsub_feature_masked(
+                gsub,
+                glyphs,
+                gdef,
+                tag,
+                MONG_SCRIPT_PRIORITY,
+                &mask,
+                joiners,
+            );
         }
     }
     if !early {
         let locl_ccmp = [*b"locl", *b"ccmp"];
-        apply_gsub_features_merged(gsub, glyphs, gdef, &[], &locl_ccmp, MONG_SCRIPT_PRIORITY);
+        let prio = MONG_SCRIPT_PRIORITY;
+        apply_gsub_features_merged(gsub, glyphs, gdef, &[], &locl_ccmp, prio, table);
     }
 
     // calt / liga are applied by the generic default-GSUB pass

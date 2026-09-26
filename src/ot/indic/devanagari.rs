@@ -73,6 +73,7 @@ use super::{IndicConfig, RephMode, RephPosition};
 use crate::buffer::{ClusterLevel, Glyph};
 use crate::shape::{
     apply_gsub_feature_in_scripts, apply_gsub_feature_masked, apply_locl_ccmp_if_length_preserving,
+    JoinerTable,
 };
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
@@ -119,12 +120,22 @@ pub fn shape_indic(
         tag_positions(codepoints, glyphs, syllable);
     }
 
+    // The joiner handling of HarfBuzz's shaper for the script: the
+    // Indic shaper's features take ZWJ and ZWNJ as ordinary glyphs;
+    // Sinhala goes to the Universal Shaping Engine instead.
+    let table = if config.script == Script::Sinhala {
+        JoinerTable::Use
+    } else {
+        JoinerTable::Indic
+    };
+    let prio = config.script_priority;
+
     // HarfBuzz runs `locl` and `ccmp` as one stage before initial
     // reordering. Everything below indexes glyphs by code point, so a
     // font whose `ccmp` changes the glyph count gets `locl` as the
     // first basic feature and `ccmp` last instead.
     let early = gsub.is_some_and(|gsub| {
-        apply_locl_ccmp_if_length_preserving(gsub, glyphs, gdef, config.script_priority)
+        apply_locl_ccmp_if_length_preserving(gsub, glyphs, gdef, config.script_priority, table)
     });
 
     // Initial reordering is per-syllable and mutates `glyphs` in
@@ -152,20 +163,15 @@ pub fn shape_indic(
     if let Some(gsub) = gsub {
         let half_mask = compute_half_mask(gsub, gdef, codepoints, glyphs, config, &syllables);
         if !early {
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"locl", 0, config.script_priority);
+            let joiners = table.joiners(*b"locl");
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"locl", 0, prio, joiners);
         }
-        for tag in INDIC_BASIC_FEATURES {
-            if *tag == b"half" {
-                apply_gsub_feature_masked(
-                    gsub,
-                    glyphs,
-                    gdef,
-                    **tag,
-                    config.script_priority,
-                    &half_mask,
-                );
+        for &&tag in INDIC_BASIC_FEATURES {
+            let joiners = table.joiners(tag);
+            if tag == *b"half" {
+                apply_gsub_feature_masked(gsub, glyphs, gdef, tag, prio, &half_mask, joiners);
             } else {
-                apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, config.script_priority);
+                apply_gsub_feature_in_scripts(gsub, glyphs, gdef, tag, 0, prio, joiners);
             }
         }
     }
@@ -193,11 +199,13 @@ pub fn shape_indic(
 
     // Presentation features.
     if let Some(gsub) = gsub {
-        for tag in INDIC_PRESENTATION_FEATURES {
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, config.script_priority);
+        for &&tag in INDIC_PRESENTATION_FEATURES {
+            let joiners = table.joiners(tag);
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, tag, 0, prio, joiners);
         }
         if !early {
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"ccmp", 0, config.script_priority);
+            let joiners = table.joiners(*b"ccmp");
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"ccmp", 0, prio, joiners);
         }
     }
 }

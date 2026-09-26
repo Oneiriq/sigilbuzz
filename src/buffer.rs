@@ -97,10 +97,12 @@ pub struct Glyph {
 /// Bits packed into [`Glyph::unicode_props`]. Laid out to leave room
 /// for future expansion without shifting existing meanings.
 ///
-/// Bits 7 to 15 are reserved for the shaper's ligature bookkeeping
-/// (the ligature id and component index GSUB records for GPOS mark
-/// attachment, HarfBuzz's `lig_props`); callers building glyphs by
-/// hand should leave them zero.
+/// Bits 3 to 5 hold the shaper's other matching props (hidden
+/// ignorables and the synthesized glyph class, see
+/// [`crate::tables::layout::skip_iter::match_prop`]) and bits 7 to 15
+/// its ligature bookkeeping (the ligature id and component index GSUB
+/// records for GPOS mark attachment, HarfBuzz's `lig_props`); callers
+/// building glyphs by hand should leave them zero.
 pub mod unicode_prop {
     /// The glyph's source codepoint is default ignorable in HarfBuzz's
     /// sense (ZWJ, ZWNJ, bidi controls, variation selectors, soft

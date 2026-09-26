@@ -6,7 +6,9 @@ use alloc::vec::Vec;
 
 use super::{parse_sequence_lookup_records, SequenceLookupRecord};
 use crate::error::{Error, Result};
-use crate::tables::layout::skip_iter::MatchFilter;
+use crate::tables::layout::skip_iter::{
+    match_backtrack, match_input, match_lookahead, InputMatch, MatchContext, MatchGlyph,
+};
 use crate::tables::layout::{ClassDef, Coverage};
 use crate::tables::parse::Reader;
 
@@ -370,64 +372,26 @@ impl<'a> ChainContext3<'a> {
         &self.lookups
     }
 
-    /// Tests whether the run matches starting at `i`. Pass-through
-    /// filter shorthand.
+    /// Matches input, lookahead and backtrack coverages around
+    /// `glyphs[i]`, which must be in the first input coverage. `None`
+    /// for an empty input sequence, which matches nothing (HarfBuzz
+    /// reads its first coverage from a null offset).
     #[must_use]
-    pub fn matches(&self, glyphs: &[u16], i: usize) -> bool {
-        self.matches_filtered(glyphs, i, &MatchFilter::none())
-            .is_some()
-    }
-
-    /// Filter-aware match: returns the raw span of the input match
-    /// (first to last matched glyph, inclusive) or `None` when any
-    /// of the backtrack / input / lookahead coverages fail.
-    #[must_use]
-    pub fn matches_filtered(
+    pub fn matches(
         &self,
-        glyphs: &[u16],
+        glyphs: &[MatchGlyph],
         i: usize,
-        filter: &MatchFilter<'_>,
-    ) -> Option<usize> {
-        // Cheapest test first: input[0] must match the cursor glyph.
-        // Most cursor positions fail here, so checking before walking
-        // backtrack avoids `prev_unskipped` work we'd throw away.
-        if self.input.is_empty() {
-            // Spec-wise empty input is degenerate; report a zero-span
-            // match so the caller can still advance by one.
-            return Some(0);
-        }
-        if !self.input[0].contains(*glyphs.get(i)?) {
+        cx: &MatchContext<'_>,
+    ) -> Option<InputMatch> {
+        let (first, rest) = self.input.split_first()?;
+        if !first.contains(glyphs.get(i)?.id) {
             return None;
         }
-        let mut last = i;
-        let mut cursor = i + 1;
-        for cov in &self.input[1..] {
-            let pos = filter.next_unskipped(glyphs, cursor)?;
-            if !cov.contains(glyphs[pos]) {
-                return None;
-            }
-            last = pos;
-            cursor = pos + 1;
-        }
-        // Backtrack: walk left from `i`.
-        let mut bt_cursor = i;
-        for cov in &self.backtrack {
-            let pos = filter.prev_unskipped(glyphs, bt_cursor)?;
-            if !cov.contains(glyphs[pos]) {
-                return None;
-            }
-            bt_cursor = pos;
-        }
-        // Lookahead: walk right from last+1.
-        let mut la_cursor = last + 1;
-        for cov in &self.lookahead {
-            let pos = filter.next_unskipped(glyphs, la_cursor)?;
-            if !cov.contains(glyphs[pos]) {
-                return None;
-            }
-            la_cursor = pos + 1;
-        }
-        Some(last - i + 1)
+        let m = match_input(glyphs, i, rest.len(), cx, |k, g| rest[k].contains(g))?;
+        let (ahead, back) = (&self.lookahead, &self.backtrack);
+        let context = match_lookahead(glyphs, m.end, ahead.len(), cx, |k, g| ahead[k].contains(g))
+            && match_backtrack(glyphs, i, back.len(), cx, |k, g| back[k].contains(g));
+        context.then_some(m)
     }
 }
 

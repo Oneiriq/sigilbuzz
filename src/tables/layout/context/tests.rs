@@ -2,6 +2,20 @@
 //! with and without a mark-skipping filter.
 
 use super::*;
+use crate::tables::layout::skip_iter::{match_prop, InputMatch, MatchContext, MatchGlyph};
+
+/// A GSUB context with no lookup flags and automatic joiners.
+const PLAIN: MatchContext<'static> = MatchContext::plain();
+
+/// A run of glyphs with no props.
+fn run(ids: &[u16]) -> Vec<MatchGlyph> {
+    ids.iter().map(|&id| MatchGlyph::new(id)).collect()
+}
+
+/// Glyph positions from the first input glyph to the last, inclusive.
+fn span(m: &InputMatch) -> usize {
+    m.end - m.positions.as_slice()[0]
+}
 
 fn build_coverage_format1(glyphs: &[u16]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -71,16 +85,16 @@ fn context1_parses_and_matches_a_rule() {
     out[rule_off_slot..rule_off_slot + 2].copy_from_slice(&(rule_off_rel as u16).to_be_bytes());
 
     let ctx = Context1::parse(&out).unwrap();
-    let (n, lookups) = ctx.matches(&[10, 20, 30, 99], 0).unwrap();
-    assert_eq!(n, 3);
+    let (m, lookups) = ctx.matches(&run(&[10, 20, 30, 99]), 0, &PLAIN).unwrap();
+    assert_eq!(span(&m), 3);
     assert_eq!(lookups.len(), 1);
     assert_eq!(lookups[0].sequence_index, 1);
     assert_eq!(lookups[0].lookup_list_index, 7);
 
     // First glyph uncovered: no match.
-    assert!(ctx.matches(&[11, 20, 30], 0).is_none());
+    assert!(ctx.matches(&run(&[11, 20, 30]), 0, &PLAIN).is_none());
     // Input tail mismatch.
-    assert!(ctx.matches(&[10, 21, 30], 0).is_none());
+    assert!(ctx.matches(&run(&[10, 21, 30]), 0, &PLAIN).is_none());
 }
 
 #[test]
@@ -136,13 +150,13 @@ fn context2_class_based_matches_and_rejects() {
     out[cd_slot..cd_slot + 2].copy_from_slice(&(cd_off as u16).to_be_bytes());
 
     let ctx = Context2::parse(&out).unwrap();
-    let (n, lookups) = ctx.matches(&[10, 25], 0).unwrap();
-    assert_eq!(n, 2);
+    let (m, lookups) = ctx.matches(&run(&[10, 25]), 0, &PLAIN).unwrap();
+    assert_eq!(span(&m), 2);
     assert_eq!(lookups[0].lookup_list_index, 5);
     // Mismatched class for second slot.
-    assert!(ctx.matches(&[10, 40], 0).is_none());
+    assert!(ctx.matches(&run(&[10, 40]), 0, &PLAIN).is_none());
     // Uncovered first glyph.
-    assert!(ctx.matches(&[12, 25], 0).is_none());
+    assert!(ctx.matches(&run(&[12, 25]), 0, &PLAIN).is_none());
 }
 
 #[test]
@@ -166,9 +180,9 @@ fn context3_matches_coverage_input() {
     out[cov1_slot..cov1_slot + 2].copy_from_slice(&(cov1_off as u16).to_be_bytes());
 
     let ctx = Context3::parse(&out).unwrap();
-    assert!(ctx.matches(&[5, 7], 0));
-    assert!(ctx.matches(&[6, 7], 0));
-    assert!(!ctx.matches(&[5, 8], 0));
+    assert!(ctx.matches(&run(&[5, 7]), 0, &PLAIN).is_some());
+    assert!(ctx.matches(&run(&[6, 7]), 0, &PLAIN).is_some());
+    assert!(ctx.matches(&run(&[5, 8]), 0, &PLAIN).is_none());
     assert_eq!(ctx.lookups()[0].lookup_list_index, 3);
 }
 
@@ -201,10 +215,10 @@ fn chain_context3_walks_backtrack_input_lookahead() {
 
     let ctx = ChainContext3::parse(&out).unwrap();
     assert_eq!(ctx.context_len(), (1, 1, 1));
-    assert!(ctx.matches(&[10, 20, 30], 1));
-    assert!(!ctx.matches(&[11, 20, 30], 1));
-    assert!(!ctx.matches(&[10, 21, 30], 1));
-    assert!(!ctx.matches(&[10, 20, 31], 1));
+    assert!(ctx.matches(&run(&[10, 20, 30]), 1, &PLAIN).is_some());
+    assert!(ctx.matches(&run(&[11, 20, 30]), 1, &PLAIN).is_none());
+    assert!(ctx.matches(&run(&[10, 21, 30]), 1, &PLAIN).is_none());
+    assert!(ctx.matches(&run(&[10, 20, 31]), 1, &PLAIN).is_none());
 }
 
 #[test]
@@ -243,12 +257,12 @@ fn chain_context1_glyph_based_matches() {
     out[cov_slot..cov_slot + 2].copy_from_slice(&(cov_off as u16).to_be_bytes());
 
     let ctx = ChainContext1::parse(&out).unwrap();
-    let (n, lookups) = ctx.matches(&[5, 10, 20, 30], 1).unwrap();
-    assert_eq!(n, 2);
+    let (m, lookups) = ctx.matches(&run(&[5, 10, 20, 30]), 1, &PLAIN).unwrap();
+    assert_eq!(span(&m), 2);
     assert_eq!(lookups[0].lookup_list_index, 4);
-    assert!(ctx.matches(&[99, 10, 20, 30], 1).is_none()); // bt mismatch
-    assert!(ctx.matches(&[5, 10, 21, 30], 1).is_none()); // input mismatch
-    assert!(ctx.matches(&[5, 10, 20, 31], 1).is_none()); // la mismatch
+    assert!(ctx.matches(&run(&[99, 10, 20, 30]), 1, &PLAIN).is_none()); // bt mismatch
+    assert!(ctx.matches(&run(&[5, 10, 21, 30]), 1, &PLAIN).is_none()); // input mismatch
+    assert!(ctx.matches(&run(&[5, 10, 20, 31]), 1, &PLAIN).is_none()); // la mismatch
 }
 
 #[test]
@@ -306,12 +320,12 @@ fn chain_context2_class_based_matches() {
     }
 
     let ctx = ChainContext2::parse(&out).unwrap();
-    let (n, lookups) = ctx.matches(&[5, 10, 20, 30], 1).unwrap();
-    assert_eq!(n, 2);
+    let (m, lookups) = ctx.matches(&run(&[5, 10, 20, 30]), 1, &PLAIN).unwrap();
+    assert_eq!(span(&m), 2);
     assert_eq!(lookups[0].lookup_list_index, 9);
-    assert!(ctx.matches(&[99, 10, 20, 30], 1).is_none());
-    assert!(ctx.matches(&[5, 10, 99, 30], 1).is_none());
-    assert!(ctx.matches(&[5, 10, 20, 99], 1).is_none());
+    assert!(ctx.matches(&run(&[99, 10, 20, 30]), 1, &PLAIN).is_none());
+    assert!(ctx.matches(&run(&[5, 10, 99, 30]), 1, &PLAIN).is_none());
+    assert!(ctx.matches(&run(&[5, 10, 20, 99]), 1, &PLAIN).is_none());
 }
 
 #[test]
@@ -356,10 +370,10 @@ fn chain_context2_null_class_defs_put_every_glyph_in_class_zero() {
     assert_eq!(ctx.lookahead_class().class_of(11), 0);
     // Any glyph satisfies a class-0 backtrack or lookahead slot,
     // including ones the input ClassDef puts in another class.
-    assert!(ctx.matches(&[99, 10, 77], 1).is_some());
-    assert!(ctx.matches(&[11, 10, 11], 1).is_some());
+    assert!(ctx.matches(&run(&[99, 10, 77]), 1, &PLAIN).is_some());
+    assert!(ctx.matches(&run(&[11, 10, 11]), 1, &PLAIN).is_some());
     // The context still needs a glyph on each side.
-    assert!(ctx.matches(&[10, 77], 0).is_none());
+    assert!(ctx.matches(&run(&[10, 77]), 0, &PLAIN).is_none());
 }
 
 /// Build a minimal GDEF where each listed glyph has the given class.
@@ -389,7 +403,9 @@ fn build_gdef_with_classes(classes: &[(u16, u16)]) -> alloc::vec::Vec<u8> {
 #[test]
 fn context3_filtered_matches_across_marks() {
     use crate::tables::gdef::Gdef;
-    use crate::tables::layout::skip_iter::{MatchFilter, LOOKUP_FLAG_IGNORE_MARKS};
+    use crate::tables::layout::skip_iter::{
+        Joiners, LayoutTable, MatchFilter, LOOKUP_FLAG_IGNORE_MARKS,
+    };
 
     // Input: [cov{5,6}, cov{7}]. Same encoding as the pass-through test.
     let mut out = Vec::new();
@@ -416,15 +432,20 @@ fn context3_filtered_matches_across_marks() {
     let filter = MatchFilter::for_lookup(LOOKUP_FLAG_IGNORE_MARKS, Some(&gdef), None);
 
     // With the filter the mark is hopped over; span covers index 0..=2.
-    assert_eq!(ctx.matches_filtered(&[5, 99, 7], 0, &filter), Some(3));
+    let cx = MatchContext::new(filter, LayoutTable::Gsub, Joiners::AUTO);
+    let m = ctx.matches(&run(&[5, 99, 7]), 0, &cx).unwrap();
+    assert_eq!(m.positions.as_slice(), [0, 2]);
+    assert_eq!(span(&m), 3);
     // Without the filter the plain .matches fails at the mark.
-    assert!(!ctx.matches(&[5, 99, 7], 0));
+    assert!(ctx.matches(&run(&[5, 99, 7]), 0, &PLAIN).is_none());
 }
 
 #[test]
 fn chain_context3_filtered_backtrack_skips_marks() {
     use crate::tables::gdef::Gdef;
-    use crate::tables::layout::skip_iter::{MatchFilter, LOOKUP_FLAG_IGNORE_MARKS};
+    use crate::tables::layout::skip_iter::{
+        Joiners, LayoutTable, MatchFilter, LOOKUP_FLAG_IGNORE_MARKS,
+    };
 
     // bt=[cov{10}], input=[cov{20}], lookahead=[cov{30}].
     let mut out = Vec::new();
@@ -458,9 +479,11 @@ fn chain_context3_filtered_backtrack_skips_marks() {
     let filter = MatchFilter::for_lookup(LOOKUP_FLAG_IGNORE_MARKS, Some(&gdef), None);
 
     // [10, 99, 20, 30]: plain matcher fails on the mark in backtrack (i=2).
-    assert!(!ctx.matches(&[10, 99, 20, 30], 2));
+    assert!(ctx.matches(&run(&[10, 99, 20, 30]), 2, &PLAIN).is_none());
     // With the filter, the mark is skipped and the match fires.
-    assert_eq!(ctx.matches_filtered(&[10, 99, 20, 30], 2, &filter), Some(1));
+    let cx = MatchContext::new(filter, LayoutTable::Gsub, Joiners::AUTO);
+    let m = ctx.matches(&run(&[10, 99, 20, 30]), 2, &cx).unwrap();
+    assert_eq!(span(&m), 1);
 }
 
 #[test]
@@ -473,4 +496,111 @@ fn rejects_format_mismatch() {
     assert!(ChainContext1::parse(&bytes).is_err());
     assert!(ChainContext2::parse(&bytes).is_err());
     assert!(ChainContext3::parse(&bytes).is_err());
+}
+
+/// A default-ignorable glyph with extra props (ZWJ, ZWNJ, ...).
+fn ignorable(id: u16, extra: u16) -> MatchGlyph {
+    MatchGlyph::with_props(id, match_prop::DEFAULT_IGNORABLE | extra)
+}
+
+/// Context format 3 over `[cov{5}, cov{second}]`, with no lookups.
+fn context3(second: u16) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&3u16.to_be_bytes()); // format
+    out.extend_from_slice(&2u16.to_be_bytes()); // glyphCount
+    out.extend_from_slice(&0u16.to_be_bytes()); // lookupCount
+    out.extend_from_slice(&10u16.to_be_bytes()); // cov[0]
+    out.extend_from_slice(&16u16.to_be_bytes()); // cov[1]
+    out.extend_from_slice(&build_coverage_format1(&[5]));
+    out.extend_from_slice(&build_coverage_format1(&[second]));
+    out
+}
+
+#[test]
+fn input_matching_skips_ignorables_the_rule_does_not_name() {
+    use crate::tables::layout::skip_iter::{Joiners, LayoutTable, MatchFilter};
+    let bytes = context3(7);
+    let ctx = Context3::parse(&bytes).unwrap();
+    let with = |joiners| MatchContext::new(MatchFilter::none(), LayoutTable::Gsub, joiners);
+    let gpos = MatchContext::new(MatchFilter::none(), LayoutTable::Gpos, Joiners::AUTO);
+
+    // Soft hyphen (plain ignorable) and ZWJ are skipped with automatic
+    // joiners; the match spans them.
+    let shy = [MatchGlyph::new(5), ignorable(50, 0), MatchGlyph::new(7)];
+    let m = ctx.matches(&shy, 0, &PLAIN).unwrap();
+    assert_eq!(m.positions.as_slice(), [0, 2]);
+    assert_eq!(m.end, 3);
+    let zwj = [
+        MatchGlyph::new(5),
+        ignorable(51, match_prop::ZWJ),
+        MatchGlyph::new(7),
+    ];
+    assert!(ctx.matches(&zwj, 0, &PLAIN).is_some());
+    // A manual-ZWJ feature must name the ZWJ.
+    assert!(ctx.matches(&zwj, 0, &with(Joiners::MANUAL_ZWJ)).is_none());
+
+    // GSUB input matching never skips ZWNJ; GPOS does.
+    let zwnj = [
+        MatchGlyph::new(5),
+        ignorable(52, match_prop::ZWNJ),
+        MatchGlyph::new(7),
+    ];
+    assert!(ctx.matches(&zwnj, 0, &PLAIN).is_none());
+    assert!(ctx.matches(&zwnj, 0, &gpos).is_some());
+
+    // A hidden ignorable (CGJ) stays visible to GSUB, not to GPOS.
+    let cgj = [
+        MatchGlyph::new(5),
+        ignorable(53, match_prop::HIDDEN),
+        MatchGlyph::new(7),
+    ];
+    assert!(ctx.matches(&cgj, 0, &PLAIN).is_none());
+    assert!(ctx.matches(&cgj, 0, &gpos).is_some());
+}
+
+#[test]
+fn an_ignorable_the_rule_names_is_matched_not_skipped() {
+    let bytes = context3(51);
+    let ctx = Context3::parse(&bytes).unwrap();
+    let zwj = [
+        MatchGlyph::new(5),
+        ignorable(51, match_prop::ZWJ),
+        MatchGlyph::new(7),
+    ];
+    let m = ctx.matches(&zwj, 0, &PLAIN).unwrap();
+    assert_eq!(m.positions.as_slice(), [0, 1]);
+}
+
+#[test]
+fn context_walks_skip_zwj_always_and_zwnj_unless_manual() {
+    use crate::tables::layout::skip_iter::{Joiners, LayoutTable, MatchFilter};
+    // Backtrack [cov{10}], input [cov{20}], lookahead [cov{30}].
+    let mut out = Vec::new();
+    out.extend_from_slice(&3u16.to_be_bytes());
+    for off in [18u16, 24, 30] {
+        out.extend_from_slice(&1u16.to_be_bytes());
+        out.extend_from_slice(&off.to_be_bytes());
+    }
+    out.extend_from_slice(&0u16.to_be_bytes()); // lookup count
+    assert_eq!(out.len(), 16);
+    out.extend_from_slice(&[0, 0]);
+    out.extend_from_slice(&build_coverage_format1(&[10]));
+    out.extend_from_slice(&build_coverage_format1(&[20]));
+    out.extend_from_slice(&build_coverage_format1(&[30]));
+    let ctx = ChainContext3::parse(&out).unwrap();
+    let manual = MatchContext::new(MatchFilter::none(), LayoutTable::Gsub, Joiners::MANUAL);
+
+    let zwj = ignorable(51, match_prop::ZWJ);
+    let zwnj = ignorable(52, match_prop::ZWNJ);
+    let (b, i, l) = (
+        MatchGlyph::new(10),
+        MatchGlyph::new(20),
+        MatchGlyph::new(30),
+    );
+    // ZWJ is skipped in backtrack and lookahead even for manual joiners.
+    assert!(ctx.matches(&[b, zwj, i, zwj, l], 2, &manual).is_some());
+    // ZWNJ is skipped only with automatic joiners.
+    assert!(ctx.matches(&[b, zwnj, i, l], 2, &PLAIN).is_some());
+    assert!(ctx.matches(&[b, zwnj, i, l], 2, &manual).is_none());
+    assert!(ctx.matches(&[b, i, zwnj, l], 1, &manual).is_none());
 }

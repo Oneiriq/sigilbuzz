@@ -73,7 +73,7 @@ pub use scripts::{
 pub(crate) use syllable::{segment_syllables, Syllable, SyllableKind};
 
 use crate::buffer::{ClusterLevel, Glyph};
-use crate::shape::apply_gsub_feature_in_scripts;
+use crate::shape::{apply_gsub_feature_in_scripts, JoinerTable};
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 
@@ -221,7 +221,16 @@ pub fn shape_khmer(
     //    the USE-mandated order.
     if let Some(gsub) = gsub {
         for tag in USE_BASIC_FEATURES {
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, KHMER_SCRIPT_PRIORITY);
+            let joiners = JoinerTable::Khmer.joiners(**tag);
+            apply_gsub_feature_in_scripts(
+                gsub,
+                glyphs,
+                gdef,
+                **tag,
+                0,
+                KHMER_SCRIPT_PRIORITY,
+                joiners,
+            );
         }
     }
 
@@ -229,7 +238,16 @@ pub fn shape_khmer(
     //    forms for the collapsed conjuncts.
     if let Some(gsub) = gsub {
         for tag in USE_TOPOGRAPHICAL_FEATURES {
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, KHMER_SCRIPT_PRIORITY);
+            let joiners = JoinerTable::Khmer.joiners(**tag);
+            apply_gsub_feature_in_scripts(
+                gsub,
+                glyphs,
+                gdef,
+                **tag,
+                0,
+                KHMER_SCRIPT_PRIORITY,
+                joiners,
+            );
         }
     }
 
@@ -253,10 +271,14 @@ pub fn shape_khmer(
 /// worst. Passing `false` skips it. `level` is the buffer's cluster
 /// level, which decides whether reordered glyphs merge clusters.
 ///
+/// `table` is the joiner handling of the HarfBuzz shaper the script
+/// maps to (USE, Myanmar, or the default shaper for Thai, Lao and
+/// Hangul).
+///
 /// [`UseCategory`]: crate::unicode::use_category::UseCategory
 /// [`UsePosition`]: crate::unicode::use_category::UsePosition
 #[allow(clippy::too_many_arguments)]
-pub fn shape_use(
+pub(crate) fn shape_use(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
@@ -266,6 +288,7 @@ pub fn shape_use(
     topographical_features: &[&[u8; 4]],
     reorder_prebase: bool,
     level: ClusterLevel,
+    table: JoinerTable,
 ) {
     if codepoints.is_empty() || glyphs.is_empty() {
         return;
@@ -299,7 +322,16 @@ pub fn shape_use(
             // Snapshot pre-`pref` glyph IDs so the reorder can detect
             // which positions actually changed.
             let pre_ids: Vec<u32> = glyphs.iter().map(|g| g.glyph_id).collect();
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"pref", 0, script_priority);
+            let joiners = table.joiners(*b"pref");
+            apply_gsub_feature_in_scripts(
+                gsub,
+                glyphs,
+                gdef,
+                *b"pref",
+                0,
+                script_priority,
+                joiners,
+            );
             // The pref pass on the fonts we care about is a single-subst
             // (length-preserving), so the snapshot length still aligns.
             // If a future font ships a pref ligature that changes glyph
@@ -315,11 +347,29 @@ pub fn shape_use(
                 if **tag == *b"pref" {
                     continue;
                 }
-                apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority);
+                let joiners = table.joiners(**tag);
+                apply_gsub_feature_in_scripts(
+                    gsub,
+                    glyphs,
+                    gdef,
+                    **tag,
+                    0,
+                    script_priority,
+                    joiners,
+                );
             }
         } else {
             for tag in basic_features {
-                apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority);
+                let joiners = table.joiners(**tag);
+                apply_gsub_feature_in_scripts(
+                    gsub,
+                    glyphs,
+                    gdef,
+                    **tag,
+                    0,
+                    script_priority,
+                    joiners,
+                );
             }
         }
     }
@@ -327,7 +377,8 @@ pub fn shape_use(
     // 4. Topographical features.
     if let Some(gsub) = gsub {
         for tag in topographical_features {
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority);
+            let joiners = table.joiners(**tag);
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority, joiners);
         }
     }
 }

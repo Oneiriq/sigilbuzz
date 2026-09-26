@@ -18,6 +18,7 @@ use super::{apply_gsub_feature_masked, feature_disabled, Feature};
 use crate::buffer::Glyph;
 use crate::tables::cmap::Cmap;
 use crate::tables::gdef::Gdef;
+use crate::tables::layout::Joiners;
 use crate::tables::Gsub;
 use crate::unicode::mirroring::bidi_mirroring_glyph;
 
@@ -46,5 +47,14 @@ pub(super) fn apply_rtlm(
         return;
     }
     let mask: Vec<bool> = mirrored.iter().map(|m| !m).collect();
-    apply_gsub_feature_masked(gsub, glyphs, gdef, *b"rtlm", script_priority, &mask);
+    let joiners = Joiners::AUTO;
+    apply_gsub_feature_masked(
+        gsub,
+        glyphs,
+        gdef,
+        *b"rtlm",
+        script_priority,
+        &mask,
+        joiners,
+    );
 }

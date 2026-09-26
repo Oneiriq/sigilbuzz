@@ -14,6 +14,7 @@ use super::{
     USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES,
 };
 use crate::buffer::{ClusterLevel, Glyph};
+use crate::shape::JoinerTable;
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 
@@ -38,6 +39,7 @@ pub fn shape_myanmar(
         MYANMAR_TOPOGRAPHICAL_FEATURES,
         true,
         level,
+        JoinerTable::Myanmar,
     );
 }
 
@@ -62,6 +64,7 @@ pub fn shape_thai(
         &[],
         false,
         level,
+        JoinerTable::Default,
     );
 }
 
@@ -84,6 +87,7 @@ pub fn shape_lao(
         &[],
         false,
         level,
+        JoinerTable::Default,
     );
 }
 
@@ -117,6 +121,7 @@ pub fn shape_hangul(
         &[],
         false,
         level,
+        JoinerTable::Default,
     );
 }
 
@@ -212,6 +217,7 @@ pub fn shape_nko_in_context(
         &[],
         &[*b"locl", *b"ccmp"],
         NKO_SCRIPT_PRIORITY,
+        JoinerTable::Use,
     );
 
     // 2. Compute the joining-form vector using the shared Arabic
@@ -240,6 +246,7 @@ pub fn shape_nko_in_context(
                 tag,
                 NKO_SCRIPT_PRIORITY,
                 &mask,
+                JoinerTable::Use.joiners(tag),
             );
         }
     }
@@ -267,6 +274,7 @@ pub fn shape_buginese(
         USE_TOPOGRAPHICAL_FEATURES,
         true,
         level,
+        JoinerTable::Use,
     );
 }
 
@@ -288,6 +296,7 @@ pub fn shape_tai_tham(
         USE_TOPOGRAPHICAL_FEATURES,
         true,
         level,
+        JoinerTable::Use,
     );
 }
 
@@ -309,6 +318,7 @@ pub fn shape_balinese(
         USE_TOPOGRAPHICAL_FEATURES,
         true,
         level,
+        JoinerTable::Use,
     );
 }
 
@@ -330,6 +340,7 @@ pub fn shape_sundanese(
         USE_TOPOGRAPHICAL_FEATURES,
         true,
         level,
+        JoinerTable::Use,
     );
 }
 
@@ -351,6 +362,7 @@ pub fn shape_lepcha(
         USE_TOPOGRAPHICAL_FEATURES,
         true,
         level,
+        JoinerTable::Use,
     );
 }
 
@@ -372,6 +384,7 @@ pub fn shape_limbu(
         USE_TOPOGRAPHICAL_FEATURES,
         true,
         level,
+        JoinerTable::Use,
     );
 }
 
@@ -393,6 +406,7 @@ pub fn shape_cham(
         USE_TOPOGRAPHICAL_FEATURES,
         true,
         level,
+        JoinerTable::Use,
     );
 }
 
@@ -418,6 +432,7 @@ pub fn shape_brahmi(
         USE_TOPOGRAPHICAL_FEATURES,
         true,
         level,
+        JoinerTable::Use,
     );
 }
 
@@ -439,6 +454,7 @@ pub fn shape_sharada(
         USE_TOPOGRAPHICAL_FEATURES,
         true,
         level,
+        JoinerTable::Use,
     );
 }
 
@@ -460,6 +476,7 @@ pub fn shape_khojki(
         USE_TOPOGRAPHICAL_FEATURES,
         true,
         level,
+        JoinerTable::Use,
     );
 }
 
@@ -483,6 +500,7 @@ pub fn shape_tirhuta(
         USE_TOPOGRAPHICAL_FEATURES,
         true,
         level,
+        JoinerTable::Use,
     );
 }
 
@@ -504,6 +522,7 @@ pub fn shape_modi(
         USE_TOPOGRAPHICAL_FEATURES,
         true,
         level,
+        JoinerTable::Use,
     );
 }
 

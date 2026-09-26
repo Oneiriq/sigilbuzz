@@ -107,11 +107,13 @@ mod attach;
 mod cluster;
 mod dotted_circle;
 mod features;
+mod glyph_props;
 mod gpos;
 mod gsub;
 mod gsub_parsed;
 mod hangul;
 mod ignorables;
+mod joiners;
 mod kern;
 mod lig;
 mod native_direction;
@@ -130,6 +132,7 @@ pub(crate) use features::{
 };
 use gsub::apply_gsub_lookup;
 use gsub_parsed::filter_for_lookup;
+pub(crate) use joiners::JoinerTable;
 pub use pipeline::shape;
 use segment::ProcessedSegment;
 

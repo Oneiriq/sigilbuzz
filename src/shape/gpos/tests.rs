@@ -2,7 +2,9 @@
 //! and the pair-adjustment cursor rules.
 
 use super::*;
+use crate::buffer::unicode_prop;
 use crate::tables::gpos::value_record::{X_ADVANCE, X_ADVANCE_DEVICE, Y_ADVANCE};
+use crate::tables::layout::MatchFilter;
 use crate::tables::variation_store::ItemVariationStore;
 use alloc::vec;
 
@@ -34,7 +36,14 @@ fn stage_merges_features_in_lookup_order_and_runs_shared_lookups_once() {
     // `dist` and `kern` share lookup 1: it runs once.
     assert_eq!(indices(&stage), [1, 2, 3, 4, 5]);
     // Lookups of `mark` / `mkmk` do not pass over ZWJ.
-    let zwj = |i: u16| stage.iter().find(|l| l.index == i).unwrap().auto_zwj;
+    let zwj = |i: u16| {
+        stage
+            .iter()
+            .find(|l| l.index == i)
+            .unwrap()
+            .joiners
+            .auto_zwj
+    };
     assert!(zwj(1) && zwj(3) && zwj(4));
     assert!(!zwj(2) && !zwj(5));
 }
@@ -150,10 +159,7 @@ fn pair_pos_format1(v1_x_advance: i16, value_format2: u16, device: bool) -> Vec<
 
 fn state(filter: MatchFilter<'_>) -> LookupState<'_> {
     LookupState {
-        filter,
-        flag: 0,
-        mark_filtering_set: None,
-        auto_zwj: true,
+        mcx: MatchContext::new(filter, LayoutTable::Gpos, Joiners::AUTO),
     }
 }
 
@@ -214,8 +220,7 @@ fn pair_finds_the_second_glyph_across_default_ignorables() {
     // across it.
     let mut glyphs = vec![glyph(1), zwj, glyph(2)];
     let manual = LookupState {
-        auto_zwj: false,
-        ..state(MatchFilter::none())
+        mcx: MatchContext::new(MatchFilter::none(), LayoutTable::Gpos, Joiners::MANUAL),
     };
     let next = apply_pair(&pp, &manual, &mut glyphs, 0, &VarCtx::none(), true);
     assert_eq!(next, None);

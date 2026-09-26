@@ -36,13 +36,12 @@ use alloc::vec::Vec;
 use super::gpos::Skipper;
 use super::{lig, VarCtx};
 use crate::buffer::{Direction, Glyph};
-use crate::tables::gdef::{Gdef, GlyphClass};
 use crate::tables::gpos::{
     lookup_type as gpos_lt, CursivePos, MarkAttachment, MarkBasePos, MarkLigaPos, MarkMarkPos,
 };
 use crate::tables::layout::{
-    MatchFilter, LOOKUP_FLAG_IGNORE_BASE_GLYPHS, LOOKUP_FLAG_IGNORE_LIGATURES,
-    LOOKUP_FLAG_IGNORE_MARKS, LOOKUP_FLAG_RIGHT_TO_LEFT,
+    GlyphClasses, MatchGlyph, SkipRules, LOOKUP_FLAG_IGNORE_BASE_GLYPHS,
+    LOOKUP_FLAG_IGNORE_LIGATURES, LOOKUP_FLAG_IGNORE_MARKS, LOOKUP_FLAG_RIGHT_TO_LEFT,
 };
 
 /// How a glyph hangs from its parent.
@@ -80,16 +79,35 @@ pub(super) struct Attach<'s> {
 /// Lookup-level inputs shared by every attachment subtable of one
 /// lookup.
 pub(super) struct LookupCx<'c> {
-    pub(super) gdef: Option<&'c Gdef<'c>>,
-    pub(super) filter: &'c MatchFilter<'c>,
+    /// The lookup's GPOS input walk: its flags, its glyph classes, and
+    /// its feature's joiner handling.
+    rules: SkipRules<'c>,
+    pub(super) var: &'c VarCtx<'c>,
+}
+
+impl<'c> LookupCx<'c> {
+    /// Inputs for a lookup whose input walk is `rules`.
+    pub(super) const fn new(rules: SkipRules<'c>, var: &'c VarCtx<'c>) -> Self {
+        Self { rules, var }
+    }
+
     /// Raw `LookupFlag`; cursive attachment reads the RightToLeft bit
     /// and mark-to-mark keeps its mark-filtering part.
-    pub(super) lookup_flag: u16,
-    /// The lookup's mark filtering set index, when it has one.
-    pub(super) mark_filtering_set: Option<u16>,
-    /// Whether iteration passes over ZWJ (HarfBuzz's `auto_zwj`).
-    pub(super) ignore_zwj: bool,
-    pub(super) var: &'c VarCtx<'c>,
+    fn lookup_flag(&self) -> u16 {
+        self.rules.filter().flag()
+    }
+
+    /// Where the lookup's glyph classes come from.
+    fn classes(&self) -> GlyphClasses<'c> {
+        self.rules.filter().classes()
+    }
+
+    /// The input walk with the lookup flags replaced by `flag`, as
+    /// HarfBuzz's `set_lookup_props` does for the base searches.
+    fn walk_with_flag(&self, flag: u16) -> Skipper<'c> {
+        let filter = self.rules.filter().with_flag(flag);
+        Skipper::new(self.rules.with_filter(filter))
+    }
 }
 
 /// One parsed attachment subtable plus the bytes its anchors resolve
@@ -141,7 +159,7 @@ pub(super) fn apply_lookup(
     cx: &LookupCx<'_>,
 ) {
     for i in 0..glyphs.len() {
-        if cx.filter.is_skipped(glyphs[i].glyph_id as u16) {
+        if cx.rules.filter().is_skipped(MatchGlyph::from(&glyphs[i])) {
             continue;
         }
         for sub in subtables {
@@ -177,8 +195,9 @@ pub(super) fn apply_at(
             // HarfBuzz issue 4124: a glyph the multiple-substitution
             // rule rejects still serves as the base when the subtable
             // covers it.
+            let classes = cx.classes();
             let Some(base) = find_base(glyphs, at, cx, |j| {
-                accepts_as_base(glyphs, j, cx.gdef) || mbp.covers_base(glyphs[j].glyph_id as u16)
+                accepts_as_base(glyphs, j, &classes) || mbp.covers_base(glyphs[j].glyph_id as u16)
             }) else {
                 return false;
             };
@@ -223,15 +242,15 @@ pub(super) fn apply_at(
             // The previous glyph the lookup's mark filtering keeps,
             // with the ignore-base / -ligature / -mark flags dropped:
             // it must be a mark, or there is nothing to stack on.
-            let flag = cx.lookup_flag
+            let flag = cx.lookup_flag()
                 & !(LOOKUP_FLAG_IGNORE_BASE_GLYPHS
                     | LOOKUP_FLAG_IGNORE_LIGATURES
                     | LOOKUP_FLAG_IGNORE_MARKS);
-            let filter = MatchFilter::for_lookup(flag, cx.gdef, cx.mark_filtering_set);
-            let Some(prev) = Skipper::new(&filter, cx.ignore_zwj).prev(glyphs, at) else {
+            let Some(prev) = cx.walk_with_flag(flag).prev(glyphs, at) else {
                 return false;
             };
-            if !is_mark(&glyphs[prev], cx.gdef) || !marks_share_a_component(glyphs, at, prev) {
+            if !is_mark(&glyphs[prev], &cx.classes()) || !marks_share_a_component(glyphs, at, prev)
+            {
                 return false;
             }
             let Some(pair) = mmp.attach(mark_gid, glyphs[prev].glyph_id as u16) else {
@@ -243,9 +262,10 @@ pub(super) fn apply_at(
     }
 }
 
-/// True when GDEF classes the glyph as a mark.
-fn is_mark(g: &Glyph, gdef: Option<&Gdef<'_>>) -> bool {
-    gdef.is_some_and(|d| d.glyph_class(g.glyph_id as u16) == GlyphClass::Mark)
+/// True when the glyph is a mark, by GDEF or, for fonts without GDEF
+/// glyph classes, by its synthesized class.
+fn is_mark(g: &Glyph, classes: &GlyphClasses<'_>) -> bool {
+    classes.is_mark(MatchGlyph::from(g))
 }
 
 /// The glyph a mark at `at` attaches to: the nearest earlier glyph the
@@ -259,8 +279,7 @@ fn find_base(
     cx: &LookupCx<'_>,
     accept: impl Fn(usize) -> bool,
 ) -> Option<usize> {
-    let filter = MatchFilter::for_lookup(LOOKUP_FLAG_IGNORE_MARKS, cx.gdef, None);
-    let skipper = Skipper::new(&filter, cx.ignore_zwj);
+    let skipper = cx.walk_with_flag(LOOKUP_FLAG_IGNORE_MARKS);
     (0..at)
         .rev()
         .find(|&j| !skipper.skips(&glyphs[j]) && accept(j))
@@ -270,13 +289,13 @@ fn find_base(
 /// substitution produced, a mark only attaches to the first one
 /// (issue 740), unless a mark separates it from its predecessor
 /// (issue 1020).
-fn accepts_as_base(glyphs: &[Glyph], j: usize, gdef: Option<&Gdef<'_>>) -> bool {
+fn accepts_as_base(glyphs: &[Glyph], j: usize, classes: &GlyphClasses<'_>) -> bool {
     let g = &glyphs[j];
     if !lig::is_multiplied(g) || lig::lig_comp(g) == 0 || j == 0 {
         return true;
     }
     let prev = &glyphs[j - 1];
-    is_mark(prev, gdef)
+    is_mark(prev, classes)
         || !lig::is_multiplied(prev)
         || lig::lig_id(g) != lig::lig_id(prev)
         || lig::lig_comp(g) != lig::lig_comp(prev) + 1
@@ -335,7 +354,7 @@ fn apply_cursive(
     let Some(entry) = cp.entry(glyphs[j].glyph_id as u16) else {
         return false;
     };
-    let Some(i) = Skipper::new(cx.filter, cx.ignore_zwj).prev(glyphs, j) else {
+    let Some(i) = Skipper::new(cx.rules).prev(glyphs, j) else {
         return false;
     };
     let Some(exit) = cp.exit(glyphs[i].glyph_id as u16) else {
@@ -381,7 +400,7 @@ fn apply_cursive(
         entry_x.saturating_sub(exit_x),
         entry_y.saturating_sub(exit_y),
     );
-    if cx.lookup_flag & LOOKUP_FLAG_RIGHT_TO_LEFT == 0 {
+    if cx.lookup_flag() & LOOKUP_FLAG_RIGHT_TO_LEFT == 0 {
         core::mem::swap(&mut child, &mut parent);
         x_offset = x_offset.saturating_neg();
         y_offset = y_offset.saturating_neg();

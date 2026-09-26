@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use super::{parse_sequence_lookup_records, SequenceLookupRecord};
 use crate::error::{Error, Result};
-use crate::tables::layout::skip_iter::MatchFilter;
+use crate::tables::layout::skip_iter::{match_input, InputMatch, MatchContext, MatchGlyph};
 use crate::tables::layout::{ClassDef, Coverage};
 use crate::tables::parse::Reader;
 
@@ -329,44 +329,21 @@ impl<'a> Context3<'a> {
         &self.lookups
     }
 
-    /// Tests whether the run matches starting at `i`. Pass-through
-    /// filter shorthand.
+    /// Matches the input coverages starting at `glyphs[i]`, which must
+    /// be in the first coverage. `None` for an empty input sequence,
+    /// which matches nothing (HarfBuzz reads its first coverage from a
+    /// null offset).
     #[must_use]
-    pub fn matches(&self, glyphs: &[u16], i: usize) -> bool {
-        self.matches_filtered(glyphs, i, &MatchFilter::none())
-            .is_some()
-    }
-
-    /// Filter-aware match: returns the raw span of the match (number
-    /// of glyph positions between the first matched glyph and the
-    /// last matched glyph, inclusive) or `None` when the input
-    /// sequence does not align with `glyphs` starting at `i`.
-    #[must_use]
-    pub fn matches_filtered(
+    pub fn matches(
         &self,
-        glyphs: &[u16],
+        glyphs: &[MatchGlyph],
         i: usize,
-        filter: &MatchFilter<'_>,
-    ) -> Option<usize> {
-        if self.input.is_empty() {
-            return Some(0);
-        }
-        // First input glyph must be at position `i` (coverage gate:
-        // the caller positioned us here on purpose; we do not skip
-        // the first glyph).
-        if !self.input[0].contains(*glyphs.get(i)?) {
+        cx: &MatchContext<'_>,
+    ) -> Option<InputMatch> {
+        let (first, rest) = self.input.split_first()?;
+        if !first.contains(glyphs.get(i)?.id) {
             return None;
         }
-        let mut last = i;
-        let mut cursor = i + 1;
-        for cov in &self.input[1..] {
-            let pos = filter.next_unskipped(glyphs, cursor)?;
-            if !cov.contains(glyphs[pos]) {
-                return None;
-            }
-            last = pos;
-            cursor = pos + 1;
-        }
-        Some(last - i + 1)
+        match_input(glyphs, i, rest.len(), cx, |k, g| rest[k].contains(g))
     }
 }
