@@ -1,17 +1,29 @@
 //! Feature to lookup resolution, shared by the GSUB and GPOS passes.
 //!
-//! For each feature the pipeline applies, the shaper walks the run's
-//! script-tag priority list (`arab` then `DFLT`, `dev2` then `deva`
-//! then `DFLT`, ...) and takes the lookups from the first script whose
-//! chosen language system carries the feature. The language system is
-//! chosen per script by [`Script::select_lang_sys`]: the buffer
-//! language's OpenType tags in order, then a `dflt` record, then the
-//! script's default language system.
+//! Like HarfBuzz (`hb_ot_map_builder_t`), each table picks one script
+//! and one language system for a run, and every feature comes from
+//! that language system alone:
 //!
-//! A language system's required feature (`requiredFeatureIndex`)
-//! applies whenever the pipeline asks for its tag, merged with that
-//! tag's regular lookups, which is where HarfBuzz schedules a required
-//! feature whose tag the shaper knows.
+//! - The script is the first of the run's candidate tags (`arab`,
+//!   `dev2` then `deva`, ...) that the table lists, then `DFLT`, then
+//!   `dflt`, then `latn` (`hb_ot_layout_table_select_script`).
+//! - The language system is chosen by [`Script::select_lang_sys`]: the
+//!   buffer language's OpenType tags in order, then a `dflt` record,
+//!   then the script's default language system
+//!   (`hb_ot_layout_script_select_language`).
+//!
+//! A feature the chosen language system does not list has no lookups,
+//! even when another script or language system in the font has it.
+//! The one exception is `vert`, which HarfBuzz looks up anywhere in
+//! the FeatureList when the language system lacks it
+//! (`F_GLOBAL_SEARCH`). When a language system lists a tag twice, the
+//! first entry wins, as in `hb_ot_layout_collect_features_map`.
+//!
+//! A language system's required feature (`requiredFeatureIndex`) joins
+//! the lookups of its tag, which is where HarfBuzz schedules a required
+//! feature whose tag the shaper knows. [`required_feature`] exposes it
+//! so the shaper can run it at the start of GSUB when its tag is one
+//! the pipeline never applies.
 //!
 //! [`Script::select_lang_sys`]: crate::tables::layout::Script::select_lang_sys
 
@@ -19,15 +31,35 @@ use alloc::vec::Vec;
 
 use crate::tables::layout::{FeatureList, LangSys, ScriptList};
 
-/// Sorted, deduplicated lookup indices that feature `tag` selects.
+/// Script tags HarfBuzz falls back to, in order, when none of the
+/// run's own tags is in the table.
+const FALLBACK_SCRIPTS: [[u8; 4]; 3] = [*b"DFLT", *b"dflt", *b"latn"];
+
+/// Features HarfBuzz looks up in the whole FeatureList when the
+/// selected language system does not list them.
+const GLOBAL_SEARCH_FEATURES: [[u8; 4]; 1] = [*b"vert"];
+
+/// The language system a table uses for a run whose candidate script
+/// tags are `script_priority`, or `None` when the table has no usable
+/// script.
+fn select_lang_sys<'a>(
+    script_list: &ScriptList<'a>,
+    language_tags: &[[u8; 4]],
+    script_priority: &[[u8; 4]],
+) -> Option<LangSys<'a>> {
+    let script = script_priority
+        .iter()
+        .chain(FALLBACK_SCRIPTS.iter())
+        .find_map(|tag| script_list.find(*tag))?;
+    script.select_lang_sys(language_tags)
+}
+
+/// Sorted, deduplicated lookup indices that feature `tag` selects in
+/// the language system [`select_lang_sys`] picks.
 ///
-/// Walks `script_priority` in order and returns the lookups of the
-/// first script whose selected language system carries `tag`. A script
-/// that is present but lacks the feature falls through to the next
-/// one. When no listed script carries it, falls back to `DFLT` (unless
-/// already tried) and then to the first script in the table, returning
-/// that language system's lookups, possibly none. `None` means the
-/// table offered no usable language system at all.
+/// `Some(empty)` means the language system does not carry the
+/// feature; `None` means the table offered no usable language system
+/// at all.
 pub(crate) fn feature_lookup_indices(
     script_list: &ScriptList<'_>,
     feature_list: &FeatureList<'_>,
@@ -35,58 +67,65 @@ pub(crate) fn feature_lookup_indices(
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
 ) -> Option<Vec<u16>> {
-    for script_tag in script_priority {
-        let Some(script) = script_list.find(*script_tag) else {
-            continue;
-        };
-        let Some(lang_sys) = script.select_lang_sys(language_tags) else {
-            continue;
-        };
-        if let Some(indices) = lang_sys_lookups(&lang_sys, feature_list, tag) {
-            return Some(indices);
+    let lang_sys = select_lang_sys(script_list, language_tags, script_priority);
+    let found = lang_sys
+        .as_ref()
+        .and_then(|lang_sys| lang_sys_lookups(lang_sys, feature_list, tag));
+    if found.is_some() {
+        return found;
+    }
+    if GLOBAL_SEARCH_FEATURES.contains(&tag) {
+        if let Some((_, feature)) = feature_list.iter().find(|(t, _)| *t == tag) {
+            return Some(sorted(feature.lookup_indices().collect()));
         }
     }
-
-    let already_tried_dflt = script_priority.iter().any(|t| t == b"DFLT");
-    let first_script = || script_list.iter().next().map(|(_, s)| s);
-    let script = if already_tried_dflt {
-        first_script()?
-    } else {
-        script_list.find(*b"DFLT").or_else(first_script)?
-    };
-    let lang_sys = script.select_lang_sys(language_tags)?;
-    Some(lang_sys_lookups(&lang_sys, feature_list, tag).unwrap_or_default())
+    lang_sys.map(|_| Vec::new())
 }
 
-/// The lookups feature `tag` selects in one language system, with the
-/// required feature included when its tag matches. `None` when the
-/// language system does not carry the feature at all.
+/// The required feature of the language system [`select_lang_sys`]
+/// picks: its tag and sorted lookup indices.
+pub(crate) fn required_feature(
+    script_list: &ScriptList<'_>,
+    feature_list: &FeatureList<'_>,
+    language_tags: &[[u8; 4]],
+    script_priority: &[[u8; 4]],
+) -> Option<([u8; 4], Vec<u16>)> {
+    let lang_sys = select_lang_sys(script_list, language_tags, script_priority)?;
+    let (tag, feature) = feature_list.get(lang_sys.required_feature_index()?)?;
+    Some((tag, sorted(feature.lookup_indices().collect())))
+}
+
+/// The lookups feature `tag` selects in one language system: the
+/// first feature record with that tag, plus the required feature when
+/// its tag matches. `None` when the language system carries neither.
 fn lang_sys_lookups(
     lang_sys: &LangSys<'_>,
     feature_list: &FeatureList<'_>,
     tag: [u8; 4],
 ) -> Option<Vec<u16>> {
-    let mut indices: Vec<u16> = Vec::new();
-    let mut has_feature = false;
-    let required = lang_sys.required_feature_index();
-    for feature_index in required.into_iter().chain(lang_sys.feature_indices()) {
-        let Some((feature_tag, feature)) = feature_list.get(feature_index) else {
-            continue;
-        };
-        if feature_tag != tag {
-            continue;
-        }
-        has_feature = true;
-        for lookup in feature.lookup_indices() {
-            if !indices.contains(&lookup) {
-                indices.push(lookup);
-            }
-        }
+    let with_tag = |index: u16| {
+        feature_list
+            .get(index)
+            .filter(|(feature_tag, _)| *feature_tag == tag)
+            .map(|(_, feature)| feature)
+    };
+    let required = lang_sys.required_feature_index().and_then(with_tag);
+    let regular = lang_sys.feature_indices().find_map(with_tag);
+    if required.is_none() && regular.is_none() {
+        return None;
     }
-    has_feature.then(|| {
-        indices.sort_unstable();
-        indices
-    })
+    let indices = required
+        .into_iter()
+        .chain(regular)
+        .flat_map(|feature| feature.lookup_indices())
+        .collect();
+    Some(sorted(indices))
+}
+
+fn sorted(mut indices: Vec<u16>) -> Vec<u16> {
+    indices.sort_unstable();
+    indices.dedup();
+    indices
 }
 
 #[cfg(test)]
@@ -217,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_through_the_script_priority() {
+    fn one_language_system_supplies_every_feature() {
         let f = Fixture {
             scripts: script_list(&[
                 (*b"DFLT", Some(lang_sys(0xFFFF, &[1])), vec![]),
@@ -231,11 +270,81 @@ mod tests {
         };
         let cyrl = [*b"cyrl", *b"DFLT"];
         assert_eq!(f.lookups(&[*b"SRB "], b"locl", &cyrl), Some(vec![10]));
-        // cyrl/SRB lacks liga, so DFLT supplies it.
-        assert_eq!(f.lookups(&[*b"SRB "], b"liga", &cyrl), Some(vec![11]));
-        // A script missing from the priority list is never consulted,
-        // except as the final first-script fallback.
-        assert_eq!(f.lookups(&[*b"SRB "], b"locl", &[*b"DFLT"]), Some(vec![]));
+        // cyrl/SRB lacks liga. HarfBuzz does not borrow it from DFLT:
+        // the run's script is cyrl, and cyrl/SRB has no liga.
+        assert_eq!(f.lookups(&[*b"SRB "], b"liga", &cyrl), Some(vec![]));
+        assert_eq!(f.lookups(&[], b"liga", &cyrl), Some(vec![]));
+        // A run whose own script is missing uses DFLT, never another
+        // script that happens to be in the table.
+        assert_eq!(f.lookups(&[*b"SRB "], b"locl", &[*b"latn"]), Some(vec![]));
+        assert_eq!(f.lookups(&[*b"SRB "], b"liga", &[*b"latn"]), Some(vec![11]));
+    }
+
+    #[test]
+    fn script_fallback_is_dflt_then_lowercase_dflt_then_latn() {
+        let tagged = |tags: &[[u8; 4]]| Fixture {
+            scripts: script_list(
+                &tags
+                    .iter()
+                    .enumerate()
+                    .map(|(i, tag)| (*tag, Some(lang_sys(0xFFFF, &[i as u16])), vec![]))
+                    .collect::<Vec<_>>(),
+            ),
+            features: feature_list(&[*b"liga", *b"liga", *b"liga"]),
+        };
+        let thai = [*b"thai"];
+        // Script lists are sorted by tag: DFLT < dflt < latn.
+        let f = tagged(&[*b"DFLT", *b"dflt", *b"latn"]);
+        assert_eq!(f.lookups(&[], b"liga", &thai), Some(vec![10]));
+        let f = tagged(&[*b"dflt", *b"latn"]);
+        assert_eq!(f.lookups(&[], b"liga", &thai), Some(vec![10]));
+        let f = tagged(&[*b"cyrl", *b"latn"]);
+        assert_eq!(f.lookups(&[], b"liga", &thai), Some(vec![11]));
+        // No candidate and no fallback script: nothing usable.
+        let f = tagged(&[*b"cyrl"]);
+        assert_eq!(f.lookups(&[], b"liga", &thai), None);
+    }
+
+    #[test]
+    fn first_of_duplicate_feature_tags_wins() {
+        let f = Fixture {
+            scripts: script_list(&[(*b"latn", Some(lang_sys(0xFFFF, &[2, 0, 1])), vec![])]),
+            features: feature_list(&[*b"liga", *b"calt", *b"liga"]),
+        };
+        assert_eq!(f.lookups(&[], b"liga", &[*b"latn"]), Some(vec![12]));
+        assert_eq!(f.lookups(&[], b"calt", &[*b"latn"]), Some(vec![11]));
+    }
+
+    #[test]
+    fn vert_is_found_outside_the_language_system() {
+        let f = Fixture {
+            scripts: script_list(&[
+                (*b"DFLT", Some(lang_sys(0xFFFF, &[])), vec![]),
+                (*b"kana", Some(lang_sys(0xFFFF, &[0, 1])), vec![]),
+            ]),
+            features: feature_list(&[*b"vert", *b"vrt2"]),
+        };
+        let dflt = [*b"DFLT"];
+        assert_eq!(f.lookups(&[], b"vert", &dflt), Some(vec![10]));
+        // Only vert gets the global search.
+        assert_eq!(f.lookups(&[], b"vrt2", &dflt), Some(vec![]));
+    }
+
+    #[test]
+    fn required_feature_of_the_selected_language_system() {
+        let f = latin_fixture();
+        let scripts = ScriptList::parse(&f.scripts).unwrap();
+        let features = FeatureList::parse(&f.features).unwrap();
+        let latn = [*b"latn"];
+        assert_eq!(
+            required_feature(&scripts, &features, &[*b"AZE "], &latn),
+            Some((*b"rlig", vec![13]))
+        );
+        assert_eq!(
+            required_feature(&scripts, &features, &[*b"TRK "], &latn),
+            None
+        );
+        assert_eq!(required_feature(&scripts, &features, &[], &latn), None);
     }
 
     #[test]
