@@ -4,7 +4,7 @@
 //! smaller font containing only those glyphs, plus any glyphs they pull
 //! in through composites and ligatures. Every table that survives is
 //! rewritten so glyph references point at the new, compacted glyph order.
-//! [`instance`] bakes variable-font axis coordinates into a static font or
+//! [`instance()`] bakes variable-font axis coordinates into a static font or
 //! pins some axes and keeps the rest.
 //!
 //! # Pipeline

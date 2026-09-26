@@ -10,7 +10,7 @@
 //!   rewriters.
 //! - [`RewrittenLookup`] / [`RewrittenSubtable`]: the value types
 //!   the per-lookup-type rewriters produce.
-//! - [`parse_coverage_glyphs`] / [`parse_classdef_pairs`]: small
+//! - [`parse_coverage_glyphs`] / [`parse_classdef_pairs_from_bytes`]: small
 //!   byte-walking helpers for the rewriters and the closure walker.
 //! - [`build_gsub`] / [`build_gpos`]: the drivers that walk every
 //!   lookup, call the per-type rewriter, run the drop cascade, and
@@ -782,10 +782,13 @@ struct RewrittenLangSys {
 }
 
 /// Walks LangSys raw bytes:
+///
+/// ```text
 ///   Offset16 lookupOrderOffset (=0)
 ///   u16 requiredFeatureIndex
 ///   u16 featureIndexCount
 ///   u16 featureIndices[featureIndexCount]
+/// ```
 fn rewrite_langsys_from_bytes(
     bytes: &[u8],
     feature_renumber: &[Option<u16>],

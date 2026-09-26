@@ -2,10 +2,10 @@
 //!
 //! Walks every lookup in the source `GPOS` table and produces a new
 //! `GPOS` whose Coverage / ClassDef / glyph references resolve against
-//! the new gid namespace defined by the caller's [`GidMap`]. GPOS
-//! lookups don't introduce new gids (they only reposition existing
-//! ones), so the rewriter is purely a filter + remap pass over the
-//! per-type byte layout.
+//! the new gid namespace defined by the caller's
+//! [`GidMap`](crate::layout::GidMap). GPOS lookups don't introduce new
+//! gids (they only reposition existing ones), so the rewriter is purely
+//! a filter + remap pass over the per-type byte layout.
 //!
 //! # Per-lookup-type coverage
 //!
@@ -735,7 +735,7 @@ fn emit_pair_pos_format2(
 ///   so the explicit pair table can't bloat past the source matrix.
 ///
 /// Otherwise we use the cheap fmt-2 pass-through path. The matrix
-/// indices in that path remain valid because [`emit_classdef`]
+/// indices in that path remain valid because [`emit_classdef`](crate::emit_classdef)
 /// preserves source class IDs verbatim.
 fn should_use_format1_fallback(
     surviving_first: &[(u16, u16)],

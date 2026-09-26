@@ -3,7 +3,7 @@
 //! Walks every lookup in the source `GSUB` table and produces a new
 //! `GSUB` whose Coverage / ClassDef / substitution-target gid
 //! references resolve against the new gid namespace defined by the
-//! caller's [`GidMap`].
+//! caller's [`GidMap`](crate::layout::GidMap).
 //!
 //! # Per-lookup-type coverage
 //!
