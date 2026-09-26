@@ -18,7 +18,7 @@ use super::attach_list::attach_point;
 use super::item_var_store::store_len;
 use super::lig_caret::rewrite_lig_glyph;
 use super::read::coverage;
-use super::{mark_glyph_sets, rewrite_classdef_subtable, rewrite_gdef_bytes, Header};
+use super::{mark_glyph_sets, rewrite_classdef_subtable, rewrite_gdef_bytes, Header, StorePlan};
 use crate::coverage::emit_coverage_from_glyphs;
 use crate::layout::GidMap;
 use crate::SubsetError;
@@ -615,7 +615,7 @@ fn malformed_caret_values_drop_their_ligature() {
     let mut null_caret = gdef.clone();
     put_u16(&mut null_caret, lig + 2, 0);
     for (bad, at) in [(&bad_format, caret), (&null_caret, lig + 2)] {
-        match rewrite_lig_glyph(bad, lig, true) {
+        match rewrite_lig_glyph(bad, lig, StorePlan::Keep) {
             Err(SubsetError::Parse(Error::Malformed { offset, .. })) => assert_eq!(offset, at),
             other => panic!("expected a parse error, got {other:?}"),
         }

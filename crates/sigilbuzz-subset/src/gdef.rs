@@ -74,6 +74,41 @@ pub(crate) fn rewrite_gdef(
 }
 
 /// [`rewrite_gdef`] on raw table bytes.
+pub(crate) fn rewrite_gdef_bytes(
+    bytes: &[u8],
+    map: &GidMap,
+    keep_variations: bool,
+) -> Result<Option<Vec<u8>>, SubsetError> {
+    let plan = if keep_variations {
+        StorePlan::Keep
+    } else {
+        StorePlan::Drop
+    };
+    rebuild_gdef(bytes, map, plan)
+}
+
+/// What a rebuilt GDEF does with the ItemVariationStore and with the
+/// VariationIndex tables of its format 3 ligature carets, which name
+/// rows of the store.
+#[derive(Clone, Copy)]
+pub(crate) enum StorePlan<'a> {
+    /// Copy the store; the carets keep their VariationIndex tables.
+    Keep,
+    /// Leave the store out; the carets drop their VariationIndex
+    /// tables, keeping hinting Device tables.
+    Drop,
+    /// Write `store` in place of the source's (the partial instancer's
+    /// projection) and send each caret's VariationIndex row through
+    /// `remap`. A row it maps to `None` has no variation left, and the
+    /// caret drops the table.
+    Replace {
+        store: &'a [u8],
+        remap: &'a dyn Fn(u16, u16) -> Option<(u16, u16)>,
+    },
+}
+
+/// Rebuilds a GDEF from raw table bytes under `map`, with the store
+/// and caret variations handled per `plan`.
 ///
 /// GDEF header (all offsets from the start of the table, 0 = absent):
 ///
@@ -87,10 +122,10 @@ pub(crate) fn rewrite_gdef(
 ///   Offset16 markGlyphSetsDefOffset      (1.2+)
 ///   Offset32 itemVarStoreOffset          (1.3+)
 /// ```
-pub(crate) fn rewrite_gdef_bytes(
+pub(crate) fn rebuild_gdef(
     bytes: &[u8],
     map: &GidMap,
-    keep_variations: bool,
+    plan: StorePlan<'_>,
 ) -> Result<Option<Vec<u8>>, SubsetError> {
     // Without a readable header nothing in the table can be trusted.
     let Ok(header) = Header::read(bytes) else {
@@ -103,21 +138,23 @@ pub(crate) fn rewrite_gdef_bytes(
         None => None,
     };
     let lig_carets = match present(header.lig_carets) {
-        Some(off) => lenient(lig_caret::rewrite(bytes, off, map, keep_variations))?,
+        Some(off) => lenient(lig_caret::rewrite(bytes, off, map, plan))?,
         None => None,
     };
     let mark_attach =
         present(header.mark_attach).and_then(|off| rewrite_classdef_subtable(bytes, off, map));
     let mark_sets =
         present(header.mark_sets).and_then(|off| mark_glyph_sets::rewrite(bytes, off, map).ok());
-    let ivs = present(header.store)
-        .filter(|_| keep_variations)
-        .and_then(|off| {
+    let ivs = match plan {
+        StorePlan::Keep => present(header.store).and_then(|off| {
             // `store_len` has checked that `off + len` stays inside
             // the table, so the sum cannot wrap.
             let len = item_var_store::store_len(bytes, off).ok()?;
             Some(&bytes[off..off + len])
-        });
+        }),
+        StorePlan::Drop => None,
+        StorePlan::Replace { store, .. } => Some(store),
+    };
 
     let anything_left = glyph_class.is_some()
         || attach_list.is_some()

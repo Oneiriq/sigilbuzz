@@ -108,11 +108,13 @@ use sigilbuzz::tables::Reader;
 use sigilbuzz::Face;
 
 mod gdef_store;
+mod store_remap;
 
 use crate::sfnt;
 use crate::util;
 use crate::{GlyphId, SubsetError};
 use gdef_store::{prune_gdef_store, GdefBake};
+use store_remap::{bake_gdef_store_partial, remap_gpos_variation_indices};
 
 /// F2DOT14 normalized axis coordinate. Matches the on-disk encoding the
 /// VF spec uses: a signed 2.14 fixed-point in the range `[-1.0, 1.0]`,
@@ -521,8 +523,11 @@ fn cff2_bake(
 ///   `ItemVariationStore` partial-projected through `pins` / `coords`,
 ///   each DeltaSetIndexMap rewritten to point at the new subtable
 ///   indexes,
+/// - rebuilds `GDEF` around its projected store and renumbers every
+///   VariationIndex in it and in `GPOS` to match (see
+///   [`store_remap`]),
 /// - rides `glyf` / `hmtx` / `vmtx` / `head` / `hhea` / `maxp` /
-///   layout / and other tables through verbatim. The Keep-axis
+///   the rest of the layout and other tables through verbatim. The Keep-axis
 ///   variations stay live; the Pin-axis dimensions fold into the
 ///   trimmed deltas so a shaper at `(Keep coords)` produces exactly
 ///   what the source produced at `(Keep coords, Pin coords)`.
@@ -581,14 +586,17 @@ fn partial_instance(
             tables.push((tag::MVAR, new_mvar));
         }
     }
-    // GDEF.IVS rewrite (optional).
-    if let Ok(gdef_bytes) = face.table_bytes(tag::GDEF) {
-        if let Some(new_gdef) = bake_gdef_ivs_partial(gdef_bytes, &post_avar_coords, pins) {
-            tables.push((tag::GDEF, new_gdef));
-        } else {
-            // No IVS in GDEF: pass through.
-            tables.push((tag::GDEF, gdef_bytes.to_vec()));
-        }
+    // GDEF.IVS rewrite (optional). The projection can renumber the
+    // store's rows, so the GDEF carets follow the new numbering and so
+    // do the GPOS VariationIndex tables below.
+    let (gdef_bake, store_remap) = bake_gdef_store_partial(face, &post_avar_coords, pins)?;
+    if let GdefBake::Rebuilt(b) = &gdef_bake {
+        tables.push((tag::GDEF, b.clone()));
+    }
+    if let (Some(remap), Ok(gpos_bytes)) = (&store_remap, face.table_bytes(tag::GPOS)) {
+        let mut gpos = gpos_bytes.to_vec();
+        remap_gpos_variation_indices(&mut gpos, remap);
+        tables.push((tag::GPOS, gpos));
     }
 
     // CFF2 VarStore + blend-operator rewrite (optional). VarStore
@@ -620,7 +628,11 @@ fn partial_instance(
             continue;
         }
         // Variable-font tables we handled above are excluded; the
-        // gvar / CFF2 paths run when their host tables are present.
+        // gvar / CFF2 paths run when their host tables are present. A
+        // GDEF that held only its store is gone.
+        if rec.tag == tag::GDEF && matches!(gdef_bake, GdefBake::Dropped) {
+            continue;
+        }
         let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;
         tables.push((rec.tag, bytes.to_vec()));
     }
@@ -2497,55 +2509,6 @@ fn bake_mvar_partial(mvar_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Opt
             out.extend_from_slice(&mvar_bytes[off + 8..off + record_size]);
         }
     }
-    out.extend_from_slice(&new_ivs);
-    Some(out)
-}
-
-// ---------------------------------------------------------------------------
-// GDEF.IVS partial bake
-// ---------------------------------------------------------------------------
-
-/// Re-emits GDEF with its embedded IVS partial-projected. The other
-/// GDEF tables (glyphClassDef, attachList, ligCaretList,
-/// markAttachClassDef, markGlyphSetsDef) ride through verbatim: they
-/// don't carry variation indices.
-///
-/// Unlike the prune-IVS path used for full instancing, this preserves
-/// GDEF v1.3 with a non-zero `itemVarStoreOffset` pointing at the new
-/// trimmed IVS. GPOS Anchor variations + future GDEF-resident
-/// VariationIndex consumers (mark / cursive bake) reach the trimmed
-/// regions through the same offset.
-#[allow(dead_code)] // wired in by the partial-instancing integration commit
-fn bake_gdef_ivs_partial(gdef_bytes: &[u8], coords: &[f32], pins: &[AxisPin]) -> Option<Vec<u8>> {
-    if gdef_bytes.len() < 18 {
-        return None;
-    }
-    let major = u16::from_be_bytes([gdef_bytes[0], gdef_bytes[1]]);
-    let minor = u16::from_be_bytes([gdef_bytes[2], gdef_bytes[3]]);
-    if major != 1 || minor < 3 {
-        return None;
-    }
-    let ivs_off = u32::from_be_bytes([
-        gdef_bytes[14],
-        gdef_bytes[15],
-        gdef_bytes[16],
-        gdef_bytes[17],
-    ]) as usize;
-    if ivs_off == 0 {
-        return None;
-    }
-    if gdef_bytes.len() < ivs_off {
-        return None;
-    }
-    let (new_ivs, _remap) = bake_ivs_partial(&gdef_bytes[ivs_off..], coords, pins)?;
-
-    // The non-IVS GDEF body (everything before ivs_off) rides through
-    // verbatim. Patch the IVS offset to the truncated body's tail and
-    // append the new IVS.
-    let mut out = Vec::with_capacity(ivs_off + new_ivs.len());
-    out.extend_from_slice(&gdef_bytes[..ivs_off]);
-    let new_ivs_off: u32 = ivs_off as u32;
-    out[14..18].copy_from_slice(&new_ivs_off.to_be_bytes());
     out.extend_from_slice(&new_ivs);
     Some(out)
 }
@@ -4493,14 +4456,19 @@ mod partial_instancing_tests {
     }
 
     #[test]
-    fn bake_gdef_ivs_partial_trims_ivs_and_keeps_offset_alive() {
+    fn partial_gdef_bake_trims_the_store_and_keeps_its_offset() {
         let ivs = build_ivs2(
             &[[(0.0, 1.0, 1.0), (0.0, 1.0, 1.0)]],
             &[(alloc::vec![0], alloc::vec![alloc::vec![100]])],
         );
         let gdef = build_gdef_v13_ivs_only(&ivs);
-        let new_gdef = bake_gdef_ivs_partial(&gdef, &[1.0, 0.0], &[AxisPin::Pin, AxisPin::Keep])
-            .expect("bake");
+        let map = crate::layout::GidMap::from_kept(&[0]);
+        let pins = [AxisPin::Pin, AxisPin::Keep];
+        let (bake, _) =
+            super::store_remap::bake_gdef_bytes_partial(&gdef, &map, &[1.0, 0.0], &pins).unwrap();
+        let GdefBake::Rebuilt(new_gdef) = bake else {
+            panic!("expected a rebuilt GDEF");
+        };
         // The IVS offset slot is still 18 (header end) and non-zero.
         let new_off = u32::from_be_bytes([new_gdef[14], new_gdef[15], new_gdef[16], new_gdef[17]]);
         assert_eq!(new_off, 18);
