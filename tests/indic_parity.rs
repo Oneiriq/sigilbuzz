@@ -232,3 +232,31 @@ fn pre_base_matra_glyphs_end_up_before_their_consonant() {
         "base consonant (cluster 0) should appear second"
     );
 }
+
+/// `(glyph id, cluster)` pairs for `text`, keeping clusters at or
+/// past `from`, shifted down by it.
+fn glyphs_from(text: &str, from: u32) -> Vec<(u32, u32)> {
+    let blob = Blob::new(NOTO_DEVA);
+    let face = Face::parse(&blob, 0).expect("parse face");
+    let font = Font::new(face, 1000.0);
+    let mut buffer = Buffer::new();
+    buffer.push_str(text);
+    shape(&font, &buffer, &[])
+        .expect("shape")
+        .glyphs
+        .iter()
+        .filter(|g| g.cluster >= from)
+        .map(|g| (g.glyph_id, g.cluster - from))
+        .collect()
+}
+
+#[test]
+fn devanagari_after_other_text_reorders_the_same() {
+    // Final reordering finds each syllable's glyphs by their real
+    // cluster offsets, so a run that does not start the text (and one
+    // after a decomposed Thai vowel) moves its reph the same way.
+    let deva = "\u{0915}\u{0930}\u{094D}\u{092E} \u{0927}\u{0930}\u{094D}\u{092E}";
+    let alone = glyphs_from(deva, 0);
+    assert_eq!(glyphs_from(&format!("ab {deva}"), 3), alone);
+    assert_eq!(glyphs_from(&format!("\u{0E33} {deva}"), 4), alone);
+}

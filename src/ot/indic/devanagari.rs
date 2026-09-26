@@ -98,6 +98,9 @@ pub fn shape_indic(
     // codepoint indices it covers (start, end exclusive) so the
     // reorder phase can index into `glyphs` without re-scanning.
     let syllables = segment_syllables(codepoints, config);
+    // The cluster each code point starts, for final reordering, read
+    // while glyphs are still one per code point.
+    let byte_offsets = code_point_clusters(codepoints, glyphs);
 
     // Tag per-glyph Indic positions BEFORE we reorder or apply
     // features. The `rphf` ligature will drop the halant and leave
@@ -166,7 +169,6 @@ pub fn shape_indic(
     // reph glyph via `rphf`; we locate it by the
     // `RaToBecomeReph` tag we set above, which the ligature path
     // preserved on the surviving glyph.
-    let byte_offsets = cluster_byte_offsets(codepoints);
     for syllable in &syllables {
         let byte_start = byte_offsets[syllable.start];
         let byte_end = byte_offsets[syllable.end];
@@ -724,6 +726,23 @@ fn is_consonant(ch: char) -> bool {
         syllabic_category(ch),
         IndicSyllabicCategory::Consonant | IndicSyllabicCategory::ConsonantPlaceholder
     )
+}
+
+/// Returns a length-`codepoints.len() + 1` array mapping each code
+/// point to the cluster its glyph carries, with an open end. The
+/// clusters are the run's real UTF-8 offsets, so they hold for a
+/// segment that does not start the text and for code points that
+/// share a cluster (split matras). Falls back to offsets counted from
+/// the code points when the glyphs are no longer one per code point.
+fn code_point_clusters(codepoints: &[char], glyphs: &[Glyph]) -> Vec<u32> {
+    if glyphs.len() != codepoints.len() {
+        return cluster_byte_offsets(codepoints);
+    }
+    glyphs
+        .iter()
+        .map(|g| g.cluster)
+        .chain(core::iter::once(u32::MAX))
+        .collect()
 }
 
 /// Returns a length-`codepoints.len() + 1` array mapping codepoint

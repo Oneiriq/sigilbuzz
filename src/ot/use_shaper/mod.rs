@@ -239,6 +239,7 @@ pub fn shape_khmer(
     // 1. Segment. One pass over the codepoints, emitting Syllable
     //    records that the reorder pass can consume directly.
     let syllables = segment_syllables(codepoints);
+    let byte_offsets = code_point_clusters(codepoints, glyphs);
 
     // 2. Initial reordering: pre-base vowel signs move before the
     //    base. Done BEFORE GSUB so features see the logical order
@@ -270,7 +271,6 @@ pub fn shape_khmer(
     //    first codepoint, matching HarfBuzz / rustybuzz so the
     //    parity tests see identical cluster ids even after GSUB
     //    has collapsed parts of the syllable.
-    let byte_offsets = cluster_byte_offsets(codepoints);
     merge_syllable_clusters(glyphs, &syllables, &byte_offsets);
 
     // Final GPOS (kern, mark, mkmk, dist) runs in the caller, see
@@ -628,6 +628,24 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
     glyphs[syl_start..syl_end].copy_from_slice(&rebuilt);
 }
 
+/// Returns a length-`codepoints.len() + 1` array mapping each code
+/// point to the cluster its glyph carries, with an open end. Read
+/// before any reordering or GSUB, while glyphs are one per code point,
+/// these are the run's real UTF-8 offsets, right for a segment that
+/// does not start the text and for decomposed vowels whose parts share
+/// a cluster. Falls back to offsets counted from the code points when
+/// the glyphs are not one per code point.
+fn code_point_clusters(codepoints: &[char], glyphs: &[Glyph]) -> Vec<u32> {
+    if glyphs.len() != codepoints.len() {
+        return cluster_byte_offsets(codepoints);
+    }
+    glyphs
+        .iter()
+        .map(|g| g.cluster)
+        .chain(core::iter::once(u32::MAX))
+        .collect()
+}
+
 /// Returns a length-`codepoints.len() + 1` array mapping codepoint
 /// index to UTF-8 byte offset. `out[i]` is the byte offset of the
 /// i'th codepoint; `out[len]` is the total byte length.
@@ -692,6 +710,7 @@ pub fn shape_use(
 
     // 1. Segment.
     let syllables = segment_syllables(codepoints);
+    let byte_offsets = code_point_clusters(codepoints, glyphs);
 
     // 2. Initial reordering. Some scripts (Thai, Lao) type pre-base
     //    vowels before the base already, so the reorder would break
@@ -751,7 +770,6 @@ pub fn shape_use(
     }
 
     // 5. Cluster merge.
-    let byte_offsets = cluster_byte_offsets(codepoints);
     merge_syllable_clusters(glyphs, &syllables, &byte_offsets);
 }
 
