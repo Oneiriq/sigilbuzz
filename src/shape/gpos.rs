@@ -351,6 +351,10 @@ fn apply_subtables_at(
 /// and applies the pair's records. HarfBuzz leaves the cursor on the
 /// second glyph so it can start the next pair, unless the subtable's
 /// `valueFormat2` is nonzero, in which case it moves past it.
+///
+/// As in HarfBuzz, the first glyph's coverage is checked before the
+/// search: a long run of glyphs the walk skips would otherwise be
+/// scanned again from every glyph in it.
 fn apply_pair(
     pp: &PairPos<'_>,
     state: &LookupState<'_>,
@@ -360,6 +364,9 @@ fn apply_pair(
     horizontal: bool,
 ) -> Option<usize> {
     let first = glyphs.get(at)?.glyph_id as u16;
+    if !pp.covers(first) {
+        return None;
+    }
     let j = Skipper::new(state.mcx.input()).next(glyphs, at + 1)?;
     let second = glyphs[j].glyph_id as u16;
     let (v1, v2, base) = pp.lookup_with_device_base(first, second)?;

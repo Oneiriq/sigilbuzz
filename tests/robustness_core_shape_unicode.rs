@@ -14,6 +14,7 @@ use sigilbuzz::{
 const AMIRI: &[u8] = include_bytes!("fixtures/amiri_regular.ttf");
 const OPEN_SANS: &[u8] = include_bytes!("fixtures/opensans_regular.ttf");
 const AAT_SYNTHETIC: &[u8] = include_bytes!("fixtures/aat_synthetic.ttf");
+const RUBIK: &[u8] = include_bytes!("fixtures/rubik_vf.ttf");
 
 fn push16(out: &mut Vec<u8>, v: u16) {
     out.extend_from_slice(&v.to_be_bytes());
@@ -174,6 +175,17 @@ fn long_run_of_composing_marks_normalizes_in_linear_time() {
     let glyphs = shape_glyphs(OPEN_SANS, &text, &[]);
     assert_eq!(glyphs.len(), 100_000);
     assert!(glyphs.windows(2).all(|w| w[0].glyph_id == w[1].glyph_id));
+}
+
+#[test]
+fn long_pair_positioning_run_of_ignorables_is_linear() {
+    // A GPOS pair lookup reached every glyph of a long run of default
+    // ignorables and searched the rest of the run for a second glyph
+    // before checking the first glyph's coverage. Rubik kerns through
+    // GPOS.
+    let text = format!("A{}V", "\u{200B}".repeat(100_000));
+    let glyphs = shape_glyphs(RUBIK, &text, &[]);
+    assert_eq!(glyphs.len(), 100_002);
 }
 
 #[test]
