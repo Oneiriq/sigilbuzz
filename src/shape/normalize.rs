@@ -199,6 +199,10 @@ pub(super) struct Normalizer<'a> {
     pub(super) has_gpos_mark: bool,
     /// The buffer's cluster level, which decides which merges happen.
     pub(super) level: ClusterLevel,
+    /// The run gets fallback mark positioning: once normalized, its
+    /// nonspacing marks take the positional classes their combining
+    /// classes stand for (`recategorize_combining_class`).
+    pub(super) recategorize_marks: bool,
 }
 
 impl Normalizer<'_> {
@@ -227,6 +231,14 @@ impl Normalizer<'_> {
             )
         {
             self.compose_round(&mut out);
+        }
+        if self.recategorize_marks {
+            for c in out
+                .iter_mut()
+                .filter(|c| c.class & char_class::NONSPACING_MARK != 0)
+            {
+                c.mcc = fallback::recategorize_combining_class(c.ch, c.mcc);
+            }
         }
         out
     }

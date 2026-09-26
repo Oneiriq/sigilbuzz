@@ -229,7 +229,24 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let language_tags: &[[u8; 4]] = buffer
         .language()
         .map_or(&[], crate::Language::ot_language_tags);
+    let gsub = face.gsub()?.map(|g| {
+        g.with_language_tags(language_tags)
+            .with_cluster_level(level)
+    });
     let gpos = face.gpos()?.map(|g| g.with_language_tags(language_tags));
+
+    // The shaper HarfBuzz would pick for the whole buffer, from its
+    // script. It decides mark zeroing and fallback mark positioning;
+    // each segment's own script picks its normalization and GSUB.
+    let buffer_shaper = Shaper::for_script(buffer_script.unwrap_or(Script::Other), !is_vertical);
+    let applies_morx = gsub.is_none() && face.table_bytes(crate::tables::tag::MORX).is_ok();
+    let fallback_marks = position::fallback_mark_positioning(
+        face,
+        gpos.as_ref(),
+        gsub.is_some(),
+        applies_morx,
+        buffer_shaper,
+    )?;
 
     // Step 1.75: normalization, which also maps the characters to
     // glyphs. Each segment normalizes with the mode and hooks of the
@@ -249,6 +266,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             shaper: Shaper::for_script(seg.script, !is_vertical),
             has_gpos_mark: has_gpos_mark(seg.script_priority),
             level,
+            recategorize_marks: fallback_marks,
         },
     );
 
@@ -268,10 +286,6 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // Latin-majority mixed runs.
     let dominant_script = buffer_script;
 
-    let gsub = face.gsub()?.map(|g| {
-        g.with_language_tags(language_tags)
-            .with_cluster_level(level)
-    });
     // GDEF is consulted up-front so the LookupFlag skip-iterator has
     // it available for every GSUB context match. GPOS reuses the same
     // handle further down.
@@ -733,9 +747,11 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         direction,
         features,
         dominant_script,
+        shaper: buffer_shaper,
         has_gsub: gsub.is_some(),
         applied_morx,
         zero_ignorables: ignorables::zeroes(flags),
+        fallback_marks,
     };
     position::position(&inputs, &mut glyphs, &seg_glyph_ranges)?;
 

@@ -49,6 +49,10 @@
 //!   across each pair the way HarfBuzz does (the `kern` submodule),
 //!   and HarfBuzz's mark-width zeroing per script (the `position`
 //!   submodule).
+//! - HarfBuzz's fallback positioning (the `fallback` submodule): the
+//!   widths of space characters drawn with the space glyph, and, when
+//!   no GPOS, `kerx`, or cross-stream `kern` table positions the run,
+//!   marks placed from their combining classes and glyph extents.
 //!
 //! Any default-on feature can be suppressed by a `Feature { tag,
 //! value: 0 }` entry.
@@ -101,8 +105,6 @@
 //! - Automatic direction detection: an unset direction shapes as LTR
 //!   even for Arabic or Hebrew text. Set [`crate::Direction::Rtl`]
 //!   explicitly to get HarfBuzz's RTL behavior and visual order.
-//! - The fallback mark positioner HarfBuzz uses for fonts without
-//!   GPOS.
 
 mod aat;
 mod attach;

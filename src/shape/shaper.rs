@@ -129,6 +129,24 @@ impl Shaper {
         }
     }
 
+    /// The shaper's `fallback_position`: whether marks the font cannot
+    /// position get fallback positions from their combining classes.
+    pub(super) const fn fallback_position(self) -> bool {
+        matches!(
+            self,
+            Self::Default | Self::Arabic | Self::Hebrew | Self::Hangul
+        )
+    }
+
+    /// The shaper's `gpos_tag`: GPOS only applies when the font's GPOS
+    /// has a script of this tag (HarfBuzz disables it otherwise).
+    pub(super) const fn gpos_tag(self) -> Option<[u8; 4]> {
+        match self {
+            Self::Hebrew => Some(*b"hebr"),
+            _ => None,
+        }
+    }
+
     /// The shaper's `zero_width_marks`.
     pub(super) const fn mark_zeroing(self) -> MarkZeroing {
         match self {
@@ -164,6 +182,11 @@ mod tests {
             Shaper::Hebrew.normalization_mode(),
             NormalizationMode::ComposedDiacritics
         );
+        assert!(Shaper::Hangul.fallback_position());
+        assert!(!Shaper::Thai.fallback_position());
+        assert!(!Shaper::Indic.fallback_position());
+        assert_eq!(Shaper::Hebrew.gpos_tag(), Some(*b"hebr"));
+        assert_eq!(Shaper::Arabic.gpos_tag(), None);
         assert_eq!(Shaper::Hangul.mark_zeroing(), MarkZeroing::None);
         assert_eq!(Shaper::Use.mark_zeroing(), MarkZeroing::Early);
         assert_eq!(Shaper::Thai.mark_zeroing(), MarkZeroing::Late);

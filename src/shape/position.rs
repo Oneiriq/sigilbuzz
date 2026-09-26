@@ -6,22 +6,25 @@
 //! Which table positions the run follows HarfBuzz's plan:
 //!
 //! - `kerx` replaces GPOS unless the font also has GSUB and GPOS.
-//! - GPOS runs its stage (see [`super::gpos`]).
+//! - GPOS runs its stage (see [`super::gpos`]), unless the run's shaper
+//!   names a script GPOS lacks (Hebrew needs `hebr`).
 //! - When GPOS has no `kern` feature for the run (`vkrn` for vertical
 //!   runs), `kerx` kerns if the font has it, else the legacy `kern`
 //!   table does.
 //!
 //! Mark widths are zeroed before GPOS or after all positioning,
 //! depending on the shaper HarfBuzz picks for the run's script (see
-//! [`mark_zeroing`]), and not at all when `kerx` or a state-machine
-//! `kern` table does the positioning. When no GPOS or `kerx` runs, a
-//! zeroed mark in a forward run also moves back by the advance it
-//! lost, so it hangs over the glyph before it.
+//! [`Shaper::mark_zeroing`]), and not at all when `kerx` or a
+//! state-machine `kern` table does the positioning. When no GPOS or
+//! `kerx` runs, a zeroed mark in a forward run also moves back by the
+//! advance it lost, so it hangs over the glyph before it, and when the
+//! shaper asks for it the marks then get fallback positions (see
+//! [`fallback_mark_positioning`]).
 
 use alloc::vec::Vec;
 
 use super::attach::{self, Attach};
-use super::fallback;
+use super::fallback::{self, MarkPositioner};
 use super::gpos::{self, GposCx};
 use super::shaper::{MarkZeroing, Shaper};
 use super::{kern, Feature, ProcessedSegment, VarCtx};
@@ -32,14 +35,6 @@ use crate::tables::gdef::Gdef;
 use crate::tables::layout::{GlyphClasses, MatchGlyph};
 use crate::tables::{tag, Gpos};
 use crate::unicode::Script;
-
-/// The mark-zeroing behavior of the shaper HarfBuzz uses for `script`
-/// (see [`Shaper`]). Sinhala, Tibetan, Mongolian and N'Ko all go to
-/// the Universal Shaping Engine there, whatever pipeline sigilbuzz runs
-/// them through.
-pub(super) fn mark_zeroing(script: Script) -> MarkZeroing {
-    Shaper::for_script(script, true).mark_zeroing()
-}
 
 /// Everything the positioning pass reads besides the glyphs.
 pub(super) struct Inputs<'a> {
@@ -52,6 +47,8 @@ pub(super) struct Inputs<'a> {
     /// Script of the run's first strong character: HarfBuzz picks one
     /// shaper per buffer from it.
     pub(super) dominant_script: Option<Script>,
+    /// That shaper.
+    pub(super) shaper: Shaper,
     /// The font has GSUB (HarfBuzz then prefers GPOS over `kerx`).
     pub(super) has_gsub: bool,
     /// The AAT `morx` table did the substitution.
@@ -59,6 +56,50 @@ pub(super) struct Inputs<'a> {
     /// Default ignorables get zero advances (the buffer flags neither
     /// preserve nor remove them).
     pub(super) zero_ignorables: bool,
+    /// The marks get fallback positions (see
+    /// [`fallback_mark_positioning`]).
+    pub(super) fallback_marks: bool,
+}
+
+/// True when the font's GPOS positions a run of `shaper`: HarfBuzz
+/// ignores GPOS for a shaper with a `gpos_tag` (Hebrew) unless GPOS
+/// has a script of that tag.
+pub(super) fn gpos_applies(gpos: Option<&Gpos<'_>>, shaper: Shaper) -> bool {
+    gpos.is_some_and(|gpos| {
+        shaper
+            .gpos_tag()
+            .map_or(true, |tag| gpos.script_list().find(tag).is_some())
+    })
+}
+
+/// HarfBuzz's `fallback_mark_positioning` plan flag (`hb-ot-shape.cc`):
+/// the run's shaper asks for fallback positions, and neither GPOS,
+/// `kerx`, nor a cross-stream legacy `kern` table positions the run. A
+/// run the AAT `morx` table substitutes (`applies_morx`) uses
+/// HarfBuzz's "dumber" shaper instead of any complex one, which never
+/// falls back. Decided before normalization, which recategorizes the
+/// marks' combining classes when it is on.
+pub(super) fn fallback_mark_positioning(
+    face: &Face<'_>,
+    gpos: Option<&Gpos<'_>>,
+    has_gsub: bool,
+    applies_morx: bool,
+    shaper: Shaper,
+) -> Result<bool> {
+    if !shaper.fallback_position() || (applies_morx && shaper != Shaper::Default) {
+        return Ok(false);
+    }
+    let has_gpos = gpos_applies(gpos, shaper);
+    let has_kerx = face.table_bytes(tag::KERX).is_ok();
+    // kerx wins over GPOS unless the font also has GSUB.
+    let apply_gpos = has_gpos && (has_gsub || !has_kerx);
+    if apply_gpos || has_kerx {
+        return Ok(false);
+    }
+    if face.table_bytes(tag::KERN).is_ok() {
+        return Ok(!face.kern()?.is_some_and(|k| k.has_cross_stream()));
+    }
+    Ok(true)
 }
 
 /// Positions `glyphs` (default advances already set), segment by
@@ -94,7 +135,7 @@ pub(super) fn position(
     // parsed only when it is going to run.
     let has_kerx = face.table_bytes(tag::KERX).is_ok();
     let has_kern = face.table_bytes(tag::KERN).is_ok();
-    let has_gpos = input.gpos.is_some();
+    let has_gpos = gpos_applies(input.gpos, input.shaper);
     let mut apply_kerx = has_kerx && !(input.has_gsub && has_gpos);
     let apply_gpos = has_gpos && !apply_kerx;
     let has_gpos_kern = apply_gpos
@@ -113,9 +154,7 @@ pub(super) fn position(
     }
     let kern_table = if apply_kern { face.kern()? } else { None };
 
-    let zeroing = input
-        .dominant_script
-        .map_or(MarkZeroing::Late, mark_zeroing);
+    let zeroing = input.shaper.mark_zeroing();
     // A state-machine `kern` table positions marks itself, and a
     // cross-stream one moves them across the line.
     let machine_kern = apply_kern && kern_table.as_ref().is_some_and(|k| k.has_state_machine());
@@ -172,6 +211,27 @@ pub(super) fn position(
     // Attachment offsets are resolved only now, against the final
     // advances, with the direction-specific advance compensation.
     attach::resolve_attachments(glyphs, &mut slots, direction);
+
+    if input.fallback_marks {
+        // Ligature components run in the run's direction, or in its
+        // script's for a vertical run.
+        let ligature_direction = if horizontal {
+            direction
+        } else {
+            input
+                .dominant_script
+                .map_or(Direction::Ltr, Script::horizontal_direction)
+        };
+        let positioner = MarkPositioner {
+            face,
+            coords: input.var.coords,
+            gdef: input.gdef,
+            direction,
+            ligature_direction,
+            adjust_offsets,
+        };
+        positioner.position_marks(glyphs)?;
+    }
     Ok(())
 }
 
@@ -306,6 +366,14 @@ fn zero_mark_widths(glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>, adjust_offset
 mod tests {
     use super::*;
 
+    /// The mark-zeroing behavior of the shaper HarfBuzz uses for
+    /// `script`. Sinhala, Tibetan, Mongolian and N'Ko all go to the
+    /// Universal Shaping Engine there, whatever pipeline sigilbuzz runs
+    /// them through.
+    fn zeroing(script: Script) -> MarkZeroing {
+        Shaper::for_script(script, true).mark_zeroing()
+    }
+
     #[test]
     fn zeroing_follows_the_harfbuzz_shaper_of_each_script() {
         for s in [
@@ -320,7 +388,7 @@ mod tests {
             Script::Sinhala,
             Script::Myanmar,
         ] {
-            assert_eq!(mark_zeroing(s), MarkZeroing::Early, "{s:?}");
+            assert_eq!(zeroing(s), MarkZeroing::Early, "{s:?}");
         }
         for s in [
             Script::Devanagari,
@@ -328,7 +396,7 @@ mod tests {
             Script::Khmer,
             Script::Hangul,
         ] {
-            assert_eq!(mark_zeroing(s), MarkZeroing::None, "{s:?}");
+            assert_eq!(zeroing(s), MarkZeroing::None, "{s:?}");
         }
         for s in [
             Script::Arabic,
@@ -337,7 +405,7 @@ mod tests {
             Script::Latin,
             Script::Other,
         ] {
-            assert_eq!(mark_zeroing(s), MarkZeroing::Late, "{s:?}");
+            assert_eq!(zeroing(s), MarkZeroing::Late, "{s:?}");
         }
     }
 

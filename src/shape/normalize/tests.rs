@@ -34,6 +34,7 @@ fn normalize_with(
         shaper,
         has_gpos_mark,
         level: ClusterLevel::MonotoneGraphemes,
+        recategorize_marks: false,
     };
     let chars: Vec<NormChar> = text
         .char_indices()
@@ -217,6 +218,7 @@ fn arabic_modifier_marks_get_the_renumbered_classes() {
         shaper: Shaper::Arabic,
         has_gpos_mark: true,
         level: ClusterLevel::MonotoneGraphemes,
+        recategorize_marks: false,
     };
     let chars: Vec<NormChar> = "\u{0628}\u{0650}\u{0655}"
         .char_indices()

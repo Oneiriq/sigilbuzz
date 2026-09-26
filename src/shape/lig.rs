@@ -93,7 +93,7 @@ fn set_synthesized_class(g: &mut Glyph, class: u16) {
 /// Number of components a glyph stands for, HarfBuzz's
 /// `_hb_glyph_info_get_lig_num_comps`: its recorded count when it is
 /// a ligature glyph by class and was formed as one, else one.
-fn num_comps(g: &Glyph, classes: &GlyphClasses<'_>) -> u8 {
+pub(super) fn num_comps(g: &Glyph, classes: &GlyphClasses<'_>) -> u8 {
     let m = MatchGlyph::from(g);
     if classes.kind(m) == GlyphKind::Ligature && m.is_lig_base() {
         m.lig_props() & 0x0F

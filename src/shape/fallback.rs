@@ -8,6 +8,15 @@
 //! the em-based spaces, the width of a digit for U+2007 FIGURE SPACE,
 //! of a period for U+2008 PUNCTUATION SPACE, and half the space for
 //! U+202F NARROW NO-BREAK SPACE.
+//!
+//! When nothing in the font positions a run's marks, the `marks` child
+//! places them from their combining classes and the glyphs' ink
+//! extents (`_hb_ot_shape_fallback_mark_position`).
+
+mod extents;
+mod marks;
+
+pub(super) use marks::{recategorize_combining_class, MarkPositioner};
 
 use crate::buffer::{char_class, Glyph};
 use crate::error::Result;
