@@ -86,7 +86,9 @@ dependency tree.
 
 - `rustybuzz` and `ttf-parser`: the reference implementations for the shaping and
   outline parity tests. `sigilbuzz-subset` also takes `rustybuzz` to check that
-  instanced and subset fonts position glyphs the way the variable source does.
+  instanced and subset fonts position glyphs the way the variable source does, and
+  `sigilbuzz-paint` takes `ttf-parser` to check variable COLRv1 paint values against
+  its COLR painter.
 - `criterion`: benchmarks.
 - `cc` and `fd-lock` (in `sigilbuzz-capi`): compile the C test programs and serialize
   the library build across test processes.

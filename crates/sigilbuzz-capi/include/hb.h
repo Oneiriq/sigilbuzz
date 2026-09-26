@@ -318,8 +318,9 @@ hb_face_t         *hb_subset_or_fail(hb_face_t *face, hb_subset_input_t *input);
 
 /* ---------- Paint (gated on the `paint` cargo feature) ----------
  *
- * The declarations below match HarfBuzz's hb-paint.h (8.0 API; the 8.2
- * color_glyph callback is not provided). Every callback receives the
+ * The declarations below match HarfBuzz's hb-paint.h: the 8.0 API plus
+ * the color_glyph callback HarfBuzz added in 8.2. hb_font_paint_glyph()
+ * reports callbacks in HarfBuzz 11's order. Every callback receives the
  * funcs object, the `paint_data` passed to hb_font_paint_glyph(), its
  * arguments, and the `user_data` it was installed with. A setter's
  * `destroy` runs on `user_data` when the callback is replaced, when the
@@ -363,6 +364,15 @@ typedef void (*hb_paint_push_transform_func_t) (hb_paint_funcs_t *funcs,
                                                 float dx, float dy,
                                                 void *user_data);
 
+/* Offered every glyph a PaintColrGlyph references, inside the inverse
+ * root transform. Return nonzero if the callback painted the glyph; the
+ * walk then skips its paint tree. */
+typedef hb_bool_t (*hb_paint_color_glyph_func_t) (hb_paint_funcs_t *funcs,
+                                                  void *paint_data,
+                                                  hb_codepoint_t glyph,
+                                                  hb_font_t *font,
+                                                  void *user_data);
+
 typedef void (*hb_paint_pop_transform_func_t) (hb_paint_funcs_t *funcs,
                                                void *paint_data,
                                                void *user_data);
@@ -376,7 +386,9 @@ typedef void (*hb_paint_push_clip_glyph_func_t) (hb_paint_funcs_t *funcs,
                                                  hb_font_t *font,
                                                  void *user_data);
 
-/* Never called by sigilbuzz yet. */
+/* Called around every COLRv1 glyph with its bounds at font scale (its
+ * ClipList box, or the bounds of its paint tree), and, in design units,
+ * with the ClipList box of every glyph a PaintColrGlyph references. */
 typedef void (*hb_paint_push_clip_rectangle_func_t) (hb_paint_funcs_t *funcs,
                                                      void *paint_data,
                                                      float xmin, float ymin,
@@ -547,6 +559,10 @@ void hb_paint_funcs_set_pop_transform_func(hb_paint_funcs_t *funcs,
                                            hb_paint_pop_transform_func_t func,
                                            void *user_data,
                                            hb_destroy_func_t destroy);
+void hb_paint_funcs_set_color_glyph_func(hb_paint_funcs_t *funcs,
+                                         hb_paint_color_glyph_func_t func,
+                                         void *user_data,
+                                         hb_destroy_func_t destroy);
 void hb_paint_funcs_set_push_clip_glyph_func(hb_paint_funcs_t *funcs,
                                              hb_paint_push_clip_glyph_func_t func,
                                              void *user_data,

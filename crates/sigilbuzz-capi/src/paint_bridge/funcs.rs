@@ -69,6 +69,13 @@ type PushClipGlyphFn = unsafe extern "C" fn(
     font: *mut hb_font_t,
     user_data: *mut c_void,
 );
+type ColorGlyphFn = unsafe extern "C" fn(
+    funcs: *mut hb_paint_funcs_t,
+    paint_data: *mut c_void,
+    glyph: hb_codepoint_t,
+    font: *mut hb_font_t,
+    user_data: *mut c_void,
+) -> hb_bool_t;
 type PushClipRectangleFn = unsafe extern "C" fn(
     funcs: *mut hb_paint_funcs_t,
     paint_data: *mut c_void,
@@ -148,6 +155,10 @@ type CustomPaletteColorFn = unsafe extern "C" fn(
 pub type hb_paint_push_transform_func_t = Option<PushTransformFn>;
 /// `hb_paint_pop_transform_func_t`: pop the last transform.
 pub type hb_paint_pop_transform_func_t = Option<BareFn>;
+/// `hb_paint_color_glyph_func_t` (HarfBuzz 8.2): paint the color glyph
+/// a `PaintColrGlyph` references by glyph index; return nonzero if it
+/// was painted, so the walk skips its paint tree.
+pub type hb_paint_color_glyph_func_t = Option<ColorGlyphFn>;
 /// `hb_paint_push_clip_glyph_func_t`: clip to a glyph outline as
 /// `hb_font_draw_glyph` would draw it on `font`.
 pub type hb_paint_push_clip_glyph_func_t = Option<PushClipGlyphFn>;
@@ -194,6 +205,7 @@ impl<F> Slot<F> {
 struct Table {
     push_transform: Slot<PushTransformFn>,
     pop_transform: Slot<BareFn>,
+    color_glyph: Slot<ColorGlyphFn>,
     push_clip_glyph: Slot<PushClipGlyphFn>,
     push_clip_rectangle: Slot<PushClipRectangleFn>,
     pop_clip: Slot<BareFn>,
@@ -211,6 +223,7 @@ impl Table {
     const EMPTY: Self = Self {
         push_transform: Slot::EMPTY,
         pop_transform: Slot::EMPTY,
+        color_glyph: Slot::EMPTY,
         push_clip_glyph: Slot::EMPTY,
         push_clip_rectangle: Slot::EMPTY,
         pop_clip: Slot::EMPTY,
@@ -225,10 +238,11 @@ impl Table {
     };
 
     /// Every slot's destroy callback and `user_data`, in slot order.
-    fn destroys(&self) -> [(Option<hb_destroy_func_t>, *mut c_void); 13] {
+    fn destroys(&self) -> [(Option<hb_destroy_func_t>, *mut c_void); 14] {
         [
             (self.push_transform.destroy, self.push_transform.user_data),
             (self.pop_transform.destroy, self.pop_transform.user_data),
+            (self.color_glyph.destroy, self.color_glyph.user_data),
             (self.push_clip_glyph.destroy, self.push_clip_glyph.user_data),
             (
                 self.push_clip_rectangle.destroy,
@@ -418,14 +432,22 @@ setter!(
     hb_paint_pop_transform_func_t
 );
 setter!(
+    /// Installs the color-glyph callback (HarfBuzz 8.2), offered every
+    /// glyph a `PaintColrGlyph` references.
+    hb_paint_funcs_set_color_glyph_func,
+    color_glyph,
+    hb_paint_color_glyph_func_t
+);
+setter!(
     /// Installs the push-clip-glyph callback.
     hb_paint_funcs_set_push_clip_glyph_func,
     push_clip_glyph,
     hb_paint_push_clip_glyph_func_t
 );
 setter!(
-    /// Installs the push-clip-rectangle callback. sigilbuzz does not
-    /// emit clip rectangles yet, so it is never called.
+    /// Installs the push-clip-rectangle callback, called with a COLRv1
+    /// glyph's bounds and with the ClipList box of every glyph a
+    /// `PaintColrGlyph` references.
     hb_paint_funcs_set_push_clip_rectangle_func,
     push_clip_rectangle,
     hb_paint_push_clip_rectangle_func_t
@@ -550,6 +572,35 @@ impl<'f> Dispatch<'f> {
             // the caller passed to `hb_font_paint_glyph`.
             unsafe { f(self.raw, self.paint_data, glyph, font, s.user_data) };
         }
+    }
+
+    pub(crate) fn push_clip_rectangle(&self, r: [f32; 4]) {
+        let s = self.slot(|t| t.push_clip_rectangle);
+        if let Some(f) = s.func {
+            // SAFETY: see `push_transform`.
+            unsafe {
+                f(
+                    self.raw,
+                    self.paint_data,
+                    r[0],
+                    r[1],
+                    r[2],
+                    r[3],
+                    s.user_data,
+                );
+            }
+        }
+    }
+
+    /// Offers `glyph` to the color-glyph callback. False when there is
+    /// no callback or it did not paint the glyph.
+    pub(crate) fn color_glyph(&self, glyph: hb_codepoint_t, font: *mut hb_font_t) -> bool {
+        let s = self.slot(|t| t.color_glyph);
+        let Some(f) = s.func else {
+            return false;
+        };
+        // SAFETY: see `push_clip_glyph`.
+        unsafe { f(self.raw, self.paint_data, glyph, font, s.user_data) != 0 }
     }
 
     pub(crate) fn pop_clip(&self) {

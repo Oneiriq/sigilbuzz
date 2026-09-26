@@ -20,9 +20,10 @@ use common::*;
 use sigilbuzz_capi::hb_font_set_scale;
 use sigilbuzz_capi::paint_bridge::{
     hb_color_stop_t, hb_font_paint_glyph, hb_paint_funcs_create, hb_paint_funcs_destroy,
-    hb_paint_funcs_set_color_func, hb_paint_funcs_set_pop_clip_func, hb_paint_funcs_t,
-    HB_PAINT_COMPOSITE_MODE_DEST_IN, HB_PAINT_COMPOSITE_MODE_SRC_OVER, HB_PAINT_EXTEND_PAD,
-    HB_PAINT_EXTEND_REFLECT, HB_PAINT_EXTEND_REPEAT,
+    hb_paint_funcs_set_color_func, hb_paint_funcs_set_color_glyph_func,
+    hb_paint_funcs_set_pop_clip_func, hb_paint_funcs_t, HB_PAINT_COMPOSITE_MODE_DEST_IN,
+    HB_PAINT_COMPOSITE_MODE_SRC_OVER, HB_PAINT_EXTEND_PAD, HB_PAINT_EXTEND_REFLECT,
+    HB_PAINT_EXTEND_REPEAT,
 };
 
 const RED: (u8, u8, u8, u8) = (255, 0, 0, 255);
@@ -172,19 +173,135 @@ fn root_transform_follows_the_font_scale() {
     // SAFETY: the font is live.
     unsafe { hb_font_set_scale(s.font, 2000, 4000) };
     let root = [2.0, 0.0, 0.0, 4.0, 0.0, 0.0];
-    let inverse = [0.5, 0.0, 0.0, 0.25, 0.0, 0.0];
+    let inverse = [0.5, 0.0, -0.0, 0.25, 0.0, 0.0];
+    // The ClipBox (0, 0, 1000, 1000) scales with the font, outside the
+    // root transform.
+    let clip = Ev::PushClipRect([0.0, 0.0, 2000.0, 4000.0]);
     let events = s.paint(3, 0, FG);
-    assert_eq!(events.first(), Some(&Ev::PushTransform(root)));
-    assert_eq!(events.last(), Some(&Ev::PopTransform));
+    assert_eq!(events[..2], [clip.clone(), Ev::PushTransform(root)]);
+    assert_eq!(events[events.len() - 2..], [Ev::PopTransform, Ev::PopClip]);
     let events = s.paint(2, 0, FG);
     assert_eq!(
-        events[..5],
+        events[..6],
         [
+            clip,
             Ev::PushTransform(root),
             Ev::PushGroup,
             Ev::PushTransform(inverse),
             Ev::PushClipGlyph(4),
             Ev::PushTransform(root),
+        ]
+    );
+}
+
+#[test]
+fn inverse_root_transform_has_harfbuzzs_negative_zero() {
+    // HarfBuzz prints the inverse root transform as "1 0 -0 1 0 0".
+    let s = Setup::new(&font_bytes());
+    let events = s.paint(1, 0, FG);
+    let Ev::PushTransform(inverse) = events[2] else {
+        panic!("expected the inverse root transform: {events:?}");
+    };
+    assert_eq!(inverse, INVERSE_IDENTITY);
+    assert!(inverse[2].is_sign_negative(), "{inverse:?}");
+    let Ev::PushTransform(root) = events[1] else {
+        panic!("expected the root transform: {events:?}");
+    };
+    assert!(root[2].is_sign_positive(), "{root:?}");
+}
+
+#[test]
+fn clip_boxes_round_to_font_units() {
+    // 1000 upem at 3 units per em: the 16.16 multiplier truncates to
+    // 196 / 65536, so 1000 scales to 3 and the box is (0, 0, 3, 3).
+    let s = Setup::new(&font_bytes());
+    // SAFETY: the font is live.
+    unsafe { hb_font_set_scale(s.font, 3, 3) };
+    assert_eq!(s.paint(3, 0, FG)[0], Ev::PushClipRect([0.0, 0.0, 3.0, 3.0]));
+}
+
+/// Glyphs without a ClipList: 1 = PaintColrGlyph(2), 2 = a bare solid
+/// (unbounded), 3 = PaintColrGlyph(4), whose ClipBox bounds it.
+fn unclipped_font() -> Vec<u8> {
+    let v1 = [
+        (1, colr_glyph(2)),
+        (2, solid(0, 1.0)),
+        (3, colr_glyph(4)),
+        (4, solid(1, 0.5)),
+    ];
+    let colr = colr_with_clips(&[], &v1, &[], &[(4, 4, [10, 20, 30, 40])]);
+    let cpal = cpal(&[&[RED, GREEN]]);
+    sfnt(&[(b"COLR", &colr), (b"CPAL", &cpal)])
+}
+
+#[test]
+fn unbounded_glyphs_clip_to_their_computed_extents_and_paint_nothing() {
+    let s = Setup::new(&unclipped_font());
+    for gid in [1, 2] {
+        let events = s.paint(gid, 0, FG);
+        assert!(
+            matches!(events[0], Ev::PushClipRect(_)),
+            "gid {gid}: {events:?}"
+        );
+        assert_eq!(
+            events[1..],
+            [Ev::PushTransform(IDENTITY), Ev::PopTransform, Ev::PopClip],
+            "gid {gid}"
+        );
+    }
+}
+
+#[test]
+fn colr_glyph_references_are_offered_then_clipped_to_their_box() {
+    let s = Setup::new(&unclipped_font());
+    let want = vec![
+        // Bounds computed from glyph 4's ClipBox.
+        Ev::PushClipRect([10.0, 20.0, 30.0, 40.0]),
+        Ev::PushTransform(IDENTITY),
+        // The color_glyph offer, declined: no callback is installed.
+        Ev::PushTransform(INVERSE_IDENTITY),
+        Ev::PopTransform,
+        // Glyph 4's ClipBox, in design units inside the root transform.
+        Ev::PushClipRect([10.0, 20.0, 30.0, 40.0]),
+        Ev::Color(0, hb_color(0, 255, 0, 127)),
+        Ev::PopClip,
+        Ev::PopTransform,
+        Ev::PopClip,
+    ];
+    assert_eq!(s.paint(3, 0, FG), want);
+}
+
+#[test]
+fn a_color_glyph_callback_that_paints_skips_the_reference() {
+    unsafe extern "C" fn paint_it(
+        _funcs: *mut hb_paint_funcs_t,
+        data: *mut c_void,
+        glyph: u32,
+        _font: *mut sigilbuzz_capi::hb_font_t,
+        user_data: *mut c_void,
+    ) -> i32 {
+        assert_eq!(user_data as usize, 0x2A, "own user_data");
+        // SAFETY: every test passes a live `Log` as paint_data.
+        unsafe { log(data) }
+            .events
+            .borrow_mut()
+            .push(Ev::CustomPalette(glyph));
+        1
+    }
+    let s = Setup::new(&unclipped_font());
+    // SAFETY: the table is live; the tag is never dereferenced.
+    unsafe {
+        hb_paint_funcs_set_color_glyph_func(s.funcs, Some(paint_it), 0x2A as *mut c_void, None);
+    }
+    let events = s.paint(3, 0, FG);
+    assert_eq!(
+        events[2..],
+        [
+            Ev::PushTransform(INVERSE_IDENTITY),
+            Ev::CustomPalette(4),
+            Ev::PopTransform,
+            Ev::PopTransform,
+            Ev::PopClip,
         ]
     );
 }

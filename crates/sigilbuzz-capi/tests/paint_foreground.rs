@@ -65,12 +65,10 @@ const FG: hb_color_t = hb_color(0x10, 0x20, 0x30, 0xFF);
 const RED: hb_color_t = hb_color(0, 0, 255, 255);
 const BLUE: hb_color_t = hb_color(255, 0, 0, 255);
 
-/// The events of a single-paint COLRv1 glyph, without the root
-/// transform around them.
+/// The events of a single-paint COLRv1 glyph, without the root clip
+/// and transform around them.
 fn inner(events: Vec<Ev>) -> Vec<Ev> {
-    assert_eq!(events.first(), Some(&Ev::PushTransform(IDENTITY)));
-    assert_eq!(events.last(), Some(&Ev::PopTransform));
-    events[1..events.len() - 1].to_vec()
+    unrooted(&events)
 }
 
 fn color_of(s: &Setup, gid: u32, palette: c_uint, fg: hb_color_t) -> Ev {

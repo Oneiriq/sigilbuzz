@@ -1,49 +1,75 @@
 //! Paint-tree walk in HarfBuzz's callback order.
 //!
-//! [`crate::evaluate_with`] flattens a color glyph into
-//! [`DrawCmd`](crate::DrawCmd)s: transforms are pre-multiplied and
-//! palette entries are resolved to colors. HarfBuzz's
-//! `hb_font_paint_glyph` does neither. It reports the paint tree as
-//! nested push/pop callbacks and leaves color resolution to the paint
-//! context. [`paint_glyph`] walks the same tree the same way and hands
-//! every step to a [`PaintSink`], so sigilbuzz-capi can drive its
-//! `hb_paint_funcs_t` bridge from it without losing structure.
+//! HarfBuzz's `hb_font_paint_glyph` reports a color glyph as nested
+//! push/pop callbacks and leaves color resolution to the paint context.
+//! [`paint_glyph`] walks the same tree the same way and hands every step
+//! to a [`PaintSink`]. sigilbuzz-capi drives its `hb_paint_funcs_t`
+//! bridge from it, [`crate::evaluate_with`] flattens it into
+//! [`DrawCmd`](crate::DrawCmd)s, and the sigilbuzz renderers draw it.
 //!
-//! The callback shapes follow HarfBuzz's COLR painter:
+//! The sequence is HarfBuzz 11's (checked against the paint traces in
+//! HarfBuzz's `test/api/results-paint` at the 11.0.0 tag):
 //!
-//! - A COLRv1 glyph is wrapped in `push_root_transform` /
-//!   `pop_transform`.
+//! - A COLRv1 glyph is clipped to its bounds, then wrapped in
+//!   `push_root_transform` / `pop_transform`. The bounds are the
+//!   glyph's ClipList box, or, when it has none, the bounds of its
+//!   paint tree (see [`RootClip`]). A glyph whose paint escapes every
+//!   clip is unbounded and paints nothing inside the root transform.
 //! - `PaintGlyph` is `push_inverse_root_transform`, `push_clip_glyph`,
 //!   `push_root_transform`, the child, then `pop_transform`,
 //!   `pop_clip`, `pop_transform`: the clip outline is drawn at font
-//!   scale while the child stays in design units.
+//!   scale while the child stays in design units, so a transform below
+//!   a `PaintGlyph` moves the fill but never the outline.
+//! - `PaintColrGlyph` first offers the glyph to
+//!   [`PaintSink::color_glyph`] inside `push_inverse_root_transform` /
+//!   `pop_transform`. If the sink declines, the referenced glyph's paint
+//!   is walked inside its ClipList box (`push_clip_rectangle`, in design
+//!   units) when it has one. A glyph already on the walk stack paints
+//!   nothing.
+//! - `PaintColrLayers` walks its layers in order, without groups. A
+//!   layer already on the walk stack is skipped.
 //! - Transform paints push one transform each. Translate, scale,
 //!   rotate, and skew skip the push when they are the identity, and
 //!   the `AroundCenter` forms push translate, the operation, and the
 //!   opposite translate.
 //! - `PaintComposite` is `push_group`, the backdrop, `push_group`, the
-//!   source, `pop_group(mode)`, `pop_group(SrcOver)`.
+//!   source, `pop_group(mode)`, `pop_group(SrcOver)`: the source and the
+//!   backdrop composite in isolation.
 //! - Sweep angles are reported in radians as `(angle + 1) * pi`.
 //! - A COLRv0 glyph is one `push_clip_glyph`, `color`, `pop_clip`
 //!   triple per layer, with alpha 1.
 //!
 //! Color references reach the sink unresolved ([`ColorRef`]), with
 //! variation deltas already applied, so the sink can resolve palette
-//! entries the way its own API defines.
+//! entries the way its own API defines; [`Resolver`] resolves them the
+//! way [`crate::evaluate_with`] does.
 //!
-//! This module is public only for sigilbuzz-capi. It is not part of
-//! the stable API and may change in any minor release.
+//! This module is public only for the sigilbuzz companion crates. It is
+//! not part of the stable API and may change in any minor release.
 
 use alloc::vec::Vec;
 use core::f32::consts::PI;
 
 use sigilbuzz::tables::colr::{ColorLine, Colr, ColrPaint, CompositeMode, PaintOffset};
+use sigilbuzz::tables::cpal::Cpal;
 use sigilbuzz::Face;
 
+use crate::color::Color;
 use crate::deltas::Deltas;
-use crate::eval::{GlyphId, MAX_DEPTH};
-use crate::gradient::Extend;
+use crate::eval::GlyphId;
+use crate::extents::ExtentsSink;
+use crate::gradient::{ColorStop, Extend};
+use crate::options::{EvalOptions, Palette};
 use crate::transform::{sweep_angle_to_radians, Transform2D};
+
+/// Maximum paint nesting depth, HarfBuzz's `HB_MAX_NESTING_LEVEL`. A
+/// deeper paint is not walked.
+const MAX_DEPTH: usize = 64;
+
+/// Maximum number of paints one glyph may visit. Shared subtrees can
+/// make a small paint graph expand exponentially; the walk stops once
+/// this many paints have been visited.
+const MAX_EDGES: u32 = 65_536;
 
 /// An unresolved COLR color: a palette entry plus the alpha that
 /// multiplies it.
@@ -74,10 +100,77 @@ pub struct ColorLineRef<'s> {
     pub extend: Extend,
 }
 
+/// The clip [`paint_glyph`] puts around a whole COLRv1 glyph, outside
+/// the root transform.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RootClip {
+    /// The glyph's ClipList box in design units, variation deltas
+    /// applied and rounded. HarfBuzz scales it to font units with
+    /// integer rounding.
+    ClipBox {
+        /// Left edge.
+        x_min: i32,
+        /// Bottom edge.
+        y_min: i32,
+        /// Right edge.
+        x_max: i32,
+        /// Top edge.
+        y_max: i32,
+    },
+    /// Bounds computed from the paint tree, in design units, for a
+    /// glyph without a ClipList box. When `bounded` is false some fill
+    /// escaped every clip; the extents are then meaningless and the
+    /// glyph paints nothing.
+    Extents {
+        /// Left edge.
+        x_min: f32,
+        /// Bottom edge.
+        y_min: f32,
+        /// Right edge.
+        x_max: f32,
+        /// Top edge.
+        y_max: f32,
+        /// False for an unbounded glyph.
+        bounded: bool,
+    },
+}
+
+impl RootClip {
+    /// The clip rectangle in design units as `(x_min, y_min, x_max,
+    /// y_max)`.
+    #[must_use]
+    pub fn rect(&self) -> (f32, f32, f32, f32) {
+        match *self {
+            RootClip::ClipBox {
+                x_min,
+                y_min,
+                x_max,
+                y_max,
+            } => (x_min as f32, y_min as f32, x_max as f32, y_max as f32),
+            RootClip::Extents {
+                x_min,
+                y_min,
+                x_max,
+                y_max,
+                ..
+            } => (x_min, y_min, x_max, y_max),
+        }
+    }
+
+    /// False for an unbounded glyph, which paints nothing.
+    #[must_use]
+    pub fn is_bounded(&self) -> bool {
+        !matches!(self, RootClip::Extents { bounded: false, .. })
+    }
+}
+
 /// Receives a color glyph's paint operations in HarfBuzz's order.
 ///
-/// Every `push_*` is matched by exactly one pop. Coordinates are in
-/// font design units, inside whatever transforms are pushed.
+/// Every `push_*` is matched by exactly one pop: transforms by
+/// [`PaintSink::pop_transform`], clips (glyph, rectangle, and root) by
+/// [`PaintSink::pop_clip`], and groups by [`PaintSink::pop_group`].
+/// Coordinates are in font design units, inside whatever transforms are
+/// pushed.
 pub trait PaintSink {
     /// Pushes an affine transform.
     fn push_transform(&mut self, transform: Transform2D);
@@ -89,12 +182,23 @@ pub trait PaintSink {
     fn pop_transform(&mut self);
     /// Clips to the outline of `glyph`.
     fn push_clip_glyph(&mut self, glyph: GlyphId);
+    /// Clips to a rectangle given in the current coordinates.
+    fn push_clip_rectangle(&mut self, x_min: f32, y_min: f32, x_max: f32, y_max: f32);
+    /// Clips the whole glyph, before the root transform is pushed.
+    fn push_root_clip(&mut self, clip: RootClip);
     /// Pops the most recent clip.
     fn pop_clip(&mut self);
     /// Starts an isolated group.
     fn push_group(&mut self);
     /// Ends the most recent group and composites it with `mode`.
     fn pop_group(&mut self, mode: CompositeMode);
+    /// Offered every `PaintColrGlyph` target, inside the inverse root
+    /// transform. Returning true means the sink painted the glyph itself
+    /// and the walk skips its paint tree. The default declines.
+    fn color_glyph(&mut self, glyph: GlyphId) -> bool {
+        let _ = glyph;
+        false
+    }
     /// Fills the current clip with one color.
     fn color(&mut self, color: ColorRef);
     /// Fills the current clip with a linear gradient.
@@ -137,27 +241,66 @@ pub enum Painted {
 }
 
 /// Walks `glyph`'s color data at the normalized variation `coords`,
-/// reporting each step to `sink`. A COLRv1 paint tree wins over COLRv0
-/// layers, as in HarfBuzz.
+/// reporting each step to `sink`, the way `hb_font_paint_glyph` does:
+/// a COLRv1 glyph is clipped to its [`RootClip`]. A COLRv1 paint tree
+/// wins over COLRv0 layers, as in HarfBuzz.
 pub fn paint_glyph(
     face: &Face<'_>,
     glyph: GlyphId,
     coords: &[f32],
     sink: &mut dyn PaintSink,
 ) -> Painted {
+    paint(face, glyph, coords, true, sink)
+}
+
+/// Like [`paint_glyph`] without the root clip: every COLRv1 glyph is
+/// walked, bounded or not, directly inside the root transform. This is
+/// the walk HarfBuzz runs to compute a glyph's bounds.
+pub fn paint_glyph_unclipped(
+    face: &Face<'_>,
+    glyph: GlyphId,
+    coords: &[f32],
+    sink: &mut dyn PaintSink,
+) -> Painted {
+    paint(face, glyph, coords, false, sink)
+}
+
+fn paint(
+    face: &Face<'_>,
+    glyph: GlyphId,
+    coords: &[f32],
+    clip: bool,
+    sink: &mut dyn PaintSink,
+) -> Painted {
     let Ok(Some(colr)) = face.colr() else {
         return Painted::Nothing;
     };
     if let Some(root) = colr.paint(glyph) {
-        let mut walker = Walker {
-            colr: &colr,
-            deltas: Deltas::new(&colr, coords),
-            visited: alloc::vec![glyph],
-            sink,
+        let deltas = Deltas::new(&colr, coords);
+        let root_clip = if clip {
+            Some(root_clip(face, &colr, &deltas, glyph, coords))
+        } else {
+            None
         };
-        walker.sink.push_root_transform();
-        walker.paint(Some(root), 0);
-        walker.sink.pop_transform();
+        if let Some(c) = root_clip {
+            sink.push_root_clip(c);
+        }
+        sink.push_root_transform();
+        if root_clip.map_or(true, |c| c.is_bounded()) {
+            let mut walker = Walker {
+                colr: &colr,
+                deltas,
+                glyphs: alloc::vec![glyph],
+                layers: Vec::new(),
+                edges_left: MAX_EDGES,
+                sink: &mut *sink,
+            };
+            walker.paint(Some(root), 0);
+        }
+        sink.pop_transform();
+        if root_clip.is_some() {
+            sink.pop_clip();
+        }
         return Painted::ColrV1;
     }
     if let Some(layers) = colr.v0_layers(glyph) {
@@ -174,11 +317,37 @@ pub fn paint_glyph(
     Painted::Nothing
 }
 
+/// The ClipList box of `glyph`, else the bounds of its paint tree.
+fn root_clip(
+    face: &Face<'_>,
+    colr: &Colr<'_>,
+    deltas: &Deltas<'_, '_>,
+    glyph: GlyphId,
+    coords: &[f32],
+) -> RootClip {
+    if let Some(clip) = colr.clip_box(glyph) {
+        let [x_min, y_min, x_max, y_max] = deltas.clip_box(clip);
+        return RootClip::ClipBox {
+            x_min,
+            y_min,
+            x_max,
+            y_max,
+        };
+    }
+    let mut extents = ExtentsSink::new(face, coords);
+    paint_glyph_unclipped(face, glyph, coords, &mut extents);
+    extents.root_clip()
+}
+
 struct Walker<'a, 'b, 's> {
     colr: &'b Colr<'a>,
     deltas: Deltas<'a, 'b>,
     /// COLR glyphs whose trees are on the walk stack.
-    visited: Vec<GlyphId>,
+    glyphs: Vec<GlyphId>,
+    /// LayerList indices on the walk stack.
+    layers: Vec<u32>,
+    /// Paints the walk may still visit.
+    edges_left: u32,
     sink: &'s mut dyn PaintSink,
 }
 
@@ -189,9 +358,10 @@ impl Walker<'_, '_, '_> {
         let Some(paint) = paint else {
             return;
         };
-        if depth >= MAX_DEPTH {
+        if depth >= MAX_DEPTH || self.edges_left == 0 {
             return;
         }
+        self.edges_left -= 1;
         let depth = depth + 1;
         match paint {
             ColrPaint::ColrLayers {
@@ -199,20 +369,18 @@ impl Walker<'_, '_, '_> {
                 first_layer_index,
             } => {
                 for i in 0..u32::from(num_layers) {
-                    let layer = first_layer_index
-                        .checked_add(i)
-                        .and_then(|index| self.colr.layer_paint(index));
-                    self.paint(layer, depth);
+                    let Some(index) = first_layer_index.checked_add(i) else {
+                        break;
+                    };
+                    if self.layers.contains(&index) {
+                        continue;
+                    }
+                    self.layers.push(index);
+                    self.paint(self.colr.layer_paint(index), depth);
+                    self.layers.pop();
                 }
             }
-            ColrPaint::ColrGlyph { glyph_id } => {
-                if self.visited.contains(&glyph_id) {
-                    return;
-                }
-                self.visited.push(glyph_id);
-                self.paint(self.colr.paint(glyph_id), depth);
-                self.visited.pop();
-            }
+            ColrPaint::ColrGlyph { glyph_id } => self.colr_glyph(glyph_id, depth),
             ColrPaint::Solid {
                 palette_index,
                 alpha,
@@ -586,6 +754,37 @@ impl Walker<'_, '_, '_> {
         }
     }
 
+    /// `PaintColrGlyph`: offer the glyph to the sink, then walk its tree
+    /// inside its clip box.
+    fn colr_glyph(&mut self, glyph: GlyphId, depth: usize) {
+        if self.glyphs.contains(&glyph) {
+            return;
+        }
+        self.glyphs.push(glyph);
+        self.sink.push_inverse_root_transform();
+        let handled = self.sink.color_glyph(glyph);
+        self.sink.pop_transform();
+        if !handled {
+            let clip = self
+                .colr
+                .clip_box(glyph)
+                .map(|clip| self.deltas.clip_box(clip));
+            if let Some([x_min, y_min, x_max, y_max]) = clip {
+                self.sink.push_clip_rectangle(
+                    x_min as f32,
+                    y_min as f32,
+                    x_max as f32,
+                    y_max as f32,
+                );
+            }
+            self.paint(self.colr.paint(glyph), depth);
+            if clip.is_some() {
+                self.sink.pop_clip();
+            }
+        }
+        self.glyphs.pop();
+    }
+
     fn child(&mut self, offset: PaintOffset, depth: usize) {
         let child = self.colr.paint_at(offset);
         self.paint(child, depth);
@@ -694,5 +893,47 @@ fn line<'s>(stops: &'s [StopRef], color_line: ColorLine<'_>) -> ColorLineRef<'s>
     ColorLineRef {
         stops,
         extend: color_line.extend.into(),
+    }
+}
+
+/// Resolves [`ColorRef`]s against a CPAL palette the way
+/// [`crate::evaluate_with`] does: palette entry `0xFFFF` is the
+/// foreground color with the paint alpha applied, and an entry the font
+/// cannot supply falls back to the foreground color, as in HarfBuzz.
+#[derive(Debug, Clone, Copy)]
+pub struct Resolver<'a, 'b> {
+    palette: Palette<'a, 'b>,
+}
+
+impl<'a, 'b> Resolver<'a, 'b> {
+    /// Resolves against `cpal` (if any) with `options`' palette index
+    /// and foreground color.
+    #[must_use]
+    pub fn new(cpal: Option<&'b Cpal<'a>>, options: &EvalOptions<'_>) -> Self {
+        Self {
+            palette: Palette::new(cpal, options),
+        }
+    }
+
+    /// The color for `color`, and whether it is the foreground entry.
+    #[must_use]
+    pub fn color(&self, color: ColorRef) -> (Color, bool) {
+        self.palette.resolve(color.palette_entry, color.alpha)
+    }
+
+    /// Resolves every stop of `line`, in order.
+    #[must_use]
+    pub fn stops(&self, line: ColorLineRef<'_>) -> Vec<ColorStop> {
+        line.stops
+            .iter()
+            .map(|stop| {
+                let (color, is_foreground) = self.color(stop.color);
+                ColorStop {
+                    offset: stop.offset,
+                    color,
+                    is_foreground,
+                }
+            })
+            .collect()
     }
 }

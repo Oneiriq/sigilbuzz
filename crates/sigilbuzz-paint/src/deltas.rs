@@ -1,4 +1,5 @@
-//! Variation deltas for `PaintVar*` fields and `VarColorStop`s.
+//! Variation deltas for `PaintVar*` fields, `VarColorStop`s, and
+//! variable clip boxes.
 //!
 //! Every variable COLRv1 value names a delta by `varIndexBase + i`,
 //! where `i` is the field's position in its record. The delta comes from
@@ -19,7 +20,7 @@
 //! the same [`Deltas`] value, so they never disagree about units or index
 //! mapping.
 
-use sigilbuzz::tables::colr::{Colr, VarIndexBase};
+use sigilbuzz::tables::colr::{ClipBox, Colr, VarIndexBase};
 use sigilbuzz::tables::variation_store::ItemVariationStore;
 
 /// `varIndexBase` value meaning "this record does not vary".
@@ -78,6 +79,20 @@ impl<'a, 'c> Deltas<'a, 'c> {
     /// `VarColorStop` whose `varIndexBase` is `base`.
     pub(crate) fn stop(&self, base: VarIndexBase) -> (f32, f32) {
         (self.f2dot14(base, 0), self.f2dot14(base, 1))
+    }
+
+    /// A clip box in design units with its deltas applied. HarfBuzz
+    /// rounds each delta to a whole unit (half rounds up) before adding
+    /// it; the result is `[x_min, y_min, x_max, y_max]`.
+    pub(crate) fn clip_box(&self, clip: ClipBox) -> [i32; 4] {
+        let fields = [clip.x_min, clip.y_min, clip.x_max, clip.y_max];
+        let base = clip.var_index_base.unwrap_or(NO_VARIATION);
+        let mut out = [0i32; 4];
+        for (i, (slot, v)) in out.iter_mut().zip(fields).enumerate() {
+            let delta = (self.raw(base, i as u16) + 0.5).floor();
+            *slot = i32::from(v).saturating_add(delta as i32);
+        }
+        out
     }
 }
 

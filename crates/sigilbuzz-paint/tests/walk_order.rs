@@ -1,12 +1,16 @@
 //! `walk::paint_glyph` reports paint trees in HarfBuzz's callback
-//! order: nested transforms, the root and inverse-root transforms
-//! around glyph clips, two groups per composite, biased sweep angles,
-//! and unresolved palette references.
+//! order: the root clip, nested transforms, the root and inverse-root
+//! transforms around glyph clips, clip boxes on referenced glyphs, two
+//! groups per composite, biased sweep angles, and unresolved palette
+//! references.
 
 use core::f32::consts::PI;
 
 use sigilbuzz::Face;
-use sigilbuzz_paint::walk::{paint_glyph, ColorLineRef, ColorRef, PaintSink, Painted, StopRef};
+use sigilbuzz_paint::walk::{
+    paint_glyph, paint_glyph_unclipped, ColorLineRef, ColorRef, PaintSink, Painted, RootClip,
+    StopRef,
+};
 use sigilbuzz_paint::{CompositeMode, Extend, Transform2D};
 
 // =========================================================================
@@ -47,9 +51,25 @@ fn sfnt(tables: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
     out
 }
 
+/// One ClipList record: glyphs `first..=last`, box
+/// `[x_min, y_min, x_max, y_max]`, and a `varIndexBase` for a
+/// `ClipBoxFormat2`.
+type Clip = (u16, u16, [i16; 4], Option<u32>);
+
 /// COLR with v0 base glyphs (`(gid, [(layer gid, entry)])`) and v1
 /// paints (`(gid, paint bytes)`), with the 34-byte v1 header.
 fn colr(v0: &[(u16, &[(u16, u16)])], v1: &[(u16, Vec<u8>)]) -> Vec<u8> {
+    colr_with(v0, v1, &[], &[], &[])
+}
+
+/// [`colr`] plus a ClipList, a LayerList, and a variation store.
+fn colr_with(
+    v0: &[(u16, &[(u16, u16)])],
+    v1: &[(u16, Vec<u8>)],
+    clips: &[Clip],
+    layers: &[Vec<u8>],
+    var_store: &[u8],
+) -> Vec<u8> {
     let header_len = 34usize;
     let base_off = header_len;
     let layer_off = base_off + 6 * v0.len();
@@ -62,10 +82,13 @@ fn colr(v0: &[(u16, &[(u16, u16)])], v1: &[(u16, Vec<u8>)]) -> Vec<u8> {
     out.extend_from_slice(&(layer_off as u32).to_be_bytes());
     out.extend_from_slice(&(num_layers as u16).to_be_bytes());
     out.extend_from_slice(&(list_off as u32).to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes()); // layer list
-    out.extend_from_slice(&0u32.to_be_bytes()); // clip list
+    let layer_list_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes());
+    let clip_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes());
     out.extend_from_slice(&0u32.to_be_bytes()); // index map
-    out.extend_from_slice(&0u32.to_be_bytes()); // var store
+    let var_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes());
     let mut first = 0u16;
     for (gid, layers) in v0 {
         out.extend_from_slice(&gid.to_be_bytes());
@@ -90,6 +113,68 @@ fn colr(v0: &[(u16, &[(u16, u16)])], v1: &[(u16, Vec<u8>)]) -> Vec<u8> {
         let slot = records + i * 6 + 2;
         out[slot..slot + 4].copy_from_slice(&rel.to_be_bytes());
         out.extend_from_slice(bytes);
+    }
+    if !layers.is_empty() {
+        let at = out.len();
+        out[layer_list_slot..layer_list_slot + 4].copy_from_slice(&(at as u32).to_be_bytes());
+        out.extend_from_slice(&(layers.len() as u32).to_be_bytes());
+        let mut rel = 4 + 4 * layers.len();
+        for layer in layers {
+            out.extend_from_slice(&(rel as u32).to_be_bytes());
+            rel += layer.len();
+        }
+        for layer in layers {
+            out.extend_from_slice(layer);
+        }
+    }
+    if !clips.is_empty() {
+        let at = out.len();
+        out[clip_slot..clip_slot + 4].copy_from_slice(&(at as u32).to_be_bytes());
+        out.push(1);
+        out.extend_from_slice(&(clips.len() as u32).to_be_bytes());
+        let mut box_at = 5 + 7 * clips.len();
+        for (first, last, _, var) in clips {
+            out.extend_from_slice(&first.to_be_bytes());
+            out.extend_from_slice(&last.to_be_bytes());
+            out.extend_from_slice(&(box_at as u32).to_be_bytes()[1..]);
+            box_at += if var.is_some() { 13 } else { 9 };
+        }
+        for (_, _, coords, var) in clips {
+            out.push(if var.is_some() { 2 } else { 1 });
+            for v in coords {
+                out.extend_from_slice(&v.to_be_bytes());
+            }
+            if let Some(base) = var {
+                out.extend_from_slice(&base.to_be_bytes());
+            }
+        }
+    }
+    if !var_store.is_empty() {
+        let at = out.len();
+        out[var_slot..var_slot + 4].copy_from_slice(&(at as u32).to_be_bytes());
+        out.extend_from_slice(var_store);
+    }
+    out
+}
+
+/// One-axis item variation store: a single region peaking at +1 and
+/// one int16 delta per row.
+fn ivs(rows: &[i16]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&12u32.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&22u32.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&f2dot14(0.0));
+    out.extend_from_slice(&f2dot14(1.0));
+    out.extend_from_slice(&f2dot14(1.0));
+    for v in [rows.len() as u16, 1, 1, 0] {
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+    for row in rows {
+        out.extend_from_slice(&row.to_be_bytes());
     }
     out
 }
@@ -118,6 +203,12 @@ fn paint_glyph_node(gid: u16, child: &[u8]) -> Vec<u8> {
 fn colr_glyph(gid: u16) -> Vec<u8> {
     let mut p = vec![11u8];
     p.extend_from_slice(&gid.to_be_bytes());
+    p
+}
+
+fn colr_layers(count: u8, first: u32) -> Vec<u8> {
+    let mut p = vec![1u8, count];
+    p.extend_from_slice(&first.to_be_bytes());
     p
 }
 
@@ -206,9 +297,12 @@ enum Ev {
     InverseRoot,
     Pop,
     Clip(u16),
+    ClipRect([f32; 4]),
+    RootClip(RootClip),
     PopClip,
     Group,
     PopGroup(CompositeMode),
+    ColorGlyph(u16),
     Color(ColorRef),
     Linear(Vec<StopRef>, Extend, [f32; 6]),
     Sweep(Vec<StopRef>, (f32, f32), f32, f32),
@@ -216,35 +310,49 @@ enum Ev {
 }
 
 #[derive(Default)]
-struct Rec(Vec<Ev>);
+struct Rec {
+    events: Vec<Ev>,
+    /// Glyphs `color_glyph` claims to paint itself.
+    handles: Vec<u16>,
+}
 
 impl PaintSink for Rec {
     fn push_transform(&mut self, t: Transform2D) {
-        self.0.push(Ev::Push(t));
+        self.events.push(Ev::Push(t));
     }
     fn push_root_transform(&mut self) {
-        self.0.push(Ev::Root);
+        self.events.push(Ev::Root);
     }
     fn push_inverse_root_transform(&mut self) {
-        self.0.push(Ev::InverseRoot);
+        self.events.push(Ev::InverseRoot);
     }
     fn pop_transform(&mut self) {
-        self.0.push(Ev::Pop);
+        self.events.push(Ev::Pop);
     }
     fn push_clip_glyph(&mut self, glyph: u16) {
-        self.0.push(Ev::Clip(glyph));
+        self.events.push(Ev::Clip(glyph));
+    }
+    fn push_clip_rectangle(&mut self, x_min: f32, y_min: f32, x_max: f32, y_max: f32) {
+        self.events.push(Ev::ClipRect([x_min, y_min, x_max, y_max]));
+    }
+    fn push_root_clip(&mut self, clip: RootClip) {
+        self.events.push(Ev::RootClip(clip));
     }
     fn pop_clip(&mut self) {
-        self.0.push(Ev::PopClip);
+        self.events.push(Ev::PopClip);
     }
     fn push_group(&mut self) {
-        self.0.push(Ev::Group);
+        self.events.push(Ev::Group);
     }
     fn pop_group(&mut self, mode: CompositeMode) {
-        self.0.push(Ev::PopGroup(mode));
+        self.events.push(Ev::PopGroup(mode));
+    }
+    fn color_glyph(&mut self, glyph: u16) -> bool {
+        self.events.push(Ev::ColorGlyph(glyph));
+        self.handles.contains(&glyph)
     }
     fn color(&mut self, color: ColorRef) {
-        self.0.push(Ev::Color(color));
+        self.events.push(Ev::Color(color));
     }
     fn linear_gradient(
         &mut self,
@@ -254,7 +362,7 @@ impl PaintSink for Rec {
         p2: (f32, f32),
     ) {
         let pts = [p0.0, p0.1, p1.0, p1.1, p2.0, p2.1];
-        self.0
+        self.events
             .push(Ev::Linear(line.stops.to_vec(), line.extend, pts));
     }
     fn radial_gradient(
@@ -265,7 +373,7 @@ impl PaintSink for Rec {
         _c1: (f32, f32),
         _r1: f32,
     ) {
-        self.0.push(Ev::Radial);
+        self.events.push(Ev::Radial);
     }
     fn sweep_gradient(
         &mut self,
@@ -274,7 +382,7 @@ impl PaintSink for Rec {
         start_angle: f32,
         end_angle: f32,
     ) {
-        self.0.push(Ev::Sweep(
+        self.events.push(Ev::Sweep(
             line.stops.to_vec(),
             center,
             start_angle,
@@ -283,11 +391,23 @@ impl PaintSink for Rec {
     }
 }
 
+/// The unclipped walk: the paint tree alone, inside the root transform.
 fn walk(bytes: &[u8], gid: u16) -> (Painted, Vec<Ev>) {
     let face = Face::parse_bytes(bytes, 0).expect("face parses");
     let mut rec = Rec::default();
-    let painted = paint_glyph(&face, gid, &[], &mut rec);
-    (painted, rec.0)
+    let painted = paint_glyph_unclipped(&face, gid, &[], &mut rec);
+    (painted, rec.events)
+}
+
+/// The clipped walk HarfBuzz's `hb_font_paint_glyph` performs.
+fn walk_clipped(bytes: &[u8], gid: u16, coords: &[f32], handles: &[u16]) -> Vec<Ev> {
+    let face = Face::parse_bytes(bytes, 0).expect("face parses");
+    let mut rec = Rec {
+        handles: handles.to_vec(),
+        ..Rec::default()
+    };
+    paint_glyph(&face, gid, coords, &mut rec);
+    rec.events
 }
 
 fn color(palette_entry: u16, alpha: f32) -> Ev {
@@ -307,8 +427,23 @@ fn stop(offset: f32, palette_entry: u16, alpha: f32) -> StopRef {
     }
 }
 
+fn clip_box(x_min: i32, y_min: i32, x_max: i32, y_max: i32) -> Ev {
+    Ev::RootClip(RootClip::ClipBox {
+        x_min,
+        y_min,
+        x_max,
+        y_max,
+    })
+}
+
+/// A `PaintColrGlyph(gid)` the sink declines: the color_glyph offer
+/// inside the inverse root transform.
+fn offered(gid: u16) -> Vec<Ev> {
+    vec![Ev::InverseRoot, Ev::ColorGlyph(gid), Ev::Pop]
+}
+
 // =========================================================================
-// Tests
+// Tests: the paint tree
 // =========================================================================
 
 #[test]
@@ -433,7 +568,7 @@ fn sweep_angles_are_biased_radians() {
 }
 
 #[test]
-fn colr_glyph_reference_recurses_and_stops_on_cycles() {
+fn colr_glyph_reference_is_offered_then_walked_and_stops_on_cycles() {
     // 7 -> PaintColrGlyph(8) -> solid; 9 -> PaintColrGlyph(9).
     let bytes = sfnt(&[(
         b"COLR",
@@ -442,8 +577,41 @@ fn colr_glyph_reference_recurses_and_stops_on_cycles() {
             &[(7, colr_glyph(8)), (8, solid(3, 1.0)), (9, colr_glyph(9))],
         ),
     )]);
-    assert_eq!(walk(&bytes, 7).1, vec![Ev::Root, color(3, 1.0), Ev::Pop]);
+    let mut want = vec![Ev::Root];
+    want.extend(offered(8));
+    want.extend([color(3, 1.0), Ev::Pop]);
+    assert_eq!(walk(&bytes, 7).1, want);
+    // A glyph already on the walk stack paints nothing at all.
     assert_eq!(walk(&bytes, 9).1, vec![Ev::Root, Ev::Pop]);
+}
+
+#[test]
+fn colr_glyph_handled_by_the_sink_skips_its_tree() {
+    // Glyphs 7 and 8 share a ClipBox; the sink paints 8 itself, so
+    // neither 8's clip box nor its tree is walked.
+    let clip = [(7, 8, [0, 0, 100, 100], None)];
+    let paints = [(7, colr_glyph(8)), (8, solid(3, 1.0))];
+    let bytes = sfnt(&[(b"COLR", &colr_with(&[], &paints, &clip, &[], &[]))]);
+    let mut want = vec![clip_box(0, 0, 100, 100), Ev::Root];
+    want.extend(offered(8));
+    want.extend([Ev::Pop, Ev::PopClip]);
+    assert_eq!(walk_clipped(&bytes, 7, &[], &[8]), want);
+}
+
+#[test]
+fn colr_layers_walk_in_order_and_skip_layers_on_the_stack() {
+    // Layer 0 is a solid; layer 1 is PaintColrLayers(0..2) again, whose
+    // own layer 1 is on the stack and is skipped.
+    let layers = [solid(1, 1.0), colr_layers(2, 0)];
+    let bytes = sfnt(&[(
+        b"COLR",
+        &colr_with(&[], &[(7, colr_layers(2, 0))], &[], &layers, &[]),
+    )]);
+    let (_, events) = walk(&bytes, 7);
+    assert_eq!(
+        events,
+        vec![Ev::Root, color(1, 1.0), color(1, 1.0), Ev::Pop]
+    );
 }
 
 #[test]
@@ -452,17 +620,17 @@ fn colr_v0_layers_are_clip_color_pop_triples() {
     let bytes = sfnt(&[(b"COLR", &colr(&[(5, layers)], &[]))]);
     let (painted, events) = walk(&bytes, 5);
     assert_eq!(painted, Painted::ColrV0);
-    assert_eq!(
-        events,
-        vec![
-            Ev::Clip(20),
-            color(1, 1.0),
-            Ev::PopClip,
-            Ev::Clip(21),
-            color(FOREGROUND, 1.0),
-            Ev::PopClip,
-        ]
-    );
+    let expected = vec![
+        Ev::Clip(20),
+        color(1, 1.0),
+        Ev::PopClip,
+        Ev::Clip(21),
+        color(FOREGROUND, 1.0),
+        Ev::PopClip,
+    ];
+    assert_eq!(events, expected);
+    // COLRv0 glyphs get no root clip.
+    assert_eq!(walk_clipped(&bytes, 5, &[], &[]), expected);
 }
 
 #[test]
@@ -503,5 +671,123 @@ fn broken_child_offset_still_balances_pushes() {
             Ev::Pop,
             Ev::Pop,
         ]
+    );
+}
+
+// =========================================================================
+// Tests: the root clip
+// =========================================================================
+
+#[test]
+fn clip_box_clips_the_whole_glyph_outside_the_root_transform() {
+    let clips = [(5, 9, [-10, -20, 500, 600], None)];
+    let bytes = sfnt(&[(
+        b"COLR",
+        &colr_with(&[], &[(7, solid(0, 1.0))], &clips, &[], &[]),
+    )]);
+    // The ClipBox bounds even a bare solid, so it paints.
+    assert_eq!(
+        walk_clipped(&bytes, 7, &[], &[]),
+        vec![
+            clip_box(-10, -20, 500, 600),
+            Ev::Root,
+            color(0, 1.0),
+            Ev::Pop,
+            Ev::PopClip,
+        ]
+    );
+}
+
+#[test]
+fn unbounded_glyphs_paint_nothing() {
+    // No ClipBox, and the solid escapes every clip.
+    let bytes = sfnt(&[(b"COLR", &colr(&[], &[(7, solid(0, 1.0))]))]);
+    let events = walk_clipped(&bytes, 7, &[], &[]);
+    assert!(
+        matches!(
+            events[0],
+            Ev::RootClip(RootClip::Extents { bounded: false, .. })
+        ),
+        "{events:?}"
+    );
+    assert_eq!(events[1..], [Ev::Root, Ev::Pop, Ev::PopClip]);
+}
+
+#[test]
+fn computed_bounds_follow_clip_boxes_of_referenced_glyphs() {
+    // 7 has no ClipBox: its bounds come from the paint tree, here the
+    // box of the referenced glyph 8, moved by the translate above it.
+    let clips = [(8, 8, [0, 0, 100, 50], None)];
+    let paints = [(7, translate(10, 20, &colr_glyph(8))), (8, solid(1, 0.5))];
+    let bytes = sfnt(&[(b"COLR", &colr_with(&[], &paints, &clips, &[], &[]))]);
+    let events = walk_clipped(&bytes, 7, &[], &[]);
+    let mut want = vec![
+        Ev::RootClip(RootClip::Extents {
+            x_min: 10.0,
+            y_min: 20.0,
+            x_max: 110.0,
+            y_max: 70.0,
+            bounded: true,
+        }),
+        Ev::Root,
+        Ev::Push(Transform2D::translate(10.0, 20.0)),
+    ];
+    want.extend(offered(8));
+    want.extend([
+        Ev::ClipRect([0.0, 0.0, 100.0, 50.0]),
+        color(1, 0.5),
+        Ev::PopClip,
+        Ev::Pop,
+        Ev::Pop,
+        Ev::PopClip,
+    ]);
+    assert_eq!(events, want);
+}
+
+#[test]
+fn source_in_composites_intersect_computed_bounds() {
+    // SrcIn keeps only where both groups are: the two ClipBoxes overlap
+    // on [50, 100] x [0, 100].
+    let clips = [
+        (8, 8, [0, 0, 100, 100], None),
+        (9, 9, [50, 0, 150, 100], None),
+    ];
+    let paints = [
+        (7, composite(&colr_glyph(9), 5, &colr_glyph(8))),
+        (8, solid(0, 1.0)),
+        (9, solid(1, 1.0)),
+    ];
+    let bytes = sfnt(&[(b"COLR", &colr_with(&[], &paints, &clips, &[], &[]))]);
+    let events = walk_clipped(&bytes, 7, &[], &[]);
+    assert_eq!(
+        events[0],
+        Ev::RootClip(RootClip::Extents {
+            x_min: 50.0,
+            y_min: 0.0,
+            x_max: 100.0,
+            y_max: 100.0,
+            bounded: true,
+        })
+    );
+}
+
+#[test]
+fn variable_clip_boxes_take_rounded_deltas() {
+    // ClipBoxFormat2 with varIndexBase 0: rows 0..3 move each edge.
+    // At coordinate 0.5 the deltas are 5, -3.5, 10.5, -0.5: rounded
+    // half up to 5, -3, 11, 0.
+    let clips = [(7, 7, [0, 0, 100, 100], Some(0))];
+    let store = ivs(&[10, -7, 21, -1]);
+    let bytes = sfnt(&[(
+        b"COLR",
+        &colr_with(&[], &[(7, solid(0, 1.0))], &clips, &[], &store),
+    )]);
+    assert_eq!(
+        walk_clipped(&bytes, 7, &[0.5], &[])[0],
+        clip_box(5, -3, 111, 100)
+    );
+    assert_eq!(
+        walk_clipped(&bytes, 7, &[], &[])[0],
+        clip_box(0, 0, 100, 100)
     );
 }

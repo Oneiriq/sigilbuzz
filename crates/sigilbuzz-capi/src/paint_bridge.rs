@@ -5,16 +5,25 @@
 //! an `hb_paint_funcs_t` (see the `funcs` submodule) and hands it to
 //! `hb_font_paint_glyph`, which walks the glyph and fires callbacks.
 //! The walk itself is `sigilbuzz_paint::walk::paint_glyph`, which
-//! reports steps in HarfBuzz's order; this module turns each step into
-//! the matching callback:
+//! reports steps in HarfBuzz 11's order; this module turns each step
+//! into the matching callback:
 //!
-//! - A COLRv1 glyph: `push_transform(root)`, the paint tree,
-//!   `pop_transform`. The root transform maps design units to font
+//! - A COLRv1 glyph: `push_clip_rectangle` with the glyph's bounds,
+//!   `push_transform(root)`, the paint tree, `pop_transform`,
+//!   `pop_clip`. The bounds are its ClipList box scaled to font units
+//!   (see the `clip` submodule), or the bounds of its paint tree; a
+//!   glyph whose paint escapes every clip paints nothing inside the
+//!   root transform. The root transform maps design units to font
 //!   scale: `(x_scale / upem, 0, 0, y_scale / upem, 0, 0)`.
 //! - `PaintGlyph`: `push_transform(inverse root)`,
 //!   `push_clip_glyph(gid, font)`, `push_transform(root)`, the child,
 //!   then `pop_transform`, `pop_clip`, `pop_transform`. The clip outline
-//!   is what `hb_font_draw_glyph` would draw at font scale.
+//!   is what `hb_font_draw_glyph` would draw at font scale. The inverse
+//!   root transform's `xy` is `-0.0`, as HarfBuzz computes it.
+//! - `PaintColrGlyph`: `push_transform(inverse root)`,
+//!   `color_glyph(gid, font)`, `pop_transform`; unless the callback
+//!   painted the glyph, its ClipList box (if any) as
+//!   `push_clip_rectangle` in design units, its paint tree, `pop_clip`.
 //! - Transform paints: one `push_transform` / `pop_transform` pair
 //!   each, skipped for identity translate, scale, rotate, and skew.
 //! - `PaintComposite`: `push_group`, backdrop, `push_group`, source,
@@ -34,9 +43,7 @@
 //! has no such palette or entry. The paint alpha multiplies the color's
 //! alpha byte and the product is truncated.
 //!
-//! Not emitted yet: HarfBuzz's `push_clip_rectangle` around COLRv1
-//! glyphs (from the ClipList, or from computed extents) and the
-//! `image` callback for SVG and bitmap glyphs.
+//! Not emitted yet: the `image` callback for SVG and bitmap glyphs.
 
 // `_face` is the lifetime-root field in `FontInner`; the bridge reads
 // it to obtain a `&Face` for paint evaluation. See
@@ -51,11 +58,12 @@ use core::ffi::{c_uint, c_void};
 
 use sigilbuzz::tables::cpal::Cpal;
 use sigilbuzz::Face;
-use sigilbuzz_paint::walk::{self, ColorLineRef, ColorRef, PaintSink, Painted};
+use sigilbuzz_paint::walk::{self, ColorLineRef, ColorRef, PaintSink, Painted, RootClip};
 use sigilbuzz_paint::{CompositeMode, Transform2D};
 
 use crate::{handle, hb_bool_t, hb_codepoint_t, hb_face_t, hb_font_t};
 
+mod clip;
 mod color;
 mod color_line;
 mod funcs;
@@ -83,9 +91,10 @@ pub use color_line::{
     HB_PAINT_EXTEND_PAD, HB_PAINT_EXTEND_REFLECT, HB_PAINT_EXTEND_REPEAT,
 };
 pub use funcs::{
-    hb_glyph_extents_t, hb_paint_color_func_t, hb_paint_custom_palette_color_func_t,
-    hb_paint_funcs_create, hb_paint_funcs_destroy, hb_paint_funcs_is_immutable,
-    hb_paint_funcs_make_immutable, hb_paint_funcs_reference, hb_paint_funcs_set_color_func,
+    hb_glyph_extents_t, hb_paint_color_func_t, hb_paint_color_glyph_func_t,
+    hb_paint_custom_palette_color_func_t, hb_paint_funcs_create, hb_paint_funcs_destroy,
+    hb_paint_funcs_is_immutable, hb_paint_funcs_make_immutable, hb_paint_funcs_reference,
+    hb_paint_funcs_set_color_func, hb_paint_funcs_set_color_glyph_func,
     hb_paint_funcs_set_custom_palette_color_func, hb_paint_funcs_set_image_func,
     hb_paint_funcs_set_linear_gradient_func, hb_paint_funcs_set_pop_clip_func,
     hb_paint_funcs_set_pop_group_func, hb_paint_funcs_set_pop_transform_func,
@@ -155,12 +164,18 @@ pub unsafe extern "C" fn hb_font_paint_glyph(
         palette_index,
         foreground,
     };
-    let (root, inverse_root) = root_transforms(upem(face), x_scale, y_scale);
+    let upem = upem(face);
+    let (root, inverse_root) = root_transforms(f32::from(upem), x_scale, y_scale);
     let mut bridge = Bridge {
         colors: &colors,
         font,
         root,
         inverse_root,
+        scale: clip::Scale {
+            upem,
+            x_scale,
+            y_scale,
+        },
     };
     let painted = match u16::try_from(glyph) {
         Ok(gid) => walk::paint_glyph(face, gid, &coords, &mut bridge),
@@ -176,24 +191,28 @@ pub unsafe extern "C" fn hb_font_paint_glyph(
 
 /// The face's units per em as HarfBuzz reads them: `head.unitsPerEm`
 /// when it is in 16..=16384, else 1000.
-fn upem(face: &Face<'_>) -> f32 {
+fn upem(face: &Face<'_>) -> u16 {
     face.head()
         .ok()
         .map(|h| h.units_per_em)
         .filter(|u| (16..=16384).contains(u))
-        .map_or(1000.0, f32::from)
+        .unwrap_or(1000)
 }
 
 /// The root transform (design units to font scale) and its inverse, as
 /// HarfBuzz builds them. HarfBuzz folds its synthetic slant into the
-/// `xy` terms; sigilbuzz fonts have none, so those are zero. A zero
-/// scale inverts as if it were `upem`, as in HarfBuzz.
+/// `xy` terms; sigilbuzz fonts have none, so the root's `xy` is `0.0`
+/// and the inverse's is `-0.0` (HarfBuzz computes `-slant * ...`). A
+/// zero scale inverts as if it were `upem`, as in HarfBuzz.
 fn root_transforms(upem: f32, x_scale: i32, y_scale: i32) -> (Transform2D, Transform2D) {
     let (xs, ys) = (x_scale as f32, y_scale as f32);
     let root = Transform2D::scale(xs / upem, ys / upem);
     let inv_x = if x_scale == 0 { upem } else { xs };
     let inv_y = if y_scale == 0 { upem } else { ys };
-    let inverse = Transform2D::scale(upem / inv_x, upem / inv_y);
+    let inverse = Transform2D {
+        xy: -0.0,
+        ..Transform2D::scale(upem / inv_x, upem / inv_y)
+    };
     (root, inverse)
 }
 
@@ -238,6 +257,8 @@ struct Bridge<'b> {
     font: *mut hb_font_t,
     root: Transform2D,
     inverse_root: Transform2D,
+    /// Font scale for the root clip rectangle.
+    scale: clip::Scale,
 }
 
 impl Bridge<'_> {
@@ -266,6 +287,20 @@ impl PaintSink for Bridge<'_> {
     fn push_clip_glyph(&mut self, glyph: u16) {
         self.dispatch()
             .push_clip_glyph(hb_codepoint_t::from(glyph), self.font);
+    }
+
+    fn push_clip_rectangle(&mut self, x_min: f32, y_min: f32, x_max: f32, y_max: f32) {
+        self.dispatch()
+            .push_clip_rectangle([x_min, y_min, x_max, y_max]);
+    }
+
+    fn push_root_clip(&mut self, clip: RootClip) {
+        self.dispatch().push_clip_rectangle(self.scale.rect(clip));
+    }
+
+    fn color_glyph(&mut self, glyph: u16) -> bool {
+        self.dispatch()
+            .color_glyph(hb_codepoint_t::from(glyph), self.font)
     }
 
     fn pop_clip(&mut self) {
@@ -335,6 +370,8 @@ mod tests {
         let (root, inverse) = root_transforms(1000.0, 2000, 500);
         assert_eq!(root, Transform2D::scale(2.0, 0.5));
         assert_eq!(inverse, Transform2D::scale(0.5, 2.0));
+        // HarfBuzz's `-slant * upem / x_scale` with no slant.
+        assert!(inverse.xy.is_sign_negative() && root.xy.is_sign_positive());
         // Default scale (upem) is the identity matrix.
         let (root, inverse) = root_transforms(2048.0, 2048, 2048);
         assert_eq!(root, Transform2D::IDENTITY);

@@ -1,7 +1,7 @@
 //! Shared fixtures and a callback recorder for the `hb_paint_*` tests.
 //!
 //! Fixtures are hand-built SFNTs carrying COLR (v0 records and v1
-//! paints, with the 34-byte v1 header), CPAL, and optionally
+//! paints, with the 34-byte v1 header and a ClipList), CPAL, and optionally
 //! fvar. The recorder installs every paint callback with its own
 //! `user_data` tag, logs each call into the `Log` passed as
 //! `paint_data`, and checks that every callback received its own tag.
@@ -19,9 +19,9 @@ use sigilbuzz_capi::paint_bridge::{
     hb_paint_funcs_destroy, hb_paint_funcs_set_color_func, hb_paint_funcs_set_linear_gradient_func,
     hb_paint_funcs_set_pop_clip_func, hb_paint_funcs_set_pop_group_func,
     hb_paint_funcs_set_pop_transform_func, hb_paint_funcs_set_push_clip_glyph_func,
-    hb_paint_funcs_set_push_group_func, hb_paint_funcs_set_push_transform_func,
-    hb_paint_funcs_set_radial_gradient_func, hb_paint_funcs_set_sweep_gradient_func,
-    hb_paint_funcs_t,
+    hb_paint_funcs_set_push_clip_rectangle_func, hb_paint_funcs_set_push_group_func,
+    hb_paint_funcs_set_push_transform_func, hb_paint_funcs_set_radial_gradient_func,
+    hb_paint_funcs_set_sweep_gradient_func, hb_paint_funcs_t,
 };
 use sigilbuzz_capi::{
     hb_blob_create, hb_blob_destroy, hb_face_create, hb_face_destroy, hb_font_create,
@@ -124,10 +124,28 @@ pub fn ivs(rows: &[i16]) -> Vec<u8> {
     out
 }
 
+/// The ClipList box [`colr`] gives every glyph.
+pub const CLIP_BOX: [i16; 4] = [0, 0, 1000, 1000];
+
+/// [`CLIP_BOX`] as the root clip rectangle at the default font scale.
+pub const CLIP_RECT: [f32; 4] = [0.0, 0.0, 1000.0, 1000.0];
+
 /// COLR with v0 base glyphs (`(gid, [(layer gid, entry)])`), v1 paints
 /// (`(gid, paint bytes)`, sorted by gid), and an optional variation
-/// store, with the 34-byte v1 header.
+/// store. Every glyph gets the ClipList box [`CLIP_BOX`], so even an
+/// unbounded paint is painted.
 pub fn colr(v0: &[(u16, &[(u16, u16)])], v1: &[(u16, Vec<u8>)], var_store: &[u8]) -> Vec<u8> {
+    colr_with_clips(v0, v1, var_store, &[(0, u16::MAX, CLIP_BOX)])
+}
+
+/// [`colr`] with the given ClipList records (`(first gid, last gid,
+/// box)`), or no ClipList when `clips` is empty.
+pub fn colr_with_clips(
+    v0: &[(u16, &[(u16, u16)])],
+    v1: &[(u16, Vec<u8>)],
+    var_store: &[u8],
+    clips: &[(u16, u16, [i16; 4])],
+) -> Vec<u8> {
     let header_len = 34usize;
     let base_off = header_len;
     let layer_off = base_off + 6 * v0.len();
@@ -141,7 +159,8 @@ pub fn colr(v0: &[(u16, &[(u16, u16)])], v1: &[(u16, Vec<u8>)], var_store: &[u8]
     out.extend_from_slice(&(num_layers as u16).to_be_bytes());
     out.extend_from_slice(&(list_off as u32).to_be_bytes());
     out.extend_from_slice(&0u32.to_be_bytes()); // layer list
-    out.extend_from_slice(&0u32.to_be_bytes()); // clip list
+    let clip_slot = out.len();
+    out.extend_from_slice(&0u32.to_be_bytes());
     out.extend_from_slice(&0u32.to_be_bytes()); // index map
     let var_slot = out.len();
     out.extend_from_slice(&0u32.to_be_bytes());
@@ -169,6 +188,24 @@ pub fn colr(v0: &[(u16, &[(u16, u16)])], v1: &[(u16, Vec<u8>)], var_store: &[u8]
         let slot = records + i * 6 + 2;
         out[slot..slot + 4].copy_from_slice(&rel.to_be_bytes());
         out.extend_from_slice(bytes);
+    }
+    if !clips.is_empty() {
+        let off = out.len() as u32;
+        out[clip_slot..clip_slot + 4].copy_from_slice(&off.to_be_bytes());
+        out.push(1);
+        out.extend_from_slice(&(clips.len() as u32).to_be_bytes());
+        for (i, (first, last, _)) in clips.iter().enumerate() {
+            out.extend_from_slice(&first.to_be_bytes());
+            out.extend_from_slice(&last.to_be_bytes());
+            let box_at = (5 + 7 * clips.len() + 9 * i) as u32;
+            out.extend_from_slice(&box_at.to_be_bytes()[1..]);
+        }
+        for (_, _, coords) in clips {
+            out.push(1);
+            for v in coords {
+                out.extend_from_slice(&v.to_be_bytes());
+            }
+        }
     }
     if !var_store.is_empty() {
         let off = out.len() as u32;
@@ -199,6 +236,13 @@ fn parent(mut head: Vec<u8>, child: &[u8]) -> Vec<u8> {
     set_offset24(&mut head, 1, at);
     head.extend_from_slice(child);
     head
+}
+
+/// PaintColrGlyph referencing `gid`.
+pub fn colr_glyph(gid: u16) -> Vec<u8> {
+    let mut p = vec![11u8];
+    p.extend_from_slice(&gid.to_be_bytes());
+    p
 }
 
 /// PaintGlyph clipping `child` to `gid`.
@@ -310,6 +354,7 @@ pub enum Ev {
     PushTransform([f32; 6]),
     PopTransform,
     PushClipGlyph(u32),
+    PushClipRect([f32; 4]),
     PopClip,
     Color(i32, hb_color_t),
     Linear(Vec<hb_color_stop_t>, c_uint, [f32; 6]),
@@ -340,6 +385,7 @@ pub const TAG_RADIAL: usize = 0x107;
 pub const TAG_SWEEP: usize = 0x108;
 pub const TAG_PUSH_GROUP: usize = 0x109;
 pub const TAG_POP_GROUP: usize = 0x10A;
+pub const TAG_PUSH_CLIP_RECT: usize = 0x10B;
 
 /// # Safety
 /// `data` must be the `&Log` the test passed as `paint_data`.
@@ -422,6 +468,25 @@ unsafe extern "C" fn on_push_clip_glyph(
         .push(font as usize);
     let ev = Ev::PushClipGlyph(glyph);
     record(data, user_data, TAG_PUSH_CLIP_GLYPH, "push_clip_glyph", ev);
+}
+
+unsafe extern "C" fn on_push_clip_rect(
+    _funcs: *mut hb_paint_funcs_t,
+    data: *mut c_void,
+    x_min: f32,
+    y_min: f32,
+    x_max: f32,
+    y_max: f32,
+    user_data: *mut c_void,
+) {
+    let ev = Ev::PushClipRect([x_min, y_min, x_max, y_max]);
+    record(
+        data,
+        user_data,
+        TAG_PUSH_CLIP_RECT,
+        "push_clip_rectangle",
+        ev,
+    );
 }
 
 unsafe extern "C" fn on_pop_clip(
@@ -547,6 +612,12 @@ pub fn recording_funcs() -> *mut hb_paint_funcs_t {
             tag(TAG_PUSH_CLIP_GLYPH),
             None,
         );
+        hb_paint_funcs_set_push_clip_rectangle_func(
+            f,
+            Some(on_push_clip_rect),
+            tag(TAG_PUSH_CLIP_RECT),
+            None,
+        );
         hb_paint_funcs_set_pop_clip_func(f, Some(on_pop_clip), tag(TAG_POP_CLIP), None);
         hb_paint_funcs_set_color_func(f, Some(on_color), tag(TAG_COLOR), None);
         hb_paint_funcs_set_linear_gradient_func(f, Some(on_linear), tag(TAG_LINEAR), None);
@@ -635,7 +706,7 @@ pub const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 /// scale: inverse root, clip, root, `inner`, pop, pop clip, pop.
 pub fn clipped(gid: u32, inner: Vec<Ev>) -> Vec<Ev> {
     let mut out = vec![
-        Ev::PushTransform(IDENTITY),
+        Ev::PushTransform(INVERSE_IDENTITY),
         Ev::PushClipGlyph(gid),
         Ev::PushTransform(IDENTITY),
     ];
@@ -644,10 +715,27 @@ pub fn clipped(gid: u32, inner: Vec<Ev>) -> Vec<Ev> {
     out
 }
 
-/// Wraps a COLRv1 glyph's events in the default-scale root transform.
+/// `push_transform(inverse root)` at the default scale: HarfBuzz's
+/// `-slant * upem / x_scale` makes its `xy` a negative zero.
+pub const INVERSE_IDENTITY: [f32; 6] = [1.0, 0.0, -0.0, 1.0, 0.0, 0.0];
+
+/// Wraps a COLRv1 glyph's events in the [`CLIP_RECT`] clip and the
+/// default-scale root transform.
 pub fn rooted(inner: Vec<Ev>) -> Vec<Ev> {
-    let mut out = vec![Ev::PushTransform(IDENTITY)];
+    let mut out = vec![Ev::PushClipRect(CLIP_RECT), Ev::PushTransform(IDENTITY)];
     out.extend(inner);
-    out.push(Ev::PopTransform);
+    out.extend([Ev::PopTransform, Ev::PopClip]);
     out
+}
+
+/// The events inside a [`rooted`] glyph.
+pub fn unrooted(events: &[Ev]) -> Vec<Ev> {
+    let n = events.len();
+    assert!(n >= 4, "too few events for a COLRv1 glyph: {events:?}");
+    assert_eq!(
+        events[..2],
+        [Ev::PushClipRect(CLIP_RECT), Ev::PushTransform(IDENTITY)]
+    );
+    assert_eq!(events[n - 2..], [Ev::PopTransform, Ev::PopClip]);
+    events[2..n - 2].to_vec()
 }

@@ -8,11 +8,13 @@
  *   per slot when the funcs object is freed.
  * - A glyph without color data (Open Sans, argv[1]) paints
  *   push_clip_glyph(glyph, font), color(1, foreground), pop_clip.
- * - A COLRv1 glyph built in memory paints HarfBuzz's sequence: root
- *   transform, push_group/pop_group(mode) around composites, inverse
- *   root / clip / root around PaintGlyph, biased sweep angles, color
- *   lines readable through both the accessor and the struct fields,
- *   palette fallback to the foreground, and custom_palette_color.
+ * - A COLRv1 glyph built in memory paints HarfBuzz's sequence: its
+ *   ClipList box as a clip rectangle at font scale, root transform,
+ *   push_group/pop_group(mode) around composites, inverse root (with
+ *   HarfBuzz's negative-zero xy) / clip / root around PaintGlyph,
+ *   biased sweep angles, color lines readable through both the accessor
+ *   and the struct fields, palette fallback to the foreground, and
+ *   custom_palette_color.
  * - HB_COLOR packs blue high and alpha low, as in HarfBuzz.
  *
  * Exit 0 means PASS.
@@ -47,8 +49,8 @@ typedef struct {
 
 /* One distinct user_data per callback. */
 static int tag_push_transform, tag_pop_transform, tag_push_clip_glyph,
-    tag_pop_clip, tag_color, tag_linear, tag_radial, tag_sweep,
-    tag_push_group, tag_pop_group, tag_custom;
+    tag_push_clip_rectangle, tag_pop_clip, tag_color, tag_linear, tag_radial,
+    tag_sweep, tag_push_group, tag_pop_group, tag_custom;
 
 static void append(recorder_t *r, const char *s) {
     size_t used = strlen(r->log);
@@ -90,6 +92,17 @@ static void on_push_clip_glyph(hb_paint_funcs_t *funcs, void *paint_data,
     check_tag(r, user_data, &tag_push_clip_glyph);
     if (font != r->expected_font) r->wrong_font += 1;
     snprintf(buf, sizeof buf, "C%u", (unsigned)glyph);
+    append(r, buf);
+}
+
+static void on_push_clip_rectangle(hb_paint_funcs_t *funcs, void *paint_data,
+                                   float xmin, float ymin, float xmax,
+                                   float ymax, void *user_data) {
+    recorder_t *r = (recorder_t *)paint_data;
+    char buf[96];
+    (void)funcs;
+    check_tag(r, user_data, &tag_push_clip_rectangle);
+    snprintf(buf, sizeof buf, "X[%g %g %g %g]", xmin, ymin, xmax, ymax);
     append(r, buf);
 }
 
@@ -209,6 +222,8 @@ static hb_paint_funcs_t *recording_funcs(void) {
     hb_paint_funcs_set_push_transform_func(f, on_push_transform, &tag_push_transform, NULL);
     hb_paint_funcs_set_pop_transform_func(f, on_pop_transform, &tag_pop_transform, NULL);
     hb_paint_funcs_set_push_clip_glyph_func(f, on_push_clip_glyph, &tag_push_clip_glyph, NULL);
+    hb_paint_funcs_set_push_clip_rectangle_func(f, on_push_clip_rectangle,
+                                                &tag_push_clip_rectangle, NULL);
     hb_paint_funcs_set_pop_clip_func(f, on_pop_clip, &tag_pop_clip, NULL);
     hb_paint_funcs_set_color_func(f, on_color, &tag_color, NULL);
     hb_paint_funcs_set_linear_gradient_func(f, on_linear, &tag_linear, NULL);
@@ -251,6 +266,7 @@ static void put_bytes(bytes_t *o, const bytes_t *src) {
  *     backdrop: PaintGlyph(1) -> PaintSweepGradient(center (50, 60),
  *               stored angles -1 and 0.5, extend REPEAT,
  *               stops (0, entry 0, alpha 1), (1, entry 0xFFFF, alpha 0.5))
+ *   ClipList: glyph 7 clips to (0, 0) - (1000, 500).
  * CPAL: one palette, entry 0 red, entry 1 green.
  */
 static void build_font(bytes_t *font) {
@@ -264,7 +280,7 @@ static void build_font(bytes_t *font) {
     put16(&colr, 0);  /* numLayerRecords */
     put32(&colr, 34); /* baseGlyphListOffset */
     put32(&colr, 0);  /* layerListOffset */
-    put32(&colr, 0);  /* clipListOffset */
+    put32(&colr, 96); /* clipListOffset: after the 52 bytes of paints */
     put32(&colr, 0);  /* varIndexMapOffset */
     put32(&colr, 0);  /* itemVariationStoreOffset */
     /* BaseGlyphList: one record, paint right after it (offset 10). */
@@ -286,6 +302,10 @@ static void build_font(bytes_t *font) {
     put8(&colr, 1); put16(&colr, 2);
     put16(&colr, F2DOT14(0.0)); put16(&colr, 0); put16(&colr, F2DOT14(1.0));
     put16(&colr, F2DOT14(1.0)); put16(&colr, 0xFFFF); put16(&colr, F2DOT14(0.5));
+    /* +52 = 96: ClipList, one record for glyph 7, ClipBoxFormat1 at +12. */
+    put8(&colr, 1); put32(&colr, 1);
+    put16(&colr, 7); put16(&colr, 7); put24(&colr, 12);
+    put8(&colr, 1); put16(&colr, 0); put16(&colr, 0); put16(&colr, 1000); put16(&colr, 500);
 
     /* CPAL v0: one palette of two entries, records as b, g, r, a. */
     put16(&cpal, 0); put16(&cpal, 2); put16(&cpal, 1); put16(&cpal, 2);
@@ -420,10 +440,11 @@ int main(int argc, char **argv) {
     hb_face_destroy(face);
 
 #define ID "T[1 0 0 1 0 0]"
+#define INV "T[1 0 -0 1 0 0]"
     snprintf(expected, sizeof expected,
-             ID " G " ID " C1 " ID
+             "X[0 0 1000 500] " ID " G " INV " C1 " ID
              " W[50 60 0.0000 4.7124] e1 n2 s0:0/0000ffff s1:1/1020307f"
-             " P PC P G " ID " C2 " ID " K0/00ff007f P PC P PG23 PG3 P");
+             " P PC P G " INV " C2 " ID " K0/00ff007f P PC P PG23 PG3 P PC");
     paint(r, font, 7, funcs, 0, fg);
     CHECK(strcmp(r->log, expected) == 0, "COLRv1:\n got  %s\n want %s", r->log, expected);
     CHECK(r->wrong_user_data == 0 && r->wrong_font == 0, "COLRv1 user_data/font");
@@ -441,17 +462,20 @@ int main(int argc, char **argv) {
     CHECK(strstr(r->log, "s0:0/0000ffff") != NULL, "entry 0 still from CPAL: %s", r->log);
     CHECK(r->wrong_user_data == 0, "custom palette user_data");
 
-    /* The root transform follows the font scale. */
+    /* The root transform and the clip box follow the font scale. */
     hb_font_set_scale(font, 2000, 500);
     paint(r, font, 7, funcs, 0, fg);
     {
-        const char *want = "T[2 0 0 0.5 0 0] G T[0.5 0 0 2 0 0] C1 T[2 0 0 0.5 0 0]";
+        const char *want =
+            "X[0 0 2000 250] T[2 0 0 0.5 0 0] G T[0.5 0 -0 2 0 0] C1 T[2 0 0 0.5 0 0]";
         CHECK(strncmp(r->log, want, strlen(want)) == 0, "scaled: %s", r->log);
     }
 #undef ID
+#undef INV
 
     /* The remaining setters exist and accept NULL. */
     hb_paint_funcs_set_push_clip_rectangle_func(funcs, NULL, NULL, NULL);
+    hb_paint_funcs_set_color_glyph_func(funcs, NULL, NULL, NULL);
     hb_paint_funcs_set_image_func(funcs, NULL, NULL, NULL);
 
     /* Set / has / population on a fresh hb_set_t: proves the set API

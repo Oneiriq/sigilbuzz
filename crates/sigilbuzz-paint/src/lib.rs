@@ -55,11 +55,13 @@ extern crate alloc;
 mod color;
 mod deltas;
 mod eval;
+mod extents;
 mod gradient;
 mod options;
 mod transform;
-// Public only for sigilbuzz-capi's `hb_paint_*` bridge; not part of the
-// stable API (docs/STABILITY.md, Tier 2).
+// Public only for the companion crates (sigilbuzz-capi's `hb_paint_*`
+// bridge and the renderers); not part of the stable API
+// (docs/STABILITY.md, Tier 2).
 #[doc(hidden)]
 pub mod walk;
 

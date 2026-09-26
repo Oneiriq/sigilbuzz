@@ -22,6 +22,9 @@ sigilbuzz = { workspace = true }
 [dev-dependencies]
 # Criterion drives the COLRv1 evaluator bench. Dev-dep only.
 criterion = "0.8"
+# ttf-parser paints variable COLRv1 glyphs itself; the parity test
+# checks our variation deltas against it. Dev-dep only.
+ttf-parser = "0.25"
 
 [[bench]]
 name = "evaluate"
