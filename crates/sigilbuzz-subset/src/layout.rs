@@ -350,7 +350,7 @@ pub(crate) fn decide(
         } else {
             Decision::Preserve
         };
-        let gdef_store = face.table_bytes(tag::GDEF).ok().is_some_and(|gdef| {
+        let gdef_store = face.table_bytes(tag::GDEF).is_ok_and(|gdef| {
             let minor = gdef
                 .get(2..4)
                 .map_or(0, |b| u16::from_be_bytes([b[0], b[1]]));
