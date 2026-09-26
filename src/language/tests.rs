@@ -106,6 +106,17 @@ fn multiple_tags_are_most_specific_first() {
     assert_eq!(tags("dv"), [*b"DIV ", *b"DHV "]);
     assert_eq!(tags("aii"), [*b"SWA ", *b"SYR "]);
     assert_eq!(tags("id"), [*b"IND ", *b"MLY "]);
+    assert_eq!(tags("crk"), [*b"WCR ", *b"YCR ", *b"CRE "]);
+}
+
+#[test]
+fn at_most_three_tags_are_tried() {
+    // HarfBuzz asks for HB_OT_MAX_TAGS_PER_LANGUAGE (3) candidates.
+    const FOUR: &[[u8; 4]] = &[*b"AAA ", *b"BBB ", *b"CCC ", *b"DDD "];
+    assert_eq!(OtTags::Static(FOUR).as_slice(), &FOUR[..3]);
+    assert_eq!(OtTags::Static(&FOUR[..2]).as_slice(), &FOUR[..2]);
+    assert_eq!(OtTags::One(*b"EEE ").as_slice(), [*b"EEE "]);
+    assert!(OtTags::None.as_slice().is_empty());
 }
 
 #[test]

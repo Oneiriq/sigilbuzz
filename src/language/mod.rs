@@ -108,13 +108,19 @@ enum OtTags {
     One([u8; 4]),
 }
 
+/// Most OpenType language system tags tried for one language, as in
+/// HarfBuzz's `HB_OT_MAX_TAGS_PER_LANGUAGE`. The shaper asks for this
+/// many candidates, so a tag past the third is never selected.
+const MAX_TAGS_PER_LANGUAGE: usize = 3;
+
 impl OtTags {
     fn as_slice(&self) -> &[[u8; 4]] {
-        match self {
+        let tags = match self {
             Self::None => &[],
-            Self::Static(tags) => tags,
+            Self::Static(tags) => *tags,
             Self::One(tag) => core::slice::from_ref(tag),
-        }
+        };
+        &tags[..tags.len().min(MAX_TAGS_PER_LANGUAGE)]
     }
 }
 
@@ -173,6 +179,10 @@ impl Language {
     /// script and falls back to the script's default language system
     /// when the font has none of them. Empty when the tag maps to no
     /// registered language system.
+    ///
+    /// Like HarfBuzz (`HB_OT_MAX_TAGS_PER_LANGUAGE`), at most three
+    /// candidates are returned; further tags the registry lists for
+    /// the language are never tried.
     ///
     /// # Examples
     ///
