@@ -74,6 +74,13 @@ pub unsafe extern "C" fn hb_face_collect_unicodes(face: *const hb_face_t, set: *
 /// where the array ends. Either pointer may be NULL, in which case
 /// the corresponding filter is "all scripts" / "all languages".
 ///
+/// One case differs from HarfBuzz. With a `scripts` filter and a NULL
+/// `languages`, HarfBuzz collects the features of every language
+/// system of the matching scripts. The core `Script` API cannot list
+/// a script's named language systems, so this function adds every
+/// feature in the table instead, as soon as one script matches. The
+/// result can include features that only other scripts use.
+///
 /// # Safety
 /// `face` and `features` must each be null or valid.
 /// `scripts`/`languages` must point to NUL-terminated `hb_tag_t[]`
@@ -184,10 +191,11 @@ unsafe fn read_tag_list(ptr: *const hb_tag_t) -> Option<Vec<[u8; 4]>> {
 /// Public-API access to a `Script` does not expose a "name every
 /// LangSys" iterator: only `default_lang_sys()` and
 /// `find_lang_sys(tag)`. When the caller hasn't supplied a language
-/// filter we therefore resort to a script-scoped fallback: union
-/// every feature tag reachable from any script that passes
-/// `script_filter`. For an unfiltered (NULL, NULL) call this collapses
-/// to "every entry in the FeatureList", matching HarfBuzz's semantics.
+/// filter, a matching script therefore adds every entry in the
+/// FeatureList, not only the features its own language systems name.
+/// That over-collects compared with HarfBuzz. For an unfiltered
+/// (NULL, NULL) call the result is "every entry in the FeatureList",
+/// which does match HarfBuzz.
 fn collect_features_from(
     script_list: &sigilbuzz::tables::layout::ScriptList<'_>,
     feature_list: &sigilbuzz::tables::layout::FeatureList<'_>,
@@ -223,12 +231,10 @@ fn collect_features_from(
             None => {
                 // Script-only filter: include every feature tag the
                 // script's default LangSys reaches, plus a fallback
-                // that sweeps the full FeatureList: the public Script
-                // API doesn't enumerate named LangSys records by
-                // index. The full sweep matches HarfBuzz's "include
-                // every reachable feature for this script" semantics
-                // because OpenType requires every LangSys's feature
-                // indices to point into the same shared FeatureList.
+                // that sweeps the full FeatureList, because the
+                // public Script API doesn't enumerate named LangSys
+                // records by index. The sweep over-collects: it also
+                // adds features that only other scripts reference.
                 if let Some(default_lang_sys) = script.default_lang_sys() {
                     add_features_for_lang_sys(default_lang_sys, feature_list, out);
                 }

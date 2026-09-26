@@ -1201,6 +1201,13 @@ pub unsafe extern "C" fn hb_buffer_add_utf16(
     state.buffer.push_str(&s);
 }
 
+/// Sets the direction `hb_shape` lays the text out in.
+///
+/// Vertical directions switch to vertical metrics, as in HarfBuzz.
+/// For RTL text sigilbuzz returns the glyphs in logical order, the
+/// same order as the input. HarfBuzz returns them reversed, in visual
+/// order.
+///
 /// # Safety
 /// `buffer` must be null or valid.
 #[no_mangle]
@@ -1219,6 +1226,14 @@ pub unsafe extern "C" fn hb_buffer_set_direction(
     state.buffer.set_direction(map_direction_in(direction));
 }
 
+/// Records the buffer's script. Shaping does not read it.
+///
+/// HarfBuzz uses the script to pick the script-specific shaper and the
+/// OpenType script tables. sigilbuzz has no way to take either from
+/// the caller: it works out the script of each run from the text. The
+/// value only tells `hb_buffer_guess_segment_properties` that the
+/// script is already set.
+///
 /// # Safety
 /// `buffer` must be null or valid.
 #[no_mangle]
@@ -1233,6 +1248,13 @@ pub unsafe extern "C" fn hb_buffer_set_script(buffer: *mut hb_buffer_t, script: 
     state.script = script;
 }
 
+/// Records the buffer's language. Shaping does not read it.
+///
+/// HarfBuzz uses the language to pick the OpenType language system.
+/// sigilbuzz always shapes with each script's default language
+/// system. The value only tells `hb_buffer_guess_segment_properties`
+/// that the language is already set.
+///
 /// # Safety
 /// `buffer` must be null or valid. `language` is stored as an opaque
 /// value and never dereferenced.
@@ -1248,6 +1270,16 @@ pub unsafe extern "C" fn hb_buffer_set_language(buffer: *mut hb_buffer_t, langua
     state.language = language;
 }
 
+/// Fills in the direction, script, and language that are not set yet.
+/// The direction becomes LTR, the script comes from the first run of
+/// the text, and the language becomes `und`.
+///
+/// HarfBuzz picks the direction from the script (RTL for Arabic, for
+/// example) and the language from the process locale. None of this
+/// changes the shaping result here: a buffer with no direction set
+/// already shapes as LTR, and shaping does not read the script or the
+/// language (see `hb_buffer_set_script` and `hb_buffer_set_language`).
+///
 /// # Safety
 /// `buffer` must be null or valid.
 #[no_mangle]
