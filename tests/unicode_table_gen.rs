@@ -13,9 +13,10 @@
 //!   `hb_buffer_guess_segment_properties`.
 //! - `src/unicode/general_category_table.rs`: the letter (L*), mark
 //!   (Mn, Mc, Me), and decimal number (Nd) ranges of
-//!   `General_Category`, and `Extended_Pictographic` from
-//!   `emoji-data.txt`, for HarfBuzz's grapheme and native-direction
-//!   rules.
+//!   `General_Category`, the nonspacing mark (Mn) ranges on their own,
+//!   and `Extended_Pictographic` from `emoji-data.txt`, for HarfBuzz's
+//!   grapheme and native-direction rules and its synthesized glyph
+//!   classes.
 //!
 //! # Sources
 //!
@@ -305,7 +306,14 @@ fn generate_categories() -> String {
     let categories = load(GENERAL_CATEGORY);
     let emoji = load(EMOJI_DATA);
     let mut classes = vec![' '; CODE_SPACE];
+    let mut nonspacing = vec![false; CODE_SPACE];
     for row in &categories.rows {
+        if row[1] == "Mn" {
+            let (start, end) = parse_range(&row[0]);
+            for cp in start..=end {
+                nonspacing[cp as usize] = true;
+            }
+        }
         let class = match row[1].as_str() {
             "Lu" | "Ll" | "Lt" | "Lm" | "Lo" => 'L',
             "Mn" | "Mc" | "Me" => 'M',
@@ -344,6 +352,14 @@ fn generate_categories() -> String {
             };
             format!("(0x{s:04X}, 0x{e:04X}, {name})")
         })
+        .collect();
+    emit_wrapped(&mut out, &items);
+    out.push_str("];\n\n");
+    out.push_str("/// Nonspacing marks (Mn). Sorted, non-overlapping, inclusive.\n");
+    out.push_str("pub(super) static NONSPACING_MARKS: &[(u32, u32)] = &[\n");
+    let items: Vec<String> = runs(&nonspacing, false)
+        .iter()
+        .map(|(s, e, _)| format!("(0x{s:04X}, 0x{e:04X})"))
         .collect();
     emit_wrapped(&mut out, &items);
     out.push_str("];\n\n");

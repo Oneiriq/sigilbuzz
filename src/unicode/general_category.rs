@@ -1,12 +1,13 @@
 //! The parts of `General_Category` and `Extended_Pictographic` that
-//! HarfBuzz's grapheme and native-direction rules read.
+//! HarfBuzz's grapheme and native-direction rules and its synthesized
+//! glyph classes read.
 //!
 //! The tables in `general_category_table.rs` are generated from Unicode
 //! 17.0.0 `DerivedGeneralCategory.txt` and `emoji-data.txt` (snapshots
 //! in `tests/tools/ucd/`; regenerate with
 //! `cargo test --test unicode_table_gen -- --ignored`).
 
-use super::general_category_table::{CLASSES, EXTENDED_PICTOGRAPHIC};
+use super::general_category_table::{CLASSES, EXTENDED_PICTOGRAPHIC, NONSPACING_MARKS};
 
 /// A coarse General_Category class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,8 +65,30 @@ pub fn general_category_class(ch: char) -> Option<GeneralCategoryClass> {
 /// ```
 #[must_use]
 pub fn is_extended_pictographic(ch: char) -> bool {
+    in_ranges(EXTENDED_PICTOGRAPHIC, ch)
+}
+
+/// True for nonspacing marks (General_Category Mn), the characters
+/// HarfBuzz's synthesized glyph classes treat as marks.
+///
+/// # Examples
+///
+/// ```
+/// use sigilbuzz::unicode::general_category::is_nonspacing_mark;
+///
+/// assert!(is_nonspacing_mark('\u{0301}')); // combining acute accent
+/// assert!(!is_nonspacing_mark('\u{0903}')); // Devanagari visarga, Mc
+/// assert!(!is_nonspacing_mark('a'));
+/// ```
+#[must_use]
+pub fn is_nonspacing_mark(ch: char) -> bool {
+    in_ranges(NONSPACING_MARKS, ch)
+}
+
+/// True when `ch` falls in one of the sorted inclusive `ranges`.
+fn in_ranges(ranges: &[(u32, u32)], ch: char) -> bool {
     let cp = u32::from(ch);
-    EXTENDED_PICTOGRAPHIC
+    ranges
         .binary_search_by(|&(start, end)| {
             if end < cp {
                 core::cmp::Ordering::Less
@@ -100,5 +123,6 @@ mod tests {
     fn tables_are_sorted() {
         assert!(CLASSES.windows(2).all(|w| w[0].1 < w[1].0));
         assert!(EXTENDED_PICTOGRAPHIC.windows(2).all(|w| w[0].1 < w[1].0));
+        assert!(NONSPACING_MARKS.windows(2).all(|w| w[0].1 < w[1].0));
     }
 }
