@@ -45,11 +45,6 @@
 //!
 //! Not emitted yet: the `image` callback for SVG and bitmap glyphs.
 
-// `_face` is the lifetime-root field in `FontInner`; the bridge reads
-// it to obtain a `&Face` for paint evaluation. See
-// `crates/sigilbuzz-capi/src/lib.rs` for the rationale.
-#![allow(clippy::used_underscore_binding)]
-
 extern crate alloc;
 
 use alloc::sync::Arc;
@@ -141,15 +136,17 @@ pub unsafe extern "C" fn hb_font_paint_glyph(
     }
     // Keep our own references for the whole walk, so a callback that
     // destroys the caller's font or funcs cannot free them under us.
-    // SAFETY: the caller guarantees both are live handles.
+    // SAFETY: `font` is non-null and the caller guarantees it is a live
+    // handle, so taking a new reference to it is sound.
     let font_ref: Arc<hb_font_t> = unsafe { handle::retain(font.cast_const()) };
-    // SAFETY: as above.
+    // SAFETY: `pfuncs` is non-null and the caller guarantees it is a
+    // live handle, so taking a new reference to it is sound.
     let funcs_ref: Arc<hb_paint_funcs_t> = unsafe { handle::retain(pfuncs.cast_const()) };
 
     // Copy the font state before any callback runs, so the font lock is
     // not held while user code runs and a callback that changes the
     // font does not affect this walk.
-    let face: Arc<hb_face_t> = Arc::clone(&font_ref.inner._face);
+    let face: Arc<hb_face_t> = Arc::clone(&font_ref.inner.face);
     let (coords, x_scale, y_scale): (Vec<f32>, i32, i32) = {
         let state = font_ref.inner.state.lock();
         (state.coords.clone(), state.x_scale, state.y_scale)

@@ -82,9 +82,10 @@ impl BidiMap {
     ///
     /// # Panics
     ///
-    /// Panics if `info` was computed for a different string (its
-    /// [`BidiInfo::char_count`] must match `text`'s character count)
-    /// or if `text` exceeds `u32::MAX` bytes.
+    /// Debug builds panic if `info` was computed for a different
+    /// string (its [`BidiInfo::char_count`] must match `text`'s
+    /// character count). See [`BidiMap::from_order`] for what release
+    /// builds return instead.
     #[must_use]
     pub fn new(text: &str, info: &BidiInfo) -> Self {
         Self::from_order(text, &info.reorder(), info)
@@ -97,30 +98,37 @@ impl BidiMap {
     /// the string (like [`crate::Buffer::set_text_bidi`]) pass it in
     /// so the L2 pass runs once.
     ///
+    /// When the inputs do not fit together (`order` is not a
+    /// permutation of `text`'s characters, `info` was computed for a
+    /// different string, or `text` exceeds `u32::MAX` bytes) the
+    /// result is an empty map: every lookup returns `None`.
+    ///
     /// # Panics
     ///
-    /// Panics if `order`'s length differs from `text`'s character
-    /// count, if `info` disagrees with that count, or if `text`
-    /// exceeds `u32::MAX` bytes.
+    /// Debug builds panic if `order`'s length or `info`'s character
+    /// count differs from `text`'s character count, to flag the
+    /// caller bug early.
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn from_order(text: &str, order: &[usize], info: &BidiInfo) -> Self {
-        assert!(
-            u32::try_from(text.len()).is_ok(),
-            "text exceeds u32::MAX bytes"
-        );
         let chars: Vec<(usize, char)> = text.char_indices().collect();
-        assert_eq!(
+        debug_assert_eq!(
             order.len(),
             chars.len(),
             "order length must match text character count"
         );
-        assert_eq!(
+        debug_assert_eq!(
             info.char_count(),
             chars.len(),
             "BidiInfo was computed for a different string"
         );
+        let paragraph = info.paragraph_direction();
         let levels_logical = info.levels();
+        if u32::try_from(text.len()).is_err()
+            || order.len() != chars.len()
+            || levels_logical.len() != chars.len()
+        {
+            return Self::empty(paragraph);
+        }
 
         let n = chars.len();
         let mut visual_starts = Vec::with_capacity(n);
@@ -129,10 +137,15 @@ impl BidiMap {
         let mut identity = true;
         let mut visual_byte: u32 = 0;
         for (visual_idx, &logical_idx) in order.iter().enumerate() {
-            let (logical_byte, ch) = chars[logical_idx];
+            let (Some(&(logical_byte, ch)), Some(&level)) =
+                (chars.get(logical_idx), levels_logical.get(logical_idx))
+            else {
+                return Self::empty(paragraph);
+            };
             visual_starts.push(visual_byte);
+            // Both casts are lossless: `text.len()` fits in `u32`.
             logical_starts.push(logical_byte as u32);
-            levels.push(levels_logical[logical_idx]);
+            levels.push(level);
             identity &= visual_idx == logical_idx;
             visual_byte += ch.len_utf8() as u32;
         }
@@ -144,14 +157,39 @@ impl BidiMap {
             .collect();
         logical_index.sort_unstable_by_key(|&(l, _)| l);
 
+        // A permutation lists every character start exactly once, so
+        // the sorted logical starts must equal the text's own starts.
+        // A repeated index breaks that and would make the inverse
+        // lookups disagree with the forward ones.
+        let is_permutation = logical_index
+            .iter()
+            .map(|&(l, _)| l as usize)
+            .eq(chars.iter().map(|&(b, _)| b));
+        if !is_permutation {
+            return Self::empty(paragraph);
+        }
+
         Self {
             visual_starts,
             logical_starts,
             levels,
             logical_index,
-            paragraph: info.paragraph_direction(),
+            paragraph,
             text_len: visual_byte,
             identity,
+        }
+    }
+
+    /// A map with no characters. Every lookup returns `None`.
+    fn empty(paragraph: Direction) -> Self {
+        Self {
+            visual_starts: Vec::new(),
+            logical_starts: Vec::new(),
+            levels: Vec::new(),
+            logical_index: Vec::new(),
+            paragraph,
+            text_len: 0,
+            identity: true,
         }
     }
 
@@ -192,7 +230,7 @@ impl BidiMap {
     #[must_use]
     pub fn visual_to_logical(&self, visual_byte: usize) -> Option<usize> {
         let idx = round_down_index(&self.visual_starts, visual_byte, self.text_len)?;
-        Some(self.logical_starts[idx] as usize)
+        self.logical_starts.get(idx).map(|&l| l as usize)
     }
 
     /// Maps a byte offset in the logical (source) string to the byte
@@ -204,7 +242,7 @@ impl BidiMap {
     #[must_use]
     pub fn logical_to_visual(&self, logical_byte: usize) -> Option<usize> {
         let idx = self.logical_index_at(logical_byte)?;
-        Some(self.visual_starts[idx] as usize)
+        self.visual_starts.get(idx).map(|&v| v as usize)
     }
 
     /// Embedding level (post L1) of the character containing the
@@ -214,7 +252,7 @@ impl BidiMap {
     #[must_use]
     pub fn level_at_visual(&self, visual_byte: usize) -> Option<u8> {
         let idx = round_down_index(&self.visual_starts, visual_byte, self.text_len)?;
-        Some(self.levels[idx])
+        self.levels.get(idx).copied()
     }
 
     /// Embedding level (post L1) of the character containing the
@@ -222,7 +260,7 @@ impl BidiMap {
     #[must_use]
     pub fn level_at_logical(&self, logical_byte: usize) -> Option<u8> {
         let idx = self.logical_index_at(logical_byte)?;
-        Some(self.levels[idx])
+        self.levels.get(idx).copied()
     }
 
     /// Index into the parallel arrays for the character containing
@@ -231,14 +269,14 @@ impl BidiMap {
         if logical_byte >= self.text_len as usize {
             return None;
         }
+        // Lossless: below `text_len`, which is a `u32`.
         let logical_byte = logical_byte as u32;
         let pos = self
             .logical_index
             .partition_point(|&(l, _)| l <= logical_byte);
-        // pos > 0 always: offset 0 is a char start and text is
-        // non-empty here (text_len > logical_byte >= 0).
-        let (_, idx) = self.logical_index[pos - 1];
-        Some(idx as usize)
+        // pos > 0 for any non-empty map: offset 0 is a char start.
+        let (_, idx) = self.logical_index.get(pos.checked_sub(1)?)?;
+        Some(*idx as usize)
     }
 }
 
@@ -249,11 +287,11 @@ fn round_down_index(starts: &[u32], byte: usize, text_len: u32) -> Option<usize>
     if byte >= text_len as usize {
         return None;
     }
-    #[allow(clippy::cast_possible_truncation)]
-    let byte = byte as u32; // < text_len which fits u32
+    // Lossless: below `text_len`, which is a `u32`.
+    let byte = byte as u32;
     let pos = starts.partition_point(|&s| s <= byte);
-    // pos > 0 always: starts[0] == 0 and byte >= 0.
-    Some(pos - 1)
+    // pos > 0 for any non-empty map: starts[0] == 0.
+    pos.checked_sub(1)
 }
 
 #[cfg(test)]

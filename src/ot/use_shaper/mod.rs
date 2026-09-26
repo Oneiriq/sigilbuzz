@@ -4,10 +4,10 @@
 //! every SE-Asian, SE-Indic and archaic-South-Asian script that does
 //! not fit Arabic or Indic2 runs through. Khmer, Myanmar, Tai Tham,
 //! Buginese, New Tai Lue, Cham, Old Hangul, Hanifi Rohingya are all
-//! USE clients. 0.2.0 wires up Khmer as the pilot; the other scripts
-//! add incrementally by extending the per-codepoint tables in
-//! [`crate::unicode::use_category`] and registering their script tag
-//! in this module's script priority table.
+//! USE clients. Each script gets an entry point below that pairs its
+//! script-tag priority with a feature chain. A new script needs its
+//! codepoints in the per-codepoint tables of
+//! [`crate::unicode::use_category`] and an entry point here.
 //!
 //! # Pipeline
 //!
@@ -193,12 +193,7 @@ pub(crate) enum SyllableKind {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Syllable {
     pub kind: SyllableKind,
-    /// Start codepoint/glyph index (inclusive). Kept for debugging
-    /// and test assertions even when the reorder pass only needs
-    /// `end` and `base_index`. Tagging a syllable by its left edge
-    /// is the cheapest way to cross-reference against the original
-    /// codepoint slice.
-    #[allow(dead_code)]
+    /// Start codepoint/glyph index (inclusive).
     pub start: usize,
     /// End codepoint/glyph index (exclusive).
     pub end: usize,
@@ -293,10 +288,10 @@ pub(crate) fn segment_syllables(codepoints: &[char]) -> Vec<Syllable> {
     out
 }
 
-/// Parses a single syllable starting at `start`. Always makes
-/// progress: `end > start` on return.
+/// Parses a single syllable starting at `start`, which must be below
+/// `cps.len()`. Always makes progress and stays in bounds:
+/// `start < end <= cps.len()` on return.
 fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
-    let len = cps.len();
     let first = use_category(cps[start]);
 
     match first {
@@ -330,7 +325,6 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
             // its own cluster id after the merge pass, matching
             // rustybuzz, where e.g. the three Khmer digits ០១២
             // emit clusters 0/3/6 rather than a single merged 0.
-            let _ = len;
             Syllable {
                 kind: SyllableKind::Symbol,
                 start,
@@ -340,13 +334,14 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
                 kinzi_index: None,
             }
         }
-        UseCategory::R => {
+        UseCategory::R if start + 1 < cps.len() => {
             // Repha prefix, followed by a consonant syllable. The
             // Myanmar kinzi case is handled inline in
             // `scan_consonant_syllable` because kinzi's codepoints
-            // (Nga / Asat / Virama) are categorized as B/H/H, not R;
-            // this arm stays for potential future R-category repha
-            // in other USE scripts.
+            // (Nga / Asat / Virama) are categorized as B/H/H, not R.
+            // No codepoint maps to R today. A repha at the very end
+            // of the run falls through to the one-wide Broken arm so
+            // the syllable never runs past `cps.len()`.
             let syl = scan_consonant_syllable(cps, start + 1);
             Syllable {
                 kind: syl.kind,
@@ -533,7 +528,10 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
     let Some(base) = syllable.base_index else {
         return;
     };
-    if syllable.end > glyphs.len() || syllable.end > codepoints.len() {
+    if syllable.end > glyphs.len()
+        || syllable.end > codepoints.len()
+        || !(syllable.start..syllable.end).contains(&base)
+    {
         return;
     }
 
@@ -595,16 +593,19 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
     let syl_start = syllable.start;
     let syl_end = syllable.end;
     let original: Vec<Glyph> = glyphs[syl_start..syl_end].to_vec();
-    let mut rebuilt: Vec<Glyph> = Vec::with_capacity(syl_end - syl_start);
+    let mut rebuilt: Vec<Glyph> = Vec::with_capacity(original.len());
 
-    // Set of indices whose glyphs are consumed by the earlier
-    // buckets and must not be re-emitted by the fall-through.
-    let mut consumed: Vec<usize> = Vec::new();
+    // Syllable-relative flags for glyphs consumed by the earlier
+    // buckets, which the fall-through must not re-emit. A flag array
+    // keeps the pass linear in the syllable length even when a
+    // syllable carries thousands of pre-base signs.
+    let mut consumed = alloc::vec![false; original.len()];
+    let kinzi = kinzi_idx.filter(|&kz| kz >= syl_start && kz + 2 < syl_end);
 
     // 1. Pre-base matras, in logical order.
     for &idx in &to_move {
         rebuilt.push(original[idx - syl_start]);
-        consumed.push(idx);
+        consumed[idx - syl_start] = true;
     }
     // 2. Pre-base consonant pair (coeng + ra). Both glyphs move to
     //    the start of the syllable so the `pref` GSUB feature sees
@@ -612,42 +613,38 @@ fn initial_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllabl
     //    already sits before the base.
     if let Some(pc) = pre_cons_idx {
         if pc >= syl_start && pc + 1 < syl_end {
-            rebuilt.push(original[pc - syl_start]);
-            rebuilt.push(original[pc + 1 - syl_start]);
-            consumed.push(pc);
-            consumed.push(pc + 1);
+            for rel in [pc - syl_start, pc + 1 - syl_start] {
+                rebuilt.push(original[rel]);
+                consumed[rel] = true;
+            }
         }
     }
     // 3. Mark the kinzi triple as consumed so the fall-through
     //    doesn't re-emit them at the syllable head; we inject them
     //    right after the base consonant below.
-    if let Some(kz) = kinzi_idx {
-        if kz + 2 < syl_end {
-            consumed.push(kz);
-            consumed.push(kz + 1);
-            consumed.push(kz + 2);
-        }
+    if let Some(kz) = kinzi {
+        consumed[kz - syl_start..=kz + 2 - syl_start].fill(true);
     }
     // 4. Everything else, in original order, with the kinzi triple
     //    injected immediately after the base consonant.
-    for idx in syl_start..syl_end {
-        if consumed.contains(&idx) {
+    for (rel, &glyph) in original.iter().enumerate() {
+        if consumed[rel] {
             continue;
         }
-        rebuilt.push(original[idx - syl_start]);
-        if idx == base {
-            if let Some(kz) = kinzi_idx {
-                if kz + 2 < syl_end {
-                    rebuilt.push(original[kz - syl_start]);
-                    rebuilt.push(original[kz + 1 - syl_start]);
-                    rebuilt.push(original[kz + 2 - syl_start]);
-                }
+        rebuilt.push(glyph);
+        if syl_start + rel == base {
+            if let Some(kz) = kinzi {
+                rebuilt.extend_from_slice(&original[kz - syl_start..=kz + 2 - syl_start]);
             }
         }
     }
 
-    debug_assert_eq!(rebuilt.len(), syl_end - syl_start);
-    glyphs[syl_start..syl_end].copy_from_slice(&rebuilt);
+    // Every glyph of the syllable is emitted exactly once for the
+    // syllables the segmenter builds. If a future category table ever
+    // breaks that, keep the syllable as it was instead of panicking.
+    if rebuilt.len() == original.len() {
+        glyphs[syl_start..syl_end].copy_from_slice(&rebuilt);
+    }
 }
 
 /// Returns a length-`codepoints.len() + 1` array mapping each code
@@ -687,17 +684,25 @@ fn cluster_byte_offsets(codepoints: &[char]) -> Vec<u32> {
 /// rustybuzz behavior. Downstream callers see one cluster id per
 /// syllable (the byte offset of the first codepoint) even when GSUB
 /// substitutions have collapsed glyphs inside the syllable.
+///
+/// Syllables are consecutive, so their byte ranges are sorted and
+/// disjoint and a glyph falls in at most one of them. Rewriting a
+/// cluster to its syllable's start keeps it inside that range, so one
+/// pass with a binary search per glyph gives the same result as
+/// visiting every glyph once per syllable, in `O(n log s)` time.
 fn merge_syllable_clusters(glyphs: &mut [Glyph], syllables: &[Syllable], byte_offsets: &[u32]) {
-    for syl in syllables {
-        if syl.end == syl.start {
+    let ranges: Vec<(u32, u32)> = syllables
+        .iter()
+        .filter(|syl| syl.end > syl.start)
+        .filter_map(|syl| Some((*byte_offsets.get(syl.start)?, *byte_offsets.get(syl.end)?)))
+        .collect();
+    for g in glyphs {
+        let after = ranges.partition_point(|&(start, _)| start <= g.cluster);
+        let Some(&(start, end)) = after.checked_sub(1).and_then(|k| ranges.get(k)) else {
             continue;
-        }
-        let byte_start = byte_offsets[syl.start];
-        let byte_end = byte_offsets[syl.end];
-        for g in glyphs.iter_mut() {
-            if g.cluster >= byte_start && g.cluster < byte_end {
-                g.cluster = byte_start;
-            }
+        };
+        if g.cluster < end {
+            g.cluster = start;
         }
     }
 }
@@ -715,6 +720,7 @@ fn merge_syllable_clusters(glyphs: &mut [Glyph], syllables: &[Syllable], byte_of
 /// logically typed *before* the base consonant already, so the
 /// reorder pass would be a no-op at best and break clustering at
 /// worst. Passing `false` skips it.
+// The parameter list is public API, so it stays as is.
 #[allow(clippy::too_many_arguments)]
 pub fn shape_use(
     gsub: Option<&Gsub<'_>>,
@@ -762,10 +768,10 @@ pub fn shape_use(
             apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"pref", 0, script_priority);
             // The pref pass on the fonts we care about is a single-subst
             // (length-preserving), so the snapshot length still aligns.
-            // If a future font ships a pref ligature that changes glyph
-            // count, the lengths diverge and we skip the reorder. The
-            // shaper still produces the post-pref output, just without
-            // the pre-base move (matching the pre-fix behavior).
+            // If a font ships a pref ligature that changes glyph count,
+            // the lengths diverge and we skip the reorder. The shaper
+            // still produces the post-pref output, just without the
+            // pre-base move.
             if pre_ids.len() == glyphs.len() {
                 for syl in &syllables {
                     pref_reorder(codepoints, glyphs, syl, &pre_ids);
@@ -801,8 +807,8 @@ pub fn shape_use(
 /// [`UsePosition::BelowBase`] (the textbook medial-ra), moves the
 /// substituted glyph to the front of the syllable so it visually sits
 /// before the base. Mirrors rustybuzz's `record_pref` ->
-/// `reorder_syllable_use` pair, but only for the medial-ra case the
-/// 0.8.0 corpus exercises (Cham). Length-preserving.
+/// `reorder_syllable_use` pair, but only for the medial-ra case
+/// (Cham). Length-preserving.
 fn pref_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllable, pre_ids: &[u32]) {
     if !matches!(syllable.kind, SyllableKind::Consonant) {
         return;
@@ -810,7 +816,11 @@ fn pref_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllable, 
     let Some(base) = syllable.base_index else {
         return;
     };
-    if syllable.end > glyphs.len() || syllable.end > codepoints.len() {
+    if syllable.end > glyphs.len()
+        || syllable.end > codepoints.len()
+        || syllable.end > pre_ids.len()
+        || !(syllable.start..syllable.end).contains(&base)
+    {
         return;
     }
 
@@ -837,20 +847,20 @@ fn pref_reorder(codepoints: &[char], glyphs: &mut [Glyph], syllable: &Syllable, 
     let syl_start = syllable.start;
     let syl_end = syllable.end;
     let original: Vec<Glyph> = glyphs[syl_start..syl_end].to_vec();
-    let mut rebuilt: Vec<Glyph> = Vec::with_capacity(syl_end - syl_start);
+    let mut rebuilt: Vec<Glyph> = Vec::with_capacity(original.len());
+    let mut moved = alloc::vec![false; original.len()];
 
     // 1. Substituted pre-base forms in logical order.
     for &idx in &to_move {
         rebuilt.push(original[idx - syl_start]);
+        moved[idx - syl_start] = true;
     }
     // 2. Everything else, in original order.
-    for idx in syl_start..syl_end {
-        if to_move.contains(&idx) {
-            continue;
+    for (rel, &glyph) in original.iter().enumerate() {
+        if !moved[rel] {
+            rebuilt.push(glyph);
         }
-        rebuilt.push(original[idx - syl_start]);
     }
-    debug_assert_eq!(rebuilt.len(), syl_end - syl_start);
     glyphs[syl_start..syl_end].copy_from_slice(&rebuilt);
 }
 
@@ -880,7 +890,7 @@ pub fn shape_myanmar(
 /// the shaping reduces to contextual forms + mark positioning. We
 /// still segment into syllables so the cluster-merge pass groups
 /// tone marks with their consonant, matching HarfBuzz's Thai shaper
-/// for every string in the 0.2.0 corpus.
+/// on the Thai parity corpus.
 pub fn shape_thai(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -1513,5 +1523,62 @@ mod tests {
         // now it is first).
         assert_eq!(glyphs[0].glyph_id, 20);
         assert_eq!(glyphs[1].glyph_id, 10);
+    }
+
+    #[test]
+    fn long_run_of_pre_base_signs_reorders_in_linear_time() {
+        // Khmer ka followed by 200000 sign-e is one consonant syllable
+        // whose pre-base signs all move. Checking each glyph against a
+        // list of moved indices cost about 4e10 comparisons.
+        const N: usize = 200_000;
+        let mut cp = vec!['\u{1780}'];
+        cp.extend(core::iter::repeat('\u{17C1}').take(N));
+        let mut glyphs = fake_glyphs(cp.len());
+        shape_khmer(None, None, &cp, &mut glyphs);
+        // The signs move to the front in order, then the base.
+        assert_eq!(glyphs.len(), N + 1);
+        assert_eq!(glyphs[0].glyph_id, 2);
+        assert_eq!(glyphs[N - 1].glyph_id, N as u32 + 1);
+        assert_eq!(glyphs[N].glyph_id, 1);
+    }
+
+    #[test]
+    fn many_syllables_merge_clusters_in_linear_time() {
+        // 200000 Khmer digits are 200000 one-wide syllables. Visiting
+        // every glyph once per syllable cost about 4e10 comparisons.
+        const N: usize = 200_000;
+        let cp = vec!['\u{17E0}'; N];
+        let mut glyphs: Vec<Glyph> = (0..N).map(|i| Glyph::new(1, (i * 3) as u32)).collect();
+        shape_khmer(None, None, &cp, &mut glyphs);
+        assert_eq!(glyphs[N - 1].cluster, ((N - 1) * 3) as u32);
+    }
+
+    #[test]
+    fn merge_syllable_clusters_matches_per_syllable_scan() {
+        // Reference: the per-syllable scan the binary search replaces.
+        fn merge_by_scan(glyphs: &mut [Glyph], syllables: &[Syllable], byte_offsets: &[u32]) {
+            for syl in syllables {
+                let (start, end) = (byte_offsets[syl.start], byte_offsets[syl.end]);
+                for g in glyphs.iter_mut() {
+                    if g.cluster >= start && g.cluster < end {
+                        g.cluster = start;
+                    }
+                }
+            }
+        }
+        let text = "\u{1780}\u{17C1}\u{17E0}\u{179F}\u{17D2}\u{178F}\u{17B8} \u{1780}";
+        let cp = cps(text);
+        let syllables = segment_syllables(&cp);
+        let byte_offsets = cluster_byte_offsets(&cp);
+        let total = byte_offsets[cp.len()];
+        for shift in 0..4u32 {
+            let clusters: Vec<u32> = (0..total + 3).rev().map(|c| c ^ shift).collect();
+            let glyphs: Vec<Glyph> = clusters.iter().map(|&c| Glyph::new(0, c)).collect();
+            let mut expected = glyphs.clone();
+            merge_by_scan(&mut expected, &syllables, &byte_offsets);
+            let mut got = glyphs;
+            merge_syllable_clusters(&mut got, &syllables, &byte_offsets);
+            assert_eq!(got, expected);
+        }
     }
 }

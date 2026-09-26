@@ -30,6 +30,8 @@ fn ptr(addr: usize) -> *mut hb_set_t {
 #[test]
 fn concurrent_readers_see_a_stable_set() {
     let set = hb_set_create();
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or data that outlives the call.
     unsafe {
         for cp in 0..64u32 {
             hb_set_add(set, cp * 2);
@@ -43,9 +45,13 @@ fn concurrent_readers_see_a_stable_set() {
                 let mut hits = 0u32;
                 for round in 0..ROUNDS {
                     let cp = round % 128;
+                    // SAFETY: every pointer passed here is null, a live handle created
+                    // in this test, or data that outlives the call.
                     if unsafe { hb_set_has(set, cp) } != 0 {
                         hits += 1;
                     }
+                    // SAFETY: every pointer passed here is null, a live handle created
+                    // in this test, or data that outlives the call.
                     assert_eq!(unsafe { hb_set_get_population(set) }, 64);
                 }
                 hits
@@ -57,6 +63,8 @@ fn concurrent_readers_see_a_stable_set() {
         // 128-round cycle hits.
         assert_eq!(handle.join().expect("reader thread"), ROUNDS / 2);
     }
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or data that outlives the call.
     unsafe { hb_set_destroy(set) };
 }
 
@@ -70,11 +78,15 @@ fn concurrent_writers_do_not_lose_updates() {
                 let set = ptr(shared);
                 let base = (t as u32) * ROUNDS;
                 for i in 0..ROUNDS {
+                    // SAFETY: every pointer passed here is null, a live handle created
+                    // in this test, or data that outlives the call.
                     unsafe { hb_set_add(set, base + i) };
                 }
                 // Remove the odd half again so adds and deletes interleave
                 // with the other threads' adds.
                 for i in (1..ROUNDS).step_by(2) {
+                    // SAFETY: every pointer passed here is null, a live handle created
+                    // in this test, or data that outlives the call.
                     unsafe { hb_set_del(set, base + i) };
                 }
             })
@@ -84,7 +96,11 @@ fn concurrent_writers_do_not_lose_updates() {
         handle.join().expect("writer thread");
     }
     let expected = (THREADS as u32) * ROUNDS / 2;
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or data that outlives the call.
     assert_eq!(unsafe { hb_set_get_population(set) }, expected);
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or data that outlives the call.
     unsafe { hb_set_destroy(set) };
 }
 

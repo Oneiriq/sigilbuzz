@@ -14,6 +14,7 @@
 //! turn a position inside any sub-slice back into an offset from the
 //! start of the table.
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::fmt;
@@ -84,10 +85,18 @@ pub(crate) fn error_context(err: &Error) -> &'static str {
     }
 }
 
-/// Collects the warnings of one subset or instance run.
+/// Most distinct warnings one run keeps. A hostile font can hold far
+/// more malformed pieces than anyone reads, and every one would cost
+/// memory. The first ones in sort order are kept.
+pub(crate) const MAX_WARNINGS: usize = 1 << 16;
+
+/// Collects the warnings of one subset or instance run, without
+/// repeats: some rewriters read a structure twice (the GSUB and GPOS
+/// context lookups are rewritten again once lookup indices are known),
+/// and a piece shared by many records is visited once per record.
 #[derive(Debug, Default)]
 pub(crate) struct Warnings {
-    list: RefCell<Vec<SubsetWarning>>,
+    list: RefCell<BTreeSet<SubsetWarning>>,
 }
 
 impl Warnings {
@@ -99,12 +108,16 @@ impl Warnings {
         context: &'static str,
         dropped: &'static str,
     ) {
-        self.list.borrow_mut().push(SubsetWarning {
+        let mut list = self.list.borrow_mut();
+        list.insert(SubsetWarning {
             table,
             offset,
             context,
             dropped,
         });
+        if list.len() > MAX_WARNINGS {
+            list.pop_last();
+        }
     }
 
     /// Records a parse error found in `table`, whose offsets count from
@@ -126,14 +139,10 @@ impl Warnings {
         self.push(table, offset, error_context(err), dropped);
     }
 
-    /// The recorded warnings, sorted and without repeats: some
-    /// rewriters read a structure twice (the GSUB and GPOS context
-    /// lookups are rewritten again once lookup indices are known).
+    /// The recorded warnings, sorted and without repeats, at most
+    /// [`MAX_WARNINGS`] of them.
     pub(crate) fn into_sorted(self) -> Vec<SubsetWarning> {
-        let mut list = self.list.into_inner();
-        list.sort_unstable();
-        list.dedup();
-        list
+        self.list.into_inner().into_iter().collect()
     }
 }
 
@@ -283,5 +292,18 @@ mod tests {
             format!("{w}"),
             "'GDEF' byte 58: GDEF AttachPoint truncated; left out one glyph's AttachPoint"
         );
+    }
+
+    #[test]
+    fn the_list_stops_growing_at_the_cap() {
+        let sink = Warnings::default();
+        for offset in 0..super::MAX_WARNINGS + 10 {
+            sink.push(*b"GPOS", offset, "x", "y");
+        }
+        let list = sink.into_sorted();
+        assert_eq!(list.len(), super::MAX_WARNINGS);
+        // The first ones in sort order stay.
+        assert_eq!(list.first().map(|w| w.offset), Some(0));
+        assert_eq!(list.last().map(|w| w.offset), Some(super::MAX_WARNINGS - 1));
     }
 }

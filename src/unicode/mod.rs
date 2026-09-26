@@ -2,10 +2,8 @@
 //!
 //! Scripts (Latin, Arabic, Hangul, ...) and general categories drive
 //! which feature list the shaper applies and how cluster boundaries
-//! are decided. Bootstrap impl is intentionally minimal; a full table
-//! of UCD-derived data lands as the shaper's needs grow.
-
-#![allow(missing_docs)]
+//! are decided. The tables are hand-curated excerpts of the UCD that
+//! cover the scripts the shaper handles, not the full database.
 
 pub mod bidi;
 pub mod bidi_brackets;
@@ -154,12 +152,12 @@ impl Script {
     }
 
     /// Returns `true` if the script routes through the Universal
-    /// Shaping Engine pipeline. Khmer, Myanmar, Thai, Lao, and the
-    /// Jamo subset of Hangul are the 0.2.0 set; 0.7.x adds the
-    /// Brahmic SE-Asian / South Asian set (Buginese, Tai Tham,
-    /// Balinese, Sundanese, Lepcha, Limbu, Cham) plus N'Ko. Each
-    /// supplies its own category table and feature list, but the
-    /// segment / reorder / basic+topographical dispatch is shared.
+    /// Shaping Engine pipeline: Khmer, Myanmar, Thai, Lao, the Jamo
+    /// subset of Hangul, N'Ko, the Brahmic SE-Asian / South Asian set
+    /// (Buginese, Tai Tham, Balinese, Sundanese, Lepcha, Limbu, Cham),
+    /// and the Brahmi-family historical scripts. Each supplies its
+    /// own category table and feature list, but the segment / reorder
+    /// / basic+topographical dispatch is shared.
     #[must_use]
     pub const fn is_use(self) -> bool {
         matches!(
@@ -280,12 +278,10 @@ pub const fn script_of(ch: char) -> Script {
         0x0F00..=0x0FFF => Script::Tibetan,
         // Khmer + Khmer Symbols
         0x1780..=0x17FF | 0x19E0..=0x19FF => Script::Khmer,
-        // Mongolian: main block. Mongolian Supplement (U+11660..)
-        // is intentionally out of scope for the bootstrap classifier
-        // since cargo's `char` is `u32` but the binding is `const fn`
-        // and the supplement lives outside the Basic Multilingual
-        // Plane; modern Noto Sans Mongolian's covered glyphs sit in
-        // the main block, which is what 0.7.0's parity corpus tests.
+        // Mongolian: main block. The Mongolian Supplement
+        // (U+11660..U+1167F) is not classified and falls through to
+        // `Other`. Noto Sans Mongolian's glyphs and the parity corpus
+        // sit in the main block.
         0x1800..=0x18AF => Script::Mongolian,
         // CJK unified ideographs + extensions A/B + Hiragana + Katakana
         0x3040..=0x309F | 0x30A0..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF => Script::Han,

@@ -124,7 +124,9 @@ fn alloc_lig_id(glyphs: &[Glyph], at: usize) -> u8 {
     if let Some(free) = (1..8u8).find(|&id| !used[usize::from(id)]) {
         return free;
     }
-    glyphs[..at]
+    glyphs
+        .get(..at)
+        .unwrap_or_default()
         .iter()
         .find(|g| is_lig_base(g))
         .map_or(1, lig_id)
@@ -150,6 +152,9 @@ fn alloc_lig_id(glyphs: &[Glyph], at: usize) -> u8 {
 /// `substitute` writes the new glyph id; the caller passes its own
 /// helper so the GSUB bookkeeping it already does (default-ignorable
 /// flags) stays in one place.
+///
+/// `positions` must start at 0, rise strictly, and stay inside the run.
+/// Anything else leaves the run untouched.
 pub(super) fn ligate(
     glyphs: &mut alloc::vec::Vec<Glyph>,
     at: usize,
@@ -161,7 +166,12 @@ pub(super) fn ligate(
     let Some(&last_rel) = positions.last() else {
         return;
     };
-    if at + last_rel >= glyphs.len() {
+    let ascending = positions.first() == Some(&0) && positions.windows(2).all(|w| w[0] < w[1]);
+    if !ascending
+        || at
+            .checked_add(last_rel)
+            .map_or(true, |end| end >= glyphs.len())
+    {
         return;
     }
     // The matched span shares one cluster, the smallest in it, as in
@@ -231,10 +241,25 @@ pub(super) fn ligate(
     if is_ligature {
         set_for_ligature(lig, new_id, total_comps.min(15) as u8);
     }
-    // Remove the components back to front so earlier indices hold.
-    for &rel in positions[1..].iter().rev() {
-        glyphs.remove(at + rel);
-    }
+    // Remove the later components in one pass: the glyphs between
+    // them (skipped marks) close up behind the ligature, and the rest
+    // of the run shifts once rather than once per component.
+    let mut components = positions[1..].iter().peekable();
+    let kept: alloc::vec::Vec<Glyph> = glyphs
+        .drain(at + 1..=at + last_rel)
+        .enumerate()
+        .filter(|&(i, _)| {
+            if components.peek() == Some(&&(i + 1)) {
+                components.next();
+                false
+            } else {
+                true
+            }
+        })
+        .map(|(_, g)| g)
+        .collect();
+    let after = at + 1;
+    glyphs.splice(after..after, kept);
 }
 
 /// Records a multiple substitution that turned one glyph into the
@@ -244,11 +269,17 @@ pub(super) fn ligate(
 /// component 0, 1, 2, ... A one-glyph sequence is a plain
 /// substitution and records nothing.
 pub(super) fn record_multiple(glyphs: &mut [Glyph], at: usize, outputs: usize) {
-    if outputs < 2 || at + outputs > glyphs.len() {
+    let Some(run) = at
+        .checked_add(outputs)
+        .and_then(|end| glyphs.get_mut(at..end))
+    else {
+        return;
+    };
+    if outputs < 2 {
         return;
     }
-    let keep_ligature = lig_id(&glyphs[at]) != 0;
-    for (i, g) in glyphs[at..at + outputs].iter_mut().enumerate() {
+    let keep_ligature = run.first().is_some_and(|g| lig_id(g) != 0);
+    for (i, g) in run.iter_mut().enumerate() {
         g.unicode_props |= MULTIPLIED;
         if !keep_ligature {
             set_for_mark(g, 0, i as u8);
@@ -379,6 +410,34 @@ mod tests {
         ligate(&mut glyphs, 0, &[0, 1], 8, Some(&gdef), plain);
         assert!(!is_multiplied(&glyphs[0]));
         assert!(is_multiplied(&glyphs[1]));
+    }
+
+    #[test]
+    fn ligate_ignores_positions_that_leave_the_run_or_do_not_rise() {
+        let mut glyphs = run(&[1, 2, 3]);
+        let before = glyphs.clone();
+        for positions in [&[0, 3][..], &[0, 2, 1], &[1, 2], &[0, usize::MAX]] {
+            ligate(&mut glyphs, 0, positions, 8, None, plain);
+            assert_eq!(glyphs, before, "{positions:?}");
+        }
+        ligate(&mut glyphs, usize::MAX, &[0, 1], 8, None, plain);
+        assert_eq!(glyphs, before);
+    }
+
+    #[test]
+    fn ligate_keeps_the_glyphs_between_components_in_order() {
+        let mut glyphs = run(&[1, 5, 2, 6, 7, 3, 4]);
+        ligate(&mut glyphs, 0, &[0, 2, 5], 8, None, plain);
+        let ids: Vec<u32> = glyphs.iter().map(|g| g.glyph_id).collect();
+        assert_eq!(ids, [8, 5, 6, 7, 4]);
+    }
+
+    #[test]
+    fn record_multiple_ignores_a_span_past_the_run() {
+        let mut glyphs = run(&[1, 2]);
+        record_multiple(&mut glyphs, 1, usize::MAX);
+        record_multiple(&mut glyphs, 1, 2);
+        assert!(glyphs.iter().all(|g| g.unicode_props == 0));
     }
 
     #[test]

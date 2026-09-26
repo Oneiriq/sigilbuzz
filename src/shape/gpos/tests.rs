@@ -98,6 +98,34 @@ fn value_records_move_the_advance_of_the_run_direction_only() {
     assert_eq!((g.x_advance, g.y_advance), (500, -1040));
 }
 
+/// Stacked adjustments pin a position at the `i32` bounds instead of
+/// overflowing (which panics in debug builds).
+#[test]
+fn value_records_saturate_at_the_i32_bounds() {
+    let v = ValueRecord {
+        x_placement: i16::MAX,
+        y_placement: i16::MIN,
+        x_advance: i16::MAX,
+        y_advance: i16::MAX,
+        ..ValueRecord::default()
+    };
+    let var = VarCtx::none();
+    let mut g = glyph(1);
+    g.x_offset = i32::MAX - 1;
+    g.y_offset = i32::MIN + 1;
+    g.x_advance = i32::MAX - 1;
+    apply_value(&mut g, &v, &[], &var, true);
+    assert_eq!(
+        (g.x_offset, g.y_offset, g.x_advance),
+        (i32::MAX, i32::MIN, i32::MAX)
+    );
+
+    let mut g = glyph(1);
+    g.y_advance = i32::MIN + 1;
+    apply_value(&mut g, &v, &[], &var, false);
+    assert_eq!(g.y_advance, i32::MIN);
+}
+
 fn be16(out: &mut Vec<u8>, v: u16) {
     out.extend_from_slice(&v.to_be_bytes());
 }
@@ -154,6 +182,7 @@ fn state(filter: MatchFilter<'_>) -> LookupState<'_> {
         flag: 0,
         mark_filtering_set: None,
         auto_zwj: true,
+        index: 0,
     }
 }
 

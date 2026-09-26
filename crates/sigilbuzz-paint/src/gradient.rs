@@ -3,11 +3,10 @@
 //! sigilbuzz exposes the COLRv1 color line as palette indices + raw
 //! coordinates. The evaluator turns those into the float-channel
 //! gradients consumers actually want: palette entries already
-//! resolved, alpha already multiplied, geometry already transformed
-//! through the active design-unit space (transform composition is the
-//! consumer's job since they may want to defer it for hardware-driven
-//! pipelines, so the gradient still ships in the pre-transform paint
-//! frame and the matching `Transform2D` is part of `DrawCmd`).
+//! resolved and alpha already multiplied. Geometry is in the design
+//! units of the outline the gradient fills. The matching `Transform2D`
+//! ships in the surrounding `DrawCmd`, so consumers can apply it on the
+//! CPU or defer it to a hardware pipeline.
 
 use alloc::vec::Vec;
 
@@ -83,16 +82,17 @@ impl From<sigilbuzz::tables::colr::Extend> for Extend {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GradientKind {
     /// Linear gradient between two endpoints. The third point in the
-    /// COLRv1 record (`p2`) anchors the gradient line's rotation; the
-    /// evaluator has already folded it into `p0` / `p1`.
+    /// COLRv1 record (`p2`) sets the rotation of the gradient's color
+    /// bands, which run parallel to the line from `p0` to `p2`.
     Linear {
         /// Start point.
         p0: (f32, f32),
         /// End point.
         p1: (f32, f32),
-        /// Rotation anchor. Renderers using the projected-line
-        /// formulation can ignore it; renderers using the spec's
-        /// "rotate the line through p2" formulation need it.
+        /// Rotation anchor. A renderer draws the gradient from `p0` to
+        /// `p1` projected onto the normal of the line from `p0` to
+        /// `p2`, as HarfBuzz's `hb_paint_reduce_linear_anchors` does.
+        /// With `p2` on `p0` the gradient runs from `p0` to `p1`.
         p2: (f32, f32),
     },
     /// Two-circle radial gradient. `t = 0` rides the inner circle,

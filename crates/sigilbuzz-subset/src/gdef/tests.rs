@@ -852,3 +852,22 @@ fn a_malformed_gdef_piece_does_not_fail_the_subset() {
     assert_eq!(classes.class_of(new(36)), 1);
     assert_eq!(classes.class_of(new(38)), 3);
 }
+
+/// A ClassDef or Coverage whose format 2 ranges all cover every glyph
+/// describes billions of entries in a few hundred kilobytes. The
+/// readers stop at one entry per glyph id.
+#[test]
+fn overlapping_ranges_are_capped() {
+    let ranges = u16::MAX;
+    let mut table = Vec::new();
+    table.extend_from_slice(&2u16.to_be_bytes());
+    table.extend_from_slice(&ranges.to_be_bytes());
+    for _ in 0..ranges {
+        table.extend_from_slice(&0u16.to_be_bytes());
+        table.extend_from_slice(&u16::MAX.to_be_bytes());
+        table.extend_from_slice(&1u16.to_be_bytes());
+    }
+    let cap = crate::layout::MAX_GLYPH_ENTRIES;
+    assert_eq!(super::read::class_def(&table, 0).map(|p| p.len()), Ok(cap));
+    assert_eq!(coverage(&table, 0).map(|p| p.len()), Ok(cap));
+}

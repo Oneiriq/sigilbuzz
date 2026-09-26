@@ -5,9 +5,9 @@
 //! sigilbuzz's shaping core works on plain SFNT (TTF/OTF). This
 //! crate is the bridge: hand it WOFF bytes, get SFNT bytes back.
 //!
-//! ```ignore
+//! ```no_run
 //! use sigilbuzz_woff::{unwrap_woff2};
-//! use sigilbuzz::{Blob, Face};
+//! use sigilbuzz::Face;
 //!
 //! let woff2: &[u8] = std::fs::read("font.woff2")?.leak();
 //! let sfnt = unwrap_woff2(woff2)?;
@@ -44,8 +44,11 @@
 //! - `woff1-deflate`: pulls in `miniz_oxide` for the WOFF1 zlib codec.
 //!   With it disabled, `unwrap_woff1` rejects compressed tables and
 //!   `wrap_woff1` only emits uncompressed pass-through bodies.
-//! - `std`: currently a no-op marker; reserved for future no_std
-//!   callers wanting Vec-free APIs.
+//! - `std`: implements `std::error::Error` for [`WoffError`]. The
+//!   crate's own code needs only `alloc` without it, but the crate
+//!   depends on `sigilbuzz` with its default `std` feature, so it
+//!   still needs a target with `std`. The `woff2` feature also needs
+//!   `std`, because the Brotli codec runs over `std::io`.
 //!
 //! See `docs/deps.md` in the workspace root for the rationale on the
 //! runtime dependencies this crate brings (`brotli`, `miniz_oxide`).
@@ -64,6 +67,7 @@ use alloc::vec::Vec;
 
 mod error;
 mod reader;
+mod sfnt;
 mod woff1;
 #[cfg(feature = "woff2")]
 mod woff2;
@@ -78,10 +82,11 @@ pub use woff2::{unwrap_woff2, wrap_woff2, wrap_woff2_with_options, WrapOptions};
 #[cfg(not(feature = "woff2"))]
 /// Stub returned when the `woff2` feature is disabled.
 ///
-/// Always returns [`WoffError::Woff2Disabled`]. Linking against the
-/// stub means a WOFF1-only consumer doesn't pay the cost of the
-/// Brotli runtime dep but still compiles against the same public
-/// API surface.
+/// Always returns [`WoffError::Woff2Disabled`]. A WOFF1-only build
+/// drops the Brotli runtime dependency and still offers
+/// `unwrap_woff2` and `wrap_woff2`, so callers that pick the format
+/// at run time still compile. `wrap_woff2_with_options` and
+/// `WrapOptions` exist only with the feature.
 pub fn unwrap_woff2(_woff2_bytes: &[u8]) -> Result<Vec<u8>> {
     Err(WoffError::Woff2Disabled)
 }

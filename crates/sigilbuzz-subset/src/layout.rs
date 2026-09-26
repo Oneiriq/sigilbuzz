@@ -54,6 +54,24 @@
 //! Per-type rewriters slot in here one at a time; the per-type module
 //! call sites are stable, so adding a new lookup-type rewriter does
 //! not require touching this module.
+//!
+//! ## Work budget
+//!
+//! Offsets in a layout table may point many records at the same
+//! bytes, so a small table can describe billions of rules. The
+//! [`GidMap`] carries a [`WorkBudget`] that every rewriter charges for
+//! the records it visits and the bytes it emits. When the budget runs
+//! out the driver drops the whole table and reports it through the
+//! subset warnings.
+//!
+//! ## Offset overflow
+//!
+//! Every emitted offset is range-checked (see [`crate::offset16`]). A
+//! rebuilt subtable that no longer fits its 16-bit offsets fails the
+//! subset, after the mark attachment and PairPos rewriters have tried
+//! splitting it. When the LookupList itself overflows,
+//! [`crate::lookup_list`] moves every subtable behind an Extension
+//! lookup, which uses 32-bit offsets.
 
 use alloc::vec::Vec;
 
@@ -62,16 +80,28 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
 use crate::offset16::Offset16Guard;
+use crate::util::{WorkBudget, WORK_LIMIT};
 use crate::warnings::{error_context, Diag, Warnings};
 use crate::{feature_variations, gdef, gpos, gsub, GlyphId, SubsetError, SubsetInput};
+
+/// A valid Coverage or ClassDef lists each glyph at most once, so it
+/// never names more than this many glyphs. The byte walkers stop
+/// there, which bounds their output on overlapping ranges.
+pub(crate) const MAX_GLYPH_ENTRIES: usize = 1 << 16;
 
 /// A new-namespace gid translator. `map(old) -> Some(new)` when the
 /// gid is kept, `None` when it has been dropped.
 ///
-/// Built once per subset from the closure walker's kept-gid set.
+/// Built once per subset from the closure walker's kept-gid set. It
+/// also carries the work budget the layout rewriters charge (see the
+/// module docs).
 pub(crate) struct GidMap {
     /// Indexed by old gid; `None` means the gid was dropped.
     table: Vec<Option<u16>>,
+    /// Number of `Some` entries in `table`.
+    kept_len: usize,
+    /// Work left for the current table rewrite.
+    budget: WorkBudget,
 }
 
 impl GidMap {
@@ -84,20 +114,88 @@ impl GidMap {
         let max = kept.iter().copied().max().unwrap_or(0);
         let mut table = alloc::vec![None; max as usize + 1];
         for (new, &old) in kept.iter().enumerate() {
-            table[old as usize] = Some(new as u16);
+            if let Some(slot) = table.get_mut(old as usize) {
+                *slot = Some(new as u16);
+            }
         }
-        Self { table }
+        Self::with_table(table)
     }
 
     #[cfg(test)]
     pub(crate) fn from_table(table: Vec<Option<u16>>) -> Self {
-        Self { table }
+        Self::with_table(table)
+    }
+
+    fn with_table(table: Vec<Option<u16>>) -> Self {
+        let kept_len = table.iter().filter(|slot| slot.is_some()).count();
+        Self {
+            table,
+            kept_len,
+            budget: WorkBudget::new(WORK_LIMIT),
+        }
+    }
+
+    /// Number of kept gids, the length of [`GidMap::iter_kept`].
+    pub(crate) fn kept_len(&self) -> usize {
+        self.kept_len
     }
 
     /// Translates `old` to its new gid, or `None` if dropped.
     #[must_use]
     pub(crate) fn map(&self, old: u16) -> Option<u16> {
         self.table.get(old as usize).copied().flatten()
+    }
+
+    /// Charges `units` of work to the rewrite budget. Returns false once
+    /// the budget is spent. The caller should stop and drop its output.
+    pub(crate) fn spend(&self, units: usize) -> bool {
+        self.budget.spend(units)
+    }
+
+    /// True once the rewrite budget has run out.
+    pub(crate) fn budget_spent(&self) -> bool {
+        self.budget.is_spent()
+    }
+
+    /// Refills the rewrite budget before the next table.
+    pub(crate) fn reset_budget(&self) {
+        self.budget.reset(WORK_LIMIT);
+    }
+
+    /// Enumerates a Coverage table's glyphs (see
+    /// [`parse_coverage_glyphs`]) and charges the budget for them.
+    /// Returns `None` once the budget is spent.
+    pub(crate) fn coverage_glyphs(&self, bytes: &[u8]) -> Option<Vec<u16>> {
+        if self.budget_spent() {
+            return None;
+        }
+        let glyphs = parse_coverage_glyphs(bytes);
+        self.spend(glyphs.len() + 1).then_some(glyphs)
+    }
+
+    /// Enumerates a ClassDef table's `(gid, class)` pairs (see
+    /// [`parse_classdef_pairs_from_bytes`]) and charges the budget for
+    /// them. Returns `None` once the budget is spent.
+    pub(crate) fn classdef_pairs(&self, bytes: &[u8]) -> Option<Vec<(u16, u16)>> {
+        if self.budget_spent() {
+            return None;
+        }
+        let pairs = parse_classdef_pairs_from_bytes(bytes);
+        self.spend(pairs.len() + 1).then_some(pairs)
+    }
+
+    /// The `(gid, class)` pairs of the ClassDef that `offset` points at
+    /// inside `sub`, class 0 left out, charged to the budget like
+    /// [`GidMap::classdef_pairs`]. A null offset is the spec's empty
+    /// ClassDef, every glyph in class 0, so it yields no pairs. fontmake
+    /// leaves the backtrack ClassDef of chained context format 2 null
+    /// this way. Returns `None` for an offset past the end of
+    /// `sub` or once the budget is spent.
+    pub(crate) fn classdef_pairs_at(&self, sub: &[u8], offset: usize) -> Option<Vec<(u16, u16)>> {
+        if offset == 0 {
+            return Some(Vec::new());
+        }
+        self.classdef_pairs(sub.get(offset..)?)
     }
 
     /// Iterates over every kept `(old_gid, new_gid)` pair in old-gid
@@ -130,8 +228,8 @@ impl GidMap {
 pub(crate) struct RewriterCtx<'a> {
     pub gid_map: &'a GidMap,
     /// Optional old -> new lookup-index map. Set during the second
-    /// pass over context-style lookups (GSUB types 5 / 6) so their
-    /// nested `SubstLookupRecord` entries can be patched. `None` on
+    /// pass over context-style lookups (GSUB types 5 / 6, GPOS types
+    /// 7 / 8) so their nested lookup records can be patched. `None` on
     /// the first pass. Context rewriters preserve the source's
     /// lookup-list indices unchanged so the caller can decide what
     /// survives and rebuild the renumber map afterwards.
@@ -164,6 +262,13 @@ impl<'a> RewriterCtx<'a> {
     /// recording an overflow in [`RewriterCtx::offsets`].
     pub(crate) fn off16(&self, distance: usize) -> u16 {
         self.offsets.narrow(distance)
+    }
+
+    /// Narrows an entry count of a rebuilt subtable to a u16, recording
+    /// an overflow in [`RewriterCtx::offsets`] the way
+    /// [`RewriterCtx::off16`] does for offsets.
+    pub(crate) fn count16(&self, count: usize) -> u16 {
+        self.offsets.narrow(count)
     }
 }
 
@@ -300,6 +405,7 @@ pub(crate) fn decide(
         Decision::Drop
     };
     let gdef = if has_gdef {
+        map.reset_budget();
         match gdef::rewrite_gdef(face, &map, input.retain_variations, warnings)? {
             Some(b) => Decision::Rewrite(b),
             None => Decision::Drop,
@@ -413,6 +519,16 @@ fn build_layout(
         }
     };
     let diag = ctx.diag.for_table(kind.tag, bytes);
+    let map = ctx.gid_map;
+    map.reset_budget();
+    let out_of_budget = || {
+        diag.at(
+            0,
+            "the rewrite needs more work than the subsetter allows",
+            "the whole table",
+        );
+        Ok(None)
+    };
     let (lookups, feature_list) = match (kind.parse)(bytes) {
         Ok(lists) => lists,
         Err(e) => {
@@ -446,10 +562,16 @@ fn build_layout(
     };
     let mut rewritten: Vec<Option<RewrittenLookup>> = Vec::with_capacity(sources.len());
     for source in &sources {
+        if !map.spend(1 + source.as_ref().map_or(0, |s| s.subtables.len())) {
+            return out_of_budget();
+        }
         rewritten.push(match source {
             Some(source) => rewrite(&first, source)?,
             None => None,
         });
+    }
+    if map.budget_spent() {
+        return out_of_budget();
     }
 
     // Second pass: context lookups again, with the renumber map.
@@ -467,12 +589,21 @@ fn build_layout(
             };
             // Only lookups that survived the first pass, and only
             // context ones: the others do not depend on the map.
-            if rewritten[li].is_none() || (kind.context_lookup_type)(&source.lookup).is_none() {
+            let Some(slot) = rewritten.get_mut(li) else {
                 continue;
+            };
+            if slot.is_none() || (kind.context_lookup_type)(&source.lookup).is_none() {
+                continue;
+            }
+            if !map.spend(1 + source.subtables.len()) {
+                return out_of_budget();
             }
             let new_lookup = rewrite(&inner, source)?;
             changed |= new_lookup.is_none();
-            rewritten[li] = new_lookup;
+            *slot = new_lookup;
+        }
+        if map.budget_spent() {
+            return out_of_budget();
         }
         if !changed {
             break;
@@ -492,17 +623,24 @@ fn build_layout(
 
     // Last: features and scripts. The ScriptList is walked as raw
     // bytes because the parser only looks LangSys records up by tag.
-    let new_features = rewrite_features(
+    let Some(new_features) = rewrite_features(
         feature_list,
         &renumber,
         &live_alternates,
         &diag,
         header_offset(bytes, 6),
-    )?;
-    let script_list = bytes.get(header_offset(bytes, 4)..).unwrap_or_default();
-    let Some(new_scripts) =
-        rewrite_scripts_from_bytes(script_list, &new_features.feature_renumber, &diag)?
+        map,
+    )?
     else {
+        return out_of_budget();
+    };
+    let script_list = bytes.get(header_offset(bytes, 4)..).unwrap_or_default();
+    let new_scripts =
+        rewrite_scripts_from_bytes(script_list, &new_features.feature_renumber, &diag, map)?;
+    if map.budget_spent() {
+        return out_of_budget();
+    }
+    let Some(new_scripts) = new_scripts else {
         return Ok(None);
     };
 
@@ -584,7 +722,9 @@ fn build_renumber(rewritten: &[Option<RewrittenLookup>]) -> Vec<Option<u16>> {
     for slot in rewritten {
         if slot.is_some() {
             out.push(Some(next));
-            next += 1;
+            // At most `u16::MAX` lookups exist, so the last survivor
+            // gets index `u16::MAX - 1` and this never saturates.
+            next = next.saturating_add(1);
         } else {
             out.push(None);
         }
@@ -604,15 +744,17 @@ struct RewrittenFeatures {
 /// Returns the new bytes plus a feature-index renumber map.
 ///
 /// A feature whose table cannot be read is dropped and reported
-/// through `diag` at its FeatureRecord; `list_at` is where the
-/// FeatureList starts in the table.
+/// through `diag` at its FeatureRecord. `list_at` is where the
+/// FeatureList starts in the table. Returns `Ok(None)` once the work
+/// budget in `map` runs out.
 fn rewrite_features(
     feature_list: FeatureList<'_>,
     lookup_renumber: &[Option<u16>],
     live_alternates: &[bool],
     diag: &Diag<'_>,
     list_at: usize,
-) -> Result<RewrittenFeatures, SubsetError> {
+    map: &GidMap,
+) -> Result<Option<RewrittenFeatures>, SubsetError> {
     let offsets = Offset16Guard::default();
     let mut surviving: Vec<([u8; 4], Vec<u16>)> = Vec::new();
     let mut feature_renumber: Vec<Option<u16>> = Vec::with_capacity(feature_list.len() as usize);
@@ -626,6 +768,9 @@ fn rewrite_features(
             feature_renumber.push(None);
             continue;
         };
+        if !map.spend(1 + usize::from(feature.len())) {
+            return Ok(None);
+        }
         let new_indices: Vec<u16> = feature
             .lookup_indices()
             .filter_map(|li| lookup_renumber.get(li as usize).copied().flatten())
@@ -666,10 +811,10 @@ fn rewrite_features(
     }
     offsets.check("FeatureList rewrite: an offset exceeds 64 KiB")?;
 
-    Ok(RewrittenFeatures {
+    Ok(Some(RewrittenFeatures {
         bytes: out,
         feature_renumber,
-    })
+    }))
 }
 
 /// Rewrites the ScriptList by walking the raw bytes (the parser
@@ -680,12 +825,14 @@ fn rewrite_features(
 /// one script survives.
 ///
 /// A script or language system that cannot be read is dropped and
-/// reported through `diag`; `bytes` is the ScriptList, a sub-slice of
-/// the table `diag` reports against.
+/// reported through `diag`. `bytes` is the ScriptList, a sub-slice of
+/// the table `diag` reports against. The walk charges the work budget
+/// in `map` and returns `Ok(None)` once it runs out.
 fn rewrite_scripts_from_bytes(
     bytes: &[u8],
     feature_renumber: &[Option<u16>],
     diag: &Diag<'_>,
+    map: &GidMap,
 ) -> Result<Option<Vec<u8>>, SubsetError> {
     // ScriptList:
     //   u16 scriptCount
@@ -716,13 +863,12 @@ fn rewrite_scripts_from_bytes(
 
     for i in 0..script_count {
         let rec_off = 2 + i * 6;
-        let tag = [
-            bytes[rec_off],
-            bytes[rec_off + 1],
-            bytes[rec_off + 2],
-            bytes[rec_off + 3],
-        ];
-        let script_off = u16::from_be_bytes([bytes[rec_off + 4], bytes[rec_off + 5]]) as usize;
+        let (Some(tag), Some(script_off)) =
+            (read_tag(bytes, rec_off), read_u16(bytes, rec_off + 4))
+        else {
+            continue;
+        };
+        let script_off = usize::from(script_off);
         let Some(script_body) = bytes.get(script_off..).filter(|b| b.len() >= 4) else {
             diag.in_part(
                 bytes,
@@ -736,8 +882,16 @@ fn rewrite_scripts_from_bytes(
         //   Offset16 defaultLangSysOffset (Script-relative; 0 means none)
         //   u16      langSysCount
         //   LangSysRecord records[langSysCount]: { tag(4) + Offset16 (Script-relative) }
-        let default_off = u16::from_be_bytes([script_body[0], script_body[1]]) as usize;
-        let langsys_count = u16::from_be_bytes([script_body[2], script_body[3]]) as usize;
+        let (Some(default_off), Some(langsys_count)) =
+            (read_u16(script_body, 0), read_u16(script_body, 2))
+        else {
+            continue;
+        };
+        let default_off = usize::from(default_off);
+        let langsys_count = usize::from(langsys_count);
+        if !map.spend(1 + langsys_count) {
+            return Ok(None);
+        }
         let langsys_records_off = 4;
         let langsys_records_end = langsys_records_off + langsys_count * 6;
         if script_body.len() < langsys_records_end {
@@ -751,7 +905,7 @@ fn rewrite_scripts_from_bytes(
         }
 
         let default = if default_off != 0 {
-            read_langsys(script_body, 0, default_off, feature_renumber, diag)
+            read_langsys(script_body, 0, default_off, feature_renumber, diag, map)
         } else {
             None
         };
@@ -759,16 +913,20 @@ fn rewrite_scripts_from_bytes(
         let mut langsystems: Vec<([u8; 4], RewrittenLangSys)> = Vec::new();
         for j in 0..langsys_count {
             let lr = langsys_records_off + j * 6;
-            let ls_tag = [
-                script_body[lr],
-                script_body[lr + 1],
-                script_body[lr + 2],
-                script_body[lr + 3],
-            ];
-            let ls_off = u16::from_be_bytes([script_body[lr + 4], script_body[lr + 5]]) as usize;
-            if let Some(rls) = read_langsys(script_body, lr + 4, ls_off, feature_renumber, diag) {
+            let (Some(ls_tag), Some(ls_off)) =
+                (read_tag(script_body, lr), read_u16(script_body, lr + 4))
+            else {
+                continue;
+            };
+            let ls_off = usize::from(ls_off);
+            if let Some(rls) =
+                read_langsys(script_body, lr + 4, ls_off, feature_renumber, diag, map)
+            {
                 langsystems.push((ls_tag, rls));
             }
+        }
+        if map.budget_spent() {
+            return Ok(None);
         }
 
         if default.is_some() || !langsystems.is_empty() {
@@ -873,9 +1031,12 @@ fn rewrite_langsys_from_bytes(
         }
     };
     let mut new_indices: Vec<u16> = Vec::with_capacity(count);
-    for i in 0..count {
-        let off = 6 + i * 2;
-        let fi = u16::from_be_bytes([bytes[off], bytes[off + 1]]);
+    for fi in bytes
+        .get(6..need)
+        .unwrap_or_default()
+        .chunks_exact(2)
+        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+    {
         if let Some(Some(new)) = feature_renumber.get(fi as usize) {
             new_indices.push(*new);
         }
@@ -891,13 +1052,15 @@ fn rewrite_langsys_from_bytes(
 
 /// Rewrites the LangSys at `off` inside `script`, whose Offset16 sits
 /// at byte `slot` of `script`. A LangSys that cannot be read is dropped
-/// and reported through `diag`.
+/// and reported through `diag`. Its feature indices are charged to the
+/// work budget in `map`, and nothing is read once it runs out.
 fn read_langsys(
     script: &[u8],
     slot: usize,
     off: usize,
     feature_renumber: &[Option<u16>],
     diag: &Diag<'_>,
+    map: &GidMap,
 ) -> Option<RewrittenLangSys> {
     let Some(body) = script.get(off..) else {
         diag.in_part(
@@ -908,6 +1071,10 @@ fn read_langsys(
         );
         return None;
     };
+    let count = read_u16(body, 4).map_or(0, usize::from);
+    if !map.spend(1 + count) {
+        return None;
+    }
     match rewrite_langsys_from_bytes(body, feature_renumber) {
         Ok(langsys) => langsys,
         Err(e) => {
@@ -987,18 +1154,6 @@ fn assemble_layout_table(
 
 // === Byte-level helpers used by the rewriters and the closure walker. ===
 
-/// The `(gid, class)` pairs of the ClassDef that `offset` points at
-/// inside `sub`, class 0 left out. A null offset is the spec's empty
-/// ClassDef (every glyph in class 0; fontmake leaves the backtrack
-/// ClassDef of chained context format 2 null this way), so it yields
-/// no pairs. An offset past the end of `sub` yields `None`.
-pub(crate) fn classdef_pairs_at(sub: &[u8], offset: usize) -> Option<Vec<(u16, u16)>> {
-    if offset == 0 {
-        return Some(Vec::new());
-    }
-    sub.get(offset..).map(parse_classdef_pairs_from_bytes)
-}
-
 /// The lookup type and subtable an Extension subtable (GSUB type 7,
 /// GPOS type 9) wraps:
 ///
@@ -1034,42 +1189,57 @@ pub(crate) fn extension_target(sub: &[u8]) -> Result<(u16, &[u8]), sigilbuzz::Er
     Ok((inner_type, inner))
 }
 
+/// Reads a big-endian `u16` at `off`, or `None` past the end.
+pub(crate) fn read_u16(bytes: &[u8], off: usize) -> Option<u16> {
+    let chunk = bytes.get(off..)?.first_chunk::<2>()?;
+    Some(u16::from_be_bytes(*chunk))
+}
+
+/// Reads a 4-byte tag at `off`, or `None` past the end.
+fn read_tag(bytes: &[u8], off: usize) -> Option<[u8; 4]> {
+    bytes.get(off..)?.first_chunk::<4>().copied()
+}
+
 /// Best-effort enumeration of the glyphs covered by a Coverage table
 /// given its raw bytes. Returns an empty vec on any parse failure.
 ///
-/// Mirrors the helper in [`crate::closure`], exposed here so the
-/// per-lookup-type rewriters in [`crate::gsub`] / [`crate::gpos`] can
-/// share it without re-deriving the byte layout.
+/// Glyphs come back in table order, so position `i` in the result is
+/// the coverage index a valid table assigns. The walk stops after
+/// [`MAX_GLYPH_ENTRIES`] glyphs: a valid table never lists more, and
+/// overlapping ranges in a malformed one could otherwise expand into
+/// billions of entries.
+///
+/// Shared by the per-lookup-type rewriters in [`crate::gsub`] /
+/// [`crate::gpos`] and the closure walker in [`crate::closure`].
 pub(crate) fn parse_coverage_glyphs(bytes: &[u8]) -> Vec<u16> {
     let mut out = Vec::new();
-    if bytes.len() < 4 {
+    let (Some(format), Some(count)) = (read_u16(bytes, 0), read_u16(bytes, 2)) else {
         return out;
-    }
-    let format = u16::from_be_bytes([bytes[0], bytes[1]]);
-    let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+    };
+    let count = usize::from(count);
     match format {
         1 => {
-            let need = 4 + count * 2;
-            if bytes.len() < need {
+            let Some(glyphs) = bytes.get(4..4 + count * 2) else {
                 return out;
-            }
-            for i in 0..count {
-                let off = 4 + i * 2;
-                out.push(u16::from_be_bytes([bytes[off], bytes[off + 1]]));
-            }
+            };
+            out.extend(
+                glyphs
+                    .chunks_exact(2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]])),
+            );
         }
         2 => {
-            let need = 4 + count * 6;
-            if bytes.len() < need {
+            let Some(records) = bytes.get(4..4 + count * 6) else {
                 return out;
-            }
-            for i in 0..count {
-                let off = 4 + i * 6;
-                let start = u16::from_be_bytes([bytes[off], bytes[off + 1]]);
-                let end = u16::from_be_bytes([bytes[off + 2], bytes[off + 3]]);
-                for g in start..=end {
-                    out.push(g);
+            };
+            for rec in records.chunks_exact(6) {
+                let start = u16::from_be_bytes([rec[0], rec[1]]);
+                let end = u16::from_be_bytes([rec[2], rec[3]]);
+                let room = MAX_GLYPH_ENTRIES.saturating_sub(out.len());
+                if room == 0 {
+                    break;
                 }
+                out.extend((start..=end).take(room));
             }
         }
         _ => {}
@@ -1079,55 +1249,55 @@ pub(crate) fn parse_coverage_glyphs(bytes: &[u8]) -> Vec<u16> {
 
 /// Walks a ClassDef's raw bytes to enumerate every `(gid, class)`
 /// pair, skipping class-0 entries.
+///
+/// Pairs come back in table order. The walk stops after
+/// [`MAX_GLYPH_ENTRIES`] pairs: a valid table never lists more, and
+/// overlapping ranges in a malformed one could otherwise expand into
+/// billions of entries.
 pub(crate) fn parse_classdef_pairs_from_bytes(bytes: &[u8]) -> Vec<(u16, u16)> {
     let mut out = Vec::new();
-    if bytes.len() < 2 {
+    let Some(format) = read_u16(bytes, 0) else {
         return out;
-    }
-    let format = u16::from_be_bytes([bytes[0], bytes[1]]);
+    };
     match format {
         1 => {
             // Format 1: u16 format, u16 startGlyphID, u16 glyphCount, u16 values[count].
-            if bytes.len() < 6 {
+            let (Some(start), Some(count)) = (read_u16(bytes, 2), read_u16(bytes, 4)) else {
                 return out;
-            }
-            let start = u16::from_be_bytes([bytes[2], bytes[3]]);
-            let count = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
-            let need = 6 + count * 2;
-            if bytes.len() < need {
+            };
+            let Some(values) = bytes.get(6..6 + usize::from(count) * 2) else {
                 return out;
-            }
-            for i in 0..count {
-                let off = 6 + i * 2;
-                let class = u16::from_be_bytes([bytes[off], bytes[off + 1]]);
+            };
+            for (i, c) in values.chunks_exact(2).enumerate() {
+                let class = u16::from_be_bytes([c[0], c[1]]);
                 if class == 0 {
                     continue;
                 }
-                let gid = start.saturating_add(i as u16);
-                out.push((gid, class));
+                // `i < glyphCount <= u16::MAX`. A valid table never runs
+                // past glyph 0xFFFF. A malformed one repeats that glyph.
+                out.push((start.saturating_add(i as u16), class));
             }
         }
         2 => {
             // Format 2: u16 format, u16 rangeCount, RangeRecord[count]: u16 start, u16 end, u16 class.
-            if bytes.len() < 4 {
+            let Some(count) = read_u16(bytes, 2) else {
                 return out;
-            }
-            let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
-            let need = 4 + count * 6;
-            if bytes.len() < need {
+            };
+            let Some(records) = bytes.get(4..4 + usize::from(count) * 6) else {
                 return out;
-            }
-            for i in 0..count {
-                let off = 4 + i * 6;
-                let start = u16::from_be_bytes([bytes[off], bytes[off + 1]]);
-                let end = u16::from_be_bytes([bytes[off + 2], bytes[off + 3]]);
-                let class = u16::from_be_bytes([bytes[off + 4], bytes[off + 5]]);
+            };
+            for r in records.chunks_exact(6) {
+                let start = u16::from_be_bytes([r[0], r[1]]);
+                let end = u16::from_be_bytes([r[2], r[3]]);
+                let class = u16::from_be_bytes([r[4], r[5]]);
                 if class == 0 {
                     continue;
                 }
-                for g in start..=end {
-                    out.push((g, class));
+                let room = MAX_GLYPH_ENTRIES.saturating_sub(out.len());
+                if room == 0 {
+                    break;
                 }
+                out.extend((start..=end).take(room).map(|g| (g, class)));
             }
         }
         _ => {}
@@ -1269,13 +1439,14 @@ mod tests {
         sub.extend_from_slice(&2u16.to_be_bytes()); // subtable format
         sub.extend_from_slice(&1u16.to_be_bytes());
         sub.extend_from_slice(&[0, 5, 0, 5, 0, 9]);
-        assert_eq!(classdef_pairs_at(&sub, 0), Some(Vec::new()));
+        let map = GidMap::from_kept(&[0]);
+        assert_eq!(map.classdef_pairs_at(&sub, 0), Some(Vec::new()));
         let cd_off = sub.len();
         sub.extend_from_slice(&2u16.to_be_bytes()); // ClassDef format 2
         sub.extend_from_slice(&1u16.to_be_bytes()); // rangeCount
         sub.extend_from_slice(&[0, 8, 0, 8, 0, 2]);
-        assert_eq!(classdef_pairs_at(&sub, cd_off), Some(vec![(8, 2)]));
-        assert_eq!(classdef_pairs_at(&sub, sub.len() + 1), None);
+        assert_eq!(map.classdef_pairs_at(&sub, cd_off), Some(vec![(8, 2)]));
+        assert_eq!(map.classdef_pairs_at(&sub, sub.len() + 1), None);
     }
 
     #[test]
@@ -1297,5 +1468,135 @@ mod tests {
         ];
         let r = build_renumber(&rewritten);
         assert_eq!(r, vec![Some(0), None, Some(1)]);
+    }
+
+    /// Format 2 table (Coverage or ClassDef) with `count` copies of a
+    /// range covering every glyph, all in class 1.
+    fn overlapping_full_ranges(count: u16) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&2u16.to_be_bytes());
+        bytes.extend_from_slice(&count.to_be_bytes());
+        for _ in 0..count {
+            bytes.extend_from_slice(&0u16.to_be_bytes());
+            bytes.extend_from_slice(&0xFFFFu16.to_be_bytes());
+            bytes.extend_from_slice(&1u16.to_be_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn parse_coverage_glyphs_caps_overlapping_ranges() {
+        // 65535 full ranges describe about 4.3 billion entries in 393 KB.
+        // The walk used to materialize all of them.
+        let bytes = overlapping_full_ranges(u16::MAX);
+        assert_eq!(parse_coverage_glyphs(&bytes).len(), MAX_GLYPH_ENTRIES);
+    }
+
+    #[test]
+    fn parse_classdef_pairs_caps_overlapping_ranges() {
+        let bytes = overlapping_full_ranges(u16::MAX);
+        assert_eq!(
+            parse_classdef_pairs_from_bytes(&bytes).len(),
+            MAX_GLYPH_ENTRIES
+        );
+    }
+
+    #[test]
+    fn gid_map_budget_stops_coverage_walks() {
+        let map = GidMap::from_kept(&[0, 1]);
+        let bytes = overlapping_full_ranges(1);
+        assert!(map.coverage_glyphs(&bytes).is_some());
+        assert!(!map.spend(usize::MAX));
+        assert!(map.budget_spent());
+        assert!(map.coverage_glyphs(&bytes).is_none());
+        assert!(map.classdef_pairs(&bytes).is_none());
+        map.reset_budget();
+        assert!(map.coverage_glyphs(&bytes).is_some());
+    }
+
+    /// One lookup of type 1 holding `count` subtables of `size` bytes
+    /// each. Subtable bytes start with format 1 so they read as valid.
+    fn big_lookup(count: usize, size: usize) -> RewrittenLookup {
+        let mut body = vec![0u8; size];
+        body[1] = 1;
+        RewrittenLookup {
+            lookup_type: 1,
+            lookup_flag: 0,
+            mark_filtering_set: None,
+            subtables: (0..count)
+                .map(|_| RewrittenSubtable {
+                    bytes: body.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Reads `(lookup type, [(wrapped type, subtable offset)])` for each
+    /// lookup of an assembled table, following Extension records.
+    fn read_lookups(table: &[u8], ext: u16) -> Vec<(u16, Vec<(u16, usize)>)> {
+        let rd = |o: usize| usize::from(u16::from_be_bytes([table[o], table[o + 1]]));
+        let ll = rd(8);
+        (0..rd(ll))
+            .map(|i| {
+                let base = ll + rd(ll + 2 + i * 2);
+                let ty = rd(base) as u16;
+                let subs = (0..rd(base + 4))
+                    .map(|s| {
+                        let sub = base + rd(base + 6 + s * 2);
+                        if ty == ext {
+                            let off = u32::from_be_bytes([
+                                table[sub + 4],
+                                table[sub + 5],
+                                table[sub + 6],
+                                table[sub + 7],
+                            ]) as usize;
+                            (rd(sub + 2) as u16, sub + off)
+                        } else {
+                            (ty, sub)
+                        }
+                    })
+                    .collect();
+                (ty, subs)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn assemble_keeps_inline_layout_when_offsets_fit() {
+        let lookups = vec![big_lookup(2, 100)];
+        let table = assemble_layout_table(&[0, 0], &[0, 0], &lookups, 7, None).unwrap();
+        let read = read_lookups(&table, 7);
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].0, 1);
+    }
+
+    #[test]
+    fn assemble_promotes_to_extension_lookups_past_16_bit_offsets() {
+        // Three lookups of 40 KB each: the third lookup starts past
+        // 64 KB, which used to wrap its Offset16 and point it at the
+        // wrong bytes.
+        let lookups = vec![
+            big_lookup(1, 40_000),
+            big_lookup(1, 40_000),
+            big_lookup(2, 30_000),
+        ];
+        let table = assemble_layout_table(&[0, 0], &[0, 0], &lookups, 7, None).unwrap();
+        let read = read_lookups(&table, 7);
+        assert_eq!(read.len(), 3);
+        for (lookup, subs) in &read {
+            assert_eq!(*lookup, 7, "every lookup becomes an Extension lookup");
+            for &(wrapped, off) in subs {
+                assert_eq!(wrapped, 1);
+                assert_eq!(&table[off..off + 2], &1u16.to_be_bytes());
+            }
+        }
+        assert_eq!(read[2].1.len(), 2);
+    }
+
+    #[test]
+    fn assemble_fails_when_script_and_feature_lists_overflow() {
+        let lookups = vec![big_lookup(1, 10)];
+        let huge = vec![0u8; 70_000];
+        assert!(assemble_layout_table(&huge, &[0, 0], &lookups, 7, None).is_err());
     }
 }

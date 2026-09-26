@@ -14,7 +14,7 @@
 //!   `(hi - 247) * 256 + lo + 108`.
 //! - `-1131..=-108` -> two bytes: `[251..=254, w]` where the value is
 //!   `-((hi - 251) * 256 + lo + 108)`.
-//! - anything outside `-32768..=32767`-ish -> five-byte form: `255`
+//! - anything outside `-1131..=1131` -> five-byte form: `255`
 //!   followed by a 32-bit big-endian two's-complement integer.
 //!
 //! Negatives are handled symmetrically with positives: the small
@@ -44,9 +44,8 @@
 //! tracks the pen and converts sigilbuzz's absolute [`PathOp`] values
 //! to deltas. Curve emission always uses `rrcurveto` (8). The H/V
 //! variants exist as size optimizations but require additional flat
-//! tangent checks; they are intentionally skipped here in favor of a
-//! simpler emitter, since this PR is targeting cleartext-readable
-//! charstrings and not a tight binary diet.
+//! tangent checks. The emitter does not use them. It favors simple,
+//! readable charstrings over the smallest encoding.
 
 use alloc::vec::Vec;
 
@@ -88,8 +87,11 @@ pub fn encode_number(out: &mut Vec<u8>, value: i32) {
 }
 
 /// Round an `f32` glyph coordinate to the nearest `i32` for Type 1
-/// emission. Subunit precision is intentionally discarded; see the
-/// module docs for why.
+/// emission. Subunit precision is intentionally discarded. See
+/// [`encode_number`] for why.
+///
+/// The final `as` cast saturates: NaN becomes 0 and values beyond the
+/// `i32` range clamp to `i32::MIN` or `i32::MAX`.
 fn round_i32(v: f32) -> i32 {
     // round_ties_even would be marginally nicer but is unstable in
     // no_std without a feature flag; plain `round` is good enough at

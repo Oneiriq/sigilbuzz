@@ -146,9 +146,8 @@ pub struct BigGlyphMetrics {
 }
 
 impl BigGlyphMetrics {
-    /// Reads an 8-byte BigGlyphMetrics record. Public-in-crate so the
-    /// CBDT parser (formats 18 / 19) can share the same shape.
-    #[allow(dead_code)]
+    /// Reads an 8-byte BigGlyphMetrics record. Shared by the CBLC
+    /// index formats 2 / 5, CBDT format 18, and EBDT formats 6 / 7 / 9.
     pub(crate) fn parse(r: &mut Reader<'_>) -> Result<Self> {
         Ok(Self {
             height: r.read_u8()?,
@@ -183,9 +182,8 @@ pub struct SmallGlyphMetrics {
 }
 
 impl SmallGlyphMetrics {
-    /// Reads a 5-byte SmallGlyphMetrics record. Public-in-crate so
-    /// the CBDT parser (format 17) can share the same shape.
-    #[allow(dead_code)]
+    /// Reads a 5-byte SmallGlyphMetrics record. Shared by CBDT format
+    /// 17 and EBDT formats 1 / 2 / 8.
     pub(crate) fn parse(r: &mut Reader<'_>) -> Result<Self> {
         Ok(Self {
             height: r.read_u8()?,
@@ -334,17 +332,17 @@ impl<'a> Cblc<'a> {
         // Walk the IndexSubTableArray looking for the entry covering
         // `glyph_id`. Entries are sorted by firstGlyphIndex; a linear
         // scan is fine: color-emoji fonts rarely exceed a handful.
+        // Every entry must fit in the table, so a huge count stops at
+        // the table end.
         for i in 0..size.number_of_index_sub_tables as usize {
-            let entry_off = array_off
-                .checked_add(i.checked_mul(8).ok_or(Error::Malformed {
-                    offset: array_off,
-                    context: "IndexSubTableArray overflow",
-                })?)
+            let entry_off = i
+                .checked_mul(8)
+                .and_then(|rel| array_off.checked_add(rel))
                 .ok_or(Error::Malformed {
                     offset: array_off,
                     context: "IndexSubTableArray overflow",
                 })?;
-            if entry_off + 8 > self.data.len() {
+            if self.data.len().saturating_sub(entry_off) < 8 {
                 return Err(Error::Truncated {
                     offset: entry_off,
                     context: "IndexSubTableArray entry",
@@ -370,6 +368,8 @@ impl<'a> Cblc<'a> {
         Ok(None)
     }
 
+    /// Resolves `glyph_id` inside one index sub-table. The caller
+    /// guarantees `first_gid <= glyph_id <= last_gid`.
     fn locate_in_subtable(
         &self,
         sub_off: usize,
@@ -381,7 +381,9 @@ impl<'a> Cblc<'a> {
         let index_format = r.read_u16()?;
         let image_format = r.read_u16()?;
         let image_data_offset = r.read_u32()?;
-        let count = u32::from(last_gid - first_gid + 1);
+        // Widen before adding one: the range 0..=0xFFFF holds 65,536
+        // glyphs, which does not fit in a u16.
+        let count = u32::from(last_gid - first_gid) + 1;
         let local_idx = u32::from(glyph_id - first_gid);
 
         match index_format {
@@ -425,7 +427,7 @@ impl<'a> Cblc<'a> {
             return Ok(None);
         }
         Ok(Some(CbdtLocation {
-            offset: image_data_offset + off0,
+            offset: image_offset(image_data_offset, Some(off0), arr_start)?,
             length: off1 - off0,
             image_format,
             metrics: None,
@@ -461,7 +463,7 @@ impl<'a> Cblc<'a> {
             return Ok(None);
         }
         Ok(Some(CbdtLocation {
-            offset: image_data_offset + off0,
+            offset: image_offset(image_data_offset, Some(off0), arr_start)?,
             length: off1 - off0,
             image_format,
             metrics: None,
@@ -477,10 +479,13 @@ impl<'a> Cblc<'a> {
     ) -> Result<Option<CbdtLocation>> {
         let num_glyphs = r.read_u32()?;
         let arr_start = r.position();
-        let bytes_needed = (num_glyphs as usize + 1) * 4;
-        if arr_start + bytes_needed > self.data.len() {
+        // Saturating: the count is a full u32 and usize is 32 bits on
+        // some targets. A saturated end always fails the check.
+        let arr_end =
+            arr_start.saturating_add((num_glyphs as usize).saturating_add(1).saturating_mul(4));
+        if arr_end > self.data.len() {
             return Err(Error::Truncated {
-                offset: arr_start + bytes_needed,
+                offset: arr_end,
                 context: "CBLC index format 4 array",
             });
         }
@@ -505,7 +510,7 @@ impl<'a> Cblc<'a> {
                 return Ok(None);
             }
             return Ok(Some(CbdtLocation {
-                offset: image_data_offset + off0,
+                offset: image_offset(image_data_offset, Some(off0), pair_off)?,
                 length: off1 - off0,
                 image_format,
                 metrics: None,
@@ -525,10 +530,11 @@ impl<'a> Cblc<'a> {
         let metrics = BigGlyphMetrics::parse(r)?;
         let num_glyphs = r.read_u32()?;
         let arr_start = r.position();
-        let bytes_needed = (num_glyphs as usize) * 2;
-        if arr_start + bytes_needed > self.data.len() {
+        // Saturating for the same reason as format 4.
+        let arr_end = arr_start.saturating_add((num_glyphs as usize).saturating_mul(2));
+        if arr_end > self.data.len() {
             return Err(Error::Truncated {
-                offset: arr_start + bytes_needed,
+                offset: arr_end,
                 context: "CBLC index format 5 array",
             });
         }
@@ -538,7 +544,7 @@ impl<'a> Cblc<'a> {
             let gid = pr.read_u16()?;
             if gid == glyph_id {
                 return Ok(Some(CbdtLocation {
-                    offset: image_data_offset + i * image_size,
+                    offset: image_offset(image_data_offset, i.checked_mul(image_size), off)?,
                     length: image_size,
                     image_format,
                     metrics: Some(metrics),
@@ -558,11 +564,27 @@ fn locate_fmt2(
     let image_size = r.read_u32()?;
     let metrics = BigGlyphMetrics::parse(r)?;
     Ok(Some(CbdtLocation {
-        offset: image_data_offset + local_idx * image_size,
+        offset: image_offset(
+            image_data_offset,
+            local_idx.checked_mul(image_size),
+            r.position(),
+        )?,
         length: image_size,
         image_format,
         metrics: Some(metrics),
     }))
+}
+
+/// Adds a glyph's relative offset to the sub-table's
+/// `imageDataOffset`. `rel` is `None` when computing it already
+/// overflowed. Both fields come from the font, so the sum can
+/// overflow `u32` and is reported as malformed at byte `at`.
+fn image_offset(image_data_offset: u32, rel: Option<u32>, at: usize) -> Result<u32> {
+    rel.and_then(|rel| image_data_offset.checked_add(rel))
+        .ok_or(Error::Malformed {
+            offset: at,
+            context: "CBLC image data offset overflow",
+        })
 }
 
 fn parse_bitmap_size(bytes: &[u8]) -> BitmapSize {

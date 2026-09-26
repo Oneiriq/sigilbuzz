@@ -85,7 +85,8 @@ pub(crate) fn transform_glyf(
             context: "wrap_woff2: maxp too short",
         });
     }
-    let num_glyphs = u16::from_be_bytes([maxp[4], maxp[5]]) as usize;
+    let num_glyphs_u16 = u16::from_be_bytes([maxp[4], maxp[5]]);
+    let num_glyphs = usize::from(num_glyphs_u16);
 
     // Decode loca offsets.
     let offsets = decode_loca(loca, index_to_loc_format, num_glyphs)?;
@@ -105,16 +106,31 @@ pub(crate) fn transform_glyf(
     let mut overlap_bitmap: Vec<u8> = alloc::vec![0u8; num_glyphs.div_ceil(8)];
     let mut any_overlap = false;
 
-    for gid in 0..num_glyphs {
-        let start = offsets[gid] as usize;
-        let end = offsets[gid + 1] as usize;
-        if end < start || end > glyf.len() {
+    // `offsets` holds `num_glyphs + 1` entries, so this visits every
+    // glyph once.
+    for (gid, pair) in offsets.windows(2).enumerate() {
+        let &[start, end] = pair else {
+            continue;
+        };
+        let (start, end) = (start as usize, end as usize);
+        let Some(body) = glyf.get(start..end) else {
             return Err(WoffError::Malformed {
                 offset: start,
                 context: "wrap_woff2: loca points outside glyf",
             });
-        }
-        let body = &glyf[start..end];
+        };
+
+        // The whole payload is addressed with u32 lengths. REPEAT flags
+        // let a small glyf expand a lot here, so stop as soon as the
+        // streams outgrow that instead of after the last glyph.
+        stream_len(
+            n_points_stream.len()
+                + flag_stream.len()
+                + glyph_stream.len()
+                + composite_stream.len()
+                + bbox_data.len()
+                + instruction_stream.len(),
+        )?;
 
         if body.is_empty() {
             // Empty glyph: nContour = 0, no bbox, no streams. The
@@ -124,23 +140,24 @@ pub(crate) fn transform_glyf(
             continue;
         }
 
-        if body.len() < 10 {
+        let Some((header, body_after_hdr)) = body.split_first_chunk::<10>() else {
             return Err(WoffError::Malformed {
                 offset: start,
                 context: "wrap_woff2: glyph header truncated",
             });
-        }
-        let n_contours = i16::from_be_bytes([body[0], body[1]]);
-        let stored_x_min = i16::from_be_bytes([body[2], body[3]]);
-        let stored_y_min = i16::from_be_bytes([body[4], body[5]]);
-        let stored_x_max = i16::from_be_bytes([body[6], body[7]]);
-        let stored_y_max = i16::from_be_bytes([body[8], body[9]]);
+        };
+        let [c0, c1, x0, x1, y0, y1, x2, x3, y2, y3] = *header;
+        let n_contours = i16::from_be_bytes([c0, c1]);
+        let stored_x_min = i16::from_be_bytes([x0, x1]);
+        let stored_y_min = i16::from_be_bytes([y0, y1]);
+        let stored_x_max = i16::from_be_bytes([x2, x3]);
+        let stored_y_max = i16::from_be_bytes([y2, y3]);
 
         n_contour_stream.extend_from_slice(&n_contours.to_be_bytes());
 
         if n_contours > 0 {
             // ---- Simple glyph ----
-            let info = parse_simple_glyph(&body[10..], n_contours as usize)?;
+            let info = parse_simple_glyph(body_after_hdr, n_contours as usize)?;
 
             // Per-contour point counts: WOFF2 stores the count of
             // points in each contour as a 255UInt16. Reconstruct
@@ -181,10 +198,10 @@ pub(crate) fn transform_glyf(
             let mut bx_max = i32::MIN;
             let mut by_max = i32::MIN;
 
-            for i in 0..info.xs.len() {
-                let dx = info.xs[i];
-                let dy = info.ys[i];
-                let on = info.on_curves[i];
+            // At most 65536 points of at most 32768 each, so the running
+            // sums stay within i32.
+            let points = info.xs.iter().zip(&info.ys).zip(&info.on_curves);
+            for ((&dx, &dy), &on) in points {
                 let (flag_byte, data) = encode_triplet(dx, dy, on);
                 flag_stream.push(flag_byte);
                 glyph_stream.extend_from_slice(&data);
@@ -205,13 +222,13 @@ pub(crate) fn transform_glyf(
             } else {
                 0
             };
-            if instr_len > u32::from(u16::MAX) as usize {
+            let Ok(instr_len) = u16::try_from(instr_len) else {
                 return Err(WoffError::Malformed {
                     offset: start,
                     context: "wrap_woff2: simple glyph instruction len > u16::MAX",
                 });
-            }
-            write_packed_u16(&mut glyph_stream, instr_len as u16);
+            };
+            write_packed_u16(&mut glyph_stream, instr_len);
             if retain_hints {
                 instruction_stream.extend_from_slice(info.instructions);
             }
@@ -231,7 +248,7 @@ pub(crate) fn transform_glyf(
                 || stored_y_max != derived_y_max;
 
             if needs_bbox {
-                bbox_bitmap[gid / 8] |= 1 << (7 - (gid % 8));
+                set_bitmap_bit(&mut bbox_bitmap, gid);
                 bbox_data.extend_from_slice(&stored_x_min.to_be_bytes());
                 bbox_data.extend_from_slice(&stored_y_min.to_be_bytes());
                 bbox_data.extend_from_slice(&stored_x_max.to_be_bytes());
@@ -240,12 +257,11 @@ pub(crate) fn transform_glyf(
 
             // OVERLAP_SIMPLE on point 0 propagates to the bitmap.
             if info.overlap_first {
-                overlap_bitmap[gid / 8] |= 1 << (7 - (gid % 8));
+                set_bitmap_bit(&mut overlap_bitmap, gid);
                 any_overlap = true;
             }
         } else if n_contours == -1 {
             // ---- Composite glyph ----
-            let body_after_hdr = &body[10..];
             let mut cr = Reader::new(body_after_hdr);
             let mut had_instructions = false;
             loop {
@@ -284,23 +300,18 @@ pub(crate) fn transform_glyf(
                 }
             }
             if had_instructions {
-                let instr_len = cr.read_u16("composite instruction len")? as usize;
-                let instructions = cr.read_bytes(instr_len, "composite instructions")?;
+                let instr_len = cr.read_u16("composite instruction len")?;
+                let instructions =
+                    cr.read_bytes(usize::from(instr_len), "composite instructions")?;
                 let written = if retain_hints { instr_len } else { 0 };
-                if written > u32::from(u16::MAX) as usize {
-                    return Err(WoffError::Malformed {
-                        offset: start,
-                        context: "wrap_woff2: composite instruction len > u16::MAX",
-                    });
-                }
-                write_packed_u16(&mut glyph_stream, written as u16);
+                write_packed_u16(&mut glyph_stream, written);
                 if retain_hints {
                     instruction_stream.extend_from_slice(instructions);
                 }
             }
 
             // Composite bbox is mandatory.
-            bbox_bitmap[gid / 8] |= 1 << (7 - (gid % 8));
+            set_bitmap_bit(&mut bbox_bitmap, gid);
             bbox_data.extend_from_slice(&stored_x_min.to_be_bytes());
             bbox_data.extend_from_slice(&stored_y_min.to_be_bytes());
             bbox_data.extend_from_slice(&stored_x_max.to_be_bytes());
@@ -320,17 +331,17 @@ pub(crate) fn transform_glyf(
     out.extend_from_slice(&0u16.to_be_bytes()); // reserved
     let option_flags: u16 = if any_overlap { 0x0001 } else { 0x0000 };
     out.extend_from_slice(&option_flags.to_be_bytes()); // optionFlags
-    out.extend_from_slice(&(num_glyphs as u16).to_be_bytes()); // numGlyphs
+    out.extend_from_slice(&num_glyphs_u16.to_be_bytes()); // numGlyphs
     out.extend_from_slice(&index_to_loc_format.to_be_bytes()); // indexFormat
-    out.extend_from_slice(&(n_contour_stream.len() as u32).to_be_bytes());
-    out.extend_from_slice(&(n_points_stream.len() as u32).to_be_bytes());
-    out.extend_from_slice(&(flag_stream.len() as u32).to_be_bytes());
-    out.extend_from_slice(&(glyph_stream.len() as u32).to_be_bytes());
-    out.extend_from_slice(&(composite_stream.len() as u32).to_be_bytes());
+    out.extend_from_slice(&stream_len(n_contour_stream.len())?.to_be_bytes());
+    out.extend_from_slice(&stream_len(n_points_stream.len())?.to_be_bytes());
+    out.extend_from_slice(&stream_len(flag_stream.len())?.to_be_bytes());
+    out.extend_from_slice(&stream_len(glyph_stream.len())?.to_be_bytes());
+    out.extend_from_slice(&stream_len(composite_stream.len())?.to_be_bytes());
 
     let bbox_total = bbox_bitmap.len() + bbox_data.len();
-    out.extend_from_slice(&(bbox_total as u32).to_be_bytes());
-    out.extend_from_slice(&(instruction_stream.len() as u32).to_be_bytes());
+    out.extend_from_slice(&stream_len(bbox_total)?.to_be_bytes());
+    out.extend_from_slice(&stream_len(instruction_stream.len())?.to_be_bytes());
 
     out.extend_from_slice(&n_contour_stream);
     out.extend_from_slice(&n_points_stream);
@@ -452,20 +463,20 @@ fn parse_simple_glyph(body: &[u8], n_contours: usize) -> Result<SimpleGlyph<'_>>
     })
 }
 
+/// Decodes the first `num_glyphs + 1` loca offsets as byte offsets.
 fn decode_loca(loca: &[u8], index_format: u16, num_glyphs: usize) -> Result<Vec<u32>> {
     let n = num_glyphs + 1;
-    let mut out: Vec<u32> = Vec::with_capacity(n);
-    if index_format == 0 {
+    let out: Vec<u32> = if index_format == 0 {
         if loca.len() < n * 2 {
             return Err(WoffError::Malformed {
                 offset: 0,
                 context: "wrap_woff2: short loca too small",
             });
         }
-        for i in 0..n {
-            let v = u16::from_be_bytes([loca[i * 2], loca[i * 2 + 1]]);
-            out.push(u32::from(v) * 2);
-        }
+        loca.chunks_exact(2)
+            .take(n)
+            .map(|c| u32::from(u16::from_be_bytes([c[0], c[1]])) * 2)
+            .collect()
     } else {
         if loca.len() < n * 4 {
             return Err(WoffError::Malformed {
@@ -473,17 +484,29 @@ fn decode_loca(loca: &[u8], index_format: u16, num_glyphs: usize) -> Result<Vec<
                 context: "wrap_woff2: long loca too small",
             });
         }
-        for i in 0..n {
-            let v = u32::from_be_bytes([
-                loca[i * 4],
-                loca[i * 4 + 1],
-                loca[i * 4 + 2],
-                loca[i * 4 + 3],
-            ]);
-            out.push(v);
-        }
-    }
+        loca.chunks_exact(4)
+            .take(n)
+            .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    };
     Ok(out)
+}
+
+/// Sets bit `gid` in a big-endian glyph bitmap. Bits past the end of
+/// the bitmap are ignored. Callers size the bitmap for every glyph.
+fn set_bitmap_bit(bitmap: &mut [u8], gid: usize) {
+    if let Some(byte) = bitmap.get_mut(gid / 8) {
+        *byte |= 1 << (7 - (gid % 8));
+    }
+}
+
+/// Converts a stream length to the u32 the transformed glyf header
+/// stores.
+fn stream_len(len: usize) -> Result<u32> {
+    u32::try_from(len).map_err(|_| WoffError::Malformed {
+        offset: 0,
+        context: "wrap_woff2: transformed glyf is larger than 4 GiB",
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -503,8 +526,9 @@ fn encode_triplet(dx: i16, dy: i16, on_curve: bool) -> (u8, Vec<u8>) {
 
     // Range 1: dx == 0, |dy| <= 1279 (mag_hi in 0..=4, low byte 0..=255).
     // The decoder computes mag = ((flag >> 1) & 7) * 256 + data[0]
-    // with flag in 0..=9, so mag_hi is capped at 4.
-    if dx == 0 && dy.abs() <= 1279 {
+    // with flag in 0..=9, so mag_hi is capped at 4. `unsigned_abs`
+    // keeps i16::MIN out of this range. `abs` overflowed on it.
+    if dx == 0 && dy.unsigned_abs() <= 1279 {
         let abs = dy.unsigned_abs();
         let sign_bit: u8 = if dy >= 0 { 1 } else { 0 };
         let mag_low = (abs & 0xFF) as u8;
@@ -515,7 +539,7 @@ fn encode_triplet(dx: i16, dy: i16, on_curve: bool) -> (u8, Vec<u8>) {
 
     // Range 2: dy == 0, |dx| <= 1279. flag in 10..=19, decoder uses
     // (flag - 10) >> 1 for mag_hi.
-    if dy == 0 && dx.abs() <= 1279 {
+    if dy == 0 && dx.unsigned_abs() <= 1279 {
         let abs = dx.unsigned_abs();
         let sign_bit: u8 = if dx >= 0 { 1 } else { 0 };
         let mag_low = (abs & 0xFF) as u8;
@@ -547,26 +571,10 @@ fn encode_triplet(dx: i16, dy: i16, on_curve: bool) -> (u8, Vec<u8>) {
         let sign_x: u8 = if dx >= 0 { 1 } else { 0 };
         let sign_y: u8 = if dy >= 0 { 1 } else { 0 };
         let flag = 20 + b0 + (sign_y << 1) + sign_x;
-        // The decoder uses `flag >> 1` for sign_y and `flag & 1` for
-        // sign_x, but the multiplexed magnitudes still come from
-        // `flag - 20` which we precomputed as `b0`. Add the sign
-        // bits *after*. Wait, we need to verify. The decoder does:
-        //   b0 = flag - 20
-        //   mag_x = 1 + (b0 & 0x30) + (b1 >> 4)   -> b0 bits 4..5
-        //   mag_y = 1 + ((b0 & 0x0C) << 2) + (b1 & 0x0F) -> b0 bits 2..3
-        //   sign_x = flag & 1
-        //   sign_y = (flag >> 1) & 1
-        // So `b0` of the decoder includes ALL 6 bits of (flag - 20).
-        // The low 2 bits of `b0` (from `flag - 20`) are `(flag - 20) & 3`,
-        // which equal `flag & 3` only when flag is in [20, 23] etc.
-        // But the decoder's `b0 & 0x0C` *masks out* the low 2 bits of
-        // b0 and keeps bits 2..3, so the sign bits don't pollute mag.
-        // Symmetrically, the encoder must put sign bits in bits 0..1
-        // of `(flag - 20)`. We did: flag = 20 + b0 + (sign_y<<1) + sign_x,
-        // but b0 already contained `b0_low = (mag_y & 0x30) >> 2`
-        // which lands in bits 2..3, and `b0_high` in bits 4..5. So
-        // the low 2 bits of (flag - 20) come purely from sign. Good.
-        // Reject any case where b0's low 2 bits weren't already 0.
+        // `b0` only uses bits 2..5, so the low two bits of
+        // `flag - 20` hold just the signs. The decoder reads the signs
+        // from `flag & 1` and `(flag >> 1) & 1`, and its masks
+        // `b0 & 0x30` and `b0 & 0x0C` keep them out of the magnitudes.
         debug_assert_eq!(b0 & 0x03, 0);
         return (off_curve_bit | flag, alloc::vec![b1]);
     }
@@ -709,6 +717,20 @@ mod tests {
                     "roundtrip mismatch for ({dx}, {dy}, on={on}); flag={flag_byte:#x} data={data:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn triplet_round_trips_i16_min_on_one_axis() {
+        // A delta of -32768 with a zero on the other axis used to hit
+        // `i16::abs` overflow. Debug builds panicked and release
+        // builds encoded the delta as 0.
+        for &(dx, dy) in &[(0, i16::MIN), (i16::MIN, 0)] {
+            let (flag_byte, data) = encode_triplet(dx, dy, true);
+            let mut r = Reader::new(&data);
+            let decoded = super::super::transform::__test_decode_one_triplet(flag_byte, &mut r)
+                .expect("triplet decodes");
+            assert_eq!(decoded, (dx, dy, true));
         }
     }
 

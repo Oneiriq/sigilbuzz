@@ -38,7 +38,7 @@
 //! ra+halant, explicit ra+halant+ZWJ, or a LogRepha encoded glyph).
 //!
 //! The configuration table matches rustybuzz's `INDIC_CONFIGS` for
-//! all nine Indic scripts sigilbuzz ships at 0.2.0.
+//! the ten Indic scripts listed above.
 
 pub mod devanagari;
 
@@ -87,10 +87,10 @@ use crate::unicode::Script;
 /// relative to the other glyphs of the syllable.
 ///
 /// Mirrors the `ot_position_t` slot the reph should occupy after
-/// reordering. HarfBuzz uses these names; we keep them verbatim so
-/// a future port of the richer reorder (which actually consults
-/// the full per-glyph positional tagging) drops in without
-/// renaming.
+/// reordering. The names match HarfBuzz's. sigilbuzz's final reorder
+/// maps these slots onto a flat syllable structure, so some of them
+/// resolve to the same target (see `final_reorder` in
+/// [`devanagari`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RephPosition {
     /// Just after the main (base) consonant.
@@ -112,12 +112,6 @@ pub enum RephPosition {
 /// [`RephMode::LogRepha`]: the encoded Repha character (e.g.
 /// Malayalam U+0D4E) is emitted ahead of the base and reordered as
 /// if it were a reph.
-///
-/// Only `Implicit` fires a reorder in sigilbuzz 0.2.0. `Explicit`
-/// and `LogRepha` currently fall through to the generic Implicit
-/// path for scripts where that produces the same output on the
-/// tested corpus; scripts that need explicit behavior are flagged
-/// as follow-up issues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RephMode {
     /// Reph formed out of initial Ra,H sequence.
@@ -252,10 +246,8 @@ pub const fn indic_config_for(script: Script) -> Option<IndicConfig> {
         Script::Sinhala => Some(IndicConfig {
             script,
             virama: 0x0DCA,
-            // Sinhala's "ra" is U+0DBB; but Sinhala reph mode is Explicit
-            // (requires a following ZWJ). sigilbuzz's M2 Implicit path
-            // won't trigger on bare ra+virama anyway, so this field is
-            // informational for Sinhala until the Explicit mode lands.
+            // Sinhala reph mode is Explicit, so ra + virama forms a reph
+            // only when a ZWJ follows.
             ra: 0x0DBB,
             reph_pos: RephPosition::AfterPost,
             reph_mode: RephMode::Explicit,

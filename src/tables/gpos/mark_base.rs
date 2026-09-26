@@ -197,12 +197,22 @@ impl<'a> MarkArray<'a> {
             return None;
         }
         let at = self.records_off + idx as usize * 4;
-        let mark_class = u16::from_be_bytes([self.data[at], self.data[at + 1]]);
-        let anchor_off_rel = u16::from_be_bytes([self.data[at + 2], self.data[at + 3]]) as usize;
+        let mut r = Reader::at(self.data, at).ok()?;
+        let mark_class = r.read_u16().ok()?;
+        let anchor_off_rel = r.read_u16().ok()? as usize;
         let anchor_off = self.base + anchor_off_rel;
         let anchor = Anchor::parse_at(self.data, anchor_off).ok()?;
         Some((mark_class, anchor))
     }
+}
+
+/// Byte length of `count` records of `mark_class_count` Offset16
+/// slots each. `None` when the product overflows `usize`, which is
+/// possible on 32-bit targets.
+pub(crate) fn anchor_matrix_len(count: u16, mark_class_count: u16) -> Option<usize> {
+    usize::from(count)
+        .checked_mul(usize::from(mark_class_count))?
+        .checked_mul(2)
 }
 
 // --------------------------------------------------------------------------
@@ -229,9 +239,9 @@ impl<'a> BaseArray<'a> {
         let mut r = Reader::at(data, base)?;
         let base_count = r.read_u16()?;
         let records_off = r.position();
-        let stride = mark_class_count as usize * 2;
-        let need = records_off + base_count as usize * stride;
-        if data.len() < need {
+        let need = anchor_matrix_len(base_count, mark_class_count)
+            .and_then(|len| records_off.checked_add(len));
+        if !need.is_some_and(|need| need <= data.len()) {
             return Err(Error::Truncated {
                 offset: records_off,
                 context: "baseArray records shorter than baseCount * markClassCount",
@@ -250,11 +260,12 @@ impl<'a> BaseArray<'a> {
         if base_idx >= self.base_count || mark_class >= self.mark_class_count {
             return None;
         }
+        // `parse` checked that the whole matrix fits in `data`, so this
+        // offset cannot overflow. The reader still bounds the read.
         let record_off = self.records_off
             + base_idx as usize * self.mark_class_count as usize * 2
             + mark_class as usize * 2;
-        let anchor_off_rel =
-            u16::from_be_bytes([self.data[record_off], self.data[record_off + 1]]) as usize;
+        let anchor_off_rel = Reader::at(self.data, record_off).ok()?.read_u16().ok()? as usize;
         if anchor_off_rel == 0 {
             // Spec: a null offset means this base has no anchor for
             // this mark class. Not an error: the mark simply does

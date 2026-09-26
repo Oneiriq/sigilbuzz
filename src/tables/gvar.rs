@@ -48,7 +48,7 @@
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
-use crate::tables::parse::Reader;
+use crate::tables::parse::{abs_f32, Reader};
 
 /// A parsed `gvar` table.
 #[derive(Debug, Clone)]
@@ -97,9 +97,10 @@ impl<'a> Gvar<'a> {
         let data_array_off = r.read_u32()?;
         let long_offsets = flags & 0x0001 != 0;
 
-        // Parse glyph offset array: glyphCount + 1 entries.
+        // Parse glyph offset array: glyphCount + 1 entries of at least
+        // 2 bytes each, so the remaining bytes bound the capacity.
         let n_offsets = glyph_count as usize + 1;
-        let mut glyph_offsets = Vec::with_capacity(n_offsets);
+        let mut glyph_offsets = Vec::with_capacity(n_offsets.min(r.remaining() / 2));
         if long_offsets {
             for _ in 0..n_offsets {
                 glyph_offsets.push(r.read_u32()?);
@@ -166,12 +167,20 @@ impl<'a> Gvar<'a> {
         if start == end {
             return Vec::new();
         }
-        let gvd_start = self.data_array_off as usize + start as usize;
-        let gvd_end = self.data_array_off as usize + end as usize;
-        if gvd_end > self.data.len() || gvd_start >= gvd_end {
+        // Checked: two u32 offsets can overflow a 32-bit usize.
+        let base = self.data_array_off as usize;
+        let (Some(gvd_start), Some(gvd_end)) = (
+            base.checked_add(start as usize),
+            base.checked_add(end as usize),
+        ) else {
+            return Vec::new();
+        };
+        if gvd_start >= gvd_end {
             return Vec::new();
         }
-        let body = &self.data[gvd_start..gvd_end];
+        let Some(body) = self.data.get(gvd_start..gvd_end) else {
+            return Vec::new();
+        };
         self.deltas_from_glyph_data(body, coords, num_points)
             .unwrap_or_default()
     }
@@ -185,7 +194,6 @@ impl<'a> Gvar<'a> {
         Some((start, end))
     }
 
-    #[allow(clippy::too_many_lines)]
     fn deltas_from_glyph_data(
         &self,
         body: &[u8],
@@ -200,7 +208,9 @@ impl<'a> Gvar<'a> {
 
         // Read tuple variation headers. Each one owns a subrange of
         // the per-tuple serialized data.
-        let mut headers: Vec<TupleVariationHeader> = Vec::with_capacity(tuple_count as usize);
+        // Each header takes at least 4 bytes, which bounds the capacity.
+        let mut headers: Vec<TupleVariationHeader> =
+            Vec::with_capacity((tuple_count as usize).min(r.remaining() / 4));
         for _ in 0..tuple_count {
             headers.push(TupleVariationHeader::read(&mut r, self.axis_count)?);
         }
@@ -233,7 +243,7 @@ impl<'a> Gvar<'a> {
         // Accumulate deltas into an insertion-ordered table keyed by
         // point index. A `Vec<PointDelta>` gives deterministic
         // output and avoids HashMap ordering nondeterminism.
-        let mut acc: Vec<PointDelta> = Vec::new();
+        let mut acc = DeltaAccumulator::default();
 
         for header in &headers {
             let tuple_data_len = header.variation_data_size as usize;
@@ -314,27 +324,23 @@ impl<'a> Gvar<'a> {
             if is_all_points {
                 for i in 0..n {
                     let pt = i as u16;
-                    #[allow(clippy::cast_precision_loss)]
                     let dx = scalar * xs[i] as f32;
-                    #[allow(clippy::cast_precision_loss)]
                     let dy = scalar * ys[i] as f32;
-                    accumulate(&mut acc, pt, dx, dy);
+                    acc.add(pt, dx, dy);
                 }
             } else {
                 for i in 0..n {
                     let Some(&pt) = point_numbers.get(i) else {
                         break;
                     };
-                    #[allow(clippy::cast_precision_loss)]
                     let dx = scalar * xs[i] as f32;
-                    #[allow(clippy::cast_precision_loss)]
                     let dy = scalar * ys[i] as f32;
-                    accumulate(&mut acc, pt, dx, dy);
+                    acc.add(pt, dx, dy);
                 }
             }
         }
 
-        Ok(acc)
+        Ok(acc.deltas)
     }
 }
 
@@ -361,25 +367,18 @@ impl TupleVariationHeader {
     fn read(r: &mut Reader<'_>, axis_count: u16) -> Result<Self> {
         let variation_data_size = r.read_u16()?;
         let tuple_index = r.read_u16()?;
+        // Each tuple is `axis_count` F2DOT14 values. Taking the bytes
+        // first means a truncated table fails before any allocation.
+        let row = usize::from(axis_count) * 2;
         let embedded_peak = if tuple_index & FLAG_EMBEDDED_PEAK != 0 {
-            let mut v = Vec::with_capacity(axis_count as usize);
-            for _ in 0..axis_count {
-                v.push(r.read_f2dot14()?);
-            }
-            Some(v)
+            Some(decode_f2dot14s(r.read_bytes(row)?))
         } else {
             None
         };
         let (intermediate_start, intermediate_end) = if tuple_index & FLAG_INTERMEDIATE_REGION != 0
         {
-            let mut s = Vec::with_capacity(axis_count as usize);
-            for _ in 0..axis_count {
-                s.push(r.read_f2dot14()?);
-            }
-            let mut e = Vec::with_capacity(axis_count as usize);
-            for _ in 0..axis_count {
-                e.push(r.read_f2dot14()?);
-            }
+            let s = decode_f2dot14s(r.read_bytes(row)?);
+            let e = decode_f2dot14s(r.read_bytes(row)?);
             (Some(s), Some(e))
         } else {
             (None, None)
@@ -409,19 +408,23 @@ impl TupleVariationHeader {
         if idx >= shared_tuple_count {
             return None;
         }
-        let base = shared_tuples_off + idx as usize * axis_count as usize * 2;
-        let need = base + axis_count as usize * 2;
-        if need > gvar_data.len() {
-            return None;
-        }
-        let mut v = Vec::with_capacity(axis_count as usize);
-        for a in 0..axis_count as usize {
-            let off = base + a * 2;
-            let raw = i16::from_be_bytes([gvar_data[off], gvar_data[off + 1]]);
-            v.push(f32::from(raw) / 16384.0);
-        }
-        Some(v)
+        let row = axis_count as usize * 2;
+        // Checked: `shared_tuples_off` is a u32 from the font, so the
+        // sum can overflow a 32-bit usize.
+        let base = shared_tuples_off.checked_add(idx as usize * row)?;
+        let bytes = gvar_data.get(base..base.checked_add(row)?)?;
+        Some(decode_f2dot14s(bytes))
     }
+}
+
+/// Decodes a run of big-endian F2DOT14 values. A trailing odd byte is
+/// ignored, which never happens for the even-length slices callers
+/// pass.
+fn decode_f2dot14s(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(2)
+        .map(|b| f32::from(i16::from_be_bytes([b[0], b[1]])) / 16384.0)
+        .collect()
 }
 
 // ----------------------------------------------------------------------------
@@ -438,7 +441,7 @@ fn tuple_scalar(peak: &[f32], start: Option<&[f32]>, end: Option<&[f32]>, coords
         if p == 0.0 {
             continue;
         }
-        if (c - p).abs() < f32::EPSILON {
+        if abs_f32(c - p) < f32::EPSILON {
             continue;
         }
         // Default region: [0, peak] or [peak, 0] depending on sign.
@@ -456,13 +459,13 @@ fn tuple_scalar(peak: &[f32], start: Option<&[f32]>, end: Option<&[f32]>, coords
             return 0.0;
         }
         if c < p {
-            if (p - s).abs() < f32::EPSILON {
+            if abs_f32(p - s) < f32::EPSILON {
                 return 0.0;
             }
             scalar *= (c - s) / (p - s);
         } else {
             // c > p
-            if (p - e).abs() < f32::EPSILON {
+            if abs_f32(p - e) < f32::EPSILON {
                 return 0.0;
             }
             scalar *= (e - c) / (e - p);
@@ -613,7 +616,6 @@ fn read_packed_deltas_n(data: &[u8], n: usize) -> Result<(Vec<i32>, usize)> {
                 });
             }
             for _ in 0..take {
-                #[allow(clippy::cast_possible_wrap)]
                 let v = data[cursor] as i8;
                 cursor += 1;
                 out.push(i32::from(v));
@@ -633,14 +635,41 @@ fn read_packed_deltas_n(data: &[u8], n: usize) -> Result<(Vec<i32>, usize)> {
     Ok((out, cursor))
 }
 
-fn accumulate(acc: &mut Vec<PointDelta>, pt: u16, dx: f32, dy: f32) {
-    // Deterministic append: do not sort. If the same point index
-    // already has an entry (shared across tuples), fold into it.
-    if let Some(existing) = acc.iter_mut().find(|e| e.point == pt) {
-        existing.dx += dx;
-        existing.dy += dy;
-    } else {
-        acc.push(PointDelta { point: pt, dx, dy });
+/// Per-point delta sums in order of first appearance.
+///
+/// `slot[pt]` holds the index of point `pt` in `deltas` plus one, or
+/// zero when the point has no entry yet. The side table makes each
+/// update constant time. A linear search per update was quadratic in
+/// the point count and let one glyph with tens of thousands of points
+/// stall the parser.
+#[derive(Default)]
+struct DeltaAccumulator {
+    deltas: Vec<PointDelta>,
+    slot: Vec<u32>,
+}
+
+impl DeltaAccumulator {
+    fn add(&mut self, pt: u16, dx: f32, dy: f32) {
+        // Deterministic append: do not sort. If the same point index
+        // already has an entry (shared across tuples), fold into it.
+        let idx = usize::from(pt);
+        if idx >= self.slot.len() {
+            self.slot.resize(idx + 1, 0);
+        }
+        match self.slot[idx]
+            .checked_sub(1)
+            .and_then(|i| self.deltas.get_mut(i as usize))
+        {
+            Some(existing) => {
+                existing.dx += dx;
+                existing.dy += dy;
+            }
+            None => {
+                self.deltas.push(PointDelta { point: pt, dx, dy });
+                // At most 65,536 distinct points, so the length fits.
+                self.slot[idx] = self.deltas.len() as u32;
+            }
+        }
     }
 }
 

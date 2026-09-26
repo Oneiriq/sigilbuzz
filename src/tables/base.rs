@@ -187,10 +187,12 @@ pub struct BaseAxis<'a> {
     data: &'a [u8],
     /// Absolute offset of the BaseTagList from `data` start.
     /// Zero when the axis ships no tag list (rare but legal).
-    tag_list_off: u16,
+    /// Stored as `usize` because an axis offset plus a relative
+    /// offset can exceed `u16::MAX`.
+    tag_list_off: usize,
     /// Absolute offset of the BaseScriptList from `data` start.
     /// Zero when the axis carries scripts but no per-script values.
-    script_list_off: u16,
+    script_list_off: usize,
     ivs: Option<ItemVariationStore<'a>>,
 }
 
@@ -218,7 +220,7 @@ impl<'a> BaseAxis<'a> {
                     context: "BASE axis tag list past end",
                 });
             }
-            abs as u16
+            abs
         };
         let script_list_off = if script_list_rel == 0 {
             0
@@ -235,7 +237,7 @@ impl<'a> BaseAxis<'a> {
                     context: "BASE axis script list past end",
                 });
             }
-            abs as u16
+            abs
         };
 
         Ok(Self {
@@ -254,14 +256,15 @@ impl<'a> BaseAxis<'a> {
         if self.tag_list_off == 0 {
             return Vec::new();
         }
-        let off = self.tag_list_off as usize;
-        let Ok(mut r) = Reader::at(self.data, off) else {
+        let Ok(mut r) = Reader::at(self.data, self.tag_list_off) else {
             return Vec::new();
         };
         let Ok(count) = r.read_u16() else {
             return Vec::new();
         };
-        let mut tags = Vec::with_capacity(count as usize);
+        // Each tag takes 4 bytes, so the remaining bytes bound the
+        // capacity.
+        let mut tags = Vec::with_capacity((count as usize).min(r.remaining() / 4));
         for _ in 0..count {
             match r.read_tag() {
                 Ok(t) => tags.push(t),
@@ -279,7 +282,7 @@ impl<'a> BaseAxis<'a> {
         if self.script_list_off == 0 {
             return None;
         }
-        let list_off = self.script_list_off as usize;
+        let list_off = self.script_list_off;
         let mut r = Reader::at(self.data, list_off).ok()?;
         let count = r.read_u16().ok()?;
         // Each record is 4 (tag) + 2 (offset) = 6 bytes.
@@ -309,9 +312,9 @@ impl<'a> BaseAxis<'a> {
 pub struct BaseScript<'a> {
     data: &'a [u8],
     /// Absolute offset of the BaseValues table, zero when absent.
-    base_values_off: u16,
+    base_values_off: usize,
     /// Absolute offset of the default MinMax table, zero when absent.
-    default_min_max_off: u16,
+    default_min_max_off: usize,
     /// The parent axis's ordered baseline tag list. Cached on the
     /// `BaseScript` so the `baseline()` lookup doesn't have to
     /// re-walk back through the axis.
@@ -348,7 +351,7 @@ impl<'a> BaseScript<'a> {
                     context: "BASE BaseValues past end",
                 });
             }
-            abs as u16
+            abs
         };
         let default_min_max_off = if default_min_max_rel == 0 {
             0
@@ -366,7 +369,7 @@ impl<'a> BaseScript<'a> {
                     context: "BASE MinMax past end",
                 });
             }
-            abs as u16
+            abs
         };
         Ok(Self {
             data,
@@ -409,7 +412,6 @@ impl<'a> BaseScript<'a> {
         } else {
             delta - 0.5
         };
-        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
         let clamped = adj.max(i16::MIN as f32).min(i16::MAX as f32) as i16;
         Some(coord.saturating_add(clamped))
     }
@@ -424,7 +426,7 @@ impl<'a> BaseScript<'a> {
             return None;
         }
         let slot = self.tags.iter().position(|t| *t == tag)?;
-        let bv_off = self.base_values_off as usize;
+        let bv_off = self.base_values_off;
         let mut r = Reader::at(self.data, bv_off).ok()?;
         let _default_idx = r.read_u16().ok()?;
         let count = r.read_u16().ok()?;
@@ -456,7 +458,7 @@ impl<'a> BaseScript<'a> {
         if self.default_min_max_off == 0 {
             return None;
         }
-        let off = self.default_min_max_off as usize;
+        let off = self.default_min_max_off;
         let mut r = Reader::at(self.data, off).ok()?;
         let min_rel = r.read_u16().ok()?;
         let max_rel = r.read_u16().ok()?;
@@ -905,7 +907,6 @@ mod tests {
     // --------------------------------------------------------------
 
     fn write_f2dot14(out: &mut Vec<u8>, v: f32) {
-        #[allow(clippy::cast_possible_truncation)]
         let raw = (v * 16384.0).round() as i16;
         out.extend_from_slice(&raw.to_be_bytes());
     }

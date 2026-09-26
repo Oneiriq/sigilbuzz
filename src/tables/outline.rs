@@ -72,8 +72,7 @@ pub enum PathOp {
 /// Produced by [`crate::Face::glyph_outline`] and
 /// [`crate::Face::glyph_outline_at_coords`]. The ops are stored in a
 /// small owned buffer so the outline can outlive the borrowed font
-/// bytes; the sigilbuzz core never allocates during shaping, only
-/// during explicit outline extraction.
+/// bytes.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Outline {
     ops: Vec<PathOp>,

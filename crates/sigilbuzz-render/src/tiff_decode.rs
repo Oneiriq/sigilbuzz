@@ -95,6 +95,19 @@ const FIELD_LONG: u16 = 4;
 const COMPRESSION_NONE: u32 = 1;
 const COMPRESSION_PACKBITS: u32 = 32773;
 
+/// Largest output-to-input ratio PackBits can reach: a two-byte repeat
+/// record expands to 128 bytes.
+const PACKBITS_MAX_EXPANSION: usize = 64;
+
+/// The two strip encodings the decoder accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Compression {
+    /// Compression tag 1: raw samples.
+    None,
+    /// Compression tag 32773: PackBits run-length encoding.
+    PackBits,
+}
+
 const PHOTOMETRIC_RGB: u32 = 2;
 
 const PLANAR_CHUNKY: u32 = 1;
@@ -151,10 +164,11 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<ColorPixmap, RenderError> {
         return Err(RenderError::UnsupportedBitmap);
     }
 
-    let compression = ifd.optional_scalar(TAG_COMPRESSION)?.unwrap_or(1);
-    if compression != COMPRESSION_NONE && compression != COMPRESSION_PACKBITS {
-        return Err(RenderError::UnsupportedBitmap);
-    }
+    let compression = match ifd.optional_scalar(TAG_COMPRESSION)?.unwrap_or(1) {
+        COMPRESSION_NONE => Compression::None,
+        COMPRESSION_PACKBITS => Compression::PackBits,
+        _ => return Err(RenderError::UnsupportedBitmap),
+    };
 
     if let Some(planar) = ifd.optional_scalar(TAG_PLANAR_CONFIG)? {
         if planar != PLANAR_CHUNKY {
@@ -182,6 +196,14 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<ColorPixmap, RenderError> {
     let total_bytes = row_bytes
         .checked_mul(height as usize)
         .ok_or(RenderError::BadTiff("image size overflow"))?;
+    // PackBits expands at most 64x (a two-byte repeat record yields 128
+    // bytes) and uncompressed strips copy 1:1, so a payload that cannot
+    // hold `total_bytes` even at that ratio is malformed. Checking this
+    // before allocating keeps a tiny header from reserving up to a
+    // gigabyte, including through strips that alias one another.
+    if total_bytes / PACKBITS_MAX_EXPANSION > bytes.len() {
+        return Err(RenderError::BadTiff("image size exceeds payload"));
+    }
 
     // Collect all strip payloads (decompressed if needed) into a single
     // contiguous buffer of `height * width * samples_per_pixel` bytes.
@@ -212,16 +234,15 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<ColorPixmap, RenderError> {
             .checked_mul(row_bytes)
             .ok_or(RenderError::BadTiff("strip size overflow"))?;
         match compression {
-            COMPRESSION_NONE => {
+            Compression::None => {
                 if strip_bytes.len() != strip_pixels {
                     return Err(RenderError::BadTiff("uncompressed strip length mismatch"));
                 }
                 raw.extend_from_slice(strip_bytes);
             }
-            COMPRESSION_PACKBITS => {
+            Compression::PackBits => {
                 packbits_decode(strip_bytes, strip_pixels, &mut raw)?;
             }
-            _ => unreachable!("compression validated above"),
         }
     }
     if raw.len() != total_bytes {
@@ -342,7 +363,10 @@ fn parse_ifd(bytes: &[u8], offset: u32, endian: Endian) -> Result<Ifd, RenderErr
         .checked_add(2)
         .and_then(|o| o.checked_add(count.checked_mul(12)?))
         .ok_or(RenderError::BadTiff("IFD body overflow"))?;
-    if body_end + 4 > bytes.len() {
+    if body_end
+        .checked_add(4)
+        .map_or(true, |end| end > bytes.len())
+    {
         return Err(RenderError::BadTiff("IFD truncated"));
     }
     let mut entries = Vec::with_capacity(count);
@@ -379,10 +403,16 @@ fn read_inline_scalar(entry: &IfdEntry, endian: Endian) -> Result<u32, RenderErr
 /// Reads the array values for an IFD entry, regardless of inline-vs-
 /// offset placement and BYTE / SHORT / LONG type.
 fn read_array(entry: &IfdEntry, file: &[u8], endian: Endian) -> Result<Vec<u32>, RenderError> {
-    let elem_size = match entry.field_type {
-        FIELD_BYTE => 1,
-        FIELD_SHORT => 2,
-        FIELD_LONG => 4,
+    /// Integer field types an array tag may use.
+    enum Elem {
+        Byte,
+        Short,
+        Long,
+    }
+    let (elem, elem_size) = match entry.field_type {
+        FIELD_BYTE => (Elem::Byte, 1),
+        FIELD_SHORT => (Elem::Short, 2),
+        FIELD_LONG => (Elem::Long, 4),
         _ => return Err(RenderError::BadTiff("unsupported field type for array")),
     };
     let total = (entry.count as usize)
@@ -401,19 +431,18 @@ fn read_array(entry: &IfdEntry, file: &[u8], endian: Endian) -> Result<Vec<u32>,
         &file[off..end]
     };
     let mut out = Vec::with_capacity(entry.count as usize);
-    match entry.field_type {
-        FIELD_BYTE => out.extend(data.iter().map(|&b| u32::from(b))),
-        FIELD_SHORT => {
+    match elem {
+        Elem::Byte => out.extend(data.iter().map(|&b| u32::from(b))),
+        Elem::Short => {
             for chunk in data.chunks_exact(2) {
                 out.push(u32::from(read_u16(chunk, endian)));
             }
         }
-        FIELD_LONG => {
+        Elem::Long => {
             for chunk in data.chunks_exact(4) {
                 out.push(read_u32(chunk, endian));
             }
         }
-        _ => unreachable!("element size guard already returned above"),
     }
     Ok(out)
 }
@@ -812,5 +841,61 @@ mod tests {
         let mut out = Vec::new();
         let err = packbits_decode(&encoded, 4, &mut out).unwrap_err();
         assert!(matches!(err, RenderError::BadTiff(_)));
+    }
+
+    /// Little-endian RGB TIFF with one strip of `strip_len` bytes at
+    /// `strip_off`, whatever the declared size. `extra` is appended.
+    fn one_strip_tiff(
+        width: u32,
+        height: u32,
+        strip_off: u32,
+        strip_len: u32,
+        extra: &[u8],
+    ) -> Vec<u8> {
+        let entries: [(u16, u16, u32, u32); 8] = [
+            (TAG_IMAGE_WIDTH, FIELD_LONG, 1, width),
+            (TAG_IMAGE_LENGTH, FIELD_LONG, 1, height),
+            // Three SHORTs of 8 at offset 110, right after the IFD.
+            (TAG_BITS_PER_SAMPLE, FIELD_SHORT, 3, 110),
+            (TAG_PHOTOMETRIC, FIELD_SHORT, 1, PHOTOMETRIC_RGB),
+            (TAG_STRIP_OFFSETS, FIELD_LONG, 1, strip_off),
+            (TAG_SAMPLES_PER_PIXEL, FIELD_SHORT, 1, 3),
+            (TAG_ROWS_PER_STRIP, FIELD_LONG, 1, height),
+            (TAG_STRIP_BYTE_COUNTS, FIELD_LONG, 1, strip_len),
+        ];
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"II");
+        buf.extend_from_slice(&42u16.to_le_bytes());
+        buf.extend_from_slice(&8u32.to_le_bytes());
+        buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, ty, count, value) in entries {
+            buf.extend_from_slice(&tag.to_le_bytes());
+            buf.extend_from_slice(&ty.to_le_bytes());
+            buf.extend_from_slice(&count.to_le_bytes());
+            buf.extend_from_slice(&value.to_le_bytes());
+        }
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(buf.len(), 110);
+        for _ in 0..3 {
+            buf.extend_from_slice(&8u16.to_le_bytes());
+        }
+        buf.extend_from_slice(extra);
+        buf
+    }
+
+    #[test]
+    fn declared_size_larger_than_the_payload_is_rejected_before_allocating() {
+        // A 16384x16384 RGB header on a tiny file used to reserve the
+        // full 768 MiB raw buffer before looking at the strip.
+        let bytes = one_strip_tiff(16_384, 16_384, 116, 3, &[1, 2, 3]);
+        assert_eq!(
+            decode_tiff(&bytes).unwrap_err(),
+            RenderError::BadTiff("image size exceeds payload")
+        );
+        // A small image whose strip holds all of its pixels still
+        // decodes.
+        let ok = one_strip_tiff(1, 1, 116, 3, &[1, 2, 3]);
+        let pix = decode_tiff(&ok).expect("decodes");
+        assert_eq!(pix.get(0, 0), [1, 2, 3, 255]);
     }
 }

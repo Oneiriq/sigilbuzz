@@ -1,6 +1,6 @@
 //! Public-surface integration tests for [`sigilbuzz_render::flatten_grouped`].
 //!
-//! Mirrors the oniq MSDF use case described in issue #218: take a
+//! Mirrors the MSDF use case described in issue #218: take a
 //! single `PathOp` stream, flatten it once, and walk the per-source-
 //! Bézier groups in order to make per-curve edge-coloring decisions.
 //! These tests exercise the exact public path
@@ -67,8 +67,8 @@ fn flatten_grouped_is_callable_from_outside_the_crate() {
 
 #[test]
 fn msdf_use_case_per_curve_identity_preserved() {
-    // The exact pattern oniq's outline cache used to wrap one Bezier
-    // at a time, but now done in a single pass.
+    // The pattern an MSDF outline cache uses to wrap one Bezier at a
+    // time, done here in a single pass.
     let ops = vec![
         PathOp::MoveTo { x: 0.0, y: 0.0 },
         PathOp::CubicTo {

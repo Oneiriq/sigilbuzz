@@ -62,10 +62,22 @@
 //! `add-0.5/subtract-0.5` rule as the HVAR / MVAR bakes so the three
 //! stay in byte-for-byte lockstep. Saturating addition guards against
 //! ValueRecord field overflow on extreme coords.
+//!
+//! # Work limit
+//!
+//! Every visitor of the walk is idempotent: folding or clearing an
+//! offset zeroes it, and renumbering a shared table is decided once.
+//! So the walk visits each subtable once even when many lookups share
+//! it, and charges a [`WorkBudget`] for every record it walks. A GPOS
+//! that exhausts the budget stops the walk, and a bake of it is left
+//! undone.
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::variation_store::ItemVariationStore;
+
+use crate::util::{WorkBudget, WORK_LIMIT};
 
 /// Defined ValueRecord format bits: bits 0x0001..=0x0080. Mirrors the
 /// `DEFINED_BITS` constant in `sigilbuzz::tables::gpos::value_record`.
@@ -347,7 +359,12 @@ fn visit_anchor(buf: &mut [u8], anchor_off: usize, visit: &mut SlotVisitor<'_>) 
 ///     u16 entryAnchorOffset   (relative to the subtable)
 ///     u16 exitAnchorOffset    (relative to the subtable)
 /// ```
-fn walk_cursive_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisitor<'_>) {
+fn walk_cursive_pos(
+    gpos_buf: &mut [u8],
+    sub_off: usize,
+    visit: &mut SlotVisitor<'_>,
+    budget: &WorkBudget,
+) {
     let Some(sub) = gpos_buf.get_mut(sub_off..) else {
         return;
     };
@@ -358,7 +375,7 @@ fn walk_cursive_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisitor
         return;
     };
     let records_off = 6usize;
-    if sub.len() < records_off + entry_exit_count * 4 {
+    if sub.len() < records_off + entry_exit_count * 4 || !budget.spend(entry_exit_count) {
         return;
     }
     // Collect anchor offsets first so the visitor may mutate freely.
@@ -380,12 +397,17 @@ fn walk_cursive_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisitor
 ///     u16 class
 ///     u16 markAnchorOffset (relative to MarkArray start)
 /// ```
-fn walk_mark_array(sub: &mut [u8], mark_array_off: usize, visit: &mut SlotVisitor<'_>) {
+fn walk_mark_array(
+    sub: &mut [u8],
+    mark_array_off: usize,
+    visit: &mut SlotVisitor<'_>,
+    budget: &WorkBudget,
+) {
     let Some(mark_count) = read_u16(sub, mark_array_off).map(usize::from) else {
         return;
     };
     let records_off = mark_array_off + 2;
-    if records_off + mark_count * 4 > sub.len() {
+    if records_off + mark_count * 4 > sub.len() || !budget.spend(mark_count) {
         return;
     }
     let anchor_offs: Vec<usize> = (0..mark_count)
@@ -411,13 +433,22 @@ fn walk_base_or_mark2_array(
     base_array_off: usize,
     mark_class_count: usize,
     visit: &mut SlotVisitor<'_>,
+    budget: &WorkBudget,
 ) {
     let Some(base_count) = read_u16(sub, base_array_off).map(usize::from) else {
         return;
     };
     let records_off = base_array_off + 2;
-    let total = base_count * mark_class_count;
-    if records_off + total * 2 > sub.len() {
+    // Both counts are 16-bit, so the product needs checked math on
+    // 32-bit targets.
+    let Some(total) = base_count.checked_mul(mark_class_count) else {
+        return;
+    };
+    let fits = total
+        .checked_mul(2)
+        .and_then(|len| records_off.checked_add(len))
+        .is_some_and(|end| end <= sub.len());
+    if !fits || !budget.spend(total) {
         return;
     }
     let anchor_offs: Vec<usize> = (0..total)
@@ -441,7 +472,12 @@ fn walk_base_or_mark2_array(
 ///   o16 markArrayOffset        (mark1ArrayOffset for type 6)
 ///   o16 baseArrayOffset        (mark2ArrayOffset for type 6)
 /// ```
-fn walk_mark_base_or_mark_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisitor<'_>) {
+fn walk_mark_base_or_mark_pos(
+    gpos_buf: &mut [u8],
+    sub_off: usize,
+    visit: &mut SlotVisitor<'_>,
+    budget: &WorkBudget,
+) {
     let Some(sub) = gpos_buf.get_mut(sub_off..) else {
         return;
     };
@@ -453,8 +489,8 @@ fn walk_mark_base_or_mark_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut S
     else {
         return;
     };
-    walk_mark_array(sub, mark_array_off as usize, visit);
-    walk_base_or_mark2_array(sub, base_array_off as usize, mcc as usize, visit);
+    walk_mark_array(sub, mark_array_off as usize, visit, budget);
+    walk_base_or_mark2_array(sub, base_array_off as usize, mcc as usize, visit, budget);
 }
 
 /// Walks every Anchor in a MarkLigPos subtable starting at `sub_off`.
@@ -477,7 +513,12 @@ fn walk_mark_base_or_mark_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut S
 ///     ComponentRecord[componentCount]:
 ///       o16 ligatureAnchorOffsets[markClassCount]  (relative to LigatureAttach)
 /// ```
-fn walk_mark_lig_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisitor<'_>) {
+fn walk_mark_lig_pos(
+    gpos_buf: &mut [u8],
+    sub_off: usize,
+    visit: &mut SlotVisitor<'_>,
+    budget: &WorkBudget,
+) {
     let Some(sub) = gpos_buf.get_mut(sub_off..) else {
         return;
     };
@@ -493,7 +534,7 @@ fn walk_mark_lig_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisito
     let lig_array_off = lig_array_off as usize;
 
     // MarkArray walks like the other Mark* lookups.
-    walk_mark_array(sub, mark_array_off as usize, visit);
+    walk_mark_array(sub, mark_array_off as usize, visit, budget);
 
     // LigatureArray: collect every ComponentRecord's anchor offsets,
     // then visit them in one pass to keep the borrows simple.
@@ -501,7 +542,7 @@ fn walk_mark_lig_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisito
         return;
     };
     let lig_attach_offs_start = lig_array_off + 2;
-    if lig_attach_offs_start + lig_count * 2 > sub.len() {
+    if lig_attach_offs_start + lig_count * 2 > sub.len() || !budget.spend(lig_count) {
         return;
     }
     let mut anchor_abs: Vec<usize> = Vec::new();
@@ -515,10 +556,22 @@ fn walk_mark_lig_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisito
             continue;
         };
         let comps_off = la_off + 2;
-        if comps_off + comp_count * mark_class_count * 2 > sub.len() {
+        // Checked for 32-bit targets: both factors come from 16-bit
+        // counts.
+        let Some(anchors) = comp_count.checked_mul(mark_class_count) else {
+            continue;
+        };
+        let fits = anchors
+            .checked_mul(2)
+            .and_then(|len| comps_off.checked_add(len))
+            .is_some_and(|end| end <= sub.len());
+        if !fits {
             continue;
         }
-        for k in 0..comp_count * mark_class_count {
+        if !budget.spend(anchors) {
+            return;
+        }
+        for k in 0..anchors {
             let rel = read_u16(sub, comps_off + k * 2).unwrap_or(0) as usize;
             if rel != 0 {
                 // ligatureAnchorOffsets are relative to LigatureAttach.
@@ -538,7 +591,12 @@ fn walk_mark_lig_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisito
 /// Walks every ValueRecord device slot in a SinglePos subtable
 /// starting at `sub_off` within `gpos_buf`. Device offsets are
 /// relative to the subtable.
-fn walk_single_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisitor<'_>) {
+fn walk_single_pos(
+    gpos_buf: &mut [u8],
+    sub_off: usize,
+    visit: &mut SlotVisitor<'_>,
+    budget: &WorkBudget,
+) {
     let Some(sub) = gpos_buf.get_mut(sub_off..) else {
         return;
     };
@@ -560,7 +618,7 @@ fn walk_single_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisitor<
         },
         _ => return,
     };
-    if sub.len() < first + count * stride {
+    if sub.len() < first + count * stride || !budget.spend(count) {
         return;
     }
     for i in 0..count {
@@ -570,20 +628,25 @@ fn walk_single_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisitor<
 
 /// Walks every ValueRecord device slot in a PairPos subtable starting
 /// at `sub_off` within `gpos_buf`.
-fn walk_pair_pos(gpos_buf: &mut [u8], sub_off: usize, visit: &mut SlotVisitor<'_>) {
+fn walk_pair_pos(
+    gpos_buf: &mut [u8],
+    sub_off: usize,
+    visit: &mut SlotVisitor<'_>,
+    budget: &WorkBudget,
+) {
     let Some(sub) = gpos_buf.get_mut(sub_off..) else {
         return;
     };
     match read_u16(sub, 0) {
-        Some(1) => walk_pair_pos_format1(sub, visit),
-        Some(2) => walk_pair_pos_format2(sub, visit),
+        Some(1) => walk_pair_pos_format1(sub, visit, budget),
+        Some(2) => walk_pair_pos_format2(sub, visit, budget),
         _ => {}
     }
 }
 
 /// PairPos format 1. The ValueRecords live inside PairSet tables and
 /// their device offsets are relative to the PairSet, not the subtable.
-fn walk_pair_pos_format1(sub: &mut [u8], visit: &mut SlotVisitor<'_>) {
+fn walk_pair_pos_format1(sub: &mut [u8], visit: &mut SlotVisitor<'_>, budget: &WorkBudget) {
     if sub.len() < 10 {
         return;
     }
@@ -598,7 +661,9 @@ fn walk_pair_pos_format1(sub: &mut [u8], visit: &mut SlotVisitor<'_>) {
     let v1_size = value_record_size(vf1);
     let pvr_size = 2 + v1_size + value_record_size(vf2);
     let set_offsets_off = 10usize;
-    if sub.len() < set_offsets_off + pair_set_count as usize * 2 {
+    if sub.len() < set_offsets_off + pair_set_count as usize * 2
+        || !budget.spend(usize::from(pair_set_count))
+    {
         return;
     }
     let set_offs: Vec<usize> = (0..pair_set_count as usize)
@@ -611,6 +676,9 @@ fn walk_pair_pos_format1(sub: &mut [u8], visit: &mut SlotVisitor<'_>) {
         if set_off + 2 + pair_value_count * pvr_size > sub.len() {
             continue;
         }
+        if !budget.spend(pair_value_count) {
+            return;
+        }
         for j in 0..pair_value_count {
             // ValueRecord1 starts after the 2-byte secondGlyph.
             let vr1_pos = set_off + 2 + j * pvr_size + 2;
@@ -622,7 +690,7 @@ fn walk_pair_pos_format1(sub: &mut [u8], visit: &mut SlotVisitor<'_>) {
 
 /// PairPos format 2. The class matrix sits inline in the subtable and
 /// its device offsets are relative to the subtable.
-fn walk_pair_pos_format2(sub: &mut [u8], visit: &mut SlotVisitor<'_>) {
+fn walk_pair_pos_format2(sub: &mut [u8], visit: &mut SlotVisitor<'_>, budget: &WorkBudget) {
     if sub.len() < 16 {
         return;
     }
@@ -639,9 +707,14 @@ fn walk_pair_pos_format2(sub: &mut [u8], visit: &mut SlotVisitor<'_>) {
     }
     let v1_size = value_record_size(vf1);
     let cell_size = v1_size + value_record_size(vf2);
-    let cells = class1_count as usize * class2_count as usize;
+    let cells = usize::from(class1_count) * usize::from(class2_count);
     let records_off = 16usize;
-    if sub.len() < records_off + cells * cell_size {
+    // The matrix size can exceed a 32-bit `usize`, so it is checked.
+    let fits = cells
+        .checked_mul(cell_size)
+        .and_then(|len| records_off.checked_add(len))
+        .is_some_and(|end| end <= sub.len());
+    if !fits || !budget.spend(cells) {
         return;
     }
     for k in 0..cells {
@@ -656,13 +729,19 @@ fn walk_pair_pos_format2(sub: &mut [u8], visit: &mut SlotVisitor<'_>) {
 // ---------------------------------------------------------------------------
 
 /// Walks one subtable of the given (non-extension) lookup type.
-fn walk_subtable(buf: &mut [u8], lookup_type: u16, sub_abs: usize, visit: &mut SlotVisitor<'_>) {
+fn walk_subtable(
+    buf: &mut [u8],
+    lookup_type: u16,
+    sub_abs: usize,
+    visit: &mut SlotVisitor<'_>,
+    budget: &WorkBudget,
+) {
     match lookup_type {
-        1 => walk_single_pos(buf, sub_abs, visit),
-        2 => walk_pair_pos(buf, sub_abs, visit),
-        3 => walk_cursive_pos(buf, sub_abs, visit),
-        4 | 6 => walk_mark_base_or_mark_pos(buf, sub_abs, visit),
-        5 => walk_mark_lig_pos(buf, sub_abs, visit),
+        1 => walk_single_pos(buf, sub_abs, visit, budget),
+        2 => walk_pair_pos(buf, sub_abs, visit, budget),
+        3 => walk_cursive_pos(buf, sub_abs, visit, budget),
+        4 | 6 => walk_mark_base_or_mark_pos(buf, sub_abs, visit, budget),
+        5 => walk_mark_lig_pos(buf, sub_abs, visit, budget),
         // Context (7) / ChainContext (8) carry no device slots of
         // their own; the lookups they dispatch to are reached through
         // the LookupList loop.
@@ -678,10 +757,13 @@ fn walk_subtable(buf: &mut [u8], lookup_type: u16, sub_abs: usize, visit: &mut S
 /// Slots are reported in lookup order, subtable order, then record
 /// order, so a visitor that mutates the buffer sees a deterministic
 /// sequence. A slot shared by several records (compilers dedupe
-/// identical anchors) is reported once per referencing record.
+/// identical anchors) is reported once per referencing record, but a
+/// subtable shared by several lookups is walked once (see the module
+/// docs).
 ///
 /// Returns `false` when the GPOS header or LookupList is malformed and
-/// nothing was walked.
+/// nothing was walked, or when the walk ran out of its work budget and
+/// stopped part way.
 pub(crate) fn walk_gpos_device_slots(gpos: &mut [u8], visit: &mut SlotVisitor<'_>) -> bool {
     if gpos.len() < 10 || read_u16(gpos, 0) != Some(1) {
         return false;
@@ -696,6 +778,9 @@ pub(crate) fn walk_gpos_device_slots(gpos: &mut [u8], visit: &mut SlotVisitor<'_
     if offsets_start + lookup_count * 2 > gpos.len() {
         return false;
     }
+    let budget = WorkBudget::new(WORK_LIMIT);
+    // `(subtable position, lookup type)` pairs already walked.
+    let mut visited: BTreeSet<(usize, u16)> = BTreeSet::new();
     for li in 0..lookup_count {
         let Some(lookup_off) = read_u16(gpos, offsets_start + li * 2).map(usize::from) else {
             continue;
@@ -710,6 +795,9 @@ pub(crate) fn walk_gpos_device_slots(gpos: &mut [u8], visit: &mut SlotVisitor<'_
         if subtable_offsets_off + subtable_count as usize * 2 > gpos.len() {
             continue;
         }
+        if !budget.spend(1 + usize::from(subtable_count)) {
+            return false;
+        }
         for si in 0..subtable_count as usize {
             let Some(sub_rel) = read_u16(gpos, subtable_offsets_off + si * 2) else {
                 continue;
@@ -719,7 +807,9 @@ pub(crate) fn walk_gpos_device_slots(gpos: &mut [u8], visit: &mut SlotVisitor<'_
                 continue;
             }
             if lookup_type != 9 {
-                walk_subtable(gpos, lookup_type, sub_abs, visit);
+                if visited.insert((sub_abs, lookup_type)) {
+                    walk_subtable(gpos, lookup_type, sub_abs, visit, &budget);
+                }
                 continue;
             }
             // Type 9: Extension. u16 format, u16 extensionLookupType,
@@ -737,12 +827,12 @@ pub(crate) fn walk_gpos_device_slots(gpos: &mut [u8], visit: &mut SlotVisitor<'_
             let Some(inner_abs) = sub_abs.checked_add(ext_off) else {
                 continue;
             };
-            if inner_abs < gpos.len() && ext_type != 9 {
-                walk_subtable(gpos, ext_type, inner_abs, visit);
+            if inner_abs < gpos.len() && ext_type != 9 && visited.insert((inner_abs, ext_type)) {
+                walk_subtable(gpos, ext_type, inner_abs, visit, &budget);
             }
         }
     }
-    true
+    !budget.is_spent()
 }
 
 /// Folds every supported `VariationIndex` in the source GPOS into the
@@ -1712,5 +1802,66 @@ mod tests {
         for off in [m1_x_dev_pos, m1_y_dev_pos, m2_x_dev_pos, m2_y_dev_pos] {
             assert_eq!(u16::from_be_bytes([baked[off], baked[off + 1]]), 0);
         }
+    }
+
+    #[test]
+    fn value_record_device_without_static_field_skips_write() {
+        // ValueFormat 0x0010: xPlaDevice without xPlacement. The slot
+        // has no static field to fold into, which used to overflow
+        // (debug) or index out of bounds (release) once the delta was
+        // non-zero.
+        let mut buf = vec![0u8; 8];
+        // ValueRecord at 0: one Offset16 pointing at byte 2.
+        buf[0..2].copy_from_slice(&2u16.to_be_bytes());
+        // VariationIndex at byte 2: outer=0, inner=0, deltaFormat=0x8000.
+        buf[6..8].copy_from_slice(&0x8000u16.to_be_bytes());
+        let ivs_bytes = build_ivs_one_region_one_item(80);
+        let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
+        visit_value_record(&mut buf, 0, 0, 0x0010, &mut |b, slot| {
+            assert_eq!(slot.field, None);
+            fold_one_field(b, slot, Some(&store), &[1.0]);
+        });
+        // The offset slot is zeroed and nothing else changes.
+        assert_eq!(&buf[0..2], &[0, 0]);
+        assert_eq!(&buf[6..8], &0x8000u16.to_be_bytes());
+    }
+
+    #[test]
+    fn bake_visits_a_shared_subtable_once() {
+        // Two lookup-list entries point at the same SinglePos lookup, so
+        // its subtable is reached twice. Folding is idempotent, so the
+        // second visit is skipped and the result matches one visit.
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&1u16.to_be_bytes()); // posFormat 1
+        sub.extend_from_slice(&0u16.to_be_bytes()); // coverage (unused)
+        sub.extend_from_slice(&0x0011u16.to_be_bytes()); // xPlacement + device
+        sub.extend_from_slice(&10i16.to_be_bytes()); // xPlacement
+        sub.extend_from_slice(&10u16.to_be_bytes()); // device offset
+        sub.extend_from_slice(&0u16.to_be_bytes()); // outer
+        sub.extend_from_slice(&0u16.to_be_bytes()); // inner
+        sub.extend_from_slice(&0x8000u16.to_be_bytes()); // VariationIndex
+
+        let mut gpos = Vec::new();
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&[0u8; 4]); // script / feature lists unused
+        gpos.extend_from_slice(&10u16.to_be_bytes()); // lookupListOffset
+                                                      // LookupList at 10: two entries, both at offset 6.
+        gpos.extend_from_slice(&2u16.to_be_bytes());
+        gpos.extend_from_slice(&6u16.to_be_bytes());
+        gpos.extend_from_slice(&6u16.to_be_bytes());
+        // Lookup at 16: type 1, flag 0, one subtable at offset 8.
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&8u16.to_be_bytes());
+        gpos.extend_from_slice(&sub);
+
+        let ivs_bytes = build_ivs_one_region_one_item(80);
+        let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
+        let baked = bake_gpos_at_coords(&gpos, Some(&store), &[1.0]).unwrap();
+        let x = i16::from_be_bytes([baked[24 + 6], baked[24 + 7]]);
+        assert_eq!(x, 90);
+        assert_eq!(&baked[24 + 8..24 + 10], &[0, 0]);
     }
 }

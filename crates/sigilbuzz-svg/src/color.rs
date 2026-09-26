@@ -88,6 +88,7 @@ pub fn glyph_to_svg_color_at_coords(
         view: None,
         defs: Defs::default(),
         body: String::new(),
+        group_styles: Vec::new(),
         painted: false,
     };
     paint_glyph(face, gid, coords, &mut sink);
@@ -95,7 +96,8 @@ pub fn glyph_to_svg_color_at_coords(
         return None;
     }
     let view = sink.view?;
-    Some(assemble_svg(view, &sink.defs.into_svg(), &sink.body))
+    let body = sink.styled_body();
+    Some(assemble_svg(view, &sink.defs.into_svg(), &body))
 }
 
 // =========================================================================
@@ -131,6 +133,11 @@ struct SvgSink<'f, 'a, 'c, 'r> {
     view: Option<[f32; 4]>,
     defs: Defs,
     body: String,
+    /// Styles for closed groups: the offset in `body` just past the
+    /// `<g` of the group's opening tag, and the attribute to put there.
+    /// They are spliced in once at the end, so closing a group never
+    /// shifts the body.
+    group_styles: Vec<(usize, String)>,
     /// Whether any fill produced a shape.
     painted: bool,
 }
@@ -164,14 +171,33 @@ impl SvgSink<'_, '_, '_, '_> {
         }
     }
 
+    /// `body` with every closed group's style spliced into its opening
+    /// tag, in one pass.
+    fn styled_body(&mut self) -> String {
+        self.group_styles.sort_by_key(|(at, _)| *at);
+        let extra: usize = self.group_styles.iter().map(|(_, s)| s.len()).sum();
+        let mut out = String::with_capacity(self.body.len().saturating_add(extra));
+        let mut from = 0;
+        for (at, style) in &self.group_styles {
+            let Some(chunk) = self.body.get(from..*at) else {
+                continue;
+            };
+            out.push_str(chunk);
+            out.push_str(style);
+            from = *at;
+        }
+        out.push_str(self.body.get(from..).unwrap_or_default());
+        out
+    }
+
     /// Opens `<g clip-path>` wrappers for every clip frame not written
     /// yet, below index `end`.
     fn write_clips(&mut self, end: usize) {
-        for i in 0..end {
-            let Frame::Clip {
+        for i in 0..end.min(self.frames.len()) {
+            let Some(Frame::Clip {
                 shape,
                 written: false,
-            } = &self.frames[i]
+            }) = self.frames.get(i)
             else {
                 continue;
             };
@@ -185,10 +211,12 @@ impl SvgSink<'_, '_, '_, '_> {
             let _ = write!(def, r#" d="{d}"/></clipPath>"#);
             self.defs.push(def);
             let _ = write!(self.body, r#"<g clip-path="url(#{id})">"#);
-            self.frames[i] = Frame::Clip {
-                shape,
-                written: true,
-            };
+            if let Some(frame) = self.frames.get_mut(i) {
+                *frame = Frame::Clip {
+                    shape,
+                    written: true,
+                };
+            }
         }
     }
 
@@ -208,7 +236,7 @@ impl SvgSink<'_, '_, '_, '_> {
         };
         let shape = match innermost {
             Some(shape) => {
-                self.write_clips(n - 1);
+                self.write_clips(n.saturating_sub(1));
                 shape
             }
             None => {
@@ -342,7 +370,9 @@ impl PaintSink for SvgSink<'_, '_, '_, '_> {
                 composite_to_blend_mode(mode)
             ),
         };
-        self.body.insert_str(at + 2, &style);
+        // `at` is where this group's `<g>` starts, so the style goes
+        // right after its `<g`.
+        self.group_styles.push((at.saturating_add(2), style));
         self.body.push_str("</g>");
     }
 
@@ -710,6 +740,22 @@ mod tests {
         assert!(svg.contains(r#"spreadMethod="pad""#));
         assert!(svg.contains(r#"stop-color="rgb(255,0,0)""#));
         assert!(!svg.contains("gradientTransform"), "{svg}");
+    }
+
+    #[test]
+    fn linear_gradient_def_turns_by_p2() {
+        // p2 on the diagonal turns the bands by 45 degrees, which moves
+        // the SVG end point from (100, 0) to (50, -50).
+        let kind = GradientKind::Linear {
+            p0: (0.0, 0.0),
+            p1: (100.0, 0.0),
+            p2: (100.0, 100.0),
+        };
+        let stops = [ColorStop::new(0.0, Color::new(1.0, 0.0, 0.0, 1.0))];
+        let mut defs = Defs::default();
+        emit_gradient_def(&mut defs, kind, &stops, Extend::Pad, Transform2D::IDENTITY);
+        let svg = defs.into_svg();
+        assert!(svg.contains(r#"x2="50" y2="-50""#), "got {svg}");
     }
 
     #[test]

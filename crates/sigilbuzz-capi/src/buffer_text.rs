@@ -423,7 +423,6 @@ pub(crate) fn clear_contents(state: &mut BufferState) {
     state.language = core::ptr::null();
     state.glyph_infos.clear();
     state.glyph_positions.clear();
-    state.props_set = false;
 }
 
 /// The core script for an `hb_script_t`: a script sigilbuzz has a
@@ -478,8 +477,13 @@ pub(crate) fn unicode_script(ch: char) -> [u8; 4] {
                 core::cmp::Ordering::Equal
             }
         })
-        .map_or(UNKNOWN, |i| SCRIPT_RANGES[i].2);
-    SCRIPT_TAGS[usize::from(index)]
+        .ok()
+        .and_then(|i| SCRIPT_RANGES.get(i))
+        .map_or(UNKNOWN, |&(_, _, script)| script);
+    SCRIPT_TAGS
+        .get(usize::from(index))
+        .copied()
+        .unwrap_or(*b"Zzzz")
 }
 
 /// `hb_buffer_guess_segment_properties`, in HarfBuzz's order: the
@@ -520,7 +524,6 @@ pub(crate) fn guess_segment_properties(state: &mut BufferState) {
             .buffer
             .set_language(unsafe { core_language(state.language) });
     }
-    state.props_set = true;
 }
 
 #[cfg(test)]

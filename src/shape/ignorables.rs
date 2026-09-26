@@ -92,9 +92,21 @@ pub(super) fn hide(glyphs: &mut Vec<Glyph>, space: Option<u32>) {
         return;
     }
     let mut kept: Vec<Glyph> = Vec::with_capacity(glyphs.len());
+    // The trailing run of `kept` glyphs that share one cluster starts
+    // at `run_start` and has the cluster `run_cluster`. A backward merge
+    // only lowers `run_cluster`, and the value is written into the run
+    // once, when the run ends. Rewriting the run on every merge would
+    // make a long run of ignorables after one big cluster quadratic.
+    let mut run_start = 0;
+    let mut run_cluster: Option<u32> = None;
     for i in 0..glyphs.len() {
         let glyph = glyphs[i];
         if !is_hidden(&glyph) {
+            if run_cluster != Some(glyph.cluster) {
+                write_cluster(&mut kept, run_start, run_cluster);
+                run_start = kept.len();
+                run_cluster = Some(glyph.cluster);
+            }
             kept.push(glyph);
             continue;
         }
@@ -106,13 +118,14 @@ pub(super) fn hide(glyphs: &mut Vec<Glyph>, space: Option<u32>) {
             // The cluster survives in the next glyph.
             continue;
         }
-        if let Some(last) = kept.last() {
+        if let Some(old) = run_cluster {
             // Merge backward: the preceding cluster takes the smaller
-            // value.
-            let old = last.cluster;
+            // value. A run before it that already has that value now
+            // continues into it.
             if cluster < old {
-                for g in kept.iter_mut().rev().take_while(|g| g.cluster == old) {
-                    g.cluster = cluster;
+                run_cluster = Some(cluster);
+                while run_start > 0 && kept[run_start - 1].cluster == cluster {
+                    run_start -= 1;
                 }
             }
             continue;
@@ -120,12 +133,29 @@ pub(super) fn hide(glyphs: &mut Vec<Glyph>, space: Option<u32>) {
         // Merge forward into the next glyph's cluster.
         if let Some(old) = glyphs.get(i + 1).map(|next| next.cluster) {
             let merged = old.min(cluster);
-            for g in glyphs[i + 1..].iter_mut().take_while(|g| g.cluster == old) {
+            for g in glyphs
+                .get_mut(i + 1..)
+                .unwrap_or_default()
+                .iter_mut()
+                .take_while(|g| g.cluster == old)
+            {
                 g.cluster = merged;
             }
         }
     }
+    write_cluster(&mut kept, run_start, run_cluster);
     *glyphs = kept;
+}
+
+/// Gives every glyph of `kept[start..]` the cluster `cluster`, when
+/// there is one.
+fn write_cluster(kept: &mut [Glyph], start: usize, cluster: Option<u32>) {
+    let Some(cluster) = cluster else {
+        return;
+    };
+    for g in kept.get_mut(start..).unwrap_or_default() {
+        g.cluster = cluster;
+    }
 }
 
 #[cfg(test)]
@@ -246,5 +276,35 @@ mod tests {
         hide(&mut glyphs, None);
         let got: Vec<(u32, u32)> = glyphs.iter().map(|g| (g.glyph_id, g.cluster)).collect();
         assert_eq!(got, [(2, 1), (5, 1)]);
+    }
+
+    /// Backward merges keep the behavior of rewriting the trailing run
+    /// on every merge: a lowered run joins an earlier run with the same
+    /// cluster, and a later merge lowers both.
+    #[test]
+    fn repeated_backward_merges_lower_every_run_they_reach() {
+        let mut glyphs = alloc::vec![
+            glyph(1, 5, false),
+            glyph(2, 7, false),
+            glyph(9, 5, true),
+            glyph(9, 3, true),
+            glyph(3, 8, false),
+        ];
+        hide(&mut glyphs, None);
+        let got: Vec<(u32, u32)> = glyphs.iter().map(|g| (g.glyph_id, g.cluster)).collect();
+        assert_eq!(got, [(1, 3), (2, 3), (3, 8)]);
+    }
+
+    /// A long right-to-left run of ignorables after one big cluster
+    /// merges in one pass. Rewriting the cluster on every merge made
+    /// this quadratic.
+    #[test]
+    fn long_backward_merge_run_stays_linear() {
+        let n = 200_000u32;
+        let mut glyphs: Vec<Glyph> = (0..n).map(|_| glyph(1, n + 1, false)).collect();
+        glyphs.extend((0..n).rev().map(|c| glyph(9, c, true)));
+        hide(&mut glyphs, None);
+        assert_eq!(glyphs.len(), n as usize);
+        assert!(glyphs.iter().all(|g| g.cluster == 0));
     }
 }

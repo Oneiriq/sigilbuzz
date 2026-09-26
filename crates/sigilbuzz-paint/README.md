@@ -72,9 +72,11 @@ a stored angle `a` is `(a + 1) * pi` radians, the value HarfBuzz reports too.
 
 | Feature | Default | What it does |
 |---|---|---|
-| `std` | yes | `Vec`-backed `DrawCmd` lists. |
+| `std` | yes | Builds the crate against `std`. It adds no API. |
 
-Turn off default features for `no_std` with `alloc`.
+The crate's own code needs only `alloc`, but it depends on `sigilbuzz` with that crate's
+default `std` feature. Turning off default features here therefore does not make it
+`no_std`, and it still needs a target with `std`.
 
 ## License
 

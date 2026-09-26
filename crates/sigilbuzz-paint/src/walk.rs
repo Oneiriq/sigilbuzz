@@ -71,6 +71,13 @@ const MAX_DEPTH: usize = 64;
 /// this many paints have been visited.
 const MAX_EDGES: u32 = 65_536;
 
+/// Maximum number of color stops one walk may resolve. The paint
+/// budget alone does not bound the work: every gradient visit resolves
+/// its whole color line, and one line can hold 65535 stops. Real color
+/// glyphs stay far below this. When a color line does not fit in what
+/// is left, the walk stops.
+const MAX_STOPS: u32 = 1 << 18;
+
 /// An unresolved COLR color: a palette entry plus the alpha that
 /// multiplies it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -293,6 +300,7 @@ fn paint(
                 glyphs: alloc::vec![glyph],
                 layers: Vec::new(),
                 edges_left: MAX_EDGES,
+                stops_left: MAX_STOPS,
                 sink: &mut *sink,
             };
             walker.paint(Some(root), 0);
@@ -348,6 +356,8 @@ struct Walker<'a, 'b, 's> {
     layers: Vec<u32>,
     /// Paints the walk may still visit.
     edges_left: u32,
+    /// Color stops the walk may still resolve.
+    stops_left: u32,
     sink: &'s mut dyn PaintSink,
 }
 
@@ -405,7 +415,9 @@ impl Walker<'_, '_, '_> {
                 x2,
                 y2,
             } => {
-                let stops = self.stops(color_line);
+                let Some(stops) = self.stops(color_line) else {
+                    return;
+                };
                 self.sink.linear_gradient(
                     line(&stops, color_line),
                     (f32::from(x0), f32::from(y0)),
@@ -423,7 +435,9 @@ impl Walker<'_, '_, '_> {
                 y2,
                 var_index_base,
             } => {
-                let stops = self.stops(color_line);
+                let Some(stops) = self.stops(color_line) else {
+                    return;
+                };
                 let d = |i| self.deltas.raw(var_index_base, i);
                 let (p0, p1, p2) = (
                     (f32::from(x0) + d(0), f32::from(y0) + d(1)),
@@ -442,7 +456,9 @@ impl Walker<'_, '_, '_> {
                 y1,
                 r1,
             } => {
-                let stops = self.stops(color_line);
+                let Some(stops) = self.stops(color_line) else {
+                    return;
+                };
                 self.sink.radial_gradient(
                     line(&stops, color_line),
                     (f32::from(x0), f32::from(y0)),
@@ -461,7 +477,9 @@ impl Walker<'_, '_, '_> {
                 r1,
                 var_index_base,
             } => {
-                let stops = self.stops(color_line);
+                let Some(stops) = self.stops(color_line) else {
+                    return;
+                };
                 let d = |i| self.deltas.raw(var_index_base, i);
                 let (c0, rr0, c1, rr1) = (
                     (f32::from(x0) + d(0), f32::from(y0) + d(1)),
@@ -479,7 +497,9 @@ impl Walker<'_, '_, '_> {
                 start_angle,
                 end_angle,
             } => {
-                let stops = self.stops(color_line);
+                let Some(stops) = self.stops(color_line) else {
+                    return;
+                };
                 self.sink.sweep_gradient(
                     line(&stops, color_line),
                     (f32::from(center_x), f32::from(center_y)),
@@ -495,7 +515,9 @@ impl Walker<'_, '_, '_> {
                 end_angle,
                 var_index_base,
             } => {
-                let stops = self.stops(color_line);
+                let Some(stops) = self.stops(color_line) else {
+                    return;
+                };
                 let center = (
                     f32::from(center_x) + self.deltas.raw(var_index_base, 0),
                     f32::from(center_y) + self.deltas.raw(var_index_base, 1),
@@ -791,8 +813,16 @@ impl Walker<'_, '_, '_> {
     }
 
     /// Resolves stop offsets and alphas at the current coordinates.
-    fn stops(&self, color_line: ColorLine<'_>) -> Vec<StopRef> {
-        color_line
+    /// Returns `None`, and ends the walk, when the line does not fit in
+    /// the stop budget.
+    fn stops(&mut self, color_line: ColorLine<'_>) -> Option<Vec<StopRef>> {
+        let Some(left) = self.stops_left.checked_sub(u32::from(color_line.len())) else {
+            self.stops_left = 0;
+            self.edges_left = 0;
+            return None;
+        };
+        self.stops_left = left;
+        let stops = color_line
             .stops_variable()
             .map(|(stop, stop_var)| {
                 let (d_offset, d_alpha) = self.deltas.stop(stop_var);
@@ -804,7 +834,8 @@ impl Walker<'_, '_, '_> {
                     },
                 }
             })
-            .collect()
+            .collect();
+        Some(stops)
     }
 
     /// A variable paint's center: FWORD fields plus design-unit deltas

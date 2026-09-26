@@ -67,6 +67,21 @@ fn scale(sx: f32, sy: f32, child: &[u8]) -> Vec<u8> {
     parent(head, child)
 }
 
+/// PaintTransform (format 12) applying the 2x3 matrix `m`
+/// (`xx, yx, xy, yy, dx, dy`) to `child`.
+fn transform(m: [f32; 6], child: &[u8]) -> Vec<u8> {
+    let mut p = vec![12u8, 0, 0, 0, 0, 0, 0];
+    let at = p.len();
+    set_offset24(&mut p, 4, at);
+    for v in m {
+        p.extend_from_slice(&((v * 65536.0).round() as i32).to_be_bytes());
+    }
+    let at = p.len();
+    set_offset24(&mut p, 1, at);
+    p.extend_from_slice(child);
+    p
+}
+
 fn composite(source: &[u8], mode: u8, backdrop: &[u8]) -> Vec<u8> {
     let mut p = vec![32u8, 0, 0, 0, mode, 0, 0, 0];
     let at = p.len();
@@ -219,6 +234,13 @@ fn font() -> Vec<u8> {
         (17, solid(0)),
         // A radial under a 2 by 1 scale: an ellipse.
         (18, glyph(2, &scale(2.0, 1.0, &radial((100, 100), 100)))),
+        // The square scaled 1000 times, far past the canvas.
+        (
+            19,
+            transform([1000.0, 0.0, 0.0, 1000.0, 0.0, 0.0], &glyph(1, &solid(0))),
+        ),
+        // A composite whose source and backdrop are itself.
+        (20, vec![32u8, 0, 0, 0, 3, 0, 0, 0]),
     ];
     let layers = [
         glyph(2, &solid(1)),
@@ -229,6 +251,7 @@ fn font() -> Vec<u8> {
         (14, 14, [0, 0, 200, 200]),
         (15, 15, [0, 0, 100, 200]),
         (17, 17, [0, 0, 100, 100]),
+        (19, 20, [0, 0, 200, 200]),
     ];
     let colr = colr(&paints, &layers, &clips);
     let tables: [(&[u8; 4], Vec<u8>); 8] = [
@@ -364,4 +387,25 @@ fn radial_gradients_under_non_uniform_scale_are_ellipses() {
         );
         assert_eq!(p[3], 255);
     }
+}
+
+#[test]
+fn outline_far_larger_than_the_canvas_still_covers_it() {
+    // PaintTransform scales the square 1000 times, to 20000 pixels a
+    // side. Only the part inside the 200-unit clip box is rasterized,
+    // and every pixel of the box lies inside the scaled square.
+    let pix = render(19);
+    assert_eq!((pix.width, pix.height), (22, 22));
+    assert_eq!(at(&pix, 0.0, 200.0, 100.0, 100.0), [255, 0, 0, 255]);
+    assert_eq!(at(&pix, 0.0, 200.0, 5.0, 195.0), [255, 0, 0, 255]);
+}
+
+#[test]
+fn self_referencing_composite_renders_within_its_budgets() {
+    // Both children of the composite are the composite itself. The walk
+    // stops at its depth and paint budgets, every group it opens is
+    // closed, and nothing is filled, so the canvas stays transparent.
+    let pix = render(20);
+    assert_eq!((pix.width, pix.height), (22, 22));
+    assert!(pix.data.chunks_exact(4).all(|p| p[3] == 0));
 }

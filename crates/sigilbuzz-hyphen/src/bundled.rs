@@ -40,16 +40,20 @@ pub enum Language {
 pub const PATTERNS_EN_US: &str = include_str!("../patterns/en-us.txt");
 
 #[cfg(feature = "patterns-en-us")]
-fn en_us_patterns() -> &'static Patterns {
+fn en_us_patterns() -> Option<&'static Patterns> {
     use std::sync::OnceLock;
-    static CELL: OnceLock<Patterns> = OnceLock::new();
+    // The bundled file always parses (the `en_us_loads` test checks it).
+    // A parse failure would surface as `None`, the "no patterns" answer.
+    static CELL: OnceLock<Option<Patterns>> = OnceLock::new();
     CELL.get_or_init(|| {
-        let mut p = Patterns::parse(PATTERNS_EN_US).expect("bundled en-us patterns must parse");
-        // hyph-en-us.tex declares hyphenmins typesetting left=2, right=3.
-        p.left_min = 2;
-        p.right_min = 3;
-        p
+        Patterns::parse(PATTERNS_EN_US).ok().map(|mut p| {
+            // hyph-en-us.tex declares hyphenmins typesetting left=2, right=3.
+            p.left_min = 2;
+            p.right_min = 3;
+            p
+        })
     })
+    .as_ref()
 }
 
 impl Patterns {
@@ -67,7 +71,7 @@ impl Patterns {
     pub fn for_language(lang: Language) -> Option<&'static Self> {
         match lang {
             #[cfg(feature = "patterns-en-us")]
-            Language::EnglishUs => Some(en_us_patterns()),
+            Language::EnglishUs => en_us_patterns(),
             // Reserved variants without vendored data fall through to
             // `None`. The match is exhaustive; the catchall is needed
             // only when at least one reserved variant is enabled.

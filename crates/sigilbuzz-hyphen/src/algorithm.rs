@@ -23,20 +23,20 @@ use crate::pattern::{Pattern, Patterns};
 /// Returns the byte offsets within `word` where soft-hyphen breaks are
 /// valid, applying the patterns in `patterns`.
 ///
-/// The returned offsets are *byte indices* into `word` and lie strictly
-/// between 1 and `word.len() - 1`. Offsets are filtered against the
-/// `left_min` / `right_min` thresholds carried by `patterns`.
+/// The returned offsets are *byte indices* into `word`, lie in
+/// `1..word.len()`, and always fall on a char boundary. Offsets are
+/// filtered against the `left_min` / `right_min` thresholds carried by
+/// `patterns`.
 ///
 /// # ASCII only
 ///
 /// Liang's algorithm and the bundled pattern files assume the word
-/// consists of 7-bit ASCII letters. Non-ASCII input is lower-cased
-/// where possible but characters outside the ASCII letter range are
-/// passed through verbatim and will simply fail to match any pattern,
-/// producing zero break opportunities.
+/// consists of 7-bit ASCII letters. ASCII letters match
+/// case-insensitively. Characters outside the ASCII letter range are
+/// passed through verbatim and never match a pattern letter.
 #[must_use]
 pub fn hyphenate(word: &str, patterns: &Patterns) -> Vec<usize> {
-    if word.len() < patterns.left_min + patterns.right_min {
+    if word.len() < patterns.left_min.saturating_add(patterns.right_min) {
         return Vec::new();
     }
 
@@ -52,29 +52,44 @@ pub fn hyphenate(word: &str, patterns: &Patterns) -> Vec<usize> {
     // priorities[i] is the strength of the break opportunity *before*
     // position `i` in the wrapped word.
     let mut priorities = vec![0u8; wrapped.len() + 1];
-
-    for i in 0..bytes.len() {
-        let at_start = i == 0;
-        for pat in &patterns.inner {
-            apply_pattern(pat, bytes, i, at_start, &mut priorities);
-        }
-    }
+    fill_priorities(bytes, patterns, &mut priorities);
 
     // Translate priority indices back to byte offsets in the *original*
     // word. The wrapped word is `.word.`, so a priority at wrapped
     // index `k` corresponds to offset `k - 1` in `word`. Valid break
-    // offsets are 1..word.len().
+    // offsets are 1..word.len(). A pattern with no letters matches at
+    // every byte, including bytes inside a multi-byte char, so offsets
+    // that split a char are dropped.
     let mut breaks = Vec::new();
     let upper = word.len() + 1;
     for (k, p) in priorities.iter().enumerate().take(upper).skip(2) {
         if p % 2 == 1 {
             let byte_offset = k - 1;
-            if byte_offset >= patterns.left_min && word.len() - byte_offset >= patterns.right_min {
+            if byte_offset >= patterns.left_min
+                && word.len() - byte_offset >= patterns.right_min
+                && word.is_char_boundary(byte_offset)
+            {
                 breaks.push(byte_offset);
             }
         }
     }
     breaks
+}
+
+/// Applies every pattern that matches `haystack` to `priorities`.
+///
+/// Priorities combine with `max`, so the order patterns are applied in does
+/// not matter. Only patterns whose first byte matches can apply at a
+/// position, so each position checks one small group of patterns.
+fn fill_priorities(haystack: &[u8], patterns: &Patterns, priorities: &mut [u8]) {
+    for (i, &b) in haystack.iter().enumerate() {
+        let at_start = i == 0;
+        for idx in patterns.index.candidates(b) {
+            if let Some(pat) = patterns.inner.get(idx) {
+                apply_pattern(pat, haystack, i, at_start, priorities);
+            }
+        }
+    }
 }
 
 fn apply_pattern(pat: &Pattern, haystack: &[u8], i: usize, at_start: bool, priorities: &mut [u8]) {
@@ -180,5 +195,84 @@ n2at\n\
         let breaks_mid = hyphenate("teach", &p2);
         // "teach" starts with `t`, not `a`, so `.ach3` should not fire.
         assert!(breaks_mid.is_empty());
+    }
+
+    /// Checks every pattern at every position, the way the algorithm did
+    /// before patterns were grouped by first byte.
+    fn priorities_checking_every_pattern(haystack: &[u8], patterns: &Patterns) -> Vec<u8> {
+        let mut priorities = vec![0u8; haystack.len() + 1];
+        for i in 0..haystack.len() {
+            for pat in &patterns.inner {
+                apply_pattern(pat, haystack, i, i == 0, &mut priorities);
+            }
+        }
+        priorities
+    }
+
+    fn assert_same_priorities(patterns: &Patterns, words: &[&str]) {
+        for word in words {
+            let wrapped = alloc::format!(".{}.", word.to_ascii_lowercase());
+            let bytes = wrapped.as_bytes();
+            let mut indexed = vec![0u8; bytes.len() + 1];
+            fill_priorities(bytes, patterns, &mut indexed);
+            assert_eq!(
+                indexed,
+                priorities_checking_every_pattern(bytes, patterns),
+                "{word:?}"
+            );
+        }
+    }
+
+    const SAMPLE_WORDS: &[&str] = &[
+        "hyphenation",
+        "HyPhEnAtIoN",
+        "achievement",
+        "teach",
+        "a",
+        "",
+        "internationalization",
+        "\u{00e9}t\u{00e9}",
+        "co-operate",
+        "x.y.z",
+        "1234",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ];
+
+    #[test]
+    fn grouped_matching_equals_checking_every_pattern() {
+        // Includes a pattern with no letters (`3`), which can match at every
+        // position, and both anchor kinds.
+        let p = Patterns::parse("hy3ph\nhe2n\n1na\n.ach3\nion1.\n3\nx1y\n.a1\n").unwrap();
+        assert_same_priorities(&p, SAMPLE_WORDS);
+    }
+
+    #[cfg(feature = "patterns-en-us")]
+    #[test]
+    fn grouped_matching_equals_checking_every_pattern_for_en_us() {
+        let p = Patterns::for_language(crate::Language::EnglishUs).unwrap();
+        assert_same_priorities(p, SAMPLE_WORDS);
+    }
+
+    #[cfg(feature = "patterns-en-us")]
+    #[test]
+    fn each_position_checks_a_small_group_of_patterns() {
+        // Before the grouping, every position checked all ~4,900 US English
+        // patterns, so a long run of letters took that many checks per
+        // letter. Each group must now be a small fraction of the set.
+        let p = Patterns::for_language(crate::Language::EnglishUs).unwrap();
+        let total = p.len();
+        let largest = (0..=255u8)
+            .map(|b| p.index.candidates(b).count())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            largest * 4 < total,
+            "largest group {largest} of {total} patterns"
+        );
+        let covered: usize = (b'a'..=b'z')
+            .chain(core::iter::once(b'.'))
+            .map(|b| p.index.candidates(b).count())
+            .sum();
+        assert_eq!(covered, total, "every pattern belongs to exactly one group");
     }
 }

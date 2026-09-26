@@ -2,7 +2,7 @@
 //! mixed-direction run through `Buffer::set_text_bidi` and prove that
 //! every emitted cluster value maps back to the character it came
 //! from in the ORIGINAL logical string, the capability RTL caret
-//! math in consumers (oniq) was blocked on.
+//! math in consumers was blocked on.
 
 use sigilbuzz::{shape, Blob, Buffer, Direction, Face, Font};
 

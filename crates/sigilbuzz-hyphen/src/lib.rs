@@ -3,8 +3,8 @@
 //! This companion crate implements [Liang's hyphenation algorithm][liang]
 //! (PhD thesis, Stanford 1983; widely deployed in TeX, OpenOffice, web
 //! browsers). The algorithm walks every contiguous *pattern* that
-//! matches in a word, sums priority numbers position-by-position, and
-//! treats odd numbers as valid break points.
+//! matches in a word, keeps the highest priority number at each
+//! position, and treats odd numbers as valid break points.
 //!
 //! Patterns look like `hy3ph` ("after `hy`, before `ph`, strongly
 //! encourage breaking") or `2tion` ("slightly discourage breaking
