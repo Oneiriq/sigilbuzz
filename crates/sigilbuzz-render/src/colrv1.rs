@@ -427,8 +427,14 @@ fn sample_gradient(g: &Gradient, paint_xform: Transform2D, x: f32, y: f32) -> [u
             start_angle,
             end_angle,
         } => {
-            let (cx, cy) = paint_xform.apply(center.0, center.1);
-            project_sweep((cx, cy), start_angle, end_angle, (x, y))
+            // Angles are counter-clockwise in the gradient's own space.
+            // Pixel space flips y (and may rotate or skew), so measure
+            // the angle after mapping the pixel back into paint space.
+            let Some(inverse) = invert(paint_xform) else {
+                return [0, 0, 0, 0];
+            };
+            let p = inverse.apply(x, y);
+            project_sweep(center, start_angle, end_angle, p)
         }
     };
     let t = match t {
@@ -437,6 +443,23 @@ fn sample_gradient(g: &Gradient, paint_xform: Transform2D, x: f32, y: f32) -> [u
     };
     let c = sample_stops(&g.stops, t);
     to_premul(c)
+}
+
+/// Inverse of a 2x3 affine, or `None` when it is singular.
+fn invert(m: Transform2D) -> Option<Transform2D> {
+    let det = m.xx * m.yy - m.xy * m.yx;
+    if det == 0.0 || !det.is_finite() {
+        return None;
+    }
+    let (xx, xy, yx, yy) = (m.yy / det, -m.xy / det, -m.yx / det, m.xx / det);
+    Some(Transform2D {
+        xx,
+        yx,
+        xy,
+        yy,
+        dx: -(xx * m.dx + xy * m.dy),
+        dy: -(yx * m.dx + yy * m.dy),
+    })
 }
 
 fn transformed_pair(m: Transform2D, p0: (f32, f32), p1: (f32, f32)) -> ((f32, f32), (f32, f32)) {
@@ -882,6 +905,47 @@ mod tests {
         assert!((t.unwrap() - 0.0).abs() < 1e-3);
         let t = project_sweep(c, 0.0, core::f32::consts::TAU, (-1.0, 0.0));
         assert!((t.unwrap() - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn invert_round_trips_and_rejects_singular_matrices() {
+        let m = Transform2D {
+            xx: 0.5,
+            yx: 0.25,
+            xy: -1.0,
+            yy: -2.0,
+            dx: 3.0,
+            dy: -7.0,
+        };
+        let inv = invert(m).expect("invertible");
+        let (x, y) = m.apply(11.0, -4.0);
+        let (bx, by) = inv.apply(x, y);
+        assert!((bx - 11.0).abs() < 1e-4 && (by + 4.0).abs() < 1e-4);
+        assert!(invert(Transform2D::scale(0.0, 1.0)).is_none());
+    }
+
+    #[test]
+    fn sweep_angle_is_measured_in_paint_space_under_a_y_flip() {
+        // Design space to pixels with a y flip, as the rasterizer does.
+        let flip = Transform2D::scale(1.0, -1.0);
+        let g = Gradient {
+            kind: GradientKind::Sweep {
+                center: (0.0, 0.0),
+                start_angle: 0.0,
+                end_angle: core::f32::consts::PI,
+            },
+            stops: vec![
+                ColorStop::new(0.0, col(1.0, 0.0, 0.0, 1.0)),
+                ColorStop::new(1.0, col(0.0, 0.0, 1.0, 1.0)),
+            ],
+            extend: Extend::Pad,
+        };
+        // Pixel (1, -1) is design (1, 1): 45 degrees, a quarter of the
+        // way from red to blue.
+        let p = sample_gradient(&g, flip, 1.0, -1.0);
+        assert!(p[0] > p[2], "{p:?}");
+        // Pixel (1, 1) is design (1, -1): past the end, padded blue.
+        assert_eq!(sample_gradient(&g, flip, 1.0, 1.0), [0, 0, 255, 255]);
     }
 
     #[test]

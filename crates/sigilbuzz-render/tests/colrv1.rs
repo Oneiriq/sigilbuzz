@@ -501,6 +501,71 @@ fn colrv1_paint_glyph_linear_gradient_varies_across_outline() {
 }
 
 // =========================================================================
+// Test 2b: PaintGlyph wrapping a PaintSweepGradient centered on the
+// square, sweeping counter-clockwise from 0 to pi (stored, with the
+// half-turn bias, as -1.0 and 0.0). Red at 0, blue at 1, pad.
+// =========================================================================
+
+fn build_glyph_sweep_gradient_font() -> Vec<u8> {
+    let head = build_head();
+    let maxp = build_maxp(2);
+    let hhea = build_hhea(2);
+    let hmtx = build_hmtx(2);
+    let (glyf, loca) = standard_glyf_loca();
+    let cpal = build_cpal_v0(&[(255, 0, 0, 255), (0, 0, 255, 255)]);
+
+    let mut colr = build_v1_header(1);
+    // PaintGlyph(1), child right after its 6 bytes.
+    colr.extend_from_slice(&[10, 0, 0, 6]);
+    colr.extend_from_slice(&1u16.to_be_bytes());
+    // PaintSweepGradient: color line right after its 12 bytes.
+    colr.extend_from_slice(&[8, 0, 0, 12]);
+    colr.extend_from_slice(&100i16.to_be_bytes()); // centerX
+    colr.extend_from_slice(&100i16.to_be_bytes()); // centerY
+    colr.extend_from_slice(&f2dot14(-1.0)); // startAngle: 0 rad
+    colr.extend_from_slice(&f2dot14(0.0)); // endAngle: pi rad
+    colr.push(0); // extend = Pad
+    colr.extend_from_slice(&2u16.to_be_bytes());
+    for (offset, entry) in [(0.0, 0u16), (1.0, 1)] {
+        colr.extend_from_slice(&f2dot14(offset));
+        colr.extend_from_slice(&entry.to_be_bytes());
+        colr.extend_from_slice(&f2dot14(1.0));
+    }
+    align4(&mut colr);
+
+    let tables: &[([u8; 4], &[u8])] = &[
+        (*b"COLR", colr.as_slice()),
+        (*b"CPAL", cpal.as_slice()),
+        (*b"glyf", glyf.as_slice()),
+        (*b"head", head.as_slice()),
+        (*b"hhea", hhea.as_slice()),
+        (*b"hmtx", hmtx.as_slice()),
+        (*b"loca", loca.as_slice()),
+        (*b"maxp", maxp.as_slice()),
+    ];
+    emit_sfnt(tables)
+}
+
+#[test]
+fn colrv1_sweep_gradient_runs_counter_clockwise_in_design_space() {
+    let bytes = build_glyph_sweep_gradient_font();
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    let pix = Rasterizer::new()
+        .rasterize_colrv1_glyph(&face, 1, 0, 100.0, &[])
+        .expect("rasterize succeeds");
+    assert!(pix.width > 4 && pix.height > 4);
+    // Pixel rows run downward, so the top half is design y above the
+    // center: angles in (0, pi), early in the sweep, mostly red. The
+    // bottom half is past the end angle and pads to blue.
+    let x = pix.width - 2;
+    let upper = pix.get(x, pix.height / 4);
+    let lower = pix.get(x, 3 * pix.height / 4);
+    assert!(upper[0] > upper[2], "upper right should be red: {upper:?}");
+    assert!(lower[2] > lower[0], "lower right should be blue: {lower:?}");
+}
+
+// =========================================================================
 // Test 3: PaintVarSolid alpha varies with normalized coords. Builds a
 // font with a 1-axis fvar + a tiny ItemVariationStore that maps a
 // single F2DOT14 alpha delta of -0.5 onto the solid's `var_index_base`
