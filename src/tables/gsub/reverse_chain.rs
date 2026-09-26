@@ -28,6 +28,9 @@
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
+use crate::tables::layout::skip_iter::{
+    match_backtrack, match_lookahead, MatchContext, MatchGlyph,
+};
 use crate::tables::layout::Coverage;
 use crate::tables::parse::Reader;
 
@@ -80,30 +83,28 @@ impl<'a> ReverseChain<'a> {
     }
 
     /// Substitute for `glyph_id` when the surrounding context matches,
-    /// or `None`. `glyphs[..i]` is the prefix, `glyphs[i+1..]` is the
-    /// suffix.
+    /// or `None`, with plain matching (no lookup flags, no default
+    /// ignorables). `glyphs[..i]` is the prefix, `glyphs[i+1..]` is
+    /// the suffix. The shaper uses [`ReverseChain::apply_at`].
     #[must_use]
     pub fn apply(&self, glyphs: &[u16], i: usize) -> Option<u16> {
-        let gid = *glyphs.get(i)?;
-        let cov_i = self.coverage.index_of(gid)? as usize;
-        // Backtrack walks `glyphs[..i]` right-to-left.
-        for (offset, cov) in self.backtrack.iter().enumerate() {
-            let pos = i.checked_sub(offset + 1)?;
-            if !cov.contains(glyphs[pos]) {
-                return None;
-            }
-        }
-        // Lookahead walks `glyphs[i+1..]` left-to-right.
-        let after = i + 1;
-        if after + self.lookahead.len() > glyphs.len() {
-            return None;
-        }
-        for (j, cov) in self.lookahead.iter().enumerate() {
-            if !cov.contains(glyphs[after + j]) {
-                return None;
-            }
-        }
-        self.substitutes.get(cov_i).copied()
+        let run: Vec<MatchGlyph> = glyphs.iter().map(|&g| MatchGlyph::new(g)).collect();
+        self.apply_at(&run, i, &MatchContext::plain())
+    }
+
+    /// Substitute for `glyphs[i]` when the surrounding context
+    /// matches, or `None`. `glyphs[..i]` is the backtrack side and
+    /// `glyphs[i + 1..]` the lookahead side, both walked with the
+    /// context walk of `cx` (HarfBuzz's `match_backtrack` and
+    /// `match_lookahead`).
+    #[must_use]
+    pub fn apply_at(&self, glyphs: &[MatchGlyph], i: usize, cx: &MatchContext<'_>) -> Option<u16> {
+        let cov_i = self.coverage.index_of(glyphs.get(i)?.id)? as usize;
+        let substitute = self.substitutes.get(cov_i).copied()?;
+        let (back, ahead) = (&self.backtrack, &self.lookahead);
+        let context = match_backtrack(glyphs, i, back.len(), cx, |k, g| back[k].contains(g))
+            && match_lookahead(glyphs, i + 1, ahead.len(), cx, |k, g| ahead[k].contains(g));
+        context.then_some(substitute)
     }
 }
 

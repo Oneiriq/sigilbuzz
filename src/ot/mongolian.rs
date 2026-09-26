@@ -56,6 +56,7 @@ use crate::buffer::Glyph;
 use crate::ot::arabic::{assign_from_types_in_context, JoiningContext, JoiningForm};
 use crate::shape::{
     apply_gsub_feature_masked, apply_gsub_features_merged, apply_locl_ccmp_if_length_preserving,
+    JoinerTable,
 };
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
@@ -170,7 +171,9 @@ pub fn shape_mongolian_in_context(
     // runs `locl` and `ccmp` together, ahead of the positional
     // features. The joining forms below index glyphs by code point, so
     // a `ccmp` that changes the glyph count waits until after them.
-    let early = apply_locl_ccmp_if_length_preserving(gsub, glyphs, gdef, MONG_SCRIPT_PRIORITY);
+    let table = JoinerTable::Use;
+    let early =
+        apply_locl_ccmp_if_length_preserving(gsub, glyphs, gdef, MONG_SCRIPT_PRIORITY, table);
 
     // Positional pass: `isol`/`init`/`medi`/`fina` each apply only
     // at positions whose computed JoiningForm matches.
@@ -183,12 +186,22 @@ pub fn shape_mongolian_in_context(
             (JoiningForm::Fina, *b"fina"),
         ] {
             let mask: Vec<bool> = forms.iter().map(|&f| f == form).collect();
-            apply_gsub_feature_masked(gsub, glyphs, gdef, tag, MONG_SCRIPT_PRIORITY, &mask);
+            let joiners = table.joiners(tag);
+            apply_gsub_feature_masked(
+                gsub,
+                glyphs,
+                gdef,
+                tag,
+                MONG_SCRIPT_PRIORITY,
+                &mask,
+                joiners,
+            );
         }
     }
     if !early {
         let locl_ccmp = [*b"locl", *b"ccmp"];
-        apply_gsub_features_merged(gsub, glyphs, gdef, &[], &locl_ccmp, MONG_SCRIPT_PRIORITY);
+        let prio = MONG_SCRIPT_PRIORITY;
+        apply_gsub_features_merged(gsub, glyphs, gdef, &[], &locl_ccmp, prio, table);
     }
 
     // calt / liga are applied by the generic default-GSUB pass
@@ -275,18 +288,16 @@ mod tests {
     #[test]
     fn vowel_separator_breaks_joining() {
         // A + MVS + E: the vowel separator (U+180E, type U) breaks
-        // the cursive chain so the A is final (it has the implicit
-        // word-start, so init), the MVS is isolated, and the E is
-        // initial because nothing precedes it. Walk:
+        // the cursive chain. Walk:
         //   A: prev=none, next=MVS(U) -> no joiner before, no joiner
         //      after -> isol.
-        //   MVS: U -> isol.
+        //   MVS: U -> no joining feature, as in HarfBuzz.
         //   E: prev=MVS(U) -> no joiner before, next=none -> isol.
         let cps: Vec<char> = "\u{1820}\u{180E}\u{1821}".chars().collect();
         let forms = assign_mongolian_forms(&cps);
         assert_eq!(
             forms,
-            alloc::vec![JoiningForm::Isol, JoiningForm::Isol, JoiningForm::Isol]
+            alloc::vec![JoiningForm::Isol, JoiningForm::None, JoiningForm::Isol]
         );
     }
 

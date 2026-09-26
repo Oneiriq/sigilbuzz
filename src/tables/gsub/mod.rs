@@ -9,6 +9,7 @@
 //! `ScriptList`, `FeatureList`, and `LookupList`. Each lookup's
 //! `lookupType` is GSUB-specific, enumerated in [`lookup_type`].
 
+use crate::buffer::ClusterLevel;
 use crate::error::{Error, Result};
 use crate::tables::layout::{FeatureList, LookupList, ScriptList};
 use crate::tables::parse::Reader;
@@ -63,6 +64,10 @@ pub struct Gsub<'a> {
     /// resolves a feature through this view. Empty selects each
     /// script's default language system.
     language_tags: &'a [[u8; 4]],
+    /// Cluster level of the run being shaped: a ligature merges its
+    /// components' clusters only at the monotone levels, as
+    /// HarfBuzz's `ligate_input` does through its buffer.
+    cluster_level: ClusterLevel,
 }
 
 impl<'a> Gsub<'a> {
@@ -102,6 +107,7 @@ impl<'a> Gsub<'a> {
             feature_list,
             lookup_list,
             language_tags: &[],
+            cluster_level: ClusterLevel::MonotoneCharacters,
         })
     }
 
@@ -135,6 +141,21 @@ impl<'a> Gsub<'a> {
     #[must_use]
     pub const fn language_tags(&self) -> &'a [[u8; 4]] {
         self.language_tags
+    }
+
+    /// Returns this view set to merge ligature clusters the way the
+    /// shaped buffer's `level` asks.
+    #[must_use]
+    pub(crate) const fn with_cluster_level(mut self, level: ClusterLevel) -> Self {
+        self.cluster_level = level;
+        self
+    }
+
+    /// The cluster level set by [`Self::with_cluster_level`];
+    /// [`ClusterLevel::MonotoneCharacters`] for a freshly parsed table.
+    #[must_use]
+    pub(crate) const fn cluster_level(&self) -> ClusterLevel {
+        self.cluster_level
     }
 
     /// Returns the parsed `ScriptList`.

@@ -16,6 +16,10 @@ use core::ops::Range;
 
 use crate::unicode::{script_of, Script};
 
+pub mod char_class;
+mod flags;
+pub use flags::{BufferFlags, ClusterLevel};
+
 /// Writing direction of a text run.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -51,10 +55,10 @@ impl Direction {
 /// produce negative displacements (contextual kerning, backtracking
 /// combining marks).
 ///
-/// In addition to the rendered fields, `Glyph` carries two
-/// shaper-internal scratch fields (`unicode_props` and
-/// `indic_position`) that the Indic / complex-script shapers use
-/// to track per-glyph state across GSUB passes. Renderers and
+/// In addition to the rendered fields, `Glyph` carries shaper-internal
+/// scratch fields (`unicode_props`, `indic_position`, `char_class`, and
+/// `combining_class`) that the shaping stages use to track per-glyph
+/// state across GSUB passes. Renderers and
 /// most callers can ignore them; they are public so the shaper
 /// modules inside this crate can round-trip state through `Vec<Glyph>`
 /// without stashing a parallel array. Stable bits of `unicode_props`
@@ -68,8 +72,8 @@ pub struct Glyph {
     /// in the SFNT glyph table, *not* a Unicode codepoint.
     pub glyph_id: u32,
     /// Cluster tag linking this glyph back to the input codepoints.
-    /// Multiple glyphs with the same cluster came from the same input
-    /// grapheme (e.g. a ligature, or a base + combining mark).
+    /// Glyphs sharing a cluster came from characters the buffer's
+    /// [`ClusterLevel`] groups (a ligature, a base and its marks, ...).
     pub cluster: u32,
     /// Horizontal advance applied after drawing this glyph.
     pub x_advance: i32,
@@ -84,20 +88,52 @@ pub struct Glyph {
     /// "was this glyph's source a joiner / default-ignorable / ...?"
     /// without re-deriving from the cluster. See `unicode_prop`.
     pub unicode_props: u16,
-    /// Shaper-internal Indic positional role, set during Indic
-    /// syllable segmentation and consulted by the final-reorder
-    /// pass. Zero (`IndicPosition::Start`) for non-Indic glyphs and
-    /// for Indic glyphs whose role has not been resolved yet.
+    /// Shaper-internal byte of the complex shapers, which share it the
+    /// way HarfBuzz's shapers share their glyph variables: the Indic
+    /// positional role, set during Indic syllable segmentation and
+    /// consulted by the final-reorder pass, or the syllable and reorder
+    /// category the Universal Shaping Engine keeps from its basic
+    /// features to its reorder. Zero (`IndicPosition::Start`) otherwise.
     pub indic_position: u8,
+    /// Shaper-internal `char_class` bits of the glyph's source
+    /// character, set by normalization and carried through GSUB like
+    /// [`Self::unicode_props`] (a ligature keeps its first component's).
+    pub char_class: u8,
+    /// Shaper-internal combining class of the glyph's source character
+    /// when it is a mark: HarfBuzz's modified combining class (see
+    /// `unicode::normalize::modified_combining_class`), as the mark
+    /// reordering and fallback positioning adjust it. Zero for every
+    /// other glyph.
+    pub combining_class: u8,
 }
 
-/// Bits packed into [`Glyph::unicode_props`]. Laid out to leave room
-/// for future expansion without shifting existing meanings.
+/// Bits packed into [`Glyph::unicode_props`].
 ///
-/// Bits 7 to 15 are reserved for the shaper's ligature bookkeeping
-/// (the ligature id and component index GSUB records for GPOS mark
-/// attachment, HarfBuzz's `lig_props`); callers building glyphs by
-/// hand should leave them zero.
+/// This is the one map of all sixteen bits; the constants live where
+/// their users are:
+///
+/// | Bits | Meaning | Constant |
+/// |------|---------|----------|
+/// | 0 | unsubstituted default ignorable | [`DEFAULT_IGNORABLE`] |
+/// | 1 | ZWJ | [`JOINER`] |
+/// | 2 | ZWNJ | [`NON_JOINER`] |
+/// | 3 | hidden ignorable (CGJ, Mongolian FVS, tags) | `match_prop::HIDDEN` |
+/// | 4, 5 | synthesized glyph class | `match_prop::SYNTHESIZED_CLASS` |
+/// | 6 | output of a ligature substitution | `match_prop::LIGATED` |
+/// | 7 | output of a multiple substitution | `match_prop::MULTIPLIED` |
+/// | 8 to 15 | HarfBuzz's `lig_props` byte | `match_prop::LIG_PROPS_SHIFT` |
+///
+/// The `match_prop` constants are in
+/// [`crate::tables::layout::skip_iter::match_prop`], which the lookup
+/// matching rules read. The `lig_props` byte holds the ligature id in
+/// its top three bits, the "is the ligature glyph" flag in bit 4, and
+/// the component index in the low four; GSUB records it for GPOS mark
+/// attachment. Bits 3 to 15 are the shaper's own: callers building
+/// glyphs by hand should leave them zero.
+///
+/// [`DEFAULT_IGNORABLE`]: crate::buffer::unicode_prop::DEFAULT_IGNORABLE
+/// [`JOINER`]: crate::buffer::unicode_prop::JOINER
+/// [`NON_JOINER`]: crate::buffer::unicode_prop::NON_JOINER
 pub mod unicode_prop {
     /// The glyph's source codepoint is default ignorable in HarfBuzz's
     /// sense (ZWJ, ZWNJ, bidi controls, variation selectors, soft
@@ -151,6 +187,8 @@ impl Glyph {
             y_offset: 0,
             unicode_props: 0,
             indic_position: IndicPosition::Start as u8,
+            char_class: 0,
+            combining_class: 0,
         }
     }
 }
@@ -166,22 +204,11 @@ pub struct Buffer {
     pub(crate) text: String,
     /// Writing direction. Defaults to [`Direction::Ltr`].
     pub(crate) direction: Direction,
-    /// `true` once a caller picked the direction ([`Buffer::set_direction`]
-    /// or [`Buffer::set_text_bidi`]). While `false`, `direction` is only
+    /// `true` once a caller picked the direction with
+    /// [`Buffer::set_direction`]. While `false`, `direction` is only
     /// the LTR default and `shape()` may choose vertical layout for
     /// Mongolian-dominant text. [`Buffer::clear`] resets it.
     pub(crate) direction_explicit: bool,
-    /// When `true`, `shape()` composes the input text via
-    /// [`crate::unicode::normalize::compose_str`] before glyph
-    /// lookup. Matches HarfBuzz's implicit NFC pass for the
-    /// ranges sigilbuzz has curated tables for.
-    pub(crate) normalize_nfc: bool,
-    /// Logical/visual byte map retained by [`Buffer::set_text_bidi`]
-    /// so consumers can translate shaped cluster values (which index
-    /// the reordered text) back to source offsets. `None` when the
-    /// text was set without bidi reordering, and invalidated by any
-    /// other text mutation.
-    pub(crate) bidi_map: Option<crate::bidi_map::BidiMap>,
     /// Script the whole buffer shapes as, set by
     /// [`Buffer::set_script`]. `None` segments the text into script
     /// runs. Accessors live in `buffer_props.rs`.
@@ -195,10 +222,10 @@ pub struct Buffer {
     /// Up to [`Buffer::CONTEXT_LENGTH`] characters that follow the
     /// text in the source, set by [`Buffer::set_post_context`].
     pub(crate) post_context: String,
-    /// `true` after [`Buffer::set_insert_dotted_circle`]`(false)`, like
-    /// HarfBuzz's `HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE`. Stored
-    /// negated so the default is HarfBuzz's.
-    pub(crate) no_dotted_circle: bool,
+    /// HarfBuzz's buffer flags, set by [`Buffer::set_flags`].
+    pub(crate) flags: BufferFlags,
+    /// How clusters form and merge, set by [`Buffer::set_cluster_level`].
+    pub(crate) cluster_level: ClusterLevel,
 }
 
 impl Buffer {
@@ -211,78 +238,22 @@ impl Buffer {
     /// Appends `text` to the buffer.
     pub fn push_str(&mut self, text: &str) {
         self.text.push_str(text);
-        self.bidi_map = None;
     }
 
     /// Replaces the buffer contents with `text`.
+    ///
+    /// A buffer holds one run in one direction, as in HarfBuzz. For text
+    /// that mixes directions, use [`crate::BidiParagraph`], which shapes
+    /// each run of the paragraph in its own direction.
     pub fn set_text(&mut self, text: &str) {
         self.text.clear();
         self.text.push_str(text);
-        self.bidi_map = None;
-    }
-
-    /// Replaces the buffer contents with `text`, but additionally
-    /// runs the UAX #9 bidirectional algorithm and reorders the
-    /// stored text into visual order before shaping.
-    ///
-    /// Because the stored text is already in visual order, this also
-    /// sets the shaping direction to an explicit [`Direction::Ltr`]:
-    /// [`crate::shape`] then walks the text left to right and returns
-    /// the glyphs in that same (visual) order. Setting
-    /// [`Direction::Rtl`] afterwards would reverse the run a second
-    /// time. The paragraph direction UAX #9 resolved stays available
-    /// through [`Self::bidi_map`] (`BidiMap::paragraph_direction`).
-    ///
-    /// Use this when you have mixed-direction input (Latin + Hebrew,
-    /// Arabic + ASCII digits, etc.) and want the shaper to receive
-    /// the run already partitioned into visual order. For best
-    /// results with HarfBuzz-grade shaping (mark attachment, cursive
-    /// joining), shape each directional run separately in logical
-    /// order with its own direction instead.
-    ///
-    /// The plain [`Self::set_text`] does not reorder or change the
-    /// direction, for callers that handle direction themselves.
-    ///
-    /// The logical-to-visual permutation is retained and exposed via
-    /// [`Self::bidi_map`], so cluster values from the shaped output
-    /// (which index the reordered text) can be translated back to
-    /// offsets in the original `text`.
-    pub fn set_text_bidi(&mut self, text: &str) {
-        let info = crate::unicode::bidi::BidiInfo::new(text, None);
-        self.direction = Direction::Ltr;
-        self.direction_explicit = true;
-        let order = info.reorder();
-        self.text.clear();
-        self.text.reserve(text.len());
-        // Walk the input chars in visual order and append.
-        let chars: Vec<char> = text.chars().collect();
-        for &i in &order {
-            if let Some(&ch) = chars.get(i) {
-                self.text.push(ch);
-            }
-        }
-        self.bidi_map = Some(crate::bidi_map::BidiMap::from_order(text, &order, &info));
     }
 
     /// Current text view.
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
-    }
-
-    /// The bidirectional reorder map captured by the last
-    /// [`Self::set_text_bidi`] call, or `None` when the current text
-    /// was set without bidi reordering ([`Self::set_text`],
-    /// [`Self::push_str`], [`Self::clear`] all reset it).
-    ///
-    /// Visual-side offsets in the map match [`crate::Glyph::cluster`]
-    /// values from shaping this buffer, as long as the opt-in NFC
-    /// pass ([`Self::set_normalize_nfc`]) does not recompose the text
-    /// (composition shortens it and shifts offsets after any composed
-    /// pair. Feed precomposed input when combining the two).
-    #[must_use]
-    pub const fn bidi_map(&self) -> Option<&crate::bidi_map::BidiMap> {
-        self.bidi_map.as_ref()
     }
 
     /// Current writing direction: [`Direction::Ltr`] until one is set
@@ -332,7 +303,7 @@ impl Buffer {
     }
 
     /// True when the direction was chosen by the caller through
-    /// [`Self::set_direction`] or [`Self::set_text_bidi`], false while
+    /// [`Self::set_direction`], false while
     /// [`Self::direction`] only reports the LTR default.
     ///
     /// [`crate::shape`] lays out Mongolian-dominant text vertically
@@ -354,30 +325,13 @@ impl Buffer {
         self.direction_explicit
     }
 
-    /// True when [`Buffer::set_normalize_nfc`] has been enabled.
-    #[must_use]
-    pub const fn normalize_nfc(&self) -> bool {
-        self.normalize_nfc
-    }
-
-    /// Enables or disables the implicit NFC composition pass that
-    /// runs before glyph lookup. Off by default. Turn this on to
-    /// match HarfBuzz's behavior, where `e + U+0301` renders the
-    /// same as the precomposed `é`.
-    pub fn set_normalize_nfc(&mut self, enabled: bool) {
-        self.normalize_nfc = enabled;
-    }
-
-    /// Clears the text, resets the direction to the unset LTR default,
-    /// turns the NFC pass off, and drops the bidi map. Like HarfBuzz's
-    /// `hb_buffer_clear_contents`, this also forgets the script,
-    /// language, and pre- and post-context.
+    /// Clears the text and resets direction to the unset LTR default.
+    /// Like HarfBuzz's `hb_buffer_clear_contents`, this also forgets
+    /// the script, language, and pre- and post-context.
     pub fn clear(&mut self) {
         self.text.clear();
         self.direction = Direction::Ltr;
         self.direction_explicit = false;
-        self.normalize_nfc = false;
-        self.bidi_map = None;
         self.script = None;
         self.language = None;
         self.pre_context.clear();
@@ -578,8 +532,8 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
 ///   ASCII digits so `"Price: 100 شلوم"` keeps the Arabic tail from
 ///   detaching on the digits.
 /// - Latin-1 punctuation / symbols (U+00A0..U+00BF).
-/// - The Unicode format-character block sigilbuzz already recognizes
-///   (ZWJ / ZWNJ / LRM / RLM / ALM).
+/// - The format characters sigilbuzz recognizes (ZWJ / ZWNJ / LRM /
+///   RLM / ALM) and the dotted circle, U+25CC, a Common symbol.
 /// - Unicode `INHERITED` combining-mark blocks: Combining
 ///   Diacritical Marks (U+0300..U+036F), the Supplement
 ///   (U+1DC0..U+1DFF), Combining Diacritical Marks for Symbols
@@ -588,6 +542,9 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
 ///   because `script_of` has no rule for U+0300 and drops the
 ///   mark into `Script::Other`, breaking `ccmp` dispatch and
 ///   any cross-mark GSUB context.
+/// - Default ignorables of no script of their own (ZWSP, word joiner,
+///   variation selectors, tag characters, ...), which GSUB and GPOS
+///   match across.
 ///
 /// Everything else resolves via [`script_of`]; runs of the same
 /// real script collapse through the normal equality check.
@@ -605,14 +562,14 @@ const fn is_common_or_inherited(ch: char) -> bool {
         | 0x007B..=0x007F
         // Latin-1 punctuation / symbols block
         | 0x00A0..=0x00BF
-        // Unicode format characters the shaper recognizes.
-        | 0x200C | 0x200D | 0x200E | 0x200F | 0x061C
+        // Format characters the shaper recognizes, U+25CC DOTTED CIRCLE.
+        | 0x200C | 0x200D | 0x200E | 0x200F | 0x061C | 0x25CC
         // INHERITED combining-mark blocks.
         | 0x0300..=0x036F
         | 0x1DC0..=0x1DFF
         | 0x20D0..=0x20FF
         | 0xFE20..=0xFE2F
-    )
+    ) || crate::unicode::is_scriptless_default_ignorable(ch)
 }
 
 /// The result of a shaping call: the glyphs, in visual order.
@@ -699,33 +656,6 @@ mod tests {
     }
 
     #[test]
-    fn set_text_bidi_keeps_pure_ltr_unchanged() {
-        let mut b = Buffer::new();
-        b.set_text_bidi("Hello");
-        assert_eq!(b.text(), "Hello");
-        assert_eq!(b.direction(), Direction::Ltr);
-    }
-
-    #[test]
-    fn set_text_bidi_reverses_pure_rtl() {
-        let mut b = Buffer::new();
-        // \u{05E9}\u{05DC}\u{05D5}\u{05DD} = "שלום" (shalom).
-        b.set_text_bidi("\u{05E9}\u{05DC}\u{05D5}\u{05DD}");
-        // After visual reorder the chars are in reverse logical
-        // order. The stored text is visual, so the shaping direction
-        // is an explicit LTR (shaping it RTL would reverse it again);
-        // the RTL paragraph direction lives on the bidi map.
-        assert_eq!(b.text(), "\u{05DD}\u{05D5}\u{05DC}\u{05E9}");
-        assert_eq!(b.direction(), Direction::Ltr);
-        assert!(b.has_explicit_direction());
-        assert_eq!(
-            b.bidi_map()
-                .map(crate::bidi_map::BidiMap::paragraph_direction),
-            Some(Direction::Rtl)
-        );
-    }
-
-    #[test]
     fn direction_starts_implicit_and_set_direction_makes_it_explicit() {
         let mut b = Buffer::new();
         assert!(!b.has_explicit_direction());
@@ -770,49 +700,6 @@ mod tests {
         b.clear();
         assert!(!b.has_explicit_direction());
         assert_eq!(b.direction(), Direction::Ltr);
-
-        b.set_text_bidi("\u{05D0}");
-        assert!(b.has_explicit_direction());
-        b.clear();
-        assert!(!b.has_explicit_direction());
-    }
-
-    #[test]
-    fn set_text_bidi_overrides_an_earlier_rtl_direction() {
-        let mut b = Buffer::new();
-        b.set_direction(Direction::Rtl);
-        b.set_text_bidi("abc \u{05D0}\u{05D1}");
-        assert_eq!(b.direction(), Direction::Ltr);
-        assert!(b.has_explicit_direction());
-    }
-
-    #[test]
-    fn set_text_bidi_handles_mixed_latin_hebrew_arabic() {
-        // "Hello עברית مرحبا": Latin + Hebrew + Arabic. Paragraph
-        // is LTR (first strong is 'H'). Visual order: "Hello "
-        // followed by the RTL runs reversed. Specifically:
-        //   - Latin "Hello " stays at level 0.
-        //   - Hebrew "עברית" + space + Arabic "مرحبا" share level
-        //     1 and reverse together: visual = ابحرم[space]תירבע.
-        let mut b = Buffer::new();
-        b.set_text_bidi("Hello \u{05E2}\u{05D1}\u{05E8}\u{05D9}\u{05EA} \u{0645}\u{0631}\u{062D}\u{0628}\u{0627}");
-        assert_eq!(b.direction(), Direction::Ltr);
-        // Sanity: visual byte length matches input byte length (no
-        // codepoints lost in reorder).
-        assert_eq!(
-            b.text().chars().count(),
-            "Hello \u{05E2}\u{05D1}\u{05E8}\u{05D9}\u{05EA} \u{0645}\u{0631}\u{062D}\u{0628}\u{0627}"
-                .chars()
-                .count()
-        );
-        // First chars stay Latin.
-        let visual: Vec<char> = b.text().chars().collect();
-        assert_eq!(visual[0], 'H');
-        assert_eq!(visual[5], ' ');
-        // Last char of the RTL run (logically Arabic alef U+0627)
-        // should appear early in the visual order: it sits at the
-        // tail of the level-1 span, which L2 reverses to the front.
-        assert_eq!(visual[6], '\u{0627}');
     }
 
     #[test]
@@ -884,6 +771,22 @@ mod tests {
         let runs = b.script_runs();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].script, Script::Arabic);
+    }
+
+    #[test]
+    fn script_runs_default_ignorables_stay_in_their_run() {
+        // ZWSP, word joiner, a variation selector and a tag character
+        // extend the run they sit in, as in the shaper's segmentation.
+        for text in [
+            "f\u{200B}i",
+            "f\u{2060}i",
+            "\u{0628}\u{FE0F}\u{0633}",
+            "f\u{E0041}i",
+        ] {
+            let mut b = Buffer::new();
+            b.push_str(text);
+            assert_eq!(b.script_runs().len(), 1, "{text:?}");
+        }
     }
 
     #[test]

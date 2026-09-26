@@ -39,7 +39,9 @@
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
-use crate::tables::layout::skip_iter::MatchFilter;
+use crate::tables::layout::skip_iter::{
+    match_backtrack, match_input, match_lookahead, InputMatch, MatchContext, MatchGlyph,
+};
 use crate::tables::layout::Coverage;
 use crate::tables::parse::Reader;
 
@@ -83,9 +85,9 @@ impl<'a> ChainContext<'a> {
         }
 
         let backtrack = parse_coverage_array(data, &mut r)?;
-        // An empty input is accepted. It makes the rule a zero-width
-        // assertion on backtrack and lookahead that can fire at any
-        // cursor. The spec does not forbid it and real fonts use it.
+        // An empty input is accepted: the spec does not forbid it. The
+        // rule then matches nothing, as in HarfBuzz, which reads its
+        // first input coverage from a null offset.
         let input = parse_coverage_array(data, &mut r)?;
         let lookahead = parse_coverage_array(data, &mut r)?;
 
@@ -117,8 +119,7 @@ impl<'a> ChainContext<'a> {
 
     /// Coverage of the first input glyph, exposed for the run-level
     /// "would_apply" precheck. `None` only for the rare empty-input
-    /// chain rule, where the lookup matches at every cursor. Caller
-    /// then conservatively schedules the cursor walk.
+    /// chain rule, which matches nothing.
     #[must_use]
     pub fn input_first_coverage(&self) -> Option<&Coverage<'a>> {
         self.input.first()
@@ -130,78 +131,29 @@ impl<'a> ChainContext<'a> {
         &self.substitutions
     }
 
-    /// Tests whether the run matches starting at input position
-    /// `i`. Returns `true` when backtrack, input, and lookahead
-    /// coverages all line up. Pass-through shorthand for
-    /// [`ChainContext::matches_filtered`] with
-    /// [`MatchFilter::none`].
+    /// Matches the rule around input position `i`: input first (the
+    /// cheap test that fails at most cursors), then lookahead, then
+    /// backtrack, each with HarfBuzz's skipping iterator (see
+    /// [`crate::tables::layout::skip_iter`]). `glyphs[i]` must be in
+    /// the first input coverage. `None` for an empty input sequence,
+    /// which matches nothing (HarfBuzz reads its first coverage from a
+    /// null offset).
     #[must_use]
-    pub fn matches(&self, glyphs: &[u16], i: usize) -> bool {
-        self.matches_filtered(glyphs, i, &MatchFilter::none())
-            .is_some()
-    }
-
-    /// Filter-aware match. Returns the raw span of the input window
-    /// (first to last matched glyph, inclusive) or `None` when any
-    /// of the three coverage arrays fails to align. The backtrack
-    /// and lookahead steps honor the skip-iterator semantics of
-    /// the active `LookupFlag`: skipped glyphs (typically marks)
-    /// between two matched backtrack positions do not block the
-    /// match.
-    #[must_use]
-    pub fn matches_filtered(
+    pub fn matches(
         &self,
-        glyphs: &[u16],
+        glyphs: &[MatchGlyph],
         i: usize,
-        filter: &MatchFilter<'_>,
-    ) -> Option<usize> {
-        // Cheapest test first: input[0] must match the cursor glyph.
-        // Most cursor positions fail here (a lookup's coverage usually
-        // selects a small subset of the run), so checking before the
-        // backtrack walk avoids `prev_unskipped` calls we'd otherwise
-        // throw away. This swap is what HarfBuzz does and shaves the
-        // bulk of the per-cursor cost on Devanagari `pres`/`abvs`/...
-        let (last, after) = if self.input.is_empty() {
-            (i, i)
-        } else {
-            if !self.input[0].contains(*glyphs.get(i)?) {
-                return None;
-            }
-            let mut last = i;
-            let mut cursor = i + 1;
-            for cov in &self.input[1..] {
-                let pos = filter.next_unskipped(glyphs, cursor)?;
-                if !cov.contains(glyphs[pos]) {
-                    return None;
-                }
-                last = pos;
-                cursor = pos + 1;
-            }
-            (last, last + 1)
-        };
-        // Backtrack.
-        let mut bt_cursor = i;
-        for cov in &self.backtrack {
-            let pos = filter.prev_unskipped(glyphs, bt_cursor)?;
-            if !cov.contains(glyphs[pos]) {
-                return None;
-            }
-            bt_cursor = pos;
+        cx: &MatchContext<'_>,
+    ) -> Option<InputMatch> {
+        let (first, rest) = self.input.split_first()?;
+        if !first.contains(glyphs.get(i)?.id) {
+            return None;
         }
-        // Lookahead.
-        let mut la_cursor = after;
-        for cov in &self.lookahead {
-            let pos = filter.next_unskipped(glyphs, la_cursor)?;
-            if !cov.contains(glyphs[pos]) {
-                return None;
-            }
-            la_cursor = pos + 1;
-        }
-        if self.input.is_empty() {
-            Some(0)
-        } else {
-            Some(last - i + 1)
-        }
+        let m = match_input(glyphs, i, rest.len(), cx, |k, g| rest[k].contains(g))?;
+        let (ahead, back) = (&self.lookahead, &self.backtrack);
+        let context = match_lookahead(glyphs, m.end, ahead.len(), cx, |k, g| ahead[k].contains(g))
+            && match_backtrack(glyphs, i, back.len(), cx, |k, g| back[k].contains(g));
+        context.then_some(m)
     }
 }
 
@@ -258,6 +210,12 @@ fn parse_coverage_array<'a>(data: &'a [u8], r: &mut Reader<'_>) -> Result<Vec<Co
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Plain matching of `ctx` at `ids[i]`.
+    fn matches(ctx: &ChainContext<'_>, ids: &[u16], i: usize) -> bool {
+        let glyphs: Vec<MatchGlyph> = ids.iter().map(|&id| MatchGlyph::new(id)).collect();
+        ctx.matches(&glyphs, i, &MatchContext::plain()).is_some()
+    }
 
     fn build_coverage_format1(glyphs: &[u16]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -355,7 +313,7 @@ mod tests {
         let ctx = ChainContext::parse(&bytes).unwrap();
 
         // Glyphs: [20, 10, 30, 40, 50]. Input starts at index 2.
-        assert!(ctx.matches(&[20, 10, 30, 40, 50], 2));
+        assert!(matches(&ctx, &[20, 10, 30, 40, 50], 2));
     }
 
     #[test]
@@ -363,21 +321,21 @@ mod tests {
         let bytes = build_format3(&[&[10]], &[&[30]], &[], &[(0, 1)]);
         let ctx = ChainContext::parse(&bytes).unwrap();
         // glyph before input is 11, not 10.
-        assert!(!ctx.matches(&[11, 30], 1));
+        assert!(!matches(&ctx, &[11, 30], 1));
     }
 
     #[test]
     fn rejects_input_mismatch() {
         let bytes = build_format3(&[], &[&[30], &[40]], &[], &[(0, 1)]);
         let ctx = ChainContext::parse(&bytes).unwrap();
-        assert!(!ctx.matches(&[30, 99], 0));
+        assert!(!matches(&ctx, &[30, 99], 0));
     }
 
     #[test]
     fn rejects_lookahead_mismatch() {
         let bytes = build_format3(&[], &[&[30]], &[&[50]], &[(0, 1)]);
         let ctx = ChainContext::parse(&bytes).unwrap();
-        assert!(!ctx.matches(&[30, 99], 0));
+        assert!(!matches(&ctx, &[30, 99], 0));
     }
 
     #[test]
@@ -386,14 +344,14 @@ mod tests {
         let ctx = ChainContext::parse(&bytes).unwrap();
         // Input at position 0 with one-glyph backtrack requirement
         // cannot match: there is nothing behind position 0.
-        assert!(!ctx.matches(&[30, 40], 0));
+        assert!(!matches(&ctx, &[30, 40], 0));
     }
 
     #[test]
     fn fails_when_lookahead_runs_off_end_of_run() {
         let bytes = build_format3(&[], &[&[30]], &[&[50]], &[(0, 1)]);
         let ctx = ChainContext::parse(&bytes).unwrap();
-        assert!(!ctx.matches(&[30], 0));
+        assert!(!matches(&ctx, &[30], 0));
     }
 
     #[test]
@@ -401,21 +359,28 @@ mod tests {
         // No backtrack, no lookahead, single-glyph input.
         let bytes = build_format3(&[], &[&[30]], &[], &[(0, 5)]);
         let ctx = ChainContext::parse(&bytes).unwrap();
-        assert!(ctx.matches(&[30], 0));
-        assert!(ctx.matches(&[99, 30, 88], 1));
-        assert!(!ctx.matches(&[99, 30], 0));
+        assert!(matches(&ctx, &[30], 0));
+        assert!(matches(&ctx, &[99, 30, 88], 1));
+        assert!(!matches(&ctx, &[99, 30], 0));
     }
 
     #[test]
     fn empty_input_with_backtrack_handles_cursor_past_the_run() {
-        // An empty-input rule skips the input check, so the backtrack
-        // walk used to start from a cursor past the run and index out
-        // of bounds.
+        // An empty-input rule has no input check, so a backtrack walk
+        // could start from a cursor past the run and index out of
+        // bounds. The rule matches nothing, wherever the cursor is.
         let bytes = build_format3(&[&[7]], &[], &[], &[]);
         let ctx = ChainContext::parse(&bytes).unwrap();
-        assert!(ctx.matches(&[7], 1));
-        assert!(ctx.matches(&[7], 5));
-        assert!(!ctx.matches(&[8], 5));
+        assert!(!matches(&ctx, &[7], 1));
+        assert!(!matches(&ctx, &[7], 5));
+        assert!(!matches(&ctx, &[8], 5));
+        assert!(!matches(&ctx, &[], usize::MAX));
+        // With an input coverage, a cursor past the run is no match.
+        let bytes = build_format3(&[&[7]], &[&[7]], &[], &[]);
+        let ctx = ChainContext::parse(&bytes).unwrap();
+        assert!(matches(&ctx, &[7, 7], 1));
+        assert!(!matches(&ctx, &[7], 5));
+        assert!(!matches(&ctx, &[7], usize::MAX));
     }
 
     #[test]

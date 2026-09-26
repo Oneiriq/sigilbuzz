@@ -5,10 +5,11 @@
 use alloc::vec::Vec;
 
 use super::gsub::{apply_gsub_lookup, apply_gsub_lookup_masked};
-use super::{feature_disabled, Feature, LookupBudget};
+use super::{feature_disabled, Feature, JoinerTable, LookupBudget};
 use crate::buffer::Glyph;
 use crate::ot::arabic::JoiningForm;
 use crate::tables::gdef::Gdef;
+use crate::tables::layout::Joiners;
 use crate::tables::Gsub;
 use crate::unicode::Script;
 
@@ -23,7 +24,14 @@ use crate::unicode::Script;
 /// `early_features` is the part of `ccmp` + `locl` that has not run
 /// yet (see [`early_default_features`]): the Arabic path and several
 /// complex shapers run both first. HarfBuzz runs the two in one stage,
-/// so their lookups interleave by lookup index.
+/// so their lookups interleave by lookup index. `table` is the joiner
+/// handling of the segment's shaper (Arabic runs its ligating features
+/// with manual ZWJ).
+///
+/// `hangul` says the buffer shapes with HarfBuzz's Hangul shaper, which
+/// turns `calt` off whatever the caller asks (`override_features_hangul`:
+/// Uniscribe does not apply it, and some CJK fonts put all their jamo
+/// lookups there).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_default_gsub(
     gsub: &Gsub<'_>,
@@ -34,40 +42,42 @@ pub(super) fn run_default_gsub(
     is_vertical: bool,
     script_priority: &[[u8; 4]],
     early_features: &[[u8; 4]],
+    table: JoinerTable,
+    hangul: bool,
     budget: &mut LookupBudget,
 ) {
-    apply_gsub_features_merged_budgeted(
-        gsub,
-        glyphs,
-        gdef,
-        features,
-        early_features,
-        script_priority,
-        budget,
-    );
+    let merged = |glyphs: &mut Vec<Glyph>, tags: &[[u8; 4]], budget: &mut LookupBudget| {
+        let priority = script_priority;
+        apply_gsub_features_merged_budgeted(
+            gsub, glyphs, gdef, features, tags, priority, table, budget,
+        );
+    };
+    let single = |glyphs: &mut Vec<Glyph>, tag: [u8; 4], alt: u16, budget: &mut LookupBudget| {
+        let joiners = table.joiners(tag);
+        let priority = script_priority;
+        apply_gsub_feature_budgeted(gsub, glyphs, gdef, tag, alt, priority, joiners, budget);
+    };
+    merged(glyphs, early_features, budget);
     if !feature_disabled(features, *b"rlig") {
-        apply_gsub_feature_budgeted(gsub, glyphs, gdef, *b"rlig", 0, script_priority, budget);
+        single(glyphs, *b"rlig", 0, budget);
     }
     if want_liga {
-        apply_gsub_feature_budgeted(gsub, glyphs, gdef, *b"liga", 0, script_priority, budget);
+        single(glyphs, *b"liga", 0, budget);
     }
     if !feature_disabled(features, *b"clig") {
-        apply_gsub_feature_budgeted(gsub, glyphs, gdef, *b"clig", 0, script_priority, budget);
+        single(glyphs, *b"clig", 0, budget);
     }
     // `calt` and `rclt` together: HarfBuzz's default horizontal
     // feature list enables both, and Mongolian fonts in particular
     // ship the same lookup set under both tags (calt for legacy,
     // rclt for required-contextual). Naively running each tag's
     // lookups in turn double-applies on those fonts.
-    apply_gsub_features_merged_budgeted(
-        gsub,
-        glyphs,
-        gdef,
-        features,
-        &[*b"calt", *b"rclt"],
-        script_priority,
-        budget,
-    );
+    let contextual: &[[u8; 4]] = if hangul {
+        &[*b"rclt"]
+    } else {
+        &[*b"calt", *b"rclt"]
+    };
+    merged(glyphs, contextual, budget);
     // Vertical writing: HarfBuzz auto-enables `vrt2` when the font
     // carries it, otherwise falls back to `vert`. The two tags
     // cannot be active together: `vrt2` (Vertical Alternates &
@@ -75,9 +85,9 @@ pub(super) fn run_default_gsub(
     if is_vertical {
         let has_vrt2 = feature_present(gsub, *b"vrt2");
         if has_vrt2 && !feature_disabled(features, *b"vrt2") {
-            apply_gsub_feature_budgeted(gsub, glyphs, gdef, *b"vrt2", 0, script_priority, budget);
+            single(glyphs, *b"vrt2", 0, budget);
         } else if !feature_disabled(features, *b"vert") {
-            apply_gsub_feature_budgeted(gsub, glyphs, gdef, *b"vert", 0, script_priority, budget);
+            single(glyphs, *b"vert", 0, budget);
         }
     }
     for feat in features {
@@ -88,15 +98,7 @@ pub(super) fn run_default_gsub(
             continue;
         }
         let alternate_idx = (feat.value.saturating_sub(1)).min(u32::from(u16::MAX)) as u16;
-        apply_gsub_feature_budgeted(
-            gsub,
-            glyphs,
-            gdef,
-            feat.tag,
-            alternate_idx,
-            script_priority,
-            budget,
-        );
+        single(glyphs, feat.tag, alternate_idx, budget);
     }
 }
 
@@ -106,7 +108,8 @@ pub(super) fn run_default_gsub(
 /// (`ccmp` with `locl`, `calt` with `rclt`), so a font whose lookups
 /// for one feature must interleave with another's keeps its intended
 /// order. Tags the caller disabled with a zero-valued [`Feature`] are
-/// skipped.
+/// skipped. A lookup shared by several of the features skips joiners
+/// only where all of them do (HarfBuzz merges the flags that way).
 ///
 /// Runs under a fresh [`LookupBudget`] for this one pass.
 pub(crate) fn apply_gsub_features_merged(
@@ -116,6 +119,7 @@ pub(crate) fn apply_gsub_features_merged(
     features: &[Feature],
     tags: &[[u8; 4]],
     script_priority: &[[u8; 4]],
+    table: JoinerTable,
 ) {
     let mut budget = LookupBudget::for_run(glyphs);
     apply_gsub_features_merged_budgeted(
@@ -125,12 +129,15 @@ pub(crate) fn apply_gsub_features_merged(
         features,
         tags,
         script_priority,
+        table,
         &mut budget,
     );
 }
 
 /// [`apply_gsub_features_merged`] under a caller-owned budget, so
-/// [`shape`] can share one budget across every lookup it applies.
+/// [`shape`](super::shape) can share one budget across every lookup
+/// it applies.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_gsub_features_merged_budgeted(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
@@ -138,18 +145,27 @@ pub(super) fn apply_gsub_features_merged_budgeted(
     features: &[Feature],
     tags: &[[u8; 4]],
     script_priority: &[[u8; 4]],
+    table: JoinerTable,
     budget: &mut LookupBudget,
 ) {
-    let mut indices: Vec<u16> = tags
-        .iter()
-        .filter(|tag| !feature_disabled(features, **tag))
-        .filter_map(|tag| lookup_indices_for_feature_in_scripts(gsub, *tag, script_priority))
-        .flatten()
-        .collect();
-    indices.sort_unstable();
-    indices.dedup();
-    for lookup_idx in indices {
-        apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, 0, budget);
+    let mut lookups: Vec<(u16, Joiners)> = Vec::new();
+    for &tag in tags {
+        if feature_disabled(features, tag) {
+            continue;
+        }
+        let joiners = table.joiners(tag);
+        for index in
+            lookup_indices_for_feature_in_scripts(gsub, tag, script_priority).unwrap_or_default()
+        {
+            match lookups.iter_mut().find(|(i, _)| *i == index) {
+                Some((_, j)) => *j = j.and(joiners),
+                None => lookups.push((index, joiners)),
+            }
+        }
+    }
+    lookups.sort_unstable_by_key(|&(index, _)| index);
+    for (lookup_idx, joiners) in lookups {
+        apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, 0, joiners, budget);
     }
 }
 
@@ -201,12 +217,14 @@ fn shaper_ran_locl_and_ccmp(script: Script, dominant: Option<Script>) -> bool {
 /// shapers do before anything else, when that keeps one glyph per
 /// code point; those shapers index their glyphs by code point, so a
 /// length-changing `ccmp` has to wait until after their positional
-/// work. Returns whether the stage ran.
+/// work. Returns whether the stage ran. `table` is the shaper's joiner
+/// handling.
 pub(crate) fn apply_locl_ccmp_if_length_preserving(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
     gdef: Option<&Gdef<'_>>,
     script_priority: &[[u8; 4]],
+    table: JoinerTable,
 ) -> bool {
     let mut trial = glyphs.clone();
     apply_gsub_features_merged(
@@ -216,6 +234,7 @@ pub(crate) fn apply_locl_ccmp_if_length_preserving(
         &[],
         &[*b"locl", *b"ccmp"],
         script_priority,
+        table,
     );
     if trial.len() != glyphs.len() {
         return false;
@@ -263,6 +282,8 @@ fn feature_present(gsub: &Gsub<'_>, tag: [u8; 4]) -> bool {
 /// subset. The table picks the first of those tags it lists, then
 /// `DFLT`, `dflt` or `latn`, and takes the feature from that script's
 /// language system alone (see [`crate::ot::layout_select`]).
+/// `joiners` is the feature's ZWJ/ZWNJ handling (see
+/// [`JoinerTable`]).
 ///
 /// Supports every GSUB lookup type:
 ///
@@ -289,6 +310,7 @@ pub(crate) fn apply_gsub_feature_in_scripts(
     tag: [u8; 4],
     alternate_index: u16,
     script_priority: &[[u8; 4]],
+    joiners: Joiners,
 ) {
     let mut budget = LookupBudget::for_run(glyphs);
     apply_gsub_feature_budgeted(
@@ -298,12 +320,15 @@ pub(crate) fn apply_gsub_feature_in_scripts(
         tag,
         alternate_index,
         script_priority,
+        joiners,
         &mut budget,
     );
 }
 
 /// [`apply_gsub_feature_in_scripts`] under a caller-owned budget, so
-/// [`shape`] can share one budget across every lookup it applies.
+/// [`shape`](super::shape) can share one budget across every lookup
+/// it applies.
+#[allow(clippy::too_many_arguments)]
 fn apply_gsub_feature_budgeted(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
@@ -311,6 +336,7 @@ fn apply_gsub_feature_budgeted(
     tag: [u8; 4],
     alternate_index: u16,
     script_priority: &[[u8; 4]],
+    joiners: Joiners,
     budget: &mut LookupBudget,
 ) {
     if glyphs.is_empty() {
@@ -326,7 +352,15 @@ fn apply_gsub_feature_budgeted(
     }
 
     for lookup_idx in lookup_indices {
-        apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, alternate_index, budget);
+        apply_gsub_lookup(
+            gsub,
+            lookup_idx,
+            glyphs,
+            gdef,
+            alternate_index,
+            joiners,
+            budget,
+        );
     }
 }
 
@@ -349,6 +383,7 @@ pub(crate) fn apply_gsub_feature_masked(
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
     mask: &[bool],
+    joiners: Joiners,
 ) {
     if glyphs.is_empty() {
         return;
@@ -362,7 +397,7 @@ pub(crate) fn apply_gsub_feature_masked(
     }
     let mut budget = LookupBudget::for_run(glyphs);
     for lookup_idx in lookup_indices {
-        apply_gsub_lookup_masked(gsub, lookup_idx, glyphs, gdef, mask, &mut budget);
+        apply_gsub_lookup_masked(gsub, lookup_idx, glyphs, gdef, mask, joiners, &mut budget);
     }
 }
 
@@ -394,8 +429,9 @@ pub(super) fn apply_arabic_positional_features(
             continue;
         }
         let mask: Vec<bool> = forms.iter().map(|&f| f == form).collect();
+        let joiners = JoinerTable::Arabic.joiners(tag);
         for lookup_idx in lookup_indices {
-            apply_gsub_lookup_masked(gsub, lookup_idx, glyphs, gdef, &mask, budget);
+            apply_gsub_lookup_masked(gsub, lookup_idx, glyphs, gdef, &mask, joiners, budget);
         }
     }
 }
@@ -434,13 +470,15 @@ fn lookup_indices_for_feature_in_scripts(
 /// lookups ligate, and single subtables uniformly. It is considerably
 /// more expensive than poking at individual subtable types, but we
 /// only call it per-syllable during Indic initial reordering, so the
-/// cost is bounded.
+/// cost is bounded. The scratch glyphs carry no joiners, so the
+/// feature's joiner handling (`joiners`) only matters for fidelity.
 pub(crate) fn feature_would_substitute(
     gsub: &Gsub<'_>,
     gdef: Option<&Gdef<'_>>,
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
     glyph_ids: &[u16],
+    joiners: Joiners,
 ) -> bool {
     if glyph_ids.is_empty() {
         return false;
@@ -453,7 +491,7 @@ pub(crate) fn feature_would_substitute(
         .map(|&id| Glyph::new(u32::from(id), 0))
         .collect();
     let before: Vec<u32> = scratch.iter().map(|g| g.glyph_id).collect();
-    apply_gsub_feature_in_scripts(gsub, &mut scratch, gdef, tag, 0, script_priority);
+    apply_gsub_feature_in_scripts(gsub, &mut scratch, gdef, tag, 0, script_priority, joiners);
     if scratch.len() != before.len() {
         return true;
     }

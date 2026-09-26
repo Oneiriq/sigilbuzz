@@ -23,21 +23,23 @@
 //!
 //!    Non-matching codepoints emit a one-wide Symbol/Broken syllable
 //!    so the segmenter always makes progress.
-//! 3. **Reorder** each syllable in place:
-//!    - Move every pre-base vowel sign (VPre) to sit immediately
-//!      before the base.
-//!    - Promote a leading Repha (R) to the USE reph slot, a no-op
-//!      for Khmer which has no repha, but wired so Myanmar's
-//!      kinzi slots straight in.
-//! 4. **Basic features**: per-syllable, applied via the GSUB
-//!    dispatcher in the script-tag order `khmr`/`khm2` -> DFLT. Order:
+//! 3. **Basic features**, on the logical order, applied via the GSUB
+//!    dispatcher in the script's tag order. Order:
 //!
 //!    ```text
-//!      locl -> ccmp -> rphf -> pref -> rkrf -> abvf -> blwf -> half
-//!           -> pstf -> vatu -> cjct -> isol
+//!      locl -> ccmp -> nukt -> akhn -> rphf -> pref -> rkrf -> abvf
+//!           -> blwf -> half -> pstf -> vatu -> cjct
 //!    ```
 //!
-//! 5. **Topographical features**, run after basic substitutions:
+//! 4. **Reorder** each syllable in place, as HarfBuzz's `reorder_use`
+//!    does after the basic features: every pre-base vowel sign (VPre),
+//!    and the glyph `pref` substituted, moves to the start of the
+//!    syllable or to just after the last halant before it.
+//!
+//!    Khmer and Myanmar reorder before their features instead (their
+//!    HarfBuzz shapers do), with the Khmer `coeng + ra` and Myanmar
+//!    kinzi moves.
+//! 5. **Topographical features**, run after the reorder:
 //!
 //!    ```text
 //!      abvs -> blws -> haln -> pres -> psts
@@ -47,14 +49,15 @@
 //!    standard kern/mark/mkmk plus the Khmer `dist` feature. This
 //!    module returns control to it after topographical GSUB.
 //!
-//! # Cluster integrity
+//! # Clusters
 //!
-//! Every reorder preserves cluster byte offsets: pre-base matra
-//! movement copies the source glyph (cluster and all), shifts the
-//! intervening glyphs right by one, and drops the matra in. The
-//! generic GSUB dispatcher already merges clusters when a ligature
-//! collapses components, so the surviving glyph carries the minimum
-//! byte offset of its source run.
+//! Every reorder moves glyphs with their clusters. At the monotone
+//! cluster levels a moved glyph and the glyphs it moved across then
+//! share their smallest cluster, the `merge_clusters` calls of
+//! HarfBuzz's Khmer, Myanmar, and USE reorderings; the other levels
+//! leave the clusters out of order. Ligatures merge in the GSUB
+//! dispatcher and graphemes before shaping starts, both by the same
+//! level, so no syllable-wide merge happens here.
 
 mod reorder;
 mod scripts;
@@ -62,17 +65,16 @@ mod syllable;
 
 use alloc::vec::Vec;
 
-use reorder::{code_point_clusters, initial_reorder, merge_syllable_clusters, pref_reorder};
+use reorder::{initial_reorder, record_pref, reorder_pre_base, tag_syllables};
 pub use scripts::{
     shape_balinese, shape_brahmi, shape_buginese, shape_cham, shape_hangul, shape_khojki,
-    shape_lao, shape_lepcha, shape_limbu, shape_modi, shape_myanmar, shape_nko,
-    shape_nko_in_context, shape_sharada, shape_sundanese, shape_tai_tham, shape_thai,
-    shape_tirhuta,
+    shape_lepcha, shape_limbu, shape_modi, shape_myanmar, shape_nko, shape_nko_in_context,
+    shape_sharada, shape_sundanese, shape_tai_tham, shape_tirhuta,
 };
 pub(crate) use syllable::{segment_syllables, Syllable, SyllableKind};
 
-use crate::buffer::Glyph;
-use crate::shape::apply_gsub_feature_in_scripts;
+use crate::buffer::{ClusterLevel, Glyph};
+use crate::shape::{apply_gsub_feature_in_scripts, JoinerTable};
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 
@@ -142,59 +144,54 @@ pub const TIRHUTA_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"tirh", *b"DFLT"];
 /// Modi script tag.
 pub const MODI_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"modi", *b"DFLT"];
 
-/// USE basic features, applied per-syllable before reordering
-/// finalization. Order matters: `rphf` must run before `half` so
-/// the ra+halant that would otherwise fold into a half-form is
-/// consumed as a reph first.
+/// USE features up to the reorder (HarfBuzz's `collect_features_use`),
+/// in order: the default glyph pre-processing group (`locl`, `ccmp`,
+/// `nukt`, `akhn`), the reordering group (`rphf`, then `pref`), and the
+/// orthographic unit shaping group (`rkrf` to `cjct`). Order matters:
+/// `rphf` must run before `half` so the ra+halant that would otherwise
+/// fold into a half-form is consumed as a reph first.
 ///
-/// `nukt` (nukta composition) and `akhn` (akhand) run with `locl`
-/// and `ccmp` in the default glyph pre-processing group. Indic-
-/// style USE scripts (Sharada, Tirhuta, Modi, Khojki, Brahmi) ship
-/// `akhn` lookups for ligatures of the form `ka + sign-i` that
-/// rustybuzz applies before reordering. Keep them at the head of
-/// the list for parity.
+/// HarfBuzz's topographical `isol`/`init`/`medi`/`fina` only reach the
+/// USE scripts with Arabic-style joining, which sigilbuzz shapes with
+/// their own joining passes (N'Ko, Mongolian).
 pub const USE_BASIC_FEATURES: &[&[u8; 4]] = &[
     b"locl", b"ccmp", b"nukt", b"akhn", b"rphf", b"pref", b"rkrf", b"abvf", b"blwf", b"half",
-    b"pstf", b"vatu", b"cjct", b"isol",
+    b"pstf", b"vatu", b"cjct",
 ];
 
 /// USE topographical features: run after basic substitutions have
 /// collapsed conjuncts into display forms.
 pub const USE_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] = &[b"abvs", b"blws", b"haln", b"pres", b"psts"];
 
-/// Myanmar's USE basic features. Adds `rphf` + `pref` + `blwf` +
-/// `pstf` + `cjct` for kinzi and medial consonant handling. The
-/// order mirrors the MS Myanmar shaping-model doc; `locl`/`ccmp`
-/// open the chain so contextual fixups settle before positional
-/// substitutions.
-pub const MYANMAR_BASIC_FEATURES: &[&[u8; 4]] = &[
-    b"locl", b"ccmp", b"rphf", b"pref", b"blwf", b"pstf", b"abvf", b"cjct",
-];
+/// Myanmar's features up to the basic ones: `locl` and `ccmp` before
+/// the syllable reorder, then `rphf` (kinzi), `pref`, `blwf`, and
+/// `pstf` after it (HarfBuzz's `myanmar_basic_features`).
+pub const MYANMAR_BASIC_FEATURES: &[&[u8; 4]] =
+    &[b"locl", b"ccmp", b"rphf", b"pref", b"blwf", b"pstf"];
 
-/// Myanmar's USE topographical features: display-form selection
-/// after the basic subs collapse conjuncts.
-pub const MYANMAR_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] =
-    &[b"abvs", b"blws", b"haln", b"pres", b"psts", b"calt"];
-
-/// Thai / Lao's feature set: no halant, no subjoining, so the
-/// shaper just needs contextual shaping + mark positioning. `liga`
-/// and `calt` handle most tone-mark placement adjustments.
-pub const THAI_LAO_FEATURES: &[&[u8; 4]] = &[b"ccmp", b"liga", b"calt"];
+/// Myanmar's other features, applied together once the syllables are
+/// done (HarfBuzz's `myanmar_other_features`).
+pub const MYANMAR_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] = &[b"pres", b"abvs", b"blws", b"psts"];
 
 /// Hangul Old-Hangul features: the three positional jamo features
-/// pick Leading/Vowel/Trailing variant shapes.
-pub const HANGUL_FEATURES: &[&[u8; 4]] = &[b"ccmp", b"ljmo", b"vjmo", b"tjmo", b"calt"];
+/// pick Leading/Vowel/Trailing variant shapes. HarfBuzz's Hangul
+/// shaper adds only these to the default features, which run once,
+/// in the default pass.
+pub const HANGUL_FEATURES: &[&[u8; 4]] = &[b"ljmo", b"vjmo", b"tjmo"];
 
 /// Entry point: shapes one Khmer run. `codepoints` is in
 /// one-to-one correspondence with `glyphs` on entry; after the call
 /// `glyphs` may be shorter (GSUB collapses) and reordered. Clusters
 /// track back to original byte offsets so the caller can map glyphs
-/// to input.
+/// to input. A reordered glyph shares one cluster with the glyphs it
+/// moved across at the monotone cluster `level`s, as in HarfBuzz's
+/// Khmer shaper.
 pub fn shape_khmer(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
     if codepoints.is_empty() || glyphs.is_empty() {
         return;
@@ -203,14 +200,13 @@ pub fn shape_khmer(
     // 1. Segment. One pass over the codepoints, emitting Syllable
     //    records that the reorder pass can consume directly.
     let syllables = segment_syllables(codepoints);
-    let byte_offsets = code_point_clusters(codepoints, glyphs);
 
     // 2. Initial reordering: pre-base vowel signs move before the
     //    base. Done BEFORE GSUB so features see the logical order
     //    fonts expect. Reordering is length-preserving, so glyph
     //    indices stay aligned with codepoints across this pass.
     for syllable in &syllables {
-        initial_reorder(codepoints, glyphs, syllable);
+        initial_reorder(codepoints, glyphs, syllable, level);
     }
 
     // 3. Basic features. The generic dispatcher in `shape.rs`
@@ -218,7 +214,16 @@ pub fn shape_khmer(
     //    the USE-mandated order.
     if let Some(gsub) = gsub {
         for tag in USE_BASIC_FEATURES {
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, KHMER_SCRIPT_PRIORITY);
+            let joiners = JoinerTable::Khmer.joiners(**tag);
+            apply_gsub_feature_in_scripts(
+                gsub,
+                glyphs,
+                gdef,
+                **tag,
+                0,
+                KHMER_SCRIPT_PRIORITY,
+                joiners,
+            );
         }
     }
 
@@ -226,41 +231,48 @@ pub fn shape_khmer(
     //    forms for the collapsed conjuncts.
     if let Some(gsub) = gsub {
         for tag in USE_TOPOGRAPHICAL_FEATURES {
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, KHMER_SCRIPT_PRIORITY);
+            let joiners = JoinerTable::Khmer.joiners(**tag);
+            apply_gsub_feature_in_scripts(
+                gsub,
+                glyphs,
+                gdef,
+                **tag,
+                0,
+                KHMER_SCRIPT_PRIORITY,
+                joiners,
+            );
         }
     }
-
-    // 5. Cluster merge. Every glyph belonging to a syllable gets
-    //    its cluster rewritten to the byte offset of the syllable's
-    //    first codepoint, matching HarfBuzz / rustybuzz so the
-    //    parity tests see identical cluster ids even after GSUB
-    //    has collapsed parts of the syllable.
-    merge_syllable_clusters(glyphs, &syllables, &byte_offsets);
 
     // Final GPOS (kern, mark, mkmk, dist) runs in the caller, see
     // shape.rs. That lets the generic mark-attachment machinery
     // handle Khmer's tone marks without a script-specific branch.
 }
 
-/// Generic USE shaping entry point, used by Myanmar, Thai, Lao and
-/// Old-Hangul runs. Mirrors [`shape_khmer`] but takes the script-
-/// priority table and the (basic, topographical) feature slices as
-/// parameters so each script can supply its own set. The syllable
-/// segmenter and pre-base reorder are script-agnostic: they run off
-/// the [`UseCategory`] / [`UsePosition`] tables which already encode
-/// per-script positional rules.
+/// Generic USE shaping entry point, used by Old-Hangul and the
+/// Universal Shaping Engine scripts. Takes the script-priority table
+/// and the (basic, topographical) feature slices as parameters so each
+/// script can supply its own set. The syllable segmenter and pre-base
+/// reorder are script-agnostic: they run off the [`UseCategory`] /
+/// [`UsePosition`] tables which already encode per-script positional
+/// rules.
 ///
-/// `reorder_prebase` controls whether the pre-base vowel reorder
-/// runs. Thai and Lao pre-base vowels (sara e and friends) are
-/// logically typed *before* the base consonant already, so the
-/// reorder pass would be a no-op at best and break clustering at
-/// worst. Passing `false` skips it.
-// The parameter list is public API, so it stays as is.
+/// As in HarfBuzz's USE shaper, the basic features see the logical
+/// order: the pre-base vowel signs, and the glyph `pref` substitutes in
+/// each syllable, move in front of their base only after them
+/// (`reorder_prebase`; Old Hangul has nothing to reorder, so it passes
+/// `false`).
+///
+/// `level` is the buffer's cluster level, which decides whether
+/// reordered glyphs merge clusters.
+///
+/// `table` is the joiner handling of the HarfBuzz shaper the script
+/// maps to (USE, or the default shaper for Hangul).
 ///
 /// [`UseCategory`]: crate::unicode::use_category::UseCategory
 /// [`UsePosition`]: crate::unicode::use_category::UsePosition
 #[allow(clippy::too_many_arguments)]
-pub fn shape_use(
+pub(crate) fn shape_use(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
@@ -269,6 +281,8 @@ pub fn shape_use(
     basic_features: &[&[u8; 4]],
     topographical_features: &[&[u8; 4]],
     reorder_prebase: bool,
+    level: ClusterLevel,
+    table: JoinerTable,
 ) {
     if codepoints.is_empty() || glyphs.is_empty() {
         return;
@@ -276,67 +290,40 @@ pub fn shape_use(
 
     // 1. Segment.
     let syllables = segment_syllables(codepoints);
-    let byte_offsets = code_point_clusters(codepoints, glyphs);
 
-    // 2. Initial reordering. Some scripts (Thai, Lao) type pre-base
-    //    vowels before the base already, so the reorder would break
-    //    cluster alignment. Skip it in that case.
-    if reorder_prebase {
-        for syllable in &syllables {
-            initial_reorder(codepoints, glyphs, syllable);
+    // 2. Basic features, on the logical order. The glyphs carry their
+    //    syllable and reorder category through GSUB, and `pref` marks
+    //    the first glyph it substitutes in each syllable as pre-base
+    //    (HarfBuzz's `record_pref_use`).
+    let reorder = reorder_prebase && tag_syllables(glyphs, codepoints, &syllables);
+    if let Some(gsub) = gsub {
+        for tag in basic_features {
+            let pref = reorder && **tag == *b"pref";
+            let before: Vec<u32> = if pref {
+                glyphs.iter().map(|g| g.glyph_id).collect()
+            } else {
+                Vec::new()
+            };
+            let joiners = table.joiners(**tag);
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority, joiners);
+            if pref {
+                record_pref(&before, glyphs);
+            }
         }
     }
 
-    // 3. Basic features. We split the chain so the `pref` feature
-    //    fires before the rest, with a per-syllable post-pref reorder
-    //    in between. That mirrors HarfBuzz/rustybuzz's USE shaper:
-    //    `pref` collapses a pre-base form (e.g. Cham medial-ra
-    //    `raMedial_cham` -> `raMedial_cham_pre`); after the
-    //    substitution the substituted glyph is treated as if it were
-    //    typed VPre, so the reorder pass moves it in front of the base.
-    //    Without this split the substituted pre-base form ends up
-    //    sitting after the base, diverging from rustybuzz on every
-    //    `pref`-driven font.
-    let has_pref = basic_features.contains(&b"pref");
-    if let Some(gsub) = gsub {
-        if reorder_prebase && has_pref {
-            // Snapshot pre-`pref` glyph IDs so the reorder can detect
-            // which positions actually changed.
-            let pre_ids: Vec<u32> = glyphs.iter().map(|g| g.glyph_id).collect();
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"pref", 0, script_priority);
-            // The pref pass on the fonts we care about is a single-subst
-            // (length-preserving), so the snapshot length still aligns.
-            // If a font ships a pref ligature that changes glyph count,
-            // the lengths diverge and we skip the reorder. The shaper
-            // still produces the post-pref output, just without the
-            // pre-base move.
-            if pre_ids.len() == glyphs.len() {
-                for syl in &syllables {
-                    pref_reorder(codepoints, glyphs, syl, &pre_ids);
-                }
-            }
-            for tag in basic_features {
-                if **tag == *b"pref" {
-                    continue;
-                }
-                apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority);
-            }
-        } else {
-            for tag in basic_features {
-                apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority);
-            }
-        }
+    // 3. The reorder, after the basic features (`reorder_use`).
+    if reorder {
+        reorder_pre_base(glyphs, level);
     }
 
     // 4. Topographical features.
     if let Some(gsub) = gsub {
         for tag in topographical_features {
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority);
+            let joiners = table.joiners(**tag);
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority, joiners);
         }
     }
-
-    // 5. Cluster merge.
-    merge_syllable_clusters(glyphs, &syllables, &byte_offsets);
 }
 
 #[cfg(test)]

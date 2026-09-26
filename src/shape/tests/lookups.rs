@@ -7,6 +7,7 @@ use crate::buffer::{unicode_prop, Glyph};
 use crate::shape::gsub::{expand_glyph_in_place, substitute_glyph};
 use crate::shape::segment::remap_segments;
 use crate::tables::gsub::ChainContextAny;
+use crate::tables::layout::Joiners;
 
 // ---------------------------------------------------------------
 // End-to-end fixtures for the contextual GSUB lookups. The font
@@ -649,10 +650,26 @@ fn standalone_feature_growth_is_capped_per_source_byte() {
     let gsub = face.gsub().unwrap().expect("GSUB");
 
     let mut glyphs = alloc::vec![Glyph::new(1, 0)];
-    apply_gsub_feature_in_scripts(&gsub, &mut glyphs, None, *b"test", 0, &[*b"DFLT"]);
+    apply_gsub_feature_in_scripts(
+        &gsub,
+        &mut glyphs,
+        None,
+        *b"test",
+        0,
+        DFLT_TEST,
+        Joiners::AUTO,
+    );
     assert_eq!(glyphs.len(), MAX_LEN_FACTOR);
     for _ in 0..2 {
-        apply_gsub_feature_in_scripts(&gsub, &mut glyphs, None, *b"test", 0, &[*b"DFLT"]);
+        apply_gsub_feature_in_scripts(
+            &gsub,
+            &mut glyphs,
+            None,
+            *b"test",
+            0,
+            DFLT_TEST,
+            Joiners::AUTO,
+        );
     }
     assert_eq!(glyphs.len(), MAX_LEN_FACTOR);
 }

@@ -18,6 +18,8 @@ fn glyph(cluster: u32, x_advance: i32) -> Glyph {
         y_offset: 0,
         unicode_props: 0,
         indic_position: 0,
+        char_class: 0,
+        combining_class: 0,
     }
 }
 

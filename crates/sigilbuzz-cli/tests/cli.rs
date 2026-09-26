@@ -194,6 +194,45 @@ fn shape_script_shapes_the_whole_text_as_one_script() {
     );
 }
 
+/// Clusters from `sigilbuzz shape font text extra...`.
+fn shaped_clusters(font: &Path, text: &str, extra: &[&str]) -> Vec<String> {
+    let mut args: Vec<&std::ffi::OsStr> = vec!["shape".as_ref(), font.as_os_str(), text.as_ref()];
+    args.extend(extra.iter().map(std::ffi::OsStr::new));
+    let (stdout, stderr, ok) = run_cli(args);
+    assert!(ok, "binary failed: stderr={stderr}");
+    stdout
+        .lines()
+        .map(|l| parse_field(l, "cluster=").to_owned())
+        .collect()
+}
+
+#[test]
+fn shape_bidi_prints_runs_in_visual_order() {
+    // "ab " then beh, alef: the Arabic run comes out right to left
+    // after the Latin run, and the clusters index the input text.
+    let font = write_tempfile("amiri.ttf", AMIRI);
+    let text = "ab \u{0628}\u{0627}";
+    assert_eq!(
+        shaped_clusters(&font, text, &["--bidi"]),
+        ["0", "1", "2", "5", "3"]
+    );
+    // Forcing a right-to-left paragraph puts the Latin run at the right.
+    assert_eq!(
+        shaped_clusters(&font, text, &["--bidi", "--direction", "rtl"]),
+        ["5", "3", "2", "0", "1"]
+    );
+    let (_stdout, stderr, ok) = run_cli([
+        "shape".as_ref(),
+        font.as_os_str(),
+        text.as_ref(),
+        "--bidi".as_ref(),
+        "--direction".as_ref(),
+        "ttb".as_ref(),
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("ltr or rtl"), "{stderr}");
+}
+
 #[test]
 fn shape_rejects_bad_script_and_language() {
     let font = open_sans_path();

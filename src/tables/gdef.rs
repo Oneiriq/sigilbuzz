@@ -172,6 +172,25 @@ impl<'a> Gdef<'a> {
         }
     }
 
+    /// True when the table carries a `GlyphClassDef` (a non-null
+    /// offset), HarfBuzz's `GDEF::has_glyph_classes`. Without one the
+    /// shaper synthesizes glyph classes from Unicode general categories
+    /// instead of reading them here.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::tables::gdef::Gdef;
+    ///
+    /// // GDEF 1.0 header with every subtable offset null.
+    /// let bytes = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    /// assert!(!Gdef::parse(&bytes).unwrap().has_glyph_classes());
+    /// ```
+    #[must_use]
+    pub const fn has_glyph_classes(&self) -> bool {
+        self.glyph_class_def.is_some()
+    }
+
     /// Raw `GlyphClassDef` value for `glyph_id`: 0 for a glyph the
     /// table does not list, otherwise the class number the font
     /// stores (1 base, 2 ligature, 3 mark, 4 component). `None` when

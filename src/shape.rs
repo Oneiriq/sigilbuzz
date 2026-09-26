@@ -4,7 +4,9 @@
 //!
 //! ```text
 //!   buffer.text  ->  split into chars (cluster = UTF-8 byte offset)
-//!                ->  cmap.glyph_id(ch)  (falls back to .notdef when missing)
+//!                ->  normalize against the font's cmap (decompose, reorder
+//!                    marks, recompose), mapping each char to its glyph id
+//!                    (.notdef when missing)
 //!                ->  hmtx.advance(gid)  (advance in font design units)
 //!                ->  Glyph { glyph_id, cluster, x_advance, ... }
 //! ```
@@ -17,7 +19,13 @@
 //!
 //! # What is here
 //!
-//! - cmap -> glyph id, then the full shaping pipeline in spec order.
+//! - HarfBuzz's font-aware normalization, which also maps characters
+//!   to glyphs (the `normalize` submodule): clusters decompose into
+//!   what the font supports, marks sort by combining class, and base
+//!   and mark pairs recompose when the font has the composite, with
+//!   the mode and hooks of the shaper HarfBuzz picks for the script
+//!   (the `shaper` submodule). Then the full shaping pipeline in spec
+//!   order.
 //! - GSUB lookup types 1 through 8, with Extension (type 7)
 //!   unwrapped: `ccmp`, `rlig`, `liga`, `clig`, `calt` run by
 //!   default; any user-enabled tag with non-zero value flows
@@ -41,6 +49,10 @@
 //!   across each pair the way HarfBuzz does (the `kern` submodule),
 //!   and HarfBuzz's mark-width zeroing per script (the `position`
 //!   submodule).
+//! - HarfBuzz's fallback positioning (the `fallback` submodule): the
+//!   widths of space characters drawn with the space glyph, and, when
+//!   no GPOS, `kerx`, or cross-stream `kern` table positions the run,
+//!   marks placed from their combining classes and glyph extents.
 //! - AAT `morx` substitution for fonts without GSUB.
 //!
 //! Any default-on feature can be suppressed by a `Feature { tag,
@@ -73,6 +85,19 @@
 //! vertical top-to-bottom layout. An explicit
 //! [`crate::Direction::Ltr`] keeps Mongolian horizontal.
 //!
+//! # Clusters and buffer flags
+//!
+//! Every glyph starts with the UTF-8 offset of its character as its
+//! cluster. The buffer's [`crate::ClusterLevel`] then decides, at each
+//! place HarfBuzz forms or merges clusters, whether that happens:
+//! grapheme forming before shaping, the merge of each reversed
+//! grapheme in a non-native direction, ligatures, the Indic, Khmer,
+//! Myanmar, and USE reorderings, Thai and Lao SARA AM, Old Hangul jamo
+//! sequences, and deleted default ignorables (see the `cluster`
+//! submodule). The [`crate::BufferFlags`] add HarfBuzz's dotted circle
+//! at the start of a paragraph (`BOT`), turn dotted circles off, and
+//! keep or remove default-ignorable glyphs instead of hiding them.
+//!
 //! # Limits
 //!
 //! Hostile fonts can nest lookups or chain multiple substitutions
@@ -85,42 +110,44 @@
 //!
 //! # What is not here
 //!
-//! - Full Unicode NFC normalization. sigilbuzz ships the
-//!   composition half of NFC (opt-in via
-//!   [`crate::Buffer::set_normalize_nfc`]); canonical
-//!   decomposition and combining-class reordering do not run, so
-//!   inputs that need reordering fall through unchanged.
 //! - Automatic direction detection: an unset direction shapes as LTR
 //!   even for Arabic or Hebrew text. Set [`crate::Direction::Rtl`]
 //!   explicitly to get HarfBuzz's RTL behavior and visual order.
-//! - The fallback mark positioner HarfBuzz uses for fonts without
-//!   GPOS.
 
 mod aat;
 mod attach;
+mod cluster;
 mod dotted_circle;
+mod fallback;
 mod features;
+mod glyph_props;
 mod gpos;
 mod gsub;
 mod gsub_parsed;
 mod hangul;
 mod ignorables;
+mod joiners;
 mod kern;
 mod lig;
 mod native_direction;
+mod normalize;
 mod pipeline;
 mod position;
 mod required;
 mod rotate;
 mod segment;
+mod shaper;
+mod thai;
 
 use aat::apply_kerx_format4;
+pub(crate) use cluster::{merge_clusters, merge_grapheme_clusters};
 pub(crate) use features::{
     apply_gsub_feature_in_scripts, apply_gsub_feature_masked, apply_gsub_features_merged,
     apply_locl_ccmp_if_length_preserving, feature_would_substitute,
 };
-use gsub::{apply_gsub_lookup, merge_clusters};
+use gsub::apply_gsub_lookup;
 use gsub_parsed::filter_for_lookup;
+pub(crate) use joiners::JoinerTable;
 pub use pipeline::shape;
 use segment::ProcessedSegment;
 

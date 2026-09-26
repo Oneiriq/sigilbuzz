@@ -46,9 +46,9 @@
 //!
 //! # Known limitations
 //!
-//! - Split matras (e.g. Tamil U+0BCA `O = e + aa`) are decomposed
-//!   before cmap by [`super::split_matra_decompose`], so this module
-//!   only ever sees their components.
+//! - Split matras (e.g. Tamil U+0BCA `O = e + aa`) decompose in the
+//!   shaper's normalization, with the Indic shaper's hooks, so this
+//!   module only ever sees their components.
 //! - Only `half` runs with a per-glyph mask. The other basic features
 //!   run across the whole run and rely on the font's lookups to touch
 //!   only the right glyphs.
@@ -64,9 +64,10 @@ use reorder::{
 pub(crate) use syllable::{segment_syllables, Syllable, SyllableKind};
 
 use super::{IndicConfig, RephMode, RephPosition};
-use crate::buffer::Glyph;
+use crate::buffer::{ClusterLevel, Glyph};
 use crate::shape::{
     apply_gsub_feature_in_scripts, apply_gsub_feature_masked, apply_locl_ccmp_if_length_preserving,
+    JoinerTable,
 };
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
@@ -88,6 +89,7 @@ pub fn shape_indic(
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
     config: &IndicConfig,
+    level: ClusterLevel,
 ) {
     if codepoints.is_empty() || glyphs.is_empty() {
         return;
@@ -112,12 +114,22 @@ pub fn shape_indic(
         tag_positions(codepoints, glyphs, syllable);
     }
 
+    // The joiner handling of HarfBuzz's shaper for the script: the
+    // Indic shaper's features take ZWJ and ZWNJ as ordinary glyphs;
+    // Sinhala goes to the Universal Shaping Engine instead.
+    let table = if config.script == Script::Sinhala {
+        JoinerTable::Use
+    } else {
+        JoinerTable::Indic
+    };
+    let prio = config.script_priority;
+
     // HarfBuzz runs `locl` and `ccmp` as one stage before initial
     // reordering. Everything below indexes glyphs by code point, so a
     // font whose `ccmp` changes the glyph count gets `locl` as the
     // first basic feature and `ccmp` last instead.
     let early = gsub.is_some_and(|gsub| {
-        apply_locl_ccmp_if_length_preserving(gsub, glyphs, gdef, config.script_priority)
+        apply_locl_ccmp_if_length_preserving(gsub, glyphs, gdef, config.script_priority, table)
     });
 
     // Initial reordering is per-syllable and mutates `glyphs` in
@@ -125,7 +137,7 @@ pub fn shape_indic(
     // in, same out) because decomposition runs separately, so
     // forward iteration is safe here.
     for syllable in &syllables {
-        initial_reorder(codepoints, glyphs, syllable);
+        initial_reorder(codepoints, glyphs, syllable, level);
     }
 
     // Basic features. Order matters: rphf must run before blwf
@@ -145,20 +157,15 @@ pub fn shape_indic(
     if let Some(gsub) = gsub {
         let half_mask = compute_half_mask(gsub, gdef, codepoints, glyphs, config, &syllables);
         if !early {
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"locl", 0, config.script_priority);
+            let joiners = table.joiners(*b"locl");
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"locl", 0, prio, joiners);
         }
-        for tag in INDIC_BASIC_FEATURES {
-            if *tag == b"half" {
-                apply_gsub_feature_masked(
-                    gsub,
-                    glyphs,
-                    gdef,
-                    **tag,
-                    config.script_priority,
-                    &half_mask,
-                );
+        for &&tag in INDIC_BASIC_FEATURES {
+            let joiners = table.joiners(tag);
+            if tag == *b"half" {
+                apply_gsub_feature_masked(gsub, glyphs, gdef, tag, prio, &half_mask, joiners);
             } else {
-                apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, config.script_priority);
+                apply_gsub_feature_in_scripts(gsub, glyphs, gdef, tag, 0, prio, joiners);
             }
         }
     }
@@ -168,15 +175,18 @@ pub fn shape_indic(
     // reph glyph via `rphf`; we locate it by the
     // `RaToBecomeReph` tag we set above, which the ligature path
     // preserved on the surviving glyph.
-    final_reorder_all(glyphs, &syllables, &byte_offsets, config);
+    // Pre-base matras merge their clusters with the base first.
+    final_reorder_all(glyphs, &syllables, &byte_offsets, config, level);
 
     // Presentation features.
     if let Some(gsub) = gsub {
-        for tag in INDIC_PRESENTATION_FEATURES {
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, config.script_priority);
+        for &&tag in INDIC_PRESENTATION_FEATURES {
+            let joiners = table.joiners(tag);
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, tag, 0, prio, joiners);
         }
         if !early {
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"ccmp", 0, config.script_priority);
+            let joiners = table.joiners(*b"ccmp");
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"ccmp", 0, prio, joiners);
         }
     }
 }
@@ -189,13 +199,14 @@ pub fn shape_devanagari(
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
     // `indic_config_for` has a Devanagari entry, so the early return
     // never fires.
     let Some(config) = super::indic_config_for(Script::Devanagari) else {
         return;
     };
-    shape_indic(gsub, gdef, codepoints, glyphs, &config);
+    shape_indic(gsub, gdef, codepoints, glyphs, &config, level);
 }
 
 /// Default Indic2 basic features, in application order. `locl` and

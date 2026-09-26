@@ -317,15 +317,51 @@ fn rle_pdf_pair_embeds_then_pops() {
     let info = BidiInfo::new("\u{202B}A\u{202C}B", None);
     let levels = info.levels();
     assert_eq!(levels.len(), 4);
-    // RLE itself: keeps paragraph level (0).
+    // RLE itself: nothing precedes it, so the paragraph level (0).
     assert_eq!(levels[0], 0);
     // 'A' inside RLE -> embedded at level 1, then I2 bumps L
     // by 1 -> level 2.
     assert_eq!(levels[1], 2);
-    // PDF: paragraph level.
-    assert_eq!(levels[2], 0);
+    // PDF: X9 removes it, and a removed character takes the level of
+    // the character before it, so it closes the embedded run.
+    assert_eq!(levels[2], 2);
     // 'B' back at paragraph level -> 0.
     assert_eq!(levels[3], 0);
+}
+
+// ---- Removed characters and L1 ----
+
+#[test]
+fn zwnj_inside_an_rtl_word_keeps_the_word_level() {
+    // Persian "mi" ZWNJ "khaham" in an LTR paragraph. ZWNJ is BN,
+    // which X9 removes; it takes the level of the letter before it
+    // instead of the paragraph level, so the word is one level-1 run.
+    let text = "a \u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}";
+    let info = BidiInfo::new(text, None);
+    assert_eq!(info.levels(), &[0, 0, 1, 1, 1, 1, 1]);
+    // ZWJ at the very start takes the paragraph level.
+    let info = BidiInfo::new("\u{200D}\u{0628}", Some(Direction::Ltr));
+    assert_eq!(info.levels(), &[0, 1]);
+}
+
+#[test]
+fn l1_resets_segment_separators_and_the_whitespace_before_them() {
+    // Hebrew, two spaces, TAB, Hebrew in an LTR paragraph: N1 would
+    // give the spaces and the tab level 1 (R on both sides); L1 puts
+    // the tab and the spaces before it back at the paragraph level.
+    let info = BidiInfo::new("\u{05D0}  \t\u{05D1}", Some(Direction::Ltr));
+    assert_eq!(info.levels(), &[1, 0, 0, 0, 1]);
+}
+
+#[test]
+fn l1_resets_trailing_whitespace_and_controls() {
+    // RLE "ab " PDF at the end of an LTR paragraph: the space and the
+    // PDF trail the text, so they return to level 0.
+    let info = BidiInfo::new("x\u{202B}ab \u{202C}", None);
+    assert_eq!(info.levels(), &[0, 0, 2, 2, 0, 0]);
+    // A space inside the text is not trailing.
+    let info = BidiInfo::new("\u{05D0} \u{05D1}", Some(Direction::Ltr));
+    assert_eq!(info.levels(), &[1, 1, 1]);
 }
 
 #[test]

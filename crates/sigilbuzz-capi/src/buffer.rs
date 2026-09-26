@@ -11,19 +11,22 @@ use sigilbuzz::Buffer;
 use crate::common::{c_str_bytes, map_direction_in};
 use crate::opaque::BufferInner;
 use crate::{
-    buffer_text, handle, hb_buffer_t, hb_direction_t, hb_glyph_info_t, hb_glyph_position_t,
-    hb_language_t, hb_script_t, spin_mutex, BufferState, HB_DIRECTION_INVALID, HB_SCRIPT_INVALID,
+    buffer_flags, buffer_text, handle, hb_buffer_t, hb_direction_t, hb_glyph_info_t,
+    hb_glyph_position_t, hb_language_t, hb_script_t, spin_mutex, BufferState, HB_DIRECTION_INVALID,
+    HB_SCRIPT_INVALID,
 };
 
 // ---------------------------------------------------------------------------
 // Buffer
 // ---------------------------------------------------------------------------
 
-/// Allocates an empty buffer with refcount 1. Direction, script, and
-/// language start unset.
+/// Allocates an empty buffer with refcount 1, HarfBuzz's default flags,
+/// and its default cluster level
+/// (`HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES`). Direction, script,
+/// and language start unset.
 #[no_mangle]
 pub extern "C" fn hb_buffer_create() -> *mut hb_buffer_t {
-    let state = BufferState {
+    let mut state = BufferState {
         buffer: Buffer::new(),
         direction: HB_DIRECTION_INVALID,
         script: HB_SCRIPT_INVALID,
@@ -31,7 +34,10 @@ pub extern "C" fn hb_buffer_create() -> *mut hb_buffer_t {
         glyph_infos: Vec::new(),
         glyph_positions: Vec::new(),
         clusters: buffer_text::ClusterTable::default(),
+        flags: buffer_flags::HB_BUFFER_FLAG_DEFAULT,
+        cluster_level: buffer_flags::HB_BUFFER_CLUSTER_LEVEL_DEFAULT,
     };
+    buffer_flags::restore_defaults(&mut state);
     handle::into_raw(hb_buffer_t {
         inner: BufferInner {
             state: spin_mutex::SpinMutex::new(state),
@@ -62,6 +68,10 @@ pub unsafe extern "C" fn hb_buffer_reference(buffer: *mut hb_buffer_t) -> *mut h
     unsafe { handle::reference(buffer) }
 }
 
+/// Empties the buffer and restores every setting, HarfBuzz's
+/// `hb_buffer_reset`: the flags and cluster level go back to their
+/// defaults, then everything `hb_buffer_clear_contents` drops goes too.
+///
 /// # Safety
 /// `buffer` must be null or valid.
 #[no_mangle]
@@ -73,14 +83,13 @@ pub unsafe extern "C" fn hb_buffer_reset(buffer: *mut hb_buffer_t) {
     // to a live `hb_buffer_t`.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
-    state.buffer.clear();
-    state.direction = HB_DIRECTION_INVALID;
-    state.script = HB_SCRIPT_INVALID;
-    state.language = ptr::null();
-    state.glyph_infos.clear();
-    state.glyph_positions.clear();
+    buffer_flags::restore_defaults(&mut state);
+    buffer_text::clear_contents(&mut state);
 }
 
+/// Empties the buffer but keeps its settings (flags and cluster
+/// level), HarfBuzz's `hb_buffer_clear_contents`.
+///
 /// # Safety
 /// `buffer` must be null or valid.
 #[no_mangle]
@@ -123,9 +132,7 @@ pub unsafe extern "C" fn hb_buffer_add_utf8(
     // Clusters are byte offsets into `text`, context comes from the
     // bytes around the item, and malformed UTF-8 becomes U+FFFD, all
     // as in HarfBuzz.
-    let Some(item_length) = buffer_text::ItemLength::from_c(item_length) else {
-        return;
-    };
+    let item_length = buffer_text::ItemLength::from_c(item_length);
     buffer_text::add::<buffer_text::Utf8>(
         &mut state,
         total_bytes,
@@ -170,9 +177,7 @@ pub unsafe extern "C" fn hb_buffer_add_utf16(
     let mut state = inner.state.lock();
     // Clusters are UTF-16 code-unit offsets into `text`; lone
     // surrogates become U+FFFD, as in HarfBuzz.
-    let Some(item_length) = buffer_text::ItemLength::from_c(item_length) else {
-        return;
-    };
+    let item_length = buffer_text::ItemLength::from_c(item_length);
     buffer_text::add::<buffer_text::Utf16>(
         &mut state,
         total_units,

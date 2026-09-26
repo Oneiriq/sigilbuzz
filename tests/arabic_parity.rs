@@ -154,9 +154,11 @@ fn assert_parity_on(text: &str) {
              sigilbuzz={} rustybuzz={}",
             sig_g.glyph_id, rb_info.glyph_id
         );
-        // Clusters are not compared: HarfBuzz merges a mark's cluster
-        // into its base's (and a ZWJ's into its neighbor's), which
-        // sigilbuzz does not do yet. Order is still pinned by the ids.
+        // Clusters are not compared: rustybuzz's default level,
+        // MONOTONE_GRAPHEMES, merges a mark's cluster into its base's
+        // (and a ZWJ's into its neighbor's), and this buffer keeps
+        // sigilbuzz's default, MONOTONE_CHARACTERS. Order is still
+        // pinned by the ids.
         assert_eq!(
             (sig_g.x_advance, sig_g.y_advance),
             (rb_pos.x_advance, rb_pos.y_advance),

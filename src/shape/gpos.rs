@@ -3,7 +3,8 @@
 //! HarfBuzz runs every GPOS feature of a shaping plan in one stage:
 //! it collects the lookups of all enabled features (`abvm`, `blwm`,
 //! `mark`, `mkmk`, plus `curs`, `dist` and `kern` for horizontal runs,
-//! plus whatever the caller enables), and applies them once each in
+//! plus whatever the caller enables, plus the language system's
+//! required feature whatever its tag), and applies them once each in
 //! lookup-list order ([`stage_lookups`], [`apply_stage`]). A lookup
 //! shared by two features runs once, and the font's lookup order,
 //! not the feature order, decides what runs first.
@@ -15,11 +16,12 @@
 //! the pair positions it, past a context match, or to the next glyph).
 //!
 //! Iteration inside a lookup (a pair's second glyph, a mark's base, a
-//! cursive predecessor) uses [`Skipper`], HarfBuzz's skipping iterator
-//! for GPOS: glyphs the lookup flags ignore are passed over, and so are
-//! default-ignorable characters (ZWNJ always, ZWJ unless the lookup
-//! belongs to `mark` or `mkmk`, which HarfBuzz registers with manual
-//! joiners).
+//! cursive predecessor, contextual input, backtrack and lookahead)
+//! follows HarfBuzz's skipping iterator for GPOS (see
+//! [`crate::tables::layout::skip_iter`]): glyphs the lookup flags
+//! ignore are passed over, and so are default-ignorable characters
+//! (ZWNJ and hidden ones always, ZWJ unless the lookup belongs to
+//! `mark` or `mkmk`, which HarfBuzz registers with manual joiners).
 
 use alloc::vec::Vec;
 
@@ -28,12 +30,16 @@ use super::{
     feature_disabled, filter_for_lookup, resolve_extension, Feature, LookupBudget, VarCtx,
     MAX_NESTED_DEPTH,
 };
-use crate::buffer::{unicode_prop, Glyph};
+use crate::buffer::Glyph;
 use crate::tables::gdef::Gdef;
 use crate::tables::gpos::{
     lookup_type as gpos_lt, ChainContextPos, ContextPos, PairPos, SinglePos, ValueRecord,
 };
-use crate::tables::layout::{Lookup, MatchFilter, SequenceLookupRecord};
+use crate::tables::layout::skip_iter::{apply_nested as apply_records, MaySkip};
+use crate::tables::layout::{
+    InputMatch, Joiners, LayoutTable, Lookup, MatchContext, MatchGlyph, SequenceLookupRecord,
+    SkipRules,
+};
 use crate::tables::Gpos;
 
 /// GPOS features HarfBuzz enables for every run.
@@ -46,9 +52,9 @@ const HORIZONTAL_FEATURES: [[u8; 4]; 3] = [*b"curs", *b"dist", *b"kern"];
 pub(super) struct StageLookup {
     /// Index into the GPOS LookupList.
     pub(super) index: u16,
-    /// HarfBuzz's `auto_zwj`: whether the lookup's iteration skips
-    /// ZWJ. False when the lookup belongs to `mark` or `mkmk`.
-    pub(super) auto_zwj: bool,
+    /// HarfBuzz's `auto_zwnj` / `auto_zwj`: manual for the lookups of
+    /// `mark` and `mkmk`.
+    pub(super) joiners: Joiners,
 }
 
 /// The lookups of every GPOS feature this run enables, sorted by
@@ -56,9 +62,14 @@ pub(super) struct StageLookup {
 /// zero-valued [`Feature`] are left out; any other tag the caller
 /// turns on joins the stage. `lookups_for` resolves one tag to its
 /// lookup indices for the run's script.
+///
+/// `required` holds the lookups of the language system's required
+/// feature. HarfBuzz adds those to the GPOS stage whatever their tag
+/// and whether or not the caller disabled it, with automatic joiners.
 pub(super) fn stage_lookups(
     features: &[Feature],
     horizontal: bool,
+    required: &[u16],
     mut lookups_for: impl FnMut([u8; 4]) -> Vec<u16>,
 ) -> Vec<StageLookup> {
     let mut tags: Vec<[u8; 4]> = COMMON_FEATURES.to_vec();
@@ -71,16 +82,24 @@ pub(super) fn stage_lookups(
         }
     }
     let mut out: Vec<StageLookup> = Vec::new();
+    let mut add = |index: u16, joiners: Joiners| match out.iter_mut().find(|l| l.index == index) {
+        Some(l) => l.joiners = l.joiners.and(joiners),
+        None => out.push(StageLookup { index, joiners }),
+    };
+    for &index in required {
+        add(index, Joiners::AUTO);
+    }
     for tag in tags {
         if feature_disabled(features, tag) {
             continue;
         }
-        let auto_zwj = !matches!(&tag, b"mark" | b"mkmk");
+        let joiners = if matches!(&tag, b"mark" | b"mkmk") {
+            Joiners::MANUAL
+        } else {
+            Joiners::AUTO
+        };
         for index in lookups_for(tag) {
-            match out.iter_mut().find(|l| l.index == index) {
-                Some(l) => l.auto_zwj &= auto_zwj,
-                None => out.push(StageLookup { index, auto_zwj }),
-            }
+            add(index, joiners);
         }
     }
     out.sort_by_key(|l| l.index);
@@ -106,36 +125,30 @@ pub(super) fn apply_stage(
     if glyphs.is_empty() {
         return;
     }
-    // Positioning never changes glyph ids, so one id snapshot serves
-    // every context match of the stage.
-    let ids: Vec<u16> = glyphs.iter().map(|g| g.glyph_id as u16).collect();
+    // Positioning never changes glyph ids or props, so one snapshot
+    // serves every match of the stage.
+    let run: Vec<MatchGlyph> = glyphs.iter().map(MatchGlyph::from).collect();
     for l in lookups {
-        apply_lookup(cx, glyphs, att, &ids, *l, budget);
+        apply_lookup(cx, glyphs, att, &run, *l, budget);
     }
 }
 
-/// HarfBuzz's skipping iterator, for iteration that accepts any glyph
-/// (no match function): a glyph is passed over when the lookup flags
-/// ignore it, or when it is an unsubstituted default-ignorable
-/// character other than a ZWJ the lookup must see.
-pub(super) struct Skipper<'f> {
-    filter: &'f MatchFilter<'f>,
-    ignore_zwj: bool,
+/// HarfBuzz's skipping iterator over the glyphs themselves, for
+/// iteration that accepts any glyph (no match function): a glyph is
+/// passed over when the walk's rules skip it or it is a default
+/// ignorable they let go.
+pub(super) struct Skipper<'r> {
+    rules: SkipRules<'r>,
 }
 
-impl<'f> Skipper<'f> {
-    pub(super) const fn new(filter: &'f MatchFilter<'f>, ignore_zwj: bool) -> Self {
-        Self { filter, ignore_zwj }
+impl<'r> Skipper<'r> {
+    pub(super) const fn new(rules: SkipRules<'r>) -> Self {
+        Self { rules }
     }
 
     /// True when iteration passes over `g`.
     pub(super) fn skips(&self, g: &Glyph) -> bool {
-        if self.filter.is_skipped(g.glyph_id as u16) {
-            return true;
-        }
-        let props = g.unicode_props;
-        props & unicode_prop::DEFAULT_IGNORABLE != 0
-            && (self.ignore_zwj || props & unicode_prop::JOINER == 0)
+        self.rules.may_skip(MatchGlyph::from(g)) != MaySkip::No
     }
 
     /// First glyph at or after `from` that iteration stops at.
@@ -194,22 +207,17 @@ fn parse_subtables<'a>(lookup: &Lookup<'a>) -> Vec<PosSubtable<'a>> {
     out
 }
 
-/// Per-lookup state shared by every subtable of one lookup.
+/// Per-lookup state shared by every subtable of one lookup: its flags,
+/// its feature's joiner handling, and its index in the LookupList.
 struct LookupState<'a> {
-    filter: MatchFilter<'a>,
-    flag: u16,
-    mark_filtering_set: Option<u16>,
-    auto_zwj: bool,
+    mcx: MatchContext<'a>,
     index: u16,
 }
 
 impl<'a> LookupState<'a> {
-    fn new(lookup: &Lookup<'a>, gdef: Option<&'a Gdef<'a>>, auto_zwj: bool, index: u16) -> Self {
+    fn new(lookup: &Lookup<'a>, gdef: Option<&'a Gdef<'a>>, joiners: Joiners, index: u16) -> Self {
         Self {
-            filter: filter_for_lookup(lookup, gdef),
-            flag: lookup.flag(),
-            mark_filtering_set: lookup.mark_filtering_set(),
-            auto_zwj,
+            mcx: MatchContext::new(filter_for_lookup(lookup, gdef), LayoutTable::Gpos, joiners),
             index,
         }
     }
@@ -220,7 +228,7 @@ fn apply_lookup(
     cx: &GposCx<'_>,
     glyphs: &mut [Glyph],
     att: &mut Attach<'_>,
-    ids: &[u16],
+    run: &[MatchGlyph],
     stage: StageLookup,
     budget: &mut LookupBudget,
 ) {
@@ -231,16 +239,19 @@ fn apply_lookup(
     if subtables.is_empty() {
         return;
     }
-    let state = LookupState::new(&lookup, cx.gdef, stage.auto_zwj, stage.index);
+    let state = LookupState::new(&lookup, cx.gdef, stage.joiners, stage.index);
     // Each lookup starts with no remembered mark base, as in HarfBuzz.
     att.reset_base_cache();
     let mut i = 0;
     while i < glyphs.len() {
-        if state.filter.is_skipped(glyphs[i].glyph_id as u16) {
+        if run
+            .get(i)
+            .is_some_and(|&g| state.mcx.filter().is_skipped(g))
+        {
             i += 1;
             continue;
         }
-        i = match apply_subtables_at(cx, &subtables, &state, glyphs, att, ids, i, 0, budget) {
+        i = match apply_subtables_at(cx, &subtables, &state, glyphs, att, run, i, 0, budget) {
             Some(next) => next.max(i + 1),
             None => i + 1,
         };
@@ -250,17 +261,18 @@ fn apply_lookup(
 /// Applies one lookup at position `at` only, for a contextual
 /// lookup's nested records. As in HarfBuzz the glyph's properties are
 /// not checked against the nested lookup's flags; its subtables just
-/// try to apply. Every call spends one unit of `budget` and does
-/// nothing once the budget is gone.
+/// try to apply, with the outer feature's joiner handling. Every call
+/// spends one unit of `budget` and does nothing once the budget is
+/// gone.
 #[allow(clippy::too_many_arguments)]
 fn apply_lookup_at(
     cx: &GposCx<'_>,
     lookup_index: u16,
     glyphs: &mut [Glyph],
     att: &mut Attach<'_>,
-    ids: &[u16],
+    run: &[MatchGlyph],
     at: usize,
-    auto_zwj: bool,
+    joiners: Joiners,
     depth: u8,
     budget: &mut LookupBudget,
 ) {
@@ -271,8 +283,8 @@ fn apply_lookup_at(
         return;
     };
     let subtables = parse_subtables(&lookup);
-    let state = LookupState::new(&lookup, cx.gdef, auto_zwj, lookup_index);
-    apply_subtables_at(cx, &subtables, &state, glyphs, att, ids, at, depth, budget);
+    let state = LookupState::new(&lookup, cx.gdef, joiners, lookup_index);
+    apply_subtables_at(cx, &subtables, &state, glyphs, att, run, at, depth, budget);
 }
 
 /// Tries each subtable at `at` in order. Returns where the cursor goes
@@ -284,64 +296,48 @@ fn apply_subtables_at(
     state: &LookupState<'_>,
     glyphs: &mut [Glyph],
     att: &mut Attach<'_>,
-    ids: &[u16],
+    run: &[MatchGlyph],
     at: usize,
     depth: u8,
     budget: &mut LookupBudget,
 ) -> Option<usize> {
     let horizontal = att.direction.is_horizontal();
+    let mcx = &state.mcx;
     for sub in subtables {
         let next = match sub {
-            PosSubtable::Single(sp, base) => sp.adjustment(glyphs[at].glyph_id as u16).map(|v| {
-                apply_value(&mut glyphs[at], &v, base, cx.var, horizontal);
-                at + 1
-            }),
+            PosSubtable::Single(sp, base) => {
+                let glyph = glyphs.get_mut(at)?;
+                sp.adjustment(glyph.glyph_id as u16).map(|v| {
+                    apply_value(glyph, &v, base, cx.var, horizontal);
+                    at + 1
+                })
+            }
             PosSubtable::Pair(pp) => apply_pair(pp, state, glyphs, at, cx.var, horizontal),
             PosSubtable::Attach(sub) => {
-                let lcx = LookupCx {
-                    gdef: cx.gdef,
-                    filter: &state.filter,
-                    lookup_flag: state.flag,
-                    mark_filtering_set: state.mark_filtering_set,
-                    ignore_zwj: state.auto_zwj,
-                    var: cx.var,
-                    lookup_index: state.index,
-                };
+                let lcx = LookupCx::new(mcx.input(), cx.var, state.index);
                 attach::apply_at(sub, glyphs, att, &lcx, at).then_some(at + 1)
             }
             PosSubtable::Context(ctx) => {
-                let matched = match ctx {
-                    ContextPos::Format1(c) => c
-                        .matches_filtered(ids, at, &state.filter)
-                        .map(|(n, l)| (n, l.to_vec())),
-                    ContextPos::Format2(c) => c
-                        .matches_filtered(ids, at, &state.filter)
-                        .map(|(n, l)| (n, l.to_vec())),
-                    ContextPos::Format3(c) => c
-                        .matches_filtered(ids, at, &state.filter)
-                        .map(|n| (n, c.lookups().to_vec())),
-                };
-                matched.map(|(len, records)| {
-                    apply_nested(cx, state, glyphs, att, ids, at, depth, &records, budget);
-                    at + len.max(1)
-                })
+                let (m, records) = match ctx {
+                    ContextPos::Format1(c) => c.matches(run, at, mcx),
+                    ContextPos::Format2(c) => c.matches(run, at, mcx),
+                    ContextPos::Format3(c) => c.matches(run, at, mcx).map(|m| (m, c.lookups())),
+                }?;
+                Some(apply_nested(
+                    cx, state, glyphs, att, run, m, records, depth, budget,
+                ))
             }
             PosSubtable::Chain(chain) => {
-                let matched = match chain {
-                    ChainContextPos::Format1(c) => c
-                        .matches_filtered(ids, at, &state.filter)
-                        .map(|(n, l)| (n, l.to_vec())),
-                    ChainContextPos::Format2(c) => c
-                        .matches_filtered(ids, at, &state.filter)
-                        .map(|(n, l)| (n, l.to_vec())),
-                    ChainContextPos::Format3(c) => c
-                        .matches_filtered(ids, at, &state.filter)
-                        .map(|n| (n, c.lookups().to_vec())),
-                };
-                matched.map(|(len, records)| {
-                    apply_nested(cx, state, glyphs, att, ids, at, depth, &records, budget);
-                    at + len.max(1)
-                })
+                let (m, records) = match chain {
+                    ChainContextPos::Format1(c) => c.matches(run, at, mcx),
+                    ChainContextPos::Format2(c) => c.matches(run, at, mcx),
+                    ChainContextPos::Format3(c) => {
+                        c.matches(run, at, mcx).map(|m| (m, c.lookups()))
+                    }
+                }?;
+                Some(apply_nested(
+                    cx, state, glyphs, att, run, m, records, depth, budget,
+                ))
             }
         };
         if next.is_some() {
@@ -355,6 +351,10 @@ fn apply_subtables_at(
 /// and applies the pair's records. HarfBuzz leaves the cursor on the
 /// second glyph so it can start the next pair, unless the subtable's
 /// `valueFormat2` is nonzero, in which case it moves past it.
+///
+/// As in HarfBuzz, the first glyph's coverage is checked before the
+/// search: a long run of glyphs the walk skips would otherwise be
+/// scanned again from every glyph in it.
 fn apply_pair(
     pp: &PairPos<'_>,
     state: &LookupState<'_>,
@@ -363,9 +363,11 @@ fn apply_pair(
     var: &VarCtx<'_>,
     horizontal: bool,
 ) -> Option<usize> {
-    let skipper = Skipper::new(&state.filter, state.auto_zwj);
-    let j = skipper.next(glyphs, at + 1)?;
-    let first = glyphs[at].glyph_id as u16;
+    let first = glyphs.get(at)?.glyph_id as u16;
+    if !pp.covers(first) {
+        return None;
+    }
+    let j = Skipper::new(state.mcx.input()).next(glyphs, at + 1)?;
     let second = glyphs[j].glyph_id as u16;
     let (v1, v2, base) = pp.lookup_with_device_base(first, second)?;
     let (left, right) = glyphs.split_at_mut(j);
@@ -374,44 +376,31 @@ fn apply_pair(
     Some(if pp.value_format2() != 0 { j + 1 } else { j })
 }
 
-/// Dispatches a contextual match's nested lookup records. A record's
-/// sequence index counts the positions the lookup flags keep, so it
-/// is walked with the lookup's filter from the match start.
+/// Dispatches a contextual match's nested lookup records at the
+/// matched input positions (HarfBuzz's `apply_lookup`; positioning
+/// never changes the run's length). Returns where the walk continues:
+/// the end of the match. Records past the end of `budget` do not run.
 #[allow(clippy::too_many_arguments)]
 fn apply_nested(
     cx: &GposCx<'_>,
     state: &LookupState<'_>,
     glyphs: &mut [Glyph],
     att: &mut Attach<'_>,
-    ids: &[u16],
-    at: usize,
-    depth: u8,
+    run: &[MatchGlyph],
+    mut m: InputMatch,
     records: &[SequenceLookupRecord],
+    depth: u8,
     budget: &mut LookupBudget,
-) {
-    for rec in records {
+) -> usize {
+    let joiners = state.mcx.joiners();
+    let len = glyphs.len();
+    apply_records(&mut m.positions, m.end, len, records, |lookup, at| {
         if budget.exhausted() {
-            return;
+            return None;
         }
-        let mut pos = at;
-        for _ in 0..rec.sequence_index {
-            match state.filter.next_unskipped(ids, pos + 1) {
-                Some(p) => pos = p,
-                None => return,
-            }
-        }
-        apply_lookup_at(
-            cx,
-            rec.lookup_list_index,
-            glyphs,
-            att,
-            ids,
-            pos,
-            state.auto_zwj,
-            depth + 1,
-            budget,
-        );
-    }
+        apply_lookup_at(cx, lookup, glyphs, att, run, at, joiners, depth + 1, budget);
+        Some(0)
+    })
 }
 
 /// Applies one ValueRecord to `glyph`, HarfBuzz's

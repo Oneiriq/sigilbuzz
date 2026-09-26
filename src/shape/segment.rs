@@ -8,9 +8,10 @@ use crate::unicode::{script_of, Script};
 
 /// One shape-time segment: a maximal run of codepoints that share a
 /// resolved script. `cp_range` is a half-open range into the
-/// post-cmap `codepoints` vector (not into the buffer text, because
-/// Khmer split-vowel preprocessing can insert synthetic codepoints).
-/// Pre-GSUB, `glyphs[cp_range]` covers exactly the same glyphs.
+/// `codepoints` vector (not into the buffer text, because
+/// preprocessing and normalization change the characters; the
+/// normalizer rewrites the ranges after it runs). Pre-GSUB,
+/// `glyphs[cp_range]` covers exactly the same glyphs.
 #[derive(Debug)]
 pub(super) struct Segment {
     pub(super) cp_range: core::ops::Range<usize>,
@@ -100,10 +101,17 @@ pub(super) fn build_segments(codepoints: &[char]) -> Vec<Segment> {
     segments
 }
 
-/// Shape-time COMMON / INHERITED predicate: stays in lockstep with
-/// the buffer-level `is_common_or_inherited` in `buffer.rs`. Kept
-/// inside `shape.rs` so the Khmer-split synthetic codepoints (which
-/// never land in the buffer's text) still segment correctly.
+/// Shape-time COMMON / INHERITED predicate: the buffer-level
+/// `is_common_or_inherited` in `buffer.rs`, plus the default
+/// ignorables of those scripts. Kept inside `shape.rs` so the
+/// Khmer-split synthetic codepoints (which never land in the buffer's
+/// text) still segment correctly.
+///
+/// A default ignorable (ZWSP, word joiner, variation selectors, tag
+/// characters, ...) has to stay in its neighbors' segment: GSUB and
+/// GPOS match across it (see the `skip_iter` module), which they
+/// cannot do when it splits the run. The Khmer and Mongolian ones
+/// have their own script and segment with it anyway.
 pub(super) const fn is_common_for_segmentation(ch: char) -> bool {
     let cp = ch as u32;
     matches!(
@@ -114,6 +122,9 @@ pub(super) const fn is_common_for_segmentation(ch: char) -> bool {
         | 0x007B..=0x007F
         | 0x00A0..=0x00BF
         | 0x200C | 0x200D | 0x200E | 0x200F | 0x061C
+        // U+25CC DOTTED CIRCLE is Common: the one `hb_insert_dotted_circle`
+        // puts at the start of the text belongs to the mark after it.
+        | 0x25CC
         // INHERITED combining-mark blocks: must extend the preceding
         // real-script segment so GSUB dispatches under the right
         // priority. Matches `buffer::is_common_or_inherited`.
@@ -121,7 +132,7 @@ pub(super) const fn is_common_for_segmentation(ch: char) -> bool {
         | 0x1DC0..=0x1DFF
         | 0x20D0..=0x20FF
         | 0xFE20..=0xFE2F
-    )
+    ) || crate::unicode::is_scriptless_default_ignorable(ch)
 }
 
 /// Rebuilds the post-GSUB segment ranges after `morx` changed the

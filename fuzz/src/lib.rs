@@ -3,7 +3,9 @@
 //! The helpers never panic on their own, so any crash a target reports comes
 //! from sigilbuzz itself.
 
-use sigilbuzz::{shape, Buffer, Direction, Face, Feature, Font};
+use sigilbuzz::{
+    shape, BidiParagraph, Buffer, BufferFlags, ClusterLevel, Direction, Face, Feature, Font,
+};
 
 /// Text samples that reach every shaper: Latin ligatures, Arabic joining,
 /// Hebrew marks, the Indic family, USE scripts, Mongolian, Tibetan, CJK,
@@ -111,14 +113,28 @@ pub fn shape_samples(face: Face<'_>, knobs: &mut Knobs<'_>, extra: Option<&str>)
         features.push(Feature { tag: FEATURE_TAGS[i], value: u32::from(knobs.byte() % 3) });
     }
     let mode = knobs.byte();
+    let flags = BufferFlags::from_bits_truncate(u32::from(knobs.byte()));
+    let level = match (mode >> 3) % 4 {
+        0 => ClusterLevel::MonotoneGraphemes,
+        1 => ClusterLevel::MonotoneCharacters,
+        2 => ClusterLevel::Characters,
+        _ => ClusterLevel::Graphemes,
+    };
     let texts = SAMPLE_TEXTS.iter().copied().chain(extra);
     for text in texts {
         let mut buffer = Buffer::new();
-        buffer.set_normalize_nfc(mode & 0x10 != 0);
+        buffer.set_flags(flags);
+        buffer.set_cluster_level(level);
         match mode % 5 {
             0 => buffer.push_str(text),
             1 => buffer.set_text(text),
-            _ => buffer.set_text_bidi(text),
+            _ => {
+                // Bidi text shapes run by run, each run in its own
+                // direction, with `buffer` as the settings template.
+                let paragraph = BidiParagraph::new(text, None);
+                let _ = paragraph.shape(&font, &buffer, &features);
+                buffer.set_text(text);
+            }
         }
         buffer.set_direction(match (mode >> 5) % 4 {
             0 => Direction::Ltr,

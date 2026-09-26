@@ -4,7 +4,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use sigilbuzz::{BidiInfo, Buffer, Face};
+use sigilbuzz::{BidiInfo, BidiParagraph, Face};
 use sigilbuzz_fuzz::{shape_samples, split_control, Knobs};
 
 const FONTS: &[&[u8]] = &[
@@ -33,14 +33,14 @@ fuzz_target!(|data: &[u8]| {
     let _ = info.levels();
     let _ = info.reorder();
 
-    let mut buffer = Buffer::new();
-    buffer.set_text_bidi(&text);
-    if let Some(map) = buffer.bidi_map() {
-        for i in [0, 1, text.len() / 2, text.len(), text.len() + 1, usize::MAX] {
-            let _ = map.visual_to_logical(i);
-            let _ = map.logical_to_visual(i);
-        }
+    let paragraph = BidiParagraph::new(&text, None);
+    for i in [0, 1, text.len() / 2, text.len(), text.len() + 1, usize::MAX] {
+        let _ = paragraph.level_at(i);
+        let _ = paragraph.run_at(i);
     }
+    let _ = paragraph.visual_runs();
+    let levels: Vec<u8> = paragraph.runs().iter().map(|run| run.level).collect();
+    let _ = BidiParagraph::reorder_visual(&levels);
 
     let font = FONTS[usize::from(knobs.byte()) % FONTS.len()];
     if let Ok(face) = Face::parse_bytes(font, 0) {

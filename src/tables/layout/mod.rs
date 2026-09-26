@@ -29,7 +29,8 @@ pub use lookup_list::Lookup;
 pub use lookup_list::LookupList;
 pub use script_list::{LangSys, Script, ScriptList};
 pub use skip_iter::{
-    MatchFilter, SkipIter, LOOKUP_FLAG_IGNORE_BASE_GLYPHS, LOOKUP_FLAG_IGNORE_LIGATURES,
-    LOOKUP_FLAG_IGNORE_MARKS, LOOKUP_FLAG_MARK_ATTACHMENT_TYPE_MASK, LOOKUP_FLAG_RIGHT_TO_LEFT,
-    LOOKUP_FLAG_USE_MARK_FILTERING_SET,
+    GlyphClasses, GlyphKind, InputMatch, Joiners, LayoutTable, MatchContext, MatchFilter,
+    MatchGlyph, MatchPositions, SkipRules, LOOKUP_FLAG_IGNORE_BASE_GLYPHS,
+    LOOKUP_FLAG_IGNORE_LIGATURES, LOOKUP_FLAG_IGNORE_MARKS, LOOKUP_FLAG_MARK_ATTACHMENT_TYPE_MASK,
+    LOOKUP_FLAG_RIGHT_TO_LEFT, LOOKUP_FLAG_USE_MARK_FILTERING_SET,
 };

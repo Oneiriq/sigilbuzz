@@ -116,6 +116,30 @@ int main(int argc, char **argv) {
         hb_buffer_destroy(other);
     }
 
+    /* Flags and cluster level: HarfBuzz's defaults, kept by
+     * hb_buffer_clear_contents, restored by hb_buffer_reset. */
+    if (hb_buffer_get_flags(buffer) != HB_BUFFER_FLAG_DEFAULT ||
+        hb_buffer_get_cluster_level(buffer) != HB_BUFFER_CLUSTER_LEVEL_DEFAULT ||
+        !HB_BUFFER_CLUSTER_LEVEL_IS_GRAPHEMES(HB_BUFFER_CLUSTER_LEVEL_DEFAULT) ||
+        HB_BUFFER_CLUSTER_LEVEL_IS_MONOTONE(HB_BUFFER_CLUSTER_LEVEL_CHARACTERS)) {
+        fprintf(stderr, "unexpected default flags or cluster level\n");
+        return 14;
+    }
+    hb_buffer_set_flags(buffer, (hb_buffer_flags_t) (HB_BUFFER_FLAG_BOT | HB_BUFFER_FLAG_EOT));
+    hb_buffer_set_cluster_level(buffer, HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS);
+    hb_buffer_clear_contents(buffer);
+    if (hb_buffer_get_flags(buffer) != (HB_BUFFER_FLAG_BOT | HB_BUFFER_FLAG_EOT) ||
+        hb_buffer_get_cluster_level(buffer) != HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS) {
+        fprintf(stderr, "hb_buffer_clear_contents lost the flags or cluster level\n");
+        return 15;
+    }
+    hb_buffer_reset(buffer);
+    if (hb_buffer_get_flags(buffer) != HB_BUFFER_FLAG_DEFAULT ||
+        hb_buffer_get_cluster_level(buffer) != HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES) {
+        fprintf(stderr, "hb_buffer_reset kept the flags or cluster level\n");
+        return 16;
+    }
+
     hb_buffer_destroy(buffer);
     hb_font_destroy(font);
     hb_face_destroy(face);

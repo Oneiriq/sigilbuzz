@@ -16,10 +16,22 @@ Added:
 - TrueType Collection (`.ttc`) support. `Face::parse` and `OwnedFace::parse` now take a
   member index into a collection. They used to reject collections as unsupported. The
   new `fonts_in_collection` returns the member count, or `None` for a plain TTF or OTF.
-- `BidiMap`. After `Buffer::set_text_bidi`, `Buffer::bidi_map` maps byte offsets
-  between visual order (what `Glyph::cluster` indexes) and logical order (the source
-  text), and reports the embedding level at each position. Use it to put carets and
-  selections back into the original text.
+- `BidiParagraph`, which runs the Unicode bidi algorithm over a paragraph and shapes it
+  the way HarfBuzz callers do: each run of one embedding level in logical order and in
+  its own direction, with the text around it as context, and the runs in visual order.
+  `line_runs`, `visual_runs`, `shape_line` and `reorder_visual` work one line at a time,
+  and glyph clusters stay byte offsets into the paragraph text. `BidiRun` and
+  `ShapedBidiRun` describe the runs. The CLI's `shape --bidi` shapes through it.
+- `BufferFlags` with `Buffer::{set_flags, flags}`, HarfBuzz's buffer flags (`BOT`,
+  `EOT`, `PRESERVE_DEFAULT_IGNORABLES`, `REMOVE_DEFAULT_IGNORABLES`,
+  `DO_NOT_INSERT_DOTTED_CIRCLE`) with HarfBuzz's values and behavior.
+- `ClusterLevel` with `Buffer::{set_cluster_level, cluster_level}`, HarfBuzz's four
+  cluster levels. Clusters form and merge where HarfBuzz forms and merges them
+  (graphemes, ligatures, reordered syllables, deleted default ignorables), as the level
+  allows. A Rust `Buffer` defaults to `MonotoneCharacters`, the level closest to the old
+  output.
+- `unicode::normalize::{decompose, compose, combining_class, modified_combining_class}`,
+  generated from the Unicode 17.0 data, with Hangul handled algorithmically.
 - Buffer script, language and context. `Buffer::set_script`, `set_language`,
   `set_pre_context` and `set_post_context` (with getters and `Buffer::CONTEXT_LENGTH`)
   now reach shaping. A set script shapes the whole buffer as that script. The language
@@ -29,9 +41,9 @@ Added:
   as in HarfBuzz). The table is generated from the OpenType language tag registry and
   SIL's ISO 639 data. `cargo test --test language_table_gen -- --ignored` regenerates
   it.
-- `Buffer::unset_direction`, `Buffer::has_explicit_direction`, and
-  `Buffer::set_insert_dotted_circle`. Broken Indic, Khmer, Myanmar and USE syllables now
-  get a U+25CC dotted circle, as in HarfBuzz.
+- `Buffer::unset_direction` and `Buffer::has_explicit_direction`. Broken Indic, Khmer,
+  Myanmar and USE syllables now get a U+25CC dotted circle, as in HarfBuzz (turn it off
+  with `BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE`).
 - `UnicodeScript::{iso15924_tag, from_iso15924_tag, horizontal_direction}` and
   `Direction::horizontal_for_script`.
 - `ShapedRun` is re-exported from the crate root.
@@ -40,6 +52,10 @@ Added:
 - `PairPos::lookup_with_device_base`, which also returns the bytes the records' Device
   and VariationIndex offsets are measured from (the PairSet in format 1, the subtable in
   format 2), and `PairPos::value_format2`.
+- `sigilbuzz-capi`: `hb_buffer_set_flags`, `hb_buffer_get_flags`,
+  `hb_buffer_set_cluster_level` and `hb_buffer_get_cluster_level`, with HarfBuzz's
+  constants and defaults (`HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES` for a new
+  buffer).
 - `sigilbuzz-capi`: `hb_buffer_add_utf32`, `hb_buffer_add_codepoints`,
   `hb_buffer_add_latin1`, `hb_subset_input_reference`, `hb_subset_input_create_or_fail`,
   `hb_paint_funcs_reference`, `hb_paint_funcs_make_immutable` and `_is_immutable`, the
@@ -70,9 +86,28 @@ Changed:
 - Text in a direction that is not its script's own (Hebrew marked LTR, Latin marked RTL,
   bottom-to-top) is shaped the way HarfBuzz does it: grapheme clusters are reversed, the
   run is shaped in its native direction, and the result is reversed back.
-- `Buffer::set_text_bidi` now sets an explicit left-to-right shaping direction, because
-  the text it stores is already in visual order. The paragraph direction is still
-  available from `bidi_map().paragraph_direction()`.
+- Text is normalized against the font like HarfBuzz, always: a character the font
+  cannot draw whole decomposes, marks sort by HarfBuzz's modified combining classes,
+  and a base and mark recompose only into a composite the font maps. Each script uses
+  the normalization mode and hooks of its HarfBuzz shaper, so Indic, Khmer and USE split
+  vowels stay split. Missing fallback spaces (EN SPACE, IDEOGRAPHIC SPACE, ...) are drawn
+  with the space glyph at HarfBuzz's widths.
+- GSUB and GPOS match rules with HarfBuzz's skipping iterator: a default ignorable a
+  rule does not name is passed over, ZWJ and ZWNJ follow each feature's joiner rules,
+  marks on different components of a ligature do not match together, and nested lookups
+  run at the recorded match positions. Fonts without a GDEF `GlyphClassDef` get glyph
+  classes synthesized from Unicode, as in HarfBuzz, so `IgnoreMarks`, mark zeroing and
+  mark attachment work for them. The `tables::layout` matchers take `MatchGlyph` runs
+  and a `MatchContext` (see Removed).
+- A language system's required GPOS feature always joins the positioning stage.
+- Fonts that GPOS does not position get HarfBuzz's fallback mark positions, placed
+  from each mark's combining class and its base's extents.
+- Feature order follows HarfBuzz's shapers: `ltra`, `ltrm` and `rtla` apply by
+  direction, Myanmar runs `locl` and `ccmp` before its reorder, the Universal Shaping
+  Engine reorders pre-base vowels after its basic features, and Thai, Lao and Hangul
+  no longer run default features twice. Non-joining characters get no joining feature.
+- Default ignorables stay in the script run of their neighbors, so a ZWSP or a
+  variation selector no longer splits a run.
 - Mongolian switches to vertical layout only when no direction was set.
   `set_direction(Direction::Ltr)` now gives horizontal Mongolian (it used to need RTL).
 - Bottom-to-top runs report a negative `y_advance`, like top-to-bottom ones.
@@ -169,7 +204,9 @@ Fixed:
 
 A hardening pass for hostile input. Fonts, images, and text can come from anywhere,
 and a malformed one must not crash, hang, or exhaust memory. Shipped code no longer
-contains `unwrap`, `expect`, or panic macros, and every fix has a regression test.
+contains `unwrap`, `expect`, or panic macros, apart from `BidiParagraph`'s documented
+check that a byte range the caller passes lies on character boundaries (the same
+contract as slicing a `str`), and every fix has a regression test.
 Fuzzing found the first bugs, and a review of every crate found the rest. Output for
 valid input is unchanged except where noted.
 
@@ -300,6 +337,14 @@ Removed:
 
 - The root crate's `alloc` feature. It gated nothing: the crate always needs `alloc`.
   `std` now only adds filesystem helpers such as `Blob::from_path`.
+- `Buffer::set_text_bidi`. It reordered the text into visual order and shaped it left
+  to right, which broke joining and mark attachment across direction changes. Shape a
+  `BidiParagraph` instead.
+- `Buffer::{set_normalize_nfc, normalize_nfc}` and
+  `unicode::normalize::{compose_pair, compose_str}`. Normalization always runs now.
+- `tables::layout::SkipIter`, `MatchFilter::{next_unskipped, prev_unskipped}`, and the
+  `matches_filtered` context matchers, replaced by the `MatchGlyph` and `MatchContext`
+  matching in `tables::layout::skip_iter`.
 
 ## 0.21.0 (2026-04-25)
 

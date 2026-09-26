@@ -54,7 +54,7 @@ pub(super) fn hangul_compose(
             None
         };
         if let Some(l) = l_index {
-            if let Some(&(_, next_ch)) = it.peek() {
+            if let Some(&(v_offset, next_ch)) = it.peek() {
                 // V jamo range: U+1161..U+1175 (21 modern vowels).
                 if (0x1161..=0x1175).contains(&(next_ch as u32)) {
                     let v = (next_ch as u32) - 0x1161;
@@ -64,6 +64,7 @@ pub(super) fn hangul_compose(
                     // (U+D7CB..U+D7FB) aborts composition entirely.
                     let mut clone = it.clone();
                     clone.next(); // skip V
+                    let t_offset = clone.peek().map_or(0, |&(offset, _)| offset);
                     let t_info = match clone.peek() {
                         Some(&(_, c)) if (0x11A8..=0x11C2).contains(&(c as u32)) => {
                             Some(Some((c as u32) - 0x11A7))
@@ -77,7 +78,7 @@ pub(super) fn hangul_compose(
                         // T gets emitted naturally on the next
                         // iteration.
                         out.push((byte_offset as u32, ch));
-                        out.push((byte_offset as u32, next_ch));
+                        out.push((v_offset as u32, next_ch));
                         it.next(); // consume V
                         continue;
                     }
@@ -93,13 +94,14 @@ pub(super) fn hangul_compose(
                             continue;
                         }
                     }
-                    // Fallback: emit each jamo as-is.
+                    // Fallback: emit each jamo as-is, each with its own
+                    // cluster (the grapheme levels merge them later, as
+                    // HarfBuzz's Hangul shaper does).
                     out.push((byte_offset as u32, ch));
-                    let v_ch = core::char::from_u32(0x1161 + v).unwrap_or(ch);
-                    out.push((byte_offset as u32, v_ch));
+                    out.push((v_offset as u32, next_ch));
                     if t != 0 {
                         let t_ch = core::char::from_u32(0x11A7 + t).unwrap_or(ch);
-                        out.push((byte_offset as u32, t_ch));
+                        out.push((t_offset as u32, t_ch));
                     }
                     continue;
                 }

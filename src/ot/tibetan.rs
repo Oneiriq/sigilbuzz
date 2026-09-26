@@ -52,7 +52,7 @@
 use alloc::vec::Vec;
 
 use crate::buffer::Glyph;
-use crate::shape::apply_gsub_feature_in_scripts;
+use crate::shape::{apply_gsub_feature_in_scripts, JoinerTable};
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 
@@ -113,7 +113,8 @@ pub fn shape_tibetan(
         return;
     };
     for tag in TIBT_FEATURES {
-        apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, TIBT_SCRIPT_PRIORITY);
+        let joiners = JoinerTable::Use.joiners(**tag);
+        apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, TIBT_SCRIPT_PRIORITY, joiners);
     }
 }
 

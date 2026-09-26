@@ -56,8 +56,9 @@ The Rust `rlib` target exists only for the crate's own tests.
 
 ## What it covers
 
-Blobs, faces, fonts, buffers, shaping, tags, directions, scripts, languages, and
-version queries. It also covers `hb_set_t`, the `hb_subset_*` functions, the
+Blobs, faces, fonts, buffers (with HarfBuzz's buffer flags and cluster levels, which
+default to `HB_BUFFER_FLAG_DEFAULT` and `HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES` as
+in HarfBuzz), shaping, tags, directions, scripts, languages, and version queries. It also covers `hb_set_t`, the `hb_subset_*` functions, the
 `hb_paint_funcs_t` paint callbacks, `hb_face_collect_unicodes`, and
 `hb_ot_layout_collect_features`. `include/hb.h` declares exactly what is implemented.
 

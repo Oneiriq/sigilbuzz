@@ -8,7 +8,7 @@ text.
 |---|---|---|
 | `face` | font bytes | every `Face` table accessor, outlines, bounds, bitmaps, SVG documents, COLR paint, `OwnedFace`, collections |
 | `shape` | font bytes | `shape()` for every script, direction, and a mix of features and variation coordinates |
-| `shape_text` | text | `shape()` with real fonts, `BidiInfo`, `Buffer::set_text_bidi`, `BidiMap` |
+| `shape_text` | text | `shape()` with real fonts, buffer flags, and cluster levels, `BidiInfo`, and `BidiParagraph` (levels, runs, and run-by-run shaping) |
 | `subset` | font bytes | `subset()` and `instance()`, then re-parses the output |
 | `woff` | bytes | WOFF1 and WOFF2 unwrap and wrap |
 | `render` | font bytes | every `Rasterizer` path: outline, COLRv0, COLRv1, SVG-in-OT, bitmaps |

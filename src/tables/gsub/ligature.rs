@@ -40,7 +40,7 @@
 //!   ligature set.
 
 use crate::error::{Error, Result};
-use crate::tables::layout::skip_iter::MatchFilter;
+use crate::tables::layout::skip_iter::{match_input, InputMatch, MatchContext, MatchGlyph};
 use crate::tables::layout::Coverage;
 use crate::tables::parse::Reader;
 
@@ -95,40 +95,36 @@ impl<'a> Ligature<'a> {
         &self.coverage
     }
 
-    /// Tries to match a ligature starting at `glyphs[0]`. Returns the
+    /// Tries to match a ligature starting at `glyphs[0]` with plain
+    /// matching (no lookup flags, no default ignorables). Returns the
     /// output glyph id and the number of input glyphs consumed when a
     /// ligature fires; `None` when no rule in this subtable matches.
+    /// The shaper uses [`Ligature::apply_at`].
     ///
     /// Search order within a LigatureSet matches the spec: first
     /// match wins, so longer-first ordering in the font wins over
     /// shorter alternatives.
     #[must_use]
     pub fn apply(&self, glyphs: &[u16]) -> Option<(u16, usize)> {
-        self.apply_filtered(glyphs, &MatchFilter::none())
-            .map(|(out, positions)| {
-                // Span covers every raw glyph between the first and
-                // the last matched component, inclusive.
-                let span = positions.last().copied().map_or(0, |p| p + 1);
-                (out, span)
-            })
+        let run: alloc::vec::Vec<MatchGlyph> = glyphs.iter().map(|&g| MatchGlyph::new(g)).collect();
+        self.apply_at(&run, 0, &MatchContext::plain())
+            .map(|(out, m)| (out, m.end))
     }
 
-    /// Filter-aware ligature match. Returns the output glyph id plus
-    /// the list of relative positions (into `glyphs`, starting at 0
-    /// for the first component) of every matched component. Callers
-    /// use those positions to collapse the ligature and to know
-    /// which skipped glyphs (typically marks) should bubble out of
-    /// the merge area to stay next to their logical base.
-    ///
-    /// When `filter.is_pass_through()` the positions are `0..N` and
-    /// the call is equivalent to [`Ligature::apply`].
+    /// Tries the ligatures of `glyphs[at]`'s LigatureSet in order and
+    /// returns the first that matches: its output glyph and the
+    /// matched input (component positions, the first at `at`), found
+    /// with the input walk of `cx` (HarfBuzz's `LigatureSet::apply`
+    /// and `match_input`). A one-component ligature matches its first
+    /// glyph alone.
     #[must_use]
-    pub fn apply_filtered(
+    pub fn apply_at(
         &self,
-        glyphs: &[u16],
-        filter: &MatchFilter<'_>,
-    ) -> Option<(u16, alloc::vec::Vec<usize>)> {
-        let first = *glyphs.first()?;
+        glyphs: &[MatchGlyph],
+        at: usize,
+        cx: &MatchContext<'_>,
+    ) -> Option<(u16, InputMatch)> {
+        let first = glyphs.get(at)?.id;
         let cov_index = self.coverage.index_of(first)?;
         if cov_index >= self.set_count {
             return None;
@@ -144,84 +140,52 @@ impl<'a> Ligature<'a> {
             return None;
         }
 
-        for i in 0..lig_count {
-            let off_off = 2 + i as usize * 2;
+        (0..usize::from(lig_count)).find_map(|i| {
+            let off_off = 2 + i * 2;
             let lig_off = u16::from_be_bytes([set_bytes[off_off], set_bytes[off_off + 1]]) as usize;
-            let Some(lig_bytes) = set_bytes.get(lig_off..) else {
-                continue;
-            };
-            if let Some((out, positions)) = try_match_ligature_filtered(lig_bytes, glyphs, filter) {
-                return Some((out, positions));
-            }
-        }
-        None
+            match_ligature(set_bytes.get(lig_off..)?, glyphs, at, cx)
+        })
     }
 }
 
-/// Filter-aware ligature match. Returns `(ligature_glyph, positions)`
-/// where `positions[k]` is the relative index into `glyphs` of the
-/// `k`-th matched component. The first component is always at
-/// index 0 because the caller gated it via coverage.
-///
-/// The two-pass shape (verify the tail components first, then
-/// allocate the positions `Vec` only on success) is deliberate: the
-/// matcher is called once per cursor that passes the lookup's
-/// coverage, which on Indic / Arabic corpora vastly outnumbers actual
-/// ligature hits. Reserving heap on every speculative call is what
-/// the Devanagari profile flagged.
-fn try_match_ligature_filtered(
+/// Matches one Ligature table at `glyphs[at]`: its tail components
+/// against the glyphs the input walk stops at.
+fn match_ligature(
     lig_bytes: &[u8],
-    glyphs: &[u16],
-    filter: &MatchFilter<'_>,
-) -> Option<(u16, alloc::vec::Vec<usize>)> {
-    // Stack-buffered scan: walk every tail component and remember its
-    // matched index. We can fit up to `STACK` components without
-    // spilling (HarfBuzz hard-caps the same number); fall back to
-    // heap only for pathological ligatures.
-    const STACK: usize = 16;
-
+    glyphs: &[MatchGlyph],
+    at: usize,
+    cx: &MatchContext<'_>,
+) -> Option<(u16, InputMatch)> {
     let mut r = Reader::new(lig_bytes);
     let ligature_glyph = r.read_u16().ok()?;
     let component_count = r.read_u16().ok()?;
     if component_count == 0 {
         return None;
     }
-    let tail = component_count as usize - 1;
+    let tail = usize::from(component_count) - 1;
     let tail_bytes = r.read_bytes(tail * 2).ok()?;
-    let mut stack_positions: [usize; STACK] = [0; STACK];
-    let mut heap_positions: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
-    let use_stack = tail < STACK;
-    let mut cursor = 1usize;
-    for i in 0..tail {
-        let expected = u16::from_be_bytes([tail_bytes[i * 2], tail_bytes[i * 2 + 1]]);
-        let pos = filter.next_unskipped(glyphs, cursor)?;
-        if glyphs[pos] != expected {
-            return None;
-        }
-        if use_stack {
-            stack_positions[i] = pos;
-        } else {
-            if heap_positions.is_empty() {
-                heap_positions.reserve(component_count as usize);
-            }
-            heap_positions.push(pos);
-        }
-        cursor = pos + 1;
-    }
-    let mut positions = alloc::vec::Vec::with_capacity(component_count as usize);
-    positions.push(0);
-    if use_stack {
-        positions.extend_from_slice(&stack_positions[..tail]);
-    } else {
-        positions.extend_from_slice(&heap_positions);
-    }
-    Some((ligature_glyph, positions))
+    let component = |k: usize| u16::from_be_bytes([tail_bytes[k * 2], tail_bytes[k * 2 + 1]]);
+    let m = match_input(glyphs, at, tail, cx, |k, g| g == component(k))?;
+    Some((ligature_glyph, m))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tables::layout::skip_iter::{Joiners, LayoutTable, MatchFilter};
     use alloc::vec::Vec;
+
+    /// A run of glyphs with no props.
+    fn run(ids: &[u16]) -> Vec<MatchGlyph> {
+        ids.iter().map(|&id| MatchGlyph::new(id)).collect()
+    }
+
+    /// Applies `lig` at the start of `ids` with plain matching: the
+    /// output glyph and where the match ends.
+    fn apply(lig: &Ligature<'_>, ids: &[u16]) -> Option<(u16, usize)> {
+        lig.apply_at(&run(ids), 0, &MatchContext::plain())
+            .map(|(out, m)| (out, m.end))
+    }
 
     fn build_coverage_format1(glyphs: &[u16]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -292,7 +256,7 @@ mod tests {
         // Covered first glyph: 10 ('f'). Ligature: 10 + 20 -> 100.
         let bytes = build_subtable(&[(10, alloc::vec![(100, alloc::vec![20])])]);
         let lig = Ligature::parse(&bytes).unwrap();
-        let out = lig.apply(&[10, 20, 30]).unwrap();
+        let out = apply(&lig, &[10, 20, 30]).unwrap();
         assert_eq!(out, (100, 2));
     }
 
@@ -301,7 +265,7 @@ mod tests {
         // 10 + 20 + 30 -> 500
         let bytes = build_subtable(&[(10, alloc::vec![(500, alloc::vec![20, 30])])]);
         let lig = Ligature::parse(&bytes).unwrap();
-        assert_eq!(lig.apply(&[10, 20, 30, 99]).unwrap(), (500, 3));
+        assert_eq!(apply(&lig, &[10, 20, 30, 99]).unwrap(), (500, 3));
     }
 
     #[test]
@@ -309,11 +273,11 @@ mod tests {
         let bytes = build_subtable(&[(10, alloc::vec![(100, alloc::vec![20])])]);
         let lig = Ligature::parse(&bytes).unwrap();
         // First glyph not covered.
-        assert!(lig.apply(&[99, 20]).is_none());
+        assert!(apply(&lig, &[99, 20]).is_none());
         // Covered first glyph but wrong second.
-        assert!(lig.apply(&[10, 99]).is_none());
+        assert!(apply(&lig, &[10, 99]).is_none());
         // Covered but not enough glyphs left.
-        assert!(lig.apply(&[10]).is_none());
+        assert!(apply(&lig, &[10]).is_none());
     }
 
     #[test]
@@ -326,7 +290,7 @@ mod tests {
             alloc::vec![(100, alloc::vec![20]), (999, alloc::vec![20, 30])],
         )]);
         let lig = Ligature::parse(&bytes).unwrap();
-        assert_eq!(lig.apply(&[10, 20, 30]).unwrap(), (100, 2));
+        assert_eq!(apply(&lig, &[10, 20, 30]).unwrap(), (100, 2));
     }
 
     #[test]
@@ -336,9 +300,9 @@ mod tests {
             alloc::vec![(999, alloc::vec![20, 30]), (100, alloc::vec![20])],
         )]);
         let lig = Ligature::parse(&bytes).unwrap();
-        assert_eq!(lig.apply(&[10, 20, 30]).unwrap(), (999, 3));
+        assert_eq!(apply(&lig, &[10, 20, 30]).unwrap(), (999, 3));
         // On (10, 20) the second (shorter) ligature still matches.
-        assert_eq!(lig.apply(&[10, 20]).unwrap(), (100, 2));
+        assert_eq!(apply(&lig, &[10, 20]).unwrap(), (100, 2));
     }
 
     #[test]
@@ -349,10 +313,10 @@ mod tests {
             (40, alloc::vec![(200, alloc::vec![50])]),
         ]);
         let lig = Ligature::parse(&bytes).unwrap();
-        assert_eq!(lig.apply(&[10, 20]).unwrap(), (100, 2));
-        assert_eq!(lig.apply(&[40, 50]).unwrap(), (200, 2));
-        assert!(lig.apply(&[10, 50]).is_none());
-        assert!(lig.apply(&[40, 20]).is_none());
+        assert_eq!(apply(&lig, &[10, 20]).unwrap(), (100, 2));
+        assert_eq!(apply(&lig, &[40, 50]).unwrap(), (200, 2));
+        assert!(apply(&lig, &[10, 50]).is_none());
+        assert!(apply(&lig, &[40, 20]).is_none());
     }
 
     #[test]
@@ -375,7 +339,7 @@ mod tests {
     #[test]
     fn filter_aware_apply_hops_marks_in_input_window() {
         use crate::tables::gdef::Gdef;
-        use crate::tables::layout::skip_iter::{MatchFilter, LOOKUP_FLAG_IGNORE_MARKS};
+        use crate::tables::layout::skip_iter::LOOKUP_FLAG_IGNORE_MARKS;
 
         // Ligature: 10 + 20 -> 100. Input stream carries a mark glyph
         // 99 between 10 and 20; with IgnoreMarks the match still fires.
@@ -401,11 +365,39 @@ mod tests {
         let filter = MatchFilter::for_lookup(LOOKUP_FLAG_IGNORE_MARKS, Some(&gdef), None);
 
         // Plain apply sees the mark blocking the second component.
-        assert!(lig.apply(&[10, 99, 20]).is_none());
+        assert!(apply(&lig, &[10, 99, 20]).is_none());
 
         // Filter-aware apply matches across the mark.
-        let (out, positions) = lig.apply_filtered(&[10, 99, 20], &filter).unwrap();
+        let cx = MatchContext::new(filter, LayoutTable::Gsub, Joiners::AUTO);
+        let (out, m) = lig.apply_at(&run(&[10, 99, 20]), 0, &cx).unwrap();
         assert_eq!(out, 100);
-        assert_eq!(positions, alloc::vec![0usize, 2]);
+        assert_eq!(m.positions.as_slice(), [0, 2]);
+    }
+
+    #[test]
+    fn default_ignorables_inside_the_input_follow_the_joiner_rules() {
+        use crate::tables::layout::skip_iter::match_prop;
+        // f + i -> fi, with a ZWJ or a ZWNJ between them.
+        let bytes = build_subtable(&[(10, alloc::vec![(100, alloc::vec![20])])]);
+        let lig = Ligature::parse(&bytes).unwrap();
+        let joiner = |extra| MatchGlyph::with_props(3, match_prop::DEFAULT_IGNORABLE | extra);
+        let zwj = [
+            MatchGlyph::new(10),
+            joiner(match_prop::ZWJ),
+            MatchGlyph::new(20),
+        ];
+        let zwnj = [
+            MatchGlyph::new(10),
+            joiner(match_prop::ZWNJ),
+            MatchGlyph::new(20),
+        ];
+        let with = |j| MatchContext::new(MatchFilter::none(), LayoutTable::Gsub, j);
+        // ZWJ does not break a ligature...
+        let (_, m) = lig.apply_at(&zwj, 0, &with(Joiners::AUTO)).unwrap();
+        assert_eq!((m.positions.as_slice(), m.end), (&[0, 2][..], 3));
+        // ...unless the feature handles joiners itself.
+        assert!(lig.apply_at(&zwj, 0, &with(Joiners::MANUAL_ZWJ)).is_none());
+        // ZWNJ always does.
+        assert!(lig.apply_at(&zwnj, 0, &with(Joiners::AUTO)).is_none());
     }
 }

@@ -25,6 +25,21 @@ fn kana_led_segments_use_the_kana_script_tag() {
     assert_eq!(priority("12 \u{30AB}")[0], *b"kana");
 }
 
+#[test]
+fn default_ignorables_stay_in_their_neighbors_segment() {
+    let segments = |text: &str| {
+        let cps: Vec<char> = text.chars().collect();
+        build_segments(&cps).len()
+    };
+    // ZWSP, word joiner, a variation selector, a tag character.
+    for text in ["f\u{200B}i", "f\u{2060}i", "f\u{FE0F}i", "f\u{E0041}i"] {
+        assert_eq!(segments(text), 1, "{text:?}");
+    }
+    assert_eq!(segments("\u{0628}\u{200B}\u{0633}"), 1);
+    // A real script change still splits.
+    assert_eq!(segments("a\u{200B}\u{05D0}"), 2);
+}
+
 /// Minimal font with head / maxp / hhea / hmtx / cmap sufficient
 /// for `shape()` to run against real ASCII text. Glyph 0 is
 /// `.notdef` (advance 0); glyph 1 is 'A' (advance 500); glyph 2
@@ -195,12 +210,11 @@ fn feature_slice_is_accepted_but_ignored_today() {
 }
 
 #[test]
-fn normalize_nfc_flag_collapses_decomposed_input() {
-    // Test font has no cmap entry for 'e', combining acute, or
-    // precomposed 'é', so every path ends up at .notdef. The
-    // meaningful difference is glyph count: NFC off -> 2 glyphs
-    // (e + combining acute both go to .notdef); NFC on -> 1 glyph
-    // (the pair composes to 'é' before cmap).
+fn decomposed_input_the_font_cannot_compose_keeps_both_characters() {
+    // The test font maps neither 'e', the combining acute, nor the
+    // precomposed 'é': normalization only recomposes into a composite
+    // the font maps, so both characters stay, each on .notdef, and
+    // each keeps its own cluster.
     let data = build_shapeable_font();
     let blob = Blob::new(&data);
     let face = Face::parse(&blob, 0).unwrap();
@@ -208,12 +222,10 @@ fn normalize_nfc_flag_collapses_decomposed_input() {
 
     let mut buffer = Buffer::new();
     buffer.push_str("e\u{0301}");
-    let before = shape(&font, &buffer, &[]).unwrap();
-    assert_eq!(before.len(), 2);
-
-    buffer.set_normalize_nfc(true);
-    let after = shape(&font, &buffer, &[]).unwrap();
-    assert_eq!(after.len(), 1);
+    let shaped = shape(&font, &buffer, &[]).unwrap();
+    assert_eq!(shaped.len(), 2);
+    assert_eq!(shaped.glyphs[0].glyph_id, 0);
+    assert_eq!(shaped.glyphs[1].cluster, 1);
 }
 
 #[test]

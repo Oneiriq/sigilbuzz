@@ -8,6 +8,13 @@
 //! the cursor is summed from `Glyph::x_advance`. Callers obtain the
 //! glyph slice from `&shape(font, buffer, &[])?.glyphs` (or whatever
 //! shaping path they use).
+//!
+//! Mixed-direction text works the same way: pass
+//! `&paragraph.shape(font, buffer, &[])?.glyphs` and `paragraph.text()`
+//! for a `sigilbuzz::BidiParagraph`. Its clusters are offsets into the
+//! logical text, and the widths are summed by cluster, so the visual
+//! order of the glyphs does not matter. Lay each returned line out with
+//! `BidiParagraph::shape_line`, which orders that line on its own.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -88,6 +95,8 @@ pub struct LineRange {
 ///         y_offset: 0,
 ///         unicode_props: 0,
 ///         indic_position: 0,
+///         char_class: 0,
+///         combining_class: 0,
 ///     })
 ///     .collect();
 ///
@@ -300,6 +309,8 @@ mod tests {
                 y_offset: 0,
                 unicode_props: 0,
                 indic_position: 0,
+                char_class: 0,
+                combining_class: 0,
             });
         }
         glyphs
@@ -327,6 +338,25 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].start_byte, 0);
         assert_eq!(lines[0].end_byte, 5);
+    }
+
+    #[test]
+    fn glyph_order_does_not_change_the_lines() {
+        // A bidi paragraph hands over its glyphs in visual order, with
+        // right-to-left runs reversed. Widths are summed by cluster, so
+        // the lines are the same as for logical order.
+        let text = "The quick brown fox";
+        let logical = shape_uniform(text, 10);
+        let mut visual = logical.clone();
+        visual[4..15].reverse();
+        let options = WrapOptions {
+            max_width: 90.0,
+            break_at_word_boundaries: true,
+        };
+        assert_eq!(
+            wrap_lines(&visual, text, options),
+            wrap_lines(&logical, text, options)
+        );
     }
 
     #[test]

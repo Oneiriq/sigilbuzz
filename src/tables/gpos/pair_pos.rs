@@ -74,6 +74,17 @@ impl<'a> PairPos<'a> {
         }
     }
 
+    /// True when `first` is in the subtable's coverage, so a pair
+    /// starting with it can match. HarfBuzz checks this before it
+    /// looks for the second glyph.
+    #[must_use]
+    pub(crate) fn covers(&self, first: u16) -> bool {
+        match self {
+            PairPos::Format1(f) => f.coverage.contains(first),
+            PairPos::Format2(f) => f.coverage.contains(first),
+        }
+    }
+
     /// The subtable's `valueFormat2`. HarfBuzz moves past the second
     /// glyph of a pair it positioned exactly when this is nonzero,
     /// whatever the record's values are.

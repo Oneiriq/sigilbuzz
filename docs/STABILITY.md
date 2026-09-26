@@ -28,9 +28,12 @@ signatures only change in a major version.
 - `Blob`, `Face`, `Font`, `Buffer`, `Glyph`, `Direction`, `Feature`
 - `ShapedRun`: the positioned glyph run `shape` returns (`glyphs`, `len`, `is_empty`)
 - `OwnedFace`: a face that owns its bytes, for caching and sharing across threads
-- `BidiMap`: the logical/visual byte map kept by `Buffer::set_text_bidi`
-  (`Buffer::bidi_map`, `BidiMap::{new, from_order, visual_to_logical,
-  logical_to_visual, level_at_visual, level_at_logical}`)
+- `BidiParagraph`: a paragraph with its UAX 9 embedding levels, shaped run by run in
+  logical order, HarfBuzz style (`BidiParagraph::{new, text, direction, base_level,
+  runs, level_at, run_at, line_runs, visual_runs, reorder_visual, shape_run,
+  shape_line, shape}`), with `BidiRun` (`range`, `level`, `is_rtl`, `direction`) and
+  `ShapedBidiRun` (`run`, `glyphs`). Glyph clusters are byte offsets into the
+  paragraph text.
 - `shape`
 - `Face::glyph_outline`, `Face::glyph_outline_at_coords`, `Face::glyph_bounds`,
   `Face::name`, `Face::parse`, `Face::parse_bytes`
@@ -73,9 +76,15 @@ signatures only change in a major version.
     direction
   - `Buffer::unset_direction`: forget the caller's direction, like HarfBuzz's
     `hb_buffer_set_direction(buffer, HB_DIRECTION_INVALID)`
-  - `Buffer::{set_insert_dotted_circle, insert_dotted_circle}`: whether broken Indic,
-    Khmer, Myanmar, and USE syllables get a U+25CC dotted circle (off is HarfBuzz's
-    `HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE`)
+  - `BufferFlags` and `Buffer::{set_flags, flags}`: HarfBuzz's buffer flags with
+    HarfBuzz's values (`BOT`, `EOT`, `PRESERVE_DEFAULT_IGNORABLES`,
+    `REMOVE_DEFAULT_IGNORABLES`, `DO_NOT_INSERT_DOTTED_CIRCLE`). They replace the
+    `Buffer::{set_insert_dotted_circle, insert_dotted_circle}` pair that 0.22.0
+    development builds had.
+  - `ClusterLevel` and `Buffer::{set_cluster_level, cluster_level}`: HarfBuzz's four
+    cluster levels. A Rust `Buffer` defaults to `MonotoneCharacters`; the C API
+    defaults to HarfBuzz's `MONOTONE_GRAPHEMES`. Both settings survive
+    `Buffer::clear`.
 
 `sigilbuzz-render`:
 

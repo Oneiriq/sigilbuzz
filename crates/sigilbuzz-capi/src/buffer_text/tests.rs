@@ -218,10 +218,46 @@ fn latin1_decoding_maps_bytes_to_the_first_256_code_points() {
 
 #[test]
 fn item_length_follows_harfbuzz() {
-    assert_eq!(ItemLength::from_c(-1), Some(ItemLength::ToEnd));
-    assert_eq!(ItemLength::from_c(0), Some(ItemLength::Units(0)));
-    assert_eq!(ItemLength::from_c(7), Some(ItemLength::Units(7)));
-    assert_eq!(ItemLength::from_c(-2), None);
+    assert_eq!(ItemLength::from_c(-1), ItemLength::ToEnd);
+    assert_eq!(ItemLength::from_c(0), ItemLength::Units(0));
+    assert_eq!(ItemLength::from_c(7), ItemLength::Units(7));
+    // HarfBuzz clamps other negative lengths to zero.
+    assert_eq!(ItemLength::from_c(-2), ItemLength::Units(0));
+    assert_eq!(ItemLength::from_c(c_int::MIN), ItemLength::Units(0));
+}
+
+#[test]
+fn a_negative_item_length_adds_no_text_but_sets_the_context() {
+    let buffer = hb_buffer_create();
+    add_utf8(buffer, b"abc|def", 3, -5);
+    with_state(buffer, |s| {
+        assert_eq!(s.buffer.text(), "");
+        assert_eq!(s.buffer.pre_context(), "abc");
+        assert_eq!(s.buffer.post_context(), "|def");
+    });
+    // A later item still sees an empty buffer, so it takes its own
+    // pre-context, as in HarfBuzz.
+    add_utf8(buffer, b"xy|z", 2, -1);
+    with_state(buffer, |s| {
+        assert_eq!(s.buffer.text(), "|z");
+        assert_eq!(s.buffer.pre_context(), "xy");
+        assert_eq!(s.buffer.post_context(), "");
+    });
+    // SAFETY: created above.
+    unsafe { hb_buffer_destroy(buffer) };
+}
+
+#[test]
+fn an_item_offset_past_the_end_is_clamped() {
+    let buffer = hb_buffer_create();
+    add_utf8(buffer, b"abc", 10, 2);
+    with_state(buffer, |s| {
+        assert_eq!(s.buffer.text(), "");
+        assert_eq!(s.buffer.pre_context(), "abc");
+        assert_eq!(s.buffer.post_context(), "");
+    });
+    // SAFETY: created above.
+    unsafe { hb_buffer_destroy(buffer) };
 }
 
 // --- Ingest -----------------------------------------------------------------

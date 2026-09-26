@@ -2,8 +2,11 @@
 //!
 //! Scripts (Latin, Arabic, Hangul, ...) and general categories drive
 //! which feature list the shaper applies and how cluster boundaries
-//! are decided. The tables are hand-curated excerpts of the UCD that
-//! cover the scripts the shaper handles, not the full database.
+//! are decided. The general category, joining type, mirroring, and
+//! canonical normalization tables are generated from UCD snapshots
+//! (see `tests/unicode_table_gen.rs`). The others are hand-curated
+//! excerpts of the UCD that cover the scripts the shaper handles, not
+//! the full database.
 
 pub mod bidi;
 pub mod bidi_brackets;
@@ -298,6 +301,39 @@ pub const fn script_of(ch: char) -> Script {
 pub const fn is_hangul_jamo(ch: char) -> bool {
     let cp = ch as u32;
     matches!(cp, 0x1100..=0x11FF | 0xA960..=0xA97F | 0xD7B0..=0xD7FF)
+}
+
+/// HarfBuzz's `hb_unicode_funcs_t::is_default_ignorable` (in
+/// `hb-unicode.hh`): Default_Ignorable_Code_Point, except the Hangul
+/// fillers (U+115F, U+1160, U+3164, U+FFA0) and the shorthand format
+/// controls (U+1BCA0..U+1BCA3), which fonts draw as regular spacing
+/// glyphs.
+pub(crate) const fn is_default_ignorable(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x00AD // SOFT HYPHEN
+            | 0x034F // COMBINING GRAPHEME JOINER
+            | 0x061C // ARABIC LETTER MARK
+            | 0x17B4..=0x17B5 // KHMER VOWEL INHERENT AQ, AA
+            | 0x180B..=0x180F // MONGOLIAN FVS1..3, VOWEL SEPARATOR, FVS4
+            | 0x200B..=0x200F // ZWSP, ZWNJ, ZWJ, LRM, RLM
+            | 0x202A..=0x202E // bidi embeddings and overrides
+            | 0x2060..=0x206F // word joiner, invisible operators, isolates
+            | 0xFE00..=0xFE0F // variation selectors
+            | 0xFEFF // ZERO WIDTH NO-BREAK SPACE
+            | 0xFFF0..=0xFFF8 // reserved
+            | 0x1D173..=0x1D17A // musical beam and phrase controls
+            | 0xE0000..=0xE0FFF // tags and supplementary variation selectors
+    )
+}
+
+/// True for a default ignorable (see [`is_default_ignorable`]) whose
+/// script is Common or Inherited, so it extends the script run it sits
+/// in: GSUB and GPOS match across it, which they cannot do when it
+/// splits the run. The Khmer inherent vowels and the Mongolian
+/// variation selectors have their own script and are left out.
+pub(crate) const fn is_scriptless_default_ignorable(ch: char) -> bool {
+    is_default_ignorable(ch) && !matches!(ch as u32, 0x17B4..=0x17B5 | 0x180B..=0x180D | 0x180F)
 }
 
 #[cfg(test)]

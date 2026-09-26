@@ -186,13 +186,66 @@ void       hb_font_set_variations(hb_font_t            *font,
 hb_buffer_t *hb_buffer_create(void);
 void         hb_buffer_destroy(hb_buffer_t *buffer);
 hb_buffer_t *hb_buffer_reference(hb_buffer_t *buffer);
+/* Clears the contents and also puts the flags and cluster level back
+ * to their defaults. */
 void         hb_buffer_reset(hb_buffer_t *buffer);
 /* Drops the text and output and, as in HarfBuzz, resets direction,
- * script, language, and the pre- and post-context. */
+ * script, language, and the pre- and post-context. The flags and
+ * cluster level stay. */
 void         hb_buffer_clear_contents(hb_buffer_t *buffer);
 
+/* Buffer flags, HarfBuzz's values. HarfBuzz's other flag bits
+ * (VERIFY, PRODUCE_UNSAFE_TO_CONCAT, PRODUCE_SAFE_TO_INSERT_TATWEEL)
+ * are accepted, stored, and returned by hb_buffer_get_flags, but
+ * change nothing: sigilbuzz produces no glyph flags. EOT is stored
+ * too; HarfBuzz's OpenType shaper reads no end-of-text state. */
+typedef enum {
+    HB_BUFFER_FLAG_DEFAULT                     = 0x00000000u,
+    HB_BUFFER_FLAG_BOT                         = 0x00000001u,
+    HB_BUFFER_FLAG_EOT                         = 0x00000002u,
+    HB_BUFFER_FLAG_PRESERVE_DEFAULT_IGNORABLES = 0x00000004u,
+    HB_BUFFER_FLAG_REMOVE_DEFAULT_IGNORABLES   = 0x00000008u,
+    HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE = 0x00000010u
+} hb_buffer_flags_t;
+
+void              hb_buffer_set_flags(hb_buffer_t *buffer, hb_buffer_flags_t flags);
+hb_buffer_flags_t hb_buffer_get_flags(const hb_buffer_t *buffer);
+
+/* How characters group into clusters. A new or reset buffer uses
+ * HB_BUFFER_CLUSTER_LEVEL_DEFAULT (MONOTONE_GRAPHEMES), as in
+ * HarfBuzz. A value outside the enum is stored and returned as given
+ * and shapes like HB_BUFFER_CLUSTER_LEVEL_CHARACTERS. */
+typedef enum {
+    HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES  = 0,
+    HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS = 1,
+    HB_BUFFER_CLUSTER_LEVEL_CHARACTERS          = 2,
+    HB_BUFFER_CLUSTER_LEVEL_GRAPHEMES           = 3,
+    HB_BUFFER_CLUSTER_LEVEL_DEFAULT = HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES
+} hb_buffer_cluster_level_t;
+
+/* HarfBuzz's level predicates; each yields 1 or 0. */
+#define HB_BUFFER_CLUSTER_LEVEL_IS_MONOTONE(level) \
+    (!!((1u << (unsigned) (level)) & \
+        ((1u << HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES) | \
+         (1u << HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS))))
+#define HB_BUFFER_CLUSTER_LEVEL_IS_GRAPHEMES(level) \
+    (!!((1u << (unsigned) (level)) & \
+        ((1u << HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES) | \
+         (1u << HB_BUFFER_CLUSTER_LEVEL_GRAPHEMES))))
+#define HB_BUFFER_CLUSTER_LEVEL_IS_CHARACTERS(level) \
+    (!!((1u << (unsigned) (level)) & \
+        ((1u << HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS) | \
+         (1u << HB_BUFFER_CLUSTER_LEVEL_CHARACTERS))))
+
+void                      hb_buffer_set_cluster_level(hb_buffer_t               *buffer,
+                                                      hb_buffer_cluster_level_t  cluster_level);
+hb_buffer_cluster_level_t hb_buffer_get_cluster_level(const hb_buffer_t *buffer);
+
 /* Adds text[item_offset, item_offset + item_length) (item_length -1
- * means to the end). As in HarfBuzz: glyph clusters are offsets into
+ * means to the end; like HarfBuzz, an offset past the end is clamped
+ * to it and any other negative length counts as 0, so such an item
+ * adds no text but still sets the context). As in HarfBuzz: glyph
+ * clusters are offsets into
  * `text` in its own code units (bytes for UTF-8 and Latin-1, 16-bit
  * units for UTF-16, 32-bit units for UTF-32 and code points), up to
  * five characters before the item become the pre-context when the

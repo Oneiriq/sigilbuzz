@@ -2,7 +2,9 @@
 //! and the pair-adjustment cursor rules.
 
 use super::*;
+use crate::buffer::unicode_prop;
 use crate::tables::gpos::value_record::{X_ADVANCE, X_ADVANCE_DEVICE, Y_ADVANCE};
+use crate::tables::layout::MatchFilter;
 use crate::tables::variation_store::ItemVariationStore;
 use alloc::vec;
 
@@ -30,18 +32,25 @@ fn indices(stage: &[StageLookup]) -> Vec<u16> {
 
 #[test]
 fn stage_merges_features_in_lookup_order_and_runs_shared_lookups_once() {
-    let stage = stage_lookups(&[], true, lookups);
+    let stage = stage_lookups(&[], true, &[], lookups);
     // `dist` and `kern` share lookup 1: it runs once.
     assert_eq!(indices(&stage), [1, 2, 3, 4, 5]);
     // Lookups of `mark` / `mkmk` do not pass over ZWJ.
-    let zwj = |i: u16| stage.iter().find(|l| l.index == i).unwrap().auto_zwj;
+    let zwj = |i: u16| {
+        stage
+            .iter()
+            .find(|l| l.index == i)
+            .unwrap()
+            .joiners
+            .auto_zwj
+    };
     assert!(zwj(1) && zwj(3) && zwj(4));
     assert!(!zwj(2) && !zwj(5));
 }
 
 #[test]
 fn a_user_enabled_default_feature_is_not_applied_twice() {
-    let with_dist = stage_lookups(&[feature(b"dist", 1)], true, lookups);
+    let with_dist = stage_lookups(&[feature(b"dist", 1)], true, &[], lookups);
     assert_eq!(indices(&with_dist), [1, 2, 3, 4, 5]);
 }
 
@@ -54,17 +63,33 @@ fn user_features_join_and_disabled_defaults_leave_the_stage() {
             feature(b"dist", 0),
         ],
         true,
+        &[],
         lookups,
     );
     assert_eq!(indices(&stage), [0, 2, 4, 5]);
 }
 
 #[test]
+fn the_required_feature_joins_the_stage_whatever_its_tag() {
+    // Required feature lookups 7 and 1: 7 belongs to no requested
+    // tag, 1 to `kern`, which the caller turned off.
+    let off = [feature(b"kern", 0), feature(b"dist", 0)];
+    let stage = stage_lookups(&off, true, &[7, 1], lookups);
+    assert_eq!(indices(&stage), [1, 2, 4, 5, 7]);
+    let auto = stage.iter().find(|l| l.index == 7).unwrap().joiners;
+    assert_eq!(auto, Joiners::AUTO);
+    // Shared with `mark`, a required lookup gets its manual joiners.
+    let stage = stage_lookups(&[], true, &[2], lookups);
+    let shared = stage.iter().find(|l| l.index == 2).unwrap().joiners;
+    assert_eq!(shared, Joiners::MANUAL);
+}
+
+#[test]
 fn vertical_runs_leave_out_the_horizontal_defaults() {
-    let stage = stage_lookups(&[], false, lookups);
+    let stage = stage_lookups(&[], false, &[], lookups);
     assert_eq!(indices(&stage), [2, 4, 5]);
     // A caller can still ask for one.
-    let stage = stage_lookups(&[feature(b"kern", 1)], false, lookups);
+    let stage = stage_lookups(&[feature(b"kern", 1)], false, &[], lookups);
     assert_eq!(indices(&stage), [1, 2, 4, 5]);
 }
 
@@ -178,10 +203,7 @@ fn pair_pos_format1(v1_x_advance: i16, value_format2: u16, device: bool) -> Vec<
 
 fn state(filter: MatchFilter<'_>) -> LookupState<'_> {
     LookupState {
-        filter,
-        flag: 0,
-        mark_filtering_set: None,
-        auto_zwj: true,
+        mcx: MatchContext::new(filter, LayoutTable::Gpos, Joiners::AUTO),
         index: 0,
     }
 }
@@ -243,8 +265,8 @@ fn pair_finds_the_second_glyph_across_default_ignorables() {
     // across it.
     let mut glyphs = vec![glyph(1), zwj, glyph(2)];
     let manual = LookupState {
-        auto_zwj: false,
-        ..state(MatchFilter::none())
+        mcx: MatchContext::new(MatchFilter::none(), LayoutTable::Gpos, Joiners::MANUAL),
+        index: 0,
     };
     let next = apply_pair(&pp, &manual, &mut glyphs, 0, &VarCtx::none(), true);
     assert_eq!(next, None);

@@ -15,9 +15,10 @@
 use alloc::vec::Vec;
 
 use super::{apply_gsub_feature_masked, feature_disabled, Feature};
-use crate::buffer::Glyph;
+use crate::buffer::{Direction, Glyph};
 use crate::tables::cmap::Cmap;
 use crate::tables::gdef::Gdef;
+use crate::tables::layout::Joiners;
 use crate::tables::Gsub;
 use crate::unicode::mirroring::bidi_mirroring_glyph;
 
@@ -27,6 +28,22 @@ pub(super) fn mirror(ch: char, cmap: &Cmap<'_>) -> (char, bool) {
     match bidi_mirroring_glyph(ch) {
         Some(m) if cmap.glyph_id(m).is_some() => (m, true),
         _ => (ch, false),
+    }
+}
+
+/// The direction features HarfBuzz enables for a run laid out in
+/// `direction` (`hb_ot_shape_collect_features`): `ltra` and `ltrm` for
+/// left to right, `rtla` for right to left (its `rtlm` only reaches
+/// the glyphs [`apply_rtlm`] masks in), none for vertical runs. They
+/// run in the stage right after any required feature, before every
+/// shaper's own features.
+pub(super) const fn direction_features(direction: Direction) -> &'static [[u8; 4]] {
+    const LTR: &[[u8; 4]] = &[*b"ltra", *b"ltrm"];
+    const RTL: &[[u8; 4]] = &[*b"rtla"];
+    match direction {
+        Direction::Ltr => LTR,
+        Direction::Rtl => RTL,
+        Direction::Ttb | Direction::Btt => &[],
     }
 }
 
@@ -46,5 +63,14 @@ pub(super) fn apply_rtlm(
         return;
     }
     let mask: Vec<bool> = mirrored.iter().map(|m| !m).collect();
-    apply_gsub_feature_masked(gsub, glyphs, gdef, *b"rtlm", script_priority, &mask);
+    let joiners = Joiners::AUTO;
+    apply_gsub_feature_masked(
+        gsub,
+        glyphs,
+        gdef,
+        *b"rtlm",
+        script_priority,
+        &mask,
+        joiners,
+    );
 }

@@ -23,7 +23,9 @@ use crate::buffer::{Direction, Glyph};
 use crate::error::Result;
 use crate::face::Face;
 use crate::tables::gdef::Gdef;
-use crate::tables::layout::{MatchFilter, LOOKUP_FLAG_IGNORE_MARKS};
+use crate::tables::layout::{
+    Joiners, LayoutTable, MatchContext, MatchFilter, LOOKUP_FLAG_IGNORE_MARKS,
+};
 use crate::tables::{KernTable, Kerx};
 
 /// Runs the kern machine for one pair subtable over `glyphs`, which
@@ -35,7 +37,7 @@ fn kern_pairs(
     kern: impl Fn(u16, u16) -> i32,
 ) {
     let filter = MatchFilter::for_lookup(LOOKUP_FLAG_IGNORE_MARKS, gdef, None);
-    let skipper = Skipper::new(&filter, true);
+    let skipper = Skipper::new(MatchContext::new(filter, LayoutTable::Gpos, Joiners::AUTO).input());
     let mut i = 0;
     while i < glyphs.len() {
         // No glyph after `i` stops the iterator, so none after any

@@ -27,8 +27,14 @@ Shape text with a font and print the glyphs.
 sigilbuzz shape FONT.ttf "Hello, world"
 sigilbuzz shape FONT.ttf "Hello" --features liga,-kern,smcp=1
 sigilbuzz shape FONT.ttf "مرحبا" --direction rtl
+sigilbuzz shape FONT.ttf "abc مرحبا 123" --bidi
 sigilbuzz shape FONT.ttf "Hi" --json
 ```
+
+`--bidi` treats the text as a bidirectional paragraph: each run of one embedding level
+is shaped in its own direction, the runs come out in visual order, and clusters stay
+byte offsets into the text. `--direction` then sets the paragraph direction (`ltr` or
+`rtl`) instead of guessing it from the first strong character.
 
 Default output:
 

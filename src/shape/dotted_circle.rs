@@ -10,7 +10,9 @@
 //! around the circle as their base. It skips the insertion when the
 //! font has no glyph for U+25CC or the buffer carries
 //! `HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE`
-//! ([`crate::Buffer::set_insert_dotted_circle`] here).
+//! ([`crate::BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE`] here). The
+//! dotted circle `BufferFlags::BOT` puts under a mark at the very start
+//! of the text is inserted earlier, by the pipeline.
 //!
 //! sigilbuzz's syllable scanners emit one broken syllable per orphan
 //! mark, where HarfBuzz's grammar takes a whole run of them as one

@@ -7,11 +7,14 @@
 //! slow cases took seconds to hours before the fixes and now finish in
 //! milliseconds.
 
-use sigilbuzz::{shape, BidiInfo, BidiMap, Blob, Buffer, Face, Feature, Font};
+use sigilbuzz::{
+    shape, BidiInfo, BidiParagraph, Blob, Buffer, BufferFlags, ClusterLevel, Face, Feature, Font,
+};
 
 const AMIRI: &[u8] = include_bytes!("fixtures/amiri_regular.ttf");
 const OPEN_SANS: &[u8] = include_bytes!("fixtures/opensans_regular.ttf");
 const AAT_SYNTHETIC: &[u8] = include_bytes!("fixtures/aat_synthetic.ttf");
+const RUBIK: &[u8] = include_bytes!("fixtures/rubik_vf.ttf");
 
 fn push16(out: &mut Vec<u8>, v: u16) {
     out.extend_from_slice(&v.to_be_bytes());
@@ -156,9 +159,33 @@ fn long_fsi_run_resolves_bidi_in_linear_time() {
     let info = BidiInfo::new(&text, None);
     assert_eq!(info.char_count(), 200_001);
 
-    let mut buffer = Buffer::new();
-    buffer.set_text_bidi(&text);
-    assert_eq!(buffer.text().chars().count(), 200_001);
+    let paragraph = BidiParagraph::new(&text, None);
+    let covered: usize = paragraph.runs().iter().map(|run| run.range.len()).sum();
+    assert_eq!(covered, text.len());
+    let visual: usize = paragraph.visual_runs().iter().map(|r| r.range.len()).sum();
+    assert_eq!(visual, text.len());
+}
+
+#[test]
+fn long_run_of_composing_marks_normalizes_in_linear_time() {
+    // Every "e" + COMBINING ACUTE ACCENT recomposes to U+00E9, which
+    // Open Sans maps. Removing each composed mark from the middle of
+    // the run shifted the rest of it every time.
+    let text = "e\u{0301}".repeat(100_000);
+    let glyphs = shape_glyphs(OPEN_SANS, &text, &[]);
+    assert_eq!(glyphs.len(), 100_000);
+    assert!(glyphs.windows(2).all(|w| w[0].glyph_id == w[1].glyph_id));
+}
+
+#[test]
+fn long_pair_positioning_run_of_ignorables_is_linear() {
+    // A GPOS pair lookup reached every glyph of a long run of default
+    // ignorables and searched the rest of the run for a second glyph
+    // before checking the first glyph's coverage. Rubik kerns through
+    // GPOS.
+    let text = format!("A{}V", "\u{200B}".repeat(100_000));
+    let glyphs = shape_glyphs(RUBIK, &text, &[]);
+    assert_eq!(glyphs.len(), 100_002);
 }
 
 #[test]
@@ -608,24 +635,35 @@ fn hostile_strings_never_panic() {
         let info = BidiInfo::new(&text, None);
         let order = info.reorder();
         assert_eq!(order.len(), text.chars().count());
-        let map = BidiMap::new(&text, &info);
+        let paragraph = BidiParagraph::new(&text, None);
         for byte in 0..=text.len() + 1 {
-            let _ = map.visual_to_logical(byte);
-            let _ = map.logical_to_visual(byte);
-            let _ = map.level_at_visual(byte);
-            let _ = map.level_at_logical(byte);
+            let _ = paragraph.level_at(byte);
+            let _ = paragraph.run_at(byte);
         }
+        let visual: usize = paragraph.visual_runs().iter().map(|r| r.range.len()).sum();
+        assert_eq!(visual, text.len());
 
         let mut buffer = Buffer::new();
-        buffer.set_text_bidi(&text);
+        buffer.set_text(&text);
         let _ = buffer.script_runs();
         for font_bytes in fonts {
             let blob = Blob::new(font_bytes);
             let face = Face::parse(&blob, 0).unwrap();
             let font = Font::new(face, 16.0);
-            for nfc in [false, true] {
-                buffer.set_normalize_nfc(nfc);
+            // Normalization always runs now. Vary the cluster level and
+            // the buffer flags instead, which drive the other merges.
+            for (level, flags) in [
+                (ClusterLevel::MonotoneGraphemes, BufferFlags::DEFAULT),
+                (
+                    ClusterLevel::Characters,
+                    BufferFlags::BOT | BufferFlags::EOT | BufferFlags::REMOVE_DEFAULT_IGNORABLES,
+                ),
+            ] {
+                buffer.set_cluster_level(level);
+                buffer.set_flags(flags);
                 let run = shape(&font, &buffer, &[]).unwrap();
+                assert!(run.len() <= 4 * text.chars().count() + 4);
+                let run = paragraph.shape(&font, &buffer, &[]).unwrap();
                 assert!(run.len() <= 4 * text.chars().count() + 4);
             }
         }
@@ -633,34 +671,52 @@ fn hostile_strings_never_panic() {
 }
 
 #[test]
-fn bidi_map_with_non_permutation_order_is_empty() {
-    // An order of the right length that repeats or overshoots an
-    // index used to index out of bounds or underflow in the lookups.
-    let text = "abc";
-    let info = BidiInfo::new(text, None);
-    for order in [[2usize, 2, 2], [5, 0, 1], [1, 2, 3]] {
-        let map = BidiMap::from_order(text, &order, &info);
-        assert!(map.is_empty());
-        for byte in 0..5 {
-            assert_eq!(map.visual_to_logical(byte), None);
-            assert_eq!(map.logical_to_visual(byte), None);
-            assert_eq!(map.level_at_visual(byte), None);
-            assert_eq!(map.level_at_logical(byte), None);
+fn reorder_visual_of_any_levels_is_a_permutation() {
+    // `BidiParagraph::reorder_visual` takes levels from the caller,
+    // who may pass levels no paragraph produces: past the UAX #9
+    // maximum depth, all odd, or none at all.
+    let cases: [&[u8]; 6] = [
+        &[],
+        &[255],
+        &[255, 0, 255, 0],
+        &[0, 254, 1, 255, 126, 125],
+        &[u8::MAX; 64],
+        &[1, 3, 5, 7, 9, 11, 13, 15],
+    ];
+    for levels in cases {
+        let mut order = BidiParagraph::reorder_visual(levels);
+        order.sort_unstable();
+        assert!(order.iter().copied().eq(0..levels.len()), "{levels:?}");
+    }
+}
+
+#[test]
+fn bidi_paragraph_lookups_past_the_end_are_none() {
+    // Offsets at or past the end of the text, and offsets inside a
+    // character, never index out of bounds.
+    for text in ["", "abc", "\u{05D0}\u{05D1}", "a\u{0628}1"] {
+        let paragraph = BidiParagraph::new(text, None);
+        for byte in text.len()..text.len() + 4 {
+            assert_eq!(paragraph.level_at(byte), None);
+            assert!(paragraph.run_at(byte).is_none());
+        }
+        for byte in 0..text.len() {
+            assert!(paragraph.level_at(byte).is_some());
+            assert!(paragraph.run_at(byte).is_some());
         }
     }
 }
 
 #[test]
-fn bidi_map_with_mismatched_order_does_not_panic_in_release() {
-    // Debug builds assert on a mismatched order. Release builds fall
-    // back to an empty map, which every lookup handles.
-    if cfg!(debug_assertions) {
-        return;
-    }
-    let text = "abc";
-    let info = BidiInfo::new(text, None);
-    let map = BidiMap::from_order(text, &[2, 2], &info);
-    assert!(map.is_empty());
-    assert_eq!(map.visual_to_logical(0), None);
-    assert_eq!(map.logical_to_visual(1), None);
+fn many_bidi_runs_shape_in_reasonable_time() {
+    // Hebrew letters and digits alternate levels, so every character
+    // is a run of its own and the paragraph shapes 20000 runs.
+    let text = "\u{05D0}1".repeat(10_000);
+    let paragraph = BidiParagraph::new(&text, None);
+    assert_eq!(paragraph.runs().len(), 20_000);
+    let blob = Blob::new(OPEN_SANS);
+    let face = Face::parse(&blob, 0).unwrap();
+    let font = Font::new(face, 16.0);
+    let run = paragraph.shape(&font, &Buffer::new(), &[]).unwrap();
+    assert_eq!(run.len(), 20_000);
 }

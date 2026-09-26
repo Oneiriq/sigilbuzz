@@ -4,81 +4,90 @@
 
 use alloc::vec::Vec;
 
+use super::reorder::initial_reorder;
+use super::segment_syllables;
 use super::{
     shape_use, BALINESE_SCRIPT_PRIORITY, BRAHMI_SCRIPT_PRIORITY, BUGINESE_SCRIPT_PRIORITY,
     CHAM_SCRIPT_PRIORITY, HANGUL_FEATURES, HANGUL_SCRIPT_PRIORITY, KHOJKI_SCRIPT_PRIORITY,
-    LAO_SCRIPT_PRIORITY, LEPCHA_SCRIPT_PRIORITY, LIMBU_SCRIPT_PRIORITY, MODI_SCRIPT_PRIORITY,
-    MYANMAR_BASIC_FEATURES, MYANMAR_SCRIPT_PRIORITY, MYANMAR_TOPOGRAPHICAL_FEATURES,
-    NKO_SCRIPT_PRIORITY, SHARADA_SCRIPT_PRIORITY, SUNDANESE_SCRIPT_PRIORITY,
-    TAI_THAM_SCRIPT_PRIORITY, THAI_LAO_FEATURES, THAI_SCRIPT_PRIORITY, TIRHUTA_SCRIPT_PRIORITY,
-    USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES,
+    LEPCHA_SCRIPT_PRIORITY, LIMBU_SCRIPT_PRIORITY, MODI_SCRIPT_PRIORITY, MYANMAR_BASIC_FEATURES,
+    MYANMAR_SCRIPT_PRIORITY, MYANMAR_TOPOGRAPHICAL_FEATURES, NKO_SCRIPT_PRIORITY,
+    SHARADA_SCRIPT_PRIORITY, SUNDANESE_SCRIPT_PRIORITY, TAI_THAM_SCRIPT_PRIORITY,
+    TIRHUTA_SCRIPT_PRIORITY, USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES,
 };
-use crate::buffer::Glyph;
+use crate::buffer::{ClusterLevel, Glyph};
+use crate::shape::{
+    apply_gsub_feature_in_scripts, apply_gsub_features_merged,
+    apply_locl_ccmp_if_length_preserving, JoinerTable,
+};
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 
-/// Entry point for Myanmar runs. Routes through the generic USE
-/// dispatch with the Myanmar script-tag priority and the Myanmar-
-/// specific feature chain (adds `rphf` for kinzi and keeps
-/// `pref`/`blwf`/`pstf`/`cjct` for medial + subjoined handling).
+/// Entry point for Myanmar runs, in the order of HarfBuzz's Myanmar
+/// shaper (`collect_features_myanmar`): `locl` and `ccmp` on the
+/// logical order, the syllable reorder (medial ra and pre-base vowels
+/// in front of the base, kinzi after it), the basic features `rphf`,
+/// `pref`, `blwf`, and `pstf` one at a time, then `pres`, `abvs`,
+/// `blws`, and `psts` together. The default features follow in the
+/// generic pass.
 pub fn shape_myanmar(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
-    shape_use(
+    if codepoints.is_empty() || glyphs.is_empty() {
+        return;
+    }
+    let table = JoinerTable::Myanmar;
+    let syllables = segment_syllables(codepoints);
+    // `locl` and `ccmp` see the logical order, as one stage, before the
+    // reorder (`collect_features_myanmar`). The reorder indexes glyphs
+    // by code point, so a length-changing `ccmp` waits until after it.
+    let early = gsub.is_some_and(|gsub| {
+        apply_locl_ccmp_if_length_preserving(gsub, glyphs, gdef, MYANMAR_SCRIPT_PRIORITY, table)
+    });
+    for syllable in &syllables {
+        initial_reorder(codepoints, glyphs, syllable, level);
+    }
+    let Some(gsub) = gsub else {
+        return;
+    };
+    if !early {
+        let locl_ccmp = [*b"locl", *b"ccmp"];
+        apply_gsub_features_merged(
+            gsub,
+            glyphs,
+            gdef,
+            &[],
+            &locl_ccmp,
+            MYANMAR_SCRIPT_PRIORITY,
+            table,
+        );
+    }
+    // The basic features, one stage each.
+    for tag in &MYANMAR_BASIC_FEATURES[2..] {
+        let joiners = table.joiners(**tag);
+        apply_gsub_feature_in_scripts(
+            gsub,
+            glyphs,
+            gdef,
+            **tag,
+            0,
+            MYANMAR_SCRIPT_PRIORITY,
+            joiners,
+        );
+    }
+    // The other features, as one stage.
+    let other: Vec<[u8; 4]> = MYANMAR_TOPOGRAPHICAL_FEATURES.iter().map(|t| **t).collect();
+    apply_gsub_features_merged(
         gsub,
-        gdef,
-        codepoints,
         glyphs,
+        gdef,
+        &[],
+        &other,
         MYANMAR_SCRIPT_PRIORITY,
-        MYANMAR_BASIC_FEATURES,
-        MYANMAR_TOPOGRAPHICAL_FEATURES,
-        true,
-    );
-}
-
-/// Entry point for Thai runs. Thai has no halant and no subjoining;
-/// the shaping reduces to contextual forms + mark positioning. We
-/// still segment into syllables so the cluster-merge pass groups
-/// tone marks with their consonant, matching HarfBuzz's Thai shaper
-/// on the Thai parity corpus.
-pub fn shape_thai(
-    gsub: Option<&Gsub<'_>>,
-    gdef: Option<&Gdef<'_>>,
-    codepoints: &[char],
-    glyphs: &mut Vec<Glyph>,
-) {
-    shape_use(
-        gsub,
-        gdef,
-        codepoints,
-        glyphs,
-        THAI_SCRIPT_PRIORITY,
-        THAI_LAO_FEATURES,
-        &[],
-        false,
-    );
-}
-
-/// Entry point for Lao runs. Lao is structurally near-identical to
-/// Thai: same feature set, no reorder, different script tag.
-pub fn shape_lao(
-    gsub: Option<&Gsub<'_>>,
-    gdef: Option<&Gdef<'_>>,
-    codepoints: &[char],
-    glyphs: &mut Vec<Glyph>,
-) {
-    shape_use(
-        gsub,
-        gdef,
-        codepoints,
-        glyphs,
-        LAO_SCRIPT_PRIORITY,
-        THAI_LAO_FEATURES,
-        &[],
-        false,
+        table,
     );
 }
 
@@ -87,13 +96,22 @@ pub fn shape_lao(
 /// default path in [`crate::shape`]; only runs containing at least
 /// one Jamo codepoint land here. The feature chain drives
 /// `ljmo`/`vjmo`/`tjmo` so Leading / Vowel / Trailing jamo pick
-/// their positional variant glyphs.
+/// their positional variant glyphs; `ccmp` and the other default
+/// features run once, in the default pass after this.
+///
+/// An `<L,V>` or `<L,V,T>` jamo sequence that did not compose into a
+/// precomposed syllable forms one cluster at the grapheme levels, as
+/// HarfBuzz's Hangul shaper merges it (`merge_out_grapheme_clusters`).
 pub fn shape_hangul(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
+    if glyphs.len() == codepoints.len() {
+        merge_jamo_syllables(codepoints, glyphs, level);
+    }
     shape_use(
         gsub,
         gdef,
@@ -103,7 +121,44 @@ pub fn shape_hangul(
         HANGUL_FEATURES,
         &[],
         false,
+        level,
+        JoinerTable::Default,
     );
+}
+
+/// HarfBuzz's leading, vowel, and trailing jamo ranges (`isL`, `isV`,
+/// `isT` in `hb-ot-shaper-hangul.cc`).
+const fn is_l(ch: char) -> bool {
+    matches!(ch as u32, 0x1100..=0x115F | 0xA960..=0xA97C)
+}
+
+const fn is_v(ch: char) -> bool {
+    matches!(ch as u32, 0x1160..=0x11A7 | 0xD7B0..=0xD7C6)
+}
+
+const fn is_t(ch: char) -> bool {
+    matches!(ch as u32, 0x11A8..=0x11FF | 0xD7CB..=0xD7FB)
+}
+
+/// Merges each `<L,V>` / `<L,V,T>` jamo sequence of `codepoints`
+/// (one glyph each) into one cluster at the grapheme levels. The text
+/// reaching here already had its composable sequences composed, so
+/// every such sequence is one HarfBuzz leaves decomposed.
+fn merge_jamo_syllables(codepoints: &[char], glyphs: &mut [Glyph], level: ClusterLevel) {
+    let mut i = 0;
+    while i + 1 < codepoints.len() {
+        if !(is_l(codepoints[i]) && is_v(codepoints[i + 1])) {
+            i += 1;
+            continue;
+        }
+        let end = if codepoints.get(i + 2).is_some_and(|&c| is_t(c)) {
+            i + 3
+        } else {
+            i + 2
+        };
+        crate::shape::merge_grapheme_clusters(glyphs, i, end, level);
+        i = end;
+    }
 }
 
 /// Entry point for N'Ko runs. N'Ko is RTL alphabetic with cursive
@@ -163,6 +218,7 @@ pub fn shape_nko_in_context(
         &[],
         &[*b"locl", *b"ccmp"],
         NKO_SCRIPT_PRIORITY,
+        JoinerTable::Use,
     );
 
     // 2. Compute the joining-form vector using the shared Arabic
@@ -191,6 +247,7 @@ pub fn shape_nko_in_context(
                 tag,
                 NKO_SCRIPT_PRIORITY,
                 &mask,
+                JoinerTable::Use.joiners(tag),
             );
         }
     }
@@ -206,6 +263,7 @@ pub fn shape_buginese(
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
     shape_use(
         gsub,
@@ -216,6 +274,8 @@ pub fn shape_buginese(
         USE_BASIC_FEATURES,
         USE_TOPOGRAPHICAL_FEATURES,
         true,
+        level,
+        JoinerTable::Use,
     );
 }
 
@@ -225,6 +285,7 @@ pub fn shape_tai_tham(
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
     shape_use(
         gsub,
@@ -235,6 +296,8 @@ pub fn shape_tai_tham(
         USE_BASIC_FEATURES,
         USE_TOPOGRAPHICAL_FEATURES,
         true,
+        level,
+        JoinerTable::Use,
     );
 }
 
@@ -244,6 +307,7 @@ pub fn shape_balinese(
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
     shape_use(
         gsub,
@@ -254,6 +318,8 @@ pub fn shape_balinese(
         USE_BASIC_FEATURES,
         USE_TOPOGRAPHICAL_FEATURES,
         true,
+        level,
+        JoinerTable::Use,
     );
 }
 
@@ -263,6 +329,7 @@ pub fn shape_sundanese(
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
     shape_use(
         gsub,
@@ -273,6 +340,8 @@ pub fn shape_sundanese(
         USE_BASIC_FEATURES,
         USE_TOPOGRAPHICAL_FEATURES,
         true,
+        level,
+        JoinerTable::Use,
     );
 }
 
@@ -282,6 +351,7 @@ pub fn shape_lepcha(
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
     shape_use(
         gsub,
@@ -292,6 +362,8 @@ pub fn shape_lepcha(
         USE_BASIC_FEATURES,
         USE_TOPOGRAPHICAL_FEATURES,
         true,
+        level,
+        JoinerTable::Use,
     );
 }
 
@@ -301,6 +373,7 @@ pub fn shape_limbu(
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
     shape_use(
         gsub,
@@ -311,6 +384,8 @@ pub fn shape_limbu(
         USE_BASIC_FEATURES,
         USE_TOPOGRAPHICAL_FEATURES,
         true,
+        level,
+        JoinerTable::Use,
     );
 }
 
@@ -320,6 +395,7 @@ pub fn shape_cham(
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
     shape_use(
         gsub,
@@ -330,6 +406,8 @@ pub fn shape_cham(
         USE_BASIC_FEATURES,
         USE_TOPOGRAPHICAL_FEATURES,
         true,
+        level,
+        JoinerTable::Use,
     );
 }
 
@@ -343,6 +421,7 @@ pub fn shape_brahmi(
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
     shape_use(
         gsub,
@@ -353,6 +432,8 @@ pub fn shape_brahmi(
         USE_BASIC_FEATURES,
         USE_TOPOGRAPHICAL_FEATURES,
         true,
+        level,
+        JoinerTable::Use,
     );
 }
 
@@ -362,6 +443,7 @@ pub fn shape_sharada(
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
     shape_use(
         gsub,
@@ -372,6 +454,8 @@ pub fn shape_sharada(
         USE_BASIC_FEATURES,
         USE_TOPOGRAPHICAL_FEATURES,
         true,
+        level,
+        JoinerTable::Use,
     );
 }
 
@@ -381,6 +465,7 @@ pub fn shape_khojki(
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
     shape_use(
         gsub,
@@ -391,6 +476,8 @@ pub fn shape_khojki(
         USE_BASIC_FEATURES,
         USE_TOPOGRAPHICAL_FEATURES,
         true,
+        level,
+        JoinerTable::Use,
     );
 }
 
@@ -402,6 +489,7 @@ pub fn shape_tirhuta(
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
     shape_use(
         gsub,
@@ -412,6 +500,8 @@ pub fn shape_tirhuta(
         USE_BASIC_FEATURES,
         USE_TOPOGRAPHICAL_FEATURES,
         true,
+        level,
+        JoinerTable::Use,
     );
 }
 
@@ -421,6 +511,7 @@ pub fn shape_modi(
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
+    level: ClusterLevel,
 ) {
     shape_use(
         gsub,
@@ -431,5 +522,47 @@ pub fn shape_modi(
         USE_BASIC_FEATURES,
         USE_TOPOGRAPHICAL_FEATURES,
         true,
+        level,
+        JoinerTable::Use,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    fn merged(text: &str, level: ClusterLevel) -> Vec<u32> {
+        let cps: Vec<char> = text.chars().collect();
+        let mut glyphs: Vec<Glyph> = text
+            .char_indices()
+            .map(|(i, c)| Glyph::new(c as u32, i as u32))
+            .collect();
+        merge_jamo_syllables(&cps, &mut glyphs, level);
+        glyphs.iter().map(|g| g.cluster).collect()
+    }
+
+    #[test]
+    fn jamo_sequences_merge_at_grapheme_levels() {
+        // <L,V,T> with an Extended-B T, then an <L,V> with an
+        // Extended-A L, then a lone vowel.
+        let text = "\u{1100}\u{1161}\u{D7CB}\u{A960}\u{1161}\u{1161}";
+        assert_eq!(
+            merged(text, ClusterLevel::MonotoneGraphemes),
+            vec![0, 0, 0, 9, 9, 15]
+        );
+        assert_eq!(
+            merged(text, ClusterLevel::Graphemes),
+            vec![0, 0, 0, 9, 9, 15]
+        );
+        assert_eq!(
+            merged(text, ClusterLevel::MonotoneCharacters),
+            vec![0, 3, 6, 9, 12, 15]
+        );
+        // A trailing jamo alone or before a vowel starts nothing.
+        assert_eq!(
+            merged("\u{11A8}\u{1161}", ClusterLevel::MonotoneGraphemes),
+            vec![0, 3]
+        );
+    }
 }

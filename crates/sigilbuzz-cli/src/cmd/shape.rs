@@ -10,13 +10,17 @@
 //! readable output. The shape pipeline always runs at the font's
 //! design-unit size (size = 1.0 means we report raw advances). There
 //! is no point-size knob in the CLI yet.
+//!
+//! `--bidi` shapes the text as a bidirectional paragraph through
+//! [`sigilbuzz::BidiParagraph`]: every embedding-level run in its own
+//! direction, the runs in visual order, clusters indexing the input.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
 
 use clap::Args as ClapArgs;
 
-use sigilbuzz::{shape, Blob, Buffer, Face, Font, Glyph, Language, UnicodeScript};
+use sigilbuzz::{shape, BidiParagraph, Blob, Buffer, Face, Font, Glyph, Language, UnicodeScript};
 
 use super::util::{parse_direction, parse_feature_list, read_font, with_stdout, CliResult};
 
@@ -45,8 +49,15 @@ pub struct Args {
     pub features: Option<String>,
     /// Writing direction (`ltr`, `rtl`, `ttb`, `btt`). `rtl` and `btt`
     /// print the glyphs in visual order (reversed), like `hb-shape`.
+    /// With `--bidi`, the paragraph direction (`ltr` or `rtl`) instead.
     #[arg(long)]
     pub direction: Option<String>,
+    /// Shape the text as a bidirectional paragraph: run the Unicode
+    /// bidi algorithm, shape each embedding-level run in logical order
+    /// in its own direction, and print the runs in visual order.
+    /// Clusters stay byte offsets into the text.
+    #[arg(long)]
+    pub bidi: bool,
     /// ISO 15924 script code (e.g. `Arab`, `deva`) to shape the whole
     /// text as, like `hb-shape --script`. Without it, or for a script
     /// sigilbuzz has no shaper for, the text is split into script runs.
@@ -68,11 +79,8 @@ pub fn run(args: Args) -> CliResult {
     let face = Face::parse(&blob, 0).map_err(|e| format!("parse face: {e:?}"))?;
     let font = Font::new(face, 1.0);
 
+    let direction = args.direction.as_deref().map(parse_direction).transpose()?;
     let mut buffer = Buffer::new();
-    buffer.set_text(&args.text);
-    if let Some(d) = &args.direction {
-        buffer.set_direction(parse_direction(d)?);
-    }
     if let Some(s) = &args.script {
         buffer.set_script(parse_script(s)?);
     }
@@ -86,7 +94,19 @@ pub fn run(args: Args) -> CliResult {
         None => Vec::new(),
     };
 
-    let run = shape(&font, &buffer, &features).map_err(|e| format!("shape: {e:?}"))?;
+    let run = if args.bidi {
+        if direction.is_some_and(|d| !d.is_horizontal()) {
+            return Err("--bidi takes a paragraph direction of ltr or rtl".into());
+        }
+        BidiParagraph::new(&args.text, direction).shape(&font, &buffer, &features)
+    } else {
+        buffer.set_text(&args.text);
+        if let Some(d) = direction {
+            buffer.set_direction(d);
+        }
+        shape(&font, &buffer, &features)
+    }
+    .map_err(|e| format!("shape: {e:?}"))?;
 
     with_stdout(|out| {
         if args.json {

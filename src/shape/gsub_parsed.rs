@@ -1,12 +1,13 @@
 //! Pre-parsed GSUB subtables: the parse-once cache a lookup's cursor
 //! walk reuses, the coverage digests that let it skip positions, the
-//! per-cursor dispatch over the cache, and the glyph-id shadow buffer
-//! the drivers keep in sync.
+//! per-cursor dispatch over the cache, and the matching view of the
+//! glyph run the drivers keep in sync.
 
 use alloc::vec::Vec;
 
 use super::gsub::{
     apply_gsub_chain_context_at, apply_gsub_context_at, expand_glyph_in_place, substitute_glyph,
+    GsubCx,
 };
 use super::{lig, resolve_extension, LookupBudget};
 use crate::buffer::Glyph;
@@ -15,8 +16,7 @@ use crate::tables::gsub::{
     lookup_type as gsub_lt, Alternate, ChainContextAny, Context as GsubContext, Ligature, Multiple,
     ReverseChain, Single,
 };
-use crate::tables::layout::{Lookup, MatchFilter};
-use crate::tables::Gsub;
+use crate::tables::layout::{Lookup, MatchContext, MatchFilter, MatchGlyph};
 
 /// One pre-parsed GSUB subtable, ready to drive a cursor walk.
 ///
@@ -39,8 +39,7 @@ pub(super) enum ParsedGsubSubtable<'a> {
 /// Parses the subtables of a single `Lookup`, handling the Extension
 /// type-7 unwrap so the caller never sees raw lookup type 7. Returns
 /// the parsed list in spec order; subtables that fail to parse are
-/// silently dropped, matching the per-cursor behavior the inline
-/// `apply_gsub_lookup_at` walker had before the cache was introduced.
+/// dropped.
 pub(super) fn parse_lookup_subtables<'a>(
     lookup: &Lookup<'a>,
     raw_lt: u16,
@@ -112,29 +111,20 @@ fn primary_coverage_of<'a, 'b>(
     }
 }
 
-/// Reports whether at least one glyph in `ids` could trigger any
+/// Reports whether at least one glyph in `run` could trigger any
 /// subtable in `parsed`, a fast pre-filter so the cursor walk in
 /// `apply_gsub_lookup` skips lookups whose coverage doesn't intersect
 /// the run at all. Mirrors HarfBuzz's `would_apply` skip; returns
 /// `true` conservatively when a subtable doesn't expose its primary
 /// coverage cheaply.
-pub(super) fn lookup_might_apply(parsed: &[ParsedGsubSubtable<'_>], ids: &[u16]) -> bool {
-    if ids.is_empty() {
+pub(super) fn lookup_might_apply(parsed: &[ParsedGsubSubtable<'_>], run: &[MatchGlyph]) -> bool {
+    if run.is_empty() {
         return false;
     }
-    for sub in parsed {
-        match primary_coverage_of(sub) {
-            None => return true,
-            Some(cov) => {
-                for &id in ids {
-                    if cov.contains(id) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
+    parsed.iter().any(|sub| match primary_coverage_of(sub) {
+        None => true,
+        Some(cov) => run.iter().any(|g| cov.contains(g.id)),
+    })
 }
 
 /// True when every subtable in `parsed` exposes a single primary
@@ -146,197 +136,149 @@ pub(super) fn parsed_has_full_digest(parsed: &[ParsedGsubSubtable<'_>]) -> bool 
     parsed.iter().all(|s| primary_coverage_of(s).is_some())
 }
 
-/// True when `glyphs[i]` is in any of `parsed`'s primary coverages.
+/// True when glyph `id` is in any of `parsed`'s primary coverages.
 /// Caller has already established that every subtable exposes one
-/// (`parsed_has_full_digest`). Falling out of the digest path back to
-/// the per-position walker happens at the caller level.
+/// (`parsed_has_full_digest`).
 pub(super) fn cursor_in_digest(parsed: &[ParsedGsubSubtable<'_>], id: u16) -> bool {
-    for sub in parsed {
-        if let Some(cov) = primary_coverage_of(sub) {
-            if cov.contains(id) {
-                return true;
-            }
-        }
-    }
-    false
+    parsed
+        .iter()
+        .filter_map(primary_coverage_of)
+        .any(|cov| cov.contains(id))
 }
 
-/// Cursor-position dispatch over a pre-parsed subtable list. Mirrors
-/// the inner loop of `apply_gsub_lookup_at` but without the
-/// per-cursor parse cost. Returns the input span the matching subtable
-/// consumed (1 for Single/Alternate, N for Ligature, the input window
-/// length for Context / Chain / Reverse), or 0 when no subtable fired.
+/// Tries the subtables of one lookup at `at` in order; the first one
+/// that applies wins. Returns where the lookup's walk continues when
+/// one applied (HarfBuzz leaves the cursor past a single substitution,
+/// past a multiple substitution's outputs, past the glyphs a ligature
+/// kept inside its match, and at the end of a contextual match), or
+/// `None` when none did.
+///
+/// `nested` is set when a contextual lookup dispatched this one:
+/// reverse chaining substitutions do not apply then, as in HarfBuzz.
+/// The glyph at `at` is not checked against the lookup's flags here;
+/// the top-level walk does that, a nested dispatch does not. Nested
+/// lookups and multiple substitutions spend `budget`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_parsed_lookup_at(
-    gsub: &Gsub<'_>,
+    cx: &GsubCx<'_>,
     parsed: &[ParsedGsubSubtable<'_>],
-    filter: &MatchFilter<'_>,
+    mcx: &MatchContext<'_>,
     glyphs: &mut Vec<Glyph>,
-    ids: &mut GlyphIds,
-    gdef: Option<&Gdef<'_>>,
+    run: &mut MatchRun,
     at: usize,
     depth: u8,
     alternate_index: u16,
+    nested: bool,
     budget: &mut LookupBudget,
-) -> usize {
+) -> Option<usize> {
     if at >= glyphs.len() {
-        return 0;
+        return None;
     }
+    let id = run.get(at).id;
     for sub in parsed {
-        match sub {
-            ParsedGsubSubtable::Single(single) => {
-                let id = glyphs[at].glyph_id as u16;
-                if filter.is_skipped(id) {
-                    continue;
-                }
-                if let Some(out) = single.apply(id) {
-                    substitute_glyph(&mut glyphs[at], out);
-                    ids.set(at, out);
-                    return 1;
-                }
-            }
-            ParsedGsubSubtable::Multiple(m) => {
-                let id = glyphs[at].glyph_id as u16;
-                if filter.is_skipped(id) {
-                    continue;
-                }
-                if let Some(seq) = m.apply(id) {
-                    if let Some(n) = expand_glyph_in_place(glyphs, at, &seq, budget) {
-                        ids.resync(glyphs);
-                        return n;
-                    }
-                }
-            }
-            ParsedGsubSubtable::Alternate(alt) => {
-                let id = glyphs[at].glyph_id as u16;
-                if filter.is_skipped(id) {
-                    continue;
-                }
-                if let Some(out) = alt.apply(id, alternate_index) {
-                    substitute_glyph(&mut glyphs[at], out);
-                    ids.set(at, out);
-                    return 1;
-                }
-            }
+        let next = match sub {
+            ParsedGsubSubtable::Single(single) => single.apply(id).map(|out| {
+                substitute_glyph(&mut glyphs[at], out);
+                run.sync(at, &glyphs[at]);
+                at + 1
+            }),
+            ParsedGsubSubtable::Multiple(m) => m
+                .apply(id)
+                .and_then(|seq| expand_glyph_in_place(glyphs, at, &seq, budget))
+                .map(|n| {
+                    run.resync(glyphs);
+                    at + n
+                }),
+            ParsedGsubSubtable::Alternate(alt) => alt.apply(id, alternate_index).map(|out| {
+                substitute_glyph(&mut glyphs[at], out);
+                run.sync(at, &glyphs[at]);
+                at + 1
+            }),
             ParsedGsubSubtable::Ligature(ligature) => {
-                let window = ids.as_slice().get(at..).unwrap_or_default();
-                if let Some((out, positions)) = ligature.apply_filtered(window, filter) {
-                    lig::ligate(glyphs, at, &positions, out, gdef, substitute_glyph);
-                    ids.resync(glyphs);
-                    // Ligature emits 1 glyph from N matched components.
-                    // The cursor must advance past the ligature output
-                    // *and* any skipped (filtered) glyphs that survived
-                    // inside the matched window: in HarfBuzz's
-                    // input/output buffer model that is `idx + span` in
-                    // INPUT space; in our in-place model the buffer
-                    // already shrunk by `(positions.len() - 1)` glyphs,
-                    // so the equivalent NEW-buffer advance is
-                    // `span - (positions.len() - 1)` = `1 + skipped`.
-                    //
-                    // Returning the raw input span over-advances by the
-                    // number of consumed components, which silently skips
-                    // the next-letter slot, visible as Mongolian's calt
-                    // marker-pass leaking marker glyphs on 3+ letter
-                    // chains (#118).
-                    let span = positions.last().copied().map_or(0, |p| p + 1);
-                    let advance = 1 + span.saturating_sub(positions.len());
-                    return advance;
-                }
+                ligature.apply_at(run.as_slice(), at, mcx).map(|(out, m)| {
+                    let positions = m.positions.as_slice();
+                    if positions.len() == 1 {
+                        // A one-component ligature is a plain
+                        // substitution, not a ligation.
+                        substitute_glyph(&mut glyphs[at], out);
+                    } else {
+                        let classes = mcx.filter().classes();
+                        let level = cx.gsub.cluster_level();
+                        lig::ligate(glyphs, positions, out, &classes, substitute_glyph, level);
+                    }
+                    run.resync(glyphs);
+                    // The components after the first are gone; the
+                    // walk resumes after the last one's old place.
+                    m.end - (positions.len() - 1)
+                })
             }
             ParsedGsubSubtable::Context(ctx) => {
-                let ran = apply_gsub_context_at(
-                    gsub,
-                    ctx,
-                    glyphs,
-                    ids,
-                    gdef,
-                    filter,
-                    at,
-                    depth + 1,
-                    budget,
-                );
-                if ran > 0 {
-                    return ran;
-                }
+                apply_gsub_context_at(cx, ctx, mcx, glyphs, run, at, depth + 1, budget)
             }
             ParsedGsubSubtable::ChainContext(chain) => {
-                let ran = apply_gsub_chain_context_at(
-                    gsub,
-                    chain,
-                    glyphs,
-                    ids,
-                    gdef,
-                    filter,
-                    at,
-                    depth + 1,
-                    budget,
-                );
-                if ran > 0 {
-                    return ran;
-                }
+                apply_gsub_chain_context_at(cx, chain, mcx, glyphs, run, at, depth + 1, budget)
             }
             ParsedGsubSubtable::ReverseChained(rc) => {
-                if let Some(out) = rc.apply(ids.as_slice(), at) {
-                    substitute_glyph(&mut glyphs[at], out);
-                    ids.set(at, out);
-                    return 1;
+                if nested {
+                    None
+                } else {
+                    rc.apply_at(run.as_slice(), at, mcx).map(|out| {
+                        substitute_glyph(&mut glyphs[at], out);
+                        run.sync(at, &glyphs[at]);
+                        at + 1
+                    })
                 }
             }
+        };
+        if next.is_some() {
+            return next;
         }
     }
-    0
+    None
 }
 
-/// Mirror buffer of `glyph_id`s, kept in lockstep with the live
-/// `Vec<Glyph>` that GSUB drivers mutate. The matchers for context /
-/// chained-context / reverse-chain / ligature subtables all want a
-/// flat `&[u16]` for backtrack/lookahead/window scanning; before this
-/// shadow buffer existed every cursor step rebuilt that slice via
-/// `glyphs.iter().map(...).collect()`, which is `O(N²)` for a feature
-/// that fires on every glyph. We keep the shadow in sync manually
-/// after each substitution: Single/Alternate touch one slot,
-/// Ligature/Multiple change length and trigger a full resync.
+/// The run as the matching rules see it ([`MatchGlyph`]s), kept in
+/// lockstep with the live `Vec<Glyph>` that GSUB drivers mutate. The
+/// matchers want a flat slice for backtrack/lookahead/window
+/// scanning; rebuilding it per cursor step would be `O(N^2)` for a
+/// feature that fires on every glyph. Single substitutions update one
+/// slot, ligatures and multiple substitutions resync.
 #[derive(Debug)]
-pub(super) struct GlyphIds {
-    ids: Vec<u16>,
+pub(super) struct MatchRun {
+    glyphs: Vec<MatchGlyph>,
 }
 
-impl GlyphIds {
+impl MatchRun {
     pub(super) fn from_glyphs(glyphs: &[Glyph]) -> Self {
-        let mut ids = Vec::with_capacity(glyphs.len());
-        for g in glyphs {
-            ids.push(g.glyph_id as u16);
-        }
-        Self { ids }
-    }
-
-    pub(super) fn as_slice(&self) -> &[u16] {
-        &self.ids
-    }
-
-    /// Single-slot update; the glyph at `at` gained a new id but the
-    /// stream length is unchanged. Caller has already written to the
-    /// `Glyph` struct.
-    pub(super) fn set(&mut self, at: usize, gid: u16) {
-        if at < self.ids.len() {
-            self.ids[at] = gid;
+        Self {
+            glyphs: glyphs.iter().map(MatchGlyph::from).collect(),
         }
     }
 
-    /// Length-changing substitution (ligature drain, multiple-sub
-    /// expansion). Cheaper than maintaining diff edits inside every
-    /// driver. These substitutions are far less common than context
-    /// matches anyway.
+    pub(super) fn as_slice(&self) -> &[MatchGlyph] {
+        &self.glyphs
+    }
+
+    pub(super) fn get(&self, at: usize) -> MatchGlyph {
+        self.glyphs.get(at).copied().unwrap_or_default()
+    }
+
+    /// The glyph at `at` changed in place (id and props).
+    pub(super) fn sync(&mut self, at: usize, glyph: &Glyph) {
+        if let Some(slot) = self.glyphs.get_mut(at) {
+            *slot = MatchGlyph::from(glyph);
+        }
+    }
+
+    /// The run changed length or several glyphs changed.
     pub(super) fn resync(&mut self, glyphs: &[Glyph]) {
-        self.ids.clear();
-        for g in glyphs {
-            self.ids.push(g.glyph_id as u16);
-        }
+        self.glyphs.clear();
+        self.glyphs.extend(glyphs.iter().map(MatchGlyph::from));
     }
 }
 
 /// Builds a [`MatchFilter`] scoped to one lookup, honoring its
-/// `LookupFlag`, GDEF-backed glyph classes, and the optional
+/// `LookupFlag`, the font's glyph classes, and the optional
 /// `markFilteringSet` trailer when the font carries one.
 pub(super) fn filter_for_lookup<'a>(
     lookup: &Lookup<'a>,

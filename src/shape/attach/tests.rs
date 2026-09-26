@@ -3,6 +3,8 @@
 //! fixtures (anchors, GDEF classes, a small ItemVariationStore).
 
 use super::*;
+use crate::tables::gdef::Gdef;
+use crate::tables::layout::{Joiners, LayoutTable, MatchContext, MatchFilter};
 use crate::tables::variation_store::ItemVariationStore;
 use alloc::vec;
 
@@ -217,6 +219,22 @@ fn offsets(glyphs: &[Glyph]) -> Vec<(i32, i32)> {
     glyphs.iter().map(|g| (g.x_offset, g.y_offset)).collect()
 }
 
+/// Inputs of a GPOS attachment lookup with `filter`'s flags; with
+/// `ignore_zwj` its feature skips ZWJ automatically, otherwise it has
+/// manual joiners like `mark` and `mkmk`.
+fn lookup_cx<'a>(filter: MatchFilter<'a>, ignore_zwj: bool, var: &'a VarCtx<'a>) -> LookupCx<'a> {
+    let joiners = if ignore_zwj {
+        Joiners::AUTO
+    } else {
+        Joiners::MANUAL
+    };
+    LookupCx::new(
+        MatchContext::new(filter, LayoutTable::Gpos, joiners).input(),
+        var,
+        0,
+    )
+}
+
 fn run_lookup(
     subs: &[AttachSubtable<'_>],
     glyphs: &mut [Glyph],
@@ -239,16 +257,11 @@ fn run_lookup_zwj(
     ignore_zwj: bool,
 ) -> Vec<Slot> {
     let mut slots = new_slots(glyphs.len());
-    let filter = MatchFilter::for_lookup(lookup_flag, gdef, None);
-    let cx = LookupCx {
-        gdef,
-        filter: &filter,
-        lookup_flag,
-        mark_filtering_set: None,
+    let cx = lookup_cx(
+        MatchFilter::for_lookup(lookup_flag, gdef, None),
         ignore_zwj,
         var,
-        lookup_index: 0,
-    };
+    );
     let mut att = Attach::new(direction, &mut slots);
     apply_lookup(subs, glyphs, &mut att, &cx);
     slots
@@ -531,17 +544,8 @@ fn mark_mark_stacks_onto_the_previous_mark() {
     let gdef = Gdef::parse(&gdef_raw).unwrap();
     let mut glyphs = vec![glyph(1, 600), glyph(2, 0), glyph(3, 0)];
     let mut slots = new_slots(3);
-    let filter = MatchFilter::none();
     let var = VarCtx::none();
-    let cx = LookupCx {
-        gdef: Some(&gdef),
-        filter: &filter,
-        lookup_flag: 0,
-        mark_filtering_set: None,
-        ignore_zwj: true,
-        var: &var,
-        lookup_index: 0,
-    };
+    let cx = lookup_cx(MatchFilter::for_lookup(0, Some(&gdef), None), true, &var);
     let mut att = Attach::new(Direction::Ltr, &mut slots);
     let mark_subs = [AttachSubtable::parse(gpos_lt::MARK_TO_BASE, &base).unwrap()];
     let mkmk_subs = [AttachSubtable::parse(gpos_lt::MARK_TO_MARK, &mkmk).unwrap()];
@@ -711,29 +715,13 @@ fn cursive_reattachment_reverses_the_old_chain() {
     let var = VarCtx::none();
     let mut att = Attach::new(Direction::Ltr, &mut slots);
     // First lookup (no RightToLeft): 1 hangs from 0.
-    let cx = LookupCx {
-        gdef: None,
-        filter: &filter,
-        lookup_flag: 0,
-        mark_filtering_set: None,
-        ignore_zwj: true,
-        var: &var,
-        lookup_index: 0,
-    };
+    let cx = lookup_cx(filter, true, &var);
     apply_lookup(&ltr_flagless, &mut glyphs, &mut att, &cx);
     assert_eq!(att.slots[1], cursive_slot(-1));
     assert_eq!(glyphs[1].y_offset, -200);
     // Second lookup (RightToLeft): 1 now hangs from 2, so the old
     // link flips and 0 hangs from 1 with the negated offset.
-    let cx = LookupCx {
-        gdef: None,
-        filter: &filter,
-        lookup_flag: LOOKUP_FLAG_RIGHT_TO_LEFT,
-        mark_filtering_set: None,
-        ignore_zwj: true,
-        var: &var,
-        lookup_index: 0,
-    };
+    let cx = lookup_cx(filter.with_flag(LOOKUP_FLAG_RIGHT_TO_LEFT), true, &var);
     apply_lookup(&rtl_flagged, &mut glyphs, &mut att, &cx);
     assert_eq!(att.slots[1], cursive_slot(1));
     assert_eq!(att.slots[0], cursive_slot(1));
@@ -756,15 +744,7 @@ fn cursive_separates_a_parent_attached_to_its_new_child() {
     let var = VarCtx::none();
     let mut att = Attach::new(Direction::Rtl, &mut slots);
     for flag in [LOOKUP_FLAG_RIGHT_TO_LEFT, 0] {
-        let cx = LookupCx {
-            gdef: None,
-            filter: &filter,
-            lookup_flag: flag,
-            mark_filtering_set: None,
-            ignore_zwj: true,
-            var: &var,
-            lookup_index: 0,
-        };
+        let cx = lookup_cx(filter.with_flag(flag), true, &var);
         apply_lookup(&subs, &mut glyphs, &mut att, &cx);
     }
     assert_eq!(att.slots[1], cursive_slot(-1));
@@ -781,15 +761,7 @@ fn apply_at_ignores_positions_past_the_end() {
     let mut slots = new_slots(1);
     let filter = MatchFilter::none();
     let var = VarCtx::none();
-    let cx = LookupCx {
-        gdef: None,
-        filter: &filter,
-        lookup_flag: 0,
-        mark_filtering_set: None,
-        ignore_zwj: true,
-        var: &var,
-        lookup_index: 0,
-    };
+    let cx = lookup_cx(filter, true, &var);
     let mut att = Attach::new(Direction::Ltr, &mut slots);
     assert!(!apply_at(&sub, &mut glyphs, &mut att, &cx, 5));
     assert!(!apply_at(&sub, &mut glyphs, &mut att, &cx, 0));
