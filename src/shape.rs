@@ -77,6 +77,7 @@
 //!   fallback mark positioner HarfBuzz uses for fonts without GPOS.
 
 mod attach;
+mod required;
 
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
@@ -915,6 +916,21 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         let seg_glyphs_src = glyphs[seg.cp_range.clone()].to_vec();
         let seg_cps = &codepoints[seg.cp_range.clone()];
         let mut seg_glyphs = seg_glyphs_src;
+
+        // A required feature whose tag no later pass applies runs
+        // first, as HarfBuzz runs it in GSUB stage 0.
+        if let Some(ref gsub) = gsub {
+            let plan = required::SegmentPlan {
+                script: seg.script,
+                dominant: dominant_script,
+                codepoints: seg_cps,
+                arabic: seg.script == Script::Arabic && !arabic_forms.is_empty(),
+                vertical: is_vertical,
+                features,
+            };
+            let priority = seg.script_priority;
+            required::apply_unscheduled(gsub, &mut seg_glyphs, gdef.as_ref(), priority, &plan);
+        }
 
         // Per-script pre-shapers. Each is gated on the segment's
         // resolved script so a Hebrew segment never runs the Indic
