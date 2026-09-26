@@ -64,6 +64,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     } else {
         buffer.direction()
     };
+    // The direction the output is laid out in, which HarfBuzz builds
+    // its shape plan for (it picks `ltra`/`ltrm` or `rtla`/`rtlm`),
+    // before a non-native direction flips the shaping direction below.
+    let target_direction = direction;
     let is_vertical = !direction.is_horizontal();
 
     let face = font.face();
@@ -342,8 +346,9 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         let mut seg_glyphs = seg_glyphs_src;
 
         // A required feature whose tag no later pass applies runs
-        // first, as HarfBuzz runs it in GSUB stage 0; `rtlm` follows
-        // on backward runs.
+        // first, as HarfBuzz runs it in GSUB stage 0; the direction
+        // features (`ltra` and `ltrm`, or `rtla`, then `rtlm` on
+        // backward runs) follow, in the stage HarfBuzz gives them.
         if let Some(ref gsub) = gsub {
             let plan = required::SegmentPlan {
                 script: seg.script,
@@ -352,13 +357,25 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 arabic: seg.script == Script::Arabic && !arabic_forms.is_empty(),
                 vertical: is_vertical,
                 backward,
+                direction_features: rotate::direction_features(target_direction),
                 features,
             };
             let priority = seg.script_priority;
-            required::apply_unscheduled(gsub, &mut seg_glyphs, gdef.as_ref(), priority, &plan);
+            let gdef = gdef.as_ref();
+            required::apply_unscheduled(gsub, &mut seg_glyphs, gdef, priority, &plan);
+            let direction_tags = rotate::direction_features(target_direction);
+            let table = JoinerTable::for_segment(seg.script, plan.arabic, dominant_script);
+            apply_gsub_features_merged(
+                gsub,
+                &mut seg_glyphs,
+                gdef,
+                features,
+                direction_tags,
+                priority,
+                table,
+            );
             if backward {
                 let mirrored = &mirrored_mask[seg.cp_range.clone()];
-                let gdef = gdef.as_ref();
                 rotate::apply_rtlm(gsub, &mut seg_glyphs, gdef, priority, features, mirrored);
             }
         }

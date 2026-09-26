@@ -58,6 +58,8 @@ pub(super) struct SegmentPlan<'a> {
     /// True for backward (right-to-left or bottom-to-top) runs, which
     /// apply `rtlm`.
     pub(super) backward: bool,
+    /// The direction features the run applies (`ltra`, `ltrm`, `rtla`).
+    pub(super) direction_features: &'a [[u8; 4]],
     /// The caller's feature overrides.
     pub(super) features: &'a [Feature],
 }
@@ -107,7 +109,8 @@ impl SegmentPlan<'_> {
     fn applies(&self, tag: [u8; 4]) -> bool {
         let default = DEFAULT_CHAIN.contains(&tag)
             || (self.vertical && VERTICAL_CHAIN.contains(&tag))
-            || (self.backward && tag == *b"rtlm");
+            || (self.backward && tag == *b"rtlm")
+            || self.direction_features.contains(&tag);
         if default && !feature_disabled(self.features, tag) {
             return true;
         }
@@ -161,8 +164,16 @@ mod tests {
             arabic: script == Script::Arabic,
             vertical: false,
             backward: false,
+            direction_features: super::super::rotate::direction_features(crate::Direction::Ltr),
             features,
         }
+    }
+
+    #[test]
+    fn direction_features_count_as_applied() {
+        let p = plan(Script::Latin, &[], &[]);
+        assert!(p.applies(*b"ltra"));
+        assert!(!p.applies(*b"rtla"));
     }
 
     #[test]

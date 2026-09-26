@@ -271,6 +271,34 @@ fn thai_lao_and_hangul_run_each_default_feature_once() {
 }
 
 #[test]
+fn direction_features_follow_the_requested_direction() {
+    // HarfBuzz enables ltra and ltrm for a left-to-right plan and rtla
+    // for a right-to-left one, whatever direction the text then shapes
+    // in: LTR Hebrew is read as visual order and shaped right to left,
+    // but still gets ltra.
+    const OPEN_SANS: &[u8] = include_bytes!("fixtures/opensans_regular.ttf");
+    const NOTO_HEBREW: &[u8] = include_bytes!("fonts/NotoSansHebrew-Regular.ttf");
+    let cases: [(&[u8], [u8; 4], char, Direction); 3] = [
+        (OPEN_SANS, *b"latn", 'a', Direction::Ltr),
+        (NOTO_HEBREW, *b"hebr", '\u{05D0}', Direction::Rtl),
+        (NOTO_HEBREW, *b"hebr", '\u{05D0}', Direction::Ltr),
+    ];
+    for (font, script, ch, direction) in cases {
+        let g = glyph(font, ch);
+        for feature in [*b"ltra", *b"ltrm", *b"rtla"] {
+            let table = gsub(&[*b"DFLT", script], &[(feature, vec![0])], &[bump(g)]);
+            let patched = with_table(font, *b"GSUB", &table);
+            let rows = assert_parity(&patched, &ch.to_string(), direction);
+            let enabled = match direction {
+                Direction::Ltr => feature != *b"rtla",
+                _ => feature == *b"rtla",
+            };
+            assert_eq!(rows[0].0, u32::from(g) + u32::from(enabled), "{feature:?}");
+        }
+    }
+}
+
+#[test]
 fn non_joining_characters_take_no_isol() {
     // HarfBuzz's joining state machine gives a non-joining character
     // (hamza, a space) no action, so `isol` only reaches the letters
