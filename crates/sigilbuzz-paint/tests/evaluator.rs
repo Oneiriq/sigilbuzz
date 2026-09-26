@@ -125,7 +125,7 @@ fn solid_paint_emits_single_fill_with_palette_color() {
     assert_eq!(cmds.len(), 1, "expected exactly one FillGlyph");
     match &cmds[0] {
         DrawCmd::FillGlyph { paint, .. } => match paint {
-            PaintSource::Solid(c) => {
+            PaintSource::Solid { color: c, .. } => {
                 assert!((c.r).abs() < 1e-6);
                 assert!((c.g - 1.0).abs() < 1e-6);
                 assert!((c.b).abs() < 1e-6);
@@ -149,7 +149,7 @@ fn solid_paint_alpha_multiplies_palette_alpha() {
     let cmds = evaluate(&face, 7);
     match &cmds[0] {
         DrawCmd::FillGlyph {
-            paint: PaintSource::Solid(c),
+            paint: PaintSource::Solid { color: c, .. },
             ..
         } => {
             assert!((c.a - 0.5).abs() < 1e-3, "alpha was {}", c.a);
@@ -188,7 +188,7 @@ fn paint_glyph_overrides_fill_gid() {
     match &cmds[0] {
         DrawCmd::FillGlyph { gid, paint, .. } => {
             assert_eq!(*gid, 201, "PaintGlyph should rewrite the fill gid");
-            assert!(matches!(paint, PaintSource::Solid(_)));
+            assert!(matches!(paint, PaintSource::Solid { .. }));
         }
         other => panic!("unexpected {other:?}"),
     }
@@ -431,7 +431,7 @@ fn var_solid_with_empty_coords_is_identity() {
     assert_eq!(cmds.len(), 1);
     match &cmds[0] {
         DrawCmd::FillGlyph {
-            paint: PaintSource::Solid(c),
+            paint: PaintSource::Solid { color: c, .. },
             ..
         } => {
             assert!((c.r - 64.0 / 255.0).abs() < 1e-6);
@@ -467,12 +467,12 @@ fn determinism_of_repeated_evaluate() {
             (
                 DrawCmd::FillGlyph {
                     gid: g1,
-                    paint: PaintSource::Solid(c1),
+                    paint: PaintSource::Solid { color: c1, .. },
                     ..
                 },
                 DrawCmd::FillGlyph {
                     gid: g2,
-                    paint: PaintSource::Solid(c2),
+                    paint: PaintSource::Solid { color: c2, .. },
                     ..
                 },
             ) => {
@@ -874,7 +874,7 @@ fn evaluate_ivs_at(coord_input: &[f32]) -> (f32, f32, (f32, f32)) {
     let solid_cmds = evaluate_at_coords(&face, 1, coord_input);
     let solid_alpha = match solid_cmds.as_slice() {
         [DrawCmd::FillGlyph {
-            paint: PaintSource::Solid(c),
+            paint: PaintSource::Solid { color: c, .. },
             ..
         }] => c.a,
         other => panic!("solid: unexpected {other:?}"),
@@ -1131,7 +1131,7 @@ fn delta_set_index_map_redirects_var_index_base_through_gdef() {
     let solid_cmds = evaluate_at_coords(&face, 1, &coords);
     let solid_alpha = match solid_cmds.as_slice() {
         [DrawCmd::FillGlyph {
-            paint: PaintSource::Solid(c),
+            paint: PaintSource::Solid { color: c, .. },
             ..
         }] => c.a,
         other => panic!("solid: unexpected {other:?}"),

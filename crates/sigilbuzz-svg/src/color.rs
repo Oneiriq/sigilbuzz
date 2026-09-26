@@ -201,7 +201,9 @@ fn emit_fill(
 ) {
     let xform = transform_attr(transform);
     match paint {
-        PaintSource::Solid(c) => {
+        // Foreground fills already carry the evaluator's default
+        // foreground (opaque white), so they need no special case.
+        PaintSource::Solid { color: c, .. } => {
             body.push_str("<path");
             if let Some(t) = xform {
                 let _ = write!(body, r#" transform="{t}""#);
@@ -519,18 +521,9 @@ mod tests {
                 p2: (0.0, 100.0),
             },
             stops: alloc::vec![
-                ColorStop {
-                    offset: 0.0,
-                    color: Color::new(1.0, 0.0, 0.0, 1.0),
-                },
-                ColorStop {
-                    offset: 0.5,
-                    color: Color::new(0.0, 1.0, 0.0, 1.0),
-                },
-                ColorStop {
-                    offset: 1.0,
-                    color: Color::new(0.0, 0.0, 1.0, 1.0),
-                },
+                ColorStop::new(0.0, Color::new(1.0, 0.0, 0.0, 1.0)),
+                ColorStop::new(0.5, Color::new(0.0, 1.0, 0.0, 1.0)),
+                ColorStop::new(1.0, Color::new(0.0, 0.0, 1.0, 1.0)),
             ],
             extend: Extend::Pad,
         };
@@ -557,14 +550,8 @@ mod tests {
                 r1: 50.0,
             },
             stops: alloc::vec![
-                ColorStop {
-                    offset: 0.0,
-                    color: Color::new(1.0, 1.0, 1.0, 1.0),
-                },
-                ColorStop {
-                    offset: 1.0,
-                    color: Color::new(0.0, 0.0, 0.0, 1.0),
-                },
+                ColorStop::new(0.0, Color::new(1.0, 1.0, 1.0, 1.0)),
+                ColorStop::new(1.0, Color::new(0.0, 0.0, 0.0, 1.0)),
             ],
             extend: Extend::Reflect,
         };
@@ -587,14 +574,8 @@ mod tests {
                 end_angle: core::f32::consts::PI,
             },
             stops: alloc::vec![
-                ColorStop {
-                    offset: 0.0,
-                    color: Color::new(1.0, 0.0, 0.0, 1.0),
-                },
-                ColorStop {
-                    offset: 1.0,
-                    color: Color::new(0.0, 0.0, 1.0, 1.0),
-                },
+                ColorStop::new(0.0, Color::new(1.0, 0.0, 0.0, 1.0)),
+                ColorStop::new(1.0, Color::new(0.0, 0.0, 1.0, 1.0)),
             ],
             extend: Extend::Pad,
         };
@@ -616,7 +597,10 @@ mod tests {
             &mut defs,
             &mut body,
             Transform2D::IDENTITY,
-            &PaintSource::Solid(Color::new(0.5, 0.5, 0.5, 0.5)),
+            &PaintSource::Solid {
+                color: Color::new(0.5, 0.5, 0.5, 0.5),
+                is_foreground: false,
+            },
             "M 0 0 Z",
         );
         assert!(body.contains(r#"fill="rgb(128,128,128)""#));
@@ -631,7 +615,10 @@ mod tests {
             &mut defs,
             &mut body,
             Transform2D::IDENTITY,
-            &PaintSource::Solid(Color::new(0.0, 0.0, 0.0, 1.0)),
+            &PaintSource::Solid {
+                color: Color::new(0.0, 0.0, 0.0, 1.0),
+                is_foreground: false,
+            },
             "M 0 0 Z",
         );
         assert!(!body.contains("fill-opacity"));
@@ -659,17 +646,26 @@ mod tests {
             DrawCmd::FillGlyph {
                 gid: 1,
                 transform: Transform2D::IDENTITY,
-                paint: PaintSource::Solid(Color::new(1.0, 0.0, 0.0, 1.0)),
+                paint: PaintSource::Solid {
+                    color: Color::new(1.0, 0.0, 0.0, 1.0),
+                    is_foreground: false
+                },
             },
             DrawCmd::FillGlyph {
                 gid: 2,
                 transform: Transform2D::IDENTITY,
-                paint: PaintSource::Solid(Color::new(0.0, 1.0, 0.0, 1.0)),
+                paint: PaintSource::Solid {
+                    color: Color::new(0.0, 1.0, 0.0, 1.0),
+                    is_foreground: false
+                },
             },
             DrawCmd::FillGlyph {
                 gid: 3,
                 transform: Transform2D::IDENTITY,
-                paint: PaintSource::Solid(Color::new(0.0, 0.0, 1.0, 1.0)),
+                paint: PaintSource::Solid {
+                    color: Color::new(0.0, 0.0, 1.0, 1.0),
+                    is_foreground: false
+                },
             },
         ];
         let leaves: alloc::vec::Vec<Option<LeafGeometry>> = alloc::vec![

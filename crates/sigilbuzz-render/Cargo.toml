@@ -18,7 +18,7 @@ std = []
 
 [dependencies]
 sigilbuzz = { workspace = true }
-sigilbuzz-paint = { path = "../sigilbuzz-paint", version = "0.1.0" }
+sigilbuzz-paint = { path = "../sigilbuzz-paint", version = "0.2.0" }
 # `miniz_oxide` provides the zlib INFLATE primitive used by the
 # embedded PNG decoder for CBDT / sbix bitmap tables. Same dep
 # already pulled in by `sigilbuzz-woff` for WOFF1 zlib (see

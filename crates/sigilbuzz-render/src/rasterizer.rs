@@ -269,9 +269,11 @@ impl Rasterizer {
     /// and blended through any `PaintComposite` mode, into a single
     /// surface sized to the union bounding box of every fill.
     ///
-    /// `palette_index` is forwarded for forward compatibility with
-    /// COLRv0; the COLRv1 evaluator currently always uses palette 0
-    /// for stop color lookups.
+    /// `palette_index` selects the CPAL palette that solid fills and
+    /// gradient stops resolve against. Unlike
+    /// [`Rasterizer::rasterize_colrv0_glyph`], an index the font does
+    /// not have is not an error: it falls back to palette 0. Foreground
+    /// (`0xFFFF`) entries render opaque white.
     ///
     /// # Errors
     /// - [`RenderError::ColrV1NotFound`] when the font has no v1

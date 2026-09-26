@@ -21,8 +21,36 @@ pub struct ColorStop {
     /// but the spec allows out-of-range values for `Repeat` / `Reflect`
     /// extends.
     pub offset: f32,
-    /// Resolved color with the per-stop alpha already folded in.
+    /// Resolved color with the per-stop alpha already folded in. For a
+    /// foreground stop this is the evaluation's foreground color (see
+    /// [`crate::EvalOptions::with_foreground`]) with the stop alpha
+    /// applied.
     pub color: Color,
+    /// True when the stop used COLR palette entry `0xFFFF`, the
+    /// foreground (text) color. A renderer with its own text color can
+    /// substitute it here, keeping `color.a` relative to the evaluation
+    /// foreground's alpha.
+    pub is_foreground: bool,
+}
+
+impl ColorStop {
+    /// A stop with an ordinary (non-foreground) color.
+    ///
+    /// ```
+    /// use sigilbuzz_paint::{Color, ColorStop};
+    ///
+    /// let stop = ColorStop::new(0.5, Color::new(1.0, 0.0, 0.0, 1.0));
+    /// assert_eq!(stop.offset, 0.5);
+    /// assert!(!stop.is_foreground);
+    /// ```
+    #[must_use]
+    pub const fn new(offset: f32, color: Color) -> Self {
+        Self {
+            offset,
+            color,
+            is_foreground: false,
+        }
+    }
 }
 
 /// Extend-mode mirrors [`sigilbuzz::tables::colr::Extend`] but lives

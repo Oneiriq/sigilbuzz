@@ -1,7 +1,7 @@
 //! COLRv1 paint-tree rasterization.
 //!
 //! [`rasterize_colrv1`] consumes a flat [`DrawCmd`] stream emitted by
-//! [`sigilbuzz_paint::evaluate_at_coords`] and turns it into a single
+//! [`sigilbuzz_paint::evaluate_with`] and turns it into a single
 //! premultiplied RGBA [`ColorPixmap`]. The flow is:
 //!
 //! 1. Walk the `DrawCmd` stream linearly. Maintain a *layer stack* of
@@ -41,8 +41,8 @@ use alloc::vec::Vec;
 
 use sigilbuzz::Face;
 use sigilbuzz_paint::{
-    evaluate_at_coords, Color, CompositeMode, DrawCmd, Extend, Gradient, GradientKind, PaintSource,
-    Transform2D,
+    evaluate_with, Color, CompositeMode, DrawCmd, EvalOptions, Extend, Gradient, GradientKind,
+    PaintSource, Transform2D,
 };
 
 use crate::affine::Affine;
@@ -54,17 +54,17 @@ use crate::raster::rasterize as raster;
 /// Public entry: walks the `DrawCmd` stream `sigilbuzz-paint` would
 /// produce for `gid` and renders it to a premultiplied RGBA pixmap.
 ///
-/// `palette_index` is forwarded to the evaluator's CPAL lookups; the
-/// evaluator currently always uses palette 0 internally, so this
-/// argument is reserved for the API parity with `rasterize_colrv0_glyph`
-/// and is wired through for forward compatibility.
+/// `palette_index` selects the CPAL palette the evaluator resolves
+/// palette entries against. A font without that palette falls back to
+/// palette 0. Foreground (`0xFFFF`) entries render in the evaluator's
+/// default foreground, opaque white.
 ///
 /// `tolerance` is the per-glyph curve flattening tolerance in pixel
 /// units (same semantics as [`crate::Rasterizer`]'s field).
 pub(crate) fn rasterize_colrv1(
     face: &Face<'_>,
     gid: u16,
-    _palette_index: u16,
+    palette_index: u16,
     size_pt: f32,
     coords: &[f32],
     tolerance: f32,
@@ -89,7 +89,10 @@ pub(crate) fn rasterize_colrv1(
         }
     }
 
-    let cmds = evaluate_at_coords(face, gid, coords);
+    let options = EvalOptions::new()
+        .with_coords(coords)
+        .with_palette_index(palette_index);
+    let cmds = evaluate_with(face, gid, &options);
     if cmds.is_empty() {
         return Ok(ColorPixmap::new(0, 0));
     }
@@ -335,7 +338,10 @@ fn paint_glyph_into_layer(
 /// Resolves the color at pixel `(x, y)` for a paint source.
 fn evaluate_paint(paint: &PaintSource, paint_xform: Transform2D, x: f32, y: f32) -> [u8; 4] {
     match paint {
-        PaintSource::Solid(c) => to_premul(*c),
+        // Foreground fills arrive already resolved to the evaluator's
+        // default foreground (opaque white), so `is_foreground` needs no
+        // special handling here.
+        PaintSource::Solid { color, .. } => to_premul(*color),
         PaintSource::Gradient(g) => sample_gradient(g, paint_xform, x, y),
     }
 }
@@ -775,14 +781,8 @@ mod tests {
     #[test]
     fn sample_stops_interpolates_linearly() {
         let stops = [
-            ColorStop {
-                offset: 0.0,
-                color: col(1.0, 0.0, 0.0, 1.0),
-            },
-            ColorStop {
-                offset: 1.0,
-                color: col(0.0, 0.0, 1.0, 1.0),
-            },
+            ColorStop::new(0.0, col(1.0, 0.0, 0.0, 1.0)),
+            ColorStop::new(1.0, col(0.0, 0.0, 1.0, 1.0)),
         ];
         let mid = sample_stops(&stops, 0.5);
         assert!((mid.r - 0.5).abs() < 1e-6);

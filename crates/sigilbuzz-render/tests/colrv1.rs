@@ -223,14 +223,18 @@ fn standard_glyf_loca() -> (Vec<u8>, Vec<u8>) {
 // =========================================================================
 
 fn build_glyph_solid_font() -> Vec<u8> {
+    // CPAL: one entry, opaque red.
+    build_glyph_solid_font_with_cpal(&build_cpal_v0(&[(255, 0, 0, 255)]))
+}
+
+/// Same glyph as [`build_glyph_solid_font`], painting palette entry 0
+/// from the supplied CPAL.
+fn build_glyph_solid_font_with_cpal(cpal: &[u8]) -> Vec<u8> {
     let head = build_head();
     let maxp = build_maxp(2);
     let hhea = build_hhea(2);
     let hmtx = build_hmtx(2);
     let (glyf, loca) = standard_glyf_loca();
-
-    // CPAL: one entry, opaque red.
-    let cpal = build_cpal_v0(&[(255, 0, 0, 255)]);
 
     // COLR: BaseGlyphPaintRecord for gid 1 -> PaintGlyph(child=Solid,
     // outline=gid 1). The PaintGlyph's child paint is right after.
@@ -251,7 +255,7 @@ fn build_glyph_solid_font() -> Vec<u8> {
 
     let tables: &[([u8; 4], &[u8])] = &[
         (*b"COLR", colr.as_slice()),
-        (*b"CPAL", cpal.as_slice()),
+        (*b"CPAL", cpal),
         (*b"glyf", glyf.as_slice()),
         (*b"head", head.as_slice()),
         (*b"hhea", hhea.as_slice()),
@@ -260,6 +264,65 @@ fn build_glyph_solid_font() -> Vec<u8> {
         (*b"maxp", maxp.as_slice()),
     ];
     emit_sfnt(tables)
+}
+
+/// CPAL v0 with two one-entry palettes.
+fn build_cpal_two_palettes(p0: (u8, u8, u8, u8), p1: (u8, u8, u8, u8)) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&0u16.to_be_bytes()); // version
+    out.extend_from_slice(&1u16.to_be_bytes()); // numPaletteEntries
+    out.extend_from_slice(&2u16.to_be_bytes()); // numPalettes
+    out.extend_from_slice(&2u16.to_be_bytes()); // numColorRecords
+    out.extend_from_slice(&16u32.to_be_bytes()); // colorRecordsArrayOffset
+    out.extend_from_slice(&0u16.to_be_bytes()); // palette 0 -> record 0
+    out.extend_from_slice(&1u16.to_be_bytes()); // palette 1 -> record 1
+    for (r, g, b, a) in [p0, p1] {
+        out.extend_from_slice(&[b, g, r, a]);
+    }
+    align4(&mut out);
+    out
+}
+
+/// Counts pixels that are mostly `channel` (0 = red, 2 = blue).
+fn count_dominant(pix: &sigilbuzz_render::ColorPixmap, channel: usize) -> usize {
+    let mut n = 0;
+    for y in 0..pix.height {
+        for x in 0..pix.width {
+            let p = pix.get(x, y);
+            let others = (0..3).filter(|&c| c != channel).all(|c| p[c] < 30);
+            if p[3] > 0 && p[channel] > 200 && others {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+#[test]
+fn colrv1_palette_index_selects_cpal_palette() {
+    let cpal = build_cpal_two_palettes((255, 0, 0, 255), (0, 0, 255, 255));
+    let bytes = build_glyph_solid_font_with_cpal(&cpal);
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    let rast = Rasterizer::new();
+
+    let light = rast
+        .rasterize_colrv1_glyph(&face, 1, 0, 100.0, &[])
+        .expect("palette 0 renders");
+    assert!(count_dominant(&light, 0) > 0, "palette 0 paints red");
+    assert_eq!(count_dominant(&light, 2), 0, "palette 0 has no blue");
+
+    let dark = rast
+        .rasterize_colrv1_glyph(&face, 1, 1, 100.0, &[])
+        .expect("palette 1 renders");
+    assert!(count_dominant(&dark, 2) > 0, "palette 1 paints blue");
+    assert_eq!(count_dominant(&dark, 0), 0, "palette 1 has no red");
+
+    // A palette the font does not have falls back to palette 0.
+    let fallback = rast
+        .rasterize_colrv1_glyph(&face, 1, 9, 100.0, &[])
+        .expect("out-of-range palette still renders");
+    assert_eq!(fallback, light);
 }
 
 #[test]

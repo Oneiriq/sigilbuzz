@@ -1,5 +1,5 @@
 //! `hb_paint_*`: bridge from HarfBuzz's paint-funcs API to
-//! `sigilbuzz_paint::evaluate()`.
+//! `sigilbuzz_paint::evaluate_with()`.
 //!
 //! HarfBuzz's COLRv1 surface is callback-based: the consumer
 //! populates an `hb_paint_funcs_t` table with function pointers, hands
@@ -23,55 +23,53 @@
 //! routinely skip the no-op transform path for performance.
 //!
 //! Color conversion: sigilbuzz-paint hands back f32 RGBA in `[0, 1]`;
-//! HarfBuzz's `hb_color_t` is a packed `u32` BGRA byte tuple. The
-//! conversion is a clamp + cast.
+//! HarfBuzz's `hb_color_t` is a packed `u32` BGRA byte tuple. Palette
+//! colors convert with a clamp + round.
+//!
+//! `hb_font_paint_glyph` honors its HarfBuzz parameters:
+//!
+//! - `palette_index` picks the CPAL palette. A palette the font does not
+//!   have falls back to palette 0 (HarfBuzz paints every palette entry
+//!   in the foreground color in that case).
+//! - Paints and gradient stops on COLR palette entry `0xFFFF` report
+//!   `is_foreground = 1` and carry `foreground_color` with its alpha
+//!   multiplied by the paint alpha, computed exactly as HarfBuzz does
+//!   (`alpha_byte * alpha`, truncated).
+//! - The walk uses the font's current variation coordinates, as set by
+//!   `hb_font_set_variations`.
+//!
+//! Gradient callbacks read their stops and extend mode back through
+//! `hb_color_line_get_color_stops` / `hb_color_line_get_extend` (see
+//! the `color_line` submodule).
 
-// `_face` is the lifetime-root field in `FaceInner`/`FontInner`; the
-// bridge reads it to obtain a `&Face` for paint evaluation. See
+// `_face` is the lifetime-root field in `FontInner`; the bridge reads
+// it to obtain a `&Face` for paint evaluation. See
 // `crates/sigilbuzz-capi/src/lib.rs` for the rationale.
 #![allow(clippy::used_underscore_binding)]
 
 extern crate alloc;
 
-use core::ffi::c_void;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::ffi::{c_uint, c_void};
 
-use crate::{handle, hb_bool_t, hb_font_t};
-use sigilbuzz_paint::{evaluate, Color, DrawCmd, Extend, GradientKind, PaintSource, Transform2D};
+use crate::{handle, hb_bool_t, hb_face_t, hb_font_t};
+use sigilbuzz_paint::{
+    evaluate_with, Color, DrawCmd, EvalOptions, GradientKind, PaintSource, Transform2D,
+};
+
+mod color_line;
+
+use color_line::ResolvedColorLine;
+pub use color_line::{
+    hb_color_line_get_color_stops, hb_color_line_get_extend, hb_color_line_t, hb_color_stop_t,
+    hb_paint_extend_t, HB_PAINT_EXTEND_PAD, HB_PAINT_EXTEND_REFLECT, HB_PAINT_EXTEND_REPEAT,
+};
 
 /// HarfBuzz's packed BGRA color. Layout: byte 0 = blue, byte 1 = green,
 /// byte 2 = red, byte 3 = alpha. Matches the `HB_COLOR(b, g, r, a)`
 /// macro upstream.
 pub type hb_color_t = u32;
-
-/// Opaque color-line handle. HarfBuzz models the color line as an
-/// opaque type the callee can call back into through
-/// `hb_color_line_get_color_stops` / `hb_color_line_get_extend`. The
-/// minimal-bridge surface this crate ships hands the color stops to
-/// the consumer through a small inline accessor surface that the
-/// gradient callbacks peek at via `*const hb_color_line_t`. Today the
-/// pointer is a `*const ResolvedColorLine`; the layout is private to
-/// this crate.
-#[repr(C)]
-pub struct hb_color_line_t {
-    /// Opaque payload. The C surface treats this pointer as a black
-    /// box; the bridge passes it back into a future
-    /// `hb_color_line_*` accessor surface (deferred to a follow-up
-    /// PR, see #103 follow-on tracking).
-    _opaque: [u8; 0],
-}
-
-/// Internal: a color line we hand to a gradient callback. Lives on
-/// the stack of `hb_font_paint_glyph` for the duration of the call.
-///
-/// HarfBuzz's `hb_color_line_t` is opaque to the C consumer; the
-/// fields here exist so a future `hb_color_line_get_color_stops` /
-/// `hb_color_line_get_extend` accessor pair can read them back. Those
-/// accessors land in a follow-up PR. See #103 follow-on tracking.
-#[allow(dead_code)]
-struct ResolvedColorLine<'a> {
-    stops: &'a [sigilbuzz_paint::ColorStop],
-    extend: Extend,
-}
 
 // ---------------------------------------------------------------------------
 // hb_paint_funcs_t
@@ -351,40 +349,53 @@ impl_setter!(
 
 /// Walks the COLRv1 paint tree for `gid` against `font`'s face, firing
 /// callbacks on `funcs` for each draw operation. `paint_data` is
-/// threaded through to every callback. `_palette_index` and
-/// `foreground_color` are accepted for HarfBuzz signature parity but
-/// the underlying evaluator already routes palette lookups through
-/// `evaluate`'s default palette; renderers that want a non-default
-/// palette must pre-pick before calling, matching the
-/// `sigilbuzz_paint::evaluate_at_coords` contract.
+/// threaded through to every callback.
+///
+/// `palette_index` selects the CPAL palette (palette 0 when the font
+/// has no such palette). Paints and stops on the foreground entry
+/// report `is_foreground = 1` and use `foreground_color` with the
+/// paint alpha multiplied into its alpha. The walk runs at the font's
+/// current variation coordinates. A glyph without a COLRv1 paint tree
+/// fires no callbacks.
 ///
 /// # Safety
-/// `font` and `funcs` must be valid; `paint_data` may be any pointer
-/// (it is threaded back to the consumer's callbacks unchanged).
+/// `font` and `funcs` must be null or live objects; `paint_data` may be
+/// any pointer (it is threaded back to the consumer's callbacks
+/// unchanged).
 #[no_mangle]
 pub unsafe extern "C" fn hb_font_paint_glyph(
     font: *mut hb_font_t,
     gid: u32,
     funcs: *mut hb_paint_funcs_t,
     paint_data: *mut c_void,
-    _palette_index: u32,
+    palette_index: c_uint,
     foreground_color: hb_color_t,
 ) {
     if font.is_null() || funcs.is_null() {
         return;
     }
+    // COLR glyph ids are 16-bit; nothing larger can have a paint tree.
+    let Ok(gid) = u16::try_from(gid) else {
+        return;
+    };
     // SAFETY: caller asserts validity.
     let font_inner = unsafe { &(*font).inner };
-    // The face lives in the face handle the font holds for the duration
-    // of this call. Borrow directly: paint evaluation only reads from
-    // the face, never from FontState's mutated coords (the variable-
-    // color-fonts story routes coords through `evaluate_at_coords`
-    // which is exposed in a follow-up). For now, evaluate at the
-    // default instance.
-    let face: &sigilbuzz::Face<'static> = &font_inner._face.inner.face;
-
-    let cmds = evaluate(face, gid as u16);
-    let _ = foreground_color; // future hook for is_foreground=true
+    // Take our own face reference and a copy of the coords before any
+    // callback runs, so a callback that changes (or even destroys) the
+    // font cannot pull data out from under the walk, and the font lock
+    // is not held while user code runs.
+    let face: Arc<hb_face_t> = Arc::clone(&font_inner._face);
+    let coords: Vec<f32> = font_inner.state.lock().coords.clone();
+    // Palette indices past u16 can never exist in CPAL; u16::MAX is
+    // always out of range, so it takes the same fallback path.
+    let palette = u16::try_from(palette_index).unwrap_or(u16::MAX);
+    // The foreground stays opaque white inside the evaluator, so a
+    // foreground color's alpha channel is exactly the paint alpha; see
+    // `paint_color_to_hb`.
+    let options = EvalOptions::new()
+        .with_coords(&coords)
+        .with_palette_index(palette);
+    let cmds = evaluate_with(&face.inner.face, gid, &options);
 
     // Walk the DrawCmd stream and dispatch.
     for cmd in &cmds {
@@ -426,7 +437,7 @@ pub unsafe extern "C" fn hb_font_paint_glyph(
                 if let Some(cb) = unsafe { (*funcs).push_clip_glyph } {
                     cb(funcs, paint_data, *leaf_gid as u32);
                 }
-                emit_paint_source(funcs, paint_data, paint);
+                emit_paint_source(funcs, paint_data, paint, foreground_color);
                 // SAFETY: caller asserts funcs validity.
                 if let Some(cb) = unsafe { (*funcs).pop_clip } {
                     cb(funcs, paint_data);
@@ -443,24 +454,38 @@ pub unsafe extern "C" fn hb_font_paint_glyph(
 }
 
 /// Dispatches the matching callback for a [`PaintSource`].
-fn emit_paint_source(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void, paint: &PaintSource) {
+fn emit_paint_source(
+    funcs: *mut hb_paint_funcs_t,
+    paint_data: *mut c_void,
+    paint: &PaintSource,
+    foreground: hb_color_t,
+) {
     match paint {
-        PaintSource::Solid(color) => {
+        PaintSource::Solid {
+            color,
+            is_foreground,
+        } => {
             // SAFETY: caller asserts funcs validity.
             if let Some(cb) = unsafe { (*funcs).color } {
-                cb(funcs, paint_data, 0, color_to_hb(*color));
+                let packed = paint_color_to_hb(*color, *is_foreground, foreground);
+                cb(funcs, paint_data, hb_bool_t::from(*is_foreground), packed);
             }
         }
         PaintSource::Gradient(gradient) => {
-            // Build a stack-local resolved color line and hand its
-            // address to the callback. The lifetime of the pointer is
-            // limited to the callback itself.
-            let line = ResolvedColorLine {
-                stops: &gradient.stops,
-                extend: gradient.extend,
-            };
-            let line_ptr: *const hb_color_line_t =
-                core::ptr::from_ref::<ResolvedColorLine>(&line).cast::<hb_color_line_t>();
+            // Resolve every stop to HarfBuzz form up front and hand the
+            // callback the address of a stack-local color line. The
+            // pointer is valid only while the callback runs.
+            let stops = gradient
+                .stops
+                .iter()
+                .map(|s| hb_color_stop_t {
+                    offset: s.offset,
+                    is_foreground: hb_bool_t::from(s.is_foreground),
+                    color: paint_color_to_hb(s.color, s.is_foreground, foreground),
+                })
+                .collect();
+            let line = ResolvedColorLine::new(stops, gradient.extend);
+            let line_ptr: *const hb_color_line_t = line.as_ptr();
             match gradient.kind {
                 GradientKind::Linear { p0, p1, p2 } => {
                     // SAFETY: caller asserts funcs validity.
@@ -495,13 +520,27 @@ fn emit_paint_source(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void, pain
                     }
                 }
             }
-            // The color line is unused after the callback returns; the
-            // stack frame goes away with it. Suppress the warning that
-            // the local outlives nothing meaningful.
-            let _ = line_ptr;
-            let _ = line;
+            // `line` must outlive every callback above; it drops here.
+            drop(line);
         }
     }
+}
+
+/// Packs one resolved paint color for a callback.
+///
+/// A foreground color becomes `foreground` with its alpha byte
+/// multiplied by the paint alpha, the same float product and
+/// truncation HarfBuzz's `HB_COLOR(b, g, r, a * alpha)` performs. The
+/// evaluator ran with an opaque white foreground, so `color.a` is
+/// exactly that paint alpha (clamped to `[0, 1]`). Any other color
+/// goes through [`color_to_hb`].
+fn paint_color_to_hb(color: Color, is_foreground: bool, foreground: hb_color_t) -> hb_color_t {
+    if !is_foreground {
+        return color_to_hb(color);
+    }
+    let fg_alpha = f32::from((foreground >> 24) as u8);
+    let alpha = (fg_alpha * color.a.clamp(0.0, 1.0)) as u32;
+    (foreground & 0x00FF_FFFF) | (alpha << 24)
 }
 
 /// Pack an f32 RGBA color into HarfBuzz's BGRA u32. Channels are
@@ -527,7 +566,6 @@ mod tests {
     use super::*;
     use core::ptr;
     use core::sync::atomic::{AtomicU32, Ordering};
-    use sigilbuzz_paint::ColorStop;
 
     #[test]
     fn create_destroy_round_trips() {
@@ -541,6 +579,29 @@ mod tests {
             hb_paint_funcs_destroy(ptr::null_mut());
             assert!(hb_paint_funcs_reference(ptr::null_mut()).is_null());
         }
+    }
+
+    #[test]
+    fn foreground_color_takes_paint_alpha_like_harfbuzz() {
+        // a = 0xC0, r = 0x12, g = 0x34, b = 0x56.
+        let fg: hb_color_t = 0xC012_3456;
+        // Full paint alpha keeps the foreground untouched.
+        assert_eq!(paint_color_to_hb(Color::WHITE, true, fg), fg);
+        // HarfBuzz: HB_COLOR(b, g, r, 0xC0 * 0.5) = 0x60.
+        let half = Color::new(1.0, 1.0, 1.0, 0.5);
+        assert_eq!(paint_color_to_hb(half, true, fg), 0x6012_3456);
+        // Truncation, not rounding: 255 * 0.5 = 127.5 gives 127.
+        assert_eq!(paint_color_to_hb(half, true, 0xFF00_0000), 0x7F00_0000);
+        // Zero alpha keeps the color channels.
+        let clear = Color::new(1.0, 1.0, 1.0, 0.0);
+        assert_eq!(paint_color_to_hb(clear, true, fg), 0x0012_3456);
+    }
+
+    #[test]
+    fn non_foreground_color_ignores_foreground() {
+        let red = Color::new(1.0, 0.0, 0.0, 1.0);
+        assert_eq!(paint_color_to_hb(red, false, 0x8012_3456), 0xFFFF_0000);
+        assert_eq!(paint_color_to_hb(red, false, 0), color_to_hb(red));
     }
 
     #[test]
@@ -607,9 +668,4 @@ mod tests {
 
         unsafe { hb_paint_funcs_destroy(funcs) };
     }
-
-    // Reference the gradient stop type so the unused-import warning
-    // doesn't fire, keeping the shape of the bridge tested.
-    #[allow(dead_code)]
-    fn _stop_type_check(_s: ColorStop) {}
 }

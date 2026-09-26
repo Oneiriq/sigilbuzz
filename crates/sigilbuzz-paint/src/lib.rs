@@ -8,8 +8,11 @@
 //! - composes nested affine transforms into a single 2x3 matrix per
 //!   leaf,
 //! - resolves [`sigilbuzz::tables::colr::ColorLine`] stops against the
-//!   active [`sigilbuzz::tables::cpal::Cpal`] palette, applying the
+//!   selected [`sigilbuzz::tables::cpal::Cpal`] palette, applying the
 //!   per-stop alpha,
+//! - keeps foreground-ness: fills and stops that use COLR palette entry
+//!   `0xFFFF` (the text color) carry `is_foreground == true` and the
+//!   foreground color chosen through [`EvalOptions`],
 //! - emits [`DrawCmd::PushLayer`] / [`DrawCmd::PopLayer`] pairs around
 //!   `PaintComposite` children so the consumer can drive
 //!   blend-mode-aware compositing,
@@ -50,10 +53,12 @@ extern crate alloc;
 mod color;
 mod eval;
 mod gradient;
+mod options;
 mod transform;
 
 pub use color::Color;
-pub use eval::{evaluate, evaluate_at_coords, DrawCmd, GlyphId, PaintSource};
+pub use eval::{evaluate, evaluate_at_coords, evaluate_with, DrawCmd, GlyphId, PaintSource};
 pub use gradient::{ColorStop, Extend, Gradient, GradientKind};
+pub use options::EvalOptions;
 pub use sigilbuzz::tables::colr::CompositeMode;
 pub use transform::Transform2D;

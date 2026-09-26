@@ -5,7 +5,7 @@
 //! resolve to f32 color stops, and `PaintComposite` nodes wrap their
 //! child output in [`DrawCmd::PushLayer`] / [`DrawCmd::PopLayer`].
 //!
-//! Determinism: the output for a given (face, gid, coords) tuple is
+//! Determinism: the output for a given (face, gid, options) tuple is
 //! byte-for-byte stable. The walker is depth-first, left-to-right
 //! (source then backdrop for composites, in spec order), and never
 //! reorders.
@@ -18,26 +18,16 @@ use alloc::vec::Vec;
 use sigilbuzz::tables::colr::{
     ColorLine, Colr, ColrPaint, CompositeMode, F2Dot14, Fword, PaintOffset, VarIndexBase,
 };
-use sigilbuzz::tables::cpal::Cpal;
 use sigilbuzz::tables::variation_store::ItemVariationStore;
 use sigilbuzz::Face;
 
 use crate::color::Color;
 use crate::gradient::{ColorStop, Extend, Gradient, GradientKind};
+use crate::options::{EvalOptions, Palette};
 use crate::transform::{angle_to_radians, Transform2D};
 
 /// Glyph-id alias. Mirrors the on-disk u16 used throughout sigilbuzz.
 pub type GlyphId = u16;
-
-/// Active palette index used for CPAL lookups. The COLRv1 spec
-/// defaults to palette 0; renderers wanting light/dark variants can
-/// pre-pick a different palette before calling the evaluator.
-const DEFAULT_PALETTE_INDEX: u16 = 0;
-
-/// Sentinel palette index meaning "use the foreground text color".
-/// COLRv1 reserves `0xFFFF` for this; the evaluator resolves it to
-/// opaque white so renderers can apply their own foreground overlay.
-const FOREGROUND_PALETTE_INDEX: u16 = 0xFFFF;
 
 /// Maximum DAG-walk depth. Defensive cap above and beyond the
 /// visited-set cycle check. A deeply linear chain still exits before
@@ -77,7 +67,18 @@ pub enum DrawCmd {
 #[derive(Debug, Clone)]
 pub enum PaintSource {
     /// Solid RGBA fill.
-    Solid(Color),
+    Solid {
+        /// Resolved color with the paint alpha folded in. For a
+        /// foreground fill this is the evaluation's foreground color
+        /// (see [`EvalOptions::with_foreground`]) with the paint alpha
+        /// applied.
+        color: Color,
+        /// True when the paint used COLR palette entry `0xFFFF`, the
+        /// foreground (text) color. A renderer with its own text color
+        /// can substitute it here, keeping `color.a` relative to the
+        /// evaluation foreground's alpha.
+        is_foreground: bool,
+    },
     /// Resolved gradient: palette indices already substituted for
     /// f32 RGBA, alpha multiplied in, geometry in design-unit space.
     Gradient(Gradient),
@@ -85,10 +86,10 @@ pub enum PaintSource {
 
 /// Walks `face`'s COLRv1 paint tree for `gid`, returning the draw
 /// commands required to render the color glyph. Equivalent to
-/// [`evaluate_at_coords`] with empty `coords`.
+/// [`evaluate_with`] with [`EvalOptions::default`].
 #[must_use]
 pub fn evaluate(face: &Face<'_>, gid: GlyphId) -> Vec<DrawCmd> {
-    evaluate_at_coords(face, gid, &[])
+    evaluate_with(face, gid, &EvalOptions::new())
 }
 
 /// Same as [`evaluate`] but applies variation deltas from `coords` to
@@ -98,6 +99,26 @@ pub fn evaluate(face: &Face<'_>, gid: GlyphId) -> Vec<DrawCmd> {
 /// accepts. An empty slice is the static (no-deltas) path.
 #[must_use]
 pub fn evaluate_at_coords(face: &Face<'_>, gid: GlyphId, coords: &[f32]) -> Vec<DrawCmd> {
+    evaluate_with(face, gid, &EvalOptions::new().with_coords(coords))
+}
+
+/// Walks `face`'s COLRv1 paint tree for `gid` with explicit
+/// [`EvalOptions`]: variation coordinates, CPAL palette, and the
+/// foreground color for palette entry `0xFFFF`.
+///
+/// ```
+/// use sigilbuzz::Face;
+/// use sigilbuzz_paint::{evaluate_with, Color, EvalOptions};
+///
+/// // A face without a COLR table has nothing to paint.
+/// let sfnt = [0u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+/// let face = Face::parse_bytes(&sfnt, 0).unwrap();
+/// let black = Color::new(0.0, 0.0, 0.0, 1.0);
+/// let options = EvalOptions::new().with_palette_index(1).with_foreground(black);
+/// assert!(evaluate_with(&face, 42, &options).is_empty());
+/// ```
+#[must_use]
+pub fn evaluate_with(face: &Face<'_>, gid: GlyphId, options: &EvalOptions<'_>) -> Vec<DrawCmd> {
     let mut out = Vec::new();
     let Ok(Some(colr)) = face.colr() else {
         return out;
@@ -111,10 +132,10 @@ pub fn evaluate_at_coords(face: &Face<'_>, gid: GlyphId, coords: &[f32]) -> Vec<
     let index_map = resolve_index_map(face);
     let mut ctx = EvalCtx {
         colr: &colr,
-        cpal: cpal.as_ref(),
+        palette: Palette::new(cpal.as_ref(), options),
         var_store: var_store.as_ref(),
         index_map,
-        coords,
+        coords: options.coords(),
         visited: Vec::new(),
         out: &mut out,
     };
@@ -131,7 +152,8 @@ pub fn evaluate_at_coords(face: &Face<'_>, gid: GlyphId, coords: &[f32]) -> Vec<
 /// `evaluate` signature stays small.
 struct EvalCtx<'a, 'b> {
     colr: &'b Colr<'a>,
-    cpal: Option<&'b Cpal<'a>>,
+    /// Selected CPAL palette plus the foreground color.
+    palette: Palette<'a, 'b>,
     var_store: Option<&'b ItemVariationStore<'a>>,
     /// Optional DeltaSetIndexMap that redirects a paint's
     /// `var_index_base + field_index` through an indirection table
@@ -826,11 +848,14 @@ fn walk_composite(
 // =========================================================================
 
 fn emit_solid(ctx: &mut EvalCtx<'_, '_>, palette_index: u16, alpha: F2Dot14, xform: Transform2D) {
-    let color = resolve_palette_color(ctx.cpal, palette_index).with_alpha_multiplied(alpha);
+    let (color, is_foreground) = ctx.palette.resolve(palette_index, alpha);
     ctx.out.push(DrawCmd::FillGlyph {
         gid: 0,
         transform: xform,
-        paint: PaintSource::Solid(color),
+        paint: PaintSource::Solid {
+            color,
+            is_foreground,
+        },
     });
 }
 
@@ -924,23 +949,8 @@ fn emit_sweep_gradient(
 }
 
 // =========================================================================
-// CPAL resolution + ColorLine sampling
+// ColorLine sampling
 // =========================================================================
-
-/// Resolves a CPAL palette entry to a float-channel color. Falls back
-/// to opaque white for the `0xFFFF` foreground sentinel and to fully
-/// transparent for any other lookup miss. Never panics.
-fn resolve_palette_color(cpal: Option<&Cpal<'_>>, palette_index: u16) -> Color {
-    if palette_index == FOREGROUND_PALETTE_INDEX {
-        return Color::new(1.0, 1.0, 1.0, 1.0);
-    }
-    let Some(cpal) = cpal else {
-        return Color::TRANSPARENT;
-    };
-    cpal.color(DEFAULT_PALETTE_INDEX, palette_index)
-        .map(Color::from_cpal)
-        .unwrap_or(Color::TRANSPARENT)
-}
 
 /// Resolves every stop on a `ColorLine` against the active CPAL palette
 /// and (when present) the var store. The stops are returned in the
@@ -957,7 +967,6 @@ fn resolve_stops(
     let mut out = Vec::with_capacity(color_line.len() as usize);
     let coords = ctx.coords;
     let var_store = ctx.var_store;
-    let cpal = ctx.cpal;
 
     for (stop, stop_var) in color_line.stops_variable() {
         let mut offset = stop.stop_offset;
@@ -989,8 +998,12 @@ fn resolve_stops(
                 alpha += store.delta(a_outer, a_inner, coords) / 16384.0;
             }
         }
-        let color = resolve_palette_color(cpal, stop.palette_index).with_alpha_multiplied(alpha);
-        out.push(ColorStop { offset, color });
+        let (color, is_foreground) = ctx.palette.resolve(stop.palette_index, alpha);
+        out.push(ColorStop {
+            offset,
+            color,
+            is_foreground,
+        });
     }
     out
 }

@@ -286,6 +286,33 @@ typedef uint32_t hb_color_t;
     (((uint32_t)(b)&0xFFu) | (((uint32_t)(g)&0xFFu)<<8) | \
      (((uint32_t)(r)&0xFFu)<<16) | (((uint32_t)(a)&0xFFu)<<24))
 
+/* One resolved gradient stop. `is_foreground` is nonzero for stops on
+ * the COLR foreground entry; their `color` is the foreground color
+ * passed to hb_font_paint_glyph() with the stop alpha applied. */
+typedef struct hb_color_stop_t {
+    float      offset;
+    hb_bool_t  is_foreground;
+    hb_color_t color;
+} hb_color_stop_t;
+
+typedef enum {
+    HB_PAINT_EXTEND_PAD     = 0,
+    HB_PAINT_EXTEND_REPEAT  = 1,
+    HB_PAINT_EXTEND_REFLECT = 2
+} hb_paint_extend_t;
+
+/* Color-line accessors for the gradient callbacks. The color line is
+ * valid only while the callback that received it runs.
+ * hb_color_line_get_color_stops() copies up to *count stops starting at
+ * `start`, stores the number copied in *count, and returns the total
+ * number of stops. With a NULL `count` or `color_stops` it only returns
+ * the total. */
+unsigned int      hb_color_line_get_color_stops(const hb_color_line_t *color_line,
+                                                unsigned int           start,
+                                                unsigned int          *count,
+                                                hb_color_stop_t       *color_stops);
+hb_paint_extend_t hb_color_line_get_extend(const hb_color_line_t *color_line);
+
 typedef void (*hb_paint_push_transform_func_t)(hb_paint_funcs_t *funcs,
                                                void *paint_data,
                                                float xx, float yx,
@@ -339,6 +366,12 @@ void              hb_paint_funcs_set_linear_gradient_func(hb_paint_funcs_t *func
 void              hb_paint_funcs_set_radial_gradient_func(hb_paint_funcs_t *funcs, hb_paint_radial_gradient_func_t cb);
 void              hb_paint_funcs_set_sweep_gradient_func(hb_paint_funcs_t *funcs, hb_paint_sweep_gradient_func_t cb);
 
+/* Walks the glyph's COLRv1 paint tree at the font's current variation
+ * coordinates. `palette_index` selects the CPAL palette (palette 0 when
+ * the font has no such palette). Paints on the COLR foreground entry
+ * call the color callback with is_foreground = 1 and `foreground_color`
+ * whose alpha is multiplied by the paint alpha, as in HarfBuzz. A glyph
+ * without a COLRv1 paint tree fires no callbacks. */
 void              hb_font_paint_glyph(hb_font_t *font,
                                       uint32_t gid,
                                       hb_paint_funcs_t *funcs,

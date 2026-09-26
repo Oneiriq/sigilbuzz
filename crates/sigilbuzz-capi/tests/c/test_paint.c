@@ -75,6 +75,13 @@ int main(int argc, char **argv) {
     hb_paint_funcs_set_radial_gradient_func(funcs, NULL);
     hb_paint_funcs_set_sweep_gradient_func(funcs, NULL);
 
+    /* The color-line accessors must link; a NULL line is empty / PAD. */
+    if (hb_color_line_get_color_stops(NULL, 0, NULL, NULL) != 0 ||
+        hb_color_line_get_extend(NULL) != HB_PAINT_EXTEND_PAD) {
+        fprintf(stderr, "NULL color line accessors misbehaved\n");
+        return 11;
+    }
+
     /* Set / has / population on a fresh hb_set_t: proves the set
      * API symbols all link. */
     hb_set_t *set = hb_set_create();

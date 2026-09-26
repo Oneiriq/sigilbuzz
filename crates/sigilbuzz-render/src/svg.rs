@@ -1878,15 +1878,15 @@ fn parse_stop(node: &Node) -> Option<ColorStop> {
         }
     }
     let a = (color[3] as f32 / 255.0 * stop_opacity).clamp(0.0, 1.0);
-    Some(ColorStop {
+    Some(ColorStop::new(
         offset,
-        color: PaintColor {
+        PaintColor {
             r: color[0] as f32 / 255.0,
             g: color[1] as f32 / 255.0,
             b: color[2] as f32 / 255.0,
             a,
         },
-    })
+    ))
 }
 
 fn parse_stop_offset(s: &str) -> f32 {
