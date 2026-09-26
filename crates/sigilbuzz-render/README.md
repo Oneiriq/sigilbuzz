@@ -15,7 +15,8 @@ glyphs into pixels on the CPU, for every kind of glyph a modern font can carry.
   drawn in the text color (palette entry `0xFFFF`) use `Rasterizer::with_foreground`,
   opaque black by default, as do palette entries the font cannot supply.
 - SVG-in-OT glyphs render too: paths, shapes, strokes and dashes, gradients, `<use>`,
-  clip paths, masks, a set of filter primitives, and `<textPath>`.
+  clip paths, masks, a set of filter primitives, and `<textPath>`. `currentColor` is the
+  `with_foreground` color.
 - Embedded bitmaps from CBDT, sbix, and EBDT tables are decoded and scaled. PNG, JPEG
   (baseline and progressive), and TIFF images are supported.
 - Every entry point takes normalized axis coordinates, so variable fonts work

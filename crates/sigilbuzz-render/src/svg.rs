@@ -163,6 +163,12 @@ impl Rasterizer {
     /// but currently has no effect. SVG-in-OT documents are static
     /// (no axis tagging), and HarfBuzz / CoreText behave the same way.
     ///
+    /// `currentColor` in `fill`, `stroke`, `stop-color`, and `color` is
+    /// the rasterizer's foreground color (see
+    /// [`Rasterizer::with_foreground`]), the text color the OpenType SVG
+    /// spec hands a glyph document, until a `color` attribute changes
+    /// it for a subtree.
+    ///
     /// # Errors
     /// - [`RenderError::SvgNotFound`] when `gid` has no SVG record.
     /// - [`RenderError::SvgGzipped`] when the payload is gzip-compressed
@@ -190,7 +196,7 @@ impl Rasterizer {
             return Err(RenderError::SvgGzipped);
         }
         let xml = core::str::from_utf8(doc_record.data).map_err(|_| RenderError::Parse("svg"))?;
-        let doc = parse_document(xml)?;
+        let doc = parse_document_with(xml, self.foreground())?;
 
         if doc.view_w <= 0.0 || doc.view_h <= 0.0 {
             return Err(RenderError::Parse("svg viewBox"));
@@ -297,7 +303,7 @@ impl Rasterizer {
             return Err(RenderError::SvgGzipped);
         }
         let xml = core::str::from_utf8(doc_record.data).map_err(|_| RenderError::Parse("svg"))?;
-        let mut doc = parse_document(xml)?;
+        let mut doc = parse_document_with(xml, self.foreground())?;
 
         if doc.view_w <= 0.0 || doc.view_h <= 0.0 {
             return Err(RenderError::Parse("svg viewBox"));
@@ -317,7 +323,16 @@ impl Rasterizer {
             let root = parse_xml(xml)?;
             let mut defs = Defs::default();
             collect_defs(&root, &mut defs);
-            append_text_path_fills(&mut doc, &root, &defs, face, coords, upem, text_paths);
+            append_text_path_fills(
+                &mut doc,
+                &root,
+                &defs,
+                face,
+                coords,
+                upem,
+                text_paths,
+                self.foreground(),
+            );
         }
 
         let s = (size_pt / doc.view_w).min(size_pt / doc.view_h);
@@ -440,6 +455,7 @@ pub struct TextPathGlyph {
 /// un-parseable `d`, glyph outline lookup error, advance past path
 /// length) silently drop the offending glyph or run, matching the
 /// rest of the SVG-subset policy.
+#[allow(clippy::too_many_arguments)]
 fn append_text_path_fills(
     doc: &mut SvgDoc,
     root: &Node,
@@ -448,8 +464,12 @@ fn append_text_path_fills(
     coords: &[f32],
     upem: f32,
     text_paths: &[TextPathInput<'_>],
+    foreground: [u8; 4],
 ) {
-    let ctx = ElemCtx::default();
+    let ctx = ElemCtx {
+        current_color: foreground,
+        ..ElemCtx::default()
+    };
     walk_for_text_paths(root, doc, defs, &ctx, face, coords, upem, text_paths, 0);
 }
 
@@ -975,7 +995,14 @@ fn name_eq(a: &str, b: &str) -> bool {
 // Top-level parse
 // =========================================================================
 
+#[cfg(test)]
 fn parse_document(xml: &str) -> Result<SvgDoc, RenderError> {
+    parse_document_with(xml, Rasterizer::DEFAULT_FOREGROUND)
+}
+
+/// Parses `xml` with `currentColor` starting as `foreground`, the text
+/// color the OpenType SVG spec hands a glyph document.
+fn parse_document_with(xml: &str, foreground: [u8; 4]) -> Result<SvgDoc, RenderError> {
     let root = parse_xml(xml)?;
     if !name_eq(&root.name, "svg") {
         return Err(RenderError::Parse("svg root"));
@@ -1017,7 +1044,10 @@ fn parse_document(xml: &str) -> Result<SvgDoc, RenderError> {
     collect_defs(&root, &mut defs);
 
     // Second pass: walk the tree, emitting fills.
-    let ctx = ElemCtx::default();
+    let ctx = ElemCtx {
+        current_color: foreground,
+        ..ElemCtx::default()
+    };
     walk(&root, &mut doc, &defs, &ctx, 0, 0)?;
 
     Ok(doc)
@@ -1055,6 +1085,9 @@ struct ElemCtx {
     /// black" at paint time, matching the SVG default. Tracked
     /// separately from gradient paint so cascading respects both.
     fill_color: Option<[u8; 4]>,
+    /// `currentColor`: the text foreground color, or the nearest
+    /// `color` attribute.
+    current_color: [u8; 4],
     /// Inherited gradient href (when `fill="url(#id)"`). Resolved at
     /// paint time so the cascade stays simple.
     fill_grad_href: Option<String>,
@@ -1101,6 +1134,7 @@ impl Default for ElemCtx {
         Self {
             xform: Affine::identity(),
             fill_color: None,
+            current_color: Rasterizer::DEFAULT_FOREGROUND,
             fill_grad_href: None,
             fill_opacity: 1.0,
             opacity: 1.0,
@@ -1252,6 +1286,14 @@ fn walk(
 /// Computes the inherited [`ElemCtx`] for `node`, given `parent`.
 fn inherit_attrs(parent: &ElemCtx, node: &Node) -> ElemCtx {
     let mut ctx = parent.clone();
+    // `color` sets this element's `currentColor` before its own paints
+    // read it.
+    if let Some(c) = node
+        .attr("color")
+        .and_then(|v| color_value(v, parent.current_color))
+    {
+        ctx.current_color = c;
+    }
     for (k, v) in &node.attrs {
         if attr_matches(k, "transform") {
             if let Some(t) = parse_transform(v) {
@@ -1264,7 +1306,7 @@ fn inherit_attrs(parent: &ElemCtx, node: &Node) -> ElemCtx {
             } else if v.trim().eq_ignore_ascii_case("none") {
                 ctx.fill_color = Some([0, 0, 0, 0]);
                 ctx.fill_grad_href = None;
-            } else if let Some(c) = parse_color(v) {
+            } else if let Some(c) = color_value(v, ctx.current_color) {
                 ctx.fill_color = Some(c);
                 ctx.fill_grad_href = None;
             }
@@ -1279,7 +1321,7 @@ fn inherit_attrs(parent: &ElemCtx, node: &Node) -> ElemCtx {
         } else if attr_matches(k, "stroke") {
             if v.trim().eq_ignore_ascii_case("none") {
                 ctx.stroke_color = None;
-            } else if let Some(c) = parse_color(v) {
+            } else if let Some(c) = color_value(v, ctx.current_color) {
                 ctx.stroke_color = Some(c);
             }
         } else if attr_matches(k, "stroke-opacity") {
@@ -1786,7 +1828,7 @@ fn resolve_gradient(defs: &Defs<'_>, id: &str, ctx: &ElemCtx) -> Option<Gradient
     let mut stops: Vec<ColorStop> = Vec::new();
     for c in &node.children {
         if name_eq(&c.name, "stop") {
-            if let Some(s) = parse_stop(c) {
+            if let Some(s) = parse_stop(c, ctx.current_color) {
                 stops.push(s);
             }
         }
@@ -1800,7 +1842,7 @@ fn resolve_gradient(defs: &Defs<'_>, id: &str, ctx: &ElemCtx) -> Option<Gradient
             if let Some(parent) = defs.lookup(href) {
                 for c in &parent.children {
                     if name_eq(&c.name, "stop") {
-                        if let Some(s) = parse_stop(c) {
+                        if let Some(s) = parse_stop(c, ctx.current_color) {
                             stops.push(s);
                         }
                     }
@@ -1848,14 +1890,15 @@ fn resolve_gradient(defs: &Defs<'_>, id: &str, ctx: &ElemCtx) -> Option<Gradient
     })
 }
 
-fn parse_stop(node: &Node) -> Option<ColorStop> {
+/// `current` is the `currentColor` of the element the gradient paints.
+fn parse_stop(node: &Node, current: [u8; 4]) -> Option<ColorStop> {
     let offset = node.attr("offset").map(parse_stop_offset).unwrap_or(0.0);
     // stop-color is the canonical attribute; some authoring tools fold
     // it into a CSS-ish style="stop-color:#rgb;stop-opacity:0.5". Be
     // tolerant.
     let mut color = node
         .attr("stop-color")
-        .and_then(parse_color)
+        .and_then(|v| color_value(v, current))
         .unwrap_or([0, 0, 0, 255]);
     let stop_opacity = node
         .attr("stop-opacity")
@@ -1867,7 +1910,7 @@ fn parse_stop(node: &Node) -> Option<ColorStop> {
             let key = parts.next()?.trim();
             let val = parts.next()?.trim();
             if key.eq_ignore_ascii_case("stop-color") {
-                if let Some(c) = parse_color(val) {
+                if let Some(c) = color_value(val, current) {
                     color = c;
                 }
             } else if key.eq_ignore_ascii_case("stop-opacity") {
@@ -3942,6 +3985,15 @@ fn parse_length(s: &str) -> Option<f32> {
 fn parse_opacity(s: &str) -> Option<f32> {
     let v = s.trim().parse::<f32>().ok()?;
     Some(v.clamp(0.0, 1.0))
+}
+
+/// A paint color that may be `currentColor`, which resolves to
+/// `current`.
+fn color_value(s: &str, current: [u8; 4]) -> Option<[u8; 4]> {
+    if s.trim().eq_ignore_ascii_case("currentColor") {
+        return Some(current);
+    }
+    parse_color(s)
 }
 
 fn parse_color(s: &str) -> Option<[u8; 4]> {

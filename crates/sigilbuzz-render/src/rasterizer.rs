@@ -66,8 +66,9 @@ impl Rasterizer {
     /// Paints color-glyph layers that use COLR palette entry `0xFFFF`
     /// (the text color) in `rgba`, straight (not premultiplied) alpha.
     /// Applies to [`Rasterizer::rasterize_colrv0_glyph`] and
-    /// [`Rasterizer::rasterize_colrv1_glyph`]; the paint's own alpha
-    /// multiplies `rgba[3]`.
+    /// [`Rasterizer::rasterize_colrv1_glyph`], where the paint's own
+    /// alpha multiplies `rgba[3]`, and to `currentColor` in the documents
+    /// [`Rasterizer::rasterize_svg_glyph`] draws.
     ///
     /// ```
     /// use sigilbuzz_render::Rasterizer;
