@@ -20,8 +20,8 @@ use crate::ot::indic::devanagari::{INDIC_BASIC_FEATURES, INDIC_PRESENTATION_FEAT
 use crate::ot::indic::indic_config_for;
 use crate::ot::tibetan::TIBT_FEATURES;
 use crate::ot::use_shaper::{
-    HANGUL_FEATURES, MYANMAR_BASIC_FEATURES, MYANMAR_TOPOGRAPHICAL_FEATURES, THAI_LAO_FEATURES,
-    USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES,
+    HANGUL_FEATURES, MYANMAR_BASIC_FEATURES, MYANMAR_TOPOGRAPHICAL_FEATURES, USE_BASIC_FEATURES,
+    USE_TOPOGRAPHICAL_FEATURES,
 };
 use crate::tables::gdef::Gdef;
 use crate::tables::layout::Joiners;
@@ -86,7 +86,6 @@ impl SegmentPlan<'_> {
             | Script::Tirhuta
             | Script::Modi => &[USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES],
             Script::Myanmar => &[MYANMAR_BASIC_FEATURES, MYANMAR_TOPOGRAPHICAL_FEATURES],
-            Script::Thai | Script::Lao => &[THAI_LAO_FEATURES],
             Script::NKo => &[LOCL_CCMP, POSITIONAL],
             Script::Tibetan if dominant => &[TIBT_FEATURES],
             Script::Mongolian if dominant => &[LOCL_CCMP, POSITIONAL],

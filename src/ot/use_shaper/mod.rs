@@ -66,9 +66,8 @@ use alloc::vec::Vec;
 use reorder::{initial_reorder, pref_reorder};
 pub use scripts::{
     shape_balinese, shape_brahmi, shape_buginese, shape_cham, shape_hangul, shape_khojki,
-    shape_lao, shape_lepcha, shape_limbu, shape_modi, shape_myanmar, shape_nko,
-    shape_nko_in_context, shape_sharada, shape_sundanese, shape_tai_tham, shape_thai,
-    shape_tirhuta,
+    shape_lepcha, shape_limbu, shape_modi, shape_myanmar, shape_nko, shape_nko_in_context,
+    shape_sharada, shape_sundanese, shape_tai_tham, shape_tirhuta,
 };
 pub(crate) use syllable::{segment_syllables, Syllable, SyllableKind};
 
@@ -177,14 +176,11 @@ pub const MYANMAR_BASIC_FEATURES: &[&[u8; 4]] = &[
 pub const MYANMAR_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] =
     &[b"abvs", b"blws", b"haln", b"pres", b"psts", b"calt"];
 
-/// Thai / Lao's feature set: no halant, no subjoining, so the
-/// shaper just needs contextual shaping + mark positioning. `liga`
-/// and `calt` handle most tone-mark placement adjustments.
-pub const THAI_LAO_FEATURES: &[&[u8; 4]] = &[b"ccmp", b"liga", b"calt"];
-
 /// Hangul Old-Hangul features: the three positional jamo features
-/// pick Leading/Vowel/Trailing variant shapes.
-pub const HANGUL_FEATURES: &[&[u8; 4]] = &[b"ccmp", b"ljmo", b"vjmo", b"tjmo", b"calt"];
+/// pick Leading/Vowel/Trailing variant shapes. HarfBuzz's Hangul
+/// shaper adds only these to the default features, which run once,
+/// in the default pass.
+pub const HANGUL_FEATURES: &[&[u8; 4]] = &[b"ljmo", b"vjmo", b"tjmo"];
 
 /// Entry point: shapes one Khmer run. `codepoints` is in
 /// one-to-one correspondence with `glyphs` on entry; after the call
@@ -256,24 +252,21 @@ pub fn shape_khmer(
     // handle Khmer's tone marks without a script-specific branch.
 }
 
-/// Generic USE shaping entry point, used by Myanmar, Thai, Lao and
-/// Old-Hangul runs. Mirrors [`shape_khmer`] but takes the script-
-/// priority table and the (basic, topographical) feature slices as
-/// parameters so each script can supply its own set. The syllable
-/// segmenter and pre-base reorder are script-agnostic: they run off
-/// the [`UseCategory`] / [`UsePosition`] tables which already encode
-/// per-script positional rules.
+/// Generic USE shaping entry point, used by Myanmar, Old-Hangul, and
+/// the Universal Shaping Engine scripts. Mirrors [`shape_khmer`] but
+/// takes the script-priority table and the (basic, topographical)
+/// feature slices as parameters so each script can supply its own set.
+/// The syllable segmenter and pre-base reorder are script-agnostic:
+/// they run off the [`UseCategory`] / [`UsePosition`] tables which
+/// already encode per-script positional rules.
 ///
 /// `reorder_prebase` controls whether the pre-base vowel reorder
-/// runs. Thai and Lao pre-base vowels (sara e and friends) are
-/// logically typed *before* the base consonant already, so the
-/// reorder pass would be a no-op at best and break clustering at
-/// worst. Passing `false` skips it. `level` is the buffer's cluster
-/// level, which decides whether reordered glyphs merge clusters.
+/// runs. Old Hangul has nothing to reorder, so it passes `false`.
+/// `level` is the buffer's cluster level, which decides whether
+/// reordered glyphs merge clusters.
 ///
 /// `table` is the joiner handling of the HarfBuzz shaper the script
-/// maps to (USE, Myanmar, or the default shaper for Thai, Lao and
-/// Hangul).
+/// maps to (USE, Myanmar, or the default shaper for Hangul).
 ///
 /// [`UseCategory`]: crate::unicode::use_category::UseCategory
 /// [`UsePosition`]: crate::unicode::use_category::UsePosition
@@ -297,9 +290,7 @@ pub(crate) fn shape_use(
     // 1. Segment.
     let syllables = segment_syllables(codepoints);
 
-    // 2. Initial reordering. Some scripts (Thai, Lao) type pre-base
-    //    vowels before the base already, so the reorder would break
-    //    cluster alignment. Skip it in that case.
+    // 2. Initial reordering, for the scripts that have any.
     if reorder_prebase {
         for syllable in &syllables {
             initial_reorder(codepoints, glyphs, syllable, level);

@@ -418,24 +418,9 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 level,
             );
         }
-        if seg.script == Script::Thai {
-            crate::ot::use_shaper::shape_thai(
-                gsub.as_ref(),
-                gdef.as_ref(),
-                seg_cps,
-                &mut seg_glyphs,
-                level,
-            );
-        }
-        if seg.script == Script::Lao {
-            crate::ot::use_shaper::shape_lao(
-                gsub.as_ref(),
-                gdef.as_ref(),
-                seg_cps,
-                &mut seg_glyphs,
-                level,
-            );
-        }
+        // Thai and Lao need no pass of their own: HarfBuzz's Thai shaper
+        // adds no features to the default ones, and its sara am
+        // preprocessing ran with the other preprocessing above.
         if seg.script == Script::NKo {
             crate::ot::use_shaper::shape_nko_in_context(
                 gsub.as_ref(),
@@ -612,6 +597,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 seg.script_priority,
                 early_default_features(seg_arabic_active, seg.script, dominant_script),
                 joiner_table,
+                buffer_shaper == Shaper::Hangul,
             );
         }
 

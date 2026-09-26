@@ -7,11 +7,10 @@ use alloc::vec::Vec;
 use super::{
     shape_use, BALINESE_SCRIPT_PRIORITY, BRAHMI_SCRIPT_PRIORITY, BUGINESE_SCRIPT_PRIORITY,
     CHAM_SCRIPT_PRIORITY, HANGUL_FEATURES, HANGUL_SCRIPT_PRIORITY, KHOJKI_SCRIPT_PRIORITY,
-    LAO_SCRIPT_PRIORITY, LEPCHA_SCRIPT_PRIORITY, LIMBU_SCRIPT_PRIORITY, MODI_SCRIPT_PRIORITY,
-    MYANMAR_BASIC_FEATURES, MYANMAR_SCRIPT_PRIORITY, MYANMAR_TOPOGRAPHICAL_FEATURES,
-    NKO_SCRIPT_PRIORITY, SHARADA_SCRIPT_PRIORITY, SUNDANESE_SCRIPT_PRIORITY,
-    TAI_THAM_SCRIPT_PRIORITY, THAI_LAO_FEATURES, THAI_SCRIPT_PRIORITY, TIRHUTA_SCRIPT_PRIORITY,
-    USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES,
+    LEPCHA_SCRIPT_PRIORITY, LIMBU_SCRIPT_PRIORITY, MODI_SCRIPT_PRIORITY, MYANMAR_BASIC_FEATURES,
+    MYANMAR_SCRIPT_PRIORITY, MYANMAR_TOPOGRAPHICAL_FEATURES, NKO_SCRIPT_PRIORITY,
+    SHARADA_SCRIPT_PRIORITY, SUNDANESE_SCRIPT_PRIORITY, TAI_THAM_SCRIPT_PRIORITY,
+    TIRHUTA_SCRIPT_PRIORITY, USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES,
 };
 use crate::buffer::{ClusterLevel, Glyph};
 use crate::shape::JoinerTable;
@@ -43,60 +42,13 @@ pub fn shape_myanmar(
     );
 }
 
-/// Entry point for Thai runs. Thai has no halant and no subjoining;
-/// the shaping reduces to contextual forms + mark positioning. Tone
-/// marks join their consonant's cluster through the grapheme levels'
-/// cluster forming, before any shaper runs, as in HarfBuzz.
-pub fn shape_thai(
-    gsub: Option<&Gsub<'_>>,
-    gdef: Option<&Gdef<'_>>,
-    codepoints: &[char],
-    glyphs: &mut Vec<Glyph>,
-    level: ClusterLevel,
-) {
-    shape_use(
-        gsub,
-        gdef,
-        codepoints,
-        glyphs,
-        THAI_SCRIPT_PRIORITY,
-        THAI_LAO_FEATURES,
-        &[],
-        false,
-        level,
-        JoinerTable::Default,
-    );
-}
-
-/// Entry point for Lao runs. Lao is structurally near-identical to
-/// Thai: same feature set, no reorder, different script tag.
-pub fn shape_lao(
-    gsub: Option<&Gsub<'_>>,
-    gdef: Option<&Gdef<'_>>,
-    codepoints: &[char],
-    glyphs: &mut Vec<Glyph>,
-    level: ClusterLevel,
-) {
-    shape_use(
-        gsub,
-        gdef,
-        codepoints,
-        glyphs,
-        LAO_SCRIPT_PRIORITY,
-        THAI_LAO_FEATURES,
-        &[],
-        false,
-        level,
-        JoinerTable::Default,
-    );
-}
-
 /// Entry point for Hangul runs, specifically Jamo (Old Hangul)
 /// decomposed text. Precomposed syllables still flow through the
 /// default path in [`crate::shape`]; only runs containing at least
 /// one Jamo codepoint land here. The feature chain drives
 /// `ljmo`/`vjmo`/`tjmo` so Leading / Vowel / Trailing jamo pick
-/// their positional variant glyphs.
+/// their positional variant glyphs; `ccmp` and the other default
+/// features run once, in the default pass after this.
 ///
 /// An `<L,V>` or `<L,V,T>` jamo sequence that did not compose into a
 /// precomposed syllable forms one cluster at the grapheme levels, as

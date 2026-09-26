@@ -27,6 +27,11 @@ use crate::unicode::Script;
 /// so their lookups interleave by lookup index. `table` is the joiner
 /// handling of the segment's shaper (Arabic runs its ligating features
 /// with manual ZWJ).
+///
+/// `hangul` says the buffer shapes with HarfBuzz's Hangul shaper, which
+/// turns `calt` off whatever the caller asks (`override_features_hangul`:
+/// Uniscribe does not apply it, and some CJK fonts put all their jamo
+/// lookups there).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_default_gsub(
     gsub: &Gsub<'_>,
@@ -38,6 +43,7 @@ pub(super) fn run_default_gsub(
     script_priority: &[[u8; 4]],
     early_features: &[[u8; 4]],
     table: JoinerTable,
+    hangul: bool,
 ) {
     let merged = |glyphs: &mut Vec<Glyph>, tags: &[[u8; 4]]| {
         apply_gsub_features_merged(gsub, glyphs, gdef, features, tags, script_priority, table);
@@ -61,7 +67,12 @@ pub(super) fn run_default_gsub(
     // ship the same lookup set under both tags (calt for legacy,
     // rclt for required-contextual). Naively running each tag's
     // lookups in turn double-applies on those fonts.
-    merged(glyphs, &[*b"calt", *b"rclt"]);
+    let contextual: &[[u8; 4]] = if hangul {
+        &[*b"rclt"]
+    } else {
+        &[*b"calt", *b"rclt"]
+    };
+    merged(glyphs, contextual);
     // Vertical writing: HarfBuzz auto-enables `vrt2` when the font
     // carries it, otherwise falls back to `vert`. The two tags
     // cannot be active together: `vrt2` (Vertical Alternates &
