@@ -6,18 +6,21 @@
 //! turn into pixels. The walker:
 //!
 //! - composes nested affine transforms into a single 2x3 matrix per
-//!   leaf,
+//!   leaf, keeping the outline of a `PaintGlyph` in place when a
+//!   transform below it moves only the paint,
 //! - resolves [`sigilbuzz::tables::colr::ColorLine`] stops against the
 //!   selected [`sigilbuzz::tables::cpal::Cpal`] palette, applying the
 //!   per-stop alpha,
+//! - applies variation deltas from the COLR table's own item variation
+//!   store, through its DeltaSetIndexMap when it has one,
 //! - keeps foreground-ness: fills and stops that use COLR palette entry
 //!   `0xFFFF` (the text color) carry `is_foreground == true` and the
 //!   foreground color chosen through [`EvalOptions`] (opaque black by
 //!   default); a palette lookup that fails also yields that color, as
 //!   in HarfBuzz,
 //! - emits [`DrawCmd::PushLayer`] / [`DrawCmd::PopLayer`] pairs around
-//!   `PaintComposite` children so the consumer can drive
-//!   blend-mode-aware compositing,
+//!   `PaintComposite` children, with the backdrop and the source each
+//!   isolated, so the consumer can drive blend-mode-aware compositing,
 //! - recurses through [`sigilbuzz::tables::colr::ColrPaint::ColrGlyph`]
 //!   references with a visited-set so cyclic DAGs terminate.
 //!

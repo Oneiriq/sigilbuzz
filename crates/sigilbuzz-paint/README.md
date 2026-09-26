@@ -8,14 +8,16 @@ sigilbuzz parses a COLRv1 paint tree into a borrowed enum
 (`sigilbuzz::tables::colr::ColrPaint`). This crate walks that tree and emits a flat
 list of `DrawCmd`s that a renderer can turn into pixels. Along the way it:
 
-- Combines nested transforms into one 2x3 matrix per leaf.
+- Combines nested transforms into one 2x3 matrix per leaf. A transform below a
+  `PaintGlyph` moves only the paint: the fill keeps the glyph's outline in place and
+  carries the gradient geometry into the outline's space.
 - Resolves `ColorLine` stops against the selected CPAL palette, including per-stop alpha.
 - Applies variation deltas from the COLR table's own item variation store, through its
   DeltaSetIndexMap when it has one, as HarfBuzz does.
 - Keeps the foreground color apart. Solid fills and gradient stops that use COLR palette
   entry `0xFFFF` (the text color) carry `is_foreground == true`.
-- Wraps `PaintComposite` children in `PushLayer` / `PopLayer` so the renderer can
-  blend them.
+- Wraps each `PaintComposite` in an isolating `PushLayer` / `PopLayer` pair holding the
+  backdrop and a nested pair, with the composite mode, holding the source.
 - Follows `ColrGlyph` references and stops on cycles.
 
 Malformed fonts never cause a panic. A bad offset or an unknown paint format ends the

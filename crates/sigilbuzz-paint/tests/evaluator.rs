@@ -338,15 +338,112 @@ fn composite_wraps_source_with_push_pop() {
     let bytes = build_face_bytes(&colr, &cpal);
     let face = Face::parse_bytes(&bytes, 0).unwrap();
     let cmds = evaluate(&face, 7);
-    // Expected: backdrop fill, PushLayer, source fill, PopLayer.
-    assert_eq!(cmds.len(), 4, "{cmds:?}");
-    assert!(matches!(cmds[0], DrawCmd::FillGlyph { .. }));
-    match cmds[1] {
-        DrawCmd::PushLayer { composite_mode } => assert_eq!(composite_mode, CompositeMode::Screen),
-        ref other => panic!("expected PushLayer, got {other:?}"),
+    // Expected: an isolating SrcOver layer holding the backdrop fill
+    // and a Screen layer holding the source fill.
+    assert_eq!(cmds.len(), 6, "{cmds:?}");
+    let layer_mode = |cmd: &DrawCmd| match cmd {
+        DrawCmd::PushLayer { composite_mode } => *composite_mode,
+        other => panic!("expected PushLayer, got {other:?}"),
+    };
+    assert_eq!(layer_mode(&cmds[0]), CompositeMode::SrcOver);
+    assert!(matches!(cmds[1], DrawCmd::FillGlyph { .. }));
+    assert_eq!(layer_mode(&cmds[2]), CompositeMode::Screen);
+    assert!(matches!(cmds[3], DrawCmd::FillGlyph { .. }));
+    assert!(matches!(cmds[4], DrawCmd::PopLayer));
+    assert!(matches!(cmds[5], DrawCmd::PopLayer));
+}
+
+// =========================================================================
+// 5b. A transform below a PaintGlyph moves the paint, not the outline;
+//     one above it moves both.
+// =========================================================================
+
+/// PaintGlyph(`gid`) whose child starts right after its 6 bytes.
+fn paint_glyph_head(gid: u16) -> Vec<u8> {
+    let mut p = vec![10u8, 0, 0, 6];
+    p.extend_from_slice(&gid.to_be_bytes());
+    p
+}
+
+/// PaintTransform (scale 2, translate (10, 0)) whose child follows its
+/// 7-byte record and 24-byte Affine2x3.
+fn scale_two_head() -> Vec<u8> {
+    let mut p = vec![12u8, 0, 0, 31, 0, 0, 7];
+    for v in [2i32, 0, 0, 2, 10, 0] {
+        p.extend_from_slice(&(v << 16).to_be_bytes());
     }
-    assert!(matches!(cmds[2], DrawCmd::FillGlyph { .. }));
-    assert!(matches!(cmds[3], DrawCmd::PopLayer));
+    p
+}
+
+/// Linear gradient from (0, 0) to (100, 0), rotation point (0, 100).
+fn linear_red_blue() -> Vec<u8> {
+    let mut p = vec![4u8, 0, 0, 16];
+    for v in [0i16, 0, 100, 0, 0, 100] {
+        p.extend_from_slice(&v.to_be_bytes());
+    }
+    p.push(0);
+    p.extend_from_slice(&2u16.to_be_bytes());
+    for (offset, entry) in [(0.0, 0u16), (1.0, 1)] {
+        p.extend_from_slice(&f2dot14(offset));
+        p.extend_from_slice(&entry.to_be_bytes());
+        p.extend_from_slice(&f2dot14(1.0));
+    }
+    p
+}
+
+fn only_fill(cmds: &[DrawCmd]) -> (u16, sigilbuzz_paint::Transform2D, GradientKind) {
+    match cmds {
+        [DrawCmd::FillGlyph {
+            gid,
+            transform,
+            paint: PaintSource::Gradient(g),
+        }] => (*gid, *transform, g.kind),
+        other => panic!("expected one gradient fill, got {other:?}"),
+    }
+}
+
+#[test]
+fn transform_below_paint_glyph_moves_only_the_gradient() {
+    let cpal = build_cpal_v0(&[(255, 0, 0, 255), (0, 0, 255, 255)]);
+
+    // PaintGlyph(5) -> PaintTransform -> gradient.
+    let mut below = build_v1_header(7);
+    below.extend_from_slice(&paint_glyph_head(5));
+    below.extend_from_slice(&scale_two_head());
+    below.extend_from_slice(&linear_red_blue());
+    let bytes = build_face_bytes(&below, &cpal);
+    let face = Face::parse_bytes(&bytes, 0).unwrap();
+    let (gid, transform, kind) = only_fill(&evaluate(&face, 7));
+    assert_eq!(gid, 5);
+    assert_eq!(transform, sigilbuzz_paint::Transform2D::IDENTITY);
+    assert_eq!(
+        kind,
+        GradientKind::Linear {
+            p0: (10.0, 0.0),
+            p1: (210.0, 0.0),
+            p2: (10.0, 200.0),
+        }
+    );
+
+    // PaintTransform -> PaintGlyph(5) -> gradient: outline and paint
+    // move together, and the gradient keeps its own coordinates.
+    let mut above = build_v1_header(7);
+    above.extend_from_slice(&scale_two_head());
+    above.extend_from_slice(&paint_glyph_head(5));
+    above.extend_from_slice(&linear_red_blue());
+    let bytes = build_face_bytes(&above, &cpal);
+    let face = Face::parse_bytes(&bytes, 0).unwrap();
+    let (gid, transform, kind) = only_fill(&evaluate(&face, 7));
+    assert_eq!(gid, 5);
+    assert_eq!(transform.apply(1.0, 1.0), (12.0, 2.0));
+    assert_eq!(
+        kind,
+        GradientKind::Linear {
+            p0: (0.0, 0.0),
+            p1: (100.0, 0.0),
+            p2: (0.0, 100.0),
+        }
+    );
 }
 
 // =========================================================================
