@@ -1,13 +1,13 @@
 //! Keeping VariationIndex tables in step with a partially instanced
 //! GDEF ItemVariationStore.
 //!
-//! [`super::project_ivs`] projects the store onto the kept axes and
+//! [`super::ivs::project_ivs`] projects the store onto the kept axes and
 //! elides every ItemVariationData subtable left with no region (all of
 //! its regions sat outside the pinned coordinates) or no rows. The
 //! subtables after an elided one move down, so an `(outer, inner)` row
 //! reference changes its `outer`, and a reference into an elided
 //! subtable has nothing left to name: its delta is zero at every kept
-//! coordinate. [`super::RegionRemap`] records both.
+//! coordinate. [`super::ivs::RegionRemap`] records both.
 //!
 //! GPOS ValueRecords and anchors and GDEF ligature carets reach the
 //! store through VariationIndex tables, so each of them goes through
@@ -23,7 +23,8 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
 use super::gdef_store::{has_store, identity_map, GdefBake};
-use super::{project_ivs, shifted, AxisPin, RegionRemap};
+use super::ivs::{project_ivs, shifted, RegionRemap};
+use super::AxisPin;
 use crate::gdef::StorePlan;
 use crate::gpos_var::{walk_gpos_device_slots, VARIATION_INDEX_DELTA_FORMAT};
 use crate::layout::GidMap;
