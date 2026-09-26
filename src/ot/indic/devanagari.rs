@@ -63,7 +63,8 @@ use alloc::vec::Vec;
 use super::{IndicConfig, RephMode, RephPosition};
 use crate::buffer::{Glyph, IndicPosition};
 use crate::shape::{
-    apply_gsub_feature_in_scripts, apply_gsub_feature_masked, feature_would_substitute,
+    apply_gsub_feature_in_scripts, apply_gsub_feature_masked, apply_locl_ccmp_if_length_preserving,
+    feature_would_substitute,
 };
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
@@ -109,6 +110,14 @@ pub fn shape_indic(
         tag_positions(codepoints, glyphs, syllable);
     }
 
+    // HarfBuzz runs `locl` and `ccmp` as one stage before initial
+    // reordering. Everything below indexes glyphs by code point, so a
+    // font whose `ccmp` changes the glyph count gets `locl` as the
+    // first basic feature and `ccmp` last instead.
+    let early = gsub.is_some_and(|gsub| {
+        apply_locl_ccmp_if_length_preserving(gsub, glyphs, gdef, config.script_priority)
+    });
+
     // Initial reordering is per-syllable and mutates `glyphs` in
     // place. Indic reorder is length-preserving (same glyph count
     // in, same out) because decomposition runs separately, so
@@ -133,6 +142,9 @@ pub fn shape_indic(
     // `consonant_position_from_face` in rustybuzz's ot_shaper_indic.
     if let Some(gsub) = gsub {
         let half_mask = compute_half_mask(gsub, gdef, codepoints, glyphs, config, &syllables);
+        if !early {
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"locl", 0, config.script_priority);
+        }
         for tag in INDIC_BASIC_FEATURES {
             if *tag == b"half" {
                 apply_gsub_feature_masked(
@@ -174,6 +186,9 @@ pub fn shape_indic(
         for tag in INDIC_PRESENTATION_FEATURES {
             apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, config.script_priority);
         }
+        if !early {
+            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, *b"ccmp", 0, config.script_priority);
+        }
     }
 }
 
@@ -191,11 +206,12 @@ pub fn shape_devanagari(
     shape_indic(gsub, gdef, codepoints, glyphs, &config);
 }
 
-/// Default Indic2 basic features, in application order. `locl` opens
-/// the chain, as in HarfBuzz, so language-specific forms (Marathi,
-/// Nepali) are in place before conjunct formation.
+/// Default Indic2 basic features, in application order. `locl` and
+/// `ccmp` run before them, ahead of initial reordering as in HarfBuzz,
+/// so language-specific forms (Marathi, Nepali) are in place before
+/// conjunct formation.
 pub(crate) const INDIC_BASIC_FEATURES: &[&[u8; 4]] = &[
-    b"locl", b"nukt", b"akhn", b"rphf", b"rkrf", b"blwf", b"half", b"pstf", b"vatu", b"cjct",
+    b"nukt", b"akhn", b"rphf", b"rkrf", b"blwf", b"half", b"pstf", b"vatu", b"cjct",
 ];
 
 /// Default Indic2 presentation features, in application order.

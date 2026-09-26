@@ -36,11 +36,16 @@
 //!
 //! # Feature order
 //!
-//! The Mongolian feature chain mirrors Arabic:
+//! HarfBuzz shapes Mongolian with its USE shaper, whose first stage
+//! runs `locl` and `ccmp` together:
 //!
 //! ```text
-//!   ccmp -> isol/init/medi/fina (positional pass) -> calt -> liga
+//!   locl + ccmp -> isol/init/medi/fina (positional pass) -> calt -> liga
 //! ```
+//!
+//! A font whose `ccmp` changes the glyph count gets `locl` + `ccmp`
+//! after the positional pass instead, because the joining forms are
+//! assigned per code point.
 //!
 //! `rlig` is omitted. Noto Sans Mongolian ships its required
 //! ligatures under the positional features themselves.
@@ -49,7 +54,9 @@ use alloc::vec::Vec;
 
 use crate::buffer::Glyph;
 use crate::ot::arabic::{assign_from_types_in_context, JoiningContext, JoiningForm};
-use crate::shape::apply_gsub_feature_masked;
+use crate::shape::{
+    apply_gsub_feature_masked, apply_gsub_features_merged, apply_locl_ccmp_if_length_preserving,
+};
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 use crate::unicode::joining::{joining_type, JoiningType};
@@ -62,13 +69,10 @@ use crate::unicode::joining::{joining_type, JoiningType};
 pub const MONG_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"mong", *b"DFLT"];
 
 /// Mongolian shaper has no script-specific feature chain of its
-/// own beyond the four positional (`isol`/`init`/`medi`/`fina`)
-/// features run masked below. `ccmp` runs in the generic default
-/// GSUB pass before the positional features. Actually after, in
-/// HarfBuzz's order, but for Mongolian fonts on the 0.7.0 corpus
-/// the `ccmp` lookups are SINGLE_SUBST and order-insensitive.
-/// `calt` and `liga` also fire afterward in default-GSUB; nothing
-/// for the Mongolian shaper to drive itself.
+/// own beyond `locl` + `ccmp` and the four positional
+/// (`isol`/`init`/`medi`/`fina`) features run masked below. `calt`
+/// and `liga` fire afterward in default-GSUB; nothing for the
+/// Mongolian shaper to drive itself.
 #[allow(dead_code)]
 pub const MONG_FEATURES_PRE: &[&[u8; 4]] = &[];
 
@@ -131,9 +135,10 @@ pub fn assign_mongolian_forms_in_context(
 /// Entry point: shapes one Mongolian run.
 ///
 /// `codepoints` and `glyphs` start 1:1 (a glyph per codepoint, post
-/// cmap). The shaper runs `ccmp`, then the four positional features
-/// gated on the joining-form vector, then `calt`/`liga`. After the
-/// call `glyphs` may have shrunk through ligature collapse.
+/// cmap). The shaper runs `locl` + `ccmp`, then the four positional
+/// features gated on the joining-form vector; `calt`/`liga` follow in
+/// the default pass. After the call `glyphs` may have shrunk through
+/// ligature collapse.
 pub fn shape_mongolian(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -160,15 +165,15 @@ pub fn shape_mongolian_in_context(
         return;
     };
 
+    // HarfBuzz shapes Mongolian with the USE shaper, whose first stage
+    // runs `locl` and `ccmp` together, ahead of the positional
+    // features. The joining forms below index glyphs by code point, so
+    // a `ccmp` that changes the glyph count waits until after them.
+    let early = apply_locl_ccmp_if_length_preserving(gsub, glyphs, gdef, MONG_SCRIPT_PRIORITY);
+
     // Positional pass: `isol`/`init`/`medi`/`fina` each apply only
     // at positions whose computed JoiningForm matches.
     let forms = assign_mongolian_forms_in_context(codepoints, context);
-    // The forms vector is aligned with `codepoints`. ccmp may have
-    // rewritten glyph ids but it does not change run length on the
-    // Mongolian fonts we test against (Noto Sans Mongolian's ccmp
-    // lookups are SINGLE_SUBST), so the cps<->glyph count is still
-    // the same here. If a future font ships a length-changing ccmp
-    // lookup the parity test will catch it.
     if glyphs.len() == forms.len() {
         for (form, tag) in [
             (JoiningForm::Isol, *b"isol"),
@@ -179,6 +184,10 @@ pub fn shape_mongolian_in_context(
             let mask: Vec<bool> = forms.iter().map(|&f| f == form).collect();
             apply_gsub_feature_masked(gsub, glyphs, gdef, tag, MONG_SCRIPT_PRIORITY, &mask);
         }
+    }
+    if !early {
+        let locl_ccmp = [*b"locl", *b"ccmp"];
+        apply_gsub_features_merged(gsub, glyphs, gdef, &[], &locl_ccmp, MONG_SCRIPT_PRIORITY);
     }
 
     // calt / liga are applied by the generic default-GSUB pass

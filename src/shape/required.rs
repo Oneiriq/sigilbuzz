@@ -38,8 +38,8 @@ const VERTICAL_CHAIN: &[[u8; 4]] = &[*b"vert", *b"vrt2"];
 /// The joining-form features of the Arabic, Mongolian, and N'Ko paths.
 const POSITIONAL: &[&[u8; 4]] = &[b"isol", b"init", b"medi", b"fina"];
 
-/// `ccmp`, which the N'Ko shaper runs ahead of its positional pass.
-const CCMP: &[&[u8; 4]] = &[b"ccmp"];
+/// `locl` and `ccmp`, which the Indic, Mongolian, and N'Ko shapers run first.
+const LOCL_CCMP: &[&[u8; 4]] = &[b"locl", b"ccmp"];
 
 /// What decides the GSUB tags one segment's pipeline applies.
 pub(super) struct SegmentPlan<'a> {
@@ -67,7 +67,7 @@ impl SegmentPlan<'_> {
     /// apply their features whatever the caller's overrides say.
     fn shaper_features(&self) -> &'static [&'static [&'static [u8; 4]]] {
         if indic_config_for(self.script).is_some() {
-            return &[INDIC_BASIC_FEATURES, INDIC_PRESENTATION_FEATURES];
+            return &[LOCL_CCMP, INDIC_BASIC_FEATURES, INDIC_PRESENTATION_FEATURES];
         }
         let dominant = self.dominant == Some(self.script);
         match self.script {
@@ -86,9 +86,9 @@ impl SegmentPlan<'_> {
             | Script::Modi => &[USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES],
             Script::Myanmar => &[MYANMAR_BASIC_FEATURES, MYANMAR_TOPOGRAPHICAL_FEATURES],
             Script::Thai | Script::Lao => &[THAI_LAO_FEATURES],
-            Script::NKo => &[CCMP, POSITIONAL],
+            Script::NKo => &[LOCL_CCMP, POSITIONAL],
             Script::Tibetan if dominant => &[TIBT_FEATURES],
-            Script::Mongolian if dominant => &[POSITIONAL],
+            Script::Mongolian if dominant => &[LOCL_CCMP, POSITIONAL],
             Script::Hangul
                 if dominant
                     && self

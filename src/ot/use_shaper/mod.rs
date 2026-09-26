@@ -909,8 +909,9 @@ pub fn shape_hangul(
 /// shared joining state machine in [`crate::unicode::joining`]. The
 /// shaper:
 ///
-/// 1. Runs `ccmp` so any precomposed N'Ko diphthongs in the font's
-///    composition lookup decompose.
+/// 1. Runs `locl` and `ccmp` as one stage, so localized forms and
+///    any precomposed N'Ko diphthongs in the font's composition lookup
+///    settle before the positional pass (HarfBuzz's USE order).
 /// 2. Computes a per-codepoint joining-form vector via the shared
 ///    Arabic state machine. N'Ko's joining types live in the same
 ///    [`JoiningType`](crate::unicode::joining::JoiningType) table.
@@ -949,14 +950,15 @@ pub fn shape_nko_in_context(
         return;
     };
 
-    // 1. ccmp first: handles any compositional rewrites the font
-    //    registers before the positional pass sees the glyph stream.
-    crate::shape::apply_gsub_feature_in_scripts(
+    // 1. locl + ccmp first, as one stage: HarfBuzz shapes N'Ko with
+    //    its USE shaper, whose first stage runs both before the
+    //    positional features see the glyph stream.
+    crate::shape::apply_gsub_features_merged(
         gsub,
         glyphs,
         gdef,
-        *b"ccmp",
-        0,
+        &[],
+        &[*b"locl", *b"ccmp"],
         NKO_SCRIPT_PRIORITY,
     );
 

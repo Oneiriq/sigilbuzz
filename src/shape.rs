@@ -1164,7 +1164,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 want_liga,
                 is_vertical,
                 seg.script_priority,
-                early_default_features(seg_arabic_active, seg.script),
+                early_default_features(seg_arabic_active, seg.script, dominant_script),
             );
         }
 
@@ -1625,10 +1625,9 @@ const fn is_common_for_segmentation(ch: char) -> bool {
 /// alternate-selector value.
 ///
 /// `early_features` is the part of `ccmp` + `locl` that has not run
-/// yet: the Arabic path runs both before its positional features, and
-/// the Indic and USE shapers run `locl` with their basic features.
-/// HarfBuzz runs the two in one stage, so their lookups interleave by
-/// lookup index.
+/// yet (see [`early_default_features`]): the Arabic path and several
+/// complex shapers run both first. HarfBuzz runs the two in one stage,
+/// so their lookups interleave by lookup index.
 #[allow(clippy::too_many_arguments)]
 fn run_default_gsub(
     gsub: &Gsub<'_>,
@@ -1701,7 +1700,7 @@ fn run_default_gsub(
 /// for one feature must interleave with another's keeps its intended
 /// order. Tags the caller disabled with a zero-valued [`Feature`] are
 /// skipped.
-fn apply_gsub_features_merged(
+pub(crate) fn apply_gsub_features_merged(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
     gdef: Option<&Gdef<'_>>,
@@ -1723,29 +1722,33 @@ fn apply_gsub_features_merged(
 }
 
 /// The part of `ccmp` + `locl` the default GSUB pass still has to run
-/// for a segment: the Arabic path already ran both, and the complex
-/// shapers that open their basic features with `locl` (Indic, Khmer,
-/// Myanmar, and the USE scripts on the full USE feature chain) already
-/// ran that one.
-fn early_default_features(arabic_ran: bool, script: Script) -> &'static [[u8; 4]] {
+/// for a segment. The Arabic path runs both ahead of its positional
+/// features, and so do the complex shapers HarfBuzz gives a `locl` +
+/// `ccmp` stage: Indic, Mongolian (when it is the dominant script),
+/// N'Ko, Khmer, Myanmar, and the scripts on the full USE feature
+/// chain. Running either again would apply its lookups twice.
+fn early_default_features(
+    arabic_ran: bool,
+    script: Script,
+    dominant: Option<Script>,
+) -> &'static [[u8; 4]] {
     const CCMP_LOCL: &[[u8; 4]] = &[*b"ccmp", *b"locl"];
-    const CCMP: &[[u8; 4]] = &[*b"ccmp"];
-    if arabic_ran {
+    if arabic_ran || shaper_ran_locl_and_ccmp(script, dominant) {
         &[]
-    } else if shaper_ran_locl(script) {
-        CCMP
     } else {
         CCMP_LOCL
     }
 }
 
-/// True when the segment's complex shaper already ran `locl` as one of
-/// its basic features.
-fn shaper_ran_locl(script: Script) -> bool {
+/// True when the segment's complex shaper already ran `locl` and
+/// `ccmp`.
+fn shaper_ran_locl_and_ccmp(script: Script, dominant: Option<Script>) -> bool {
     script.is_indic()
+        || (script == Script::Mongolian && dominant == Some(Script::Mongolian))
         || matches!(
             script,
-            Script::Khmer
+            Script::NKo
+                | Script::Khmer
                 | Script::Myanmar
                 | Script::Buginese
                 | Script::TaiTham
@@ -1760,6 +1763,33 @@ fn shaper_ran_locl(script: Script) -> bool {
                 | Script::Tirhuta
                 | Script::Modi
         )
+}
+
+/// Applies `locl` and `ccmp` as one stage, as the Indic and Mongolian
+/// shapers do before anything else, when that keeps one glyph per
+/// code point; those shapers index their glyphs by code point, so a
+/// length-changing `ccmp` has to wait until after their positional
+/// work. Returns whether the stage ran.
+pub(crate) fn apply_locl_ccmp_if_length_preserving(
+    gsub: &Gsub<'_>,
+    glyphs: &mut Vec<Glyph>,
+    gdef: Option<&Gdef<'_>>,
+    script_priority: &[[u8; 4]],
+) -> bool {
+    let mut trial = glyphs.clone();
+    apply_gsub_features_merged(
+        gsub,
+        &mut trial,
+        gdef,
+        &[],
+        &[*b"locl", *b"ccmp"],
+        script_priority,
+    );
+    if trial.len() != glyphs.len() {
+        return false;
+    }
+    *glyphs = trial;
+    true
 }
 
 /// GSUB feature tags that `shape()` already dispatches by name,
