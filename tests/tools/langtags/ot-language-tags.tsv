@@ -1,0 +1,684 @@
+# Microsoft OpenType Language System Tag registry
+# Source: https://learn.microsoft.com/en-us/typography/opentype/spec/languagetags
+# Retrieved: 2026-09-25
+tag	deprecated	name	iso639
+AAQ 	0	Eastern Abenaki	aaq
+ABA 	0	Abaza	abq
+ABK 	0	Abkhazian	abk
+ACH 	0	Acholi	ach
+ACR 	0	Achi	acr
+ACY 	0	Cypriot Arabic	acy
+ADY 	0	Adyghe	ady
+AFK 	0	Afrikaans	afr
+AFR 	0	Afar	aar
+AGW 	0	Agaw	ahg
+AIO 	0	Aiton	aio
+AKA 	0	Akan	aka, fat, twi
+AKB 	0	Batak Angkola	akb
+ALS 	0	Alsatian	gsw
+ALT 	0	Altai	atv, alt
+AMH 	0	Amharic	amh
+ANG 	0	Anglo-Saxon	ang
+APPH	0	Phonetic transcription—Americanist conventions	Cf. BCP 47 variant subtag “fonnapa” (see https://www.iana.org/assignments/lang-subtags-templates/fonnapa.txt)
+ARA 	0	Arabic	ara
+ARG 	0	Aragonese	arg
+ARI 	0	Aari	aiw
+ARK 	0	Rakhine	mhv, rmz, rki
+ASM 	0	Assamese	asm
+AST 	0	Asturian	ast
+ATH 	0	Athapaskan languages	aht, apa, apk, apj, apl, apm, apw, ath, bea, sek, bcr, caf, chp, clc, coq, crx, ctc, den, dgr, gce, gwi, haa, hoi, hup, ing, kkz, koy, ktw, kuu, mvb, nav, qwt, scs, srs, taa, tau, tcb, tce, tfn, tgx, tht, tol, ttm, tuu, txc, wlk, xup, xsl
+ATS 	0	Gros Ventre (Atsina)	ats
+AVN 	0	Avatime	avn
+AVR 	0	Avar	ava
+AWA 	0	Awadhi	awa
+AYM 	0	Aymara	aym
+AZB 	0	Torki	azb
+AZE 	0	Azerbaijani	aze
+BAD 	0	Badaga	bfq
+BAD0	0	Banda	bad, bbp, bfl, bjo, bpd, bqk, gox, kuw, liy, lna, lnl, mnh, nue, nuu, tor, yaj, zmz
+BAG 	0	Baghelkhandi	bfy
+BAL 	0	Balkar	krc
+BAN 	0	Balinese	ban
+BAR 	0	Bavarian	bar
+BAU 	0	Baulé	bci
+BBC 	0	Batak Toba	bbc
+BBR 	0	Berber	auj, ber, cnu, gha, gho, grr, jbe, jbn, kab, mzb, oua, rif, sds, shi, shy, siz, sjs, swn, taq, tez, thv, thz, tia, tjo, tmh, ttq, tzm, zen, zgh
+BCH 	0	Bench	bcq
+BCR 	0	Bible Cree	
+BDC 	0	Emberá-Baudó	bdc
+BDY 	0	Bandjalang	bdy
+BEL 	0	Belarusian	bel
+BEM 	0	Bemba	bem
+BEN 	0	Bangla	ben
+BGC 	0	Haryanvi	bgc
+BGQ 	0	Bagri	bgq
+BGR 	0	Bulgarian	bul
+BHI 	0	Bhili	bhi, bhb
+BHO 	0	Bhojpuri	bho
+BIK 	0	Bikol	bik, bhk, bcl, bto, cts, bln, fbl, lbl, rbl, ubl
+BIL 	0	Bilen	byn
+BIS 	0	Bislama	bis
+BJJ 	0	Kanauji	bjj
+BKF 	0	Blackfoot	bla
+BLI 	0	Baluchi	bal
+BLK 	0	Pa’o Karen	blk
+BLN 	0	Balante	bjt, ble
+BLT 	0	Balti	bft
+BMB 	0	Bambara (Bamanankan)	bam
+BML 	0	Bamileke	bai, bbj, bko, byv, fmp, jgo, nla, nnh, nnz, nwe, xmg, ybb
+BOS 	0	Bosnian	bos
+BPY 	0	Bishnupriya Manipuri	bpy
+BRE 	0	Breton	bre
+BRH 	0	Brahui	brh
+BRI 	0	Braj Bhasha	bra
+BRM 	0	Burmese	mya
+BRX 	0	Bodo	brx
+BSH 	0	Bashkir	bak
+BSK 	0	Burushaski	bsk
+BTD 	0	Batak Dairi (Pakpak)	btd
+BTI 	0	Beti	btb, beb, bum, bxp, eto, ewo, mct
+BTK 	0	Batak languages	akb, bbc, btd, btk, btm, bts, btx, btz
+BTM 	0	Batak Mandailing	btm
+BTS 	0	Batak Simalungun	bts
+BTX 	0	Batak Karo	btx
+BTZ 	0	Batak Alas-Kluet	btz
+BUG 	0	Bugis	bug
+BYV 	0	Medumba	byv
+CAK 	0	Kaqchikel	cak
+CAT 	0	Catalan	cat
+CAY 	0	Cayuga	cay
+CBG 	0	Chimila	cbg
+CBK 	0	Zamboanga Chavacano	cbk
+CCHN	0	Chinantec	cco, chj, chq, chz, cle, cnl, cnt, cpa, csa, cso, cte, ctl, cuc, cvn
+CEB 	0	Cebuano	ceb
+CGG 	0	Chiga	cgg
+CHA 	0	Chamorro	cha
+CHE 	0	Chechen	che
+CHG 	0	Chaha Gurage	sgw
+CHH 	0	Chattisgarhi	hne
+CHI 	0	Chichewa (Chewa, Nyanja)	nya
+CHK 	0	Chukchi	ckt
+CHK0	0	Chuukese	chk
+CHO 	0	Choctaw	cho
+CHP 	0	Chipewyan	chp
+CHR 	0	Cherokee	chr
+CHU 	0	Chuvash	chv
+CHY 	0	Cheyenne	chy
+CJA 	0	Western Cham	cja
+CJM 	0	Eastern Cham	cjm
+CMI 	0	Emberá-Chamí	cmi
+CMR 	0	Comorian	swb, wlc, wni, zdj
+COO 	0	Comox	coo
+COP 	0	Coptic	cop
+COR 	0	Cornish	cor
+COS 	0	Corsican	cos
+CPP 	0	Creoles	abs, acf, afs, aig, aoa, bah, bew, bis, bjs, bpl, bpq, brc, bxo, bzj, bzk, cbk, ccl, ccm, chn, cks, cpe, cpf, cpi, cpp, cri, crp, crs, dcr, dep, djk, fab, fng, fpe, gac, gcf, gcl, gcr, gib, goq, gpe, gul, gyn, hat, hca, hmo, hwc, icr, idb, ihb, jam, jvd, kcn, kea, kmv, kri, kww, lir, lou, lrt, max, mbf, mcm, mfe, mfp, mkn, mod, msi, mud, mzs, nag, nef, ngm, njt, onx, oor, pap, pcm, pea, pey, pga, pih, pis, pln, pml, pmy, pov, pre, rcf, rop, scf, sci, skw, srm, srn, sta, svc, tas, tch, tcs, tgh, tmg, tpi, trf, tvy, uln, vic, vkp, wes, xmm, ycr
+CRE 	0	Cree	cre
+CRR 	0	Carrier	crx, caf
+CRT 	0	Crimean Tatar	crh
+CSB 	0	Kashubian	csb
+CSL 	0	Church Slavonic	chu
+CSY 	0	Czech	ces
+CTG 	0	Chittagonian	ctg
+CTO 	0	Emberá-Catío	cto
+CTT 	0	Wayanad Chetti	ctt
+CUK 	0	San Blas Kuna	cuk
+DAG 	0	Dagbani	dag
+DAN 	0	Danish	dan
+DAR 	0	Dargwa	dar
+DAX 	0	Dayi	dax
+DCR 	0	Woods Cree	cwd
+DEU 	0	German	deu
+DGO 	0	Dogri (individual language)	dgo
+DGR 	0	Dogri (macrolanguage)	doi
+DHG 	0	Dhangu	dhg
+DHV 	1	Divehi (Dhivehi, Maldivian)	div
+DIQ 	0	Dimli	diq
+DIV 	0	Divehi (Dhivehi, Maldivian)	div
+DJR 	0	Zarma	dje
+DJR0	0	Djambarrpuyngu	djr
+DNG 	0	Dangme	ada
+DNJ 	0	Dan	dnj
+DNK 	0	Dinka	din
+DRI 	0	Dari	prs
+DUJ 	0	Dhuwal	duj, dwu, dwy
+DUN 	0	Dungan	dng
+DZN 	0	Dzongkha	dzo
+EBI 	0	Ebira	igb
+ECR 	0	Eastern Cree	crj, crl
+EDO 	0	Edo	bin
+EFI 	0	Efik	efi
+ELL 	0	Greek	ell
+EMK 	0	Eastern Maninkakan	emk
+EMP 	0	Northern Emberá	emp
+ENG 	0	English	eng
+ERZ 	0	Erzya	myv
+ESP 	0	Spanish	spa
+ESU 	0	Central Yupik	esu
+ETI 	0	Estonian	est
+EUQ 	0	Basque	eus
+EVK 	0	Evenki	evn
+EVN 	0	Even	eve
+EWE 	0	Ewe	ewe
+FAN 	0	French Antillean	acf
+FAN0	0	Fang	fan
+FAR 	0	Persian	fas
+FAT 	0	Fanti	fat
+FIN 	0	Finnish	fin
+FJI 	0	Fijian	fij
+FLE 	0	Dutch (Flemish)	vls
+FMP 	0	Fe’fe’	fmp
+FNE 	0	Forest Enets	enf
+FON 	0	Fon	fon
+FOS 	0	Faroese	fao
+FRA 	0	French	fra
+FRC 	0	Cajun French	frc
+FRI 	0	Frisian	fry
+FRL 	0	Friulian	fur
+FRP 	0	Arpitan	frp
+FTA 	0	Futa	fuf
+FUL 	0	Fulah	ful
+FUV 	0	Nigerian Fulfulde	fuv
+GAD 	0	Ga	gaa
+GAE 	0	Scottish Gaelic	gla
+GAG 	0	Gagauz	gag
+GAL 	0	Galician	glg
+GAR 	0	Garshuni	
+GAW 	0	Garhwali	gbm
+GEZ 	0	Geez	gez
+GIH 	0	Githabul	gih
+GIL 	0	Gilyak	niv
+GIL0	0	Kiribati (Gilbertese)	gil
+GKP 	0	Kpelle (Guinea)	gkp
+GLK 	0	Gilaki	glk
+GMZ 	0	Gumuz	guk
+GNN 	0	Gumatj	gnn
+GOG 	0	Gogo	gog
+GON 	0	Gondi	gon
+GRN 	0	Greenlandic	kal
+GRO 	0	Garo	grt
+GUA 	0	Guarani	grn
+GUC 	0	Wayuu	guc
+GUF 	0	Gupapuyngu	guf
+GUJ 	0	Gujarati	guj
+GUZ 	0	Gusii	guz
+HAI 	0	Haitian (Haitian Creole)	hat
+HAI0	0	Haida	hai, hax, hdn
+HAL 	0	Halam (Falam Chin)	cfm
+HAR 	0	Harauti	hoj
+HAU 	0	Hausa	hau
+HAW 	0	Hawaiian	haw
+HAY 	0	Haya	hay
+HAZ 	0	Hazaragi	haz
+HBN 	0	Hammer-Banna	amf
+HEI 	0	Heiltsuk	hei
+HER 	0	Herero	her
+HIL 	0	Hiligaynon	hil
+HIN 	0	Hindi	hin
+HMA 	0	High Mari	mrj
+HMD 	0	A-Hmao	hmd
+HMN 	0	Hmong	hmn
+HMO 	0	Hiri Motu	hmo
+HMZ 	0	Hmong Shuat	hmz
+HND 	0	Hindko	hno, hnd
+HO  	0	Ho	hoc
+HRI 	0	Harari	har
+HRV 	0	Croatian	hrv
+HUN 	0	Hungarian	hun
+HUR 	0	Halkomelem	hur
+HYE 	0	Armenian	hye, hyw
+HYE0	0	Armenian East	hye
+IBA 	0	Iban	iba
+IBB 	0	Ibibio	ibb
+IBO 	0	Igbo	ibo
+IDO 	0	Ido	ido
+IJO 	0	Ijo languages	iby, ijc, ije, ijn, ijo, ijs, nkx, okd, okr, orr
+ILE 	0	Interlingue	ile
+ILO 	0	Ilokano	ilo
+INA 	0	Interlingua	ina
+IND 	0	Indonesian	ind
+ING 	0	Ingush	inh
+INU 	0	Inuktitut	iku
+INUK	0	Nunavik Inuktitut	ike, iku
+IPK 	0	Inupiat	ipk
+IPPH	0	Phonetic transcription—IPA conventions	Cf. BCP 47 variant subtag “fonipa” (see https://www.iana.org/assignments/lang-subtags-templates/fonipa.txt)
+IRI 	0	Irish	gle
+IRT 	0	Irish Traditional	ghc, gle
+IRU 	0	Irula	iru
+ISL 	0	Icelandic	isl
+ISM 	0	Inari Sami	smn
+ITA 	0	Italian	ita
+IWR 	0	Hebrew	heb
+JAM 	0	Jamaican Creole	jam
+JAN 	0	Japanese	jpn
+JAV 	0	Javanese	jav
+JBO 	0	Lojban	jbo
+JCT 	0	Krymchak	jct
+JDT 	0	Judeo-Tat	jdt
+JII 	0	Yiddish	yid
+JUD 	0	Ladino	lad
+JUL 	0	Jula	dyu
+KAB 	0	Kabardian	kbd
+KAB0	0	Kabyle	kab
+KAC 	0	Kachchi	kfr
+KAL 	0	Kalenjin	kln
+KAN 	0	Kannada	kan
+KAR 	0	Karachay	krc
+KAT 	0	Georgian	kat
+KAW 	0	Kawi (Old Javanese)	kaw
+KAZ 	0	Kazakh	kaz
+KBC 	0	Kadiwéu	kbc
+KDE 	0	Makonde	kde
+KEA 	0	Kabuverdianu (Crioulo)	kea
+KEB 	0	Kebena	ktb
+KEK 	0	Kekchi	kek
+KGE 	0	Khutsuri Georgian	kat
+KGF 	0	Kube	kgf
+KHA 	0	Khakass	kjh
+KHK 	0	Khanty-Kazim	kca
+KHM 	0	Khmer	khm
+KHS 	0	Khanty-Shurishkar	kca
+KHT 	0	Khamti Shan	kht
+KHV 	0	Khanty-Vakhi	kca
+KHW 	0	Khowar	khw
+KIK 	0	Kikuyu (Gikuyu)	kik
+KIR 	0	Kirghiz (Kyrgyz)	kir
+KIS 	0	Kisii	kqs, kss
+KIU 	0	Kirmanjki	kiu
+KJD 	0	Southern Kiwai	kjd
+KJJ 	0	Khinalug	kjj
+KJP 	0	Eastern Pwo Karen	kjp
+KJZ 	0	Bumthangkha	kjz
+KKN 	0	Kokni	kex
+KLM 	0	Kalmyk	xal
+KMB 	0	Kamba	kam
+KMG 	0	Kâte	kmg
+KMN 	0	Kumaoni	kfy
+KMO 	0	Komo	kmw
+KMS 	0	Komso	kxc
+KMZ 	0	Khorasani Turkic	kmz
+KNR 	0	Kanuri	kau
+KOD 	0	Kodagu	kfa
+KOH 	0	Korean Old Hangul	kor, okm
+KOK 	0	Konkani	kok
+KOM 	0	Komi	kom
+KON 	0	Kikongo	ktu
+KON0	0	Kongo	kon
+KOP 	0	Komi-Permyak	koi
+KOR 	0	Korean	kor
+KOS 	0	Kosraean	kos
+KOZ 	0	Komi-Zyrian	kpv
+KPL 	0	Kpelle	kpe
+KRI 	0	Krio	kri
+KRK 	0	Karakalpak	kaa
+KRL 	0	Karelian	krl
+KRM 	0	Karaim	kdr
+KRN 	0	Karen	blk, bwe, eky, ghk, jkm, jkp, kar, kjp, kjt, ksw, kvl, kvq, kvt, kvu, kvy, kxf, kxk, kyu, pdu, pwo, pww, wea
+KRT 	0	Koorete	kqy
+KSH 	0	Kashmiri	kas
+KSH0	0	Ripuarian	ksh
+KSI 	0	Khasi	kha
+KSM 	0	Kildin Sami	sjd
+KSU 	0	Khamyang	ksu
+KSW 	0	S’gaw Karen	ksw
+KUA 	0	Kuanyama	kua
+KUI 	0	Kui	kxu
+KUL 	0	Kulvi	kfx
+KUM 	0	Kumyk	kum
+KUR 	0	Kurdish	kur
+KUU 	0	Kurukh	kru
+KUY 	0	Kuy	kdt
+KVQ 	0	Geba Karen	kvq
+KWK 	0	Kwakʼwala	kwk
+KYK 	0	Koryak	kpy
+KYU 	0	Western Kayah	kyu
+LAD 	0	Ladin	lld
+LAH 	0	Lahuli	bfu
+LAK 	0	Lak	lbe
+LAM 	0	Lambani	lmn
+LAO 	0	Lao	lao
+LAT 	0	Latin	lat
+LAZ 	0	Laz	lzz
+LCR 	0	L-Cree	crm
+LDK 	0	Ladakhi	lbj
+LEF 	0	Lelemi	lef
+LEZ 	0	Lezgi	lez
+LIJ 	0	Ligurian	lij
+LIM 	0	Limburgish	lim
+LIN 	0	Lingala	lin
+LIS 	0	Lisu	lis
+LIV 	0	Liv	liv
+LJP 	0	Lampung	ljp
+LKI 	0	Laki	lki
+LMA 	0	Low Mari	mhr
+LMB 	0	Limbu	lif
+LMO 	0	Lombard	lmo
+LMW 	0	Lomwe	ngl
+LOM 	0	Loma	lom
+LPO 	0	Lipo	lpo
+LRC 	0	Luri	lrc, luz, bqi, zum
+LSB 	0	Lower Sorbian	dsb
+LSM 	0	Lule Sami	smj
+LTH 	0	Lithuanian	lit
+LTZ 	0	Luxembourgish	ltz
+LUA 	0	Luba-Lulua	lua
+LUB 	0	Luba-Katanga	lub
+LUG 	0	Ganda	lug
+LUH 	0	Luyia	luy
+LUO 	0	Luo	luo
+LUT 	0	Lushootseed	lut
+LVI 	0	Latvian	lav
+MAD 	0	Madura	mad
+MAG 	0	Magahi	mag
+MAH 	0	Marshallese	mah
+MAJ 	0	Majang	mpe
+MAK 	0	Makhuwa	vmw
+MAL 	0	Malayalam	mal
+MAM 	0	Mam	mam
+MAN 	0	Mansi	mns
+MAP 	0	Mapudungun	arn
+MAR 	0	Marathi	mar
+MAW 	0	Marwari	mwr, dhd, rwr, mve, wry, mtr, swv
+MBN 	0	Mbundu	kmb
+MBO 	0	Mbo	mbo
+MCH 	0	Manchu	mnc
+MCR 	0	Moose Cree	crm
+MDE 	0	Mende	men
+MDR 	0	Mandar	mdr
+MEN 	0	Me’en	mym
+MER 	0	Meru	mer
+MEV 	0	Mano	mev
+MFA 	0	Pattani Malay	mfa
+MFE 	0	Morisyen	mfe
+MIN 	0	Minangkabau	min
+MIZ 	0	Mizo	lus
+MKD 	0	Macedonian	mkd
+MKR 	0	Makasar	mak
+MKW 	0	Kituba	mkw
+MLE 	0	Male	mdy
+MLG 	0	Malagasy	mlg
+MLN 	0	Malinke	mlq
+MLR 	0	Malayalam Reformed	mal
+MLY 	0	Malay	msa
+MND 	0	Mandinka	mnk
+MNG 	0	Mongolian	mon
+MNI 	0	Manipuri	mni
+MNK 	0	Maninka	man, mnk, myq, mku, msc, emk, mwk, mlq
+MNX 	0	Manx	glv
+MOH 	0	Mohawk	moh
+MOK 	0	Moksha	mdf
+MOL 	0	Moldavian	mol
+MON 	0	Mon	mnw
+MONT	0	Thailand Mon	mnw
+MOR 	0	Moroccan	
+MOS 	0	Mossi	mos
+MRI 	0	Maori	mri
+MTH 	0	Maithili	mai
+MTS 	0	Maltese	mlt
+MUN 	0	Mundari	unr
+MUS 	0	Muscogee	mus
+MWL 	0	Mirandese	mwl
+MWW 	0	Hmong Daw	mww
+MYN 	0	Mayan	acr, agu, caa, cac, cak, chf, ckz, cob, ctu, emy, hus, itz, ixl, jac, kek, kjb, knj, lac, mam, mhc, mop, myn, poc, poh, quc, qum, quv, toj, ttc, tzh, tzj, tzo, usp, yua
+MZN 	0	Mazanderani	mzn
+NAG 	0	Naga-Assamese	nag
+NAH 	0	Nahuatl	azd, azn, azz, nah, naz, nch, nci, ncj, ncl, ncx, ngu, nhc, nhe, nhg, nhi, nhk, nhm, nhn, nhp, nhq, nht, nhv, nhw, nhx, nhy, nhz, nlv, npl, nsu, nuz
+NAN 	0	Nanai	gld
+NAP 	0	Neapolitan	nap
+NAS 	0	Naskapi	nsk
+NAU 	0	Nauruan	nau
+NAV 	0	Navajo	nav
+NCR 	0	N-Cree	csw
+NDB 	0	Ndebele	nbl, nde
+NDC 	0	Ndau	ndc
+NDG 	0	Ndonga	ndo
+NDS 	0	Low Saxon	nds
+NEP 	0	Nepali	nep
+NEW 	0	Newari	new
+NGA 	0	Ngbaka	nga
+NGR 	0	Nagari	
+NHC 	0	Norway House Cree	csw
+NIS 	0	Nisi	dap, njz, tgj
+NIU 	0	Niuean	niu
+NKL 	0	Nyankole	nyn
+NKO 	0	N’Ko	nqo
+NLD 	0	Dutch	nld
+NOE 	0	Nimadi	noe
+NOG 	0	Nogai	nog
+NOP 	0	Numanggang	nop
+NOR 	0	Norwegian	nob
+NOV 	0	Novial	nov
+NSM 	0	Northern Sami	sme
+NSO 	0	Northern Sotho	nso
+NTA 	0	Northern Tai	nod
+NTO 	0	Esperanto	epo
+NUK 	0	Nuu-chah-nulth	nuk
+NYM 	0	Nyamwezi	nym
+NYN 	0	Norwegian Nynorsk (Nynorsk, Norwegian)	nno
+NZA 	0	Mbembe Tigon	nza
+OCI 	0	Occitan	oci
+OCR 	0	Oji-Cree	ojs
+OJB 	0	Ojibway	oji
+ONE 	0	Oneida	one
+ONO 	0	Onondaga	ono
+ORI 	0	Odia	ori
+ORO 	0	Oromo	orm
+OSS 	0	Ossetian	oss
+PAA 	0	Palestinian Aramaic	sam
+PAG 	0	Pangasinan	pag
+PAL 	0	Pali	pli
+PAM 	0	Pampangan	pam
+PAN 	0	Punjabi	pan
+PAP 	0	Palpa	plp
+PAP0	0	Papiamentu	pap
+PAS 	0	Pashto	pus
+PAU 	0	Palauan	pau
+PCC 	0	Bouyei	pcc
+PCD 	0	Picard	pcd
+PDC 	0	Pennsylvania German	pdc
+PGR 	0	Polytonic Greek	ell
+PHK 	0	Phake	phk
+PIH 	0	Norfolk	pih
+PIL 	0	Filipino	fil
+PLG 	0	Palaung	pce, rbb, pll
+PLG0	0	Pilagá	plg
+PLK 	0	Polish	pol
+PMS 	0	Piemontese	pms
+PNB 	0	Western Panjabi	pnb
+POH 	0	Pocomchi	poh
+PON 	0	Pohnpeian	pon
+PRO 	0	Provençal / Old Provençal	pro
+PTG 	0	Portuguese	por
+PWO 	0	Western Pwo Karen	pwo
+QIN 	0	Chin	bgr, biu, cek, cey, cfm, cbl, cka, ckn, clj, clt, cmr, cnb, cnh, cnk, cnw, csh, csj, csv, csy, ctd, cth, czt, dao, gnb, hlt, hmr, hra, lus, mrh, mwq, pck, pkh, pub, ral, rtc, sch, sez, shl, smt, tcp, tcz, vap, weu, zom, zyp
+QUC 	0	K’iche’	quc
+QUH 	0	Quechua (Bolivia)	quh
+QUZ 	0	Quechua	quz
+QVI 	0	Quechua (Ecuador)	qvi
+QWH 	0	Quechua (Peru)	qwh
+RAJ 	0	Rajasthani	raj
+RAR 	0	Rarotongan	rar
+RBU 	0	Russian Buriat	bxr
+RCR 	0	R-Cree	atj
+REJ 	0	Rejang	rej
+RIA 	0	Riang	ria
+RHG 	0	Rohingya	rhg
+RIF 	0	Tarifit	rif
+RIT 	0	Ritarungo	rit
+RKW 	0	Arakwal	rkw
+RMS 	0	Romansh	roh
+RMY 	0	Vlax Romani	rmy
+ROM 	0	Romanian	ron
+ROY 	0	Romany	rom
+RSY 	0	Rusyn	rue
+RTM 	0	Rotuman	rtm
+RUA 	0	Kinyarwanda	kin
+RUN 	0	Rundi	run
+RUP 	0	Aromanian	rup
+RUS 	0	Russian	rus
+SAD 	0	Sadri	sck
+SAN 	0	Sanskrit	san
+SAS 	0	Sasak	sas
+SAT 	0	Santali	sat
+SAY 	0	Sayisi	chp
+SCN 	0	Sicilian	scn
+SCO 	0	Scots	sco
+SCS 	0	North Slavey	scs
+SEE 	0	Seneca	see
+SEK 	0	Sekota	xan
+SEL 	0	Selkup	sel
+SFM 	0	Small Flowery Miao	sfm
+SGA 	0	Old Irish	mga, sga
+SGO 	0	Sango	sag
+SGS 	0	Samogitian	sgs
+SHI 	0	Tachelhit	shi
+SHN 	0	Shan	shn
+SIB 	0	Sibe	sjo
+SID 	0	Sidamo	sid
+SIG 	0	Silte Gurage	xst, stv, wle
+SJA 	0	Epena	sja
+SJE 	0	Pite Sami	sje
+SJU 	0	Ume Sami	sju
+SKS 	0	Skolt Sami	sms
+SKY 	0	Slovak	slk
+SLA 	0	Slavey	den, scs, xsl
+SLV 	0	Slovenian	slv
+SML 	0	Somali	som
+SMO 	0	Samoan	smo
+SNA 	0	Sena	seh
+SNA0	0	Shona	sna
+SND 	0	Sindhi	snd
+SNH 	0	Sinhala (Sinhalese)	sin
+SNK 	0	Soninke	snk
+SOG 	0	Sodo Gurage	gru
+SOP 	0	Songe	sop
+SOT 	0	Southern Sotho	sot
+SQI 	0	Albanian	sqi
+SRB 	0	Serbian	cnr, srp
+SRD 	0	Sardinian	srd
+SRK 	0	Saraiki	skr
+SRR 	0	Serer	srr
+SSL 	0	South Slavey	xsl
+SSM 	0	Southern Sami	sma
+STR 	0	Straits Salish	str
+STQ 	0	Saterland Frisian	stq
+SUK 	0	Sukuma	suk
+SUN 	0	Sundanese	sun
+SUR 	0	Suri	suq
+SVA 	0	Svan	sva
+SVE 	0	Swedish	swe
+SWA 	0	Swadaya Aramaic	aii
+SWK 	0	Swahili	swa
+SWZ 	0	Swati	ssw
+SXT 	0	Sutu	ngo, xnj, xnq
+SXU 	0	Upper Saxon	sxu
+SYL 	0	Sylheti	syl
+SYR 	0	Syriac	aii, amw, cld, syc, syr, tru
+SYRE	0	Syriac, Estrangela script-variant (equivalent to ISO 15924 'Syre')	syc, syr
+SYRJ	0	Syriac, Western script-variant (equivalent to ISO 15924 'Syrj')	syc, syr
+SYRN	0	Syriac, Eastern script-variant (equivalent to ISO 15924 'Syrn')	syc, syr
+SZL 	0	Silesian	szl
+TAB 	0	Tabasaran	tab
+TAJ 	0	Tajiki	tgk
+TAM 	0	Tamil	tam
+TAQ 	0	Tamasheq	taq
+TAT 	0	Tatar	tat
+TBV 	0	Tobo	tbv
+TCR 	0	TH-Cree	cwd
+TDC 	0	Emberá-Tadó	tdc
+TDD 	0	Dehong Dai	tdd
+TEL 	0	Telugu	tel
+TET 	0	Tetum	tet
+TGL 	0	Tagalog	tgl
+TGN 	0	Tongan	ton
+TGR 	0	Tigre	tig
+TGY 	0	Tigrinya	tir
+THA 	0	Thai	tha
+THT 	0	Tahitian	tah
+THP 	0	Thompson	thp
+THV 	0	Tahaggart Tamahaq	thv
+THZ 	0	Tayart Tamajeq	thz
+TIB 	0	Tibetan	bod
+TIV 	0	Tiv	tiv
+TJL 	0	Tai Laing	tjl
+TKM 	0	Turkmen	tuk
+TLI 	0	Tlingit	tli
+TMH 	0	Tamashek	taq, thv, thz, tmh, ttq
+TLY 	0	Talysh	tly
+TMN 	0	Temne	tem
+TNA 	0	Tswana	tsn
+TNE 	0	Tundra Enets	enh
+TNG 	0	Tonga	toi
+TOD 	0	Todo	xal
+TOD0	0	Toma	tod
+TPI 	0	Tok Pisin	tpi
+TRK 	0	Turkish	tur
+TSG 	0	Tsonga	tso
+TSJ 	0	Tshangla	tsj
+TTQ 	0	Tawallammat Tamajaq	ttq
+TUA 	0	Turoyo Aramaic	tru
+TUL 	0	Tulu	tcy
+TUM 	0	Tumbuka	tum
+TUS 	0	Tuscarora	tus
+TUV 	0	Tuvin	tyv
+TVL 	0	Tuvalu	tvl
+TWI 	0	Twi	twi
+TYZ 	0	Tày	tyz
+TZM 	0	Tamazight	tzm
+TZO 	0	Tzotzil	tzo
+UDI 	0	Udi	udi
+UDM 	0	Udmurt	udm
+UKR 	0	Ukrainian	ukr
+UMB 	0	Umbundu	umb
+UPPH	0	Uralic Phonetic Alphabet	Cf. BCP 47 variant subtag “fonupa” (see https://www.iana.org/assignments/lang-subtags-templates/fonupa.txt)
+URD 	0	Urdu	urd
+USB 	0	Upper Sorbian	hsb
+UYG 	0	Uyghur	uig
+UZB 	0	Uzbek	uzb
+VEC 	0	Venetian	vec
+VEN 	0	Venda	ven
+VIT 	0	Vietnamese	vie
+VOL 	0	Volapük	vol
+VRO 	0	Võro	vro
+WA  	0	Wa	wbm
+WAG 	0	Wagdi	wbr
+WAR 	0	Waray-Waray	war
+WBL 	0	Wakhi	wbl
+WCI 	0	Waci Gbe	wci
+WCR 	0	West-Cree	crk
+WDT 	0	Wendat	wdt
+WEL 	0	Welsh	cym
+WLF 	0	Wolof	wol
+WLN 	0	Walloon	wln
+WTM 	0	Mewati	wtm
+WYN 	0	Wyandot	wyn
+XBD 	0	Lü	khb
+XHS 	0	Xhosa	xho
+XJB 	0	Minjangbal	xjb
+XKF 	0	Khengkha	xkf
+XOG 	0	Soga	xog
+XPE 	0	Kpelle (Liberia)	xpe
+XUB 	0	Bette Kuruma	xub
+XUJ 	0	Jennu Kuruma	xuj
+YAK 	0	Sakha	sah
+YAO 	0	Yao	yao
+YAP 	0	Yapese	yap
+YBA 	0	Yoruba	yor
+YCR 	0	Y-Cree	crj, crk, crl
+YGP 	0	Gepo	ygp
+YIC 	0	Yi Classic	
+YIM 	0	Yi Modern	iii
+YNA 	0	Aluo	yna
+YUF 	0	Havasupai-Walapai-Yavapai	yuf
+YWQ 	0	Wuding-Luquan Yi	ywq
+ZEA 	0	Zealandic	zea
+ZGH 	0	Standard Moroccan Tamazight	zgh
+ZHA 	0	Zhuang	zha
+ZHH 	0	Chinese, Traditional, Hong Kong SAR	zho
+ZHP 	0	Chinese, Phonetic	zho
+ZHS 	0	Chinese, Simplified	zho
+ZHT 	0	Chinese, Traditional	zho
+ZHTM	0	Chinese, Traditional, Macao SAR	zho
+ZND 	0	Zande	zne
+ZUL 	0	Zulu	zul
+ZZA 	0	Zazaki	zza

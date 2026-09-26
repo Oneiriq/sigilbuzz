@@ -58,6 +58,18 @@ signatures only change in a major version.
 
   The deep `ot::*` and `unicode::*` paths stay hidden (Tier 2). Only the names above
   are stable.
+- Added in 0.22.0, so that a buffer's script, language, and surrounding text reach
+  shaping:
+  - `Language`: a normalized BCP 47 tag (`Language::{new, as_str,
+    ot_language_tags}`), mapped to OpenType language system tags by a table generated
+    from the OpenType language tag registry
+  - `Buffer::{set_script, script}`: shape the whole buffer as one script
+  - `Buffer::{set_language, language}`: select the OpenType language system
+  - `Buffer::{set_pre_context, pre_context, set_post_context, post_context}` and
+    `Buffer::CONTEXT_LENGTH`: text around the run that cursive joining consults
+  - `UnicodeScript::{iso15924_tag, from_iso15924_tag, horizontal_direction}` and
+    `Direction::horizontal_for_script`: ISO 15924 codes and each script's horizontal
+    direction
 
 `sigilbuzz-render`:
 

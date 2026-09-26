@@ -197,6 +197,19 @@ pub struct Buffer {
     /// text was set without bidi reordering, and invalidated by any
     /// other text mutation.
     pub(crate) bidi_map: Option<crate::bidi_map::BidiMap>,
+    /// Script the whole buffer shapes as, set by
+    /// [`Buffer::set_script`]. `None` segments the text into script
+    /// runs. Accessors live in `buffer_props.rs`.
+    pub(crate) script: Option<Script>,
+    /// BCP 47 language selecting the OpenType language system, set by
+    /// [`Buffer::set_language`].
+    pub(crate) language: Option<crate::language::Language>,
+    /// Up to [`Buffer::CONTEXT_LENGTH`] characters that precede the
+    /// text in the source, set by [`Buffer::set_pre_context`].
+    pub(crate) pre_context: String,
+    /// Up to [`Buffer::CONTEXT_LENGTH`] characters that follow the
+    /// text in the source, set by [`Buffer::set_post_context`].
+    pub(crate) post_context: String,
 }
 
 impl Buffer {
@@ -343,14 +356,18 @@ impl Buffer {
     }
 
     /// Clears the text and resets direction to the unset LTR default.
-    /// Other future state (script, language, user data) will reset
-    /// here too.
+    /// Like HarfBuzz's `hb_buffer_clear_contents`, this also forgets
+    /// the script, language, and pre- and post-context.
     pub fn clear(&mut self) {
         self.text.clear();
         self.direction = Direction::Ltr;
         self.direction_explicit = false;
         self.normalize_nfc = false;
         self.bidi_map = None;
+        self.script = None;
+        self.language = None;
+        self.pre_context.clear();
+        self.post_context.clear();
     }
 
     /// True when no text has been pushed.

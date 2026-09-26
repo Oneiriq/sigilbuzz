@@ -13,6 +13,7 @@ pub mod bidi_class;
 pub mod indic_category;
 pub mod joining;
 pub mod normalize;
+mod script_tags;
 pub mod use_category;
 
 /// Coarse script classification.
