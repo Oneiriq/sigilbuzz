@@ -117,6 +117,7 @@ mod hmtx;
 mod hvar;
 mod instance;
 mod layout;
+mod lookup_list;
 mod sfnt;
 mod util;
 mod varc;

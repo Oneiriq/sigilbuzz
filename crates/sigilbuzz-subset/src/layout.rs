@@ -365,11 +365,12 @@ pub(crate) fn build_gsub(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
         return None;
     }
 
-    Some(assemble_layout_table(
+    assemble_layout_table(
         &new_scripts,
         &new_features.bytes,
         &new_lookups,
-    ))
+        sigilbuzz::tables::gsub::lookup_type::EXTENSION,
+    )
 }
 
 /// Drives the GPOS rewrite, same two-phase shape as [`build_gsub`].
@@ -473,11 +474,12 @@ pub(crate) fn build_gpos(face: &Face<'_>, ctx: &RewriterCtx) -> Option<Vec<u8>> 
         return None;
     }
 
-    Some(assemble_layout_table(
+    assemble_layout_table(
         &new_scripts,
         &new_features.bytes,
         &new_lookups,
-    ))
+        sigilbuzz::tables::gpos::lookup_type::EXTENSION,
+    )
 }
 
 /// Builds an `Option<u16>` array indexed by old lookup index. `Some(n)`
@@ -756,12 +758,17 @@ fn encode_langsys(ls: &RewrittenLangSys) -> Vec<u8> {
 }
 
 /// Assembles a complete GSUB or GPOS table (their headers are
-/// identical). Builds the LookupList around the rewritten lookups.
+/// identical). Builds the LookupList around the rewritten lookups
+/// through [`crate::lookup_list::emit`], which falls back to Extension
+/// lookups (`extension_type`: 7 for GSUB, 9 for GPOS) when the lookups
+/// outgrow 16-bit offsets. Returns `None` when the header offsets
+/// themselves cannot fit.
 fn assemble_layout_table(
     script_list: &[u8],
     feature_list: &[u8],
     lookups: &[RewrittenLookup],
-) -> Vec<u8> {
+    extension_type: u16,
+) -> Option<Vec<u8>> {
     // GSUB/GPOS header (v1.0):
     //   u16 majorVersion = 1
     //   u16 minorVersion = 0
@@ -770,8 +777,9 @@ fn assemble_layout_table(
     //   Offset16 lookupListOffset
     let header_len: u16 = 10;
     let script_list_off = header_len;
-    let feature_list_off = script_list_off + script_list.len() as u16;
-    let lookup_list_off = feature_list_off + feature_list.len() as u16;
+    let feature_list_off = u16::try_from(usize::from(header_len) + script_list.len()).ok()?;
+    let lookup_list_off = u16::try_from(usize::from(feature_list_off) + feature_list.len()).ok()?;
+    let lookup_list = crate::lookup_list::emit(lookups, extension_type)?;
 
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes());
@@ -781,47 +789,8 @@ fn assemble_layout_table(
     out.extend_from_slice(&lookup_list_off.to_be_bytes());
     out.extend_from_slice(script_list);
     out.extend_from_slice(feature_list);
-
-    // LookupList:
-    //   u16 lookupCount
-    //   Offset16 lookupOffsets[lookupCount]
-    //   Lookup[] bodies
-    let lookup_list_start = out.len();
-    out.extend_from_slice(&(lookups.len() as u16).to_be_bytes());
-    let offsets_start = out.len();
-    for _ in 0..lookups.len() {
-        out.extend_from_slice(&0u16.to_be_bytes());
-    }
-    for (i, lookup) in lookups.iter().enumerate() {
-        let body_start = out.len();
-        let rel = (body_start - lookup_list_start) as u16;
-        let slot = offsets_start + i * 2;
-        out[slot..slot + 2].copy_from_slice(&rel.to_be_bytes());
-        // Lookup header:
-        //   u16 lookupType
-        //   u16 lookupFlag
-        //   u16 subtableCount
-        //   Offset16 subtableOffsets[subtableCount]
-        //   (u16 markFilteringSet, only if flag bit set)
-        out.extend_from_slice(&lookup.lookup_type.to_be_bytes());
-        out.extend_from_slice(&lookup.lookup_flag.to_be_bytes());
-        out.extend_from_slice(&(lookup.subtables.len() as u16).to_be_bytes());
-        let sub_offsets_start = out.len();
-        for _ in 0..lookup.subtables.len() {
-            out.extend_from_slice(&0u16.to_be_bytes());
-        }
-        if let Some(mfs) = lookup.mark_filtering_set {
-            out.extend_from_slice(&mfs.to_be_bytes());
-        }
-        for (j, sub) in lookup.subtables.iter().enumerate() {
-            let sub_start = out.len();
-            let rel = (sub_start - body_start) as u16;
-            let slot = sub_offsets_start + j * 2;
-            out[slot..slot + 2].copy_from_slice(&rel.to_be_bytes());
-            out.extend_from_slice(&sub.bytes);
-        }
-    }
-    out
+    out.extend_from_slice(&lookup_list);
+    Some(out)
 }
 
 // === Byte-level helpers used by the rewriters and the closure walker. ===
