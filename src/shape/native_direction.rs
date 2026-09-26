@@ -121,6 +121,8 @@ pub(super) fn reverse_graphemes(run: Run<'_>, cont: &[bool], level: ClusterLevel
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::String;
+
     use super::*;
 
     #[test]
