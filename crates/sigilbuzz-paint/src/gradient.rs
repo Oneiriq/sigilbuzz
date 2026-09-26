@@ -3,11 +3,10 @@
 //! sigilbuzz exposes the COLRv1 color line as palette indices + raw
 //! coordinates. The evaluator turns those into the float-channel
 //! gradients consumers actually want: palette entries already
-//! resolved, alpha already multiplied, geometry already transformed
-//! through the active design-unit space (transform composition is the
-//! consumer's job since they may want to defer it for hardware-driven
-//! pipelines, so the gradient still ships in the pre-transform paint
-//! frame and the matching `Transform2D` is part of `DrawCmd`).
+//! resolved and alpha already multiplied. Geometry stays in the
+//! paint's own design-unit frame. The matching `Transform2D` ships in
+//! the surrounding `DrawCmd`, so consumers can apply it on the CPU or
+//! defer it to a hardware pipeline.
 
 use alloc::vec::Vec;
 
@@ -55,16 +54,17 @@ impl From<sigilbuzz::tables::colr::Extend> for Extend {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GradientKind {
     /// Linear gradient between two endpoints. The third point in the
-    /// COLRv1 record (`p2`) anchors the gradient line's rotation; the
-    /// evaluator has already folded it into `p0` / `p1`.
+    /// COLRv1 record (`p2`) sets the rotation of the gradient's color
+    /// bands. The evaluator passes all three points through unchanged.
     Linear {
         /// Start point.
         p0: (f32, f32),
         /// End point.
         p1: (f32, f32),
-        /// Rotation anchor. Renderers using the projected-line
-        /// formulation can ignore it; renderers using the spec's
-        /// "rotate the line through p2" formulation need it.
+        /// Rotation anchor. The spec's effective end point is `p1`
+        /// projected onto the line through `p0` that is perpendicular
+        /// to the line from `p0` to `p2`. [`linear_gradient_end`]
+        /// computes it.
         p2: (f32, f32),
     },
     /// Two-circle radial gradient. `t = 0` rides the inner circle,
@@ -89,6 +89,34 @@ pub enum GradientKind {
         /// End angle in radians.
         end_angle: f32,
     },
+}
+
+/// Returns the effective end point of a COLRv1 linear gradient: `p1`
+/// moved along the direction from `p0` to `p2` until the line from
+/// `p0` to it is perpendicular to that direction. The color bands run
+/// parallel to the line from `p0` to `p2`, so a plain two-point
+/// gradient from `p0` to the returned point paints the same colors in
+/// the gradient's own coordinate space. When `p2` equals `p0` the
+/// direction is undefined and `p1` comes back unchanged, as in
+/// HarfBuzz.
+///
+/// ```
+/// use sigilbuzz_paint::linear_gradient_end;
+///
+/// // Bands along the diagonal pull the end point onto the other one.
+/// let end = linear_gradient_end((0.0, 0.0), (100.0, 0.0), (100.0, 100.0));
+/// assert_eq!(end, (50.0, -50.0));
+/// ```
+#[must_use]
+pub fn linear_gradient_end(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32)) -> (f32, f32) {
+    let (q1x, q1y) = (p1.0 - p0.0, p1.1 - p0.1);
+    let (q2x, q2y) = (p2.0 - p0.0, p2.1 - p0.1);
+    let len_sq = q2x * q2x + q2y * q2y;
+    if len_sq <= f32::EPSILON {
+        return p1;
+    }
+    let k = (q1x * q2x + q1y * q2y) / len_sq;
+    (p1.0 - k * q2x, p1.1 - k * q2y)
 }
 
 /// Resolved gradient: shape + stops + extend mode.

@@ -17,8 +17,9 @@
 //!   references with a visited-set so cyclic DAGs terminate.
 //!
 //! The walker never panics on malformed input. A bad sub-offset, an
-//! unknown paint format, or a cycle truncates the [`DrawCmd`] stream;
-//! it never produces a partially-constructed paint.
+//! unknown paint format, a cycle, or a paint graph that expands past a
+//! fixed work budget truncates the [`DrawCmd`] stream. It never
+//! produces a partially-constructed paint.
 //!
 //! ```no_run
 //! use sigilbuzz::Face;
@@ -53,7 +54,9 @@ mod gradient;
 mod transform;
 
 pub use color::Color;
-pub use eval::{evaluate, evaluate_at_coords, DrawCmd, GlyphId, PaintSource};
-pub use gradient::{ColorStop, Extend, Gradient, GradientKind};
+pub use eval::{
+    evaluate, evaluate_at_coords, evaluate_with_palette, DrawCmd, GlyphId, PaintSource,
+};
+pub use gradient::{linear_gradient_end, ColorStop, Extend, Gradient, GradientKind};
 pub use sigilbuzz::tables::colr::CompositeMode;
 pub use transform::Transform2D;

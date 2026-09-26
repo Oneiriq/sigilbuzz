@@ -43,8 +43,9 @@ impl Vhea {
         let major = r.read_u16()?;
         let minor = r.read_u16()?;
         // OpenType ships 1.0 (legacy) and 1.1; Apple ships 1.0. We
-        // accept any (major=1, minor in {0, 1}) because the field
-        // layout through numberOfLongVerMetrics is identical.
+        // accept major 1 with minor 0, 1, or 0x1000 (1.1 stored as the
+        // Fixed value 0x00011000) because the field layout through
+        // numberOfLongVerMetrics is identical.
         if major != 1 || (minor != 0 && minor != 1 && minor != 0x1000) {
             return Err(Error::Malformed {
                 offset: 0,

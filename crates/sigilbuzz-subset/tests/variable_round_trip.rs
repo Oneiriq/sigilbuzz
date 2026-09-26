@@ -14,7 +14,7 @@
 //! load. It carries a single `wght` axis spanning 300..900.
 
 use sigilbuzz::tables::tag;
-use sigilbuzz::{Blob, Face};
+use sigilbuzz::{shape, Blob, Buffer, Face, Font};
 use sigilbuzz_subset::{subset, SubsetInput};
 
 const RUBIK: &[u8] = include_bytes!("../../../tests/fixtures/rubik_vf.ttf");
@@ -194,4 +194,49 @@ fn variable_subset_is_deterministic() {
     let a = subset(&face, &input).unwrap();
     let b = subset(&face, &input).unwrap();
     assert_eq!(a.bytes, b.bytes);
+}
+
+/// Synthetic variable font whose (A, V) kern pair tightens by 100
+/// units at wght=900 through a GPOS VariationIndex and the GDEF
+/// ItemVariationStore. It also has an unkerned "B".
+const VAR_KERN: &[u8] = include_bytes!("../../../tests/fixtures/var_kern.ttf");
+
+/// Shapes "AV" in `font_bytes` at the normalized wght `coord`.
+fn av_advances(font_bytes: &[u8], coord: f32) -> Vec<i32> {
+    let face = Face::parse_bytes(font_bytes, 0).unwrap();
+    let coords = [coord];
+    let font = Font::new(face, 1000.0).with_coords(&coords);
+    let mut buffer = Buffer::new();
+    buffer.push_str("AV");
+    let shaped = shape(&font, &buffer, &[]).unwrap();
+    shaped.glyphs.iter().map(|g| g.x_advance).collect()
+}
+
+#[test]
+fn kern_variation_survives_a_subset_that_drops_a_glyph() {
+    // Dropping B makes the subsetter rewrite GPOS and GDEF. The kern
+    // pair's VariationIndex must still reach the variation store.
+    let face = Face::parse_bytes(VAR_KERN, 0).unwrap();
+    let input = SubsetInput {
+        gids: vec![cmap_lookup(&face, 'A'), cmap_lookup(&face, 'V')],
+        ..Default::default()
+    };
+    let out = subset(&face, &input).unwrap();
+    assert_eq!(out.gid_map.len(), 3, "B is dropped");
+
+    let subset_face = Face::parse_bytes(&out.bytes, 0).unwrap();
+    let gdef = subset_face.gdef().unwrap().expect("GDEF kept");
+    assert!(
+        gdef.item_variation_store().is_some(),
+        "variation store kept"
+    );
+
+    for coord in [0.0, 0.5, 1.0] {
+        assert_eq!(
+            av_advances(&out.bytes, coord),
+            av_advances(VAR_KERN, coord),
+            "coord {coord}"
+        );
+    }
+    assert_eq!(av_advances(&out.bytes, 1.0), [400, 500]);
 }

@@ -28,17 +28,20 @@ pub fn build(sfnt_version: u32, tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
     let mut sorted: Vec<&([u8; 4], Vec<u8>)> = tables.iter().collect();
     sorted.sort_by_key(|(t, _)| *t);
 
+    // Callers pass at most one table per source directory entry, and a
+    // directory holds at most `u16::MAX` entries.
     let num_tables = sorted.len() as u16;
     // Spec searchRange / entrySelector / rangeShift derivation. The
     // values are informational only (every modern SFNT consumer
-    // ignores them), but emit them correctly anyway.
+    // ignores them), but emit them correctly anyway. The power of two
+    // is tracked in `usize` so doubling past 32768 cannot overflow.
     let mut entry_selector: u16 = 0;
-    let mut sr_pow: u16 = 1;
-    while sr_pow * 2 <= num_tables {
+    let mut sr_pow: usize = 1;
+    while sr_pow * 2 <= usize::from(num_tables) {
         sr_pow *= 2;
         entry_selector += 1;
     }
-    let search_range = sr_pow.saturating_mul(16);
+    let search_range = u16::try_from(sr_pow * 16).unwrap_or(u16::MAX);
     let range_shift = num_tables.saturating_mul(16).saturating_sub(search_range);
 
     let header_len = 12 + sorted.len() * 16;
@@ -182,5 +185,20 @@ mod tests {
         // First record tag should be "head" since it sorts before "name".
         assert_eq!(&bytes[12..16], b"head");
         assert_eq!(&bytes[28..32], b"name");
+    }
+
+    #[test]
+    fn build_handles_more_than_32768_tables() {
+        // A source directory can list up to 65535 tables. Doubling the
+        // searchRange power of two past 32768 used to overflow u16,
+        // which panicked in debug builds and looped forever in release.
+        let tables: alloc::vec::Vec<([u8; 4], alloc::vec::Vec<u8>)> = (0..40_000u32)
+            .map(|i| (i.to_be_bytes(), alloc::vec::Vec::new()))
+            .collect();
+        let bytes = build(0x0001_0000, &tables);
+        assert_eq!(&bytes[4..6], &40_000u16.to_be_bytes());
+        // searchRange saturates, entrySelector = floor(log2(40000)).
+        assert_eq!(&bytes[6..8], &u16::MAX.to_be_bytes());
+        assert_eq!(&bytes[8..10], &15u16.to_be_bytes());
     }
 }

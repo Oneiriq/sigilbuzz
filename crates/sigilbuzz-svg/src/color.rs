@@ -13,10 +13,10 @@
 //!   carries an `<!-- sweep-fallback -->` comment so consumers that
 //!   care can detect the substitution and route through a richer
 //!   renderer.
-//! - `PushLayer` / `PopLayer` map to `<g>` wrappers; SVG's blend modes
-//!   only cover a subset of the COLRv1 composite list, so unsupported
-//!   modes are passed through as `style="mix-blend-mode: <name>"` and
-//!   left to the SVG viewer's CSS engine.
+//! - `PushLayer` / `PopLayer` map to `<g style="mix-blend-mode:...">`
+//!   wrappers. CSS blend modes only cover a subset of the COLRv1
+//!   composite list, so Porter-Duff modes with no CSS equivalent fall
+//!   back to `normal`.
 //!
 //! The walker re-walks the same DrawCmd stream sigilbuzz-paint emits
 //! to keep behavior aligned with other renderers built on the
@@ -31,8 +31,8 @@ use core::fmt::Write as _;
 
 use sigilbuzz::Face;
 use sigilbuzz_paint::{
-    evaluate, evaluate_at_coords, Color, CompositeMode, DrawCmd, Gradient, GradientKind,
-    PaintSource, Transform2D,
+    evaluate, evaluate_at_coords, linear_gradient_end, Color, CompositeMode, DrawCmd, Gradient,
+    GradientKind, PaintSource, Transform2D,
 };
 
 use crate::{path_bbox, path_data, push_num, F2Dot14, GlyphId, VIEWBOX_MARGIN};
@@ -93,10 +93,9 @@ fn render_color_svg(face: &Face<'_>, cmds: &[DrawCmd], coords: &[F2Dot14]) -> Op
             }
         }
     }
+    // `bbox` is set only when some leaf is `Some`, so `None` here also
+    // covers the case where every leaf is missing.
     let bbox = bbox?;
-    if leaves.iter().all(Option::is_none) {
-        return None;
-    }
 
     // Second pass: walk the cmd stream alongside the leaf list,
     // emitting defs (gradients) and the body (paths + groups). The
@@ -234,8 +233,11 @@ fn push_layer(body: &mut String, mode: CompositeMode) {
 
 fn emit_gradient_def(defs: &mut Defs, g: &Gradient) -> String {
     match g.kind {
-        GradientKind::Linear { p0, p1, .. } => {
+        GradientKind::Linear { p0, p1, p2 } => {
             let id = defs.allocate_id("grad");
+            // SVG bands are perpendicular to x1,y1 -> x2,y2. Moving the
+            // end point by p2 turns them the way COLRv1 asks.
+            let p1 = linear_gradient_end(p0, p1, p2);
             let mut s = String::new();
             let _ = write!(
                 s,
@@ -385,7 +387,7 @@ fn composite_to_blend_mode(mode: CompositeMode) -> &'static str {
     // Porter-Duff cases that have no CSS equivalent fall back to
     // `normal` so the output stays renderable. Consumers wanting full
     // fidelity should drive sigilbuzz-paint into a Porter-Duff-aware
-    // backend (sigilbuzz-gpu, future sigilbuzz-pdf).
+    // backend.
     match mode {
         CompositeMode::Clear => "normal",
         CompositeMode::Src => "normal",
@@ -544,6 +546,29 @@ mod tests {
         assert!(svg.contains(r#"x2="100""#));
         assert!(svg.contains(r#"spreadMethod="pad""#));
         assert!(svg.contains(r#"stop-color="rgb(255,0,0)""#));
+    }
+
+    #[test]
+    fn linear_gradient_def_turns_by_p2() {
+        use sigilbuzz_paint::{ColorStop, Extend, Gradient, GradientKind};
+        // p2 on the diagonal turns the bands by 45 degrees, which moves
+        // the SVG end point from (100, 0) to (50, -50).
+        let g = Gradient {
+            kind: GradientKind::Linear {
+                p0: (0.0, 0.0),
+                p1: (100.0, 0.0),
+                p2: (100.0, 100.0),
+            },
+            stops: alloc::vec![ColorStop {
+                offset: 0.0,
+                color: Color::new(1.0, 0.0, 0.0, 1.0),
+            }],
+            extend: Extend::Pad,
+        };
+        let mut defs = Defs::default();
+        emit_gradient_def(&mut defs, &g);
+        let svg = defs.into_svg();
+        assert!(svg.contains(r#"x2="50" y2="-50""#), "got {svg}");
     }
 
     #[test]

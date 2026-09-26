@@ -30,19 +30,31 @@ use crate::error::{Result, WoffError};
 /// clause, and downstream SFNT parsing would silently see a different
 /// table than the directory advertises.
 ///
+/// Inflation stops one byte past `expected_len`, so a small stream
+/// that expands to far more data than the directory declares never
+/// allocates more than the declared size.
+///
 /// # Errors
 ///
 /// - `Malformed { context: "zlib decompress failed" }` when the
 ///   underlying inflate routine rejects the stream (bad header, bad
 ///   block, truncated payload, bad adler32).
+/// - `Malformed { context: "zlib output exceeds origLength" }` when
+///   the stream holds more than `expected_len + 1` bytes.
 /// - `Malformed { context: "zlib origLength mismatch" }` when inflate
 ///   succeeds but the recovered length disagrees with `expected_len`.
 pub(crate) fn inflate_zlib(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
-    let out =
-        miniz_oxide::inflate::decompress_to_vec_zlib(input).map_err(|_| WoffError::Malformed {
-            offset: 0,
-            context: "WOFF1 zlib decompress failed",
-        })?;
+    use miniz_oxide::inflate::{decompress_to_vec_zlib_with_limit, TINFLStatus};
+
+    let limit = expected_len.saturating_add(1);
+    let out = decompress_to_vec_zlib_with_limit(input, limit).map_err(|e| {
+        let context = if e.status == TINFLStatus::HasMoreOutput {
+            "WOFF1 zlib output exceeds origLength"
+        } else {
+            "WOFF1 zlib decompress failed"
+        };
+        WoffError::Malformed { offset: 0, context }
+    })?;
     if out.len() != expected_len {
         return Err(WoffError::Malformed {
             offset: 0,
@@ -111,6 +123,30 @@ mod tests {
             matches!(err, WoffError::Malformed { context, .. } if context.contains("origLength")),
             "expected origLength mismatch, got {err:?}"
         );
+    }
+
+    #[test]
+    fn inflate_stops_at_declared_length() {
+        // 8 MiB of zeros compresses to a few KiB. With a declared
+        // origLength of 16 the helper used to inflate the whole 8 MiB
+        // before it compared lengths. It must stop at the limit.
+        let raw = vec![0u8; 8 << 20];
+        let z = deflate_zlib(&raw, 6);
+        let err = inflate_zlib(&z, 16).unwrap_err();
+        assert!(
+            matches!(err, WoffError::Malformed { context, .. } if context.contains("exceeds")),
+            "expected the output limit to trip, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn inflate_accepts_exact_length() {
+        // The limit sits one byte past origLength, so a stream that
+        // fills origLength exactly still round-trips.
+        let raw = vec![7u8; 4096];
+        let z = deflate_zlib(&raw, 9);
+        assert_eq!(inflate_zlib(&z, raw.len()).expect("inflates"), raw);
+        assert!(inflate_zlib(&z, raw.len() - 1).is_err());
     }
 
     #[test]

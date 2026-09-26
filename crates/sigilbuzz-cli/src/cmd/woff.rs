@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use clap::{Args as ClapArgs, Subcommand};
 
-use super::util::CliResult;
+use super::util::{status, CliResult};
 
 /// Arguments for `sigilbuzz woff`.
 #[derive(Debug, ClapArgs)]
@@ -61,7 +61,11 @@ pub fn run(args: Args) -> CliResult {
                 };
             std::fs::write(&output, &wrapped)
                 .map_err(|e| format!("write {}: {e}", output.display()))?;
-            eprintln!("wrote {} bytes to {}", wrapped.len(), output.display());
+            status(format_args!(
+                "wrote {} bytes to {}",
+                wrapped.len(),
+                output.display()
+            ));
         }
         Op::Unwrap { input, output } => {
             let bytes =
@@ -81,7 +85,11 @@ pub fn run(args: Args) -> CliResult {
             };
             std::fs::write(&output, &sfnt)
                 .map_err(|e| format!("write {}: {e}", output.display()))?;
-            eprintln!("wrote {} bytes to {}", sfnt.len(), output.display());
+            status(format_args!(
+                "wrote {} bytes to {}",
+                sfnt.len(),
+                output.display()
+            ));
         }
     }
     Ok(())

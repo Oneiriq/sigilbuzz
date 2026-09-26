@@ -27,7 +27,7 @@
 //!   pointing at a `<linearGradient>` / `<radialGradient>`.
 //! - Stroking: `stroke`, `stroke-width`, `stroke-linecap` (butt
 //!   minimum, round / square as best-effort), `stroke-linejoin` (miter
-//!   minimum, round / bevel as best-effort).
+//!   and bevel, round as best-effort).
 //! - `<linearGradient>` / `<radialGradient>` with `<stop>` children;
 //!   ramp evaluation reuses the COLRv1 implementation in
 //!   [`crate::colrv1`].
@@ -44,8 +44,8 @@
 //!   mask buffer's alpha channel directly. `maskUnits="userSpaceOnUse"`
 //!   (default) and `maskUnits="objectBoundingBox"` (mask region rect
 //!   re-interpreted in `[0, 1]²` of the masked element's bbox) are
-//!   both supported. Nested mask references inside the mask body
-//!   remain deferred.
+//!   both supported. Nested mask references inside the mask body are
+//!   not supported and are dropped.
 //!
 //! - `stroke-dasharray` + `stroke-dashoffset` on stroked geometry,
 //!   applied to the post-flattening polyline. Curves become chords
@@ -68,9 +68,14 @@
 //!   gid and a user-space x-advance), and the renderer walks the
 //!   referenced path's arc length, fetching each glyph's outline from
 //!   the same [`Face`] and translating it to the cumulative-advance
-//!   position. Glyphs are placed axis-aligned only. Tangent rotation
-//!   is deferred to a follow-up. `side="right"` and path cycling
-//!   (`startOffset` past path end) are also deferred.
+//!   position. Glyphs are placed axis-aligned only: tangent rotation,
+//!   `side="right"`, and path cycling (`startOffset` past path end)
+//!   are not supported.
+//!
+//! - Work limits. Parsing, stored geometry, and rendering each run
+//!   against a fixed per-document budget, far above what real fonts
+//!   need. A document that exceeds one stops early instead of taking
+//!   unbounded time or memory.
 //!
 //! Anything outside this list, filter primitives beyond the set above
 //! (`feTurbulence`, `feImage`, `feMorphology`, `feConvolveMatrix`,
@@ -106,6 +111,7 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use sigilbuzz::tables::PathOp;
 use sigilbuzz::Face;
@@ -114,9 +120,9 @@ use sigilbuzz_paint::{Color as PaintColor, ColorStop, Extend};
 use crate::affine::Affine;
 use crate::colrv1::{apply_extend, project_linear, project_radial, sample_stops, to_premul};
 use crate::error::RenderError;
-use crate::flatten::flatten;
+use crate::flatten::{flatten, flatten_limited, Segment, MAX_SEGMENTS};
 use crate::pixmap::{ColorPixmap, Pixmap};
-use crate::raster::rasterize as raster;
+use crate::raster::{raster_bounds, rasterize_in, Window};
 use crate::rasterizer::Rasterizer;
 
 /// Maximum recursion depth for nested `<g>` elements. Real fonts stay
@@ -133,6 +139,13 @@ const MAX_FILLS: usize = 4096;
 /// engines; we match.
 const MAX_USE_DEPTH: u32 = 16;
 
+/// Maximum element nesting along one walk, counting the levels that
+/// `<use>` expansion adds. `<use>` restarts the group depth count, so
+/// without this the walk could recurse `MAX_USE_DEPTH` times
+/// `MAX_GROUP_DEPTH` deep (over 500 frames), which overflows a 1 MiB
+/// stack in debug builds. Real documents nest well under 20.
+const MAX_WALK_NESTING: u16 = 64;
+
 /// Miter cut-off ratio per SVG: when the miter would extend more than
 /// `4 * stroke-width` past the join, fall back to a bevel join.
 const MITER_LIMIT: f32 = 4.0;
@@ -144,6 +157,52 @@ const MITER_LIMIT: f32 = 4.0;
 /// can otherwise multiply up to a `u32::MAX * u32::MAX * 4` allocation
 /// that panics in the `Vec` macro before any rasterization runs.
 const MAX_RENDER_DIM: f32 = 16384.0;
+
+/// Parse work allowed for one document, in abstract units. Visiting an
+/// element costs [`WALK_VISIT_COST`] plus the bytes of its attributes
+/// and of the inherited state it copies, and resolving a reference
+/// costs the bytes it parses. `<use>` expansion can revisit a subtree
+/// many times, so without this a small document can demand exponential
+/// work. Real documents use a small fraction of it.
+const MAX_PARSE_WORK: usize = 1 << 24;
+
+/// Fixed parse-work cost of visiting one element.
+const WALK_VISIT_COST: usize = 64;
+
+/// Path operations a document may store across all of its fills,
+/// counting the copies attached through clip paths, masks, filters,
+/// and gradient stops. Bounds memory when many fills share one large
+/// referenced definition.
+const MAX_DOC_OPS: usize = 1 << 21;
+
+/// Maximum primitives kept per `<filter>`. Each named result holds a
+/// canvas-sized pixmap. Real filters use a handful.
+const MAX_FILTER_PRIMITIVES: usize = 64;
+
+/// Canvas-sized passes allowed while rendering one document. A fill
+/// costs one pass, plus one per filter primitive and merge input, plus
+/// one for a mask buffer. Mask children and filters otherwise multiply
+/// the per-fill cost without limit.
+const MAX_RENDER_PASSES: u32 = 1 << 15;
+
+/// Maximum points one [`flatten_to_polylines`] call produces. Once
+/// reached, curves stop subdividing and contribute only their end
+/// point.
+const MAX_POLYLINE_POINTS: usize = 1 << 20;
+
+/// Maximum path operations one [`stroke_to_fill`] call emits. Dashes
+/// and joins multiply the input, so this bounds the ribbon size.
+const MAX_STROKE_OPS: usize = 1 << 21;
+
+/// Maximum dash boundaries walked while stroking one path, see
+/// [`dash_polyline_limited`]. A tiny dash length on a long path would
+/// otherwise split it billions of times.
+const MAX_DASH_SPLITS: usize = 1 << 20;
+
+/// Largest box-blur radius. The window sums stay within `u32` up to
+/// `(2 * r + 1) * 255`, and no canvas is wide enough for a larger
+/// radius to matter.
+const MAX_BLUR_RADIUS: i32 = 1 << 22;
 
 // =========================================================================
 // Public entry
@@ -169,9 +228,12 @@ impl Rasterizer {
     ///   (sigilbuzz-render does not ship a gzip dep; consumers should
     ///   decompress and feed back via a future bytes-based entry point).
     /// - [`RenderError::Parse`] for unrecoverable XML / path-data
-    ///   errors.
+    ///   errors, and for documents that exceed the fill cap or the
+    ///   parse work budget (for example through runaway `<use>`
+    ///   expansion).
     /// - [`RenderError::BadSize`] when `size_pt` is non-finite or
-    ///   non-positive.
+    ///   non-positive, or when the canvas would exceed 16384 pixels on
+    ///   a side.
     pub fn rasterize_svg_glyph(
         &self,
         face: &Face<'_>,
@@ -223,16 +285,11 @@ impl Rasterizer {
         {
             return Err(RenderError::BadSize(size_pt));
         }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let width = width_f as u32;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let height = height_f as u32;
         let mut out = ColorPixmap::new(width, height);
 
-        let tol = self.flattening_tolerance();
-        for fill in &doc.fills {
-            render_fill(&mut out, fill, &world, tol);
-        }
+        render_doc(&mut out, &doc, &world, self.flattening_tolerance());
         Ok(out)
     }
 
@@ -259,11 +316,10 @@ impl Rasterizer {
     ///    enclosing `<textPath>` (or fallback solid black if none).
     ///
     /// **Axis-aligned only.** Glyphs do not rotate to follow the path
-    /// tangent; this is a known PoC limitation flagged by PR #236's
-    /// defer-note and tracked for the next minor. `side="right"` and
-    /// path cycling beyond a single cumulative-advance walk are also
-    /// deferred. Extra glyphs whose advance overruns the path's total
-    /// length are silently dropped.
+    /// tangent. `side="right"` and path cycling beyond a single
+    /// cumulative-advance walk are not supported either. Extra glyphs
+    /// whose advance overruns the path's total length are silently
+    /// dropped.
     ///
     /// `coords` flows through to glyph outline lookups so variable
     /// fonts produce the right outlines for the supplied axis position;
@@ -315,8 +371,7 @@ impl Rasterizer {
                 return Err(RenderError::BadUpem);
             }
             let root = parse_xml(xml)?;
-            let mut defs = Defs::default();
-            collect_defs(&root, &mut defs);
+            let defs = build_defs(&root);
             append_text_path_fills(&mut doc, &root, &defs, face, coords, upem, text_paths);
         }
 
@@ -338,16 +393,11 @@ impl Rasterizer {
         {
             return Err(RenderError::BadSize(size_pt));
         }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let width = width_f as u32;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let height = height_f as u32;
         let mut out = ColorPixmap::new(width, height);
 
-        let tol = self.flattening_tolerance();
-        for fill in &doc.fills {
-            render_fill(&mut out, fill, &world, tol);
-        }
+        render_doc(&mut out, &doc, &world, self.flattening_tolerance());
         Ok(out)
     }
 }
@@ -379,8 +429,8 @@ impl Rasterizer {
 ///
 /// `glyph_runs` is consumed in order. Cumulative `x_advance` walks the
 /// path; glyphs whose run-start position lands past the path's total
-/// arc length are silently dropped (path cycling is deferred, see the
-/// module-level docs).
+/// arc length are silently dropped (path cycling is not supported, see
+/// the module-level docs).
 #[derive(Debug, Clone)]
 pub struct TextPathInput<'a> {
     /// The `<path>` id this run targets. Matches the
@@ -468,7 +518,7 @@ fn walk_for_text_paths(
     if depth > MAX_GROUP_DEPTH {
         return;
     }
-    if doc.fills.len() >= MAX_FILLS {
+    if doc_full(doc, defs) || !defs.charge_work(visit_cost(node, parent)) {
         return;
     }
     let ctx = inherit_attrs(parent, node);
@@ -502,7 +552,7 @@ fn walk_for_text_paths(
             text_paths,
             depth + 1,
         );
-        if doc.fills.len() >= MAX_FILLS {
+        if doc_full(doc, defs) {
             break;
         }
     }
@@ -530,6 +580,11 @@ fn emit_text_path_fills(
     let Some(d_attr) = target.attr("d") else {
         return;
     };
+    // Each matching `<textPath>` re-parses and re-flattens the
+    // referenced path, so both costs come out of the work budget.
+    if !defs.charge_work(d_attr.len()) {
+        return;
+    }
     let Ok(path_ops) = parse_path_d(d_attr) else {
         return;
     };
@@ -542,7 +597,7 @@ fn emit_text_path_fills(
     // already use. The world transform (doc -> pixel) is applied per
     // Fill at raster time, so we don't double-apply it here.
     let polyline = build_arc_length_polyline(&path_ops);
-    if polyline.is_empty() {
+    if polyline.is_empty() || !defs.charge_work(polyline.len()) {
         return;
     }
     let total = polyline.last().map_or(0.0, |p| p.cum);
@@ -558,10 +613,14 @@ fn emit_text_path_fills(
 
     let mut cum = 0.0_f32;
     for g in &input.glyph_runs {
-        if doc.fills.len() >= MAX_FILLS {
+        if doc_full(doc, defs) {
             break;
         }
         if cum > total {
+            break;
+        }
+        // Locating the glyph scans the polyline.
+        if !defs.charge_work(polyline.len()) {
             break;
         }
         let Some(pos) = sample_polyline_position(&polyline, cum) else {
@@ -571,24 +630,29 @@ fn emit_text_path_fills(
             if !outline.is_empty() {
                 let translated = transform_outline_ops(outline.ops(), scale, pos.0, pos.1);
                 if !translated.is_empty() {
-                    doc.fills.push(Fill {
-                        ops: translated,
-                        paint: fill_paint.clone(),
-                        xform: ctx.xform,
-                        clip: ctx
-                            .clip_href
-                            .as_deref()
-                            .and_then(|id| resolve_clip_shape(defs, id)),
-                        is_stroke: false,
-                        filter: ctx
-                            .filter_href
-                            .as_deref()
-                            .and_then(|id| resolve_filter(defs, id)),
-                        mask: ctx
-                            .mask_href
-                            .as_deref()
-                            .and_then(|id| resolve_mask_shape(defs, id)),
-                    });
+                    push_fill(
+                        doc,
+                        defs,
+                        Fill {
+                            ops: translated,
+                            paint: fill_paint.clone(),
+                            xform: ctx.xform,
+                            clip: ctx
+                                .clip_href
+                                .as_deref()
+                                .and_then(|id| resolve_clip_shape(defs, id)),
+                            #[cfg(test)]
+                            is_stroke: false,
+                            filter: ctx
+                                .filter_href
+                                .as_deref()
+                                .and_then(|id| resolve_filter(defs, id)),
+                            mask: ctx
+                                .mask_href
+                                .as_deref()
+                                .and_then(|id| resolve_mask_shape(defs, id)),
+                        },
+                    );
                 }
             }
         }
@@ -613,9 +677,9 @@ struct PolyPoint {
 ///
 /// Multi-contour paths concatenate their per-contour polylines back to
 /// back. The cumulative-advance walk treats them as one continuous
-/// stroke for placement, matching the simple PoC contract documented
-/// on [`TextPathInput`]. Tangent-rotation and per-contour breaks are
-/// deferred work.
+/// stroke for placement, matching the contract documented on
+/// [`TextPathInput`]. Tangent rotation and per-contour breaks are not
+/// supported.
 fn build_arc_length_polyline(ops: &[PathOp]) -> Vec<PolyPoint> {
     let segs = flatten(
         ops.iter().copied(),
@@ -747,9 +811,9 @@ struct Fill {
     /// world transform apply to both).
     clip: Option<ClipShape>,
     /// Indicates whether this fill is the outline of a stroke (closed
-    /// fill ribbon). Affects nothing in rendering but documents the
-    /// pipeline split.
-    #[allow(dead_code)]
+    /// fill ribbon). Rendering ignores it. Tests use it to tell the
+    /// fill and stroke passes apart.
+    #[cfg(test)]
     is_stroke: bool,
     /// Optional filter chain to apply to this fill. Resolved at parse
     /// time from `filter="url(#id)"`. When set, the fill is rendered
@@ -766,6 +830,37 @@ struct Fill {
     /// BT.709 luminance * mask source alpha modulates the
     /// SourceGraphic alpha before composite.
     mask: Option<MaskShape>,
+}
+
+impl Fill {
+    /// Storage weight charged against [`MAX_DOC_OPS`]: the path
+    /// operations this fill owns, including the copies attached
+    /// through its clip, mask, filter, and gradient stops.
+    fn weight(&self) -> usize {
+        let paint = match &self.paint {
+            Paint::Solid(_) => 0,
+            Paint::Gradient(g) => g.stops.len(),
+        };
+        self.ops
+            .len()
+            .saturating_add(paint)
+            .saturating_add(self.clip.as_ref().map_or(0, |c| c.ops.len()))
+            .saturating_add(self.filter.as_ref().map_or(0, Filter::passes))
+            .saturating_add(
+                self.mask
+                    .as_ref()
+                    .map_or(0, |m| m.fills.iter().map(Fill::weight).sum()),
+            )
+    }
+
+    /// Canvas-sized passes rendering this fill costs, not counting the
+    /// children of its mask, which charge their own.
+    fn render_passes(&self) -> u32 {
+        let filter = self.filter.as_ref().map_or(0, Filter::passes);
+        let filter = u32::try_from(filter).unwrap_or(u32::MAX);
+        1u32.saturating_add(filter)
+            .saturating_add(u32::from(self.mask.is_some()))
+    }
 }
 
 /// Paint source for a [`Fill`]. SVG-in-OT documents use solid color
@@ -842,7 +937,7 @@ struct MaskShape {
     /// Interpretation depends on `units`. When `units` is
     /// `UserSpaceOnUse`, this is currently informational only. The
     /// luminance fast path renders the mask body across the entire
-    /// canvas, matching the prior PR #236 behavior.
+    /// canvas.
     region_x: f32,
     region_y: f32,
     region_w: f32,
@@ -871,6 +966,20 @@ struct Filter {
     primitives: Vec<FilterPrimitive>,
 }
 
+impl Filter {
+    /// Canvas-sized passes evaluating this filter costs: one per
+    /// primitive plus one per `feMerge` input.
+    fn passes(&self) -> usize {
+        self.primitives
+            .iter()
+            .map(|p| match &p.op {
+                FilterOp::Merge { inputs } => inputs.len().saturating_add(1),
+                _ => 1,
+            })
+            .fold(0usize, usize::saturating_add)
+    }
+}
+
 /// One `<fe*>` element: an input ref (`in="..."`), an output name
 /// (`result="..."`), and an operation. Inputs default to `SourceGraphic`
 /// for the first primitive and the previous primitive's result
@@ -878,12 +987,9 @@ struct Filter {
 #[derive(Debug, Clone)]
 struct FilterPrimitive {
     /// `in="..."`. `None` means "use previous primitive's output, or
-    /// SourceGraphic if no previous primitive".
+    /// SourceGraphic if no previous primitive". No supported primitive
+    /// takes a second input, so `in2="..."` is not read.
     input: Option<String>,
-    /// Second input (only meaningful for primitives that take two. For
-    /// the v1 set, none do, but parsed for forward-compat).
-    #[allow(dead_code)]
-    input2: Option<String>,
     /// `result="..."`. Names this primitive's output for later refs.
     /// `None` means "anonymous; only the next primitive can reference
     /// it (via the implicit-input chain)".
@@ -1013,8 +1119,7 @@ fn parse_document(xml: &str) -> Result<SvgDoc, RenderError> {
     // First pass: collect every element that carries `id=` so `<use>`
     // and `fill="url(#...)"` can resolve forward references. We just
     // index by id; the renderer walks the tree itself.
-    let mut defs = Defs::default();
-    collect_defs(&root, &mut defs);
+    let defs = build_defs(&root);
 
     // Second pass: walk the tree, emitting fills.
     let ctx = ElemCtx::default();
@@ -1023,20 +1128,85 @@ fn parse_document(xml: &str) -> Result<SvgDoc, RenderError> {
     Ok(doc)
 }
 
-#[derive(Default)]
+/// Id index plus the per-document work budgets. Every parse-time
+/// helper already receives the `Defs`, so the budgets live here as
+/// cells shared by the document walk and by mask resolution.
 struct Defs<'a> {
+    /// Elements that carry `id=`, sorted by id. Elements sharing an id
+    /// stay in document order, so a lookup returns the first one.
     by_id: Vec<(&'a str, &'a Node)>,
+    /// Parse work left, see [`MAX_PARSE_WORK`].
+    work_left: Cell<usize>,
+    /// Stored path operations left, see [`MAX_DOC_OPS`].
+    ops_left: Cell<usize>,
+}
+
+impl Default for Defs<'_> {
+    fn default() -> Self {
+        Self {
+            by_id: Vec::new(),
+            work_left: Cell::new(MAX_PARSE_WORK),
+            ops_left: Cell::new(MAX_DOC_OPS),
+        }
+    }
 }
 
 impl<'a> Defs<'a> {
     fn lookup(&self, id: &str) -> Option<&'a Node> {
-        for (k, v) in &self.by_id {
-            if *k == id {
-                return Some(*v);
-            }
+        let first = self.by_id.partition_point(|(k, _)| *k < id);
+        match self.by_id.get(first) {
+            Some(&(k, node)) if k == id => Some(node),
+            _ => None,
         }
-        None
     }
+
+    /// Spends `n` units of parse work. Returns `false`, and leaves the
+    /// budget empty, when fewer than `n` remain.
+    fn charge_work(&self, n: usize) -> bool {
+        charge(&self.work_left, n)
+    }
+
+    /// Reserves room for `n` stored path operations. Returns `false`,
+    /// and leaves the budget empty, when fewer than `n` remain.
+    fn charge_ops(&self, n: usize) -> bool {
+        charge(&self.ops_left, n)
+    }
+
+    /// True once the stored-operation budget is spent.
+    fn ops_exhausted(&self) -> bool {
+        self.ops_left.get() == 0
+    }
+
+    /// True once the parse work budget is spent. A reference resolved
+    /// after that point may be incomplete, so callers drop the fill.
+    fn work_exhausted(&self) -> bool {
+        self.work_left.get() == 0
+    }
+}
+
+fn charge(left: &Cell<usize>, n: usize) -> bool {
+    if let Some(rest) = left.get().checked_sub(n) {
+        left.set(rest);
+        true
+    } else {
+        left.set(0);
+        false
+    }
+}
+
+/// True when `doc` must not take more fills: either the fill count cap
+/// or the stored-operation budget is reached.
+fn doc_full(doc: &SvgDoc, defs: &Defs<'_>) -> bool {
+    doc.fills.len() >= MAX_FILLS || defs.ops_exhausted()
+}
+
+/// Builds the id index for the tree rooted at `root`.
+fn build_defs(root: &Node) -> Defs<'_> {
+    let mut defs = Defs::default();
+    collect_defs(root, &mut defs);
+    // `sort_by` is stable, so equal ids keep document order.
+    defs.by_id.sort_by(|a, b| a.0.cmp(b.0));
+    defs
 }
 
 fn collect_defs<'a>(node: &'a Node, defs: &mut Defs<'a>) {
@@ -1046,6 +1216,22 @@ fn collect_defs<'a>(node: &'a Node, defs: &mut Defs<'a>) {
     for c in &node.children {
         collect_defs(c, defs);
     }
+}
+
+/// Parse-work cost of reading `node`: the fixed visit cost plus the
+/// attribute bytes that get scanned.
+fn node_cost(node: &Node) -> usize {
+    node.attrs
+        .iter()
+        .map(|(k, v)| k.len().saturating_add(v.len()))
+        .fold(WALK_VISIT_COST, usize::saturating_add)
+}
+
+/// Parse-work cost of visiting `node` with inherited state `ctx`:
+/// [`node_cost`] plus the heap bytes of the inherited state that gets
+/// cloned.
+fn visit_cost(node: &Node, ctx: &ElemCtx) -> usize {
+    node_cost(node).saturating_add(ctx.heap_bytes())
 }
 
 #[derive(Debug, Clone)]
@@ -1094,6 +1280,9 @@ struct ElemCtx {
     /// into the resolver. Keeps the stack bounded at the documented
     /// "mask-of-mask is unsupported" semantics.
     mask_depth: u8,
+    /// Elements between the walk root and this context, including the
+    /// levels `<use>` expansion adds. See [`MAX_WALK_NESTING`].
+    nesting: u16,
 }
 
 impl Default for ElemCtx {
@@ -1115,7 +1304,20 @@ impl Default for ElemCtx {
             filter_href: None,
             mask_href: None,
             mask_depth: 0,
+            nesting: 0,
         }
+    }
+}
+
+impl ElemCtx {
+    /// Heap bytes a clone of this context copies.
+    fn heap_bytes(&self) -> usize {
+        let href = |h: &Option<String>| h.as_ref().map_or(0, String::len);
+        (self.stroke_dasharray.len() * core::mem::size_of::<f32>())
+            .saturating_add(href(&self.fill_grad_href))
+            .saturating_add(href(&self.clip_href))
+            .saturating_add(href(&self.filter_href))
+            .saturating_add(href(&self.mask_href))
     }
 }
 
@@ -1141,11 +1343,14 @@ fn walk(
     depth: u32,
     use_depth: u32,
 ) -> Result<(), RenderError> {
-    if depth > MAX_GROUP_DEPTH {
+    if depth > MAX_GROUP_DEPTH || parent.nesting >= MAX_WALK_NESTING {
         return Err(RenderError::Parse("svg nesting"));
     }
-    if doc.fills.len() >= MAX_FILLS {
+    if doc_full(doc, defs) {
         return Err(RenderError::Parse("svg fill cap"));
+    }
+    if !defs.charge_work(visit_cost(node, parent)) {
+        return Err(RenderError::Parse("svg work cap"));
     }
 
     // Skip elements that contribute no rendering: <defs>, <linearGradient>,
@@ -1171,7 +1376,7 @@ fn walk(
     if name_eq(&node.name, "svg") || name_eq(&node.name, "g") {
         for child in &node.children {
             walk(child, doc, defs, &ctx, depth + 1, use_depth)?;
-            if doc.fills.len() >= MAX_FILLS {
+            if doc_full(doc, defs) {
                 break;
             }
         }
@@ -1241,7 +1446,7 @@ fn walk(
         // / <symbol> don't swallow visible content.
         for child in &node.children {
             walk(child, doc, defs, &ctx, depth + 1, use_depth)?;
-            if doc.fills.len() >= MAX_FILLS {
+            if doc_full(doc, defs) {
                 break;
             }
         }
@@ -1252,6 +1457,7 @@ fn walk(
 /// Computes the inherited [`ElemCtx`] for `node`, given `parent`.
 fn inherit_attrs(parent: &ElemCtx, node: &Node) -> ElemCtx {
     let mut ctx = parent.clone();
+    ctx.nesting = parent.nesting.saturating_add(1);
     for (k, v) in &node.attrs {
         if attr_matches(k, "transform") {
             if let Some(t) = parse_transform(v) {
@@ -1348,6 +1554,38 @@ fn parse_url_ref(s: &str) -> Option<String> {
 
 /// Pushes one or more fills (and stroke fills) for `ops` under `ctx`.
 fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) {
+    if defs.ops_exhausted() {
+        return;
+    }
+    // Work out what this element paints before resolving any
+    // reference, so an element that paints nothing costs nothing.
+    let fill_paint = resolve_fill_paint(defs, ctx).filter(|p| !is_fully_transparent(p));
+    let stroke = ctx.stroke_color.and_then(|scol| {
+        if ctx.stroke_width <= 0.0 {
+            return None;
+        }
+        let alpha = (scol[3] as f32 / 255.0) * ctx.stroke_opacity * ctx.opacity;
+        let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+        if a == 0 {
+            return None;
+        }
+        let (stroke_ops, work) = stroke_to_fill(
+            ops,
+            ctx.stroke_width,
+            ctx.stroke_linecap,
+            ctx.stroke_linejoin,
+            &ctx.stroke_dasharray,
+            ctx.stroke_dashoffset,
+        );
+        if stroke_ops.is_empty() || !defs.charge_work(work) {
+            return None;
+        }
+        Some((stroke_ops, [scol[0], scol[1], scol[2], a]))
+    });
+    if fill_paint.is_none() && stroke.is_none() {
+        return;
+    }
+
     // Resolve the clip shape once per emission.
     let clip = ctx
         .clip_href
@@ -1371,7 +1609,7 @@ fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) 
     // reference so a `<mask id=a>...<rect mask=url(#b)>...<mask
     // id=b>...<rect mask=url(#a)>` document can't recurse the
     // resolver into a stack overflow. mask-of-mask is documented as
-    // deferred; this enforces it.
+    // unsupported, and this enforces it.
     let mask = if ctx.mask_depth == 0 {
         ctx.mask_href
             .as_deref()
@@ -1381,49 +1619,52 @@ fn emit_paint(doc: &mut SvgDoc, defs: &Defs<'_>, ctx: &ElemCtx, ops: &[PathOp]) 
     };
 
     // Fill pass.
-    let fill_paint = resolve_fill_paint(defs, ctx);
     if let Some(p) = fill_paint {
-        if !is_fully_transparent(&p) {
-            doc.fills.push(Fill {
+        push_fill(
+            doc,
+            defs,
+            Fill {
                 ops: ops.to_vec(),
                 paint: p,
                 xform: ctx.xform,
                 clip: clip.clone(),
+                #[cfg(test)]
                 is_stroke: false,
                 filter: filter.clone(),
                 mask: mask.clone(),
-            });
-        }
+            },
+        );
     }
 
     // Stroke pass.
-    if let Some(scol) = ctx.stroke_color {
-        if ctx.stroke_width > 0.0 {
-            let alpha = (scol[3] as f32 / 255.0) * ctx.stroke_opacity * ctx.opacity;
-            let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-            if a > 0 {
-                let rgba = [scol[0], scol[1], scol[2], a];
-                let stroke_ops = stroke_to_fill(
-                    ops,
-                    ctx.stroke_width,
-                    ctx.stroke_linecap,
-                    ctx.stroke_linejoin,
-                    &ctx.stroke_dasharray,
-                    ctx.stroke_dashoffset,
-                );
-                if !stroke_ops.is_empty() && doc.fills.len() < MAX_FILLS {
-                    doc.fills.push(Fill {
-                        ops: stroke_ops,
-                        paint: Paint::Solid(rgba),
-                        xform: ctx.xform,
-                        clip: clip.clone(),
-                        is_stroke: true,
-                        filter: filter.clone(),
-                        mask: mask.clone(),
-                    });
-                }
-            }
+    if let Some((stroke_ops, rgba)) = stroke {
+        if doc.fills.len() < MAX_FILLS {
+            push_fill(
+                doc,
+                defs,
+                Fill {
+                    ops: stroke_ops,
+                    paint: Paint::Solid(rgba),
+                    xform: ctx.xform,
+                    clip,
+                    #[cfg(test)]
+                    is_stroke: true,
+                    filter,
+                    mask,
+                },
+            );
         }
+    }
+}
+
+/// Appends `fill` if the document's stored-operation budget can hold
+/// it. A fill that does not fit is dropped and the budget is marked
+/// spent, which stops the walk the same way the fill cap does. A fill
+/// built after the parse work budget ran out is dropped too, since its
+/// clip, mask, or filter may have been cut short.
+fn push_fill(doc: &mut SvgDoc, defs: &Defs<'_>, fill: Fill) {
+    if !defs.work_exhausted() && defs.charge_ops(fill.weight()) {
+        doc.fills.push(fill);
     }
 }
 
@@ -1460,18 +1701,20 @@ fn resolve_fill_paint(defs: &Defs<'_>, ctx: &ElemCtx) -> Option<Paint> {
 
 fn resolve_clip_shape(defs: &Defs<'_>, id: &str) -> Option<ClipShape> {
     let cp = defs.lookup(id)?;
-    if !name_eq(&cp.name, "clipPath") {
+    if !name_eq(&cp.name, "clipPath") || !defs.charge_work(node_cost(cp)) {
         return None;
     }
     // Walk children. We support exactly one shape (path / rect /
     // circle / ellipse). Multiple shapes inside a clipPath are still
-    // accepted but only the first is used; this matches the
-    // documented "single-path basic clipPath" deferral note.
+    // accepted but only the first is used.
     let mut local_xform = Affine::identity();
     if let Some(t) = cp.attr("transform").and_then(parse_transform) {
         local_xform = local_xform.compose(&t);
     }
     for c in &cp.children {
+        if !defs.charge_work(node_cost(c)) {
+            return None;
+        }
         let child_ops = if name_eq(&c.name, "path") {
             c.attr("d").and_then(|d| parse_path_d(d).ok())
         } else if name_eq(&c.name, "rect") {
@@ -1521,7 +1764,7 @@ fn resolve_clip_shape(defs: &Defs<'_>, id: &str) -> Option<ClipShape> {
 /// recursive composite.
 fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape> {
     let mn = defs.lookup(id)?;
-    if !name_eq(&mn.name, "mask") {
+    if !name_eq(&mn.name, "mask") || !defs.charge_work(node_cost(mn)) {
         return None;
     }
     // Build a tiny scratch SvgDoc so we can re-use `walk` end-to-end.
@@ -1539,7 +1782,7 @@ fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape> {
         ctx.xform = ctx.xform.compose(&t);
     }
     // Drop any nested mask reference on the mask root itself:
-    // mask-of-mask isn't supported; the brief defers it explicitly.
+    // mask-of-mask isn't supported.
     ctx.mask_href = None;
     // Cycle-guard: bump `mask_depth` so any descendant `<rect
     // mask="url(#...)">` inside the mask body falls out at
@@ -1549,8 +1792,9 @@ fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape> {
     ctx.mask_depth = ctx.mask_depth.saturating_add(1);
     for child in &mn.children {
         // Sanity: cap mask-internal fill count at the same MAX_FILLS
-        // ceiling as the document.
-        if scratch.fills.len() >= MAX_FILLS {
+        // ceiling as the document. The work and storage budgets are
+        // the document's own.
+        if doc_full(&scratch, defs) {
             break;
         }
         let _ = walk(child, &mut scratch, defs, &ctx, 0, 0);
@@ -1575,11 +1819,9 @@ fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape> {
     // Per SVG spec the mask region defaults to the full bounding-box
     // window when `objectBoundingBox` (-10%, -10%, 120%, 120% in the
     // spec, but consumer-side OT-SVG fonts almost always use the
-    // simpler 0/0/1/1 window. We follow that simpler convention so
-    // the test fixture in the brief reads cleanly). For
-    // `userSpaceOnUse`, the legacy PR #236 behavior ignored the
-    // region entirely, so we keep the parse but only consult it in
-    // the bbox path.
+    // simpler 0/0/1/1 window, which is the default we use). For
+    // `userSpaceOnUse` the region is ignored, so we keep the parse but
+    // only consult it in the bbox path.
     let region_x = mn.attr("x").and_then(parse_length).unwrap_or(0.0);
     let region_y = mn.attr("y").and_then(parse_length).unwrap_or(0.0);
     let region_w = mn.attr("width").and_then(parse_length).unwrap_or(1.0);
@@ -1598,15 +1840,28 @@ fn resolve_mask_shape(defs: &Defs<'_>, id: &str) -> Option<MaskShape> {
 
 /// Resolves a `<filter id="...">` definition into a [`Filter`] record.
 /// Unknown / malformed primitives are skipped silently. The rest of
-/// the chain still runs. Returns `None` if the id doesn't point at a
-/// `<filter>` element or no recognized primitives were collected.
+/// the chain still runs. Primitives past [`MAX_FILTER_PRIMITIVES`] are
+/// ignored. Returns `None` if the id doesn't point at a `<filter>`
+/// element or no recognized primitives were collected.
 fn resolve_filter(defs: &Defs<'_>, id: &str) -> Option<Filter> {
     let f = defs.lookup(id)?;
-    if !name_eq(&f.name, "filter") {
+    if !name_eq(&f.name, "filter") || !defs.charge_work(node_cost(f)) {
         return None;
     }
     let mut primitives = Vec::new();
     for c in &f.children {
+        if primitives.len() >= MAX_FILTER_PRIMITIVES {
+            break;
+        }
+        // `feMerge` also reads its `feMergeNode` children.
+        let cost = c
+            .children
+            .iter()
+            .map(node_cost)
+            .fold(node_cost(c), usize::saturating_add);
+        if !defs.charge_work(cost) {
+            return None;
+        }
         if let Some(p) = parse_filter_primitive(c) {
             primitives.push(p);
         }
@@ -1619,7 +1874,6 @@ fn resolve_filter(defs: &Defs<'_>, id: &str) -> Option<Filter> {
 
 fn parse_filter_primitive(node: &Node) -> Option<FilterPrimitive> {
     let input = node.attr("in").map(|s| s.trim().to_string());
-    let input2 = node.attr("in2").map(|s| s.trim().to_string());
     let result = node.attr("result").map(|s| s.trim().to_string());
 
     let op = if name_eq(&node.name, "feGaussianBlur") {
@@ -1670,12 +1924,7 @@ fn parse_filter_primitive(node: &Node) -> Option<FilterPrimitive> {
         return None;
     };
 
-    Some(FilterPrimitive {
-        input,
-        input2,
-        result,
-        op,
-    })
+    Some(FilterPrimitive { input, result, op })
 }
 
 /// `stdDeviation` may be a single number or two whitespace-separated
@@ -1780,6 +2029,16 @@ fn resolve_gradient(defs: &Defs<'_>, id: &str, ctx: &ElemCtx) -> Option<Gradient
     if !is_linear && !is_radial {
         return None;
     }
+    // Every fill that references the gradient parses its stops again.
+    let stops_cost = |n: &Node| {
+        n.children
+            .iter()
+            .map(node_cost)
+            .fold(node_cost(n), usize::saturating_add)
+    };
+    if !defs.charge_work(stops_cost(node)) {
+        return None;
+    }
     // Stops can come from this node or, via xlink:href, an ancestor
     // gradient. A single hop of resolution is enough for every real
     // SVG-in-OT we've seen.
@@ -1798,6 +2057,9 @@ fn resolve_gradient(defs: &Defs<'_>, id: &str, ctx: &ElemCtx) -> Option<Gradient
             .and_then(|s| s.strip_prefix('#'))
         {
             if let Some(parent) = defs.lookup(href) {
+                if !defs.charge_work(stops_cost(parent)) {
+                    return None;
+                }
                 for c in &parent.children {
                     if name_eq(&c.name, "stop") {
                         if let Some(s) = parse_stop(c) {
@@ -1850,29 +2112,30 @@ fn resolve_gradient(defs: &Defs<'_>, id: &str, ctx: &ElemCtx) -> Option<Gradient
 
 fn parse_stop(node: &Node) -> Option<ColorStop> {
     let offset = node.attr("offset").map(parse_stop_offset).unwrap_or(0.0);
-    // stop-color is the canonical attribute; some authoring tools fold
-    // it into a CSS-ish style="stop-color:#rgb;stop-opacity:0.5". Be
-    // tolerant.
+    // stop-color and stop-opacity are presentation attributes. Some
+    // authoring tools fold them into a CSS-ish
+    // style="stop-color:#rgb;stop-opacity:0.5" instead. A style
+    // declaration wins over the attribute, as in CSS. Chunks without
+    // a colon, such as the empty one after a trailing semicolon, are
+    // skipped.
     let mut color = node
         .attr("stop-color")
         .and_then(parse_color)
         .unwrap_or([0, 0, 0, 255]);
-    let stop_opacity = node
+    let mut stop_opacity = node
         .attr("stop-opacity")
         .and_then(parse_opacity)
         .unwrap_or(1.0);
     if let Some(style) = node.attr("style") {
-        for chunk in style.split(';') {
-            let mut parts = chunk.splitn(2, ':');
-            let key = parts.next()?.trim();
-            let val = parts.next()?.trim();
+        for (key, val) in style.split(';').filter_map(|chunk| chunk.split_once(':')) {
+            let (key, val) = (key.trim(), val.trim());
             if key.eq_ignore_ascii_case("stop-color") {
                 if let Some(c) = parse_color(val) {
                     color = c;
                 }
             } else if key.eq_ignore_ascii_case("stop-opacity") {
-                if let Some(_o) = parse_opacity(val) {
-                    // applied below
+                if let Some(o) = parse_opacity(val) {
+                    stop_opacity = o;
                 }
             }
         }
@@ -1912,6 +2175,10 @@ fn parse_stop_offset(s: &str) -> f32 {
 /// segment direction. Joins between segments are filled with
 /// miter / round / bevel geometry, and the open ends carry the
 /// configured cap shape.
+///
+/// Also returns the work spent, in polyline points, dash boundaries,
+/// and emitted operations, so the caller can charge it to the
+/// document budget.
 fn stroke_to_fill(
     ops: &[PathOp],
     stroke_width: f32,
@@ -1919,17 +2186,22 @@ fn stroke_to_fill(
     join: LineJoin,
     dasharray: &[f32],
     dashoffset: f32,
-) -> Vec<PathOp> {
+) -> (Vec<PathOp>, usize) {
     if stroke_width <= 0.0 {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let polylines = flatten_to_polylines(ops);
     let half = stroke_width * 0.5;
     let mut out: Vec<PathOp> = Vec::new();
+    let mut splits_left = MAX_DASH_SPLITS;
+    let points: usize = polylines.iter().map(|p| p.points.len()).sum();
 
     let dashed = !dasharray.is_empty() && dasharray.iter().any(|&v| v > 0.0);
 
     for poly in &polylines {
+        if out.len() >= MAX_STROKE_OPS {
+            break;
+        }
         if poly.points.len() < 2 {
             continue;
         }
@@ -1938,14 +2210,18 @@ fn stroke_to_fill(
             // chord-flattened polyline cumulative length, which is
             // always slightly short of the curve), emit only the "draw"
             // phase segments as fresh open polylines.
-            let segs = dash_polyline(
+            let segs = dash_polyline_limited(
                 &poly.points,
                 &poly.arc_lengths,
                 poly.closed,
                 dasharray,
                 dashoffset,
+                &mut splits_left,
             );
             for seg in segs {
+                if out.len() >= MAX_STROKE_OPS {
+                    break;
+                }
                 if seg.len() >= 2 {
                     emit_stroked_polyline(&mut out, &seg, false, half, cap, join);
                 }
@@ -1954,7 +2230,10 @@ fn stroke_to_fill(
             emit_stroked_polyline(&mut out, &poly.points, poly.closed, half, cap, join);
         }
     }
-    out
+    let work = points
+        .saturating_add(MAX_DASH_SPLITS - splits_left)
+        .saturating_add(out.len());
+    (out, work)
 }
 
 #[derive(Debug, Clone)]
@@ -1992,6 +2271,8 @@ fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
     let mut cx = 0.0_f32;
     let mut cy = 0.0_f32;
     let mut open = false;
+    // Curve subdivision stops once this many points exist in total.
+    let mut budget = MAX_POLYLINE_POINTS;
 
     let push_line = |cur: &mut Vec<(f32, f32)>, arcs: &mut Vec<f32>, x: f32, y: f32| {
         let dup = cur
@@ -2049,7 +2330,19 @@ fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
                 x,
                 y,
             } => {
-                flatten_quad_polyline(&mut cur, &mut cur_arc, cx, cy, ccx, ccy, x, y, 0.25, 0);
+                flatten_quad_polyline(
+                    &mut cur,
+                    &mut cur_arc,
+                    cx,
+                    cy,
+                    ccx,
+                    ccy,
+                    x,
+                    y,
+                    0.25,
+                    &mut budget,
+                    0,
+                );
                 cx = x;
                 cy = y;
             }
@@ -2073,6 +2366,7 @@ fn flatten_to_polylines(ops: &[PathOp]) -> Vec<PolyLine> {
                     x,
                     y,
                     0.25,
+                    &mut budget,
                     0,
                 );
                 cx = x;
@@ -2114,6 +2408,7 @@ fn flatten_quad_polyline(
     x2: f32,
     y2: f32,
     tol: f32,
+    budget: &mut usize,
     depth: u32,
 ) {
     let dx = x2 - x0;
@@ -2127,7 +2422,10 @@ fn flatten_quad_polyline(
         let ey = y1 - y0;
         ex * ex + ey * ey
     };
-    if depth >= 16 || dist_sq <= 4.0 * tol * tol {
+    if stop_polyline_subdivision(depth, *budget, &[x0, y0, x1, y1, x2, y2])
+        || dist_sq <= 4.0 * tol * tol
+    {
+        *budget = budget.saturating_sub(1);
         if out
             .last()
             .map(|p| (p.0 - x2).abs() > 1e-6 || (p.1 - y2).abs() > 1e-6)
@@ -2148,8 +2446,39 @@ fn flatten_quad_polyline(
     let m01 = (0.5 * (x0 + x1), 0.5 * (y0 + y1));
     let m12 = (0.5 * (x1 + x2), 0.5 * (y1 + y2));
     let m = (0.5 * (m01.0 + m12.0), 0.5 * (m01.1 + m12.1));
-    flatten_quad_polyline(out, arcs, x0, y0, m01.0, m01.1, m.0, m.1, tol, depth + 1);
-    flatten_quad_polyline(out, arcs, m.0, m.1, m12.0, m12.1, x2, y2, tol, depth + 1);
+    flatten_quad_polyline(
+        out,
+        arcs,
+        x0,
+        y0,
+        m01.0,
+        m01.1,
+        m.0,
+        m.1,
+        tol,
+        budget,
+        depth + 1,
+    );
+    flatten_quad_polyline(
+        out,
+        arcs,
+        m.0,
+        m.1,
+        m12.0,
+        m12.1,
+        x2,
+        y2,
+        tol,
+        budget,
+        depth + 1,
+    );
+}
+
+/// True when polyline subdivision must stop: the depth cap or the
+/// point budget is reached, or a control point is NaN or infinite
+/// (splitting those only yields more non-finite points).
+fn stop_polyline_subdivision(depth: u32, budget: usize, points: &[f32]) -> bool {
+    depth >= 16 || budget == 0 || !points.iter().all(|v| v.is_finite())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2165,6 +2494,7 @@ fn flatten_cubic_polyline(
     x3: f32,
     y3: f32,
     tol: f32,
+    budget: &mut usize,
     depth: u32,
 ) {
     let dx = x3 - x0;
@@ -2181,7 +2511,10 @@ fn flatten_cubic_polyline(
         let e2y = y2 - y0;
         (e1x * e1x + e1y * e1y, e2x * e2x + e2y * e2y)
     };
-    if depth >= 16 || (d1 <= tol * tol && d2 <= tol * tol) {
+    if stop_polyline_subdivision(depth, *budget, &[x0, y0, x1, y1, x2, y2, x3, y3])
+        || (d1 <= tol * tol && d2 <= tol * tol)
+    {
+        *budget = budget.saturating_sub(1);
         if out
             .last()
             .map(|p| (p.0 - x3).abs() > 1e-6 || (p.1 - y3).abs() > 1e-6)
@@ -2217,6 +2550,7 @@ fn flatten_cubic_polyline(
         m.0,
         m.1,
         tol,
+        budget,
         depth + 1,
     );
     flatten_cubic_polyline(
@@ -2231,6 +2565,7 @@ fn flatten_cubic_polyline(
         x3,
         y3,
         tol,
+        budget,
         depth + 1,
     );
 }
@@ -2242,8 +2577,10 @@ fn flatten_cubic_polyline(
 /// geometry. The result is visually identical to "miter" for typical
 /// stroke widths and avoids the corner-case math.
 ///
-/// Round / square caps emit half-circles / extended rectangles at the
-/// open ends (best-effort follow-up, for now butt is the default).
+/// Round / square caps emit octagon disks / extended rectangles at the
+/// open ends. Butt is the default.
+///
+/// Stops early once `out` holds [`MAX_STROKE_OPS`] operations.
 fn emit_stroked_polyline(
     out: &mut Vec<PathOp>,
     points: &[(f32, f32)],
@@ -2259,6 +2596,9 @@ fn emit_stroked_polyline(
     let segs = if closed { n } else { n - 1 };
 
     for i in 0..segs {
+        if out.len() >= MAX_STROKE_OPS {
+            return;
+        }
         let a = points[i];
         let b = points[(i + 1) % n];
         let (dx, dy) = (b.0 - a.0, b.1 - a.1);
@@ -2293,9 +2633,9 @@ fn emit_stroked_polyline(
         out.push(PathOp::Close);
     }
 
-    // Joins. For miter (default): overlapping rectangles already paint
-    // the joint correctly. For round / bevel we approximate with a
-    // disk / triangle at each vertex.
+    // Joins. The overlapping rectangles leave a notch on the outer side
+    // of every corner. Round joins fill it with a disk at each vertex.
+    // Miter and bevel joins fill it with wedges below.
     if join == LineJoin::Round || cap == LineCap::Round {
         let join_at = |out: &mut Vec<PathOp>, p: (f32, f32)| {
             emit_disk(out, p.0, p.1, half);
@@ -2303,6 +2643,9 @@ fn emit_stroked_polyline(
         let start = if closed { 0 } else { 1 };
         let end = if closed { n } else { n - 1 };
         for p in &points[start..end] {
+            if out.len() >= MAX_STROKE_OPS {
+                return;
+            }
             join_at(out, *p);
         }
         if !closed && cap == LineCap::Round {
@@ -2311,16 +2654,20 @@ fn emit_stroked_polyline(
         }
     }
 
-    // Miter spikes: when adjacent segments don't form a near-straight
-    // angle, fill the wedge between them so a sharp corner doesn't
-    // leave a notch. Falls back to bevel beyond the miter limit.
-    if join == LineJoin::Miter && n >= 3 {
+    // Miter and bevel wedges: when adjacent segments don't form a
+    // near-straight angle, fill the wedge between them so a sharp
+    // corner doesn't leave a notch. Miters fall back to bevels beyond
+    // the miter limit.
+    if join != LineJoin::Round && n >= 3 {
         let span = if closed { n } else { n - 2 };
         for i in 0..span {
+            if out.len() >= MAX_STROKE_OPS {
+                return;
+            }
             let prev = points[if closed && i == 0 { n - 1 } else { i }];
             let cur = points[if closed { (i + 1) % n } else { i + 1 }];
             let next = points[if closed { (i + 2) % n } else { i + 2 }];
-            emit_miter_join(out, prev, cur, next, half);
+            emit_join_wedges(out, prev, cur, next, half, join);
         }
     }
 }
@@ -2349,16 +2696,40 @@ fn emit_disk(out: &mut Vec<PathOp>, cx: f32, cy: f32, r: f32) {
     out.push(PathOp::Close);
 }
 
-/// Emits a miter-join wedge at vertex `cur`, given the previous and
-/// next polyline points. When the join angle is reflex enough that the
-/// miter would exceed `MITER_LIMIT * width`, a bevel triangle is used
-/// instead (matching SVG's stroke-miterlimit default of 4).
-fn emit_miter_join(
+/// Stroke edge corners at a join vertex `cur`: where the left and
+/// right edges of the incoming segment end, and where those of the
+/// outgoing segment start. Left is left of the direction of travel.
+struct JoinCorners {
+    a_left: (f32, f32),
+    b_left: (f32, f32),
+    a_right: (f32, f32),
+    b_right: (f32, f32),
+}
+
+/// Emits the bevel at `cur`: one triangle on each side, joining the
+/// join center to the two edge corners. Only the outer one shows. The
+/// inner one lies where the segment rectangles already overlap.
+fn emit_bevel_join(out: &mut Vec<PathOp>, cur: (f32, f32), c: &JoinCorners) {
+    for (a, b) in [(c.a_left, c.b_left), (c.a_right, c.b_right)] {
+        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
+        out.push(PathOp::LineTo { x: a.0, y: a.1 });
+        out.push(PathOp::LineTo { x: b.0, y: b.1 });
+        out.push(PathOp::Close);
+    }
+}
+
+/// Emits the join wedges at vertex `cur`, given the previous and next
+/// polyline points. A bevel join is a triangle on each side. A miter
+/// join extends the edges to their meeting point, and becomes a bevel
+/// when the miter would exceed `MITER_LIMIT * width` (SVG's
+/// stroke-miterlimit default of 4). Round joins are drawn elsewhere.
+fn emit_join_wedges(
     out: &mut Vec<PathOp>,
     prev: (f32, f32),
     cur: (f32, f32),
     next: (f32, f32),
     half: f32,
+    join: LineJoin,
 ) {
     let (ax, ay) = (cur.0 - prev.0, cur.1 - prev.1);
     let la = (ax * ax + ay * ay).sqrt();
@@ -2372,68 +2743,39 @@ fn emit_miter_join(
     // Outer perpendicular (left of travel) on each segment.
     let (na, na2) = ((-tay) * half, tax * half);
     let (nb, nb2) = ((-tby) * half, tbx * half);
-    // Outer corners.
-    let p_a_left = (cur.0 + na, cur.1 + na2);
-    let p_b_left = (cur.0 + nb, cur.1 + nb2);
-    let p_a_right = (cur.0 - na, cur.1 - na2);
-    let p_b_right = (cur.0 - nb, cur.1 - nb2);
+    let corners = JoinCorners {
+        a_left: (cur.0 + na, cur.1 + na2),
+        b_left: (cur.0 + nb, cur.1 + nb2),
+        a_right: (cur.0 - na, cur.1 - na2),
+        b_right: (cur.0 - nb, cur.1 - nb2),
+    };
+    if join == LineJoin::Bevel {
+        emit_bevel_join(out, cur, &corners);
+        return;
+    }
 
     // Compute miter point on the outer side. A small angle between
-    // segments means a long spike. Bail to bevel beyond the limit.
+    // segments means a long spike. Bail to bevel beyond the limit or
+    // at a near 180 degree turn.
     let dot = tax * tbx + tay * tby;
     let denom = 1.0 + dot;
-    if denom <= 1e-6 {
-        // Near 180° turn; bevel triangle on each side handles it.
-        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
-        out.push(PathOp::LineTo {
-            x: p_a_left.0,
-            y: p_a_left.1,
-        });
-        out.push(PathOp::LineTo {
-            x: p_b_left.0,
-            y: p_b_left.1,
-        });
-        out.push(PathOp::Close);
-        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
-        out.push(PathOp::LineTo {
-            x: p_a_right.0,
-            y: p_a_right.1,
-        });
-        out.push(PathOp::LineTo {
-            x: p_b_right.0,
-            y: p_b_right.1,
-        });
-        out.push(PathOp::Close);
-        return;
-    }
     // Miter spike length per the SVG appendix:
     //   m = half / sin(theta/2)   where  cos(theta) = -dot for "turn"
-    let miter_ratio = (2.0_f32 / denom).sqrt(); // = 1 / sin(theta/2)
+    let miter_ratio = if denom > 1e-6 {
+        (2.0_f32 / denom).sqrt() // = 1 / sin(theta/2)
+    } else {
+        f32::INFINITY
+    };
     if miter_ratio > MITER_LIMIT {
-        // Bevel: just two triangles connecting outer corners to the
-        // join center.
-        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
-        out.push(PathOp::LineTo {
-            x: p_a_left.0,
-            y: p_a_left.1,
-        });
-        out.push(PathOp::LineTo {
-            x: p_b_left.0,
-            y: p_b_left.1,
-        });
-        out.push(PathOp::Close);
-        out.push(PathOp::MoveTo { x: cur.0, y: cur.1 });
-        out.push(PathOp::LineTo {
-            x: p_a_right.0,
-            y: p_a_right.1,
-        });
-        out.push(PathOp::LineTo {
-            x: p_b_right.0,
-            y: p_b_right.1,
-        });
-        out.push(PathOp::Close);
+        emit_bevel_join(out, cur, &corners);
         return;
     }
+    let JoinCorners {
+        a_left: p_a_left,
+        b_left: p_b_left,
+        a_right: p_a_right,
+        b_right: p_b_right,
+    } = corners;
     // Bisector direction.
     let bis_x = tax + tbx;
     let bis_y = tay + tby;
@@ -2518,6 +2860,26 @@ fn parse_dasharray(s: &str) -> Vec<f32> {
     nums
 }
 
+/// [`dash_polyline_limited`] with a fresh split budget.
+#[cfg(test)]
+fn dash_polyline(
+    points: &[(f32, f32)],
+    arc_lengths: &[f32],
+    closed: bool,
+    pattern: &[f32],
+    offset: f32,
+) -> Vec<Vec<(f32, f32)>> {
+    let mut splits_left = MAX_DASH_SPLITS;
+    dash_polyline_limited(
+        points,
+        arc_lengths,
+        closed,
+        pattern,
+        offset,
+        &mut splits_left,
+    )
+}
+
 /// Walks `points` by cumulative *true Bezier arc length* and returns
 /// the polylines that fall inside the "draw" phase of the dash pattern.
 /// `arc_lengths[i]` is the parent-curve arc length of the chord from
@@ -2546,16 +2908,26 @@ fn parse_dasharray(s: &str) -> Vec<f32> {
 ///   the same way as any other.
 /// - For straight-chord polylines (rect, polygon, polyline, line,
 ///   `LineTo` paths), `arc_lengths[i]` is exactly the Euclidean
-///   distance, so this function is bit-identical to the previous
-///   chord-only walker on those inputs.
-fn dash_polyline(
+///   distance, so this function is bit-identical to a chord-only
+///   walker on those inputs.
+///
+/// Each dash boundary walked costs one unit of `splits_left`, a budget
+/// shared across the calls for one stroke. When it runs out the walk
+/// stops and returns the dashes found so far. This also ends the walk
+/// when float rounding stops a tiny dash length from advancing along a
+/// long path.
+fn dash_polyline_limited(
     points: &[(f32, f32)],
     arc_lengths: &[f32],
     closed: bool,
     pattern: &[f32],
     offset: f32,
+    splits_left: &mut usize,
 ) -> Vec<Vec<(f32, f32)>> {
     let total: f32 = pattern.iter().sum();
+    let Some(&first) = pattern.first() else {
+        return Vec::new();
+    };
     if total <= 0.0 || points.len() < 2 {
         return Vec::new();
     }
@@ -2567,8 +2939,13 @@ fn dash_polyline(
     // The current dash index (even = draw, odd = skip) and remaining
     // length within that dash segment after consuming `off`.
     let mut idx = 0usize;
-    let mut remaining = pattern[0];
-    while off > 0.0 && remaining <= off {
+    let mut remaining = first;
+    // `off < total`, so this finishes within one pass over the pattern
+    // plus rounding slack. The bound stops a pattern whose entries are
+    // too small to change `off` from cycling forever.
+    let mut steps_left = pattern.len().saturating_mul(2).saturating_add(1);
+    while off > 0.0 && remaining <= off && steps_left > 0 {
+        steps_left -= 1;
         off -= remaining;
         idx = (idx + 1) % pattern.len();
         remaining = pattern[idx];
@@ -2608,6 +2985,10 @@ fn dash_polyline(
         // Walk the segment, splitting at every dash boundary in
         // arc-length space.
         while seg_arc - s_consumed > remaining {
+            let Some(left) = splits_left.checked_sub(1) else {
+                return out;
+            };
+            *splits_left = left;
             // Boundary lands at arc-length `s_consumed + remaining`
             // along this chord; map to chord parameter `t` linearly.
             // For straight chords this is exact; for curve chords the
@@ -2929,23 +3310,92 @@ fn line_to_path(node: &Node) -> Vec<PathOp> {
 // Render-time blit
 // =========================================================================
 
-fn render_fill(out: &mut ColorPixmap, fill: &Fill, world: &Affine, tol: f32) {
+/// Canvas-pass and segment budgets for rendering one document,
+/// shared by every fill and by the children of every mask.
+struct RenderBudget {
+    /// Canvas-sized passes left, see [`MAX_RENDER_PASSES`].
+    passes_left: u32,
+    /// Flattened segments left, see [`MAX_SEGMENTS`].
+    segments_left: usize,
+}
+
+impl RenderBudget {
+    fn new() -> Self {
+        Self {
+            passes_left: MAX_RENDER_PASSES,
+            segments_left: MAX_SEGMENTS,
+        }
+    }
+
+    /// Spends `n` passes. Returns `false`, spending nothing, when
+    /// fewer than `n` remain.
+    fn take_passes(&mut self, n: u32) -> bool {
+        match self.passes_left.checked_sub(n) {
+            Some(rest) => {
+                self.passes_left = rest;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Flattens `ops` within the remaining segment budget and charges
+    /// the segments it produced.
+    fn flatten(&mut self, ops: &[PathOp], xform: &Affine, tol: f32) -> Vec<Segment> {
+        let segs = flatten_limited(ops.iter().copied(), xform, tol, self.segments_left);
+        self.segments_left = self.segments_left.saturating_sub(segs.len());
+        segs
+    }
+}
+
+/// Renders every fill of `doc` onto `out`.
+fn render_doc(out: &mut ColorPixmap, doc: &SvgDoc, world: &Affine, tol: f32) {
+    let mut budget = RenderBudget::new();
+    for fill in &doc.fills {
+        render_fill(out, fill, world, tol, &mut budget);
+    }
+}
+
+/// Renders one fill onto `out`. Fills that no longer fit the render
+/// budget are skipped.
+///
+/// Masks are rasterized only inside the canvas. Pixels there get the
+/// same coverage as a full rasterization, and a shape far larger than
+/// the canvas costs no more than the canvas.
+fn render_fill(
+    out: &mut ColorPixmap,
+    fill: &Fill,
+    world: &Affine,
+    tol: f32,
+    budget: &mut RenderBudget,
+) {
+    if budget.segments_left == 0 || !budget.take_passes(fill.render_passes()) {
+        return;
+    }
+    let canvas = Window {
+        x0: 0,
+        y0: 0,
+        x1: out.width as i32,
+        y1: out.height as i32,
+    };
     let xf = world.compose(&fill.xform);
-    let segs = flatten(fill.ops.iter().copied(), &xf, tol);
-    if segs.is_empty() {
+    let segs = budget.flatten(&fill.ops, &xf, tol);
+    // `raster_bounds` is `None` exactly when the full rasterization
+    // would be empty, which is when there is nothing to paint.
+    if segs.is_empty() || raster_bounds(&segs).is_none() {
         return;
     }
-    let mask = raster(&segs);
-    if mask.pixmap.is_empty() {
-        return;
-    }
+    // Clipped to the canvas this can be empty while the full raster is
+    // not. That still paints nothing, but filters such as `feFlood`
+    // must run as before, so keep going.
+    let mask = rasterize_in(&segs, Some(canvas));
     // If a clip-path is set, rasterize it once, then multiply mask
     // alpha by the clip alpha at sample time. The clip lives in
     // document space; compose the world transform on top.
     let clip_mask = fill.clip.as_ref().map(|cs| {
         let cxf = world.compose(&cs.xform);
-        let csegs = flatten(cs.ops.iter().copied(), &cxf, tol);
-        raster(&csegs)
+        let csegs = budget.flatten(&cs.ops, &cxf, tol);
+        rasterize_in(&csegs, Some(canvas))
     });
 
     // Filtered or masked shapes route through a same-size scratch
@@ -2964,13 +3414,19 @@ fn render_fill(out: &mut ColorPixmap, fill: &Fill, world: &Affine, tol: f32) {
             src
         };
         if let Some(m) = &fill.mask {
-            apply_mask(&mut result, m, world, tol);
+            apply_mask_budgeted(&mut result, m, world, tol, budget);
         }
         composite_over(out, &result);
         return;
     }
 
     paint_into(out, fill, &mask, clip_mask.as_ref(), world);
+}
+
+/// [`apply_mask_budgeted`] with a fresh render budget.
+#[cfg(test)]
+fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &Affine, tol: f32) {
+    apply_mask_budgeted(dst, mask_shape, world, tol, &mut RenderBudget::new());
 }
 
 /// Multiplies `dst`'s premultiplied alpha by the alpha derived from
@@ -2985,10 +3441,17 @@ fn render_fill(out: &mut ColorPixmap, fill: &Fill, world: &Affine, tol: f32) {
 /// When `maskUnits="objectBoundingBox"` the mask's `(x, y, width,
 /// height)` rect is interpreted in `[0, 1]²` of the masked element's
 /// bounding box (computed from `dst`'s non-zero alpha extent). Pixels
-/// outside that rect are forced to `m = 0`. `userSpaceOnUse` (the
-/// PR #236 behavior) leaves the mask coverage unchanged across the
-/// whole canvas.
-fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &Affine, tol: f32) {
+/// outside that rect are forced to `m = 0`. `userSpaceOnUse` leaves
+/// the mask coverage unchanged across the whole canvas.
+///
+/// Mask children draw from `budget` like any other fill.
+fn apply_mask_budgeted(
+    dst: &mut ColorPixmap,
+    mask_shape: &MaskShape,
+    world: &Affine,
+    tol: f32,
+    budget: &mut RenderBudget,
+) {
     if dst.is_empty() {
         return;
     }
@@ -2997,7 +3460,7 @@ fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &Affine, tol
     // element in pixel space.
     let mut mask_buf = ColorPixmap::new(dst.width, dst.height);
     for f in &mask_shape.fills {
-        render_fill(&mut mask_buf, f, world, tol);
+        render_fill(&mut mask_buf, f, world, tol, budget);
     }
 
     // For `objectBoundingBox`, derive the bbox from `dst`'s non-zero
@@ -3043,8 +3506,8 @@ fn apply_mask(dst: &mut ColorPixmap, mask_shape: &MaskShape, world: &Affine, tol
     // preserves the invariant.
     //
     // The mask buffer is also premultiplied (it came out of the same
-    // render pipeline). For luminance we keep the integer-math trick
-    // from PR #236: luminance(premul_rgb) is already luminance * alpha
+    // render pipeline). For luminance we use an integer-math shortcut:
+    // luminance(premul_rgb) is already luminance * alpha
     // because premul_rgb = straight_rgb * alpha, so no un-premultiply
     // step is needed. Fixed-point: BT.709 weights * 1024 -> 218 / 732 /
     // 74 (sum 1024) for round-trip-stable integer math.
@@ -3384,12 +3847,9 @@ fn apply_filter(filter: &Filter, source: &ColorPixmap) -> ColorPixmap {
     for prim in &filter.primitives {
         let in_pix: ColorPixmap = match prim.input.as_deref() {
             Some("SourceGraphic") => source.clone(),
-            Some("SourceAlpha") => {
-                if source_alpha.is_none() {
-                    source_alpha = Some(make_source_alpha(source));
-                }
-                source_alpha.as_ref().unwrap().clone()
-            }
+            Some("SourceAlpha") => source_alpha
+                .get_or_insert_with(|| make_source_alpha(source))
+                .clone(),
             Some(name) => named
                 .get(name)
                 .cloned()
@@ -3410,12 +3870,9 @@ fn apply_filter(filter: &Filter, source: &ColorPixmap) -> ColorPixmap {
                 for name in inputs {
                     let layer = match name.as_str() {
                         "SourceGraphic" => source.clone(),
-                        "SourceAlpha" => {
-                            if source_alpha.is_none() {
-                                source_alpha = Some(make_source_alpha(source));
-                            }
-                            source_alpha.as_ref().unwrap().clone()
-                        }
+                        "SourceAlpha" => source_alpha
+                            .get_or_insert_with(|| make_source_alpha(source))
+                            .clone(),
                         other => named
                             .get(other)
                             .cloned()
@@ -3487,8 +3944,8 @@ fn apply_gaussian_blur(src: &ColorPixmap, sx: f32, sy: f32) -> ColorPixmap {
     if (sx <= 0.0 && sy <= 0.0) || src.is_empty() {
         return src.clone();
     }
-    let rx = (sx.max(0.0)).ceil() as i32;
-    let ry = (sy.max(0.0)).ceil() as i32;
+    let rx = ((sx.max(0.0)).ceil() as i32).min(MAX_BLUR_RADIUS);
+    let ry = ((sy.max(0.0)).ceil() as i32).min(MAX_BLUR_RADIUS);
     let mut buf = src.clone();
     if rx > 0 {
         for _ in 0..3 {
@@ -3501,6 +3958,17 @@ fn apply_gaussian_blur(src: &ColorPixmap, sx: f32, sy: f32) -> ColorPixmap {
         }
     }
     buf
+}
+
+/// Sum of `sample(k)` over `k` in `-r..=r` with `k` clamped into
+/// `0..len`, as the edge-extending blur window needs. Counts the
+/// clamped samples instead of visiting them, so the cost is at most
+/// `len` samples however large `r` is. `r >= 0` and `len >= 1`.
+fn clamped_window_sum(r: i32, len: i32, sample: impl Fn(i32) -> u32) -> u32 {
+    let inside = r.min(len - 1);
+    let below = r as u32 * sample(0);
+    let above = (r - inside) as u32 * sample(len - 1);
+    (0..=inside).map(&sample).sum::<u32>() + below + above
 }
 
 fn box_blur_h(src: &ColorPixmap, r: i32) -> ColorPixmap {
@@ -3518,19 +3986,12 @@ fn box_blur_h(src: &ColorPixmap, r: i32) -> ColorPixmap {
         // clamp to the edge ("EDGE" mode in SVG terms, closer to what
         // browser engines do for filter regions touching the canvas
         // edge).
-        let mut sr: u32 = 0;
-        let mut sg: u32 = 0;
-        let mut sb: u32 = 0;
-        let mut sa: u32 = 0;
         // Prime the window with [-r, r] samples.
-        for kx in -r..=r {
-            let cx = kx.clamp(0, w - 1);
-            let i = row + cx as usize * 4;
-            sr += src.data[i] as u32;
-            sg += src.data[i + 1] as u32;
-            sb += src.data[i + 2] as u32;
-            sa += src.data[i + 3] as u32;
-        }
+        let sample = |c: usize| move |kx: i32| src.data[row + kx as usize * 4 + c] as u32;
+        let mut sr = clamped_window_sum(r, w, sample(0));
+        let mut sg = clamped_window_sum(r, w, sample(1));
+        let mut sb = clamped_window_sum(r, w, sample(2));
+        let mut sa = clamped_window_sum(r, w, sample(3));
         for x in 0..w {
             let oi = row + x as usize * 4;
             out.data[oi] = (sr / kernel) as u8;
@@ -3563,18 +4024,11 @@ fn box_blur_v(src: &ColorPixmap, r: i32) -> ColorPixmap {
     let stride = (w as usize) * 4;
     for x in 0..w {
         let col = x as usize * 4;
-        let mut sr: u32 = 0;
-        let mut sg: u32 = 0;
-        let mut sb: u32 = 0;
-        let mut sa: u32 = 0;
-        for ky in -r..=r {
-            let cy = ky.clamp(0, h - 1);
-            let i = col + cy as usize * stride;
-            sr += src.data[i] as u32;
-            sg += src.data[i + 1] as u32;
-            sb += src.data[i + 2] as u32;
-            sa += src.data[i + 3] as u32;
-        }
+        let sample = |c: usize| move |ky: i32| src.data[col + ky as usize * stride + c] as u32;
+        let mut sr = clamped_window_sum(r, h, sample(0));
+        let mut sg = clamped_window_sum(r, h, sample(1));
+        let mut sb = clamped_window_sum(r, h, sample(2));
+        let mut sa = clamped_window_sum(r, h, sample(3));
         for y in 0..h {
             let oi = col + y as usize * stride;
             out.data[oi] = (sr / kernel) as u8;
@@ -3628,17 +4082,19 @@ fn apply_color_matrix(src: &ColorPixmap, m: &[f32; 20]) -> ColorPixmap {
 /// reads return transparent black; the destination is fresh.
 fn apply_offset(src: &ColorPixmap, dx: f32, dy: f32) -> ColorPixmap {
     let mut out = ColorPixmap::new(src.width, src.height);
+    // `as i32` saturates for huge offsets, so the subtractions below
+    // saturate too. Any saturated source index is out of range.
     let dxi = dx.round() as i32;
     let dyi = dy.round() as i32;
     let w = src.width as i32;
     let h = src.height as i32;
     for y in 0..h {
-        let sy = y - dyi;
+        let sy = y.saturating_sub(dyi);
         if sy < 0 || sy >= h {
             continue;
         }
         for x in 0..w {
-            let sx = x - dxi;
+            let sx = x.saturating_sub(dxi);
             if sx < 0 || sx >= w {
                 continue;
             }
@@ -3959,9 +4415,11 @@ fn parse_color(s: &str) -> Option<[u8; 4]> {
     }
     if let Some(rest) = s.strip_prefix('#') {
         if rest.len() == 6 {
-            let r = u8::from_str_radix(&rest[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&rest[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&rest[4..6], 16).ok()?;
+            // `get` rather than slicing: six bytes of non-ASCII text can
+            // put a byte offset inside a character.
+            let r = u8::from_str_radix(rest.get(0..2)?, 16).ok()?;
+            let g = u8::from_str_radix(rest.get(2..4)?, 16).ok()?;
+            let b = u8::from_str_radix(rest.get(4..6)?, 16).ok()?;
             return Some([r, g, b, 255]);
         }
         if rest.len() == 3 {
@@ -4080,8 +4538,11 @@ fn parse_path_d(s: &str) -> Result<Vec<PathOp>, RenderError> {
             match last_cmd {
                 Some(b'M') => b'L',
                 Some(b'm') => b'l',
+                // Closepath takes no arguments, so a number after it is
+                // an error. Repeating it would consume nothing and loop
+                // forever.
+                Some(b'Z' | b'z') | None => return Err(RenderError::Parse("svg path d")),
                 Some(prev) => prev,
-                None => return Err(RenderError::Parse("svg path d")),
             }
         };
         match cmd {
@@ -4493,6 +4954,34 @@ mod tests {
     }
 
     #[test]
+    fn stop_style_sets_color_and_opacity() {
+        // The style declarations win over the attributes, and the
+        // trailing semicolon does not drop the stop.
+        let xml = r##"<svg viewBox="0 0 10 10">
+            <defs>
+                <linearGradient id="g" x1="0" y1="0" x2="10" y2="0">
+                    <stop offset="0" stop-opacity="1" style="stop-color:#00FF00;stop-opacity:0.25;"/>
+                    <stop offset="1" stop-color="#0000FF" stop-opacity="0.5"/>
+                </linearGradient>
+            </defs>
+            <rect x="0" y="0" width="10" height="10" fill="url(#g)"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        let Paint::Gradient(g) = &doc.fills[0].paint else {
+            panic!("expected gradient fill");
+        };
+        assert_eq!(g.stops.len(), 2);
+        let first = g.stops[0].color;
+        assert!((first.g - 1.0).abs() < 1e-6 && first.r.abs() < 1e-6);
+        assert!(
+            (first.a - 0.25).abs() < 1e-6,
+            "style opacity, got {}",
+            first.a
+        );
+        assert!((g.stops[1].color.a - 0.5).abs() < 1e-6, "attribute opacity");
+    }
+
+    #[test]
     fn radial_gradient_parsed() {
         let xml = r##"<svg viewBox="0 0 10 10">
             <defs>
@@ -4519,6 +5008,27 @@ mod tests {
         // No fill (fill="none"), but one stroke fill.
         assert_eq!(doc.fills.len(), 1);
         assert!(doc.fills[0].is_stroke);
+    }
+
+    /// Strokes a right-angle corner at (50, 10) with the given join
+    /// and reports whether two pixels past the outer corner are
+    /// painted: (51, 8) lies inside the bevel, (53, 6) only inside the
+    /// miter.
+    fn outer_corner_pixels(join: &str) -> (bool, bool) {
+        let xml = alloc::format!(
+            r##"<svg viewBox="0 0 64 64"><path d="M 10 10 L 50 10 L 50 50" stroke="#000"
+                stroke-width="8" stroke-linejoin="{join}" fill="none"/></svg>"##
+        );
+        let doc = parse_document(&xml).unwrap();
+        let mut pix = ColorPixmap::new(64, 64);
+        render_doc(&mut pix, &doc, &Affine::identity(), 0.25);
+        (pix.get(51, 8)[3] > 0, pix.get(53, 6)[3] > 0)
+    }
+
+    #[test]
+    fn bevel_join_fills_the_outer_corner_without_a_spike() {
+        assert_eq!(outer_corner_pixels("bevel"), (true, false));
+        assert_eq!(outer_corner_pixels("miter"), (true, true));
     }
 
     #[test]
@@ -4596,7 +5106,7 @@ mod tests {
 
     #[test]
     fn mask_of_mask_is_dropped() {
-        // The brief defers nested masks: a mask whose body references
+        // Nested masks are unsupported: a mask whose body references
         // another mask must drop the inner reference at resolve time.
         let xml = r##"<svg viewBox="0 0 100 100">
             <defs>
@@ -5148,7 +5658,7 @@ mod tests {
                 .sum()
         };
         // Sanity: arc-length is *longer* than the chord polyline,
-        // matching the brief's analytic prediction.
+        // matching the analytic prediction.
         assert!(
             true_arc_total > chord_total,
             "arc-length {true_arc_total} must exceed chord total {chord_total}"
@@ -5492,5 +6002,199 @@ mod tests {
             (180.0..=220.0).contains(&total),
             "expected chord total ~200, got {total}"
         );
+    }
+
+    #[test]
+    fn path_d_number_after_closepath_is_an_error() {
+        // A number after `Z` used to repeat the closepath without
+        // consuming input, looping forever while pushing Close ops.
+        assert!(parse_path_d("M0 0 L1 0 Z 1 1").is_err());
+        assert!(parse_path_d("m0 0 z5").is_err());
+    }
+
+    #[test]
+    fn parse_color_rejects_six_bytes_of_non_ascii_hex() {
+        // Six bytes of text where byte 2 falls inside a character used
+        // to panic on the slice.
+        assert_eq!(parse_color("#a\u{20AC}bc"), None);
+        assert_eq!(parse_color("#\u{e9}\u{e9}\u{e9}"), None);
+    }
+
+    #[test]
+    fn use_fan_out_is_bounded_by_the_work_budget() {
+        // Ten levels of groups that each reference the next level ten
+        // times expand to 10^10 element visits. This used to hang.
+        use core::fmt::Write;
+        let mut xml = String::from(r#"<svg viewBox="0 0 10 10"><defs>"#);
+        for level in 0..10 {
+            write!(xml, r#"<g id="l{level}">"#).unwrap();
+            for _ in 0..10 {
+                write!(xml, r##"<use href="#l{}"/>"##, level + 1).unwrap();
+            }
+            xml.push_str("</g>");
+        }
+        xml.push_str(r##"<g id="l10"/></defs><use href="#l0"/></svg>"##);
+        assert_eq!(
+            parse_document(&xml).unwrap_err(),
+            RenderError::Parse("svg work cap")
+        );
+    }
+
+    #[test]
+    fn repeated_large_clip_is_bounded_by_the_ops_budget() {
+        // Every fill used to carry its own copy of the clip path, so
+        // 4096 fills sharing a 20k-op clip stored 80M operations.
+        use core::fmt::Write;
+        let mut clip = String::from("M0 0");
+        for i in 0..20_000 {
+            write!(clip, " L{} {}", i % 97, i % 89).unwrap();
+        }
+        let mut xml = String::from(r#"<svg viewBox="0 0 10 10"><defs><clipPath id="c">"#);
+        write!(xml, r#"<path d="{clip}"/></clipPath></defs>"#).unwrap();
+        for _ in 0..4096 {
+            xml.push_str(r#"<rect width="5" height="5" clip-path="url(#c)"/>"#);
+        }
+        xml.push_str("</svg>");
+        let doc = parse_document(&xml).unwrap();
+        let stored: usize = doc.fills.iter().map(Fill::weight).sum();
+        assert!(stored <= MAX_DOC_OPS, "stored {stored} ops");
+        assert!(doc.fills.len() < 4096);
+    }
+
+    #[test]
+    fn filter_keeps_at_most_max_primitives() {
+        let mut xml = String::from(r#"<svg viewBox="0 0 10 10"><defs><filter id="f">"#);
+        for _ in 0..500 {
+            xml.push_str(r#"<feOffset dx="1"/>"#);
+        }
+        xml.push_str(r##"</filter></defs><rect width="5" height="5" filter="url(#f)"/></svg>"##);
+        let doc = parse_document(&xml).unwrap();
+        let f = doc.fills[0].filter.as_ref().expect("filter attached");
+        assert_eq!(f.primitives.len(), MAX_FILTER_PRIMITIVES);
+    }
+
+    #[test]
+    fn shared_mask_rendering_is_bounded_by_the_pass_budget() {
+        // Every masked fill renders all mask children again, so fills
+        // times children grows without limit. Here 1000 fills with a
+        // 100-child mask would need about 102k canvas passes.
+        use core::fmt::Write;
+        let mut xml = String::from(r#"<svg viewBox="0 0 16 16"><defs><mask id="m">"#);
+        for i in 0..100 {
+            write!(
+                xml,
+                r#"<rect x="{}" y="0" width="1" height="16" fill="white"/>"#,
+                i % 16
+            )
+            .unwrap();
+        }
+        xml.push_str("</mask></defs>");
+        for _ in 0..1000 {
+            xml.push_str(r#"<rect width="8" height="8" fill="red" mask="url(#m)"/>"#);
+        }
+        xml.push_str("</svg>");
+        let doc = parse_document(&xml).unwrap();
+        assert_eq!(doc.fills.len(), 1000);
+        let mut out = ColorPixmap::new(16, 16);
+        let mut budget = RenderBudget::new();
+        for fill in &doc.fills {
+            render_fill(&mut out, fill, &Affine::identity(), 0.25, &mut budget);
+        }
+        assert!(budget.passes_left < doc.fills[0].render_passes() + 100);
+        assert_eq!(out.get(4, 4)[3], 255, "early fills still render");
+    }
+
+    #[test]
+    fn repeated_mask_resolution_is_bounded_by_the_work_budget() {
+        // Each masked element walks the whole mask body again. With a
+        // 1000-child mask and 4000 elements that is four million
+        // element visits, so the parse stops at the work budget.
+        let mut xml = String::from(r#"<svg viewBox="0 0 16 16"><defs><mask id="m">"#);
+        for _ in 0..1000 {
+            xml.push_str(r#"<rect width="1" height="16" fill="white"/>"#);
+        }
+        xml.push_str("</mask></defs>");
+        for _ in 0..4000 {
+            xml.push_str(r#"<rect width="8" height="8" fill="red" mask="url(#m)"/>"#);
+        }
+        xml.push_str("</svg>");
+        assert_eq!(
+            parse_document(&xml).unwrap_err(),
+            RenderError::Parse("svg work cap")
+        );
+    }
+
+    #[test]
+    fn tiny_dash_on_a_long_line_stops_at_the_split_budget() {
+        // Past ~16384 units a 0.001 dash no longer advances the walk
+        // position, so this used to loop forever.
+        let pts = [(0.0, 0.0), (100_000.0, 0.0)];
+        let segs = dash_polyline(&pts, &[100_000.0], false, &[0.001, 0.001], 0.0);
+        assert!(!segs.is_empty());
+        assert!(segs.len() <= MAX_DASH_SPLITS);
+    }
+
+    #[test]
+    fn non_finite_curves_do_not_multiply_stroke_points() {
+        // A NaN control point used to subdivide 16 levels deep and emit
+        // 65536 points per curve.
+        let ops = [
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::QuadTo {
+                cx: f32::NAN,
+                cy: 0.0,
+                x: 10.0,
+                y: 0.0,
+            },
+            PathOp::CubicTo {
+                c1x: f32::INFINITY,
+                c1y: 0.0,
+                c2x: 0.0,
+                c2y: 0.0,
+                x: 20.0,
+                y: 5.0,
+            },
+        ];
+        let polys = flatten_to_polylines(&ops);
+        let points: usize = polys.iter().map(|p| p.points.len()).sum();
+        assert_eq!(points, 3);
+    }
+
+    #[test]
+    fn huge_blur_radius_is_clamped() {
+        let mut src = ColorPixmap::new(7, 5);
+        for (i, b) in src.data.iter_mut().enumerate() {
+            *b = (i * 37 % 256) as u8;
+        }
+        // Used to overflow `r * 2 + 1` (a panic in debug builds) and
+        // visit four billion window samples per row.
+        let out = apply_gaussian_blur(&src, 1e30, f32::INFINITY);
+        assert_eq!((out.width, out.height), (7, 5));
+    }
+
+    #[test]
+    fn counted_blur_window_matches_the_sample_by_sample_sum() {
+        for r in 0..24 {
+            for len in 1..12 {
+                let sample = |k: i32| (k * 13 + 7) as u32 % 256;
+                let naive: u32 = (-r..=r).map(|k| sample(k.clamp(0, len - 1))).sum();
+                assert_eq!(clamped_window_sum(r, len, sample), naive, "r {r} len {len}");
+            }
+        }
+    }
+
+    #[test]
+    fn huge_filter_offset_does_not_overflow() {
+        let mut src = ColorPixmap::new(4, 4);
+        src.data.fill(200);
+        // `y - dy` used to overflow `i32` once the offset saturated.
+        for (dx, dy) in [
+            (0.0, -1e30),
+            (-1e30, 0.0),
+            (f32::NEG_INFINITY, f32::INFINITY),
+        ] {
+            let out = apply_offset(&src, dx, dy);
+            assert!(out.data.iter().all(|&b| b == 0));
+        }
     }
 }

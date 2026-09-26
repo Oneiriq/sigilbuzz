@@ -8,7 +8,8 @@
 //! These two properties are published in the Unicode Character
 //! Database (`IndicSyllabicCategory.txt`, `IndicPositionalCategory.txt`)
 //! and are OSI-approved data. sigilbuzz carries a hand-curated excerpt
-//! covering the scripts it can shape: the full Indic family at 0.2.0.
+//! covering the scripts it can shape: the ten scripts of the Indic
+//! family (Devanagari through Sinhala).
 //!
 //! # Layout
 //!
@@ -33,46 +34,82 @@
 /// Indic syllable. Variants mirror the UAX #44 `Indic_Syllabic_Category`
 /// enumeration; only the values sigilbuzz uses today are listed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum IndicSyllabicCategory {
     /// Anything we have not tabulated: passes through untouched.
     Other,
+    /// Nasalization mark (anusvara, candrabindu).
     Bindu,
+    /// Post-vocalic aspiration mark.
     Visarga,
+    /// Elision mark (avagraha).
     Avagraha,
+    /// Nukta: modifies the consonant before it.
     Nukta,
+    /// Virama that forms conjuncts (halant).
     Virama,
+    /// Virama that only kills the inherent vowel, never stacks.
     PureKiller,
+    /// Invisible virama that only stacks (Myanmar, Khmer coeng).
     InvisibleStacker,
+    /// Independent vowel letter.
     VowelIndependent,
+    /// Dependent vowel sign (matra).
     VowelDependent,
+    /// Vowel that is neither clearly independent nor dependent.
     Vowel,
+    /// Stand-in base for a vowel or mark (dotted circle, hyphen).
     ConsonantPlaceholder,
+    /// Base consonant.
     Consonant,
+    /// Consonant with no inherent vowel (khanda ta, chillu).
     ConsonantDead,
+    /// Consonant that stacks the following consonant.
     ConsonantWithStacker,
+    /// Consonant that prefixes a syllable (Tibetan-style).
     ConsonantPrefixed,
+    /// Repha form that precedes the base (Consonant_Preceding_Repha).
     ConsonantPreceding,
+    /// Repha form that follows the base (Consonant_Succeeding_Repha).
     ConsonantSucceeding,
+    /// Subjoined consonant form.
     ConsonantSubjoined,
+    /// Medial consonant.
     ConsonantMedial,
+    /// Syllable-final consonant.
     ConsonantFinal,
+    /// Head letter of a stack (Tibetan).
     ConsonantHeadLetter,
+    /// Initial consonant written as a postfix.
     ConsonantInitialPostfixed,
+    /// Letter that modifies the preceding letter.
     ModifyingLetter,
+    /// Spacing tone letter.
     ToneLetter,
+    /// Nonspacing tone mark.
     ToneMark,
+    /// Gemination mark (consonant doubling).
     GeminationMark,
+    /// Cantillation mark (Vedic accents).
     CantillationMark,
+    /// Register shifter (Khmer).
     RegisterShifter,
+    /// Mark that modifies the whole syllable.
     SyllableModifier,
+    /// Mark that silences a consonant.
     ConsonantKiller,
+    /// Digit.
     Number,
+    /// Brahmi joining number.
     BrahmiJoiningNumber,
+    /// Mark that joins numbers.
     NumberJoiner,
+    /// Zero-width joiner.
     Joiner,
+    /// Zero-width non-joiner.
     NonJoiner,
+    /// Symbol.
     Symbol,
+    /// Symbol that behaves like a letter.
     SymbolLetter,
 }
 
@@ -80,24 +117,39 @@ pub enum IndicSyllabicCategory {
 /// base consonant. Used by the Indic shaper to decide which feature
 /// bucket a matra belongs in (pre-base, below-base, post-base...).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum IndicPositionalCategory {
     /// Default for codepoints without a position annotation.
     NotApplicable,
+    /// Right of the base (post-base).
     Right,
+    /// Left of the base (pre-base).
     Left,
+    /// Split: one part left, one part right of the base.
     LeftAndRight,
+    /// Above the base.
     Top,
+    /// Below the base.
     Bottom,
+    /// Split: above and below the base.
     TopAndBottom,
+    /// Split: above and right of the base.
     TopAndRight,
+    /// Split: above and left of the base.
     TopAndLeft,
+    /// Split: above, left, and right of the base.
     TopAndLeftAndRight,
+    /// Split: below and left of the base.
     BottomAndLeft,
+    /// Split: below and right of the base.
     BottomAndRight,
+    /// Split: above, below, and right of the base.
     TopAndBottomAndRight,
+    /// Split: above, below, and left of the base.
     TopAndBottomAndLeft,
+    /// Drawn over the base.
     Overstruck,
+    /// Drawn left of the base and stored before it (the visual-order
+    /// vowels of Thai, Lao, and New Tai Lue).
     VisualOrderLeft,
 }
 
@@ -443,7 +495,7 @@ const fn malayalam_syllabic(cp: u32) -> IndicSyllabicCategory {
         // dot reph"). HarfBuzz treats it as a consonant; we bundle it into the
         // Consonant range alongside the script's base consonants and U+0D54..0D56
         // chillus so the syllable segmenter handles it as a base-eligible glyph.
-        // Reph reorder proper (LogRepha mode) is a follow-up issue.
+        // Reph reordering in LogRepha mode is not implemented.
         0x0D15..=0x0D3A | 0x0D4E | 0x0D54..=0x0D56 => IndicSyllabicCategory::Consonant,
         0x0D3B | 0x0D3C => IndicSyllabicCategory::Nukta,
         0x0D3D => IndicSyllabicCategory::Avagraha,

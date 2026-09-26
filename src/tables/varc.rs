@@ -43,8 +43,8 @@
 //!
 //! # Scope
 //!
-//! Reading only: encoding and subsetting are out of scope and live in
-//! their own follow-up tickets. ConditionList parsing is stubbed (we
+//! This module only reads VARC. Subsetting lives in the
+//! `sigilbuzz-subset` crate. ConditionList parsing is stubbed (we
 //! advance past it but never gate on conditions); in-the-wild VARC
 //! fonts shipped to date do not exercise conditions either.
 
@@ -80,8 +80,9 @@ pub struct VarcComponent {
     /// `(x', y') = (xx*x + xy*y + tx, yx*x + yy*y + ty)`.
     pub transform: [f32; 6],
     /// Effective normalized axis coords for the child outline, in
-    /// `fvar` axis order. Empty when the child reuses the parent's
-    /// coord vector (RESET_UNSPECIFIED_AXES clear and HAVE_AXES clear).
+    /// `fvar` axis order: the parent's coord vector with any HAVE_AXES
+    /// values written over the listed axes. The vector grows to cover
+    /// the highest listed axis when the parent's is shorter.
     pub coords: Vec<f32>,
 }
 
@@ -92,8 +93,9 @@ pub struct VarcComposite {
     pub components: Vec<VarcComponent>,
 }
 
-// Variable-component flag bits (per boring-expansion-spec).
-const VC_RESET_UNSPECIFIED_AXES: u32 = 1 << 0;
+// Variable-component flag bits (per boring-expansion-spec). Bit 0,
+// RESET_UNSPECIFIED_AXES, is not honored: axes a component does not
+// list always keep the parent's value.
 const VC_HAVE_AXES: u32 = 1 << 1;
 const VC_AXIS_VALUES_HAVE_VARIATION: u32 = 1 << 2;
 const VC_TRANSFORM_HAS_VARIATION: u32 = 1 << 3;
@@ -109,6 +111,13 @@ const VC_GID_IS_24BIT: u32 = 1 << 12;
 const VC_HAVE_SKEW_X: u32 = 1 << 13;
 const VC_HAVE_SKEW_Y: u32 = 1 << 14;
 const VC_RESERVED_MASK: u32 = !((1u32 << 15) - 1);
+
+/// Upper bound on the coordinate values one composite carries across
+/// all its components. Each component copies a coord vector, widened
+/// to the highest axis index it lists, so a few record bytes can ask
+/// for up to 65536 values. The cap keeps a long record of such
+/// components from turning into a huge allocation.
+const MAX_COMPOSITE_COORDS: usize = 1 << 20;
 
 impl<'a> Varc<'a> {
     /// Parses a `VARC` table.
@@ -200,28 +209,36 @@ impl<'a> Varc<'a> {
 
     /// Resolves the component list for `gid` at the given normalized
     /// axis coords. Returns `None` for uncovered gids.
+    ///
+    /// A malformed component ends the list early. So does a component
+    /// that would push the total length of all component coord vectors
+    /// past 2^20 values.
     #[must_use]
     pub fn composite(&self, gid: u16, coords: &[f32]) -> Option<VarcComposite> {
         let idx = self.coverage.index_of(gid)? as usize;
         let raw = *self.glyph_records.get(idx)?;
         let mut composite = VarcComposite::default();
         let mut r = Reader::new(raw);
+        let mut total_coords = 0usize;
         while !r.is_empty() {
             // A VarComponent stops when bytes run out. Reaching the
             // end mid-record means the font is malformed; we skip the
             // rest rather than error so a single bad glyph doesn't
             // tank the rest of the document.
-            match self.resolve_component(&mut r, coords) {
-                Ok(c) => composite.components.push(c),
-                Err(_) => break,
+            let Ok(c) = self.resolve_component(&mut r, coords) else {
+                break;
+            };
+            total_coords = total_coords.saturating_add(c.coords.len());
+            if total_coords > MAX_COMPOSITE_COORDS {
+                break;
             }
+            composite.components.push(c);
         }
         Some(composite)
     }
 
     /// Decodes one component record at the reader's current position
     /// and resolves it against `coords`.
-    #[allow(clippy::too_many_lines, clippy::similar_names)]
     fn resolve_component(&self, r: &mut Reader<'_>, coords: &[f32]) -> Result<VarcComponent> {
         let flags = read_uint32var(r)?;
         if flags & VC_RESERVED_MASK != 0 {
@@ -244,28 +261,19 @@ impl<'a> Varc<'a> {
             let _ = read_uint32var(r)?;
         }
 
-        let mut effective_coords: Vec<f32> = if flags & VC_RESET_UNSPECIFIED_AXES != 0 {
-            // Start from the parent's coord vector; HAVE_AXES values
-            // override per-axis. (Inherited axes outside HAVE_AXES are
-            // taken from the parent.)
-            coords.to_vec()
-        } else {
-            // No reset: the child operates in the same coord vector
-            // as the parent, with HAVE_AXES values *replacing* the
-            // listed axes.
-            coords.to_vec()
-        };
+        // The child starts from the parent's coord vector, and
+        // HAVE_AXES values replace the listed axes.
+        let mut effective_coords: Vec<f32> = coords.to_vec();
 
         if flags & VC_HAVE_AXES != 0 {
             let axis_indices_index = read_uint32var(r)? as usize;
-            let axis_indices = self
-                .axis_indices_lists
-                .get(axis_indices_index)
-                .ok_or(Error::Malformed {
-                    offset: r.position(),
-                    context: "VARC component axisIndicesIndex out of range",
-                })?
-                .clone();
+            let axis_indices =
+                self.axis_indices_lists
+                    .get(axis_indices_index)
+                    .ok_or(Error::Malformed {
+                        offset: r.position(),
+                        context: "VARC component axisIndicesIndex out of range",
+                    })?;
             let n = axis_indices.len();
             // The TupleValues stream packs `n` F2DOT14 values, but
             // sigilbuzz's decode_tuple_values yields i32; we treat
@@ -274,14 +282,8 @@ impl<'a> Varc<'a> {
                 offset: r.position(),
                 context: "VARC component axisValues TupleValues truncated",
             })?;
-            let mut axis_values: Vec<f32> = raw_values
-                .into_iter()
-                .map(|v| {
-                    #[allow(clippy::cast_precision_loss)]
-                    let f = v as f32 / 16384.0;
-                    f
-                })
-                .collect();
+            let mut axis_values: Vec<f32> =
+                raw_values.into_iter().map(|v| v as f32 / 16384.0).collect();
 
             // Optional per-value variation deltas.
             if flags & VC_AXIS_VALUES_HAVE_VARIATION != 0 {
@@ -290,8 +292,8 @@ impl<'a> Varc<'a> {
                     let outer = (var_idx >> 16) as u16;
                     let inner = var_idx & 0xFFFF;
                     if let Some(deltas) = store.resolve_deltas(outer, inner, n, coords) {
-                        for (i, d) in deltas.iter().enumerate() {
-                            axis_values[i] += d / 16384.0;
+                        for (value, d) in axis_values.iter_mut().zip(&deltas) {
+                            *value += d / 16384.0;
                         }
                     }
                 }
@@ -401,16 +403,6 @@ impl<'a> Varc<'a> {
         //   T(-tcx, -tcy)
         let transform = compose_affine(tx, ty, rotation, sx, sy, skew_x, skew_y, tcx, tcy);
 
-        // Discard any reserved trailing uint32var per remaining flag
-        // bit. boring-expansion-spec says the high 17 bits are a
-        // reserved-mask; we already errored on those above, so this
-        // loop is a no-op in practice. Kept for forward-compat.
-        let mut bits = flags & VC_RESERVED_MASK;
-        while bits != 0 {
-            let _ = read_uint32var(r)?;
-            bits &= bits - 1;
-        }
-
         Ok(VarcComponent {
             gid,
             transform,
@@ -478,7 +470,9 @@ fn decode_tuple_values_in_reader(r: &mut Reader<'_>, count: usize) -> Option<Vec
     let start = r.position();
     let remaining = r.remaining();
     let buf = r.peek_bytes(remaining).ok()?;
-    let mut out: Vec<i32> = Vec::with_capacity(count);
+    // One control byte yields at most 64 values, so reserve no more
+    // than the remaining bytes can encode.
+    let mut out: Vec<i32> = Vec::with_capacity(count.min(buf.len().saturating_mul(64)));
     let mut i = 0usize;
     while out.len() < count {
         if i >= buf.len() {
@@ -515,7 +509,6 @@ fn decode_tuple_values_in_reader(r: &mut Reader<'_>, count: usize) -> Option<Vec
                     if i >= buf.len() {
                         return None;
                     }
-                    #[allow(clippy::cast_possible_wrap)]
                     let v = buf[i] as i8;
                     i += 1;
                     i32::from(v)
@@ -580,13 +573,11 @@ fn decode_axis_indices(data: &[u8]) -> Result<Vec<u16>> {
                             context: "VARC axisIndices i8 entry truncated",
                         });
                     }
-                    #[allow(clippy::cast_possible_wrap)]
                     let v = data[i] as i8;
                     i += 1;
                     i32::from(v)
                 }
             };
-            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
             out.push(v as u16);
         }
     }
@@ -597,14 +588,12 @@ fn decode_axis_indices(data: &[u8]) -> Result<Vec<u16>> {
 /// this for rotation, skew (each multiplied by π in radians).
 fn read_f4dot12(r: &mut Reader<'_>) -> Result<f32> {
     let raw = r.read_i16()?;
-    #[allow(clippy::cast_precision_loss)]
     Ok(f32::from(raw) / 4096.0)
 }
 
 /// Reads an F6.10 fixed-point as `f32`. Used for scale fields.
 fn read_f6dot10(r: &mut Reader<'_>) -> Result<f32> {
     let raw = r.read_i16()?;
-    #[allow(clippy::cast_precision_loss)]
     Ok(f32::from(raw) / 1024.0)
 }
 
@@ -617,11 +606,7 @@ fn read_f6dot10(r: &mut Reader<'_>) -> Result<f32> {
 /// ```
 ///
 /// Returned in `[xx, xy, yx, yy, tx_eff, ty_eff]` row-major form.
-#[allow(
-    clippy::many_single_char_names,
-    clippy::too_many_arguments,
-    clippy::similar_names
-)]
+#[allow(clippy::too_many_arguments)]
 fn compose_affine(
     tx: f32,
     ty: f32,
@@ -633,13 +618,8 @@ fn compose_affine(
     tcx: f32,
     tcy: f32,
 ) -> [f32; 6] {
-    // sigilbuzz is no_std; avoid libm by sticking to small-angle exact
-    // values for the trig-free identity case (rotation == skew == 0).
-    // For non-zero angles fall back to the polynomial approximations
-    // already used by the rest of the crate. No, we just use libm-free
-    // f32::sin / f32::cos when std is on, and a Taylor expansion when
-    // it isn't. Wait: core::f32 has no sin/cos in no_std. Use a
-    // ChebyshevPad approximation good to ~5e-7 over [-π, π].
+    // core has no sin or cos without std, so `sincos_pi` evaluates a
+    // Taylor polynomial instead of calling libm.
     let (cos_r, sin_r) = sincos_pi(rotation);
     let (cos_skx, sin_skx) = sincos_pi(-skew_x);
     let (cos_sky, sin_sky) = sincos_pi(skew_y);
@@ -679,14 +659,25 @@ fn compose_affine(
     [r_xx, r_xy, r_yx, r_yy, tx_eff, ty_eff]
 }
 
-/// `sin(x*π)` and `cos(x*π)` for `x` in `[-2, 2]`. Tight enough for
-/// glyph composites. VARC's F4.12 rotation field clamps at ±2π
-/// regardless and font designers stay well inside ±π. Implemented
-/// via a Taylor series for `no_std`-friendliness.
-#[allow(clippy::many_single_char_names)]
+/// `sin(x*π)` and `cos(x*π)`. Tight enough for glyph composites.
+/// VARC's F4.12 fields stay within `[-8, 8)`, but variation deltas can
+/// push an angle anywhere, including infinity. Implemented via a
+/// Taylor series for `no_std`-friendliness.
 fn sincos_pi(x: f32) -> (f32, f32) {
     // Reduce to [-1, 1] (i.e. [-π, π]).
     let mut t = x;
+    // For large or infinite angles the loops below would run for a
+    // long time or forever, so take the remainder first. `%` is exact
+    // and so is each loop step below 2^25, so both paths give the same
+    // angle wherever the loops finish. Clearing the sign of a zero
+    // remainder matches what the loops produce.
+    // A range check instead of `abs`, which core lacks before Rust 1.85.
+    if !(-16.0..=16.0).contains(&t) {
+        t %= 2.0;
+        if t == 0.0 {
+            t = 0.0;
+        }
+    }
     while t > 1.0 {
         t -= 2.0;
     }
@@ -718,7 +709,8 @@ mod tests {
         out
     }
 
-    /// Builds a CFF2 INDEX with 1-byte offsets.
+    /// Builds a CFF2 INDEX with 1-byte offsets, or 4-byte offsets when
+    /// the payload does not fit in one byte.
     fn build_cff2_index(entries: &[&[u8]]) -> Vec<u8> {
         let count = entries.len() as u32;
         let mut out = Vec::new();
@@ -726,12 +718,21 @@ mod tests {
         if entries.is_empty() {
             return out;
         }
-        out.push(1); // off_size = 1
+        let total: usize = entries.iter().map(|e| e.len()).sum();
+        let wide = total + 1 > 255;
+        let push_off = |out: &mut Vec<u8>, off: u32| {
+            if wide {
+                out.extend_from_slice(&off.to_be_bytes());
+            } else {
+                out.push(off as u8);
+            }
+        };
+        out.push(if wide { 4 } else { 1 }); // off_size
         let mut cursor: u32 = 1;
-        out.push(cursor as u8);
+        push_off(&mut out, cursor);
         for e in entries {
             cursor += e.len() as u32;
-            out.push(cursor as u8);
+            push_off(&mut out, cursor);
         }
         for e in entries {
             out.extend_from_slice(e);
@@ -960,5 +961,84 @@ mod tests {
         let y_out = t[2] * 1.0 + t[3] * 0.0 + t[5];
         assert!(x_out.abs() < 1e-3, "expected 0, got {x_out}");
         assert!((y_out - 1.0).abs() < 1e-3, "expected 1, got {y_out}");
+    }
+
+    #[test]
+    fn sincos_pi_huge_angle_terminates() {
+        // Reduction used to subtract 2 until the angle fell below 1,
+        // which never ends for infinity or for values where x - 2 == x.
+        let (c, s) = sincos_pi(1.0e30);
+        assert_eq!((c, s), (1.0, 0.0));
+        assert!(sincos_pi(f32::INFINITY).0.is_nan());
+        assert!(sincos_pi(f32::NEG_INFINITY).1.is_nan());
+        // The remainder path agrees with the loop path, sign of zero
+        // included.
+        assert_eq!(sincos_pi(21.25), sincos_pi(1.25));
+        assert_eq!(sincos_pi(-18.0).1.to_bits(), sincos_pi(0.0).1.to_bits());
+    }
+
+    /// A MultiItemVariationStore with one axis-free region (scalar 1
+    /// everywhere) and one subtable naming it `mentions` times, whose
+    /// single delta set is `mentions` copies of `i32::MAX`.
+    fn build_max_delta_store(mentions: u16) -> Vec<u8> {
+        let mut payload = Vec::new();
+        let mut left = usize::from(mentions);
+        while left > 0 {
+            let run = left.min(64);
+            payload.push(0xC0 | (run - 1) as u8); // i32 run
+            for _ in 0..run {
+                payload.extend_from_slice(&i32::MAX.to_be_bytes());
+            }
+            left -= run;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // format
+        out.extend_from_slice(&12u32.to_be_bytes()); // region list
+        out.extend_from_slice(&1u16.to_be_bytes()); // one subtable
+        out.extend_from_slice(&20u32.to_be_bytes()); // subtable offset
+                                                     // Region list at 12: one region at relative offset 6.
+        out.extend_from_slice(&1u16.to_be_bytes());
+        out.extend_from_slice(&6u32.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes()); // zero axes
+                                                    // Subtable at 20.
+        out.push(1);
+        out.extend_from_slice(&mentions.to_be_bytes());
+        for _ in 0..mentions {
+            out.extend_from_slice(&0u16.to_be_bytes());
+        }
+        out.extend_from_slice(&build_cff2_index(&[&payload]));
+        out
+    }
+
+    #[test]
+    fn huge_rotation_delta_does_not_hang() {
+        // 128 deltas of i32::MAX push the rotation to 2^26 half turns,
+        // where subtracting 2 no longer changes an f32.
+        let store = build_max_delta_store(128);
+        let flags = VC_TRANSFORM_HAS_VARIATION | VC_HAVE_ROTATION;
+        let mut record = Vec::new();
+        record.push(flags as u8);
+        record.extend_from_slice(&5u16.to_be_bytes()); // gid
+        record.push(0x00); // transform var index: outer 0, inner 0
+        record.extend_from_slice(&0i16.to_be_bytes()); // rotation
+        let bytes = build_varc(&[1], &[&record], Some(&store), None);
+        let varc = Varc::parse(&bytes).unwrap();
+        let comp = varc.composite(1, &[]).unwrap();
+        assert_eq!(comp.components.len(), 1);
+    }
+
+    #[test]
+    fn wide_axis_components_stop_at_coord_budget() {
+        // Each 6-byte component lists axis 65535, so its coord vector
+        // grows to 65536 values. 100 000 of them used to allocate
+        // about 26 GB.
+        let axis_indices: &[u8] = &[0x40, 0xFF, 0xFF]; // one i16: 65535
+        let component: [u8; 6] = [VC_HAVE_AXES as u8, 0x00, 0x05, 0x00, 0x00, 0x00];
+        let record = component.repeat(100_000);
+        let bytes = build_varc(&[1], &[&record], None, Some(&[axis_indices]));
+        let varc = Varc::parse(&bytes).unwrap();
+        let comp = varc.composite(1, &[]).unwrap();
+        assert_eq!(comp.components.len(), MAX_COMPOSITE_COORDS / 65536);
+        assert!(comp.components.iter().all(|c| c.coords.len() == 65536));
     }
 }

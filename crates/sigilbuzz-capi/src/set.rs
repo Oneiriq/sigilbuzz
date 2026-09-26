@@ -6,15 +6,15 @@
 //! "glyph set" inputs, and the introspection helpers
 //! (`hb_face_collect_unicodes` / `hb_ot_layout_collect_features`)
 //! hand back populated sets. We back it with an
-//! `Arc<RefCell<BTreeSet<u32>>>`. `BTreeSet` keeps iteration in
-//! ascending order (the contract `hb_set_next` advertises) and
-//! `Arc<RefCell<...>>` lets the same set be observed through multiple
-//! refcount handles, mirroring HarfBuzz's "an `hb_subset_input_t`
-//! returns a handle to its internal set" idiom.
+//! `Arc<SpinMutex<BTreeSet<u32>>>`. `BTreeSet` keeps iteration in
+//! ascending order (the contract `hb_set_next` advertises), and the
+//! `Arc` lets the same set be observed through multiple refcount
+//! handles, mirroring HarfBuzz's "an `hb_subset_input_t` returns a
+//! handle to its internal set" idiom.
 //!
-//! `RefCell` is sound here because every mutator routes through a
-//! C-side pointer; the C ABI never observes a held borrow. The
-//! `Arc` adds Send + Sync via the same pattern used by [`crate::hb_blob_t`].
+//! The spin lock makes every access safe from any thread, the same
+//! way the buffer and font handles work. No lock is held across a
+//! call back into C, so a set cannot deadlock on itself.
 //!
 //! # Refcount contract
 //!
@@ -28,38 +28,26 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::sync::Arc;
-use core::cell::RefCell;
 use core::ptr;
 
 use crate::hb_bool_t;
+use crate::spin_mutex::SpinMutex;
+
+/// Shared payload behind an `hb_set_t` handle.
+pub(crate) type SharedSet = Arc<SpinMutex<BTreeSet<u32>>>;
 
 /// Opaque integer set. The struct itself is a thin handle; the
 /// shared payload lives behind the inner `Arc`.
 #[repr(C)]
 pub struct hb_set_t {
-    inner: Arc<RefCell<BTreeSet<u32>>>,
+    inner: SharedSet,
 }
-
-// SAFETY: `RefCell` is `!Sync`, but every access is gated by the C
-// ABI surface: the C caller never holds a `&` to the underlying
-// BTreeSet across a callback boundary. The Send/Sync claims here
-// match the contract HarfBuzz itself documents: an `hb_set_t` is
-// safe to share between threads as long as accesses are serialized
-// externally. See the module-level note on the safety story.
-unsafe impl Send for hb_set_t {}
-unsafe impl Sync for hb_set_t {}
 
 impl hb_set_t {
     /// Internal constructor.
     pub(crate) fn new() -> Self {
-        // Clippy flags `Arc<RefCell<...>>` because `RefCell` is
-        // `!Sync`. The HarfBuzz `hb_set_t` contract pushes synchron-
-        // isation onto the consumer (matching the rest of this
-        // crate), so the unsafe `Send + Sync` impls below are sound;
-        // suppress the lint at the construction site.
-        #[allow(clippy::arc_with_non_send_sync)]
         Self {
-            inner: Arc::new(RefCell::new(BTreeSet::new())),
+            inner: Arc::new(SpinMutex::new(BTreeSet::new())),
         }
     }
 
@@ -68,18 +56,18 @@ impl hb_set_t {
     /// `hb_set_t` handle that observes the same payload. Only the
     /// `subset` cargo feature uses this helper today.
     #[cfg(feature = "subset")]
-    pub(crate) fn from_arc(inner: Arc<RefCell<BTreeSet<u32>>>) -> Self {
+    pub(crate) fn from_arc(inner: SharedSet) -> Self {
         Self { inner }
     }
 
     /// Internal: borrow the underlying BTreeSet for read.
     pub(crate) fn with_inner<R>(&self, f: impl FnOnce(&BTreeSet<u32>) -> R) -> R {
-        f(&self.inner.borrow())
+        f(&self.inner.lock())
     }
 
     /// Internal: borrow the underlying BTreeSet for write.
     pub(crate) fn with_inner_mut<R>(&self, f: impl FnOnce(&mut BTreeSet<u32>) -> R) -> R {
-        f(&mut self.inner.borrow_mut())
+        f(&mut self.inner.lock())
     }
 
     /// Internal: clone the Arc so a sibling handle observes the same
@@ -108,21 +96,24 @@ pub unsafe extern "C" fn hb_set_destroy(set: *mut hb_set_t) {
     if set.is_null() {
         return;
     }
-    // SAFETY: caller-asserted non-null pointer originally from
-    // Box::into_raw. Reclaim and drop, decrementing the inner Arc.
+    // SAFETY: `set` is non-null and the caller guarantees it came
+    // from `Box::into_raw` in `hb_set_create` or `hb_set_reference`
+    // and has not been destroyed yet. Dropping the box decrements
+    // the inner Arc.
     drop(unsafe { Box::from_raw(set) });
 }
 
 /// Allocates a fresh handle that observes the same payload.
 ///
 /// # Safety
-/// `set` must be valid.
+/// `set` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_set_reference(set: *mut hb_set_t) -> *mut hb_set_t {
     if set.is_null() {
         return ptr::null_mut();
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `set` is non-null and the caller guarantees it points
+    // to a live `hb_set_t`.
     let shared = unsafe { (*set).share() };
     Box::into_raw(Box::new(shared))
 }
@@ -130,39 +121,42 @@ pub unsafe extern "C" fn hb_set_reference(set: *mut hb_set_t) -> *mut hb_set_t {
 /// Adds `codepoint` to the set. No-op if already present.
 ///
 /// # Safety
-/// `set` must be valid.
+/// `set` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_set_add(set: *mut hb_set_t, codepoint: u32) {
     if set.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `set` is non-null and the caller guarantees it points
+    // to a live `hb_set_t`.
     unsafe { (*set).with_inner_mut(|s| s.insert(codepoint)) };
 }
 
 /// Removes `codepoint` from the set. No-op if absent.
 ///
 /// # Safety
-/// `set` must be valid.
+/// `set` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_set_del(set: *mut hb_set_t, codepoint: u32) {
     if set.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `set` is non-null and the caller guarantees it points
+    // to a live `hb_set_t`.
     unsafe { (*set).with_inner_mut(|s| s.remove(&codepoint)) };
 }
 
 /// Returns 1 if `codepoint` is in the set, 0 otherwise.
 ///
 /// # Safety
-/// `set` must be valid.
+/// `set` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_set_has(set: *const hb_set_t, codepoint: u32) -> hb_bool_t {
     if set.is_null() {
         return 0;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `set` is non-null and the caller guarantees it points
+    // to a live `hb_set_t`.
     unsafe {
         if (*set).with_inner(|s| s.contains(&codepoint)) {
             1
@@ -175,13 +169,14 @@ pub unsafe extern "C" fn hb_set_has(set: *const hb_set_t, codepoint: u32) -> hb_
 /// Returns the number of integers currently in the set.
 ///
 /// # Safety
-/// `set` must be valid.
+/// `set` must be null or valid.
 #[no_mangle]
 pub unsafe extern "C" fn hb_set_get_population(set: *const hb_set_t) -> u32 {
     if set.is_null() {
         return 0;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `set` is non-null and the caller guarantees it points
+    // to a live `hb_set_t`.
     unsafe { (*set).with_inner(|s| s.len()) as u32 }
 }
 
@@ -192,15 +187,18 @@ pub unsafe extern "C" fn hb_set_get_population(set: *const hb_set_t) -> u32 {
 /// further member exists; in that case `*codepoint` is left untouched.
 ///
 /// # Safety
-/// `set` must be valid; `codepoint` must point to a writable `u32`.
+/// `set` must be null or valid. `codepoint` must be null or point to
+/// a writable `u32`.
 #[no_mangle]
 pub unsafe extern "C" fn hb_set_next(set: *const hb_set_t, codepoint: *mut u32) -> hb_bool_t {
     if set.is_null() || codepoint.is_null() {
         return 0;
     }
-    // SAFETY: caller asserts validity.
+    // SAFETY: `codepoint` is non-null and the caller guarantees it
+    // points to a readable and writable `u32`.
     let current = unsafe { *codepoint };
-    // SAFETY: caller asserts validity.
+    // SAFETY: `set` is non-null and the caller guarantees it points
+    // to a live `hb_set_t`.
     let next = unsafe {
         (*set).with_inner(|s| {
             if current == u32::MAX {
@@ -221,7 +219,8 @@ pub unsafe extern "C" fn hb_set_next(set: *const hb_set_t, codepoint: *mut u32) 
     };
     match next {
         Some(v) => {
-            // SAFETY: caller asserts writeable.
+            // SAFETY: `codepoint` is non-null and the caller
+            // guarantees it points to a writable `u32`.
             unsafe { *codepoint = v };
             1
         }
@@ -235,6 +234,8 @@ mod tests {
 
     #[test]
     fn create_destroy_null_safe() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             hb_set_destroy(ptr::null_mut());
         }
@@ -243,6 +244,8 @@ mod tests {
     #[test]
     fn add_has_population() {
         let s = hb_set_create();
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             assert_eq!(hb_set_get_population(s), 0);
             hb_set_add(s, 65);
@@ -261,6 +264,8 @@ mod tests {
     #[test]
     fn next_walks_ascending() {
         let s = hb_set_create();
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             hb_set_add(s, 100);
             hb_set_add(s, 1);
@@ -281,6 +286,8 @@ mod tests {
 
     #[test]
     fn reference_shares_payload() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             let a = hb_set_create();
             hb_set_add(a, 7);
@@ -299,6 +306,8 @@ mod tests {
 
     #[test]
     fn empty_next_yields_false() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             let s = hb_set_create();
             let mut cp: u32 = u32::MAX;
@@ -309,6 +318,8 @@ mod tests {
 
     #[test]
     fn null_setters_are_noops() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             hb_set_add(ptr::null_mut(), 5);
             hb_set_del(ptr::null_mut(), 5);

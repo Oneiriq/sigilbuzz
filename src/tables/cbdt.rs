@@ -100,61 +100,37 @@ impl<'a> Cbdt<'a> {
                 offset: start,
                 context: "CBDT location overflow",
             })?;
-        if end > self.data.len() {
-            return Err(Error::Truncated {
-                offset: end,
-                context: "CBDT slice past end of table",
-            });
-        }
-        let slice = &self.data[start..end];
+        let slice = self.data.get(start..end).ok_or(Error::Truncated {
+            offset: end,
+            context: "CBDT slice past end of table",
+        })?;
         let mut r = Reader::new(slice);
 
         match loc.image_format {
             17 => {
                 // Small metrics + PNG data.
                 let metrics = SmallGlyphMetrics::parse(&mut r)?;
-                let data_len = r.read_u32()? as usize;
-                let data_start = r.position();
-                if data_start + data_len > slice.len() {
-                    return Err(Error::Truncated {
-                        offset: data_start + data_len,
-                        context: "CBDT format 17 PNG data",
-                    });
-                }
+                let data = read_payload(&mut r, slice, "CBDT format 17 PNG data")?;
                 Ok(GlyphBitmap {
                     image_format: 17,
                     metrics: GlyphBitmapMetrics::Small(metrics),
-                    data: &slice[data_start..data_start + data_len],
+                    data,
                 })
             }
             18 => {
                 // Big metrics + PNG data.
-                let metrics = parse_big(&mut r)?;
-                let data_len = r.read_u32()? as usize;
-                let data_start = r.position();
-                if data_start + data_len > slice.len() {
-                    return Err(Error::Truncated {
-                        offset: data_start + data_len,
-                        context: "CBDT format 18 PNG data",
-                    });
-                }
+                let metrics = BigGlyphMetrics::parse(&mut r)?;
+                let data = read_payload(&mut r, slice, "CBDT format 18 PNG data")?;
                 Ok(GlyphBitmap {
                     image_format: 18,
                     metrics: GlyphBitmapMetrics::Big(metrics),
-                    data: &slice[data_start..data_start + data_len],
+                    data,
                 })
             }
             19 => {
                 // No inline metrics; PNG data only. Metrics ride along
                 // on the CBLC location record (constant-metric format).
-                let data_len = r.read_u32()? as usize;
-                let data_start = r.position();
-                if data_start + data_len > slice.len() {
-                    return Err(Error::Truncated {
-                        offset: data_start + data_len,
-                        context: "CBDT format 19 PNG data",
-                    });
-                }
+                let data = read_payload(&mut r, slice, "CBDT format 19 PNG data")?;
                 let metrics = match loc.metrics {
                     Some(big) => GlyphBitmapMetrics::Big(big),
                     None => GlyphBitmapMetrics::Small(SmallGlyphMetrics::default()),
@@ -162,7 +138,7 @@ impl<'a> Cbdt<'a> {
                 Ok(GlyphBitmap {
                     image_format: 19,
                     metrics,
-                    data: &slice[data_start..data_start + data_len],
+                    data,
                 })
             }
             _ => Err(Error::Unsupported {
@@ -172,17 +148,23 @@ impl<'a> Cbdt<'a> {
     }
 }
 
-fn parse_big(r: &mut Reader<'_>) -> Result<BigGlyphMetrics> {
-    Ok(BigGlyphMetrics {
-        height: r.read_u8()?,
-        width: r.read_u8()?,
-        hori_bearing_x: r.read_i8()?,
-        hori_bearing_y: r.read_i8()?,
-        hori_advance: r.read_u8()?,
-        vert_bearing_x: r.read_i8()?,
-        vert_bearing_y: r.read_i8()?,
-        vert_advance: r.read_u8()?,
-    })
+/// Reads the `u32 dataLen` prefix that starts every PNG payload and
+/// returns the `dataLen` bytes after it. The end offset is checked
+/// so a huge `dataLen` cannot wrap on 32-bit targets.
+fn read_payload<'a>(
+    r: &mut Reader<'a>,
+    slice: &'a [u8],
+    context: &'static str,
+) -> Result<&'a [u8]> {
+    let data_len = r.read_u32()? as usize;
+    let data_start = r.position();
+    data_start
+        .checked_add(data_len)
+        .and_then(|end| slice.get(data_start..end))
+        .ok_or(Error::Truncated {
+            offset: data_start.saturating_add(data_len),
+            context,
+        })
 }
 
 #[cfg(test)]

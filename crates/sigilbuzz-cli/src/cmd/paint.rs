@@ -13,7 +13,7 @@ use clap::Args as ClapArgs;
 use sigilbuzz::{Blob, Face};
 use sigilbuzz_paint::{evaluate, DrawCmd};
 
-use super::util::{read_font, CliResult};
+use super::util::{read_font, status, with_stdout, CliResult};
 
 /// Arguments for `sigilbuzz paint`.
 #[derive(Debug, ClapArgs)]
@@ -32,24 +32,29 @@ pub fn run(args: Args) -> CliResult {
 
     let cmds = evaluate(&face, args.gid);
     if cmds.is_empty() {
-        eprintln!(
+        status(format_args!(
             "gid {} has no COLRv1 paint tree (or font carries no COLR table)",
             args.gid
-        );
+        ));
         return Ok(());
     }
-    for cmd in &cmds {
-        match cmd {
-            DrawCmd::FillGlyph {
-                gid,
-                transform,
-                paint,
-            } => println!("FillGlyph gid={gid} transform={transform:?} paint={paint:?}"),
-            DrawCmd::PushLayer { composite_mode } => {
-                println!("PushLayer mode={composite_mode:?}");
+    with_stdout(|out| {
+        for cmd in &cmds {
+            match cmd {
+                DrawCmd::FillGlyph {
+                    gid,
+                    transform,
+                    paint,
+                } => writeln!(
+                    out,
+                    "FillGlyph gid={gid} transform={transform:?} paint={paint:?}"
+                )?,
+                DrawCmd::PushLayer { composite_mode } => {
+                    writeln!(out, "PushLayer mode={composite_mode:?}")?;
+                }
+                DrawCmd::PopLayer => writeln!(out, "PopLayer")?,
             }
-            DrawCmd::PopLayer => println!("PopLayer"),
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }

@@ -19,7 +19,7 @@ use sigilbuzz_capi::paint_bridge::{
 };
 use sigilbuzz_capi::{
     hb_blob_create, hb_blob_destroy, hb_face_create, hb_face_destroy, hb_font_create,
-    hb_font_destroy, HB_MEMORY_MODE_READONLY,
+    hb_font_destroy, hb_font_set_variations, hb_variation_t, HB_MEMORY_MODE_READONLY,
 };
 
 // =========================================================================
@@ -75,7 +75,7 @@ fn build_cpal_v0(colors: &[(u8, u8, u8, u8)]) -> Vec<u8> {
 }
 
 fn build_v1_header(glyph_id: u16) -> Vec<u8> {
-    let header_len: usize = 30;
+    let header_len: usize = 34;
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes());
@@ -83,9 +83,10 @@ fn build_v1_header(glyph_id: u16) -> Vec<u8> {
     out.extend_from_slice(&(header_len as u32).to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes());
     out.extend_from_slice(&(header_len as u32).to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&0u32.to_be_bytes()); // layerListOffset
+    out.extend_from_slice(&0u32.to_be_bytes()); // clipListOffset
+    out.extend_from_slice(&0u32.to_be_bytes()); // varIndexMapOffset
+    out.extend_from_slice(&0u32.to_be_bytes()); // itemVariationStoreOffset
     out.extend_from_slice(&1u32.to_be_bytes());
     out.extend_from_slice(&glyph_id.to_be_bytes());
     out.extend_from_slice(&10u32.to_be_bytes());
@@ -158,6 +159,8 @@ fn paint_glyph_against_solid_colr_fires_color_and_clip_callbacks() {
     let cpal = build_cpal_v0(&[(255, 0, 0, 255)]);
     let bytes = build_face_bytes(&colr, &cpal);
 
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or a slice that outlives the call.
     unsafe {
         let blob = hb_blob_create(
             bytes.as_ptr().cast::<c_char>(),
@@ -193,6 +196,217 @@ fn paint_glyph_against_solid_colr_fires_color_and_clip_callbacks() {
         assert_eq!((color >> 16) & 0xFF, 0xFF, "red byte");
         assert_eq!((color >> 8) & 0xFF, 0x00, "green byte");
         assert_eq!(color & 0xFF, 0x00, "blue byte");
+
+        hb_paint_funcs_destroy(funcs);
+        hb_font_destroy(font);
+        hb_face_destroy(face);
+        hb_blob_destroy(blob);
+    }
+}
+
+// =========================================================================
+// Variation coordinates
+// =========================================================================
+
+/// Builds an SFNT from `(tag, data)` pairs, which must be sorted by
+/// tag.
+fn build_sfnt(tables: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+    let mut offset = 12 + tables.len() * 16;
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x00010000u32.to_be_bytes());
+    out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+    out.extend_from_slice(&[0; 6]);
+    for (tag, data) in tables {
+        out.extend_from_slice(*tag);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        offset += data.len();
+    }
+    for (_, data) in tables {
+        out.extend_from_slice(data);
+    }
+    out
+}
+
+/// An `fvar` table with one `wght` axis: min 100, default 400, max 900.
+fn build_fvar_wght() -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes()); // majorVersion
+    out.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
+    out.extend_from_slice(&16u16.to_be_bytes()); // axesArrayOffset
+    out.extend_from_slice(&2u16.to_be_bytes()); // reserved
+    out.extend_from_slice(&1u16.to_be_bytes()); // axisCount
+    out.extend_from_slice(&20u16.to_be_bytes()); // axisSize
+    out.extend_from_slice(&0u16.to_be_bytes()); // instanceCount
+    out.extend_from_slice(&8u16.to_be_bytes()); // instanceSize
+    out.extend_from_slice(b"wght");
+    for value in [100i32, 400, 900] {
+        out.extend_from_slice(&(value << 16).to_be_bytes());
+    }
+    out.extend_from_slice(&0u16.to_be_bytes()); // flags
+    out.extend_from_slice(&256u16.to_be_bytes()); // axisNameID
+    out
+}
+
+/// A COLRv1 table whose base glyph 7 is a PaintVarSolid (palette 0,
+/// alpha 1.0). One ItemVariationStore row lowers the alpha by 0.5 at
+/// the axis maximum. The header layout and the store placement follow
+/// the fixtures in `sigilbuzz-paint/tests/evaluator.rs`.
+fn build_var_solid_colr() -> Vec<u8> {
+    let header_len: u32 = 34;
+    let mut colr = Vec::new();
+    colr.extend_from_slice(&1u16.to_be_bytes()); // version
+    colr.extend_from_slice(&0u16.to_be_bytes()); // numBaseGlyphRecords
+    colr.extend_from_slice(&header_len.to_be_bytes());
+    colr.extend_from_slice(&header_len.to_be_bytes());
+    colr.extend_from_slice(&0u16.to_be_bytes()); // numLayerRecords
+    colr.extend_from_slice(&header_len.to_be_bytes()); // baseGlyphList
+    colr.extend_from_slice(&0u32.to_be_bytes()); // layerList
+    colr.extend_from_slice(&0u32.to_be_bytes()); // clipList
+    colr.extend_from_slice(&0u32.to_be_bytes()); // varIndexMap
+    let var_store_slot = colr.len();
+    colr.extend_from_slice(&0u32.to_be_bytes()); // variation store
+                                                 // BaseGlyphList with one record: glyph 7, paint right after it.
+    colr.extend_from_slice(&1u32.to_be_bytes());
+    colr.extend_from_slice(&7u16.to_be_bytes());
+    colr.extend_from_slice(&10u32.to_be_bytes());
+    // PaintVarSolid: format 3, palette 0, alpha 1.0, varIndexBase 0.
+    colr.push(3);
+    colr.extend_from_slice(&0u16.to_be_bytes());
+    colr.extend_from_slice(&f2dot14(1.0));
+    colr.extend_from_slice(&0u32.to_be_bytes());
+
+    let var_store_off = colr.len() as u32;
+    colr[var_store_slot..var_store_slot + 4].copy_from_slice(&var_store_off.to_be_bytes());
+    // ItemVariationStore: format 1, region list at 12, one subtable.
+    colr.extend_from_slice(&1u16.to_be_bytes());
+    colr.extend_from_slice(&12u32.to_be_bytes());
+    colr.extend_from_slice(&1u16.to_be_bytes());
+    colr.extend_from_slice(&22u32.to_be_bytes());
+    // Region list: one axis, one region peaking at the axis maximum.
+    colr.extend_from_slice(&1u16.to_be_bytes());
+    colr.extend_from_slice(&1u16.to_be_bytes());
+    colr.extend_from_slice(&f2dot14(0.0));
+    colr.extend_from_slice(&f2dot14(1.0));
+    colr.extend_from_slice(&f2dot14(1.0));
+    // Subtable: one item, one word delta, one region.
+    colr.extend_from_slice(&1u16.to_be_bytes());
+    colr.extend_from_slice(&1u16.to_be_bytes());
+    colr.extend_from_slice(&1u16.to_be_bytes());
+    colr.extend_from_slice(&0u16.to_be_bytes());
+    colr.extend_from_slice(&(-8192i16).to_be_bytes()); // alpha -0.5
+    colr
+}
+
+/// Records the last color a paint callback reported into the `u32`
+/// that `paint_data` points at.
+extern "C" fn cb_record_color(
+    _funcs: *mut hb_paint_funcs_t,
+    data: *mut c_void,
+    _is_foreground: i32,
+    color: hb_color_t,
+) {
+    // SAFETY: the test passes a pointer to a live `AtomicU32` as
+    // `paint_data`.
+    unsafe { (*data.cast::<AtomicU32>()).store(color, Ordering::SeqCst) };
+}
+
+/// HarfBuzz paints with the variation coordinates set on the font.
+/// The bridge used to paint the default instance whatever the font's
+/// variations were.
+#[test]
+fn paint_glyph_applies_font_variations() {
+    let fvar = build_fvar_wght();
+    let colr = build_var_solid_colr();
+    let cpal = build_cpal_v0(&[(255, 0, 0, 255)]);
+    let bytes = build_sfnt(&[(b"COLR", &colr), (b"CPAL", &cpal), (b"fvar", &fvar)]);
+
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or a slice that outlives the call.
+    unsafe {
+        let blob = hb_blob_create(
+            bytes.as_ptr().cast::<c_char>(),
+            bytes.len() as c_uint,
+            HB_MEMORY_MODE_READONLY,
+            ptr::null_mut(),
+            None,
+        );
+        let face = hb_face_create(blob, 0);
+        let font = hb_font_create(face);
+        let funcs = hb_paint_funcs_create();
+        hb_paint_funcs_set_color_func(funcs, Some(cb_record_color));
+        let color = AtomicU32::new(0);
+        let data = ptr::from_ref(&color).cast_mut().cast::<c_void>();
+
+        hb_font_paint_glyph(font, 7, funcs, data, 0, 0);
+        assert_eq!(color.load(Ordering::SeqCst) >> 24, 0xFF, "default alpha");
+
+        let heavy = hb_variation_t {
+            tag: u32::from_be_bytes(*b"wght"),
+            value: 900.0,
+        };
+        hb_font_set_variations(font, &heavy, 1);
+        hb_font_paint_glyph(font, 7, funcs, data, 0, 0);
+        // Alpha 1.0 - 0.5 = 0.5, packed as round(0.5 * 255) = 128.
+        assert_eq!(color.load(Ordering::SeqCst) >> 24, 128, "alpha at wght 900");
+
+        hb_paint_funcs_destroy(funcs);
+        hb_font_destroy(font);
+        hb_face_destroy(face);
+        hb_blob_destroy(blob);
+    }
+}
+
+/// HarfBuzz resolves colors in the palette the caller passes.
+#[test]
+fn paint_glyph_uses_the_requested_palette() {
+    // PaintSolid on glyph 7 using palette entry 0.
+    let mut colr = build_v1_header(7);
+    colr.push(2); // PaintSolid
+    colr.extend_from_slice(&0u16.to_be_bytes()); // palette entry 0
+    colr.extend_from_slice(&f2dot14(1.0)); // alpha 1.0
+                                           // CPAL with two one-entry palettes: red, then blue.
+    let mut cpal = Vec::new();
+    for word in [0u16, 1, 2, 2] {
+        cpal.extend_from_slice(&word.to_be_bytes()); // version, entries, palettes, records
+    }
+    cpal.extend_from_slice(&16u32.to_be_bytes()); // colorRecordsArrayOffset
+    cpal.extend_from_slice(&0u16.to_be_bytes()); // palette 0 starts at record 0
+    cpal.extend_from_slice(&1u16.to_be_bytes()); // palette 1 starts at record 1
+    cpal.extend_from_slice(&[0, 0, 255, 255]); // BGRA red
+    cpal.extend_from_slice(&[255, 0, 0, 255]); // BGRA blue
+    let bytes = build_face_bytes(&colr, &cpal);
+
+    // SAFETY: every pointer passed here is null, a live handle created
+    // in this test, or a slice that outlives the call.
+    unsafe {
+        let blob = hb_blob_create(
+            bytes.as_ptr().cast::<c_char>(),
+            bytes.len() as c_uint,
+            HB_MEMORY_MODE_READONLY,
+            ptr::null_mut(),
+            None,
+        );
+        let face = hb_face_create(blob, 0);
+        let font = hb_font_create(face);
+        let funcs = hb_paint_funcs_create();
+        hb_paint_funcs_set_color_func(funcs, Some(cb_record_color));
+        let color = AtomicU32::new(0);
+        let data = ptr::from_ref(&color).cast_mut().cast::<c_void>();
+
+        hb_font_paint_glyph(font, 7, funcs, data, 0, 0);
+        assert_eq!(
+            color.load(Ordering::SeqCst),
+            0xFFFF_0000,
+            "palette 0 is red"
+        );
+        hb_font_paint_glyph(font, 7, funcs, data, 1, 0);
+        assert_eq!(
+            color.load(Ordering::SeqCst),
+            0xFF00_00FF,
+            "palette 1 is blue"
+        );
 
         hb_paint_funcs_destroy(funcs);
         hb_font_destroy(font);

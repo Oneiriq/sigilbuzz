@@ -72,11 +72,17 @@ pub(crate) fn member_offset(data: &[u8], index: u32) -> Result<usize> {
             context: "font index out of range for this collection",
         });
     }
-    r.skip(4 * index as usize)?;
+    // `4 * index` overflows `usize` on 32-bit targets for large
+    // indices. Such an index cannot fit in the data either.
+    let entry_offset = (index as usize).checked_mul(4).ok_or(Error::Truncated {
+        offset: 12,
+        context: "ttcf offset table",
+    })?;
+    r.skip(entry_offset)?;
     let dir_offset = r.read_u32()? as usize;
     if dir_offset >= data.len() {
         return Err(Error::Malformed {
-            offset: 12 + 4 * index as usize,
+            offset: 12usize.saturating_add(entry_offset),
             context: "member table-directory offset past end of file",
         });
     }
@@ -92,7 +98,6 @@ mod tests {
         let mut d = Vec::new();
         d.extend_from_slice(&TTCF_MAGIC.to_be_bytes());
         d.extend_from_slice(&version.to_be_bytes());
-        #[allow(clippy::cast_possible_truncation)]
         d.extend_from_slice(&(offsets.len() as u32).to_be_bytes());
         for &o in offsets {
             d.extend_from_slice(&o.to_be_bytes());

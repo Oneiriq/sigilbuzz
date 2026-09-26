@@ -3,9 +3,8 @@
 //! Refines the advances and placements produced by cmap+hmtx with
 //! feature-driven deltas: kerning (lookup type 2), cursive
 //! attachment (type 3), mark-to-base attachment (type 4), and so
-//! on. sigilbuzz at M2 implements type 2 (pair adjustment) only,
-//! enough to make kerning actually apply, and exposes the
-//! machinery for later lookup types to slot in.
+//! on. This module parses every lookup type except cursive
+//! attachment (type 3), which the shaper does not apply.
 //!
 //! The table header is shared with GSUB: version + offsets to
 //! `ScriptList`, `FeatureList`, and `LookupList`. Each lookup in the
@@ -36,24 +35,25 @@ pub use pair_pos::{PairPos, PairPosFormat1, PairPosFormat2};
 pub use single_adj::SinglePos;
 pub use value_record::{resolve_variation_delta, ValueRecord};
 
-/// Canonical GPOS lookup type numbers. Not exhaustive today; entries
-/// land here as sigilbuzz acquires the corresponding lookup parsers.
+/// Canonical GPOS lookup type numbers.
 pub mod lookup_type {
-    /// Single adjustment. Deferred.
+    /// Single adjustment. See [`super::SinglePos`].
     pub const SINGLE_ADJUSTMENT: u16 = 1;
-    /// Pair adjustment: the one sigilbuzz currently implements.
+    /// Pair adjustment (kerning). See [`super::PairPos`].
     pub const PAIR_ADJUSTMENT: u16 = 2;
-    /// Cursive attachment. Deferred.
+    /// Cursive attachment. No parser in this module.
     pub const CURSIVE_ATTACHMENT: u16 = 3;
-    /// Mark-to-base attachment. Deferred.
+    /// Mark-to-base attachment. See [`super::MarkBasePos`].
     pub const MARK_TO_BASE: u16 = 4;
-    /// Mark-to-ligature attachment. Deferred.
+    /// Mark-to-ligature attachment. See [`super::MarkLigaPos`].
     pub const MARK_TO_LIGATURE: u16 = 5;
-    /// Mark-to-mark attachment. Deferred.
+    /// Mark-to-mark attachment. See [`super::MarkMarkPos`].
     pub const MARK_TO_MARK: u16 = 6;
-    /// Context positioning: implemented for formats 1, 2, 3.
+    /// Context positioning, formats 1, 2 and 3. See
+    /// [`super::ContextPos`].
     pub const CONTEXT: u16 = 7;
-    /// Chained context positioning: implemented for formats 1, 2, 3.
+    /// Chained context positioning, formats 1, 2 and 3. See
+    /// [`super::ChainContextPos`].
     pub const CHAINED_CONTEXT: u16 = 8;
     /// Extension positioning: forwards to another lookup type.
     pub const EXTENSION: u16 = 9;
@@ -61,7 +61,6 @@ pub mod lookup_type {
 
 /// Parsed `GPOS`.
 #[derive(Debug, Clone, Copy)]
-#[allow(clippy::struct_field_names)]
 pub struct Gpos<'a> {
     script_list: ScriptList<'a>,
     feature_list: FeatureList<'a>,

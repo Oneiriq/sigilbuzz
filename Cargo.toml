@@ -5,6 +5,8 @@
 # different constraints. GPU float math and matrix composition don't
 # belong in the no_std shaper.
 members = [".", "crates/*"]
+# The cargo-fuzz targets are their own workspace and need nightly.
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2021"
@@ -62,7 +64,7 @@ ttf-parser = "0.25"
 # Criterion drives the shaping benches under benches/. Dev-dep only:
 # benches do not ship in any release artifact and never enter the
 # crate's dependency closure.
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "shape_latin"

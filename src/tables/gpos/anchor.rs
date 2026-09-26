@@ -19,9 +19,9 @@
 //!
 //! The hint-only fields are consumed to advance the cursor past
 //! them when parsing a larger structure that contains anchors
-//! inline, but they do not influence placement. Device tables are
-//! a later milestone (same situation as in ValueRecord: they hold
-//! per-ppem deltas that sigilbuzz does not yet apply).
+//! inline, but they do not influence placement. The Device or
+//! VariationIndex tables that format 3 points at are not applied, so
+//! only `(x, y)` reaches the shaper.
 
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;

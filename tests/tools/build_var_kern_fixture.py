@@ -2,8 +2,10 @@
 """Synthesise a tiny variable font with a `wght`-varying kern pair.
 
 The output font `var_kern.ttf` carries:
-- Two real glyphs ("A" and "V") plus `.notdef`, with hand-built
-  TrueType outlines so the file stays under ~10 KB.
+- Three real glyphs plus `.notdef`, with hand-built TrueType
+  outlines so the file stays under ~10 KB. "A" and "V" form the kern
+  pair. "B" is not kerned. It lets a subset drop a glyph, which makes
+  the subsetter rewrite the layout tables.
 - An `fvar` axis `wght` with (min=400, default=400, max=900).
 - An HVAR-like ItemVariationStore referenced from GDEF v1.3 that
   contributes a -100 design-unit delta to the (A, V) kern pair at
@@ -35,6 +37,7 @@ UPEM = 1000
 
 GLYPH_A = "A"
 GLYPH_V = "V"
+GLYPH_B = "B"
 
 
 def build_glyph_outline(width_units):
@@ -54,13 +57,13 @@ def build_variation_index_bytes(outer: int, inner: int) -> bytes:
 
 
 def main():
-    glyphs_order = [".notdef", GLYPH_A, GLYPH_V]
+    glyphs_order = [".notdef", GLYPH_A, GLYPH_V, GLYPH_B]
 
     fb = FontBuilder(UPEM, isTTF=True)
     fb.setupGlyphOrder(glyphs_order)
-    fb.setupCharacterMap({ord("A"): GLYPH_A, ord("V"): GLYPH_V})
+    fb.setupCharacterMap({ord("A"): GLYPH_A, ord("V"): GLYPH_V, ord("B"): GLYPH_B})
 
-    # Minimal outlines. Both glyphs are 500-unit wide rectangles.
+    # Minimal outlines. Every real glyph is a 500-unit wide rectangle.
     pen_notdef = TTGlyphPen(None)
     pen_notdef.moveTo((0, 0))
     pen_notdef.lineTo((400, 0))
@@ -71,12 +74,14 @@ def main():
         ".notdef": pen_notdef.glyph(),
         GLYPH_A: build_glyph_outline(500),
         GLYPH_V: build_glyph_outline(500),
+        GLYPH_B: build_glyph_outline(500),
     }
     fb.setupGlyf(glyphs)
     fb.setupHorizontalMetrics({
         ".notdef": (500, 0),
         GLYPH_A: (500, 0),
         GLYPH_V: (500, 0),
+        GLYPH_B: (500, 0),
     })
     fb.setupHorizontalHeader(ascent=800, descent=-200)
     fb.setupOS2(sTypoAscender=800, sTypoDescender=-200, usWinAscent=800, usWinDescent=200)
@@ -139,7 +144,7 @@ def main():
         #     u16 secondGlyph = gid_v
         #     ValueRecord1:
         #       i16 x_advance = 0
-        #       Offset16 x_advance_device -> VariationIndex at subtable-relative offset
+        #       Offset16 x_advance_device -> VariationIndex, offset from the PairSet
         # Then coverage and variation index blobs appended.
         value_format1 = 0x0044
         value_format2 = 0
@@ -151,7 +156,9 @@ def main():
         coverage_off = pair_set_off + pair_set_size
         coverage = struct.pack(">HH", 1, 1) + struct.pack(">H", gid_a)
         # VariationIndex (6 bytes) at coverage_off + len(coverage).
-        var_index_off = coverage_off + len(coverage)
+        # Device offsets in a PairPos format 1 value record are
+        # measured from the start of the PairSet.
+        var_index_off = coverage_off + len(coverage) - pair_set_off
         var_index = build_variation_index_bytes(0, 0)
 
         header = (

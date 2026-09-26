@@ -24,8 +24,8 @@ For TrueType fonts:
 | `fvar`, `avar`, `gvar`, `HVAR`, `VARC` | Kept. `fvar` and `avar` pass through, the others are rebuilt for the new glyph order. Off with `retain_variations: false`. |
 | `kern`, `vhea`, `vmtx`, `VORG`, `COLR`, `CPAL`, `morx`, `kerx` | Dropped by default. With `drop_unhandled: false` they return an error instead. |
 
-CFF and CFF2 fonts are supported too, including CID-keyed CFF. When you subset one of
-them down to fewer glyphs, its layout and variation tables are dropped for now.
+CFF and CFF2 fonts are supported too, including CID-keyed CFF. Their layout and variation
+tables follow the same rules as above. A `CFF2` table keeps its own variation data.
 
 `instance` handles variable fonts. It bakes a set of axis coordinates into a static
 font, or pins some axes and leaves the rest variable.
@@ -54,7 +54,9 @@ std::fs::write("./MyFont.subset.ttf", &out.bytes).unwrap();
 |---|---|---|
 | `std` | yes | Implements `std::error::Error` for `SubsetError`. |
 
-Turn off default features for `no_std` with `alloc`.
+The crate's own code needs only `alloc`, but it depends on `sigilbuzz` with that crate's
+default `std` feature. Turning off default features here therefore does not make it
+`no_std`, and it still needs a target with `std`.
 
 ## License
 

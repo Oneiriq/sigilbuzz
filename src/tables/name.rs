@@ -188,16 +188,16 @@ impl<'a> Name<'a> {
         best.map(|(_, s)| s)
     }
 
-    /// Family name (Name ID 1). Falls through to the typographic
-    /// family (Name ID 16) when ID 1 is absent.
+    /// Family name: the typographic family (Name ID 16) when present,
+    /// otherwise the legacy family (Name ID 1).
     #[must_use]
     pub fn family_name(&self) -> Option<String> {
         self.get(NAME_ID_TYPOGRAPHIC_FAMILY)
             .or_else(|| self.get(NAME_ID_FAMILY))
     }
 
-    /// Subfamily / style name (Name ID 2). Falls through to the
-    /// typographic subfamily (Name ID 17) when ID 2 is absent.
+    /// Subfamily / style name: the typographic subfamily (Name ID 17)
+    /// when present, otherwise the legacy subfamily (Name ID 2).
     #[must_use]
     pub fn subfamily_name(&self) -> Option<String> {
         self.get(NAME_ID_TYPOGRAPHIC_SUBFAMILY)

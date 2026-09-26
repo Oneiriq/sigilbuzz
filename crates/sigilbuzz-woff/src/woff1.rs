@@ -16,8 +16,11 @@ use alloc::vec::Vec;
 
 use crate::error::{Result, WoffError};
 use crate::reader::Reader;
+use crate::sfnt;
 
 const WOFF1_SIGNATURE: u32 = 0x774F_4646; // 'wOFF'
+const WOFF1_HEADER_LEN: usize = 44;
+const WOFF1_ENTRY_LEN: usize = 20;
 
 /// Knobs for [`wrap_woff1_with_options`].
 ///
@@ -72,7 +75,8 @@ pub fn unwrap_woff1(woff_bytes: &[u8]) -> Result<Vec<u8>> {
     }
     let flavor = r.read_u32("WOFF1 flavor")?;
     let _length = r.read_u32("WOFF1 length")?;
-    let num_tables = r.read_u16("WOFF1 numTables")? as usize;
+    let num_tables_u16 = r.read_u16("WOFF1 numTables")?;
+    let num_tables = usize::from(num_tables_u16);
     let reserved = r.read_u16("WOFF1 reserved")?;
     if reserved != 0 {
         return Err(WoffError::BadMagic {
@@ -88,16 +92,19 @@ pub fn unwrap_woff1(woff_bytes: &[u8]) -> Result<Vec<u8>> {
 
     // --- Read directory ----------------------------------------------------
 
-    struct Entry {
+    struct Entry<'a> {
         tag: [u8; 4],
-        offset: u32,
-        comp_length: u32,
+        /// Stored table bytes, `compLength` long.
+        body: &'a [u8],
+        /// Byte offset of `body` in the WOFF1 file.
+        start: usize,
         orig_length: u32,
         orig_checksum: u32,
     }
 
     let mut entries = Vec::with_capacity(num_tables);
     for _ in 0..num_tables {
+        let record_offset = r.position();
         let tag = r.read_tag("WOFF1 table tag")?;
         let offset = r.read_u32("WOFF1 table offset")?;
         let comp_length = r.read_u32("WOFF1 compLength")?;
@@ -106,32 +113,65 @@ pub fn unwrap_woff1(woff_bytes: &[u8]) -> Result<Vec<u8>> {
 
         if comp_length > orig_length {
             return Err(WoffError::Malformed {
-                offset: r.position() - 16,
+                offset: record_offset,
                 context: "WOFF1 compLength > origLength",
             });
         }
-        // Bounds-check the body now so the body-copy loop below can
-        // unwrap without surprises.
-        let end =
-            (offset as usize)
-                .checked_add(comp_length as usize)
-                .ok_or(WoffError::Malformed {
-                    offset: r.position() - 16,
-                    context: "table offset + compLength overflows",
-                })?;
-        if end > woff_bytes.len() {
-            return Err(WoffError::Malformed {
-                offset: r.position() - 16,
-                context: "table extends past end of WOFF1 file",
-            });
-        }
+        let start = offset as usize;
+        let end = start
+            .checked_add(comp_length as usize)
+            .ok_or(WoffError::Malformed {
+                offset: record_offset,
+                context: "table offset + compLength overflows",
+            })?;
+        let body = woff_bytes.get(start..end).ok_or(WoffError::Malformed {
+            offset: record_offset,
+            context: "table extends past end of WOFF1 file",
+        })?;
 
         entries.push(Entry {
             tag,
-            offset,
-            comp_length,
+            body,
+            start,
             orig_length,
             orig_checksum,
+        });
+    }
+
+    // --- Validate layout ---------------------------------------------------
+
+    // The spec requires readers to reject table data that overlaps
+    // another table or the header and directory. Accepting it would
+    // also let one stored body expand once per directory entry that
+    // points at it. Empty bodies cover no bytes and cannot overlap.
+    let mut ranges: Vec<(usize, usize)> = entries
+        .iter()
+        .filter(|e| !e.body.is_empty())
+        .map(|e| (e.start, e.start + e.body.len()))
+        .collect();
+    ranges.sort_unstable();
+    let mut covered_until = WOFF1_HEADER_LEN + WOFF1_ENTRY_LEN * num_tables;
+    for (start, end) in ranges {
+        if start < covered_until {
+            return Err(WoffError::Malformed {
+                offset: start,
+                context: "WOFF1 table data overlaps another block",
+            });
+        }
+        covered_until = end;
+    }
+
+    // SFNT layout: header (12) + directory (16 * num_tables) +
+    // padded table bodies. The SFNT directory addresses tables with
+    // u32 offsets, so the whole rebuilt font must fit in u32.
+    let header_size = 12 + 16 * num_tables;
+    let sfnt_size = entries.iter().fold(header_size as u64, |acc, e| {
+        acc + pad4_u64(u64::from(e.orig_length))
+    });
+    if sfnt_size > u64::from(u32::MAX) {
+        return Err(WoffError::Malformed {
+            offset: 16,
+            context: "WOFF1 tables add up to more than 4 GiB",
         });
     }
 
@@ -139,37 +179,44 @@ pub fn unwrap_woff1(woff_bytes: &[u8]) -> Result<Vec<u8>> {
 
     // Compute search params per the SFNT spec, a no-op for our
     // parser but required for spec-compliant readers.
-    let (search_range, entry_selector, range_shift) = sfnt_search_params(num_tables as u16);
+    let (search_range, entry_selector, range_shift) = sfnt::search_params(num_tables_u16);
 
-    // SFNT layout: header (12) + directory (16 * num_tables) +
-    // padded table bodies. Each table body must be 4-byte aligned;
-    // the offset in the SFNT directory points at the table itself.
-    let header_size = 12 + 16 * num_tables;
-    let mut sfnt = Vec::with_capacity(
-        header_size
-            + entries
-                .iter()
-                .map(|e| pad4(e.orig_length as usize))
-                .sum::<usize>(),
-    );
+    // Reserve the declared size, but never more than the stored bytes
+    // can inflate to. Deflate cannot expand data by more than 1032 to 1.
+    let reserve = entries.iter().fold(header_size as u64, |acc, e| {
+        let stored = e.body.len() as u64;
+        acc + pad4_u64(u64::from(e.orig_length).min(stored.saturating_mul(1032)))
+    });
+    let mut sfnt = Vec::with_capacity(usize::try_from(reserve).unwrap_or(0));
 
     sfnt.extend_from_slice(&flavor.to_be_bytes());
-    sfnt.extend_from_slice(&(num_tables as u16).to_be_bytes());
+    sfnt.extend_from_slice(&num_tables_u16.to_be_bytes());
     sfnt.extend_from_slice(&search_range.to_be_bytes());
     sfnt.extend_from_slice(&entry_selector.to_be_bytes());
     sfnt.extend_from_slice(&range_shift.to_be_bytes());
 
-    // Directory placeholder; we'll overwrite offsets as we go.
-    let dir_start = sfnt.len();
-    sfnt.resize(dir_start + 16 * num_tables, 0);
+    // Directory. Every body comes out exactly `origLength` bytes long
+    // (inflate is checked against it below), so each offset is known
+    // before any body is written. The size check above keeps every
+    // offset within u32.
+    let mut body_offset = header_size as u64;
+    for e in &entries {
+        let offset = u32::try_from(body_offset).map_err(|_| WoffError::Malformed {
+            offset: 16,
+            context: "WOFF1 tables add up to more than 4 GiB",
+        })?;
+        sfnt.extend_from_slice(&e.tag);
+        sfnt.extend_from_slice(&e.orig_checksum.to_be_bytes());
+        sfnt.extend_from_slice(&offset.to_be_bytes());
+        sfnt.extend_from_slice(&e.orig_length.to_be_bytes());
+        body_offset += pad4_u64(u64::from(e.orig_length));
+    }
 
     // Bodies. Walk the WOFF1 directory in file order so the SFNT we
     // emit is deterministic.
-    for (i, e) in entries.iter().enumerate() {
-        let body_offset = sfnt.len() as u32;
-
-        let body = &woff_bytes[e.offset as usize..e.offset as usize + e.comp_length as usize];
-        if e.comp_length == e.orig_length {
+    for e in &entries {
+        let body = e.body;
+        if body.len() == e.orig_length as usize {
             // Uncompressed pass-through.
             sfnt.extend_from_slice(body);
         } else {
@@ -190,13 +237,6 @@ pub fn unwrap_woff1(woff_bytes: &[u8]) -> Result<Vec<u8>> {
         while sfnt.len() % 4 != 0 {
             sfnt.push(0);
         }
-
-        // Write the directory record.
-        let rec = dir_start + i * 16;
-        sfnt[rec..rec + 4].copy_from_slice(&e.tag);
-        sfnt[rec + 4..rec + 8].copy_from_slice(&e.orig_checksum.to_be_bytes());
-        sfnt[rec + 8..rec + 12].copy_from_slice(&body_offset.to_be_bytes());
-        sfnt[rec + 12..rec + 16].copy_from_slice(&e.orig_length.to_be_bytes());
     }
 
     Ok(sfnt)
@@ -236,8 +276,55 @@ pub fn wrap_woff1_with_options(sfnt_bytes: &[u8], opts: WrapWoff1Options) -> Res
     let mut r = Reader::new(sfnt_bytes);
 
     let flavor = r.read_u32("SFNT version")?;
-    let num_tables = r.read_u16("SFNT numTables")? as usize;
+    let num_tables_u16 = r.read_u16("SFNT numTables")?;
+    let num_tables = usize::from(num_tables_u16);
     r.skip(6, "SFNT searchRange/entrySelector/rangeShift")?;
+
+    // WOFF1 layout: 44-byte header + 20-byte directory * num_tables
+    // + padded table bodies. We don't emit metadata or private blocks.
+    let header_size = WOFF1_HEADER_LEN + WOFF1_ENTRY_LEN * num_tables;
+
+    // First pass: read and bounds-check every record. The WOFF1 header
+    // stores offsets and the file length as u32, so the uncompressed
+    // total must fit before any table is compressed. Compressed bodies
+    // are never larger than the raw ones, so this also bounds the
+    // output. Records may point at shared bytes, so the total can
+    // exceed the input size.
+    let mut raw_tables = Vec::with_capacity(num_tables);
+    let mut padded_total = header_size as u64;
+    // totalSfntSize: the SFNT header and directory plus every table
+    // padded to four bytes, the size of the font this file unwraps
+    // to. It is below `padded_total`, so it fits u32 once that does.
+    let mut sfnt_total: u64 = 12 + 16 * num_tables as u64;
+    for _ in 0..num_tables {
+        let record_offset = r.position();
+        let tag = r.read_tag("SFNT table tag")?;
+        let checksum = r.read_u32("SFNT table checksum")?;
+        let offset = r.read_u32("SFNT table offset")?;
+        let length = r.read_u32("SFNT table length")?;
+
+        let end = (offset as usize)
+            .checked_add(length as usize)
+            .ok_or(WoffError::Malformed {
+                offset: record_offset,
+                context: "SFNT table offset + length overflows",
+            })?;
+        let raw = sfnt_bytes
+            .get(offset as usize..end)
+            .ok_or(WoffError::Malformed {
+                offset: record_offset,
+                context: "SFNT table extends past end of input",
+            })?;
+        padded_total += pad4_u64(u64::from(length));
+        sfnt_total += pad4_u64(u64::from(length));
+        if padded_total > u64::from(u32::MAX) {
+            return Err(WoffError::Malformed {
+                offset: record_offset,
+                context: "SFNT tables add up to more than 4 GiB",
+            });
+        }
+        raw_tables.push((tag, checksum, length, raw));
+    }
 
     struct Entry {
         tag: [u8; 4],
@@ -247,60 +334,48 @@ pub fn wrap_woff1_with_options(sfnt_bytes: &[u8], opts: WrapWoff1Options) -> Res
         body: Vec<u8>,
         comp_length: u32,
         orig_length: u32,
+        /// Offset of `body` in the WOFF1 file.
+        offset: u32,
     }
 
+    // Second pass: compress each table and lay out the bodies so the
+    // header can carry `length`. Every value fits u32 because of the
+    // total checked above.
+    let too_large = WoffError::Malformed {
+        offset: 0,
+        context: "SFNT tables add up to more than 4 GiB",
+    };
     let mut entries: Vec<Entry> = Vec::with_capacity(num_tables);
-    for _ in 0..num_tables {
-        let tag = r.read_tag("SFNT table tag")?;
-        let checksum = r.read_u32("SFNT table checksum")?;
-        let offset = r.read_u32("SFNT table offset")?;
-        let length = r.read_u32("SFNT table length")?;
-
-        let end = (offset as usize)
-            .checked_add(length as usize)
-            .ok_or(WoffError::Malformed {
-                offset: r.position() - 16,
-                context: "SFNT table offset + length overflows",
-            })?;
-        if end > sfnt_bytes.len() {
-            return Err(WoffError::Malformed {
-                offset: r.position() - 16,
-                context: "SFNT table extends past end of input",
-            });
-        }
-        let raw = &sfnt_bytes[offset as usize..end];
-
+    let mut cursor = header_size;
+    for (tag, checksum, orig_length, raw) in raw_tables {
         let (body, comp_length) = compress_body(raw, opts.deflate_quality);
-
+        let Ok(offset) = u32::try_from(cursor) else {
+            return Err(too_large);
+        };
+        cursor = pad4(cursor + body.len());
         entries.push(Entry {
             tag,
             checksum,
             body,
             comp_length,
-            orig_length: length,
+            orig_length,
+            offset,
         });
     }
-
-    // WOFF1 layout: 44-byte header + 20-byte directory * num_tables
-    // + padded table bodies. We don't emit metadata or private blocks.
-    let header_size = 44 + 20 * num_tables;
-    // Compute total file size and per-body offsets up front so the
-    // header can carry `length`.
-    let mut body_offsets = Vec::with_capacity(num_tables);
-    let mut cursor = header_size;
-    for e in &entries {
-        body_offsets.push(cursor as u32);
-        cursor = pad4(cursor + e.comp_length as usize);
-    }
     let total_length = cursor;
+    let Ok(total_length_u32) = u32::try_from(total_length) else {
+        return Err(too_large);
+    };
+
+    let total_sfnt_size = u32::try_from(sfnt_total).unwrap_or(u32::MAX);
 
     let mut woff = Vec::with_capacity(total_length);
     woff.extend_from_slice(&WOFF1_SIGNATURE.to_be_bytes());
     woff.extend_from_slice(&flavor.to_be_bytes());
-    woff.extend_from_slice(&(total_length as u32).to_be_bytes());
-    woff.extend_from_slice(&(num_tables as u16).to_be_bytes());
+    woff.extend_from_slice(&total_length_u32.to_be_bytes());
+    woff.extend_from_slice(&num_tables_u16.to_be_bytes());
     woff.extend_from_slice(&0u16.to_be_bytes()); // reserved
-    woff.extend_from_slice(&(sfnt_bytes.len() as u32).to_be_bytes()); // totalSfntSize (approx)
+    woff.extend_from_slice(&total_sfnt_size.to_be_bytes());
     woff.extend_from_slice(&0u16.to_be_bytes()); // majorVersion
     woff.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
     woff.extend_from_slice(&0u32.to_be_bytes()); // metaOffset
@@ -309,9 +384,9 @@ pub fn wrap_woff1_with_options(sfnt_bytes: &[u8], opts: WrapWoff1Options) -> Res
     woff.extend_from_slice(&0u32.to_be_bytes()); // privOffset
     woff.extend_from_slice(&0u32.to_be_bytes()); // privLength
 
-    for (i, e) in entries.iter().enumerate() {
+    for e in &entries {
         woff.extend_from_slice(&e.tag);
-        woff.extend_from_slice(&body_offsets[i].to_be_bytes());
+        woff.extend_from_slice(&e.offset.to_be_bytes());
         woff.extend_from_slice(&e.comp_length.to_be_bytes());
         woff.extend_from_slice(&e.orig_length.to_be_bytes());
         woff.extend_from_slice(&e.checksum.to_be_bytes());
@@ -334,12 +409,9 @@ pub fn wrap_woff1_with_options(sfnt_bytes: &[u8], opts: WrapWoff1Options) -> Res
 ///
 /// Returns the bytes to write and the matching `compLength`. With the
 /// feature off, the function is a thin pass-through that always
-/// returns `(raw.to_vec(), raw.len())`.
-// `_quality` is unused in the feature-off build but consumed inside
-// the `cfg(feature = "woff1-deflate")` block. The leading underscore
-// is the standard "unused unless a cfg branch fires" idiom.
-#[allow(clippy::used_underscore_binding)]
-fn compress_body(raw: &[u8], _quality: u8) -> (Vec<u8>, u32) {
+/// returns `(raw.to_vec(), raw.len())`. Callers pass bodies no longer
+/// than a u32 table length, so both lengths fit u32.
+fn compress_body(raw: &[u8], quality: u8) -> (Vec<u8>, u32) {
     #[cfg(feature = "woff1-deflate")]
     {
         // Compress, then keep the result only if it's strictly
@@ -347,12 +419,14 @@ fn compress_body(raw: &[u8], _quality: u8) -> (Vec<u8>, u32) {
         // `compLength == origLength` as the "uncompressed" sentinel,
         // so equal-size compressed payloads provide no signal and
         // would just cost decode time.
-        let compressed = crate::zlib::deflate_zlib(raw, _quality);
+        let compressed = crate::zlib::deflate_zlib(raw, quality);
         if compressed.len() < raw.len() {
             let comp_len = compressed.len() as u32;
             return (compressed, comp_len);
         }
     }
+    #[cfg(not(feature = "woff1-deflate"))]
+    let _ = quality;
     let len = raw.len() as u32;
     (raw.to_vec(), len)
 }
@@ -361,22 +435,9 @@ const fn pad4(n: usize) -> usize {
     (n + 3) & !3
 }
 
-/// SFNT search-param triple (`searchRange`, `entrySelector`,
-/// `rangeShift`). All deterministic functions of `num_tables`.
-fn sfnt_search_params(num_tables: u16) -> (u16, u16, u16) {
-    if num_tables == 0 {
-        return (0, 0, 0);
-    }
-    // Largest power of two <= num_tables, scaled by record size 16.
-    let mut entry_selector: u16 = 0;
-    let mut pow2: u16 = 1;
-    while pow2 * 2 <= num_tables {
-        pow2 *= 2;
-        entry_selector += 1;
-    }
-    let search_range = pow2 * 16;
-    let range_shift = num_tables * 16 - search_range;
-    (search_range, entry_selector, range_shift)
+/// `pad4` over u64, for size totals built from u32 table lengths.
+const fn pad4_u64(n: u64) -> u64 {
+    (n + 3) & !3
 }
 
 #[cfg(test)]
@@ -386,10 +447,10 @@ mod tests {
     #[test]
     fn search_params_match_spec() {
         // Examples from the OpenType spec.
-        assert_eq!(sfnt_search_params(0), (0, 0, 0));
-        assert_eq!(sfnt_search_params(1), (16, 0, 0));
-        assert_eq!(sfnt_search_params(9), (128, 3, 16));
-        assert_eq!(sfnt_search_params(14), (128, 3, 96));
+        assert_eq!(sfnt::search_params(0), (0, 0, 0));
+        assert_eq!(sfnt::search_params(1), (16, 0, 0));
+        assert_eq!(sfnt::search_params(9), (128, 3, 16));
+        assert_eq!(sfnt::search_params(14), (128, 3, 96));
     }
 
     #[cfg(feature = "woff1-deflate")]

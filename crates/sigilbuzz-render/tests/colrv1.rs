@@ -128,21 +128,32 @@ fn build_hmtx(num_glyphs: u16) -> Vec<u8> {
 }
 
 fn build_cpal_v0(colors: &[(u8, u8, u8, u8)]) -> Vec<u8> {
-    let num_palettes: u16 = 1;
-    let entries = colors.len() as u16;
+    build_cpal_palettes(&[colors])
+}
+
+/// Builds a v0 CPAL with one palette per slice. Every palette must
+/// have the same number of entries.
+fn build_cpal_palettes(palettes: &[&[(u8, u8, u8, u8)]]) -> Vec<u8> {
+    let num_palettes = palettes.len() as u16;
+    let entries = palettes[0].len() as u16;
     let mut out = Vec::new();
     out.extend_from_slice(&0u16.to_be_bytes());
     out.extend_from_slice(&entries.to_be_bytes());
     out.extend_from_slice(&num_palettes.to_be_bytes());
-    out.extend_from_slice(&entries.to_be_bytes());
+    out.extend_from_slice(&(entries * num_palettes).to_be_bytes());
     let header_plus_indices = 12 + num_palettes as usize * 2;
     out.extend_from_slice(&(header_plus_indices as u32).to_be_bytes());
-    out.extend_from_slice(&0u16.to_be_bytes());
-    for (r, g, b, a) in colors {
-        out.push(*b);
-        out.push(*g);
-        out.push(*r);
-        out.push(*a);
+    for i in 0..num_palettes {
+        out.extend_from_slice(&(i * entries).to_be_bytes()); // colorRecordIndices
+    }
+    for colors in palettes {
+        assert_eq!(colors.len(), usize::from(entries));
+        for (r, g, b, a) in *colors {
+            out.push(*b);
+            out.push(*g);
+            out.push(*r);
+            out.push(*a);
+        }
     }
     align4(&mut out);
     out
@@ -154,7 +165,7 @@ fn build_cpal_v0(colors: &[(u8, u8, u8, u8)]) -> Vec<u8> {
 /// BaseGlyphList start (same convention as the paint-crate evaluator
 /// fixtures).
 fn build_v1_header(glyph_id: u16) -> Vec<u8> {
-    let header_len: u32 = 30;
+    let header_len: u32 = 34;
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // version
     out.extend_from_slice(&0u16.to_be_bytes()); // numBaseGlyphRecords (v0)
@@ -164,8 +175,10 @@ fn build_v1_header(glyph_id: u16) -> Vec<u8> {
     out.extend_from_slice(&header_len.to_be_bytes()); // baseGlyphListOffset
     out.extend_from_slice(&0u32.to_be_bytes()); // layerListOffset
     out.extend_from_slice(&0u32.to_be_bytes()); // clipListOffset
-    out.extend_from_slice(&0u32.to_be_bytes()); // varStoreOffset
-                                                // BaseGlyphList: numRecords, then (gid, paintOffset).
+    out.extend_from_slice(&0u32.to_be_bytes()); // varIndexMapOffset
+    out.extend_from_slice(&0u32.to_be_bytes()); // itemVariationStoreOffset
+
+    // BaseGlyphList: numRecords, then (gid, paintOffset).
     out.extend_from_slice(&1u32.to_be_bytes());
     out.extend_from_slice(&glyph_id.to_be_bytes());
     out.extend_from_slice(&10u32.to_be_bytes());
@@ -223,14 +236,18 @@ fn standard_glyf_loca() -> (Vec<u8>, Vec<u8>) {
 // =========================================================================
 
 fn build_glyph_solid_font() -> Vec<u8> {
+    // CPAL: one entry, opaque red.
+    build_glyph_solid_font_with_cpal(&build_cpal_v0(&[(255, 0, 0, 255)]))
+}
+
+/// The solid-fill font of [`build_glyph_solid_font`] with its CPAL
+/// replaced by `cpal`. The PaintSolid uses palette entry 0.
+fn build_glyph_solid_font_with_cpal(cpal: &[u8]) -> Vec<u8> {
     let head = build_head();
     let maxp = build_maxp(2);
     let hhea = build_hhea(2);
     let hmtx = build_hmtx(2);
     let (glyf, loca) = standard_glyf_loca();
-
-    // CPAL: one entry, opaque red.
-    let cpal = build_cpal_v0(&[(255, 0, 0, 255)]);
 
     // COLR: BaseGlyphPaintRecord for gid 1 -> PaintGlyph(child=Solid,
     // outline=gid 1). The PaintGlyph's child paint is right after.
@@ -251,7 +268,7 @@ fn build_glyph_solid_font() -> Vec<u8> {
 
     let tables: &[([u8; 4], &[u8])] = &[
         (*b"COLR", colr.as_slice()),
-        (*b"CPAL", cpal.as_slice()),
+        (*b"CPAL", cpal),
         (*b"glyf", glyf.as_slice()),
         (*b"head", head.as_slice()),
         (*b"hhea", hhea.as_slice()),
@@ -290,6 +307,43 @@ fn colrv1_paint_glyph_solid_fills_inside_outline() {
     assert!(
         transparent_pixels > 0,
         "expected the 1-px margin to be transparent"
+    );
+}
+
+#[test]
+fn colrv1_resolves_colors_in_the_requested_palette() {
+    // Palette 0 is red and palette 1 is blue.
+    let cpal = build_cpal_palettes(&[&[(255, 0, 0, 255)], &[(0, 0, 255, 255)]]);
+    let bytes = build_glyph_solid_font_with_cpal(&cpal);
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    let rast = Rasterizer::new();
+    let count = |palette: u16, want: fn(&[u8; 4]) -> bool| {
+        let pix = rast
+            .rasterize_colrv1_glyph(&face, 1, palette, 100.0, &[])
+            .expect("rasterize succeeds");
+        let mut hits = 0;
+        for y in 0..pix.height {
+            for x in 0..pix.width {
+                hits += usize::from(want(&pix.get(x, y)));
+            }
+        }
+        hits
+    };
+    let red = |p: &[u8; 4]| p[0] > 200 && p[2] < 30;
+    let blue = |p: &[u8; 4]| p[2] > 200 && p[0] < 30;
+    assert!(count(0, red) > 0 && count(0, blue) == 0, "palette 0 is red");
+    assert!(
+        count(1, blue) > 0 && count(1, red) == 0,
+        "palette 1 is blue"
+    );
+
+    let err = rast
+        .rasterize_colrv1_glyph(&face, 1, 2, 100.0, &[])
+        .unwrap_err();
+    assert!(
+        matches!(err, RenderError::BadPaletteIndex { palette: 2, .. }),
+        "got {err:?}"
     );
 }
 
@@ -474,16 +528,16 @@ fn build_var_solid_font() -> Vec<u8> {
     // when coords = [1.0].
     let ivs = build_ivs_one_axis_one_short_delta(-8192_i16);
 
-    // Compute COLR layout: header (30 bytes) -> paint body -> IVS.
-    // We need the IVS to live inside the COLR table data, accessed
-    // through `var_store_offset`. So we set varStoreOffset in the
-    // header to point past the paint body.
+    // Compute COLR layout: header (34 bytes), then the paint body,
+    // then the IVS. The IVS lives inside the COLR table data, reached
+    // through `itemVariationStoreOffset`, which points past the paint
+    // body.
     //
-    // Plan: write the v1 header with placeholder varStoreOffset, then
+    // Plan: write the v1 header with a placeholder store offset, then
     // append PaintVarSolid (8 bytes), then align, then the IVS, then
-    // patch varStoreOffset in the header.
+    // patch the store offset in the header.
     let mut colr = build_v1_header(1);
-    let var_store_off_slot = 26; // varStoreOffset is the last u32 in the header
+    let var_store_off_slot = 30; // itemVariationStoreOffset is the last u32 in the header
                                  // PaintGlyph(child=PaintVarSolid, outline=gid 1).
     let pglyph_start = colr.len();
     colr.push(10); // PaintGlyph

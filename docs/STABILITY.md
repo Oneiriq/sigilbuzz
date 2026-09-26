@@ -195,7 +195,7 @@ are welcome but not part of the contract.
 Before 1.0, a public item can be renamed or removed without a deprecation release, but
 only in a minor version bump and only with an entry in
 [CHANGELOG.md](../CHANGELOG.md). Breaking a Tier 1 item should be a deliberate choice,
-called out in the pull request, and checked against oniq, the main internal consumer.
+called out in the pull request, and checked against the known consumers listed below.
 
 After 1.0:
 
@@ -206,15 +206,14 @@ After 1.0:
 
 ## Known consumers
 
-- oniq is the main downstream consumer. Before each release is tagged, oniq is built
-  against the release candidate. oniq uses:
+- The main consumer is a text rendering application with an MSDF glyph generator.
+  Before each release is tagged, it is built against the release candidate. It uses:
   - `sigilbuzz::{Blob, Buffer, Face, Font, Direction, Feature, shape}`
   - `sigilbuzz::tables::{Outline, PathOp, Fvar}`
   - `sigilbuzz_render::{Affine, DEFAULT_TOLERANCE, flatten}`
 
   These are all Tier 1 and have kept the same shape since 0.19.
-- pixel-stroke uses the outline and render APIs for software rasterization, under the
-  same Tier 1 terms.
+- A software rasterizer uses the outline and render APIs under the same Tier 1 terms.
 
 If you build on sigilbuzz, open an issue or pull request that links to your usage so
 future audits know what to protect.

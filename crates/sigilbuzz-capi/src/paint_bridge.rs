@@ -1,5 +1,5 @@
 //! `hb_paint_*`: bridge from HarfBuzz's paint-funcs API to
-//! `sigilbuzz_paint::evaluate()`.
+//! `sigilbuzz_paint::evaluate_at_coords()`.
 //!
 //! HarfBuzz's COLRv1 surface is callback-based: the consumer
 //! populates an `hb_paint_funcs_t` table with function pointers, hands
@@ -26,52 +26,32 @@
 //! HarfBuzz's `hb_color_t` is a packed `u32` BGRA byte tuple. The
 //! conversion is a clamp + cast.
 
-// `_face` is the lifetime-root field in `FaceInner`/`FontInner`; the
-// bridge reads it to obtain a `&Face` for paint evaluation. See
-// `crates/sigilbuzz-capi/src/lib.rs` for the rationale.
-#![allow(clippy::used_underscore_binding)]
-
 extern crate alloc;
 
 use alloc::boxed::Box;
 use core::ffi::c_void;
 
 use crate::{hb_bool_t, hb_font_t};
-use sigilbuzz_paint::{evaluate, Color, DrawCmd, Extend, GradientKind, PaintSource, Transform2D};
+use sigilbuzz_paint::{
+    evaluate_with_palette, Color, DrawCmd, GradientKind, PaintSource, Transform2D,
+};
 
 /// HarfBuzz's packed BGRA color. Layout: byte 0 = blue, byte 1 = green,
 /// byte 2 = red, byte 3 = alpha. Matches the `HB_COLOR(b, g, r, a)`
 /// macro upstream.
 pub type hb_color_t = u32;
 
-/// Opaque color-line handle. HarfBuzz models the color line as an
-/// opaque type the callee can call back into through
-/// `hb_color_line_get_color_stops` / `hb_color_line_get_extend`. The
-/// minimal-bridge surface this crate ships hands the color stops to
-/// the consumer through a small inline accessor surface that the
-/// gradient callbacks peek at via `*const hb_color_line_t`. Today the
-/// pointer is a `*const ResolvedColorLine`; the layout is private to
-/// this crate.
+/// Opaque color-line handle passed to the gradient callbacks.
+/// HarfBuzz lets the callee read the stops back through
+/// `hb_color_line_get_color_stops` / `hb_color_line_get_extend`. This
+/// crate does not export those accessors yet (#103), so the pointer
+/// is only an opaque, non-null token that is valid for the duration
+/// of the callback.
 #[repr(C)]
 pub struct hb_color_line_t {
     /// Opaque payload. The C surface treats this pointer as a black
-    /// box; the bridge passes it back into a future
-    /// `hb_color_line_*` accessor surface (deferred to a follow-up
-    /// PR, see #103 follow-on tracking).
+    /// box and never reads through it.
     _opaque: [u8; 0],
-}
-
-/// Internal: a color line we hand to a gradient callback. Lives on
-/// the stack of `hb_font_paint_glyph` for the duration of the call.
-///
-/// HarfBuzz's `hb_color_line_t` is opaque to the C consumer; the
-/// fields here exist so a future `hb_color_line_get_color_stops` /
-/// `hb_color_line_get_extend` accessor pair can read them back. Those
-/// accessors land in a follow-up PR. See #103 follow-on tracking.
-#[allow(dead_code)]
-struct ResolvedColorLine<'a> {
-    stops: &'a [sigilbuzz_paint::ColorStop],
-    extend: Extend,
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +181,9 @@ pub unsafe extern "C" fn hb_paint_funcs_destroy(funcs: *mut hb_paint_funcs_t) {
     if funcs.is_null() {
         return;
     }
-    // SAFETY: caller-asserted.
+    // SAFETY: `funcs` is non-null and the caller guarantees it came
+    // from `Box::into_raw` in `hb_paint_funcs_create` and has not been
+    // destroyed yet.
     drop(unsafe { Box::from_raw(funcs) });
 }
 
@@ -215,13 +197,15 @@ macro_rules! impl_setter {
         /// clear.
         ///
         /// # Safety
-        /// `funcs` must be valid.
+        /// `funcs` must be null or valid.
         #[no_mangle]
         pub unsafe extern "C" fn $name(funcs: *mut hb_paint_funcs_t, callback: $cb_ty) {
             if funcs.is_null() {
                 return;
             }
-            // SAFETY: caller asserts validity.
+            // SAFETY: `funcs` is non-null and the caller guarantees it
+            // points to a live `hb_paint_funcs_t` that nothing else is
+            // using during this call.
             unsafe {
                 (*funcs).$field = callback;
             }
@@ -340,52 +324,66 @@ impl_setter!(
 
 /// Walks the COLRv1 paint tree for `gid` against `font`'s face, firing
 /// callbacks on `funcs` for each draw operation. `paint_data` is
-/// threaded through to every callback. `_palette_index` and
-/// `foreground_color` are accepted for HarfBuzz signature parity but
-/// the underlying evaluator already routes palette lookups through
-/// `evaluate`'s default palette; renderers that want a non-default
-/// palette must pre-pick before calling, matching the
-/// `sigilbuzz_paint::evaluate_at_coords` contract.
+/// threaded through to every callback. `palette_index` picks the CPAL
+/// palette colors resolve in, as in HarfBuzz. A color in a palette the
+/// font does not have comes out transparent, where HarfBuzz reports
+/// the foreground color. `_foreground_color` is accepted for HarfBuzz
+/// signature parity only: solid colors are always reported with
+/// `is_foreground` set to 0.
+///
+/// Paint evaluation applies the variation coordinates set on `font`
+/// with `hb_font_set_variations`, as HarfBuzz does. A `gid` above
+/// 65535 is not a valid glyph id and paints nothing.
 ///
 /// # Safety
-/// `font` and `funcs` must be valid; `paint_data` may be any pointer
-/// (it is threaded back to the consumer's callbacks unchanged).
+/// `font` and `funcs` must each be null or valid. `paint_data` may be
+/// any pointer (it is threaded back to the consumer's callbacks
+/// unchanged).
 #[no_mangle]
 pub unsafe extern "C" fn hb_font_paint_glyph(
     font: *mut hb_font_t,
     gid: u32,
     funcs: *mut hb_paint_funcs_t,
     paint_data: *mut c_void,
-    _palette_index: u32,
-    foreground_color: hb_color_t,
+    palette_index: u32,
+    _foreground_color: hb_color_t,
 ) {
     if font.is_null() || funcs.is_null() {
         return;
     }
-    // SAFETY: caller asserts validity.
+    // Glyph ids are 16-bit. Truncating would paint an unrelated glyph.
+    let Ok(gid) = u16::try_from(gid) else {
+        return;
+    };
+    // SAFETY: `font` is non-null and the caller guarantees it points
+    // to a live `hb_font_t`.
     let font_inner = unsafe { &(*font).inner };
     // The face lives in the `Arc<FaceInner>` we hold for the duration
-    // of this call. Borrow directly: paint evaluation only reads from
-    // the face, never from FontState's mutated coords (the variable-
-    // color-fonts story routes coords through `evaluate_at_coords`
-    // which is exposed in a follow-up). For now, evaluate at the
-    // default instance.
-    let face: &sigilbuzz::Face<'static> = &font_inner._face.face;
+    // of this call. Paint evaluation only reads from the face.
+    let face: &sigilbuzz::Face<'static> = &font_inner.face.face;
+    // Copy the coords out so the font lock is not held while the
+    // callbacks run. A callback may call back into the font.
+    let coords = font_inner.state.lock().coords.clone();
 
-    let cmds = evaluate(face, gid as u16);
-    let _ = foreground_color; // future hook for is_foreground=true
+    // CPAL palette indices are 16-bit, so a larger index names no
+    // palette.
+    let palette = u16::try_from(palette_index).unwrap_or(u16::MAX);
+    let cmds = evaluate_with_palette(face, gid, &coords, palette);
 
-    // Walk the DrawCmd stream and dispatch.
+    // Walk the DrawCmd stream and dispatch. Each callback slot is
+    // read again right before use because a callback may replace the
+    // slots through the `funcs` pointer it receives.
     for cmd in &cmds {
         match cmd {
             DrawCmd::PushLayer { composite_mode } => {
-                // SAFETY: caller asserts funcs validity.
+                // SAFETY: `funcs` is non-null and the caller guarantees
+                // it points to a live `hb_paint_funcs_t`.
                 if let Some(cb) = unsafe { (*funcs).push_layer } {
                     cb(funcs, paint_data, *composite_mode as u32);
                 }
             }
             DrawCmd::PopLayer => {
-                // SAFETY: caller asserts funcs validity.
+                // SAFETY: as above.
                 if let Some(cb) = unsafe { (*funcs).pop_layer } {
                     cb(funcs, paint_data);
                 }
@@ -397,7 +395,7 @@ pub unsafe extern "C" fn hb_font_paint_glyph(
             } => {
                 let pushed_transform = !is_identity(transform);
                 if pushed_transform {
-                    // SAFETY: caller asserts funcs validity.
+                    // SAFETY: as above.
                     if let Some(cb) = unsafe { (*funcs).push_transform } {
                         cb(
                             funcs,
@@ -411,17 +409,19 @@ pub unsafe extern "C" fn hb_font_paint_glyph(
                         );
                     }
                 }
-                // SAFETY: caller asserts funcs validity.
+                // SAFETY: as above.
                 if let Some(cb) = unsafe { (*funcs).push_clip_glyph } {
-                    cb(funcs, paint_data, *leaf_gid as u32);
+                    cb(funcs, paint_data, u32::from(*leaf_gid));
                 }
-                emit_paint_source(funcs, paint_data, paint);
-                // SAFETY: caller asserts funcs validity.
+                // SAFETY: `funcs` is non-null and points to a live
+                // `hb_paint_funcs_t`, as checked and guaranteed above.
+                unsafe { emit_paint_source(funcs, paint_data, paint) };
+                // SAFETY: as above.
                 if let Some(cb) = unsafe { (*funcs).pop_clip } {
                     cb(funcs, paint_data);
                 }
                 if pushed_transform {
-                    // SAFETY: caller asserts funcs validity.
+                    // SAFETY: as above.
                     if let Some(cb) = unsafe { (*funcs).pop_transform } {
                         cb(funcs, paint_data);
                     }
@@ -432,27 +432,31 @@ pub unsafe extern "C" fn hb_font_paint_glyph(
 }
 
 /// Dispatches the matching callback for a [`PaintSource`].
-fn emit_paint_source(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void, paint: &PaintSource) {
+///
+/// # Safety
+/// `funcs` must be non-null and point to a live `hb_paint_funcs_t`.
+unsafe fn emit_paint_source(
+    funcs: *mut hb_paint_funcs_t,
+    paint_data: *mut c_void,
+    paint: &PaintSource,
+) {
     match paint {
         PaintSource::Solid(color) => {
-            // SAFETY: caller asserts funcs validity.
+            // SAFETY: this function's contract guarantees `funcs` is
+            // non-null and live.
             if let Some(cb) = unsafe { (*funcs).color } {
                 cb(funcs, paint_data, 0, color_to_hb(*color));
             }
         }
         PaintSource::Gradient(gradient) => {
-            // Build a stack-local resolved color line and hand its
-            // address to the callback. The lifetime of the pointer is
-            // limited to the callback itself.
-            let line = ResolvedColorLine {
-                stops: &gradient.stops,
-                extend: gradient.extend,
-            };
+            // The color line handle is opaque to C (see
+            // `hb_color_line_t`). Point it at the gradient, which
+            // outlives every callback below.
             let line_ptr: *const hb_color_line_t =
-                core::ptr::from_ref::<ResolvedColorLine>(&line).cast::<hb_color_line_t>();
+                core::ptr::from_ref(gradient).cast::<hb_color_line_t>();
             match gradient.kind {
                 GradientKind::Linear { p0, p1, p2 } => {
-                    // SAFETY: caller asserts funcs validity.
+                    // SAFETY: as for the solid case.
                     if let Some(cb) = unsafe { (*funcs).linear_gradient } {
                         cb(
                             funcs, paint_data, line_ptr, p0.0, p0.1, p1.0, p1.1, p2.0, p2.1,
@@ -460,7 +464,7 @@ fn emit_paint_source(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void, pain
                     }
                 }
                 GradientKind::Radial { c0, r0, c1, r1 } => {
-                    // SAFETY: caller asserts funcs validity.
+                    // SAFETY: as for the solid case.
                     if let Some(cb) = unsafe { (*funcs).radial_gradient } {
                         cb(funcs, paint_data, line_ptr, c0.0, c0.1, r0, c1.0, c1.1, r1);
                     }
@@ -470,7 +474,7 @@ fn emit_paint_source(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void, pain
                     start_angle,
                     end_angle,
                 } => {
-                    // SAFETY: caller asserts funcs validity.
+                    // SAFETY: as for the solid case.
                     if let Some(cb) = unsafe { (*funcs).sweep_gradient } {
                         cb(
                             funcs,
@@ -484,11 +488,6 @@ fn emit_paint_source(funcs: *mut hb_paint_funcs_t, paint_data: *mut c_void, pain
                     }
                 }
             }
-            // The color line is unused after the callback returns; the
-            // stack frame goes away with it. Suppress the warning that
-            // the local outlives nothing meaningful.
-            let _ = line_ptr;
-            let _ = line;
         }
     }
 }
@@ -516,10 +515,11 @@ mod tests {
     use super::*;
     use core::ptr;
     use core::sync::atomic::{AtomicU32, Ordering};
-    use sigilbuzz_paint::ColorStop;
 
     #[test]
     fn create_destroy_round_trips() {
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             let f = hb_paint_funcs_create();
             assert!(!f.is_null());
@@ -573,6 +573,8 @@ mod tests {
         // face with a COLR table; the equivalence test
         // (`paint_evaluator` Rust integration) covers that path.
         let funcs = hb_paint_funcs_create();
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             (*funcs).push_layer = Some(count_push_layer);
             (*funcs).pop_layer = Some(count_pop_layer);
@@ -583,6 +585,8 @@ mod tests {
 
         // Direct invocation matches what the dispatcher does for a
         // PushLayer / PopLayer pair.
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe {
             ((*funcs).push_layer.unwrap())(funcs, ptr::null_mut(), 3);
             ((*funcs).pop_layer.unwrap())(funcs, ptr::null_mut());
@@ -591,11 +595,8 @@ mod tests {
         assert_eq!(COUNTERS[0].load(Ordering::SeqCst), 1);
         assert_eq!(COUNTERS[1].load(Ordering::SeqCst), 1);
 
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
         unsafe { hb_paint_funcs_destroy(funcs) };
     }
-
-    // Reference the gradient stop type so the unused-import warning
-    // doesn't fire, keeping the shape of the bridge tested.
-    #[allow(dead_code)]
-    fn _stop_type_check(_s: ColorStop) {}
 }

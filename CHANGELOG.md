@@ -20,22 +20,115 @@ Added:
   between visual order (what `Glyph::cluster` indexes) and logical order (the source
   text), and reports the embedding level at each position. Use it to put carets and
   selections back into the original text.
+- `fuzz/`: cargo-fuzz targets for every part of the workspace that reads untrusted
+  input. See [fuzz/README.md](fuzz/README.md).
+- `Colr::var_index_map_offset`, the COLR v1 header's `DeltaSetIndexMap` offset.
+- `PairPos::lookup_with_base`, which resolves format 1 device tables against their
+  PairSet the way the spec does.
+- `sigilbuzz-paint`: `evaluate_with_palette`, which evaluates a COLR paint graph with a
+  chosen CPAL palette, and `linear_gradient_end`, which folds a linear gradient's `p2`
+  into its end point.
 
 Changed:
+
+- Latin, Greek, Cyrillic, and Han text now look for `latn`, `grek`, `cyrl`, and `hani`
+  lookups before falling back to `DFLT`, as HarfBuzz does. Fonts that put their kerning
+  or ligatures under the script tag get them now. Rubik VF, for example, had no Latin
+  kerning before.
+- `sigilbuzz-render` returns `RenderError::BadPaletteIndex` for a palette the font does
+  not have. Palette 0 still falls back to the default colors.
+- `hb_font_set_ppem` is documented as a no-op. sigilbuzz does not hint, so nothing read
+  the value.
+- The companion crate READMEs no longer claim `no_std`. Every companion crate enables the
+  core crate's `std` feature.
 
 - The minimum supported Rust version is now 1.81. The core crate already needed 1.81
   for `core::error::Error`, so the old `rust-version = "1.75"` was wrong.
 - `sigilbuzz-woff` 0.3.1 and `sigilbuzz-render` 0.8.1 move to `miniz_oxide` 0.9.
+  `sigilbuzz-woff` 0.3.1 also moves to `brotli` 9.
 - `sigilbuzz-capi` 0.2.2 installs with `cargo cinstall` from cargo-c. That puts
   `libsigilbuzz`, the header (`include/sigilbuzz/hb.h`), a generated `sigilbuzz.pc`, and
   a CMake package in place in one step. The old pkg-config and CMake templates had to be
   filled in by hand and looked for a `libsigilbuzz` that `cargo build` never produced
   (it builds `libsigilbuzz_capi`). They are gone.
-- The companion crate benchmarks moved to Criterion 0.8.
+- All benchmarks moved to Criterion 0.8.
 - A full `LICENSE` file now sits at the repo root, and `NOTICE` spells out the
   attribution terms. The license is still Apache-2.0.
 - The documentation was rewritten, and the release history moved out of
   `docs/ROADMAP.md` into this file.
+- CI and the pre-push hook lint and test the whole workspace. They used to cover only
+  the root crate. CI also checks the minimum Rust version, including every `no_std`
+  build.
+- Every companion crate gets a patch release for the fixes below: `sigilbuzz-subset`
+  0.11.1, `sigilbuzz-paint` 0.1.1, `sigilbuzz-svg` 0.1.2, `sigilbuzz-pdf` 0.2.2,
+  `sigilbuzz-gpu` 0.1.1, `sigilbuzz-text-layout` 0.1.1, `sigilbuzz-hyphen` 0.1.1, and
+  `sigilbuzz-cli` 0.1.1.
+
+Fixed:
+
+A hardening pass for hostile input. Fonts, images, and text can come from anywhere,
+and a malformed one must not crash, hang, or exhaust memory. Shipped code no longer
+contains `unwrap`, `expect`, or panic macros, and every fix has a regression test.
+Fuzzing found the first bugs, and a review of every crate found the rest. Output for
+valid input is unchanged except where noted.
+
+- Panics on malformed fonts in CFF (INDEX offsets, charstring operands, subroutine
+  indexes), AAT `morx`, the GSUB and GPOS skip iterator, the JPEG decoder, and WOFF2
+  wrapping. One panic was reachable with an ordinary font and ordinary text: an Arabic
+  letter after a decomposed Thai vowel crashed the Arabic joining step, and on longer
+  text it misaligned the joining forms.
+- Allocations sized from counts in the file without checking the data behind them: up
+  to 17 GB in CFF2, 200 GB in `morx`, 32 GB in `MultiItemVariationStore`, 25 GB in
+  contextual rule sets, 8.6 GB in `gvar` subsetting, and 30 GB in the rasterizer.
+  Decompression in WOFF1, WOFF2, PNG, JPEG, and TIFF is now capped by what the input
+  can plausibly hold.
+- Hangs and runaway work: CFF subroutine bombs, composite glyphs that fan out (`glyf`,
+  VARC, EBDT), cyclic `morx` chains, nested GSUB and GPOS lookups (now bounded per
+  `shape()` call, like HarfBuzz), unbounded buffer growth from multiple substitution and
+  `morx` insertion, SVG `<use>` fan-out, COLR paint graphs, and quadratic passes in
+  bidi resolution, Indic and USE reordering, line wrapping, and subsetting.
+  Hyphenation checked all 4,938 US English patterns at every letter. It now checks
+  only the patterns that start with that letter, about 10 times faster with the same
+  result.
+- Subsetting a large font could produce broken layout tables. Rewritten GSUB and GPOS
+  tables over 64 KB wrapped their 16-bit offsets. They now use Extension lookups when
+  they need to.
+- `BASE` offsets past 64 KB were truncated, so baseline tags were read from the wrong
+  place.
+- The `no_std` builds did not compile on Rust 1.81, the declared minimum.
+- `sigilbuzz-capi`: `hb_set_t` was not safe to share between threads,
+  `hb_font_paint_glyph` truncated glyph ids above 65535, and a language string with an
+  embedded NUL leaked memory on every call. Every `unsafe` block now says why it is
+  sound.
+- `sigilbuzz-cli`: writing to a closed pipe panicked. It now reports an error.
+- `sigilbuzz-woff`: the `woff2` feature did not build without the default features.
+
+The new limits only affect fonts far beyond anything real, for example a glyph with
+more than 65,536 points, or a `shape()` call that needs more than 64 lookup
+applications per glyph (never fewer than 16,384 in total).
+
+Settings and table data that were read and then ignored:
+
+- The COLR v1 header was read with four offsets instead of five, so variable COLRv1
+  fonts never found their delta-set index map.
+- GPOS PairPos format 1 read its device tables relative to the subtable instead of the
+  PairSet, so variable kerning deltas came from the wrong place.
+- Subsetting dropped the GDEF variation store, so a subset variable font lost its
+  kerning deltas. `retain_hints` dropped `cvt `, `fpgm`, and `prep`. CFF and CFF2 fonts
+  ignored `retain_layout`, `retain_variations`, and `drop_unhandled`, so OTF subsets
+  lost GSUB, GPOS, `fvar`, and `HVAR`.
+- `sigilbuzz-capi`: `hb_font_set_scale` did not change the output, `hb_blob_create`
+  ignored its memory mode and dropped the destroy callback for empty blobs,
+  `hb_shape_full` ignored the shaper list, and `hb_font_paint_glyph` ignored the font's
+  variation coordinates and the chosen palette.
+- `sigilbuzz-woff`: WOFF1 wrapping wrote the input length as `totalSfntSize` instead of
+  the padded size.
+- `sigilbuzz-text-layout`: `break_at_word_boundaries = false` did nothing, mandatory
+  breaks ignored `max_width`, and newline characters counted toward the line width.
+- `sigilbuzz-render` and `sigilbuzz-svg`: a linear gradient's `p2` point was ignored,
+  `stop-opacity` inside a `style` attribute was ignored, a trailing `;` in `style`
+  dropped the whole gradient stop, and `stroke-linejoin="bevel"` left a notch at every
+  outer corner instead of drawing the bevel.
 
 ## 0.21.0 (2026-04-25)
 
@@ -118,7 +211,7 @@ Fixed:
 
 ## 0.16.0 (2026-04-25)
 
-Three gaps found while moving oniq's MSDF glyph generator onto sigilbuzz.
+Three gaps found while moving an MSDF glyph generator onto sigilbuzz.
 
 - `flatten()`, `Segment`, and `DEFAULT_TOLERANCE` are public in `sigilbuzz-render`
   (#208, #211).

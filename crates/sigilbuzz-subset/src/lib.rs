@@ -105,6 +105,7 @@ mod classdef;
 mod closure;
 mod cmap;
 mod coverage;
+mod device;
 mod fvar;
 mod gdef;
 mod glyf;
@@ -143,6 +144,17 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Glyph index alias. sigilbuzz uses raw `u16` glyph ids throughout.
 pub type GlyphId = u16;
 
+/// TrueType hinting tables that [`SubsetInput::retain_hints`] keeps or
+/// drops along with the glyph instructions.
+const HINTING_TABLES: [[u8; 4]; 3] = [*b"cvt ", *b"fpgm", *b"prep"];
+
+/// Layout tables that [`SubsetInput::retain_layout`] keeps or drops.
+const LAYOUT_TABLES: [[u8; 4]; 3] = [tag::GSUB, tag::GPOS, tag::GDEF];
+
+/// Variable-font tables that [`SubsetInput::retain_variations`] keeps
+/// or drops.
+const VARIATION_TABLES: [[u8; 4]; 5] = [tag::FVAR, tag::AVAR, tag::GVAR, tag::HVAR, tag::VARC];
+
 /// Subset configuration.
 #[derive(Debug, Clone)]
 pub struct SubsetInput {
@@ -150,31 +162,34 @@ pub struct SubsetInput {
     /// pieces will be added automatically by the dependency walker.
     /// Glyph 0 (`.notdef`) is always retained even when omitted.
     pub gids: Vec<GlyphId>,
-    /// If true, retain hinting / instructions. Defaults to false.
-    /// Currently honored only for simple glyphs in `glyf`.
+    /// If true, retain TrueType hinting: the instructions of simple
+    /// and composite glyphs in `glyf`, plus the `cvt `, `fpgm`, and
+    /// `prep` tables they depend on. Defaults to false, which strips
+    /// the instructions and drops those tables. CFF and CFF2
+    /// charstrings keep their hint operators either way.
     pub retain_hints: bool,
     /// If true, drop tables that don't have a subset implementation
     /// (the default). If false, encountering an unsupported table
     /// surfaces [`SubsetError::Unsupported`].
     pub drop_unhandled: bool,
     /// If true (the default), retain layout tables (`GSUB`, `GPOS`,
-    /// `GDEF`) when the closure walker has pulled in every glyph the
-    /// remaining lookups reference, i.e. when the layout machinery
-    /// can be passed through verbatim with no gid renumbering risk.
-    /// When false, layout tables are dropped, matching the 0.5.0
-    /// behavior. Callers that explicitly want a hint-free, layout-
-    /// free subset (e.g. embedded PDF font streams) should set this
-    /// to false.
+    /// `GDEF`), for `glyf`, CFF, and CFF2 fonts alike. They pass
+    /// through verbatim when every glyph survives and are rewritten for
+    /// the new glyph ids otherwise. When false, layout tables are
+    /// dropped. Callers that
+    /// explicitly want a hint-free, layout-free subset (e.g. embedded
+    /// PDF font streams) should set this to false.
     pub retain_layout: bool,
     /// If true (the default), retain variable-font tables (`fvar`,
-    /// `avar`, `gvar`, `HVAR`) so the resulting subset still varies
-    /// under axis coordinates. `fvar` and `avar` are passed through
-    /// verbatim; `gvar` is rebuilt with one entry per kept gid;
-    /// `HVAR` is rebuilt around a fresh `DeltaSetIndexMap` plus a
+    /// `avar`, `gvar`, `HVAR`, `VARC`) so the resulting subset still
+    /// varies under axis coordinates. `fvar` and `avar` are passed
+    /// through verbatim; `gvar` is rebuilt with one entry per kept
+    /// gid; `HVAR` is rebuilt around a fresh `DeltaSetIndexMap` plus a
     /// deduped `ItemVariationStore`. When false, every variable-font
-    /// table is dropped, matching the 0.5.0 baseline. The resulting
-    /// subset behaves as a static font pinned to the source's default
-    /// instance.
+    /// table is dropped. The resulting subset behaves as a static font
+    /// pinned to the source's default instance. A `CFF2` table keeps
+    /// its own variation store either way, since it is part of the
+    /// outline data.
     pub retain_variations: bool,
 }
 
@@ -208,7 +223,8 @@ pub enum SubsetError {
     /// so this only fires when the caller's slice is empty
     /// and `drop_unhandled` is false.
     EmptyGidSet,
-    /// A gid past the source font's `numGlyphs` was supplied.
+    /// A gid past the source font's `numGlyphs` was supplied. Also
+    /// reported for gid 0 when the source font has no glyphs at all.
     GidOutOfRange {
         /// The offending gid.
         gid: GlyphId,
@@ -216,8 +232,11 @@ pub enum SubsetError {
         num_glyphs: u16,
     },
     /// The source font uses a feature sigilbuzz-subset cannot yet
-    /// process: typically CFF / CFF2 outlines or, with
-    /// `drop_unhandled = false`, any of the deferred tables.
+    /// process, or data it cannot rewrite safely. Examples: a table
+    /// without a subset implementation when `drop_unhandled` is false,
+    /// a composite glyph that names a glyph past `numGlyphs`, or tables
+    /// that share data so heavily that the rebuilt copy would explode
+    /// in size.
     Unsupported(&'static str),
     /// A sigilbuzz parse error bubbled up while inspecting the
     /// source font.
@@ -270,18 +289,20 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
     // them under a non-identity gid map for both non-CID and CID-keyed
     // CFF1 plus CFF2.
     //
-    // Today the dispatch handles three cases cleanly:
+    // The dispatch handles three cases:
     //
     // 1. The kept gid set after closure is the source font's identity
     //    (every gid kept). The CFF / CFF2 table and its dependencies
     //    are passed through verbatim and the surrounding sfnt directory
     //    is rebuilt around them. This mirrors the
-    //    [`layout::Decision::Preserve`] strategy from `feature/subset-
-    //    layout-rewriter` for GSUB / GPOS / GDEF.
+    //    [`layout::Decision::Preserve`] strategy for GSUB / GPOS / GDEF.
     // 2. CFF1 non-identity (non-CID and CID-keyed) routes through
     //    [`cff_non_identity`] which calls [`cff::subset_non_identity`].
-    // 3. CFF2 non-identity routes through [`cff2_non_identity`] which
-    //    calls [`cff2::subset_non_identity`].
+    // 3. CFF2 non-identity routes through the same [`cff_non_identity`],
+    //    which calls [`cff2::subset_non_identity`] for it.
+    //
+    // All three honor `retain_layout`, `retain_variations`, and
+    // `drop_unhandled` the way the `glyf` path does.
     let has_cff1 = face.record(tag::CFF1).is_some();
     let has_cff2 = face.record(tag::CFF2).is_some();
     if has_cff1 || has_cff2 {
@@ -302,15 +323,12 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         let identity = kept.len() == cff_num_glyphs as usize
             && kept.iter().enumerate().all(|(i, &g)| g as usize == i);
         if identity {
-            return cff_passthrough(face, &kept, has_cff1);
+            return cff_passthrough(face, &kept, input);
         }
-        if has_cff1 {
-            return cff_non_identity(face, &kept);
-        }
-        // CFF2 non-identity: mirror the CID-keyed CFF1 flow with
+        // CFF2 non-identity mirrors the CID-keyed CFF1 flow with
         // CFF2-specific elisions (no String INDEX, no Encoding/charset,
         // single inline Top DICT). VariationStore rides through verbatim.
-        return cff2_non_identity(face, &kept);
+        return cff_non_identity(face, &kept, input, has_cff1);
     }
 
     let maxp = face.maxp()?;
@@ -329,12 +347,14 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         return Err(SubsetError::EmptyGidSet);
     }
 
-    // Closure walk: expand to include composite components in glyf.
-    // Gid 0 is always retained per the SFNT convention.
+    // Closure walk: expand to include composite components, layout
+    // partners, and VARC components. Gid 0 is always retained per the
+    // SFNT convention.
     let kept = closure::compute_closure(face, &input.gids)?;
 
     // Build the old->new map. New gids are 0..N in old-order, with
-    // gid 0 always at slot 0.
+    // gid 0 always at slot 0. The closure only returns gids below
+    // `num_glyphs`, so every new gid and the count fit in u16.
     let mut gid_map: Vec<(GlyphId, GlyphId)> = kept
         .iter()
         .enumerate()
@@ -402,106 +422,22 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         tables.push((*b"OS/2", os2));
     }
 
-    // Layout tables (GSUB / GPOS / GDEF). Identity gid map: pass the
-    // source bytes through verbatim. Non-identity: per-lookup-type
-    // rewriters in `crate::gsub` / `crate::gpos` / `crate::gdef`
-    // produce fresh bytes; lookup types without a rewriter drop and
-    // the drop cascade propagates the loss up. See `layout::decide`.
-    let plan = layout::decide(face, &kept, input)?;
-    match plan.gdef {
-        layout::Decision::Preserve => {
-            let bytes = face.table_bytes(tag::GDEF).map_err(SubsetError::from)?;
-            tables.push((tag::GDEF, bytes.to_vec()));
-        }
-        layout::Decision::Rewrite(b) => tables.push((tag::GDEF, b)),
-        layout::Decision::Drop => {}
-    }
-    match plan.gsub {
-        layout::Decision::Preserve => {
-            let bytes = face.table_bytes(tag::GSUB).map_err(SubsetError::from)?;
-            tables.push((tag::GSUB, bytes.to_vec()));
-        }
-        layout::Decision::Rewrite(b) => tables.push((tag::GSUB, b)),
-        layout::Decision::Drop => {}
-    }
-    match plan.gpos {
-        layout::Decision::Preserve => {
-            let bytes = face.table_bytes(tag::GPOS).map_err(SubsetError::from)?;
-            tables.push((tag::GPOS, bytes.to_vec()));
-        }
-        layout::Decision::Rewrite(b) => tables.push((tag::GPOS, b)),
-        layout::Decision::Drop => {}
-    }
+    push_layout_and_variation_tables(face, &kept, &gid_map, input, &mut tables)?;
 
-    // Variable-font tables. fvar/avar pass through verbatim;
-    // gvar/HVAR are rebuilt around the new gid namespace. When
-    // `retain_variations` is false we drop them all and the subset
-    // becomes a static-instance font.
-    if input.retain_variations {
-        if let Some(b) = fvar::subset_fvar(face)? {
-            tables.push((tag::FVAR, b));
-        }
-        if let Some(b) = avar::subset_avar(face)? {
-            tables.push((tag::AVAR, b));
-        }
-        if let Some(b) = gvar::subset_gvar(face, &kept)? {
-            tables.push((tag::GVAR, b));
-        }
-        if let Some(b) = hvar::subset_hvar(face, &kept)? {
-            tables.push((tag::HVAR, b));
-        }
-        // VARC: re-emit when the source carries the table. Coverage
-        // entries renumber per the new gid map and component records
-        // are rewritten to point at the new gid namespace; the
-        // MultiVarStore is preserved verbatim.
-        if let Some(varc) = face.varc()? {
-            let varc_bytes = face.table_bytes(tag::VARC).map_err(SubsetError::from)?;
-            let lookup = |old: GlyphId| -> Option<GlyphId> {
-                gid_map
-                    .binary_search_by_key(&old, |(o, _)| *o)
-                    .ok()
-                    .map(|i| gid_map[i].1)
-            };
-            if let Some(b) = varc::subset_varc(&varc, varc_bytes, &kept, &lookup)? {
-                tables.push((tag::VARC, b));
+    // TrueType hinting tables. Kept glyph instructions call functions
+    // from `fpgm`, run after `prep`, and read `cvt `. None of the three
+    // names a glyph id, so they pass through verbatim when the
+    // instructions are kept, and are dropped with them otherwise.
+    if input.retain_hints {
+        for t in HINTING_TABLES {
+            if face.record(t).is_some() {
+                let bytes = face.table_bytes(t).map_err(SubsetError::from)?;
+                tables.push((t, bytes.to_vec()));
             }
         }
     }
 
-    // Walk every other table the source carries and decide.
-    for rec in face.records() {
-        // Skip tables we already emitted.
-        if tables.iter().any(|(t, _)| *t == rec.tag) {
-            continue;
-        }
-        // Layout tables hit the plan above; even when their plan is
-        // `Drop`, the drop is intentional and matches the
-        // drop_unhandled convention. Skip them here.
-        if matches!(rec.tag, tag::GSUB | tag::GPOS | tag::GDEF) {
-            continue;
-        }
-        // Variable-font tables hit the retain_variations branch
-        // above; when retain_variations=false the drop is
-        // intentional.
-        if matches!(
-            rec.tag,
-            tag::FVAR | tag::AVAR | tag::GVAR | tag::HVAR | tag::VARC
-        ) {
-            continue;
-        }
-        // Source tables we already errored on (CFF/CFF2) cannot
-        // appear here. We returned early above.
-        if !input.drop_unhandled {
-            // Strict mode: any table without an implementation aborts.
-            // kern / vhea / vmtx / VORG / COLR / CPAL / morx / kerx:
-            // none of these are subset-aware in 0.6.0 either.
-            return Err(SubsetError::Unsupported(
-                "table not yet handled by sigilbuzz-subset; pass drop_unhandled=true",
-            ));
-        }
-        // Permissive mode: silently drop. We don't preserve them
-        // verbatim because their gid references would be stale.
-    }
+    check_unhandled_tables(face, &tables, input)?;
 
     // Build the new font.
     let bytes = sfnt::build(face.sfnt_version(), &tables);
@@ -512,19 +448,121 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
     })
 }
 
-/// CFF1 non-identity orchestration.
+/// Appends the layout and variable-font tables the subset keeps, as
+/// [`SubsetInput::retain_layout`] and [`SubsetInput::retain_variations`]
+/// ask. Shared by the `glyf`, CFF, and CFF2 paths: every table here is
+/// keyed by glyph id, not by outline format.
+fn push_layout_and_variation_tables(
+    face: &Face<'_>,
+    kept: &[GlyphId],
+    gid_map: &[(GlyphId, GlyphId)],
+    input: &SubsetInput,
+    tables: &mut Vec<([u8; 4], Vec<u8>)>,
+) -> Result<(), SubsetError> {
+    // Layout tables (GSUB / GPOS / GDEF). Identity gid map: pass the
+    // source bytes through verbatim. Non-identity: per-lookup-type
+    // rewriters in `crate::gsub` / `crate::gpos` / `crate::gdef`
+    // produce fresh bytes; lookup types without a rewriter drop and
+    // the drop cascade propagates the loss up. See `layout::decide`.
+    let plan = layout::decide(face, kept, input)?;
+    for (t, decision) in [
+        (tag::GDEF, plan.gdef),
+        (tag::GSUB, plan.gsub),
+        (tag::GPOS, plan.gpos),
+    ] {
+        match decision {
+            layout::Decision::Preserve => {
+                let bytes = face.table_bytes(t).map_err(SubsetError::from)?;
+                tables.push((t, bytes.to_vec()));
+            }
+            layout::Decision::Rewrite(b) => tables.push((t, b)),
+            layout::Decision::Drop => {}
+        }
+    }
+
+    // Variable-font tables. fvar/avar pass through verbatim;
+    // gvar/HVAR are rebuilt around the new gid namespace. When
+    // `retain_variations` is false we drop them all and the subset
+    // becomes a static-instance font.
+    if !input.retain_variations {
+        return Ok(());
+    }
+    if let Some(b) = fvar::subset_fvar(face)? {
+        tables.push((tag::FVAR, b));
+    }
+    if let Some(b) = avar::subset_avar(face)? {
+        tables.push((tag::AVAR, b));
+    }
+    if let Some(b) = gvar::subset_gvar(face, kept)? {
+        tables.push((tag::GVAR, b));
+    }
+    if let Some(b) = hvar::subset_hvar(face, kept)? {
+        tables.push((tag::HVAR, b));
+    }
+    // VARC: re-emit when the source carries the table. Coverage
+    // entries renumber per the new gid map and component records
+    // are rewritten to point at the new gid namespace; the
+    // MultiVarStore is pruned to the entries the kept records use. The
+    // core parse only validates the table: `subset_varc` walks the raw
+    // bytes itself.
+    if face.varc()?.is_some() {
+        let varc_bytes = face.table_bytes(tag::VARC).map_err(SubsetError::from)?;
+        let lookup = |old: GlyphId| -> Option<GlyphId> {
+            let i = gid_map.binary_search_by_key(&old, |(o, _)| *o).ok()?;
+            gid_map.get(i).map(|&(_, new)| new)
+        };
+        if let Some(b) = varc::subset_varc(varc_bytes, kept, &lookup)? {
+            tables.push((tag::VARC, b));
+        }
+    }
+    Ok(())
+}
+
+/// In strict mode (`drop_unhandled` false), fails on any source table
+/// the subset did not emit. Layout, variable-font, and hinting tables
+/// are exempt: their own flags decide whether they stay, so dropping
+/// them is intended. In permissive mode the rest are dropped, because
+/// their glyph id references would be stale.
+fn check_unhandled_tables(
+    face: &Face<'_>,
+    tables: &[([u8; 4], Vec<u8>)],
+    input: &SubsetInput,
+) -> Result<(), SubsetError> {
+    if input.drop_unhandled {
+        return Ok(());
+    }
+    for rec in face.records() {
+        let emitted = tables.iter().any(|(t, _)| *t == rec.tag);
+        let flag_driven = LAYOUT_TABLES.contains(&rec.tag)
+            || VARIATION_TABLES.contains(&rec.tag)
+            || HINTING_TABLES.contains(&rec.tag);
+        if !emitted && !flag_driven {
+            // kern / vhea / vmtx / VORG / COLR / CPAL / morx / kerx
+            // and others have no subset implementation.
+            return Err(SubsetError::Unsupported(
+                "table not yet handled by sigilbuzz-subset; pass drop_unhandled=true",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// CFF1 and CFF2 non-identity orchestration.
 ///
-/// Wires the [`cff::subset_non_identity`] table rewriter into a fresh
-/// SFNT directory: every other table is either passed through verbatim
-/// (when its bytes don't carry gid-keyed data, e.g. `name`, `head`)
-/// or rebuilt against the new gid namespace (`cmap`, `hmtx` / `hhea`,
-/// `maxp`, `post`).
-///
-/// Variable-font tables (`fvar`, `avar`, `gvar`, `HVAR`) and layout
-/// tables (`GSUB` / `GPOS` / `GDEF`) are dropped on the non-identity
-/// path. CFF1 fonts rarely carry them, and a follow-up wires the
-/// existing rewriters in once the orchestration baseline lands.
-fn cff_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, SubsetError> {
+/// Rebuilds the `CFF ` table with [`cff::subset_non_identity`], or the
+/// `CFF2` table with [`cff2::subset_non_identity`], around the kept-gid
+/// set. A CFF2 table carries its own variation store, which rides
+/// through inside the rebuilt table. The fresh SFNT directory around
+/// it rebuilds `cmap`, `hmtx` / `hhea`, `maxp`, and `post` for the new
+/// gid namespace, passes `head`, `name`, and `OS/2` through, and keeps
+/// the layout and variable-font tables that `input` asks for, as the
+/// `glyf` path does.
+fn cff_non_identity(
+    face: &Face<'_>,
+    kept: &[GlyphId],
+    input: &SubsetInput,
+    has_cff1: bool,
+) -> Result<SubsetOutput, SubsetError> {
     // Build the gid_map.
     let mut gid_map: Vec<(GlyphId, GlyphId)> = kept
         .iter()
@@ -534,9 +572,14 @@ fn cff_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, S
     gid_map.sort_by_key(|(old, _)| *old);
     let new_num_glyphs = kept.len() as u16;
 
-    // Rebuild the CFF table.
-    let cff_bytes = face.table_bytes(tag::CFF1).map_err(SubsetError::from)?;
-    let new_cff = cff::subset_non_identity(cff_bytes, kept)?;
+    // Rebuild the CFF or CFF2 table.
+    let (cff_tag, new_cff) = if has_cff1 {
+        let bytes = face.table_bytes(tag::CFF1).map_err(SubsetError::from)?;
+        (tag::CFF1, cff::subset_non_identity(bytes, kept)?)
+    } else {
+        let bytes = face.table_bytes(tag::CFF2).map_err(SubsetError::from)?;
+        (tag::CFF2, cff2::subset_non_identity(bytes, kept)?)
+    };
 
     // Rebuild the directly-rewritable tables that ride alongside the CFF.
     let head_bytes = face.table_bytes(tag::HEAD).map_err(SubsetError::from)?;
@@ -569,75 +612,14 @@ fn cff_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, S
         (tag::CMAP, cmap_out),
         (tag::NAME, name_out),
         (tag::POST, post_out),
-        (tag::CFF1, new_cff),
+        (cff_tag, new_cff),
     ];
     if let Some(os2) = os2_out {
         tables.push((*b"OS/2", os2));
     }
 
-    let bytes = sfnt::build(face.sfnt_version(), &tables);
-    Ok(SubsetOutput {
-        bytes,
-        gid_map: gid_map.into_iter().collect(),
-    })
-}
-
-/// CFF2 non-identity orchestration.
-///
-/// Mirrors [`cff_non_identity`]'s shape: rebuild the CFF2 table around
-/// the kept-gid set via [`cff2::subset_non_identity`], then assemble a
-/// fresh SFNT directory around it. CFF2 fonts pair with cmap, hmtx,
-/// hhea, head, name, OS/2. Every other table the source carries
-/// (including layout / variable-font tables) is dropped on the
-/// non-identity path; the rewriters ride alongside the CFF1 flow's same
-/// follow-up that wires those in.
-fn cff2_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, SubsetError> {
-    let mut gid_map: Vec<(GlyphId, GlyphId)> = kept
-        .iter()
-        .enumerate()
-        .map(|(new, &old)| (old, new as u16))
-        .collect();
-    gid_map.sort_by_key(|(old, _)| *old);
-    let new_num_glyphs = kept.len() as u16;
-
-    let cff2_bytes = face.table_bytes(tag::CFF2).map_err(SubsetError::from)?;
-    let new_cff2 = cff2::subset_non_identity(cff2_bytes, kept)?;
-
-    let head_bytes = face.table_bytes(tag::HEAD).map_err(SubsetError::from)?;
-    let head_out = head_bytes.to_vec();
-
-    let cmap_out = cmap::subset_cmap(face, &gid_map)?;
-    let hmtx_out = hmtx::subset_hmtx(face, kept)?;
-
-    let hhea_bytes = face.table_bytes(tag::HHEA).map_err(SubsetError::from)?;
-    let mut hhea_out = hhea_bytes.to_vec();
-    util::write_hhea_metrics_count(&mut hhea_out, hmtx_out.number_of_h_metrics)?;
-
-    let maxp_bytes = face.table_bytes(tag::MAXP).map_err(SubsetError::from)?;
-    let mut maxp_out = maxp_bytes.to_vec();
-    util::write_maxp_num_glyphs(&mut maxp_out, new_num_glyphs)?;
-
-    let post_out = util::synthesize_post_format_3(face)?;
-
-    let name_out = face
-        .table_bytes(tag::NAME)
-        .map(|b| b.to_vec())
-        .map_err(SubsetError::from)?;
-    let os2_out = face.table_bytes(*b"OS/2").ok().map(<[u8]>::to_vec);
-
-    let mut tables: Vec<([u8; 4], Vec<u8>)> = alloc::vec![
-        (tag::HEAD, head_out),
-        (tag::HHEA, hhea_out),
-        (tag::MAXP, maxp_out),
-        (tag::HMTX, hmtx_out.bytes),
-        (tag::CMAP, cmap_out),
-        (tag::NAME, name_out),
-        (tag::POST, post_out),
-        (tag::CFF2, new_cff2),
-    ];
-    if let Some(os2) = os2_out {
-        tables.push((*b"OS/2", os2));
-    }
+    push_layout_and_variation_tables(face, kept, &gid_map, input, &mut tables)?;
+    check_unhandled_tables(face, &tables, input)?;
 
     let bytes = sfnt::build(face.sfnt_version(), &tables);
     Ok(SubsetOutput {
@@ -656,31 +638,36 @@ fn cff2_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, 
 /// hmtx, hhea, maxp, post, name, OS/2, COLR, CPAL, and the layout
 /// tables. We copy every table the source carries except the small
 /// set the rest of the pipeline can't round-trip: `vhea` / `vmtx` /
-/// `VORG` / legacy `kern` / `morx` / `kerx`.
+/// `VORG` / legacy `kern` / `morx` / `kerx`. Layout and variable-font
+/// tables stay only when `input` asks for them, and strict mode
+/// (`drop_unhandled` false) rejects the tables that cannot be kept.
 ///
 /// Returns the new SFNT bytes plus an identity `gid_map`.
 fn cff_passthrough(
     face: &Face<'_>,
     kept: &[GlyphId],
-    has_cff1: bool,
+    input: &SubsetInput,
 ) -> Result<SubsetOutput, SubsetError> {
-    let _ = has_cff1; // CFF1 vs CFF2 doesn't matter: the source tag travels.
     let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::new();
     for rec in face.records() {
+        let dropped_by_flag = (!input.retain_layout && LAYOUT_TABLES.contains(&rec.tag))
+            || (!input.retain_variations && VARIATION_TABLES.contains(&rec.tag));
         // Skip the same set the glyf path drops when in
         // drop_unhandled mode. CFF identity-passthrough is morally a
         // "preserve everything still relevant" emit, so vertical /
         // legacy-kern tables that the rest of the pipeline can't
         // round-trip stay dropped.
-        if matches!(
+        let unhandled = matches!(
             &rec.tag,
             b"vhea" | b"vmtx" | b"VORG" | b"kern" | b"morx" | b"kerx"
-        ) {
+        );
+        if dropped_by_flag || unhandled {
             continue;
         }
         let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;
         tables.push((rec.tag, bytes.to_vec()));
     }
+    check_unhandled_tables(face, &tables, input)?;
     let bytes = sfnt::build(face.sfnt_version(), &tables);
     let gid_map: Vec<(GlyphId, GlyphId)> = kept.iter().map(|&g| (g, g)).collect();
     Ok(SubsetOutput { bytes, gid_map })

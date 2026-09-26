@@ -159,13 +159,16 @@ impl<'a> Sbix<'a> {
         let entry_off = (i as usize) * 4;
         let mut r = Reader::at(self.strike_offsets, entry_off)?;
         let strike_off = r.read_u32()? as usize;
-        if strike_off + 4 > self.data.len() {
-            return Err(Error::Truncated {
-                offset: strike_off,
-                context: "sbix strike header",
-            });
-        }
-        let strike_data = &self.data[strike_off..];
+        // Slice rather than compute `strike_off + 4`, which can wrap on
+        // 32-bit targets.
+        let strike_data =
+            self.data
+                .get(strike_off..)
+                .filter(|s| s.len() >= 4)
+                .ok_or(Error::Truncated {
+                    offset: strike_off,
+                    context: "sbix strike header",
+                })?;
         let mut sr = Reader::new(strike_data);
         let ppem = sr.read_u16()?;
         let ppi = sr.read_u16()?;
@@ -182,7 +185,7 @@ impl<'a> Sbix<'a> {
         })?;
         if arr_end > strike_data.len() {
             return Err(Error::Truncated {
-                offset: strike_off + arr_end,
+                offset: strike_off.saturating_add(arr_end),
                 context: "sbix glyphDataOffsets array",
             });
         }

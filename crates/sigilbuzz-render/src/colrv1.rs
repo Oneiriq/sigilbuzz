@@ -1,7 +1,7 @@
 //! COLRv1 paint-tree rasterization.
 //!
 //! [`rasterize_colrv1`] consumes a flat [`DrawCmd`] stream emitted by
-//! [`sigilbuzz_paint::evaluate_at_coords`] and turns it into a single
+//! [`sigilbuzz_paint::evaluate_with_palette`] and turns it into a single
 //! premultiplied RGBA [`ColorPixmap`]. The flow is:
 //!
 //! 1. Walk the `DrawCmd` stream linearly. Maintain a *layer stack* of
@@ -41,30 +41,29 @@ use alloc::vec::Vec;
 
 use sigilbuzz::Face;
 use sigilbuzz_paint::{
-    evaluate_at_coords, Color, CompositeMode, DrawCmd, Extend, Gradient, GradientKind, PaintSource,
-    Transform2D,
+    evaluate_with_palette, linear_gradient_end, Color, CompositeMode, DrawCmd, Extend, Gradient,
+    GradientKind, PaintSource, Transform2D,
 };
 
 use crate::affine::Affine;
 use crate::error::RenderError;
-use crate::flatten::flatten;
+use crate::flatten::{flatten_limited, Segment, MAX_SEGMENTS};
 use crate::pixmap::{ColorPixmap, Pixmap};
-use crate::raster::rasterize as raster;
+use crate::raster::{raster_bounds, rasterize as raster, RasterBounds, MAX_RASTER_DIM};
 
 /// Public entry: walks the `DrawCmd` stream `sigilbuzz-paint` would
 /// produce for `gid` and renders it to a premultiplied RGBA pixmap.
 ///
-/// `palette_index` is forwarded to the evaluator's CPAL lookups; the
-/// evaluator currently always uses palette 0 internally, so this
-/// argument is reserved for the API parity with `rasterize_colrv0_glyph`
-/// and is wired through for forward compatibility.
+/// `palette_index` picks the CPAL palette every color resolves
+/// against. Palette 0 is always accepted. Any other index must name a
+/// palette the font has.
 ///
 /// `tolerance` is the per-glyph curve flattening tolerance in pixel
 /// units (same semantics as [`crate::Rasterizer`]'s field).
 pub(crate) fn rasterize_colrv1(
     face: &Face<'_>,
     gid: u16,
-    _palette_index: u16,
+    palette_index: u16,
     size_pt: f32,
     coords: &[f32],
     tolerance: f32,
@@ -89,7 +88,22 @@ pub(crate) fn rasterize_colrv1(
         }
     }
 
-    let cmds = evaluate_at_coords(face, gid, coords);
+    // Palette 0 stays valid without a CPAL table, as before. Any other
+    // palette must exist, the same rule the COLRv0 path applies.
+    if palette_index != 0 {
+        let num_palettes = face
+            .cpal()
+            .map_err(|_| RenderError::Parse("cpal"))?
+            .map_or(0, |cpal| cpal.num_palettes());
+        if palette_index >= num_palettes {
+            return Err(RenderError::BadPaletteIndex {
+                palette: palette_index,
+                entry: 0xFFFF,
+            });
+        }
+    }
+
+    let cmds = evaluate_with_palette(face, gid, coords, palette_index);
     if cmds.is_empty() {
         return Ok(ColorPixmap::new(0, 0));
     }
@@ -105,10 +119,17 @@ pub(crate) fn rasterize_colrv1(
         dy: 0.0,
     };
 
-    // First pass: pre-rasterize every FillGlyph leaf to discover the
-    // overall bounding box. This matches the strategy used by the
-    // COLRv0 path: no surface allocation until we know the union.
+    // First pass: flatten every FillGlyph leaf and find where its mask
+    // will land, to discover the overall bounding box. This matches
+    // the strategy used by the COLRv0 path: no surface allocation
+    // until we know the union. Masks are rasterized one at a time in
+    // the second pass, so memory holds one mask however many leaves
+    // the paint graph produces.
     let mut leaves: Vec<Leaf> = Vec::new();
+    // All leaves share one segment budget, so a paint graph that
+    // repeats a heavy outline thousands of times stays bounded. Leaves
+    // past the budget are skipped.
+    let mut budget = MAX_SEGMENTS;
     for cmd in &cmds {
         if let DrawCmd::FillGlyph {
             gid: fill_gid,
@@ -116,6 +137,10 @@ pub(crate) fn rasterize_colrv1(
             paint,
         } = cmd
         {
+            if budget == 0 {
+                leaves.push(Leaf::Empty);
+                continue;
+            }
             let xform = transform.then(to_pixels);
             let affine = transform_to_affine(xform);
             let outline = face
@@ -129,16 +154,19 @@ pub(crate) fn rasterize_colrv1(
                 leaves.push(Leaf::Empty);
                 continue;
             }
-            let segs = flatten(outline.ops().iter().copied(), &affine, tolerance);
+            let segs = flatten_limited(outline.ops().iter().copied(), &affine, tolerance, budget);
+            budget = budget.saturating_sub(segs.len());
             if segs.is_empty() {
                 leaves.push(Leaf::Empty);
                 continue;
             }
-            let r = raster(&segs);
+            let Some(bounds) = raster_bounds(&segs) else {
+                leaves.push(Leaf::Empty);
+                continue;
+            };
             leaves.push(Leaf::Glyph {
-                mask: r.pixmap,
-                origin_x: r.origin_x,
-                origin_y: r.origin_y,
+                segs,
+                bounds,
                 paint: paint.clone(),
                 paint_xform: xform,
             });
@@ -153,21 +181,12 @@ pub(crate) fn rasterize_colrv1(
     let mut max_y = i32::MIN;
     let mut any = false;
     for leaf in &leaves {
-        if let Leaf::Glyph {
-            mask,
-            origin_x,
-            origin_y,
-            ..
-        } = leaf
-        {
-            if mask.is_empty() {
-                continue;
-            }
+        if let Leaf::Glyph { bounds, .. } = leaf {
             any = true;
-            min_x = min_x.min(*origin_x);
-            min_y = min_y.min(*origin_y);
-            max_x = max_x.max(*origin_x + mask.width as i32);
-            max_y = max_y.max(*origin_y + mask.height as i32);
+            min_x = min_x.min(bounds.origin_x);
+            min_y = min_y.min(bounds.origin_y);
+            max_x = max_x.max(bounds.origin_x + bounds.width as i32);
+            max_y = max_y.max(bounds.origin_y + bounds.height as i32);
         }
     }
     if !any || max_x <= min_x || max_y <= min_y {
@@ -175,85 +194,94 @@ pub(crate) fn rasterize_colrv1(
     }
     let width = (max_x - min_x) as u32;
     let height = (max_y - min_y) as u32;
+    // The union contains every leaf, so this also covers a single leaf
+    // that is too large to rasterize.
+    if width > MAX_RASTER_DIM || height > MAX_RASTER_DIM {
+        return Err(RenderError::BadSize(size_pt));
+    }
+    // Every pushed layer is a full canvas. Bound how many can be alive
+    // at once by their combined pixel count.
+    let canvas_pixels = u64::from(width) * u64::from(height);
+    let max_live_layers = (MAX_LAYER_STACK_PIXELS / canvas_pixels).max(1);
 
-    // Layer stack. The bottom is the destination; PushLayer adds a
-    // fresh transparent surface on top.
-    let mut stack: Vec<Layer> = Vec::with_capacity(4);
-    stack.push(Layer {
-        pixmap: ColorPixmap::new(width, height),
-        mode: CompositeMode::SrcOver,
-    });
+    // Layer stack. `base` is the destination. PushLayer adds a fresh
+    // transparent surface on top of it.
+    let mut base = ColorPixmap::new(width, height);
+    let mut pushed: Vec<Layer> = Vec::new();
 
     let mut leaf_iter = leaves.into_iter();
     for cmd in cmds {
         match cmd {
             DrawCmd::FillGlyph { .. } => {
-                let leaf = leaf_iter
-                    .next()
-                    .expect("leaf vec built from cmd stream stays in lock-step");
+                // `leaves` holds one entry per FillGlyph in `cmds`, so
+                // this never runs dry. Skipping is a harmless fallback.
+                let Some(leaf) = leaf_iter.next() else {
+                    continue;
+                };
                 let Leaf::Glyph {
-                    mask,
-                    origin_x,
-                    origin_y,
+                    segs,
                     paint,
                     paint_xform,
+                    ..
                 } = leaf
                 else {
                     continue;
                 };
-                let dx = origin_x - min_x;
-                let dy = origin_y - min_y;
+                let r = raster(&segs);
+                let dx = r.origin_x - min_x;
+                let dy = r.origin_y - min_y;
                 // Translate paint coords from union-bbox space into
                 // mask-local space when sampling the gradient.
                 let bbox_origin = (min_x, min_y);
-                let top = stack.last_mut().expect("layer stack never empty");
-                paint_glyph_into_layer(
-                    &mut top.pixmap,
-                    &mask,
-                    dx,
-                    dy,
-                    &paint,
-                    paint_xform,
-                    bbox_origin,
-                );
+                let top = pushed.last_mut().map_or(&mut base, |l| &mut l.pixmap);
+                paint_glyph_into_layer(top, &r.pixmap, dx, dy, &paint, paint_xform, bbox_origin);
             }
             DrawCmd::PushLayer { composite_mode } => {
-                stack.push(Layer {
+                if pushed.len() as u64 + 1 >= max_live_layers {
+                    return Err(RenderError::BadSize(size_pt));
+                }
+                pushed.push(Layer {
                     pixmap: ColorPixmap::new(width, height),
                     mode: composite_mode,
                 });
             }
             DrawCmd::PopLayer => {
-                if stack.len() < 2 {
-                    // Mismatched pop: evaluator guarantees pairing
-                    // but we stay defensive against future cmd-stream
-                    // changes.
+                // A pop with nothing pushed is ignored: the evaluator
+                // guarantees pairing but we stay defensive against
+                // future cmd-stream changes.
+                let Some(top) = pushed.pop() else {
                     continue;
-                }
-                let top = stack.pop().expect("len >= 2 above");
-                let parent = stack.last_mut().expect("len >= 1 above");
-                composite_layer(&mut parent.pixmap, &top.pixmap, top.mode);
+                };
+                let parent = pushed.last_mut().map_or(&mut base, |l| &mut l.pixmap);
+                composite_layer(parent, &top.pixmap, top.mode);
             }
         }
     }
 
-    Ok(stack.remove(0).pixmap)
+    Ok(base)
 }
+
+/// Combined pixel count of the COLRv1 layer stack (the base canvas
+/// plus every pushed layer that is alive at once). Pushing past it
+/// fails with [`RenderError::BadSize`]. At 4 bytes per pixel this is
+/// 4 GiB, reached only by huge canvases or very deep composite nesting.
+const MAX_LAYER_STACK_PIXELS: u64 = 1 << 30;
 
 /// Per-leaf data captured during the first pass.
 enum Leaf {
-    /// Outline rasterized to alpha + the paint that fills it.
+    /// Flattened outline + the paint that fills it.
     Glyph {
-        mask: Pixmap,
-        origin_x: i32,
-        origin_y: i32,
+        /// Outline edges in pixel space.
+        segs: Vec<Segment>,
+        /// Where the rasterized mask lands.
+        bounds: RasterBounds,
         paint: PaintSource,
         /// Design-units-to-pixel transform that was used to flatten
         /// the outline. The same transform takes paint coordinates
         /// (also given in design units) into pixel space.
         paint_xform: Transform2D,
     },
-    /// Skipped leaf (no outline / empty / out-of-range).
+    /// Skipped leaf (no outline / empty / out-of-range / over budget).
     Empty,
 }
 
@@ -402,9 +430,20 @@ fn sample_gradient(g: &Gradient, paint_xform: Transform2D, x: f32, y: f32) -> [u
         return [0, 0, 0, 0];
     }
     let t = match g.kind {
-        GradientKind::Linear { p0, p1, .. } => {
-            let (a, b) = transformed_pair(paint_xform, p0, p1);
-            project_linear(a, b, (x, y))
+        GradientKind::Linear { p0, p1, p2 } => {
+            // Color bands run parallel to p0 -> p2, or perpendicular to
+            // p0 -> p1 when p2 equals p0. Mapping a point on that line
+            // through the transform keeps the bands right under skew.
+            let end = linear_gradient_end(p0, p1, p2);
+            let (q2x, q2y) = (p2.0 - p0.0, p2.1 - p0.1);
+            let band = if q2x * q2x + q2y * q2y <= f32::EPSILON {
+                (p0.0 - (p1.1 - p0.1), p0.1 + (p1.0 - p0.0))
+            } else {
+                p2
+            };
+            let (a, b) = transformed_pair(paint_xform, p0, end);
+            let c = paint_xform.apply(band.0, band.1);
+            project_linear_banded(a, b, c, (x, y))
         }
         GradientKind::Radial { c0, r0, c1, r1 } => {
             let (a, b) = transformed_pair(paint_xform, c0, c1);
@@ -448,8 +487,8 @@ fn matrix_scale(m: Transform2D) -> f32 {
 /// normalized parameter `t` such that `a + t * (b - a)` is the
 /// closest point on the line. Returns `None` when `a == b`.
 ///
-/// Re-exported through the crate so the SVG path can reuse the same
-/// projection logic for `<linearGradient>` (PR #205 deferral).
+/// `pub(crate)` so the SVG path can reuse the same
+/// projection logic for `<linearGradient>`.
 pub(crate) fn project_linear(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> Option<f32> {
     let dx = b.0 - a.0;
     let dy = b.1 - a.1;
@@ -460,12 +499,31 @@ pub(crate) fn project_linear(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> Opt
     Some(((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len_sq)
 }
 
+/// Linear gradient parameter at `p` for a gradient from `a` to `b`
+/// whose color bands run parallel to the line from `a` to `c`.
+/// Returns `None` when the bands are parallel to `a -> b`, which
+/// leaves `t` undefined.
+fn project_linear_banded(
+    a: (f32, f32),
+    b: (f32, f32),
+    c: (f32, f32),
+    p: (f32, f32),
+) -> Option<f32> {
+    // `n` is normal to the bands, so `t` grows only across them.
+    let n = (a.1 - c.1, c.0 - a.0);
+    let denom = n.0 * (b.0 - a.0) + n.1 * (b.1 - a.1);
+    if denom.abs() <= f32::EPSILON {
+        return None;
+    }
+    Some((n.0 * (p.0 - a.0) + n.1 * (p.1 - a.1)) / denom)
+}
+
 /// Two-circle radial gradient projection. Solves the standard
 /// quadratic that COLRv1 / SVG share. See the spec's appendix.
 /// Returns the larger valid root in `[0, +inf)` (the "outer" branch).
 ///
 /// `pub(crate)` so the SVG path can reuse the same code for
-/// `<radialGradient>` (PR #205 deferral).
+/// `<radialGradient>`.
 pub(crate) fn project_radial(
     c0: (f32, f32),
     r0: f32,
@@ -548,8 +606,7 @@ fn project_sweep(
 /// Applies the extend mode to a gradient parameter `t`, returning the
 /// in-`[0, 1]` value used to sample the stops.
 ///
-/// `pub(crate)` so the SVG path can reuse the COLRv1 ramp behavior
-/// (PR #205 deferral).
+/// `pub(crate)` so the SVG path can reuse the COLRv1 ramp behavior.
 pub(crate) fn apply_extend(t: f32, extend: Extend) -> f32 {
     match extend {
         Extend::Pad => t.clamp(0.0, 1.0),
@@ -726,174 +783,4 @@ fn porter_duff(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use alloc::vec;
-    use sigilbuzz_paint::{ColorStop, GradientKind};
-
-    fn col(r: f32, g: f32, b: f32, a: f32) -> Color {
-        Color::new(r, g, b, a)
-    }
-
-    #[test]
-    fn extend_pad_clamps() {
-        assert!((apply_extend(-0.5, Extend::Pad) - 0.0).abs() < 1e-6);
-        assert!((apply_extend(1.5, Extend::Pad) - 1.0).abs() < 1e-6);
-        assert!((apply_extend(0.5, Extend::Pad) - 0.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn extend_repeat_wraps() {
-        assert!((apply_extend(1.25, Extend::Repeat) - 0.25).abs() < 1e-6);
-        assert!((apply_extend(-0.25, Extend::Repeat) - 0.75).abs() < 1e-6);
-    }
-
-    #[test]
-    fn extend_reflect_bounces() {
-        // 1.25 -> 0.75 (reflected past 1)
-        assert!((apply_extend(1.25, Extend::Reflect) - 0.75).abs() < 1e-6);
-        // 2.25 -> 0.25 (full cycle + a bit)
-        assert!((apply_extend(2.25, Extend::Reflect) - 0.25).abs() < 1e-6);
-    }
-
-    #[test]
-    fn linear_projection_endpoints() {
-        let a = (0.0, 0.0);
-        let b = (10.0, 0.0);
-        assert!((project_linear(a, b, (0.0, 0.0)).unwrap() - 0.0).abs() < 1e-6);
-        assert!((project_linear(a, b, (10.0, 0.0)).unwrap() - 1.0).abs() < 1e-6);
-        assert!((project_linear(a, b, (5.0, 0.0)).unwrap() - 0.5).abs() < 1e-6);
-        // Off-axis: projects to the foot of the perpendicular.
-        assert!((project_linear(a, b, (5.0, 50.0)).unwrap() - 0.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn linear_projection_zero_length_is_none() {
-        assert!(project_linear((1.0, 1.0), (1.0, 1.0), (0.0, 0.0)).is_none());
-    }
-
-    #[test]
-    fn sample_stops_interpolates_linearly() {
-        let stops = [
-            ColorStop {
-                offset: 0.0,
-                color: col(1.0, 0.0, 0.0, 1.0),
-            },
-            ColorStop {
-                offset: 1.0,
-                color: col(0.0, 0.0, 1.0, 1.0),
-            },
-        ];
-        let mid = sample_stops(&stops, 0.5);
-        assert!((mid.r - 0.5).abs() < 1e-6);
-        assert!((mid.b - 0.5).abs() < 1e-6);
-        // Below first stop clamps to first.
-        let lo = sample_stops(&stops, -1.0);
-        assert!((lo.r - 1.0).abs() < 1e-6);
-        // Above last stop clamps to last.
-        let hi = sample_stops(&stops, 2.0);
-        assert!((hi.b - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn to_premul_multiplies_channels() {
-        let p = to_premul(col(1.0, 1.0, 1.0, 0.5));
-        // 1.0 * 0.5 ~ 128 (rounded from 127.5).
-        assert!(p[0] >= 127 && p[0] <= 128);
-        assert_eq!(p[3], 128);
-    }
-
-    #[test]
-    fn blend_src_over_full_alpha_replaces() {
-        let mut dst = ColorPixmap::new(1, 1);
-        blend_src_over(&mut dst, 0, 0, [255, 0, 0, 255]);
-        assert_eq!(dst.get(0, 0), [255, 0, 0, 255]);
-    }
-
-    #[test]
-    fn blend_src_over_zero_alpha_is_noop() {
-        let mut dst = ColorPixmap::new(1, 1);
-        // Pre-fill so we can detect any clobber.
-        dst.data = vec![10, 20, 30, 40];
-        blend_src_over(&mut dst, 0, 0, [0, 0, 0, 0]);
-        assert_eq!(dst.data, vec![10, 20, 30, 40]);
-    }
-
-    #[test]
-    fn porter_duff_src_over_matches_legacy() {
-        // (255,0,0,255) over (0,0,255,255) = (255,0,0,255).
-        let r = porter_duff(CompositeMode::SrcOver, 255, 0, 0, 255, 0, 0, 255, 255);
-        assert_eq!(r, (255, 0, 0, 255));
-    }
-
-    #[test]
-    fn porter_duff_dest_in_masks_dest_by_src_alpha() {
-        // src.a=128 (~50%), dst opaque red: result should be ~50% red.
-        let r = porter_duff(CompositeMode::DestIn, 0, 0, 0, 128, 255, 0, 0, 255);
-        assert!(r.0 > 120 && r.0 < 132, "got {}", r.0);
-        assert_eq!(r.1, 0);
-        assert!(r.3 > 120 && r.3 < 132);
-    }
-
-    #[test]
-    fn porter_duff_dest_out_clears_dest_where_src_opaque() {
-        let r = porter_duff(CompositeMode::DestOut, 0, 0, 0, 255, 255, 255, 255, 255);
-        assert_eq!(r, (0, 0, 0, 0));
-    }
-
-    #[test]
-    fn porter_duff_src_in_masks_src_by_dest_alpha() {
-        let r = porter_duff(CompositeMode::SrcIn, 255, 0, 0, 255, 0, 0, 0, 128);
-        // src red * dst.a/255.
-        assert!(r.0 > 120 && r.0 < 132);
-        assert!(r.3 > 120 && r.3 < 132);
-    }
-
-    #[test]
-    fn porter_duff_src_out_keeps_src_where_dest_transparent() {
-        let r = porter_duff(CompositeMode::SrcOut, 255, 0, 0, 255, 0, 0, 0, 0);
-        assert_eq!(r, (255, 0, 0, 255));
-    }
-
-    #[test]
-    fn unsupported_mode_falls_back_to_src_over() {
-        let r1 = porter_duff(CompositeMode::SrcOver, 255, 0, 0, 255, 0, 0, 0, 0);
-        let r2 = porter_duff(CompositeMode::Multiply, 255, 0, 0, 255, 0, 0, 0, 0);
-        assert_eq!(r1, r2);
-    }
-
-    #[test]
-    fn radial_quadratic_two_circles() {
-        // Two concentric circles, radii 0 and 10, centered on origin.
-        // Sample at (5, 0). That's halfway between r=0 and r=10.
-        let t = project_radial((0.0, 0.0), 0.0, (0.0, 0.0), 10.0, (5.0, 0.0));
-        assert!(t.is_some());
-        let t = t.unwrap();
-        assert!((t - 0.5).abs() < 1e-3, "got {t}");
-    }
-
-    #[test]
-    fn sweep_basic_quadrants() {
-        let c = (0.0, 0.0);
-        // Sweep from 0 to 2pi: angle 0 -> t=0, angle pi -> t=0.5.
-        let t = project_sweep(c, 0.0, core::f32::consts::TAU, (1.0, 0.0));
-        assert!((t.unwrap() - 0.0).abs() < 1e-3);
-        let t = project_sweep(c, 0.0, core::f32::consts::TAU, (-1.0, 0.0));
-        assert!((t.unwrap() - 0.5).abs() < 1e-3);
-    }
-
-    #[test]
-    fn gradient_with_no_stops_is_transparent() {
-        let g = Gradient {
-            kind: GradientKind::Linear {
-                p0: (0.0, 0.0),
-                p1: (10.0, 0.0),
-                p2: (0.0, 1.0),
-            },
-            stops: Vec::new(),
-            extend: Extend::Pad,
-        };
-        let p = sample_gradient(&g, Transform2D::IDENTITY, 5.0, 0.0);
-        assert_eq!(p, [0, 0, 0, 0]);
-    }
-}
+mod tests;

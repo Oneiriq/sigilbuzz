@@ -10,8 +10,9 @@
 //! (source then backdrop for composites, in spec order), and never
 //! reorders.
 //!
-//! Robustness: malformed offsets, unknown formats, and reference
-//! cycles all truncate the output. The walker never panics.
+//! Robustness: malformed offsets, unknown formats, reference cycles,
+//! and paint graphs that expand past a fixed work budget all truncate
+//! the output. The walker never panics.
 
 use alloc::vec::Vec;
 
@@ -29,9 +30,8 @@ use crate::transform::{angle_to_radians, Transform2D};
 /// Glyph-id alias. Mirrors the on-disk u16 used throughout sigilbuzz.
 pub type GlyphId = u16;
 
-/// Active palette index used for CPAL lookups. The COLRv1 spec
-/// defaults to palette 0; renderers wanting light/dark variants can
-/// pre-pick a different palette before calling the evaluator.
+/// CPAL palette that [`evaluate`] and [`evaluate_at_coords`] resolve
+/// colors against. Palette 0 is the font's default.
 const DEFAULT_PALETTE_INDEX: u16 = 0;
 
 /// Sentinel palette index meaning "use the foreground text color".
@@ -43,6 +43,15 @@ const FOREGROUND_PALETTE_INDEX: u16 = 0xFFFF;
 /// visited-set cycle check. A deeply linear chain still exits before
 /// blowing the stack.
 const MAX_DEPTH: usize = 64;
+
+/// Maximum work one evaluation may do, counted as paint nodes visited
+/// plus color stops resolved. The paint graph is a DAG, so a node
+/// reached from several parents is walked once per parent. A
+/// `PaintColrLayers` or `PaintComposite` whose children point back at
+/// shared nodes can therefore expand exponentially within
+/// [`MAX_DEPTH`]. The budget bounds both run time and the size of the
+/// returned command list. Real color glyphs stay far below it.
+const MAX_WORK: usize = 1 << 18;
 
 /// One unit of work emitted by the evaluator.
 ///
@@ -98,24 +107,52 @@ pub fn evaluate(face: &Face<'_>, gid: GlyphId) -> Vec<DrawCmd> {
 /// accepts. An empty slice is the static (no-deltas) path.
 #[must_use]
 pub fn evaluate_at_coords(face: &Face<'_>, gid: GlyphId, coords: &[f32]) -> Vec<DrawCmd> {
+    evaluate_with_palette(face, gid, coords, DEFAULT_PALETTE_INDEX)
+}
+
+/// Same as [`evaluate_at_coords`] but resolves colors against CPAL
+/// palette `palette`, so a caller can pick one of the font's
+/// alternate palettes (a dark theme, for example). Colors in a
+/// palette the font does not have resolve to transparent, the same
+/// as a missing palette entry.
+///
+/// ```no_run
+/// use sigilbuzz::Face;
+/// use sigilbuzz_paint::evaluate_with_palette;
+///
+/// # fn demo(face: &Face<'_>) {
+/// // Glyph 42 in the font's second palette, at the default instance.
+/// let cmds = evaluate_with_palette(face, 42, &[], 1);
+/// # let _ = cmds;
+/// # }
+/// ```
+#[must_use]
+pub fn evaluate_with_palette(
+    face: &Face<'_>,
+    gid: GlyphId,
+    coords: &[f32],
+    palette: u16,
+) -> Vec<DrawCmd> {
     let mut out = Vec::new();
     let Ok(Some(colr)) = face.colr() else {
         return out;
     };
     let cpal = face.cpal().ok().flatten();
-    let var_store = resolve_var_store(&colr).or_else(|| resolve_gdef_var_store(face));
+    let var_store = resolve_var_store(&colr);
     let Some(root) = colr.paint(gid) else {
         return out;
     };
 
-    let index_map = resolve_index_map(face);
+    let index_map = resolve_index_map(&colr);
     let mut ctx = EvalCtx {
         colr: &colr,
         cpal: cpal.as_ref(),
+        palette,
         var_store: var_store.as_ref(),
         index_map,
         coords,
         visited: Vec::new(),
+        work_left: MAX_WORK,
         out: &mut out,
     };
     ctx.visited.push(gid);
@@ -132,20 +169,36 @@ pub fn evaluate_at_coords(face: &Face<'_>, gid: GlyphId, coords: &[f32]) -> Vec<
 struct EvalCtx<'a, 'b> {
     colr: &'b Colr<'a>,
     cpal: Option<&'b Cpal<'a>>,
+    /// CPAL palette that colors resolve against.
+    palette: u16,
     var_store: Option<&'b ItemVariationStore<'a>>,
-    /// Optional DeltaSetIndexMap that redirects a paint's
-    /// `var_index_base + field_index` through an indirection table
-    /// before it hits the IVS. Spec-compliant variable color fonts
-    /// use this to share IVS rows across many paint records: without
-    /// it the evaluator would treat `var_index_base` as a literal
-    /// `(outer, inner)` pair, which only works for trivially-laid-out
-    /// IVS subtables.
+    /// Optional DeltaSetIndexMap from the COLR header. It redirects
+    /// a paint's `var_index_base + field_index` through an
+    /// indirection table before it hits the IVS. Without a map the
+    /// index splits directly into an `(outer, inner)` pair.
     index_map: Option<DeltaSetIndexMap<'a>>,
     coords: &'b [f32],
     /// Glyph ids whose paint trees are currently on the walk stack.
     /// `PaintColrGlyph` checks this before recursing.
     visited: Vec<GlyphId>,
+    /// Remaining work budget. See [`MAX_WORK`].
+    work_left: usize,
     out: &'b mut Vec<DrawCmd>,
+}
+
+impl EvalCtx<'_, '_> {
+    /// Charges `units` against the work budget. Returns `false` and
+    /// empties the budget when not enough is left, which stops the
+    /// rest of the walk.
+    fn charge(&mut self, units: usize) -> bool {
+        if let Some(left) = self.work_left.checked_sub(units) {
+            self.work_left = left;
+            true
+        } else {
+            self.work_left = 0;
+            false
+        }
+    }
 }
 
 /// Resolves the var store referenced by the COLRv1 header, if any.
@@ -161,59 +214,21 @@ fn resolve_var_store<'a>(colr: &Colr<'a>) -> Option<ItemVariationStore<'a>> {
     ItemVariationStore::parse(&data[start..]).ok()
 }
 
-/// Falls back to the GDEF v1.3+ shared `ItemVariationStore` when the
-/// COLR table doesn't carry its own. Real-world variable color fonts
-/// often park the IVS in GDEF and reach into it from both COLR and
-/// GPOS. Without this fallback the evaluator silently emits the
-/// static (no-deltas) output for any such font even when `coords` is
-/// non-empty.
-fn resolve_gdef_var_store<'a>(face: &Face<'a>) -> Option<ItemVariationStore<'a>> {
-    let gdef = face.table_bytes(*b"GDEF").ok()?;
-    if gdef.len() < 18 {
-        return None;
-    }
-    let minor = u16::from_be_bytes([gdef[2], gdef[3]]);
-    if minor < 3 {
-        return None;
-    }
-    let ivs_off = u32::from_be_bytes([gdef[14], gdef[15], gdef[16], gdef[17]]) as usize;
-    if ivs_off == 0 || ivs_off >= gdef.len() {
-        return None;
-    }
-    ItemVariationStore::parse(&gdef[ivs_off..]).ok()
-}
-
-/// Looks for a DeltaSetIndexMap supplied via the font's GDEF table.
-///
-/// The OpenType spec puts the COLRv1 DeltaSetIndexMap inside the COLR
-/// header (`varIndexMapOffset`); sigilbuzz's COLR parser doesn't yet
-/// surface that field, so the paint crate accepts an alternate
-/// location: a paint-crate convention places a u32
-/// `deltaSetIndexMapOffset` at byte 18 of a v1.3 GDEF header, right
-/// after `itemVarStoreOffset`. Real-world v1.3 GDEFs leave those
-/// bytes absent, so the lookup returns `None` for them and the
-/// evaluator falls back to the no-indirection path.
-fn resolve_index_map<'a>(face: &Face<'a>) -> Option<DeltaSetIndexMap<'a>> {
-    let gdef = face.table_bytes(*b"GDEF").ok()?;
-    if gdef.len() < 22 {
-        return None;
-    }
-    let minor = u16::from_be_bytes([gdef[2], gdef[3]]);
-    if minor < 3 {
-        return None;
-    }
-    let map_off = u32::from_be_bytes([gdef[18], gdef[19], gdef[20], gdef[21]]) as usize;
-    if map_off == 0 || map_off >= gdef.len() {
-        return None;
-    }
-    DeltaSetIndexMap::parse(gdef, map_off)
+/// Resolves the DeltaSetIndexMap referenced by the COLRv1 header, if
+/// any. A missing or malformed map yields `None`, and variation
+/// indices then map directly to `(outer, inner)` pairs.
+fn resolve_index_map<'a>(colr: &Colr<'a>) -> Option<DeltaSetIndexMap<'a>> {
+    let off = colr.var_index_map_offset()?;
+    DeltaSetIndexMap::parse(colr.data(), usize::try_from(off).ok()?)
 }
 
 /// Walks one paint node. `xform` is the transform inherited from the
 /// chain of ancestor transforms; `depth` is the current recursion
-/// depth used for the cycle-bypass safety net.
+/// depth used for the cycle-bypass safety net. Every call charges one
+/// unit of the work budget, including calls cut off by the depth cap,
+/// so a wide node just above the cap still pays for its children.
 fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2D, depth: usize) {
-    if depth >= MAX_DEPTH {
+    if !ctx.charge(1) || depth >= MAX_DEPTH {
         return;
     }
     match paint {
@@ -222,8 +237,11 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
             num_layers,
             first_layer_index,
         } => {
-            for i in 0..num_layers as u32 {
-                let Some(layer) = ctx.colr.layer_paint(first_layer_index + i) else {
+            for i in 0..u32::from(num_layers) {
+                let Some(layer) = first_layer_index
+                    .checked_add(i)
+                    .and_then(|index| ctx.colr.layer_paint(index))
+                else {
                     return;
                 };
                 walk_paint(ctx, layer, xform, depth + 1);
@@ -276,7 +294,6 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
             f(y1),
             f(x2),
             f(y2),
-            None,
             xform,
         ),
         ColrPaint::VarLinearGradient {
@@ -304,7 +321,6 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
                 f(y1) + dy1,
                 f(x2) + dx2,
                 f(y2) + dy2,
-                Some(var_index_base),
                 xform,
             );
         }
@@ -325,7 +341,6 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
             f(x1),
             f(y1),
             r1 as f32,
-            None,
             xform,
         ),
         ColrPaint::VarRadialGradient {
@@ -353,7 +368,6 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
                 f(x1) + dx1,
                 f(y1) + dy1,
                 r1 as f32 + dr1,
-                Some(var_index_base),
                 xform,
             );
         }
@@ -370,7 +384,6 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
             f(center_y),
             start_angle,
             end_angle,
-            None,
             xform,
         ),
         ColrPaint::VarSweepGradient {
@@ -392,7 +405,6 @@ fn walk_paint(ctx: &mut EvalCtx<'_, '_>, paint: ColrPaint<'_>, xform: Transform2
                 f(center_y) + dcy,
                 start_angle + dsa,
                 end_angle + dea,
-                Some(var_index_base),
                 xform,
             );
         }
@@ -826,7 +838,8 @@ fn walk_composite(
 // =========================================================================
 
 fn emit_solid(ctx: &mut EvalCtx<'_, '_>, palette_index: u16, alpha: F2Dot14, xform: Transform2D) {
-    let color = resolve_palette_color(ctx.cpal, palette_index).with_alpha_multiplied(alpha);
+    let color =
+        resolve_palette_color(ctx.cpal, ctx.palette, palette_index).with_alpha_multiplied(alpha);
     ctx.out.push(DrawCmd::FillGlyph {
         gid: 0,
         transform: xform,
@@ -844,10 +857,11 @@ fn emit_linear_gradient(
     y1: f32,
     x2: f32,
     y2: f32,
-    var_base: Option<VarIndexBase>,
     xform: Transform2D,
 ) {
-    let stops = resolve_stops(ctx, color_line, var_base);
+    let Some(stops) = resolve_stops(ctx, color_line) else {
+        return;
+    };
     let extend: Extend = color_line.extend.into();
     ctx.out.push(DrawCmd::FillGlyph {
         gid: 0,
@@ -874,10 +888,11 @@ fn emit_radial_gradient(
     x1: f32,
     y1: f32,
     r1: f32,
-    var_base: Option<VarIndexBase>,
     xform: Transform2D,
 ) {
-    let stops = resolve_stops(ctx, color_line, var_base);
+    let Some(stops) = resolve_stops(ctx, color_line) else {
+        return;
+    };
     let extend: Extend = color_line.extend.into();
     ctx.out.push(DrawCmd::FillGlyph {
         gid: 0,
@@ -903,10 +918,11 @@ fn emit_sweep_gradient(
     cy: f32,
     start_angle: F2Dot14,
     end_angle: F2Dot14,
-    var_base: Option<VarIndexBase>,
     xform: Transform2D,
 ) {
-    let stops = resolve_stops(ctx, color_line, var_base);
+    let Some(stops) = resolve_stops(ctx, color_line) else {
+        return;
+    };
     let extend: Extend = color_line.extend.into();
     ctx.out.push(DrawCmd::FillGlyph {
         gid: 0,
@@ -930,34 +946,34 @@ fn emit_sweep_gradient(
 /// Resolves a CPAL palette entry to a float-channel color. Falls back
 /// to opaque white for the `0xFFFF` foreground sentinel and to fully
 /// transparent for any other lookup miss. Never panics.
-fn resolve_palette_color(cpal: Option<&Cpal<'_>>, palette_index: u16) -> Color {
+fn resolve_palette_color(cpal: Option<&Cpal<'_>>, palette: u16, palette_index: u16) -> Color {
     if palette_index == FOREGROUND_PALETTE_INDEX {
         return Color::new(1.0, 1.0, 1.0, 1.0);
     }
     let Some(cpal) = cpal else {
         return Color::TRANSPARENT;
     };
-    cpal.color(DEFAULT_PALETTE_INDEX, palette_index)
+    cpal.color(palette, palette_index)
         .map(Color::from_cpal)
         .unwrap_or(Color::TRANSPARENT)
 }
 
 /// Resolves every stop on a `ColorLine` against the active CPAL palette
 /// and (when present) the var store. The stops are returned in the
-/// order they appear on the line.
-fn resolve_stops(
-    ctx: &EvalCtx<'_, '_>,
-    color_line: ColorLine<'_>,
-    _var_base: Option<VarIndexBase>,
-) -> Vec<ColorStop> {
-    // VarColorLine carries a per-stop `varIndexBase`; non-var lines
-    // surface `u32::MAX` for that field, which the `delta` lookup
-    // collapses to a zero contribution. We therefore use the same
-    // code path for both forms.
-    let mut out = Vec::with_capacity(color_line.len() as usize);
+/// order they appear on the line. Each stop charges one unit of the
+/// work budget. Returns `None` when the budget cannot cover the line.
+fn resolve_stops(ctx: &mut EvalCtx<'_, '_>, color_line: ColorLine<'_>) -> Option<Vec<ColorStop>> {
+    if !ctx.charge(usize::from(color_line.len())) {
+        return None;
+    }
+    // VarColorLine carries a per-stop `varIndexBase`. Non-var lines
+    // surface `u32::MAX` for that field, which the check below treats
+    // as "no deltas". Both forms therefore share one code path.
+    let mut out = Vec::with_capacity(usize::from(color_line.len()));
     let coords = ctx.coords;
     let var_store = ctx.var_store;
     let cpal = ctx.cpal;
+    let palette = ctx.palette;
 
     for (stop, stop_var) in color_line.stops_variable() {
         let mut offset = stop.stop_offset;
@@ -989,10 +1005,11 @@ fn resolve_stops(
                 alpha += store.delta(a_outer, a_inner, coords) / 16384.0;
             }
         }
-        let color = resolve_palette_color(cpal, stop.palette_index).with_alpha_multiplied(alpha);
+        let color =
+            resolve_palette_color(cpal, palette, stop.palette_index).with_alpha_multiplied(alpha);
         out.push(ColorStop { offset, color });
     }
-    out
+    Some(out)
 }
 
 // =========================================================================
@@ -1091,40 +1108,23 @@ impl<'a> DeltaSetIndexMap<'a> {
     /// Returns `None` if the header is truncated or carries an
     /// unknown format.
     fn parse(data: &'a [u8], start: usize) -> Option<Self> {
-        if data.len() < start + 4 {
-            return None;
-        }
-        let format = data[start];
-        let entry_format = data[start + 1];
-        let mut cursor = start + 2;
-        let map_count = match format {
+        let header = data.get(start..)?;
+        let (&[format, entry_format], rest) = header.split_first_chunk::<2>()?;
+        let (map_count, rest) = match format {
             0 => {
-                let v = u16::from_be_bytes([data[cursor], data[cursor + 1]]) as u32;
-                cursor += 2;
-                v
+                let (count, rest) = rest.split_first_chunk::<2>()?;
+                (u32::from(u16::from_be_bytes(*count)), rest)
             }
             1 => {
-                if data.len() < cursor + 4 {
-                    return None;
-                }
-                let v = u32::from_be_bytes([
-                    data[cursor],
-                    data[cursor + 1],
-                    data[cursor + 2],
-                    data[cursor + 3],
-                ]);
-                cursor += 4;
-                v
+                let (count, rest) = rest.split_first_chunk::<4>()?;
+                (u32::from_be_bytes(*count), rest)
             }
             _ => return None,
         };
         let entry_bytes = ((entry_format >> 4) & 0x03) as usize + 1;
         let inner_bits = u32::from(entry_format & 0x0F) + 1;
-        let total = (map_count as usize).checked_mul(entry_bytes)?;
-        if data.len() < cursor + total {
-            return None;
-        }
-        let entries = &data[cursor..cursor + total];
+        let total = usize::try_from(map_count).ok()?.checked_mul(entry_bytes)?;
+        let entries = rest.get(..total)?;
         let inner_mask = (1u32 << inner_bits).wrapping_sub(1);
         Some(Self {
             entries,
@@ -1147,14 +1147,11 @@ impl<'a> DeltaSetIndexMap<'a> {
         } else {
             self.map_count - 1
         } as usize;
-        let off = idx * self.entry_bytes;
-        if self.entries.len() < off + self.entry_bytes {
-            return None;
-        }
-        let mut raw: u32 = 0;
-        for i in 0..self.entry_bytes {
-            raw = (raw << 8) | u32::from(self.entries[off + i]);
-        }
+        let off = idx.checked_mul(self.entry_bytes)?;
+        let entry = self.entries.get(off..off.checked_add(self.entry_bytes)?)?;
+        let raw = entry
+            .iter()
+            .fold(0u32, |acc, &byte| (acc << 8) | u32::from(byte));
         let inner = (raw & self.inner_mask) as u16;
         let outer = (raw >> self.inner_bits) as u16;
         Some((outer, inner))

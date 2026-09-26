@@ -3,9 +3,9 @@
 //!
 //! Picks the family / subfamily / postscript / full / version
 //! accessors and asserts each one returns the upstream string. This
-//! is the path oniq's font browser exercises after #210 lands; we
-//! assert the strings round-trip rather than making any claim about
-//! the encoding selection internals.
+//! is the path a font browser takes to list font names. The test
+//! checks that the strings round-trip and makes no claim about the
+//! encoding selection internals.
 
 use sigilbuzz::{Blob, Face};
 

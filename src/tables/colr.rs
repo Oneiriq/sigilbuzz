@@ -59,9 +59,8 @@ pub struct Colr<'a> {
     base_glyph_list_off: u32,
     /// Absolute offset to the v1 LayerList block, or 0 if absent.
     layer_list_off: u32,
-    /// Absolute offset to the v1 ClipList block, or 0 if absent.
-    #[allow(dead_code)]
-    clip_list_off: u32,
+    /// Absolute offset to the v1 DeltaSetIndexMap, or 0 if absent.
+    var_index_map_off: u32,
     /// Absolute offset to the v1 ItemVariationStore, or 0 if absent.
     var_store_off: u32,
 }
@@ -117,13 +116,17 @@ impl<'a> Colr<'a> {
 
         let mut base_glyph_list_off = 0u32;
         let mut layer_list_off = 0u32;
-        let mut clip_list_off = 0u32;
+        let mut var_index_map_off = 0u32;
         let mut var_store_off = 0u32;
         if version >= 1 {
-            // v1 appends four Offset32 fields to the header.
+            // v1 appends five Offset32 fields to the header:
+            // baseGlyphList, layerList, clipList, varIndexMap, and
+            // itemVariationStore. The ClipList offset is read and
+            // dropped. Nothing in sigilbuzz consumes clip boxes.
             base_glyph_list_off = r.read_u32()?;
             layer_list_off = r.read_u32()?;
-            clip_list_off = r.read_u32()?;
+            let _clip_list_off = r.read_u32()?;
+            var_index_map_off = r.read_u32()?;
             var_store_off = r.read_u32()?;
         }
 
@@ -135,7 +138,7 @@ impl<'a> Colr<'a> {
             num_layer_records,
             base_glyph_list_off,
             layer_list_off,
-            clip_list_off,
+            var_index_map_off,
             var_store_off,
         })
     }
@@ -173,6 +176,19 @@ impl<'a> Colr<'a> {
             None
         } else {
             Some(self.var_store_off)
+        }
+    }
+
+    /// Returns the absolute offset of the v1 `DeltaSetIndexMap`, or
+    /// `None` when the font has none. Without a map, a variation index
+    /// splits directly into an `(outer, inner)` pair: the high 16 bits
+    /// are the outer index and the low 16 bits are the inner index.
+    #[must_use]
+    pub fn var_index_map_offset(&self) -> Option<u32> {
+        if self.var_index_map_off == 0 {
+            None
+        } else {
+            Some(self.var_index_map_off)
         }
     }
 
@@ -224,17 +240,11 @@ impl<'a> Colr<'a> {
             return None;
         }
         let list_start = self.base_glyph_list_off as usize;
-        if list_start + 4 > self.data.len() {
-            return None;
-        }
-        let count = u32::from_be_bytes([
-            self.data[list_start],
-            self.data[list_start + 1],
-            self.data[list_start + 2],
-            self.data[list_start + 3],
-        ]) as usize;
+        let count = read_u32_at(self.data, list_start)? as usize;
         let recs_start = list_start + 4;
-        let recs_end = recs_start.checked_add(count * 6)?;
+        // Checked: on 32-bit targets `count * 6` can overflow, and a
+        // wrapped end would let the search below index out of bounds.
+        let recs_end = recs_start.checked_add(count.checked_mul(6)?)?;
         if recs_end > self.data.len() {
             return None;
         }
@@ -287,28 +297,14 @@ impl<'a> Colr<'a> {
             return None;
         }
         let list_start = self.layer_list_off as usize;
-        if list_start + 4 > self.data.len() {
-            return None;
-        }
-        let count = u32::from_be_bytes([
-            self.data[list_start],
-            self.data[list_start + 1],
-            self.data[list_start + 2],
-            self.data[list_start + 3],
-        ]);
+        let count = read_u32_at(self.data, list_start)?;
         if layer_index >= count {
             return None;
         }
-        let entry = list_start + 4 + layer_index as usize * 4;
-        if entry + 4 > self.data.len() {
-            return None;
-        }
-        let paint_rel = u32::from_be_bytes([
-            self.data[entry],
-            self.data[entry + 1],
-            self.data[entry + 2],
-            self.data[entry + 3],
-        ]);
+        let entry = (layer_index as usize)
+            .checked_mul(4)?
+            .checked_add(list_start + 4)?;
+        let paint_rel = read_u32_at(self.data, entry)?;
         let abs = (list_start as u32).checked_add(paint_rel)?;
         self.paint_at(abs)
     }
@@ -319,6 +315,13 @@ impl<'a> Colr<'a> {
     pub const fn data(&self) -> &'a [u8] {
         self.data
     }
+}
+
+/// Reads a big-endian `u32` at `off`, or `None` when fewer than four
+/// bytes remain.
+fn read_u32_at(data: &[u8], off: usize) -> Option<u32> {
+    let bytes = data.get(off..)?.get(..4)?;
+    Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 // =========================================================================
@@ -518,37 +521,77 @@ impl ColorLine<'_> {
 }
 
 /// Composite mode for `PaintComposite`. Values match the COLR spec.
+/// Modes 0 to 12 are the Porter-Duff operators. Modes 13 to 27 are
+/// the separable and non-separable blend modes from the W3C
+/// Compositing and Blending spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(missing_docs)]
 #[repr(u8)]
 pub enum CompositeMode {
+    /// Porter-Duff clear: the result is fully transparent.
     Clear = 0,
+    /// Porter-Duff source: keep the source only.
     Src = 1,
+    /// Porter-Duff destination: keep the backdrop only.
     Dest = 2,
+    /// Porter-Duff source over: source drawn on top of the backdrop.
     SrcOver = 3,
+    /// Porter-Duff destination over: backdrop drawn on top of the
+    /// source.
     DestOver = 4,
+    /// Porter-Duff source in: source where the backdrop is opaque.
     SrcIn = 5,
+    /// Porter-Duff destination in: backdrop where the source is
+    /// opaque.
     DestIn = 6,
+    /// Porter-Duff source out: source where the backdrop is
+    /// transparent.
     SrcOut = 7,
+    /// Porter-Duff destination out: backdrop where the source is
+    /// transparent.
     DestOut = 8,
+    /// Porter-Duff source atop: source over the backdrop, clipped to
+    /// the backdrop.
     SrcAtop = 9,
+    /// Porter-Duff destination atop: backdrop over the source, clipped
+    /// to the source.
     DestAtop = 10,
+    /// Porter-Duff XOR: each shape only where the other is absent.
     Xor = 11,
+    /// Porter-Duff plus: source and backdrop added and clamped.
     Plus = 12,
+    /// Screen blend: inverted multiply, always at least as light.
     Screen = 13,
+    /// Overlay blend: multiply or screen, chosen by the backdrop.
     Overlay = 14,
+    /// Darken blend: the darker of source and backdrop per channel.
     Darken = 15,
+    /// Lighten blend: the lighter of source and backdrop per channel.
     Lighten = 16,
+    /// Color dodge blend: brightens the backdrop by the source.
     ColorDodge = 17,
+    /// Color burn blend: darkens the backdrop by the source.
     ColorBurn = 18,
+    /// Hard light blend: multiply or screen, chosen by the source.
     HardLight = 19,
+    /// Soft light blend: a softer version of hard light.
     SoftLight = 20,
+    /// Difference blend: absolute difference of the channels.
     Difference = 21,
+    /// Exclusion blend: like difference with lower contrast.
     Exclusion = 22,
+    /// Multiply blend: product of the channels, always at least as
+    /// dark.
     Multiply = 23,
+    /// Hue blend: source hue with backdrop saturation and luminosity.
     HslHue = 24,
+    /// Saturation blend: source saturation with backdrop hue and
+    /// luminosity.
     HslSaturation = 25,
+    /// Color blend: source hue and saturation with backdrop
+    /// luminosity.
     HslColor = 26,
+    /// Luminosity blend: source luminosity with backdrop hue and
+    /// saturation.
     HslLuminosity = 27,
 }
 
@@ -982,7 +1025,6 @@ impl<'a> ColrPaint<'a> {
     // The paint tree spans 32 distinct formats so the match is
     // necessarily long. Splitting per-format would hurt locality more
     // than it would help readability, so keep the big `match` intact.
-    #[allow(clippy::too_many_lines, clippy::similar_names)]
     pub fn parse(data: &'a [u8], offset: usize) -> Result<Self> {
         if offset >= data.len() {
             return Err(Error::Truncated {
@@ -1514,24 +1556,78 @@ mod tests {
 
     // ---------------- v1 paint-tree tests ----------------
 
+    /// Size of a v1 header: the 14-byte v0 header plus five Offset32
+    /// fields.
+    const V1_HEADER_LEN: u32 = 14 + 5 * 4;
+
+    /// Offset of the `varIndexMapOffset` field in a v1 header.
+    const VAR_INDEX_MAP_SLOT: usize = 26;
+
+    /// Offset of the `itemVariationStoreOffset` field in a v1 header.
+    const VAR_STORE_SLOT: usize = 30;
+
+    /// Starts a v1 COLR with empty v0 arrays and the BaseGlyphList
+    /// right after the header. The layer list, clip list, index map,
+    /// and variation store offsets are zero. Callers append the
+    /// BaseGlyphList.
+    fn v1_header() -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // version
+        out.extend_from_slice(&0u16.to_be_bytes()); // numBaseGlyphRecords
+        out.extend_from_slice(&V1_HEADER_LEN.to_be_bytes()); // baseGlyphRecordsOffset
+        out.extend_from_slice(&V1_HEADER_LEN.to_be_bytes()); // layerRecordsOffset
+        out.extend_from_slice(&0u16.to_be_bytes()); // numLayerRecords
+        out.extend_from_slice(&V1_HEADER_LEN.to_be_bytes()); // baseGlyphListOffset
+        out.extend_from_slice(&0u32.to_be_bytes()); // layerListOffset
+        out.extend_from_slice(&0u32.to_be_bytes()); // clipListOffset
+        out.extend_from_slice(&0u32.to_be_bytes()); // varIndexMapOffset
+        out.extend_from_slice(&0u32.to_be_bytes()); // itemVariationStoreOffset
+        assert_eq!(out.len(), V1_HEADER_LEN as usize);
+        out
+    }
+
+    #[test]
+    fn v1_header_reads_index_map_and_store_offsets() {
+        let mut out = build_colr_v1_solid(5, 0.5);
+        out[VAR_INDEX_MAP_SLOT..VAR_INDEX_MAP_SLOT + 4]
+            .copy_from_slice(&0x0102_0304u32.to_be_bytes());
+        out[VAR_STORE_SLOT..VAR_STORE_SLOT + 4].copy_from_slice(&0x0506_0708u32.to_be_bytes());
+        let colr = Colr::parse(&out).unwrap();
+        assert_eq!(colr.var_index_map_offset(), Some(0x0102_0304));
+        assert_eq!(colr.var_store_offset(), Some(0x0506_0708));
+        // The BaseGlyphList still starts after the full 34-byte header.
+        assert!(matches!(
+            colr.paint(42),
+            Some(ColrPaint::Solid {
+                palette_index: 5,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn v1_header_without_variations_reports_none() {
+        let colr_bytes = build_colr_v1_solid(5, 0.5);
+        let colr = Colr::parse(&colr_bytes).unwrap();
+        assert_eq!(colr.var_index_map_offset(), None);
+        assert_eq!(colr.var_store_offset(), None);
+    }
+
+    #[test]
+    fn v1_header_missing_store_offset_is_truncated() {
+        // A four-offset header (30 bytes) is one Offset32 short. The
+        // empty v0 arrays point inside the buffer, so only the missing
+        // itemVariationStoreOffset can fail.
+        let mut short = build_colr_v1_solid(5, 0.5)[..VAR_STORE_SLOT].to_vec();
+        short[4..8].copy_from_slice(&14u32.to_be_bytes());
+        short[8..12].copy_from_slice(&14u32.to_be_bytes());
+        assert!(matches!(Colr::parse(&short), Err(Error::Truncated { .. })));
+    }
+
     /// Build a minimal v1 COLR with a single base glyph whose paint
     /// tree is a `PaintSolid`. Returns the full table bytes.
     fn build_colr_v1_solid(palette_index: u16, alpha: f32) -> Vec<u8> {
-        let mut out = Vec::new();
-        // v1 header = 14 bytes (v0) + 16 bytes (4x u32).
-        let header_len = 14 + 16;
-        out.extend_from_slice(&1u16.to_be_bytes()); // version
-        out.extend_from_slice(&0u16.to_be_bytes()); // numBaseGlyphRecords
-        out.extend_from_slice(&(header_len as u32).to_be_bytes()); // baseGlyphRecordsOffset (empty body so anywhere works)
-        out.extend_from_slice(&(header_len as u32).to_be_bytes()); // layerRecordsOffset
-        out.extend_from_slice(&0u16.to_be_bytes()); // numLayerRecords
-                                                    // v1 appendix: baseGlyphListOffset, layerListOffset,
-                                                    // clipListOffset, varStoreOffset.
-        let base_glyph_list_off = header_len as u32;
-        out.extend_from_slice(&base_glyph_list_off.to_be_bytes());
-        out.extend_from_slice(&0u32.to_be_bytes()); // layerListOffset
-        out.extend_from_slice(&0u32.to_be_bytes()); // clipListOffset
-        out.extend_from_slice(&0u32.to_be_bytes()); // varStoreOffset
+        let mut out = v1_header();
 
         // BaseGlyphList: { u32 numRecords; BaseGlyphPaintRecord[...] }.
         // BaseGlyphPaintRecord = { u16 glyphID; Offset32 paintOffset (relative to BaseGlyphList) }.
@@ -1572,18 +1668,7 @@ mod tests {
     /// PaintColrLayers at the root of a base glyph.
     #[test]
     fn v1_colr_layers_round_trip() {
-        let mut out = Vec::new();
-        let header_len = 30;
-        out.extend_from_slice(&1u16.to_be_bytes());
-        out.extend_from_slice(&0u16.to_be_bytes());
-        out.extend_from_slice(&(header_len as u32).to_be_bytes());
-        out.extend_from_slice(&(header_len as u32).to_be_bytes());
-        out.extend_from_slice(&0u16.to_be_bytes());
-        let base_glyph_list_off = header_len as u32;
-        out.extend_from_slice(&base_glyph_list_off.to_be_bytes());
-        out.extend_from_slice(&0u32.to_be_bytes());
-        out.extend_from_slice(&0u32.to_be_bytes());
-        out.extend_from_slice(&0u32.to_be_bytes());
+        let mut out = v1_header();
 
         // BaseGlyphList.
         out.extend_from_slice(&1u32.to_be_bytes());
@@ -1613,18 +1698,7 @@ mod tests {
     /// resolution + depth-one traversal via `paint_at`.
     #[test]
     fn v1_glyph_paint_chains_to_solid() {
-        let mut out = Vec::new();
-        let header_len = 30;
-        out.extend_from_slice(&1u16.to_be_bytes());
-        out.extend_from_slice(&0u16.to_be_bytes());
-        out.extend_from_slice(&(header_len as u32).to_be_bytes());
-        out.extend_from_slice(&(header_len as u32).to_be_bytes());
-        out.extend_from_slice(&0u16.to_be_bytes());
-        let base_glyph_list_off = header_len as u32;
-        out.extend_from_slice(&base_glyph_list_off.to_be_bytes());
-        out.extend_from_slice(&0u32.to_be_bytes());
-        out.extend_from_slice(&0u32.to_be_bytes());
-        out.extend_from_slice(&0u32.to_be_bytes());
+        let mut out = v1_header();
 
         // BaseGlyphList: one record pointing at paint at offset 10
         // (relative to list start).
@@ -1687,18 +1761,7 @@ mod tests {
     /// back byte-for-byte.
     #[test]
     fn v1_linear_gradient_parses_colorline_and_coords() {
-        let mut out = Vec::new();
-        let header_len = 30;
-        out.extend_from_slice(&1u16.to_be_bytes());
-        out.extend_from_slice(&0u16.to_be_bytes());
-        out.extend_from_slice(&(header_len as u32).to_be_bytes());
-        out.extend_from_slice(&(header_len as u32).to_be_bytes());
-        out.extend_from_slice(&0u16.to_be_bytes());
-        let base_glyph_list_off = header_len as u32;
-        out.extend_from_slice(&base_glyph_list_off.to_be_bytes());
-        out.extend_from_slice(&0u32.to_be_bytes());
-        out.extend_from_slice(&0u32.to_be_bytes());
-        out.extend_from_slice(&0u32.to_be_bytes());
+        let mut out = v1_header();
 
         out.extend_from_slice(&1u32.to_be_bytes()); // base-glyph count
         out.extend_from_slice(&33u16.to_be_bytes());
@@ -1771,18 +1834,7 @@ mod tests {
     #[test]
     fn v1_composite_exposes_both_children() {
         // Build a minimal header pointing at a composite at the end.
-        let mut out = Vec::new();
-        let header_len = 30;
-        out.extend_from_slice(&1u16.to_be_bytes());
-        out.extend_from_slice(&0u16.to_be_bytes());
-        out.extend_from_slice(&(header_len as u32).to_be_bytes());
-        out.extend_from_slice(&(header_len as u32).to_be_bytes());
-        out.extend_from_slice(&0u16.to_be_bytes());
-        let base_glyph_list_off = header_len as u32;
-        out.extend_from_slice(&base_glyph_list_off.to_be_bytes());
-        out.extend_from_slice(&0u32.to_be_bytes());
-        out.extend_from_slice(&0u32.to_be_bytes());
-        out.extend_from_slice(&0u32.to_be_bytes());
+        let mut out = v1_header();
 
         out.extend_from_slice(&1u32.to_be_bytes());
         out.extend_from_slice(&7u16.to_be_bytes());
@@ -1838,18 +1890,7 @@ mod tests {
     #[test]
     fn v1_simple_transform_variants_round_trip() {
         fn build_single_transform(format: u8, payload: &[u8]) -> Vec<u8> {
-            let mut out = Vec::new();
-            let header_len = 30;
-            out.extend_from_slice(&1u16.to_be_bytes());
-            out.extend_from_slice(&0u16.to_be_bytes());
-            out.extend_from_slice(&(header_len as u32).to_be_bytes());
-            out.extend_from_slice(&(header_len as u32).to_be_bytes());
-            out.extend_from_slice(&0u16.to_be_bytes());
-            let bgl = header_len as u32;
-            out.extend_from_slice(&bgl.to_be_bytes());
-            out.extend_from_slice(&0u32.to_be_bytes());
-            out.extend_from_slice(&0u32.to_be_bytes());
-            out.extend_from_slice(&0u32.to_be_bytes());
+            let mut out = v1_header();
             out.extend_from_slice(&1u32.to_be_bytes());
             out.extend_from_slice(&1u16.to_be_bytes());
             out.extend_from_slice(&10u32.to_be_bytes());
