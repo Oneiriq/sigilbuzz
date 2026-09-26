@@ -172,9 +172,10 @@ pub struct SubsetInput {
     /// surfaces [`SubsetError::Unsupported`].
     pub drop_unhandled: bool,
     /// If true (the default), retain layout tables (`GSUB`, `GPOS`,
-    /// `GDEF`) on the `glyf` path. They pass through verbatim when
-    /// every glyph survives and are rewritten for the new glyph ids
-    /// otherwise. When false, layout tables are dropped. Callers that
+    /// `GDEF`), for `glyf`, CFF, and CFF2 fonts alike. They pass
+    /// through verbatim when every glyph survives and are rewritten for
+    /// the new glyph ids otherwise. When false, layout tables are
+    /// dropped. Callers that
     /// explicitly want a hint-free, layout-free subset (e.g. embedded
     /// PDF font streams) should set this to false.
     pub retain_layout: bool,
@@ -185,7 +186,9 @@ pub struct SubsetInput {
     /// gid; `HVAR` is rebuilt around a fresh `DeltaSetIndexMap` plus a
     /// deduped `ItemVariationStore`. When false, every variable-font
     /// table is dropped. The resulting subset behaves as a static font
-    /// pinned to the source's default instance.
+    /// pinned to the source's default instance. A `CFF2` table keeps
+    /// its own variation store either way, since it is part of the
+    /// outline data.
     pub retain_variations: bool,
 }
 
@@ -294,8 +297,11 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
     //    [`layout::Decision::Preserve`] strategy for GSUB / GPOS / GDEF.
     // 2. CFF1 non-identity (non-CID and CID-keyed) routes through
     //    [`cff_non_identity`] which calls [`cff::subset_non_identity`].
-    // 3. CFF2 non-identity routes through [`cff2_non_identity`] which
-    //    calls [`cff2::subset_non_identity`].
+    // 3. CFF2 non-identity routes through the same [`cff_non_identity`],
+    //    which calls [`cff2::subset_non_identity`] for it.
+    //
+    // All three honor `retain_layout`, `retain_variations`, and
+    // `drop_unhandled` the way the `glyf` path does.
     let has_cff1 = face.record(tag::CFF1).is_some();
     let has_cff2 = face.record(tag::CFF2).is_some();
     if has_cff1 || has_cff2 {
@@ -316,15 +322,12 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         let identity = kept.len() == cff_num_glyphs as usize
             && kept.iter().enumerate().all(|(i, &g)| g as usize == i);
         if identity {
-            return cff_passthrough(face, &kept, has_cff1);
+            return cff_passthrough(face, &kept, input);
         }
-        if has_cff1 {
-            return cff_non_identity(face, &kept);
-        }
-        // CFF2 non-identity: mirror the CID-keyed CFF1 flow with
+        // CFF2 non-identity mirrors the CID-keyed CFF1 flow with
         // CFF2-specific elisions (no String INDEX, no Encoding/charset,
         // single inline Top DICT). VariationStore rides through verbatim.
-        return cff2_non_identity(face, &kept);
+        return cff_non_identity(face, &kept, input, has_cff1);
     }
 
     let maxp = face.maxp()?;
@@ -541,19 +544,22 @@ fn check_unhandled_tables(
     Ok(())
 }
 
-/// CFF1 non-identity orchestration.
+/// CFF1 and CFF2 non-identity orchestration.
 ///
-/// Wires the [`cff::subset_non_identity`] table rewriter into a fresh
-/// SFNT directory: every other table is either passed through verbatim
-/// (when its bytes don't carry gid-keyed data, e.g. `name`, `head`)
-/// or rebuilt against the new gid namespace (`cmap`, `hmtx` / `hhea`,
-/// `maxp`, `post`).
-///
-/// Variable-font tables (`fvar`, `avar`, `gvar`, `HVAR`) and layout
-/// tables (`GSUB` / `GPOS` / `GDEF`) are dropped on the non-identity
-/// path. CFF1 fonts rarely carry them, and the rewriters used on the
-/// `glyf` path are not wired in here.
-fn cff_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, SubsetError> {
+/// Rebuilds the `CFF ` table with [`cff::subset_non_identity`], or the
+/// `CFF2` table with [`cff2::subset_non_identity`], around the kept-gid
+/// set. A CFF2 table carries its own variation store, which rides
+/// through inside the rebuilt table. The fresh SFNT directory around
+/// it rebuilds `cmap`, `hmtx` / `hhea`, `maxp`, and `post` for the new
+/// gid namespace, passes `head`, `name`, and `OS/2` through, and keeps
+/// the layout and variable-font tables that `input` asks for, as the
+/// `glyf` path does.
+fn cff_non_identity(
+    face: &Face<'_>,
+    kept: &[GlyphId],
+    input: &SubsetInput,
+    has_cff1: bool,
+) -> Result<SubsetOutput, SubsetError> {
     // Build the gid_map.
     let mut gid_map: Vec<(GlyphId, GlyphId)> = kept
         .iter()
@@ -563,9 +569,14 @@ fn cff_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, S
     gid_map.sort_by_key(|(old, _)| *old);
     let new_num_glyphs = kept.len() as u16;
 
-    // Rebuild the CFF table.
-    let cff_bytes = face.table_bytes(tag::CFF1).map_err(SubsetError::from)?;
-    let new_cff = cff::subset_non_identity(cff_bytes, kept)?;
+    // Rebuild the CFF or CFF2 table.
+    let (cff_tag, new_cff) = if has_cff1 {
+        let bytes = face.table_bytes(tag::CFF1).map_err(SubsetError::from)?;
+        (tag::CFF1, cff::subset_non_identity(bytes, kept)?)
+    } else {
+        let bytes = face.table_bytes(tag::CFF2).map_err(SubsetError::from)?;
+        (tag::CFF2, cff2::subset_non_identity(bytes, kept)?)
+    };
 
     // Rebuild the directly-rewritable tables that ride alongside the CFF.
     let head_bytes = face.table_bytes(tag::HEAD).map_err(SubsetError::from)?;
@@ -598,74 +609,14 @@ fn cff_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, S
         (tag::CMAP, cmap_out),
         (tag::NAME, name_out),
         (tag::POST, post_out),
-        (tag::CFF1, new_cff),
+        (cff_tag, new_cff),
     ];
     if let Some(os2) = os2_out {
         tables.push((*b"OS/2", os2));
     }
 
-    let bytes = sfnt::build(face.sfnt_version(), &tables);
-    Ok(SubsetOutput {
-        bytes,
-        gid_map: gid_map.into_iter().collect(),
-    })
-}
-
-/// CFF2 non-identity orchestration.
-///
-/// Mirrors [`cff_non_identity`]'s shape: rebuild the CFF2 table around
-/// the kept-gid set via [`cff2::subset_non_identity`], then assemble a
-/// fresh SFNT directory around it. CFF2 fonts pair with cmap, hmtx,
-/// hhea, head, name, OS/2. Every other table the source carries
-/// (including layout / variable-font tables) is dropped on the
-/// non-identity path, as on the CFF1 path.
-fn cff2_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, SubsetError> {
-    let mut gid_map: Vec<(GlyphId, GlyphId)> = kept
-        .iter()
-        .enumerate()
-        .map(|(new, &old)| (old, new as u16))
-        .collect();
-    gid_map.sort_by_key(|(old, _)| *old);
-    let new_num_glyphs = kept.len() as u16;
-
-    let cff2_bytes = face.table_bytes(tag::CFF2).map_err(SubsetError::from)?;
-    let new_cff2 = cff2::subset_non_identity(cff2_bytes, kept)?;
-
-    let head_bytes = face.table_bytes(tag::HEAD).map_err(SubsetError::from)?;
-    let head_out = head_bytes.to_vec();
-
-    let cmap_out = cmap::subset_cmap(face, &gid_map)?;
-    let hmtx_out = hmtx::subset_hmtx(face, kept)?;
-
-    let hhea_bytes = face.table_bytes(tag::HHEA).map_err(SubsetError::from)?;
-    let mut hhea_out = hhea_bytes.to_vec();
-    util::write_hhea_metrics_count(&mut hhea_out, hmtx_out.number_of_h_metrics)?;
-
-    let maxp_bytes = face.table_bytes(tag::MAXP).map_err(SubsetError::from)?;
-    let mut maxp_out = maxp_bytes.to_vec();
-    util::write_maxp_num_glyphs(&mut maxp_out, new_num_glyphs)?;
-
-    let post_out = util::synthesize_post_format_3(face)?;
-
-    let name_out = face
-        .table_bytes(tag::NAME)
-        .map(|b| b.to_vec())
-        .map_err(SubsetError::from)?;
-    let os2_out = face.table_bytes(*b"OS/2").ok().map(<[u8]>::to_vec);
-
-    let mut tables: Vec<([u8; 4], Vec<u8>)> = alloc::vec![
-        (tag::HEAD, head_out),
-        (tag::HHEA, hhea_out),
-        (tag::MAXP, maxp_out),
-        (tag::HMTX, hmtx_out.bytes),
-        (tag::CMAP, cmap_out),
-        (tag::NAME, name_out),
-        (tag::POST, post_out),
-        (tag::CFF2, new_cff2),
-    ];
-    if let Some(os2) = os2_out {
-        tables.push((*b"OS/2", os2));
-    }
+    push_layout_and_variation_tables(face, kept, &gid_map, input, &mut tables)?;
+    check_unhandled_tables(face, &tables, input)?;
 
     let bytes = sfnt::build(face.sfnt_version(), &tables);
     Ok(SubsetOutput {
@@ -684,31 +635,36 @@ fn cff2_non_identity(face: &Face<'_>, kept: &[GlyphId]) -> Result<SubsetOutput, 
 /// hmtx, hhea, maxp, post, name, OS/2, COLR, CPAL, and the layout
 /// tables. We copy every table the source carries except the small
 /// set the rest of the pipeline can't round-trip: `vhea` / `vmtx` /
-/// `VORG` / legacy `kern` / `morx` / `kerx`.
+/// `VORG` / legacy `kern` / `morx` / `kerx`. Layout and variable-font
+/// tables stay only when `input` asks for them, and strict mode
+/// (`drop_unhandled` false) rejects the tables that cannot be kept.
 ///
 /// Returns the new SFNT bytes plus an identity `gid_map`.
 fn cff_passthrough(
     face: &Face<'_>,
     kept: &[GlyphId],
-    has_cff1: bool,
+    input: &SubsetInput,
 ) -> Result<SubsetOutput, SubsetError> {
-    let _ = has_cff1; // CFF1 vs CFF2 doesn't matter: the source tag travels.
     let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::new();
     for rec in face.records() {
+        let dropped_by_flag = (!input.retain_layout && LAYOUT_TABLES.contains(&rec.tag))
+            || (!input.retain_variations && VARIATION_TABLES.contains(&rec.tag));
         // Skip the same set the glyf path drops when in
         // drop_unhandled mode. CFF identity-passthrough is morally a
         // "preserve everything still relevant" emit, so vertical /
         // legacy-kern tables that the rest of the pipeline can't
         // round-trip stay dropped.
-        if matches!(
+        let unhandled = matches!(
             &rec.tag,
             b"vhea" | b"vmtx" | b"VORG" | b"kern" | b"morx" | b"kerx"
-        ) {
+        );
+        if dropped_by_flag || unhandled {
             continue;
         }
         let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;
         tables.push((rec.tag, bytes.to_vec()));
     }
+    check_unhandled_tables(face, &tables, input)?;
     let bytes = sfnt::build(face.sfnt_version(), &tables);
     let gid_map: Vec<(GlyphId, GlyphId)> = kept.iter().map(|&g| (g, g)).collect();
     Ok(SubsetOutput { bytes, gid_map })

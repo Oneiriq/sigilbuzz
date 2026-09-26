@@ -361,8 +361,8 @@ fn real_cff2_subset_non_identity_round_trip() {
         gids: kept_gids.clone(),
         retain_hints: false,
         drop_unhandled: true,
-        // Layout / variations off: the non-identity path drops
-        // them today (matches the CFF1 non-identity flow).
+        // Layout / variations off so this test covers the bare CFF2
+        // rewrite. tests/input_flags.rs covers the kept tables.
         retain_layout: false,
         retain_variations: false,
     };
