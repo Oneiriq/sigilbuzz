@@ -656,13 +656,18 @@ impl Bake<'_, '_> {
             if !self.spend(pair_value_count) {
                 return;
             }
+            // Device offsets in format 1 are measured from the
+            // PairSet, so the fold works on the PairSet's bytes.
+            let Some(set) = sub.get_mut(set_off..) else {
+                continue;
+            };
             for j in 0..pair_value_count {
-                let pvr_off = set_off + 2 + j * pvr_size;
+                let pvr_off = 2 + j * pvr_size;
                 // ValueRecord1 starts after the 2-byte secondGlyph.
                 let vr1_pos = pvr_off + 2;
                 let vr2_pos = vr1_pos + v1_size;
-                self.value_record(sub, vr1_pos, value_format1);
-                self.value_record(sub, vr2_pos, value_format2);
+                self.value_record(set, vr1_pos, value_format1);
+                self.value_record(set, vr2_pos, value_format2);
             }
         }
     }
@@ -1007,7 +1012,8 @@ mod tests {
         gpos.extend_from_slice(&50u16.to_be_bytes());
 
         // VariationIndex at the end: outer=0, inner=0, deltaFormat=0x8000.
-        let vi_rel = (gpos.len() - sub_off) as u16;
+        // PairPos format 1 measures device offsets from the PairSet.
+        let vi_rel = (gpos.len() - sub_off) as u16 - pair_set_rel;
         gpos.extend_from_slice(&0u16.to_be_bytes());
         gpos.extend_from_slice(&0u16.to_be_bytes());
         gpos.extend_from_slice(&0x8000u16.to_be_bytes());
@@ -1129,7 +1135,7 @@ mod tests {
         gpos.extend_from_slice(&1u16.to_be_bytes());
         gpos.extend_from_slice(&1u16.to_be_bytes());
         gpos.extend_from_slice(&50u16.to_be_bytes());
-        let vi_rel = (gpos.len() - sub_off) as u16;
+        let vi_rel = (gpos.len() - sub_off) as u16 - pair_set_rel;
         gpos.extend_from_slice(&0u16.to_be_bytes());
         gpos.extend_from_slice(&0u16.to_be_bytes());
         gpos.extend_from_slice(&0x8000u16.to_be_bytes());

@@ -54,9 +54,22 @@ impl<'a> PairPos<'a> {
     /// hit but happened to have no delta, which is still different
     /// from "no rule."
     pub fn lookup(&self, first: u16, second: u16) -> Option<(ValueRecord, ValueRecord)> {
+        self.lookup_with_base(first, second)
+            .map(|(v1, v2, _)| (v1, v2))
+    }
+
+    /// Same as [`PairPos::lookup`], plus the bytes of the table that
+    /// the records' Device and VariationIndex offsets are measured
+    /// from. The OpenType spec measures them from the PairSet in
+    /// format 1 and from the subtable in format 2.
+    pub fn lookup_with_base(
+        &self,
+        first: u16,
+        second: u16,
+    ) -> Option<(ValueRecord, ValueRecord, &'a [u8])> {
         match self {
             PairPos::Format1(f) => f.lookup(first, second),
-            PairPos::Format2(f) => f.lookup(first, second),
+            PairPos::Format2(f) => f.lookup(first, second).map(|(v1, v2)| (v1, v2, f.data)),
         }
     }
 }
@@ -123,7 +136,9 @@ impl<'a> PairPosFormat1<'a> {
         Reader::at(self.data, off).ok()?.read_u16().ok()
     }
 
-    fn lookup(&self, first: u16, second: u16) -> Option<(ValueRecord, ValueRecord)> {
+    /// Returns the pair's records and the PairSet bytes their Device
+    /// offsets are measured from.
+    fn lookup(&self, first: u16, second: u16) -> Option<(ValueRecord, ValueRecord, &'a [u8])> {
         let cov = self.coverage.index_of(first)?;
         if cov >= self.pair_set_count {
             return None;
@@ -152,7 +167,7 @@ impl<'a> PairPosFormat1<'a> {
                     let mut rr = Reader::at(set_bytes, value_off).ok()?;
                     let v1 = ValueRecord::parse(&mut rr, self.value_format1).ok()?;
                     let v2 = ValueRecord::parse(&mut rr, self.value_format2).ok()?;
-                    return Some((v1, v2));
+                    return Some((v1, v2, set_bytes));
                 }
             }
         }
@@ -362,6 +377,19 @@ mod tests {
         assert!(pp.lookup(10, 16).is_none());
     }
 
+    #[test]
+    fn format1_device_base_is_the_pair_set() {
+        // Device offsets in format 1 are measured from the PairSet,
+        // so the base must start at the second PairSet's count word.
+        let bytes =
+            build_pair_pos_format1(&[10, 20], &[&[(15, -30, 0), (25, 5, 0)], &[(5, -50, 0)]]);
+        let pp = PairPos::parse(&bytes).unwrap();
+        let (_, _, base) = pp.lookup_with_base(20, 5).unwrap();
+        let set_off = usize::from(u16::from_be_bytes([bytes[12], bytes[13]]));
+        assert_eq!(base, &bytes[set_off..]);
+        assert_eq!(&base[..2], &1u16.to_be_bytes(), "pairValueCount of set 1");
+    }
+
     /// Builds a Pair Adjustment format 2 subtable with a single
     /// X_ADVANCE value field on valueFormat1 and no value on
     /// valueFormat2. `matrix[c1][c2]` is the x_advance for the
@@ -430,6 +458,9 @@ mod tests {
         // Pair (11, 22) -> class1=1, class2=2 -> -15.
         let (v1b, _) = pp.lookup(11, 22).unwrap();
         assert_eq!(v1b.x_advance, -15);
+        // Format 2 measures Device offsets from the subtable itself.
+        let (_, _, base) = pp.lookup_with_base(11, 22).unwrap();
+        assert_eq!(base, &bytes[..]);
     }
 
     #[test]

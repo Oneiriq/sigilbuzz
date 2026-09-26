@@ -125,9 +125,10 @@ impl VarCtx<'_> {
 
 /// Applies one `ValueRecord` to `glyph`, folding in any
 /// Device/VariationIndex deltas the `subtable` carries for this
-/// record. `subtable` is the enclosing PairPos/SinglePos subtable
-/// bytes. Device/VariationIndex sub-offsets are always rooted
-/// there.
+/// record. `subtable` is the table the record's Device and
+/// VariationIndex offsets are measured from: the SinglePos subtable,
+/// the PairPos format 2 subtable, or the PairSet of a PairPos
+/// format 1 subtable.
 ///
 /// The sums saturate: a font that stacks thousands of adjustments
 /// on one glyph pins the position at the `i32` bounds.
@@ -2824,7 +2825,7 @@ fn apply_gpos_feature_in_scripts_with_var(
                     let Ok(pp) = PairPos::parse(inner_bytes) else {
                         continue;
                     };
-                    apply_pair_pos(&pp, glyphs, &filter, inner_bytes, var);
+                    apply_pair_pos(&pp, glyphs, &filter, var);
                     ran_any = true;
                 }
                 gpos_lt::MARK_TO_BASE => {
@@ -2960,9 +2961,9 @@ fn apply_gpos_lookup_at(
                     continue;
                 };
                 let second = second_glyph.glyph_id as u16;
-                if let Some((v1, v2)) = pp.lookup(first, second) {
-                    apply_value_record(first_glyph, &v1, inner_bytes, var);
-                    apply_value_record(second_glyph, &v2, inner_bytes, var);
+                if let Some((v1, v2, base)) = pp.lookup_with_base(first, second) {
+                    apply_value_record(first_glyph, &v1, base, var);
+                    apply_value_record(second_glyph, &v2, base, var);
                     return;
                 }
             }
@@ -3691,7 +3692,6 @@ fn apply_pair_pos(
     pp: &PairPos<'_>,
     glyphs: &mut [Glyph],
     filter: &MatchFilter<'_>,
-    subtable: &[u8],
     var: &VarCtx<'_>,
 ) {
     if glyphs.len() < 2 {
@@ -3712,15 +3712,14 @@ fn apply_pair_pos(
             break;
         };
         let second = ids[j];
-        if let Some((v1, v2)) = pp.lookup(first, second) {
+        if let Some((v1, v2, base)) = pp.lookup_with_base(first, second) {
             // PairPos applies v1 to `i` and v2 to `j`. Both records'
-            // Device/VariationIndex offsets root at the PairPos
-            // subtable bytes; the second-y_advance slot follows the
-            // same rule.
+            // Device/VariationIndex offsets are measured from `base`:
+            // the PairSet in format 1, the subtable in format 2.
             {
                 let (left, right) = glyphs.split_at_mut(j);
-                apply_value_record(&mut left[i], &v1, subtable, var);
-                apply_value_record(&mut right[0], &v2, subtable, var);
+                apply_value_record(&mut left[i], &v1, base, var);
+                apply_value_record(&mut right[0], &v2, base, var);
             }
         }
         // Advance to the position of the second glyph; HarfBuzz uses

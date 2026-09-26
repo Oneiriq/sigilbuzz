@@ -139,7 +139,7 @@ def main():
         #     u16 secondGlyph = gid_v
         #     ValueRecord1:
         #       i16 x_advance = 0
-        #       Offset16 x_advance_device -> VariationIndex at subtable-relative offset
+        #       Offset16 x_advance_device -> VariationIndex, offset from the PairSet
         # Then coverage and variation index blobs appended.
         value_format1 = 0x0044
         value_format2 = 0
@@ -151,7 +151,9 @@ def main():
         coverage_off = pair_set_off + pair_set_size
         coverage = struct.pack(">HH", 1, 1) + struct.pack(">H", gid_a)
         # VariationIndex (6 bytes) at coverage_off + len(coverage).
-        var_index_off = coverage_off + len(coverage)
+        # Device offsets in a PairPos format 1 value record are
+        # measured from the start of the PairSet.
+        var_index_off = coverage_off + len(coverage) - pair_set_off
         var_index = build_variation_index_bytes(0, 0)
 
         header = (

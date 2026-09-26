@@ -16,18 +16,12 @@
 //! one kern pair) without the megabyte of overhead a real variable
 //! font would cost.
 //!
-//! # Why no byte-for-byte rustybuzz parity here
-//!
-//! The synthetic font relies on PairPos format 1 Device offsets
-//! being measured from the PairPos subtable start, which is the
-//! OpenType spec's rule. rustybuzz 0.20 (via ttf-parser) resolves
-//! those offsets against the enclosing PairSet instead, which
-//! means it cannot find the VariationIndex in this fixture and
-//! silently drops the delta: rustybuzz returns the default-
-//! instance advance regardless of the bound axis. Matching that
-//! would mean replicating an upstream bug. The `rubik_vf.ttf`
-//! fixture in `variable_fonts.rs` still covers HVAR parity with
-//! rustybuzz against a real variable font.
+//! The PairPos is format 1, so the OpenType spec and HarfBuzz
+//! measure its Device offsets from the PairSet. There is no
+//! rustybuzz parity check here: rustybuzz 0.20 never applies a
+//! format 1 Device table, because ttf-parser 0.25 cuts the PairSet
+//! off after its records and so cannot reach a table stored past
+//! them.
 
 use sigilbuzz::{shape, Blob, Buffer, Face, Font};
 
