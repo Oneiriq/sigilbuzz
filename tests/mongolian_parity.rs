@@ -310,3 +310,25 @@ fn clear_brings_back_the_auto_vertical_default() {
         "TTB advances are negative"
     );
 }
+
+#[test]
+fn unset_direction_brings_back_the_auto_vertical_default() {
+    let blob = Blob::new(NOTO_MONGOLIAN);
+    let face = Face::parse(&blob, 0).expect("parse face");
+    let font = Font::new(face, 1000.0);
+
+    let mut buffer = Buffer::new();
+    buffer.push_str("\u{1820}");
+    buffer.set_direction(Direction::Ltr);
+    let horizontal = shape(&font, &buffer, &[]).expect("shape explicit LTR");
+    assert_eq!(horizontal.glyphs[0].y_advance, 0);
+
+    // Unlike clear(), unset_direction() keeps the text.
+    buffer.unset_direction();
+    let vertical = shape(&font, &buffer, &[]).expect("shape after unset_direction");
+    assert_eq!(vertical.glyphs[0].x_advance, 0);
+    assert!(
+        vertical.glyphs[0].y_advance < 0,
+        "TTB advances are negative"
+    );
+}

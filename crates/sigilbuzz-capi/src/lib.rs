@@ -1118,8 +1118,19 @@ pub unsafe extern "C" fn hb_buffer_set_direction(
     // SAFETY: caller asserts validity.
     let inner = unsafe { &(*buffer).inner };
     let mut state = inner.state.lock();
-    state.direction = direction;
-    state.buffer.set_direction(map_direction_in(direction));
+    // HB_DIRECTION_INVALID (or any other value outside LTR..BTT) puts
+    // the buffer back to "unset", so the core picks the layout itself
+    // again, as in HarfBuzz.
+    match map_direction_in(direction) {
+        Some(core) => {
+            state.direction = direction;
+            state.buffer.set_direction(core);
+        }
+        None => {
+            state.direction = HB_DIRECTION_INVALID;
+            state.buffer.unset_direction();
+        }
+    }
     state.props_set = true;
 }
 
@@ -1494,12 +1505,16 @@ pub extern "C" fn hb_version_string() -> *const c_char {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn map_direction_in(d: hb_direction_t) -> Direction {
+/// The core direction for a valid `hb_direction_t`, `None` for
+/// `HB_DIRECTION_INVALID` and every other value HarfBuzz's
+/// `HB_DIRECTION_IS_VALID` rejects.
+fn map_direction_in(d: hb_direction_t) -> Option<Direction> {
     match d {
-        HB_DIRECTION_RTL => Direction::Rtl,
-        HB_DIRECTION_TTB => Direction::Ttb,
-        HB_DIRECTION_BTT => Direction::Btt,
-        _ => Direction::Ltr,
+        HB_DIRECTION_LTR => Some(Direction::Ltr),
+        HB_DIRECTION_RTL => Some(Direction::Rtl),
+        HB_DIRECTION_TTB => Some(Direction::Ttb),
+        HB_DIRECTION_BTT => Some(Direction::Btt),
+        _ => None,
     }
 }
 

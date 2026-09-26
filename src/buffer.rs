@@ -318,6 +318,31 @@ impl Buffer {
         self.direction_explicit = true;
     }
 
+    /// Forgets the direction the caller chose, the way HarfBuzz's
+    /// `hb_buffer_set_direction(buffer, HB_DIRECTION_INVALID)` does.
+    ///
+    /// [`Self::direction`] goes back to the [`Direction::Ltr`] default
+    /// and [`Self::has_explicit_direction`] to `false`, so
+    /// [`crate::shape`] once again picks the layout itself (vertical for
+    /// Mongolian-dominant text). The text, script, language, and
+    /// context are kept.
+    ///
+    /// ```
+    /// use sigilbuzz::{Buffer, Direction};
+    ///
+    /// let mut buffer = Buffer::new();
+    /// buffer.push_str("abc");
+    /// buffer.set_direction(Direction::Rtl);
+    /// buffer.unset_direction();
+    /// assert_eq!(buffer.direction(), Direction::Ltr);
+    /// assert!(!buffer.has_explicit_direction());
+    /// assert_eq!(buffer.text(), "abc");
+    /// ```
+    pub fn unset_direction(&mut self) {
+        self.direction = Direction::Ltr;
+        self.direction_explicit = false;
+    }
+
     /// True when the direction was chosen by the caller through
     /// [`Self::set_direction`] or [`Self::set_text_bidi`], false while
     /// [`Self::direction`] only reports the LTR default.
@@ -720,6 +745,21 @@ mod tests {
         b.set_direction(Direction::Btt);
         assert!(b.has_explicit_direction());
         assert_eq!(b.direction(), Direction::Btt);
+    }
+
+    #[test]
+    fn unset_direction_returns_to_the_implicit_default() {
+        let mut b = Buffer::new();
+        b.push_str("abc");
+        b.set_direction(Direction::Ttb);
+        b.unset_direction();
+        assert!(!b.has_explicit_direction());
+        assert_eq!(b.direction(), Direction::Ltr);
+        assert_eq!(b.text(), "abc");
+        // An explicit LTR is also forgotten.
+        b.set_direction(Direction::Ltr);
+        b.unset_direction();
+        assert!(!b.has_explicit_direction());
     }
 
     #[test]

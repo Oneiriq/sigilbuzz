@@ -70,6 +70,8 @@ signatures only change in a major version.
   - `UnicodeScript::{iso15924_tag, from_iso15924_tag, horizontal_direction}` and
     `Direction::horizontal_for_script`: ISO 15924 codes and each script's horizontal
     direction
+  - `Buffer::unset_direction`: forget the caller's direction, like HarfBuzz's
+    `hb_buffer_set_direction(buffer, HB_DIRECTION_INVALID)`
 
 `sigilbuzz-render`:
 

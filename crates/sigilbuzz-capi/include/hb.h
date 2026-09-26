@@ -209,6 +209,9 @@ void         hb_buffer_add_utf16(hb_buffer_t    *buffer,
                                  unsigned int    item_offset,
                                  int             item_length);
 
+/* HB_DIRECTION_INVALID returns the buffer to an unset direction, so
+ * the shaper chooses the layout again (vertical for Mongolian-dominant
+ * text, left to right otherwise). */
 void         hb_buffer_set_direction(hb_buffer_t *buffer, hb_direction_t direction);
 /* The whole buffer shapes as `script`. Scripts sigilbuzz has no shaper
  * for (and Common, Inherited, Unknown) leave the text split into

@@ -441,6 +441,68 @@ fn clear_contents_resets_properties_and_context() {
     unsafe { hb_buffer_destroy(buffer) };
 }
 
+#[test]
+fn invalid_direction_unsets_the_core_direction() {
+    let buffer = hb_buffer_create();
+    add_utf8(buffer, b"abc", 0, -1);
+    // SAFETY: created above.
+    unsafe { hb_buffer_set_direction(buffer, HB_DIRECTION_RTL) };
+    with_state(buffer, |s| {
+        assert_eq!(s.direction, HB_DIRECTION_RTL);
+        assert!(s.buffer.has_explicit_direction());
+    });
+    // INVALID, and any other value HarfBuzz does not accept as a
+    // direction, returns to the unset default instead of forcing LTR.
+    for invalid in [crate::HB_DIRECTION_INVALID, 1, 8] {
+        // SAFETY: created above.
+        unsafe {
+            hb_buffer_set_direction(buffer, HB_DIRECTION_RTL);
+            hb_buffer_set_direction(buffer, invalid);
+        }
+        with_state(buffer, |s| {
+            assert_eq!(s.direction, crate::HB_DIRECTION_INVALID);
+            assert!(!s.buffer.has_explicit_direction());
+            assert_eq!(s.buffer.direction(), sigilbuzz::Direction::Ltr);
+            assert_eq!(s.buffer.text(), "abc");
+        });
+    }
+    // An unset direction is filled in by guessing again.
+    // SAFETY: created above.
+    unsafe { hb_buffer_guess_segment_properties(buffer) };
+    with_state(buffer, |s| {
+        assert_eq!(s.direction, crate::HB_DIRECTION_LTR);
+        assert!(s.buffer.has_explicit_direction());
+    });
+    // SAFETY: created above.
+    unsafe { hb_buffer_destroy(buffer) };
+}
+
+#[test]
+fn invalid_direction_restores_mongolian_auto_vertical() {
+    const MONGOLIAN: &[u8] =
+        include_bytes!("../../../../tests/fonts/NotoSansMongolian-Regular.ttf");
+    let font = TestFont::new(MONGOLIAN);
+    let buffer = hb_buffer_create();
+    add_utf8(buffer, "\u{1820}".as_bytes(), 0, -1);
+    let y_advance = |buffer: *mut hb_buffer_t| {
+        // SAFETY: both handles are live.
+        unsafe {
+            hb_shape(font.0, buffer, ptr::null(), 0);
+            let mut len: c_uint = 0;
+            let pos = crate::hb_buffer_get_glyph_positions(buffer, &mut len);
+            core::slice::from_raw_parts(pos, len as usize)[0].y_advance
+        }
+    };
+    // SAFETY: created above.
+    unsafe { hb_buffer_set_direction(buffer, crate::HB_DIRECTION_LTR) };
+    assert_eq!(y_advance(buffer), 0);
+    // SAFETY: created above.
+    unsafe { hb_buffer_set_direction(buffer, crate::HB_DIRECTION_INVALID) };
+    assert_ne!(y_advance(buffer), 0);
+    // SAFETY: created above.
+    unsafe { hb_buffer_destroy(buffer) };
+}
+
 fn guessed(text: &str, script: Option<u32>) -> (u32, u32) {
     let buffer = hb_buffer_create();
     add_utf8(buffer, text.as_bytes(), 0, -1);
