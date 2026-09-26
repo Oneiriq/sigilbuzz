@@ -385,9 +385,11 @@ impl Buffer {
     /// `select_shaper_for_script` segmentation.
     ///
     /// A leading `COMMON`/`INHERITED` span before the first real
-    /// script codepoint takes `Script::Other` with the default `DFLT`
-    /// priority, same treatment HarfBuzz gives a pure-digits or
-    /// pure-punctuation run.
+    /// script codepoint joins that script's run, the way HarfBuzz
+    /// gives a buffer the script of its first non-`COMMON` character.
+    /// Text with no real script at all is one `Script::Other` run
+    /// with the default `DFLT` priority, same treatment HarfBuzz gives
+    /// a pure-digits or pure-punctuation run.
     ///
     /// The returned vector is empty for an empty buffer. Callers walk
     /// it left-to-right: segment boundaries are deterministic, so the
@@ -398,6 +400,11 @@ impl Buffer {
         if self.text.is_empty() {
             return runs;
         }
+        let leading = self
+            .text
+            .chars()
+            .find(|&c| !is_common_or_inherited(c))
+            .map_or(Script::Other, script_of);
         let mut current: Option<(Script, usize)> = None;
         for (byte, ch) in self.text.char_indices() {
             let raw = script_of(ch);
@@ -413,7 +420,7 @@ impl Buffer {
             // real script bucket attaches normally through the
             // script-equality test below.
             let resolved = if is_common_or_inherited(ch) {
-                current.map_or(raw, |(s, _)| s)
+                current.map_or(leading, |(s, _)| s)
             } else {
                 raw
             };
@@ -472,6 +479,17 @@ const DFLT_ONLY: &[[u8; 4]] = &[*b"DFLT"];
 const ARAB_PRIORITY: &[[u8; 4]] = &[*b"arab", *b"DFLT"];
 /// Hebrew script-tag priority: `hebr` then DFLT fallback.
 const HEBR_PRIORITY: &[[u8; 4]] = &[*b"hebr", *b"DFLT"];
+/// Latin script-tag priority. Language systems (Turkish, Romanian,
+/// ...) live under `latn`, so it must come before DFLT for
+/// [`Buffer::set_language`] to reach them.
+const LATN_PRIORITY: &[[u8; 4]] = &[*b"latn", *b"DFLT"];
+/// Cyrillic script-tag priority (`cyrl` holds SRB / MKD / BGR).
+const CYRL_PRIORITY: &[[u8; 4]] = &[*b"cyrl", *b"DFLT"];
+/// Greek script-tag priority.
+const GREK_PRIORITY: &[[u8; 4]] = &[*b"grek", *b"DFLT"];
+/// Han script-tag priority (`hani` holds the ZHS / ZHT / JAN / KOR
+/// language systems).
+const HANI_PRIORITY: &[[u8; 4]] = &[*b"hani", *b"DFLT"];
 
 /// Returns the GSUB/GPOS script-tag priority list for a coarse
 /// [`Script`]. Mirrors what `shape()` used to compute inline and what
@@ -529,10 +547,12 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
         Script::Khojki => KHOJKI_SCRIPT_PRIORITY,
         Script::Tirhuta => TIRHUTA_SCRIPT_PRIORITY,
         Script::Modi => MODI_SCRIPT_PRIORITY,
-        // Latin / Greek / Cyrillic / Han / Other: DFLT is where Latin
-        // shipped features live and where anything we do not have
-        // specialized dispatch for falls back.
-        _ => DFLT_ONLY,
+        Script::Latin => LATN_PRIORITY,
+        Script::Cyrillic => CYRL_PRIORITY,
+        Script::Greek => GREK_PRIORITY,
+        Script::Han => HANI_PRIORITY,
+        // Scripts sigilbuzz has no bucket for fall back to DFLT.
+        Script::Other => DFLT_ONLY,
     }
 }
 
@@ -787,7 +807,7 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].script, Script::Latin);
         assert_eq!(runs[0].byte_range, 0..5);
-        assert_eq!(runs[0].script_priority, &[*b"DFLT"]);
+        assert_eq!(runs[0].script_priority, &[*b"latn", *b"DFLT"]);
     }
 
     #[test]
@@ -863,7 +883,7 @@ mod tests {
     fn script_priority_for_common_scripts() {
         assert_eq!(script_priority_for(Script::Arabic), &[*b"arab", *b"DFLT"]);
         assert_eq!(script_priority_for(Script::Hebrew), &[*b"hebr", *b"DFLT"]);
-        assert_eq!(script_priority_for(Script::Latin), &[*b"DFLT"]);
+        assert_eq!(script_priority_for(Script::Latin), &[*b"latn", *b"DFLT"]);
         assert_eq!(script_priority_for(Script::Other), &[*b"DFLT"]);
         assert_eq!(
             script_priority_for(Script::Khmer),
@@ -884,6 +904,23 @@ mod tests {
         assert_eq!(runs.len(), 1, "combining mark must extend its base");
         assert_eq!(runs[0].script, Script::Latin);
         assert_eq!(runs[0].byte_range, 0..3);
+    }
+
+    #[test]
+    fn script_runs_leading_punctuation_joins_the_first_script() {
+        // "(123 " before Hebrew belongs to the Hebrew run.
+        let mut b = Buffer::new();
+        b.push_str("(123 \u{05E9}\u{05DC}\u{05D5}\u{05DD})");
+        let runs = b.script_runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].script, Script::Hebrew);
+        // No script-bearing character at all: one DFLT run.
+        let mut b = Buffer::new();
+        b.push_str("12:30!");
+        let runs = b.script_runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].script, Script::Other);
+        assert_eq!(runs[0].script_priority, &[*b"DFLT"]);
     }
 
     #[test]

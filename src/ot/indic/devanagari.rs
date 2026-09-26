@@ -191,9 +191,11 @@ pub fn shape_devanagari(
     shape_indic(gsub, gdef, codepoints, glyphs, &config);
 }
 
-/// Default Indic2 basic features, in application order.
+/// Default Indic2 basic features, in application order. `locl` opens
+/// the chain, as in HarfBuzz, so language-specific forms (Marathi,
+/// Nepali) are in place before conjunct formation.
 pub(crate) const INDIC_BASIC_FEATURES: &[&[u8; 4]] = &[
-    b"nukt", b"akhn", b"rphf", b"rkrf", b"blwf", b"half", b"pstf", b"vatu", b"cjct",
+    b"locl", b"nukt", b"akhn", b"rphf", b"rkrf", b"blwf", b"half", b"pstf", b"vatu", b"cjct",
 ];
 
 /// Default Indic2 presentation features, in application order.

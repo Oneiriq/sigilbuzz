@@ -818,7 +818,18 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // half under DFLT in a single call. The pre-segmenter implementation
     // resolved one global priority and missed script-specific lookups
     // on whichever half lost the tie-break.
-    let segments = build_segments(&codepoints);
+    //
+    // A caller-set script (Buffer::set_script) replaces the
+    // segmentation: the whole buffer is one run under that script, the
+    // way HarfBuzz shapes one buffer with one script.
+    let segments = match buffer.script() {
+        Some(script) => alloc::vec![Segment {
+            cp_range: 0..codepoints.len(),
+            script,
+            script_priority: script_priority_for(script),
+        }],
+        None => build_segments(&codepoints),
+    };
 
     // Dominant script: the first non-COMMON/INHERITED script in the
     // buffer. HarfBuzz (and rustybuzz) compute this once in
@@ -834,13 +845,21 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // pre-pass on dominant-script is the smallest knob that keeps
     // parity clean on pure Hangul runs while matching HarfBuzz on
     // Latin-majority mixed runs.
-    let dominant_script: Option<Script> = codepoints
-        .iter()
-        .copied()
-        .find(|&c| !is_common_for_segmentation(c))
-        .map(script_of);
+    let dominant_script: Option<Script> = buffer.script().or_else(|| {
+        codepoints
+            .iter()
+            .copied()
+            .find(|&c| !is_common_for_segmentation(c))
+            .map(script_of)
+    });
 
-    let gsub = face.gsub()?;
+    // The buffer language picks each script's language system for
+    // every GSUB and GPOS feature lookup, including the ones the
+    // complex shapers run (see `crate::ot::layout_select`).
+    let language_tags: &[[u8; 4]] = buffer
+        .language()
+        .map_or(&[], crate::Language::ot_language_tags);
+    let gsub = face.gsub()?.map(|g| g.with_language_tags(language_tags));
     // GDEF is consulted up-front so the LookupFlag skip-iterator has
     // it available for every GSUB context match. GPOS reuses the same
     // handle further down.
@@ -853,7 +872,8 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // segment is bounded by non-Arabic neighbors anyway, so global
     // computation is both correct and cheaper than recomputing per
     // segment.
-    let has_arabic = codepoints.iter().any(|&c| script_of(c) == Script::Arabic);
+    let has_arabic = buffer.script() == Some(Script::Arabic)
+        || codepoints.iter().any(|&c| script_of(c) == Script::Arabic);
     let arabic_forms: Vec<JoiningForm> = if has_arabic {
         assign_joining_forms(text)
     } else {
@@ -1067,18 +1087,18 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             // Arabic positional + default GSUB for this segment.
             let seg_arabic_active = seg.script == Script::Arabic && !arabic_forms.is_empty();
             if seg_arabic_active {
-                // ccmp must run before positional features so any
-                // composition/decomposition has settled first.
-                if !feature_disabled(features, *b"ccmp") {
-                    apply_gsub_feature(
-                        gsub,
-                        &mut seg_glyphs,
-                        gdef.as_ref(),
-                        *b"ccmp",
-                        0,
-                        seg.script_priority,
-                    );
-                }
+                // ccmp and locl must run before positional features so
+                // any composition/decomposition and localized forms
+                // have settled first (HarfBuzz's Arabic shaper puts
+                // them in one stage ahead of isol/fina/medi/init).
+                apply_gsub_features_merged(
+                    gsub,
+                    &mut seg_glyphs,
+                    gdef.as_ref(),
+                    features,
+                    &[*b"ccmp", *b"locl"],
+                    seg.script_priority,
+                );
                 // Arabic positional pass consumes only the segment's
                 // slice of the forms vector: cps/glyphs are 1:1 at
                 // this point (ccmp can rewrite ids but not lengths in
@@ -1094,7 +1114,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 want_liga,
                 is_vertical,
                 seg.script_priority,
-                seg_arabic_active,
+                early_default_features(seg_arabic_active, seg.script),
             );
         }
 
@@ -1259,7 +1279,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // segment inhibits the legacy-kern fallback, which matches the
     // spec: the modern table wins whenever it carries any usable data
     // for the run.
-    let gpos = face.gpos()?;
+    let gpos = face.gpos()?.map(|g| g.with_language_tags(language_tags));
     // Build the variable-font resolution context once. Passing this
     // through every GPOS apply site is what lets VariationIndex
     // deltas inside a ValueRecord actually respond to the user's
@@ -1481,21 +1501,27 @@ struct ProcessedSegment {
 /// scripts agree with the buffer-level [`crate::buffer::Buffer::script_runs`]
 /// segmentation: COMMON codepoints (ASCII space/digits/punctuation,
 /// ZWJ/ZWNJ/bidi marks) extend whichever real-script segment ran
-/// before them, and a leading COMMON-only run takes the raw script
-/// of its first codepoint (typically `Script::Latin` via the ASCII
-/// table). Always returns at least one segment covering the whole
-/// `codepoints` range for a non-empty input.
+/// before them. A leading COMMON-only run joins the first real script
+/// after it, the way HarfBuzz gives a buffer the script of its first
+/// non-COMMON character, and text with no real script at all shapes
+/// as `Script::Other` under DFLT. Always returns at least one segment
+/// covering the whole `codepoints` range for a non-empty input.
 fn build_segments(codepoints: &[char]) -> Vec<Segment> {
     let mut segments: Vec<Segment> = Vec::new();
     if codepoints.is_empty() {
         return segments;
     }
+    let leading = codepoints
+        .iter()
+        .copied()
+        .find(|&c| !is_common_for_segmentation(c))
+        .map_or(Script::Other, script_of);
     let mut current_start = 0usize;
     let mut current_script: Option<Script> = None;
     for (i, &ch) in codepoints.iter().enumerate() {
         let raw = script_of(ch);
         let resolved = if is_common_for_segmentation(ch) {
-            current_script.unwrap_or(raw)
+            current_script.unwrap_or(leading)
         } else {
             raw
         };
@@ -1573,12 +1599,18 @@ const fn is_default_ignorable(ch: char) -> bool {
 }
 
 /// Runs the default GSUB feature chain and any user-enabled extras.
-/// Order matches the spec: `ccmp` -> `rlig` -> `liga` -> `clig` ->
-/// `calt`, then `vrt2` / `vert` for vertical runs. HarfBuzz's Latin
-/// fallback shaper turns the horizontal list on by default;
-/// sigilbuzz follows suit. User-enabled features beyond that list
-/// are dispatched afterwards, respecting their 1-indexed
+/// Order matches the spec: `ccmp` + `locl` -> `rlig` -> `liga` ->
+/// `clig` -> `calt`, then `vrt2` / `vert` for vertical runs.
+/// HarfBuzz's Latin fallback shaper turns the horizontal list on by
+/// default; sigilbuzz follows suit. User-enabled features beyond that
+/// list are dispatched afterwards, respecting their 1-indexed
 /// alternate-selector value.
+///
+/// `early_features` is the part of `ccmp` + `locl` that has not run
+/// yet: the Arabic path runs both before its positional features, and
+/// the Indic and USE shapers run `locl` with their basic features.
+/// HarfBuzz runs the two in one stage, so their lookups interleave by
+/// lookup index.
 #[allow(clippy::too_many_arguments)]
 fn run_default_gsub(
     gsub: &Gsub<'_>,
@@ -1588,13 +1620,16 @@ fn run_default_gsub(
     want_liga: bool,
     is_vertical: bool,
     script_priority: &[[u8; 4]],
-    arabic_positional_already_ran: bool,
+    early_features: &[[u8; 4]],
 ) {
-    // ccmp already ran before the Arabic positional pass; avoid
-    // double-applying it here.
-    if !arabic_positional_already_ran && !feature_disabled(features, *b"ccmp") {
-        apply_gsub_feature(gsub, glyphs, gdef, *b"ccmp", 0, script_priority);
-    }
+    apply_gsub_features_merged(
+        gsub,
+        glyphs,
+        gdef,
+        features,
+        early_features,
+        script_priority,
+    );
     if !feature_disabled(features, *b"rlig") {
         apply_gsub_feature(gsub, glyphs, gdef, *b"rlig", 0, script_priority);
     }
@@ -1608,35 +1643,15 @@ fn run_default_gsub(
     // feature list enables both, and Mongolian fonts in particular
     // ship the same lookup set under both tags (calt for legacy,
     // rclt for required-contextual). Naively running each tag's
-    // lookups in turn double-applies on those fonts. Mirror
-    // HarfBuzz's "each lookup runs once per pass" rule by collecting
-    // both lookup index lists, deduplicating, and applying the
-    // union in ascending lookup-index order, the same order the
-    // GSUB FeatureList walks them.
-    if !feature_disabled(features, *b"calt") || !feature_disabled(features, *b"rclt") {
-        let mut indices: Vec<u16> = Vec::new();
-        if !feature_disabled(features, *b"calt") {
-            if let Some(idxs) =
-                lookup_indices_for_feature_in_scripts(gsub, *b"calt", script_priority)
-            {
-                indices.extend(idxs);
-            }
-        }
-        if !feature_disabled(features, *b"rclt") {
-            if let Some(idxs) =
-                lookup_indices_for_feature_in_scripts(gsub, *b"rclt", script_priority)
-            {
-                indices.extend(idxs);
-            }
-        }
-        // Sort + dedup so each lookup is applied at most once and in
-        // ascending index order (matching HarfBuzz's pass walk).
-        indices.sort_unstable();
-        indices.dedup();
-        for lookup_idx in indices {
-            apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, 0);
-        }
-    }
+    // lookups in turn double-applies on those fonts.
+    apply_gsub_features_merged(
+        gsub,
+        glyphs,
+        gdef,
+        features,
+        &[*b"calt", *b"rclt"],
+        script_priority,
+    );
     // Vertical writing: HarfBuzz auto-enables `vrt2` when the font
     // carries it, otherwise falls back to `vert`. The two tags
     // cannot be active together: `vrt2` (Vertical Alternates &
@@ -1661,13 +1676,90 @@ fn run_default_gsub(
     }
 }
 
+/// Applies several features' lookups as one pass: each lookup once,
+/// in ascending lookup-index order, the order the GSUB LookupList
+/// walks them. HarfBuzz runs features that share a stage this way
+/// (`ccmp` with `locl`, `calt` with `rclt`), so a font whose lookups
+/// for one feature must interleave with another's keeps its intended
+/// order. Tags the caller disabled with a zero-valued [`Feature`] are
+/// skipped.
+fn apply_gsub_features_merged(
+    gsub: &Gsub<'_>,
+    glyphs: &mut Vec<Glyph>,
+    gdef: Option<&Gdef<'_>>,
+    features: &[Feature],
+    tags: &[[u8; 4]],
+    script_priority: &[[u8; 4]],
+) {
+    let mut indices: Vec<u16> = tags
+        .iter()
+        .filter(|tag| !feature_disabled(features, **tag))
+        .filter_map(|tag| lookup_indices_for_feature_in_scripts(gsub, *tag, script_priority))
+        .flatten()
+        .collect();
+    indices.sort_unstable();
+    indices.dedup();
+    for lookup_idx in indices {
+        apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, 0);
+    }
+}
+
+/// The part of `ccmp` + `locl` the default GSUB pass still has to run
+/// for a segment: the Arabic path already ran both, and the complex
+/// shapers that open their basic features with `locl` (Indic, Khmer,
+/// Myanmar, and the USE scripts on the full USE feature chain) already
+/// ran that one.
+fn early_default_features(arabic_ran: bool, script: Script) -> &'static [[u8; 4]] {
+    const CCMP_LOCL: &[[u8; 4]] = &[*b"ccmp", *b"locl"];
+    const CCMP: &[[u8; 4]] = &[*b"ccmp"];
+    if arabic_ran {
+        &[]
+    } else if shaper_ran_locl(script) {
+        CCMP
+    } else {
+        CCMP_LOCL
+    }
+}
+
+/// True when the segment's complex shaper already ran `locl` as one of
+/// its basic features.
+fn shaper_ran_locl(script: Script) -> bool {
+    script.is_indic()
+        || matches!(
+            script,
+            Script::Khmer
+                | Script::Myanmar
+                | Script::Buginese
+                | Script::TaiTham
+                | Script::Balinese
+                | Script::Sundanese
+                | Script::Lepcha
+                | Script::Limbu
+                | Script::Cham
+                | Script::Brahmi
+                | Script::Sharada
+                | Script::Khojki
+                | Script::Tirhuta
+                | Script::Modi
+        )
+}
+
 /// GSUB feature tags that `shape()` already dispatches by name,
 /// so the user-override walk should skip them rather than
 /// double-apply.
 fn is_handled_gsub_tag(tag: [u8; 4]) -> bool {
     matches!(
         &tag,
-        b"liga" | b"kern" | b"ccmp" | b"rlig" | b"clig" | b"calt" | b"rclt" | b"vert" | b"vrt2"
+        b"liga"
+            | b"kern"
+            | b"ccmp"
+            | b"locl"
+            | b"rlig"
+            | b"clig"
+            | b"calt"
+            | b"rclt"
+            | b"vert"
+            | b"vrt2"
     )
 }
 
@@ -2405,79 +2497,23 @@ fn lookup_indices_for_feature(gsub: &Gsub<'_>, tag: [u8; 4]) -> Option<Vec<u16>>
 
 /// Script-priority variant of [`lookup_indices_for_feature`]. Walks
 /// the `script_priority` tags in order and returns lookup indices
-/// for the first script that carries the requested feature tag. A
-/// script that exists but lacks the feature simply yields an empty
-/// lookup list. Falls through to the next priority. If none of
-/// the priority scripts carry the feature, falls back to DFLT then
-/// the first script in the table (matching the generic-path
-/// default).
+/// for the first script whose language system carries the requested
+/// feature tag, falling back to DFLT then the first script in the
+/// table. The language system comes from the view's language tags
+/// (see [`Gsub::with_language_tags`]); the walk itself lives in
+/// [`crate::ot::layout_select`], shared with GPOS.
 fn lookup_indices_for_feature_in_scripts(
     gsub: &Gsub<'_>,
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
 ) -> Option<Vec<u16>> {
-    let script_list = gsub.script_list();
-    let feature_list = gsub.feature_list();
-
-    // Try each requested script in order; the first one that carries
-    // the feature wins. Scripts present but lacking this tag still
-    // count as "found" and stop the fallback chain. Matches how
-    // HarfBuzz treats per-script feature overrides.
-    for tag_pri in script_priority {
-        let Some(script) = script_list.find(*tag_pri) else {
-            continue;
-        };
-        let Some(lang_sys) = script.default_lang_sys() else {
-            continue;
-        };
-        let mut indices: Vec<u16> = Vec::new();
-        let mut has_feature = false;
-        for feat_idx in lang_sys.feature_indices() {
-            let Some((feat_tag, feature)) = feature_list.get(feat_idx) else {
-                continue;
-            };
-            if feat_tag != tag {
-                continue;
-            }
-            has_feature = true;
-            for idx in feature.lookup_indices() {
-                if !indices.contains(&idx) {
-                    indices.push(idx);
-                }
-            }
-        }
-        if has_feature {
-            indices.sort_unstable();
-            return Some(indices);
-        }
-    }
-
-    // Final fallback: DFLT (if not already tried) then first script.
-    let already_tried_dflt = script_priority.iter().any(|t| *t == *b"DFLT");
-    let script = if already_tried_dflt {
-        script_list.iter().next().map(|(_, s)| s)?
-    } else {
-        script_list
-            .find(*b"DFLT")
-            .or_else(|| script_list.iter().next().map(|(_, s)| s))?
-    };
-    let lang_sys = script.default_lang_sys()?;
-    let mut indices: Vec<u16> = Vec::new();
-    for feat_idx in lang_sys.feature_indices() {
-        let Some((feat_tag, feature)) = feature_list.get(feat_idx) else {
-            continue;
-        };
-        if feat_tag != tag {
-            continue;
-        }
-        for idx in feature.lookup_indices() {
-            if !indices.contains(&idx) {
-                indices.push(idx);
-            }
-        }
-    }
-    indices.sort_unstable();
-    Some(indices)
+    crate::ot::layout_select::feature_lookup_indices(
+        gsub.script_list(),
+        gsub.feature_list(),
+        gsub.language_tags(),
+        tag,
+        script_priority,
+    )
 }
 
 /// Asks "would feature `tag`'s lookups substitute starting at the
@@ -3002,63 +3038,13 @@ fn gpos_lookup_indices_for_feature_in_scripts(
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
 ) -> Option<Vec<u16>> {
-    let script_list = gpos.script_list();
-    let feature_list = gpos.feature_list();
-
-    for tag_pri in script_priority {
-        let Some(script) = script_list.find(*tag_pri) else {
-            continue;
-        };
-        let Some(lang_sys) = script.default_lang_sys() else {
-            continue;
-        };
-        let mut indices: Vec<u16> = Vec::new();
-        let mut has_feature = false;
-        for feat_idx in lang_sys.feature_indices() {
-            let Some((feat_tag, feature)) = feature_list.get(feat_idx) else {
-                continue;
-            };
-            if feat_tag != tag {
-                continue;
-            }
-            has_feature = true;
-            for idx in feature.lookup_indices() {
-                if !indices.contains(&idx) {
-                    indices.push(idx);
-                }
-            }
-        }
-        if has_feature {
-            indices.sort_unstable();
-            return Some(indices);
-        }
-    }
-
-    let already_tried_dflt = script_priority.iter().any(|t| *t == *b"DFLT");
-    let script = if already_tried_dflt {
-        script_list.iter().next().map(|(_, s)| s)?
-    } else {
-        script_list
-            .find(*b"DFLT")
-            .or_else(|| script_list.iter().next().map(|(_, s)| s))?
-    };
-    let lang_sys = script.default_lang_sys()?;
-    let mut indices: Vec<u16> = Vec::new();
-    for feat_idx in lang_sys.feature_indices() {
-        let Some((feat_tag, feature)) = feature_list.get(feat_idx) else {
-            continue;
-        };
-        if feat_tag != tag {
-            continue;
-        }
-        for idx in feature.lookup_indices() {
-            if !indices.contains(&idx) {
-                indices.push(idx);
-            }
-        }
-    }
-    indices.sort_unstable();
-    Some(indices)
+    crate::ot::layout_select::feature_lookup_indices(
+        gpos.script_list(),
+        gpos.feature_list(),
+        gpos.language_tags(),
+        tag,
+        script_priority,
+    )
 }
 
 /// Walks the run and applies the single-adjustment subtable to

@@ -220,6 +220,21 @@ impl<'a> Script<'a> {
         None
     }
 
+    /// Picks the language system for a list of candidate language tags,
+    /// the way HarfBuzz's `hb_ot_layout_script_select_language` does:
+    /// the first tag with a record wins, then a record tagged `dflt`
+    /// (some fonts ship one instead of a default offset), then the
+    /// script's default language system. `None` only when the script
+    /// has none of these.
+    #[must_use]
+    pub fn select_lang_sys(&self, language_tags: &[[u8; 4]]) -> Option<LangSys<'a>> {
+        language_tags
+            .iter()
+            .find_map(|tag| self.find_lang_sys(*tag))
+            .or_else(|| self.find_lang_sys(*b"dflt"))
+            .or_else(|| self.default_lang_sys())
+    }
+
     /// Number of language-system records (not counting the default).
     #[must_use]
     pub const fn lang_sys_count(&self) -> u16 {
@@ -467,6 +482,61 @@ mod tests {
         assert_eq!(idx, alloc::vec![5, 6, 7]);
         let deu = latn.find_lang_sys(*b"DEU ").expect("DEU LangSys");
         assert_eq!(deu.feature_indices().collect::<Vec<_>>(), alloc::vec![9]);
+    }
+
+    #[test]
+    fn select_lang_sys_prefers_candidates_in_order() {
+        let bytes = build_minimal_scriptlist(&[(
+            *b"cyrl",
+            Some(build_lang_sys(0xFFFF, &[0])),
+            &[
+                (*b"MKD ", build_lang_sys(0xFFFF, &[1])),
+                (*b"SRB ", build_lang_sys(0xFFFF, &[2])),
+            ],
+        )]);
+        let list = ScriptList::parse(&bytes).unwrap();
+        let cyrl = list.find(*b"cyrl").unwrap();
+        let pick = |tags: &[[u8; 4]]| -> Vec<u16> {
+            cyrl.select_lang_sys(tags)
+                .unwrap()
+                .feature_indices()
+                .collect()
+        };
+        assert_eq!(pick(&[*b"SRB "]), alloc::vec![2]);
+        assert_eq!(pick(&[*b"XXX ", *b"MKD ", *b"SRB "]), alloc::vec![1]);
+        // No candidate present: the default LangSys.
+        assert_eq!(pick(&[*b"TRK "]), alloc::vec![0]);
+        assert_eq!(pick(&[]), alloc::vec![0]);
+    }
+
+    #[test]
+    fn select_lang_sys_tries_dflt_record_before_default_offset() {
+        let bytes = build_minimal_scriptlist(&[(
+            *b"latn",
+            Some(build_lang_sys(0xFFFF, &[0])),
+            &[(*b"dflt", build_lang_sys(0xFFFF, &[7]))],
+        )]);
+        let list = ScriptList::parse(&bytes).unwrap();
+        let latn = list.find(*b"latn").unwrap();
+        let picked: Vec<u16> = latn
+            .select_lang_sys(&[*b"ENG "])
+            .unwrap()
+            .feature_indices()
+            .collect();
+        assert_eq!(picked, alloc::vec![7]);
+    }
+
+    #[test]
+    fn select_lang_sys_without_default_or_match_is_none() {
+        let bytes = build_minimal_scriptlist(&[(
+            *b"latn",
+            None,
+            &[(*b"TRK ", build_lang_sys(0xFFFF, &[3]))],
+        )]);
+        let list = ScriptList::parse(&bytes).unwrap();
+        let latn = list.find(*b"latn").unwrap();
+        assert!(latn.select_lang_sys(&[*b"ENG "]).is_none());
+        assert!(latn.select_lang_sys(&[*b"TRK "]).is_some());
     }
 
     #[test]
