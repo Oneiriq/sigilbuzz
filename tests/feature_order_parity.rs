@@ -20,6 +20,13 @@ const OLD_HANGUL: &[u8] = include_bytes!("fonts/NotoSansOldHangul-Subset.ttf");
 enum Lookup {
     /// Single substitution (format 2), `(from, to)` sorted by `from`.
     Single(Vec<(u16, u16)>),
+    /// Chained context (format 3): `input` followed by `lookahead` runs
+    /// lookup `nested` on `input`.
+    Chain {
+        input: u16,
+        lookahead: u16,
+        nested: u16,
+    },
 }
 
 fn push16(out: &mut Vec<u8>, v: u16) {
@@ -53,6 +60,27 @@ fn subtable(lookup: &Lookup) -> (u16, Vec<u8>) {
             let from: Vec<u16> = pairs.iter().map(|p| p.0).collect();
             out.extend(coverage(&from));
             (1, out)
+        }
+        Lookup::Chain {
+            input,
+            lookahead,
+            nested,
+        } => {
+            // Format, no backtrack, one input and one lookahead
+            // coverage, one lookup record, then the two coverages.
+            let input_at = 18;
+            push16(&mut out, 3);
+            push16(&mut out, 0);
+            push16(&mut out, 1);
+            push16(&mut out, offset16(input_at));
+            push16(&mut out, 1);
+            push16(&mut out, offset16(input_at + 6));
+            push16(&mut out, 1);
+            push16(&mut out, 0);
+            push16(&mut out, *nested);
+            out.extend(coverage(&[*input]));
+            out.extend(coverage(&[*lookahead]));
+            (6, out)
         }
     }
 }
@@ -239,5 +267,29 @@ fn thai_lao_and_hangul_run_each_default_feature_once() {
             let runs = u32::from(!(script == *b"hang" && feature == *b"calt"));
             assert_eq!(rows[0].0, u32::from(g) + runs, "{feature:?} on {text:?}");
         }
+    }
+}
+
+#[test]
+fn myanmar_runs_locl_and_ccmp_before_reordering() {
+    // HarfBuzz's Myanmar shaper applies locl and ccmp to the logical
+    // order, then moves the medial ra in front of its base. A rule for
+    // "ka followed by medial ra" only matches before that.
+    const NOTO_MYANMAR: &[u8] = include_bytes!("fonts/NotoSansMyanmar-Regular.ttf");
+    let ka = glyph(NOTO_MYANMAR, '\u{1000}');
+    let medial_ra = glyph(NOTO_MYANMAR, '\u{103C}');
+    for feature in [*b"ccmp", *b"locl"] {
+        let lookups = [
+            Lookup::Chain {
+                input: ka,
+                lookahead: medial_ra,
+                nested: 1,
+            },
+            Lookup::Single(vec![(ka, ka + 1)]),
+        ];
+        let table = gsub(&[*b"DFLT", *b"mym2"], &[(feature, vec![0])], &lookups);
+        let patched = with_table(NOTO_MYANMAR, *b"GSUB", &table);
+        let rows = assert_parity(&patched, "\u{1000}\u{103C}", Direction::Ltr);
+        assert!(rows.iter().any(|r| r.0 == u32::from(ka) + 1), "{rows:?}");
     }
 }

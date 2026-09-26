@@ -162,19 +162,15 @@ pub const USE_BASIC_FEATURES: &[&[u8; 4]] = &[
 /// collapsed conjuncts into display forms.
 pub const USE_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] = &[b"abvs", b"blws", b"haln", b"pres", b"psts"];
 
-/// Myanmar's USE basic features. Adds `rphf` + `pref` + `blwf` +
-/// `pstf` + `cjct` for kinzi and medial consonant handling. The
-/// order mirrors the MS Myanmar shaping-model doc; `locl`/`ccmp`
-/// open the chain so contextual fixups settle before positional
-/// substitutions.
-pub const MYANMAR_BASIC_FEATURES: &[&[u8; 4]] = &[
-    b"locl", b"ccmp", b"rphf", b"pref", b"blwf", b"pstf", b"abvf", b"cjct",
-];
+/// Myanmar's features up to the basic ones: `locl` and `ccmp` before
+/// the syllable reorder, then `rphf` (kinzi), `pref`, `blwf`, and
+/// `pstf` after it (HarfBuzz's `myanmar_basic_features`).
+pub const MYANMAR_BASIC_FEATURES: &[&[u8; 4]] =
+    &[b"locl", b"ccmp", b"rphf", b"pref", b"blwf", b"pstf"];
 
-/// Myanmar's USE topographical features: display-form selection
-/// after the basic subs collapse conjuncts.
-pub const MYANMAR_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] =
-    &[b"abvs", b"blws", b"haln", b"pres", b"psts", b"calt"];
+/// Myanmar's other features, applied together once the syllables are
+/// done (HarfBuzz's `myanmar_other_features`).
+pub const MYANMAR_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] = &[b"pres", b"abvs", b"blws", b"psts"];
 
 /// Hangul Old-Hangul features: the three positional jamo features
 /// pick Leading/Vowel/Trailing variant shapes. HarfBuzz's Hangul
