@@ -1,5 +1,5 @@
 //! `hb_paint_*`: bridge from HarfBuzz's paint-funcs API to
-//! `sigilbuzz_paint::evaluate()`.
+//! `sigilbuzz_paint::evaluate_at_coords()`.
 //!
 //! HarfBuzz's COLRv1 surface is callback-based: the consumer
 //! populates an `hb_paint_funcs_t` table with function pointers, hands
@@ -32,7 +32,7 @@ use alloc::boxed::Box;
 use core::ffi::c_void;
 
 use crate::{hb_bool_t, hb_font_t};
-use sigilbuzz_paint::{evaluate, Color, DrawCmd, GradientKind, PaintSource, Transform2D};
+use sigilbuzz_paint::{evaluate_at_coords, Color, DrawCmd, GradientKind, PaintSource, Transform2D};
 
 /// HarfBuzz's packed BGRA color. Layout: byte 0 = blue, byte 1 = green,
 /// byte 2 = red, byte 3 = alpha. Matches the `HB_COLOR(b, g, r, a)`
@@ -327,9 +327,9 @@ impl_setter!(
 /// only: the evaluator always uses its default palette, and solid
 /// colors are always reported with `is_foreground` set to 0.
 ///
-/// Paint evaluation uses the face's default instance. Variation
-/// coordinates set on `font` are not applied. A `gid` above 65535 is
-/// not a valid glyph id and paints nothing.
+/// Paint evaluation applies the variation coordinates set on `font`
+/// with `hb_font_set_variations`, as HarfBuzz does. A `gid` above
+/// 65535 is not a valid glyph id and paints nothing.
 ///
 /// # Safety
 /// `font` and `funcs` must each be null or valid. `paint_data` may be
@@ -357,8 +357,11 @@ pub unsafe extern "C" fn hb_font_paint_glyph(
     // The face lives in the `Arc<FaceInner>` we hold for the duration
     // of this call. Paint evaluation only reads from the face.
     let face: &sigilbuzz::Face<'static> = &font_inner.face.face;
+    // Copy the coords out so the font lock is not held while the
+    // callbacks run. A callback may call back into the font.
+    let coords = font_inner.state.lock().coords.clone();
 
-    let cmds = evaluate(face, gid);
+    let cmds = evaluate_at_coords(face, gid, &coords);
 
     // Walk the DrawCmd stream and dispatch. Each callback slot is
     // read again right before use because a callback may replace the
