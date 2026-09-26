@@ -82,6 +82,7 @@ pub mod set;
 // Text ingest (`hb_buffer_add_*`), cluster mapping, and segment
 // property handling for `hb_buffer_t`.
 mod buffer_text;
+pub use buffer_text::{hb_buffer_add_codepoints, hb_buffer_add_latin1, hb_buffer_add_utf32};
 // `subset_bridge` is gated on the `subset` cargo feature so a
 // `--no-default-features` build of this crate still compiles cleanly
 // without pulling in the companion subsetter crate. `paint_bridge`

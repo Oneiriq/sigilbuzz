@@ -193,10 +193,11 @@ void         hb_buffer_clear_contents(hb_buffer_t *buffer);
 
 /* Adds text[item_offset, item_offset + item_length) (item_length -1
  * means to the end). As in HarfBuzz: glyph clusters are offsets into
- * `text` in its own code units (bytes for UTF-8, 16-bit units for
- * UTF-16), up to five characters before the item become the
- * pre-context when the buffer is empty, up to five after it become the
- * post-context, and malformed sequences become U+FFFD. */
+ * `text` in its own code units (bytes for UTF-8 and Latin-1, 16-bit
+ * units for UTF-16, 32-bit units for UTF-32 and code points), up to
+ * five characters before the item become the pre-context when the
+ * buffer is empty, up to five after it become the post-context, and
+ * malformed sequences become U+FFFD. */
 void         hb_buffer_add_utf8(hb_buffer_t *buffer,
                                 const char  *text,
                                 int          text_length,
@@ -208,6 +209,29 @@ void         hb_buffer_add_utf16(hb_buffer_t    *buffer,
                                  int             text_length,
                                  unsigned int    item_offset,
                                  int             item_length);
+
+/* Surrogates and values past U+10FFFF become U+FFFD. */
+void         hb_buffer_add_utf32(hb_buffer_t    *buffer,
+                                 const uint32_t *text,
+                                 int             text_length,
+                                 unsigned int    item_offset,
+                                 int             item_length);
+
+/* HarfBuzz passes code points through unchecked; sigilbuzz stores
+ * text as Unicode scalar values, so invalid ones become U+FFFD as in
+ * hb_buffer_add_utf32. */
+void         hb_buffer_add_codepoints(hb_buffer_t          *buffer,
+                                      const hb_codepoint_t *text,
+                                      int                   text_length,
+                                      unsigned int          item_offset,
+                                      int                   item_length);
+
+/* Each byte is the code point of the same value (U+0000..U+00FF). */
+void         hb_buffer_add_latin1(hb_buffer_t   *buffer,
+                                  const uint8_t *text,
+                                  int            text_length,
+                                  unsigned int   item_offset,
+                                  int            item_length);
 
 /* HB_DIRECTION_INVALID returns the buffer to an unset direction, so
  * the shaper chooses the layout again (vertical for Mongolian-dominant

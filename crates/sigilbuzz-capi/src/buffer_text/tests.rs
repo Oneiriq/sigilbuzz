@@ -9,8 +9,9 @@ use sigilbuzz::{shape, Blob, Buffer, Face, Font, Language, UnicodeScript};
 
 use super::*;
 use crate::{
-    hb_blob_create, hb_blob_destroy, hb_buffer_add_utf16, hb_buffer_add_utf8,
-    hb_buffer_clear_contents, hb_buffer_create, hb_buffer_destroy, hb_buffer_get_glyph_infos,
+    hb_blob_create, hb_blob_destroy, hb_buffer_add_codepoints, hb_buffer_add_latin1,
+    hb_buffer_add_utf16, hb_buffer_add_utf32, hb_buffer_add_utf8, hb_buffer_clear_contents,
+    hb_buffer_create, hb_buffer_destroy, hb_buffer_get_glyph_infos,
     hb_buffer_guess_segment_properties, hb_buffer_reset, hb_buffer_set_direction,
     hb_buffer_set_language, hb_buffer_set_script, hb_buffer_t, hb_face_create, hb_face_destroy,
     hb_font_create, hb_font_destroy, hb_font_t, hb_shape, HB_DIRECTION_RTL,
@@ -187,6 +188,35 @@ fn utf16_decoding_matches_harfbuzz() {
 }
 
 #[test]
+fn utf32_decoding_matches_harfbuzz() {
+    let text = [0x61u32, 0x1F600, 0xD800, 0xDFFF, 0x11_0000, 0x10_FFFF];
+    let chars: Vec<char> = decode::<Utf32>(&text).iter().map(|(c, _)| *c).collect();
+    assert_eq!(
+        chars,
+        [
+            'a',
+            '\u{1F600}',
+            REPLACEMENT,
+            REPLACEMENT,
+            REPLACEMENT,
+            '\u{10FFFF}'
+        ]
+    );
+    assert_eq!(Utf32::prev(&text, 0, 2), ('\u{1F600}', 1));
+    assert_eq!(Utf32::prev(&text, 0, 3), (REPLACEMENT, 2));
+}
+
+#[test]
+fn latin1_decoding_maps_bytes_to_the_first_256_code_points() {
+    let text = [0x41u8, 0xE9, 0xFF, 0x80];
+    assert_eq!(
+        decode::<Latin1>(&text),
+        [('A', 0), ('\u{E9}', 1), ('\u{FF}', 2), ('\u{80}', 3)]
+    );
+    assert_eq!(Latin1::prev(&text, 0, 2), ('\u{E9}', 1));
+}
+
+#[test]
 fn item_length_follows_harfbuzz() {
     assert_eq!(ItemLength::from_c(-1), Some(ItemLength::ToEnd));
     assert_eq!(ItemLength::from_c(0), Some(ItemLength::Units(0)));
@@ -257,6 +287,143 @@ fn utf16_item_clusters_count_code_units() {
     });
     // SAFETY: created above.
     unsafe { hb_buffer_destroy(buffer) };
+}
+
+fn add_utf32(buffer: *mut hb_buffer_t, text: &[u32], item_offset: u32, item_length: c_int) {
+    let len = c_int::try_from(text.len()).unwrap();
+    // SAFETY: (text, len) is a live u32 slice.
+    unsafe { hb_buffer_add_utf32(buffer, text.as_ptr(), len, item_offset, item_length) };
+}
+
+fn add_codepoints(buffer: *mut hb_buffer_t, text: &[u32], item_offset: u32, item_length: c_int) {
+    let len = c_int::try_from(text.len()).unwrap();
+    // SAFETY: (text, len) is a live u32 slice.
+    unsafe { hb_buffer_add_codepoints(buffer, text.as_ptr(), len, item_offset, item_length) };
+}
+
+fn add_latin1(buffer: *mut hb_buffer_t, text: &[u8], item_offset: u32, item_length: c_int) {
+    let len = c_int::try_from(text.len()).unwrap();
+    // SAFETY: (text, len) is a live byte slice.
+    unsafe { hb_buffer_add_latin1(buffer, text.as_ptr(), len, item_offset, item_length) };
+}
+
+fn code_points(text: &str) -> Vec<u32> {
+    text.chars().map(u32::from).collect()
+}
+
+#[test]
+fn utf32_item_clusters_count_code_points() {
+    let text = code_points("x\u{1F600}\u{E9}\u{1F601}y");
+    for add in [add_utf32, add_codepoints] {
+        let buffer = hb_buffer_create();
+        add(buffer, &text, 1, 3);
+        with_state(buffer, |s| {
+            assert_eq!(s.buffer.text(), "\u{1F600}\u{E9}\u{1F601}");
+            assert_eq!(s.buffer.pre_context(), "x");
+            assert_eq!(s.buffer.post_context(), "y");
+            let clusters: Vec<u32> = s.clusters.entries.iter().map(|e| e.1).collect();
+            assert_eq!(clusters, [1, 2, 3]);
+        });
+        // SAFETY: created above.
+        unsafe { hb_buffer_destroy(buffer) };
+    }
+}
+
+#[test]
+fn invalid_code_points_become_replacement_characters() {
+    let text = [0x61u32, 0xD800, 0x11_0000, 0x62];
+    for add in [add_utf32, add_codepoints] {
+        let buffer = hb_buffer_create();
+        add(buffer, &text, 0, -1);
+        with_state(buffer, |s| {
+            assert_eq!(s.buffer.text(), "a\u{FFFD}\u{FFFD}b");
+            let clusters: Vec<u32> = s.clusters.entries.iter().map(|e| e.1).collect();
+            assert_eq!(clusters, [0, 1, 2, 3]);
+        });
+        // SAFETY: created above.
+        unsafe { hb_buffer_destroy(buffer) };
+    }
+}
+
+#[test]
+fn latin1_item_sets_text_context_and_byte_clusters() {
+    let buffer = hb_buffer_create();
+    add_latin1(buffer, b"ab\xE9t\xE9cd", 2, 3);
+    with_state(buffer, |s| {
+        assert_eq!(s.buffer.text(), "\u{E9}t\u{E9}");
+        assert_eq!(s.buffer.pre_context(), "ab");
+        assert_eq!(s.buffer.post_context(), "cd");
+        let clusters: Vec<u32> = s.clusters.entries.iter().map(|e| e.1).collect();
+        assert_eq!(clusters, [2, 3, 4]);
+    });
+    // SAFETY: created above.
+    unsafe { hb_buffer_destroy(buffer) };
+}
+
+#[test]
+fn zero_terminated_utf32_and_latin1_read_to_the_terminator() {
+    let buffer = hb_buffer_create();
+    let utf32 = [0x48u32, 0x69, 0, 0x78];
+    let latin1 = b"\xE9!\0z";
+    // SAFETY: both arrays are zero-terminated and the buffer is live.
+    unsafe {
+        hb_buffer_add_utf32(buffer, utf32.as_ptr(), -1, 0, -1);
+        hb_buffer_add_latin1(buffer, latin1.as_ptr(), -1, 0, -1);
+    }
+    with_state(buffer, |s| assert_eq!(s.buffer.text(), "Hi\u{E9}!"));
+    // SAFETY: created above.
+    unsafe { hb_buffer_destroy(buffer) };
+}
+
+#[test]
+fn null_text_or_buffer_adds_nothing() {
+    let buffer = hb_buffer_create();
+    // SAFETY: null pointers are rejected before any read.
+    unsafe {
+        hb_buffer_add_utf32(buffer, ptr::null(), 3, 0, -1);
+        hb_buffer_add_codepoints(buffer, ptr::null(), 3, 0, -1);
+        hb_buffer_add_latin1(buffer, ptr::null(), 3, 0, -1);
+        hb_buffer_add_utf32(ptr::null_mut(), [0x41u32].as_ptr(), 1, 0, -1);
+    }
+    with_state(buffer, |s| assert!(s.buffer.is_empty()));
+    // SAFETY: created above.
+    unsafe { hb_buffer_destroy(buffer) };
+}
+
+#[test]
+fn every_add_function_shapes_like_utf8() {
+    let font = TestFont::new(OPEN_SANS);
+    // Twelve characters after two of pre-context; the e-acute takes
+    // two UTF-8 bytes but one unit everywhere else.
+    let text = "--caf\u{E9} au lait--";
+    let (offset, len) = (2u32, 12);
+    let reference = hb_buffer_create();
+    add_utf8(reference, text.as_bytes(), offset, 13);
+    let expected = ids(&font.shape(reference));
+    // SAFETY: created above.
+    unsafe { hb_buffer_destroy(reference) };
+
+    let utf32 = code_points(text);
+    let latin1: Vec<u8> = text.chars().map(|c| u8::try_from(c).unwrap()).collect();
+    let cases: [(&str, &dyn Fn(*mut hb_buffer_t)); 3] = [
+        ("utf32", &|b| add_utf32(b, &utf32, offset, len)),
+        ("codepoints", &|b| add_codepoints(b, &utf32, offset, len)),
+        ("latin1", &|b| add_latin1(b, &latin1, offset, len)),
+    ];
+    for (name, add) in cases {
+        let buffer = hb_buffer_create();
+        add(buffer);
+        let shaped = font.shape(buffer);
+        assert_eq!(ids(&shaped), expected, "{name}");
+        // One character per code unit: clusters count characters.
+        assert_eq!(
+            sorted_clusters(&shaped),
+            (2..14).collect::<Vec<u32>>(),
+            "{name}"
+        );
+        // SAFETY: created above.
+        unsafe { hb_buffer_destroy(buffer) };
+    }
 }
 
 #[test]

@@ -4,6 +4,8 @@
 //! HarfBuzz reports a glyph's cluster as the index, in the caller's
 //! own code units, of the character it came from: UTF-8 bytes for
 //! `hb_buffer_add_utf8`, UTF-16 code units for `hb_buffer_add_utf16`,
+//! 32-bit units for `hb_buffer_add_utf32` and
+//! `hb_buffer_add_codepoints`, bytes for `hb_buffer_add_latin1`,
 //! counted from the start of the array passed to that call (so
 //! `item_offset` is included). The core [`Buffer`] stores UTF-8 and
 //! reports byte offsets into its own text, so every add records, per
@@ -17,13 +19,14 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::ffi::CStr;
+use core::ffi::{c_int, c_uint, CStr};
 
 use sigilbuzz::{Buffer, Direction, Language, UnicodeScript};
 
 use crate::{
-    hb_direction_t, hb_language_t, hb_script_t, lang_und, BufferState, HB_DIRECTION_BTT,
-    HB_DIRECTION_INVALID, HB_DIRECTION_LTR, HB_DIRECTION_RTL, HB_DIRECTION_TTB, HB_SCRIPT_INVALID,
+    hb_buffer_t, hb_direction_t, hb_language_t, hb_script_t, lang_und, BufferState,
+    HB_DIRECTION_BTT, HB_DIRECTION_INVALID, HB_DIRECTION_LTR, HB_DIRECTION_RTL, HB_DIRECTION_TTB,
+    HB_SCRIPT_INVALID,
 };
 
 /// HarfBuzz's default replacement character for malformed input.
@@ -166,6 +169,156 @@ impl Encoding for Utf16 {
         }
         (REPLACEMENT, at)
     }
+}
+
+/// UTF-32 code units, one per character, checked like HarfBuzz's
+/// `hb_utf32_t`: surrogates and values past U+10FFFF become U+FFFD.
+///
+/// `hb_buffer_add_codepoints` uses this decoder too. HarfBuzz skips
+/// the check there and keeps such values as they are, but the core
+/// buffer holds Rust `char`s, which cannot represent them, so they
+/// become U+FFFD as well.
+pub(crate) enum Utf32 {}
+
+impl Encoding for Utf32 {
+    type Unit = u32;
+
+    fn next(text: &[u32], pos: usize, _end: usize) -> (char, usize) {
+        (char::from_u32(text[pos]).unwrap_or(REPLACEMENT), pos + 1)
+    }
+
+    fn prev(text: &[u32], _start: usize, pos: usize) -> (char, usize) {
+        (
+            char::from_u32(text[pos - 1]).unwrap_or(REPLACEMENT),
+            pos - 1,
+        )
+    }
+}
+
+/// Bytes holding the first 256 code points, one per character, as in
+/// HarfBuzz's `hb_latin1_t`. Every byte is valid.
+pub(crate) enum Latin1 {}
+
+impl Encoding for Latin1 {
+    type Unit = u8;
+
+    fn next(text: &[u8], pos: usize, _end: usize) -> (char, usize) {
+        (char::from(text[pos]), pos + 1)
+    }
+
+    fn prev(text: &[u8], _start: usize, pos: usize) -> (char, usize) {
+        (char::from(text[pos - 1]), pos - 1)
+    }
+}
+
+/// The code units `hb_buffer_add_*` reads: `text_length` of them, or,
+/// when `text_length` is negative, every unit up to the terminating
+/// zero.
+///
+/// # Safety
+///
+/// `text` must be non-null and point to `text_length` readable units,
+/// or to a zero-terminated array when `text_length` is negative.
+unsafe fn units<'a, T: Copy + Default + PartialEq>(text: *const T, text_length: c_int) -> &'a [T] {
+    let len = match usize::try_from(text_length) {
+        Ok(len) => len,
+        Err(_) => {
+            let mut len = 0usize;
+            // SAFETY: the caller guarantees a zero-terminated array.
+            while unsafe { *text.add(len) } != T::default() {
+                len += 1;
+            }
+            len
+        }
+    };
+    // SAFETY: the caller guarantees `len` readable units at `text`.
+    unsafe { core::slice::from_raw_parts(text, len) }
+}
+
+/// Shared body of the `hb_buffer_add_*` entry points below.
+///
+/// # Safety
+///
+/// `buffer` must be null or live, and `text` null or valid as
+/// described on [`units`].
+unsafe fn add_from_c<E: Encoding>(
+    buffer: *mut hb_buffer_t,
+    text: *const E::Unit,
+    text_length: c_int,
+    item_offset: c_uint,
+    item_length: c_int,
+) where
+    E::Unit: Default + PartialEq,
+{
+    if buffer.is_null() || text.is_null() {
+        return;
+    }
+    let Some(item_length) = ItemLength::from_c(item_length) else {
+        return;
+    };
+    // SAFETY: the caller's contract for `text` and `text_length`.
+    let text = unsafe { units(text, text_length) };
+    // SAFETY: the caller guarantees `buffer` is live.
+    let inner = unsafe { &(*buffer).inner };
+    let mut state = inner.state.lock();
+    add::<E>(&mut state, text, item_offset as usize, item_length);
+}
+
+/// `hb_buffer_add_utf32`: like `hb_buffer_add_utf8`, with clusters in
+/// 32-bit code units. Surrogates and values past U+10FFFF become
+/// U+FFFD, as in HarfBuzz.
+///
+/// # Safety
+/// `buffer` must be null or valid; `(text, text_length)` must describe
+/// a valid `u32[]` slice (or a zero-terminated array when
+/// `text_length == -1`).
+#[no_mangle]
+pub unsafe extern "C" fn hb_buffer_add_utf32(
+    buffer: *mut hb_buffer_t,
+    text: *const u32,
+    text_length: c_int,
+    item_offset: c_uint,
+    item_length: c_int,
+) {
+    // SAFETY: forwarded caller contract.
+    unsafe { add_from_c::<Utf32>(buffer, text, text_length, item_offset, item_length) };
+}
+
+/// `hb_buffer_add_codepoints`: like `hb_buffer_add_utf32`. HarfBuzz
+/// leaves the values unchecked; the core buffer cannot hold values
+/// that are not Unicode scalar values, so those become U+FFFD here.
+///
+/// # Safety
+/// Same contract as [`hb_buffer_add_utf32`].
+#[no_mangle]
+pub unsafe extern "C" fn hb_buffer_add_codepoints(
+    buffer: *mut hb_buffer_t,
+    text: *const u32,
+    text_length: c_int,
+    item_offset: c_uint,
+    item_length: c_int,
+) {
+    // SAFETY: forwarded caller contract.
+    unsafe { add_from_c::<Utf32>(buffer, text, text_length, item_offset, item_length) };
+}
+
+/// `hb_buffer_add_latin1`: each byte is the code point of the same
+/// value (U+0000 to U+00FF), and clusters are byte offsets.
+///
+/// # Safety
+/// `buffer` must be null or valid; `(text, text_length)` must describe
+/// a valid byte slice (or a NUL-terminated string when
+/// `text_length == -1`).
+#[no_mangle]
+pub unsafe extern "C" fn hb_buffer_add_latin1(
+    buffer: *mut hb_buffer_t,
+    text: *const u8,
+    text_length: c_int,
+    item_offset: c_uint,
+    item_length: c_int,
+) {
+    // SAFETY: forwarded caller contract.
+    unsafe { add_from_c::<Latin1>(buffer, text, text_length, item_offset, item_length) };
 }
 
 fn to_u32(n: usize) -> u32 {

@@ -86,6 +86,36 @@ int main(int argc, char **argv) {
         return 11;
     }
 
+    /* The UTF-32, code point, and Latin-1 entry points shape "Hello"
+     * to the same glyphs as UTF-8. */
+    const uint32_t hello32[] = {'H', 'e', 'l', 'l', 'o', 0};
+    const uint8_t hello8[] = {'H', 'e', 'l', 'l', 'o', 0};
+    for (int kind = 0; kind < 3; kind++) {
+        hb_buffer_t *other = hb_buffer_create();
+        if (kind == 0)
+            hb_buffer_add_utf32(other, hello32, -1, 0, -1);
+        else if (kind == 1)
+            hb_buffer_add_codepoints(other, hello32, 5, 0, -1);
+        else
+            hb_buffer_add_latin1(other, hello8, -1, 0, -1);
+        hb_buffer_set_direction(other, HB_DIRECTION_LTR);
+        hb_shape(font, other, NULL, 0);
+        unsigned int other_len = 0;
+        hb_glyph_info_t *other_infos = hb_buffer_get_glyph_infos(other, &other_len);
+        if (other_len != len) {
+            fprintf(stderr, "add kind %d: %u glyphs, expected %u\n", kind, other_len, len);
+            return 12;
+        }
+        for (unsigned int i = 0; i < len; i++) {
+            if (other_infos[i].codepoint != infos[i].codepoint ||
+                other_infos[i].cluster != i) {
+                fprintf(stderr, "add kind %d: glyph %u differs\n", kind, i);
+                return 13;
+            }
+        }
+        hb_buffer_destroy(other);
+    }
+
     hb_buffer_destroy(buffer);
     hb_font_destroy(font);
     hb_face_destroy(face);
