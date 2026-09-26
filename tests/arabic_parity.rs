@@ -186,6 +186,23 @@ fn zwj_and_zwnj_corpus_matches_rustybuzz() {
     }
 }
 
+/// Joining types HarfBuzz derives from ArabicShaping.txt and the
+/// General_Category fallback: marks and format characters from
+/// outside the Arabic blocks are transparent, so the behs around them
+/// still join; ALEF MAKSURA is dual-joining.
+#[test]
+fn joining_types_follow_arabic_shaping_and_general_category() {
+    for text in [
+        "\u{0628}\u{0301}\u{0628}",         // Mn from Combining Diacritics
+        "\u{0628}\u{20DD}\u{0628}",         // Me, enclosing circle
+        "\u{0628}\u{0649}\u{0628}",         // alef maksura is D
+        "\u{0649}\u{0622}",                 // D before R
+        "\u{0628}\u{0640}\u{0640}\u{0628}", // tatweel chain
+    ] {
+        assert_parity_on(text);
+    }
+}
+
 #[test]
 fn marhaba_shapes_to_different_glyphs_than_isolated_letters() {
     // Sanity check independent of rustybuzz: the joining pass must

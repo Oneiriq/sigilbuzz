@@ -12,6 +12,8 @@ pub mod bidi_brackets;
 pub mod bidi_class;
 pub mod indic_category;
 pub mod joining;
+#[rustfmt::skip]
+mod joining_table;
 pub mod normalize;
 mod script_tags;
 pub mod use_category;
