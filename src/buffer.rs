@@ -553,6 +553,9 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
 ///   because `script_of` has no rule for U+0300 and drops the
 ///   mark into `Script::Other`, breaking `ccmp` dispatch and
 ///   any cross-mark GSUB context.
+/// - Default ignorables of no script of their own (ZWSP, word joiner,
+///   variation selectors, tag characters, ...), which GSUB and GPOS
+///   match across.
 ///
 /// Everything else resolves via [`script_of`]; runs of the same
 /// real script collapse through the normal equality check.
@@ -577,7 +580,7 @@ const fn is_common_or_inherited(ch: char) -> bool {
         | 0x1DC0..=0x1DFF
         | 0x20D0..=0x20FF
         | 0xFE20..=0xFE2F
-    )
+    ) || crate::unicode::is_scriptless_default_ignorable(ch)
 }
 
 /// The result of a shaping call: the glyphs, in visual order.
@@ -779,6 +782,22 @@ mod tests {
         let runs = b.script_runs();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].script, Script::Arabic);
+    }
+
+    #[test]
+    fn script_runs_default_ignorables_stay_in_their_run() {
+        // ZWSP, word joiner, a variation selector and a tag character
+        // extend the run they sit in, as in the shaper's segmentation.
+        for text in [
+            "f\u{200B}i",
+            "f\u{2060}i",
+            "\u{0628}\u{FE0F}\u{0633}",
+            "f\u{E0041}i",
+        ] {
+            let mut b = Buffer::new();
+            b.push_str(text);
+            assert_eq!(b.script_runs().len(), 1, "{text:?}");
+        }
     }
 
     #[test]

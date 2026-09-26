@@ -131,6 +131,5 @@ pub(super) const fn is_common_for_segmentation(ch: char) -> bool {
         | 0x1DC0..=0x1DFF
         | 0x20D0..=0x20FF
         | 0xFE20..=0xFE2F
-    ) || (super::ignorables::is_default_ignorable(ch)
-        && !matches!(cp, 0x17B4..=0x17B5 | 0x180B..=0x180D | 0x180F))
+    ) || crate::unicode::is_scriptless_default_ignorable(ch)
 }
