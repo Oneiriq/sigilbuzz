@@ -188,8 +188,8 @@ pub struct Buffer {
     pub(crate) text: String,
     /// Writing direction. Defaults to [`Direction::Ltr`].
     pub(crate) direction: Direction,
-    /// `true` once a caller picked the direction ([`Buffer::set_direction`]
-    /// or [`Buffer::set_text_bidi`]). While `false`, `direction` is only
+    /// `true` once a caller picked the direction with
+    /// [`Buffer::set_direction`]. While `false`, `direction` is only
     /// the LTR default and `shape()` may choose vertical layout for
     /// Mongolian-dominant text. [`Buffer::clear`] resets it.
     pub(crate) direction_explicit: bool,
@@ -198,12 +198,6 @@ pub struct Buffer {
     /// lookup. Matches HarfBuzz's implicit NFC pass for the
     /// ranges sigilbuzz has curated tables for.
     pub(crate) normalize_nfc: bool,
-    /// Logical/visual byte map retained by [`Buffer::set_text_bidi`]
-    /// so consumers can translate shaped cluster values (which index
-    /// the reordered text) back to source offsets. `None` when the
-    /// text was set without bidi reordering, and invalidated by any
-    /// other text mutation.
-    pub(crate) bidi_map: Option<crate::bidi_map::BidiMap>,
     /// Script the whole buffer shapes as, set by
     /// [`Buffer::set_script`]. `None` segments the text into script
     /// runs. Accessors live in `buffer_props.rs`.
@@ -233,79 +227,22 @@ impl Buffer {
     /// Appends `text` to the buffer.
     pub fn push_str(&mut self, text: &str) {
         self.text.push_str(text);
-        self.bidi_map = None;
     }
 
     /// Replaces the buffer contents with `text`.
+    ///
+    /// A buffer holds one run in one direction, as in HarfBuzz. For text
+    /// that mixes directions, use [`crate::BidiParagraph`], which shapes
+    /// each run of the paragraph in its own direction.
     pub fn set_text(&mut self, text: &str) {
         self.text.clear();
         self.text.push_str(text);
-        self.bidi_map = None;
-    }
-
-    /// Replaces the buffer contents with `text`, but additionally
-    /// runs the UAX #9 bidirectional algorithm and reorders the
-    /// stored text into visual order before shaping.
-    ///
-    /// Because the stored text is already in visual order, this also
-    /// sets the shaping direction to an explicit [`Direction::Ltr`]:
-    /// [`crate::shape`] then walks the text left to right and returns
-    /// the glyphs in that same (visual) order. Setting
-    /// [`Direction::Rtl`] afterwards would reverse the run a second
-    /// time. The paragraph direction UAX #9 resolved stays available
-    /// through [`Self::bidi_map`] (`BidiMap::paragraph_direction`).
-    ///
-    /// Use this when you have mixed-direction input (Latin + Hebrew,
-    /// Arabic + ASCII digits, etc.) and want the shaper to receive
-    /// the run already partitioned into visual order. For best
-    /// results with HarfBuzz-grade shaping (mark attachment, cursive
-    /// joining), shape each directional run separately in logical
-    /// order with its own direction instead.
-    ///
-    /// The plain [`Self::set_text`] is left untouched: existing
-    /// 0.1.0 consumers (oniq, demos) that handle direction
-    /// themselves keep their current semantics.
-    ///
-    /// The logical-to-visual permutation is retained and exposed via
-    /// [`Self::bidi_map`], so cluster values from the shaped output
-    /// (which index the reordered text) can be translated back to
-    /// offsets in the original `text`.
-    pub fn set_text_bidi(&mut self, text: &str) {
-        let info = crate::unicode::bidi::BidiInfo::new(text, None);
-        self.direction = Direction::Ltr;
-        self.direction_explicit = true;
-        let order = info.reorder();
-        self.text.clear();
-        self.text.reserve(text.len());
-        // Walk the input chars in visual order and append.
-        let chars: Vec<char> = text.chars().collect();
-        for &i in &order {
-            if let Some(&ch) = chars.get(i) {
-                self.text.push(ch);
-            }
-        }
-        self.bidi_map = Some(crate::bidi_map::BidiMap::from_order(text, &order, &info));
     }
 
     /// Current text view.
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
-    }
-
-    /// The bidirectional reorder map captured by the last
-    /// [`Self::set_text_bidi`] call, or `None` when the current text
-    /// was set without bidi reordering ([`Self::set_text`],
-    /// [`Self::push_str`], [`Self::clear`] all reset it).
-    ///
-    /// Visual-side offsets in the map match [`crate::Glyph::cluster`]
-    /// values from shaping this buffer, as long as the opt-in NFC
-    /// pass ([`Self::set_normalize_nfc`]) does not recompose the text
-    /// (composition shortens it and shifts offsets after any composed
-    /// pair. Feed precomposed input when combining the two).
-    #[must_use]
-    pub const fn bidi_map(&self) -> Option<&crate::bidi_map::BidiMap> {
-        self.bidi_map.as_ref()
     }
 
     /// Current writing direction: [`Direction::Ltr`] until one is set
@@ -355,7 +292,7 @@ impl Buffer {
     }
 
     /// True when the direction was chosen by the caller through
-    /// [`Self::set_direction`] or [`Self::set_text_bidi`], false while
+    /// [`Self::set_direction`], false while
     /// [`Self::direction`] only reports the LTR default.
     ///
     /// [`crate::shape`] lays out Mongolian-dominant text vertically
@@ -399,7 +336,6 @@ impl Buffer {
         self.direction = Direction::Ltr;
         self.direction_explicit = false;
         self.normalize_nfc = false;
-        self.bidi_map = None;
         self.script = None;
         self.language = None;
         self.pre_context.clear();
@@ -723,33 +659,6 @@ mod tests {
     }
 
     #[test]
-    fn set_text_bidi_keeps_pure_ltr_unchanged() {
-        let mut b = Buffer::new();
-        b.set_text_bidi("Hello");
-        assert_eq!(b.text(), "Hello");
-        assert_eq!(b.direction(), Direction::Ltr);
-    }
-
-    #[test]
-    fn set_text_bidi_reverses_pure_rtl() {
-        let mut b = Buffer::new();
-        // \u{05E9}\u{05DC}\u{05D5}\u{05DD} = "שלום" (shalom).
-        b.set_text_bidi("\u{05E9}\u{05DC}\u{05D5}\u{05DD}");
-        // After visual reorder the chars are in reverse logical
-        // order. The stored text is visual, so the shaping direction
-        // is an explicit LTR (shaping it RTL would reverse it again);
-        // the RTL paragraph direction lives on the bidi map.
-        assert_eq!(b.text(), "\u{05DD}\u{05D5}\u{05DC}\u{05E9}");
-        assert_eq!(b.direction(), Direction::Ltr);
-        assert!(b.has_explicit_direction());
-        assert_eq!(
-            b.bidi_map()
-                .map(crate::bidi_map::BidiMap::paragraph_direction),
-            Some(Direction::Rtl)
-        );
-    }
-
-    #[test]
     fn direction_starts_implicit_and_set_direction_makes_it_explicit() {
         let mut b = Buffer::new();
         assert!(!b.has_explicit_direction());
@@ -794,49 +703,6 @@ mod tests {
         b.clear();
         assert!(!b.has_explicit_direction());
         assert_eq!(b.direction(), Direction::Ltr);
-
-        b.set_text_bidi("\u{05D0}");
-        assert!(b.has_explicit_direction());
-        b.clear();
-        assert!(!b.has_explicit_direction());
-    }
-
-    #[test]
-    fn set_text_bidi_overrides_an_earlier_rtl_direction() {
-        let mut b = Buffer::new();
-        b.set_direction(Direction::Rtl);
-        b.set_text_bidi("abc \u{05D0}\u{05D1}");
-        assert_eq!(b.direction(), Direction::Ltr);
-        assert!(b.has_explicit_direction());
-    }
-
-    #[test]
-    fn set_text_bidi_handles_mixed_latin_hebrew_arabic() {
-        // "Hello עברית مرحبا": Latin + Hebrew + Arabic. Paragraph
-        // is LTR (first strong is 'H'). Visual order: "Hello "
-        // followed by the RTL runs reversed. Specifically:
-        //   - Latin "Hello " stays at level 0.
-        //   - Hebrew "עברית" + space + Arabic "مرحبا" share level
-        //     1 and reverse together: visual = ابحرم[space]תירבע.
-        let mut b = Buffer::new();
-        b.set_text_bidi("Hello \u{05E2}\u{05D1}\u{05E8}\u{05D9}\u{05EA} \u{0645}\u{0631}\u{062D}\u{0628}\u{0627}");
-        assert_eq!(b.direction(), Direction::Ltr);
-        // Sanity: visual byte length matches input byte length (no
-        // codepoints lost in reorder).
-        assert_eq!(
-            b.text().chars().count(),
-            "Hello \u{05E2}\u{05D1}\u{05E8}\u{05D9}\u{05EA} \u{0645}\u{0631}\u{062D}\u{0628}\u{0627}"
-                .chars()
-                .count()
-        );
-        // First chars stay Latin.
-        let visual: Vec<char> = b.text().chars().collect();
-        assert_eq!(visual[0], 'H');
-        assert_eq!(visual[5], ' ');
-        // Last char of the RTL run (logically Arabic alef U+0627)
-        // should appear early in the visual order: it sits at the
-        // tail of the level-1 span, which L2 reverses to the front.
-        assert_eq!(visual[6], '\u{0627}');
     }
 
     #[test]

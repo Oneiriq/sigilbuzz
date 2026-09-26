@@ -86,9 +86,11 @@ A few things you will likely need next:
 
 - Right-to-left text: call `buffer.set_direction(Direction::Rtl)`. As in HarfBuzz, the
   glyphs come back in visual order (leftmost glyph first), ready to draw left to right.
-- Mixed-direction text: use `buffer.set_text_bidi(text)` in place of `push_str`. It runs
-  the Unicode bidi algorithm, reorders the text into visual order, and shapes it left to
-  right. `buffer.bidi_map()` maps between logical and visual byte offsets afterward.
+- Mixed-direction text: build a `BidiParagraph` from the text. It runs the Unicode bidi
+  algorithm, shapes each run of one embedding level in logical order and in its own
+  direction (the way HarfBuzz callers do), and puts the runs in visual order with
+  `paragraph.shape(&font, &buffer, &features)`. Glyph clusters stay byte offsets into
+  your text. For wrapped text, `line_runs` and `shape_line` order each line on its own.
 - Variable fonts: `font.with_coords(&coords)` shapes at a given set of normalized axis
   coordinates.
 - Font collections: pass the member index to `Face::parse`. `fonts_in_collection` tells

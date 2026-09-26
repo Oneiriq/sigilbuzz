@@ -7,8 +7,10 @@
 //! - **N0-N2**: paired brackets, then neutral resolution.
 //! - **I1-I2**: implicit-level resolution.
 //! - **L1**: whitespace and separator levels, with the whole text as
-//!   one line.
-//! - **L2**: [`BidiInfo::reorder`].
+//!   one line. [`crate::BidiParagraph::line_runs`] applies L1 again at
+//!   the end of each line.
+//! - **L2**: [`BidiInfo::reorder`] for characters, and
+//!   [`crate::BidiParagraph::reorder_visual`] for runs.
 //!
 //! The algorithm is implemented as a sequence of array-mutation
 //! passes against a single working buffer of (`BidiClass`, `level`)
@@ -49,6 +51,9 @@
 //! - [`BidiInfo::levels`]: per-character embedding level (after L1).
 //! - [`BidiInfo::reorder`]: visual-order character-index permutation
 //!   (rule L2).
+//!
+//! Shaping works on runs of one level instead: see
+//! [`crate::BidiParagraph`].
 
 mod explicit;
 mod neutral;
@@ -58,7 +63,8 @@ mod weak;
 use alloc::vec::Vec;
 
 use explicit::{build_isolating_sequences, explicit_levels};
-use reorder::{apply_l1, assign_removed_levels, reorder_visual};
+use reorder::{apply_l1, assign_removed_levels};
+pub(crate) use reorder::{is_l1_trailing, reorder_visual};
 use weak::resolve_sequence;
 
 use crate::buffer::Direction;
@@ -206,7 +212,9 @@ impl BidiInfo {
     /// (`text.chars().nth(i)`); the returned `Vec` always has
     /// length [`Self::char_count`].
     ///
-    /// The whole text is treated as one line.
+    /// The whole text is treated as one line. Reordering characters is
+    /// for display of plain character streams; shaping reorders runs
+    /// instead (see [`crate::BidiParagraph`]).
     #[must_use]
     pub fn reorder(&self) -> Vec<usize> {
         reorder_visual(&self.levels)

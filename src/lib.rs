@@ -37,6 +37,15 @@
 //!
 //! See [`Blob`], [`Face`], [`Font`], [`Buffer`], and [`shape`] for each step.
 //!
+//! # Bidirectional text
+//!
+//! Like HarfBuzz, [`shape`] shapes one run in one direction. Text that
+//! mixes directions goes through [`BidiParagraph`]: it resolves the
+//! Unicode bidirectional algorithm's embedding levels, shapes each run of
+//! one level in logical order and in its own direction, and orders the
+//! runs for display, per line when the paragraph wraps. Glyph clusters
+//! always index the text as the caller wrote it.
+//!
 //! # `no_std`
 //!
 //! The crate compiles with `--no-default-features` on stable Rust. The
@@ -49,7 +58,7 @@
 
 extern crate alloc;
 
-mod bidi_map;
+mod bidi;
 mod blob;
 mod buffer;
 mod buffer_props;
@@ -82,7 +91,7 @@ pub mod tables;
 #[doc(hidden)]
 pub mod unicode;
 
-pub use bidi_map::BidiMap;
+pub use bidi::{BidiParagraph, BidiRun, ShapedBidiRun};
 pub use blob::Blob;
 pub use buffer::{Buffer, Direction, Glyph, ShapedRun};
 pub use error::{Error, Result};

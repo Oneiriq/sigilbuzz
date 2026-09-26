@@ -28,9 +28,12 @@ signatures only change in a major version.
 - `Blob`, `Face`, `Font`, `Buffer`, `Glyph`, `Direction`, `Feature`
 - `ShapedRun`: the positioned glyph run `shape` returns (`glyphs`, `len`, `is_empty`)
 - `OwnedFace`: a face that owns its bytes, for caching and sharing across threads
-- `BidiMap`: the logical/visual byte map kept by `Buffer::set_text_bidi`
-  (`Buffer::bidi_map`, `BidiMap::{new, from_order, visual_to_logical,
-  logical_to_visual, level_at_visual, level_at_logical}`)
+- `BidiParagraph`: a paragraph with its UAX 9 embedding levels, shaped run by run in
+  logical order, HarfBuzz style (`BidiParagraph::{new, text, direction, base_level,
+  runs, level_at, run_at, line_runs, visual_runs, reorder_visual, shape_run,
+  shape_line, shape}`), with `BidiRun` (`range`, `level`, `is_rtl`, `direction`) and
+  `ShapedBidiRun` (`run`, `glyphs`). Glyph clusters are byte offsets into the
+  paragraph text.
 - `shape`
 - `Face::glyph_outline`, `Face::glyph_outline_at_coords`, `Face::glyph_bounds`,
   `Face::name`, `Face::parse`, `Face::parse_bytes`
