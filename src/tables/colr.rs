@@ -28,6 +28,10 @@ use alloc::vec::Vec;
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
 
+mod clip;
+
+pub use clip::{ClipBox, ClipList};
+
 /// Offset (absolute, within the COLR table) to a v1 `Paint` node.
 /// Stored as a u24 in the font, widened to u32 here.
 pub type PaintOffset = u32;
@@ -60,14 +64,22 @@ pub struct Colr<'a> {
     /// Absolute offset to the v1 LayerList block, or 0 if absent.
     layer_list_off: u32,
     /// Absolute offset to the v1 ClipList block, or 0 if absent.
-    #[allow(dead_code)]
     clip_list_off: u32,
+    /// Absolute offset to the v1 DeltaSetIndexMap, or 0 if absent.
+    var_index_map_off: u32,
     /// Absolute offset to the v1 ItemVariationStore, or 0 if absent.
     var_store_off: u32,
 }
 
 impl<'a> Colr<'a> {
     /// Parses a `COLR` table header.
+    ///
+    /// A version 1 header is 34 bytes: the 14-byte version 0 header
+    /// followed by five Offset32 fields (BaseGlyphList, LayerList,
+    /// ClipList, DeltaSetIndexMap, ItemVariationStore). A version 1
+    /// table cut off before the end of those fields is rejected with
+    /// [`Error::Truncated`], as HarfBuzz's sanitizer drops such a table
+    /// entirely.
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(data);
         let version = r.read_u16()?;
@@ -118,12 +130,14 @@ impl<'a> Colr<'a> {
         let mut base_glyph_list_off = 0u32;
         let mut layer_list_off = 0u32;
         let mut clip_list_off = 0u32;
+        let mut var_index_map_off = 0u32;
         let mut var_store_off = 0u32;
         if version >= 1 {
-            // v1 appends four Offset32 fields to the header.
+            // v1 appends five Offset32 fields to the header.
             base_glyph_list_off = r.read_u32()?;
             layer_list_off = r.read_u32()?;
             clip_list_off = r.read_u32()?;
+            var_index_map_off = r.read_u32()?;
             var_store_off = r.read_u32()?;
         }
 
@@ -136,6 +150,7 @@ impl<'a> Colr<'a> {
             base_glyph_list_off,
             layer_list_off,
             clip_list_off,
+            var_index_map_off,
             var_store_off,
         })
     }
@@ -174,6 +189,39 @@ impl<'a> Colr<'a> {
         } else {
             Some(self.var_store_off)
         }
+    }
+
+    /// Returns the absolute offset of the v1 DeltaSetIndexMap, or
+    /// `None` when the table has none. When present, a paint's
+    /// `varIndexBase + i` is mapped through it before the variation
+    /// store lookup; when absent, the index itself splits into the
+    /// store's outer (high 16 bits) and inner (low 16 bits) indices.
+    #[must_use]
+    pub fn var_index_map_offset(&self) -> Option<u32> {
+        (self.var_index_map_off != 0).then_some(self.var_index_map_off)
+    }
+
+    /// Returns the absolute offset of the v1 ClipList, or `None` when
+    /// the table has none.
+    #[must_use]
+    pub fn clip_list_offset(&self) -> Option<u32> {
+        (self.clip_list_off != 0).then_some(self.clip_list_off)
+    }
+
+    /// Parses the v1 ClipList. Returns `None` when the table has no
+    /// ClipList or its header does not fit in the table, which is how
+    /// HarfBuzz treats a ClipList offset that fails to sanitize.
+    #[must_use]
+    pub fn clip_list(&self) -> Option<ClipList<'a>> {
+        let off = self.clip_list_offset()?;
+        ClipList::parse(self.data, off as usize).ok()
+    }
+
+    /// The clip box of `glyph_id`, from the ClipList, or `None` when the
+    /// table has no ClipList or the glyph has no box.
+    #[must_use]
+    pub fn clip_box(&self, glyph_id: u16) -> Option<ClipBox> {
+        self.clip_list()?.get(glyph_id)
     }
 
     /// Looks up v0 layers for `glyph_id`. Binary search on the sorted
@@ -1518,19 +1566,20 @@ mod tests {
     /// tree is a `PaintSolid`. Returns the full table bytes.
     fn build_colr_v1_solid(palette_index: u16, alpha: f32) -> Vec<u8> {
         let mut out = Vec::new();
-        // v1 header = 14 bytes (v0) + 16 bytes (4x u32).
-        let header_len = 14 + 16;
+        // v1 header = 14 bytes (v0) + 20 bytes (5x u32).
+        let header_len = 14 + 20;
         out.extend_from_slice(&1u16.to_be_bytes()); // version
         out.extend_from_slice(&0u16.to_be_bytes()); // numBaseGlyphRecords
         out.extend_from_slice(&(header_len as u32).to_be_bytes()); // baseGlyphRecordsOffset (empty body so anywhere works)
         out.extend_from_slice(&(header_len as u32).to_be_bytes()); // layerRecordsOffset
         out.extend_from_slice(&0u16.to_be_bytes()); // numLayerRecords
                                                     // v1 appendix: baseGlyphListOffset, layerListOffset,
-                                                    // clipListOffset, varStoreOffset.
+                                                    // clipListOffset, varIndexMapOffset, varStoreOffset.
         let base_glyph_list_off = header_len as u32;
         out.extend_from_slice(&base_glyph_list_off.to_be_bytes());
         out.extend_from_slice(&0u32.to_be_bytes()); // layerListOffset
         out.extend_from_slice(&0u32.to_be_bytes()); // clipListOffset
+        out.extend_from_slice(&0u32.to_be_bytes()); // varIndexMapOffset
         out.extend_from_slice(&0u32.to_be_bytes()); // varStoreOffset
 
         // BaseGlyphList: { u32 numRecords; BaseGlyphPaintRecord[...] }.
@@ -1569,11 +1618,90 @@ mod tests {
         }
     }
 
+    /// The five v1 offsets land in their own fields: the fourth is the
+    /// DeltaSetIndexMap, the fifth the ItemVariationStore.
+    #[test]
+    fn v1_header_reads_all_five_offsets() {
+        let mut bytes = build_colr_v1_solid(5, 0.5);
+        bytes[22..26].copy_from_slice(&0x60u32.to_be_bytes()); // clipListOffset
+        bytes[26..30].copy_from_slice(&0x70u32.to_be_bytes()); // varIndexMapOffset
+        bytes[30..34].copy_from_slice(&0x80u32.to_be_bytes()); // varStoreOffset
+        let colr = Colr::parse(&bytes).unwrap();
+        assert_eq!(colr.clip_list_offset(), Some(0x60));
+        assert_eq!(colr.var_index_map_offset(), Some(0x70));
+        assert_eq!(colr.var_store_offset(), Some(0x80));
+        // The clip list offset points past the table, so there is none.
+        assert!(colr.clip_list().is_none());
+        assert!(colr.clip_box(42).is_none());
+
+        let zeroed = build_colr_v1_solid(5, 0.5);
+        let colr = Colr::parse(&zeroed).unwrap();
+        assert_eq!(colr.clip_list_offset(), None);
+        assert_eq!(colr.var_index_map_offset(), None);
+        assert_eq!(colr.var_store_offset(), None);
+    }
+
+    /// A v1 header cut off before its last offset is rejected, the way
+    /// HarfBuzz's sanitizer drops the table.
+    #[test]
+    fn v1_header_truncated_before_the_store_offset_is_rejected() {
+        let mut bytes = build_colr_v1_solid(5, 0.5);
+        // Empty v0 arrays at offset 14, so only the v1 fields can run
+        // out of bytes.
+        bytes[4..8].copy_from_slice(&14u32.to_be_bytes());
+        bytes[8..12].copy_from_slice(&14u32.to_be_bytes());
+        for len in [14, 18, 30, 33] {
+            assert!(
+                matches!(Colr::parse(&bytes[..len]), Err(Error::Truncated { .. })),
+                "len {len}"
+            );
+        }
+        // The error names the offset where the missing field starts.
+        assert!(matches!(
+            Colr::parse(&bytes[..30]),
+            Err(Error::Truncated { offset: 30, .. })
+        ));
+        // A v0 table needs only the 14-byte header.
+        let mut v0 = bytes[..14].to_vec();
+        v0[0..2].copy_from_slice(&0u16.to_be_bytes());
+        assert!(Colr::parse(&v0).is_ok());
+    }
+
+    /// `Colr::clip_box` finds a glyph's box through the ClipList.
+    #[test]
+    fn clip_box_resolves_through_the_clip_list() {
+        let mut bytes = build_colr_v1_solid(5, 0.5);
+        let list = bytes.len() as u32;
+        bytes[22..26].copy_from_slice(&list.to_be_bytes());
+        bytes.push(1); // ClipList format
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&40u16.to_be_bytes());
+        bytes.extend_from_slice(&42u16.to_be_bytes());
+        bytes.extend_from_slice(&[0, 0, 12]); // box right after the record
+        bytes.push(1); // ClipBoxFormat1
+        for v in [-10i16, -20, 500, 600] {
+            bytes.extend_from_slice(&v.to_be_bytes());
+        }
+        let colr = Colr::parse(&bytes).unwrap();
+        assert_eq!(colr.clip_list().map(|l| l.len()), Some(1));
+        assert_eq!(
+            colr.clip_box(42),
+            Some(ClipBox {
+                x_min: -10,
+                y_min: -20,
+                x_max: 500,
+                y_max: 600,
+                var_index_base: None,
+            })
+        );
+        assert_eq!(colr.clip_box(43), None);
+    }
+
     /// PaintColrLayers at the root of a base glyph.
     #[test]
     fn v1_colr_layers_round_trip() {
         let mut out = Vec::new();
-        let header_len = 30;
+        let header_len = 34;
         out.extend_from_slice(&1u16.to_be_bytes());
         out.extend_from_slice(&0u16.to_be_bytes());
         out.extend_from_slice(&(header_len as u32).to_be_bytes());
@@ -1581,6 +1709,7 @@ mod tests {
         out.extend_from_slice(&0u16.to_be_bytes());
         let base_glyph_list_off = header_len as u32;
         out.extend_from_slice(&base_glyph_list_off.to_be_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes());
         out.extend_from_slice(&0u32.to_be_bytes());
         out.extend_from_slice(&0u32.to_be_bytes());
         out.extend_from_slice(&0u32.to_be_bytes());
@@ -1614,7 +1743,7 @@ mod tests {
     #[test]
     fn v1_glyph_paint_chains_to_solid() {
         let mut out = Vec::new();
-        let header_len = 30;
+        let header_len = 34;
         out.extend_from_slice(&1u16.to_be_bytes());
         out.extend_from_slice(&0u16.to_be_bytes());
         out.extend_from_slice(&(header_len as u32).to_be_bytes());
@@ -1622,6 +1751,7 @@ mod tests {
         out.extend_from_slice(&0u16.to_be_bytes());
         let base_glyph_list_off = header_len as u32;
         out.extend_from_slice(&base_glyph_list_off.to_be_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes());
         out.extend_from_slice(&0u32.to_be_bytes());
         out.extend_from_slice(&0u32.to_be_bytes());
         out.extend_from_slice(&0u32.to_be_bytes());
@@ -1688,7 +1818,7 @@ mod tests {
     #[test]
     fn v1_linear_gradient_parses_colorline_and_coords() {
         let mut out = Vec::new();
-        let header_len = 30;
+        let header_len = 34;
         out.extend_from_slice(&1u16.to_be_bytes());
         out.extend_from_slice(&0u16.to_be_bytes());
         out.extend_from_slice(&(header_len as u32).to_be_bytes());
@@ -1696,6 +1826,7 @@ mod tests {
         out.extend_from_slice(&0u16.to_be_bytes());
         let base_glyph_list_off = header_len as u32;
         out.extend_from_slice(&base_glyph_list_off.to_be_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes());
         out.extend_from_slice(&0u32.to_be_bytes());
         out.extend_from_slice(&0u32.to_be_bytes());
         out.extend_from_slice(&0u32.to_be_bytes());
@@ -1772,7 +1903,7 @@ mod tests {
     fn v1_composite_exposes_both_children() {
         // Build a minimal header pointing at a composite at the end.
         let mut out = Vec::new();
-        let header_len = 30;
+        let header_len = 34;
         out.extend_from_slice(&1u16.to_be_bytes());
         out.extend_from_slice(&0u16.to_be_bytes());
         out.extend_from_slice(&(header_len as u32).to_be_bytes());
@@ -1780,6 +1911,7 @@ mod tests {
         out.extend_from_slice(&0u16.to_be_bytes());
         let base_glyph_list_off = header_len as u32;
         out.extend_from_slice(&base_glyph_list_off.to_be_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes());
         out.extend_from_slice(&0u32.to_be_bytes());
         out.extend_from_slice(&0u32.to_be_bytes());
         out.extend_from_slice(&0u32.to_be_bytes());
@@ -1839,7 +1971,7 @@ mod tests {
     fn v1_simple_transform_variants_round_trip() {
         fn build_single_transform(format: u8, payload: &[u8]) -> Vec<u8> {
             let mut out = Vec::new();
-            let header_len = 30;
+            let header_len = 34;
             out.extend_from_slice(&1u16.to_be_bytes());
             out.extend_from_slice(&0u16.to_be_bytes());
             out.extend_from_slice(&(header_len as u32).to_be_bytes());
@@ -1847,6 +1979,7 @@ mod tests {
             out.extend_from_slice(&0u16.to_be_bytes());
             let bgl = header_len as u32;
             out.extend_from_slice(&bgl.to_be_bytes());
+            out.extend_from_slice(&0u32.to_be_bytes());
             out.extend_from_slice(&0u32.to_be_bytes());
             out.extend_from_slice(&0u32.to_be_bytes());
             out.extend_from_slice(&0u32.to_be_bytes());

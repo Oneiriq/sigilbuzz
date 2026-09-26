@@ -87,10 +87,10 @@ fn ivs(rows: &[i16]) -> Vec<u8> {
     out
 }
 
-/// COLRv1 in the header layout sigilbuzz reads: BaseGlyphList right
+/// COLRv1 with the 34-byte v1 header: BaseGlyphList right
 /// after the header, the variation store after the paints.
 fn colr(paints: &[(u16, Vec<u8>)], var_store: &[u8]) -> Vec<u8> {
-    let header_len: u32 = 30;
+    let header_len: u32 = 34;
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes());
@@ -98,8 +98,9 @@ fn colr(paints: &[(u16, Vec<u8>)], var_store: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&header_len.to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes());
     out.extend_from_slice(&header_len.to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&0u32.to_be_bytes()); // layer list
+    out.extend_from_slice(&0u32.to_be_bytes()); // clip list
+    out.extend_from_slice(&0u32.to_be_bytes()); // index map
     let var_slot = out.len();
     out.extend_from_slice(&0u32.to_be_bytes());
     out.extend_from_slice(&(paints.len() as u32).to_be_bytes());

@@ -1,7 +1,7 @@
 //! Shared fixtures and a callback recorder for the `hb_paint_*` tests.
 //!
 //! Fixtures are hand-built SFNTs carrying COLR (v0 records and v1
-//! paints, in the header layout sigilbuzz reads), CPAL, and optionally
+//! paints, with the 34-byte v1 header), CPAL, and optionally
 //! fvar. The recorder installs every paint callback with its own
 //! `user_data` tag, logs each call into the `Log` passed as
 //! `paint_data`, and checks that every callback received its own tag.
@@ -126,9 +126,9 @@ pub fn ivs(rows: &[i16]) -> Vec<u8> {
 
 /// COLR with v0 base glyphs (`(gid, [(layer gid, entry)])`), v1 paints
 /// (`(gid, paint bytes)`, sorted by gid), and an optional variation
-/// store, in the header layout sigilbuzz reads.
+/// store, with the 34-byte v1 header.
 pub fn colr(v0: &[(u16, &[(u16, u16)])], v1: &[(u16, Vec<u8>)], var_store: &[u8]) -> Vec<u8> {
-    let header_len = 30usize;
+    let header_len = 34usize;
     let base_off = header_len;
     let layer_off = base_off + 6 * v0.len();
     let num_layers: usize = v0.iter().map(|(_, l)| l.len()).sum();
@@ -140,8 +140,9 @@ pub fn colr(v0: &[(u16, &[(u16, u16)])], v1: &[(u16, Vec<u8>)], var_store: &[u8]
     out.extend_from_slice(&(layer_off as u32).to_be_bytes());
     out.extend_from_slice(&(num_layers as u16).to_be_bytes());
     out.extend_from_slice(&(list_off as u32).to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&0u32.to_be_bytes()); // layer list
+    out.extend_from_slice(&0u32.to_be_bytes()); // clip list
+    out.extend_from_slice(&0u32.to_be_bytes()); // index map
     let var_slot = out.len();
     out.extend_from_slice(&0u32.to_be_bytes());
     let mut first = 0u16;

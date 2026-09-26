@@ -124,17 +124,17 @@ fn foreground_fill(alpha: f32) -> Vec<u8> {
     p
 }
 
-/// COLR in the header layout sigilbuzz reads: one v0 base glyph (2)
-/// with one foreground layer on gid 1, and v1 paints for gids 3 and 4.
+/// COLR with the 34-byte v1 header: one v0 base glyph (2) with one
+/// foreground layer on gid 1, and v1 paints for gids 3 and 4.
 fn colr() -> Vec<u8> {
     let mut c = Vec::new();
     c.extend_from_slice(&1u16.to_be_bytes()); // version
     c.extend_from_slice(&1u16.to_be_bytes()); // numBaseGlyphRecords
-    c.extend_from_slice(&30u32.to_be_bytes()); // baseGlyphRecordsOffset
-    c.extend_from_slice(&36u32.to_be_bytes()); // layerRecordsOffset
+    c.extend_from_slice(&34u32.to_be_bytes()); // baseGlyphRecordsOffset
+    c.extend_from_slice(&40u32.to_be_bytes()); // layerRecordsOffset
     c.extend_from_slice(&1u16.to_be_bytes()); // numLayerRecords
-    c.extend_from_slice(&40u32.to_be_bytes()); // baseGlyphListOffset
-    c.extend_from_slice(&[0; 12]); // layer list, clip list, var store
+    c.extend_from_slice(&44u32.to_be_bytes()); // baseGlyphListOffset
+    c.extend_from_slice(&[0; 16]); // layer list, clip list, index map, var store
     for v in [2u16, 0, 1] {
         c.extend_from_slice(&v.to_be_bytes()); // base glyph record
     }

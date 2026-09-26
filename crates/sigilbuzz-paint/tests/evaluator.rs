@@ -80,7 +80,7 @@ fn build_cpal_v0(colors: &[(u8, u8, u8, u8)]) -> Vec<u8> {
 /// offset 10 (relative to the BaseGlyphList start) and the caller
 /// appends its bytes after this header returns.
 fn build_v1_header(glyph_id: u16) -> Vec<u8> {
-    let header_len = 30; // v0 (14) + v1 appendix (16)
+    let header_len = 34; // v0 (14) + v1 appendix (20)
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // version
     out.extend_from_slice(&0u16.to_be_bytes()); // numBaseGlyphRecords (v0)
@@ -90,6 +90,7 @@ fn build_v1_header(glyph_id: u16) -> Vec<u8> {
     out.extend_from_slice(&(header_len as u32).to_be_bytes()); // baseGlyphListOffset
     out.extend_from_slice(&0u32.to_be_bytes()); // layerListOffset
     out.extend_from_slice(&0u32.to_be_bytes()); // clipListOffset
+    out.extend_from_slice(&0u32.to_be_bytes()); // varIndexMapOffset
     out.extend_from_slice(&0u32.to_be_bytes()); // varStoreOffset
 
     // BaseGlyphList: numRecords = 1, then the record { glyphID,
@@ -263,7 +264,7 @@ fn paint_colr_glyph_cycle_truncates() {
     // and glyph 2. Glyph 1's paint is a `PaintColrGlyph(2)`; glyph 2's
     // is a `PaintColrGlyph(1)`. The walker must bail when it sees gid 1
     // again on the visited stack rather than recursing forever.
-    let header_len = 30;
+    let header_len = 34;
     let mut colr = Vec::new();
     colr.extend_from_slice(&1u16.to_be_bytes());
     colr.extend_from_slice(&0u16.to_be_bytes());
@@ -271,9 +272,7 @@ fn paint_colr_glyph_cycle_truncates() {
     colr.extend_from_slice(&(header_len as u32).to_be_bytes());
     colr.extend_from_slice(&0u16.to_be_bytes());
     colr.extend_from_slice(&(header_len as u32).to_be_bytes()); // baseGlyphListOffset
-    colr.extend_from_slice(&0u32.to_be_bytes());
-    colr.extend_from_slice(&0u32.to_be_bytes());
-    colr.extend_from_slice(&0u32.to_be_bytes());
+    colr.extend_from_slice(&[0; 16]); // layer list, clip list, index map, store
 
     // BaseGlyphList: 2 records.
     let bgl_start = colr.len();
@@ -722,7 +721,7 @@ fn build_ivs(
 /// COLR data when non-empty and its absolute offset is recorded as
 /// `varStoreOffset` in the v1 header.
 fn build_v1_multi_colr(paints: &[(u16, Vec<u8>)], var_store: &[u8]) -> Vec<u8> {
-    let header_len: u32 = 30; // 14 (v0) + 16 (v1 appendix, 4 u32)
+    let header_len: u32 = 34; // 14 (v0) + 20 (v1 appendix, 5 u32)
 
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // version
@@ -733,6 +732,7 @@ fn build_v1_multi_colr(paints: &[(u16, Vec<u8>)], var_store: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&header_len.to_be_bytes()); // baseGlyphListOff
     out.extend_from_slice(&0u32.to_be_bytes()); // layerListOff
     out.extend_from_slice(&0u32.to_be_bytes()); // clipListOff
+    out.extend_from_slice(&0u32.to_be_bytes()); // varIndexMapOff
     let var_store_slot = out.len();
     out.extend_from_slice(&0u32.to_be_bytes()); // varStoreOff (filled in below)
 

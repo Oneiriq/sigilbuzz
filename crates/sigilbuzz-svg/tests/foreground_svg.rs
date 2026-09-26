@@ -134,11 +134,11 @@ fn colr() -> Vec<u8> {
     let mut c = Vec::new();
     c.extend_from_slice(&1u16.to_be_bytes());
     c.extend_from_slice(&0u16.to_be_bytes());
-    c.extend_from_slice(&30u32.to_be_bytes());
-    c.extend_from_slice(&30u32.to_be_bytes());
+    c.extend_from_slice(&34u32.to_be_bytes());
+    c.extend_from_slice(&34u32.to_be_bytes());
     c.extend_from_slice(&0u16.to_be_bytes());
-    c.extend_from_slice(&30u32.to_be_bytes());
-    c.extend_from_slice(&[0; 12]);
+    c.extend_from_slice(&34u32.to_be_bytes());
+    c.extend_from_slice(&[0; 16]);
     c.extend_from_slice(&(paints.len() as u32).to_be_bytes());
     let mut offset = 4 + 6 * paints.len();
     for (gid, p) in &paints {

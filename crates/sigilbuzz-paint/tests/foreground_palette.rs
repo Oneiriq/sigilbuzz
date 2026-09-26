@@ -79,7 +79,7 @@ fn build_cpal(palettes: &[&[(u8, u8, u8, u8)]]) -> Vec<u8> {
 /// `var_store`, when non-empty, is appended and referenced from the
 /// header's `varStoreOffset`.
 fn build_colr(paints: &[(u16, Vec<u8>)], var_store: &[u8]) -> Vec<u8> {
-    let header_len: u32 = 30;
+    let header_len: u32 = 34;
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes()); // version
     out.extend_from_slice(&0u16.to_be_bytes()); // numBaseGlyphRecords
@@ -89,6 +89,7 @@ fn build_colr(paints: &[(u16, Vec<u8>)], var_store: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&header_len.to_be_bytes()); // baseGlyphListOffset
     out.extend_from_slice(&0u32.to_be_bytes()); // layerListOffset
     out.extend_from_slice(&0u32.to_be_bytes()); // clipListOffset
+    out.extend_from_slice(&0u32.to_be_bytes()); // varIndexMapOffset
     let var_store_slot = out.len();
     out.extend_from_slice(&0u32.to_be_bytes()); // varStoreOffset
     out.extend_from_slice(&(paints.len() as u32).to_be_bytes());

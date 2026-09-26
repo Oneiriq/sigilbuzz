@@ -48,9 +48,9 @@ fn sfnt(tables: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
 }
 
 /// COLR with v0 base glyphs (`(gid, [(layer gid, entry)])`) and v1
-/// paints (`(gid, paint bytes)`), in the header layout sigilbuzz reads.
+/// paints (`(gid, paint bytes)`), with the 34-byte v1 header.
 fn colr(v0: &[(u16, &[(u16, u16)])], v1: &[(u16, Vec<u8>)]) -> Vec<u8> {
-    let header_len = 30usize;
+    let header_len = 34usize;
     let base_off = header_len;
     let layer_off = base_off + 6 * v0.len();
     let num_layers: usize = v0.iter().map(|(_, l)| l.len()).sum();
@@ -64,6 +64,7 @@ fn colr(v0: &[(u16, &[(u16, u16)])], v1: &[(u16, Vec<u8>)]) -> Vec<u8> {
     out.extend_from_slice(&(list_off as u32).to_be_bytes());
     out.extend_from_slice(&0u32.to_be_bytes()); // layer list
     out.extend_from_slice(&0u32.to_be_bytes()); // clip list
+    out.extend_from_slice(&0u32.to_be_bytes()); // index map
     out.extend_from_slice(&0u32.to_be_bytes()); // var store
     let mut first = 0u16;
     for (gid, layers) in v0 {
