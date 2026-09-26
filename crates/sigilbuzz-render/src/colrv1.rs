@@ -55,9 +55,8 @@ use crate::raster::rasterize as raster;
 /// produce for `gid` and renders it to a premultiplied RGBA pixmap.
 ///
 /// `palette_index` selects the CPAL palette the evaluator resolves
-/// palette entries against. Entries the font cannot supply, and
-/// foreground (`0xFFFF`) entries, render in the evaluator's default
-/// foreground, opaque black.
+/// palette entries against. Foreground (`0xFFFF`) entries, and entries
+/// the font cannot supply, render in `foreground` (straight-alpha RGBA).
 ///
 /// `tolerance` is the per-glyph curve flattening tolerance in pixel
 /// units (same semantics as [`crate::Rasterizer`]'s field).
@@ -68,6 +67,7 @@ pub(crate) fn rasterize_colrv1(
     size_pt: f32,
     coords: &[f32],
     tolerance: f32,
+    foreground: [u8; 4],
 ) -> Result<ColorPixmap, RenderError> {
     if !size_pt.is_finite() || size_pt <= 0.0 {
         return Err(RenderError::BadSize(size_pt));
@@ -89,9 +89,11 @@ pub(crate) fn rasterize_colrv1(
         }
     }
 
+    let [r, g, b, a] = foreground.map(|c| f32::from(c) / 255.0);
     let options = EvalOptions::new()
         .with_coords(coords)
-        .with_palette_index(palette_index);
+        .with_palette_index(palette_index)
+        .with_foreground(Color::new(r, g, b, a));
     let cmds = evaluate_with(face, gid, &options);
     if cmds.is_empty() {
         return Ok(ColorPixmap::new(0, 0));

@@ -15,6 +15,9 @@ the same input always gives the same bytes. SVG 1.1 has no sweep (conic) gradien
 COLRv1 sweep gradient becomes a `<linearGradient>` across the gradient's bounding box,
 with a comment in the output noting the substitution.
 
+Color glyph layers drawn in the text color (COLR palette entry `0xFFFF`) are filled with
+`currentColor`, so an inline SVG glyph takes the CSS `color` of the text around it.
+
 ## Quick start
 
 ```rust,no_run

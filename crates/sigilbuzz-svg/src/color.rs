@@ -7,6 +7,10 @@
 //! - solid `PaintSolid` leaves render as `<path fill="rgb(...)" .../>`.
 //! - linear / radial gradients land in a `<defs>` block and are
 //!   referenced via `fill="url(#grad-N)"`.
+//! - fills and gradient stops on COLR palette entry `0xFFFF` (the text
+//!   color) use `currentColor`, with the paint alpha as `fill-opacity`
+//!   or `stop-opacity`, so the glyph takes the color of the text it is
+//!   embedded in.
 //! - sweep gradients have no SVG 1.1 equivalent. We degrade them to a
 //!   linear gradient running across the gradient's center. The
 //!   colors are right, the angular distribution is not. The output
@@ -31,7 +35,7 @@ use core::fmt::Write as _;
 
 use sigilbuzz::Face;
 use sigilbuzz_paint::{
-    evaluate, evaluate_at_coords, Color, CompositeMode, DrawCmd, Gradient, GradientKind,
+    evaluate_with, Color, ColorStop, CompositeMode, DrawCmd, EvalOptions, Gradient, GradientKind,
     PaintSource, Transform2D,
 };
 
@@ -43,6 +47,11 @@ use crate::{path_bbox, path_data, push_num, F2Dot14, GlyphId, VIEWBOX_MARGIN};
 /// referenced outline glyphs carry a non-empty path. In that case the
 /// caller can fall back to [`crate::glyph_to_svg`] for a black
 /// outline rendering.
+///
+/// Paints on the foreground palette entry (the text color) are filled
+/// with `currentColor`, so the glyph inherits the CSS `color` of the
+/// element it is placed in (black when nothing sets it). Palette
+/// entries the font cannot supply are filled black.
 #[must_use]
 pub fn glyph_to_svg_color(face: &Face<'_>, gid: GlyphId) -> Option<String> {
     glyph_to_svg_color_at_coords(face, gid, &[])
@@ -55,11 +64,13 @@ pub fn glyph_to_svg_color_at_coords(
     gid: GlyphId,
     coords: &[F2Dot14],
 ) -> Option<String> {
-    let cmds = if coords.is_empty() {
-        evaluate(face, gid)
-    } else {
-        evaluate_at_coords(face, gid, coords)
-    };
+    // An opaque foreground keeps foreground alphas equal to the paint
+    // alpha, which is what `fill-opacity` / `stop-opacity` need next to
+    // `currentColor`.
+    let options = EvalOptions::new()
+        .with_coords(coords)
+        .with_foreground(Color::BLACK);
+    let cmds = evaluate_with(face, gid, &options);
     if cmds.is_empty() {
         return None;
     }
@@ -201,14 +212,21 @@ fn emit_fill(
 ) {
     let xform = transform_attr(transform);
     match paint {
-        // Foreground fills already carry the evaluator's default
-        // foreground (opaque black), so they need no special case.
-        PaintSource::Solid { color: c, .. } => {
+        // The evaluator's foreground is opaque, so a foreground fill's
+        // alpha is exactly the paint alpha.
+        PaintSource::Solid {
+            color: c,
+            is_foreground,
+        } => {
             body.push_str("<path");
             if let Some(t) = xform {
                 let _ = write!(body, r#" transform="{t}""#);
             }
-            let _ = write!(body, r#" d="{d}" fill="{}""#, color_to_rgb(*c));
+            let _ = write!(
+                body,
+                r#" d="{d}" fill="{}""#,
+                fill_color(*c, *is_foreground)
+            );
             if c.a < 1.0 - 1e-6 {
                 let _ = write!(body, r#" fill-opacity="{}""#, fmt_num(c.a));
             }
@@ -249,7 +267,7 @@ fn emit_gradient_def(defs: &mut Defs, g: &Gradient) -> String {
                 spread_method(g),
             );
             for stop in &g.stops {
-                s.push_str(&stop_tag(stop.offset, stop.color));
+                s.push_str(&stop_tag(stop));
             }
             s.push_str("</linearGradient>");
             defs.push(s);
@@ -274,7 +292,7 @@ fn emit_gradient_def(defs: &mut Defs, g: &Gradient) -> String {
                 spread_method(g),
             );
             for stop in &g.stops {
-                s.push_str(&stop_tag(stop.offset, stop.color));
+                s.push_str(&stop_tag(stop));
             }
             s.push_str("</radialGradient>");
             defs.push(s);
@@ -309,7 +327,7 @@ fn emit_gradient_def(defs: &mut Defs, g: &Gradient) -> String {
                 spread_method(g),
             );
             for stop in &g.stops {
-                s.push_str(&stop_tag(stop.offset, stop.color));
+                s.push_str(&stop_tag(stop));
             }
             s.push_str("</linearGradient>");
             defs.push(s);
@@ -326,19 +344,18 @@ fn spread_method(g: &Gradient) -> &'static str {
     }
 }
 
-fn stop_tag(offset: f32, color: Color) -> String {
-    if (color.a - 1.0).abs() < 1e-6 {
+fn stop_tag(stop: &ColorStop) -> String {
+    let color = fill_color(stop.color, stop.is_foreground);
+    if (stop.color.a - 1.0).abs() < 1e-6 {
         format!(
-            r#"<stop offset="{}" stop-color="{}"/>"#,
-            fmt_num(offset),
-            color_to_rgb(color),
+            r#"<stop offset="{}" stop-color="{color}"/>"#,
+            fmt_num(stop.offset),
         )
     } else {
         format!(
-            r#"<stop offset="{}" stop-color="{}" stop-opacity="{}"/>"#,
-            fmt_num(offset),
-            color_to_rgb(color),
-            fmt_num(color.a),
+            r#"<stop offset="{}" stop-color="{color}" stop-opacity="{}"/>"#,
+            fmt_num(stop.offset),
+            fmt_num(stop.color.a),
         )
     }
 }
@@ -346,6 +363,17 @@ fn stop_tag(offset: f32, color: Color) -> String {
 // =========================================================================
 // Color + transform helpers
 // =========================================================================
+
+/// The SVG paint for a resolved color: `currentColor` for the COLR
+/// foreground entry, so the glyph follows the surrounding text color,
+/// else an `rgb(...)` literal. Alpha is emitted separately.
+fn fill_color(c: Color, is_foreground: bool) -> String {
+    if is_foreground {
+        String::from("currentColor")
+    } else {
+        color_to_rgb(c)
+    }
+}
 
 fn color_to_rgb(c: Color) -> String {
     let r = (c.r.clamp(0.0, 1.0) * 255.0).round() as u32;
@@ -622,6 +650,66 @@ mod tests {
             "M 0 0 Z",
         );
         assert!(!body.contains("fill-opacity"));
+    }
+
+    #[test]
+    fn foreground_solid_fills_with_current_color() {
+        let mut defs = Defs::default();
+        let mut body = String::new();
+        emit_fill(
+            &mut defs,
+            &mut body,
+            Transform2D::IDENTITY,
+            &PaintSource::Solid {
+                color: Color::new(0.0, 0.0, 0.0, 0.5),
+                is_foreground: true,
+            },
+            "M 0 0 Z",
+        );
+        assert!(body.contains(r#"fill="currentColor""#), "{body}");
+        assert!(body.contains(r#"fill-opacity="0.5""#), "{body}");
+        assert!(!body.contains("rgb("), "{body}");
+    }
+
+    #[test]
+    fn foreground_stops_use_current_color() {
+        use sigilbuzz_paint::{Extend, Gradient, GradientKind};
+        let g = Gradient {
+            kind: GradientKind::Linear {
+                p0: (0.0, 0.0),
+                p1: (100.0, 0.0),
+                p2: (0.0, 100.0),
+            },
+            stops: alloc::vec![
+                ColorStop::new(0.0, Color::new(1.0, 0.0, 0.0, 1.0)),
+                ColorStop {
+                    offset: 1.0,
+                    color: Color::new(0.0, 0.0, 0.0, 0.25),
+                    is_foreground: true,
+                },
+                ColorStop {
+                    offset: 1.0,
+                    color: Color::BLACK,
+                    is_foreground: true,
+                },
+            ],
+            extend: Extend::Pad,
+        };
+        let mut defs = Defs::default();
+        emit_gradient_def(&mut defs, &g);
+        let svg = defs.into_svg();
+        assert!(
+            svg.contains(r#"<stop offset="0" stop-color="rgb(255,0,0)"/>"#),
+            "{svg}"
+        );
+        assert!(
+            svg.contains(r#"<stop offset="1" stop-color="currentColor" stop-opacity="0.25"/>"#),
+            "{svg}"
+        );
+        assert!(
+            svg.contains(r#"<stop offset="1" stop-color="currentColor"/>"#),
+            "{svg}"
+        );
     }
 
     #[test]

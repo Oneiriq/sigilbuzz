@@ -26,11 +26,13 @@ use crate::raster::{rasterize as raster, Render};
 ///
 /// Construction is cheap. The default config picks a `0.25`-pixel
 /// curve flattening tolerance, which matches FreeType's smooth
-/// rasterizer perceptually.
+/// rasterizer perceptually, and an opaque black foreground color.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rasterizer {
     /// Curve flattening tolerance in pixels.
     tolerance: f32,
+    /// Straight-alpha RGBA used for COLR palette entry `0xFFFF`.
+    foreground: [u8; 4],
 }
 
 impl Default for Rasterizer {
@@ -40,10 +42,17 @@ impl Default for Rasterizer {
 }
 
 impl Rasterizer {
+    /// Foreground color used unless [`Rasterizer::with_foreground`]
+    /// picks another: opaque black, the default ink of a text renderer.
+    pub const DEFAULT_FOREGROUND: [u8; 4] = [0, 0, 0, 255];
+
     /// New rasterizer with default settings.
     #[must_use]
     pub const fn new() -> Self {
-        Self { tolerance: 0.25 }
+        Self {
+            tolerance: 0.25,
+            foreground: Self::DEFAULT_FOREGROUND,
+        }
     }
 
     /// Override the curve flattening tolerance (pixel units). Smaller
@@ -52,6 +61,37 @@ impl Rasterizer {
     pub const fn with_tolerance(mut self, tol: f32) -> Self {
         self.tolerance = tol;
         self
+    }
+
+    /// Paints color-glyph layers that use COLR palette entry `0xFFFF`
+    /// (the text color) in `rgba`, straight (not premultiplied) alpha.
+    /// Applies to [`Rasterizer::rasterize_colrv0_glyph`] and
+    /// [`Rasterizer::rasterize_colrv1_glyph`]; the paint's own alpha
+    /// multiplies `rgba[3]`.
+    ///
+    /// ```
+    /// use sigilbuzz_render::Rasterizer;
+    ///
+    /// assert_eq!(Rasterizer::new().foreground(), [0, 0, 0, 255]);
+    /// let white = Rasterizer::new().with_foreground([255, 255, 255, 255]);
+    /// assert_eq!(white.foreground(), [255, 255, 255, 255]);
+    /// ```
+    #[must_use]
+    pub const fn with_foreground(mut self, rgba: [u8; 4]) -> Self {
+        self.foreground = rgba;
+        self
+    }
+
+    /// The foreground color, straight-alpha RGBA.
+    ///
+    /// ```
+    /// use sigilbuzz_render::Rasterizer;
+    ///
+    /// assert_eq!(Rasterizer::new().foreground(), Rasterizer::DEFAULT_FOREGROUND);
+    /// ```
+    #[must_use]
+    pub const fn foreground(&self) -> [u8; 4] {
+        self.foreground
     }
 
     /// Returns the configured curve flattening tolerance. Used by
@@ -125,9 +165,8 @@ impl Rasterizer {
     /// is rasterized at the same size as the base glyph; the resulting
     /// alpha mask is multiplied by the palette color for that layer
     /// and then `over`-composited on top of the running pixmap. The
-    /// special palette index `0xFFFF` falls back to opaque black,
-    /// rasterizers in real apps would substitute the foreground text
-    /// color here, but at this layer we have no app-level context.
+    /// special palette index `0xFFFF` paints in the foreground color
+    /// (see [`Rasterizer::with_foreground`]), opaque black by default.
     ///
     /// # Errors
     /// - [`RenderError::NoColrV0`] when the glyph has no v0 layer record.
@@ -209,10 +248,7 @@ impl Rasterizer {
             let mask = raster(&segs);
 
             let color = if layer.palette_index == 0xFFFF {
-                // Foreground fallback. The renderer has no app context
-                // here, so emit opaque black; a downstream caller can
-                // remap this layer if it cares.
-                [0, 0, 0, 255]
+                self.foreground
             } else {
                 let c = cpal.color(palette_index, layer.palette_index).ok_or(
                     RenderError::BadPaletteIndex {
@@ -274,7 +310,9 @@ impl Rasterizer {
     /// [`Rasterizer::rasterize_colrv0_glyph`], an index the font does
     /// not have is not an error: as in HarfBuzz, every palette entry
     /// then paints in the foreground color, as does an entry the palette
-    /// lacks. Foreground (`0xFFFF`) entries render opaque black.
+    /// lacks. Foreground (`0xFFFF`) entries paint in the foreground
+    /// color (see [`Rasterizer::with_foreground`]), opaque black by
+    /// default.
     ///
     /// # Errors
     /// - [`RenderError::ColrV1NotFound`] when the font has no v1
@@ -292,7 +330,15 @@ impl Rasterizer {
         size_pt: f32,
         coords: &[f32],
     ) -> Result<ColorPixmap, RenderError> {
-        rasterize_colrv1(face, gid, palette_index, size_pt, coords, self.tolerance)
+        rasterize_colrv1(
+            face,
+            gid,
+            palette_index,
+            size_pt,
+            coords,
+            self.tolerance,
+            self.foreground,
+        )
     }
 
     /// Rasterizes an embedded bitmap glyph (CBDT/CBLC or sbix PNG)
