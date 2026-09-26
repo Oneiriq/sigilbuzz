@@ -14,6 +14,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
+const AMIRI: &[u8] = include_bytes!("../../../tests/fixtures/amiri_regular.ttf");
 
 /// Counter so each fixture path is unique across tests in one process.
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -150,6 +151,67 @@ fn shape_rejects_bad_feature_tag() {
         stderr.contains("must be exactly 4"),
         "expected feature-tag error, got: {stderr}"
     );
+}
+
+/// Glyph ids from `sigilbuzz shape font text extra...`.
+fn shaped_gids(font: &Path, text: &str, extra: &[&str]) -> Vec<String> {
+    let mut args: Vec<&std::ffi::OsStr> = vec!["shape".as_ref(), font.as_os_str(), text.as_ref()];
+    args.extend(extra.iter().map(std::ffi::OsStr::new));
+    let (stdout, stderr, ok) = run_cli(args);
+    assert!(ok, "binary failed: stderr={stderr}");
+    stdout
+        .lines()
+        .map(|l| parse_field(l, "gid=").to_owned())
+        .collect()
+}
+
+#[test]
+fn shape_language_selects_the_language_system() {
+    // Open Sans has Romanian comma-below forms under latn/ROM.
+    let font = open_sans_path();
+    let text = "\u{0218}\u{0219}";
+    let default = shaped_gids(&font, text, &[]);
+    let romanian = shaped_gids(&font, text, &["--language", "ro"]);
+    assert_eq!(default.len(), 2);
+    assert_ne!(default, romanian, "--language ro must reach locl");
+    assert_eq!(romanian, shaped_gids(&font, text, &["--language", "ro-RO"]));
+}
+
+#[test]
+fn shape_script_shapes_the_whole_text_as_one_script() {
+    // As Latin, the Arabic letters are not joined: they keep their
+    // isolated forms instead of init + fina.
+    let font = write_tempfile("amiri.ttf", AMIRI);
+    let text = "\u{0628}\u{0628}";
+    let arabic = shaped_gids(&font, text, &["--direction", "rtl"]);
+    let latin = shaped_gids(&font, text, &["--direction", "rtl", "--script", "latn"]);
+    assert_eq!(arabic.len(), 2);
+    assert_ne!(arabic, latin);
+    assert_eq!(latin[0], latin[1], "unjoined behs share one glyph");
+    assert_eq!(
+        arabic,
+        shaped_gids(&font, text, &["--direction", "rtl", "--script", "Arab"])
+    );
+}
+
+#[test]
+fn shape_rejects_bad_script_and_language() {
+    let font = open_sans_path();
+    for (flag, value) in [
+        ("--script", "Arabic"),
+        ("--script", "ar1b"),
+        ("--language", "@"),
+    ] {
+        let (_stdout, stderr, ok) = run_cli([
+            "shape".as_ref(),
+            font.as_os_str(),
+            "Hi".as_ref(),
+            flag.as_ref(),
+            value.as_ref(),
+        ]);
+        assert!(!ok, "{flag} {value} should fail");
+        assert!(stderr.contains("invalid"), "{flag} {value}: {stderr}");
+    }
 }
 
 fn parse_field<'a>(line: &'a str, key: &str) -> &'a str {
