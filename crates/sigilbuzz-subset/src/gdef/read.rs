@@ -1,4 +1,5 @@
-//! Bounds-checked readers for the GDEF rewriters.
+//! Bounds-checked readers for the GDEF rewriters: the Coverage and
+//! ClassDef walkers here, and the scalar readers of [`crate::read`].
 //!
 //! Every position is a byte offset from the start of the GDEF table,
 //! and every failure reports that offset so a malformed font can be
@@ -8,42 +9,7 @@ use alloc::vec::Vec;
 
 use sigilbuzz::Error;
 
-/// Reads the big-endian u16 at `pos`.
-pub(super) fn u16_at(table: &[u8], pos: usize, context: &'static str) -> Result<u16, Error> {
-    pos.checked_add(2)
-        .and_then(|end| table.get(pos..end))
-        .map(|b| u16::from_be_bytes([b[0], b[1]]))
-        .ok_or(Error::Truncated {
-            offset: pos,
-            context,
-        })
-}
-
-/// Reads the big-endian u32 at `pos`.
-pub(super) fn u32_at(table: &[u8], pos: usize, context: &'static str) -> Result<u32, Error> {
-    pos.checked_add(4)
-        .and_then(|end| table.get(pos..end))
-        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-        .ok_or(Error::Truncated {
-            offset: pos,
-            context,
-        })
-}
-
-/// Returns `table[pos..pos + len]`, or a truncation error at `pos`.
-pub(super) fn slice_at<'a>(
-    table: &'a [u8],
-    pos: usize,
-    len: usize,
-    context: &'static str,
-) -> Result<&'a [u8], Error> {
-    pos.checked_add(len)
-        .and_then(|end| table.get(pos..end))
-        .ok_or(Error::Truncated {
-            offset: pos,
-            context,
-        })
-}
+pub(super) use crate::read::{slice_at, u16_at, u32_at};
 
 /// Lists the `(glyph, class)` pairs of the ClassDef table at `off`,
 /// leaving out glyphs of class 0.

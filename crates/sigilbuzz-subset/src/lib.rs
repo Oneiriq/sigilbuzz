@@ -135,6 +135,7 @@ mod instance;
 mod layout;
 mod lookup_list;
 mod offset16;
+mod read;
 mod sfnt;
 mod util;
 mod varc;

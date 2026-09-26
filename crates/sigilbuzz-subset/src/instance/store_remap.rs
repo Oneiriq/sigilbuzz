@@ -1,7 +1,7 @@
 //! Keeping VariationIndex tables in step with a partially instanced
 //! GDEF ItemVariationStore.
 //!
-//! [`super::bake_ivs_partial`] projects the store onto the kept axes and
+//! [`super::project_ivs`] projects the store onto the kept axes and
 //! elides every ItemVariationData subtable left with no region (all of
 //! its regions sat outside the pinned coordinates) or no rows. The
 //! subtables after an elided one move down, so an `(outer, inner)` row
@@ -23,10 +23,11 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
 use super::gdef_store::{has_store, identity_map, GdefBake};
-use super::{bake_ivs_partial, AxisPin, RegionRemap};
+use super::{project_ivs, shifted, AxisPin, RegionRemap};
 use crate::gdef::StorePlan;
 use crate::gpos_var::{walk_gpos_device_slots, VARIATION_INDEX_DELTA_FORMAT};
 use crate::layout::GidMap;
+use crate::read;
 use crate::warnings::Warnings;
 use crate::SubsetError;
 
@@ -78,18 +79,21 @@ pub(super) fn bake_gdef_bytes_partial(
     if !has_store(bytes) {
         return Ok((GdefBake::Unchanged, None));
     }
-    let store_off = u32::from_be_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]) as usize;
-    let projected = bytes
-        .get(store_off..)
-        .and_then(|store| bake_ivs_partial(store, coords, pins));
-    if projected.is_none() {
-        warnings.push(
-            tag::GDEF,
-            store_off,
-            "GDEF ItemVariationStore could not be read",
-            "the ItemVariationStore",
-        );
-    }
+    // A store that cannot be projected is dropped and reported; its
+    // rows then read as no variation. Running out of 32-bit offsets
+    // is still an error.
+    let projected =
+        match read::offset32_at(bytes, 14, 0, "GDEF ItemVariationStore offset past the end")
+            .map_err(SubsetError::from)
+            .and_then(|at| project_ivs(&bytes[at..], coords, pins).map_err(|e| shifted(e, at)))
+        {
+            Ok(projected) => Some(projected),
+            Err(SubsetError::Parse(e)) => {
+                warnings.parse_error(tag::GDEF, 0, &e, "the ItemVariationStore");
+                None
+            }
+            Err(other) => return Err(other),
+        };
     let (rebuilt, remap) = match projected {
         Some((store, rows)) => {
             let remap = StoreRemap::Rows(rows);
