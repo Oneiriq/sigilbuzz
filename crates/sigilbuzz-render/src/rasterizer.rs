@@ -168,11 +168,14 @@ impl Rasterizer {
     /// special palette index `0xFFFF` paints in the foreground color
     /// (see [`Rasterizer::with_foreground`]), opaque black by default.
     ///
+    /// Palette entries resolve the way
+    /// [`Rasterizer::rasterize_colrv1_glyph`] resolves them, as in
+    /// HarfBuzz: a palette index the font does not have, an entry past
+    /// the end of the palette, and a font without `CPAL` all paint in
+    /// the foreground color instead of failing.
+    ///
     /// # Errors
     /// - [`RenderError::NoColrV0`] when the glyph has no v0 layer record.
-    /// - [`RenderError::NoCpal`] when the font lacks `CPAL`.
-    /// - [`RenderError::BadPaletteIndex`] when a layer's palette entry
-    ///   is out of range.
     /// - [`RenderError::Parse`] for any underlying parser failure.
     pub fn rasterize_colrv0_glyph(
         &self,
@@ -195,23 +198,7 @@ impl Rasterizer {
             .map_err(|_| RenderError::Parse("colr"))?
             .ok_or(RenderError::NoColrV0(gid))?;
         let layers = colr.v0_layers(gid).ok_or(RenderError::NoColrV0(gid))?;
-        let cpal = face
-            .cpal()
-            .map_err(|_| RenderError::Parse("cpal"))?
-            .ok_or(RenderError::NoCpal)?;
-
-        // Validate the user-supplied palette index against the CPAL
-        // up front. The per-layer `cpal.color()` lookup below would
-        // also catch this, but only for layers whose palette entry
-        // is not the foreground sentinel `0xFFFF`. A glyph composed
-        // entirely of foreground layers would otherwise silently
-        // accept an out-of-range palette. (issue #203)
-        if palette_index >= cpal.num_palettes() {
-            return Err(RenderError::BadPaletteIndex {
-                palette: palette_index,
-                entry: 0xFFFF,
-            });
-        }
+        let cpal = face.cpal().map_err(|_| RenderError::Parse("cpal"))?;
 
         let s = size_pt / upem;
         let xform = Affine {
@@ -247,17 +234,13 @@ impl Rasterizer {
             }
             let mask = raster(&segs);
 
-            let color = if layer.palette_index == 0xFFFF {
-                self.foreground
-            } else {
-                let c = cpal.color(palette_index, layer.palette_index).ok_or(
-                    RenderError::BadPaletteIndex {
-                        palette: palette_index,
-                        entry: layer.palette_index,
-                    },
-                )?;
-                [c.r, c.g, c.b, c.a]
-            };
+            // HarfBuzz's paint context: entry 0xFFFF is the foreground,
+            // and so is any entry the font cannot supply.
+            let color = cpal
+                .as_ref()
+                .filter(|_| layer.palette_index != 0xFFFF)
+                .and_then(|cpal| cpal.color(palette_index, layer.palette_index))
+                .map_or(self.foreground, |c| [c.r, c.g, c.b, c.a]);
             masks.push(LayerMask { r: mask, color });
         }
 
@@ -313,13 +296,11 @@ impl Rasterizer {
     /// any clip renders as an empty pixmap.
     ///
     /// `palette_index` selects the CPAL palette that solid fills and
-    /// gradient stops resolve against. Unlike
-    /// [`Rasterizer::rasterize_colrv0_glyph`], an index the font does
-    /// not have is not an error: as in HarfBuzz, every palette entry
-    /// then paints in the foreground color, as does an entry the palette
-    /// lacks. Foreground (`0xFFFF`) entries paint in the foreground
-    /// color (see [`Rasterizer::with_foreground`]), opaque black by
-    /// default.
+    /// gradient stops resolve against. An index the font does not have
+    /// is not an error: as in HarfBuzz, every palette entry then paints
+    /// in the foreground color, as does an entry the palette lacks.
+    /// Foreground (`0xFFFF`) entries paint in the foreground color (see
+    /// [`Rasterizer::with_foreground`]), opaque black by default.
     ///
     /// # Errors
     /// - [`RenderError::ColrV1NotFound`] when the font has no v1

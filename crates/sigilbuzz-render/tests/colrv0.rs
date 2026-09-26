@@ -322,29 +322,30 @@ fn colrv0_composition_is_deterministic() {
 }
 
 #[test]
-fn colrv0_oob_palette_index_with_real_layers_errors() {
-    // Sanity: when a layer has a real palette entry, an out-of-range
-    // palette index already errors via the per-layer cpal lookup.
+fn colrv0_oob_palette_index_paints_every_layer_in_the_foreground() {
+    // As in HarfBuzz (and the COLRv1 path): a palette the font does
+    // not have resolves every palette entry to the foreground color.
     let bytes = build_colrv0_font();
     let blob = Blob::new(&bytes);
     let face = Face::parse(&blob, 0).unwrap();
-    let rast = Rasterizer::new();
-    let err = rast
+    let green = Rasterizer::new().with_foreground([0, 255, 0, 255]);
+    let valid = green
+        .rasterize_colrv0_glyph(&face, 0, 0, 24.0, &[])
+        .unwrap();
+    let pix = green
         .rasterize_colrv0_glyph(&face, 0, 999, 24.0, &[])
-        .unwrap_err();
+        .expect("out-of-range palette still renders");
+    assert_eq!((pix.width, pix.height), (valid.width, valid.height));
+    let inked: Vec<&[u8]> = pix.data.chunks_exact(4).filter(|p| p[3] > 0).collect();
+    assert!(!inked.is_empty(), "the layers still paint");
     assert!(
-        matches!(
-            err,
-            sigilbuzz_render::RenderError::BadPaletteIndex { palette: 999, .. }
-        ),
-        "got {err:?}"
+        inked.iter().all(|p| p[0] == 0 && p[2] == 0 && p[1] == p[3]),
+        "every layer is the green foreground"
     );
 }
 
 /// Build a COLRv0 font where both layers are flagged as foreground
-/// (`palette_index == 0xFFFF`). The pre-fix rasterizer would happily
-/// accept any user-supplied palette_index here because the
-/// per-layer `cpal.color()` lookup is skipped for foreground layers.
+/// (`palette_index == 0xFFFF`), so no layer consults CPAL.
 #[allow(clippy::too_many_lines)]
 fn build_colrv0_foreground_only_font() -> Vec<u8> {
     let head = {
@@ -500,27 +501,20 @@ fn build_colrv0_foreground_only_font() -> Vec<u8> {
 }
 
 #[test]
-fn colrv0_oob_palette_index_with_foreground_only_layers_errors() {
-    // Regression for issue #203: pre-fix rasterizer accepted any
-    // palette_index when every layer was a foreground sentinel
-    // (0xFFFF) because the per-layer cpal lookup that would have
-    // detected the bad index was skipped.
+fn colrv0_foreground_only_layers_ignore_the_palette_index() {
+    // Foreground layers never consult CPAL, so every palette index,
+    // valid or not, renders the same pixels (issue #203 made an
+    // out-of-range index an error; HarfBuzz resolves it instead).
     let bytes = build_colrv0_foreground_only_font();
     let blob = Blob::new(&bytes);
     let face = Face::parse(&blob, 0).unwrap();
     let rast = Rasterizer::new();
-    // Valid palette index 0 must succeed.
-    let ok = rast.rasterize_colrv0_glyph(&face, 0, 0, 32.0, &[]);
-    assert!(ok.is_ok(), "valid palette: {:?}", ok.err());
-    // Out-of-range palette index 5 (font has 1 palette) must error.
-    let err = rast
+    let valid = rast
+        .rasterize_colrv0_glyph(&face, 0, 0, 32.0, &[])
+        .expect("valid palette");
+    let out_of_range = rast
         .rasterize_colrv0_glyph(&face, 0, 5, 32.0, &[])
-        .expect_err("oob palette must error");
-    assert!(
-        matches!(
-            err,
-            sigilbuzz_render::RenderError::BadPaletteIndex { palette: 5, .. }
-        ),
-        "got {err:?}"
-    );
+        .expect("out-of-range palette still renders");
+    assert!(!valid.is_empty());
+    assert_eq!(valid, out_of_range);
 }
