@@ -1,8 +1,9 @@
 //! Variation-delta lookup for `PaintVar*` fields and `VarColorStop`s.
 //!
-//! The flattening evaluator ([`crate::evaluate_with`]) resolves every
-//! delta through one [`Deltas`] value, so units and index-map handling
-//! live in one place.
+//! Both the flattening evaluator ([`crate::evaluate_with`]) and the
+//! HarfBuzz-order walker ([`crate::walk`]) resolve deltas through the
+//! same [`Deltas`] value, so the two never disagree about units or
+//! index-map handling.
 
 use sigilbuzz::tables::colr::{Colr, VarIndexBase};
 use sigilbuzz::tables::variation_store::ItemVariationStore;

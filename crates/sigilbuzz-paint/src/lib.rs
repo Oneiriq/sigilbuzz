@@ -56,6 +56,10 @@ mod eval;
 mod gradient;
 mod options;
 mod transform;
+// Public only for sigilbuzz-capi's `hb_paint_*` bridge; not part of the
+// stable API (docs/STABILITY.md, Tier 2).
+#[doc(hidden)]
+pub mod walk;
 
 pub use color::Color;
 pub use eval::{evaluate, evaluate_at_coords, evaluate_with, DrawCmd, GlyphId, PaintSource};

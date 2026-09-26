@@ -155,6 +155,10 @@ release.
   types are exported from `tables::` and are stable. Helper types you can only reach
   through the module path (for example `tables::layout::FeatureList` or
   `tables::gpos::ChainContextPos`) are not.
+- `sigilbuzz_paint::walk`: the paint-tree walk in HarfBuzz's callback order
+  (`paint_glyph`, `PaintSink`, `ColorRef`, `StopRef`, `ColorLineRef`, `Painted`).
+  sigilbuzz-capi drives its `hb_paint_funcs_t` bridge from it. Renderers should use
+  `evaluate_with`.
 
 ### Tier 3: internal
 
