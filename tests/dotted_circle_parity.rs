@@ -10,7 +10,7 @@
 //! clusters the way HarfBuzz does yet.
 
 use rustybuzz::{BufferFlags, Direction as RbDirection};
-use sigilbuzz::{shape, Blob, Buffer, Direction, Face, Font};
+use sigilbuzz::{shape, Blob, Buffer, BufferFlags as Flags, Direction, Face, Font};
 
 const DEVANAGARI: &[u8] = include_bytes!("fonts/NotoSansDevanagari-Regular.ttf");
 const BENGALI: &[u8] = include_bytes!("fonts/NotoSansBengali-Regular.ttf");
@@ -28,7 +28,11 @@ fn sigilbuzz_rows(data: &[u8], text: &str, circles: bool) -> Vec<Row> {
     let mut buffer = Buffer::new();
     buffer.push_str(text);
     buffer.set_direction(Direction::Ltr);
-    buffer.set_insert_dotted_circle(circles);
+    buffer.set_flags(if circles {
+        Flags::DEFAULT
+    } else {
+        Flags::DO_NOT_INSERT_DOTTED_CIRCLE
+    });
     shape(&font, &buffer, &[])
         .expect("sigilbuzz shape")
         .glyphs
@@ -101,7 +105,7 @@ fn khmer_myanmar_and_use_orphans_sit_on_a_dotted_circle() {
 }
 
 #[test]
-fn the_buffer_option_turns_insertion_off() {
+fn the_flag_turns_insertion_off() {
     assert_parity(DEVANAGARI, DEVANAGARI_BROKEN, false);
     assert_parity(KHMER, &["\u{17C1}\u{1780}", "\u{17B6}"], false);
     assert_eq!(sigilbuzz_rows(DEVANAGARI, "\u{093F}", false).len(), 1);

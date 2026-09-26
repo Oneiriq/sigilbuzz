@@ -16,7 +16,7 @@ use super::{
     dotted_circle, feature_disabled, ignorables, native_direction, position, required, rotate,
     Feature, VarCtx,
 };
-use crate::buffer::{script_priority_for, Buffer, Direction, Glyph, ShapedRun};
+use crate::buffer::{script_priority_for, Buffer, BufferFlags, Direction, Glyph, ShapedRun};
 use crate::error::Result;
 use crate::font::Font;
 use crate::ot::arabic::{assign_from_types_in_context, JoiningContext, JoiningForm};
@@ -370,7 +370,11 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         // Broken syllables get a dotted circle to sit on.
         let circled = cmap
             .glyph_id('\u{25CC}')
-            .filter(|_| buffer.insert_dotted_circle())
+            .filter(|_| {
+                !buffer
+                    .flags()
+                    .contains(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE)
+            })
             .and_then(|circle| dotted_circle::insert(seg.script, seg_cps, &mut seg_glyphs, circle));
         let seg_cps = circled.as_deref().unwrap_or(seg_cps);
 

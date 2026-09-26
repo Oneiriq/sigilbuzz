@@ -93,7 +93,7 @@ pub mod unicode;
 
 pub use bidi::{BidiParagraph, BidiRun, ShapedBidiRun};
 pub use blob::Blob;
-pub use buffer::{Buffer, Direction, Glyph, ShapedRun};
+pub use buffer::{Buffer, BufferFlags, Direction, Glyph, ShapedRun};
 pub use error::{Error, Result};
 pub use face::{Face, GlyphBitmapEntry};
 pub use font::Font;

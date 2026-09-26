@@ -5,7 +5,7 @@
 //! [`Buffer`]; this module adds the script and language, plus the
 //! pre- and post-context: text around the buffer's run that is not
 //! shaped but tells the shaper how the run connects to its
-//! neighbors, and the dotted-circle option for broken syllables.
+//! neighbors.
 
 use crate::buffer::Buffer;
 use crate::language::Language;
@@ -183,51 +183,6 @@ impl Buffer {
             .map_or(text.len(), |(i, _)| i);
         self.post_context.clear();
         self.post_context.push_str(&text[..end]);
-    }
-
-    /// True (the default) when shaping inserts U+25CC DOTTED CIRCLE
-    /// for broken syllables; see [`Self::set_insert_dotted_circle`].
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use sigilbuzz::Buffer;
-    ///
-    /// let mut buffer = Buffer::new();
-    /// assert!(buffer.insert_dotted_circle());
-    /// buffer.set_insert_dotted_circle(false);
-    /// assert!(!buffer.insert_dotted_circle());
-    /// ```
-    #[must_use]
-    pub const fn insert_dotted_circle(&self) -> bool {
-        !self.no_dotted_circle
-    }
-
-    /// Chooses whether shaping inserts U+25CC DOTTED CIRCLE for broken
-    /// syllables.
-    ///
-    /// In the Indic, Khmer, Myanmar, and USE scripts, a dependent mark
-    /// (a vowel sign, virama, nukta, bindu, ...) that starts a syllable
-    /// has no base to sit on. Like HarfBuzz, [`crate::shape`] inserts a
-    /// dotted circle glyph in front of it, when the font has one, so
-    /// the mark is drawn on the circle. Pass `false` for HarfBuzz's
-    /// `HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE` behavior, for
-    /// example when the run continues text shaped earlier. Like
-    /// HarfBuzz's buffer flags, the setting survives [`Self::clear`].
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use sigilbuzz::Buffer;
-    ///
-    /// let mut buffer = Buffer::new();
-    /// buffer.push_str("\u{093F}");
-    /// buffer.set_insert_dotted_circle(false);
-    /// buffer.clear();
-    /// assert!(!buffer.insert_dotted_circle());
-    /// ```
-    pub fn set_insert_dotted_circle(&mut self, enabled: bool) {
-        self.no_dotted_circle = !enabled;
     }
 }
 

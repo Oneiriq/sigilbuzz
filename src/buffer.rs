@@ -16,6 +16,9 @@ use core::ops::Range;
 
 use crate::unicode::{script_of, Script};
 
+mod flags;
+pub use flags::BufferFlags;
+
 /// Writing direction of a text run.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -211,10 +214,8 @@ pub struct Buffer {
     /// Up to [`Buffer::CONTEXT_LENGTH`] characters that follow the
     /// text in the source, set by [`Buffer::set_post_context`].
     pub(crate) post_context: String,
-    /// `true` after [`Buffer::set_insert_dotted_circle`]`(false)`, like
-    /// HarfBuzz's `HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE`. Stored
-    /// negated so the default is HarfBuzz's.
-    pub(crate) no_dotted_circle: bool,
+    /// HarfBuzz's buffer flags, set by [`Buffer::set_flags`].
+    pub(crate) flags: BufferFlags,
 }
 
 impl Buffer {

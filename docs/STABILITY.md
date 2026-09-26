@@ -76,9 +76,10 @@ signatures only change in a major version.
     direction
   - `Buffer::unset_direction`: forget the caller's direction, like HarfBuzz's
     `hb_buffer_set_direction(buffer, HB_DIRECTION_INVALID)`
-  - `Buffer::{set_insert_dotted_circle, insert_dotted_circle}`: whether broken Indic,
-    Khmer, Myanmar, and USE syllables get a U+25CC dotted circle (off is HarfBuzz's
-    `HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE`)
+  - `BufferFlags` and `Buffer::{set_flags, flags}`: HarfBuzz's buffer flags with
+    HarfBuzz's values (`EOT`, `DO_NOT_INSERT_DOTTED_CIRCLE`). They replace the
+    `Buffer::{set_insert_dotted_circle, insert_dotted_circle}` pair that 0.22.0
+    development builds had, and survive `Buffer::clear`.
 
 `sigilbuzz-render`:
 
