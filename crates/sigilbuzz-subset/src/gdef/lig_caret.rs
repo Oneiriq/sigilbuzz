@@ -43,10 +43,11 @@ pub(super) fn rewrite(
 ) -> Result<Option<Vec<u8>>, SubsetError> {
     let mut entries = Vec::new();
     for (new_gid, lig_glyph) in kept_entries(table, off, map, "GDEF LigCaretList")? {
-        entries.push((
-            new_gid,
-            rewrite_lig_glyph(table, lig_glyph, keep_variations)?,
-        ));
+        match rewrite_lig_glyph(table, lig_glyph, keep_variations) {
+            Ok(body) => entries.push((new_gid, body)),
+            Err(SubsetError::Parse(_)) => {}
+            Err(overflow) => return Err(overflow),
+        }
     }
     if entries.is_empty() {
         return Ok(None);
@@ -56,7 +57,7 @@ pub(super) fn rewrite(
 
 /// Rebuilds the LigGlyph at `pos`: the caret count, one offset per
 /// caret, then the caret copies (identical carets share one copy).
-fn rewrite_lig_glyph(
+pub(super) fn rewrite_lig_glyph(
     table: &[u8],
     pos: usize,
     keep_variations: bool,

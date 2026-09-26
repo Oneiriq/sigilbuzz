@@ -28,9 +28,13 @@
 //! MarkGlyphSetsDef, else 1.0. The whole table is dropped only when no
 //! subtable has anything left.
 //!
-//! Structural errors in the subtables (truncation, unknown formats)
-//! surface as [`SubsetError::Parse`] with the byte offset from the
-//! start of the GDEF table.
+//! A malformed piece is left out rather than failing the subset, the
+//! way HarfBuzz's sanitizer neuters it: a header that cannot be read
+//! drops the whole table, a list, MarkGlyphSetsDef or store whose own
+//! structure is broken drops that subtable, and a broken AttachPoint
+//! or LigGlyph drops that glyph's entry. The readers still locate each
+//! problem by byte offset from the start of the GDEF table (see
+//! [`read`]); only running out of 16-bit offsets is an error.
 
 mod attach_list;
 mod caret_fold;
@@ -88,52 +92,32 @@ fn rewrite_gdef_bytes(
     map: &GidMap,
     keep_variations: bool,
 ) -> Result<Option<Vec<u8>>, SubsetError> {
-    const CTX: &str = "GDEF header truncated";
-    if u16_at(bytes, 0, CTX)? != 1 {
-        return Err(Error::Malformed {
-            offset: 0,
-            context: "unsupported GDEF major version",
-        }
-        .into());
-    }
-    let minor = u16_at(bytes, 2, CTX)?;
-    let offset_at = |pos: usize| u16_at(bytes, pos, CTX).map(usize::from);
-    let glyph_class_off = offset_at(4)?;
-    let attach_list_off = offset_at(6)?;
-    let lig_caret_off = offset_at(8)?;
-    let mark_attach_off = offset_at(10)?;
-    let mark_sets_off = if minor >= 2 { offset_at(12)? } else { 0 };
-    let ivs_off = if minor >= 3 {
-        u32_at(bytes, 14, CTX)? as usize
-    } else {
-        0
+    // Without a readable header nothing in the table can be trusted.
+    let Ok(header) = Header::read(bytes) else {
+        return Ok(None);
     };
-
     let glyph_class =
-        present(glyph_class_off).and_then(|off| rewrite_classdef_subtable(bytes, off, map));
-    let attach_list = match present(attach_list_off) {
-        Some(off) => attach_list::rewrite(bytes, off, map)?,
+        present(header.glyph_class).and_then(|off| rewrite_classdef_subtable(bytes, off, map));
+    let attach_list = match present(header.attach_list) {
+        Some(off) => lenient(attach_list::rewrite(bytes, off, map))?,
         None => None,
     };
-    let lig_carets = match present(lig_caret_off) {
-        Some(off) => lig_caret::rewrite(bytes, off, map, keep_variations)?,
+    let lig_carets = match present(header.lig_carets) {
+        Some(off) => lenient(lig_caret::rewrite(bytes, off, map, keep_variations))?,
         None => None,
     };
     let mark_attach =
-        present(mark_attach_off).and_then(|off| rewrite_classdef_subtable(bytes, off, map));
-    let mark_sets = match present(mark_sets_off) {
-        Some(off) => Some(mark_glyph_sets::rewrite(bytes, off, map)?),
-        None => None,
-    };
-    let ivs = match present(ivs_off).filter(|_| keep_variations) {
-        Some(off) => {
+        present(header.mark_attach).and_then(|off| rewrite_classdef_subtable(bytes, off, map));
+    let mark_sets =
+        present(header.mark_sets).and_then(|off| mark_glyph_sets::rewrite(bytes, off, map).ok());
+    let ivs = present(header.store)
+        .filter(|_| keep_variations)
+        .and_then(|off| {
             // `store_len` has checked that `off + len` stays inside
             // the table, so the sum cannot wrap.
-            let len = item_var_store::store_len(bytes, off)?;
+            let len = item_var_store::store_len(bytes, off).ok()?;
             Some(&bytes[off..off + len])
-        }
-        None => None,
-    };
+        });
 
     let anything_left = glyph_class.is_some()
         || attach_list.is_some()
@@ -181,6 +165,53 @@ fn rewrite_gdef_bytes(
     Ok(Some(out))
 }
 
+/// Offsets of the GDEF subtables, 0 where absent or where the header
+/// version has no field for them.
+struct Header {
+    glyph_class: usize,
+    attach_list: usize,
+    lig_carets: usize,
+    mark_attach: usize,
+    mark_sets: usize,
+    store: usize,
+}
+
+impl Header {
+    fn read(bytes: &[u8]) -> Result<Self, Error> {
+        const CTX: &str = "GDEF header truncated";
+        if u16_at(bytes, 0, CTX)? != 1 {
+            return Err(Error::Malformed {
+                offset: 0,
+                context: "unsupported GDEF major version",
+            });
+        }
+        let minor = u16_at(bytes, 2, CTX)?;
+        let offset_at = |pos: usize| u16_at(bytes, pos, CTX).map(usize::from);
+        Ok(Self {
+            glyph_class: offset_at(4)?,
+            attach_list: offset_at(6)?,
+            lig_carets: offset_at(8)?,
+            mark_attach: offset_at(10)?,
+            mark_sets: if minor >= 2 { offset_at(12)? } else { 0 },
+            store: if minor >= 3 {
+                u32_at(bytes, 14, CTX)? as usize
+            } else {
+                0
+            },
+        })
+    }
+}
+
+/// Leaves out a sub-structure whose bytes do not parse: its parse
+/// error becomes "nothing survived". Running out of 16-bit offsets in
+/// the rebuilt table is still an error.
+fn lenient<T>(rewritten: Result<Option<T>, SubsetError>) -> Result<Option<T>, SubsetError> {
+    match rewritten {
+        Err(SubsetError::Parse(_)) => Ok(None),
+        other => other,
+    }
+}
+
 /// Maps the spec's "0 means absent" offset convention onto `Option`.
 fn present(off: usize) -> Option<usize> {
     (off != 0).then_some(off)
@@ -204,7 +235,9 @@ fn offset16(pos: usize) -> Result<u16, SubsetError> {
 ///
 /// Returns `(new glyph id, absolute position of the table the entry
 /// names)` for every covered glyph the map keeps, sorted by new glyph
-/// id. Coverage entries past `count` have no table and are skipped.
+/// id. Coverage entries past `count` have no table and are skipped, and
+/// so are null entries: that glyph simply has no table. A list whose
+/// Coverage or offset array cannot be read is an error.
 fn kept_entries(
     table: &[u8],
     list_off: usize,
@@ -230,10 +263,7 @@ fn kept_entries(
         let slot = list_off + 4 + usize::from(index) * 2;
         let rel = usize::from(u16_at(table, slot, context)?);
         if rel == 0 {
-            return Err(Error::Malformed {
-                offset: slot,
-                context: "GDEF list entry has a null offset",
-            });
+            continue;
         }
         out.push((new_gid, list_off + rel));
     }
