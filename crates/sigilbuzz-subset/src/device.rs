@@ -100,19 +100,25 @@ impl Dedup {
 /// from `src_parent`. The copy lands at the end of `out` (shared with
 /// any identical table already placed through `pool`) and the slot is
 /// rewritten relative to `out_base`. An unresolvable table clears the
-/// slot. A copy whose offset would not fit in 16 bits clears it too
-/// and returns `false`, so the caller can report the overflow.
+/// slot, and so does a VariationIndex when `keep_variations` is off: a
+/// static subset has no ItemVariationStore for it to name, and leaving
+/// it out keeps it from taking offset space. A copy whose offset would
+/// not fit in 16 bits clears the slot too and returns `false`, so the
+/// caller can report the overflow.
 fn relocate_slot(
     out: &mut Vec<u8>,
     slot: usize,
     out_base: usize,
     src_parent: &[u8],
     pool: &mut Dedup,
+    keep_variations: bool,
 ) -> bool {
     let Some(src_off) = read_u16(out, slot) else {
         return true;
     };
-    let (new_off, fits) = match device_table(src_parent, usize::from(src_off)) {
+    let table = device_table(src_parent, usize::from(src_off))
+        .filter(|t| keep_variations || read_u16(t, 4) != Some(VARIATION_INDEX_FORMAT));
+    let (new_off, fits) = match table {
         Some(table) => match u16::try_from(pool.place(out, table) - out_base) {
             Ok(rel) => (rel, true),
             Err(_) => (0, false),
@@ -135,10 +141,11 @@ fn relocate_slot(
 /// Formats 1 and 2 copy verbatim. Format 3 device offsets are measured
 /// from the Anchor itself, so the referenced tables are copied right
 /// after the 10-byte header and the offsets re-pointed at them. The
-/// blob can then sit anywhere in the rebuilt subtable. Returns an
-/// empty Vec for a null offset or a malformed anchor, which callers
-/// treat as "no anchor".
-pub(crate) fn copy_anchor(parent: &[u8], offset: usize) -> Vec<u8> {
+/// blob can then sit anywhere in the rebuilt subtable. Without
+/// `keep_variations`, VariationIndex tables are left out and their
+/// offsets cleared. Returns an empty Vec for a null offset or a
+/// malformed anchor, which callers treat as "no anchor".
+pub(crate) fn copy_anchor(parent: &[u8], offset: usize, keep_variations: bool) -> Vec<u8> {
     if offset == 0 {
         return Vec::new();
     }
@@ -159,7 +166,7 @@ pub(crate) fn copy_anchor(parent: &[u8], offset: usize) -> Vec<u8> {
         let mut pool = Dedup::default();
         for slot in [6, 8] {
             // Right behind the 10-byte header, the copies always fit.
-            relocate_slot(&mut out, slot, 0, anchor, &mut pool);
+            relocate_slot(&mut out, slot, 0, anchor, &mut pool, keep_variations);
         }
     }
     out
@@ -178,6 +185,9 @@ pub(crate) struct RecordRun<'a> {
     pub stride: usize,
     /// The ValueRecords inside one group.
     pub records: &'a [(usize, u16)],
+    /// Whether VariationIndex tables are copied. Off for a static
+    /// subset, which clears their slots instead.
+    pub keep_variations: bool,
 }
 
 /// Re-points the device slots of ValueRecords that were copied verbatim
@@ -204,7 +214,14 @@ pub(crate) fn relocate_value_records(
                 run.first + group * run.stride + rel + 2 * (format & 0x000F).count_ones() as usize;
             for bit in [0x0010u16, 0x0020, 0x0040, 0x0080] {
                 if format & bit != 0 {
-                    fits &= relocate_slot(out, slot, out_base, src_parent, &mut pool);
+                    fits &= relocate_slot(
+                        out,
+                        slot,
+                        out_base,
+                        src_parent,
+                        &mut pool,
+                        run.keep_variations,
+                    );
                     slot += 2;
                 }
             }

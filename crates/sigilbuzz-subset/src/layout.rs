@@ -132,6 +132,11 @@ pub(crate) struct RewriterCtx<'a> {
     /// lookup-list indices unchanged so the caller can decide what
     /// survives and rebuild the renumber map afterwards.
     pub lookup_renumber: Option<&'a [Option<u16>]>,
+    /// Whether rebuilt GPOS subtables copy the VariationIndex tables
+    /// their anchors and ValueRecords name. Off for a static subset,
+    /// which drops the GDEF ItemVariationStore they would point into;
+    /// the slots are cleared instead, and the tables take no space.
+    pub keep_variations: bool,
     /// Offset16s of the rebuilt subtables that could not reach their
     /// targets. The lookup rewriters check it after every subtable.
     pub offsets: Offset16Guard,
@@ -142,6 +147,7 @@ impl<'a> RewriterCtx<'a> {
         Self {
             gid_map,
             lookup_renumber,
+            keep_variations: true,
             offsets: Offset16Guard::default(),
         }
     }
@@ -216,29 +222,55 @@ pub(crate) fn decide(
         kept.len() == num_glyphs && kept.iter().enumerate().all(|(i, &g)| g as usize == i);
 
     if identity {
+        // A static subset keeps no ItemVariationStore, so even here the
+        // GPOS VariationIndex slots are cleared and a GDEF carrying a
+        // store is rebuilt without it (and without caret variations).
+        let statics = !input.retain_variations;
+        let gpos = if !has_gpos {
+            Decision::Drop
+        } else if statics {
+            let mut bytes = face.table_bytes(tag::GPOS)?.to_vec();
+            crate::gpos_var::strip_variation_indices(&mut bytes);
+            Decision::Rewrite(bytes)
+        } else {
+            Decision::Preserve
+        };
+        let gdef_store = face.table_bytes(tag::GDEF).ok().is_some_and(|gdef| {
+            let minor = gdef
+                .get(2..4)
+                .map_or(0, |b| u16::from_be_bytes([b[0], b[1]]));
+            minor >= 3 && gdef.get(14..18).is_some_and(|off| off != [0; 4])
+        });
+        let gdef = if !has_gdef {
+            Decision::Drop
+        } else if statics && gdef_store {
+            match gdef::rewrite_gdef(face, &GidMap::from_kept(kept), false)? {
+                Some(b) => Decision::Rewrite(b),
+                None => Decision::Drop,
+            }
+        } else {
+            Decision::Preserve
+        };
         return Ok(LayoutPlan {
             gsub: if has_gsub {
                 Decision::Preserve
             } else {
                 Decision::Drop
             },
-            gpos: if has_gpos {
-                Decision::Preserve
-            } else {
-                Decision::Drop
-            },
-            gdef: if has_gdef {
-                Decision::Preserve
-            } else {
-                Decision::Drop
-            },
+            gpos,
+            gdef,
         });
     }
 
     // Non-identity: invoke the rewriter. Each driver returns either
-    // bytes to substitute or None when the whole table dropped.
+    // bytes to substitute or None when the whole table dropped. A
+    // static subset's GPOS never copies VariationIndex tables: the
+    // GDEF ItemVariationStore they would name is dropped.
     let map = GidMap::from_kept(kept);
-    let ctx = RewriterCtx::new(&map, None);
+    let ctx = RewriterCtx {
+        keep_variations: input.retain_variations,
+        ..RewriterCtx::new(&map, None)
+    };
 
     let gsub = if has_gsub {
         match build_gsub(face, &ctx)? {
@@ -250,14 +282,7 @@ pub(crate) fn decide(
     };
     let gpos = if has_gpos {
         match build_gpos(face, &ctx)? {
-            Some(mut b) => {
-                // A static subset drops the GDEF ItemVariationStore, so
-                // no VariationIndex may point into it.
-                if !input.retain_variations {
-                    crate::gpos_var::strip_variation_indices(&mut b);
-                }
-                Decision::Rewrite(b)
-            }
+            Some(b) => Decision::Rewrite(b),
             None => Decision::Drop,
         }
     } else {
@@ -328,7 +353,10 @@ pub(crate) fn build_gsub(
     let mut renumber = build_renumber(&rewritten);
     for _ in 0..lookups.len() {
         let mut changed = false;
-        let inner_ctx = RewriterCtx::new(ctx.gid_map, Some(&renumber));
+        let inner_ctx = RewriterCtx {
+            keep_variations: ctx.keep_variations,
+            ..RewriterCtx::new(ctx.gid_map, Some(&renumber))
+        };
         for li in 0..lookups.len() {
             // Only re-rewrite slots that survived the first pass; nothing to
             // resurrect here.
@@ -455,7 +483,10 @@ pub(crate) fn build_gpos(
     let mut renumber = build_renumber(&rewritten);
     for _ in 0..lookups.len() {
         let mut changed = false;
-        let inner_ctx = RewriterCtx::new(ctx.gid_map, Some(&renumber));
+        let inner_ctx = RewriterCtx {
+            keep_variations: ctx.keep_variations,
+            ..RewriterCtx::new(ctx.gid_map, Some(&renumber))
+        };
         for li in 0..lookups.len() {
             if rewritten
                 .get(li as usize)
@@ -952,6 +983,9 @@ pub(crate) fn parse_classdef_pairs_from_bytes(bytes: &[u8]) -> Vec<(u16, u16)> {
     }
     out
 }
+
+#[cfg(test)]
+mod static_tests;
 
 #[cfg(test)]
 mod truncation_tests;

@@ -94,7 +94,7 @@ fn copy_anchor_formats_1_and_2_are_verbatim() {
     let fmt2 = [0u8, 2, 0, 10, 0, 20, 0, 7];
     for anchor in [&fmt1[..], &fmt2[..]] {
         let parent = at_offset(6, anchor);
-        assert_eq!(copy_anchor(&parent, 6), anchor);
+        assert_eq!(copy_anchor(&parent, 6, true), anchor);
     }
 }
 
@@ -110,7 +110,7 @@ fn copy_anchor_format3_brings_its_devices_along() {
     anchor.extend_from_slice(&device(12, 13, 1, 1));
     let parent = at_offset(8, &anchor);
 
-    let copy = copy_anchor(&parent, 8);
+    let copy = copy_anchor(&parent, 8, true);
     assert_eq!(&copy[..6], &anchor[..6]);
     assert_eq!(u16_at(&copy, 6), 10);
     assert_eq!(u16_at(&copy, 8), 16);
@@ -119,12 +119,51 @@ fn copy_anchor_format3_brings_its_devices_along() {
     assert_eq!(copy.len(), 24);
 }
 
+/// A static subset has no ItemVariationStore: VariationIndex tables
+/// are left out and their slots cleared, hinting Device tables stay.
+#[test]
+fn static_copies_leave_variation_indices_out() {
+    let mut anchor = anchor3(12, 24);
+    anchor.resize(12, 0);
+    anchor.extend_from_slice(&variation_index(0, 5));
+    anchor.resize(24, 0);
+    anchor.extend_from_slice(&device(12, 13, 1, 1));
+    let parent = at_offset(8, &anchor);
+    let copy = copy_anchor(&parent, 8, false);
+    assert_eq!(u16_at(&copy, 6), 0, "x VariationIndex left out");
+    assert_eq!(u16_at(&copy, 8), 10, "y Device kept");
+    assert_eq!(&copy[10..], &device(12, 13, 1, 1)[..]);
+
+    // ValueRecords: xAdvDevice names a VariationIndex, yAdvDevice a
+    // Device. Only the Device is copied.
+    let mut src = vec![0u8, 4, 0, 10];
+    src.extend_from_slice(&variation_index(0, 1));
+    src.extend_from_slice(&device(9, 9, 1, 1));
+    let mut out = src[..4].to_vec();
+    let fits = relocate_value_records(
+        &mut out,
+        0,
+        &src,
+        &RecordRun {
+            first: 0,
+            count: 1,
+            stride: 4,
+            records: &[(0, 0x00C0)],
+            keep_variations: false,
+        },
+    );
+    assert!(fits);
+    assert_eq!(u16_at(&out, 0), 0);
+    assert_eq!(u16_at(&out, 2), 4);
+    assert_eq!(&out[4..], &device(9, 9, 1, 1)[..]);
+}
+
 #[test]
 fn copy_anchor_format3_shares_one_copy_of_a_shared_device() {
     let mut anchor = anchor3(10, 10);
     anchor.extend_from_slice(&variation_index(2, 3));
     let parent = at_offset(4, &anchor);
-    let copy = copy_anchor(&parent, 4);
+    let copy = copy_anchor(&parent, 4, true);
     assert_eq!(copy.len(), 16);
     assert_eq!(u16_at(&copy, 6), 10);
     assert_eq!(u16_at(&copy, 8), 10);
@@ -136,7 +175,7 @@ fn copy_anchor_format3_clears_null_and_unusable_devices() {
     let mut anchor = anchor3(0, 10);
     anchor.extend_from_slice(&device(1, 1, 7, 1));
     let parent = at_offset(2, &anchor);
-    let copy = copy_anchor(&parent, 2);
+    let copy = copy_anchor(&parent, 2, true);
     assert_eq!(copy.len(), 10);
     assert_eq!(u16_at(&copy, 6), 0);
     assert_eq!(u16_at(&copy, 8), 0);
@@ -146,14 +185,14 @@ fn copy_anchor_format3_clears_null_and_unusable_devices() {
 fn copy_anchor_rejects_null_truncated_and_unknown_anchors() {
     let anchor = anchor3(0, 0);
     let parent = at_offset(2, &anchor);
-    assert!(copy_anchor(&parent, 0).is_empty());
-    assert!(copy_anchor(&parent, 100).is_empty());
+    assert!(copy_anchor(&parent, 0, true).is_empty());
+    assert!(copy_anchor(&parent, 100, true).is_empty());
     assert!(
-        copy_anchor(&parent[..10], 2).is_empty(),
+        copy_anchor(&parent[..10], 2, true).is_empty(),
         "format 3 cut short"
     );
     let unknown = at_offset(2, &[0, 9, 0, 1, 0, 1]);
-    assert!(copy_anchor(&unknown, 2).is_empty());
+    assert!(copy_anchor(&unknown, 2, true).is_empty());
 }
 
 #[test]
@@ -199,6 +238,7 @@ fn relocate_value_records_copies_and_repoints_devices() {
             count: 3,
             stride: 4,
             records: &[(0, format)],
+            keep_variations: true,
         },
     );
     // Copies land at 18 (inner 1) and 24 (inner 2); offsets from 4.
@@ -233,6 +273,7 @@ fn relocate_value_records_walks_every_record_of_a_group() {
             count: 1,
             stride: 6,
             records: &[(0, vf1), (4, vf2)],
+            keep_variations: true,
         },
     );
     assert_eq!(u16_at(&out, 4), 8);
@@ -256,6 +297,7 @@ fn relocate_value_records_clears_unusable_and_overflowing_slots() {
             count: 2,
             stride: 2,
             records: &[(0, format)],
+            keep_variations: true,
         },
     );
     assert_eq!(u16_at(&out, 0), 4);
@@ -265,7 +307,7 @@ fn relocate_value_records_clears_unusable_and_overflowing_slots() {
     // cannot be addressed by an Offset16: the slot clears instead.
     let mut far = vec![0u8, 4];
     far.resize(70_000, 0);
-    relocate_value_records(
+    let fits = relocate_value_records(
         &mut far,
         0,
         &src,
@@ -274,7 +316,9 @@ fn relocate_value_records_clears_unusable_and_overflowing_slots() {
             count: 1,
             stride: 2,
             records: &[(0, format)],
+            keep_variations: true,
         },
     );
     assert_eq!(u16_at(&far, 0), 0);
+    assert!(!fits, "the overflow is reported");
 }

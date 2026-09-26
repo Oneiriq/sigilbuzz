@@ -219,7 +219,7 @@ fn read(
         let rec = 2 + i * 4;
         let class = u16::from_be_bytes([mark_array[rec], mark_array[rec + 1]]);
         let rel = u16::from_be_bytes([mark_array[rec + 2], mark_array[rec + 3]]);
-        let anchor = copy_anchor(mark_array, usize::from(rel));
+        let anchor = copy_anchor(mark_array, usize::from(rel), ctx.keep_variations);
         // A class past markClassCount or a null anchor cannot attach.
         if class < class_count && !anchor.is_empty() {
             marks.push(Mark { gid, class, anchor });
@@ -233,7 +233,7 @@ fn read(
             .map(|c| {
                 let slot = first + c * 2;
                 let rel = u16::from_be_bytes([table[slot], table[slot + 1]]);
-                copy_anchor(table, usize::from(rel))
+                copy_anchor(table, usize::from(rel), ctx.keep_variations)
             })
             .collect()
     };

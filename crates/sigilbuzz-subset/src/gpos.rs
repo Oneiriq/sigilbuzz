@@ -71,7 +71,7 @@ use alloc::vec::Vec;
 use sigilbuzz::tables::gpos::lookup_type as gpos_type;
 
 use crate::coverage::emit_coverage_from_pairs;
-use crate::device::Dedup;
+use crate::device::{copy_anchor, Dedup};
 use crate::layout::{
     parse_classdef_pairs_from_bytes, parse_coverage_glyphs, RewriterCtx, RewrittenLookup,
     RewrittenSubtable,
@@ -312,6 +312,7 @@ fn carry_devices(
         count,
         stride,
         records,
+        keep_variations: ctx.keep_variations,
     };
     if !crate::device::relocate_value_records(out, 0, src_parent, &run) {
         ctx.offsets.record();
@@ -987,8 +988,8 @@ fn rewrite_cursive(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
         let rec_off = records_off + i * 4;
         let entry_off = u16::from_be_bytes([sub[rec_off], sub[rec_off + 1]]) as usize;
         let exit_off = u16::from_be_bytes([sub[rec_off + 2], sub[rec_off + 3]]) as usize;
-        let entry_bytes = read_anchor_bytes(sub, entry_off);
-        let exit_bytes = read_anchor_bytes(sub, exit_off);
+        let entry_bytes = copy_anchor(sub, entry_off, ctx.keep_variations);
+        let exit_bytes = copy_anchor(sub, exit_off, ctx.keep_variations);
         surviving.push((g_new, entry_bytes, exit_bytes));
     }
     if surviving.is_empty() {
@@ -996,14 +997,6 @@ fn rewrite_cursive(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubtable> {
     }
 
     Some(emit_cursive(ctx, &surviving))
-}
-
-/// Reads an anchor table at `offset` inside `sub` into a standalone
-/// blob. Returns an empty Vec for null offsets (0). Format 3 anchors
-/// carry their Device / VariationIndex tables along, re-pointed
-/// relative to the blob (see [`crate::device::copy_anchor`]).
-fn read_anchor_bytes(sub: &[u8], offset: usize) -> Vec<u8> {
-    crate::device::copy_anchor(sub, offset)
 }
 
 fn emit_cursive(ctx: &RewriterCtx, surviving: &[(u16, Vec<u8>, Vec<u8>)]) -> RewrittenSubtable {
