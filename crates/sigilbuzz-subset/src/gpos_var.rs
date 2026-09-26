@@ -184,7 +184,7 @@ pub(crate) type SlotVisitor<'v> = dyn FnMut(&mut [u8], DeviceSlot) + 'v;
 /// - If the referenced table is a `VariationIndex` but `store` is
 ///   `None` (font has GPOS variations but no GDEF.IVS, malformed):
 ///   zero the offset slot, leave the static field alone.
-fn fold_one_field(
+pub(crate) fn fold_one_field(
     buf: &mut [u8],
     slot: DeviceSlot,
     store: Option<&ItemVariationStore<'_>>,

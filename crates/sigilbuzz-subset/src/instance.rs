@@ -31,10 +31,9 @@
 //! default for the "ship as static" workflow):
 //!
 //! - `fvar`, `avar`, `gvar`, `HVAR` are dropped from the directory.
-//! - `GDEF` is preserved verbatim. Its embedded `ItemVariationStore` is
-//!   no longer reachable from any consumer because the surrounding
-//!   variable-font tables are gone, but the bytes ride along. Pruning
-//!   it cleanly is staged for a sibling.
+//! - `GDEF` keeps every subtable but its `ItemVariationStore`, which is
+//!   pruned once the GPOS bake (see below) and the LigCaretList caret
+//!   fold have resolved every `VariationIndex` that pointed into it.
 //!
 //! When `drop_var_tables` is false the variable-font tables ride
 //! through verbatim. The glyf and hmtx bake still applies to *bake* the
@@ -355,7 +354,7 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     // caller wants the static "ship as static" output, prune it. See
     // module header for the GPOS-bake-then-IVS-prune ordering.
     let gdef_pruned = if input.drop_var_tables {
-        prune_gdef_ivs(face)?
+        prune_gdef_ivs(face, &coords)?
     } else {
         None
     };
@@ -470,7 +469,7 @@ fn cff2_bake(
     }
 
     let gdef_pruned = if input.drop_var_tables {
-        prune_gdef_ivs(face)?
+        prune_gdef_ivs(face, coords)?
     } else {
         None
     };
@@ -2611,7 +2610,12 @@ fn bake_gpos_var(face: &Face<'_>, coords: &[f32]) -> Result<Option<Vec<u8>>, Sub
 /// middle of the table (rare in real fonts), we just zero the
 /// offset; the orphan bytes ride through but are unreachable by any
 /// consumer.
-fn prune_gdef_ivs(face: &Face<'_>) -> Result<Option<Vec<u8>>, SubsetError> {
+///
+/// Before the store goes, every LigCaretList format 3 caret has its
+/// VariationIndex delta at `coords` folded into its coordinate (see
+/// [`crate::gdef::fold_caret_variations`]), so carets land at the
+/// instance rather than at the default.
+fn prune_gdef_ivs(face: &Face<'_>, coords: &[f32]) -> Result<Option<Vec<u8>>, SubsetError> {
     let bytes = match face.table_bytes(tag::GDEF) {
         Ok(b) => b,
         Err(_) => return Ok(None),
@@ -2633,6 +2637,9 @@ fn prune_gdef_ivs(face: &Face<'_>) -> Result<Option<Vec<u8>>, SubsetError> {
         return Ok(None);
     }
     let mut out = bytes.to_vec();
+    let gdef = face.gdef().map_err(SubsetError::from)?;
+    let store = gdef.as_ref().and_then(|g| g.item_variation_store());
+    crate::gdef::fold_caret_variations(&mut out, store, coords);
     out[14..18].copy_from_slice(&0u32.to_be_bytes());
     // Truncate the IVS payload when it sits at the tail of the table
     // (the layout fontTools emits and that every real GDEF in the
@@ -3620,7 +3627,7 @@ mod vvar_synthetic_tests {
         // OPEN_SANS has GDEF but it's v1.0 (no IVS).
         const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
         let face = Face::parse_bytes(OPEN_SANS, 0).unwrap();
-        let out = prune_gdef_ivs(&face).unwrap();
+        let out = prune_gdef_ivs(&face, &[]).unwrap();
         // OpenSans is GDEF v1.0, no prune.
         assert!(out.is_none());
     }

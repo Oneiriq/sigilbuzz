@@ -33,6 +33,7 @@
 //! start of the GDEF table.
 
 mod attach_list;
+mod caret_fold;
 mod item_var_store;
 mod lig_caret;
 mod mark_glyph_sets;
@@ -48,6 +49,8 @@ use crate::device::Dedup;
 use crate::layout::{parse_classdef_pairs_from_bytes, GidMap};
 use crate::SubsetError;
 use read::{u16_at, u32_at};
+
+pub(crate) use caret_fold::fold_caret_variations;
 
 /// Rewrites the face's `GDEF` table. Returns `Ok(None)` when the face
 /// has no GDEF or when every subtable drops to nothing.
