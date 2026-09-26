@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use super::{BidiParagraph, BidiRun, ShapedBidiRun};
-use crate::buffer::{Buffer, ShapedRun};
+use crate::buffer::{Buffer, BufferFlags, ShapedRun};
 use crate::error::Result;
 use crate::font::Font;
 use crate::shape::{shape, Feature};
@@ -67,6 +67,7 @@ impl BidiParagraph {
         run_buffer.set_direction(run.direction());
         run_buffer.set_pre_context(&self.text[..range.start]);
         run_buffer.set_post_context(&self.text[range.end..]);
+        run_buffer.set_flags(run_flags(buffer.flags(), &range, self.text.len()));
         let mut shaped = shape(font, &run_buffer, features)?;
         // `new` checked that the text fits in u32, so the sum does too.
         let offset = range.start as u32;
@@ -157,5 +158,51 @@ impl BidiParagraph {
             glyphs.extend(piece.glyphs);
         }
         Ok(ShapedRun { glyphs })
+    }
+}
+
+/// The flags a run's buffer gets from the template's. `BOT` and `EOT`
+/// say a buffer starts or ends the text, which a run only does when it
+/// starts or ends the paragraph, so a run elsewhere drops them. Every
+/// other flag carries over unchanged.
+fn run_flags(template: BufferFlags, range: &Range<usize>, text_len: usize) -> BufferFlags {
+    let mut flags = template;
+    flags.set(
+        BufferFlags::BOT,
+        template.contains(BufferFlags::BOT) && range.start == 0,
+    );
+    flags.set(
+        BufferFlags::EOT,
+        template.contains(BufferFlags::EOT) && range.end == text_len,
+    );
+    flags
+}
+
+#[cfg(test)]
+mod flag_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_paragraph_edges_keep_bot_and_eot() {
+        let all = BufferFlags::BOT | BufferFlags::EOT | BufferFlags::PRESERVE_DEFAULT_IGNORABLES;
+        assert_eq!(run_flags(all, &(0..10), 10), all);
+        assert_eq!(
+            run_flags(all, &(0..4), 10),
+            BufferFlags::BOT | BufferFlags::PRESERVE_DEFAULT_IGNORABLES
+        );
+        assert_eq!(
+            run_flags(all, &(4..10), 10),
+            BufferFlags::EOT | BufferFlags::PRESERVE_DEFAULT_IGNORABLES
+        );
+        assert_eq!(
+            run_flags(all, &(2..6), 10),
+            BufferFlags::PRESERVE_DEFAULT_IGNORABLES
+        );
+    }
+
+    #[test]
+    fn a_template_without_bot_or_eot_gains_neither() {
+        let none = BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE;
+        assert_eq!(run_flags(none, &(0..10), 10), none);
     }
 }
