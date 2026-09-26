@@ -33,10 +33,12 @@ pub struct Args {
     /// Writing direction (`ltr`, `rtl`, `ttb`, `btt`).
     #[arg(long)]
     pub direction: Option<String>,
-    /// Script tag (informational; sigilbuzz auto-detects internally).
+    /// Script tag. Accepted for hb-shape compatibility and has no
+    /// effect: sigilbuzz takes the script from the text.
     #[arg(long)]
     pub script: Option<String>,
-    /// Language tag (informational; sigilbuzz auto-detects internally).
+    /// Language tag. Accepted for hb-shape compatibility and has no
+    /// effect: sigilbuzz shapes with the default language system.
     #[arg(long)]
     pub language: Option<String>,
     /// Emit JSON instead of one-line-per-glyph text.
@@ -56,11 +58,10 @@ pub fn run(args: Args) -> CliResult {
     if let Some(d) = &args.direction {
         buffer.set_direction(parse_direction(d)?);
     }
-    // script / language are accepted for hb-shape parity but the
-    // shaping core auto-detects script per run, so we record them
-    // only as informational fields in the JSON path. Storing them
-    // would require a no-op Buffer setter; we intentionally do not
-    // add one to the core just for CLI ergonomics.
+    // `--script` and `--language` are accepted so hb-shape command
+    // lines work, and they change nothing. The core Buffer has no
+    // setter for either: the shaper takes the script of each run from
+    // the text and always uses the default language system.
     let _ = (&args.script, &args.language);
 
     let features = match args.features.as_deref() {
