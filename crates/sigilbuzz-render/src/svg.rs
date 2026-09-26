@@ -2112,30 +2112,30 @@ fn resolve_gradient(defs: &Defs<'_>, id: &str, ctx: &ElemCtx) -> Option<Gradient
 
 fn parse_stop(node: &Node) -> Option<ColorStop> {
     let offset = node.attr("offset").map(parse_stop_offset).unwrap_or(0.0);
-    // stop-color is the canonical attribute; some authoring tools fold
-    // it into a CSS-ish style="stop-color:#rgb;stop-opacity:0.5". Be
-    // tolerant.
+    // stop-color and stop-opacity are presentation attributes. Some
+    // authoring tools fold them into a CSS-ish
+    // style="stop-color:#rgb;stop-opacity:0.5" instead. A style
+    // declaration wins over the attribute, as in CSS. Chunks without
+    // a colon, such as the empty one after a trailing semicolon, are
+    // skipped.
     let mut color = node
         .attr("stop-color")
         .and_then(parse_color)
         .unwrap_or([0, 0, 0, 255]);
-    let stop_opacity = node
+    let mut stop_opacity = node
         .attr("stop-opacity")
         .and_then(parse_opacity)
         .unwrap_or(1.0);
     if let Some(style) = node.attr("style") {
-        for chunk in style.split(';') {
-            let mut parts = chunk.splitn(2, ':');
-            let key = parts.next()?.trim();
-            let val = parts.next()?.trim();
+        for (key, val) in style.split(';').filter_map(|chunk| chunk.split_once(':')) {
+            let (key, val) = (key.trim(), val.trim());
             if key.eq_ignore_ascii_case("stop-color") {
                 if let Some(c) = parse_color(val) {
                     color = c;
                 }
             } else if key.eq_ignore_ascii_case("stop-opacity") {
-                if let Some(_o) = parse_opacity(val) {
-                    // Not applied: only the `stop-opacity` attribute
-                    // feeds the alpha below.
+                if let Some(o) = parse_opacity(val) {
+                    stop_opacity = o;
                 }
             }
         }
@@ -4955,6 +4955,34 @@ mod tests {
         };
         assert_eq!(g.stops.len(), 2);
         assert!(matches!(g.kind, GradKind::Linear { .. }));
+    }
+
+    #[test]
+    fn stop_style_sets_color_and_opacity() {
+        // The style declarations win over the attributes, and the
+        // trailing semicolon does not drop the stop.
+        let xml = r##"<svg viewBox="0 0 10 10">
+            <defs>
+                <linearGradient id="g" x1="0" y1="0" x2="10" y2="0">
+                    <stop offset="0" stop-opacity="1" style="stop-color:#00FF00;stop-opacity:0.25;"/>
+                    <stop offset="1" stop-color="#0000FF" stop-opacity="0.5"/>
+                </linearGradient>
+            </defs>
+            <rect x="0" y="0" width="10" height="10" fill="url(#g)"/>
+        </svg>"##;
+        let doc = parse_document(xml).unwrap();
+        let Paint::Gradient(g) = &doc.fills[0].paint else {
+            panic!("expected gradient fill");
+        };
+        assert_eq!(g.stops.len(), 2);
+        let first = g.stops[0].color;
+        assert!((first.g - 1.0).abs() < 1e-6 && first.r.abs() < 1e-6);
+        assert!(
+            (first.a - 0.25).abs() < 1e-6,
+            "style opacity, got {}",
+            first.a
+        );
+        assert!((g.stops[1].color.a - 0.5).abs() < 1e-6, "attribute opacity");
     }
 
     #[test]
