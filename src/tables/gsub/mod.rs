@@ -109,6 +109,20 @@ impl<'a> Gsub<'a> {
     /// for the first of `tags` the font has (see
     /// [`crate::tables::layout::Script::select_lang_sys`]) instead of
     /// the default one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::{Face, Language};
+    ///
+    /// let data = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
+    /// let face = Face::parse_bytes(data, 0)?;
+    /// let romanian = Language::new("ro").expect("non-empty tag");
+    /// let gsub = face.gsub()?.expect("Open Sans has GSUB");
+    /// let gsub = gsub.with_language_tags(romanian.ot_language_tags());
+    /// assert_eq!(gsub.language_tags(), &[*b"ROM "]);
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
     #[must_use]
     pub const fn with_language_tags(mut self, tags: &'a [[u8; 4]]) -> Self {
         self.language_tags = tags;

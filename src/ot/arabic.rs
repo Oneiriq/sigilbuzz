@@ -173,6 +173,21 @@ pub fn assign_joining_forms(text: &str) -> Vec<JoiningForm> {
 /// [`assign_joining_forms`] for a run with known surroundings: the
 /// first and last letters join toward `context` the way they would
 /// join toward a neighbor inside the run.
+///
+/// # Examples
+///
+/// ```
+/// use sigilbuzz::ot::arabic::{assign_joining_forms_in_context, JoiningContext};
+/// use sigilbuzz::JoiningForm;
+///
+/// // A beh preceded by a beh in the source text takes its final form.
+/// let context = JoiningContext::from_context("\u{0628}", "");
+/// assert_eq!(assign_joining_forms_in_context("\u{0628}", context), [JoiningForm::Fina]);
+/// assert_eq!(
+///     assign_joining_forms_in_context("\u{0628}", JoiningContext::NONE),
+///     [JoiningForm::Isol]
+/// );
+/// ```
 #[must_use]
 pub fn assign_joining_forms_in_context(text: &str, context: JoiningContext) -> Vec<JoiningForm> {
     let types: Vec<JoiningType> = text.chars().map(joining_type).collect();

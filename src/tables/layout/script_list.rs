@@ -226,6 +226,24 @@ impl<'a> Script<'a> {
     /// (some fonts ship one instead of a default offset), then the
     /// script's default language system. `None` only when the script
     /// has none of these.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::Face;
+    ///
+    /// let data = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
+    /// let face = Face::parse_bytes(data, 0)?;
+    /// let gsub = face.gsub()?.expect("Open Sans has GSUB");
+    /// let latn = gsub.script_list().find(*b"latn").expect("latn script");
+    /// let romanian = latn.select_lang_sys(&[*b"XYZ ", *b"ROM "]).expect("ROM LangSys");
+    /// let default = latn.select_lang_sys(&[]).expect("default LangSys");
+    /// assert_ne!(
+    ///     romanian.feature_indices().collect::<Vec<_>>(),
+    ///     default.feature_indices().collect::<Vec<_>>()
+    /// );
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
     #[must_use]
     pub fn select_lang_sys(&self, language_tags: &[[u8; 4]]) -> Option<LangSys<'a>> {
         language_tags

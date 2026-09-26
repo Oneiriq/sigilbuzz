@@ -119,6 +119,20 @@ impl<'a> Gpos<'a> {
     /// for the first of `tags` the font has (see
     /// [`crate::tables::layout::Script::select_lang_sys`]) instead of
     /// the default one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::{Face, Language};
+    ///
+    /// let data = include_bytes!("../../../tests/fixtures/amiri_regular.ttf");
+    /// let face = Face::parse_bytes(data, 0)?;
+    /// let urdu = Language::new("ur").expect("non-empty tag");
+    /// let gpos = face.gpos()?.expect("Amiri has GPOS");
+    /// let gpos = gpos.with_language_tags(urdu.ot_language_tags());
+    /// assert_eq!(gpos.language_tags(), &[*b"URD "]);
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
     #[must_use]
     pub const fn with_language_tags(mut self, tags: &'a [[u8; 4]]) -> Self {
         self.language_tags = tags;
