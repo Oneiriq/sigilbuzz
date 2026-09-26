@@ -426,18 +426,23 @@ impl Normalizer<'_> {
     }
 
     /// Third round: recomposes marks with their starter, in place.
-    /// HarfBuzz copies the run to an output buffer as it goes; here the
-    /// characters before `i` are that output and the rest its input, so
-    /// its `merge_out_clusters` is a plain merge over both.
+    /// HarfBuzz copies the run to an output buffer as it goes; here
+    /// `chars[..w]` is that output and `chars[i..]` its input. A
+    /// composed mark is dropped, so the output falls behind the input,
+    /// and the round stays linear however many marks compose.
     fn compose_round(&self, chars: &mut Vec<NormChar>) {
+        let len = chars.len();
+        if len == 0 {
+            return;
+        }
         let mut starter = 0;
-        let mut i = 1;
-        while i < chars.len() {
+        let mut w = 1;
+        for i in 1..len {
             let cur = chars[i];
             // A non-mark never composes with the starter before it
             // (Hangul fonts in particular do not mix syllables and jamo).
             if cur.is_mark() {
-                let unblocked = starter == i - 1 || chars[i - 1].mcc < cur.mcc;
+                let unblocked = starter == w - 1 || chars[w - 1].mcc < cur.mcc;
                 let composed = unblocked
                     .then(|| {
                         hooks::compose(self.shaper, chars[starter].ch, cur.ch, self.has_gpos_mark)
@@ -445,18 +450,56 @@ impl Normalizer<'_> {
                     .flatten()
                     .and_then(|c| self.nominal(c).map(|glyph| (c, glyph)));
                 if let Some((composed, glyph)) = composed {
-                    merge_clusters(chars, starter, i + 1, self.level);
-                    chars.remove(i);
+                    self.merge_composed(chars, starter, w, i);
                     let s = &mut chars[starter];
                     s.set_char(composed);
                     s.glyph = glyph;
                     continue;
                 }
             }
+            chars[w] = cur;
             if cur.mcc == 0 {
-                starter = i;
+                starter = w;
             }
-            i += 1;
+            w += 1;
+        }
+        chars.truncate(w);
+    }
+
+    /// HarfBuzz's `merge_out_clusters (starter, out_len)` for a mark at
+    /// `chars[i]` that composes with the output `chars[starter..w]`:
+    /// [`merge_clusters`] over the output from `starter` on and the
+    /// mark, as if the two were adjacent. Like the merge, it spreads
+    /// back over output characters that shared the starter's cluster
+    /// and forward over input characters that shared the mark's.
+    fn merge_composed(&self, chars: &mut [NormChar], starter: usize, w: usize, i: usize) {
+        if !self.level.is_monotone() || starter >= w || w > i {
+            return;
+        }
+        let mark = chars[i].cluster;
+        let Some(cluster) = chars[starter..w]
+            .iter()
+            .map(|c| c.cluster)
+            .chain([mark])
+            .min()
+        else {
+            return;
+        };
+        let mut end = i + 1;
+        if cluster != mark {
+            while end < chars.len() && chars[end - 1].cluster == chars[end].cluster {
+                end += 1;
+            }
+        }
+        let mut start = starter;
+        if cluster != chars[starter].cluster {
+            while start > 0 && chars[start - 1].cluster == chars[start].cluster {
+                start -= 1;
+            }
+        }
+        let (output, input) = chars.split_at_mut(i);
+        for c in output[start..w].iter_mut().chain(&mut input[..end - i]) {
+            c.cluster = cluster;
         }
     }
 }

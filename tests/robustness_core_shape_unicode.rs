@@ -166,6 +166,17 @@ fn long_fsi_run_resolves_bidi_in_linear_time() {
 }
 
 #[test]
+fn long_run_of_composing_marks_normalizes_in_linear_time() {
+    // Every "e" + COMBINING ACUTE ACCENT recomposes to U+00E9, which
+    // Open Sans maps. Removing each composed mark from the middle of
+    // the run shifted the rest of it every time.
+    let text = "e\u{0301}".repeat(100_000);
+    let glyphs = shape_glyphs(OPEN_SANS, &text, &[]);
+    assert_eq!(glyphs.len(), 100_000);
+    assert!(glyphs.windows(2).all(|w| w[0].glyph_id == w[1].glyph_id));
+}
+
+#[test]
 fn long_mark_run_shapes_in_linear_time() {
     // Mark-to-base used to walk back to the base for every mark and
     // then sum every advance in between.
