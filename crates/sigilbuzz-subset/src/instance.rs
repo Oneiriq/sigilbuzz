@@ -2560,10 +2560,10 @@ mod tests {
     const SOURCE_SANS: &[u8] =
         include_bytes!("../../../tests/fonts/SourceSans3VF-Latin-Subset.otf");
     const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
-    /// 972-byte synthetic VF with a single PairPos format 1 lookup
+    /// Synthetic VF with a single PairPos format 1 lookup
     /// whose AV pair carries a VariationIndex into a one-region IVS;
     /// at wght=900 the delta is -100, at wght=400 it is 0. Built by
-    /// `tests/tools/build_var_kern_fixture.py`. See
+    /// the fixture builder in `tests/variable_kern.rs`. See
     /// `tests/variable_kern.rs` for the upstream cover.
     const VAR_KERN: &[u8] = include_bytes!("../../../tests/fixtures/var_kern.ttf");
 
@@ -3262,25 +3262,11 @@ mod tests {
     }
 
     /// `var_kern.ttf` measures its PairValueRecord device offset from
-    /// the PairPos subtable, but the spec measures it from the PairSet
-    /// (the base the bake uses). Returns a copy with the offset rebased
-    /// onto the PairSet so the fixture resolves its VariationIndex.
+    /// the PairSet, as the spec says (the base the bake uses). Its
+    /// earlier Python-built version measured from the PairPos subtable
+    /// and needed rebasing here; the Rust-built fixture does not.
     fn var_kern_with_pair_set_relative_device() -> Vec<u8> {
-        let face = Face::parse_bytes(VAR_KERN, 0).unwrap();
-        let rec = face.records().iter().find(|r| r.tag == tag::GPOS).unwrap();
-        let gpos_start = rec.offset as usize;
-        let gpos = face.table_bytes(tag::GPOS).unwrap();
-        let rd = |p: usize| u16::from_be_bytes([gpos[p], gpos[p + 1]]) as usize;
-        let lookup_base = rd(8) + rd(rd(8) + 2);
-        let sub_abs = lookup_base + rd(lookup_base + 6);
-        let pair_set = rd(sub_abs + 10);
-        // PairValueRecord 0: secondGlyph, xAdvance, xAdvDevice.
-        let slot = sub_abs + pair_set + 6;
-        let rebased = (rd(slot) - pair_set) as u16;
-        let mut bytes = VAR_KERN.to_vec();
-        let abs = gpos_start + slot;
-        bytes[abs..abs + 2].copy_from_slice(&rebased.to_be_bytes());
-        bytes
+        VAR_KERN.to_vec()
     }
 
     #[test]

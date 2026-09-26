@@ -18,18 +18,20 @@
 //! | 0x0040 | x_advance_device      | `Offset16` -> Device / VariationIndex |
 //! | 0x0080 | y_advance_device      | `Offset16` -> Device / VariationIndex |
 //!
-//! Each device offset is relative to the start of the enclosing
-//! subtable (PairPos, SinglePos, ...). When the referenced table has
-//! `deltaFormat = 0x8000` it is a `VariationIndex`: an outer/inner
-//! pair indexing into GDEF's shared `ItemVariationStore`, which is
-//! how variable-font kerning actually scales with axis coords. The
-//! non-variation `Device` shape encodes per-ppem hinting deltas;
-//! sigilbuzz parses them but does not apply them (we run in design
-//! units).
+//! Each device offset is relative to the table that holds the record:
+//! the SinglePos subtable, the PairPos format 2 subtable, or, for
+//! PairPos format 1, the PairSet (see
+//! [`crate::tables::gpos::PairPos::lookup_with_device_base`]). When
+//! the referenced table has `deltaFormat = 0x8000` it is a
+//! `VariationIndex`: an outer/inner pair indexing into GDEF's shared
+//! `ItemVariationStore`, which is how variable-font kerning actually
+//! scales with axis coords. The non-variation `Device` shape encodes
+//! per-ppem hinting deltas; sigilbuzz parses them but does not apply
+//! them (we run in design units).
 //!
 //! The record carries the raw `u16` offsets verbatim so the shaper
-//! can resolve them against the subtable data slice at apply time,
-//! see [`resolve_variation_delta`].
+//! can resolve them against that base at apply time, see
+//! [`resolve_variation_delta`].
 
 use crate::error::Result;
 use crate::tables::layout::DeviceOrVariationIndex;
@@ -153,8 +155,9 @@ fn round_delta(delta: f32) -> i32 {
     }
 }
 
-/// Resolves one `Device` / `VariationIndex` slot against the
-/// enclosing subtable bytes and the shared `ItemVariationStore`.
+/// Resolves one `Device` / `VariationIndex` slot against the bytes
+/// its offset is measured from (see the module docs for which table
+/// that is) and the shared `ItemVariationStore`.
 ///
 /// - `device_off == 0` -> the value record did not carry this slot
 ///   (or the spec-blessed "null"). Returns `0`.
