@@ -20,7 +20,7 @@ For TrueType fonts:
 | `hmtx`, `hhea`, `maxp`, `head` | Rewritten for the new glyph order. |
 | `post` | Written as format 3 (no glyph names). |
 | `name`, `OS/2` | Passed through unchanged. |
-| `GSUB`, `GPOS`, `GDEF` | Kept as-is when every glyph survives, rewritten otherwise. Off with `retain_layout: false`. |
+| `GSUB`, `GPOS`, `GDEF` | Kept as-is when every glyph survives, rewritten otherwise, FeatureVariations included. Off with `retain_layout: false`. |
 | `fvar`, `avar`, `gvar`, `HVAR`, `VARC` | Kept. `fvar` and `avar` pass through, the others are rebuilt for the new glyph order. Off with `retain_variations: false`. |
 | `kern`, `vhea`, `vmtx`, `VORG`, `COLR`, `CPAL`, `morx`, `kerx` | Dropped by default. With `drop_unhandled: false` they return an error instead. |
 

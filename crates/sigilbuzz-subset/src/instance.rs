@@ -86,6 +86,17 @@
 //! Anchor itself; PairPos format 1 measures its from the PairSet. See
 //! [`crate::gpos_var`] for the per-structure offset bases.
 //!
+//! # GSUB / GPOS FeatureVariations
+//!
+//! A 1.1 GSUB or GPOS swaps feature lookups by region of the design
+//! space. A full instance applies the record that matches at the
+//! instance's coordinates: its substitutions become the default
+//! features, and the table becomes version 1.0. A partial instance
+//! settles every condition on a pinned axis (a record that can no
+//! longer match goes, a condition that always holds goes) and
+//! renumbers the axes that stay, as HarfBuzz's instancer does. See
+//! [`crate::feature_variations`].
+//!
 //! # Out of scope (deferred)
 //!
 //! - **CFF2 partial instancing** (some axes pinned, others left
@@ -359,6 +370,13 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     } else {
         None
     };
+    // FeatureVariations: the record that matches at `coords` becomes
+    // the default features, and the table goes.
+    let pinned = pinned_axes(&coords, &[]);
+    let gpos_baked = layout_variations(face, tag::GPOS, gpos_baked, &pinned, &[], &warnings)?;
+    if let Some(b) = layout_variations(face, tag::GSUB, None, &pinned, &[], &warnings)? {
+        tables.push((tag::GSUB, b));
+    }
     if let Some(b) = gpos_baked.clone() {
         tables.push((tag::GPOS, b));
     }
@@ -481,6 +499,11 @@ fn cff2_bake(
     } else {
         None
     };
+    let pinned = pinned_axes(coords, &[]);
+    let gpos_baked = layout_variations(face, tag::GPOS, gpos_baked, &pinned, &[], &warnings)?;
+    if let Some(b) = layout_variations(face, tag::GSUB, None, &pinned, &[], &warnings)? {
+        tables.push((tag::GSUB, b));
+    }
     if let Some(b) = gpos_baked.clone() {
         tables.push((tag::GPOS, b));
     }
@@ -635,10 +658,31 @@ fn partial_instance(
     if let GdefBake::Rebuilt(b) = &gdef_bake {
         tables.push((tag::GDEF, b.clone()));
     }
-    if let (Some(remap), Ok(gpos_bytes)) = (&store_remap, face.table_bytes(tag::GPOS)) {
-        let mut gpos = gpos_bytes.to_vec();
-        remap_gpos_variation_indices(&mut gpos, remap);
-        tables.push((tag::GPOS, gpos));
+    let remapped_gpos = match (&store_remap, face.table_bytes(tag::GPOS)) {
+        (Some(remap), Ok(gpos_bytes)) => {
+            let mut gpos = gpos_bytes.to_vec();
+            remap_gpos_variation_indices(&mut gpos, remap);
+            Some(gpos)
+        }
+        _ => None,
+    };
+
+    // FeatureVariations: conditions on the pinned axes are settled and
+    // the kept axes renumbered.
+    let pinned = pinned_axes(&post_avar_coords, pins);
+    let new_axis = kept_axis_indices(pins);
+    if let Some(b) = layout_variations(face, tag::GSUB, None, &pinned, &new_axis, &warnings)? {
+        tables.push((tag::GSUB, b));
+    }
+    if let Some(b) = layout_variations(
+        face,
+        tag::GPOS,
+        remapped_gpos,
+        &pinned,
+        &new_axis,
+        &warnings,
+    )? {
+        tables.push((tag::GPOS, b));
     }
 
     // CFF2 VarStore + blend-operator rewrite (optional). VarStore
@@ -688,6 +732,66 @@ fn partial_instance(
         bytes,
         warnings: warnings.into_sorted(),
     })
+}
+
+/// The F2DOT14 coordinate of every pinned axis (`None` for a `Keep`
+/// axis), from post-avar `coords`. An empty `pins` pins every axis.
+/// FeatureVariations conditions compare these against their F2DOT14
+/// ranges, as a shaper does with its normalized coordinates.
+fn pinned_axes(coords: &[f32], pins: &[AxisPin]) -> Vec<Option<i16>> {
+    coords
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| match pins.get(i) {
+            Some(AxisPin::Keep) => None,
+            Some(AxisPin::Pin) | None => {
+                #[allow(clippy::cast_possible_truncation)]
+                let raw = (c * 16384.0).round().clamp(-16384.0, 16384.0) as i16;
+                Some(raw)
+            }
+        })
+        .collect()
+}
+
+/// The index each `Keep` axis takes in the instance's `fvar` (the kept
+/// axes in source order), `None` for a pinned one.
+fn kept_axis_indices(pins: &[AxisPin]) -> Vec<Option<u16>> {
+    let mut next = 0u16;
+    pins.iter()
+        .map(|pin| match pin {
+            AxisPin::Keep => {
+                next += 1;
+                Some(next - 1)
+            }
+            AxisPin::Pin => None,
+        })
+        .collect()
+}
+
+/// The GSUB or GPOS `tag` of the instance with its FeatureVariations
+/// instanced (see [`crate::feature_variations::instance_table`]):
+/// starting from `rebuilt` when an earlier step already rewrote the
+/// table, else from the source. `None` when the table does not change.
+fn layout_variations(
+    face: &Face<'_>,
+    tag: [u8; 4],
+    rebuilt: Option<Vec<u8>>,
+    pinned: &[Option<i16>],
+    new_axis: &[Option<u16>],
+    warnings: &Warnings,
+) -> Result<Option<Vec<u8>>, SubsetError> {
+    let instanced = match &rebuilt {
+        Some(bytes) => {
+            crate::feature_variations::instance_table(bytes, tag, pinned, new_axis, warnings)?
+        }
+        None => match face.table_bytes(tag) {
+            Ok(bytes) => {
+                crate::feature_variations::instance_table(bytes, tag, pinned, new_axis, warnings)?
+            }
+            Err(_) => None,
+        },
+    };
+    Ok(instanced.or(rebuilt))
 }
 
 /// CFF1 (non-variable) instance pass: nothing to bake; rebuild the SFNT

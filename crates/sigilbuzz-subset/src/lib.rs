@@ -51,6 +51,8 @@
 //!   16-bit offsets is split into several; any other subtable that
 //!   does fails the subset with [`SubsetError::Unsupported`] rather
 //!   than wrap an offset.
+//!   FeatureVariations (GSUB and GPOS 1.1) are kept, their feature and
+//!   lookup indices remapped with the rest.
 //! - Variations: `fvar` and `avar` pass through. `gvar` is rebuilt with one
 //!   entry per kept glyph, `HVAR` around a fresh `DeltaSetIndexMap` and a
 //!   deduplicated `ItemVariationStore`, and `VARC` around the kept
@@ -121,6 +123,7 @@ mod closure;
 mod cmap;
 mod coverage;
 mod device;
+mod feature_variations;
 mod fvar;
 mod gdef;
 mod glyf;

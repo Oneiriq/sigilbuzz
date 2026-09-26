@@ -22,13 +22,15 @@
 //! to drop:
 //!
 //! 1. Lookups whose every subtable rewrote to empty.
-//! 2. Features that name no surviving lookup.
+//! 2. Features that name no surviving lookup, unless a FeatureVariations
+//!    alternate still gives them one.
 //! 3. Scripts whose every feature dropped.
 //! 4. The container table entirely if no script survives.
 //!
 //! Surviving lookups are then renumbered to 0..N. Every reference
-//! (the FeatureList's lookup-index list) is rewritten through the
-//! same renumber map.
+//! (the FeatureList's lookup-index list, and the feature and lookup
+//! indices inside the FeatureVariations of a 1.1 table) is rewritten
+//! through the same renumber maps; see [`crate::feature_variations`].
 //!
 //! # Coverage matrix today
 //!
@@ -61,7 +63,7 @@ use sigilbuzz::Face;
 
 use crate::offset16::Offset16Guard;
 use crate::warnings::{error_context, Diag, Warnings};
-use crate::{gdef, gpos, gsub, GlyphId, SubsetError, SubsetInput};
+use crate::{feature_variations, gdef, gpos, gsub, GlyphId, SubsetError, SubsetInput};
 
 /// A new-namespace gid translator. `map(old) -> Some(new)` when the
 /// gid is kept, `None` when it has been dropped.
@@ -478,9 +480,25 @@ fn build_layout(
         renumber = build_renumber(&rewritten);
     }
 
+    // FeatureVariations (1.1 tables): a feature some alternate still
+    // gives a surviving lookup stays, even with no default lookup left.
+    let variations = feature_variations::read(bytes).unwrap_or_else(|e| {
+        diag.error(&e, "the FeatureVariations");
+        None
+    });
+    let live_alternates = variations.as_ref().map_or_else(Vec::new, |fv| {
+        fv.features_with_live_alternates(usize::from(feature_list.len()), &renumber)
+    });
+
     // Last: features and scripts. The ScriptList is walked as raw
     // bytes because the parser only looks LangSys records up by tag.
-    let new_features = rewrite_features(feature_list, &renumber, &diag, header_offset(bytes, 6))?;
+    let new_features = rewrite_features(
+        feature_list,
+        &renumber,
+        &live_alternates,
+        &diag,
+        header_offset(bytes, 6),
+    )?;
     let script_list = bytes.get(header_offset(bytes, 4)..).unwrap_or_default();
     let Some(new_scripts) =
         rewrite_scripts_from_bytes(script_list, &new_features.feature_renumber, &diag)?
@@ -492,12 +510,19 @@ fn build_layout(
     if new_lookups.is_empty() {
         return Ok(None);
     }
+    let new_variations = match &variations {
+        Some(fv) => {
+            feature_variations::subset(fv, &new_features.feature_renumber, &renumber, &diag)?
+        }
+        None => None,
+    };
 
     assemble_layout_table(
         &new_scripts,
         &new_features.bytes,
         &new_lookups,
         kind.extension_type,
+        new_variations.as_deref(),
     )
     .map(Some)
 }
@@ -574,8 +599,9 @@ struct RewrittenFeatures {
 }
 
 /// Rewrites the FeatureList. Drops any feature whose lookup-index list
-/// becomes empty after the lookup renumber. Returns the new bytes plus
-/// a feature-index renumber map.
+/// becomes empty after the lookup renumber, unless `live_alternates`
+/// marks it (a FeatureVariations alternate still gives it a lookup).
+/// Returns the new bytes plus a feature-index renumber map.
 ///
 /// A feature whose table cannot be read is dropped and reported
 /// through `diag` at its FeatureRecord; `list_at` is where the
@@ -583,6 +609,7 @@ struct RewrittenFeatures {
 fn rewrite_features(
     feature_list: FeatureList<'_>,
     lookup_renumber: &[Option<u16>],
+    live_alternates: &[bool],
     diag: &Diag<'_>,
     list_at: usize,
 ) -> Result<RewrittenFeatures, SubsetError> {
@@ -603,7 +630,11 @@ fn rewrite_features(
             .lookup_indices()
             .filter_map(|li| lookup_renumber.get(li as usize).copied().flatten())
             .collect();
-        if new_indices.is_empty() {
+        let live = live_alternates
+            .get(usize::from(fi))
+            .copied()
+            .unwrap_or(false);
+        if new_indices.is_empty() && !live {
             feature_renumber.push(None);
         } else {
             feature_renumber.push(Some(surviving.len() as u16));
@@ -906,21 +937,24 @@ fn encode_langsys(ls: &RewrittenLangSys) -> Vec<u8> {
 /// identical). Builds the LookupList around the rewritten lookups
 /// through [`crate::lookup_list::emit`], which falls back to Extension
 /// lookups (`extension_type`: 7 for GSUB, 9 for GPOS) when the lookups
-/// outgrow 16-bit offsets. Errors when the header offsets themselves,
-/// or even the Extension layout, cannot fit.
+/// outgrow 16-bit offsets. With `feature_variations` the table is
+/// version 1.1 and carries them after the LookupList. Errors when the
+/// header offsets themselves, or even the Extension layout, cannot fit.
 fn assemble_layout_table(
     script_list: &[u8],
     feature_list: &[u8],
     lookups: &[RewrittenLookup],
     extension_type: u16,
+    feature_variations: Option<&[u8]>,
 ) -> Result<Vec<u8>, SubsetError> {
-    // GSUB/GPOS header (v1.0):
+    // GSUB/GPOS header:
     //   u16 majorVersion = 1
-    //   u16 minorVersion = 0
+    //   u16 minorVersion = 0, or 1 with FeatureVariations
     //   Offset16 scriptListOffset
     //   Offset16 featureListOffset
     //   Offset16 lookupListOffset
-    let header_len: u16 = 10;
+    //   Offset32 featureVariationsOffset   (1.1)
+    let header_len: u16 = if feature_variations.is_some() { 14 } else { 10 };
     let script_list_off = header_len;
     let offsets = Offset16Guard::default();
     let feature_list_off = offsets.narrow(usize::from(header_len) + script_list.len());
@@ -932,13 +966,22 @@ fn assemble_layout_table(
 
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes());
-    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&u16::from(feature_variations.is_some()).to_be_bytes());
     out.extend_from_slice(&script_list_off.to_be_bytes());
     out.extend_from_slice(&feature_list_off.to_be_bytes());
     out.extend_from_slice(&lookup_list_off.to_be_bytes());
+    if feature_variations.is_some() {
+        out.extend_from_slice(&[0; 4]);
+    }
     out.extend_from_slice(script_list);
     out.extend_from_slice(feature_list);
     out.extend_from_slice(&lookup_list);
+    if let Some(variations) = feature_variations {
+        let at = u32::try_from(out.len())
+            .map_err(|_| SubsetError::Unsupported("layout rewrite: the table exceeds 4 GiB"))?;
+        out[10..14].copy_from_slice(&at.to_be_bytes());
+        out.extend_from_slice(variations);
+    }
     Ok(out)
 }
 
