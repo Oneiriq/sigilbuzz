@@ -63,8 +63,7 @@ use sigilbuzz::tables::gsub::lookup_type as gsub_type;
 use crate::coverage::emit_coverage_from_pairs;
 use crate::device::Dedup;
 use crate::layout::{
-    extension_target, has_null_class_def, parse_coverage_glyphs, RewriterCtx, RewrittenLookup,
-    RewrittenSubtable,
+    extension_target, parse_coverage_glyphs, RewriterCtx, RewrittenLookup, RewrittenSubtable,
 };
 use crate::warnings::error_context;
 use crate::SubsetError;
@@ -122,11 +121,6 @@ fn report_unreadable(ctx: &RewriterCtx, lookup_type: u16, sub: &[u8]) {
 fn parse_subtable(lookup_type: u16, sub: &[u8]) -> Result<(), sigilbuzz::Error> {
     use sigilbuzz::tables::gsub as parser;
     match lookup_type {
-        gsub_type::CONTEXT | gsub_type::CHAINED_CONTEXT
-            if has_null_class_def(sub, lookup_type == gsub_type::CHAINED_CONTEXT) =>
-        {
-            Ok(())
-        }
         gsub_type::SINGLE => parser::Single::parse(sub).map(drop),
         gsub_type::MULTIPLE => parser::Multiple::parse(sub).map(drop),
         gsub_type::ALTERNATE => parser::Alternate::parse(sub).map(drop),
@@ -1151,7 +1145,7 @@ fn rewrite_type5_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     }
     let cov_bytes = sub.get(cov_off..)?;
     let covered = parse_coverage_glyphs(cov_bytes);
-    let cd_bytes = sub.get(cd_off..)?;
+    let cd_pairs_old = crate::layout::classdef_pairs_at(sub, cd_off)?;
     let map = ctx.gid_map;
 
     // Filter Coverage to surviving first glyphs and rebuild it.
@@ -1164,7 +1158,6 @@ fn rewrite_type5_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
     // class ids still have at least one glyph; class indices in
     // ClassRule.input_classes_tail that are no longer reachable cause
     // the rule to die (it could never match in the new namespace).
-    let cd_pairs_old = crate::layout::parse_classdef_pairs_from_bytes(cd_bytes);
     let mut cd_pairs_new: Vec<(u16, u16)> = Vec::with_capacity(cd_pairs_old.len());
     let mut reachable_classes: Vec<bool> = Vec::new();
     for (gid_old, class) in &cd_pairs_old {
@@ -1657,13 +1650,9 @@ fn rewrite_type6_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<RewrittenSubta
         return None;
     }
 
-    let bt_cd_bytes = sub.get(bt_cd_off..)?;
-    let in_cd_bytes = sub.get(in_cd_off..)?;
-    let la_cd_bytes = sub.get(la_cd_off..)?;
-
-    let bt_pairs_old = crate::layout::parse_classdef_pairs_from_bytes(bt_cd_bytes);
-    let in_pairs_old = crate::layout::parse_classdef_pairs_from_bytes(in_cd_bytes);
-    let la_pairs_old = crate::layout::parse_classdef_pairs_from_bytes(la_cd_bytes);
+    let bt_pairs_old = crate::layout::classdef_pairs_at(sub, bt_cd_off)?;
+    let in_pairs_old = crate::layout::classdef_pairs_at(sub, in_cd_off)?;
+    let la_pairs_old = crate::layout::classdef_pairs_at(sub, la_cd_off)?;
 
     let remap = |pairs: &[(u16, u16)]| -> (Vec<(u16, u16)>, Vec<bool>) {
         let mut new_pairs: Vec<(u16, u16)> = Vec::with_capacity(pairs.len());

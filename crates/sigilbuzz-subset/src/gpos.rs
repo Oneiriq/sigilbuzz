@@ -73,8 +73,8 @@ use sigilbuzz::tables::gpos::lookup_type as gpos_type;
 use crate::coverage::emit_coverage_from_pairs;
 use crate::device::{copy_anchor, Dedup};
 use crate::layout::{
-    extension_target, has_null_class_def, parse_classdef_pairs_from_bytes, parse_coverage_glyphs,
-    RewriterCtx, RewrittenLookup, RewrittenSubtable,
+    classdef_pairs_at, extension_target, parse_coverage_glyphs, RewriterCtx, RewrittenLookup,
+    RewrittenSubtable,
 };
 use crate::warnings::error_context;
 use crate::SubsetError;
@@ -134,11 +134,6 @@ fn report_unreadable(ctx: &RewriterCtx, lookup_type: u16, sub: &[u8]) {
 fn parse_subtable(lookup_type: u16, sub: &[u8]) -> Result<(), sigilbuzz::Error> {
     use sigilbuzz::tables::gpos as parser;
     match lookup_type {
-        gpos_type::CONTEXT | gpos_type::CHAINED_CONTEXT
-            if has_null_class_def(sub, lookup_type == gpos_type::CHAINED_CONTEXT) =>
-        {
-            Ok(())
-        }
         gpos_type::SINGLE_ADJUSTMENT => parser::SinglePos::parse(sub).map(drop),
         gpos_type::PAIR_ADJUSTMENT => parser::PairPos::parse(sub).map(drop),
         gpos_type::CURSIVE_ATTACHMENT => parser::CursivePos::parse(sub).map(drop),
@@ -632,10 +627,8 @@ fn rewrite_pair_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<Vec<Rewritt
 
     let cov_bytes = sub.get(cov_off..)?;
     let covered = parse_coverage_glyphs(cov_bytes);
-    let cd1_bytes = sub.get(cd1_off..)?;
-    let cd2_bytes = sub.get(cd2_off..)?;
-    let cd1_pairs = parse_classdef_pairs_from_bytes(cd1_bytes);
-    let cd2_pairs = parse_classdef_pairs_from_bytes(cd2_bytes);
+    let cd1_pairs = classdef_pairs_at(sub, cd1_off)?;
+    let cd2_pairs = classdef_pairs_at(sub, cd2_off)?;
 
     let map = ctx.gid_map;
 
@@ -905,6 +898,10 @@ fn rewrite_pair_pos_format2_to_format1(
 /// `cd_off` inside `sub`. Returns 0 (the implicit default) on any
 /// parse failure.
 fn class_of_gid(sub: &[u8], cd_off: usize, gid: u16) -> u16 {
+    // A null offset is the empty ClassDef: every glyph is class 0.
+    if cd_off == 0 {
+        return 0;
+    }
     let Some(cd) = sub.get(cd_off..) else {
         return 0;
     };
@@ -1355,7 +1352,7 @@ fn rewrite_context_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<Rewritte
     }
     let cov_bytes = sub.get(cov_off..)?;
     let covered = parse_coverage_glyphs(cov_bytes);
-    let cd_bytes = sub.get(cd_off..)?;
+    let cd_pairs_old = classdef_pairs_at(sub, cd_off)?;
     let map = ctx.gid_map;
 
     let new_covered: Vec<u16> = covered.iter().filter_map(|&g| map.map(g)).collect();
@@ -1363,7 +1360,6 @@ fn rewrite_context_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<Rewritte
         return None;
     }
 
-    let cd_pairs_old = parse_classdef_pairs_from_bytes(cd_bytes);
     let mut cd_pairs_new: Vec<(u16, u16)> = Vec::with_capacity(cd_pairs_old.len());
     let mut reachable_classes: Vec<bool> = Vec::new();
     for (gid_old, class) in &cd_pairs_old {
@@ -1785,13 +1781,9 @@ fn rewrite_chain_context_pos_format2(ctx: &RewriterCtx, sub: &[u8]) -> Option<Re
         return None;
     }
 
-    let bt_cd_bytes = sub.get(bt_cd_off..)?;
-    let in_cd_bytes = sub.get(in_cd_off..)?;
-    let la_cd_bytes = sub.get(la_cd_off..)?;
-
-    let bt_pairs_old = parse_classdef_pairs_from_bytes(bt_cd_bytes);
-    let in_pairs_old = parse_classdef_pairs_from_bytes(in_cd_bytes);
-    let la_pairs_old = parse_classdef_pairs_from_bytes(la_cd_bytes);
+    let bt_pairs_old = classdef_pairs_at(sub, bt_cd_off)?;
+    let in_pairs_old = classdef_pairs_at(sub, in_cd_off)?;
+    let la_pairs_old = classdef_pairs_at(sub, la_cd_off)?;
 
     let remap = |pairs: &[(u16, u16)]| -> (Vec<(u16, u16)>, Vec<bool>) {
         let mut new_pairs: Vec<(u16, u16)> = Vec::with_capacity(pairs.len());

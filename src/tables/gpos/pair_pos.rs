@@ -245,14 +245,16 @@ impl<'a> PairPosFormat2<'a> {
             offset: coverage_off,
             context: "pairPos format2 coverage offset past end",
         })?)?;
-        let class_def1 = ClassDef::parse(data.get(class_def1_off..).ok_or(Error::Malformed {
-            offset: class_def1_off,
-            context: "pairPos format2 classDef1 offset past end",
-        })?)?;
-        let class_def2 = ClassDef::parse(data.get(class_def2_off..).ok_or(Error::Malformed {
-            offset: class_def2_off,
-            context: "pairPos format2 classDef2 offset past end",
-        })?)?;
+        let class_def1 = ClassDef::parse_at(
+            data,
+            class_def1_off,
+            "pairPos format2 classDef1 offset past end",
+        )?;
+        let class_def2 = ClassDef::parse_at(
+            data,
+            class_def2_off,
+            "pairPos format2 classDef2 offset past end",
+        )?;
 
         Ok(Self {
             data,

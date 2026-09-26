@@ -248,10 +248,11 @@ impl<'a> Context2<'a> {
             offset: coverage_off,
             context: "context format 2 coverage offset past end",
         })?)?;
-        let class_def = ClassDef::parse(data.get(class_def_off..).ok_or(Error::Malformed {
-            offset: class_def_off,
-            context: "context format 2 classDef offset past end",
-        })?)?;
+        let class_def = ClassDef::parse_at(
+            data,
+            class_def_off,
+            "context format 2 classDef offset past end",
+        )?;
 
         let mut class_sets = Vec::with_capacity(class_set_count);
         for off in set_offs {
@@ -623,18 +624,21 @@ impl<'a> ChainContext2<'a> {
             offset: coverage_off,
             context: "chain context format 2 coverage offset past end",
         })?)?;
-        let backtrack_class = ClassDef::parse(data.get(bt_cd_off..).ok_or(Error::Malformed {
-            offset: bt_cd_off,
-            context: "chain context format 2 backtrackClassDef offset past end",
-        })?)?;
-        let input_class = ClassDef::parse(data.get(in_cd_off..).ok_or(Error::Malformed {
-            offset: in_cd_off,
-            context: "chain context format 2 inputClassDef offset past end",
-        })?)?;
-        let lookahead_class = ClassDef::parse(data.get(la_cd_off..).ok_or(Error::Malformed {
-            offset: la_cd_off,
-            context: "chain context format 2 lookaheadClassDef offset past end",
-        })?)?;
+        let backtrack_class = ClassDef::parse_at(
+            data,
+            bt_cd_off,
+            "chain context format 2 backtrackClassDef offset past end",
+        )?;
+        let input_class = ClassDef::parse_at(
+            data,
+            in_cd_off,
+            "chain context format 2 inputClassDef offset past end",
+        )?;
+        let lookahead_class = ClassDef::parse_at(
+            data,
+            la_cd_off,
+            "chain context format 2 lookaheadClassDef offset past end",
+        )?;
 
         let mut class_sets = Vec::with_capacity(set_count);
         for off in set_offs {
@@ -1385,6 +1389,54 @@ mod tests {
         assert!(ctx.matches(&[99, 10, 20, 30], 1).is_none());
         assert!(ctx.matches(&[5, 10, 99, 30], 1).is_none());
         assert!(ctx.matches(&[5, 10, 20, 99], 1).is_none());
+    }
+
+    #[test]
+    fn chain_context2_null_class_defs_put_every_glyph_in_class_zero() {
+        // fontmake leaves the backtrack (and often lookahead) ClassDef
+        // offset null. A null ClassDef means every glyph is class 0, as
+        // in HarfBuzz; reading the subtable header as a ClassDef instead
+        // either fails to parse or invents classes.
+        //   input cd: 10..=11 -> 1. Rule for input class 1:
+        //   bt=[0], input_tail=[], la=[0].
+        let mut out = Vec::new();
+        out.extend_from_slice(&2u16.to_be_bytes()); // format
+        out.extend_from_slice(&0u16.to_be_bytes()); // cov slot
+        out.extend_from_slice(&0u16.to_be_bytes()); // bt cd: null
+        out.extend_from_slice(&0u16.to_be_bytes()); // in cd slot
+        out.extend_from_slice(&0u16.to_be_bytes()); // la cd: null
+        out.extend_from_slice(&2u16.to_be_bytes()); // set count
+        out.extend_from_slice(&0u16.to_be_bytes()); // set[0]
+        out.extend_from_slice(&0u16.to_be_bytes()); // set[1]
+        let (cov_slot, in_cd_slot, set1_slot) = (2, 6, 14);
+
+        let set_off = out.len();
+        out.extend_from_slice(&1u16.to_be_bytes()); // rule count
+        out.extend_from_slice(&4u16.to_be_bytes()); // rule offset (from the set)
+        out.extend_from_slice(&1u16.to_be_bytes()); // bt count
+        out.extend_from_slice(&0u16.to_be_bytes()); // bt class 0
+        out.extend_from_slice(&1u16.to_be_bytes()); // input count
+        out.extend_from_slice(&1u16.to_be_bytes()); // la count
+        out.extend_from_slice(&0u16.to_be_bytes()); // la class 0
+        out.extend_from_slice(&0u16.to_be_bytes()); // lookup count
+        out[set1_slot..set1_slot + 2].copy_from_slice(&(set_off as u16).to_be_bytes());
+
+        let cov_off = out.len();
+        out.extend_from_slice(&build_coverage_format1(&[10, 11]));
+        out[cov_slot..cov_slot + 2].copy_from_slice(&(cov_off as u16).to_be_bytes());
+        let cd_off = out.len();
+        out.extend_from_slice(&build_classdef_format2(&[(10, 11, 1)]));
+        out[in_cd_slot..in_cd_slot + 2].copy_from_slice(&(cd_off as u16).to_be_bytes());
+
+        let ctx = ChainContext2::parse(&out).expect("null ClassDef offsets are valid");
+        assert_eq!(ctx.backtrack_class().class_of(5), 0);
+        assert_eq!(ctx.lookahead_class().class_of(11), 0);
+        // Any glyph satisfies a class-0 backtrack or lookahead slot,
+        // including ones the input ClassDef puts in another class.
+        assert!(ctx.matches(&[99, 10, 77], 1).is_some());
+        assert!(ctx.matches(&[11, 10, 11], 1).is_some());
+        // The context still needs a glyph on each side.
+        assert!(ctx.matches(&[10, 77], 0).is_none());
     }
 
     /// Build a minimal GDEF where each listed glyph has the given class.

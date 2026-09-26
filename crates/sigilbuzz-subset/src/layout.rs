@@ -987,18 +987,16 @@ fn assemble_layout_table(
 
 // === Byte-level helpers used by the rewriters and the closure walker. ===
 
-/// True for a format 2 (class based) context or chained context
-/// subtable with a null ClassDef offset. The spec lets the offset be
-/// null, which puts every glyph in class 0, and fonts built by fontmake
-/// leave the backtrack ClassDef null that way; the shaper's parser
-/// instead reads the subtable itself as the ClassDef. The subtable
-/// checks skip such subtables rather than report them as malformed.
-pub(crate) fn has_null_class_def(sub: &[u8], chained: bool) -> bool {
-    let slots: &[usize] = if chained { &[4, 6, 8] } else { &[4] };
-    sub.get(0..2) == Some(&[0u8, 2][..])
-        && slots
-            .iter()
-            .any(|&at| sub.get(at..at + 2) == Some(&[0u8, 0][..]))
+/// The `(gid, class)` pairs of the ClassDef that `offset` points at
+/// inside `sub`, class 0 left out. A null offset is the spec's empty
+/// ClassDef (every glyph in class 0; fontmake leaves the backtrack
+/// ClassDef of chained context format 2 null this way), so it yields
+/// no pairs. An offset past the end of `sub` yields `None`.
+pub(crate) fn classdef_pairs_at(sub: &[u8], offset: usize) -> Option<Vec<(u16, u16)>> {
+    if offset == 0 {
+        return Some(Vec::new());
+    }
+    sub.get(offset..).map(parse_classdef_pairs_from_bytes)
 }
 
 /// The lookup type and subtable an Extension subtable (GSUB type 7,
@@ -1261,6 +1259,23 @@ mod tests {
         }
         let pairs = parse_classdef_pairs_from_bytes(&bytes);
         assert_eq!(pairs, vec![(5, 1)]);
+    }
+
+    #[test]
+    fn classdef_pairs_at_reads_a_null_offset_as_empty() {
+        // A context format 2 header: its first word (2) would read as a
+        // ClassDef format, so a null offset must not parse from 0.
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&2u16.to_be_bytes()); // subtable format
+        sub.extend_from_slice(&1u16.to_be_bytes());
+        sub.extend_from_slice(&[0, 5, 0, 5, 0, 9]);
+        assert_eq!(classdef_pairs_at(&sub, 0), Some(Vec::new()));
+        let cd_off = sub.len();
+        sub.extend_from_slice(&2u16.to_be_bytes()); // ClassDef format 2
+        sub.extend_from_slice(&1u16.to_be_bytes()); // rangeCount
+        sub.extend_from_slice(&[0, 8, 0, 8, 0, 2]);
+        assert_eq!(classdef_pairs_at(&sub, cd_off), Some(vec![(8, 2)]));
+        assert_eq!(classdef_pairs_at(&sub, sub.len() + 1), None);
     }
 
     #[test]
