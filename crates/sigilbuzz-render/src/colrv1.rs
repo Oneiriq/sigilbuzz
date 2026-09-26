@@ -41,8 +41,8 @@ use alloc::vec::Vec;
 
 use sigilbuzz::Face;
 use sigilbuzz_paint::{
-    evaluate_with_palette, Color, CompositeMode, DrawCmd, Extend, Gradient, GradientKind,
-    PaintSource, Transform2D,
+    evaluate_with_palette, linear_gradient_end, Color, CompositeMode, DrawCmd, Extend, Gradient,
+    GradientKind, PaintSource, Transform2D,
 };
 
 use crate::affine::Affine;
@@ -430,9 +430,20 @@ fn sample_gradient(g: &Gradient, paint_xform: Transform2D, x: f32, y: f32) -> [u
         return [0, 0, 0, 0];
     }
     let t = match g.kind {
-        GradientKind::Linear { p0, p1, .. } => {
-            let (a, b) = transformed_pair(paint_xform, p0, p1);
-            project_linear(a, b, (x, y))
+        GradientKind::Linear { p0, p1, p2 } => {
+            // Color bands run parallel to p0 -> p2, or perpendicular to
+            // p0 -> p1 when p2 equals p0. Mapping a point on that line
+            // through the transform keeps the bands right under skew.
+            let end = linear_gradient_end(p0, p1, p2);
+            let (q2x, q2y) = (p2.0 - p0.0, p2.1 - p0.1);
+            let band = if q2x * q2x + q2y * q2y <= f32::EPSILON {
+                (p0.0 - (p1.1 - p0.1), p0.1 + (p1.0 - p0.0))
+            } else {
+                p2
+            };
+            let (a, b) = transformed_pair(paint_xform, p0, end);
+            let c = paint_xform.apply(band.0, band.1);
+            project_linear_banded(a, b, c, (x, y))
         }
         GradientKind::Radial { c0, r0, c1, r1 } => {
             let (a, b) = transformed_pair(paint_xform, c0, c1);
@@ -486,6 +497,25 @@ pub(crate) fn project_linear(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> Opt
         return None;
     }
     Some(((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len_sq)
+}
+
+/// Linear gradient parameter at `p` for a gradient from `a` to `b`
+/// whose color bands run parallel to the line from `a` to `c`.
+/// Returns `None` when the bands are parallel to `a -> b`, which
+/// leaves `t` undefined.
+fn project_linear_banded(
+    a: (f32, f32),
+    b: (f32, f32),
+    c: (f32, f32),
+    p: (f32, f32),
+) -> Option<f32> {
+    // `n` is normal to the bands, so `t` grows only across them.
+    let n = (a.1 - c.1, c.0 - a.0);
+    let denom = n.0 * (b.0 - a.0) + n.1 * (b.1 - a.1);
+    if denom.abs() <= f32::EPSILON {
+        return None;
+    }
+    Some((n.0 * (p.0 - a.0) + n.1 * (p.1 - a.1)) / denom)
 }
 
 /// Two-circle radial gradient projection. Solves the standard
@@ -907,6 +937,55 @@ mod tests {
         assert!((t.unwrap() - 0.0).abs() < 1e-3);
         let t = project_sweep(c, 0.0, core::f32::consts::TAU, (-1.0, 0.0));
         assert!((t.unwrap() - 0.5).abs() < 1e-3);
+    }
+
+    /// Red at `t = 0`, blue at `t = 1`, padded.
+    fn red_to_blue(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32)) -> Gradient {
+        Gradient {
+            kind: GradientKind::Linear { p0, p1, p2 },
+            stops: alloc::vec![
+                sigilbuzz_paint::ColorStop {
+                    offset: 0.0,
+                    color: Color::new(1.0, 0.0, 0.0, 1.0),
+                },
+                sigilbuzz_paint::ColorStop {
+                    offset: 1.0,
+                    color: Color::new(0.0, 0.0, 1.0, 1.0),
+                },
+            ],
+            extend: Extend::Pad,
+        }
+    }
+
+    #[test]
+    fn linear_gradient_bands_follow_p2() {
+        // p2 on the diagonal: bands run at 45 degrees, so (50, 50) sits
+        // on the p0 band (red) and (100, 0) on the p1 band (blue).
+        // Ignoring p2 would put (50, 50) halfway.
+        let g = red_to_blue((0.0, 0.0), (100.0, 0.0), (100.0, 100.0));
+        let at = |x, y| sample_gradient(&g, Transform2D::IDENTITY, x, y);
+        assert_eq!(at(50.0, 50.0), [255, 0, 0, 255]);
+        assert_eq!(at(100.0, 0.0), [0, 0, 255, 255]);
+        let mid = at(25.0, -25.0);
+        assert!(mid[0] > 100 && mid[2] > 100, "halfway mixes, got {mid:?}");
+    }
+
+    #[test]
+    fn linear_gradient_bands_stay_parallel_to_p2_under_skew() {
+        // A horizontal skew keeps horizontal bands horizontal. With p2
+        // straight up from p0, every point on y = 50 shares a color.
+        let g = red_to_blue((0.0, 0.0), (0.0, 100.0), (100.0, 0.0));
+        let skew = Transform2D {
+            xx: 1.0,
+            yx: 0.0,
+            xy: 0.7,
+            yy: 1.0,
+            dx: 0.0,
+            dy: 0.0,
+        };
+        let left = sample_gradient(&g, skew, -40.0, 50.0);
+        let right = sample_gradient(&g, skew, 90.0, 50.0);
+        assert_eq!(left, right);
     }
 
     #[test]

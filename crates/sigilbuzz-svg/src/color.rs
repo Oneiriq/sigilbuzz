@@ -31,8 +31,8 @@ use core::fmt::Write as _;
 
 use sigilbuzz::Face;
 use sigilbuzz_paint::{
-    evaluate, evaluate_at_coords, Color, CompositeMode, DrawCmd, Gradient, GradientKind,
-    PaintSource, Transform2D,
+    evaluate, evaluate_at_coords, linear_gradient_end, Color, CompositeMode, DrawCmd, Gradient,
+    GradientKind, PaintSource, Transform2D,
 };
 
 use crate::{path_bbox, path_data, push_num, F2Dot14, GlyphId, VIEWBOX_MARGIN};
@@ -233,8 +233,11 @@ fn push_layer(body: &mut String, mode: CompositeMode) {
 
 fn emit_gradient_def(defs: &mut Defs, g: &Gradient) -> String {
     match g.kind {
-        GradientKind::Linear { p0, p1, .. } => {
+        GradientKind::Linear { p0, p1, p2 } => {
             let id = defs.allocate_id("grad");
+            // SVG bands are perpendicular to x1,y1 -> x2,y2. Moving the
+            // end point by p2 turns them the way COLRv1 asks.
+            let p1 = linear_gradient_end(p0, p1, p2);
             let mut s = String::new();
             let _ = write!(
                 s,
@@ -543,6 +546,29 @@ mod tests {
         assert!(svg.contains(r#"x2="100""#));
         assert!(svg.contains(r#"spreadMethod="pad""#));
         assert!(svg.contains(r#"stop-color="rgb(255,0,0)""#));
+    }
+
+    #[test]
+    fn linear_gradient_def_turns_by_p2() {
+        use sigilbuzz_paint::{ColorStop, Extend, Gradient, GradientKind};
+        // p2 on the diagonal turns the bands by 45 degrees, which moves
+        // the SVG end point from (100, 0) to (50, -50).
+        let g = Gradient {
+            kind: GradientKind::Linear {
+                p0: (0.0, 0.0),
+                p1: (100.0, 0.0),
+                p2: (100.0, 100.0),
+            },
+            stops: alloc::vec![ColorStop {
+                offset: 0.0,
+                color: Color::new(1.0, 0.0, 0.0, 1.0),
+            }],
+            extend: Extend::Pad,
+        };
+        let mut defs = Defs::default();
+        emit_gradient_def(&mut defs, &g);
+        let svg = defs.into_svg();
+        assert!(svg.contains(r#"x2="50" y2="-50""#), "got {svg}");
     }
 
     #[test]
