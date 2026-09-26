@@ -309,6 +309,9 @@ fn reduce(raw: &str, url: &str, retrieved: &str, keep: impl Fn(&[&str]) -> bool)
     out
 }
 
+/// Which data lines of a downloaded file a snapshot keeps, by field.
+type Keep = fn(&[&str]) -> bool;
+
 fn refresh_snapshots() {
     let Ok(dir) = std::env::var("SIGILBUZZ_UCD_DIR") else {
         return;
@@ -317,7 +320,7 @@ fn refresh_snapshots() {
     let retrieved =
         std::env::var("SIGILBUZZ_UCD_RETRIEVED").expect("set SIGILBUZZ_UCD_RETRIEVED=YYYY-MM-DD");
     let base = format!("https://www.unicode.org/Public/{version}/ucd");
-    let jobs: [(&str, String, fn(&[&str]) -> bool); 5] = [
+    let jobs: [(&str, String, Keep); 5] = [
         (ARABIC_SHAPING, format!("{base}/{ARABIC_SHAPING}"), |_| true),
         (
             GENERAL_CATEGORY,
