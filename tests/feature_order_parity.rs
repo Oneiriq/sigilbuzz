@@ -271,6 +271,28 @@ fn thai_lao_and_hangul_run_each_default_feature_once() {
 }
 
 #[test]
+fn non_joining_characters_take_no_isol() {
+    // HarfBuzz's joining state machine gives a non-joining character
+    // (hamza, a space) no action, so `isol` only reaches the letters
+    // that join.
+    const AMIRI: &[u8] = include_bytes!("fixtures/amiri_regular.ttf");
+    let hamza = glyph(AMIRI, '\u{0621}');
+    let beh = glyph(AMIRI, '\u{0628}');
+    let mut pairs = vec![(hamza, hamza + 1), (beh, beh + 1)];
+    pairs.sort_unstable();
+    let table = gsub(
+        &[*b"DFLT", *b"arab"],
+        &[(*b"isol", vec![0])],
+        &[Lookup::Single(pairs)],
+    );
+    let patched = with_table(AMIRI, *b"GSUB", &table);
+    let rows = assert_parity(&patched, "\u{0621} \u{0628}", Direction::Rtl);
+    // Visual order: beh, space, hamza.
+    assert_eq!(rows[0].0, u32::from(beh) + 1);
+    assert_eq!(rows[2].0, u32::from(hamza));
+}
+
+#[test]
 fn myanmar_runs_locl_and_ccmp_before_reordering() {
     // HarfBuzz's Myanmar shaper applies locl and ccmp to the logical
     // order, then moves the medial ra in front of its base. A rule for

@@ -32,13 +32,14 @@
 //! feature for the current position is:
 //!
 //! ```text
-//!   current is R  or U   ->  isol            if prev is not D/C/L
+//!   current is R         ->  isol            if prev is not D/C/L
 //!                        ->  fina            otherwise
 //!   current is D  or C   ->  isol            if prev is not D/C/L and next is not D/C/R
 //!                        ->  init            if prev is not D/C/L and next is     D/C/R
 //!                        ->  fina            if prev is     D/C/L and next is not D/C/R
 //!                        ->  medi            if prev is     D/C/L and next is     D/C/R
 //!   current is L         ->  (mirror; no Unicode 15.1 characters hit this)
+//!   current is U         ->  no feature: non-joining, as in HarfBuzz
 //!   current is T         ->  transparent: caller carries the tag through
 //! ```
 //!
@@ -219,12 +220,10 @@ pub fn assign_from_types_in_context(
 fn form_at(types: &[JoiningType], i: usize, context: JoiningContext) -> JoiningForm {
     let current = types[i];
     match current {
-        JoiningType::T => JoiningForm::None,
-        JoiningType::U => {
-            // Non-joining letter: always isolated, regardless of
-            // neighbors. Hamza is the canonical example.
-            JoiningForm::Isol
-        }
+        // A non-joining character (hamza, digits, spaces, the other
+        // scripts' letters) gets no joining feature at all: HarfBuzz's
+        // state table gives it no action, so not even `isol` applies.
+        JoiningType::T | JoiningType::U => JoiningForm::None,
         JoiningType::R => {
             // Right-joining letters (alef, waw, reh ...) connect to
             // the *preceding* letter only. So the only question is
@@ -393,12 +392,11 @@ mod tests {
     fn zwnj_breaks_joining_at_boundary() {
         // ZWNJ is Non_joining (U): breaks the chain. "BeB" with
         // ZWNJ in the middle: first beh is isol (trailing ZWNJ breaks
-        // join), ZWNJ itself is isol from the state machine (carried
-        // through as None-equivalent isol), second beh is isol too.
+        // join), ZWNJ itself gets no feature, second beh is isol too.
         let got = forms("\u{0628}\u{200C}\u{0628}");
         assert_eq!(
             got,
-            alloc::vec![JoiningForm::Isol, JoiningForm::Isol, JoiningForm::Isol]
+            alloc::vec![JoiningForm::Isol, JoiningForm::None, JoiningForm::Isol]
         );
     }
 
@@ -408,7 +406,7 @@ mod tests {
         let got = forms("\u{0628} \u{0628}");
         assert_eq!(
             got,
-            alloc::vec![JoiningForm::Isol, JoiningForm::Isol, JoiningForm::Isol]
+            alloc::vec![JoiningForm::Isol, JoiningForm::None, JoiningForm::Isol]
         );
     }
 
@@ -471,13 +469,15 @@ mod tests {
     }
 
     #[test]
-    fn non_arabic_run_is_all_isol() {
-        // A run of non-joining types resolves to isol for every
-        // position (non-arabic spaces + letters behave the same way).
-        let got = forms("abc");
+    fn non_joining_characters_get_no_joining_feature() {
+        // Non-joining characters (Latin letters, spaces, hamza) take no
+        // isol/init/medi/fina at all, as in HarfBuzz's arabic_joining.
+        let got = forms("ab \u{0621}");
+        assert_eq!(got, alloc::vec![JoiningForm::None; 4]);
+        // A beh after a hamza is still isolated or initial by itself.
         assert_eq!(
-            got,
-            alloc::vec![JoiningForm::Isol, JoiningForm::Isol, JoiningForm::Isol]
+            forms("\u{0621}\u{0628}\u{0628}"),
+            alloc::vec![JoiningForm::None, JoiningForm::Init, JoiningForm::Fina]
         );
     }
 

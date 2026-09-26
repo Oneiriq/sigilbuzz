@@ -287,18 +287,16 @@ mod tests {
     #[test]
     fn vowel_separator_breaks_joining() {
         // A + MVS + E: the vowel separator (U+180E, type U) breaks
-        // the cursive chain so the A is final (it has the implicit
-        // word-start, so init), the MVS is isolated, and the E is
-        // initial because nothing precedes it. Walk:
+        // the cursive chain. Walk:
         //   A: prev=none, next=MVS(U) -> no joiner before, no joiner
         //      after -> isol.
-        //   MVS: U -> isol.
+        //   MVS: U -> no joining feature, as in HarfBuzz.
         //   E: prev=MVS(U) -> no joiner before, next=none -> isol.
         let cps: Vec<char> = "\u{1820}\u{180E}\u{1821}".chars().collect();
         let forms = assign_mongolian_forms(&cps);
         assert_eq!(
             forms,
-            alloc::vec![JoiningForm::Isol, JoiningForm::Isol, JoiningForm::Isol]
+            alloc::vec![JoiningForm::Isol, JoiningForm::None, JoiningForm::Isol]
         );
     }
 
