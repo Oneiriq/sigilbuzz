@@ -48,7 +48,7 @@
 //! - **Type 7 (context positioning)**: formats 1 / 2 / 3, mirroring
 //!   the GSUB type-5 byte-level rewriter. Nested `PosLookupRecord`s
 //!   are renumbered through the GPOS lookup-list renumber map driven
-//!   by the two-phase build in [`crate::layout::build_gpos`]. Rules
+//!   by the two-pass build in [`crate::layout::build_gpos`]. Rules
 //!   left without records (`ignore pos`) are kept, since they stop
 //!   the later rules of their lookup from matching.
 //! - **Type 8 (chained context positioning)**: formats 1 / 2 / 3,
