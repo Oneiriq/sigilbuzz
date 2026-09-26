@@ -928,6 +928,20 @@ pub fn shape_nko(
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
 ) {
+    let context = crate::ot::arabic::JoiningContext::NONE;
+    shape_nko_in_context(gsub, gdef, codepoints, glyphs, context);
+}
+
+/// [`shape_nko`] for a run whose surroundings are known: the first and
+/// last letters join toward `context` (the buffer's pre- and
+/// post-context, as in HarfBuzz's Arabic-family joining).
+pub fn shape_nko_in_context(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+    context: crate::ot::arabic::JoiningContext,
+) {
     if codepoints.is_empty() || glyphs.is_empty() {
         return;
     }
@@ -955,7 +969,7 @@ pub fn shape_nko(
         .iter()
         .map(|&c| crate::unicode::joining::joining_type(c))
         .collect();
-    let forms = crate::ot::arabic::assign_from_types(&types);
+    let forms = crate::ot::arabic::assign_from_types_in_context(&types, context);
 
     if glyphs.len() == forms.len() {
         for (form, tag) in [

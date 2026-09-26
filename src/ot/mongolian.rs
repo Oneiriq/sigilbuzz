@@ -48,7 +48,7 @@
 use alloc::vec::Vec;
 
 use crate::buffer::Glyph;
-use crate::ot::arabic::{assign_from_types, JoiningForm};
+use crate::ot::arabic::{assign_from_types_in_context, JoiningContext, JoiningForm};
 use crate::shape::apply_gsub_feature_masked;
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
@@ -98,8 +98,19 @@ pub const fn is_mongolian_fvs(ch: char) -> bool {
 /// Mongolian fonts target.
 #[must_use]
 pub fn assign_mongolian_forms(codepoints: &[char]) -> Vec<JoiningForm> {
+    assign_mongolian_forms_in_context(codepoints, JoiningContext::NONE)
+}
+
+/// [`assign_mongolian_forms`] for a run with known surroundings (the
+/// buffer's pre- and post-context), so a run that starts or ends
+/// mid-word keeps its connected forms.
+#[must_use]
+pub fn assign_mongolian_forms_in_context(
+    codepoints: &[char],
+    context: JoiningContext,
+) -> Vec<JoiningForm> {
     let types: Vec<JoiningType> = codepoints.iter().map(|&c| joining_type(c)).collect();
-    let mut forms = assign_from_types(&types);
+    let mut forms = assign_from_types_in_context(&types, context);
     // FVS inherits the previous letter's form. Walk left-to-right
     // and propagate the most recent non-None form through any FVS
     // positions; this matches rustybuzz's
@@ -129,6 +140,19 @@ pub fn shape_mongolian(
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
 ) {
+    shape_mongolian_in_context(gsub, gdef, codepoints, glyphs, JoiningContext::NONE);
+}
+
+/// [`shape_mongolian`] for a run whose surroundings are known: the
+/// first and last letters join toward `context` (see
+/// [`JoiningContext::around`]).
+pub fn shape_mongolian_in_context(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+    context: JoiningContext,
+) {
     if codepoints.is_empty() || glyphs.is_empty() {
         return;
     }
@@ -138,7 +162,7 @@ pub fn shape_mongolian(
 
     // Positional pass: `isol`/`init`/`medi`/`fina` each apply only
     // at positions whose computed JoiningForm matches.
-    let forms = assign_mongolian_forms(codepoints);
+    let forms = assign_mongolian_forms_in_context(codepoints, context);
     // The forms vector is aligned with `codepoints`. ccmp may have
     // rewritten glyph ids but it does not change run length on the
     // Mongolian fonts we test against (Noto Sans Mongolian's ccmp

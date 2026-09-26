@@ -85,7 +85,7 @@ use crate::buffer::{script_priority_for, unicode_prop, Buffer, Direction, Glyph,
 use crate::error::Result;
 use crate::face::Face;
 use crate::font::Font;
-use crate::ot::arabic::{assign_joining_forms, JoiningForm};
+use crate::ot::arabic::{assign_joining_forms_in_context, JoiningContext, JoiningForm};
 use crate::tables::gdef::Gdef;
 use crate::tables::gpos::{
     lookup_type as gpos_lt, resolve_variation_delta, ChainContextPos, ContextPos, PairPos,
@@ -871,13 +871,26 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // lose the cross-boundary context, but in sigilbuzz every Arabic
     // segment is bounded by non-Arabic neighbors anyway, so global
     // computation is both correct and cheaper than recomputing per
-    // segment.
+    // segment. The buffer's pre- and post-context stand in for the
+    // letters beyond the text's ends, as in HarfBuzz's arabic_joining.
     let has_arabic = buffer.script() == Some(Script::Arabic)
         || codepoints.iter().any(|&c| script_of(c) == Script::Arabic);
     let arabic_forms: Vec<JoiningForm> = if has_arabic {
-        assign_joining_forms(text)
+        let context = JoiningContext::from_context(buffer.pre_context(), buffer.post_context());
+        assign_joining_forms_in_context(text, context)
     } else {
         Vec::new()
+    };
+    // Joining context for the Mongolian and N'Ko shapers, which
+    // compute forms per segment: the segment's neighbors, then the
+    // buffer context beyond the text.
+    let joining_context = |range: &core::ops::Range<usize>| {
+        JoiningContext::around(
+            &codepoints,
+            range.clone(),
+            buffer.pre_context(),
+            buffer.post_context(),
+        )
     };
 
     // Step 2 (per segment): pre-shaper -> GSUB. We build the result by
@@ -926,11 +939,12 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             );
         }
         if seg.script == Script::Mongolian && dominant_script == Some(Script::Mongolian) {
-            crate::ot::mongolian::shape_mongolian(
+            crate::ot::mongolian::shape_mongolian_in_context(
                 gsub.as_ref(),
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                joining_context(&seg.cp_range),
             );
         }
         if seg.script == Script::Myanmar {
@@ -958,11 +972,12 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             );
         }
         if seg.script == Script::NKo {
-            crate::ot::use_shaper::shape_nko(
+            crate::ot::use_shaper::shape_nko_in_context(
                 gsub.as_ref(),
                 gdef.as_ref(),
                 seg_cps,
                 &mut seg_glyphs,
+                joining_context(&seg.cp_range),
             );
         }
         if seg.script == Script::Buginese {
