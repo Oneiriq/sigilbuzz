@@ -22,8 +22,25 @@ Added:
   selections back into the original text.
 - `fuzz/`: cargo-fuzz targets for every part of the workspace that reads untrusted
   input. See [fuzz/README.md](fuzz/README.md).
+- `Colr::var_index_map_offset`, the COLR v1 header's `DeltaSetIndexMap` offset.
+- `PairPos::lookup_with_base`, which resolves format 1 device tables against their
+  PairSet the way the spec does.
+- `sigilbuzz-paint`: `evaluate_with_palette`, which evaluates a COLR paint graph with a
+  chosen CPAL palette, and `linear_gradient_end`, which folds a linear gradient's `p2`
+  into its end point.
 
 Changed:
+
+- Latin, Greek, Cyrillic, and Han text now look for `latn`, `grek`, `cyrl`, and `hani`
+  lookups before falling back to `DFLT`, as HarfBuzz does. Fonts that put their kerning
+  or ligatures under the script tag get them now. Rubik VF, for example, had no Latin
+  kerning before.
+- `sigilbuzz-render` returns `RenderError::BadPaletteIndex` for a palette the font does
+  not have. Palette 0 still falls back to the default colors.
+- `hb_font_set_ppem` is documented as a no-op. sigilbuzz does not hint, so nothing read
+  the value.
+- The companion crate READMEs no longer claim `no_std`. Every companion crate enables the
+  core crate's `std` feature.
 
 - The minimum supported Rust version is now 1.81. The core crate already needed 1.81
   for `core::error::Error`, so the old `rust-version = "1.75"` was wrong.
@@ -89,6 +106,29 @@ valid input is unchanged except where noted.
 The new limits only affect fonts far beyond anything real, for example a glyph with
 more than 65,536 points, or a `shape()` call that needs more than 64 lookup
 applications per glyph (never fewer than 16,384 in total).
+
+Settings and table data that were read and then ignored:
+
+- The COLR v1 header was read with four offsets instead of five, so variable COLRv1
+  fonts never found their delta-set index map.
+- GPOS PairPos format 1 read its device tables relative to the subtable instead of the
+  PairSet, so variable kerning deltas came from the wrong place.
+- Subsetting dropped the GDEF variation store, so a subset variable font lost its
+  kerning deltas. `retain_hints` dropped `cvt `, `fpgm`, and `prep`. CFF and CFF2 fonts
+  ignored `retain_layout`, `retain_variations`, and `drop_unhandled`, so OTF subsets
+  lost GSUB, GPOS, `fvar`, and `HVAR`.
+- `sigilbuzz-capi`: `hb_font_set_scale` did not change the output, `hb_blob_create`
+  ignored its memory mode and dropped the destroy callback for empty blobs,
+  `hb_shape_full` ignored the shaper list, and `hb_font_paint_glyph` ignored the font's
+  variation coordinates and the chosen palette.
+- `sigilbuzz-woff`: WOFF1 wrapping wrote the input length as `totalSfntSize` instead of
+  the padded size.
+- `sigilbuzz-text-layout`: `break_at_word_boundaries = false` did nothing, mandatory
+  breaks ignored `max_width`, and newline characters counted toward the line width.
+- `sigilbuzz-render` and `sigilbuzz-svg`: a linear gradient's `p2` point was ignored,
+  `stop-opacity` inside a `style` attribute was ignored, a trailing `;` in `style`
+  dropped the whole gradient stop, and `stroke-linejoin="bevel"` left a notch at every
+  outer corner instead of drawing the bevel.
 
 ## 0.21.0 (2026-04-25)
 
