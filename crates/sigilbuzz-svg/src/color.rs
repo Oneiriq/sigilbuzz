@@ -202,7 +202,7 @@ fn emit_fill(
     let xform = transform_attr(transform);
     match paint {
         // Foreground fills already carry the evaluator's default
-        // foreground (opaque white), so they need no special case.
+        // foreground (opaque black), so they need no special case.
         PaintSource::Solid { color: c, .. } => {
             body.push_str("<path");
             if let Some(t) = xform {

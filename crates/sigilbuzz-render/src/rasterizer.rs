@@ -272,8 +272,9 @@ impl Rasterizer {
     /// `palette_index` selects the CPAL palette that solid fills and
     /// gradient stops resolve against. Unlike
     /// [`Rasterizer::rasterize_colrv0_glyph`], an index the font does
-    /// not have is not an error: it falls back to palette 0. Foreground
-    /// (`0xFFFF`) entries render opaque white.
+    /// not have is not an error: as in HarfBuzz, every palette entry
+    /// then paints in the foreground color, as does an entry the palette
+    /// lacks. Foreground (`0xFFFF`) entries render opaque black.
     ///
     /// # Errors
     /// - [`RenderError::ColrV1NotFound`] when the font has no v1

@@ -230,13 +230,13 @@ fn close(a: f32, b: f32) -> bool {
 // =========================================================================
 
 #[test]
-fn foreground_solid_is_flagged_and_keeps_default_white() {
+fn foreground_solid_is_flagged_and_defaults_to_black() {
     let bytes = face_bytes(&[(1, paint_solid(FOREGROUND, 0.5))]);
     let face = Face::parse_bytes(&bytes, 0).expect("face parses");
     let (color, is_fg) = only_solid(&evaluate(&face, 1));
     assert!(is_fg, "palette entry 0xFFFF must report foreground");
-    // Default foreground is opaque white, the pre-flag output.
-    assert_eq!((color.r, color.g, color.b), (1.0, 1.0, 1.0));
+    // The default foreground is opaque black, like a text renderer's.
+    assert_eq!((color.r, color.g, color.b), (0.0, 0.0, 0.0));
     assert!(close(color.a, 0.5), "alpha was {}", color.a);
 }
 
@@ -284,11 +284,11 @@ fn foreground_gradient_stops_are_flagged_per_stop() {
     assert!(stops[1].is_foreground);
     assert_eq!(
         (stops[1].color.r, stops[1].color.g, stops[1].color.b),
-        (1.0, 1.0, 1.0)
+        (0.0, 0.0, 0.0)
     );
     assert!(close(stops[1].color.a, 0.5));
 
-    let fg = Color::new(0.0, 0.0, 0.0, 1.0);
+    let fg = Color::new(1.0, 1.0, 1.0, 1.0);
     let stops = only_stops(&evaluate_with(
         &face,
         1,
@@ -297,7 +297,7 @@ fn foreground_gradient_stops_are_flagged_per_stop() {
     assert!(stops[1].is_foreground);
     assert_eq!(
         (stops[1].color.r, stops[1].color.g, stops[1].color.b),
-        (0.0, 0.0, 0.0)
+        (1.0, 1.0, 1.0)
     );
     assert!(close(stops[1].color.a, 0.5));
     // The palette stop is untouched by the foreground choice.
@@ -336,13 +336,35 @@ fn non_default_palette_resolves_solids_and_stops() {
 }
 
 #[test]
-fn out_of_range_palette_falls_back_to_default_palette() {
-    let bytes = face_bytes(&[(1, paint_solid(1, 1.0))]);
+fn out_of_range_palette_paints_the_foreground_like_harfbuzz() {
+    let bytes = face_bytes(&[
+        (1, paint_solid(1, 0.5)),
+        (2, paint_linear(&[(0.0, 0, 1.0), (1.0, 1, 1.0)])),
+    ]);
     let face = Face::parse_bytes(&bytes, 0).expect("face parses");
-    let options = EvalOptions::new().with_palette_index(7);
+    let fg = Color::new(0.2, 0.4, 0.6, 1.0);
+    let options = EvalOptions::new().with_palette_index(7).with_foreground(fg);
     let (color, is_fg) = only_solid(&evaluate_with(&face, 1, &options));
-    assert!(!is_fg);
-    assert_eq!(color, Color::new(0.0, 1.0, 0.0, 1.0), "palette 0 entry 1");
+    assert!(!is_fg, "a palette lookup is never flagged foreground");
+    assert_eq!((color.r, color.g, color.b), (0.2, 0.4, 0.6));
+    assert!(close(color.a, 0.5));
+    for stop in only_stops(&evaluate_with(&face, 2, &options)) {
+        assert_eq!((stop.color, stop.is_foreground), (fg, false));
+    }
+}
+
+#[test]
+fn missing_palette_entry_paints_the_foreground_like_harfbuzz() {
+    // TWO_PALETTES has two entries; entry 5 does not exist.
+    let bytes = face_bytes(&[(1, paint_solid(5, 1.0))]);
+    let face = Face::parse_bytes(&bytes, 0).expect("face parses");
+    assert_eq!(
+        only_solid(&evaluate(&face, 1)),
+        (EvalOptions::DEFAULT_FOREGROUND, false)
+    );
+    let fg = Color::new(0.0, 1.0, 0.0, 1.0);
+    let options = EvalOptions::new().with_foreground(fg);
+    assert_eq!(only_solid(&evaluate_with(&face, 1, &options)), (fg, false));
 }
 
 #[test]
@@ -356,7 +378,7 @@ fn palette_choice_does_not_affect_foreground() {
         &EvalOptions::new().with_palette_index(1),
     ));
     assert_eq!(a, b);
-    assert_eq!(a, (Color::WHITE, true));
+    assert_eq!(a, (Color::BLACK, true));
 }
 
 // =========================================================================

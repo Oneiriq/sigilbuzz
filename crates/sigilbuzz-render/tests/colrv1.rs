@@ -318,11 +318,24 @@ fn colrv1_palette_index_selects_cpal_palette() {
     assert!(count_dominant(&dark, 2) > 0, "palette 1 paints blue");
     assert_eq!(count_dominant(&dark, 0), 0, "palette 1 has no red");
 
-    // A palette the font does not have falls back to palette 0.
+    // A palette the font does not have paints every palette entry in
+    // the foreground color, opaque black by default, as HarfBuzz does.
     let fallback = rast
         .rasterize_colrv1_glyph(&face, 1, 9, 100.0, &[])
         .expect("out-of-range palette still renders");
-    assert_eq!(fallback, light);
+    assert_eq!(
+        (fallback.width, fallback.height),
+        (light.width, light.height)
+    );
+    assert_eq!(count_dominant(&fallback, 0), 0, "no palette red");
+    let opaque: Vec<[u8; 4]> = fallback
+        .data
+        .chunks_exact(4)
+        .filter(|p| p[3] == 255)
+        .map(|p| [p[0], p[1], p[2], p[3]])
+        .collect();
+    assert!(!opaque.is_empty(), "the glyph still paints");
+    assert!(opaque.iter().all(|p| *p == [0, 0, 0, 255]), "all black");
 }
 
 #[test]

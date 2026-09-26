@@ -12,7 +12,9 @@
 //!   per-stop alpha,
 //! - keeps foreground-ness: fills and stops that use COLR palette entry
 //!   `0xFFFF` (the text color) carry `is_foreground == true` and the
-//!   foreground color chosen through [`EvalOptions`],
+//!   foreground color chosen through [`EvalOptions`] (opaque black by
+//!   default); a palette lookup that fails also yields that color, as
+//!   in HarfBuzz,
 //! - emits [`DrawCmd::PushLayer`] / [`DrawCmd::PopLayer`] pairs around
 //!   `PaintComposite` children so the consumer can drive
 //!   blend-mode-aware compositing,

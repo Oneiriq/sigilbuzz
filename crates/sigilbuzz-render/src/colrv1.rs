@@ -55,9 +55,9 @@ use crate::raster::rasterize as raster;
 /// produce for `gid` and renders it to a premultiplied RGBA pixmap.
 ///
 /// `palette_index` selects the CPAL palette the evaluator resolves
-/// palette entries against. A font without that palette falls back to
-/// palette 0. Foreground (`0xFFFF`) entries render in the evaluator's
-/// default foreground, opaque white.
+/// palette entries against. Entries the font cannot supply, and
+/// foreground (`0xFFFF`) entries, render in the evaluator's default
+/// foreground, opaque black.
 ///
 /// `tolerance` is the per-glyph curve flattening tolerance in pixel
 /// units (same semantics as [`crate::Rasterizer`]'s field).
@@ -338,9 +338,9 @@ fn paint_glyph_into_layer(
 /// Resolves the color at pixel `(x, y)` for a paint source.
 fn evaluate_paint(paint: &PaintSource, paint_xform: Transform2D, x: f32, y: f32) -> [u8; 4] {
     match paint {
-        // Foreground fills arrive already resolved to the evaluator's
-        // default foreground (opaque white), so `is_foreground` needs no
-        // special handling here.
+        // Foreground fills arrive already resolved to the evaluation's
+        // foreground color, so `is_foreground` needs no special
+        // handling here.
         PaintSource::Solid { color, .. } => to_premul(*color),
         PaintSource::Gradient(g) => sample_gradient(g, paint_xform, x, y),
     }

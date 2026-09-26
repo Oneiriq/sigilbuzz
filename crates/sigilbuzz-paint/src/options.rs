@@ -15,6 +15,12 @@
 //! applied. A consumer that knows its text color can either pass it in
 //! through [`EvalOptions::with_foreground`] or keep the default and
 //! substitute its own color wherever the flag is set.
+//!
+//! Palette lookups that fail resolve the way HarfBuzz resolves them: a
+//! palette the font does not have, a palette entry past the end of the
+//! palette, and a font without `CPAL` all yield the foreground color.
+//! Those fills are not flagged `is_foreground`, because they did not
+//! ask for the text color.
 
 use sigilbuzz::tables::cpal::Cpal;
 
@@ -33,14 +39,14 @@ pub(crate) const FOREGROUND_PALETTE_ENTRY: u16 = 0xFFFF;
 /// use sigilbuzz_paint::{Color, EvalOptions};
 ///
 /// let coords = [0.5_f32];
-/// let black = Color::new(0.0, 0.0, 0.0, 1.0);
+/// let red = Color::new(1.0, 0.0, 0.0, 1.0);
 /// let options = EvalOptions::new()
 ///     .with_coords(&coords)
 ///     .with_palette_index(1)
-///     .with_foreground(black);
+///     .with_foreground(red);
 /// assert_eq!(options.coords(), &[0.5]);
 /// assert_eq!(options.palette_index(), 1);
-/// assert_eq!(options.foreground(), black);
+/// assert_eq!(options.foreground(), red);
 ///
 /// let defaults = EvalOptions::default();
 /// assert!(defaults.coords().is_empty());
@@ -56,10 +62,10 @@ pub struct EvalOptions<'a> {
 
 impl<'a> EvalOptions<'a> {
     /// Foreground color used when the caller does not pick one: opaque
-    /// white. It is what earlier releases painted for palette entry
-    /// `0xFFFF`, so output stays the same for callers that never set a
-    /// foreground.
-    pub const DEFAULT_FOREGROUND: Color = Color::WHITE;
+    /// black, the color text renderers draw with by default.
+    ///
+    /// Releases before 0.3 used opaque white here.
+    pub const DEFAULT_FOREGROUND: Color = Color::BLACK;
 
     /// Default options: static (no variation deltas), palette 0, and
     /// [`EvalOptions::DEFAULT_FOREGROUND`].
@@ -97,9 +103,9 @@ impl<'a> EvalOptions<'a> {
 
     /// Resolves palette entries against CPAL palette `palette_index`.
     ///
-    /// A font with fewer palettes than `palette_index + 1` falls back
-    /// to palette 0, the font's default palette, so an out-of-range
-    /// choice still renders the glyph in its default colors.
+    /// When the font has fewer palettes than `palette_index + 1`, every
+    /// palette entry resolves to the foreground color, as in HarfBuzz.
+    /// Those fills keep `is_foreground == false`.
     ///
     /// ```
     /// use sigilbuzz_paint::EvalOptions;
@@ -156,7 +162,7 @@ impl<'a> EvalOptions<'a> {
     /// ```
     /// use sigilbuzz_paint::{Color, EvalOptions};
     ///
-    /// assert_eq!(EvalOptions::new().foreground(), Color::WHITE);
+    /// assert_eq!(EvalOptions::new().foreground(), Color::BLACK);
     /// ```
     #[must_use]
     pub const fn foreground(&self) -> Color {
@@ -174,23 +180,17 @@ impl Default for EvalOptions<'_> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Palette<'a, 'b> {
     cpal: Option<&'b Cpal<'a>>,
-    /// Effective palette index, already clamped into range.
+    /// The requested palette index. The font may not have it.
     palette_index: u16,
     foreground: Color,
 }
 
 impl<'a, 'b> Palette<'a, 'b> {
-    /// Selects the palette `options` asks for, or palette 0 when the
-    /// font has no such palette.
+    /// Selects the palette `options` asks for.
     pub(crate) fn new(cpal: Option<&'b Cpal<'a>>, options: &EvalOptions<'_>) -> Self {
-        let requested = options.palette_index();
-        let palette_index = match cpal {
-            Some(c) if requested < c.num_palettes() => requested,
-            _ => 0,
-        };
         Self {
             cpal,
-            palette_index,
+            palette_index: options.palette_index(),
             foreground: options.foreground(),
         }
     }
@@ -198,8 +198,9 @@ impl<'a, 'b> Palette<'a, 'b> {
     /// Resolves palette entry `entry` and folds `alpha` into the result.
     ///
     /// Returns the color and whether it came from the foreground entry
-    /// (`0xFFFF`). An entry the palette does not have resolves to fully
-    /// transparent. Never panics.
+    /// (`0xFFFF`). A lookup that fails (no `CPAL`, no such palette, or
+    /// no such entry) resolves to the foreground color without the
+    /// foreground flag, matching HarfBuzz. Never panics.
     pub(crate) fn resolve(&self, entry: u16, alpha: f32) -> (Color, bool) {
         if entry == FOREGROUND_PALETTE_ENTRY {
             return (self.foreground.with_alpha_multiplied(alpha), true);
@@ -207,7 +208,7 @@ impl<'a, 'b> Palette<'a, 'b> {
         let color = self
             .cpal
             .and_then(|cpal| cpal.color(self.palette_index, entry))
-            .map_or(Color::TRANSPARENT, Color::from_cpal);
+            .map_or(self.foreground, Color::from_cpal);
         (color.with_alpha_multiplied(alpha), false)
     }
 }
@@ -239,11 +240,11 @@ mod tests {
     }
 
     #[test]
-    fn default_options_match_legacy_behavior() {
+    fn default_options_are_static_palette_zero_black() {
         let o = EvalOptions::default();
         assert!(o.coords().is_empty());
         assert_eq!(o.palette_index(), 0);
-        assert_eq!(o.foreground(), Color::new(1.0, 1.0, 1.0, 1.0));
+        assert_eq!(o.foreground(), Color::new(0.0, 0.0, 0.0, 1.0));
     }
 
     #[test]
@@ -283,24 +284,27 @@ mod tests {
     }
 
     #[test]
-    fn out_of_range_palette_falls_back_to_palette_zero() {
+    fn out_of_range_palette_resolves_to_unflagged_foreground() {
         let bytes = two_palette_cpal();
         let cpal = Cpal::parse(&bytes).expect("cpal parses");
-        let p = Palette::new(Some(&cpal), &EvalOptions::new().with_palette_index(2));
-        let (c, is_fg) = p.resolve(0, 1.0);
+        let fg = Color::new(0.1, 0.2, 0.3, 1.0);
+        let o = EvalOptions::new().with_palette_index(2).with_foreground(fg);
+        let p = Palette::new(Some(&cpal), &o);
+        assert_eq!(p.resolve(0, 1.0), (fg, false));
+        let (c, is_fg) = p.resolve(1, 0.5);
         assert!(!is_fg);
-        assert_eq!(c, Color::new(1.0, 0.0, 0.0, 1.0));
+        assert!((c.a - 0.5).abs() < 1e-6);
     }
 
     #[test]
-    fn missing_entry_or_cpal_is_transparent() {
+    fn missing_entry_or_cpal_resolves_to_unflagged_foreground() {
         let bytes = two_palette_cpal();
         let cpal = Cpal::parse(&bytes).expect("cpal parses");
         let p = Palette::new(Some(&cpal), &EvalOptions::new());
-        assert_eq!(p.resolve(9, 1.0), (Color::TRANSPARENT, false));
+        assert_eq!(p.resolve(9, 1.0), (Color::BLACK, false));
         let none = Palette::new(None, &EvalOptions::new());
-        assert_eq!(none.resolve(0, 1.0), (Color::TRANSPARENT, false));
+        assert_eq!(none.resolve(0, 1.0), (Color::BLACK, false));
         // The foreground entry never needs a CPAL.
-        assert_eq!(none.resolve(0xFFFF, 1.0), (Color::WHITE, true));
+        assert_eq!(none.resolve(0xFFFF, 1.0), (Color::BLACK, true));
     }
 }
