@@ -14,20 +14,21 @@ A dependency has to clear this bar:
 
 ## `brotli` (in `sigilbuzz-woff`)
 
-- Version: `8.x`.
-- License: BSD-3-Clause or MIT.
+- Version: `9.x`.
+- License: BSD-3-Clause and MIT.
 - Where: `crates/sigilbuzz-woff/Cargo.toml`, behind the `woff2` feature. The feature
   is on by default. Turn it off if you only need WOFF1.
 - Why: WOFF2 compresses all of its tables into one Brotli stream. `unwrap_woff2` needs
   to decompress it and `wrap_woff2` needs to compress it. Brotli is its own spec (RFC
   7932), and an encoder written from scratch would dwarf the rest of the WOFF2 code.
   The `brotli` crate is the standard Rust port and handles both directions.
-- Transitive dependencies: `alloc-no-stdlib` and `alloc-stdlib`. Both are small,
-  `no_std`-capable, BSD-3 or MIT, and from the same author.
+- Transitive dependencies: `brotli-decompressor` 6, `alloc-no-stdlib`, and
+  `alloc-stdlib`. All three are small, `no_std`-capable, BSD-3-Clause licensed (the
+  decompressor is also MIT), and come from the same project.
 - History: through 0.6.0 the crate used `brotli-decompressor` 5, which only
   decompresses. 0.7.0 switched to `brotli` 8 to get the encoder for `wrap_woff2`. It
   comes from the same project, and the decompression API behaves the same, so nothing
-  changed for `unwrap_woff2` callers.
+  changed for `unwrap_woff2` callers. 0.22.0 moved to `brotli` 9.
 
 ## `miniz_oxide` (in `sigilbuzz-woff` and `sigilbuzz-render`)
 

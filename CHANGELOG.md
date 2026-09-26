@@ -28,6 +28,7 @@ Changed:
 - The minimum supported Rust version is now 1.81. The core crate already needed 1.81
   for `core::error::Error`, so the old `rust-version = "1.75"` was wrong.
 - `sigilbuzz-woff` 0.3.1 and `sigilbuzz-render` 0.8.1 move to `miniz_oxide` 0.9.
+  `sigilbuzz-woff` 0.3.1 also moves to `brotli` 9.
 - `sigilbuzz-capi` 0.2.2 installs with `cargo cinstall` from cargo-c. That puts
   `libsigilbuzz`, the header (`include/sigilbuzz/hb.h`), a generated `sigilbuzz.pc`, and
   a CMake package in place in one step. The old pkg-config and CMake templates had to be
