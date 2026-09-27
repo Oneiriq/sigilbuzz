@@ -88,6 +88,15 @@ Added:
 - `sigilbuzz-capi`: `hb_font_get_nominal_glyph`, `hb_font_get_variation_glyph`,
   `hb_font_get_glyph`, `hb_face_collect_variation_selectors`, and
   `hb_face_collect_variation_unicodes`.
+- `BidiParagraph` applies UAX #9 rule P1: it splits the text after each paragraph
+  separator (LF, CR, NEL, U+001C to U+001E, U+2029, with CR LF as one separator, as ICU
+  treats it), and each paragraph gets its own base level (or the forced direction).
+  Runs, lines and visual order stop at paragraph boundaries, and shaping context and
+  the `BOT` and `EOT` flags stop at paragraph edges, so each paragraph shapes as it
+  would alone. `BidiParagraph::{paragraphs, paragraph_at}` and `BidiParagraphSpan`
+  describe the paragraphs. `direction` and `base_level` give the first paragraph's.
+  Text without a paragraph separator resolves and shapes as before. The CLI's
+  `shape --bidi` gets the split too.
 
 Changed:
 

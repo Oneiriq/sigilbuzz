@@ -90,7 +90,9 @@ A few things you will likely need next:
   algorithm, shapes each run of one embedding level in logical order and in its own
   direction (the way HarfBuzz callers do), and puts the runs in visual order with
   `paragraph.shape(&font, &buffer, &features)`. Glyph clusters stay byte offsets into
-  your text. For wrapped text, `line_runs` and `shape_line` order each line on its own.
+  your text. Text with several paragraphs splits at paragraph separators, and each
+  paragraph gets its own direction. For wrapped text, `line_runs` and `shape_line` order
+  each line on its own.
 - Variable fonts: `font.with_coords(&coords)` shapes at a given set of normalized axis
   coordinates.
 - Font collections: pass the member index to `Face::parse`. `fonts_in_collection` tells

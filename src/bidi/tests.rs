@@ -4,11 +4,15 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{BidiParagraph, BidiRun};
+use super::{BidiParagraph, BidiParagraphSpan, BidiRun};
 use crate::buffer::Direction;
 
 fn run(range: core::ops::Range<usize>, level: u8) -> BidiRun {
     BidiRun { range, level }
+}
+
+fn span(range: core::ops::Range<usize>, level: u8) -> BidiParagraphSpan {
+    BidiParagraphSpan { range, level }
 }
 
 #[test]
@@ -164,4 +168,174 @@ fn line_runs_reject_a_range_inside_a_character() {
 fn line_runs_reject_a_range_past_the_end() {
     let paragraph = BidiParagraph::new("abc", None);
     let _ = paragraph.line_runs(0..4);
+}
+
+/// The level of every character of `text`, in order.
+fn char_levels(paragraph: &BidiParagraph) -> Vec<u8> {
+    paragraph
+        .text()
+        .char_indices()
+        .map(|(i, _)| paragraph.level_at(i).unwrap_or(u8::MAX))
+        .collect()
+}
+
+#[test]
+fn a_newline_starts_a_paragraph_with_its_own_direction() {
+    // A Hebrew paragraph, then a Latin one ending in a Hebrew letter.
+    let text = "\u{05D0}\u{05D1} ab\nab \u{05D0}";
+    let paragraph = BidiParagraph::new(text, None);
+    assert_eq!(char_levels(&paragraph), [1, 1, 1, 2, 2, 1, 0, 0, 0, 1]);
+    assert_eq!(paragraph.direction(), Direction::Rtl);
+    assert_eq!(
+        paragraph.runs(),
+        [
+            run(0..5, 1),
+            run(5..7, 2),
+            run(7..8, 1),
+            run(8..11, 0),
+            run(11..13, 1)
+        ]
+    );
+}
+
+#[test]
+fn every_paragraph_separator_splits_the_text() {
+    // LF, CR, the information separators, NEL, PARAGRAPH SEPARATOR.
+    for sep in [
+        '\n', '\r', '\u{1C}', '\u{1D}', '\u{1E}', '\u{85}', '\u{2029}',
+    ] {
+        let text = alloc::format!("\u{05D0}{sep}a");
+        let paragraph = BidiParagraph::new(&text, None);
+        let split = 2 + sep.len_utf8();
+        assert_eq!(
+            paragraph.paragraphs(),
+            [span(0..split, 1), span(split..split + 1, 0)],
+            "{sep:?}"
+        );
+        // The separator takes its paragraph's level.
+        assert_eq!(char_levels(&paragraph), [1, 1, 0], "{sep:?}");
+    }
+    // Other controls and line separators do not split.
+    for other in ['\t', '\u{0B}', '\u{1F}', '\u{2028}'] {
+        let text = alloc::format!("\u{05D0}{other}a");
+        assert_eq!(BidiParagraph::new(&text, None).paragraphs().len(), 1);
+    }
+}
+
+#[test]
+fn cr_lf_is_one_separator() {
+    let paragraph = BidiParagraph::new("\u{05D0}\r\na", None);
+    assert_eq!(paragraph.paragraphs(), [span(0..4, 1), span(4..5, 0)]);
+    assert_eq!(char_levels(&paragraph), [1, 1, 1, 0]);
+    // LF then CR is two separators. The CR alone is a paragraph with
+    // no strong character, so left to right.
+    let paragraph = BidiParagraph::new("\u{05D0}\n\ra", None);
+    assert_eq!(
+        paragraph.paragraphs(),
+        [span(0..3, 1), span(3..4, 0), span(4..5, 0)]
+    );
+    assert_eq!(char_levels(&paragraph), [1, 1, 0, 0]);
+}
+
+#[test]
+fn a_final_separator_starts_no_paragraph() {
+    assert!(BidiParagraph::new("", None).paragraphs().is_empty());
+    assert_eq!(
+        BidiParagraph::new("abc\n", None).paragraphs(),
+        [span(0..4, 0)]
+    );
+    assert_eq!(BidiParagraph::new("\n", None).paragraphs(), [span(0..1, 0)]);
+    assert_eq!(
+        BidiParagraph::new("\n\n", Some(Direction::Rtl)).paragraphs(),
+        [span(0..1, 1), span(1..2, 1)]
+    );
+    // Empty text keeps the forced direction.
+    assert_eq!(
+        BidiParagraph::new("", Some(Direction::Rtl)).direction(),
+        Direction::Rtl
+    );
+}
+
+#[test]
+fn a_forced_direction_applies_to_every_paragraph() {
+    let paragraph = BidiParagraph::new("abc\n\u{05D0}", Some(Direction::Rtl));
+    assert_eq!(paragraph.paragraphs(), [span(0..4, 1), span(4..6, 1)]);
+    // The last run of the first paragraph and the only run of the
+    // second share level 1 but stay apart.
+    assert_eq!(paragraph.runs(), [run(0..3, 2), run(3..4, 1), run(4..6, 1)]);
+    let paragraph = BidiParagraph::new("\u{05D0}\n\u{05D1}", Some(Direction::Ltr));
+    assert_eq!(paragraph.paragraphs(), [span(0..3, 0), span(3..5, 0)]);
+    assert_eq!(char_levels(&paragraph), [1, 0, 1]);
+}
+
+#[test]
+fn embeddings_and_isolates_end_with_their_paragraph() {
+    // Rule X8: an override, an embedding, or an isolate left open at a
+    // paragraph separator does not reach the next paragraph.
+    for opener in ['\u{202E}', '\u{202B}', '\u{2067}', '\u{2068}'] {
+        let text = alloc::format!("{opener}\u{05D0}b\ncd");
+        let paragraph = BidiParagraph::new(&text, None);
+        let levels = char_levels(&paragraph);
+        assert_eq!(levels[levels.len() - 2..], [0, 0], "{opener:?}");
+        assert_eq!(paragraph.paragraphs().len(), 2);
+    }
+}
+
+#[test]
+fn runs_and_lines_stop_at_paragraph_boundaries() {
+    let paragraph = BidiParagraph::new("ab\ncd", None);
+    assert_eq!(paragraph.runs(), [run(0..3, 0), run(3..5, 0)]);
+    assert_eq!(paragraph.visual_runs(), [run(0..3, 0), run(3..5, 0)]);
+    assert_eq!(paragraph.line_runs(1..4), [run(1..3, 0), run(3..4, 0)]);
+    assert_eq!(paragraph.run_at(3), Some(&run(3..5, 0)));
+}
+
+#[test]
+fn a_line_across_paragraphs_orders_each_part_on_its_own() {
+    // Two right-to-left paragraphs, each with a Latin letter.
+    let text = "\u{05D0} b\n\u{05D1} c";
+    let paragraph = BidiParagraph::new(text, None);
+    assert_eq!(
+        paragraph.visual_runs(),
+        [
+            run(4..5, 1),
+            run(3..4, 2),
+            run(0..3, 1),
+            run(8..9, 2),
+            run(5..8, 1)
+        ]
+    );
+    // Rule L1 applies at the end of each part: the space trailing the
+    // first part drops to that paragraph's level.
+    let text = "a \u{05D0} \n\u{05D1}";
+    let paragraph = BidiParagraph::new(text, None);
+    assert_eq!(char_levels(&paragraph), [0, 0, 1, 0, 0, 1]);
+    assert_eq!(
+        paragraph.line_runs(0..text.len()),
+        [run(0..2, 0), run(2..4, 1), run(4..6, 0), run(6..8, 1)]
+    );
+}
+
+#[test]
+fn paragraph_at_covers_the_text() {
+    let text = "ab\r\n\u{05D0}\u{2029}c";
+    let paragraph = BidiParagraph::new(text, None);
+    let spans = [span(0..4, 0), span(4..9, 1), span(9..10, 0)];
+    assert_eq!(paragraph.paragraphs(), spans);
+    for offset in 0..text.len() {
+        let want = spans.iter().find(|s| s.range.contains(&offset));
+        assert_eq!(paragraph.paragraph_at(offset), want, "{offset}");
+    }
+    assert_eq!(paragraph.paragraph_at(text.len()), None);
+    assert_eq!(paragraph.paragraphs()[1].direction(), Direction::Rtl);
+}
+
+#[test]
+fn many_paragraphs_stay_linear() {
+    // A long run of separators is one paragraph each.
+    let text = "\n".repeat(50_000);
+    let paragraph = BidiParagraph::new(&text, Some(Direction::Rtl));
+    assert_eq!(paragraph.paragraphs().len(), 50_000);
+    assert_eq!(paragraph.runs().len(), 50_000);
+    assert_eq!(paragraph.visual_runs().len(), 50_000);
 }
