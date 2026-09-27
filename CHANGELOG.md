@@ -353,6 +353,14 @@ Output that differed from HarfBuzz:
   subtables with a null backtrack ClassDef (as fontmake writes them) failed to parse or
   matched invented classes. PairPos format 2 and the subsetter's class-based rewriters
   had the same bug.
+- The bidi algorithm passes every line of the Unicode 17.0 BidiTest.txt (3,878 failed
+  before) and all but four lines of BidiCharacterTest.txt (19 failed before). An isolate
+  inside a directional override opens at its own direction and still matches its PDI
+  (X5a to X5c, BD9), an override leaves boundary neutrals to rule X9 (X6), a paragraph
+  separator takes the paragraph level (X8), marks after a bracket that N0 resolves take
+  its type, bracket pairing stops when the stack is full, and U+2329 and U+232A pair with
+  U+3008 and U+3009 (BD16). The four remaining lines need Bidi_Class values the curated
+  `bidi_class` table lacks.
 
 Removed:
 

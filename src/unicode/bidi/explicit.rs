@@ -141,15 +141,16 @@ pub(super) fn explicit_levels(cells: &mut [BidiCell], para_level: u8) {
                     isolate: false,
                 });
                 cell.level = last.level;
+                // FSI was resolved to LRI / RLI before the loop, so
+                // only Rli is RTL here. The initiator's own type decides,
+                // before an override resets it.
+                let is_rtl = cell.cls == BidiClass::Rli;
                 // Apply override to the isolate initiator itself.
                 match last.override_status {
                     Override::Ltr => cell.cls = BidiClass::L,
                     Override::Rtl => cell.cls = BidiClass::R,
                     Override::None => {}
                 }
-                // FSI was resolved to LRI / RLI before the loop, so
-                // only Rli is RTL here.
-                let is_rtl = cell.cls == BidiClass::Rli;
                 let new_level = if is_rtl {
                     next_odd_level(last.level)
                 } else {
@@ -209,6 +210,14 @@ pub(super) fn explicit_levels(cells: &mut [BidiCell], para_level: u8) {
                 });
                 cell.level = last.level;
             }
+            // X8: a paragraph separator takes the paragraph level. After
+            // rule P1 it ends the text, so nothing follows it.
+            BidiClass::B => cell.level = para_level,
+            // X6 leaves BN out: no override applies, so rule X9 still
+            // removes it.
+            BidiClass::Bn => {
+                cell.level = stack.last().map_or(para_level, |last| last.level);
+            }
             // X6: any other character.
             _ => {
                 let last = stack.last().copied().unwrap_or(StackEntry {
@@ -225,7 +234,9 @@ pub(super) fn explicit_levels(cells: &mut [BidiCell], para_level: u8) {
             }
         }
     }
-    // X8: handled implicitly. Paragraph end pops everything.
+    // X8: the stack ends with the paragraph. Rule P1 leaves a paragraph
+    // separator only at the end, where the B arm gives it the paragraph
+    // level.
 }
 
 const fn next_odd_level(current: u8) -> u8 {
@@ -300,8 +311,14 @@ fn build_level_runs(cells: &[BidiCell]) -> Vec<LevelRun> {
 /// Joins level runs into BD13 isolating-run sequences. Each isolate
 /// initiator (LRI / RLI / FSI) hands off to the level run starting
 /// inside the isolate; the matching PDI rejoins.
+///
+/// Isolate initiators and PDIs match by their `original` classes (BD9),
+/// since an override resets the class of an initiator inside it (X5a to
+/// X5c) without changing what it matches, as in the reference
+/// implementation.
 pub(super) fn build_isolating_sequences(
     cells: &[BidiCell],
+    original: &[BidiClass],
     para_level: u8,
 ) -> Vec<IsolatingSequence> {
     let runs = build_level_runs(cells);
@@ -319,7 +336,7 @@ pub(super) fn build_isolating_sequences(
     // run that picks up after the corresponding PDI.
     // To find that run we precompute for each isolate initiator the
     // matching PDI cell index.
-    let isolate_map = build_isolate_map(cells);
+    let isolate_map = build_isolate_map(original);
     // Map cell index -> run index containing it.
     let mut cell_to_run = vec![usize::MAX; cells.len()];
     for (ri, run) in runs.iter().enumerate() {
@@ -337,8 +354,10 @@ pub(super) fn build_isolating_sequences(
         // so `last()` always yields a cell.
         let mut cursor = ri;
         while let Some(&last_idx) = runs[cursor].indices.last() {
-            let last_cls = cells[last_idx].cls;
-            if !last_cls.is_isolate_initiator() {
+            if !original
+                .get(last_idx)
+                .is_some_and(|cls| cls.is_isolate_initiator())
+            {
                 break;
             }
             let Some(pdi_ci) = isolate_map.get(&last_idx).copied() else {
@@ -434,13 +453,13 @@ pub(super) fn build_isolating_sequences(
 
 /// Builds a map from isolate-initiator cell index to its matching PDI
 /// cell index. Initiators without a matching PDI are absent.
-fn build_isolate_map(cells: &[BidiCell]) -> alloc::collections::BTreeMap<usize, usize> {
+fn build_isolate_map(classes: &[BidiClass]) -> alloc::collections::BTreeMap<usize, usize> {
     let mut map: alloc::collections::BTreeMap<usize, usize> = alloc::collections::BTreeMap::new();
     let mut stack: Vec<usize> = Vec::new();
-    for (i, cell) in cells.iter().enumerate() {
-        if cell.cls.is_isolate_initiator() {
+    for (i, cls) in classes.iter().enumerate() {
+        if cls.is_isolate_initiator() {
             stack.push(i);
-        } else if cell.cls == BidiClass::Pdi {
+        } else if *cls == BidiClass::Pdi {
             if let Some(opener) = stack.pop() {
                 map.insert(opener, i);
             }

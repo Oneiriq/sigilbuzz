@@ -24,6 +24,13 @@
 //! after each paragraph separator and runs the other rules on each
 //! paragraph.
 //!
+//! ## Conformance
+//!
+//! Every line of the Unicode 17.0 BidiTest.txt resolves to its levels
+//! and order. So does every line of BidiCharacterTest.txt but four,
+//! where the curated [`bidi_class`] table classifies U+061C, U+002A,
+//! and U+06F1 differently from the UCD.
+//!
 //! ## Characters X9 removes
 //!
 //! UAX #9 section 5.2 keeps the characters rule X9 removes (the
@@ -205,7 +212,7 @@ impl BidiInfo {
 
         // Partition into level runs and isolating run sequences,
         // then run W1-W7 + N0 + N1-N2 + I1-I2 per sequence.
-        let isolating_sequences = build_isolating_sequences(&cells, para_level);
+        let isolating_sequences = build_isolating_sequences(&cells, &original, para_level);
         for seq in isolating_sequences {
             resolve_sequence(&mut cells, &chars, &seq);
         }
@@ -263,3 +270,6 @@ impl BidiInfo {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod conformance_tests;
