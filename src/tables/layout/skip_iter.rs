@@ -46,6 +46,7 @@ pub use sequence::{
     apply_nested, match_backtrack, match_input, match_lookahead, InputMatch, MatchPositions,
     MAX_CONTEXT_LENGTH,
 };
+pub(crate) use sequence::{match_backtrack_in, match_input_in, match_lookahead_in};
 
 /// `LookupFlag`: `RightToLeft` bit. Indicates the lookup runs in
 /// RTL direction. Only GPOS type 3 (cursive) uses it; matching does
@@ -204,6 +205,61 @@ impl MatchGlyph {
             match_prop::SYNTHESIZED_MARK => GlyphKind::Mark,
             _ => GlyphKind::Base,
         }
+    }
+}
+
+/// Where matching reports the glyph ranges HarfBuzz marks unsafe to
+/// break or to concatenate (`hb_buffer_t::unsafe_to_break`,
+/// `unsafe_to_concat`, and their `_from_outbuffer` variants when
+/// `from_out` is set). Positions are indices into the [`MatchSeq`]
+/// that was matched. `()` drops them.
+pub(crate) trait UnsafeRanges {
+    /// A range no line break may split.
+    fn unsafe_to_break(&mut self, start: usize, end: usize, from_out: bool);
+    /// A range whose glyphs depend on the text around them.
+    fn unsafe_to_concat(&mut self, start: usize, end: usize, from_out: bool);
+}
+
+impl UnsafeRanges for () {
+    fn unsafe_to_break(&mut self, _start: usize, _end: usize, _from_out: bool) {}
+    fn unsafe_to_concat(&mut self, _start: usize, _end: usize, _from_out: bool) {}
+}
+
+/// A run of glyphs as HarfBuzz's skipping iterator reads it: the
+/// glyphs, and for each one whether the lookup's feature is on there
+/// (its feature mask) and which syllable it belongs to.
+///
+/// A slice of [`MatchGlyph`]s is such a run with every glyph in the
+/// mask and none in a syllable. The shaper's GSUB buffer implements
+/// it over its output and input halves, so a walk sees the glyphs
+/// already substituted before the cursor and the pending ones after.
+pub(crate) trait MatchSeq {
+    /// Number of glyphs.
+    fn len(&self) -> usize;
+
+    /// The glyph at `i`, or `None` past the end.
+    fn glyph(&self, i: usize) -> Option<MatchGlyph>;
+
+    /// True when the lookup's feature is on at glyph `i`, the test
+    /// `(info.mask & lookup_mask)` HarfBuzz's input walks make.
+    fn in_mask(&self, _i: usize) -> bool {
+        true
+    }
+
+    /// The syllable of glyph `i`, HarfBuzz's `syllable()` byte. Zero
+    /// when the glyph is in no syllable.
+    fn syllable(&self, _i: usize) -> u8 {
+        0
+    }
+}
+
+impl MatchSeq for [MatchGlyph] {
+    fn len(&self) -> usize {
+        <[MatchGlyph]>::len(self)
+    }
+
+    fn glyph(&self, i: usize) -> Option<MatchGlyph> {
+        self.get(i).copied()
     }
 }
 
@@ -456,13 +512,15 @@ pub enum LayoutTable {
 }
 
 /// Everything one lookup's matching depends on: its flags, its table,
-/// and its feature's joiner handling. Hands out the [`SkipRules`] for
-/// input and for context walks.
+/// its feature's joiner handling, and whether its feature matches
+/// within one syllable. Hands out the [`SkipRules`] for input and for
+/// context walks.
 #[derive(Debug, Clone, Copy)]
 pub struct MatchContext<'a> {
     filter: MatchFilter<'a>,
     table: LayoutTable,
     joiners: Joiners,
+    per_syllable: bool,
 }
 
 impl<'a> MatchContext<'a> {
@@ -473,7 +531,35 @@ impl<'a> MatchContext<'a> {
             filter,
             table,
             joiners,
+            per_syllable: false,
         }
+    }
+
+    /// The same context for a feature HarfBuzz registers with
+    /// `F_PER_SYLLABLE` (`per_syllable` true): a GSUB walk then stops
+    /// at glyphs of another syllable than the cursor's. GPOS walks
+    /// ignore the setting, as in HarfBuzz.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::tables::layout::MatchContext;
+    ///
+    /// let cx = MatchContext::plain().with_per_syllable(true);
+    /// assert!(cx.per_syllable());
+    /// ```
+    #[must_use]
+    pub const fn with_per_syllable(self, per_syllable: bool) -> Self {
+        Self {
+            per_syllable,
+            ..self
+        }
+    }
+
+    /// True when the lookup's feature matches within one syllable.
+    #[must_use]
+    pub const fn per_syllable(&self) -> bool {
+        self.per_syllable
     }
 
     /// A GSUB context with no lookup flags and automatic joiners.
@@ -511,6 +597,8 @@ impl<'a> MatchContext<'a> {
     /// Rules for input walks (`skipping_iterator_t::init` with
     /// `context_match = false`): ZWNJ is skipped only in GPOS, ZWJ
     /// when the feature allows it, hidden characters only in GPOS.
+    /// Every glyph the walk stops at must have the lookup's feature
+    /// on (see [`MatchSeq::in_mask`]).
     #[must_use]
     pub const fn input(&self) -> SkipRules<'a> {
         let gpos = matches!(self.table, LayoutTable::Gpos);
@@ -519,12 +607,15 @@ impl<'a> MatchContext<'a> {
             ignore_zwnj: gpos,
             ignore_zwj: self.joiners.auto_zwj,
             ignore_hidden: gpos,
+            check_mask: true,
+            syllable: 0,
         }
     }
 
     /// Rules for backtrack and lookahead walks (`context_match =
     /// true`): ZWJ is always skipped, ZWNJ in GPOS or when the feature
-    /// allows it, hidden characters only in GPOS.
+    /// allows it, hidden characters only in GPOS. The feature mask is
+    /// not checked.
     #[must_use]
     pub const fn context(&self) -> SkipRules<'a> {
         let gpos = matches!(self.table, LayoutTable::Gpos);
@@ -533,6 +624,36 @@ impl<'a> MatchContext<'a> {
             ignore_zwnj: gpos || self.joiners.auto_zwnj,
             ignore_zwj: true,
             ignore_hidden: gpos,
+            check_mask: false,
+            syllable: 0,
+        }
+    }
+
+    /// The syllable a walk from the glyph at `cursor` stays in:
+    /// HarfBuzz's `matcher.syllable`, the cursor glyph's syllable for a
+    /// per-syllable GSUB feature, zero (any syllable) otherwise.
+    fn cursor_syllable<S: MatchSeq + ?Sized>(&self, seq: &S, cursor: usize) -> u8 {
+        if self.per_syllable && matches!(self.table, LayoutTable::Gsub) {
+            seq.syllable(cursor)
+        } else {
+            0
+        }
+    }
+
+    /// [`Self::input`] for a walk whose cursor glyph is `seq[cursor]`.
+    pub(crate) fn input_at<S: MatchSeq + ?Sized>(&self, seq: &S, cursor: usize) -> SkipRules<'a> {
+        SkipRules {
+            syllable: self.cursor_syllable(seq, cursor),
+            ..self.input()
+        }
+    }
+
+    /// [`Self::context`] for a walk whose cursor glyph is
+    /// `seq[cursor]`.
+    pub(crate) fn context_at<S: MatchSeq + ?Sized>(&self, seq: &S, cursor: usize) -> SkipRules<'a> {
+        SkipRules {
+            syllable: self.cursor_syllable(seq, cursor),
+            ..self.context()
         }
     }
 }
@@ -549,14 +670,22 @@ pub enum MaySkip {
 }
 
 /// One walk's skipping rules, HarfBuzz's `matcher_t` (lookup props
-/// plus the ZWNJ, ZWJ and hidden exemptions). Get one from
-/// [`MatchContext::input`] or [`MatchContext::context`].
+/// plus the ZWNJ, ZWJ and hidden exemptions, the feature mask for
+/// input walks, and the syllable of a per-syllable feature). Get one
+/// from [`MatchContext::input`] or [`MatchContext::context`].
 #[derive(Debug, Clone, Copy)]
 pub struct SkipRules<'a> {
     filter: MatchFilter<'a>,
     ignore_zwnj: bool,
     ignore_zwj: bool,
     ignore_hidden: bool,
+    /// Input walks stop at a glyph whose feature mask is off as at a
+    /// mismatch (`matcher.mask` is the lookup mask); context walks do
+    /// not check it (`matcher.mask` is all ones).
+    check_mask: bool,
+    /// The cursor's syllable, when the walk may not leave it; zero
+    /// for any syllable.
+    syllable: u8,
 }
 
 impl<'a> SkipRules<'a> {
@@ -590,21 +719,79 @@ impl<'a> SkipRules<'a> {
         MaySkip::No
     }
 
-    /// HarfBuzz's `skipping_iterator_t::match` for one glyph.
+    /// HarfBuzz's `skipping_iterator_t::match` for glyph `i` of `seq`.
     /// `matches` is the rule's verdict on the glyph id, `None` when
     /// the walk has no match function. Returns `Some(true)` to stop
     /// and match, `Some(false)` to stop and fail, `None` to skip.
-    fn step(&self, g: MatchGlyph, matches: impl FnOnce(u16) -> Option<bool>) -> Option<bool> {
+    ///
+    /// As in `matcher_t::may_match`, a glyph outside the feature mask
+    /// (input walks) or outside the cursor's syllable (per-syllable
+    /// features) does not match, whatever the rule says.
+    fn step<S: MatchSeq + ?Sized>(
+        &self,
+        seq: &S,
+        i: usize,
+        g: MatchGlyph,
+        matches: impl FnOnce(u16) -> Option<bool>,
+    ) -> Option<bool> {
         let skip = self.may_skip(g);
         if skip == MaySkip::Yes {
             return None;
         }
-        match matches(g.id) {
+        let gated = (self.check_mask && !seq.in_mask(i))
+            || (self.syllable != 0 && seq.syllable(i) != self.syllable);
+        let verdict = if gated { Some(false) } else { matches(g.id) };
+        match verdict {
             Some(true) => Some(true),
             None if skip == MaySkip::No => Some(true),
             _ if skip == MaySkip::No => Some(false),
             _ => None,
         }
+    }
+
+    /// [`Self::next`] over any [`MatchSeq`]. On failure returns
+    /// HarfBuzz's `unsafe_to`: one past the glyph that failed to match,
+    /// or the length of the run when the walk ran out of glyphs.
+    pub(crate) fn next_in<S: MatchSeq + ?Sized>(
+        &self,
+        seq: &S,
+        from: usize,
+        mut matches: impl FnMut(u16) -> Option<bool>,
+    ) -> Result<usize, usize> {
+        let len = seq.len();
+        let mut i = from;
+        while i < len {
+            let g = seq.glyph(i).unwrap_or_default();
+            match self.step(seq, i, g, &mut matches) {
+                Some(true) => return Ok(i),
+                Some(false) => return Err(i + 1),
+                None => {}
+            }
+            i += 1;
+        }
+        Err(len)
+    }
+
+    /// [`Self::prev`] over any [`MatchSeq`]. On failure returns
+    /// HarfBuzz's `unsafe_from`: the glyph before the one that failed
+    /// to match (at least zero), or zero when the walk ran out.
+    pub(crate) fn prev_in<S: MatchSeq + ?Sized>(
+        &self,
+        seq: &S,
+        before: usize,
+        mut matches: impl FnMut(u16) -> Option<bool>,
+    ) -> Result<usize, usize> {
+        let mut i = before.min(seq.len());
+        while i > 0 {
+            i -= 1;
+            let g = seq.glyph(i).unwrap_or_default();
+            match self.step(seq, i, g, &mut matches) {
+                Some(true) => return Ok(i),
+                Some(false) => return Err(i.max(1) - 1),
+                None => {}
+            }
+        }
+        Err(0)
     }
 
     /// HarfBuzz's `skipping_iterator_t::next`, starting at `from`
@@ -615,16 +802,9 @@ impl<'a> SkipRules<'a> {
         &self,
         glyphs: &[MatchGlyph],
         from: usize,
-        mut matches: impl FnMut(u16) -> Option<bool>,
+        matches: impl FnMut(u16) -> Option<bool>,
     ) -> Option<usize> {
-        for (i, &g) in glyphs.iter().enumerate().skip(from) {
-            match self.step(g, &mut matches) {
-                Some(true) => return Some(i),
-                Some(false) => return None,
-                None => {}
-            }
-        }
-        None
+        self.next_in(glyphs, from, matches).ok()
     }
 
     /// HarfBuzz's `skipping_iterator_t::prev`: like [`Self::next`],
@@ -633,16 +813,9 @@ impl<'a> SkipRules<'a> {
         &self,
         glyphs: &[MatchGlyph],
         before: usize,
-        mut matches: impl FnMut(u16) -> Option<bool>,
+        matches: impl FnMut(u16) -> Option<bool>,
     ) -> Option<usize> {
-        for i in (0..before.min(glyphs.len())).rev() {
-            match self.step(glyphs[i], &mut matches) {
-                Some(true) => return Some(i),
-                Some(false) => return None,
-                None => {}
-            }
-        }
-        None
+        self.prev_in(glyphs, before, matches).ok()
     }
 
     /// [`Self::next`] without a match function: the first glyph at or

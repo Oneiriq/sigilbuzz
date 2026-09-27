@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use super::{LayoutTable, MatchContext, MatchGlyph, MaySkip};
+use super::{LayoutTable, MatchContext, MatchGlyph, MatchSeq, MaySkip};
 use crate::tables::layout::SequenceLookupRecord;
 
 /// HarfBuzz's `HB_MAX_CONTEXT_LENGTH`: the longest input sequence a
@@ -85,13 +85,28 @@ pub fn match_input(
     start: usize,
     count: usize,
     cx: &MatchContext<'_>,
-    mut matches: impl FnMut(usize, u16) -> bool,
+    matches: impl FnMut(usize, u16) -> bool,
 ) -> Option<InputMatch> {
+    match_input_in(glyphs, start, count, cx, matches).ok()
+}
+
+/// [`match_input`] over any [`MatchSeq`], whose glyph at `start` is
+/// the cursor. On failure returns HarfBuzz's `end_position`: where the
+/// input walk gave up (see `SkipRules::next_in`), or `None` when
+/// `match_input` leaves it unset (a rule too long, or the ligature
+/// component rule).
+pub(crate) fn match_input_in<S: MatchSeq + ?Sized>(
+    seq: &S,
+    start: usize,
+    count: usize,
+    cx: &MatchContext<'_>,
+    mut matches: impl FnMut(usize, u16) -> bool,
+) -> Result<InputMatch, Option<usize>> {
     if count + 1 > MAX_CONTEXT_LENGTH {
-        return None;
+        return Err(None);
     }
-    let first = *glyphs.get(start)?;
-    let rules = cx.input();
+    let first = seq.glyph(start).ok_or(None)?;
+    let rules = cx.input_at(seq, start);
     let (first_lig_id, first_lig_comp) = (first.lig_id(), first.lig_comp());
     let mut ligbase = LigBase::NotChecked;
     // Allocated once the first component matches: most attempts fail
@@ -99,13 +114,15 @@ pub fn match_input(
     let mut positions = MatchPositions::default();
     let mut idx = start;
     for k in 0..count {
-        idx = rules.next(glyphs, idx + 1, |id| Some(matches(k, id)))?;
+        idx = rules
+            .next_in(seq, idx + 1, |id| Some(matches(k, id)))
+            .map_err(Some)?;
         if positions.is_empty() {
             positions.positions.reserve_exact(count + 1);
             positions.push(start);
         }
         positions.push(idx);
-        let this = glyphs[idx];
+        let this = seq.glyph(idx).unwrap_or_default();
         let (this_lig_id, this_lig_comp) = (this.lig_id(), this.lig_comp());
         if first_lig_id != 0 && first_lig_comp != 0 {
             // A component attached to an earlier ligature's component:
@@ -113,9 +130,10 @@ pub fn match_input(
             if first_lig_id != this_lig_id || first_lig_comp != this_lig_comp {
                 // ...unless that ligature is ignorable.
                 if ligbase == LigBase::NotChecked {
+                    let skippable =
+                        |j: usize| rules.may_skip(seq.glyph(j).unwrap_or_default()) == MaySkip::Yes;
                     ligbase = if cx.table() == LayoutTable::Gsub
-                        && ligature_before(glyphs, start, first_lig_id)
-                            .is_some_and(|j| rules.may_skip(glyphs[j]) == MaySkip::Yes)
+                        && ligature_before(seq, start, first_lig_id).is_some_and(skippable)
                     {
                         LigBase::MaySkip
                     } else {
@@ -123,19 +141,19 @@ pub fn match_input(
                     };
                 }
                 if ligbase == LigBase::MayNotSkip {
-                    return None;
+                    return Err(None);
                 }
             }
         } else if this_lig_id != 0 && this_lig_comp != 0 && this_lig_id != first_lig_id {
             // Components not attached to a ligature may not match
             // glyphs attached to one, other than the first itself.
-            return None;
+            return Err(None);
         }
     }
     if positions.is_empty() {
         positions.push(start);
     }
-    Some(InputMatch {
+    Ok(InputMatch {
         positions,
         end: idx + 1,
     })
@@ -144,11 +162,11 @@ pub fn match_input(
 /// The ligature glyph with id `lig_id` among the glyphs before
 /// `start` that carry that id, as `match_input` looks for it in the
 /// output buffer.
-fn ligature_before(glyphs: &[MatchGlyph], start: usize, lig_id: u8) -> Option<usize> {
+fn ligature_before<S: MatchSeq + ?Sized>(seq: &S, start: usize, lig_id: u8) -> Option<usize> {
     let mut j = start;
-    while j > 0 && glyphs[j - 1].lig_id() == lig_id {
+    while j > 0 && seq.glyph(j - 1).is_some_and(|g| g.lig_id() == lig_id) {
         j -= 1;
-        if glyphs[j].lig_comp() == 0 {
+        if seq.glyph(j).is_some_and(|g| g.lig_comp() == 0) {
             return Some(j);
         }
     }
@@ -163,17 +181,28 @@ pub fn match_backtrack(
     start: usize,
     count: usize,
     cx: &MatchContext<'_>,
-    mut matches: impl FnMut(usize, u16) -> bool,
+    matches: impl FnMut(usize, u16) -> bool,
 ) -> bool {
-    let rules = cx.context();
+    match_backtrack_in(glyphs, start, count, cx, matches).is_ok()
+}
+
+/// [`match_backtrack`] over any [`MatchSeq`], whose glyph at `start`
+/// is the cursor. Returns HarfBuzz's `match_start`, the first glyph of
+/// the backtrack (`start` when there is none), or on failure its
+/// `unsafe_from` (see `SkipRules::prev_in`).
+pub(crate) fn match_backtrack_in<S: MatchSeq + ?Sized>(
+    seq: &S,
+    start: usize,
+    count: usize,
+    cx: &MatchContext<'_>,
+    mut matches: impl FnMut(usize, u16) -> bool,
+) -> Result<usize, usize> {
+    let rules = cx.context_at(seq, start);
     let mut idx = start;
     for k in 0..count {
-        match rules.prev(glyphs, idx, |id| Some(matches(k, id))) {
-            Some(i) => idx = i,
-            None => return false,
-        }
+        idx = rules.prev_in(seq, idx, |id| Some(matches(k, id)))?;
     }
-    true
+    Ok(idx)
 }
 
 /// HarfBuzz's `match_lookahead`: matches `count` glyphs from `end`
@@ -183,17 +212,29 @@ pub fn match_lookahead(
     end: usize,
     count: usize,
     cx: &MatchContext<'_>,
-    mut matches: impl FnMut(usize, u16) -> bool,
+    matches: impl FnMut(usize, u16) -> bool,
 ) -> bool {
-    let rules = cx.context();
+    match_lookahead_in(glyphs, end, end, count, cx, matches).is_ok()
+}
+
+/// [`match_lookahead`] over any [`MatchSeq`] whose cursor glyph is at
+/// `cursor`. Returns HarfBuzz's `end_index`, one past the last glyph
+/// of the lookahead (`end` when there is none), or on failure its
+/// `unsafe_to` (see `SkipRules::next_in`).
+pub(crate) fn match_lookahead_in<S: MatchSeq + ?Sized>(
+    seq: &S,
+    cursor: usize,
+    end: usize,
+    count: usize,
+    cx: &MatchContext<'_>,
+    mut matches: impl FnMut(usize, u16) -> bool,
+) -> Result<usize, usize> {
+    let rules = cx.context_at(seq, cursor);
     let mut from = end;
     for k in 0..count {
-        match rules.next(glyphs, from, |id| Some(matches(k, id))) {
-            Some(i) => from = i + 1,
-            None => return false,
-        }
+        from = rules.next_in(seq, from, |id| Some(matches(k, id)))? + 1;
     }
-    true
+    Ok(from)
 }
 
 /// HarfBuzz's `apply_lookup`: runs a matched rule's nested lookup

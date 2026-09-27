@@ -27,8 +27,6 @@ These are smaller pieces that are not scheduled yet.
 - Language tags from version 1 `name` tables are read but not exposed.
 - Subsetting a CFF or CFF2 font down to fewer glyphs drops its layout and variation
   tables. TrueType fonts keep them.
-- GSUB ligature and multiple substitution edit the glyph buffer in place, which is
-  quadratic on very long runs (about 1.8 seconds for 40,000 Arabic characters).
 
 ## Known bugs
 

@@ -29,7 +29,7 @@ use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
 use crate::tables::layout::skip_iter::{
-    match_backtrack, match_lookahead, MatchContext, MatchGlyph,
+    match_backtrack_in, match_lookahead_in, MatchContext, MatchGlyph, MatchSeq, UnsafeRanges,
 };
 use crate::tables::layout::Coverage;
 use crate::tables::parse::Reader;
@@ -99,12 +99,43 @@ impl<'a> ReverseChain<'a> {
     /// `match_lookahead`).
     #[must_use]
     pub fn apply_at(&self, glyphs: &[MatchGlyph], i: usize, cx: &MatchContext<'_>) -> Option<u16> {
-        let cov_i = self.coverage.index_of(glyphs.get(i)?.id)? as usize;
+        self.apply_at_in(glyphs, i, cx, &mut ())
+    }
+
+    /// [`Self::apply_at`] over any [`MatchSeq`], reporting what
+    /// HarfBuzz's `ReverseChainSingleSubstFormat1::apply` marks unsafe
+    /// to `sink`: backtrack through lookahead unsafe to break on a
+    /// match, what the failed walk examined unsafe to concatenate
+    /// otherwise.
+    pub(crate) fn apply_at_in<S: MatchSeq + ?Sized>(
+        &self,
+        seq: &S,
+        i: usize,
+        cx: &MatchContext<'_>,
+        sink: &mut impl UnsafeRanges,
+    ) -> Option<u16> {
+        let cov_i = self.coverage.index_of(seq.glyph(i)?.id)? as usize;
         let substitute = self.substitutes.get(cov_i).copied()?;
         let (back, ahead) = (&self.backtrack, &self.lookahead);
-        let context = match_backtrack(glyphs, i, back.len(), cx, |k, g| back[k].contains(g))
-            && match_lookahead(glyphs, i + 1, ahead.len(), cx, |k, g| ahead[k].contains(g));
-        context.then_some(substitute)
+        let start = match match_backtrack_in(seq, i, back.len(), cx, |k, g| back[k].contains(g)) {
+            Ok(start) => start,
+            Err(unsafe_from) => {
+                // `end_index` is still zero: nothing to mark.
+                sink.unsafe_to_concat(unsafe_from, 0, true);
+                return None;
+            }
+        };
+        let ahead_match = |k: usize, g: u16| ahead[k].contains(g);
+        match match_lookahead_in(seq, i, i + 1, ahead.len(), cx, ahead_match) {
+            Ok(end) => {
+                sink.unsafe_to_break(start, end, true);
+                Some(substitute)
+            }
+            Err(unsafe_to) => {
+                sink.unsafe_to_concat(start, unsafe_to, true);
+                None
+            }
+        }
     }
 }
 
