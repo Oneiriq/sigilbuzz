@@ -341,6 +341,10 @@ Output that differed from HarfBuzz:
   subtables with a null backtrack ClassDef (as fontmake writes them) failed to parse or
   matched invented classes. PairPos format 2 and the subsetter's class-based rewriters
   had the same bug.
+- A multiple substitution with an empty sequence deletes its glyph, as HarfBuzz's
+  `Sequence::apply` does, and the glyph's cluster merges into a neighbor the way
+  `delete_glyph` merges it. It used to leave the glyph in place. Noto Sans Lepcha
+  deletes vowel signs this way.
 
 Removed:
 

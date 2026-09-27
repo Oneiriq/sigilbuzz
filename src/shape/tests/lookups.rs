@@ -3,7 +3,7 @@
 //! guard, and the default-ignorable bookkeeping substitution does.
 
 use super::*;
-use crate::buffer::{unicode_prop, Glyph};
+use crate::buffer::{unicode_prop, ClusterLevel, Glyph};
 use crate::shape::gsub::substitute_glyph;
 use crate::shape::gsub_buffer::GsubBuffer;
 use crate::shape::segment::remap_segments;
@@ -718,3 +718,41 @@ fn remap_segments_follows_morx_origins() {
 
 const DFLT_TEST: &[[u8; 4]] = &[*b"DFLT"];
 const ARAB_TEST: &[[u8; 4]] = &[*b"arab", *b"DFLT"];
+
+#[test]
+fn an_empty_multiple_substitution_sequence_deletes_its_glyph() {
+    // HarfBuzz's `Sequence::apply` deletes the glyph when the sequence
+    // is empty (HarfBuzz issue 253) through `hb_buffer_t::delete_glyph`,
+    // whose cluster goes to the glyph before it, or at the monotone
+    // levels to the glyph after it when it starts the run. Expected
+    // output from HarfBuzz 14.5.0 (uharfbuzz 0.56.2) on these font
+    // bytes.
+    let data = build_shapeable_font_with_gsub(&[(2, repeat_a_subtable(0))], &[0]);
+    let blob = Blob::new(&data);
+    let face = Face::parse(&blob, 0).unwrap();
+    let font = Font::new(face, 16.0);
+    let features = [Feature {
+        tag: *b"test",
+        value: 1,
+    }];
+    let run = |text: &str, level: ClusterLevel| {
+        let mut buffer = Buffer::new();
+        buffer.push_str(text);
+        buffer.set_cluster_level(level);
+        let shaped = shape(&font, &buffer, &features).unwrap();
+        shaped
+            .glyphs
+            .iter()
+            .map(|g| (g.glyph_id, g.cluster))
+            .collect::<Vec<_>>()
+    };
+    let mc = ClusterLevel::MonotoneCharacters;
+    assert_eq!(run("BAB", mc), [(2, 0), (2, 2)]);
+    assert_eq!(
+        run("CAB", ClusterLevel::MonotoneGraphemes),
+        [(3, 0), (2, 2)]
+    );
+    assert_eq!(run("AB", mc), [(2, 0)]);
+    assert_eq!(run("AAAB", mc), [(2, 0)]);
+    assert_eq!(run("AB", ClusterLevel::Characters), [(2, 1)]);
+}
