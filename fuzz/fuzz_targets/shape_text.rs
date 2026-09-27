@@ -22,6 +22,7 @@ const FONTS: &[&[u8]] = &[
     include_bytes!("../../tests/fonts/NotoSansTamil-Regular.ttf"),
     include_bytes!("../../tests/fonts/NotoSansSharada-Regular.ttf"),
     include_bytes!("../../tests/fonts/SourceSans3VF-Latin-Subset.otf"),
+    include_bytes!("../../tests/fixtures/noto_sans_cjk_jp_uvs_subset.otf"),
 ];
 
 fuzz_target!(|data: &[u8]| {
@@ -37,7 +38,9 @@ fuzz_target!(|data: &[u8]| {
     for i in [0, 1, text.len() / 2, text.len(), text.len() + 1, usize::MAX] {
         let _ = paragraph.level_at(i);
         let _ = paragraph.run_at(i);
+        let _ = paragraph.paragraph_at(i);
     }
+    let _ = paragraph.paragraphs();
     let _ = paragraph.visual_runs();
     let levels: Vec<u8> = paragraph.runs().iter().map(|run| run.level).collect();
     let _ = BidiParagraph::reorder_visual(&levels);
