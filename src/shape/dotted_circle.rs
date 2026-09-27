@@ -1,7 +1,7 @@
 //! Dotted circles for broken syllables, HarfBuzz's
 //! `hb_syllabic_insert_dotted_circles` (`hb-ot-shaper-syllabic.cc`).
 //!
-//! The Indic, Khmer, Myanmar, and USE shapers find a "broken"
+//! The Indic, Myanmar, and USE shapers find a "broken"
 //! syllable when a dependent mark (a matra, virama, nukta, bindu, or
 //! other combining sign) starts a syllable with no base to attach to,
 //! as in a lone U+093F DEVANAGARI VOWEL SIGN I. HarfBuzz then inserts
@@ -19,7 +19,9 @@
 //! broken syllable, so consecutive broken syllables share one circle.
 //! The circle goes in before the shaper runs, and the shaper then sees
 //! it as the base (U+25CC is a consonant placeholder to the Indic
-//! scanner and a generic base to USE).
+//! scanner and a generic base to USE). The Khmer shaper
+//! (`crate::ot::khmer`) inserts its own circles after its syllable
+//! machine, as HarfBuzz's does.
 
 use alloc::vec::Vec;
 
@@ -80,8 +82,7 @@ fn insertion_points(script: Script, cps: &[char]) -> Vec<usize> {
             .collect()
     } else if matches!(
         script,
-        Script::Khmer
-            | Script::Myanmar
+        Script::Myanmar
             | Script::Buginese
             | Script::TaiTham
             | Script::Balinese
@@ -206,9 +207,9 @@ mod tests {
     }
 
     #[test]
-    fn khmer_orphan_vowel_gets_a_circle() {
-        let (cps, clusters) = run(Script::Khmer, "\u{1780} \u{17C1}\u{1780}").expect("inserted");
-        assert_eq!(cps, ['\u{1780}', ' ', '\u{25CC}', '\u{17C1}', '\u{1780}']);
-        assert_eq!(clusters, [0, 3, 4, 4, 7]);
+    fn khmer_is_left_to_its_shaper() {
+        // The Khmer shaper inserts its own circles, from its own
+        // syllable machine.
+        assert_eq!(run(Script::Khmer, "\u{1780} \u{17C1}\u{1780}"), None);
     }
 }

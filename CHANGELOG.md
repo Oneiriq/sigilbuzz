@@ -194,6 +194,19 @@ Changed:
 - CI and the pre-push hook lint and test the whole workspace. They used to cover only
   the root crate. CI also checks the minimum Rust version, including every `no_std`
   build.
+- Khmer has its own shaper, following HarfBuzz's (`hb-ot-shaper-khmer.cc`), in place of
+  the Universal Shaping Engine. HarfBuzz's Khmer syllable grammar decides the syllables,
+  so ZWJ and ZWNJ stay in a syllable only before a robat, an above-base vowel sign or an
+  X-group sign, and broken clusters get a dotted circle. Coeng + ro and a pre-base vowel
+  sign move to the start of their syllable before any lookup runs, with HarfBuzz's
+  `pref`, `blwf`, `abvf`, `pstf` and `cfar` masks. `locl`, `ccmp` and those five
+  features run as one stage, each lookup only where its mask allows and one syllable at
+  a time (`F_PER_SYLLABLE`), and `pres`, `abvs`, `blws` and `psts` run as one stage with
+  `rlig`, `calt`, `clig`, `rclt` and the caller's features. `liga` is off for Khmer, as
+  in HarfBuzz. On 2,010 Khmer test strings with Noto Sans Khmer, the output now matches
+  HarfBuzz 14.5.0 at the `MonotoneGraphemes`, `MonotoneCharacters` and `Characters`
+  cluster levels (before: 281 of the first 510). `ot::use_shaper::shape_khmer` runs the
+  new shaper, default features included.
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,

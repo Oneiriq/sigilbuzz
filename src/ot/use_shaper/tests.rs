@@ -342,9 +342,11 @@ fn use_reorder_moves_the_glyph_pref_substituted() {
 
 #[test]
 fn long_run_of_pre_base_signs_reorders_in_linear_time() {
-    // Khmer ka followed by 200000 sign-e is one consonant syllable
-    // whose pre-base signs all move. Checking each glyph against a
-    // list of moved indices cost about 4e10 comparisons.
+    // Khmer ka followed by 200000 sign-e. HarfBuzz's Khmer grammar
+    // takes one pre-base sign into the consonant syllable, which moves
+    // in front of ka. Every other sign is a broken cluster of its own.
+    // A scan or reorder that revisited the run per syllable would cost
+    // about 4e10 steps.
     const N: usize = 200_000;
     let mut cp = vec!['\u{1780}'];
     cp.extend(core::iter::repeat('\u{17C1}').take(N));
@@ -356,11 +358,10 @@ fn long_run_of_pre_base_signs_reorders_in_linear_time() {
         &mut glyphs,
         ClusterLevel::MonotoneCharacters,
     );
-    // The signs move to the front in order, then the base.
     assert_eq!(glyphs.len(), N + 1);
     assert_eq!(glyphs[0].glyph_id, 2);
-    assert_eq!(glyphs[N - 1].glyph_id, N as u32 + 1);
-    assert_eq!(glyphs[N].glyph_id, 1);
+    assert_eq!(glyphs[1].glyph_id, 1);
+    assert_eq!(glyphs[N].glyph_id, N as u32 + 1);
 }
 
 #[test]

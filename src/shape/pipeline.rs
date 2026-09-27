@@ -429,14 +429,21 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 level,
             );
         }
+        // The Khmer shaper runs every GSUB feature of its run, the
+        // default ones in its last stage, as HarfBuzz's does.
+        let shaper_ran_defaults = seg.script == Script::Khmer;
         if seg.script == Script::Khmer {
-            crate::ot::use_shaper::shape_khmer(
-                gsub.as_ref(),
-                gdef.as_ref(),
-                seg_cps,
-                &mut seg_glyphs,
+            let run = crate::ot::khmer::KhmerRun {
+                gsub: gsub.as_ref(),
+                gdef: gdef.as_ref(),
                 level,
-            );
+                features,
+                vertical: is_vertical,
+                dotted_circle: cmap
+                    .glyph_id('\u{25CC}')
+                    .filter(|_| !flags.contains(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE)),
+            };
+            crate::ot::khmer::shape(&run, seg_cps, &mut seg_glyphs);
         }
         if seg.script == Script::Tibetan && dominant_script == Some(Script::Tibetan) {
             crate::ot::tibetan::shape_tibetan(
@@ -642,19 +649,21 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                     &mut budget,
                 );
             }
-            run_default_gsub(
-                gsub,
-                &mut seg_glyphs,
-                gdef.as_ref(),
-                features,
-                want_liga,
-                is_vertical,
-                seg.script_priority,
-                early_default_features(seg_arabic_active, seg.script, dominant_script),
-                joiner_table,
-                buffer_shaper == Shaper::Hangul,
-                &mut budget,
-            );
+            if !shaper_ran_defaults {
+                run_default_gsub(
+                    gsub,
+                    &mut seg_glyphs,
+                    gdef.as_ref(),
+                    features,
+                    want_liga,
+                    is_vertical,
+                    seg.script_priority,
+                    early_default_features(seg_arabic_active, seg.script, dominant_script),
+                    joiner_table,
+                    buffer_shaper == Shaper::Hangul,
+                    &mut budget,
+                );
+            }
         }
 
         let start = processed_glyphs.len();
