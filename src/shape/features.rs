@@ -5,11 +5,11 @@
 use alloc::vec::Vec;
 
 use super::gsub::{apply_gsub_lookup, apply_gsub_lookups_masked};
+use super::joiners::FeatureFlags;
 use super::{feature_disabled, Feature, JoinerTable, LookupBudget};
 use crate::buffer::Glyph;
 use crate::ot::arabic::JoiningForm;
 use crate::tables::gdef::Gdef;
-use crate::tables::layout::Joiners;
 use crate::tables::Gsub;
 use crate::unicode::Script;
 
@@ -148,7 +148,7 @@ pub(super) fn apply_gsub_features_merged_budgeted(
     table: JoinerTable,
     budget: &mut LookupBudget,
 ) {
-    let mut lookups: Vec<(u16, Joiners)> = Vec::new();
+    let mut lookups: Vec<(u16, FeatureFlags)> = Vec::new();
     for &tag in tags {
         if feature_disabled(features, tag) {
             continue;
@@ -282,8 +282,8 @@ fn feature_present(gsub: &Gsub<'_>, tag: [u8; 4]) -> bool {
 /// subset. The table picks the first of those tags it lists, then
 /// `DFLT`, `dflt` or `latn`, and takes the feature from that script's
 /// language system alone (see [`crate::ot::layout_select`]).
-/// `joiners` is the feature's ZWJ/ZWNJ handling (see
-/// [`JoinerTable`]).
+/// `joiners` are the feature's flags: its ZWJ/ZWNJ handling and whether
+/// it matches within one syllable (see [`JoinerTable`]).
 ///
 /// Supports every GSUB lookup type:
 ///
@@ -310,7 +310,7 @@ pub(crate) fn apply_gsub_feature_in_scripts(
     tag: [u8; 4],
     alternate_index: u16,
     script_priority: &[[u8; 4]],
-    joiners: Joiners,
+    joiners: impl Into<FeatureFlags>,
 ) {
     let mut budget = LookupBudget::for_run(glyphs);
     apply_gsub_feature_budgeted(
@@ -320,7 +320,7 @@ pub(crate) fn apply_gsub_feature_in_scripts(
         tag,
         alternate_index,
         script_priority,
-        joiners,
+        joiners.into(),
         &mut budget,
     );
 }
@@ -336,7 +336,7 @@ fn apply_gsub_feature_budgeted(
     tag: [u8; 4],
     alternate_index: u16,
     script_priority: &[[u8; 4]],
-    joiners: Joiners,
+    flags: FeatureFlags,
     budget: &mut LookupBudget,
 ) {
     if glyphs.is_empty() {
@@ -358,7 +358,7 @@ fn apply_gsub_feature_budgeted(
             glyphs,
             gdef,
             alternate_index,
-            joiners,
+            flags,
             budget,
         );
     }
@@ -380,7 +380,7 @@ pub(crate) fn apply_gsub_feature_masked(
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
     mask: &[bool],
-    joiners: Joiners,
+    joiners: impl Into<FeatureFlags>,
 ) {
     if glyphs.is_empty() {
         return;
@@ -399,7 +399,7 @@ pub(crate) fn apply_gsub_feature_masked(
         glyphs,
         gdef,
         mask,
-        joiners,
+        joiners.into(),
         &mut budget,
     );
 }
@@ -479,7 +479,7 @@ pub(crate) fn feature_would_substitute(
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
     glyph_ids: &[u16],
-    joiners: Joiners,
+    joiners: impl Into<FeatureFlags>,
 ) -> bool {
     if glyph_ids.is_empty() {
         return false;

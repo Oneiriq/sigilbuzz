@@ -41,6 +41,9 @@ pub fn shape_myanmar(
     }
     let table = JoinerTable::Myanmar;
     let syllables = segment_syllables(codepoints);
+    // Per-syllable features match within these (HarfBuzz's syllable()).
+    let numbers = syllables.iter().map(|s| (s.start, s.end, s.kind as u8));
+    crate::shape::number_syllables(glyphs, numbers);
     // `locl` and `ccmp` see the logical order, as one stage, before the
     // reorder (`collect_features_myanmar`). The reorder indexes glyphs
     // by code point, so a length-changing `ccmp` waits until after it.

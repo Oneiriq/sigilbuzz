@@ -200,6 +200,9 @@ pub fn shape_khmer(
     // 1. Segment. One pass over the codepoints, emitting Syllable
     //    records that the reorder pass can consume directly.
     let syllables = segment_syllables(codepoints);
+    // Per-syllable features match within these (HarfBuzz's syllable()).
+    let numbers = syllables.iter().map(|s| (s.start, s.end, s.kind as u8));
+    crate::shape::number_syllables(glyphs, numbers);
 
     // 2. Initial reordering: pre-base vowel signs move before the
     //    base. Done BEFORE GSUB so features see the logical order
@@ -290,6 +293,9 @@ pub(crate) fn shape_use(
 
     // 1. Segment.
     let syllables = segment_syllables(codepoints);
+    // Per-syllable features match within these (HarfBuzz's syllable()).
+    let numbers = syllables.iter().map(|s| (s.start, s.end, s.kind as u8));
+    crate::shape::number_syllables(glyphs, numbers);
 
     // 2. Basic features, on the logical order. The glyphs carry their
     //    syllable and reorder category through GSUB, and `pref` marks

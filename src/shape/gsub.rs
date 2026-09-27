@@ -12,7 +12,10 @@
 //! backtrack and lookahead) follows HarfBuzz's skipping iterator, see
 //! [`crate::tables::layout::skip_iter`]: glyphs the lookup flags
 //! ignore are passed over, and so are default-ignorable characters the
-//! rule does not name, per the feature's [`Joiners`].
+//! rule does not name, per the feature's joiner handling
+//! ([`Joiners`](crate::tables::layout::Joiners)). A feature HarfBuzz
+//! registers per syllable only matches glyphs of the cursor's
+//! syllable.
 
 use alloc::vec::Vec;
 
@@ -21,6 +24,7 @@ use super::gsub_parsed::{
     apply_parsed_lookup_at, cursor_in_digest, filter_for_lookup, lookup_might_apply,
     parse_lookup_subtables, parsed_has_full_digest, ParsedGsubSubtable,
 };
+use super::joiners::FeatureFlags;
 use super::{resolve_extension, LookupBudget, MAX_NESTED_DEPTH};
 use crate::buffer::{unicode_prop, Glyph};
 use crate::tables::gdef::Gdef;
@@ -29,16 +33,16 @@ use crate::tables::gsub::{
 };
 use crate::tables::layout::skip_iter::apply_nested;
 use crate::tables::layout::{
-    InputMatch, Joiners, LayoutTable, Lookup, MatchContext, MatchGlyph, SequenceLookupRecord,
+    InputMatch, LayoutTable, Lookup, MatchContext, MatchGlyph, SequenceLookupRecord,
 };
 use crate::tables::Gsub;
 
 /// What every GSUB lookup of one pass shares: the table, the font's
-/// GDEF, and the joiner handling of the feature the lookups belong to.
+/// GDEF, and the flags of the feature the lookups belong to.
 pub(super) struct GsubCx<'a> {
     pub(super) gsub: &'a Gsub<'a>,
     pub(super) gdef: Option<&'a Gdef<'a>>,
-    pub(super) joiners: Joiners,
+    pub(super) flags: FeatureFlags,
 }
 
 impl<'a> GsubCx<'a> {
@@ -47,8 +51,9 @@ impl<'a> GsubCx<'a> {
         MatchContext::new(
             filter_for_lookup(lookup, self.gdef),
             LayoutTable::Gsub,
-            self.joiners,
+            self.flags.joiners,
         )
+        .with_per_syllable(self.flags.per_syllable)
     }
 }
 
@@ -85,14 +90,10 @@ pub(super) fn apply_gsub_lookups_masked(
     glyphs: &mut Vec<Glyph>,
     gdef: Option<&Gdef<'_>>,
     mask: &[bool],
-    joiners: Joiners,
+    flags: FeatureFlags,
     budget: &mut LookupBudget,
 ) {
-    let cx = GsubCx {
-        gsub,
-        gdef,
-        joiners,
-    };
+    let cx = GsubCx { gsub, gdef, flags };
     let mut buf = GsubBuffer::new(core::mem::take(glyphs), Some(mask));
     for &index in lookups {
         if let Some(lookup) = gsub.lookup_list().get(index) {
@@ -116,26 +117,22 @@ pub(super) fn apply_gsub_lookups_masked(
 /// Reverse-chained lookups (type 8) walk right to left instead, as in
 /// HarfBuzz's `apply_backward`.
 ///
-/// `joiners` is the ZWJ/ZWNJ handling of the feature the lookup
-/// belongs to. Nested lookups and multiple substitutions spend
-/// `budget` (see [`LookupBudget`]).
+/// `flags` are the joiner handling and per-syllable setting of the
+/// feature the lookup belongs to. Nested lookups and multiple
+/// substitutions spend `budget` (see [`LookupBudget`]).
 pub(super) fn apply_gsub_lookup(
     gsub: &Gsub<'_>,
     lookup_idx: u16,
     glyphs: &mut Vec<Glyph>,
     gdef: Option<&Gdef<'_>>,
     alternate_index: u16,
-    joiners: Joiners,
+    flags: FeatureFlags,
     budget: &mut LookupBudget,
 ) {
     let Some(lookup) = gsub.lookup_list().get(lookup_idx) else {
         return;
     };
-    let cx = GsubCx {
-        gsub,
-        gdef,
-        joiners,
-    };
+    let cx = GsubCx { gsub, gdef, flags };
     let mut buf = GsubBuffer::new(core::mem::take(glyphs), None);
     apply_lookup_to_buffer(&cx, &lookup, &mut buf, alternate_index, budget);
     *glyphs = buf.into_glyphs();

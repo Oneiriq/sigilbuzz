@@ -14,6 +14,7 @@
 //! [`apply_unscheduled`] runs the required feature when no pass of
 //! the segment's pipeline will apply its tag.
 
+use super::joiners::FeatureFlags;
 use super::{apply_gsub_lookup, feature_disabled, Feature, LookupBudget};
 use crate::buffer::Glyph;
 use crate::ot::indic::devanagari::{INDIC_BASIC_FEATURES, INDIC_PRESENTATION_FEATURES};
@@ -24,7 +25,6 @@ use crate::ot::use_shaper::{
     USE_TOPOGRAPHICAL_FEATURES,
 };
 use crate::tables::gdef::Gdef;
-use crate::tables::layout::Joiners;
 use crate::tables::Gsub;
 use crate::unicode::Script;
 
@@ -150,7 +150,7 @@ pub(super) fn apply_unscheduled(
         return;
     }
     for lookup in lookups {
-        apply_gsub_lookup(gsub, lookup, glyphs, gdef, 0, Joiners::AUTO, budget);
+        apply_gsub_lookup(gsub, lookup, glyphs, gdef, 0, FeatureFlags::AUTO, budget);
     }
 }
 
