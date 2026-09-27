@@ -225,6 +225,40 @@ impl GsubBuffer {
         }
     }
 
+    /// HarfBuzz's `delete_glyph`: drops the cursor glyph, and when its
+    /// cluster would vanish with it, merges the cluster into a
+    /// neighbor: backward into the glyphs output before it at every
+    /// level, or forward into the next glyph at the monotone levels.
+    pub(super) fn delete_glyph(&mut self, level: ClusterLevel) {
+        let Some(cluster) = self.cur().map(|g| g.cluster) else {
+            return;
+        };
+        let next = self.buf.get(self.idx + 1).map(|g| g.cluster);
+        let prev = self
+            .out_len
+            .checked_sub(1)
+            .and_then(|i| self.buf.get(i))
+            .map(|g| g.cluster);
+        if next == Some(cluster) || prev == Some(cluster) {
+            // The cluster survives.
+        } else if let Some(old) = prev {
+            if cluster < old {
+                let mut i = self.out_len;
+                while let Some(g) = i.checked_sub(1).and_then(|p| self.buf.get_mut(p)) {
+                    if g.cluster != old {
+                        break;
+                    }
+                    g.cluster = cluster;
+                    i -= 1;
+                }
+            }
+        } else if next.is_some() {
+            let at = self.cursor();
+            self.merge_clusters(at, at + 2, level);
+        }
+        self.skip_glyph();
+    }
+
     /// HarfBuzz's `replace_glyph` for a GSUB substitution: the cursor
     /// glyph becomes `gid` and moves to the output.
     pub(super) fn replace_glyph(&mut self, gid: u16) {
