@@ -207,6 +207,22 @@ Changed:
   HarfBuzz 14.5.0 at the `MonotoneGraphemes`, `MonotoneCharacters` and `Characters`
   cluster levels (before: 281 of the first 510). `ot::use_shaper::shape_khmer` runs the
   new shaper, default features included.
+- Devanagari, Bengali, Gurmukhi, Gujarati, Oriya, Tamil, Telugu, Kannada and Malayalam
+  run through a port of HarfBuzz's Indic shaper (`hb-ot-shaper-indic.cc`): its syllable
+  grammar and character table, consonant positions read from the font's `blwf`,
+  `vatu`, `pstf` and `pref`, its initial and final reordering, and its feature stages
+  and masks. ZWJ and ZWNJ now act as in HarfBuzz: a joiner after Ra,H blocks an implicit
+  reph, a ZWJ after a halant stops the base search and keeps a pre-base matra from
+  moving past that halant, a ZWNJ turns `half` off and ends the syllable after a
+  halant, and a reph or pre-base consonant moves past a joiner that follows a halant.
+  Kannada Ra,H,ZWJ at the start of a syllable is shaped as Ra,ZWJ,H, so it forms no
+  reph, with the halant and ZWJ clusters merged. `liga` is off for these scripts, and
+  `init`, `pres`, `abvs`, `blws`, `psts` and `haln` run in one stage with `rlig`,
+  `calt`, `clig`, `rclt` and the caller's features. On 7,656 test strings with the Noto
+  Sans fonts of the nine scripts, the output matches HarfBuzz 14.5.0 on all but 7 (before:
+  4,826), at every cluster level. The 7 are HarfBuzz's vowel constraints, which insert a
+  dotted circle between an independent vowel and a vowel sign that would look like
+  another vowel, and sigilbuzz does not do that yet. Sinhala keeps the earlier Indic pass.
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,

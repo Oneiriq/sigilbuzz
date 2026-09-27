@@ -157,6 +157,9 @@ pub(crate) struct GlyphInfo {
     /// Whether a GSUB substitution touched the glyph (HarfBuzz's
     /// `_hb_glyph_info_substituted`).
     pub(crate) substituted: bool,
+    /// Whether the glyph's character continues a word, by the general
+    /// category test of the Indic `init` rule (see [`is_word_char`]).
+    pub(crate) word_char: bool,
 }
 
 impl GlyphInfo {
@@ -164,6 +167,47 @@ impl GlyphInfo {
     pub(crate) const fn syllable_type(self) -> u8 {
         self.syllable & 0x0F
     }
+}
+
+/// The format characters (General_Category Cf) of Unicode 17.0
+/// (`DerivedGeneralCategory.txt`), inclusive ranges.
+const FORMAT_CHARACTERS: [(u32, u32); 21] = [
+    (0x00AD, 0x00AD),
+    (0x0600, 0x0605),
+    (0x061C, 0x061C),
+    (0x06DD, 0x06DD),
+    (0x070F, 0x070F),
+    (0x0890, 0x0891),
+    (0x08E2, 0x08E2),
+    (0x180E, 0x180E),
+    (0x200B, 0x200F),
+    (0x202A, 0x202E),
+    (0x2060, 0x2064),
+    (0x2066, 0x206F),
+    (0xFEFF, 0xFEFF),
+    (0xFFF9, 0xFFFB),
+    (0x110BD, 0x110BD),
+    (0x110CD, 0x110CD),
+    (0x13430, 0x1343F),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0001, 0xE0001),
+    (0xE0020, 0xE007F),
+];
+
+/// True when `ch` has a general category from Cf to Mn in HarfBuzz's
+/// order (format, unassigned, private use, letters, and marks), the
+/// test `final_reordering_syllable_indic` makes on the character before
+/// a left matra: after such a character the matra does not start a
+/// word. Unassigned code points count as other characters here.
+pub(crate) fn is_word_char(ch: char) -> bool {
+    use crate::unicode::general_category::{general_category_class, GeneralCategoryClass};
+    let u = ch as u32;
+    matches!(
+        general_category_class(ch),
+        Some(GeneralCategoryClass::Letter | GeneralCategoryClass::Mark)
+    ) || FORMAT_CHARACTERS.iter().any(|&(a, b)| (a..=b).contains(&u))
+        || matches!(u, 0xE000..=0xF8FF | 0xF_0000..=0xF_FFFD | 0x10_0000..=0x10_FFFD)
 }
 
 /// Marks each syllable `scan` found on its glyphs' `syllable`
@@ -241,6 +285,7 @@ pub(crate) fn insert_dotted_circles(
                 syllable,
                 mask: info[i].mask,
                 substituted: false,
+                word_char: false,
             };
             let glyph = Glyph::new(u32::from(circle), glyphs[i].cluster);
             while i < glyphs.len()

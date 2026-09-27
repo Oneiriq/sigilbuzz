@@ -410,28 +410,45 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         }
 
         // Broken syllables get a dotted circle to sit on.
-        let circled = cmap
+        let circle = cmap
             .glyph_id('\u{25CC}')
-            .filter(|_| !flags.contains(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE))
-            .and_then(|circle| dotted_circle::insert(seg.script, seg_cps, &mut seg_glyphs, circle));
+            .filter(|_| !flags.contains(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE));
+        let circled =
+            circle.and_then(|c| dotted_circle::insert(seg.script, seg_cps, &mut seg_glyphs, c));
         let seg_cps = circled.as_deref().unwrap_or(seg_cps);
 
         // Per-script pre-shapers. Each is gated on the segment's
         // resolved script so a Hebrew segment never runs the Indic
-        // state machine, and vice versa.
-        if let Some(config) = crate::ot::indic::indic_config_for(seg.script) {
-            crate::ot::indic::shape_indic(
-                gsub.as_ref(),
-                gdef.as_ref(),
-                seg_cps,
-                &mut seg_glyphs,
-                &config,
-                level,
-            );
+        // state machine, and vice versa. The Indic and Khmer shapers
+        // run every GSUB feature of their run, the default ones in
+        // their last stage, as HarfBuzz's do, and insert their own
+        // dotted circles.
+        let indic = crate::ot::indic::indic_config_for(seg.script);
+        let shaper_ran_defaults =
+            seg.script == Script::Khmer || indic.is_some_and(|c| c.script != Script::Sinhala);
+        if let Some(config) = indic {
+            if config.script == Script::Sinhala {
+                crate::ot::indic::shape_indic(
+                    gsub.as_ref(),
+                    gdef.as_ref(),
+                    seg_cps,
+                    &mut seg_glyphs,
+                    &config,
+                    level,
+                );
+            } else {
+                let run = crate::ot::indic::shaper::IndicRun {
+                    gsub: gsub.as_ref(),
+                    gdef: gdef.as_ref(),
+                    level,
+                    features,
+                    vertical: is_vertical,
+                    dotted_circle: circle,
+                    virama_glyph: char::from_u32(config.virama).and_then(|v| cmap.glyph_id(v)),
+                };
+                crate::ot::indic::shaper::shape(&run, &config, seg_cps, &mut seg_glyphs);
+            }
         }
-        // The Khmer shaper runs every GSUB feature of its run, the
-        // default ones in its last stage, as HarfBuzz's does.
-        let shaper_ran_defaults = seg.script == Script::Khmer;
         if seg.script == Script::Khmer {
             let run = crate::ot::khmer::KhmerRun {
                 gsub: gsub.as_ref(),
@@ -439,9 +456,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 level,
                 features,
                 vertical: is_vertical,
-                dotted_circle: cmap
-                    .glyph_id('\u{25CC}')
-                    .filter(|_| !flags.contains(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE)),
+                dotted_circle: circle,
             };
             crate::ot::khmer::shape(&run, seg_cps, &mut seg_glyphs);
         }
