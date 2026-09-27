@@ -354,13 +354,23 @@ Output that differed from HarfBuzz:
   matched invented classes. PairPos format 2 and the subsetter's class-based rewriters
   had the same bug.
 - The bidi algorithm passes every line of the Unicode 17.0 BidiTest.txt (3,878 failed
-  before) and all but four lines of BidiCharacterTest.txt (19 failed before). An isolate
-  inside a directional override opens at its own direction and still matches its PDI
-  (X5a to X5c, BD9), an override leaves boundary neutrals to rule X9 (X6), a paragraph
-  separator takes the paragraph level (X8), marks after a bracket that N0 resolves take
-  its type, bracket pairing stops when the stack is full, and U+2329 and U+232A pair with
-  U+3008 and U+3009 (BD16). The four remaining lines need Bidi_Class values the curated
-  `bidi_class` table lacks.
+  before) and BidiCharacterTest.txt (19 failed before). An isolate inside a directional
+  override opens at its own direction and still matches its PDI (X5a to X5c, BD9), an
+  override leaves boundary neutrals to rule X9 (X6), a paragraph separator takes the
+  paragraph level (X8), marks after a bracket that N0 resolves take its type, bracket
+  pairing stops when the stack is full, and U+2329 and U+232A pair with U+3008 and
+  U+3009 (BD16).
+- `bidi_class` and the paired-bracket table are generated from the Unicode 17.0
+  `DerivedBidiClass.txt` (with the defaults of its `@missing` lines) and
+  `BidiBrackets.txt` by `tests/unicode_table_gen.rs`, like the other UCD tables. The
+  hand-picked tables had thousands of wrong values (Devanagari and other Indic marks as
+  L instead of NSM, Samaritan, Mandaic, Adlam and other right-to-left scripts as ON,
+  U+002A as ET, U+06F0 to U+06F9 as AN) and 30 of the 128 bracket pairs missing.
+  `BidiParagraph` levels change for such text. `shape` changes only where the class
+  decides the native direction, for scripts sigilbuzz has no shaper for: text in
+  Samaritan, Mandaic, Adlam, Kharoshthi, Phoenician, Garay and the other right-to-left
+  scripts is now reversed like HarfBuzz reverses it, and Old Hungarian, Old Italic, Runic
+  and Tifinagh, which HarfBuzz gives no native direction, are never reversed.
 
 Removed:
 

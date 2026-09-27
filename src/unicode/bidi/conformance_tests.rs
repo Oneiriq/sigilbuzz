@@ -2,9 +2,8 @@
 //! BidiCharacterTest.txt) that pin rules X5a to X5c, X6, X8, N0, and
 //! BD16.
 //!
-//! The full files pass except four BidiCharacterTest lines whose
-//! characters the curated `bidi_class` table classifies differently
-//! from the UCD (U+061C, U+002A, U+06F1).
+//! The full files pass. The last lines here needed the UCD-generated
+//! `bidi_class` table: U+061C is AL, U+002A is ON, and U+06F1 is EN.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -111,6 +110,12 @@ fn bidi_character_test_lines() {
         // BD16: canonically equivalent brackets pair.
         "0061 0020 2329 0062 002E 0031 3009;1;1;2 2 2 2 2 2 2;0 1 2 3 4 5 6",
         "05D0 0020 3008 05D1 002E 0031 232A;0;0;1 1 1 1 1 2 1;6 5 4 3 2 1 0",
+        // Classes from the UCD: ALM is AL, the asterisk ON, and the
+        // extended Arabic-Indic digits EN.
+        "061C 0020 0031 002D 0032;0;0;1 1 2 1 2;4 3 2 1 0",
+        "0028 05D0 0029 0020 0031 002A 0032;0;0;0 1 0 0 2 1 2;0 1 2 3 6 5 4",
+        "06F1 0028 0627 0029;0;0;0 0 1 0;0 1 2 3",
+        "0028 06F1 0029 0627;0;0;0 0 0 1;0 1 2 3",
     ];
     for line in lines {
         let fields: Vec<&str> = line.split(';').collect();

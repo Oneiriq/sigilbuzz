@@ -29,6 +29,12 @@
 //! - `src/unicode/normalize/combining_class_table.rs`: the nonzero
 //!   `Canonical_Combining_Class` ranges, from
 //!   `DerivedCombiningClass.txt`.
+//! - `src/unicode/bidi_class_table.rs`: `Bidi_Class`, from
+//!   `DerivedBidiClass.txt`, with the defaults its `@missing` lines give
+//!   the code points it does not list (R, AL, or ET in the blocks set
+//!   aside for them, L everywhere else).
+//! - `src/unicode/bidi_brackets_table.rs`: `Bidi_Paired_Bracket` and
+//!   `Bidi_Paired_Bracket_Type`, from `BidiBrackets.txt`.
 //!
 //! # Sources
 //!
@@ -51,6 +57,9 @@
 //!   character with a canonical (untagged) decomposition.
 //! - `DerivedCombiningClass.txt`: the lines with a nonzero class.
 //! - `CompositionExclusions.txt`: every data line.
+//! - `DerivedBidiClass.txt`: every data line, and the `@missing` lines
+//!   with their leading `# ` removed, so they read as data.
+//! - `BidiBrackets.txt`: every data line.
 //!
 //! # Commands
 //!
@@ -61,10 +70,11 @@
 //! ```
 //!
 //! Refresh the snapshots first by pointing `SIGILBUZZ_UCD_DIR` at a
-//! directory holding the nine files as downloaded from
+//! directory holding the eleven files as downloaded from
 //! `https://www.unicode.org/Public/<version>/ucd/`
-//! (`DerivedGeneralCategory.txt` and `DerivedCombiningClass.txt` are
-//! under `extracted/` there and `emoji-data.txt` under `emoji/`), with
+//! (`DerivedGeneralCategory.txt`, `DerivedCombiningClass.txt`, and
+//! `DerivedBidiClass.txt` are under `extracted/` there and
+//! `emoji-data.txt` under `emoji/`), with
 //! `SIGILBUZZ_UCD_VERSION` (for example `17.0.0`) and
 //! `SIGILBUZZ_UCD_RETRIEVED=YYYY-MM-DD` set.
 //!
@@ -84,6 +94,8 @@ const EMOJI_DATA: &str = "emoji-data.txt";
 const UNICODE_DATA: &str = "UnicodeData.txt";
 const COMBINING_CLASS: &str = "DerivedCombiningClass.txt";
 const COMPOSITION_EXCLUSIONS: &str = "CompositionExclusions.txt";
+const BIDI_CLASS: &str = "DerivedBidiClass.txt";
+const BIDI_BRACKETS: &str = "BidiBrackets.txt";
 
 const JOINING_RS: &str = "src/unicode/joining_table.rs";
 const MIRRORING_RS: &str = "src/unicode/mirroring_table.rs";
@@ -92,6 +104,8 @@ const CATEGORY_RS: &str = "src/unicode/general_category_table.rs";
 const DECOMPOSE_RS: &str = "src/unicode/normalize/decompose_table.rs";
 const COMPOSE_RS: &str = "src/unicode/normalize/compose_table.rs";
 const COMBINING_CLASS_RS: &str = "src/unicode/normalize/combining_class_table.rs";
+const BIDI_CLASS_RS: &str = "src/unicode/bidi_class_table.rs";
+const BIDI_BRACKETS_RS: &str = "src/unicode/bidi_brackets_table.rs";
 
 /// The General_Category values the snapshot keeps.
 const KEPT_CATEGORIES: &[&str] = &["Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Cf"];
@@ -527,6 +541,139 @@ fn generate_combining_classes() -> String {
     out
 }
 
+// --- Bidi classes ------------------------------------------------------------------
+
+/// The `BidiClass` variant for a Bidi_Class value, short (`AL`) or long
+/// (`Arabic_Letter`).
+fn bidi_variant(value: &str) -> &'static str {
+    match value {
+        "L" | "Left_To_Right" => "L",
+        "R" | "Right_To_Left" => "R",
+        "AL" | "Arabic_Letter" => "Al",
+        "EN" | "European_Number" => "En",
+        "ES" | "European_Separator" => "Es",
+        "ET" | "European_Terminator" => "Et",
+        "AN" | "Arabic_Number" => "An",
+        "CS" | "Common_Separator" => "Cs",
+        "NSM" | "Nonspacing_Mark" => "Nsm",
+        "BN" | "Boundary_Neutral" => "Bn",
+        "B" | "Paragraph_Separator" => "B",
+        "S" | "Segment_Separator" => "S",
+        "WS" | "White_Space" => "Ws",
+        "ON" | "Other_Neutral" => "On",
+        "LRE" | "Left_To_Right_Embedding" => "Lre",
+        "LRO" | "Left_To_Right_Override" => "Lro",
+        "RLE" | "Right_To_Left_Embedding" => "Rle",
+        "RLO" | "Right_To_Left_Override" => "Rlo",
+        "PDF" | "Pop_Directional_Format" => "Pdf",
+        "LRI" | "Left_To_Right_Isolate" => "Lri",
+        "RLI" | "Right_To_Left_Isolate" => "Rli",
+        "FSI" | "First_Strong_Isolate" => "Fsi",
+        "PDI" | "Pop_Directional_Isolate" => "Pdi",
+        _ => panic!("unknown Bidi_Class {value:?}"),
+    }
+}
+
+/// `Bidi_Class` of every code point: the `@missing` defaults in file
+/// order (each overrides the ones before it, as UAX #44 says), then the
+/// listed values.
+fn bidi_classes() -> Vec<&'static str> {
+    let snapshot = load(BIDI_CLASS);
+    let mut classes = vec!["L"; CODE_SPACE];
+    let (missing, listed): (Vec<_>, Vec<_>) = snapshot
+        .rows
+        .iter()
+        .partition(|row| row[0].starts_with("@missing:"));
+    assert!(!missing.is_empty(), "no @missing lines in {BIDI_CLASS}");
+    for row in missing.into_iter().chain(listed) {
+        let range = row[0].trim_start_matches("@missing:").trim();
+        let (start, end) = parse_range(range);
+        let class = bidi_variant(&row[1]);
+        for cp in start..=end {
+            classes[cp as usize] = class;
+        }
+    }
+    classes
+}
+
+fn generate_bidi_classes() -> String {
+    let snapshot = load(BIDI_CLASS);
+    let classes = bidi_classes();
+    let mut used: Vec<&str> = classes.iter().copied().filter(|&c| c != "L").collect();
+    used.sort_unstable();
+    used.dedup();
+
+    let mut out = String::new();
+    file_header(&mut out, &[&snapshot]);
+    out.push_str("// Code point ranges read best in hex without digit separators.\n");
+    out.push_str("#![allow(clippy::unreadable_literal)]\n\n");
+    out.push_str("use super::bidi_class::BidiClass::{\n");
+    let names: Vec<String> = ["self"]
+        .into_iter()
+        .chain(used)
+        .map(str::to_owned)
+        .collect();
+    emit_wrapped(&mut out, &names);
+    out.push_str("};\n\n");
+    out.push_str("/// `(first, last, class)` for every code point whose `Bidi_Class`\n");
+    out.push_str("/// is not L (Left_To_Right), unassigned code points included.\n");
+    out.push_str("/// Sorted, non-overlapping, inclusive. A `const` so that\n");
+    out.push_str("/// `bidi_class` can stay a `const fn`.\n");
+    out.push_str("pub(super) const BIDI_CLASSES: &[(u32, u32, BidiClass)] = &[\n");
+    let items: Vec<String> = runs(&classes, "L")
+        .iter()
+        .map(|(s, e, c)| format!("(0x{s:04X}, 0x{e:04X}, {c})"))
+        .collect();
+    emit_wrapped(&mut out, &items);
+    out.push_str("];\n");
+    out
+}
+
+/// `(code point, paired bracket, open)` for every `BidiBrackets.txt`
+/// entry. Sorted by code point.
+fn bidi_brackets() -> Vec<(u32, u32, bool)> {
+    let mut pairs: Vec<(u32, u32, bool)> = load(BIDI_BRACKETS)
+        .rows
+        .iter()
+        .map(|row| {
+            let open = match row[2].as_str() {
+                "o" => true,
+                "c" => false,
+                other => panic!("bracket type {other:?} in {row:?}"),
+            };
+            (parse_hex(&row[0]), parse_hex(&row[1]), open)
+        })
+        .collect();
+    pairs.sort_unstable();
+    let count = pairs.len();
+    pairs.dedup_by_key(|p| p.0);
+    assert_eq!(pairs.len(), count, "duplicate code points");
+    pairs
+}
+
+fn generate_bidi_brackets() -> String {
+    let snapshot = load(BIDI_BRACKETS);
+    let mut out = String::new();
+    file_header(&mut out, &[&snapshot]);
+    out.push_str("// Code points read best in hex without digit separators.\n");
+    out.push_str("#![allow(clippy::unreadable_literal)]\n\n");
+    out.push_str("use super::bidi_brackets::BracketType::{self, Close, Open};\n\n");
+    out.push_str("/// `(code point, Bidi_Paired_Bracket, Bidi_Paired_Bracket_Type)`\n");
+    out.push_str("/// for every paired bracket. Sorted by code point. A `const` so\n");
+    out.push_str("/// that `bracket_of` can stay a `const fn`.\n");
+    out.push_str("pub(super) const BRACKETS: &[(u32, u32, BracketType)] = &[\n");
+    let items: Vec<String> = bidi_brackets()
+        .iter()
+        .map(|&(cp, pair, open)| {
+            let kind = if open { "Open" } else { "Close" };
+            format!("(0x{cp:04X}, 0x{pair:04X}, {kind})")
+        })
+        .collect();
+    emit_wrapped(&mut out, &items);
+    out.push_str("];\n");
+    out
+}
+
 // --- Snapshot refresh ------------------------------------------------------------
 
 /// Reduces a downloaded UCD file to a snapshot: the provenance lines,
@@ -573,7 +720,7 @@ fn refresh_snapshots() {
     let retrieved =
         std::env::var("SIGILBUZZ_UCD_RETRIEVED").expect("set SIGILBUZZ_UCD_RETRIEVED=YYYY-MM-DD");
     let base = format!("https://www.unicode.org/Public/{version}/ucd");
-    let jobs: [(&str, String, Keep); 9] = [
+    let jobs: [(&str, String, Keep); 11] = [
         (ARABIC_SHAPING, format!("{base}/{ARABIC_SHAPING}"), keep_all),
         (
             GENERAL_CATEGORY,
@@ -607,17 +754,28 @@ fn refresh_snapshots() {
             format!("{base}/{COMPOSITION_EXCLUSIONS}"),
             keep_all,
         ),
+        (
+            BIDI_CLASS,
+            format!("{base}/extracted/{BIDI_CLASS}"),
+            keep_all,
+        ),
+        (BIDI_BRACKETS, format!("{base}/{BIDI_BRACKETS}"), keep_all),
     ];
     let version_line = format!("{UNICODE_DATA}, Unicode {version}");
     std::fs::create_dir_all(snapshot_dir()).expect("create snapshot dir");
     for (file, url, keep) in jobs {
-        let raw = read(&Path::new(&dir).join(file));
+        let mut raw = read(&Path::new(&dir).join(file));
+        if file == BIDI_CLASS {
+            // The defaults for unlisted code points sit in comment
+            // lines. Keep them as data.
+            raw = raw.replace("# @missing: ", "@missing: ");
+        }
         let snapshot = reduce(&raw, &url, &retrieved, &version_line, keep);
         std::fs::write(snapshot_dir().join(file), snapshot).expect("write snapshot");
     }
 }
 
-fn outputs() -> [(&'static str, String); 7] {
+fn outputs() -> [(&'static str, String); 9] {
     [
         (JOINING_RS, generate_joining()),
         (MIRRORING_RS, generate_mirroring()),
@@ -626,6 +784,8 @@ fn outputs() -> [(&'static str, String); 7] {
         (DECOMPOSE_RS, generate_decompositions()),
         (COMPOSE_RS, generate_compositions()),
         (COMBINING_CLASS_RS, generate_combining_classes()),
+        (BIDI_CLASS_RS, generate_bidi_classes()),
+        (BIDI_BRACKETS_RS, generate_bidi_brackets()),
     ]
 }
 
@@ -692,4 +852,45 @@ fn normalization_snapshots_derive_known_mappings() {
     assert_eq!(composes(0x0F71, 0x0F72), None);
     // Singletons never compose.
     assert!(composites.iter().all(|&(_, _, c)| c != 0x212B));
+}
+
+#[test]
+fn bidi_snapshot_derives_known_classes() {
+    let classes = bidi_classes();
+    for (cp, class) in [
+        (0x0041, "L"),
+        (0x05D0, "R"),
+        (0x0627, "Al"),
+        (0x06F1, "En"),
+        (0x0901, "Nsm"),
+        (0x2029, "B"),
+        (0x2067, "Rli"),
+        // @missing defaults: an unassigned code point in the Hebrew, the
+        // Arabic, and the Currency Symbols blocks, and outside them.
+        (0x05FF, "R"),
+        (0x07BF, "Al"),
+        (0x20CF, "Et"),
+        (0x50000, "L"),
+        // Unassigned default ignorables and noncharacters are listed.
+        (0x2065, "Bn"),
+        (0xFDD0, "Bn"),
+    ] {
+        assert_eq!(classes[cp], class, "U+{cp:04X}");
+    }
+}
+
+#[test]
+fn bracket_snapshot_derives_known_pairs() {
+    let pairs = bidi_brackets();
+    assert_eq!(pairs.len(), 128);
+    for (cp, pair, open) in [
+        (0x0028, 0x0029, true),
+        (0x0029, 0x0028, false),
+        (0x2329, 0x232A, true),
+        (0x3009, 0x3008, false),
+        (0x0F3A, 0x0F3B, true),
+        (0x2E5C, 0x2E5B, false),
+    ] {
+        assert!(pairs.contains(&(cp, pair, open)), "U+{cp:04X}");
+    }
 }

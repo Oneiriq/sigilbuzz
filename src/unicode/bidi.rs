@@ -26,10 +26,10 @@
 //!
 //! ## Conformance
 //!
-//! Every line of the Unicode 17.0 BidiTest.txt resolves to its levels
-//! and order. So does every line of BidiCharacterTest.txt but four,
-//! where the curated [`bidi_class`] table classifies U+061C, U+002A,
-//! and U+06F1 differently from the UCD.
+//! Every line of the Unicode 17.0 BidiTest.txt and
+//! BidiCharacterTest.txt resolves to its levels and order. The
+//! [`bidi_class`] and bracket tables are generated from the same UCD
+//! release.
 //!
 //! ## Characters X9 removes
 //!
@@ -45,8 +45,8 @@
 //! types but before N1 / N2 sweep neutrals, brackets that pair across
 //! the isolating-run sequence get a strong type assigned according to
 //! the surrounding embedding context. The pair codepoint table lives
-//! in [`crate::unicode::bidi_brackets`] (curated extract of
-//! `BidiBrackets.txt`: ASCII + CJK + math families).
+//! in [`crate::unicode::bidi_brackets`], generated from
+//! `BidiBrackets.txt`.
 //!
 //! Brackets that don't pair (unbalanced opener / closer, opener
 //! without a matching closer) fall through unchanged and N1's
