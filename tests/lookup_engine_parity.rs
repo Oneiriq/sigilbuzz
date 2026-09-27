@@ -63,3 +63,58 @@ fn per_syllable_features_do_not_form_conjuncts_across_syllables() {
         ]
     );
 }
+
+const RUBIK: &[u8] = include_bytes!("fixtures/rubik_vf.ttf");
+const OPEN_SANS: &[u8] = include_bytes!("fixtures/opensans_regular.ttf");
+
+/// Glyph id, cluster, x offset and y offset.
+fn marks(font: &[u8], text: &str) -> Vec<(u32, u32, i32, i32)> {
+    let blob = Blob::new(font);
+    let face = Face::parse(&blob, 0).expect("face");
+    let font = Font::new(face, 1000.0);
+    let mut buffer = Buffer::new();
+    buffer.push_str(text);
+    buffer.set_direction(Direction::Ltr);
+    let run = shape(&font, &buffer, &[]).expect("shape");
+    run.glyphs
+        .iter()
+        .map(|g| (g.glyph_id, g.cluster, g.x_offset, g.y_offset))
+        .collect()
+}
+
+#[test]
+fn a_cgj_that_blocked_mark_reordering_stays_hidden_from_gsub() {
+    // hb-ot-shape-normalize.cc: a COMBINING GRAPHEME JOINER is hidden
+    // (GSUB sees it) unless the marks around it were in order anyway,
+    // in which case `_hb_glyph_info_unhide` lets GSUB skip it. Rubik's
+    // mark lookups pick the acute's form from the mark after it.
+    //
+    // Acute (230) then cedilla (202): the CGJ kept them from being
+    // reordered, so it stays hidden and the acute keeps its own form.
+    assert_eq!(
+        marks(RUBIK, "f\u{0301}\u{034F}\u{0327}"),
+        [
+            (162, 0, 0, 0),
+            (1126, 1, -280, 190),
+            (928, 3, 0, 0),
+            (1137, 5, -340, 0)
+        ]
+    );
+    // Cedilla then acute were in order: the CGJ is skipped and the
+    // acute takes the form it has after a cedilla.
+    assert_eq!(
+        marks(RUBIK, "f\u{0327}\u{034F}\u{0301}"),
+        [
+            (162, 0, 0, 0),
+            (1154, 1, -340, 0),
+            (928, 3, 0, 0),
+            (1145, 5, -308, 10)
+        ]
+    );
+    // Before a base the CGJ blocks nothing either: "f", CGJ, "i"
+    // ligates.
+    assert_eq!(
+        marks(OPEN_SANS, "f\u{034F}i"),
+        [(564, 0, 0, 0), (3, 0, 0, 0)]
+    );
+}
