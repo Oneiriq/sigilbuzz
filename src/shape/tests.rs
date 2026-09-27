@@ -12,6 +12,7 @@ use crate::tables::cmap::{build_cmap_wrapper, build_format4};
 use alloc::vec::Vec;
 
 mod lookups;
+mod masks;
 
 #[test]
 fn kana_led_segments_use_the_kana_script_tag() {

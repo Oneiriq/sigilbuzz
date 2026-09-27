@@ -23,7 +23,10 @@ use crate::tables::layout::Joiners;
 /// only the lookup indices in `feature_indices` fire from the
 /// top-level `test` feature. The rest are still in the
 /// LookupList so nested-lookup dispatch can reach them.
-fn build_shapeable_font_with_gsub(lookups: &[(u16, Vec<u8>)], feature_indices: &[u16]) -> Vec<u8> {
+pub(super) fn build_shapeable_font_with_gsub(
+    lookups: &[(u16, Vec<u8>)],
+    feature_indices: &[u16],
+) -> Vec<u8> {
     let gsub_bytes = build_single_feature_gsub_with_filter(*b"test", lookups, feature_indices);
 
     // Reuse the build_shapeable_font bodies by re-assembling with
@@ -177,7 +180,7 @@ fn build_single_feature_gsub_with_filter(
 }
 
 // Helpers for building individual subtable bodies.
-fn build_cov_fmt1(glyphs: &[u16]) -> Vec<u8> {
+pub(super) fn build_cov_fmt1(glyphs: &[u16]) -> Vec<u8> {
     let mut o = Vec::new();
     o.extend_from_slice(&1u16.to_be_bytes());
     o.extend_from_slice(&(glyphs.len() as u16).to_be_bytes());
@@ -202,7 +205,7 @@ fn build_classdef_fmt2(ranges: &[(u16, u16, u16)]) -> Vec<u8> {
 /// Builds a GSUB type-1 format-2 (explicit) single-sub subtable
 /// that maps each glyph in `coverage` to the corresponding entry
 /// in `substitutes`.
-fn build_single_fmt2_subst(coverage_glyphs: &[u16], substitutes: &[u16]) -> Vec<u8> {
+pub(super) fn build_single_fmt2_subst(coverage_glyphs: &[u16], substitutes: &[u16]) -> Vec<u8> {
     assert_eq!(coverage_glyphs.len(), substitutes.len());
     let mut o = Vec::new();
     o.extend_from_slice(&2u16.to_be_bytes()); // format
@@ -716,7 +719,7 @@ fn remap_segments_follows_morx_origins() {
     assert!(remap_segments(&[], &[0, 1]).is_empty());
 }
 
-const DFLT_TEST: &[[u8; 4]] = &[*b"DFLT"];
+pub(super) const DFLT_TEST: &[[u8; 4]] = &[*b"DFLT"];
 const ARAB_TEST: &[[u8; 4]] = &[*b"arab", *b"DFLT"];
 
 #[test]

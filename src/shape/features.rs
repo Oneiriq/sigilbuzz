@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 
-use super::gsub::{apply_gsub_lookup, apply_gsub_lookup_masked};
+use super::gsub::{apply_gsub_lookup, apply_gsub_lookups_masked};
 use super::{feature_disabled, Feature, JoinerTable, LookupBudget};
 use crate::buffer::Glyph;
 use crate::ot::arabic::JoiningForm;
@@ -365,17 +365,14 @@ fn apply_gsub_feature_budgeted(
 }
 
 /// Applies a single feature's lookups only at glyph positions where
-/// `mask[i]` is true. Used by the Indic shaper to gate `half` off
-/// on consonants whose post-halant partner is already going to be
-/// consumed by `blwf`. Mirrors HarfBuzz's per-glyph feature mask
-/// machinery at the one spot sigilbuzz currently needs it.
-///
-/// Shares the masked lookup dispatcher with Arabic
-/// positional features; lookups that don't understand the mask
-/// (chaining-context interior) fall through to the unmasked
-/// dispatcher, matching the behavior documented on
-/// [`apply_gsub_lookup_masked`]. Runs under a fresh [`LookupBudget`]
-/// for this one feature.
+/// `mask[i]` is true, HarfBuzz's per-glyph feature mask. Used by the
+/// Indic shaper to gate `half` off on consonants whose post-halant
+/// partner is already going to be consumed by `blwf`, and by the
+/// joining and mirroring passes. The mask moves with its glyph
+/// through the feature's lookups, and every input glyph a rule
+/// matches must have the feature on (see
+/// [`apply_gsub_lookups_masked`]). Runs under a fresh
+/// [`LookupBudget`] for this one feature.
 pub(crate) fn apply_gsub_feature_masked(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
@@ -396,9 +393,15 @@ pub(crate) fn apply_gsub_feature_masked(
         return;
     }
     let mut budget = LookupBudget::for_run(glyphs);
-    for lookup_idx in lookup_indices {
-        apply_gsub_lookup_masked(gsub, lookup_idx, glyphs, gdef, mask, joiners, &mut budget);
-    }
+    apply_gsub_lookups_masked(
+        gsub,
+        &lookup_indices,
+        glyphs,
+        gdef,
+        mask,
+        joiners,
+        &mut budget,
+    );
 }
 
 /// Applies the four Arabic positional features (`isol`, `init`,
@@ -430,9 +433,7 @@ pub(super) fn apply_arabic_positional_features(
         }
         let mask: Vec<bool> = forms.iter().map(|&f| f == form).collect();
         let joiners = JoinerTable::Arabic.joiners(tag);
-        for lookup_idx in lookup_indices {
-            apply_gsub_lookup_masked(gsub, lookup_idx, glyphs, gdef, &mask, joiners, budget);
-        }
+        apply_gsub_lookups_masked(gsub, &lookup_indices, glyphs, gdef, &mask, joiners, budget);
     }
 }
 

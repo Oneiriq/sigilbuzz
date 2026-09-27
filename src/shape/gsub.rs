@@ -16,7 +16,7 @@
 
 use alloc::vec::Vec;
 
-use super::gsub_buffer::{GlyphSlice, GsubBuffer};
+use super::gsub_buffer::GsubBuffer;
 use super::gsub_parsed::{
     apply_parsed_lookup_at, cursor_in_digest, filter_for_lookup, lookup_might_apply,
     parse_lookup_subtables, parsed_has_full_digest, ParsedGsubSubtable,
@@ -66,49 +66,39 @@ fn effective_type(lookup: &Lookup<'_>) -> u16 {
     }
 }
 
-/// Applies a single GSUB lookup only at positions where `mask[i]`
-/// is true. Used by the Arabic positional pass: `isol` at positions
-/// tagged `Isol`, `init` at `Init`, and so on, and by the Indic
-/// shaper for `half`/`pref`/`pres` gating.
+/// Applies a feature's GSUB lookups, in order, only where `mask`
+/// turns the feature on: HarfBuzz's per-glyph feature mask, for the
+/// features the shapers give to some glyphs only (the Arabic and
+/// Mongolian positional forms, Indic `half`, `rtlm` on mirrored
+/// characters). `mask[i]` belongs to `glyphs[i]` and moves with it
+/// through every substitution, as the mask bits of HarfBuzz's glyph
+/// info do, so the later lookups of the feature still find it.
 ///
-/// Per-glyph lookup types (SINGLE / MULTIPLE / ALTERNATE / LIGATURE)
-/// only fire when the mask at the cursor position is true; the mask
-/// moves with its glyph through the pass.
-/// Chained-context lookups inside a positional feature run over the
-/// full glyph stream. The rules' coverage already encodes their
-/// positional intent.
-///
-/// Like [`apply_gsub_lookup`], this walks the cursor once and tries
-/// the lookup's subtables in spec order, taking the first match.
-pub(super) fn apply_gsub_lookup_masked(
+/// As in HarfBuzz, a lookup only starts at a glyph the feature is on
+/// at (`apply_forward` and `apply_backward` test `lookup_mask`), and
+/// every other input glyph a rule matches (ligature components,
+/// contextual input) must have the feature on too (the skipping
+/// iterator's `may_match`). Backtrack and lookahead glyphs need not.
+pub(super) fn apply_gsub_lookups_masked(
     gsub: &Gsub<'_>,
-    lookup_idx: u16,
+    lookups: &[u16],
     glyphs: &mut Vec<Glyph>,
     gdef: Option<&Gdef<'_>>,
     mask: &[bool],
     joiners: Joiners,
     budget: &mut LookupBudget,
 ) {
-    let Some(lookup) = gsub.lookup_list().get(lookup_idx) else {
-        return;
-    };
-    // Chained-context inside a positional feature ignores the mask:
-    // the rule itself encodes positional intent via its input coverage
-    // (post-positional glyph ids tagged init/medi/fina/...). Defer to
-    // the unmasked driver so the cursor walk + first-subtable-wins
-    // semantics still apply.
-    let lt = effective_type(&lookup);
-    if lt == gsub_lt::CHAINED_CONTEXT || lt == gsub_lt::CONTEXT {
-        apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, 0, joiners, budget);
-        return;
-    }
     let cx = GsubCx {
         gsub,
         gdef,
         joiners,
     };
     let mut buf = GsubBuffer::new(core::mem::take(glyphs), Some(mask));
-    apply_lookup_to_buffer(&cx, &lookup, &mut buf, 0, budget);
+    for &index in lookups {
+        if let Some(lookup) = gsub.lookup_list().get(index) {
+            apply_lookup_to_buffer(&cx, &lookup, &mut buf, 0, budget);
+        }
+    }
     *glyphs = buf.into_glyphs();
 }
 
@@ -146,20 +136,16 @@ pub(super) fn apply_gsub_lookup(
         gdef,
         joiners,
     };
-    if effective_type(&lookup) == gsub_lt::REVERSE_CHAINED {
-        let parsed = parse_lookup_subtables(&lookup, lookup.lookup_type());
-        apply_reverse_chain(&parsed, glyphs, &cx.match_cx(&lookup));
-        return;
-    }
     let mut buf = GsubBuffer::new(core::mem::take(glyphs), None);
     apply_lookup_to_buffer(&cx, &lookup, &mut buf, alternate_index, budget);
     *glyphs = buf.into_glyphs();
 }
 
-/// One forward pass of `lookup` over `buf`, HarfBuzz's
-/// `apply_string` + `apply_forward`: the cursor stops at each glyph
+/// One pass of `lookup` over `buf`, HarfBuzz's
+/// `apply_string`: `apply_forward`, whose cursor stops at each glyph
 /// the feature is on at and the lookup flags keep, and moves on by one
-/// wherever no subtable applies.
+/// wherever no subtable applies, or `apply_backward` for a reverse
+/// chaining lookup.
 fn apply_lookup_to_buffer(
     cx: &GsubCx<'_>,
     lookup: &Lookup<'_>,
@@ -181,6 +167,10 @@ fn apply_lookup_to_buffer(
         return;
     }
     let mcx = cx.match_cx(lookup);
+    if effective_type(lookup) == gsub_lt::REVERSE_CHAINED {
+        apply_reverse_chain(&parsed, buf, &mcx);
+        return;
+    }
     // With the "digest" path the cursor only stops at glyphs in the
     // union of the subtables' primary coverages. It falls back to
     // visiting every position when a subtable's primary coverage
@@ -351,7 +341,7 @@ pub(super) fn substitute_glyph(glyph: &mut Glyph, gid: u16) {
 /// substituted, which is what the lookahead sees.
 fn apply_reverse_chain(
     parsed: &[ParsedGsubSubtable<'_>],
-    glyphs: &mut [Glyph],
+    buf: &mut GsubBuffer,
     mcx: &MatchContext<'_>,
 ) {
     let subtables: Vec<&ReverseChain<'_>> = parsed
@@ -364,15 +354,18 @@ fn apply_reverse_chain(
     if subtables.is_empty() {
         return;
     }
-    for i in (0..glyphs.len()).rev() {
-        if mcx.filter().is_skipped(MatchGlyph::from(&glyphs[i])) {
+    buf.sync();
+    for i in (0..buf.len()).rev() {
+        let Some(g) = buf.get(i) else {
+            continue;
+        };
+        if !buf.in_mask_at(i) || mcx.filter().is_skipped(MatchGlyph::from(g)) {
             continue;
         }
-        let run = GlyphSlice(glyphs);
         let substitute = subtables
             .iter()
-            .find_map(|rc| rc.apply_at_in(&run, i, mcx, &mut ()));
-        if let (Some(out), Some(glyph)) = (substitute, glyphs.get_mut(i)) {
+            .find_map(|rc| rc.apply_at_in(&*buf, i, mcx, &mut ()));
+        if let (Some(out), Some(glyph)) = (substitute, buf.get_mut(i)) {
             substitute_glyph(glyph, out);
         }
     }
