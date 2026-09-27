@@ -40,7 +40,10 @@
 //!   ligature set.
 
 use crate::error::{Error, Result};
-use crate::tables::layout::skip_iter::{match_input, InputMatch, MatchContext, MatchGlyph};
+use crate::tables::layout::skip_iter::{
+    match_input_in, InputMatch, MatchContext, MatchGlyph, MatchPositions, MatchSeq, MaySkip,
+    UnsafeRanges,
+};
 use crate::tables::layout::Coverage;
 use crate::tables::parse::Reader;
 
@@ -124,49 +127,137 @@ impl<'a> Ligature<'a> {
         at: usize,
         cx: &MatchContext<'_>,
     ) -> Option<(u16, InputMatch)> {
-        let first = glyphs.get(at)?.id;
+        self.apply_at_in(glyphs, at, cx, &mut ())
+    }
+
+    /// [`Self::apply_at`] over any [`MatchSeq`], reporting what
+    /// HarfBuzz's `LigatureSet::apply` and `Ligature::apply` mark
+    /// unsafe to concatenate to `sink`.
+    ///
+    /// With more than one ligature in the set, HarfBuzz first finds
+    /// the glyph after `at` with the context walk and only tries the
+    /// ligatures whose second component is that glyph; a ligature it
+    /// passes over marks the pair unsafe to concatenate. The match
+    /// found is the same either way.
+    pub(crate) fn apply_at_in<S: MatchSeq + ?Sized>(
+        &self,
+        seq: &S,
+        at: usize,
+        cx: &MatchContext<'_>,
+        sink: &mut impl UnsafeRanges,
+    ) -> Option<(u16, InputMatch)> {
+        let first = seq.glyph(at)?.id;
         let cov_index = self.coverage.index_of(first)?;
         if cov_index >= self.set_count {
             return None;
         }
         let set_off_off = self.set_offsets_off + cov_index as usize * 2;
-        let set_off =
-            u16::from_be_bytes([self.data[set_off_off], self.data[set_off_off + 1]]) as usize;
+        let set_off = self
+            .data
+            .get(set_off_off..set_off_off + 2)
+            .map(|b| usize::from(u16::from_be_bytes([b[0], b[1]])))?;
         let set_bytes = self.data.get(set_off..)?;
 
         let mut r = Reader::new(set_bytes);
-        let lig_count = r.read_u16().ok()?;
-        if set_bytes.len() < 2 + lig_count as usize * 2 {
-            return None;
-        }
+        let lig_count = usize::from(r.read_u16().ok()?);
+        let offsets = set_bytes.get(2..2 + lig_count * 2)?;
+        let ligature = |i: usize| {
+            let off = usize::from(u16::from_be_bytes([offsets[i * 2], offsets[i * 2 + 1]]));
+            set_bytes.get(off..).and_then(LigatureRule::parse)
+        };
 
-        (0..usize::from(lig_count)).find_map(|i| {
-            let off_off = 2 + i * 2;
-            let lig_off = u16::from_be_bytes([set_bytes[off_off], set_bytes[off_off + 1]]) as usize;
-            match_ligature(set_bytes.get(lig_off..)?, glyphs, at, cx)
-        })
+        if lig_count > 1 {
+            // HarfBuzz's fast path: the second glyph by the context
+            // walk, used as is only when no rule could skip it.
+            let rules = cx.context_at(seq, at);
+            let second = rules
+                .next_in(seq, at + 1, |_| Some(true))
+                .ok()
+                .and_then(|j| {
+                    let g = seq.glyph(j)?;
+                    (rules.may_skip(g) == MaySkip::No).then_some((g.id, j + 1))
+                });
+            if let Some((second, unsafe_to)) = second {
+                let mut passed_over = false;
+                for i in 0..lig_count {
+                    let Some(lig) = ligature(i) else {
+                        continue;
+                    };
+                    if lig.component(0).map_or(true, |c| c == second) {
+                        if let Some(found) = lig.apply(seq, at, cx, sink) {
+                            if passed_over {
+                                sink.unsafe_to_concat(at, unsafe_to, false);
+                            }
+                            return Some(found);
+                        }
+                    } else {
+                        passed_over = true;
+                    }
+                }
+                if passed_over {
+                    sink.unsafe_to_concat(at, unsafe_to, false);
+                }
+                return None;
+            }
+        }
+        (0..lig_count).find_map(|i| ligature(i)?.apply(seq, at, cx, sink))
     }
 }
 
-/// Matches one Ligature table at `glyphs[at]`: its tail components
-/// against the glyphs the input walk stops at.
-fn match_ligature(
-    lig_bytes: &[u8],
-    glyphs: &[MatchGlyph],
-    at: usize,
-    cx: &MatchContext<'_>,
-) -> Option<(u16, InputMatch)> {
-    let mut r = Reader::new(lig_bytes);
-    let ligature_glyph = r.read_u16().ok()?;
-    let component_count = r.read_u16().ok()?;
-    if component_count == 0 {
-        return None;
+/// One Ligature table of a LigatureSet.
+struct LigatureRule<'b> {
+    glyph: u16,
+    /// Component count including the first (HarfBuzz's `lenP1`).
+    count: usize,
+    /// The components after the first, big-endian.
+    tail: &'b [u8],
+}
+
+impl<'b> LigatureRule<'b> {
+    fn parse(bytes: &'b [u8]) -> Option<Self> {
+        let mut r = Reader::new(bytes);
+        let glyph = r.read_u16().ok()?;
+        let count = usize::from(r.read_u16().ok()?);
+        let tail = r.read_bytes(count.saturating_sub(1) * 2).ok()?;
+        Some(Self { glyph, count, tail })
     }
-    let tail = usize::from(component_count) - 1;
-    let tail_bytes = r.read_bytes(tail * 2).ok()?;
-    let component = |k: usize| u16::from_be_bytes([tail_bytes[k * 2], tail_bytes[k * 2 + 1]]);
-    let m = match_input(glyphs, at, tail, cx, |k, g| g == component(k))?;
-    Some((ligature_glyph, m))
+
+    /// The `k`-th component after the first.
+    fn component(&self, k: usize) -> Option<u16> {
+        self.tail
+            .get(k * 2..k * 2 + 2)
+            .map(|b| u16::from_be_bytes([b[0], b[1]]))
+    }
+
+    /// HarfBuzz's `Ligature::apply` without the ligation: the output
+    /// glyph and the matched components.
+    fn apply<S: MatchSeq + ?Sized>(
+        &self,
+        seq: &S,
+        at: usize,
+        cx: &MatchContext<'_>,
+        sink: &mut impl UnsafeRanges,
+    ) -> Option<(u16, InputMatch)> {
+        match self.count {
+            0 => None,
+            1 => Some((
+                self.glyph,
+                InputMatch {
+                    positions: MatchPositions::new(at),
+                    end: at + 1,
+                },
+            )),
+            count => {
+                match match_input_in(seq, at, count - 1, cx, |k, g| self.component(k) == Some(g)) {
+                    Ok(m) => Some((self.glyph, m)),
+                    Err(end) => {
+                        sink.unsafe_to_concat(at, end.unwrap_or(0), false);
+                        None
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

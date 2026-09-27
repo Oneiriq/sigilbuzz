@@ -2,6 +2,12 @@
 //! nested variants, contextual dispatch, and the glyph edits every
 //! substitution goes through.
 //!
+//! A lookup walks the run the way HarfBuzz's `apply_forward` does,
+//! through a [`GsubBuffer`]: glyphs the cursor passes move to the
+//! output, substitutions consume input and produce output, and a
+//! contextual rule's nested lookups move the cursor around inside the
+//! match (`move_to`). Every lookup is one linear pass.
+//!
 //! Matching inside a lookup (ligature components, contextual input,
 //! backtrack and lookahead) follows HarfBuzz's skipping iterator, see
 //! [`crate::tables::layout::skip_iter`]: glyphs the lookup flags
@@ -10,11 +16,12 @@
 
 use alloc::vec::Vec;
 
+use super::gsub_buffer::{GlyphSlice, GsubBuffer};
 use super::gsub_parsed::{
     apply_parsed_lookup_at, cursor_in_digest, filter_for_lookup, lookup_might_apply,
-    parse_lookup_subtables, parsed_has_full_digest, MatchRun, ParsedGsubSubtable,
+    parse_lookup_subtables, parsed_has_full_digest, ParsedGsubSubtable,
 };
-use super::{lig, resolve_extension, LookupBudget, MAX_NESTED_DEPTH};
+use super::{resolve_extension, LookupBudget, MAX_NESTED_DEPTH};
 use crate::buffer::{unicode_prop, Glyph};
 use crate::tables::gdef::Gdef;
 use crate::tables::gsub::{
@@ -22,7 +29,7 @@ use crate::tables::gsub::{
 };
 use crate::tables::layout::skip_iter::apply_nested;
 use crate::tables::layout::{
-    InputMatch, Joiners, LayoutTable, Lookup, MatchContext, SequenceLookupRecord,
+    InputMatch, Joiners, LayoutTable, Lookup, MatchContext, MatchGlyph, SequenceLookupRecord,
 };
 use crate::tables::Gsub;
 
@@ -65,7 +72,8 @@ fn effective_type(lookup: &Lookup<'_>) -> u16 {
 /// shaper for `half`/`pref`/`pres` gating.
 ///
 /// Per-glyph lookup types (SINGLE / MULTIPLE / ALTERNATE / LIGATURE)
-/// only fire when the mask at the cursor position is true.
+/// only fire when the mask at the cursor position is true; the mask
+/// moves with its glyph through the pass.
 /// Chained-context lookups inside a positional feature run over the
 /// full glyph stream. The rules' coverage already encodes their
 /// positional intent.
@@ -94,27 +102,14 @@ pub(super) fn apply_gsub_lookup_masked(
         apply_gsub_lookup(gsub, lookup_idx, glyphs, gdef, 0, joiners, budget);
         return;
     }
-
-    let parsed = parse_lookup_subtables(&lookup, lookup.lookup_type());
-    if parsed.is_empty() {
-        return;
-    }
     let cx = GsubCx {
         gsub,
         gdef,
         joiners,
     };
-    let mcx = cx.match_cx(&lookup);
-    let mut run = MatchRun::from_glyphs(glyphs);
-    let mut i = 0;
-    while i < glyphs.len() {
-        if !mask.get(i).copied().unwrap_or(false) || mcx.filter().is_skipped(run.get(i)) {
-            i += 1;
-            continue;
-        }
-        i = apply_parsed_lookup_at(&cx, &parsed, &mcx, glyphs, &mut run, i, 0, 0, false, budget)
-            .map_or(i + 1, |next| next.max(i + 1));
-    }
+    let mut buf = GsubBuffer::new(core::mem::take(glyphs), Some(mask));
+    apply_lookup_to_buffer(&cx, &lookup, &mut buf, 0, budget);
+    *glyphs = buf.into_glyphs();
 }
 
 /// Applies a single GSUB lookup by index. Mirrors HarfBuzz's
@@ -146,75 +141,81 @@ pub(super) fn apply_gsub_lookup(
     let Some(lookup) = gsub.lookup_list().get(lookup_idx) else {
         return;
     };
+    let cx = GsubCx {
+        gsub,
+        gdef,
+        joiners,
+    };
+    if effective_type(&lookup) == gsub_lt::REVERSE_CHAINED {
+        let parsed = parse_lookup_subtables(&lookup, lookup.lookup_type());
+        apply_reverse_chain(&parsed, glyphs, &cx.match_cx(&lookup));
+        return;
+    }
+    let mut buf = GsubBuffer::new(core::mem::take(glyphs), None);
+    apply_lookup_to_buffer(&cx, &lookup, &mut buf, alternate_index, budget);
+    *glyphs = buf.into_glyphs();
+}
+
+/// One forward pass of `lookup` over `buf`, HarfBuzz's
+/// `apply_string` + `apply_forward`: the cursor stops at each glyph
+/// the feature is on at and the lookup flags keep, and moves on by one
+/// wherever no subtable applies.
+fn apply_lookup_to_buffer(
+    cx: &GsubCx<'_>,
+    lookup: &Lookup<'_>,
+    buf: &mut GsubBuffer,
+    alternate_index: u16,
+    budget: &mut LookupBudget,
+) {
     // Pre-parse subtables once so the cursor walk below doesn't
     // re-parse them at every position. ChainContextAny / Context /
     // Ligature parsers each allocate three or four `Vec`s for their
     // coverage / substitution arrays; doing that per cursor on a 80-
     // glyph Devanagari run is what made the bench look like a
     // quadratic explosion.
-    let parsed = parse_lookup_subtables(&lookup, lookup.lookup_type());
-    if parsed.is_empty() {
-        return;
-    }
-    let cx = GsubCx {
-        gsub,
-        gdef,
-        joiners,
-    };
-    let mcx = cx.match_cx(&lookup);
-
-    if effective_type(&lookup) == gsub_lt::REVERSE_CHAINED {
-        apply_reverse_chain(&parsed, glyphs, &mcx);
-        return;
-    }
-
-    let mut run = MatchRun::from_glyphs(glyphs);
+    let parsed = parse_lookup_subtables(lookup, lookup.lookup_type());
     // Run-level "would_apply" precheck. If no glyph in the run can
     // possibly trigger any subtable's primary coverage, the cursor
     // walk has nothing to do.
-    if !lookup_might_apply(&parsed, run.as_slice()) {
+    if parsed.is_empty() || !lookup_might_apply(&parsed, buf.glyphs()) {
         return;
     }
-
-    // Forward cursor walk: with the "digest" path the cursor only
-    // stops at glyphs in the union of the subtables' primary
-    // coverages. It falls back to visiting every position when a
-    // subtable's primary coverage isn't a single `Coverage` table
-    // (chain-context format 1/2).
-    //
-    // A subtable that matches but produces zero substitutions (common
-    // in Amiri rlig: a context with `SubstCount=0` is intentionally a
-    // "no-op match" that blocks later subtables at this cursor) still
-    // moves the cursor past its input.
+    let mcx = cx.match_cx(lookup);
+    // With the "digest" path the cursor only stops at glyphs in the
+    // union of the subtables' primary coverages. It falls back to
+    // visiting every position when a subtable's primary coverage
+    // isn't a single `Coverage` table (chain-context format 1/2).
     let use_digest = parsed_has_full_digest(&parsed);
-    let mut i = 0;
-    while i < glyphs.len() {
-        let g = run.get(i);
-        if (use_digest && !cursor_in_digest(&parsed, g.id)) || mcx.filter().is_skipped(g) {
-            i += 1;
+    buf.clear_output();
+    while let Some(&g) = buf.cur() {
+        let m = MatchGlyph::from(&g);
+        if (use_digest && !cursor_in_digest(&parsed, m.id))
+            || !buf.cur_in_mask()
+            || mcx.filter().is_skipped(m)
+        {
+            buf.next_glyph();
             continue;
         }
-        i = apply_parsed_lookup_at(
-            &cx,
-            &parsed,
-            &mcx,
-            glyphs,
-            &mut run,
-            i,
-            0,
-            alternate_index,
-            false,
-            budget,
-        )
-        .map_or(i + 1, |next| next.max(i + 1));
+        let (cursor, len) = (buf.cursor(), buf.len());
+        let applied =
+            apply_parsed_lookup_at(cx, &parsed, &mcx, buf, 0, alternate_index, false, budget);
+        // A subtable that matches but produces zero substitutions
+        // (common in Amiri rlig: a context with `SubstCount=0` is a
+        // "no-op match" that blocks later subtables at this cursor)
+        // still moves the cursor past its input. A walk that neither
+        // moved nor shrank the run steps on, so it always ends.
+        if !applied || (buf.cursor() <= cursor && buf.len() >= len) {
+            buf.next_glyph();
+        }
     }
+    buf.sync();
 }
 
-/// Applies a nested GSUB lookup at one position, for a contextual
-/// rule's lookup records. Returns `None` when the lookup did not
-/// apply. As in HarfBuzz's `recurse`, the nested lookup brings its own
-/// flags but keeps the outer feature's joiner handling, and the glyph
-/// at `at` is not checked against its flags.
+/// Applies a nested GSUB lookup at the cursor, for a contextual rule's
+/// lookup records. Returns `None` when the lookup did not apply. As
+/// in HarfBuzz's `recurse`, the nested lookup brings its own flags but
+/// keeps the outer feature's joiner handling, and the cursor glyph is
+/// not checked against its flags.
 ///
 /// `depth` is the recursion depth; we bail out at
 /// [`MAX_NESTED_DEPTH`] so a pathological font loop cannot overflow
@@ -223,13 +224,11 @@ pub(super) fn apply_gsub_lookup(
 fn apply_gsub_lookup_at(
     cx: &GsubCx<'_>,
     lookup_idx: u16,
-    glyphs: &mut Vec<Glyph>,
-    run: &mut MatchRun,
-    at: usize,
+    buf: &mut GsubBuffer,
     depth: u8,
     budget: &mut LookupBudget,
 ) -> Option<()> {
-    if depth >= MAX_NESTED_DEPTH || at >= glyphs.len() || !budget.take_nested_op() {
+    if depth >= MAX_NESTED_DEPTH || !buf.has_input() || !budget.take_nested_op() {
         return None;
     }
     let lookup = cx.gsub.lookup_list().get(lookup_idx)?;
@@ -238,52 +237,53 @@ fn apply_gsub_lookup_at(
     // Nested alternate lookups always pick index 0: feature
     // value-based selection is a top-level concept and does not
     // propagate into a recursed lookup.
-    apply_parsed_lookup_at(cx, &parsed, &mcx, glyphs, run, at, depth, 0, true, budget).map(|_| ())
+    apply_parsed_lookup_at(cx, &parsed, &mcx, buf, depth, 0, true, budget).then_some(())
 }
 
-/// A GSUB contextual subtable at `at`: matches the rule and runs its
-/// nested lookups, which spend `budget`. Returns where the walk
-/// continues (the end of the match, moved by any length change the
-/// nested lookups made).
-#[allow(clippy::too_many_arguments)]
+/// A GSUB contextual subtable at the cursor: matches the rule and runs
+/// its nested lookups, which spend `budget`, leaving the cursor at the
+/// end of the match. Returns whether a rule matched.
 pub(super) fn apply_gsub_context_at(
     cx: &GsubCx<'_>,
     ctx: &GsubContext<'_>,
     mcx: &MatchContext<'_>,
-    glyphs: &mut Vec<Glyph>,
-    run: &mut MatchRun,
-    at: usize,
+    buf: &mut GsubBuffer,
     depth: u8,
     budget: &mut LookupBudget,
-) -> Option<usize> {
-    let (m, records) = match ctx {
-        GsubContext::Format1(c) => c.matches(run.as_slice(), at, mcx)?,
-        GsubContext::Format2(c) => c.matches(run.as_slice(), at, mcx)?,
-        GsubContext::Format3(c) => (c.matches(run.as_slice(), at, mcx)?, c.lookups()),
+) -> bool {
+    let at = buf.cursor();
+    let found = match ctx {
+        GsubContext::Format1(c) => c.matches_in(&*buf, at, mcx, &mut ()),
+        GsubContext::Format2(c) => c.matches_in(&*buf, at, mcx, &mut ()),
+        GsubContext::Format3(c) => c
+            .matches_in(&*buf, at, mcx, &mut ())
+            .map(|m| (m, c.lookups())),
     };
-    Some(apply_nested_gsub_lookups(
-        cx, glyphs, run, m, records, depth, budget,
-    ))
+    let Some((m, records)) = found else {
+        return false;
+    };
+    apply_nested_gsub_lookups(cx, buf, m, records, depth, budget);
+    true
 }
 
-/// A GSUB chained-context subtable at `at`, like
+/// A GSUB chained-context subtable at the cursor, like
 /// [`apply_gsub_context_at`].
-#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_gsub_chain_context_at(
     cx: &GsubCx<'_>,
     chain: &ChainContextAny<'_>,
     mcx: &MatchContext<'_>,
-    glyphs: &mut Vec<Glyph>,
-    run: &mut MatchRun,
-    at: usize,
+    buf: &mut GsubBuffer,
     depth: u8,
     budget: &mut LookupBudget,
-) -> Option<usize> {
-    let (m, records) = match chain {
-        ChainContextAny::Format1(c) => c.matches(run.as_slice(), at, mcx)?,
-        ChainContextAny::Format2(c) => c.matches(run.as_slice(), at, mcx)?,
+) -> bool {
+    let at = buf.cursor();
+    let found = match chain {
+        ChainContextAny::Format1(c) => c.matches_in(&*buf, at, mcx, &mut ()),
+        ChainContextAny::Format2(c) => c.matches_in(&*buf, at, mcx, &mut ()),
         ChainContextAny::Format3(c) => {
-            let m = c.matches(run.as_slice(), at, mcx)?;
+            let Some(m) = c.matches_in(&*buf, at, mcx, &mut ()) else {
+                return false;
+            };
             let records: Vec<SequenceLookupRecord> = c
                 .substitutions()
                 .iter()
@@ -292,80 +292,43 @@ pub(super) fn apply_gsub_chain_context_at(
                     lookup_list_index: r.lookup_list_index,
                 })
                 .collect();
-            return Some(apply_nested_gsub_lookups(
-                cx, glyphs, run, m, &records, depth, budget,
-            ));
+            apply_nested_gsub_lookups(cx, buf, m, &records, depth, budget);
+            return true;
         }
     };
-    Some(apply_nested_gsub_lookups(
-        cx, glyphs, run, m, records, depth, budget,
-    ))
+    let Some((m, records)) = found else {
+        return false;
+    };
+    apply_nested_gsub_lookups(cx, buf, m, records, depth, budget);
+    true
 }
 
 /// Runs a matched rule's lookup records at their match positions,
-/// HarfBuzz's `apply_lookup` (see [`apply_nested`]). A record's
-/// sequence index picks one of the matched input glyphs, so glyphs
-/// the rule skipped never count, and the positions follow the length
-/// changes earlier records make. Returns where the match now ends.
+/// HarfBuzz's `apply_lookup` (see [`apply_nested`]): the cursor moves
+/// to each record's glyph, the nested lookup applies there, and the
+/// positions follow the length changes it makes. A record's sequence
+/// index picks one of the matched input glyphs, so glyphs the rule
+/// skipped never count. The cursor ends at the end of the match.
 /// Records past the end of `budget` do not run.
 fn apply_nested_gsub_lookups(
     cx: &GsubCx<'_>,
-    glyphs: &mut Vec<Glyph>,
-    run: &mut MatchRun,
+    buf: &mut GsubBuffer,
     mut m: InputMatch,
     records: &[SequenceLookupRecord],
     depth: u8,
     budget: &mut LookupBudget,
-) -> usize {
-    let run_len = glyphs.len();
-    apply_nested(&mut m.positions, m.end, run_len, records, |lookup, at| {
+) {
+    let run_len = buf.len();
+    let end = apply_nested(&mut m.positions, m.end, run_len, records, |lookup, at| {
         if budget.exhausted() {
             return None;
         }
-        let before = glyphs.len() as isize;
-        apply_gsub_lookup_at(cx, lookup, glyphs, run, at, depth, budget)?;
-        Some(glyphs.len() as isize - before)
-    })
-}
-
-/// Replaces `glyphs[at]` with the given sequence in place. Cluster
-/// is copied from the original glyph so every expanded sub-glyph
-/// still points back to its source codepoint. Returns the output
-/// length when `seq` is non-empty, `None` on a zero-length sequence
-/// (which the spec forbids but we treat as a safe no-op).
-///
-/// Also returns `None`, leaving the run untouched, when `at` is past
-/// the run or `budget` has no room for the extra glyphs (see
-/// [`LookupBudget`]).
-pub(super) fn expand_glyph_in_place(
-    glyphs: &mut Vec<Glyph>,
-    at: usize,
-    seq: &[u16],
-    budget: &mut LookupBudget,
-) -> Option<usize> {
-    let (&first, rest) = seq.split_first()?;
-    if at >= glyphs.len() || !budget.take_growth(rest.len()) {
-        return None;
-    }
-    let source = glyphs.get_mut(at)?;
-    // Inherit the source glyph's shaper-internal state so Indic
-    // `indic_position` and unicode-property bits survive a
-    // multiple-sub split. Rustybuzz does the same via its info mask.
-    substitute_glyph(source, first);
-    let source = *source;
-    let inserted = rest.iter().map(|&out_gid| {
-        let mut g = Glyph::new(u32::from(out_gid), source.cluster);
-        g.unicode_props = source.unicode_props;
-        g.indic_position = source.indic_position;
-        g.char_class = source.char_class;
-        g.combining_class = source.combining_class;
-        g
+        buf.move_to(at);
+        let before = buf.len() as isize;
+        apply_gsub_lookup_at(cx, lookup, buf, depth, budget)?;
+        Some(buf.len() as isize - before)
     });
-    let after = at + 1;
-    glyphs.splice(after..after, inserted);
-    // Component numbering for GPOS mark attachment (see `lig`).
-    lig::record_multiple(glyphs, at, seq.len());
-    Some(seq.len())
+    buf.move_to(end);
 }
 
 /// Writes a GSUB substitution result into `glyph`.
@@ -398,17 +361,19 @@ fn apply_reverse_chain(
             _ => None,
         })
         .collect();
-    let mut run = MatchRun::from_glyphs(glyphs);
+    if subtables.is_empty() {
+        return;
+    }
     for i in (0..glyphs.len()).rev() {
-        if mcx.filter().is_skipped(run.get(i)) {
+        if mcx.filter().is_skipped(MatchGlyph::from(&glyphs[i])) {
             continue;
         }
+        let run = GlyphSlice(glyphs);
         let substitute = subtables
             .iter()
-            .find_map(|rc| rc.apply_at(run.as_slice(), i, mcx));
+            .find_map(|rc| rc.apply_at_in(&run, i, mcx, &mut ()));
         if let (Some(out), Some(glyph)) = (substitute, glyphs.get_mut(i)) {
             substitute_glyph(glyph, out);
-            run.sync(i, glyph);
         }
     }
 }

@@ -10,11 +10,6 @@ use crate::tables::layout::{GlyphClasses, LOOKUP_FLAG_IGNORE_BASE_GLYPHS};
 
 const MC: ClusterLevel = ClusterLevel::MonotoneCharacters;
 
-/// A GSUB substitution callback that only swaps the glyph id.
-fn swap_id(g: &mut Glyph, gid: u16) {
-    g.glyph_id = u32::from(gid);
-}
-
 fn ignorable(props: u16) -> Glyph {
     let mut g = glyph(9, 0);
     g.unicode_props = unicode_prop::DEFAULT_IGNORABLE | props;
@@ -58,7 +53,7 @@ fn mark_to_ligature_uses_the_component_recorded_at_ligation() {
     // without having been inside it goes on the last component.
     let mut glyphs = vec![glyph(4, 0), glyph(2, 0), glyph(5, 0), glyph(2, 0)];
     let classes = GlyphClasses::new(Some(&gdef));
-    lig::ligate(&mut glyphs, &[0, 2], 1, &classes, swap_id, MC);
+    lig::ligate_glyphs(&mut glyphs, &[0, 2], 1, &classes, MC);
     assert_eq!(glyphs.len(), 3);
     glyphs[0].x_advance = 800;
     let slots = run_lookup(
@@ -136,7 +131,7 @@ fn mark_to_mark_stacks_only_marks_of_one_component() {
     // on component 2, so m3 does not stack on m2.
     let mut glyphs = vec![glyph(4, 0), glyph(2, 0), glyph(5, 0), glyph(3, 0)];
     let classes = GlyphClasses::new(Some(&gdef));
-    lig::ligate(&mut glyphs, &[0, 2], 1, &classes, swap_id, MC);
+    lig::ligate_glyphs(&mut glyphs, &[0, 2], 1, &classes, MC);
     let slots = run_lookup(
         &subs,
         &mut glyphs,

@@ -123,6 +123,7 @@ mod features;
 mod glyph_props;
 mod gpos;
 mod gsub;
+mod gsub_buffer;
 mod gsub_parsed;
 mod hangul;
 mod ignorables;

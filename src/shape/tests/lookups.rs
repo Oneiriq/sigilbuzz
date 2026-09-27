@@ -4,7 +4,8 @@
 
 use super::*;
 use crate::buffer::{unicode_prop, Glyph};
-use crate::shape::gsub::{expand_glyph_in_place, substitute_glyph};
+use crate::shape::gsub::substitute_glyph;
+use crate::shape::gsub_buffer::GsubBuffer;
 use crate::shape::segment::remap_segments;
 use crate::tables::gsub::ChainContextAny;
 use crate::tables::layout::Joiners;
@@ -289,11 +290,11 @@ fn substitute_glyph_clears_only_the_ignorable_bit() {
 fn multiple_substitution_marks_every_output_glyph_substituted() {
     let mut g = Glyph::new(0, 2);
     g.unicode_props = unicode_prop::DEFAULT_IGNORABLE | unicode_prop::NON_JOINER;
-    let mut glyphs = alloc::vec![Glyph::new(1, 0), g];
-    assert_eq!(
-        expand_glyph_in_place(&mut glyphs, 1, &[5, 6], &mut LookupBudget::for_run(&[])),
-        Some(2)
-    );
+    let mut buf = GsubBuffer::new(alloc::vec![Glyph::new(1, 0), g], None);
+    buf.clear_output();
+    buf.next_glyph();
+    lig::multiply(&mut buf, &[5, 6]);
+    let glyphs = buf.into_glyphs();
     assert_eq!(glyphs.len(), 3);
     for (i, out) in glyphs[1..].iter().enumerate() {
         // The low bits are the Unicode properties; the ligature

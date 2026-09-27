@@ -194,6 +194,15 @@ Changed:
 - CI and the pre-push hook lint and test the whole workspace. They used to cover only
   the root crate. CI also checks the minimum Rust version, including every `no_std`
   build.
+- GSUB applies each lookup in one pass through HarfBuzz's output-buffer model
+  (`out_info`, `next_glyph`, `replace_glyphs`, `output_glyph`, `move_to`, `sync`), so
+  ligature and multiple substitutions take time linear in the run. They used to edit the
+  glyph vector in place and resync, which was quadratic: 20,000 "fi" ligatures in Open
+  Sans took 8 seconds in a debug build and now take 0.16 seconds. Ligation also follows
+  HarfBuzz 14.5.0 in two details: the later pieces of a multiple substitution add no
+  component to a ligature they join (`_hb_glyph_info_get_lig_num_comps_in_ligation`),
+  and a ligature whose first component is a nonspacing mark stops being a mark. Once
+  all seven ligature ids are live, new ligatures take them in turn.
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,
