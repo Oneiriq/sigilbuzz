@@ -276,3 +276,80 @@ fn nested_lookups_track_length_changes() {
     assert_eq!(positions.as_slice(), [0, 1, 2, 3]);
     assert_eq!(end, 4);
 }
+
+/// A run whose glyphs carry a feature mask bit and a syllable.
+struct Run(Vec<(MatchGlyph, bool, u8)>);
+
+impl MatchSeq for Run {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn glyph(&self, i: usize) -> Option<MatchGlyph> {
+        self.0.get(i).map(|g| g.0)
+    }
+
+    fn in_mask(&self, i: usize) -> bool {
+        self.0.get(i).is_some_and(|g| g.1)
+    }
+
+    fn syllable(&self, i: usize) -> u8 {
+        self.0.get(i).map_or(0, |g| g.2)
+    }
+}
+
+#[test]
+fn input_walks_stop_at_a_glyph_outside_the_feature_mask() {
+    // `matcher_t::may_match`: a masked-off glyph does not match, and
+    // the walk gives up there; a context walk does not look.
+    let run = Run(alloc::vec![
+        (MatchGlyph::new(1), true, 0),
+        (MatchGlyph::new(2), false, 0),
+        (MatchGlyph::new(3), true, 0),
+    ]);
+    let cx = MatchContext::plain();
+    assert_eq!(
+        match_input_in(&run, 0, 1, &cx, |_, _| true).err(),
+        Some(Some(2))
+    );
+    assert!(match_lookahead_in(&run, 0, 1, 1, &cx, |_, g| g == 2).is_ok());
+    // A default ignorable outside the mask is passed over instead.
+    let run = Run(alloc::vec![
+        (MatchGlyph::new(1), true, 0),
+        (ignorable(9, 0), false, 0),
+        (MatchGlyph::new(3), true, 0),
+    ]);
+    let m = match_input_in(&run, 0, 1, &cx, |_, g| g == 3).ok();
+    assert_eq!(m.map(|m| m.end), Some(3));
+}
+
+#[test]
+fn per_syllable_walks_stay_in_the_cursors_syllable() {
+    // Glyphs 0 and 1 in syllable 0x10, glyph 2 in 0x20, glyph 3 in no
+    // syllable. HarfBuzz's matcher only stops at glyphs of the cursor
+    // glyph's syllable when the feature is per syllable, in input,
+    // backtrack, and lookahead walks alike.
+    let run = Run(alloc::vec![
+        (MatchGlyph::new(1), true, 0x10),
+        (MatchGlyph::new(2), true, 0x10),
+        (MatchGlyph::new(3), true, 0x20),
+        (MatchGlyph::new(4), true, 0),
+    ]);
+    let per = MatchContext::plain().with_per_syllable(true);
+    let any = MatchContext::plain();
+    assert!(match_input_in(&run, 0, 1, &per, |_, _| true).is_ok());
+    assert_eq!(
+        match_input_in(&run, 0, 2, &per, |_, _| true).err(),
+        Some(Some(3))
+    );
+    assert!(match_input_in(&run, 0, 2, &any, |_, _| true).is_ok());
+    assert!(match_lookahead_in(&run, 0, 2, 1, &per, |_, _| true).is_err());
+    assert!(match_backtrack_in(&run, 2, 1, &per, |_, _| true).is_err());
+    assert!(match_backtrack_in(&run, 2, 1, &any, |_, _| true).is_ok());
+    // A cursor in no syllable is not restricted.
+    assert!(match_backtrack_in(&run, 3, 1, &per, |_, _| true).is_ok());
+    // GPOS walks ignore the setting.
+    let gpos = MatchContext::new(MatchFilter::none(), LayoutTable::Gpos, Joiners::AUTO)
+        .with_per_syllable(true);
+    assert!(match_input_in(&run, 0, 2, &gpos, |_, _| true).is_ok());
+}

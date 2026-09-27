@@ -99,6 +99,9 @@ pub fn shape_indic(
     // codepoint indices it covers (start, end exclusive) so the
     // reorder phase can index into `glyphs` without re-scanning.
     let syllables = segment_syllables(codepoints, config);
+    // Per-syllable features match within these (HarfBuzz's syllable()).
+    let numbers = syllables.iter().map(|s| (s.start, s.end, s.kind as u8));
+    crate::shape::number_syllables(glyphs, numbers);
     // The cluster each code point starts, for final reordering, read
     // while glyphs are still one per code point.
     let byte_offsets = code_point_clusters(codepoints, glyphs);

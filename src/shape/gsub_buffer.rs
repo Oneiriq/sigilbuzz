@@ -390,6 +390,10 @@ impl MatchSeq for GsubBuffer {
     fn in_mask(&self, i: usize) -> bool {
         self.in_mask_at(i)
     }
+
+    fn syllable(&self, i: usize) -> u8 {
+        self.get(i).map_or(0, |g| g.syllable)
+    }
 }
 
 #[cfg(test)]

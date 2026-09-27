@@ -56,8 +56,8 @@ impl Direction {
 /// combining marks).
 ///
 /// In addition to the rendered fields, `Glyph` carries shaper-internal
-/// scratch fields (`unicode_props`, `indic_position`, `char_class`, and
-/// `combining_class`) that the shaping stages use to track per-glyph
+/// scratch fields (`unicode_props`, `indic_position`, `char_class`,
+/// `combining_class`, and `syllable`) that the shaping stages use to track per-glyph
 /// state across GSUB passes. Renderers and
 /// most callers can ignore them; they are public so the shaper
 /// modules inside this crate can round-trip state through `Vec<Glyph>`
@@ -105,6 +105,14 @@ pub struct Glyph {
     /// reordering and fallback positioning adjust it. Zero for every
     /// other glyph.
     pub combining_class: u8,
+    /// Shaper-internal syllable of the glyph, HarfBuzz's `syllable()`
+    /// byte: the Indic, Khmer, Myanmar, and USE shapers number their
+    /// syllables (a serial in the high four bits, the syllable type in
+    /// the low four) and every glyph a syllable produces carries its
+    /// number through GSUB. The features HarfBuzz registers with
+    /// `F_PER_SYLLABLE` only match within one syllable. Zero for a
+    /// glyph in no syllable.
+    pub syllable: u8,
 }
 
 /// Bits packed into [`Glyph::unicode_props`].
@@ -189,6 +197,7 @@ impl Glyph {
             indic_position: IndicPosition::Start as u8,
             char_class: 0,
             combining_class: 0,
+            syllable: 0,
         }
     }
 }

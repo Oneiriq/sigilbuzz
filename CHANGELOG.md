@@ -76,6 +76,14 @@ Added:
 - `ClassDef::empty` and `ClassDef::parse_at`.
 - `fuzz/`: cargo-fuzz targets for every part of the workspace that reads untrusted
   input. See [fuzz/README.md](fuzz/README.md).
+- Per-syllable matching, HarfBuzz's `F_PER_SYLLABLE`: the Indic, Khmer, Myanmar and USE
+  shapers number their syllables in the new `Glyph::syllable` field (HarfBuzz's
+  `syllable()` byte), and the features HarfBuzz registers per syllable (`locl`, `ccmp`
+  and the syllable-forming features of each shaper) only match glyphs of the cursor's
+  syllable, so a conjunct or ligature no longer forms across a syllable boundary.
+  `MatchContext::with_per_syllable` and `MatchContext::per_syllable` expose the setting
+  to the lookup matchers. `Glyph` gains a public field, so code that builds a `Glyph`
+  with a struct literal must add `syllable: 0`.
 
 Changed:
 

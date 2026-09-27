@@ -138,6 +138,7 @@ mod required;
 mod rotate;
 mod segment;
 mod shaper;
+mod syllables;
 mod thai;
 
 use aat::apply_kerx_format4;
@@ -151,6 +152,7 @@ use gsub_parsed::filter_for_lookup;
 pub(crate) use joiners::JoinerTable;
 pub use pipeline::shape;
 use segment::ProcessedSegment;
+pub(crate) use syllables::number_syllables;
 
 use crate::buffer::Glyph;
 use crate::tables::gpos::resolve_variation_delta;
