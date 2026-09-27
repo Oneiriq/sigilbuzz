@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 use super::GlyphInfo;
 use crate::buffer::Glyph;
 use crate::shape::{Feature, SyllabicGsub};
-use crate::tables::layout::skip_iter::MatchGlyph;
+use crate::tables::layout::skip_iter::match_prop;
 use crate::tables::layout::Joiners;
 
 /// HarfBuzz's feature flags (`hb_ot_map_feature_flags_t` in
@@ -49,6 +49,11 @@ impl FeatureFlags {
     /// Both flag sets.
     pub(crate) const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
+    }
+
+    /// These flags without those of `other`.
+    pub(crate) const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
     }
 
     /// True when every flag of `other` is set.
@@ -213,6 +218,13 @@ struct Slot {
     info: GlyphInfo,
     saved: [u8; 3],
     last_id: u32,
+    last_props: u16,
+}
+
+/// The glyph's ligated and multiplied bits, which a ligature or a
+/// multiple substitution sets.
+fn substitution_props(g: &Glyph) -> u16 {
+    g.unicode_props & (match_prop::LIGATED | match_prop::MULTIPLIED)
 }
 
 /// The largest slot index the three borrowed bytes hold.
@@ -284,6 +296,7 @@ pub(crate) fn apply_stage(
                 info,
                 saved,
                 last_id: g.glyph_id,
+                last_props: substitution_props(g),
             }
         })
         .collect();
@@ -313,12 +326,16 @@ pub(crate) fn apply_stage(
                     info: GlyphInfo::default(),
                     saved: [0; 3],
                     last_id: g.glyph_id,
+                    last_props: substitution_props(g),
                 });
-                let m = MatchGlyph::from(&*g);
-                if g.glyph_id != slot.last_id || m.is_ligated() || m.is_multiplied() {
+                // A new glyph id, or a glyph a ligature or multiple
+                // substitution just produced.
+                let props = substitution_props(g);
+                if g.glyph_id != slot.last_id || props != slot.last_props {
                     slot.info.substituted = true;
                 }
                 slot.last_id = g.glyph_id;
+                slot.last_props = props;
                 stash(g, i);
                 slot
             })

@@ -66,7 +66,7 @@ mod syllable;
 
 use alloc::vec::Vec;
 
-use reorder::{record_pref, reorder_pre_base, tag_syllables};
+use reorder::{record_pref, record_rphf, reorder_pre_base, rphf_info, tag_syllables};
 pub use scripts::{
     shape_balinese, shape_brahmi, shape_buginese, shape_cham, shape_hangul, shape_khojki,
     shape_lepcha, shape_limbu, shape_modi, shape_myanmar, shape_nko, shape_nko_in_context,
@@ -75,7 +75,8 @@ pub use scripts::{
 pub(crate) use syllable::{segment_syllables, Syllable, SyllableKind};
 
 use crate::buffer::{ClusterLevel, Glyph};
-use crate::shape::{apply_gsub_feature_in_scripts, JoinerTable};
+use crate::ot::syllabic::stage::{apply_stage, FeatureFlags, StageFeature};
+use crate::shape::{apply_gsub_feature_in_scripts, JoinerTable, SyllabicGsub};
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 
@@ -254,12 +255,18 @@ pub(crate) fn shape_use(
     let syllables = segment_syllables(codepoints);
 
     // 2. Basic features, on the logical order. The glyphs carry their
-    //    syllable and reorder category through GSUB, and `pref` marks
-    //    the first glyph it substitutes in each syllable as pre-base
-    //    (HarfBuzz's `record_pref_use`).
+    //    syllable and reorder category through GSUB. `rphf` applies
+    //    only to the first glyphs of each syllable and marks the glyph
+    //    it substitutes as a repha (HarfBuzz's `setup_rphf_mask` and
+    //    `record_rphf_use`), and `pref` marks the first glyph it
+    //    substitutes in each syllable as pre-base (`record_pref_use`).
     let reorder = reorder_prebase && tag_syllables(glyphs, codepoints, &syllables);
     if let Some(gsub) = gsub {
         for tag in basic_features {
+            if reorder && **tag == *b"rphf" {
+                apply_rphf(gsub, gdef, glyphs, script_priority);
+                continue;
+            }
             let pref = reorder && **tag == *b"pref";
             let before: Vec<u32> = if pref {
                 glyphs.iter().map(|g| g.glyph_id).collect()
@@ -286,6 +293,46 @@ pub(crate) fn shape_use(
             apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority, joiners);
         }
     }
+}
+
+/// HarfBuzz's flags for the USE `rphf` feature (`collect_features_use`).
+pub(crate) const USE_RPHF_FLAGS: FeatureFlags =
+    FeatureFlags::MANUAL_ZWJ.union(FeatureFlags::PER_SYLLABLE);
+
+/// HarfBuzz's USE `rphf` stage (`collect_features_use`): `rphf`,
+/// applied only to the glyphs `setup_rphf_mask` marked, and then
+/// `record_rphf_use`, which makes the glyph it substituted a repha.
+/// HarfBuzz clears the substitution flags before the stage, so only
+/// what `rphf` itself substituted counts.
+///
+/// HarfBuzz flags `rphf` `F_MANUAL_ZWJ | F_PER_SYLLABLE`
+/// ([`USE_RPHF_FLAGS`]). The per-syllable part is left out here:
+/// sigilbuzz's USE syllables come from a simpler grammar than
+/// HarfBuzz's `hb-ot-shaper-use-machine.rl`, and matching inside them
+/// would cut a lookup's context where HarfBuzz does not.
+fn apply_rphf(
+    gsub: &Gsub<'_>,
+    gdef: Option<&Gdef<'_>>,
+    glyphs: &mut Vec<Glyph>,
+    script_priority: &[[u8; 4]],
+) {
+    const RPHF: u32 = 1;
+    let mut info = rphf_info(glyphs, RPHF);
+    let mut runner = SyllabicGsub::new(gsub, gdef, glyphs);
+    let feature = StageFeature {
+        tag: *b"rphf",
+        mask: RPHF,
+        flags: USE_RPHF_FLAGS.without(FeatureFlags::PER_SYLLABLE),
+    };
+    apply_stage(
+        &mut runner,
+        script_priority,
+        &[feature],
+        &[],
+        glyphs,
+        &mut info,
+    );
+    record_rphf(glyphs, &info);
 }
 
 #[cfg(test)]

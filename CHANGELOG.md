@@ -223,6 +223,14 @@ Changed:
   4,826), at every cluster level. The 7 are HarfBuzz's vowel constraints, which insert a
   dotted circle between an independent vowel and a vowel sign that would look like
   another vowel, and sigilbuzz does not do that yet. Sinhala keeps the earlier Indic pass.
+- The Universal Shaping Engine moves a repha as HarfBuzz does (`reorder_syllable_use`
+  in `hb-ot-shaper-use.cc`). `rphf` only applies to the first three glyphs of a
+  syllable (the first one when it is a repha character), the glyph it substitutes
+  becomes a repha, and after the basic features the repha moves to just before the
+  first vowel sign, medial, final or halant that did not ligate, or to the end of the
+  syllable, merging the clusters it passes. Tirhuta and Modi reph forms used to stay in
+  front of the base. HarfBuzz also matches `rphf` one syllable at a time. sigilbuzz does
+  not yet, because its USE syllables still come from a simpler grammar than HarfBuzz's.
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,
