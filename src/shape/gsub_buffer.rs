@@ -168,8 +168,7 @@ impl GsubBuffer {
     }
 
     /// True when the feature is on at logical position `i`.
-    #[cfg(test)]
-    fn in_mask_at(&self, i: usize) -> bool {
+    pub(super) fn in_mask_at(&self, i: usize) -> bool {
         self.mask
             .as_ref()
             .map_or(true, |m| m.get(self.slot(i)).copied().unwrap_or(false))
@@ -387,19 +386,9 @@ impl MatchSeq for GsubBuffer {
     fn glyph(&self, i: usize) -> Option<MatchGlyph> {
         self.get(i).map(MatchGlyph::from)
     }
-}
 
-/// A slice of glyphs as the matching rules read it, for walks over a
-/// run that does not change length (reverse chaining, GPOS).
-pub(super) struct GlyphSlice<'a>(pub(super) &'a [Glyph]);
-
-impl MatchSeq for GlyphSlice<'_> {
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    fn glyph(&self, i: usize) -> Option<MatchGlyph> {
-        self.0.get(i).map(MatchGlyph::from)
+    fn in_mask(&self, i: usize) -> bool {
+        self.in_mask_at(i)
     }
 }
 

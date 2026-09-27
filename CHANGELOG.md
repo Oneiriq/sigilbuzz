@@ -345,6 +345,15 @@ Output that differed from HarfBuzz:
   `Sequence::apply` does, and the glyph's cluster merges into a neighbor the way
   `delete_glyph` merges it. It used to leave the glyph in place. Noto Sans Lepcha
   deletes vowel signs this way.
+- A GSUB feature that only some glyphs carry (the Arabic, Mongolian and N'Ko positional
+  forms, Indic `half`, `rtlm`) checks its mask at every input glyph a rule matches, as
+  HarfBuzz's skipping iterator does (`matcher_t::may_match`), not only at the cursor:
+  a ligature or contextual rule no longer matches across a glyph the feature is off at.
+  Contextual lookups of such features used to run over the whole run; they now start
+  only where the feature is on. The mask moves with its glyph through all of the
+  feature's lookups, where it used to stay at its index when an earlier lookup changed
+  the run's length. Every GPOS feature applies to every glyph, as in HarfBuzz, so GPOS
+  matching has no mask to check.
 
 Removed:
 
