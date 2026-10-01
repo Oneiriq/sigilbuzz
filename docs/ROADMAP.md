@@ -33,9 +33,8 @@ These are smaller pieces that are not scheduled yet.
   On 1,992 USE test strings, 1,519 shape as HarfBuzz 14.5.0 does.
 - Sinhala runs the earlier Indic pass. HarfBuzz shapes it with the Universal Shaping
   Engine.
-- The Indic shaper does not insert the dotted circle HarfBuzz adds for its vowel
-  constraints (an independent vowel followed by a vowel sign that would read as another
-  vowel).
+- Khudawadi and Takri have no shaper. HarfBuzz shapes them with the Universal Shaping
+  Engine, vowel constraints included.
 - Hangul in a buffer whose script is not Hangul is normalized one segment at a time,
   and `calt` is off for it.
 

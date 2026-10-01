@@ -147,6 +147,22 @@ impl Shaper {
         }
     }
 
+    /// Whether the shaper's `preprocess_text` runs the vowel constraints
+    /// (`_hb_preprocess_text_vowel_constraints`, see the
+    /// `vowel_constraints` module).
+    pub(super) const fn vowel_constraints(self) -> bool {
+        match self {
+            Self::Indic | Self::Use => true,
+            Self::Default
+            | Self::Arabic
+            | Self::Hebrew
+            | Self::Thai
+            | Self::Hangul
+            | Self::Khmer
+            | Self::Myanmar => false,
+        }
+    }
+
     /// The shaper's `zero_width_marks`.
     pub(super) const fn mark_zeroing(self) -> MarkZeroing {
         match self {
@@ -190,5 +206,9 @@ mod tests {
         assert_eq!(Shaper::Hangul.mark_zeroing(), MarkZeroing::None);
         assert_eq!(Shaper::Use.mark_zeroing(), MarkZeroing::Early);
         assert_eq!(Shaper::Thai.mark_zeroing(), MarkZeroing::Late);
+        assert!(Shaper::Indic.vowel_constraints());
+        assert!(Shaper::Use.vowel_constraints());
+        assert!(!Shaper::Khmer.vowel_constraints());
+        assert!(!Shaper::Myanmar.vowel_constraints());
     }
 }

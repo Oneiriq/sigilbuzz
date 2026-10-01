@@ -108,6 +108,17 @@ sigilbuzz ships the files unmodified. The OFL text lives in the upstream reposit
           --no-hinting --drop-tables+=STAT,MVAR,DSIG,BASE,vhea,vmtx \
           --output-file=NotoSansKR-HangulTone-Subset.ttf
 
+- `NotoSansDevanagari-NoGDEF-Subset.ttf`. A 2 KB subset of
+  `NotoSansDevanagari-Regular.ttf` above without its GDEF table, for
+  `tests/vowel_constraints_parity.rs`: with no GDEF glyph classes, HarfBuzz synthesizes
+  them from each character's General_Category. It keeps the space, U+0905, U+0915,
+  U+0945, and U+25CC. Same upstream and license as the full font. Built with fontTools:
+
+      python3 -m fontTools.subset NotoSansDevanagari-Regular.ttf \
+          --unicodes="U+0020,U+0905,U+0915,U+0945,U+25CC" --layout-features='*' \
+          --no-hinting --drop-tables+=GDEF,DSIG,STAT,MVAR,BASE \
+          --output-file=NotoSansDevanagari-NoGDEF-Subset.ttf
+
 ## CFF subsetting fixtures
 
 Real CFF1 and CFF2 fonts used by the round-trip tests in
