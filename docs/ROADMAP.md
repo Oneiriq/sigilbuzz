@@ -43,9 +43,6 @@ These are smaller pieces that are not scheduled yet.
   where HarfBuzz runs them in one stage. Glyphs match, but with
   `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT` some unsafe-to-concat flags differ (19 of 350
   Tai Tham test strings with Noto Sans Tai Tham, whose lookups are under `DFLT` only).
-- Unsafe-to-concat flags of a context or chained context rule set with more than four
-  rules, and of some ligature and mark lookups, differ from HarfBuzz's, which marks
-  them on its fast paths (18 of 1,992 USE test strings).
 
 ## Known bugs
 

@@ -376,6 +376,16 @@ Changed:
   forward runs from their start and backward runs from their end, each walk following
   at most 64 links, as HarfBuzz does. One Lepcha and one Tibetan test string now match
   HarfBuzz in positions, and so do all marks of `tests/fixtures/attach_chain.ttf`.
+- With `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT`, a context or chained context rule set
+  of more than four rules follows HarfBuzz's fast path (`RuleSet::apply` and
+  `ChainRuleSet::apply`): it reads the one or two glyphs after the cursor first, and a
+  rule they rule out marks the cursor through that glyph unsafe to concatenate. Once a
+  rule or a ligature of a set of two or more matches, the mark for the rules passed over
+  starts at the end of the match, where HarfBuzz leaves the cursor, instead of at the
+  cursor. All 1,992 USE test strings, all 2,100 strings of six more USE scripts, and
+  all Indic and Khmer test strings now match HarfBuzz 14.5.0 in glyph flags with that
+  buffer flag at every cluster level (before: 1,973 to 1,974, 2,077 to 2,081, and 9,621
+  to 9,638 of 9,666).
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,

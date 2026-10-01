@@ -35,6 +35,7 @@
 
 mod chained;
 mod contextual;
+mod fast_path;
 mod matchers;
 
 use alloc::collections::BTreeMap;
