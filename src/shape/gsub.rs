@@ -94,7 +94,12 @@ pub(super) fn apply_gsub_lookups_masked(
     budget: &mut LookupBudget,
 ) {
     let cx = GsubCx { gsub, gdef, flags };
-    let mut buf = GsubBuffer::new(core::mem::take(glyphs), Some(mask));
+    let mut buf = GsubBuffer::new(
+        core::mem::take(glyphs),
+        Some(mask),
+        gsub.cluster_level(),
+        gsub.unsafe_to_concat(),
+    );
     for &index in lookups {
         if let Some(lookup) = gsub.lookup_list().get(index) {
             apply_lookup_to_buffer(&cx, &lookup, &mut buf, 0, budget);
@@ -133,7 +138,12 @@ pub(super) fn apply_gsub_lookup(
         return;
     };
     let cx = GsubCx { gsub, gdef, flags };
-    let mut buf = GsubBuffer::new(core::mem::take(glyphs), None);
+    let mut buf = GsubBuffer::new(
+        core::mem::take(glyphs),
+        None,
+        gsub.cluster_level(),
+        gsub.unsafe_to_concat(),
+    );
     apply_lookup_to_buffer(&cx, &lookup, &mut buf, alternate_index, budget);
     *glyphs = buf.into_glyphs();
 }
@@ -239,13 +249,15 @@ pub(super) fn apply_gsub_context_at(
     budget: &mut LookupBudget,
 ) -> bool {
     let at = buf.cursor();
+    let mut ops = buf.take_flag_ops();
     let found = match ctx {
-        GsubContext::Format1(c) => c.matches_in(&*buf, at, mcx, &mut ()),
-        GsubContext::Format2(c) => c.matches_in(&*buf, at, mcx, &mut ()),
+        GsubContext::Format1(c) => c.matches_in(&*buf, at, mcx, &mut ops),
+        GsubContext::Format2(c) => c.matches_in(&*buf, at, mcx, &mut ops),
         GsubContext::Format3(c) => c
-            .matches_in(&*buf, at, mcx, &mut ())
+            .matches_in(&*buf, at, mcx, &mut ops)
             .map(|m| (m, c.lookups())),
     };
+    buf.apply_flag_ops(ops);
     let Some((m, records)) = found else {
         return false;
     };
@@ -264,11 +276,14 @@ pub(super) fn apply_gsub_chain_context_at(
     budget: &mut LookupBudget,
 ) -> bool {
     let at = buf.cursor();
+    let mut ops = buf.take_flag_ops();
     let found = match chain {
-        ChainContextAny::Format1(c) => c.matches_in(&*buf, at, mcx, &mut ()),
-        ChainContextAny::Format2(c) => c.matches_in(&*buf, at, mcx, &mut ()),
+        ChainContextAny::Format1(c) => c.matches_in(&*buf, at, mcx, &mut ops),
+        ChainContextAny::Format2(c) => c.matches_in(&*buf, at, mcx, &mut ops),
         ChainContextAny::Format3(c) => {
-            let Some(m) = c.matches_in(&*buf, at, mcx, &mut ()) else {
+            let found = c.matches_in(&*buf, at, mcx, &mut ops);
+            buf.apply_flag_ops(ops);
+            let Some(m) = found else {
                 return false;
             };
             let records: Vec<SequenceLookupRecord> = c
@@ -283,6 +298,7 @@ pub(super) fn apply_gsub_chain_context_at(
             return true;
         }
     };
+    buf.apply_flag_ops(ops);
     let Some((m, records)) = found else {
         return false;
     };
@@ -359,9 +375,11 @@ fn apply_reverse_chain(
         if !buf.in_mask_at(i) || mcx.filter().is_skipped(MatchGlyph::from(g)) {
             continue;
         }
+        let mut ops = buf.take_flag_ops();
         let substitute = subtables
             .iter()
-            .find_map(|rc| rc.apply_at_in(&*buf, i, mcx, &mut ()));
+            .find_map(|rc| rc.apply_at_in(&*buf, i, mcx, &mut ops));
+        buf.apply_flag_ops(ops);
         if let (Some(out), Some(glyph)) = (substitute, buf.get_mut(i)) {
             substitute_glyph(glyph, out);
         }

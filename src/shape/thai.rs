@@ -69,13 +69,13 @@ pub(super) fn preprocess(
         }
         if start < i {
             // Move NIKHAHIT to the front of the marks it follows.
-            cluster::merge_clusters(glyphs, start, end, level);
+            cluster::merge_out_clusters(glyphs, start, end, level);
             cps[start..=i].rotate_right(1);
             glyphs[start..=i].rotate_right(1);
             mirrored[start..=i].rotate_right(1);
         }
         if start > 0 {
-            cluster::merge_grapheme_clusters(glyphs, start - 1, end, level);
+            cluster::merge_out_grapheme_clusters(glyphs, start - 1, end, level);
         }
         i = end;
     }

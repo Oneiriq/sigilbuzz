@@ -13,9 +13,8 @@ use super::Buffer;
 /// A set of bits combined with `|`. The values are HarfBuzz's, so
 /// [`Self::bits`] can be handed to or taken from HarfBuzz code
 /// unchanged. Only the flags sigilbuzz honors are defined; HarfBuzz's
-/// `VERIFY`, `PRODUCE_UNSAFE_TO_CONCAT`, and
-/// `PRODUCE_SAFE_TO_INSERT_TATWEEL` have no counterpart because
-/// sigilbuzz produces no glyph flags.
+/// `VERIFY` (which reshapes to check the glyph flags) has no
+/// counterpart.
 ///
 /// # Examples
 ///
@@ -59,9 +58,19 @@ impl BufferFlags {
     /// (`HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE`). Useful when the
     /// run continues text shaped earlier.
     pub const DO_NOT_INSERT_DOTTED_CIRCLE: Self = Self(0x10);
+    /// Produce [`GlyphFlags::UNSAFE_TO_CONCAT`](crate::GlyphFlags::UNSAFE_TO_CONCAT)
+    /// on the shaped glyphs (`HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT`).
+    /// Without it only [`GlyphFlags::UNSAFE_TO_BREAK`](crate::GlyphFlags::UNSAFE_TO_BREAK)
+    /// is produced.
+    pub const PRODUCE_UNSAFE_TO_CONCAT: Self = Self(0x40);
+    /// Produce [`GlyphFlags::SAFE_TO_INSERT_TATWEEL`](crate::GlyphFlags::SAFE_TO_INSERT_TATWEEL)
+    /// where Arabic joining allows a tatweel
+    /// (`HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL`); those clusters
+    /// are also unsafe to break.
+    pub const PRODUCE_SAFE_TO_INSERT_TATWEEL: Self = Self(0x80);
 
     /// Every flag sigilbuzz defines.
-    const KNOWN: u32 = 0x1F;
+    const KNOWN: u32 = 0xDF;
 
     /// The empty set, same as [`Self::DEFAULT`].
     #[must_use]
@@ -100,7 +109,7 @@ impl BufferFlags {
     }
 
     /// The flags for `bits`, dropping the bits sigilbuzz does not
-    /// define (HarfBuzz's `VERIFY` and glyph-flag requests among them).
+    /// define (HarfBuzz's `VERIFY` among them).
     ///
     /// ```
     /// use sigilbuzz::BufferFlags;
@@ -374,7 +383,9 @@ mod tests {
         assert_eq!(BufferFlags::PRESERVE_DEFAULT_IGNORABLES.bits(), 0x04);
         assert_eq!(BufferFlags::REMOVE_DEFAULT_IGNORABLES.bits(), 0x08);
         assert_eq!(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE.bits(), 0x10);
-        assert_eq!(BufferFlags::all().bits(), 0x1F);
+        assert_eq!(BufferFlags::PRODUCE_UNSAFE_TO_CONCAT.bits(), 0x40);
+        assert_eq!(BufferFlags::PRODUCE_SAFE_TO_INSERT_TATWEEL.bits(), 0x80);
+        assert_eq!(BufferFlags::all().bits(), 0xDF);
     }
 
     #[test]
@@ -392,8 +403,8 @@ mod tests {
         assert_eq!(f, BufferFlags::BOT);
         f &= BufferFlags::EOT;
         assert!(f.is_empty());
-        assert_eq!(BufferFlags::from_bits(0x1F), Some(BufferFlags::all()));
-        assert_eq!(BufferFlags::from_bits(0x40), None);
+        assert_eq!(BufferFlags::from_bits(0xDF), Some(BufferFlags::all()));
+        assert_eq!(BufferFlags::from_bits(0x20), None);
         assert_eq!(BufferFlags::from_bits_truncate(0xFF), BufferFlags::all());
     }
 

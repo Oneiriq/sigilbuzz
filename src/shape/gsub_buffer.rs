@@ -28,9 +28,10 @@
 
 use alloc::vec::Vec;
 
+use super::glyph_flags::{self, BREAK, CONCAT};
 use super::gsub::substitute_glyph;
-use crate::buffer::{ClusterLevel, Glyph};
-use crate::tables::layout::skip_iter::{MatchGlyph, MatchSeq};
+use crate::buffer::{ClusterLevel, Glyph, GlyphFlags};
+use crate::tables::layout::skip_iter::{MatchGlyph, MatchSeq, UnsafeRanges};
 
 /// Smallest number of free slots a closed gap reopens with.
 const MIN_GAP: usize = 8;
@@ -52,13 +53,76 @@ pub(super) struct GsubBuffer {
     lig_ids_used: u8,
     /// The last ligature id handed out once all seven were in use.
     lig_serial: u8,
+    /// True during a pass, HarfBuzz's `have_output`.
+    have_output: bool,
+    /// Where HarfBuzz's own buffer would have its cursor: its input
+    /// indices, which the glyph flag ranges of the output buffer mix
+    /// with output indices, stop matching ours once the output outgrew
+    /// the input and HarfBuzz moved it to a separate array.
+    hb_idx: usize,
+    /// True once the output outgrew the input in this pass.
+    separate: bool,
+    /// The run's cluster level, for merges and glyph flags.
+    level: ClusterLevel,
+    /// Whether unsafe-to-concatenate flags are recorded at all.
+    concat: bool,
+    /// Flag ranges the last match reported, not applied yet.
+    ops: FlagOps,
+}
+
+/// One glyph flag range a match reported.
+#[derive(Debug, Clone, Copy)]
+struct FlagOp {
+    flags: GlyphFlags,
+    interior: bool,
+    start: usize,
+    end: usize,
+    from_out: bool,
+}
+
+/// The glyph flag ranges a match reports while it reads the buffer,
+/// applied once it is done ([`GsubBuffer::apply_flag_ops`]).
+#[derive(Debug, Default)]
+pub(super) struct FlagOps {
+    ops: Vec<FlagOp>,
+    concat: bool,
+}
+
+impl UnsafeRanges for FlagOps {
+    fn unsafe_to_break(&mut self, start: usize, end: usize, from_out: bool) {
+        self.ops.push(FlagOp {
+            flags: BREAK,
+            interior: true,
+            start,
+            end,
+            from_out,
+        });
+    }
+
+    fn unsafe_to_concat(&mut self, start: usize, end: usize, from_out: bool) {
+        if self.concat {
+            self.ops.push(FlagOp {
+                flags: CONCAT,
+                interior: false,
+                start,
+                end,
+                from_out,
+            });
+        }
+    }
 }
 
 impl GsubBuffer {
     /// A buffer over `glyphs`, with the feature on at the glyphs whose
     /// `mask` entry is true (on at every glyph without a mask; off past
-    /// the end of a short mask).
-    pub(super) fn new(glyphs: Vec<Glyph>, mask: Option<&[bool]>) -> Self {
+    /// the end of a short mask). `level` is the cluster level, and
+    /// `concat` whether unsafe-to-concatenate flags are wanted.
+    pub(super) fn new(
+        glyphs: Vec<Glyph>,
+        mask: Option<&[bool]>,
+        level: ClusterLevel,
+        concat: bool,
+    ) -> Self {
         let mask = mask.map(|m| {
             (0..glyphs.len())
                 .map(|i| m.get(i).copied().unwrap_or(false))
@@ -71,6 +135,12 @@ impl GsubBuffer {
             idx: 0,
             lig_ids_used: 0,
             lig_serial: 0,
+            have_output: false,
+            hb_idx: 0,
+            separate: false,
+            level,
+            concat,
+            ops: FlagOps::default(),
         }
     }
 
@@ -89,6 +159,7 @@ impl GsubBuffer {
     /// and the cursor is on the first.
     pub(super) fn clear_output(&mut self) {
         self.sync();
+        self.have_output = true;
         self.lig_ids_used = self
             .buf
             .iter()
@@ -106,6 +177,9 @@ impl GsubBuffer {
         }
         self.out_len = 0;
         self.idx = 0;
+        self.have_output = false;
+        self.hb_idx = 0;
+        self.separate = false;
     }
 
     /// Number of glyphs in the run: output plus input.
@@ -202,6 +276,7 @@ impl GsubBuffer {
         self.copy_slot(self.idx, self.out_len);
         self.out_len += 1;
         self.idx += 1;
+        self.hb_idx += 1;
     }
 
     /// HarfBuzz's `next_glyphs`: `n` glyphs move to the output.
@@ -215,12 +290,14 @@ impl GsubBuffer {
         }
         self.out_len += n;
         self.idx += n;
+        self.hb_idx += n;
     }
 
     /// HarfBuzz's `skip_glyph`: the cursor glyph is dropped.
     pub(super) fn skip_glyph(&mut self) {
         if self.has_input() {
             self.idx += 1;
+            self.hb_idx += 1;
         }
     }
 
@@ -228,8 +305,8 @@ impl GsubBuffer {
     /// cluster would vanish with it, merges the cluster into a
     /// neighbor: backward into the glyphs output before it at every
     /// level, or forward into the next glyph at the monotone levels.
-    pub(super) fn delete_glyph(&mut self, level: ClusterLevel) {
-        let Some(cluster) = self.cur().map(|g| g.cluster) else {
+    pub(super) fn delete_glyph(&mut self) {
+        let Some((cluster, flags)) = self.cur().map(|g| (g.cluster, g.flags)) else {
             return;
         };
         let next = self.buf.get(self.idx + 1).map(|g| g.cluster);
@@ -247,13 +324,14 @@ impl GsubBuffer {
                     if g.cluster != old {
                         break;
                     }
-                    g.cluster = cluster;
+                    // The glyphs take the deleted glyph's flags too.
+                    glyph_flags::set_cluster(g, cluster, flags);
                     i -= 1;
                 }
             }
         } else if next.is_some() {
             let at = self.cursor();
-            self.merge_clusters(at, at + 2, level);
+            self.merge_clusters(at, at + 2);
         }
         self.skip_glyph();
     }
@@ -296,6 +374,7 @@ impl GsubBuffer {
             mask.splice(self.idx..self.idx, core::iter::repeat(false).take(grow));
         }
         self.idx += grow;
+        self.separate = true;
     }
 
     /// HarfBuzz's `move_to`: puts the cursor at logical position `i`,
@@ -316,6 +395,12 @@ impl GsubBuffer {
             }
             self.idx = dst;
             self.out_len = i;
+            // HarfBuzz's separate output shifts its input forward
+            // first when the rewind needs more room than it has.
+            if self.separate && self.hb_idx < count {
+                self.hb_idx = count;
+            }
+            self.hb_idx -= count;
         }
     }
 
@@ -337,11 +422,16 @@ impl GsubBuffer {
     /// (`start` at or after the cursor): at the monotone levels the
     /// range takes its smallest cluster, spreading to neighbors that
     /// shared a cluster with an end whose cluster changes, into the
-    /// output when the range starts at the cursor.
-    pub(super) fn merge_clusters(&mut self, start: usize, end: usize, level: ClusterLevel) {
+    /// output when the range starts at the cursor. At the other levels
+    /// the range becomes unsafe to break instead.
+    pub(super) fn merge_clusters(&mut self, start: usize, end: usize) {
         let len = self.len();
         let end = end.min(len);
-        if end < start + 2 || !level.is_monotone() {
+        if end < start + 2 {
+            return;
+        }
+        if !self.level.is_monotone() {
+            self.set_flags(start, end, BREAK, true, false);
             return;
         }
         let cl = |b: &Self, i: usize| b.get(i).map_or(0, |g| g.cluster);
@@ -366,13 +456,83 @@ impl GsubBuffer {
             while i > 0 && cl(self, i - 1) == start_cluster {
                 i -= 1;
                 if let Some(g) = self.get_mut(i) {
-                    g.cluster = cluster;
+                    glyph_flags::set_cluster(g, cluster, GlyphFlags::empty());
                 }
             }
         }
         for i in start..end {
             if let Some(g) = self.get_mut(i) {
-                g.cluster = cluster;
+                glyph_flags::set_cluster(g, cluster, GlyphFlags::empty());
+            }
+        }
+    }
+
+    /// The storage for the glyph flag ranges of the next match, to fill
+    /// and hand back to [`Self::apply_flag_ops`].
+    pub(super) fn take_flag_ops(&mut self) -> FlagOps {
+        let mut ops = core::mem::take(&mut self.ops);
+        ops.concat = self.concat;
+        ops
+    }
+
+    /// Applies the ranges a match reported, in order, and keeps the
+    /// storage for the next match.
+    pub(super) fn apply_flag_ops(&mut self, mut ops: FlagOps) {
+        for op in ops.ops.drain(..) {
+            self.set_flags(op.start, op.end, op.flags, op.interior, op.from_out);
+        }
+        self.ops = ops;
+    }
+
+    /// HarfBuzz's `_set_glyph_flags` over logical positions: `start`
+    /// and `end` are input positions, or with `from_out` an output
+    /// position and an input one (the `_from_outbuffer` variants).
+    /// Outside a pass every position is an input one.
+    fn set_flags(
+        &mut self,
+        start: usize,
+        end: usize,
+        flags: GlyphFlags,
+        interior: bool,
+        from_out: bool,
+    ) {
+        let level = self.level;
+        if !self.have_output {
+            glyph_flags::set_flags(&mut self.buf, start, end, flags, interior, level);
+            return;
+        }
+        let shift = self.idx - self.out_len;
+        if !from_out {
+            // HarfBuzz's input indices differ from ours by a constant.
+            let start = start.max(self.out_len);
+            let (start, end) = (start + shift, end.saturating_add(shift));
+            glyph_flags::set_flags(&mut self.buf, start, end, flags, interior, level);
+            return;
+        }
+        // HarfBuzz measures such a range from an output index to one of
+        // its own input indices, and skips it when that is wider than
+        // it allows (or runs backward, once its output outgrew its
+        // input).
+        let input_len = end.saturating_sub(self.out_len);
+        if glyph_flags::too_wide(start, self.hb_idx + input_len) {
+            return;
+        }
+        let start = start.min(self.out_len);
+        let input_len = input_len.min(self.buf.len() - self.idx);
+        let (out, input) = self.buf.split_at_mut(self.idx);
+        let (Some(out), Some(input)) =
+            (out.get_mut(start..self.out_len), input.get_mut(..input_len))
+        else {
+            return;
+        };
+        if interior {
+            let cluster = glyph_flags::find_min_cluster(input, u32::MAX, level);
+            let cluster = glyph_flags::find_min_cluster(out, cluster, level);
+            glyph_flags::set_infos(out, cluster, flags, level);
+            glyph_flags::set_infos(input, cluster, flags, level);
+        } else {
+            for g in out.iter_mut().chain(input.iter_mut()) {
+                g.flags |= flags;
             }
         }
     }
@@ -401,6 +561,8 @@ mod tests {
     use super::*;
     use alloc::vec;
 
+    const MC: ClusterLevel = ClusterLevel::MonotoneCharacters;
+
     fn run(ids: &[u32]) -> Vec<Glyph> {
         ids.iter()
             .enumerate()
@@ -417,7 +579,7 @@ mod tests {
 
     #[test]
     fn output_and_input_halves_read_as_one_run() {
-        let mut b = GsubBuffer::new(run(&[1, 2, 3, 4]), None);
+        let mut b = GsubBuffer::new(run(&[1, 2, 3, 4]), None, MC, false);
         b.clear_output();
         b.next_glyph();
         b.skip_glyph();
@@ -436,7 +598,7 @@ mod tests {
 
     #[test]
     fn move_to_rewinds_and_advances_through_the_output() {
-        let mut b = GsubBuffer::new(run(&[1, 2, 3, 4, 5]), None);
+        let mut b = GsubBuffer::new(run(&[1, 2, 3, 4, 5]), None, MC, false);
         b.clear_output();
         b.next_glyphs(4);
         b.move_to(1);
@@ -452,7 +614,7 @@ mod tests {
     #[test]
     fn the_mask_moves_with_its_glyph() {
         let mask = [true, false, true];
-        let mut b = GsubBuffer::new(run(&[1, 2, 3]), Some(&mask));
+        let mut b = GsubBuffer::new(run(&[1, 2, 3]), Some(&mask), MC, false);
         b.clear_output();
         b.skip_glyph();
         assert!(!b.cur_in_mask());
@@ -467,7 +629,7 @@ mod tests {
 
     #[test]
     fn a_long_expansion_moves_the_tail_a_few_times_only() {
-        let mut b = GsubBuffer::new(run(&[1; 1000]), None);
+        let mut b = GsubBuffer::new(run(&[1; 1000]), None, MC, false);
         b.clear_output();
         let mut grows = 0;
         while b.has_input() {
@@ -488,7 +650,7 @@ mod tests {
     fn ligature_ids_avoid_live_ones_then_cycle() {
         let mut glyphs = run(&[1, 2]);
         glyphs[0].unicode_props = 2 << 13;
-        let mut b = GsubBuffer::new(glyphs, None);
+        let mut b = GsubBuffer::new(glyphs, None, MC, false);
         b.clear_output();
         let got: Vec<u8> = (0..9).map(|_| b.alloc_lig_id()).collect();
         assert_eq!(got, [1, 3, 4, 5, 6, 7, 1, 2, 3]);
@@ -499,14 +661,14 @@ mod tests {
         // Clusters 0 5 5 | 5 2: the input range [3, 5) merges to 2 and
         // the output glyphs sharing cluster 5 follow.
         let glyphs: Vec<Glyph> = [0, 5, 5, 5, 2].iter().map(|&c| Glyph::new(1, c)).collect();
-        let mut b = GsubBuffer::new(glyphs, None);
+        let mut b = GsubBuffer::new(glyphs, None, MC, false);
         b.clear_output();
         b.next_glyphs(3);
-        b.merge_clusters(3, 5, ClusterLevel::MonotoneCharacters);
+        b.merge_clusters(3, 5);
         let clusters: Vec<u32> = (0..5).filter_map(|i| b.get(i)).map(|g| g.cluster).collect();
         assert_eq!(clusters, [0, 2, 2, 2, 2]);
-        let mut b = GsubBuffer::new(run(&[1, 1]), None);
-        b.merge_clusters(0, 2, ClusterLevel::Characters);
-        assert_eq!(b.get(1).map(|g| g.cluster), Some(1));
+        let mut b = GsubBuffer::new(run(&[1, 1]), None, ClusterLevel::Characters, false);
+        b.merge_clusters(0, 2);
+        assert_eq!(b.get(1).map(|g| (g.cluster, g.flags)), Some((1, BREAK)));
     }
 }

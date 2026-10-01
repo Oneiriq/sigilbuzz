@@ -57,8 +57,16 @@ fn pre_base_vowel_moves_before_base() {
     for s in &syls {
         initial_reorder(&cp, &mut glyphs, s, ClusterLevel::Characters);
     }
-    assert_eq!(glyphs[0], original[1], "sign-e should sit first visually");
-    assert_eq!(glyphs[1], original[0], "ka should sit second");
+    // The reorder also marks the pair unsafe to break (HarfBuzz's
+    // merge_clusters at a non-monotone level), so compare ids and
+    // clusters only.
+    let id = |g: &Glyph| (g.glyph_id, g.cluster);
+    assert_eq!(
+        id(&glyphs[0]),
+        id(&original[1]),
+        "sign-e should sit first visually"
+    );
+    assert_eq!(id(&glyphs[1]), id(&original[0]), "ka should sit second");
 }
 
 #[test]

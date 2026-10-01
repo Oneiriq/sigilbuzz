@@ -8,6 +8,13 @@ use crate::tables::layout::MatchFilter;
 use crate::tables::variation_store::ItemVariationStore;
 use alloc::vec;
 
+/// Flag settings for tests that do not look at glyph flags.
+const TEST_FLAGS: FlagCx = FlagCx {
+    level: crate::buffer::ClusterLevel::MonotoneCharacters,
+    concat: false,
+    tatweel: false,
+};
+
 fn feature(tag: &[u8; 4], value: u32) -> Feature {
     Feature { tag: *tag, value }
 }
@@ -219,6 +226,7 @@ fn pair_leaves_the_cursor_on_the_second_glyph_without_a_second_record() {
         &mut glyphs,
         0,
         &VarCtx::none(),
+        TEST_FLAGS,
         true,
     );
     assert_eq!(next, Some(1));
@@ -238,6 +246,7 @@ fn pair_moves_past_the_second_glyph_when_value_format2_is_set() {
         &mut glyphs,
         0,
         &VarCtx::none(),
+        TEST_FLAGS,
         true,
     );
     assert_eq!(next, Some(2));
@@ -256,6 +265,7 @@ fn pair_finds_the_second_glyph_across_default_ignorables() {
         &mut glyphs,
         0,
         &VarCtx::none(),
+        TEST_FLAGS,
         true,
     );
     assert_eq!(next, Some(2));
@@ -268,7 +278,15 @@ fn pair_finds_the_second_glyph_across_default_ignorables() {
         mcx: MatchContext::new(MatchFilter::none(), LayoutTable::Gpos, Joiners::MANUAL),
         index: 0,
     };
-    let next = apply_pair(&pp, &manual, &mut glyphs, 0, &VarCtx::none(), true);
+    let next = apply_pair(
+        &pp,
+        &manual,
+        &mut glyphs,
+        0,
+        &VarCtx::none(),
+        TEST_FLAGS,
+        true,
+    );
     assert_eq!(next, None);
     assert_eq!(glyphs[0].x_advance, 500);
 }
@@ -294,6 +312,14 @@ fn pair_set_device_offsets_are_measured_from_the_pair_set() {
     let bytes = pair_pos_format1(-40, 0, true);
     let pp = PairPos::parse(&bytes).unwrap();
     let mut glyphs = vec![glyph(1), glyph(2)];
-    apply_pair(&pp, &state(MatchFilter::none()), &mut glyphs, 0, &var, true);
+    apply_pair(
+        &pp,
+        &state(MatchFilter::none()),
+        &mut glyphs,
+        0,
+        &var,
+        TEST_FLAGS,
+        true,
+    );
     assert_eq!(glyphs[0].x_advance, 500 - 40 - 100);
 }

@@ -124,7 +124,7 @@ pub unsafe extern "C" fn hb_shape_full(
     for g in &shaped.glyphs {
         infos.push(hb_glyph_info_t {
             codepoint: g.glyph_id,
-            mask: 0,
+            mask: g.flags.bits(),
             // Core clusters are UTF-8 offsets into the buffer text;
             // report them in the units of the caller's add call.
             cluster: buffer_state.clusters.map(g.cluster, text_len),

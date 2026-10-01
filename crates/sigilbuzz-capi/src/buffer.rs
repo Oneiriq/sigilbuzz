@@ -371,3 +371,34 @@ pub unsafe extern "C" fn hb_buffer_get_length(buffer: *mut hb_buffer_t) -> c_uin
     let state = inner.state.lock();
     state.glyph_infos.len() as c_uint
 }
+
+/// `hb_glyph_flags_t`: the glyph flags of a shaped glyph.
+pub type hb_glyph_flags_t = c_uint;
+/// Breaking the text before this glyph's cluster changes the shaping.
+pub const HB_GLYPH_FLAG_UNSAFE_TO_BREAK: hb_glyph_flags_t = 0x0000_0001;
+/// Joining text shaped separately at this glyph's cluster changes the
+/// shaping. Reported with `HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT`.
+pub const HB_GLYPH_FLAG_UNSAFE_TO_CONCAT: hb_glyph_flags_t = 0x0000_0002;
+/// A tatweel may be inserted before this glyph's cluster. Reported with
+/// `HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL`.
+pub const HB_GLYPH_FLAG_SAFE_TO_INSERT_TATWEEL: hb_glyph_flags_t = 0x0000_0004;
+/// Every defined glyph flag.
+pub const HB_GLYPH_FLAG_DEFINED: hb_glyph_flags_t = 0x0000_0007;
+
+/// The glyph flags of a shaped glyph, the defined bits of its `mask`,
+/// as HarfBuzz's `hb_glyph_info_get_glyph_flags` returns them. Zero
+/// for a null `info`.
+///
+/// # Safety
+/// `info` must be null or point to a readable `hb_glyph_info_t`.
+#[no_mangle]
+pub unsafe extern "C" fn hb_glyph_info_get_glyph_flags(
+    info: *const hb_glyph_info_t,
+) -> hb_glyph_flags_t {
+    if info.is_null() {
+        return 0;
+    }
+    // SAFETY: `info` is non-null and the caller guarantees it points to
+    // a readable `hb_glyph_info_t`.
+    unsafe { (*info).mask & HB_GLYPH_FLAG_DEFINED }
+}

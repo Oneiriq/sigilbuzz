@@ -87,6 +87,16 @@ fn constants_match_harfbuzz() {
     assert_eq!(HB_BUFFER_FLAG_PRESERVE_DEFAULT_IGNORABLES, 0x04);
     assert_eq!(HB_BUFFER_FLAG_REMOVE_DEFAULT_IGNORABLES, 0x08);
     assert_eq!(HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE, 0x10);
+    assert_eq!(HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT, 0x40);
+    assert_eq!(HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL, 0x80);
+    assert_eq!(
+        HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL,
+        BufferFlags::PRODUCE_SAFE_TO_INSERT_TATWEEL.bits()
+    );
+    assert_eq!(crate::HB_GLYPH_FLAG_UNSAFE_TO_BREAK, 0x01);
+    assert_eq!(crate::HB_GLYPH_FLAG_UNSAFE_TO_CONCAT, 0x02);
+    assert_eq!(crate::HB_GLYPH_FLAG_SAFE_TO_INSERT_TATWEEL, 0x04);
+    assert_eq!(crate::HB_GLYPH_FLAG_DEFINED, 0x07);
     assert_eq!(HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES, 0);
     assert_eq!(HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS, 1);
     assert_eq!(HB_BUFFER_CLUSTER_LEVEL_CHARACTERS, 2);
@@ -251,6 +261,44 @@ fn flags_change_the_shaped_glyphs() {
         );
     }
     assert_eq!(font.shape(buffer, "\u{0301}a").len(), plain.len());
+    // SAFETY: created above.
+    unsafe { hb_buffer_destroy(buffer) };
+}
+
+#[test]
+fn shaped_glyphs_report_harfbuzz_glyph_flags() {
+    // Open Sans kerns "AVATAR" pair by pair: each kerned pair is unsafe
+    // to break. With PRODUCE_UNSAFE_TO_CONCAT every glyph is also
+    // unsafe to concatenate (the kerning lookups look at every
+    // neighbor). HarfBuzz 14.5.0 (uharfbuzz 0.56.2) gives these flags
+    // at its default cluster level.
+    let font = TestFont::new(OPEN_SANS);
+    let buffer = hb_buffer_create();
+    let flags = |buffer| {
+        let mut n: c_uint = 0;
+        // SAFETY: the buffer is live and was just shaped.
+        unsafe {
+            let infos = hb_buffer_get_glyph_infos(buffer, &mut n);
+            core::slice::from_raw_parts(infos, n as usize)
+                .iter()
+                .map(|g| crate::hb_glyph_info_get_glyph_flags(g))
+                .collect::<Vec<u32>>()
+        }
+    };
+    font.shape(buffer, "AVATAR");
+    assert_eq!(flags(buffer), [0, 1, 1, 1, 1, 0]);
+    // SAFETY: created above.
+    unsafe { hb_buffer_set_flags(buffer, HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT) };
+    with_state(buffer, |s| {
+        assert_eq!(s.buffer.flags(), BufferFlags::PRODUCE_UNSAFE_TO_CONCAT);
+    });
+    font.shape(buffer, "AVATAR");
+    assert_eq!(flags(buffer), [2, 3, 3, 3, 3, 2]);
+    // SAFETY: a null info has no flags.
+    assert_eq!(
+        unsafe { crate::hb_glyph_info_get_glyph_flags(ptr::null()) },
+        0
+    );
     // SAFETY: created above.
     unsafe { hb_buffer_destroy(buffer) };
 }

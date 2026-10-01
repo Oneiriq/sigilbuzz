@@ -120,6 +120,19 @@ typedef struct hb_glyph_info_t {
     uint32_t       var2;
 } hb_glyph_info_t;
 
+/* Glyph flags, HarfBuzz's values. Every glyph of a cluster carries the
+ * same flags. UNSAFE_TO_CONCAT needs HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT
+ * and SAFE_TO_INSERT_TATWEEL needs
+ * HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL. */
+typedef enum {
+    HB_GLYPH_FLAG_UNSAFE_TO_BREAK        = 0x00000001,
+    HB_GLYPH_FLAG_UNSAFE_TO_CONCAT       = 0x00000002,
+    HB_GLYPH_FLAG_SAFE_TO_INSERT_TATWEEL = 0x00000004,
+    HB_GLYPH_FLAG_DEFINED                = 0x00000007
+} hb_glyph_flags_t;
+
+hb_glyph_flags_t hb_glyph_info_get_glyph_flags(const hb_glyph_info_t *info);
+
 typedef struct hb_glyph_position_t {
     hb_position_t x_advance;
     hb_position_t y_advance;
@@ -194,18 +207,19 @@ void         hb_buffer_reset(hb_buffer_t *buffer);
  * cluster level stay. */
 void         hb_buffer_clear_contents(hb_buffer_t *buffer);
 
-/* Buffer flags, HarfBuzz's values. HarfBuzz's other flag bits
- * (VERIFY, PRODUCE_UNSAFE_TO_CONCAT, PRODUCE_SAFE_TO_INSERT_TATWEEL)
- * are accepted, stored, and returned by hb_buffer_get_flags, but
- * change nothing: sigilbuzz produces no glyph flags. EOT is stored
- * too; HarfBuzz's OpenType shaper reads no end-of-text state. */
+/* Buffer flags, HarfBuzz's values. HarfBuzz's VERIFY bit is accepted,
+ * stored, and returned by hb_buffer_get_flags, but changes nothing. EOT
+ * is stored too; HarfBuzz's OpenType shaper reads no end-of-text
+ * state. */
 typedef enum {
     HB_BUFFER_FLAG_DEFAULT                     = 0x00000000u,
     HB_BUFFER_FLAG_BOT                         = 0x00000001u,
     HB_BUFFER_FLAG_EOT                         = 0x00000002u,
     HB_BUFFER_FLAG_PRESERVE_DEFAULT_IGNORABLES = 0x00000004u,
     HB_BUFFER_FLAG_REMOVE_DEFAULT_IGNORABLES   = 0x00000008u,
-    HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE = 0x00000010u
+    HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE = 0x00000010u,
+    HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT    = 0x00000040u,
+    HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL = 0x00000080u
 } hb_buffer_flags_t;
 
 void              hb_buffer_set_flags(hb_buffer_t *buffer, hb_buffer_flags_t flags);

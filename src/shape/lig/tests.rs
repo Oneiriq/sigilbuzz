@@ -1,6 +1,7 @@
 //! Tests for ligature and multiple-substitution bookkeeping.
 
 use super::*;
+use crate::buffer::ClusterLevel;
 use crate::tables::gdef::Gdef;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -254,7 +255,7 @@ fn single_output_multiple_substitution_records_nothing() {
 
 #[test]
 fn multiply_outputs_every_glyph_of_the_sequence_at_the_cursor() {
-    let mut buf = GsubBuffer::new(run(&[1, 2, 3]), None);
+    let mut buf = GsubBuffer::new(run(&[1, 2, 3]), None, MC, false);
     buf.clear_output();
     buf.next_glyph();
     multiply(&mut buf, &[7, 8, 9]);

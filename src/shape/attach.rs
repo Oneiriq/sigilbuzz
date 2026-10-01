@@ -33,6 +33,7 @@
 
 use alloc::vec::Vec;
 
+use super::glyph_flags::FlagCx;
 use super::gpos::Skipper;
 use super::{lig, VarCtx};
 use crate::buffer::{Direction, Glyph};
@@ -75,15 +76,18 @@ pub(super) struct Attach<'s> {
     pub(super) direction: Direction,
     pub(super) slots: &'s mut [Slot],
     base_cache: BaseCache,
+    /// The shaping call's glyph flag settings.
+    pub(super) flags: FlagCx,
 }
 
 impl<'s> Attach<'s> {
     /// Scratch for a run in `direction` with one slot per glyph.
-    pub(super) fn new(direction: Direction, slots: &'s mut [Slot]) -> Self {
+    pub(super) fn new(direction: Direction, slots: &'s mut [Slot], flags: FlagCx) -> Self {
         Self {
             direction,
             slots,
             base_cache: BaseCache::default(),
+            flags,
         }
     }
 
@@ -242,11 +246,18 @@ pub(super) fn apply_at(
             let Some(base) = find_base(glyphs, at, cx, &mut att.base_cache, |j| {
                 accepts_as_base(glyphs, j, &classes) || mbp.covers_base(glyphs[j].glyph_id as u16)
             }) else {
+                att.flags.unsafe_to_concat(glyphs, 0, at + 1);
                 return false;
             };
-            let Some(pair) = mbp.attach(mark_gid, glyphs[base].glyph_id as u16) else {
+            let base_gid = glyphs[base].glyph_id as u16;
+            if !mbp.covers_base(base_gid) {
+                att.flags.unsafe_to_concat(glyphs, base, at + 1);
+                return false;
+            }
+            let Some(pair) = mbp.attach(mark_gid, base_gid) else {
                 return false;
             };
+            att.flags.unsafe_to_break(glyphs, base, at + 1);
             attach_mark(glyphs, att, at, base, &pair, bytes, cx.var);
             true
         }
@@ -255,10 +266,12 @@ pub(super) fn apply_at(
                 return false;
             }
             let Some(lig) = find_base(glyphs, at, cx, &mut att.base_cache, |_| true) else {
+                att.flags.unsafe_to_concat(glyphs, 0, at + 1);
                 return false;
             };
             let lig_gid = glyphs[lig].glyph_id as u16;
             let Some(comp_count) = mlp.component_count(lig_gid).filter(|&n| n > 0) else {
+                att.flags.unsafe_to_concat(glyphs, lig, at + 1);
                 return false;
             };
             // A mark that was inside this ligature when it formed
@@ -275,6 +288,7 @@ pub(super) fn apply_at(
             let Some(pair) = mlp.attach(mark_gid, lig_gid, component) else {
                 return false;
             };
+            att.flags.unsafe_to_break(glyphs, lig, at + 1);
             attach_mark(glyphs, att, at, lig, &pair, bytes, cx.var);
             true
         }
@@ -290,15 +304,21 @@ pub(super) fn apply_at(
                     | LOOKUP_FLAG_IGNORE_LIGATURES
                     | LOOKUP_FLAG_IGNORE_MARKS);
             let Some(prev) = cx.walk_with_flag(flag).prev(glyphs, at) else {
+                att.flags.unsafe_to_concat(glyphs, 0, at + 1);
                 return false;
             };
-            if !is_mark(&glyphs[prev], &cx.classes()) || !marks_share_a_component(glyphs, at, prev)
+            let prev_gid = glyphs[prev].glyph_id as u16;
+            if !is_mark(&glyphs[prev], &cx.classes())
+                || !marks_share_a_component(glyphs, at, prev)
+                || !mmp.covers_mark2(prev_gid)
             {
+                att.flags.unsafe_to_concat(glyphs, prev, at + 1);
                 return false;
             }
-            let Some(pair) = mmp.attach(mark_gid, glyphs[prev].glyph_id as u16) else {
+            let Some(pair) = mmp.attach(mark_gid, prev_gid) else {
                 return false;
             };
+            att.flags.unsafe_to_break(glyphs, prev, at + 1);
             attach_mark(glyphs, att, at, prev, &pair, bytes, cx.var);
             true
         }
@@ -427,11 +447,14 @@ fn apply_cursive(
         return false;
     };
     let Some(i) = Skipper::new(cx.rules).prev(glyphs, j) else {
+        att.flags.unsafe_to_concat(glyphs, 0, j + 1);
         return false;
     };
     let Some(exit) = cp.exit(glyphs[i].glyph_id as u16) else {
+        att.flags.unsafe_to_concat(glyphs, i, j + 1);
         return false;
     };
+    att.flags.unsafe_to_break(glyphs, i, j + 1);
     let (exit_x, exit_y) = exit.resolve(cp.data(), cx.var.store, cx.var.coords);
     let (entry_x, entry_y) = entry.resolve(cp.data(), cx.var.store, cx.var.coords);
 

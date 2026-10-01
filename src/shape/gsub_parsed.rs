@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use super::gsub::{apply_gsub_chain_context_at, apply_gsub_context_at, substitute_glyph, GsubCx};
 use super::gsub_buffer::GsubBuffer;
 use super::{lig, resolve_extension, LookupBudget};
-use crate::buffer::{ClusterLevel, Glyph};
+use crate::buffer::Glyph;
 use crate::tables::gdef::Gdef;
 use crate::tables::gsub::{
     lookup_type as gsub_lt, Alternate, ChainContextAny, Context as GsubContext, Ligature, Multiple,
@@ -175,16 +175,17 @@ pub(super) fn apply_parsed_lookup_at(
             ParsedGsubSubtable::Single(single) => {
                 single.apply(id).map(|out| buf.replace_glyph(out))
             }
-            ParsedGsubSubtable::Multiple(m) => m.apply(id).and_then(|seq| {
-                let level = cx.gsub.cluster_level();
-                apply_multiple(buf, &seq, level, budget).then_some(())
-            }),
+            ParsedGsubSubtable::Multiple(m) => m
+                .apply(id)
+                .and_then(|seq| apply_multiple(buf, &seq, budget).then_some(())),
             ParsedGsubSubtable::Alternate(alt) => alt
                 .apply(id, alternate_index)
                 .map(|out| buf.replace_glyph(out)),
-            ParsedGsubSubtable::Ligature(ligature) => ligature
-                .apply_at_in(&*buf, at, mcx, &mut ())
-                .and_then(|(out, m)| {
+            ParsedGsubSubtable::Ligature(ligature) => {
+                let mut ops = buf.take_flag_ops();
+                let found = ligature.apply_at_in(&*buf, at, mcx, &mut ops);
+                buf.apply_flag_ops(ops);
+                found.and_then(|(out, m)| {
                     let positions = m.positions.as_slice();
                     if positions.len() == 1 {
                         // A one-component ligature is a plain
@@ -193,9 +194,9 @@ pub(super) fn apply_parsed_lookup_at(
                         return Some(());
                     }
                     let classes = mcx.filter().classes();
-                    let level = cx.gsub.cluster_level();
-                    lig::ligate(buf, positions, m.end, out, &classes, level).then_some(())
-                }),
+                    lig::ligate(buf, positions, m.end, out, &classes).then_some(())
+                })
+            }
             ParsedGsubSubtable::Context(ctx) => {
                 apply_gsub_context_at(cx, ctx, mcx, buf, depth + 1, budget).then_some(())
             }
@@ -209,7 +210,10 @@ pub(super) fn apply_parsed_lookup_at(
                     // A reverse chaining subtable reached by a forward
                     // walk substitutes in place, as HarfBuzz's
                     // `replace_glyph_inplace` does.
-                    rc.apply_at_in(&*buf, at, mcx, &mut ()).map(|out| {
+                    let mut ops = buf.take_flag_ops();
+                    let found = rc.apply_at_in(&*buf, at, mcx, &mut ops);
+                    buf.apply_flag_ops(ops);
+                    found.map(|out| {
                         if let Some(g) = buf.cur_mut() {
                             substitute_glyph(g, out);
                         }
@@ -228,18 +232,13 @@ pub(super) fn apply_parsed_lookup_at(
 /// `Sequence::apply`: one glyph is a plain substitution, more are
 /// output in its place, and none deletes the glyph (the spec forbids
 /// an empty sequence, but Uniscribe and HarfBuzz accept it; HarfBuzz
-/// issue 253), merging its cluster into a neighbor at `level`.
+/// issue 253), merging its cluster into a neighbor.
 /// Returns false when `budget` has no room for the extra glyphs (see
 /// [`LookupBudget`]).
-fn apply_multiple(
-    buf: &mut GsubBuffer,
-    seq: &[u16],
-    level: ClusterLevel,
-    budget: &mut LookupBudget,
-) -> bool {
+fn apply_multiple(buf: &mut GsubBuffer, seq: &[u16], budget: &mut LookupBudget) -> bool {
     match seq {
         [] => {
-            buf.delete_glyph(level);
+            buf.delete_glyph();
             true
         }
         [one] => {

@@ -84,6 +84,21 @@ Added:
   `MatchContext::with_per_syllable` and `MatchContext::per_syllable` expose the setting
   to the lookup matchers. `Glyph` gains a public field, so code that builds a `Glyph`
   with a struct literal must add `syllable: 0`.
+- Glyph flags, HarfBuzz's `hb_glyph_flags_t`: `GlyphFlags` (`UNSAFE_TO_BREAK`,
+  `UNSAFE_TO_CONCAT`, `SAFE_TO_INSERT_TATWEEL`) in the new `Glyph::flags` field, set where
+  HarfBuzz 14.5.0 sets them: the skipping iterator's matches and failed matches in
+  every GSUB and GPOS lookup type, cluster merges a cluster level skips, ligatures and
+  deleted glyphs, kerning (GPOS, `kern`, `kerx` pairs), cursive and mark attachment,
+  fallback mark positioning, Arabic, Mongolian and N'Ko joining, and the syllables of the
+  Indic, Khmer, Myanmar and USE shapers. Every glyph of a cluster carries the same
+  flags. `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT` and
+  `BufferFlags::PRODUCE_SAFE_TO_INSERT_TATWEEL` (HarfBuzz's values) turn on the two
+  optional kinds. Code that builds a `Glyph` with a struct literal must add
+  `flags: GlyphFlags::empty()`.
+- `sigilbuzz-capi`: `hb_glyph_info_get_glyph_flags`, `hb_glyph_flags_t` with the
+  `HB_GLYPH_FLAG_*` constants, and `HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT` and
+  `HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL`. `hb_glyph_info_t::mask` carries the
+  glyph flags, as in HarfBuzz; it used to be zero.
 
 Changed:
 

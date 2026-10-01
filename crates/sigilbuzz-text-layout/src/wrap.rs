@@ -98,6 +98,7 @@ pub struct LineRange {
 ///         char_class: 0,
 ///         combining_class: 0,
 ///         syllable: 0,
+///         flags: sigilbuzz::GlyphFlags::empty(),
 ///     })
 ///     .collect();
 ///
@@ -313,6 +314,7 @@ mod tests {
                 char_class: 0,
                 combining_class: 0,
                 syllable: 0,
+                flags: sigilbuzz::GlyphFlags::empty(),
             });
         }
         glyphs
