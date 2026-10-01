@@ -227,7 +227,8 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // The shaper HarfBuzz would pick for the whole buffer, from its
     // script. It runs its `preprocess_text` on the whole buffer and
     // decides mark zeroing and fallback mark positioning. Each
-    // segment's own script picks its normalization and GSUB.
+    // segment's own script picks its GSUB, and its normalization
+    // unless the buffer's shaper shapes it (`Shaper::normalizer_for`).
     let buffer_shaper = Shaper::for_script(buffer_script.unwrap_or(Script::Other), !is_vertical);
     // The rest of HarfBuzz's SARA AM handling, which (like its Thai
     // shaper) runs once the text is in the direction it shapes in.
@@ -297,8 +298,9 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
 
     // Step 1.75: normalization, which also maps the characters to
     // glyphs. Each segment normalizes with the mode and hooks of the
-    // shaper HarfBuzz gives its script (see `normalize`), so its code
-    // points and glyphs stay one to one.
+    // shaper that shapes it (see `normalize` and
+    // `Shaper::normalizer_for`), so its code points and glyphs stay one
+    // to one.
     let has_gpos_mark = |priority: &[[u8; 4]]| {
         gpos.as_ref()
             .is_some_and(|g| position::has_feature(g, *b"mark", priority))
@@ -310,7 +312,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         &mut segments,
         |seg| Normalizer {
             cmap: &cmap,
-            shaper: Shaper::for_script(seg.script, !is_vertical),
+            shaper: Shaper::for_script(seg.script, !is_vertical).normalizer_for(buffer_shaper),
             has_gpos_mark: has_gpos_mark(seg.script_priority),
             level,
             recategorize_marks: fallback_marks,
@@ -726,7 +728,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                     seg.script_priority,
                     early_default_features(seg_arabic_active, seg.script, dominant_script),
                     joiner_table,
-                    buffer_shaper == Shaper::Hangul,
+                    !(is_vertical && buffer_shaper == Shaper::Hangul),
                     &mut budget,
                 );
             }

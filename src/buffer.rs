@@ -14,7 +14,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use crate::unicode::{script_of, Script};
+use crate::unicode::{is_hangul_tone_mark, script_of, Script};
 
 pub mod char_class;
 mod flags;
@@ -370,7 +370,8 @@ impl Buffer {
     /// (digits, punctuation, ASCII space, ZWJ/ZWNJ/bidi marks) and
     /// `INHERITED` (combining marks) codepoints extend whichever real
     /// script ran before them, matching HarfBuzz's
-    /// `select_shaper_for_script` segmentation.
+    /// `select_shaper_for_script` segmentation. A Hangul tone mark
+    /// (U+302E, U+302F) extends the run before it too.
     ///
     /// A leading `COMMON`/`INHERITED` span before the first real
     /// script codepoint joins that script's run, the way HarfBuzz
@@ -409,6 +410,10 @@ impl Buffer {
             // script-equality test below.
             let resolved = if is_common_or_inherited(ch) {
                 current.map_or(leading, |(s, _)| s)
+            } else if is_hangul_tone_mark(ch) {
+                // A Hangul tone mark is a combining mark: it stays
+                // with the character before it, as in `shape`.
+                current.map_or(raw, |(s, _)| s)
             } else {
                 raw
             };
@@ -862,6 +867,22 @@ mod tests {
         let runs = b.script_runs();
         assert_eq!(runs.len(), 1, "combining mark must extend its base");
         assert_eq!(runs[0].script, Script::Latin);
+        assert_eq!(runs[0].byte_range, 0..3);
+    }
+
+    #[test]
+    fn script_runs_hangul_tone_mark_stays_with_the_letter_before_it() {
+        let mut b = Buffer::new();
+        b.push_str("e\u{0301}\u{302E}");
+        let runs = b.script_runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].script, Script::Latin);
+        // At the start of the text the tone mark is Hangul.
+        let mut b = Buffer::new();
+        b.push_str("\u{302E}a");
+        let runs = b.script_runs();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].script, Script::Hangul);
         assert_eq!(runs[0].byte_range, 0..3);
     }
 

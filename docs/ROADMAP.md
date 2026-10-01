@@ -35,8 +35,12 @@ These are smaller pieces that are not scheduled yet.
   Engine.
 - Khudawadi and Takri have no shaper. HarfBuzz shapes them with the Universal Shaping
   Engine, vowel constraints included.
-- Hangul in a buffer whose script is not Hangul is normalized one segment at a time,
-  and `calt` is off for it.
+- A buffer of several scripts shapes one script run at a time, where HarfBuzz shapes the
+  whole buffer with the shaper of its script. So contextual lookups do not reach across
+  runs, and with `PRODUCE_UNSAFE_TO_CONCAT` some flags at run boundaries differ.
+- Vertical text runs `liga`, `clig`, `calt` and `rclt`, except in Hangul runs of a
+  Hangul buffer and `calt` anywhere in a Hangul buffer. HarfBuzz turns them on for
+  horizontal text only.
 
 ## Known bugs
 

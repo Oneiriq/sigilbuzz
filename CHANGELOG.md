@@ -321,6 +321,18 @@ Changed:
   matches HarfBuzz 14.5.0 on 1,674 at `MonotoneGraphemes` and `Characters` and 1,620 at
   `MonotoneCharacters` (before: 628 and 574). The rest come from the USE and Sinhala
   syllable grammars and from text in a buffer of another script.
+- Hangul in a buffer of another script, and the text of other scripts in a Hangul
+  buffer, shape as HarfBuzz shapes them. Such text normalizes with the shaper of the
+  buffer, as HarfBuzz normalizes the whole buffer with it: a syllable followed by a mark
+  in a Latin or Han buffer decomposes into jamo, and Latin text in a Hangul buffer
+  composes nothing. `calt` now applies to other scripts in a horizontal Hangul buffer,
+  since HarfBuzz 14.5.0 keeps it off jamo only. A Hangul tone mark after a letter of
+  another script stays in that letter's run, so it sorts with the letter's marks and
+  joins its cluster, and `Buffer::script_runs` keeps it in that run too. On 5,568
+  strings that mix syllables, modern and old jamo, and tone marks with Latin, Han,
+  kana, Greek and Cyrillic in both orders, with Noto Sans KR, its subsets and the Old
+  Hangul fixture, the output matches HarfBuzz 14.5.0 at every cluster level (before:
+  4,969).
 - The Devanagari stress signs and accents (U+0951..U+0954) are Inherited, as in
   `Scripts.txt`: they stay in the run of the letter before them and do not give a
   buffer its script. Alone they now shape with the default shaper, as in HarfBuzz,

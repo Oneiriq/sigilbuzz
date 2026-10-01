@@ -116,6 +116,22 @@ impl Shaper {
         }
     }
 
+    /// The shaper that normalizes a segment of a script that maps to
+    /// `self` in a buffer HarfBuzz shapes with `buffer`.
+    ///
+    /// HarfBuzz normalizes the whole buffer with the buffer's shaper.
+    /// sigilbuzz runs each segment's own shaper, so each segment
+    /// normalizes with it, except where sigilbuzz shapes the segment as
+    /// the buffer's shaper does: the Hangul shaper only runs for a
+    /// Hangul buffer, and in a Hangul buffer the text of scripts with no
+    /// shaper of their own goes through the Hangul shaper's features.
+    pub(super) fn normalizer_for(self, buffer: Self) -> Self {
+        match (self, buffer) {
+            (Self::Hangul, _) | (Self::Default, Self::Hangul) => buffer,
+            _ => self,
+        }
+    }
+
     /// The shaper's `normalization_preference`, with `AUTO` resolved.
     pub(super) const fn normalization_mode(self) -> NormalizationMode {
         match self {
@@ -206,6 +222,23 @@ mod tests {
         assert_eq!(Shaper::Hangul.mark_zeroing(), MarkZeroing::None);
         assert_eq!(Shaper::Use.mark_zeroing(), MarkZeroing::Early);
         assert_eq!(Shaper::Thai.mark_zeroing(), MarkZeroing::Late);
+        assert_eq!(
+            Shaper::Hangul.normalizer_for(Shaper::Default),
+            Shaper::Default
+        );
+        assert_eq!(
+            Shaper::Default.normalizer_for(Shaper::Hangul),
+            Shaper::Hangul
+        );
+        assert_eq!(
+            Shaper::Hangul.normalizer_for(Shaper::Hangul),
+            Shaper::Hangul
+        );
+        assert_eq!(Shaper::Indic.normalizer_for(Shaper::Hangul), Shaper::Indic);
+        assert_eq!(
+            Shaper::Default.normalizer_for(Shaper::Indic),
+            Shaper::Default
+        );
         assert!(Shaper::Indic.vowel_constraints());
         assert!(Shaper::Use.vowel_constraints());
         assert!(!Shaper::Khmer.vowel_constraints());

@@ -108,6 +108,24 @@ sigilbuzz ships the files unmodified. The OFL text lives in the upstream reposit
           --no-hinting --drop-tables+=STAT,MVAR,DSIG,BASE,vhea,vmtx \
           --output-file=NotoSansKR-HangulTone-Subset.ttf
 
+- `NotoSansKR-Calt-Subset.ttf`. A 4 KB subset of the same Regular instance of Noto Sans
+  Korean, with one lookup added, for `tests/hangul_mixed_parity.rs`: a single
+  substitution under every script's `calt` that turns `a` into `c` and U+1100 into
+  U+1101, so the test sees which glyphs `calt` reaches. It keeps the space, `a` to `c`,
+  U+00E1, U+0301, U+25CC, U+302E, U+1100, U+1101, U+1161, U+11A8, U+AC00, U+AC01, and
+  U+4E2D. Same upstream and license as `NotoSansKR-HangulTone-Subset.ttf`. Built with
+  fontTools:
+
+      python3 -m fontTools.subset NotoSansKR-Regular.ttf \
+          --unicodes="U+0020,U+0061-0063,U+00E1,U+0301,U+25CC,U+302E,U+1100-1101,U+1161,U+11A8,U+AC00,U+AC01,U+4E2D" \
+          --layout-features="ljmo,vjmo,tjmo,ccmp,calt,locl" \
+          --no-hinting --drop-tables+=STAT,MVAR,DSIG,BASE,vhea,vmtx,GPOS \
+          --output-file=subset.ttf
+
+  then, in Python, append `buildLookup([buildSingleSubstSubtable({"a": "c", "uni1100":
+  "uni1101"})])` from `fontTools.otlLib.builder` to the GSUB lookup list and add its
+  index to every `calt` feature.
+
 - `NotoSansDevanagari-NoGDEF-Subset.ttf`. A 2 KB subset of
   `NotoSansDevanagari-Regular.ttf` above without its GDEF table, for
   `tests/vowel_constraints_parity.rs`: with no GDEF glyph classes, HarfBuzz synthesizes

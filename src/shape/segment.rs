@@ -4,7 +4,7 @@
 use alloc::vec::Vec;
 
 use crate::buffer::script_priority_for;
-use crate::unicode::{script_of, Script};
+use crate::unicode::{is_hangul_tone_mark, script_of, Script};
 
 /// One shape-time segment: a maximal run of codepoints that share a
 /// resolved script. `cp_range` is a half-open range into the
@@ -51,11 +51,12 @@ fn segment_priority(script: Script, cps: &[char]) -> &'static [[u8; 4]] {
 /// scripts agree with the buffer-level [`crate::buffer::Buffer::script_runs`]
 /// segmentation: COMMON codepoints (ASCII space/digits/punctuation,
 /// ZWJ/ZWNJ/bidi marks) extend whichever real-script segment ran
-/// before them. A leading COMMON-only run joins the first real script
-/// after it, the way HarfBuzz gives a buffer the script of its first
-/// non-COMMON character, and text with no real script at all shapes
-/// as `Script::Other` under DFLT. Always returns at least one segment
-/// covering the whole `codepoints` range for a non-empty input.
+/// before them, and so does a Hangul tone mark. A leading COMMON-only
+/// run joins the first real script after it, the way HarfBuzz gives a
+/// buffer the script of its first non-COMMON character, and text with
+/// no real script at all shapes as `Script::Other` under DFLT. Always
+/// returns at least one segment covering the whole `codepoints` range
+/// for a non-empty input.
 pub(super) fn build_segments(codepoints: &[char]) -> Vec<Segment> {
     let mut segments: Vec<Segment> = Vec::new();
     if codepoints.is_empty() {
@@ -72,6 +73,12 @@ pub(super) fn build_segments(codepoints: &[char]) -> Vec<Segment> {
         let raw = script_of(ch);
         let resolved = if is_common_for_segmentation(ch) {
             current_script.unwrap_or(leading)
+        } else if is_hangul_tone_mark(ch) {
+            // A combining mark of the Hangul script. HarfBuzz shapes
+            // the buffer as one run, so the mark normalizes with the
+            // character before it and joins its cluster. It stays in
+            // that character's segment, and only starts a Hangul one.
+            current_script.unwrap_or(raw)
         } else {
             raw
         };

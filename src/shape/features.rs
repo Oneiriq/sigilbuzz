@@ -28,10 +28,12 @@ use crate::unicode::Script;
 /// handling of the segment's shaper (Arabic runs its ligating features
 /// with manual ZWJ).
 ///
-/// `hangul` says the buffer shapes with HarfBuzz's Hangul shaper, which
-/// turns `calt` off whatever the caller asks (`override_features_hangul`:
-/// Uniscribe does not apply it, and some CJK fonts put all their jamo
-/// lookups there).
+/// `calt` says whether `calt` applies. It is off for vertical text of a
+/// buffer HarfBuzz shapes with its Hangul shaper, whose vertical
+/// features leave it out whatever the caller asks. In horizontal text
+/// the Hangul shaper keeps `calt` off jamo only
+/// (`override_features_hangul` and `setup_masks_hangul`), and no jamo
+/// reach this pass.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_default_gsub(
     gsub: &Gsub<'_>,
@@ -43,7 +45,7 @@ pub(super) fn run_default_gsub(
     script_priority: &[[u8; 4]],
     early_features: &[[u8; 4]],
     table: JoinerTable,
-    hangul: bool,
+    calt: bool,
     budget: &mut LookupBudget,
 ) {
     let merged = |glyphs: &mut Vec<Glyph>, tags: &[[u8; 4]], budget: &mut LookupBudget| {
@@ -72,10 +74,10 @@ pub(super) fn run_default_gsub(
     // ship the same lookup set under both tags (calt for legacy,
     // rclt for required-contextual). Naively running each tag's
     // lookups in turn double-applies on those fonts.
-    let contextual: &[[u8; 4]] = if hangul {
-        &[*b"rclt"]
-    } else {
+    let contextual: &[[u8; 4]] = if calt {
         &[*b"calt", *b"rclt"]
+    } else {
+        &[*b"rclt"]
     };
     merged(glyphs, contextual, budget);
     // Vertical writing: HarfBuzz auto-enables `vrt2` when the font
