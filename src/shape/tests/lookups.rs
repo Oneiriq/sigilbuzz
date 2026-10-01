@@ -3,8 +3,9 @@
 //! guard, and the default-ignorable bookkeeping substitution does.
 
 use super::*;
-use crate::buffer::{unicode_prop, Glyph};
-use crate::shape::gsub::{expand_glyph_in_place, substitute_glyph};
+use crate::buffer::{unicode_prop, ClusterLevel, Glyph};
+use crate::shape::gsub::substitute_glyph;
+use crate::shape::gsub_buffer::GsubBuffer;
 use crate::shape::segment::remap_segments;
 use crate::tables::gsub::ChainContextAny;
 use crate::tables::layout::Joiners;
@@ -22,7 +23,10 @@ use crate::tables::layout::Joiners;
 /// only the lookup indices in `feature_indices` fire from the
 /// top-level `test` feature. The rest are still in the
 /// LookupList so nested-lookup dispatch can reach them.
-fn build_shapeable_font_with_gsub(lookups: &[(u16, Vec<u8>)], feature_indices: &[u16]) -> Vec<u8> {
+pub(super) fn build_shapeable_font_with_gsub(
+    lookups: &[(u16, Vec<u8>)],
+    feature_indices: &[u16],
+) -> Vec<u8> {
     let gsub_bytes = build_single_feature_gsub_with_filter(*b"test", lookups, feature_indices);
 
     // Reuse the build_shapeable_font bodies by re-assembling with
@@ -176,7 +180,7 @@ fn build_single_feature_gsub_with_filter(
 }
 
 // Helpers for building individual subtable bodies.
-fn build_cov_fmt1(glyphs: &[u16]) -> Vec<u8> {
+pub(super) fn build_cov_fmt1(glyphs: &[u16]) -> Vec<u8> {
     let mut o = Vec::new();
     o.extend_from_slice(&1u16.to_be_bytes());
     o.extend_from_slice(&(glyphs.len() as u16).to_be_bytes());
@@ -201,7 +205,7 @@ fn build_classdef_fmt2(ranges: &[(u16, u16, u16)]) -> Vec<u8> {
 /// Builds a GSUB type-1 format-2 (explicit) single-sub subtable
 /// that maps each glyph in `coverage` to the corresponding entry
 /// in `substitutes`.
-fn build_single_fmt2_subst(coverage_glyphs: &[u16], substitutes: &[u16]) -> Vec<u8> {
+pub(super) fn build_single_fmt2_subst(coverage_glyphs: &[u16], substitutes: &[u16]) -> Vec<u8> {
     assert_eq!(coverage_glyphs.len(), substitutes.len());
     let mut o = Vec::new();
     o.extend_from_slice(&2u16.to_be_bytes()); // format
@@ -289,11 +293,12 @@ fn substitute_glyph_clears_only_the_ignorable_bit() {
 fn multiple_substitution_marks_every_output_glyph_substituted() {
     let mut g = Glyph::new(0, 2);
     g.unicode_props = unicode_prop::DEFAULT_IGNORABLE | unicode_prop::NON_JOINER;
-    let mut glyphs = alloc::vec![Glyph::new(1, 0), g];
-    assert_eq!(
-        expand_glyph_in_place(&mut glyphs, 1, &[5, 6], &mut LookupBudget::for_run(&[])),
-        Some(2)
-    );
+    let level = ClusterLevel::MonotoneCharacters;
+    let mut buf = GsubBuffer::new(alloc::vec![Glyph::new(1, 0), g], None, level, false);
+    buf.clear_output();
+    buf.next_glyph();
+    lig::multiply(&mut buf, &[5, 6]);
+    let glyphs = buf.into_glyphs();
     assert_eq!(glyphs.len(), 3);
     for (i, out) in glyphs[1..].iter().enumerate() {
         // The low bits are the Unicode properties; the ligature
@@ -715,5 +720,43 @@ fn remap_segments_follows_morx_origins() {
     assert!(remap_segments(&[], &[0, 1]).is_empty());
 }
 
-const DFLT_TEST: &[[u8; 4]] = &[*b"DFLT"];
+pub(super) const DFLT_TEST: &[[u8; 4]] = &[*b"DFLT"];
 const ARAB_TEST: &[[u8; 4]] = &[*b"arab", *b"DFLT"];
+
+#[test]
+fn an_empty_multiple_substitution_sequence_deletes_its_glyph() {
+    // HarfBuzz's `Sequence::apply` deletes the glyph when the sequence
+    // is empty (HarfBuzz issue 253) through `hb_buffer_t::delete_glyph`,
+    // whose cluster goes to the glyph before it, or at the monotone
+    // levels to the glyph after it when it starts the run. Expected
+    // output from HarfBuzz 14.5.0 (uharfbuzz 0.56.2) on these font
+    // bytes.
+    let data = build_shapeable_font_with_gsub(&[(2, repeat_a_subtable(0))], &[0]);
+    let blob = Blob::new(&data);
+    let face = Face::parse(&blob, 0).unwrap();
+    let font = Font::new(face, 16.0);
+    let features = [Feature {
+        tag: *b"test",
+        value: 1,
+    }];
+    let run = |text: &str, level: ClusterLevel| {
+        let mut buffer = Buffer::new();
+        buffer.push_str(text);
+        buffer.set_cluster_level(level);
+        let shaped = shape(&font, &buffer, &features).unwrap();
+        shaped
+            .glyphs
+            .iter()
+            .map(|g| (g.glyph_id, g.cluster))
+            .collect::<Vec<_>>()
+    };
+    let mc = ClusterLevel::MonotoneCharacters;
+    assert_eq!(run("BAB", mc), [(2, 0), (2, 2)]);
+    assert_eq!(
+        run("CAB", ClusterLevel::MonotoneGraphemes),
+        [(3, 0), (2, 2)]
+    );
+    assert_eq!(run("AB", mc), [(2, 0)]);
+    assert_eq!(run("AAAB", mc), [(2, 0)]);
+    assert_eq!(run("AB", ClusterLevel::Characters), [(2, 1)]);
+}

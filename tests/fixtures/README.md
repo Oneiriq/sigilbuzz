@@ -52,3 +52,27 @@ Fonts used by the integration tests.
   `tests/tools/build_phantom_anchor_fixture.py`. `tests/outline_parity.rs` uses it to
   drive phantom-point resolution on a real `Face`. Public domain, no third-party
   content (generated entirely at build time).
+- `noto_sans_cjk_jp_uvs_subset.otf`: an 11 KB subset of Noto Sans CJK JP Regular
+  (version 2.004) by Adobe and the Noto Project Authors, SIL Open Font License 1.1
+  (reserved font name "Source", which the subset does not use). Source:
+  <https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf>,
+  license at <https://github.com/notofonts/noto-cjk/blob/main/Sans/LICENSE>. It keeps
+  the font's cmap format 14 subtable (Unicode Variation Sequences) for a few base
+  characters, with both default and non-default sequences for VS1, VS2, and VS17 to
+  VS19, so the tests can exercise variation sequence lookups and shaping. No other
+  fixture has a format 14 subtable. Built with fontTools 4.66.0 (`pyftsubset`):
+
+      pyftsubset NotoSansCJKjp-Regular.otf \
+          --unicodes="U+0020,U+0061,U+3001,U+3002,U+FF01,U+FF0C,U+845B,U+9089,U+6F22,U+4E08,U+8FBB,U+FE00,U+FE01,U+E0100,U+E0101,U+E0102" \
+          --layout-features='*' --desubroutinize --no-hinting --name-IDs='*' \
+          --notdef-outline --output-file=noto_sans_cjk_jp_uvs_subset.otf
+
+  The selectors must be in `--unicodes`, or `pyftsubset` drops the format 14 records.
+  `tests/cmap14_parity.rs` and the `sigilbuzz-capi` glyph lookup tests use it.
+- `../fonts/NotoSansKR-HangulTone-Subset.ttf`: an 8 KB subset of Noto Sans KR (OFL 1.1,
+  Copyright 2014-2021 Adobe, Reserved Font Name 'Source'), from
+  <https://github.com/google/fonts/tree/main/ofl/notosanskr>, instanced at Regular and
+  cut to the Hangul tone marks, the dotted circle, and a few jamo and syllables. It sits
+  with the other Noto fonts in `tests/fonts/`, whose README has the exact fontTools
+  commands. `tests/hangul_tone_harfbuzz_parity.rs` uses it, since no other fixture has
+  the tone marks.

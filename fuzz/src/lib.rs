@@ -120,11 +120,13 @@ pub fn shape_samples(face: Face<'_>, knobs: &mut Knobs<'_>, extra: Option<&str>)
         2 => ClusterLevel::Characters,
         _ => ClusterLevel::Graphemes,
     };
+    let not_found_selector = (mode & 0x80 != 0).then(|| u32::from(knobs.byte()));
     let texts = SAMPLE_TEXTS.iter().copied().chain(extra);
     for text in texts {
         let mut buffer = Buffer::new();
         buffer.set_flags(flags);
         buffer.set_cluster_level(level);
+        buffer.set_not_found_variation_selector_glyph(not_found_selector);
         match mode % 5 {
             0 => buffer.push_str(text),
             1 => buffer.set_text(text),

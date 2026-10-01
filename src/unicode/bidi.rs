@@ -19,8 +19,17 @@
 //! is linear per embedding level), so hostile input such as a long
 //! digit run or a deep stack of isolates stays cheap.
 //!
-//! The text is one paragraph: rule P1 (splitting at paragraph
-//! separators) is left to the caller.
+//! [`BidiInfo`] treats its text as one paragraph.
+//! [`crate::BidiParagraph`] applies rule P1 first: it splits the text
+//! after each paragraph separator and runs the other rules on each
+//! paragraph.
+//!
+//! ## Conformance
+//!
+//! Every line of the Unicode 17.0 BidiTest.txt and
+//! BidiCharacterTest.txt resolves to its levels and order. The
+//! [`bidi_class`] and bracket tables are generated from the same UCD
+//! release.
 //!
 //! ## Characters X9 removes
 //!
@@ -36,8 +45,8 @@
 //! types but before N1 / N2 sweep neutrals, brackets that pair across
 //! the isolating-run sequence get a strong type assigned according to
 //! the surrounding embedding context. The pair codepoint table lives
-//! in [`crate::unicode::bidi_brackets`] (curated extract of
-//! `BidiBrackets.txt`: ASCII + CJK + math families).
+//! in [`crate::unicode::bidi_brackets`], generated from
+//! `BidiBrackets.txt`.
 //!
 //! Brackets that don't pair (unbalanced opener / closer, opener
 //! without a matching closer) fall through unchanged and N1's
@@ -62,6 +71,7 @@ mod reorder;
 mod weak;
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use explicit::{build_isolating_sequences, explicit_levels};
 use reorder::{apply_l1, assign_removed_levels};
@@ -70,6 +80,36 @@ use weak::resolve_sequence;
 
 use crate::buffer::Direction;
 pub use crate::unicode::bidi_class::{bidi_class, BidiClass};
+
+/// UAX #9 rule P1: the byte ranges of the paragraphs of `text`, in
+/// order. Each paragraph ends after a paragraph separator (Bidi_Class
+/// B: LF, CR, U+001C to U+001E, NEL, U+2029), which stays with the
+/// paragraph it ends, or at the end of the text. Empty text has no
+/// paragraphs, and a separator at the very end starts no empty one.
+///
+/// A CR directly before an LF does not end a paragraph: the pair is
+/// one separator, as the Unicode newline guidelines (section 5.8 of the
+/// Unicode Standard) and ICU's `ubidi_setPara` treat it.
+pub(crate) fn paragraph_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, ch)) = chars.next() {
+        if bidi_class(ch) != BidiClass::B {
+            continue;
+        }
+        if ch == '\r' && matches!(chars.peek(), Some(&(_, '\n'))) {
+            continue;
+        }
+        let end = i + ch.len_utf8();
+        ranges.push(start..end);
+        start = end;
+    }
+    if start < text.len() {
+        ranges.push(start..text.len());
+    }
+    ranges
+}
 
 /// Applies UAX #9 rules P2 and P3 to `text` and returns the
 /// paragraph-level direction. LTR when no strong character exists
@@ -136,6 +176,10 @@ impl BidiInfo {
     /// `None`, P2 / P3 resolves it from the first strong character.
     /// Otherwise the override is honored (matches the
     /// `unicode-bidi` API).
+    ///
+    /// The whole text is one paragraph, even when it holds paragraph
+    /// separators. [`crate::BidiParagraph`] splits text into paragraphs
+    /// (rule P1) first.
     #[must_use]
     pub fn new(text: &str, paragraph_dir: Option<Direction>) -> Self {
         let paragraph = paragraph_dir.unwrap_or_else(|| paragraph_direction_with_isolates(text));
@@ -168,7 +212,7 @@ impl BidiInfo {
 
         // Partition into level runs and isolating run sequences,
         // then run W1-W7 + N0 + N1-N2 + I1-I2 per sequence.
-        let isolating_sequences = build_isolating_sequences(&cells, para_level);
+        let isolating_sequences = build_isolating_sequences(&cells, &original, para_level);
         for seq in isolating_sequences {
             resolve_sequence(&mut cells, &chars, &seq);
         }
@@ -226,3 +270,6 @@ impl BidiInfo {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod conformance_tests;

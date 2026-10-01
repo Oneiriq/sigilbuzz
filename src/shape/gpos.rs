@@ -22,10 +22,14 @@
 //! ignore are passed over, and so are default-ignorable characters
 //! (ZWNJ and hidden ones always, ZWJ unless the lookup belongs to
 //! `mark` or `mkmk`, which HarfBuzz registers with manual joiners).
+//! HarfBuzz's input walks also test each glyph's feature mask. Every
+//! GPOS feature here applies to every glyph, as HarfBuzz registers
+//! them all as global features, so that test always passes.
 
 use alloc::vec::Vec;
 
 use super::attach::{self, Attach, AttachSubtable, LookupCx};
+use super::glyph_flags::FlagCx;
 use super::{
     feature_disabled, filter_for_lookup, resolve_extension, Feature, LookupBudget, VarCtx,
     MAX_NESTED_DEPTH,
@@ -111,6 +115,8 @@ pub(super) struct GposCx<'a> {
     pub(super) gpos: &'a Gpos<'a>,
     pub(super) gdef: Option<&'a Gdef<'a>>,
     pub(super) var: &'a VarCtx<'a>,
+    /// The shaping call's glyph flag settings.
+    pub(super) flags: FlagCx,
 }
 
 /// Applies `lookups` in order across `glyphs`. Nested lookup calls
@@ -312,32 +318,48 @@ fn apply_subtables_at(
                     at + 1
                 })
             }
-            PosSubtable::Pair(pp) => apply_pair(pp, state, glyphs, at, cx.var, horizontal),
+            PosSubtable::Pair(pp) => {
+                apply_pair(pp, state, glyphs, at, cx.var, cx.flags, horizontal)
+            }
             PosSubtable::Attach(sub) => {
                 let lcx = LookupCx::new(mcx.input(), cx.var, state.index);
                 attach::apply_at(sub, glyphs, att, &lcx, at).then_some(at + 1)
             }
             PosSubtable::Context(ctx) => {
-                let (m, records) = match ctx {
-                    ContextPos::Format1(c) => c.matches(run, at, mcx),
-                    ContextPos::Format2(c) => c.matches(run, at, mcx),
-                    ContextPos::Format3(c) => c.matches(run, at, mcx).map(|m| (m, c.lookups())),
-                }?;
-                Some(apply_nested(
-                    cx, state, glyphs, att, run, m, records, depth, budget,
-                ))
+                let found = match ctx {
+                    ContextPos::Format1(c) => {
+                        c.matches_in(run, at, mcx, &mut cx.flags.sink(glyphs))
+                    }
+                    ContextPos::Format2(c) => {
+                        c.matches_in(run, at, mcx, &mut cx.flags.sink(glyphs))
+                    }
+                    ContextPos::Format3(c) => c
+                        .matches_in(run, at, mcx, &mut cx.flags.sink(glyphs))
+                        .map(|m| (m, c.lookups())),
+                };
+                // A rule set that does not match leaves the later
+                // subtables their turn.
+                found.map(|(m, records)| {
+                    apply_nested(cx, state, glyphs, att, run, m, records, depth, budget)
+                })
             }
             PosSubtable::Chain(chain) => {
-                let (m, records) = match chain {
-                    ChainContextPos::Format1(c) => c.matches(run, at, mcx),
-                    ChainContextPos::Format2(c) => c.matches(run, at, mcx),
-                    ChainContextPos::Format3(c) => {
-                        c.matches(run, at, mcx).map(|m| (m, c.lookups()))
+                let found = match chain {
+                    ChainContextPos::Format1(c) => {
+                        c.matches_in(run, at, mcx, &mut cx.flags.sink(glyphs))
                     }
-                }?;
-                Some(apply_nested(
-                    cx, state, glyphs, att, run, m, records, depth, budget,
-                ))
+                    ChainContextPos::Format2(c) => {
+                        c.matches_in(run, at, mcx, &mut cx.flags.sink(glyphs))
+                    }
+                    ChainContextPos::Format3(c) => c
+                        .matches_in(run, at, mcx, &mut cx.flags.sink(glyphs))
+                        .map(|m| (m, c.lookups())),
+                };
+                // A rule set that does not match leaves the later
+                // subtables their turn.
+                found.map(|(m, records)| {
+                    apply_nested(cx, state, glyphs, att, run, m, records, depth, budget)
+                })
             }
         };
         if next.is_some() {
@@ -361,19 +383,60 @@ fn apply_pair(
     glyphs: &mut [Glyph],
     at: usize,
     var: &VarCtx<'_>,
+    flags: FlagCx,
     horizontal: bool,
 ) -> Option<usize> {
     let first = glyphs.get(at)?.glyph_id as u16;
     if !pp.covers(first) {
         return None;
     }
-    let j = Skipper::new(state.mcx.input()).next(glyphs, at + 1)?;
+    let Some(j) = Skipper::new(state.mcx.input()).next(glyphs, at + 1) else {
+        flags.unsafe_to_concat(glyphs, at, glyphs.len());
+        return None;
+    };
     let second = glyphs[j].glyph_id as u16;
-    let (v1, v2, base) = pp.lookup_with_device_base(first, second)?;
+    let Some((v1, v2, base)) = pp.lookup_with_device_base(first, second) else {
+        flags.unsafe_to_concat(glyphs, at, j + 1);
+        return None;
+    };
     let (left, right) = glyphs.split_at_mut(j);
     apply_value(&mut left[at], &v1, base, var, horizontal);
     apply_value(&mut right[0], &v2, base, var, horizontal);
-    Some(if pp.value_format2() != 0 { j + 1 } else { j })
+    // HarfBuzz's PairSet::apply and PairPosFormat2::apply: a pair that
+    // moved something is unsafe to break, any other is unsafe to
+    // concatenate, and with a second value record the glyph after the
+    // pair joins the range (HarfBuzz issue 3824).
+    if moves(&v1, var, horizontal) || moves(&v2, var, horizontal) {
+        flags.unsafe_to_break(glyphs, at, j + 1);
+    } else {
+        flags.unsafe_to_concat(glyphs, at, j + 1);
+    }
+    if pp.value_format2() != 0 {
+        flags.unsafe_to_break(glyphs, at, j + 2);
+        Some(j + 1)
+    } else {
+        Some(j)
+    }
+}
+
+/// HarfBuzz's `ValueFormat::apply_value` result: whether the record
+/// holds a nonzero value it reads (the advance of the run's axis
+/// only), or a device offset it reads, which it does only for a
+/// variable font at non-default coordinates here.
+fn moves(v: &ValueRecord, var: &VarCtx<'_>, horizontal: bool) -> bool {
+    let advance = if horizontal { v.x_advance } else { v.y_advance };
+    let advance_device = if horizontal {
+        v.x_advance_device_off
+    } else {
+        v.y_advance_device_off
+    };
+    v.x_placement != 0
+        || v.y_placement != 0
+        || advance != 0
+        || (var.is_active()
+            && (v.x_placement_device_off != 0
+                || v.y_placement_device_off != 0
+                || advance_device != 0))
 }
 
 /// Dispatches a contextual match's nested lookup records at the

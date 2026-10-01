@@ -120,6 +120,19 @@ typedef struct hb_glyph_info_t {
     uint32_t       var2;
 } hb_glyph_info_t;
 
+/* Glyph flags, HarfBuzz's values. Every glyph of a cluster carries the
+ * same flags. UNSAFE_TO_CONCAT needs HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT
+ * and SAFE_TO_INSERT_TATWEEL needs
+ * HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL. */
+typedef enum {
+    HB_GLYPH_FLAG_UNSAFE_TO_BREAK        = 0x00000001,
+    HB_GLYPH_FLAG_UNSAFE_TO_CONCAT       = 0x00000002,
+    HB_GLYPH_FLAG_SAFE_TO_INSERT_TATWEEL = 0x00000004,
+    HB_GLYPH_FLAG_DEFINED                = 0x00000007
+} hb_glyph_flags_t;
+
+hb_glyph_flags_t hb_glyph_info_get_glyph_flags(const hb_glyph_info_t *info);
+
 typedef struct hb_glyph_position_t {
     hb_position_t x_advance;
     hb_position_t y_advance;
@@ -181,6 +194,23 @@ void       hb_font_set_variations(hb_font_t            *font,
                                   const hb_variation_t *variations,
                                   unsigned int          variations_length);
 
+/* Glyph lookups through the cmap. On a miss they return 0 and store 0 in
+ * `glyph`. hb_font_get_variation_glyph reads the format 14 subtable: a
+ * default sequence gives the base character's glyph. hb_font_get_glyph
+ * is hb_font_get_variation_glyph for a nonzero selector and
+ * hb_font_get_nominal_glyph otherwise. */
+hb_bool_t hb_font_get_nominal_glyph(hb_font_t      *font,
+                                    hb_codepoint_t  unicode,
+                                    hb_codepoint_t *glyph);
+hb_bool_t hb_font_get_variation_glyph(hb_font_t      *font,
+                                      hb_codepoint_t  unicode,
+                                      hb_codepoint_t  variation_selector,
+                                      hb_codepoint_t *glyph);
+hb_bool_t hb_font_get_glyph(hb_font_t      *font,
+                            hb_codepoint_t  unicode,
+                            hb_codepoint_t  variation_selector,
+                            hb_codepoint_t *glyph);
+
 /* ---------- Buffer ---------- */
 
 hb_buffer_t *hb_buffer_create(void);
@@ -194,18 +224,19 @@ void         hb_buffer_reset(hb_buffer_t *buffer);
  * cluster level stay. */
 void         hb_buffer_clear_contents(hb_buffer_t *buffer);
 
-/* Buffer flags, HarfBuzz's values. HarfBuzz's other flag bits
- * (VERIFY, PRODUCE_UNSAFE_TO_CONCAT, PRODUCE_SAFE_TO_INSERT_TATWEEL)
- * are accepted, stored, and returned by hb_buffer_get_flags, but
- * change nothing: sigilbuzz produces no glyph flags. EOT is stored
- * too; HarfBuzz's OpenType shaper reads no end-of-text state. */
+/* Buffer flags, HarfBuzz's values. HarfBuzz's VERIFY bit is accepted,
+ * stored, and returned by hb_buffer_get_flags, but changes nothing. EOT
+ * is stored too. HarfBuzz's OpenType shaper reads no end-of-text
+ * state. */
 typedef enum {
     HB_BUFFER_FLAG_DEFAULT                     = 0x00000000u,
     HB_BUFFER_FLAG_BOT                         = 0x00000001u,
     HB_BUFFER_FLAG_EOT                         = 0x00000002u,
     HB_BUFFER_FLAG_PRESERVE_DEFAULT_IGNORABLES = 0x00000004u,
     HB_BUFFER_FLAG_REMOVE_DEFAULT_IGNORABLES   = 0x00000008u,
-    HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE = 0x00000010u
+    HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE = 0x00000010u,
+    HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT    = 0x00000040u,
+    HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL = 0x00000080u
 } hb_buffer_flags_t;
 
 void              hb_buffer_set_flags(hb_buffer_t *buffer, hb_buffer_flags_t flags);
@@ -240,6 +271,15 @@ typedef enum {
 void                      hb_buffer_set_cluster_level(hb_buffer_t               *buffer,
                                                       hb_buffer_cluster_level_t  cluster_level);
 hb_buffer_cluster_level_t hb_buffer_get_cluster_level(const hb_buffer_t *buffer);
+
+/* The glyph a variation selector becomes when the font has no glyph for
+ * it after its base character. HB_CODEPOINT_INVALID (the default) hides
+ * such a selector like any other default ignorable. A setting:
+ * hb_buffer_clear_contents keeps it and hb_buffer_reset clears it. */
+#define HB_CODEPOINT_INVALID ((hb_codepoint_t) -1)
+void           hb_buffer_set_not_found_variation_selector_glyph(hb_buffer_t   *buffer,
+                                                                hb_codepoint_t not_found_variation_selector);
+hb_codepoint_t hb_buffer_get_not_found_variation_selector_glyph(const hb_buffer_t *buffer);
 
 /* Adds text[item_offset, item_offset + item_length) (item_length -1
  * means to the end; like HarfBuzz, an offset past the end is clamped
@@ -693,6 +733,13 @@ void hb_font_paint_glyph(hb_font_t *font,
 #define HB_OT_TAG_GPOS HB_TAG('G','P','O','S')
 
 void hb_face_collect_unicodes(const hb_face_t *face, hb_set_t *set);
+
+/* The variation selectors the face's cmap format 14 subtable has records
+ * for, and the base characters it lists with one selector. */
+void hb_face_collect_variation_selectors(const hb_face_t *face, hb_set_t *out);
+void hb_face_collect_variation_unicodes(const hb_face_t *face,
+                                        hb_codepoint_t   variation_selector,
+                                        hb_set_t        *out);
 
 void hb_ot_layout_collect_features(const hb_face_t *face,
                                    hb_tag_t          table_tag,

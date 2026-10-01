@@ -3,12 +3,15 @@
 
 use alloc::vec::Vec;
 
+use super::matchers::context_rule;
 use super::{
     parse_sequence_lookup_records, parse_shared_sets, read_offset_array, read_rule_offsets,
     read_u16_array, rule_bytes, RuleBudget, SequenceLookupRecord,
 };
 use crate::error::{Error, Result};
-use crate::tables::layout::skip_iter::{match_input, InputMatch, MatchContext, MatchGlyph};
+use crate::tables::layout::skip_iter::{
+    InputMatch, MatchContext, MatchGlyph, MatchSeq, UnsafeRanges,
+};
 use crate::tables::layout::{ClassDef, Coverage};
 use crate::tables::parse::Reader;
 
@@ -314,10 +317,22 @@ impl<'a> Context3<'a> {
         i: usize,
         cx: &MatchContext<'_>,
     ) -> Option<InputMatch> {
+        self.matches_in(glyphs, i, cx, &mut ())
+    }
+
+    /// [`Self::matches`] over any [`MatchSeq`], reporting unsafe
+    /// ranges to `sink`.
+    pub(crate) fn matches_in<S: MatchSeq + ?Sized>(
+        &self,
+        seq: &S,
+        i: usize,
+        cx: &MatchContext<'_>,
+        sink: &mut impl UnsafeRanges,
+    ) -> Option<InputMatch> {
         let (first, rest) = self.input.split_first()?;
-        if !first.contains(glyphs.get(i)?.id) {
+        if !first.contains(seq.glyph(i)?.id) {
             return None;
         }
-        match_input(glyphs, i, rest.len(), cx, |k, g| rest[k].contains(g))
+        context_rule(seq, i, cx, sink, rest.len(), |k, g| rest[k].contains(g))
     }
 }

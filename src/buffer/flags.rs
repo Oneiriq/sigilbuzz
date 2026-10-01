@@ -1,7 +1,8 @@
-//! Buffer flags and cluster levels, HarfBuzz's `hb_buffer_flags_t`
-//! and `hb_buffer_cluster_level_t`.
+//! Buffer flags, cluster levels, and the not-found variation selector
+//! glyph: HarfBuzz's `hb_buffer_flags_t`, `hb_buffer_cluster_level_t`,
+//! and `hb_buffer_set_not_found_variation_selector_glyph`.
 //!
-//! Both are buffer settings rather than content: like HarfBuzz's
+//! All three are buffer settings rather than content: like HarfBuzz's
 //! `hb_buffer_clear_contents`, [`Buffer::clear`] keeps them.
 
 use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
@@ -13,9 +14,8 @@ use super::Buffer;
 /// A set of bits combined with `|`. The values are HarfBuzz's, so
 /// [`Self::bits`] can be handed to or taken from HarfBuzz code
 /// unchanged. Only the flags sigilbuzz honors are defined; HarfBuzz's
-/// `VERIFY`, `PRODUCE_UNSAFE_TO_CONCAT`, and
-/// `PRODUCE_SAFE_TO_INSERT_TATWEEL` have no counterpart because
-/// sigilbuzz produces no glyph flags.
+/// `VERIFY` (which reshapes to check the glyph flags) has no
+/// counterpart.
 ///
 /// # Examples
 ///
@@ -59,9 +59,19 @@ impl BufferFlags {
     /// (`HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE`). Useful when the
     /// run continues text shaped earlier.
     pub const DO_NOT_INSERT_DOTTED_CIRCLE: Self = Self(0x10);
+    /// Produce [`GlyphFlags::UNSAFE_TO_CONCAT`](crate::GlyphFlags::UNSAFE_TO_CONCAT)
+    /// on the shaped glyphs (`HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT`).
+    /// Without it only [`GlyphFlags::UNSAFE_TO_BREAK`](crate::GlyphFlags::UNSAFE_TO_BREAK)
+    /// is produced.
+    pub const PRODUCE_UNSAFE_TO_CONCAT: Self = Self(0x40);
+    /// Produce [`GlyphFlags::SAFE_TO_INSERT_TATWEEL`](crate::GlyphFlags::SAFE_TO_INSERT_TATWEEL)
+    /// where Arabic joining allows a tatweel
+    /// (`HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL`). Those clusters
+    /// are also unsafe to break.
+    pub const PRODUCE_SAFE_TO_INSERT_TATWEEL: Self = Self(0x80);
 
     /// Every flag sigilbuzz defines.
-    const KNOWN: u32 = 0x1F;
+    const KNOWN: u32 = 0xDF;
 
     /// The empty set, same as [`Self::DEFAULT`].
     #[must_use]
@@ -100,7 +110,7 @@ impl BufferFlags {
     }
 
     /// The flags for `bits`, dropping the bits sigilbuzz does not
-    /// define (HarfBuzz's `VERIFY` and glyph-flag requests among them).
+    /// define (HarfBuzz's `VERIFY` among them).
     ///
     /// ```
     /// use sigilbuzz::BufferFlags;
@@ -360,6 +370,45 @@ impl Buffer {
     pub fn set_cluster_level(&mut self, level: ClusterLevel) {
         self.cluster_level = level;
     }
+
+    /// The glyph set with [`Self::set_not_found_variation_selector_glyph`],
+    /// or `None` (the default).
+    #[must_use]
+    pub const fn not_found_variation_selector_glyph(&self) -> Option<u32> {
+        self.not_found_variation_selector
+    }
+
+    /// Sets the glyph a variation selector becomes when the font has no
+    /// glyph for it after its base character, HarfBuzz's
+    /// `hb_buffer_set_not_found_variation_selector_glyph`.
+    ///
+    /// With `None` (the default) such a selector is a default ignorable
+    /// like any other: it is hidden, or removed with
+    /// [`BufferFlags::REMOVE_DEFAULT_IGNORABLES`]. With `Some(glyph)` it
+    /// stays in the output as `glyph`, so a caller can see that the
+    /// font lacks the variation and, for example, fall back to another
+    /// font. Only the first selector after a base counts, as in
+    /// HarfBuzz's `handle_variation_selector_cluster`. Like the flags,
+    /// the setting survives [`Self::clear`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::{shape, Buffer, Face, Font};
+    ///
+    /// # let data = include_bytes!("../../tests/fixtures/opensans_regular.ttf");
+    /// let font = Font::new(Face::parse_bytes(data, 0)?, 1000.0);
+    /// let mut buffer = Buffer::new();
+    /// buffer.push_str("a\u{FE00}");
+    /// // Open Sans has no variation sequences: the selector is hidden.
+    /// assert_eq!(shape(&font, &buffer, &[])?.glyphs[1].glyph_id, 3);
+    /// buffer.set_not_found_variation_selector_glyph(Some(0));
+    /// assert_eq!(shape(&font, &buffer, &[])?.glyphs[1].glyph_id, 0);
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
+    pub fn set_not_found_variation_selector_glyph(&mut self, glyph: Option<u32>) {
+        self.not_found_variation_selector = glyph;
+    }
 }
 
 #[cfg(test)]
@@ -374,7 +423,9 @@ mod tests {
         assert_eq!(BufferFlags::PRESERVE_DEFAULT_IGNORABLES.bits(), 0x04);
         assert_eq!(BufferFlags::REMOVE_DEFAULT_IGNORABLES.bits(), 0x08);
         assert_eq!(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE.bits(), 0x10);
-        assert_eq!(BufferFlags::all().bits(), 0x1F);
+        assert_eq!(BufferFlags::PRODUCE_UNSAFE_TO_CONCAT.bits(), 0x40);
+        assert_eq!(BufferFlags::PRODUCE_SAFE_TO_INSERT_TATWEEL.bits(), 0x80);
+        assert_eq!(BufferFlags::all().bits(), 0xDF);
     }
 
     #[test]
@@ -392,8 +443,8 @@ mod tests {
         assert_eq!(f, BufferFlags::BOT);
         f &= BufferFlags::EOT;
         assert!(f.is_empty());
-        assert_eq!(BufferFlags::from_bits(0x1F), Some(BufferFlags::all()));
-        assert_eq!(BufferFlags::from_bits(0x40), None);
+        assert_eq!(BufferFlags::from_bits(0xDF), Some(BufferFlags::all()));
+        assert_eq!(BufferFlags::from_bits(0x20), None);
         assert_eq!(BufferFlags::from_bits_truncate(0xFF), BufferFlags::all());
     }
 

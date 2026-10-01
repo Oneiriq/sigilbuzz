@@ -1,14 +1,11 @@
 //! Pre-parsed GSUB subtables: the parse-once cache a lookup's cursor
-//! walk reuses, the coverage digests that let it skip positions, the
-//! per-cursor dispatch over the cache, and the matching view of the
-//! glyph run the drivers keep in sync.
+//! walk reuses, the coverage digests that let it skip positions,
+//! and the per-cursor dispatch over the cache.
 
 use alloc::vec::Vec;
 
-use super::gsub::{
-    apply_gsub_chain_context_at, apply_gsub_context_at, expand_glyph_in_place, substitute_glyph,
-    GsubCx,
-};
+use super::gsub::{apply_gsub_chain_context_at, apply_gsub_context_at, substitute_glyph, GsubCx};
+use super::gsub_buffer::GsubBuffer;
 use super::{lig, resolve_extension, LookupBudget};
 use crate::buffer::Glyph;
 use crate::tables::gdef::Gdef;
@@ -16,7 +13,7 @@ use crate::tables::gsub::{
     lookup_type as gsub_lt, Alternate, ChainContextAny, Context as GsubContext, Ligature, Multiple,
     ReverseChain, Single,
 };
-use crate::tables::layout::{Lookup, MatchContext, MatchFilter, MatchGlyph};
+use crate::tables::layout::{Lookup, MatchContext, MatchFilter};
 
 /// One pre-parsed GSUB subtable, ready to drive a cursor walk.
 ///
@@ -117,13 +114,13 @@ fn primary_coverage_of<'a, 'b>(
 /// the run at all. Mirrors HarfBuzz's `would_apply` skip; returns
 /// `true` conservatively when a subtable doesn't expose its primary
 /// coverage cheaply.
-pub(super) fn lookup_might_apply(parsed: &[ParsedGsubSubtable<'_>], run: &[MatchGlyph]) -> bool {
+pub(super) fn lookup_might_apply(parsed: &[ParsedGsubSubtable<'_>], run: &[Glyph]) -> bool {
     if run.is_empty() {
         return false;
     }
     parsed.iter().any(|sub| match primary_coverage_of(sub) {
         None => true,
-        Some(cov) => run.iter().any(|g| cov.contains(g.id)),
+        Some(cov) => run.iter().any(|g| cov.contains(g.glyph_id as u16)),
     })
 }
 
@@ -146,16 +143,15 @@ pub(super) fn cursor_in_digest(parsed: &[ParsedGsubSubtable<'_>], id: u16) -> bo
         .any(|cov| cov.contains(id))
 }
 
-/// Tries the subtables of one lookup at `at` in order; the first one
-/// that applies wins. Returns where the lookup's walk continues when
-/// one applied (HarfBuzz leaves the cursor past a single substitution,
-/// past a multiple substitution's outputs, past the glyphs a ligature
-/// kept inside its match, and at the end of a contextual match), or
-/// `None` when none did.
+/// Tries the subtables of one lookup at the cursor in order. The first
+/// one that applies wins and leaves the cursor where HarfBuzz does:
+/// past a single substitution, past a multiple substitution's outputs,
+/// past the glyphs a ligature kept inside its match, and at the end
+/// of a contextual match. Returns whether one applied.
 ///
 /// `nested` is set when a contextual lookup dispatched this one:
 /// reverse chaining substitutions do not apply then, as in HarfBuzz.
-/// The glyph at `at` is not checked against the lookup's flags here;
+/// The cursor glyph is not checked against the lookup's flags here;
 /// the top-level walk does that, a nested dispatch does not. Nested
 /// lookups and multiple substitutions spend `budget`.
 #[allow(clippy::too_many_arguments)]
@@ -163,117 +159,99 @@ pub(super) fn apply_parsed_lookup_at(
     cx: &GsubCx<'_>,
     parsed: &[ParsedGsubSubtable<'_>],
     mcx: &MatchContext<'_>,
-    glyphs: &mut Vec<Glyph>,
-    run: &mut MatchRun,
-    at: usize,
+    buf: &mut GsubBuffer,
     depth: u8,
     alternate_index: u16,
     nested: bool,
     budget: &mut LookupBudget,
-) -> Option<usize> {
-    if at >= glyphs.len() {
-        return None;
-    }
-    let id = run.get(at).id;
+) -> bool {
+    let Some(cur) = buf.cur() else {
+        return false;
+    };
+    let id = cur.glyph_id as u16;
+    let at = buf.cursor();
     for sub in parsed {
-        let next = match sub {
-            ParsedGsubSubtable::Single(single) => single.apply(id).map(|out| {
-                substitute_glyph(&mut glyphs[at], out);
-                run.sync(at, &glyphs[at]);
-                at + 1
-            }),
+        let applied = match sub {
+            ParsedGsubSubtable::Single(single) => {
+                single.apply(id).map(|out| buf.replace_glyph(out))
+            }
             ParsedGsubSubtable::Multiple(m) => m
                 .apply(id)
-                .and_then(|seq| expand_glyph_in_place(glyphs, at, &seq, budget))
-                .map(|n| {
-                    run.resync(glyphs);
-                    at + n
-                }),
-            ParsedGsubSubtable::Alternate(alt) => alt.apply(id, alternate_index).map(|out| {
-                substitute_glyph(&mut glyphs[at], out);
-                run.sync(at, &glyphs[at]);
-                at + 1
-            }),
+                .and_then(|seq| apply_multiple(buf, &seq, budget).then_some(())),
+            ParsedGsubSubtable::Alternate(alt) => alt
+                .apply(id, alternate_index)
+                .map(|out| buf.replace_glyph(out)),
             ParsedGsubSubtable::Ligature(ligature) => {
-                ligature.apply_at(run.as_slice(), at, mcx).map(|(out, m)| {
+                let mut ops = buf.take_flag_ops();
+                let found = ligature.apply_at_in(&*buf, at, mcx, &mut ops);
+                buf.apply_flag_ops(ops);
+                found.and_then(|(out, m)| {
                     let positions = m.positions.as_slice();
                     if positions.len() == 1 {
                         // A one-component ligature is a plain
                         // substitution, not a ligation.
-                        substitute_glyph(&mut glyphs[at], out);
-                    } else {
-                        let classes = mcx.filter().classes();
-                        let level = cx.gsub.cluster_level();
-                        lig::ligate(glyphs, positions, out, &classes, substitute_glyph, level);
+                        buf.replace_glyph(out);
+                        return Some(());
                     }
-                    run.resync(glyphs);
-                    // The components after the first are gone; the
-                    // walk resumes after the last one's old place.
-                    m.end - (positions.len() - 1)
+                    let classes = mcx.filter().classes();
+                    lig::ligate(buf, positions, m.end, out, &classes).then_some(())
                 })
             }
             ParsedGsubSubtable::Context(ctx) => {
-                apply_gsub_context_at(cx, ctx, mcx, glyphs, run, at, depth + 1, budget)
+                apply_gsub_context_at(cx, ctx, mcx, buf, depth + 1, budget).then_some(())
             }
             ParsedGsubSubtable::ChainContext(chain) => {
-                apply_gsub_chain_context_at(cx, chain, mcx, glyphs, run, at, depth + 1, budget)
+                apply_gsub_chain_context_at(cx, chain, mcx, buf, depth + 1, budget).then_some(())
             }
             ParsedGsubSubtable::ReverseChained(rc) => {
                 if nested {
                     None
                 } else {
-                    rc.apply_at(run.as_slice(), at, mcx).map(|out| {
-                        substitute_glyph(&mut glyphs[at], out);
-                        run.sync(at, &glyphs[at]);
-                        at + 1
+                    // A reverse chaining subtable reached by a forward
+                    // walk substitutes in place, as HarfBuzz's
+                    // `replace_glyph_inplace` does.
+                    let mut ops = buf.take_flag_ops();
+                    let found = rc.apply_at_in(&*buf, at, mcx, &mut ops);
+                    buf.apply_flag_ops(ops);
+                    found.map(|out| {
+                        if let Some(g) = buf.cur_mut() {
+                            substitute_glyph(g, out);
+                        }
                     })
                 }
             }
         };
-        if next.is_some() {
-            return next;
+        if applied.is_some() {
+            return true;
         }
     }
-    None
+    false
 }
 
-/// The run as the matching rules see it ([`MatchGlyph`]s), kept in
-/// lockstep with the live `Vec<Glyph>` that GSUB drivers mutate. The
-/// matchers want a flat slice for backtrack/lookahead/window
-/// scanning; rebuilding it per cursor step would be `O(N^2)` for a
-/// feature that fires on every glyph. Single substitutions update one
-/// slot, ligatures and multiple substitutions resync.
-#[derive(Debug)]
-pub(super) struct MatchRun {
-    glyphs: Vec<MatchGlyph>,
-}
-
-impl MatchRun {
-    pub(super) fn from_glyphs(glyphs: &[Glyph]) -> Self {
-        Self {
-            glyphs: glyphs.iter().map(MatchGlyph::from).collect(),
+/// A multiple substitution's sequence at the cursor, HarfBuzz's
+/// `Sequence::apply`: one glyph is a plain substitution, more are
+/// output in its place, and none deletes the glyph (the spec forbids
+/// an empty sequence, but Uniscribe and HarfBuzz accept it, see HarfBuzz
+/// issue 253), merging its cluster into a neighbor.
+/// Returns false when `budget` has no room for the extra glyphs (see
+/// [`LookupBudget`]).
+fn apply_multiple(buf: &mut GsubBuffer, seq: &[u16], budget: &mut LookupBudget) -> bool {
+    match seq {
+        [] => {
+            buf.delete_glyph();
+            true
         }
-    }
-
-    pub(super) fn as_slice(&self) -> &[MatchGlyph] {
-        &self.glyphs
-    }
-
-    pub(super) fn get(&self, at: usize) -> MatchGlyph {
-        self.glyphs.get(at).copied().unwrap_or_default()
-    }
-
-    /// The glyph at `at` changed in place (id and props).
-    pub(super) fn sync(&mut self, at: usize, glyph: &Glyph) {
-        if let Some(slot) = self.glyphs.get_mut(at) {
-            *slot = MatchGlyph::from(glyph);
+        [one] => {
+            buf.replace_glyph(*one);
+            true
         }
-    }
-
-    /// The run changed length or several glyphs changed.
-    pub(super) fn resync(&mut self, glyphs: &[Glyph]) {
-        self.glyphs.clear();
-        self.glyphs.extend(glyphs.iter().map(MatchGlyph::from));
+        _ => {
+            if !budget.take_growth(seq.len() - 1) {
+                return false;
+            }
+            lig::multiply(buf, seq);
+            true
+        }
     }
 }
 

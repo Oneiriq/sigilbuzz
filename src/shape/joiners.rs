@@ -1,4 +1,5 @@
-//! Which GSUB features handle ZWJ and ZWNJ themselves.
+//! Which GSUB features handle ZWJ and ZWNJ themselves, and which
+//! match within one syllable.
 //!
 //! HarfBuzz's shapers register some features with `F_MANUAL_ZWJ` or
 //! `F_MANUAL_ZWNJ` (`F_MANUAL_JOINERS` for both): the lookups of such a
@@ -10,16 +11,65 @@
 //! models say. Every other feature, including all the default ones,
 //! skips joiners automatically.
 //!
+//! The Myanmar and USE shapers also register the features that shape
+//! a syllable with `F_PER_SYLLABLE`: their lookups only match glyphs
+//! of the cursor's syllable (the skipping iterator's `per_syllable`),
+//! so no conjunct or ligature forms across a syllable boundary. The
+//! syllables are the ones the shapers record in
+//! [`Glyph::syllable`](crate::Glyph::syllable).
+//!
 //! [`JoinerTable`] is the per-shaper list, from the feature tables of
-//! HarfBuzz's `hb-ot-shaper-arabic.cc`, `-indic.cc`, `-khmer.cc`,
-//! `-myanmar.cc` and `-use.cc` (the `mark` and `mkmk` GPOS features,
-//! manual in every shaper, live with the GPOS stage). The first
+//! HarfBuzz's `hb-ot-shaper-arabic.cc`, `-myanmar.cc` and `-use.cc`
+//! (the `mark` and `mkmk` GPOS features, manual in every shaper, live
+//! with the GPOS stage). The Indic and Khmer shapers apply every GSUB
+//! feature of their runs with their own feature tables
+//! (`crate::ot::indic::shaper`, `crate::ot::khmer`), so their segments
+//! take the default table here. The first
 //! registration of a tag decides its flags, and shapers register
 //! theirs before the default features, so a shaper's flags win for
 //! the default tags it also lists (`ccmp`, `liga`, ... in Arabic).
 
 use crate::tables::layout::Joiners;
 use crate::unicode::Script;
+
+/// A GSUB feature's flags in its shaper's feature table: HarfBuzz's
+/// `F_MANUAL_ZWJ` / `F_MANUAL_ZWNJ` ([`Joiners`]) and
+/// `F_PER_SYLLABLE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FeatureFlags {
+    /// How the feature's lookups treat ZWJ and ZWNJ.
+    pub(crate) joiners: Joiners,
+    /// The feature's lookups match within the cursor's syllable only.
+    pub(crate) per_syllable: bool,
+}
+
+impl FeatureFlags {
+    /// Automatic joiners, any syllable: the default features' flags.
+    pub(crate) const AUTO: Self = Self {
+        joiners: Joiners::AUTO,
+        per_syllable: false,
+    };
+
+    /// The flags of a lookup that several features of one stage share,
+    /// as HarfBuzz's map merges them: joiners are skipped only where
+    /// every feature skips them, and the first feature's per-syllable
+    /// setting stays.
+    pub(crate) const fn and(self, other: Self) -> Self {
+        Self {
+            joiners: self.joiners.and(other.joiners),
+            per_syllable: self.per_syllable,
+        }
+    }
+}
+
+impl From<Joiners> for FeatureFlags {
+    fn from(joiners: Joiners) -> Self {
+        Self {
+            joiners,
+            per_syllable: false,
+        }
+    }
+}
 
 /// The feature table of the HarfBuzz shaper a run's GSUB features
 /// follow.
@@ -30,10 +80,6 @@ pub(crate) enum JoinerTable {
     Default,
     /// The Arabic shaper: manual ZWJ for its ligating features.
     Arabic,
-    /// The Indic shaper: manual joiners for every Indic feature.
-    Indic,
-    /// The Khmer shaper: manual joiners for every Khmer feature.
-    Khmer,
     /// The Myanmar shaper: manual ZWJ for its basic and presentation
     /// features.
     Myanmar,
@@ -52,16 +98,6 @@ impl JoinerTable {
             return Self::Arabic;
         }
         match script {
-            Script::Devanagari
-            | Script::Bengali
-            | Script::Gurmukhi
-            | Script::Gujarati
-            | Script::Oriya
-            | Script::Tamil
-            | Script::Telugu
-            | Script::Kannada
-            | Script::Malayalam => Self::Indic,
-            Script::Khmer => Self::Khmer,
             Script::Myanmar => Self::Myanmar,
             Script::Tibetan | Script::Mongolian if dominant == Some(script) => Self::Use,
             Script::Sinhala
@@ -82,8 +118,46 @@ impl JoinerTable {
         }
     }
 
+    /// The flags of feature `tag` in this shaper: its joiner handling
+    /// and whether it matches within one syllable.
+    pub(crate) fn joiners(self, tag: [u8; 4]) -> FeatureFlags {
+        FeatureFlags {
+            joiners: self.manual_joiners(tag),
+            per_syllable: self.per_syllable(tag),
+        }
+    }
+
+    /// Whether feature `tag` is registered with `F_PER_SYLLABLE`: in
+    /// Myanmar `locl`, `ccmp`, and the basic features, and in USE
+    /// every feature up to its reorder.
+    fn per_syllable(self, tag: [u8; 4]) -> bool {
+        match self {
+            Self::Default | Self::Arabic => false,
+            Self::Myanmar => matches!(
+                &tag,
+                b"locl" | b"ccmp" | b"rphf" | b"pref" | b"blwf" | b"pstf"
+            ),
+            Self::Use => matches!(
+                &tag,
+                b"locl"
+                    | b"ccmp"
+                    | b"nukt"
+                    | b"akhn"
+                    | b"rphf"
+                    | b"pref"
+                    | b"rkrf"
+                    | b"abvf"
+                    | b"blwf"
+                    | b"half"
+                    | b"pstf"
+                    | b"vatu"
+                    | b"cjct"
+            ),
+        }
+    }
+
     /// The joiner handling of feature `tag` in this shaper.
-    pub(crate) fn joiners(self, tag: [u8; 4]) -> Joiners {
+    fn manual_joiners(self, tag: [u8; 4]) -> Joiners {
         let manual = match self {
             Self::Default => false,
             Self::Arabic => matches!(
@@ -102,38 +176,6 @@ impl JoinerTable {
                     | b"liga"
                     | b"clig"
                     | b"mset"
-            ),
-            Self::Indic => matches!(
-                &tag,
-                b"nukt"
-                    | b"akhn"
-                    | b"rphf"
-                    | b"rkrf"
-                    | b"pref"
-                    | b"blwf"
-                    | b"abvf"
-                    | b"half"
-                    | b"pstf"
-                    | b"vatu"
-                    | b"cjct"
-                    | b"init"
-                    | b"pres"
-                    | b"abvs"
-                    | b"blws"
-                    | b"psts"
-                    | b"haln"
-            ),
-            Self::Khmer => matches!(
-                &tag,
-                b"pref"
-                    | b"blwf"
-                    | b"abvf"
-                    | b"pstf"
-                    | b"cfar"
-                    | b"pres"
-                    | b"abvs"
-                    | b"blws"
-                    | b"psts"
             ),
             Self::Myanmar => matches!(
                 &tag,
@@ -160,7 +202,6 @@ impl JoinerTable {
         };
         match (manual, self) {
             (false, _) => Joiners::AUTO,
-            (true, Self::Indic | Self::Khmer) => Joiners::MANUAL,
             (true, _) => Joiners::MANUAL_ZWJ,
         }
     }
@@ -172,22 +213,45 @@ mod tests {
 
     #[test]
     fn shapers_mark_their_features_manual() {
-        assert_eq!(JoinerTable::Arabic.joiners(*b"liga"), Joiners::MANUAL_ZWJ);
-        assert_eq!(JoinerTable::Arabic.joiners(*b"rclt"), Joiners::AUTO);
-        assert_eq!(JoinerTable::Indic.joiners(*b"half"), Joiners::MANUAL);
-        assert_eq!(JoinerTable::Indic.joiners(*b"ccmp"), Joiners::AUTO);
-        assert_eq!(JoinerTable::Khmer.joiners(*b"pres"), Joiners::MANUAL);
-        assert_eq!(JoinerTable::Myanmar.joiners(*b"blwf"), Joiners::MANUAL_ZWJ);
-        assert_eq!(JoinerTable::Use.joiners(*b"pres"), Joiners::MANUAL_ZWJ);
-        assert_eq!(JoinerTable::Use.joiners(*b"isol"), Joiners::AUTO);
-        assert_eq!(JoinerTable::Default.joiners(*b"liga"), Joiners::AUTO);
+        assert_eq!(
+            JoinerTable::Arabic.joiners(*b"liga").joiners,
+            Joiners::MANUAL_ZWJ
+        );
+        assert_eq!(JoinerTable::Arabic.joiners(*b"rclt").joiners, Joiners::AUTO);
+        assert_eq!(
+            JoinerTable::Myanmar.joiners(*b"blwf").joiners,
+            Joiners::MANUAL_ZWJ
+        );
+        assert_eq!(
+            JoinerTable::Use.joiners(*b"pres").joiners,
+            Joiners::MANUAL_ZWJ
+        );
+        assert_eq!(JoinerTable::Use.joiners(*b"isol").joiners, Joiners::AUTO);
+        assert_eq!(
+            JoinerTable::Default.joiners(*b"liga").joiners,
+            Joiners::AUTO
+        );
+    }
+
+    #[test]
+    fn syllabic_shapers_mark_their_syllable_features_per_syllable() {
+        let per = |t: JoinerTable, tag: &[u8; 4]| t.joiners(*tag).per_syllable;
+        // hb-ot-shaper-myanmar.cc: locl, ccmp and the basic features.
+        assert!(per(JoinerTable::Myanmar, b"rphf") && per(JoinerTable::Myanmar, b"pstf"));
+        assert!(!per(JoinerTable::Myanmar, b"pres") && !per(JoinerTable::Myanmar, b"blws"));
+        // hb-ot-shaper-use.cc: up to the reorder.
+        assert!(per(JoinerTable::Use, b"nukt") && per(JoinerTable::Use, b"cjct"));
+        assert!(!per(JoinerTable::Use, b"isol") && !per(JoinerTable::Use, b"pres"));
+        assert!(!per(JoinerTable::Arabic, b"ccmp") && !per(JoinerTable::Default, b"ccmp"));
     }
 
     #[test]
     fn segments_pick_their_shapers_table() {
         let t = JoinerTable::for_segment;
         assert_eq!(t(Script::Arabic, true, None), JoinerTable::Arabic);
-        assert_eq!(t(Script::Devanagari, false, None), JoinerTable::Indic);
+        // The Indic and Khmer shapers bring their own tables.
+        assert_eq!(t(Script::Devanagari, false, None), JoinerTable::Default);
+        assert_eq!(t(Script::Khmer, false, None), JoinerTable::Default);
         assert_eq!(t(Script::Sinhala, false, None), JoinerTable::Use);
         let mong = Some(Script::Mongolian);
         assert_eq!(t(Script::Mongolian, false, mong), JoinerTable::Use);

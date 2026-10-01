@@ -2,15 +2,19 @@
 //!
 //! Scripts (Latin, Arabic, Hangul, ...) and general categories drive
 //! which feature list the shaper applies and how cluster boundaries
-//! are decided. The general category, joining type, mirroring, and
-//! canonical normalization tables are generated from UCD snapshots
-//! (see `tests/unicode_table_gen.rs`). The others are hand-curated
-//! excerpts of the UCD that cover the scripts the shaper handles, not
-//! the full database.
+//! are decided. The bidi class, paired bracket, general category,
+//! joining type, mirroring, and canonical normalization tables are
+//! generated from UCD snapshots (see `tests/unicode_table_gen.rs`). The
+//! others are hand-curated excerpts of the UCD that cover the scripts
+//! the shaper handles, not the full database.
 
 pub mod bidi;
 pub mod bidi_brackets;
+#[rustfmt::skip]
+mod bidi_brackets_table;
 pub mod bidi_class;
+#[rustfmt::skip]
+mod bidi_class_table;
 pub mod general_category;
 #[rustfmt::skip]
 mod general_category_table;
@@ -268,13 +272,15 @@ pub const fn script_of(ch: char) -> Script {
         // Modi (Marathi, 17th century).
         0x11600..=0x1165F => Script::Modi,
         // Hangul Jamo + Jamo Extended-A + Jamo Extended-B +
-        // precomposed Hangul Syllables + Hangul Compatibility Jamo.
-        // The USE routing in shape.rs only triggers for the Jamo
-        // ranges; precomposed syllables flow through the default
-        // pipeline. Matches HarfBuzz / rustybuzz.
-        0x1100..=0x11FF | 0xA960..=0xA97F | 0xAC00..=0xD7A3 | 0xD7B0..=0xD7FF | 0x3130..=0x318F => {
-            Script::Hangul
-        }
+        // precomposed Hangul Syllables + Hangul Compatibility Jamo,
+        // and the two Hangul tone marks (Script=Hangul in
+        // Scripts.txt), which the Hangul shaper moves.
+        0x1100..=0x11FF
+        | 0x302E..=0x302F
+        | 0x3130..=0x318F
+        | 0xA960..=0xA97F
+        | 0xAC00..=0xD7A3
+        | 0xD7B0..=0xD7FF => Script::Hangul,
         // Tibetan: base block. Stacked subjoined consonants live
         // in U+0F90..U+0FBC; the whole block routes through the
         // Tibetan feature-loop shaper.

@@ -1,0 +1,22 @@
+# Source: https://www.unicode.org/Public/17.0.0/ucd/Blocks.txt
+# Retrieved: 2026-09-26
+# Blocks-17.0.0.txt
+# Date: 2025-08-01
+0000..007F; Basic Latin
+0080..00FF; Latin-1 Supplement
+0900..097F; Devanagari
+0980..09FF; Bengali
+0A00..0A7F; Gurmukhi
+0A80..0AFF; Gujarati
+0B00..0B7F; Oriya
+0B80..0BFF; Tamil
+0C00..0C7F; Telugu
+0C80..0CFF; Kannada
+0D00..0D7F; Malayalam
+1780..17FF; Khmer
+1CD0..1CFF; Vedic Extensions
+2000..206F; General Punctuation
+2070..209F; Superscripts and Subscripts
+25A0..25FF; Geometric Shapes
+A8E0..A8FF; Devanagari Extended
+11300..1137F; Grantha

@@ -1,5 +1,5 @@
-//! Font functions: creating a font on a face, reference counting, and
-//! the scale, ppem and variation setters.
+//! Font functions: creating a font on a face, reference counting, the
+//! scale, ppem and variation setters, and the cmap glyph lookups.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -10,7 +10,10 @@ use sigilbuzz::Font;
 
 use crate::face::empty_face_arc;
 use crate::opaque::{FontInner, FontState};
-use crate::{handle, hb_face_t, hb_font_t, hb_position_t, hb_variation_t, spin_mutex, FaceInner};
+use crate::{
+    handle, hb_bool_t, hb_codepoint_t, hb_face_t, hb_font_t, hb_position_t, hb_variation_t,
+    spin_mutex, FaceInner,
+};
 
 // ---------------------------------------------------------------------------
 // Font
@@ -251,4 +254,111 @@ pub unsafe extern "C" fn hb_font_set_variations(
     // touched again until a later setter rebuilds the font. The font
     // is stored next to the coords and drops before them.
     state.font = unsafe { build_font(&inner.face.inner, state.x_scale, &state.coords) };
+}
+
+/// The glyph `face` maps `unicode` to, or `None`.
+fn nominal_glyph(face: &sigilbuzz::Face<'_>, unicode: hb_codepoint_t) -> Option<u16> {
+    let ch = char::from_u32(unicode)?;
+    face.cmap().ok()?.glyph_id(ch)
+}
+
+/// The glyph `face` maps the variation sequence to, or `None`.
+fn variation_glyph(
+    face: &sigilbuzz::Face<'_>,
+    unicode: hb_codepoint_t,
+    variation_selector: hb_codepoint_t,
+) -> Option<u16> {
+    let ch = char::from_u32(unicode)?;
+    let selector = char::from_u32(variation_selector)?;
+    face.cmap().ok()?.variation_glyph(ch, selector)
+}
+
+/// Writes `found` (or 0) to `glyph` when it is non-null and returns
+/// whether a glyph was found. HarfBuzz stores 0 on a miss.
+///
+/// # Safety
+/// `glyph` must be null or point to a writable `hb_codepoint_t`.
+unsafe fn store_glyph(found: Option<u16>, glyph: *mut hb_codepoint_t) -> hb_bool_t {
+    if !glyph.is_null() {
+        // SAFETY: `glyph` is non-null and the caller guarantees it
+        // points to a writable `hb_codepoint_t`.
+        unsafe { *glyph = found.map_or(0, u32::from) };
+    }
+    hb_bool_t::from(found.is_some())
+}
+
+/// Looks `unicode` up in the font's cmap and stores its glyph in
+/// `glyph`, as HarfBuzz's `hb_font_get_nominal_glyph` does. Returns 0
+/// and stores 0 when the font does not map it (or `font` is null).
+///
+/// # Safety
+/// `font` must be null or a live font. `glyph` must be null or point
+/// to a writable `hb_codepoint_t`.
+#[no_mangle]
+pub unsafe extern "C" fn hb_font_get_nominal_glyph(
+    font: *mut hb_font_t,
+    unicode: hb_codepoint_t,
+    glyph: *mut hb_codepoint_t,
+) -> hb_bool_t {
+    let found = if font.is_null() {
+        None
+    } else {
+        // SAFETY: `font` is non-null and the caller guarantees it
+        // points to a live `hb_font_t`.
+        let inner = unsafe { &(*font).inner };
+        nominal_glyph(&inner.face.inner.face, unicode)
+    };
+    // SAFETY: the caller guarantees `glyph` is null or writable.
+    unsafe { store_glyph(found, glyph) }
+}
+
+/// Looks the variation sequence `unicode` followed by
+/// `variation_selector` up in the font's cmap format 14 subtable and
+/// stores its glyph in `glyph`, as HarfBuzz's
+/// `hb_font_get_variation_glyph` does. A default sequence gives the
+/// glyph of `unicode`. Returns 0 and stores 0 when the font does not
+/// list the sequence (or `font` is null).
+///
+/// # Safety
+/// `font` must be null or a live font. `glyph` must be null or point
+/// to a writable `hb_codepoint_t`.
+#[no_mangle]
+pub unsafe extern "C" fn hb_font_get_variation_glyph(
+    font: *mut hb_font_t,
+    unicode: hb_codepoint_t,
+    variation_selector: hb_codepoint_t,
+    glyph: *mut hb_codepoint_t,
+) -> hb_bool_t {
+    let found = if font.is_null() {
+        None
+    } else {
+        // SAFETY: `font` is non-null and the caller guarantees it
+        // points to a live `hb_font_t`.
+        let inner = unsafe { &(*font).inner };
+        variation_glyph(&inner.face.inner.face, unicode, variation_selector)
+    };
+    // SAFETY: the caller guarantees `glyph` is null or writable.
+    unsafe { store_glyph(found, glyph) }
+}
+
+/// `hb_font_get_variation_glyph` when `variation_selector` is nonzero,
+/// `hb_font_get_nominal_glyph` otherwise, as in HarfBuzz.
+///
+/// # Safety
+/// `font` must be null or a live font. `glyph` must be null or point
+/// to a writable `hb_codepoint_t`.
+#[no_mangle]
+pub unsafe extern "C" fn hb_font_get_glyph(
+    font: *mut hb_font_t,
+    unicode: hb_codepoint_t,
+    variation_selector: hb_codepoint_t,
+    glyph: *mut hb_codepoint_t,
+) -> hb_bool_t {
+    if variation_selector != 0 {
+        // SAFETY: the caller's guarantees are this function's.
+        unsafe { hb_font_get_variation_glyph(font, unicode, variation_selector, glyph) }
+    } else {
+        // SAFETY: the caller's guarantees are this function's.
+        unsafe { hb_font_get_nominal_glyph(font, unicode, glyph) }
+    }
 }

@@ -17,8 +17,8 @@
 //! direction from their first strong bidi class instead, so an RTL
 //! script without a sigilbuzz shaper (Syriac, Thaana, ...) still counts
 //! as RTL. HarfBuzz reports no native direction for the bidirectional
-//! scripts (Old Hungarian, Old Italic, Runic, Tifinagh); those show up
-//! here as left to right.
+//! scripts (Old Hungarian, Old Italic, Runic, Tifinagh), so text in
+//! them shapes in the direction asked for, never reversed.
 //!
 //! A grapheme is a character and the continuation characters after it
 //! (see `cluster::continuations`). At
@@ -39,21 +39,42 @@ const fn is_regional_indicator(ch: char) -> bool {
     matches!(ch as u32, 0x1F1E6..=0x1F1FF)
 }
 
+/// Letters of the scripts HarfBuzz's `hb_script_get_horizontal_direction`
+/// gives no direction (`HB_DIRECTION_INVALID`): Old Hungarian, Old
+/// Italic, Runic, and Tifinagh (their `Scripts.txt` ranges).
+const fn has_no_native_direction(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x16A0..=0x16EA
+            | 0x16EE..=0x16F8
+            | 0x2D30..=0x2D67
+            | 0x2D6F..=0x2D70
+            | 0x2D7F
+            | 0x10300..=0x10323
+            | 0x1032D..=0x1032F
+            | 0x10C80..=0x10CB2
+            | 0x10CC0..=0x10CF2
+            | 0x10CFA..=0x10CFF
+    )
+}
+
 /// The script's native horizontal direction: [`Script::horizontal_direction`],
 /// or for text sigilbuzz has no script bucket for, the direction of
 /// its first strong character (left to right when there is none, as
-/// for HarfBuzz's Common script).
-fn native_horizontal(script: Option<Script>, cps: &[char]) -> Direction {
+/// for HarfBuzz's Common script). `None` when that character belongs
+/// to a script HarfBuzz gives no direction.
+fn native_horizontal(script: Option<Script>, cps: &[char]) -> Option<Direction> {
     match script {
-        Some(script) if script != Script::Other => script.horizontal_direction(),
+        Some(script) if script != Script::Other => Some(script.horizontal_direction()),
         _ => cps
             .iter()
             .find_map(|&c| match bidi_class(c) {
-                BidiClass::L => Some(Direction::Ltr),
-                BidiClass::R | BidiClass::Al => Some(Direction::Rtl),
+                _ if has_no_native_direction(c) => Some(None),
+                BidiClass::L => Some(Some(Direction::Ltr)),
+                BidiClass::R | BidiClass::Al => Some(Some(Direction::Rtl)),
                 _ => None,
             })
-            .unwrap_or(Direction::Ltr),
+            .unwrap_or(Some(Direction::Ltr)),
     }
 }
 
@@ -63,7 +84,9 @@ pub(super) fn resolve(direction: Direction, script: Option<Script>, cps: &[char]
     if !direction.is_horizontal() {
         return Direction::Ttb;
     }
-    let mut native = native_horizontal(script, cps);
+    let Some(mut native) = native_horizontal(script, cps) else {
+        return direction;
+    };
     if native == Direction::Rtl && direction == Direction::Ltr {
         let (mut number, mut ri) = (false, false);
         for &c in cps {

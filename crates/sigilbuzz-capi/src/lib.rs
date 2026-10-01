@@ -109,16 +109,21 @@ pub use buffer::{
     hb_buffer_add_utf16, hb_buffer_add_utf8, hb_buffer_clear_contents, hb_buffer_create,
     hb_buffer_destroy, hb_buffer_get_glyph_infos, hb_buffer_get_glyph_positions,
     hb_buffer_get_length, hb_buffer_guess_segment_properties, hb_buffer_reference, hb_buffer_reset,
-    hb_buffer_set_direction, hb_buffer_set_language, hb_buffer_set_script,
+    hb_buffer_set_direction, hb_buffer_set_language, hb_buffer_set_script, hb_glyph_flags_t,
+    hb_glyph_info_get_glyph_flags, HB_GLYPH_FLAG_DEFINED, HB_GLYPH_FLAG_SAFE_TO_INSERT_TATWEEL,
+    HB_GLYPH_FLAG_UNSAFE_TO_BREAK, HB_GLYPH_FLAG_UNSAFE_TO_CONCAT,
 };
 pub use buffer_flags::{
     hb_buffer_cluster_level_t, hb_buffer_flags_t, hb_buffer_get_cluster_level, hb_buffer_get_flags,
-    hb_buffer_set_cluster_level, hb_buffer_set_flags, HB_BUFFER_CLUSTER_LEVEL_CHARACTERS,
-    HB_BUFFER_CLUSTER_LEVEL_DEFAULT, HB_BUFFER_CLUSTER_LEVEL_GRAPHEMES,
-    HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS, HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES,
-    HB_BUFFER_FLAG_BOT, HB_BUFFER_FLAG_DEFAULT, HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE,
-    HB_BUFFER_FLAG_EOT, HB_BUFFER_FLAG_PRESERVE_DEFAULT_IGNORABLES,
-    HB_BUFFER_FLAG_REMOVE_DEFAULT_IGNORABLES,
+    hb_buffer_get_not_found_variation_selector_glyph, hb_buffer_set_cluster_level,
+    hb_buffer_set_flags, hb_buffer_set_not_found_variation_selector_glyph,
+    HB_BUFFER_CLUSTER_LEVEL_CHARACTERS, HB_BUFFER_CLUSTER_LEVEL_DEFAULT,
+    HB_BUFFER_CLUSTER_LEVEL_GRAPHEMES, HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS,
+    HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES, HB_BUFFER_FLAG_BOT, HB_BUFFER_FLAG_DEFAULT,
+    HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE, HB_BUFFER_FLAG_EOT,
+    HB_BUFFER_FLAG_PRESERVE_DEFAULT_IGNORABLES, HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL,
+    HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT, HB_BUFFER_FLAG_REMOVE_DEFAULT_IGNORABLES,
+    HB_CODEPOINT_INVALID,
 };
 pub(crate) use common::lang_und;
 pub use common::{
@@ -131,7 +136,8 @@ pub use face::{
     hb_face_create, hb_face_destroy, hb_face_get_glyph_count, hb_face_get_upem, hb_face_reference,
 };
 pub use font::{
-    hb_font_create, hb_font_destroy, hb_font_get_scale, hb_font_reference, hb_font_set_ppem,
+    hb_font_create, hb_font_destroy, hb_font_get_glyph, hb_font_get_nominal_glyph,
+    hb_font_get_scale, hb_font_get_variation_glyph, hb_font_reference, hb_font_set_ppem,
     hb_font_set_scale, hb_font_set_variations,
 };
 pub use opaque::{hb_blob_t, hb_buffer_t, hb_face_t, hb_font_t};
@@ -251,7 +257,8 @@ const fn tag(s: &[u8; 4]) -> hb_tag_t {
 pub struct hb_glyph_info_t {
     /// Before shaping, a Unicode codepoint. After shaping, a glyph id.
     pub codepoint: hb_codepoint_t,
-    /// Glyph flags. Always 0 in this implementation.
+    /// Glyph flags (`hb_glyph_flags_t`). Read them with
+    /// [`hb_glyph_info_get_glyph_flags`].
     pub mask: hb_mask_t,
     /// Index of the input cluster this glyph belongs to.
     pub cluster: u32,

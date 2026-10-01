@@ -100,6 +100,8 @@ pub(in crate::shape) struct MarkPositioner<'a> {
     /// Zeroed marks move back by the advance they lose (see
     /// `position::position`).
     pub(in crate::shape) adjust_offsets: bool,
+    /// The run's cluster level, for the glyph flags.
+    pub(in crate::shape) level: crate::buffer::ClusterLevel,
 }
 
 /// True for glyphs mark positioning treats as marks.
@@ -154,6 +156,8 @@ impl MarkPositioner<'_> {
     /// `position_around_base`: positions the marks in
     /// `glyphs[base + 1..end]` around `glyphs[base]`.
     fn position_around_base(&self, glyphs: &mut [Glyph], base: usize, end: usize) -> Result<()> {
+        // The marks' places depend on their base.
+        crate::shape::glyph_flags::unsafe_to_break(glyphs, base, end, self.level);
         let base_glyph = glyphs[base];
         let Some(mut base_extents) =
             glyph_extents(self.face, self.coords, base_glyph.glyph_id as u16)?

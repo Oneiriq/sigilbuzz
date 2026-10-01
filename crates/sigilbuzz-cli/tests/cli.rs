@@ -234,6 +234,20 @@ fn shape_bidi_prints_runs_in_visual_order() {
 }
 
 #[test]
+fn shape_bidi_orders_each_paragraph_on_its_own() {
+    // An Arabic paragraph ("beh alef ab" and U+2029), then a Latin one.
+    // The first is right to left: its separator (byte 7) at the left,
+    // then "ab", then the Arabic letters. The second follows, left to
+    // right.
+    let font = write_tempfile("amiri.ttf", AMIRI);
+    let text = "\u{0628}\u{0627} ab\u{2029}cd";
+    assert_eq!(
+        shaped_clusters(&font, text, &["--bidi"]),
+        ["7", "5", "6", "4", "2", "0", "10", "11"]
+    );
+}
+
+#[test]
 fn shape_rejects_bad_script_and_language() {
     let font = open_sans_path();
     for (flag, value) in [

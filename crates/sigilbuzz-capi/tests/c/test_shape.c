@@ -70,6 +70,11 @@ int main(int argc, char **argv) {
             fprintf(stderr, "glyph %u resolved to .notdef\n", i);
             return 9;
         }
+        /* The glyph flags stay within the bits HarfBuzz defines. */
+        if (hb_glyph_info_get_glyph_flags(&infos[i]) & ~HB_GLYPH_FLAG_DEFINED) {
+            fprintf(stderr, "glyph %u has undefined flags\n", i);
+            return 9;
+        }
     }
 
     /* Version sanity. */

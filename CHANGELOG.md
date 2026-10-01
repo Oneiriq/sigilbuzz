@@ -76,6 +76,58 @@ Added:
 - `ClassDef::empty` and `ClassDef::parse_at`.
 - `fuzz/`: cargo-fuzz targets for every part of the workspace that reads untrusted
   input. See [fuzz/README.md](fuzz/README.md).
+- Per-syllable matching, HarfBuzz's `F_PER_SYLLABLE`: the Indic, Khmer, Myanmar and USE
+  shapers number their syllables in the new `Glyph::syllable` field (HarfBuzz's
+  `syllable()` byte), and the features HarfBuzz registers per syllable (`locl`, `ccmp`
+  and the syllable-forming features of each shaper) only match glyphs of the cursor's
+  syllable, so a conjunct or ligature no longer forms across a syllable boundary.
+  `MatchContext::with_per_syllable` and `MatchContext::per_syllable` expose the setting
+  to the lookup matchers. `Glyph` gains a public field, so code that builds a `Glyph`
+  with a struct literal must add `syllable: 0`.
+- Glyph flags, HarfBuzz's `hb_glyph_flags_t`: `GlyphFlags` (`UNSAFE_TO_BREAK`,
+  `UNSAFE_TO_CONCAT`, `SAFE_TO_INSERT_TATWEEL`) in the new `Glyph::flags` field, set where
+  HarfBuzz 14.5.0 sets them: the skipping iterator's matches and failed matches in
+  every GSUB and GPOS lookup type, cluster merges a cluster level skips, ligatures and
+  deleted glyphs, kerning (GPOS, `kern`, `kerx` pairs), cursive and mark attachment,
+  fallback mark positioning, Arabic, Mongolian and N'Ko joining, the syllables of the
+  Indic, Khmer, Myanmar and USE shapers, a left matra the Indic shaper gives no `init`,
+  and the Hangul shaper's jamo and tone marks. Every glyph of a cluster carries the same
+  flags. On the Khmer, Indic and Hangul test strings the flags match HarfBuzz 14.5.0
+  wherever the glyphs do, at every cluster level. `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT` and
+  `BufferFlags::PRODUCE_SAFE_TO_INSERT_TATWEEL` (HarfBuzz's values) turn on the two
+  optional kinds. Code that builds a `Glyph` with a struct literal must add
+  `flags: GlyphFlags::empty()`.
+- `sigilbuzz-capi`: `hb_glyph_info_get_glyph_flags`, `hb_glyph_flags_t` with the
+  `HB_GLYPH_FLAG_*` constants, and `HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT` and
+  `HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL`. `hb_glyph_info_t::mask` carries the
+  glyph flags, as in HarfBuzz. It used to be zero.
+- cmap format 14, Unicode Variation Sequences: `Cmap::variation_glyph`,
+  `Cmap::variation_selectors`, `Cmap::variation_unicodes`, and `Face::variation_glyph`,
+  read from the subtable under `(0, 5)` as HarfBuzz reads it. Shaping uses it as
+  HarfBuzz's normalizer does: a character followed by a variation selector (U+FE00 to
+  U+FE0F, U+E0100 to U+E01EF) takes the glyph the font gives the pair, or the
+  character's usual glyph for a default sequence, and the selector is dropped with its
+  cluster merged into the character's. Pairs the font does not list shape as before.
+  Output changes only for fonts with a format 14 subtable. A format 14 subtable that
+  does not fit is ignored.
+- `sigilbuzz-capi`: `hb_font_get_nominal_glyph`, `hb_font_get_variation_glyph`,
+  `hb_font_get_glyph`, `hb_face_collect_variation_selectors`, and
+  `hb_face_collect_variation_unicodes`.
+- `Buffer::{set_not_found_variation_selector_glyph, not_found_variation_selector_glyph}`,
+  HarfBuzz's not-found variation selector glyph: a variation selector the font has no
+  glyph for after its base character becomes that glyph, with no advance or offset,
+  instead of being hidden or removed, so a caller can tell the font lacks the variation.
+  `sigilbuzz-capi`: `hb_buffer_set_not_found_variation_selector_glyph`,
+  `hb_buffer_get_not_found_variation_selector_glyph`, and `HB_CODEPOINT_INVALID`.
+- `BidiParagraph` applies UAX #9 rule P1: it splits the text after each paragraph
+  separator (LF, CR, NEL, U+001C to U+001E, U+2029, with CR LF as one separator, as ICU
+  treats it), and each paragraph gets its own base level (or the forced direction).
+  Runs, lines and visual order stop at paragraph boundaries, and shaping context and
+  the `BOT` and `EOT` flags stop at paragraph edges, so each paragraph shapes as it
+  would alone. `BidiParagraph::{paragraphs, paragraph_at}` and `BidiParagraphSpan`
+  describe the paragraphs. `direction` and `base_level` give the first paragraph's.
+  Text without a paragraph separator resolves and shapes as before. The CLI's
+  `shape --bidi` gets the split too.
 
 Changed:
 
@@ -194,6 +246,67 @@ Changed:
 - CI and the pre-push hook lint and test the whole workspace. They used to cover only
   the root crate. CI also checks the minimum Rust version, including every `no_std`
   build.
+- GSUB applies each lookup in one pass through HarfBuzz's output-buffer model
+  (`out_info`, `next_glyph`, `replace_glyphs`, `output_glyph`, `move_to`, `sync`), so
+  ligature and multiple substitutions take time linear in the run. They used to edit the
+  glyph vector in place and resync, which was quadratic: 20,000 "fi" ligatures in Open
+  Sans took 8 seconds in a debug build and now take 0.16 seconds. Ligation also follows
+  HarfBuzz 14.5.0 in two details: the later pieces of a multiple substitution add no
+  component to a ligature they join (`_hb_glyph_info_get_lig_num_comps_in_ligation`),
+  and a ligature whose first component is a nonspacing mark stops being a mark. Once
+  all seven ligature ids are live, new ligatures take them in turn.
+- Khmer has its own shaper, following HarfBuzz's (`hb-ot-shaper-khmer.cc`), in place of
+  the Universal Shaping Engine. HarfBuzz's Khmer syllable grammar decides the syllables,
+  so ZWJ and ZWNJ stay in a syllable only before a robat, an above-base vowel sign or an
+  X-group sign, and broken clusters get a dotted circle. Coeng + ro and a pre-base vowel
+  sign move to the start of their syllable before any lookup runs, with HarfBuzz's
+  `pref`, `blwf`, `abvf`, `pstf` and `cfar` masks. `locl`, `ccmp` and those five
+  features run as one stage, each lookup only where its mask allows and one syllable at
+  a time (`F_PER_SYLLABLE`), and `pres`, `abvs`, `blws` and `psts` run as one stage with
+  `rlig`, `calt`, `clig`, `rclt` and the caller's features. `liga` is off for Khmer, as
+  in HarfBuzz. On 2,010 Khmer test strings with Noto Sans Khmer, the output now matches
+  HarfBuzz 14.5.0 at the `MonotoneGraphemes`, `MonotoneCharacters` and `Characters`
+  cluster levels (before: 281 of the first 510). `ot::use_shaper::shape_khmer` runs the
+  new shaper, default features included.
+- Devanagari, Bengali, Gurmukhi, Gujarati, Oriya, Tamil, Telugu, Kannada and Malayalam
+  run through a port of HarfBuzz's Indic shaper (`hb-ot-shaper-indic.cc`): its syllable
+  grammar and character table, consonant positions read from the font's `blwf`,
+  `vatu`, `pstf` and `pref`, its initial and final reordering, and its feature stages
+  and masks. ZWJ and ZWNJ now act as in HarfBuzz: a joiner after Ra,H blocks an implicit
+  reph, a ZWJ after a halant stops the base search and keeps a pre-base matra from
+  moving past that halant, a ZWNJ turns `half` off and ends the syllable after a
+  halant, and a reph or pre-base consonant moves past a joiner that follows a halant.
+  Kannada Ra,H,ZWJ at the start of a syllable is shaped as Ra,ZWJ,H, so it forms no
+  reph, with the halant and ZWJ clusters merged. `liga` is off for these scripts, and
+  `init`, `pres`, `abvs`, `blws`, `psts` and `haln` run in one stage with `rlig`,
+  `calt`, `clig`, `rclt` and the caller's features. On 7,656 test strings with the Noto
+  Sans fonts of the nine scripts, the output matches HarfBuzz 14.5.0 on all but 7 (before:
+  4,826), at every cluster level. The 7 are HarfBuzz's vowel constraints, which insert a
+  dotted circle between an independent vowel and a vowel sign that would look like
+  another vowel, and sigilbuzz does not do that yet. Sinhala keeps the earlier Indic pass.
+  `ot::indic::shape_indic` and `shape_devanagari` run the port, default features
+  included.
+- The Universal Shaping Engine moves a repha as HarfBuzz does (`reorder_syllable_use`
+  in `hb-ot-shaper-use.cc`). `rphf` only applies to the first three glyphs of a
+  syllable (the first one when it is a repha character), the glyph it substitutes
+  becomes a repha, and after the basic features the repha moves to just before the
+  first vowel sign, medial, final or halant that did not ligate, or to the end of the
+  syllable, merging the clusters it passes. Tirhuta and Modi reph forms used to stay in
+  front of the base. HarfBuzz also matches `rphf` one syllable at a time. sigilbuzz does
+  not yet, because its USE syllables still come from a simpler grammar than HarfBuzz's.
+- Hangul follows HarfBuzz's Hangul shaper (`hb-ot-shaper-hangul.cc`) in a buffer whose
+  script is Hangul. Its preprocessing runs after grapheme clusters form, as in
+  HarfBuzz: jamo compose into a precomposed syllable the font has, a syllable the font
+  lacks decomposes into jamo, and a tone mark (U+302E, U+302F) after a syllable moves
+  in front of it, sharing its cluster, unless the font draws it with no advance. A tone
+  mark with no syllable before it gets a dotted circle, which sorts with the marks as
+  the tone mark does. `ljmo`, `vjmo` and `tjmo` apply only to the jamo of a syllable
+  that did not compose, and they run in one stage with the default features, where
+  `calt` applies to every glyph but jamo (HarfBuzz 14.5.0 turns `calt` off on jamo
+  only). The tone marks are now Hangul script, as in `Scripts.txt`. On 1,200 random
+  Hangul strings with Noto Sans KR and the Old Hangul fixture, the output now matches
+  HarfBuzz at every cluster level (before: 558). `ot::use_shaper::shape_hangul` runs
+  the new stage, default features included.
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,
@@ -332,6 +445,41 @@ Output that differed from HarfBuzz:
   subtables with a null backtrack ClassDef (as fontmake writes them) failed to parse or
   matched invented classes. PairPos format 2 and the subsetter's class-based rewriters
   had the same bug.
+- A multiple substitution with an empty sequence deletes its glyph, as HarfBuzz's
+  `Sequence::apply` does, and the glyph's cluster merges into a neighbor the way
+  `delete_glyph` merges it. It used to leave the glyph in place. Noto Sans Lepcha
+  deletes vowel signs this way.
+- A GPOS lookup whose contextual or chained contextual subtable does not match at a
+  glyph goes on to its next subtable, as in HarfBuzz. sigilbuzz stopped trying the
+  lookup there, so later subtables never applied: Amiri's kerning, for one, lost its
+  hamza and teh marbuta rules.
+- A GSUB feature that only some glyphs carry (the Arabic, Mongolian and N'Ko positional
+  forms, Indic `half`, `rtlm`) checks its mask at every input glyph a rule matches, as
+  HarfBuzz's skipping iterator does (`matcher_t::may_match`), not only at the cursor:
+  a ligature or contextual rule no longer matches across a glyph the feature is off at.
+  Contextual lookups of such features used to run over the whole run. They now start
+  only where the feature is on. The mask moves with its glyph through all of the
+  feature's lookups, where it used to stay at its index when an earlier lookup changed
+  the run's length. Every GPOS feature applies to every glyph, as in HarfBuzz, so GPOS
+  matching has no mask to check.
+- The bidi algorithm passes every line of the Unicode 17.0 BidiTest.txt (3,878 failed
+  before) and BidiCharacterTest.txt (19 failed before). An isolate inside a directional
+  override opens at its own direction and still matches its PDI (X5a to X5c, BD9), an
+  override leaves boundary neutrals to rule X9 (X6), a paragraph separator takes the
+  paragraph level (X8), marks after a bracket that N0 resolves take its type, bracket
+  pairing stops when the stack is full, and U+2329 and U+232A pair with U+3008 and
+  U+3009 (BD16).
+- `bidi_class` and the paired-bracket table are generated from the Unicode 17.0
+  `DerivedBidiClass.txt` (with the defaults of its `@missing` lines) and
+  `BidiBrackets.txt` by `tests/unicode_table_gen.rs`, like the other UCD tables. The
+  hand-picked tables had thousands of wrong values (Devanagari and other Indic marks as
+  L instead of NSM, Samaritan, Mandaic, Adlam and other right-to-left scripts as ON,
+  U+002A as ET, U+06F0 to U+06F9 as AN) and 30 of the 128 bracket pairs missing.
+  `BidiParagraph` levels change for such text. `shape` changes only where the class
+  decides the native direction, for scripts sigilbuzz has no shaper for: text in
+  Samaritan, Mandaic, Adlam, Kharoshthi, Phoenician, Garay and the other right-to-left
+  scripts is now reversed like HarfBuzz reverses it, and Old Hungarian, Old Italic, Runic
+  and Tifinagh, which HarfBuzz gives no native direction, are never reversed.
 
 Removed:
 

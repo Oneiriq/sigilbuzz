@@ -11,9 +11,11 @@
 //! design-unit size (size = 1.0 means we report raw advances). There
 //! is no point-size knob in the CLI yet.
 //!
-//! `--bidi` shapes the text as a bidirectional paragraph through
+//! `--bidi` shapes the text as bidirectional text through
 //! [`sigilbuzz::BidiParagraph`]: every embedding-level run in its own
 //! direction, the runs in visual order, clusters indexing the input.
+//! Paragraph separators split the text into paragraphs, each with its
+//! own direction and ordered on its own, one after the other.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -55,6 +57,7 @@ pub struct Args {
     /// Shape the text as a bidirectional paragraph: run the Unicode
     /// bidi algorithm, shape each embedding-level run in logical order
     /// in its own direction, and print the runs in visual order.
+    /// Paragraph separators (newlines, U+2029) start new paragraphs.
     /// Clusters stay byte offsets into the text.
     #[arg(long)]
     pub bidi: bool,

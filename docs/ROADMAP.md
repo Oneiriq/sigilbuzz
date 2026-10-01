@@ -27,21 +27,30 @@ These are smaller pieces that are not scheduled yet.
 - Language tags from version 1 `name` tables are read but not exposed.
 - Subsetting a CFF or CFF2 font down to fewer glyphs drops its layout and variation
   tables. TrueType fonts keep them.
-- GSUB ligature and multiple substitution edit the glyph buffer in place, which is
-  quadratic on very long runs (about 1.8 seconds for 40,000 Arabic characters).
+- The Universal Shaping Engine finds syllables with a simpler grammar than HarfBuzz's,
+  and its category table misses some characters (Tirhuta sign i, for one). So `rphf`
+  is not matched one syllable at a time, and some glyph flags differ from HarfBuzz's.
+  On 1,992 USE test strings, 1,519 shape as HarfBuzz 14.5.0 does.
+- Sinhala runs the earlier Indic pass. HarfBuzz shapes it with the Universal Shaping
+  Engine.
+- The Indic shaper does not insert the dotted circle HarfBuzz adds for its vowel
+  constraints (an independent vowel followed by a vowel sign that would read as another
+  vowel).
+- Hangul in a buffer whose script is not Hangul is normalized one segment at a time,
+  and `calt` is off for it.
 
 ## Known bugs
 
 Found during the 0.22.0 hardening review. Each fix changes output for some valid
 fonts, so they are left for a release that can call that out.
 
-- Indic: a syllable with two or more pre-base matras moves the wrong glyphs during
-  reordering. HarfBuzz uses a stable partition here.
+- Sinhala: a syllable with two or more pre-base vowel signs moves the wrong glyphs
+  during reordering. HarfBuzz uses a stable partition here. The nine scripts the
+  Indic shaper port covers reorder them as HarfBuzz does.
 - CFF2 FDSelect format 4 truncates font DICT indexes to 8 bits, so a font with more
   than 256 font DICTs uses the wrong local subroutines.
 - Progressive JPEG images in `sbix` decode their AC coefficients through the zigzag
   table twice.
-- Bidi: an RLI inside a directional override loses its direction.
 - VARC: child components get empty axis coordinates where they should inherit the
   parent's, and `RESET_UNSPECIFIED_AXES` is ignored.
 - `morx`: the substitution table layout differs from the spec in one place, and a

@@ -13,3 +13,9 @@ pub const NONSPACING_MARK: u8 = 1 << 1;
 /// glyph, telling positioning which width to give it (HarfBuzz's space
 /// fallback type).
 pub const SPACE_SHIFT: u32 = 3;
+/// The source character is a variation selector right after a base
+/// character, and the font has no glyph for the pair. HarfBuzz gives it
+/// General_Category Cf while it substitutes and positions, so it is no
+/// mark then, and afterwards swaps in the buffer's not-found variation
+/// selector glyph when one is set.
+pub const UNRESOLVED_SELECTOR: u8 = 1 << 2;

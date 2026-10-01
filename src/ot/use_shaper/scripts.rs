@@ -8,11 +8,11 @@ use super::reorder::initial_reorder;
 use super::segment_syllables;
 use super::{
     shape_use, BALINESE_SCRIPT_PRIORITY, BRAHMI_SCRIPT_PRIORITY, BUGINESE_SCRIPT_PRIORITY,
-    CHAM_SCRIPT_PRIORITY, HANGUL_FEATURES, HANGUL_SCRIPT_PRIORITY, KHOJKI_SCRIPT_PRIORITY,
-    LEPCHA_SCRIPT_PRIORITY, LIMBU_SCRIPT_PRIORITY, MODI_SCRIPT_PRIORITY, MYANMAR_BASIC_FEATURES,
-    MYANMAR_SCRIPT_PRIORITY, MYANMAR_TOPOGRAPHICAL_FEATURES, NKO_SCRIPT_PRIORITY,
-    SHARADA_SCRIPT_PRIORITY, SUNDANESE_SCRIPT_PRIORITY, TAI_THAM_SCRIPT_PRIORITY,
-    TIRHUTA_SCRIPT_PRIORITY, USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES,
+    CHAM_SCRIPT_PRIORITY, KHOJKI_SCRIPT_PRIORITY, LEPCHA_SCRIPT_PRIORITY, LIMBU_SCRIPT_PRIORITY,
+    MODI_SCRIPT_PRIORITY, MYANMAR_BASIC_FEATURES, MYANMAR_SCRIPT_PRIORITY,
+    MYANMAR_TOPOGRAPHICAL_FEATURES, NKO_SCRIPT_PRIORITY, SHARADA_SCRIPT_PRIORITY,
+    SUNDANESE_SCRIPT_PRIORITY, TAI_THAM_SCRIPT_PRIORITY, TIRHUTA_SCRIPT_PRIORITY,
+    USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES,
 };
 use crate::buffer::{ClusterLevel, Glyph};
 use crate::shape::{
@@ -41,6 +41,9 @@ pub fn shape_myanmar(
     }
     let table = JoinerTable::Myanmar;
     let syllables = segment_syllables(codepoints);
+    // Per-syllable features match within these (HarfBuzz's syllable()).
+    let numbers = syllables.iter().map(|s| (s.start, s.end, s.kind as u8));
+    crate::shape::number_syllables(glyphs, numbers, level);
     // `locl` and `ccmp` see the logical order, as one stage, before the
     // reorder (`collect_features_myanmar`). The reorder indexes glyphs
     // by code point, so a length-changing `ccmp` waits until after it.
@@ -91,17 +94,17 @@ pub fn shape_myanmar(
     );
 }
 
-/// Entry point for Hangul runs, specifically Jamo (Old Hangul)
-/// decomposed text. Precomposed syllables still flow through the
-/// default path in [`crate::shape`]; only runs containing at least
-/// one Jamo codepoint land here. The feature chain drives
-/// `ljmo`/`vjmo`/`tjmo` so Leading / Vowel / Trailing jamo pick
-/// their positional variant glyphs; `ccmp` and the other default
-/// features run once, in the default pass after this.
+/// Entry point for Hangul runs whose syllables composed already: the
+/// GSUB stage of HarfBuzz's Hangul shaper (`crate::ot::hangul`), with
+/// `ljmo`, `vjmo`, and `tjmo` on each `<L,V>` or `<L,V,T>` jamo
+/// sequence, `calt` kept off jamo, and the default features, all in
+/// one stage as HarfBuzz runs them.
 ///
-/// An `<L,V>` or `<L,V,T>` jamo sequence that did not compose into a
-/// precomposed syllable forms one cluster at the grapheme levels, as
+/// Each such jamo sequence forms one cluster at the grapheme levels, as
 /// HarfBuzz's Hangul shaper merges it (`merge_out_grapheme_clusters`).
+/// Shaping through [`crate::shape`] also composes and decomposes
+/// syllables and moves tone marks first, as HarfBuzz's preprocessing
+/// does.
 pub fn shape_hangul(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -109,21 +112,18 @@ pub fn shape_hangul(
     glyphs: &mut Vec<Glyph>,
     level: ClusterLevel,
 ) {
-    if glyphs.len() == codepoints.len() {
-        merge_jamo_syllables(codepoints, glyphs, level);
+    if glyphs.len() != codepoints.len() {
+        return;
     }
-    shape_use(
+    merge_jamo_syllables(codepoints, glyphs, level);
+    let jamo = crate::ot::hangul::jamo_features(codepoints);
+    let run = crate::ot::hangul::HangulRun {
         gsub,
         gdef,
-        codepoints,
-        glyphs,
-        HANGUL_SCRIPT_PRIORITY,
-        HANGUL_FEATURES,
-        &[],
-        false,
-        level,
-        JoinerTable::Default,
-    );
+        features: &[],
+        vertical: false,
+    };
+    crate::ot::hangul::shape(&run, codepoints, &jamo, glyphs);
 }
 
 /// HarfBuzz's leading, vowel, and trailing jamo ranges (`isL`, `isV`,

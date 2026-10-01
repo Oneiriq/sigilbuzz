@@ -1,5 +1,5 @@
 //! Visual order for one line: rule L1 at the line end, then rule L2
-//! over the line's runs.
+//! over the line's runs, one paragraph at a time.
 
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -23,7 +23,12 @@ impl BidiParagraph {
     ///   stretch of runs at that level or higher is reversed.
     ///
     /// A run cut by a line break yields just the part inside the line.
-    /// Adjacent runs never share a level.
+    /// Adjacent runs of one paragraph never share a level.
+    ///
+    /// A line never crosses a paragraph boundary in a layout, since each
+    /// paragraph starts a new line. When `line` does, each paragraph's
+    /// part is ordered as a line of its own, with its own paragraph
+    /// level, and the parts come in logical order.
     ///
     /// # Panics
     ///
@@ -56,6 +61,24 @@ impl BidiParagraph {
     #[must_use]
     pub fn line_runs(&self, line: Range<usize>) -> Vec<BidiRun> {
         self.check_range(&line);
+        let first = self
+            .paragraphs
+            .partition_point(|paragraph| paragraph.range.end <= line.start);
+        let mut runs = Vec::new();
+        for paragraph in self.paragraphs[first..]
+            .iter()
+            .take_while(|paragraph| paragraph.range.start < line.end)
+        {
+            let start = line.start.max(paragraph.range.start);
+            let end = line.end.min(paragraph.range.end);
+            runs.extend(self.paragraph_line_runs(start..end, paragraph.level));
+        }
+        runs
+    }
+
+    /// [`Self::line_runs`] for a line inside one paragraph whose level
+    /// is `base_level`.
+    fn paragraph_line_runs(&self, line: Range<usize>, base_level: u8) -> Vec<BidiRun> {
         // L1 for the end of this line.
         let body_end = self.text[line.clone()]
             .char_indices()
@@ -74,7 +97,7 @@ impl BidiParagraph {
             let end = run.range.end.min(body_end);
             push_run(&mut runs, start..end, run.level);
         }
-        push_run(&mut runs, body_end..line.end, self.base_level());
+        push_run(&mut runs, body_end..line.end, base_level);
 
         let levels: Vec<u8> = runs.iter().map(|run| run.level).collect();
         reorder_visual(&levels)
@@ -83,8 +106,8 @@ impl BidiParagraph {
             .collect()
     }
 
-    /// The paragraph's runs in visual order, with the whole text as one
-    /// line: [`Self::line_runs`] over the full text.
+    /// The text's runs in visual order, with each paragraph as one line:
+    /// [`Self::line_runs`] over the full text.
     ///
     /// ```
     /// use sigilbuzz::{BidiParagraph, BidiRun};
@@ -111,8 +134,8 @@ impl BidiParagraph {
     ///
     /// [`Self::line_runs`] already orders the paragraph's own runs. This
     /// is for engines that cut a line into finer items (a font or style
-    /// change inside a run): give it the items of one line in logical
-    /// order, after applying L1 to the line end as
+    /// change inside a run): give it the items of one line of one
+    /// paragraph in logical order, after applying L1 to the line end as
     /// [`Self::line_runs`] does.
     ///
     /// ```

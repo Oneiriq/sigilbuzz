@@ -18,7 +18,9 @@ use crate::unicode::{script_of, Script};
 
 pub mod char_class;
 mod flags;
+mod glyph_flags;
 pub use flags::{BufferFlags, ClusterLevel};
+pub use glyph_flags::GlyphFlags;
 
 /// Writing direction of a text run.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -56,8 +58,8 @@ impl Direction {
 /// combining marks).
 ///
 /// In addition to the rendered fields, `Glyph` carries shaper-internal
-/// scratch fields (`unicode_props`, `indic_position`, `char_class`, and
-/// `combining_class`) that the shaping stages use to track per-glyph
+/// scratch fields (`unicode_props`, `indic_position`, `char_class`,
+/// `combining_class`, and `syllable`) that the shaping stages use to track per-glyph
 /// state across GSUB passes. Renderers and
 /// most callers can ignore them; they are public so the shaper
 /// modules inside this crate can round-trip state through `Vec<Glyph>`
@@ -105,6 +107,19 @@ pub struct Glyph {
     /// reordering and fallback positioning adjust it. Zero for every
     /// other glyph.
     pub combining_class: u8,
+    /// Shaper-internal syllable of the glyph, HarfBuzz's `syllable()`
+    /// byte: the Indic, Khmer, Myanmar, and USE shapers number their
+    /// syllables (a serial in the high four bits, the syllable type in
+    /// the low four) and every glyph a syllable produces carries its
+    /// number through GSUB. The features HarfBuzz registers with
+    /// `F_PER_SYLLABLE` only match within one syllable. Zero for a
+    /// glyph in no syllable.
+    pub syllable: u8,
+    /// Glyph flags, HarfBuzz's `hb_glyph_info_get_glyph_flags`: whether
+    /// the text may be broken or joined at this glyph's cluster without
+    /// reshaping (see [`GlyphFlags`]). Every glyph of a cluster carries
+    /// the same flags.
+    pub flags: GlyphFlags,
 }
 
 /// Bits packed into [`Glyph::unicode_props`].
@@ -189,6 +204,8 @@ impl Glyph {
             indic_position: IndicPosition::Start as u8,
             char_class: 0,
             combining_class: 0,
+            syllable: 0,
+            flags: GlyphFlags::empty(),
         }
     }
 }
@@ -226,6 +243,9 @@ pub struct Buffer {
     pub(crate) flags: BufferFlags,
     /// How clusters form and merge, set by [`Buffer::set_cluster_level`].
     pub(crate) cluster_level: ClusterLevel,
+    /// The glyph a variation selector the font cannot resolve becomes,
+    /// set by [`Buffer::set_not_found_variation_selector_glyph`].
+    pub(crate) not_found_variation_selector: Option<u32>,
 }
 
 impl Buffer {

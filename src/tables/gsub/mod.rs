@@ -68,6 +68,9 @@ pub struct Gsub<'a> {
     /// components' clusters only at the monotone levels, as
     /// HarfBuzz's `ligate_input` does through its buffer.
     cluster_level: ClusterLevel,
+    /// Whether lookups record where glyphs are unsafe to concatenate,
+    /// which only a buffer with `PRODUCE_UNSAFE_TO_CONCAT` asks for.
+    unsafe_to_concat: bool,
 }
 
 impl<'a> Gsub<'a> {
@@ -108,6 +111,7 @@ impl<'a> Gsub<'a> {
             lookup_list,
             language_tags: &[],
             cluster_level: ClusterLevel::MonotoneCharacters,
+            unsafe_to_concat: false,
         })
     }
 
@@ -156,6 +160,20 @@ impl<'a> Gsub<'a> {
     #[must_use]
     pub(crate) const fn cluster_level(&self) -> ClusterLevel {
         self.cluster_level
+    }
+
+    /// The same view for a buffer that asks for unsafe-to-concatenate
+    /// glyph flags (`BufferFlags::PRODUCE_UNSAFE_TO_CONCAT`).
+    #[must_use]
+    pub(crate) const fn with_unsafe_to_concat(mut self, produce: bool) -> Self {
+        self.unsafe_to_concat = produce;
+        self
+    }
+
+    /// True when lookups record where glyphs are unsafe to concatenate.
+    #[must_use]
+    pub(crate) const fn unsafe_to_concat(&self) -> bool {
+        self.unsafe_to_concat
     }
 
     /// Returns the parsed `ScriptList`.

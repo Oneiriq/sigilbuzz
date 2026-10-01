@@ -45,6 +45,7 @@ pub use chained::{
     ChainRuleSet1,
 };
 pub use contextual::{ClassRule2, ClassSet2, Context1, Context2, Context3, Rule1, RuleSet1};
+pub(crate) use matchers::{chain_rule, ChainTests};
 
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;

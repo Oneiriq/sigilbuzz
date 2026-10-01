@@ -1,13 +1,13 @@
-//! Indic2 state machine and its Devanagari instantiation.
+//! The Indic entry points, and sigilbuzz's earlier Indic pass.
 //!
-//! The core `shape_indic` function is script-agnostic: it takes an
-//! [`IndicConfig`] that captures the per-script virama / ra / reph
-//! position / reph mode / GSUB script-tag priority and runs the
-//! HarfBuzz-style reorder + feature pipeline. Devanagari, Bengali,
-//! Gurmukhi, Gujarati, Oriya, Tamil, Telugu, Kannada, Malayalam and
-//! Sinhala all feed into the same machine; only the configuration
-//! (and the ISC/IPC tables in [`crate::unicode::indic_category`])
-//! differs per script.
+//! [`shape_indic`] and [`shape_devanagari`] run the port of HarfBuzz's
+//! Indic shaper (`crate::ot::indic::shaper`) for the nine scripts it
+//! covers. Sinhala still takes the earlier pass described below, which
+//! the rest of this module implements. It takes an [`IndicConfig`]
+//! that captures the per-script virama, ra, reph position, reph mode,
+//! and GSUB script-tag priority, and runs a HarfBuzz-style reorder and
+//! feature pipeline over the ISC and IPC tables in
+//! [`crate::unicode::indic_category`].
 //!
 //! # Pipeline
 //!
@@ -73,7 +73,7 @@ use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 use crate::unicode::Script;
 
-/// Script-agnostic Indic entry point. Re-orders and runs basic Indic
+/// Script-agnostic Indic entry point. Re-orders and runs the Indic
 /// features over the portion of `glyphs` that corresponds to the
 /// Indic run described by `codepoints`, using `config` for per-script
 /// behavior.
@@ -83,7 +83,45 @@ use crate::unicode::Script;
 /// reordering. After this function returns, `glyphs` may contain
 /// fewer entries (if basic features applied ligatures) and the
 /// order can differ from input.
+///
+/// The nine scripts of HarfBuzz's Indic shaper run through its port
+/// (`crate::ot::indic::shaper`), every GSUB feature of the run
+/// included, the default ones too. The virama glyph comes from the run
+/// itself, and broken clusters get no dotted circle here. Shaping
+/// through [`crate::shape`] adds both from the font. Sinhala, which
+/// HarfBuzz sends to the Universal Shaping Engine, keeps sigilbuzz's
+/// earlier Indic pass.
 pub fn shape_indic(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+    config: &IndicConfig,
+    level: ClusterLevel,
+) {
+    if config.script == Script::Sinhala {
+        shape_indic_legacy(gsub, gdef, codepoints, glyphs, config, level);
+        return;
+    }
+    let virama_glyph = codepoints
+        .iter()
+        .zip(glyphs.iter())
+        .find(|(&c, _)| c as u32 == config.virama)
+        .map(|(_, g)| g.glyph_id as u16);
+    let run = super::shaper::IndicRun {
+        gsub,
+        gdef,
+        level,
+        features: &[],
+        vertical: false,
+        dotted_circle: None,
+        virama_glyph,
+    };
+    super::shaper::shape(&run, config, codepoints, glyphs);
+}
+
+/// sigilbuzz's earlier Indic pass, which Sinhala still runs through.
+pub(crate) fn shape_indic_legacy(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
@@ -99,6 +137,9 @@ pub fn shape_indic(
     // codepoint indices it covers (start, end exclusive) so the
     // reorder phase can index into `glyphs` without re-scanning.
     let syllables = segment_syllables(codepoints, config);
+    // Per-syllable features match within these (HarfBuzz's syllable()).
+    let numbers = syllables.iter().map(|s| (s.start, s.end, s.kind as u8));
+    crate::shape::number_syllables(glyphs, numbers, level);
     // The cluster each code point starts, for final reordering, read
     // while glyphs are still one per code point.
     let byte_offsets = code_point_clusters(codepoints, glyphs);
@@ -114,14 +155,10 @@ pub fn shape_indic(
         tag_positions(codepoints, glyphs, syllable);
     }
 
-    // The joiner handling of HarfBuzz's shaper for the script: the
-    // Indic shaper's features take ZWJ and ZWNJ as ordinary glyphs;
-    // Sinhala goes to the Universal Shaping Engine instead.
-    let table = if config.script == Script::Sinhala {
-        JoinerTable::Use
-    } else {
-        JoinerTable::Indic
-    };
+    // HarfBuzz shapes Sinhala, the one script this pass still runs,
+    // with the Universal Shaping Engine, so its features take that
+    // shaper's joiner handling.
+    let table = JoinerTable::Use;
     let prio = config.script_priority;
 
     // HarfBuzz runs `locl` and `ccmp` as one stage before initial

@@ -18,13 +18,15 @@
 //! while it substitutes, so the in/out variants (`merge_out_clusters`
 //! and friends) all come down to the same flat merge here.
 //!
-//! HarfBuzz also marks the range unsafe to break when a level skips a
-//! merge; sigilbuzz produces no glyph flags, so that part has no
-//! counterpart.
+//! When a level skips a merge of the input, HarfBuzz marks the range
+//! unsafe to break instead. The merges of its output buffer
+//! (`merge_out_clusters`) just skip. A merge that changes a glyph's
+//! cluster clears its glyph flags (`set_cluster`).
 
 use alloc::vec::Vec;
 
-use crate::buffer::{ClusterLevel, Glyph};
+use super::glyph_flags;
+use crate::buffer::{ClusterLevel, Glyph, GlyphFlags};
 use crate::unicode::general_category::{
     general_category_class, is_extended_pictographic, GeneralCategoryClass,
 };
@@ -34,8 +36,17 @@ use crate::unicode::general_category::{
 pub(crate) trait Clustered {
     /// The cluster.
     fn cluster(&self) -> u32;
-    /// Replaces the cluster.
+    /// Replaces the cluster, leaving the flags alone.
     fn set_cluster(&mut self, cluster: u32);
+    /// The glyph flags.
+    fn flags(&self) -> GlyphFlags;
+    /// Replaces the glyph flags.
+    fn set_flags(&mut self, flags: GlyphFlags);
+    /// Adds glyph flags.
+    fn add_flags(&mut self, flags: GlyphFlags) {
+        let all = self.flags() | flags;
+        self.set_flags(all);
+    }
 }
 
 impl Clustered for Glyph {
@@ -45,6 +56,14 @@ impl Clustered for Glyph {
 
     fn set_cluster(&mut self, cluster: u32) {
         self.cluster = cluster;
+    }
+
+    fn flags(&self) -> GlyphFlags {
+        self.flags
+    }
+
+    fn set_flags(&mut self, flags: GlyphFlags) {
+        self.flags = flags;
     }
 }
 
@@ -70,13 +89,32 @@ fn merge_impl<T: Clustered>(items: &mut [T], mut start: usize, mut end: usize) {
         }
     }
     for item in &mut items[start..end] {
-        item.set_cluster(cluster);
+        glyph_flags::set_cluster(item, cluster, GlyphFlags::empty());
     }
 }
 
-/// HarfBuzz's `hb_buffer_t::merge_clusters` (and `merge_out_clusters`)
-/// for `items[start..end]`: merges only at the monotone levels.
+/// HarfBuzz's `hb_buffer_t::merge_clusters` for `items[start..end]`:
+/// merges at the monotone levels, marks the range unsafe to break at
+/// the others.
 pub(crate) fn merge_clusters<T: Clustered>(
+    items: &mut [T],
+    start: usize,
+    end: usize,
+    level: ClusterLevel,
+) {
+    if end < start + 2 {
+        return;
+    }
+    if level.is_monotone() {
+        merge_impl(items, start, end);
+    } else {
+        glyph_flags::unsafe_to_break(items, start, end, level);
+    }
+}
+
+/// HarfBuzz's `merge_out_clusters` for `items[start..end]`: merges
+/// only at the monotone levels.
+pub(crate) fn merge_out_clusters<T: Clustered>(
     items: &mut [T],
     start: usize,
     end: usize,
@@ -87,10 +125,28 @@ pub(crate) fn merge_clusters<T: Clustered>(
     }
 }
 
-/// HarfBuzz's `merge_grapheme_clusters` (and
-/// `merge_out_grapheme_clusters`) for `items[start..end]`: merges only
-/// at the grapheme levels.
+/// HarfBuzz's `merge_grapheme_clusters` for `items[start..end]`:
+/// merges at the grapheme levels, marks the range unsafe to break at
+/// the others.
 pub(crate) fn merge_grapheme_clusters<T: Clustered>(
+    items: &mut [T],
+    start: usize,
+    end: usize,
+    level: ClusterLevel,
+) {
+    if end < start + 2 {
+        return;
+    }
+    if level.is_graphemes() {
+        merge_impl(items, start, end);
+    } else {
+        glyph_flags::unsafe_to_break(items, start, end, level);
+    }
+}
+
+/// HarfBuzz's `merge_out_grapheme_clusters` for `items[start..end]`:
+/// merges only at the grapheme levels.
+pub(crate) fn merge_out_grapheme_clusters<T: Clustered>(
     items: &mut [T],
     start: usize,
     end: usize,
