@@ -11,9 +11,7 @@ use super::features::{
 };
 use super::hangul;
 use super::normalize::{self, Normalizer};
-use super::segment::{
-    build_segments, is_common_for_segmentation, remap_segments, ProcessedSegment, Segment,
-};
+use super::segment::{build_segments, guess_script, remap_segments, ProcessedSegment, Segment};
 use super::shaper::Shaper;
 use super::{
     cluster, dotted_circle, feature_disabled, glyph_flags, ignorables, joining_flags,
@@ -196,13 +194,9 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     //
     // The buffer's script, as HarfBuzz guesses it: the caller's, or
     // that of the first script-bearing character in the text's order.
-    let buffer_script: Option<Script> = buffer.script().or_else(|| {
-        codepoints
-            .iter()
-            .copied()
-            .find(|&c| !is_common_for_segmentation(c))
-            .map(script_of)
-    });
+    let buffer_script: Option<Script> = buffer
+        .script()
+        .or_else(|| guess_script(codepoints.iter().copied()));
     // A caller-chosen direction that is not the script's native one
     // reads the text as already in that visual order: shape its
     // graphemes reversed, in the native direction (see

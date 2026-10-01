@@ -7,7 +7,7 @@
 //! shaped but tells the shaper how the run connects to its
 //! neighbors.
 
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, Direction};
 use crate::language::Language;
 use crate::unicode::Script;
 
@@ -57,6 +57,59 @@ impl Buffer {
     /// ```
     pub fn set_script(&mut self, script: Option<Script>) {
         self.script = script;
+    }
+
+    /// Fills in the segment properties the caller left unset, as
+    /// HarfBuzz's `hb_buffer_guess_segment_properties` does. The script
+    /// becomes that of the first character that is not Common or
+    /// Inherited, and the direction becomes that script's horizontal
+    /// direction ([`Script::horizontal_direction`]), or left to right
+    /// when the text has no such character. Properties the caller set
+    /// stay as they are. HarfBuzz also takes an unset language from the
+    /// process locale. sigilbuzz leaves it unset, so the output does
+    /// not depend on the environment.
+    ///
+    /// With the script set, [`crate::shape`] shapes the whole buffer
+    /// with that script's shaper, as HarfBuzz does, even when the text
+    /// mixes scripts. Code that calls `hb_buffer_guess_segment_properties`
+    /// before `hb_shape` gets the same output by calling this before
+    /// [`crate::shape`]. Without the call, [`crate::shape`] shapes each
+    /// script run with its own shaper.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::{Buffer, Direction, UnicodeScript};
+    ///
+    /// let mut buffer = Buffer::new();
+    /// buffer.push_str("abc \u{05D0}\u{05D1}");
+    /// buffer.guess_segment_properties();
+    /// assert_eq!(buffer.script(), Some(UnicodeScript::Latin));
+    /// assert_eq!(buffer.direction(), Direction::Ltr);
+    ///
+    /// let mut buffer = Buffer::new();
+    /// buffer.push_str("12 \u{05D0}\u{05D1} abc");
+    /// buffer.guess_segment_properties();
+    /// assert_eq!(buffer.script(), Some(UnicodeScript::Hebrew));
+    /// assert_eq!(buffer.direction(), Direction::Rtl);
+    ///
+    /// // A direction the caller chose stays.
+    /// let mut buffer = Buffer::new();
+    /// buffer.push_str("\u{05D0}");
+    /// buffer.set_direction(Direction::Ltr);
+    /// buffer.guess_segment_properties();
+    /// assert_eq!(buffer.direction(), Direction::Ltr);
+    /// ```
+    pub fn guess_segment_properties(&mut self) {
+        if self.script.is_none() {
+            self.script = crate::shape::guess_script(self.text.chars());
+        }
+        if !self.direction_explicit {
+            let direction = self
+                .script
+                .map_or(Direction::Ltr, Script::horizontal_direction);
+            self.set_direction(direction);
+        }
     }
 
     /// The language set with [`Self::set_language`].

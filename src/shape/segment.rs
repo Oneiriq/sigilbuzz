@@ -108,6 +108,16 @@ pub(super) fn build_segments(codepoints: &[char]) -> Vec<Segment> {
     segments
 }
 
+/// The script HarfBuzz's `hb_buffer_guess_segment_properties` gives a
+/// buffer of `chars`: that of the first character that is not Common
+/// or Inherited, or `None` when every character is.
+pub(crate) fn guess_script(chars: impl IntoIterator<Item = char>) -> Option<Script> {
+    chars
+        .into_iter()
+        .find(|&c| !is_common_for_segmentation(c))
+        .map(script_of)
+}
+
 /// Shape-time COMMON / INHERITED predicate: the buffer-level
 /// `is_common_or_inherited` in `buffer.rs`, plus the default
 /// ignorables of those scripts. Kept inside `shape.rs` so the

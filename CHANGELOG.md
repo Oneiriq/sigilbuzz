@@ -9,6 +9,17 @@ stability commitment.
 
 Added:
 
+- `Buffer::guess_segment_properties`, HarfBuzz's `hb_buffer_guess_segment_properties`: an
+  unset script becomes that of the first character that is not Common or Inherited, and
+  an unset direction becomes that script's horizontal direction. The language stays
+  unset, so the output does not depend on the process locale. With the script set,
+  `shape` uses one shaper for the whole buffer, as HarfBuzz does, so code that calls
+  `hb_buffer_guess_segment_properties` before `hb_shape` gets HarfBuzz's output for text
+  that mixes scripts too. Without the call, `shape` still shapes each script run with
+  its own shaper. On 1,793 strings that put the vowel constraint sequences after Latin or
+  another script, the output with the call matches HarfBuzz 14.5.0 in glyphs, clusters,
+  glyph flags and positions at every cluster level (without it: 1,746, and 1,716 at
+  `MonotoneCharacters`).
 - `OwnedFace`, a face that owns its font bytes behind an `Arc<[u8]>` and has no
   lifetime parameter. It parses the table directory once and hands out `Face` views
   through `as_face()`. It is `Send + Sync` and cheap to clone, so you can keep parsed
@@ -351,7 +362,8 @@ Changed:
   put every listed sequence of the 14 other scripts in several contexts, the output
   matches HarfBuzz 14.5.0 on 1,746 at `MonotoneGraphemes` and `Characters` and 1,716 at
   `MonotoneCharacters` (before: 628 and 574). The rest put two scripts in one buffer,
-  which sigilbuzz shapes one script run at a time (see docs/ROADMAP.md).
+  which sigilbuzz shapes one script run at a time unless the caller calls
+  `Buffer::guess_segment_properties`. With that call, all 1,793 match.
 - Hangul in a buffer of another script, and the text of other scripts in a Hangul
   buffer, shape as HarfBuzz shapes them. Such text normalizes with the shaper of the
   buffer, as HarfBuzz normalizes the whole buffer with it: a syllable followed by a mark

@@ -33,9 +33,6 @@ These are smaller pieces that are not scheduled yet.
 - The Indic scripts do not try HarfBuzz's newest script tags (`dev3`, `bng3`, and the
   others ending in 3), so a font with lookups under those tags does not get the
   Universal Shaping Engine, as HarfBuzz gives it.
-- A buffer of several scripts shapes one script run at a time, where HarfBuzz shapes the
-  whole buffer with the shaper of its script. So contextual lookups do not reach across
-  runs, and with `PRODUCE_UNSAFE_TO_CONCAT` some flags at run boundaries differ.
 - Myanmar runs sigilbuzz's own pass, with a simpler syllable grammar than HarfBuzz's
   Myanmar shaper (`hb-ot-shaper-myanmar.cc`). On 1,540 Myanmar test strings, 1,033
   shape as HarfBuzz 14.5.0 does.
