@@ -15,8 +15,8 @@ use crate::ot::syllabic::stage::{
     FeatureFlags as F, MapFeature, StageFeature, GLOBAL_MASK,
 };
 use crate::ot::syllabic::{
-    cat, categories, insert_dotted_circles, pos, set_syllables, syllable_ranges, DottedCircle,
-    GlyphInfo,
+    cat, categories, insert_dotted_circles, pos, set_syllables, setup_syllables, syllable_ranges,
+    DottedCircle, GlyphInfo,
 };
 use crate::shape::{feature_would_substitute, Feature, SyllabicGsub};
 use crate::tables::gdef::Gdef;
@@ -225,6 +225,7 @@ pub(crate) fn shape(
         .collect();
     let cats: Vec<u8> = info.iter().map(|g| g.category).collect();
     set_syllables(&mut info, &machine::find_syllables(&cats));
+    setup_syllables(glyphs, &info, run.level);
 
     let prio = config.script_priority;
     let runner = run

@@ -242,6 +242,22 @@ pub(crate) fn syllable_ranges(info: &[GlyphInfo]) -> Vec<core::ops::Range<usize>
     out
 }
 
+/// The rest of HarfBuzz's `setup_syllables_indic` and
+/// `setup_syllables_khmer` once [`set_syllables`] has run: each glyph
+/// carries its syllable, and each syllable is unsafe to break, since
+/// its shape depends on all of it. `glyphs` and `info` are one to one.
+pub(crate) fn setup_syllables(glyphs: &mut [Glyph], info: &[GlyphInfo], level: ClusterLevel) {
+    if glyphs.len() != info.len() {
+        return;
+    }
+    for (g, i) in glyphs.iter_mut().zip(info) {
+        g.syllable = i.syllable;
+    }
+    for range in syllable_ranges(info) {
+        crate::shape::unsafe_to_break(glyphs, range.start, range.end, level);
+    }
+}
+
 /// What a shaper's dotted circles look like: the syllable type that
 /// gets one, the circle's category and position, and the category of a
 /// repha the circle goes after, when the shaper has one.
@@ -287,7 +303,10 @@ pub(crate) fn insert_dotted_circles(
                 substituted: false,
                 word_char: false,
             };
-            let glyph = Glyph::new(u32::from(circle), glyphs[i].cluster);
+            // The mask HarfBuzz copies holds the glyph flags too.
+            let mut glyph = Glyph::new(u32::from(circle), glyphs[i].cluster);
+            glyph.flags = glyphs[i].flags;
+            glyph.syllable = glyphs[i].syllable;
             while i < glyphs.len()
                 && info[i].syllable == syllable
                 && Some(info[i].category) == spec.repha

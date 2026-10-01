@@ -37,6 +37,14 @@ pub(crate) fn number_syllables(
     }
 }
 
+/// HarfBuzz's `unsafe_to_break(start, end)` for the shapers that keep
+/// their syllables beside the glyphs: the glyphs of
+/// `glyphs[start..end]` outside its smallest cluster become unsafe to
+/// break at the cluster `level`.
+pub(crate) fn unsafe_to_break(glyphs: &mut [Glyph], start: usize, end: usize, level: ClusterLevel) {
+    glyph_flags::unsafe_to_break(glyphs, start, end, level);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -14,6 +14,9 @@ const AMIRI: &[u8] = include_bytes!("fixtures/amiri_regular.ttf");
 const MONGOLIAN: &[u8] = include_bytes!("fonts/NotoSansMongolian-Regular.ttf");
 const DEVANAGARI: &[u8] = include_bytes!("fonts/NotoSansDevanagari-Regular.ttf");
 const SINHALA: &[u8] = include_bytes!("fonts/NotoSansSinhala-Regular.ttf");
+const BENGALI: &[u8] = include_bytes!("fonts/NotoSansBengali-Regular.ttf");
+const KHMER: &[u8] = include_bytes!("fonts/NotoSansKhmer-Regular.ttf");
+const HANGUL_TONE: &[u8] = include_bytes!("fonts/NotoSansKR-HangulTone-Subset.ttf");
 
 const MC: ClusterLevel = ClusterLevel::MonotoneCharacters;
 const CONCAT: BufferFlags = BufferFlags::PRODUCE_UNSAFE_TO_CONCAT;
@@ -158,5 +161,78 @@ fn syllables_are_unsafe_to_break_inside() {
     assert_eq!(
         flags(SINHALA, text, Direction::Ltr, MC, BufferFlags::DEFAULT),
         [(48, 0, 0), (5, 3, 1), (41, 6, 0)]
+    );
+}
+
+#[test]
+fn a_khmer_syllable_over_two_clusters_is_unsafe_to_break() {
+    // setup_syllables_khmer: ka, coeng, the independent vowel qoo, a
+    // vowel sign, and ZWJ are one syllable in two grapheme clusters, so
+    // the second cluster is unsafe to break.
+    let text = "\u{1780}\u{17D2}\u{17A5}\u{17BD}\u{200D}";
+    assert_eq!(
+        flags(
+            KHMER,
+            text,
+            Direction::Ltr,
+            ClusterLevel::MonotoneGraphemes,
+            BufferFlags::DEFAULT
+        ),
+        [(25, 0, 0), (135, 0, 0), (65, 6, 1), (95, 6, 1), (3, 6, 1)]
+    );
+}
+
+#[test]
+fn a_left_matra_after_a_letter_is_unsafe_to_break() {
+    // final_reordering_syllable_indic: a pre-base matra that does not
+    // start a word gets no `init`, and it and the letter before it are
+    // unsafe to break.
+    assert_eq!(
+        flags(
+            DEVANAGARI,
+            "\u{0915}\u{0915}\u{093F}",
+            Direction::Ltr,
+            MC,
+            BufferFlags::DEFAULT
+        ),
+        [(56, 0, 0), (545, 3, 1), (56, 3, 1)]
+    );
+    assert_eq!(
+        flags(
+            BENGALI,
+            "\u{0995}\u{09C7}\u{0995}\u{09C7}",
+            Direction::Ltr,
+            MC,
+            BufferFlags::DEFAULT
+        ),
+        [(450, 0, 0), (20, 0, 0), (61, 6, 1), (20, 6, 1)]
+    );
+}
+
+#[test]
+fn a_hangul_tone_mark_moved_in_front_is_safe_to_break() {
+    // Forming clusters at this level marks a tone mark unsafe to break
+    // after its syllable. preprocess_text_hangul then moves it in front
+    // and merges the two clusters, and the merge resets the flags of
+    // the glyph whose cluster changed (set_cluster).
+    assert_eq!(
+        flags(
+            HANGUL_TONE,
+            "\u{AC00}\u{302E}",
+            Direction::Ltr,
+            MC,
+            BufferFlags::DEFAULT
+        ),
+        [(17, 0, 0), (20, 0, 0)]
+    );
+    assert_eq!(
+        flags(
+            HANGUL_TONE,
+            "\u{1101}\u{1162}\u{11A9}\u{302F}",
+            Direction::Ltr,
+            MC,
+            BufferFlags::DEFAULT
+        ),
+        [(18, 0, 0), (29, 0, 0), (57, 0, 0), (75, 0, 0)]
     );
 }

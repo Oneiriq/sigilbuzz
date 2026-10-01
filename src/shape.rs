@@ -156,7 +156,7 @@ pub(crate) use joiners::JoinerTable;
 pub use pipeline::shape;
 use segment::ProcessedSegment;
 pub(crate) use syllabic::SyllabicGsub;
-pub(crate) use syllables::number_syllables;
+pub(crate) use syllables::{number_syllables, unsafe_to_break};
 
 use crate::buffer::Glyph;
 use crate::tables::gpos::resolve_variation_delta;

@@ -34,8 +34,8 @@ use super::syllabic::stage::{
     MapFeature, StageFeature, GLOBAL_MASK,
 };
 use super::syllabic::{
-    cat, categories, insert_dotted_circles, merge_clusters, set_syllables, syllable_ranges,
-    DottedCircle, GlyphInfo,
+    cat, categories, insert_dotted_circles, merge_clusters, set_syllables, setup_syllables,
+    syllable_ranges, DottedCircle, GlyphInfo,
 };
 use crate::buffer::{ClusterLevel, Glyph};
 use crate::shape::{Feature, SyllabicGsub};
@@ -140,6 +140,7 @@ pub(crate) fn shape(run: &KhmerRun<'_>, codepoints: &[char], glyphs: &mut Vec<Gl
         .collect();
     let cats: Vec<u8> = info.iter().map(|g| g.category).collect();
     set_syllables(&mut info, &machine::find_syllables(&cats));
+    setup_syllables(glyphs, &info, run.level);
 
     let prio = KHMER_SCRIPT_PRIORITY;
     let mut runner = run

@@ -89,9 +89,11 @@ Added:
   HarfBuzz 14.5.0 sets them: the skipping iterator's matches and failed matches in
   every GSUB and GPOS lookup type, cluster merges a cluster level skips, ligatures and
   deleted glyphs, kerning (GPOS, `kern`, `kerx` pairs), cursive and mark attachment,
-  fallback mark positioning, Arabic, Mongolian and N'Ko joining, and the syllables of the
-  Indic, Khmer, Myanmar and USE shapers. Every glyph of a cluster carries the same
-  flags. `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT` and
+  fallback mark positioning, Arabic, Mongolian and N'Ko joining, the syllables of the
+  Indic, Khmer, Myanmar and USE shapers, a left matra the Indic shaper gives no `init`,
+  and the Hangul shaper's jamo and tone marks. Every glyph of a cluster carries the same
+  flags. On the Khmer, Indic and Hangul test strings the flags match HarfBuzz 14.5.0
+  wherever the glyphs do, at every cluster level. `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT` and
   `BufferFlags::PRODUCE_SAFE_TO_INSERT_TATWEEL` (HarfBuzz's values) turn on the two
   optional kinds. Code that builds a `Glyph` with a struct literal must add
   `flags: GlyphFlags::empty()`.

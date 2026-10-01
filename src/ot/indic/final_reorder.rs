@@ -142,9 +142,14 @@ impl Final<'_, '_> {
             }
         }
 
-        // `init` on a left matra that starts a word.
-        if info[start].position == pos::PRE_M && (start == 0 || !info[start - 1].word_char) {
-            info[start].mask |= INIT;
+        // `init` on a left matra that starts a word. After a letter or
+        // mark, the matra and that character are unsafe to break.
+        if info[start].position == pos::PRE_M {
+            if start == 0 || !info[start - 1].word_char {
+                info[start].mask |= INIT;
+            } else {
+                crate::shape::unsafe_to_break(glyphs, start - 1, start + 1, self.level);
+            }
         }
     }
 

@@ -16,8 +16,8 @@
 //! 1. **Categorize** every codepoint in the run via
 //!    [`use_category`](crate::unicode::use_category::use_category)
 //!    and [`use_position`](crate::unicode::use_category::use_position).
-//! 2. **Segment** into USE syllables. The grammar (simplified to the
-//!    shape Khmer actually emits) is:
+//! 2. **Segment** into USE syllables. The grammar, a simplified form
+//!    of HarfBuzz's, is:
 //!
 //!    ```text
 //!      R? (B | GB | IV) (H B)* VPre* VAbv* VBlw* VPst* M* FM*

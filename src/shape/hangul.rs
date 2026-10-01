@@ -20,7 +20,9 @@
 
 use alloc::vec::Vec;
 
-use crate::buffer::{char_class, ClusterLevel, Glyph};
+use super::cluster::Clustered;
+use super::glyph_flags;
+use crate::buffer::{char_class, ClusterLevel, Glyph, GlyphFlags};
 pub(super) use crate::ot::hangul::jamo_features;
 use crate::ot::hangul::{is_l, is_t, is_v, jamo};
 use crate::unicode::normalize::modified_combining_class;
@@ -78,6 +80,24 @@ struct Entry {
     feature: u8,
 }
 
+impl Clustered for Entry {
+    fn cluster(&self) -> u32 {
+        self.glyph.cluster
+    }
+
+    fn set_cluster(&mut self, cluster: u32) {
+        self.glyph.cluster = cluster;
+    }
+
+    fn flags(&self) -> GlyphFlags {
+        self.glyph.flags
+    }
+
+    fn set_flags(&mut self, flags: GlyphFlags) {
+        self.glyph.flags = flags;
+    }
+}
+
 /// The output so far and the input still to read, as HarfBuzz's buffer
 /// keeps them while it rewrites itself. Cluster merges see the output
 /// followed by the unread input as one run, as HarfBuzz's merges do.
@@ -102,10 +122,14 @@ impl Rewrite {
 
     /// Replaces the next `num_in` input characters with `chars`, each a
     /// copy of the first one after its cluster merged over the replaced
-    /// ones at the monotone `level`s (`replace_glyphs`).
+    /// ones at the monotone `level`s (`replace_glyphs`). At the other
+    /// levels the replaced characters are unsafe to break instead, as
+    /// HarfBuzz's `merge_clusters` makes them.
     fn replace(&mut self, num_in: usize, chars: &[char], level: ClusterLevel) {
         if level.is_monotone() {
             self.merge(self.out.len(), self.out.len() + num_in);
+        } else {
+            self.unsafe_to_break_input(num_in, level);
         }
         let Some(&orig) = self.input.get(self.read) else {
             return;
@@ -116,6 +140,21 @@ impl Rewrite {
             ..orig
         }));
         self.read += num_in;
+    }
+
+    /// HarfBuzz's `unsafe_to_break(idx, idx + n)`: the next `n` input
+    /// characters.
+    fn unsafe_to_break_input(&mut self, n: usize, level: ClusterLevel) {
+        if let Some(rest) = self.input.get_mut(self.read..) {
+            glyph_flags::unsafe_to_break(rest, 0, n, level);
+        }
+    }
+
+    /// HarfBuzz's `unsafe_to_break_from_outbuffer(start, idx)`: the
+    /// output from `start` on.
+    fn unsafe_to_break_output(&mut self, start: usize, level: ClusterLevel) {
+        let end = self.out.len();
+        glyph_flags::unsafe_to_break(&mut self.out, start, end, level);
     }
 
     /// The length of the run the merges see.
@@ -139,7 +178,9 @@ impl Rewrite {
 
     /// HarfBuzz's `merge_clusters_impl` over `[start, end)` of the run:
     /// the range takes its smallest cluster, extended over neighbors
-    /// that share a cluster with an end whose cluster changes.
+    /// that share a cluster with an end whose cluster changes. A
+    /// character whose cluster changes loses its glyph flags
+    /// (`set_cluster`).
     fn merge(&mut self, mut start: usize, mut end: usize) {
         let limit = self.len();
         if end > limit || end <= start + 1 {
@@ -158,7 +199,7 @@ impl Rewrite {
         }
         for k in start..end {
             if let Some(e) = self.at(k) {
-                e.glyph.cluster = cluster;
+                glyph_flags::set_cluster(&mut e.glyph, cluster, GlyphFlags::empty());
             }
         }
     }
@@ -205,6 +246,7 @@ pub(super) fn preprocess(
             if start < end && end == buf.out.len() {
                 // The tone mark follows a syllable: move it in front,
                 // unless it has no advance.
+                buf.unsafe_to_break_output(start, level);
                 buf.next_glyph();
                 if !(font.zero_width)(u) {
                     if level.is_monotone() {
@@ -247,6 +289,7 @@ pub(super) fn preprocess(
             if is_v(v) {
                 let t = buf.cur(2).filter(|&t| is_t(t));
                 let len = if t.is_some() { 3 } else { 2 };
+                buf.unsafe_to_break_input(len, level);
                 let (lu, vu, tu) = (u as u32, v as u32, t.map(|t| t as u32));
                 if is_combining_l(lu) && is_combining_v(vu) && tu.map_or(true, is_combining_t) {
                     let tindex = tu.map_or(0, |t| t - T_BASE);
@@ -287,6 +330,8 @@ pub(super) fn preprocess(
                         end = start + 1;
                         continue;
                     }
+                    // Unsafe between the LV and the T.
+                    buf.unsafe_to_break_input(2, level);
                 }
             }
             if !has_s || (tindex == 0 && next_t.is_some()) {
@@ -314,6 +359,10 @@ pub(super) fn preprocess(
                         buf.merge(start, end);
                     }
                     continue;
+                }
+                if tindex == 0 && next_t.is_some() {
+                    // Unsafe between the LV and the T.
+                    buf.unsafe_to_break_input(2, level);
                 }
             }
             if has_s {
