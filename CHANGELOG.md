@@ -368,6 +368,14 @@ Changed:
   `Scripts.txt`: they stay in the run of the letter before them and do not give a
   buffer its script. Alone they now shape with the default shaper, as in HarfBuzz,
   where they used to get a dotted circle.
+- A GPOS mark takes the cross-stream offset of its parent (y in horizontal runs, x in
+  vertical ones, summed over the parent's cursive chain) when it attaches, and only the
+  parent's main-direction offset at the end of GPOS, as in HarfBuzz 14.5.0
+  (`resolve_cross_offset` and `propagate_attachment_offsets`). A lookup that raises a
+  base after its mark attached no longer moves the mark. The end-of-GPOS pass resolves
+  forward runs from their start and backward runs from their end, each walk following
+  at most 64 links, as HarfBuzz does. One Lepcha and one Tibetan test string now match
+  HarfBuzz in positions, and so do all marks of `tests/fixtures/attach_chain.ttf`.
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,

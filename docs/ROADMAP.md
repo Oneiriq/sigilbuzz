@@ -46,10 +46,6 @@ These are smaller pieces that are not scheduled yet.
 - Unsafe-to-concat flags of a context or chained context rule set with more than four
   rules, and of some ligature and mark lookups, differ from HarfBuzz's, which marks
   them on its fast paths (18 of 1,992 USE test strings).
-- A mark takes its parent's vertical offset when it attaches in HarfBuzz
-  (`resolve_cross_offset`), where sigilbuzz adds the parent's final offset. The two
-  differ when a later lookup moves the parent (one Lepcha and one Tibetan string of
-  3,000 test strings in those and other scripts).
 
 ## Known bugs
 
