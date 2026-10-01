@@ -1,17 +1,19 @@
-//! Introspection helpers: `hb_face_collect_unicodes` and
-//! `hb_ot_layout_collect_features`.
+//! Introspection helpers: `hb_face_collect_unicodes`, the variation
+//! sequence collectors, and `hb_ot_layout_collect_features`.
 //!
-//! Both populate an `hb_set_t` the caller passes in.
-//! `hb_face_collect_unicodes` walks the cmap; `hb_ot_layout_collect_features`
-//! walks GSUB / GPOS's ScriptList -> LangSys -> FeatureList and adds the
-//! feature tags reachable through the script/language filter.
+//! Each populates an `hb_set_t` the caller passes in.
+//! `hb_face_collect_unicodes` walks the cmap, the variation sequence
+//! collectors read its format 14 subtable, and
+//! `hb_ot_layout_collect_features` walks GSUB / GPOS's ScriptList ->
+//! LangSys -> FeatureList and adds the feature tags reachable through
+//! the script/language filter.
 
 extern crate alloc;
 
 use alloc::vec::Vec;
 
 use crate::set::hb_set_t;
-use crate::{hb_face_t, hb_tag_t, FaceInner};
+use crate::{hb_codepoint_t, hb_face_t, hb_tag_t, FaceInner};
 
 /// HarfBuzz layout-table tag for GSUB. Matches the upstream constant.
 pub const HB_OT_TAG_GSUB: hb_tag_t =
@@ -63,6 +65,61 @@ pub unsafe extern "C" fn hb_face_collect_unicodes(face: *const hb_face_t, set: *
             }
         });
     }
+}
+
+/// Adds every variation selector `face`'s cmap format 14 subtable has a
+/// record for to `out`, as HarfBuzz's
+/// `hb_face_collect_variation_selectors` does. Adds nothing when the
+/// face has no such subtable.
+///
+/// # Safety
+/// `face` and `out` must each be null or valid.
+#[no_mangle]
+pub unsafe extern "C" fn hb_face_collect_variation_selectors(
+    face: *const hb_face_t,
+    out: *mut hb_set_t,
+) {
+    if face.is_null() || out.is_null() {
+        return;
+    }
+    // SAFETY: `face` is non-null and the caller guarantees it points
+    // to a live `hb_face_t`.
+    let face_inner: &FaceInner = unsafe { &(*face).inner };
+    let Ok(cmap) = face_inner.face.cmap() else {
+        return;
+    };
+    let selectors = cmap.variation_selectors();
+    // SAFETY: `out` is non-null and the caller guarantees it points to
+    // a live `hb_set_t`.
+    unsafe { (*out).with_inner_mut(|s| s.extend(selectors)) };
+}
+
+/// Adds every base character `face`'s cmap format 14 subtable lists
+/// with `variation_selector` (in its default and its own-glyph
+/// sequences) to `out`, as HarfBuzz's
+/// `hb_face_collect_variation_unicodes` does.
+///
+/// # Safety
+/// `face` and `out` must each be null or valid.
+#[no_mangle]
+pub unsafe extern "C" fn hb_face_collect_variation_unicodes(
+    face: *const hb_face_t,
+    variation_selector: hb_codepoint_t,
+    out: *mut hb_set_t,
+) {
+    if face.is_null() || out.is_null() {
+        return;
+    }
+    // SAFETY: `face` is non-null and the caller guarantees it points
+    // to a live `hb_face_t`.
+    let face_inner: &FaceInner = unsafe { &(*face).inner };
+    let Ok(cmap) = face_inner.face.cmap() else {
+        return;
+    };
+    let unicodes = cmap.variation_unicodes(variation_selector);
+    // SAFETY: `out` is non-null and the caller guarantees it points to
+    // a live `hb_set_t`.
+    unsafe { (*out).with_inner_mut(|s| s.extend(unicodes)) };
 }
 
 /// Walks the GSUB or GPOS feature graph for `face`, filtered by the
@@ -389,6 +446,66 @@ mod tests {
                 ptr::null(),
                 ptr::null_mut(),
             );
+        }
+    }
+
+    /// Subset of Noto Sans CJK JP with a cmap format 14 subtable.
+    const NOTO_CJK_UVS: &[u8] =
+        include_bytes!("../../../tests/fixtures/noto_sans_cjk_jp_uvs_subset.otf");
+
+    /// The members of `set`, ascending.
+    ///
+    /// # Safety
+    /// `set` must be a live set.
+    unsafe fn members(set: *mut hb_set_t) -> Vec<u32> {
+        // SAFETY: the caller guarantees `set` is live.
+        unsafe { (*set).with_inner(|s| s.iter().copied().collect()) }
+    }
+
+    #[test]
+    fn collect_variation_selectors_and_unicodes_match_harfbuzz() {
+        // HarfBuzz 14.5.0 (uharfbuzz) on the same font gives these.
+        // SAFETY: every pointer passed here is null or a live handle
+        // created in this test, and each handle is destroyed once.
+        unsafe {
+            let blob = hb_blob_create(
+                NOTO_CJK_UVS.as_ptr().cast::<c_char>(),
+                NOTO_CJK_UVS.len() as c_uint,
+                HB_MEMORY_MODE_READONLY,
+                ptr::null_mut(),
+                None,
+            );
+            let face = hb_face_create(blob, 0);
+            let set = hb_set_create();
+            hb_face_collect_variation_selectors(face, set);
+            assert_eq!(members(set), [0xFE00, 0xFE01, 0xE0100, 0xE0101, 0xE0102]);
+            hb_set_destroy(set);
+
+            let set = hb_set_create();
+            hb_face_collect_variation_unicodes(face, 0xFE00, set);
+            assert_eq!(members(set), [0x3001, 0x3002, 0x6F22, 0xFF01, 0xFF0C]);
+            // Collecting adds to what the set holds.
+            hb_face_collect_variation_unicodes(face, 0xE0102, set);
+            assert_eq!(
+                members(set),
+                [0x3001, 0x3002, 0x6F22, 0x9089, 0xFF01, 0xFF0C]
+            );
+            hb_set_destroy(set);
+
+            // Open Sans has no format 14 subtable.
+            let (os_blob, os_face) = make_face();
+            let set = hb_set_create();
+            hb_face_collect_variation_selectors(os_face, set);
+            hb_face_collect_variation_unicodes(os_face, 0xFE00, set);
+            assert_eq!(hb_set_get_population(set), 0);
+            hb_set_destroy(set);
+
+            hb_face_collect_variation_selectors(ptr::null(), ptr::null_mut());
+            hb_face_collect_variation_unicodes(face, 0xFE00, ptr::null_mut());
+            hb_face_destroy(os_face);
+            hb_blob_destroy(os_blob);
+            hb_face_destroy(face);
+            hb_blob_destroy(blob);
         }
     }
 }

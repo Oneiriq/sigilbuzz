@@ -5,7 +5,7 @@
 use alloc::vec::Vec;
 
 use super::explicit::IsolatingSequence;
-use super::BidiClass;
+use super::{bidi_class, BidiClass};
 use crate::unicode::bidi_brackets::{bracket_of, BracketType};
 
 /// "Strong" classification for N1: maps L to L; R / EN / AN to R;
@@ -101,13 +101,18 @@ pub(super) fn apply_n0(classes: &mut [BidiClass], chars: &[char], seq: &Isolatin
         };
         match entry.kind {
             BracketType::Open => {
-                if stack.len() < N0_BRACKET_STACK_MAX {
-                    stack.push((i, cp, entry.pair));
+                // BD16: an opener with no room on the stack stops the
+                // pairing for the rest of the sequence. The pairs found
+                // so far stand.
+                if stack.len() >= N0_BRACKET_STACK_MAX {
+                    break;
                 }
+                stack.push((i, cp, canonical_bracket(entry.pair)));
             }
             BracketType::Close => {
                 // Find the topmost opener whose close codepoint equals
-                // this closer's codepoint.
+                // this closer's codepoint, up to canonical equivalence.
+                let cp = canonical_bracket(cp);
                 if let Some(pos) = stack.iter().rposition(|&(_, _, close_cp)| close_cp == cp) {
                     let (open_seq_i, _, _) = stack[pos];
                     pairs.push((open_seq_i, i));
@@ -170,21 +175,22 @@ pub(super) fn apply_n0(classes: &mut [BidiClass], chars: &[char], seq: &Isolatin
         if let Some(r) = resolved {
             classes[open] = r;
             classes[close] = r;
-            // N0 §3.1.3: any NSMs that immediately follow either
-            // bracket take the same resolved type. Walk forward past
-            // the bracket cells until a non-NSM is hit.
-            for c in classes.iter_mut().skip(open + 1) {
-                if *c == BidiClass::Nsm {
-                    *c = r;
-                } else {
-                    break;
-                }
-            }
-            for c in classes.iter_mut().skip(close + 1) {
-                if *c == BidiClass::Nsm {
-                    *c = r;
-                } else {
-                    break;
+            // N0: the characters that were NSM before rule W1 and
+            // immediately follow either bracket take the same resolved
+            // type. W1 already gave them the bracket's ON, so the
+            // original class decides. Characters rule X9 removed (ZWJ,
+            // for one) are not in the sequence, so they do not stop
+            // the walk.
+            for bracket in [open, close] {
+                for (c, &ci) in classes.iter_mut().zip(&seq.indices).skip(bracket + 1) {
+                    if chars
+                        .get(ci)
+                        .is_some_and(|&ch| bidi_class(ch) == BidiClass::Nsm)
+                    {
+                        *c = r;
+                    } else {
+                        break;
+                    }
                 }
             }
         }
@@ -198,5 +204,17 @@ const fn strong_for_n0(c: BidiClass) -> Option<BidiClass> {
         BidiClass::L => Some(BidiClass::L),
         BidiClass::R | BidiClass::En | BidiClass::An => Some(BidiClass::R),
         _ => None,
+    }
+}
+
+/// BD16 matches brackets up to canonical equivalence: U+2329 and U+232A
+/// (the angle brackets in Miscellaneous Technical) decompose to U+3008
+/// and U+3009, so either closer ends either opener. No other paired
+/// bracket has a canonical decomposition.
+const fn canonical_bracket(cp: u32) -> u32 {
+    match cp {
+        0x2329 => 0x3008,
+        0x232A => 0x3009,
+        _ => cp,
     }
 }

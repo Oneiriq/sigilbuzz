@@ -91,7 +91,7 @@ pub mod tables;
 #[doc(hidden)]
 pub mod unicode;
 
-pub use bidi::{BidiParagraph, BidiRun, ShapedBidiRun};
+pub use bidi::{BidiParagraph, BidiParagraphSpan, BidiRun, ShapedBidiRun};
 pub use blob::Blob;
 pub use buffer::{Buffer, BufferFlags, ClusterLevel, Direction, Glyph, GlyphFlags, ShapedRun};
 pub use error::{Error, Result};

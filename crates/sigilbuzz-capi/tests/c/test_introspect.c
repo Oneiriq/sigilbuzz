@@ -1,11 +1,14 @@
 /*
- * test_introspect.c: drives hb_face_collect_unicodes and
- * hb_ot_layout_collect_features against Open Sans.
+ * test_introspect.c: drives hb_face_collect_unicodes,
+ * hb_ot_layout_collect_features, the variation sequence collectors, the
+ * hb_font glyph lookups, and the not-found variation selector glyph
+ * setting against Open Sans.
  *
- * Both helpers populate an `hb_set_t` the caller hands in. The test
- * asserts the resulting sets are non-empty and contain at least one
- * known entry (U+0041 for collect_unicodes, any feature tag for
- * collect_features). Exit 0 means PASS.
+ * The collectors populate an `hb_set_t` the caller hands in. The test
+ * asserts the sets hold at least one known entry (U+0041 for
+ * collect_unicodes, any feature tag for collect_features) and that Open
+ * Sans, which has no cmap format 14 subtable, lists no variation
+ * sequences. Exit 0 means PASS.
  */
 
 #include "hb.h"
@@ -58,6 +61,46 @@ int main(int argc, char **argv) {
         return 7;
     }
     hb_set_destroy(empty);
+
+    /* Open Sans has no cmap format 14 subtable: no selectors, and no
+     * variation glyph even for a mapped base. */
+    hb_set_t *selectors = hb_set_create();
+    hb_face_collect_variation_selectors(face, selectors);
+    hb_face_collect_variation_unicodes(face, 0xFE00, selectors);
+    if (hb_set_get_population(selectors) != 0) {
+        fprintf(stderr, "expected no variation selectors in Open Sans\n");
+        return 8;
+    }
+    hb_set_destroy(selectors);
+
+    hb_font_t *font = hb_font_create(face);
+    hb_codepoint_t glyph = 0;
+    if (!hb_font_get_nominal_glyph(font, 0x41, &glyph) || glyph == 0) {
+        fprintf(stderr, "expected a nominal glyph for U+0041\n");
+        return 9;
+    }
+    if (hb_font_get_variation_glyph(font, 0x41, 0xFE00, &glyph) || glyph != 0) {
+        fprintf(stderr, "expected no variation glyph for U+0041 U+FE00\n");
+        return 10;
+    }
+    if (!hb_font_get_glyph(font, 0x41, 0, &glyph) || glyph == 0) {
+        fprintf(stderr, "expected hb_font_get_glyph to find U+0041\n");
+        return 11;
+    }
+    hb_font_destroy(font);
+
+    /* The not-found variation selector glyph is a buffer setting. */
+    hb_buffer_t *buffer = hb_buffer_create();
+    if (hb_buffer_get_not_found_variation_selector_glyph(buffer) != HB_CODEPOINT_INVALID) {
+        fprintf(stderr, "expected no not-found variation selector glyph\n");
+        return 12;
+    }
+    hb_buffer_set_not_found_variation_selector_glyph(buffer, 5);
+    if (hb_buffer_get_not_found_variation_selector_glyph(buffer) != 5) {
+        fprintf(stderr, "expected not-found variation selector glyph 5\n");
+        return 13;
+    }
+    hb_buffer_destroy(buffer);
 
     hb_face_destroy(face);
     hb_blob_destroy(blob);

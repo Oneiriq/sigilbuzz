@@ -559,3 +559,24 @@ fn uax9_reference_extract_covers_strong_neutral_weak_explicit() {
         );
     }
 }
+
+#[test]
+fn paragraph_ranges_split_after_each_separator() {
+    // Each paragraph as (start, end).
+    let split = |text: &str| -> Vec<(usize, usize)> {
+        paragraph_ranges(text)
+            .into_iter()
+            .map(|r| (r.start, r.end))
+            .collect()
+    };
+    assert!(split("").is_empty());
+    assert_eq!(split("abc"), [(0, 3)]);
+    assert_eq!(split("a\nb"), [(0, 2), (2, 3)]);
+    assert_eq!(split("a\r\nb"), [(0, 3), (3, 4)]);
+    assert_eq!(split("a\n\rb"), [(0, 2), (2, 3), (3, 4)]);
+    assert_eq!(split("a\r"), [(0, 2)]);
+    assert_eq!(split("\u{2029}\u{85}"), [(0, 3), (3, 5)]);
+    assert_eq!(split("a\u{1C}b\u{1D}c\u{1E}"), [(0, 2), (2, 4), (4, 6)]);
+    // Line and segment separators do not end a paragraph.
+    assert_eq!(split("a\u{2028}b\tc\u{0B}d"), [(0, 9)]);
+}

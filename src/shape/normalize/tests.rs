@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
 use super::{NormChar, Normalizer};
-use crate::buffer::ClusterLevel;
+use crate::buffer::{char_class, unicode_prop, ClusterLevel};
 use crate::shape::shaper::Shaper;
 use crate::tables::cmap::{build_cmap_wrapper, build_format12, Cmap};
 
@@ -35,6 +35,7 @@ fn normalize_with(
         has_gpos_mark,
         level: ClusterLevel::MonotoneGraphemes,
         recategorize_marks: false,
+        not_found_variation_selector: None,
     };
     let chars: Vec<NormChar> = text
         .char_indices()
@@ -219,6 +220,7 @@ fn arabic_modifier_marks_get_the_renumbered_classes() {
         has_gpos_mark: true,
         level: ClusterLevel::MonotoneGraphemes,
         recategorize_marks: false,
+        not_found_variation_selector: None,
     };
     let chars: Vec<NormChar> = "\u{0628}\u{0650}\u{0655}"
         .char_indices()
@@ -324,4 +326,173 @@ fn glyphs_carry_the_mark_class_bits() {
     assert_eq!((g.char_class, g.combining_class), (0, 0));
     let g = NormChar::new('\u{200D}', 0, false).glyph();
     assert_ne!(g.unicode_props, 0);
+}
+
+/// Normalizes `text` with a font mapping 'a'..='z' to their code
+/// points, U+FE00..U+FE02 unmapped, and a format 14 subtable: 'e' with
+/// VS1 has glyph 500, 'e' with VS2 is a default sequence, and 'x' with
+/// VS1 maps to glyph 0 (not found).
+fn normalize_uvs(text: &str, level: ClusterLevel) -> Vec<(char, u32, u32)> {
+    let chars: Vec<(char, u32)> = text.char_indices().map(|(i, c)| (c, i as u32)).collect();
+    normalize_uvs_clustered(&chars, level)
+}
+
+/// [`normalize_uvs`] over characters with the given clusters.
+fn normalize_uvs_clustered(chars: &[(char, u32)], level: ClusterLevel) -> Vec<(char, u32, u32)> {
+    normalize_uvs_with(chars, level, None)
+        .into_iter()
+        .map(|(c, g, cl, _, _)| (c, g, cl))
+        .collect()
+}
+
+/// [`normalize_uvs_clustered`] with a not-found variation selector
+/// glyph. The last two fields say whether the glyph is still default
+/// ignorable and whether it is an unresolved variation selector.
+fn normalize_uvs_with(
+    chars: &[(char, u32)],
+    level: ClusterLevel,
+    not_found: Option<u32>,
+) -> Vec<(char, u32, u32, bool, bool)> {
+    use crate::tables::cmap::build_format14;
+    let uvs = build_format14(&[
+        (0xFE00, &[], &[(0x65, 500), (0x78, 0)]),
+        (0xFE01, &[(0x65, 0)], &[]),
+    ]);
+    let bytes = build_cmap_wrapper(&[(0, 5, uvs), (3, 10, build_format12(&[(0x61, 0x7A, 0x61)]))]);
+    let cmap = Cmap::parse(&bytes).unwrap();
+    let normalizer = Normalizer {
+        cmap: &cmap,
+        shaper: Shaper::Default,
+        has_gpos_mark: true,
+        level,
+        recategorize_marks: false,
+        not_found_variation_selector: not_found,
+    };
+    let chars: Vec<NormChar> = chars
+        .iter()
+        .map(|&(c, cluster)| NormChar::new(c, cluster, false))
+        .collect();
+    normalizer
+        .run(&chars)
+        .iter()
+        .map(|c| {
+            let g = c.glyph();
+            let ignorable = g.unicode_props & unicode_prop::DEFAULT_IGNORABLE != 0;
+            let unresolved = g.char_class & char_class::UNRESOLVED_SELECTOR != 0;
+            (c.ch, c.glyph, c.cluster, ignorable, unresolved)
+        })
+        .collect()
+}
+
+#[test]
+fn a_variation_sequence_takes_its_glyph_and_drops_the_selector() {
+    let level = ClusterLevel::MonotoneCharacters;
+    // Its own glyph.
+    let out = normalize_uvs("ae\u{FE00}b", level);
+    assert_eq!(out, [('a', 0x61, 0), ('e', 500, 1), ('b', 0x62, 5)]);
+    // A default sequence: the base glyph.
+    let out = normalize_uvs("e\u{FE01}", level);
+    assert_eq!(out, [('e', 0x65, 0)]);
+    // A selector after a resolved sequence maps on its own.
+    let out = normalize_uvs("e\u{FE00}\u{FE01}", level);
+    assert_eq!(out, [('e', 500, 0), ('\u{FE01}', 0, 4)]);
+}
+
+#[test]
+fn an_unlisted_variation_sequence_maps_both_characters() {
+    let level = ClusterLevel::MonotoneCharacters;
+    let out = normalize_uvs("e\u{FE02}", level);
+    assert_eq!(out, [('e', 0x65, 0), ('\u{FE02}', 0, 1)]);
+    // A mapping to glyph 0 is not found.
+    let out = normalize_uvs("x\u{FE00}", level);
+    assert_eq!(out, [('x', 0x78, 0), ('\u{FE00}', 0, 1)]);
+    // Only the character right before the selector is looked up.
+    let out = normalize_uvs("e\u{0301}\u{FE00}", level);
+    assert_eq!(
+        out,
+        [('e', 0x65, 0), ('\u{0301}', 0, 1), ('\u{FE00}', 0, 3)]
+    );
+}
+
+#[test]
+fn a_variation_sequence_merges_clusters_only_at_monotone_levels() {
+    // The glyph keeps the base's cluster at every level. A mark that
+    // shares the selector's cluster (as two characters split from one
+    // would) joins the base's cluster only at the monotone levels, as
+    // HarfBuzz's `merge_clusters` does.
+    let chars = [('e', 0), ('\u{FE00}', 1), ('\u{0301}', 1)];
+    for (level, mark_cluster) in [
+        (ClusterLevel::MonotoneGraphemes, 0),
+        (ClusterLevel::MonotoneCharacters, 0),
+        (ClusterLevel::Characters, 1),
+        (ClusterLevel::Graphemes, 1),
+    ] {
+        let out = normalize_uvs_clustered(&chars, level);
+        assert_eq!(
+            out,
+            [('e', 500, 0), ('\u{0301}', 0, mark_cluster)],
+            "{level:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unresolved_selector_is_no_mark_and_shows_when_asked() {
+    let level = ClusterLevel::MonotoneCharacters;
+    let chars = |text: &str| -> Vec<(char, u32)> {
+        text.char_indices().map(|(i, c)| (c, i as u32)).collect()
+    };
+    // Unset: the selector maps on its own and stays default ignorable,
+    // but HarfBuzz no longer counts it as a mark.
+    let out = normalize_uvs_with(&chars("e\u{FE02}"), level, None);
+    assert_eq!(
+        out,
+        [('e', 0x65, 0, false, false), ('\u{FE02}', 0, 1, true, true)]
+    );
+    // Set: no longer ignorable, so neither hidden nor removed. The glyph
+    // is swapped in after positioning.
+    let out = normalize_uvs_with(&chars("e\u{FE02}"), level, Some(7));
+    assert_eq!(
+        out,
+        [
+            ('e', 0x65, 0, false, false),
+            ('\u{FE02}', 0, 1, false, true)
+        ]
+    );
+    // Only the selector right after the base: a further one is ignorable.
+    let out = normalize_uvs_with(&chars("x\u{FE00}\u{FE01}"), level, Some(7));
+    assert_eq!(
+        out,
+        [
+            ('x', 0x78, 0, false, false),
+            ('\u{FE00}', 0, 1, false, true),
+            ('\u{FE01}', 0, 4, true, false)
+        ]
+    );
+    // A resolved sequence leaves no selector.
+    let out = normalize_uvs_with(&chars("e\u{FE00}"), level, Some(7));
+    assert_eq!(out, [('e', 500, 0, false, false)]);
+}
+
+#[test]
+fn show_variation_selectors_swaps_in_the_glyph_with_no_position() {
+    use crate::buffer::Glyph;
+    let mut selector = Glyph::new(0, 1);
+    selector.char_class = char_class::UNRESOLVED_SELECTOR;
+    selector.x_advance = 1000;
+    selector.x_offset = -5;
+    selector.y_offset = 3;
+    let mut base = Glyph::new(4, 0);
+    base.x_advance = 563;
+    let mut glyphs = [base, selector];
+    super::show_variation_selectors(&mut glyphs, None);
+    assert_eq!(glyphs[1].glyph_id, 0);
+    assert_eq!(glyphs[1].x_advance, 1000);
+    super::show_variation_selectors(&mut glyphs, Some(9));
+    assert_eq!(glyphs[0], base);
+    let g = glyphs[1];
+    assert_eq!(
+        (g.glyph_id, g.cluster, g.x_advance, g.x_offset, g.y_offset),
+        (9, 1, 0, 0, 0)
+    );
 }

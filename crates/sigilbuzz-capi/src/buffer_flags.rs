@@ -1,10 +1,13 @@
-//! Buffer flags and cluster levels: `hb_buffer_set_flags`,
-//! `hb_buffer_get_flags`, `hb_buffer_set_cluster_level`, and
-//! `hb_buffer_get_cluster_level`, with HarfBuzz's constant values.
+//! Buffer settings: `hb_buffer_set_flags`, `hb_buffer_get_flags`,
+//! `hb_buffer_set_cluster_level`, `hb_buffer_get_cluster_level`, and
+//! `hb_buffer_{set,get}_not_found_variation_selector_glyph`, with
+//! HarfBuzz's constant values.
 //!
-//! Like HarfBuzz, a buffer starts with `HB_BUFFER_FLAG_DEFAULT` and
-//! `HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES`; `hb_buffer_reset`
-//! restores both and `hb_buffer_clear_contents` keeps them. (The Rust
+//! Like HarfBuzz, a buffer starts with `HB_BUFFER_FLAG_DEFAULT`,
+//! `HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES`, and no not-found
+//! variation selector glyph (`HB_CODEPOINT_INVALID`).
+//! `hb_buffer_reset` restores all three and `hb_buffer_clear_contents`
+//! keeps them. (The Rust
 //! `Buffer` defaults to MONOTONE_CHARACTERS instead; the C surface
 //! follows HarfBuzz.)
 
@@ -12,7 +15,10 @@ use core::ffi::c_uint;
 
 use sigilbuzz::{BufferFlags, ClusterLevel};
 
-use crate::{hb_buffer_t, BufferState};
+use crate::{hb_buffer_t, hb_codepoint_t, BufferState};
+
+/// HarfBuzz's `HB_CODEPOINT_INVALID`: no glyph.
+pub const HB_CODEPOINT_INVALID: hb_codepoint_t = u32::MAX;
 
 /// `hb_buffer_flags_t`.
 pub type hb_buffer_flags_t = c_uint;
@@ -60,8 +66,9 @@ pub(crate) fn core_level(level: hb_buffer_cluster_level_t) -> ClusterLevel {
     }
 }
 
-/// Puts the flags and cluster level back to HarfBuzz's defaults, on
-/// the C state and on the core buffer (`hb_buffer_create` and
+/// Puts the flags, cluster level, and not-found variation selector
+/// glyph back to HarfBuzz's defaults, on the C state and on the core
+/// buffer (`hb_buffer_create` and
 /// `hb_buffer_reset`).
 pub(crate) fn restore_defaults(state: &mut BufferState) {
     state.flags = HB_BUFFER_FLAG_DEFAULT;
@@ -70,6 +77,7 @@ pub(crate) fn restore_defaults(state: &mut BufferState) {
     state
         .buffer
         .set_cluster_level(core_level(HB_BUFFER_CLUSTER_LEVEL_DEFAULT));
+    state.buffer.set_not_found_variation_selector_glyph(None);
 }
 
 /// Sets the buffer flags. Like HarfBuzz, the value is stored as given
@@ -145,6 +153,51 @@ pub unsafe extern "C" fn hb_buffer_get_cluster_level(
     let inner = unsafe { &(*buffer).inner };
     let state = inner.state.lock();
     state.cluster_level
+}
+
+/// Sets the glyph a variation selector becomes when the font has no
+/// glyph for it after its base character, HarfBuzz's
+/// `hb_buffer_set_not_found_variation_selector_glyph`.
+/// `HB_CODEPOINT_INVALID` (the default) hides such a selector like any
+/// other default ignorable.
+///
+/// # Safety
+/// `buffer` must be null or a live buffer.
+#[no_mangle]
+pub unsafe extern "C" fn hb_buffer_set_not_found_variation_selector_glyph(
+    buffer: *mut hb_buffer_t,
+    not_found_variation_selector: hb_codepoint_t,
+) {
+    if buffer.is_null() {
+        return;
+    }
+    // SAFETY: the caller guarantees `buffer` is live.
+    let inner = unsafe { &(*buffer).inner };
+    let mut state = inner.state.lock();
+    let glyph = (not_found_variation_selector != HB_CODEPOINT_INVALID)
+        .then_some(not_found_variation_selector);
+    state.buffer.set_not_found_variation_selector_glyph(glyph);
+}
+
+/// The glyph set with [`hb_buffer_set_not_found_variation_selector_glyph`],
+/// or `HB_CODEPOINT_INVALID` when none is set or the buffer is null.
+///
+/// # Safety
+/// `buffer` must be null or a live buffer.
+#[no_mangle]
+pub unsafe extern "C" fn hb_buffer_get_not_found_variation_selector_glyph(
+    buffer: *const hb_buffer_t,
+) -> hb_codepoint_t {
+    if buffer.is_null() {
+        return HB_CODEPOINT_INVALID;
+    }
+    // SAFETY: the caller guarantees `buffer` is live.
+    let inner = unsafe { &(*buffer).inner };
+    let state = inner.state.lock();
+    state
+        .buffer
+        .not_found_variation_selector_glyph()
+        .unwrap_or(HB_CODEPOINT_INVALID)
 }
 
 #[cfg(test)]

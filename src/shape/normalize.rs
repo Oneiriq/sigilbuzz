@@ -38,10 +38,10 @@
 //! `glyph_props`); after reordering, one that blocked no reordering is
 //! un-hidden, as in HarfBuzz.
 //!
-//! sigilbuzz's cmap parser has no format 14 subtable, so a base and
-//! variation selector never map to a variant glyph: both map on their
-//! own and GSUB sees them, as HarfBuzz does when the font lacks the
-//! variation.
+//! A character followed by a variation selector maps through the
+//! font's cmap format 14 subtable, as in HarfBuzz: when the font has a
+//! glyph for the sequence, that glyph replaces both characters.
+//! Otherwise both map on their own and GSUB sees them.
 
 mod hooks;
 
@@ -53,7 +53,7 @@ use super::glyph_flags;
 use super::segment::Segment;
 use super::shaper::{NormalizationMode, Shaper};
 use super::{glyph_props, ignorables};
-use crate::buffer::{char_class, ClusterLevel, Glyph, GlyphFlags};
+use crate::buffer::{char_class, unicode_prop, ClusterLevel, Glyph, GlyphFlags};
 use crate::tables::cmap::Cmap;
 use crate::tables::layout::skip_iter::match_prop;
 use crate::unicode::general_category::{
@@ -91,6 +91,10 @@ pub(super) struct NormChar {
     /// Glyph flags the character carries from before normalization
     /// (grapheme merges a cluster level skipped).
     flags: GlyphFlags,
+    /// A variation selector the font could not resolve after its base,
+    /// shown as the buffer's not-found variation selector glyph: it is
+    /// no longer default ignorable, so it is neither hidden nor removed.
+    shown_selector: bool,
 }
 
 impl Clustered for NormChar {
@@ -123,6 +127,7 @@ impl NormChar {
             mcc: 0,
             unhidden: false,
             flags: GlyphFlags::empty(),
+            shown_selector: false,
         };
         c.set_char(ch);
         c
@@ -162,6 +167,9 @@ impl NormChar {
         g.unicode_props = ignorables::unicode_props(self.ch) | glyph_props::initial(self.ch);
         if self.unhidden {
             g.unicode_props &= !match_prop::HIDDEN;
+        }
+        if self.shown_selector {
+            g.unicode_props &= !unicode_prop::DEFAULT_IGNORABLE;
         }
         g.char_class = self.class;
         g.combining_class = self.mcc;
@@ -221,6 +229,9 @@ pub(super) struct Normalizer<'a> {
     /// nonspacing marks take the positional classes their combining
     /// classes stand for (`recategorize_combining_class`).
     pub(super) recategorize_marks: bool,
+    /// The buffer's not-found variation selector glyph
+    /// ([`crate::Buffer::set_not_found_variation_selector_glyph`]).
+    pub(super) not_found_variation_selector: Option<u32>,
 }
 
 impl Normalizer<'_> {
@@ -336,15 +347,52 @@ impl Normalizer<'_> {
         }
     }
 
-    /// `handle_variation_selector_cluster`, without cmap format 14: a
-    /// cluster with a variation selector is not normalized; each
-    /// character maps on its own (glyph 0 when the font lacks it).
+    /// `handle_variation_selector_cluster`: a cluster with a variation
+    /// selector is not normalized. A character followed by a selector
+    /// takes the glyph the font's format 14 subtable gives the pair
+    /// ([`Cmap::variation_glyph`]), and the selector goes away, its
+    /// cluster merged into the character's (`replace_glyphs (2, 1)`).
+    /// When the font has no glyph for the pair, both characters map on
+    /// their own, and so does any further selector. The selector right
+    /// after the character becomes the buffer's not-found variation
+    /// selector glyph after positioning when one is set, and stays
+    /// visible (see [`show_variation_selectors`]). Every other character
+    /// maps on its own (glyph 0 when the font lacks it).
     fn map_variation_selector_cluster(&self, cluster: &[NormChar], out: &mut Vec<NormChar>) {
-        out.extend(
-            cluster
-                .iter()
-                .map(|c| c.with_glyph(self.nominal(c.ch).unwrap_or(0))),
-        );
+        let mut chars = cluster.to_vec();
+        let nominal = |c: NormChar| c.with_glyph(self.nominal(c.ch).unwrap_or(0));
+        let mut i = 0;
+        while i + 1 < chars.len() {
+            if !is_variation_selector(chars[i + 1].ch) {
+                out.push(nominal(chars[i]));
+                i += 1;
+                continue;
+            }
+            match self.cmap.variation_glyph(chars[i].ch, chars[i + 1].ch) {
+                Some(glyph) => {
+                    merge_clusters(&mut chars, i, i + 2, self.level);
+                    out.push(chars[i].with_glyph(u32::from(glyph)));
+                }
+                None => {
+                    out.push(nominal(chars[i]));
+                    // HarfBuzz's `_hb_glyph_info_set_variation_selector`: no
+                    // mark until `show_variation_selectors`, and no longer
+                    // ignorable when a not-found glyph will replace it.
+                    let mut selector = nominal(chars[i + 1]);
+                    selector.class = char_class::UNRESOLVED_SELECTOR;
+                    selector.shown_selector = self.not_found_variation_selector.is_some();
+                    out.push(selector);
+                }
+            }
+            i += 2;
+            while i < chars.len() && is_variation_selector(chars[i].ch) {
+                out.push(nominal(chars[i]));
+                i += 1;
+            }
+        }
+        if let Some(&last) = chars.get(i) {
+            out.push(nominal(last));
+        }
     }
 
     /// `decompose_current_character`: maps `cur`, decomposing it when
@@ -519,6 +567,28 @@ impl Normalizer<'_> {
         for c in output[start..w].iter_mut().chain(&mut input[..end - i]) {
             glyph_flags::set_cluster(c, cluster, GlyphFlags::empty());
         }
+    }
+}
+
+/// HarfBuzz's `hb_ot_deal_with_variation_selectors`, run after
+/// positioning and before the ignorables are hidden: with a not-found
+/// variation selector glyph set
+/// ([`crate::Buffer::set_not_found_variation_selector_glyph`]), every
+/// variation selector the font could not resolve after its base becomes
+/// that glyph, with no advance and no offset.
+pub(super) fn show_variation_selectors(glyphs: &mut [Glyph], not_found: Option<u32>) {
+    let Some(glyph_id) = not_found else {
+        return;
+    };
+    for g in glyphs
+        .iter_mut()
+        .filter(|g| g.char_class & char_class::UNRESOLVED_SELECTOR != 0)
+    {
+        g.glyph_id = glyph_id;
+        g.x_advance = 0;
+        g.y_advance = 0;
+        g.x_offset = 0;
+        g.y_offset = 0;
     }
 }
 

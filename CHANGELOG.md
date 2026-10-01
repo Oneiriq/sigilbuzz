@@ -98,7 +98,34 @@ Added:
 - `sigilbuzz-capi`: `hb_glyph_info_get_glyph_flags`, `hb_glyph_flags_t` with the
   `HB_GLYPH_FLAG_*` constants, and `HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT` and
   `HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL`. `hb_glyph_info_t::mask` carries the
-  glyph flags, as in HarfBuzz; it used to be zero.
+  glyph flags, as in HarfBuzz. It used to be zero.
+- cmap format 14, Unicode Variation Sequences: `Cmap::variation_glyph`,
+  `Cmap::variation_selectors`, `Cmap::variation_unicodes`, and `Face::variation_glyph`,
+  read from the subtable under `(0, 5)` as HarfBuzz reads it. Shaping uses it as
+  HarfBuzz's normalizer does: a character followed by a variation selector (U+FE00 to
+  U+FE0F, U+E0100 to U+E01EF) takes the glyph the font gives the pair, or the
+  character's usual glyph for a default sequence, and the selector is dropped with its
+  cluster merged into the character's. Pairs the font does not list shape as before.
+  Output changes only for fonts with a format 14 subtable. A format 14 subtable that
+  does not fit is ignored.
+- `sigilbuzz-capi`: `hb_font_get_nominal_glyph`, `hb_font_get_variation_glyph`,
+  `hb_font_get_glyph`, `hb_face_collect_variation_selectors`, and
+  `hb_face_collect_variation_unicodes`.
+- `Buffer::{set_not_found_variation_selector_glyph, not_found_variation_selector_glyph}`,
+  HarfBuzz's not-found variation selector glyph: a variation selector the font has no
+  glyph for after its base character becomes that glyph, with no advance or offset,
+  instead of being hidden or removed, so a caller can tell the font lacks the variation.
+  `sigilbuzz-capi`: `hb_buffer_set_not_found_variation_selector_glyph`,
+  `hb_buffer_get_not_found_variation_selector_glyph`, and `HB_CODEPOINT_INVALID`.
+- `BidiParagraph` applies UAX #9 rule P1: it splits the text after each paragraph
+  separator (LF, CR, NEL, U+001C to U+001E, U+2029, with CR LF as one separator, as ICU
+  treats it), and each paragraph gets its own base level (or the forced direction).
+  Runs, lines and visual order stop at paragraph boundaries, and shaping context and
+  the `BOT` and `EOT` flags stop at paragraph edges, so each paragraph shapes as it
+  would alone. `BidiParagraph::{paragraphs, paragraph_at}` and `BidiParagraphSpan`
+  describe the paragraphs. `direction` and `base_level` give the first paragraph's.
+  Text without a paragraph separator resolves and shapes as before. The CLI's
+  `shape --bidi` gets the split too.
 
 Changed:
 
@@ -376,11 +403,29 @@ Output that differed from HarfBuzz:
   forms, Indic `half`, `rtlm`) checks its mask at every input glyph a rule matches, as
   HarfBuzz's skipping iterator does (`matcher_t::may_match`), not only at the cursor:
   a ligature or contextual rule no longer matches across a glyph the feature is off at.
-  Contextual lookups of such features used to run over the whole run; they now start
+  Contextual lookups of such features used to run over the whole run. They now start
   only where the feature is on. The mask moves with its glyph through all of the
   feature's lookups, where it used to stay at its index when an earlier lookup changed
   the run's length. Every GPOS feature applies to every glyph, as in HarfBuzz, so GPOS
   matching has no mask to check.
+- The bidi algorithm passes every line of the Unicode 17.0 BidiTest.txt (3,878 failed
+  before) and BidiCharacterTest.txt (19 failed before). An isolate inside a directional
+  override opens at its own direction and still matches its PDI (X5a to X5c, BD9), an
+  override leaves boundary neutrals to rule X9 (X6), a paragraph separator takes the
+  paragraph level (X8), marks after a bracket that N0 resolves take its type, bracket
+  pairing stops when the stack is full, and U+2329 and U+232A pair with U+3008 and
+  U+3009 (BD16).
+- `bidi_class` and the paired-bracket table are generated from the Unicode 17.0
+  `DerivedBidiClass.txt` (with the defaults of its `@missing` lines) and
+  `BidiBrackets.txt` by `tests/unicode_table_gen.rs`, like the other UCD tables. The
+  hand-picked tables had thousands of wrong values (Devanagari and other Indic marks as
+  L instead of NSM, Samaritan, Mandaic, Adlam and other right-to-left scripts as ON,
+  U+002A as ET, U+06F0 to U+06F9 as AN) and 30 of the 128 bracket pairs missing.
+  `BidiParagraph` levels change for such text. `shape` changes only where the class
+  decides the native direction, for scripts sigilbuzz has no shaper for: text in
+  Samaritan, Mandaic, Adlam, Kharoshthi, Phoenician, Garay and the other right-to-left
+  scripts is now reversed like HarfBuzz reverses it, and Old Hungarian, Old Italic, Runic
+  and Tifinagh, which HarfBuzz gives no native direction, are never reversed.
 
 Removed:
 

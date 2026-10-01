@@ -29,14 +29,33 @@
 //! Symbol fonts need per-codepoint PUA remapping. Fonts that ship a
 //! Symbol subtable usually also ship a Unicode one, and sigilbuzz
 //! reads that instead.
+//!
+//! # Variation sequences
+//!
+//! A format 14 subtable under `(0, 5)` maps Unicode Variation Sequences
+//! (a base character and a variation selector) to glyphs. sigilbuzz
+//! reads it next to the subtable above, as HarfBuzz does, and answers
+//! [`Cmap::variation_glyph`], [`Cmap::variation_selectors`], and
+//! [`Cmap::variation_unicodes`] from it. A format 14 subtable whose
+//! records do not fit is ignored, as HarfBuzz's sanitizer drops it.
+
+mod format14;
+
+use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
+use format14::{Format14, GlyphVariant};
+
+#[cfg(test)]
+pub(crate) use format14::build_format14;
 
 /// Parsed `cmap` with its best available subtable pre-selected.
 #[derive(Debug, Clone)]
 pub struct Cmap<'a> {
     subtable: Subtable<'a>,
+    /// The format 14 subtable under `(0, 5)`, if the font has one.
+    uvs: Option<Format14<'a>>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,12 +85,20 @@ impl<'a> Cmap<'a> {
             });
         }
 
-        // First pass: pick the highest-scoring encoding record.
+        // First pass: pick the highest-scoring encoding record, and
+        // note the first Unicode Variation Sequences record.
         let mut best: Option<(u32, u32)> = None; // (score, subtable_offset)
+        let mut uvs: Option<Format14<'a>> = None;
         for _ in 0..num_tables {
             let platform_id = r.read_u16()?;
             let encoding_id = r.read_u16()?;
             let subtable_offset = r.read_u32()?;
+
+            if (platform_id, encoding_id) == (0, 5) && uvs.is_none() {
+                uvs = data
+                    .get(subtable_offset as usize..)
+                    .and_then(|sub| Format14::parse(sub).ok());
+            }
 
             let Some(score) = encoding_score(platform_id, encoding_id, data, subtable_offset)
             else {
@@ -114,7 +141,7 @@ impl<'a> Cmap<'a> {
             }
         };
 
-        Ok(Self { subtable })
+        Ok(Self { subtable, uvs })
     }
 
     /// Resolves a character to its glyph index. Returns `None` when
@@ -134,6 +161,79 @@ impl<'a> Cmap<'a> {
         } else {
             Some(gid)
         }
+    }
+
+    /// Resolves the variation sequence `ch` followed by `selector` to a
+    /// glyph, as HarfBuzz's `hb_font_get_variation_glyph` does.
+    ///
+    /// The font's format 14 subtable decides. A sequence it maps to its
+    /// own glyph returns that glyph. A sequence it lists as a default
+    /// sequence returns [`Self::glyph_id`] of `ch`. A sequence it does
+    /// not list returns `None`, even when the font maps `ch` itself, so
+    /// a caller can tell the variant apart from the base glyph.
+    ///
+    /// ```
+    /// use sigilbuzz::Face;
+    ///
+    /// let data = include_bytes!("../../tests/fixtures/noto_sans_cjk_jp_uvs_subset.otf");
+    /// let cmap = Face::parse_bytes(data, 0)?.cmap()?;
+    /// // U+845B with VS17 has its own glyph.
+    /// assert_eq!(cmap.variation_glyph('\u{845B}', '\u{E0100}'), Some(29));
+    /// // With VS18 it is a default sequence: the usual glyph.
+    /// assert_eq!(cmap.variation_glyph('\u{845B}', '\u{E0101}'), cmap.glyph_id('\u{845B}'));
+    /// // The font does not list it with VS19.
+    /// assert_eq!(cmap.variation_glyph('\u{845B}', '\u{E0102}'), None);
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
+    #[must_use]
+    pub fn variation_glyph(&self, ch: char, selector: char) -> Option<u16> {
+        match self.uvs.as_ref()?.glyph_variant(ch as u32, selector as u32) {
+            GlyphVariant::Found(glyph) => Some(glyph),
+            GlyphVariant::UseDefault => self.glyph_id(ch),
+            GlyphVariant::NotFound => None,
+        }
+    }
+
+    /// The variation selectors the font's format 14 subtable has records
+    /// for, sorted, as HarfBuzz's `hb_face_collect_variation_selectors`
+    /// collects them. Empty when the font has no such subtable.
+    ///
+    /// The values come from the table as they are, so a malformed font
+    /// can list values that are not Unicode scalar values.
+    ///
+    /// ```
+    /// use sigilbuzz::Face;
+    ///
+    /// let data = include_bytes!("../../tests/fixtures/noto_sans_cjk_jp_uvs_subset.otf");
+    /// let cmap = Face::parse_bytes(data, 0)?.cmap()?;
+    /// assert_eq!(cmap.variation_selectors(), [0xFE00, 0xFE01, 0xE0100, 0xE0101, 0xE0102]);
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
+    #[must_use]
+    pub fn variation_selectors(&self) -> Vec<u32> {
+        self.uvs.map_or_else(Vec::new, |uvs| uvs.selectors())
+    }
+
+    /// The base characters the font lists with `selector`, in both its
+    /// default and its own-glyph sequences, sorted, as HarfBuzz's
+    /// `hb_face_collect_variation_unicodes` collects them. Empty when
+    /// the font has no record for `selector`.
+    ///
+    /// The values come from the table as they are, so a malformed font
+    /// can list values that are not Unicode scalar values.
+    ///
+    /// ```
+    /// use sigilbuzz::Face;
+    ///
+    /// let data = include_bytes!("../../tests/fixtures/noto_sans_cjk_jp_uvs_subset.otf");
+    /// let cmap = Face::parse_bytes(data, 0)?.cmap()?;
+    /// assert_eq!(cmap.variation_unicodes(0xE0102), [0x9089]);
+    /// assert!(cmap.variation_unicodes(0xE0103).is_empty());
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
+    #[must_use]
+    pub fn variation_unicodes(&self, selector: u32) -> Vec<u32> {
+        self.uvs.map_or_else(Vec::new, |uvs| uvs.unicodes(selector))
     }
 }
 
@@ -428,9 +528,6 @@ impl<'a> Format12<'a> {
 // --------------------------------------------------------------------------
 // Fixture helpers (tests only)
 // --------------------------------------------------------------------------
-
-#[cfg(test)]
-use alloc::vec::Vec;
 
 #[cfg(test)]
 pub(crate) fn build_cmap_wrapper(records: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {

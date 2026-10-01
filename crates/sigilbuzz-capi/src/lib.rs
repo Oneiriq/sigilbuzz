@@ -115,13 +115,15 @@ pub use buffer::{
 };
 pub use buffer_flags::{
     hb_buffer_cluster_level_t, hb_buffer_flags_t, hb_buffer_get_cluster_level, hb_buffer_get_flags,
-    hb_buffer_set_cluster_level, hb_buffer_set_flags, HB_BUFFER_CLUSTER_LEVEL_CHARACTERS,
-    HB_BUFFER_CLUSTER_LEVEL_DEFAULT, HB_BUFFER_CLUSTER_LEVEL_GRAPHEMES,
-    HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS, HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES,
-    HB_BUFFER_FLAG_BOT, HB_BUFFER_FLAG_DEFAULT, HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE,
-    HB_BUFFER_FLAG_EOT, HB_BUFFER_FLAG_PRESERVE_DEFAULT_IGNORABLES,
-    HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL, HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT,
-    HB_BUFFER_FLAG_REMOVE_DEFAULT_IGNORABLES,
+    hb_buffer_get_not_found_variation_selector_glyph, hb_buffer_set_cluster_level,
+    hb_buffer_set_flags, hb_buffer_set_not_found_variation_selector_glyph,
+    HB_BUFFER_CLUSTER_LEVEL_CHARACTERS, HB_BUFFER_CLUSTER_LEVEL_DEFAULT,
+    HB_BUFFER_CLUSTER_LEVEL_GRAPHEMES, HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS,
+    HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES, HB_BUFFER_FLAG_BOT, HB_BUFFER_FLAG_DEFAULT,
+    HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE, HB_BUFFER_FLAG_EOT,
+    HB_BUFFER_FLAG_PRESERVE_DEFAULT_IGNORABLES, HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL,
+    HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT, HB_BUFFER_FLAG_REMOVE_DEFAULT_IGNORABLES,
+    HB_CODEPOINT_INVALID,
 };
 pub(crate) use common::lang_und;
 pub use common::{
@@ -134,7 +136,8 @@ pub use face::{
     hb_face_create, hb_face_destroy, hb_face_get_glyph_count, hb_face_get_upem, hb_face_reference,
 };
 pub use font::{
-    hb_font_create, hb_font_destroy, hb_font_get_scale, hb_font_reference, hb_font_set_ppem,
+    hb_font_create, hb_font_destroy, hb_font_get_glyph, hb_font_get_nominal_glyph,
+    hb_font_get_scale, hb_font_get_variation_glyph, hb_font_reference, hb_font_set_ppem,
     hb_font_set_scale, hb_font_set_variations,
 };
 pub use opaque::{hb_blob_t, hb_buffer_t, hb_face_t, hb_font_t};

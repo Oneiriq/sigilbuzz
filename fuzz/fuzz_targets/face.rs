@@ -31,6 +31,12 @@ fn exercise(face: &Face<'_>, knobs: &mut Knobs<'_>) {
     if let Ok(cmap) = face.cmap() {
         for ch in ['A', 'z', '\u{0627}', '\u{0915}', '\u{4e00}', '\u{1f642}', '\u{10ffff}'] {
             let _ = cmap.glyph_id(ch);
+            for selector in ['\u{FE00}', '\u{FE0F}', '\u{E0100}'] {
+                let _ = cmap.variation_glyph(ch, selector);
+            }
+        }
+        for selector in cmap.variation_selectors().into_iter().take(8) {
+            let _ = cmap.variation_unicodes(selector);
         }
     }
     if let Ok(Some(name)) = face.name() {

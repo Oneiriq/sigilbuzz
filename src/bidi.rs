@@ -9,10 +9,10 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use crate::buffer::{Direction, Glyph};
-use crate::unicode::bidi::BidiInfo;
+use crate::unicode::bidi::{paragraph_ranges, BidiInfo};
 
 #[cfg(doc)]
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, BufferFlags};
 
 /// A run of text at one embedding level: the unit HarfBuzz shapes.
 ///
@@ -73,8 +73,54 @@ pub struct ShapedBidiRun {
     pub glyphs: Vec<Glyph>,
 }
 
-/// A paragraph of text with its UAX #9 embedding levels, ready to be
-/// shaped run by run.
+/// One paragraph of a [`BidiParagraph`]'s text (UAX #9 rule P1): its
+/// byte range and its paragraph embedding level.
+///
+/// [`BidiParagraph::paragraphs`] lists them in logical order.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BidiParagraphSpan {
+    /// Byte range of the paragraph in the text, its closing paragraph
+    /// separator included.
+    pub range: Range<usize>,
+    /// Paragraph embedding level: 0 for a left-to-right paragraph, 1 for
+    /// a right-to-left one.
+    pub level: u8,
+}
+
+impl BidiParagraphSpan {
+    /// True for a right-to-left paragraph.
+    ///
+    /// ```
+    /// use sigilbuzz::BidiParagraphSpan;
+    ///
+    /// assert!(BidiParagraphSpan { range: 0..2, level: 1 }.is_rtl());
+    /// ```
+    #[must_use]
+    pub const fn is_rtl(&self) -> bool {
+        self.level % 2 == 1
+    }
+
+    /// The paragraph direction: [`Direction::Rtl`] for level 1,
+    /// [`Direction::Ltr`] for level 0.
+    ///
+    /// ```
+    /// use sigilbuzz::{BidiParagraphSpan, Direction};
+    ///
+    /// let span = BidiParagraphSpan { range: 0..1, level: 0 };
+    /// assert_eq!(span.direction(), Direction::Ltr);
+    /// ```
+    #[must_use]
+    pub const fn direction(&self) -> Direction {
+        if self.is_rtl() {
+            Direction::Rtl
+        } else {
+            Direction::Ltr
+        }
+    }
+}
+
+/// Text of one or more paragraphs with its UAX #9 embedding levels,
+/// ready to be shaped run by run.
 ///
 /// HarfBuzz leaves the Unicode bidirectional algorithm (UAX #9) to its
 /// caller. The caller resolves the paragraph's embedding levels, cuts
@@ -83,9 +129,11 @@ pub struct ShapedBidiRun {
 /// puts the runs in visual order. [`BidiParagraph`] does the same
 /// thing:
 ///
-/// - [`BidiParagraph::new`] resolves the levels (UAX #9 through rule
-///   L1, with the whole text as one line) and splits the text into
-///   [`BidiRun`]s, each a byte range and a level, in logical order.
+/// - [`BidiParagraph::new`] splits the text into paragraphs (UAX #9
+///   rule P1, see [Paragraphs](#paragraphs)), resolves each paragraph's
+///   levels (through rule L1, with the whole paragraph as one line), and
+///   splits the text into [`BidiRun`]s, each a byte range and a level,
+///   in logical order.
 /// - [`BidiParagraph::shape_run`] shapes one run, or any piece of one,
 ///   with its direction. The paragraph text around the piece becomes
 ///   the buffer's pre- and post-context, so Arabic joining and other
@@ -121,16 +169,70 @@ pub struct ShapedBidiRun {
 /// # Ok::<(), sigilbuzz::Error>(())
 /// ```
 ///
+/// # Paragraphs
+///
+/// Rule P1 splits the text after every paragraph separator (Bidi_Class
+/// B: LF, CR, U+001C to U+001E, NEL, and U+2029 PARAGRAPH SEPARATOR).
+/// The separator belongs to the paragraph it ends, and a separator at
+/// the end of the text starts no empty paragraph. Each paragraph then
+/// goes through the rest of the algorithm on its own:
+///
+/// - It gets its own base level: from its first strong character (rules
+///   P2 and P3) when [`BidiParagraph::new`] gets `None`, or the forced
+///   direction for every paragraph when it gets `Some`.
+/// - Embeddings, overrides, and isolates end at its end (rule X8), and
+///   its separator takes its base level (rule L1).
+/// - Runs, lines, and visual order never cross a paragraph boundary.
+///   [`BidiParagraph::runs`] can end one paragraph and start the next
+///   at the same level. A line range that spans paragraphs is ordered
+///   as one line per paragraph, the paragraphs in logical order.
+/// - Shaping context stops at the paragraph edges, and a run that
+///   starts or ends a paragraph keeps the buffer's
+///   [`BufferFlags::BOT`] or [`BufferFlags::EOT`], so each paragraph
+///   shapes as it would in a [`BidiParagraph`] of its own.
+///
+/// UAX #9 leaves two choices to the implementation, made here as ICU's
+/// `ubidi_setPara` makes them: a CR directly followed by an LF is one
+/// separator, so the pair ends one paragraph, and a forced direction
+/// applies to every paragraph. [`BidiParagraph::paragraphs`] lists the
+/// paragraphs with their levels.
+///
+/// ```
+/// use sigilbuzz::{BidiParagraph, BidiParagraphSpan, BidiRun};
+///
+/// // A Hebrew paragraph, then a Latin one.
+/// let text = "\u{05D0}\u{05D1} ab\u{2029}cd \u{05D2}";
+/// let paragraph = BidiParagraph::new(text, None);
+/// assert_eq!(
+///     paragraph.paragraphs(),
+///     [
+///         BidiParagraphSpan { range: 0..10, level: 1 },
+///         BidiParagraphSpan { range: 10..15, level: 0 },
+///     ]
+/// );
+/// // Each paragraph is ordered on its own.
+/// assert_eq!(
+///     paragraph.visual_runs(),
+///     [
+///         BidiRun { range: 7..10, level: 1 },
+///         BidiRun { range: 5..7, level: 2 },
+///         BidiRun { range: 0..5, level: 1 },
+///         BidiRun { range: 10..13, level: 0 },
+///         BidiRun { range: 13..15, level: 1 },
+///     ]
+/// );
+/// ```
+///
 /// # Laying out lines
 ///
 /// UAX #9 reorders each line on its own, so a paragraph that wraps must
 /// not be reordered as a whole. A layout engine works in logical order
 /// until it knows the lines:
 ///
-/// 1. Build one [`BidiParagraph`] per paragraph (UAX #9 rule P1 is the
-///    caller's: split the text at paragraph separators first). Pass
-///    `Some(direction)` to force the base direction, `None` to take it
-///    from the first strong character.
+/// 1. Build a [`BidiParagraph`] from the text. Pass `Some(direction)` to
+///    force the base direction, `None` to take each paragraph's from its
+///    first strong character. A new paragraph starts a new line, so
+///    break each of [`BidiParagraph::paragraphs`] into lines on its own.
 /// 2. Measure. Shape every run of [`BidiParagraph::runs`] with
 ///    [`BidiParagraph::shape_run`] (or the whole paragraph with
 ///    [`BidiParagraph::shape`]). Clusters are logical byte offsets, so
@@ -221,26 +323,32 @@ pub struct ShapedBidiRun {
 ///   a vertical direction.
 #[derive(Debug, Clone)]
 pub struct BidiParagraph {
-    /// The paragraph text, in logical order.
+    /// The text, in logical order.
     text: String,
     /// Embedding level (after L1) of every byte of `text`.
     levels: Vec<u8>,
-    /// Maximal spans of one level, in logical order.
+    /// Maximal spans of one level inside one paragraph, in logical
+    /// order.
     runs: Vec<BidiRun>,
-    /// Paragraph direction: [`Direction::Ltr`] or [`Direction::Rtl`].
+    /// The paragraphs (rule P1), in logical order.
+    paragraphs: Vec<BidiParagraphSpan>,
+    /// The first paragraph's direction ([`Direction::Ltr`] or
+    /// [`Direction::Rtl`]), or the forced one for empty text.
     direction: Direction,
 }
 
 impl BidiParagraph {
-    /// Resolves the embedding levels of `text` and splits it into runs.
+    /// Splits `text` into paragraphs, resolves their embedding levels,
+    /// and splits them into runs.
     ///
-    /// `direction` forces the paragraph direction: `Some(Direction::Rtl)`
-    /// for a right-to-left paragraph, any other `Some` for a left-to-right
-    /// one. `None` takes it from the first strong character outside an
-    /// isolate (UAX #9 rules P2 and P3), left to right when there is none.
+    /// `direction` forces the direction of every paragraph:
+    /// `Some(Direction::Rtl)` for right to left, any other `Some` for left
+    /// to right. `None` takes each paragraph's from its first strong
+    /// character outside an isolate (UAX #9 rules P2 and P3), left to
+    /// right when there is none.
     ///
-    /// The whole text is one paragraph: split it at paragraph separators
-    /// (UAX #9 rule P1) before calling this.
+    /// Paragraph separators split the text into paragraphs (UAX #9 rule
+    /// P1). See [Paragraphs](#paragraphs).
     ///
     /// ```
     /// use sigilbuzz::{BidiParagraph, BidiRun, Direction};
@@ -254,58 +362,78 @@ impl BidiParagraph {
     ///         BidiRun { range: 5..8, level: 2 },
     ///     ]
     /// );
+    ///
+    /// // A newline starts a paragraph with its own direction.
+    /// let two = BidiParagraph::new("\u{05D0}\u{05D1}\nabc", None);
+    /// let directions: Vec<Direction> = two.paragraphs().iter().map(|p| p.direction()).collect();
+    /// assert_eq!(directions, [Direction::Rtl, Direction::Ltr]);
     /// ```
     #[must_use]
     pub fn new(text: &str, direction: Option<Direction>) -> Self {
-        let direction = direction.map(|d| {
+        let forced = direction.map(|d| {
             if d == Direction::Rtl {
                 Direction::Rtl
             } else {
                 Direction::Ltr
             }
         });
-        let info = BidiInfo::new(text, direction);
-        let direction = if info.paragraph_direction() == Direction::Rtl {
-            Direction::Rtl
-        } else {
-            Direction::Ltr
-        };
         let mut levels = Vec::with_capacity(text.len());
-        for (ch, &level) in text.chars().zip(info.levels()) {
-            levels.extend(core::iter::repeat(level).take(ch.len_utf8()));
-        }
         let mut runs: Vec<BidiRun> = Vec::new();
-        for (byte, &level) in levels.iter().enumerate() {
-            match runs.last_mut() {
-                Some(run) if run.level == level => run.range.end = byte + 1,
-                _ => runs.push(BidiRun {
-                    range: byte..byte + 1,
-                    level,
-                }),
+        let mut paragraphs = Vec::new();
+        for range in paragraph_ranges(text) {
+            let Some(paragraph_text) = text.get(range.clone()) else {
+                continue;
+            };
+            let info = BidiInfo::new(paragraph_text, forced);
+            let first_run = runs.len();
+            let mut byte = range.start;
+            for (ch, &level) in paragraph_text.chars().zip(info.levels()) {
+                let end = byte + ch.len_utf8();
+                levels.extend(core::iter::repeat(level).take(end - byte));
+                // Runs of an earlier paragraph are out of reach.
+                match runs.get_mut(first_run..).and_then(<[BidiRun]>::last_mut) {
+                    Some(run) if run.level == level => run.range.end = end,
+                    _ => runs.push(BidiRun {
+                        range: byte..end,
+                        level,
+                    }),
+                }
+                byte = end;
             }
+            let level = u8::from(info.paragraph_direction() == Direction::Rtl);
+            paragraphs.push(BidiParagraphSpan { range, level });
         }
+        let direction = paragraphs.first().map_or(
+            forced.unwrap_or(Direction::Ltr),
+            BidiParagraphSpan::direction,
+        );
         Self {
             text: String::from(text),
             levels,
             runs,
+            paragraphs,
             direction,
         }
     }
 
-    /// The paragraph text, in logical order.
+    /// The text, in logical order.
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
     }
 
     /// The paragraph direction, [`Direction::Ltr`] or [`Direction::Rtl`].
+    /// When the text holds several paragraphs, the first one's (see
+    /// [`Self::paragraphs`] for each). For empty text, the forced
+    /// direction, or [`Direction::Ltr`].
     #[must_use]
     pub const fn direction(&self) -> Direction {
         self.direction
     }
 
     /// The paragraph embedding level: 0 for a left-to-right paragraph,
-    /// 1 for a right-to-left one.
+    /// 1 for a right-to-left one. When the text holds several
+    /// paragraphs, the first one's, as for [`Self::direction`].
     #[must_use]
     pub const fn base_level(&self) -> u8 {
         match self.direction {
@@ -314,8 +442,53 @@ impl BidiParagraph {
         }
     }
 
+    /// The paragraphs of the text (UAX #9 rule P1), in logical order,
+    /// each with its embedding level. They cover the text without gaps.
+    /// Empty text has none.
+    ///
+    /// ```
+    /// use sigilbuzz::{BidiParagraph, BidiParagraphSpan, Direction};
+    ///
+    /// // CR LF is one separator. The text is forced right to left.
+    /// let paragraph = BidiParagraph::new("ab\r\ncd", Some(Direction::Rtl));
+    /// assert_eq!(
+    ///     paragraph.paragraphs(),
+    ///     [
+    ///         BidiParagraphSpan { range: 0..4, level: 1 },
+    ///         BidiParagraphSpan { range: 4..6, level: 1 },
+    ///     ]
+    /// );
+    /// ```
+    #[must_use]
+    pub fn paragraphs(&self) -> &[BidiParagraphSpan] {
+        &self.paragraphs
+    }
+
+    /// The paragraph holding byte `offset`, or `None` at or past the end
+    /// of the text.
+    ///
+    /// ```
+    /// use sigilbuzz::BidiParagraph;
+    ///
+    /// let paragraph = BidiParagraph::new("ab\n\u{05D0}", None);
+    /// assert_eq!(paragraph.paragraph_at(1).map(|p| p.level), Some(0));
+    /// assert_eq!(paragraph.paragraph_at(3).map(|p| p.level), Some(1));
+    /// assert_eq!(paragraph.paragraph_at(5), None);
+    /// ```
+    #[must_use]
+    pub fn paragraph_at(&self, offset: usize) -> Option<&BidiParagraphSpan> {
+        let index = self
+            .paragraphs
+            .partition_point(|paragraph| paragraph.range.end <= offset);
+        self.paragraphs
+            .get(index)
+            .filter(|paragraph| paragraph.range.start <= offset)
+    }
+
     /// The runs of one embedding level, in logical order. They cover the
-    /// text without gaps.
+    /// text without gaps. A run never crosses a paragraph boundary, so
+    /// the last run of one paragraph and the first of the next can share
+    /// a level. Within a paragraph, adjacent runs never do.
     #[must_use]
     pub fn runs(&self) -> &[BidiRun] {
         &self.runs

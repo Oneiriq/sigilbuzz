@@ -2,15 +2,19 @@
 //!
 //! Scripts (Latin, Arabic, Hangul, ...) and general categories drive
 //! which feature list the shaper applies and how cluster boundaries
-//! are decided. The general category, joining type, mirroring, and
-//! canonical normalization tables are generated from UCD snapshots
-//! (see `tests/unicode_table_gen.rs`). The others are hand-curated
-//! excerpts of the UCD that cover the scripts the shaper handles, not
-//! the full database.
+//! are decided. The bidi class, paired bracket, general category,
+//! joining type, mirroring, and canonical normalization tables are
+//! generated from UCD snapshots (see `tests/unicode_table_gen.rs`). The
+//! others are hand-curated excerpts of the UCD that cover the scripts
+//! the shaper handles, not the full database.
 
 pub mod bidi;
 pub mod bidi_brackets;
+#[rustfmt::skip]
+mod bidi_brackets_table;
 pub mod bidi_class;
+#[rustfmt::skip]
+mod bidi_class_table;
 pub mod general_category;
 #[rustfmt::skip]
 mod general_category_table;

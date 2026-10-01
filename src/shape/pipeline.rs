@@ -289,6 +289,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             has_gpos_mark: has_gpos_mark(seg.script_priority),
             level,
             recategorize_marks: fallback_marks,
+            not_found_variation_selector: buffer.not_found_variation_selector_glyph(),
         },
     );
 
@@ -826,6 +827,9 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     if !direction.is_forward() {
         glyphs.reverse();
     }
+
+    // Unresolved variation selectors take the not-found glyph, if set.
+    normalize::show_variation_selectors(&mut glyphs, buffer.not_found_variation_selector_glyph());
 
     // Then the ignorables become the invisible space glyph (or are
     // kept or removed, as the buffer flags ask).
