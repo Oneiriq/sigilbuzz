@@ -13,7 +13,10 @@
 //! only has `DFLT` or `latn` lookups, and Myanmar also when it only has
 //! the pre-spec `mymr` tag; sigilbuzz runs its Indic and Myanmar shapers
 //! regardless, so those scripts always map to their own shaper here.
+//! The scripts of the Universal Shaping Engine go to the default shaper
+//! in such a font, as in HarfBuzz ([`Shaper::for_run`]).
 
+use crate::tables::Gsub;
 use crate::unicode::Script;
 
 /// A HarfBuzz shaper.
@@ -116,6 +119,48 @@ impl Shaper {
         }
     }
 
+    /// The shaper that normalizes a segment of a script that maps to
+    /// `self` in a buffer HarfBuzz shapes with `buffer`.
+    ///
+    /// HarfBuzz normalizes the whole buffer with the buffer's shaper.
+    /// sigilbuzz runs each segment's own shaper, so each segment
+    /// normalizes with it, except where sigilbuzz shapes the segment as
+    /// the buffer's shaper does: the Hangul shaper only runs for a
+    /// Hangul buffer, and in a Hangul buffer the text of scripts with no
+    /// shaper of their own goes through the Hangul shaper's features.
+    pub(super) fn normalizer_for(self, buffer: Self) -> Self {
+        match (self, buffer) {
+            (Self::Hangul, _) | (Self::Default, Self::Hangul) => buffer,
+            _ => self,
+        }
+    }
+
+    /// [`Self::for_script`] for a run whose lookups try the script tags
+    /// `script_priority` in the font's `gsub`, as HarfBuzz's
+    /// `hb_ot_shaper_categorize` decides it: the Indic scripts and the
+    /// scripts of the Universal Shaping Engine take the default shaper
+    /// when the script tag GSUB picks is `DFLT` (or `dflt`) or `latn`,
+    /// since the font was not made for the script's shaper. Myanmar
+    /// takes it for those and for `mymr`, the tag of fonts made before
+    /// Myanmar's shaping model.
+    pub(super) fn for_run(
+        script: Script,
+        horizontal: bool,
+        gsub: Option<&Gsub<'_>>,
+        script_priority: &[[u8; 4]],
+    ) -> Self {
+        let shaper = Self::for_script(script, horizontal);
+        let chosen = gsub.and_then(|g| {
+            crate::ot::layout_select::chosen_script(g.script_list(), script_priority)
+        });
+        let generic = chosen.is_some_and(|tag| matches!(&tag, b"DFLT" | b"dflt" | b"latn"));
+        match shaper {
+            Self::Use | Self::Indic if generic => Self::Default,
+            Self::Myanmar if generic || chosen == Some(*b"mymr") => Self::Default,
+            _ => shaper,
+        }
+    }
+
     /// The shaper's `normalization_preference`, with `AUTO` resolved.
     pub(super) const fn normalization_mode(self) -> NormalizationMode {
         match self {
@@ -144,6 +189,22 @@ impl Shaper {
         match self {
             Self::Hebrew => Some(*b"hebr"),
             _ => None,
+        }
+    }
+
+    /// Whether the shaper's `preprocess_text` runs the vowel constraints
+    /// (`_hb_preprocess_text_vowel_constraints`, see the
+    /// `vowel_constraints` module).
+    pub(super) const fn vowel_constraints(self) -> bool {
+        match self {
+            Self::Indic | Self::Use => true,
+            Self::Default
+            | Self::Arabic
+            | Self::Hebrew
+            | Self::Thai
+            | Self::Hangul
+            | Self::Khmer
+            | Self::Myanmar => false,
         }
     }
 
@@ -190,5 +251,26 @@ mod tests {
         assert_eq!(Shaper::Hangul.mark_zeroing(), MarkZeroing::None);
         assert_eq!(Shaper::Use.mark_zeroing(), MarkZeroing::Early);
         assert_eq!(Shaper::Thai.mark_zeroing(), MarkZeroing::Late);
+        assert_eq!(
+            Shaper::Hangul.normalizer_for(Shaper::Default),
+            Shaper::Default
+        );
+        assert_eq!(
+            Shaper::Default.normalizer_for(Shaper::Hangul),
+            Shaper::Hangul
+        );
+        assert_eq!(
+            Shaper::Hangul.normalizer_for(Shaper::Hangul),
+            Shaper::Hangul
+        );
+        assert_eq!(Shaper::Indic.normalizer_for(Shaper::Hangul), Shaper::Indic);
+        assert_eq!(
+            Shaper::Default.normalizer_for(Shaper::Indic),
+            Shaper::Default
+        );
+        assert!(Shaper::Indic.vowel_constraints());
+        assert!(Shaper::Use.vowel_constraints());
+        assert!(!Shaper::Khmer.vowel_constraints());
+        assert!(!Shaper::Myanmar.vowel_constraints());
     }
 }

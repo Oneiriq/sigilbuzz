@@ -53,11 +53,6 @@ impl FeatureFlags {
         Self(self.0 | other.0)
     }
 
-    /// These flags without those of `other`.
-    pub(crate) const fn without(self, other: Self) -> Self {
-        Self(self.0 & !other.0)
-    }
-
     /// True when every flag of `other` is set.
     pub(crate) const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0

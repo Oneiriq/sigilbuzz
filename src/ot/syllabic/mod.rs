@@ -3,10 +3,11 @@
 //! broken clusters, and the per-glyph state that GSUB stages carry.
 //!
 //! HarfBuzz's Indic and Khmer shapers classify every character by
-//! `hb_indic_get_categories` (`hb-ot-shaper-indic-table.cc`), split the
-//! run into syllables with a Ragel machine, and then keep a category,
+//! `hb_indic_get_categories` (`hb-ot-shaper-indic-table.cc`), and its
+//! Universal Shaping Engine by `hb_use_get_category`. Each splits the
+//! run into syllables with a Ragel machine, and then keeps a category,
 //! a position, a syllable serial, and a feature mask on every glyph
-//! while their GSUB features run. [`GlyphInfo`] holds that state here,
+//! while its GSUB features run. [`GlyphInfo`] holds that state here,
 //! and [`stage`] keeps it aligned with the glyphs through
 //! substitutions.
 

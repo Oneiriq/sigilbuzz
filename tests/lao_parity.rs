@@ -2,10 +2,10 @@
 //!
 //! Shapes a Lao corpus with both sigilbuzz and rustybuzz against
 //! Noto Sans Lao (OFL) and asserts the output matches byte-for-byte.
-//! Lao runs through sigilbuzz's Universal Shaping Engine pipeline
-//! (`src/ot/use_shaper`) with the Lao script-tag priority (`lao ` ->
-//! `DFLT`) and the same reduced Thai/Lao feature chain (`ccmp` /
-//! `liga` / `calt`: Lao has no halant and no subjoining).
+//! Lao runs through the default GSUB features with the Lao script tags
+//! (`lao `, then `DFLT`), as HarfBuzz's Thai shaper adds no
+//! features of its own (`ccmp` / `liga` / `calt`: Lao has no halant
+//! and no subjoining).
 //!
 //! The corpus exercises:
 //!
@@ -19,7 +19,7 @@
 //!   * mixed Lao + Latin
 //!
 //! A failure here is a parity drift against rustybuzz; fix in
-//! src/ot/use_shaper or src/unicode/use_category.
+//! src/shape/thai.rs or the default GSUB features.
 
 use sigilbuzz::{shape, Blob, Buffer, Face, Font};
 

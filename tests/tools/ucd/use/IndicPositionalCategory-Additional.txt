@@ -1,0 +1,79 @@
+# Source: HarfBuzz 14.5.0, src/ms-use/IndicPositionalCategory-Additional.txt
+# MIT License, Copyright (c) Microsoft Corporation.
+# Override values For Indic_Positional_Category
+# Not derivable
+# Initial version based on Unicode 7.0 by Andrew Glass 2014-03-17
+# Updated for Unicode 10.0 by Andrew Glass 2017-07-25
+# Ammended for Unicode 10.0 by Andrew Glass 2018-09-21
+# Updated for L2/19-083    by Andrew Glass 2019-05-06
+# Updated for Unicode 12.1 by Andrew Glass 2019-05-30
+# Updated for Unicode 13.0 by Andrew Glass 2020-07-28
+# Updated for Unicode 14.0 by Andrew Glass 2021-09-28
+# Updated for Unicode 15.0 by Andrew Glass 2022-09-16
+# Updated for Unicode 15.1 by Andrew Glass 2023-09-14
+# Updated for Unicode 16.0 by Andrew Glass 2024-09-11
+# Updated for Unicode 17.0 by Andrew Glass 2025-09-15
+# Updated for Unicode 18.0 by Andrew Glass 2026-09-04
+0F72; Bottom
+0F7A..0F7D; Bottom
+0F80; Bottom
+A9BF; Bottom
+10A38; Bottom
+11127..11129; Bottom
+1112D; Bottom
+11130; Bottom
+1BF2..1BF3; Bottom
+AAB0; Bottom
+AAB2..AAB3; Bottom
+AAB7..AAB8; Bottom
+AABE; Bottom
+1C29; Left
+A9BE; Right
+10A0C; Right
+11942; Right
+0F74; Top
+1A18; Top
+AA35; Top
+AAB4; Top
+1112A..1112B; Top
+11131..11132; Top
+1E4EC..1E4EF; Top
+0E33; Top_And_Right
+0EB3; Top_And_Right
+0859..085B; Bottom
+18A9; Bottom
+10AE5; Bottom
+10AE6; Bottom
+10F46..10F47; Bottom
+10F48..10F4A; Bottom
+10F4B; Bottom
+10F4C; Bottom
+10F4D..10F50; Bottom
+10F82; Bottom
+10F83; Bottom
+10F84; Bottom
+10F85; Bottom
+113CF; Bottom
+16F4F; Bottom
+16F51..16F87; Bottom
+16F8F..16F92; Bottom
+1E5EE; Bottom
+1E5EF; Bottom
+103C; Left
+07EB..07F3; Top
+07FD; Top
+1885..1886; Top
+1B6C; Top
+1CF8..1CF9; Top
+10D24..10D27; Top
+10EAB..10EAC; Top
+10D69..10D6D; Top
+16B30..16B36; Top
+1E130..1E136; Top
+1E2AE; Top
+1E2EC..1E2EF; Top
+1E944..1E94A; Top
+1BC9D..1BC9E; Overstruck
+180B..180D; NA
+180F; NA
+2D7F; NA

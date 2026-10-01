@@ -14,7 +14,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use crate::unicode::{script_of, Script};
+use crate::unicode::{is_hangul_tone_mark, script_of, Script};
 
 pub mod char_class;
 mod flags;
@@ -65,9 +65,9 @@ impl Direction {
 /// modules inside this crate can round-trip state through `Vec<Glyph>`
 /// without stashing a parallel array. Stable bits of `unicode_props`
 /// are set once during buffer preparation (default-ignorable,
-/// joiner, ...); `indic_position` is an `IndicPosition` value that
-/// survives ligature substitutions (the surviving glyph inherits
-/// the first-component position).
+/// joiner, ...). `indic_position` is a scratch byte that survives
+/// ligature substitutions (the surviving glyph inherits the first
+/// component's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Glyph {
     /// Glyph index within the font. After shaping, this is the index
@@ -90,12 +90,9 @@ pub struct Glyph {
     /// "was this glyph's source a joiner / default-ignorable / ...?"
     /// without re-deriving from the cluster. See `unicode_prop`.
     pub unicode_props: u16,
-    /// Shaper-internal byte of the complex shapers, which share it the
-    /// way HarfBuzz's shapers share their glyph variables: the Indic
-    /// positional role, set during Indic syllable segmentation and
-    /// consulted by the final-reorder pass, or the syllable and reorder
-    /// category the Universal Shaping Engine keeps from its basic
-    /// features to its reorder. Zero (`IndicPosition::Start`) otherwise.
+    /// Shaper-internal byte the syllable-based shapers borrow while one
+    /// of their GSUB stages runs, to keep each glyph's shaper state
+    /// aligned with it through the substitutions. Zero otherwise.
     pub indic_position: u8,
     /// Shaper-internal `char_class` bits of the glyph's source
     /// character, set by normalization and carried through GSUB like
@@ -163,29 +160,6 @@ pub mod unicode_prop {
     pub const NON_JOINER: u16 = 1 << 2;
 }
 
-/// Indic positional role, stored in [`Glyph::indic_position`] as
-/// `u8`. The discriminants mirror HarfBuzz's `ot_position_t`, so a
-/// port of the richer Indic reorder (pref, below-form resolution,
-/// ...) can add the missing slots (`PreC = 3`, `AfterMain = 5`
-/// through `AfterPost = 12`, `End = 14`) without renumbering these.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IndicPosition {
-    /// Default / unresolved, also used for non-Indic glyphs.
-    Start = 0,
-    /// A leading `ra` that is a reph candidate. Set on the glyph
-    /// carrying the reph before GSUB runs; the reph glyph inherits
-    /// the position through ligature substitution.
-    RaToBecomeReph = 1,
-    /// Pre-base matra (before the base consonant visually).
-    PreM = 2,
-    /// The base consonant of a syllable.
-    BaseC = 4,
-    /// Syllable modifier / vedic. The final reorder places a reph
-    /// before any trailing run of these.
-    Smvd = 13,
-}
-
 impl Glyph {
     /// Minimal constructor used by the shaper pipeline: everything
     /// but the glyph id and cluster starts at zero. Exists so the
@@ -201,7 +175,7 @@ impl Glyph {
             x_offset: 0,
             y_offset: 0,
             unicode_props: 0,
-            indic_position: IndicPosition::Start as u8,
+            indic_position: 0,
             char_class: 0,
             combining_class: 0,
             syllable: 0,
@@ -370,7 +344,8 @@ impl Buffer {
     /// (digits, punctuation, ASCII space, ZWJ/ZWNJ/bidi marks) and
     /// `INHERITED` (combining marks) codepoints extend whichever real
     /// script ran before them, matching HarfBuzz's
-    /// `select_shaper_for_script` segmentation.
+    /// `select_shaper_for_script` segmentation. A Hangul tone mark
+    /// (U+302E, U+302F) extends the run before it too.
     ///
     /// A leading `COMMON`/`INHERITED` span before the first real
     /// script codepoint joins that script's run, the way HarfBuzz
@@ -409,6 +384,10 @@ impl Buffer {
             // script-equality test below.
             let resolved = if is_common_or_inherited(ch) {
                 current.map_or(leading, |(s, _)| s)
+            } else if is_hangul_tone_mark(ch) {
+                // A Hangul tone mark is a combining mark: it stays
+                // with the character before it, as in `shape`.
+                current.map_or(raw, |(s, _)| s)
             } else {
                 raw
             };
@@ -562,6 +541,8 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
 ///   because `script_of` has no rule for U+0300 and drops the
 ///   mark into `Script::Other`, breaking `ccmp` dispatch and
 ///   any cross-mark GSUB context.
+/// - The Devanagari stress signs and accents (U+0951..U+0954), which
+///   are `INHERITED` though they sit in the Devanagari block.
 /// - Default ignorables of no script of their own (ZWSP, word joiner,
 ///   variation selectors, tag characters, ...), which GSUB and GPOS
 ///   match across.
@@ -589,6 +570,8 @@ const fn is_common_or_inherited(ch: char) -> bool {
         | 0x1DC0..=0x1DFF
         | 0x20D0..=0x20FF
         | 0xFE20..=0xFE2F
+        // INHERITED Devanagari stress signs and accents.
+        | 0x0951..=0x0954
     ) || crate::unicode::is_scriptless_default_ignorable(ch)
 }
 
@@ -858,6 +841,22 @@ mod tests {
         let runs = b.script_runs();
         assert_eq!(runs.len(), 1, "combining mark must extend its base");
         assert_eq!(runs[0].script, Script::Latin);
+        assert_eq!(runs[0].byte_range, 0..3);
+    }
+
+    #[test]
+    fn script_runs_hangul_tone_mark_stays_with_the_letter_before_it() {
+        let mut b = Buffer::new();
+        b.push_str("e\u{0301}\u{302E}");
+        let runs = b.script_runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].script, Script::Latin);
+        // At the start of the text the tone mark is Hangul.
+        let mut b = Buffer::new();
+        b.push_str("\u{302E}a");
+        let runs = b.script_runs();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].script, Script::Hangul);
         assert_eq!(runs[0].byte_range, 0..3);
     }
 

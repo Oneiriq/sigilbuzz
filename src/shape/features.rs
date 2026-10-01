@@ -6,32 +6,37 @@ use alloc::vec::Vec;
 
 use super::gsub::{apply_gsub_lookup, apply_gsub_lookups_masked};
 use super::joiners::FeatureFlags;
-use super::{feature_disabled, Feature, JoinerTable, LookupBudget};
+use super::{feature_disabled, feature_enabled, Feature, JoinerTable, LookupBudget};
 use crate::buffer::Glyph;
 use crate::ot::arabic::JoiningForm;
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 use crate::unicode::Script;
 
-/// Runs the default GSUB feature chain and any user-enabled extras.
-/// Order matches the spec: `ccmp` + `locl` -> `rlig` -> `liga` ->
-/// `clig` -> `calt`, then `vrt2` / `vert` for vertical runs.
-/// HarfBuzz's Latin fallback shaper turns the horizontal list on by
-/// default; sigilbuzz follows suit. User-enabled features beyond that
+/// Runs the default GSUB feature chain and any user-enabled extras, in
+/// the order `ccmp` and `locl`, `rlig`, `liga`, `clig`, `calt` with
+/// `rclt`, then `vert`. As in HarfBuzz (`horizontal_features` in
+/// `hb-ot-shape.cc`), `liga`, `clig`, `calt` and `rclt` are on by
+/// default in horizontal text only, and vertical text gets `vert`
+/// instead. A caller can turn any of them on or off in either
+/// direction. `vrt2` runs only when the caller turns it on, since
+/// HarfBuzz enables `vert` alone. User-enabled features beyond that
 /// list are dispatched afterwards, respecting their 1-indexed
 /// alternate-selector value.
 ///
 /// `early_features` is the part of `ccmp` + `locl` that has not run
-/// yet (see [`early_default_features`]): the Arabic path and several
-/// complex shapers run both first. HarfBuzz runs the two in one stage,
+/// yet (see [`early_default_features`]): the Arabic path and the
+/// Myanmar pass run both first. HarfBuzz runs the two in one stage,
 /// so their lookups interleave by lookup index. `table` is the joiner
 /// handling of the segment's shaper (Arabic runs its ligating features
 /// with manual ZWJ).
 ///
-/// `hangul` says the buffer shapes with HarfBuzz's Hangul shaper, which
-/// turns `calt` off whatever the caller asks (`override_features_hangul`:
-/// Uniscribe does not apply it, and some CJK fonts put all their jamo
-/// lookups there).
+/// `calt` says whether `calt` applies. It is off for vertical text of a
+/// buffer HarfBuzz shapes with its Hangul shaper, whose vertical
+/// features leave it out whatever the caller asks. In horizontal text
+/// the Hangul shaper keeps `calt` off jamo only
+/// (`override_features_hangul` and `setup_masks_hangul`), and no jamo
+/// reach this pass.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_default_gsub(
     gsub: &Gsub<'_>,
@@ -43,7 +48,7 @@ pub(super) fn run_default_gsub(
     script_priority: &[[u8; 4]],
     early_features: &[[u8; 4]],
     table: JoinerTable,
-    hangul: bool,
+    calt: bool,
     budget: &mut LookupBudget,
 ) {
     let merged = |glyphs: &mut Vec<Glyph>, tags: &[[u8; 4]], budget: &mut LookupBudget| {
@@ -57,14 +62,25 @@ pub(super) fn run_default_gsub(
         let priority = script_priority;
         apply_gsub_feature_budgeted(gsub, glyphs, gdef, tag, alt, priority, joiners, budget);
     };
+    // A feature HarfBuzz enables for one direction only: on by default
+    // in that direction unless the caller turns it off, and in the
+    // other direction only when the caller turns it on.
+    let default_on = |tag: [u8; 4], direction_matches: bool| {
+        if direction_matches {
+            !feature_disabled(features, tag)
+        } else {
+            feature_enabled(features, tag)
+        }
+    };
+    let horizontal = !is_vertical;
     merged(glyphs, early_features, budget);
     if !feature_disabled(features, *b"rlig") {
         single(glyphs, *b"rlig", 0, budget);
     }
-    if want_liga {
+    if want_liga && default_on(*b"liga", horizontal) {
         single(glyphs, *b"liga", 0, budget);
     }
-    if !feature_disabled(features, *b"clig") {
+    if default_on(*b"clig", horizontal) {
         single(glyphs, *b"clig", 0, budget);
     }
     // `calt` and `rclt` together: HarfBuzz's default horizontal
@@ -72,23 +88,15 @@ pub(super) fn run_default_gsub(
     // ship the same lookup set under both tags (calt for legacy,
     // rclt for required-contextual). Naively running each tag's
     // lookups in turn double-applies on those fonts.
-    let contextual: &[[u8; 4]] = if hangul {
-        &[*b"rclt"]
-    } else {
-        &[*b"calt", *b"rclt"]
-    };
-    merged(glyphs, contextual, budget);
-    // Vertical writing: HarfBuzz auto-enables `vrt2` when the font
-    // carries it, otherwise falls back to `vert`. The two tags
-    // cannot be active together: `vrt2` (Vertical Alternates &
-    // Rotation) is the superset, so prefer it.
-    if is_vertical {
-        let has_vrt2 = feature_present(gsub, *b"vrt2");
-        if has_vrt2 && !feature_disabled(features, *b"vrt2") {
-            single(glyphs, *b"vrt2", 0, budget);
-        } else if !feature_disabled(features, *b"vert") {
-            single(glyphs, *b"vert", 0, budget);
-        }
+    let contextual: Vec<[u8; 4]> = [*b"calt", *b"rclt"]
+        .into_iter()
+        .filter(|&tag| default_on(tag, horizontal) && (calt || tag != *b"calt"))
+        .collect();
+    merged(glyphs, &contextual, budget);
+    // Vertical text gets `vert`, which the lookup selection finds in
+    // any script the font lists it under (`F_GLOBAL_SEARCH`).
+    if default_on(*b"vert", is_vertical) {
+        single(glyphs, *b"vert", 0, budget);
     }
     for feat in features {
         if feat.value == 0 {
@@ -170,55 +178,24 @@ pub(super) fn apply_gsub_features_merged_budgeted(
 }
 
 /// The part of `ccmp` + `locl` the default GSUB pass still has to run
-/// for a segment. The Arabic path runs both ahead of its positional
-/// features, and so do the complex shapers HarfBuzz gives a `locl` +
-/// `ccmp` stage: Indic, Mongolian (when it is the dominant script),
-/// N'Ko, Khmer, Myanmar, and the scripts on the full USE feature
-/// chain. Running either again would apply its lookups twice.
-pub(super) fn early_default_features(
-    arabic_ran: bool,
-    script: Script,
-    dominant: Option<Script>,
-) -> &'static [[u8; 4]] {
+/// for a segment. The Arabic path and the Myanmar pass run both ahead
+/// of their own features, and running either again would apply its
+/// lookups twice. The Indic, Khmer, Hangul, and USE shapers run every
+/// feature themselves, so the default pass does not run for them.
+pub(super) fn early_default_features(arabic_ran: bool, script: Script) -> &'static [[u8; 4]] {
     const CCMP_LOCL: &[[u8; 4]] = &[*b"ccmp", *b"locl"];
-    if arabic_ran || shaper_ran_locl_and_ccmp(script, dominant) {
+    if arabic_ran || script == Script::Myanmar {
         &[]
     } else {
         CCMP_LOCL
     }
 }
 
-/// True when the segment's complex shaper already ran `locl` and
-/// `ccmp`.
-fn shaper_ran_locl_and_ccmp(script: Script, dominant: Option<Script>) -> bool {
-    script.is_indic()
-        || (script == Script::Mongolian && dominant == Some(Script::Mongolian))
-        || matches!(
-            script,
-            Script::NKo
-                | Script::Khmer
-                | Script::Myanmar
-                | Script::Buginese
-                | Script::TaiTham
-                | Script::Balinese
-                | Script::Sundanese
-                | Script::Lepcha
-                | Script::Limbu
-                | Script::Cham
-                | Script::Brahmi
-                | Script::Sharada
-                | Script::Khojki
-                | Script::Tirhuta
-                | Script::Modi
-        )
-}
-
-/// Applies `locl` and `ccmp` as one stage, as the Indic and Mongolian
-/// shapers do before anything else, when that keeps one glyph per
-/// code point; those shapers index their glyphs by code point, so a
-/// length-changing `ccmp` has to wait until after their positional
-/// work. Returns whether the stage ran. `table` is the shaper's joiner
-/// handling.
+/// Applies `locl` and `ccmp` as one stage, as the Myanmar pass does
+/// before anything else, when that keeps one glyph per code point. The
+/// pass indexes its glyphs by code point, so a length-changing `ccmp`
+/// has to wait until after its reorder. Returns whether the stage ran.
+/// `table` is the shaper's joiner handling.
 pub(crate) fn apply_locl_ccmp_if_length_preserving(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
@@ -249,28 +226,8 @@ pub(crate) fn apply_locl_ccmp_if_length_preserving(
 fn is_handled_gsub_tag(tag: [u8; 4]) -> bool {
     matches!(
         &tag,
-        b"liga"
-            | b"kern"
-            | b"ccmp"
-            | b"locl"
-            | b"rlig"
-            | b"clig"
-            | b"calt"
-            | b"rclt"
-            | b"vert"
-            | b"vrt2"
+        b"liga" | b"kern" | b"ccmp" | b"locl" | b"rlig" | b"clig" | b"calt" | b"rclt" | b"vert"
     )
-}
-
-/// Returns `true` when the GSUB default-LangSys advertises the named
-/// feature tag. Used by the vertical-writing dispatcher to decide
-/// between `vrt2` (preferred if present) and `vert` (fallback).
-fn feature_present(gsub: &Gsub<'_>, tag: [u8; 4]) -> bool {
-    // Vertical-writing probe runs before we know the script. Use the
-    // DFLT -> first script order to match the previous behavior.
-    // Arabic fonts do not ship vert/vrt2, so this choice is not
-    // observable in practice.
-    lookup_indices_for_feature_in_scripts(gsub, tag, &[*b"DFLT"]).is_some_and(|v| !v.is_empty())
 }
 
 /// Applies every GSUB lookup reachable via the named feature tag

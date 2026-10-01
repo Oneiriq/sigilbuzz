@@ -25,6 +25,7 @@ use super::glyph_flags;
 use crate::buffer::{char_class, ClusterLevel, Glyph, GlyphFlags};
 pub(super) use crate::ot::hangul::jamo_features;
 use crate::ot::hangul::{is_l, is_t, is_v, jamo};
+use crate::unicode::is_hangul_tone_mark;
 use crate::unicode::normalize::modified_combining_class;
 
 const L_BASE: u32 = 0x1100;
@@ -52,11 +53,6 @@ const fn is_combining_t(u: u32) -> bool {
 
 const fn is_combined_s(u: u32) -> bool {
     S_BASE <= u && u < S_BASE + S_COUNT
-}
-
-/// A Hangul tone mark (`isHangulTone`).
-const fn is_tone(ch: char) -> bool {
-    matches!(ch as u32, 0x302E..=0x302F)
 }
 
 /// What the preprocessing asks of the font.
@@ -242,7 +238,7 @@ pub(super) fn preprocess(
     let graphemes = level.is_graphemes();
 
     while let Some(u) = buf.cur(0) {
-        if is_tone(u) {
+        if is_hangul_tone_mark(u) {
             if start < end && end == buf.out.len() {
                 // The tone mark follows a syllable: move it in front,
                 // unless it has no advance.

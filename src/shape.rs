@@ -143,6 +143,7 @@ mod shaper;
 mod syllabic;
 mod syllables;
 mod thai;
+mod vowel_constraints;
 
 use aat::apply_kerx_format4;
 pub(crate) use cluster::{merge_clusters, merge_grapheme_clusters};
@@ -340,6 +341,12 @@ pub struct Feature {
 /// `Feature { tag, value: 0 }` in the override list.
 fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
     features.iter().any(|f| f.tag == tag && f.value == 0)
+}
+
+/// Returns `true` when the override list turns the feature on and does
+/// not also turn it off.
+fn feature_enabled(features: &[Feature], tag: [u8; 4]) -> bool {
+    features.iter().any(|f| f.tag == tag && f.value != 0) && !feature_disabled(features, tag)
 }
 
 /// Resolves a GPOS/GSUB type-9 Extension subtable to its inner

@@ -14,8 +14,10 @@
 //!   characters;
 //! - the synthesized glyph class (`hb_synthesize_glyph_classes`): a
 //!   nonspacing mark that is not default ignorable is a mark, anything
-//!   else a base glyph. The class only matters for fonts without a
-//!   GDEF `GlyphClassDef`; GSUB updates it as it ligates and expands
+//!   else a base glyph. HarfBuzz reads the General_Category it stores
+//!   with the character, which a character a shaper inserted copies
+//!   from the mark after it. The class only matters for fonts without
+//!   a GDEF `GlyphClassDef`. GSUB updates it as it ligates and expands
 //!   glyphs (see the `lig` module).
 //!
 //! Normalization (the `normalize` module) sets these props for the
@@ -23,9 +25,8 @@
 //! that did not block any mark reordering, as HarfBuzz does.
 
 use super::ignorables;
-use crate::buffer::Glyph;
+use crate::buffer::{char_class, Glyph};
 use crate::tables::layout::skip_iter::{match_prop, MatchGlyph};
-use crate::unicode::general_category::is_nonspacing_mark;
 
 impl From<&Glyph> for MatchGlyph {
     fn from(g: &Glyph) -> Self {
@@ -34,8 +35,9 @@ impl From<&Glyph> for MatchGlyph {
 }
 
 /// The matching props a glyph mapped from `ch` starts with, on top of
-/// the default-ignorable and joiner bits.
-pub(super) fn initial(ch: char) -> u16 {
+/// the default-ignorable and joiner bits. `class` holds the
+/// `char_class` bits of the character's General_Category.
+pub(super) fn initial(ch: char, class: u8) -> u16 {
     if ignorables::is_default_ignorable(ch) {
         // Never a mark, so that lookups skipping marks do not skip
         // them; some of these are hidden.
@@ -44,7 +46,7 @@ pub(super) fn initial(ch: char) -> u16 {
         } else {
             0
         }
-    } else if is_nonspacing_mark(ch) {
+    } else if class & char_class::NONSPACING_MARK != 0 {
         match_prop::SYNTHESIZED_MARK
     } else {
         0
@@ -55,17 +57,34 @@ pub(super) fn initial(ch: char) -> u16 {
 mod tests {
     use super::*;
 
+    fn props(ch: char) -> u16 {
+        initial(ch, crate::shape::normalize::mark_props(ch).0)
+    }
+
     #[test]
     fn marks_hidden_characters_and_bases() {
-        assert_eq!(initial('\u{0301}'), match_prop::SYNTHESIZED_MARK);
+        assert_eq!(props('\u{0301}'), match_prop::SYNTHESIZED_MARK);
         // Spacing marks are base glyphs to HarfBuzz's synthesis.
-        assert_eq!(initial('\u{0903}'), 0);
-        assert_eq!(initial('a'), 0);
+        assert_eq!(props('\u{0903}'), 0);
+        assert_eq!(props('a'), 0);
         // Variation selectors are Mn but default ignorable.
-        assert_eq!(initial('\u{FE0F}'), 0);
+        assert_eq!(props('\u{FE0F}'), 0);
         for hidden in ['\u{034F}', '\u{180B}', '\u{180F}', '\u{E0041}'] {
-            assert_eq!(initial(hidden), match_prop::HIDDEN, "{hidden:?}");
+            assert_eq!(props(hidden), match_prop::HIDDEN, "{hidden:?}");
         }
-        assert_eq!(initial('\u{200D}'), 0);
+        assert_eq!(props('\u{200D}'), 0);
+    }
+
+    #[test]
+    fn inserted_characters_take_the_class_they_copy() {
+        // A dotted circle with the General_Category of a nonspacing
+        // vowel sign is a mark, as in `hb_synthesize_glyph_classes`.
+        let nonspacing = char_class::MARK | char_class::NONSPACING_MARK;
+        assert_eq!(
+            initial('\u{25CC}', nonspacing),
+            match_prop::SYNTHESIZED_MARK
+        );
+        assert_eq!(initial('\u{25CC}', char_class::MARK), 0);
+        assert_eq!(props('\u{25CC}'), 0);
     }
 }

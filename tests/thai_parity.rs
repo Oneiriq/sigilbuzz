@@ -2,10 +2,10 @@
 //!
 //! Shapes a Thai corpus with both sigilbuzz and rustybuzz against
 //! Noto Sans Thai (OFL) and asserts the output matches byte-for-byte.
-//! Thai runs through sigilbuzz's Universal Shaping Engine pipeline
-//! (`src/ot/use_shaper`) with the Thai script-tag priority (`thai` ->
-//! `DFLT`) and the reduced Thai/Lao feature chain (`ccmp` / `liga` /
-//! `calt`, Thai has no halant and no subjoining).
+//! Thai runs through the default GSUB features with the Thai script
+//! tags (`thai`, then `DFLT`), as HarfBuzz's Thai shaper
+//! adds no features of its own (`ccmp` / `liga` / `calt`, Thai has no
+//! halant and no subjoining).
 //!
 //! The corpus exercises:
 //!
@@ -23,7 +23,7 @@
 //!   * mixed Thai + Latin
 //!
 //! A failure here is a parity drift against rustybuzz; fix in
-//! src/ot/use_shaper or src/unicode/use_category.
+//! src/shape/thai.rs or the default GSUB features.
 
 use sigilbuzz::{shape, Blob, Buffer, Face, Font};
 

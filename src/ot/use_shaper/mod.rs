@@ -1,98 +1,91 @@
-//! Universal Shaping Engine (USE).
+//! The Universal Shaping Engine (USE), following HarfBuzz's
+//! (`hb-ot-shaper-use.cc`).
 //!
-//! The USE is Microsoft's generic complex-script shaper, the one
-//! every SE-Asian, SE-Indic and archaic-South-Asian script that does
-//! not fit Arabic or Indic2 runs through. Tai Tham, Buginese, New Tai
-//! Lue, Cham, and Hanifi Rohingya are USE clients, and sigilbuzz also
-//! runs its Myanmar and Old Hangul passes through this module. Khmer
-//! has its own shaper (`crate::ot::khmer`), as in HarfBuzz, and
-//! [`shape_khmer`] runs it. Each script gets an entry point below that
-//! pairs its script-tag priority with a feature chain. A new script
-//! needs its codepoints in the per-codepoint tables of
-//! [`crate::unicode::use_category`] and an entry point here.
+//! The USE is Microsoft's generic complex-script shaper. HarfBuzz
+//! sends it every script `hb_ot_shaper_categorize` does not give a
+//! shaper of its own: Sinhala, Balinese, Cham, Tai Tham, the
+//! Brahmi-family historical scripts, and many more. A run goes through
+//! these steps:
 //!
-//! # Pipeline
+//! 1. Every character gets its USE category from the table generated
+//!    from the Unicode Character Database (`hb_use_get_category`,
+//!    see the `category` module), and the syllable machine of
+//!    `hb-ot-shaper-use-machine.rl` splits the run into clusters (the
+//!    `machine` module). Each cluster is unsafe to break.
+//!    `setup_rphf_mask` lets `rphf` apply to the start of each
+//!    cluster. When the font has the `isol`, `init`, `medi`, or `fina`
+//!    features, each character gets the mask of its Arabic-style
+//!    joining form in the scripts that join that way (N'Ko, Mongolian),
+//!    and the clusters of the other scripts join each other
+//!    (`setup_topographical_masks`).
+//! 2. `locl`, `ccmp`, `nukt`, and `akhn` run as one stage, one cluster
+//!    at a time (`USE_FEATURES` keeps HarfBuzz's flags).
+//! 3. `rphf` runs, and the glyph it substitutes becomes a repha
+//!    (`record_rphf_use`). `pref` runs, and the glyph it substitutes
+//!    becomes a pre-base vowel sign (`record_pref_use`).
+//! 4. `rkrf`, `abvf`, `blwf`, `half`, `pstf`, `vatu`, and `cjct` run
+//!    as one stage, one cluster at a time.
+//! 5. Broken clusters get a dotted circle, after a leading repha. In
+//!    each cluster a repha moves toward the end and the pre-base vowel
+//!    signs move to the start (`reorder_use`). Each move merges the
+//!    clusters it passes.
+//! 6. `isol`, `init`, `medi`, and `fina` run as one stage, on the
+//!    glyphs of their masks.
+//! 7. `abvs`, `blws`, `haln`, `pres`, and `psts` run as one stage with
+//!    the default features HarfBuzz puts in the same stage (`rlig`,
+//!    `calt`, `clig`, `liga`, `rclt`, or `vert` in vertical text) and
+//!    the caller's features.
 //!
-//! 1. **Categorize** every codepoint in the run via
-//!    [`use_category`](crate::unicode::use_category::use_category)
-//!    and [`use_position`](crate::unicode::use_category::use_position).
-//! 2. **Segment** into USE syllables. The grammar, a simplified form
-//!    of HarfBuzz's, is:
+//! GPOS runs in the generic pipeline in [`crate::shape`].
 //!
-//!    ```text
-//!      R? (B | GB | IV) (H B)* VPre* VAbv* VBlw* VPst* M* FM*
-//!    ```
+//! HarfBuzz checks the vowel constraints of
+//! `hb-ot-shaper-vowel-constraints.cc` before all of this, before
+//! normalization (`preprocess_text_use`). sigilbuzz does not insert
+//! those dotted circles yet. Their place is the preprocessing in
+//! [`crate::shape`], next to the Thai and Hangul preprocessing.
 //!
-//!    Non-matching codepoints emit a one-wide Symbol/Broken syllable
-//!    so the segmenter always makes progress.
-//! 3. **Basic features**, on the logical order, applied via the GSUB
-//!    dispatcher in the script's tag order. Order:
-//!
-//!    ```text
-//!      locl -> ccmp -> nukt -> akhn -> rphf -> pref -> rkrf -> abvf
-//!           -> blwf -> half -> pstf -> vatu -> cjct
-//!    ```
-//!
-//! 4. **Reorder** each syllable in place, as HarfBuzz's `reorder_use`
-//!    does after the basic features: every pre-base vowel sign (VPre),
-//!    and the glyph `pref` substituted, moves to the start of the
-//!    syllable or to just after the last halant before it.
-//!
-//!    Myanmar reorders before its features instead (its HarfBuzz
-//!    shaper does), with the kinzi move.
-//! 5. **Topographical features**, run after the reorder:
-//!
-//!    ```text
-//!      abvs -> blws -> haln -> pres -> psts
-//!    ```
-//!
-//! 6. **GPOS**: the generic pipeline in [`crate::shape`] runs the
-//!    standard kern/mark/mkmk and `dist`. This module returns control
-//!    to it after topographical GSUB.
-//!
-//! # Clusters
-//!
-//! Every reorder moves glyphs with their clusters. At the monotone
-//! cluster levels a moved glyph and the glyphs it moved across then
-//! share their smallest cluster, the `merge_clusters` calls of
-//! HarfBuzz's Myanmar and USE reorderings. The other levels leave
-//! the clusters out of order. Ligatures merge in the GSUB
-//! dispatcher and graphemes before shaping starts, both by the same
-//! level, so no syllable-wide merge happens here.
+//! Khmer has its own shaper (`crate::ot::khmer`), as in HarfBuzz, and
+//! [`shape_khmer`] runs it. Myanmar runs sigilbuzz's Myanmar pass
+//! ([`shape_myanmar`]).
 
+mod category;
+mod machine;
 mod reorder;
 mod scripts;
-mod syllable;
+#[rustfmt::skip]
+mod table;
 
 use alloc::vec::Vec;
 
-use reorder::{record_pref, record_rphf, reorder_pre_base, rphf_info, tag_syllables};
+pub use crate::ot::myanmar::{
+    shape_myanmar, MYANMAR_BASIC_FEATURES, MYANMAR_SCRIPT_PRIORITY, MYANMAR_TOPOGRAPHICAL_FEATURES,
+};
 pub use scripts::{
     shape_balinese, shape_brahmi, shape_buginese, shape_cham, shape_hangul, shape_khojki,
-    shape_lepcha, shape_limbu, shape_modi, shape_myanmar, shape_nko, shape_nko_in_context,
-    shape_sharada, shape_sundanese, shape_tai_tham, shape_tirhuta,
+    shape_lepcha, shape_limbu, shape_modi, shape_nko, shape_nko_in_context, shape_sharada,
+    shape_sundanese, shape_tai_tham, shape_tirhuta,
 };
-pub(crate) use syllable::{segment_syllables, Syllable, SyllableKind};
+pub(crate) use scripts::{shape_script, shape_use, UseScript};
 
+use self::machine::{find_syllables, syllable};
 use crate::buffer::{ClusterLevel, Glyph};
-use crate::ot::syllabic::stage::{apply_stage, FeatureFlags, StageFeature};
-use crate::shape::{apply_gsub_feature_in_scripts, JoinerTable, SyllabicGsub};
+use crate::ot::arabic::JoiningForm;
+use crate::ot::syllabic::stage::{
+    add_user_features, apply_alternate_feature, apply_stage, has_feature, FeatureFlags as F,
+    MapFeature, StageFeature, GLOBAL_MASK,
+};
+use crate::ot::syllabic::{insert_dotted_circles, setup_syllables, DottedCircle, GlyphInfo};
+use crate::shape::{Feature, SyllabicGsub};
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 
 /// Script-tag priority for USE GSUB / GPOS feature lookup.
 ///
-/// Khmer fonts advertise their USE features under `khmr` (Indic2
-/// tag) and the legacy `khmr` form is identical; HarfBuzz also
-/// accepts `khm2` on fonts built against the 2005+ Indic2 revision.
-/// DFLT falls through for fonts that register features only in the
-/// default LangSys (rare for Khmer but cheap to probe).
+/// Khmer fonts advertise their features under `khmr`, and HarfBuzz
+/// also accepts `khm2` on fonts built against the 2005+ Indic2
+/// revision. DFLT falls through for fonts that register features only
+/// in the default LangSys (rare for Khmer but cheap to probe).
 pub const KHMER_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"khmr", *b"khm2", *b"DFLT"];
-
-/// Myanmar script-tag priority: `mym2` is the Indic2 (2012+) tag
-/// that modern Noto / Padauk builds use; `mymr` is the legacy tag
-/// that older fonts still carry.
-pub const MYANMAR_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"mym2", *b"mymr", *b"DFLT"];
 
 /// Thai script-tag priority.
 pub const THAI_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"thai", *b"DFLT"];
@@ -102,8 +95,8 @@ pub const THAI_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"thai", *b"DFLT"];
 pub const LAO_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"lao ", *b"DFLT"];
 
 /// Hangul script-tag priority. Old Hangul fonts register their
-/// `ljmo`/`vjmo`/`tjmo` features under `hang`; `jamo` is the legacy
-/// tag that a few fonts still emit.
+/// `ljmo`/`vjmo`/`tjmo` features under `hang`, and `jamo` is the
+/// legacy tag that a few fonts still emit.
 pub const HANGUL_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"hang", *b"jamo", *b"DFLT"];
 
 /// N'Ko script tag: `nko ` (trailing space) is the canonical
@@ -146,40 +139,272 @@ pub const TIRHUTA_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"tirh", *b"DFLT"];
 /// Modi script tag.
 pub const MODI_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"modi", *b"DFLT"];
 
-/// USE features up to the reorder (HarfBuzz's `collect_features_use`),
-/// in order: the default glyph pre-processing group (`locl`, `ccmp`,
-/// `nukt`, `akhn`), the reordering group (`rphf`, then `pref`), and the
-/// orthographic unit shaping group (`rkrf` to `cjct`). Order matters:
-/// `rphf` must run before `half` so the ra+halant that would otherwise
-/// fold into a half-form is consumed as a reph first.
-///
-/// HarfBuzz's topographical `isol`/`init`/`medi`/`fina` only reach the
-/// USE scripts with Arabic-style joining, which sigilbuzz shapes with
-/// their own joining passes (N'Ko, Mongolian).
+/// The USE features up to the reorder (HarfBuzz's
+/// `collect_features_use`), in order: the default glyph
+/// pre-processing group (`locl`, `ccmp`, `nukt`, `akhn`), the
+/// reordering group (`rphf`, then `pref`), and the orthographic unit
+/// shaping group (`rkrf` to `cjct`).
 pub const USE_BASIC_FEATURES: &[&[u8; 4]] = &[
     b"locl", b"ccmp", b"nukt", b"akhn", b"rphf", b"pref", b"rkrf", b"abvf", b"blwf", b"half",
     b"pstf", b"vatu", b"cjct",
 ];
 
-/// USE topographical features: run after basic substitutions have
-/// collapsed conjuncts into display forms.
-pub const USE_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] = &[b"abvs", b"blws", b"haln", b"pres", b"psts"];
+/// The USE features after the reorder: the joining forms
+/// (`use_topographical_features`), then the standard typographic
+/// presentation features (`use_other_features`).
+pub const USE_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] = &[
+    b"isol", b"init", b"medi", b"fina", b"abvs", b"blws", b"haln", b"pres", b"psts",
+];
 
-/// Myanmar's features up to the basic ones: `locl` and `ccmp` before
-/// the syllable reorder, then `rphf` (kinzi), `pref`, `blwf`, and
-/// `pstf` after it (HarfBuzz's `myanmar_basic_features`).
-pub const MYANMAR_BASIC_FEATURES: &[&[u8; 4]] =
-    &[b"locl", b"ccmp", b"rphf", b"pref", b"blwf", b"pstf"];
+/// HarfBuzz's USE features with their flags, in the order
+/// `collect_features_use` adds them. The stages split after `akhn`,
+/// `rphf`, `pref`, `cjct`, and `fina`.
+pub(crate) const USE_FEATURES: [MapFeature; 22] = [
+    MapFeature::new(b"locl", F::GLOBAL.union(F::PER_SYLLABLE)),
+    MapFeature::new(b"ccmp", F::GLOBAL.union(F::PER_SYLLABLE)),
+    MapFeature::new(b"nukt", F::GLOBAL.union(F::PER_SYLLABLE)),
+    MapFeature::new(b"akhn", MANUAL_ZWJ_PER_SYLLABLE.union(F::GLOBAL)),
+    MapFeature::new(b"rphf", MANUAL_ZWJ_PER_SYLLABLE),
+    MapFeature::new(b"pref", MANUAL_ZWJ_PER_SYLLABLE.union(F::GLOBAL)),
+    MapFeature::new(b"rkrf", MANUAL_ZWJ_PER_SYLLABLE.union(F::GLOBAL)),
+    MapFeature::new(b"abvf", MANUAL_ZWJ_PER_SYLLABLE.union(F::GLOBAL)),
+    MapFeature::new(b"blwf", MANUAL_ZWJ_PER_SYLLABLE.union(F::GLOBAL)),
+    MapFeature::new(b"half", MANUAL_ZWJ_PER_SYLLABLE.union(F::GLOBAL)),
+    MapFeature::new(b"pstf", MANUAL_ZWJ_PER_SYLLABLE.union(F::GLOBAL)),
+    MapFeature::new(b"vatu", MANUAL_ZWJ_PER_SYLLABLE.union(F::GLOBAL)),
+    MapFeature::new(b"cjct", MANUAL_ZWJ_PER_SYLLABLE.union(F::GLOBAL)),
+    MapFeature::new(b"isol", F::NONE),
+    MapFeature::new(b"init", F::NONE),
+    MapFeature::new(b"medi", F::NONE),
+    MapFeature::new(b"fina", F::NONE),
+    MapFeature::new(b"abvs", F::GLOBAL.union(F::MANUAL_ZWJ)),
+    MapFeature::new(b"blws", F::GLOBAL.union(F::MANUAL_ZWJ)),
+    MapFeature::new(b"haln", F::GLOBAL.union(F::MANUAL_ZWJ)),
+    MapFeature::new(b"pres", F::GLOBAL.union(F::MANUAL_ZWJ)),
+    MapFeature::new(b"psts", F::GLOBAL.union(F::MANUAL_ZWJ)),
+];
 
-/// Myanmar's other features, applied together once the syllables are
-/// done (HarfBuzz's `myanmar_other_features`).
-pub const MYANMAR_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] = &[b"pres", b"abvs", b"blws", b"psts"];
+/// `F_MANUAL_ZWJ | F_PER_SYLLABLE`.
+const MANUAL_ZWJ_PER_SYLLABLE: F = F::MANUAL_ZWJ.union(F::PER_SYLLABLE);
 
-/// Hangul Old-Hangul features: the three positional jamo features
-/// pick Leading/Vowel/Trailing variant shapes. HarfBuzz's Hangul
-/// shaper adds only these to the default features and runs them all
-/// in one stage with the defaults (see [`shape_hangul`]).
-pub const HANGUL_FEATURES: &[&[u8; 4]] = &[b"ljmo", b"vjmo", b"tjmo"];
+/// The stages of [`USE_FEATURES`]: the ranges of features each runs.
+const EARLY: core::ops::Range<usize> = 0..4;
+const RPHF_STAGE: core::ops::Range<usize> = 4..5;
+const PREF_STAGE: core::ops::Range<usize> = 5..6;
+const BASIC: core::ops::Range<usize> = 6..13;
+const TOPOGRAPHICAL: core::ops::Range<usize> = 13..17;
+const OTHER: core::ops::Range<usize> = 17..22;
+
+/// The `rphf` mask bit.
+const RPHF: u32 = 1;
+/// The mask bits of `isol`, `init`, `medi`, and `fina`.
+const TOPOGRAPHICAL_BITS: [u32; 4] = [1 << 1, 1 << 2, 1 << 3, 1 << 4];
+
+/// The default GSUB features HarfBuzz runs in the USE shaper's last
+/// stage, for horizontal and for vertical text (`common_features`,
+/// `horizontal_features`, and `vert` in `hb-ot-shape.cc`). `ccmp` and
+/// `locl` ran in the first stage.
+const DEFAULT_HORIZONTAL: [MapFeature; 5] = [
+    MapFeature::new(b"rlig", F::GLOBAL),
+    MapFeature::new(b"calt", F::GLOBAL),
+    MapFeature::new(b"clig", F::GLOBAL),
+    MapFeature::new(b"liga", F::GLOBAL),
+    MapFeature::new(b"rclt", F::GLOBAL),
+];
+const DEFAULT_VERTICAL: [MapFeature; 2] = [
+    MapFeature::new(b"rlig", F::GLOBAL),
+    MapFeature::new(b"vert", F::GLOBAL),
+];
+
+/// What the USE shaper needs besides the glyphs.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct UseRun<'a> {
+    /// The font's GSUB, if any.
+    pub(crate) gsub: Option<&'a Gsub<'a>>,
+    /// The font's GDEF, if any.
+    pub(crate) gdef: Option<&'a Gdef<'a>>,
+    /// The script tags the run's lookups try.
+    pub(crate) script_priority: &'a [[u8; 4]],
+    /// The buffer's cluster level.
+    pub(crate) level: ClusterLevel,
+    /// The caller's feature overrides.
+    pub(crate) features: &'a [Feature],
+    /// True for vertical text.
+    pub(crate) vertical: bool,
+    /// The dotted circle glyph for broken clusters, or `None` when the
+    /// font has none or the buffer asks for no dotted circles.
+    pub(crate) dotted_circle: Option<u16>,
+    /// The joining form of each character, for a script with
+    /// Arabic-style joining (HarfBuzz's `has_arabic_joining`), whose
+    /// forms pick the topographical features. `None` for the other
+    /// scripts, whose clusters join each other instead.
+    pub(crate) joining: Option<&'a [JoiningForm]>,
+}
+
+/// Shapes one run with the Universal Shaping Engine: `codepoints` and
+/// `glyphs` are one to one on entry. Runs every GSUB feature of the
+/// run, the default ones included.
+pub(crate) fn shape(run: &UseRun<'_>, codepoints: &[char], glyphs: &mut Vec<Glyph>) {
+    if codepoints.len() != glyphs.len() || glyphs.is_empty() {
+        return;
+    }
+    // `setup_masks_use` and `setup_syllables_use`.
+    let mut info: Vec<GlyphInfo> = codepoints
+        .iter()
+        .map(|&c| GlyphInfo {
+            category: category::category(c),
+            ..GlyphInfo::default()
+        })
+        .collect();
+    find_syllables(codepoints, &mut info);
+    setup_syllables(glyphs, &info, run.level);
+
+    let prio = run.script_priority;
+    let mut runner = run
+        .gsub
+        .map(|gsub| SyllabicGsub::new(gsub, run.gdef, glyphs));
+    let has = |tag: [u8; 4]| {
+        runner
+            .as_ref()
+            .is_some_and(|r| has_feature(r, run.features, tag, prio))
+    };
+    let has_rphf = has(*b"rphf");
+    if has_rphf {
+        reorder::setup_rphf_mask(&mut info, RPHF);
+    }
+    // A topographical feature the caller turned on everywhere is
+    // global, so it gets no mask of its own.
+    let mut masks = [0u32; 4];
+    for (k, f) in USE_FEATURES[TOPOGRAPHICAL].iter().enumerate() {
+        if has(f.tag) && !user_enabled(run.features, f.tag) {
+            masks[k] = TOPOGRAPHICAL_BITS[k];
+        }
+    }
+    match run.joining {
+        // `setup_masks_arabic_plan`.
+        Some(forms) => {
+            for (g, &form) in info.iter_mut().zip(forms) {
+                let k = match form {
+                    JoiningForm::Isol => 0,
+                    JoiningForm::Init => 1,
+                    JoiningForm::Medi => 2,
+                    JoiningForm::Fina => 3,
+                    JoiningForm::None => continue,
+                };
+                g.mask |= masks[k];
+            }
+        }
+        None => reorder::setup_topographical_masks(&mut info, masks),
+    }
+
+    if let Some(runner) = runner.as_mut() {
+        let stage = |range: core::ops::Range<usize>, bit: u32| -> Vec<StageFeature> {
+            USE_FEATURES[range]
+                .iter()
+                .map(|&f| StageFeature::of(f, bit))
+                .collect()
+        };
+        apply_stage(
+            runner,
+            prio,
+            &stage(EARLY, 0),
+            run.features,
+            glyphs,
+            &mut info,
+        );
+        clear_substitution_flags(&mut info);
+        let rphf = stage(RPHF_STAGE, RPHF);
+        apply_stage(runner, prio, &rphf, run.features, glyphs, &mut info);
+        if has_rphf {
+            reorder::record_rphf(&mut info, RPHF);
+        }
+        clear_substitution_flags(&mut info);
+        let pref = stage(PREF_STAGE, 0);
+        apply_stage(runner, prio, &pref, run.features, glyphs, &mut info);
+        reorder::record_pref(&mut info);
+        apply_stage(
+            runner,
+            prio,
+            &stage(BASIC, 0),
+            run.features,
+            glyphs,
+            &mut info,
+        );
+    }
+
+    // `reorder_use`.
+    if let Some(circle) = run.dotted_circle {
+        let spec = DottedCircle {
+            broken: syllable::BROKEN,
+            category: category::B,
+            position: 0,
+            repha: Some(category::R),
+        };
+        insert_dotted_circles(glyphs, &mut info, spec, circle);
+    }
+    reorder::reorder(glyphs, &mut info, run.level);
+
+    let Some(runner) = runner.as_mut() else {
+        return;
+    };
+    let topographical: Vec<StageFeature> = USE_FEATURES[TOPOGRAPHICAL]
+        .iter()
+        .zip(TOPOGRAPHICAL_BITS)
+        .map(|(&f, bit)| {
+            if user_enabled(run.features, f.tag) {
+                StageFeature::of(MapFeature::new(&f.tag, F::GLOBAL), GLOBAL_MASK)
+            } else {
+                StageFeature::of(f, bit)
+            }
+        })
+        .collect();
+    apply_stage(
+        runner,
+        prio,
+        &topographical,
+        run.features,
+        glyphs,
+        &mut info,
+    );
+
+    let defaults: &[MapFeature] = if run.vertical {
+        &DEFAULT_VERTICAL
+    } else {
+        &DEFAULT_HORIZONTAL
+    };
+    let mut other: Vec<StageFeature> = USE_FEATURES[OTHER]
+        .iter()
+        .chain(defaults)
+        .map(|&f| StageFeature::of(f, GLOBAL_MASK))
+        .collect();
+    let alternates = add_user_features(&mut other, run.features, earlier);
+    apply_stage(runner, prio, &other, run.features, glyphs, &mut info);
+    for (tag, value) in alternates {
+        apply_alternate_feature(runner, prio, tag, value, glyphs);
+    }
+}
+
+/// HarfBuzz's `_hb_clear_substitution_flags`.
+fn clear_substitution_flags(info: &mut [GlyphInfo]) {
+    for g in info {
+        g.substituted = false;
+    }
+}
+
+/// True when the caller turned `tag` on for the whole run.
+fn user_enabled(features: &[Feature], tag: [u8; 4]) -> bool {
+    features
+        .iter()
+        .rev()
+        .find(|f| f.tag == tag)
+        .is_some_and(|f| f.value != 0)
+}
+
+/// Tags the caller's features cannot add to the last stage: those of
+/// the earlier stages.
+fn earlier(tag: [u8; 4]) -> bool {
+    USE_FEATURES[..OTHER.start].iter().any(|f| f.tag == tag)
+}
 
 /// Entry point: shapes one Khmer run with the Khmer shaper
 /// (`crate::ot::khmer`), which follows HarfBuzz's. `codepoints` is in
@@ -212,131 +437,11 @@ pub fn shape_khmer(
     crate::ot::khmer::shape(&run, codepoints, glyphs);
 }
 
-/// Generic USE shaping entry point, used by Old-Hangul and the
-/// Universal Shaping Engine scripts. Takes the script-priority table
-/// and the (basic, topographical) feature slices as parameters so each
-/// script can supply its own set. The syllable segmenter and pre-base
-/// reorder are script-agnostic: they run off the [`UseCategory`] /
-/// [`UsePosition`] tables which already encode per-script positional
-/// rules.
-///
-/// As in HarfBuzz's USE shaper, the basic features see the logical
-/// order: the pre-base vowel signs, and the glyph `pref` substitutes in
-/// each syllable, move in front of their base only after them
-/// (`reorder_prebase`; Old Hangul has nothing to reorder, so it passes
-/// `false`).
-///
-/// `level` is the buffer's cluster level, which decides whether
-/// reordered glyphs merge clusters.
-///
-/// `table` is the joiner handling of the HarfBuzz shaper the script
-/// maps to (USE, or the default shaper for Hangul).
-///
-/// [`UseCategory`]: crate::unicode::use_category::UseCategory
-/// [`UsePosition`]: crate::unicode::use_category::UsePosition
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn shape_use(
-    gsub: Option<&Gsub<'_>>,
-    gdef: Option<&Gdef<'_>>,
-    codepoints: &[char],
-    glyphs: &mut Vec<Glyph>,
-    script_priority: &[[u8; 4]],
-    basic_features: &[&[u8; 4]],
-    topographical_features: &[&[u8; 4]],
-    reorder_prebase: bool,
-    level: ClusterLevel,
-    table: JoinerTable,
-) {
-    if codepoints.is_empty() || glyphs.is_empty() {
-        return;
-    }
-
-    // 1. Segment.
-    let syllables = segment_syllables(codepoints);
-    // Per-syllable features match within these (HarfBuzz's syllable()).
-    let numbers = syllables.iter().map(|s| (s.start, s.end, s.kind as u8));
-    crate::shape::number_syllables(glyphs, numbers, level);
-
-    // 2. Basic features, on the logical order. The glyphs carry their
-    //    syllable and reorder category through GSUB. `rphf` applies
-    //    only to the first glyphs of each syllable and marks the glyph
-    //    it substitutes as a repha (HarfBuzz's `setup_rphf_mask` and
-    //    `record_rphf_use`), and `pref` marks the first glyph it
-    //    substitutes in each syllable as pre-base (`record_pref_use`).
-    let reorder = reorder_prebase && tag_syllables(glyphs, codepoints, &syllables);
-    if let Some(gsub) = gsub {
-        for tag in basic_features {
-            if reorder && **tag == *b"rphf" {
-                apply_rphf(gsub, gdef, glyphs, script_priority);
-                continue;
-            }
-            let pref = reorder && **tag == *b"pref";
-            let before: Vec<u32> = if pref {
-                glyphs.iter().map(|g| g.glyph_id).collect()
-            } else {
-                Vec::new()
-            };
-            let joiners = table.joiners(**tag);
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority, joiners);
-            if pref {
-                record_pref(&before, glyphs);
-            }
-        }
-    }
-
-    // 3. The reorder, after the basic features (`reorder_use`).
-    if reorder {
-        reorder_pre_base(glyphs, level);
-    }
-
-    // 4. Topographical features.
-    if let Some(gsub) = gsub {
-        for tag in topographical_features {
-            let joiners = table.joiners(**tag);
-            apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority, joiners);
-        }
-    }
-}
-
-/// HarfBuzz's flags for the USE `rphf` feature (`collect_features_use`).
-pub(crate) const USE_RPHF_FLAGS: FeatureFlags =
-    FeatureFlags::MANUAL_ZWJ.union(FeatureFlags::PER_SYLLABLE);
-
-/// HarfBuzz's USE `rphf` stage (`collect_features_use`): `rphf`,
-/// applied only to the glyphs `setup_rphf_mask` marked, and then
-/// `record_rphf_use`, which makes the glyph it substituted a repha.
-/// HarfBuzz clears the substitution flags before the stage, so only
-/// what `rphf` itself substituted counts.
-///
-/// HarfBuzz flags `rphf` `F_MANUAL_ZWJ | F_PER_SYLLABLE`
-/// ([`USE_RPHF_FLAGS`]). The per-syllable part is left out here:
-/// sigilbuzz's USE syllables come from a simpler grammar than
-/// HarfBuzz's `hb-ot-shaper-use-machine.rl`, and matching inside them
-/// would cut a lookup's context where HarfBuzz does not.
-fn apply_rphf(
-    gsub: &Gsub<'_>,
-    gdef: Option<&Gdef<'_>>,
-    glyphs: &mut Vec<Glyph>,
-    script_priority: &[[u8; 4]],
-) {
-    const RPHF: u32 = 1;
-    let mut info = rphf_info(glyphs, RPHF);
-    let mut runner = SyllabicGsub::new(gsub, gdef, glyphs);
-    let feature = StageFeature {
-        tag: *b"rphf",
-        mask: RPHF,
-        flags: USE_RPHF_FLAGS.without(FeatureFlags::PER_SYLLABLE),
-    };
-    apply_stage(
-        &mut runner,
-        script_priority,
-        &[feature],
-        &[],
-        glyphs,
-        &mut info,
-    );
-    record_rphf(glyphs, &info);
-}
+/// Hangul Old-Hangul features: the three positional jamo features
+/// pick Leading/Vowel/Trailing variant shapes. HarfBuzz's Hangul
+/// shaper adds only these to the default features and runs them all
+/// in one stage with the defaults (see [`shape_hangul`]).
+pub const HANGUL_FEATURES: &[&[u8; 4]] = &[b"ljmo", b"vjmo", b"tjmo"];
 
 #[cfg(test)]
 mod tests;

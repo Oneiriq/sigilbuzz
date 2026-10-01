@@ -1,346 +1,210 @@
-//! Syllable reordering: the moves Myanmar makes before its
-//! features and the repha and pre-base moves the Universal Shaping
-//! Engine makes after its basic features, with the cluster merges each
-//! move makes.
+//! The mask setup, the records, and the reordering of HarfBuzz's USE
+//! shaper (`hb-ot-shaper-use.cc`): `setup_rphf_mask`,
+//! `setup_topographical_masks`, `record_rphf_use`, `record_pref_use`,
+//! and `reorder_syllable_use`.
 
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use super::{Syllable, SyllableKind};
-use crate::buffer::{ClusterLevel, Glyph, IndicPosition};
-use crate::ot::syllabic::GlyphInfo;
-use crate::shape::merge_clusters;
+use super::category::{
+    FABV, FBLW, FMABV, FMBLW, FMPST, FPST, H, HVM, IS, MABV, MBLW, MPRE, MPST, R, VABV, VBLW,
+    VMABV, VMBLW, VMPRE, VMPST, VPRE, VPST,
+};
+use super::machine::syllable;
+use crate::buffer::{ClusterLevel, Glyph};
+use crate::ot::syllabic::{merge_clusters, syllable_ranges, GlyphInfo};
 use crate::tables::layout::skip_iter::MatchGlyph;
-use crate::unicode::use_category::{use_category, use_position, UseCategory, UsePosition};
 
-/// Initial reorder for one syllable. Moves every pre-base vowel sign
-/// in the syllable to the syllable head, and a Myanmar kinzi to just
-/// after the base. Length-preserving: glyph count and codepoint count
-/// stay aligned.
-///
-/// Every move spans the glyphs between the moved one's old and new
-/// slots. At the monotone cluster `level`s those glyphs share one
-/// cluster, as HarfBuzz's `merge_clusters` before each Myanmar sort
-/// step leaves them.
-pub(super) fn initial_reorder(
-    codepoints: &[char],
-    glyphs: &mut [Glyph],
-    syllable: &Syllable,
-    level: ClusterLevel,
-) {
-    if !matches!(syllable.kind, SyllableKind::Consonant) {
-        return;
-    }
-    let Some(base) = syllable.base_index else {
-        return;
-    };
-    if syllable.end > glyphs.len()
-        || syllable.end > codepoints.len()
-        || !(syllable.start..syllable.end).contains(&base)
-    {
-        return;
-    }
-
-    // Gather pre-base matra indices that live after the base: those
-    // are the ones that need to move. A pre-base sign sitting before
-    // the base is already in position (unusual but legal for
-    // broken-cluster repair).
-    let mut to_move: Vec<usize> = Vec::new();
-    for (offset, &ch) in codepoints[base + 1..syllable.end].iter().enumerate() {
-        if matches!(use_category(ch), UseCategory::VPre) || use_position(ch) == UsePosition::PreBase
-        {
-            to_move.push(base + 1 + offset);
-        }
-    }
-
-    // Myanmar kinzi prefix: three codepoints at `kinzi_index`,
-    // `kinzi_index + 1`, `kinzi_index + 2` (Nga + Asat + Virama).
-    // rustybuzz's Myanmar reorder tags them POS_AFTER_MAIN so the
-    // sort drops them after the base consonant; sigilbuzz replicates
-    // the resulting glyph order here. After reorder, `rphf` fires on
-    // the still-adjacent triple and collapses it to the font's kinzi
-    // glyph, which naturally sits in the reph slot (immediately after
-    // the base consonant).
-    let kinzi_idx = syllable.kinzi_index;
-
-    if to_move.is_empty() && kinzi_idx.is_none() {
-        return;
-    }
-
-    // Rebuild the syllable slice in one pass so we handle the
-    // multi-matra and halant-stack cases without index drift.
-    //
-    // Target layout (USE pre-base rule per MS USE spec):
-    //
-    //   [pre-base matras in logical order]
-    //   [everything else, in original order]
-    //
-    // Pre-base matras move to the very start of the syllable, not
-    // just before the base. This keeps halant stacks intact so GSUB
-    // `blwf` / `pstf` can still see `halant + consonant` pairs
-    // adjacent and collapse them into a single subscript glyph.
-    //
-    // `base` is used below as the anchor for Myanmar kinzi
-    // placement: the kinzi triple gets injected immediately after
-    // the base consonant in the rebuilt slice, matching rustybuzz's
-    // POS_AFTER_MAIN semantics.
-    let syl_start = syllable.start;
-    let syl_end = syllable.end;
-    // The glyphs the moves below pass over: pre-base matras travel to
-    // the syllable start, the kinzi triple to just after the base.
-    let kinzi = kinzi_idx.filter(|&kz| kz >= syl_start && kz + 2 < syl_end);
-    let mut span = to_move.last().map(|&last| syl_start..last + 1);
-    if let Some(kz) = kinzi {
-        span = Some(span.map_or(kz..base + 1, |s| s.start.min(kz)..s.end.max(base + 1)));
-    }
-    if let Some(span) = span {
-        merge_clusters(glyphs, span.start, span.end, level);
-    }
-    let original: Vec<Glyph> = glyphs[syl_start..syl_end].to_vec();
-    let mut rebuilt: Vec<Glyph> = Vec::with_capacity(original.len());
-
-    // Syllable-relative flags for glyphs consumed by the earlier
-    // buckets, which the fall-through must not re-emit. A flag array
-    // keeps the pass linear in the syllable length even when a
-    // syllable carries thousands of pre-base signs.
-    let mut consumed = alloc::vec![false; original.len()];
-
-    // 1. Pre-base matras, in logical order.
-    for &idx in &to_move {
-        rebuilt.push(original[idx - syl_start]);
-        consumed[idx - syl_start] = true;
-    }
-    // 2. Mark the kinzi triple as consumed so the fall-through
-    //    doesn't re-emit them at the syllable head; we inject them
-    //    right after the base consonant below.
-    if let Some(kz) = kinzi {
-        consumed[kz - syl_start..=kz + 2 - syl_start].fill(true);
-    }
-    // 3. Everything else, in original order, with the kinzi triple
-    //    injected immediately after the base consonant.
-    for (rel, &glyph) in original.iter().enumerate() {
-        if consumed[rel] {
-            continue;
-        }
-        rebuilt.push(glyph);
-        if syl_start + rel == base {
-            if let Some(kz) = kinzi {
-                rebuilt.extend_from_slice(&original[kz - syl_start..=kz + 2 - syl_start]);
-            }
-        }
-    }
-
-    // Every glyph of the syllable is emitted exactly once for the
-    // syllables the segmenter builds. If a future category table ever
-    // breaks that, keep the syllable as it was instead of panicking.
-    if rebuilt.len() == original.len() {
-        glyphs[syl_start..syl_end].copy_from_slice(&rebuilt);
-    }
-}
-
-/// Reorder category tag: a halant (`H`).
-const TAG_HALANT: u8 = 1;
-/// Reorder category tag: a pre-base vowel sign or modifier (`VPre`,
-/// `VMPre`), or the glyph `pref` substituted.
-const TAG_PRE_BASE: u8 = 2;
-/// Reorder category tag: a repha (`R`), or the glyph `rphf`
-/// substituted.
-const TAG_REPHA: u8 = 3;
-/// Reorder category tag: another mark that sits after the base for the
-/// repha move (HarfBuzz's `POST_BASE_FLAGS64`: vowel signs, vowel
-/// modifiers, medials, and finals).
-const TAG_POST_BASE: u8 = 4;
-/// Mask of the reorder category in the tag byte.
-const TAG_CATEGORY: u8 = 0x07;
-/// Tag bit: `rphf` may apply to the glyph (HarfBuzz's `rphf_mask`).
-const TAG_RPHF: u8 = 0x08;
-/// Shift of the syllable serial in the tag byte.
-const TAG_SERIAL_SHIFT: u32 = 4;
-
-/// Tags each glyph with its syllable and reorder category, which the
-/// Universal Shaping Engine reads after its basic features. HarfBuzz
-/// keeps both in the glyph info (`syllable()`, `use_category()`), where
-/// a ligature keeps its first component's and a multiple
-/// substitution's outputs their source's; sigilbuzz keeps them in
-/// [`Glyph::indic_position`], which GSUB carries the same way: the
-/// syllable serial (1 to 15, then 1 again, so neighbors always differ)
-/// in the high nibble, the category and the `rphf` mask bit in the low
-/// one. As HarfBuzz's `setup_rphf_mask` does, `rphf` may apply to the
-/// first glyph of a syllable that starts with a repha and to the first
-/// three glyphs of any other syllable. Returns `false`, tagging
-/// nothing, unless glyphs and code points are one to one.
-pub(super) fn tag_syllables(
-    glyphs: &mut [Glyph],
-    codepoints: &[char],
-    syllables: &[Syllable],
-) -> bool {
-    if glyphs.len() != codepoints.len() {
-        return false;
-    }
-    let mut serial = 1u8;
-    for syl in syllables {
-        let end = syl.end.min(glyphs.len());
-        let starts_with_repha = codepoints
-            .get(syl.start)
-            .is_some_and(|&c| use_category(c) == UseCategory::R);
-        let rphf_end = if starts_with_repha {
-            syl.start + 1
+/// HarfBuzz's `setup_rphf_mask`: `rphf` may apply to the first glyph
+/// of a syllable that starts with a repha, and to the first three
+/// glyphs of any other syllable.
+pub(super) fn setup_rphf_mask(info: &mut [GlyphInfo], rphf: u32) {
+    for range in syllable_ranges(info) {
+        let limit = if info[range.start].category == R {
+            1
         } else {
-            (syl.start + 3).min(end)
+            range.len().min(3)
         };
-        for i in syl.start..end {
-            let ch = codepoints[i];
-            let category = match use_category(ch) {
-                UseCategory::H => TAG_HALANT,
-                UseCategory::R => TAG_REPHA,
-                c if c == UseCategory::VPre || use_position(ch) == UsePosition::PreBase => {
-                    TAG_PRE_BASE
-                }
-                UseCategory::VAbv
-                | UseCategory::VBlw
-                | UseCategory::VPst
-                | UseCategory::M
-                | UseCategory::FM
-                | UseCategory::CM => TAG_POST_BASE,
-                _ => 0,
-            };
-            let rphf = if i < rphf_end { TAG_RPHF } else { 0 };
-            glyphs[i].indic_position = (serial << TAG_SERIAL_SHIFT) | rphf | category;
+        for g in &mut info[range.start..range.start + limit] {
+            g.mask |= rphf;
         }
-        serial = serial % 15 + 1;
     }
-    true
 }
 
-/// The shaper state [`apply_rphf`](super::apply_rphf) runs `rphf` with:
-/// each glyph's syllable serial, and the `rphf` bit as its mask.
-pub(super) fn rphf_info(glyphs: &[Glyph], rphf_bit: u32) -> Vec<GlyphInfo> {
-    glyphs
-        .iter()
-        .map(|g| GlyphInfo {
-            syllable: g.indic_position >> TAG_SERIAL_SHIFT,
-            mask: if g.indic_position & TAG_RPHF != 0 {
-                rphf_bit
-            } else {
-                0
-            },
-            ..GlyphInfo::default()
-        })
-        .collect()
+/// The joining forms of `setup_topographical_masks`, in the order of
+/// HarfBuzz's `use_topographical_features`.
+const ISOL: usize = 0;
+const INIT: usize = 1;
+const MEDI: usize = 2;
+const FINA: usize = 3;
+
+/// HarfBuzz's `setup_topographical_masks`: each cluster joins the
+/// cluster before it, so the clusters of a run of clusters get the
+/// `init`, `medi`, and `fina` masks, and a cluster alone gets `isol`.
+/// Hieroglyph clusters and characters outside a cluster break the run.
+/// `masks` holds the mask of `isol`, `init`, `medi`, and `fina`, zero
+/// for a feature the font lacks.
+pub(super) fn setup_topographical_masks(info: &mut [GlyphInfo], masks: [u32; 4]) {
+    let all = masks.iter().fold(0, |a, &m| a | m);
+    if all == 0 {
+        return;
+    }
+    let other = !all;
+    let mut last_start = 0;
+    let mut last_form: Option<usize> = None;
+    for range in syllable_ranges(info) {
+        let kind = info[range.start].syllable_type();
+        if matches!(kind, syllable::HIEROGLYPH | syllable::NON_CLUSTER) {
+            last_form = None;
+        } else {
+            let join = matches!(last_form, Some(FINA | ISOL));
+            if join {
+                // The cluster before continues into this one.
+                let form = if last_form == Some(FINA) { MEDI } else { INIT };
+                for g in &mut info[last_start..range.start] {
+                    g.mask = (g.mask & other) | masks[form];
+                }
+            }
+            let form = if join { FINA } else { ISOL };
+            for g in &mut info[range.clone()] {
+                g.mask = (g.mask & other) | masks[form];
+            }
+            last_form = Some(form);
+        }
+        last_start = range.start;
+    }
 }
 
 /// HarfBuzz's `record_rphf_use`: in each syllable, the first glyph
 /// `rphf` substituted among the leading glyphs it could apply to
-/// becomes a repha. `info` is the state `rphf` ran with, one entry per
-/// glyph.
-pub(super) fn record_rphf(glyphs: &mut [Glyph], info: &[GlyphInfo]) {
-    if info.len() != glyphs.len() {
-        return;
-    }
-    for range in syllable_ranges(glyphs) {
-        let found = range
-            .take_while(|&i| info[i].mask != 0)
-            .find(|&i| info[i].substituted);
-        if let Some(i) = found {
-            let g = &mut glyphs[i];
-            g.indic_position = (g.indic_position & !TAG_CATEGORY) | TAG_REPHA;
+/// becomes a repha.
+pub(super) fn record_rphf(info: &mut [GlyphInfo], rphf: u32) {
+    for range in syllable_ranges(info) {
+        for g in &mut info[range] {
+            if g.mask & rphf == 0 {
+                break;
+            }
+            if g.substituted {
+                g.category = R;
+                break;
+            }
         }
     }
-}
-
-/// The glyph range of each syllable: the runs of glyphs sharing a
-/// serial (HarfBuzz's `foreach_syllable`).
-fn syllable_ranges(glyphs: &[Glyph]) -> Vec<Range<usize>> {
-    let serial = |g: &Glyph| g.indic_position >> TAG_SERIAL_SHIFT;
-    let mut ranges = Vec::new();
-    let mut start = 0;
-    for i in 1..=glyphs.len() {
-        if i == glyphs.len() || serial(&glyphs[i]) != serial(&glyphs[start]) {
-            ranges.push(start..i);
-            start = i;
-        }
-    }
-    ranges
 }
 
 /// HarfBuzz's `record_pref_use`: in each syllable, the first glyph
-/// `pref` substituted becomes a pre-base glyph, given the glyph ids
-/// from before `pref`. Does nothing when `pref` changed the glyph
-/// count, which this comparison cannot follow.
-pub(super) fn record_pref(before: &[u32], glyphs: &mut [Glyph]) {
-    if before.len() != glyphs.len() {
-        return;
-    }
-    for range in syllable_ranges(glyphs) {
-        if let Some(i) = range.into_iter().find(|&i| glyphs[i].glyph_id != before[i]) {
-            let g = &mut glyphs[i];
-            g.indic_position = (g.indic_position & !TAG_CATEGORY) | TAG_PRE_BASE;
+/// `pref` substituted becomes a pre-base vowel sign, which it behaves
+/// like.
+pub(super) fn record_pref(info: &mut [GlyphInfo]) {
+    for range in syllable_ranges(info) {
+        if let Some(g) = info[range].iter_mut().find(|g| g.substituted) {
+            g.category = VPRE;
         }
     }
 }
 
-/// HarfBuzz's `reorder_syllable_use`, run after the basic features on
-/// glyphs [`tag_syllables`] tagged. In each syllable, a repha at the
-/// start first moves toward the end, to just before the first
-/// post-base glyph or halant that did not ligate, or to the end (see
-/// [`move_repha`]). Then a pre-base glyph moves back to the start of
-/// the syllable, or to just after the last halant before it that did
-/// not ligate. Both merge the clusters they pass at the monotone
-/// `level`s. Only the first glyph of a multiple substitution moves
-/// back. Clears the tags.
+/// HarfBuzz's `POST_BASE_FLAGS64`: the categories a repha stops in
+/// front of.
+fn is_post_base(category: u8) -> bool {
+    matches!(
+        category,
+        FABV | FBLW
+            | FPST
+            | FMABV
+            | FMBLW
+            | FMPST
+            | MABV
+            | MBLW
+            | MPST
+            | MPRE
+            | VABV
+            | VBLW
+            | VPST
+            | VPRE
+            | VMABV
+            | VMBLW
+            | VMPST
+            | VMPRE
+    )
+}
+
+/// HarfBuzz's `is_halant_use`: a halant that did not ligate.
+fn is_halant(g: &Glyph, info: &GlyphInfo) -> bool {
+    matches!(info.category, H | HVM | IS) && !MatchGlyph::from(g).is_ligated()
+}
+
+/// HarfBuzz's `reorder_syllable_use` for every syllable. In a
+/// syllable of a type that reorders, a repha at the start moves toward
+/// the end, to just before the first post-base glyph or halant that
+/// did not ligate, or to the end. Then each pre-base vowel sign or
+/// modifier moves back to the start of the syllable, or to just after
+/// the last halant before it that did not ligate. Both merge the
+/// clusters they pass at the monotone `level`s. Only the first glyph
+/// of a multiple substitution moves back.
 ///
 /// HarfBuzz moves each pre-base glyph on its own, which costs time
 /// quadratic in the number of pre-base glyphs one insertion point
 /// collects. Here the moves to one insertion point are collected and
 /// applied together (see [`move_to_insertion_point`]), so the pass
 /// stays linear.
-pub(super) fn reorder_pre_base(glyphs: &mut [Glyph], level: ClusterLevel) {
+pub(super) fn reorder(glyphs: &mut [Glyph], info: &mut [GlyphInfo], level: ClusterLevel) {
+    if glyphs.len() != info.len() {
+        return;
+    }
     let mut moves: Vec<usize> = Vec::new();
-    let mut scratch: Vec<Glyph> = Vec::new();
-    for range in syllable_ranges(glyphs) {
-        move_repha(glyphs, range.clone(), level);
+    let mut order: Vec<usize> = Vec::new();
+    for range in syllable_ranges(info) {
+        let kind = info[range.start].syllable_type();
+        if !matches!(
+            kind,
+            syllable::VIRAMA_TERMINATED
+                | syllable::SAKOT_TERMINATED
+                | syllable::STANDARD
+                | syllable::SYMBOL
+                | syllable::BROKEN
+        ) {
+            continue;
+        }
+        move_repha(glyphs, info, range.clone(), level);
         let mut j = range.start;
         moves.clear();
         for i in range {
-            // Moves only ever touch glyphs before `i`, so these are the
-            // glyph's own tags whether or not earlier moves ran yet.
-            let m = MatchGlyph::from(&glyphs[i]);
-            let category = glyphs[i].indic_position & TAG_CATEGORY;
-            if category == TAG_HALANT && !m.is_ligated() {
-                move_to_insertion_point(glyphs, j, &moves, level, &mut scratch);
+            // Moves only ever touch glyphs before `i`, so this is the
+            // glyph's own category whether or not earlier moves ran.
+            if is_halant(&glyphs[i], &info[i]) {
+                move_to_insertion_point(glyphs, info, j, &moves, level, &mut order);
                 moves.clear();
                 j = i + 1;
-            } else if category == TAG_PRE_BASE && m.lig_comp() == 0 && j < i {
+            } else if matches!(info[i].category, VPRE | VMPRE)
+                && MatchGlyph::from(&glyphs[i]).lig_comp() == 0
+                && j < i
+            {
                 moves.push(i);
             }
         }
-        move_to_insertion_point(glyphs, j, &moves, level, &mut scratch);
-    }
-    for g in glyphs {
-        g.indic_position = IndicPosition::Start as u8;
+        move_to_insertion_point(glyphs, info, j, &moves, level, &mut order);
     }
 }
 
-/// The repha move of `reorder_syllable_use`: when the syllable at
-/// `range` starts with a repha (a character of category `R`, or the
-/// glyph `rphf` formed) and has more glyphs, the repha moves before the
-/// first post-base glyph or halant that did not ligate, or to the end
-/// of the syllable when there is none, and the glyphs it passes share
-/// its cluster at the monotone `level`s.
-fn move_repha(glyphs: &mut [Glyph], range: Range<usize>, level: ClusterLevel) {
+/// The repha move of `reorder_syllable_use` for the syllable at
+/// `range`.
+fn move_repha(
+    glyphs: &mut [Glyph],
+    info: &mut [GlyphInfo],
+    range: Range<usize>,
+    level: ClusterLevel,
+) {
     let (start, end) = (range.start, range.end);
-    let category = |g: &Glyph| g.indic_position & TAG_CATEGORY;
-    if end > glyphs.len() || end - start <= 1 || category(&glyphs[start]) != TAG_REPHA {
+    if end > glyphs.len() || end - start <= 1 || info[start].category != R {
         return;
     }
     for i in start + 1..end {
-        let g = &glyphs[i];
-        let post_base = matches!(category(g), TAG_PRE_BASE | TAG_POST_BASE)
-            || (category(g) == TAG_HALANT && !MatchGlyph::from(g).is_ligated());
+        let post_base = is_post_base(info[i].category) || is_halant(&glyphs[i], &info[i]);
         if post_base || i == end - 1 {
             let target = if post_base { i - 1 } else { i };
             merge_clusters(glyphs, start, target + 1, level);
             glyphs[start..=target].rotate_left(1);
+            info[start..=target].rotate_left(1);
             return;
         }
     }
@@ -354,38 +218,44 @@ fn move_repha(glyphs: &mut [Glyph], range: Range<usize>, level: ClusterLevel) {
 /// One at a time, each move also merges the clusters from `j` through
 /// the moved glyph. The ranges all start at `j` and grow, and the
 /// glyphs of a merged range share one cluster, so the moves inside
-/// it do not change any cluster. On a run whose clusters rise or fall
+/// it do not change any cluster. On a run whose clusters rise
 /// monotonically, as they do at the monotone levels, merging the
 /// widest range once leaves the same clusters as merging each range
-/// in turn.
+/// in turn. At the other levels a merge marks the range unsafe to
+/// break, and the widest range marks the same glyphs as the ranges in
+/// turn, since the glyphs in each range are the ones it started with.
 fn move_to_insertion_point(
     glyphs: &mut [Glyph],
+    info: &mut [GlyphInfo],
     j: usize,
     moves: &[usize],
     level: ClusterLevel,
-    scratch: &mut Vec<Glyph>,
+    order: &mut Vec<usize>,
 ) {
     let (Some(&first), Some(&last)) = (moves.first(), moves.last()) else {
         return;
     };
     let ascending = moves.windows(2).all(|w| w[0] < w[1]);
-    if !ascending || first <= j || last >= glyphs.len() {
+    if !ascending || first <= j || last >= glyphs.len() || last >= info.len() {
         return;
     }
     merge_clusters(glyphs, j, last + 1, level);
-    let span = &mut glyphs[j..=last];
-    scratch.clear();
-    scratch.extend(moves.iter().rev().map(|&i| span[i - j]));
+    order.clear();
+    order.extend(moves.iter().rev());
     let mut next_move = moves.iter().peekable();
-    for (k, &g) in span.iter().enumerate() {
-        if next_move.peek() == Some(&&(j + k)) {
+    for k in j..=last {
+        if next_move.peek() == Some(&&k) {
             next_move.next();
         } else {
-            scratch.push(g);
+            order.push(k);
         }
     }
     // Ascending moves inside the span make the lengths match.
-    if scratch.len() == span.len() {
-        span.copy_from_slice(scratch);
+    if order.len() != last + 1 - j {
+        return;
     }
+    let moved_glyphs: Vec<Glyph> = order.iter().map(|&k| glyphs[k]).collect();
+    let moved_info: Vec<GlyphInfo> = order.iter().map(|&k| info[k]).collect();
+    glyphs[j..=last].copy_from_slice(&moved_glyphs);
+    info[j..=last].copy_from_slice(&moved_info);
 }
