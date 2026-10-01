@@ -1,4 +1,6 @@
-# sigilbuzz
+<p align="center">
+  <img src="assets/banner.png" alt="sigilbuzz, a pure-Rust text shaping engine" width="100%">
+</p>
 
 sigilbuzz is a text shaping engine written in pure Rust. You give it a font and a
 string. It gives you back glyph IDs and positions, ready to draw. The API follows the

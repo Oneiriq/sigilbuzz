@@ -33,6 +33,7 @@ publish = true
 readme = "README.md"
 keywords = ["text", "shaping", "opentype", "harfbuzz", "typography"]
 categories = ["text-processing", "rendering", "no-std"]
+exclude = ["/assets"]
 
 [lib]
 # Standalone library. No proc-macros, no C glue.
