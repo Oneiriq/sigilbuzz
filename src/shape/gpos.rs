@@ -22,7 +22,7 @@
 //! ignore are passed over, and so are default-ignorable characters
 //! (ZWNJ and hidden ones always, ZWJ unless the lookup belongs to
 //! `mark` or `mkmk`, which HarfBuzz registers with manual joiners).
-//! HarfBuzz's input walks also test each glyph's feature mask; every
+//! HarfBuzz's input walks also test each glyph's feature mask. Every
 //! GPOS feature here applies to every glyph, as HarfBuzz registers
 //! them all as global features, so that test always passes.
 

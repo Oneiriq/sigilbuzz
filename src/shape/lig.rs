@@ -227,7 +227,7 @@ pub(super) fn ligate(
     buf.replace_glyph(lig_gid);
 
     // Later components keep their logical positions as long as every
-    // glyph consumed before them is output again; each component
+    // glyph consumed before them is output again. Each component
     // dropped moves the ones after it one place closer.
     for (dropped, &pos) in positions[1..].iter().enumerate() {
         let pos = pos - dropped;

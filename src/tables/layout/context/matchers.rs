@@ -19,7 +19,7 @@ use crate::tables::layout::skip_iter::{
 
 /// HarfBuzz's `context_apply_lookup` without the nested lookups: the
 /// `tail` input glyphs after `seq[i]`, tested by `input`. A match
-/// marks the input unsafe to break; a failure marks where the walk
+/// marks the input unsafe to break. A failure marks where the walk
 /// gave up unsafe to concatenate.
 pub(crate) fn context_rule<S: MatchSeq + ?Sized>(
     seq: &S,
@@ -54,7 +54,7 @@ pub(crate) struct ChainTests<I, L, B> {
 
 /// HarfBuzz's `chain_context_apply_lookup` without the nested
 /// lookups: input, then lookahead, then backtrack around `seq[i]`. A
-/// match marks backtrack through lookahead unsafe to break; a failure
+/// match marks backtrack through lookahead unsafe to break. A failure
 /// marks what was examined unsafe to concatenate.
 pub(crate) fn chain_rule<S, I, L, B>(
     seq: &S,

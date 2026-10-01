@@ -15,7 +15,7 @@
 //! One vector holds both halves with a gap between them: the output
 //! is `buf[..out_len]`, the input `buf[idx..]`, and
 //! `buf[out_len..idx]` is free. Consuming a glyph without output widens
-//! the gap; outputting more glyphs than consumed narrows it, and when
+//! the gap. Outputting more glyphs than consumed narrows it, and when
 //! it closes the input tail moves right by at least half the buffer,
 //! so the moves cost amortized constant time per output glyph.
 //!
@@ -114,7 +114,7 @@ impl UnsafeRanges for FlagOps {
 
 impl GsubBuffer {
     /// A buffer over `glyphs`, with the feature on at the glyphs whose
-    /// `mask` entry is true (on at every glyph without a mask; off past
+    /// `mask` entry is true (on at every glyph without a mask, off past
     /// the end of a short mask). `level` is the cluster level, and
     /// `concat` whether unsafe-to-concatenate flags are wanted.
     pub(super) fn new(
@@ -346,7 +346,7 @@ impl GsubBuffer {
     }
 
     /// HarfBuzz's `output_glyph` / `output_info`: `glyph` joins the
-    /// output ahead of the cursor, with the cursor glyph's mask; the
+    /// output ahead of the cursor, with the cursor glyph's mask. The
     /// cursor stays.
     pub(super) fn output_glyph(&mut self, glyph: Glyph) {
         self.ensure_gap(1);

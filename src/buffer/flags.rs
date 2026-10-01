@@ -66,7 +66,7 @@ impl BufferFlags {
     pub const PRODUCE_UNSAFE_TO_CONCAT: Self = Self(0x40);
     /// Produce [`GlyphFlags::SAFE_TO_INSERT_TATWEEL`](crate::GlyphFlags::SAFE_TO_INSERT_TATWEEL)
     /// where Arabic joining allows a tatweel
-    /// (`HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL`); those clusters
+    /// (`HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL`). Those clusters
     /// are also unsafe to break.
     pub const PRODUCE_SAFE_TO_INSERT_TATWEEL: Self = Self(0x80);
 

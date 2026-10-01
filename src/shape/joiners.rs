@@ -128,8 +128,8 @@ impl JoinerTable {
     }
 
     /// Whether feature `tag` is registered with `F_PER_SYLLABLE`: in
-    /// Myanmar `locl`, `ccmp`, and the basic features; in USE every
-    /// feature up to its reorder.
+    /// Myanmar `locl`, `ccmp`, and the basic features, and in USE
+    /// every feature up to its reorder.
     fn per_syllable(self, tag: [u8; 4]) -> bool {
         match self {
             Self::Default | Self::Arabic => false,

@@ -195,7 +195,7 @@ fn multiple_substitution_numbers_its_outputs() {
 #[test]
 fn later_pieces_of_a_multiple_substitution_add_no_component() {
     // HarfBuzz 14.5.0 `_hb_glyph_info_get_lig_num_comps_in_ligation`
-    // (issue 4969): base 1 expanded into 1, 2; ligating both pieces
+    // (issue 4969): base 1 expanded into 1 and 2. Ligating both pieces
     // with base 3 gives a two-component ligature, not three.
     let bytes = gdef_bytes();
     let gdef = Gdef::parse(&bytes).unwrap();

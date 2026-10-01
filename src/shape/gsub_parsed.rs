@@ -143,7 +143,7 @@ pub(super) fn cursor_in_digest(parsed: &[ParsedGsubSubtable<'_>], id: u16) -> bo
         .any(|cov| cov.contains(id))
 }
 
-/// Tries the subtables of one lookup at the cursor in order; the first
+/// Tries the subtables of one lookup at the cursor in order. The first
 /// one that applies wins and leaves the cursor where HarfBuzz does:
 /// past a single substitution, past a multiple substitution's outputs,
 /// past the glyphs a ligature kept inside its match, and at the end
@@ -231,7 +231,7 @@ pub(super) fn apply_parsed_lookup_at(
 /// A multiple substitution's sequence at the cursor, HarfBuzz's
 /// `Sequence::apply`: one glyph is a plain substitution, more are
 /// output in its place, and none deletes the glyph (the spec forbids
-/// an empty sequence, but Uniscribe and HarfBuzz accept it; HarfBuzz
+/// an empty sequence, but Uniscribe and HarfBuzz accept it, see HarfBuzz
 /// issue 253), merging its cluster into a neighbor.
 /// Returns false when `budget` has no room for the extra glyphs (see
 /// [`LookupBudget`]).

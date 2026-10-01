@@ -108,7 +108,7 @@ fn a_context_rule_needs_the_feature_on_at_every_input_glyph() {
 
 #[test]
 fn the_mask_moves_with_its_glyph_through_the_features_lookups() {
-    // Lookup 0 ligates the first two glyphs; lookup 1 then looks at
+    // Lookup 0 ligates the first two glyphs. Lookup 1 then looks at
     // the third, which the feature is off at, although its position
     // moved to where an "on" glyph used to be.
     let font = build_shapeable_font_with_gsub(

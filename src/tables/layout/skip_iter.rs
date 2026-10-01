@@ -680,10 +680,10 @@ pub struct SkipRules<'a> {
     ignore_zwj: bool,
     ignore_hidden: bool,
     /// Input walks stop at a glyph whose feature mask is off as at a
-    /// mismatch (`matcher.mask` is the lookup mask); context walks do
+    /// mismatch (`matcher.mask` is the lookup mask). Context walks do
     /// not check it (`matcher.mask` is all ones).
     check_mask: bool,
-    /// The cursor's syllable, when the walk may not leave it; zero
+    /// The cursor's syllable, when the walk may not leave it, or zero
     /// for any syllable.
     syllable: u8,
 }

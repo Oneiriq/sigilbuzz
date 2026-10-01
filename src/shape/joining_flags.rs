@@ -95,8 +95,8 @@ const TABLE: [[Entry; 6]; 7] = [
     ],
 ];
 
-/// The table column of a joining type; `None` for a transparent one,
-/// which the machine passes over. sigilbuzz has no Syriac joining
+/// The table column of a joining type, or `None` for a transparent
+/// one, which the machine passes over. sigilbuzz has no Syriac joining
 /// groups, so ALAPH and DALATH_RISH never occur.
 const fn column(t: JoiningType) -> Option<usize> {
     match t {

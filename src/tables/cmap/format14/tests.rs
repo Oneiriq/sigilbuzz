@@ -19,7 +19,7 @@ fn cmap_bytes(uvs: Vec<u8>) -> Vec<u8> {
 
 fn sample() -> Vec<u8> {
     build_format14(&[
-        // VS1: 'A'..='C' default, 'D' -> 100, 'E' -> glyph 0.
+        // VS1: 'A'..='C' default, 'D' maps to 100, 'E' to glyph 0.
         (VS1, &[(0x41, 2)], &[(0x44, 100), (0x45, 0)]),
         // VS2: only its own glyphs.
         (VS2, &[], &[(0x41, 200), (0x5A, 201)]),

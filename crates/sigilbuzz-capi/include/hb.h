@@ -226,7 +226,7 @@ void         hb_buffer_clear_contents(hb_buffer_t *buffer);
 
 /* Buffer flags, HarfBuzz's values. HarfBuzz's VERIFY bit is accepted,
  * stored, and returned by hb_buffer_get_flags, but changes nothing. EOT
- * is stored too; HarfBuzz's OpenType shaper reads no end-of-text
+ * is stored too. HarfBuzz's OpenType shaper reads no end-of-text
  * state. */
 typedef enum {
     HB_BUFFER_FLAG_DEFAULT                     = 0x00000000u,

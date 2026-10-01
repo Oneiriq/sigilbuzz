@@ -301,7 +301,7 @@ impl MatchSeq for Run {
 #[test]
 fn input_walks_stop_at_a_glyph_outside_the_feature_mask() {
     // `matcher_t::may_match`: a masked-off glyph does not match, and
-    // the walk gives up there; a context walk does not look.
+    // the walk gives up there. A context walk does not look.
     let run = Run(alloc::vec![
         (MatchGlyph::new(1), true, 0),
         (MatchGlyph::new(2), false, 0),

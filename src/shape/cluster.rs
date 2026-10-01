@@ -19,7 +19,7 @@
 //! and friends) all come down to the same flat merge here.
 //!
 //! When a level skips a merge of the input, HarfBuzz marks the range
-//! unsafe to break instead; the merges of its output buffer
+//! unsafe to break instead. The merges of its output buffer
 //! (`merge_out_clusters`) just skip. A merge that changes a glyph's
 //! cluster clears its glyph flags (`set_cluster`).
 

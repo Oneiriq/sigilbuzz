@@ -257,7 +257,7 @@ const fn tag(s: &[u8; 4]) -> hb_tag_t {
 pub struct hb_glyph_info_t {
     /// Before shaping, a Unicode codepoint. After shaping, a glyph id.
     pub codepoint: hb_codepoint_t,
-    /// Glyph flags (`hb_glyph_flags_t`); read them with
+    /// Glyph flags (`hb_glyph_flags_t`). Read them with
     /// [`hb_glyph_info_get_glyph_flags`].
     pub mask: hb_mask_t,
     /// Index of the input cluster this glyph belongs to.

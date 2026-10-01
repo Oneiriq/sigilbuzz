@@ -136,7 +136,7 @@ impl<'a> Ligature<'a> {
     ///
     /// With more than one ligature in the set, HarfBuzz first finds
     /// the glyph after `at` with the context walk and only tries the
-    /// ligatures whose second component is that glyph; a ligature it
+    /// ligatures whose second component is that glyph. A ligature it
     /// passes over marks the pair unsafe to concatenate. The match
     /// found is the same either way.
     pub(crate) fn apply_at_in<S: MatchSeq + ?Sized>(

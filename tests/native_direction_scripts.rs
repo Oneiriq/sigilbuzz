@@ -13,7 +13,7 @@
 //! native direction in HarfBuzz and are never reversed.
 //!
 //! Open Sans has none of these letters, so the glyphs are .notdef (and
-//! U+0301 for the mark); the order and clusters show the reversal.
+//! U+0301 for the mark). The order and clusters show the reversal.
 //! Expected output from uharfbuzz with HarfBuzz 14.5.0, cluster level
 //! MONOTONE_CHARACTERS: `(glyph, cluster, x_advance, x_offset,
 //! y_offset)`.

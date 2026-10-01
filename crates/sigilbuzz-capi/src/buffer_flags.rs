@@ -81,7 +81,7 @@ pub(crate) fn restore_defaults(state: &mut BufferState) {
 }
 
 /// Sets the buffer flags. Like HarfBuzz, the value is stored as given
-/// and [`hb_buffer_get_flags`] returns it; HarfBuzz's `VERIFY`, which
+/// and [`hb_buffer_get_flags`] returns it. HarfBuzz's `VERIFY`, which
 /// sigilbuzz has no behavior for, has no effect.
 ///
 /// # Safety

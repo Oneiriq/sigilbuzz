@@ -59,7 +59,7 @@ mod tests {
         assert_eq!(glyphs[0].syllable, 0x12);
         assert_eq!(glyphs[14].syllable, 0xF2);
         assert_eq!(glyphs[15].syllable, 0x12);
-        // A range past the run is cut at its end; the glyphs keep
+        // A range past the run is cut at its end, and the glyphs keep
         // their syllable when a range misses them.
         number_syllables(&mut glyphs, [(16, 99, 3)], MC);
         assert_eq!(glyphs[16].syllable, 0x13);

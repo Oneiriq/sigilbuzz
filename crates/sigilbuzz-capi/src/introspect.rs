@@ -4,9 +4,9 @@
 //! Each populates an `hb_set_t` the caller passes in.
 //! `hb_face_collect_unicodes` walks the cmap, the variation sequence
 //! collectors read its format 14 subtable, and
-//! `hb_ot_layout_collect_features` walks GSUB / GPOS's ScriptList ->
-//! LangSys -> FeatureList and adds the feature tags reachable through
-//! the script/language filter.
+//! `hb_ot_layout_collect_features` walks the ScriptList, LangSys, and
+//! FeatureList of GSUB and GPOS and adds the feature tags reachable
+//! through the script and language filter.
 
 extern crate alloc;
 
