@@ -361,9 +361,10 @@ fn mark_follows_a_displaced_parent_along_the_line_only() {
 
 #[test]
 fn stacked_marks_resolve_parents_first_in_any_order() {
-    // base <- m1 <- m2. m2's resolved x includes m1's resolved x,
-    // whichever order the chain is discovered in. The y offsets stay
-    // as the marks attached with them.
+    // m2 attaches to m1, which attaches to the base. m2's resolved x
+    // includes m1's resolved x, whichever order the chain is
+    // discovered in. The y offsets stay as the marks attached with
+    // them.
     let build = || {
         let mut g = vec![glyph(1, 500), glyph(2, 0), glyph(3, 0)];
         g[1].x_offset = 100;

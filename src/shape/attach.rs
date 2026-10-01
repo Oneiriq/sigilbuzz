@@ -24,7 +24,7 @@
 //!    main-direction offset and compensates for the advances between
 //!    parent and child. That compensation is where direction matters.
 //!    Forward runs (LTR, TTB) subtract the advances of
-//!    `parent..child`; backward runs (RTL, BTT) are still in logical
+//!    `parent..child`. Backward runs (RTL, BTT) are still in logical
 //!    order at that point and will be reversed afterwards, so they add
 //!    the advances of `parent+1..=child` instead.
 //!

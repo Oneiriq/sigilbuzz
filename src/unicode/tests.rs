@@ -47,7 +47,7 @@ fn classifies_greek_and_cyrillic() {
 
 #[test]
 fn classifies_devanagari() {
-    // क (U+0915) and vowel sign I (U+093F).
+    // Devanagari ka (U+0915) and vowel sign I (U+093F).
     assert_eq!(script_of('\u{0915}'), Script::Devanagari);
     assert_eq!(script_of('\u{093F}'), Script::Devanagari);
 }
@@ -91,8 +91,8 @@ fn unknown_scripts_fall_through_to_other() {
 
 #[test]
 fn classifies_khmer() {
-    // ក U+1780 (consonant ka), ៊ U+17CA (register shifter),
-    // ៛ U+17DB (currency riel), and a Khmer Symbols sign
+    // U+1780 (consonant ka), U+17CA (register shifter),
+    // U+17DB (currency riel), and a Khmer Symbols sign
     // U+19E0 sit in the Khmer bucket.
     assert_eq!(script_of('\u{1780}'), Script::Khmer);
     assert_eq!(script_of('\u{17CA}'), Script::Khmer);
@@ -102,7 +102,7 @@ fn classifies_khmer() {
 
 #[test]
 fn classifies_myanmar() {
-    // ကာ: U+1000 (consonant ka) + U+102C (sign aa).
+    // U+1000 (consonant ka) and U+102C (sign aa).
     assert_eq!(script_of('\u{1000}'), Script::Myanmar);
     assert_eq!(script_of('\u{102C}'), Script::Myanmar);
     // Myanmar Extended-A (e.g. Shan sign maun).
@@ -113,7 +113,7 @@ fn classifies_myanmar() {
 
 #[test]
 fn classifies_thai() {
-    // ก U+0E01 (consonant ko kai), ั U+0E31 (mai han-akat).
+    // U+0E01 (consonant ko kai) and U+0E31 (mai han-akat).
     assert_eq!(script_of('\u{0E01}'), Script::Thai);
     assert_eq!(script_of('\u{0E31}'), Script::Thai);
     // Block end: Thai digits.
@@ -122,15 +122,15 @@ fn classifies_thai() {
 
 #[test]
 fn classifies_lao() {
-    // ກ U+0E81 (consonant ko), ັ U+0EB1 (mai kan).
+    // U+0E81 (consonant ko) and U+0EB1 (mai kan).
     assert_eq!(script_of('\u{0E81}'), Script::Lao);
     assert_eq!(script_of('\u{0EB1}'), Script::Lao);
 }
 
 #[test]
 fn classifies_hangul() {
-    // Jamo: leading ᄀ (U+1100), vowel ᅡ (U+1161), trailing ᆨ
-    // (U+11A8). Precomposed 가 (U+AC00) also in the Hangul
+    // Jamo: leading U+1100, vowel U+1161, trailing U+11A8.
+    // Precomposed U+AC00 is also in the Hangul
     // bucket: `is_hangul_jamo` separates the USE-routed subset.
     assert_eq!(script_of('\u{1100}'), Script::Hangul);
     assert_eq!(script_of('\u{1161}'), Script::Hangul);
