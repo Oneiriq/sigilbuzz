@@ -74,7 +74,7 @@ const IGNORE_FLAGS: u16 =
     LOOKUP_FLAG_IGNORE_BASE_GLYPHS | LOOKUP_FLAG_IGNORE_LIGATURES | LOOKUP_FLAG_IGNORE_MARKS;
 
 /// Bits of [`MatchGlyph::props`], the same layout the shaper keeps in
-/// `Glyph::unicode_props`; [`crate::buffer::unicode_prop`] maps all
+/// `Glyph::unicode_props`; `crate::buffer::unicode_prop` maps all
 /// sixteen.
 ///
 /// The low byte holds the matching properties HarfBuzz keeps in
