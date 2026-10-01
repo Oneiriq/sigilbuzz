@@ -479,6 +479,15 @@ Changed:
   all Indic and Khmer test strings now match HarfBuzz 14.5.0 in glyph flags with that
   buffer flag at every cluster level (before: 1,973 to 1,974, 2,077 to 2,081, and 9,621
   to 9,638 of 9,666).
+- With `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT`, a context or chained context rule set
+  of more than four rules tried at the last glyph of the run passes over the rules that
+  need a glyph after it, and they mark the cursor glyph unsafe to concatenate. When a
+  later rule matches, HarfBuzz (`RuleSet::apply` and `ChainRuleSet::apply`) starts that
+  mark where the match left the cursor, the end of the run, so nothing is marked.
+  sigilbuzz now does the same. With `Buffer::guess_segment_properties` on both sides,
+  3,774 of the 3,775 Myanmar test strings now match HarfBuzz 14.5.0 in glyph flags with
+  that buffer flag at `MonotoneGraphemes` and 3,773 at the other levels (before: 3,771,
+  and 3,770 at `Characters`).
 - The default GSUB features run in the stages HarfBuzz builds for them
   (`hb_ot_shape_collect_features`). The default, Hebrew and Thai shapers run `ccmp`,
   `locl`, `rlig`, `calt`, `clig`, `liga` and `rclt` (or `vert` in vertical text), the

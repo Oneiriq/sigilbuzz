@@ -97,7 +97,10 @@ where
                 }
             });
             if needs_more {
-                sink.unsafe_to_concat(at, unsafe_to1, false);
+                // As below, the mark starts where a matched rule left
+                // the cursor.
+                let from = found.as_ref().map_or(at, |f| f.0.end);
+                sink.unsafe_to_concat(from, unsafe_to1, false);
             }
             return found;
         }

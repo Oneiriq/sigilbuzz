@@ -21,6 +21,7 @@ const MODI: &[u8] = include_bytes!("fonts/NotoSansModi-Regular.ttf");
 const SHARADA: &[u8] = include_bytes!("fonts/NotoSansSharada-Regular.ttf");
 const TAI_THAM: &[u8] = include_bytes!("fonts/NotoSansTaiTham-Regular.ttf");
 const KHMER: &[u8] = include_bytes!("fonts/NotoSansKhmer-Regular.ttf");
+const MYANMAR: &[u8] = include_bytes!("fonts/NotoSansMyanmar-Regular.ttf");
 const TELUGU: &[u8] = include_bytes!("fonts/NotoSansTelugu-Regular.ttf");
 const OPEN_SANS: &[u8] = include_bytes!("fixtures/opensans_regular.ttf");
 
@@ -110,6 +111,28 @@ fn a_matched_rule_marks_from_the_end_of_its_match() {
     assert_eq!(
         flags(TELUGU, "\u{0C16}\u{0C48}\u{0C40}"),
         [(327, 0, 0), (62, 0, 0)]
+    );
+}
+
+#[test]
+fn a_rule_matched_on_the_last_glyph_marks_from_the_end_of_its_match() {
+    // Noto Sans Myanmar's `blws` lookup 72 is a class-based chained
+    // context with more than four rules for the dotted circle, which
+    // ends the run. Rules that need a glyph after it are passed over,
+    // and a later rule with only a backtrack matches. HarfBuzz marks
+    // from where the match left the cursor, the end of the run, so
+    // nothing is marked.
+    assert_eq!(
+        flags(MYANMAR, "\u{1031}\u{FE00}"),
+        [(547, 0, 0), (388, 0, 0)]
+    );
+    assert_eq!(
+        flags(MYANMAR, "\u{25CC}\u{1031}\u{FE00}"),
+        [(547, 0, 0), (388, 0, 0)]
+    );
+    assert_eq!(
+        flags(MYANMAR, "\u{AA78}\u{1084}"),
+        [(170, 0, 0), (118, 0, 0), (388, 0, 0)]
     );
 }
 
