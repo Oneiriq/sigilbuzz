@@ -177,8 +177,8 @@ pub const MYANMAR_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] = &[b"pres", b"abvs", b"bl
 
 /// Hangul Old-Hangul features: the three positional jamo features
 /// pick Leading/Vowel/Trailing variant shapes. HarfBuzz's Hangul
-/// shaper adds only these to the default features, which run once,
-/// in the default pass.
+/// shaper adds only these to the default features and runs them all
+/// in one stage with the defaults (see [`shape_hangul`]).
 pub const HANGUL_FEATURES: &[&[u8; 4]] = &[b"ljmo", b"vjmo", b"tjmo"];
 
 /// Entry point: shapes one Khmer run with the Khmer shaper

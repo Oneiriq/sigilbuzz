@@ -52,3 +52,10 @@ Fonts used by the integration tests.
   `tests/tools/build_phantom_anchor_fixture.py`. `tests/outline_parity.rs` uses it to
   drive phantom-point resolution on a real `Face`. Public domain, no third-party
   content (generated entirely at build time).
+- `../fonts/NotoSansKR-HangulTone-Subset.ttf`: an 8 KB subset of Noto Sans KR (OFL 1.1,
+  Copyright 2014-2021 Adobe, Reserved Font Name 'Source'), from
+  <https://github.com/google/fonts/tree/main/ofl/notosanskr>, instanced at Regular and
+  cut to the Hangul tone marks, the dotted circle, and a few jamo and syllables. It sits
+  with the other Noto fonts in `tests/fonts/`, whose README has the exact fontTools
+  commands. `tests/hangul_tone_harfbuzz_parity.rs` uses it, since no other fixture has
+  the tone marks.

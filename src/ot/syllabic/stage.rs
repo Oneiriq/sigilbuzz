@@ -32,6 +32,8 @@ use crate::tables::layout::Joiners;
 pub(crate) struct FeatureFlags(u8);
 
 impl FeatureFlags {
+    /// No flag (`F_NONE`).
+    pub(crate) const NONE: Self = Self(0);
     /// `F_GLOBAL`: the feature applies to every glyph.
     pub(crate) const GLOBAL: Self = Self(1);
     /// `F_MANUAL_ZWNJ`: lookups see ZWNJ instead of skipping it.

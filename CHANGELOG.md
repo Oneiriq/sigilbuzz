@@ -231,6 +231,19 @@ Changed:
   syllable, merging the clusters it passes. Tirhuta and Modi reph forms used to stay in
   front of the base. HarfBuzz also matches `rphf` one syllable at a time. sigilbuzz does
   not yet, because its USE syllables still come from a simpler grammar than HarfBuzz's.
+- Hangul follows HarfBuzz's Hangul shaper (`hb-ot-shaper-hangul.cc`) in a buffer whose
+  script is Hangul. Its preprocessing runs after grapheme clusters form, as in
+  HarfBuzz: jamo compose into a precomposed syllable the font has, a syllable the font
+  lacks decomposes into jamo, and a tone mark (U+302E, U+302F) after a syllable moves
+  in front of it, sharing its cluster, unless the font draws it with no advance. A tone
+  mark with no syllable before it gets a dotted circle, which sorts with the marks as
+  the tone mark does. `ljmo`, `vjmo` and `tjmo` apply only to the jamo of a syllable
+  that did not compose, and they run in one stage with the default features, where
+  `calt` applies to every glyph but jamo (HarfBuzz 14.5.0 turns `calt` off on jamo
+  only). The tone marks are now Hangul script, as in `Scripts.txt`. On 1,200 random
+  Hangul strings with Noto Sans KR and the Old Hangul fixture, the output now matches
+  HarfBuzz at every cluster level (before: 558). `ot::use_shaper::shape_hangul` runs
+  the new stage, default features included.
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,

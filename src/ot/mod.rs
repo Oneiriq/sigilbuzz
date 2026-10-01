@@ -16,6 +16,7 @@
 //! - [`use_shaper`]: the Universal Shaping Engine and its clients.
 
 pub mod arabic;
+pub(crate) mod hangul;
 pub mod indic;
 pub(crate) mod khmer;
 pub(crate) mod layout_select;

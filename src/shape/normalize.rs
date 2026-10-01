@@ -175,7 +175,18 @@ pub(super) fn normalize_segments<'a>(
         let chars: Vec<NormChar> = seg
             .cp_range
             .clone()
-            .map(|i| NormChar::new(codepoints[i], glyphs[i].cluster, mirrored[i]))
+            .map(|i| {
+                let mut c = NormChar::new(codepoints[i], glyphs[i].cluster, mirrored[i]);
+                // A character a shaper inserted in place of a mark
+                // keeps that mark's properties, as HarfBuzz's
+                // `replace_glyphs` copies them (the Hangul shaper's
+                // dotted circle for a tone mark).
+                if glyphs[i].combining_class != 0 {
+                    c.class = glyphs[i].char_class;
+                    c.mcc = glyphs[i].combining_class;
+                }
+                c
+            })
             .collect();
         let start = out_codepoints.len();
         for c in normalizer_for(seg).run(&chars) {

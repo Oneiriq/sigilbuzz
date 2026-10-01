@@ -9,7 +9,7 @@ use super::features::{
     apply_arabic_positional_features, apply_gsub_features_merged_budgeted, early_default_features,
     run_default_gsub,
 };
-use super::hangul::hangul_compose;
+use super::hangul;
 use super::normalize::{self, Normalizer};
 use super::segment::{
     build_segments, is_common_for_segmentation, remap_segments, ProcessedSegment, Segment,
@@ -116,18 +116,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // without re-scanning the UTF-8 stream.
     let mut glyphs: Vec<Glyph> = Vec::with_capacity(text.len());
     let mut codepoints: Vec<char> = Vec::with_capacity(text.len());
-    // Preprocess Hangul Jamo NFC composition: L + V (+ optional T)
-    // sequences collapse into the precomposed syllable in
-    // U+AC00..U+D7A3 when the font carries a cmap entry for the
-    // precomposed codepoint. The Jamo sub-blocks outside the modern
-    // compositional range (Extended-A L, Extended-B T) suppress
-    // composition so the font's `ljmo` / `vjmo` / `tjmo` features can
-    // shape each jamo independently (matches HarfBuzz / rustybuzz).
-    //
-    // Returns `(byte_offset, char)` pairs; the byte offset is always
-    // the first codepoint of the composed cluster, so cluster
-    // tracking stays aligned with the original UTF-8 stream.
-    let composed_chars: Vec<(u32, char)> = hangul_compose(text, &cmap);
+    // `(byte_offset, char)` for each character. Hangul syllables
+    // compose later, in the Hangul preprocessing below.
+    let composed_chars: Vec<(u32, char)> =
+        text.char_indices().map(|(i, c)| (i as u32, c)).collect();
     // Which characters continue the grapheme before them, read off the
     // text before any character is split below (HarfBuzz sets the bit
     // in `hb_set_unicode_props`, ahead of its own splits). `cont` has
@@ -234,6 +226,33 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // The rest of HarfBuzz's SARA AM handling, which (like its Thai
     // shaper) runs once the text is in the direction it shapes in.
     thai::preprocess(&mut codepoints, &mut glyphs, &mut mirrored_mask, level);
+    // HarfBuzz's Hangul shaper, which shapes a buffer whose script is
+    // Hangul, composes and decomposes syllables and moves tone marks
+    // at the same point (see `hangul`). The jamo features it gives stay
+    // with the characters until the Hangul GSUB stage.
+    let hangul_buffer = buffer_script == Some(Script::Hangul);
+    let mut jamo: Option<(Vec<char>, Vec<u8>)> = None;
+    if hangul_buffer {
+        let has_glyph = |c: char| cmap.glyph_id(c).is_some();
+        let zero_width = |c: char| {
+            cmap.glyph_id(c)
+                .is_some_and(|g| hmtx.advance(g).unwrap_or(0) == 0)
+        };
+        let font = hangul::HangulFont {
+            has_glyph: &has_glyph,
+            zero_width: &zero_width,
+            dotted_circle: !flags.contains(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE)
+                && has_glyph('\u{25CC}'),
+        };
+        let features = hangul::preprocess(
+            &mut codepoints,
+            &mut glyphs,
+            &mut mirrored_mask,
+            &font,
+            level,
+        );
+        jamo = Some((codepoints.clone(), features));
+    }
     let mut segments = match buffer.script() {
         Some(script) => alloc::vec![Segment {
             cp_range: 0..codepoints.len(),
@@ -289,6 +308,17 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             recategorize_marks: fallback_marks,
         },
     );
+    // The jamo features of the normalized text: those of the Hangul
+    // preprocessing when normalization kept every character, as it
+    // does unless the font lacks one with a decomposition, and
+    // otherwise read off the characters.
+    let jamo: Option<Vec<u8>> = jamo.map(|(before, features)| {
+        if before == codepoints {
+            features
+        } else {
+            hangul::jamo_features(&codepoints)
+        }
+    });
 
     // One work budget for every lookup this call applies directly,
     // across all segments (see `LookupBudget`). The `ot` pre-shapers
@@ -606,27 +636,24 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 level,
             );
         }
-        // Hangul routes through USE only for Jamo-decomposed text.
-        // Precomposed syllables (U+AC00..U+D7A3) still pass through
-        // the default GSUB/GPOS chain: `ljmo`/`vjmo`/`tjmo` are
-        // no-ops on them, so running the pipeline is harmless but
-        // wasteful. Additionally gate on the buffer's dominant
-        // script: HarfBuzz picks one shaper for the whole run based
-        // on the first non-COMMON script, so a Latin-majority mix
-        // like `Hi \u{1100}\u{1161}` shapes the jamo under the
-        // default shaper (no positional variant forms). sigilbuzz
-        // matches that here so mixed runs round-trip glyph-for-glyph.
-        if seg.script == Script::Hangul
-            && dominant_script == Some(Script::Hangul)
-            && seg_cps.iter().any(|&c| crate::unicode::is_hangul_jamo(c))
-        {
-            crate::ot::use_shaper::shape_hangul(
-                gsub.as_ref(),
-                gdef.as_ref(),
-                seg_cps,
-                &mut seg_glyphs,
-                level,
-            );
+        // A Hangul segment of a buffer the Hangul shaper shapes runs
+        // HarfBuzz's Hangul GSUB stage, default features included, with
+        // the jamo features of the preprocessing. In a buffer of
+        // another script (`Hi \u{1100}\u{1161}`), HarfBuzz shapes the
+        // jamo with that script's shaper, so they get no jamo features.
+        let hangul_jamo = jamo
+            .as_ref()
+            .filter(|_| seg.script == Script::Hangul)
+            .and_then(|j| j.get(seg.cp_range.clone()));
+        let shaper_ran_defaults = shaper_ran_defaults || hangul_jamo.is_some();
+        if let Some(seg_jamo) = hangul_jamo {
+            let run = crate::ot::hangul::HangulRun {
+                gsub: gsub.as_ref(),
+                gdef: gdef.as_ref(),
+                features,
+                vertical: is_vertical,
+            };
+            crate::ot::hangul::shape(&run, seg_cps, seg_jamo, &mut seg_glyphs);
         }
 
         if let Some(ref gsub) = gsub {
