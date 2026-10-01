@@ -17,7 +17,8 @@ use super::segment::{
 use super::shaper::Shaper;
 use super::{
     cluster, dotted_circle, feature_disabled, glyph_flags, ignorables, joining_flags,
-    native_direction, position, required, rotate, thai, Feature, JoinerTable, LookupBudget, VarCtx,
+    native_direction, position, required, rotate, thai, vowel_constraints, Feature, JoinerTable,
+    LookupBudget, VarCtx,
 };
 use crate::buffer::{script_priority_for, Buffer, BufferFlags, Direction, Glyph, ShapedRun};
 use crate::error::{Error, Result};
@@ -223,9 +224,19 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     } else {
         direction
     };
+    // The shaper HarfBuzz would pick for the whole buffer, from its
+    // script. It runs its `preprocess_text` on the whole buffer and
+    // decides mark zeroing and fallback mark positioning. Each
+    // segment's own script picks its GSUB, and its normalization
+    // unless the buffer's shaper shapes it (`Shaper::normalizer_for`).
+    let buffer_shaper = Shaper::for_script(buffer_script.unwrap_or(Script::Other), !is_vertical);
     // The rest of HarfBuzz's SARA AM handling, which (like its Thai
     // shaper) runs once the text is in the direction it shapes in.
     thai::preprocess(&mut codepoints, &mut glyphs, &mut mirrored_mask, level);
+    if buffer_shaper.vowel_constraints() {
+        let (cps, marks) = (&mut codepoints, &mut mirrored_mask);
+        vowel_constraints::insert_dotted_circles(buffer_script, flags, cps, &mut glyphs, marks);
+    }
     // HarfBuzz's Hangul shaper, which shapes a buffer whose script is
     // Hangul, composes and decomposes syllables and moves tone marks
     // at the same point (see `hangul`). The jamo features it gives stay
@@ -276,10 +287,6 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     });
     let gpos = face.gpos()?.map(|g| g.with_language_tags(language_tags));
 
-    // The shaper HarfBuzz would pick for the whole buffer, from its
-    // script. It decides mark zeroing and fallback mark positioning;
-    // each segment's own script picks its normalization and GSUB.
-    let buffer_shaper = Shaper::for_script(buffer_script.unwrap_or(Script::Other), !is_vertical);
     let applies_morx = gsub.is_none() && face.table_bytes(crate::tables::tag::MORX).is_ok();
     let fallback_marks = position::fallback_mark_positioning(
         face,
@@ -291,8 +298,9 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
 
     // Step 1.75: normalization, which also maps the characters to
     // glyphs. Each segment normalizes with the mode and hooks of the
-    // shaper HarfBuzz gives its script (see `normalize`), so its code
-    // points and glyphs stay one to one.
+    // shaper that shapes it (see `normalize` and
+    // `Shaper::normalizer_for`), so its code points and glyphs stay one
+    // to one.
     let has_gpos_mark = |priority: &[[u8; 4]]| {
         gpos.as_ref()
             .is_some_and(|g| position::has_feature(g, *b"mark", priority))
@@ -304,7 +312,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         &mut segments,
         |seg| Normalizer {
             cmap: &cmap,
-            shaper: Shaper::for_script(seg.script, !is_vertical),
+            shaper: Shaper::for_script(seg.script, !is_vertical).normalizer_for(buffer_shaper),
             has_gpos_mark: has_gpos_mark(seg.script_priority),
             level,
             recategorize_marks: fallback_marks,
@@ -720,7 +728,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                     seg.script_priority,
                     early_default_features(seg_arabic_active, seg.script, dominant_script),
                     joiner_table,
-                    buffer_shaper == Shaper::Hangul,
+                    !(is_vertical && buffer_shaper == Shaper::Hangul),
                     &mut budget,
                 );
             }

@@ -137,15 +137,7 @@ impl NormChar {
     /// (HarfBuzz's `_hb_glyph_info_set_unicode_props`).
     fn set_char(&mut self, ch: char) {
         self.ch = ch;
-        self.class = 0;
-        self.mcc = 0;
-        if general_category_class(ch) == Some(GeneralCategoryClass::Mark) {
-            self.class |= char_class::MARK;
-            if is_nonspacing_mark(ch) {
-                self.class |= char_class::NONSPACING_MARK;
-            }
-            self.mcc = modified_combining_class(ch);
-        }
+        (self.class, self.mcc) = mark_props(ch);
     }
 
     /// `_hb_glyph_info_is_unicode_mark`.
@@ -164,7 +156,8 @@ impl NormChar {
     /// `glyph_props`), and the character class.
     pub(super) fn glyph(&self) -> Glyph {
         let mut g = Glyph::new(self.glyph, self.cluster);
-        g.unicode_props = ignorables::unicode_props(self.ch) | glyph_props::initial(self.ch);
+        g.unicode_props =
+            ignorables::unicode_props(self.ch) | glyph_props::initial(self.ch, self.class);
         if self.unhidden {
             g.unicode_props &= !match_prop::HIDDEN;
         }
@@ -176,6 +169,21 @@ impl NormChar {
         g.flags = self.flags;
         g
     }
+}
+
+/// The `char_class` bits and modified combining class of `ch`, as
+/// HarfBuzz's `_hb_glyph_info_set_unicode_props` records them: the mark
+/// bits and the class of a mark, and zero for anything else.
+pub(super) fn mark_props(ch: char) -> (u8, u8) {
+    if general_category_class(ch) != Some(GeneralCategoryClass::Mark) {
+        return (0, 0);
+    }
+    let class = if is_nonspacing_mark(ch) {
+        char_class::MARK | char_class::NONSPACING_MARK
+    } else {
+        char_class::MARK
+    };
+    (class, modified_combining_class(ch))
 }
 
 /// Normalizes each segment of a run with the normalizer
@@ -203,8 +211,9 @@ pub(super) fn normalize_segments<'a>(
                 // A character a shaper inserted in place of a mark
                 // keeps that mark's properties, as HarfBuzz's
                 // `replace_glyphs` copies them (the Hangul shaper's
-                // dotted circle for a tone mark).
-                if glyphs[i].combining_class != 0 {
+                // dotted circle for a tone mark, and the dotted circle
+                // of the vowel constraints).
+                if glyphs[i].char_class & char_class::MARK != 0 {
                     c.class = glyphs[i].char_class;
                     c.mcc = glyphs[i].combining_class;
                 }

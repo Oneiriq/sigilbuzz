@@ -143,6 +143,7 @@ mod shaper;
 mod syllabic;
 mod syllables;
 mod thai;
+mod vowel_constraints;
 
 use aat::apply_kerx_format4;
 pub(crate) use cluster::{merge_clusters, merge_grapheme_clusters};

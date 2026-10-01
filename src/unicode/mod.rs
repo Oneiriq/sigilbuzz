@@ -309,6 +309,13 @@ pub const fn is_hangul_jamo(ch: char) -> bool {
     matches!(cp, 0x1100..=0x11FF | 0xA960..=0xA97F | 0xD7B0..=0xD7FF)
 }
 
+/// A Hangul tone mark, U+302E or U+302F (HarfBuzz's `isHangulTone`).
+/// Its script is Hangul, and it is a combining mark (General_Category
+/// Mc, combining class 224).
+pub(crate) const fn is_hangul_tone_mark(ch: char) -> bool {
+    matches!(ch as u32, 0x302E..=0x302F)
+}
+
 /// HarfBuzz's `hb_unicode_funcs_t::is_default_ignorable` (in
 /// `hb-unicode.hh`): Default_Ignorable_Code_Point, except the Hangul
 /// fillers (U+115F, U+1160, U+3164, U+FFA0) and the shorthand format

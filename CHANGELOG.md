@@ -280,10 +280,9 @@ Changed:
   reph, with the halant and ZWJ clusters merged. `liga` is off for these scripts, and
   `init`, `pres`, `abvs`, `blws`, `psts` and `haln` run in one stage with `rlig`,
   `calt`, `clig`, `rclt` and the caller's features. On 7,656 test strings with the Noto
-  Sans fonts of the nine scripts, the output matches HarfBuzz 14.5.0 on all but 7 (before:
-  4,826), at every cluster level. The 7 are HarfBuzz's vowel constraints, which insert a
-  dotted circle between an independent vowel and a vowel sign that would look like
-  another vowel, and sigilbuzz does not do that yet. Sinhala keeps the earlier Indic pass.
+  Sans fonts of the nine scripts, the output matches HarfBuzz 14.5.0 on all of them
+  (before: 4,826), at every cluster level, with the vowel constraints and the Devanagari
+  stress signs below. Sinhala keeps the earlier Indic pass.
   `ot::indic::shape_indic` and `shape_devanagari` run the port, default features
   included.
 - The Universal Shaping Engine moves a repha as HarfBuzz does (`reorder_syllable_use`
@@ -307,6 +306,37 @@ Changed:
   Hangul strings with Noto Sans KR and the Old Hangul fixture, the output now matches
   HarfBuzz at every cluster level (before: 558). `ot::use_shaper::shape_hangul` runs
   the new stage, default features included.
+- The Indic and Universal Shaping Engine shapers insert HarfBuzz's vowel constraint
+  dotted circles (`_hb_preprocess_text_vowel_constraints` in
+  `hb-ot-shaper-vowel-constraints.cc`). Before normalization, a U+25CC goes before the
+  last character of each sequence of the buffer's script that
+  `IndicShapingInvalidCluster.txt` lists, such as Devanagari A followed by the vowel
+  sign AA, which would read as the letter AA. `DO_NOT_INSERT_DOTTED_CIRCLE` turns it
+  off. The circle takes the cluster, glyph flags and Unicode properties of the
+  character after it, so in a font without GDEF glyph classes a circle before a
+  nonspacing mark is a mark. `tests/vowel_constraints_gen.rs` generates the table from
+  that file. HarfBuzz's Khmer and Myanmar shapers do not run it, and sigilbuzz has no
+  shaper for Khudawadi and Takri, the two other scripts it lists. On 1,793 strings that
+  put every listed sequence of the 14 other scripts in several contexts, the output
+  matches HarfBuzz 14.5.0 on 1,674 at `MonotoneGraphemes` and `Characters` and 1,620 at
+  `MonotoneCharacters` (before: 628 and 574). The rest come from the USE and Sinhala
+  syllable grammars and from text in a buffer of another script.
+- Hangul in a buffer of another script, and the text of other scripts in a Hangul
+  buffer, shape as HarfBuzz shapes them. Such text normalizes with the shaper of the
+  buffer, as HarfBuzz normalizes the whole buffer with it: a syllable followed by a mark
+  in a Latin or Han buffer decomposes into jamo, and Latin text in a Hangul buffer
+  composes nothing. `calt` now applies to other scripts in a horizontal Hangul buffer,
+  since HarfBuzz 14.5.0 keeps it off jamo only. A Hangul tone mark after a letter of
+  another script stays in that letter's run, so it sorts with the letter's marks and
+  joins its cluster, and `Buffer::script_runs` keeps it in that run too. On 5,568
+  strings that mix syllables, modern and old jamo, and tone marks with Latin, Han,
+  kana, Greek and Cyrillic in both orders, with Noto Sans KR, its subsets and the Old
+  Hangul fixture, the output matches HarfBuzz 14.5.0 at every cluster level (before:
+  4,969).
+- The Devanagari stress signs and accents (U+0951..U+0954) are Inherited, as in
+  `Scripts.txt`: they stay in the run of the letter before them and do not give a
+  buffer its script. Alone they now shape with the default shaper, as in HarfBuzz,
+  where they used to get a dotted circle.
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,
