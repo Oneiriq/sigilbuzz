@@ -137,8 +137,9 @@ impl<'a> Ligature<'a> {
     /// With more than one ligature in the set, HarfBuzz first finds
     /// the glyph after `at` with the context walk and only tries the
     /// ligatures whose second component is that glyph. A ligature it
-    /// passes over marks the pair unsafe to concatenate. The match
-    /// found is the same either way.
+    /// passes over marks the pair unsafe to concatenate, or, when a
+    /// later ligature matches, the glyphs from the end of that match
+    /// up to the second glyph. The match found is the same either way.
     pub(crate) fn apply_at_in<S: MatchSeq + ?Sized>(
         &self,
         seq: &S,
@@ -185,8 +186,10 @@ impl<'a> Ligature<'a> {
                     };
                     if lig.component(0).map_or(true, |c| c == second) {
                         if let Some(found) = lig.apply(seq, at, cx, sink) {
+                            // HarfBuzz marks from where the ligature
+                            // left the cursor, the end of its match.
                             if passed_over {
-                                sink.unsafe_to_concat(at, unsafe_to, false);
+                                sink.unsafe_to_concat(found.1.end, unsafe_to, false);
                             }
                             return Some(found);
                         }

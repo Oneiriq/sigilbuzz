@@ -137,6 +137,81 @@ sigilbuzz ships the files unmodified. The OFL text lives in the upstream reposit
           --no-hinting --drop-tables+=GDEF,DSIG,STAT,MVAR,BASE \
           --output-file=NotoSansDevanagari-NoGDEF-Subset.ttf
 
+- Subsets of six Noto fonts for `tests/script_coverage_parity.rs`, one for each of
+  Javanese, Chakma, Khudawadi, Takri, Syriac, and Adlam, which HarfBuzz shapes with the
+  Universal Shaping Engine or, for Syriac, the Arabic shaper. Each keeps the characters
+  the tests shape, the space, U+200C, U+200D, and U+25CC, and all of its layout features.
+  The sources are the hinted builds at
+  <https://github.com/notofonts/notofonts.github.io/tree/main/fonts>
+  (`NotoSans<Script>/hinted/ttf/NotoSans<Script>-Regular.ttf`), from the Noto Project
+  Authors under the OFL 1.1. Built with fontTools 4.66.1 (`fontTools.subset` with
+  `layout_features=['*']`, no hinting, all name IDs, the `.notdef` outline, and
+  `DSIG`, `STAT`, `MVAR`, and `BASE` dropped):
+  - `NotoSansJavanese-Subset.ttf`: U+A980..U+A983, U+A986, U+A98F, U+A9A0, U+A9A1,
+    U+A9A4, U+A9AB, U+A9AD, U+A9B2, U+A9B4, U+A9B6, U+A9B8, U+A9BA..U+A9C0.
+  - `NotoSansChakma-Subset.ttf`: U+11100..U+11103, U+11107, U+11108, U+11116, U+1111A,
+    U+11122, U+11123, U+11127, U+11128, U+1112C, U+1112D, U+11131, U+11133, U+11134.
+  - `NotoSansKhudawadi-Subset.ttf`: U+112B0, U+112BA, U+112C0, U+112C9, U+112D8,
+    U+112DF, U+112E0, U+112E1, U+112E3, U+112E5, U+112E9, U+112EA.
+  - `NotoSansTakri-Subset.ttf`: U+11680, U+11686, U+1168A, U+11694, U+116A2, U+116A4,
+    U+116AB, U+116AD, U+116AE, U+116B2, U+116B4, U+116B6, U+116B7.
+  - `NotoSansSyriac-Subset.ttf`: U+0640, U+070F, U+0710, U+0712, U+0713, U+0715,
+    U+0718, U+071D, U+0720, U+0721, U+072A, U+0730, U+0732. It keeps the font's `stch`
+    feature, which stretches U+070F SYRIAC ABBREVIATION MARK.
+  - `NotoSansAdlam-Subset.ttf`: U+1E900, U+1E902, U+1E904, U+1E922, U+1E924, U+1E926,
+    U+1E944, U+1E946, U+1E94A, U+1E94B.
+
+- `NotoSansDevanagari-Dev3-Subset.ttf`. A 41 KB subset of
+  `NotoSansDevanagari-Regular.ttf` above whose `dev2` script records in GSUB and GPOS are
+  renamed `dev3`, for `tests/indic3_parity.rs`. No released font uses the Indic3 tags
+  yet, and HarfBuzz gives a font that has them the Universal Shaping Engine. It keeps
+  the space, U+200C, U+200D, U+25CC, U+0901..U+0903, U+0905, U+0915, U+0916, U+0924,
+  U+0928, U+092A, U+092E, U+092F, U+0930, U+0937, U+0938, U+093C, U+093E..U+0941,
+  U+0947, U+094B, and U+094D. Same upstream and license as the full font. Built with
+  fontTools 4.66.1, subset as above, then in Python:
+
+      for tag in ("GSUB", "GPOS"):
+          records = font[tag].table.ScriptList.ScriptRecord
+          for r in records:
+              if r.ScriptTag == "dev2":
+                  r.ScriptTag = "dev3"
+          records.sort(key=lambda r: r.ScriptTag)
+
+- `NotoSansChakma-Dist-Subset.ttf` and `NotoSansChakma-Dist9-Subset.ttf`. 6 KB subsets
+  of Noto Sans Chakma for `tests/concat_flags_parity.rs`. They keep the class-based
+  chained context of the `dist` feature, whose rules for a letter all start with a
+  vowel sign or a post-base form. Same upstream, license and fontTools options as
+  `NotoSansChakma-Subset.ttf` above, with the space, U+200C, U+200D, U+25CC, U+11103,
+  U+11120, U+11122, U+11133, U+11134, U+11145, and U+11146.
+  `NotoSansChakma-Dist9-Subset.ttf` then gets eight chained context subtables in front
+  of the `dist` lookup's subtable, so it is the ninth. Each matches only the space, in
+  Python:
+
+      from fontTools.ttLib.tables import otTables as ot
+
+      gpos = font["GPOS"].table
+      (dist,) = [r.Feature.LookupListIndex for r in gpos.FeatureList.FeatureRecord
+                 if r.FeatureTag == "dist"]
+      lookup = gpos.LookupList.Lookup[dist[0]]
+
+      def space_only():
+          st = ot.ChainContextPos()
+          st.Format = 3
+          cov = ot.Coverage()
+          cov.glyphs = ["space"]
+          st.BacktrackGlyphCount = 0
+          st.BacktrackCoverage = []
+          st.InputGlyphCount = 1
+          st.InputCoverage = [cov]
+          st.LookAheadGlyphCount = 0
+          st.LookAheadCoverage = []
+          st.PosCount = 0
+          st.PosLookupRecord = []
+          return st
+
+      lookup.SubTable = [space_only() for _ in range(8)] + lookup.SubTable
+      lookup.SubTableCount = len(lookup.SubTable)
+
 ## CFF subsetting fixtures
 
 Real CFF1 and CFF2 fonts used by the round-trip tests in

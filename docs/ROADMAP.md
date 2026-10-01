@@ -27,29 +27,15 @@ These are smaller pieces that are not scheduled yet.
 - Language tags from version 1 `name` tables are read but not exposed.
 - Subsetting a CFF or CFF2 font down to fewer glyphs drops its layout and variation
   tables. TrueType fonts keep them.
-- Scripts that `UnicodeScript` has no bucket for (Javanese, Chakma, Kaithi, Khudawadi,
-  Takri, and the other scripts HarfBuzz gives the Universal Shaping Engine) shape with
-  the default shaper, so they also get no vowel constraints.
-- The Indic scripts do not try HarfBuzz's newest script tags (`dev3`, `bng3`, and the
-  others ending in 3), so a font with lookups under those tags does not get the
-  Universal Shaping Engine, as HarfBuzz gives it.
-- A buffer of several scripts shapes one script run at a time, where HarfBuzz shapes the
-  whole buffer with the shaper of its script. So contextual lookups do not reach across
-  runs, and with `PRODUCE_UNSAFE_TO_CONCAT` some flags at run boundaries differ.
-- Myanmar runs sigilbuzz's own pass, with a simpler syllable grammar than HarfBuzz's
-  Myanmar shaper (`hb-ot-shaper-myanmar.cc`). On 1,540 Myanmar test strings, 1,033
-  shape as HarfBuzz 14.5.0 does.
-- The default shaper runs `ccmp` and `locl` before the other default GSUB features,
-  where HarfBuzz runs them in one stage. Glyphs match, but with
-  `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT` some unsafe-to-concat flags differ (19 of 350
-  Tai Tham test strings with Noto Sans Tai Tham, whose lookups are under `DFLT` only).
-- Unsafe-to-concat flags of a context or chained context rule set with more than four
-  rules, and of some ligature and mark lookups, differ from HarfBuzz's, which marks
-  them on its fast paths (18 of 1,992 USE test strings).
-- A mark takes its parent's vertical offset when it attaches in HarfBuzz
-  (`resolve_cross_offset`), where sigilbuzz adds the parent's final offset. The two
-  differ when a later lookup moves the parent (one Lepcha and one Tibetan string of
-  3,000 test strings in those and other scripts).
+- The `stch` stretch of the Arabic shaper (U+070F SYRIAC ABBREVIATION MARK) fills the
+  rest of the word, and HarfBuzz counts symbol characters (General_Category Sc, Sk, Sm,
+  So) into the word. sigilbuzz has no symbol categories, so a symbol ends the word.
+- The older `UnicodeScript` buckets (Latin through Modi) still cover the Unicode blocks
+  of their scripts, where HarfBuzz reads the Script property. Characters of those
+  scripts outside the blocks (Latin Extended Additional, Arabic Extended-A, the CJK
+  extensions past B, the Mongolian Supplement) shape as `Other`.
+- HarfBuzz's default GSUB stages also hold `rvrn` (in a stage of its own), the automatic
+  fraction features and `rand`. sigilbuzz applies none of them.
 
 ## Known bugs
 

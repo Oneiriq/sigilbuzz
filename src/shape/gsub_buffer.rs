@@ -36,14 +36,25 @@ use crate::tables::layout::skip_iter::{MatchGlyph, MatchSeq, UnsafeRanges};
 /// Smallest number of free slots a closed gap reopens with.
 const MIN_GAP: usize = 8;
 
+/// Mask bit: the feature being applied is on at the glyph.
+const ON: u8 = 1;
+/// Mask bit: a substitution produced the glyph during this buffer's
+/// life (HarfBuzz's `HB_OT_LAYOUT_GLYPH_PROPS_SUBSTITUTED`), even one
+/// that kept its glyph id.
+const SUBSTITUTED: u8 = 2;
+
 /// The run one GSUB lookup (or one feature's lookups) works on.
 #[derive(Debug)]
 pub(super) struct GsubBuffer {
     /// Output, gap, then input.
     buf: Vec<Glyph>,
-    /// Whether the feature being applied is on at each slot of `buf`,
-    /// for features only some glyphs carry. Moves with its glyph.
-    mask: Option<Vec<bool>>,
+    /// Whether the feature being applied is on at each slot of `buf`
+    /// ([`ON`]), for features only some glyphs carry, and whether a
+    /// substitution produced it ([`SUBSTITUTED`]). Moves with its glyph.
+    mask: Option<Vec<u8>>,
+    /// Whether the lookup being applied reads the [`ON`] bits of
+    /// `mask`. A lookup that a feature on every glyph shares does not.
+    mask_active: bool,
     /// Length of the output.
     out_len: usize,
     /// Start of the input in `buf`: the cursor glyph.
@@ -125,12 +136,13 @@ impl GsubBuffer {
     ) -> Self {
         let mask = mask.map(|m| {
             (0..glyphs.len())
-                .map(|i| m.get(i).copied().unwrap_or(false))
+                .map(|i| u8::from(m.get(i).copied().unwrap_or(false)))
                 .collect()
         });
         Self {
             buf: glyphs,
             mask,
+            mask_active: true,
             out_len: 0,
             idx: 0,
             lig_ids_used: 0,
@@ -148,6 +160,18 @@ impl GsubBuffer {
     pub(super) fn into_glyphs(mut self) -> Vec<Glyph> {
         self.sync();
         self.buf
+    }
+
+    /// The glyphs, once no pass is running, and for each whether a
+    /// substitution produced it. Only a buffer with a mask tracks
+    /// substitutions. Without one, none is reported.
+    pub(super) fn into_glyphs_and_substituted(mut self) -> (Vec<Glyph>, Vec<bool>) {
+        self.sync();
+        let substituted = match &self.mask {
+            Some(mask) => mask.iter().map(|&m| m & SUBSTITUTED != 0).collect(),
+            None => alloc::vec![false; self.buf.len()],
+        };
+        (self.buf, substituted)
     }
 
     /// The glyphs between passes.
@@ -234,18 +258,27 @@ impl GsubBuffer {
         self.buf.get_mut(self.idx)
     }
 
+    /// Makes the next lookups read the mask (`active`) or treat every
+    /// glyph as in it. The mask keeps moving with its glyphs either way.
+    pub(super) fn set_mask_active(&mut self, active: bool) {
+        self.mask_active = active;
+    }
+
+    /// The mask, when the current lookup reads it.
+    fn active_mask(&self) -> Option<&Vec<u8>> {
+        self.mask.as_ref().filter(|_| self.mask_active)
+    }
+
     /// True when the feature is on at the cursor glyph.
     pub(super) fn cur_in_mask(&self) -> bool {
-        self.mask
-            .as_ref()
-            .map_or(true, |m| m.get(self.idx).copied().unwrap_or(false))
+        self.active_mask()
+            .map_or(true, |m| m.get(self.idx).is_some_and(|&m| m & ON != 0))
     }
 
     /// True when the feature is on at logical position `i`.
     pub(super) fn in_mask_at(&self, i: usize) -> bool {
-        self.mask
-            .as_ref()
-            .map_or(true, |m| m.get(self.slot(i)).copied().unwrap_or(false))
+        self.active_mask()
+            .map_or(true, |m| m.get(self.slot(i)).is_some_and(|&m| m & ON != 0))
     }
 
     /// Copies slot `from` to slot `to`, mask included.
@@ -339,23 +372,42 @@ impl GsubBuffer {
     /// HarfBuzz's `replace_glyph` for a GSUB substitution: the cursor
     /// glyph becomes `gid` and moves to the output.
     pub(super) fn replace_glyph(&mut self, gid: u16) {
-        if let Some(g) = self.cur_mut() {
-            substitute_glyph(g, gid);
-        }
+        self.substitute_at(self.idx, gid);
         self.next_glyph();
     }
 
-    /// HarfBuzz's `output_glyph` / `output_info`: `glyph` joins the
-    /// output ahead of the cursor, with the cursor glyph's mask. The
+    /// Substitutes `gid` for the glyph at logical position `i` in place,
+    /// as HarfBuzz's `replace_glyph_inplace` does.
+    pub(super) fn replace_glyph_at(&mut self, i: usize, gid: u16) {
+        self.substitute_at(self.slot(i), gid);
+    }
+
+    /// Substitutes `gid` for the glyph in `slot` of `buf` and marks it
+    /// substituted.
+    fn substitute_at(&mut self, slot: usize, gid: u16) {
+        if let Some(g) = self.buf.get_mut(slot) {
+            substitute_glyph(g, gid);
+        }
+        if let Some(m) = self.mask.as_mut().and_then(|m| m.get_mut(slot)) {
+            *m |= SUBSTITUTED;
+        }
+    }
+
+    /// HarfBuzz's `output_glyph` / `output_info` for the outputs of a
+    /// multiple substitution: `glyph` joins the output ahead of the
+    /// cursor, with the cursor glyph's mask, marked substituted. The
     /// cursor stays.
     pub(super) fn output_glyph(&mut self, glyph: Glyph) {
         self.ensure_gap(1);
-        let on = self.cur_in_mask();
+        let on = self
+            .mask
+            .as_ref()
+            .map_or(ON, |m| m.get(self.idx).map_or(0, |&m| m & ON));
         if let Some(slot) = self.buf.get_mut(self.out_len) {
             *slot = glyph;
         }
         if let Some(slot) = self.mask.as_mut().and_then(|m| m.get_mut(self.out_len)) {
-            *slot = on;
+            *slot = on | SUBSTITUTED;
         }
         self.out_len += 1;
     }
@@ -371,7 +423,7 @@ impl GsubBuffer {
         let filler = core::iter::repeat(Glyph::new(0, 0)).take(grow);
         self.buf.splice(self.idx..self.idx, filler);
         if let Some(mask) = &mut self.mask {
-            mask.splice(self.idx..self.idx, core::iter::repeat(false).take(grow));
+            mask.splice(self.idx..self.idx, core::iter::repeat(0).take(grow));
         }
         self.idx += grow;
         self.separate = true;

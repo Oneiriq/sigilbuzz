@@ -115,9 +115,9 @@
 //!   explicitly to get HarfBuzz's RTL behavior and visual order.
 
 mod aat;
+mod arabic_joining;
 mod attach;
 mod cluster;
-mod dotted_circle;
 mod fallback;
 mod features;
 mod glyph_flags;
@@ -129,7 +129,6 @@ mod gsub_parsed;
 mod hangul;
 mod ignorables;
 mod joiners;
-mod joining_flags;
 mod kern;
 mod lig;
 mod native_direction;
@@ -140,6 +139,7 @@ mod required;
 mod rotate;
 mod segment;
 mod shaper;
+mod stch;
 mod syllabic;
 mod syllables;
 mod thai;
@@ -147,17 +147,15 @@ mod vowel_constraints;
 
 use aat::apply_kerx_format4;
 pub(crate) use cluster::{merge_clusters, merge_grapheme_clusters};
-pub(crate) use features::{
-    apply_gsub_feature_in_scripts, apply_gsub_feature_masked, apply_gsub_features_merged,
-    apply_locl_ccmp_if_length_preserving, feature_would_substitute,
-};
+pub(crate) use features::{apply_gsub_feature_masked, feature_would_substitute};
 use gsub::apply_gsub_lookup;
 use gsub_parsed::filter_for_lookup;
 pub(crate) use joiners::JoinerTable;
 pub use pipeline::shape;
+pub(crate) use segment::guess_script;
 use segment::ProcessedSegment;
 pub(crate) use syllabic::SyllabicGsub;
-pub(crate) use syllables::{number_syllables, unsafe_to_break};
+pub(crate) use syllables::unsafe_to_break;
 
 use crate::buffer::Glyph;
 use crate::tables::gpos::resolve_variation_delta;

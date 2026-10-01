@@ -9,6 +9,17 @@ stability commitment.
 
 Added:
 
+- `Buffer::guess_segment_properties`, HarfBuzz's `hb_buffer_guess_segment_properties`: an
+  unset script becomes that of the first character that is not Common or Inherited, and
+  an unset direction becomes that script's horizontal direction. The language stays
+  unset, so the output does not depend on the process locale. With the script set,
+  `shape` uses one shaper for the whole buffer, as HarfBuzz does, so code that calls
+  `hb_buffer_guess_segment_properties` before `hb_shape` gets HarfBuzz's output for text
+  that mixes scripts too. Without the call, `shape` still shapes each script run with
+  its own shaper. On 1,793 strings that put the vowel constraint sequences after Latin or
+  another script, the output with the call matches HarfBuzz 14.5.0 in glyphs, clusters,
+  glyph flags and positions at every cluster level (without it: 1,746, and 1,716 at
+  `MonotoneCharacters`).
 - `OwnedFace`, a face that owns its font bytes behind an `Arc<[u8]>` and has no
   lifetime parameter. It parses the table directory once and hands out `Face` views
   through `as_face()`. It is `Send + Sync` and cheap to clone, so you can keep parsed
@@ -47,6 +58,10 @@ Added:
 - `UnicodeScript::{iso15924_tag, from_iso15924_tag, horizontal_direction}` and
   `Direction::horizontal_for_script`.
 - `ShapedRun` is re-exported from the crate root.
+- `UnicodeScript` buckets for Syriac and the 75 other scripts HarfBuzz 14.5.0 gives the
+  Universal Shaping Engine that sigilbuzz had none for (see Changed), and the hidden
+  `unicode::script_code`, the Unicode Script property of a character as an ISO 15924
+  code (`Zyyy` for Common, `Zinh` for Inherited, `Zzzz` for unassigned code points).
 - GPOS cursive attachment (lookup type 3). `curs` runs by default on horizontal runs.
   It never ran before.
 - `PairPos::lookup_with_device_base`, which also returns the bytes the records' Device
@@ -314,9 +329,7 @@ Changed:
   glyph flags at the `MonotoneGraphemes`, `MonotoneCharacters` and `Characters` cluster
   levels (before: 1,519 in glyphs, 1,275 with flags), and so do all 1,448 Sinhala
   strings (before: 1,036 and 983). 2,100 strings in six more USE scripts and 900 in
-  Tibetan, N'Ko and Mongolian all match too (before: 1,532 and 733). This fixes Sinhala syllables with two or more pre-base vowel signs. Myanmar
-  keeps sigilbuzz's Myanmar pass (`ot::use_shaper::shape_myanmar`), and its output is
-  unchanged. The entry points `ot::use_shaper::shape_balinese` to `shape_modi`,
+  Tibetan, N'Ko and Mongolian all match too (before: 1,532 and 733). This fixes Sinhala syllables with two or more pre-base vowel signs. The entry points `ot::use_shaper::shape_balinese` to `shape_modi`,
   `shape_nko`, `ot::tibetan::shape_tibetan`, `ot::mongolian::shape_mongolian`, and
   `ot::indic::shape_indic` for Sinhala run the new shaper, default features included.
   `ot::use_shaper::USE_TOPOGRAPHICAL_FEATURES` now lists `isol`, `init`, `medi` and
@@ -324,6 +337,25 @@ Changed:
   Universal Shaping Engine: also Sinhala, Tibetan and Mongolian, and no longer Khmer,
   Myanmar, Thai, Lao and Hangul, which have shapers of their own.
   `UnicodeScript::is_indic` no longer holds for Sinhala.
+- Myanmar follows HarfBuzz's Myanmar shaper (`hb-ot-shaper-myanmar.cc`). The Myanmar
+  categories of HarfBuzz's Indic table (`gen-indic-table.py`, now generated with the
+  Myanmar blocks and the variation selectors) feed the syllable machine of
+  `hb-ot-shaper-myanmar-machine.rl`, and each syllable is unsafe to break. `locl` and
+  `ccmp` run per syllable before the reorder. Broken clusters then get a dotted
+  circle, and each syllable is sorted by HarfBuzz's positions: a kinzi after the base,
+  a medial ra and pre-base vowel signs before it, the marks after a below-base vowel
+  before that vowel, a run of pre-base vowel signs flipped, and each move merging the
+  clusters it passes. `rphf`, `pref`, `blwf` and `pstf` follow one stage each, per
+  syllable and with manual ZWJ, then `pres`, `abvs`, `blws` and `psts` in one stage
+  with `rlig`, `calt`, `clig`, `liga`, `rclt` (or `vert`) and the caller's features.
+  All 1,540 Myanmar test strings and 3,775 more (kinzi, medials, stacks, signs, tones,
+  joiners, broken clusters, digits, variation selectors, Myanmar Extended-A and -B)
+  now match HarfBuzz 14.5.0 in glyphs, clusters, glyph flags and positions at the
+  `MonotoneGraphemes`, `MonotoneCharacters` and `Characters` cluster levels (before:
+  1,033, 1,031 and 1,032 of the 1,540 in glyphs). Myanmar text in a font whose GSUB
+  picks `DFLT`, `latn` or `mymr` gets the default shaper's `ccmp`, `locl` and joiner
+  handling, which it skipped before. `ot::use_shaper::shape_myanmar` runs the new
+  shaper, default features included.
 - Hangul follows HarfBuzz's Hangul shaper (`hb-ot-shaper-hangul.cc`) in a buffer whose
   script is Hangul. Its preprocessing runs after grapheme clusters form, as in
   HarfBuzz: jamo compose into a precomposed syllable the font has, a syllable the font
@@ -346,12 +378,14 @@ Changed:
   off. The circle takes the cluster, glyph flags and Unicode properties of the
   character after it, so in a font without GDEF glyph classes a circle before a
   nonspacing mark is a mark. `tests/vowel_constraints_gen.rs` generates the table from
-  that file. HarfBuzz's Khmer and Myanmar shapers do not run it, and sigilbuzz has no
-  shaper for Khudawadi and Takri, the two other scripts it lists. On 1,793 strings that
-  put every listed sequence of the 14 other scripts in several contexts, the output
+  that file. HarfBuzz's Khmer and Myanmar shapers do not run it. Khudawadi and Takri,
+  the two other scripts it lists, get it with their new buckets (below). On 1,793
+  strings that put every listed sequence of the 14 other scripts in several contexts,
+  the output
   matches HarfBuzz 14.5.0 on 1,746 at `MonotoneGraphemes` and `Characters` and 1,716 at
   `MonotoneCharacters` (before: 628 and 574). The rest put two scripts in one buffer,
-  which sigilbuzz shapes one script run at a time (see docs/ROADMAP.md).
+  which sigilbuzz shapes one script run at a time unless the caller calls
+  `Buffer::guess_segment_properties`. With that call, all 1,793 match.
 - Hangul in a buffer of another script, and the text of other scripts in a Hangul
   buffer, shape as HarfBuzz shapes them. Such text normalizes with the shaper of the
   buffer, as HarfBuzz normalizes the whole buffer with it: a syllable followed by a mark
@@ -368,6 +402,121 @@ Changed:
   `Scripts.txt`: they stay in the run of the letter before them and do not give a
   buffer its script. Alone they now shape with the default shaper, as in HarfBuzz,
   where they used to get a dotted circle.
+- Breaking: `UnicodeScript` has a bucket for every script HarfBuzz 14.5.0 gives a shaper
+  of its own (`hb_ot_shaper_categorize` in `hb-ot-shaper.hh`): Syriac, which takes the
+  Arabic shaper, and 75 scripts of the Universal Shaping Engine, from Javanese, Chakma,
+  Kaithi, Khudawadi, Takri and Grantha to Adlam, Mandaic, Sogdian, and Jurchen,
+  Proto-Cuneiform and Seal from Unicode 18.0. They were `Other` and shaped with the
+  default shaper, so they got no syllables, no reordering, no joining forms and no
+  vowel constraints. Their code points come from the Unicode Script property
+  (`Scripts.txt` of Unicode 18.0.0, the version HarfBuzz 14.5.0 reads), and each tries
+  its ISO 15924 code in lowercase, then `DFLT`, as its script tags
+  (`hb_ot_old_tag_from_script` in `hb-ot-tag.cc`). Adlam, Chorasmian, Hanifi Rohingya,
+  Mandaic, Manichaean, Old Uyghur, Phags-pa, Psalter Pahlavi and Sogdian get
+  Arabic-style joining forms in the Universal Shaping Engine (`has_arabic_joining`), and
+  Khudawadi and Takri get their vowel constraints. The joining glyph flags now come only
+  from the shaper HarfBuzz picks for the buffer, so Mongolian and N'Ko in a font with
+  only `DFLT` or `latn` lookups no longer get them. Sidetic is right to left
+  (`Direction::horizontal_for_script`), and Tifinagh keeps no native direction. On
+  97,234 strings in 56 of these scripts with their Noto fonts, the output matches
+  HarfBuzz 14.5.0 in glyphs, clusters and glyph flags at the `MonotoneGraphemes`,
+  `MonotoneCharacters` and `Characters` cluster levels (before: 47,078, 46,984 and
+  46,984), and in positions too except for 50 Marchen strings (see docs/ROADMAP.md).
+  The new variants break an exhaustive `match` on `UnicodeScript`, which is now
+  `#[non_exhaustive]`, so later buckets will not.
+- Syriac shapes with HarfBuzz's Arabic shaper (`hb-ot-shaper-arabic.cc`). The joining
+  state machine of `arabic_joining`, with its ALAPH and DALATH RISH columns, gives alaph
+  `fin2` after a letter that does not join it and `fin3` after dalath or rish, and the
+  letter before a final alaph `med2`. The font's `stch` feature splits U+070F SYRIAC
+  ABBREVIATION MARK into tiles that stretch over the rest of the word after positioning
+  (`record_stch` and `apply_stch`). All 581 Syriac test strings with Noto Sans Syriac
+  match HarfBuzz 14.5.0 at every cluster level (before: 268 with flags).
+- The Arabic shaper keeps each glyph's joining form with the glyph through `ccmp` and
+  `locl`, as HarfBuzz keeps it in the glyph info. A font whose `ccmp` splits a letter
+  (Noto Sans Arabic splits dotted letters into a base and its dots) used to give the
+  joining features to the wrong glyphs. The joining features run in HarfBuzz's order
+  (`isol`, `fina`, `fin2`, `fin3`, `medi`, `med2`, `init`) under the segment's script
+  tags, and vertical Arabic takes the default shaper, as in HarfBuzz. On 1,000 Arabic
+  strings with Noto Sans Arabic and Amiri, 999 now match HarfBuzz 14.5.0 right to left
+  (before: 686) and all 1,000 top to bottom (before: 334).
+- Characters whose Unicode Script is Common or Inherited (the tatweel, the dandas, the
+  Arabic harakat, CJK punctuation) stay in the script run around them, in `shape` and
+  in `Buffer::script_runs`, as HarfBuzz gives a buffer the script of its first other
+  character. They used to start a run of their own when `script_of` gave them a bucket
+  or `Other`, which split a Syriac word at its tatweel.
+- The Universal Shaping Engine and the Indic and Khmer shapers count a substitution that
+  keeps the glyph id as a substitution (`_hb_glyph_info_substituted`). Noto Sans
+  Javanese's `pref` maps cakra to itself, and HarfBuzz then moves the cakra in front of
+  its base like a pre-base vowel sign (`record_pref_use`). sigilbuzz left it in place.
+- The `Scripts.txt` and `PropertyValueAliases.txt` snapshots under `tests/tools/ucd/` are
+  Unicode 18.0.0, and the Script property table they generate moved from
+  `sigilbuzz-capi` into the core crate. The C API's `hb_buffer_guess_segment_properties`
+  reads it from there and now knows the Unicode 18.0 characters.
+- The Indic scripts try HarfBuzz's Indic3 script tags (`dev3`, `bng3`, `gur3`, `gjr3`,
+  `ory3`, `tml3`, `tel3`, `knd3`, `mlm3`) before the ones ending in 2
+  (`hb_ot_all_tags_from_script` in `hb-ot-tag.cc`), and a run whose font has one shapes
+  with the Universal Shaping Engine in place of the Indic shaper, as
+  `hb_ot_shaper_categorize` decides. On 2,631 Devanagari strings with a subset of Noto
+  Sans Devanagari whose `dev2` script records are renamed `dev3`, the output matches
+  HarfBuzz 14.5.0 at every cluster level (before: 1,656, 621 and 1,757 with flags at
+  `MonotoneGraphemes`, `MonotoneCharacters` and `Characters`). Fonts without those tags
+  shape as before.
+- A GPOS mark takes the cross-stream offset of its parent (y in horizontal runs, x in
+  vertical ones, summed over the parent's cursive chain) when it attaches, and only the
+  parent's main-direction offset at the end of GPOS, as in HarfBuzz 14.5.0
+  (`resolve_cross_offset` and `propagate_attachment_offsets`). A lookup that raises a
+  base after its mark attached no longer moves the mark. The end-of-GPOS pass resolves
+  forward runs from their start and backward runs from their end, each walk following
+  at most 64 links, as HarfBuzz does. One Lepcha and one Tibetan test string now match
+  HarfBuzz in positions, and so do all marks of `tests/fixtures/attach_chain.ttf`.
+- With `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT`, a context or chained context rule set
+  of more than four rules follows HarfBuzz's fast path (`RuleSet::apply` and
+  `ChainRuleSet::apply`): it reads the one or two glyphs after the cursor first, and a
+  rule they rule out marks the cursor through that glyph unsafe to concatenate. Once a
+  rule or a ligature of a set of two or more matches, the mark for the rules passed over
+  starts at the end of the match, where HarfBuzz leaves the cursor, instead of at the
+  cursor. All 1,992 USE test strings, all 2,100 strings of six more USE scripts, and
+  all Indic and Khmer test strings now match HarfBuzz 14.5.0 in glyph flags with that
+  buffer flag at every cluster level (before: 1,973 to 1,974, 2,077 to 2,081, and 9,621
+  to 9,638 of 9,666).
+- With `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT`, a context or chained context rule set
+  of more than four rules tried at the last glyph of the run passes over the rules that
+  need a glyph after it, and they mark the cursor glyph unsafe to concatenate. When a
+  later rule matches, HarfBuzz (`RuleSet::apply` and `ChainRuleSet::apply`) starts that
+  mark where the match left the cursor, the end of the run, so nothing is marked.
+  sigilbuzz now does the same. With `Buffer::guess_segment_properties` on both sides,
+  3,774 of the 3,775 Myanmar test strings now match HarfBuzz 14.5.0 in glyph flags with
+  that buffer flag at `MonotoneGraphemes` and 3,773 at the other levels (before: 3,771,
+  and 3,770 at `Characters`).
+- With `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT`, a class-based context or chained context
+  rule set of more than four rules in one of the first eight subtables of its lookup
+  checks the class of the glyph after the cursor against the classes its rules start
+  with, before it reads the glyph after that one, as HarfBuzz's
+  `hb_ot_layout_ruleset_digest_t` does. When no rule starts with that class, the cursor
+  through that glyph is unsafe to concatenate. When a ZWJ, ZWNJ or other default
+  ignorable came after that glyph, sigilbuzz used to take the plain walk over the rules
+  instead, which marks nothing.
+  With `Buffer::guess_segment_properties` on both sides, all 3,775 Myanmar test strings,
+  all 3,468 Chakma test strings and all 3,183 Javanese test strings now match HarfBuzz
+  14.5.0 in glyph flags with that buffer flag at every cluster level (before: 3,773 to
+  3,774, 3,464, and 3,177 at `MonotoneCharacters` and `Characters`).
+- The default GSUB features run in the stages HarfBuzz builds for them
+  (`hb_ot_shape_collect_features`). The default, Hebrew and Thai shapers run `ccmp`,
+  `locl`, `rlig`, `calt`, `clig`, `liga` and `rclt` (or `vert` in vertical text), the
+  direction features with `rtlm`, and the caller's features in one stage, so their
+  lookups apply in lookup-index order whatever feature they belong to. `ccmp` and
+  `locl` used to run first, the direction features before them, and each other feature
+  on its own. The Arabic shaper (`collect_features_arabic`) runs `isol`, `fina`, `medi`
+  and `init` in that order, then `rlig`, then `calt`, then `liga`, `clig`, `mset` and
+  the rest, in both directions. It used to run `init` before `fina`, `liga` and `clig`
+  before `calt`, and no `mset`. Vertical Arabic now takes the default shaper, as in
+  HarfBuzz. `tests/fixtures/stage_order.ttf` tests the stages.
+- With `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT`, a `kern` or `kerx` table the shaping
+  plan applies marks the whole run unsafe to concatenate even when kerning is off (as in
+  vertical text), as HarfBuzz's `KerxTable::apply` does. The legacy `kern` table only
+  applies to the shapers HarfBuzz lets fall back to it (the default, Arabic, Hebrew and
+  Hangul shapers), as `hb_ot_shape_plan_t` decides. All 20 vertical test strings now
+  match HarfBuzz 14.5.0 in glyph flags with that buffer flag (before: 15).
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,

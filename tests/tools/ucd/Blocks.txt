@@ -13,10 +13,15 @@
 0C00..0C7F; Telugu
 0C80..0CFF; Kannada
 0D00..0D7F; Malayalam
+1000..109F; Myanmar
 1780..17FF; Khmer
 1CD0..1CFF; Vedic Extensions
 2000..206F; General Punctuation
 2070..209F; Superscripts and Subscripts
 25A0..25FF; Geometric Shapes
 A8E0..A8FF; Devanagari Extended
+A9E0..A9FF; Myanmar Extended-B
+AA60..AA7F; Myanmar Extended-A
+FE00..FE0F; Variation Selectors
 11300..1137F; Grantha
+116D0..116FF; Myanmar Extended-C

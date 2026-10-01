@@ -461,27 +461,10 @@ fn direction_out(direction: Direction) -> hb_direction_t {
 
 /// The Unicode Script property of `ch` as an ISO 15924 code (`Zyyy`
 /// for Common, `Zinh` for Inherited, `Zzzz` for Unknown), what
-/// HarfBuzz's `hb_unicode_funcs_t::script` returns.
+/// HarfBuzz's `hb_unicode_funcs_t::script` returns. The core crate's
+/// table is generated from the Unicode version HarfBuzz 14.5.0 reads.
 pub(crate) fn unicode_script(ch: char) -> [u8; 4] {
-    use crate::script_table::{SCRIPT_RANGES, SCRIPT_TAGS, UNKNOWN};
-    let cp = u32::from(ch);
-    let index = SCRIPT_RANGES
-        .binary_search_by(|&(start, end, _)| {
-            if end < cp {
-                core::cmp::Ordering::Less
-            } else if start > cp {
-                core::cmp::Ordering::Greater
-            } else {
-                core::cmp::Ordering::Equal
-            }
-        })
-        .ok()
-        .and_then(|i| SCRIPT_RANGES.get(i))
-        .map_or(UNKNOWN, |&(_, _, script)| script);
-    SCRIPT_TAGS
-        .get(usize::from(index))
-        .copied()
-        .unwrap_or(*b"Zzzz")
+    sigilbuzz::unicode::script_code(ch)
 }
 
 /// `hb_buffer_guess_segment_properties`, in HarfBuzz's order: the

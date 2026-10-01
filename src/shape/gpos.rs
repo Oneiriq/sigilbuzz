@@ -39,7 +39,7 @@ use crate::tables::gdef::Gdef;
 use crate::tables::gpos::{
     lookup_type as gpos_lt, ChainContextPos, ContextPos, PairPos, SinglePos, ValueRecord,
 };
-use crate::tables::layout::skip_iter::{apply_nested as apply_records, MaySkip};
+use crate::tables::layout::skip_iter::{apply_nested as apply_records, MaySkip, SUBTABLE_CACHES};
 use crate::tables::layout::{
     InputMatch, Joiners, LayoutTable, Lookup, MatchContext, MatchGlyph, SequenceLookupRecord,
     SkipRules,
@@ -308,8 +308,8 @@ fn apply_subtables_at(
     budget: &mut LookupBudget,
 ) -> Option<usize> {
     let horizontal = att.direction.is_horizontal();
-    let mcx = &state.mcx;
-    for sub in subtables {
+    for (k, sub) in subtables.iter().enumerate() {
+        let mcx = &state.mcx.with_rule_set_digests(k < SUBTABLE_CACHES);
         let next = match sub {
             PosSubtable::Single(sp, base) => {
                 let glyph = glyphs.get_mut(at)?;

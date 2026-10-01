@@ -10,7 +10,10 @@
 //!   names a script GPOS lacks (Hebrew needs `hebr`).
 //! - When GPOS has no `kern` feature for the run (`vkrn` for vertical
 //!   runs), `kerx` kerns if the font has it, else the legacy `kern`
-//!   table does.
+//!   table does, for the shapers HarfBuzz lets fall back to it (see
+//!   [`Shaper::fallback_position`]).
+//! - A `kern` or `kerx` table the plan applies marks the whole run
+//!   unsafe to concatenate, whether or not kerning is requested.
 //!
 //! Mark widths are zeroed before GPOS or after all positioning,
 //! depending on the shaper HarfBuzz picks for the run's script (see
@@ -149,7 +152,8 @@ pub(super) fn position(
         if has_kerx {
             apply_kerx = true;
         } else if has_kern {
-            apply_kern = true;
+            // Not every HarfBuzz shaper applies the legacy table.
+            apply_kern = input.shaper.fallback_position();
         }
     }
     let kern_table = if apply_kern { face.kern()? } else { None };
@@ -193,6 +197,12 @@ pub(super) fn position(
                 gpos::apply_stage(&cx, seg_glyphs, &mut att, &lookups, budget);
             }
         }
+    }
+    // HarfBuzz's `KerxTable::apply` (hb-aat-layout-kerx-table.hh),
+    // which runs `kern` too, starts by marking the whole run, and the
+    // plan applies the table whether or not kerning is requested.
+    if apply_kerx || apply_kern {
+        input.flags.unsafe_to_concat_all(glyphs);
     }
     if requested_kerning {
         if apply_kerx {
@@ -367,6 +377,32 @@ fn zero_mark_widths(glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>, adjust_offset
     }
 }
 
+/// The font's horizontal advance of glyph `id`: its `hmtx` advance,
+/// moved by the `HVAR` delta at `coords` when the font varies (HarfBuzz's
+/// `hb_font_get_glyph_h_advance`), rounded to the nearest unit.
+pub(super) fn font_advance(
+    hmtx: &crate::tables::hmtx::Hmtx<'_>,
+    hvar: Option<&crate::tables::hvar::Hvar<'_>>,
+    coords: &[f32],
+    id: u32,
+) -> i32 {
+    let id = id as u16;
+    let base = i32::from(hmtx.advance(id).unwrap_or(0));
+    match hvar {
+        Some(hvar) => {
+            let delta = hvar.advance_delta(id, coords);
+            // Round to nearest without libm: the deltas are small.
+            let rounded = if delta >= 0.0 {
+                (delta + 0.5) as i32
+            } else {
+                (delta - 0.5) as i32
+            };
+            base.saturating_add(rounded)
+        }
+        None => base,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,6 +428,8 @@ mod tests {
             Script::NKo,
             Script::Sinhala,
             Script::Myanmar,
+            Script::Javanese,
+            Script::Adlam,
         ] {
             assert_eq!(zeroing(s), MarkZeroing::Early, "{s:?}");
         }
@@ -405,6 +443,7 @@ mod tests {
         }
         for s in [
             Script::Arabic,
+            Script::Syriac,
             Script::Hebrew,
             Script::Thai,
             Script::Latin,

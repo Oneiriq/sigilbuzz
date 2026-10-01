@@ -6,19 +6,16 @@ use alloc::vec::Vec;
 
 use super::aat::apply_morx;
 use super::features::{
-    apply_arabic_positional_features, apply_gsub_features_merged_budgeted, early_default_features,
-    run_default_gsub,
+    apply_arabic_positional_features, apply_gsub_features_merged_budgeted, apply_stch,
+    run_default_gsub, DefaultGsub, DefaultShaper,
 };
 use super::hangul;
 use super::normalize::{self, Normalizer};
-use super::segment::{
-    build_segments, is_common_for_segmentation, remap_segments, ProcessedSegment, Segment,
-};
+use super::segment::{build_segments, guess_script, remap_segments, ProcessedSegment, Segment};
 use super::shaper::Shaper;
 use super::{
-    cluster, dotted_circle, feature_disabled, glyph_flags, ignorables, joining_flags,
-    native_direction, position, required, rotate, thai, vowel_constraints, Feature, JoinerTable,
-    LookupBudget, VarCtx,
+    arabic_joining, cluster, glyph_flags, ignorables, native_direction, position, required, rotate,
+    stch, thai, vowel_constraints, Feature, JoinerTable, LookupBudget, VarCtx,
 };
 use crate::buffer::{script_priority_for, Buffer, BufferFlags, Direction, Glyph, ShapedRun};
 use crate::error::{Error, Result};
@@ -50,7 +47,6 @@ use crate::unicode::{script_of, Script};
 // The pipeline is a straight-line sequence of passes so the order is
 // visible in one place.
 pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<ShapedRun> {
-    let want_liga = !feature_disabled(features, *b"liga");
     // Vertical layout: explicit when the buffer direction is TTB/BTT,
     // *implicit* when the run is dominantly Mongolian and the caller
     // never chose a direction. Mongolian's traditional writing axis is
@@ -196,13 +192,9 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     //
     // The buffer's script, as HarfBuzz guesses it: the caller's, or
     // that of the first script-bearing character in the text's order.
-    let buffer_script: Option<Script> = buffer.script().or_else(|| {
-        codepoints
-            .iter()
-            .copied()
-            .find(|&c| !is_common_for_segmentation(c))
-            .map(script_of)
-    });
+    let buffer_script: Option<Script> = buffer
+        .script()
+        .or_else(|| guess_script(codepoints.iter().copied()));
     // A caller-chosen direction that is not the script's native one
     // reads the text as already in that visual order: shape its
     // graphemes reversed, in the native direction (see
@@ -341,15 +333,14 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // Arabic and Universal Shaping Engine shapers assign the joining
     // forms (`arabic_joining`), over the whole buffer.
     let flag_cx = glyph_flags::FlagCx::new(level, flags);
-    let joins = match buffer_script {
-        Some(Script::Arabic) => !is_vertical,
-        Some(Script::Mongolian | Script::NKo) => true,
+    let joins = match buffer_shaper {
+        Shaper::Arabic => true,
+        Shaper::Use => buffer_script.is_some_and(Script::has_arabic_joining),
         _ => false,
     };
+    let (pre, post) = (buffer.pre_context(), buffer.post_context());
     if joins {
-        let types: Vec<JoiningType> = codepoints.iter().map(|&c| joining_type(c)).collect();
-        let context = JoiningContext::from_context(buffer.pre_context(), buffer.post_context());
-        joining_flags::set_joining_flags(&mut glyphs, &types, context, flag_cx);
+        arabic_joining::set_flags(&mut glyphs, &codepoints, pre, post, flag_cx);
     }
 
     // One work budget for every lookup this call applies directly,
@@ -390,12 +381,11 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // The forms index `codepoints`, not the text: the split-vowel
     // decompositions above make `codepoints` longer than the text,
     // and segments slice the forms by their `cp_range`.
-    let has_arabic = buffer.script() == Some(Script::Arabic)
-        || codepoints.iter().any(|&c| script_of(c) == Script::Arabic);
-    let arabic_forms: Vec<JoiningForm> = if has_arabic {
-        let context = JoiningContext::from_context(buffer.pre_context(), buffer.post_context());
-        let types: Vec<JoiningType> = codepoints.iter().map(|&c| joining_type(c)).collect();
-        assign_from_types_in_context(&types, context)
+    let arabic_shaped = |s: Script| matches!(s, Script::Arabic | Script::Syriac);
+    let has_arabic = buffer.script().is_some_and(arabic_shaped)
+        || codepoints.iter().any(|&c| arabic_shaped(script_of(c)));
+    let arabic_actions = if has_arabic {
+        arabic_joining::actions(&codepoints, pre, post)
     } else {
         Vec::new()
     };
@@ -419,6 +409,8 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // the downstream GPOS pass can dispatch under the same priority.
     let mut processed_glyphs: Vec<Glyph> = Vec::with_capacity(glyphs.len());
     let mut seg_glyph_ranges: Vec<ProcessedSegment> = Vec::with_capacity(segments.len());
+    // Whether `stch` left stretch tiles for after positioning.
+    let mut has_stch = false;
 
     for seg in &segments {
         // Take an owned sub-vec of this segment's glyphs so ligature
@@ -443,18 +435,46 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         let use_run = seg_shaper == Shaper::Use
             && (!matches!(seg.script, Script::Tibetan | Script::Mongolian)
                 || dominant_script == Some(seg.script));
+        // The Arabic shaper's joining forms (Arabic and Syriac). Vertical
+        // Arabic takes the default shaper, as in HarfBuzz.
+        let seg_arabic = seg_shaper == Shaper::Arabic && !arabic_actions.is_empty();
+        if seg_arabic && gsub.is_some() {
+            let actions = arabic_actions.get(seg.cp_range.clone()).unwrap_or_default();
+            arabic_joining::stash(&mut seg_glyphs, actions);
+        }
+        let indic = crate::ot::indic::indic_config_for(seg.script)
+            .filter(|c| c.script != Script::Sinhala && seg_shaper == Shaper::Indic);
+        let myanmar = seg_shaper == Shaper::Myanmar;
+        // A Hangul segment of a buffer the Hangul shaper shapes runs
+        // HarfBuzz's Hangul GSUB stage, default features included, with
+        // the jamo features of the preprocessing. In a buffer of
+        // another script (`Hi \u{1100}\u{1161}`), HarfBuzz shapes the
+        // jamo with that script's shaper, so they get no jamo features.
+        let hangul_jamo = jamo
+            .as_ref()
+            .filter(|_| seg.script == Script::Hangul)
+            .and_then(|j| j.get(seg.cp_range.clone()));
+        let shaper_ran_defaults = seg.script == Script::Khmer
+            || indic.is_some()
+            || use_run
+            || myanmar
+            || hangul_jamo.is_some();
+        // HarfBuzz's default, Hebrew and Thai shapers add no stage of
+        // their own, so the direction features join the default ones.
+        let plain_default = !shaper_ran_defaults && !seg_arabic;
 
         // A required feature whose tag no later pass applies runs
-        // first, as HarfBuzz runs it in GSUB stage 0; the direction
+        // first, as HarfBuzz runs it in GSUB stage 0. The direction
         // features (`ltra` and `ltrm`, or `rtla`, then `rtlm` on
-        // backward runs) follow, in the stage HarfBuzz gives them.
+        // backward runs) follow in a stage of their own, except for the
+        // default shaper, which runs them with its default features.
         if let Some(ref gsub) = gsub {
             let plan = required::SegmentPlan {
                 script: seg.script,
                 dominant: dominant_script,
                 use_shaper: use_run,
                 codepoints: seg_cps,
-                arabic: seg.script == Script::Arabic && !arabic_forms.is_empty(),
+                arabic: seg_arabic,
                 vertical: is_vertical,
                 backward,
                 direction_features: rotate::direction_features(target_direction),
@@ -464,43 +484,41 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             let gdef = gdef.as_ref();
             required::apply_unscheduled(gsub, &mut seg_glyphs, gdef, priority, &plan, &mut budget);
             let direction_tags = rotate::direction_features(target_direction);
-            let table = JoinerTable::for_segment(seg.script, plan.arabic);
-            apply_gsub_features_merged_budgeted(
-                gsub,
-                &mut seg_glyphs,
-                gdef,
-                features,
-                direction_tags,
-                priority,
-                table,
-                &mut budget,
-            );
-            if backward {
-                let mirrored = mirrored_mask.get(seg.cp_range.clone()).unwrap_or_default();
-                rotate::apply_rtlm(gsub, &mut seg_glyphs, gdef, priority, features, mirrored);
+            let table = JoinerTable::for_segment(plan.arabic);
+            if !plain_default {
+                apply_gsub_features_merged_budgeted(
+                    gsub,
+                    &mut seg_glyphs,
+                    gdef,
+                    features,
+                    direction_tags,
+                    priority,
+                    table,
+                    &mut budget,
+                );
+                if backward {
+                    let mirrored = mirrored_mask.get(seg.cp_range.clone()).unwrap_or_default();
+                    rotate::apply_rtlm(gsub, &mut seg_glyphs, gdef, priority, features, mirrored);
+                }
+            }
+            if seg_arabic {
+                has_stch |=
+                    apply_stch(gsub, &mut seg_glyphs, gdef, features, priority, &mut budget);
             }
         }
 
-        // Broken syllables get a dotted circle to sit on. The Indic,
-        // Khmer, and USE shapers insert theirs after their syllable
-        // machines. Myanmar gets them here.
+        // Broken syllables get a dotted circle to sit on, which the
+        // syllabic shapers insert after their syllable machines.
         let circle = cmap
             .glyph_id('\u{25CC}')
             .filter(|_| !flags.contains(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE));
-        let circled = circle
-            .filter(|_| seg_shaper == Shaper::Myanmar)
-            .and_then(|c| dotted_circle::insert(seg_cps, &mut seg_glyphs, c));
-        let seg_cps = circled.as_deref().unwrap_or(seg_cps);
 
         // Per-script pre-shapers. Each is gated on the segment's
         // resolved script so a Hebrew segment never runs the Indic
-        // state machine, and vice versa. The Indic, Khmer, and USE
-        // shapers run every GSUB feature of their run, the default ones
-        // in their last stage, as HarfBuzz's do, and insert their own
-        // dotted circles.
-        let indic = crate::ot::indic::indic_config_for(seg.script)
-            .filter(|c| c.script != Script::Sinhala && seg_shaper == Shaper::Indic);
-        let shaper_ran_defaults = seg.script == Script::Khmer || indic.is_some() || use_run;
+        // state machine, and vice versa. The Indic, Khmer, Myanmar, and
+        // USE shapers run every GSUB feature of their run, the default
+        // ones in their last stage, as HarfBuzz's do, and insert their
+        // own dotted circles.
         if let Some(config) = indic {
             let run = crate::ot::indic::shaper::IndicRun {
                 gsub: gsub.as_ref(),
@@ -521,7 +539,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                 Script::Mongolian => Some(crate::ot::mongolian::assign_mongolian_forms_in_context(
                     seg_cps, context,
                 )),
-                Script::NKo => {
+                s if s.has_arabic_joining() => {
                     let types: Vec<JoiningType> =
                         seg_cps.iter().map(|&c| joining_type(c)).collect();
                     Some(assign_from_types_in_context(&types, context))
@@ -551,29 +569,21 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             };
             crate::ot::khmer::shape(&run, seg_cps, &mut seg_glyphs);
         }
-        if seg_shaper == Shaper::Myanmar {
-            crate::ot::myanmar::shape_myanmar(
-                gsub.as_ref(),
-                gdef.as_ref(),
-                seg_cps,
-                &mut seg_glyphs,
+        if myanmar {
+            let run = crate::ot::myanmar::MyanmarRun {
+                gsub: gsub.as_ref(),
+                gdef: gdef.as_ref(),
                 level,
-            );
+                features,
+                vertical: is_vertical,
+                dotted_circle: circle,
+            };
+            crate::ot::myanmar::shape(&run, seg_cps, &mut seg_glyphs);
         }
         // Thai and Lao need no pass of their own: HarfBuzz's Thai shaper
         // adds no features to the default ones, and its sara am
         // preprocessing ran with the other preprocessing above.
 
-        // A Hangul segment of a buffer the Hangul shaper shapes runs
-        // HarfBuzz's Hangul GSUB stage, default features included, with
-        // the jamo features of the preprocessing. In a buffer of
-        // another script (`Hi \u{1100}\u{1161}`), HarfBuzz shapes the
-        // jamo with that script's shaper, so they get no jamo features.
-        let hangul_jamo = jamo
-            .as_ref()
-            .filter(|_| seg.script == Script::Hangul)
-            .and_then(|j| j.get(seg.cp_range.clone()));
-        let shaper_ran_defaults = shaper_ran_defaults || hangul_jamo.is_some();
         if let Some(seg_jamo) = hangul_jamo {
             let run = crate::ot::hangul::HangulRun {
                 gsub: gsub.as_ref(),
@@ -586,9 +596,8 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
 
         if let Some(ref gsub) = gsub {
             // Arabic positional + default GSUB for this segment.
-            let seg_arabic_active = seg.script == Script::Arabic && !arabic_forms.is_empty();
-            let joiner_table = JoinerTable::for_segment(seg.script, seg_arabic_active);
-            if seg_arabic_active {
+            let joiner_table = JoinerTable::for_segment(seg_arabic);
+            if seg_arabic {
                 // ccmp and locl must run before positional features so
                 // any composition/decomposition and localized forms
                 // have settled first (HarfBuzz's Arabic shaper puts
@@ -603,35 +612,39 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                     joiner_table,
                     &mut budget,
                 );
-                // Arabic positional pass consumes only the segment's
-                // slice of the forms vector: cps/glyphs are 1:1 at
-                // this point (ccmp can rewrite ids but not lengths in
-                // practice for Arabic), so the slice aligns. The
-                // masked apply reads the mask with `get`, so a ccmp
-                // that did change the length only shifts the mask.
-                let forms_slice = arabic_forms.get(seg.cp_range.clone()).unwrap_or_default();
+                // The joining features read the actions stashed in the
+                // glyphs (see `apply_arabic_positional_features`).
                 apply_arabic_positional_features(
                     gsub,
                     &mut seg_glyphs,
                     gdef.as_ref(),
-                    forms_slice,
+                    seg.script_priority,
                     &mut budget,
                 );
+                arabic_joining::clear_actions(&mut seg_glyphs);
             }
             if !shaper_ran_defaults {
-                run_default_gsub(
-                    gsub,
-                    &mut seg_glyphs,
-                    gdef.as_ref(),
+                let rtlm: Option<Vec<bool>> = backward.then(|| {
+                    let mirrored = mirrored_mask.get(seg.cp_range.clone()).unwrap_or_default();
+                    mirrored.iter().map(|m| !m).collect()
+                });
+                let shaper = if seg_arabic {
+                    DefaultShaper::Arabic
+                } else {
+                    DefaultShaper::Plain {
+                        direction: rotate::direction_features(target_direction),
+                        rtlm: rtlm.as_deref(),
+                    }
+                };
+                let stages = DefaultGsub {
                     features,
-                    want_liga,
-                    is_vertical,
-                    seg.script_priority,
-                    early_default_features(seg_arabic_active, seg.script),
-                    joiner_table,
-                    !(is_vertical && buffer_shaper == Shaper::Hangul),
-                    &mut budget,
-                );
+                    vertical: is_vertical,
+                    script_priority: seg.script_priority,
+                    table: joiner_table,
+                    calt: !(is_vertical && buffer_shaper == Shaper::Hangul),
+                    shaper,
+                };
+                run_default_gsub(gsub, &mut seg_glyphs, gdef.as_ref(), &stages, &mut budget);
             }
         }
 
@@ -734,22 +747,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             face.hvar()?
         };
         for glyph in &mut glyphs {
-            let id = glyph.glyph_id as u16;
-            let base = i32::from(hmtx.advance(id).unwrap_or(0));
-            glyph.x_advance = if let Some(ref hvar) = hvar {
-                let delta = hvar.advance_delta(id, coords);
-                // Round-to-nearest without pulling in libm: the
-                // delta arithmetic is small, so add-0.5 / subtract-0.5
-                // suffices.
-                let rounded = if delta >= 0.0 {
-                    (delta + 0.5) as i32
-                } else {
-                    (delta - 0.5) as i32
-                };
-                base.saturating_add(rounded)
-            } else {
-                base
-            };
+            glyph.x_advance = position::font_advance(&hmtx, hvar.as_ref(), coords, glyph.glyph_id);
         }
     }
 
@@ -795,6 +793,23 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // kept or removed, as the buffer flags ask).
     let space = cmap.glyph_id(' ').map(u32::from);
     ignorables::hide(&mut glyphs, space, flags, level);
+    // The Arabic shaper's `postprocess_glyphs`: the `stch` stretch.
+    if has_stch {
+        let hvar = if font.coords().is_empty() {
+            None
+        } else {
+            face.hvar()?
+        };
+        let advance = |id: u32| position::font_advance(&hmtx, hvar.as_ref(), font.coords(), id);
+        let stretch = stch::Stretch {
+            rtl: direction == Direction::Rtl,
+            advance: &advance,
+            text,
+            level,
+            max_len: typed.len().saturating_mul(64).max(16_384),
+        };
+        stch::apply_stch(&mut glyphs, &stretch);
+    }
     glyph_flags::propagate(&mut glyphs, flags);
 
     Ok(ShapedRun { glyphs })

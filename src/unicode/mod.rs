@@ -3,10 +3,10 @@
 //! Scripts (Latin, Arabic, Hangul, ...) and general categories drive
 //! which feature list the shaper applies and how cluster boundaries
 //! are decided. The bidi class, paired bracket, general category,
-//! joining type, mirroring, and canonical normalization tables are
-//! generated from UCD snapshots (see `tests/unicode_table_gen.rs`). The
-//! others are hand-curated excerpts of the UCD that cover the scripts
-//! the shaper handles, not the full database.
+//! joining type, mirroring, Script, and canonical normalization tables
+//! are generated from UCD snapshots (see `tests/unicode_table_gen.rs`).
+//! The others are hand-curated excerpts of the UCD that cover the
+//! scripts the shaper handles, not the full database.
 
 pub mod bidi;
 pub mod bidi_brackets;
@@ -25,10 +25,22 @@ pub mod mirroring;
 #[rustfmt::skip]
 mod mirroring_table;
 pub mod normalize;
+#[rustfmt::skip]
+mod script_table;
 mod script_tags;
 
 /// Coarse script classification.
+///
+/// One bucket for each script HarfBuzz gives a shaper of its own
+/// (`hb_ot_shaper_categorize`), and a few more whose OpenType script
+/// tags fonts use (Latin, Greek, Cyrillic, Han). Every other script is
+/// [`Script::Other`].
+///
+/// The enum is `#[non_exhaustive]`: later releases add buckets
+/// without a breaking change, so a `match` outside this crate needs a
+/// wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Script {
     /// Basic Latin + supplements. Covers ASCII and Western European.
     Latin,
@@ -131,6 +143,158 @@ pub enum Script {
     /// Modi (U+11600..U+1165F). Historical script for Marathi
     /// (17th century). USE pipeline.
     Modi,
+    /// Syriac (`Syrc`). The Arabic shaper applies, with the Syriac joining forms.
+    Syriac,
+    /// Buhid (`Buhd`). USE pipeline.
+    Buhid,
+    /// Hanunoo (`Hano`). USE pipeline.
+    Hanunoo,
+    /// Tagalog (`Tglg`). USE pipeline.
+    Tagalog,
+    /// Tagbanwa (`Tagb`). USE pipeline.
+    Tagbanwa,
+    /// Tai Le (`Tale`). USE pipeline.
+    TaiLe,
+    /// Kharoshthi (`Khar`). USE pipeline.
+    Kharoshthi,
+    /// Syloti Nagri (`Sylo`). USE pipeline.
+    SylotiNagri,
+    /// Tifinagh (`Tfng`). USE pipeline.
+    Tifinagh,
+    /// Phags Pa (`Phag`). USE pipeline, with Arabic-style joining forms.
+    PhagsPa,
+    /// Kayah Li (`Kali`). USE pipeline.
+    KayahLi,
+    /// Rejang (`Rjng`). USE pipeline.
+    Rejang,
+    /// Saurashtra (`Saur`). USE pipeline.
+    Saurashtra,
+    /// Egyptian Hieroglyphs (`Egyp`). USE pipeline.
+    EgyptianHieroglyphs,
+    /// Javanese (`Java`). USE pipeline.
+    Javanese,
+    /// Kaithi (`Kthi`). USE pipeline.
+    Kaithi,
+    /// Meetei Mayek (`Mtei`). USE pipeline.
+    MeeteiMayek,
+    /// Tai Viet (`Tavt`). USE pipeline.
+    TaiViet,
+    /// Batak (`Batk`). USE pipeline.
+    Batak,
+    /// Mandaic (`Mand`). USE pipeline, with Arabic-style joining forms.
+    Mandaic,
+    /// Chakma (`Cakm`). USE pipeline.
+    Chakma,
+    /// Miao (`Plrd`). USE pipeline.
+    Miao,
+    /// Takri (`Takr`). USE pipeline.
+    Takri,
+    /// Duployan (`Dupl`). USE pipeline.
+    Duployan,
+    /// Grantha (`Gran`). USE pipeline.
+    Grantha,
+    /// Khudawadi (`Sind`). USE pipeline.
+    Khudawadi,
+    /// Mahajani (`Mahj`). USE pipeline.
+    Mahajani,
+    /// Manichaean (`Mani`). USE pipeline, with Arabic-style joining forms.
+    Manichaean,
+    /// Pahawh Hmong (`Hmng`). USE pipeline.
+    PahawhHmong,
+    /// Psalter Pahlavi (`Phlp`). USE pipeline, with Arabic-style joining forms.
+    PsalterPahlavi,
+    /// Siddham (`Sidd`). USE pipeline.
+    Siddham,
+    /// Ahom (`Ahom`). USE pipeline.
+    Ahom,
+    /// Multani (`Mult`). USE pipeline.
+    Multani,
+    /// Adlam (`Adlm`). USE pipeline, with Arabic-style joining forms.
+    Adlam,
+    /// Bhaiksuki (`Bhks`). USE pipeline.
+    Bhaiksuki,
+    /// Marchen (`Marc`). USE pipeline.
+    Marchen,
+    /// Newa (`Newa`). USE pipeline.
+    Newa,
+    /// Masaram Gondi (`Gonm`). USE pipeline.
+    MasaramGondi,
+    /// Soyombo (`Soyo`). USE pipeline.
+    Soyombo,
+    /// Zanabazar Square (`Zanb`). USE pipeline.
+    ZanabazarSquare,
+    /// Dogra (`Dogr`). USE pipeline.
+    Dogra,
+    /// Gunjala Gondi (`Gong`). USE pipeline.
+    GunjalaGondi,
+    /// Hanifi Rohingya (`Rohg`). USE pipeline, with Arabic-style joining forms.
+    HanifiRohingya,
+    /// Makasar (`Maka`). USE pipeline.
+    Makasar,
+    /// Medefaidrin (`Medf`). USE pipeline.
+    Medefaidrin,
+    /// Old Sogdian (`Sogo`). USE pipeline.
+    OldSogdian,
+    /// Sogdian (`Sogd`). USE pipeline, with Arabic-style joining forms.
+    Sogdian,
+    /// Elymaic (`Elym`). USE pipeline.
+    Elymaic,
+    /// Nandinagari (`Nand`). USE pipeline.
+    Nandinagari,
+    /// Nyiakeng Puachue Hmong (`Hmnp`). USE pipeline.
+    NyiakengPuachueHmong,
+    /// Wancho (`Wcho`). USE pipeline.
+    Wancho,
+    /// Chorasmian (`Chrs`). USE pipeline, with Arabic-style joining forms.
+    Chorasmian,
+    /// Dives Akuru (`Diak`). USE pipeline.
+    DivesAkuru,
+    /// Khitan Small Script (`Kits`). USE pipeline.
+    KhitanSmallScript,
+    /// Yezidi (`Yezi`). USE pipeline.
+    Yezidi,
+    /// Cypro Minoan (`Cpmn`). USE pipeline.
+    CyproMinoan,
+    /// Old Uyghur (`Ougr`). USE pipeline, with Arabic-style joining forms.
+    OldUyghur,
+    /// Tangsa (`Tnsa`). USE pipeline.
+    Tangsa,
+    /// Toto (`Toto`). USE pipeline.
+    Toto,
+    /// Vithkuqi (`Vith`). USE pipeline.
+    Vithkuqi,
+    /// Kawi (`Kawi`). USE pipeline.
+    Kawi,
+    /// Nag Mundari (`Nagm`). USE pipeline.
+    NagMundari,
+    /// Garay (`Gara`). USE pipeline.
+    Garay,
+    /// Gurung Khema (`Gukh`). USE pipeline.
+    GurungKhema,
+    /// Kirat Rai (`Krai`). USE pipeline.
+    KiratRai,
+    /// Ol Onal (`Onao`). USE pipeline.
+    OlOnal,
+    /// Sunuwar (`Sunu`). USE pipeline.
+    Sunuwar,
+    /// Todhri (`Todr`). USE pipeline.
+    Todhri,
+    /// Tulu Tigalari (`Tutg`). USE pipeline.
+    TuluTigalari,
+    /// Beria Erfe (`Berf`). USE pipeline.
+    BeriaErfe,
+    /// Sidetic (`Sidt`). USE pipeline.
+    Sidetic,
+    /// Tai Yo (`Tayo`). USE pipeline.
+    TaiYo,
+    /// Tolong Siki (`Tols`). USE pipeline.
+    TolongSiki,
+    /// Jurchen (`Jurc`). USE pipeline.
+    Jurchen,
+    /// Proto Cuneiform (`Pcun`). USE pipeline.
+    ProtoCuneiform,
+    /// Seal (`Seal`). USE pipeline.
+    Seal,
     /// Anything else: returned when sigilbuzz has no specialized
     /// table for the codepoint's script.
     Other,
@@ -161,11 +325,22 @@ impl Script {
     /// Returns `true` if the script routes through the Universal
     /// Shaping Engine, as in HarfBuzz (`hb_ot_shaper_categorize`):
     /// Sinhala, Tibetan, Mongolian, N'Ko, the Brahmic SE-Asian / South
-    /// Asian set (Buginese, Tai Tham, Balinese, Sundanese, Lepcha,
-    /// Limbu, Cham), and the Brahmi-family historical scripts. A font
-    /// whose GSUB has lookups for such a script only under `DFLT` or
-    /// `latn` gets the default shaper instead. Khmer, Myanmar, Thai,
-    /// Lao, and Hangul have shapers of their own.
+    /// Asian set (Buginese, Tai Tham, Balinese, Javanese, ...), the
+    /// Brahmi-family historical scripts (Brahmi, Kaithi, Takri, ...),
+    /// and the joining scripts other than Arabic and Syriac (Adlam,
+    /// Mandaic, Sogdian, ...). A font whose GSUB has lookups for such a
+    /// script only under `DFLT` or `latn` gets the default shaper
+    /// instead. Khmer, Myanmar, Thai, Lao, and Hangul have shapers of
+    /// their own, and Syriac takes the Arabic shaper.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::UnicodeScript;
+    ///
+    /// assert!(UnicodeScript::Javanese.is_use());
+    /// assert!(!UnicodeScript::Syriac.is_use());
+    /// ```
     #[must_use]
     pub const fn is_use(self) -> bool {
         matches!(
@@ -186,16 +361,127 @@ impl Script {
                 | Script::Khojki
                 | Script::Tirhuta
                 | Script::Modi
+                | Script::Buhid
+                | Script::Hanunoo
+                | Script::Tagalog
+                | Script::Tagbanwa
+                | Script::TaiLe
+                | Script::Kharoshthi
+                | Script::SylotiNagri
+                | Script::Tifinagh
+                | Script::PhagsPa
+                | Script::KayahLi
+                | Script::Rejang
+                | Script::Saurashtra
+                | Script::EgyptianHieroglyphs
+                | Script::Javanese
+                | Script::Kaithi
+                | Script::MeeteiMayek
+                | Script::TaiViet
+                | Script::Batak
+                | Script::Mandaic
+                | Script::Chakma
+                | Script::Miao
+                | Script::Takri
+                | Script::Duployan
+                | Script::Grantha
+                | Script::Khudawadi
+                | Script::Mahajani
+                | Script::Manichaean
+                | Script::PahawhHmong
+                | Script::PsalterPahlavi
+                | Script::Siddham
+                | Script::Ahom
+                | Script::Multani
+                | Script::Adlam
+                | Script::Bhaiksuki
+                | Script::Marchen
+                | Script::Newa
+                | Script::MasaramGondi
+                | Script::Soyombo
+                | Script::ZanabazarSquare
+                | Script::Dogra
+                | Script::GunjalaGondi
+                | Script::HanifiRohingya
+                | Script::Makasar
+                | Script::Medefaidrin
+                | Script::OldSogdian
+                | Script::Sogdian
+                | Script::Elymaic
+                | Script::Nandinagari
+                | Script::NyiakengPuachueHmong
+                | Script::Wancho
+                | Script::Chorasmian
+                | Script::DivesAkuru
+                | Script::KhitanSmallScript
+                | Script::Yezidi
+                | Script::CyproMinoan
+                | Script::OldUyghur
+                | Script::Tangsa
+                | Script::Toto
+                | Script::Vithkuqi
+                | Script::Kawi
+                | Script::NagMundari
+                | Script::Garay
+                | Script::GurungKhema
+                | Script::KiratRai
+                | Script::OlOnal
+                | Script::Sunuwar
+                | Script::Todhri
+                | Script::TuluTigalari
+                | Script::BeriaErfe
+                | Script::Sidetic
+                | Script::TaiYo
+                | Script::TolongSiki
+                | Script::Jurchen
+                | Script::ProtoCuneiform
+                | Script::Seal
+        )
+    }
+
+    /// True for the scripts whose letters join like Arabic, which
+    /// HarfBuzz's Arabic and Universal Shaping Engine shapers give
+    /// joining forms (`has_arabic_joining` in
+    /// `hb-ot-shaper-arabic-joining-list.hh`).
+    pub(crate) const fn has_arabic_joining(self) -> bool {
+        matches!(
+            self,
+            Script::Adlam
+                | Script::Arabic
+                | Script::Chorasmian
+                | Script::HanifiRohingya
+                | Script::Mandaic
+                | Script::Manichaean
+                | Script::Mongolian
+                | Script::NKo
+                | Script::OldUyghur
+                | Script::PhagsPa
+                | Script::PsalterPahlavi
+                | Script::Sogdian
+                | Script::Syriac
         )
     }
 }
 
 /// Returns the script bucket for a character.
 ///
-/// This is a sparse classifier: only the codepoints
-/// sigilbuzz knows how to shape differently are listed. The
-/// fallthrough is [`Script::Other`], which the shaper treats with the
-/// generic path.
+/// The older buckets (Latin through Modi, in declaration order) cover
+/// the Unicode blocks of their scripts, so the Common and Inherited
+/// characters inside those blocks land in them too. The buckets added
+/// in 0.22.0 (Syriac through Seal) take the code points the Unicode
+/// Script property gives their script (`Scripts.txt` of Unicode
+/// 18.0.0, the version HarfBuzz 14.5.0 uses). The fallthrough is
+/// [`Script::Other`], which the shaper treats with the generic path.
+///
+/// # Examples
+///
+/// ```
+/// use sigilbuzz::{script_of, UnicodeScript};
+///
+/// assert_eq!(script_of('\u{A98F}'), UnicodeScript::Javanese);
+/// assert_eq!(script_of('\u{0712}'), UnicodeScript::Syriac);
+/// assert_eq!(script_of('\u{0531}'), UnicodeScript::Other);
+/// ```
 #[must_use]
 pub const fn script_of(ch: char) -> Script {
     let cp = ch as u32;
@@ -293,8 +579,67 @@ pub const fn script_of(ch: char) -> Script {
         0x1800..=0x18AF => Script::Mongolian,
         // CJK unified ideographs + extensions A/B + Hiragana + Katakana
         0x3040..=0x309F | 0x30A0..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF => Script::Han,
-        _ => Script::Other,
+        _ => {
+            let index = script_index(cp) as usize;
+            if index < script_table::BUCKETS.len() {
+                script_table::BUCKETS[index]
+            } else {
+                Script::Other
+            }
+        }
     }
+}
+
+/// The index in `script_table::SCRIPT_TAGS` of the Unicode Script
+/// property of code point `cp`: a binary search of the generated
+/// ranges, `UNKNOWN` for a code point they do not list.
+const fn script_index(cp: u32) -> u8 {
+    let ranges = script_table::SCRIPT_RANGES;
+    let (mut lo, mut hi) = (0, ranges.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let (start, end, script) = ranges[mid];
+        if end < cp {
+            lo = mid + 1;
+        } else if start > cp {
+            hi = mid;
+        } else {
+            return script;
+        }
+    }
+    script_table::UNKNOWN
+}
+
+/// The Unicode Script property of `ch` as an ISO 15924 code: `Zyyy`
+/// for Common, `Zinh` for Inherited, and `Zzzz` for unassigned code
+/// points. This is what HarfBuzz's `hb_unicode_script` returns, from
+/// the same Unicode version (18.0.0). [`script_of`] gives the coarser
+/// shaping bucket.
+///
+/// # Examples
+///
+/// ```
+/// use sigilbuzz::unicode::script_code;
+///
+/// assert_eq!(script_code('a'), *b"Latn");
+/// assert_eq!(script_code('\u{0640}'), *b"Zyyy");
+/// assert_eq!(script_code('\u{0301}'), *b"Zinh");
+/// assert_eq!(script_code('\u{0378}'), *b"Zzzz");
+/// ```
+#[must_use]
+pub fn script_code(ch: char) -> [u8; 4] {
+    script_table::SCRIPT_TAGS
+        .get(usize::from(script_index(u32::from(ch))))
+        .copied()
+        .unwrap_or(*b"Zzzz")
+}
+
+/// True when the Unicode Script property of `ch` is Common or
+/// Inherited, so the character takes the script of the text around it
+/// (HarfBuzz's `hb_buffer_guess_segment_properties` skips them).
+pub(crate) const fn is_common_or_inherited_script(ch: char) -> bool {
+    let index = script_index(ch as u32);
+    index == script_table::COMMON || index == script_table::INHERITED
 }
 
 /// Returns `true` if the codepoint is a Hangul Jamo (Leading / Vowel /
@@ -348,226 +693,35 @@ pub(crate) const fn is_scriptless_default_ignorable(ch: char) -> bool {
     is_default_ignorable(ch) && !matches!(ch as u32, 0x17B4..=0x17B5 | 0x180B..=0x180D | 0x180F)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn classifies_latin_ascii() {
-        assert_eq!(script_of('A'), Script::Latin);
-        assert_eq!(script_of('z'), Script::Latin);
-        assert_eq!(script_of('0'), Script::Latin);
-    }
-
-    #[test]
-    fn classifies_cjk_ideographs() {
-        assert_eq!(script_of('字'), Script::Han);
-        assert_eq!(script_of('あ'), Script::Han); // Hiragana
-        assert_eq!(script_of('カ'), Script::Han); // Katakana
-    }
-
-    #[test]
-    fn classifies_arabic() {
-        assert_eq!(script_of('ا'), Script::Arabic);
-        assert_eq!(script_of('ل'), Script::Arabic);
-    }
-
-    #[test]
-    fn classifies_hebrew() {
-        // Main block: alef, lamed, final-mem, sheva, cantillation
-        // etnahta.
-        assert_eq!(script_of('\u{05D0}'), Script::Hebrew);
-        assert_eq!(script_of('\u{05DC}'), Script::Hebrew);
-        assert_eq!(script_of('\u{05DD}'), Script::Hebrew);
-        assert_eq!(script_of('\u{05B0}'), Script::Hebrew);
-        assert_eq!(script_of('\u{0591}'), Script::Hebrew);
-        // Presentation forms: alef with patah, shin with dot,
-        // lam+alef equivalent position.
-        assert_eq!(script_of('\u{FB2E}'), Script::Hebrew);
-        assert_eq!(script_of('\u{FB2A}'), Script::Hebrew);
-        // Boundary: U+FB50 is Arabic presentation forms, not Hebrew.
-        assert_eq!(script_of('\u{FB50}'), Script::Arabic);
-    }
-
-    #[test]
-    fn classifies_greek_and_cyrillic() {
-        assert_eq!(script_of('Δ'), Script::Greek);
-        assert_eq!(script_of('Д'), Script::Cyrillic);
-    }
-
-    #[test]
-    fn classifies_devanagari() {
-        // क (U+0915) and vowel sign I (U+093F).
-        assert_eq!(script_of('\u{0915}'), Script::Devanagari);
-        assert_eq!(script_of('\u{093F}'), Script::Devanagari);
-    }
-
-    #[test]
-    fn classifies_indic_family() {
-        assert_eq!(script_of('\u{09B0}'), Script::Bengali); // Bengali RA
-        assert_eq!(script_of('\u{0A30}'), Script::Gurmukhi); // Gurmukhi RA
-        assert_eq!(script_of('\u{0AB0}'), Script::Gujarati); // Gujarati RA
-        assert_eq!(script_of('\u{0B30}'), Script::Oriya); // Oriya RA
-        assert_eq!(script_of('\u{0BB0}'), Script::Tamil); // Tamil RA
-        assert_eq!(script_of('\u{0C30}'), Script::Telugu); // Telugu RA
-        assert_eq!(script_of('\u{0CB0}'), Script::Kannada); // Kannada RA
-        assert_eq!(script_of('\u{0D30}'), Script::Malayalam); // Malayalam RA
-        assert_eq!(script_of('\u{0DB1}'), Script::Sinhala); // Sinhala NA
-    }
-
-    #[test]
-    fn is_indic_covers_full_family() {
-        assert!(Script::Devanagari.is_indic());
-        assert!(Script::Bengali.is_indic());
-        assert!(Script::Gurmukhi.is_indic());
-        assert!(Script::Gujarati.is_indic());
-        assert!(Script::Oriya.is_indic());
-        assert!(Script::Tamil.is_indic());
-        assert!(Script::Telugu.is_indic());
-        assert!(Script::Kannada.is_indic());
-        assert!(Script::Malayalam.is_indic());
-        // HarfBuzz shapes Sinhala with the Universal Shaping Engine.
-        assert!(!Script::Sinhala.is_indic());
-        assert!(!Script::Latin.is_indic());
-        assert!(!Script::Arabic.is_indic());
-        assert!(!Script::Other.is_indic());
-    }
-
-    #[test]
-    fn unknown_scripts_fall_through_to_other() {
-        // Armenian: not in the bootstrap table.
-        assert_eq!(script_of('\u{0531}'), Script::Other);
-    }
-
-    #[test]
-    fn classifies_khmer() {
-        // ក U+1780 (consonant ka), ៊ U+17CA (register shifter),
-        // ៛ U+17DB (currency riel), and a Khmer Symbols sign
-        // U+19E0 sit in the Khmer bucket.
-        assert_eq!(script_of('\u{1780}'), Script::Khmer);
-        assert_eq!(script_of('\u{17CA}'), Script::Khmer);
-        assert_eq!(script_of('\u{17DB}'), Script::Khmer);
-        assert_eq!(script_of('\u{19E0}'), Script::Khmer);
-    }
-
-    #[test]
-    fn classifies_myanmar() {
-        // ကာ: U+1000 (consonant ka) + U+102C (sign aa).
-        assert_eq!(script_of('\u{1000}'), Script::Myanmar);
-        assert_eq!(script_of('\u{102C}'), Script::Myanmar);
-        // Myanmar Extended-A (e.g. Shan sign maun).
-        assert_eq!(script_of('\u{AA60}'), Script::Myanmar);
-        // Myanmar Extended-B.
-        assert_eq!(script_of('\u{A9E0}'), Script::Myanmar);
-    }
-
-    #[test]
-    fn classifies_thai() {
-        // ก U+0E01 (consonant ko kai), ั U+0E31 (mai han-akat).
-        assert_eq!(script_of('\u{0E01}'), Script::Thai);
-        assert_eq!(script_of('\u{0E31}'), Script::Thai);
-        // Block end: Thai digits.
-        assert_eq!(script_of('\u{0E50}'), Script::Thai);
-    }
-
-    #[test]
-    fn classifies_lao() {
-        // ກ U+0E81 (consonant ko), ັ U+0EB1 (mai kan).
-        assert_eq!(script_of('\u{0E81}'), Script::Lao);
-        assert_eq!(script_of('\u{0EB1}'), Script::Lao);
-    }
-
-    #[test]
-    fn classifies_hangul() {
-        // Jamo: leading ᄀ (U+1100), vowel ᅡ (U+1161), trailing ᆨ
-        // (U+11A8). Precomposed 가 (U+AC00) also in the Hangul
-        // bucket: `is_hangul_jamo` separates the USE-routed subset.
-        assert_eq!(script_of('\u{1100}'), Script::Hangul);
-        assert_eq!(script_of('\u{1161}'), Script::Hangul);
-        assert_eq!(script_of('\u{11A8}'), Script::Hangul);
-        assert_eq!(script_of('\u{AC00}'), Script::Hangul);
-        assert_eq!(script_of('\u{A960}'), Script::Hangul);
-        assert_eq!(script_of('\u{D7B0}'), Script::Hangul);
-    }
-
-    #[test]
-    fn hangul_jamo_predicate_only_matches_jamo_blocks() {
-        assert!(is_hangul_jamo('\u{1100}'));
-        assert!(is_hangul_jamo('\u{11A8}'));
-        assert!(is_hangul_jamo('\u{A960}'));
-        assert!(is_hangul_jamo('\u{D7B0}'));
-        // Precomposed syllables are NOT jamo.
-        assert!(!is_hangul_jamo('\u{AC00}'));
-        // Compatibility jamo are NOT the USE-routed block.
-        assert!(!is_hangul_jamo('\u{3131}'));
-    }
-
-    #[test]
-    fn is_use_covers_all_use_scripts() {
-        // The scripts HarfBuzz gives the Universal Shaping Engine.
-        assert!(Script::Sinhala.is_use());
-        assert!(Script::Tibetan.is_use());
-        assert!(Script::Mongolian.is_use());
-        assert!(Script::NKo.is_use());
-        assert!(Script::Buginese.is_use());
-        assert!(Script::TaiTham.is_use());
-        assert!(Script::Balinese.is_use());
-        assert!(Script::Sundanese.is_use());
-        assert!(Script::Lepcha.is_use());
-        assert!(Script::Limbu.is_use());
-        assert!(Script::Cham.is_use());
-        assert!(Script::Brahmi.is_use());
-        assert!(Script::Sharada.is_use());
-        assert!(Script::Khojki.is_use());
-        assert!(Script::Tirhuta.is_use());
-        assert!(Script::Modi.is_use());
-        assert!(!Script::Latin.is_use());
-        assert!(!Script::Devanagari.is_use());
-        // These have shapers of their own.
-        for script in [
-            Script::Khmer,
-            Script::Myanmar,
-            Script::Thai,
-            Script::Lao,
-            Script::Hangul,
-        ] {
-            assert!(!script.is_use(), "{script:?}");
-        }
-    }
-
-    #[test]
-    fn classifies_brahmi_family_smp_scripts() {
-        // Brahmi (U+11000..U+1107F).
-        assert_eq!(script_of('\u{11000}'), Script::Brahmi); // candrabindu
-        assert_eq!(script_of('\u{11015}'), Script::Brahmi); // letter ka
-        assert_eq!(script_of('\u{1107F}'), Script::Brahmi); // block end
-                                                            // Sharada (U+11180..U+111DF).
-        assert_eq!(script_of('\u{11180}'), Script::Sharada);
-        assert_eq!(script_of('\u{11192}'), Script::Sharada); // letter ka
-        assert_eq!(script_of('\u{111DF}'), Script::Sharada);
-        // Khojki (U+11200..U+1124F).
-        assert_eq!(script_of('\u{11200}'), Script::Khojki); // letter a
-        assert_eq!(script_of('\u{11208}'), Script::Khojki); // letter ka
-                                                            // Tirhuta (U+11480..U+114DF).
-        assert_eq!(script_of('\u{11480}'), Script::Tirhuta); // letter a
-        assert_eq!(script_of('\u{1148A}'), Script::Tirhuta); // letter ka
-                                                             // Modi (U+11600..U+1165F).
-        assert_eq!(script_of('\u{11600}'), Script::Modi); // letter a
-        assert_eq!(script_of('\u{11606}'), Script::Modi); // letter ka
-    }
-
-    #[test]
-    fn classifies_added_use_scripts() {
-        assert_eq!(script_of('\u{07CA}'), Script::NKo); // letter ba
-        assert_eq!(script_of('\u{1A00}'), Script::Buginese); // letter ka
-        assert_eq!(script_of('\u{1A20}'), Script::TaiTham); // letter high ka
-        assert_eq!(script_of('\u{1B00}'), Script::Balinese);
-        assert_eq!(script_of('\u{1B83}'), Script::Sundanese); // letter a
-        assert_eq!(script_of('\u{1C00}'), Script::Lepcha); // letter ka
-        assert_eq!(script_of('\u{1900}'), Script::Limbu); // vowel-carrier
-        assert_eq!(script_of('\u{AA00}'), Script::Cham); // letter a
-                                                         // Block boundaries.
-        assert_eq!(script_of('\u{AA5F}'), Script::Cham);
-        assert_eq!(script_of('\u{AA60}'), Script::Myanmar);
-    }
+/// True for the characters that take the script of the text around
+/// them when text splits into script runs, as HarfBuzz's buffer takes
+/// the script of its first character that is not `COMMON` or
+/// `INHERITED`: every character the Unicode Script property gives
+/// Common or Inherited (the tatweel, the dandas, combining marks,
+/// punctuation), and the default ignorables of no script of their own
+/// (unassigned ones included), which GSUB and GPOS match across.
+/// Without these, `"e\u{0301}"` would split into two runs and break
+/// `ccmp` and any GSUB context across the mark.
+///
+/// The blocks sigilbuzz listed by hand before it read the Script
+/// property stay in: ASCII and Latin-1 punctuation and symbols (with
+/// the ordinal indicators U+00AA and U+00BA), the combining mark
+/// blocks, and U+25CC.
+pub(crate) const fn is_common_or_inherited(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x0000..=0x0040
+            | 0x005B..=0x0060
+            | 0x007B..=0x007F
+            | 0x00A0..=0x00BF
+            | 0x0300..=0x036F
+            | 0x1DC0..=0x1DFF
+            | 0x20D0..=0x20FF
+            | 0xFE20..=0xFE2F
+            | 0x25CC
+    ) || is_common_or_inherited_script(ch)
+        || is_scriptless_default_ignorable(ch)
 }
+
+#[cfg(test)]
+mod tests;

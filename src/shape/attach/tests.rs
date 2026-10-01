@@ -339,8 +339,11 @@ fn intermediate_glyph_advances_are_compensated_both_ways() {
 }
 
 #[test]
-fn mark_follows_a_displaced_parent() {
-    // A kerning placement on the base moves its mark too.
+fn mark_follows_a_displaced_parent_along_the_line_only() {
+    // A kerning placement on the base moves its mark along the line.
+    // The base's cross-stream offset reached the mark when it attached
+    // (HarfBuzz's `resolve_cross_offset`), so the resolve pass leaves
+    // the mark's y alone.
     for (dir, expect) in [
         (Direction::Ltr, -20 + 100 - 500),
         (Direction::Rtl, -20 + 100),
@@ -352,14 +355,16 @@ fn mark_follows_a_displaced_parent() {
         let mut slots = vec![Slot::default(), mark_slot(-1)];
         resolve_attachments(&mut glyphs, &mut slots, dir);
         assert_eq!(glyphs[1].x_offset, expect, "{dir:?}");
-        assert_eq!(glyphs[1].y_offset, 7, "{dir:?}");
+        assert_eq!(glyphs[1].y_offset, 0, "{dir:?}");
     }
 }
 
 #[test]
 fn stacked_marks_resolve_parents_first_in_any_order() {
-    // base <- m1 <- m2. m2's resolved offset includes m1's resolved
-    // offset, whichever order the chain is discovered in.
+    // m2 attaches to m1, which attaches to the base. m2's resolved x
+    // includes m1's resolved x, whichever order the chain is
+    // discovered in. The y offsets stay as the marks attached with
+    // them.
     let build = || {
         let mut g = vec![glyph(1, 500), glyph(2, 0), glyph(3, 0)];
         g[1].x_offset = 100;
@@ -371,13 +376,80 @@ fn stacked_marks_resolve_parents_first_in_any_order() {
     let mut glyphs = build();
     let mut slots = vec![Slot::default(), mark_slot(-1), mark_slot(-1)];
     resolve_attachments(&mut glyphs, &mut slots, Direction::Ltr);
-    assert_eq!(offsets(&glyphs), vec![(0, 0), (-400, 400), (-395, 600)]);
+    assert_eq!(offsets(&glyphs), vec![(0, 0), (-400, 400), (-395, 200)]);
 
     let mut glyphs = build();
     let mut slots = vec![Slot::default(), mark_slot(-1), mark_slot(-1)];
     resolve_attachments(&mut glyphs, &mut slots, Direction::Rtl);
-    assert_eq!(offsets(&glyphs), vec![(0, 0), (100, 400), (105, 600)]);
+    assert_eq!(offsets(&glyphs), vec![(0, 0), (100, 400), (105, 200)]);
     assert!(slots.iter().all(|s| s.chain == 0), "every link consumed");
+}
+
+#[test]
+fn a_mark_attaches_with_the_cross_offset_of_its_base_chain() {
+    // 0 hangs from 1 by a cursive link, both already raised. The mark
+    // on 0 adds the y offsets of 0 and 1 to its anchor delta.
+    let bytes = mark_attach_subtable(2, &anchor1(0, 0), 1, &anchor1(100, 500));
+    let subs = [AttachSubtable::parse(gpos_lt::MARK_TO_BASE, &bytes).unwrap()];
+    let gdef_raw = gdef_bytes(&[2], &[]);
+    let gdef = Gdef::parse(&gdef_raw).unwrap();
+    let var = VarCtx::none();
+    let cx = lookup_cx(MatchFilter::for_lookup(0, Some(&gdef), None), true, &var);
+    for (dir, expect) in [(Direction::Ltr, (100, 530)), (Direction::Ttb, (130, 500))] {
+        let mut glyphs = vec![glyph(1, 600), glyph(2, 0), glyph(1, 600)];
+        glyphs[0].y_offset = 10;
+        glyphs[0].x_offset = 10;
+        glyphs[2].y_offset = 20;
+        glyphs[2].x_offset = 20;
+        let mut slots = vec![cursive_slot(2), Slot::default(), Slot::default()];
+        let mut att = Attach::new(dir, &mut slots, NO_FLAGS);
+        apply_lookup(&subs, &mut glyphs, &mut att, &cx);
+        assert_eq!(offsets(&glyphs)[1], expect, "{dir:?}");
+    }
+}
+
+#[test]
+fn the_cross_offset_walks_stop_when_their_budget_is_spent() {
+    // Every glyph hangs from the next one and sits 1 unit up.
+    let mut glyphs: Vec<Glyph> = (0..40).map(|i| glyph(i, 100)).collect();
+    let mut slots = new_slots(40);
+    for i in 0..39 {
+        glyphs[i].y_offset = 1;
+        slots[i] = cursive_slot(1);
+    }
+    let mut att = Attach::new(Direction::Ltr, &mut slots, NO_FLAGS);
+    assert_eq!(resolve_cross_offset(&glyphs, &mut att, 0), 39);
+    att.cross_steps_left = 10;
+    assert_eq!(resolve_cross_offset(&glyphs, &mut att, 0), 11);
+    assert_eq!(resolve_cross_offset(&glyphs, &mut att, 0), 1);
+}
+
+#[test]
+fn walks_start_at_the_end_of_backward_runs_and_stop_after_64_links() {
+    // 100 glyphs, each hanging from the next one and 1 unit up. A
+    // forward run resolves from glyph 0: that walk stops after 64
+    // links, so glyph 64 keeps its own offset and glyph 65 starts a
+    // new walk. A backward run resolves from the end, one link at a
+    // time.
+    let build = || {
+        let mut glyphs: Vec<Glyph> = (0..100).map(|i| glyph(i, 100)).collect();
+        let mut slots = new_slots(100);
+        for i in 0..99 {
+            glyphs[i].y_offset = 1;
+            slots[i] = cursive_slot(1);
+        }
+        (glyphs, slots)
+    };
+    let (mut glyphs, mut slots) = build();
+    resolve_attachments(&mut glyphs, &mut slots, Direction::Ltr);
+    let y = |g: &[Glyph], i: usize| g[i].y_offset;
+    assert_eq!(
+        [0, 63, 64, 65, 98, 99].map(|i| y(&glyphs, i)),
+        [65, 2, 1, 34, 1, 0]
+    );
+    let (mut glyphs, mut slots) = build();
+    resolve_attachments(&mut glyphs, &mut slots, Direction::Rtl);
+    assert_eq!([0, 64, 98, 99].map(|i| y(&glyphs, i)), [99, 35, 1, 0]);
 }
 
 #[test]

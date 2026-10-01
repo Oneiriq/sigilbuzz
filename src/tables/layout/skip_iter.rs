@@ -511,6 +511,11 @@ pub enum LayoutTable {
     Gpos,
 }
 
+/// How many subtables of a lookup HarfBuzz gives a cache, the first
+/// ones (`hb_accelerate_subtables_context_t::dispatch`). See
+/// [`MatchContext::with_rule_set_digests`].
+pub(crate) const SUBTABLE_CACHES: usize = 8;
+
 /// Everything one lookup's matching depends on: its flags, its table,
 /// its feature's joiner handling, and whether its feature matches
 /// within one syllable. Hands out the [`SkipRules`] for input and for
@@ -521,6 +526,7 @@ pub struct MatchContext<'a> {
     table: LayoutTable,
     joiners: Joiners,
     per_syllable: bool,
+    rule_set_digests: bool,
 }
 
 impl<'a> MatchContext<'a> {
@@ -532,7 +538,26 @@ impl<'a> MatchContext<'a> {
             table,
             joiners,
             per_syllable: false,
+            rule_set_digests: true,
         }
+    }
+
+    /// The same context for one subtable of the lookup: `digests` is
+    /// false past the first [`SUBTABLE_CACHES`] subtables. HarfBuzz
+    /// gives only those a cache (`hb_accelerate_subtables_context_t`
+    /// in `hb-ot-layout-gsubgpos.hh`), and a class-based context rule
+    /// set checks its digest of first input classes only with one.
+    pub(crate) const fn with_rule_set_digests(self, digests: bool) -> Self {
+        Self {
+            rule_set_digests: digests,
+            ..self
+        }
+    }
+
+    /// True when a class-based context rule set checks its digest of
+    /// first input classes (see [`Self::with_rule_set_digests`]).
+    pub(crate) const fn rule_set_digests(&self) -> bool {
+        self.rule_set_digests
     }
 
     /// The same context for a feature HarfBuzz registers with

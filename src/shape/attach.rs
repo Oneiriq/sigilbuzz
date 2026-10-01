@@ -12,24 +12,30 @@
 //!    cursive chains) and a [`Slot`] recording what it hangs from: the
 //!    attachment kind plus a relative link to the parent glyph. Cursive
 //!    attachment also adjusts advances along the main direction right
-//!    away, because those are direction-specific but local.
+//!    away, because those are direction-specific but local. A mark
+//!    also adds the cross-stream offset its parent has at that moment,
+//!    summed over the parent's cursive chain (HarfBuzz's
+//!    `resolve_cross_offset`).
 //! 2. **Resolve.** After every positioning pass (GPOS, legacy `kern`,
 //!    `kerx`) and the late mark-width zeroing, [`resolve_attachments`]
 //!    walks each chain from its root and turns the raw deltas into pen
-//!    relative offsets: a child inherits its parent's resolved offset
-//!    and, for marks, compensates for the advances between parent and
-//!    child. That compensation is where direction matters. Forward runs
-//!    (LTR, TTB) subtract the advances of `parent..child`; backward runs
-//!    (RTL, BTT) are still in logical order at that point and will be
-//!    reversed afterwards, so they add the advances of
-//!    `parent+1..=child` instead.
+//!    relative offsets: a cursive child inherits its parent's resolved
+//!    cross-stream offset, and a mark inherits its parent's resolved
+//!    main-direction offset and compensates for the advances between
+//!    parent and child. That compensation is where direction matters.
+//!    Forward runs (LTR, TTB) subtract the advances of
+//!    `parent..child`. Backward runs (RTL, BTT) are still in logical
+//!    order at that point and will be reversed afterwards, so they add
+//!    the advances of `parent+1..=child` instead.
 //!
 //! Resolving once at the end, with final advances, is what makes the
 //! result correct in both directions no matter which positioning ran
 //! after the attachment lookup: a kern adjustment or a zeroed mark
 //! advance between a base and its mark is always accounted for, and a
-//! mark follows its base when the base itself moves (kerning
-//! placement, cursive chains).
+//! mark follows its base along the line when the base itself moves.
+//! Across the line a mark keeps the position it got when it attached,
+//! as in HarfBuzz 14.5.0, so a later lookup that raises or lowers the
+//! base leaves the mark where it was.
 
 use alloc::vec::Vec;
 
@@ -78,16 +84,28 @@ pub(super) struct Attach<'s> {
     base_cache: BaseCache,
     /// The shaping call's glyph flag settings.
     pub(super) flags: FlagCx,
+    /// Cursive links the cross-stream offset walks of mark attachment
+    /// may still follow (see [`resolve_cross_offset`]).
+    cross_steps_left: usize,
 }
 
 impl<'s> Attach<'s> {
     /// Scratch for a run in `direction` with one slot per glyph.
     pub(super) fn new(direction: Direction, slots: &'s mut [Slot], flags: FlagCx) -> Self {
+        // HarfBuzz walks the whole cursive chain for every mark, which
+        // a long chain of marked glyphs turns into quadratic work. The
+        // walks share a budget as large as the nested lookup budget,
+        // which no real text comes near.
+        let cross_steps_left = slots
+            .len()
+            .saturating_mul(super::NESTED_OPS_PER_GLYPH)
+            .max(super::NESTED_OPS_MIN);
         Self {
             direction,
             slots,
             base_cache: BaseCache::default(),
             flags,
+            cross_steps_left,
         }
     }
 
@@ -406,9 +424,12 @@ fn marks_share_a_component(glyphs: &[Glyph], mark1: usize, mark2: usize) -> bool
     }
 }
 
-/// Records a mark attachment of `mark` onto `parent`: the mark's offset
-/// becomes the raw anchor delta (replacing any earlier placement, as in
-/// HarfBuzz) and its slot links to the parent for the resolve pass.
+/// Records a mark attachment of `mark` onto `parent`, as HarfBuzz's
+/// `MarkArray::apply` (`OT/Layout/GPOS/MarkArray.hh`) does: the mark's
+/// offset becomes the raw anchor delta (replacing any earlier
+/// placement) plus, across the line, the parent's cross-stream offset
+/// as it stands now, and its slot links to the parent for the resolve
+/// pass.
 fn attach_mark(
     glyphs: &mut [Glyph],
     att: &mut Attach<'_>,
@@ -420,13 +441,44 @@ fn attach_mark(
 ) {
     let (mark_x, mark_y) = pair.mark_anchor.resolve(bytes, var.store, var.coords);
     let (base_x, base_y) = pair.base_anchor.resolve(bytes, var.store, var.coords);
+    let base_offset = resolve_cross_offset(glyphs, att, parent);
     let g = &mut glyphs[mark];
     g.x_offset = base_x.saturating_sub(mark_x);
     g.y_offset = base_y.saturating_sub(mark_y);
+    if att.direction.is_horizontal() {
+        g.y_offset = g.y_offset.saturating_add(base_offset);
+    } else {
+        g.x_offset = g.x_offset.saturating_add(base_offset);
+    }
     att.slots[mark] = Slot {
         kind: AttachKind::Mark,
         chain: parent as i32 - mark as i32,
     };
+}
+
+/// HarfBuzz's `resolve_cross_offset` (`OT/Layout/GPOS/MarkArray.hh`):
+/// the cross-stream offset (y in horizontal runs, x in vertical ones)
+/// of the glyph at `at` plus those of the cursive parents it hangs
+/// from, as they stand now. The walk stops at the first glyph without
+/// a cursive link, and once the shared step budget is spent.
+fn resolve_cross_offset(glyphs: &[Glyph], att: &mut Attach<'_>, at: usize) -> i32 {
+    let horizontal = att.direction.is_horizontal();
+    let cross = |g: &Glyph| if horizontal { g.y_offset } else { g.x_offset };
+    let len = glyphs.len().min(att.slots.len());
+    let mut offset = glyphs.get(at).map_or(0, cross);
+    let mut cur = at;
+    while let Some(&slot) = att.slots.get(cur) {
+        if slot.kind != AttachKind::Cursive || att.cross_steps_left == 0 {
+            break;
+        }
+        let Some(parent) = linked_index(cur, slot.chain, len).filter(|_| slot.chain != 0) else {
+            break;
+        };
+        att.cross_steps_left -= 1;
+        cur = parent;
+        offset = offset.saturating_add(glyphs.get(cur).map_or(0, cross));
+    }
+    offset
 }
 
 /// Cursive attachment of the glyph at `j` (entry) to the previous
@@ -581,16 +633,24 @@ fn linked_index(index: usize, chain: i32, len: usize) -> Option<usize> {
     }
 }
 
+/// How many links one walk of [`resolve_attachments`] follows from its
+/// starting glyph, HarfBuzz's `HB_MAX_NESTING_LEVEL`.
+const MAX_CHAIN_DEPTH: usize = 64;
+
 /// Final attachment pass: converts every recorded chain into pen
 /// relative offsets, parents before children. Must run after all
 /// advance changes (GPOS, legacy kern, kerx, mark-width zeroing) and
 /// before a backward run is reversed; `direction` is the run's
 /// effective direction.
 ///
-/// Equivalent to HarfBuzz's `propagate_attachment_offsets` over the
-/// whole buffer. The walk is iterative, so arbitrarily long cursive
-/// chains cannot overflow the stack, and each link is consumed once,
-/// so malformed cycles terminate.
+/// Port of HarfBuzz's `GPOS::position_finish_offsets` and
+/// `propagate_attachment_offsets` (`OT/Layout/GPOS/GPOS.hh`): glyphs
+/// are visited from the start of the run in forward directions and
+/// from its end in backward ones (HarfBuzz issue 5514), and each visit
+/// resolves the glyph's ancestors first, up to [`MAX_CHAIN_DEPTH`]
+/// links away. The walk is iterative, so long cursive chains cannot
+/// overflow the stack, and each link is consumed once, so malformed
+/// cycles terminate.
 pub(super) fn resolve_attachments(glyphs: &mut [Glyph], slots: &mut [Slot], direction: Direction) {
     let len = glyphs.len().min(slots.len());
     // Running advance sums, so the compensation for the glyphs between
@@ -598,22 +658,29 @@ pub(super) fn resolve_attachments(glyphs: &mut [Glyph], slots: &mut [Slot], dire
     // over them. Advances do not change while attachments resolve.
     let advances = AdvanceSums::new(glyphs.get(..len).unwrap_or_default());
     let mut path: Vec<(usize, usize, AttachKind)> = Vec::new();
-    for start in 0..len {
+    let forward = direction.is_forward();
+    for n in 0..len {
+        let start = if forward { n } else { len - 1 - n };
         if slots[start].chain == 0 {
             continue;
         }
         path.clear();
         let mut cur = start;
+        let mut depth_left = MAX_CHAIN_DEPTH;
         loop {
             let slot = slots[cur];
-            if slot.chain == 0 {
-                break;
-            }
             slots[cur].chain = 0;
             let Some(parent) = linked_index(cur, slot.chain, len) else {
                 break;
             };
+            if depth_left == 0 {
+                break;
+            }
             path.push((cur, parent, slot.kind));
+            if slots[parent].chain == 0 {
+                break;
+            }
+            depth_left -= 1;
             cur = parent;
         }
         for &(child, parent, kind) in path.iter().rev() {
@@ -666,7 +733,10 @@ fn clamp_i32(v: i64) -> i32 {
     v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
-/// Folds the resolved position of `parent` into `child`.
+/// Folds the resolved position of `parent` into `child`: a cursive
+/// child takes the parent's cross-stream offset, a mark the parent's
+/// main-direction offset plus the advance compensation. The mark got
+/// its cross-stream share when it attached.
 fn propagate(
     glyphs: &mut [Glyph],
     advances: &AdvanceSums,
@@ -691,7 +761,11 @@ fn propagate(
             }
         }
         AttachKind::Mark => {
-            let (mut dx, mut dy) = (i64::from(px), i64::from(py));
+            let (mut dx, mut dy) = if direction.is_horizontal() {
+                (i64::from(px), 0)
+            } else {
+                (0, i64::from(py))
+            };
             // Marks only ever attach backwards in logical order.
             if parent < child {
                 if direction.is_forward() {

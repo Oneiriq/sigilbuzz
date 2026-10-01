@@ -110,25 +110,29 @@ pub struct IndicConfig {
     pub reph_pos: RephPosition,
     /// How the shaper decides a syllable has a reph.
     pub reph_mode: RephMode,
-    /// Script-tag priority for GSUB/GPOS feature lookup. First tag
-    /// is the Indic2 tag (`dev2`, `bng2`, ...); second is the legacy
-    /// Indic1 tag; last is always `DFLT` as a fallback.
+    /// Script-tag priority for GSUB/GPOS feature lookup: the Indic3
+    /// tag (`dev3`, `bng3`, ...), the Indic2 tag (`dev2`, `bng2`, ...),
+    /// the legacy Indic1 tag, and `DFLT` as a fallback.
     pub script_priority: &'static [[u8; 4]],
 }
 
-// Script-tag priority tables. Each Indic script has an Indic2 tag
-// (`dev2`, `bng2`, ...) and a legacy Indic1 tag (`deva`, `beng`, ...);
-// DFLT is a last-resort fallback. Sinhala is the only Indic script
-// that never received an Indic2 tag, so its priority only lists `sinh`.
-pub(crate) const DEVA_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"dev2", *b"deva", *b"DFLT"];
-pub(crate) const BENG_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"bng2", *b"beng", *b"DFLT"];
-pub(crate) const GURU_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"gur2", *b"guru", *b"DFLT"];
-pub(crate) const GUJR_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"gjr2", *b"gujr", *b"DFLT"];
-pub(crate) const ORYA_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"ory2", *b"orya", *b"DFLT"];
-pub(crate) const TAML_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"tml2", *b"taml", *b"DFLT"];
-pub(crate) const TELU_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"tel2", *b"telu", *b"DFLT"];
-pub(crate) const KNDA_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"knd2", *b"knda", *b"DFLT"];
-pub(crate) const MLYM_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"mlm2", *b"mlym", *b"DFLT"];
+// Script-tag priority tables, in HarfBuzz's order
+// (`hb_ot_all_tags_from_script` in `hb-ot-tag.cc`). Each Indic script
+// has an Indic3 tag (`dev3`, `bng3`, ...), an Indic2 tag (`dev2`,
+// `bng2`, ...), and a legacy Indic1 tag (`deva`, `beng`, ...). DFLT is
+// a last-resort fallback. A font that has the Indic3 tag gets the
+// Universal Shaping Engine (`Shaper::for_run`). Sinhala is the only
+// one that never received a newer tag, so its priority only lists
+// `sinh`.
+pub(crate) const DEVA_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"dev3", *b"dev2", *b"deva", *b"DFLT"];
+pub(crate) const BENG_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"bng3", *b"bng2", *b"beng", *b"DFLT"];
+pub(crate) const GURU_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"gur3", *b"gur2", *b"guru", *b"DFLT"];
+pub(crate) const GUJR_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"gjr3", *b"gjr2", *b"gujr", *b"DFLT"];
+pub(crate) const ORYA_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"ory3", *b"ory2", *b"orya", *b"DFLT"];
+pub(crate) const TAML_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"tml3", *b"tml2", *b"taml", *b"DFLT"];
+pub(crate) const TELU_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"tel3", *b"tel2", *b"telu", *b"DFLT"];
+pub(crate) const KNDA_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"knd3", *b"knd2", *b"knda", *b"DFLT"];
+pub(crate) const MLYM_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"mlm3", *b"mlm2", *b"mlym", *b"DFLT"];
 pub(crate) const SINH_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"sinh", *b"DFLT"];
 
 /// Returns the [`IndicConfig`] for an Indic script, or `None` for
@@ -270,7 +274,7 @@ mod tests {
         assert_eq!(c.virama, 0x094D);
         assert_eq!(c.reph_pos, RephPosition::BeforePost);
         assert_eq!(c.reph_mode, RephMode::Implicit);
-        assert_eq!(c.script_priority, &[*b"dev2", *b"deva", *b"DFLT"]);
+        assert_eq!(c.script_priority, &[*b"dev3", *b"dev2", *b"deva", *b"DFLT"]);
     }
 
     #[test]

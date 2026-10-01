@@ -69,7 +69,9 @@ impl<'a> SyllabicGsub<'a> {
     /// Applies lookup `index` to `glyphs`, with the feature's joiner
     /// handling. The lookup applies at a glyph only when `applies`
     /// accepts it. With `per_syllable`, it matches only glyphs whose
-    /// [`Glyph::syllable`] is the cursor glyph's.
+    /// [`Glyph::syllable`] is the cursor glyph's. Returns, for each
+    /// glyph after the lookup, whether a substitution produced it, one
+    /// that kept the glyph id included.
     pub(crate) fn apply_lookup(
         &mut self,
         index: u16,
@@ -77,9 +79,9 @@ impl<'a> SyllabicGsub<'a> {
         per_syllable: bool,
         glyphs: &mut Vec<Glyph>,
         applies: &dyn Fn(&Glyph) -> bool,
-    ) {
+    ) -> Vec<bool> {
         if glyphs.is_empty() {
-            return;
+            return Vec::new();
         }
         let mask: Vec<bool> = glyphs.iter().map(applies).collect();
         let flags = FeatureFlags {
@@ -94,6 +96,6 @@ impl<'a> SyllabicGsub<'a> {
             &mask,
             flags,
             &mut self.budget,
-        );
+        )
     }
 }

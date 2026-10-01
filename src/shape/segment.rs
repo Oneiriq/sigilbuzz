@@ -108,41 +108,22 @@ pub(super) fn build_segments(codepoints: &[char]) -> Vec<Segment> {
     segments
 }
 
-/// Shape-time COMMON / INHERITED predicate: the buffer-level
-/// `is_common_or_inherited` in `buffer.rs`, plus the default
-/// ignorables of those scripts. Kept inside `shape.rs` so the
-/// Khmer-split synthetic codepoints (which never land in the buffer's
-/// text) still segment correctly.
-///
-/// A default ignorable (ZWSP, word joiner, variation selectors, tag
-/// characters, ...) has to stay in its neighbors' segment: GSUB and
-/// GPOS match across it (see the `skip_iter` module), which they
-/// cannot do when it splits the run. The Khmer and Mongolian ones
-/// have their own script and segment with it anyway.
+/// The script HarfBuzz's `hb_buffer_guess_segment_properties` gives a
+/// buffer of `chars`: that of the first character that is not Common
+/// or Inherited, or `None` when every character is.
+pub(crate) fn guess_script(chars: impl IntoIterator<Item = char>) -> Option<Script> {
+    chars
+        .into_iter()
+        .find(|&c| !is_common_for_segmentation(c))
+        .map(script_of)
+}
+
+/// Shape-time COMMON / INHERITED predicate: the characters that take
+/// the script of the segment around them (see
+/// [`crate::unicode::is_common_or_inherited`]). The same predicate
+/// splits [`crate::buffer::Buffer::script_runs`], so both agree.
 pub(super) const fn is_common_for_segmentation(ch: char) -> bool {
-    let cp = ch as u32;
-    matches!(
-        cp,
-        0x0000..=0x002F
-        | 0x0030..=0x0040
-        | 0x005B..=0x0060
-        | 0x007B..=0x007F
-        | 0x00A0..=0x00BF
-        | 0x200C | 0x200D | 0x200E | 0x200F | 0x061C
-        // U+25CC DOTTED CIRCLE is Common: the one `hb_insert_dotted_circle`
-        // puts at the start of the text belongs to the mark after it.
-        | 0x25CC
-        // INHERITED combining-mark blocks: must extend the preceding
-        // real-script segment so GSUB dispatches under the right
-        // priority. Matches `buffer::is_common_or_inherited`.
-        | 0x0300..=0x036F
-        | 0x1DC0..=0x1DFF
-        | 0x20D0..=0x20FF
-        | 0xFE20..=0xFE2F
-        // The Devanagari stress signs and accents, INHERITED in
-        // Scripts.txt: other scripts use them too.
-        | 0x0951..=0x0954
-    ) || crate::unicode::is_scriptless_default_ignorable(ch)
+    crate::unicode::is_common_or_inherited(ch)
 }
 
 /// Rebuilds the post-GSUB segment ranges after `morx` changed the

@@ -8,9 +8,9 @@
 //!
 //! - [`arabic`]: the cursive joining state machine.
 //! - [`indic`]: the Indic2 reordering shaper.
-//! - `khmer`: the Khmer shaper, and `syllabic`, the syllable machine,
-//!   character table, and masked GSUB stages it shares with the Indic
-//!   shaper.
+//! - `khmer` and `myanmar`: the Khmer and Myanmar shapers, and
+//!   `syllabic`, the syllable machine, character table, and masked GSUB
+//!   stages they share with the Indic shaper.
 //! - [`mongolian`]: Mongolian joining with free variation selectors.
 //! - [`tibetan`]: the Tibetan feature chain.
 //! - [`use_shaper`]: the Universal Shaping Engine and its clients.

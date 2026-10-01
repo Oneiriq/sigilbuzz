@@ -168,8 +168,6 @@ fn telugu_length_mark_keeps_its_combining_class() {
 
 #[test]
 fn every_script_with_sequences_is_reachable() {
-    // Khudawadi and Takri have sequences too, but sigilbuzz has no
-    // script for them.
     for script in [
         Script::Devanagari,
         Script::Bengali,
@@ -185,6 +183,8 @@ fn every_script_with_sequences_is_reachable() {
         Script::Khojki,
         Script::Tirhuta,
         Script::Modi,
+        Script::Khudawadi,
+        Script::Takri,
     ] {
         assert!(!sequences(script).is_empty(), "{script:?}");
     }

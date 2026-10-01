@@ -75,6 +75,9 @@ signatures only change in a major version.
   - `UnicodeScript::{iso15924_tag, from_iso15924_tag, horizontal_direction}` and
     `Direction::horizontal_for_script`: ISO 15924 codes and each script's horizontal
     direction
+  - `UnicodeScript` buckets for Syriac and every other script HarfBuzz gives a shaper
+    of its own. `UnicodeScript` is `#[non_exhaustive]` from 0.22.0: a later bucket is
+    an additive change, and a `match` on it outside the crate needs a wildcard arm
   - `Buffer::unset_direction`: forget the caller's direction, like HarfBuzz's
     `hb_buffer_set_direction(buffer, HB_DIRECTION_INVALID)`
   - `BufferFlags` and `Buffer::{set_flags, flags}`: HarfBuzz's buffer flags with
