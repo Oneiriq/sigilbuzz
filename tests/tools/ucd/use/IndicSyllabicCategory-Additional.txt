@@ -1,0 +1,148 @@
+# Source: HarfBuzz 14.5.0, src/ms-use/IndicSyllabicCategory-Additional.txt
+# MIT License, Copyright (c) Microsoft Corporation.
+# Override values For Indic_Syllabic_Category
+# Not derivable
+# Initial version based on Unicode 7.0 by Andrew Glass 2014-03-17
+# Updated for Unicode 10.0 by Andrew Glass 2017-07-25
+# Updated for Unicode 12.1 by Andrew Glass 2019-05-24
+# Updated for Unicode 13.0 by Andrew Glass 2020-07-28
+# Updated for Unicode 14.0 by Andrew Glass 2021-09-25
+# Updated for Unicode 15.0 by Andrew Glass 2022-09-16
+# Updated for Unicode 15.1 by Andrew Glass 2023-09-14
+# Updated for Unicode 16.0 by Andrew Glass 2024-09-11
+# Updated for Unicode 17.0 by Andrew Glass 2025-09-15
+# Updated for Unicode 18.0 by Andrew Glass 2026-09-04
+193A; Bindu
+AA29; Bindu
+10A0D; Bindu
+113CE; Bindu
+19C1..19C7; Consonant
+25CC; Consonant
+0F7F; Consonant_Dead
+11A3B..11A3E; Consonant_Subjoined
+1C36; Consonant_Final_Modifier
+11134; Gemination_Mark
+0F71; Nukta
+113CF; Nukta
+1A7B..1A7C; Tone_Mark
+1A7F; Tone_Mark
+AAB1; Vowel_Independent
+AABA; Vowel_Independent
+AABD; Vowel_Independent
+0800..0815; Consonant
+0840..0858; Consonant
+0F00..0F01; Consonant
+0F04..0F06; Consonant
+1800; Consonant
+1807; Consonant
+180A; Consonant
+1820..1842; Consonant
+1843; Consonant
+1844..1878; Consonant
+2D30..2D67; Consonant
+2D6F; Consonant
+10570..1057A; Consonant
+1057C..1058A; Consonant
+1058C..10592; Consonant
+10594..10595; Consonant
+10597..105A1; Consonant
+105A3..105B1; Consonant
+105B3..105B9; Consonant
+105BB..105BC; Consonant
+10AC0..10AC7; Consonant
+10AC9..10AE4; Consonant
+10D00..10D23; Consonant
+10D4A..10D4F; Consonant
+10D50..10D65; Consonant
+10D70..10D85; Consonant
+10D6F; Consonant
+10E80..10EA9; Consonant
+10EB0..10EB1; Consonant
+10F30..10F45; Consonant
+10F70..10F81; Consonant
+111DA; Consonant
+16B00..16B2F; Consonant
+16F00..16F4A; Consonant
+16FE4; Consonant
+18B00..18CD5; Consonant
+18CFF; Consonant
+1BC00..1BC6A; Consonant
+1BC70..1BC7C; Consonant
+1BC80..1BC88; Consonant
+1BC90..1BC99; Consonant
+1E100..1E12C; Consonant
+1E137..1E13D; Consonant
+1E14E; Consonant
+1E14F; Consonant
+1E290..1E2AD; Consonant
+1E2C0..1E2EB; Consonant
+1E4D0..1E4EA; Consonant
+1E4EB; Consonant
+1E5D0..1E5ED; Consonant
+1E5F0; Consonant
+1E900..1E921; Consonant
+1E922..1E943; Consonant
+1E94B; Consonant
+1880..1884; Consonant_Placeholder
+10D27; Gemination_Mark
+FE00..FE0F; Modifying_Letter
+16F50; Modifying_Letter
+0859..085B; Nukta
+0F39; Nukta
+1885..1886; Nukta
+18A9; Nukta
+10AE5..10AE6; Nukta
+16F4F; Nukta
+1BC9D..1BC9E; Nukta
+1E944..1E94A; Nukta
+10F82..10F85; Nukta
+10D30..10D39; Number
+10F51..10F54; Number
+16AC0..16AC9; Number
+1E140..1E149; Number
+1E2F0..1E2F9; Number
+1E4F0..1E4F9; Number
+1E5F1..1E5FA; Number
+1E950..1E959; Number
+07EB..07F3; Tone_Mark
+07FD; Tone_Mark
+0F86..0F87; Tone_Mark
+17CF; Tone_Mark
+10D24..10D26; Tone_Mark
+10F46..10F50; Tone_Mark
+16B30..16B36; Tone_Mark
+16F8F..16F92; Tone_Mark
+1E130..1E136; Tone_Mark
+1E2AE; Tone_Mark
+1E2EC..1E2EF; Tone_Mark
+2D7F; Virama
+0B55; Vowel_Dependent
+10D69..10D6D; Vowel_Dependent
+10EAB..10EAC; Vowel_Dependent
+16F51..16F87; Vowel_Dependent
+1E4EC..1E4EF; Vowel_Dependent
+1E5EE..1E5EF; Vowel_Dependent
+1CF8..1CF9; Cantillation_Mark
+1B6B..1B73; Symbol_Modifier
+13000..1342F; Hieroglyph
+1343C..1343F; Hieroglyph
+13441..13446; Hieroglyph
+13460..143FA; Hieroglyph
+13430..13436; Hieroglyph_Joiner
+13439..1343B; Hieroglyph_Joiner
+005B; Hieroglyph_Mark_Begin
+007B; Hieroglyph_Mark_Begin
+27E6; Hieroglyph_Mark_Begin
+27E8; Hieroglyph_Mark_Begin
+2E22; Hieroglyph_Mark_Begin
+2E24; Hieroglyph_Mark_Begin
+005D; Hieroglyph_Mark_End
+007D; Hieroglyph_Mark_End
+27E7; Hieroglyph_Mark_End
+27E9; Hieroglyph_Mark_End
+2E23; Hieroglyph_Mark_End
+2E25; Hieroglyph_Mark_End
+13437; Hieroglyph_Segment_Begin
+13438; Hieroglyph_Segment_End
+13440; Hieroglyph_Mirror
+13447..13455; Hieroglyph_Modifier

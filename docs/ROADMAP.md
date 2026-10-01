@@ -27,26 +27,32 @@ These are smaller pieces that are not scheduled yet.
 - Language tags from version 1 `name` tables are read but not exposed.
 - Subsetting a CFF or CFF2 font down to fewer glyphs drops its layout and variation
   tables. TrueType fonts keep them.
-- The Universal Shaping Engine finds syllables with a simpler grammar than HarfBuzz's,
-  and its category table misses some characters (Tirhuta sign i, for one). So `rphf`
-  is not matched one syllable at a time, and some glyph flags differ from HarfBuzz's.
-  On 1,992 USE test strings, 1,519 shape as HarfBuzz 14.5.0 does.
-- Sinhala runs the earlier Indic pass. HarfBuzz shapes it with the Universal Shaping
-  Engine.
-- Khudawadi and Takri have no shaper. HarfBuzz shapes them with the Universal Shaping
-  Engine, vowel constraints included.
+- Scripts that `UnicodeScript` has no bucket for (Javanese, Chakma, Kaithi, Khudawadi,
+  Takri, and the other scripts HarfBuzz gives the Universal Shaping Engine) shape with
+  the default shaper, so they also get no vowel constraints.
 - A buffer of several scripts shapes one script run at a time, where HarfBuzz shapes the
   whole buffer with the shaper of its script. So contextual lookups do not reach across
   runs, and with `PRODUCE_UNSAFE_TO_CONCAT` some flags at run boundaries differ.
+- Myanmar runs sigilbuzz's own pass, with a simpler syllable grammar than HarfBuzz's
+  Myanmar shaper (`hb-ot-shaper-myanmar.cc`). On 1,540 Myanmar test strings, 1,033
+  shape as HarfBuzz 14.5.0 does.
+- The default shaper runs `ccmp` and `locl` before the other default GSUB features,
+  where HarfBuzz runs them in one stage. Glyphs match, but with
+  `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT` some unsafe-to-concat flags differ (19 of 350
+  Tai Tham test strings with Noto Sans Tai Tham, whose lookups are under `DFLT` only).
+- Unsafe-to-concat flags of a context or chained context rule set with more than four
+  rules, and of some ligature and mark lookups, differ from HarfBuzz's, which marks
+  them on its fast paths (18 of 1,992 USE test strings).
+- A mark takes its parent's vertical offset when it attaches in HarfBuzz
+  (`resolve_cross_offset`), where sigilbuzz adds the parent's final offset. The two
+  differ when a later lookup moves the parent (one Lepcha and one Tibetan string of
+  3,000 test strings in those and other scripts).
 
 ## Known bugs
 
 Found during the 0.22.0 hardening review. Each fix changes output for some valid
 fonts, so they are left for a release that can call that out.
 
-- Sinhala: a syllable with two or more pre-base vowel signs moves the wrong glyphs
-  during reordering. HarfBuzz uses a stable partition here. The nine scripts the
-  Indic shaper port covers reorder them as HarfBuzz does.
 - CFF2 FDSelect format 4 truncates font DICT indexes to 8 bits, so a font with more
   than 256 font DICTs uses the wrong local subroutines.
 - Progressive JPEG images in `sbix` decode their AC coefficients through the zigzag

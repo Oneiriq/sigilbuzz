@@ -2,10 +2,9 @@
 //!
 //! Shapes a Khmer corpus with both sigilbuzz and rustybuzz against
 //! Noto Sans Khmer (OFL) and asserts the output matches byte-for-byte.
-//! Khmer runs through sigilbuzz's Universal Shaping Engine pipeline
-//! (`src/ot/use_shaper`): category-classifier + syllable state
-//! machine + pre-base matra reorder + the USE basic/topographical
-//! feature chains.
+//! Khmer runs through sigilbuzz's Khmer shaper (`src/ot/khmer`), a
+//! port of HarfBuzz's: the category table, the syllable machine, the
+//! coeng and pre-base reorder, and the Khmer feature stages.
 //!
 //! The corpus exercises:
 //!
@@ -13,7 +12,7 @@
 //!   * post-base vowel signs (aa)
 //!   * pre-base vowel signs (sign-e, sign-ai)
 //!   * coeng (subscript) consonant stacks
-//!   * combined coeng + pre-base (full USE reorder path)
+//!   * combined coeng + pre-base
 //!   * independent vowels
 //!   * final marks (nikahit, reahmuk)
 //!   * register shifters (muusikatoan, triisap)
@@ -21,7 +20,7 @@
 //!   * mixed Khmer + Latin runs
 //!
 //! A failure here is a parity drift against rustybuzz; fix in
-//! src/ot/use_shaper or src/unicode/use_category.
+//! src/ot/khmer.
 
 use sigilbuzz::{shape, Blob, Buffer, Face, Font};
 

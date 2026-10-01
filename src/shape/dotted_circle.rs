@@ -1,126 +1,65 @@
-//! Dotted circles for broken syllables, HarfBuzz's
+//! Dotted circles for broken Myanmar syllables, HarfBuzz's
 //! `hb_syllabic_insert_dotted_circles` (`hb-ot-shaper-syllabic.cc`).
 //!
-//! The Indic, Myanmar, and USE shapers find a "broken"
-//! syllable when a dependent mark (a matra, virama, nukta, bindu, or
-//! other combining sign) starts a syllable with no base to attach to,
-//! as in a lone U+093F DEVANAGARI VOWEL SIGN I. HarfBuzz then inserts
-//! U+25CC DOTTED CIRCLE at the start of that syllable (after a repha
-//! that opens it), with the syllable's cluster, so the marks shape
-//! around the circle as their base. It skips the insertion when the
-//! font has no glyph for U+25CC or the buffer carries
+//! HarfBuzz's syllabic shapers find a "broken" syllable when a
+//! dependent mark (a vowel sign, virama, medial, or other combining
+//! sign) starts a syllable with no base to attach to. They then insert
+//! U+25CC DOTTED CIRCLE at the start of that syllable, with the
+//! syllable's cluster, so the marks shape around the circle as their
+//! base. The insertion is skipped when the font has no glyph for
+//! U+25CC or the buffer carries
 //! `HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE`
 //! ([`crate::BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE`] here). The
 //! dotted circle `BufferFlags::BOT` puts under a mark at the very start
 //! of the text is inserted earlier, by the pipeline.
 //!
-//! sigilbuzz's syllable scanners emit one broken syllable per orphan
-//! mark, where HarfBuzz's grammar takes a whole run of them as one
-//! broken syllable, so consecutive broken syllables share one circle.
-//! The circle goes in before the shaper runs, and the shaper then sees
-//! it as the base (U+25CC is a consonant placeholder to the Indic
-//! scanner and a generic base to USE). The Khmer shaper
-//! (`crate::ot::khmer`) inserts its own circles after its syllable
-//! machine, as HarfBuzz's does.
+//! The Indic, Khmer, and USE shapers insert their own circles, from
+//! their own syllable machines. This module serves the Myanmar pass,
+//! whose syllable scanner emits one broken syllable per orphan mark
+//! where HarfBuzz's grammar takes a whole run of them as one broken
+//! syllable, so consecutive broken syllables share one circle. The
+//! circle goes in before the Myanmar pass runs, which then sees it as
+//! a generic base.
 
 use alloc::vec::Vec;
 
 use crate::buffer::Glyph;
-use crate::ot::indic::devanagari::{segment_syllables as indic_syllables, SyllableKind as Indic};
-use crate::ot::indic::indic_config_for;
-use crate::ot::use_shaper::{segment_syllables as use_syllables, SyllableKind as Use};
-use crate::unicode::indic_category::{syllabic_category, IndicSyllabicCategory as Isc};
-use crate::unicode::use_category::{use_category, UseCategory};
-use crate::unicode::Script;
+use crate::ot::myanmar::{category, Category};
+use crate::ot::myanmar::{segment_syllables, SyllableKind};
 
 /// U+25CC DOTTED CIRCLE.
 const DOTTED_CIRCLE: char = '\u{25CC}';
 
-/// True when an Indic syllable starting with `ch` has no base: a
-/// dependent sign at the start of a syllable.
-fn indic_orphan(ch: char) -> bool {
+/// True when a syllable starting with `ch` has no base.
+fn orphan(ch: char) -> bool {
     matches!(
-        syllabic_category(ch),
-        Isc::VowelDependent
-            | Isc::Virama
-            | Isc::Nukta
-            | Isc::Bindu
-            | Isc::Visarga
-            | Isc::CantillationMark
-            | Isc::ConsonantMedial
-    )
-}
-
-/// True when a USE syllable starting with `ch` has no base.
-fn use_orphan(ch: char) -> bool {
-    matches!(
-        use_category(ch),
-        UseCategory::H
-            | UseCategory::VPre
-            | UseCategory::VAbv
-            | UseCategory::VBlw
-            | UseCategory::VPst
-            | UseCategory::M
-            | UseCategory::FM
-            | UseCategory::CM
+        category(ch),
+        Category::H
+            | Category::VPre
+            | Category::VAbv
+            | Category::VBlw
+            | Category::VPst
+            | Category::M
+            | Category::FM
+            | Category::CM
     )
 }
 
 /// Where the circles go: the code point index each broken run starts
-/// at, past a leading repha.
-fn insertion_points(script: Script, cps: &[char]) -> Vec<usize> {
+/// at.
+fn insertion_points(cps: &[char]) -> Vec<usize> {
     let mut points = Vec::new();
-    // Syllable (start, end, broken) triples, in order.
-    let sinhala = indic_config_for(script).filter(|c| c.script == Script::Sinhala);
-    let syllables: Vec<(usize, usize, bool)> = if let Some(config) = sinhala {
-        indic_syllables(cps, &config)
-            .iter()
-            .map(|s| {
-                let broken = matches!(s.kind, Indic::Broken | Indic::Standalone)
-                    && cps.get(s.start).is_some_and(|&c| indic_orphan(c));
-                (s.start, s.end, broken)
-            })
-            .collect()
-    } else if matches!(
-        script,
-        Script::Myanmar
-            | Script::Buginese
-            | Script::TaiTham
-            | Script::Balinese
-            | Script::Sundanese
-            | Script::Lepcha
-            | Script::Limbu
-            | Script::Cham
-            | Script::Brahmi
-            | Script::Sharada
-            | Script::Khojki
-            | Script::Tirhuta
-            | Script::Modi
-    ) {
-        use_syllables(cps)
-            .iter()
-            .map(|s| {
-                let repha = cps
-                    .get(s.start)
-                    .is_some_and(|&c| use_category(c) == UseCategory::R);
-                let first = if repha { s.start + 1 } else { s.start };
-                let broken =
-                    s.kind == Use::Broken && cps.get(first).is_some_and(|&c| use_orphan(c));
-                (first, s.end, broken)
-            })
-            .collect()
-    } else {
-        return points;
-    };
     let mut previous_end: Option<usize> = None;
-    for (start, end, broken) in syllables {
+    for s in segment_syllables(cps) {
+        let start = s.start;
+        let broken = s.kind == SyllableKind::Broken && cps.get(start).is_some_and(|&c| orphan(c));
         if broken {
             // A broken syllable right after another is part of the
             // same run of marks: one circle covers both.
             if previous_end != Some(start) {
                 points.push(start);
             }
-            previous_end = Some(end);
+            previous_end = Some(s.end);
         } else {
             previous_end = None;
         }
@@ -129,19 +68,14 @@ fn insertion_points(script: Script, cps: &[char]) -> Vec<usize> {
 }
 
 /// Inserts a dotted circle (glyph `circle`) before each broken run of
-/// the segment `cps` / `glyphs` of `script`. Returns the segment's new
-/// code points when it inserted any; `glyphs` then has the circles
-/// too. Glyphs must still be one per code point.
-pub(super) fn insert(
-    script: Script,
-    cps: &[char],
-    glyphs: &mut Vec<Glyph>,
-    circle: u16,
-) -> Option<Vec<char>> {
+/// the Myanmar segment `cps` / `glyphs`. Returns the segment's new code
+/// points when it inserted any. `glyphs` then has the circles too.
+/// Glyphs must still be one per code point.
+pub(super) fn insert(cps: &[char], glyphs: &mut Vec<Glyph>, circle: u16) -> Option<Vec<char>> {
     if glyphs.len() != cps.len() {
         return None;
     }
-    let points = insertion_points(script, cps);
+    let points = insertion_points(cps);
     if points.is_empty() {
         return None;
     }
@@ -151,15 +85,9 @@ pub(super) fn insert(
     for (i, (&ch, &glyph)) in cps.iter().zip(glyphs.iter()).enumerate() {
         if next.peek() == Some(&&i) {
             next.next();
-            // The circle takes the cluster of the syllable it opens
-            // (the repha's, when one comes first).
-            let cluster = if i > 0 && use_category(cps[i - 1]) == UseCategory::R {
-                glyphs[i - 1].cluster
-            } else {
-                glyph.cluster
-            };
+            // The circle takes the cluster of the syllable it opens.
             new_cps.push(DOTTED_CIRCLE);
-            new_glyphs.push(Glyph::new(u32::from(circle), cluster));
+            new_glyphs.push(Glyph::new(u32::from(circle), glyph.cluster));
         }
         new_cps.push(ch);
         new_glyphs.push(glyph);
@@ -172,45 +100,31 @@ pub(super) fn insert(
 mod tests {
     use super::*;
 
-    fn run(script: Script, text: &str) -> Option<(Vec<char>, Vec<u32>)> {
+    fn run(text: &str) -> Option<(Vec<char>, Vec<u32>)> {
         let cps: Vec<char> = text.chars().collect();
         let mut glyphs: Vec<Glyph> = text
             .char_indices()
             .map(|(i, c)| Glyph::new(c as u32, i as u32))
             .collect();
-        insert(script, &cps, &mut glyphs, 7)
-            .map(|new| (new, glyphs.iter().map(|g| g.cluster).collect()))
+        insert(&cps, &mut glyphs, 7).map(|new| (new, glyphs.iter().map(|g| g.cluster).collect()))
     }
 
     #[test]
-    fn lone_matra_gets_a_circle_with_its_cluster() {
-        let (cps, clusters) = run(Script::Sinhala, "\u{0DD9}").expect("inserted");
-        assert_eq!(cps, ['\u{25CC}', '\u{0DD9}']);
+    fn lone_vowel_sign_gets_a_circle_with_its_cluster() {
+        let (cps, clusters) = run("\u{1031}").expect("inserted");
+        assert_eq!(cps, ['\u{25CC}', '\u{1031}']);
         assert_eq!(clusters, [0, 0]);
     }
 
     #[test]
     fn one_circle_per_run_of_orphan_marks() {
-        let (cps, _) = run(Script::Sinhala, "\u{0D9A} \u{0DD9}\u{0D82}\u{0DCA}").expect("inserted");
-        assert_eq!(
-            cps,
-            ['\u{0D9A}', ' ', '\u{25CC}', '\u{0DD9}', '\u{0D82}', '\u{0DCA}']
-        );
+        let (cps, _) = run("\u{1000} \u{1031}\u{102C}").expect("inserted");
+        assert_eq!(cps, ['\u{1000}', ' ', '\u{25CC}', '\u{1031}', '\u{102C}']);
     }
 
     #[test]
-    fn complete_syllables_and_other_scripts_are_left_alone() {
-        assert_eq!(run(Script::Sinhala, "\u{0D9A}\u{0DD9}\u{0D82}"), None);
-        assert_eq!(run(Script::Sinhala, "\u{200D}\u{0D9A}"), None);
-        assert_eq!(run(Script::Thai, "\u{0E31}"), None);
-        assert_eq!(run(Script::Latin, "\u{0301}"), None);
-    }
-
-    #[test]
-    fn indic_and_khmer_are_left_to_their_shapers() {
-        // The Indic and Khmer shapers insert their own circles, from
-        // their own syllable machines.
-        assert_eq!(run(Script::Devanagari, "\u{093F}"), None);
-        assert_eq!(run(Script::Khmer, "\u{1780} \u{17C1}\u{1780}"), None);
+    fn complete_syllables_are_left_alone() {
+        assert_eq!(run("\u{1000}\u{1031}\u{102C}"), None);
+        assert_eq!(run("\u{200D}\u{1000}"), None);
     }
 }

@@ -65,9 +65,9 @@ impl Direction {
 /// modules inside this crate can round-trip state through `Vec<Glyph>`
 /// without stashing a parallel array. Stable bits of `unicode_props`
 /// are set once during buffer preparation (default-ignorable,
-/// joiner, ...); `indic_position` is an `IndicPosition` value that
-/// survives ligature substitutions (the surviving glyph inherits
-/// the first-component position).
+/// joiner, ...). `indic_position` is a scratch byte that survives
+/// ligature substitutions (the surviving glyph inherits the first
+/// component's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Glyph {
     /// Glyph index within the font. After shaping, this is the index
@@ -90,12 +90,9 @@ pub struct Glyph {
     /// "was this glyph's source a joiner / default-ignorable / ...?"
     /// without re-deriving from the cluster. See `unicode_prop`.
     pub unicode_props: u16,
-    /// Shaper-internal byte of the complex shapers, which share it the
-    /// way HarfBuzz's shapers share their glyph variables: the Indic
-    /// positional role, set during Indic syllable segmentation and
-    /// consulted by the final-reorder pass, or the syllable and reorder
-    /// category the Universal Shaping Engine keeps from its basic
-    /// features to its reorder. Zero (`IndicPosition::Start`) otherwise.
+    /// Shaper-internal byte the syllable-based shapers borrow while one
+    /// of their GSUB stages runs, to keep each glyph's shaper state
+    /// aligned with it through the substitutions. Zero otherwise.
     pub indic_position: u8,
     /// Shaper-internal `char_class` bits of the glyph's source
     /// character, set by normalization and carried through GSUB like
@@ -163,29 +160,6 @@ pub mod unicode_prop {
     pub const NON_JOINER: u16 = 1 << 2;
 }
 
-/// Indic positional role, stored in [`Glyph::indic_position`] as
-/// `u8`. The discriminants mirror HarfBuzz's `ot_position_t`, so a
-/// port of the richer Indic reorder (pref, below-form resolution,
-/// ...) can add the missing slots (`PreC = 3`, `AfterMain = 5`
-/// through `AfterPost = 12`, `End = 14`) without renumbering these.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IndicPosition {
-    /// Default / unresolved, also used for non-Indic glyphs.
-    Start = 0,
-    /// A leading `ra` that is a reph candidate. Set on the glyph
-    /// carrying the reph before GSUB runs; the reph glyph inherits
-    /// the position through ligature substitution.
-    RaToBecomeReph = 1,
-    /// Pre-base matra (before the base consonant visually).
-    PreM = 2,
-    /// The base consonant of a syllable.
-    BaseC = 4,
-    /// Syllable modifier / vedic. The final reorder places a reph
-    /// before any trailing run of these.
-    Smvd = 13,
-}
-
 impl Glyph {
     /// Minimal constructor used by the shaper pipeline: everything
     /// but the glyph id and cluster starts at zero. Exists so the
@@ -201,7 +175,7 @@ impl Glyph {
             x_offset: 0,
             y_offset: 0,
             unicode_props: 0,
-            indic_position: IndicPosition::Start as u8,
+            indic_position: 0,
             char_class: 0,
             combining_class: 0,
             syllable: 0,

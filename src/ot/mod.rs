@@ -21,6 +21,7 @@ pub mod indic;
 pub(crate) mod khmer;
 pub(crate) mod layout_select;
 pub mod mongolian;
+pub(crate) mod myanmar;
 pub(crate) mod syllabic;
 pub mod tibetan;
 pub mod use_shaper;

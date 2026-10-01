@@ -282,7 +282,7 @@ Changed:
   `calt`, `clig`, `rclt` and the caller's features. On 7,656 test strings with the Noto
   Sans fonts of the nine scripts, the output matches HarfBuzz 14.5.0 on all of them
   (before: 4,826), at every cluster level, with the vowel constraints and the Devanagari
-  stress signs below. Sinhala keeps the earlier Indic pass.
+  stress signs below.
   `ot::indic::shape_indic` and `shape_devanagari` run the port, default features
   included.
 - The Universal Shaping Engine moves a repha as HarfBuzz does (`reorder_syllable_use`
@@ -291,8 +291,39 @@ Changed:
   becomes a repha, and after the basic features the repha moves to just before the
   first vowel sign, medial, final or halant that did not ligate, or to the end of the
   syllable, merging the clusters it passes. Tirhuta and Modi reph forms used to stay in
-  front of the base. HarfBuzz also matches `rphf` one syllable at a time. sigilbuzz does
-  not yet, because its USE syllables still come from a simpler grammar than HarfBuzz's.
+  front of the base.
+- The Universal Shaping Engine follows HarfBuzz's (`hb-ot-shaper-use.cc`). Its character
+  categories come from a table generated the way `gen-use-table.py` builds
+  `hb-ot-shaper-use-table.hh`, from the Unicode 18.0 data and HarfBuzz's `ms-use`
+  overrides (`cargo test --test use_table_gen -- --ignored` regenerates it), so
+  characters such as Tirhuta sign i now join their clusters. The syllable grammar of
+  `hb-ot-shaper-use-machine.rl` finds the clusters, with the default-ignorable marks and
+  a ZWNJ before a mark left out of the match, and each cluster is unsafe to break.
+  `locl` to `akhn`, then `rphf`, then `pref`, then `rkrf` to `cjct` run as stages one
+  cluster at a time (`F_PER_SYLLABLE`), with HarfBuzz's joiner handling, its `rphf` mask
+  and its repha and pre-base records. Broken clusters get a dotted circle after any
+  repha, and then the repha and the pre-base vowel signs move. `isol`, `init`, `medi`
+  and `fina` follow the joining of the clusters (of the letters, for N'Ko and
+  Mongolian), and `abvs`, `blws`, `haln`, `pres` and `psts` run as one stage with
+  `rlig`, `calt`, `clig`, `liga`, `rclt` and the caller's features. Sinhala, Tibetan,
+  N'Ko and Mongolian now shape with it, as in HarfBuzz (`hb_ot_shaper_categorize`), in
+  place of the earlier Indic pass and their own passes, and a USE script in a font whose
+  GSUB only has `DFLT` or `latn` lookups gets the default shaper. With the vowel
+  constraints below, all 1,992 USE test strings with the Noto fonts for Balinese, Cham,
+  Khojki, Modi, Sharada and Tirhuta now match HarfBuzz 14.5.0 in glyphs, clusters and
+  glyph flags at the `MonotoneGraphemes`, `MonotoneCharacters` and `Characters` cluster
+  levels (before: 1,519 in glyphs, 1,275 with flags), and so do all 1,448 Sinhala
+  strings (before: 1,036 and 983). 2,100 strings in six more USE scripts and 900 in
+  Tibetan, N'Ko and Mongolian all match too (before: 1,532 and 733). This fixes Sinhala syllables with two or more pre-base vowel signs. Myanmar
+  keeps sigilbuzz's Myanmar pass (`ot::use_shaper::shape_myanmar`), and its output is
+  unchanged. The entry points `ot::use_shaper::shape_balinese` to `shape_modi`,
+  `shape_nko`, `ot::tibetan::shape_tibetan`, `ot::mongolian::shape_mongolian`, and
+  `ot::indic::shape_indic` for Sinhala run the new shaper, default features included.
+  `ot::use_shaper::USE_TOPOGRAPHICAL_FEATURES` now lists `isol`, `init`, `medi` and
+  `fina` too. `UnicodeScript::is_use` now holds for the scripts HarfBuzz gives the
+  Universal Shaping Engine: also Sinhala, Tibetan and Mongolian, and no longer Khmer,
+  Myanmar, Thai, Lao and Hangul, which have shapers of their own.
+  `UnicodeScript::is_indic` no longer holds for Sinhala.
 - Hangul follows HarfBuzz's Hangul shaper (`hb-ot-shaper-hangul.cc`) in a buffer whose
   script is Hangul. Its preprocessing runs after grapheme clusters form, as in
   HarfBuzz: jamo compose into a precomposed syllable the font has, a syllable the font
@@ -318,9 +349,9 @@ Changed:
   that file. HarfBuzz's Khmer and Myanmar shapers do not run it, and sigilbuzz has no
   shaper for Khudawadi and Takri, the two other scripts it lists. On 1,793 strings that
   put every listed sequence of the 14 other scripts in several contexts, the output
-  matches HarfBuzz 14.5.0 on 1,674 at `MonotoneGraphemes` and `Characters` and 1,620 at
-  `MonotoneCharacters` (before: 628 and 574). The rest come from the USE and Sinhala
-  syllable grammars and from text in a buffer of another script.
+  matches HarfBuzz 14.5.0 on 1,746 at `MonotoneGraphemes` and `Characters` and 1,716 at
+  `MonotoneCharacters` (before: 628 and 574). The rest put two scripts in one buffer,
+  which sigilbuzz shapes one script run at a time (see docs/ROADMAP.md).
 - Hangul in a buffer of another script, and the text of other scripts in a Hangul
   buffer, shape as HarfBuzz shapes them. Such text normalizes with the shaper of the
   buffer, as HarfBuzz normalizes the whole buffer with it: a syllable followed by a mark
@@ -529,6 +560,14 @@ Removed:
 - `tables::layout::SkipIter`, `MatchFilter::{next_unskipped, prev_unskipped}`, and the
   `matches_filtered` context matchers, replaced by the `MatchGlyph` and `MatchContext`
   matching in `tables::layout::skip_iter`.
+- The hidden `unicode::use_category` module (`UseCategory`, `UsePosition`,
+  `use_category`, `use_position`, `is_hangul_l`, `is_hangul_v`, `is_hangul_t`) and
+  `unicode::indic_category` module (`IndicSyllabicCategory`, `IndicPositionalCategory`,
+  `syllabic_category`, `positional_category`). The Universal Shaping Engine reads its
+  generated category table, and the Myanmar pass keeps the Myanmar part of the old
+  table. Nothing else read them.
+- The hidden `ot::tibetan::TIBT_FEATURES`. Tibetan runs every feature of the Universal
+  Shaping Engine.
 
 ## 0.21.0 (2026-04-25)
 

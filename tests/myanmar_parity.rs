@@ -2,10 +2,10 @@
 //!
 //! Shapes a Myanmar corpus with both sigilbuzz and rustybuzz against
 //! Noto Sans Myanmar (OFL) and asserts the output matches byte-for-
-//! byte. Myanmar runs through sigilbuzz's Universal Shaping Engine
-//! pipeline (`src/ot/use_shaper`) with the Myanmar script-tag priority
-//! (`mym2` -> `mymr` -> `DFLT`) and the Myanmar-specific basic feature
-//! chain (`rphf` / `pref` / `blwf` / `pstf` / `abvf` / `cjct`).
+//! byte. Myanmar runs through sigilbuzz's Myanmar pass
+//! (`src/ot/myanmar`) with the Myanmar script tags (`mym2`, `mymr`,
+//! then `DFLT`) and the Myanmar basic features (`rphf`, `pref`,
+//! `blwf`, and `pstf`).
 //!
 //! The corpus exercises:
 //!
@@ -21,7 +21,7 @@
 //!   * mixed Myanmar + Latin runs
 //!
 //! A failure here is a parity drift against rustybuzz; fix in
-//! src/ot/use_shaper or src/unicode/use_category.
+//! src/ot/myanmar.
 
 use sigilbuzz::{shape, Blob, Buffer, Face, Font};
 

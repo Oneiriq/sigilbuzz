@@ -18,7 +18,6 @@ mod bidi_class_table;
 pub mod general_category;
 #[rustfmt::skip]
 mod general_category_table;
-pub mod indic_category;
 pub mod joining;
 #[rustfmt::skip]
 mod joining_table;
@@ -27,7 +26,6 @@ pub mod mirroring;
 mod mirroring_table;
 pub mod normalize;
 mod script_tags;
-pub mod use_category;
 
 /// Coarse script classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,35 +60,35 @@ pub enum Script {
     Kannada,
     /// Malayalam. Indic reordering shaper applies.
     Malayalam,
-    /// Sinhala. Indic reordering shaper applies.
+    /// Sinhala. The Universal Shaping Engine (USE) applies, as in
+    /// HarfBuzz.
     Sinhala,
-    /// Khmer. Universal Shaping Engine (USE) applies.
+    /// Khmer. The Khmer shaper applies.
     Khmer,
-    /// Myanmar (Burmese, Shan, Mon). Universal Shaping Engine (USE)
-    /// applies. Covers main block U+1000..U+109F plus Myanmar
-    /// Extended-A U+AA60..U+AA7F and Extended-B U+A9E0..U+A9FF.
+    /// Myanmar (Burmese, Shan, Mon). The Myanmar shaper applies.
+    /// Covers main block U+1000..U+109F plus Myanmar Extended-A
+    /// U+AA60..U+AA7F and Extended-B U+A9E0..U+A9FF.
     Myanmar,
-    /// Thai. Routed through the USE pipeline: no coeng-style
-    /// subscripts but the same mark reorder + feature-chain shape.
-    /// Covers U+0E00..U+0E7F.
+    /// Thai. The Thai shaper applies: the default features, after
+    /// sara am splits into nikhahit and sara aa. Covers
+    /// U+0E00..U+0E7F.
     Thai,
-    /// Lao. Structurally near-identical to Thai; routed through USE.
-    /// Covers U+0E80..U+0EFF.
+    /// Lao. Shaped like Thai. Covers U+0E80..U+0EFF.
     Lao,
-    /// Hangul. Modern precomposed syllables (U+AC00..U+D7A3) reach
-    /// the shaper through cmap and the default pipeline; Jamo-
-    /// decomposed text (U+1100..U+11FF, U+A960..U+A97F, U+D7B0..U+D7FF)
-    /// routes through USE so `ljmo` / `vjmo` / `tjmo` see the L / V / T
-    /// jamo in logical order.
+    /// Hangul. A buffer of Hangul runs the Hangul shaper, which
+    /// composes and decomposes syllables as the font needs and gives
+    /// the jamo of a syllable left decomposed (U+1100..U+11FF,
+    /// U+A960..U+A97F, U+D7B0..U+D7FF) the `ljmo` / `vjmo` / `tjmo`
+    /// features.
     Hangul,
     /// Tibetan (U+0F00..U+0FFF). Stacked above/below-base subjoined
-    /// consonants: runs through the feature-loop-only Tibetan shaper
-    /// in [`crate::ot::tibetan`].
+    /// consonants. The Universal Shaping Engine applies, as in
+    /// HarfBuzz.
     Tibetan,
     /// Mongolian (U+1800..U+18AF). Cursive-joining like Arabic, with
     /// Free Variation Selectors (U+180B..U+180D, U+180F) overriding
-    /// the joining-form choice. Runs through the Mongolian shaper in
-    /// [`crate::ot::mongolian`].
+    /// the joining-form choice. The Universal Shaping Engine applies,
+    /// with the joining forms of [`crate::ot::mongolian`].
     Mongolian,
     /// N'Ko. Right-to-left alphabetic script for the Manding language
     /// family (Bambara / Maninka / Dyula). USE pipeline; covers
@@ -140,7 +138,10 @@ pub enum Script {
 
 impl Script {
     /// Returns `true` if the script is one of the Indic family scripts
-    /// that run through the Indic reordering shaper.
+    /// that run through the Indic reordering shaper: Devanagari,
+    /// Bengali, Gurmukhi, Gujarati, Oriya, Tamil, Telugu, Kannada, and
+    /// Malayalam, as in HarfBuzz (`hb_ot_shaper_categorize`). Sinhala
+    /// runs the Universal Shaping Engine (see [`Self::is_use`]).
     #[must_use]
     pub const fn is_indic(self) -> bool {
         matches!(
@@ -154,26 +155,24 @@ impl Script {
                 | Script::Telugu
                 | Script::Kannada
                 | Script::Malayalam
-                | Script::Sinhala
         )
     }
 
     /// Returns `true` if the script routes through the Universal
-    /// Shaping Engine pipeline: Khmer, Myanmar, Thai, Lao, the Jamo
-    /// subset of Hangul, N'Ko, the Brahmic SE-Asian / South Asian set
-    /// (Buginese, Tai Tham, Balinese, Sundanese, Lepcha, Limbu, Cham),
-    /// and the Brahmi-family historical scripts. Each supplies its
-    /// own category table and feature list, but the segment / reorder
-    /// / basic+topographical dispatch is shared.
+    /// Shaping Engine, as in HarfBuzz (`hb_ot_shaper_categorize`):
+    /// Sinhala, Tibetan, Mongolian, N'Ko, the Brahmic SE-Asian / South
+    /// Asian set (Buginese, Tai Tham, Balinese, Sundanese, Lepcha,
+    /// Limbu, Cham), and the Brahmi-family historical scripts. A font
+    /// whose GSUB has lookups for such a script only under `DFLT` or
+    /// `latn` gets the default shaper instead. Khmer, Myanmar, Thai,
+    /// Lao, and Hangul have shapers of their own.
     #[must_use]
     pub const fn is_use(self) -> bool {
         matches!(
             self,
-            Script::Khmer
-                | Script::Myanmar
-                | Script::Thai
-                | Script::Lao
-                | Script::Hangul
+            Script::Sinhala
+                | Script::Tibetan
+                | Script::Mongolian
                 | Script::NKo
                 | Script::Buginese
                 | Script::TaiTham
@@ -427,7 +426,8 @@ mod tests {
         assert!(Script::Telugu.is_indic());
         assert!(Script::Kannada.is_indic());
         assert!(Script::Malayalam.is_indic());
-        assert!(Script::Sinhala.is_indic());
+        // HarfBuzz shapes Sinhala with the Universal Shaping Engine.
+        assert!(!Script::Sinhala.is_indic());
         assert!(!Script::Latin.is_indic());
         assert!(!Script::Arabic.is_indic());
         assert!(!Script::Other.is_indic());
@@ -504,11 +504,10 @@ mod tests {
 
     #[test]
     fn is_use_covers_all_use_scripts() {
-        assert!(Script::Khmer.is_use());
-        assert!(Script::Myanmar.is_use());
-        assert!(Script::Thai.is_use());
-        assert!(Script::Lao.is_use());
-        assert!(Script::Hangul.is_use());
+        // The scripts HarfBuzz gives the Universal Shaping Engine.
+        assert!(Script::Sinhala.is_use());
+        assert!(Script::Tibetan.is_use());
+        assert!(Script::Mongolian.is_use());
         assert!(Script::NKo.is_use());
         assert!(Script::Buginese.is_use());
         assert!(Script::TaiTham.is_use());
@@ -524,6 +523,16 @@ mod tests {
         assert!(Script::Modi.is_use());
         assert!(!Script::Latin.is_use());
         assert!(!Script::Devanagari.is_use());
+        // These have shapers of their own.
+        for script in [
+            Script::Khmer,
+            Script::Myanmar,
+            Script::Thai,
+            Script::Lao,
+            Script::Hangul,
+        ] {
+            assert!(!script.is_use(), "{script:?}");
+        }
     }
 
     #[test]

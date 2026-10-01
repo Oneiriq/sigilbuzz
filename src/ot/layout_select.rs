@@ -55,6 +55,21 @@ fn select_lang_sys<'a>(
     script.select_lang_sys(language_tags)
 }
 
+/// The script tag a table picks for a run whose candidate script tags
+/// are `script_priority`: the first of them the table lists, then
+/// `DFLT`, `dflt`, or `latn` (`hb_ot_layout_table_select_script`), or
+/// `None` when it lists none of those.
+pub(crate) fn chosen_script(
+    script_list: &ScriptList<'_>,
+    script_priority: &[[u8; 4]],
+) -> Option<[u8; 4]> {
+    script_priority
+        .iter()
+        .chain(FALLBACK_SCRIPTS.iter())
+        .find(|&&tag| script_list.find(tag).is_some())
+        .copied()
+}
+
 /// Sorted, deduplicated lookup indices that feature `tag` selects in
 /// the language system [`select_lang_sys`] picks.
 ///
