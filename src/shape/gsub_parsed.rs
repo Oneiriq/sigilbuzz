@@ -13,6 +13,7 @@ use crate::tables::gsub::{
     lookup_type as gsub_lt, Alternate, ChainContextAny, Context as GsubContext, Ligature, Multiple,
     ReverseChain, Single,
 };
+use crate::tables::layout::skip_iter::SUBTABLE_CACHES;
 use crate::tables::layout::{Lookup, MatchContext, MatchFilter};
 
 /// One pre-parsed GSUB subtable, ready to drive a cursor walk.
@@ -170,7 +171,8 @@ pub(super) fn apply_parsed_lookup_at(
     };
     let id = cur.glyph_id as u16;
     let at = buf.cursor();
-    for sub in parsed {
+    for (k, sub) in parsed.iter().enumerate() {
+        let mcx = &mcx.with_rule_set_digests(k < SUBTABLE_CACHES);
         let applied = match sub {
             ParsedGsubSubtable::Single(single) => {
                 single.apply(id).map(|out| buf.replace_glyph(out))

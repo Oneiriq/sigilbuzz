@@ -488,6 +488,18 @@ Changed:
   3,774 of the 3,775 Myanmar test strings now match HarfBuzz 14.5.0 in glyph flags with
   that buffer flag at `MonotoneGraphemes` and 3,773 at the other levels (before: 3,771,
   and 3,770 at `Characters`).
+- With `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT`, a class-based context or chained context
+  rule set of more than four rules in one of the first eight subtables of its lookup
+  checks the class of the glyph after the cursor against the classes its rules start
+  with, before it reads the glyph after that one, as HarfBuzz's
+  `hb_ot_layout_ruleset_digest_t` does. When no rule starts with that class, the cursor
+  through that glyph is unsafe to concatenate. When a ZWJ, ZWNJ or other default
+  ignorable came after that glyph, sigilbuzz used to take the plain walk over the rules
+  instead, which marks nothing.
+  With `Buffer::guess_segment_properties` on both sides, all 3,775 Myanmar test strings,
+  all 3,468 Chakma test strings and all 3,183 Javanese test strings now match HarfBuzz
+  14.5.0 in glyph flags with that buffer flag at every cluster level (before: 3,773 to
+  3,774, 3,464, and 3,177 at `MonotoneCharacters` and `Characters`).
 - The default GSUB features run in the stages HarfBuzz builds for them
   (`hb_ot_shape_collect_features`). The default, Hebrew and Thai shapers run `ccmp`,
   `locl`, `rlig`, `calt`, `clig`, `liga` and `rclt` (or `vert` in vertical text), the

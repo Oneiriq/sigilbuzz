@@ -177,6 +177,41 @@ sigilbuzz ships the files unmodified. The OFL text lives in the upstream reposit
                   r.ScriptTag = "dev3"
           records.sort(key=lambda r: r.ScriptTag)
 
+- `NotoSansChakma-Dist-Subset.ttf` and `NotoSansChakma-Dist9-Subset.ttf`. 6 KB subsets
+  of Noto Sans Chakma for `tests/concat_flags_parity.rs`. They keep the class-based
+  chained context of the `dist` feature, whose rules for a letter all start with a
+  vowel sign or a post-base form. Same upstream, license and fontTools options as
+  `NotoSansChakma-Subset.ttf` above, with the space, U+200C, U+200D, U+25CC, U+11103,
+  U+11120, U+11122, U+11133, U+11134, U+11145, and U+11146.
+  `NotoSansChakma-Dist9-Subset.ttf` then gets eight chained context subtables in front
+  of the `dist` lookup's subtable, so it is the ninth. Each matches only the space, in
+  Python:
+
+      from fontTools.ttLib.tables import otTables as ot
+
+      gpos = font["GPOS"].table
+      (dist,) = [r.Feature.LookupListIndex for r in gpos.FeatureList.FeatureRecord
+                 if r.FeatureTag == "dist"]
+      lookup = gpos.LookupList.Lookup[dist[0]]
+
+      def space_only():
+          st = ot.ChainContextPos()
+          st.Format = 3
+          cov = ot.Coverage()
+          cov.glyphs = ["space"]
+          st.BacktrackGlyphCount = 0
+          st.BacktrackCoverage = []
+          st.InputGlyphCount = 1
+          st.InputCoverage = [cov]
+          st.LookAheadGlyphCount = 0
+          st.LookAheadCoverage = []
+          st.PosCount = 0
+          st.PosLookupRecord = []
+          return st
+
+      lookup.SubTable = [space_only() for _ in range(8)] + lookup.SubTable
+      lookup.SubTableCount = len(lookup.SubTable)
+
 ## CFF subsetting fixtures
 
 Real CFF1 and CFF2 fonts used by the round-trip tests in

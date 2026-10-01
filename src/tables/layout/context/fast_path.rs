@@ -13,10 +13,15 @@
 //! fails, and once a rule matches the mark starts where the match
 //! ends.
 //!
-//! HarfBuzz also keeps a digest of the classes each rule set accepts
-//! after the cursor (`hb_ot_layout_ruleset_digest_t`) and gives up at
-//! once when the glyph after the cursor is not in it. That marks the
-//! same glyphs as trying every rule does, so it is left out here.
+//! A class-based rule set in one of the first eight subtables of a
+//! lookup also keeps a digest of the classes its rules accept after
+//! the cursor (`hb_ot_layout_ruleset_digest_t`, built by
+//! `collect_first_input_classes`). HarfBuzz checks it as soon as it
+//! has the glyph after the cursor, and when the glyph's class is not
+//! in it marks the cursor through that glyph and gives up. Passing
+//! over every rule marks the same glyphs, except when the glyph after
+//! that one is a default ignorable: without the digest, HarfBuzz then
+//! takes the plain walk over the rules, which marks nothing.
 
 use crate::tables::layout::skip_iter::{InputMatch, MatchContext, MatchSeq, MaySkip, UnsafeRanges};
 
@@ -39,10 +44,26 @@ pub(crate) trait Rule {
 
 /// How the fast path turns a glyph id into the value a rule compares:
 /// the glyph id itself in the glyph-based formats, its input or
-/// lookahead class in the class-based ones.
+/// lookahead class in the class-based ones. `digest` is true when the
+/// rule set checks its digest of first input values (the class-based
+/// formats, see [`MatchContext::rule_set_digests`]).
 pub(crate) struct RuleValues<I, L> {
     pub(crate) input: I,
     pub(crate) lookahead: L,
+    pub(crate) digest: bool,
+}
+
+/// `hb_ot_layout_ruleset_digest_t::may_have` for the input value
+/// `value` of the glyph after the cursor: a rule with no input after
+/// the cursor fills the digest, the others add their first input
+/// value, and values are compared modulo 64.
+fn digest_may_have<R: Rule>(rules: &[R], value: u16) -> bool {
+    rules.iter().any(|r| {
+        r.head()
+            .input
+            .first()
+            .map_or(true, |&v| v % 64 == value % 64)
+    })
 }
 
 /// Where a rule set is matched: the run, the cursor, and the lookup's
@@ -114,7 +135,16 @@ where
     let (second, unsafe_to2) = match walk.next_in(seq, unsafe_to1, |_| Some(true)) {
         Ok(j) => match usable(j) {
             Some(g) => (Some(g), j + 1),
-            None => return rules.iter().find_map(|r| apply(r, sink)),
+            None => {
+                // HarfBuzz checks the digest before it reads this
+                // glyph. Anywhere else the digest marks what the rules
+                // below would.
+                if values.digest && !digest_may_have(rules, (values.input)(first)) {
+                    sink.unsafe_to_concat(at, unsafe_to1, false);
+                    return None;
+                }
+                return rules.iter().find_map(|r| apply(r, sink));
+            }
         },
         Err(_) => (None, 0),
     };

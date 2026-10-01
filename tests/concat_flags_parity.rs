@@ -7,6 +7,9 @@
 //! `ChainRuleSet::apply`). It reads the glyphs after the cursor first
 //! and marks the cursor through the glyph that ruled a rule out, and
 //! once a rule matches it marks from where the match left the cursor.
+//! A class-based rule set in one of the first eight subtables of its
+//! lookup checks the glyph after the cursor against a digest of the
+//! classes its rules start with before it reads the next glyph.
 //! A `kern` or `kerx` table the shaping plan applies marks the whole
 //! run (`KerxTable::apply`), kerning or not.
 //!
@@ -15,8 +18,12 @@
 //! `HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES`: glyph id, cluster (a
 //! UTF-8 byte offset) and glyph flags, in output order.
 
+use std::time::{Duration, Instant};
+
 use sigilbuzz::{shape, Blob, Buffer, BufferFlags, ClusterLevel, Direction, Face, Font};
 
+const CHAKMA_DIST: &[u8] = include_bytes!("fonts/NotoSansChakma-Dist-Subset.ttf");
+const CHAKMA_DIST9: &[u8] = include_bytes!("fonts/NotoSansChakma-Dist9-Subset.ttf");
 const MODI: &[u8] = include_bytes!("fonts/NotoSansModi-Regular.ttf");
 const SHARADA: &[u8] = include_bytes!("fonts/NotoSansSharada-Regular.ttf");
 const TAI_THAM: &[u8] = include_bytes!("fonts/NotoSansTaiTham-Regular.ttf");
@@ -134,6 +141,60 @@ fn a_rule_matched_on_the_last_glyph_marks_from_the_end_of_its_match() {
         flags(MYANMAR, "\u{AA78}\u{1084}"),
         [(170, 0, 0), (118, 0, 0), (388, 0, 0)]
     );
+}
+
+#[test]
+fn a_rule_set_digest_marks_through_the_glyph_after_the_cursor() {
+    // Noto Sans Myanmar's `blws` lookup 73 has more than four
+    // class-based rules for U+109B, and none starts with the class of
+    // U+1092. HarfBuzz rules U+1092 out with the rule set's digest
+    // before it reads the ZWNJ after it, and marks the cursor through
+    // U+1092. Without the digest, the ZWNJ would take it off the fast
+    // path, and the full matches would mark nothing.
+    assert_eq!(
+        flags(MYANMAR, "\u{109B}\u{1092}\u{200C}"),
+        [(388, 0, 2), (141, 0, 2), (132, 3, 2), (3, 6, 3)]
+    );
+    // The `dist` lookup of Noto Sans Chakma does the same in GPOS. Its
+    // rules for a letter all start with a vowel sign or a post-base
+    // form, so a letter, then a ZWJ, after the cursor marks the cursor
+    // through the letter.
+    assert_eq!(
+        flags(CHAKMA_DIST, "\u{11103}\u{11122}\u{200D}"),
+        [(5, 0, 2), (7, 4, 2), (1, 4, 2)]
+    );
+    assert_eq!(
+        flags(CHAKMA_DIST, "\u{11122}\u{11103}\u{11122}\u{200D}"),
+        [(7, 0, 2), (5, 4, 2), (7, 8, 2), (1, 8, 2)]
+    );
+}
+
+#[test]
+fn a_rule_set_past_the_eighth_subtable_has_no_digest() {
+    // The same font with eight subtables in front of the `dist`
+    // subtable. HarfBuzz gives only the first eight subtables of a
+    // lookup a cache, and a rule set without one keeps no digest, so
+    // the ZWJ takes it off the fast path and nothing is marked.
+    assert_eq!(
+        flags(CHAKMA_DIST9, "\u{11103}\u{11122}\u{200D}"),
+        [(5, 0, 0), (7, 4, 0), (1, 4, 0)]
+    );
+    assert_eq!(
+        flags(CHAKMA_DIST9, "\u{11103}\u{11122}"),
+        [(5, 0, 2), (7, 4, 2)]
+    );
+}
+
+#[test]
+fn long_runs_through_a_rule_set_digest_stay_fast() {
+    // Every letter of the run is a cursor whose rule set checks the
+    // digest. The check reads the rule set once per cursor.
+    let chakma = "\u{11103}\u{11122}\u{200D}".repeat(5_000);
+    let myanmar = "\u{109B}\u{1092}\u{200C}".repeat(5_000);
+    let start = Instant::now();
+    assert!(flags(CHAKMA_DIST, &chakma).len() >= 15_000);
+    assert!(flags(MYANMAR, &myanmar).len() >= 15_000);
+    assert!(start.elapsed() < Duration::from_secs(20));
 }
 
 /// Open Sans with its GPOS table renamed, so only its `kern` table can

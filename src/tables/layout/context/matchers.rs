@@ -130,6 +130,7 @@ impl Context1<'_> {
         let values = RuleValues {
             input: |g| g,
             lookahead: |g| g,
+            digest: false,
         };
         match_rule_set(&cur, sink, &set.rules, &values, |rule, sink| {
             let tail = &rule.input_tail;
@@ -169,6 +170,7 @@ impl Context2<'_> {
         let values = RuleValues {
             input: |g| self.class_def.class_of(g),
             lookahead: |g| self.class_def.class_of(g),
+            digest: cx.rule_set_digests(),
         };
         match_rule_set(&cur, sink, &set.rules, &values, |rule, sink| {
             let tail = &rule.input_classes_tail;
@@ -208,6 +210,7 @@ impl ChainContext1<'_> {
         let values = RuleValues {
             input: |g| g,
             lookahead: |g| g,
+            digest: false,
         };
         match_rule_set(&cur, sink, &set.rules, &values, |rule, sink| {
             let (tail, ahead, back) = (&rule.input_tail, &rule.lookahead, &rule.backtrack);
@@ -251,6 +254,7 @@ impl ChainContext2<'_> {
         let values = RuleValues {
             input: |g| self.input_class.class_of(g),
             lookahead: |g| self.lookahead_class.class_of(g),
+            digest: cx.rule_set_digests(),
         };
         match_rule_set(&cur, sink, &set.rules, &values, |rule, sink| {
             let (tail, ahead, back) = (&rule.input_classes_tail, &rule.lookahead, &rule.backtrack);
