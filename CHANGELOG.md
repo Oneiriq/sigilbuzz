@@ -88,6 +88,12 @@ Added:
 - `sigilbuzz-capi`: `hb_font_get_nominal_glyph`, `hb_font_get_variation_glyph`,
   `hb_font_get_glyph`, `hb_face_collect_variation_selectors`, and
   `hb_face_collect_variation_unicodes`.
+- `Buffer::{set_not_found_variation_selector_glyph, not_found_variation_selector_glyph}`,
+  HarfBuzz's not-found variation selector glyph: a variation selector the font has no
+  glyph for after its base character becomes that glyph, with no advance or offset,
+  instead of being hidden or removed, so a caller can tell the font lacks the variation.
+  `sigilbuzz-capi`: `hb_buffer_set_not_found_variation_selector_glyph`,
+  `hb_buffer_get_not_found_variation_selector_glyph`, and `HB_CODEPOINT_INVALID`.
 - `BidiParagraph` applies UAX #9 rule P1: it splits the text after each paragraph
   separator (LF, CR, NEL, U+001C to U+001E, U+2029, with CR LF as one separator, as ICU
   treats it), and each paragraph gets its own base level (or the forced direction).

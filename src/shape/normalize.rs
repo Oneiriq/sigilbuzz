@@ -52,7 +52,7 @@ use super::fallback;
 use super::segment::Segment;
 use super::shaper::{NormalizationMode, Shaper};
 use super::{glyph_props, ignorables};
-use crate::buffer::{char_class, ClusterLevel, Glyph};
+use crate::buffer::{char_class, unicode_prop, ClusterLevel, Glyph};
 use crate::tables::cmap::Cmap;
 use crate::tables::layout::skip_iter::match_prop;
 use crate::unicode::general_category::{
@@ -87,6 +87,10 @@ pub(super) struct NormChar {
     /// A COMBINING GRAPHEME JOINER that blocked no mark reordering, so
     /// GSUB may skip it like any other ignorable.
     unhidden: bool,
+    /// A variation selector the font could not resolve after its base,
+    /// shown as the buffer's not-found variation selector glyph: it is
+    /// no longer default ignorable, so it is neither hidden nor removed.
+    shown_selector: bool,
 }
 
 impl Clustered for NormChar {
@@ -110,6 +114,7 @@ impl NormChar {
             class: 0,
             mcc: 0,
             unhidden: false,
+            shown_selector: false,
         };
         c.set_char(ch);
         c
@@ -149,6 +154,9 @@ impl NormChar {
         g.unicode_props = ignorables::unicode_props(self.ch) | glyph_props::initial(self.ch);
         if self.unhidden {
             g.unicode_props &= !match_prop::HIDDEN;
+        }
+        if self.shown_selector {
+            g.unicode_props &= !unicode_prop::DEFAULT_IGNORABLE;
         }
         g.char_class = self.class;
         g.combining_class = self.mcc;
@@ -203,6 +211,9 @@ pub(super) struct Normalizer<'a> {
     /// nonspacing marks take the positional classes their combining
     /// classes stand for (`recategorize_combining_class`).
     pub(super) recategorize_marks: bool,
+    /// The buffer's not-found variation selector glyph
+    /// ([`crate::Buffer::set_not_found_variation_selector_glyph`]).
+    pub(super) not_found_variation_selector: Option<u32>,
 }
 
 impl Normalizer<'_> {
@@ -324,8 +335,11 @@ impl Normalizer<'_> {
     /// ([`Cmap::variation_glyph`]), and the selector goes away, its
     /// cluster merged into the character's (`replace_glyphs (2, 1)`).
     /// When the font has no glyph for the pair, both characters map on
-    /// their own, and so does any further selector. Every other
-    /// character maps on its own (glyph 0 when the font lacks it).
+    /// their own, and so does any further selector. The selector right
+    /// after the character becomes the buffer's not-found variation
+    /// selector glyph after positioning when one is set, and stays
+    /// visible (see [`show_variation_selectors`]). Every other character
+    /// maps on its own (glyph 0 when the font lacks it).
     fn map_variation_selector_cluster(&self, cluster: &[NormChar], out: &mut Vec<NormChar>) {
         let mut chars = cluster.to_vec();
         let nominal = |c: NormChar| c.with_glyph(self.nominal(c.ch).unwrap_or(0));
@@ -343,7 +357,13 @@ impl Normalizer<'_> {
                 }
                 None => {
                     out.push(nominal(chars[i]));
-                    out.push(nominal(chars[i + 1]));
+                    // HarfBuzz's `_hb_glyph_info_set_variation_selector`: no
+                    // mark until `show_variation_selectors`, and no longer
+                    // ignorable when a not-found glyph will replace it.
+                    let mut selector = nominal(chars[i + 1]);
+                    selector.class = char_class::UNRESOLVED_SELECTOR;
+                    selector.shown_selector = self.not_found_variation_selector.is_some();
+                    out.push(selector);
                 }
             }
             i += 2;
@@ -529,6 +549,28 @@ impl Normalizer<'_> {
         for c in output[start..w].iter_mut().chain(&mut input[..end - i]) {
             c.cluster = cluster;
         }
+    }
+}
+
+/// HarfBuzz's `hb_ot_deal_with_variation_selectors`, run after
+/// positioning and before the ignorables are hidden: with a not-found
+/// variation selector glyph set
+/// ([`crate::Buffer::set_not_found_variation_selector_glyph`]), every
+/// variation selector the font could not resolve after its base becomes
+/// that glyph, with no advance and no offset.
+pub(super) fn show_variation_selectors(glyphs: &mut [Glyph], not_found: Option<u32>) {
+    let Some(glyph_id) = not_found else {
+        return;
+    };
+    for g in glyphs
+        .iter_mut()
+        .filter(|g| g.char_class & char_class::UNRESOLVED_SELECTOR != 0)
+    {
+        g.glyph_id = glyph_id;
+        g.x_advance = 0;
+        g.y_advance = 0;
+        g.x_offset = 0;
+        g.y_offset = 0;
     }
 }
 

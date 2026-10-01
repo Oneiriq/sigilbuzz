@@ -254,3 +254,50 @@ fn flags_change_the_shaped_glyphs() {
     // SAFETY: created above.
     unsafe { hb_buffer_destroy(buffer) };
 }
+
+#[test]
+fn the_not_found_variation_selector_glyph_is_a_setting() {
+    const NOTO_CJK_UVS: &[u8] =
+        include_bytes!("../../../../tests/fixtures/noto_sans_cjk_jp_uvs_subset.otf");
+    let font = TestFont::new(NOTO_CJK_UVS);
+    let buffer = hb_buffer_create();
+    // SAFETY: created above.
+    unsafe {
+        assert_eq!(
+            hb_buffer_get_not_found_variation_selector_glyph(buffer),
+            HB_CODEPOINT_INVALID
+        );
+    }
+    // HarfBuzz 14.5.0 at its default MONOTONE_GRAPHEMES: the font has no
+    // glyph for "a" with VS1, so the selector is hidden (the space
+    // glyph, 1) until a glyph is set.
+    assert_eq!(font.shape(buffer, "a\u{FE00}"), [(4, 0), (1, 0)]);
+    // SAFETY: created above.
+    unsafe { hb_buffer_set_not_found_variation_selector_glyph(buffer, 5) };
+    assert_eq!(font.shape(buffer, "a\u{FE00}"), [(4, 0), (5, 0)]);
+    // SAFETY: created above.
+    unsafe {
+        assert_eq!(hb_buffer_get_not_found_variation_selector_glyph(buffer), 5);
+        hb_buffer_clear_contents(buffer);
+        assert_eq!(hb_buffer_get_not_found_variation_selector_glyph(buffer), 5);
+        hb_buffer_reset(buffer);
+        assert_eq!(
+            hb_buffer_get_not_found_variation_selector_glyph(buffer),
+            HB_CODEPOINT_INVALID
+        );
+        hb_buffer_set_not_found_variation_selector_glyph(buffer, 5);
+        hb_buffer_set_not_found_variation_selector_glyph(buffer, HB_CODEPOINT_INVALID);
+    }
+    with_state(buffer, |s| {
+        assert_eq!(s.buffer.not_found_variation_selector_glyph(), None);
+    });
+    // SAFETY: null is allowed, and `buffer` was created above.
+    unsafe {
+        hb_buffer_set_not_found_variation_selector_glyph(ptr::null_mut(), 5);
+        assert_eq!(
+            hb_buffer_get_not_found_variation_selector_glyph(ptr::null()),
+            HB_CODEPOINT_INVALID
+        );
+        hb_buffer_destroy(buffer);
+    }
+}

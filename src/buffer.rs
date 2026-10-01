@@ -226,6 +226,9 @@ pub struct Buffer {
     pub(crate) flags: BufferFlags,
     /// How clusters form and merge, set by [`Buffer::set_cluster_level`].
     pub(crate) cluster_level: ClusterLevel,
+    /// The glyph a variation selector the font cannot resolve becomes,
+    /// set by [`Buffer::set_not_found_variation_selector_glyph`].
+    pub(crate) not_found_variation_selector: Option<u32>,
 }
 
 impl Buffer {

@@ -1,7 +1,8 @@
-//! Buffer flags and cluster levels, HarfBuzz's `hb_buffer_flags_t`
-//! and `hb_buffer_cluster_level_t`.
+//! Buffer flags, cluster levels, and the not-found variation selector
+//! glyph: HarfBuzz's `hb_buffer_flags_t`, `hb_buffer_cluster_level_t`,
+//! and `hb_buffer_set_not_found_variation_selector_glyph`.
 //!
-//! Both are buffer settings rather than content: like HarfBuzz's
+//! All three are buffer settings rather than content: like HarfBuzz's
 //! `hb_buffer_clear_contents`, [`Buffer::clear`] keeps them.
 
 use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
@@ -359,6 +360,45 @@ impl Buffer {
     /// ```
     pub fn set_cluster_level(&mut self, level: ClusterLevel) {
         self.cluster_level = level;
+    }
+
+    /// The glyph set with [`Self::set_not_found_variation_selector_glyph`],
+    /// or `None` (the default).
+    #[must_use]
+    pub const fn not_found_variation_selector_glyph(&self) -> Option<u32> {
+        self.not_found_variation_selector
+    }
+
+    /// Sets the glyph a variation selector becomes when the font has no
+    /// glyph for it after its base character, HarfBuzz's
+    /// `hb_buffer_set_not_found_variation_selector_glyph`.
+    ///
+    /// With `None` (the default) such a selector is a default ignorable
+    /// like any other: it is hidden, or removed with
+    /// [`BufferFlags::REMOVE_DEFAULT_IGNORABLES`]. With `Some(glyph)` it
+    /// stays in the output as `glyph`, so a caller can see that the
+    /// font lacks the variation and, for example, fall back to another
+    /// font. Only the first selector after a base counts, as in
+    /// HarfBuzz's `handle_variation_selector_cluster`. Like the flags,
+    /// the setting survives [`Self::clear`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::{shape, Buffer, Face, Font};
+    ///
+    /// # let data = include_bytes!("../../tests/fixtures/opensans_regular.ttf");
+    /// let font = Font::new(Face::parse_bytes(data, 0)?, 1000.0);
+    /// let mut buffer = Buffer::new();
+    /// buffer.push_str("a\u{FE00}");
+    /// // Open Sans has no variation sequences: the selector is hidden.
+    /// assert_eq!(shape(&font, &buffer, &[])?.glyphs[1].glyph_id, 3);
+    /// buffer.set_not_found_variation_selector_glyph(Some(0));
+    /// assert_eq!(shape(&font, &buffer, &[])?.glyphs[1].glyph_id, 0);
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
+    pub fn set_not_found_variation_selector_glyph(&mut self, glyph: Option<u32>) {
+        self.not_found_variation_selector = glyph;
     }
 }
 

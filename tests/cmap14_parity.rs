@@ -17,7 +17,7 @@
 //! cluster level (MONOTONE_GRAPHEMES, MONOTONE_CHARACTERS, CHARACTERS,
 //! GRAPHEMES). Every y advance and offset is zero.
 
-use sigilbuzz::{shape, Buffer, ClusterLevel, Direction, Face, Font};
+use sigilbuzz::{shape, Buffer, BufferFlags, ClusterLevel, Direction, Face, Font};
 
 const FONT: &[u8] = include_bytes!("fixtures/noto_sans_cjk_jp_uvs_subset.otf");
 
@@ -294,4 +294,259 @@ fn collected_selectors_and_unicodes_match_harfbuzz() {
     for (selector, want) in cases {
         assert_eq!(cmap.variation_unicodes(selector), want, "{selector:X}");
     }
+}
+
+const OPEN_SANS: &[u8] = include_bytes!("fixtures/opensans_regular.ttf");
+const AMIRI: &[u8] = include_bytes!("fixtures/amiri_regular.ttf");
+
+/// Font, text, not-found glyph, cluster level, flags, and the expected
+/// glyphs.
+type NotFoundCase = (
+    &'static [u8],
+    &'static str,
+    Option<u32>,
+    ClusterLevel,
+    BufferFlags,
+    Expected,
+);
+
+/// `hb_buffer_set_not_found_variation_selector_glyph`: font, text, the
+/// not-found glyph, cluster level, flags, and HarfBuzz 14.5.0's output
+/// as `(glyph, cluster, x_advance)`. These come from HarfBuzz's C API
+/// (uharfbuzz does not expose the setting). Every y advance and offset
+/// is zero.
+const NOT_FOUND_CASES: &[NotFoundCase] = &[
+    (FONT, "a\u{FE00}", None, MC, NONE, &[(4, 0, 563), (1, 1, 0)]),
+    // Unset, an unresolved selector is hidden. Meanwhile it is no mark,
+    // so the marks after it stay with it.
+    (
+        FONT,
+        "a\u{FE00}\u{0301}",
+        None,
+        MC,
+        NONE,
+        &[(4, 0, 563), (1, 1, 0), (0, 4, 0)],
+    ),
+    (
+        FONT,
+        "a\u{FE00}\u{0301}",
+        None,
+        MC,
+        PRESERVE,
+        &[(4, 0, 563), (0, 1, 1000), (0, 4, 0)],
+    ),
+    (
+        OPEN_SANS,
+        "a\u{FE00}\u{0301}\u{0302}",
+        None,
+        MC,
+        NONE,
+        &[(68, 0, 1139), (3, 1, 0), (612, 4, 0), (0, 6, 1229)],
+    ),
+    (
+        OPEN_SANS,
+        "a\u{FE00}\u{0301}",
+        None,
+        MC,
+        PRESERVE,
+        &[(68, 0, 1139), (0, 1, 1229), (612, 4, 0)],
+    ),
+    (
+        AMIRI,
+        "a\u{FE00}\u{0301}\u{0302}",
+        None,
+        MC,
+        NONE,
+        &[(6256, 0, 420), (1, 1, 0), (6519, 4, 0), (6520, 6, 0)],
+    ),
+    (
+        AMIRI,
+        "a\u{FE00}\u{0301}",
+        None,
+        MC,
+        PRESERVE,
+        &[(6256, 0, 420), (0, 1, 364), (6519, 4, 0)],
+    ),
+    (
+        FONT,
+        "a\u{FE00}",
+        Some(5),
+        MC,
+        NONE,
+        &[(4, 0, 563), (5, 1, 0)],
+    ),
+    (
+        FONT,
+        "a\u{FE00}",
+        Some(0),
+        MC,
+        NONE,
+        &[(4, 0, 563), (0, 1, 0)],
+    ),
+    (
+        FONT,
+        "\u{845B}\u{E0102}",
+        Some(5),
+        MC,
+        NONE,
+        &[(12, 0, 1000), (5, 3, 0)],
+    ),
+    // A resolved sequence, then a further selector: hidden as usual.
+    (
+        FONT,
+        "\u{845B}\u{E0100}\u{E0101}",
+        Some(5),
+        MC,
+        NONE,
+        &[(29, 0, 1000), (1, 7, 0)],
+    ),
+    (
+        FONT,
+        "\u{845B}\u{E0102}\u{FE00}",
+        Some(5),
+        MC,
+        NONE,
+        &[(12, 0, 1000), (5, 3, 0), (1, 7, 0)],
+    ),
+    // A default sequence resolves, so nothing is shown.
+    (
+        FONT,
+        "\u{845B}\u{E0101}",
+        Some(5),
+        MC,
+        NONE,
+        &[(12, 0, 1000)],
+    ),
+    // A selector with no base is not looked up as a pair.
+    (
+        FONT,
+        "\u{FE00}a",
+        Some(5),
+        MC,
+        NONE,
+        &[(1, 0, 0), (4, 3, 563)],
+    ),
+    (
+        FONT,
+        "a\u{FE00}\u{0301}",
+        Some(5),
+        MC,
+        NONE,
+        &[(4, 0, 563), (5, 1, 0), (0, 4, 0)],
+    ),
+    (
+        FONT,
+        "a\u{FE00}",
+        Some(5),
+        ClusterLevel::MonotoneGraphemes,
+        NONE,
+        &[(4, 0, 563), (5, 0, 0)],
+    ),
+    (
+        FONT,
+        "a\u{FE00}",
+        Some(5),
+        ClusterLevel::Characters,
+        NONE,
+        &[(4, 0, 563), (5, 1, 0)],
+    ),
+    (
+        FONT,
+        "a\u{FE00}",
+        Some(5),
+        ClusterLevel::Graphemes,
+        NONE,
+        &[(4, 0, 563), (5, 0, 0)],
+    ),
+    // Removing default ignorables keeps the shown selector.
+    (
+        FONT,
+        "a\u{FE00}\u{FE01}",
+        Some(5),
+        MC,
+        REMOVE,
+        &[(4, 0, 563), (5, 1, 0)],
+    ),
+    (
+        FONT,
+        "a\u{FE00}\u{FE01}",
+        Some(5),
+        MC,
+        BufferFlags::PRESERVE_DEFAULT_IGNORABLES,
+        &[(4, 0, 563), (5, 1, 0), (0, 4, 1000)],
+    ),
+    (
+        FONT,
+        "a\u{FE00}b",
+        Some(12),
+        MC,
+        NONE,
+        &[(4, 0, 563), (12, 1, 0), (0, 4, 1000)],
+    ),
+    (
+        FONT,
+        "\u{3001}\u{FE02}",
+        Some(12),
+        MC,
+        NONE,
+        &[(7, 0, 1000), (12, 3, 0)],
+    ),
+    (
+        OPEN_SANS,
+        "a\u{FE00}",
+        Some(5),
+        MC,
+        NONE,
+        &[(68, 0, 1139), (5, 1, 0)],
+    ),
+    (
+        OPEN_SANS,
+        "a\u{FE00}\u{0301}",
+        Some(70),
+        MC,
+        NONE,
+        &[(68, 0, 1139), (70, 1, 0), (612, 4, 0)],
+    ),
+    (
+        OPEN_SANS,
+        "a\u{FE00}b",
+        Some(70),
+        MC,
+        NONE,
+        &[(68, 0, 1139), (70, 1, 0), (69, 4, 1255)],
+    ),
+];
+
+const MC: ClusterLevel = ClusterLevel::MonotoneCharacters;
+const NONE: BufferFlags = BufferFlags::DEFAULT;
+const PRESERVE: BufferFlags = BufferFlags::PRESERVE_DEFAULT_IGNORABLES;
+const REMOVE: BufferFlags = BufferFlags::REMOVE_DEFAULT_IGNORABLES;
+
+#[test]
+fn unresolved_selectors_show_the_not_found_glyph_like_harfbuzz() {
+    let mut failures = Vec::new();
+    for &(data, text, not_found, level, flags, want) in NOT_FOUND_CASES {
+        let font = Font::new(Face::parse_bytes(data, 0).expect("parse face"), 1000.0);
+        let mut buffer = Buffer::new();
+        buffer.push_str(text);
+        buffer.set_direction(Direction::Ltr);
+        buffer.set_cluster_level(level);
+        buffer.set_flags(flags);
+        buffer.set_not_found_variation_selector_glyph(not_found);
+        let run = shape(&font, &buffer, &[]).expect("shape");
+        let got: Vec<(u32, u32, i32)> = run
+            .glyphs
+            .iter()
+            .map(|g| {
+                assert_eq!((g.y_advance, g.x_offset, g.y_offset), (0, 0, 0), "{text:?}");
+                (g.glyph_id, g.cluster, g.x_advance)
+            })
+            .collect();
+        if got != want {
+            failures.push(format!(
+                "{text:?} {not_found:?} {level:?} {flags:?}\n  got  {got:?}\n  want {want:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

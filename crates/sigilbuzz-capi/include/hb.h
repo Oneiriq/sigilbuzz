@@ -258,6 +258,15 @@ void                      hb_buffer_set_cluster_level(hb_buffer_t               
                                                       hb_buffer_cluster_level_t  cluster_level);
 hb_buffer_cluster_level_t hb_buffer_get_cluster_level(const hb_buffer_t *buffer);
 
+/* The glyph a variation selector becomes when the font has no glyph for
+ * it after its base character. HB_CODEPOINT_INVALID (the default) hides
+ * such a selector like any other default ignorable. A setting:
+ * hb_buffer_clear_contents keeps it and hb_buffer_reset clears it. */
+#define HB_CODEPOINT_INVALID ((hb_codepoint_t) -1)
+void           hb_buffer_set_not_found_variation_selector_glyph(hb_buffer_t   *buffer,
+                                                                hb_codepoint_t not_found_variation_selector);
+hb_codepoint_t hb_buffer_get_not_found_variation_selector_glyph(const hb_buffer_t *buffer);
+
 /* Adds text[item_offset, item_offset + item_length) (item_length -1
  * means to the end; like HarfBuzz, an offset past the end is clamped
  * to it and any other negative length counts as 0, so such an item

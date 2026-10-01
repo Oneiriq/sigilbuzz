@@ -1,7 +1,8 @@
 /*
  * test_introspect.c: drives hb_face_collect_unicodes,
- * hb_ot_layout_collect_features, the variation sequence collectors, and
- * the hb_font glyph lookups against Open Sans.
+ * hb_ot_layout_collect_features, the variation sequence collectors, the
+ * hb_font glyph lookups, and the not-found variation selector glyph
+ * setting against Open Sans.
  *
  * The collectors populate an `hb_set_t` the caller hands in. The test
  * asserts the sets hold at least one known entry (U+0041 for
@@ -87,6 +88,19 @@ int main(int argc, char **argv) {
         return 11;
     }
     hb_font_destroy(font);
+
+    /* The not-found variation selector glyph is a buffer setting. */
+    hb_buffer_t *buffer = hb_buffer_create();
+    if (hb_buffer_get_not_found_variation_selector_glyph(buffer) != HB_CODEPOINT_INVALID) {
+        fprintf(stderr, "expected no not-found variation selector glyph\n");
+        return 12;
+    }
+    hb_buffer_set_not_found_variation_selector_glyph(buffer, 5);
+    if (hb_buffer_get_not_found_variation_selector_glyph(buffer) != 5) {
+        fprintf(stderr, "expected not-found variation selector glyph 5\n");
+        return 13;
+    }
+    hb_buffer_destroy(buffer);
 
     hb_face_destroy(face);
     hb_blob_destroy(blob);
