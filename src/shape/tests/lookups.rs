@@ -293,7 +293,8 @@ fn substitute_glyph_clears_only_the_ignorable_bit() {
 fn multiple_substitution_marks_every_output_glyph_substituted() {
     let mut g = Glyph::new(0, 2);
     g.unicode_props = unicode_prop::DEFAULT_IGNORABLE | unicode_prop::NON_JOINER;
-    let mut buf = GsubBuffer::new(alloc::vec![Glyph::new(1, 0), g], None);
+    let level = ClusterLevel::MonotoneCharacters;
+    let mut buf = GsubBuffer::new(alloc::vec![Glyph::new(1, 0), g], None, level, false);
     buf.clear_output();
     buf.next_glyph();
     lig::multiply(&mut buf, &[5, 6]);

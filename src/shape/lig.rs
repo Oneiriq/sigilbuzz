@@ -44,7 +44,7 @@
 
 use super::gsub_buffer::GsubBuffer;
 use crate::buffer::char_class;
-use crate::buffer::{ClusterLevel, Glyph};
+use crate::buffer::Glyph;
 use crate::tables::layout::skip_iter::{match_prop, GlyphClasses, GlyphKind, MatchGlyph};
 
 fn set_lig_props(g: &mut Glyph, props: u8) {
@@ -147,7 +147,7 @@ fn renumber(g: &Glyph, so_far: u32, last: u32) -> u8 {
 /// - Marks right after the last component that belonged to an
 ///   earlier ligature are renumbered into this one.
 ///
-/// At the monotone cluster `level`s the matched span shares one
+/// At the monotone cluster levels the matched span shares one
 /// cluster, the smallest in it (`ligate_input` calls its buffer's
 /// `merge_clusters`); at the others the ligature keeps its first
 /// component's cluster and the glyphs between keep theirs.
@@ -161,7 +161,6 @@ pub(super) fn ligate(
     match_end: usize,
     lig_gid: u16,
     classes: &GlyphClasses<'_>,
-    level: ClusterLevel,
 ) -> bool {
     let cursor = buf.cursor();
     let (Some(&first_pos), Some(&last)) = (positions.first(), positions.last()) else {
@@ -191,7 +190,7 @@ pub(super) fn ligate(
             .map(|&p| comps(buf, p, false))
             .sum::<u32>();
 
-    buf.merge_clusters(cursor, match_end, level);
+    buf.merge_clusters(cursor, match_end);
 
     let mut is_mark_ligature = kind(buf, cursor) == GlyphKind::Mark;
     let mut is_base_ligature = kind(buf, cursor) == GlyphKind::Base;
@@ -304,15 +303,15 @@ pub(super) fn ligate_glyphs(
     positions: &[usize],
     lig_gid: u16,
     classes: &GlyphClasses<'_>,
-    level: ClusterLevel,
+    level: crate::buffer::ClusterLevel,
 ) -> bool {
     let (Some(&first), Some(&last)) = (positions.first(), positions.last()) else {
         return false;
     };
-    let mut buf = GsubBuffer::new(core::mem::take(glyphs), None);
+    let mut buf = GsubBuffer::new(core::mem::take(glyphs), None, level, false);
     buf.clear_output();
     buf.next_glyphs(first);
-    let done = ligate(&mut buf, positions, last + 1, lig_gid, classes, level);
+    let done = ligate(&mut buf, positions, last + 1, lig_gid, classes);
     *glyphs = buf.into_glyphs();
     done
 }

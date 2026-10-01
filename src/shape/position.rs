@@ -25,6 +25,7 @@ use alloc::vec::Vec;
 
 use super::attach::{self, Attach};
 use super::fallback::{self, MarkPositioner};
+use super::glyph_flags::FlagCx;
 use super::gpos::{self, GposCx};
 use super::shaper::{MarkZeroing, Shaper};
 use super::{kern, Feature, LookupBudget, ProcessedSegment, VarCtx};
@@ -59,6 +60,8 @@ pub(super) struct Inputs<'a> {
     /// The marks get fallback positions (see
     /// [`fallback_mark_positioning`]).
     pub(super) fallback_marks: bool,
+    /// The shaping call's glyph flag settings.
+    pub(super) flags: FlagCx,
 }
 
 /// True when the font's GPOS positions a run of `shaper`: HarfBuzz
@@ -174,6 +177,7 @@ pub(super) fn position(
                 gpos,
                 gdef: input.gdef,
                 var: input.var,
+                flags: input.flags,
             };
             for seg in segments {
                 if seg.range.is_empty() {
@@ -189,7 +193,7 @@ pub(super) fn position(
                 ) else {
                     continue;
                 };
-                let mut att = Attach::new(direction, seg_slots);
+                let mut att = Attach::new(direction, seg_slots, input.flags);
                 gpos::apply_stage(&cx, seg_glyphs, &mut att, &lookups, budget);
             }
         }
@@ -197,11 +201,11 @@ pub(super) fn position(
     if requested_kerning {
         if apply_kerx {
             if let Some(kerx) = face.kerx()? {
-                kern::apply_kerx_table(face, &kerx, glyphs, input.gdef, direction)?;
+                kern::apply_kerx_table(face, &kerx, glyphs, input.gdef, direction, input.flags)?;
             }
         } else if apply_kern {
             if let Some(ref table) = kern_table {
-                kern::apply_kern_table(table, glyphs, input.gdef, direction);
+                kern::apply_kern_table(table, glyphs, input.gdef, direction, input.flags);
             }
         }
     }
@@ -233,6 +237,7 @@ pub(super) fn position(
             direction,
             ligature_direction,
             adjust_offsets,
+            level: input.flags.level,
         };
         positioner.position_marks(glyphs)?;
     }

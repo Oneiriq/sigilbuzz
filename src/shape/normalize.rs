@@ -49,10 +49,11 @@ use alloc::vec::Vec;
 
 use super::cluster::{merge_clusters, Clustered};
 use super::fallback;
+use super::glyph_flags;
 use super::segment::Segment;
 use super::shaper::{NormalizationMode, Shaper};
 use super::{glyph_props, ignorables};
-use crate::buffer::{char_class, ClusterLevel, Glyph};
+use crate::buffer::{char_class, ClusterLevel, Glyph, GlyphFlags};
 use crate::tables::cmap::Cmap;
 use crate::tables::layout::skip_iter::match_prop;
 use crate::unicode::general_category::{
@@ -87,6 +88,9 @@ pub(super) struct NormChar {
     /// A COMBINING GRAPHEME JOINER that blocked no mark reordering, so
     /// GSUB may skip it like any other ignorable.
     unhidden: bool,
+    /// Glyph flags the character carries from before normalization
+    /// (grapheme merges a cluster level skipped).
+    flags: GlyphFlags,
 }
 
 impl Clustered for NormChar {
@@ -96,6 +100,14 @@ impl Clustered for NormChar {
 
     fn set_cluster(&mut self, cluster: u32) {
         self.cluster = cluster;
+    }
+
+    fn flags(&self) -> GlyphFlags {
+        self.flags
+    }
+
+    fn set_flags(&mut self, flags: GlyphFlags) {
+        self.flags = flags;
     }
 }
 
@@ -110,6 +122,7 @@ impl NormChar {
             class: 0,
             mcc: 0,
             unhidden: false,
+            flags: GlyphFlags::empty(),
         };
         c.set_char(ch);
         c
@@ -152,6 +165,7 @@ impl NormChar {
         }
         g.char_class = self.class;
         g.combining_class = self.mcc;
+        g.flags = self.flags;
         g
     }
 }
@@ -175,7 +189,11 @@ pub(super) fn normalize_segments<'a>(
         let chars: Vec<NormChar> = seg
             .cp_range
             .clone()
-            .map(|i| NormChar::new(codepoints[i], glyphs[i].cluster, mirrored[i]))
+            .map(|i| {
+                let mut c = NormChar::new(codepoints[i], glyphs[i].cluster, mirrored[i]);
+                c.flags = glyphs[i].flags;
+                c
+            })
             .collect();
         let start = out_codepoints.len();
         for c in normalizer_for(seg).run(&chars) {
@@ -499,7 +517,7 @@ impl Normalizer<'_> {
         }
         let (output, input) = chars.split_at_mut(i);
         for c in output[start..w].iter_mut().chain(&mut input[..end - i]) {
-            c.cluster = cluster;
+            glyph_flags::set_cluster(c, cluster, GlyphFlags::empty());
         }
     }
 }

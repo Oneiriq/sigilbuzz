@@ -29,6 +29,10 @@ pub const HB_BUFFER_FLAG_PRESERVE_DEFAULT_IGNORABLES: hb_buffer_flags_t = 0x0000
 pub const HB_BUFFER_FLAG_REMOVE_DEFAULT_IGNORABLES: hb_buffer_flags_t = 0x0000_0008;
 /// Never insert U+25CC DOTTED CIRCLE.
 pub const HB_BUFFER_FLAG_DO_NOT_INSERT_DOTTED_CIRCLE: hb_buffer_flags_t = 0x0000_0010;
+/// Report `HB_GLYPH_FLAG_UNSAFE_TO_CONCAT` on the shaped glyphs.
+pub const HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT: hb_buffer_flags_t = 0x0000_0040;
+/// Report `HB_GLYPH_FLAG_SAFE_TO_INSERT_TATWEEL` on the shaped glyphs.
+pub const HB_BUFFER_FLAG_PRODUCE_SAFE_TO_INSERT_TATWEEL: hb_buffer_flags_t = 0x0000_0080;
 
 /// `hb_buffer_cluster_level_t`.
 pub type hb_buffer_cluster_level_t = c_uint;
@@ -69,9 +73,8 @@ pub(crate) fn restore_defaults(state: &mut BufferState) {
 }
 
 /// Sets the buffer flags. Like HarfBuzz, the value is stored as given
-/// and [`hb_buffer_get_flags`] returns it; bits sigilbuzz has no
-/// behavior for (HarfBuzz's `VERIFY`, `PRODUCE_UNSAFE_TO_CONCAT`,
-/// `PRODUCE_SAFE_TO_INSERT_TATWEEL`) have no effect.
+/// and [`hb_buffer_get_flags`] returns it; HarfBuzz's `VERIFY`, which
+/// sigilbuzz has no behavior for, has no effect.
 ///
 /// # Safety
 /// `buffer` must be null or a live buffer.

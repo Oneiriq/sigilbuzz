@@ -16,8 +16,8 @@ use super::segment::{
 };
 use super::shaper::Shaper;
 use super::{
-    cluster, dotted_circle, feature_disabled, ignorables, native_direction, position, required,
-    rotate, thai, Feature, JoinerTable, LookupBudget, VarCtx,
+    cluster, dotted_circle, feature_disabled, glyph_flags, ignorables, joining_flags,
+    native_direction, position, required, rotate, thai, Feature, JoinerTable, LookupBudget, VarCtx,
 };
 use crate::buffer::{script_priority_for, Buffer, BufferFlags, Direction, Glyph, ShapedRun};
 use crate::error::{Error, Result};
@@ -249,9 +249,11 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let language_tags: &[[u8; 4]] = buffer
         .language()
         .map_or(&[], crate::Language::ot_language_tags);
+    let concat = flags.contains(BufferFlags::PRODUCE_UNSAFE_TO_CONCAT);
     let gsub = face.gsub()?.map(|g| {
         g.with_language_tags(language_tags)
             .with_cluster_level(level)
+            .with_unsafe_to_concat(concat)
     });
     let gpos = face.gpos()?.map(|g| g.with_language_tags(language_tags));
 
@@ -289,6 +291,21 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             recategorize_marks: fallback_marks,
         },
     );
+
+    // The glyph flags of cursive joining, which HarfBuzz sets while its
+    // Arabic and Universal Shaping Engine shapers assign the joining
+    // forms (`arabic_joining`), over the whole buffer.
+    let flag_cx = glyph_flags::FlagCx::new(level, flags);
+    let joins = match buffer_script {
+        Some(Script::Arabic) => !is_vertical,
+        Some(Script::Mongolian | Script::NKo) => true,
+        _ => false,
+    };
+    if joins {
+        let types: Vec<JoiningType> = codepoints.iter().map(|&c| joining_type(c)).collect();
+        let context = JoiningContext::from_context(buffer.pre_context(), buffer.post_context());
+        joining_flags::set_joining_flags(&mut glyphs, &types, context, flag_cx);
+    }
 
     // One work budget for every lookup this call applies directly,
     // across all segments (see `LookupBudget`). The `ot` pre-shapers
@@ -800,6 +817,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         applied_morx,
         zero_ignorables: ignorables::zeroes(flags),
         fallback_marks,
+        flags: flag_cx,
     };
     position::position(&inputs, &mut glyphs, &seg_glyph_ranges, &mut budget)?;
 
@@ -813,6 +831,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // kept or removed, as the buffer flags ask).
     let space = cmap.glyph_id(' ').map(u32::from);
     ignorables::hide(&mut glyphs, space, flags, level);
+    glyph_flags::propagate(&mut glyphs, flags);
 
     Ok(ShapedRun { glyphs })
 }

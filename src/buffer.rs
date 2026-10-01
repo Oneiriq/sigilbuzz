@@ -18,7 +18,9 @@ use crate::unicode::{script_of, Script};
 
 pub mod char_class;
 mod flags;
+mod glyph_flags;
 pub use flags::{BufferFlags, ClusterLevel};
+pub use glyph_flags::GlyphFlags;
 
 /// Writing direction of a text run.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +115,11 @@ pub struct Glyph {
     /// `F_PER_SYLLABLE` only match within one syllable. Zero for a
     /// glyph in no syllable.
     pub syllable: u8,
+    /// Glyph flags, HarfBuzz's `hb_glyph_info_get_glyph_flags`: whether
+    /// the text may be broken or joined at this glyph's cluster without
+    /// reshaping (see [`GlyphFlags`]). Every glyph of a cluster carries
+    /// the same flags.
+    pub flags: GlyphFlags,
 }
 
 /// Bits packed into [`Glyph::unicode_props`].
@@ -198,6 +205,7 @@ impl Glyph {
             char_class: 0,
             combining_class: 0,
             syllable: 0,
+            flags: GlyphFlags::empty(),
         }
     }
 }

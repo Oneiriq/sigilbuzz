@@ -8,15 +8,21 @@
 //! GSUB, so a feature registered per syllable only matches glyphs of
 //! the cursor's syllable (see
 //! [`MatchContext::with_per_syllable`](crate::tables::layout::MatchContext::with_per_syllable)).
+//!
+//! As in the shapers' `setup_syllables` functions, each syllable is
+//! also marked unsafe to break: its shape depends on all of it.
 
-use crate::buffer::Glyph;
+use super::glyph_flags;
+use crate::buffer::{ClusterLevel, Glyph};
 
 /// Numbers the syllables of `glyphs`, one glyph per code point: each
 /// `(start, end, kind)` gives its glyphs `start..end` the next serial
-/// and the type `kind`. Glyphs outside every syllable keep theirs.
+/// and the type `kind`, and marks it unsafe to break at the cluster
+/// `level`. Glyphs outside every syllable keep theirs.
 pub(crate) fn number_syllables(
     glyphs: &mut [Glyph],
     syllables: impl IntoIterator<Item = (usize, usize, u8)>,
+    level: ClusterLevel,
 ) {
     let mut serial: u8 = 1;
     for (start, end, kind) in syllables {
@@ -26,6 +32,7 @@ pub(crate) fn number_syllables(
                 g.syllable = value;
             }
         }
+        glyph_flags::unsafe_to_break(glyphs, start, end, level);
         serial = if serial == 15 { 1 } else { serial + 1 };
     }
 }
@@ -35,17 +42,27 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
 
+    const MC: ClusterLevel = ClusterLevel::MonotoneCharacters;
+
     #[test]
     fn serials_run_from_one_to_fifteen_and_wrap() {
         let mut glyphs: Vec<Glyph> = (0..17).map(|i| Glyph::new(1, i)).collect();
-        number_syllables(&mut glyphs, (0..17).map(|i| (i, i + 1, 2)));
+        number_syllables(&mut glyphs, (0..17).map(|i| (i, i + 1, 2)), MC);
         assert_eq!(glyphs[0].syllable, 0x12);
         assert_eq!(glyphs[14].syllable, 0xF2);
         assert_eq!(glyphs[15].syllable, 0x12);
         // A range past the run is cut at its end; the glyphs keep
         // their syllable when a range misses them.
-        number_syllables(&mut glyphs, [(16, 99, 3)]);
+        number_syllables(&mut glyphs, [(16, 99, 3)], MC);
         assert_eq!(glyphs[16].syllable, 0x13);
         assert_eq!(glyphs[15].syllable, 0x12);
+    }
+
+    #[test]
+    fn a_syllable_is_unsafe_to_break_inside() {
+        let mut glyphs: Vec<Glyph> = (0..4).map(|i| Glyph::new(1, i)).collect();
+        number_syllables(&mut glyphs, [(0, 3, 1), (3, 4, 1)], MC);
+        let flags: Vec<u32> = glyphs.iter().map(|g| g.flags.bits()).collect();
+        assert_eq!(flags, [0, 3, 3, 0]);
     }
 }

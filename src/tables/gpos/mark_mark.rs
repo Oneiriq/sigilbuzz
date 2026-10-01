@@ -96,6 +96,12 @@ impl<'a> MarkMarkPos<'a> {
         self.mark1_coverage.contains(glyph_id)
     }
 
+    /// True when `glyph_id` is in the mark2 (base mark) coverage.
+    #[must_use]
+    pub fn covers_mark2(&self, glyph_id: u16) -> bool {
+        self.mark2_coverage.contains(glyph_id)
+    }
+
     /// Tries to attach the upper mark `mark1_gid` onto the lower mark
     /// `mark2_gid`. Returns the anchor pair when both are covered and
     /// `mark2` has an anchor for `mark1`'s class; `None` otherwise.

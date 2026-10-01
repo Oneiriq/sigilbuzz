@@ -18,7 +18,7 @@
 use alloc::vec::Vec;
 
 use super::cluster::merge_clusters;
-use crate::buffer::{unicode_prop, BufferFlags, ClusterLevel, Glyph};
+use crate::buffer::{unicode_prop, BufferFlags, ClusterLevel, Glyph, GlyphFlags};
 
 pub(super) use crate::unicode::is_default_ignorable;
 
@@ -105,13 +105,18 @@ pub(super) fn hide(
     // make a long run of ignorables after one big cluster quadratic.
     let mut run_start = 0;
     let mut run_cluster: Option<u32> = None;
+    // The flags of the deleted glyph that last lowered `run_cluster`:
+    // HarfBuzz's `set_cluster` gives them to every glyph whose cluster
+    // the merge changes.
+    let mut run_flags: Option<GlyphFlags> = None;
     for i in 0..glyphs.len() {
         let glyph = glyphs[i];
         if !is_hidden(&glyph) {
             if run_cluster != Some(glyph.cluster) {
-                write_cluster(&mut kept, run_start, run_cluster);
+                write_cluster(&mut kept, run_start, run_cluster, run_flags);
                 run_start = kept.len();
                 run_cluster = Some(glyph.cluster);
+                run_flags = None;
             }
             kept.push(glyph);
             continue;
@@ -130,6 +135,7 @@ pub(super) fn hide(
             // continues into it.
             if cluster < old {
                 run_cluster = Some(cluster);
+                run_flags = Some(glyph.flags);
                 while run_start > 0 && kept[run_start - 1].cluster == cluster {
                     run_start -= 1;
                 }
@@ -141,17 +147,25 @@ pub(super) fn hide(
         // the merge only changes glyphs still to come.
         merge_clusters(glyphs, i, i + 2, level);
     }
-    write_cluster(&mut kept, run_start, run_cluster);
+    write_cluster(&mut kept, run_start, run_cluster, run_flags);
     *glyphs = kept;
 }
 
 /// Gives every glyph of `kept[start..]` the cluster `cluster`, when
-/// there is one.
-fn write_cluster(kept: &mut [Glyph], start: usize, cluster: Option<u32>) {
+/// there is one, and `flags` to those whose cluster that changes.
+fn write_cluster(
+    kept: &mut [Glyph],
+    start: usize,
+    cluster: Option<u32>,
+    flags: Option<GlyphFlags>,
+) {
     let Some(cluster) = cluster else {
         return;
     };
     for g in kept.get_mut(start..).unwrap_or_default() {
+        if let Some(flags) = flags.filter(|_| g.cluster != cluster) {
+            g.flags = flags;
+        }
         g.cluster = cluster;
     }
 }

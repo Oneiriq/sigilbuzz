@@ -21,6 +21,7 @@ fn glyph(cluster: u32, x_advance: i32) -> Glyph {
         char_class: 0,
         combining_class: 0,
         syllable: 0,
+        flags: sigilbuzz::GlyphFlags::empty(),
     }
 }
 
