@@ -397,6 +397,12 @@ Changed:
   the rest, in both directions. It used to run `init` before `fina`, `liga` and `clig`
   before `calt`, and no `mset`. Vertical Arabic now takes the default shaper, as in
   HarfBuzz. `tests/fixtures/stage_order.ttf` tests the stages.
+- With `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT`, a `kern` or `kerx` table the shaping
+  plan applies marks the whole run unsafe to concatenate even when kerning is off (as in
+  vertical text), as HarfBuzz's `KerxTable::apply` does. The legacy `kern` table only
+  applies to the shapers HarfBuzz lets fall back to it (the default, Arabic, Hebrew and
+  Hangul shapers), as `hb_ot_shape_plan_t` decides. All 20 vertical test strings now
+  match HarfBuzz 14.5.0 in glyph flags with that buffer flag (before: 15).
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,
