@@ -1,98 +1,20 @@
-//! Per-script entry points. Each routes one script's run through
-//! [`shape_use`](super::shape_use) with its script tags and feature
-//! chain; N'Ko runs its own joining-form pass instead.
+//! Per-script entry points. Each routes one script's run through the
+//! Universal Shaping Engine ([`shape_use`]) with its script tags, and
+//! Hangul through the Hangul shaper's GSUB stage.
 
 use alloc::vec::Vec;
 
-use super::reorder::initial_reorder;
-use super::segment_syllables;
 use super::{
-    shape_use, BALINESE_SCRIPT_PRIORITY, BRAHMI_SCRIPT_PRIORITY, BUGINESE_SCRIPT_PRIORITY,
+    shape, UseRun, BALINESE_SCRIPT_PRIORITY, BRAHMI_SCRIPT_PRIORITY, BUGINESE_SCRIPT_PRIORITY,
     CHAM_SCRIPT_PRIORITY, KHOJKI_SCRIPT_PRIORITY, LEPCHA_SCRIPT_PRIORITY, LIMBU_SCRIPT_PRIORITY,
-    MODI_SCRIPT_PRIORITY, MYANMAR_BASIC_FEATURES, MYANMAR_SCRIPT_PRIORITY,
-    MYANMAR_TOPOGRAPHICAL_FEATURES, NKO_SCRIPT_PRIORITY, SHARADA_SCRIPT_PRIORITY,
-    SUNDANESE_SCRIPT_PRIORITY, TAI_THAM_SCRIPT_PRIORITY, TIRHUTA_SCRIPT_PRIORITY,
-    USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES,
+    MODI_SCRIPT_PRIORITY, NKO_SCRIPT_PRIORITY, SHARADA_SCRIPT_PRIORITY, SUNDANESE_SCRIPT_PRIORITY,
+    TAI_THAM_SCRIPT_PRIORITY, TIRHUTA_SCRIPT_PRIORITY,
 };
 use crate::buffer::{ClusterLevel, Glyph};
-use crate::shape::{
-    apply_gsub_feature_in_scripts, apply_gsub_features_merged,
-    apply_locl_ccmp_if_length_preserving, JoinerTable,
-};
+use crate::ot::arabic::{assign_from_types_in_context, JoiningContext, JoiningForm};
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
-
-/// Entry point for Myanmar runs, in the order of HarfBuzz's Myanmar
-/// shaper (`collect_features_myanmar`): `locl` and `ccmp` on the
-/// logical order, the syllable reorder (medial ra and pre-base vowels
-/// in front of the base, kinzi after it), the basic features `rphf`,
-/// `pref`, `blwf`, and `pstf` one at a time, then `pres`, `abvs`,
-/// `blws`, and `psts` together. The default features follow in the
-/// generic pass.
-pub fn shape_myanmar(
-    gsub: Option<&Gsub<'_>>,
-    gdef: Option<&Gdef<'_>>,
-    codepoints: &[char],
-    glyphs: &mut Vec<Glyph>,
-    level: ClusterLevel,
-) {
-    if codepoints.is_empty() || glyphs.is_empty() {
-        return;
-    }
-    let table = JoinerTable::Myanmar;
-    let syllables = segment_syllables(codepoints);
-    // Per-syllable features match within these (HarfBuzz's syllable()).
-    let numbers = syllables.iter().map(|s| (s.start, s.end, s.kind as u8));
-    crate::shape::number_syllables(glyphs, numbers, level);
-    // `locl` and `ccmp` see the logical order, as one stage, before the
-    // reorder (`collect_features_myanmar`). The reorder indexes glyphs
-    // by code point, so a length-changing `ccmp` waits until after it.
-    let early = gsub.is_some_and(|gsub| {
-        apply_locl_ccmp_if_length_preserving(gsub, glyphs, gdef, MYANMAR_SCRIPT_PRIORITY, table)
-    });
-    for syllable in &syllables {
-        initial_reorder(codepoints, glyphs, syllable, level);
-    }
-    let Some(gsub) = gsub else {
-        return;
-    };
-    if !early {
-        let locl_ccmp = [*b"locl", *b"ccmp"];
-        apply_gsub_features_merged(
-            gsub,
-            glyphs,
-            gdef,
-            &[],
-            &locl_ccmp,
-            MYANMAR_SCRIPT_PRIORITY,
-            table,
-        );
-    }
-    // The basic features, one stage each.
-    for tag in &MYANMAR_BASIC_FEATURES[2..] {
-        let joiners = table.joiners(**tag);
-        apply_gsub_feature_in_scripts(
-            gsub,
-            glyphs,
-            gdef,
-            **tag,
-            0,
-            MYANMAR_SCRIPT_PRIORITY,
-            joiners,
-        );
-    }
-    // The other features, as one stage.
-    let other: Vec<[u8; 4]> = MYANMAR_TOPOGRAPHICAL_FEATURES.iter().map(|t| **t).collect();
-    apply_gsub_features_merged(
-        gsub,
-        glyphs,
-        gdef,
-        &[],
-        &other,
-        MYANMAR_SCRIPT_PRIORITY,
-        table,
-    );
-}
+use crate::unicode::joining::{joining_type, JoiningType};
 
 /// Entry point for Hangul runs whose syllables composed already: the
 /// GSUB stage of HarfBuzz's Hangul shaper (`crate::ot::hangul`), with
@@ -161,33 +83,18 @@ fn merge_jamo_syllables(codepoints: &[char], glyphs: &mut [Glyph], level: Cluste
     }
 }
 
-/// Entry point for N'Ko runs. N'Ko is RTL alphabetic with cursive
-/// joining of the same shape as Arabic: every letter has up to four
-/// positional forms (`isol`/`init`/`medi`/`fina`) selected by the
-/// shared joining state machine in [`crate::unicode::joining`]. The
-/// shaper:
-///
-/// 1. Runs `locl` and `ccmp` as one stage, so localized forms and
-///    any precomposed N'Ko diphthongs in the font's composition lookup
-///    settle before the positional pass (HarfBuzz's USE order).
-/// 2. Computes a per-codepoint joining-form vector via the shared
-///    Arabic state machine. N'Ko's joining types live in the same
-///    [`JoiningType`](crate::unicode::joining::JoiningType) table.
-/// 3. Applies `isol`/`init`/`medi`/`fina` masked by the joining-form
-///    vector under the `nko ` script tag. Noto Sans NKo registers
-///    `init`/`medi`/`fina` (no `isol` lookup: the unfeatured glyph
-///    is the isolated form already), so the masked dispatcher
-///    naturally no-ops on `isol` positions.
-/// 4. Lets the generic default-GSUB pass run `calt` / `liga` after
-///    the shaper returns. Tone-mark zeroing (mark advances -> 0)
-///    happens in the generic pipeline.
+/// Entry point for N'Ko runs: the Universal Shaping Engine with the
+/// `nko ` script tags, whose `isol`, `init`, `medi`, and `fina` follow
+/// the Arabic-style joining forms of the letters, as in HarfBuzz
+/// (`setup_masks_arabic_plan`). Clusters merge at the monotone
+/// characters level, the default of a Rust [`crate::Buffer`].
 pub fn shape_nko(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
 ) {
-    let context = crate::ot::arabic::JoiningContext::NONE;
+    let context = JoiningContext::NONE;
     shape_nko_in_context(gsub, gdef, codepoints, glyphs, context);
 }
 
@@ -199,65 +106,83 @@ pub fn shape_nko_in_context(
     gdef: Option<&Gdef<'_>>,
     codepoints: &[char],
     glyphs: &mut Vec<Glyph>,
-    context: crate::ot::arabic::JoiningContext,
+    context: JoiningContext,
 ) {
-    if codepoints.is_empty() || glyphs.is_empty() {
-        return;
-    }
-    let Some(gsub) = gsub else {
-        return;
+    let types: Vec<JoiningType> = codepoints.iter().map(|&c| joining_type(c)).collect();
+    let forms = assign_from_types_in_context(&types, context);
+    let script = UseScript {
+        script_priority: NKO_SCRIPT_PRIORITY,
+        joining: Some(&forms),
     };
-
-    // 1. locl + ccmp first, as one stage: HarfBuzz shapes N'Ko with
-    //    its USE shaper, whose first stage runs both before the
-    //    positional features see the glyph stream.
-    crate::shape::apply_gsub_features_merged(
+    shape_script(
         gsub,
-        glyphs,
         gdef,
-        &[],
-        &[*b"locl", *b"ccmp"],
-        NKO_SCRIPT_PRIORITY,
-        JoinerTable::Use,
+        codepoints,
+        glyphs,
+        script,
+        ClusterLevel::MonotoneCharacters,
     );
-
-    // 2. Compute the joining-form vector using the shared Arabic
-    //    state machine. The vector is aligned with `codepoints`;
-    //    after `ccmp` the glyph count may have shifted (a multi-sub
-    //    in `ccmp` would split one glyph into two), so we only run
-    //    the masked positional pass when lengths still align.
-    let types: Vec<crate::unicode::joining::JoiningType> = codepoints
-        .iter()
-        .map(|&c| crate::unicode::joining::joining_type(c))
-        .collect();
-    let forms = crate::ot::arabic::assign_from_types_in_context(&types, context);
-
-    if glyphs.len() == forms.len() {
-        for (form, tag) in [
-            (crate::ot::arabic::JoiningForm::Isol, *b"isol"),
-            (crate::ot::arabic::JoiningForm::Init, *b"init"),
-            (crate::ot::arabic::JoiningForm::Medi, *b"medi"),
-            (crate::ot::arabic::JoiningForm::Fina, *b"fina"),
-        ] {
-            let mask: Vec<bool> = forms.iter().map(|&f| f == form).collect();
-            crate::shape::apply_gsub_feature_masked(
-                gsub,
-                glyphs,
-                gdef,
-                tag,
-                NKO_SCRIPT_PRIORITY,
-                &mask,
-                JoinerTable::Use.joiners(tag),
-            );
-        }
-    }
-
-    // calt / liga fire in the generic default-GSUB pass after this
-    // shaper returns; nothing else to drive here.
 }
 
-/// Entry point for Buginese runs. Brahmic: pre-base reorder fires
-/// for sara e (U+1A19). Uses the full USE feature chain.
+/// The script facts [`shape_script`] needs: the script tags, and the
+/// joining forms of a script with Arabic-style joining.
+#[derive(Clone, Copy)]
+pub(crate) struct UseScript<'a> {
+    pub(crate) script_priority: &'a [[u8; 4]],
+    pub(crate) joining: Option<&'a [JoiningForm]>,
+}
+
+/// Shapes one run with the Universal Shaping Engine under the script
+/// tags `script_priority`, every GSUB feature of the run included, the
+/// default ones too, with no caller features. `codepoints` is in
+/// one-to-one correspondence with `glyphs` on entry. After the call
+/// `glyphs` may be shorter (GSUB collapses) and reordered, and a
+/// reordered glyph shares one cluster with the glyphs it moved across
+/// at the monotone cluster `level`s. Broken clusters get no dotted
+/// circle here. Shaping through [`crate::shape`] adds them.
+pub(crate) fn shape_use(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+    script_priority: &[[u8; 4]],
+    level: ClusterLevel,
+) {
+    let script = UseScript {
+        script_priority,
+        joining: None,
+    };
+    shape_script(gsub, gdef, codepoints, glyphs, script, level);
+}
+
+/// [`shape_use`] for a script that may join Arabic-style.
+pub(crate) fn shape_script(
+    gsub: Option<&Gsub<'_>>,
+    gdef: Option<&Gdef<'_>>,
+    codepoints: &[char],
+    glyphs: &mut Vec<Glyph>,
+    script: UseScript<'_>,
+    level: ClusterLevel,
+) {
+    let run = UseRun {
+        gsub,
+        gdef,
+        script_priority: script.script_priority,
+        level,
+        features: &[],
+        vertical: false,
+        dotted_circle: None,
+        joining: script.joining,
+    };
+    shape(&run, codepoints, glyphs);
+}
+
+/// Entry point for Buginese runs: the Universal Shaping Engine with the
+/// script's tags, every GSUB feature of the run included, the default
+/// ones too. `codepoints` is in one-to-one correspondence with `glyphs`
+/// on entry, and a reordered glyph shares one cluster with the glyphs it
+/// moved across at the monotone cluster `level`s. Broken clusters get no
+/// dotted circle here. Shaping through [`crate::shape`] adds them.
 pub fn shape_buginese(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -271,15 +196,16 @@ pub fn shape_buginese(
         codepoints,
         glyphs,
         BUGINESE_SCRIPT_PRIORITY,
-        USE_BASIC_FEATURES,
-        USE_TOPOGRAPHICAL_FEATURES,
-        true,
         level,
-        JoinerTable::Use,
     );
 }
 
-/// Entry point for Tai Tham (Lanna) runs.
+/// Entry point for Tai Tham (Lanna) runs: the Universal Shaping Engine with the
+/// script's tags, every GSUB feature of the run included, the default
+/// ones too. `codepoints` is in one-to-one correspondence with `glyphs`
+/// on entry, and a reordered glyph shares one cluster with the glyphs it
+/// moved across at the monotone cluster `level`s. Broken clusters get no
+/// dotted circle here. Shaping through [`crate::shape`] adds them.
 pub fn shape_tai_tham(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -293,15 +219,16 @@ pub fn shape_tai_tham(
         codepoints,
         glyphs,
         TAI_THAM_SCRIPT_PRIORITY,
-        USE_BASIC_FEATURES,
-        USE_TOPOGRAPHICAL_FEATURES,
-        true,
         level,
-        JoinerTable::Use,
     );
 }
 
-/// Entry point for Balinese runs.
+/// Entry point for Balinese runs: the Universal Shaping Engine with the
+/// script's tags, every GSUB feature of the run included, the default
+/// ones too. `codepoints` is in one-to-one correspondence with `glyphs`
+/// on entry, and a reordered glyph shares one cluster with the glyphs it
+/// moved across at the monotone cluster `level`s. Broken clusters get no
+/// dotted circle here. Shaping through [`crate::shape`] adds them.
 pub fn shape_balinese(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -315,15 +242,16 @@ pub fn shape_balinese(
         codepoints,
         glyphs,
         BALINESE_SCRIPT_PRIORITY,
-        USE_BASIC_FEATURES,
-        USE_TOPOGRAPHICAL_FEATURES,
-        true,
         level,
-        JoinerTable::Use,
     );
 }
 
-/// Entry point for Sundanese runs.
+/// Entry point for Sundanese runs: the Universal Shaping Engine with the
+/// script's tags, every GSUB feature of the run included, the default
+/// ones too. `codepoints` is in one-to-one correspondence with `glyphs`
+/// on entry, and a reordered glyph shares one cluster with the glyphs it
+/// moved across at the monotone cluster `level`s. Broken clusters get no
+/// dotted circle here. Shaping through [`crate::shape`] adds them.
 pub fn shape_sundanese(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -337,15 +265,16 @@ pub fn shape_sundanese(
         codepoints,
         glyphs,
         SUNDANESE_SCRIPT_PRIORITY,
-        USE_BASIC_FEATURES,
-        USE_TOPOGRAPHICAL_FEATURES,
-        true,
         level,
-        JoinerTable::Use,
     );
 }
 
-/// Entry point for Lepcha runs.
+/// Entry point for Lepcha runs: the Universal Shaping Engine with the
+/// script's tags, every GSUB feature of the run included, the default
+/// ones too. `codepoints` is in one-to-one correspondence with `glyphs`
+/// on entry, and a reordered glyph shares one cluster with the glyphs it
+/// moved across at the monotone cluster `level`s. Broken clusters get no
+/// dotted circle here. Shaping through [`crate::shape`] adds them.
 pub fn shape_lepcha(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -359,15 +288,16 @@ pub fn shape_lepcha(
         codepoints,
         glyphs,
         LEPCHA_SCRIPT_PRIORITY,
-        USE_BASIC_FEATURES,
-        USE_TOPOGRAPHICAL_FEATURES,
-        true,
         level,
-        JoinerTable::Use,
     );
 }
 
-/// Entry point for Limbu runs.
+/// Entry point for Limbu runs: the Universal Shaping Engine with the
+/// script's tags, every GSUB feature of the run included, the default
+/// ones too. `codepoints` is in one-to-one correspondence with `glyphs`
+/// on entry, and a reordered glyph shares one cluster with the glyphs it
+/// moved across at the monotone cluster `level`s. Broken clusters get no
+/// dotted circle here. Shaping through [`crate::shape`] adds them.
 pub fn shape_limbu(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -375,21 +305,15 @@ pub fn shape_limbu(
     glyphs: &mut Vec<Glyph>,
     level: ClusterLevel,
 ) {
-    shape_use(
-        gsub,
-        gdef,
-        codepoints,
-        glyphs,
-        LIMBU_SCRIPT_PRIORITY,
-        USE_BASIC_FEATURES,
-        USE_TOPOGRAPHICAL_FEATURES,
-        true,
-        level,
-        JoinerTable::Use,
-    );
+    shape_use(gsub, gdef, codepoints, glyphs, LIMBU_SCRIPT_PRIORITY, level);
 }
 
-/// Entry point for Cham runs.
+/// Entry point for Cham runs: the Universal Shaping Engine with the
+/// script's tags, every GSUB feature of the run included, the default
+/// ones too. `codepoints` is in one-to-one correspondence with `glyphs`
+/// on entry, and a reordered glyph shares one cluster with the glyphs it
+/// moved across at the monotone cluster `level`s. Broken clusters get no
+/// dotted circle here. Shaping through [`crate::shape`] adds them.
 pub fn shape_cham(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -397,25 +321,15 @@ pub fn shape_cham(
     glyphs: &mut Vec<Glyph>,
     level: ClusterLevel,
 ) {
-    shape_use(
-        gsub,
-        gdef,
-        codepoints,
-        glyphs,
-        CHAM_SCRIPT_PRIORITY,
-        USE_BASIC_FEATURES,
-        USE_TOPOGRAPHICAL_FEATURES,
-        true,
-        level,
-        JoinerTable::Use,
-    );
+    shape_use(gsub, gdef, codepoints, glyphs, CHAM_SCRIPT_PRIORITY, level);
 }
 
-/// Entry point for Brahmi runs. Brahmic: full USE feature chain.
-/// SMP block (U+11000..U+1107F). No pre-base reorder fires (no
-/// pre-base vowel signs in Brahmi); included on the consonant
-/// shaping path so virama / vowel-sign substitutions still see
-/// the syllable structure.
+/// Entry point for Brahmi runs: the Universal Shaping Engine with the
+/// script's tags, every GSUB feature of the run included, the default
+/// ones too. `codepoints` is in one-to-one correspondence with `glyphs`
+/// on entry, and a reordered glyph shares one cluster with the glyphs it
+/// moved across at the monotone cluster `level`s. Broken clusters get no
+/// dotted circle here. Shaping through [`crate::shape`] adds them.
 pub fn shape_brahmi(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -429,15 +343,16 @@ pub fn shape_brahmi(
         codepoints,
         glyphs,
         BRAHMI_SCRIPT_PRIORITY,
-        USE_BASIC_FEATURES,
-        USE_TOPOGRAPHICAL_FEATURES,
-        true,
         level,
-        JoinerTable::Use,
     );
 }
 
-/// Entry point for Sharada runs.
+/// Entry point for Sharada runs: the Universal Shaping Engine with the
+/// script's tags, every GSUB feature of the run included, the default
+/// ones too. `codepoints` is in one-to-one correspondence with `glyphs`
+/// on entry, and a reordered glyph shares one cluster with the glyphs it
+/// moved across at the monotone cluster `level`s. Broken clusters get no
+/// dotted circle here. Shaping through [`crate::shape`] adds them.
 pub fn shape_sharada(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -451,15 +366,16 @@ pub fn shape_sharada(
         codepoints,
         glyphs,
         SHARADA_SCRIPT_PRIORITY,
-        USE_BASIC_FEATURES,
-        USE_TOPOGRAPHICAL_FEATURES,
-        true,
         level,
-        JoinerTable::Use,
     );
 }
 
-/// Entry point for Khojki runs.
+/// Entry point for Khojki runs: the Universal Shaping Engine with the
+/// script's tags, every GSUB feature of the run included, the default
+/// ones too. `codepoints` is in one-to-one correspondence with `glyphs`
+/// on entry, and a reordered glyph shares one cluster with the glyphs it
+/// moved across at the monotone cluster `level`s. Broken clusters get no
+/// dotted circle here. Shaping through [`crate::shape`] adds them.
 pub fn shape_khojki(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -473,17 +389,16 @@ pub fn shape_khojki(
         codepoints,
         glyphs,
         KHOJKI_SCRIPT_PRIORITY,
-        USE_BASIC_FEATURES,
-        USE_TOPOGRAPHICAL_FEATURES,
-        true,
         level,
-        JoinerTable::Use,
     );
 }
 
-/// Entry point for Tirhuta runs. Tirhuta has pre-base vowel signs
-/// (sign-e U+114B9, sign-o U+114BC) that the USE pre-base reorder
-/// fires for.
+/// Entry point for Tirhuta runs: the Universal Shaping Engine with the
+/// script's tags, every GSUB feature of the run included, the default
+/// ones too. `codepoints` is in one-to-one correspondence with `glyphs`
+/// on entry, and a reordered glyph shares one cluster with the glyphs it
+/// moved across at the monotone cluster `level`s. Broken clusters get no
+/// dotted circle here. Shaping through [`crate::shape`] adds them.
 pub fn shape_tirhuta(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -497,15 +412,16 @@ pub fn shape_tirhuta(
         codepoints,
         glyphs,
         TIRHUTA_SCRIPT_PRIORITY,
-        USE_BASIC_FEATURES,
-        USE_TOPOGRAPHICAL_FEATURES,
-        true,
         level,
-        JoinerTable::Use,
     );
 }
 
-/// Entry point for Modi runs.
+/// Entry point for Modi runs: the Universal Shaping Engine with the
+/// script's tags, every GSUB feature of the run included, the default
+/// ones too. `codepoints` is in one-to-one correspondence with `glyphs`
+/// on entry, and a reordered glyph shares one cluster with the glyphs it
+/// moved across at the monotone cluster `level`s. Broken clusters get no
+/// dotted circle here. Shaping through [`crate::shape`] adds them.
 pub fn shape_modi(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -513,18 +429,7 @@ pub fn shape_modi(
     glyphs: &mut Vec<Glyph>,
     level: ClusterLevel,
 ) {
-    shape_use(
-        gsub,
-        gdef,
-        codepoints,
-        glyphs,
-        MODI_SCRIPT_PRIORITY,
-        USE_BASIC_FEATURES,
-        USE_TOPOGRAPHICAL_FEATURES,
-        true,
-        level,
-        JoinerTable::Use,
-    );
+    shape_use(gsub, gdef, codepoints, glyphs, MODI_SCRIPT_PRIORITY, level);
 }
 
 #[cfg(test)]

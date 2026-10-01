@@ -20,7 +20,7 @@
 //! reversal.
 //!
 //! A failure here is a parity drift against rustybuzz; fix in
-//! `src/ot/use_shaper` or `src/unicode/use_category`.
+//! `src/ot/use_shaper`.
 
 use rustybuzz::Direction as RbDirection;
 use sigilbuzz::{shape, Blob, Buffer, Direction, Face, Font};

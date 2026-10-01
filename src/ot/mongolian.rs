@@ -1,26 +1,27 @@
-//! Mongolian script shaper.
+//! Mongolian joining forms, and the Mongolian entry points.
 //!
 //! Mongolian (U+1800..U+18AF) is cursive: every letter has up to
 //! four positional forms (isolated, initial, medial, final) selected
-//! the same way Arabic does. The state machine that picks the form
-//! is shared verbatim with Arabic via [`crate::ot::arabic`]; the
-//! difference between the two scripts is in the shaper around the
-//! state machine:
+//! the same way Arabic does. HarfBuzz shapes it with the Universal
+//! Shaping Engine ([`crate::ot::use_shaper`]), whose `isol`, `init`,
+//! `medi`, and `fina` follow those joining forms
+//! (`setup_masks_arabic_plan`). The state machine that picks the forms
+//! is shared verbatim with Arabic via [`crate::ot::arabic`]. Around
+//! it:
 //!
 //! - **Free Variation Selectors** (FVS1 = U+180B, FVS2 = U+180C,
 //!   FVS3 = U+180D, FVS4 = U+180F) override the default form
-//!   choice. The shaper handles them in two places: the
-//!   [joining table](crate::unicode::joining) marks them
+//!   choice. The [joining table](crate::unicode::joining) marks them
 //!   `Transparent` so the state machine threads them through, and
-//!   this module post-processes the form vector so the FVS position
-//!   inherits the form chosen for the preceding letter. That way
-//!   the GSUB lookup driving the variant (e.g. `init` lookups
-//!   targeting `letter + FVS1`) sees the FVS as part of the
-//!   initial-form cluster.
+//!   each then takes the form of the character before it
+//!   (HarfBuzz's `mongolian_variation_selectors`). That way the GSUB
+//!   lookup driving the variant (e.g. `init` lookups targeting
+//!   `letter + FVS1`) sees the FVS as part of the initial-form
+//!   cluster.
 //! - **Word break via NNBSP** (U+202F NARROW NO-BREAK SPACE) marks
 //!   the boundary between two visually-joined Mongolian "words".
 //!   sigilbuzz's segmenter already breaks the run on NNBSP because
-//!   it falls into the COMMON segmentation bucket; the joining
+//!   it falls into the COMMON segmentation bucket. The joining
 //!   state machine sees the resulting Mongolian segment in
 //!   isolation, which gives the right "the last letter of the
 //!   first word is final, the first letter of the second word is
@@ -28,54 +29,30 @@
 //! - **Vertical default**. Mongolian is written top-to-bottom by
 //!   default. While the caller has not chosen a direction, the
 //!   dispatcher in [`crate::shape`] lays a dominantly Mongolian run
-//!   out top to bottom: vertical metrics and the `vert`/`vrt2` GSUB
-//!   features. Consumers who want horizontal Mongolian set a
+//!   out top to bottom: vertical metrics and the `vert` GSUB
+//!   feature. Consumers who want horizontal Mongolian set a
 //!   direction explicitly with
 //!   [`crate::buffer::Buffer::set_direction`]: LTR keeps logical
 //!   order, RTL returns the run reversed like any RTL run.
-//!
-//! # Feature order
-//!
-//! HarfBuzz shapes Mongolian with its USE shaper, whose first stage
-//! runs `locl` and `ccmp` together:
-//!
-//! ```text
-//!   locl + ccmp -> isol/init/medi/fina (positional pass) -> calt -> liga
-//! ```
-//!
-//! A font whose `ccmp` changes the glyph count gets `locl` + `ccmp`
-//! after the positional pass instead, because the joining forms are
-//! assigned per code point.
-//!
-//! `rlig` is omitted. Noto Sans Mongolian ships its required
-//! ligatures under the positional features themselves.
 
 use alloc::vec::Vec;
 
-use crate::buffer::Glyph;
+use crate::buffer::{ClusterLevel, Glyph};
 use crate::ot::arabic::{assign_from_types_in_context, JoiningContext, JoiningForm};
-use crate::shape::{
-    apply_gsub_feature_masked, apply_gsub_features_merged, apply_locl_ccmp_if_length_preserving,
-    JoinerTable,
-};
+use crate::ot::use_shaper::{shape_script, UseScript};
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 use crate::unicode::joining::{joining_type, JoiningType};
 
 /// Script-tag priority for Mongolian GSUB / GPOS feature lookup.
 ///
-/// Mongolian fonts register their lookups under `mong`; DFLT is the
+/// Mongolian fonts register their lookups under `mong`. DFLT is the
 /// universal fallback for fonts that only carry features in the
 /// default LangSys.
 pub const MONG_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"mong", *b"DFLT"];
 
 /// Features the Mongolian shaper runs before the positional pass.
-/// Always empty.
-///
-/// The shaper drives `locl` + `ccmp` and the four positional features
-/// (`isol`/`init`/`medi`/`fina`), masked by joining form. `calt` and
-/// `liga` run in the generic default GSUB pass after this shaper
-/// returns.
+/// Always empty: the Universal Shaping Engine runs every feature.
 pub const MONG_FEATURES_PRE: &[&[u8; 4]] = &[];
 
 /// True for every codepoint that is part of the Mongolian block.
@@ -85,7 +62,7 @@ pub const fn is_mongolian(ch: char) -> bool {
 }
 
 /// True for the Mongolian Free Variation Selectors (FVS1..FVS4).
-/// FVS1..FVS3 are present from Unicode 1.0; FVS4 was added in 14.0
+/// FVS1..FVS3 are present from Unicode 1.0. FVS4 was added in 14.0
 /// and lives at U+180F (just before the Mongolian Vowel Separator).
 #[must_use]
 pub const fn is_mongolian_fvs(ch: char) -> bool {
@@ -98,10 +75,10 @@ pub const fn is_mongolian_fvs(ch: char) -> bool {
 /// shares the same joining types) and this wrapper layers FVS
 /// inheritance on top: a Free Variation Selector is Transparent in
 /// the state machine (so it does not break the cursive chain) and
-/// then takes on the *form* of the letter immediately to its left.
-/// That way the positional GSUB pass treats the letter+FVS pair as
-/// a two-glyph cluster of the same form, which is exactly what
-/// Mongolian fonts target.
+/// then takes on the *form* of the character to its left. That way
+/// the positional GSUB pass treats the letter+FVS pair as a two-glyph
+/// cluster of the same form, which is exactly what Mongolian fonts
+/// target.
 #[must_use]
 pub fn assign_mongolian_forms(codepoints: &[char]) -> Vec<JoiningForm> {
     assign_mongolian_forms_in_context(codepoints, JoiningContext::NONE)
@@ -117,30 +94,23 @@ pub fn assign_mongolian_forms_in_context(
 ) -> Vec<JoiningForm> {
     let types: Vec<JoiningType> = codepoints.iter().map(|&c| joining_type(c)).collect();
     let mut forms = assign_from_types_in_context(&types, context);
-    // FVS inherits the previous letter's form. Walk left-to-right
-    // and propagate the most recent non-None form through any FVS
-    // positions; this matches rustybuzz's
-    // `mongolian_variation_selectors` which copies the preceding
-    // glyph's `arabic_shaping_action` onto FVS positions before the
-    // positional masks are applied.
-    let mut last_form = JoiningForm::None;
-    for (i, &ch) in codepoints.iter().enumerate() {
-        if is_mongolian_fvs(ch) {
-            forms[i] = last_form;
-        } else if forms[i] != JoiningForm::None {
-            last_form = forms[i];
+    // HarfBuzz's `mongolian_variation_selectors`: each FVS copies the
+    // form of the character before it.
+    for i in 1..forms.len().min(codepoints.len()) {
+        if is_mongolian_fvs(codepoints[i]) {
+            forms[i] = forms[i - 1];
         }
     }
     forms
 }
 
-/// Entry point: shapes one Mongolian run.
+/// Entry point: shapes one Mongolian run with the Universal Shaping
+/// Engine, as HarfBuzz does, every GSUB feature included.
 ///
 /// `codepoints` and `glyphs` start 1:1 (a glyph per codepoint, post
-/// cmap). The shaper runs `locl` + `ccmp`, then the four positional
-/// features gated on the joining-form vector; `calt`/`liga` follow in
-/// the default pass. After the call `glyphs` may have shrunk through
-/// ligature collapse.
+/// cmap). After the call `glyphs` may have shrunk through ligature
+/// collapse. Clusters merge at the monotone characters level, the
+/// default of a Rust [`crate::Buffer`].
 pub fn shape_mongolian(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -160,52 +130,19 @@ pub fn shape_mongolian_in_context(
     glyphs: &mut Vec<Glyph>,
     context: JoiningContext,
 ) {
-    if codepoints.is_empty() || glyphs.is_empty() {
-        return;
-    }
-    let Some(gsub) = gsub else {
-        return;
-    };
-
-    // HarfBuzz shapes Mongolian with the USE shaper, whose first stage
-    // runs `locl` and `ccmp` together, ahead of the positional
-    // features. The joining forms below index glyphs by code point, so
-    // a `ccmp` that changes the glyph count waits until after them.
-    let table = JoinerTable::Use;
-    let early =
-        apply_locl_ccmp_if_length_preserving(gsub, glyphs, gdef, MONG_SCRIPT_PRIORITY, table);
-
-    // Positional pass: `isol`/`init`/`medi`/`fina` each apply only
-    // at positions whose computed JoiningForm matches.
     let forms = assign_mongolian_forms_in_context(codepoints, context);
-    if glyphs.len() == forms.len() {
-        for (form, tag) in [
-            (JoiningForm::Isol, *b"isol"),
-            (JoiningForm::Init, *b"init"),
-            (JoiningForm::Medi, *b"medi"),
-            (JoiningForm::Fina, *b"fina"),
-        ] {
-            let mask: Vec<bool> = forms.iter().map(|&f| f == form).collect();
-            let joiners = table.joiners(tag);
-            apply_gsub_feature_masked(
-                gsub,
-                glyphs,
-                gdef,
-                tag,
-                MONG_SCRIPT_PRIORITY,
-                &mask,
-                joiners,
-            );
-        }
-    }
-    if !early {
-        let locl_ccmp = [*b"locl", *b"ccmp"];
-        let prio = MONG_SCRIPT_PRIORITY;
-        apply_gsub_features_merged(gsub, glyphs, gdef, &[], &locl_ccmp, prio, table);
-    }
-
-    // calt / liga are applied by the generic default-GSUB pass
-    // after this shaper returns; nothing else to do here.
+    let script = UseScript {
+        script_priority: MONG_SCRIPT_PRIORITY,
+        joining: Some(&forms),
+    };
+    shape_script(
+        gsub,
+        gdef,
+        codepoints,
+        glyphs,
+        script,
+        ClusterLevel::MonotoneCharacters,
+    );
 }
 
 #[cfg(test)]
@@ -307,12 +244,25 @@ mod tests {
     }
 
     #[test]
-    fn shape_with_no_gsub_is_a_noop() {
+    fn fvs_copies_the_form_of_the_character_before_it() {
+        // A, vowel separator, FVS1: the separator has no form, and
+        // the FVS copies that (HarfBuzz's
+        // `mongolian_variation_selectors`).
+        let cps: Vec<char> = "\u{1820}\u{180E}\u{180B}".chars().collect();
+        let forms = assign_mongolian_forms(&cps);
+        assert_eq!(
+            forms,
+            alloc::vec![JoiningForm::Isol, JoiningForm::None, JoiningForm::None]
+        );
+    }
+
+    #[test]
+    fn shape_with_no_gsub_keeps_the_glyphs() {
         let cps: Vec<char> = "\u{1820}\u{1821}".chars().collect();
         let mut glyphs = alloc::vec![Glyph::new(1, 0), Glyph::new(2, 3)];
-        let original = glyphs.clone();
         shape_mongolian(None, None, &cps, &mut glyphs);
-        assert_eq!(glyphs, original);
+        let ids: Vec<u32> = glyphs.iter().map(|g| g.glyph_id).collect();
+        assert_eq!(ids, [1, 2]);
     }
 
     #[test]

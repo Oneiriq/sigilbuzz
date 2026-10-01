@@ -13,7 +13,10 @@
 //! only has `DFLT` or `latn` lookups, and Myanmar also when it only has
 //! the pre-spec `mymr` tag; sigilbuzz runs its Indic and Myanmar shapers
 //! regardless, so those scripts always map to their own shaper here.
+//! The scripts of the Universal Shaping Engine go to the default shaper
+//! in such a font, as in HarfBuzz ([`Shaper::for_run`]).
 
+use crate::tables::Gsub;
 use crate::unicode::Script;
 
 /// A HarfBuzz shaper.
@@ -113,6 +116,28 @@ impl Shaper {
             | Script::Cyrillic
             | Script::Han
             | Script::Other => Self::Default,
+        }
+    }
+
+    /// [`Self::for_script`] for a run whose lookups try the script tags
+    /// `script_priority` in the font's `gsub`: HarfBuzz gives a script
+    /// of the Universal Shaping Engine the default shaper when the
+    /// script tag GSUB picks is `DFLT` or `latn`
+    /// (`hb_ot_shaper_categorize`).
+    pub(super) fn for_run(
+        script: Script,
+        horizontal: bool,
+        gsub: Option<&Gsub<'_>>,
+        script_priority: &[[u8; 4]],
+    ) -> Self {
+        let shaper = Self::for_script(script, horizontal);
+        let generic = gsub
+            .and_then(|g| crate::ot::layout_select::chosen_script(g.script_list(), script_priority))
+            .is_some_and(|tag| tag == *b"DFLT" || tag == *b"latn");
+        if shaper == Self::Use && generic {
+            Self::Default
+        } else {
+            shaper
         }
     }
 

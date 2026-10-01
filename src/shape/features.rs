@@ -22,8 +22,8 @@ use crate::unicode::Script;
 /// alternate-selector value.
 ///
 /// `early_features` is the part of `ccmp` + `locl` that has not run
-/// yet (see [`early_default_features`]): the Arabic path and several
-/// complex shapers run both first. HarfBuzz runs the two in one stage,
+/// yet (see [`early_default_features`]): the Arabic path and the
+/// Myanmar pass run both first. HarfBuzz runs the two in one stage,
 /// so their lookups interleave by lookup index. `table` is the joiner
 /// handling of the segment's shaper (Arabic runs its ligating features
 /// with manual ZWJ).
@@ -170,55 +170,24 @@ pub(super) fn apply_gsub_features_merged_budgeted(
 }
 
 /// The part of `ccmp` + `locl` the default GSUB pass still has to run
-/// for a segment. The Arabic path runs both ahead of its positional
-/// features, and so do the complex shapers HarfBuzz gives a `locl` +
-/// `ccmp` stage: Indic, Mongolian (when it is the dominant script),
-/// N'Ko, Khmer, Myanmar, and the scripts on the full USE feature
-/// chain. Running either again would apply its lookups twice.
-pub(super) fn early_default_features(
-    arabic_ran: bool,
-    script: Script,
-    dominant: Option<Script>,
-) -> &'static [[u8; 4]] {
+/// for a segment. The Arabic path and the Myanmar pass run both ahead
+/// of their own features, and running either again would apply its
+/// lookups twice. The Indic, Khmer, Hangul, and USE shapers run every
+/// feature themselves, so the default pass does not run for them.
+pub(super) fn early_default_features(arabic_ran: bool, script: Script) -> &'static [[u8; 4]] {
     const CCMP_LOCL: &[[u8; 4]] = &[*b"ccmp", *b"locl"];
-    if arabic_ran || shaper_ran_locl_and_ccmp(script, dominant) {
+    if arabic_ran || script == Script::Myanmar {
         &[]
     } else {
         CCMP_LOCL
     }
 }
 
-/// True when the segment's complex shaper already ran `locl` and
-/// `ccmp`.
-fn shaper_ran_locl_and_ccmp(script: Script, dominant: Option<Script>) -> bool {
-    script.is_indic()
-        || (script == Script::Mongolian && dominant == Some(Script::Mongolian))
-        || matches!(
-            script,
-            Script::NKo
-                | Script::Khmer
-                | Script::Myanmar
-                | Script::Buginese
-                | Script::TaiTham
-                | Script::Balinese
-                | Script::Sundanese
-                | Script::Lepcha
-                | Script::Limbu
-                | Script::Cham
-                | Script::Brahmi
-                | Script::Sharada
-                | Script::Khojki
-                | Script::Tirhuta
-                | Script::Modi
-        )
-}
-
-/// Applies `locl` and `ccmp` as one stage, as the Indic and Mongolian
-/// shapers do before anything else, when that keeps one glyph per
-/// code point; those shapers index their glyphs by code point, so a
-/// length-changing `ccmp` has to wait until after their positional
-/// work. Returns whether the stage ran. `table` is the shaper's joiner
-/// handling.
+/// Applies `locl` and `ccmp` as one stage, as the Myanmar pass does
+/// before anything else, when that keeps one glyph per code point. The
+/// pass indexes its glyphs by code point, so a length-changing `ccmp`
+/// has to wait until after its reorder. Returns whether the stage ran.
+/// `table` is the shaper's joiner handling.
 pub(crate) fn apply_locl_ccmp_if_length_preserving(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,

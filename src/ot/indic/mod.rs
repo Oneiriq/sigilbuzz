@@ -41,7 +41,8 @@
 //! after the base only.
 //!
 //! Sinhala, which HarfBuzz shapes with the Universal Shaping Engine,
-//! keeps sigilbuzz's earlier Indic pass (the [`devanagari`] module).
+//! runs that shaper ([`crate::ot::use_shaper`]). Its config here only
+//! gives [`shape_indic`] its script tags.
 
 pub mod devanagari;
 mod final_reorder;
@@ -57,10 +58,8 @@ use crate::unicode::Script;
 /// relative to the other glyphs of the syllable.
 ///
 /// Mirrors the `ot_position_t` slot the reph should occupy after
-/// reordering. The names match HarfBuzz's. sigilbuzz's final reorder
-/// maps these slots onto a flat syllable structure, so some of them
-/// resolve to the same target (see `final_reorder` in
-/// [`devanagari`]).
+/// reordering. The names match HarfBuzz's (`reph_position_t` in
+/// `hb-ot-shaper-indic.cc`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RephPosition {
     /// Just after the main (base) consonant.

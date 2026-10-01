@@ -164,9 +164,8 @@ release.
 - `sigilbuzz::unicode::*`: the Unicode property tables. The consumer-facing parts are
   exported from the crate root and are Tier 1 (`UnicodeScript`, `script_of`,
   `is_hangul_jamo`, `BidiInfo`, `BidiClass`, `bidi_class`, `JoiningType`). The rest
-  (bidi class tables, Indic and USE category tables, normalization helpers, bracket
-  pairs, the joining-type table) stays hidden because the underlying Unicode data
-  changes with each Unicode release.
+  (bidi class tables, normalization helpers, bracket pairs, the joining-type table)
+  stays hidden because the underlying Unicode data changes with each Unicode release.
 - `sigilbuzz::tables::{ankr, avar, base, cbdt, cblc, cff, cff2, cmap, ebdt, eblc,
   fvar, gdef, glyf, gpos, gsub, gvar, head, hhea, hmtx, hvar, kern, kerx, layout, loca,
   math, maxp, morx, multi_var_store, mvar, name, parse, sbix, svg_table, varc,

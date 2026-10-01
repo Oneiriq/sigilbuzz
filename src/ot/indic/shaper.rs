@@ -238,7 +238,7 @@ pub(crate) fn shape(
     };
     let is_old_spec = !run
         .gsub
-        .and_then(|g| chosen_script(g, prio))
+        .and_then(|g| crate::ot::layout_select::chosen_script(g.script_list(), prio))
         .is_some_and(|tag| tag[3] == b'2');
     let mut plan = Plan {
         config: *config,
@@ -332,17 +332,6 @@ fn early_or_off(tag: [u8; 4]) -> bool {
             .iter()
             .chain(&INDIC_EARLY_FEATURES)
             .any(|f| f.tag == tag)
-}
-
-/// The script tag GSUB picks for the run: the first of its own tags
-/// the table lists, then `DFLT`, `dflt`, or `latn`, as
-/// `hb_ot_layout_table_select_script` picks it.
-fn chosen_script(gsub: &Gsub<'_>, prio: &[[u8; 4]]) -> Option<[u8; 4]> {
-    let scripts = gsub.script_list();
-    prio.iter()
-        .chain([*b"DFLT", *b"dflt", *b"latn"].iter())
-        .find(|&&tag| scripts.find(tag).is_some())
-        .copied()
 }
 
 #[cfg(test)]

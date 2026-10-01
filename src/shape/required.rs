@@ -17,13 +17,10 @@
 use super::joiners::FeatureFlags;
 use super::{apply_gsub_lookup, feature_disabled, Feature, LookupBudget};
 use crate::buffer::Glyph;
-use crate::ot::indic::devanagari::{INDIC_BASIC_FEATURES, INDIC_PRESENTATION_FEATURES};
 use crate::ot::indic::indic_config_for;
-use crate::ot::tibetan::TIBT_FEATURES;
-use crate::ot::use_shaper::{
-    HANGUL_FEATURES, MYANMAR_BASIC_FEATURES, MYANMAR_TOPOGRAPHICAL_FEATURES, USE_BASIC_FEATURES,
-    USE_TOPOGRAPHICAL_FEATURES,
-};
+use crate::ot::indic::shaper::INDIC_FEATURES;
+use crate::ot::myanmar::{MYANMAR_BASIC_FEATURES, MYANMAR_TOPOGRAPHICAL_FEATURES};
+use crate::ot::use_shaper::{HANGUL_FEATURES, USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES};
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 use crate::unicode::Script;
@@ -36,19 +33,26 @@ const DEFAULT_CHAIN: &[[u8; 4]] = &[
 /// Extra default features of vertical runs.
 const VERTICAL_CHAIN: &[[u8; 4]] = &[*b"vert", *b"vrt2"];
 
-/// The joining-form features of the Arabic, Mongolian, and N'Ko paths.
+/// The joining-form features of the Arabic path.
 const POSITIONAL: &[&[u8; 4]] = &[b"isol", b"init", b"medi", b"fina"];
 
-/// `locl` and `ccmp`, which the Indic, Mongolian, and N'Ko shapers run first.
+/// `locl` and `ccmp`, which the Indic shaper runs first.
 const LOCL_CCMP: &[&[u8; 4]] = &[b"locl", b"ccmp"];
+
+/// The tags this module counts as applied for Khmer.
+const KHMER_TAGS: &[&[u8; 4]] = &[
+    b"locl", b"ccmp", b"nukt", b"akhn", b"rphf", b"pref", b"rkrf", b"abvf", b"blwf", b"half",
+    b"pstf", b"vatu", b"cjct", b"abvs", b"blws", b"haln", b"pres", b"psts",
+];
 
 /// What decides the GSUB tags one segment's pipeline applies.
 pub(super) struct SegmentPlan<'a> {
     /// The segment's script.
     pub(super) script: Script,
-    /// The buffer's dominant script, which gates the Tibetan,
-    /// Mongolian, and Hangul shapers.
+    /// The buffer's dominant script, which gates the Hangul shaper.
     pub(super) dominant: Option<Script>,
+    /// True when the Universal Shaping Engine shapes the segment.
+    pub(super) use_shaper: bool,
     /// The segment's code points.
     pub(super) codepoints: &'a [char],
     /// True when the Arabic joining pass runs for the segment.
@@ -69,28 +73,13 @@ impl SegmentPlan<'_> {
     /// mirroring the dispatch in [`super::shape`]. Complex shapers
     /// apply their features whatever the caller's overrides say.
     fn shaper_features(&self) -> &'static [&'static [&'static [u8; 4]]] {
-        if indic_config_for(self.script).is_some() {
-            return &[LOCL_CCMP, INDIC_BASIC_FEATURES, INDIC_PRESENTATION_FEATURES];
+        if self.use_shaper {
+            return &[USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES];
         }
         let dominant = self.dominant == Some(self.script);
         match self.script {
-            Script::Khmer
-            | Script::Buginese
-            | Script::TaiTham
-            | Script::Balinese
-            | Script::Sundanese
-            | Script::Lepcha
-            | Script::Limbu
-            | Script::Cham
-            | Script::Brahmi
-            | Script::Sharada
-            | Script::Khojki
-            | Script::Tirhuta
-            | Script::Modi => &[USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES],
+            Script::Khmer => &[KHMER_TAGS],
             Script::Myanmar => &[MYANMAR_BASIC_FEATURES, MYANMAR_TOPOGRAPHICAL_FEATURES],
-            Script::NKo => &[LOCL_CCMP, POSITIONAL],
-            Script::Tibetan if dominant => &[TIBT_FEATURES],
-            Script::Mongolian if dominant => &[LOCL_CCMP, POSITIONAL],
             Script::Hangul
                 if dominant
                     && self
@@ -107,6 +96,10 @@ impl SegmentPlan<'_> {
 
     /// True when some pass of the segment's pipeline applies `tag`.
     fn applies(&self, tag: [u8; 4]) -> bool {
+        let indic = indic_config_for(self.script).is_some_and(|c| c.script != Script::Sinhala);
+        if indic && (LOCL_CCMP.contains(&&tag) || INDIC_FEATURES.iter().any(|f| f.tag == tag)) {
+            return true;
+        }
         let default = DEFAULT_CHAIN.contains(&tag)
             || (self.vertical && VERTICAL_CHAIN.contains(&tag))
             || (self.backward && tag == *b"rtlm")
@@ -162,6 +155,7 @@ mod tests {
         SegmentPlan {
             script,
             dominant: Some(script),
+            use_shaper: script.is_use(),
             codepoints: cps,
             arabic: script == Script::Arabic,
             vertical: false,
@@ -205,6 +199,15 @@ mod tests {
         assert!(plan(Script::Khmer, &[], &[]).applies(*b"pref"));
         assert!(plan(Script::Thai, &[], &[]).applies(*b"liga"));
         assert!(!plan(Script::Latin, &[], &[]).applies(*b"rphf"));
+        // The Universal Shaping Engine, unless the font sends the
+        // script to the default shaper.
+        assert!(plan(Script::Sinhala, &[], &[]).applies(*b"rphf"));
+        let generic = SegmentPlan {
+            use_shaper: false,
+            ..plan(Script::Sinhala, &[], &[])
+        };
+        assert!(!generic.applies(*b"rphf"));
+        assert!(generic.applies(*b"liga"));
         // The Hangul shaper only runs for jamo.
         assert!(!plan(Script::Hangul, &[], &['\u{AC00}']).applies(*b"ljmo"));
         assert!(plan(Script::Hangul, &[], &['\u{1100}']).applies(*b"ljmo"));
