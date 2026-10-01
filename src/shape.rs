@@ -115,6 +115,7 @@
 //!   explicitly to get HarfBuzz's RTL behavior and visual order.
 
 mod aat;
+mod arabic_joining;
 mod attach;
 mod cluster;
 mod fallback;
@@ -128,7 +129,6 @@ mod gsub_parsed;
 mod hangul;
 mod ignorables;
 mod joiners;
-mod joining_flags;
 mod kern;
 mod lig;
 mod native_direction;
@@ -139,6 +139,7 @@ mod required;
 mod rotate;
 mod segment;
 mod shaper;
+mod stch;
 mod syllabic;
 mod syllables;
 mod thai;

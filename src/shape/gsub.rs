@@ -84,6 +84,10 @@ fn effective_type(lookup: &Lookup<'_>) -> u16 {
 /// every other input glyph a rule matches (ligature components,
 /// contextual input) must have the feature on too (the skipping
 /// iterator's `may_match`). Backtrack and lookahead glyphs need not.
+///
+/// Returns, for each glyph after the lookups, whether a substitution
+/// produced it, one that kept the glyph id included (HarfBuzz's
+/// `_hb_glyph_info_substituted`).
 pub(super) fn apply_gsub_lookups_masked(
     gsub: &Gsub<'_>,
     lookups: &[u16],
@@ -92,7 +96,7 @@ pub(super) fn apply_gsub_lookups_masked(
     mask: &[bool],
     flags: FeatureFlags,
     budget: &mut LookupBudget,
-) {
+) -> Vec<bool> {
     let cx = GsubCx { gsub, gdef, flags };
     let mut buf = GsubBuffer::new(
         core::mem::take(glyphs),
@@ -105,7 +109,9 @@ pub(super) fn apply_gsub_lookups_masked(
             apply_lookup_to_buffer(&cx, &lookup, &mut buf, 0, budget);
         }
     }
-    *glyphs = buf.into_glyphs();
+    let (out, substituted) = buf.into_glyphs_and_substituted();
+    *glyphs = out;
+    substituted
 }
 
 /// Applies a single GSUB lookup by index. Mirrors HarfBuzz's
@@ -380,8 +386,8 @@ fn apply_reverse_chain(
             .iter()
             .find_map(|rc| rc.apply_at_in(&*buf, i, mcx, &mut ops));
         buf.apply_flag_ops(ops);
-        if let (Some(out), Some(glyph)) = (substitute, buf.get_mut(i)) {
-            substitute_glyph(glyph, out);
+        if let Some(out) = substitute {
+            buf.replace_glyph_at(i, out);
         }
     }
 }

@@ -21,10 +21,10 @@ stable. [docs/STABILITY.md](docs/STABILITY.md) lists them.
 - OpenType layout: every GSUB and GPOS lookup type, GDEF, feature variations, and the
   legacy `kern` table.
 - AAT `morx` and `kerx`, used when a font has no GSUB or GPOS.
-- Complex scripts: Arabic, Hebrew, Devanagari and the rest of the Indic family,
-  Khmer, Myanmar, Thai, Lao, Tibetan, Mongolian, N'Ko, Old Hangul, plus the scripts
-  handled by the Universal Shaping Engine (Balinese, Brahmi, Buginese, Cham, Khojki,
-  Lepcha, Limbu, Modi, Sharada, Sundanese, Tai Tham, Tirhuta).
+- Complex scripts: Arabic, Syriac, Hebrew, Devanagari and the rest of the Indic
+  family, Khmer, Myanmar, Thai, Lao, Tibetan, Mongolian, N'Ko, Old Hangul, plus every
+  other script HarfBuzz gives the Universal Shaping Engine (Adlam, Balinese, Brahmi,
+  Chakma, Javanese, Kaithi, Takri, and many more).
 - Mixed-script runs, bidi (UAX 9 with paired brackets), and vertical text.
 - Variable fonts: `fvar`, `avar`, `gvar`, `HVAR`, `VVAR`, `MVAR`, and VARC composite
   glyphs.

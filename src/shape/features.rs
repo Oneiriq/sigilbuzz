@@ -4,11 +4,11 @@
 
 use alloc::vec::Vec;
 
+use super::arabic_joining::Action;
 use super::gsub::{apply_gsub_lookup, apply_gsub_lookups_masked};
 use super::joiners::FeatureFlags;
 use super::{feature_disabled, feature_enabled, Feature, JoinerTable, LookupBudget};
 use crate::buffer::Glyph;
-use crate::ot::arabic::JoiningForm;
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 
@@ -307,34 +307,54 @@ pub(crate) fn apply_gsub_feature_masked(
     );
 }
 
-/// Applies the four Arabic positional features (`isol`, `init`,
-/// `medi`, `fina`), each restricted to the glyph positions whose
-/// [`JoiningForm`] matches. The forms slice stays aligned with the
-/// glyph run because we call this before any `ccmp`/`rlig`/`liga`
-/// substitution has shrunk or expanded the stream (see the call
-/// site in [`shape`](super::shape)).
+/// Applies `stch`, the Arabic shaper's first feature, and records the
+/// glyphs its multiple substitutions produced as stretch tiles
+/// (`record_stch` in `hb-ot-shaper-arabic.cc`). Returns whether it
+/// recorded any, so the stretch runs after positioning (see the `stch`
+/// module).
+pub(super) fn apply_stch(
+    gsub: &Gsub<'_>,
+    glyphs: &mut Vec<Glyph>,
+    gdef: Option<&Gdef<'_>>,
+    features: &[Feature],
+    script_priority: &[[u8; 4]],
+    budget: &mut LookupBudget,
+) -> bool {
+    let tag = *b"stch";
+    let lookups = lookup_indices_for_feature_in_scripts(gsub, tag, script_priority);
+    if feature_disabled(features, tag) || lookups.as_ref().map_or(true, Vec::is_empty) {
+        return false;
+    }
+    for index in lookups.unwrap_or_default() {
+        apply_gsub_lookup(gsub, index, glyphs, gdef, 0, FeatureFlags::AUTO, budget);
+    }
+    super::arabic_joining::record_stch(glyphs)
+}
+
+/// Applies the Arabic shaper's joining features (`isol`, `fina`,
+/// `fin2`, `fin3`, `medi`, `med2`, `init`), one stage each in that
+/// order, as HarfBuzz's `collect_features_arabic` adds them. Each runs
+/// on the glyphs whose joining action (see the `arabic_joining`
+/// module, which stashes it in each glyph so it follows the glyph
+/// through `ccmp` and the other substitutions) is its own. The
+/// features come from the segment's script tags, `script_priority`.
 pub(super) fn apply_arabic_positional_features(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
     gdef: Option<&Gdef<'_>>,
-    forms: &[JoiningForm],
+    script_priority: &[[u8; 4]],
     budget: &mut LookupBudget,
 ) {
-    for (form, tag) in [
-        (JoiningForm::Isol, *b"isol"),
-        (JoiningForm::Init, *b"init"),
-        (JoiningForm::Medi, *b"medi"),
-        (JoiningForm::Fina, *b"fina"),
-    ] {
+    for (action, tag) in Action::FEATURES {
         let Some(lookup_indices) =
-            lookup_indices_for_feature_in_scripts(gsub, tag, &[*b"arab", *b"DFLT"])
+            lookup_indices_for_feature_in_scripts(gsub, tag, script_priority)
         else {
             continue;
         };
         if lookup_indices.is_empty() {
             continue;
         }
-        let mask: Vec<bool> = forms.iter().map(|&f| f == form).collect();
+        let mask: Vec<bool> = glyphs.iter().map(|g| action.is_on(g)).collect();
         let joiners = JoinerTable::Arabic.joiners(tag);
         apply_gsub_lookups_masked(gsub, &lookup_indices, glyphs, gdef, &mask, joiners, budget);
     }

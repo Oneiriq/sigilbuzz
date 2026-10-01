@@ -27,12 +27,6 @@ These are smaller pieces that are not scheduled yet.
 - Language tags from version 1 `name` tables are read but not exposed.
 - Subsetting a CFF or CFF2 font down to fewer glyphs drops its layout and variation
   tables. TrueType fonts keep them.
-- Scripts that `UnicodeScript` has no bucket for (Javanese, Chakma, Kaithi, Khudawadi,
-  Takri, and the other scripts HarfBuzz gives the Universal Shaping Engine) shape with
-  the default shaper, so they also get no vowel constraints.
-- The Indic scripts do not try HarfBuzz's newest script tags (`dev3`, `bng3`, and the
-  others ending in 3), so a font with lookups under those tags does not get the
-  Universal Shaping Engine, as HarfBuzz gives it.
 - The default shaper runs `ccmp` and `locl` before the other default GSUB features,
   where HarfBuzz runs them in one stage. Glyphs match, but with
   `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT` some unsafe-to-concat flags differ (19 of 350
@@ -44,7 +38,14 @@ These are smaller pieces that are not scheduled yet.
 - A mark takes its parent's vertical offset when it attaches in HarfBuzz
   (`resolve_cross_offset`), where sigilbuzz adds the parent's final offset. The two
   differ when a later lookup moves the parent (one Lepcha and one Tibetan string of
-  3,000 test strings in those and other scripts).
+  3,000 test strings in those and other scripts, and 50 of 5,888 Marchen strings).
+- The `stch` stretch of the Arabic shaper (U+070F SYRIAC ABBREVIATION MARK) fills the
+  rest of the word, and HarfBuzz counts symbol characters (General_Category Sc, Sk, Sm,
+  So) into the word. sigilbuzz has no symbol categories, so a symbol ends the word.
+- The older `UnicodeScript` buckets (Latin through Modi) still cover the Unicode blocks
+  of their scripts, where HarfBuzz reads the Script property. Characters of those
+  scripts outside the blocks (Latin Extended Additional, Arabic Extended-A, the CJK
+  extensions past B, the Mongolian Supplement) shape as `Other`.
 
 ## Known bugs
 

@@ -15,7 +15,7 @@
 //! The buffer's script is its first script-bearing character's, as
 //! HarfBuzz guesses it. Scripts sigilbuzz has no bucket for take their
 //! direction from their first strong bidi class instead, so an RTL
-//! script without a sigilbuzz shaper (Syriac, Thaana, ...) still counts
+//! script without a sigilbuzz bucket (Thaana, Samaritan, ...) still counts
 //! as RTL. HarfBuzz reports no native direction for the bidirectional
 //! scripts (Old Hungarian, Old Italic, Runic, Tifinagh), so text in
 //! them shapes in the direction asked for, never reversed.
@@ -58,14 +58,15 @@ const fn has_no_native_direction(ch: char) -> bool {
     )
 }
 
-/// The script's native horizontal direction: [`Script::horizontal_direction`],
-/// or for text sigilbuzz has no script bucket for, the direction of
-/// its first strong character (left to right when there is none, as
-/// for HarfBuzz's Common script). `None` when that character belongs
-/// to a script HarfBuzz gives no direction.
+/// The script's native horizontal direction: that of its ISO 15924 code
+/// ([`Direction::horizontal_for_script`], `None` for Tifinagh, which
+/// HarfBuzz writes either way), or for text sigilbuzz has no script
+/// bucket for, the direction of its first strong character (left to
+/// right when there is none, as for HarfBuzz's Common script). `None`
+/// when that character belongs to a script HarfBuzz gives no direction.
 fn native_horizontal(script: Option<Script>, cps: &[char]) -> Option<Direction> {
-    match script {
-        Some(script) if script != Script::Other => Some(script.horizontal_direction()),
+    match script.and_then(Script::iso15924_tag) {
+        Some(tag) => Direction::horizontal_for_script(tag),
         _ => cps
             .iter()
             .find_map(|&c| match bidi_class(c) {

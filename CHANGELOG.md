@@ -58,6 +58,10 @@ Added:
 - `UnicodeScript::{iso15924_tag, from_iso15924_tag, horizontal_direction}` and
   `Direction::horizontal_for_script`.
 - `ShapedRun` is re-exported from the crate root.
+- `UnicodeScript` buckets for Syriac and the 75 other scripts HarfBuzz 14.5.0 gives the
+  Universal Shaping Engine that sigilbuzz had none for (see Changed), and the hidden
+  `unicode::script_code`, the Unicode Script property of a character as an ISO 15924
+  code (`Zyyy` for Common, `Zinh` for Inherited, `Zzzz` for unassigned code points).
 - GPOS cursive attachment (lookup type 3). `curs` runs by default on horizontal runs.
   It never ran before.
 - `PairPos::lookup_with_device_base`, which also returns the bytes the records' Device
@@ -374,9 +378,10 @@ Changed:
   off. The circle takes the cluster, glyph flags and Unicode properties of the
   character after it, so in a font without GDEF glyph classes a circle before a
   nonspacing mark is a mark. `tests/vowel_constraints_gen.rs` generates the table from
-  that file. HarfBuzz's Khmer and Myanmar shapers do not run it, and sigilbuzz has no
-  shaper for Khudawadi and Takri, the two other scripts it lists. On 1,793 strings that
-  put every listed sequence of the 14 other scripts in several contexts, the output
+  that file. HarfBuzz's Khmer and Myanmar shapers do not run it. Khudawadi and Takri,
+  the two other scripts it lists, get it with their new buckets (below). On 1,793
+  strings that put every listed sequence of the 14 other scripts in several contexts,
+  the output
   matches HarfBuzz 14.5.0 on 1,746 at `MonotoneGraphemes` and `Characters` and 1,716 at
   `MonotoneCharacters` (before: 628 and 574). The rest put two scripts in one buffer,
   which sigilbuzz shapes one script run at a time unless the caller calls
@@ -397,6 +402,65 @@ Changed:
   `Scripts.txt`: they stay in the run of the letter before them and do not give a
   buffer its script. Alone they now shape with the default shaper, as in HarfBuzz,
   where they used to get a dotted circle.
+- Breaking: `UnicodeScript` has a bucket for every script HarfBuzz 14.5.0 gives a shaper
+  of its own (`hb_ot_shaper_categorize` in `hb-ot-shaper.hh`): Syriac, which takes the
+  Arabic shaper, and 75 scripts of the Universal Shaping Engine, from Javanese, Chakma,
+  Kaithi, Khudawadi, Takri and Grantha to Adlam, Mandaic, Sogdian, and Jurchen,
+  Proto-Cuneiform and Seal from Unicode 18.0. They were `Other` and shaped with the
+  default shaper, so they got no syllables, no reordering, no joining forms and no
+  vowel constraints. Their code points come from the Unicode Script property
+  (`Scripts.txt` of Unicode 18.0.0, the version HarfBuzz 14.5.0 reads), and each tries
+  its ISO 15924 code in lowercase, then `DFLT`, as its script tags
+  (`hb_ot_old_tag_from_script` in `hb-ot-tag.cc`). Adlam, Chorasmian, Hanifi Rohingya,
+  Mandaic, Manichaean, Old Uyghur, Phags-pa, Psalter Pahlavi and Sogdian get
+  Arabic-style joining forms in the Universal Shaping Engine (`has_arabic_joining`), and
+  Khudawadi and Takri get their vowel constraints. The joining glyph flags now come only
+  from the shaper HarfBuzz picks for the buffer, so Mongolian and N'Ko in a font with
+  only `DFLT` or `latn` lookups no longer get them. Sidetic is right to left
+  (`Direction::horizontal_for_script`), and Tifinagh keeps no native direction. On
+  97,234 strings in 56 of these scripts with their Noto fonts, the output matches
+  HarfBuzz 14.5.0 in glyphs, clusters and glyph flags at the `MonotoneGraphemes`,
+  `MonotoneCharacters` and `Characters` cluster levels (before: 47,078, 46,984 and
+  46,984), and in positions too except for 50 Marchen strings (see docs/ROADMAP.md).
+  The new variants break an exhaustive `match` on `UnicodeScript`, which is now
+  `#[non_exhaustive]`, so later buckets will not.
+- Syriac shapes with HarfBuzz's Arabic shaper (`hb-ot-shaper-arabic.cc`). The joining
+  state machine of `arabic_joining`, with its ALAPH and DALATH RISH columns, gives alaph
+  `fin2` after a letter that does not join it and `fin3` after dalath or rish, and the
+  letter before a final alaph `med2`. The font's `stch` feature splits U+070F SYRIAC
+  ABBREVIATION MARK into tiles that stretch over the rest of the word after positioning
+  (`record_stch` and `apply_stch`). All 581 Syriac test strings with Noto Sans Syriac
+  match HarfBuzz 14.5.0 at every cluster level (before: 268 with flags).
+- The Arabic shaper keeps each glyph's joining form with the glyph through `ccmp` and
+  `locl`, as HarfBuzz keeps it in the glyph info. A font whose `ccmp` splits a letter
+  (Noto Sans Arabic splits dotted letters into a base and its dots) used to give the
+  joining features to the wrong glyphs. The joining features run in HarfBuzz's order
+  (`isol`, `fina`, `fin2`, `fin3`, `medi`, `med2`, `init`) under the segment's script
+  tags, and vertical Arabic takes the default shaper, as in HarfBuzz. On 1,000 Arabic
+  strings with Noto Sans Arabic and Amiri, 999 now match HarfBuzz 14.5.0 right to left
+  (before: 686) and all 1,000 top to bottom (before: 334).
+- Characters whose Unicode Script is Common or Inherited (the tatweel, the dandas, the
+  Arabic harakat, CJK punctuation) stay in the script run around them, in `shape` and
+  in `Buffer::script_runs`, as HarfBuzz gives a buffer the script of its first other
+  character. They used to start a run of their own when `script_of` gave them a bucket
+  or `Other`, which split a Syriac word at its tatweel.
+- The Universal Shaping Engine and the Indic and Khmer shapers count a substitution that
+  keeps the glyph id as a substitution (`_hb_glyph_info_substituted`). Noto Sans
+  Javanese's `pref` maps cakra to itself, and HarfBuzz then moves the cakra in front of
+  its base like a pre-base vowel sign (`record_pref_use`). sigilbuzz left it in place.
+- The `Scripts.txt` and `PropertyValueAliases.txt` snapshots under `tests/tools/ucd/` are
+  Unicode 18.0.0, and the Script property table they generate moved from
+  `sigilbuzz-capi` into the core crate. The C API's `hb_buffer_guess_segment_properties`
+  reads it from there and now knows the Unicode 18.0 characters.
+- The Indic scripts try HarfBuzz's Indic3 script tags (`dev3`, `bng3`, `gur3`, `gjr3`,
+  `ory3`, `tml3`, `tel3`, `knd3`, `mlm3`) before the ones ending in 2
+  (`hb_ot_all_tags_from_script` in `hb-ot-tag.cc`), and a run whose font has one shapes
+  with the Universal Shaping Engine in place of the Indic shaper, as
+  `hb_ot_shaper_categorize` decides. On 2,631 Devanagari strings with a subset of Noto
+  Sans Devanagari whose `dev2` script records are renamed `dev3`, the output matches
+  HarfBuzz 14.5.0 at every cluster level (before: 1,656, 621 and 1,757 with flags at
+  `MonotoneGraphemes`, `MonotoneCharacters` and `Characters`). Fonts without those tags
+  shape as before.
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,

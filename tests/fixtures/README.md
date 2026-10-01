@@ -76,3 +76,10 @@ Fonts used by the integration tests.
   with the other Noto fonts in `tests/fonts/`, whose README has the exact fontTools
   commands. `tests/hangul_tone_harfbuzz_parity.rs` uses it, since no other fixture has
   the tone marks.
+- `../fonts/NotoSansDevanagari-Dev3-Subset.ttf`: a 41 KB subset of Noto Sans Devanagari
+  (OFL 1.1, the Noto Project Authors) whose `dev2` script records are renamed `dev3`, so
+  `tests/indic3_parity.rs` can check that a font with the Indic3 tags gets the Universal
+  Shaping Engine, as in HarfBuzz. No released font uses those tags yet. It sits with the
+  other Noto fonts in `tests/fonts/`, whose README has the exact fontTools steps. The
+  subsets of Noto Sans Javanese, Chakma, Khudawadi, Takri, Syriac, and Adlam that
+  `tests/script_coverage_parity.rs` uses are listed there too.

@@ -33,8 +33,10 @@ const DEFAULT_CHAIN: &[[u8; 4]] = &[
 /// Extra default features of vertical runs.
 const VERTICAL_CHAIN: &[[u8; 4]] = &[*b"vert", *b"vrt2"];
 
-/// The joining-form features of the Arabic path.
-const POSITIONAL: &[&[u8; 4]] = &[b"isol", b"init", b"medi", b"fina"];
+/// The joining-form features of the Arabic shaper.
+const POSITIONAL: &[&[u8; 4]] = &[
+    b"isol", b"fina", b"fin2", b"fin3", b"medi", b"med2", b"init",
+];
 
 /// `locl` and `ccmp`, which the Indic shaper runs first.
 const LOCL_CCMP: &[&[u8; 4]] = &[b"locl", b"ccmp"];
@@ -55,7 +57,8 @@ pub(super) struct SegmentPlan<'a> {
     pub(super) use_shaper: bool,
     /// The segment's code points.
     pub(super) codepoints: &'a [char],
-    /// True when the Arabic joining pass runs for the segment.
+    /// True when the Arabic shaper's joining forms apply to the segment
+    /// (Arabic and Syriac).
     pub(super) arabic: bool,
     /// True for vertical layout.
     pub(super) vertical: bool,
@@ -89,14 +92,17 @@ impl SegmentPlan<'_> {
             {
                 &[HANGUL_FEATURES]
             }
-            Script::Arabic if self.arabic => &[POSITIONAL],
+            _ if self.arabic => &[POSITIONAL],
             _ => &[],
         }
     }
 
     /// True when some pass of the segment's pipeline applies `tag`.
     fn applies(&self, tag: [u8; 4]) -> bool {
-        let indic = indic_config_for(self.script).is_some_and(|c| c.script != Script::Sinhala);
+        // An Indic script whose font has a `dev3`-style tag runs the
+        // Universal Shaping Engine instead.
+        let indic = !self.use_shaper
+            && indic_config_for(self.script).is_some_and(|c| c.script != Script::Sinhala);
         if indic && (LOCL_CCMP.contains(&&tag) || INDIC_FEATURES.iter().any(|f| f.tag == tag)) {
             return true;
         }

@@ -564,7 +564,7 @@ fn set_script_reaches_the_core_buffer() {
         assert_eq!(s.buffer.script(), Some(UnicodeScript::Arabic));
     });
     // Common and scripts without a bucket keep per-run segmentation.
-    for script in [HB_SCRIPT_COMMON, u32::from_be_bytes(*b"Syrc"), 0] {
+    for script in [HB_SCRIPT_COMMON, u32::from_be_bytes(*b"Thaa"), 0] {
         // SAFETY: created above.
         unsafe { hb_buffer_set_script(buffer, script) };
         with_state(buffer, |s| assert_eq!(s.buffer.script(), None));
@@ -771,8 +771,8 @@ fn guess_takes_direction_from_the_script() {
     );
     // An explicit script without a sigilbuzz bucket still sets the
     // direction.
-    let syriac = u32::from_be_bytes(*b"Syrc");
-    assert_eq!(guessed("abc", Some(syriac)), (syriac, HB_DIRECTION_RTL));
+    let thaana = u32::from_be_bytes(*b"Thaa");
+    assert_eq!(guessed("abc", Some(thaana)), (thaana, HB_DIRECTION_RTL));
 }
 
 #[test]
@@ -794,8 +794,9 @@ fn unicode_script_reads_the_script_property() {
 fn guess_uses_the_full_script_property() {
     use crate::HB_DIRECTION_LTR;
     let tag = |t: &[u8; 4]| u32::from_be_bytes(*t);
-    // Scripts sigilbuzz has no shaping bucket for still get their
-    // script and their right-to-left direction.
+    // Right-to-left scripts get their script and direction, with a
+    // shaping bucket (Syriac, Adlam, Mandaic, Hanifi Rohingya) or
+    // without one (Thaana, Samaritan).
     for (text, script) in [
         ("\u{0710}\u{0712}", b"Syrc"),
         ("\u{0780}\u{0781}", b"Thaa"),
