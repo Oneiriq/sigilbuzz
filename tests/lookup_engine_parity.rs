@@ -118,3 +118,38 @@ fn a_cgj_that_blocked_mark_reordering_stays_hidden_from_gsub() {
         [(564, 0, 0, 0), (3, 0, 0, 0)]
     );
 }
+
+const AMIRI: &[u8] = include_bytes!("fixtures/amiri_regular.ttf");
+
+#[test]
+fn a_gpos_context_subtable_that_does_not_match_leaves_the_next_its_turn() {
+    // HarfBuzz tries a lookup's subtables in order until one applies
+    // (hb_ot_layout_lookup_accelerator_t::apply). sigilbuzz stopped at
+    // the first chained context subtable that did not match, so
+    // Amiri's kerning lookups never reached their later subtables: the
+    // teh marbuta here kept its unkerned advance of 587.
+    let blob = Blob::new(AMIRI);
+    let face = Face::parse(&blob, 0).expect("face");
+    let font = Font::new(face, 1000.0);
+    let mut buffer = Buffer::new();
+    buffer.push_str("\u{0643}\u{0629}\u{0643}\u{0651}\u{0623}\u{062E}\u{0651}");
+    buffer.set_direction(Direction::Rtl);
+    let run = shape(&font, &buffer, &[]).expect("shape");
+    let got: Vec<Out> = run
+        .glyphs
+        .iter()
+        .map(|g| (g.glyph_id, g.cluster, g.x_advance, g.x_offset))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (97, 12, 0, 134),
+            (62, 10, 661, 0),
+            (4263, 8, 261, 0),
+            (97, 6, 0, -9),
+            (4173, 4, 343, 0),
+            (4366, 2, 336, 0),
+            (4330, 0, 674, 0),
+        ]
+    );
+}
