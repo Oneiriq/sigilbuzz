@@ -9,9 +9,14 @@
 //! Every rule tried reports the glyphs HarfBuzz marks unsafe to break
 //! or concatenate (`context_apply_lookup` and
 //! `chain_context_apply_lookup` in `hb-ot-layout-gsubgpos.hh`) to an
-//! [`UnsafeRanges`].
+//! [`UnsafeRanges`]. A rule set of more than four rules goes through
+//! HarfBuzz's fast path (see [`super::fast_path`]).
 
-use super::{ChainContext1, ChainContext2, Context1, Context2, SequenceLookupRecord};
+use super::fast_path::{match_rule_set, Cursor, Rule, RuleHead, RuleValues};
+use super::{
+    ChainClassRule2, ChainContext1, ChainContext2, ChainRule1, ClassRule2, Context1, Context2,
+    Rule1, SequenceLookupRecord,
+};
 use crate::tables::layout::skip_iter::{
     match_backtrack_in, match_input_in, match_lookahead_in, InputMatch, MatchContext, MatchGlyph,
     MatchSeq, UnsafeRanges,
@@ -121,7 +126,12 @@ impl Context1<'_> {
     ) -> Option<(InputMatch, &[SequenceLookupRecord])> {
         let first = seq.glyph(i)?.id;
         let set = self.rule_set(self.coverage.index_of(first)?)?;
-        set.rules.iter().find_map(|rule| {
+        let cur = Cursor { seq, at: i, cx };
+        let values = RuleValues {
+            input: |g| g,
+            lookahead: |g| g,
+        };
+        match_rule_set(&cur, sink, &set.rules, &values, |rule, sink| {
             let tail = &rule.input_tail;
             let m = context_rule(seq, i, cx, sink, tail.len(), |k, g| g == tail[k])?;
             Some((m, rule.lookups.as_slice()))
@@ -155,7 +165,12 @@ impl Context2<'_> {
         let first = seq.glyph(i)?.id;
         self.coverage.index_of(first)?;
         let set = self.class_set(self.class_def.class_of(first))?;
-        set.rules.iter().find_map(|rule| {
+        let cur = Cursor { seq, at: i, cx };
+        let values = RuleValues {
+            input: |g| self.class_def.class_of(g),
+            lookahead: |g| self.class_def.class_of(g),
+        };
+        match_rule_set(&cur, sink, &set.rules, &values, |rule, sink| {
             let tail = &rule.input_classes_tail;
             let m = context_rule(seq, i, cx, sink, tail.len(), |k, g| {
                 self.class_def.class_of(g) == tail[k]
@@ -189,7 +204,12 @@ impl ChainContext1<'_> {
     ) -> Option<(InputMatch, &[SequenceLookupRecord])> {
         let first = seq.glyph(i)?.id;
         let set = self.rule_set(self.coverage.index_of(first)?)?;
-        set.rules.iter().find_map(|rule| {
+        let cur = Cursor { seq, at: i, cx };
+        let values = RuleValues {
+            input: |g| g,
+            lookahead: |g| g,
+        };
+        match_rule_set(&cur, sink, &set.rules, &values, |rule, sink| {
             let (tail, ahead, back) = (&rule.input_tail, &rule.lookahead, &rule.backtrack);
             let tests = ChainTests {
                 input: (tail.len(), |k: usize, g: u16| g == tail[k]),
@@ -227,7 +247,12 @@ impl ChainContext2<'_> {
         let first = seq.glyph(i)?.id;
         self.coverage.index_of(first)?;
         let set = self.class_set(self.input_class.class_of(first))?;
-        set.rules.iter().find_map(|rule| {
+        let cur = Cursor { seq, at: i, cx };
+        let values = RuleValues {
+            input: |g| self.input_class.class_of(g),
+            lookahead: |g| self.lookahead_class.class_of(g),
+        };
+        match_rule_set(&cur, sink, &set.rules, &values, |rule, sink| {
             let (tail, ahead, back) = (&rule.input_classes_tail, &rule.lookahead, &rule.backtrack);
             let tests = ChainTests {
                 input: (tail.len(), |k: usize, g: u16| {
@@ -243,5 +268,41 @@ impl ChainContext2<'_> {
             let m = chain_rule(seq, i, cx, sink, tests)?;
             Some((m, rule.lookups.as_slice()))
         })
+    }
+}
+
+impl Rule for Rule1 {
+    fn head(&self) -> RuleHead<'_> {
+        RuleHead {
+            input: &self.input_tail,
+            lookahead: &[],
+        }
+    }
+}
+
+impl Rule for ClassRule2 {
+    fn head(&self) -> RuleHead<'_> {
+        RuleHead {
+            input: &self.input_classes_tail,
+            lookahead: &[],
+        }
+    }
+}
+
+impl Rule for ChainRule1 {
+    fn head(&self) -> RuleHead<'_> {
+        RuleHead {
+            input: &self.input_tail,
+            lookahead: &self.lookahead,
+        }
+    }
+}
+
+impl Rule for ChainClassRule2 {
+    fn head(&self) -> RuleHead<'_> {
+        RuleHead {
+            input: &self.input_classes_tail,
+            lookahead: &self.lookahead,
+        }
     }
 }

@@ -461,6 +461,41 @@ Changed:
   HarfBuzz 14.5.0 at every cluster level (before: 1,656, 621 and 1,757 with flags at
   `MonotoneGraphemes`, `MonotoneCharacters` and `Characters`). Fonts without those tags
   shape as before.
+- A GPOS mark takes the cross-stream offset of its parent (y in horizontal runs, x in
+  vertical ones, summed over the parent's cursive chain) when it attaches, and only the
+  parent's main-direction offset at the end of GPOS, as in HarfBuzz 14.5.0
+  (`resolve_cross_offset` and `propagate_attachment_offsets`). A lookup that raises a
+  base after its mark attached no longer moves the mark. The end-of-GPOS pass resolves
+  forward runs from their start and backward runs from their end, each walk following
+  at most 64 links, as HarfBuzz does. One Lepcha and one Tibetan test string now match
+  HarfBuzz in positions, and so do all marks of `tests/fixtures/attach_chain.ttf`.
+- With `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT`, a context or chained context rule set
+  of more than four rules follows HarfBuzz's fast path (`RuleSet::apply` and
+  `ChainRuleSet::apply`): it reads the one or two glyphs after the cursor first, and a
+  rule they rule out marks the cursor through that glyph unsafe to concatenate. Once a
+  rule or a ligature of a set of two or more matches, the mark for the rules passed over
+  starts at the end of the match, where HarfBuzz leaves the cursor, instead of at the
+  cursor. All 1,992 USE test strings, all 2,100 strings of six more USE scripts, and
+  all Indic and Khmer test strings now match HarfBuzz 14.5.0 in glyph flags with that
+  buffer flag at every cluster level (before: 1,973 to 1,974, 2,077 to 2,081, and 9,621
+  to 9,638 of 9,666).
+- The default GSUB features run in the stages HarfBuzz builds for them
+  (`hb_ot_shape_collect_features`). The default, Hebrew and Thai shapers run `ccmp`,
+  `locl`, `rlig`, `calt`, `clig`, `liga` and `rclt` (or `vert` in vertical text), the
+  direction features with `rtlm`, and the caller's features in one stage, so their
+  lookups apply in lookup-index order whatever feature they belong to. `ccmp` and
+  `locl` used to run first, the direction features before them, and each other feature
+  on its own. The Arabic shaper (`collect_features_arabic`) runs `isol`, `fina`, `medi`
+  and `init` in that order, then `rlig`, then `calt`, then `liga`, `clig`, `mset` and
+  the rest, in both directions. It used to run `init` before `fina`, `liga` and `clig`
+  before `calt`, and no `mset`. Vertical Arabic now takes the default shaper, as in
+  HarfBuzz. `tests/fixtures/stage_order.ttf` tests the stages.
+- With `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT`, a `kern` or `kerx` table the shaping
+  plan applies marks the whole run unsafe to concatenate even when kerning is off (as in
+  vertical text), as HarfBuzz's `KerxTable::apply` does. The legacy `kern` table only
+  applies to the shapers HarfBuzz lets fall back to it (the default, Arabic, Hebrew and
+  Hangul shapers), as `hb_ot_shape_plan_t` decides. All 20 vertical test strings now
+  match HarfBuzz 14.5.0 in glyph flags with that buffer flag (before: 15).
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,

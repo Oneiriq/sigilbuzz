@@ -52,6 +52,22 @@ Fonts used by the integration tests.
   `tests/tools/build_phantom_anchor_fixture.py`. `tests/outline_parity.rs` uses it to
   drive phantom-point resolution on a real `Face`. Public domain, no third-party
   content (generated entirely at build time).
+- `attach_chain.ttf`: a synthetic 1,628-byte font with five bases, the ligature `f_i`,
+  and the combining marks U+0300 to U+0303. Its GPOS stacks a mark on a mark before
+  that mark attaches, joins `b` cursively with the RightToLeft flag, attaches marks to
+  bases, ligatures and marks, and then moves the bases with a `blwm` lookup. No other
+  fixture has a lookup that moves a base after its mark attached. Built
+  deterministically by `tests/tools/build_attach_chain_fixture.py` with fontTools.
+  `tests/attach_offsets_parity.rs` uses it. SIL Open Font License 1.1, no third-party
+  content.
+- `stage_order.ttf`: a synthetic 2,092-byte font with the Latin letters a, b, c, e and
+  f, the Arabic letters beh, lam and alef, and alternate glyphs. Each GSUB lookup makes
+  one substitution, and the lookups of `ccmp`, `ltra`, `liga`, `calt`, `smcp`, `vert`,
+  the joining features and `mset` interleave by lookup index, so the result shows the
+  order the features ran in. No other fixture has lookups that interleave across
+  features. Built deterministically by `tests/tools/build_stage_order_fixture.py` with
+  fontTools. `tests/stage_order_parity.rs` uses it. SIL Open Font License 1.1, no
+  third-party content.
 - `noto_sans_cjk_jp_uvs_subset.otf`: an 11 KB subset of Noto Sans CJK JP Regular
   (version 2.004) by Adobe and the Noto Project Authors, SIL Open Font License 1.1
   (reserved font name "Source", which the subset does not use). Source:

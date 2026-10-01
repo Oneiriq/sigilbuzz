@@ -52,6 +52,9 @@ pub(super) struct GsubBuffer {
     /// ([`ON`]), for features only some glyphs carry, and whether a
     /// substitution produced it ([`SUBSTITUTED`]). Moves with its glyph.
     mask: Option<Vec<u8>>,
+    /// Whether the lookup being applied reads the [`ON`] bits of
+    /// `mask`. A lookup that a feature on every glyph shares does not.
+    mask_active: bool,
     /// Length of the output.
     out_len: usize,
     /// Start of the input in `buf`: the cursor glyph.
@@ -139,6 +142,7 @@ impl GsubBuffer {
         Self {
             buf: glyphs,
             mask,
+            mask_active: true,
             out_len: 0,
             idx: 0,
             lig_ids_used: 0,
@@ -254,17 +258,26 @@ impl GsubBuffer {
         self.buf.get_mut(self.idx)
     }
 
+    /// Makes the next lookups read the mask (`active`) or treat every
+    /// glyph as in it. The mask keeps moving with its glyphs either way.
+    pub(super) fn set_mask_active(&mut self, active: bool) {
+        self.mask_active = active;
+    }
+
+    /// The mask, when the current lookup reads it.
+    fn active_mask(&self) -> Option<&Vec<u8>> {
+        self.mask.as_ref().filter(|_| self.mask_active)
+    }
+
     /// True when the feature is on at the cursor glyph.
     pub(super) fn cur_in_mask(&self) -> bool {
-        self.mask
-            .as_ref()
+        self.active_mask()
             .map_or(true, |m| m.get(self.idx).is_some_and(|&m| m & ON != 0))
     }
 
     /// True when the feature is on at logical position `i`.
     pub(super) fn in_mask_at(&self, i: usize) -> bool {
-        self.mask
-            .as_ref()
+        self.active_mask()
             .map_or(true, |m| m.get(self.slot(i)).is_some_and(|&m| m & ON != 0))
     }
 
@@ -386,7 +399,10 @@ impl GsubBuffer {
     /// cursor stays.
     pub(super) fn output_glyph(&mut self, glyph: Glyph) {
         self.ensure_gap(1);
-        let on = u8::from(self.cur_in_mask());
+        let on = self
+            .mask
+            .as_ref()
+            .map_or(ON, |m| m.get(self.idx).map_or(0, |&m| m & ON));
         if let Some(slot) = self.buf.get_mut(self.out_len) {
             *slot = glyph;
         }

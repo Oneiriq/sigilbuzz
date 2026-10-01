@@ -114,6 +114,50 @@ pub(super) fn apply_gsub_lookups_masked(
     substituted
 }
 
+/// One lookup of a GSUB stage: its index, the flags of the features
+/// that share it, the alternate an AlternateSubst picks, and whether
+/// it only applies where the stage's mask is on (a lookup no global
+/// feature of the stage reaches).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct StageLookup {
+    pub(super) index: u16,
+    pub(super) flags: FeatureFlags,
+    pub(super) alternate: u16,
+    pub(super) masked: bool,
+}
+
+/// Applies the lookups of one GSUB stage in order, HarfBuzz's
+/// `hb_ot_map_t::apply` over a stage: each lookup once, the masked ones
+/// only on the glyphs `mask` marks. The mask moves with its glyphs
+/// through every lookup of the stage.
+pub(super) fn apply_gsub_stage(
+    gsub: &Gsub<'_>,
+    lookups: &[StageLookup],
+    glyphs: &mut Vec<Glyph>,
+    gdef: Option<&Gdef<'_>>,
+    mask: Option<&[bool]>,
+    budget: &mut LookupBudget,
+) {
+    let mut buf = GsubBuffer::new(
+        core::mem::take(glyphs),
+        mask,
+        gsub.cluster_level(),
+        gsub.unsafe_to_concat(),
+    );
+    for l in lookups {
+        if let Some(lookup) = gsub.lookup_list().get(l.index) {
+            let cx = GsubCx {
+                gsub,
+                gdef,
+                flags: l.flags,
+            };
+            buf.set_mask_active(l.masked);
+            apply_lookup_to_buffer(&cx, &lookup, &mut buf, l.alternate, budget);
+        }
+    }
+    *glyphs = buf.into_glyphs();
+}
+
 /// Applies a single GSUB lookup by index. Mirrors HarfBuzz's
 /// `apply_forward`: walks the glyph run cursor-by-cursor, and at each
 /// cursor whose glyph the lookup flags keep tries the lookup's

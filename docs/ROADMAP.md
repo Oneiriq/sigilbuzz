@@ -27,18 +27,6 @@ These are smaller pieces that are not scheduled yet.
 - Language tags from version 1 `name` tables are read but not exposed.
 - Subsetting a CFF or CFF2 font down to fewer glyphs drops its layout and variation
   tables. TrueType fonts keep them.
-- The default shaper runs `ccmp` and `locl` before the other default GSUB features,
-  where HarfBuzz runs them in one stage. Glyphs match, but with
-  `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT` some unsafe-to-concat flags differ (19 of 350
-  Tai Tham test strings with Noto Sans Tai Tham, whose lookups are under `DFLT` only).
-- Unsafe-to-concat flags of a context or chained context rule set with more than four
-  rules, and of some ligature and mark lookups, differ from HarfBuzz's, which marks
-  them on its fast paths (18 of 1,992 USE test strings, 14 of 1,540 Myanmar test
-  strings).
-- A mark takes its parent's vertical offset when it attaches in HarfBuzz
-  (`resolve_cross_offset`), where sigilbuzz adds the parent's final offset. The two
-  differ when a later lookup moves the parent (one Lepcha and one Tibetan string of
-  3,000 test strings in those and other scripts, and 50 of 5,888 Marchen strings).
 - The `stch` stretch of the Arabic shaper (U+070F SYRIAC ABBREVIATION MARK) fills the
   rest of the word, and HarfBuzz counts symbol characters (General_Category Sc, Sk, Sm,
   So) into the word. sigilbuzz has no symbol categories, so a symbol ends the word.
@@ -46,6 +34,8 @@ These are smaller pieces that are not scheduled yet.
   of their scripts, where HarfBuzz reads the Script property. Characters of those
   scripts outside the blocks (Latin Extended Additional, Arabic Extended-A, the CJK
   extensions past B, the Mongolian Supplement) shape as `Other`.
+- HarfBuzz's default GSUB stages also hold `rvrn` (in a stage of its own), the automatic
+  fraction features and `rand`. sigilbuzz applies none of them.
 
 ## Known bugs
 
