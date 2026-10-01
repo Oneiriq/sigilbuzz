@@ -39,10 +39,9 @@ These are smaller pieces that are not scheduled yet.
 - Myanmar runs sigilbuzz's own pass, with a simpler syllable grammar than HarfBuzz's
   Myanmar shaper (`hb-ot-shaper-myanmar.cc`). On 1,540 Myanmar test strings, 1,033
   shape as HarfBuzz 14.5.0 does.
-- The default shaper runs `ccmp` and `locl` before the other default GSUB features,
-  where HarfBuzz runs them in one stage. Glyphs match, but with
-  `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT` some unsafe-to-concat flags differ (19 of 350
-  Tai Tham test strings with Noto Sans Tai Tham, whose lookups are under `DFLT` only).
+- HarfBuzz's default GSUB stages also hold `rvrn` (in a stage of its own), the automatic
+  fraction features and `rand`, and its Arabic shaper's first stage holds `stch`.
+  sigilbuzz applies none of them.
 
 ## Known bugs
 

@@ -386,6 +386,17 @@ Changed:
   all Indic and Khmer test strings now match HarfBuzz 14.5.0 in glyph flags with that
   buffer flag at every cluster level (before: 1,973 to 1,974, 2,077 to 2,081, and 9,621
   to 9,638 of 9,666).
+- The default GSUB features run in the stages HarfBuzz builds for them
+  (`hb_ot_shape_collect_features`). The default, Hebrew and Thai shapers run `ccmp`,
+  `locl`, `rlig`, `calt`, `clig`, `liga` and `rclt` (or `vert` in vertical text), the
+  direction features with `rtlm`, and the caller's features in one stage, so their
+  lookups apply in lookup-index order whatever feature they belong to. `ccmp` and
+  `locl` used to run first, the direction features before them, and each other feature
+  on its own. The Arabic shaper (`collect_features_arabic`) runs `isol`, `fina`, `medi`
+  and `init` in that order, then `rlig`, then `calt`, then `liga`, `clig`, `mset` and
+  the rest, in both directions. It used to run `init` before `fina`, `liga` and `clig`
+  before `calt`, and no `mset`. Vertical Arabic now takes the default shaper, as in
+  HarfBuzz. `tests/fixtures/stage_order.ttf` tests the stages.
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,

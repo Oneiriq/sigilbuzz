@@ -33,8 +33,9 @@ const DEFAULT_CHAIN: &[[u8; 4]] = &[
 /// Extra default features of vertical runs.
 const VERTICAL_CHAIN: &[[u8; 4]] = &[*b"vert", *b"vrt2"];
 
-/// The joining-form features of the Arabic path.
-const POSITIONAL: &[&[u8; 4]] = &[b"isol", b"init", b"medi", b"fina"];
+/// The joining-form features of the Arabic path, and `mset`, which
+/// only the Arabic shaper turns on.
+const ARABIC_FEATURES: &[&[u8; 4]] = &[b"isol", b"init", b"medi", b"fina", b"mset"];
 
 /// `locl` and `ccmp`, which the Indic shaper runs first.
 const LOCL_CCMP: &[&[u8; 4]] = &[b"locl", b"ccmp"];
@@ -89,7 +90,7 @@ impl SegmentPlan<'_> {
             {
                 &[HANGUL_FEATURES]
             }
-            Script::Arabic if self.arabic => &[POSITIONAL],
+            Script::Arabic if self.arabic => &[ARABIC_FEATURES],
             _ => &[],
         }
     }
