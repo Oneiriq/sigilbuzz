@@ -1,7 +1,7 @@
-# Source: https://www.unicode.org/Public/17.0.0/ucd/PropertyValueAliases.txt
-# Retrieved: 2026-09-26
-# PropertyValueAliases-17.0.0.txt
-# Date: 2025-06-30, 06:16:21 GMT
+# Source: https://www.unicode.org/Public/18.0.0/ucd/PropertyValueAliases.txt
+# Retrieved: 2026-10-01
+# PropertyValueAliases-18.0.0.txt
+# Date: 2026-06-24, 13:39:29 GMT
 sc ; Adlm                             ; Adlam
 sc ; Aghb                             ; Caucasian_Albanian
 sc ; Ahom                             ; Ahom
@@ -64,6 +64,7 @@ sc ; Hrkt                             ; Katakana_Or_Hiragana
 sc ; Hung                             ; Old_Hungarian
 sc ; Ital                             ; Old_Italic
 sc ; Java                             ; Javanese
+sc ; Jurc                             ; Jurchen
 sc ; Kali                             ; Kayah_Li
 sc ; Kana                             ; Katakana
 sc ; Kawi                             ; Kawi
@@ -117,6 +118,7 @@ sc ; Osma                             ; Osmanya
 sc ; Ougr                             ; Old_Uyghur
 sc ; Palm                             ; Palmyrene
 sc ; Pauc                             ; Pau_Cin_Hau
+sc ; Pcun                             ; Proto_Cuneiform
 sc ; Perm                             ; Old_Permic
 sc ; Phag                             ; Phags_Pa
 sc ; Phli                             ; Inscriptional_Pahlavi
@@ -130,6 +132,7 @@ sc ; Runr                             ; Runic
 sc ; Samr                             ; Samaritan
 sc ; Sarb                             ; Old_South_Arabian
 sc ; Saur                             ; Saurashtra
+sc ; Seal                             ; Seal
 sc ; Sgnw                             ; SignWriting
 sc ; Shaw                             ; Shavian
 sc ; Shrd                             ; Sharada

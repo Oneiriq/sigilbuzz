@@ -14,7 +14,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use crate::unicode::{is_hangul_tone_mark, script_of, Script};
+use crate::unicode::{is_common_or_inherited, is_hangul_tone_mark, script_of, Script};
 
 pub mod char_class;
 mod flags;
@@ -341,9 +341,10 @@ impl Buffer {
     /// Splits the buffer's text into maximal script runs and yields
     /// one `ScriptRun` per run. Consecutive codepoints sharing the
     /// same resolved script collapse into a single run; `COMMON`
-    /// (digits, punctuation, ASCII space, ZWJ/ZWNJ/bidi marks) and
-    /// `INHERITED` (combining marks) codepoints extend whichever real
-    /// script ran before them, matching HarfBuzz's
+    /// (digits, punctuation, ASCII space, ZWJ/ZWNJ/bidi marks, the
+    /// tatweel, the dandas) and `INHERITED` (combining marks)
+    /// codepoints, as the Unicode Script property gives them, extend
+    /// whichever real script ran before them, matching HarfBuzz's
     /// `select_shaper_for_script` segmentation. A Hangul tone mark
     /// (U+302E, U+302F) extends the run before it too.
     ///
@@ -516,63 +517,11 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
         Script::Cyrillic => CYRL_PRIORITY,
         Script::Greek => GREK_PRIORITY,
         Script::Han => HANI_PRIORITY,
-        // Scripts sigilbuzz has no bucket for fall back to DFLT.
-        Script::Other => DFLT_ONLY,
+        // The buckets that take their code points from the Unicode
+        // Script property try their own tag. Scripts sigilbuzz has no
+        // bucket for fall back to DFLT.
+        other => other.table_script_priority().unwrap_or(DFLT_ONLY),
     }
-}
-
-/// True for codepoints HarfBuzz treats as `COMMON` or `INHERITED`
-/// for segmentation purposes. They should extend the adjacent
-/// real-script run rather than carve their own segment.
-///
-/// Covers:
-/// - ASCII controls, whitespace, and punctuation (U+0000..U+002F,
-///   U+003A..U+0040, U+005B..U+0060, U+007B..U+007E) including the
-///   ASCII digits so `"Price: 100 شلوم"` keeps the Arabic tail from
-///   detaching on the digits.
-/// - Latin-1 punctuation / symbols (U+00A0..U+00BF).
-/// - The format characters sigilbuzz recognizes (ZWJ / ZWNJ / LRM /
-///   RLM / ALM) and the dotted circle, U+25CC, a Common symbol.
-/// - Unicode `INHERITED` combining-mark blocks: Combining
-///   Diacritical Marks (U+0300..U+036F), the Supplement
-///   (U+1DC0..U+1DFF), Combining Diacritical Marks for Symbols
-///   (U+20D0..U+20FF), and Combining Half Marks (U+FE20..U+FE2F).
-///   Without these, `"e\u{0301}"` segments into Latin + Other
-///   because `script_of` has no rule for U+0300 and drops the
-///   mark into `Script::Other`, breaking `ccmp` dispatch and
-///   any cross-mark GSUB context.
-/// - The Devanagari stress signs and accents (U+0951..U+0954), which
-///   are `INHERITED` though they sit in the Devanagari block.
-/// - Default ignorables of no script of their own (ZWSP, word joiner,
-///   variation selectors, tag characters, ...), which GSUB and GPOS
-///   match across.
-///
-/// Everything else resolves via [`script_of`]; runs of the same
-/// real script collapse through the normal equality check.
-const fn is_common_or_inherited(ch: char) -> bool {
-    let cp = ch as u32;
-    matches!(
-        cp,
-        // ASCII controls + SPACE + !"#$%&'()*+,-./
-        0x0000..=0x002F
-        // ASCII digits + :;<=>?@
-        | 0x0030..=0x0040
-        // ASCII [\]^_`
-        | 0x005B..=0x0060
-        // ASCII {|}~ + DEL
-        | 0x007B..=0x007F
-        // Latin-1 punctuation / symbols block
-        | 0x00A0..=0x00BF
-        // Format characters the shaper recognizes, U+25CC DOTTED CIRCLE.
-        | 0x200C | 0x200D | 0x200E | 0x200F | 0x061C | 0x25CC
-        // INHERITED combining-mark blocks.
-        | 0x0300..=0x036F
-        | 0x1DC0..=0x1DFF
-        | 0x20D0..=0x20FF
-        | 0xFE20..=0xFE2F
-        // INHERITED Devanagari stress signs and accents.
-        | 0x0951..=0x0954
-    ) || crate::unicode::is_scriptless_default_ignorable(ch)
 }
 
 /// The result of a shaping call: the glyphs, in visual order.

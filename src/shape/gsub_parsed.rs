@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 
-use super::gsub::{apply_gsub_chain_context_at, apply_gsub_context_at, substitute_glyph, GsubCx};
+use super::gsub::{apply_gsub_chain_context_at, apply_gsub_context_at, GsubCx};
 use super::gsub_buffer::GsubBuffer;
 use super::{lig, resolve_extension, LookupBudget};
 use crate::buffer::Glyph;
@@ -213,11 +213,7 @@ pub(super) fn apply_parsed_lookup_at(
                     let mut ops = buf.take_flag_ops();
                     let found = rc.apply_at_in(&*buf, at, mcx, &mut ops);
                     buf.apply_flag_ops(ops);
-                    found.map(|out| {
-                        if let Some(g) = buf.cur_mut() {
-                            substitute_glyph(g, out);
-                        }
-                    })
+                    found.map(|out| buf.replace_glyph_at(at, out))
                 }
             }
         };

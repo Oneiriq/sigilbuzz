@@ -367,6 +367,32 @@ fn zero_mark_widths(glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>, adjust_offset
     }
 }
 
+/// The font's horizontal advance of glyph `id`: its `hmtx` advance,
+/// moved by the `HVAR` delta at `coords` when the font varies (HarfBuzz's
+/// `hb_font_get_glyph_h_advance`), rounded to the nearest unit.
+pub(super) fn font_advance(
+    hmtx: &crate::tables::hmtx::Hmtx<'_>,
+    hvar: Option<&crate::tables::hvar::Hvar<'_>>,
+    coords: &[f32],
+    id: u32,
+) -> i32 {
+    let id = id as u16;
+    let base = i32::from(hmtx.advance(id).unwrap_or(0));
+    match hvar {
+        Some(hvar) => {
+            let delta = hvar.advance_delta(id, coords);
+            // Round to nearest without libm: the deltas are small.
+            let rounded = if delta >= 0.0 {
+                (delta + 0.5) as i32
+            } else {
+                (delta - 0.5) as i32
+            };
+            base.saturating_add(rounded)
+        }
+        None => base,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,6 +418,8 @@ mod tests {
             Script::NKo,
             Script::Sinhala,
             Script::Myanmar,
+            Script::Javanese,
+            Script::Adlam,
         ] {
             assert_eq!(zeroing(s), MarkZeroing::Early, "{s:?}");
         }
@@ -405,6 +433,7 @@ mod tests {
         }
         for s in [
             Script::Arabic,
+            Script::Syriac,
             Script::Hebrew,
             Script::Thai,
             Script::Latin,

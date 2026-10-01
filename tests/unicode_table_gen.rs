@@ -7,10 +7,13 @@
 //!   Transparent when it is Mn, Me, or Cf, and Non_Joining otherwise).
 //! - `src/unicode/mirroring_table.rs`: `Bidi_Mirroring_Glyph`, from
 //!   `BidiMirroring.txt`.
-//! - `crates/sigilbuzz-capi/src/script_table.rs`: the `Script`
-//!   property as ISO 15924 codes, from `Scripts.txt` and the `sc`
-//!   rows of `PropertyValueAliases.txt`, for
-//!   `hb_buffer_guess_segment_properties`.
+//! - `src/unicode/script_table.rs`: the `Script` property as ISO
+//!   15924 codes, from `Scripts.txt` and the `sc` rows of
+//!   `PropertyValueAliases.txt`, for `script_of` (the buckets of
+//!   [`TABLE_SCRIPTS`]), for script segmentation (Common and
+//!   Inherited), and for the C API's
+//!   `hb_buffer_guess_segment_properties`. These two snapshots are
+//!   Unicode 18.0.0, the version HarfBuzz 14.5.0 reads.
 //! - `src/unicode/general_category_table.rs`: the letter (L*), mark
 //!   (Mn, Mc, Me), and decimal number (Nd) ranges of
 //!   `General_Category`, the nonspacing mark (Mn) ranges on their own,
@@ -76,7 +79,17 @@
 //! `DerivedBidiClass.txt` are under `extracted/` there and
 //! `emoji-data.txt` under `emoji/`), with
 //! `SIGILBUZZ_UCD_VERSION` (for example `17.0.0`) and
-//! `SIGILBUZZ_UCD_RETRIEVED=YYYY-MM-DD` set.
+//! `SIGILBUZZ_UCD_RETRIEVED=YYYY-MM-DD` set. Setting
+//! `SIGILBUZZ_UCD_FILES` to a comma-separated list of file names
+//! refreshes only those, which is how `Scripts.txt` and
+//! `PropertyValueAliases.txt` moved to 18.0.0 ahead of the others:
+//!
+//! ```text
+//! SIGILBUZZ_UCD_DIR=<dir> SIGILBUZZ_UCD_VERSION=18.0.0 \
+//!     SIGILBUZZ_UCD_RETRIEVED=2026-10-01 \
+//!     SIGILBUZZ_UCD_FILES=Scripts.txt,PropertyValueAliases.txt \
+//!     cargo test --test unicode_table_gen -- --ignored
+//! ```
 //!
 //! The non-ignored test in this file regenerates every table in memory
 //! and fails when a committed file has drifted from the snapshots.
@@ -99,7 +112,23 @@ const BIDI_BRACKETS: &str = "BidiBrackets.txt";
 
 const JOINING_RS: &str = "src/unicode/joining_table.rs";
 const MIRRORING_RS: &str = "src/unicode/mirroring_table.rs";
-const SCRIPT_RS: &str = "crates/sigilbuzz-capi/src/script_table.rs";
+const SCRIPT_RS: &str = "src/unicode/script_table.rs";
+
+/// The ISO 15924 codes of the scripts whose `script_of` bucket comes
+/// from the Script property: every script HarfBuzz 14.5.0 gives a
+/// shaper of its own (`hb_ot_shaper_categorize` in `hb-ot-shaper.hh`)
+/// that the hand-written block ranges of `script_of` do not cover.
+/// Syriac takes the Arabic shaper, the rest the Universal Shaping
+/// Engine.
+const TABLE_SCRIPTS: [&str; 76] = [
+    "Syrc", "Buhd", "Hano", "Tglg", "Tagb", "Tale", "Khar", "Sylo", "Tfng", "Phag", "Kali", "Rjng",
+    "Saur", "Egyp", "Java", "Kthi", "Mtei", "Tavt", "Batk", "Mand", "Cakm", "Plrd", "Takr", "Dupl",
+    "Gran", "Sind", "Mahj", "Mani", "Hmng", "Phlp", "Sidd", "Ahom", "Mult", "Adlm", "Bhks", "Marc",
+    "Newa", "Gonm", "Soyo", "Zanb", "Dogr", "Gong", "Rohg", "Maka", "Medf", "Sogo", "Sogd", "Elym",
+    "Nand", "Hmnp", "Wcho", "Chrs", "Diak", "Kits", "Yezi", "Cpmn", "Ougr", "Tnsa", "Toto", "Vith",
+    "Kawi", "Nagm", "Gara", "Gukh", "Krai", "Onao", "Sunu", "Todr", "Tutg", "Berf", "Sidt", "Tayo",
+    "Tols", "Jurc", "Pcun", "Seal",
+];
 const CATEGORY_RS: &str = "src/unicode/general_category_table.rs";
 const DECOMPOSE_RS: &str = "src/unicode/normalize/decompose_table.rs";
 const COMPOSE_RS: &str = "src/unicode/normalize/compose_table.rs";
@@ -314,21 +343,44 @@ fn generate_scripts() -> String {
     file_header(&mut out, &[&scripts, &aliases]);
     out.push_str("// Code point ranges read best in hex without digit separators.\n");
     out.push_str("#![allow(clippy::unreadable_literal)]\n\n");
+    out.push_str("use super::Script;\n\n");
     out.push_str("/// ISO 15924 codes of every script value, indexed by the third field\n");
     out.push_str("/// of [`SCRIPT_RANGES`]. Sorted.\n");
-    out.push_str("pub(crate) static SCRIPT_TAGS: &[[u8; 4]] = &[\n");
+    out.push_str("pub(super) const SCRIPT_TAGS: &[[u8; 4]] = &[\n");
     let items: Vec<String> = tags.iter().map(|t| format!("*b\"{t}\"")).collect();
     emit_wrapped(&mut out, &items);
     out.push_str("];\n\n");
+    let (common, inherited) = (index["Zyyy"], index["Zinh"]);
     let _ = writeln!(
         out,
         "/// Index of `Zzzz` (Unknown) in [`SCRIPT_TAGS`], the script of every\n\
          /// code point [`SCRIPT_RANGES`] does not cover.\n\
-         pub(crate) const UNKNOWN: u8 = {unknown};\n"
+         pub(super) const UNKNOWN: u8 = {unknown};\n\n\
+         /// Index of `Zyyy` (Common) in [`SCRIPT_TAGS`].\n\
+         pub(super) const COMMON: u8 = {common};\n\n\
+         /// Index of `Zinh` (Inherited) in [`SCRIPT_TAGS`].\n\
+         pub(super) const INHERITED: u8 = {inherited};\n"
     );
+    out.push_str("/// The `script_of` bucket of each script of [`SCRIPT_TAGS`] whose code\n");
+    out.push_str("/// points come from this table, and `Script::Other` for the others.\n");
+    out.push_str("pub(super) const BUCKETS: &[Script] = &[\n");
+    let items: Vec<String> = tags
+        .iter()
+        .map(|tag| {
+            if !TABLE_SCRIPTS.contains(tag) {
+                return "Script::Other".to_owned();
+            }
+            let code: [u8; 4] = tag.as_bytes().try_into().expect("four-letter code");
+            let bucket = sigilbuzz::UnicodeScript::from_iso15924_tag(code)
+                .unwrap_or_else(|| panic!("no bucket for {tag}"));
+            format!("Script::{bucket:?}")
+        })
+        .collect();
+    emit_wrapped(&mut out, &items);
+    out.push_str("];\n\n");
     out.push_str("/// `(first, last, script)` for every code point with a known script,\n");
     out.push_str("/// `script` indexing [`SCRIPT_TAGS`]. Sorted, non-overlapping.\n");
-    out.push_str("pub(crate) static SCRIPT_RANGES: &[(u32, u32, u8)] = &[\n");
+    out.push_str("pub(super) const SCRIPT_RANGES: &[(u32, u32, u8)] = &[\n");
     let items: Vec<String> = runs(&values, unknown)
         .iter()
         .map(|(s, e, t)| format!("(0x{s:04X}, 0x{e:04X}, {t})"))
@@ -762,8 +814,13 @@ fn refresh_snapshots() {
         (BIDI_BRACKETS, format!("{base}/{BIDI_BRACKETS}"), keep_all),
     ];
     let version_line = format!("{UNICODE_DATA}, Unicode {version}");
+    let only = std::env::var("SIGILBUZZ_UCD_FILES").ok();
+    let wanted = |file: &str| {
+        only.as_deref()
+            .map_or(true, |list| list.split(',').any(|f| f.trim() == file))
+    };
     std::fs::create_dir_all(snapshot_dir()).expect("create snapshot dir");
-    for (file, url, keep) in jobs {
+    for (file, url, keep) in jobs.into_iter().filter(|(file, _, _)| wanted(file)) {
         let mut raw = read(&Path::new(&dir).join(file));
         if file == BIDI_CLASS {
             // The defaults for unlisted code points sit in comment
@@ -806,6 +863,31 @@ fn committed_unicode_tables_match_snapshots() {
             committed == expected,
             "{path} is stale; run `cargo test --test unicode_table_gen -- --ignored`"
         );
+    }
+}
+
+#[test]
+fn table_scripts_cover_every_code_point_of_their_script() {
+    // `script_of` gives each code point of a script of
+    // `TABLE_SCRIPTS` its bucket, so no hand-written block range
+    // shadows one, and `script_code` reads the snapshot back.
+    let aliases = load(ALIASES);
+    let codes: BTreeMap<&str, &str> = aliases
+        .rows
+        .iter()
+        .map(|row| (row[2].as_str(), row[1].as_str()))
+        .collect();
+    for row in &load(SCRIPTS).rows {
+        let code = codes[row[1].as_str()];
+        let tag: [u8; 4] = code.as_bytes().try_into().expect("four letters");
+        let bucket = sigilbuzz::UnicodeScript::from_iso15924_tag(tag);
+        let (start, end) = parse_range(&row[0]);
+        for ch in (start..=end).filter_map(char::from_u32) {
+            assert_eq!(sigilbuzz::unicode::script_code(ch), tag, "{ch:?}");
+            if TABLE_SCRIPTS.contains(&code) {
+                assert_eq!(Some(sigilbuzz::script_of(ch)), bucket, "{ch:?}");
+            }
+        }
     }
 }
 

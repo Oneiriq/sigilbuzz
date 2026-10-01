@@ -25,7 +25,7 @@ pub(super) enum Shaper {
     /// The default shaper (Latin, Greek, Cyrillic, Han, and every
     /// script without a dedicated one), also used for vertical Arabic.
     Default,
-    /// Arabic joining shaper.
+    /// Arabic joining shaper, for Arabic and Syriac.
     Arabic,
     /// Hebrew shaper.
     Hebrew,
@@ -75,47 +75,19 @@ pub(super) enum MarkZeroing {
 }
 
 impl Shaper {
-    /// The shaper HarfBuzz runs `script` through. Arabic only uses the
-    /// Arabic shaper for horizontal runs.
+    /// The shaper HarfBuzz runs `script` through. Arabic and Syriac
+    /// only use the Arabic shaper for horizontal runs.
     pub(super) fn for_script(script: Script, horizontal: bool) -> Self {
         match script {
-            Script::Arabic if horizontal => Self::Arabic,
+            Script::Arabic | Script::Syriac if horizontal => Self::Arabic,
             Script::Hebrew => Self::Hebrew,
             Script::Thai | Script::Lao => Self::Thai,
             Script::Hangul => Self::Hangul,
-            Script::Devanagari
-            | Script::Bengali
-            | Script::Gurmukhi
-            | Script::Gujarati
-            | Script::Oriya
-            | Script::Tamil
-            | Script::Telugu
-            | Script::Kannada
-            | Script::Malayalam => Self::Indic,
             Script::Khmer => Self::Khmer,
             Script::Myanmar => Self::Myanmar,
-            Script::Sinhala
-            | Script::Tibetan
-            | Script::Mongolian
-            | Script::NKo
-            | Script::Buginese
-            | Script::TaiTham
-            | Script::Balinese
-            | Script::Sundanese
-            | Script::Lepcha
-            | Script::Limbu
-            | Script::Cham
-            | Script::Brahmi
-            | Script::Sharada
-            | Script::Khojki
-            | Script::Tirhuta
-            | Script::Modi => Self::Use,
-            Script::Arabic
-            | Script::Latin
-            | Script::Greek
-            | Script::Cyrillic
-            | Script::Han
-            | Script::Other => Self::Default,
+            s if s.is_indic() => Self::Indic,
+            s if s.is_use() => Self::Use,
+            _ => Self::Default,
         }
     }
 
@@ -141,8 +113,10 @@ impl Shaper {
     /// scripts of the Universal Shaping Engine take the default shaper
     /// when the script tag GSUB picks is `DFLT` (or `dflt`) or `latn`,
     /// since the font was not made for the script's shaper. Myanmar
-    /// takes it for those and for `mymr`, the tag of fonts made before
-    /// Myanmar's shaping model.
+    /// takes the default shaper for those generic tags and for `mymr`,
+    /// the tag of fonts made before Myanmar's shaping model. Syriac
+    /// takes it when the chosen tag is `DFLT`. Arabic keeps the Arabic
+    /// shaper, since HarfBuzz has fallback shaping for it.
     pub(super) fn for_run(
         script: Script,
         horizontal: bool,
@@ -157,6 +131,7 @@ impl Shaper {
         match shaper {
             Self::Use | Self::Indic if generic => Self::Default,
             Self::Myanmar if generic || chosen == Some(*b"mymr") => Self::Default,
+            Self::Arabic if script == Script::Syriac && chosen == Some(*b"DFLT") => Self::Default,
             _ => shaper,
         }
     }
@@ -230,6 +205,28 @@ mod tests {
         assert_eq!(Shaper::for_script(Script::Lao, true), Shaper::Thai);
         assert_eq!(Shaper::for_script(Script::Tamil, true), Shaper::Indic);
         assert_eq!(Shaper::for_script(Script::Latin, true), Shaper::Default);
+        // `hb_ot_shaper_categorize`: Syriac joins Arabic, and the
+        // scripts of the generated table go to the Universal Shaping
+        // Engine.
+        assert_eq!(Shaper::for_script(Script::Syriac, true), Shaper::Arabic);
+        assert_eq!(Shaper::for_script(Script::Syriac, false), Shaper::Default);
+        for script in [Script::Javanese, Script::Takri, Script::Adlam, Script::Seal] {
+            assert_eq!(Shaper::for_script(script, true), Shaper::Use, "{script:?}");
+            assert_eq!(Shaper::for_script(script, false), Shaper::Use, "{script:?}");
+        }
+        assert_eq!(Shaper::for_script(Script::Other, true), Shaper::Default);
+    }
+
+    #[test]
+    fn runs_without_a_font_keep_the_script_shaper() {
+        // With no GSUB there is no chosen tag: HarfBuzz's
+        // `HB_TAG_NONE`, which is not `DFLT`.
+        let syrc = crate::buffer::script_priority_for(Script::Syriac);
+        assert_eq!(syrc, [*b"syrc", *b"DFLT"]);
+        assert_eq!(
+            Shaper::for_run(Script::Syriac, true, None, syrc),
+            Shaper::Arabic
+        );
     }
 
     #[test]

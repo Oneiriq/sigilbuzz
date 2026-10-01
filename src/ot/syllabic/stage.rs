@@ -302,6 +302,7 @@ pub(crate) fn apply_stage(
         .collect();
     for lookup in lookups {
         let joiners = lookup.joiners;
+        let substituted: Vec<bool>;
         {
             let table = &slots;
             let get = |g: &Glyph| table.get(slot_of(g));
@@ -310,7 +311,8 @@ pub(crate) fn apply_stage(
             let global = lookup.mask == GLOBAL_MASK;
             let applies =
                 |g: &Glyph| global || get(g).is_some_and(|s| s.info.mask & lookup.mask != 0);
-            runner.apply_lookup(lookup.index, joiners, lookup.per_syllable, glyphs, &applies);
+            substituted =
+                runner.apply_lookup(lookup.index, joiners, lookup.per_syllable, glyphs, &applies);
         }
         slots = glyphs
             .iter_mut()
@@ -322,10 +324,13 @@ pub(crate) fn apply_stage(
                     last_id: g.glyph_id,
                     last_props: substitution_props(g),
                 });
-                // A new glyph id, or a glyph a ligature or multiple
-                // substitution just produced.
+                // A substitution produced the glyph, even one that kept
+                // its id, or it has a new id or new ligature props.
                 let props = substitution_props(g);
-                if g.glyph_id != slot.last_id || props != slot.last_props {
+                if substituted.get(i).copied().unwrap_or(false)
+                    || g.glyph_id != slot.last_id
+                    || props != slot.last_props
+                {
                     slot.info.substituted = true;
                 }
                 slot.last_id = g.glyph_id;
