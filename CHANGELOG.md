@@ -404,6 +404,12 @@ Settings and table data that were read and then ignored:
 
 Output that differed from HarfBuzz:
 
+- Vertical text no longer runs `liga`, `clig`, `calt` and `rclt` by default. HarfBuzz
+  turns them on for horizontal text only (`horizontal_features` in `hb-ot-shape.cc`).
+  Vertical text now gets `vert` alone. sigilbuzz used to prefer `vrt2` when the font had
+  it, and to fall back to it when the caller turned `vert` off. `vrt2` now runs only when
+  the caller turns it on, as in HarfBuzz, and a caller can also turn `vert` on in
+  horizontal text.
 - Mark positioning ignored AnchorFormat3 device tables, so marks in variable fonts stayed
   at the default instance. VariationIndex deltas now apply to mark, mark-to-mark,
   mark-to-ligature and cursive anchors.

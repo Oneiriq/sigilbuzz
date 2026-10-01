@@ -343,6 +343,12 @@ fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
     features.iter().any(|f| f.tag == tag && f.value == 0)
 }
 
+/// Returns `true` when the override list turns the feature on and does
+/// not also turn it off.
+fn feature_enabled(features: &[Feature], tag: [u8; 4]) -> bool {
+    features.iter().any(|f| f.tag == tag && f.value != 0) && !feature_disabled(features, tag)
+}
+
 /// Resolves a GPOS/GSUB type-9 Extension subtable to its inner
 /// lookup type and its inner byte slice. Layout:
 ///

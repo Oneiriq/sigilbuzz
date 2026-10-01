@@ -6,18 +6,21 @@ use alloc::vec::Vec;
 
 use super::gsub::{apply_gsub_lookup, apply_gsub_lookups_masked};
 use super::joiners::FeatureFlags;
-use super::{feature_disabled, Feature, JoinerTable, LookupBudget};
+use super::{feature_disabled, feature_enabled, Feature, JoinerTable, LookupBudget};
 use crate::buffer::Glyph;
 use crate::ot::arabic::JoiningForm;
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 use crate::unicode::Script;
 
-/// Runs the default GSUB feature chain and any user-enabled extras.
-/// Order matches the spec: `ccmp` + `locl` -> `rlig` -> `liga` ->
-/// `clig` -> `calt`, then `vrt2` / `vert` for vertical runs.
-/// HarfBuzz's Latin fallback shaper turns the horizontal list on by
-/// default; sigilbuzz follows suit. User-enabled features beyond that
+/// Runs the default GSUB feature chain and any user-enabled extras, in
+/// the order `ccmp` and `locl`, `rlig`, `liga`, `clig`, `calt` with
+/// `rclt`, then `vert`. As in HarfBuzz (`horizontal_features` in
+/// `hb-ot-shape.cc`), `liga`, `clig`, `calt` and `rclt` are on by
+/// default in horizontal text only, and vertical text gets `vert`
+/// instead. A caller can turn any of them on or off in either
+/// direction. `vrt2` runs only when the caller turns it on, since
+/// HarfBuzz enables `vert` alone. User-enabled features beyond that
 /// list are dispatched afterwards, respecting their 1-indexed
 /// alternate-selector value.
 ///
@@ -59,14 +62,25 @@ pub(super) fn run_default_gsub(
         let priority = script_priority;
         apply_gsub_feature_budgeted(gsub, glyphs, gdef, tag, alt, priority, joiners, budget);
     };
+    // A feature HarfBuzz enables for one direction only: on by default
+    // in that direction unless the caller turns it off, and in the
+    // other direction only when the caller turns it on.
+    let default_on = |tag: [u8; 4], direction_matches: bool| {
+        if direction_matches {
+            !feature_disabled(features, tag)
+        } else {
+            feature_enabled(features, tag)
+        }
+    };
+    let horizontal = !is_vertical;
     merged(glyphs, early_features, budget);
     if !feature_disabled(features, *b"rlig") {
         single(glyphs, *b"rlig", 0, budget);
     }
-    if want_liga {
+    if want_liga && default_on(*b"liga", horizontal) {
         single(glyphs, *b"liga", 0, budget);
     }
-    if !feature_disabled(features, *b"clig") {
+    if default_on(*b"clig", horizontal) {
         single(glyphs, *b"clig", 0, budget);
     }
     // `calt` and `rclt` together: HarfBuzz's default horizontal
@@ -74,23 +88,15 @@ pub(super) fn run_default_gsub(
     // ship the same lookup set under both tags (calt for legacy,
     // rclt for required-contextual). Naively running each tag's
     // lookups in turn double-applies on those fonts.
-    let contextual: &[[u8; 4]] = if calt {
-        &[*b"calt", *b"rclt"]
-    } else {
-        &[*b"rclt"]
-    };
-    merged(glyphs, contextual, budget);
-    // Vertical writing: HarfBuzz auto-enables `vrt2` when the font
-    // carries it, otherwise falls back to `vert`. The two tags
-    // cannot be active together: `vrt2` (Vertical Alternates &
-    // Rotation) is the superset, so prefer it.
-    if is_vertical {
-        let has_vrt2 = feature_present(gsub, *b"vrt2");
-        if has_vrt2 && !feature_disabled(features, *b"vrt2") {
-            single(glyphs, *b"vrt2", 0, budget);
-        } else if !feature_disabled(features, *b"vert") {
-            single(glyphs, *b"vert", 0, budget);
-        }
+    let contextual: Vec<[u8; 4]> = [*b"calt", *b"rclt"]
+        .into_iter()
+        .filter(|&tag| default_on(tag, horizontal) && (calt || tag != *b"calt"))
+        .collect();
+    merged(glyphs, &contextual, budget);
+    // Vertical text gets `vert`, which the lookup selection finds in
+    // any script the font lists it under (`F_GLOBAL_SEARCH`).
+    if default_on(*b"vert", is_vertical) {
+        single(glyphs, *b"vert", 0, budget);
     }
     for feat in features {
         if feat.value == 0 {
@@ -251,28 +257,8 @@ pub(crate) fn apply_locl_ccmp_if_length_preserving(
 fn is_handled_gsub_tag(tag: [u8; 4]) -> bool {
     matches!(
         &tag,
-        b"liga"
-            | b"kern"
-            | b"ccmp"
-            | b"locl"
-            | b"rlig"
-            | b"clig"
-            | b"calt"
-            | b"rclt"
-            | b"vert"
-            | b"vrt2"
+        b"liga" | b"kern" | b"ccmp" | b"locl" | b"rlig" | b"clig" | b"calt" | b"rclt" | b"vert"
     )
-}
-
-/// Returns `true` when the GSUB default-LangSys advertises the named
-/// feature tag. Used by the vertical-writing dispatcher to decide
-/// between `vrt2` (preferred if present) and `vert` (fallback).
-fn feature_present(gsub: &Gsub<'_>, tag: [u8; 4]) -> bool {
-    // Vertical-writing probe runs before we know the script. Use the
-    // DFLT -> first script order to match the previous behavior.
-    // Arabic fonts do not ship vert/vrt2, so this choice is not
-    // observable in practice.
-    lookup_indices_for_feature_in_scripts(gsub, tag, &[*b"DFLT"]).is_some_and(|v| !v.is_empty())
 }
 
 /// Applies every GSUB lookup reachable via the named feature tag

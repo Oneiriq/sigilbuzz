@@ -128,11 +128,7 @@ pub(super) fn position(
     let requested_kerning = if horizontal {
         !super::feature_disabled(input.features, kern_tag)
     } else {
-        input
-            .features
-            .iter()
-            .any(|f| f.tag == kern_tag && f.value != 0)
-            && !super::feature_disabled(input.features, kern_tag)
+        super::feature_enabled(input.features, kern_tag)
     };
 
     // The plan only needs to know which tables exist; each one is
