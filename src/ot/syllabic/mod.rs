@@ -23,7 +23,6 @@ use crate::buffer::{ClusterLevel, Glyph};
 /// machines (`I_Cat` in `hb-ot-shaper-indic-machine.rl`, `K_Cat` in
 /// `hb-ot-shaper-khmer-machine.rl`). The two machines share the
 /// numbers they have in common.
-#[allow(dead_code)] // the full HarfBuzz set, some only used by the table
 pub(crate) mod cat {
     /// Anything the grammars do not name.
     pub(crate) const X: u8 = 0;
@@ -85,7 +84,6 @@ pub(crate) mod cat {
 
 /// Visual positions in a syllable, left to right (HarfBuzz's
 /// `ot_position_t`, `hb-ot-shaper-indic.hh`).
-#[allow(dead_code)] // the full HarfBuzz set, some only used by the table
 pub(crate) mod pos {
     /// Unset.
     pub(crate) const START: u8 = 0;
@@ -107,8 +105,6 @@ pub(crate) mod pos {
     pub(crate) const BELOW_C: u8 = 8;
     /// After subjoined consonants.
     pub(crate) const AFTER_SUB: u8 = 9;
-    /// Before post-base consonants.
-    pub(crate) const BEFORE_POST: u8 = 10;
     /// Post-base consonant.
     pub(crate) const POST_C: u8 = 11;
     /// After post-base consonants.

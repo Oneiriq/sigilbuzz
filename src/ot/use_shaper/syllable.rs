@@ -33,12 +33,6 @@ pub(crate) struct Syllable {
     /// Codepoint-space index of the base consonant inside the
     /// syllable, or `None` for non-consonant syllables.
     pub base_index: Option<usize>,
-    /// Codepoint-space index of a pre-base consonant pair
-    /// (`coeng + ra` in Khmer), or `None`. When present, the two
-    /// glyphs at `pre_base_cons_index` and `pre_base_cons_index + 1`
-    /// get moved to before the base after GSUB has had a chance to
-    /// collapse them into a single subscript form.
-    pub pre_base_cons_index: Option<usize>,
     /// Codepoint-space index of a Myanmar kinzi prefix: the triple
     /// `Nga (U+1004) + Asat (U+103A) + Virama (U+1039)` at the start
     /// of a consonant syllable. When present, those three glyphs move
@@ -90,7 +84,6 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
                     start,
                     end: start + 1,
                     base_index: None,
-                    pre_base_cons_index: None,
                     kinzi_index: None,
                 }
             }
@@ -106,7 +99,6 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
                 start,
                 end: start + 1,
                 base_index: None,
-                pre_base_cons_index: None,
                 kinzi_index: None,
             }
         }
@@ -124,7 +116,6 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
                 start,
                 end: syl.end,
                 base_index: syl.base_index,
-                pre_base_cons_index: syl.pre_base_cons_index,
                 kinzi_index: syl.kinzi_index,
             }
         }
@@ -133,7 +124,6 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
             start,
             end: start + 1,
             base_index: None,
-            pre_base_cons_index: None,
             kinzi_index: None,
         },
         _ => Syllable {
@@ -141,7 +131,6 @@ fn scan_one_syllable(cps: &[char], start: usize) -> Syllable {
             start,
             end: start + 1,
             base_index: None,
-            pre_base_cons_index: None,
             kinzi_index: None,
         },
     }
@@ -191,38 +180,19 @@ fn scan_consonant_syllable(cps: &[char], start: usize) -> Syllable {
                 start,
                 end: start + 1,
                 base_index: None,
-                pre_base_cons_index: None,
                 kinzi_index: None,
             };
         };
 
-    // Zero or more halant-consonant pairs (Khmer coeng stacks). The
-    // last base wins: it is the visible consonant; earlier bases
-    // become subscripts via the `blwf`/`pstf` GSUB features.
-    //
-    // Exception: Khmer `coeng + ra` (U+17D2 + U+179A) is a pre-base
-    // subscript. When we hit it, remember the pair's index but
-    // keep the previous consonant as the visible base, so the
-    // post-GSUB reorder can move the subscript-ra glyph in front
-    // of the base. This is the Khmer-specific `pref` positioning
-    // rule that USE bakes in for every script with pre-base
-    // subscripts (Myanmar has similar behavior for medial ra).
-    let mut pre_base_cons_index: Option<usize> = None;
+    // Zero or more halant-consonant pairs (conjunct stacks). The last
+    // base is the visible consonant. Earlier bases become subscripts
+    // through the `blwf` and `pstf` GSUB features.
     while i + 1 < len
         && use_category(cps[i]) == UseCategory::H
         && matches!(use_category(cps[i + 1]), UseCategory::B | UseCategory::GB)
     {
-        let halant_idx = i;
-        let cons_idx = i + 1;
-        let is_khmer_coeng_ra = cps[halant_idx] == '\u{17D2}' && cps[cons_idx] == '\u{179A}';
+        base_index = Some(i + 1);
         i += 2;
-        if is_khmer_coeng_ra && pre_base_cons_index.is_none() {
-            // Pre-base subscript. Do NOT update base_index: the
-            // visible base stays the consonant before the coeng.
-            pre_base_cons_index = Some(halant_idx);
-        } else {
-            base_index = Some(cons_idx);
-        }
     }
 
     // Trailing vowel signs and marks. Order the grammar is lenient
@@ -243,7 +213,7 @@ fn scan_consonant_syllable(cps: &[char], start: usize) -> Syllable {
                 i += 1;
             }
             // A trailing halant without a following base ends the
-            // syllable (Khmer viriam usage). Consume and stop.
+            // syllable. Consume and stop.
             UseCategory::H => {
                 i += 1;
                 break;
@@ -257,7 +227,6 @@ fn scan_consonant_syllable(cps: &[char], start: usize) -> Syllable {
         start,
         end: i,
         base_index,
-        pre_base_cons_index,
         kinzi_index,
     }
 }
@@ -286,7 +255,6 @@ fn scan_vowel_syllable(cps: &[char], start: usize) -> Syllable {
         start,
         end: i,
         base_index: Some(start),
-        pre_base_cons_index: None,
         kinzi_index: None,
     }
 }

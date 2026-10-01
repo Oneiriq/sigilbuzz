@@ -14,17 +14,14 @@ use crate::tables::layout::skip_iter::MatchGlyph;
 use crate::unicode::use_category::{use_category, use_position, UseCategory, UsePosition};
 
 /// Initial reorder for one syllable. Moves every pre-base vowel sign
-/// in the syllable to sit immediately before the base consonant, and
-/// promotes pre-base consonant pairs (Khmer `coeng + ra`) to the
-/// syllable head so the `pref` GSUB feature sees them adjacent AND
-/// their output glyph naturally sits before the base.
-/// Length-preserving: glyph count and codepoint count stay aligned.
+/// in the syllable to the syllable head, and a Myanmar kinzi to just
+/// after the base. Length-preserving: glyph count and codepoint count
+/// stay aligned.
 ///
 /// Every move spans the glyphs between the moved one's old and new
-/// slots; at the monotone cluster `level`s those glyphs share one
-/// cluster, as HarfBuzz's `merge_clusters` before each Khmer move
-/// (`reorder_consonant_syllable`) and each Myanmar sort step leaves
-/// them.
+/// slots. At the monotone cluster `level`s those glyphs share one
+/// cluster, as HarfBuzz's `merge_clusters` before each Myanmar sort
+/// step leaves them.
 pub(super) fn initial_reorder(
     codepoints: &[char],
     glyphs: &mut [Glyph],
@@ -56,13 +53,6 @@ pub(super) fn initial_reorder(
         }
     }
 
-    // Pre-base consonant pair indices (Khmer `coeng + ra` = the two
-    // codepoints at `pre_base_cons_index` and that + 1). These
-    // move to the start of the syllable, BEFORE the pre-base
-    // matras, so the visual order ends up as
-    // `[matras, pre-base cons pair, everything else, base, ...]`.
-    let pre_cons_idx = syllable.pre_base_cons_index;
-
     // Myanmar kinzi prefix: three codepoints at `kinzi_index`,
     // `kinzi_index + 1`, `kinzi_index + 2` (Nga + Asat + Virama).
     // rustybuzz's Myanmar reorder tags them POS_AFTER_MAIN so the
@@ -73,12 +63,12 @@ pub(super) fn initial_reorder(
     // the base consonant).
     let kinzi_idx = syllable.kinzi_index;
 
-    if to_move.is_empty() && pre_cons_idx.is_none() && kinzi_idx.is_none() {
+    if to_move.is_empty() && kinzi_idx.is_none() {
         return;
     }
 
     // Rebuild the syllable slice in one pass so we handle the
-    // multi-matra and coeng-stack cases without index drift.
+    // multi-matra and halant-stack cases without index drift.
     //
     // Target layout (USE pre-base rule per MS USE spec):
     //
@@ -86,14 +76,9 @@ pub(super) fn initial_reorder(
     //   [everything else, in original order]
     //
     // Pre-base matras move to the very start of the syllable, not
-    // just before the base. This keeps coeng stacks intact so GSUB
+    // just before the base. This keeps halant stacks intact so GSUB
     // `blwf` / `pstf` can still see `halant + consonant` pairs
     // adjacent and collapse them into a single subscript glyph.
-    //
-    // For `sa + coeng + ta + sign-e` the result is
-    // `[sign-e, sa, coeng, ta]`. The subsequent `blwf` pass sees
-    // `coeng + ta` still adjacent and collapses to a single
-    // subscript-ta glyph, matching rustybuzz.
     //
     // `base` is used below as the anchor for Myanmar kinzi
     // placement: the kinzi triple gets injected immediately after
@@ -101,15 +86,10 @@ pub(super) fn initial_reorder(
     // POS_AFTER_MAIN semantics.
     let syl_start = syllable.start;
     let syl_end = syllable.end;
-    // The glyphs the moves below pass over: pre-base matras and the
-    // coeng pair travel to the syllable start, the kinzi triple to
-    // just after the base.
-    let pair = pre_cons_idx.filter(|&pc| pc >= syl_start && pc + 1 < syl_end);
+    // The glyphs the moves below pass over: pre-base matras travel to
+    // the syllable start, the kinzi triple to just after the base.
     let kinzi = kinzi_idx.filter(|&kz| kz >= syl_start && kz + 2 < syl_end);
     let mut span = to_move.last().map(|&last| syl_start..last + 1);
-    if let Some(pc) = pair {
-        span = Some(syl_start..span.map_or(pc + 2, |s| s.end.max(pc + 2)));
-    }
     if let Some(kz) = kinzi {
         span = Some(span.map_or(kz..base + 1, |s| s.start.min(kz)..s.end.max(base + 1)));
     }
@@ -130,25 +110,13 @@ pub(super) fn initial_reorder(
         rebuilt.push(original[idx - syl_start]);
         consumed[idx - syl_start] = true;
     }
-    // 2. Pre-base consonant pair (coeng + ra). Both glyphs move to
-    //    the start of the syllable so the `pref` GSUB feature sees
-    //    the pair adjacent AND the collapsed subscript-ra glyph
-    //    already sits before the base.
-    if let Some(pc) = pre_cons_idx {
-        if pc >= syl_start && pc + 1 < syl_end {
-            for rel in [pc - syl_start, pc + 1 - syl_start] {
-                rebuilt.push(original[rel]);
-                consumed[rel] = true;
-            }
-        }
-    }
-    // 3. Mark the kinzi triple as consumed so the fall-through
+    // 2. Mark the kinzi triple as consumed so the fall-through
     //    doesn't re-emit them at the syllable head; we inject them
     //    right after the base consonant below.
     if let Some(kz) = kinzi {
         consumed[kz - syl_start..=kz + 2 - syl_start].fill(true);
     }
-    // 4. Everything else, in original order, with the kinzi triple
+    // 3. Everything else, in original order, with the kinzi triple
     //    injected immediately after the base consonant.
     for (rel, &glyph) in original.iter().enumerate() {
         if consumed[rel] {

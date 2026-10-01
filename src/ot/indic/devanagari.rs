@@ -155,14 +155,10 @@ pub(crate) fn shape_indic_legacy(
         tag_positions(codepoints, glyphs, syllable);
     }
 
-    // The joiner handling of HarfBuzz's shaper for the script: the
-    // Indic shaper's features take ZWJ and ZWNJ as ordinary glyphs;
-    // Sinhala goes to the Universal Shaping Engine instead.
-    let table = if config.script == Script::Sinhala {
-        JoinerTable::Use
-    } else {
-        JoinerTable::Indic
-    };
+    // HarfBuzz shapes Sinhala, the one script this pass still runs,
+    // with the Universal Shaping Engine, so its features take that
+    // shaper's joiner handling.
+    let table = JoinerTable::Use;
     let prio = config.script_priority;
 
     // HarfBuzz runs `locl` and `ccmp` as one stage before initial
