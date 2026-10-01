@@ -434,10 +434,10 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             continue;
         };
         let mut seg_glyphs = seg_glyphs_src.to_vec();
-        // Whether the Universal Shaping Engine shapes the segment: its
-        // scripts take the default shaper in a font without lookups of
-        // their own, as in HarfBuzz, and the Tibetan and Mongolian runs
-        // of a buffer of another script take that buffer's shaper.
+        // The segment's shaper. The Indic, Myanmar and USE scripts take
+        // the default shaper in a font without lookups of their own, as
+        // in HarfBuzz, and the Tibetan and Mongolian runs of a buffer of
+        // another script take that buffer's shaper.
         let seg_shaper =
             Shaper::for_run(seg.script, !is_vertical, gsub.as_ref(), seg.script_priority);
         let use_run = seg_shaper == Shaper::Use
@@ -488,7 +488,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             .glyph_id('\u{25CC}')
             .filter(|_| !flags.contains(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE));
         let circled = circle
-            .filter(|_| seg.script == Script::Myanmar)
+            .filter(|_| seg_shaper == Shaper::Myanmar)
             .and_then(|c| dotted_circle::insert(seg_cps, &mut seg_glyphs, c));
         let seg_cps = circled.as_deref().unwrap_or(seg_cps);
 
@@ -498,8 +498,8 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         // shapers run every GSUB feature of their run, the default ones
         // in their last stage, as HarfBuzz's do, and insert their own
         // dotted circles.
-        let indic =
-            crate::ot::indic::indic_config_for(seg.script).filter(|c| c.script != Script::Sinhala);
+        let indic = crate::ot::indic::indic_config_for(seg.script)
+            .filter(|c| c.script != Script::Sinhala && seg_shaper == Shaper::Indic);
         let shaper_ran_defaults = seg.script == Script::Khmer || indic.is_some() || use_run;
         if let Some(config) = indic {
             let run = crate::ot::indic::shaper::IndicRun {
@@ -551,7 +551,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             };
             crate::ot::khmer::shape(&run, seg_cps, &mut seg_glyphs);
         }
-        if seg.script == Script::Myanmar {
+        if seg_shaper == Shaper::Myanmar {
             crate::ot::myanmar::shape_myanmar(
                 gsub.as_ref(),
                 gdef.as_ref(),

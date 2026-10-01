@@ -136,10 +136,13 @@ impl Shaper {
     }
 
     /// [`Self::for_script`] for a run whose lookups try the script tags
-    /// `script_priority` in the font's `gsub`: HarfBuzz gives a script
-    /// of the Universal Shaping Engine the default shaper when the
-    /// script tag GSUB picks is `DFLT` or `latn`
-    /// (`hb_ot_shaper_categorize`).
+    /// `script_priority` in the font's `gsub`, as HarfBuzz's
+    /// `hb_ot_shaper_categorize` decides it: the Indic scripts and the
+    /// scripts of the Universal Shaping Engine take the default shaper
+    /// when the script tag GSUB picks is `DFLT` (or `dflt`) or `latn`,
+    /// since the font was not made for the script's shaper. Myanmar
+    /// takes it for those and for `mymr`, the tag of fonts made before
+    /// Myanmar's shaping model.
     pub(super) fn for_run(
         script: Script,
         horizontal: bool,
@@ -147,13 +150,14 @@ impl Shaper {
         script_priority: &[[u8; 4]],
     ) -> Self {
         let shaper = Self::for_script(script, horizontal);
-        let generic = gsub
-            .and_then(|g| crate::ot::layout_select::chosen_script(g.script_list(), script_priority))
-            .is_some_and(|tag| tag == *b"DFLT" || tag == *b"latn");
-        if shaper == Self::Use && generic {
-            Self::Default
-        } else {
-            shaper
+        let chosen = gsub.and_then(|g| {
+            crate::ot::layout_select::chosen_script(g.script_list(), script_priority)
+        });
+        let generic = chosen.is_some_and(|tag| matches!(&tag, b"DFLT" | b"dflt" | b"latn"));
+        match shaper {
+            Self::Use | Self::Indic if generic => Self::Default,
+            Self::Myanmar if generic || chosen == Some(*b"mymr") => Self::Default,
+            _ => shaper,
         }
     }
 

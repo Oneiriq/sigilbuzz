@@ -435,6 +435,13 @@ Settings and table data that were read and then ignored:
 
 Output that differed from HarfBuzz:
 
+- An Indic script whose lookups the font does not have, so that GSUB picks `DFLT`,
+  `dflt` or `latn` for it, shapes with the default shaper, as HarfBuzz's
+  `hb_ot_shaper_categorize` decides. So does Myanmar in such a font or one with only
+  `mymr` lookups. Bengali text in Noto Sans Devanagari used to get the Indic shaper, so
+  a leading stress sign got a dotted circle and stress signs shared their letter's
+  cluster at `MonotoneCharacters`. 336 stress sign strings now all match HarfBuzz
+  14.5.0 (before: 328, and 312 at `MonotoneCharacters`).
 - Vertical text no longer runs `liga`, `clig`, `calt` and `rclt` by default. HarfBuzz
   turns them on for horizontal text only (`horizontal_features` in `hb-ot-shape.cc`).
   Vertical text now gets `vert` alone. sigilbuzz used to prefer `vrt2` when the font had

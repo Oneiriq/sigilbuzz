@@ -323,3 +323,25 @@ fn devanagari_stress_signs_take_the_script_of_their_letter() {
     ];
     check(BENGALI, cases, ClusterLevel::MonotoneGraphemes);
 }
+
+#[test]
+fn an_indic_script_without_lookups_in_the_font_gets_the_default_shaper() {
+    // hb_ot_shaper_categorize: Noto Sans Devanagari has no Bengali
+    // script, so GSUB picks DFLT for Bengali text and HarfBuzz shapes it
+    // with the default shaper. A leading stress sign gets no dotted
+    // circle, and at the character level the stress sign keeps its own
+    // cluster.
+    let cases: &[(&str, &[Row])] = &[
+        ("\u{0951}\u{0995}", &[(108, 0, 0, 0, 0), (0, 3, 600, 0, 0)]),
+        ("\u{0995}\u{0951}", &[(0, 0, 600, 0, 0), (108, 0, 0, 0, 0)]),
+    ];
+    check(DEVANAGARI, cases, ClusterLevel::MonotoneGraphemes);
+    let cases: &[(&str, &[Row])] = &[
+        ("\u{0995}\u{0951}", &[(0, 0, 600, 0, 0), (108, 3, 0, 0, 0)]),
+        (
+            "\u{0995}\u{0951}\u{0951}",
+            &[(0, 0, 600, 0, 0), (108, 3, 0, 0, 0), (108, 6, 0, 0, 0)],
+        ),
+    ];
+    check(DEVANAGARI, cases, ClusterLevel::MonotoneCharacters);
+}
