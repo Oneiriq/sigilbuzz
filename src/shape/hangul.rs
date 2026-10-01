@@ -1,113 +1,336 @@
-//! Hangul jamo composition, run over the text before the cmap lookup.
+//! HarfBuzz's Hangul preprocessing (`preprocess_text_hangul` in
+//! `hb-ot-shaper-hangul.cc`), run on the characters of a buffer the
+//! Hangul shaper shapes, after grapheme clusters form and before
+//! normalization.
+//!
+//! - `<L,V>` and `<L,V,T>` jamo sequences compose into the precomposed
+//!   syllable when every part is a modern jamo and the font has the
+//!   syllable. An `<LV,T>` pair composes the same way.
+//! - A sequence that does not compose stays as jamo, and each jamo gets
+//!   its `ljmo`, `vjmo`, or `tjmo` feature. A precomposed syllable the
+//!   font lacks, or an `<LV>` followed by a trailing jamo that cannot
+//!   join it, decomposes into jamo with those features when the font
+//!   has them. The jamo of one syllable then share a cluster at the
+//!   grapheme levels.
+//! - A tone mark (U+302E, U+302F) right after a syllable moves in front
+//!   of it, and the two share a cluster at the monotone levels, unless
+//!   the font draws the tone mark with no advance (it is then made to
+//!   overstrike). A tone mark after anything else gets a dotted circle
+//!   to sit on: after it, or before a zero-advance one.
 
-/// Pre-iterates `text` and applies Hangul NFC jamo composition in a
-/// single pass: a Leading jamo (L) followed by a Vowel jamo (V) and
-/// optionally a Trailing jamo (T) collapses into the matching
-/// precomposed syllable in U+AC00..U+D7A3 *when* the font carries a
-/// cmap entry for the precomposed codepoint. HarfBuzz / rustybuzz do
-/// exactly this, so matching the behavior is mandatory for byte-
-/// parity on modern Korean corpora.
-///
-/// Extended-B trailing jamo (U+D7CB..U+D7FB) abort composition of
-/// the whole L+V+T triple so the font's `ljmo` / `vjmo` / `tjmo`
-/// features can shape each jamo on its own (matches rustybuzz).
-///
-/// Returns a vector of `(byte_offset, char)` pairs that replaces the
-/// normal `text.char_indices()` sequence in the main shaping loop.
-/// The byte offset is the offset of the FIRST codepoint in the
-/// composed cluster (the L for an L+V / L+V+T composition), so
-/// downstream cluster tracking still maps glyphs back to the
-/// original UTF-8 stream.
-pub(super) fn hangul_compose(
-    text: &str,
-    cmap: &crate::tables::cmap::Cmap<'_>,
-) -> alloc::vec::Vec<(u32, char)> {
-    let mut out = alloc::vec::Vec::with_capacity(text.len());
-    // Gate: HarfBuzz / rustybuzz select the Hangul shaper on a
-    // per-run basis and the Hangul preprocessor (the NFC compose)
-    // runs only when that shaper is active. sigilbuzz's segmenter
-    // splits scripts but the Hangul preprocessor still has to see
-    // the segment's L+V(+T) window to run, so we gate on "the
-    // buffer is Hangul / whitespace / default-ignorable only".
-    // Mixed-script buffers (e.g. "Hi " + jamo) bypass composition;
-    // the jamo runs through its own segment under `hang` but stays
-    // as L + V glyphs, matching rustybuzz.
-    let compose_enabled = text.chars().all(|c| {
-        let cp = c as u32;
-        matches!(crate::unicode::script_of(c), crate::unicode::Script::Hangul)
-            || c == ' '
-            || (0x200B..=0x200D).contains(&cp)
-            || cp == 0xFEFF
-    });
-    let mut it = text.char_indices().peekable();
-    while let Some((byte_offset, ch)) = it.next() {
-        if !compose_enabled {
-            out.push((byte_offset as u32, ch));
+use alloc::vec::Vec;
+
+use crate::buffer::{char_class, ClusterLevel, Glyph};
+pub(super) use crate::ot::hangul::jamo_features;
+use crate::ot::hangul::{is_l, is_t, is_v, jamo};
+use crate::unicode::normalize::modified_combining_class;
+
+const L_BASE: u32 = 0x1100;
+const V_BASE: u32 = 0x1161;
+const T_BASE: u32 = 0x11A7;
+const L_COUNT: u32 = 19;
+const V_COUNT: u32 = 21;
+const T_COUNT: u32 = 28;
+const S_BASE: u32 = 0xAC00;
+const N_COUNT: u32 = V_COUNT * T_COUNT;
+const S_COUNT: u32 = L_COUNT * N_COUNT;
+const DOTTED_CIRCLE: char = '\u{25CC}';
+
+const fn is_combining_l(u: u32) -> bool {
+    L_BASE <= u && u < L_BASE + L_COUNT
+}
+
+const fn is_combining_v(u: u32) -> bool {
+    V_BASE <= u && u < V_BASE + V_COUNT
+}
+
+const fn is_combining_t(u: u32) -> bool {
+    T_BASE < u && u < T_BASE + T_COUNT
+}
+
+const fn is_combined_s(u: u32) -> bool {
+    S_BASE <= u && u < S_BASE + S_COUNT
+}
+
+/// A Hangul tone mark (`isHangulTone`).
+const fn is_tone(ch: char) -> bool {
+    matches!(ch as u32, 0x302E..=0x302F)
+}
+
+/// What the preprocessing asks of the font.
+pub(super) struct HangulFont<'a> {
+    /// Whether the font maps a character.
+    pub(super) has_glyph: &'a dyn Fn(char) -> bool,
+    /// Whether the font maps a character to a glyph with no advance
+    /// (`is_zero_width_char`).
+    pub(super) zero_width: &'a dyn Fn(char) -> bool,
+    /// Whether broken tone marks get a dotted circle: the font has one
+    /// and the buffer allows it.
+    pub(super) dotted_circle: bool,
+}
+
+/// One character on its way through the preprocessing.
+#[derive(Clone, Copy)]
+struct Entry {
+    ch: char,
+    glyph: Glyph,
+    mirrored: bool,
+    feature: u8,
+}
+
+/// The output so far and the input still to read, as HarfBuzz's buffer
+/// keeps them while it rewrites itself. Cluster merges see the output
+/// followed by the unread input as one run, as HarfBuzz's merges do.
+struct Rewrite {
+    out: Vec<Entry>,
+    input: Vec<Entry>,
+    read: usize,
+}
+
+impl Rewrite {
+    fn cur(&self, offset: usize) -> Option<char> {
+        self.input.get(self.read + offset).map(|e| e.ch)
+    }
+
+    /// Copies the next input character to the output.
+    fn next_glyph(&mut self) {
+        if let Some(&e) = self.input.get(self.read) {
+            self.out.push(e);
+            self.read += 1;
+        }
+    }
+
+    /// Replaces the next `num_in` input characters with `chars`, each a
+    /// copy of the first one after its cluster merged over the replaced
+    /// ones at the monotone `level`s (`replace_glyphs`).
+    fn replace(&mut self, num_in: usize, chars: &[char], level: ClusterLevel) {
+        if level.is_monotone() {
+            self.merge(self.out.len(), self.out.len() + num_in);
+        }
+        let Some(&orig) = self.input.get(self.read) else {
+            return;
+        };
+        self.out.extend(chars.iter().map(|&ch| Entry {
+            ch,
+            feature: jamo::NONE,
+            ..orig
+        }));
+        self.read += num_in;
+    }
+
+    /// The length of the run the merges see.
+    fn len(&self) -> usize {
+        self.out.len() + self.input.len().saturating_sub(self.read)
+    }
+
+    /// The entry at `k` of the run the merges see.
+    fn at(&mut self, k: usize) -> Option<&mut Entry> {
+        let out = self.out.len();
+        if k < out {
+            self.out.get_mut(k)
+        } else {
+            self.input.get_mut(self.read + (k - out))
+        }
+    }
+
+    fn cluster(&mut self, k: usize) -> u32 {
+        self.at(k).map_or(0, |e| e.glyph.cluster)
+    }
+
+    /// HarfBuzz's `merge_clusters_impl` over `[start, end)` of the run:
+    /// the range takes its smallest cluster, extended over neighbors
+    /// that share a cluster with an end whose cluster changes.
+    fn merge(&mut self, mut start: usize, mut end: usize) {
+        let limit = self.len();
+        if end > limit || end <= start + 1 {
+            return;
+        }
+        let cluster = (start..end).map(|k| self.cluster(k)).min().unwrap_or(0);
+        if cluster != self.cluster(end - 1) {
+            while end < limit && self.cluster(end - 1) == self.cluster(end) {
+                end += 1;
+            }
+        }
+        if cluster != self.cluster(start) {
+            while start > 0 && self.cluster(start - 1) == self.cluster(start) {
+                start -= 1;
+            }
+        }
+        for k in start..end {
+            if let Some(e) = self.at(k) {
+                e.glyph.cluster = cluster;
+            }
+        }
+    }
+}
+
+/// Runs the Hangul preprocessing over one buffer's characters
+/// (`cps`, `glyphs`, and `mirrored` are one to one) and returns each
+/// resulting character's jamo feature (see [`jamo`]).
+pub(super) fn preprocess(
+    cps: &mut Vec<char>,
+    glyphs: &mut Vec<Glyph>,
+    mirrored: &mut Vec<bool>,
+    font: &HangulFont<'_>,
+    level: ClusterLevel,
+) -> Vec<u8> {
+    if cps.len() != glyphs.len() || cps.len() != mirrored.len() {
+        return alloc::vec![jamo::NONE; cps.len()];
+    }
+    let entries: Vec<Entry> = cps
+        .iter()
+        .zip(glyphs.iter())
+        .zip(mirrored.iter())
+        .map(|((&ch, &glyph), &mirrored)| Entry {
+            ch,
+            glyph,
+            mirrored,
+            feature: jamo::NONE,
+        })
+        .collect();
+    let mut buf = Rewrite {
+        out: Vec::with_capacity(entries.len()),
+        input: entries,
+        read: 0,
+    };
+    // The most recent syllable, `out[start..end]`, valid when
+    // `start < end`.
+    let (mut start, mut end) = (0usize, 0usize);
+    let has = font.has_glyph;
+    let ch = |u: u32| char::from_u32(u).unwrap_or('\u{FFFD}');
+    let graphemes = level.is_graphemes();
+
+    while let Some(u) = buf.cur(0) {
+        if is_tone(u) {
+            if start < end && end == buf.out.len() {
+                // The tone mark follows a syllable: move it in front,
+                // unless it has no advance.
+                buf.next_glyph();
+                if !(font.zero_width)(u) {
+                    if level.is_monotone() {
+                        buf.merge(start, end + 1);
+                    }
+                    if let Some(span) = buf.out.get_mut(start..=end) {
+                        span.rotate_right(1);
+                    }
+                }
+            } else if font.dotted_circle {
+                // No syllable to sit on: add a dotted circle. HarfBuzz
+                // copies the tone mark's glyph info to it, so it sorts
+                // with the marks in normalization as the tone mark
+                // does (see `normalize_segments`).
+                let chars = if (font.zero_width)(u) {
+                    [DOTTED_CIRCLE, u]
+                } else {
+                    [u, DOTTED_CIRCLE]
+                };
+                buf.replace(1, &chars, level);
+                let n = buf.out.len();
+                if let Some(circle) = buf.out.get_mut(n.saturating_sub(2)..n) {
+                    for e in circle.iter_mut().filter(|e| e.ch == DOTTED_CIRCLE) {
+                        e.glyph.char_class = char_class::MARK;
+                        e.glyph.combining_class = modified_combining_class(u);
+                    }
+                }
+            } else {
+                buf.next_glyph();
+            }
+            start = buf.out.len();
+            end = buf.out.len();
             continue;
         }
-        // L jamo range: U+1100..U+1112 (the 19 modern leading
-        // consonants). Extended-A (U+A960..) do NOT compose: they
-        // stay as jamo so `ljmo` picks them up.
-        let l_index = if (0x1100..=0x1112).contains(&(ch as u32)) {
-            Some((ch as u32) - 0x1100)
-        } else {
-            None
-        };
-        if let Some(l) = l_index {
-            if let Some(&(v_offset, next_ch)) = it.peek() {
-                // V jamo range: U+1161..U+1175 (21 modern vowels).
-                if (0x1161..=0x1175).contains(&(next_ch as u32)) {
-                    let v = (next_ch as u32) - 0x1161;
-                    // Peek past V to detect the trailing jamo, if any.
-                    // HarfBuzz's rule: only compose when the whole
-                    // run is in the modern range. Extended-B T
-                    // (U+D7CB..U+D7FB) aborts composition entirely.
-                    let mut clone = it.clone();
-                    clone.next(); // skip V
-                    let t_offset = clone.peek().map_or(0, |&(offset, _)| offset);
-                    let t_info = match clone.peek() {
-                        Some(&(_, c)) if (0x11A8..=0x11C2).contains(&(c as u32)) => {
-                            Some(Some((c as u32) - 0x11A7))
-                        }
-                        Some(&(_, c)) if (0xD7CB..=0xD7FB).contains(&(c as u32)) => Some(None),
-                        _ => None,
-                    };
-                    if matches!(t_info, Some(None)) {
-                        // Extended-B T blocks composition; emit each
-                        // jamo as-is. L and V are consumed here; the
-                        // T gets emitted naturally on the next
-                        // iteration.
-                        out.push((byte_offset as u32, ch));
-                        out.push((v_offset as u32, next_ch));
-                        it.next(); // consume V
+
+        start = buf.out.len();
+        let next = buf.cur(1);
+        if is_l(u) && next.is_some() {
+            let v = next.unwrap_or_default();
+            if is_v(v) {
+                let t = buf.cur(2).filter(|&t| is_t(t));
+                let len = if t.is_some() { 3 } else { 2 };
+                let (lu, vu, tu) = (u as u32, v as u32, t.map(|t| t as u32));
+                if is_combining_l(lu) && is_combining_v(vu) && tu.map_or(true, is_combining_t) {
+                    let tindex = tu.map_or(0, |t| t - T_BASE);
+                    let s = ch(S_BASE + (lu - L_BASE) * N_COUNT + (vu - V_BASE) * T_COUNT + tindex);
+                    if has(s) {
+                        buf.replace(len, &[s], level);
+                        end = start + 1;
                         continue;
                     }
-                    let t = t_info.and_then(|o| o).unwrap_or(0);
-                    it.next(); // consume V
-                    if t != 0 {
-                        it.next(); // consume modern T
+                }
+                // No composition: the jamo take their features.
+                for feature in [jamo::LJMO, jamo::VJMO, jamo::TJMO].into_iter().take(len) {
+                    if let Some(e) = buf.input.get_mut(buf.read) {
+                        e.feature = feature;
                     }
-                    let syllable_cp = 0xAC00 + (l * 21 + v) * 28 + t;
-                    if let Some(ch_composed) = core::char::from_u32(syllable_cp) {
-                        if cmap.glyph_id(ch_composed).is_some() {
-                            out.push((byte_offset as u32, ch_composed));
-                            continue;
-                        }
+                    buf.next_glyph();
+                }
+                end = start + len;
+                if graphemes {
+                    buf.merge(start, end);
+                }
+                continue;
+            }
+        } else if is_combined_s(u as u32) {
+            let s = u as u32;
+            let has_s = has(u);
+            let lindex = (s - S_BASE) / N_COUNT;
+            let nindex = (s - S_BASE) % N_COUNT;
+            let vindex = nindex / T_COUNT;
+            let tindex = nindex % T_COUNT;
+            let next_t = next.filter(|&n| is_t(n));
+            if tindex == 0 {
+                if let Some(t) = next.filter(|&n| is_combining_t(n as u32)) {
+                    // `<LV,T>`: compose if the font has the syllable.
+                    let new_s = ch(s + (t as u32 - T_BASE));
+                    if has(new_s) {
+                        buf.replace(2, &[new_s], level);
+                        end = start + 1;
+                        continue;
                     }
-                    // Fallback: emit each jamo as-is, each with its own
-                    // cluster (the grapheme levels merge them later, as
-                    // HarfBuzz's Hangul shaper does).
-                    out.push((byte_offset as u32, ch));
-                    out.push((v_offset as u32, next_ch));
-                    if t != 0 {
-                        let t_ch = core::char::from_u32(0x11A7 + t).unwrap_or(ch);
-                        out.push((t_offset as u32, t_ch));
+                }
+            }
+            if !has_s || (tindex == 0 && next_t.is_some()) {
+                let decomposed = [
+                    ch(L_BASE + lindex),
+                    ch(V_BASE + vindex),
+                    ch(T_BASE + tindex),
+                ];
+                if has(decomposed[0]) && has(decomposed[1]) && (tindex == 0 || has(decomposed[2])) {
+                    let mut s_len = if tindex == 0 { 2 } else { 3 };
+                    buf.replace(1, &decomposed[..s_len], level);
+                    // An `<LV>` decomposed for a trailing jamo that
+                    // cannot join it takes that jamo along.
+                    if has_s && tindex == 0 {
+                        buf.next_glyph();
+                        s_len += 1;
+                    }
+                    end = start + s_len;
+                    let features = [jamo::LJMO, jamo::VJMO, jamo::TJMO];
+                    let decomposed_out = buf.out.get_mut(start..end).unwrap_or_default();
+                    for (e, &f) in decomposed_out.iter_mut().zip(&features) {
+                        e.feature = f;
+                    }
+                    if graphemes {
+                        buf.merge(start, end);
                     }
                     continue;
                 }
             }
+            if has_s {
+                end = start + 1;
+            }
         }
-        out.push((byte_offset as u32, ch));
+        // Not a syllable start: leave `end` at or before `start`, which
+        // keeps a following tone mark from moving.
+        buf.next_glyph();
     }
-    out
+
+    let entries = buf.out;
+    *cps = entries.iter().map(|e| e.ch).collect();
+    *glyphs = entries.iter().map(|e| e.glyph).collect();
+    *mirrored = entries.iter().map(|e| e.mirrored).collect();
+    entries.iter().map(|e| e.feature).collect()
 }
+
+#[cfg(test)]
+mod tests;

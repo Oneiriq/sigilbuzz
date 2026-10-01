@@ -253,6 +253,58 @@ Changed:
   component to a ligature they join (`_hb_glyph_info_get_lig_num_comps_in_ligation`),
   and a ligature whose first component is a nonspacing mark stops being a mark. Once
   all seven ligature ids are live, new ligatures take them in turn.
+- Khmer has its own shaper, following HarfBuzz's (`hb-ot-shaper-khmer.cc`), in place of
+  the Universal Shaping Engine. HarfBuzz's Khmer syllable grammar decides the syllables,
+  so ZWJ and ZWNJ stay in a syllable only before a robat, an above-base vowel sign or an
+  X-group sign, and broken clusters get a dotted circle. Coeng + ro and a pre-base vowel
+  sign move to the start of their syllable before any lookup runs, with HarfBuzz's
+  `pref`, `blwf`, `abvf`, `pstf` and `cfar` masks. `locl`, `ccmp` and those five
+  features run as one stage, each lookup only where its mask allows and one syllable at
+  a time (`F_PER_SYLLABLE`), and `pres`, `abvs`, `blws` and `psts` run as one stage with
+  `rlig`, `calt`, `clig`, `rclt` and the caller's features. `liga` is off for Khmer, as
+  in HarfBuzz. On 2,010 Khmer test strings with Noto Sans Khmer, the output now matches
+  HarfBuzz 14.5.0 at the `MonotoneGraphemes`, `MonotoneCharacters` and `Characters`
+  cluster levels (before: 281 of the first 510). `ot::use_shaper::shape_khmer` runs the
+  new shaper, default features included.
+- Devanagari, Bengali, Gurmukhi, Gujarati, Oriya, Tamil, Telugu, Kannada and Malayalam
+  run through a port of HarfBuzz's Indic shaper (`hb-ot-shaper-indic.cc`): its syllable
+  grammar and character table, consonant positions read from the font's `blwf`,
+  `vatu`, `pstf` and `pref`, its initial and final reordering, and its feature stages
+  and masks. ZWJ and ZWNJ now act as in HarfBuzz: a joiner after Ra,H blocks an implicit
+  reph, a ZWJ after a halant stops the base search and keeps a pre-base matra from
+  moving past that halant, a ZWNJ turns `half` off and ends the syllable after a
+  halant, and a reph or pre-base consonant moves past a joiner that follows a halant.
+  Kannada Ra,H,ZWJ at the start of a syllable is shaped as Ra,ZWJ,H, so it forms no
+  reph, with the halant and ZWJ clusters merged. `liga` is off for these scripts, and
+  `init`, `pres`, `abvs`, `blws`, `psts` and `haln` run in one stage with `rlig`,
+  `calt`, `clig`, `rclt` and the caller's features. On 7,656 test strings with the Noto
+  Sans fonts of the nine scripts, the output matches HarfBuzz 14.5.0 on all but 7 (before:
+  4,826), at every cluster level. The 7 are HarfBuzz's vowel constraints, which insert a
+  dotted circle between an independent vowel and a vowel sign that would look like
+  another vowel, and sigilbuzz does not do that yet. Sinhala keeps the earlier Indic pass.
+  `ot::indic::shape_indic` and `shape_devanagari` run the port, default features
+  included.
+- The Universal Shaping Engine moves a repha as HarfBuzz does (`reorder_syllable_use`
+  in `hb-ot-shaper-use.cc`). `rphf` only applies to the first three glyphs of a
+  syllable (the first one when it is a repha character), the glyph it substitutes
+  becomes a repha, and after the basic features the repha moves to just before the
+  first vowel sign, medial, final or halant that did not ligate, or to the end of the
+  syllable, merging the clusters it passes. Tirhuta and Modi reph forms used to stay in
+  front of the base. HarfBuzz also matches `rphf` one syllable at a time. sigilbuzz does
+  not yet, because its USE syllables still come from a simpler grammar than HarfBuzz's.
+- Hangul follows HarfBuzz's Hangul shaper (`hb-ot-shaper-hangul.cc`) in a buffer whose
+  script is Hangul. Its preprocessing runs after grapheme clusters form, as in
+  HarfBuzz: jamo compose into a precomposed syllable the font has, a syllable the font
+  lacks decomposes into jamo, and a tone mark (U+302E, U+302F) after a syllable moves
+  in front of it, sharing its cluster, unless the font draws it with no advance. A tone
+  mark with no syllable before it gets a dotted circle, which sorts with the marks as
+  the tone mark does. `ljmo`, `vjmo` and `tjmo` apply only to the jamo of a syllable
+  that did not compose, and they run in one stage with the default features, where
+  `calt` applies to every glyph but jamo (HarfBuzz 14.5.0 turns `calt` off on jamo
+  only). The tone marks are now Hangul script, as in `Scripts.txt`. On 1,200 random
+  Hangul strings with Noto Sans KR and the Old Hangul fixture, the output now matches
+  HarfBuzz at every cluster level (before: 558). `ot::use_shaper::shape_hangul` runs
+  the new stage, default features included.
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,

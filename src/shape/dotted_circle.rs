@@ -1,7 +1,7 @@
 //! Dotted circles for broken syllables, HarfBuzz's
 //! `hb_syllabic_insert_dotted_circles` (`hb-ot-shaper-syllabic.cc`).
 //!
-//! The Indic, Khmer, Myanmar, and USE shapers find a "broken"
+//! The Indic, Myanmar, and USE shapers find a "broken"
 //! syllable when a dependent mark (a matra, virama, nukta, bindu, or
 //! other combining sign) starts a syllable with no base to attach to,
 //! as in a lone U+093F DEVANAGARI VOWEL SIGN I. HarfBuzz then inserts
@@ -19,7 +19,9 @@
 //! broken syllable, so consecutive broken syllables share one circle.
 //! The circle goes in before the shaper runs, and the shaper then sees
 //! it as the base (U+25CC is a consonant placeholder to the Indic
-//! scanner and a generic base to USE).
+//! scanner and a generic base to USE). The Khmer shaper
+//! (`crate::ot::khmer`) inserts its own circles after its syllable
+//! machine, as HarfBuzz's does.
 
 use alloc::vec::Vec;
 
@@ -69,7 +71,8 @@ fn use_orphan(ch: char) -> bool {
 fn insertion_points(script: Script, cps: &[char]) -> Vec<usize> {
     let mut points = Vec::new();
     // Syllable (start, end, broken) triples, in order.
-    let syllables: Vec<(usize, usize, bool)> = if let Some(config) = indic_config_for(script) {
+    let sinhala = indic_config_for(script).filter(|c| c.script == Script::Sinhala);
+    let syllables: Vec<(usize, usize, bool)> = if let Some(config) = sinhala {
         indic_syllables(cps, &config)
             .iter()
             .map(|s| {
@@ -80,8 +83,7 @@ fn insertion_points(script: Script, cps: &[char]) -> Vec<usize> {
             .collect()
     } else if matches!(
         script,
-        Script::Khmer
-            | Script::Myanmar
+        Script::Myanmar
             | Script::Buginese
             | Script::TaiTham
             | Script::Balinese
@@ -182,33 +184,33 @@ mod tests {
 
     #[test]
     fn lone_matra_gets_a_circle_with_its_cluster() {
-        let (cps, clusters) = run(Script::Devanagari, "\u{093F}").expect("inserted");
-        assert_eq!(cps, ['\u{25CC}', '\u{093F}']);
+        let (cps, clusters) = run(Script::Sinhala, "\u{0DD9}").expect("inserted");
+        assert_eq!(cps, ['\u{25CC}', '\u{0DD9}']);
         assert_eq!(clusters, [0, 0]);
     }
 
     #[test]
     fn one_circle_per_run_of_orphan_marks() {
-        let (cps, _) =
-            run(Script::Devanagari, "\u{0915} \u{093F}\u{0902}\u{094D}").expect("inserted");
+        let (cps, _) = run(Script::Sinhala, "\u{0D9A} \u{0DD9}\u{0D82}\u{0DCA}").expect("inserted");
         assert_eq!(
             cps,
-            ['\u{0915}', ' ', '\u{25CC}', '\u{093F}', '\u{0902}', '\u{094D}']
+            ['\u{0D9A}', ' ', '\u{25CC}', '\u{0DD9}', '\u{0D82}', '\u{0DCA}']
         );
     }
 
     #[test]
     fn complete_syllables_and_other_scripts_are_left_alone() {
-        assert_eq!(run(Script::Devanagari, "\u{0915}\u{093F}\u{0902}"), None);
-        assert_eq!(run(Script::Devanagari, "\u{200D}\u{0915}"), None);
+        assert_eq!(run(Script::Sinhala, "\u{0D9A}\u{0DD9}\u{0D82}"), None);
+        assert_eq!(run(Script::Sinhala, "\u{200D}\u{0D9A}"), None);
         assert_eq!(run(Script::Thai, "\u{0E31}"), None);
         assert_eq!(run(Script::Latin, "\u{0301}"), None);
     }
 
     #[test]
-    fn khmer_orphan_vowel_gets_a_circle() {
-        let (cps, clusters) = run(Script::Khmer, "\u{1780} \u{17C1}\u{1780}").expect("inserted");
-        assert_eq!(cps, ['\u{1780}', ' ', '\u{25CC}', '\u{17C1}', '\u{1780}']);
-        assert_eq!(clusters, [0, 3, 4, 4, 7]);
+    fn indic_and_khmer_are_left_to_their_shapers() {
+        // The Indic and Khmer shapers insert their own circles, from
+        // their own syllable machines.
+        assert_eq!(run(Script::Devanagari, "\u{093F}"), None);
+        assert_eq!(run(Script::Khmer, "\u{1780} \u{17C1}\u{1780}"), None);
     }
 }

@@ -10,37 +10,44 @@
 //! forms) are selected by font-declared GSUB features that run in
 //! a specific order.
 //!
-//! The HarfBuzz implementation of the Indic2 shaper is the
-//! reference; sigilbuzz follows the same phase structure:
+//! The nine scripts of HarfBuzz's Indic shaper (Devanagari through
+//! Malayalam) run through a port of it (`hb-ot-shaper-indic.cc`, in
+//! the `shaper`, `initial`, and `final_reorder` submodules):
 //!
 //! ```text
-//!   1. Segment the buffer into syllables.
-//!   2. For each syllable: initial reordering.
-//!      - Matra decomposition.
-//!      - Classify consonants (half-form, below-base, post-base, ...).
-//!      - Reorder pre-base matras to before the base consonant.
-//!      - Mark `ra + halant` as reph and move to the reordering slot.
-//!   3. Apply basic features in order: `nukt`, `akhn`, `rphf`,
-//!      `blwf`, `half`, `pstf`, `vatu`, `cjct`.
-//!   4. Final reordering.
-//!      - Reph to its font-declared position.
-//!      - Pre-base matras to their visual slot.
-//!   5. Apply presentation features: `init`, `pres`, `abvs`,
-//!      `blws`, `psts`, `haln`. (These run through the generic
-//!      GSUB pass after the Indic pipeline returns.)
+//!   1. Classify each character (hb_indic_get_categories) and split the
+//!      run into syllables with HarfBuzz's Indic syllable grammar.
+//!   2. Apply `locl` and `ccmp`, one syllable at a time.
+//!   3. Initial reordering: consonant positions from the font's
+//!      `blwf`, `vatu`, `pstf`, and `pref`, dotted circles for broken
+//!      clusters, the base consonant and reph of each syllable (ZWJ
+//!      and ZWNJ decide both), the syllable sorted by position, and
+//!      the feature masks.
+//!   4. The basic features `nukt` to `cjct`, one stage each, masked
+//!      and one syllable at a time.
+//!   5. Final reordering: the base again, pre-base matras next to it,
+//!      the reph to its script's position, pre-base-reordering
+//!      consonants, and `init` on a word-initial matra.
+//!   6. `init`, `pres`, `abvs`, `blws`, `psts`, and `haln` in one stage
+//!      with the default features HarfBuzz puts there.
 //! ```
 //!
-//! The state machine itself is script-agnostic. Per-script behavior
-//! is concentrated in [`IndicConfig`]: script-tag priority (which
-//! `<scr>`/`<scr2>` pair to look up features under), reph
-//! positioning (where the reph lands after `rphf` collapses the
-//! ra+halant pair), and the reph-detection mode (implicit
-//! ra+halant, explicit ra+halant+ZWJ, or a LogRepha encoded glyph).
+//! Per-script behavior is in [`IndicConfig`]: script-tag priority
+//! (which `<scr>`/`<scr2>` pair to look up features under), reph
+//! positioning, and the reph-detection mode (implicit ra+halant,
+//! explicit ra+halant+ZWJ, or a LogRepha encoded glyph). HarfBuzz's
+//! other two per-script settings live in the shaper: every one of the
+//! nine scripts has an old spec, and Telugu and Kannada apply `blwf`
+//! after the base only.
 //!
-//! The configuration table matches rustybuzz's `INDIC_CONFIGS` for
-//! the ten Indic scripts listed above.
+//! Sinhala, which HarfBuzz shapes with the Universal Shaping Engine,
+//! keeps sigilbuzz's earlier Indic pass (the [`devanagari`] module).
 
 pub mod devanagari;
+mod final_reorder;
+mod initial;
+mod machine;
+pub(crate) mod shaper;
 
 pub use devanagari::{shape_devanagari, shape_indic};
 

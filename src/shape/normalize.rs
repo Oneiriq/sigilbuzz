@@ -200,6 +200,14 @@ pub(super) fn normalize_segments<'a>(
             .map(|i| {
                 let mut c = NormChar::new(codepoints[i], glyphs[i].cluster, mirrored[i]);
                 c.flags = glyphs[i].flags;
+                // A character a shaper inserted in place of a mark
+                // keeps that mark's properties, as HarfBuzz's
+                // `replace_glyphs` copies them (the Hangul shaper's
+                // dotted circle for a tone mark).
+                if glyphs[i].combining_class != 0 {
+                    c.class = glyphs[i].char_class;
+                    c.mcc = glyphs[i].combining_class;
+                }
                 c
             })
             .collect();

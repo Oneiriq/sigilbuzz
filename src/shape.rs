@@ -140,6 +140,7 @@ mod required;
 mod rotate;
 mod segment;
 mod shaper;
+mod syllabic;
 mod syllables;
 mod thai;
 
@@ -154,6 +155,7 @@ use gsub_parsed::filter_for_lookup;
 pub(crate) use joiners::JoinerTable;
 pub use pipeline::shape;
 use segment::ProcessedSegment;
+pub(crate) use syllabic::SyllabicGsub;
 pub(crate) use syllables::number_syllables;
 
 use crate::buffer::Glyph;

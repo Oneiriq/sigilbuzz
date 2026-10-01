@@ -2,11 +2,13 @@
 //!
 //! The USE is Microsoft's generic complex-script shaper, the one
 //! every SE-Asian, SE-Indic and archaic-South-Asian script that does
-//! not fit Arabic or Indic2 runs through. Khmer, Myanmar, Tai Tham,
-//! Buginese, New Tai Lue, Cham, Old Hangul, Hanifi Rohingya are all
-//! USE clients. Each script gets an entry point below that pairs its
-//! script-tag priority with a feature chain. A new script needs its
-//! codepoints in the per-codepoint tables of
+//! not fit Arabic or Indic2 runs through. Tai Tham, Buginese, New Tai
+//! Lue, Cham, and Hanifi Rohingya are USE clients, and sigilbuzz also
+//! runs its Myanmar and Old Hangul passes through this module. Khmer
+//! has its own shaper (`crate::ot::khmer`), as in HarfBuzz, and
+//! [`shape_khmer`] runs it. Each script gets an entry point below that
+//! pairs its script-tag priority with a feature chain. A new script
+//! needs its codepoints in the per-codepoint tables of
 //! [`crate::unicode::use_category`] and an entry point here.
 //!
 //! # Pipeline
@@ -36,9 +38,8 @@
 //!    and the glyph `pref` substituted, moves to the start of the
 //!    syllable or to just after the last halant before it.
 //!
-//!    Khmer and Myanmar reorder before their features instead (their
-//!    HarfBuzz shapers do), with the Khmer `coeng + ra` and Myanmar
-//!    kinzi moves.
+//!    Myanmar reorders before its features instead (its HarfBuzz
+//!    shaper does), with the kinzi move.
 //! 5. **Topographical features**, run after the reorder:
 //!
 //!    ```text
@@ -46,16 +47,16 @@
 //!    ```
 //!
 //! 6. **GPOS**: the generic pipeline in [`crate::shape`] runs the
-//!    standard kern/mark/mkmk plus the Khmer `dist` feature. This
-//!    module returns control to it after topographical GSUB.
+//!    standard kern/mark/mkmk and `dist`. This module returns control
+//!    to it after topographical GSUB.
 //!
 //! # Clusters
 //!
 //! Every reorder moves glyphs with their clusters. At the monotone
 //! cluster levels a moved glyph and the glyphs it moved across then
 //! share their smallest cluster, the `merge_clusters` calls of
-//! HarfBuzz's Khmer, Myanmar, and USE reorderings; the other levels
-//! leave the clusters out of order. Ligatures merge in the GSUB
+//! HarfBuzz's Myanmar and USE reorderings. The other levels leave
+//! the clusters out of order. Ligatures merge in the GSUB
 //! dispatcher and graphemes before shaping starts, both by the same
 //! level, so no syllable-wide merge happens here.
 
@@ -65,7 +66,7 @@ mod syllable;
 
 use alloc::vec::Vec;
 
-use reorder::{initial_reorder, record_pref, reorder_pre_base, tag_syllables};
+use reorder::{record_pref, record_rphf, reorder_pre_base, rphf_info, tag_syllables};
 pub use scripts::{
     shape_balinese, shape_brahmi, shape_buginese, shape_cham, shape_hangul, shape_khojki,
     shape_lepcha, shape_limbu, shape_modi, shape_myanmar, shape_nko, shape_nko_in_context,
@@ -74,7 +75,8 @@ pub use scripts::{
 pub(crate) use syllable::{segment_syllables, Syllable, SyllableKind};
 
 use crate::buffer::{ClusterLevel, Glyph};
-use crate::shape::{apply_gsub_feature_in_scripts, JoinerTable};
+use crate::ot::syllabic::stage::{apply_stage, FeatureFlags, StageFeature};
+use crate::shape::{apply_gsub_feature_in_scripts, JoinerTable, SyllabicGsub};
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 
@@ -175,17 +177,23 @@ pub const MYANMAR_TOPOGRAPHICAL_FEATURES: &[&[u8; 4]] = &[b"pres", b"abvs", b"bl
 
 /// Hangul Old-Hangul features: the three positional jamo features
 /// pick Leading/Vowel/Trailing variant shapes. HarfBuzz's Hangul
-/// shaper adds only these to the default features, which run once,
-/// in the default pass.
+/// shaper adds only these to the default features and runs them all
+/// in one stage with the defaults (see [`shape_hangul`]).
 pub const HANGUL_FEATURES: &[&[u8; 4]] = &[b"ljmo", b"vjmo", b"tjmo"];
 
-/// Entry point: shapes one Khmer run. `codepoints` is in
-/// one-to-one correspondence with `glyphs` on entry; after the call
+/// Entry point: shapes one Khmer run with the Khmer shaper
+/// (`crate::ot::khmer`), which follows HarfBuzz's. `codepoints` is in
+/// one-to-one correspondence with `glyphs` on entry. After the call
 /// `glyphs` may be shorter (GSUB collapses) and reordered. Clusters
 /// track back to original byte offsets so the caller can map glyphs
 /// to input. A reordered glyph shares one cluster with the glyphs it
 /// moved across at the monotone cluster `level`s, as in HarfBuzz's
 /// Khmer shaper.
+///
+/// Every GSUB feature of the run runs here, the default ones
+/// (`rlig`, `calt`, `clig`, `rclt`) included, since HarfBuzz runs
+/// them in the Khmer shaper's last stage. Broken clusters get no
+/// dotted circle here. Shaping through [`crate::shape`] adds them.
 pub fn shape_khmer(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
@@ -193,63 +201,15 @@ pub fn shape_khmer(
     glyphs: &mut Vec<Glyph>,
     level: ClusterLevel,
 ) {
-    if codepoints.is_empty() || glyphs.is_empty() {
-        return;
-    }
-
-    // 1. Segment. One pass over the codepoints, emitting Syllable
-    //    records that the reorder pass can consume directly.
-    let syllables = segment_syllables(codepoints);
-    // Per-syllable features match within these (HarfBuzz's syllable()).
-    let numbers = syllables.iter().map(|s| (s.start, s.end, s.kind as u8));
-    crate::shape::number_syllables(glyphs, numbers, level);
-
-    // 2. Initial reordering: pre-base vowel signs move before the
-    //    base. Done BEFORE GSUB so features see the logical order
-    //    fonts expect. Reordering is length-preserving, so glyph
-    //    indices stay aligned with codepoints across this pass.
-    for syllable in &syllables {
-        initial_reorder(codepoints, glyphs, syllable, level);
-    }
-
-    // 3. Basic features. The generic dispatcher in `shape.rs`
-    //    handles script-tag fallback; we just hand it the tags in
-    //    the USE-mandated order.
-    if let Some(gsub) = gsub {
-        for tag in USE_BASIC_FEATURES {
-            let joiners = JoinerTable::Khmer.joiners(**tag);
-            apply_gsub_feature_in_scripts(
-                gsub,
-                glyphs,
-                gdef,
-                **tag,
-                0,
-                KHMER_SCRIPT_PRIORITY,
-                joiners,
-            );
-        }
-    }
-
-    // 4. Topographical features: after basic, to pick display
-    //    forms for the collapsed conjuncts.
-    if let Some(gsub) = gsub {
-        for tag in USE_TOPOGRAPHICAL_FEATURES {
-            let joiners = JoinerTable::Khmer.joiners(**tag);
-            apply_gsub_feature_in_scripts(
-                gsub,
-                glyphs,
-                gdef,
-                **tag,
-                0,
-                KHMER_SCRIPT_PRIORITY,
-                joiners,
-            );
-        }
-    }
-
-    // Final GPOS (kern, mark, mkmk, dist) runs in the caller, see
-    // shape.rs. That lets the generic mark-attachment machinery
-    // handle Khmer's tone marks without a script-specific branch.
+    let run = crate::ot::khmer::KhmerRun {
+        gsub,
+        gdef,
+        level,
+        features: &[],
+        vertical: false,
+        dotted_circle: None,
+    };
+    crate::ot::khmer::shape(&run, codepoints, glyphs);
 }
 
 /// Generic USE shaping entry point, used by Old-Hangul and the
@@ -298,12 +258,18 @@ pub(crate) fn shape_use(
     crate::shape::number_syllables(glyphs, numbers, level);
 
     // 2. Basic features, on the logical order. The glyphs carry their
-    //    syllable and reorder category through GSUB, and `pref` marks
-    //    the first glyph it substitutes in each syllable as pre-base
-    //    (HarfBuzz's `record_pref_use`).
+    //    syllable and reorder category through GSUB. `rphf` applies
+    //    only to the first glyphs of each syllable and marks the glyph
+    //    it substitutes as a repha (HarfBuzz's `setup_rphf_mask` and
+    //    `record_rphf_use`), and `pref` marks the first glyph it
+    //    substitutes in each syllable as pre-base (`record_pref_use`).
     let reorder = reorder_prebase && tag_syllables(glyphs, codepoints, &syllables);
     if let Some(gsub) = gsub {
         for tag in basic_features {
+            if reorder && **tag == *b"rphf" {
+                apply_rphf(gsub, gdef, glyphs, script_priority);
+                continue;
+            }
             let pref = reorder && **tag == *b"pref";
             let before: Vec<u32> = if pref {
                 glyphs.iter().map(|g| g.glyph_id).collect()
@@ -330,6 +296,46 @@ pub(crate) fn shape_use(
             apply_gsub_feature_in_scripts(gsub, glyphs, gdef, **tag, 0, script_priority, joiners);
         }
     }
+}
+
+/// HarfBuzz's flags for the USE `rphf` feature (`collect_features_use`).
+pub(crate) const USE_RPHF_FLAGS: FeatureFlags =
+    FeatureFlags::MANUAL_ZWJ.union(FeatureFlags::PER_SYLLABLE);
+
+/// HarfBuzz's USE `rphf` stage (`collect_features_use`): `rphf`,
+/// applied only to the glyphs `setup_rphf_mask` marked, and then
+/// `record_rphf_use`, which makes the glyph it substituted a repha.
+/// HarfBuzz clears the substitution flags before the stage, so only
+/// what `rphf` itself substituted counts.
+///
+/// HarfBuzz flags `rphf` `F_MANUAL_ZWJ | F_PER_SYLLABLE`
+/// ([`USE_RPHF_FLAGS`]). The per-syllable part is left out here:
+/// sigilbuzz's USE syllables come from a simpler grammar than
+/// HarfBuzz's `hb-ot-shaper-use-machine.rl`, and matching inside them
+/// would cut a lookup's context where HarfBuzz does not.
+fn apply_rphf(
+    gsub: &Gsub<'_>,
+    gdef: Option<&Gdef<'_>>,
+    glyphs: &mut Vec<Glyph>,
+    script_priority: &[[u8; 4]],
+) {
+    const RPHF: u32 = 1;
+    let mut info = rphf_info(glyphs, RPHF);
+    let mut runner = SyllabicGsub::new(gsub, gdef, glyphs);
+    let feature = StageFeature {
+        tag: *b"rphf",
+        mask: RPHF,
+        flags: USE_RPHF_FLAGS.without(FeatureFlags::PER_SYLLABLE),
+    };
+    apply_stage(
+        &mut runner,
+        script_priority,
+        &[feature],
+        &[],
+        glyphs,
+        &mut info,
+    );
+    record_rphf(glyphs, &info);
 }
 
 #[cfg(test)]

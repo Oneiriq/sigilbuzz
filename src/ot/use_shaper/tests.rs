@@ -3,6 +3,7 @@
 
 use super::reorder::initial_reorder;
 use super::*;
+use crate::ot::syllabic::GlyphInfo;
 use alloc::vec;
 
 fn cps(s: &str) -> Vec<char> {
@@ -350,9 +351,11 @@ fn use_reorder_moves_the_glyph_pref_substituted() {
 
 #[test]
 fn long_run_of_pre_base_signs_reorders_in_linear_time() {
-    // Khmer ka followed by 200000 sign-e is one consonant syllable
-    // whose pre-base signs all move. Checking each glyph against a
-    // list of moved indices cost about 4e10 comparisons.
+    // Khmer ka followed by 200000 sign-e. HarfBuzz's Khmer grammar
+    // takes one pre-base sign into the consonant syllable, which moves
+    // in front of ka. Every other sign is a broken cluster of its own.
+    // A scan or reorder that revisited the run per syllable would cost
+    // about 4e10 steps.
     const N: usize = 200_000;
     let mut cp = vec!['\u{1780}'];
     cp.extend(core::iter::repeat('\u{17C1}').take(N));
@@ -364,11 +367,10 @@ fn long_run_of_pre_base_signs_reorders_in_linear_time() {
         &mut glyphs,
         ClusterLevel::MonotoneCharacters,
     );
-    // The signs move to the front in order, then the base.
     assert_eq!(glyphs.len(), N + 1);
     assert_eq!(glyphs[0].glyph_id, 2);
-    assert_eq!(glyphs[N - 1].glyph_id, N as u32 + 1);
-    assert_eq!(glyphs[N].glyph_id, 1);
+    assert_eq!(glyphs[1].glyph_id, 1);
+    assert_eq!(glyphs[N].glyph_id, N as u32 + 1);
 }
 
 #[test]
@@ -409,19 +411,34 @@ fn long_run_of_use_pre_base_signs_reorders_in_linear_time() {
 
 /// HarfBuzz's `reorder_syllable_use` loop, one move and one merge at a
 /// time, as the reference for the batched pass. Reads the tags
-/// `reorder::tag_syllables` writes (serial in the high nibble, 1 for a
-/// halant and 2 for a pre-base glyph in the low one).
+/// `reorder::tag_syllables` writes (serial in the high nibble, and in
+/// the low three bits 1 for a halant, 2 for a pre-base glyph, 3 for a
+/// repha, and 4 for another post-base mark).
 fn reorder_one_by_one(glyphs: &mut [Glyph], level: ClusterLevel) {
     let serial = |g: &Glyph| g.indic_position >> 4;
+    let category = |g: &Glyph| g.indic_position & 0x07;
+    let ligated = |g: &Glyph| crate::tables::layout::skip_iter::MatchGlyph::from(g).is_ligated();
     let mut start = 0;
     while start < glyphs.len() {
         let end = (start..glyphs.len())
             .find(|&i| serial(&glyphs[i]) != serial(&glyphs[start]))
             .unwrap_or(glyphs.len());
+        if category(&glyphs[start]) == 3 && end - start > 1 {
+            for i in start + 1..end {
+                let c = category(&glyphs[i]);
+                let post = c == 2 || c == 4 || (c == 1 && !ligated(&glyphs[i]));
+                if post || i == end - 1 {
+                    let i = if post { i - 1 } else { i };
+                    crate::shape::merge_clusters(glyphs, start, i + 1, level);
+                    glyphs[start..=i].rotate_left(1);
+                    break;
+                }
+            }
+        }
         let mut j = start;
         for i in start..end {
             let m = crate::tables::layout::skip_iter::MatchGlyph::from(&glyphs[i]);
-            let category = glyphs[i].indic_position & 0x0F;
+            let category = glyphs[i].indic_position & 0x07;
             if category == 1 && !m.is_ligated() {
                 j = i + 1;
             } else if category == 2 && m.lig_comp() == 0 && j < i {
@@ -439,7 +456,9 @@ fn reorder_one_by_one(glyphs: &mut [Glyph], level: ClusterLevel) {
 #[test]
 fn use_reorder_matches_moving_one_glyph_at_a_time() {
     // Balinese ka, adeg adeg, taling, and a post-base sign, in every
-    // mix up to six long, with rising and falling clusters.
+    // mix up to six long, with rising and falling clusters, and with
+    // the first glyph of each syllable taken as the repha `rphf`
+    // formed or not.
     let alphabet = ['\u{1B13}', '\u{1B44}', '\u{1B3E}', '\u{1B38}'];
     let levels = [
         ClusterLevel::MonotoneGraphemes,
@@ -452,7 +471,8 @@ fn use_reorder_matches_moving_one_glyph_at_a_time() {
                 .map(|k| alphabet[(code / 4u32.pow(k) % 4) as usize])
                 .collect();
             for level in levels {
-                for falling in [false, true] {
+                for (falling, repha) in [(false, false), (true, false), (false, true), (true, true)]
+                {
                     let mut glyphs = tagged(&text);
                     if falling {
                         let n = glyphs.len() as u32;
@@ -460,12 +480,60 @@ fn use_reorder_matches_moving_one_glyph_at_a_time() {
                             g.cluster = 3 * (n - k as u32);
                         }
                     }
+                    if repha {
+                        let mut info = vec![GlyphInfo::default(); glyphs.len()];
+                        for (k, i) in info.iter_mut().enumerate() {
+                            i.mask = u32::from(glyphs[k].indic_position & 0x08 != 0);
+                            i.substituted = true;
+                        }
+                        reorder::record_rphf(&mut glyphs, &info);
+                    }
                     let mut expected = glyphs.clone();
                     reorder_one_by_one(&mut expected, level);
                     reorder::reorder_pre_base(&mut glyphs, level);
-                    assert_eq!(glyphs, expected, "{text:?} {level:?} falling {falling}");
+                    let note = format!("{text:?} {level:?} falling {falling} repha {repha}");
+                    assert_eq!(glyphs, expected, "{note}");
                 }
             }
         }
     }
+}
+
+#[test]
+fn rphf_mask_covers_the_first_three_glyphs() {
+    // Tirhuta ra, virama, ka, virama, kha: `rphf` may apply to the
+    // first three glyphs only.
+    let glyphs = tagged("\u{114A9}\u{114C2}\u{1148F}\u{114C2}\u{11490}");
+    let mask: Vec<bool> = glyphs
+        .iter()
+        .map(|g| g.indic_position & 0x08 != 0)
+        .collect();
+    assert_eq!(mask, [true, true, true, false, false]);
+    let info = reorder::rphf_info(&glyphs, 1);
+    assert_eq!(
+        info.iter().map(|i| i.mask).collect::<Vec<_>>(),
+        [1, 1, 1, 0, 0]
+    );
+}
+
+#[test]
+fn repha_moves_before_the_first_halant_or_mark() {
+    // Ra, virama, ka, virama, kha with the Ra a repha: it moves after
+    // ka, before the virama.
+    let mut glyphs = tagged("\u{114A9}\u{114C2}\u{1148F}\u{114C2}\u{11490}");
+    glyphs.remove(1);
+    let info: Vec<GlyphInfo> = glyphs
+        .iter()
+        .enumerate()
+        .map(|(k, _)| GlyphInfo {
+            mask: u32::from(k == 0),
+            substituted: k == 0,
+            ..GlyphInfo::default()
+        })
+        .collect();
+    reorder::record_rphf(&mut glyphs, &info);
+    reorder::reorder_pre_base(&mut glyphs, ClusterLevel::MonotoneCharacters);
+    let (ids, clusters) = ids_and_clusters(&glyphs);
+    assert_eq!(ids, [3, 1, 4, 5]);
+    assert_eq!(clusters, [0, 0, 3, 4]);
 }

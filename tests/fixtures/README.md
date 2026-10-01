@@ -69,3 +69,10 @@ Fonts used by the integration tests.
 
   The selectors must be in `--unicodes`, or `pyftsubset` drops the format 14 records.
   `tests/cmap14_parity.rs` and the `sigilbuzz-capi` glyph lookup tests use it.
+- `../fonts/NotoSansKR-HangulTone-Subset.ttf`: an 8 KB subset of Noto Sans KR (OFL 1.1,
+  Copyright 2014-2021 Adobe, Reserved Font Name 'Source'), from
+  <https://github.com/google/fonts/tree/main/ofl/notosanskr>, instanced at Regular and
+  cut to the Hangul tone marks, the dotted circle, and a few jamo and syllables. It sits
+  with the other Noto fonts in `tests/fonts/`, whose README has the exact fontTools
+  commands. `tests/hangul_tone_harfbuzz_parity.rs` uses it, since no other fixture has
+  the tone marks.

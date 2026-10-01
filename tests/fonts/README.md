@@ -91,6 +91,23 @@ sigilbuzz ships the files unmodified. The OFL text lives in the upstream reposit
   variable (`gvar`, `fvar`, `avar`, `HVAR`, `STAT`) and vertical (`vhea`, `vmtx`)
   tables. The shaper only uses the static Regular master in this fixture.
 
+- `NotoSansKR-HangulTone-Subset.ttf`. An 8 KB subset of the Noto Sans Korean variable
+  font, instanced at Regular (weight 400) and cut to the characters
+  `tests/hangul_tone_harfbuzz_parity.rs` needs: the Hangul tone marks U+302E and
+  U+302F, U+25CC DOTTED CIRCLE, a few modern and old jamo, the syllables U+AC00,
+  U+AC01, and U+AC1C, U+0301, and the space. The other Hangul fixture has no tone
+  marks. Upstream: <https://github.com/google/fonts/tree/main/ofl/notosanskr>
+  (`NotoSansKR[wght].ttf`), OFL 1.1, Copyright 2014-2021 Adobe, with Reserved Font
+  Name 'Source'. Built with fontTools:
+
+      python3 -m fontTools.varLib.instancer 'NotoSansKR[wght].ttf' wght=400 --static \
+          -o NotoSansKR-Regular.ttf
+      python3 -m fontTools.subset NotoSansKR-Regular.ttf \
+          --unicodes="U+0020,U+0301,U+25CC,U+302E-302F,U+1100-1103,U+1161-1163,U+11A8-11AA,U+11C3,U+1140,U+A960,U+D7B0,U+D7CB,U+AC00,U+AC01,U+AC1C" \
+          --layout-features="ljmo,vjmo,tjmo,ccmp,calt,liga,locl,kern,mark,mkmk" \
+          --no-hinting --drop-tables+=STAT,MVAR,DSIG,BASE,vhea,vmtx \
+          --output-file=NotoSansKR-HangulTone-Subset.ttf
+
 ## CFF subsetting fixtures
 
 Real CFF1 and CFF2 fonts used by the round-trip tests in
