@@ -99,7 +99,10 @@ impl SegmentPlan<'_> {
 
     /// True when some pass of the segment's pipeline applies `tag`.
     fn applies(&self, tag: [u8; 4]) -> bool {
-        let indic = indic_config_for(self.script).is_some_and(|c| c.script != Script::Sinhala);
+        // An Indic script whose font has a `dev3`-style tag runs the
+        // Universal Shaping Engine instead.
+        let indic = !self.use_shaper
+            && indic_config_for(self.script).is_some_and(|c| c.script != Script::Sinhala);
         if indic && (LOCL_CCMP.contains(&&tag) || INDIC_FEATURES.iter().any(|f| f.tag == tag)) {
             return true;
         }

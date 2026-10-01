@@ -161,6 +161,22 @@ sigilbuzz ships the files unmodified. The OFL text lives in the upstream reposit
   - `NotoSansAdlam-Subset.ttf`: U+1E900, U+1E902, U+1E904, U+1E922, U+1E924, U+1E926,
     U+1E944, U+1E946, U+1E94A, U+1E94B.
 
+- `NotoSansDevanagari-Dev3-Subset.ttf`. A 41 KB subset of
+  `NotoSansDevanagari-Regular.ttf` above whose `dev2` script records in GSUB and GPOS are
+  renamed `dev3`, for `tests/indic3_parity.rs`. No released font uses the Indic3 tags
+  yet, and HarfBuzz gives a font that has them the Universal Shaping Engine. It keeps
+  the space, U+200C, U+200D, U+25CC, U+0901..U+0903, U+0905, U+0915, U+0916, U+0924,
+  U+0928, U+092A, U+092E, U+092F, U+0930, U+0937, U+0938, U+093C, U+093E..U+0941,
+  U+0947, U+094B, and U+094D. Same upstream and license as the full font. Built with
+  fontTools 4.66.1, subset as above, then in Python:
+
+      for tag in ("GSUB", "GPOS"):
+          records = font[tag].table.ScriptList.ScriptRecord
+          for r in records:
+              if r.ScriptTag == "dev2":
+                  r.ScriptTag = "dev3"
+          records.sort(key=lambda r: r.ScriptTag)
+
 ## CFF subsetting fixtures
 
 Real CFF1 and CFF2 fonts used by the round-trip tests in

@@ -423,6 +423,15 @@ Changed:
   Unicode 18.0.0, and the Script property table they generate moved from
   `sigilbuzz-capi` into the core crate. The C API's `hb_buffer_guess_segment_properties`
   reads it from there and now knows the Unicode 18.0 characters.
+- The Indic scripts try HarfBuzz's Indic3 script tags (`dev3`, `bng3`, `gur3`, `gjr3`,
+  `ory3`, `tml3`, `tel3`, `knd3`, `mlm3`) before the ones ending in 2
+  (`hb_ot_all_tags_from_script` in `hb-ot-tag.cc`), and a run whose font has one shapes
+  with the Universal Shaping Engine in place of the Indic shaper, as
+  `hb_ot_shaper_categorize` decides. On 2,631 Devanagari strings with a subset of Noto
+  Sans Devanagari whose `dev2` script records are renamed `dev3`, the output matches
+  HarfBuzz 14.5.0 at every cluster level (before: 1,656, 621 and 1,757 with flags at
+  `MonotoneGraphemes`, `MonotoneCharacters` and `Characters`). Fonts without those tags
+  shape as before.
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,

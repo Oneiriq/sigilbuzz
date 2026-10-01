@@ -33,7 +33,9 @@ pub(super) enum Shaper {
     Thai,
     /// Hangul shaper.
     Hangul,
-    /// Indic shaper (Devanagari through Malayalam; Sinhala uses USE).
+    /// Indic shaper (Devanagari through Malayalam). Sinhala takes the
+    /// Universal Shaping Engine, and so does an Indic run whose font
+    /// picks a `dev3`-style tag.
     Indic,
     /// Khmer shaper.
     Khmer,
@@ -112,11 +114,13 @@ impl Shaper {
     /// `hb_ot_shaper_categorize` decides it: the Indic scripts and the
     /// scripts of the Universal Shaping Engine take the default shaper
     /// when the script tag GSUB picks is `DFLT` (or `dflt`) or `latn`,
-    /// since the font was not made for the script's shaper. Myanmar
-    /// takes the default shaper for those generic tags and for `mymr`,
-    /// the tag of fonts made before Myanmar's shaping model. Syriac
-    /// takes it when the chosen tag is `DFLT`. Arabic keeps the Arabic
-    /// shaper, since HarfBuzz has fallback shaping for it.
+    /// since the font was not made for the script's shaper. An Indic
+    /// script whose chosen tag ends in `3` (`dev3`, `bng3`, ...) takes
+    /// the Universal Shaping Engine. Myanmar takes the default shaper
+    /// for those generic tags and for `mymr`, the tag of fonts made
+    /// before Myanmar's shaping model. Syriac takes it when the chosen
+    /// tag is `DFLT`. Arabic keeps the Arabic shaper, since HarfBuzz
+    /// has fallback shaping for it.
     pub(super) fn for_run(
         script: Script,
         horizontal: bool,
@@ -128,8 +132,10 @@ impl Shaper {
             crate::ot::layout_select::chosen_script(g.script_list(), script_priority)
         });
         let generic = chosen.is_some_and(|tag| matches!(&tag, b"DFLT" | b"dflt" | b"latn"));
+        let indic3 = chosen.is_some_and(|tag| tag[3] == b'3');
         match shaper {
             Self::Use | Self::Indic if generic => Self::Default,
+            Self::Indic if indic3 => Self::Use,
             Self::Myanmar if generic || chosen == Some(*b"mymr") => Self::Default,
             Self::Arabic if script == Script::Syriac && chosen == Some(*b"DFLT") => Self::Default,
             _ => shaper,
@@ -220,7 +226,13 @@ mod tests {
     #[test]
     fn runs_without_a_font_keep_the_script_shaper() {
         // With no GSUB there is no chosen tag: HarfBuzz's
-        // `HB_TAG_NONE`, which is not `DFLT`.
+        // `HB_TAG_NONE`, which is neither `DFLT` nor a `3` tag.
+        let deva = crate::buffer::script_priority_for(Script::Devanagari);
+        assert_eq!(deva[0], *b"dev3");
+        assert_eq!(
+            Shaper::for_run(Script::Devanagari, true, None, deva),
+            Shaper::Indic
+        );
         let syrc = crate::buffer::script_priority_for(Script::Syriac);
         assert_eq!(syrc, [*b"syrc", *b"DFLT"]);
         assert_eq!(

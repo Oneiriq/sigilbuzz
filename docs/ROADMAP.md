@@ -27,9 +27,6 @@ These are smaller pieces that are not scheduled yet.
 - Language tags from version 1 `name` tables are read but not exposed.
 - Subsetting a CFF or CFF2 font down to fewer glyphs drops its layout and variation
   tables. TrueType fonts keep them.
-- The Indic scripts do not try HarfBuzz's newest script tags (`dev3`, `bng3`, and the
-  others ending in 3), so a font with lookups under those tags does not get the
-  Universal Shaping Engine, as HarfBuzz gives it.
 - A buffer of several scripts shapes one script run at a time, where HarfBuzz shapes the
   whole buffer with the shaper of its script. So contextual lookups do not reach across
   runs, and with `PRODUCE_UNSAFE_TO_CONCAT` some flags at run boundaries differ.
