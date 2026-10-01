@@ -223,6 +223,8 @@ Changed:
   4,826), at every cluster level. The 7 are HarfBuzz's vowel constraints, which insert a
   dotted circle between an independent vowel and a vowel sign that would look like
   another vowel, and sigilbuzz does not do that yet. Sinhala keeps the earlier Indic pass.
+  `ot::indic::shape_indic` and `shape_devanagari` run the port, default features
+  included.
 - The Universal Shaping Engine moves a repha as HarfBuzz does (`reorder_syllable_use`
   in `hb-ot-shaper-use.cc`). `rphf` only applies to the first three glyphs of a
   syllable (the first one when it is a repha character), the glyph it substitutes
