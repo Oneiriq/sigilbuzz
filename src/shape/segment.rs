@@ -132,6 +132,9 @@ pub(super) const fn is_common_for_segmentation(ch: char) -> bool {
         | 0x1DC0..=0x1DFF
         | 0x20D0..=0x20FF
         | 0xFE20..=0xFE2F
+        // The Devanagari stress signs and accents, INHERITED in
+        // Scripts.txt: other scripts use them too.
+        | 0x0951..=0x0954
     ) || crate::unicode::is_scriptless_default_ignorable(ch)
 }
 

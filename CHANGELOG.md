@@ -280,10 +280,9 @@ Changed:
   reph, with the halant and ZWJ clusters merged. `liga` is off for these scripts, and
   `init`, `pres`, `abvs`, `blws`, `psts` and `haln` run in one stage with `rlig`,
   `calt`, `clig`, `rclt` and the caller's features. On 7,656 test strings with the Noto
-  Sans fonts of the nine scripts, the output matches HarfBuzz 14.5.0 on all but 2
-  (before: 4,826), at every cluster level, with the vowel constraints below. The 2
-  start with U+0954, which is Inherited, so HarfBuzz shapes them with its default
-  shaper. Sinhala keeps the earlier Indic pass.
+  Sans fonts of the nine scripts, the output matches HarfBuzz 14.5.0 on all of them
+  (before: 4,826), at every cluster level, with the vowel constraints and the Devanagari
+  stress signs below. Sinhala keeps the earlier Indic pass.
   `ot::indic::shape_indic` and `shape_devanagari` run the port, default features
   included.
 - The Universal Shaping Engine moves a repha as HarfBuzz does (`reorder_syllable_use`
@@ -322,6 +321,10 @@ Changed:
   matches HarfBuzz 14.5.0 on 1,674 at `MonotoneGraphemes` and `Characters` and 1,620 at
   `MonotoneCharacters` (before: 628 and 574). The rest come from the USE and Sinhala
   syllable grammars and from text in a buffer of another script.
+- The Devanagari stress signs and accents (U+0951..U+0954) are Inherited, as in
+  `Scripts.txt`: they stay in the run of the letter before them and do not give a
+  buffer its script. Alone they now shape with the default shaper, as in HarfBuzz,
+  where they used to get a dotted circle.
 - Companion crate releases: `sigilbuzz-capi` 0.3.0, `sigilbuzz-paint` 0.2.0,
   `sigilbuzz-render` 0.9.0, `sigilbuzz-subset` 0.12.0, and `sigilbuzz-svg` 0.2.0 carry
   the breaking changes above. `sigilbuzz-pdf` 0.2.2, `sigilbuzz-gpu` 0.1.1,

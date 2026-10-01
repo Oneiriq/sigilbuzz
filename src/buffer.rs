@@ -562,6 +562,8 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
 ///   because `script_of` has no rule for U+0300 and drops the
 ///   mark into `Script::Other`, breaking `ccmp` dispatch and
 ///   any cross-mark GSUB context.
+/// - The Devanagari stress signs and accents (U+0951..U+0954), which
+///   are `INHERITED` though they sit in the Devanagari block.
 /// - Default ignorables of no script of their own (ZWSP, word joiner,
 ///   variation selectors, tag characters, ...), which GSUB and GPOS
 ///   match across.
@@ -589,6 +591,8 @@ const fn is_common_or_inherited(ch: char) -> bool {
         | 0x1DC0..=0x1DFF
         | 0x20D0..=0x20FF
         | 0xFE20..=0xFE2F
+        // INHERITED Devanagari stress signs and accents.
+        | 0x0951..=0x0954
     ) || crate::unicode::is_scriptless_default_ignorable(ch)
 }
 

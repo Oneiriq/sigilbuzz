@@ -279,3 +279,47 @@ fn kannada_swap_merges_the_halant_and_zwj_clusters() {
     ];
     check(KANNADA, cases, ClusterLevel::MonotoneCharacters);
 }
+
+#[test]
+fn devanagari_stress_signs_take_the_script_of_their_letter() {
+    // U+0951..U+0954 are Inherited in Scripts.txt. Alone they give
+    // HarfBuzz no script, so the default shaper inserts no dotted
+    // circle. After a Bengali letter they are Bengali, and the mark
+    // positions on the letter.
+    let cases: &[(&str, &[Row])] = &[
+        ("\u{0954}", &[(111, 0, 0, 0, 0)]),
+        (
+            "\u{0954}\u{25CC}",
+            &[(111, 0, 0, 0, 0), (789, 3, 510, 0, 0)],
+        ),
+        (
+            "\u{0951}\u{0915}",
+            &[
+                (789, 0, 510, 0, 0),
+                (108, 0, 0, -170, 0),
+                (56, 3, 768, 0, 0),
+            ],
+        ),
+        (
+            "\u{0915}\u{0951}",
+            &[(56, 0, 768, 0, 0), (108, 0, 0, -221, 0)],
+        ),
+    ];
+    check(DEVANAGARI, cases, ClusterLevel::MonotoneGraphemes);
+    let cases: &[(&str, &[Row])] = &[
+        (
+            "\u{0995}\u{0951}",
+            &[(20, 0, 807, 0, 0), (639, 0, 0, -99, 323)],
+        ),
+        (
+            "\u{0995}\u{0952}\u{09BE}",
+            &[
+                (20, 0, 807, 0, 0),
+                (640, 0, 0, -99, -313),
+                (661, 0, 510, 0, 0),
+                (54, 0, 266, 0, 0),
+            ],
+        ),
+    ];
+    check(BENGALI, cases, ClusterLevel::MonotoneGraphemes);
+}
