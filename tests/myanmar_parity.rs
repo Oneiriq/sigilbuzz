@@ -2,26 +2,25 @@
 //!
 //! Shapes a Myanmar corpus with both sigilbuzz and rustybuzz against
 //! Noto Sans Myanmar (OFL) and asserts the output matches byte-for-
-//! byte. Myanmar runs through sigilbuzz's Myanmar pass
-//! (`src/ot/myanmar`) with the Myanmar script tags (`mym2`, `mymr`,
-//! then `DFLT`) and the Myanmar basic features (`rphf`, `pref`,
-//! `blwf`, and `pstf`).
+//! byte. Myanmar runs through sigilbuzz's Myanmar shaper
+//! (`src/ot/myanmar`), a port of HarfBuzz's, with the Myanmar script
+//! tags (`mym2`, `mymr`, then `DFLT`).
 //!
 //! The corpus exercises:
 //!
 //!   * plain consonants (one syllable, no reorder)
 //!   * post-base vowel signs (aa)
-//!   * pre-base vowel sign (sign e, the only pre-base matra in
-//!     Myanmar, U+1031)
+//!   * pre-base vowel sign (sign e, U+1031)
 //!   * medial consonants (medial ya, ra, wa, ha)
 //!   * virama-linked subjoining consonant
 //!   * independent vowels
 //!   * final marks (anusvara, dot below, visarga)
-//!   * Myanmar digits (Symbol pass-through)
+//!   * Myanmar digits
 //!   * mixed Myanmar + Latin runs
 //!
-//! A failure here is a parity drift against rustybuzz; fix in
-//! src/ot/myanmar.
+//! rustybuzz agrees with HarfBuzz on every string here. The HarfBuzz
+//! expectations, which win where the two differ, live in
+//! `tests/myanmar_harfbuzz_parity.rs`.
 
 use sigilbuzz::{shape, Blob, Buffer, Face, Font};
 
@@ -56,8 +55,8 @@ const CORPUS: &[Case] = &[
         note: "kaa (post-base aa)",
         compare_rustybuzz: true,
     },
-    // ကေ: ka + sign e. Pre-base matra: USE reorder moves sign-e
-    // before ka visually.
+    // Ka + sign e. Pre-base matra: the reorder moves sign e
+    // before ka.
     Case {
         text: "\u{1000}\u{1031}",
         note: "ke (pre-base sign-e)",
@@ -124,11 +123,8 @@ const CORPUS: &[Case] = &[
         compare_rustybuzz: true,
     },
     // မင်္ဂလာပါ: "Hello" (mingalaba). Exercises the kinzi prefix
-    // (`nga + asat + virama`) which sigilbuzz's Myanmar reorder
-    // moves to POS_AFTER_MAIN, immediately after the base
-    // consonant. Once the triple sits after the base, `rphf`
-    // collapses it to the font's kinzi glyph in the reph slot,
-    // matching rustybuzz glyph-for-glyph.
+    // (`nga + asat + virama`), which the reorder moves right after the
+    // base consonant (`POS_AFTER_MAIN`).
     Case {
         text: "\u{1019}\u{1004}\u{103A}\u{1039}\u{1002}\u{101C}\u{102C}\u{1015}\u{102B}",
         note: "mingalaba (hello): kinzi reorder",

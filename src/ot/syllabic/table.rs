@@ -20,8 +20,8 @@
 #![allow(clippy::unreadable_literal)]
 
 use super::cat::{
-    A, C, CM, CS, DOTTEDCIRCLE, H, M, MPST, N, PLACEHOLDER, RA, REPHA, ROBATIC, SM, SMPST, SYMBOL,
-    V, VABV, VBLW, VPRE, VPST, X, XGROUP, YGROUP, ZWJ, ZWNJ,
+    A, AS, C, CM, CS, DOTTEDCIRCLE, H, M, MH, ML, MPST, MR, MW, MY, N, PLACEHOLDER, PT, RA, REPHA,
+    ROBATIC, SM, SMPST, SYMBOL, V, VABV, VBLW, VPRE, VPST, VS, X, XGROUP, YGROUP, ZWJ, ZWNJ,
 };
 use super::pos::{
     ABOVE_C, AFTER_MAIN, AFTER_POST, AFTER_SUB, BASE_C, BEFORE_SUB, BELOW_C, END, POST_C, PRE_C,
@@ -264,6 +264,42 @@ pub(super) static RANGES: &[(u32, &[u16])] = &[
         ],
     ),
     (
+        0x1000,
+        &[
+            p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(RA, BASE_C), p(C, BASE_C),
+            p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C),
+            p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C),
+            p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C),
+            p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(RA, BASE_C), p(C, BASE_C), p(C, BASE_C),
+            p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(V, BASE_C), p(V, BASE_C), p(V, BASE_C),
+            p(V, BASE_C), p(V, BASE_C), p(V, BASE_C), p(V, BASE_C), p(V, BASE_C), p(V, BASE_C),
+            p(V, BASE_C), p(VPST, POST_C), p(VPST, POST_C), p(VABV, ABOVE_C), p(VABV, ABOVE_C),
+            p(VBLW, BELOW_C), p(VBLW, BELOW_C), p(VPRE, PRE_C), p(A, SMVD), p(VABV, ABOVE_C),
+            p(VABV, ABOVE_C), p(VABV, ABOVE_C), p(A, SMVD), p(N, END), p(SM, SMVD), p(H, END),
+            p(AS, END), p(MY, END), p(MR, END), p(MW, END), p(MH, END), p(C, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(X, END),
+            p(X, END), p(C, BASE_C), p(X, END), p(C, BASE_C), p(C, BASE_C), p(V, BASE_C),
+            p(V, BASE_C), p(V, BASE_C), p(V, BASE_C), p(VPST, POST_C), p(VPST, POST_C),
+            p(VBLW, BELOW_C), p(VBLW, BELOW_C), p(RA, BASE_C), p(C, BASE_C), p(C, BASE_C),
+            p(C, BASE_C), p(MY, END), p(MY, END), p(ML, END), p(C, BASE_C), p(VPST, POST_C),
+            p(PT, END), p(PT, END), p(C, BASE_C), p(C, BASE_C), p(VPST, POST_C), p(VPST, POST_C),
+            p(PT, END), p(PT, END), p(PT, END), p(PT, END), p(PT, END), p(C, BASE_C), p(C, BASE_C),
+            p(C, BASE_C), p(VABV, ABOVE_C), p(VABV, ABOVE_C), p(VABV, ABOVE_C), p(VABV, ABOVE_C),
+            p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C),
+            p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C),
+            p(C, BASE_C), p(MW, END), p(VPST, POST_C), p(VPRE, PRE_C), p(VABV, ABOVE_C),
+            p(VABV, ABOVE_C), p(SM, SMVD), p(SM, SMVD), p(SM, SMVD), p(SM, SMVD), p(SM, SMVD),
+            p(SM, SMVD), p(SM, SMVD), p(C, BASE_C), p(SM, SMVD), p(PLACEHOLDER, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(SM, SMVD),
+            p(SM, SMVD), p(SM, SMVD), p(VABV, ABOVE_C),
+        ],
+    ),
+    (
         0x1780,
         &[
             p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C),
@@ -343,6 +379,37 @@ pub(super) static RANGES: &[(u32, &[u16])] = &[
         ],
     ),
     (
+        0xA9E0,
+        &[
+            p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(VABV, ABOVE_C),
+            p(X, END), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C),
+            p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(PLACEHOLDER, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(C, BASE_C),
+            p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C),
+        ],
+    ),
+    (
+        0xAA60,
+        &[
+            p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C),
+            p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C),
+            p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(C, BASE_C), p(X, END), p(C, BASE_C),
+            p(C, BASE_C), p(C, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(X, END), p(X, END), p(X, END), p(C, BASE_C), p(PT, END),
+            p(N, END), p(N, END), p(C, BASE_C), p(C, BASE_C),
+        ],
+    ),
+    (
+        0xFE00,
+        &[
+            p(VS, END), p(VS, END), p(VS, END), p(VS, END), p(VS, END), p(VS, END), p(VS, END),
+            p(VS, END), p(VS, END), p(VS, END), p(VS, END), p(VS, END), p(VS, END), p(VS, END),
+            p(VS, END), p(VS, END),
+        ],
+    ),
+    (
         0x11301,
         &[
             p(SM, SMVD), p(SM, SMVD), p(SM, SMVD),
@@ -352,6 +419,18 @@ pub(super) static RANGES: &[(u32, &[u16])] = &[
         0x1133B,
         &[
             p(N, END), p(N, END),
+        ],
+    ),
+    (
+        0x116D0,
+        &[
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C),
+            p(PLACEHOLDER, BASE_C), p(PLACEHOLDER, BASE_C),
         ],
     ),
 ];

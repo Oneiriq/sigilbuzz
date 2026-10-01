@@ -11,7 +11,6 @@ use crate::buffer::Glyph;
 use crate::ot::arabic::JoiningForm;
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
-use crate::unicode::Script;
 
 /// Runs the default GSUB feature chain and any user-enabled extras, in
 /// the order `ccmp` and `locl`, `rlig`, `liga`, `clig`, `calt` with
@@ -25,9 +24,9 @@ use crate::unicode::Script;
 /// alternate-selector value.
 ///
 /// `early_features` is the part of `ccmp` + `locl` that has not run
-/// yet (see [`early_default_features`]): the Arabic path and the
-/// Myanmar pass run both first. HarfBuzz runs the two in one stage,
-/// so their lookups interleave by lookup index. `table` is the joiner
+/// yet (see [`early_default_features`]): the Arabic path runs both
+/// first. HarfBuzz runs the two in one stage, so their lookups
+/// interleave by lookup index. `table` is the joiner
 /// handling of the segment's shaper (Arabic runs its ligating features
 /// with manual ZWJ).
 ///
@@ -119,32 +118,8 @@ pub(super) fn run_default_gsub(
 /// skipped. A lookup shared by several of the features skips joiners
 /// only where all of them do (HarfBuzz merges the flags that way).
 ///
-/// Runs under a fresh [`LookupBudget`] for this one pass.
-pub(crate) fn apply_gsub_features_merged(
-    gsub: &Gsub<'_>,
-    glyphs: &mut Vec<Glyph>,
-    gdef: Option<&Gdef<'_>>,
-    features: &[Feature],
-    tags: &[[u8; 4]],
-    script_priority: &[[u8; 4]],
-    table: JoinerTable,
-) {
-    let mut budget = LookupBudget::for_run(glyphs);
-    apply_gsub_features_merged_budgeted(
-        gsub,
-        glyphs,
-        gdef,
-        features,
-        tags,
-        script_priority,
-        table,
-        &mut budget,
-    );
-}
-
-/// [`apply_gsub_features_merged`] under a caller-owned budget, so
-/// [`shape`](super::shape) can share one budget across every lookup
-/// it applies.
+/// Runs under a caller-owned budget, so [`shape`](super::shape) can
+/// share one budget across every lookup it applies.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_gsub_features_merged_budgeted(
     gsub: &Gsub<'_>,
@@ -178,46 +153,17 @@ pub(super) fn apply_gsub_features_merged_budgeted(
 }
 
 /// The part of `ccmp` + `locl` the default GSUB pass still has to run
-/// for a segment. The Arabic path and the Myanmar pass run both ahead
-/// of their own features, and running either again would apply its
-/// lookups twice. The Indic, Khmer, Hangul, and USE shapers run every
-/// feature themselves, so the default pass does not run for them.
-pub(super) fn early_default_features(arabic_ran: bool, script: Script) -> &'static [[u8; 4]] {
+/// for a segment. The Arabic path runs both ahead of its own features,
+/// and running either again would apply its lookups twice. The Indic,
+/// Khmer, Myanmar, Hangul, and USE shapers run every feature
+/// themselves, so the default pass does not run for them.
+pub(super) fn early_default_features(arabic_ran: bool) -> &'static [[u8; 4]] {
     const CCMP_LOCL: &[[u8; 4]] = &[*b"ccmp", *b"locl"];
-    if arabic_ran || script == Script::Myanmar {
+    if arabic_ran {
         &[]
     } else {
         CCMP_LOCL
     }
-}
-
-/// Applies `locl` and `ccmp` as one stage, as the Myanmar pass does
-/// before anything else, when that keeps one glyph per code point. The
-/// pass indexes its glyphs by code point, so a length-changing `ccmp`
-/// has to wait until after its reorder. Returns whether the stage ran.
-/// `table` is the shaper's joiner handling.
-pub(crate) fn apply_locl_ccmp_if_length_preserving(
-    gsub: &Gsub<'_>,
-    glyphs: &mut Vec<Glyph>,
-    gdef: Option<&Gdef<'_>>,
-    script_priority: &[[u8; 4]],
-    table: JoinerTable,
-) -> bool {
-    let mut trial = glyphs.clone();
-    apply_gsub_features_merged(
-        gsub,
-        &mut trial,
-        gdef,
-        &[],
-        &[*b"locl", *b"ccmp"],
-        script_priority,
-        table,
-    );
-    if trial.len() != glyphs.len() {
-        return false;
-    }
-    *glyphs = trial;
-    true
 }
 
 /// GSUB feature tags that `shape()` already dispatches by name,
