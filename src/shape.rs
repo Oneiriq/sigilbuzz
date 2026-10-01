@@ -155,6 +155,7 @@ use gsub::apply_gsub_lookup;
 use gsub_parsed::filter_for_lookup;
 pub(crate) use joiners::JoinerTable;
 pub use pipeline::shape;
+pub(crate) use segment::guess_script;
 use segment::ProcessedSegment;
 pub(crate) use syllabic::SyllabicGsub;
 pub(crate) use syllables::{number_syllables, unsafe_to_break};

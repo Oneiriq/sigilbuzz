@@ -88,6 +88,11 @@ A few things you will likely need next:
 
 - Right-to-left text: call `buffer.set_direction(Direction::Rtl)`. As in HarfBuzz, the
   glyphs come back in visual order (leftmost glyph first), ready to draw left to right.
+- Text in several scripts: with no script set, `shape` splits the text into script runs
+  and shapes each with its own shaper, so every script gets its own shaping. To shape the
+  buffer the way HarfBuzz does after `hb_buffer_guess_segment_properties`, with one
+  shaper for the whole buffer, call `buffer.guess_segment_properties()` first, or set the
+  script yourself with `buffer.set_script`.
 - Mixed-direction text: build a `BidiParagraph` from the text. It runs the Unicode bidi
   algorithm, shapes each run of one embedding level in logical order and in its own
   direction (the way HarfBuzz callers do), and puts the runs in visual order with
