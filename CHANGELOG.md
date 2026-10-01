@@ -353,6 +353,10 @@ Output that differed from HarfBuzz:
   `Sequence::apply` does, and the glyph's cluster merges into a neighbor the way
   `delete_glyph` merges it. It used to leave the glyph in place. Noto Sans Lepcha
   deletes vowel signs this way.
+- A GPOS lookup whose contextual or chained contextual subtable does not match at a
+  glyph goes on to its next subtable, as in HarfBuzz. sigilbuzz stopped trying the
+  lookup there, so later subtables never applied: Amiri's kerning, for one, lost its
+  hamza and teh marbuta rules.
 - A GSUB feature that only some glyphs carry (the Arabic, Mongolian and N'Ko positional
   forms, Indic `half`, `rtlm`) checks its mask at every input glyph a rule matches, as
   HarfBuzz's skipping iterator does (`matcher_t::may_match`), not only at the cursor:

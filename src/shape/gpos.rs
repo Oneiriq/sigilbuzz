@@ -321,26 +321,30 @@ fn apply_subtables_at(
                 attach::apply_at(sub, glyphs, att, &lcx, at).then_some(at + 1)
             }
             PosSubtable::Context(ctx) => {
-                let (m, records) = match ctx {
+                let found = match ctx {
                     ContextPos::Format1(c) => c.matches(run, at, mcx),
                     ContextPos::Format2(c) => c.matches(run, at, mcx),
                     ContextPos::Format3(c) => c.matches(run, at, mcx).map(|m| (m, c.lookups())),
-                }?;
-                Some(apply_nested(
-                    cx, state, glyphs, att, run, m, records, depth, budget,
-                ))
+                };
+                // A rule set that does not match leaves the later
+                // subtables their turn.
+                found.map(|(m, records)| {
+                    apply_nested(cx, state, glyphs, att, run, m, records, depth, budget)
+                })
             }
             PosSubtable::Chain(chain) => {
-                let (m, records) = match chain {
+                let found = match chain {
                     ChainContextPos::Format1(c) => c.matches(run, at, mcx),
                     ChainContextPos::Format2(c) => c.matches(run, at, mcx),
                     ChainContextPos::Format3(c) => {
                         c.matches(run, at, mcx).map(|m| (m, c.lookups()))
                     }
-                }?;
-                Some(apply_nested(
-                    cx, state, glyphs, att, run, m, records, depth, budget,
-                ))
+                };
+                // A rule set that does not match leaves the later
+                // subtables their turn.
+                found.map(|(m, records)| {
+                    apply_nested(cx, state, glyphs, att, run, m, records, depth, budget)
+                })
             }
         };
         if next.is_some() {
