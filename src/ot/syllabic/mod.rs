@@ -2,8 +2,9 @@
 //! character table, the syllable scanner, dotted-circle insertion for
 //! broken clusters, and the per-glyph state that GSUB stages carry.
 //!
-//! HarfBuzz's Indic and Khmer shapers classify every character by
-//! `hb_indic_get_categories` (`hb-ot-shaper-indic-table.cc`), and its
+//! HarfBuzz's Indic, Khmer, and Myanmar shapers classify every
+//! character by `hb_indic_get_categories`
+//! (`hb-ot-shaper-indic-table.cc`), and its
 //! Universal Shaping Engine by `hb_use_get_category`. Each splits the
 //! run into syllables with a Ragel machine, and then keeps a category,
 //! a position, a syllable serial, and a feature mask on every glyph
@@ -20,10 +21,12 @@ use alloc::vec::Vec;
 
 use crate::buffer::{ClusterLevel, Glyph};
 
-/// Character categories of HarfBuzz's Indic and Khmer syllable
-/// machines (`I_Cat` in `hb-ot-shaper-indic-machine.rl`, `K_Cat` in
-/// `hb-ot-shaper-khmer-machine.rl`). The two machines share the
-/// numbers they have in common.
+/// Character categories of HarfBuzz's Indic, Khmer, and Myanmar
+/// syllable machines (`I_Cat` in `hb-ot-shaper-indic-machine.rl`,
+/// `K_Cat` in `hb-ot-shaper-khmer-machine.rl`, `M_Cat` in
+/// `hb-ot-shaper-myanmar-machine.rl`). The machines share the numbers
+/// they have in common. The Myanmar machine calls [`V`] `IV`, [`N`]
+/// `DB` (dot below), and [`PLACEHOLDER`] `GB`.
 pub(crate) mod cat {
     /// Anything the grammars do not name.
     pub(crate) const X: u8 = 0;
@@ -79,6 +82,22 @@ pub(crate) mod cat {
     pub(crate) const XGROUP: u8 = 26;
     /// Khmer signs of the Y group (reahmuk and others).
     pub(crate) const YGROUP: u8 = 27;
+    /// Myanmar asat.
+    pub(crate) const AS: u8 = 32;
+    /// Myanmar medial ha.
+    pub(crate) const MH: u8 = 35;
+    /// Myanmar medial ra.
+    pub(crate) const MR: u8 = 36;
+    /// Myanmar medial wa and Shan medial wa.
+    pub(crate) const MW: u8 = 37;
+    /// Myanmar medial ya, Mon medial na, and Mon medial ma.
+    pub(crate) const MY: u8 = 38;
+    /// Myanmar Pwo and other tone marks.
+    pub(crate) const PT: u8 = 39;
+    /// Variation selector.
+    pub(crate) const VS: u8 = 40;
+    /// Mon medial la.
+    pub(crate) const ML: u8 = 41;
     /// Syllable modifier with no position of its own.
     pub(crate) const SMPST: u8 = 57;
 }
@@ -239,8 +258,9 @@ pub(crate) fn syllable_ranges(info: &[GlyphInfo]) -> Vec<core::ops::Range<usize>
     out
 }
 
-/// The rest of HarfBuzz's `setup_syllables_indic` and
-/// `setup_syllables_khmer` once [`set_syllables`] has run: each glyph
+/// The rest of HarfBuzz's `setup_syllables_indic`,
+/// `setup_syllables_khmer`, and `setup_syllables_myanmar` once
+/// [`set_syllables`] has run: each glyph
 /// carries its syllable, and each syllable is unsafe to break, since
 /// its shape depends on all of it. `glyphs` and `info` are one to one.
 pub(crate) fn setup_syllables(glyphs: &mut [Glyph], info: &[GlyphInfo], level: ClusterLevel) {
@@ -344,6 +364,11 @@ mod tests {
         assert_eq!(categories('\u{17C1}'), (cat::VPRE, pos::PRE_C));
         assert_eq!(categories('\u{200C}'), (cat::ZWNJ, pos::END));
         assert_eq!(categories('\u{25CC}'), (cat::DOTTEDCIRCLE, pos::BASE_C));
+        assert_eq!(categories('\u{1004}'), (cat::RA, pos::BASE_C));
+        assert_eq!(categories('\u{103A}'), (cat::AS, pos::END));
+        assert_eq!(categories('\u{103C}'), (cat::MR, pos::END));
+        assert_eq!(categories('\u{1031}'), (cat::VPRE, pos::PRE_C));
+        assert_eq!(categories('\u{FE00}'), (cat::VS, pos::END));
         assert_eq!(categories('A'), (cat::X, pos::END));
         assert_eq!(categories('\u{10FFFF}'), (cat::X, pos::END));
     }

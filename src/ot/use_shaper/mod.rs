@@ -44,9 +44,9 @@
 //! those dotted circles yet. Their place is the preprocessing in
 //! [`crate::shape`], next to the Thai and Hangul preprocessing.
 //!
-//! Khmer has its own shaper (`crate::ot::khmer`), as in HarfBuzz, and
-//! [`shape_khmer`] runs it. Myanmar runs sigilbuzz's Myanmar pass
-//! ([`shape_myanmar`]).
+//! Khmer and Myanmar have shapers of their own (`crate::ot::khmer`,
+//! `crate::ot::myanmar`), as in HarfBuzz, and [`shape_khmer`] and
+//! [`shape_myanmar`] run them.
 
 mod category;
 mod machine;

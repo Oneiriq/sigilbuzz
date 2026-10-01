@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::buffer::{unicode_prop, ClusterLevel, Glyph};
+use crate::shape::features::apply_gsub_feature_in_scripts;
 use crate::shape::gsub::substitute_glyph;
 use crate::shape::gsub_buffer::GsubBuffer;
 use crate::shape::segment::remap_segments;

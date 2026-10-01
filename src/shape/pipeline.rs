@@ -14,9 +14,8 @@ use super::normalize::{self, Normalizer};
 use super::segment::{build_segments, guess_script, remap_segments, ProcessedSegment, Segment};
 use super::shaper::Shaper;
 use super::{
-    cluster, dotted_circle, feature_disabled, glyph_flags, ignorables, joining_flags,
-    native_direction, position, required, rotate, thai, vowel_constraints, Feature, JoinerTable,
-    LookupBudget, VarCtx,
+    cluster, feature_disabled, glyph_flags, ignorables, joining_flags, native_direction, position,
+    required, rotate, thai, vowel_constraints, Feature, JoinerTable, LookupBudget, VarCtx,
 };
 use crate::buffer::{script_priority_for, Buffer, BufferFlags, Direction, Glyph, ShapedRun};
 use crate::error::{Error, Result};
@@ -458,7 +457,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             let gdef = gdef.as_ref();
             required::apply_unscheduled(gsub, &mut seg_glyphs, gdef, priority, &plan, &mut budget);
             let direction_tags = rotate::direction_features(target_direction);
-            let table = JoinerTable::for_segment(seg.script, plan.arabic);
+            let table = JoinerTable::for_segment(plan.arabic);
             apply_gsub_features_merged_budgeted(
                 gsub,
                 &mut seg_glyphs,
@@ -475,26 +474,23 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             }
         }
 
-        // Broken syllables get a dotted circle to sit on. The Indic,
-        // Khmer, and USE shapers insert theirs after their syllable
-        // machines. Myanmar gets them here.
+        // Broken syllables get a dotted circle to sit on, which the
+        // syllabic shapers insert after their syllable machines.
         let circle = cmap
             .glyph_id('\u{25CC}')
             .filter(|_| !flags.contains(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE));
-        let circled = circle
-            .filter(|_| seg_shaper == Shaper::Myanmar)
-            .and_then(|c| dotted_circle::insert(seg_cps, &mut seg_glyphs, c));
-        let seg_cps = circled.as_deref().unwrap_or(seg_cps);
 
         // Per-script pre-shapers. Each is gated on the segment's
         // resolved script so a Hebrew segment never runs the Indic
-        // state machine, and vice versa. The Indic, Khmer, and USE
-        // shapers run every GSUB feature of their run, the default ones
-        // in their last stage, as HarfBuzz's do, and insert their own
-        // dotted circles.
+        // state machine, and vice versa. The Indic, Khmer, Myanmar, and
+        // USE shapers run every GSUB feature of their run, the default
+        // ones in their last stage, as HarfBuzz's do, and insert their
+        // own dotted circles.
         let indic = crate::ot::indic::indic_config_for(seg.script)
             .filter(|c| c.script != Script::Sinhala && seg_shaper == Shaper::Indic);
-        let shaper_ran_defaults = seg.script == Script::Khmer || indic.is_some() || use_run;
+        let myanmar = seg_shaper == Shaper::Myanmar;
+        let shaper_ran_defaults =
+            seg.script == Script::Khmer || indic.is_some() || use_run || myanmar;
         if let Some(config) = indic {
             let run = crate::ot::indic::shaper::IndicRun {
                 gsub: gsub.as_ref(),
@@ -545,14 +541,16 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             };
             crate::ot::khmer::shape(&run, seg_cps, &mut seg_glyphs);
         }
-        if seg_shaper == Shaper::Myanmar {
-            crate::ot::myanmar::shape_myanmar(
-                gsub.as_ref(),
-                gdef.as_ref(),
-                seg_cps,
-                &mut seg_glyphs,
+        if myanmar {
+            let run = crate::ot::myanmar::MyanmarRun {
+                gsub: gsub.as_ref(),
+                gdef: gdef.as_ref(),
                 level,
-            );
+                features,
+                vertical: is_vertical,
+                dotted_circle: circle,
+            };
+            crate::ot::myanmar::shape(&run, seg_cps, &mut seg_glyphs);
         }
         // Thai and Lao need no pass of their own: HarfBuzz's Thai shaper
         // adds no features to the default ones, and its sara am
@@ -581,7 +579,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         if let Some(ref gsub) = gsub {
             // Arabic positional + default GSUB for this segment.
             let seg_arabic_active = seg.script == Script::Arabic && !arabic_forms.is_empty();
-            let joiner_table = JoinerTable::for_segment(seg.script, seg_arabic_active);
+            let joiner_table = JoinerTable::for_segment(seg_arabic_active);
             if seg_arabic_active {
                 // ccmp and locl must run before positional features so
                 // any composition/decomposition and localized forms
@@ -621,7 +619,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                     want_liga,
                     is_vertical,
                     seg.script_priority,
-                    early_default_features(seg_arabic_active, seg.script),
+                    early_default_features(seg_arabic_active),
                     joiner_table,
                     !(is_vertical && buffer_shaper == Shaper::Hangul),
                     &mut budget,

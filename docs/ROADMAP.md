@@ -33,16 +33,14 @@ These are smaller pieces that are not scheduled yet.
 - The Indic scripts do not try HarfBuzz's newest script tags (`dev3`, `bng3`, and the
   others ending in 3), so a font with lookups under those tags does not get the
   Universal Shaping Engine, as HarfBuzz gives it.
-- Myanmar runs sigilbuzz's own pass, with a simpler syllable grammar than HarfBuzz's
-  Myanmar shaper (`hb-ot-shaper-myanmar.cc`). On 1,540 Myanmar test strings, 1,033
-  shape as HarfBuzz 14.5.0 does.
 - The default shaper runs `ccmp` and `locl` before the other default GSUB features,
   where HarfBuzz runs them in one stage. Glyphs match, but with
   `BufferFlags::PRODUCE_UNSAFE_TO_CONCAT` some unsafe-to-concat flags differ (19 of 350
   Tai Tham test strings with Noto Sans Tai Tham, whose lookups are under `DFLT` only).
 - Unsafe-to-concat flags of a context or chained context rule set with more than four
   rules, and of some ligature and mark lookups, differ from HarfBuzz's, which marks
-  them on its fast paths (18 of 1,992 USE test strings).
+  them on its fast paths (18 of 1,992 USE test strings, 14 of 1,540 Myanmar test
+  strings).
 - A mark takes its parent's vertical offset when it attaches in HarfBuzz
   (`resolve_cross_offset`), where sigilbuzz adds the parent's final offset. The two
   differ when a later lookup moves the parent (one Lepcha and one Tibetan string of

@@ -6,11 +6,8 @@
 //! `IndicPositionalCategory.txt`, and `Blocks.txt`. This file ports
 //! that script's rules (the category and position maps, the per-code
 //! point overrides, and the per-script matra positions) as of
-//! HarfBuzz 14.5.0. The Myanmar blocks, the Myanmar-only categories,
-//! and the variation selectors are left out: sigilbuzz's Myanmar
-//! shaper does not read this table, and a code point the table leaves
-//! out gets category `X`, which the Indic and Khmer syllable grammars
-//! treat the way they treat those categories.
+//! HarfBuzz 14.5.0, the Myanmar blocks and the variation selectors
+//! included.
 //!
 //! # Sources
 //!
@@ -55,8 +52,7 @@ const MAX_GAP: u32 = 32;
 /// `ALLOWED_SINGLES` of `gen-indic-table.py`.
 const ALLOWED_SINGLES: &[u32] = &[0x00A0, 0x25CC];
 
-/// `ALLOWED_BLOCKS` of `gen-indic-table.py`, without the Myanmar
-/// blocks.
+/// `ALLOWED_BLOCKS` of `gen-indic-table.py`.
 const ALLOWED_BLOCKS: &[&str] = &[
     "Basic Latin",
     "Latin-1 Supplement",
@@ -69,16 +65,20 @@ const ALLOWED_BLOCKS: &[&str] = &[
     "Telugu",
     "Kannada",
     "Malayalam",
+    "Myanmar",
     "Khmer",
     "Vedic Extensions",
     "General Punctuation",
     "Superscripts and Subscripts",
     "Devanagari Extended",
+    "Myanmar Extended-B",
+    "Myanmar Extended-A",
+    "Myanmar Extended-C",
 ];
 
 /// Blocks the snapshots keep beyond [`ALLOWED_BLOCKS`]: those of the
 /// override code points outside them.
-const OVERRIDE_BLOCKS: &[&str] = &["Geometric Shapes", "Grantha"];
+const OVERRIDE_BLOCKS: &[&str] = &["Variation Selectors", "Geometric Shapes", "Grantha"];
 
 /// `category_map` of `gen-indic-table.py`.
 fn category_of(isc: &str) -> &'static str {
@@ -145,9 +145,24 @@ fn position_of(ipc: &str) -> &'static str {
     }
 }
 
-/// `category_overrides` of `gen-indic-table.py`, without the Myanmar
-/// entries and the variation selectors.
+/// `category_overrides` of `gen-indic-table.py`.
 const CATEGORY_OVERRIDES: &[(u32, &str)] = &[
+    (0xFE00, "VS"),
+    (0xFE01, "VS"),
+    (0xFE02, "VS"),
+    (0xFE03, "VS"),
+    (0xFE04, "VS"),
+    (0xFE05, "VS"),
+    (0xFE06, "VS"),
+    (0xFE07, "VS"),
+    (0xFE08, "VS"),
+    (0xFE09, "VS"),
+    (0xFE0A, "VS"),
+    (0xFE0B, "VS"),
+    (0xFE0C, "VS"),
+    (0xFE0D, "VS"),
+    (0xFE0E, "VS"),
+    (0xFE0F, "VS"),
     (0x2015, "PLACEHOLDER"),
     (0x2022, "PLACEHOLDER"),
     (0x25FB, "PLACEHOLDER"),
@@ -219,6 +234,42 @@ const CATEGORY_OVERRIDES: &[(u32, &str)] = &[
     (0x17DD, "Ygroup"),
     (0x17D3, "Ygroup"),
     (0x17D9, "PLACEHOLDER"),
+    (0x104E, "C"),
+    (0x1004, "Ra"),
+    (0x101B, "Ra"),
+    (0x105A, "Ra"),
+    (0x1032, "A"),
+    (0x1036, "A"),
+    (0x103A, "As"),
+    (0x103E, "MH"),
+    (0x1060, "ML"),
+    (0x103C, "MR"),
+    (0x103D, "MW"),
+    (0x1082, "MW"),
+    (0x103B, "MY"),
+    (0x105E, "MY"),
+    (0x105F, "MY"),
+    (0x1063, "PT"),
+    (0x1064, "PT"),
+    (0x1069, "PT"),
+    (0x106A, "PT"),
+    (0x106B, "PT"),
+    (0x106C, "PT"),
+    (0x106D, "PT"),
+    (0xAA7B, "PT"),
+    (0x1038, "SM"),
+    (0x1087, "SM"),
+    (0x1088, "SM"),
+    (0x1089, "SM"),
+    (0x108A, "SM"),
+    (0x108B, "SM"),
+    (0x108C, "SM"),
+    (0x108D, "SM"),
+    (0x108F, "SM"),
+    (0x109A, "SM"),
+    (0x109B, "SM"),
+    (0x109C, "SM"),
+    (0x104A, "PLACEHOLDER"),
 ];
 
 /// `position_overrides` of `gen-indic-table.py`.
@@ -259,7 +310,7 @@ fn position_category(pos: &str) -> &'static str {
         "ABOVE_C" => "VAbv",
         "BELOW_C" => "VBlw",
         "POST_C" => "VPst",
-        other => panic!("Khmer matra with position {other}"),
+        other => panic!("Khmer or Myanmar matra with position {other}"),
     }
 }
 
@@ -360,7 +411,7 @@ fn indic_data() -> BTreeMap<u32, (&'static str, &'static str)> {
         if consonants.contains(&cat) {
             pos = "BASE_C";
         } else if matras.contains(&cat) {
-            if block.starts_with("Khmer") {
+            if block.starts_with("Khmer") || block.starts_with("Myanmar") {
                 cat = position_category(pos);
             } else {
                 pos = matra_position(u, pos, block);
@@ -541,4 +592,15 @@ fn snapshots_derive_known_categories() {
     assert_eq!(data[&0x0CC3], ("M", "AFTER_SUB"));
     assert_eq!(data[&0x200D], ("ZWJ", "END"));
     assert_eq!(data[&0x25CC], ("DOTTEDCIRCLE", "BASE_C"));
+    // MYANMAR LETTER NGA, VOWEL SIGN E, SIGN ASAT, CONSONANT SIGN
+    // MEDIAL RA, SIGN DOT BELOW, SIGN VISARGA, DIGIT ZERO, and a
+    // variation selector.
+    assert_eq!(data[&0x1004], ("Ra", "BASE_C"));
+    assert_eq!(data[&0x1031], ("VPre", "PRE_C"));
+    assert_eq!(data[&0x103A], ("As", "END"));
+    assert_eq!(data[&0x103C], ("MR", "END"));
+    assert_eq!(data[&0x1037], ("N", "END"));
+    assert_eq!(data[&0x1038], ("SM", "SMVD"));
+    assert_eq!(data[&0x1040], ("PLACEHOLDER", "BASE_C"));
+    assert_eq!(data[&0xFE00], ("VS", "END"));
 }

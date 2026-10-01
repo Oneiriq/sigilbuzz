@@ -325,9 +325,7 @@ Changed:
   glyph flags at the `MonotoneGraphemes`, `MonotoneCharacters` and `Characters` cluster
   levels (before: 1,519 in glyphs, 1,275 with flags), and so do all 1,448 Sinhala
   strings (before: 1,036 and 983). 2,100 strings in six more USE scripts and 900 in
-  Tibetan, N'Ko and Mongolian all match too (before: 1,532 and 733). This fixes Sinhala syllables with two or more pre-base vowel signs. Myanmar
-  keeps sigilbuzz's Myanmar pass (`ot::use_shaper::shape_myanmar`), and its output is
-  unchanged. The entry points `ot::use_shaper::shape_balinese` to `shape_modi`,
+  Tibetan, N'Ko and Mongolian all match too (before: 1,532 and 733). This fixes Sinhala syllables with two or more pre-base vowel signs. The entry points `ot::use_shaper::shape_balinese` to `shape_modi`,
   `shape_nko`, `ot::tibetan::shape_tibetan`, `ot::mongolian::shape_mongolian`, and
   `ot::indic::shape_indic` for Sinhala run the new shaper, default features included.
   `ot::use_shaper::USE_TOPOGRAPHICAL_FEATURES` now lists `isol`, `init`, `medi` and
@@ -335,6 +333,25 @@ Changed:
   Universal Shaping Engine: also Sinhala, Tibetan and Mongolian, and no longer Khmer,
   Myanmar, Thai, Lao and Hangul, which have shapers of their own.
   `UnicodeScript::is_indic` no longer holds for Sinhala.
+- Myanmar follows HarfBuzz's Myanmar shaper (`hb-ot-shaper-myanmar.cc`). The Myanmar
+  categories of HarfBuzz's Indic table (`gen-indic-table.py`, now generated with the
+  Myanmar blocks and the variation selectors) feed the syllable machine of
+  `hb-ot-shaper-myanmar-machine.rl`, and each syllable is unsafe to break. `locl` and
+  `ccmp` run per syllable before the reorder. Broken clusters then get a dotted
+  circle, and each syllable is sorted by HarfBuzz's positions: a kinzi after the base,
+  a medial ra and pre-base vowel signs before it, the marks after a below-base vowel
+  before that vowel, a run of pre-base vowel signs flipped, and each move merging the
+  clusters it passes. `rphf`, `pref`, `blwf` and `pstf` follow one stage each, per
+  syllable and with manual ZWJ, then `pres`, `abvs`, `blws` and `psts` in one stage
+  with `rlig`, `calt`, `clig`, `liga`, `rclt` (or `vert`) and the caller's features.
+  All 1,540 Myanmar test strings and 3,775 more (kinzi, medials, stacks, signs, tones,
+  joiners, broken clusters, digits, variation selectors, Myanmar Extended-A and -B)
+  now match HarfBuzz 14.5.0 in glyphs, clusters, glyph flags and positions at the
+  `MonotoneGraphemes`, `MonotoneCharacters` and `Characters` cluster levels (before:
+  1,033, 1,031 and 1,032 of the 1,540 in glyphs). Myanmar text in a font whose GSUB
+  picks `DFLT`, `latn` or `mymr` gets the default shaper's `ccmp`, `locl` and joiner
+  handling, which it skipped before. `ot::use_shaper::shape_myanmar` runs the new
+  shaper, default features included.
 - Hangul follows HarfBuzz's Hangul shaper (`hb-ot-shaper-hangul.cc`) in a buffer whose
   script is Hangul. Its preprocessing runs after grapheme clusters form, as in
   HarfBuzz: jamo compose into a precomposed syllable the font has, a syllable the font

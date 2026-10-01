@@ -117,7 +117,6 @@
 mod aat;
 mod attach;
 mod cluster;
-mod dotted_circle;
 mod fallback;
 mod features;
 mod glyph_flags;
@@ -147,10 +146,7 @@ mod vowel_constraints;
 
 use aat::apply_kerx_format4;
 pub(crate) use cluster::{merge_clusters, merge_grapheme_clusters};
-pub(crate) use features::{
-    apply_gsub_feature_in_scripts, apply_gsub_feature_masked, apply_gsub_features_merged,
-    apply_locl_ccmp_if_length_preserving, feature_would_substitute,
-};
+pub(crate) use features::{apply_gsub_feature_masked, feature_would_substitute};
 use gsub::apply_gsub_lookup;
 use gsub_parsed::filter_for_lookup;
 pub(crate) use joiners::JoinerTable;
@@ -158,7 +154,7 @@ pub use pipeline::shape;
 pub(crate) use segment::guess_script;
 use segment::ProcessedSegment;
 pub(crate) use syllabic::SyllabicGsub;
-pub(crate) use syllables::{number_syllables, unsafe_to_break};
+pub(crate) use syllables::unsafe_to_break;
 
 use crate::buffer::Glyph;
 use crate::tables::gpos::resolve_variation_delta;
