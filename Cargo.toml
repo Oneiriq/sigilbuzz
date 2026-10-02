@@ -148,6 +148,12 @@ missing_panics_doc = "allow"
 # public-API-doc rule and let private items document themselves on a
 # best-effort basis.
 missing_docs_in_private_items = "allow"
+# Rust 1.99 added `assert_is_empty` to the style group. It fires on every
+# `assert!(x.is_empty())` (71 sites, almost all in tests), and its
+# rewrites need a typed empty value at each one, such as
+# `assert_eq!(breaks, [] as [usize; 0])`, which reads worse than the
+# assertion it replaces.
+assert_is_empty = "allow"
 # Companion-crate pedantic exemptions. These fire across the binary
 # encoder/decoder code in sigilbuzz-subset, sigilbuzz-woff,
 # sigilbuzz-gpu, sigilbuzz-pdf and the parser code in

@@ -115,8 +115,8 @@ pub(super) fn adjust_spaces(
                 Some((upem + kind / 2) / kind)
             }
             space::EM_4_18 => Some(upem * 4 / 18),
-            space::FIGURE => figure.map(&advance).transpose()?,
-            space::PUNCTUATION => punctuation.map(&advance).transpose()?,
+            space::FIGURE => figure.map(advance).transpose()?,
+            space::PUNCTUATION => punctuation.map(advance).transpose()?,
             space::NARROW => {
                 if horizontal {
                     g.x_advance /= 2;
