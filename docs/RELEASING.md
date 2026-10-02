@@ -56,14 +56,20 @@ crates.io with its own version number.
    gh release create vX.Y.Z --title vX.Y.Z --notes-file notes.md
    ```
 
-7. Publish from the tagged commit. You need a crates.io API token (`cargo login`).
+7. Publishing the release starts the "Publish to crates.io" workflow
+   (`.github/workflows/publish.yml`). It checks that the tag matches the `sigilbuzz`
+   version, reruns the gate, `cargo audit`, and the dry run on the tagged commit, then
+   waits for approval in the `crates-io-approval` environment. Once approved, it runs
+   `cargo publish --workspace` with the `CARGO_REGISTRY_TOKEN` secret. A prerelease
+   runs the checks only.
 
-   ```bash
-   cargo publish --workspace
-   ```
-
-   Cargo publishes the crates in dependency order. If it stops partway, publish the
-   rest with `cargo publish -p <crate>`, following the order below.
+   crates.io accepts five new crates at once, then one every ten minutes, so a release
+   that adds crates waits out that limit (the first release, which adds all 12, takes
+   well over an hour). The job skips crates that are already up, so re-running a
+   failed job resumes the release. To publish by hand instead, run
+   `cargo publish --workspace` from the tagged commit after `cargo login`, and if it
+   stops partway, publish the rest with `cargo publish -p <crate>`, following the
+   order below.
 
 8. Add the crates.io links to the GitHub release notes.
 
@@ -88,6 +94,6 @@ depends on it. The dry run fails if they disagree.
 
 ## Package size
 
-The core crate packs to about 2.6 MiB compressed, mostly test fonts. The crates.io
+The core crate packs to about 3.2 MiB compressed, mostly test fonts. The crates.io
 limit is 10 MiB. If a new fixture pushes it close, add an `exclude` list to the
 package manifest.

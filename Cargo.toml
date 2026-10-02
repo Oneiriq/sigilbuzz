@@ -33,7 +33,9 @@ publish = true
 readme = "README.md"
 keywords = ["text", "shaping", "opentype", "harfbuzz", "typography"]
 categories = ["text-processing", "rendering", "no-std"]
-exclude = ["/assets"]
+# Brand assets and repo tooling (CI, git hooks, contributor rules) stay out
+# of the published package.
+exclude = ["/assets", "/.github", "/hooks", "/scripts", "/agent.md"]
 
 [lib]
 # Standalone library. No proc-macros, no C glue.

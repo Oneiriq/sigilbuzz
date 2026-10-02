@@ -5,7 +5,7 @@ GitHub issues and pull requests. sigilbuzz is pre-1.0, so a minor release may ch
 the API. See [docs/STABILITY.md](docs/STABILITY.md) for what is covered by the
 stability commitment.
 
-## 0.22.0 (unreleased)
+## 0.22.0 (2026-10-02)
 
 Added:
 
