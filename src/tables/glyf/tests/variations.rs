@@ -252,9 +252,9 @@ fn malformed_composite_deltas_fail_the_outline() {
 
 /// Glyph 0 is a composite of the square, with `flags` on the
 /// component; its own tuple moves its advance point by -100. Returns
-/// its phantom points at peak 1.0. hmtx: glyph 0 advances 600, glyph 1
+/// its phantom points at `coord`. hmtx: glyph 0 advances 600, glyph 1
 /// 500, both with a zero left side bearing.
-fn composite_phantoms(flags: u16) -> Result<[(f32, f32); 4]> {
+fn composite_phantoms(flags: u16, coord: f32) -> Result<[(f32, f32); 4]> {
     let parent = build_composite(&[Comp {
         flags: COMP_ARGS_ARE_XY_VALUES | flags,
         glyph: 1,
@@ -277,17 +277,32 @@ fn composite_phantoms(flags: u16) -> Result<[(f32, f32); 4]> {
         hmtx: &hmtx,
         vmtx: None,
     };
-    glyf.phantom_points_at_coords(&loca, 0, &metrics, Some(&gvar), &[1.0])
+    glyf.phantom_points_at_coords(&loca, 0, &metrics, Some(&gvar), &[coord])
 }
 
 #[test]
 fn phantom_points_move_by_their_deltas() {
     // The composite's own advance point: 600 - 100.
-    let pp = composite_phantoms(0).unwrap();
+    let pp = composite_phantoms(0, 1.0).unwrap();
     assert_points(&pp, &[(0.0, 0.0), (500.0, 0.0), (0.0, 0.0), (0.0, 0.0)]);
     // USE_MY_METRICS: the square's, 500 + 30.
-    let pp = composite_phantoms(COMP_USE_MY_METRICS).unwrap();
+    let pp = composite_phantoms(COMP_USE_MY_METRICS, 1.0).unwrap();
     assert_points(&pp, &[(0.0, 0.0), (530.0, 0.0), (0.0, 0.0), (0.0, 0.0)]);
+}
+
+#[test]
+fn use_my_metrics_holds_at_the_default_instance() {
+    // The square's advance point, 500 + 30 * coord, all the way down to
+    // the default instance, where it is not the composite's own 600.
+    for (coord, advance) in [(1.0, 530.0), (0.5, 515.0), (0.01, 500.3), (0.0, 500.0)] {
+        let pp = composite_phantoms(COMP_USE_MY_METRICS, coord).unwrap();
+        assert_points(&pp, &[(0.0, 0.0), (advance, 0.0), (0.0, 0.0), (0.0, 0.0)]);
+    }
+    // Without the flag the composite keeps its own, 600 - 100 * coord.
+    for (coord, advance) in [(0.5, 550.0), (0.0, 600.0)] {
+        let pp = composite_phantoms(0, coord).unwrap();
+        assert_points(&pp[..2], &[(0.0, 0.0), (advance, 0.0)]);
+    }
 }
 
 /// Composites whose `USE_MY_METRICS` components lead back to them:

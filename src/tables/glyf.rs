@@ -495,8 +495,8 @@ impl<'a> Glyf<'a> {
     /// as for composite anchors. `gvar` then moves them by the glyph's
     /// phantom deltas. A composite glyph takes the phantom points of
     /// its last component flagged `USE_MY_METRICS`, at the same
-    /// coords, as HarfBuzz does. With no `gvar`, or coords that are
-    /// all zero, the points are the defaults.
+    /// coords, as HarfBuzz does, at the default instance too. With no
+    /// `gvar`, or coords that are all zero, nothing moves.
     ///
     /// A `USE_MY_METRICS` component that leads back to a composite
     /// being walked is skipped where HarfBuzz's cycle detector skips
@@ -582,7 +582,9 @@ impl<'a> Glyf<'a> {
     }
 
     /// Phantom points of `glyph_id` with its gvar deltas applied when
-    /// `cx` carries variations: HarfBuzz's phantom-only `get_points`.
+    /// `cx` carries variations, and a composite's taken from its
+    /// `USE_MY_METRICS` component either way: HarfBuzz's phantom-only
+    /// `get_points`.
     /// `depth` and `budget` bound the walk through `USE_MY_METRICS`
     /// components as they bound [`Glyf::flatten`].
     fn varied_phantoms(
@@ -626,9 +628,6 @@ impl<'a> Glyf<'a> {
         }
         budget.take_glyph()?;
         let mut pp = self.phantom_points(cx.loca, glyph_id, metrics)?;
-        let Some(var) = cx.var else {
-            return Ok(pp);
-        };
         // The glyph's own gvar points come first: contour points for a
         // simple glyph, components for a composite, none when empty.
         let mut components = Vec::new();
@@ -646,12 +645,19 @@ impl<'a> Glyf<'a> {
             }
             _ => 0,
         };
-        let deltas = var
-            .gvar
-            .phantom_deltas(glyph_id, var.coords, own_points, &mut budget.work)?;
-        for (p, d) in pp.iter_mut().zip(deltas) {
-            p.0 += d.0;
-            p.1 += d.1;
+        // gvar moves the points away from the default instance. The
+        // USE_MY_METRICS components below apply at every instance, as in
+        // HarfBuzz, so the points stay continuous as the coords reach
+        // zero.
+        if let Some(var) = cx.var {
+            let work = &mut budget.work;
+            let deltas = var
+                .gvar
+                .phantom_deltas(glyph_id, var.coords, own_points, work)?;
+            for (p, d) in pp.iter_mut().zip(deltas) {
+                p.0 += d.0;
+                p.1 += d.1;
+            }
         }
         if components.is_empty() {
             return Ok(pp);
