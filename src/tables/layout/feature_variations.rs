@@ -155,6 +155,30 @@ impl<'a> FeatureVariations<'a> {
     /// nested more than [`MAX_CONDITION_DEPTH`] deep, or a table that
     /// needs more checks than its size allows (see the
     /// [module documentation](self)).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::tables::layout::FeatureVariations;
+    ///
+    /// // Version 1.0, one record: a null ConditionSet, which always
+    /// // holds, and a FeatureTableSubstitution at byte 16 that gives
+    /// // feature 3 an alternate Feature table at byte 12 of it, with
+    /// // the one lookup 7.
+    /// let data = [
+    ///     0, 1, 0, 0, 0, 0, 0, 1, // header
+    ///     0, 0, 0, 0, 0, 0, 0, 16, // record
+    ///     0, 1, 0, 0, 0, 1, // FeatureTableSubstitution
+    ///     0, 3, 0, 0, 0, 12, // feature 3
+    ///     0, 0, 0, 1, 0, 7, // alternate Feature
+    /// ];
+    /// let variations = FeatureVariations::parse(&data)?;
+    /// assert_eq!(variations.len(), 1);
+    /// assert_eq!(variations.find_index(&[], None), Some(0));
+    /// // A record that runs past the end fails to parse.
+    /// assert!(FeatureVariations::parse(&data[..12]).is_err());
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(data);
         let major = r.read_u16()?;
@@ -263,6 +287,26 @@ impl<'a> FeatureVariations<'a> {
     /// feature `feature_index`: that of the first substitution record
     /// with the index. `None` when the record substitutes nothing for
     /// the feature or `record` is past the last record.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::tables::layout::FeatureVariations;
+    ///
+    /// // One record, which gives feature 3 the one lookup 7 (see
+    /// // `FeatureVariations::parse`).
+    /// let data = [
+    ///     0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 1, 0, 3, 0, 0, 0, 12,
+    ///     0, 0, 0, 1, 0, 7,
+    /// ];
+    /// let variations = FeatureVariations::parse(&data)?;
+    /// let feature = variations.substitute(0, 3).expect("feature 3 is substituted");
+    /// assert_eq!(feature.lookup_indices().collect::<Vec<_>>(), [7]);
+    /// // The record leaves feature 2 alone, and there is no record 1.
+    /// assert!(variations.substitute(0, 2).is_none());
+    /// assert!(variations.substitute(1, 3).is_none());
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
     #[must_use]
     pub fn substitute(&self, record: u32, feature_index: u16) -> Option<Feature<'a>> {
         self.substitution(record)?.find(feature_index)
@@ -504,6 +548,29 @@ impl<'a> ConditionSet<'a> {
 
     /// True when every condition holds at the normalized coordinates
     /// `coords` (see [`FeatureVariations::find_index`]).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::tables::layout::FeatureVariations;
+    ///
+    /// // One record whose ConditionSet, at byte 16, names one axis
+    /// // range at byte 6 of it: axis 0 from 0.5 (F2DOT14 0x2000) to
+    /// // 1.0 (0x4000). The record substitutes nothing.
+    /// let data = [
+    ///     0, 1, 0, 0, 0, 0, 0, 1, // header
+    ///     0, 0, 0, 16, 0, 0, 0, 0, // record
+    ///     0, 1, 0, 0, 0, 6, // ConditionSet
+    ///     0, 1, 0, 0, 0x20, 0, 0x40, 0, // axis range
+    /// ];
+    /// let variations = FeatureVariations::parse(&data)?;
+    /// let set = variations.condition_set(0).expect("record 0");
+    /// assert!(set.matches(&[0.75], None));
+    /// assert!(!set.matches(&[0.25], None));
+    /// // No coordinates read as the default instance, axis 0 at 0.
+    /// assert!(!set.matches(&[], None));
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
     #[must_use]
     pub fn matches(&self, coords: &[f32], store: Option<&ItemVariationStore<'_>>) -> bool {
         self.holds(&mut EvalContext::new(coords, store))
@@ -515,8 +582,10 @@ impl<'a> ConditionSet<'a> {
 }
 
 /// One condition. A null offset reads as [`Condition::Unknown`] with
-/// format 0.
+/// format 0. Later versions of the format may add kinds of condition,
+/// so the enum is non-exhaustive.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum Condition<'a> {
     /// Format 1: holds while the coordinate of axis `axis_index` lies
     /// in `min..=max`. All three are F2DOT14 values, as raw integers.
@@ -613,6 +682,34 @@ impl<'a> Condition<'a> {
 
     /// True when the condition holds at the normalized coordinates
     /// `coords` (see [`FeatureVariations::find_index`]).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::tables::layout::{Condition, FeatureVariations};
+    ///
+    /// // One record whose ConditionSet names a negation (format 5) of
+    /// // an axis range: axis 0 from 0.5 (F2DOT14 0x2000) to 1.0
+    /// // (0x4000).
+    /// let data = [
+    ///     0, 1, 0, 0, 0, 0, 0, 1, // header
+    ///     0, 0, 0, 16, 0, 0, 0, 0, // record
+    ///     0, 1, 0, 0, 0, 6, // ConditionSet
+    ///     0, 5, 0, 0, 5, // negation of the condition 5 bytes on
+    ///     0, 1, 0, 0, 0x20, 0, 0x40, 0, // axis range
+    /// ];
+    /// let variations = FeatureVariations::parse(&data)?;
+    /// let set = variations.condition_set(0).expect("record 0");
+    /// let not = set.get(0).expect("condition 0");
+    /// let Condition::Negate(negation) = not else {
+    ///     panic!("a negation");
+    /// };
+    /// let range = negation.condition();
+    /// assert!(range.matches(&[0.75], None));
+    /// assert!(!not.matches(&[0.75], None));
+    /// assert!(not.matches(&[0.25], None));
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
     #[must_use]
     pub fn matches(&self, coords: &[f32], store: Option<&ItemVariationStore<'_>>) -> bool {
         self.holds(&mut EvalContext::new(coords, store), 1)
