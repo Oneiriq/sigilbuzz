@@ -541,3 +541,120 @@ fn subset_rejects_empty_selection() {
         "expected friendly error, got: {stderr}"
     );
 }
+
+/// Runs `sigilbuzz subset` on Open Sans with `extra` arguments.
+/// Returns the output bytes (empty on failure), stderr, and success.
+fn subset_open_sans(stem: &str, extra: &[&std::ffi::OsStr]) -> (Vec<u8>, String, bool) {
+    let font = open_sans_path();
+    let out = write_tempfile(stem, b"");
+    let mut args: Vec<&std::ffi::OsStr> =
+        vec!["subset".as_ref(), font.as_os_str(), out.as_os_str()];
+    args.extend_from_slice(extra);
+    let (_stdout, stderr, ok) = run_cli(args);
+    let bytes = if ok {
+        std::fs::read(&out).expect("read output")
+    } else {
+        Vec::new()
+    };
+    (bytes, stderr, ok)
+}
+
+#[test]
+fn subset_text_keeps_the_same_glyphs_as_unicodes() {
+    let (by_unicodes, stderr, ok) = subset_open_sans(
+        "subset_hi_uni.ttf",
+        &["--unicodes".as_ref(), "H,i".as_ref()],
+    );
+    assert!(ok, "{stderr}");
+    // Repeated characters count once.
+    let (by_text, stderr, ok) =
+        subset_open_sans("subset_hi_text.ttf", &["--text".as_ref(), "HiHi".as_ref()]);
+    assert!(ok, "{stderr}");
+    assert_eq!(by_text, by_unicodes);
+    // A text file loses its line breaks and leading byte order mark.
+    let file = write_tempfile("subset_hi.txt", "\u{FEFF}H\r\ni\n".as_bytes());
+    let (by_file, stderr, ok) = subset_open_sans(
+        "subset_hi_file.ttf",
+        &["--text-file".as_ref(), file.as_os_str()],
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(by_file, by_unicodes);
+}
+
+#[test]
+fn subset_text_combines_with_unicodes_and_gids() {
+    let (split, stderr, ok) = subset_open_sans(
+        "subset_split.ttf",
+        &[
+            "--unicodes".as_ref(),
+            "H".as_ref(),
+            "--text".as_ref(),
+            "i".as_ref(),
+            "--gids".as_ref(),
+            "0".as_ref(),
+        ],
+    );
+    assert!(ok, "{stderr}");
+    let (joined, stderr, ok) =
+        subset_open_sans("subset_joined.ttf", &["--text".as_ref(), "Hi".as_ref()]);
+    assert!(ok, "{stderr}");
+    assert_eq!(split, joined);
+}
+
+#[test]
+fn subset_text_file_must_exist() {
+    let missing = std::env::temp_dir().join("sigilbuzz-cli-no-such-text-file.txt");
+    let (_, stderr, ok) = subset_open_sans(
+        "subset_nofile.ttf",
+        &["--text-file".as_ref(), missing.as_os_str()],
+    );
+    assert!(!ok);
+    assert!(stderr.contains("could not read text file"), "{stderr}");
+}
+
+#[test]
+fn subset_rejects_missing_characters_unless_asked_to_skip() {
+    // Open Sans has no Hangul.
+    let (_, stderr, ok) = subset_open_sans(
+        "subset_missing.ttf",
+        &["--text".as_ref(), "H\u{AC00}".as_ref()],
+    );
+    assert!(!ok);
+    assert!(stderr.contains("U+AC00 has no cmap entry"), "{stderr}");
+    assert!(
+        stderr.contains("--skip-missing"),
+        "the error names the flag: {stderr}"
+    );
+
+    let (skipped, stderr, ok) = subset_open_sans(
+        "subset_skip.ttf",
+        &[
+            "--text".as_ref(),
+            "H\u{AC00}\u{AC01}".as_ref(),
+            "--skip-missing".as_ref(),
+        ],
+    );
+    assert!(ok, "{stderr}");
+    assert!(
+        stderr.contains("skipped 2 characters the font has no glyph for: U+AC00, U+AC01"),
+        "{stderr}"
+    );
+    let (just_h, _, _) = subset_open_sans("subset_h.ttf", &["--unicodes".as_ref(), "H".as_ref()]);
+    assert_eq!(skipped, just_h);
+
+    // Skipping every character leaves nothing to keep.
+    let (_, stderr, ok) = subset_open_sans(
+        "subset_skip_all.ttf",
+        &[
+            "--text".as_ref(),
+            "\u{AC00}".as_ref(),
+            "--skip-missing".as_ref(),
+        ],
+    );
+    assert!(!ok);
+    assert!(stderr.contains("skipped 1 character the font"), "{stderr}");
+    assert!(
+        stderr.contains("none of the requested characters"),
+        "{stderr}"
+    );
+}
