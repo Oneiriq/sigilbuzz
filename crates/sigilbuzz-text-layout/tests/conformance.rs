@@ -186,3 +186,21 @@ fn line_break_samples() {
         line_breaks,
     );
 }
+
+#[test]
+fn word_break_samples() {
+    check_samples(
+        &[
+            // WordBreakTest.txt lines 1515, 1825, 1843, and 1847.
+            "/ 0061 x 0027 x 2060 x 0061 / 0027 x 2060 /",
+            "/ 0031 x 002E x 2060 x 0031 / 002E x 2060 /",
+            "/ 0041 x 005F x 0030 x 005F x 3031 x 005F /",
+            "/ 0061 / 1F1E6 x 1F1E7 x 200D / 1F1E8 / 0062 /",
+            // The UAX #29 example "나는 Chicago에 산다." keeps each word
+            // whole.
+            "/ B098 x B294 / 0020 / 0043 x 0068 x 0069 x 0063 x 0061 x 0067 x 006F x C5D0 / 0020 \
+             / C0B0 x B2E4 / 002E /",
+        ],
+        word_boundaries,
+    );
+}

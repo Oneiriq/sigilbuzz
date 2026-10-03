@@ -42,6 +42,8 @@ mod class;
 mod line_break_table;
 mod linebreak;
 mod word;
+#[rustfmt::skip]
+mod word_break_table;
 mod wrap;
 
 pub use class::{line_break_class, LineBreakClass};
@@ -49,5 +51,5 @@ pub use linebreak::{
     line_break_opportunities, line_break_opportunities_with, BreakOpportunity, LineBreakIter,
     WordBreak,
 };
-pub use word::word_breaks;
+pub use word::{word_breaks, WordBreakIter};
 pub use wrap::{wrap_lines, LineRange, WrapOptions};
