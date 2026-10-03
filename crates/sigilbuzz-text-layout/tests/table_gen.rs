@@ -5,8 +5,8 @@
 //!   of every code point, with a few flag bits the line breaking rules
 //!   read alongside it: East_Asian_Width F, W, or H (LB19a, LB30), the
 //!   initial and final quotation marks (LB15a, LB15b, LB19), the SA
-//!   characters that are marks (LB1), the typographic letter units
-//!   of CSS `word-break: keep-all`, and the unassigned
+//!   characters that are marks (LB1), the letter units of CSS
+//!   `word-break: keep-all` as Blink finds them, and the unassigned
 //!   Extended_Pictographic code points (LB30b).
 //! - `src/word_break_table.rs`: the `Word_Break` property (UAX #29)
 //!   and `Extended_Pictographic` (WB3c).
@@ -106,9 +106,9 @@ const FINAL_QUOTE: u8 = 4;
 /// An SA character with General_Category Mn or Mc, which LB1 resolves
 /// to CM.
 const SA_MARK: u8 = 8;
-/// A typographic letter unit for CSS `word-break: keep-all`: a letter
-/// or number (General_Category L* or N*), or a character of class NU,
-/// AL, AI, or ID.
+/// A letter unit for CSS `word-break: keep-all`, as Blink's
+/// `ShouldKeepAfterKeepAll` finds them: a letter or number
+/// (General_Category L* or N*) that is not of class SA.
 const LETTER_UNIT: u8 = 16;
 /// An unassigned (General_Category Cn) Extended_Pictographic code
 /// point (LB30b).
@@ -295,7 +295,7 @@ fn line_break_values() -> Vec<(u8, u8)> {
                 flags |= SA_MARK;
             }
             let letter = gc.starts_with('L') || gc.starts_with('N');
-            if letter || ["NU", "AL", "AI", "ID"].iter().any(|c| is(cp, c)) {
+            if letter && !is(cp, "SA") {
                 flags |= LETTER_UNIT;
             }
             if pictographic[cp] && gc == "Cn" {
@@ -340,7 +340,7 @@ fn generate_line_break() -> String {
     out.push_str("/// XX without flags. Sorted, non-overlapping, inclusive. The flag bits\n");
     out.push_str("/// are the constants of `crate::class`: 1 East Asian (F, W, H), 2\n");
     out.push_str("/// initial quotation mark (QU and Pi), 4 final quotation mark (QU and\n");
-    out.push_str("/// Pf), 8 SA mark (Mn or Mc), 16 typographic letter unit, and 32\n");
+    out.push_str("/// Pf), 8 SA mark (Mn or Mc), 16 keep-all letter unit, and 32\n");
     out.push_str("/// unassigned Extended_Pictographic.\n");
     out.push_str("pub(crate) static LINE_BREAK: &[(u32, u32, LineBreakClass, u8)] = &[\n");
     let items: Vec<String> = table
@@ -540,5 +540,11 @@ fn snapshots_derive_known_values() {
     assert_eq!(flags(0x0028), 0);
     // An unassigned code point in an emoji block.
     assert_eq!(class(0x1F02C), "ID");
-    assert_eq!(flags(0x1F02C), LETTER_UNIT | UNASSIGNED_PICTOGRAPHIC);
+    assert_eq!(flags(0x1F02C), UNASSIGNED_PICTOGRAPHIC);
+    // Letter units are the letters and numbers outside class SA. Emoji
+    // and symbols are not, whatever their class.
+    assert_eq!(flags(0x0041) & LETTER_UNIT, LETTER_UNIT);
+    assert_eq!(flags(0x0E01) & LETTER_UNIT, 0);
+    assert_eq!(flags(0x1F600) & LETTER_UNIT, 0);
+    assert_eq!(flags(0x0040) & LETTER_UNIT, 0);
 }

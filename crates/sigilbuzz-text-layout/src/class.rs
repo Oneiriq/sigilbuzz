@@ -133,9 +133,9 @@ pub(crate) const FINAL_QUOTE: u8 = 4;
 /// An SA character with General_Category Mn or Mc, which LB1 resolves
 /// to CM.
 pub(crate) const SA_MARK: u8 = 8;
-/// A typographic letter unit for CSS `word-break: keep-all`: a letter
-/// or number (General_Category L* or N*), or a character of class NU,
-/// AL, AI, or ID.
+/// A letter unit for CSS `word-break: keep-all`, as Blink's
+/// `ShouldKeepAfterKeepAll` finds them: a letter or number
+/// (General_Category L* or N*) that is not of class SA.
 pub(crate) const LETTER_UNIT: u8 = 16;
 /// An unassigned (General_Category Cn) Extended_Pictographic code
 /// point (LB30b).
@@ -241,6 +241,8 @@ mod tests {
         assert_eq!(flags('\u{0E01}') & SA_MARK, 0);
         assert_eq!(flags('\u{300C}'), EAST_ASIAN);
         assert_eq!(flags('('), 0);
-        assert_eq!(flags('\u{1F02C}'), LETTER_UNIT | UNASSIGNED_PICTOGRAPHIC);
+        assert_eq!(flags('\u{1F02C}'), UNASSIGNED_PICTOGRAPHIC);
+        assert_eq!(flags('\u{0E01}') & LETTER_UNIT, 0);
+        assert_eq!(flags('\u{1F600}') & LETTER_UNIT, 0);
     }
 }
