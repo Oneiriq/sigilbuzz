@@ -319,15 +319,45 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         buffer_shaper,
     )?;
 
+    // HarfBuzz's `has_gpos_mark`, which its Hebrew shaper reads when it
+    // composes: its feature map has `mark` unless the caller turned the
+    // feature off or the language systems GSUB and GPOS pick both leave
+    // it out. Lookups play no part, so a FeatureVariations record that
+    // leaves `mark` none changes nothing.
+    let mark_enabled = !super::feature_disabled(features, *b"mark");
+    let has_gpos_mark = |priority: &[[u8; 4]]| {
+        use crate::ot::layout_select::lists_feature;
+        let mark = *b"mark";
+        let in_gpos = || {
+            gpos.as_ref().is_some_and(|g| {
+                lists_feature(
+                    g.script_list(),
+                    &g.features(),
+                    g.language_tags(),
+                    mark,
+                    priority,
+                )
+            })
+        };
+        let in_gsub = || {
+            gsub.as_ref().is_some_and(|g| {
+                lists_feature(
+                    g.script_list(),
+                    &g.features(),
+                    g.language_tags(),
+                    mark,
+                    priority,
+                )
+            })
+        };
+        mark_enabled && (in_gpos() || in_gsub())
+    };
+
     // Step 1.75: normalization, which also maps the characters to
     // glyphs. Each segment normalizes with the mode and hooks of the
     // shaper that shapes it (see `normalize` and
     // `Shaper::normalizer_for`), so its code points and glyphs stay one
     // to one.
-    let has_gpos_mark = |priority: &[[u8; 4]]| {
-        gpos.as_ref()
-            .is_some_and(|g| position::has_feature(g, *b"mark", priority))
-    };
     normalize::normalize_segments(
         &mut codepoints,
         &mut glyphs,

@@ -11,7 +11,9 @@
 //! - When GPOS has no `kern` feature for the run (`vkrn` for vertical
 //!   runs), `kerx` kerns if the font has it, else the legacy `kern`
 //!   table does, for the shapers HarfBuzz lets fall back to it (see
-//!   [`Shaper::fallback_position`]).
+//!   [`Shaper::fallback_position`]). GPOS has the feature when the
+//!   language system it picks lists it, even with no lookups, and the
+//!   caller did not turn kerning off.
 //! - A `kern` or `kerx` table the plan applies marks the whole run
 //!   unsafe to concatenate, whether or not kerning is requested.
 //!
@@ -142,11 +144,16 @@ pub(super) fn position(
     let has_gpos = gpos_applies(input.gpos, input.shaper);
     let mut apply_kerx = has_kerx && !(input.has_gsub && has_gpos);
     let apply_gpos = has_gpos && !apply_kerx;
+    // HarfBuzz asks whether its feature map gives the kerning feature a
+    // GPOS index: the run requests kerning and the language system GPOS
+    // picks lists the feature. A FeatureVariations record that leaves
+    // the feature no lookups does not bring the legacy tables back.
     let has_gpos_kern = apply_gpos
+        && requested_kerning
         && input.gpos.is_some_and(|gpos| {
             segments
                 .iter()
-                .any(|s| !lookups_for(gpos, kern_tag, s.script_priority).is_empty())
+                .any(|s| lists_feature(gpos, kern_tag, s.script_priority))
         });
     let mut apply_kern = false;
     if !apply_kerx && !has_gpos_kern {
@@ -318,11 +325,17 @@ pub(super) fn round_half_away(delta: f32) -> i32 {
     }
 }
 
-/// True when GPOS has lookups for feature `tag` under the script tags
-/// of `script_priority` (HarfBuzz's `has_gpos_mark` asks this of
-/// `mark`).
-pub(super) fn has_feature(gpos: &Gpos<'_>, tag: [u8; 4], script_priority: &[[u8; 4]]) -> bool {
-    !lookups_for(gpos, tag, script_priority).is_empty()
+/// True when the language system GPOS picks for the script tags of
+/// `script_priority` lists feature `tag`, with or without lookups (see
+/// [`crate::ot::layout_select::lists_feature`]).
+fn lists_feature(gpos: &Gpos<'_>, tag: [u8; 4], script_priority: &[[u8; 4]]) -> bool {
+    crate::ot::layout_select::lists_feature(
+        gpos.script_list(),
+        &gpos.features(),
+        gpos.language_tags(),
+        tag,
+        script_priority,
+    )
 }
 
 /// Lookup indices feature `tag` selects for one segment's script.
