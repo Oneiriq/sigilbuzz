@@ -51,17 +51,14 @@ fn dict_int(out: &mut Vec<u8>, v: usize) {
     out.extend_from_slice(&(v as i32).to_be_bytes());
 }
 
-#[test]
-fn cff_fd_select_with_unsorted_ranges_fills_in_linear_time() {
-    // A CID-keyed CFF with 65,535 empty glyphs and an FDSelect format 3
-    // whose 65,535 ranges alternate between first glyph 0 and first
-    // glyph 65,535. Half of them span every glyph, so filling range
-    // by range took about two billion writes.
-    const N: usize = 65_535;
+/// Builds a CID-keyed CFF with `n_glyphs` empty glyphs, one empty Font
+/// DICT, and an FDSelect format 3 with one range per entry of `firsts`,
+/// all in FD 0, ended by `sentinel`.
+fn cid_cff_with_fd_ranges(n_glyphs: usize, firsts: &[u16], sentinel: u16) -> Vec<u8> {
     let top_dict_len = 20;
     let prefix = 4 + 6 + (2 + 1 + 2 + top_dict_len) + 2 + 2;
     let cs_off = prefix;
-    let fda_off = cs_off + 3 + (N + 1);
+    let fda_off = cs_off + 3 + (n_glyphs + 1);
     let fds_off = fda_off + 5;
 
     let mut cff = vec![1, 0, 4, 4];
@@ -77,10 +74,10 @@ fn cff_fd_select_with_unsorted_ranges_fills_in_linear_time() {
     cff.extend_from_slice(&[0, 0]); // Global Subr INDEX
     assert_eq!(cff.len(), cs_off);
 
-    // CharStrings INDEX: N empty entries.
-    cff.extend_from_slice(&(N as u16).to_be_bytes());
+    // CharStrings INDEX: `n_glyphs` empty entries.
+    cff.extend_from_slice(&(n_glyphs as u16).to_be_bytes());
     cff.push(1);
-    cff.extend(core::iter::repeat(1).take(N + 1));
+    cff.extend(core::iter::repeat(1).take(n_glyphs + 1));
     assert_eq!(cff.len(), fda_off);
 
     // FDArray INDEX: one empty Font DICT.
@@ -89,18 +86,63 @@ fn cff_fd_select_with_unsorted_ranges_fills_in_linear_time() {
 
     // FDSelect format 3.
     cff.push(3);
-    cff.extend_from_slice(&(N as u16).to_be_bytes());
-    for i in 0..N {
-        let first: u16 = if i % 2 == 0 { 0 } else { N as u16 };
+    cff.extend_from_slice(&(firsts.len() as u16).to_be_bytes());
+    for first in firsts {
         cff.extend_from_slice(&first.to_be_bytes());
         cff.push(0);
     }
-    cff.extend_from_slice(&(N as u16).to_be_bytes()); // sentinel
+    cff.extend_from_slice(&sentinel.to_be_bytes());
+    cff
+}
 
+#[test]
+fn cff_fd_select_with_unsorted_ranges_is_not_expanded() {
+    // A CID-keyed CFF with 65,535 empty glyphs and an FDSelect format 3
+    // whose 65,535 ranges alternate between first glyph 0 and first
+    // glyph 65,535. Half of them span every glyph, so filling range
+    // by range took about two billion writes. FDSelect is no longer
+    // expanded, and range 0 already spans every glyph, so the lookups
+    // for the first and the last glyph both stop at range 0.
+    const N: usize = 65_535;
+    let firsts: Vec<u16> = (0..N)
+        .map(|i| if i % 2 == 0 { 0 } else { N as u16 })
+        .collect();
+    let cff = cid_cff_with_fd_ranges(N, &firsts, N as u16);
     let parsed = Cff::parse(&cff).unwrap();
     assert_eq!(usize::from(parsed.num_glyphs()), N);
+    for gid in [0, N as u16 - 1] {
+        let mut out = Outline::new();
+        assert!(parsed.outline(gid, &mut out).unwrap());
+    }
+}
+
+#[test]
+fn cff_fd_select_unsorted_lookup_walks_to_the_last_range() {
+    // First glyphs alternate between 1 and 0, so every range but one
+    // is empty or covers only glyph 0, and only the last range, which
+    // runs to the sentinel, covers the last glyph. Its lookup has to
+    // scan all 65,535 ranges, once.
+    const N: usize = 65_535;
+    let firsts: Vec<u16> = (0..N).map(|i| if i % 2 == 0 { 1 } else { 0 }).collect();
+    let cff = cid_cff_with_fd_ranges(N, &firsts, N as u16);
+    let parsed = Cff::parse(&cff).unwrap();
     let mut out = Outline::new();
-    assert!(parsed.outline(0, &mut out).unwrap());
+    assert!(parsed.outline(N as u16 - 1, &mut out).unwrap());
+}
+
+#[test]
+fn cff_fd_select_with_one_glyph_ranges_draws_every_glyph_without_quadratic_cost() {
+    // 65,535 sorted ranges of one glyph each. A lookup used to scan the
+    // ranges from the front, so drawing every glyph from one held
+    // `Cff` read about two billion range records. Sorted ranges are
+    // now binary-searched.
+    const N: usize = 65_535;
+    let firsts: Vec<u16> = (0..N as u16).collect();
+    let cff = cid_cff_with_fd_ranges(N, &firsts, N as u16);
+    let parsed = Cff::parse(&cff).unwrap();
+    for gid in 0..N as u16 {
+        assert!(parsed.outline(gid, &mut Outline::new()).unwrap());
+    }
 }
 
 // ---------------------------------------------------------------------
