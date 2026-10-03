@@ -49,8 +49,11 @@ fn quadratic_subdivides_to_chord_when_tight() {
     );
     // First segment starts at (0,0).
     assert!((segs[0].x0).abs() < 1e-5);
-    // Last segment ends at (100,0).
-    assert!((segs[segs.len() - 1].x1 - 100.0).abs() < 1e-5);
+    // The last chord ends at (100,0), and the implicit close of the
+    // open contour returns from there to (0,0).
+    assert!((segs[segs.len() - 2].x1 - 100.0).abs() < 1e-5);
+    let close = segs[segs.len() - 1];
+    assert!((close.x0 - 100.0).abs() < 1e-5 && close.x1.abs() < 1e-5);
 }
 
 #[test]
@@ -168,13 +171,15 @@ fn flatten_grouped_tight_tolerance_subdivides_cubic_heavily() {
         },
     ];
     let curves = flatten_grouped(ops, &Affine::identity(), 0.01);
-    assert_eq!(curves.len(), 1);
+    // The cubic, then the implicit close-line of the open contour.
+    assert_eq!(curves.len(), 2);
     match &curves[0] {
         FlattenedCurve::Cubic(segs) => {
             assert!(segs.len() > 8, "tight tolerance got {} segs", segs.len());
         }
         other => panic!("expected Cubic, got {other:?}"),
     }
+    assert!(matches!(curves[1], FlattenedCurve::Line(_)));
 }
 
 #[test]
@@ -397,13 +402,141 @@ fn non_finite_curves_emit_a_single_chord() {
             y: 5.0,
         },
     ];
-    assert_eq!(flatten(ops, &Affine::identity(), 0.25).len(), 2);
+    // One chord per curve, plus the implicit close of the open contour.
+    assert_eq!(flatten(ops, &Affine::identity(), 0.25).len(), 3);
     let grouped = flatten_grouped(ops, &Affine::identity(), 0.25);
-    assert_eq!(grouped.len(), 2);
-    assert!(grouped.iter().all(|c| match c {
+    assert_eq!(grouped.len(), 3);
+    assert!(grouped[..2].iter().all(|c| match c {
         FlattenedCurve::Quad(s) | FlattenedCurve::Cubic(s) => s.len() == 1,
         FlattenedCurve::Line(_) => false,
     }));
+    assert!(matches!(grouped[2], FlattenedCurve::Line(_)));
+}
+
+// -------- implicit close of open contours --------
+
+fn line_path(points: &[(f32, f32)]) -> Vec<PathOp> {
+    let mut ops = Vec::new();
+    for (i, &(x, y)) in points.iter().enumerate() {
+        ops.push(if i == 0 {
+            PathOp::MoveTo { x, y }
+        } else {
+            PathOp::LineTo { x, y }
+        });
+    }
+    ops
+}
+
+const TRIANGLE: [(f32, f32); 3] = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)];
+const SQUARE: [(f32, f32); 4] = [(20.0, 0.0), (30.0, 0.0), (30.0, 10.0), (20.0, 10.0)];
+
+/// Two contours: a triangle and a square, each with or without `Close`.
+fn two_contours(close: bool) -> Vec<PathOp> {
+    let mut ops = line_path(&TRIANGLE);
+    if close {
+        ops.push(PathOp::Close);
+    }
+    ops.extend(line_path(&SQUARE));
+    if close {
+        ops.push(PathOp::Close);
+    }
+    ops
+}
+
+#[test]
+fn open_contour_is_closed_at_the_end() {
+    let open = line_path(&TRIANGLE);
+    let segs = flatten(open.iter().copied(), &Affine::identity(), 0.25);
+    assert_eq!(segs.len(), 3);
+    assert_eq!(
+        segs[2],
+        Segment {
+            x0: 10.0,
+            y0: 10.0,
+            x1: 0.0,
+            y1: 0.0
+        }
+    );
+    let mut closed = open;
+    closed.push(PathOp::Close);
+    assert_eq!(segs, flatten(closed, &Affine::identity(), 0.25));
+}
+
+#[test]
+fn open_contour_is_closed_at_the_next_moveto() {
+    // The triangle's close-line comes before the square's first edge.
+    let segs = flatten(two_contours(false), &Affine::identity(), 0.25);
+    assert_eq!(segs.len(), 7);
+    assert_eq!((segs[2].x1, segs[2].y1), (0.0, 0.0));
+    assert_eq!((segs[3].x0, segs[3].y0), (20.0, 0.0));
+    assert_eq!(segs, flatten(two_contours(true), &Affine::identity(), 0.25));
+}
+
+#[test]
+fn closed_contours_get_no_second_close() {
+    // Close already returned the pen to the start, so neither the next
+    // MoveTo nor the end of the path adds another segment.
+    let segs = flatten(two_contours(true), &Affine::identity(), 0.25);
+    assert_eq!(segs.len(), 7);
+}
+
+#[test]
+fn contour_back_at_its_start_needs_no_close() {
+    let ops = line_path(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 0.0)]);
+    assert_eq!(flatten(ops, &Affine::identity(), 0.25).len(), 3);
+}
+
+#[test]
+fn flatten_open_leaves_open_contours_open() {
+    let segs = flatten_open(two_contours(false), &Affine::identity(), 0.25);
+    // Two triangle edges and three square edges, no close-lines.
+    assert_eq!(segs.len(), 5);
+    assert_eq!((segs[1].x1, segs[1].y1), (10.0, 10.0));
+    assert_eq!((segs[2].x0, segs[2].y0), (20.0, 0.0));
+    // An explicit Close still closes.
+    assert_eq!(
+        flatten_open(two_contours(true), &Affine::identity(), 0.25).len(),
+        7
+    );
+}
+
+#[test]
+fn flatten_grouped_closes_open_contours_with_lines() {
+    let grouped = flatten_grouped(two_contours(false), &Affine::identity(), 0.25);
+    assert_eq!(
+        grouped,
+        flatten_grouped(two_contours(true), &Affine::identity(), 0.25)
+    );
+    assert_eq!(grouped.len(), 7);
+    assert!(grouped.iter().all(|c| matches!(c, FlattenedCurve::Line(_))));
+    assert_eq!(
+        ungroup(&grouped),
+        flatten(two_contours(false), &Affine::identity(), 0.25)
+    );
+}
+
+#[test]
+fn draw_after_close_is_closed_again() {
+    // After Close the pen sits at the contour start. A LineTo from there
+    // reopens the contour, so the end of the path closes it again.
+    let mut ops = line_path(&TRIANGLE);
+    ops.push(PathOp::Close);
+    ops.push(PathOp::LineTo { x: 0.0, y: 10.0 });
+    let segs = flatten(ops.iter().copied(), &Affine::identity(), 0.25);
+    assert_eq!(segs.len(), 5);
+    assert_eq!(
+        segs[4],
+        Segment {
+            x0: 0.0,
+            y0: 10.0,
+            x1: 0.0,
+            y1: 0.0
+        }
+    );
+    assert_eq!(
+        ungroup(&flatten_grouped(ops, &Affine::identity(), 0.25)),
+        segs
+    );
 }
 
 #[test]

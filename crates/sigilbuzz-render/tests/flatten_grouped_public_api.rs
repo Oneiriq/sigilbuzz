@@ -161,7 +161,9 @@ fn flatten_grouped_with_xform() {
     ];
     let xf = Affine::scale(50.0, 50.0);
     let curves = flatten_grouped(ops, &xf, DEFAULT_TOLERANCE);
-    assert_eq!(curves.len(), 1);
+    // The LineTo, then the close-line of the open contour.
+    assert_eq!(curves.len(), 2);
+    assert!(matches!(curves[1], FlattenedCurve::Line(_)));
     match &curves[0] {
         FlattenedCurve::Line(s) => {
             assert!((s.x0).abs() < 1e-5 && (s.y0).abs() < 1e-5);
