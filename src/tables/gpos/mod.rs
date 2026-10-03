@@ -7,12 +7,14 @@
 //! attachment (type 3), which the shaper does not apply.
 //!
 //! The table header is shared with GSUB: version + offsets to
-//! `ScriptList`, `FeatureList`, and `LookupList`. Each lookup in the
-//! `LookupList` has a `lookupType` (see
-//! `LookupType`) that determines how its subtables are parsed.
+//! `ScriptList`, `FeatureList`, and `LookupList`, then from version
+//! 1.1 on an offset to `FeatureVariations` (see
+//! [`Gpos::feature_variations`]). Each lookup in the `LookupList` has
+//! a `lookupType` (see [`lookup_type`]) that determines how its
+//! subtables are parsed.
 
 use crate::error::{Error, Result};
-use crate::tables::layout::{FeatureList, LookupList, ScriptList};
+use crate::tables::layout::{FeatureList, FeatureVariations, LookupList, ScriptList};
 use crate::tables::parse::Reader;
 
 pub mod anchor;
@@ -64,9 +66,12 @@ pub mod lookup_type {
 /// Parsed `GPOS`.
 #[derive(Debug, Clone, Copy)]
 pub struct Gpos<'a> {
+    data: &'a [u8],
     script_list: ScriptList<'a>,
     feature_list: FeatureList<'a>,
     lookup_list: LookupList<'a>,
+    /// `featureVariationsOffset` (version 1.1 and later), 0 for none.
+    feature_variations_offset: u32,
     /// Language system tags the shaper tries, in order, when it
     /// resolves a feature through this view. Empty selects each
     /// script's default language system.
@@ -78,7 +83,7 @@ impl<'a> Gpos<'a> {
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(data);
         let major = r.read_u16()?;
-        let _minor = r.read_u16()?;
+        let minor = r.read_u16()?;
         if major != 1 {
             return Err(Error::Malformed {
                 offset: 0,
@@ -88,6 +93,14 @@ impl<'a> Gpos<'a> {
         let script_list_off = r.read_u16()? as usize;
         let feature_list_off = r.read_u16()? as usize;
         let lookup_list_off = r.read_u16()? as usize;
+        let feature_variations_offset = if minor >= 1 {
+            r.read_u32().map_err(|_| Error::Truncated {
+                offset: r.position(),
+                context: "GPOS 1.1 header shorter than featureVariationsOffset",
+            })?
+        } else {
+            0
+        };
 
         let script_list =
             ScriptList::parse(data.get(script_list_off..).ok_or(Error::Malformed {
@@ -106,11 +119,44 @@ impl<'a> Gpos<'a> {
             })?)?;
 
         Ok(Self {
+            data,
             script_list,
             feature_list,
             lookup_list,
+            feature_variations_offset,
             language_tags: &[],
         })
+    }
+
+    /// The table's `FeatureVariations`, read when asked for. `Ok(None)`
+    /// for a version 1.0 table or a null offset. Byte offsets in errors
+    /// count from the start of the FeatureVariations table, except for
+    /// an offset past the end of the GPOS, which reports the offset
+    /// field.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Malformed`] for an offset past the end of the table and
+    /// the errors of [`FeatureVariations::parse`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::Face;
+    ///
+    /// // Amiri's GPOS is version 1.0, with no FeatureVariations.
+    /// let data = include_bytes!("../../../tests/fixtures/amiri_regular.ttf");
+    /// let face = Face::parse_bytes(data, 0)?;
+    /// let gpos = face.gpos()?.expect("Amiri has GPOS");
+    /// assert!(gpos.feature_variations()?.is_none());
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
+    pub fn feature_variations(&self) -> Result<Option<FeatureVariations<'a>>> {
+        crate::tables::layout::feature_variations::locate(
+            self.data,
+            self.feature_variations_offset,
+            "GPOS featureVariations offset past end",
+        )
     }
 
     /// Returns this view with a language system preference: the
@@ -211,5 +257,81 @@ mod tests {
     #[test]
     fn rejects_truncated_header() {
         assert!(Gpos::parse(&[0u8; 5]).is_err());
+    }
+
+    /// A version 1.1 table with empty lists and `fv` at byte 20.
+    fn build_v11(fv: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // major
+        out.extend_from_slice(&1u16.to_be_bytes()); // minor
+        out.extend_from_slice(&14u16.to_be_bytes()); // scriptList
+        out.extend_from_slice(&16u16.to_be_bytes()); // featureList
+        out.extend_from_slice(&18u16.to_be_bytes()); // lookupList
+        out.extend_from_slice(&20u32.to_be_bytes()); // featureVariations
+        out.extend_from_slice(&[0; 6]); // three empty lists
+        out.extend_from_slice(fv);
+        out
+    }
+
+    /// An empty FeatureVariations 1.0.
+    const EMPTY_FV: [u8; 8] = [0, 1, 0, 0, 0, 0, 0, 0];
+
+    #[test]
+    fn reads_feature_variations_from_a_1_1_header() {
+        let bytes = build_v11(&EMPTY_FV);
+        let table = Gpos::parse(&bytes).unwrap();
+        assert_eq!(table.feature_list().len(), 0);
+        let variations = table.feature_variations().unwrap();
+        assert_eq!(variations.map(|v| v.len()), Some(0));
+        // A null offset.
+        let mut bytes = build_v11(&EMPTY_FV);
+        bytes[10..14].copy_from_slice(&0u32.to_be_bytes());
+        let table = Gpos::parse(&bytes).unwrap();
+        assert!(table.feature_variations().unwrap().is_none());
+        // Version 1.0 has no offset field, whatever follows the header.
+        let mut bytes = build_v11(&EMPTY_FV);
+        bytes[2..4].copy_from_slice(&0u16.to_be_bytes());
+        let table = Gpos::parse(&bytes).unwrap();
+        assert!(table.feature_variations().unwrap().is_none());
+    }
+
+    #[test]
+    fn rejects_a_1_1_header_without_its_offset() {
+        let bytes = build_v11(&EMPTY_FV);
+        for len in 10..14 {
+            assert_eq!(
+                Gpos::parse(&bytes[..len]).unwrap_err(),
+                Error::Truncated {
+                    offset: 10,
+                    context: "GPOS 1.1 header shorter than featureVariationsOffset",
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn reports_unreadable_feature_variations() {
+        let mut bytes = build_v11(&EMPTY_FV);
+        bytes[10..14].copy_from_slice(&100u32.to_be_bytes());
+        let table = Gpos::parse(&bytes).unwrap();
+        assert_eq!(
+            table.feature_variations().unwrap_err(),
+            Error::Malformed {
+                offset: 10,
+                context: "GPOS featureVariations offset past end",
+            }
+        );
+        let bytes = build_v11(&[0, 2, 0, 0, 0, 0, 0, 0]);
+        let table = Gpos::parse(&bytes).unwrap();
+        assert!(matches!(
+            table.feature_variations(),
+            Err(Error::Malformed { offset: 0, .. })
+        ));
+        let bytes = build_v11(&[0, 1, 0, 0, 0, 0, 0, 1]);
+        let table = Gpos::parse(&bytes).unwrap();
+        assert!(matches!(
+            table.feature_variations(),
+            Err(Error::Truncated { offset: 8, .. })
+        ));
     }
 }
