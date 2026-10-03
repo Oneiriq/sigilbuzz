@@ -34,7 +34,9 @@
 //! (LB30a). Southeast Asian scripts (class SA: Thai, Lao, Khmer,
 //! Myanmar, and others) need a dictionary to find word boundaries,
 //! which this crate does not have. They resolve to AL as LB1 directs,
-//! so a run of them breaks only at spaces and punctuation.
+//! so a run of them breaks only at spaces and punctuation. For the
+//! same reason [`word_breaks`] finds a boundary after every character
+//! of them, apart from combining marks.
 //!
 //! [uax14]: https://www.unicode.org/reports/tr14/
 //! [uax29]: https://www.unicode.org/reports/tr29/

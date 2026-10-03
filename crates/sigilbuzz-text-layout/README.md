@@ -53,7 +53,8 @@ Every UAX 14 rule is implemented, including Korean syllable blocks of conjoining
 (LB30a). The Southeast Asian scripts of class SA (Thai, Lao, Khmer, Myanmar, and
 others) need a dictionary to find the boundaries between words, which this crate does
 not have. Line breaking treats a run of them as one word that breaks at spaces and
-punctuation.
+punctuation, and `word_breaks` finds a boundary after every character of them, apart
+from combining marks.
 
 ## Regenerating the tables
 
