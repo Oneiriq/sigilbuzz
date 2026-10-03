@@ -62,8 +62,10 @@ sigilbuzz subset FONT.otf OUT.otf --text '세로쓰기' --text-file article.txt 
 ```
 
 You can combine `--gids`, `--unicodes`, `--text`, and `--text-file`. They are merged
-before subsetting. `--text` and `--text-file` keep each distinct character of the text;
-`--text-file` reads UTF-8 and leaves out line breaks and a leading byte order mark.
+before subsetting. `--text` and `--text-file` keep each distinct character of the text,
+except tabs and line and paragraph breaks (TAB, LF, CR, U+2028, U+2029); pass one of
+those to `--unicodes` to keep its glyph. `--text-file` reads UTF-8 and also leaves out a
+leading byte order mark.
 A requested character the font has no glyph for is an error, unless `--skip-missing`
 is given: then it is skipped, and the command reports how many were.
 `--drop-layout` and `--drop-variations` drop tables that are kept by default.

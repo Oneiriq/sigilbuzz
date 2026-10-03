@@ -8,6 +8,11 @@
 //! match. A character the font lacks is an error unless
 //! `--skip-missing` is given. Defaults match `SubsetInput::default()`.
 //!
+//! The text of `--text` and `--text-file` leaves out tabs and line and
+//! paragraph breaks (TAB, LF, CR, U+2028, U+2029), which lay text out
+//! rather than draw it, and the text file a leading byte order mark.
+//! Ask for one of them with `--unicodes` to keep its glyph.
+//!
 //! Each piece of the source font the subset leaves out because it
 //! could not be read (`SubsetOutput::warnings`) is reported on stderr
 //! as a `warning:` line naming the table, byte offset, reason, and what
@@ -41,12 +46,15 @@ pub struct Args {
     /// against the source font's cmap.
     #[arg(long)]
     pub unicodes: Option<String>,
-    /// Keep every character of this text. Each distinct character is
-    /// resolved against the source font's cmap, like `--unicodes`.
+    /// Keep every character of this text, except tabs and line and
+    /// paragraph breaks (TAB, LF, CR, U+2028, U+2029). Each distinct
+    /// character is resolved against the source font's cmap, like
+    /// `--unicodes`.
     #[arg(long)]
     pub text: Option<String>,
-    /// Keep every character of this UTF-8 text file, except line
-    /// breaks (CR and LF) and a leading byte order mark.
+    /// Keep every character of this UTF-8 text file, except tabs, line
+    /// and paragraph breaks (TAB, LF, CR, U+2028, U+2029), and a leading
+    /// byte order mark.
     #[arg(long, value_name = "PATH")]
     pub text_file: Option<PathBuf>,
     /// Skip requested characters the font has no glyph for, and report
@@ -148,7 +156,7 @@ fn requested_chars(args: &Args) -> CliResult<BTreeSet<char>> {
         chars.extend(parse_unicode_list(spec)?);
     }
     if let Some(text) = &args.text {
-        chars.extend(text.chars());
+        chars.extend(text_chars(text));
     }
     if let Some(path) = &args.text_file {
         let text = std::fs::read_to_string(path)
@@ -158,12 +166,24 @@ fn requested_chars(args: &Args) -> CliResult<BTreeSet<char>> {
     Ok(chars)
 }
 
-/// The characters of a text file's contents that count as text: every
-/// one but CR, LF, and a byte order mark at the start, which editors
-/// add on their own.
+/// Whether `c` lays text out rather than draws it: a tab, or a line or
+/// paragraph break. Text is full of them and fonts often have no glyph
+/// for them, so `--text` and `--text-file` do not ask for them.
+fn is_layout_control(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\r' | '\u{2028}' | '\u{2029}')
+}
+
+/// The characters of `--text` that count as text: every one but the
+/// [layout controls](is_layout_control).
+fn text_chars(text: &str) -> impl Iterator<Item = char> + '_ {
+    text.chars().filter(|&c| !is_layout_control(c))
+}
+
+/// The characters of a text file's contents that count as text: those
+/// of [`text_chars`], without a byte order mark at the start, which
+/// editors add on their own.
 fn text_file_chars(text: &str) -> impl Iterator<Item = char> + '_ {
-    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
-    text.chars().filter(|&c| c != '\n' && c != '\r')
+    text_chars(text.strip_prefix('\u{FEFF}').unwrap_or(text))
 }
 
 /// `U+XXXX` for each of the first [`SKIPPED_SHOWN`] characters, then a
@@ -184,7 +204,7 @@ fn list_code_points(chars: &[char]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{list_code_points, text_file_chars};
+    use super::{list_code_points, text_chars, text_file_chars};
 
     #[test]
     fn text_files_lose_line_breaks_and_a_leading_bom() {
@@ -193,6 +213,18 @@ mod tests {
         // A byte order mark past the start is a character like any other.
         let got: String = text_file_chars("x\u{FEFF}").collect();
         assert_eq!(got, "x\u{FEFF}");
+    }
+
+    #[test]
+    fn text_loses_tabs_and_line_and_paragraph_breaks() {
+        let text = "a\tb\r\nc\u{2028}d\u{2029}e\u{FEFF}";
+        let got: String = text_chars(text).collect();
+        assert_eq!(got, "abcde\u{FEFF}", "a byte order mark is kept in --text");
+        let got: String = text_file_chars(text).collect();
+        assert_eq!(got, "abcde\u{FEFF}");
+        // Other controls and spaces are text.
+        let got: String = text_chars("\u{0B}\u{0C} \u{A0}").collect();
+        assert_eq!(got, "\u{0B}\u{0C} \u{A0}");
     }
 
     #[test]
