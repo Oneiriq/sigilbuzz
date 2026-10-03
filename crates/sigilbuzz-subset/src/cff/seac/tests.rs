@@ -166,19 +166,23 @@ fn the_iso_adobe_charset_maps_sids_to_their_own_glyphs() {
 #[test]
 fn codes_without_a_glyph_or_outside_the_encoding_add_nothing() {
     // Code 300 is past the encoding, code 128 undefined in it, and
-    // grave has no glyph in this font.
+    // grave has no glyph in this font. A seac draws only when both of
+    // its glyphs resolve, so the one with an `A` keeps no `A` either,
+    // as in HarfBuzz.
     let font = cff1(
         &[
             (A.1, plain()),
             (202, cs(&[0, 0, 300, 128], &[14])),
             (203, cs(&[0, 0, A.0, GRAVE.0], &[14])),
+            (204, cs(&[0, 0, 300, A.0], &[14])),
         ],
         &[],
         &[],
         false,
     );
-    assert_eq!(closure(&font, &[2], 4), vec![2]);
-    assert_eq!(closure(&font, &[3], 4), vec![1, 3]);
+    assert_eq!(closure(&font, &[2], 5), vec![2]);
+    assert_eq!(closure(&font, &[3], 5), vec![3]);
+    assert_eq!(closure(&font, &[4], 5), vec![4]);
 }
 
 #[test]

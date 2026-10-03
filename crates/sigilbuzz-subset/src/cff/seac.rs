@@ -8,7 +8,10 @@
 //! each code into a SID, and the font's charset gives the glyph with
 //! that SID. A subset that keeps such a glyph keeps both components,
 //! as HarfBuzz's subsetter does, or the glyph draws wrong (or not at
-//! all) in the subset.
+//! all) in the subset. A seac that a subroutine ends is found too
+//! (HarfBuzz's subsetter misses it, but the core drawer draws it), and
+//! one with a code that names no glyph keeps nothing, as neither
+//! draws it.
 //!
 //! Only name-keyed fonts use `seac`: a CID-keyed font's charset maps
 //! CIDs, not SIDs, and HarfBuzz finds no components there either. The
@@ -98,8 +101,8 @@ impl<'a> SeacClosure<'a> {
 
     /// Marks the base and accent glyphs of every kept seac glyph in
     /// `keep`. Returns true when that kept a glyph that was not kept
-    /// before. A charstring that cannot be run, and a code with no
-    /// glyph, add nothing: the closure is best effort.
+    /// before. A charstring that cannot be run, and a seac with a code
+    /// that names no glyph, add nothing: the closure is best effort.
     pub(crate) fn expand(&mut self, keep: &mut [bool]) -> bool {
         let mut added = false;
         for gid in 0..keep.len().min(self.char_strings.len()) {
@@ -117,9 +120,14 @@ impl<'a> SeacClosure<'a> {
             let Step::End(Some((base, accent))) = scan.run(self.char_strings[gid], 0) else {
                 continue;
             };
-            for code in [base, accent] {
-                let component = standard_sid(code).and_then(|sid| self.glyph_of_sid.get(&sid));
-                if let Some(slot) = component.and_then(|&g| keep.get_mut(usize::from(g))) {
+            // A seac draws only when both glyphs resolve, in the core
+            // drawer as in HarfBuzz; otherwise it keeps neither.
+            let glyph = |code| standard_sid(code).and_then(|sid| self.glyph_of_sid.get(&sid));
+            let (Some(&base), Some(&accent)) = (glyph(base), glyph(accent)) else {
+                continue;
+            };
+            for g in [base, accent] {
+                if let Some(slot) = keep.get_mut(usize::from(g)) {
                     added |= !*slot;
                     *slot = true;
                 }
