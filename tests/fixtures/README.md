@@ -12,6 +12,28 @@ Fonts used by the integration tests.
   Fischer, OFL 1.1, from the `googlefonts/rubik` repository. `tests/variable_fonts.rs`
   uses it to exercise the `fvar`, `avar`, and `HVAR` advance-delta pipeline and `gvar`
   outline deltas against rustybuzz's output at the same axis coordinate.
+- `hahmlet_gvar_subset.ttf`: a 7,908-byte subset of Hahmlet Variable (`wght` 100 to
+  900, default 400), version 1.002, Copyright 2020 The Hahmlet Project Authors, SIL Open
+  Font License 1.1. Source: <https://github.com/google/fonts/raw/main/ofl/hahmlet/Hahmlet%5Bwght%5D.ttf>
+  (SHA-256 `892bffe530255770a7435226154a02f519055ff6bedf64254f37f21d15a59279`), license at
+  <https://github.com/google/fonts/blob/main/ofl/hahmlet/OFL.txt>. It keeps the space,
+  `O`, `Á`, `Å`, U+3143 and the syllables U+BE60, U+BE75 and U+BED0, plus the components
+  `Á` and `Å` need. Its `gvar` has simple glyphs whose tuples list only some points,
+  composites whose components move (one through a sparse tuple) and take their metrics
+  from a `USE_MY_METRICS` component, and a space whose advance moves through its phantom
+  points, which no other fixture has together. Built with this repo's `sigilbuzz subset`
+  in two passes, since the closure of the first pass still follows the GPOS mark
+  attachments of the accents into every base:
+
+      cargo run --release -p sigilbuzz-cli -- subset 'Hahmlet[wght].ttf' nolayout.ttf \
+          --unicodes "U+0020,O,U+00C1,U+00C5,U+3143,U+BE60,U+BE75,U+BED0" --drop-layout
+      cargo run --release -p sigilbuzz-cli -- subset nolayout.ttf hahmlet_gvar_subset.ttf \
+          --unicodes "U+0020,O,U+00C1,U+00C5,U+3143,U+BE60,U+BE75,U+BED0" --drop-layout
+
+  `tests/gvar_iup_parity.rs` checks outlines, extents and advances against
+  `hahmlet_gvar_subset.expected`, HarfBuzz 14.5.0's output at five weights. Regenerate
+  that file with `uv run --no-project --with uharfbuzz==0.56.2 python
+  tests/tools/gvar_iup_expected.py`.
 - `var_kern.ttf`: a synthetic 768-byte variable font with three glyphs ("A", "V", and an
   unkerned "B" that lets a subset drop a glyph), one `wght` axis (400 to 900), and a GPOS
   kern pair whose `x_advance` delta is -100 at wght=900 and 0 at wght=400, through a
