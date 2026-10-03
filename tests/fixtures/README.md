@@ -85,6 +85,25 @@ Fonts used by the integration tests.
 
   The selectors must be in `--unicodes`, or `pyftsubset` drops the format 14 records.
   `tests/cmap14_parity.rs` and the `sigilbuzz-capi` glyph lookup tests use it.
+- `noto_sans_kr_vf_vertical_subset.otf`: a 10 KB, 16-glyph subset of Noto Sans KR
+  Variable (version 2.004) by Adobe and the Noto Project Authors, SIL Open Font License
+  1.1 (Copyright 2014-2021 Adobe, reserved font name "Source", which the subset does not
+  use). Source:
+  <https://github.com/notofonts/noto-cjk/raw/main/Sans/Variable/OTF/Subset/NotoSansKR-VF.otf>
+  (git blob `1c59da9a18539f40f117a32e54f205a447f2815d`), license at
+  <https://github.com/notofonts/noto-cjk/blob/main/Sans/LICENSE>. It is a CFF2 variable
+  font (`wght` 100 to 900, default 100) that keeps `vhea`, `vmtx`, `VORG` and `VVAR`,
+  including the `VVAR` vertical origin map, plus `BASE` and `STAT`, for the space, the
+  corner brackets U+300C and U+300D, the ideographic comma and full stop, U+AC00, and
+  U+2030 and U+2170, whose vertical origins vary with the weight. No other fixture has
+  vertical metrics or their variations.
+  `crates/sigilbuzz-subset/tests/vertical_round_trip.rs` and the CLI tests use it. Cut
+  with the sigilbuzz subsetter itself (no fontTools needed), from the repository root:
+
+      cargo run --release -p sigilbuzz-cli -- subset NotoSansKR-VF.otf \
+          tests/fixtures/noto_sans_kr_vf_vertical_subset.otf \
+          --unicodes 'U+0020,U+300C,U+300D,U+3001,U+3002,U+AC00,U+2030,U+2170'
+
 - `../fonts/NotoSansKR-HangulTone-Subset.ttf`: an 8 KB subset of Noto Sans KR (OFL 1.1,
   Copyright 2014-2021 Adobe, Reserved Font Name 'Source'), from
   <https://github.com/google/fonts/tree/main/ofl/notosanskr>, instanced at Regular and

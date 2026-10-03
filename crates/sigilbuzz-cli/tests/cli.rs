@@ -658,3 +658,54 @@ fn subset_rejects_missing_characters_unless_asked_to_skip() {
         "{stderr}"
     );
 }
+
+#[test]
+fn subset_keeps_vertical_metrics_for_vertical_text() {
+    // A CJK subset must lay out vertical text like its source. Subsets
+    // used to drop vhea, vmtx and VORG, which turned these 1000-unit
+    // advances into 1448.
+    const NOTO_KR: &[u8] =
+        include_bytes!("../../../tests/fixtures/noto_sans_kr_vf_vertical_subset.otf");
+    let font = write_tempfile("noto_kr.otf", NOTO_KR);
+    let out = write_tempfile("noto_kr_sub.otf", b"");
+    let text = "\u{300C}\u{300D}\u{3002}";
+    let (_, stderr, ok) = run_cli([
+        "subset".as_ref(),
+        font.as_os_str(),
+        out.as_os_str(),
+        "--text".as_ref(),
+        text.as_ref(),
+    ]);
+    assert!(ok, "{stderr}");
+    let ttb = |path: &Path| {
+        let (stdout, stderr, ok) = run_cli([
+            "shape".as_ref(),
+            path.as_os_str(),
+            text.as_ref(),
+            "--direction".as_ref(),
+            "ttb".as_ref(),
+            "--json".as_ref(),
+        ]);
+        assert!(ok, "{stderr}");
+        stdout
+            .split("},{")
+            .map(|g| {
+                ["y_advance\":", "x_offset\":", "y_offset\":"]
+                    .map(|key| parse_json_int(g, key))
+                    .to_vec()
+            })
+            .collect::<Vec<_>>()
+    };
+    let want = ttb(&font);
+    assert_eq!(want, vec![vec![-1000, -500, -880]; 3]);
+    assert_eq!(ttb(&out), want);
+}
+
+/// The integer after `key` in a flat JSON object.
+fn parse_json_int(object: &str, key: &str) -> i32 {
+    let rest = &object[object.find(key).expect("key present") + key.len()..];
+    let end = rest
+        .find(|c: char| c != '-' && !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().expect("an integer")
+}
